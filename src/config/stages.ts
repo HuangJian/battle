@@ -1,157 +1,167 @@
 import type { StageData, TankKind } from '../types'
+import { LEVELS, ENEMY_FORCES } from './stageData'
 
 /**
- * Stage definitions.
- * Tile codes (13×13 grid, each tile = 2×2 sub-blocks):
+ * Classic Battle City stages.
+ *
+ * The authentic level layouts live in `stageData.ts` as 35 stages of 13×13
+ * numeric tile codes (the original Famicom maps from
+ * github.com/FrontHeads/tanchiki). Each numeric code names a material plus
+ * which of the four 2×2 sub-cells it fills, reproducing the original's partial
+ * brick & steel pieces.
+ *
+ * This file decodes every stage into a 26×26 grid of single characters — one
+ * character per 16px sub-block — which is exactly what `TileMap.loadStage`
+ * consumes. The 26×26 grid is the native terrain resolution of this engine
+ * (GRID = 26, CELL = 16), so partial fills render faithfully with no loss.
+ *
+ * Char legend (one per sub-block):
  *   . = empty    b = brick    s = steel
  *   w = water    f = forest   i = ice
  *   E = base (eagle)
  *
- * Adding a new stage = adding one entry to STAGES.
+ * Adding a new stage = appending one 13×13 numeric grid to `LEVELS` in
+ * `stageData.ts` (and a matching 20-char enemy string to `ENEMY_FORCES`).
  */
 
-const ENEMY_POOL: TankKind[] = [
-  'basic',
-  'basic',
-  'basic',
-  'basic',
-  'fast',
-  'fast',
-  'fast',
-  'power',
-  'power',
-  'armor',
-]
+// --- Tile codec -------------------------------------------------------------
 
-function makeEnemies(seed: number): TankKind[] {
-  const kinds: TankKind[] = []
-  // Deterministic pseudo-random based on seed
-  let s = seed
-  const rng = () => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff
-    return s / 0x7fffffff
-  }
-  for (let i = 0; i < 20; i++) {
-    const r = rng()
-    if (i < 4) {
-      kinds.push('basic')
-    } else if (r < 0.3) {
-      kinds.push('basic')
-    } else if (r < 0.55) {
-      kinds.push('fast')
-    } else if (r < 0.8) {
-      kinds.push('power')
-    } else {
-      kinds.push('armor')
-    }
-  }
-  // Mark every 4th enemy as bonus (drops power-up)
-  void ENEMY_POOL
-  return kinds
+type Quad = [boolean, boolean, boolean, boolean] // TL, TR, BL, BR
+const WHOLE: Quad = [true, true, true, true]
+const TOP: Quad = [true, true, false, false]
+const BOTTOM: Quad = [false, false, true, true]
+const LEFT: Quad = [true, false, true, false]
+const RIGHT: Quad = [false, true, false, true]
+const BL: Quad = [false, false, true, false]
+const BR: Quad = [false, false, false, true]
+
+interface Piece {
+  ch: string
+  quad: Quad
 }
 
-export const STAGES: StageData[] = [
-  {
-    id: 1,
-    name: 'Outpost',
-    tiles: [
-      '.............',
-      '.............',
-      '..bb.....bb..',
-      '..bb.....bb..',
-      '.............',
-      '.....bbb.....',
-      '.....b.b.....',
-      '.....bbb.....',
-      '.............',
-      '..bb.....bb..',
-      '..bb.....bb..',
-      '....bbbbb....',
-      '.....bEb.....',
-    ],
-    enemies: makeEnemies(42),
-  },
-  {
-    id: 2,
-    name: 'Waterways',
-    tiles: [
-      '.............',
-      '..bbb...bbb..',
-      '..b.b...b.b..',
-      '..bbb...bbb..',
-      '.....www.....',
-      '.....www.....',
-      '..bbb...bbb..',
-      '..b.b...b.b..',
-      '..bbb...bbb..',
-      '.....www.....',
-      '.............',
-      '....bbbbb....',
-      '.....bEb.....',
-    ],
-    enemies: makeEnemies(77),
-  },
-  {
-    id: 3,
-    name: 'Steel Fortress',
-    tiles: [
-      '.............',
-      '..sss...sss..',
-      '.............',
-      '..bbb...bbb..',
-      '.............',
-      '....f...f....',
-      '...ff.ff.ff..',
-      '....f...f....',
-      '.............',
-      '..bbb...bbb..',
-      '.............',
-      '....bbbbb....',
-      '.....bEb.....',
-    ],
-    enemies: makeEnemies(123),
-  },
-  {
-    id: 4,
-    name: 'Crossfire',
-    tiles: [
-      '.............',
-      '....bbb......',
-      '....b.b.sss..',
-      '....bbb......',
-      '..w.......w..',
-      '..w.bbbbb.w..',
-      '..w.b...b.w..',
-      '..w.bbbbb.w..',
-      '..w.......w..',
-      '......bbb....',
-      '..sss.b.b....',
-      '......bbb....',
-      '.....bEb.....',
-    ],
-    enemies: makeEnemies(256),
-  },
-  {
-    id: 5,
-    name: 'Maze',
-    tiles: [
-      '.............',
-      '.bb.bbb.bb...',
-      '.b.....b.bb..',
-      '.b.sss.b.....',
-      '.b.....b.sss.',
-      '.bbbbbbb.b...',
-      '.............',
-      '...b.bbbbbbb.',
-      'sss.b.......b',
-      '...b.bbb.bbb.',
-      '...b.....b...',
-      '...bbbbb.b...',
-      '.....bEb.....',
-    ],
-    enemies: makeEnemies(999),
-  },
+// Codes from the source data (see stageData.ts header).
+const CODE: Record<number, Piece | 'base'> = {
+  1: { ch: 'b', quad: WHOLE },
+  2: { ch: 'b', quad: TOP },
+  3: { ch: 'b', quad: RIGHT },
+  4: { ch: 'b', quad: BOTTOM },
+  5: { ch: 'b', quad: LEFT },
+  17: { ch: 'b', quad: BL },
+  18: { ch: 'b', quad: BR },
+  6: { ch: 's', quad: WHOLE },
+  7: { ch: 's', quad: TOP },
+  8: { ch: 's', quad: RIGHT },
+  9: { ch: 's', quad: BOTTOM },
+  10: { ch: 's', quad: LEFT },
+  19: { ch: 's', quad: BL },
+  20: { ch: 's', quad: BR },
+  11: { ch: 'f', quad: WHOLE },
+  12: { ch: 'i', quad: WHOLE },
+  13: { ch: 'w', quad: WHOLE },
+  15: 'base',
+}
+
+const KIND_OF: Record<string, TankKind> = {
+  a: 'basic',
+  b: 'fast',
+  c: 'power',
+  d: 'armor',
+}
+
+const STAGE_NAMES = [
+  'Outpost',
+  'Waterways',
+  'Steel Fortress',
+  'Crossfire',
+  'Maze',
+  'Brickworks',
+  'Iron Curtain',
+  'Riverbed',
+  'Twin Towers',
+  'Gauntlet',
+  'Fortress',
+  'Lattice',
+  'Bunker Hill',
+  'Steel Web',
+  'Citadel',
+  'Crossroads',
+  'Twin Spires',
+  'Gridlock',
+  'Frozen Field',
+  'Bastion',
+  'Checkers',
+  'Oasis',
+  'Ramparts',
+  'Labyrinth',
+  'Quarry',
+  'Ice Palace',
+  'Brick Maze',
+  'Thicket',
+  'Spider',
+  'Concentric',
+  'Eagle Nest',
+  'Star Fort',
+  'Diamond',
+  'Battlement',
+  'Final Redoubt',
 ]
+
+/** Decode one 13×13 numeric level into a 26×26 char grid (one char per sub-block). */
+function decodeLevel(grid: number[][]): string[] {
+  const rows: string[] = []
+  for (let r = 0; r < 26; r++) rows.push('.'.repeat(26))
+  for (let ty = 0; ty < 13; ty++) {
+    for (let tx = 0; tx < 13; tx++) {
+      const code = grid[ty]?.[tx] ?? 0
+      const piece = CODE[code]
+      const cx = tx * 2
+      const cy = ty * 2
+      if (piece === 'base') {
+        // Eagle occupies the 2×2 sub-blocks of this tile (matches BASE_POS).
+        for (let dr = 0; dr < 2; dr++) {
+          for (let dc = 0; dc < 2; dc++) {
+            const sr = cy + dr
+            const sc = cx + dc
+            const line = rows[sr]
+            rows[sr] = line.slice(0, sc) + 'E' + line.slice(sc + 1)
+          }
+        }
+        continue
+      }
+      if (!piece) continue
+      const q = piece.quad
+      const set = (sr: number, sc: number, on: boolean) => {
+        if (!on) return
+        const line = rows[sr]
+        rows[sr] = line.slice(0, sc) + piece.ch + line.slice(sc + 1)
+      }
+      set(cy + 0, cx + 0, q[0])
+      set(cy + 0, cx + 1, q[1])
+      set(cy + 1, cx + 0, q[2])
+      set(cy + 1, cx + 1, q[3])
+    }
+  }
+  return rows
+}
+
+/** Build the 20-enemy spawn queue for a stage from its force string. */
+function decodeForces(index: number): TankKind[] {
+  const forces = ENEMY_FORCES[index % ENEMY_FORCES.length]
+  const queue: TankKind[] = []
+  for (let i = 0; i < 20; i++) {
+    const ch = forces[i] ?? 'a'
+    queue.push(KIND_OF[ch] ?? 'basic')
+  }
+  return queue
+}
+
+export const STAGES: StageData[] = LEVELS.map((grid, i) => ({
+  id: i + 1,
+  name: STAGE_NAMES[i] ?? `Stage ${i + 1}`,
+  tiles: decodeLevel(grid),
+  enemies: decodeForces(i),
+}))
 
 /** Bonus enemy indices (0-based): every 4th enemy drops a power-up */
 export function isBonusEnemy(index: number): boolean {

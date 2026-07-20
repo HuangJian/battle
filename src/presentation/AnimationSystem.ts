@@ -38,7 +38,12 @@ export class AnimationSystem {
   private components = new Map<number, VisualComponent>()
 
   /** Get or create a visual component for an entity */
-  getOrCreate(entityId: number, sprite: string, direction: Direction, level: number = 0): VisualComponent {
+  getOrCreate(
+    entityId: number,
+    sprite: string,
+    direction: Direction,
+    level: number = 0,
+  ): VisualComponent {
     let vc = this.components.get(entityId)
     if (!vc) {
       vc = {

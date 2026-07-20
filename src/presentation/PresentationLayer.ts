@@ -308,12 +308,7 @@ export class PresentationLayer {
       if (!tank.alive) continue
       activeIds.add(tank.id)
 
-      const vc = this.animations.getOrCreate(
-        tank.id,
-        'tank',
-        tank.dir,
-        tank.level ?? 0,
-      )
+      const vc = this.animations.getOrCreate(tank.id, 'tank', tank.dir, tank.level ?? 0)
       vc.direction = tank.dir
       vc.level = tank.level ?? 0
       vc.flash = (tank.flashTimer ?? 0) > 0

@@ -72,6 +72,8 @@ export class World {
   theme: ThemeColors
   themeKey: string
   difficultyKey: string
+  menuCursor: number
+  selectedStage: number
   rng: RNG
 
   // Events (consumed by renderer/audio/stats)
@@ -105,6 +107,8 @@ export class World {
     this.difficultyKey = 'classic'
     this.theme = THEMES[DEFAULT_THEME]
     this.themeKey = DEFAULT_THEME
+    this.menuCursor = 0
+    this.selectedStage = 0
     this.rng = new RNG(Date.now())
     this.events = []
     this.frame = 0
@@ -112,7 +116,7 @@ export class World {
 
   // ---- Lifecycle ----
 
-  startGame(difficultyKey: string, themeKey: string): void {
+  startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
     this.difficultyKey = difficultyKey
     this.themeKey = themeKey
     this.difficulty = DIFFICULTIES[difficultyKey] ?? DIFFICULTIES['classic']
@@ -120,8 +124,7 @@ export class World {
     this.score = 0
     this.lives = this.difficulty.startLives
     this.playerLevel = this.difficulty.playerStartLevel
-    this.stageIndex = 0
-    this.loadStage(0)
+    this.loadStage(startStage)
   }
 
   loadStage(index: number): void {

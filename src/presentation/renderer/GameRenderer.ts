@@ -198,14 +198,7 @@ export class GameRenderer {
 
       // Draw tank
       if (tank.isPlayer) {
-        this.artist.drawPlayerTank(
-          tank.x,
-          tank.y,
-          tank.w,
-          tank.dir,
-          tank.level ?? 0,
-          animFrame,
-        )
+        this.artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
       } else {
         this.artist.drawEnemyTank(
           tank.x,

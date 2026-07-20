@@ -59,6 +59,34 @@
 
 ---
 
+## 5. Classic Stages: Authentic NES Layouts (35 stages)
+
+**Reference:** `github.com/artF412/BattleCity-HD-Reforged` (core `stageData.ts` + `stages.ts`),
+which itself derives the maps from `github.com/FrontHeads/tanchiki` (original Famicom layouts).
+
+**Decision:** Ship the 35 authentic classic stages. Raw numeric level grids live in
+`src/config/stageData.ts` (`LEVELS` + `ENEMY_FORCES`); `src/config/stages.ts` holds a
+codec that decodes each 13×13 numeric level into the engine's native 26×26 char grid
+(one char per 16px sub-block) and builds `STAGES`.
+
+**Rationale / best-choice论证:**
+- The authentic data uses a 13×13 grid of *numeric tile codes*, where each code names a
+  material **plus which of the four 2×2 sub-cells it fills** (whole / half / quarter brick
+  & steel). This reproduces the original's partial brick/steel pieces — the signature look.
+- This engine's terrain is already a 26×26 sub-block grid (`GRID=26`, `CELL=16`) and the
+  renderer draws each 16px cell independently, so decoding to a 26×26 char grid preserves
+  partial fills **losslessly** with no engine changes beyond the loader.
+- The base eagle (code `15`) is decoded into the 2×2 sub-blocks at rows 24–25 / cols 12–13,
+  which exactly matches `BASE_POS` and the renderer's base-ruins region — so base detection,
+  destruction, and rendering all work unchanged.
+- Enemy spawn order uses the authentic `ENEMY_FORCES` strings (a=BASIC, b=FAST, c=POWER,
+  d=ARMOR), mapped to this engine's `TankKind` values. Bonus-enemy cadence (every 4th) is
+  unchanged.
+- Keeping the raw numeric data separate from the codec makes the data trivially diffable
+  against the reference and easy to extend (append a 13×13 grid + 20-char force string).
+
+---
+
 ## 5. Movement Alignment: Perpendicular Axis Snapping
 
 **Decision:** When a tank moves, the perpendicular axis is snapped to the nearest 16px cell boundary every frame.

@@ -2,6 +2,7 @@ import type { World } from '../../game/World'
 import type { ThemeColors } from '../../types'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
+import { STAGES } from '../../config/stages'
 
 /**
  * UIManager — manages all HTML/CSS UI overlay elements.
@@ -124,12 +125,12 @@ export class UIManager {
     // Footer
     this.footer = this.createElement('div', 'footer')
     this.footer.innerHTML = `
-      <span>WASD</span>/Arrows Move &nbsp;·&nbsp;
-      <span>Space</span> Fire &nbsp;·&nbsp;
+      <span>↑↓</span> Select &nbsp;·&nbsp;
+      <span>←→</span> Change &nbsp;·&nbsp;
+      <span>Enter</span> Start &nbsp;·&nbsp;
       <span>P</span> Pause &nbsp;·&nbsp;
       <span>R</span> Reset &nbsp;·&nbsp;
-      <span>T</span> Theme &nbsp;·&nbsp;
-      <span>Enter</span> Start
+      <span>T</span> Theme
     `
 
     // Assemble
@@ -171,15 +172,24 @@ export class UIManager {
             <span class="menu-label">THEME</span>
             <div class="menu-options" data-theme="options"></div>
           </div>
+          <div class="menu-row" data-menu="stage">
+            <span class="menu-label">STAGE</span>
+            <div class="menu-stage-selector">
+              <span class="menu-stage-arrow" data-stage="prev">◀</span>
+              <span class="menu-stage-value" data-stage="value">01 / 35</span>
+              <span class="menu-stage-arrow" data-stage="next">▶</span>
+            </div>
+            <span class="menu-stage-name" data-stage="name">Outpost</span>
+          </div>
         </div>
         <div class="menu-start">
           <div class="menu-start-button">PRESS ENTER TO START</div>
         </div>
         <div class="menu-controls">
-          <span><kbd>WASD</kbd>/Arrows Move</span>
-          <span><kbd>Space</kbd> Fire</span>
-          <span>← → Difficulty</span>
+          <span>↑ ↓ Select Row</span>
+          <span>← → Change</span>
           <span><kbd>T</kbd> Theme</span>
+          <span><kbd>Enter</kbd> Start</span>
         </div>
         <div class="menu-hiscore">
           High Score: <span data-menu="hiscore">0</span>
@@ -334,6 +344,31 @@ export class UIManager {
         opt.classList.remove('selected')
       }
     })
+
+    // Highlight selected menu row (cursor)
+    const menuRows = this.menuScreen.querySelectorAll('.menu-row')
+    menuRows.forEach((el) => {
+      const row = el as HTMLElement
+      const idx =
+        row.dataset.menu === 'difficulty'
+          ? 0
+          : row.dataset.menu === 'theme'
+            ? 1
+            : row.dataset.menu === 'stage'
+              ? 2
+              : -1
+      row.classList.toggle('selected', idx === world.menuCursor)
+    })
+
+    // Stage selector display
+    const stageValue = this.menuScreen.querySelector('[data-stage="value"]')
+    if (stageValue) {
+      stageValue.textContent = `${String(world.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
+    }
+    const stageName = this.menuScreen.querySelector('[data-stage="name"]')
+    if (stageName) {
+      stageName.textContent = STAGES[world.selectedStage]?.name ?? ''
+    }
 
     // High score
     const hiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')

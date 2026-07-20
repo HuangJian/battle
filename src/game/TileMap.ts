@@ -4,7 +4,8 @@ import { GRID, CELL } from '../constants'
 /**
  * TileMap — 26×26 grid of sub-blocks.
  * Each sub-block is CELL (16px) wide.
- * A "tile" in stage data = 2×2 sub-blocks.
+ * Stage data is already a 26×26 grid (one char per sub-block), so each char
+ * maps 1:1 to a sub-block.
  */
 export class TileMap {
   /** grid[row][col] — terrain type per sub-block */
@@ -25,21 +26,11 @@ export class TileMap {
     }
 
     const tiles = stage.tiles
-    for (let tr = 0; tr < 13; tr++) {
-      const line = tiles[tr] || ''
-      for (let tc = 0; tc < 13; tc++) {
-        const ch = line[tc] || '.'
-        const type = this.charToTerrain(ch)
-        // Each tile maps to 2×2 sub-blocks
-        for (let dr = 0; dr < 2; dr++) {
-          for (let dc = 0; dc < 2; dc++) {
-            const sr = tr * 2 + dr
-            const sc = tc * 2 + dc
-            if (sr < GRID && sc < GRID) {
-              this.grid[sr][sc] = type
-            }
-          }
-        }
+    for (let r = 0; r < GRID; r++) {
+      const line = tiles[r] || ''
+      for (let c = 0; c < GRID; c++) {
+        const ch = line[c] || '.'
+        this.grid[r][c] = this.charToTerrain(ch)
       }
     }
   }

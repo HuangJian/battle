@@ -5,6 +5,7 @@ import { PresentationLayer } from '../presentation/PresentationLayer'
 import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
+import { STAGES } from '../config/stages'
 import { TICK_MS } from '../constants'
 import type { GameSettings } from '../types'
 
@@ -109,47 +110,57 @@ export class Game {
     const w = this.world
 
     if (w.state === 'menu') {
-      // Difficulty selection (left/right)
-      if (
-        this.input.isUpPressed() ||
-        this.input.wasPressed('ArrowLeft') ||
-        this.input.wasPressed('KeyA')
-      ) {
-        this.difficultyIndex =
-          (this.difficultyIndex - 1 + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
-        w.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
-        w.difficulty = DIFFICULTIES[w.difficultyKey]
+      const rowCount = 3
+      // Move cursor between rows (DIFFICULTY / THEME / STAGE)
+      if (this.input.isUpPressed()) {
+        w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      if (
-        this.input.isDownPressed() ||
-        this.input.wasPressed('ArrowRight') ||
-        this.input.wasPressed('KeyD')
-      ) {
-        this.difficultyIndex = (this.difficultyIndex + 1) % DIFFICULTY_KEYS.length
-        w.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
-        w.difficulty = DIFFICULTIES[w.difficultyKey]
+      if (this.input.isDownPressed()) {
+        w.menuCursor = (w.menuCursor + 1) % rowCount
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Theme selection (T key)
+      // Change value of the selected row
+      const left = this.input.wasPressed('ArrowLeft') || this.input.wasPressed('KeyA')
+      const right = this.input.wasPressed('ArrowRight') || this.input.wasPressed('KeyD')
+      if (left || right) {
+        const dir = left ? -1 : 1
+        if (w.menuCursor === 0) {
+          this.difficultyIndex =
+            (this.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
+          w.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
+          w.difficulty = DIFFICULTIES[w.difficultyKey]
+        } else if (w.menuCursor === 1) {
+          this.themeIndex = (this.themeIndex + dir) % THEME_KEYS.length
+          w.themeKey = THEME_KEYS[this.themeIndex]
+          w.theme = THEMES[w.themeKey]
+        } else {
+          w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
+        }
+        this.audio.init()
+        this.audio.resume()
+        this.audio.playMenuSelect()
+      }
+      // Theme shortcut (T key)
       if (this.input.wasPressed('KeyT')) {
         this.themeIndex = (this.themeIndex + 1) % THEME_KEYS.length
         w.themeKey = THEME_KEYS[this.themeIndex]
         w.theme = THEMES[w.themeKey]
+        w.menuCursor = 1
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Start game
+      // Start game at the selected stage
       if (this.input.isConfirmPressed()) {
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
-        w.startGame(w.difficultyKey, w.themeKey)
+        w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
         this.saveSettings()
       }
       return

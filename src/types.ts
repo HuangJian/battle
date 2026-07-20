@@ -143,7 +143,7 @@ export interface DifficultyConfig {
 export interface StageData {
   id: number
   name: string
-  /** 13×13 grid, each cell is a 2-char code */
+  /** 26×26 grid (one char per 16px sub-block): '.', 'b', 's', 'w', 'f', 'i', 'E' */
   tiles: string[]
   /** Enemy queue: list of tank kinds */
   enemies: TankKind[]
