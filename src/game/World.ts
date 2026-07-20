@@ -1,0 +1,320 @@
+import type {
+  Tank,
+  Bullet,
+  PowerUp,
+  Explosion,
+  ScorePopup,
+  GameEvent,
+  GameState,
+  TankKind,
+  DifficultyConfig,
+  ThemeColors,
+} from '../types'
+import type { Direction } from '../constants'
+import { TileMap } from './TileMap'
+import { RNG } from '../utils/RNG'
+import { STAGES } from '../config/stages'
+import { DIFFICULTIES } from '../config/difficulty'
+import { THEMES, DEFAULT_THEME } from '../config/theme'
+import { TANK_CONFIGS } from '../config/tanks'
+import { GRID, CELL, TANK, ENEMIES_PER_STAGE, START_LIVES } from '../constants'
+
+let nextId = 1
+export function genId(): number {
+  return nextId++
+}
+
+/** Spawn queue entry */
+export interface SpawnEntry {
+  kind: TankKind
+  bonus: boolean
+  spawnIndex: number
+}
+
+/**
+ * World — the complete runtime game state.
+ * No hidden state outside this object.
+ * Only Simulation may modify the World.
+ */
+export class World {
+  // Terrain
+  tileMap: TileMap
+
+  // Entities
+  player: Tank | null
+  tanks: Tank[] // enemy tanks
+  bullets: Bullet[]
+  powerUps: PowerUp[]
+  explosions: Explosion[]
+  popups: ScorePopup[]
+
+  // Stage info
+  stageIndex: number
+  spawnQueue: SpawnEntry[]
+  enemiesSpawned: number
+  enemiesRemaining: number
+
+  // Game state
+  state: GameState
+  score: number
+  lives: number
+  playerLevel: number
+  highScore: number
+
+  // Timers
+  freezeTimer: number // enemy freeze countdown (ms)
+  stageClearTimer: number // transition timer
+  gameOverTimer: number
+  spawnTimer: number // delay between spawns
+
+  // Config
+  difficulty: DifficultyConfig
+  theme: ThemeColors
+  themeKey: string
+  difficultyKey: string
+  rng: RNG
+
+  // Events (consumed by renderer/audio/stats)
+  events: GameEvent[]
+
+  // Animation frame counter
+  frame: number
+
+  constructor() {
+    this.tileMap = new TileMap()
+    this.player = null
+    this.tanks = []
+    this.bullets = []
+    this.powerUps = []
+    this.explosions = []
+    this.popups = []
+    this.stageIndex = 0
+    this.spawnQueue = []
+    this.enemiesSpawned = 0
+    this.enemiesRemaining = 0
+    this.state = 'menu'
+    this.score = 0
+    this.lives = START_LIVES
+    this.playerLevel = 0
+    this.highScore = this.loadHighScore()
+    this.freezeTimer = 0
+    this.stageClearTimer = 0
+    this.gameOverTimer = 0
+    this.spawnTimer = 0
+    this.difficulty = DIFFICULTIES['classic']
+    this.difficultyKey = 'classic'
+    this.theme = THEMES[DEFAULT_THEME]
+    this.themeKey = DEFAULT_THEME
+    this.rng = new RNG(Date.now())
+    this.events = []
+    this.frame = 0
+  }
+
+  // ---- Lifecycle ----
+
+  startGame(difficultyKey: string, themeKey: string): void {
+    this.difficultyKey = difficultyKey
+    this.themeKey = themeKey
+    this.difficulty = DIFFICULTIES[difficultyKey] ?? DIFFICULTIES['classic']
+    this.theme = THEMES[themeKey] ?? THEMES[DEFAULT_THEME]
+    this.score = 0
+    this.lives = this.difficulty.startLives
+    this.playerLevel = this.difficulty.playerStartLevel
+    this.stageIndex = 0
+    this.loadStage(0)
+  }
+
+  loadStage(index: number): void {
+    const stage = STAGES[index]
+    if (!stage) {
+      this.state = 'victory'
+      this.pushEvent({ type: 'stage_clear', stage: this.stageIndex })
+      return
+    }
+
+    this.tileMap.loadStage(stage)
+    this.tanks = []
+    this.bullets = []
+    this.powerUps = []
+    this.explosions = []
+    this.popups = []
+
+    this.stageIndex = index
+    this.enemiesSpawned = 0
+    this.enemiesRemaining = ENEMIES_PER_STAGE
+    this.freezeTimer = 0
+    this.stageClearTimer = 0
+    this.gameOverTimer = 0
+    this.spawnTimer = 0
+
+    // Build spawn queue
+    this.spawnQueue = []
+    const enemies = stage.enemies
+    for (let i = 0; i < ENEMIES_PER_STAGE; i++) {
+      const kind = enemies[i % enemies.length]
+      this.spawnQueue.push({
+        kind,
+        bonus: i % 4 === 3,
+        spawnIndex: i,
+      })
+    }
+
+    // Spawn player
+    this.spawnPlayer()
+    this.state = 'playing'
+  }
+
+  spawnPlayer(): void {
+    const col = 8 // sub-block coords
+    const row = 24
+    this.player = this.createTank('player', col * CELL, row * CELL, 'up')
+    this.player.level = this.playerLevel
+    this.player.shieldTimer = 3000
+    this.player.isPlayer = true
+  }
+
+  createTank(kind: TankKind, x: number, y: number, dir: Direction): Tank {
+    const cfg = TANK_CONFIGS[kind]
+    const hp = kind === 'player' ? 1 : Math.max(1, Math.round(cfg.hp * this.difficulty.enemyHpMult))
+    return {
+      id: genId(),
+      x,
+      y,
+      w: TANK,
+      h: TANK,
+      dir,
+      alive: true,
+      kind,
+      speed: kind === 'player' ? cfg.speed : cfg.speed * this.difficulty.enemySpeedMult,
+      hp,
+      maxHp: hp,
+      fireCooldown: kind === 'player' ? 400 : 600 / this.difficulty.enemyFireMult,
+      lastFire: 0,
+      moving: false,
+      spawnTimer: 1000,
+      level: kind === 'player' ? this.playerLevel : 0,
+      shieldTimer: kind === 'player' ? 3000 : 0,
+      isPlayer: kind === 'player',
+      flashTimer: 0,
+      aiState:
+        kind === 'player'
+          ? undefined
+          : {
+              thinkTimer: 0,
+              currentDir: dir,
+              fireTimer: 500,
+            },
+      bonus: false,
+    }
+  }
+
+  // ---- Entity Management ----
+
+  addBullet(bullet: Bullet): void {
+    this.bullets.push(bullet)
+  }
+
+  removeBullet(id: number): void {
+    this.bullets = this.bullets.filter((b) => b.id !== id)
+  }
+
+  addExplosion(exp: Explosion): void {
+    this.explosions.push(exp)
+  }
+
+  addPowerUp(pu: PowerUp): void {
+    this.powerUps.push(pu)
+  }
+
+  addPopup(popup: ScorePopup): void {
+    this.popups.push(popup)
+  }
+
+  removeDeadEntities(): void {
+    this.tanks = this.tanks.filter((t) => t.alive)
+    this.bullets = this.bullets.filter((b) => b.alive)
+    this.powerUps = this.powerUps.filter((p) => p.alive)
+    this.explosions = this.explosions.filter((e) => e.timer > 0)
+    this.popups = this.popups.filter((p) => p.timer > 0)
+  }
+
+  // ---- Queries ----
+
+  get allTanks(): Tank[] {
+    return this.player ? [this.player, ...this.tanks] : this.tanks
+  }
+
+  get enemyCount(): number {
+    return this.tanks.filter((t) => t.spawnTimer <= 0).length
+  }
+
+  get totalEnemiesLeft(): number {
+    return this.enemiesRemaining
+  }
+
+  get currentStageName(): string {
+    return STAGES[this.stageIndex]?.name ?? '?'
+  }
+
+  get totalStages(): number {
+    return STAGES.length
+  }
+
+  // ---- Events ----
+
+  pushEvent(event: GameEvent): void {
+    this.events.push(event)
+  }
+
+  consumeEvents(): GameEvent[] {
+    const events = this.events
+    this.events = []
+    return events
+  }
+
+  // ---- Persistence ----
+
+  private loadHighScore(): number {
+    try {
+      return parseInt(localStorage.getItem('bc_highscore') || '0', 10) || 0
+    } catch {
+      return 0
+    }
+  }
+
+  saveHighScore(): void {
+    if (this.score > this.highScore) {
+      this.highScore = this.score
+      try {
+        localStorage.setItem('bc_highscore', String(this.highScore))
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // ---- Grid helpers ----
+
+  isCellBlocked(col: number, row: number): boolean {
+    return TileMap.blocksTank(this.tileMap.get(col, row))
+  }
+
+  /** Check if a rectangle (in pixels) collides with blocking terrain */
+  rectHitsTerrain(x: number, y: number, w: number, h: number): boolean {
+    const c0 = Math.floor(x / CELL)
+    const r0 = Math.floor(y / CELL)
+    const c1 = Math.floor((x + w - 1) / CELL)
+    const r1 = Math.floor((y + h - 1) / CELL)
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (TileMap.blocksTank(this.tileMap.get(c, r))) return true
+      }
+    }
+    return false
+  }
+
+  /** Check if a rect is fully inside the playfield */
+  isInBounds(x: number, y: number, w: number, h: number): boolean {
+    return x >= 0 && y >= 0 && x + w <= GRID * CELL && y + h <= GRID * CELL
+  }
+}
