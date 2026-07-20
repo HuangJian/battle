@@ -17,15 +17,6 @@ export const TANK = CELL * 2 // 32
 /** Bullet pixel size */
 export const BULLET = 6
 
-/** HUD width in pixels */
-export const HUD_WIDTH = 96
-
-/** Total canvas width */
-export const CANVAS_WIDTH = FIELD + HUD_WIDTH // 512
-
-/** Total canvas height */
-export const CANVAS_HEIGHT = FIELD // 416
-
 /** Movement alignment grid (tanks snap to multiples of this when turning) */
 export const ALIGN = CELL // 16
 

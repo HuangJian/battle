@@ -172,7 +172,7 @@ export interface ThemeColors {
   enemyPower: string
   enemyArmor: string
   enemyArmorFlash: string
-  // UI
+  // UI — canvas
   hudBg: string
   hudText: string
   hudAccent: string
@@ -181,9 +181,28 @@ export interface ThemeColors {
   explosion2: string
   explosion3: string
   bullet: string
+  bulletGlow: string
   powerUp: string
   powerUpGlow: string
   spawn: string
+  // UI — HTML overlay
+  panelBg: string
+  panelBorder: string
+  panelShadow: string
+  textPrimary: string
+  textSecondary: string
+  textMuted: string
+  accentPrimary: string
+  accentSecondary: string
+  buttonBg: string
+  buttonHover: string
+  buttonActive: string
+  overlayBg: string
+  danger: string
+  success: string
+  // Ambient
+  gridLineColor: string
+  vignetteColor: string
 }
 
 // ============================================================
@@ -206,4 +225,78 @@ export interface KeyBindings {
   fire: string
   pause: string
   reset: string
+}
+
+// ============================================================
+// Presentation Layer Types
+// ============================================================
+
+/** Visual component — tracks the visual state of a simulation entity */
+export interface VisualComponent {
+  entityId: number
+  sprite: string // e.g. "tank.player", "bullet", "explosion.big"
+  animation: string // e.g. "idle", "move", "spawn", "destroy"
+  direction: Direction
+  elapsed: number // ms since animation started
+  alpha: number
+  scale: number
+  flash: boolean
+  level: number
+}
+
+/** Particle — a single visual particle */
+export interface Particle {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  life: number
+  maxLife: number
+  size: number
+  color: string
+  type: 'spark' | 'debris' | 'smoke' | 'ring' | 'flash'
+  gravity: number
+  drag: number
+  rotation: number
+  rotSpeed: number
+  active: boolean
+}
+
+/** Particle emitter configuration */
+export interface EmitterConfig {
+  x: number
+  y: number
+  count: number
+  speedMin: number
+  speedMax: number
+  lifeMin: number
+  lifeMax: number
+  sizeMin: number
+  sizeMax: number
+  colors: string[]
+  type: Particle['type']
+  gravity: number
+  drag: number
+  angleMin: number // radians
+  angleMax: number
+  spread: number // positional spread radius
+}
+
+/** Camera state */
+export interface CameraState {
+  x: number
+  y: number
+  shake: number
+  shakeDecay: number
+  offsetX: number
+  offsetY: number
+  scale: number
+}
+
+/** Theme definition with metadata */
+export interface ThemeDefinition {
+  key: string
+  name: string
+  description: string
+  colors: ThemeColors
 }

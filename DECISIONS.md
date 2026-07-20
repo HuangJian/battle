@@ -120,3 +120,113 @@
 - The base is 2×2 sub-blocks; destroying one would leave a visual gap but the game should end immediately
 - Destroying all cells ensures `isBaseDestroyed()` returns true on the next check
 - The destroyed base is rendered as ruins for visual feedback
+
+---
+
+## Presentation Upgrade Decisions
+
+### 10. Presentation Adapter: Event-Driven Visual State
+
+**Decision:** The PresentationLayer observes the World (read-only) and consumes GameEvents to build its own visual state. It does not modify the World.
+
+**Rationale:**
+- Preserves the Simulation → World → Renderer architecture
+- GameEvents already exist for audio; presentation reuses the same stream
+- Visual state (particles, animation transitions, camera shake) is ephemeral and belongs in the presentation layer, not the World
+- Game.ts passes events to both AudioManager and PresentationLayer
+
+---
+
+### 11. Canvas Resolution: Playfield-Only (416×416) + HTML HUD
+
+**Decision:** Reduce canvas to 416×416 (playfield only). Move HUD and menu to HTML/CSS overlay elements positioned around the canvas.
+
+**Rationale:**
+- The simulation only uses the 416×416 playfield; the 96px HUD sidebar was purely visual
+- HTML/CSS HUD enables modern typography, smooth animations, and responsive layout
+- Separating UI from game canvas is explicitly required by the upgrade plan
+- Canvas becomes simpler — no need to handle two rendering zones
+
+---
+
+### 12. DPR-Aware Rendering with Offscreen Buffer
+
+**Decision:** Use an offscreen canvas at logical resolution (416×416), then blit to a DPR-scaled display canvas. This gives crisp pixels on retina displays.
+
+**Rationale:**
+- Current canvas is blurry on retina/HiDPI displays
+- Offscreen buffer keeps drawing code simple (logical coordinates)
+- Display canvas is sized to `416 * DPR` for pixel-perfect output
+- CSS scales the display canvas responsively
+
+---
+
+### 13. Animation System: Time-Based with Visual Components
+
+**Decision:** Introduce time-based animation using `performance.now()` elapsed time. Each entity gets a `VisualComponent` that tracks animation state (name, elapsed time, direction). The animation system computes the current frame from elapsed time and FPS config.
+
+**Rationale:**
+- Time-based animation is frame-rate independent (required by upgrade plan)
+- Visual components decouple visual state from simulation state
+- Frame computation: `frame = floor(elapsed / (1000 / fps)) % frameCount`
+- Supports smooth transitions between animation states (idle → move → destroy)
+
+---
+
+### 14. Particle System: Pool-Based with Configurable Emitters
+
+**Decision:** Implement a pool-based particle system. Particles are pre-allocated and reused. Emitters are configured via data (position, velocity, lifetime, color, size, gravity).
+
+**Rationale:**
+- Pool allocation avoids GC pressure during gameplay
+- Configurable emitters allow adding new effects without code changes
+- Used for: explosion debris, bullet sparks, dust, ambient effects
+- Each particle: position, velocity, life, maxLife, size, color, type
+
+---
+
+### 15. Camera System: Shake + Offset (No Zoom for Now)
+
+**Decision:** Implement a camera with position offset and shake. Zoom is architecture-ready but disabled (scale = 1.0) to avoid gameplay readability issues on small maps.
+
+**Rationale:**
+- Screen shake adds impact feedback for explosions and hits
+- Position offset enables future camera panning and stage transitions
+- Zoom on a 416×416 map would reduce visibility — kept at 1.0 for now
+- Camera shake decays exponentially: `shake * pow(0.85, frames)`
+
+---
+
+### 16. Theme System: Extended ThemeColors + CSS Variables
+
+**Decision:** Extend `ThemeColors` with additional fields for UI styling (panel colors, text colors, gradients, shadows). Generate CSS custom properties from the active theme at runtime.
+
+**Rationale:**
+- CSS variables allow HTML UI to react to theme changes instantly
+- Extended color palette supports modern UI elements (panels, buttons, shadows)
+- Themes remain pure data — no rendering code changes needed
+- Two initial themes: Classic (enhanced) and Neon
+
+---
+
+### 17. Visual Asset Format: Programmatic Drawing + Metadata Registry
+
+**Decision:** Keep programmatic Canvas 2D drawing but organize it through a metadata-driven sprite registry. Each sprite type has a `VisualDefinition` with animation states, frame counts, and metadata. The `SpriteArtist` reads these definitions to draw.
+
+**Rationale:**
+- Maintains the MVP's zero-asset approach (no PNG files to source)
+- Metadata registry enables future PNG sprite support — just swap the artist
+- Animation definitions are data, not code — easy to add new animations
+- `VisualDefinition` format is compatible with the plan's `metadata.json` structure
+
+---
+
+### 18. State Transitions: CSS-Animated Overlays
+
+**Decision:** Game state transitions (menu → playing, stage clear, game over) use CSS-animated HTML overlays with fade/slide effects. No canvas-based transition animations.
+
+**Rationale:**
+- CSS transitions are GPU-accelerated and smooth
+- HTML overlays can use modern typography and layout
+- Keeps canvas focused on game rendering
+- Transitions are declarative (CSS classes) not imperative (JS animation)

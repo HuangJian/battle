@@ -1,25 +1,25 @@
 import { World } from './World'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS } from './Input'
-import { Renderer } from '../render/Renderer'
+import { PresentationLayer } from '../presentation/PresentationLayer'
 import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
-import { TICK_MS, CANVAS_WIDTH, CANVAS_HEIGHT } from '../constants'
+import { THEMES, DEFAULT_THEME } from '../config/theme'
+import { TICK_MS } from '../constants'
 import type { GameSettings } from '../types'
 
 const SETTINGS_KEY = 'bc_settings'
+const THEME_KEYS = Object.keys(THEMES)
 
 /**
  * Game — top-level orchestrator.
  * Owns the game loop, wires all systems together.
  */
 export class Game {
-  canvas: HTMLCanvasElement
-  ctx: CanvasRenderingContext2D
   world: World
   input: Input
   simulation: Simulation
-  renderer: Renderer
+  presentation: PresentationLayer
   audio: AudioManager
 
   private lastTime = 0
@@ -29,22 +29,27 @@ export class Game {
 
   settings: GameSettings
   private difficultyIndex = 1 // classic
+  private themeIndex = 0
 
-  constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas
-    canvas.width = CANVAS_WIDTH
-    canvas.height = CANVAS_HEIGHT
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Canvas 2D not supported')
-    this.ctx = ctx
-
+  constructor(root: HTMLElement) {
     this.settings = this.loadSettings()
     this.world = new World()
     this.input = new Input(this.settings.keys)
     this.simulation = new Simulation(this.world, this.input)
-    this.renderer = new Renderer(canvas)
+    this.presentation = new PresentationLayer(root)
     this.audio = new AudioManager()
     this.audio.setVolume(this.settings.volume)
+
+    // Apply saved settings
+    const savedDiffIdx = DIFFICULTY_KEYS.indexOf(this.settings.difficulty)
+    if (savedDiffIdx >= 0) this.difficultyIndex = savedDiffIdx
+    const savedThemeIdx = THEME_KEYS.indexOf(this.settings.theme)
+    if (savedThemeIdx >= 0) this.themeIndex = savedThemeIdx
+
+    this.world.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
+    this.world.difficulty = DIFFICULTIES[this.world.difficultyKey]
+    this.world.themeKey = THEME_KEYS[this.themeIndex]
+    this.world.theme = THEMES[this.world.themeKey]
   }
 
   start(): void {
@@ -84,15 +89,15 @@ export class Game {
       steps++
     }
 
-    // Process audio events
+    // Process events — pass to both audio and presentation
     const events = this.world.consumeEvents()
     this.audio.handleEvents(events)
+    this.presentation.handleEvents(events)
 
     // Render
-    this.renderer.render(this.world)
+    this.presentation.render(this.world, dt)
 
-    // Clear per-frame input state (moved here from Simulation.tick
-    // so menu/victory states also get cleared)
+    // Clear per-frame input state
     this.input.endFrame()
 
     this.rafId = requestAnimationFrame(this.loop)
@@ -104,7 +109,7 @@ export class Game {
     const w = this.world
 
     if (w.state === 'menu') {
-      // Difficulty selection
+      // Difficulty selection (left/right)
       if (
         this.input.isUpPressed() ||
         this.input.wasPressed('ArrowLeft') ||
@@ -126,6 +131,15 @@ export class Game {
         this.difficultyIndex = (this.difficultyIndex + 1) % DIFFICULTY_KEYS.length
         w.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
         w.difficulty = DIFFICULTIES[w.difficultyKey]
+        this.audio.init()
+        this.audio.resume()
+        this.audio.playMenuSelect()
+      }
+      // Theme selection (T key)
+      if (this.input.wasPressed('KeyT')) {
+        this.themeIndex = (this.themeIndex + 1) % THEME_KEYS.length
+        w.themeKey = THEME_KEYS[this.themeIndex]
+        w.theme = THEMES[w.themeKey]
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
@@ -167,6 +181,7 @@ export class Game {
     this.world.explosions = []
     this.world.popups = []
     this.world.spawnQueue = []
+    this.presentation.reset()
     this.audio.playMenuSelect()
   }
 
@@ -176,7 +191,7 @@ export class Game {
     const defaults: GameSettings = {
       volume: 0.3,
       difficulty: 'classic',
-      theme: 'classic',
+      theme: DEFAULT_THEME,
       screenScale: 1,
       keys: { ...DEFAULT_KEYS },
     }
