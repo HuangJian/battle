@@ -24,6 +24,8 @@ export class UIManager {
   private gameOverScreen: HTMLElement
   private stageClearScreen: HTMLElement
   private victoryScreen: HTMLElement
+  private recoveryScreen: HTMLElement
+  private recoveryOptions: HTMLElement[] = []
   private footer: HTMLElement
 
   private currentScreen = 'menu'
@@ -116,11 +118,15 @@ export class UIManager {
       </div>
     `
 
+    // Recovery screen (mission failed → rewind / restart)
+    this.recoveryScreen = this.createRecoveryScreen()
+
     this.overlay.appendChild(this.menuScreen)
     this.overlay.appendChild(this.pauseScreen)
     this.overlay.appendChild(this.gameOverScreen)
     this.overlay.appendChild(this.stageClearScreen)
     this.overlay.appendChild(this.victoryScreen)
+    this.overlay.appendChild(this.recoveryScreen)
 
     // Footer
     this.footer = this.createElement('div', 'footer')
@@ -252,12 +258,13 @@ export class UIManager {
     if (screen === this.currentScreen) return
     this.currentScreen = screen
 
-    const screens = {
+    const screens: Record<string, HTMLElement> = {
       menu: this.menuScreen,
       paused: this.pauseScreen,
       gameover: this.gameOverScreen,
       stageclear: this.stageClearScreen,
       victory: this.victoryScreen,
+      recovery: this.recoveryScreen,
     }
 
     for (const [name, el] of Object.entries(screens)) {
@@ -273,6 +280,11 @@ export class UIManager {
       this.hudBar.classList.remove('visible')
     } else {
       this.hudBar.classList.add('visible')
+    }
+
+    // Reset recovery screen sub-state when leaving recovery
+    if (screen !== 'recovery') {
+      this.recoveryScreen.classList.remove('fading', 'countdown')
     }
 
     // Show/hide overlay
@@ -319,6 +331,9 @@ export class UIManager {
     if (victoryScore) {
       victoryScore.textContent = String(world.score)
     }
+
+    // Recovery screen
+    this.updateRecovery(world)
 
     // Show correct screen
     this.showScreen(world.state)
@@ -376,6 +391,87 @@ export class UIManager {
     const hiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
     if (hiScore) {
       hiScore.textContent = String(world.highScore)
+    }
+  }
+
+  // ---- Recovery Screen ----
+
+  private createRecoveryScreen(): HTMLElement {
+    const screen = this.createElement('div', 'ui-screen ui-recovery')
+    screen.innerHTML = `
+      <div class="recovery-menu" data-recovery="menu">
+        <h2 class="recovery-title ui-danger">MISSION FAILED</h2>
+        <p class="recovery-subtitle">Rewind time and try again</p>
+        <div class="recovery-options">
+          <div class="recovery-option" data-recovery-option="0">
+            <span class="recovery-option-icon">⏪</span>
+            <div class="recovery-option-text">
+              <span class="recovery-option-label">30 Seconds Ago</span>
+              <span class="recovery-option-desc">Restore recent gameplay</span>
+            </div>
+          </div>
+          <div class="recovery-option" data-recovery-option="1">
+            <span class="recovery-option-icon">⏪⏪</span>
+            <div class="recovery-option-text">
+              <span class="recovery-option-label">60 Seconds Ago</span>
+              <span class="recovery-option-desc">Restore oldest available</span>
+            </div>
+          </div>
+          <div class="recovery-option" data-recovery-option="2">
+            <span class="recovery-option-icon">↻</span>
+            <div class="recovery-option-text">
+              <span class="recovery-option-label">Restart Stage</span>
+              <span class="recovery-option-desc">Return to stage start</span>
+            </div>
+          </div>
+        </div>
+        <div class="recovery-controls">
+          <span>↑ ↓ Select</span>
+          <span><kbd>Enter</kbd> Confirm</span>
+          <span><kbd>R</kbd> Menu</span>
+        </div>
+      </div>
+      <div class="recovery-countdown" data-recovery="countdown">
+        <span class="countdown-number" data-recovery="countdown-number">3</span>
+        <span class="countdown-label">READY</span>
+      </div>
+    `
+
+    // Cache option elements
+    const opts = screen.querySelectorAll('[data-recovery-option]')
+    opts.forEach((el) => {
+      this.recoveryOptions.push(el as HTMLElement)
+    })
+
+    return screen
+  }
+
+  /** Update recovery overlay from world state */
+  private updateRecovery(world: World): void {
+    if (world.state !== 'recovery') return
+
+    // Toggle fading / countdown classes
+    this.recoveryScreen.classList.toggle('fading', world.recoveryFading)
+
+    const isCountdown = world.recoveryCountdown > 0
+    this.recoveryScreen.classList.toggle('countdown', isCountdown)
+
+    // Show countdown number
+    if (isCountdown) {
+      const numEl = this.recoveryScreen.querySelector('[data-recovery="countdown-number"]')
+      if (numEl) {
+        numEl.textContent = String(world.recoveryCountdown)
+      }
+      return
+    }
+
+    // Update option selection and availability
+    for (let i = 0; i < this.recoveryOptions.length; i++) {
+      const opt = this.recoveryOptions[i]
+      opt.classList.toggle('selected', i === world.recoveryCursor)
+      // The Game / RecoverySystem determines availability; we just read
+      // the history size via the option being non-disabled by default.
+      // Actual availability is checked on confirm in Game.handleRecoveryInput.
     }
   }
 

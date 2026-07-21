@@ -28,4 +28,9 @@ export class RNG {
   reseed(seed: number): void {
     this.state = seed >>> 0
   }
+
+  /** Return the internal state so it can be captured by a snapshot. */
+  getState(): number {
+    return this.state
+  }
 }

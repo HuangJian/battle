@@ -1,6 +1,7 @@
 import { World } from './World'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS } from './Input'
+import { RecoverySystem, RECOVERY_OPTION_COUNT } from './RecoverySystem'
 import { PresentationLayer } from '../presentation/PresentationLayer'
 import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
 import { AudioManager } from '../audio/AudioManager'
@@ -23,11 +24,15 @@ export class Game {
   simulation: Simulation
   presentation: PresentationLayer
   audio: AudioManager
+  recovery: RecoverySystem
 
   private lastTime = 0
   private accumulator = 0
   private running = false
   private rafId = 0
+  private prevStageIndex = -1
+  private prevRecoveryPhase = 'idle'
+  private prevCountdown = 0
 
   settings: GameSettings
   private difficultyIndex = 1 // classic
@@ -40,6 +45,7 @@ export class Game {
     this.simulation = new Simulation(this.world, this.input)
     this.presentation = new PresentationLayer(root)
     this.audio = new AudioManager()
+    this.recovery = new RecoverySystem()
     this.audio.setVolume(this.settings.volume)
 
     // Apply saved settings
@@ -81,6 +87,7 @@ export class Game {
 
     // Fixed timestep simulation
     let steps = 0
+    let enteredGameOver = false
     while (this.accumulator >= TICK_MS && steps < 5) {
       if (
         this.world.state === 'playing' ||
@@ -88,9 +95,60 @@ export class Game {
         this.world.state === 'gameover'
       ) {
         this.simulation.tick()
+
+        // Detect stage change → create Stage Snapshot (RecoverySystem.md §7)
+        if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
+          this.recovery.createStageSnapshot(this.world)
+          this.prevStageIndex = this.world.stageIndex
+        }
+
+        // Detect game over → intercept for recovery
+        if (this.world.state === 'gameover' && !enteredGameOver) {
+          enteredGameOver = true
+          this.startRecovery()
+          break // stop ticking — simulation is now suspended
+        }
       }
       this.accumulator -= TICK_MS
       steps++
+    }
+
+    // Recovery flow update (fade, countdown) — runs while state is 'recovery'
+    if (this.world.state === 'recovery') {
+      // Drain accumulator so the simulation doesn't burst-forward
+      // when gameplay resumes after the countdown.
+      this.accumulator = 0
+
+      this.handleRecoveryInput()
+      this.recovery.updateFlow(this.world, dt)
+
+      // When the fade completes the snapshot is restored internally.
+      // At that transition we must rebuild all presentation state
+      // (particles, camera, animations) — Presentation is disposable.
+      if (this.recovery.phase === 'countdown' && this.prevRecoveryPhase === 'fading') {
+        this.presentation.reset()
+        this.audio.stopAll()
+      }
+
+      // Countdown beeps — play a tone each time the number changes
+      if (this.world.recoveryCountdown !== this.prevCountdown) {
+        if (this.world.recoveryCountdown > 0) {
+          this.audio.playCountdownBeep()
+        } else if (this.prevCountdown > 0) {
+          // Countdown just finished → resume
+          this.audio.playCountdownGo()
+        }
+      }
+      this.prevCountdown = this.world.recoveryCountdown
+      this.prevRecoveryPhase = this.recovery.phase
+    } else {
+      this.prevRecoveryPhase = 'idle'
+      this.prevCountdown = 0
+    }
+
+    // History recording — runs while state is 'playing'
+    if (this.world.state === 'playing') {
+      this.recovery.updateRecording(this.world, dt)
     }
 
     // Process events — pass to both audio and presentation
@@ -163,6 +221,8 @@ export class Game {
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
+        this.recovery.reset()
+        this.prevStageIndex = -1
         w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
         this.saveSettings()
       }
@@ -186,6 +246,51 @@ export class Game {
     }
   }
 
+  // ---- Recovery ----
+
+  /**
+   * Intercept game-over and transition to the recovery flow.
+   * The Simulation has already set state='gameover' and saved the
+   * high score; we redirect to 'recovery' so the player can choose
+   * to rewind time instead of accepting defeat.
+   */
+  private startRecovery(): void {
+    this.recovery.startRecovery(this.world)
+  }
+
+  /** Handle keyboard navigation in the recovery menu. */
+  private handleRecoveryInput(): void {
+    const w = this.world
+    if (!this.recovery.isMenuPhase()) return
+
+    // Navigate up/down
+    if (this.input.isUpPressed()) {
+      w.recoveryCursor = (w.recoveryCursor - 1 + RECOVERY_OPTION_COUNT) % RECOVERY_OPTION_COUNT
+      this.audio.playMenuSelect()
+    }
+    if (this.input.isDownPressed()) {
+      w.recoveryCursor = (w.recoveryCursor + 1) % RECOVERY_OPTION_COUNT
+      this.audio.playMenuSelect()
+    }
+
+    // Confirm selection
+    if (this.input.isConfirmPressed()) {
+      const option = w.recoveryCursor
+      if (this.recovery.isOptionAvailable(option)) {
+        this.recovery.selectOption(option, w)
+        this.audio.playRecoveryStart()
+      } else {
+        // Option unavailable — play a soft "denied" beep
+        this.audio.playMenuSelect()
+      }
+    }
+
+    // Allow abandoning recovery and returning to menu
+    if (this.input.isResetPressed()) {
+      this.resetToMenu()
+    }
+  }
+
   resetToMenu(): void {
     this.world.state = 'menu'
     this.world.player = null
@@ -195,6 +300,10 @@ export class Game {
     this.world.explosions = []
     this.world.popups = []
     this.world.spawnQueue = []
+    this.world.recoveryCountdown = 0
+    this.world.recoveryFading = false
+    this.recovery.reset()
+    this.prevStageIndex = -1
     this.presentation.reset()
     this.audio.playMenuSelect()
   }

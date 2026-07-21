@@ -4,7 +4,14 @@ import type { Direction } from './constants'
 // Core Types
 // ============================================================
 
-export type GameState = 'menu' | 'playing' | 'paused' | 'stageclear' | 'gameover' | 'victory'
+export type GameState =
+  | 'menu'
+  | 'playing'
+  | 'paused'
+  | 'stageclear'
+  | 'gameover'
+  | 'victory'
+  | 'recovery'
 
 export type TerrainType = 'empty' | 'brick' | 'steel' | 'water' | 'forest' | 'ice' | 'base'
 

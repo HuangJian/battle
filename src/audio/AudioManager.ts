@@ -164,6 +164,35 @@ export class AudioManager {
     this.beep(600, 0.05, 'square', 0.1)
   }
 
+  playRecoveryStart(): void {
+    // Descending sweep — signifies time rewind
+    this.sweep(800, 200, 0.4, 'sawtooth', 0.2)
+  }
+
+  playCountdownBeep(): void {
+    this.beep(880, 0.08, 'square', 0.15)
+  }
+
+  playCountdownGo(): void {
+    this.beep(1320, 0.15, 'square', 0.2)
+  }
+
+  /** Stop all currently sounding oscillators/sources immediately. */
+  stopAll(): void {
+    if (!this.ctx) return
+    // A brute-force way to silence everything: suspend and resume.
+    // Any scheduled sources that haven't finished will be cut off.
+    try {
+      this.ctx.suspend()
+      // Resume on next microtask so future sounds work
+      setTimeout(() => {
+        this.ctx?.resume()
+      }, 0)
+    } catch {
+      /* ignore */
+    }
+  }
+
   // ---- Event handler ----
 
   handleEvents(events: GameEvent[]): void {

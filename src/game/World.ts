@@ -82,6 +82,11 @@ export class World {
   // Animation frame counter
   frame: number
 
+  // Recovery UI state (read by UIManager, written by RecoverySystem)
+  recoveryCursor: number // selected menu option (0=30s, 1=60s, 2=restart)
+  recoveryCountdown: number // 0 = none, 3/2/1 = counting down
+  recoveryFading: boolean // true while fading to black before restore
+
   constructor() {
     this.tileMap = new TileMap()
     this.player = null
@@ -112,6 +117,9 @@ export class World {
     this.rng = new RNG(Date.now())
     this.events = []
     this.frame = 0
+    this.recoveryCursor = 0
+    this.recoveryCountdown = 0
+    this.recoveryFading = false
   }
 
   // ---- Lifecycle ----
