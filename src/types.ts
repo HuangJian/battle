@@ -46,6 +46,7 @@ export interface Tank extends Entity {
   isPlayer?: boolean
   // Enemy-specific
   flashTimer?: number // armor tank flashing
+  hitCount?: number // number of non-lethal hits taken (drives hit-state overlay)
   aiState?: AIState
   bonus?: boolean // drops a power-up when destroyed
 }
@@ -151,6 +152,8 @@ export interface StageData {
 
 export interface ThemeColors {
   bg: string
+  /** Optional vertical gradient [top, bottom] used as the play-field background. */
+  bgGradient?: [string, string]
   brick: string
   brickDark: string
   steel: string

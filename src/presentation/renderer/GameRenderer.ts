@@ -1,6 +1,7 @@
 import type { World } from '../../game/World'
 import { CELL, GRID, FIELD, TANK } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
+import type { SpriteLibrary } from './SpriteLibrary'
 import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
@@ -29,6 +30,7 @@ export class GameRenderer {
     particles: ParticleSystem,
     effects: EffectsSystem,
     dpr: number = 1,
+    lib?: SpriteLibrary,
   ) {
     this.canvas = canvas
     this.dpr = dpr
@@ -39,6 +41,7 @@ export class GameRenderer {
     this.ctx = ctx
     this.ctx.imageSmoothingEnabled = true
     this.artist = new SpriteArtist(ctx, {} as never)
+    if (lib) this.artist.setLibrary(lib)
     this.camera = camera
     this.animations = animations
     this.particles = particles
@@ -66,8 +69,16 @@ export class GameRenderer {
     ctx.save()
     ctx.translate(cam.x, cam.y)
 
-    // Clear with background
-    ctx.fillStyle = world.theme.bg
+    // Clear with background (gradient if the theme defines one)
+    const bgGrad = world.theme.bgGradient
+    if (bgGrad) {
+      const g = ctx.createLinearGradient(0, -10, 0, FIELD + 10)
+      g.addColorStop(0, bgGrad[0])
+      g.addColorStop(1, bgGrad[1])
+      ctx.fillStyle = g
+    } else {
+      ctx.fillStyle = world.theme.bg
+    }
     ctx.fillRect(-10, -10, FIELD + 20, FIELD + 20)
 
     // Grid lines (subtle)
@@ -209,6 +220,7 @@ export class GameRenderer {
           animFrame,
           (tank.flashTimer ?? 0) > 0,
           tank.hp,
+          Math.min(tank.hitCount ?? 0, 4),
         )
       }
 

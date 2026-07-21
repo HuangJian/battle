@@ -124,6 +124,70 @@ export const NEON_THEME: ThemeColors = {
   vignetteColor: 'rgba(0, 0, 0, 0.5)',
 }
 
+/**
+ * Modern Retro theme — the cream canvas from the redesign.
+ * Warm, light, playful; matches the Ardot "Modern Presentation" art direction.
+ */
+export const MODERN_RETRO_THEME: ThemeColors = {
+  bg: '#fbe6c4', // mid-cream, used for spawn-flash masking
+  bgGradient: ['#FFF7E6', '#FCE3B4'], // warm cream → deeper cream (vertical)
+  brick: '#d98a4f',
+  brickDark: '#a85f2c',
+  steel: '#c9c9c9',
+  steelDark: '#9a9a9a',
+  water: '#5bb8e8',
+  waterDark: '#2f8fc4',
+  forest: '#5bbf6a',
+  forestDark: '#2f8f43',
+  ice: '#a9e0f5',
+  base: '#f4c430',
+  baseDark: '#c8941f',
+
+  playerBody: '#f4c430',
+  playerTurret: '#fff7e6',
+  playerBody2: '#f4c430',
+  playerBody3: '#fff7e6',
+
+  enemyBasic: '#e23b2c',
+  enemyFast: '#22c3dc',
+  enemyPower: '#8b5cf6',
+  enemyArmor: '#7a8290',
+  enemyArmorFlash: '#ffffff',
+
+  hudBg: 'rgba(255, 247, 230, 0.92)',
+  hudText: '#2b2b2b',
+  hudAccent: '#e07a5f',
+
+  explosion1: '#ffd23f',
+  explosion2: '#ff7a3c',
+  explosion3: '#e0432b',
+  bullet: '#2b2b2b',
+  bulletGlow: '#f4c430',
+  powerUp: '#e07a5f',
+  powerUpGlow: '#f4c430',
+  spawn: '#f4c430',
+
+  // HTML UI
+  panelBg: 'rgba(255, 247, 230, 0.92)',
+  panelBorder: 'rgba(224, 122, 95, 0.3)',
+  panelShadow: 'rgba(0, 0, 0, 0.15)',
+  textPrimary: '#2b2b2b',
+  textSecondary: '#6b5848',
+  textMuted: '#a08a72',
+  accentPrimary: '#f4c430',
+  accentSecondary: '#e07a5f',
+  buttonBg: 'rgba(224, 122, 95, 0.1)',
+  buttonHover: 'rgba(224, 122, 95, 0.18)',
+  buttonActive: 'rgba(224, 122, 95, 0.28)',
+  overlayBg: 'rgba(43, 43, 43, 0.5)',
+  danger: '#e0432b',
+  success: '#3fae5a',
+
+  // Ambient
+  gridLineColor: 'rgba(43, 43, 43, 0.05)',
+  vignetteColor: 'rgba(43, 43, 43, 0.06)',
+}
+
 export const THEME_DEFINITIONS: ThemeDefinition[] = [
   {
     key: 'classic',
@@ -137,11 +201,18 @@ export const THEME_DEFINITIONS: ThemeDefinition[] = [
     description: 'Vibrant cyberpunk glow',
     colors: NEON_THEME,
   },
+  {
+    key: 'modern',
+    name: 'Modern Retro',
+    description: 'Warm cream canvas, faithful to the redesign',
+    colors: MODERN_RETRO_THEME,
+  },
 ]
 
 export const THEMES: Record<string, ThemeColors> = {
   classic: CLASSIC_THEME,
   neon: NEON_THEME,
+  modern: MODERN_RETRO_THEME,
 }
 
-export const DEFAULT_THEME = 'classic'
+export const DEFAULT_THEME = 'modern'

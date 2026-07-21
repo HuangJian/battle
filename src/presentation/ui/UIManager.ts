@@ -223,7 +223,9 @@ export class UIManager {
   applyTheme(colors: ThemeColors): void {
     const root = document.documentElement
     const vars: Record<string, string> = {
-      '--theme-bg': colors.bg,
+      '--theme-bg': colors.bgGradient
+        ? `linear-gradient(180deg, ${colors.bgGradient[0]}, ${colors.bgGradient[1]})`
+        : colors.bg,
       '--theme-panel-bg': colors.panelBg,
       '--theme-panel-border': colors.panelBorder,
       '--theme-panel-shadow': colors.panelShadow,

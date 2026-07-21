@@ -473,6 +473,7 @@ export class Simulation {
 
       // Damage tank
       tank.hp--
+      tank.hitCount = (tank.hitCount ?? 0) + 1
       this.createExplosion(bullet.x, bullet.y, 'small')
 
       if (tank.hp <= 0) {

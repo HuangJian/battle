@@ -1,5 +1,6 @@
 import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
+import type { SpriteLibrary } from './SpriteLibrary'
 
 /**
  * SpriteArtist — enhanced programmatic sprite drawing.
@@ -9,6 +10,7 @@ import type { Direction } from '../../constants'
 export class SpriteArtist {
   ctx: CanvasRenderingContext2D
   theme: ThemeColors
+  lib: SpriteLibrary | null = null
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
     this.ctx = ctx
@@ -19,11 +21,45 @@ export class SpriteArtist {
     this.theme = theme
   }
 
+  setLibrary(lib: SpriteLibrary): void {
+    this.lib = lib
+  }
+
+  /**
+   * Draws an SVG sprite (96x96 artboard) centered in a size×size cell.
+   * `scale` lets tanks slightly overflow the cell so treads reach the edges.
+   * Returns false when the sprite is not loaded, so callers can fall back
+   * to the procedural drawing.
+   */
+  private drawSvgCentered(
+    key: string,
+    x: number,
+    y: number,
+    size: number,
+    rotationRad = 0,
+    scale = 1,
+  ): boolean {
+    const img = this.lib?.get(key)
+    if (!img) return false
+    const ctx = this.ctx
+    const s2 = size * scale
+    const cx = x + size / 2
+    const cy = y + size / 2
+    ctx.save()
+    ctx.translate(cx, cy)
+    if (rotationRad) ctx.rotate(rotationRad)
+    ctx.imageSmoothingEnabled = true
+    ctx.drawImage(img, -s2 / 2, -s2 / 2, s2, s2)
+    ctx.restore()
+    return true
+  }
+
   // ================================================================
   // Terrain
   // ================================================================
 
   drawBrick(x: number, y: number, size: number): void {
+    if (this.drawSvgCentered('terrain.brick', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -57,6 +93,7 @@ export class SpriteArtist {
   }
 
   drawSteel(x: number, y: number, size: number): void {
+    if (this.drawSvgCentered('terrain.steel', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -91,6 +128,7 @@ export class SpriteArtist {
   }
 
   drawWater(x: number, y: number, size: number, frame: number): void {
+    if (this.drawSvgCentered('terrain.water', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -122,6 +160,7 @@ export class SpriteArtist {
   }
 
   drawForest(x: number, y: number, size: number): void {
+    if (this.drawSvgCentered('terrain.forest', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -148,6 +187,7 @@ export class SpriteArtist {
   }
 
   drawIce(x: number, y: number, size: number): void {
+    if (this.drawSvgCentered('terrain.ice', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -169,6 +209,7 @@ export class SpriteArtist {
   }
 
   drawBase(x: number, y: number, size: number, destroyed: boolean): void {
+    if (!destroyed && this.drawSvgCentered('terrain.base', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -311,6 +352,13 @@ export class SpriteArtist {
     level: number,
     animFrame: number,
   ): void {
+    const rot =
+      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    if (this.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
+      const stage = Math.max(0, Math.min(level ?? 0, 3))
+      if (stage > 0) this.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, 0, 1.28)
+      return
+    }
     const t = this.theme
     const body = level >= 3 ? t.playerBody3 : level >= 2 ? t.playerBody2 : t.playerBody
     this.drawTank(x, y, size, dir, body, t.playerTurret, animFrame, level)
@@ -325,7 +373,22 @@ export class SpriteArtist {
     animFrame: number,
     flash: boolean,
     hp: number,
+    hitStage = 0,
   ): void {
+    const rot =
+      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const keyMap: Record<string, string> = {
+      basic: 'tank.basic',
+      fast: 'tank.fast',
+      power: 'tank.power',
+      armor: 'tank.armor',
+    }
+    const key = keyMap[kind] ?? 'tank.basic'
+    if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
+      const stage = Math.max(0, Math.min(hitStage, 4))
+      if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, 0, 1.28)
+      return
+    }
     const t = this.theme
     let body: string
     let turret: string
@@ -360,6 +423,7 @@ export class SpriteArtist {
   // ================================================================
 
   drawBullet(x: number, y: number, size: number, dir: Direction): void {
+    if (this.drawSvgCentered('bullet', x, y, size, 0, 1.5)) return
     const t = this.theme
     const ctx = this.ctx
     const cx = x + size / 2
@@ -401,6 +465,14 @@ export class SpriteArtist {
   // ================================================================
 
   drawPowerUp(x: number, y: number, size: number, type: string, frame: number): void {
+    const itemKey: Record<string, string> = {
+      star: 'item.star',
+      bomb: 'item_bomb',
+      shield: 'item.shield',
+      freeze: 'item_freeze',
+    }
+    const key = itemKey[type]
+    if (key && this.drawSvgCentered(key, x, y, size)) return
     const ctx = this.ctx
     const t = this.theme
     const blink = Math.floor(frame / 10) % 2 === 0
@@ -529,6 +601,7 @@ export class SpriteArtist {
   // ================================================================
 
   drawShield(x: number, y: number, size: number, frame: number): void {
+    if (this.drawSvgCentered('fx.shield', x, y, size, 0, 1.28)) return
     const ctx = this.ctx
     const blink = Math.floor(frame / 4) % 2 === 0
     ctx.strokeStyle = blink ? 'rgba(255,255,255,0.7)' : 'rgba(128,192,255,0.5)'
@@ -548,6 +621,20 @@ export class SpriteArtist {
   drawExplosion(x: number, y: number, size: number, progress: number, kind: 'small' | 'big'): void {
     const ctx = this.ctx
     const t = this.theme
+
+    // SVG burst: grows and fades with progress (x,y is the explosion center)
+    const img = this.lib?.get('fx.explosion')
+    if (img) {
+      const grow = kind === 'big' ? 1.0 : 0.7
+      const s2 = size * (0.6 + progress * (1.0 + grow))
+      const alpha = progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
+      ctx.save()
+      ctx.globalAlpha = alpha
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(img, x - s2 / 2, y - s2 / 2, s2, s2)
+      ctx.restore()
+      return
+    }
 
     if (kind === 'big') {
       // Flash phase (0-0.15)

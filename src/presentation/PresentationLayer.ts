@@ -6,6 +6,7 @@ import { AnimationSystem } from './AnimationSystem'
 import { ParticleSystem } from './ParticleSystem'
 import { EffectsSystem } from './EffectsSystem'
 import { GameRenderer } from './renderer/GameRenderer'
+import { spriteLibrary } from './renderer/SpriteLibrary'
 import { UIManager } from './ui/UIManager'
 
 /**
@@ -41,6 +42,7 @@ export class PresentationLayer {
       this.particles,
       this.effects,
       this.dpr,
+      spriteLibrary,
     )
   }
 

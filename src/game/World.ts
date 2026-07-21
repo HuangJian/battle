@@ -199,6 +199,7 @@ export class World {
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
       flashTimer: 0,
+      hitCount: 0,
       aiState:
         kind === 'player'
           ? undefined

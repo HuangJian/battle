@@ -2,6 +2,7 @@ import { World } from './World'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS } from './Input'
 import { PresentationLayer } from '../presentation/PresentationLayer'
+import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
 import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
@@ -53,8 +54,10 @@ export class Game {
     this.world.theme = THEMES[this.world.themeKey]
   }
 
-  start(): void {
+  async start(): Promise<void> {
     this.input.attach(window)
+    // Preload the SVG asset library so sprites are ready for the first frame.
+    await spriteLibrary.load()
     this.running = true
     this.lastTime = performance.now()
     this.loop(this.lastTime)

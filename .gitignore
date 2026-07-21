@@ -1,5 +1,9 @@
 node_modules/
 dist/
+
+.workbuddy/
+.vscode/
+
 *.local
 .DS_Store
 
