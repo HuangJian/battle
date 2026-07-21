@@ -7,6 +7,7 @@ import { ParticleSystem } from './ParticleSystem'
 import { EffectsSystem } from './EffectsSystem'
 import { GameRenderer } from './renderer/GameRenderer'
 import { spriteLibrary } from './renderer/SpriteLibrary'
+import { SpriteCache } from './renderer/SpriteCache'
 import { UIManager } from './ui/UIManager'
 
 /**
@@ -22,6 +23,7 @@ export class PresentationLayer {
   effects: EffectsSystem
   renderer: GameRenderer
   ui: UIManager
+  spriteCache: SpriteCache
   private dpr: number
 
   constructor(root: HTMLElement) {
@@ -35,6 +37,8 @@ export class PresentationLayer {
 
     this.dpr = Math.min(window.devicePixelRatio || 1, 2) // cap at 2x for performance
 
+    this.spriteCache = new SpriteCache(this.dpr)
+
     this.renderer = new GameRenderer(
       this.ui.canvas,
       this.camera,
@@ -44,6 +48,12 @@ export class PresentationLayer {
       this.dpr,
       spriteLibrary,
     )
+  }
+
+  /** Build the sprite cache after the sprite library has loaded. */
+  initSpriteCache(lib: typeof spriteLibrary): void {
+    this.spriteCache.build(lib)
+    this.renderer.setSpriteCache(this.spriteCache)
   }
 
   /** Process game events for visual effects */

@@ -1,16 +1,23 @@
 import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
 import type { SpriteLibrary } from './SpriteLibrary'
+import type { SpriteCache } from './SpriteCache'
+import { DIR_TO_INDEX } from './SpriteCache'
 
 /**
  * SpriteArtist — enhanced programmatic sprite drawing.
  * Draws all game sprites with Canvas 2D primitives at higher visual quality.
  * Theme-aware: colors come from the active theme.
+ *
+ * Performance: when a SpriteCache is available, tank/effect/bullet/explosion
+ * sprites are drawn from pre-rasterized canvas bitmaps instead of SVG images.
+ * This eliminates SVG parse/rasterize overhead and per-frame rotation.
  */
 export class SpriteArtist {
   ctx: CanvasRenderingContext2D
   theme: ThemeColors
   lib: SpriteLibrary | null = null
+  spriteCache: SpriteCache | null = null
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
     this.ctx = ctx
@@ -23,6 +30,10 @@ export class SpriteArtist {
 
   setLibrary(lib: SpriteLibrary): void {
     this.lib = lib
+  }
+
+  setSpriteCache(cache: SpriteCache): void {
+    this.spriteCache = cache
   }
 
   /**
@@ -352,6 +363,28 @@ export class SpriteArtist {
     level: number,
     animFrame: number,
   ): void {
+    // Fast path: use pre-rasterized + pre-rotated sprite (no save/translate/rotate/restore)
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const sprite = cache.getTankSprite('tank.player1', dirIdx)
+      if (sprite) {
+        const cs = cache.canvasSize
+        const cx = x + size / 2
+        const cy = y + size / 2
+        const ctx = this.ctx
+        ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
+        // Star buffer overlay
+        const stage = Math.max(0, Math.min(level ?? 0, 3))
+        if (stage > 0) {
+          const overlay = cache.getEffectSprite(`fx.starbuf${stage}`)
+          if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
+        }
+        return
+      }
+    }
+
+    // SVG fallback
     const rot =
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
     if (this.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
@@ -375,8 +408,6 @@ export class SpriteArtist {
     hp: number,
     hitStage = 0,
   ): void {
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
     const keyMap: Record<string, string> = {
       basic: 'tank.basic',
       fast: 'tank.fast',
@@ -384,6 +415,31 @@ export class SpriteArtist {
       armor: 'tank.armor',
     }
     const key = keyMap[kind] ?? 'tank.basic'
+
+    // Fast path: use pre-rasterized + pre-rotated sprite
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const sprite = cache.getTankSprite(key, dirIdx)
+      if (sprite) {
+        const cs = cache.canvasSize
+        const cx = x + size / 2
+        const cy = y + size / 2
+        const ctx = this.ctx
+        ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
+        // Hit overlay
+        const stage = Math.max(0, Math.min(hitStage, 4))
+        if (stage > 0) {
+          const overlay = cache.getEffectSprite(`fx.hit${stage}`)
+          if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
+        }
+        return
+      }
+    }
+
+    // SVG fallback
+    const rot =
+      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
     if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
       if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, 0, 1.28)
@@ -423,6 +479,18 @@ export class SpriteArtist {
   // ================================================================
 
   drawBullet(x: number, y: number, size: number, dir: Direction): void {
+    // Fast path: pre-rasterized bullet bitmap
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const sprite = cache.getBulletSprite()
+      if (sprite) {
+        const s2 = size * 1.5
+        const cx = x + size / 2
+        const cy = y + size / 2
+        this.ctx.drawImage(sprite, cx - s2 / 2, cy - s2 / 2, s2, s2)
+        return
+      }
+    }
     if (this.drawSvgCentered('bullet', x, y, size, 0, 1.5)) return
     const t = this.theme
     const ctx = this.ctx
@@ -465,14 +533,27 @@ export class SpriteArtist {
   // ================================================================
 
   drawPowerUp(x: number, y: number, size: number, type: string, frame: number): void {
+    // Fixed: item keys were 'item_bomb'/'item_freeze' but SPRITE_URLS uses 'item.bomb'/'item.freeze'
     const itemKey: Record<string, string> = {
       star: 'item.star',
-      bomb: 'item_bomb',
+      bomb: 'item.bomb',
       shield: 'item.shield',
-      freeze: 'item_freeze',
+      freeze: 'item.freeze',
     }
     const key = itemKey[type]
-    if (key && this.drawSvgCentered(key, x, y, size)) return
+
+    // Fast path: pre-rasterized item bitmap
+    if (key) {
+      const cache = this.spriteCache
+      if (cache?.built) {
+        const sprite = cache.getItemSprite(key)
+        if (sprite) {
+          this.ctx.drawImage(sprite, x, y, size, size)
+          return
+        }
+      }
+      if (this.drawSvgCentered(key, x, y, size)) return
+    }
     const ctx = this.ctx
     const t = this.theme
     const blink = Math.floor(frame / 10) % 2 === 0
@@ -601,6 +682,18 @@ export class SpriteArtist {
   // ================================================================
 
   drawShield(x: number, y: number, size: number, frame: number): void {
+    // Fast path: pre-rasterized shield bitmap
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const sprite = cache.getEffectSprite('fx.shield')
+      if (sprite) {
+        const cs = cache.canvasSize
+        const cx = x + size / 2
+        const cy = y + size / 2
+        this.ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
+        return
+      }
+    }
     if (this.drawSvgCentered('fx.shield', x, y, size, 0, 1.28)) return
     const ctx = this.ctx
     const blink = Math.floor(frame / 4) % 2 === 0
@@ -622,17 +715,28 @@ export class SpriteArtist {
     const ctx = this.ctx
     const t = this.theme
 
-    // SVG burst: grows and fades with progress (x,y is the explosion center)
+    // Fast path: pre-rasterized explosion bitmap (canvas-to-canvas blit, no SVG rasterize)
+    const cache = this.spriteCache
+    const expSprite = cache?.built ? cache.getExplosionSprite() : null
+    if (expSprite) {
+      const grow = kind === 'big' ? 1.0 : 0.7
+      const s2 = size * (0.6 + progress * (1.0 + grow))
+      const alpha = progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
+      ctx.globalAlpha = alpha
+      ctx.drawImage(expSprite, x - s2 / 2, y - s2 / 2, s2, s2)
+      ctx.globalAlpha = 1
+      return
+    }
+
+    // SVG fallback
     const img = this.lib?.get('fx.explosion')
     if (img) {
       const grow = kind === 'big' ? 1.0 : 0.7
       const s2 = size * (0.6 + progress * (1.0 + grow))
       const alpha = progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
-      ctx.save()
       ctx.globalAlpha = alpha
-      ctx.imageSmoothingEnabled = true
       ctx.drawImage(img, x - s2 / 2, y - s2 / 2, s2, s2)
-      ctx.restore()
+      ctx.globalAlpha = 1
       return
     }
 

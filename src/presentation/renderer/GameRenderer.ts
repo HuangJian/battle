@@ -2,20 +2,28 @@ import type { World } from '../../game/World'
 import { CELL, GRID, FIELD, TANK } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
 import type { SpriteLibrary } from './SpriteLibrary'
+import type { SpriteCache } from './SpriteCache'
 import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
 import type { ThemeColors } from '../../types'
+import { createOffscreenCanvas } from '../../utils/canvas'
 
 /**
  * GameRenderer — renders the game world to a canvas.
- * Applies camera transform, draws all entities, particles, and effects.
- * Never modifies the World.
  *
- * Performance: terrain (grid lines + all non-forest tiles) and forest tiles
- * are cached to offscreen canvases, rebuilt only when the tile map changes,
- * the water animation phase flips, or the theme changes.
+ * Advanced performance techniques:
+ * 1. Terrain cache: static tiles (grid + brick/steel/ice/base) pre-rendered to
+ *    an offscreen canvas, rebuilt only when terrain or theme changes.
+ * 2. Water separation: water tiles drawn directly each frame (cheap, few tiles)
+ *    so the terrain cache stays static — no rebuilds for water animation.
+ * 3. Forest cache: forest tiles pre-rendered to a separate offscreen canvas.
+ * 4. Vignette cache: pre-rendered to an offscreen canvas per theme — replaces
+ *    a full-screen gradient fillRect with a single drawImage.
+ * 5. Canvas context: `alpha:false` + `desynchronized:true` for GPU-optimized blits.
+ * 6. Camera transform via setTransform (no save/restore overhead).
+ * 7. Particle batching: iterate by type to minimize state changes.
  */
 export class GameRenderer {
   ctx: CanvasRenderingContext2D
@@ -28,21 +36,25 @@ export class GameRenderer {
 
   private dpr: number
 
-  // ---- Terrain cache ----
-  /** Cached grid lines + non-forest terrain (brick, steel, water, ice, base, ruins). */
-  private terrainCache: HTMLCanvasElement
+  // ---- Terrain cache (static: grid + brick/steel/ice/base, NO water) ----
+  private terrainCache: CanvasImageSource
   private terrainCacheCtx: CanvasRenderingContext2D
-  /** Cached forest terrain (drawn on top of tanks). */
-  private forestCache: HTMLCanvasElement
-  private forestCacheCtx: CanvasRenderingContext2D
-  /** Last water animation phase rendered into the cache. */
-  private lastWaterPhase = -1
-  /** Whether the terrain cache needs a full rebuild. */
   private terrainCacheDirty = true
+
+  // ---- Forest cache ----
+  private forestCache: CanvasImageSource
+  private forestCacheCtx: CanvasRenderingContext2D
+
+  // ---- Water cell positions (for direct rendering each frame) ----
+  private waterCells: Array<{ c: number; r: number }> = []
+
+  // ---- Vignette cache (offscreen canvas per theme) ----
+  private vignetteCanvas: CanvasImageSource
+  private vignetteCtx: CanvasRenderingContext2D
+  private vignetteDirty = true
 
   // ---- Gradient cache ----
   private cachedBgGradient: CanvasGradient | null = null
-  private cachedVignette: CanvasGradient | null = null
   private cachedTheme: ThemeColors | null = null
 
   constructor(
@@ -58,7 +70,9 @@ export class GameRenderer {
     this.dpr = dpr
     canvas.width = FIELD * dpr
     canvas.height = FIELD * dpr
-    const ctx = canvas.getContext('2d')
+    // alpha:false — canvas is always opaque (background drawn first), skips alpha compositing
+    // desynchronized:true — hints the browser to use a lower-latency GPU pipeline
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true })
     if (!ctx) throw new Error('Canvas 2D context not available')
     this.ctx = ctx
     this.ctx.imageSmoothingEnabled = true
@@ -69,20 +83,18 @@ export class GameRenderer {
     this.particles = particles
     this.effects = effects
 
-    // Create offscreen terrain cache canvases at DPR resolution
-    this.terrainCache = document.createElement('canvas')
-    this.terrainCache.width = FIELD * dpr
-    this.terrainCache.height = FIELD * dpr
-    this.terrainCacheCtx = this.terrainCache.getContext('2d')!
-    this.terrainCacheCtx.scale(dpr, dpr)
-    this.terrainCacheCtx.imageSmoothingEnabled = true
+    // Create offscreen terrain cache canvases at DPR resolution (uses OffscreenCanvas when available)
+    const tc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.terrainCache = tc.canvas
+    this.terrainCacheCtx = tc.ctx
 
-    this.forestCache = document.createElement('canvas')
-    this.forestCache.width = FIELD * dpr
-    this.forestCache.height = FIELD * dpr
-    this.forestCacheCtx = this.forestCache.getContext('2d')!
-    this.forestCacheCtx.scale(dpr, dpr)
-    this.forestCacheCtx.imageSmoothingEnabled = true
+    const fc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.forestCache = fc.canvas
+    this.forestCacheCtx = fc.ctx
+
+    const vc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.vignetteCanvas = vc.canvas
+    this.vignetteCtx = vc.ctx
   }
 
   getDpr(): number {
@@ -90,12 +102,15 @@ export class GameRenderer {
   }
 
   setTheme(theme: ThemeColors): void {
-    // Only update when the theme object actually changes (rare — menu selection)
     if (theme === this.artist.theme) return
     this.artist.setTheme(theme)
     this.terrainCacheDirty = true
     this.cachedBgGradient = null
-    this.cachedVignette = null
+    this.vignetteDirty = true
+  }
+
+  setSpriteCache(cache: SpriteCache): void {
+    this.artist.setSpriteCache(cache)
   }
 
   // ================================================================
@@ -105,47 +120,49 @@ export class GameRenderer {
   render(world: World): void {
     this.setTheme(world.theme)
     const ctx = this.ctx
-
-    // Apply DPR scaling — reset transform and scale
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    const dpr = this.dpr
 
     // Camera offset
     const cam = this.camera.getOffset()
 
-    ctx.save()
-    ctx.translate(cam.x, cam.y)
+    // Combine DPR + camera into a single setTransform (no save/restore needed)
+    ctx.setTransform(dpr, 0, 0, dpr, cam.x * dpr, cam.y * dpr)
 
-    // 1. Background fill (with margin for camera shake) — cheap, one fillRect
+    // 1. Background fill
     this.fillBackground(world)
 
-    // 2. Grid lines + non-forest terrain (cached)
+    // 2. Static terrain cache (grid + brick/steel/ice/base — NO water)
     this.updateTerrainCache(world)
     ctx.drawImage(this.terrainCache, 0, 0, FIELD, FIELD)
 
-    // 3. Tanks
+    // 3. Water tiles (drawn directly — cheap, few tiles, animated)
+    this.renderWater(world)
+
+    // 4. Tanks
     this.renderTanks(world)
 
-    // 4. Bullets
+    // 5. Bullets
     this.renderBullets(world)
 
-    // 5. Power-ups
+    // 6. Power-ups
     this.renderPowerUps(world)
 
-    // 6. Forest (cached, drawn on top of tanks for hiding)
+    // 7. Forest (cached, drawn on top of tanks for hiding)
     ctx.drawImage(this.forestCache, 0, 0, FIELD, FIELD)
 
-    // 7. Explosions
+    // 8. Explosions
     this.renderExplosions(world)
 
-    // 8. Particles
+    // 9. Particles (batched by type)
     this.renderParticles()
 
-    // 9. Score popups
+    // 10. Score popups
     this.renderPopups(world)
 
-    ctx.restore()
+    // Reset transform for screen-space effects
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-    // 10. Screen flash (over everything)
+    // 11. Screen flash (over everything)
     const flash = this.effects.getFlash()
     if (flash) {
       ctx.fillStyle = flash.color
@@ -154,7 +171,7 @@ export class GameRenderer {
       ctx.globalAlpha = 1
     }
 
-    // 11. Vignette (cached gradient)
+    // 12. Vignette (cached offscreen canvas — one drawImage)
     this.drawVignette(world)
   }
 
@@ -165,7 +182,6 @@ export class GameRenderer {
     const t = world.theme
 
     if (t.bgGradient) {
-      // Cache the gradient — recreate only when theme changes
       if (!this.cachedBgGradient || this.cachedTheme !== t) {
         const g = ctx.createLinearGradient(0, -10, 0, FIELD + 10)
         g.addColorStop(0, t.bgGradient[0])
@@ -183,25 +199,21 @@ export class GameRenderer {
   // ---- Terrain cache ----
 
   private updateTerrainCache(world: World): void {
-    const waterPhase = Math.floor(world.frame / 20) % 2
     const tm = world.tileMap
-
-    // Rebuild only when something actually changed
-    if (!this.terrainCacheDirty && !tm.dirty && waterPhase === this.lastWaterPhase) return
+    if (!this.terrainCacheDirty && !tm.dirty) return
 
     this.terrainCacheDirty = false
-    this.lastWaterPhase = waterPhase
     tm.dirty = false
 
     this.rebuildTerrainCache(world)
     this.rebuildForestCache(world)
+    this.scanWaterCells(world)
   }
 
   private rebuildTerrainCache(world: World): void {
     const ctx = this.terrainCacheCtx
     const tm = world.tileMap
     const artist = this.artist
-    // Swap artist context to the offscreen canvas
     const savedCtx = artist.ctx
     artist.ctx = ctx
 
@@ -219,12 +231,11 @@ export class GameRenderer {
     }
     ctx.stroke()
 
-    // Non-forest terrain
-    const frame = world.frame
+    // Static terrain only (NO water — water is rendered separately each frame)
     for (let r = 0; r < GRID; r++) {
       for (let c = 0; c < GRID; c++) {
         const type = tm.get(c, r)
-        if (type === 'empty' || type === 'forest') continue
+        if (type === 'empty' || type === 'forest' || type === 'water') continue
 
         const x = c * CELL
         const y = r * CELL
@@ -235,9 +246,6 @@ export class GameRenderer {
             break
           case 'steel':
             artist.drawSteel(x, y, CELL)
-            break
-          case 'water':
-            artist.drawWater(x, y, CELL, frame)
             break
           case 'ice':
             artist.drawIce(x, y, CELL)
@@ -260,7 +268,6 @@ export class GameRenderer {
       }
     }
 
-    // Restore artist context
     artist.ctx = savedCtx
   }
 
@@ -284,6 +291,30 @@ export class GameRenderer {
     artist.ctx = savedCtx
   }
 
+  /** Scan and cache water cell positions for efficient per-frame rendering. */
+  private scanWaterCells(world: World): void {
+    this.waterCells = []
+    const tm = world.tileMap
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (tm.get(c, r) === 'water') {
+          this.waterCells.push({ c, r })
+        }
+      }
+    }
+  }
+
+  // ---- Water (direct render each frame — animated, few tiles) ----
+
+  private renderWater(world: World): void {
+    const artist = this.artist
+    const frame = world.frame
+    for (let i = 0; i < this.waterCells.length; i++) {
+      const { c, r } = this.waterCells[i]
+      artist.drawWater(c * CELL, r * CELL, CELL, frame)
+    }
+  }
+
   // ---- Tanks ----
 
   private renderTanks(world: World): void {
@@ -293,17 +324,14 @@ export class GameRenderer {
     for (const tank of world.allTanks) {
       if (!tank.alive) continue
 
-      // Spawn animation
       if (tank.spawnTimer > 0) {
         artist.drawSpawn(tank.x, tank.y, tank.w, frame)
         continue
       }
 
-      // Determine animation frame
       const vc = this.animations.get(tank.id)
       const animFrame = vc ? this.animations.getFrame(vc) : (frame >> 2) & 1
 
-      // Draw tank
       if (tank.isPlayer) {
         artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
       } else {
@@ -320,7 +348,6 @@ export class GameRenderer {
         )
       }
 
-      // Bonus enemy indicator
       if (tank.bonus) {
         const blink = Math.floor(frame / 10) % 2 === 0
         if (blink) {
@@ -330,7 +357,6 @@ export class GameRenderer {
         }
       }
 
-      // Shield effect
       if (tank.shieldTimer && tank.shieldTimer > 0) {
         artist.drawShield(tank.x, tank.y, tank.w, frame)
       }
@@ -368,61 +394,88 @@ export class GameRenderer {
     }
   }
 
-  // ---- Particles ----
+  // ---- Particles (batched by type to minimize state changes) ----
 
   private renderParticles(): void {
     const ctx = this.ctx
-    // Iterate pool directly — avoids allocating a new array every frame
     const pool = this.particles.pool
     const count = this.particles.activeCount
 
+    // Pass 1: spark particles (fillRect — batch fillStyle changes)
+    let lastFill = ''
     for (let i = 0; i < count; i++) {
       const p = pool[i]
-      if (!p.active) continue
+      if (!p.active || p.type !== 'spark') continue
+      ctx.globalAlpha = p.life / p.maxLife
+      if (p.color !== lastFill) {
+        ctx.fillStyle = p.color
+        lastFill = p.color
+      }
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size)
+    }
 
+    // Pass 2: debris particles (requires transform — use save/restore per particle)
+    for (let i = 0; i < count; i++) {
+      const p = pool[i]
+      if (!p.active || p.type !== 'debris') continue
+      ctx.globalAlpha = p.life / p.maxLife
+      ctx.save()
+      ctx.translate(p.x, p.y)
+      ctx.rotate(p.rotation)
+      ctx.fillStyle = p.color
+      ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size)
+      ctx.restore()
+    }
+
+    // Pass 3: smoke particles (arc fill — batch by minimizing fillStyle changes)
+    lastFill = ''
+    for (let i = 0; i < count; i++) {
+      const p = pool[i]
+      if (!p.active || p.type !== 'smoke') continue
+      const alpha = p.life / p.maxLife
+      ctx.globalAlpha = alpha * 0.4
+      if (p.color !== lastFill) {
+        ctx.fillStyle = p.color
+        lastFill = p.color
+      }
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.size * (1 + (1 - alpha) * 0.5), 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    // Pass 4: ring particles (arc stroke)
+    let lastStroke = ''
+    for (let i = 0; i < count; i++) {
+      const p = pool[i]
+      if (!p.active || p.type !== 'ring') continue
       const alpha = p.life / p.maxLife
       ctx.globalAlpha = alpha
-
-      switch (p.type) {
-        case 'spark':
-          ctx.fillStyle = p.color
-          ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size)
-          break
-
-        case 'debris':
-          ctx.save()
-          ctx.translate(p.x, p.y)
-          ctx.rotate(p.rotation)
-          ctx.fillStyle = p.color
-          ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size)
-          ctx.restore()
-          break
-
-        case 'smoke':
-          ctx.fillStyle = p.color
-          ctx.globalAlpha = alpha * 0.4
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, p.size * (1 + (1 - alpha) * 0.5), 0, Math.PI * 2)
-          ctx.fill()
-          break
-
-        case 'ring':
-          ctx.strokeStyle = p.color
-          ctx.lineWidth = Math.max(1, p.size * alpha)
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, p.size * (1 + (1 - alpha) * 2), 0, Math.PI * 2)
-          ctx.stroke()
-          break
-
-        case 'flash':
-          ctx.fillStyle = p.color
-          ctx.globalAlpha = alpha * 0.8
-          ctx.beginPath()
-          ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2)
-          ctx.fill()
-          break
+      if (p.color !== lastStroke) {
+        ctx.strokeStyle = p.color
+        lastStroke = p.color
       }
+      ctx.lineWidth = Math.max(1, p.size * alpha)
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.size * (1 + (1 - alpha) * 2), 0, Math.PI * 2)
+      ctx.stroke()
     }
+
+    // Pass 5: flash particles (arc fill)
+    lastFill = ''
+    for (let i = 0; i < count; i++) {
+      const p = pool[i]
+      if (!p.active || p.type !== 'flash') continue
+      const alpha = p.life / p.maxLife
+      ctx.globalAlpha = alpha * 0.8
+      if (p.color !== lastFill) {
+        ctx.fillStyle = p.color
+        lastFill = p.color
+      }
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
     ctx.globalAlpha = 1
   }
 
@@ -436,10 +489,8 @@ export class GameRenderer {
       const alpha = Math.min(1, popup.timer / 500)
       const offsetY = (1 - popup.timer / 1500) * 20
       ctx.globalAlpha = alpha
-      // Shadow
       ctx.fillStyle = 'rgba(0,0,0,0.6)'
       ctx.fillText(popup.text, popup.x + TANK / 2 + 1, popup.y - 2 - offsetY + 1)
-      // Text
       ctx.fillStyle = world.theme.hudAccent
       ctx.fillText(popup.text, popup.x + TANK / 2, popup.y - 2 - offsetY)
     }
@@ -447,13 +498,16 @@ export class GameRenderer {
     ctx.textAlign = 'left'
   }
 
-  // ---- Vignette ----
+  // ---- Vignette (cached offscreen canvas) ----
 
   private drawVignette(world: World): void {
     const ctx = this.ctx
-    // Cache the gradient — recreate only when theme changes
-    if (!this.cachedVignette || this.cachedTheme !== world.theme) {
-      const gradient = ctx.createRadialGradient(
+
+    // Rebuild vignette cache when theme changes
+    if (this.vignetteDirty || this.cachedTheme !== world.theme) {
+      const vctx = this.vignetteCtx
+      vctx.clearRect(0, 0, FIELD, FIELD)
+      const gradient = vctx.createRadialGradient(
         FIELD / 2,
         FIELD / 2,
         FIELD * 0.35,
@@ -463,10 +517,12 @@ export class GameRenderer {
       )
       gradient.addColorStop(0, 'rgba(0,0,0,0)')
       gradient.addColorStop(1, world.theme.vignetteColor)
-      this.cachedVignette = gradient
+      vctx.fillStyle = gradient
+      vctx.fillRect(0, 0, FIELD, FIELD)
       this.cachedTheme = world.theme
+      this.vignetteDirty = false
     }
-    ctx.fillStyle = this.cachedVignette
-    ctx.fillRect(0, 0, FIELD, FIELD)
+
+    ctx.drawImage(this.vignetteCanvas, 0, 0, FIELD, FIELD)
   }
 }

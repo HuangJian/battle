@@ -64,6 +64,8 @@ export class Game {
     this.input.attach(window)
     // Preload the SVG asset library so sprites are ready for the first frame.
     await spriteLibrary.load()
+    // Pre-rasterize sprites to canvas bitmaps for fast rendering
+    this.presentation.initSpriteCache(spriteLibrary)
     this.running = true
     this.lastTime = performance.now()
     this.loop(this.lastTime)

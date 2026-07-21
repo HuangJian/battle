@@ -8,7 +8,7 @@ import { SPRITE_URLS } from '../../assets/sprites/index'
  * errored, so the game can safely `await` it before the first frame.
  */
 export class SpriteLibrary {
-  private images = new Map<string, HTMLImageElement>()
+  private images = new Map<string, CanvasImageSource>()
   private _ready = false
 
   get ready(): boolean {
@@ -21,6 +21,29 @@ export class SpriteLibrary {
       Object.entries(SPRITE_URLS).map(([key, url]) => this.loadOne(key, url)),
     )
     this._ready = true
+  }
+
+  /**
+   * Load sprites from a URL map using fetch + createImageBitmap.
+   * Works in Web Workers where HTMLImageElement is not available.
+   */
+  async loadFromUrls(urls: Record<string, string>): Promise<void> {
+    if (this._ready) return
+    await Promise.all(
+      Object.entries(urls).map(([key, url]) => this.loadOneFromUrl(key, url)),
+    )
+    this._ready = true
+  }
+
+  private async loadOneFromUrl(key: string, url: string): Promise<void> {
+    try {
+      const response = await fetch(url)
+      const blob = await response.blob()
+      const bitmap = await createImageBitmap(blob)
+      this.images.set(key, bitmap)
+    } catch {
+      console.warn(`[SpriteLibrary] failed to load sprite: ${key}`)
+    }
   }
 
   private loadOne(key: string, url: string): Promise<void> {
@@ -40,10 +63,15 @@ export class SpriteLibrary {
   }
 
   /** Returns the loaded image, or undefined if not yet available. */
-  get(key: string): HTMLImageElement | undefined {
+  get(key: string): CanvasImageSource | undefined {
     const img = this.images.get(key)
-    if (img && img.complete && img.naturalWidth > 0) return img
-    return undefined
+    if (!img) return undefined
+    // HTMLImageElement needs a readiness check; ImageBitmap is always ready
+    if ('complete' in img) {
+      const htmlImg = img as HTMLImageElement
+      if (!htmlImg.complete || htmlImg.naturalWidth === 0) return undefined
+    }
+    return img
   }
 
   has(key: string): boolean {
