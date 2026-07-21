@@ -1,102 +1,14 @@
-# Battle City Web
+# Battle City Web — MVP
 
-> **A modern, customizable Battle City for the browser.**
+> **The development plan and future expansion directions.**
 >
-> Faithful to the classic. Designed for the future.
+> The creed lives in `MANIFEST.md`. The decisions live in `DECISIONS.md`.
+>
+> This file is the what and the when.
 
 ---
 
-# 1. Vision
-
-Battle City Web is a modern web implementation of the classic Battle City.
-
-The project has two equally important goals:
-
-* Preserve the fast, simple and satisfying gameplay of the original.
-* Build a clean foundation that allows the game to evolve naturally over time.
-
-The first release is intentionally conservative.
-
-It should feel like the Battle City everyone remembers.
-
-Every future feature should be an extension rather than a replacement.
-
-This project is ultimately designed for one purpose:
-
-> Open the browser, play for five minutes, leave with a smile.
-
----
-
-# 2. Design Goals
-
-The project should always prioritize the following goals, in order.
-
-### 1. Fun
-
-Gameplay always comes first.
-
-Everything else exists to support the gameplay.
-
----
-
-### 2. Simplicity
-
-Avoid unnecessary abstraction.
-
-Choose solutions that remain understandable six months later.
-
----
-
-### 3. Extensibility
-
-Adding a new tank, item or game mode should primarily involve adding new modules or configuration rather than modifying existing systems.
-
----
-
-### 4. Maintainability
-
-The project should remain enjoyable to maintain.
-
-Readable code is preferred over clever code.
-
----
-
-### 5. Performance
-
-Stable 60 FPS on modern browsers.
-
-Performance optimization happens only after correctness.
-
----
-
-# 3. Scope
-
-## Phase One
-
-Faithfully reproduce the classic Battle City experience.
-
-Deliver a polished game that people actually enjoy playing.
-
----
-
-## Not Included
-
-The first release intentionally excludes:
-
-* Multiplayer
-* Online services
-* Cloud save
-* Complex map editor
-* Boss battles
-* Procedural generation
-* Tower Defense
-* Extensive modding
-
-These are future capabilities, not MVP requirements.
-
----
-
-# 4. Technical Stack
+# 1. Technical Stack
 
 | Area      | Choice                 |
 | --------- | ---------------------- |
@@ -115,7 +27,7 @@ No heavy game framework is required.
 
 ---
 
-# 5. Architecture
+# 2. Architecture
 
 The project is organized around responsibilities.
 
@@ -143,11 +55,9 @@ Only the Simulation layer is allowed to modify the World.
 
 Everything else observes the World.
 
-This separation is the most important architectural rule in the project.
-
 ---
 
-# 6. World Model
+# 3. World Model
 
 The World represents the complete runtime state.
 
@@ -165,7 +75,7 @@ There should be no hidden gameplay state outside the World.
 
 ---
 
-# 7. Core Systems
+# 4. Core Systems
 
 The engine consists of small, focused systems.
 
@@ -186,7 +96,7 @@ Each system has one responsibility.
 
 ---
 
-# 8. Gameplay
+# 5. Gameplay
 
 ## Player
 
@@ -238,7 +148,7 @@ Future power-ups should plug into the same item system.
 
 ---
 
-# 9. User Experience
+# 6. User Experience
 
 The game should start immediately.
 
@@ -264,7 +174,7 @@ Minimal configuration.
 
 ---
 
-### Controls
+## Controls
 
 Desktop
 
@@ -281,7 +191,7 @@ Mobile
 
 ---
 
-# 10. Customization
+# 7. Customization
 
 Customization is a first-class feature.
 
@@ -334,7 +244,7 @@ Examples:
 
 ---
 
-# 11. Resource System
+# 8. Resource System
 
 All gameplay content should come from external resources whenever practical.
 
@@ -366,7 +276,7 @@ Adding content should not require modifying engine code.
 
 ---
 
-# 12. Development Milestones
+# 9. Development Milestones
 
 ## Milestone 1
 
@@ -418,7 +328,7 @@ A game ready for daily play.
 
 ---
 
-# 13. Definition of Done
+# 10. Definition of Done
 
 A feature is complete only if:
 
@@ -432,7 +342,7 @@ A feature is complete only if:
 
 ---
 
-# 14. Future Evolution
+# 11. Future Evolution
 
 Phase One should deliberately leave room for future expansion.
 
@@ -573,7 +483,7 @@ The initial JSON-based resource structure should be designed with this evolution
 
 ---
 
-# 15. Capability Matrix
+# 12. Capability Matrix
 
 | Capability        | Phase One          | Future Evolution         |
 | ----------------- | ------------------ | ------------------------ |
@@ -588,21 +498,3 @@ The initial JSON-based resource structure should be designed with this evolution
 | Modifiers         | Framework ready    | Challenge modes          |
 | Game Modes        | Classic            | Endless / TD / Boss Rush |
 | Community Content | Resource-ready     | Mods & custom campaigns  |
-
----
-
-# 16. Long-Term Direction
-
-This project is intentionally small.
-
-It is not trying to become a full-featured game engine.
-
-Instead, it aims to become an exceptionally polished implementation of one timeless game.
-
-Every future improvement should satisfy three conditions:
-
-* It makes the game more enjoyable.
-* It keeps the architecture simple.
-* It respects the spirit of the original.
-
-If a feature increases complexity without noticeably improving the player experience, it does not belong in this project.
