@@ -292,8 +292,8 @@ export class PresentationLayer {
     this.camera.update(dt)
     this.effects.update(dt)
 
-    // Apply theme to UI
-    this.ui.applyTheme(world.theme)
+    // Apply theme to UI — only when the theme key changes (avoids 16 CSS var writes/frame)
+    this.ui.applyThemeIfChanged(world.theme, world.themeKey)
 
     // Render game world
     this.renderer.render(world)

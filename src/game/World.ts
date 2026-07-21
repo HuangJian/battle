@@ -79,6 +79,9 @@ export class World {
   // Events (consumed by renderer/audio/stats)
   events: GameEvent[]
 
+  // Reusable buffer for allTanks getter — avoids allocating a new array each call
+  private _allTanksBuf: Tank[] = []
+
   // Animation frame counter
   frame: number
 
@@ -243,21 +246,48 @@ export class World {
   }
 
   removeDeadEntities(): void {
-    this.tanks = this.tanks.filter((t) => t.alive)
-    this.bullets = this.bullets.filter((b) => b.alive)
-    this.powerUps = this.powerUps.filter((p) => p.alive)
-    this.explosions = this.explosions.filter((e) => e.timer > 0)
-    this.popups = this.popups.filter((p) => p.timer > 0)
+    // In-place compaction — avoids creating 5 new arrays every tick
+    this.compact(this.tanks, (t) => t.alive)
+    this.compact(this.bullets, (b) => b.alive)
+    this.compact(this.powerUps, (p) => p.alive)
+    this.compact(this.explosions, (e) => e.timer > 0)
+    this.compact(this.popups, (p) => p.timer > 0)
+  }
+
+  /** Remove elements that don't match the predicate, in-place (swap-and-pop). */
+  private compact<T>(arr: T[], predicate: (item: T) => boolean): void {
+    let w = 0
+    for (let r = 0; r < arr.length; r++) {
+      if (predicate(arr[r])) {
+        arr[w++] = arr[r]
+      }
+    }
+    arr.length = w
   }
 
   // ---- Queries ----
 
   get allTanks(): Tank[] {
-    return this.player ? [this.player, ...this.tanks] : this.tanks
+    if (this.player) {
+      // Reuse buffer — avoids creating a new array every call (called ~10×/tick)
+      this._allTanksBuf[0] = this.player
+      const tanks = this.tanks
+      for (let i = 0; i < tanks.length; i++) {
+        this._allTanksBuf[i + 1] = tanks[i]
+      }
+      this._allTanksBuf.length = tanks.length + 1
+      return this._allTanksBuf
+    }
+    return this.tanks
   }
 
   get enemyCount(): number {
-    return this.tanks.filter((t) => t.spawnTimer <= 0).length
+    let count = 0
+    const tanks = this.tanks
+    for (let i = 0; i < tanks.length; i++) {
+      if (tanks[i].spawnTimer <= 0) count++
+    }
+    return count
   }
 
   get totalEnemiesLeft(): number {

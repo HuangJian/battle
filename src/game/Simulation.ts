@@ -5,7 +5,6 @@ import {
   CELL,
   TANK,
   BULLET,
-  GRID,
   FIELD,
   MAX_ENEMIES_ALIVE,
   FIRE_COOLDOWN,
@@ -425,14 +424,9 @@ export class Simulation {
         if (type === 'empty') continue
 
         if (type === 'base') {
-          // Destroy ALL base cells — any hit ends the game
-          for (let br = 0; br < GRID; br++) {
-            for (let bc = 0; bc < GRID; bc++) {
-              if (w.tileMap.get(bc, br) === 'base') {
-                w.tileMap.destroy(bc, br)
-              }
-            }
-          }
+          // Destroy ALL base cells at once — any hit ends the game
+          // Use cached base cell positions (O(4)) instead of scanning the entire grid (O(676))
+          w.tileMap.destroyAllBaseCells()
           hit = true
           this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'big')
           w.pushEvent({ type: 'base_destroyed' })

@@ -127,6 +127,9 @@ function restoreWorld(world: World, snap: WorldSnapshot): void {
       world.tileMap.grid[r][c] = snap.tileGrid[r][c]
     }
   }
+  // Rebuild cached base state and mark terrain dirty for renderer
+  world.tileMap.rebuildBaseCache()
+  world.tileMap.dirty = true
 
   // Entities — clone from snapshot so the snapshot stays pristine
   world.player = snap.player ? cloneTank(snap.player) : null

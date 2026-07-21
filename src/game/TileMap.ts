@@ -11,6 +11,16 @@ export class TileMap {
   /** grid[row][col] — terrain type per sub-block */
   grid: TerrainType[][]
 
+  /** Set to true when terrain changes; renderer checks this to invalidate its cache. */
+  dirty = true
+
+  /** Cached positions of all base cells (usually 4 cells at rows 24-25, cols 12-13). */
+  private baseCells: Array<{ c: number; r: number }> = []
+  /** Cached base position in pixels (first base cell found). */
+  private basePos: { x: number; y: number } | null = null
+  /** Whether any base cell is still intact. */
+  private baseAlive = false
+
   constructor() {
     this.grid = []
     for (let r = 0; r < GRID; r++) {
@@ -33,6 +43,9 @@ export class TileMap {
         this.grid[r][c] = this.charToTerrain(ch)
       }
     }
+
+    this.rebuildBaseCache()
+    this.dirty = true
   }
 
   private charToTerrain(ch: string): TerrainType {
@@ -68,7 +81,46 @@ export class TileMap {
   /** Destroy a single sub-block (set to empty) */
   destroy(col: number, row: number): void {
     if (col >= 0 && col < GRID && row >= 0 && row < GRID) {
+      const type = this.grid[row][col]
       this.grid[row][col] = 'empty'
+      if (type === 'base') {
+        // Check if any cached base cells remain intact (O(4) instead of O(676))
+        this.baseAlive = false
+        for (const cell of this.baseCells) {
+          if (this.grid[cell.r][cell.c] === 'base') {
+            this.baseAlive = true
+            break
+          }
+        }
+      }
+      this.dirty = true
+    }
+  }
+
+  /** Destroy all base cells at once (when any base cell is hit). O(4) instead of O(676). */
+  destroyAllBaseCells(): void {
+    for (const cell of this.baseCells) {
+      this.grid[cell.r][cell.c] = 'empty'
+    }
+    this.baseAlive = false
+    this.dirty = true
+  }
+
+  /** Rebuild cached base state from the grid. Called after loadStage and snapshot restore. */
+  rebuildBaseCache(): void {
+    this.baseCells = []
+    this.basePos = null
+    this.baseAlive = false
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (this.grid[r][c] === 'base') {
+          this.baseAlive = true
+          this.baseCells.push({ c, r })
+          if (!this.basePos) {
+            this.basePos = { x: c * CELL, y: r * CELL }
+          }
+        }
+      }
     }
   }
 
@@ -97,25 +149,13 @@ export class TileMap {
     return Math.floor(px / CELL)
   }
 
-  /** Check if the base is destroyed */
+  /** Check if the base is destroyed — O(1) via cached state */
   isBaseDestroyed(): boolean {
-    for (let r = 0; r < GRID; r++) {
-      for (let c = 0; c < GRID; c++) {
-        if (this.grid[r][c] === 'base') return false
-      }
-    }
-    return true
+    return !this.baseAlive
   }
 
-  /** Find base position in pixels */
+  /** Find base position in pixels — O(1) via cached state */
   getBasePos(): { x: number; y: number } | null {
-    for (let r = 0; r < GRID; r++) {
-      for (let c = 0; c < GRID; c++) {
-        if (this.grid[r][c] === 'base') {
-          return { x: c * CELL, y: r * CELL }
-        }
-      }
-    }
-    return null
+    return this.basePos
   }
 }

@@ -31,6 +31,30 @@ export class UIManager {
   private currentScreen = 'menu'
   private animatedScore = 0
   private displayScore = 0
+  private lastThemeKey = ''
+
+  // Cached DOM elements for menu (avoid querySelectorAll every frame)
+  private menuDiffOptions: HTMLElement[] = []
+  private menuThemeOptions: HTMLElement[] = []
+  private menuRows: HTMLElement[] = []
+  private menuStageValue: HTMLElement | null = null
+  private menuStageName: HTMLElement | null = null
+  private menuHiScore: HTMLElement | null = null
+  private stageClearName: HTMLElement | null = null
+  private victoryScoreEl: HTMLElement | null = null
+  private recoveryCountdownNum: HTMLElement | null = null
+
+  // Last HUD values (avoid unnecessary textContent writes)
+  private lastScore = -1
+  private lastHiScore = -1
+  private lastStage = -1
+  private lastEnemies = -1
+  private lastLives = -1
+  private lastMenuCursor = -1
+  private lastDifficultyKey = ''
+  private lastThemeKeyMenu = ''
+  private lastSelectedStage = -1
+  private lastHighScoreMenu = -1
 
   constructor(root: HTMLElement) {
     this.root = root
@@ -152,6 +176,21 @@ export class UIManager {
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
 
+    // Cache menu DOM elements (avoid querySelectorAll every frame)
+    this.menuDiffOptions = Array.from(
+      this.menuScreen.querySelectorAll('[data-difficulty="options"] .menu-option'),
+    ) as HTMLElement[]
+    this.menuThemeOptions = Array.from(
+      this.menuScreen.querySelectorAll('[data-theme="options"] .menu-option'),
+    ) as HTMLElement[]
+    this.menuRows = Array.from(this.menuScreen.querySelectorAll('.menu-row')) as HTMLElement[]
+    this.menuStageValue = this.menuScreen.querySelector('[data-stage="value"]')
+    this.menuStageName = this.menuScreen.querySelector('[data-stage="name"]')
+    this.menuHiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
+    this.stageClearName = this.stageClearScreen.querySelector('[data-stage="name"]')
+    this.victoryScoreEl = this.victoryScreen.querySelector('[data-victory="score"]')
+    this.recoveryCountdownNum = this.recoveryScreen.querySelector('[data-recovery="countdown-number"]')
+
     this.showScreen('menu')
   }
 
@@ -225,8 +264,15 @@ export class UIManager {
     return screen
   }
 
+  /** Apply theme colors as CSS variables — only when theme key changes */
+  applyThemeIfChanged(colors: ThemeColors, themeKey: string): void {
+    if (themeKey === this.lastThemeKey) return
+    this.lastThemeKey = themeKey
+    this.applyTheme(colors)
+  }
+
   /** Apply theme colors as CSS variables */
-  applyTheme(colors: ThemeColors): void {
+  private applyTheme(colors: ThemeColors): void {
     const root = document.documentElement
     const vars: Record<string, string> = {
       '--theme-bg': colors.bgGradient
@@ -307,90 +353,104 @@ export class UIManager {
       }
     }
 
-    // HUD
-    this.hudScore.textContent = String(Math.round(this.displayScore)).padStart(6, '0')
-    this.hudHiScore.textContent = String(world.highScore).padStart(6, '0')
-    this.hudStage.textContent = String(world.stageIndex + 1).padStart(2, '0')
-    this.hudEnemies.textContent = String(world.enemiesRemaining)
+    // HUD — only write to DOM when values actually change
+    const scoreVal = Math.round(this.displayScore)
+    if (scoreVal !== this.lastScore) {
+      this.hudScore.textContent = String(scoreVal).padStart(6, '0')
+      this.lastScore = scoreVal
+    }
+    if (world.highScore !== this.lastHiScore) {
+      this.hudHiScore.textContent = String(world.highScore).padStart(6, '0')
+      this.lastHiScore = world.highScore
+    }
+    if (world.stageIndex !== this.lastStage) {
+      this.hudStage.textContent = String(world.stageIndex + 1).padStart(2, '0')
+      this.lastStage = world.stageIndex
+    }
+    if (world.enemiesRemaining !== this.lastEnemies) {
+      this.hudEnemies.textContent = String(world.enemiesRemaining)
+      this.lastEnemies = world.enemiesRemaining
+    }
+    if (world.lives !== this.lastLives) {
+      const hearts = '♥'.repeat(Math.max(0, world.lives))
+      this.hudLives.textContent = hearts || '—'
+      this.lastLives = world.lives
+    }
 
-    // Lives as hearts
-    const hearts = '♥'.repeat(Math.max(0, world.lives))
-    this.hudLives.textContent = hearts || '—'
-
-    // Menu state
-    this.updateMenu(world)
+    // Menu state — only update when in menu
+    if (world.state === 'menu') {
+      this.updateMenu(world)
+    }
 
     // Stage clear
-    const stageName = this.stageClearScreen.querySelector('[data-stage="name"]')
-    if (stageName) {
-      stageName.textContent = `Stage ${world.stageIndex + 1}: ${world.currentStageName} Complete`
+    if (this.stageClearName) {
+      this.stageClearName.textContent = `Stage ${world.stageIndex + 1}: ${world.currentStageName} Complete`
     }
 
     // Victory
-    const victoryScore = this.victoryScreen.querySelector('[data-victory="score"]')
-    if (victoryScore) {
-      victoryScore.textContent = String(world.score)
+    if (this.victoryScoreEl) {
+      this.victoryScoreEl.textContent = String(world.score)
     }
 
     // Recovery screen
-    this.updateRecovery(world)
+    if (world.state === 'recovery') {
+      this.updateRecovery(world)
+    }
 
     // Show correct screen
     this.showScreen(world.state)
   }
 
   private updateMenu(world: World): void {
-    // Highlight selected difficulty
-    const diffOptions = this.menuScreen.querySelectorAll('[data-difficulty="options"] .menu-option')
-    diffOptions.forEach((el) => {
-      const opt = el as HTMLElement
-      if (opt.dataset.value === world.difficultyKey) {
-        opt.classList.add('selected')
-      } else {
-        opt.classList.remove('selected')
+    // Highlight selected difficulty — only when changed
+    if (world.difficultyKey !== this.lastDifficultyKey) {
+      this.lastDifficultyKey = world.difficultyKey
+      for (const opt of this.menuDiffOptions) {
+        opt.classList.toggle('selected', opt.dataset.value === world.difficultyKey)
       }
-    })
-
-    // Highlight selected theme
-    const themeOptions = this.menuScreen.querySelectorAll('[data-theme="options"] .menu-option')
-    themeOptions.forEach((el) => {
-      const opt = el as HTMLElement
-      if (opt.dataset.value === world.themeKey) {
-        opt.classList.add('selected')
-      } else {
-        opt.classList.remove('selected')
-      }
-    })
-
-    // Highlight selected menu row (cursor)
-    const menuRows = this.menuScreen.querySelectorAll('.menu-row')
-    menuRows.forEach((el) => {
-      const row = el as HTMLElement
-      const idx =
-        row.dataset.menu === 'difficulty'
-          ? 0
-          : row.dataset.menu === 'theme'
-            ? 1
-            : row.dataset.menu === 'stage'
-              ? 2
-              : -1
-      row.classList.toggle('selected', idx === world.menuCursor)
-    })
-
-    // Stage selector display
-    const stageValue = this.menuScreen.querySelector('[data-stage="value"]')
-    if (stageValue) {
-      stageValue.textContent = `${String(world.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
-    }
-    const stageName = this.menuScreen.querySelector('[data-stage="name"]')
-    if (stageName) {
-      stageName.textContent = STAGES[world.selectedStage]?.name ?? ''
     }
 
-    // High score
-    const hiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
-    if (hiScore) {
-      hiScore.textContent = String(world.highScore)
+    // Highlight selected theme — only when changed
+    if (world.themeKey !== this.lastThemeKeyMenu) {
+      this.lastThemeKeyMenu = world.themeKey
+      for (const opt of this.menuThemeOptions) {
+        opt.classList.toggle('selected', opt.dataset.value === world.themeKey)
+      }
+    }
+
+    // Highlight selected menu row (cursor) — only when changed
+    if (world.menuCursor !== this.lastMenuCursor) {
+      this.lastMenuCursor = world.menuCursor
+      for (const row of this.menuRows) {
+        const idx =
+          row.dataset.menu === 'difficulty'
+            ? 0
+            : row.dataset.menu === 'theme'
+              ? 1
+              : row.dataset.menu === 'stage'
+                ? 2
+                : -1
+        row.classList.toggle('selected', idx === world.menuCursor)
+      }
+    }
+
+    // Stage selector display — only when changed
+    if (world.selectedStage !== this.lastSelectedStage) {
+      this.lastSelectedStage = world.selectedStage
+      if (this.menuStageValue) {
+        this.menuStageValue.textContent = `${String(world.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
+      }
+      if (this.menuStageName) {
+        this.menuStageName.textContent = STAGES[world.selectedStage]?.name ?? ''
+      }
+    }
+
+    // High score — only when changed
+    if (world.highScore !== this.lastHighScoreMenu) {
+      this.lastHighScoreMenu = world.highScore
+      if (this.menuHiScore) {
+        this.menuHiScore.textContent = String(world.highScore)
+      }
     }
   }
 
@@ -458,9 +518,8 @@ export class UIManager {
 
     // Show countdown number
     if (isCountdown) {
-      const numEl = this.recoveryScreen.querySelector('[data-recovery="countdown-number"]')
-      if (numEl) {
-        numEl.textContent = String(world.recoveryCountdown)
+      if (this.recoveryCountdownNum) {
+        this.recoveryCountdownNum.textContent = String(world.recoveryCountdown)
       }
       return
     }

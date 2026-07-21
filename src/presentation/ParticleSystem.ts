@@ -7,12 +7,17 @@ const POOL_SIZE = 500
  * Pre-allocates particles and reuses them.
  */
 export class ParticleSystem {
-  private pool: Particle[] = []
-  private activeCount = 0
+  /** Pool of pre-allocated particles (public for direct iteration by renderer). */
+  pool: Particle[] = []
+  /** Number of potentially-active particles at the front of the pool. */
+  activeCount = 0
+  /** Free-list (stack of indices) for O(1) particle allocation. */
+  private freeList: number[] = []
 
   constructor() {
     for (let i = 0; i < POOL_SIZE; i++) {
       this.pool.push(this.createParticle())
+      this.freeList.push(i)
     }
   }
 
@@ -68,18 +73,19 @@ export class ParticleSystem {
   }
 
   private getFreeParticle(): Particle | null {
-    for (let i = 0; i < POOL_SIZE; i++) {
-      if (!this.pool[i].active) {
-        this.activeCount = Math.max(this.activeCount, i + 1)
-        return this.pool[i]
-      }
-    }
-    return null
+    // O(1) pop from free-list instead of O(n) linear scan
+    const idx = this.freeList.pop()
+    if (idx === undefined) return null
+    if (idx >= this.activeCount) this.activeCount = idx + 1
+    return this.pool[idx]
   }
 
   /** Update all active particles */
   update(dt: number): void {
     const dts = dt / 16.67 // normalize to 60fps units
+    // At 60fps dts≈1 so Math.pow(x,1)===x — skip the expensive call
+    const simpleDrag = Math.abs(dts - 1) < 0.01
+    let maxActive = 0
     for (let i = 0; i < this.activeCount; i++) {
       const p = this.pool[i]
       if (!p.active) continue
@@ -87,27 +93,26 @@ export class ParticleSystem {
       p.life -= dt
       if (p.life <= 0) {
         p.active = false
+        this.freeList.push(i)
         continue
       }
 
-      p.vx *= Math.pow(p.drag, dts)
-      p.vy *= Math.pow(p.drag, dts)
+      if (simpleDrag) {
+        p.vx *= p.drag
+        p.vy *= p.drag
+      } else {
+        const f = Math.pow(p.drag, dts)
+        p.vx *= f
+        p.vy *= f
+      }
       p.vy += p.gravity * dts
       p.x += p.vx * dts
       p.y += p.vy * dts
       p.rotation += p.rotSpeed * dts
+      maxActive = i + 1
     }
-  }
-
-  /** Get all active particles for rendering */
-  getActiveParticles(): Particle[] {
-    const result: Particle[] = []
-    for (let i = 0; i < this.activeCount; i++) {
-      if (this.pool[i].active) {
-        result.push(this.pool[i])
-      }
-    }
-    return result
+    // Shrink activeCount so the update loop doesn't grow unbounded
+    this.activeCount = maxActive
   }
 
   /** Clear all particles */
@@ -116,5 +121,9 @@ export class ParticleSystem {
       p.active = false
     }
     this.activeCount = 0
+    this.freeList.length = 0
+    for (let i = 0; i < POOL_SIZE; i++) {
+      this.freeList.push(i)
+    }
   }
 }
