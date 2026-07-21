@@ -18,11 +18,7 @@ export interface OffscreenCanvasResult {
  * The canvas is suitable for caching rendered content (terrain, sprites, etc.)
  * and can be passed to `ctx.drawImage()` as a source.
  */
-export function createOffscreenCanvas(
-  w: number,
-  h: number,
-  scale?: number,
-): OffscreenCanvasResult {
+export function createOffscreenCanvas(w: number, h: number, scale?: number): OffscreenCanvasResult {
   let canvas: any
   if (typeof OffscreenCanvas !== 'undefined') {
     canvas = new OffscreenCanvas(w, h)

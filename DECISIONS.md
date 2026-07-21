@@ -258,3 +258,39 @@ codec that decodes each 13×13 numeric level into the engine's native 26×26 cha
 - HTML overlays can use modern typography and layout
 - Keeps canvas focused on game rendering
 - Transitions are declarative (CSS classes) not imperative (JS animation)
+
+---
+
+## Determinism & Input Fixes
+
+### 19. Simulation RNG: Migrate Math.random() to world.rng
+
+**Decision:** All entropy inside `Simulation` flows through `world.rng` (`src/utils/RNG.ts`). Specifically, `updateEnemyAI()` now uses `w.rng.next()`, `w.rng.pick(ALL_DIRS)`, and `w.rng.next() * N` for think/fire timers; `spawnPowerUp()` now uses `w.rng.pick(types)` and `w.rng.int(12)` for placement. `Math.random()` is no longer called anywhere in `src/game/`.
+
+**Rationale:**
+- AGENTS.md §2.3 promises "Same inputs + same RNG state + same World ⇒ identical replay, always." `Math.random()`'s state is not captured by `WorldSnapshot`/`world.rng.getState()`, so any call inside `Simulation` is a determinism leak that breaks replays and `RecoverySystem` rewinds.
+- `RNG` already exposes `next()`, `int(max)`, and `pick<T>(arr)` — no new RNG API was needed.
+- Presentation code (`Camera`, `ParticleSystem`, `AudioManager`) still uses `Math.random()`, which AGENTS.md §5 explicitly permits because that entropy never feeds back into the World.
+
+**Implications:**
+- A rewound World (via `RecoverySystem`) now reproduces the exact same future it produced the first time, because `world.rng` state is part of the snapshot and `Math.random()` no longer contributes.
+- Existing AI distributions are unchanged (same weights, same ranges) — only the source of randomness moved.
+- Test coverage: `tests/simulation.test.ts` runs the same seeded simulation twice while perturbing `Math.random()` between runs; before the fix this diverged, after it matches.
+
+---
+
+### 20. Input Movement Priority: Last Pressed Wins
+
+**Decision:** `Input.getMoveDirection()` resolves held movement keys by "last pressed wins" instead of the previous fixed order (up → down → left → right). A press-ordered `moveStack: string[]` is maintained — `onKeyDown` pushes a movement key when first pressed, `onKeyUp` removes it, and `getMoveDirection()` walks the stack from most-recent to oldest, returning the direction of the first still-held entry.
+
+**Rationale:**
+- The old code comment explicitly said "Priority: last pressed wins — but for simplicity, check in order", acknowledging the debt. Players who roll from one direction to another (e.g. up → right while still holding up) expect the newer direction to take precedence, matching classic Battle City feel and every modern twin-stick/top-down shooter.
+- The fixed-order check made the up direction "sticky": holding up and pressing right kept the tank moving up, which felt broken.
+- A stack is the minimal data structure that encodes press order with O(1) push and O(n) (n ≤ 4) remove; given the at-most-four movement keys, this is effectively O(1).
+- `moveStack` is keyed off `onKeyDown`/`onKeyUp` (not `endFrame`), so it survives the per-frame `endFrame()` clear that governs edge-detection state (DECISIONS §8) — held keys persist correctly across frames.
+- A defensive prune in `getMoveDirection()` handles stale entries if a keyup was missed (e.g. window blur), keeping the stack from growing unbounded.
+
+**Implications:**
+- No change to menu navigation, which uses `wasPressed()` edge detection (DECISIONS §8) rather than `getMoveDirection()`.
+- No change to custom key bindings — `moveDirFor()` consults `this.keys`, so WASD layouts work identically.
+- Test coverage: `tests/input.test.ts` pins down press-order, fallback-on-release, auto-repeat dedup, non-movement-key filtering, custom bindings, and cross-frame persistence.

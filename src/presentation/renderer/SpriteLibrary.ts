@@ -17,9 +17,7 @@ export class SpriteLibrary {
 
   async load(): Promise<void> {
     if (this._ready) return
-    await Promise.all(
-      Object.entries(SPRITE_URLS).map(([key, url]) => this.loadOne(key, url)),
-    )
+    await Promise.all(Object.entries(SPRITE_URLS).map(([key, url]) => this.loadOne(key, url)))
     this._ready = true
   }
 
@@ -29,9 +27,7 @@ export class SpriteLibrary {
    */
   async loadFromUrls(urls: Record<string, string>): Promise<void> {
     if (this._ready) return
-    await Promise.all(
-      Object.entries(urls).map(([key, url]) => this.loadOneFromUrl(key, url)),
-    )
+    await Promise.all(Object.entries(urls).map(([key, url]) => this.loadOneFromUrl(key, url)))
     this._ready = true
   }
 

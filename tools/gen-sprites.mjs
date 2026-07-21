@@ -50,12 +50,54 @@ function angrEye(cx, cy, color = '#fff') {
 
 // ---------- palette ----------
 const P = {
-  p1: { bodyA: '#FBE08A', bodyB: '#F4C430', bodyC: '#D9A91E', tread: '#2b2b2b', turret: '#E8B84B', turretDk: '#B9871C' },
-  p2: { bodyA: '#BFE0FF', bodyB: '#3D9BF5', bodyC: '#2C6FB8', tread: '#22303f', turret: '#5BA8F0', turretDk: '#21508F' },
-  basic: { bodyA: '#F2776A', bodyB: '#E23B2C', bodyC: '#A8281C', tread: '#2b2b2b', turret: '#C73023', turretDk: '#7E1C14' },
-  fast: { bodyA: '#BDEEF5', bodyB: '#22C3DC', bodyC: '#148A9C', tread: '#103a44', turret: '#3FD0E6', turretDk: '#0E6E7E' },
-  power: { bodyA: '#C4B0F8', bodyB: '#8B5CF6', bodyC: '#5B34B0', tread: '#2a2140', turret: '#A07CF8', turretDk: '#46278F' },
-  armor: { bodyA: '#C9D2DA', bodyB: '#9AA3AD', bodyC: '#6B7480', tread: '#3a3f47', turret: '#AEB7C0', turretDk: '#5b636e' },
+  p1: {
+    bodyA: '#FBE08A',
+    bodyB: '#F4C430',
+    bodyC: '#D9A91E',
+    tread: '#2b2b2b',
+    turret: '#E8B84B',
+    turretDk: '#B9871C',
+  },
+  p2: {
+    bodyA: '#BFE0FF',
+    bodyB: '#3D9BF5',
+    bodyC: '#2C6FB8',
+    tread: '#22303f',
+    turret: '#5BA8F0',
+    turretDk: '#21508F',
+  },
+  basic: {
+    bodyA: '#F2776A',
+    bodyB: '#E23B2C',
+    bodyC: '#A8281C',
+    tread: '#2b2b2b',
+    turret: '#C73023',
+    turretDk: '#7E1C14',
+  },
+  fast: {
+    bodyA: '#BDEEF5',
+    bodyB: '#22C3DC',
+    bodyC: '#148A9C',
+    tread: '#103a44',
+    turret: '#3FD0E6',
+    turretDk: '#0E6E7E',
+  },
+  power: {
+    bodyA: '#C4B0F8',
+    bodyB: '#8B5CF6',
+    bodyC: '#5B34B0',
+    tread: '#2a2140',
+    turret: '#A07CF8',
+    turretDk: '#46278F',
+  },
+  armor: {
+    bodyA: '#C9D2DA',
+    bodyB: '#9AA3AD',
+    bodyC: '#6B7480',
+    tread: '#3a3f47',
+    turret: '#AEB7C0',
+    turretDk: '#5b636e',
+  },
 }
 
 function tankDefs(id, p) {
@@ -159,14 +201,18 @@ function powerEnemy() {
 function armorEnemy() {
   const id = 'a'
   const p = P.armor
-  const rivet = (cx, cy) => `<circle cx="${cx}" cy="${cy}" r="2.4" fill="#5b636e"/><circle cx="${cx - 0.7}" cy="${cy - 0.7}" r="0.9" fill="#dfe6ec"/>`
+  const rivet = (cx, cy) =>
+    `<circle cx="${cx}" cy="${cy}" r="2.4" fill="#5b636e"/><circle cx="${cx - 0.7}" cy="${cy - 0.7}" r="0.9" fill="#dfe6ec"/>`
   const center =
     // glowing yellow eyes
     `<ellipse cx="42" cy="46" rx="5" ry="6" fill="#FFD23F"/>` +
     `<ellipse cx="54" cy="46" rx="5" ry="6" fill="#FFD23F"/>` +
     `<circle cx="42" cy="46" r="2.2" fill="#7a5200"/>` +
     `<circle cx="54" cy="46" r="2.2" fill="#7a5200"/>` +
-    rivet(34, 34) + rivet(62, 34) + rivet(34, 64) + rivet(62, 64)
+    rivet(34, 34) +
+    rivet(62, 34) +
+    rivet(34, 64) +
+    rivet(62, 64)
   const inner =
     shadow() +
     treads() +
@@ -201,8 +247,7 @@ function baseSprite() {
 
 // ---------- bullet ----------
 function bulletSprite() {
-  const defs =
-    `<radialGradient id="bcore" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff"/><stop offset="0.6" stop-color="#FFE060"/><stop offset="1" stop-color="#FFB020"/></radialGradient>`
+  const defs = `<radialGradient id="bcore" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff"/><stop offset="0.6" stop-color="#FFE060"/><stop offset="1" stop-color="#FFB020"/></radialGradient>`
   const inner =
     `<ellipse cx="48" cy="48" rx="9" ry="14" fill="#FFE060" opacity="0.35"/>` +
     `<ellipse cx="48" cy="48" rx="5.5" ry="11" fill="url(#bcore)"/>`
@@ -211,8 +256,7 @@ function bulletSprite() {
 
 // ---------- terrain (tileable) ----------
 function brickSprite() {
-  const defs =
-    `<linearGradient id="bk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F2A088"/><stop offset="1" stop-color="#E07A5F"/></linearGradient>`
+  const defs = `<linearGradient id="bk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F2A088"/><stop offset="1" stop-color="#E07A5F"/></linearGradient>`
   let s = `<rect width="96" height="96" fill="#D8C3A8"/>` // mortar
   const bh = 24
   const bw = 48
@@ -254,8 +298,7 @@ function steelSprite() {
 }
 
 function waterSprite() {
-  const defs =
-    `<linearGradient id="wt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4FA8E0"/><stop offset="1" stop-color="#2E6FB0"/></linearGradient>`
+  const defs = `<linearGradient id="wt" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4FA8E0"/><stop offset="1" stop-color="#2E6FB0"/></linearGradient>`
   let s = `<rect width="96" height="96" fill="url(#wt)"/>`
   for (let row = 0; row < 4; row++) {
     const y = 8 + row * 24
@@ -351,7 +394,10 @@ function explosionSprite() {
     const y2 = 48 + Math.sin(a) * 44
     spikes += `<line x1="${f(x1)}" y1="${f(y1)}" x2="${f(x2)}" y2="${f(y2)}" stroke="#FFB020" stroke-width="5" stroke-linecap="round" opacity="0.85"/>`
   }
-  const inner = spikes + `<circle cx="48" cy="48" r="30" fill="url(#ex)"/>` + `<circle cx="48" cy="48" r="14" fill="#fff" opacity="0.9"/>`
+  const inner =
+    spikes +
+    `<circle cx="48" cy="48" r="30" fill="url(#ex)"/>` +
+    `<circle cx="48" cy="48" r="14" fill="#fff" opacity="0.9"/>`
   return { defs, inner }
 }
 
@@ -380,25 +426,32 @@ function starbuf(n) {
 
 function hitStage(stage) {
   // damage overlays centered ~ (48,48); drawn on top of enemy tank
-  const crack = (d, w, op) => `<path d="${d}" stroke="rgba(20,20,20,${op})" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
-  const lightCrack = (d, w) => `<path d="${d}" stroke="rgba(255,255,255,0.5)" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
+  const crack = (d, w, op) =>
+    `<path d="${d}" stroke="rgba(20,20,20,${op})" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
+  const lightCrack = (d, w) =>
+    `<path d="${d}" stroke="rgba(255,255,255,0.5)" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
   let inner = ''
   if (stage === 0) {
     inner = `<circle cx="48" cy="48" r="30" fill="none" stroke="rgba(255,255,255,0.0)"/>`
   } else if (stage === 1) {
     inner =
-      crack('M40 30 L46 44 L40 56', 2.5, 0.6) + lightCrack('M40 30 L46 44 L40 56', 1) +
+      crack('M40 30 L46 44 L40 56', 2.5, 0.6) +
+      lightCrack('M40 30 L46 44 L40 56', 1) +
       crack('M58 34 L52 46 L58 60', 2.5, 0.6)
   } else if (stage === 2) {
     inner =
       `<rect x="30" y="26" width="36" height="46" rx="11" fill="rgba(120,120,120,0.18)"/>` +
-      crack('M40 30 L46 44 L40 56', 2.5, 0.65) + lightCrack('M40 30 L46 44 L40 56', 1) +
-      crack('M58 34 L52 46 L58 60', 2.5, 0.65) + crack('M34 50 L48 54 L62 50', 2, 0.55)
+      crack('M40 30 L46 44 L40 56', 2.5, 0.65) +
+      lightCrack('M40 30 L46 44 L40 56', 1) +
+      crack('M58 34 L52 46 L58 60', 2.5, 0.65) +
+      crack('M34 50 L48 54 L62 50', 2, 0.55)
   } else if (stage === 3) {
     inner =
       `<rect x="30" y="26" width="36" height="46" rx="11" fill="rgba(90,90,90,0.28)"/>` +
-      crack('M40 30 L46 44 L40 56', 3, 0.7) + crack('M58 34 L52 46 L58 60', 3, 0.7) +
-      crack('M34 50 L48 54 L62 50', 2.5, 0.6) + crack('M44 28 L50 40 L44 52', 2, 0.55) +
+      crack('M40 30 L46 44 L40 56', 3, 0.7) +
+      crack('M58 34 L52 46 L58 60', 3, 0.7) +
+      crack('M34 50 L48 54 L62 50', 2.5, 0.6) +
+      crack('M44 28 L50 40 L44 52', 2, 0.55) +
       `<circle cx="34" cy="36" r="6" fill="rgba(80,80,80,0.5)"/>` +
       `<circle cx="62" cy="60" r="5" fill="rgba(80,80,80,0.5)"/>`
   } else {
@@ -406,8 +459,10 @@ function hitStage(stage) {
     inner =
       `<rect x="28" y="24" width="40" height="50" rx="11" fill="rgba(40,30,30,0.5)"/>` +
       `<circle cx="48" cy="48" r="30" fill="rgba(200,40,20,0.18)"/>` +
-      crack('M40 30 L46 44 L40 56', 3, 0.8) + crack('M58 34 L52 46 L58 60', 3, 0.8) +
-      crack('M34 50 L48 54 L62 50', 3, 0.75) + crack('M44 28 L50 40 L44 52', 2.5, 0.7) +
+      crack('M40 30 L46 44 L40 56', 3, 0.8) +
+      crack('M58 34 L52 46 L58 60', 3, 0.8) +
+      crack('M34 50 L48 54 L62 50', 3, 0.75) +
+      crack('M44 28 L50 40 L44 52', 2.5, 0.7) +
       `<g stroke="#FFD23F" stroke-width="2" stroke-linecap="round">` +
       `<path d="M48 18 L48 26 M70 40 L62 44 M26 40 L34 44 M48 74 L48 66"/></g>`
   }
@@ -416,33 +471,33 @@ function hitStage(stage) {
 
 // ---------- assemble ----------
 const files = {
-  'player1': playerTank('p1', P.p1, '#FFE97A'),
-  'player2': playerTank('p2', P.p2, '#E6F7FF'),
-  'enemy_basic': basicEnemy(),
-  'enemy_fast': fastEnemy(),
-  'enemy_power': powerEnemy(),
-  'enemy_armor': armorEnemy(),
-  'base': baseSprite(),
-  'bullet': bulletSprite(),
-  'brick': brickSprite(),
-  'steel': steelSprite(),
-  'water': waterSprite(),
-  'forest': forestSprite(),
-  'ice': iceSprite(),
-  'item_star': itemStar(),
-  'item_bomb': itemBomb(),
-  'item_shield': itemShield(),
-  'item_freeze': itemFreeze(),
-  'explosion': explosionSprite(),
-  'fx_shield': shieldFx(),
-  'fx_starbuf1': starbuf(1),
-  'fx_starbuf2': starbuf(2),
-  'fx_starbuf3': starbuf(3),
-  'fx_hit0': hitStage(0),
-  'fx_hit1': hitStage(1),
-  'fx_hit2': hitStage(2),
-  'fx_hit3': hitStage(3),
-  'fx_hit4': hitStage(4),
+  player1: playerTank('p1', P.p1, '#FFE97A'),
+  player2: playerTank('p2', P.p2, '#E6F7FF'),
+  enemy_basic: basicEnemy(),
+  enemy_fast: fastEnemy(),
+  enemy_power: powerEnemy(),
+  enemy_armor: armorEnemy(),
+  base: baseSprite(),
+  bullet: bulletSprite(),
+  brick: brickSprite(),
+  steel: steelSprite(),
+  water: waterSprite(),
+  forest: forestSprite(),
+  ice: iceSprite(),
+  item_star: itemStar(),
+  item_bomb: itemBomb(),
+  item_shield: itemShield(),
+  item_freeze: itemFreeze(),
+  explosion: explosionSprite(),
+  fx_shield: shieldFx(),
+  fx_starbuf1: starbuf(1),
+  fx_starbuf2: starbuf(2),
+  fx_starbuf3: starbuf(3),
+  fx_hit0: hitStage(0),
+  fx_hit1: hitStage(1),
+  fx_hit2: hitStage(2),
+  fx_hit3: hitStage(3),
+  fx_hit4: hitStage(4),
 }
 
 let count = 0

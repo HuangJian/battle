@@ -189,7 +189,9 @@ export class UIManager {
     this.menuHiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
     this.stageClearName = this.stageClearScreen.querySelector('[data-stage="name"]')
     this.victoryScoreEl = this.victoryScreen.querySelector('[data-victory="score"]')
-    this.recoveryCountdownNum = this.recoveryScreen.querySelector('[data-recovery="countdown-number"]')
+    this.recoveryCountdownNum = this.recoveryScreen.querySelector(
+      '[data-recovery="countdown-number"]',
+    )
 
     this.showScreen('menu')
   }

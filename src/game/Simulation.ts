@@ -201,7 +201,9 @@ export class Simulation {
       if (ai.thinkTimer <= 0) {
         // Choose a new direction
         // 40% chance to aim at base or player, 60% random
-        const r = Math.random()
+        // All entropy flows through world.rng so the simulation stays
+        // deterministic (AGENTS.md §2.3) — never Math.random() here.
+        const r = w.rng.next()
         if (r < 0.3 && w.player) {
           // Move toward player
           ai.currentDir = this.dirToward(tank, w.player.x, w.player.y)
@@ -211,12 +213,12 @@ export class Simulation {
           if (base) {
             ai.currentDir = this.dirToward(tank, base.x, base.y)
           } else {
-            ai.currentDir = ALL_DIRS[Math.floor(Math.random() * 4)]
+            ai.currentDir = w.rng.pick(ALL_DIRS)
           }
         } else {
-          ai.currentDir = ALL_DIRS[Math.floor(Math.random() * 4)]
+          ai.currentDir = w.rng.pick(ALL_DIRS)
         }
-        ai.thinkTimer = 500 + Math.random() * 1500
+        ai.thinkTimer = 500 + w.rng.next() * 1500
         tank.dir = ai.currentDir
         tank.moving = true
       }
@@ -225,7 +227,7 @@ export class Simulation {
       ai.fireTimer -= 1000 / 60
       if (ai.fireTimer <= 0) {
         this.tryFire(tank)
-        ai.fireTimer = 300 + Math.random() * 1200
+        ai.fireTimer = 300 + w.rng.next() * 1200
       }
 
       tank.moving = true
@@ -528,15 +530,15 @@ export class Simulation {
   private spawnPowerUp(): void {
     const w = this.world
     const types: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet']
-    const type = types[Math.floor(Math.random() * types.length)]
+    const type = w.rng.pick(types)
 
-    // Random position (not on walls)
+    // Random position (not on walls) — entropy from world.rng for determinism.
     let x = 0,
       y = 0
     let tries = 0
     do {
-      x = Math.floor(Math.random() * 12) * 2 * CELL
-      y = Math.floor(Math.random() * 12) * 2 * CELL
+      x = w.rng.int(12) * 2 * CELL
+      y = w.rng.int(12) * 2 * CELL
       tries++
     } while (tries < 20 && w.rectHitsTerrain(x, y, TANK, TANK))
 

@@ -1,0 +1,367 @@
+# AGENTS.md — Battle City Web
+
+> **Operating manual for any coding agent working in this repository.**
+>
+> Read this file first. Read it fully. It is the contract between you and the project.
+>
+> The creed lives in `MANIFEST.md`. The decisions live in `DECISIONS.md`. The plans live in `plan/`. This file tells you how to *execute* all three without breaking what makes the game worth building.
+
+---
+
+## 0. The One-Sentence Mission
+
+> Open the browser, play for five minutes, leave with a smile. (MANIFEST §1)
+
+Every change is judged against that moment. If a change does not serve it, the change does not belong here. When you are unsure, this sentence decides.
+
+---
+
+## 1. Read These Before Writing Any Code
+
+In this order, every session:
+
+1. **`MANIFEST.md`** — the creed. Non-negotiable. Section 13 ("The Three Gates") is the final arbiter for every ambiguity.
+2. **`DECISIONS.md`** — the accumulated design decisions. You are extending this list, not contradicting it.
+3. **`plan/mvp.md`** — what the product is and the milestone structure.
+4. **`plan/RecoverySystem.md`** and **`plan/presentation-upgrade.md`** — the active feature plans. Their "Definition of Done" sections are acceptance criteria.
+5. **`docs/presentation-audit.md`** — the current rendering state assessment.
+6. **This file** — your operating contract.
+
+If a plan you are asked to execute contradicts the MANIFEST, the MANIFEST wins. Stop and record the conflict in `DECISIONS.md` before proceeding (see §6).
+
+---
+
+## 2. Architecture Invariants — Non-Negotiable
+
+These come from MANIFEST §3–§8 and are enforced by the codebase structure. Violating any of them is a bug, even if the tests pass.
+
+### 2.1 One Author
+
+```
+Input → Simulation → World → Renderer / Audio / UI / Stats
+```
+
+- **Only `Simulation` may modify the `World`.** (`src/game/Simulation.ts`)
+- Everything else — `Input`, `PresentationLayer`, `AudioManager`, `UIManager`, `RecoverySystem` — **observes** the World read-only.
+- `RecoverySystem` is the single exception: it restores the World from a snapshot, but it does so by overwriting state atomically, never by participating in gameplay rules (RecoverySystem.md §20.1).
+
+### 2.2 No Hidden State
+
+There is no gameplay state outside the `World` object (`src/game/World.ts`). Not in a singleton, not in a module variable, not in a closure. If it affects the game, it lives in the World. If you are tempted to add a module-level mutable variable for gameplay, you are wrong — put it on the World.
+
+### 2.3 Determinism Is a Promise
+
+- Fixed timestep (`TICK_MS = 1000/60`, `src/constants.ts`).
+- All randomness flows through `world.rng` (`src/utils/RNG.ts`). **Never call `Math.random()` inside the Simulation.** `Math.random()` is only acceptable in pure presentation code (particles, visual jitter) that never feeds back into the World.
+- Input is recordable. Same inputs + same RNG state + same World ⇒ identical replay, always.
+
+### 2.4 Data Over Code
+
+Tanks are config (`src/config/tanks.ts`). Stages are config (`src/config/stages.ts` ← `stageData.ts`). Difficulty is config (`src/config/difficulty.ts`). Themes are config (`src/config/theme.ts`).
+
+> Adding a new tank = adding a row, not editing a system. Adding a stage = appending a grid. Adding a theme = swapping presentation data.
+
+If your feature requires hardcoding a new entity behavior into a system, reconsider. The engine executes; it does not hardcode.
+
+### 2.5 Presentation Is Disposable
+
+Particles, camera shake, animation state, screen flashes — **none of it lives in the World.** None of it survives a reset. When the game rewinds (RecoverySystem) or returns to menu, `PresentationLayer.reset()` is called and visual state is rebuilt from the World.
+
+> Same World state. Better presentation. (MANIFEST §8)
+
+### 2.6 Zero-Asset Discipline (Now: SVG)
+
+Sprites are drawn, not shipped as bitmaps. The current pipeline is **SVG assets** (`src/assets/sprites/*.svg`) pre-rasterized into a `SpriteCache` at load time — not PNGs, not a raw `drawImage` path. Audio is synthesized via Web Audio API (`src/audio/AudioManager.ts`). When bitmap assets eventually arrive, they extend the sprite registry; they do not replace it.
+
+### 2.7 The Three Gates (MANIFEST §13)
+
+Every improvement must pass **all three**:
+
+1. It makes the game more enjoyable.
+2. It keeps the architecture simple.
+3. It respects the spirit of the original.
+
+Two out of three is not enough. If a feature adds complexity without noticeably improving the player's five minutes, reject it.
+
+---
+
+## 3. Repository Map
+
+```
+src/
+  constants.ts            # CELL=16, GRID=26, FIELD=416, TANK=32, TICK_MS, direction vectors
+  types.ts                # All shared types: Tank, Bullet, WorldSnapshot, ThemeColors, ...
+  main.ts                 # Entry: wires Game into #app
+  game/                   # SIMULATION LAYER (only layer that mutates World)
+    World.ts              #   complete runtime state + entity management
+    Simulation.ts         #   the only author of World; runs all systems per tick
+    TileMap.ts            #   26×26 sub-block grid + cached base state
+    Input.ts              #   keyboard capture; never mutates World
+    Game.ts               #   top-level orchestrator + fixed-timestep loop
+    RecoverySystem.ts     #   snapshot manager + history recorder + recovery controller
+  presentation/           # PRESENTATION LAYER (read-only on World)
+    PresentationLayer.ts  #   orchestrator: camera + anim + particles + effects + renderer + ui
+    renderer/             #   GameRenderer, SpriteArtist, SpriteLibrary, SpriteCache
+    ui/UIManager.ts       #   HTML/CSS HUD + overlays (canvas is playfield-only, 416×416)
+    Camera.ts  AnimationSystem.ts  ParticleSystem.ts  EffectsSystem.ts
+  audio/AudioManager.ts   # Web Audio synthesis
+  config/                 # DATA: tanks, stages, stageData, difficulty, theme
+  assets/sprites/         # SVG sprite library + index.ts URL registry
+  utils/                  # RNG (seeded mulberry32), helpers (snap, aabb, dirs)
+tests/                    # bun:test specs (mirrors src/ structure by concern)
+plan/                     # mvp.md, RecoverySystem.md, presentation-upgrade.md, tasks.chat.md
+docs/                     # presentation-audit.md (and future audits)
+tools/gen-sprites.mjs     # regenerates the SVG sprite library
+```
+
+Key conventions:
+
+- **Canvas is playfield-only**: 416×416 logical, DPR-scaled via an offscreen buffer (`SpriteCache`, `GameRenderer`). HUD/menu/overlays are HTML/CSS in `UIManager`. Do not move UI back onto the canvas.
+- **Tank sprites face UP** in the SVG; the renderer rotates per direction. Preserve this convention when adding sprites.
+- **`genId()`** (`World.ts`) is the single source of entity IDs.
+
+---
+
+## 4. Development Workflow — Executing a Plan Autonomously
+
+When you are handed a plan (a `plan/*.md` milestone, a `tasks.chat.md` directive, or an inline task), follow this loop. Do not ask for permission on steps the MANIFEST already answers.
+
+### Step 1 — Decode the task
+
+Restate, in your own working notes, three things:
+
+- **What** the deliverable is (from the plan's "Deliverable" / "Acceptance" sections).
+- **Which invariants** it touches (re-read §2 of this file).
+- **Which `DECISIONS.md` entries** already constrain the design.
+
+If the task is vague ("polish the sprites", "make it feel better"), the MANIFEST's Three Gates (§2.7) and "Readable at a Glance" (MANIFEST §12) are your spec. Derive concrete acceptance criteria from them before coding.
+
+### Step 2 — Audit before you build
+
+If the task touches rendering, audio, or any system with an existing audit doc, read it first (`docs/presentation-audit.md` is the template). If no audit exists for the area you are changing and the change is non-trivial, write a short audit note in `docs/` describing current state + target state. This is not optional for refactor-grade work (presentation-upgrade.md §2 requires it).
+
+### Step 3 — Implement
+
+- Follow §5 (code conventions) and §7 (where things go).
+- Keep the Simulation pure. Keep Presentation read-only. Keep data in `config/`.
+- Run the quality gates (§9) continuously, not just at the end.
+
+### Step 4 — Verify against acceptance criteria
+
+Check each "Definition of Done" item from the relevant plan literally. The MVP DoD (plan/mvp.md §10) applies to *every* change:
+
+> A feature is complete only if: works correctly · no TS errors · no runtime errors · maintains 60 FPS · integrates with existing systems · can be restarted safely · introduces no hidden state.
+
+### Step 5 — Record (see §6)
+
+Append a decision to `DECISIONS.md` for anything non-obvious, and append a line to the workspace memory log (§11).
+
+### Step 6 — Hand off
+
+Leave the tree green: `bun run check` must pass. Present the result per the agent loop's result-presentation rules.
+
+---
+
+## 5. Code Conventions
+
+### Language & tooling
+
+- **TypeScript**, `strict: true`, `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`, `noFallthroughCasesInSwitch` (`tsconfig.json`). The compiler is a reviewer; do not silence it with `any` or `@ts-ignore`.
+- **Bun** is the all-in-one tool: runtime, test runner (`bun test`), package manager.
+- **Vite** is the dev server and build tool. Build target: `es2020`.
+- **oxlint** + **oxfmt** for lint and format. Do not introduce ESLint/Prettier.
+
+### Commands (canonical)
+
+```
+bun run dev          # vite dev server on :3000
+bun run build        # oxlint && tsc && vite build  (the gate before merge)
+bun run test         # bun test
+bun run typecheck    # tsc --noEmit --incremental
+bun run lint         # oxlint
+bun run format       # oxfmt
+bun run check        # full gate: test + typecheck + lint + format
+```
+
+`bun run check` is the definition of "green". Run it before declaring a task done.
+
+### Style
+
+- No classes where a function suffices; no singletons for gameplay state.
+- Prefer pure functions in `utils/`. Simulation methods may mutate the World they own — that is their job.
+- Use the seeded `RNG` (`world.rng`) for any randomness that affects gameplay. `Math.random()` is only acceptable in pure presentation code (particles, visual jitter) that never feeds back into the World.
+- Keep the bundle small. New dependency ⇒ justify in `DECISIONS.md`. The project is deliberately tiny (MANIFEST §14).
+
+### File placement
+
+- New gameplay system → `src/game/` and called from `Simulation.updatePlaying()` (or the relevant state branch).
+- New visual system → `src/presentation/`. It must not import from `src/game/` except to read types.
+- New content (tank/stage/theme/difficulty) → `src/config/`. Engine code must not change.
+- New sprite → `src/assets/sprites/*.svg` + register in `src/assets/sprites/index.ts` (`SPRITE_URLS`). 96×96 viewBox, faces UP for tanks.
+- New test → `tests/`, mirroring the concern (e.g. `tests/stages.test.ts` mirrors `src/config/stages.ts`).
+
+---
+
+## 6. When in Doubt — Derive From the MANIFEST, Record, Then Execute
+
+This is the core autonomy contract. You are expected to make judgment calls instead of stalling. The process is:
+
+### 6.1 Identify the doubt
+
+A doubt is any of:
+
+- The plan is silent on a design point.
+- Two reasonable implementations exist and the plan does not pick one.
+- The plan appears to conflict with the MANIFEST or an existing decision.
+- A visual/tunable value (color, timing, count, threshold) is unspecified.
+
+### 6.2 Derive the optimal solution
+
+Resolve the doubt by consulting, in priority order:
+
+1. **MANIFEST** — the creed. Does one of the 14 sections answer this? (§10 "Simple Beats Clever" and §13 "Three Gates" settle most doubts.)
+2. **DECISIONS.md** — has this already been decided? Look for the closest precedent.
+3. **Existing code** — what does the codebase already do in analogous situations? Consistency is a form of correctness.
+4. **The classic original** — for gameplay feel, Battle City (Famicom) behavior is the reference. Authenticity beats novelty unless the MANIFEST says otherwise.
+5. **The plan's stated rationale** — if the plan gives a "why", honor it even when the "what" is ambiguous.
+
+### 6.3 Record the decision
+
+**Before** executing, append a numbered entry to `DECISIONS.md` using the existing format:
+
+```markdown
+## N. <Short Title>
+
+**Decision:** <What you chose, concretely.>
+
+**Rationale:**
+- <Why, anchored in MANIFEST / precedent / the plan's intent.>
+- <What you rejected and why.>
+
+**Implications:** <Optional — what this enables or forecloses.>
+```
+
+Keep numbering sequential (the file is at ~18). If your decision revises an earlier one, mark the old one `_(superseded by §N)_` rather than deleting it — history matters.
+
+### 6.4 Execute
+
+Now implement the recorded decision. If mid-implementation you discover the decision was wrong, update the `DECISIONS.md` entry (with a dated note) and proceed. Do not silently deviate.
+
+### 6.5 What NOT to decide alone
+
+Escalate to the human (ask, do not guess) only when:
+
+- The change would break the **One Author** invariant (§2.1) in a way the MANIFEST forbids.
+- The change requires a **new runtime dependency** or a **new build tool**.
+- The change alters the **public game feel** in a way the plan did not contemplate (e.g., changing tank speed defaults, adding a new game mode).
+- You are about to **delete or rewrite** a system that has no test coverage and no audit doc.
+
+Everything else is yours to decide, record, and execute.
+
+---
+
+## 7. Bug-Fix Workflow — Reproduce With a Test Before You Fix
+
+This is mandatory. No exceptions.
+
+> A bug is not fixed until a failing test proves it existed and then passes after your change.
+
+### 7.1 Reproduce first
+
+Before touching production code, write a failing test in `tests/` that reproduces the bug.
+
+- The test must **fail** on the unmodified codebase. Run `bun test` and confirm the failure. If it passes, you have not reproduced the bug — keep going.
+- The test must be **minimal**: isolate the failing behavior. If the bug is in `Simulation`, drive the `World` + `Simulation` directly without the render loop. If it is in `TileMap`, test `TileMap` in isolation. If it is in a config decoder (like `stages.ts`), mirror the codec in the test the way `tests/stages.test.ts` does — an independent re-implementation is the strongest proof.
+- The test must be **deterministic**. Seed `world.rng` with a fixed value (`new RNG(12345)`) if randomness is involved. Never write a bug-repro test that depends on `Math.random()` or wall-clock time.
+
+### 7.2 Then fix
+
+Make the minimal change that turns the test green. Do not refactor opportunistically during a bug fix — that is how regressions are born. If you spot a cleanup opportunity, note it as a follow-up task; do not bundle it.
+
+### 7.3 Then verify
+
+- `bun test` — your new test passes.
+- `bun run check` — the full gate is green (no type/lint/format regressions).
+- Manually confirm the fix at `bun run dev` if the bug had a visible component.
+
+---
+
+## 8. Testing Conventions
+
+- **Runner**: `bun:test` (`import { describe, it, expect } from 'bun:test'`). Tests live in `tests/`.
+- **Mirror the concern**: `tests/stages.test.ts` ↔ `src/config/stages.ts`. Name new test files after the module or system they cover.
+- **Prefer independent re-implementations for codecs/data**: see `tests/stages.test.ts` for the pattern — it re-decodes the level data locally and asserts equality with the production decoder. This catches decoder regressions that a "golden file" test would miss.
+- **No DOM in unit tests** unless the system under test requires it. `Simulation`/`World`/`TileMap`/`RecoverySystem` are pure logic — test them headlessly.
+- **Snapshot/restoration tests** (for RecoverySystem) must assert the full field list in RecoverySystem.md §18: player position, enemy positions, bullets, terrain destruction, items, score, lives, timers, enemy queue, RNG state.
+- **Determinism tests**: when adding RNG-consuming logic, add a test that runs the same seed twice and asserts identical World state.
+
+---
+
+## 9. Quality Gates — Definition of Done
+
+A task is done when **all** of these hold:
+
+- [ ] `bun run check` is green (test + typecheck + lint + format).
+- [ ] `bun run build` succeeds (this is what ships).
+- [ ] No new `Math.random()` in Simulation paths (§2.3).
+- [ ] No new module-level mutable gameplay state (§2.2).
+- [ ] No new UI drawn on the game canvas (§2.5 — UI is HTML/CSS).
+- [ ] The relevant plan's "Definition of Done" checklist is satisfied.
+- [ ] New decisions recorded in `DECISIONS.md` (§6).
+- [ ] Bug fixes have a reproducing test (§7).
+- [ ] 60 FPS maintained on a typical machine (MANIFEST §14, plan/mvp.md §10). If your change is expensive, profile it.
+- [ ] Memory stays bounded — RecoverySystem history is a fixed 60-entry circular buffer; do not introduce unbounded growth (RecoverySystem.md §8, §14).
+
+---
+
+## 10. Asset Pipeline
+
+- **Author sprites as SVG** in `src/assets/sprites/`, 96×96 viewBox. Tanks face UP.
+- **Register** each new sprite in `src/assets/sprites/index.ts` → `SPRITE_URLS` (key like `tank.<kind>`, `terrain.<type>`, `fx.<name>`, `item.<type>`).
+- **Regenerate the library** with `node tools/gen-sprites.mjs` if you are adjusting the generator rather than hand-editing SVGs.
+- **Consume** via `SpriteLibrary` (preloads) → `SpriteCache` (pre-rasterizes to canvas bitmaps at DPR) → `SpriteArtist`/`GameRenderer` (draws). Do not bypass the cache by loading images inline in the render loop.
+- **Terrain tiles must be seamless** (working memory: 96×96 full-frame, texture period must divide 96 — no inset borders, no centered shrink, no mosaic seams). See the Modern Retro design conventions for the palette and per-tile rules.
+- **Themability**: sprite colors that vary by theme come from `ThemeColors` (`src/types.ts`) applied at draw time, not baked into the SVG. Keep gameplay-neutral color in the SVG; keep theme-reactive color in config.
+
+---
+
+## 11. Memory & Continuity
+
+After substantive work, append a brief note to the workspace daily log:
+
+- `/Users/hj/dev/github/battle/.workbuddy/memory/YYYY-MM-DD.md` — append-only daily log (create if missing).
+- `/Users/hj/dev/github/battle/.workbuddy/memory/MEMORY.md` — curated long-term project notes, for durable conventions/preferences.
+
+Record: what was built/changed, the decision rationale (link to the `DECISIONS.md` entry), any pitfall discovered, and the next sensible step. Do not record transient search results or tool errors.
+
+This is supplemental — it never replaces the actual deliverable or your reply to the user.
+
+---
+
+## 12. Quick Reference — Constants You Will Need
+
+```
+CELL = 16            // sub-block px
+GRID = 26            // sub-blocks per side
+FIELD = 416          // playfield px (GRID × CELL)
+TANK = 32            // tank px (2 × CELL)
+TICK_MS = 1000/60    // fixed timestep
+MAX_ENEMIES_ALIVE = 4
+ENEMIES_PER_STAGE = 20
+START_LIVES = 3
+PLAYER_SPAWN = { col: 8, row: 24 }
+BASE_POS = { col: 12, row: 24 }   // base eagle, 2×2 at rows 24-25 / cols 12-13
+ENEMY_SPAWNS = [ {0,0}, {12,0}, {6,0} ]   // tile coords
+```
+
+Tank kinds: `'player' | 'basic' | 'fast' | 'power' | 'armor'` (MANIFEST: players wear stars, enemies wear faces).
+Terrain chars in stage grids: `'.' 'b' 's' 'w' 'f' 'i' 'E'` (empty/brick/steel/water/forest/ice/base).
+Game states: `'menu' | 'playing' | 'paused' | 'stageclear' | 'gameover' | 'victory' | 'recovery'`.
+
+---
+
+## 13. The Rule Behind All the Rules
+
+> Simple beats clever. Readable in six months is worth more than elegant today. (MANIFEST §10)
+
+When this file and your instincts disagree, this file wins. When this file and the MANIFEST disagree, the MANIFEST wins. When the MANIFEST is silent, choose the option that keeps the game small, the architecture clean, and the player smiling — then write it down in `DECISIONS.md` so the next agent does not have to re-derive it.
