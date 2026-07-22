@@ -76,14 +76,6 @@ export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
 
 export type Direction = 'up' | 'down' | 'left' | 'right'
 
-/** Tank fire cooldown per level (ms) */
-export const FIRE_COOLDOWN: Record<number, number> = {
-  0: 400, // level 0
-  1: 350,
-  2: 300,
-  3: 250,
-}
-
 // ============================================================
 // Tactical Intelligence Framework (AI) timing
 // ============================================================
@@ -103,19 +95,7 @@ export const ELECTION_CHECK_TICKS = 60
 /** How long (ms) a committed dodge direction is held before re-evaluating. */
 export const DODGE_LOCK_MS = 350
 
-/** Player tank speed per level (px/tick) */
-export const PLAYER_SPEED: Record<number, number> = {
-  0: 2,
-  1: 2,
-  2: 2,
-  3: 3,
-}
-
-/** Bullet speed per source (px/tick) */
-export const BULLET_SPEED = {
-  player: 4,
-  basic: 2,
-  fast: 4,
-  power: 3,
-  armor: 3,
-}
+// NOTE: player & bullet speeds are no longer hardcoded here. They are derived
+// from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
+// which keeps bullets strictly faster than tanks (see that file for the
+// speed-ratio invariant). These old constants are intentionally removed.

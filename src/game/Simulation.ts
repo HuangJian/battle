@@ -6,8 +6,6 @@ import {
   BULLET,
   FIELD,
   MAX_ENEMIES_ALIVE,
-  FIRE_COOLDOWN,
-  PLAYER_SPEED,
   DIR_VECTORS,
   FREEZE_DURATION_MS,
   SHIELD_DURATION_MS,
@@ -15,6 +13,7 @@ import {
   ENEMY_SPAWNS,
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
+import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { genId } from './World'
 import { Input } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
@@ -326,7 +325,6 @@ export class Simulation {
       if (activeBullets >= maxBullets) return
     }
 
-    const cfg = TANK_CONFIGS[tank.kind]
     const v = DIR_VECTORS[tank.dir]
 
     // Bullet starts at the center of the tank's front edge
@@ -344,8 +342,8 @@ export class Simulation {
       ownerId: tank.id,
       ownerKind: tank.kind,
       isPlayer: tank.isPlayer ?? false,
-      speed: cfg.bulletSpeed,
-      power: tank.isPlayer ? ((tank.level ?? 0) >= 2 ? 2 : 1) : cfg.bulletPower,
+      speed: tank.bulletSpeed,
+      power: tank.bulletPower,
     }
 
     w.addBullet(bullet)
@@ -445,9 +443,14 @@ export class Simulation {
         return true
       }
 
-      // Damage tank
+      // Damage tank — cosmetic / HP effect ONLY. A non-lethal hit must NEVER
+      // change a tank's identity or combat capability (issue #2): we do not
+      // swap `kind`, mutate `profile`, or alter any derived stat (speed,
+      // bulletSpeed, fireCooldown, bulletPower). The tank keeps its type and
+      // appearance; only `hp` drops and a damage *decoration* (hitCount) rises
+      // so the renderer can layer on type-preserving scorch/crack decals.
       tank.hp--
-      tank.hitCount = (tank.hitCount ?? 0) + 1
+      tank.hitCount = Math.min((tank.hitCount ?? 0) + 1, 4)
       this.createExplosion(bullet.x, bullet.y, 'small')
 
       if (tank.hp <= 0) {
@@ -560,11 +563,20 @@ export class Simulation {
 
     switch (type) {
       case 'star':
-        if ((p.level ?? 0) < 3) {
+        // Player progression is universal: every star raises ALL capability
+        // dimensions together (plan §11). Re-derive the tank's concrete stats
+        // from the new profile. Current HP is intentionally NOT refilled — a
+        // star is power, not a repair.
+        if ((p.level ?? 0) < PLAYER_PROGRESSION.maximumLevel) {
           p.level = (p.level ?? 0) + 1
           w.playerLevel = p.level
-          p.fireCooldown = FIRE_COOLDOWN[p.level] ?? 250
-          if (p.level >= 3) p.speed = PLAYER_SPEED[3]
+          const stats = profileToStats(resolveProfile('player', p.level))
+          p.speed = stats.speed
+          p.bulletSpeed = stats.bulletSpeed
+          p.bulletPower = stats.bulletPower
+          p.fireCooldown = stats.fireCooldown
+          p.maxHp = stats.maxHp
+          p.profile = resolveProfile('player', p.level)
         }
         break
 
@@ -663,6 +675,10 @@ export class Simulation {
         w.gameOverTimer = 3000
         w.saveHighScore()
       } else {
+        // Star damage regression (plan §12): losing the tank costs a star
+        // level, downgrading ALL capability dimensions together — the player
+        // comes back weaker, exactly as a downgrade should feel.
+        w.playerLevel = Math.max(0, w.playerLevel - 1)
         // Respawn player
         w.spawnPlayer()
         w.player.shieldTimer = RESPAWN_SHIELD_MS

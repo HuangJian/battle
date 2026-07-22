@@ -14,6 +14,12 @@ import {
 } from '../constants'
 import { opposite, ALL_DIRS } from '../utils/helpers'
 import { resolveConfig, commanderChanceFor } from './config'
+import {
+  capabilityBias,
+  applyEliteModifier,
+  profileToStats,
+  resolveProfile,
+} from '../config/combat'
 import type { ResolvedConfig, Situation, Perception } from './types'
 import { perceive, analyze, dirToward, manhattan } from './perception'
 
@@ -161,7 +167,7 @@ export class TacticalIntelligence {
   /** Score every candidate goal and return the highest. */
   private evaluateGoals(
     _world: World,
-    _tank: Tank,
+    tank: Tank,
     brain: AIState,
     cfg: ResolvedConfig,
     p: Perception,
@@ -172,11 +178,17 @@ export class TacticalIntelligence {
     const threatPenalty = s.threat ? 0.35 : 0
     const followsDirective = brain.directive !== 'none' && cfg.teamwork && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
 
+    // Combat Capability bias (plan §14): the tank evaluates its OWN strengths.
+    // A high-mobility tank presses/flanks harder; a high-armor tank pushes more
+    // aggressively (lower risk); a high-firepower tank weighs attacks higher.
+    const bias = tank.profile ? capabilityBias(tank.profile) : { flank: 0, push: 0, attack: 0 }
+    const pushAttack = (bias.attack + bias.push) * 0.8
+
     // attackBase
     let attackBase = 0
     if (p.hasBase) {
       const closeness = 1 - Math.min(1, s.distToBase / maxDist)
-      attackBase = w.attackBase * (0.4 + 0.6 * closeness) - threatPenalty
+      attackBase = w.attackBase * (0.4 + 0.6 * closeness) - threatPenalty + pushAttack
       if (brain.strategicGoal === 'attackBase') attackBase += 0.5
       if (followsDirective && brain.directive === 'defendBase') attackBase += 0.6
     }
@@ -188,7 +200,8 @@ export class TacticalIntelligence {
       attackPlayer =
         w.attackPlayer * (0.4 + 0.6 * closeness) +
         (s.playerInLineOfFire ? 0.4 : 0) -
-        threatPenalty
+        threatPenalty +
+        pushAttack
       if (brain.strategicGoal === 'attackPlayer') attackPlayer += 0.4
       if (followsDirective && brain.directive === 'attackTogether') attackPlayer += 0.6
     }
@@ -196,25 +209,26 @@ export class TacticalIntelligence {
     // destroyWall (only meaningful when a wall blocks the path / is in LOS)
     let destroyWall = -Infinity
     if (s.pathBlocked || s.wallInLineOfFire) {
-      destroyWall = w.destroyWall * 1.0 + (s.wallInLineOfFire ? 0.3 : 0)
+      destroyWall = w.destroyWall * 1.0 + (s.wallInLineOfFire ? 0.3 : 0) + bias.attack * 0.5
     }
 
-    // retreat (fragile + threatened)
+    // retreat (fragile + threatened). High armor already self-limits this by
+    // shrinking the "fragile" window, so heavy tanks naturally retreat less.
     let retreat = -Infinity
-    if (s.threat && tankHp(_tank) <= 1) {
-      retreat = w.retreat * 0.9
+    if (s.threat && tankHp(tank) <= 1) {
+      retreat = w.retreat * 0.9 - bias.push * 0.3
     }
 
     // regroup (directive / congestion)
     let regroup = -Infinity
     if (s.congestion >= 2 || (followsDirective && brain.directive === 'spreadOut')) {
-      regroup = w.regroup * (0.4 + s.congestion * 0.15)
+      regroup = w.regroup * (0.4 + s.congestion * 0.15) + bias.flank * 0.3
       if (followsDirective && brain.directive === 'spreadOut') regroup += 0.5
       if (followsDirective && brain.directive === 'defendBase') regroup += 0.3
     }
 
-    // advance (always-present baseline so the tank keeps pressing forward)
-    const advance = w.advance * 0.3
+    // advance (always-present baseline; mobility makes flanking cheaper)
+    const advance = w.advance * 0.3 + bias.flank * 0.6
 
     const scores: Array<[GoalType, number]> = [
       ['attackBase', attackBase],
@@ -437,7 +451,7 @@ export class TacticalIntelligence {
       // Break a wall that blocks progress toward the objective.
       const g = brain.tacticalGoal
       if (g === 'destroyWall' || g === 'attackBase' || g === 'attackPlayer') shoot = true
-    } else if (world.rng.next() < cfg.aggression) {
+    } else if (world.rng.next() < effectiveAggression(cfg, tank)) {
       shoot = true // opportunistic fire when no clear shot
     }
 
@@ -493,6 +507,21 @@ export class TacticalIntelligence {
     bestAi.level = 'commander'
     bestAi.commanderTimer = COMMANDER_INTERVAL_MS * (0.5 + world.rng.next() * 0.5)
     bestAi.strategicGoal = 'attackBase'
+
+    // Elite commander combat modifier (plan §8, §10): boost the kind's primary
+    // dimension by +15% and re-derive the tank's concrete stats. Note we only
+    // touch THIS tank's profile (a fresh object from applyEliteModifier), so
+    // other tanks of the same kind keep their base archetype. The commander
+    // also enters at full health to feel like an exceptional unit.
+    const eliteProfile = applyEliteModifier(best.profile ?? resolveProfile(best.kind, 0), best.kind)
+    best.profile = eliteProfile
+    const eliteStats = profileToStats(eliteProfile)
+    best.speed = eliteStats.speed
+    best.bulletSpeed = eliteStats.bulletSpeed
+    best.bulletPower = eliteStats.bulletPower
+    best.fireCooldown = eliteStats.fireCooldown
+    best.maxHp = eliteStats.maxHp
+    best.hp = eliteStats.maxHp
   }
 
   /** The commander evaluates the battlefield and broadcasts a directive. */
@@ -546,6 +575,17 @@ export class TacticalIntelligence {
 
 function tankHp(tank: Tank): number {
   return tank.hp
+}
+
+/**
+ * Firing willingness blends the intelligence tier's `aggression` with the
+ * tank's own fire-control capability (plan §4.3 — fire control connects
+ * directly with AI). A fire-control 80 tank fires ~0.94×aggression; a 50 tank
+ * ~0.85×. Bounded to [0,1].
+ */
+function effectiveAggression(cfg: ResolvedConfig, tank: Tank): number {
+  const fc = tank.profile ? tank.profile.fireControl : 50
+  return Math.min(1, cfg.aggression * (0.7 + 0.3 * (fc / 100)))
 }
 
 function clamp(v: number, min: number, max: number): number {

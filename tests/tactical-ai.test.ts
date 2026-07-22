@@ -217,7 +217,16 @@ describe('Tactical Intelligence — commander (DoD #4)', () => {
 // ============================================================
 
 describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
-  /** Survival rate of a single enemy against a player bullet fired down its column. */
+  /**
+   * Survival rate of a single enemy against a player bullet fired down its
+   * column. The bullet is faster than any tank (speed 6) so it ALWAYS threatens
+   * the enemy; survival therefore reflects pure dodge skill. The vertical gap
+   * and 120-tick window are calibrated so that a tank which *decides* to dodge
+   * (after its reaction delay) has time to step clear of the bullet column —
+   * so survival ≈ dodge probability. This isolates the avoidance behaviour
+   * (the test freezes tactical re-thinking so the only perpendicular movement
+   * is the reactive dodge).
+   */
   function survivalRate(kind: TankKind, trials: number): number {
     let survived = 0
     for (let s = 0; s < trials; s++) {
@@ -235,11 +244,12 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
         enemy.aiState.strategicTimer = 60000
       }
       const ecx = enemy.x + TANK / 2
-      // player bullet, 3 cells above, heading down, aligned with the enemy
+      const gap = 170 // px between bullet start and enemy (well within the field)
+      // player bullet, faster than any tank, heading down, aligned with the enemy
       world.bullets.push({
         id: genId(),
         x: ecx - BULLET / 2,
-        y: ey - 3 * CELL,
+        y: ey - gap,
         w: BULLET,
         h: BULLET,
         dir: 'down' as Direction,
@@ -247,10 +257,10 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
         ownerId: -1,
         ownerKind: 'player',
         isPlayer: true,
-        speed: 2,
+        speed: 6,
         power: 1,
       })
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 120; i++) {
         sim.tick()
         if (!enemy.alive) break
       }

@@ -425,48 +425,88 @@ function starbuf(n) {
 }
 
 function hitStage(stage) {
-  // damage overlays centered ~ (48,48); drawn on top of enemy tank
+  // Identity-preserving battle damage. These overlays are blitted ON TOP of the
+  // enemy's own (type-specific) sprite, so the tank's colour & silhouette must
+  // always stay visible — a hit fast / armour / basic tank must remain instantly
+  // recognisable as its type (issue #2). We therefore use ONLY thin cracks,
+  // small semi-transparent scorch specks, and a few glowing embers / smoke
+  // wisps. The old design filled the whole hull with a charcoal/gray rect, which
+  // recoloured every tank into the same generic charred blob.
   const crack = (d, w, op) =>
-    `<path d="${d}" stroke="rgba(20,20,20,${op})" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
+    `<path d="${d}" stroke="rgba(15,15,15,${op})" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
   const lightCrack = (d, w) =>
-    `<path d="${d}" stroke="rgba(255,255,255,0.5)" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
-  let inner = ''
-  if (stage === 0) {
-    inner = `<circle cx="48" cy="48" r="30" fill="none" stroke="rgba(255,255,255,0.0)"/>`
-  } else if (stage === 1) {
-    inner =
-      crack('M40 30 L46 44 L40 56', 2.5, 0.6) +
-      lightCrack('M40 30 L46 44 L40 56', 1) +
-      crack('M58 34 L52 46 L58 60', 2.5, 0.6)
-  } else if (stage === 2) {
-    inner =
-      `<rect x="30" y="26" width="36" height="46" rx="11" fill="rgba(120,120,120,0.18)"/>` +
-      crack('M40 30 L46 44 L40 56', 2.5, 0.65) +
-      lightCrack('M40 30 L46 44 L40 56', 1) +
-      crack('M58 34 L52 46 L58 60', 2.5, 0.65) +
-      crack('M34 50 L48 54 L62 50', 2, 0.55)
-  } else if (stage === 3) {
-    inner =
-      `<rect x="30" y="26" width="36" height="46" rx="11" fill="rgba(90,90,90,0.28)"/>` +
-      crack('M40 30 L46 44 L40 56', 3, 0.7) +
-      crack('M58 34 L52 46 L58 60', 3, 0.7) +
-      crack('M34 50 L48 54 L62 50', 2.5, 0.6) +
-      crack('M44 28 L50 40 L44 52', 2, 0.55) +
-      `<circle cx="34" cy="36" r="6" fill="rgba(80,80,80,0.5)"/>` +
-      `<circle cx="62" cy="60" r="5" fill="rgba(80,80,80,0.5)"/>`
-  } else {
-    // stage 4 — charred + red glow + sparks
-    inner =
-      `<rect x="28" y="24" width="40" height="50" rx="11" fill="rgba(40,30,30,0.5)"/>` +
-      `<circle cx="48" cy="48" r="30" fill="rgba(200,40,20,0.18)"/>` +
-      crack('M40 30 L46 44 L40 56', 3, 0.8) +
-      crack('M58 34 L52 46 L58 60', 3, 0.8) +
-      crack('M34 50 L48 54 L62 50', 3, 0.75) +
-      crack('M44 28 L50 40 L44 52', 2.5, 0.7) +
-      `<g stroke="#FFD23F" stroke-width="2" stroke-linecap="round">` +
-      `<path d="M48 18 L48 26 M70 40 L62 44 M26 40 L34 44 M48 74 L48 66"/></g>`
+    `<path d="${d}" stroke="rgba(255,255,255,0.45)" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
+  const scorch = (cx, cy, r, op) =>
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="rgba(28,18,12,${op})"/>`
+  const ember = (cx, cy, r) =>
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="rgba(255,90,30,0.5)"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="${(r * 0.5).toFixed(1)}" fill="rgba(255,205,90,0.7)"/>`
+  const smoke = (cx, cy) =>
+    `<circle cx="${cx}" cy="${cy}" r="6" fill="rgba(190,190,190,0.20)"/>` +
+    `<circle cx="${cx - 3}" cy="${cy - 4}" r="4" fill="rgba(210,210,210,0.16)"/>`
+
+  if (stage === 0) return { defs: '', inner: '' }
+  if (stage === 1) {
+    // a couple of hairline cracks
+    return {
+      defs: '',
+      inner:
+        crack('M42 30 L47 42 L41 54', 2, 0.55) +
+        lightCrack('M42 30 L47 42 L41 54', 0.8) +
+        crack('M57 34 L52 46 L58 58', 2, 0.55),
+    }
   }
-  return { defs: '', inner }
+  if (stage === 2) {
+    // more cracks + a few small scorch specks
+    return {
+      defs: '',
+      inner:
+        crack('M42 30 L47 42 L41 54', 2.2, 0.6) +
+        lightCrack('M42 30 L47 42 L41 54', 0.8) +
+        crack('M57 34 L52 46 L58 58', 2.2, 0.6) +
+        crack('M36 52 L48 55 L60 51', 1.8, 0.5) +
+        scorch(34, 38, 3.5, 0.3) +
+        scorch(62, 58, 3, 0.3) +
+        scorch(50, 30, 2.5, 0.25),
+    }
+  }
+  if (stage === 3) {
+    // heavier cracks + scorch + a small smoke wisp (still transparent body)
+    return {
+      defs: '',
+      inner:
+        crack('M42 30 L47 42 L41 54', 2.6, 0.65) +
+        crack('M57 34 L52 46 L58 58', 2.6, 0.65) +
+        crack('M36 52 L48 55 L60 51', 2.2, 0.55) +
+        crack('M45 28 L50 40 L44 52', 1.8, 0.5) +
+        crack('M30 44 L40 47', 1.6, 0.45) +
+        scorch(34, 38, 4, 0.35) +
+        scorch(62, 58, 4, 0.35) +
+        scorch(50, 30, 3, 0.3) +
+        scorch(40, 62, 2.5, 0.28) +
+        smoke(30, 22),
+    }
+  }
+  // stage 4 — heavy damage, STILL transparent: cracks + scorch + glowing embers
+  // at the impact points + small smoke wisps. The tank's own colour is untouched.
+  return {
+    defs: '',
+    inner:
+      crack('M42 30 L47 42 L41 54', 3, 0.7) +
+      crack('M57 34 L52 46 L58 58', 3, 0.7) +
+      crack('M36 52 L48 55 L60 51', 2.6, 0.6) +
+      crack('M45 28 L50 40 L44 52', 2.2, 0.55) +
+      crack('M30 44 L40 47', 2, 0.5) +
+      crack('M68 44 L58 47', 2, 0.5) +
+      scorch(34, 38, 5, 0.4) +
+      scorch(62, 58, 5, 0.4) +
+      scorch(50, 30, 3.5, 0.35) +
+      scorch(40, 62, 3, 0.32) +
+      ember(34, 38, 3) +
+      ember(62, 58, 3) +
+      smoke(30, 20) +
+      smoke(66, 22),
+  }
 }
 
 // ---------- assemble ----------

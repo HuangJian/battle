@@ -1,59 +1,43 @@
 import type { TankConfig, TankKind } from '../types'
-import { BULLET_SPEED } from '../constants'
 
 /**
- * Tank configurations.
- * Adding a new tank type = adding one entry here.
+ * Tank metadata.
+ *
+ * Combat stats (hp / speed / bulletSpeed / bulletPower) are NO LONGER stored
+ * here — they are derived from each tank's CombatProfile in `config/combat.ts`
+ * (see the Combat Capability System). This file keeps only the static,
+ * non-combat presentation/score metadata. Adding a new tank = a profile entry
+ * in `combat.ts` plus (optionally) a metadata row here.
  */
 export const TANK_CONFIGS: Record<TankKind, TankConfig> = {
   player: {
     kind: 'player',
-    hp: 1,
-    speed: 2,
-    bulletSpeed: BULLET_SPEED.player,
-    bulletPower: 1,
-    score: 0,
     color: '#e8c840',
+    score: 0,
     dropsBonus: false,
   },
   basic: {
     kind: 'basic',
-    hp: 1,
-    speed: 1,
-    bulletSpeed: BULLET_SPEED.basic,
-    bulletPower: 1,
-    score: 100,
     color: '#808080',
+    score: 100,
     dropsBonus: false,
   },
   fast: {
     kind: 'fast',
-    hp: 1,
-    speed: 3,
-    bulletSpeed: BULLET_SPEED.fast,
-    bulletPower: 1,
-    score: 200,
     color: '#40c0c0',
+    score: 200,
     dropsBonus: false,
   },
   power: {
     kind: 'power',
-    hp: 1,
-    speed: 2,
-    bulletSpeed: BULLET_SPEED.power,
-    bulletPower: 1,
-    score: 300,
     color: '#c080c0',
+    score: 300,
     dropsBonus: false,
   },
   armor: {
     kind: 'armor',
-    hp: 4,
-    speed: 2,
-    bulletSpeed: BULLET_SPEED.armor,
-    bulletPower: 1,
-    score: 400,
     color: '#c0c040',
+    score: 400,
     dropsBonus: false,
   },
 }

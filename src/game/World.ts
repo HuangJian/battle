@@ -18,7 +18,7 @@ import { RNG } from '../utils/RNG'
 import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
-import { TANK_CONFIGS } from '../config/tanks'
+import { resolveProfile, profileToStats } from '../config/combat'
 import { resolveConfig, levelForKind } from '../ai/config'
 import { GRID, CELL, TANK, ENEMIES_PER_STAGE, START_LIVES, STRATEGIC_INTERVAL_MS, COMMANDER_INTERVAL_MS } from '../constants'
 
@@ -197,8 +197,15 @@ export class World {
   }
 
   createTank(kind: TankKind, x: number, y: number, dir: Direction): Tank {
-    const cfg = TANK_CONFIGS[kind]
-    const hp = kind === 'player' ? 1 : Math.max(1, Math.round(cfg.hp * this.difficulty.enemyHpMult))
+    // Combat Capability System: stats come from the tank's profile, not
+    // hardcoded numbers. Player profiles scale with star level; enemies use
+    // their fixed archetype profile (modified only when promoted to elite).
+    const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
+    const stats = profileToStats(profile)
+    const hp =
+      kind === 'player'
+        ? stats.maxHp
+        : Math.max(1, Math.round(stats.maxHp * this.difficulty.enemyHpMult))
 
     // Enemy brains are initialized here (on the World — no hidden state).
     // The Tactical Intelligence Framework reads/writes these fields every tick.
@@ -235,16 +242,19 @@ export class World {
       dir,
       alive: true,
       kind,
-      speed: kind === 'player' ? cfg.speed : cfg.speed * this.difficulty.enemySpeedMult,
+      speed: stats.speed,
       hp,
       maxHp: hp,
-      fireCooldown: kind === 'player' ? 400 : 600 / this.difficulty.enemyFireMult,
+      bulletPower: stats.bulletPower,
+      bulletSpeed: stats.bulletSpeed,
+      fireCooldown: stats.fireCooldown,
       lastFire: 0,
       moving: false,
       spawnTimer: 1000,
       level: kind === 'player' ? this.playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
+      profile,
       flashTimer: 0,
       hitCount: 0,
       aiState,

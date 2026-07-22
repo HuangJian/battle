@@ -38,11 +38,50 @@ export interface Entity {
   alive: boolean
 }
 
+/**
+ * Combat Capability System — the six universal dimensions every tank owns.
+ *
+ * Each value is an abstract 0..100 score (50 = baseline). Concrete gameplay
+ * numbers (speed, HP, cooldown, …) are *derived* from these via
+ * `profileToStats` in `config/combat.ts` — the engine never hardcodes per-tank
+ * stats, so a new tank type is just a profile (data), not a code branch.
+ */
+export interface CombatProfile {
+  /** Projectile destructive power → bullet damage / wall & armor damage. */
+  firepower: number
+  /** Bullet travel speed → hit probability / reaction difficulty. */
+  projectileSpeed: number
+  /** Shooting effectiveness → fire cadence & fire-control (ties to AI). */
+  fireControl: number
+  /** Overall movement capability → speed / maneuverability. */
+  mobility: number
+  /** Tank durability → maximum HP. */
+  armor: number
+  /** Reserved extension attribute (shield / regen / stealth / …), v1.0 unused. */
+  special: number
+}
+
+/** One of the six capability dimensions. */
+export type CombatDimension = keyof CombatProfile
+
+/** Concrete gameplay stats derived from a CombatProfile. */
+export interface TankStats {
+  speed: number
+  bulletSpeed: number
+  bulletPower: number
+  maxHp: number
+  fireCooldown: number
+}
+
 export interface Tank extends Entity {
   kind: TankKind
   speed: number
   hp: number
   maxHp: number
+  /** Damage dealt per bullet (derived from firepower). */
+  bulletPower: number
+  /** Bullet travel speed (derived from projectileSpeed). */
+  bulletSpeed: number
   fireCooldown: number
   lastFire: number
   moving: boolean
@@ -51,6 +90,8 @@ export interface Tank extends Entity {
   level?: number
   shieldTimer?: number
   isPlayer?: boolean
+  // Combat Capability System — every tank owns a profile (immutable config).
+  profile: CombatProfile
   // Enemy-specific
   flashTimer?: number // armor tank flashing
   hitCount?: number // number of non-lethal hits taken (drives hit-state overlay)
@@ -194,12 +235,11 @@ export type GameEvent =
 
 export interface TankConfig {
   kind: TankKind
-  hp: number
-  speed: number
-  bulletSpeed: number
-  bulletPower: number
-  score: number
+  /** Display color (kept for themes/UI that sample it). */
   color: string
+  /** Score awarded when this tank is destroyed. */
+  score: number
+  /** Whether a bonus variant of this tank can drop a power-up. */
   dropsBonus: boolean
 }
 
