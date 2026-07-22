@@ -2,7 +2,7 @@ import type { World } from '../game/World'
 import type { Tank } from '../types'
 import type { Direction } from '../constants'
 import { CELL, TANK, DIR_VECTORS, FIELD } from '../constants'
-import { aabb } from '../utils/helpers'
+import { aabb, snap } from '../utils/helpers'
 import type { Perception, Situation, BulletObservation, ResolvedConfig } from './types'
 
 /**
@@ -31,19 +31,45 @@ export function dirToward(x: number, y: number, tx: number, ty: number): Directi
  * Can the tank take one full step in `dir` from its current position?
  * `considerTanks` includes other tanks as obstacles (used for routing to avoid
  * gridlock); the movement system still resolves final collisions regardless.
+ *
+ * The check covers the *swept union* of the tank's current and destination
+ * footprints, not just the destination. Checking only the destination was the
+ * root cause of "enemies stuck on each other / against walls": a tank already
+ * touching a wall (or another tank) on the side it wants to move along would
+ * see a clear destination (the destination sits *past* the obstacle) while the
+ * very first fine-step already overlaps it — so the AI kept choosing that
+ * "open" lane, rammed the obstacle every tick, and froze. The swept union
+ * catches the obstacle the tank is adjacent to, so such a direction is
+ * correctly reported as blocked.
  */
 export function canStep(world: World, tank: Tank, dir: Direction, considerTanks: boolean): boolean {
   const v = DIR_VECTORS[dir]
-  const nx = tank.x + v.dx * TANK
-  const ny = tank.y + v.dy * TANK
-  if (!world.isInBounds(nx, ny, tank.w, tank.h)) return false
-  if (world.rectHitsTerrain(nx, ny, tank.w, tank.h)) return false
+  // Reason about the tank on its conceptual grid. The cross-axis is kept
+  // aligned by `alignTank` every tick, but the movement axis can accumulate
+  // sub-cell drift (speed is fractional). Using the raw (drifted) position in
+  // the swept union makes two tanks stacked in a column wrongly report each
+  // other as blocking their perpendicular move — a primary cause of "enemies
+  // stuck on each other". Snapping to the grid removes that phantom overlap;
+  // since a tank can never legally overlap a real obstacle, the grid-aligned
+  // union agrees with the actual movement collision.
+  const gx = snap(tank.x, CELL)
+  const gy = snap(tank.y, CELL)
+  const nx = gx + v.dx * TANK
+  const ny = gy + v.dy * TANK
+  // Swept rectangle: union of the current footprint [gx,gx+TANK] and the
+  // destination footprint [nx,nx+TANK]. Width/height = step distance + size.
+  const sx = Math.min(gx, nx)
+  const sy = Math.min(gy, ny)
+  const sw = Math.abs(nx - gx) + TANK
+  const sh = Math.abs(ny - gy) + TANK
+  if (!world.isInBounds(sx, sy, sw, sh)) return false
+  if (world.rectHitsTerrain(sx, sy, sw, sh)) return false
   if (considerTanks) {
     const all = world.allTanks
     for (let i = 0; i < all.length; i++) {
       const o = all[i]
       if (o === tank || !o.alive || o.spawnTimer > 0) continue
-      if (aabb(nx, ny, tank.w, tank.h, o.x, o.y, o.w, o.h)) return false
+      if (aabb(sx, sy, sw, sh, o.x, o.y, o.w, o.h)) return false
     }
   }
   return true
@@ -77,7 +103,11 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     if (tt === 'base') return { hit: 'base', dist: d }
     if (tt === 'brick') return { hit: 'wall', dist: d }
     if (tt === 'steel') return { hit: 'steel', dist: d }
-    if (player && player.alive && aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)) {
+    if (
+      player &&
+      player.alive &&
+      aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)
+    ) {
       return { hit: 'player', dist: d }
     }
   }
@@ -146,12 +176,7 @@ export function perceive(world: World, tank: Tank, cfg: ResolvedConfig): Percept
 }
 
 /** Convert perception into tactical knowledge (analysis only, no decisions). */
-export function analyze(
-  world: World,
-  tank: Tank,
-  p: Perception,
-  cfg: ResolvedConfig,
-): Situation {
+export function analyze(world: World, tank: Tank, p: Perception, cfg: ResolvedConfig): Situation {
   const maxDist = FIELD
   const distToBase = p.hasBase ? manhattan(p.selfX, p.selfY, p.baseX, p.baseY) : Infinity
   const distToPlayer = p.hasPlayer ? manhattan(p.selfX, p.selfY, p.playerX, p.playerY) : Infinity

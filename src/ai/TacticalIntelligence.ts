@@ -12,7 +12,7 @@ import {
   ELECTION_CHECK_TICKS,
   DODGE_LOCK_MS,
 } from '../constants'
-import { opposite, ALL_DIRS } from '../utils/helpers'
+import { opposite, ALL_DIRS, snap } from '../utils/helpers'
 import { resolveConfig, commanderChanceFor } from './config'
 import {
   capabilityBias,
@@ -176,7 +176,8 @@ export class TacticalIntelligence {
     const w = cfg.weights
     const maxDist = FIELD
     const threatPenalty = s.threat ? 0.35 : 0
-    const followsDirective = brain.directive !== 'none' && cfg.teamwork && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
+    const followsDirective =
+      brain.directive !== 'none' && cfg.teamwork && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
 
     // Combat Capability bias (plan §14): the tank evaluates its OWN strengths.
     // A high-mobility tank presses/flanks harder; a high-armor tank pushes more
@@ -282,7 +283,11 @@ export class TacticalIntelligence {
     }
 
     // Directive bias (teamwork tanks only; others ignore it — §14).
-    if (brain.directive !== 'none' && cfg.teamwork && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5) {
+    if (
+      brain.directive !== 'none' &&
+      cfg.teamwork &&
+      brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
+    ) {
       switch (brain.directive) {
         case 'pushLeft':
           tx = Math.min(tx, FIELD * 0.33)
@@ -333,9 +338,23 @@ export class TacticalIntelligence {
     const cy = tank.y + tank.h / 2
     const desired = dirToward(cx, cy, tx, ty)
     const options = p.openDirs
-    if (options.length === 0) return brain.currentDir
+    if (options.length === 0) {
+      // Fully boxed in — every direction is blocked by terrain or another tank
+      // (e.g. two enemies nose-to-nose in a 1-wide corridor, or wedged in a
+      // dead-end pocket). Returning `currentDir` here would make the tank ram
+      // the *same* blocked direction every tick → permanent freeze ("enemies
+      // stuck on each other"). Reverse instead so the tank backs out of the
+      // pocket; on a corridor with an open end this unzips the whole jam (the
+      // tank at the open end is never boxed, moves, and frees the rest). If the
+      // reverse is also blocked the tank simply can't move this tick — but at
+      // least one member of any multi-tank jam with an opening will find it.
+      return opposite(brain.currentDir)
+    }
 
-    const scored = options.map((d) => ({ d, score: this.dirScore(world, tank, d, desired, tx, ty) }))
+    const scored = options.map((d) => ({
+      d,
+      score: this.dirScore(world, tank, d, desired, tx, ty),
+    }))
     scored.sort((a, b) => b.score - a.score)
 
     // Imperfection: occasionally commit to a suboptimal route.
@@ -346,7 +365,14 @@ export class TacticalIntelligence {
     return scored[0].d
   }
 
-  private dirScore(world: World, tank: Tank, d: Direction, desired: Direction, tx: number, ty: number): number {
+  private dirScore(
+    world: World,
+    tank: Tank,
+    d: Direction,
+    desired: Direction,
+    tx: number,
+    ty: number,
+  ): number {
     const v = DIR_VECTORS[d]
     const nx = tank.x + v.dx * CELL
     const ny = tank.y + v.dy * CELL
@@ -364,11 +390,15 @@ export class TacticalIntelligence {
 
   /** Count open directions from a position (terrain only, ignores tanks). */
   private openCountAt(world: World, x: number, y: number): number {
+    // Grid-align the reference point so sub-cell drift doesn't skew the
+    // dead-end penalty the way it skewed canStep (see canStep notes).
+    const gx = snap(x, CELL)
+    const gy = snap(y, CELL)
     let c = 0
     for (const d of ALL_DIRS) {
       const v = DIR_VECTORS[d]
-      const nx = x + v.dx * TANK
-      const ny = y + v.dy * TANK
+      const nx = gx + v.dx * TANK
+      const ny = gy + v.dy * TANK
       if (world.isInBounds(nx, ny, TANK, TANK) && !world.rectHitsTerrain(nx, ny, TANK, TANK)) c++
     }
     return c
@@ -505,7 +535,12 @@ export class TacticalIntelligence {
 
     bestAi.isCommander = true
     bestAi.level = 'commander'
-    bestAi.commanderTimer = COMMANDER_INTERVAL_MS * (0.5 + world.rng.next() * 0.5)
+    // Broadcast the FIRST directive on the very next tick (timer already <= 0).
+    // This matters because a freshly-elected commander can be killed by
+    // friendly fire before its nominal interval elapses; broadcasting
+    // immediately on election guarantees coordination kicks in right away
+    // instead of depending on the commander surviving ~COMMANDER_INTERVAL_MS.
+    bestAi.commanderTimer = 0
     bestAi.strategicGoal = 'attackBase'
 
     // Elite commander combat modifier (plan §8, §10): boost the kind's primary
@@ -567,7 +602,12 @@ export class TacticalIntelligence {
     if (right > left + 1) return 'pushLeft'
     if (left > right + 1) return 'pushRight'
 
-    return world.rng.pick(['attackTogether', 'spreadOut', 'pushLeft', 'pushRight'] as CommanderDirective[])
+    return world.rng.pick([
+      'attackTogether',
+      'spreadOut',
+      'pushLeft',
+      'pushRight',
+    ] as CommanderDirective[])
   }
 }
 

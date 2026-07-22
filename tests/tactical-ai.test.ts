@@ -190,10 +190,32 @@ describe('Tactical Intelligence — commander (DoD #4)', () => {
 
   it('chaos elects a commander that broadcasts directives to others', () => {
     const { world, sim } = seededWorld(2024, 'chaos')
+    // Capture the base cells so the commander-coordination assertion isn't
+    // disturbed by the base being destroyed. Enemies reaching the base triggers
+    // loadStage(), which wipes every enemy (including the commander) — that is
+    // correct game behaviour but incidental to what this test checks (a
+    // commander *broadcasts* directives). Navigation improvements make enemies
+    // reach the base sooner, so we keep the base alive in place to isolate the
+    // broadcast behaviour. The Definition of Done ("commander coordinates but
+    // never overrides") is fully preserved.
+    const baseCells: Array<{ c: number; r: number }> = []
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (world.tileMap.grid[r][c] === 'base') baseCells.push({ c, r })
+      }
+    }
+    const restoreBase = () => {
+      for (const { c, r } of baseCells) world.tileMap.grid[r][c] = 'base'
+      world.tileMap.rebuildBaseCache()
+    }
     let sawCommander = false
     let sawDirective = false
     for (let i = 0; i < 3600; i++) {
       sim.tick()
+      if (world.tileMap.isBaseDestroyed()) {
+        restoreBase()
+        world.state = 'playing'
+      }
       const cmd = world.tanks.find((t) => t.alive && t.aiState?.isCommander)
       if (cmd) {
         sawCommander = true
@@ -204,7 +226,6 @@ describe('Tactical Intelligence — commander (DoD #4)', () => {
           }
         }
       }
-      if (world.state !== 'playing') world.loadStage(world.stageIndex)
       if (!world.player || !world.player.alive) world.spawnPlayer()
     }
     expect(sawCommander).toBe(true)
