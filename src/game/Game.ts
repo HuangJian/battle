@@ -8,7 +8,7 @@ import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { STAGES } from '../config/stages'
-import { TICK_MS } from '../constants'
+import { TICK_MS, MAX_RENDER_FPS } from '../constants'
 import type { GameSettings } from '../types'
 
 const SETTINGS_KEY = 'bc_settings'
@@ -31,6 +31,10 @@ export class Game {
   private running = false
   private rafId = 0
   private prevStageIndex = -1
+  /** Timestamp of the last canvas repaint (for MAX_RENDER_FPS throttle). */
+  private _lastRenderTime = 0
+  /** True while the tab is hidden (loop paused by visibilitychange). */
+  private _hidden = false
   private prevRecoveryPhase = 'idle'
   private prevCountdown = 0
 
@@ -74,13 +78,35 @@ export class Game {
     this.presentation.initSpriteCache(spriteLibrary)
     this.running = true
     this.lastTime = performance.now()
+    document.addEventListener('visibilitychange', this.onVisibility)
     this.loop(this.lastTime)
   }
 
   stop(): void {
     this.running = false
     cancelAnimationFrame(this.rafId)
+    document.removeEventListener('visibilitychange', this.onVisibility)
     this.input.detach(window)
+  }
+
+  /**
+   * Pause the loop when the tab is hidden (stops all GPU/CPU work — the single
+   * biggest energy saver for a backgrounded game) and resume cleanly on return.
+   */
+  private onVisibility = (): void => {
+    if (document.hidden) {
+      if (!this._hidden) {
+        this._hidden = true
+        cancelAnimationFrame(this.rafId)
+      }
+    } else if (this._hidden) {
+      this._hidden = false
+      if (this.running) {
+        this.lastTime = performance.now()
+        this.presentation.markNeedsRender()
+        this.rafId = requestAnimationFrame(this.loop)
+      }
+    }
   }
 
   private loop = (time: number): void => {
@@ -164,8 +190,21 @@ export class Game {
     this.audio.handleEvents(events)
     this.presentation.handleEvents(events)
 
-    // Render
-    this.presentation.render(this.world, dt)
+    // Render — on-demand energy saver. The full canvas repaint is skipped
+    // unless the visible scene changed (PresentationLayer.shouldRender) and the
+    // MAX_RENDER_FPS throttle allows it. This keeps the GPU idle — instead of
+    // repainting 60×/sec — during menu, pause, game-over, and idle lulls, so
+    // the fan stays off. Input, simulation, and the HUD still run every frame.
+    const wantRender = this.presentation.shouldRender(this.world)
+    const canRender = MAX_RENDER_FPS <= 0 || time - this._lastRenderTime >= 1000 / MAX_RENDER_FPS
+    if (wantRender && canRender) {
+      this.presentation.render(this.world, dt)
+      this._lastRenderTime = time
+    }
+
+    // Update the HTML HUD every frame (cheap, internally guarded) so menu/pause
+    // overlays stay live even when the canvas repaint is skipped.
+    this.presentation.updateUI(this.world)
 
     // Clear per-frame input state
     this.input.endFrame()

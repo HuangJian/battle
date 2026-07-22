@@ -23,6 +23,17 @@ export const ALIGN = CELL // 16
 /** Fixed timestep for simulation (ms) */
 export const TICK_MS = 1000 / 60
 
+/**
+ * Render-rate cap (frames/sec). Decoupled from the simulation: the sim always
+ * ticks at 60Hz for responsiveness/determinism, but the *canvas repaint* can be
+ * throttled to cut GPU load and power draw.
+ *   0 = uncapped (paint every animation frame — default, preserves 60fps feel)
+ *   e.g. 30 = halve GPU work during action (battery / low-power mode)
+ * On-demand skip (PresentationLayer.shouldRender) already eliminates repaints
+ * during idle/menu/pause regardless of this value.
+ */
+export const MAX_RENDER_FPS = 0
+
 /** Max enemies alive at once */
 export const MAX_ENEMIES_ALIVE = 4
 

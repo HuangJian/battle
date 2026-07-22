@@ -412,3 +412,59 @@ passes (≈2500 cheap iterations/frame, no allocation). Left as-is — the per-t
 batching minimizes `fillStyle`/`strokeStyle` state changes; merging into one pass
 would interleave types and *increase* state churn. `world.allTanks` rewrites a
 reused buffer per call (O(tanks), trivial).
+
+---
+
+### 26. Energy Pass: On-Demand Render Skip + Visibility Pause
+
+Fourth pass, driven by the explicit goal "reduce power draw / don't let the fan
+spin". Hitting 60 fps is necessary but not sufficient: if the loop repaints the
+full 416×416 canvas **every animation frame unconditionally**, the GPU never idles
+and the fan runs continuously — even at a static menu, while paused, on the
+game-over screen, or during idle lulls. Energy is won by **doing less work per
+second**, not just by speeding up each frame.
+
+**DPR cap already in place** (`PresentationLayer` clamps `devicePixelRatio` to ≤2),
+so overdraw was already bounded. The real gaps were (1) unconditional full-canvas
+repaint and (2) no visibility pause.
+
+**Changes:**
+- **On-demand render skip (`PresentationLayer.shouldRender`)** — returns `false`
+  (skip `render()` entirely) when the visible scene is unchanged. The canvas keeps
+  its last painted pixels; the GPU goes idle. Input, simulation, and the HTML HUD
+  still run every frame, so responsiveness is untouched. Forced-`true` when:
+  time-based effects animate every frame (particles, explosions, screen flash,
+  hit-pause, camera shake, score popups); structural/UI state changes (game state,
+  theme, menu/recovery navigation, terrain-cache dirty). Otherwise a cheap
+  **scene signature** (`computeSceneSig`) is compared to the last painted frame —
+  water phase + coarse bullet/tank positions + tank state bits (spawn/shield/flash/
+  bonus/moving) + player level + power-up position/type + camera offset, with the
+  native spawn/shield/flash animation phase folded in so those animations still
+  play at their designed rate (repaint only on phase flips, skip in-between
+  frames). Coarse 8px buckets mean sub-pixel jitter never false-triggers a repaint.
+- **`reset()` forces a repaint** (`_needRender = true`) so returning to menu /
+  recovery-resume always paints a fresh frame. Same flag set on visibility resume.
+- **Visibility pause (`Game.onVisibility`)** — on `document.hidden`, cancel the rAF
+  and stop the loop completely (the single biggest energy saver for a backgrounded
+  tab); on return, reset `lastTime`, mark-needs-render, and resume. Guarded by
+  `running` so `stop()` still wins. Listener added in `start()`, removed in `stop()`.
+- **`MAX_RENDER_FPS` knob (`constants.ts`, default 0 = uncapped)** — decouples the
+  canvas repaint rate from the 60 Hz simulation. Set to e.g. `30` for a battery /
+  low-power mode that halves GPU work during *active* play. Default preserves the
+  60 fps feel; on-demand skip already eliminates idle repaints regardless of value.
+- **HUD split out** — `render()` no longer calls `ui.update`; a separate always-on
+  `updateUI()` keeps menu/pause overlays live even when the canvas repaint is gated.
+
+**Behavior:** during menu / pause / game-over / victory / idle lulls the canvas is
+repainted 0× (fans off); during active play with motion it repaints every frame as
+before (smooth, 60 fps). The simulation always ticks at 60 Hz for determinism.
+
+**Verified:** `tsc --noEmit` clean, oxlint 0 warnings, `bun test` 25/25,
+`bun tools/bench-sim.ts` ALL PASS (sim 1.5–2.2 µs/tick, well under the 16.6 ms
+frame budget). `vite build` itself is blocked in this sandbox only by the
+bulk-delete of `dist/assets` (unrelated to code correctness).
+
+**Considered-and-left:** a finer-grained dirty-rectangle canvas compositor was
+evaluated but rejected — it would violate the "keep architecture simple" gate for
+marginal extra gain over the whole-frame skip, and the terrain/forest/water/vignette
+caches already make each full repaint cheap.
