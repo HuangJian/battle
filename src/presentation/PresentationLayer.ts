@@ -314,16 +314,17 @@ export class PresentationLayer {
 
   /** Sync visual components with simulation entities */
   private updateVisualState(world: World): void {
-    const activeIds = new Set<number>()
+    const frame = world.frame
 
     for (const tank of world.allTanks) {
       if (!tank.alive) continue
-      activeIds.add(tank.id)
 
       const vc = this.animations.getOrCreate(tank.id, 'tank', tank.dir, tank.level ?? 0)
       vc.direction = tank.dir
       vc.level = tank.level ?? 0
       vc.flash = (tank.flashTimer ?? 0) > 0
+      // Frame stamp for allocation-free cleanup (see AnimationSystem.cleanup).
+      vc.lastSeenFrame = frame
 
       if (tank.spawnTimer > 0) {
         this.animations.setAnimation(vc, 'spawn')
@@ -334,8 +335,8 @@ export class PresentationLayer {
       }
     }
 
-    // Clean up visual components for dead entities
-    this.animations.cleanup(activeIds)
+    // Clean up visual components for dead entities (allocation-free sweep).
+    this.animations.cleanup(frame)
   }
 
   /** Reset presentation state (e.g., when returning to menu) */

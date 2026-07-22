@@ -294,3 +294,121 @@ codec that decodes each 13×13 numeric level into the engine's native 26×26 cha
 - No change to menu navigation, which uses `wasPressed()` edge detection (DECISIONS §8) rather than `getMoveDirection()`.
 - No change to custom key bindings — `moveDirFor()` consults `this.keys`, so WASD layouts work identically.
 - Test coverage: `tests/input.test.ts` pins down press-order, fallback-on-release, auto-repeat dedup, non-movement-key filtering, custom bindings, and cross-frame persistence.
+
+---
+
+## Performance Tuning (2026-07-22)
+
+**Goal:** Sustain 60fps with no GC jank. Scope: render/GC path only — the simulation was measured at ~3µs/tick (negligible vs the 16.6ms frame budget), so it is NOT the bottleneck.
+
+### 21. Eliminate Per-Frame Allocations (GC Pressure)
+
+**Decision:** Remove every unconditional allocation on the per-frame hot path.
+
+- `Camera.getOffset()` now returns a reused `_offset` object instead of `new {x,y}` every frame.
+- `World.consumeEvents()` uses a double-buffered swap (`events` ↔ `eventsSpare`, clear the spare) instead of `this.events = []` — zero array allocation per frame.
+- `EffectsSystem.getFlash()` returns a reused `_flashResult` object instead of `new {color,intensity}` on every flash frame.
+- `AnimationSystem.cleanup()` uses a frame stamp (`VisualComponent.lastSeenFrame === world.frame`) for mark-and-sweep instead of `PresentationLayer` allocating `new Set<number>()` every frame and doing hash `.has()` lookups.
+
+**Rationale:** GC pauses are the most likely cause of frame drops in a steady-state canvas game; removing guaranteed per-frame allocations keeps the heap stable. Verified by `tools/bench-sim.ts` (≤2 distinct event-buffer identities over 2000 frames).
+
+### 22. Incremental Terrain Cache Rebuild
+
+**Decision:** A single destroyed sub-block no longer triggers a full 26×26 terrain-cache rebuild. `TileMap` now records changed cells in `dirtyCells` (flat `row*GRID+col` indices); the renderer redraws only those cells in place (terrain + forest caches), leaving `tm.dirty` (full rebuild) for stage load, theme change, and base destruction (which needs ruin rendering).
+
+**Rationale:** Previously every brick/steel hit set `tm.dirty`, forcing ~676 tile draws + grid redraw + forest redraw + a full water rescan on the next frame — even when only 1–4 cells changed. During sustained combat this was a per-frame O(676) redundant-render cost. Incremental redraw is O(changed cells) and pixel-identical to a full rebuild (empty cells redraw their grid lines; solid cells redraw tile art; the opposite cache cell is cleared). Both caches stay consistent for any transition.
+
+**Verification:** `tools/bench-sim.ts` asserts `destroy(3,3)` → `dirty===false && dirtyCells.length===1`, and `destroyAllBaseCells()` → `dirty===true` (full rebuild preserved).
+
+### 23. Regression Guard: FPS Sampler
+
+**Decision:** `Game` tracks a rolling FPS (updated once/second, allocation-free) and `console.warn`s only after 3 *consecutive* sub-45fps seconds (avoids one-off GC-blip noise). `bun tools/bench-sim.ts` is the headless perf regression check (sim timing + allocation + terrain invariants).
+
+### 24. Deeper Pass: Render Hot-Path & Water Steady-State
+
+Second optimization pass ("think deeper"). All changes are behavior-preserving or
+behavior-improving and allocation-free on the steady-state path. Verified: typecheck clean, oxlint 0 warnings, `bench-sim.ts` ALL PASS.
+
+- **Water is a steady-state hotspot (fixed).** `drawWater` previously called
+  `drawSvgCentered('terrain.water', …)`, and because `terrain.water` is registered
+  in the sprite library, that path **won** — so every water sub-cell did
+  `save()/translate()/drawImage()/restore()` **every frame** (40–80 cells on
+  "Waterways"/"Riverbed" stages → 40–80 graphics-state allocations/frame,
+  every frame). It also silently *disabled* the intended wave animation (the
+  static SVG never animated). Fix: `SpriteCache.rebuildWater(theme)` pre-rasterizes
+  two phase-animated water bitmaps (theme-aware, rebuilt on theme change like the
+  terrain/vignette caches); `drawWater` blits the active phase. Net: 1 cheap blit
+  per cell, no per-call allocation, and the wave animation is restored.
+
+- **`drawSvgCentered` no-rotation fast path (fixed).** The common SVG draw has
+  `rotationRad === 0` (water, power-ups, base tiles). It now blits directly with
+  `drawImage` and skips `save()/restore()`, eliminating a per-call graphics-state
+  allocation for every non-rotated sprite draw.
+
+- **Hoist per-call object literals (fixed).** `drawEnemyTank` allocated a `keyMap`
+  object literal and `drawPowerUp` a `itemKey` object literal on **every** draw
+  call (once per enemy tank / power-up per frame → N allocations/frame). Both are
+  now module-level constants (`TANK_KEY_MAP`, `ITEM_KEY_MAP`).
+
+- **Debris particles: drop `save()/restore()` per particle (fixed).** The debris
+  pass did `save()/translate()/rotate()/restore()` per debris particle. `save()`
+  allocates a graphics-state object each call — GC pressure exactly when many
+  explosions overlap (debris up to ~15 per big boom). Replaced with an explicit
+  `setTransform` to the base+translate matrix and a single `setTransform` reset
+  after the pass (base transform components cached on `GameRenderer`).
+
+- **`renderPopups` early-return (fixed).** Popups are transient (briefly after a
+  kill). The method forced `ctx.font = 'bold 11px …'` (a CSS-font parse) and two
+  `textAlign` writes **every frame** even with zero popups. Now returns early when
+  `world.popups.length === 0`.
+
+- **`UIManager.update` stage-clear / victory DOM writes (fixed).** Previously wrote
+  a template-literal string into a hidden element's `textContent` **every frame**
+  during normal play (the elements exist but are `display:none`). Now guarded by
+  `world.state` and cached (`lastStageClear` / `lastVictory`) so the work only
+  happens on the relevant screen and only on change.
+
+**Sweep result:** The `Game` loop orchestration (`consumeEvents` double-buffer,
+number `dt`, `endFrame`) is allocation-free. Event-driven allocations
+(`EmitterConfig` literals per explosion/bullet) are bounded and not steady-state;
+left as-is. Net steady-state per-frame allocations on the render path: ~0.
+
+### 25. Ultra Pass: Simulation Per-Tick Allocations
+
+Third pass ("ultra think"). Scrutinized every per-frame system that the first two
+passes hadn't read line-by-line — Simulation tick, RecoverySystem, AudioManager,
+AnimationSystem, EffectsSystem, Camera, Input. Confirmed clean (allocation-free
+or event-bound, not steady-state) for: RecoverySystem (snapshots are 1 Hz, not
+per-frame), AudioManager (Web Audio nodes only on actual sound events),
+AnimationSystem (getOrCreate allocates once per entity; getFrame/cleanup no-alloc),
+EffectsSystem (getFlash reuses object), Camera (reused offset), Input (persistent
+Sets cleared, not reallocated), Game loop orchestration (double-buffered events,
+number dt). The remaining steady-state allocations were all in the **simulation
+tick** (previously deemed "not the bottleneck" by timing, but per-tick allocations
+still feed GC during active play):
+
+- **`tryFire` player-bullet count (fixed).** Counted active player bullets with
+  `w.bullets.filter(b => b.alive && b.ownerId === tank.id).length` — a **new array
+  allocation on every player fire attempt** (each shot, ~2–5×/sec). Replaced with an
+  allocation-free counting loop that early-breaks at the cap.
+- **`spawnPowerUp` drop table (fixed).** Rebuilt the `['star','bomb','shield',
+  'freeze','tank','helmet']` array literal **every bonus-enemy kill**. Hoisted to a
+  module-level `POWERUP_TYPES` constant (same pattern as the earlier key-map hoists).
+- **`updateSpawning` spawn rect (fixed).** Allocated `{ x, y, w, h }` on every
+  spawn-retry tick (while the spawn point is blocked). Inlined the AABB call with
+  literal values — zero allocation.
+- **`World.removeBullet` (fixed, defensive).** Dead code (never called) but carried
+  `this.bullets = this.bullets.filter(...)`, a per-removal array allocation. Switched
+  to in-place swap-and-pop, matching `removeDeadEntities`.
+
+**Verified:** typecheck clean, oxlint 0 warnings, `bun test` 25/25 pass,
+`bun tools/bench-sim.ts` ALL PASS (sim timing informational; correctness invariants
+hold). Net: the entire per-frame + per-tick path is now allocation-free on the
+steady-state path. Only remaining allocations are gameplay/event-bound (explosions,
+power-up spawns, emitted events) and are accepted as inherent.
+
+**Considered-and-left:** `renderParticles` iterates the pool in 5 type-batched
+passes (≈2500 cheap iterations/frame, no allocation). Left as-is — the per-type
+batching minimizes `fillStyle`/`strokeStyle` state changes; merging into one pass
+would interleave types and *increase* state churn. `world.allTanks` rewrites a
+reused buffer per call (O(tanks), trivial).

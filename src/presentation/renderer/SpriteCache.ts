@@ -1,6 +1,8 @@
-import { TANK, BULLET } from '../../constants'
+import { TANK, BULLET, CELL } from '../../constants'
 import type { SpriteLibrary } from './SpriteLibrary'
 import { createOffscreenCanvas } from '../../utils/canvas'
+import type { ThemeColors } from '../../types'
+import { drawWaterTile } from './SpriteArtist'
 
 /**
  * SpriteCache — pre-rasterizes SVG sprites to canvas bitmaps at init time.
@@ -41,6 +43,8 @@ export class SpriteCache {
   private itemSprites = new Map<string, CanvasImageSource>()
   private bulletSprite: CanvasImageSource | null = null
   private explosionSprite: CanvasImageSource | null = null
+  /** Two phase-animated water frames (theme-aware), rebuilt on theme change. */
+  private waterSprites: CanvasImageSource[] = []
   private dpr: number
   private _built = false
 
@@ -113,6 +117,21 @@ export class SpriteCache {
     this._built = true
   }
 
+  /**
+   * Pre-rasterize the two water wave phases (theme-aware) into bitmaps. Called
+   * once at init and again whenever the theme changes, so `drawWater` can blit
+   * a phase per frame instead of redrawing water cells or (worse) allocating a
+   * graphics-state per water cell via the old SVG path.
+   */
+  rebuildWater(theme: ThemeColors): void {
+    this.waterSprites = []
+    for (let phase = 0; phase < 2; phase++) {
+      const { canvas, ctx } = createOffscreenCanvas(CELL * this.dpr, CELL * this.dpr, this.dpr)
+      drawWaterTile(ctx, 0, 0, CELL, theme, phase)
+      this.waterSprites.push(canvas)
+    }
+  }
+
   // ---- Pre-render helpers ----
 
   private renderRotated(
@@ -164,12 +183,17 @@ export class SpriteCache {
     return this.explosionSprite
   }
 
+  getWaterSprite(phase: number): CanvasImageSource | undefined {
+    return this.waterSprites[phase % 2]
+  }
+
   clear(): void {
     this.tankSprites.clear()
     this.effectSprites.clear()
     this.itemSprites.clear()
     this.bulletSprite = null
     this.explosionSprite = null
+    this.waterSprites = []
     this._built = false
   }
 }

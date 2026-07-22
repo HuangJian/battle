@@ -25,6 +25,9 @@ const ENEMY_SPAWN_POINTS = [
   { x: 24 * CELL, y: 0 },
 ]
 
+/** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
+const POWERUP_TYPES: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet']
+
 /**
  * Simulation — the only layer allowed to modify the World.
  * Runs all game systems in a fixed timestep.
@@ -128,13 +131,10 @@ export class Simulation {
     const pt = ENEMY_SPAWN_POINTS[this.spawnPointIndex % ENEMY_SPAWN_POINTS.length]
     this.spawnPointIndex++
 
-    // Check if spawn area is clear of other tanks
-    const spawnRect = { x: pt.x, y: pt.y, w: TANK, h: TANK }
+    // Check if spawn area is clear of other tanks (inline rect — no per-retry allocation)
     let canSpawn = true
     for (const tank of w.allTanks) {
-      if (
-        aabb(spawnRect.x, spawnRect.y, spawnRect.w, spawnRect.h, tank.x, tank.y, tank.w, tank.h)
-      ) {
+      if (aabb(pt.x, pt.y, TANK, TANK, tank.x, tank.y, tank.w, tank.h)) {
         canSpawn = false
         break
       }
@@ -341,10 +341,18 @@ export class Simulation {
     const now = w.frame * (1000 / 60)
     if (now - tank.lastFire < tank.fireCooldown) return
 
-    // Player bullet limit
+    // Player bullet limit — count in place (no per-fire array allocation)
     if (tank.isPlayer) {
       const maxBullets = (tank.level ?? 0) >= 2 ? 2 : 1
-      const activeBullets = w.bullets.filter((b) => b.alive && b.ownerId === tank.id).length
+      let activeBullets = 0
+      const bullets = w.bullets
+      for (let i = 0; i < bullets.length; i++) {
+        const b = bullets[i]
+        if (b.alive && b.ownerId === tank.id) {
+          activeBullets++
+          if (activeBullets >= maxBullets) break
+        }
+      }
       if (activeBullets >= maxBullets) return
     }
 
@@ -529,8 +537,7 @@ export class Simulation {
 
   private spawnPowerUp(): void {
     const w = this.world
-    const types: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet']
-    const type = w.rng.pick(types)
+    const type = w.rng.pick(POWERUP_TYPES)
 
     // Random position (not on walls) — entropy from world.rng for determinism.
     let x = 0,

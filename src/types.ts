@@ -252,6 +252,13 @@ export interface VisualComponent {
   scale: number
   flash: boolean
   level: number
+  /**
+   * Frame stamp used for mark-and-sweep cleanup of stale visual components
+   * (avoids allocating a Set every render frame). Set to world.frame each
+   * time the component is seen as alive; components whose stamp is stale are
+   * removed by AnimationSystem.cleanup().
+   */
+  lastSeenFrame?: number
 }
 
 /** Particle — a single visual particle */

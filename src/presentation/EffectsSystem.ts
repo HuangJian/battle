@@ -43,9 +43,16 @@ export class EffectsSystem {
     this.slowMoTimer = duration
   }
 
+  /**
+   * Get the current flash, or null if none. Returns a reused object (no
+   * per-frame allocation) — callers must read it immediately.
+   */
+  private _flashResult: { color: string; intensity: number } = { color: '#ffffff', intensity: 0 }
   getFlash(): { color: string; intensity: number } | null {
     if (this.flashIntensity <= 0) return null
-    return { color: this.flashColor, intensity: this.flashIntensity }
+    this._flashResult.color = this.flashColor
+    this._flashResult.intensity = this.flashIntensity
+    return this._flashResult
   }
 
   get isPaused(): boolean {

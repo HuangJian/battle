@@ -102,10 +102,14 @@ export class AnimationSystem {
     return vc.elapsed >= frameDuration * def.frames
   }
 
-  /** Remove components for entities that no longer exist */
-  cleanup(activeIds: Set<number>): void {
-    for (const [id] of this.components) {
-      if (!activeIds.has(id)) {
+  /**
+   * Remove visual components whose entity was not seen alive this frame.
+   * Uses a frame stamp (set on the component by the presentation layer) instead
+   * of a per-frame Set, so cleanup is allocation-free and O(components).
+   */
+  cleanup(currentFrame: number): void {
+    for (const [id, vc] of this.components) {
+      if (vc.lastSeenFrame !== currentFrame) {
         this.components.delete(id)
       }
     }

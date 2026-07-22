@@ -55,6 +55,8 @@ export class UIManager {
   private lastThemeKeyMenu = ''
   private lastSelectedStage = -1
   private lastHighScoreMenu = -1
+  private lastStageClear = ''
+  private lastVictory = ''
 
   constructor(root: HTMLElement) {
     this.root = root
@@ -384,14 +386,24 @@ export class UIManager {
       this.updateMenu(world)
     }
 
-    // Stage clear
-    if (this.stageClearName) {
-      this.stageClearName.textContent = `Stage ${world.stageIndex + 1}: ${world.currentStageName} Complete`
+    // Stage clear — only write while actually on the stage-clear screen, and
+    // only when the text changed. Previously this rebuilt a template-literal
+    // string and wrote a hidden element's textContent EVERY frame during play.
+    if (world.state === 'stageclear' && this.stageClearName) {
+      const txt = `Stage ${world.stageIndex + 1}: ${world.currentStageName} Complete`
+      if (txt !== this.lastStageClear) {
+        this.stageClearName.textContent = txt
+        this.lastStageClear = txt
+      }
     }
 
-    // Victory
-    if (this.victoryScoreEl) {
-      this.victoryScoreEl.textContent = String(world.score)
+    // Victory — same guard (only on the victory screen, only on change)
+    if (world.state === 'victory' && this.victoryScoreEl) {
+      const v = String(world.score)
+      if (v !== this.lastVictory) {
+        this.victoryScoreEl.textContent = v
+        this.lastVictory = v
+      }
     }
 
     // Recovery screen

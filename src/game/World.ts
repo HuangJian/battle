@@ -79,6 +79,12 @@ export class World {
   // Events (consumed by renderer/audio/stats)
   events: GameEvent[]
 
+  /**
+   * Spare event buffer for double-buffering. consumeEvents() swaps the active
+   * and spare buffers so the per-frame event array is never reallocated.
+   */
+  private eventsSpare: GameEvent[] = []
+
   // Reusable buffer for allTanks getter — avoids allocating a new array each call
   private _allTanksBuf: Tank[] = []
 
@@ -230,7 +236,17 @@ export class World {
   }
 
   removeBullet(id: number): void {
-    this.bullets = this.bullets.filter((b) => b.id !== id)
+    // In-place swap-and-pop (bullet order is irrelevant) — avoids allocating a
+    // fresh array on every removal.
+    const arr = this.bullets
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i].id === id) {
+        const last = arr.length - 1
+        arr[i] = arr[last]
+        arr.pop()
+        return
+      }
+    }
   }
 
   addExplosion(exp: Explosion): void {
@@ -309,9 +325,13 @@ export class World {
   }
 
   consumeEvents(): GameEvent[] {
-    const events = this.events
-    this.events = []
-    return events
+    // Double-buffer: return the current accumulation buffer and start fresh in
+    // the spare (now-cleared) buffer. No per-frame array allocation.
+    const out = this.events
+    this.events = this.eventsSpare
+    this.eventsSpare = out
+    this.events.length = 0
+    return out
   }
 
   // ---- Persistence ----

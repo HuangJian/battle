@@ -8,6 +8,7 @@
     "preview": "vite preview",
     "test": "bun test",
     "typecheck": "tsc --noEmit --incremental",
+    "bench": "bun tools/bench-sim.ts",
     "lint": "oxlint",
     "format": "oxfmt",
     "check": "bun test && tsc --noEmit --incremental && oxlint && oxfmt"

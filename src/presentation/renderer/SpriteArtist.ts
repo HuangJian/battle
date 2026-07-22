@@ -5,6 +5,62 @@ import type { SpriteCache } from './SpriteCache'
 import { DIR_TO_INDEX } from './SpriteCache'
 
 /**
+ * Draw a single water tile (procedural, theme-aware, phase-animated) into `ctx`
+ * at (x, y), sized `size`×`size`. Extracted as a shared helper so SpriteCache
+ * can pre-rasterize the two wave phases into bitmaps for cheap per-frame blits,
+ * while the no-cache fallback still animates identically.
+ */
+export function drawWaterTile(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  theme: ThemeColors,
+  phase: number,
+): void {
+  const s = size / 4
+  // Base
+  ctx.fillStyle = theme.water
+  ctx.fillRect(x, y, size, size)
+
+  // Wave layers
+  ctx.fillStyle = theme.waterDark
+  if (phase === 0) {
+    ctx.fillRect(x + s, y + s, s * 2, 1)
+    ctx.fillRect(x, y + s * 3, s * 2, 1)
+  } else {
+    ctx.fillRect(x + s * 2, y + s, s * 2, 1)
+    ctx.fillRect(x + s, y + s * 3, s * 2, 1)
+  }
+
+  // Highlights
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'
+  if (phase === 0) {
+    ctx.fillRect(x + s, y + s - 2, s * 2, 1)
+    ctx.fillRect(x, y + s * 3 - 2, s * 2, 1)
+  } else {
+    ctx.fillRect(x + s * 2, y + s - 2, s * 2, 1)
+    ctx.fillRect(x + s, y + s * 3 - 2, s * 2, 1)
+  }
+}
+
+/** Maps enemy tank kind → sprite key (module-level to avoid per-call allocation). */
+const TANK_KEY_MAP: Record<string, string> = {
+  basic: 'tank.basic',
+  fast: 'tank.fast',
+  power: 'tank.power',
+  armor: 'tank.armor',
+}
+
+/** Maps power-up type → sprite key (module-level to avoid per-call allocation). */
+const ITEM_KEY_MAP: Record<string, string> = {
+  star: 'item.star',
+  bomb: 'item.bomb',
+  shield: 'item.shield',
+  freeze: 'item.freeze',
+}
+
+/**
  * SpriteArtist — enhanced programmatic sprite drawing.
  * Draws all game sprites with Canvas 2D primitives at higher visual quality.
  * Theme-aware: colors come from the active theme.
@@ -54,11 +110,19 @@ export class SpriteArtist {
     if (!img) return false
     const ctx = this.ctx
     const s2 = size * scale
+    if (!rotationRad) {
+      // No rotation: blit directly. Avoids a per-call save()/restore() pair
+      // (graphics-state allocation + stack push/pop) on the hot path — the
+      // common case for water, power-ups, and base tiles.
+      ctx.imageSmoothingEnabled = true
+      ctx.drawImage(img, x + (size - s2) / 2, y + (size - s2) / 2, s2, s2)
+      return true
+    }
     const cx = x + size / 2
     const cy = y + size / 2
     ctx.save()
     ctx.translate(cx, cy)
-    if (rotationRad) ctx.rotate(rotationRad)
+    ctx.rotate(rotationRad)
     ctx.imageSmoothingEnabled = true
     ctx.drawImage(img, -s2 / 2, -s2 / 2, s2, s2)
     ctx.restore()
@@ -139,35 +203,21 @@ export class SpriteArtist {
   }
 
   drawWater(x: number, y: number, size: number, frame: number): void {
-    if (this.drawSvgCentered('terrain.water', x, y, size)) return
-    const t = this.theme
-    const ctx = this.ctx
-    const s = size / 4
+    // Fast path: pre-rasterized, phase-animated water bitmap (cheap blit, no
+    // per-frame save/translate/restore). Replaces the old static-SVG path that
+    // allocated a graphics state per water cell every frame and never animated.
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const phase = Math.floor(frame / 20) % 2
+      const sprite = cache.getWaterSprite(phase)
+      if (sprite) {
+        this.ctx.drawImage(sprite, x, y, size, size)
+        return
+      }
+    }
+    // Fallback (no cache built yet): procedural animated water
     const phase = Math.floor(frame / 20) % 2
-
-    // Base
-    ctx.fillStyle = t.water
-    ctx.fillRect(x, y, size, size)
-
-    // Wave layers
-    ctx.fillStyle = t.waterDark
-    if (phase === 0) {
-      ctx.fillRect(x + s, y + s, s * 2, 1)
-      ctx.fillRect(x, y + s * 3, s * 2, 1)
-    } else {
-      ctx.fillRect(x + s * 2, y + s, s * 2, 1)
-      ctx.fillRect(x + s, y + s * 3, s * 2, 1)
-    }
-
-    // Highlights
-    ctx.fillStyle = 'rgba(255,255,255,0.15)'
-    if (phase === 0) {
-      ctx.fillRect(x + s, y + s - 2, s * 2, 1)
-      ctx.fillRect(x, y + s * 3 - 2, s * 2, 1)
-    } else {
-      ctx.fillRect(x + s * 2, y + s - 2, s * 2, 1)
-      ctx.fillRect(x + s, y + s * 3 - 2, s * 2, 1)
-    }
+    drawWaterTile(this.ctx, x, y, size, this.theme, phase)
   }
 
   drawForest(x: number, y: number, size: number): void {
@@ -408,13 +458,7 @@ export class SpriteArtist {
     hp: number,
     hitStage = 0,
   ): void {
-    const keyMap: Record<string, string> = {
-      basic: 'tank.basic',
-      fast: 'tank.fast',
-      power: 'tank.power',
-      armor: 'tank.armor',
-    }
-    const key = keyMap[kind] ?? 'tank.basic'
+    const key = TANK_KEY_MAP[kind] ?? 'tank.basic'
 
     // Fast path: use pre-rasterized + pre-rotated sprite
     const cache = this.spriteCache
@@ -533,14 +577,7 @@ export class SpriteArtist {
   // ================================================================
 
   drawPowerUp(x: number, y: number, size: number, type: string, frame: number): void {
-    // Fixed: item keys were 'item_bomb'/'item_freeze' but SPRITE_URLS uses 'item.bomb'/'item.freeze'
-    const itemKey: Record<string, string> = {
-      star: 'item.star',
-      bomb: 'item.bomb',
-      shield: 'item.shield',
-      freeze: 'item.freeze',
-    }
-    const key = itemKey[type]
+    const key = ITEM_KEY_MAP[type]
 
     // Fast path: pre-rasterized item bitmap
     if (key) {

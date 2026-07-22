@@ -41,15 +41,20 @@ export class Camera {
     }
   }
 
-  /** Get the current render offset (shake + sustained offset) */
+  /**
+   * Get the current render offset (shake + sustained offset).
+   * Returns a reused object — never allocates — so the per-frame render path
+   * stays allocation-free. Callers must read it immediately (it is mutated on
+   * the next call).
+   */
+  private _offset: { x: number; y: number } = { x: 0, y: 0 }
   getOffset(): { x: number; y: number } {
     const s = this.state
     const shakeX = (Math.random() - 0.5) * s.shake * 2
     const shakeY = (Math.random() - 0.5) * s.shake * 2
-    return {
-      x: s.offsetX + shakeX,
-      y: s.offsetY + shakeY,
-    }
+    this._offset.x = s.offsetX + shakeX
+    this._offset.y = s.offsetY + shakeY
+    return this._offset
   }
 
   reset(): void {

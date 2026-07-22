@@ -14,6 +14,13 @@ export class TileMap {
   /** Set to true when terrain changes; renderer checks this to invalidate its cache. */
   dirty = true
 
+  /**
+   * Indices (row * GRID + col) of individual cells that changed since the last
+   * incremental terrain-cache redraw. Lets the renderer redraw only the
+   * affected cells instead of the whole 26×26 field. Cleared after consumption.
+   */
+  dirtyCells: number[] = []
+
   /** Cached positions of all base cells (usually 4 cells at rows 24-25, cols 12-13). */
   private baseCells: Array<{ c: number; r: number }> = []
   /** Cached base position in pixels (first base cell found). */
@@ -46,6 +53,7 @@ export class TileMap {
 
     this.rebuildBaseCache()
     this.dirty = true
+    this.dirtyCells.length = 0
   }
 
   private charToTerrain(ch: string): TerrainType {
@@ -74,7 +82,15 @@ export class TileMap {
 
   set(col: number, row: number, type: TerrainType): void {
     if (col >= 0 && col < GRID && row >= 0 && row < GRID) {
+      const prev = this.grid[row][col]
+      if (prev === type) return
       this.grid[row][col] = type
+      // Water changes require re-scanning the water cell list → full rebuild.
+      if (prev === 'water' || type === 'water') {
+        this.dirty = true
+      } else {
+        this.dirtyCells.push(row * GRID + col)
+      }
     }
   }
 
@@ -82,6 +98,7 @@ export class TileMap {
   destroy(col: number, row: number): void {
     if (col >= 0 && col < GRID && row >= 0 && row < GRID) {
       const type = this.grid[row][col]
+      if (type === 'empty') return // nothing to destroy — no change
       this.grid[row][col] = 'empty'
       if (type === 'base') {
         // Check if any cached base cells remain intact (O(4) instead of O(676))
@@ -92,8 +109,12 @@ export class TileMap {
             break
           }
         }
+        // Base destruction changes global ruin rendering → full rebuild.
+        this.dirty = true
+      } else {
+        // Incremental redraw: only this one cell changed (no full rebuild).
+        this.dirtyCells.push(row * GRID + col)
       }
-      this.dirty = true
     }
   }
 
@@ -101,6 +122,7 @@ export class TileMap {
   destroyAllBaseCells(): void {
     for (const cell of this.baseCells) {
       this.grid[cell.r][cell.c] = 'empty'
+      this.dirtyCells.push(cell.r * GRID + cell.c)
     }
     this.baseAlive = false
     this.dirty = true

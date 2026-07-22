@@ -34,6 +34,12 @@ export class Game {
   private prevRecoveryPhase = 'idle'
   private prevCountdown = 0
 
+  /** Rolling FPS (updated once per second) — cheap regression signal. */
+  fps = 0
+  private _frameCount = 0
+  private _fpsLastTime = 0
+  private _slowSeconds = 0
+
   settings: GameSettings
   private difficultyIndex = 1 // classic
   private themeIndex = 0
@@ -163,6 +169,22 @@ export class Game {
 
     // Clear per-frame input state
     this.input.endFrame()
+
+    // --- Performance sampler (regression guard, allocation-free) ---
+    this._frameCount++
+    if (time - this._fpsLastTime >= 1000) {
+      this.fps = this._frameCount
+      this._frameCount = 0
+      this._fpsLastTime = time
+      if (this.fps < 45) {
+        this._slowSeconds++
+        if (this._slowSeconds === 3) {
+          console.warn(`[perf] sustained low frame rate: ${this.fps} fps`)
+        }
+      } else {
+        this._slowSeconds = 0
+      }
+    }
 
     this.rafId = requestAnimationFrame(this.loop)
   }

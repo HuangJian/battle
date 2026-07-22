@@ -7,7 +7,7 @@ import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
-import type { ThemeColors } from '../../types'
+import type { ThemeColors, TerrainType } from '../../types'
 import { createOffscreenCanvas } from '../../utils/canvas'
 
 /**
@@ -56,6 +56,14 @@ export class GameRenderer {
   // ---- Gradient cache ----
   private cachedBgGradient: CanvasGradient | null = null
   private cachedTheme: ThemeColors | null = null
+
+  // ---- Water sprite cache (theme-aware, phase-animated) ----
+  private waterSpriteDirty = true
+
+  // ---- Base transform components (for allocation-free debris rendering) ----
+  private _baseDpr = 1
+  private _baseCamX = 0
+  private _baseCamY = 0
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -107,6 +115,7 @@ export class GameRenderer {
     this.terrainCacheDirty = true
     this.cachedBgGradient = null
     this.vignetteDirty = true
+    this.waterSpriteDirty = true
   }
 
   setSpriteCache(cache: SpriteCache): void {
@@ -128,6 +137,11 @@ export class GameRenderer {
     // Combine DPR + camera into a single setTransform (no save/restore needed)
     ctx.setTransform(dpr, 0, 0, dpr, cam.x * dpr, cam.y * dpr)
 
+    // Cache base transform so the debris pass can reset without save/restore
+    this._baseDpr = dpr
+    this._baseCamX = cam.x
+    this._baseCamY = cam.y
+
     // 1. Background fill
     this.fillBackground(world)
 
@@ -136,6 +150,10 @@ export class GameRenderer {
     ctx.drawImage(this.terrainCache, 0, 0, FIELD, FIELD)
 
     // 3. Water tiles (drawn directly — cheap, few tiles, animated)
+    if (this.waterSpriteDirty) {
+      this.artist.spriteCache?.rebuildWater(world.theme)
+      this.waterSpriteDirty = false
+    }
     this.renderWater(world)
 
     // 4. Tanks
@@ -200,14 +218,96 @@ export class GameRenderer {
 
   private updateTerrainCache(world: World): void {
     const tm = world.tileMap
-    if (!this.terrainCacheDirty && !tm.dirty) return
+    if (!this.terrainCacheDirty && !tm.dirty && tm.dirtyCells.length === 0) return
 
-    this.terrainCacheDirty = false
-    tm.dirty = false
+    if (this.terrainCacheDirty || tm.dirty) {
+      // Full rebuild — stage load, theme change, or base destruction (ruins).
+      this.terrainCacheDirty = false
+      tm.dirty = false
+      this.rebuildTerrainCache(world)
+      this.rebuildForestCache(world)
+      this.scanWaterCells(world)
+      tm.dirtyCells.length = 0
+    } else {
+      // Incremental rebuild — only the cells that actually changed. This turns
+      // "a brick got shot" from a full 26×26 cache rebuild into O(changed cells).
+      const cells = tm.dirtyCells
+      const artist = this.artist
+      const savedCtx = artist.ctx // restore after — draw helpers use artist.ctx
+      for (let i = 0; i < cells.length; i++) {
+        const idx = cells[i]
+        const c = idx % GRID
+        const r = (idx - c) / GRID
+        const type = tm.get(c, r)
+        if (type === 'forest') {
+          artist.ctx = this.forestCacheCtx
+          this.redrawForestCell(c, r)
+          // Clear any stale terrain tile under the (opaque) forest overlay.
+          this.terrainCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
+        } else {
+          artist.ctx = this.terrainCacheCtx
+          this.redrawTerrainCell(c, r, type, world.theme)
+          // Clear any stale forest overlay left at this cell.
+          this.forestCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
+        }
+      }
+      artist.ctx = savedCtx
+      tm.dirtyCells.length = 0
+    }
+  }
 
-    this.rebuildTerrainCache(world)
-    this.rebuildForestCache(world)
-    this.scanWaterCells(world)
+  /**
+   * Redraw a single terrain cell in place (used for incremental updates).
+   * Reproduces exactly what the full rebuild would draw for that cell:
+   * grid lines for empty space, or the tile art for a solid tile.
+   */
+  private redrawTerrainCell(c: number, r: number, type: TerrainType, theme: ThemeColors): void {
+    const ctx = this.terrainCacheCtx
+    const x = c * CELL
+    const y = r * CELL
+    ctx.clearRect(x, y, CELL, CELL)
+
+    if (type === 'empty') {
+      // Empty space: just the grid lines crossing this cell.
+      ctx.strokeStyle = theme.gridLineColor
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+      ctx.lineTo(x + CELL, y)
+      ctx.moveTo(x, y + CELL)
+      ctx.lineTo(x + CELL, y + CELL)
+      ctx.moveTo(x, y)
+      ctx.lineTo(x, y + CELL)
+      ctx.moveTo(x + CELL, y)
+      ctx.lineTo(x + CELL, y + CELL)
+      ctx.stroke()
+      return
+    }
+
+    const artist = this.artist
+    switch (type) {
+      case 'brick':
+        artist.drawBrick(x, y, CELL)
+        break
+      case 'steel':
+        artist.drawSteel(x, y, CELL)
+        break
+      case 'ice':
+        artist.drawIce(x, y, CELL)
+        break
+      case 'base':
+        artist.drawBase(x, y, CELL, false)
+        break
+    }
+  }
+
+  /** Redraw a single forest cell in the forest cache (clear or draw). */
+  private redrawForestCell(c: number, r: number): void {
+    const ctx = this.forestCacheCtx
+    const x = c * CELL
+    const y = r * CELL
+    ctx.clearRect(x, y, CELL, CELL)
+    this.artist.drawForest(x, y, CELL)
   }
 
   private rebuildTerrainCache(world: World): void {
@@ -414,18 +514,36 @@ export class GameRenderer {
       ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size)
     }
 
-    // Pass 2: debris particles (requires transform — use save/restore per particle)
+    // Pass 2: debris particles (rotated). Use setTransform directly instead of
+    // save()/restore() per particle — save() allocates a graphics-state object
+    // on every call, which is GC pressure during explosions (lots of debris).
     for (let i = 0; i < count; i++) {
       const p = pool[i]
       if (!p.active || p.type !== 'debris') continue
       ctx.globalAlpha = p.life / p.maxLife
-      ctx.save()
-      ctx.translate(p.x, p.y)
-      ctx.rotate(p.rotation)
       ctx.fillStyle = p.color
+      // Equivalent to translate(p) then rotate, without pushing a saved state:
+      // screen = dpr * (local + p + cameraOffset).
+      ctx.setTransform(
+        this._baseDpr,
+        0,
+        0,
+        this._baseDpr,
+        (p.x + this._baseCamX) * this._baseDpr,
+        (p.y + this._baseCamY) * this._baseDpr,
+      )
+      ctx.rotate(p.rotation)
       ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size)
-      ctx.restore()
     }
+    // Restore base transform for the remaining passes (smoke/ring/flash/popups)
+    ctx.setTransform(
+      this._baseDpr,
+      0,
+      0,
+      this._baseDpr,
+      this._baseCamX * this._baseDpr,
+      this._baseCamY * this._baseDpr,
+    )
 
     // Pass 3: smoke particles (arc fill — batch by minimizing fillStyle changes)
     lastFill = ''
@@ -482,6 +600,10 @@ export class GameRenderer {
   // ---- Score Popups ----
 
   private renderPopups(world: World): void {
+    // Popups are transient (briefly after a kill). Skip entirely on the common
+    // frame where there are none — avoids forcing a `ctx.font` parse and two
+    // `textAlign` state writes 60×/sec for no work.
+    if (world.popups.length === 0) return
     const ctx = this.ctx
     ctx.font = 'bold 11px "Courier New", monospace'
     ctx.textAlign = 'center'
