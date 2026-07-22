@@ -424,10 +424,10 @@ export class SpriteArtist {
         const cy = y + size / 2
         const ctx = this.ctx
         ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
-        // Star buffer overlay
+        // Star buffer overlay (pre-rotated to match the tank direction)
         const stage = Math.max(0, Math.min(level ?? 0, 3))
         if (stage > 0) {
-          const overlay = cache.getEffectSprite(`fx.starbuf${stage}`)
+          const overlay = cache.getStarbufSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
         }
         return
@@ -439,7 +439,7 @@ export class SpriteArtist {
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
     if (this.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(level ?? 0, 3))
-      if (stage > 0) this.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, 0, 1.28)
+      if (stage > 0) this.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, rot, 1.28)
       return
     }
     const t = this.theme
@@ -471,10 +471,10 @@ export class SpriteArtist {
         const cy = y + size / 2
         const ctx = this.ctx
         ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
-        // Hit overlay
+        // Hit overlay — rotates with the enemy tank (it mimics the tank silhouette with side "tread" bars).
         const stage = Math.max(0, Math.min(hitStage, 4))
         if (stage > 0) {
-          const overlay = cache.getEffectSprite(`fx.hit${stage}`)
+          const overlay = cache.getHitSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
         }
         return
@@ -486,7 +486,7 @@ export class SpriteArtist {
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
     if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
-      if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, 0, 1.28)
+      if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, rot, 1.28)
       return
     }
     const t = this.theme

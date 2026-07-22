@@ -40,6 +40,10 @@ export const DIR_TO_INDEX: Record<string, number> = {
 export class SpriteCache {
   private tankSprites = new Map<string, CanvasImageSource[]>()
   private effectSprites = new Map<string, CanvasImageSource>()
+  /** Player level-up star-buffer overlays — pre-rendered in all 4 directions so they rotate with the tank (they mimic the tank silhouette with side "tread" bars). */
+  private starbufSprites = new Map<string, CanvasImageSource[]>()
+  /** Enemy hit/damage overlays — same reasoning as star-buffers: the art mimics the tank silhouette with side "tread" bars, so it must rotate with the enemy tank. */
+  private hitSprites = new Map<string, CanvasImageSource[]>()
   private itemSprites = new Map<string, CanvasImageSource>()
   private bulletSprite: CanvasImageSource | null = null
   private explosionSprite: CanvasImageSource | null = null
@@ -77,21 +81,47 @@ export class SpriteCache {
     }
 
     // --- Effect overlays (non-rotated, at tank scale) ---
-    const effectKeys = [
-      'fx.shield',
-      'fx.starbuf1',
-      'fx.starbuf2',
-      'fx.starbuf3',
-      'fx.hit0',
-      'fx.hit1',
-      'fx.hit2',
-      'fx.hit3',
-      'fx.hit4',
-    ]
+    // Only the shield lives here: it's a radially-symmetric bubble centered on
+    // the tank, so it reads identically at any rotation and doesn't need to
+    // follow the tank's facing.
+    const effectKeys = ['fx.shield']
     for (const key of effectKeys) {
       const img = lib.get(key)
       if (!img) continue
       this.effectSprites.set(key, this.renderEffect(img))
+    }
+
+    // --- Star-buffer overlays (player level-up aura) ---
+    // These mimic the tank silhouette with side "tread" bars, so they must
+    // rotate WITH the player tank. Pre-render all 4 directions like tank
+    // sprites; otherwise they sit upright on top of a left/right-facing tank
+    // and read as mismatched vertical treads on the sides.
+    const starbufKeys = ['fx.starbuf1', 'fx.starbuf2', 'fx.starbuf3']
+    for (const key of starbufKeys) {
+      const img = lib.get(key)
+      if (!img) continue
+      const canvases: CanvasImageSource[] = []
+      for (const rot of ROTATIONS) {
+        canvases.push(this.renderRotated(img, TANK_RENDER_SIZE, rot))
+      }
+      this.starbufSprites.set(key, canvases)
+    }
+
+    // --- Enemy hit/damage overlays (fx.hit1–hit4) ---
+    // Same reasoning as the star-buffer: the art mimics the tank silhouette
+    // with side "tread" bars, so it must rotate WITH the enemy tank. Pre-render
+    // all 4 directions; otherwise they sit upright on a left/right-facing enemy
+    // and read as mismatched vertical treads on the sides. (fx.hit0 is a
+    // complete halo and is never drawn — the blit path clamps stage to >0.)
+    const hitKeys = ['fx.hit1', 'fx.hit2', 'fx.hit3', 'fx.hit4']
+    for (const key of hitKeys) {
+      const img = lib.get(key)
+      if (!img) continue
+      const canvases: CanvasImageSource[] = []
+      for (const rot of ROTATIONS) {
+        canvases.push(this.renderRotated(img, TANK_RENDER_SIZE, rot))
+      }
+      this.hitSprites.set(key, canvases)
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
@@ -171,6 +201,16 @@ export class SpriteCache {
     return this.effectSprites.get(key)
   }
 
+  /** Player level-up star-buffer overlay for the given stage (1–3), pre-rotated to the tank's direction. */
+  getStarbufSprite(stage: number, dirIndex: number): CanvasImageSource | undefined {
+    return this.starbufSprites.get(`fx.starbuf${stage}`)?.[dirIndex]
+  }
+
+  /** Enemy hit/damage overlay for the given stage (1–4), pre-rotated to the tank's direction. */
+  getHitSprite(stage: number, dirIndex: number): CanvasImageSource | undefined {
+    return this.hitSprites.get(`fx.hit${stage}`)?.[dirIndex]
+  }
+
   getItemSprite(key: string): CanvasImageSource | undefined {
     return this.itemSprites.get(key)
   }
@@ -190,6 +230,8 @@ export class SpriteCache {
   clear(): void {
     this.tankSprites.clear()
     this.effectSprites.clear()
+    this.starbufSprites.clear()
+    this.hitSprites.clear()
     this.itemSprites.clear()
     this.bulletSprite = null
     this.explosionSprite = null
