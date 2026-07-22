@@ -534,9 +534,14 @@ profile distributions, not code branches.
   together (level 0→50, 1→60, 2→70, 3→80). Ceiling is `PLAYER_PROGRESSION`
   (`maximumLevel`, `maxMultiplier`) so hardcore/challenge modes can out-scale
   commanders without touching engine code.
-- **Star damage regression (plan §12):** implemented as classic behaviour — losing
-  the tank costs one star level, downgrading all dimensions together (player now has
-  >1 HP at higher levels via the armor→maxHp mapping, so the downgrade is real).
+- **Star damage regression (plan §12 → user override, 2026-07-23):** the plan
+  specified "lose one star level" on death, BUT the user reported the star buff
+  persisting after respawn as a bug. Changed to a FULL reset: on death the player
+  reverts to `difficulty.playerStartLevel` (all earned stars discarded), classic
+  Battle City behaviour (death resets the tank to its baseline form). `checkConditions`
+  now sets `w.playerLevel = w.difficulty.playerStartLevel` (was `Math.max(0, -1)`),
+  and `spawnPlayer` rebuilds the tank from that reset level. Relax (startLevel 1)
+  keeps its 1 baseline star; classic/hard/chaos reset to 0.
 - **AI integration (plan §14):** `capabilityBias(profile)` adds flank/push/attack
   weight to goal scoring, and `fireControl` scales firing aggression, so every tank
   "plays to its strengths" with no bespoke scripts.

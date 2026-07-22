@@ -302,6 +302,9 @@ export class Game {
         this.recovery.reset()
         this.prevStageIndex = -1
         w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
+        // Drop the confirm keypress (Space/Enter) so it can't bleed into the
+        // gameplay fire input and make the player auto-fire on the first frame.
+        this.input.reset()
         this.saveSettings()
       }
       return

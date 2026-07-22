@@ -166,4 +166,17 @@ export class Input {
     this.justPressed.clear()
     this.justReleased.clear()
   }
+
+  /**
+   * Clear ALL input state (held keys, press order, per-frame edges).
+   * Used when leaving a state where a key was used for something other than
+   * gameplay — e.g. the Space that confirms "start game" must not carry over
+   * and read as a held fire key on the first playing frame (auto-fire bug).
+   */
+  reset(): void {
+    this.pressed.clear()
+    this.justPressed.clear()
+    this.justReleased.clear()
+    this.moveStack.length = 0
+  }
 }

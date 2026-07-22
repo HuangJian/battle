@@ -675,10 +675,12 @@ export class Simulation {
         w.gameOverTimer = 3000
         w.saveHighScore()
       } else {
-        // Star damage regression (plan §12): losing the tank costs a star
-        // level, downgrading ALL capability dimensions together — the player
-        // comes back weaker, exactly as a downgrade should feel.
-        w.playerLevel = Math.max(0, w.playerLevel - 1)
+        // Star buff does NOT persist across respawns (user bug fix): losing the
+        // tank discards ALL earned star upgrades and reverts the player to the
+        // difficulty's starting level — classic Battle City behaviour (death
+        // resets the tank to its baseline form). The respawned player is then
+        // rebuilt from this reset level; only the difficulty baseline remains.
+        w.playerLevel = w.difficulty.playerStartLevel
         // Respawn player
         w.spawnPlayer()
         w.player.shieldTimer = RESPAWN_SHIELD_MS
