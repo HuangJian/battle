@@ -28,7 +28,11 @@ export class UIManager {
   private recoveryOptions: HTMLElement[] = []
   private footer: HTMLElement
 
-  private currentScreen = 'menu'
+  // Start as a sentinel so the first showScreen('menu') in the constructor
+  // actually applies (the guard bails when screen === currentScreen). If this
+  // were pre-set to 'menu', the initial menu would never receive the
+  // 'active'/'visible' classes and would render invisible on first load.
+  private currentScreen = ''
   private animatedScore = 0
   private displayScore = 0
   private lastThemeKey = ''
