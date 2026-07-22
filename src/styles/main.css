@@ -652,6 +652,136 @@ body {
 }
 
 /* ================================================================
+   Controls / Key Bindings Screen
+   ================================================================ */
+.ui-controls {
+  background: var(--theme-overlay-bg);
+}
+
+.controls-panel {
+  gap: 16px;
+  max-width: 340px;
+  width: 90%;
+}
+
+.controls-panel .ui-hint {
+  margin-top: -4px;
+}
+
+.controls-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+}
+
+.controls-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--theme-text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.controls-key-btn {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--theme-accent-primary);
+  min-width: 56px;
+  padding: 6px 12px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-accent-primary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: center;
+}
+
+.controls-key-btn:hover {
+  background: var(--theme-button-hover);
+}
+
+.controls-key-btn.listening {
+  color: var(--theme-text-primary);
+  border-color: var(--theme-accent-secondary);
+  background: var(--theme-button-active);
+  animation: pulse-border 1.2s ease-in-out infinite;
+}
+
+.controls-key-btn.conflict {
+  border-color: var(--theme-danger);
+  color: var(--theme-danger);
+  animation: none;
+}
+
+.controls-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.controls-btn {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-secondary);
+  padding: 8px 18px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.controls-btn:hover {
+  color: var(--theme-text-primary);
+  background: var(--theme-button-hover);
+}
+
+.controls-btn-primary {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+  background: var(--theme-button-active);
+}
+
+.controls-btn-primary:hover {
+  background: var(--theme-button-hover);
+}
+
+/* Menu "Controls" entry */
+.menu-controls-button {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--theme-text-secondary);
+  padding: 8px 20px;
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 8px;
+  background: var(--theme-button-bg);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.menu-controls-button:hover {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+  background: var(--theme-button-active);
+}
+
+/* ================================================================
    Footer
    ================================================================ */
 .footer {

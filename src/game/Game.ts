@@ -54,6 +54,8 @@ export class Game {
     this.input = new Input(this.settings.keys)
     this.simulation = new Simulation(this.world, this.input)
     this.presentation = new PresentationLayer(root)
+    // Wire the live key-bindings object + persistence into the controls panel.
+    this.presentation.ui.initControls(this.settings.keys, () => this.saveSettings())
     this.audio = new AudioManager()
     this.recovery = new RecoverySystem()
     this.audio.setVolume(this.settings.volume)
@@ -234,6 +236,19 @@ export class Game {
     const w = this.world
 
     if (w.state === 'menu') {
+      // The controls panel is a UI-modal that owns all key input while open;
+      // skip menu navigation so it doesn't fight the panel.
+      if (this.presentation.ui.isControlsOpen()) return
+
+      // Open the controls / key-bindings panel (mouse users use the menu button).
+      if (this.input.wasPressed('KeyC')) {
+        this.presentation.ui.openControls()
+        this.audio.init()
+        this.audio.resume()
+        this.audio.playMenuSelect()
+        return
+      }
+
       const rowCount = 3
       // Move cursor between rows (DIFFICULTY / THEME / STAGE)
       if (this.input.isUpPressed()) {

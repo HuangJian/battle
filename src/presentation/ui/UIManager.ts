@@ -1,5 +1,6 @@
 import type { World } from '../../game/World'
-import type { ThemeColors } from '../../types'
+import type { ThemeColors, KeyBindings } from '../../types'
+import { DEFAULT_KEYS } from '../../game/Input'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
@@ -27,6 +28,28 @@ export class UIManager {
   private recoveryScreen: HTMLElement
   private recoveryOptions: HTMLElement[] = []
   private footer: HTMLElement
+
+  // ---- Controls / key-bindings panel ----
+  private controlsScreen: HTMLElement
+  private controlsKeyButtons = new Map<keyof KeyBindings, HTMLElement>()
+  private controlsBindings: KeyBindings = { ...DEFAULT_KEYS }
+  private controlsOnChanged: (() => void) | null = null
+  private listeningAction: keyof KeyBindings | null = null
+  private controlsOpen = false
+
+  /** Ordered list of rebindable actions shown in the controls panel. */
+  private static readonly CONTROL_ACTIONS: ReadonlyArray<{
+    action: keyof KeyBindings
+    label: string
+  }> = [
+    { action: 'up', label: 'Move Up' },
+    { action: 'down', label: 'Move Down' },
+    { action: 'left', label: 'Move Left' },
+    { action: 'right', label: 'Move Right' },
+    { action: 'fire', label: 'Fire' },
+    { action: 'pause', label: 'Pause' },
+    { action: 'reset', label: 'Reset to Menu' },
+  ]
 
   // Start as a sentinel so the first showScreen('menu') in the constructor
   // actually applies (the guard bails when screen === currentScreen). If this
@@ -158,6 +181,10 @@ export class UIManager {
     this.overlay.appendChild(this.victoryScreen)
     this.overlay.appendChild(this.recoveryScreen)
 
+    // Controls / key-bindings screen
+    this.controlsScreen = this.createControlsScreen()
+    this.overlay.appendChild(this.controlsScreen)
+
     // Footer
     this.footer = this.createElement('div', 'footer')
     this.footer.innerHTML = `
@@ -238,10 +265,12 @@ export class UIManager {
         <div class="menu-start">
           <div class="menu-start-button">PRESS ENTER TO START</div>
         </div>
+        <div class="menu-controls-button" data-menu="controls">⚙ CONTROLS</div>
         <div class="menu-controls">
           <span>↑ ↓ Select Row</span>
           <span>← → Change</span>
           <span><kbd>T</kbd> Theme</span>
+          <span><kbd>C</kbd> Controls</span>
           <span><kbd>Enter</kbd> Start</span>
         </div>
         <div class="menu-hiscore">
@@ -267,6 +296,12 @@ export class UIManager {
       opt.dataset.value = def.key
       opt.textContent = def.name
       themeContainer.appendChild(opt)
+    }
+
+    // Open the controls panel
+    const controlsBtn = screen.querySelector('[data-menu="controls"]') as HTMLElement | null
+    if (controlsBtn) {
+      controlsBtn.addEventListener('click', () => this.openControls())
     }
 
     return screen
@@ -351,6 +386,11 @@ export class UIManager {
 
   /** Update HUD and menu display from world state */
   update(world: World): void {
+    // While the controls panel is open it owns the overlay (manually
+    // toggled), so skip the per-frame screen sync that would otherwise
+    // re-activate the menu behind it.
+    if (this.controlsOpen) return
+
     // Animate score
     this.animatedScore = world.score
     if (this.displayScore !== this.animatedScore) {
@@ -555,5 +595,197 @@ export class UIManager {
   /** Get the footer element */
   getFooter(): HTMLElement {
     return this.footer
+  }
+
+  // ---- Controls / Key Bindings Panel ----
+
+  /**
+   * Wire the live key-bindings object (the same reference the Input system
+   * reads) and a persistence callback. Called once from Game after the
+   * PresentationLayer is constructed.
+   */
+  initControls(bindings: KeyBindings, onChanged: () => void): void {
+    this.controlsBindings = bindings
+    this.controlsOnChanged = onChanged
+    this.refreshAllKeyButtons()
+    // Capture-phase listener so a rebind key never reaches the game Input
+    // (which listens on window in the bubble phase). We only act while the
+    // panel is open, so normal gameplay input is unaffected.
+    window.addEventListener('keydown', this.onControlsKeyDown, true)
+  }
+
+  /** Whether the controls panel is currently open (a UI-modal, not a world state). */
+  isControlsOpen(): boolean {
+    return this.controlsOpen
+  }
+
+  /** Open the controls panel over the menu. */
+  openControls(): void {
+    if (this.controlsOpen) return
+    this.controlsOpen = true
+    this.menuScreen.classList.remove('active')
+    this.controlsScreen.classList.add('active')
+    this.listeningAction = null
+    this.refreshAllKeyButtons()
+  }
+
+  /** Close the controls panel and return to the menu. */
+  closeControls(): void {
+    if (!this.controlsOpen) return
+    this.controlsOpen = false
+    this.listeningAction = null
+    this.controlsScreen.classList.remove('active')
+    this.menuScreen.classList.add('active')
+  }
+
+  private createControlsScreen(): HTMLElement {
+    const screen = this.createElement('div', 'ui-screen ui-controls')
+    const panel = this.createElement('div', 'ui-panel controls-panel')
+    panel.innerHTML = `
+      <h2 class="ui-title">CONTROLS</h2>
+      <p class="ui-hint">Click a key, then press a new one</p>
+      <div class="controls-list" data-controls="list"></div>
+      <div class="controls-actions">
+        <button class="controls-btn" data-controls="reset" type="button">Reset Defaults</button>
+        <button class="controls-btn controls-btn-primary" data-controls="back" type="button">Back</button>
+      </div>
+      <p class="ui-hint">Press <kbd>Esc</kbd> to go back</p>
+    `
+
+    const list = panel.querySelector('[data-controls="list"]') as HTMLElement
+    for (const { action, label } of UIManager.CONTROL_ACTIONS) {
+      const row = this.createElement('div', 'controls-row')
+      const labelEl = this.createElement('span', 'controls-label')
+      labelEl.textContent = label
+      const btn = this.createElement('button', 'controls-key-btn') as HTMLButtonElement
+      btn.type = 'button'
+      btn.dataset.action = action
+      btn.textContent = this.formatKey(this.controlsBindings[action])
+      btn.addEventListener('click', () => this.onKeyButtonClick(action))
+      row.appendChild(labelEl)
+      row.appendChild(btn)
+      list.appendChild(row)
+      this.controlsKeyButtons.set(action, btn)
+    }
+
+    const resetBtn = panel.querySelector('[data-controls="reset"]') as HTMLElement
+    resetBtn.addEventListener('click', () => this.resetBindings())
+    const backBtn = panel.querySelector('[data-controls="back"]') as HTMLElement
+    backBtn.addEventListener('click', () => this.closeControls())
+
+    screen.appendChild(panel)
+    return screen
+  }
+
+  private onKeyButtonClick(action: keyof KeyBindings): void {
+    // Toggle listening mode for this action.
+    if (this.listeningAction === action) {
+      this.cancelListening()
+      return
+    }
+    this.listeningAction = action
+    const btn = this.controlsKeyButtons.get(action)
+    if (btn) {
+      btn.classList.add('listening')
+      btn.classList.remove('conflict')
+      btn.textContent = 'Press a key…'
+    }
+    // Clear listening state on any other buttons.
+    for (const [other, otherBtn] of this.controlsKeyButtons) {
+      if (other !== action) {
+        otherBtn.classList.remove('listening')
+        otherBtn.textContent = this.formatKey(this.controlsBindings[other])
+      }
+    }
+  }
+
+  private cancelListening(): void {
+    this.listeningAction = null
+    this.refreshAllKeyButtons()
+  }
+
+  private resetBindings(): void {
+    for (const { action } of UIManager.CONTROL_ACTIONS) {
+      this.controlsBindings[action] = DEFAULT_KEYS[action]
+    }
+    this.listeningAction = null
+    this.refreshAllKeyButtons()
+    this.controlsOnChanged?.()
+  }
+
+  private refreshAllKeyButtons(): void {
+    for (const { action } of UIManager.CONTROL_ACTIONS) {
+      this.refreshKeyButton(action)
+    }
+  }
+
+  private refreshKeyButton(action: keyof KeyBindings): void {
+    const btn = this.controlsKeyButtons.get(action)
+    if (!btn) return
+    btn.classList.remove('listening', 'conflict')
+    btn.textContent = this.formatKey(this.controlsBindings[action])
+  }
+
+  /** Reject keys reserved for panel navigation, and duplicates of other actions. */
+  private findConflict(action: keyof KeyBindings, code: string): keyof KeyBindings | null {
+    if (code === 'Escape' || code === 'Tab') return action // reserved
+    for (const { action: other } of UIManager.CONTROL_ACTIONS) {
+      if (other !== action && this.controlsBindings[other] === code) return other
+    }
+    return null
+  }
+
+  private flashConflict(action: keyof KeyBindings): void {
+    const btn = this.controlsKeyButtons.get(action)
+    if (!btn) return
+    btn.classList.add('conflict')
+    window.setTimeout(() => btn.classList.remove('conflict'), 600)
+  }
+
+  private formatKey(code: string): string {
+    if (code.startsWith('Arrow')) {
+      return (
+        { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' } as Record<string, string>
+      )[code] ?? code
+    }
+    if (code === 'Space') return 'SPACE'
+    if (code === 'Escape') return 'ESC'
+    if (code === 'Enter') return 'ENTER'
+    if (code.startsWith('Key')) return code.slice(3)
+    if (code.startsWith('Digit')) return code.slice(5)
+    if (code.startsWith('Numpad')) return 'NP' + code.slice(6)
+    return code
+  }
+
+  private onControlsKeyDown = (e: KeyboardEvent): void => {
+    if (!this.controlsOpen) return
+    // Own all key input while the panel is open so the game Input never sees
+    // it (prevents the menu cursor from moving behind the panel, and stops
+    // the rebind key from being registered as "pressed").
+    e.preventDefault()
+    e.stopImmediatePropagation()
+
+    if (this.listeningAction) {
+      const action = this.listeningAction
+      if (e.code === 'Escape') {
+        this.cancelListening()
+        return
+      }
+      const conflict = this.findConflict(action, e.code)
+      if (conflict) {
+        this.flashConflict(action)
+        return
+      }
+      this.controlsBindings[action] = e.code
+      this.listeningAction = null
+      this.refreshKeyButton(action)
+      this.controlsOnChanged?.()
+      return
+    }
+
+    // Not listening: Esc / Enter closes the panel.
+    if (e.code === 'Escape' || e.code === 'Enter') {
+      this.closeControls()
+    }
   }
 }
