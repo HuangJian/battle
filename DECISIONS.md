@@ -99,19 +99,62 @@ codec that decodes each 13×13 numeric level into the engine's native 26×26 cha
 
 ---
 
-## 6. Enemy AI: Weighted Random Direction
+## 6. Enemy AI: Tactical Intelligence Framework
 
-**Decision:** Enemy AI uses a simple weighted random system:
-- 30% chance: move toward player
-- 20% chance: move toward base
-- 50% chance: random direction
-- Re-evaluate every 0.5–2.0 seconds
+**Decision:** Enemy AI is now the **Tactical Intelligence Framework** (`src/ai/`),
+implemented per `plan/Tactical-Intelligence-Framework.md`. It replaces the old
+weighted-random direction picker entirely.
+
+- **Single decision pipeline for every enemy:** `World → Perception → Situation
+  Analysis → Goal Evaluation → Decision → Action Planner → Execution`
+  (`src/ai/TacticalIntelligence.ts`).
+- **Three thinking layers, distinct time scales:** strategic (~20 s, stable
+  long-term objective), tactical (~5 s, dynamic goal + route target), reactive
+  (every tick, bullet avoidance + committed-dodge hold).
+- **Intelligence is configuration, not code.** Tiers `rookie / soldier /
+  veteran / commander` live in `src/ai/config.ts` (`INTELLIGENCE_LEVELS`) with
+  capability flags + dynamic goal weights. Enemy kind → base tier via
+  `KIND_TO_LEVEL` (basic→rookie, fast→soldier, power/armor→veteran). Difficulty
+  scales capabilities (dodge, prediction depth, reaction, aggression,
+  commander-election chance) through `DIFFICULTY_AI` — never the tank stats. New
+  tiers are added by appending one registry entry; no engine change.
+- **Dynamic goal scoring** replaces fixed priority lists (`evaluateGoals`):
+  each candidate goal (attackBase / attackPlayer / destroyWall / retreat /
+  regroup / advance) gets a weighted score from situation factors; the highest
+  wins. Weights are tier-owned, so "smarter" tanks make better judgements.
+- **Bullet avoidance** scales with intelligence: prediction depth (how early a
+  bullet is seen), dodge probability, and a delayed-reaction model. Lower tiers
+  react late and fail to dodge more often.
+- **Commander system:** on difficulties with `commanderChance > 0`, one alive
+  enemy is elected commander (highest tier wins) and broadcasts lightweight
+  directives (pushLeft / pushRight / defendBase / attackTogether / spreadOut)
+  every ~20 s. Directives *influence* — teamwork tiers heed them (goal/route
+  bias); non-teamwork tiers ignore them. The commander never overrides an
+  autonomous tank.
+- **Imperfection model:** `reactionTime`, `aimError`, `routeNoise` make higher
+  tiers commit fewer mistakes while never becoming flawless (dodge probability
+  clamped to ≤ 0.95).
+- **State lives on the World.** The per-tank brain is the `AIState` field on
+  `Tank` (renamed from the old 3-field struct to a flat, serializable
+  `AIBrain` — still shallow-cloned safely by `RecoverySystem`). All entropy
+  flows through `world.rng` (`AGENTS.md §2.3`), so the framework is fully
+  deterministic and survives snapshots/replays.
 
 **Rationale:**
-- Simple but produces believable, varied behavior
-- Enemies naturally navigate toward objectives without complex pathfinding
-- Different tank types (fast, power, armor) create gameplay variety through stats, not AI complexity
-- Future: AI strategy interface is anticipated — `aiState` can be replaced with different strategies
+- Satisfies the plan's Definition of Done: same pipeline for all enemies,
+  config-driven intelligence, separated strategic/tactical thinking, coordinating
+  (non-overriding) commander, dynamic scoring, scalable bullet avoidance,
+  configurable imperfection, determinism, and extensibility for future bosses /
+  tower-defense / replay / mods.
+- Difficulty now arises from *better decisions*, not stronger stats — exactly
+  the plan's Vision.
+- The previous `aiState` "can be replaced with different strategies" note
+  (DECISIONS §6 old) is now realized: the strategy is the framework, and tiers
+  are data.
+
+**Testing:** `tests/tactical-ai.test.ts` guards determinism, no-stall
+  navigation, strategic-goal stability, commander election/broadcast,
+  intelligence-scaled bullet avoidance, and config-driven tiers.
 
 ---
 

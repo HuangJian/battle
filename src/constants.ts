@@ -84,6 +84,25 @@ export const FIRE_COOLDOWN: Record<number, number> = {
   3: 250,
 }
 
+// ============================================================
+// Tactical Intelligence Framework (AI) timing
+// ============================================================
+
+/** Default interval between tactical (5s) re-evaluations. */
+export const TACTICAL_INTERVAL_MS = 5000
+
+/** Default interval between strategic (20s) re-evaluations. */
+export const STRATEGIC_INTERVAL_MS = 20000
+
+/** Commander broadcast cadence (20s). */
+export const COMMANDER_INTERVAL_MS = 20000
+
+/** Commander election is attempted every N ticks (~1s at 60fps). */
+export const ELECTION_CHECK_TICKS = 60
+
+/** How long (ms) a committed dodge direction is held before re-evaluating. */
+export const DODGE_LOCK_MS = 350
+
 /** Player tank speed per level (px/tick) */
 export const PLAYER_SPEED: Record<number, number> = {
   0: 2,

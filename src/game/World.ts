@@ -9,6 +9,8 @@ import type {
   TankKind,
   DifficultyConfig,
   ThemeColors,
+  AIState,
+  GoalType,
 } from '../types'
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
@@ -17,7 +19,8 @@ import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { TANK_CONFIGS } from '../config/tanks'
-import { GRID, CELL, TANK, ENEMIES_PER_STAGE, START_LIVES } from '../constants'
+import { resolveConfig, levelForKind } from '../ai/config'
+import { GRID, CELL, TANK, ENEMIES_PER_STAGE, START_LIVES, STRATEGIC_INTERVAL_MS, COMMANDER_INTERVAL_MS } from '../constants'
 
 let nextId = 1
 export function genId(): number {
@@ -196,6 +199,33 @@ export class World {
   createTank(kind: TankKind, x: number, y: number, dir: Direction): Tank {
     const cfg = TANK_CONFIGS[kind]
     const hp = kind === 'player' ? 1 : Math.max(1, Math.round(cfg.hp * this.difficulty.enemyHpMult))
+
+    // Enemy brains are initialized here (on the World — no hidden state).
+    // The Tactical Intelligence Framework reads/writes these fields every tick.
+    let aiState: AIState | undefined
+    if (kind !== 'player') {
+      const level = levelForKind(kind)
+      const ai = resolveConfig(level, this.difficultyKey)
+      const base = this.tileMap.getBasePos()
+      aiState = {
+        level,
+        isCommander: false,
+        thinkTimer: 200 + this.rng.next() * 600,
+        fireTimer: 400 + this.rng.next() * 600,
+        currentDir: dir,
+        tacticalGoal: 'advance' as GoalType,
+        targetX: base ? base.x + CELL : x + TANK / 2,
+        targetY: base ? base.y + CELL : y + TANK / 2,
+        strategicTimer: STRATEGIC_INTERVAL_MS * (0.8 + this.rng.next() * 0.4),
+        strategicGoal: 'attackBase' as GoalType,
+        reactionTimer: ai.reactionTime,
+        dodgeLock: 0,
+        commanderTimer: COMMANDER_INTERVAL_MS,
+        directive: 'none',
+        directiveAge: 1e9,
+      }
+    }
+
     return {
       id: genId(),
       x,
@@ -217,14 +247,7 @@ export class World {
       isPlayer: kind === 'player',
       flashTimer: 0,
       hitCount: 0,
-      aiState:
-        kind === 'player'
-          ? undefined
-          : {
-              thinkTimer: 0,
-              currentDir: dir,
-              fireTimer: 500,
-            },
+      aiState,
       bonus: false,
     }
   }

@@ -1,6 +1,5 @@
 import type { World } from './World'
 import type { Tank, Bullet, PowerUpType } from '../types'
-import type { Direction } from '../constants'
 import {
   CELL,
   TANK,
@@ -18,7 +17,8 @@ import {
 import { TANK_CONFIGS } from '../config/tanks'
 import { genId } from './World'
 import { Input } from './Input'
-import { snap, aabb, ALL_DIRS } from '../utils/helpers'
+import { TacticalIntelligence } from '../ai/TacticalIntelligence'
+import { snap, aabb } from '../utils/helpers'
 
 // Spawn points derived from the design constants (ENEMY_SPAWNS, in tile
 // coords). The third authentic point is col 6 (x = 96), NOT the old hardcoded
@@ -38,11 +38,14 @@ const POWERUP_TYPES: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank'
 export class Simulation {
   world: World
   input: Input
+  /** Tactical Intelligence Framework — owns all enemy decision-making. */
+  private ai: TacticalIntelligence
   private spawnPointIndex = 0
 
   constructor(world: World, input: Input) {
     this.world = world
     this.input = input
+    this.ai = new TacticalIntelligence()
   }
 
   /** Run one simulation tick (1/60s) */
@@ -197,66 +200,10 @@ export class Simulation {
   // ================================================================
 
   private updateEnemyAI(): void {
-    const w = this.world
-    const frozen = w.freezeTimer > 0
-
-    for (const tank of w.tanks) {
-      if (!tank.alive || tank.spawnTimer > 0) continue
-      if (frozen) {
-        tank.moving = false
-        continue
-      }
-
-      const ai = tank.aiState
-      if (!ai) continue
-
-      // Think timer — change direction periodically
-      ai.thinkTimer -= 1000 / 60
-      if (ai.thinkTimer <= 0) {
-        // Choose a new direction
-        // 40% chance to aim at base or player, 60% random
-        // All entropy flows through world.rng so the simulation stays
-        // deterministic (AGENTS.md §2.3) — never Math.random() here.
-        const r = w.rng.next()
-        if (r < 0.3 && w.player) {
-          // Move toward player
-          ai.currentDir = this.dirToward(tank, w.player.x, w.player.y)
-        } else if (r < 0.5) {
-          // Move toward base
-          const base = w.tileMap.getBasePos()
-          if (base) {
-            ai.currentDir = this.dirToward(tank, base.x, base.y)
-          } else {
-            ai.currentDir = w.rng.pick(ALL_DIRS)
-          }
-        } else {
-          ai.currentDir = w.rng.pick(ALL_DIRS)
-        }
-        ai.thinkTimer = 500 + w.rng.next() * 1500
-        tank.dir = ai.currentDir
-        tank.moving = true
-      }
-
-      // Fire timer
-      ai.fireTimer -= 1000 / 60
-      if (ai.fireTimer <= 0) {
-        this.tryFire(tank)
-        ai.fireTimer = 300 + w.rng.next() * 1200
-      }
-
-      tank.moving = true
-      tank.dir = ai.currentDir
-    }
-  }
-
-  private dirToward(tank: Tank, tx: number, ty: number): Direction {
-    const dx = tx - tank.x
-    const dy = ty - tank.y
-    if (Math.abs(dx) > Math.abs(dy)) {
-      return dx > 0 ? 'right' : 'left'
-    } else {
-      return dy > 0 ? 'down' : 'up'
-    }
+    // Delegate all enemy decision-making to the Tactical Intelligence
+    // Framework. It reads the World (Perception) and writes tank intent
+    // (direction / firing) back — never hidden state, never Math.random().
+    this.ai.update(this.world, (tank) => this.tryFire(tank))
   }
 
   // ================================================================

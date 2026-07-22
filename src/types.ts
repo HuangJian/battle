@@ -58,10 +58,74 @@ export interface Tank extends Entity {
   bonus?: boolean // drops a power-up when destroyed
 }
 
+/**
+ * Intelligence tier names. Every AI tank runs the same decision pipeline;
+ * differences are entirely configuration-driven (see `src/ai/config.ts`).
+ * New tiers can be added there without touching the engine.
+ */
+export type IntelligenceLevel = 'rookie' | 'soldier' | 'veteran' | 'commander'
+
+/**
+ * Candidate tactical/strategic goals. Goals compete through dynamic scores
+ * (see `src/ai/TacticalIntelligence.ts`) rather than a fixed priority list.
+ */
+export type GoalType =
+  | 'attackBase'
+  | 'attackPlayer'
+  | 'destroyWall'
+  | 'retreat'
+  | 'regroup'
+  | 'advance'
+
+/**
+ * Lightweight cooperation directives broadcast by the (elected) commander.
+ * Tanks remain autonomous — they may follow or ignore a directive according
+ * to their own intelligence (teamwork flag).
+ */
+export type CommanderDirective =
+  | 'none'
+  | 'pushLeft'
+  | 'pushRight'
+  | 'defendBase'
+  | 'attackTogether'
+  | 'spreadOut'
+
+/**
+ * AIBrain — the complete, serializable decision state for one enemy tank.
+ *
+ * This is the Tactical Intelligence Framework's per-tank memory and lives on
+ * the World (no hidden state outside it — AGENTS.md §2.2). It is a flat
+ * structure of primitives only, so `RecoverySystem` can shallow-clone it
+ * safely when snapshotting the World.
+ *
+ * The fields `thinkTimer` / `fireTimer` / `currentDir` are kept from the
+ * previous AI for backwards compatibility with the determinism tests.
+ */
 export interface AIState {
-  thinkTimer: number
-  currentDir: Direction
-  fireTimer: number
+  // ---- Identity / intelligence ----
+  level: IntelligenceLevel
+  isCommander: boolean
+
+  // ---- Tactical layer (reactive + short horizon) ----
+  thinkTimer: number // ms until the next tactical re-evaluation
+  fireTimer: number // ms until the next fire attempt
+  currentDir: Direction // direction the tank intends to move this tick
+  tacticalGoal: GoalType // current short-term objective
+  targetX: number // route target (px, tank-center aligned)
+  targetY: number
+
+  // ---- Strategic layer (long horizon) ----
+  strategicTimer: number // ms until the next strategic re-evaluation
+  strategicGoal: GoalType // stable long-term objective
+
+  // ---- Reaction / imperfection ----
+  reactionTimer: number // ms of remaining "delayed reaction" before dodging
+  dodgeLock: number // ms the current dodge direction is committed
+
+  // ---- Commander ----
+  commanderTimer: number // ms until this commander's next broadcast
+  directive: CommanderDirective // last directive received (or 'none')
+  directiveAge: number // ms since the directive was received
 }
 
 export interface Bullet extends Entity {
