@@ -13,17 +13,20 @@ import {
   FREEZE_DURATION_MS,
   SHIELD_DURATION_MS,
   RESPAWN_SHIELD_MS,
+  ENEMY_SPAWNS,
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { genId } from './World'
 import { Input } from './Input'
 import { snap, aabb, ALL_DIRS } from '../utils/helpers'
 
-const ENEMY_SPAWN_POINTS = [
-  { x: 0, y: 0 },
-  { x: 12 * CELL, y: 0 },
-  { x: 24 * CELL, y: 0 },
-]
+// Spawn points derived from the design constants (ENEMY_SPAWNS, in tile
+// coords). The third authentic point is col 6 (x = 96), NOT the old hardcoded
+// col 24 (x = 384) which jammed a tank against the right wall (FIELD = 416,
+// tank = 32 ⇒ a tank at x = 384 occupies x = 384..416 and can only move
+// down/left; two such tanks meeting at the edge deadlock with zero free
+// directions). See fix in updateSpawning().
+const ENEMY_SPAWN_POINTS = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
 
 /** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
 const POWERUP_TYPES: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet']
@@ -126,31 +129,42 @@ export class Simulation {
     if (w.enemyCount >= MAX_ENEMIES_ALIVE) return
     if (w.spawnTimer > 0) return
 
-    // Check if spawn point is clear
     const entry = w.spawnQueue[0]
-    const pt = ENEMY_SPAWN_POINTS[this.spawnPointIndex % ENEMY_SPAWN_POINTS.length]
-    this.spawnPointIndex++
+    const n = ENEMY_SPAWN_POINTS.length
 
-    // Check if spawn area is clear of other tanks (inline rect — no per-retry allocation)
-    let canSpawn = true
-    for (const tank of w.allTanks) {
-      if (aabb(pt.x, pt.y, TANK, TANK, tank.x, tank.y, tank.w, tank.h)) {
-        canSpawn = false
-        break
+    // Try every spawn point in rotation and use the first one that is clear of
+    // tanks. Previously the code retried only the *current* point (decrementing
+    // the index on failure), so a single occupied/stuck point would stall ALL
+    // enemy spawns forever. Now an occupied point is simply skipped and the next
+    // one is tried; if none are clear we just retry next frame and rotate the
+    // start index so we don't keep re-checking the same blocked point first.
+    for (let i = 0; i < n; i++) {
+      const idx = (this.spawnPointIndex + i) % n
+      const pt = ENEMY_SPAWN_POINTS[idx]
+
+      // Check if spawn area is clear of other tanks (inline rect — no per-retry allocation)
+      let canSpawn = true
+      for (const tank of w.allTanks) {
+        if (aabb(pt.x, pt.y, TANK, TANK, tank.x, tank.y, tank.w, tank.h)) {
+          canSpawn = false
+          break
+        }
       }
-    }
-    if (!canSpawn) {
-      this.spawnPointIndex-- // retry same point next frame
+      if (!canSpawn) continue
+
+      // Create the enemy tank
+      const tank = w.createTank(entry.kind, pt.x, pt.y, 'down')
+      tank.bonus = entry.bonus
+      w.tanks.push(tank)
+      w.spawnQueue.shift()
+      w.enemiesSpawned++
+      w.spawnTimer = 1500 // 1.5s between spawns
+      this.spawnPointIndex = (idx + 1) % n
       return
     }
 
-    // Create the enemy tank
-    const tank = w.createTank(entry.kind, pt.x, pt.y, 'down')
-    tank.bonus = entry.bonus
-    w.tanks.push(tank)
-    w.spawnQueue.shift()
-    w.enemiesSpawned++
-    w.spawnTimer = 1500 // 1.5s between spawns
+    // All points blocked this frame — advance the start index and retry next frame.
+    this.spawnPointIndex = (this.spawnPointIndex + 1) % n
   }
 
   // ================================================================
@@ -324,7 +338,16 @@ export class Simulation {
     const w = this.world
     for (const other of w.allTanks) {
       if (other === self || !other.alive) continue
-      if (other.spawnTimer > 0) continue // spawning tanks don't block
+      // NOTE: spawning tanks (spawnTimer > 0) DO block movement. Previously
+      // they were skipped here, which let a moving tank drive *into* a tank
+      // that was still in its spawn animation. The two would overlap, and once
+      // the spawn timer expired they were jammed at the corner/edge with zero
+      // free directions — multiple enemies permanently stuck at the spawn point.
+      // Spawn safety is still guaranteed: updateSpawning() refuses to create a
+      // tank on top of any existing tank (including spawning ones), so the only
+      // overlap path was movement, now closed. (Bullets still pass through
+      // spawning tanks — they are invulnerable — via the separate check in
+      // bulletHitsTank.)
       if (aabb(newX, newY, self.w, self.h, other.x, other.y, other.w, other.h)) {
         return true
       }

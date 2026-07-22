@@ -3,6 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
+import { ENEMY_SPAWNS, CELL, TANK, GRID } from '../src/constants'
 
 /**
  * Determinism tests for the Simulation layer.
@@ -142,5 +143,113 @@ describe('Simulation determinism (AGENTS.md §2.3)', () => {
     // Different seeds must yield different simulations — otherwise the
     // determinism test above would be vacuous.
     expect(snapB).not.toEqual(snapA)
+  })
+})
+
+/**
+ * Regression guard for "enemies get stuck / overlap at the spawn point".
+ *
+ * Two bugs previously produced this:
+ *   1. ENEMY_SPAWN_POINTS hardcoded a point at the right edge (x = 24*CELL),
+ *      jamming a tank against the wall where it could only move down/left.
+ *   2. tankHitsTank() skipped spawning tanks (spawnTimer > 0), so a moving
+ *      tank could drive *into* a tank still in its spawn animation. The two
+ *      overlapped, and once the spawn timer expired they deadlocked at the
+ *      corner/edge with zero free directions — multiple enemies permanently
+ *      stuck at the spawn point.
+ *
+ * Both are prevented by: spawning tanks now block movement, and the spawn
+ * area check (which already refused to create a tank on top of any existing
+ * tank) is the only way a tank enters a cell. The hard invariant is therefore:
+ * no two alive tanks ever occupy the same (x, y) at the same tick.
+ */
+describe('Enemy spawn does not deadlock or overlap (bug regression)', () => {
+  const SPAWN_PTS = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+  const atSpawn = (x: number, y: number) =>
+    SPAWN_PTS.some((p) => Math.abs(p.x - x) < TANK && Math.abs(p.y - y) < TANK)
+
+  function runStage(stageIndex: number, seed: number, ticks: number) {
+    const world = new World()
+    world.rng = new RNG(seed)
+    const input = new Input()
+    const sim = new Simulation(world, input)
+
+    let overlapSeen = false
+    let spawnDeadlockTicks = 0
+    let maxSpawnDeadlock = 0
+    // Track per-tank stuck runs at a spawn point (alive, not spawning, not frozen).
+    const stuckAtSpawn = new Map<number, { x: number; y: number; n: number }>()
+
+    for (let t = 0; t < ticks; t++) {
+      // Keep the stage alive without a human player so enemies keep spawning.
+      if (world.state !== 'playing') world.loadStage(stageIndex)
+      if (!world.player || !world.player.alive) world.spawnPlayer()
+      sim.tick()
+
+      // Hard invariant: no two alive tanks share a position.
+      const alive = world.tanks.filter((tk) => tk.alive)
+      for (let i = 0; i < alive.length; i++) {
+        for (let j = i + 1; j < alive.length; j++) {
+          if (alive[i].x === alive[j].x && alive[i].y === alive[j].y) overlapSeen = true
+        }
+      }
+
+      // Soft signal: an alive, active enemy parked at a spawn point that cannot
+      // move in any of down/left/right (up is always blocked at the top edge).
+      const free = (tk: { x: number; y: number }, dx: number, dy: number) => {
+        const nx = tk.x + dx
+        const ny = tk.y + dy
+        if (nx < 0 || ny < 0 || nx + TANK > GRID * CELL || ny + TANK > GRID * CELL) return false
+        for (const o of alive) {
+          if (o === tk) continue
+          if (nx === o.x && ny === o.y) return false
+        }
+        return true
+      }
+      for (const tk of alive) {
+        if (tk.spawnTimer > 0) {
+          stuckAtSpawn.delete(tk.id)
+          continue
+        }
+        const rec = stuckAtSpawn.get(tk.id)
+        const trapped = atSpawn(tk.x, tk.y) && !free(tk, 0, tk.speed) && !free(tk, -tk.speed, 0) && !free(tk, tk.speed, 0)
+        if (trapped) {
+          if (rec && rec.x === tk.x && rec.y === tk.y) rec.n++
+          else stuckAtSpawn.set(tk.id, { x: tk.x, y: tk.y, n: 1 })
+        } else {
+          stuckAtSpawn.delete(tk.id)
+        }
+      }
+      for (const rec of stuckAtSpawn.values()) {
+        if (rec.n > maxSpawnDeadlock) maxSpawnDeadlock = rec.n
+      }
+      void spawnDeadlockTicks
+    }
+    return { overlapSeen, maxSpawnDeadlock }
+  }
+
+  it('no two alive tanks ever overlap during long multi-stage runs', () => {
+    let anyOverlap = false
+    for (let stage = 0; stage < 35; stage++) {
+      for (const seed of [1, 7, 42]) {
+        const { overlapSeen } = runStage(stage, seed * 1000 + stage, 800)
+        if (overlapSeen) anyOverlap = true
+      }
+    }
+    expect(anyOverlap).toBe(false)
+  })
+
+  it('no active enemy is permanently deadlocked at a spawn point', () => {
+    let worst = 0
+    for (let stage = 0; stage < 35; stage++) {
+      for (const seed of [1, 7, 42]) {
+        const { maxSpawnDeadlock } = runStage(stage, seed * 1000 + stage, 800)
+        if (maxSpawnDeadlock > worst) worst = maxSpawnDeadlock
+      }
+    }
+    // A transient crowd at a spawn point can last a moment, but a true
+    // deadlock (all of down/left/right blocked) must never persist. 180 ticks
+    // (3 s) is far beyond any legitimate "waiting to move" window.
+    expect(worst).toBeLessThan(180)
   })
 })
