@@ -269,45 +269,54 @@ export class SpriteArtist {
     ctx.fillRect(x + 2, y + 2, 1, 3)
   }
 
+  /**
+   * Draws the base. `x,y` is the TOP-LEFT pixel of the 2×2 base block and
+   * `size` is the full block size (2×CELL). The base is a single 3D energy
+   * crystal spanning the whole block (not four separate tiles) — the caller
+   * (GameRenderer) only invokes this once, for the block's top-left cell.
+   */
   drawBase(x: number, y: number, size: number, destroyed: boolean): void {
-    if (!destroyed && this.drawSvgCentered('terrain.base', x, y, size)) return
-    const t = this.theme
-    const ctx = this.ctx
-    const s = size / 4
+    const key = destroyed ? 'terrain.base_ruins' : 'terrain.base'
+    if (this.drawSvgCentered(key, x, y, size)) return
 
+    // Procedural fallback (only when the SVG is not yet loaded)
+    const ctx = this.ctx
+    const cx = x + size / 2
     if (destroyed) {
-      // Ruins
-      ctx.fillStyle = '#3a2a10'
-      ctx.fillRect(x, y, size, size)
-      ctx.fillStyle = '#5a4a20'
-      ctx.fillRect(x + s, y + s, s * 2, s * 2)
-      ctx.fillStyle = '#2a1a08'
-      ctx.fillRect(x + s, y + s * 2, s, s)
-      ctx.fillRect(x + s * 2, y + s, s, s)
+      ctx.fillStyle = '#5b6670'
+      ctx.beginPath()
+      ctx.moveTo(cx, y + size * 0.15)
+      ctx.lineTo(x + size * 0.3, y + size * 0.55)
+      ctx.lineTo(cx, y + size * 0.9)
+      ctx.lineTo(x + size * 0.7, y + size * 0.55)
+      ctx.closePath()
+      ctx.fill()
       return
     }
-
-    // Base background
-    ctx.fillStyle = t.base
-    ctx.fillRect(x, y, size, size)
-
-    // Eagle body
-    ctx.fillStyle = t.baseDark
-    // Body
-    ctx.fillRect(x + s, y + s, s * 2, s * 2)
-    // Wings
-    ctx.fillRect(x, y + s, s, s)
-    ctx.fillRect(x + s * 3, y + s, s, s)
-    // Head
-    ctx.fillStyle = t.base
-    ctx.fillRect(x + s, y, s * 2, s)
-    // Beak
-    ctx.fillStyle = '#e04040'
-    ctx.fillRect(x + s * 2, y + s, s, s / 2)
-    // Feet
-    ctx.fillStyle = t.baseDark
-    ctx.fillRect(x + s, y + s * 3, s / 2, s)
-    ctx.fillRect(x + s * 2 + s / 2, y + s * 3, s / 2, s)
+    // Intact crystal fallback
+    const g = ctx.createLinearGradient(0, y, 0, y + size)
+    g.addColorStop(0, '#EAFBFF')
+    g.addColorStop(1, '#3E9BE0')
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.moveTo(cx, y + size * 0.1)
+    ctx.lineTo(x + size * 0.22, y + size * 0.45)
+    ctx.lineTo(cx, y + size * 0.55)
+    ctx.lineTo(x + size * 0.78, y + size * 0.45)
+    ctx.closePath()
+    ctx.fill()
+    ctx.beginPath()
+    ctx.moveTo(x + size * 0.22, y + size * 0.45)
+    ctx.lineTo(cx, y + size * 0.55)
+    ctx.lineTo(cx, y + size * 0.9)
+    ctx.closePath()
+    ctx.fill()
+    ctx.fillStyle = '#ffffff'
+    ctx.globalAlpha = 0.5
+    ctx.beginPath()
+    ctx.ellipse(cx, y + size * 0.5, size * 0.1, size * 0.14, 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.globalAlpha = 1
   }
 
   // ================================================================

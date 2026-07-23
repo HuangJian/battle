@@ -8,6 +8,7 @@ import enemy_fast from './enemy_fast.svg?url'
 import enemy_power from './enemy_power.svg?url'
 import enemy_armor from './enemy_armor.svg?url'
 import base from './base.svg?url'
+import base_ruins from './base_ruins.svg?url'
 import bullet from './bullet.svg?url'
 import brick from './brick.svg?url'
 import steel from './steel.svg?url'
@@ -39,6 +40,7 @@ export const SPRITE_URLS: Record<string, string> = {
   'tank.armor': enemy_armor,
   // Terrain
   'terrain.base': base,
+  'terrain.base_ruins': base_ruins,
   'terrain.brick': brick,
   'terrain.steel': steel,
   'terrain.water': water,

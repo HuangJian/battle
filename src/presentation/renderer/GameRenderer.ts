@@ -1,4 +1,5 @@
 import type { World } from '../../game/World'
+import type { TileMap } from '../../game/TileMap'
 import { CELL, GRID, FIELD, TANK } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
 import type { SpriteLibrary } from './SpriteLibrary'
@@ -246,7 +247,7 @@ export class GameRenderer {
           this.terrainCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
         } else {
           artist.ctx = this.terrainCacheCtx
-          this.redrawTerrainCell(c, r, type, world.theme)
+          this.redrawTerrainCell(c, r, type, world.theme, tm)
           // Clear any stale forest overlay left at this cell.
           this.forestCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
         }
@@ -261,7 +262,13 @@ export class GameRenderer {
    * Reproduces exactly what the full rebuild would draw for that cell:
    * grid lines for empty space, or the tile art for a solid tile.
    */
-  private redrawTerrainCell(c: number, r: number, type: TerrainType, theme: ThemeColors): void {
+  private redrawTerrainCell(
+    c: number,
+    r: number,
+    type: TerrainType,
+    theme: ThemeColors,
+    tm: TileMap,
+  ): void {
     const ctx = this.terrainCacheCtx
     const x = c * CELL
     const y = r * CELL
@@ -296,7 +303,10 @@ export class GameRenderer {
         artist.drawIce(x, y, CELL)
         break
       case 'base':
-        artist.drawBase(x, y, CELL, false)
+        // The base is ONE crystal spanning 2×2; only the top-left cell draws it.
+        if (tm.isBaseTopLeft(c, r)) {
+          artist.drawBase(x, y, CELL * 2, false)
+        }
         break
     }
   }
@@ -351,21 +361,19 @@ export class GameRenderer {
             artist.drawIce(x, y, CELL)
             break
           case 'base':
-            artist.drawBase(x, y, CELL, false)
+            // Draw the whole 2×2 base as ONE crystal (only from its top-left cell).
+            if (tm.isBaseTopLeft(c, r)) {
+              artist.drawBase(c * CELL, r * CELL, CELL * 2, false)
+            }
             break
         }
       }
     }
 
-    // Destroyed base ruins
+    // Destroyed base ruins — one shattered crystal across the 2×2 block
     if (tm.isBaseDestroyed()) {
-      for (let r = 24; r <= 25; r++) {
-        for (let c = 12; c <= 13; c++) {
-          if (r < GRID && c < GRID) {
-            artist.drawBase(c * CELL, r * CELL, CELL, true)
-          }
-        }
-      }
+      const bp = tm.getBasePos()
+      if (bp) artist.drawBase(bp.x, bp.y, CELL * 2, true)
     }
 
     artist.ctx = savedCtx

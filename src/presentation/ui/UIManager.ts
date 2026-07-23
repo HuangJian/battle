@@ -107,6 +107,10 @@ export class UIManager {
           <span class="hud-label">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
         </div>
+        <div class="hud-pause" data-hud="pause">
+          <span class="hud-pause-title"><span class="hud-pause-dot"></span>PAUSED</span>
+          <span class="hud-pause-hint">P to resume</span>
+        </div>
       </div>
       <div class="hud-group hud-right">
         <div class="hud-item">
@@ -370,6 +374,10 @@ export class UIManager {
     } else {
       this.hudBar.classList.add('visible')
     }
+
+    // Pause indicator lives in the STAGE area of the HUD bar (not a floating
+    // overlay) so the battle field stays fully visible for screenshots.
+    this.hudBar.classList.toggle('paused', screen === 'paused')
 
     // Reset recovery screen sub-state when leaving recovery
     if (screen !== 'recovery') {

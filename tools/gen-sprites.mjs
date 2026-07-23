@@ -23,15 +23,53 @@ function starPath(cx, cy, R, r, n = 5, rot = -Math.PI / 2) {
 }
 
 // Two side treads (left 15..30, right 66..81), body spans 30..66.
+// High-contrast design: near-black base + bright metallic track links + a
+// crisp bright top edge, so the treads clearly separate from the colourful
+// hull (the old mid-grey treads blended into the body on some tanks).
 function treads() {
   let s = ''
   for (const x of [15, 66]) {
-    s += `<rect x="${x}" y="20" width="15" height="58" rx="4" fill="#2b2b2b"/>`
+    // Dark casing
+    s += `<rect x="${x}" y="20" width="15" height="58" rx="4" fill="#141414"/>`
+    s += `<rect x="${x}" y="20" width="15" height="58" rx="4" fill="none" stroke="#000" stroke-width="1"/>`
+    // Bright track links (the part that must read as "mechanical tread")
     for (let i = 0; i < 7; i++) {
-      s += `<rect x="${x + 1}" y="${22 + i * 8}" width="13" height="4" rx="1" fill="#4a4a4a"/>`
+      const y = 22 + i * 8
+      s += `<rect x="${x + 1}" y="${y}" width="13" height="5.5" rx="1.5" fill="#8d8d8d"/>`
+      s += `<rect x="${x + 1}" y="${y}" width="13" height="2" rx="1" fill="#d2d2d2"/>`
     }
-    s += `<rect x="${x}" y="20" width="15" height="3" rx="1.5" fill="#5e5e5e"/>`
+    // Bright top & dim bottom edges for 3D pop
+    s += `<rect x="${x}" y="20" width="15" height="3" rx="1.5" fill="#c6c6c6"/>`
+    s += `<rect x="${x}" y="75" width="15" height="3" rx="1.5" fill="#000" opacity="0.55"/>`
   }
+  return s
+}
+
+// Streamlined treads for the FAST enemy: slanted (chevron) track links that
+// lean forward to suggest speed, plus a faint cyan motion streak skimming the
+// outer edge of each tread — tying into the enemy's #22C3DC accent colour.
+function treadsFast() {
+  let s = ''
+  for (const x of [15, 66]) {
+    s += `<rect x="${x}" y="20" width="15" height="58" rx="4" fill="#141414"/>`
+    s += `<rect x="${x}" y="20" width="15" height="58" rx="4" fill="none" stroke="#000" stroke-width="1"/>`
+    for (let i = 0; i < 7; i++) {
+      const y = 22 + i * 8
+      const yb = y + 5.5
+      const yt = y + 0.5
+      // slanted link (parallelogram leaning right) + bright highlight strip
+      s += `<polygon points="${x + 1},${yb} ${x + 13},${yb} ${x + 15},${yt} ${x + 3},${yt}" fill="#8d8d8d"/>`
+      s += `<polygon points="${x + 1},${yb} ${x + 13},${yb} ${x + 13},${yb - 2} ${x + 1},${yb - 2}" fill="#d2d2d2" opacity="0.9"/>`
+    }
+    s += `<rect x="${x}" y="20" width="15" height="3" rx="1.5" fill="#c6c6c6"/>`
+    s += `<rect x="${x}" y="75" width="15" height="3" rx="1.5" fill="#000" opacity="0.55"/>`
+  }
+  // faint cyan speed streaks just outside each tread
+  s +=
+    `<g opacity="0.5">` +
+    `<path d="M12 28 L12 72" stroke="#7FE9F5" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 7"/>` +
+    `<path d="M84 28 L84 72" stroke="#7FE9F5" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 7"/>` +
+    `</g>`
   return s
 }
 
@@ -162,7 +200,7 @@ function fastEnemy() {
     `<path d="M42 56 Q48 52 54 56" stroke="#0e3a44" stroke-width="2.4" fill="none" stroke-linecap="round"/>`
   const inner =
     shadow() +
-    treads() +
+    treadsFast() +
     `<path d="M30 30 Q48 22 66 30 L66 70 Q48 76 30 70 Z" fill="url(#${id}body)"/>` +
     `<rect x="34" y="33" width="28" height="5" rx="2.5" fill="rgba(255,255,255,0.3)"/>` +
     `<rect x="35" y="36" width="26" height="22" rx="7" fill="url(#${id}tur)"/>` +
@@ -224,24 +262,53 @@ function armorEnemy() {
   return { defs: tankDefs(id, p), inner }
 }
 
-// ---------- base (energy cube) ----------
+// ---------- base (single 3D energy crystal, spans the 2x2 base block) ----------
 function baseSprite() {
   const defs =
-    `<radialGradient id="bglow" cx="0.5" cy="0.5" r="0.5">` +
-    `<stop offset="0" stop-color="#FFE9A8"/><stop offset="1" stop-color="#F4C430"/></radialGradient>` +
-    `<linearGradient id="ctop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset="1" stop-color="#F4C430"/></linearGradient>` +
-    `<linearGradient id="cleft" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F4C430"/><stop offset="1" stop-color="#C99A12"/></linearGradient>` +
-    `<linearGradient id="cright" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E0B22A"/><stop offset="1" stop-color="#A87E0E"/></linearGradient>`
+    `<radialGradient id="cGlow" cx="0.5" cy="0.52" r="0.5"><stop offset="0" stop-color="#9BE7FF" stop-opacity="0.95"/><stop offset="0.55" stop-color="#3FA9F0" stop-opacity="0.45"/><stop offset="1" stop-color="#1E4475" stop-opacity="0"/></radialGradient>` +
+    `<linearGradient id="cTop" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#EAFBFF"/><stop offset="1" stop-color="#A7E8FF"/></linearGradient>` +
+    `<linearGradient id="cFaceL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#BFF0FF"/><stop offset="1" stop-color="#3E9BE0"/></linearGradient>` +
+    `<linearGradient id="cFaceR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8FD4F5"/><stop offset="1" stop-color="#2A6FB8"/></linearGradient>` +
+    `<linearGradient id="cBotL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5FB0E0"/><stop offset="1" stop-color="#2C6BA8"/></linearGradient>` +
+    `<linearGradient id="cBotR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4A93C8"/><stop offset="1" stop-color="#1E4F86"/></linearGradient>`
+  const edge = 'stroke="#EAFBFF" stroke-width="1.4" stroke-linejoin="round"'
   const inner =
-    `<ellipse cx="48" cy="80" rx="26" ry="6" fill="rgba(0,0,0,0.2)"/>` +
-    `<ellipse cx="48" cy="52" rx="34" ry="34" fill="url(#bglow)" opacity="0.35"/>` +
-    // isometric cube
-    `<polygon points="48,22 74,36 74,64 48,78 22,64 22,36" fill="url(#cleft)"/>` +
-    `<polygon points="48,22 74,36 48,50 22,36" fill="url(#ctop)"/>` +
-    `<polygon points="74,36 74,64 48,78 48,50" fill="url(#cright)"/>` +
-    // inner glow lines
-    `<polygon points="48,34 64,43 48,52 32,43" fill="none" stroke="#FFF3C8" stroke-width="2" opacity="0.8"/>` +
-    `<circle cx="48" cy="43" r="4" fill="#FFF3C8"/>`
+    // outer energy glow
+    `<ellipse cx="48" cy="50" rx="44" ry="44" fill="url(#cGlow)"/>` +
+    // energy pad at the foot
+    `<ellipse cx="48" cy="84" rx="30" ry="7" fill="rgba(120,200,255,0.35)"/>` +
+    // crystal facets (a single faceted gem)
+    `<polygon points="48,12 22,46 48,54" fill="url(#cTop)" ${edge}/>` +
+    `<polygon points="48,12 74,46 48,54" fill="url(#cTop)" ${edge}/>` +
+    `<polygon points="22,46 48,54 30,70" fill="url(#cFaceL)" ${edge}/>` +
+    `<polygon points="74,46 66,70 48,54" fill="url(#cFaceR)" ${edge}/>` +
+    `<polygon points="48,54 30,70 48,86" fill="url(#cBotL)" ${edge}/>` +
+    `<polygon points="48,54 66,70 48,86" fill="url(#cBotR)" ${edge}/>` +
+    // bright central ridge highlight
+    `<line x1="48" y1="12" x2="48" y2="86" stroke="rgba(255,255,255,0.5)" stroke-width="1.2"/>` +
+    // inner core glow
+    `<ellipse cx="48" cy="50" rx="9" ry="12" fill="#FFFFFF" opacity="0.55"/>` +
+    // sparkles
+    `<circle cx="40" cy="30" r="2" fill="#fff"/>` +
+    `<circle cx="60" cy="34" r="1.6" fill="#fff"/>` +
+    `<circle cx="48" cy="20" r="1.4" fill="#EAFBFF"/>`
+  return { defs, inner }
+}
+
+// Shattered crystal — drawn once the base is destroyed.
+function baseRuinsSprite() {
+  const defs =
+    `<linearGradient id="ruL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9AA6B0"/><stop offset="1" stop-color="#5B6670"/></linearGradient>`
+  const s = 'stroke="#3A434C" stroke-width="1.2" stroke-linejoin="round"'
+  const inner =
+    `<ellipse cx="48" cy="84" rx="28" ry="6" fill="rgba(0,0,0,0.3)"/>` +
+    `<polygon points="48,20 28,48 44,58" fill="url(#ruL)" ${s}/>` +
+    `<polygon points="48,20 68,46 50,56" fill="#7C8893" ${s}/>` +
+    `<polygon points="30,64 46,58 40,82 26,76" fill="#5B6670" ${s}/>` +
+    `<polygon points="66,62 50,56 52,82 70,76" fill="#46525C" ${s}/>` +
+    `<path d="M48 20 L46 40 L52 56 M44 58 L40 70 M50 56 L54 72" stroke="rgba(20,24,28,0.7)" stroke-width="1.4" fill="none"/>` +
+    `<polygon points="18,72 26,68 24,80" fill="#6B7681" ${s}/>` +
+    `<polygon points="74,74 82,70 80,82" fill="#5B6670" ${s}/>`
   return { defs, inner }
 }
 
@@ -273,28 +340,42 @@ function brickSprite() {
 }
 
 function steelSprite() {
-  let s = `<rect width="96" height="96" fill="#8A909C"/>`
-  const panes = [
-    [2, 2],
-    [50, 2],
-    [2, 50],
-    [50, 50],
-  ]
-  for (const [x, y] of panes) {
-    s += `<rect x="${x}" y="${y}" width="44" height="44" rx="5" fill="#C9CDD4"/>`
-    s += `<rect x="${x}" y="${y}" width="44" height="8" rx="4" fill="rgba(255,255,255,0.35)"/>`
-    s += `<rect x="${x}" y="${y + 36}" width="44" height="8" rx="4" fill="rgba(0,0,0,0.12)"/>`
-    // rivets
-    for (const [rx, ry] of [
-      [x + 6, y + 6],
-      [x + 38, y + 6],
-      [x + 6, y + 38],
-      [x + 38, y + 38],
-    ]) {
-      s += `<circle cx="${rx}" cy="${ry}" r="2.4" fill="#9aa0ac"/><circle cx="${rx - 0.8}" cy="${ry - 0.8}" r="0.9" fill="#eef1f5"/>`
-    }
+  // Full-bleed metal plate (no per-tile margin) so adjacent steel tiles merge
+  // into ONE cohesive wall. A seamless 45° brushed texture (period 24, which
+  // divides 96) tiles perfectly, and rivets sit at the four corners so they
+  // form a continuous rivet grid across the whole wall.
+  const defs =
+    `<linearGradient id="st" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0" stop-color="#DDE2E8"/><stop offset="0.5" stop-color="#B3B9C2"/><stop offset="1" stop-color="#9AA1AB"/></linearGradient>`
+  // seamless diagonal brushed lines
+  let lines = ''
+  for (let i = -4; i < 8; i++) {
+    const x = i * 24
+    lines += `<line x1="${x}" y1="0" x2="${x + 96}" y2="96" stroke="rgba(255,255,255,0.07)" stroke-width="2"/>`
+    lines += `<line x1="${x + 12}" y1="0" x2="${x + 108}" y2="96" stroke="rgba(0,0,0,0.06)" stroke-width="2"/>`
   }
-  return { defs: '', inner: s }
+  // Rivets use a LIGHT head + DARK outline so they stay visible both on the
+  // bright top of the gradient and the darker bottom (a dark rivet vanished
+  // against the lower tile — that was the bug).
+  const rivet = (cx, cy) =>
+    `<circle cx="${cx}" cy="${cy}" r="3.4" fill="#E7EBF0" stroke="#3A3F47" stroke-width="1"/>` +
+    `<circle cx="${cx - 0.9}" cy="${cy - 0.9}" r="1.1" fill="#ffffff"/>`
+  let s =
+    `<rect width="96" height="96" fill="url(#st)"/>` +
+    lines +
+    // subtle embossed cross seam (low opacity → reads as paneling, not a gap)
+    `<rect x="47" y="0" width="2" height="96" fill="rgba(0,0,0,0.09)"/>` +
+    `<rect x="0" y="47" width="96" height="2" fill="rgba(0,0,0,0.09)"/>` +
+    `<rect x="47.5" y="0" width="1" height="96" fill="rgba(255,255,255,0.12)"/>` +
+    `<rect x="0" y="47.5" width="96" height="1" fill="rgba(255,255,255,0.12)"/>`
+  for (const [cx, cy] of [
+    [9, 9],
+    [87, 9],
+    [9, 87],
+    [87, 87],
+  ])
+    s += rivet(cx, cy)
+  return { defs, inner: s }
 }
 
 function waterSprite() {
@@ -310,19 +391,43 @@ function waterSprite() {
 }
 
 function forestSprite() {
-  // semi-transparent canopy so tanks peek through ("若隐若现")
-  let s = ``
-  const blobs = [
-    [24, 24, 22],
-    [60, 22, 26],
-    [40, 44, 28],
-    [74, 50, 22],
-    [20, 62, 24],
-    [56, 70, 26],
+  // Semi-transparent canopy ("若隐若现"): dense enough to read as a leafy bush,
+  // but light enough that a tank underneath stays clearly visible. Earlier the
+  // canopy was drawn at ~0.8 opacity which fully hid enemies — now dropped to
+  // ~0.4–0.5 with looser spacing so the tank's silhouette always peeks through.
+  let s = ''
+  // dark base canopy — airy coverage
+  const base = [
+    [30, 30, 26],
+    [66, 26, 26],
+    [48, 54, 30],
+    [22, 64, 22],
+    [76, 64, 24],
+    [48, 16, 20],
   ]
-  for (const [cx, cy, r] of blobs) {
-    s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#3F9142" opacity="0.82"/>`
-    s += `<circle cx="${cx - r * 0.3}" cy="${cy - r * 0.3}" r="${r * 0.45}" fill="#58B35B" opacity="0.85"/>`
+  for (const [cx, cy, r] of base) {
+    s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#2C6E33" opacity="0.5"/>`
+  }
+  // mid-tone highlights
+  const mid = [
+    [34, 28, 18],
+    [62, 32, 20],
+    [50, 56, 22],
+    [26, 64, 15],
+    [72, 62, 17],
+  ]
+  for (const [cx, cy, r] of mid) {
+    s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#4CA653" opacity="0.42"/>`
+  }
+  // bright tips
+  for (const [cx, cy, r] of [
+    [40, 24, 11],
+    [58, 42, 13],
+    [34, 52, 10],
+    [66, 58, 10],
+    [48, 70, 11],
+  ]) {
+    s += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#74C879" opacity="0.34"/>`
   }
   return { defs: '', inner: s }
 }
@@ -438,87 +543,80 @@ function starbuf(n) {
 }
 
 function hitStage(stage) {
-  // Identity-preserving battle damage. These overlays are blitted ON TOP of the
-  // enemy's own (type-specific) sprite, so the tank's colour & silhouette must
-  // always stay visible — a hit fast / armour / basic tank must remain instantly
-  // recognisable as its type (issue #2). We therefore use ONLY thin cracks,
-  // small semi-transparent scorch specks, and a few glowing embers / smoke
-  // wisps. The old design filled the whole hull with a charcoal/gray rect, which
-  // recoloured every tank into the same generic charred blob.
-  const crack = (d, w, op) =>
-    `<path d="${d}" stroke="rgba(15,15,15,${op})" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
-  const lightCrack = (d, w) =>
-    `<path d="${d}" stroke="rgba(255,255,255,0.45)" stroke-width="${w}" fill="none" stroke-linecap="round"/>`
-  const scorch = (cx, cy, r, op) =>
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="rgba(28,18,12,${op})"/>`
-  const ember = (cx, cy, r) =>
-    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="rgba(255,90,30,0.5)"/>` +
-    `<circle cx="${cx}" cy="${cy}" r="${(r * 0.5).toFixed(1)}" fill="rgba(255,205,90,0.7)"/>`
+  // Bold, unmistakable battle damage. These overlays sit ON TOP of the enemy's
+  // own sprite and rotate with it, so the tank's colour & silhouette stay
+  // recognisable — but the damage must now be OBVIOUS (the previous thin dark
+  // hairline cracks were nearly invisible). We use glowing hot cracks (orange
+  // glow + white-hot core), bright 4-point impact sparks, and an energised
+  // outline ring that intensifies per stage.
+  const glowCrack = (d) =>
+    `<path d="${d}" stroke="rgba(255,150,30,0.85)" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.5"/>` +
+    `<path d="${d}" stroke="rgba(255,245,200,0.95)" stroke-width="1.7" fill="none" stroke-linecap="round"/>`
+  // 4-point spark starburst — reads instantly as "hit"
+  const spark = (cx, cy, r, col = '#fff6c8') =>
+    `<path d="M${cx} ${cy - r} L${cx + r * 0.3} ${cy - r * 0.3} L${cx + r} ${cy} L${cx + r * 0.3} ${cy + r * 0.3} L${cx} ${cy + r} L${cx - r * 0.3} ${cy + r * 0.3} L${cx - r} ${cy} L${cx - r * 0.3} ${cy - r * 0.3} Z" fill="${col}"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="${r * 0.34}" fill="#fff"/>`
+  const ring = (cx, cy, rx, ry, col, w, op) =>
+    `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="none" stroke="${col}" stroke-width="${w}" opacity="${op}"/>`
   const smoke = (cx, cy) =>
-    `<circle cx="${cx}" cy="${cy}" r="6" fill="rgba(190,190,190,0.20)"/>` +
-    `<circle cx="${cx - 3}" cy="${cy - 4}" r="4" fill="rgba(210,210,210,0.16)"/>`
+    `<circle cx="${cx}" cy="${cy}" r="6" fill="rgba(190,190,190,0.22)"/>` +
+    `<circle cx="${cx - 3}" cy="${cy - 4}" r="4" fill="rgba(210,210,210,0.18)"/>`
 
   if (stage === 0) return { defs: '', inner: '' }
   if (stage === 1) {
-    // a couple of hairline cracks
     return {
       defs: '',
-      inner:
-        crack('M42 30 L47 42 L41 54', 2, 0.55) +
-        lightCrack('M42 30 L47 42 L41 54', 0.8) +
-        crack('M57 34 L52 46 L58 58', 2, 0.55),
+      inner: glowCrack('M42 30 L47 42 L41 54') + glowCrack('M57 34 L52 46 L58 58') + spark(48, 44, 9),
     }
   }
   if (stage === 2) {
-    // more cracks + a few small scorch specks
     return {
       defs: '',
       inner:
-        crack('M42 30 L47 42 L41 54', 2.2, 0.6) +
-        lightCrack('M42 30 L47 42 L41 54', 0.8) +
-        crack('M57 34 L52 46 L58 58', 2.2, 0.6) +
-        crack('M36 52 L48 55 L60 51', 1.8, 0.5) +
-        scorch(34, 38, 3.5, 0.3) +
-        scorch(62, 58, 3, 0.3) +
-        scorch(50, 30, 2.5, 0.25),
+        glowCrack('M42 30 L47 42 L41 54') +
+        glowCrack('M57 34 L52 46 L58 58') +
+        glowCrack('M36 52 L48 55 L60 51') +
+        spark(48, 44, 9) +
+        spark(40, 58, 6) +
+        ring(48, 48, 34, 41, 'rgba(255,255,255,0.55)', 2, 0.55),
     }
   }
   if (stage === 3) {
-    // heavier cracks + scorch + a small smoke wisp (still transparent body)
     return {
       defs: '',
       inner:
-        crack('M42 30 L47 42 L41 54', 2.6, 0.65) +
-        crack('M57 34 L52 46 L58 58', 2.6, 0.65) +
-        crack('M36 52 L48 55 L60 51', 2.2, 0.55) +
-        crack('M45 28 L50 40 L44 52', 1.8, 0.5) +
-        crack('M30 44 L40 47', 1.6, 0.45) +
-        scorch(34, 38, 4, 0.35) +
-        scorch(62, 58, 4, 0.35) +
-        scorch(50, 30, 3, 0.3) +
-        scorch(40, 62, 2.5, 0.28) +
-        smoke(30, 22),
+        glowCrack('M42 30 L47 42 L41 54') +
+        glowCrack('M57 34 L52 46 L58 58') +
+        glowCrack('M36 52 L48 55 L60 51') +
+        glowCrack('M45 28 L50 40 L44 52') +
+        spark(48, 44, 10) +
+        spark(40, 58, 7) +
+        spark(60, 40, 6) +
+        ring(48, 48, 35, 42, 'rgba(255,120,60,0.9)', 2.4, 0.7) +
+        smoke(30, 22) +
+        smoke(66, 22),
     }
   }
-  // stage 4 — heavy damage, STILL transparent: cracks + scorch + glowing embers
-  // at the impact points + small smoke wisps. The tank's own colour is untouched.
+  // stage 4 — critical: heavy glowing cracks + bold red danger ring + multiple
+  // impact sparks + smoke. Unmistakable, yet the tank colour shows through.
   return {
     defs: '',
     inner:
-      crack('M42 30 L47 42 L41 54', 3, 0.7) +
-      crack('M57 34 L52 46 L58 58', 3, 0.7) +
-      crack('M36 52 L48 55 L60 51', 2.6, 0.6) +
-      crack('M45 28 L50 40 L44 52', 2.2, 0.55) +
-      crack('M30 44 L40 47', 2, 0.5) +
-      crack('M68 44 L58 47', 2, 0.5) +
-      scorch(34, 38, 5, 0.4) +
-      scorch(62, 58, 5, 0.4) +
-      scorch(50, 30, 3.5, 0.35) +
-      scorch(40, 62, 3, 0.32) +
-      ember(34, 38, 3) +
-      ember(62, 58, 3) +
+      glowCrack('M42 30 L47 42 L41 54') +
+      glowCrack('M57 34 L52 46 L58 58') +
+      glowCrack('M36 52 L48 55 L60 51') +
+      glowCrack('M45 28 L50 40 L44 52') +
+      glowCrack('M30 44 L40 47') +
+      glowCrack('M68 44 L58 47') +
+      spark(48, 44, 11) +
+      spark(40, 58, 8) +
+      spark(60, 40, 7) +
+      spark(34, 36, 6) +
+      ring(48, 48, 36, 43, 'rgba(255,70,50,0.95)', 3, 0.85) +
+      ring(48, 48, 31, 37, 'rgba(255,200,120,0.8)', 1.5, 0.7) +
       smoke(30, 20) +
-      smoke(66, 22),
+      smoke(66, 22) +
+      smoke(48, 18),
   }
 }
 
@@ -531,6 +629,7 @@ const files = {
   enemy_power: powerEnemy(),
   enemy_armor: armorEnemy(),
   base: baseSprite(),
+  base_ruins: baseRuinsSprite(),
   bullet: bulletSprite(),
   brick: brickSprite(),
   steel: steelSprite(),

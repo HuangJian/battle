@@ -135,6 +135,46 @@ body {
   letter-spacing: 2px;
 }
 
+/* Pause indicator — sits in the HUD's STAGE area (hud-center) so pausing never
+   covers the battle field. Hidden unless the HUD bar has the .paused class. */
+.hud-pause {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  margin-left: 4px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: rgba(232, 200, 64, 0.16);
+  border: 1px solid var(--theme-accent-primary);
+  box-shadow: 0 0 10px rgba(232, 200, 64, 0.25);
+}
+.hud-bar.paused .hud-pause {
+  display: flex;
+}
+.hud-pause-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--theme-accent-primary);
+}
+.hud-pause-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--theme-accent-primary);
+  box-shadow: 0 0 6px var(--theme-accent-primary);
+}
+.hud-pause-hint {
+  font-size: 8px;
+  letter-spacing: 1px;
+  color: var(--theme-text-muted);
+}
+
 /* ================================================================
    Game Container
    ================================================================ */
@@ -197,6 +237,35 @@ body {
   opacity: 1;
   transform: scale(1);
   pointer-events: auto;
+}
+
+/* Pause: keep the entire battle field visible (for screenshots) — a small
+   top-corner pill with a transparent, non-blurred backdrop instead of the
+   usual full-screen dark/blurred overlay. */
+.ui-paused {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12px;
+}
+.ui-paused.active {
+  pointer-events: none;
+}
+/* The visible PAUSED indicator now lives in the HUD's STAGE area — the
+   floating pill is suppressed so the battle field is never covered. */
+.ui-paused .ui-panel {
+  display: none;
+}
+.ui-paused .ui-title {
+  font-size: 18px;
+  letter-spacing: 5px;
+}
+.ui-paused .ui-hint {
+  font-size: 11px;
+  margin: 0;
+  opacity: 0.75;
 }
 
 /* ================================================================

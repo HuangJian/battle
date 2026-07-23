@@ -180,4 +180,17 @@ export class TileMap {
   getBasePos(): { x: number; y: number } | null {
     return this.basePos
   }
+
+  /**
+   * Returns true if (c, r) is the TOP-LEFT cell of a contiguous base block.
+   * The base is drawn as a single crystal spanning its 2×2 area, so only this
+   * cell triggers the full-block draw. A cell qualifies when it is 'base' and
+   * has no 'base' neighbour to its left or above.
+   */
+  isBaseTopLeft(c: number, r: number): boolean {
+    if (this.grid[r]?.[c] !== 'base') return false
+    const left = c > 0 ? this.grid[r][c - 1] : 'empty'
+    const up = r > 0 ? this.grid[r - 1][c] : 'empty'
+    return left !== 'base' && up !== 'base'
+  }
 }
