@@ -175,6 +175,63 @@ body {
   color: var(--theme-text-muted);
 }
 
+/* ---- Active buff countdowns (shield / freeze) ----
+   Live in the HUD's STAGE area so timed buffs are shown OUTSIDE the battle
+   field. Each chip only appears while its buff is active. */
+.hud-buffs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+.buff-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, currentColor 35%, transparent);
+  animation: buff-pop 0.22s ease-out;
+}
+.buff-chip[hidden] {
+  display: none;
+}
+.buff-icon {
+  font-size: 12px;
+  line-height: 1;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, currentColor 60%, transparent));
+}
+.buff-time {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: currentColor;
+  min-width: 8px;
+  text-align: center;
+}
+/* Shield → warm gold accent; Freeze → cool blue. currentColor drives the
+   border / background tint / glow so each chip is self-consistent. */
+.buff-shield {
+  color: var(--theme-accent-primary);
+}
+.buff-freeze {
+  color: #3d9bf5;
+}
+
+@keyframes buff-pop {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
 /* ================================================================
    Game Container
    ================================================================ */

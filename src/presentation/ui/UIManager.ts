@@ -19,6 +19,10 @@ export class UIManager {
   private hudStage: HTMLElement
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
+  private buffShield: HTMLElement
+  private buffShieldTime: HTMLElement
+  private buffFreeze: HTMLElement
+  private buffFreezeTime: HTMLElement
   private overlay: HTMLElement
   private menuScreen: HTMLElement
   private pauseScreen: HTMLElement
@@ -77,6 +81,9 @@ export class UIManager {
   private lastStage = -1
   private lastEnemies = -1
   private lastLives = -1
+  // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
+  private lastShieldSec = -1
+  private lastFreezeSec = -1
   private lastMenuCursor = -1
   private lastDifficultyKey = ''
   private lastThemeKeyMenu = ''
@@ -106,6 +113,16 @@ export class UIManager {
         <div class="hud-item">
           <span class="hud-label">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
+        </div>
+        <div class="hud-buffs" data-hud="buffs">
+          <div class="buff-chip buff-shield" data-buff="shield" hidden>
+            <span class="buff-icon">🛡</span>
+            <span class="buff-time" data-buff-time="shield">0</span>
+          </div>
+          <div class="buff-chip buff-freeze" data-buff="freeze" hidden>
+            <span class="buff-icon">❄</span>
+            <span class="buff-time" data-buff-time="freeze">0</span>
+          </div>
         </div>
         <div class="hud-pause" data-hud="pause">
           <span class="hud-pause-title"><span class="hud-pause-dot"></span>PAUSED</span>
@@ -212,6 +229,10 @@ export class UIManager {
     this.hudStage = this.hudBar.querySelector('[data-hud="stage"]')!
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
+    this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
+    this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
+    this.buffFreeze = this.hudBar.querySelector('[data-buff="freeze"]')!
+    this.buffFreezeTime = this.hudBar.querySelector('[data-buff-time="freeze"]')!
 
     // Cache menu DOM elements (avoid querySelectorAll every frame)
     this.menuDiffOptions = Array.from(
@@ -433,6 +454,9 @@ export class UIManager {
       this.lastLives = world.lives
     }
 
+    // Active timed buffs (shield / freeze) — countdown shown outside the field
+    this.updateBuffs(world)
+
     // Menu state — only update when in menu
     if (world.state === 'menu') {
       this.updateMenu(world)
@@ -465,6 +489,45 @@ export class UIManager {
 
     // Show correct screen
     this.showScreen(world.state)
+  }
+
+  /**
+   * Update the timed-buff countdown chips in the HUD. Only the buffs that are
+   * genuinely time-limited get a countdown: the player's SHIELD
+   * (shield/helmet pickup + spawn protection, via player.shieldTimer) and the
+   * enemy FREEZE (freeze/clock pickup, via world.freezeTimer). Star / extra
+   * life / bomb are instant or permanent and intentionally have no timer.
+   *
+   * DOM writes are keyed on the remaining WHOLE second so the text only
+   * changes ~once per second, and a chip's `hidden` attribute flips only on
+   * the transition to/from 0 — no per-frame DOM churn.
+   */
+  private updateBuffs(world: World): void {
+    const shieldMs = world.player?.alive ? (world.player.shieldTimer ?? 0) : 0
+    this.updateBuffChip(this.buffShield, this.buffShieldTime, shieldMs, 'shield')
+
+    this.updateBuffChip(this.buffFreeze, this.buffFreezeTime, world.freezeTimer, 'freeze')
+  }
+
+  /** Reflect a single buff's remaining time into its chip; hide it at 0. */
+  private updateBuffChip(
+    chip: HTMLElement,
+    timeEl: HTMLElement,
+    ms: number,
+    which: 'shield' | 'freeze',
+  ): void {
+    const sec = ms > 0 ? Math.ceil(ms / 1000) : 0
+    const last = which === 'shield' ? this.lastShieldSec : this.lastFreezeSec
+    if (sec === last) return
+    if (which === 'shield') this.lastShieldSec = sec
+    else this.lastFreezeSec = sec
+
+    if (sec > 0) {
+      timeEl.textContent = String(sec)
+      chip.hidden = false
+    } else {
+      chip.hidden = true
+    }
   }
 
   private updateMenu(world: World): void {
