@@ -591,3 +591,24 @@ only HP (not position/speed), so the determinism test is preserved.
   (combat.test grew by 2 cases asserting the gate + the −40% scale; the
   bullet-avoidance test in tactical-ai.test still passes against the slower
   tanks, so dodge-vs-intelligence holds).
+
+**Refinement (2026-07-23) — fire-rate fairness invariant (duel-safe player):**
+- User requirement: with no buffs on either side, the player must never LOSE a
+  head-on duel (对枪) against any enemy type because of a lower fire rate. In a
+  duel opposing bullets cancel 1:1 (`bulletHitsBullet`), so the shorter
+  fireCooldown side always lands the surplus shell — the invariant reduces to:
+  unbuffed player (level 0, fireControl 50 → 420 ms) cooldown ≤ every enemy
+  archetype's cooldown.
+- `power` violated it (fireControl 55 → 400 ms, strictly out-firing the
+  player). Rebalanced: fireControl 55 → 50 (420 ms, tie), the 5 freed points
+  moved to `special` (no stat mapping) so the 300 budget is preserved. Side
+  effects: none on speed/HP/bulletSpeed/bulletPower; AI `effectiveAggression`
+  shifts 0.865→0.85 (negligible). Elite promotions never boost fireControl, so
+  elites keep the invariant too.
+- Guarded by `tests/fire-rate-duel.test.ts` (6 cases): a config contract
+  (player cd ≤ every base AND elite archetype cd) plus a real-Simulation
+  head-on duel vs each kind — corridor cleared, both sides firing at their
+  exact max cadence via the real `tryFire` gate — asserting the player is
+  never destroyed, fires ≥ the enemy, and strictly-slower enemies actually
+  die to the surplus shells. Verified the tests FAIL with the old power
+  profile. `tsc --noEmit` clean, `bun test` 75/75.

@@ -67,10 +67,18 @@ export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> =
   power: {
     firepower: 75,
     projectileSpeed: 50,
-    fireControl: 55,
+    // Fire-rate fairness invariant: NO enemy archetype may out-fire the
+    // unbuffed player (level 0, fireControl 50 → 420 ms). fireCooldown is
+    // 620 − fireControl×4, so any enemy fireControl above 50 would win a
+    // head-on duel purely on cadence (bullets cancel 1:1; the faster firer
+    // always lands the surplus shell). power was 55 (400 ms — strictly
+    // faster than the player); rebalanced to 50 with the 5 freed points
+    // moved to `special` (no stat mapping) so the 300 budget still holds.
+    // Guarded by tests/fire-rate-duel.test.ts.
+    fireControl: 50,
     mobility: 30,
     armor: 45,
-    special: 45,
+    special: 50,
   },
   armor: {
     firepower: 55,
