@@ -321,22 +321,19 @@ export class Simulation {
   private tryFire(tank: Tank): void {
     const w = this.world
     const now = w.frame * (1000 / 60)
+    // Fire rate is governed SOLELY by the tank's `fireCooldown` — a value
+    // derived once from the tank's combat profile (combat.ts). It is a fixed
+    // per-type cadence measured in time, and therefore cannot depend on
+    // whether any previous bullet is still in flight or has hit something.
+    //
+    // A previous implementation additionally gated the PLAYER on a
+    // max-concurrent-bullets count (1 at base level, 2 once promoted). That
+    // cap coupled the player's fire rate to bullet *lifetime*: because a
+    // bullet only disappears after it strikes terrain/a tank or leaves the
+    // field, the next shot was forced to wait for the previous one to
+    // resolve — so the effective rate depended on whether the last shell hit.
+    // The cap is intentionally removed: fire rate is `fireCooldown`, period.
     if (now - tank.lastFire < tank.fireCooldown) return
-
-    // Player bullet limit — count in place (no per-fire array allocation)
-    if (tank.isPlayer) {
-      const maxBullets = (tank.level ?? 0) >= 2 ? 2 : 1
-      let activeBullets = 0
-      const bullets = w.bullets
-      for (let i = 0; i < bullets.length; i++) {
-        const b = bullets[i]
-        if (b.alive && b.ownerId === tank.id) {
-          activeBullets++
-          if (activeBullets >= maxBullets) break
-        }
-      }
-      if (activeBullets >= maxBullets) return
-    }
 
     const v = DIR_VECTORS[tank.dir]
 

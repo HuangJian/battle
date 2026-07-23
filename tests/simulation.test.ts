@@ -340,3 +340,101 @@ describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
     expect(world.enemiesSpawned).toBeGreaterThan(0)
   })
 })
+
+/**
+ * Regression guard for "fire rate is fixed per combat type and must NOT depend
+ * on whether previous shells hit something."
+ *
+ * The player's fire rate used to be gated by a max-concurrent-bullets count
+ * (1 at base level, 2 once promoted). Because a bullet only disappears after
+ * it strikes terrain/a tank or leaves the field, that cap coupled the next
+ * shot to the *lifetime* of the previous one — so the effective rate depended
+ * on whether the last shell hit. The fix removes that cap; fire rate is now
+ * governed solely by `tank.fireCooldown` (a fixed per-type value from the
+ * combat profile), measured in time, so it is identical whether the previous
+ * bullet is still flying or has just hit a wall.
+ *
+ * The test fires the player upward in two scenarios and compares the gap
+ * between the first two shots:
+ *   - OPEN : no terrain in the bullet's path → the first bullet stays alive
+ *            far longer than one cooldown.
+ *   - WALL : a steel wall jammed against the muzzle → the bullet hits and dies
+ *            on the very next tick.
+ * With the bug, the OPEN gap ≈ bullet-flight-time (much larger than the
+ * cooldown) while WALL's gap ≈ cooldown. With the fix, both gaps equal the
+ * cooldown, proving the rate is hit-independent and fixed per type.
+ */
+describe('Fire rate is fixed per type and independent of hit outcomes', () => {
+  interface FireRun {
+    gaps: number[]
+    fireCooldownTicks: number
+  }
+
+  function runFireScenario(terrain: 'open' | 'wall'): FireRun {
+    const world = new World()
+    world.rng = new RNG(7)
+    const input = new Input()
+    const sim = new Simulation(world, input)
+    world.startGame('classic', 'modern', 0)
+    // Isolate the fire-rate measurement: no enemies to shoot the player, and
+    // skip the spawn-grace delay.
+    world.spawnQueue.length = 0
+    const player = world.player!
+    player.spawnTimer = 0
+
+    if (terrain === 'open') {
+      // Clear the player's vertical corridor (cols 8-9) so a shot flies the
+      // full field height and stays alive well past one cooldown.
+      for (let r = 0; r <= 24; r++) {
+        world.tileMap.set(8, r, 'empty')
+        world.tileMap.set(9, r, 'empty')
+      }
+    } else {
+      // Steel jammed against the muzzle: every bullet hits and dies at once.
+      for (let r = 22; r <= 23; r++) {
+        world.tileMap.set(8, r, 'steel')
+        world.tileMap.set(9, r, 'steel')
+      }
+    }
+
+    // Hold fire (drive Input's keydown handler directly — no DOM needed).
+    ;(input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }).onKeyDown(
+      { code: input.keys.fire, preventDefault: () => {} },
+    )
+
+    const fireTicks: number[] = []
+    const TOTAL = 4 * 60 // 4 seconds
+    for (let t = 1; t <= TOTAL; t++) {
+      sim.tick()
+      for (const ev of world.consumeEvents()) {
+        if (ev.type === 'bullet_fired' && ev.bullet.isPlayer) fireTicks.push(t)
+      }
+    }
+
+    const gaps: number[] = []
+    for (let i = 1; i < fireTicks.length; i++) gaps.push(fireTicks[i] - fireTicks[i - 1])
+    return { gaps, fireCooldownTicks: (player.fireCooldown * 60) / 1000 }
+  }
+
+  it('player fire cadence equals fireCooldown and is identical whether shots hit or fly free', () => {
+    const open = runFireScenario('open')
+    const wall = runFireScenario('wall')
+
+    expect(open.gaps.length).toBeGreaterThan(0)
+    expect(wall.gaps.length).toBeGreaterThan(0)
+
+    // The first gap in the OPEN scenario is the critical one: the first bullet
+    // is still alive (has not hit anything) when the second is fired, so the
+    // gap must be ~one cooldown — NOT the bullet-flight time.
+    const openFirstGap = open.gaps[0]
+    const wallFirstGap = wall.gaps[0]
+
+    // Both gaps must equal the type's fixed cooldown (allow a 2-tick tolerance).
+    expect(Math.abs(openFirstGap - open.fireCooldownTicks)).toBeLessThanOrEqual(2)
+    expect(Math.abs(wallFirstGap - wall.fireCooldownTicks)).toBeLessThanOrEqual(2)
+
+    // And the two scenarios must agree — the previous bullet's fate must not
+    // change the cadence.
+    expect(Math.abs(openFirstGap - wallFirstGap)).toBeLessThanOrEqual(2)
+  })
+})

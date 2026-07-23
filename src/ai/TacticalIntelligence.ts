@@ -492,7 +492,13 @@ export class TacticalIntelligence {
 
     if (shoot) {
       fire(tank)
-      brain.fireTimer = tank.fireCooldown * (0.8 + world.rng.next() * 0.6)
+      // Fire cadence is a fixed per-type value: exactly `fireCooldown`
+      // (derived once from the tank's combat profile). It must NOT be jittered
+      // by RNG — "same type ⇒ fixed fire rate" — and it must not depend on
+      // whether the shot connected. The hard `fireCooldown` gate in
+      // Simulation.tryFire already enforces this; the AI's own re-decision
+      // delay is set to match it so the two never disagree.
+      brain.fireTimer = tank.fireCooldown
     } else {
       brain.fireTimer = 250 // re-check soon
     }
