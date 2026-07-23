@@ -63,14 +63,14 @@ console.log(
 // ---------------------------------------------------------------------------
 const tm = new TileMap()
 // Build a tiny grid with a brick at (3,3)
-for (let r = 0; r < GRID; r++)
-  for (let c = 0; c < GRID; c++) tm.grid[r][c] = 'empty'
+for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) tm.grid[r][c] = 'empty'
 tm.grid[3][3] = 'brick'
 tm.dirty = false
 tm.dirtyCells.length = 0
 
 tm.destroy(3, 3)
-const incrementalOk = tm.dirty === false && tm.dirtyCells.length === 1 && tm.dirtyCells[0] === 3 * GRID + 3
+const incrementalOk =
+  tm.dirty === false && tm.dirtyCells.length === 1 && tm.dirtyCells[0] === 3 * GRID + 3
 console.log(
   `[terrain] brick destroy → dirty=${tm.dirty} dirtyCells=${tm.dirtyCells.length} ` +
     `(expect dirty=false, cells=1): ${incrementalOk ? 'PASS' : 'FAIL'}`,

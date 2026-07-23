@@ -11,6 +11,7 @@ import {
   SHIELD_DURATION_MS,
   RESPAWN_SHIELD_MS,
   ENEMY_SPAWNS,
+  POWERUP_TIMEOUT_MS,
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
@@ -531,6 +532,7 @@ export class Simulation {
       h: TANK,
       alive: true,
       blinkTimer: 0,
+      lifeTimer: 0,
     })
   }
 
@@ -539,9 +541,18 @@ export class Simulation {
     const p = w.player
     if (!p || !p.alive) return
 
+    const dt = 1000 / 60
+
     for (const pu of w.powerUps) {
       if (!pu.alive) continue
-      pu.blinkTimer += 1000 / 60
+      pu.blinkTimer += dt
+      pu.lifeTimer += dt
+
+      // Despawn power-up after timeout
+      if (pu.lifeTimer >= POWERUP_TIMEOUT_MS) {
+        pu.alive = false
+        continue
+      }
 
       // Check player pickup
       if (aabb(p.x, p.y, p.w, p.h, pu.x, pu.y, pu.w, pu.h)) {
@@ -550,10 +561,6 @@ export class Simulation {
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
       }
     }
-
-    // Remove power-ups after some time? In classic, they stay until collected.
-    // But let's add a timeout for gameplay.
-    // Actually, classic power-ups stay. Let's keep them.
   }
 
   private applyPowerUp(type: PowerUpType): void {

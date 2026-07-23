@@ -587,7 +587,15 @@ export class SpriteArtist {
   // Power-ups
   // ================================================================
 
-  drawPowerUp(x: number, y: number, size: number, type: string, frame: number): void {
+  drawPowerUp(
+    x: number,
+    y: number,
+    size: number,
+    type: string,
+    frame: number,
+    lifeTimer?: number,
+    maxLife?: number,
+  ): void {
     const ctx = this.ctx
     const cx = x + size / 2
     const cy = y + size / 2
@@ -628,6 +636,65 @@ export class SpriteArtist {
 
     // --- twinkling sparkles on top (unified "闪闪发光" effect) ---
     this.drawPowerUpSparkles(cx, cy, size, frame)
+
+    // --- countdown timer display ---
+    if (lifeTimer !== undefined && maxLife !== undefined && maxLife > 0) {
+      this.drawPowerUpCountdown(cx, cy, size, lifeTimer, maxLife)
+    }
+  }
+
+  /** Draw countdown timer on power-up (top-right corner, visible from spawn) */
+  private drawPowerUpCountdown(
+    cx: number,
+    cy: number,
+    size: number,
+    lifeTimer: number,
+    maxLife: number,
+  ): void {
+    const ctx = this.ctx
+    const remaining = Math.max(0, maxLife - lifeTimer)
+    const seconds = Math.ceil(remaining / 1000)
+
+    // Show countdown from the beginning (not just last 10 seconds)
+    // Position at top-right corner of the power-up bounding box
+    const padding = size * 0.08
+    const x = cx + size * 0.5 - padding
+    const y = cy - size * 0.5 + padding
+
+    // Font size: reasonable, not covering the power-up shape
+    const fontSize = Math.max(9, size * 0.28)
+    ctx.save()
+    ctx.font = `bold ${fontSize}px monospace`
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'top'
+
+    // Background rounded rect for readability (small, top-right)
+    const textWidth = ctx.measureText(String(seconds)).width
+    const bgPadding = fontSize * 0.25
+    const bgWidth = textWidth + bgPadding * 2
+    const bgHeight = fontSize + bgPadding * 0.8
+    const bgX = x - bgWidth + bgPadding
+    const bgY = y - bgPadding * 0.4
+    const radius = bgHeight * 0.35
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)'
+    ctx.beginPath()
+    ctx.roundRect(bgX, bgY, bgWidth, bgHeight, radius)
+    ctx.fill()
+
+    // Countdown text - color changes based on urgency
+    if (seconds <= 3) {
+      ctx.fillStyle = '#ff4444' // Red for urgent
+    } else if (seconds <= 5) {
+      ctx.fillStyle = '#ffaa00' // Orange for warning
+    } else if (seconds <= 10) {
+      ctx.fillStyle = '#ffff00' // Yellow for attention
+    } else {
+      ctx.fillStyle = '#ffffff' // White for normal
+    }
+
+    ctx.fillText(String(seconds), x, y)
+    ctx.restore()
   }
 
   /** Twinkling 4-point sparkles orbiting the item — the animated "sparkle". */

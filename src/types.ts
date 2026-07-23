@@ -186,6 +186,8 @@ export interface PowerUp {
   h: number
   alive: boolean
   blinkTimer: number
+  /** Time since spawn (ms). Used for despawn timeout and countdown display. */
+  lifeTimer: number
 }
 
 export interface Explosion {

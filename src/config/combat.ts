@@ -48,10 +48,38 @@ export const ELITE_BUDGET = 360
  *   heavy  (armor):   high armor, low mobility.
  */
 export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> = {
-  basic: { firepower: 50, projectileSpeed: 50, fireControl: 50, mobility: 50, armor: 50, special: 50 },
-  fast: { firepower: 40, projectileSpeed: 45, fireControl: 45, mobility: 80, armor: 45, special: 45 },
-  power: { firepower: 75, projectileSpeed: 50, fireControl: 55, mobility: 30, armor: 45, special: 45 },
-  armor: { firepower: 55, projectileSpeed: 40, fireControl: 45, mobility: 30, armor: 90, special: 40 },
+  basic: {
+    firepower: 50,
+    projectileSpeed: 50,
+    fireControl: 50,
+    mobility: 50,
+    armor: 50,
+    special: 50,
+  },
+  fast: {
+    firepower: 40,
+    projectileSpeed: 45,
+    fireControl: 45,
+    mobility: 80,
+    armor: 45,
+    special: 45,
+  },
+  power: {
+    firepower: 75,
+    projectileSpeed: 50,
+    fireControl: 55,
+    mobility: 30,
+    armor: 45,
+    special: 45,
+  },
+  armor: {
+    firepower: 55,
+    projectileSpeed: 40,
+    fireControl: 45,
+    mobility: 30,
+    armor: 90,
+    special: 40,
+  },
 }
 
 // ============================================================
@@ -177,8 +205,16 @@ export function profileToStats(profile: CombatProfile): TankStats {
   // bullet (projectileSpeed 45 → 3.8). Bullets always win the race.
   // The player's per-star "speed buff" is proportional: each star lifts
   // mobility +10 → speed +~0.17 px/tick and bullet speed +~0.24 px/tick.
-  const speed = clamp((1.5 + ((profile.mobility - 30) * 2) / 70) * SPEED_SCALE, 1.5 * SPEED_SCALE, 3.5 * SPEED_SCALE)
-  const bulletSpeed = clamp((6 + (profile.projectileSpeed - 40) * 0.05) * BULLET_SPEED_SCALE, 6 * BULLET_SPEED_SCALE, 10 * BULLET_SPEED_SCALE)
+  const speed = clamp(
+    (1.5 + ((profile.mobility - 30) * 2) / 70) * SPEED_SCALE,
+    1.5 * SPEED_SCALE,
+    3.5 * SPEED_SCALE,
+  )
+  const bulletSpeed = clamp(
+    (6 + (profile.projectileSpeed - 40) * 0.05) * BULLET_SPEED_SCALE,
+    6 * BULLET_SPEED_SCALE,
+    10 * BULLET_SPEED_SCALE,
+  )
   // armor 45→1, 50→1, 70→3, 90→4, 100→5
   const maxHp = clamp(Math.round((profile.armor - 35) / 13), 1, 8)
   // Steel is only destroyed by bulletPower 2. We set the firepower threshold so
@@ -202,7 +238,6 @@ const BULLET_SPEED_SCALE = 0.6
  *  Tuned so default power (75) cannot pierce steel; only elite power (~86)
  *  and max-level player (80) can. */
 export const STEEL_PIERCE_FIREPOWER = 80
-
 
 // ============================================================
 // AI capability bias (plan §14) — combat attributes steer decisions

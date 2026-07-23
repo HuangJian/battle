@@ -212,7 +212,11 @@ describe('Enemy spawn does not deadlock or overlap (bug regression)', () => {
           continue
         }
         const rec = stuckAtSpawn.get(tk.id)
-        const trapped = atSpawn(tk.x, tk.y) && !free(tk, 0, tk.speed) && !free(tk, -tk.speed, 0) && !free(tk, tk.speed, 0)
+        const trapped =
+          atSpawn(tk.x, tk.y) &&
+          !free(tk, 0, tk.speed) &&
+          !free(tk, -tk.speed, 0) &&
+          !free(tk, tk.speed, 0)
         if (trapped) {
           if (rec && rec.x === tk.x && rec.y === tk.y) rec.n++
           else stuckAtSpawn.set(tk.id, { x: tk.x, y: tk.y, n: 1 })

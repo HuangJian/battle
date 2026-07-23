@@ -20,7 +20,15 @@ import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
 import { resolveConfig, levelForKind } from '../ai/config'
-import { GRID, CELL, TANK, ENEMIES_PER_STAGE, START_LIVES, STRATEGIC_INTERVAL_MS, COMMANDER_INTERVAL_MS } from '../constants'
+import {
+  GRID,
+  CELL,
+  TANK,
+  ENEMIES_PER_STAGE,
+  START_LIVES,
+  STRATEGIC_INTERVAL_MS,
+  COMMANDER_INTERVAL_MS,
+} from '../constants'
 
 let nextId = 1
 export function genId(): number {

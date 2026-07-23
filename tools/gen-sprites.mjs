@@ -297,8 +297,7 @@ function baseSprite() {
 
 // Shattered crystal — drawn once the base is destroyed.
 function baseRuinsSprite() {
-  const defs =
-    `<linearGradient id="ruL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9AA6B0"/><stop offset="1" stop-color="#5B6670"/></linearGradient>`
+  const defs = `<linearGradient id="ruL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9AA6B0"/><stop offset="1" stop-color="#5B6670"/></linearGradient>`
   const s = 'stroke="#3A434C" stroke-width="1.2" stroke-linejoin="round"'
   const inner =
     `<ellipse cx="48" cy="84" rx="28" ry="6" fill="rgba(0,0,0,0.3)"/>` +
@@ -478,7 +477,9 @@ function itemFrame(id) {
 function itemStar() {
   const id = 'is'
   const defs = itemDefs(id)
-  const inner = itemFrame(id) + `<path d="${starPath(48, 48, 26, 11)}" fill="url(#${id}gold)" stroke="#FFF3C8" stroke-width="2"/>`
+  const inner =
+    itemFrame(id) +
+    `<path d="${starPath(48, 48, 26, 11)}" fill="url(#${id}gold)" stroke="#FFF3C8" stroke-width="2"/>`
   return { defs, inner }
 }
 function itemBomb() {
@@ -499,7 +500,9 @@ function itemBomb() {
 // 护盾道具 → plasma shield (energy dome with plasma filaments)
 function itemShield() {
   const id = 'ih'
-  const defs = itemDefs(id) + `<linearGradient id="${id}pl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#CFFBFF"/><stop offset="1" stop-color="#23B6E0"/></linearGradient>`
+  const defs =
+    itemDefs(id) +
+    `<linearGradient id="${id}pl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#CFFBFF"/><stop offset="1" stop-color="#23B6E0"/></linearGradient>`
   const inner =
     itemFrame(id) +
     `<path d="M30 66 Q30 30 48 25 Q66 30 66 66 Z" fill="url(#${id}pl)" opacity="0.95"/>` +
@@ -551,7 +554,9 @@ function itemFreeze() {
 // 加命道具 → little tank (player-yellow, white star emblem)
 function itemTank() {
   const id = 'it'
-  const defs = itemDefs(id) + `<linearGradient id="${id}body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FBE08A"/><stop offset="0.5" stop-color="#F4C430"/><stop offset="1" stop-color="#D9A91E"/></linearGradient>`
+  const defs =
+    itemDefs(id) +
+    `<linearGradient id="${id}body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FBE08A"/><stop offset="0.5" stop-color="#F4C430"/><stop offset="1" stop-color="#D9A91E"/></linearGradient>`
   const inner =
     itemFrame(id) +
     `<rect x="31" y="42" width="7" height="26" rx="3" fill="#2b2b2b"/>` +
@@ -566,7 +571,9 @@ function itemTank() {
 // respawn shield → soldier helmet
 function itemHelmet() {
   const id = 'ik'
-  const defs = itemDefs(id) + `<linearGradient id="${id}st" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DDE6F0"/><stop offset="1" stop-color="#8A93A3"/></linearGradient>`
+  const defs =
+    itemDefs(id) +
+    `<linearGradient id="${id}st" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DDE6F0"/><stop offset="1" stop-color="#8A93A3"/></linearGradient>`
   const inner =
     itemFrame(id) +
     `<path d="M28 52 Q28 30 48 30 Q68 30 68 52 L68 55 Q48 63 28 55 Z" fill="url(#${id}st)" stroke="#E6ECF5" stroke-width="1.5"/>` +
@@ -657,7 +664,8 @@ function hitStage(stage) {
   if (stage === 1) {
     return {
       defs: '',
-      inner: glowCrack('M42 30 L47 42 L41 54') + glowCrack('M57 34 L52 46 L58 58') + spark(48, 44, 9),
+      inner:
+        glowCrack('M42 30 L47 42 L41 54') + glowCrack('M57 34 L52 46 L58 58') + spark(48, 44, 9),
     }
   }
   if (stage === 2) {

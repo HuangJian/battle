@@ -753,8 +753,13 @@ export class UIManager {
   private formatKey(code: string): string {
     if (code.startsWith('Arrow')) {
       return (
-        { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' } as Record<string, string>
-      )[code] ?? code
+        (
+          { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' } as Record<
+            string,
+            string
+          >
+        )[code] ?? code
+      )
     }
     if (code === 'Space') return 'SPACE'
     if (code === 'Escape') return 'ESC'

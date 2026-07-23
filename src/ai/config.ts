@@ -1,10 +1,6 @@
 import type { TankKind, IntelligenceLevel } from '../types'
 import { DIFFICULTIES } from '../config/difficulty'
-import type {
-  DifficultyAIScaling,
-  IntelligenceConfig,
-  ResolvedConfig,
-} from './types'
+import type { DifficultyAIScaling, IntelligenceConfig, ResolvedConfig } from './types'
 
 /**
  * ai/config.ts — the heart of "configuration defines intelligence".
@@ -133,10 +129,34 @@ export const KIND_TO_LEVEL: Record<TankKind, IntelligenceLevel> = {
  * prediction, more likely to have a commander) rather than just faster/tougher.
  */
 export const DIFFICULTY_AI: Record<string, DifficultyAIScaling> = {
-  relax: { dodgeMult: 0.6, predictAdd: 0, reactionMult: 1.4, aggressionMult: 0.8, commanderChance: 0.0 },
-  classic: { dodgeMult: 1.0, predictAdd: 0, reactionMult: 1.0, aggressionMult: 1.0, commanderChance: 0.15 },
-  hard: { dodgeMult: 1.2, predictAdd: 1, reactionMult: 0.8, aggressionMult: 1.15, commanderChance: 0.3 },
-  chaos: { dodgeMult: 1.4, predictAdd: 2, reactionMult: 0.6, aggressionMult: 1.3, commanderChance: 0.5 },
+  relax: {
+    dodgeMult: 0.6,
+    predictAdd: 0,
+    reactionMult: 1.4,
+    aggressionMult: 0.8,
+    commanderChance: 0.0,
+  },
+  classic: {
+    dodgeMult: 1.0,
+    predictAdd: 0,
+    reactionMult: 1.0,
+    aggressionMult: 1.0,
+    commanderChance: 0.15,
+  },
+  hard: {
+    dodgeMult: 1.2,
+    predictAdd: 1,
+    reactionMult: 0.8,
+    aggressionMult: 1.15,
+    commanderChance: 0.3,
+  },
+  chaos: {
+    dodgeMult: 1.4,
+    predictAdd: 2,
+    reactionMult: 0.6,
+    aggressionMult: 1.3,
+    commanderChance: 0.5,
+  },
 }
 
 /**

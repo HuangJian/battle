@@ -1,6 +1,6 @@
 import type { World } from '../../game/World'
 import type { TileMap } from '../../game/TileMap'
-import { CELL, GRID, FIELD, TANK } from '../../constants'
+import { CELL, GRID, FIELD, TANK, POWERUP_TIMEOUT_MS } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
 import type { SpriteLibrary } from './SpriteLibrary'
 import type { SpriteCache } from './SpriteCache'
@@ -488,7 +488,7 @@ export class GameRenderer {
     const artist = this.artist
     for (const pu of world.powerUps) {
       if (!pu.alive) continue
-      artist.drawPowerUp(pu.x, pu.y, pu.w, pu.type, frame)
+      artist.drawPowerUp(pu.x, pu.y, pu.w, pu.type, frame, pu.lifeTimer, POWERUP_TIMEOUT_MS)
     }
   }
 

@@ -66,6 +66,9 @@ export const SHIELD_DURATION_MS = 10000
 /** Star power-up respawn invulnerability */
 export const RESPAWN_SHIELD_MS = 3000
 
+/** Power-up despawn timeout (ms) — how long a power-up stays on the field before disappearing */
+export const POWERUP_TIMEOUT_MS = 20000
+
 /** Direction vectors */
 export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
   up: { dx: 0, dy: -1 },

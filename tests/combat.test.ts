@@ -101,18 +101,53 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
 
   it('tank & bullet speeds are globally scaled down 40% (SPEED_SCALE)', () => {
     // mobility 30 → 0.9, mobility 100 → 2.1 px/tick
-    const slowest = profileToStats({ firepower: 50, projectileSpeed: 40, fireControl: 50, mobility: 30, armor: 50, special: 50 }).speed
-    const fastest = profileToStats({ firepower: 50, projectileSpeed: 100, fireControl: 50, mobility: 100, armor: 50, special: 50 }).speed
+    const slowest = profileToStats({
+      firepower: 50,
+      projectileSpeed: 40,
+      fireControl: 50,
+      mobility: 30,
+      armor: 50,
+      special: 50,
+    }).speed
+    const fastest = profileToStats({
+      firepower: 50,
+      projectileSpeed: 100,
+      fireControl: 50,
+      mobility: 100,
+      armor: 50,
+      special: 50,
+    }).speed
     expect(slowest).toBeCloseTo(0.9, 5)
     expect(fastest).toBeCloseTo(2.1, 5)
     // projectileSpeed 40 → 3.6 px/tick (proportional reduction)
-    const slowBullet = profileToStats({ firepower: 50, projectileSpeed: 40, fireControl: 50, mobility: 50, armor: 50, special: 50 }).bulletSpeed
+    const slowBullet = profileToStats({
+      firepower: 50,
+      projectileSpeed: 40,
+      fireControl: 50,
+      mobility: 50,
+      armor: 50,
+      special: 50,
+    }).bulletSpeed
     expect(slowBullet).toBeCloseTo(3.6, 5)
   })
 
   it('higher fire control yields a shorter fire cooldown', () => {
-    const low = profileToStats({ firepower: 50, projectileSpeed: 50, fireControl: 45, mobility: 50, armor: 50, special: 50 }).fireCooldown
-    const high = profileToStats({ firepower: 50, projectileSpeed: 50, fireControl: 80, mobility: 50, armor: 50, special: 50 }).fireCooldown
+    const low = profileToStats({
+      firepower: 50,
+      projectileSpeed: 50,
+      fireControl: 45,
+      mobility: 50,
+      armor: 50,
+      special: 50,
+    }).fireCooldown
+    const high = profileToStats({
+      firepower: 50,
+      projectileSpeed: 50,
+      fireControl: 80,
+      mobility: 50,
+      armor: 50,
+      special: 50,
+    }).fireCooldown
     expect(high).toBeLessThan(low)
   })
 })
@@ -123,10 +158,38 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
 
 describe('Combat Capability — player progression (DoD #5, #6)', () => {
   it('matches the plan §11 ladder at default multiplier (50/60/70/80)', () => {
-    expect(playerProfile(0)).toEqual({ firepower: 50, projectileSpeed: 50, fireControl: 50, mobility: 50, armor: 50, special: 50 })
-    expect(playerProfile(1)).toEqual({ firepower: 60, projectileSpeed: 60, fireControl: 60, mobility: 60, armor: 60, special: 60 })
-    expect(playerProfile(2)).toEqual({ firepower: 70, projectileSpeed: 70, fireControl: 70, mobility: 70, armor: 70, special: 70 })
-    expect(playerProfile(3)).toEqual({ firepower: 80, projectileSpeed: 80, fireControl: 80, mobility: 80, armor: 80, special: 80 })
+    expect(playerProfile(0)).toEqual({
+      firepower: 50,
+      projectileSpeed: 50,
+      fireControl: 50,
+      mobility: 50,
+      armor: 50,
+      special: 50,
+    })
+    expect(playerProfile(1)).toEqual({
+      firepower: 60,
+      projectileSpeed: 60,
+      fireControl: 60,
+      mobility: 60,
+      armor: 60,
+      special: 60,
+    })
+    expect(playerProfile(2)).toEqual({
+      firepower: 70,
+      projectileSpeed: 70,
+      fireControl: 70,
+      mobility: 70,
+      armor: 70,
+      special: 70,
+    })
+    expect(playerProfile(3)).toEqual({
+      firepower: 80,
+      projectileSpeed: 80,
+      fireControl: 80,
+      mobility: 80,
+      armor: 80,
+      special: 80,
+    })
   })
 
   it('raises ALL dimensions together (universal, not specialized)', () => {
@@ -138,13 +201,18 @@ describe('Combat Capability — player progression (DoD #5, #6)', () => {
   })
 
   it('respects the configurable maximum level (never grows past it)', () => {
-    expect(playerProfile(5).firepower).toBe(playerProfile(PLAYER_PROGRESSION.maximumLevel).firepower)
+    expect(playerProfile(5).firepower).toBe(
+      playerProfile(PLAYER_PROGRESSION.maximumLevel).firepower,
+    )
     expect(playerProfile(-1).firepower).toBe(playerProfile(0).firepower)
   })
 
   it('maxMultiplier scales the player power ceiling (Option B/C modes)', () => {
     const cfg = { ...PLAYER_PROGRESSION, maxMultiplier: 1.5 }
-    const dim = Math.min(100, Math.round((cfg.baseDim + cfg.maximumLevel * cfg.perLevel) * cfg.maxMultiplier))
+    const dim = Math.min(
+      100,
+      Math.round((cfg.baseDim + cfg.maximumLevel * cfg.perLevel) * cfg.maxMultiplier),
+    )
     expect(dim).toBeGreaterThan(playerProfile(cfg.maximumLevel).firepower)
   })
 })
@@ -175,7 +243,9 @@ describe('Combat Capability — elite commander (DoD #4)', () => {
 
   it('elite budget stays bounded (does not absurdly exceed the elite ceiling)', () => {
     for (const k of ENEMY_KINDS) {
-      expect(totalBudget(applyEliteModifier(TANK_PROFILES[k], k))).toBeLessThanOrEqual(ELITE_BUDGET + 50)
+      expect(totalBudget(applyEliteModifier(TANK_PROFILES[k], k))).toBeLessThanOrEqual(
+        ELITE_BUDGET + 50,
+      )
     }
   })
 
