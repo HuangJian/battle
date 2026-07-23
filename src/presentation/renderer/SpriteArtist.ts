@@ -58,6 +58,8 @@ const ITEM_KEY_MAP: Record<string, string> = {
   bomb: 'item.bomb',
   shield: 'item.shield',
   freeze: 'item.freeze',
+  tank: 'item.tank',
+  helmet: 'item.helmet',
 }
 
 /**
@@ -586,109 +588,98 @@ export class SpriteArtist {
   // ================================================================
 
   drawPowerUp(x: number, y: number, size: number, type: string, frame: number): void {
+    const ctx = this.ctx
+    const cx = x + size / 2
+    const cy = y + size / 2
     const key = ITEM_KEY_MAP[type]
 
-    // Fast path: pre-rasterized item bitmap
+    // --- animated golden halo (the "sparkle / glow" base of the unified look) ---
+    const pulse = 0.5 + 0.5 * Math.sin(frame * 0.11)
+    const glowR = size * (0.66 + 0.06 * pulse)
+    const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
+    g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
+    g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
+    g.addColorStop(1, 'rgba(255, 200, 70, 0)')
+    ctx.save()
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+
+    // --- pre-rasterized (or direct SVG) pentagon-framed item bitmap ---
+    let drawn = false
     if (key) {
       const cache = this.spriteCache
       if (cache?.built) {
         const sprite = cache.getItemSprite(key)
         if (sprite) {
-          this.ctx.drawImage(sprite, x, y, size, size)
-          return
+          ctx.drawImage(sprite, x, y, size, size)
+          drawn = true
         }
       }
-      if (this.drawSvgCentered(key, x, y, size)) return
+      if (!drawn && this.drawSvgCentered(key, x, y, size)) drawn = true
     }
+
+    // --- fallback: draw a unified pentagon badge so items never go invisible ---
+    if (!drawn) {
+      this.drawPowerUpFallback(x, y, size, type)
+    }
+
+    // --- twinkling sparkles on top (unified "闪闪发光" effect) ---
+    this.drawPowerUpSparkles(cx, cy, size, frame)
+  }
+
+  /** Twinkling 4-point sparkles orbiting the item — the animated "sparkle". */
+  private drawPowerUpSparkles(cx: number, cy: number, size: number, frame: number): void {
     const ctx = this.ctx
-    const t = this.theme
-    const blink = Math.floor(frame / 10) % 2 === 0
-    const s = size / 8
+    const n = 4
+    const R = size * 0.44
+    ctx.save()
+    ctx.lineCap = 'round'
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 + frame * 0.025
+      const sx = cx + Math.cos(ang) * R
+      const sy = cy + Math.sin(ang) * R * 0.82
+      const tw = 0.5 + 0.5 * Math.sin(frame * 0.16 + i * 1.7)
+      const len = size * 0.07 * (0.5 + 0.7 * tw)
+      ctx.globalAlpha = 0.25 + 0.65 * tw
+      ctx.strokeStyle = '#FFF6C8'
+      ctx.lineWidth = Math.max(1, size * 0.03)
+      ctx.beginPath()
+      ctx.moveTo(sx - len, sy)
+      ctx.lineTo(sx + len, sy)
+      ctx.moveTo(sx, sy - len)
+      ctx.lineTo(sx, sy + len)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+
+  /** Last-resort draw if the SVG sprite is missing: a plain gold pentagon + glyph. */
+  private drawPowerUpFallback(x: number, y: number, size: number, _type: string): void {
+    const ctx = this.ctx
     const cx = x + size / 2
     const cy = y + size / 2
-
-    // Outer glow
-    ctx.fillStyle = t.powerUpGlow
-    ctx.globalAlpha = blink ? 0.2 : 0.05
-    ctx.fillRect(x - 2, y - 2, size + 4, size + 4)
-    ctx.globalAlpha = 1
-
-    // Background
-    ctx.fillStyle = blink ? t.powerUp : '#202020'
-    ctx.fillRect(x, y, size, size)
-
-    // Border
-    ctx.strokeStyle = t.powerUpGlow
-    ctx.lineWidth = 2
-    ctx.strokeRect(x + 1, y + 1, size - 2, size - 2)
-
-    // Icon
-    switch (type) {
-      case 'star':
-        ctx.fillStyle = t.powerUpGlow
-        ctx.beginPath()
-        for (let i = 0; i < 5; i++) {
-          const angle = (i * 4 * Math.PI) / 5 - Math.PI / 2
-          const r = size * 0.3
-          const px = cx + Math.cos(angle) * r
-          const py = cy + Math.sin(angle) * r
-          if (i === 0) ctx.moveTo(px, py)
-          else ctx.lineTo(px, py)
-        }
-        ctx.closePath()
-        ctx.fill()
-        break
-
-      case 'bomb':
-        ctx.fillStyle = '#404040'
-        ctx.beginPath()
-        ctx.arc(cx, cy + s, size * 0.3, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.fillStyle = '#e04040'
-        ctx.fillRect(cx - s, cy - s * 2, s, s)
-        ctx.fillStyle = '#ffe040'
-        ctx.fillRect(cx - s / 2, cy - s * 2, s / 2, s / 2)
-        break
-
-      case 'shield':
-        ctx.fillStyle = t.powerUpGlow
-        ctx.beginPath()
-        ctx.moveTo(cx, y + s)
-        ctx.lineTo(x + size - s, y + s * 2)
-        ctx.lineTo(x + size - s * 2, y + size - s)
-        ctx.lineTo(cx, y + size - s)
-        ctx.lineTo(x + s * 2, y + size - s)
-        ctx.lineTo(x + s, y + s * 2)
-        ctx.closePath()
-        ctx.fill()
-        break
-
-      case 'freeze':
-        ctx.strokeStyle = '#80c0ff'
-        ctx.lineWidth = 2
-        ctx.beginPath()
-        for (let i = 0; i < 6; i++) {
-          const angle = (i * Math.PI) / 3
-          ctx.moveTo(cx, cy)
-          ctx.lineTo(cx + Math.cos(angle) * size * 0.3, cy + Math.sin(angle) * size * 0.3)
-        }
-        ctx.stroke()
-        break
-
-      case 'tank':
-        ctx.fillStyle = '#e0e0e0'
-        ctx.fillRect(x + s * 2, y + s * 2, s * 4, s * 4)
-        ctx.fillRect(x + s * 3, y + s, s * 2, s)
-        break
-
-      case 'helmet':
-        ctx.fillStyle = t.powerUpGlow
-        ctx.beginPath()
-        ctx.arc(cx, cy + s, size * 0.3, Math.PI, 0)
-        ctx.fill()
-        ctx.fillRect(cx - size * 0.3, cy + s, size * 0.6, s * 2)
-        break
+    ctx.beginPath()
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5
+      const r = size * 0.46
+      const px = cx + Math.cos(a) * r
+      const py = cy + Math.sin(a) * r
+      if (i === 0) ctx.moveTo(px, py)
+      else ctx.lineTo(px, py)
     }
+    ctx.closePath()
+    ctx.fillStyle = '#28409E'
+    ctx.fill()
+    ctx.strokeStyle = '#F4C430'
+    ctx.lineWidth = Math.max(1.5, size * 0.08)
+    ctx.stroke()
+    ctx.fillStyle = '#FFE9A8'
+    ctx.beginPath()
+    ctx.arc(cx, cy, size * 0.18, 0, Math.PI * 2)
+    ctx.fill()
   }
 
   // ================================================================

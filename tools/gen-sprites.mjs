@@ -446,42 +446,133 @@ function iceSprite() {
   return { defs, inner: s }
 }
 
-// ---------- items ----------
+// ---------- items (unified "Modern Retro" power-up badge) ----------
+// Every power-up shares ONE visual language so they read as a family:
+//   1. a soft golden halo behind,
+//   2. a regular (point-up) pentagon GOLD outer border (double-line),
+//   3. a dark inner field,
+//   4. a distinct icon (star / bomb / plasma-shield / snowflake / tank / helmet),
+//   5. the "sparkle" twinkle is animated on top in SpriteArtist.drawPowerUp.
+const PENTA_OUTER = 'M48 6 L87.95 35.02 L72.69 81.98 L23.31 81.98 L8.06 35.02 Z'
+const PENTA_INNER = 'M48 12 L82.24 36.88 L69.16 77.13 L26.84 77.13 L13.76 36.88 Z'
+
+function itemDefs(id) {
+  return (
+    // Royal-blue jewel field — contrasts strongly with the warm-cream battlefield
+    // and makes both the gold border and the icons (dark bomb / light snowflake) pop.
+    `<linearGradient id="${id}bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3A5AD8"/><stop offset="0.55" stop-color="#28409E"/><stop offset="1" stop-color="#182668"/></linearGradient>` +
+    `<linearGradient id="${id}gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset="0.5" stop-color="#F4C430"/><stop offset="1" stop-color="#B8841A"/></linearGradient>` +
+    `<radialGradient id="${id}halo" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#FFF3C8" stop-opacity="0.6"/><stop offset="0.6" stop-color="#FFD23F" stop-opacity="0.16"/><stop offset="1" stop-color="#FFD23F" stop-opacity="0"/></radialGradient>`
+  )
+}
+function itemFrame(id) {
+  return (
+    `<circle cx="48" cy="48" r="46" fill="url(#${id}halo)"/>` +
+    `<path d="${PENTA_OUTER}" fill="url(#${id}bg)" stroke="url(#${id}gold)" stroke-width="3" stroke-linejoin="round"/>` +
+    // soft top gloss so the medallion reads as glossy, not flat
+    `<ellipse cx="48" cy="30" rx="24" ry="11" fill="#FFFFFF" opacity="0.10"/>` +
+    `<path d="${PENTA_INNER}" fill="none" stroke="#FFE9A8" stroke-width="0.8" opacity="0.5"/>`
+  )
+}
+
 function itemStar() {
-  const defs = `<linearGradient id="isbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2a30"/><stop offset="1" stop-color="#15151a"/></linearGradient>`
-  const inner =
-    `<rect x="6" y="6" width="84" height="84" rx="14" fill="url(#isbg)" stroke="#FFD23F" stroke-width="2.5"/>` +
-    `<ellipse cx="48" cy="48" rx="30" ry="30" fill="#FFD23F" opacity="0.25"/>` +
-    `<path d="${starPath(48, 48, 26, 11)}" fill="#FFD23F" stroke="#FFF3C8" stroke-width="2"/>`
+  const id = 'is'
+  const defs = itemDefs(id)
+  const inner = itemFrame(id) + `<path d="${starPath(48, 48, 26, 11)}" fill="url(#${id}gold)" stroke="#FFF3C8" stroke-width="2"/>`
   return { defs, inner }
 }
 function itemBomb() {
-  const defs = `<linearGradient id="ibbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2a30"/><stop offset="1" stop-color="#15151a"/></linearGradient>`
+  const id = 'ib'
+  const defs =
+    itemDefs(id) +
+    `<radialGradient id="${id}sph" cx="0.38" cy="0.34" r="0.72"><stop offset="0" stop-color="#8A8A96"/><stop offset="0.5" stop-color="#54545F"/><stop offset="1" stop-color="#26262E"/></radialGradient>`
   const inner =
-    `<rect x="6" y="6" width="84" height="84" rx="14" fill="url(#ibbg)" stroke="#ff6b5e" stroke-width="2.5"/>` +
-    `<circle cx="48" cy="56" r="24" fill="#3a3a42"/>` +
-    `<circle cx="40" cy="48" r="7" fill="rgba(255,255,255,0.25)"/>` +
-    `<rect x="46" y="22" width="4" height="14" rx="2" fill="#caa15a" transform="rotate(18 48 29)"/>` +
-    `<circle cx="58" cy="22" r="4" fill="#FFD23F"/>` +
-    `<circle cx="58" cy="22" r="2" fill="#fff"/>`
+    itemFrame(id) +
+    // metallic graphite sphere with a bright rim so it separates from the blue field
+    `<circle cx="48" cy="56" r="22" fill="url(#${id}sph)" stroke="#C6CBD6" stroke-width="1.6"/>` +
+    `<circle cx="41" cy="49" r="6.5" fill="rgba(255,255,255,0.4)"/>` +
+    `<rect x="46" y="24" width="4" height="14" rx="2" fill="#E8C060" transform="rotate(18 48 31)"/>` +
+    `<circle cx="57" cy="23" r="4.8" fill="#FFD23F"/>` +
+    `<circle cx="57" cy="23" r="2.2" fill="#fff"/>`
   return { defs, inner }
 }
+// 护盾道具 → plasma shield (energy dome with plasma filaments)
 function itemShield() {
-  const defs = `<linearGradient id="ishbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2a30"/><stop offset="1" stop-color="#15151a"/></linearGradient>`
+  const id = 'ih'
+  const defs = itemDefs(id) + `<linearGradient id="${id}pl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#CFFBFF"/><stop offset="1" stop-color="#23B6E0"/></linearGradient>`
   const inner =
-    `<rect x="6" y="6" width="84" height="84" rx="14" fill="url(#ishbg)" stroke="#7FD4FF" stroke-width="2.5"/>` +
-    `<path d="M48 22 L70 32 L70 52 Q70 70 48 76 Q26 70 26 52 L26 32 Z" fill="#7FD4FF" opacity="0.85"/>` +
-    `<path d="M48 30 L62 38 L62 52 Q62 64 48 69 Q34 64 34 52 L34 38 Z" fill="#E6F7FF"/>`
+    itemFrame(id) +
+    `<path d="M30 66 Q30 30 48 25 Q66 30 66 66 Z" fill="url(#${id}pl)" opacity="0.95"/>` +
+    `<path d="M30 66 Q30 30 48 25 Q66 30 66 66 Z" fill="none" stroke="#EAFDFF" stroke-width="2.6"/>` +
+    `<path d="M40 64 L43 52 L39 47 L45 38" fill="none" stroke="#EAFDFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `<path d="M56 64 L53 54 L57 49 L52 41" fill="none" stroke="#EAFDFF" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `<rect x="27" y="64" width="42" height="3" rx="1.5" fill="#BFF4FF"/>`
   return { defs, inner }
 }
+// 冰冻道具 → large, bold snowflake (six arms + branches) that nearly fills the
+// pentagon. Strokes are drawn THICK + white with a dark outline so the flake
+// stays clearly visible when the sprite is shrunk to the 32px tank cell.
 function itemFreeze() {
-  const defs = `<linearGradient id="ifbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2a30"/><stop offset="1" stop-color="#15151a"/></linearGradient>`
+  const id = 'if'
+  const defs = itemDefs(id)
+  const cx = 48
+  const cy = 48
+  const R = 27 // arm length — spans almost the full inner pentagon
+  let main = ''
+  let branch = ''
+  // six arms every 60°, starting straight up
+  for (const deg of [-90, -30, 30, 90, 150, 210]) {
+    const a = (deg * Math.PI) / 180
+    const ex = cx + Math.cos(a) * R
+    const ey = cy + Math.sin(a) * R
+    main += `M${cx} ${cy} L${f(ex)} ${f(ey)} `
+    // two pairs of angled branch spurs along each arm (feathered snowflake look)
+    for (const tArm of [0.5, 0.78]) {
+      const bx = cx + Math.cos(a) * R * tArm
+      const by = cy + Math.sin(a) * R * tArm
+      const bl = R * 0.3
+      for (const off of [55, -55]) {
+        const ba = ((deg + off) * Math.PI) / 180
+        branch += `M${f(bx)} ${f(by)} L${f(bx + Math.cos(ba) * bl)} ${f(by + Math.sin(ba) * bl)} `
+      }
+    }
+  }
+  const grp = (d, w, col) =>
+    `<g stroke="${col}" stroke-width="${w}" stroke-linecap="round" fill="none"><path d="${d}"/></g>`
   const inner =
-    `<rect x="6" y="6" width="84" height="84" rx="14" fill="url(#ifbg)" stroke="#BFE8F5" stroke-width="2.5"/>` +
-    `<g stroke="#BFE8F5" stroke-width="4" stroke-linecap="round">` +
-    `<path d="M48 24 V72 M28 36 L68 60 M68 36 L28 60"/></g>` +
-    `<g stroke="#E6F7FF" stroke-width="3" stroke-linecap="round">` +
-    `<path d="M48 30 V40 M48 56 V66 M32 40 L40 46 M64 40 L56 46 M32 56 L40 52 M64 56 L56 52"/></g>`
+    itemFrame(id) +
+    // dark outline underlay so the white flake pops on the blue field
+    grp(main + branch, 7.5, '#14245e') +
+    grp(main, 4.5, '#F4FBFF') +
+    grp(branch, 3, '#DFF3FF') +
+    `<circle cx="48" cy="48" r="3.4" fill="#F4FBFF" stroke="#14245e" stroke-width="1.2"/>`
+  return { defs, inner }
+}
+// 加命道具 → little tank (player-yellow, white star emblem)
+function itemTank() {
+  const id = 'it'
+  const defs = itemDefs(id) + `<linearGradient id="${id}body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FBE08A"/><stop offset="0.5" stop-color="#F4C430"/><stop offset="1" stop-color="#D9A91E"/></linearGradient>`
+  const inner =
+    itemFrame(id) +
+    `<rect x="31" y="42" width="7" height="26" rx="3" fill="#2b2b2b"/>` +
+    `<rect x="58" y="42" width="7" height="26" rx="3" fill="#2b2b2b"/>` +
+    `<rect x="35" y="44" width="26" height="22" rx="5" fill="url(#${id}body)"/>` +
+    `<rect x="35" y="46" width="26" height="3" rx="1.5" fill="rgba(255,255,255,0.3)"/>` +
+    `<circle cx="48" cy="46" r="8" fill="#E8B84B" stroke="#B9871C" stroke-width="1"/>` +
+    `<rect x="46.5" y="30" width="3" height="14" rx="1.5" fill="#B9871C"/>` +
+    `<path d="${starPath(48, 55, 6, 2.4)}" fill="#fff" stroke="#D9A91E" stroke-width="0.6"/>`
+  return { defs, inner }
+}
+// respawn shield → soldier helmet
+function itemHelmet() {
+  const id = 'ik'
+  const defs = itemDefs(id) + `<linearGradient id="${id}st" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DDE6F0"/><stop offset="1" stop-color="#8A93A3"/></linearGradient>`
+  const inner =
+    itemFrame(id) +
+    `<path d="M28 52 Q28 30 48 30 Q68 30 68 52 L68 55 Q48 63 28 55 Z" fill="url(#${id}st)" stroke="#E6ECF5" stroke-width="1.5"/>` +
+    `<ellipse cx="48" cy="52" rx="21" ry="5" fill="#7c8595"/>` +
+    `<path d="M48 32 L48 50" stroke="#E6ECF5" stroke-width="1.5" opacity="0.55"/>` +
+    `<path d="M40 40 Q48 34 56 40" fill="none" stroke="#FFFFFF" stroke-width="1.4" opacity="0.5"/>`
   return { defs, inner }
 }
 
@@ -640,6 +731,8 @@ const files = {
   item_bomb: itemBomb(),
   item_shield: itemShield(),
   item_freeze: itemFreeze(),
+  item_tank: itemTank(),
+  item_helmet: itemHelmet(),
   explosion: explosionSprite(),
   fx_shield: shieldFx(),
   fx_starbuf1: starbuf(1),
