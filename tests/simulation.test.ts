@@ -257,3 +257,86 @@ describe('Enemy spawn does not deadlock or overlap (bug regression)', () => {
     expect(worst).toBeLessThan(180)
   })
 })
+
+/**
+ * Regression guard for "an enemy spawned on top of an obstacle (steel/brick/
+ * wall) gets stuck at the spawn point."
+ *
+ * Several authentic stages place terrain on a spawn cell — col 6 is steel on
+ * stage 2, brick on stages 9/19/21, water on stages 20/26/31, steel on stage
+ * 25. The spawn loop only checked for *tank* overlap, so when the rotation
+ * landed on a terrain-occupied point it created the tank *inside* that
+ * obstacle. Every candidate move still overlapped the cell it stood on, so it
+ * could never move off and sat at the spawn point forever.
+ *
+ * Fix: updateSpawning() now also skips spawn points that overlap blocking
+ * terrain (rectHitsTerrain), exactly like it skips points occupied by another
+ * tank. The invariant guarded here is the strongest possible: a tank can only
+ * ever be embedded in blocking terrain if it was created there (movement
+ * collision prevents driving into terrain), so "no alive tank overlaps
+ * blocking terrain" proves the spawn bug is gone.
+ */
+describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
+  function fillSpawnWithSteel(world: World, sbCol: number): void {
+    // A tank at this spawn point occupies the 2x2 sub-block area (sbCol..sbCol+1, rows 0..1).
+    for (let r = 0; r <= 1; r++) {
+      for (let c = sbCol; c <= sbCol + 1; c++) {
+        world.tileMap.set(c, r, 'steel')
+      }
+    }
+  }
+
+  it('never creates a tank embedded in blocking terrain when a spawn point is occupied by an obstacle', () => {
+    const world = new World()
+    world.rng = new RNG(12345)
+    const input = new Input()
+    const sim = new Simulation(world, input)
+    world.startGame('classic', 'modern', 0)
+
+    // Block spawn point col 6 (the cell authentic stages place terrain on),
+    // then force the rotation to try it first so the bug path is exercised.
+    fillSpawnWithSteel(world, 6)
+    ;(sim as unknown as { spawnPointIndex: number }).spawnPointIndex = ENEMY_SPAWNS.findIndex(
+      (s) => s.col === 6,
+    )
+
+    let embeddedSeen = false
+    for (let t = 0; t < 600; t++) {
+      sim.tick()
+      for (const tk of world.tanks) {
+        if (tk.alive && world.rectHitsTerrain(tk.x, tk.y, tk.w, tk.h)) embeddedSeen = true
+      }
+    }
+
+    // The bug would have embedded a tank in the steel at col 6.
+    expect(embeddedSeen).toBe(false)
+    // And spawning must NOT silently stall — enemies still appear at the
+    // clear points (col 0 / col 12 are always terrain-free).
+    expect(world.enemiesSpawned).toBeGreaterThan(0)
+  })
+
+  it('still skips safely when ALL three spawn points are terrain-blocked (no crash, resumed when cleared)', () => {
+    const world = new World()
+    world.rng = new RNG(999)
+    const input = new Input()
+    const sim = new Simulation(world, input)
+    world.startGame('classic', 'modern', 0)
+
+    // Block every spawn point.
+    for (const s of ENEMY_SPAWNS) fillSpawnWithSteel(world, s.col)
+
+    // With no clear point, no enemy should spawn but the sim must not crash
+    // or throw, and must keep trying each frame.
+    for (let t = 0; t < 120; t++) sim.tick()
+    expect(world.enemiesSpawned).toBe(0)
+
+    // Now clear the terrain — spawning must resume immediately.
+    for (const s of ENEMY_SPAWNS) {
+      for (let r = 0; r <= 1; r++) {
+        for (let c = s.col; c <= s.col + 1; c++) world.tileMap.set(c, r, 'empty')
+      }
+    }
+    for (let t = 0; t < 120; t++) sim.tick()
+    expect(world.enemiesSpawned).toBeGreaterThan(0)
+  })
+})

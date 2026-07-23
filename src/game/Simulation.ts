@@ -145,6 +145,18 @@ export class Simulation {
       const idx = (this.spawnPointIndex + i) % n
       const pt = ENEMY_SPAWN_POINTS[idx]
 
+      // Skip spawn points overlapping blocking terrain (brick/steel/water/base).
+      // Several authentic stages place terrain on top of a spawn cell — e.g.
+      // col 6 is steel on stage 2, brick on stages 9/19/21, water on stages
+      // 20/26/31, steel on stage 25. Without this check the enemy was created
+      // *inside* that terrain and then jammed: every candidate move overlapped
+      // the very cell it stood on, so rectHitsTerrain() rejected all four
+      // directions and the tank sat at the spawn point forever. Treat a
+      // terrain-blocked point exactly like an occupied one — skip it and fall
+      // through to the next clear point (col 0 / col 12 are always clear on
+      // every stage, so a spawn always succeeds).
+      if (w.rectHitsTerrain(pt.x, pt.y, TANK, TANK)) continue
+
       // Check if spawn area is clear of other tanks (inline rect — no per-retry allocation)
       let canSpawn = true
       for (const tank of w.allTanks) {
