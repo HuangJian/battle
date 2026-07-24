@@ -63,6 +63,20 @@ export class Game {
     this.presentation = new PresentationLayer(root)
     // Wire the live key-bindings object + persistence into the controls panel.
     this.presentation.ui.initControls(this.settings.keys, () => this.saveSettings())
+
+    // Wire mouse-click handlers for the start screen (same World-mutating
+    // paths as the keyboard menu input).
+    this.presentation.ui.initMenuActions({
+      selectDifficulty: (key) => this.menuSelectDifficulty(key),
+      selectTheme: (key) => this.menuSelectTheme(key),
+      cycleStage: (dir) => this.menuCycleStage(dir),
+      start: () => this.menuStart(),
+      openControls: () => {
+        if (this.world.state === 'menu') {
+          this.presentation.ui.openControls()
+        }
+      },
+    })
     this.audio = new AudioManager()
 
     // Snapshot Management Framework (plan/Snapshot-Management-Framework.md)
@@ -406,6 +420,61 @@ export class Game {
         this.resetToMenu()
       }
     }
+  }
+
+  // ---- Mouse-driven menu actions (mirror the keyboard 'menu' branch) ----
+
+  /** Mouse: pick a difficulty option. */
+  private menuSelectDifficulty(key: string): void {
+    if (this.world.state !== 'menu') return
+    const idx = DIFFICULTY_KEYS.indexOf(key)
+    if (idx < 0) return
+    this.difficultyIndex = idx
+    this.world.difficultyKey = DIFFICULTY_KEYS[idx]
+    this.world.difficulty = DIFFICULTIES[this.world.difficultyKey]
+    this.world.menuCursor = 0
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+  }
+
+  /** Mouse: pick a theme option. */
+  private menuSelectTheme(key: string): void {
+    if (this.world.state !== 'menu') return
+    const idx = THEME_KEYS.indexOf(key)
+    if (idx < 0) return
+    this.themeIndex = idx
+    this.world.themeKey = THEME_KEYS[idx]
+    this.world.theme = THEMES[this.world.themeKey]
+    this.world.menuCursor = 1
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+  }
+
+  /** Mouse: step the stage selector (dir = -1 prev / +1 next). */
+  private menuCycleStage(dir: -1 | 1): void {
+    if (this.world.state !== 'menu') return
+    this.world.selectedStage =
+      (this.world.selectedStage + dir + STAGES.length) % STAGES.length
+    this.world.menuCursor = 2
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+  }
+
+  /** Mouse: start button — same as the keyboard confirm (Enter/Space). */
+  private menuStart(): void {
+    if (this.world.state !== 'menu') return
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    this.recovery.reset()
+    this.prevStageIndex = -1
+    this.world.startGame(this.world.difficultyKey, this.world.themeKey, this.world.selectedStage)
+    // Drop the click so it can't bleed into the first-frame fire input.
+    this.input.reset()
+    this.saveSettings()
   }
 
   // ---- Snapshots (plan §3, §10, §12) ----

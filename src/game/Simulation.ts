@@ -5,6 +5,7 @@ import {
   TANK,
   BULLET,
   FIELD,
+  TICK_MS,
   MAX_ENEMIES_ALIVE,
   DIR_VECTORS,
   FREEZE_DURATION_MS,
@@ -12,6 +13,9 @@ import {
   RESPAWN_SHIELD_MS,
   ENEMY_SPAWNS,
   POWERUP_TIMEOUT_MS,
+  POWERUP_PICKUP_WINDOW_MS,
+  POWERUP_PICKUP_END_DELAY_MS,
+  STAGE_CLEAR_DELAY_MS,
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
@@ -74,6 +78,7 @@ export class Simulation {
     // Update timers
     if (w.freezeTimer > 0) w.freezeTimer -= 1000 / 60
     if (w.spawnTimer > 0) w.spawnTimer -= 1000 / 60
+    if (w.pickupWindowTimer > 0) w.pickupWindowTimer -= TICK_MS
 
     // Update spawn animations
     this.updateSpawnTimers()
@@ -710,9 +715,47 @@ export class Simulation {
 
     // Stage clear — all enemies defeated
     if (w.enemiesRemaining <= 0 && w.tanks.length === 0) {
-      w.state = 'stageclear'
-      w.stageClearTimer = 3000
-      w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
+      const hasAlivePowerUp = w.powerUps.some((p) => p.alive)
+
+      if (!hasAlivePowerUp) {
+        // Nothing left to collect → end the stage.
+        // If we were collecting bonuses, the "1s after pickup" rule applies;
+        // otherwise this is the normal immediate clear.
+        w.state = 'stageclear'
+        w.stageClearTimer = w.pickupWindowEntered
+          ? POWERUP_PICKUP_END_DELAY_MS
+          : STAGE_CLEAR_DELAY_MS
+        w.pickupWindowTimer = 0
+        w.pickupWindowEntered = false
+        w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
+        return
+      }
+
+      // Power-ups remain on the field.
+      if (!w.pickupWindowEntered) {
+        // Begin the bonus-collection window (once). Stay in 'playing' so the
+        // player can still move and pick items up.
+        w.pickupWindowEntered = true
+        w.pickupWindowTimer = POWERUP_PICKUP_WINDOW_MS
+        w.addPopup({
+          id: genId(),
+          x: FIELD / 2 - TANK / 2,
+          y: FIELD / 2 - TANK,
+          text: 'BONUS TIME!',
+          timer: 1800,
+        })
+        return
+      }
+
+      // Window already running: if it has elapsed, end the stage (timeout).
+      if (w.pickupWindowTimer <= 0) {
+        w.state = 'stageclear'
+        w.stageClearTimer = POWERUP_PICKUP_END_DELAY_MS
+        w.pickupWindowEntered = false
+        w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
+        return
+      }
+      // Window active with items still unclaimed → keep playing.
     }
   }
 

@@ -69,6 +69,22 @@ export const RESPAWN_SHIELD_MS = 3000
 /** Power-up despawn timeout (ms) — how long a power-up stays on the field before disappearing */
 export const POWERUP_TIMEOUT_MS = 20000
 
+/**
+ * After the last enemy is destroyed, if power-ups are still on the field the
+ * player gets this long (ms) to drive over and collect them before the stage
+ * auto-ends. Mirrors the classic "grab the bonus" grace period.
+ */
+export const POWERUP_PICKUP_WINDOW_MS = 10000
+
+/**
+ * Once the last remaining power-up is collected (or the pickup window expires
+ * with items still unclaimed), the stage auto-ends after this grace delay (ms).
+ */
+export const POWERUP_PICKUP_END_DELAY_MS = 1000
+
+/** Stage-clear transition delay (ms) when there is nothing left to collect. */
+export const STAGE_CLEAR_DELAY_MS = 3000
+
 /** Direction vectors */
 export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
   up: { dx: 0, dy: -1 },

@@ -87,6 +87,12 @@ export class World {
   stageClearTimer: number // transition timer
   gameOverTimer: number
   spawnTimer: number // delay between spawns
+  /** Post-victory bonus collection window (ms) — counts down while the player
+   *  grabs any power-ups left after the last enemy is destroyed. 0 = inactive. */
+  pickupWindowTimer: number
+  /** True once the bonus window has begun for the current stage (so it only
+   *  starts once, even though checkConditions runs every frame). */
+  pickupWindowEntered: boolean
 
   // Config
   difficulty: DifficultyConfig
@@ -141,6 +147,8 @@ export class World {
     this.stageClearTimer = 0
     this.gameOverTimer = 0
     this.spawnTimer = 0
+    this.pickupWindowTimer = 0
+    this.pickupWindowEntered = false
     this.difficulty = DIFFICULTIES['classic']
     this.difficultyKey = 'classic'
     this.theme = THEMES[DEFAULT_THEME]
@@ -193,6 +201,8 @@ export class World {
     this.stageClearTimer = 0
     this.gameOverTimer = 0
     this.spawnTimer = 0
+    this.pickupWindowTimer = 0
+    this.pickupWindowEntered = false
 
     // Build spawn queue
     this.spawnQueue = []

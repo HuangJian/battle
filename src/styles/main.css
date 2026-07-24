@@ -426,6 +426,16 @@ body {
   box-shadow: 0 0 12px rgba(232, 200, 64, 0.3);
 }
 
+.menu-option:hover {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+  background: var(--theme-button-hover);
+}
+
+.menu-option:active {
+  transform: scale(0.96);
+}
+
 .menu-row.selected .menu-label {
   color: var(--theme-accent-primary);
 }
@@ -439,7 +449,19 @@ body {
 .menu-stage-arrow {
   font-size: 12px;
   color: var(--theme-text-muted);
-  transition: color var(--transition);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: color var(--transition), background var(--transition);
+}
+
+.menu-stage-arrow:hover {
+  color: var(--theme-accent-primary);
+  background: var(--theme-button-hover);
+}
+
+.menu-stage-arrow:active {
+  transform: scale(0.9);
 }
 
 .menu-row.selected .menu-stage-arrow {
@@ -476,6 +498,15 @@ body {
   background: var(--theme-button-bg);
   animation: pulse-border 2s ease-in-out infinite;
   cursor: pointer;
+  transition: background var(--transition), transform 0.08s ease;
+}
+
+.menu-start-button:hover {
+  background: var(--theme-button-hover);
+}
+
+.menu-start-button:active {
+  transform: scale(0.97);
 }
 
 @keyframes pulse-border {

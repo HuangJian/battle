@@ -9,6 +9,24 @@ import { ControlCenter } from './ControlCenter'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
 
 /**
+ * Menu action callbacks registered by Game so mouse clicks on the start
+ * screen can mutate World state through the same code paths as keyboard
+ * input (UIManager itself stays read-only on the World).
+ */
+export interface MenuActions {
+  /** Select a difficulty by its config key (e.g. 'easy'). */
+  selectDifficulty(key: string): void
+  /** Select a theme by its config key (e.g. 'default'). */
+  selectTheme(key: string): void
+  /** Step the stage selector by -1 (prev) or +1 (next). */
+  cycleStage(dir: -1 | 1): void
+  /** Start the game with the current menu selections. */
+  start(): void
+  /** Open the controls / key-bindings panel. */
+  openControls(): void
+}
+
+/**
  * UIManager — manages all HTML/CSS UI overlay elements.
  * Creates and updates DOM elements for menu, HUD, and game state overlays.
  * Never modifies the World.
@@ -51,6 +69,9 @@ export class UIManager {
   private controlsOnChanged: (() => void) | null = null
   private listeningAction: keyof KeyBindings | null = null
   private controlsOpen = false
+
+  /** Menu action callbacks (mouse support). Registered by Game. */
+  private menuActions: MenuActions | null = null
 
   /** Ordered list of rebindable actions shown in the controls panel. */
   private static readonly CONTROL_ACTIONS: ReadonlyArray<{
@@ -311,7 +332,7 @@ export class UIManager {
           </div>
         </div>
         <div class="menu-start">
-          <div class="menu-start-button">PRESS ENTER TO START</div>
+          <div class="menu-start-button" data-menu="start">PRESS ENTER / CLICK TO START</div>
         </div>
         <div class="menu-controls-button" data-menu="controls">⚙ CONTROLS</div>
         <div class="menu-controls">
@@ -334,6 +355,7 @@ export class UIManager {
       const opt = this.createElement('div', 'menu-option')
       opt.dataset.value = key
       opt.textContent = diff.name
+      opt.addEventListener('click', () => this.menuActions?.selectDifficulty(key))
       diffContainer.appendChild(opt)
     }
 
@@ -343,8 +365,19 @@ export class UIManager {
       const opt = this.createElement('div', 'menu-option')
       opt.dataset.value = def.key
       opt.textContent = def.name
+      opt.addEventListener('click', () => this.menuActions?.selectTheme(def.key))
       themeContainer.appendChild(opt)
     }
+
+    // Stage selector arrows
+    const stagePrev = screen.querySelector('[data-stage="prev"]') as HTMLElement | null
+    const stageNext = screen.querySelector('[data-stage="next"]') as HTMLElement | null
+    stagePrev?.addEventListener('click', () => this.menuActions?.cycleStage(-1))
+    stageNext?.addEventListener('click', () => this.menuActions?.cycleStage(1))
+
+    // Start button — mouse equivalent of Enter/Space
+    const startBtn = screen.querySelector('[data-menu="start"]') as HTMLElement | null
+    startBtn?.addEventListener('click', () => this.menuActions?.start())
 
     // Open the controls panel
     const controlsBtn = screen.querySelector('[data-menu="controls"]') as HTMLElement | null
@@ -353,6 +386,15 @@ export class UIManager {
     }
 
     return screen
+  }
+
+  /**
+   * Register the menu action callbacks (mouse support). Called once from
+   * Game so clicks on the start screen route through the same World-mutating
+   * code paths as keyboard input. UIManager itself stays read-only.
+   */
+  initMenuActions(actions: MenuActions): void {
+    this.menuActions = actions
   }
 
   /** Apply theme colors as CSS variables — only when theme key changes */
