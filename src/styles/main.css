@@ -519,6 +519,64 @@ body {
   }
 }
 
+/* Resume row — hidden unless a manual snapshot exists (.has-resume on screen) */
+.menu-resume {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 20px;
+  border: 2px solid var(--theme-accent-primary);
+  border-radius: 8px;
+  background: var(--theme-button-active);
+  cursor: pointer;
+  transition: background var(--transition), transform 0.08s ease;
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+.ui-menu.has-resume .menu-resume {
+  display: flex;
+}
+
+.menu-resume-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.menu-resume-label {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--theme-accent-primary);
+}
+
+.menu-resume-stage {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--theme-text-secondary);
+}
+
+.menu-resume-info {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-muted);
+}
+
+.menu-resume:hover {
+  background: var(--theme-button-hover);
+}
+
+.menu-resume:active {
+  transform: scale(0.97);
+}
+
+.menu-row.selected.menu-resume {
+  box-shadow: 0 0 16px rgba(232, 200, 64, 0.5);
+}
+
 .menu-controls {
   display: flex;
   flex-wrap: wrap;

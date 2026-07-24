@@ -22,6 +22,8 @@ export interface MenuActions {
   cycleStage(dir: -1 | 1): void
   /** Start the game with the current menu selections. */
   start(): void
+  /** Resume from the last manually-saved snapshot (only offered when one exists). */
+  resume(): void
   /** Open the controls / key-bindings panel. */
   openControls(): void
 }
@@ -103,6 +105,11 @@ export class UIManager {
   private menuStageValue: HTMLElement | null = null
   private menuStageName: HTMLElement | null = null
   private menuHiScore: HTMLElement | null = null
+  private menuResumeStage: HTMLElement | null = null
+  private menuResumeInfo: HTMLElement | null = null
+  private menuStartBtn: HTMLElement | null = null
+  /** Whether a resumable manual snapshot exists (set after boot hydration). */
+  private hasResume = false
   private stageClearName: HTMLElement | null = null
   private victoryScoreEl: HTMLElement | null = null
   private recoveryCountdownNum: HTMLElement | null = null
@@ -289,6 +296,9 @@ export class UIManager {
     this.menuStageValue = this.menuScreen.querySelector('[data-stage="value"]')
     this.menuStageName = this.menuScreen.querySelector('[data-stage="name"]')
     this.menuHiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
+    this.menuResumeStage = this.menuScreen.querySelector('[data-menu="resume-stage"]')
+    this.menuResumeInfo = this.menuScreen.querySelector('[data-menu="resume-info"]')
+    this.menuStartBtn = this.menuScreen.querySelector('[data-menu="start"]')
     this.stageClearName = this.stageClearScreen.querySelector('[data-stage="name"]')
     this.victoryScoreEl = this.victoryScreen.querySelector('[data-victory="score"]')
     this.recoveryCountdownNum = this.recoveryScreen.querySelector(
@@ -313,6 +323,13 @@ export class UIManager {
           <p class="menu-subtitle">Faithful to the classic. Designed for the future.</p>
         </div>
         <div class="menu-section">
+          <div class="menu-row menu-resume" data-menu="resume">
+            <div class="menu-resume-main">
+              <span class="menu-resume-label">RESUME</span>
+              <span class="menu-resume-stage" data-menu="resume-stage">STAGE 01</span>
+            </div>
+            <div class="menu-resume-info" data-menu="resume-info">Continue from your last manual save</div>
+          </div>
           <div class="menu-row" data-menu="difficulty">
             <span class="menu-label">DIFFICULTY</span>
             <div class="menu-options" data-difficulty="options"></div>
@@ -340,7 +357,7 @@ export class UIManager {
           <span>← → Change</span>
           <span><kbd>T</kbd> Theme</span>
           <span><kbd>C</kbd> Controls</span>
-          <span><kbd>Enter</kbd> Start</span>
+          <span><kbd>Enter</kbd> Confirm</span>
         </div>
         <div class="menu-hiscore">
           High Score: <span data-menu="hiscore">0</span>
@@ -375,9 +392,14 @@ export class UIManager {
     stagePrev?.addEventListener('click', () => this.menuActions?.cycleStage(-1))
     stageNext?.addEventListener('click', () => this.menuActions?.cycleStage(1))
 
-    // Start button — mouse equivalent of Enter/Space
+    // Start button — mouse equivalent of Enter/Space (new game)
     const startBtn = screen.querySelector('[data-menu="start"]') as HTMLElement | null
     startBtn?.addEventListener('click', () => this.menuActions?.start())
+
+    // Resume row — mouse equivalent of the default confirm when a manual
+    // snapshot exists (routes through Game.menuResume → recovery.beginLoad).
+    const resumeRow = screen.querySelector('[data-menu="resume"]') as HTMLElement | null
+    resumeRow?.addEventListener('click', () => this.menuActions?.resume())
 
     // Open the controls panel
     const controlsBtn = screen.querySelector('[data-menu="controls"]') as HTMLElement | null
@@ -395,6 +417,32 @@ export class UIManager {
    */
   initMenuActions(actions: MenuActions): void {
     this.menuActions = actions
+  }
+
+  /**
+   * Tell the menu about the last manually-saved snapshot (called once after
+   * boot hydration). When one exists the start screen shows a prominent
+   * RESUME row (the default highlighted action) and relabels the bottom button
+   * to NEW GAME; when none exists the resume row is hidden and the original
+   * start behaviour is preserved.
+   */
+  setResumeTarget(target: { stage: number; stageName: string; score: number } | null): void {
+    this.hasResume = !!target
+    this.menuScreen.classList.toggle('has-resume', this.hasResume)
+
+    if (this.menuResumeStage) {
+      this.menuResumeStage.textContent = target
+        ? `STAGE ${String(target.stage + 1).padStart(2, '0')}`
+        : 'STAGE 01'
+    }
+    if (this.menuResumeInfo) {
+      this.menuResumeInfo.textContent = target
+        ? `Continue from Stage ${target.stage + 1} · ${target.stageName} · Score ${target.score}`
+        : 'Continue from your last manual save'
+    }
+    if (this.menuStartBtn) {
+      this.menuStartBtn.textContent = this.hasResume ? 'NEW GAME ▶' : 'PRESS ENTER / CLICK TO START'
+    }
   }
 
   /** Apply theme colors as CSS variables — only when theme key changes */
@@ -618,18 +666,22 @@ export class UIManager {
       }
     }
 
-    // Highlight selected menu row (cursor) — only when changed
+    // Highlight selected menu row (cursor) — only when changed.
+    // Row indices shift down by one when the RESUME row is present.
     if (world.menuCursor !== this.lastMenuCursor) {
       this.lastMenuCursor = world.menuCursor
+      const off = this.hasResume ? 1 : 0
       for (const row of this.menuRows) {
         const idx =
-          row.dataset.menu === 'difficulty'
+          row.dataset.menu === 'resume'
             ? 0
-            : row.dataset.menu === 'theme'
-              ? 1
-              : row.dataset.menu === 'stage'
-                ? 2
-                : -1
+            : row.dataset.menu === 'difficulty'
+              ? off
+              : row.dataset.menu === 'theme'
+                ? off + 1
+                : row.dataset.menu === 'stage'
+                  ? off + 2
+                  : -1
         row.classList.toggle('selected', idx === world.menuCursor)
       }
     }

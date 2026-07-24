@@ -20,6 +20,8 @@ import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
 import { resolveConfig, levelForKind } from '../ai/config'
+import { restoreWorld } from '../snapshot/WorldSerializer'
+import type { WorldSnapshot } from '../snapshot/types'
 import {
   GRID,
   CELL,
@@ -228,11 +230,33 @@ export class World {
    * Unlike loadStage, this does NOT spawn entities or change game state — it
    * only swaps the static layout so the battle field behind the menu shows the
    * selected stage's starting formation (and updates when the selection moves).
+   * Any entities left behind by a snapshot preview are cleared so the field
+   * shows only the selected stage's terrain (no stray tanks / bullets).
    */
   previewStage(index: number): void {
     const stage = STAGES[index]
     if (!stage) return
     this.tileMap.loadStage(stage)
+    this.player = null
+    this.tanks = []
+    this.bullets = []
+    this.powerUps = []
+    this.explosions = []
+    this.popups = []
+    this.events = []
+    this.stageIndex = index
+  }
+
+  /**
+   * Load a saved snapshot into the world for the start-screen RESUME preview
+   * only. The full battlefield (terrain + tanks + bullets + power-ups) is
+   * restored so the canvas behind the menu renders exactly where the player
+   * left off — but `state` is kept as 'menu' so no gameplay runs. Differs from
+   * recover.beginLoad(), which also fades and counts down into 'playing'.
+   */
+  previewSnapshot(snap: WorldSnapshot): void {
+    restoreWorld(this, snap)
+    this.state = 'menu'
   }
 
   spawnPlayer(): void {

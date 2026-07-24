@@ -16,6 +16,7 @@ import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { STAGES } from '../config/stages'
 import { TICK_MS, MAX_RENDER_FPS } from '../constants'
 import type { GameSettings } from '../types'
+import type { GameSnapshot } from '../snapshot/types'
 
 const SETTINGS_KEY = 'bc_settings'
 const THEME_KEYS = Object.keys(THEMES)
@@ -44,6 +45,8 @@ export class Game {
   private _hidden = false
   private prevRecoveryPhase = 'idle'
   private prevCountdown = 0
+  /** The last manually-saved snapshot, if any — offered as the default RESUME on the start screen. */
+  private resumeSnapshot: GameSnapshot | null = null
 
   /** Rolling FPS (updated once per second) — cheap regression signal. */
   fps = 0
@@ -71,6 +74,7 @@ export class Game {
       selectTheme: (key) => this.menuSelectTheme(key),
       cycleStage: (dir) => this.menuCycleStage(dir),
       start: () => this.menuStart(),
+      resume: () => this.menuResume(),
       openControls: () => {
         if (this.world.state === 'menu') {
           this.presentation.ui.openControls()
@@ -142,6 +146,23 @@ export class Game {
     this.input.attach(window)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
+    // Default-load behaviour: if a manual snapshot exists, surface it as the
+    // start screen's RESUME target so reopening the page continues from it.
+    this.resumeSnapshot = this.snapshots.latest({ type: 'manual' })
+    this.presentation.ui.setResumeTarget(
+      this.resumeSnapshot
+        ? {
+            stage: this.resumeSnapshot.metadata.stage,
+            stageName: this.resumeSnapshot.metadata.stageName,
+            score: this.resumeSnapshot.metadata.score,
+          }
+        : null,
+    )
+    // Open the menu on its default row and render the matching battlefield:
+    // the RESUME target's saved content (if a manual snapshot exists) or the
+    // selected stage's starting layout otherwise.
+    this.world.menuCursor = 0
+    this.applyMenuPreview()
     // Preload the SVG asset library so sprites are ready for the first frame.
     await spriteLibrary.load()
     // Pre-rasterize sprites to canvas bitmaps for fast rendering
@@ -335,63 +356,84 @@ export class Game {
         return
       }
 
-      const rowCount = 3
-      // Move cursor between rows (DIFFICULTY / THEME / STAGE)
+      // Row count grows by one when a resumable manual snapshot is offered
+      // (the RESUME row sits at index 0, pushing the config rows down).
+      const rowCount = this.resumeSnapshot ? 4 : 3
+      // Move cursor between rows (RESUME? / DIFFICULTY / THEME / STAGE)
       if (this.input.isUpPressed()) {
         w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
+        this.applyMenuPreview()
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
       if (this.input.isDownPressed()) {
         w.menuCursor = (w.menuCursor + 1) % rowCount
+        this.applyMenuPreview()
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Change value of the selected row
+      // Change value of the selected row (off = index of the first config row)
+      const off = this.resumeSnapshot ? 1 : 0
       const left = this.input.wasPressed('ArrowLeft') || this.input.wasPressed('KeyA')
       const right = this.input.wasPressed('ArrowRight') || this.input.wasPressed('KeyD')
       if (left || right) {
         const dir = left ? -1 : 1
-        if (w.menuCursor === 0) {
+        let changed = false
+        if (w.menuCursor === off) {
           this.difficultyIndex =
             (this.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
           w.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
           w.difficulty = DIFFICULTIES[w.difficultyKey]
-        } else if (w.menuCursor === 1) {
+          changed = true
+        } else if (w.menuCursor === off + 1) {
           this.themeIndex = (this.themeIndex + dir) % THEME_KEYS.length
           w.themeKey = THEME_KEYS[this.themeIndex]
           w.theme = THEMES[w.themeKey]
-        } else {
+          changed = true
+        } else if (w.menuCursor === off + 2) {
           w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
+          changed = true
         }
-        this.audio.init()
-        this.audio.resume()
-        this.audio.playMenuSelect()
+        if (changed) {
+          // Swap the battle-field preview to match the new selection immediately
+          // (e.g. moving to a different stage must repaint the canvas at once).
+          this.applyMenuPreview()
+          this.audio.init()
+          this.audio.resume()
+          this.audio.playMenuSelect()
+        }
       }
       // Theme shortcut (T key)
       if (this.input.wasPressed('KeyT')) {
         this.themeIndex = (this.themeIndex + 1) % THEME_KEYS.length
         w.themeKey = THEME_KEYS[this.themeIndex]
         w.theme = THEMES[w.themeKey]
-        w.menuCursor = 1
+        w.menuCursor = off + 1
+        this.applyMenuPreview()
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Start game at the selected stage
+      // Confirm — default action depends on the highlighted row:
+      // on the RESUME row (index 0, only when a snapshot exists) it resumes;
+      // otherwise it starts a fresh game with the current selections.
       if (this.input.isConfirmPressed()) {
-        this.audio.init()
-        this.audio.resume()
-        this.audio.playMenuSelect()
-        this.recovery.reset()
-        this.prevStageIndex = -1
-        w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
-        // Drop the confirm keypress (Space/Enter) so it can't bleed into the
-        // gameplay fire input and make the player auto-fire on the first frame.
-        this.input.reset()
-        this.saveSettings()
+        if (this.resumeSnapshot && w.menuCursor === 0) {
+          this.menuResume()
+        } else {
+          this.audio.init()
+          this.audio.resume()
+          this.audio.playMenuSelect()
+          this.recovery.reset()
+          this.prevStageIndex = -1
+          w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
+          // Drop the confirm keypress (Space/Enter) so it can't bleed into the
+          // gameplay fire input and make the player auto-fire on the first frame.
+          this.input.reset()
+          this.saveSettings()
+        }
       }
       return
     }
@@ -432,7 +474,8 @@ export class Game {
     this.difficultyIndex = idx
     this.world.difficultyKey = DIFFICULTY_KEYS[idx]
     this.world.difficulty = DIFFICULTIES[this.world.difficultyKey]
-    this.world.menuCursor = 0
+    this.world.menuCursor = this.resumeSnapshot ? 1 : 0
+    this.applyMenuPreview()
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
@@ -446,7 +489,8 @@ export class Game {
     this.themeIndex = idx
     this.world.themeKey = THEME_KEYS[idx]
     this.world.theme = THEMES[this.world.themeKey]
-    this.world.menuCursor = 1
+    this.world.menuCursor = this.resumeSnapshot ? 2 : 1
+    this.applyMenuPreview()
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
@@ -457,9 +501,9 @@ export class Game {
     if (this.world.state !== 'menu') return
     this.world.selectedStage =
       (this.world.selectedStage + dir + STAGES.length) % STAGES.length
-    this.world.menuCursor = 2
+    this.world.menuCursor = this.resumeSnapshot ? 3 : 2
     // Swap the battle-field preview to the newly selected stage's layout.
-    this.world.previewStage(this.world.selectedStage)
+    this.applyMenuPreview()
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
@@ -477,6 +521,38 @@ export class Game {
     // Drop the click so it can't bleed into the first-frame fire input.
     this.input.reset()
     this.saveSettings()
+  }
+
+  /** Mouse / default-confirm: resume from the last manual snapshot. */
+  private menuResume(): void {
+    if (this.world.state !== 'menu' || !this.resumeSnapshot) return
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    // Avoid a spurious stage-start snapshot when the resumed stage begins.
+    this.prevStageIndex = this.resumeSnapshot.metadata.stage
+    this.recovery.beginLoad(this.resumeSnapshot.id, this.world)
+    // Drop the input so the click/keypress can't bleed into gameplay.
+    this.input.reset()
+  }
+
+  /**
+   * Render the correct battlefield behind the menu for the current cursor row:
+   * the RESUME row (index 0, only when a manual snapshot exists) shows that
+   * snapshot's saved content (terrain + tanks + bullets); any config row shows
+   * the selected stage's starting layout. Called whenever the highlighted row
+   * changes so the canvas always reflects the active selection.
+   */
+  private applyMenuPreview(): void {
+    const w = this.world
+    if (this.resumeSnapshot && w.menuCursor === 0) {
+      w.previewSnapshot(this.resumeSnapshot.world)
+    } else {
+      w.previewStage(w.selectedStage)
+    }
+    // Guarantee the canvas repaints to reflect the swapped battlefield,
+    // regardless of the on-demand signature check.
+    this.presentation.markNeedsRender()
   }
 
   // ---- Snapshots (plan §3, §10, §12) ----
@@ -588,8 +664,9 @@ export class Game {
     this.recovery.reset()
     this.presentation.ui.snapshotBrowser.close()
     this.prevStageIndex = -1
-    // Show the selected stage's layout behind the menu again.
-    this.world.previewStage(this.world.selectedStage)
+    // Re-open the menu on its default row and render the matching battlefield.
+    this.world.menuCursor = 0
+    this.applyMenuPreview()
     this.presentation.reset()
     this.audio.playMenuSelect()
   }
