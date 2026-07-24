@@ -325,6 +325,26 @@ export class SpriteArtist {
   // Tanks
   // ================================================================
 
+  /**
+   * Ground shadow drawn UNDER a tank, in world (non-rotated) space. Tank
+   * sprites are pre-rotated per facing direction, so any shadow baked into the
+   * sprite would spin with the body; this keeps the contact shadow fixed at the
+   * tank's footprint regardless of direction.
+   */
+  private drawTankShadow(x: number, y: number, size: number): void {
+    const ctx = this.ctx
+    const cx = x + size / 2
+    // Contact shadow sits at the BOTTOM of the footprint, low enough that a
+    // clear crescent peeks out below the tank body (not hidden under it).
+    const cy = y + size * 0.95
+    ctx.save()
+    ctx.fillStyle = 'rgba(0,0,0,0.22)'
+    ctx.beginPath()
+    ctx.ellipse(cx, cy, size * 0.45, size * 0.126, 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+  }
+
   drawTank(
     x: number,
     y: number,
@@ -373,10 +393,6 @@ export class SpriteArtist {
     ctx.fillStyle = 'rgba(255,255,255,0.15)'
     ctx.fillRect(s, s * 2, size - s * 2, s)
 
-    // Body shadow (bottom)
-    ctx.fillStyle = 'rgba(0,0,0,0.2)'
-    ctx.fillRect(s, size - s * 3, size - s * 2, s)
-
     // Level details
     if (level >= 1) {
       ctx.fillStyle = '#f0f0f0'
@@ -424,6 +440,9 @@ export class SpriteArtist {
     level: number,
     animFrame: number,
   ): void {
+    // Non-rotating ground shadow (drawn under the tank, before any path)
+    this.drawTankShadow(x, y, size)
+
     // Fast path: use pre-rasterized + pre-rotated sprite (no save/translate/rotate/restore)
     const cache = this.spriteCache
     if (cache?.built) {
@@ -470,6 +489,9 @@ export class SpriteArtist {
     hitStage = 0,
   ): void {
     const key = TANK_KEY_MAP[kind] ?? 'tank.basic'
+
+    // Non-rotating ground shadow (drawn under the tank, before any path)
+    this.drawTankShadow(x, y, size)
 
     // Fast path: use pre-rasterized + pre-rotated sprite
     const cache = this.spriteCache
