@@ -60,6 +60,7 @@ export class GameRenderer {
 
   // ---- Water sprite cache (theme-aware, phase-animated) ----
   private waterSpriteDirty = true
+  private bulletSpriteDirty = true
 
   // ---- Base transform components (for allocation-free debris rendering) ----
   private _baseDpr = 1
@@ -117,6 +118,7 @@ export class GameRenderer {
     this.cachedBgGradient = null
     this.vignetteDirty = true
     this.waterSpriteDirty = true
+    this.bulletSpriteDirty = true
   }
 
   setSpriteCache(cache: SpriteCache): void {
@@ -160,7 +162,11 @@ export class GameRenderer {
     // 4. Tanks
     this.renderTanks(world)
 
-    // 5. Bullets
+    // 5. Bullets (rebuild the theme-colored bullet bitmap if the theme changed)
+    if (this.bulletSpriteDirty) {
+      this.artist.spriteCache?.rebuildBullet(world.theme)
+      this.bulletSpriteDirty = false
+    }
     this.renderBullets(world)
 
     // 6. Power-ups
