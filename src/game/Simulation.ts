@@ -8,6 +8,8 @@ import {
   TICK_MS,
   MAX_ENEMIES_ALIVE,
   DIR_VECTORS,
+  ICE_ACCEL_TRACTION,
+  ICE_DECEL_TRACTION,
   FREEZE_DURATION_MS,
   SHIELD_DURATION_MS,
   RESPAWN_SHIELD_MS,
@@ -233,42 +235,96 @@ export class Simulation {
     const w = this.world
     for (const tank of w.allTanks) {
       if (!tank.alive || tank.spawnTimer > 0) continue
-      if (!tank.moving) continue
+      // A non-moving tank with residual ice velocity must still be simulated
+      // so it keeps gliding to a stop; only a fully-stopped, idle tank is skipped.
+      if (!tank.moving && tank.vx === 0 && tank.vy === 0) continue
 
-      // Enemy freeze
-      if (!tank.isPlayer && w.freezeTimer > 0) continue
+      // Enemy freeze — a frozen tank can't act, so bleed off any momentum and skip.
+      if (!tank.isPlayer && w.freezeTimer > 0) {
+        tank.vx = 0
+        tank.vy = 0
+        continue
+      }
 
-      // Align to grid when turning
-      this.alignTank(tank)
+      // ---- Velocity / ice-momentum integration ----
+      // Desired velocity comes from the tank's movement intent (dir when moving).
+      const dirV = DIR_VECTORS[tank.dir]
+      const wantX = tank.moving ? dirV.dx * tank.speed : 0
+      const wantY = tank.moving ? dirV.dy * tank.speed : 0
 
-      // Try to move
-      const dist = tank.speed
-      const v = DIR_VECTORS[tank.dir]
-      const newX = tank.x + v.dx * dist
-      const newY = tank.y + v.dy * dist
+      const onIce = w.isTankOnIce(tank)
+      if (onIce) {
+        // Low traction: ease velocity toward the desired value. Accelerating
+        // (target non-zero) uses ICE_ACCEL_TRACTION; decelerating (target zero
+        // — input released, or the axis being abandoned on a perpendicular
+        // turn) uses ICE_DECEL_TRACTION so the tank coasts. That glide is the
+        // "slippery" ice feel.
+        const tx = wantX === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
+        const ty = wantY === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
+        tank.vx += (wantX - tank.vx) * tx
+        tank.vy += (wantY - tank.vy) * ty
+        // Kill sub-pixel jitter once a decelerating axis has all but stopped.
+        if (wantX === 0 && Math.abs(tank.vx) < 0.02) tank.vx = 0
+        if (wantY === 0 && Math.abs(tank.vy) < 0.02) tank.vy = 0
+      } else {
+        // Normal ground: instant traction = crisp, current control (unchanged).
+        tank.vx = wantX
+        tank.vy = wantY
+      }
+
+      // ---- Axis-lock: keep movement strictly one axis at a time so the
+      // off-axis coordinate stays grid-aligned (the collision system assumes
+      // axis-aligned tanks; a tank is exactly one 2×2 block wide). The
+      // dominant (larger |velocity|) axis wins; the other is zeroed. During a
+      // perpendicular turn on ice the OLD axis keeps gliding until it decays
+      // below the new one — i.e. you can't instantly change direction on ice.
+      const axis: 'x' | 'y' = Math.abs(tank.vx) >= Math.abs(tank.vy) ? 'x' : 'y'
+      if (axis === 'x') tank.vy = 0
+      else tank.vx = 0
+
+      // No actual motion this tick (both velocities rounded to 0) → done.
+      if (tank.vx === 0 && tank.vy === 0) continue
+
+      // Snap the perpendicular (off-axis) coordinate to the grid so the tank
+      // stays aligned to a row/column while sliding along the other axis.
+      if (axis === 'x') tank.y = snap(tank.y, CELL)
+      else tank.x = snap(tank.x, CELL)
+
+      // Try to move along the (single) velocity axis.
+      const newX = tank.x + tank.vx
+      const newY = tank.y + tank.vy
 
       // Check bounds
       if (!w.isInBounds(newX, newY, tank.w, tank.h)) {
-        // Try to align to edge
-        if (tank.dir === 'left') tank.x = 0
-        else if (tank.dir === 'right') tank.x = FIELD - tank.w
-        else if (tank.dir === 'up') tank.y = 0
-        else if (tank.dir === 'down') tank.y = FIELD - tank.h
-        // Force AI to rethink
+        if (axis === 'x') {
+          tank.x = tank.vx < 0 ? 0 : FIELD - tank.w
+          tank.vx = 0
+        } else {
+          tank.y = tank.vy < 0 ? 0 : FIELD - tank.h
+          tank.vy = 0
+        }
         if (tank.aiState) tank.aiState.thinkTimer = 0
         continue
       }
 
       // Check terrain collision
       if (w.rectHitsTerrain(newX, newY, tank.w, tank.h)) {
-        // Try to align to nearest cell boundary
-        this.alignToWall(tank)
+        // Snap to the cell boundary on the travel axis and stop there.
+        if (axis === 'x') {
+          tank.x = snap(tank.x, CELL)
+          tank.vx = 0
+        } else {
+          tank.y = snap(tank.y, CELL)
+          tank.vy = 0
+        }
         if (tank.aiState) tank.aiState.thinkTimer = 0
         continue
       }
 
       // Check tank-tank collision
       if (this.tankHitsTank(tank, newX, newY)) {
+        if (axis === 'x') tank.vx = 0
+        else tank.vy = 0
         if (tank.aiState) tank.aiState.thinkTimer = 0
         continue
       }
@@ -276,27 +332,6 @@ export class Simulation {
       // Move is valid
       tank.x = newX
       tank.y = newY
-    }
-  }
-
-  private alignTank(tank: Tank): void {
-    // When moving horizontally, snap Y to nearest half-cell
-    // When moving vertically, snap X to nearest half-cell
-    if (tank.dir === 'left' || tank.dir === 'right') {
-      tank.y = snap(tank.y, CELL)
-    } else {
-      tank.x = snap(tank.x, CELL)
-    }
-  }
-
-  private alignToWall(tank: Tank): void {
-    // Snap tank position to the wall it hit
-    const v = DIR_VECTORS[tank.dir]
-    if (v.dx !== 0) {
-      tank.x = snap(tank.x, CELL)
-    }
-    if (v.dy !== 0) {
-      tank.y = snap(tank.y, CELL)
     }
   }
 

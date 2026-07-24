@@ -322,6 +322,8 @@ export class World {
       fireCooldown: stats.fireCooldown,
       lastFire: 0,
       moving: false,
+      vx: 0,
+      vy: 0,
       spawnTimer: 1000,
       level: kind === 'player' ? this.playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
@@ -483,5 +485,19 @@ export class World {
   /** Check if a rect is fully inside the playfield */
   isInBounds(x: number, y: number, w: number, h: number): boolean {
     return x >= 0 && y >= 0 && x + w <= GRID * CELL && y + h <= GRID * CELL
+  }
+
+  /**
+   * True when the tank's footprint center sits over `ice` terrain. Drives the
+   * ice-momentum model in Simulation.updateMovement (low traction ⇒ slide).
+   * Uses the tank center so a tank is "on ice" exactly when its body is over
+   * the slippery tile. Pure function of World state — no RNG, deterministic.
+   */
+  isTankOnIce(tank: { x: number; y: number; w: number; h: number }): boolean {
+    const cx = tank.x + tank.w / 2
+    const cy = tank.y + tank.h / 2
+    const c = Math.floor(cx / CELL)
+    const r = Math.floor(cy / CELL)
+    return this.tileMap.get(c, r) === 'ice'
   }
 }

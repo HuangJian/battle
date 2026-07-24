@@ -85,6 +85,17 @@ export interface Tank extends Entity {
   fireCooldown: number
   lastFire: number
   moving: boolean
+  /**
+   * Per-tick velocity (px/tick) for the ice momentum / slide model.
+   * Movement stays strictly axis-locked (only one of vx/vy is ever non-zero
+   * at a time — see Simulation.updateMovement), so the off-axis coordinate
+   * always stays grid-aligned and the whole collision system is unaffected.
+   * On normal ground velocity snaps instantly to the desired value; on ice it
+   * eases toward it (acceleration) and keeps gliding after input is released
+   * (low deceleration) — that glide is what makes ice feel slippery.
+   */
+  vx: number
+  vy: number
   spawnTimer: number // >0 means still spawning (invulnerable, not active)
   // Player-specific
   level?: number

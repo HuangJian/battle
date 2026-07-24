@@ -95,6 +95,24 @@ export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
 
 export type Direction = 'up' | 'down' | 'left' | 'right'
 
+// ================================================================
+// Ice momentum (slide / glide) model — see Simulation.updateMovement.
+//
+// Tanks move with a per-tick velocity (vx/vy, px/tick). Each tick the velocity
+// eases toward the desired velocity (= DIR_VECTORS[dir] * speed when moving,
+// otherwise 0). TRACTION is the fraction of the remaining gap closed per tick:
+//   1.0  = instant  → crisp, current control (normal ground, plain ice-free)
+//   <1.0 = gradual  → slippery (ice)
+// Acceleration (input held / turning onto a new axis) and deceleration (input
+// released / still gliding) use SEPARATE coefficients so a tank ramps up
+// responsively yet coasts a long way after you let go — the classic ice feel.
+// These are pure simulation constants (no RNG), so determinism is preserved.
+// ================================================================
+/** Fraction of the velocity gap closed per tick while accelerating on ice. */
+export const ICE_ACCEL_TRACTION = 0.35
+/** Fraction of the velocity gap closed per tick while decelerating on ice. */
+export const ICE_DECEL_TRACTION = 0.05
+
 // ============================================================
 // Tactical Intelligence Framework (AI) timing
 // ============================================================
