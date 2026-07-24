@@ -11,10 +11,8 @@ import base from './base.svg?url'
 import base_ruins from './base_ruins.svg?url'
 import bullet from './bullet.svg?url'
 import brick from './brick.svg?url'
-import steel from './steel.svg?url'
 import water from './water.svg?url'
 import forest from './forest.svg?url'
-import ice from './ice.svg?url'
 import item_star from './item_star.svg?url'
 import item_bomb from './item_bomb.svg?url'
 import item_shield from './item_shield.svg?url'
@@ -44,10 +42,8 @@ export const SPRITE_URLS: Record<string, string> = {
   'terrain.base': base,
   'terrain.base_ruins': base_ruins,
   'terrain.brick': brick,
-  'terrain.steel': steel,
   'terrain.water': water,
   'terrain.forest': forest,
-  'terrain.ice': ice,
   // Projectiles / items
   bullet,
   'item.star': item_star,

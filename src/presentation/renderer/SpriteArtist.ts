@@ -169,39 +169,119 @@ export class SpriteArtist {
     ctx.fillRect(x + s * 2 + 1, y + s * 2 + 1, s - 2, s - 2)
   }
 
-  drawSteel(x: number, y: number, size: number): void {
-    if (this.drawSvgCentered('terrain.steel', x, y, size)) return
+  /**
+   * Steel wall, auto-tiled. `n/e/s/w` are true when the orthogonal neighbour is
+   * also steel. A connected patch reads as ONE reinforced wall (铜墙铁壁): the
+   * interior is a seamless fill, hinges strap every internal steel-steel seam
+   * together, and obvious rivets pin the four outer corners.
+   */
+  drawSteel(
+    x: number,
+    y: number,
+    size: number,
+    n = false,
+    e = false,
+    s = false,
+    w = false,
+  ): void {
     const t = this.theme
     const ctx = this.ctx
-    const s = size / 4
+    const s4 = size / 4
+    const TAU = Math.PI * 2
 
-    // Base
+    // Base fill — flat (no per-tile gradient), so a patch is one continuous slab.
     ctx.fillStyle = t.steel
     ctx.fillRect(x, y, size, size)
 
-    // Metallic gradient effect
-    ctx.fillStyle = 'rgba(255,255,255,0.15)'
-    ctx.fillRect(x, y, size, s)
-    ctx.fillStyle = 'rgba(0,0,0,0.1)'
-    ctx.fillRect(x, y + s * 3, size, s)
+    // Seamless brushed-metal hatch: parallel diagonal lines, period = size,
+    // so the texture tiles across cells without a visible seam.
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(x, y, size, size)
+    ctx.clip()
+    ctx.lineWidth = 1
+    for (let b = -size; b <= size; b += s4) {
+      const k = Math.round(b / s4)
+      ctx.strokeStyle = k % 2 === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+      ctx.beginPath()
+      ctx.moveTo(x, y + b)
+      ctx.lineTo(x + size, y + size + b)
+      ctx.stroke()
+    }
+    ctx.restore()
 
-    // Border
-    ctx.fillStyle = t.steelDark
-    ctx.fillRect(x, y + size - 2, size, 2)
-    ctx.fillRect(x + size - 2, y, 2, size)
+    // Unified patch outline + bevel — only on sides bordering a different tile.
+    const dark = t.steelDark
+    const light = 'rgba(255,255,255,0.22)'
+    const bevel = 2
+    if (!n) {
+      ctx.fillStyle = light
+      ctx.fillRect(x, y, size, bevel)
+      ctx.fillStyle = dark
+      ctx.fillRect(x, y, size, 1)
+    }
+    if (!s) {
+      ctx.fillStyle = dark
+      ctx.fillRect(x, y + size - bevel, size, bevel)
+    }
+    if (!w) {
+      ctx.fillStyle = light
+      ctx.fillRect(x, y, bevel, size)
+      ctx.fillStyle = dark
+      ctx.fillRect(x, y, 1, size)
+    }
+    if (!e) {
+      ctx.fillStyle = dark
+      ctx.fillRect(x + size - bevel, y, bevel, size)
+    }
 
-    // Inner panels
-    ctx.fillStyle = t.steelDark
-    ctx.fillRect(x + s - 1, y, 1, size)
-    ctx.fillRect(x + s * 3 - 1, y, 1, size)
-    ctx.fillRect(x, y + s * 2 - 1, size, 1)
+    // Hinges straddling each internal (steel↔steel) seam — plates bolted together.
+    const cx = x + size / 2
+    const cy = y + size / 2
+    const hinge = (ex: number, ey: number, vertical: boolean) => {
+      const len = size * 0.5
+      const thick = 4
+      ctx.fillStyle = dark
+      if (vertical) ctx.fillRect(ex - thick / 2, ey - len / 2, thick, len)
+      else ctx.fillRect(ex - len / 2, ey - thick / 2, len, thick)
+      ctx.fillStyle = 'rgba(255,255,255,0.3)'
+      ctx.beginPath()
+      ctx.arc(ex, ey, 1.4, 0, TAU)
+      ctx.fill()
+      ctx.fillStyle = 'rgba(0,0,0,0.35)'
+      ctx.beginPath()
+      ctx.arc(ex, ey, 0.8, 0, TAU)
+      ctx.fill()
+    }
+    if (n) hinge(cx, y, false)
+    if (s) hinge(cx, y + size, false)
+    if (w) hinge(x, cy, true)
+    if (e) hinge(x + size, cy, true)
 
-    // Rivets
-    ctx.fillStyle = 'rgba(255,255,255,0.3)'
-    ctx.fillRect(x + 2, y + 2, 2, 2)
-    ctx.fillRect(x + size - 4, y + 2, 2, 2)
-    ctx.fillRect(x + 2, y + size - 4, 2, 2)
-    ctx.fillRect(x + size - 4, y + size - 4, 2, 2)
+    // Obvious rivets pinning the patch's four outer corners.
+    const rivet = (rcx: number, rcy: number) => {
+      ctx.fillStyle = 'rgba(0,0,0,0.4)'
+      ctx.beginPath()
+      ctx.arc(rcx, rcy + 0.5, 3.2, 0, TAU)
+      ctx.fill()
+      ctx.fillStyle = t.steelDark
+      ctx.beginPath()
+      ctx.arc(rcx, rcy, 2.6, 0, TAU)
+      ctx.fill()
+      ctx.fillStyle = 'rgba(255,255,255,0.25)'
+      ctx.beginPath()
+      ctx.arc(rcx, rcy, 1.6, 0, TAU)
+      ctx.fill()
+      ctx.fillStyle = 'rgba(255,255,255,0.85)'
+      ctx.beginPath()
+      ctx.arc(rcx - 0.8, rcy - 0.8, 0.9, 0, TAU)
+      ctx.fill()
+    }
+    const o = 4.5
+    if (!n && !w) rivet(x + o, y + o)
+    if (!n && !e) rivet(x + size - o, y + o)
+    if (!s && !w) rivet(x + o, y + size - o)
+    if (!s && !e) rivet(x + size - o, y + size - o)
   }
 
   drawWater(x: number, y: number, size: number, frame: number): void {
@@ -249,26 +329,58 @@ export class SpriteArtist {
     ctx.fillRect(x + s * 2, y + s * 2, s, 1)
   }
 
-  drawIce(x: number, y: number, size: number): void {
-    if (this.drawSvgCentered('terrain.ice', x, y, size)) return
+  /**
+   * Ice / snow field, auto-tiled. `n/e/s/w` true when the orthogonal neighbour is
+   * also ice. A connected snowfield reads as ONE frozen surface: flat fill with
+   * no per-tile gradient, a crack web whose fissures join across tiles (so the
+   * whole patch shares one continuous network instead of per-tile snowflakes),
+   * and a frost rim only around the perimeter.
+   */
+  drawIce(
+    x: number,
+    y: number,
+    size: number,
+    n = false,
+    e = false,
+    s = false,
+    w = false,
+  ): void {
     const t = this.theme
     const ctx = this.ctx
-    const s = size / 4
+    const a = size / 3
 
+    // Flat base — no per-tile gradient, so a snowfield is one continuous surface.
     ctx.fillStyle = t.ice
     ctx.fillRect(x, y, size, size)
 
-    // Crystalline pattern
-    ctx.fillStyle = 'rgba(255,255,255,0.3)'
-    ctx.fillRect(x + s, y + s, s * 2, 1)
-    ctx.fillRect(x + s * 2, y + s * 2, s * 2, 1)
-    ctx.fillRect(x + s, y + s, 1, s * 2)
-    ctx.fillRect(x + s * 2, y + s * 2, 1, s * 2)
+    // Seamless crack web: 4 diagonal segments touching edges at 1/3 & 2/3.
+    // Neighbours use the same fractions, so fissures join across tiles into one
+    // connected frozen network rather than a grid of separate snowflakes.
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(x, y + a)
+    ctx.lineTo(x + a * 2, y) // left@1/3 -> top@2/3
+    ctx.moveTo(x, y + a * 2)
+    ctx.lineTo(x + a, y + size) // left@2/3 -> bottom@1/3
+    ctx.moveTo(x + size, y + a)
+    ctx.lineTo(x + a * 2, y + size) // right@1/3 -> bottom@2/3
+    ctx.moveTo(x + size, y + a * 2)
+    ctx.lineTo(x + a, y) // right@2/3 -> top@1/3
+    ctx.stroke()
 
-    // Shine
-    ctx.fillStyle = 'rgba(255,255,255,0.5)'
-    ctx.fillRect(x + 2, y + 2, 3, 1)
-    ctx.fillRect(x + 2, y + 2, 1, 3)
+    // Frost rim around the patch perimeter (boundary sides only).
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'
+    const f = 2
+    if (!n) ctx.fillRect(x, y, size, f)
+    if (!s) ctx.fillRect(x, y + size - f, size, f)
+    if (!w) ctx.fillRect(x, y, f, size)
+    if (!e) ctx.fillRect(x + size - f, y, f, size)
+
+    // A couple of sparkles for a frosty sheen (fixed, tiling positions).
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'
+    ctx.fillRect(x + size * 0.22, y + size * 0.28, 1, 1)
+    ctx.fillRect(x + size * 0.72, y + size * 0.62, 1, 1)
   }
 
   /**

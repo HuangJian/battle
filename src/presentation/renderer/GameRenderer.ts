@@ -236,16 +236,33 @@ export class GameRenderer {
       this.scanWaterCells(world)
       tm.dirtyCells.length = 0
     } else {
-      // Incremental rebuild — only the cells that actually changed. This turns
-      // "a brick got shot" from a full 26×26 cache rebuild into O(changed cells).
-      const cells = tm.dirtyCells
+      // Incremental rebuild — only the cells that actually changed (plus their
+      // orthogonal neighbours, so auto-tiled steel/ice re-derive their patch
+      // perimeter when a neighbour is destroyed). Turns "a brick got shot" from
+      // a full 26×26 cache rebuild into O(changed cells).
+      const expanded = new Set<number>(tm.dirtyCells)
+      for (const idx of tm.dirtyCells) {
+        const c = idx % GRID
+        const r = (idx - c) / GRID
+        const neigh: Array<[number, number]> = [
+          [c - 1, r],
+          [c + 1, r],
+          [c, r - 1],
+          [c, r + 1],
+        ]
+        for (const [nc, nr] of neigh) {
+          if (nc >= 0 && nc < GRID && nr >= 0 && nr < GRID) {
+            expanded.add(nr * GRID + nc)
+          }
+        }
+      }
       const artist = this.artist
       const savedCtx = artist.ctx // restore after — draw helpers use artist.ctx
-      for (let i = 0; i < cells.length; i++) {
-        const idx = cells[i]
+      for (const idx of expanded) {
         const c = idx % GRID
         const r = (idx - c) / GRID
         const type = tm.get(c, r)
+        if (type === 'water') continue // water isn't in the terrain cache
         if (type === 'forest') {
           artist.ctx = this.forestCacheCtx
           this.redrawForestCell(c, r)
@@ -268,6 +285,27 @@ export class GameRenderer {
    * Reproduces exactly what the full rebuild would draw for that cell:
    * grid lines for empty space, or the tile art for a solid tile.
    */
+  /**
+   * Orthogonal same-type neighbour mask for auto-tiling. Returns [n, e, s, w];
+   * out-of-bounds is treated as a boundary (different), so a patch that reaches
+   * the field edge still gets an outline there.
+   */
+  private neighborMask(
+    tm: TileMap,
+    c: number,
+    r: number,
+    type: TerrainType,
+  ): [boolean, boolean, boolean, boolean] {
+    const at = (cc: number, rr: number): TerrainType | null =>
+      cc >= 0 && cc < GRID && rr >= 0 && rr < GRID ? tm.get(cc, rr) : null
+    return [
+      at(c, r - 1) === type, // n
+      at(c + 1, r) === type, // e
+      at(c, r + 1) === type, // s
+      at(c - 1, r) === type, // w
+    ]
+  }
+
   private redrawTerrainCell(
     c: number,
     r: number,
@@ -302,12 +340,16 @@ export class GameRenderer {
       case 'brick':
         artist.drawBrick(x, y, CELL)
         break
-      case 'steel':
-        artist.drawSteel(x, y, CELL)
+      case 'steel': {
+        const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'steel')
+        artist.drawSteel(x, y, CELL, nn, ne, ns, nw)
         break
-      case 'ice':
-        artist.drawIce(x, y, CELL)
+      }
+      case 'ice': {
+        const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'ice')
+        artist.drawIce(x, y, CELL, nn, ne, ns, nw)
         break
+      }
       case 'base':
         // The base is ONE crystal spanning 2×2; only the top-left cell draws it.
         if (tm.isBaseTopLeft(c, r)) {
@@ -360,12 +402,16 @@ export class GameRenderer {
           case 'brick':
             artist.drawBrick(x, y, CELL)
             break
-          case 'steel':
-            artist.drawSteel(x, y, CELL)
+          case 'steel': {
+            const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'steel')
+            artist.drawSteel(x, y, CELL, nn, ne, ns, nw)
             break
-          case 'ice':
-            artist.drawIce(x, y, CELL)
+          }
+          case 'ice': {
+            const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'ice')
+            artist.drawIce(x, y, CELL, nn, ne, ns, nw)
             break
+          }
           case 'base':
             // Draw the whole 2×2 base as ONE crystal (only from its top-left cell).
             if (tm.isBaseTopLeft(c, r)) {
