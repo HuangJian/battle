@@ -171,7 +171,7 @@ export class SnapshotBrowser {
           ? `No ${label} snapshots — pick another filter.`
           : 'No snapshots match this filter.'
       } else {
-        empty.textContent = 'No snapshots yet — play a stage, pause, or press M to save one.'
+        empty.textContent = 'No snapshots yet — play a stage, pause, or press Shift+S to save one.'
       }
       this.listEl.appendChild(empty)
       return

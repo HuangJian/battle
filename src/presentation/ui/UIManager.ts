@@ -1,6 +1,6 @@
 import type { World } from '../../game/World'
 import type { ThemeColors, KeyBindings } from '../../types'
-import { DEFAULT_KEYS } from '../../game/Input'
+import { DEFAULT_KEYS, eventToBinding, parseBinding } from '../../game/Input'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
@@ -87,6 +87,8 @@ export class UIManager {
     { action: 'fire', label: 'Fire' },
     { action: 'pause', label: 'Pause' },
     { action: 'reset', label: 'Reset to Menu' },
+    { action: 'theme', label: 'Cycle Theme' },
+    { action: 'snapshot', label: 'Manual Save' },
   ]
 
   // Start as a sentinel so the first showScreen('menu') in the constructor
@@ -208,7 +210,7 @@ export class UIManager {
     this.gameOverScreen.innerHTML = `
       <div class="ui-panel">
         <h2 class="ui-title ui-danger">GAME OVER</h2>
-        <p class="ui-hint">Press <kbd>R</kbd> or <kbd>Enter</kbd> to return to menu</p>
+        <p class="ui-hint">Press <kbd>Shift+R</kbd> or <kbd>Enter</kbd> to return to menu</p>
       </div>
     `
 
@@ -227,7 +229,7 @@ export class UIManager {
       <div class="ui-panel">
         <h2 class="ui-title ui-success">VICTORY!</h2>
         <p class="ui-score-display">Final Score: <span data-victory="score">0</span></p>
-        <p class="ui-hint">Press <kbd>R</kbd> or <kbd>Enter</kbd> to play again</p>
+        <p class="ui-hint">Press <kbd>Shift+R</kbd> or <kbd>Enter</kbd> to play again</p>
       </div>
     `
 
@@ -264,8 +266,9 @@ export class UIManager {
       <span>←→</span> Change &nbsp;·&nbsp;
       <span>Enter</span> Start &nbsp;·&nbsp;
       <span>P</span> Pause &nbsp;·&nbsp;
-      <span>R</span> Reset &nbsp;·&nbsp;
-      <span>T</span> Theme
+      <span>Shift+R</span> Reset &nbsp;·&nbsp;
+      <span>Shift+T</span> Theme &nbsp;·&nbsp;
+      <span>Shift+S</span> Save
     `
 
     // Assemble
@@ -355,7 +358,8 @@ export class UIManager {
         <div class="menu-controls">
           <span>↑ ↓ Select Row</span>
           <span>← → Change</span>
-          <span><kbd>T</kbd> Theme</span>
+          <span><kbd>Shift+T</kbd> Theme</span>
+          <span><kbd>Shift+S</kbd> Save</span>
           <span><kbd>C</kbd> Controls</span>
           <span><kbd>Enter</kbd> Confirm</span>
         </div>
@@ -756,7 +760,7 @@ export class UIManager {
         <div class="recovery-controls">
           <span>↑ ↓ Select</span>
           <span><kbd>Enter</kbd> Confirm</span>
-          <span><kbd>R</kbd> Menu</span>
+          <span><kbd>Shift+R</kbd> Menu</span>
         </div>
       </div>
       <div class="recovery-countdown" data-recovery="countdown">
@@ -960,10 +964,12 @@ export class UIManager {
   }
 
   /** Reject keys reserved for panel navigation, and duplicates of other actions. */
-  private findConflict(action: keyof KeyBindings, code: string): keyof KeyBindings | null {
-    if (code === 'Escape' || code === 'Tab') return action // reserved
+  private findConflict(action: keyof KeyBindings, binding: string): keyof KeyBindings | null {
+    if (binding === 'Escape' || binding === 'Tab') return action // reserved
     for (const { action: other } of UIManager.CONTROL_ACTIONS) {
-      if (other !== action && this.controlsBindings[other] === code) return other
+      // Exact binding-string match: a modifier combo (Shift+R) is distinct
+      // from its bare key (R), so they must not collide on the same action.
+      if (other !== action && this.controlsBindings[other] === binding) return other
     }
     return null
   }
@@ -975,7 +981,19 @@ export class UIManager {
     window.setTimeout(() => btn.classList.remove('conflict'), 600)
   }
 
-  private formatKey(code: string): string {
+  private formatKey(binding: string): string {
+    const spec = parseBinding(binding)
+    const mods: string[] = []
+    if (spec.ctrl) mods.push('Ctrl')
+    if (spec.shift) mods.push('Shift')
+    if (spec.alt) mods.push('Alt')
+    if (spec.meta) mods.push('Meta')
+    const base = this.formatCode(spec.code)
+    return mods.length ? `${mods.join('+')}+${base}` : base
+  }
+
+  /** Render a bare `KeyboardEvent.code` (no modifiers) into a short label. */
+  private formatCode(code: string): string {
     if (code.startsWith('Arrow')) {
       return (
         (
@@ -1009,12 +1027,13 @@ export class UIManager {
         this.cancelListening()
         return
       }
-      const conflict = this.findConflict(action, e.code)
+      const binding = eventToBinding(e)
+      const conflict = this.findConflict(action, binding)
       if (conflict) {
         this.flashConflict(action)
         return
       }
-      this.controlsBindings[action] = e.code
+      this.controlsBindings[action] = binding
       this.listeningAction = null
       this.refreshKeyButton(action)
       this.controlsOnChanged?.()

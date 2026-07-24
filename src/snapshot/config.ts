@@ -51,4 +51,4 @@ export const THUMBNAIL_HEIGHT = 256
 export const THUMBNAIL_QUALITY = 0.72
 
 /** Default manual-snapshot shortcut (plan §3) — rebindable in Controls. */
-export const DEFAULT_SNAPSHOT_KEY = 'KeyM'
+export const DEFAULT_SNAPSHOT_KEY = 'Shift+KeyS'

@@ -3,7 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
-import { CELL, TANK, ICE_ACCEL_TRACTION, ICE_DECEL_TRACTION } from '../src/constants'
+import { CELL, ICE_DECEL_TRACTION } from '../src/constants'
 
 /**
  * Ice-momentum regression tests (user bug: "冰面没有滑动惯性，操控性能与平地无异").
@@ -168,7 +168,6 @@ describe('Ice momentum (user bug fix)', () => {
     // vertical axis instantly; it keeps some rightward glide first.
     release(input, input.keys.right)
     press(input, input.keys.up)
-    const vyAtTurn = p.vy
     // Immediately after the turn, vertical velocity is still ramping from 0,
     // so the tank is NOT yet travelling purely upward.
     expect(Math.abs(p.vy)).toBeLessThanOrEqual(Math.abs(p.vx) + 1e-6)

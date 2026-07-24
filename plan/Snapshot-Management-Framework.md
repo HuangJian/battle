@@ -314,10 +314,10 @@ after entering a stage.
 Shortcut:
 
 ```
-M
+Shift+S
 ```
 
-Configurable.
+Configurable (rebindable in Controls).
 
 Display success notification.
 

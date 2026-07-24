@@ -405,8 +405,8 @@ export class Game {
           this.audio.playMenuSelect()
         }
       }
-      // Theme shortcut (T key)
-      if (this.input.wasPressed('KeyT')) {
+      // Theme shortcut (Shift+T by default — see KeyBindings)
+      if (this.input.isThemePressed()) {
         this.themeIndex = (this.themeIndex + 1) % THEME_KEYS.length
         w.themeKey = THEME_KEYS[this.themeIndex]
         w.theme = THEMES[w.themeKey]
@@ -448,7 +448,7 @@ export class Game {
           this.snapshots.create('pause', w)
         }
       }
-      // Manual snapshot — the M key (plan §3, Manual)
+      // Manual snapshot — Shift+S by default (plan §3, Manual); rebindable.
       if (this.input.isSnapshotPressed()) {
         this.manualSnapshot()
       }
@@ -558,7 +558,7 @@ export class Game {
   // ---- Snapshots (plan §3, §10, §12) ----
 
   /**
-   * Create a Manual snapshot (M key / Control Center button). Manual
+   * Create a Manual snapshot (Shift+S by default / Control Center button). Manual
    * snapshots are never overwritten — when all 100 slots are used, the
    * player is asked to clean up instead (plan §3).
    */

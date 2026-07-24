@@ -649,8 +649,9 @@ only HP (not position/speed), so the determinism test is preserved.
 - **UI (UIManager + CSS).** `SnapshotBrowser` (plan §12: list + 320×180
   thumbnails w/ hover zoom + load/delete) and `ControlCenter` (plan §13:
   left sidebar, manual-save + open-browser + collapsible, hidden <900px) live
-  in `src/presentation/ui/`. Shortcut `M` = manual snapshot; opening the
-  browser auto-pauses. Toasts (`notify()`) report save success / capacity.
+  in `src/presentation/ui/`. Shortcut `Shift+S` = manual snapshot (rebindable in
+  Controls); opening the browser auto-pauses. Toasts (`notify()`) report save
+  success / capacity.
 - **Determinism fix found via this work.** `Simulation.spawnPointIndex` was a
   hidden instance field (state OUTSIDE the World — AGENTS §2.2/§2.3 violation):
   two identical World snapshots replayed on different Simulation instances
