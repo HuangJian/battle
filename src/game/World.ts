@@ -155,6 +155,8 @@ export class World {
     this.themeKey = DEFAULT_THEME
     this.menuCursor = 0
     this.selectedStage = 0
+    // Show the selected stage's layout behind the start menu from the outset.
+    this.previewStage(this.selectedStage)
     this.rng = new RNG(Date.now())
     this.events = []
     this.frame = 0
@@ -219,6 +221,18 @@ export class World {
     // Spawn player
     this.spawnPlayer()
     this.state = 'playing'
+  }
+
+  /**
+   * Load a stage's terrain into the tileMap for the start-screen preview.
+   * Unlike loadStage, this does NOT spawn entities or change game state — it
+   * only swaps the static layout so the battle field behind the menu shows the
+   * selected stage's starting formation (and updates when the selection moves).
+   */
+  previewStage(index: number): void {
+    const stage = STAGES[index]
+    if (!stage) return
+    this.tileMap.loadStage(stage)
   }
 
   spawnPlayer(): void {

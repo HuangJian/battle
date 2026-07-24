@@ -458,6 +458,8 @@ export class Game {
     this.world.selectedStage =
       (this.world.selectedStage + dir + STAGES.length) % STAGES.length
     this.world.menuCursor = 2
+    // Swap the battle-field preview to the newly selected stage's layout.
+    this.world.previewStage(this.world.selectedStage)
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
@@ -586,6 +588,8 @@ export class Game {
     this.recovery.reset()
     this.presentation.ui.snapshotBrowser.close()
     this.prevStageIndex = -1
+    // Show the selected stage's layout behind the menu again.
+    this.world.previewStage(this.world.selectedStage)
     this.presentation.reset()
     this.audio.playMenuSelect()
   }
