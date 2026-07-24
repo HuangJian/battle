@@ -1,6 +1,11 @@
 import type { World } from '../game/World'
 import type { GameEvent, EmitterConfig } from '../types'
 import { FIELD, TANK } from '../constants'
+import {
+  THUMBNAIL_WIDTH,
+  THUMBNAIL_HEIGHT,
+  THUMBNAIL_QUALITY,
+} from '../snapshot/config'
 import { Camera } from './Camera'
 import { AnimationSystem } from './AnimationSystem'
 import { ParticleSystem } from './ParticleSystem'
@@ -488,6 +493,42 @@ export class PresentationLayer {
 
     // Clean up visual components for dead entities (allocation-free sweep).
     this.animations.cleanup(frame)
+  }
+
+  // ---- Snapshot thumbnails (Snapshot Management Framework §8) ----
+
+  /** Reusable offscreen canvas for thumbnail capture (lazy). */
+  private _thumbCanvas: HTMLCanvasElement | null = null
+
+  /**
+   * Capture a square preview of the current playfield as a JPEG data URL.
+   * The field is 416×416 (square); the thumbnail is square too, so the frame
+   * is scaled uniformly with no crop and no stretch — the game's aspect
+   * ratio is preserved exactly. Returns null when the canvas has no pixels
+   * yet (e.g. before the first frame).
+   */
+  captureThumbnail(): string | null {
+    const src = this.ui.canvas
+    if (!src || src.width === 0 || src.height === 0) return null
+    try {
+      if (!this._thumbCanvas) {
+        this._thumbCanvas = document.createElement('canvas')
+        this._thumbCanvas.width = THUMBNAIL_WIDTH
+        this._thumbCanvas.height = THUMBNAIL_HEIGHT
+      }
+      const dst = this._thumbCanvas
+      const ctx = dst.getContext('2d')
+      if (!ctx) return null
+      ctx.fillStyle = '#000'
+      ctx.fillRect(0, 0, dst.width, dst.height)
+      const scale = Math.max(dst.width / src.width, dst.height / src.height)
+      const dw = src.width * scale
+      const dh = src.height * scale
+      ctx.drawImage(src, (dst.width - dw) / 2, (dst.height - dh) / 2, dw, dh)
+      return dst.toDataURL('image/jpeg', THUMBNAIL_QUALITY)
+    } catch {
+      return null
+    }
   }
 
   /** Reset presentation state (e.g., when returning to menu) */

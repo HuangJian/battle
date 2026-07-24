@@ -1,7 +1,13 @@
 import { World } from './World'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS } from './Input'
-import { RecoverySystem, RECOVERY_OPTION_COUNT } from './RecoverySystem'
+import { SnapshotManager } from '../snapshot/SnapshotManager'
+import { createDefaultStorage } from '../snapshot/storage'
+import {
+  RecoveryController,
+  RECOVERY_OPTIONS,
+  RECOVERY_OPTION_COUNT,
+} from '../snapshot/RecoveryController'
 import { PresentationLayer } from '../presentation/PresentationLayer'
 import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
 import { AudioManager } from '../audio/AudioManager'
@@ -24,7 +30,8 @@ export class Game {
   simulation: Simulation
   presentation: PresentationLayer
   audio: AudioManager
-  recovery: RecoverySystem
+  snapshots: SnapshotManager
+  recovery: RecoveryController
 
   private lastTime = 0
   private accumulator = 0
@@ -57,7 +64,12 @@ export class Game {
     // Wire the live key-bindings object + persistence into the controls panel.
     this.presentation.ui.initControls(this.settings.keys, () => this.saveSettings())
     this.audio = new AudioManager()
-    this.recovery = new RecoverySystem()
+
+    // Snapshot Management Framework (plan/Snapshot-Management-Framework.md)
+    this.snapshots = new SnapshotManager({ backend: createDefaultStorage() })
+    this.recovery = new RecoveryController(this.snapshots)
+    this.wireSnapshotUI()
+
     this.audio.setVolume(this.settings.volume)
 
     // Apply saved settings
@@ -72,8 +84,50 @@ export class Game {
     this.world.theme = THEMES[this.world.themeKey]
   }
 
+  /** Wire the Snapshot Browser + Control Center callbacks into the framework. */
+  private wireSnapshotUI(): void {
+    const ui = this.presentation.ui
+
+    ui.snapshotBrowser.init({
+      getSnapshots: () => this.snapshots.getAll(),
+      onLoad: (id) => {
+        if (this.recovery.beginLoad(id, this.world)) {
+          this.audio.playRecoveryStart()
+        }
+      },
+      onDelete: (id) => {
+        this.snapshots.delete(id)
+        ui.notify('Snapshot deleted')
+      },
+      onClose: () => {
+        // If the browser was opened from the recovery menu, the menu is
+        // still active underneath — nothing to do. Elsewhere (paused /
+        // menu) the regular screen sync resumes automatically.
+      },
+    })
+
+    ui.controlCenter.init({
+      onManualSave: () => this.manualSnapshot(),
+      onOpenBrowser: () => this.openSnapshotBrowser(),
+      onOpenControls: () => {
+        if (this.world.state === 'menu') {
+          ui.openControls()
+        } else {
+          ui.notify('Key bindings are available from the main menu', 'warn')
+        }
+      },
+      getCounts: () => ({
+        total: this.snapshots.count(),
+        manual: this.snapshots.count('manual'),
+        manualLimit: this.snapshots.policyFor('manual').limit,
+      }),
+    })
+  }
+
   async start(): Promise<void> {
     this.input.attach(window)
+    // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
+    await this.snapshots.hydrate()
     // Preload the SVG asset library so sprites are ready for the first frame.
     await spriteLibrary.load()
     // Pre-rasterize sprites to canvas bitmaps for fast rendering
@@ -132,9 +186,10 @@ export class Game {
       ) {
         this.simulation.tick()
 
-        // Detect stage change → create Stage Snapshot (RecoverySystem.md §7)
+        // Detect stage change → Stage Start snapshot (plan §3, §10)
         if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
-          this.recovery.createStageSnapshot(this.world)
+          this.snapshots.create('stage-start', this.world)
+          this.snapshots.resetAutoTimer()
           this.prevStageIndex = this.world.stageIndex
         }
 
@@ -156,7 +211,7 @@ export class Game {
       this.accumulator = 0
 
       this.handleRecoveryInput()
-      this.recovery.updateFlow(this.world, dt)
+      this.recovery.update(this.world, dt)
 
       // When the fade completes the snapshot is restored internally.
       // At that transition we must rebuild all presentation state
@@ -182,9 +237,9 @@ export class Game {
       this.prevCountdown = 0
     }
 
-    // History recording — runs while state is 'playing'
+    // Auto snapshots — every 30 s of real gameplay (plan §3, §10)
     if (this.world.state === 'playing') {
-      this.recovery.updateRecording(this.world, dt)
+      this.snapshots.updateAuto(this.world, dt)
     }
 
     // Process events — pass to both audio and presentation
@@ -199,9 +254,22 @@ export class Game {
     // the fan stays off. Input, simulation, and the HUD still run every frame.
     const wantRender = this.presentation.shouldRender(this.world)
     const canRender = MAX_RENDER_FPS <= 0 || time - this._lastRenderTime >= 1000 / MAX_RENDER_FPS
+    let rendered = false
     if (wantRender && canRender) {
       this.presentation.render(this.world, dt)
       this._lastRenderTime = time
+      rendered = true
+    }
+
+    // Thumbnail capture (plan §8) — only right after a repaint, so the
+    // preview always shows the snapshot's own frame, never a stale one.
+    if (this.snapshots.hasPendingThumbnails) {
+      if (rendered) {
+        this.snapshots.capturePendingThumbnails(() => this.presentation.captureThumbnail())
+      } else {
+        // Force a repaint next frame so the pending previews can be taken.
+        this.presentation.markNeedsRender()
+      }
     }
 
     // Update the HTML HUD every frame (cheap, internally guarded) so menu/pause
@@ -234,6 +302,10 @@ export class Game {
 
   private handleStateInput(): void {
     const w = this.world
+
+    // The Snapshot Browser is a UI-modal that owns key input while open
+    // (Esc is captured by the browser itself); skip game state input.
+    if (this.presentation.ui.snapshotBrowser.isOpen()) return
 
     if (w.state === 'menu') {
       // The controls panel is a UI-modal that owns all key input while open;
@@ -314,6 +386,15 @@ export class Game {
       if (this.input.isPausePressed()) {
         this.simulation.togglePause()
         this.audio.playPause()
+        // Entering pause → Pause snapshot (plan §3: created on pause,
+        // captures the exact moment for a safe later return).
+        if (w.state === 'paused') {
+          this.snapshots.create('pause', w)
+        }
+      }
+      // Manual snapshot — the M key (plan §3, Manual)
+      if (this.input.isSnapshotPressed()) {
+        this.manualSnapshot()
       }
       if (this.input.isResetPressed()) {
         this.resetToMenu()
@@ -327,7 +408,40 @@ export class Game {
     }
   }
 
-  // ---- Recovery ----
+  // ---- Snapshots (plan §3, §10, §12) ----
+
+  /**
+   * Create a Manual snapshot (M key / Control Center button). Manual
+   * snapshots are never overwritten — when all 100 slots are used, the
+   * player is asked to clean up instead (plan §3).
+   */
+  private manualSnapshot(): void {
+    const w = this.world
+    if (w.state !== 'playing' && w.state !== 'paused') return
+
+    const snap = this.snapshots.create('manual', w)
+    const ui = this.presentation.ui
+    if (snap) {
+      const m = snap.metadata
+      ui.notify(`Snapshot saved — Stage ${String(m.stage + 1).padStart(2, '0')} · ${m.stageName}`)
+      this.audio.playMenuSelect()
+    } else {
+      const limit = this.snapshots.policyFor('manual').limit
+      ui.notify(`Manual slots full (${limit}/${limit}) — delete old snapshots in the Browser`, 'warn')
+    }
+  }
+
+  /** Open the Snapshot Browser (Control Center / recovery menu). */
+  private openSnapshotBrowser(): void {
+    // Playing → pause first so the world doesn't run behind the modal.
+    if (this.world.state === 'playing') {
+      this.simulation.togglePause()
+      this.snapshots.create('pause', this.world)
+    }
+    this.presentation.ui.snapshotBrowser.open()
+  }
+
+  // ---- Failure Recovery (plan §11) ----
 
   /**
    * Intercept game-over and transition to the recovery flow.
@@ -336,13 +450,20 @@ export class Game {
    * to rewind time instead of accepting defeat.
    */
   private startRecovery(): void {
-    this.recovery.startRecovery(this.world)
+    this.recovery.start(this.world)
+    // Publish option availability to the menu UI (greyed-out options).
+    this.presentation.ui.setRecoveryAvailability(
+      RECOVERY_OPTIONS.map((opt) => this.recovery.isOptionAvailable(opt, this.world)),
+    )
   }
 
   /** Handle keyboard navigation in the recovery menu. */
   private handleRecoveryInput(): void {
     const w = this.world
     if (!this.recovery.isMenuPhase()) return
+    // The Snapshot Browser overlays the recovery menu when opened via
+    // "Choose a Snapshot…" — it owns all input until closed.
+    if (this.presentation.ui.snapshotBrowser.isOpen()) return
 
     // Navigate up/down
     if (this.input.isUpPressed()) {
@@ -356,13 +477,23 @@ export class Game {
 
     // Confirm selection
     if (this.input.isConfirmPressed()) {
-      const option = w.recoveryCursor
-      if (this.recovery.isOptionAvailable(option)) {
-        this.recovery.selectOption(option, w)
-        this.audio.playRecoveryStart()
-      } else {
-        // Option unavailable — play a soft "denied" beep
-        this.audio.playMenuSelect()
+      const option = RECOVERY_OPTIONS[w.recoveryCursor]
+      const result = this.recovery.select(option, w)
+      switch (result.kind) {
+        case 'transition':
+          this.audio.playRecoveryStart()
+          break
+        case 'browse':
+          this.presentation.ui.snapshotBrowser.open()
+          this.audio.playMenuSelect()
+          break
+        case 'continue':
+          this.audio.playMenuSelect()
+          break
+        case 'none':
+          // Option unavailable — soft "denied" beep
+          this.audio.playMenuSelect()
+          break
       }
     }
 
@@ -384,6 +515,7 @@ export class Game {
     this.world.recoveryCountdown = 0
     this.world.recoveryFading = false
     this.recovery.reset()
+    this.presentation.ui.snapshotBrowser.close()
     this.prevStageIndex = -1
     this.presentation.reset()
     this.audio.playMenuSelect()

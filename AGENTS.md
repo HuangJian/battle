@@ -23,7 +23,7 @@ In this order, every session:
 1. **`MANIFEST.md`** — the creed. Non-negotiable. Section 13 ("The Three Gates") is the final arbiter for every ambiguity.
 2. **`DECISIONS.md`** — the accumulated design decisions. You are extending this list, not contradicting it.
 3. **`plan/mvp.md`** — what the product is and the milestone structure.
-4. **`plan/RecoverySystem.md`** and **`plan/presentation-upgrade.md`** — the active feature plans. Their "Definition of Done" sections are acceptance criteria.
+4. **`plan/Snapshot-Management-Framework.md`** and **`plan/presentation-upgrade.md`** — the active feature plans. Their "Definition of Done" sections are acceptance criteria.
 5. **`docs/presentation-audit.md`** — the current rendering state assessment.
 6. **This file** — your operating contract.
 
@@ -42,8 +42,8 @@ Input → Simulation → World → Renderer / Audio / UI / Stats
 ```
 
 - **Only `Simulation` may modify the `World`.** (`src/game/Simulation.ts`)
-- Everything else — `Input`, `PresentationLayer`, `AudioManager`, `UIManager`, `RecoverySystem` — **observes** the World read-only.
-- `RecoverySystem` is the single exception: it restores the World from a snapshot, but it does so by overwriting state atomically, never by participating in gameplay rules (RecoverySystem.md §20.1).
+- Everything else — `Input`, `PresentationLayer`, `AudioManager`, `UIManager`, `RecoveryController` — **observes** the World read-only.
+- The `RecoveryController` (with `WorldSerializer`) is the single exception: it restores the World from a snapshot, but it does so by overwriting state atomically, never by participating in gameplay rules (see plan/Snapshot-Management-Framework.md).
 
 ### 2.2 No Hidden State
 
@@ -109,7 +109,7 @@ src/
   assets/sprites/         # SVG sprite library + index.ts URL registry
   utils/                  # RNG (seeded mulberry32), helpers (snap, aabb, dirs)
 tests/                    # bun:test specs (mirrors src/ structure by concern)
-plan/                     # mvp.md, RecoverySystem.md, presentation-upgrade.md, tasks.chat.md
+plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
 docs/                     # presentation-audit.md (and future audits)
 tools/gen-sprites.mjs     # regenerates the SVG sprite library
 ```
@@ -184,6 +184,19 @@ bun run check        # full gate: test + typecheck + lint + format
 ```
 
 `bun run check` is the definition of "green". Run it before declaring a task done.
+
+### NEVER start the dev server to validate changes
+
+- The dev server (`bun run dev`) is for the **human to playtest** — an agent must **never** start it (or otherwise spin up a browser) to validate its own changes.
+- Validation is the automated gates only: `bun run check` (test + typecheck + lint + format). For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server.
+- If a visual check is wanted, the human will open it themselves. Do not leave a dev server running as "proof" of work, and do not present a localhost URL as a validation step.
+
+### NEVER add an untracked `*.md` file to git tracking
+
+- Markdown that is **already in git tracking** (e.g. `AGENTS.md`, `DECISIONS.md`, `MANIFEST.md`, `README.md`, any `*.md` already committed) is fair game: an agent may edit, stage, and commit it like any other source file.
+- Markdown that is **not yet tracked** (an untracked `*.md` the agent did not find already staged) must **never** be added to tracking by the agent. Do not `git add` an untracked `*.md`, and do not use a blanket `git add -A` / `git add .` that would sweep one in.
+- When committing, prefer explicit paths (`git add <specific files>`) over `git add -A`. Before committing, confirm `git status` shows no untracked `*.md` being staged; if one appears, unstage it (`git restore --staged <file>` / `git reset <file>`) and leave it for the human.
+- If the human explicitly asks you to create or add a specific markdown file, that is allowed — but never auto-discover and track markdown the human did not request.
 
 ### Style
 
@@ -291,8 +304,8 @@ Make the minimal change that turns the test green. Do not refactor opportunistic
 - **Runner**: `bun:test` (`import { describe, it, expect } from 'bun:test'`). Tests live in `tests/`.
 - **Mirror the concern**: `tests/stages.test.ts` ↔ `src/config/stages.ts`. Name new test files after the module or system they cover.
 - **Prefer independent re-implementations for codecs/data**: see `tests/stages.test.ts` for the pattern — it re-decodes the level data locally and asserts equality with the production decoder. This catches decoder regressions that a "golden file" test would miss.
-- **No DOM in unit tests** unless the system under test requires it. `Simulation`/`World`/`TileMap`/`RecoverySystem` are pure logic — test them headlessly.
-- **Snapshot/restoration tests** (for RecoverySystem) must assert the full field list in RecoverySystem.md §18: player position, enemy positions, bullets, terrain destruction, items, score, lives, timers, enemy queue, RNG state.
+- **No DOM in unit tests** unless the system under test requires it. `Simulation`/`World`/`TileMap`/`SnapshotManager` are pure logic — test them headlessly.
+- **Snapshot/restoration tests** must assert the full field list (see plan/Snapshot-Management-Framework.md §7 and tests/snapshot-framework.test.ts): player position, enemy positions, bullets, terrain destruction, items, score, lives, timers, enemy queue, RNG state.
 - **Determinism tests**: when adding RNG-consuming logic, add a test that runs the same seed twice and asserts identical World state.
 
 ---
@@ -310,7 +323,7 @@ A task is done when **all** of these hold:
 - [ ] New decisions recorded in `DECISIONS.md` (§6).
 - [ ] Bug fixes have a reproducing test (§7).
 - [ ] 60 FPS maintained on a typical machine (MANIFEST §14, plan/mvp.md §10). If your change is expensive, profile it.
-- [ ] Memory stays bounded — RecoverySystem history is a fixed 60-entry circular buffer; do not introduce unbounded growth (RecoverySystem.md §8, §14).
+- [ ] Memory stays bounded — snapshot history is bounded by per-type retention policies (circular 20 for auto/pause/stage-start, 100 for manual never-overwritten); do not introduce unbounded growth (plan/Snapshot-Management-Framework.md).
 
 ---
 

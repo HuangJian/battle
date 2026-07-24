@@ -612,3 +612,57 @@ only HP (not position/speed), so the determinism test is preserved.
   never destroyed, fires ≥ the enemy, and strictly-slower enemies actually
   die to the surplus shells. Verified the tests FAIL with the old power
   profile. `tsc --noEmit` clean, `bun test` 75/75.
+
+**Feature (2026-07-23) — Snapshot Management Framework (replaces RecoverySystem):**
+- The monolithic `RecoverySystem` (auto-numbered snapshot files + inline
+  recovery UI) is **retired** (file deleted; only historical doc-comment
+  references remain). It is replaced by a policy-declared, data-driven
+  framework in `src/snapshot/` per `plan/Snapshot-Management-Framework.md`.
+- **One model, four origins.** Every snapshot is the SAME shape
+  (`WorldSnapshot` in `src/snapshot/types.ts`): a UUID id + `parentId`
+  timeline link + 13-field first-class metadata (origin/createdAt/tick/
+  stageIndex/score/lives/playerLevel/enemyCount/phase/rngState/thumbnail/
+  version/notes). Origins are `stage-start`, `pause`, `auto`, `manual` — they
+  differ ONLY by a declarative `RetentionPolicy`, never by branching code.
+- **Retention is configuration, not `if` statements.** `SnapshotManager`
+  (`src/snapshot/SnapshotManager.ts`) enforces per-origin policy from
+  `src/snapshot/config.ts`: `circular` (ring of N, overwrite oldest) for
+  stage-start/pause/auto (cap 20), `never` (hard cap 100, refuse overwrite) for
+  manual. `create(type, world)` returns `null` when a `never` bucket is full —
+  the UI then shows a toast rather than silently dropping the player's save.
+- **Determinism preserved on restore.** `WorldSerializer`
+  (`src/snapshot/WorldSerializer.ts`) deep-clones the World for a snapshot and
+  atomically overwrites it on restore (the AGENTS §2.1 exception —
+  AGENTS §2.1 — it restores state, it does not run gameplay rules). Thumbnails
+  (256×256, square) are captured by `Game` AFTER the canvas repaint (pending queue) to
+  avoid grabbing a stale frame.
+- **Persistence.** `storage.ts` defines a backend contract; `createDefaultStorage()`
+  returns an IndexedDB-backed implementation or `null` when IndexedDB is
+  unavailable (in-memory fallback, no crash). `Game.start()` awaits
+  `snapshots.hydrate()` before `spriteLibrary.load()`.
+- **Recovery Controller (plan §11).** `RecoveryController`
+  (`src/snapshot/RecoveryController.ts`) drives the 5-option failure-recovery
+  flow: `continue` / `loadLatest` / `replayStage` / `restartStage` /
+  `chooseSnapshot`. `loadLatest` has a 15s auto-trigger that falls back to
+  `restartStage` if no snapshot exists. Option availability is computed per
+  state and surfaced to the UI (disabled options are soft-denied, never crash).
+- **UI (UIManager + CSS).** `SnapshotBrowser` (plan §12: list + 320×180
+  thumbnails w/ hover zoom + load/delete) and `ControlCenter` (plan §13:
+  left sidebar, manual-save + open-browser + collapsible, hidden <900px) live
+  in `src/presentation/ui/`. Shortcut `M` = manual snapshot; opening the
+  browser auto-pauses. Toasts (`notify()`) report save success / capacity.
+- **Determinism fix found via this work.** `Simulation.spawnPointIndex` was a
+  hidden instance field (state OUTSIDE the World — AGENTS §2.2/§2.3 violation):
+  two identical World snapshots replayed on different Simulation instances
+  diverged because spawn counts live on the Sim. Moved to `World.spawnPointIndex`
+  (init in constructor + `loadStage`), used as `w.spawnPointIndex` in
+  `Simulation`, and captured/restored by `WorldSerializer`. This also fixed a
+  flaky `tests/snapshot-framework.test.ts` case ("a restored world reproduces
+  the exact same future (determinism §2.3)") that passed in isolation but
+  failed in the full suite.
+- **Verification:** `bun test` 104/104 (29 in `tests/snapshot-framework.test.ts`
+  covering one-model-four-origins, 13-field metadata, circular overwrite,
+  never-overwrite-full→null, per-type isolation, auto cadence, restore
+  round-trip + determinism reproduction + delete, 15s fallback rule, queries,
+  RecoveryController 5-option/availability/flow, storage backend contract).
+  `tsc --noEmit` clean, `oxlint` 0 warnings, `vite build` OK.

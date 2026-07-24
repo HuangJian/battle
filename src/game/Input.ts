@@ -12,6 +12,7 @@ export const DEFAULT_KEYS: KeyBindings = {
   fire: 'Space',
   pause: 'KeyP',
   reset: 'KeyR',
+  snapshot: 'KeyM',
 }
 
 /**
@@ -95,6 +96,7 @@ export class Input {
       code === k.fire ||
       code === k.pause ||
       code === k.reset ||
+      code === k.snapshot ||
       code === 'Enter' ||
       code === 'Escape'
     )
@@ -145,6 +147,11 @@ export class Input {
 
   isResetPressed(): boolean {
     return this.wasPressed(this.keys.reset)
+  }
+
+  /** Manual snapshot shortcut (configurable, default M). */
+  isSnapshotPressed(): boolean {
+    return this.wasPressed(this.keys.snapshot)
   }
 
   isConfirmPressed(): boolean {

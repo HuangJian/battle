@@ -64,6 +64,12 @@ export class World {
   spawnQueue: SpawnEntry[]
   enemiesSpawned: number
   enemiesRemaining: number
+  /**
+   * Round-robin cursor over the enemy spawn points. Lives on the World (not
+   * the Simulation) because it affects gameplay — a rewound World must
+   * reproduce the exact same spawn positions (AGENTS §2.2, §2.3).
+   */
+  spawnPointIndex: number
 
   // Game state
   state: GameState
@@ -71,6 +77,10 @@ export class World {
   lives: number
   playerLevel: number
   highScore: number
+  /** Enemies destroyed by the player this run (snapshot metadata). */
+  killCount: number
+  /** Total gameplay time this run (ms) — advanced only while playing. */
+  playTimeMs: number
 
   // Timers
   freezeTimer: number // enemy freeze countdown (ms)
@@ -102,8 +112,8 @@ export class World {
   // Animation frame counter
   frame: number
 
-  // Recovery UI state (read by UIManager, written by RecoverySystem)
-  recoveryCursor: number // selected menu option (0=30s, 1=60s, 2=restart)
+  // Recovery UI state (read by UIManager, written by RecoveryController)
+  recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
   recoveryFading: boolean // true while fading to black before restore
 
@@ -119,10 +129,13 @@ export class World {
     this.spawnQueue = []
     this.enemiesSpawned = 0
     this.enemiesRemaining = 0
+    this.spawnPointIndex = 0
     this.state = 'menu'
     this.score = 0
     this.lives = START_LIVES
     this.playerLevel = 0
+    this.killCount = 0
+    this.playTimeMs = 0
     this.highScore = this.loadHighScore()
     this.freezeTimer = 0
     this.stageClearTimer = 0
@@ -152,6 +165,8 @@ export class World {
     this.score = 0
     this.lives = this.difficulty.startLives
     this.playerLevel = this.difficulty.playerStartLevel
+    this.killCount = 0
+    this.playTimeMs = 0
     this.loadStage(startStage)
   }
 
@@ -173,6 +188,7 @@ export class World {
     this.stageIndex = index
     this.enemiesSpawned = 0
     this.enemiesRemaining = ENEMIES_PER_STAGE
+    this.spawnPointIndex = 0
     this.freezeTimer = 0
     this.stageClearTimer = 0
     this.gameOverTimer = 0

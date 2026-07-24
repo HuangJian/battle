@@ -136,8 +136,8 @@ export type CommanderDirective =
  *
  * This is the Tactical Intelligence Framework's per-tank memory and lives on
  * the World (no hidden state outside it — AGENTS.md §2.2). It is a flat
- * structure of primitives only, so `RecoverySystem` can shallow-clone it
- * safely when snapshotting the World.
+ * structure of primitives only, so the snapshot `WorldSerializer` can
+ * shallow-clone it safely when snapshotting the World.
  *
  * The fields `thinkTimer` / `fireTimer` / `currentDir` are kept from the
  * previous AI for backwards compatibility with the determinism tests.
@@ -341,6 +341,8 @@ export interface KeyBindings {
   fire: string
   pause: string
   reset: string
+  /** Manual snapshot shortcut (Snapshot Management Framework §3). */
+  snapshot: string
 }
 
 // ============================================================

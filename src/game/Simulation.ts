@@ -40,7 +40,6 @@ export class Simulation {
   input: Input
   /** Tactical Intelligence Framework — owns all enemy decision-making. */
   private ai: TacticalIntelligence
-  private spawnPointIndex = 0
 
   constructor(world: World, input: Input) {
     this.world = world
@@ -68,6 +67,9 @@ export class Simulation {
 
   private updatePlaying(): void {
     const w = this.world
+
+    // Run statistics — total play time advances only while playing.
+    w.playTimeMs += 1000 / 60
 
     // Update timers
     if (w.freezeTimer > 0) w.freezeTimer -= 1000 / 60
@@ -142,7 +144,7 @@ export class Simulation {
     // one is tried; if none are clear we just retry next frame and rotate the
     // start index so we don't keep re-checking the same blocked point first.
     for (let i = 0; i < n; i++) {
-      const idx = (this.spawnPointIndex + i) % n
+      const idx = (w.spawnPointIndex + i) % n
       const pt = ENEMY_SPAWN_POINTS[idx]
 
       // Skip spawn points overlapping blocking terrain (brick/steel/water/base).
@@ -174,12 +176,12 @@ export class Simulation {
       w.spawnQueue.shift()
       w.enemiesSpawned++
       w.spawnTimer = 1500 // 1.5s between spawns
-      this.spawnPointIndex = (idx + 1) % n
+      w.spawnPointIndex = (idx + 1) % n
       return
     }
 
     // All points blocked this frame — advance the start index and retry next frame.
-    this.spawnPointIndex = (this.spawnPointIndex + 1) % n
+    w.spawnPointIndex = (w.spawnPointIndex + 1) % n
   }
 
   // ================================================================
@@ -474,6 +476,7 @@ export class Simulation {
           const cfg = TANK_CONFIGS[tank.kind]
           w.score += cfg.score
           w.enemiesRemaining--
+          w.killCount++
           w.addPopup({
             id: genId(),
             x: tank.x,
@@ -605,6 +608,7 @@ export class Simulation {
           const cfg = TANK_CONFIGS[tank.kind]
           w.score += cfg.score
           w.enemiesRemaining--
+          w.killCount++
           w.addPopup({
             id: genId(),
             x: tank.x,

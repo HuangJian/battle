@@ -592,6 +592,17 @@ body {
    Recovery Screen
    ================================================================ */
 .ui-recovery {
+  /* The recovery screen keeps its dramatic dark backdrop in EVERY theme
+     (the fade-to-black before a restore is intentional). But its text sits
+     directly on that overlay with no cream panel behind it, so it must use
+     LIGHT, high-contrast colours here — otherwise Modern Retro's dark text
+     (tuned for the cream canvas) becomes unreadable dark-on-dark. These
+     overrides are scoped to .ui-recovery and don't affect other screens. */
+  --theme-text-primary: #f6f6f6;
+  --theme-text-secondary: #d8d8d8;
+  --theme-text-muted: #ababab;
+  --theme-danger: #ff6a5a;
+  --theme-accent-primary: #ffd23f;
   background: rgba(0, 0, 0, 0.75);
   transition: background 0.5s ease;
 }
@@ -877,13 +888,18 @@ body {
 }
 
 .controls-btn-primary {
-  color: var(--theme-accent-primary);
+  /* Solid accent fill + dark text: every theme's accent is a light/bright
+     colour (gold / cyan), so near-black text is always high-contrast and
+     legible — fixes the gold-on-translucent-gold LOAD button in Modern Retro. */
+  color: #0d0d0d;
   border-color: var(--theme-accent-primary);
-  background: var(--theme-button-active);
+  background: var(--theme-accent-primary);
+  font-weight: 800;
 }
 
 .controls-btn-primary:hover {
-  background: var(--theme-button-hover);
+  filter: brightness(1.08);
+  background: var(--theme-accent-primary);
 }
 
 /* Menu "Controls" entry */
@@ -972,4 +988,462 @@ body {
     padding: 16px 24px;
     gap: 14px;
   }
+}
+
+/* ================================================================
+   Recovery — disabled options (5-option menu, plan §11)
+   ================================================================ */
+.recovery-option.disabled {
+  opacity: 0.35;
+  filter: grayscale(0.8);
+}
+
+/* ================================================================
+   Snapshot Browser (plan §12)
+   ================================================================ */
+/* Snapshot Browser escapes the 416×416 game container: it is positioned
+   relative to the viewport (fixed) so it covers the ENTIRE page, not just
+   the playfield area. No ancestor establishes a containing block
+   (no transform/filter/will-change), so fixed anchors to the viewport. */
+.ui-snapshots {
+  position: fixed;
+  inset: 0;
+  background: var(--theme-overlay-bg);
+  z-index: 30; /* above pause / recovery screens */
+}
+
+.snap-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  padding: 16px 24px 12px;
+  background: var(--theme-panel-bg);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.snap-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--theme-panel-border);
+}
+
+.snap-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.snap-header .ui-title {
+  font-size: 16px;
+  margin-right: 0;
+}
+
+.snap-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--theme-text-muted);
+  white-space: nowrap;
+}
+
+.snap-close {
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+
+.snap-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  align-content: start;
+  flex: 1;
+  min-height: 80px;
+}
+
+.snap-empty {
+  grid-column: 1 / -1;
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--theme-text-muted);
+}
+
+.snap-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 10px;
+  transition: all var(--transition);
+}
+
+.snap-entry:hover {
+  background: var(--theme-button-hover);
+  border-color: var(--theme-accent-primary);
+}
+
+/* Thumbnail — stored 256×256 square preview (matches the 416×416 playfield
+   aspect ratio, never stretched). Shown inline; no separate hover preview. */
+.snap-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--theme-panel-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color var(--transition), box-shadow var(--transition);
+  position: relative;
+  z-index: 1;
+}
+
+.snap-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  image-rendering: pixelated;
+}
+
+.snap-thumb-empty {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 1px;
+  color: var(--theme-text-muted);
+}
+
+/* Filter toggle group — ALL | MANUAL | PAUSE | STAGE | AUTO */
+.snap-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.snap-filter {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--theme-text-secondary);
+  padding: 5px 12px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.snap-filter:hover {
+  color: var(--theme-text-primary);
+  background: var(--theme-button-hover);
+  border-color: var(--theme-accent-primary);
+}
+
+.snap-filter.active {
+  /* Solid accent fill + dark text keeps it legible in every theme
+     (matches the LOAD button fix). */
+  color: #0d0d0d;
+  background: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+  font-weight: 800;
+}
+
+.snap-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.snap-info-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.snap-type {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--theme-panel-border);
+  color: var(--theme-text-secondary);
+}
+
+.snap-type-manual {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+}
+
+.snap-type-stage-start {
+  color: var(--theme-success);
+  border-color: var(--theme-success);
+}
+
+.snap-type-pause {
+  color: var(--theme-accent-secondary);
+  border-color: var(--theme-accent-secondary);
+}
+
+.snap-stage {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--theme-text-primary);
+}
+
+.snap-created {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--theme-text-muted);
+  margin-left: auto;
+}
+
+.snap-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--theme-text-secondary);
+}
+
+.snap-commander {
+  color: var(--theme-danger);
+  font-weight: 700;
+}
+
+.snap-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.snap-actions .controls-btn {
+  flex: 1;
+  padding: 7px 12px;
+  font-size: 10px;
+  text-align: center;
+}
+
+.snap-delete-arm {
+  color: var(--theme-danger);
+  border-color: var(--theme-danger);
+}
+
+/* ================================================================
+   Control Center sidebar (plan §13)
+   ================================================================ */
+.control-center {
+  position: fixed;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 208px;
+  max-height: 92vh;
+  overflow-y: auto;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 32px var(--theme-panel-shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 20;
+  transition: width var(--transition);
+}
+
+.cc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--theme-panel-border);
+}
+
+.cc-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--theme-accent-primary);
+  white-space: nowrap;
+}
+
+.cc-collapse {
+  font-size: 10px;
+  color: var(--theme-text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  transition: color var(--transition);
+}
+
+.cc-collapse:hover {
+  color: var(--theme-text-primary);
+}
+
+.control-center.collapsed {
+  width: 44px;
+}
+
+.control-center.collapsed .cc-title,
+.control-center.collapsed .cc-body {
+  display: none;
+}
+
+.cc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+}
+
+.cc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cc-section-title {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--theme-text-muted);
+  margin-bottom: 2px;
+}
+
+.cc-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--theme-text-secondary);
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: left;
+}
+
+.cc-btn:hover:not(.cc-btn-disabled) {
+  color: var(--theme-text-primary);
+  background: var(--theme-button-hover);
+  border-color: var(--theme-accent-primary);
+}
+
+.cc-btn kbd {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 3px;
+  color: var(--theme-accent-primary);
+}
+
+.cc-btn-arrow {
+  color: var(--theme-text-muted);
+  font-size: 13px;
+}
+
+.cc-btn-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.cc-soon {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 1px;
+  color: var(--theme-text-muted);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.cc-info {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.5;
+  color: var(--theme-text-muted);
+  padding: 2px 2px 0;
+}
+
+/* Hide the sidebar on narrow screens — the playfield comes first */
+@media (max-width: 900px) {
+  .control-center {
+    display: none;
+  }
+}
+
+/* ================================================================
+   Toast notifications (snapshot confirmations)
+   ================================================================ */
+.ui-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%) translateY(16px);
+  padding: 10px 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-primary);
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-accent-primary);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px var(--theme-panel-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--transition),
+    transform var(--transition);
+  z-index: 40;
+}
+
+.ui-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.ui-toast-warn {
+  border-color: var(--theme-danger);
+  color: var(--theme-danger);
+}
+
+/* Compact the 5-option recovery menu so it fits the playfield */
+.recovery-options .recovery-option {
+  padding: 8px 14px;
 }

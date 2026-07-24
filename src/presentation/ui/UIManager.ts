@@ -4,6 +4,9 @@ import { DEFAULT_KEYS } from '../../game/Input'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
+import { SnapshotBrowser } from './SnapshotBrowser'
+import { ControlCenter } from './ControlCenter'
+import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
 
 /**
  * UIManager — manages all HTML/CSS UI overlay elements.
@@ -31,7 +34,15 @@ export class UIManager {
   private victoryScreen: HTMLElement
   private recoveryScreen: HTMLElement
   private recoveryOptions: HTMLElement[] = []
+  /** Per-option availability, set by Game while the recovery menu is open. */
+  private recoveryAvailability: boolean[] = []
   private footer: HTMLElement
+
+  // ---- Snapshot framework UI (plan §12, §13) ----
+  readonly snapshotBrowser: SnapshotBrowser
+  readonly controlCenter: ControlCenter
+  private toastEl: HTMLElement
+  private toastTimer = 0
 
   // ---- Controls / key-bindings panel ----
   private controlsScreen: HTMLElement
@@ -205,6 +216,18 @@ export class UIManager {
     // Controls / key-bindings screen
     this.controlsScreen = this.createControlsScreen()
     this.overlay.appendChild(this.controlsScreen)
+
+    // Snapshot Browser (plan §12) — full-overlay modal screen
+    this.snapshotBrowser = new SnapshotBrowser()
+    this.overlay.appendChild(this.snapshotBrowser.screen)
+
+    // Control Center sidebar (plan §13)
+    this.controlCenter = new ControlCenter()
+    this.root.appendChild(this.controlCenter.el)
+
+    // Toast notifications (manual save confirmation / capacity warnings)
+    this.toastEl = this.createElement('div', 'ui-toast')
+    this.root.appendChild(this.toastEl)
 
     // Footer
     this.footer = this.createElement('div', 'footer')
@@ -415,10 +438,16 @@ export class UIManager {
 
   /** Update HUD and menu display from world state */
   update(world: World): void {
+    // Control Center sidebar — always live (change-guarded internally).
+    this.controlCenter.update(world)
+
     // While the controls panel is open it owns the overlay (manually
     // toggled), so skip the per-frame screen sync that would otherwise
     // re-activate the menu behind it.
     if (this.controlsOpen) return
+
+    // Same for the Snapshot Browser — it owns the overlay while open.
+    if (this.snapshotBrowser.isOpen()) return
 
     // Animate score
     this.animatedScore = world.score
@@ -587,30 +616,46 @@ export class UIManager {
 
   private createRecoveryScreen(): HTMLElement {
     const screen = this.createElement('div', 'ui-screen ui-recovery')
+    // Five options, in RECOVERY_OPTIONS order (plan §11):
+    // continue · loadLatest · replayStage · restartStage · chooseSnapshot
     screen.innerHTML = `
       <div class="recovery-menu" data-recovery="menu">
         <h2 class="recovery-title ui-danger">MISSION FAILED</h2>
         <p class="recovery-subtitle">Rewind time and try again</p>
         <div class="recovery-options">
           <div class="recovery-option" data-recovery-option="0">
-            <span class="recovery-option-icon">⏪</span>
+            <span class="recovery-option-icon">🏳</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">30 Seconds Ago</span>
-              <span class="recovery-option-desc">Restore recent gameplay</span>
+              <span class="recovery-option-label">Continue</span>
+              <span class="recovery-option-desc">Accept defeat — classic game over</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="1">
-            <span class="recovery-option-icon">⏪⏪</span>
+            <span class="recovery-option-icon">⏪</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">60 Seconds Ago</span>
-              <span class="recovery-option-desc">Restore oldest available</span>
+              <span class="recovery-option-label">Load Latest Snapshot</span>
+              <span class="recovery-option-desc">Return to the most recent safe moment</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="2">
             <span class="recovery-option-icon">↻</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Restart Stage</span>
-              <span class="recovery-option-desc">Return to stage start</span>
+              <span class="recovery-option-label">Replay This Stage</span>
+              <span class="recovery-option-desc">Load the stage-start snapshot</span>
+            </div>
+          </div>
+          <div class="recovery-option" data-recovery-option="3">
+            <span class="recovery-option-icon">⚑</span>
+            <div class="recovery-option-text">
+              <span class="recovery-option-label">Restart Without Loading</span>
+              <span class="recovery-option-desc">Fresh stage start — no snapshot</span>
+            </div>
+          </div>
+          <div class="recovery-option" data-recovery-option="4">
+            <span class="recovery-option-icon">🗂</span>
+            <div class="recovery-option-text">
+              <span class="recovery-option-label">Choose a Snapshot…</span>
+              <span class="recovery-option-desc">Open the Snapshot Browser</span>
             </div>
           </div>
         </div>
@@ -657,10 +702,33 @@ export class UIManager {
     for (let i = 0; i < this.recoveryOptions.length; i++) {
       const opt = this.recoveryOptions[i]
       opt.classList.toggle('selected', i === world.recoveryCursor)
-      // The Game / RecoverySystem determines availability; we just read
-      // the history size via the option being non-disabled by default.
-      // Actual availability is checked on confirm in Game.handleRecoveryInput.
+      // Availability comes from the RecoveryController (via Game) — a
+      // disabled option is greyed out but still selectable (soft-denied
+      // on confirm), matching the classic menu feel.
+      const available = this.recoveryAvailability[i] ?? true
+      opt.classList.toggle('disabled', !available)
     }
+  }
+
+  /**
+   * Publish per-option availability for the recovery menu. Called by Game
+   * when entering the recovery flow (Game asks the RecoveryController —
+   * UIManager itself never inspects snapshots).
+   */
+  setRecoveryAvailability(availability: boolean[]): void {
+    this.recoveryAvailability = availability.slice(0, RECOVERY_OPTION_COUNT)
+  }
+
+  // ---- Toast notifications ----
+
+  /** Show a transient toast (manual save confirmations, capacity warnings). */
+  notify(message: string, kind: 'info' | 'warn' = 'info'): void {
+    this.toastEl.textContent = message
+    this.toastEl.className = `ui-toast visible ui-toast-${kind}`
+    window.clearTimeout(this.toastTimer)
+    this.toastTimer = window.setTimeout(() => {
+      this.toastEl.classList.remove('visible')
+    }, 2600)
   }
 
   /** Get the footer element */

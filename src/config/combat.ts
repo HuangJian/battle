@@ -18,7 +18,7 @@ import type { CombatProfile, CombatDimension, TankStats } from '../types'
  *  - AI reads the profile to weight its decisions (see `capabilityBias`).
  *
  * All profiles/derived data are immutable shared constants — safe to store by
- * reference on the World (RecoverySystem shallow-clones tanks) and to read from
+ * reference on the World (the snapshot WorldSerializer shallow-clones tanks) and to read from
  * the Simulation / AI without copying.
  */
 
