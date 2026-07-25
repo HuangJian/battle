@@ -37,6 +37,15 @@ export class GameRenderer {
 
   private dpr: number
 
+  // ---- Dev draw-call counter (Performance Observatory, F6 overlay) ----
+  /** Count of drawImage/fill/strokeRect calls in the most recent frame. */
+  debugDrawCalls = 0
+  private _countDraws = false
+  private _origDrawImage: ((...a: any[]) => void) | null = null
+  private _origFillRect: ((...a: any[]) => void) | null = null
+  private _origFill: ((...a: any[]) => void) | null = null
+  private _origStrokeRect: ((...a: any[]) => void) | null = null
+
   // ---- Terrain cache (static: grid + brick/steel/ice/base, NO water) ----
   private terrainCache: CanvasImageSource
   private terrainCacheCtx: CanvasRenderingContext2D
@@ -159,6 +168,52 @@ export class GameRenderer {
 
   setSpriteCache(cache: SpriteCache): void {
     this.artist.setSpriteCache(cache)
+  }
+
+  /**
+   * Arm/disarm a dev-only draw-call counter for the Performance Observatory
+   * (F6) overlay. When on, `drawImage`/`fillRect`/`fill`/`strokeRect` on the
+   * main canvas context are wrapped to increment {@link debugDrawCalls}; when
+   * off the context methods are restored and the counter is reset to 0.
+   *
+   * Gated so it is zero-cost when the overlay is off. `Game` resets
+   * `debugDrawCalls` to 0 at the start of each rendered frame, so the overlay
+   * reads the count for exactly that frame. The counter only tallies draws on
+   * the on-screen context — the offscreen terrain/forest/vignette caches draw
+   * to separate contexts and are intentionally excluded.
+   */
+  setDrawCallCounting(on: boolean): void {
+    if (on === this._countDraws) return
+    const ctx = this.ctx as unknown as Record<string, any>
+    if (on) {
+      this._origDrawImage = (this.ctx.drawImage as any).bind(this.ctx)
+      this._origFillRect = (this.ctx.fillRect as any).bind(this.ctx)
+      this._origFill = (this.ctx.fill as any).bind(this.ctx)
+      this._origStrokeRect = (this.ctx.strokeRect as any).bind(this.ctx)
+      ctx.drawImage = (...a: any[]) => {
+        this.debugDrawCalls++
+        this._origDrawImage!(...a)
+      }
+      ctx.fillRect = (...a: any[]) => {
+        this.debugDrawCalls++
+        this._origFillRect!(...a)
+      }
+      ctx.fill = (...a: any[]) => {
+        this.debugDrawCalls++
+        this._origFill!(...a)
+      }
+      ctx.strokeRect = (...a: any[]) => {
+        this.debugDrawCalls++
+        this._origStrokeRect!(...a)
+      }
+    } else {
+      if (this._origDrawImage) ctx.drawImage = this._origDrawImage
+      if (this._origFillRect) ctx.fillRect = this._origFillRect
+      if (this._origFill) ctx.fill = this._origFill
+      if (this._origStrokeRect) ctx.strokeRect = this._origStrokeRect
+      this.debugDrawCalls = 0
+    }
+    this._countDraws = on
   }
 
   // ================================================================

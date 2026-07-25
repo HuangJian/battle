@@ -35,9 +35,9 @@ function buildIceWorld(seed: number) {
 
 /** Hold a direction key down on the Input (no DOM needed — drive the handler). */
 function press(input: Input, code: string) {
-  ;(input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }).onKeyDown(
-    { code, preventDefault: () => {} },
-  )
+  ;(
+    input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }
+  ).onKeyDown({ code, preventDefault: () => {} })
 }
 function release(input: Input, code: string) {
   ;(input as unknown as { onKeyUp: (e: { code: string }) => void }).onKeyUp({ code })

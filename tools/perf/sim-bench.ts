@@ -187,7 +187,11 @@ function run(label: string, enemies: number, bullets: number): Row {
 rows.push(run('baseline (4 enemies / 6 bullets)', 4, 6))
 for (const b of [10, 30, 60, 120, 240]) rows.push(run(`bullets=${b} (4 enemies)`, 4, b))
 for (const e of [8, 16, 32, 64, 128]) rows.push(run(`enemies=${e} (6 bullets)`, e, 6))
-for (const [e, b] of [[16, 60], [32, 120], [64, 240]] as const)
+for (const [e, b] of [
+  [16, 60],
+  [32, 120],
+  [64, 240],
+] as const)
   rows.push(run(`stress (${e} enemies / ${b} bullets)`, e, b))
 
 // ---------------------------------------------------------------------------
@@ -253,9 +257,14 @@ for (const r of rows) {
   )
 }
 console.log('\n--- slope analysis (added cost per extra entity, p95) ---')
-console.log(`bullet cost @4 enemies : ${bulletSlope !== null ? (bulletSlope * 1000).toFixed(3) + ' µs/bullet' : 'n/a'}`)
-console.log(`tank   cost @6 bullets : ${tankSlope !== null ? (tankSlope * 1000).toFixed(3) + ' µs/tank' : 'n/a'}`)
-if (sustainBullets !== null) console.log(`est. max sustainable bullets @4 enemies (p95<${BUDGET_MS}ms): ~${sustainBullets}`)
+console.log(
+  `bullet cost @4 enemies : ${bulletSlope !== null ? (bulletSlope * 1000).toFixed(3) + ' µs/bullet' : 'n/a'}`,
+)
+console.log(
+  `tank   cost @6 bullets : ${tankSlope !== null ? (tankSlope * 1000).toFixed(3) + ' µs/tank' : 'n/a'}`,
+)
+if (sustainBullets !== null)
+  console.log(`est. max sustainable bullets @4 enemies (p95<${BUDGET_MS}ms): ~${sustainBullets}`)
 else console.log('tick cost is essentially flat in n — no O(n^2) blow-up detected at tested scales')
 
 const anyOver = rows.some((r) => !r.withinBudget)

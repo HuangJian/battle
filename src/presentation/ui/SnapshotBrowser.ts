@@ -151,15 +151,12 @@ export class SnapshotBrowser {
   refresh(): void {
     if (!this.callbacks) return
     const all = this.callbacks.getSnapshots()
-    const snaps =
-      this.filter === 'all' ? all : all.filter((s) => s.type === this.filter)
+    const snaps = this.filter === 'all' ? all : all.filter((s) => s.type === this.filter)
     const total = all.length
     const shown = snaps.length
 
     this.countEl.textContent =
-      this.filter === 'all'
-        ? `${total} snapshot${total === 1 ? '' : 's'}`
-        : `${shown} / ${total}`
+      this.filter === 'all' ? `${total} snapshot${total === 1 ? '' : 's'}` : `${shown} / ${total}`
     this.listEl.textContent = ''
 
     if (shown === 0) {

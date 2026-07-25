@@ -458,7 +458,9 @@ body {
   cursor: pointer;
   padding: 2px 6px;
   border-radius: 6px;
-  transition: color var(--transition), background var(--transition);
+  transition:
+    color var(--transition),
+    background var(--transition);
 }
 
 .menu-stage-arrow:hover {
@@ -504,7 +506,9 @@ body {
   background: var(--theme-button-bg);
   animation: pulse-border 2s ease-in-out infinite;
   cursor: pointer;
-  transition: background var(--transition), transform 0.08s ease;
+  transition:
+    background var(--transition),
+    transform 0.08s ease;
 }
 
 .menu-start-button:hover {
@@ -536,7 +540,9 @@ body {
   border-radius: 8px;
   background: var(--theme-button-active);
   cursor: pointer;
-  transition: background var(--transition), transform 0.08s ease;
+  transition:
+    background var(--transition),
+    transform 0.08s ease;
   animation: pulse-border 2s ease-in-out infinite;
 }
 
@@ -1210,7 +1216,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: border-color var(--transition), box-shadow var(--transition);
+  transition:
+    border-color var(--transition),
+    box-shadow var(--transition);
   position: relative;
   z-index: 1;
 }
@@ -1460,6 +1468,18 @@ body {
   border-color: var(--theme-accent-primary);
 }
 
+.cc-btn.selected {
+  color: var(--theme-text-primary);
+  background: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+}
+
+.cc-btn.selected kbd {
+  color: #0a0c10;
+  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(0, 0, 0, 0.25);
+}
+
 .cc-btn kbd {
   font-family: var(--font-mono);
   font-size: 9px;
@@ -1488,6 +1508,31 @@ body {
   border: 1px solid var(--theme-panel-border);
   border-radius: 3px;
   padding: 1px 4px;
+}
+
+/* DEVELOPER section — Debug Overlay toggle (F6) */
+.cc-perf-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cc-perf-state {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-muted);
+  min-width: 22px;
+  text-align: right;
+}
+
+.cc-perf-state.on {
+  color: #6fdc8c;
+}
+
+.cc-btn.selected .cc-perf-state.on {
+  color: #0a0c10;
 }
 
 .cc-info {
@@ -1539,6 +1584,154 @@ body {
 .ui-toast-warn {
   border-color: var(--theme-danger);
   color: var(--theme-danger);
+}
+
+/* ================================================================
+   Performance Observatory (F6 dev overlay)
+   Fixed top-right, semi-transparent dark panel — never obscures the
+   battle field. Read-only debug HUD; not drawn on the canvas.
+   Width is fixed and every value cell is a fixed-width tabular-nums
+   box, so changing numbers never stretch the panel.
+   ================================================================ */
+.perf-overlay {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 50;
+  width: 268px;
+  padding: 8px 10px;
+  background: rgba(8, 10, 14, 0.82);
+  border: 1px solid rgba(232, 200, 64, 0.3);
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--theme-text-primary);
+  /* pointer-events enabled so the Copy report button is clickable */
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.perf-overlay.breaching {
+  border-color: var(--theme-danger);
+  box-shadow: 0 4px 18px rgba(224, 122, 95, 0.45);
+}
+
+.perf-overlay[hidden] {
+  display: none;
+}
+
+.perf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16px;
+  row-gap: 2px;
+}
+
+.perf-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.perf-l {
+  color: var(--theme-text-muted);
+  letter-spacing: 0.3px;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.perf-v {
+  flex: 0 0 auto;
+  color: var(--theme-accent-primary);
+  font-weight: 700;
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.perf-v.over {
+  color: var(--theme-danger);
+}
+
+.perf-metric[hidden] {
+  display: none;
+}
+
+/* Footer: breach badge + Copy report button */
+.perf-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.perf-breach-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--theme-danger);
+  white-space: nowrap;
+}
+
+.perf-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--theme-accent-primary);
+  background: rgba(232, 200, 64, 0.12);
+  border: 1px solid rgba(232, 200, 64, 0.45);
+  border-radius: 5px;
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    border-color var(--transition);
+}
+
+.perf-copy:hover {
+  background: rgba(232, 200, 64, 0.25);
+  color: #fff;
+}
+
+/* Warning marker shown on Copy report whenever the breach log has entries */
+.perf-copy-icon {
+  color: var(--theme-danger);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.perf-copy-icon[hidden] {
+  display: none;
+}
+
+.perf-copy.has-breaches {
+  color: var(--theme-danger);
+  background: rgba(224, 122, 95, 0.14);
+  border-color: var(--theme-danger);
+}
+
+.perf-copy.has-breaches:hover {
+  background: rgba(224, 122, 95, 0.26);
+  color: #fff;
 }
 
 /* Compact the 5-option recovery menu so it fits the playfield */

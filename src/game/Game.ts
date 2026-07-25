@@ -167,6 +167,7 @@ export class Game {
     ui.controlCenter.init({
       onManualSave: () => this.manualSnapshot(),
       onOpenBrowser: () => this.openSnapshotBrowser(),
+      onTogglePerf: () => ui.togglePerfOverlay(),
       onOpenControls: () => {
         if (this.world.state === 'menu') {
           ui.openControls()
@@ -190,6 +191,9 @@ export class Game {
     // screens. Registered AFTER input.attach so Input.onKeyDown populates the
     // polled `justPressed` set before we read it.
     window.addEventListener('keydown', this.onStaticKey)
+    // Developer Performance Observatory hotkey (F6). Toggle only — never
+    // consumes the key during gameplay (other F-keys are free, F6 is unbound).
+    window.addEventListener('keydown', this.onPerfKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
     // Default-load behaviour: if a manual snapshot exists, surface it as the
@@ -225,6 +229,7 @@ export class Game {
     this.rafId = 0
     document.removeEventListener('visibilitychange', this.onVisibility)
     window.removeEventListener('keydown', this.onStaticKey)
+    window.removeEventListener('keydown', this.onPerfKey)
     this.input.detach(window)
   }
 
@@ -328,6 +333,20 @@ export class Game {
   }
 
   /**
+   * Toggle the developer Performance Observatory (F6). The overlay is a
+   * read-only debug HUD — toggling it only flips a flag and arms/disarms the
+   * renderer's draw-call counter, which is zero-cost while off.
+   */
+  private onPerfKey = (e: KeyboardEvent): void => {
+    if (e.code !== 'F6') return
+    e.preventDefault()
+    const perf = this.presentation.ui.perfOverlay
+    perf.toggle()
+    // Arm/disarm the dev draw-call counter so it adds no overhead when off.
+    this.presentation.renderer.setDrawCallCounting(perf.active)
+  }
+
+  /**
    * Repaint the canvas only if the scene actually changed, sync the HUD,
    * capture any pending snapshot thumbnail, and (re)arm the right loop driver
    * for the current state. Shared by `onStaticKey` and the mouse-driven menu
@@ -357,12 +376,30 @@ export class Game {
     this.lastTime = time
     this.accumulator += dt
 
+    // --- Performance Observatory probes (gated: zero cost when overlay off) ---
+    const perfOverlay = this.presentation.ui.perfOverlay
+    const renderer = this.presentation.renderer
+    const probe = perfOverlay.active
+    let frameT0 = 0
+    let simT0 = 0
+    let simDt = 0
+    let renderT0 = 0
+    let renderDt = 0
+    let uiT0 = 0
+    let uiDt = 0
+    if (probe) {
+      frameT0 = performance.now()
+      // Re-arm the dev draw-call counter (early-returns if already armed).
+      renderer.setDrawCallCounting(true)
+    }
+
     // Handle menu/game state input
     this.handleStateInput()
 
     // Fixed timestep simulation
     let steps = 0
     let enteredGameOver = false
+    if (probe) simT0 = performance.now()
     while (this.accumulator >= TICK_MS && steps < 5) {
       if (
         this.world.state === 'playing' ||
@@ -388,6 +425,7 @@ export class Game {
       this.accumulator -= TICK_MS
       steps++
     }
+    if (probe) simDt = performance.now() - simT0
 
     // Recovery flow update (fade, countdown) — runs while state is 'recovery'
     if (this.world.state === 'recovery') {
@@ -441,13 +479,21 @@ export class Game {
     // and idle lulls, so the fan stays off. Input, simulation, and the HUD
     // still run every frame.
     const wantRender = this.presentation.shouldRender(this.world)
-    const canRender = this.renderFpsCap <= 0 || time - this._lastRenderTime >= 1000 / this.renderFpsCap
+    const canRender =
+      this.renderFpsCap <= 0 || time - this._lastRenderTime >= 1000 / this.renderFpsCap
     let rendered = false
+    if (probe) {
+      renderT0 = performance.now()
+      // Reset the dev draw-call counter; it re-accumulates only if we actually
+      // repaint this frame (on-demand idle frames stay at 0 — accurate).
+      renderer.debugDrawCalls = 0
+    }
     if (wantRender && canRender) {
       this.presentation.render(this.world, dt)
       this._lastRenderTime = time
       rendered = true
     }
+    if (probe) renderDt = performance.now() - renderT0
 
     // Thumbnail capture (plan §8) — only right after a repaint, so the
     // preview always shows the snapshot's own frame, never a stale one.
@@ -462,7 +508,9 @@ export class Game {
 
     // Update the HTML HUD every frame (cheap, internally guarded) so menu/pause
     // overlays stay live even when the canvas repaint is skipped.
+    if (probe) uiT0 = performance.now()
     this.presentation.updateUI(this.world)
+    if (probe) uiDt = performance.now() - uiT0
 
     // Clear per-frame input state
     this.input.endFrame()
@@ -483,6 +531,19 @@ export class Game {
       } else {
         this._slowSeconds = 0
       }
+    }
+
+    // --- Performance Observatory: publish the per-frame sample (overlay only) ---
+    if (probe) {
+      const frameDt = performance.now() - frameT0
+      perfOverlay.update(this.world, renderer, this.presentation.particles, {
+        fps: this.fps,
+        frameMs: frameDt,
+        simMs: simDt,
+        renderMs: renderDt,
+        uiMs: uiDt,
+        perfMode: this.settings.performanceMode,
+      })
     }
 
     this.scheduleFrame()
@@ -669,8 +730,7 @@ export class Game {
   /** Mouse: step the stage selector (dir = -1 prev / +1 next). */
   private menuCycleStage(dir: -1 | 1): void {
     if (this.world.state !== 'menu') return
-    this.world.selectedStage =
-      (this.world.selectedStage + dir + STAGES.length) % STAGES.length
+    this.world.selectedStage = (this.world.selectedStage + dir + STAGES.length) % STAGES.length
     this.world.menuCursor = this.resumeSnapshot ? 3 : 2
     // Swap the battle-field preview to the newly selected stage's layout.
     this.applyMenuPreview()
@@ -773,7 +833,10 @@ export class Game {
       this.audio.playMenuSelect()
     } else {
       const limit = this.snapshots.policyFor('manual').limit
-      ui.notify(`Manual slots full (${limit}/${limit}) — delete old snapshots in the Browser`, 'warn')
+      ui.notify(
+        `Manual slots full (${limit}/${limit}) — delete old snapshots in the Browser`,
+        'warn',
+      )
     }
   }
 

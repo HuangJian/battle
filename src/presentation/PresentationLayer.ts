@@ -1,11 +1,7 @@
 import type { World } from '../game/World'
 import type { GameEvent, EmitterConfig } from '../types'
 import { FIELD, TANK } from '../constants'
-import {
-  THUMBNAIL_WIDTH,
-  THUMBNAIL_HEIGHT,
-  THUMBNAIL_QUALITY,
-} from '../snapshot/config'
+import { THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, THUMBNAIL_QUALITY } from '../snapshot/config'
 import { Camera } from './Camera'
 import { AnimationSystem } from './AnimationSystem'
 import { ParticleSystem } from './ParticleSystem'

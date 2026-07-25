@@ -184,16 +184,24 @@ export class SpriteCache {
     // Soft glow halo — layered translucent rings of the theme glow color
     ctx.fillStyle = theme.bulletGlow
     ctx.globalAlpha = 0.16
-    ctx.beginPath(); ctx.arc(c, c, c, 0, Math.PI * 2); ctx.fill()
+    ctx.beginPath()
+    ctx.arc(c, c, c, 0, Math.PI * 2)
+    ctx.fill()
     ctx.globalAlpha = 0.28
-    ctx.beginPath(); ctx.arc(c, c, c * 0.72, 0, Math.PI * 2); ctx.fill()
+    ctx.beginPath()
+    ctx.arc(c, c, c * 0.72, 0, Math.PI * 2)
+    ctx.fill()
     ctx.globalAlpha = 1
     // Solid core in the theme bullet color
     ctx.fillStyle = theme.bullet
-    ctx.beginPath(); ctx.arc(c, c, size * 0.27, 0, Math.PI * 2); ctx.fill()
+    ctx.beginPath()
+    ctx.arc(c, c, size * 0.27, 0, Math.PI * 2)
+    ctx.fill()
     // Bright tip highlight
     ctx.fillStyle = '#ffffff'
-    ctx.beginPath(); ctx.arc(c, c, size * 0.1, 0, Math.PI * 2); ctx.fill()
+    ctx.beginPath()
+    ctx.arc(c, c, size * 0.1, 0, Math.PI * 2)
+    ctx.fill()
     this.bulletSprite = canvas
   }
 

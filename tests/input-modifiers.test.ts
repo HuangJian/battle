@@ -96,7 +96,12 @@ describe('Input — modifier isolation for non-combat shortcuts', () => {
 
     // Bare R — must NOT trigger reset, must NOT be owned by the game.
     let claimed = false
-    keydown(input, makeEvent('KeyR', {}, () => { claimed = true }))
+    keydown(
+      input,
+      makeEvent('KeyR', {}, () => {
+        claimed = true
+      }),
+    )
     expect(input.isResetPressed()).toBe(false)
     expect(claimed).toBe(false)
     keyup(input, makeEvent('KeyR'))
@@ -104,7 +109,12 @@ describe('Input — modifier isolation for non-combat shortcuts', () => {
 
     // Ctrl+R (browser reload) — must NOT trigger reset, must NOT be claimed.
     claimed = false
-    keydown(input, makeEvent('KeyR', { ctrlKey: true }, () => { claimed = true }))
+    keydown(
+      input,
+      makeEvent('KeyR', { ctrlKey: true }, () => {
+        claimed = true
+      }),
+    )
     expect(input.isResetPressed()).toBe(false)
     expect(claimed).toBe(false)
     keyup(input, makeEvent('KeyR', { ctrlKey: true }))
@@ -112,7 +122,12 @@ describe('Input — modifier isolation for non-combat shortcuts', () => {
 
     // Shift+R — MUST trigger reset and be claimed.
     claimed = false
-    keydown(input, makeEvent('KeyR', { shiftKey: true }, () => { claimed = true }))
+    keydown(
+      input,
+      makeEvent('KeyR', { shiftKey: true }, () => {
+        claimed = true
+      }),
+    )
     expect(input.isResetPressed()).toBe(true)
     expect(claimed).toBe(true)
     keyup(input, makeEvent('KeyR', { shiftKey: true }))
@@ -187,7 +202,12 @@ describe('Input — modifier isolation for non-combat shortcuts', () => {
 
     // Shift+S MUST trigger manual save and be owned by the game.
     let claimed = false
-    keydown(input, makeEvent('KeyS', { shiftKey: true }, () => { claimed = true }))
+    keydown(
+      input,
+      makeEvent('KeyS', { shiftKey: true }, () => {
+        claimed = true
+      }),
+    )
     expect(input.isSnapshotPressed()).toBe(true)
     expect(claimed).toBe(true)
     keyup(input, makeEvent('KeyS', { shiftKey: true }))

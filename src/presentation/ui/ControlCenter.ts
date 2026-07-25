@@ -18,6 +18,8 @@ export interface ControlCenterCallbacks {
   onManualSave: () => void
   onOpenBrowser: () => void
   onOpenControls: () => void
+  /** Toggle the developer Performance Observatory overlay (F6). */
+  onTogglePerf: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
 }
@@ -28,6 +30,8 @@ export class ControlCenter {
   private countLine: HTMLElement
   private gameplayInfo: HTMLElement
   private collapsed = false
+  private perfBtn: HTMLButtonElement | null = null
+  private perfState: HTMLElement | null = null
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
@@ -62,6 +66,13 @@ export class ControlCenter {
           <h3 class="cc-section-title">GAMEPLAY</h3>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
+        <section class="cc-section">
+          <h3 class="cc-section-title">DEVELOPER</h3>
+          <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD">
+            <span>Debug Overlay</span>
+            <span class="cc-perf-meta"><kbd>F6</kbd><span class="cc-perf-state" data-cc="perf-state">OFF</span></span>
+          </button>
+        </section>
         <section class="cc-section cc-reserved">
           <h3 class="cc-section-title">RESERVED</h3>
           <div class="cc-btn cc-btn-disabled"><span>Themes</span><span class="cc-soon">SOON</span></div>
@@ -86,6 +97,10 @@ export class ControlCenter {
     wire('[data-cc="save"]', () => this.callbacks?.onManualSave())
     wire('[data-cc="browser"]', () => this.callbacks?.onOpenBrowser())
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls())
+    wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
+
+    this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
+    this.perfState = this.el.querySelector('[data-cc="perf-state"]')
 
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
@@ -98,6 +113,20 @@ export class ControlCenter {
 
   init(callbacks: ControlCenterCallbacks): void {
     this.callbacks = callbacks
+  }
+
+  /** Reflect the Performance Observatory overlay's on/off state in the
+   *  DEVELOPER panel button (highlighted + ON/OFF label). Keeps the Control
+   *  Center in sync whether the overlay was toggled here or via the F6 key. */
+  setPerfState(on: boolean): void {
+    if (this.perfBtn) {
+      this.perfBtn.classList.toggle('selected', on)
+      this.perfBtn.setAttribute('aria-pressed', String(on))
+    }
+    if (this.perfState) {
+      this.perfState.textContent = on ? 'ON' : 'OFF'
+      this.perfState.classList.toggle('on', on)
+    }
   }
 
   /** Refresh status lines from the World (cheap, change-guarded). */

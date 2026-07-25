@@ -18,20 +18,46 @@ function steelCell(x, y, size, n, e, s, w, t) {
   let k = 0
   for (let b = -size; b <= size; b += s4) {
     const col = k % 2 === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
-    out.push(`<line x1="${x}" y1="${y + b}" x2="${x + size}" y2="${y + size + b}" stroke="${col}" stroke-width="1"/>`)
+    out.push(
+      `<line x1="${x}" y1="${y + b}" x2="${x + size}" y2="${y + size + b}" stroke="${col}" stroke-width="1"/>`,
+    )
     k++
   }
   const bevel = 2
-  if (!n) { out.push(`<rect x="${x}" y="${y}" width="${size}" height="${bevel}" fill="rgba(255,255,255,0.22)"/>`); out.push(`<rect x="${x}" y="${y}" width="${size}" height="1" fill="${t.steelDark}"/>`) }
-  if (!s) out.push(`<rect x="${x}" y="${y + size - bevel}" width="${size}" height="${bevel}" fill="${t.steelDark}"/>`)
-  if (!w) { out.push(`<rect x="${x}" y="${y}" width="${bevel}" height="${size}" fill="rgba(255,255,255,0.22)"/>`); out.push(`<rect x="${x}" y="${y}" width="1" height="${size}" fill="${t.steelDark}"/>`) }
-  if (!e) out.push(`<rect x="${x + size - bevel}" y="${y}" width="${bevel}" height="${size}" fill="${t.steelDark}"/>`)
+  if (!n) {
+    out.push(
+      `<rect x="${x}" y="${y}" width="${size}" height="${bevel}" fill="rgba(255,255,255,0.22)"/>`,
+    )
+    out.push(`<rect x="${x}" y="${y}" width="${size}" height="1" fill="${t.steelDark}"/>`)
+  }
+  if (!s)
+    out.push(
+      `<rect x="${x}" y="${y + size - bevel}" width="${size}" height="${bevel}" fill="${t.steelDark}"/>`,
+    )
+  if (!w) {
+    out.push(
+      `<rect x="${x}" y="${y}" width="${bevel}" height="${size}" fill="rgba(255,255,255,0.22)"/>`,
+    )
+    out.push(`<rect x="${x}" y="${y}" width="1" height="${size}" fill="${t.steelDark}"/>`)
+  }
+  if (!e)
+    out.push(
+      `<rect x="${x + size - bevel}" y="${y}" width="${bevel}" height="${size}" fill="${t.steelDark}"/>`,
+    )
   // hinges straddling internal (steel↔steel) seams
-  const cx = x + size / 2, cy = y + size / 2
+  const cx = x + size / 2,
+    cy = y + size / 2
   const hinge = (ex, ey, vertical) => {
-    const len = size * 0.5, thick = 4
-    if (vertical) out.push(`<rect x="${ex - thick / 2}" y="${ey - len / 2}" width="${thick}" height="${len}" fill="${t.steelDark}"/>`)
-    else out.push(`<rect x="${ex - len / 2}" y="${ey - thick / 2}" width="${len}" height="${thick}" fill="${t.steelDark}"/>`)
+    const len = size * 0.5,
+      thick = 4
+    if (vertical)
+      out.push(
+        `<rect x="${ex - thick / 2}" y="${ey - len / 2}" width="${thick}" height="${len}" fill="${t.steelDark}"/>`,
+      )
+    else
+      out.push(
+        `<rect x="${ex - len / 2}" y="${ey - thick / 2}" width="${len}" height="${thick}" fill="${t.steelDark}"/>`,
+      )
     out.push(`<circle cx="${ex}" cy="${ey}" r="1.4" fill="rgba(255,255,255,0.3)"/>`)
     out.push(`<circle cx="${ex}" cy="${ey}" r="0.8" fill="rgba(0,0,0,0.35)"/>`)
   }
@@ -58,14 +84,28 @@ function iceCell(x, y, size, n, e, s, w) {
   const out = []
   const a = size / 3
   out.push(`<rect x="${x}" y="${y}" width="${size}" height="${size}" fill="#a9e0f5"/>`)
-  out.push(`<path d="M${x} ${y + a} L${x + a * 2} ${y} M${x} ${y + a * 2} L${x + a} ${y + size} M${x + size} ${y + a} L${x + a * 2} ${y + size} M${x + size} ${y + a * 2} L${x + a} ${y}" stroke="rgba(255,255,255,0.45)" stroke-width="1" fill="none"/>`)
+  out.push(
+    `<path d="M${x} ${y + a} L${x + a * 2} ${y} M${x} ${y + a * 2} L${x + a} ${y + size} M${x + size} ${y + a} L${x + a * 2} ${y + size} M${x + size} ${y + a * 2} L${x + a} ${y}" stroke="rgba(255,255,255,0.45)" stroke-width="1" fill="none"/>`,
+  )
   const f = 2
-  if (!n) out.push(`<rect x="${x}" y="${y}" width="${size}" height="${f}" fill="rgba(255,255,255,0.4)"/>`)
-  if (!s) out.push(`<rect x="${x}" y="${y + size - f}" width="${size}" height="${f}" fill="rgba(255,255,255,0.4)"/>`)
-  if (!w) out.push(`<rect x="${x}" y="${y}" width="${f}" height="${size}" fill="rgba(255,255,255,0.4)"/>`)
-  if (!e) out.push(`<rect x="${x + size - f}" y="${y}" width="${f}" height="${size}" fill="rgba(255,255,255,0.4)"/>`)
-  out.push(`<rect x="${x + size * 0.22}" y="${y + size * 0.28}" width="1" height="1" fill="rgba(255,255,255,0.7)"/>`)
-  out.push(`<rect x="${x + size * 0.72}" y="${y + size * 0.62}" width="1" height="1" fill="rgba(255,255,255,0.7)"/>`)
+  if (!n)
+    out.push(`<rect x="${x}" y="${y}" width="${size}" height="${f}" fill="rgba(255,255,255,0.4)"/>`)
+  if (!s)
+    out.push(
+      `<rect x="${x}" y="${y + size - f}" width="${size}" height="${f}" fill="rgba(255,255,255,0.4)"/>`,
+    )
+  if (!w)
+    out.push(`<rect x="${x}" y="${y}" width="${f}" height="${size}" fill="rgba(255,255,255,0.4)"/>`)
+  if (!e)
+    out.push(
+      `<rect x="${x + size - f}" y="${y}" width="${f}" height="${size}" fill="rgba(255,255,255,0.4)"/>`,
+    )
+  out.push(
+    `<rect x="${x + size * 0.22}" y="${y + size * 0.28}" width="1" height="1" fill="rgba(255,255,255,0.7)"/>`,
+  )
+  out.push(
+    `<rect x="${x + size * 0.72}" y="${y + size * 0.62}" width="1" height="1" fill="rgba(255,255,255,0.7)"/>`,
+  )
   return out.join('\n')
 }
 
@@ -75,25 +115,24 @@ const steelMask = (c, r) => c >= 0 && c < 5 && r >= 0 && r < 4
 const iceMask = (c, r) => c >= 0 && c < 4 && r >= 0 && r < 4
 const inb = (c, r, fn) => c >= 0 && fn(c, r)
 function mask(c, r, fn) {
-  return [
-    inb(c, r - 1, fn),
-    inb(c + 1, r, fn),
-    inb(c, r + 1, fn),
-    inb(c - 1, r, fn),
-  ]
+  return [inb(c, r - 1, fn), inb(c + 1, r, fn), inb(c, r + 1, fn), inb(c - 1, r, fn)]
 }
 
-let ox = 20, oy = 30
-for (let r = 0; r < 4; r++) for (let c = 0; c < 5; c++) {
-  const [nn, ne, ns, nw] = mask(c, r, steelMask)
-  parts.push(steelCell(ox + c * CELL, oy + r * CELL, CELL, nn, ne, ns, nw, modern))
-}
+let ox = 20,
+  oy = 30
+for (let r = 0; r < 4; r++)
+  for (let c = 0; c < 5; c++) {
+    const [nn, ne, ns, nw] = mask(c, r, steelMask)
+    parts.push(steelCell(ox + c * CELL, oy + r * CELL, CELL, nn, ne, ns, nw, modern))
+  }
 
-ox = 20; oy = 30 + 4 * CELL + 30
-for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
-  const [nn, ne, ns, nw] = mask(c, r, iceMask)
-  parts.push(iceCell(ox + c * CELL, oy + r * CELL, CELL, nn, ne, ns, nw))
-}
+ox = 20
+oy = 30 + 4 * CELL + 30
+for (let r = 0; r < 4; r++)
+  for (let c = 0; c < 4; c++) {
+    const [nn, ne, ns, nw] = mask(c, r, iceMask)
+    parts.push(iceCell(ox + c * CELL, oy + r * CELL, CELL, nn, ne, ns, nw))
+  }
 
 // isolated single tiles on the right
 ox = 20 + 6 * CELL + 40

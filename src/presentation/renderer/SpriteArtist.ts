@@ -175,15 +175,7 @@ export class SpriteArtist {
    * interior is a seamless fill, hinges strap every internal steel-steel seam
    * together, and obvious rivets pin the four outer corners.
    */
-  drawSteel(
-    x: number,
-    y: number,
-    size: number,
-    n = false,
-    e = false,
-    s = false,
-    w = false,
-  ): void {
+  drawSteel(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
     const t = this.theme
     const ctx = this.ctx
     const s4 = size / 4
@@ -336,15 +328,7 @@ export class SpriteArtist {
    * whole patch shares one continuous network instead of per-tile snowflakes),
    * and a frost rim only around the perimeter.
    */
-  drawIce(
-    x: number,
-    y: number,
-    size: number,
-    n = false,
-    e = false,
-    s = false,
-    w = false,
-  ): void {
+  drawIce(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
     const t = this.theme
     const ctx = this.ctx
     const a = size / 3

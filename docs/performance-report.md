@@ -159,3 +159,17 @@ Combined with §4 (0-loop idle), the fan should stay off on menu/pause **and** r
 - **WebGPU:** deliberately **not** used — Canvas 2D is correct for this game and for old iGPU targets; WebGPU would break compatibility with exactly the machines you care about.
 - **Reusable test suite:** DELIVERED (headless CI gate + browser harness).
 - **Scalability:** Simulation scales flat to 64 enemies / 240 bullets with no O(n²) blow-up — comfortably beyond the game's design caps.
+
+---
+
+## 9. Live Debug Path — Performance Observatory (F6 overlay)
+
+**Files:** `src/presentation/ui/PerfOverlay.ts`, wired via `UIManager.perfOverlay` + `Game.loop()` + `GameRenderer.setDrawCallCounting`.
+
+**What it is:** a developer-only, read-only HTML debug HUD (top-left, semi-transparent) that surfaces what the engine already computes, plus a few cheap per-frame counters. Toggle it with **`F6`** (session-only, not persisted). It is *not* drawn on the game canvas — it's pure HTML/CSS per AGENTS §2.5.
+
+**Metrics shown:** `FPS`, `Frame`, `Sim`, `Render`, `UI`, `Idle`, `Draw calls`, `Sprites`, `Bullets`, `Tanks`, `Particles`, `GC` (best-effort; `n/a` where unsupported), `Quality` (always `High`), `PerfMode` (ON/OFF). Timing values are rolling **p95 over ~120 frames**; `Idle = Frame − Sim − Render − UI` (clamped at 0).
+
+**Zero-cost when off:** every timing probe and the dev draw-call counter are gated on `overlay.active`. With the overlay off, `Game.loop()` runs no `performance.now()` calls and the renderer's draw methods are never wrapped — verified by `bun run check` + the `perf.html` harness. The one new probe is the `Frame` delta (a thin `performance.now()` wrap around the loop body), also gated.
+
+**When to use it:** press `F6` during play (or run `perf.html` → Stress) to watch CPU time split between Sim/Render/UI and confirm `Draw calls` / `Sprites` stay bounded. This is the lightweight, always-available alternative to `perf.html` for catching frame-time regressions early. The larger `Adaptive-Performance-Framework` (adaptive quality levels, `PerformanceManager` API, render CI) was deliberately **deferred** (see `plan/Performance-Observatory.md` §5) — none of it is built until the Observatory shows a sustained frame-time problem on the slowest target hardware.

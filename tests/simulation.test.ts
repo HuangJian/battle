@@ -398,9 +398,9 @@ describe('Fire rate is fixed per type and independent of hit outcomes', () => {
     }
 
     // Hold fire (drive Input's keydown handler directly — no DOM needed).
-    ;(input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }).onKeyDown(
-      { code: input.keys.fire, preventDefault: () => {} },
-    )
+    ;(
+      input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }
+    ).onKeyDown({ code: input.keys.fire, preventDefault: () => {} })
 
     const fireTicks: number[] = []
     const TOTAL = 4 * 60 // 4 seconds

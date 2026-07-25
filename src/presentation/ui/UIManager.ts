@@ -6,6 +6,7 @@ import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
 import { SnapshotBrowser } from './SnapshotBrowser'
 import { ControlCenter } from './ControlCenter'
+import { PerfOverlay } from './PerfOverlay'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
 
 /**
@@ -66,6 +67,9 @@ export class UIManager {
   readonly controlCenter: ControlCenter
   private toastEl: HTMLElement
   private toastTimer = 0
+
+  // ---- Performance Observatory (F6 dev overlay) ----
+  readonly perfOverlay: PerfOverlay
 
   // ---- Controls / key-bindings panel ----
   private controlsScreen: HTMLElement
@@ -274,6 +278,11 @@ export class UIManager {
       <span>Shift+T</span> Theme &nbsp;·&nbsp;
       <span>Shift+S</span> Save
     `
+
+    // Performance Observatory (F6) — fixed-position dev overlay (read-only).
+    this.perfOverlay = new PerfOverlay()
+    this.perfOverlay.onCopied = () => this.notify('Performance report copied', 'info')
+    this.root.appendChild(this.perfOverlay.el)
 
     // Assemble
     this.root.appendChild(this.hudBar)
@@ -687,6 +696,13 @@ export class UIManager {
     if (this.hudPauseHint) {
       this.hudPauseHint.textContent = `← → Perf: ${on ? 'ON' : 'OFF'} · P Resume`
     }
+  }
+
+  /** Toggle the developer Performance Observatory overlay (F6 hotkey / Control
+   *  Center button). Keeps the Control Center's DEVELOPER button in sync. */
+  togglePerfOverlay(): void {
+    this.perfOverlay.toggle()
+    this.controlCenter.setPerfState(this.perfOverlay.active)
   }
 
   private updateMenu(world: World): void {

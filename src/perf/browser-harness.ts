@@ -80,8 +80,7 @@ function spawnStress(enemies: number, bullets: number): void {
   if (!game) return
   const w = game.world
   const spots: Array<[number, number]> = []
-  for (let r = 0; r < 26; r += 2)
-    for (let c = 0; c < 13; c += 2) spots.push([c * CELL, r * CELL])
+  for (let r = 0; r < 26; r += 2) for (let c = 0; c < 13; c += 2) spots.push([c * CELL, r * CELL])
   for (let i = 0; i < enemies; i++) {
     const [x, y] = spots[i % spots.length]
     const t = w.createTank(ENEMY_KINDS[i % ENEMY_KINDS.length], x, y, 'down')
@@ -177,7 +176,7 @@ function report(): void {
   const frameP95 = pct(s, 95)
   const frameP99 = pct(s, 99)
   const slowFrames = frameSamples.filter((d) => d > 16.67).length
-  const busyPct = frameSamples.reduce((a, b) => a + b, 0) / Math.max(1, frameSamples.length) * fps
+  const busyPct = (frameSamples.reduce((a, b) => a + b, 0) / Math.max(1, frameSamples.length)) * fps
 
   const r: Report = {
     state,
@@ -194,18 +193,18 @@ function report(): void {
   if (history.length > 60) history.shift()
 
   // keep only the last second of frame samples for the rolling window
-  if (frameSamples.length > fps && fps > 0) frameSamples.splice(0, frameSamples.length - Math.min(MAX_SAMPLES, fps))
+  if (frameSamples.length > fps && fps > 0)
+    frameSamples.splice(0, frameSamples.length - Math.min(MAX_SAMPLES, fps))
 
   const overBudget = frameP95 >= 16.67
   const held60 = fps >= 58 && !overBudget
-  const verdict =
-    LOW_POWER.has(state)
-      ? `IDLE — 0-loop idle, ~${busyPct.toFixed(1)}% busy (fan should be off)`
-      : held60
-        ? `OK — 60 FPS held, frame p95 ${frameP95.toFixed(2)}ms`
-        : overBudget
-          ? `WARN — ${fps} FPS, frame p95 ${frameP95.toFixed(2)}ms OVER 16.67ms budget`
-          : `WARN — ${fps} FPS, frame p95 ${frameP95.toFixed(2)}ms (loop not armed? re-run scenario)`
+  const verdict = LOW_POWER.has(state)
+    ? `IDLE — 0-loop idle, ~${busyPct.toFixed(1)}% busy (fan should be off)`
+    : held60
+      ? `OK — 60 FPS held, frame p95 ${frameP95.toFixed(2)}ms`
+      : overBudget
+        ? `WARN — ${fps} FPS, frame p95 ${frameP95.toFixed(2)}ms OVER 16.67ms budget`
+        : `WARN — ${fps} FPS, frame p95 ${frameP95.toFixed(2)}ms (loop not armed? re-run scenario)`
 
   const el = document.getElementById('readout')!
   el.textContent =
