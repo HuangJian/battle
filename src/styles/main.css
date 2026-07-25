@@ -170,8 +170,9 @@ body {
   box-shadow: 0 0 6px var(--theme-accent-primary);
 }
 .hud-pause-hint {
-  font-size: 8px;
-  letter-spacing: 1px;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
   color: var(--theme-text-muted);
 }
 

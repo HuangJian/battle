@@ -1,7 +1,7 @@
 # Battle City Web — Performance Analysis & Tuning Report
 
 **Date:** 2026-07-25
-**Goal:** Hold 60 FPS while minimizing CPU usage and energy draw (keep the fan off).
+**Goal:** Hold 60 FPS while minimizing CPU usage and energy draw (keep the fan off), **including on old integrated GPUs** (Intel Iris Pro, and potentially even older machines later).
 **Expert:** Performance Benchmarker (systematic, reusable stress-test + tuning)
 
 ---
@@ -15,6 +15,8 @@
 | Browser FPS/energy harness | `perf.html` + `src/perf/browser-harness.ts` | Real 60 FPS / frame-time / long-task measurement in your browser | `bun run dev` → open `/perf.html` |
 
 The headless bench reseeds the RNG, so baselines are **reproducible**. The browser harness drives the *real* game and reports loop FPS, per-frame cost (p50/p95/p99), slow frames, and long-tasks — the only true signal for the "fan off" goal.
+
+> **Note on what the harness can't see:** it measures CPU busy-time + frame timing, *not* GPU watts. The real fan-off validation is "fan silent + still 60 FPS" on your hardware — the harness narrows it down but can't quantify the wattage.
 
 ---
 
@@ -49,19 +51,28 @@ Budget gate: tick `p95 < 6.0 ms` (leaves ~10.7 ms of the 16.67 ms frame for rend
 
 ---
 
-## 3. Bottleneck Analysis — where the CPU actually goes
+## 3. Bottleneck Analysis — where the CPU/GPU actually goes
 
 **The simulation is NOT the bottleneck.** At every realistic and stress scale the tick costs sub-microsecond medians and stays far under the 6 ms budget. The collision loops (bullet↔tank, bullet↔bullet, tank↔tank) and the per-tank AI `perceive()` are already cheap enough that an O(n²) spatial-grid rewrite would show **no measurable benefit** at the entity counts this game reaches (capped at 4 simultaneous enemies by design; bullets are few). Optimizing the sim further is low-value and adds risk — we explicitly recommend against it.
 
-**The real CPU/energy lever is the render + idle main-thread path**, which the headless bench cannot see:
-- The game already had two strong savers: **(a)** pause the loop when the tab is hidden, and **(b)** on-demand render gating that skips the canvas repaint when the scene is unchanged (GPU goes idle on menu/pause/game-over).
-- But the **full `requestAnimationFrame` loop still ran at ~60 FPS on those static screens**, keeping the main thread awake 60×/sec for no visual benefit. Even a later 10 FPS compromise still woke the thread 10×/sec. That is exactly what prevents deep CPU idle and keeps a laptop fan spinning.
+**The real CPU lever is the render + idle main-thread path** (see §4–§5). The headless bench cannot see this, but it is the part that keeps the fan spinning during *static* screens.
+
+**The real GPU lever — and the cause of the fan on your Iris Pro — is pixel fill-rate, not WebGPU.**
+- The renderer is plain **Canvas 2D** (`getContext('2d', { alpha:false, desynchronized:true })`). There is no WebGPU layer in this game.
+- It is already well-built: terrain, forest, and vignette are pre-baked into **offscreen canvases** and blitted with a single `drawImage` each frame; **no** `shadowBlur`, `.filter()`, expensive `globalCompositeOperation`, or per-frame gradients; particles are batched; the on-demand render gate skips repaints on unchanged screens.
+- So the cost is simply **rasterizing + compositing the canvas backing store 60×/sec**. On a Retina display the backing store is `FIELD × dpr = 416 × 2 = 832×832` (~692k pixels), and on an old shared-memory iGPU (Iris Pro) just pushing that layer through an ancient driver is enough to clock the GPU up → fan spins.
+- **WebGPU is the wrong direction here**, for three concrete reasons:
+  1. Iris Pro (2013–2015) and older iGPUs have poor/no WebGPU support — Safari/Firefox on those machines won't run it, so your "must run on even older machines later" goal would **fail outright**.
+  2. A 416×416 game can't exploit WebGPU's strengths (vertex/compute throughput). The cost is 2D fill rate, which WebGPU won't magically fix on a weak driver — it may even regress.
+  3. A Canvas 2D → WebGPU rewrite is a large, risky architecture change that violates the project's "keep it simple / presentation is disposable" principle, for zero benefit on the target hardware.
+
+**The fix is to cut fill-rate, not to change the rendering API.** Lower the backing-store pixel count and the GPU traffic + Skia raster work drop together — and a nearest-neighbor upscale happens to look *more* retro/crisp, which is on-brand.
 
 ---
 
 ## 4. Optimization Applied — True 0-Loop Idle (event-driven)
 
-**File:** `src/game/Game.ts` (`scheduleFrame()`, `onStaticKey`, `refreshStaticScreen`, `LOW_POWER_STATES`).
+**File:** `src/game/Game.ts` (`scheduleFrame()`, `onStaticKey`, `refreshStaticScreen`).
 
 For the static states `menu`, `paused`, `gameover`, `victory` the loop now runs **zero times** — the main thread goes fully to sleep. Input on those screens is handled **event-driven**: a single `keydown` listener (`onStaticKey`) fires the instant a key is pressed, reusing the exact same `handleStateInput()` code path the rAF loop uses for action states. It processes the key, clears the per-frame input edges, repaints *only if the visible scene actually changed* (via the on-demand `shouldRender` gate), and returns — no `requestAnimationFrame`, no `setTimeout`, no periodic wake-ups.
 
@@ -75,45 +86,76 @@ Mouse-driven menu actions (already event-driven) were wired through the same `re
 |---|---|---|---|
 | Menu / Pause / Game-Over / Victory | 60 loop iters/s (rAF) | **0 loop iters/s** (event-driven) | **100% — main thread fully asleep** |
 
-Combined with the pre-existing on-demand render gate (no canvas repaint on static screens) and tab-hidden pause, the idle energy profile is now: tab backgrounded → loop fully stopped; static foreground screen → loop fully stopped (only a one-shot repaint per key/click), GPU idle. This is the change most likely to keep the fan off.
-
-**Safety / regression checks:** typecheck clean, oxlint clean, **121/121 unit tests pass**, production build succeeds, and the sim bench is unchanged (no behavior change to gameplay — the sim was never touched). Key transitions verified: menu→play, pause↔play, gameover/victory→menu, and snapshot load from the browser all re-arm the loop correctly.
+Combined with the pre-existing on-demand render gate (no canvas repaint on static screens) and tab-hidden pause, the idle energy profile is now: tab backgrounded → loop fully stopped; static foreground screen → loop fully stopped (only a one-shot repaint per key/click), GPU idle. This is the change most likely to keep the fan off during menu/pause.
 
 ---
 
-## 5. Performance ROI
+## 5. Optimization Applied — Performance Mode (GPU fill-rate)
 
-- **Fan-off probability:** highest on menu/pause/idle (the screens users stare at between rounds). 100% cut in idle main-thread iterations — the thread is fully asleep on static screens.
-- **60 FPS during play:** preserved exactly — gameplay path is untouched.
-- **Risk:** near-zero (scheduler-only change; no gameplay/architecture invariants altered).
+**Files:** `src/game/Game.ts`, `src/presentation/PresentationLayer.ts`, `src/presentation/renderer/GameRenderer.ts`, `src/presentation/ui/UIManager.ts`, `src/types.ts`, `src/constants.ts`.
+
+A persisted **Performance Mode** toggle that attacks the GPU fill-rate bottleneck directly. **Default OFF (Quality Mode)** — crisp Retina rendering out of the box; flip it on when the fan spins or on older hardware.
+
+What it does when ON:
+- **DPR cap = 1** (instead of `min(devicePixelRatio, 2)`). On Retina this cuts the backing store from 832×832 to 416×416 — **exactly 4× fewer pixels to rasterize + composite every frame**.
+- **Render-FPS cap = 30** (`PERF_MODE_RENDER_FPS`) via the existing on-demand gate. Halves the number of full canvas repaints per second during play (vs 60). *Only the repaint is throttled — input polling + the fixed-timestep sim still run at 60, so controls stay responsive.*
+- **`image-rendering: pixelated`** on the canvas so the browser upscales the 416×416 backing to screen with nearest-neighbor — looks crisper and more retro, perfectly on-brand for Battle City, and costs the GPU nothing.
+- Rebuilds the `SpriteCache` + offscreen terrain/forest/vignette caches at the new resolution at toggle time (`applyPerformanceMode` → `GameRenderer.setDpr`), so sprites stay sharp at the lower scale. Window resize keeps the chosen DPR (resize only changes the CSS display size, never the backing store).
+
+When OFF (Quality Mode): full DPR (capped at 2×) + uncapped 60 FPS render + smooth (`auto`) upscaling — for Retina users who want maximum crispness.
+
+**Where to toggle:**
+- **Main menu:** a `PERFORMANCE` row (ON/OFF) wired through the same keyboard (`←/→`) and mouse (`click ON/OFF`) paths as difficulty/theme/stage.
+- **During gameplay (pause):** press `P` to pause, then `←/→` flips Performance ↔ Quality **without quitting to the menu**. The current mode is shown live on the HUD pause pill (`← → Perf: ON/OFF · P Resume`) and a toast confirms the switch. The change is persisted to `bc_settings`.
+- Either path routes through the same `Game.setPerformanceMode(on)` → `PresentationLayer.applyPerformanceMode` (rebuilds SpriteCache + offscreen caches at the new DPR) so the switch is instant and identical.
+
+**Quantified impact (GPU fill-rate, Retina display):**
+
+| Metric | Quality (OFF) | Performance (ON) | Reduction |
+|---|---|---|---|
+| Backing-store pixels | 832×832 ≈ 692k | 416×416 ≈ 173k | **4× fewer** |
+| Repaints/sec during play | 60 | 30 | **2× fewer** |
+| **Effective GPU fill-rate/sec** | 1× | **~1/8×** | **~87% cut** |
+
+Combined with §4 (0-loop idle), the fan should stay off on menu/pause **and** run dramatically cooler during play on your Iris Pro.
+
+> **Trade-off:** in Performance Mode, fast motion repaints at 30 FPS instead of 60, so it's marginally less smooth. For a tank game on a weak GPU this is the right exchange, and it's one click to disable.
+
+---
+
+## 6. Performance ROI
+
+- **Fan-off probability:** highest on menu/pause/idle (100% cut in idle main-thread iterations — §4), and now *also* much cooler during play thanks to the ~87% GPU fill-rate cut (§5).
+- **60 FPS during play:** preserved as the *simulation + input* rate; the only reduction is the repaint rate in Performance Mode (30), by design.
+- **Risk:** low — DPR/scale plumbing already existed; the new code is additive (a settings flag + a cache-rebuild path). No gameplay/architecture invariants altered.
 - **Reusability:** the headless bench is a CI gate (`bun run perf:sim`, exit 1 on budget breach); the browser harness gives the team a permanent, repeatable 60 FPS / energy check on real hardware.
 
 ---
 
-## 6. Recommendations
+## 7. Recommendations
 
 **High-priority (do now)**
-- Run `bun run dev` → open `/perf.html` and confirm on your machine: menu/pause idle shows **0 loop FPS** with near-0% busy (the `loop` callback should not fire at all — that is the *good* 0-loop idle signal), and Active/Stress show 60 FPS with frame p95 < 16.67 ms. Export the JSON for the record.
+- Run `bun run dev` → open `/perf.html` and confirm on your machine: menu/pause idle shows **0 loop FPS** with near-0% busy (the *good* 0-loop idle signal), and Active/Stress show the loop at 60 FPS with frame p95 < 16.67 ms. Export the JSON for the record. If the fan spins on your Iris Pro, flip **Performance Mode ON** (menu `PERFORMANCE` row, or pause + `←/→` mid-game).
 
 **Reading the harness verdict (important)**
 - **Idle (menu/paused/gameover/victory) reading `0 FPS` is correct and expected.** The loop is event-driven and sleeps; `fan should be off` is the success state, not a failure.
 - A `WARN` only means something is wrong when it says `OVER 16.67ms budget` (frame p95 genuinely exceeded) **or** appears during an *action* state with low FPS. The earlier `WARN — 0 FPS … (over 16.67ms budget)` text was a **harness artifact**: it fired on any `fps < 58` regardless of frame cost, and the harness was not re-arming the loop after `world.startGame()`, so action scenarios reported `0 FPS` with only the boot-render sample (~0.40 ms) — meaningless data.
 - Both defects are fixed: the harness now calls `game.requestFrame()` after switching to an action state (so the loop actually runs and `fps` is real), the idle label reads `0-loop idle`, and `OVER 16.67ms budget` only prints when frame p95 truly exceeds 16.67 ms. Re-run `/perf.html` after the fix to get valid numbers. The `longTasks: 2` seen at boot are one-time asset/snapshot hydration (sprite pre-rasterization + IndexedDB) — not steady-state.
-- Wire `bun run perf:sim` into CI so a future O(n²) regression in the sim is caught automatically.
 
-**Medium-priority (optional, only if you want a battery mode)**
-- Expose `MAX_RENDER_FPS` as a user setting (e.g., a "Battery / Low-power" toggle that sets it to 30 during action). Halves GPU load during play at the cost of motion smoothness. Not on by default — 60 FPS is the product goal.
+**Medium-priority (optional)**
+- Wire `bun run perf:sim` into CI so a future O(n²) regression in the sim is caught automatically.
 - If the battlefield or entity caps ever grow dramatically (e.g., 50+ simultaneous enemies), revisit a uniform spatial grid — but only then; today it is unnecessary.
 
 **Long-term (monitoring)**
 - Keep the headless bench as the regression gate; tune the `--budget` (default 6 ms) as the project evolves.
-- Use the browser harness's JSON export as a periodic benchmark snapshot (e.g., per release) to track frame-cost trends on real devices.
+- Use the browser harness's JSON export as a periodic benchmark snapshot (e.g., per release) to track frame-cost trends on real devices, especially old-iGPU machines.
 
 ---
 
-## 7. Status
+## 8. Status
 
-- **SLA (60 FPS):** MET for gameplay (sim is sub-ms; render is cached blits; loop untouched on action states).
-- **Energy / fan-off:** ADDRESSED via adaptive low-power cadence + pre-existing idle savers. Validate with the browser harness on real hardware.
+- **SLA (60 FPS sim/input):** MET for gameplay (sim is sub-ms; render is cached blits; loop untouched on action states).
+- **GPU / fan-off:** ADDRESSED via (a) Performance Mode — DPR cap 1 + 30 FPS render cap + pixelated upscale, **default OFF (Quality)** but one flip to ON (~87% GPU fill-rate cut on Retina), switchable from the menu *or* live while paused, and (b) pre-existing idle savers + 0-loop idle. Validate with the browser harness on real hardware (fan silent + playable).
+- **WebGPU:** deliberately **not** used — Canvas 2D is correct for this game and for old iGPU targets; WebGPU would break compatibility with exactly the machines you care about.
 - **Reusable test suite:** DELIVERED (headless CI gate + browser harness).
 - **Scalability:** Simulation scales flat to 64 enemies / 240 bullets with no O(n²) blow-up — comfortably beyond the game's design caps.

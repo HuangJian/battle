@@ -32,7 +32,9 @@ export const TICK_MS = 1000 / 60
  * On-demand skip (PresentationLayer.shouldRender) already eliminates repaints
  * during idle/menu/pause regardless of this value.
  */
-export const MAX_RENDER_FPS = 0
+/** Render FPS cap applied while Performance Mode is ON (cuts GPU load ~half).
+ *  0 would mean uncapped; the game uses this value only in perf mode. */
+export const PERF_MODE_RENDER_FPS = 30
 
 /** Max enemies alive at once */
 export const MAX_ENEMIES_ALIVE = 4

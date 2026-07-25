@@ -47,7 +47,7 @@ export class PresentationLayer {
   private _lastRecoveryCursor = -1
   private _lastRecoveryCountdown = -1
 
-  constructor(root: HTMLElement) {
+  constructor(root: HTMLElement, performanceMode = false) {
     this.camera = new Camera()
     this.animations = new AnimationSystem()
     this.particles = new ParticleSystem()
@@ -56,7 +56,9 @@ export class PresentationLayer {
     // Create UI first — it creates the canvas
     this.ui = new UIManager(root)
 
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2) // cap at 2x for performance
+    // DPR cap: Performance Mode pins the render scale at 1 (the browser
+    // upscales with `image-rendering: pixelated`); otherwise cap at 2×.
+    this.dpr = performanceMode ? 1 : Math.min(window.devicePixelRatio || 1, 2)
 
     this.spriteCache = new SpriteCache(this.dpr)
 
@@ -79,6 +81,27 @@ export class PresentationLayer {
     // Re-run once layout has settled (fonts / stylesheet) so the first frame
     // is already correctly sized rather than flashing the CSS fallback size.
     requestAnimationFrame(() => this.resizeCanvas())
+  }
+
+  /**
+   * Apply Performance Mode at runtime. When ON: cap render DPR at 1 and let the
+   * browser upscale the canvas with `image-rendering: pixelated` (nearest
+   * neighbor — looks more retro AND cuts GPU fill-rate ~4× on Retina). When OFF:
+   * restore DPR (capped at 2×). Rebuilds the sprite cache + renderer backing
+   * store at the new resolution and forces a repaint. Safe to call any time; if
+   * the target DPR is unchanged it only flips the CSS upscale flag.
+   */
+  applyPerformanceMode(on: boolean): void {
+    const newDpr = on ? 1 : Math.min(window.devicePixelRatio || 1, 2)
+    this.ui.canvas.style.imageRendering = on ? 'pixelated' : 'auto'
+    if (newDpr !== this.dpr) {
+      this.spriteCache = new SpriteCache(newDpr)
+      this.spriteCache.build(spriteLibrary)
+      this.renderer.artist.setSpriteCache(this.spriteCache)
+      this.renderer.setDpr(newDpr)
+      this.dpr = newDpr
+    }
+    this.markNeedsRender()
   }
 
   /** Handle window resize/orientationchange, throttled to one rAF per burst. */

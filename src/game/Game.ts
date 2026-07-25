@@ -14,7 +14,7 @@ import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { STAGES } from '../config/stages'
-import { TICK_MS, MAX_RENDER_FPS } from '../constants'
+import { TICK_MS, PERF_MODE_RENDER_FPS } from '../constants'
 import type { GameSettings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
 
@@ -64,8 +64,10 @@ export class Game {
   private running = false
   private rafId = 0
   private prevStageIndex = -1
-  /** Timestamp of the last canvas repaint (for MAX_RENDER_FPS throttle). */
+  /** Timestamp of the last canvas repaint (for the render-FPS throttle). */
   private _lastRenderTime = 0
+  /** Render FPS cap (0 = uncapped). Driven by Performance Mode. */
+  private renderFpsCap = 0
   /** True while the tab is hidden (loop paused by visibilitychange). */
   private _hidden = false
   private prevRecoveryPhase = 'idle'
@@ -88,7 +90,7 @@ export class Game {
     this.world = new World()
     this.input = new Input(this.settings.keys)
     this.simulation = new Simulation(this.world, this.input)
-    this.presentation = new PresentationLayer(root)
+    this.presentation = new PresentationLayer(root, this.settings.performanceMode)
     // Wire the live key-bindings object + persistence into the controls panel.
     this.presentation.ui.initControls(this.settings.keys, () => this.saveSettings())
 
@@ -100,12 +102,20 @@ export class Game {
       cycleStage: (dir) => this.menuCycleStage(dir),
       start: () => this.menuStart(),
       resume: () => this.menuResume(),
+      togglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       openControls: () => {
         if (this.world.state === 'menu') {
           this.presentation.ui.openControls()
         }
       },
     })
+
+    // Reflect the persisted Performance Mode in the UI (DPR is already applied
+    // via the PresentationLayer constructor; here we set the render-FPS cap
+    // and the menu's ON/OFF highlight).
+    this.renderFpsCap = this.settings.performanceMode ? PERF_MODE_RENDER_FPS : 0
+    this.presentation.ui.setPerformanceMode(this.settings.performanceMode)
+
     this.audio = new AudioManager()
 
     // Snapshot Management Framework (plan/Snapshot-Management-Framework.md)
@@ -424,11 +434,14 @@ export class Game {
 
     // Render — on-demand energy saver. The full canvas repaint is skipped
     // unless the visible scene changed (PresentationLayer.shouldRender) and the
-    // MAX_RENDER_FPS throttle allows it. This keeps the GPU idle — instead of
-    // repainting 60×/sec — during menu, pause, game-over, and idle lulls, so
-    // the fan stays off. Input, simulation, and the HUD still run every frame.
+    // renderFpsCap throttle allows it (0 = uncapped). When Performance Mode is
+    // on, renderFpsCap = PERF_MODE_RENDER_FPS (30), halving GPU traffic again;
+    // when off, it is 0 and gameplay renders at full vsync rate. This keeps the
+    // GPU idle — instead of repainting 60×/sec — during menu, pause, game-over,
+    // and idle lulls, so the fan stays off. Input, simulation, and the HUD
+    // still run every frame.
     const wantRender = this.presentation.shouldRender(this.world)
-    const canRender = MAX_RENDER_FPS <= 0 || time - this._lastRenderTime >= 1000 / MAX_RENDER_FPS
+    const canRender = this.renderFpsCap <= 0 || time - this._lastRenderTime >= 1000 / this.renderFpsCap
     let rendered = false
     if (wantRender && canRender) {
       this.presentation.render(this.world, dt)
@@ -500,7 +513,7 @@ export class Game {
 
       // Row count grows by one when a resumable manual snapshot is offered
       // (the RESUME row sits at index 0, pushing the config rows down).
-      const rowCount = this.resumeSnapshot ? 4 : 3
+      const rowCount = this.resumeSnapshot ? 5 : 4
       // Move cursor between rows (RESUME? / DIFFICULTY / THEME / STAGE)
       if (this.input.isUpPressed()) {
         w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
@@ -537,6 +550,9 @@ export class Game {
         } else if (w.menuCursor === off + 2) {
           w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
           changed = true
+        } else if (w.menuCursor === off + 3) {
+          // PERFORMANCE row — toggle Performance Mode on/off.
+          this.setPerformanceMode(!this.settings.performanceMode)
         }
         if (changed) {
           // Swap the battle-field preview to match the new selection immediately
@@ -596,6 +612,16 @@ export class Game {
       }
       if (this.input.isResetPressed()) {
         this.resetToMenu()
+      }
+      // In-game Performance Mode switch — while paused, ←/→ flips
+      // Performance ↔ Quality without quitting to the menu. The change is
+      // reflected on the HUD pause pill + a toast, and persisted.
+      if (w.state === 'paused') {
+        const left = this.input.wasPressed('ArrowLeft') || this.input.wasPressed('KeyA')
+        const right = this.input.wasPressed('ArrowRight') || this.input.wasPressed('KeyD')
+        if (left || right) {
+          this.setPerformanceMode(!this.settings.performanceMode)
+        }
       }
     }
 
@@ -690,6 +716,32 @@ export class Game {
    * the selected stage's starting layout. Called whenever the highlighted row
    * changes so the canvas always reflects the active selection.
    */
+  /**
+   * Toggle Performance Mode (persisted). When ON: render DPR is capped at 1
+   * (the browser upscales with `image-rendering: pixelated`, which both slashes
+   * GPU fill-rate ~4× on Retina and looks more retro) and the render FPS is
+   * capped at PERF_MODE_RENDER_FPS. When OFF: full DPR (capped at 2) + uncapped
+   * 60 FPS. The simulation timestep is untouched — only the paint path changes.
+   */
+  private setPerformanceMode(on: boolean): void {
+    if (this.settings.performanceMode === on) return
+    this.settings.performanceMode = on
+    this.renderFpsCap = on ? PERF_MODE_RENDER_FPS : 0
+    this.presentation.applyPerformanceMode(on)
+    this.presentation.ui.setPerformanceMode(on)
+    this.presentation.markNeedsRender()
+    this.saveSettings()
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    // Confirm the switch in-game (menu / pause) so the player sees the result
+    // without an overlay covering the battle field.
+    this.presentation.ui.notify(
+      this.settings.performanceMode ? 'Performance Mode: ON' : 'Performance Mode: OFF (Quality)',
+      'info',
+    )
+  }
+
   private applyMenuPreview(): void {
     const w = this.world
     if (this.resumeSnapshot && w.menuCursor === 0) {
@@ -826,6 +878,7 @@ export class Game {
       difficulty: 'classic',
       theme: DEFAULT_THEME,
       screenScale: 1,
+      performanceMode: false,
       keys: { ...DEFAULT_KEYS },
     }
 

@@ -341,6 +341,10 @@ export interface GameSettings {
   difficulty: string
   theme: string
   screenScale: number
+  /** Performance Mode: cap render DPR at 1 (pixelated upscale) + cap render FPS.
+   *  Drastically cuts GPU fill-rate for weak/integrated GPUs (e.g. Intel Iris
+   *  Pro) so the fan stays off. Default ON — toggle in the start menu. */
+  performanceMode: boolean
   keys: KeyBindings
 }
 

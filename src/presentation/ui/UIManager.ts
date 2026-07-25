@@ -24,6 +24,8 @@ export interface MenuActions {
   start(): void
   /** Resume from the last manually-saved snapshot (only offered when one exists). */
   resume(): void
+  /** Toggle Performance Mode (DPR cap + render-FPS cap) on/off. */
+  togglePerformance(): void
   /** Open the controls / key-bindings panel. */
   openControls(): void
 }
@@ -42,6 +44,7 @@ export class UIManager {
   private hudStage: HTMLElement
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
+  private hudPauseHint: HTMLElement | null = null
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
   private buffFreeze: HTMLElement
@@ -103,6 +106,7 @@ export class UIManager {
   // Cached DOM elements for menu (avoid querySelectorAll every frame)
   private menuDiffOptions: HTMLElement[] = []
   private menuThemeOptions: HTMLElement[] = []
+  private menuPerfOptions: HTMLElement[] = []
   private menuRows: HTMLElement[] = []
   private menuStageValue: HTMLElement | null = null
   private menuStageName: HTMLElement | null = null
@@ -167,7 +171,7 @@ export class UIManager {
         </div>
         <div class="hud-pause" data-hud="pause">
           <span class="hud-pause-title"><span class="hud-pause-dot"></span>PAUSED</span>
-          <span class="hud-pause-hint">P to resume</span>
+          <span class="hud-pause-hint">← → Perf: OFF · P Resume</span>
         </div>
       </div>
       <div class="hud-group hud-right">
@@ -283,6 +287,7 @@ export class UIManager {
     this.hudStage = this.hudBar.querySelector('[data-hud="stage"]')!
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
+    this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
     this.buffFreeze = this.hudBar.querySelector('[data-buff="freeze"]')!
@@ -350,6 +355,10 @@ export class UIManager {
             </div>
             <span class="menu-stage-name" data-stage="name">Outpost</span>
           </div>
+          <div class="menu-row" data-menu="perf">
+            <span class="menu-label">PERFORMANCE</span>
+            <div class="menu-options" data-perf="options"></div>
+          </div>
         </div>
         <div class="menu-start">
           <div class="menu-start-button" data-menu="start">PRESS ENTER / CLICK TO START</div>
@@ -389,6 +398,19 @@ export class UIManager {
       opt.addEventListener('click', () => this.menuActions?.selectTheme(def.key))
       themeContainer.appendChild(opt)
     }
+
+    // Populate Performance Mode options (ON / OFF)
+    const perfContainer = screen.querySelector('[data-perf="options"]')!
+    for (const label of ['ON', 'OFF']) {
+      const opt = this.createElement('div', 'menu-option')
+      opt.dataset.value = label
+      opt.textContent = label
+      opt.addEventListener('click', () => this.menuActions?.togglePerformance())
+      perfContainer.appendChild(opt)
+    }
+    this.menuPerfOptions = Array.from(
+      perfContainer.querySelectorAll('.menu-option'),
+    ) as HTMLElement[]
 
     // Stage selector arrows
     const stagePrev = screen.querySelector('[data-stage="prev"]') as HTMLElement | null
@@ -653,6 +675,20 @@ export class UIManager {
     }
   }
 
+  /** Reflect the current Performance Mode in the menu (ON/OFF highlight) and
+   *  on the HUD pause pill (so an in-game switch while paused is visible
+   *  without an overlay covering the battle field). Called at boot and
+   *  whenever the mode is toggled. The value lives on GameSettings, not the
+   *  World, so Game pushes it here directly. */
+  setPerformanceMode(on: boolean): void {
+    for (const opt of this.menuPerfOptions) {
+      opt.classList.toggle('selected', (opt.dataset.value === 'ON') === on)
+    }
+    if (this.hudPauseHint) {
+      this.hudPauseHint.textContent = `← → Perf: ${on ? 'ON' : 'OFF'} · P Resume`
+    }
+  }
+
   private updateMenu(world: World): void {
     // Highlight selected difficulty — only when changed
     if (world.difficultyKey !== this.lastDifficultyKey) {
@@ -685,7 +721,9 @@ export class UIManager {
                 ? off + 1
                 : row.dataset.menu === 'stage'
                   ? off + 2
-                  : -1
+                  : row.dataset.menu === 'perf'
+                    ? off + 3
+                    : -1
         row.classList.toggle('selected', idx === world.menuCursor)
       }
     }

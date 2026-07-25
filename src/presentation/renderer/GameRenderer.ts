@@ -111,6 +111,42 @@ export class GameRenderer {
     return this.dpr
   }
 
+  /**
+   * Resize the renderer to a new device-pixel-ratio at runtime (Performance
+   * Mode toggles DPR 1 ↔ 2). Reallocates the canvas backing store and the
+   * offscreen terrain/forest/vignette caches at the new resolution, resets the
+   * context state, and marks every cache dirty so they rebuild on the next
+   * render. No gameplay state is touched.
+   */
+  setDpr(dpr: number): void {
+    if (dpr === this.dpr) return
+    this.dpr = dpr
+    this.canvas.width = FIELD * dpr
+    this.canvas.height = FIELD * dpr
+    // Resizing the backing store resets the 2D context state.
+    this.ctx.imageSmoothingEnabled = true
+
+    const tc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.terrainCache = tc.canvas
+    this.terrainCacheCtx = tc.ctx
+
+    const fc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.forestCache = fc.canvas
+    this.forestCacheCtx = fc.ctx
+
+    const vc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    this.vignetteCanvas = vc.canvas
+    this.vignetteCtx = vc.ctx
+
+    // Force a full rebuild of all cached layers at the new resolution.
+    this.terrainCacheDirty = true
+    this.vignetteDirty = true
+    this.cachedBgGradient = null
+    this.cachedTheme = null
+    this.waterSpriteDirty = true
+    this.bulletSpriteDirty = true
+  }
+
   setTheme(theme: ThemeColors): void {
     if (theme === this.artist.theme) return
     this.artist.setTheme(theme)
