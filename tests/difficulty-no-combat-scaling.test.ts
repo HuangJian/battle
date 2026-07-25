@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { profileToStats, resolveProfile } from '../src/config/combat'
+import { baseSpeedPxPerTick, SPEED_JITTER_MIN, SPEED_JITTER_MAX } from '../src/config/speed'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../src/config/difficulty'
 import { CELL } from '../src/constants'
 import type { TankKind } from '../src/types'
@@ -33,7 +34,7 @@ describe('Difficulty does not scale enemy combat power', () => {
   it('every enemy kind has identical combat stats across all difficulties', () => {
     // Baseline (classic) stats per kind.
     const baseline = new Map<Exclude<TankKind, 'player'>, ReturnType<typeof profileToStats>>()
-    for (const kind of ENEMY_KINDS) baseline.set(kind, profileToStats(resolveProfile(kind)))
+    for (const kind of ENEMY_KINDS) baseline.set(kind, profileToStats(resolveProfile(kind), kind))
 
     for (const key of DIFFICULTY_KEYS) {
       const world = new World()
@@ -45,11 +46,18 @@ describe('Difficulty does not scale enemy combat power', () => {
         // difficulty (this is what the bug violated: chaos gave 2× HP).
         expect(t.hp).toBe(base.maxHp)
         expect(t.maxHp).toBe(base.maxHp)
-        // Speed / bullet speed / fire cadence are archetype-fixed too.
-        expect(t.speed).toBe(base.speed)
+        // Bullet speed / fire cadence / power are archetype-fixed too.
         expect(t.bulletSpeed).toBe(base.bulletSpeed)
         expect(t.fireCooldown).toBe(base.fireCooldown)
         expect(t.bulletPower).toBe(base.bulletPower)
+        // Speed is a per-kind base (config/speed.ts) — difficulty never scales
+        // it. Each spawned tank carries a ±5% deterministic jitter, so we check
+        // the archetype base (a pure function of kind) and that the live speed
+        // stays inside the jitter band. If a difficulty tried to scale speed,
+        // the live value would land outside [base×0.95, base×1.05].
+        const baseSpeed = baseSpeedPxPerTick(kind)
+        expect(t.speed).toBeGreaterThanOrEqual(baseSpeed * SPEED_JITTER_MIN - 1e-9)
+        expect(t.speed).toBeLessThanOrEqual(baseSpeed * SPEED_JITTER_MAX + 1e-9)
       }
     }
   })

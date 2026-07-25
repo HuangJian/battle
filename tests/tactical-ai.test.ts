@@ -124,8 +124,10 @@ describe('Tactical Intelligence — never stalls (DoD #4 / testing §18)', () =>
       if (world.state !== 'playing') world.loadStage(world.stageIndex)
       if (!world.player || !world.player.alive) world.spawnPlayer()
     }
-    // 600 ticks, up to 4 enemies, speed >=1 → comfortably in the thousands.
-    expect(totalPath).toBeGreaterThan(1500)
+    // 600 ticks, up to 4 enemies; movement scales with the (now slower, calmer)
+    // speed design — observed totalPath ≈ 1100. We only guard against freezing,
+    // so the floor sits well below that.
+    expect(totalPath).toBeGreaterThan(700)
   })
 })
 

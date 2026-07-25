@@ -1,5 +1,6 @@
 import type { TankKind } from '../types'
 import type { CombatProfile, CombatDimension, TankStats } from '../types'
+import { baseSpeedPxPerTick } from './speed'
 
 /**
  * config/combat.ts — the heart of the Combat Capability System.
@@ -201,33 +202,25 @@ export function totalBudget(profile: CombatProfile): number {
  * The mappings are deliberately centralized & linear so they are trivial to
  * tune; they preserve the relative ordering the plan assigns each role
  * (fast = fastest, heavy = toughest, power = hardest-hitting).
+ *
+ * Speed note: movement speed is NOT derived from the `mobility` dimension
+ * here. Per-kind base speeds live in `config/speed.ts` (BASE_SPEED_CPS) because
+ * the spec anchors absolute cells/sec values, and two archetypes (power &
+ * armor) share mobility 30 yet move at different speeds. So `speed` is taken
+ * from the data table whenever a `kind` is supplied; only synthetic (test)
+ * profiles without a kind fall back to the legacy mobility map. Every other
+ * stat (bullet speed / HP / fire cadence) is still derived from the profile.
  */
-export function profileToStats(profile: CombatProfile): TankStats {
-  // ── Speed ratio (fixes "fast enemy outruns its own bullet") ───────────────
-  // Both numbers are px/tick (the sim is fixed at 60 Hz). The hard invariant:
-  // EVERY bullet must travel clearly faster than the tank that fired it, and
-  // than the fastest tank on the field. We anchor the two ranges to disjoint
-  // bands so this can never invert.
-  //
-  // 2026-07-22 tuning: all tank speeds were cut 40% (SPEED_SCALE) and bullet
-  // speeds cut by the SAME proportion (BULLET_SPEED_SCALE) so the relative
-  // race holds at the slower scale. 2026-07-25: a further global cut — tank
-  // speed −20% (×0.8) and bullet speed −30% (×0.7) — for a calmer, more
-  // readable pace. Both are pure multipliers on the same linear map, so the
-  // per-role ordering is preserved and EVERY bullet still outruns the fastest
-  // tank (~1.9× in the worst practical case):
-  //   tank speed   : 0.72 – 1.68 px/tick   (mobility 30 → 100)   [was 1.5 – 3.5]
-  //   bullet speed : 2.52 – 3.78 px/tick   (projectileSpeed 40 → 100) [was 6–10]
-  // Bullets always win the race: the weakest bullet (projectileSpeed 40 → 2.52)
-  // beats the fastest tank (mobility 100 → 1.68) by ~1.5×, and a fast enemy
-  // (mobility 80 → 1.41) is outrun ~1.9× by its own bullet (projectileSpeed 45 → 2.63).
-  // The player's per-star "speed buff" is proportional: each star lifts
-  // mobility +10 → speed +~0.14 px/tick and bullet speed +~0.21 px/tick.
-  const speed = clamp(
-    (1.5 + ((profile.mobility - 30) * 2) / 70) * SPEED_SCALE,
-    1.5 * SPEED_SCALE,
-    3.5 * SPEED_SCALE,
-  )
+export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 0): TankStats {
+  // ── Speed (per-kind base, see config/speed.ts) ──────────────────────────
+  // The hard invariant: EVERY bullet must travel clearly faster than the tank
+  // that fired it, and than the fastest tank on the field. The base speeds top
+  // out at 3.0 cells/s = 0.8 px/tick (fast enemy / max-level player), while the
+  // slowest bullet is 2.52 px/tick — a ~3.15× margin in the worst case. So the
+  // race can never invert regardless of kind or jitter.
+  const speed = kind
+    ? baseSpeedPxPerTick(kind, level)
+    : clamp(1.5 + ((profile.mobility - 30) * 2) / 70, 1.5, 3.5)
   const bulletSpeed = clamp(
     (6 + (profile.projectileSpeed - 40) * 0.05) * BULLET_SPEED_SCALE,
     6 * BULLET_SPEED_SCALE,
@@ -245,13 +238,12 @@ export function profileToStats(profile: CombatProfile): TankStats {
   return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown }
 }
 
-/** Global tank-speed multiplier. History: −40% (2026-07-22) then −20%
- *  (2026-07-25) ⇒ 0.6 × 0.8 = 0.48 total (~−52% vs the original 1.0 map). */
-const SPEED_SCALE = 0.48
-
 /** Global bullet-speed multiplier. History: −40% (2026-07-22) then −30%
  *  (2026-07-25) ⇒ 0.6 × 0.7 = 0.42 total (~−58% vs the original 1.0 map).
- *  Bullets remain clearly faster than every tank (see the invariant note above). */
+ *  Bullets remain clearly faster than every tank (see the invariant note above).
+ *  Tank speed no longer uses a global multiplier — it is fixed per kind in
+ *  config/speed.ts (BASE_SPEED_CPS) so the spec's absolute cells/sec values are
+ *  exact and difficulty can never scale enemy movement. */
 const BULLET_SPEED_SCALE = 0.42
 
 /** Minimum firepower for a bullet to destroy steel (bulletPower 2).

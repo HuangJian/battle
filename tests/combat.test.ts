@@ -14,6 +14,7 @@ import {
   ELITE_BONUS,
   STEEL_PIERCE_FIREPOWER,
 } from '../src/config/combat'
+import { baseSpeedPxPerTick } from '../src/config/speed'
 import type { TankKind } from '../src/types'
 
 /**
@@ -67,10 +68,10 @@ describe('Combat Capability — budgets (DoD #3)', () => {
 
 describe('Combat Capability — stat derivation (DoD #1)', () => {
   it('fast is the fastest, heavy is the slowest, power sits between', () => {
-    const fast = profileToStats(TANK_PROFILES.fast).speed
-    const basic = profileToStats(TANK_PROFILES.basic).speed
-    const power = profileToStats(TANK_PROFILES.power).speed
-    const heavy = profileToStats(TANK_PROFILES.armor).speed
+    const fast = profileToStats(TANK_PROFILES.fast, 'fast').speed
+    const basic = profileToStats(TANK_PROFILES.basic, 'basic').speed
+    const power = profileToStats(TANK_PROFILES.power, 'power').speed
+    const heavy = profileToStats(TANK_PROFILES.armor, 'armor').speed
     expect(fast).toBeGreaterThan(basic)
     expect(heavy).toBeLessThanOrEqual(basic)
     expect(power).toBeLessThanOrEqual(basic)
@@ -99,28 +100,10 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     }
   })
 
-  it('tank & bullet speeds are globally scaled (SPEED_SCALE / BULLET_SPEED_SCALE)', () => {
-    // 2026-07-25: tank speed cut an extra 20% (×0.8) and bullet speed an extra
-    // 30% (×0.7) on top of the original −40% → SPEED_SCALE 0.48, BULLET 0.42.
-    // mobility 30 → 0.72, mobility 100 → 1.68 px/tick
-    const slowest = profileToStats({
-      firepower: 50,
-      projectileSpeed: 40,
-      fireControl: 50,
-      mobility: 30,
-      armor: 50,
-      special: 50,
-    }).speed
-    const fastest = profileToStats({
-      firepower: 50,
-      projectileSpeed: 100,
-      fireControl: 50,
-      mobility: 100,
-      armor: 50,
-      special: 50,
-    }).speed
-    expect(slowest).toBeCloseTo(0.72, 5)
-    expect(fastest).toBeCloseTo(1.68, 5)
+  it('bullet speeds are globally scaled (BULLET_SPEED_SCALE)', () => {
+    // Tank speed is no longer a global multiplier (it is fixed per kind in
+    // config/speed.ts); only bullets keep BULLET_SPEED_SCALE. 2026-07-25: bullet
+    // speed cut an extra 30% (×0.7) on top of the original −40% → 0.42 total.
     // projectileSpeed 40 → 2.52 px/tick (proportional reduction)
     const slowBullet = profileToStats({
       firepower: 50,
@@ -189,8 +172,8 @@ describe('Combat Capability — power enemy bullet speed (user req)', () => {
   })
 
   it('power bullet still clearly outruns every tank (race invariant)', () => {
-    const power = profileToStats(TANK_PROFILES.power)
-    const fast = profileToStats(TANK_PROFILES.fast) // fastest-moving enemy
+    const power = profileToStats(TANK_PROFILES.power, 'power')
+    const fast = profileToStats(TANK_PROFILES.fast, 'fast') // fastest-moving enemy
     expect(power.bulletSpeed).toBeGreaterThan(power.speed) // beats its own tank
     expect(power.bulletSpeed).toBeGreaterThan(fast.speed) // beats the fastest tank
   })
@@ -355,7 +338,10 @@ describe('Combat Capability — extensibility (DoD #2, #9)', () => {
     }
     expect(totalBudget(siege)).toBe(BASELINE_BUDGET)
     const stats = profileToStats(siege)
-    expect(stats.maxHp).toBeGreaterThan(profileToStats(TANK_PROFILES.fast).maxHp)
-    expect(stats.speed).toBeLessThanOrEqual(profileToStats(TANK_PROFILES.fast).speed)
+    expect(stats.maxHp).toBeGreaterThan(profileToStats(TANK_PROFILES.fast, 'fast').maxHp)
+    // (Speed is per-kind data in config/speed.ts, not derivable from a bare
+    // profile, so we don't assert .speed here — that's covered by speed.test.ts.)
+    // Sanity: a new slow archetype's base speed is below the fast enemy's.
+    expect(baseSpeedPxPerTick('armor')).toBeLessThan(baseSpeedPxPerTick('fast'))
   })
 })

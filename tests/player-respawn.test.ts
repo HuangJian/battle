@@ -3,6 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { resolveProfile, profileToStats } from '../src/config/combat'
+import { SPEED_JITTER_MIN, SPEED_JITTER_MAX } from '../src/config/speed'
 
 /**
  * Regression tests for two player-bug reports (2026-07-23):
@@ -40,8 +41,11 @@ describe('Bug #1 — star buff is lost on respawn', () => {
     expect(world.playerLevel).toBe(0) // reset to baseline, NOT 1
     expect(world.player!.level).toBe(0)
     // Derived stats reflect the baseline, not the pre-death upgraded tank.
-    const base = profileToStats(resolveProfile('player', 0))
-    expect(world.player!.speed).toBe(base.speed)
+    const base = profileToStats(resolveProfile('player', 0), 'player', 0)
+    // Speed carries a ±5% per-instance jitter (drawn from world.rng), so we
+    // assert it lands inside the jitter band rather than an exact value.
+    expect(world.player!.speed).toBeGreaterThanOrEqual(base.speed * SPEED_JITTER_MIN - 1e-9)
+    expect(world.player!.speed).toBeLessThanOrEqual(base.speed * SPEED_JITTER_MAX + 1e-9)
     expect(world.player!.bulletPower).toBe(base.bulletPower)
   })
 

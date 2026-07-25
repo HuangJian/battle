@@ -19,6 +19,7 @@ import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
+import { rollSpeedJitter } from '../config/speed'
 import { resolveConfig, levelForKind } from '../ai/config'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
@@ -273,7 +274,7 @@ export class World {
     // hardcoded numbers. Player profiles scale with star level; enemies use
     // their fixed archetype profile (modified only when promoted to elite).
     const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
-    const stats = profileToStats(profile)
+    const stats = profileToStats(profile, kind, kind === 'player' ? this.playerLevel : 0)
     // Enemy combat stats (including HP/armor) are fixed per archetype and never
     // scaled by difficulty — difficulty only makes enemies smarter via
     // DIFFICULTY_AI (see DECISIONS.md: Tactical Intelligence Framework). Scaling
@@ -315,7 +316,9 @@ export class World {
       dir,
       alive: true,
       kind,
-      speed: stats.speed,
+      // Per-instance speed jitter (±5%): identical archetypes don't move in
+      // lockstep, but it's drawn from world.rng so it stays deterministic.
+      speed: stats.speed * rollSpeedJitter(this.rng),
       hp,
       maxHp: hp,
       bulletPower: stats.bulletPower,

@@ -21,6 +21,7 @@ import {
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
+import { rollSpeedJitter } from '../config/speed'
 import { genId } from './World'
 import { Input } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
@@ -629,8 +630,8 @@ export class Simulation {
         if ((p.level ?? 0) < PLAYER_PROGRESSION.maximumLevel) {
           p.level = (p.level ?? 0) + 1
           w.playerLevel = p.level
-          const stats = profileToStats(resolveProfile('player', p.level))
-          p.speed = stats.speed
+          const stats = profileToStats(resolveProfile('player', p.level), 'player', p.level)
+          p.speed = stats.speed * rollSpeedJitter(this.world.rng)
           p.bulletSpeed = stats.bulletSpeed
           p.bulletPower = stats.bulletPower
           p.fireCooldown = stats.fireCooldown

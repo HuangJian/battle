@@ -556,7 +556,7 @@ export class TacticalIntelligence {
     // also enters at full health to feel like an exceptional unit.
     const eliteProfile = applyEliteModifier(best.profile ?? resolveProfile(best.kind, 0), best.kind)
     best.profile = eliteProfile
-    const eliteStats = profileToStats(eliteProfile)
+    const eliteStats = profileToStats(eliteProfile, best.kind, best.level ?? 0)
     best.speed = eliteStats.speed
     best.bulletSpeed = eliteStats.bulletSpeed
     best.bulletPower = eliteStats.bulletPower
