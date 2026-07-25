@@ -22,6 +22,31 @@ const SETTINGS_KEY = 'bc_settings'
 const THEME_KEYS = Object.keys(THEMES)
 
 /**
+ * True idle for static screens — event-driven 0-loop.
+ *
+ * The game must hold 60 FPS while *playing* (the vsync rAF loop). But on the
+ * menu / pause / game-over / victory screens nothing animates at 60 FPS, and
+ * the on-demand render gate already skips the canvas repaint there, so the
+ * GPU is already idle. Running even a coarse setTimeout loop (the previous
+ * 10 FPS compromise) still wakes the main thread 10×/sec for no visual
+ * benefit — exactly what keeps a laptop's fan spinning.
+ *
+ * These static states are therefore fully *event-driven*: a single `keydown`
+ * listener (`onStaticKey`) processes menu/pause/recovery input the instant a
+ * key is pressed — `Input`'s own `keydown` handler (registered first) has
+ * already populated the polled `justPressed` set, so we read it, repaint on
+ * demand, then stop. No rAF, no setTimeout: the main thread goes fully to
+ * sleep. The very same input handlers are re-used by the loop for action
+ * states, so behaviour is identical; only the *driver* differs.
+ *
+ * The moment input changes the state (start → playing, snapshot load →
+ * recovery, unpause → playing) `scheduleFrame()` re-arms the vsync rAF loop
+ * with zero perceptible delay. Mouse-driven menu actions take the same path
+ * via `refreshStaticScreen()`.
+ */
+const LOW_POWER_STATES = new Set(['menu', 'paused', 'gameover', 'victory'])
+
+/**
  * Game — top-level orchestrator.
  * Owns the game loop, wires all systems together.
  */
@@ -112,6 +137,11 @@ export class Game {
         if (this.recovery.beginLoad(id, this.world)) {
           this.audio.playRecoveryStart()
         }
+        // The browser closes itself before calling onLoad (state is now
+        // 'recovery', an action state), so re-arm the vsync rAF loop. The
+        // 0-loop idle path can't do this because onStaticKey bails out while
+        // the browser was open.
+        this.scheduleFrame()
       },
       onDelete: (id) => {
         this.snapshots.delete(id)
@@ -144,6 +174,12 @@ export class Game {
 
   async start(): Promise<void> {
     this.input.attach(window)
+    // Static-screen (menu / pause / game-over / victory) keyboard input is
+    // event-driven: a single keydown listener processes it the instant a key
+    // is pressed so the loop can stay fully asleep (0-loop idle) on those
+    // screens. Registered AFTER input.attach so Input.onKeyDown populates the
+    // polled `justPressed` set before we read it.
+    window.addEventListener('keydown', this.onStaticKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
     // Default-load behaviour: if a manual snapshot exists, surface it as the
@@ -176,7 +212,9 @@ export class Game {
   stop(): void {
     this.running = false
     cancelAnimationFrame(this.rafId)
+    this.rafId = 0
     document.removeEventListener('visibilitychange', this.onVisibility)
+    window.removeEventListener('keydown', this.onStaticKey)
     this.input.detach(window)
   }
 
@@ -194,10 +232,112 @@ export class Game {
       this._hidden = false
       if (this.running) {
         this.lastTime = performance.now()
-        this.presentation.markNeedsRender()
-        this.rafId = requestAnimationFrame(this.loop)
+        if (LOW_POWER_STATES.has(this.world.state)) {
+          // No loop runs while idle — repaint once so the canvas isn't blank
+          // after the tab was hidden (browsers may discard the backing store).
+          this.presentation.markNeedsRender()
+          this.presentation.updateUI(this.world)
+          if (this.presentation.shouldRender(this.world)) {
+            this.presentation.render(this.world, 0)
+          }
+          // Stay idle (no driver scheduled).
+        } else {
+          this.presentation.markNeedsRender()
+          this.scheduleFrame()
+        }
       }
     }
+  }
+
+  /**
+   * Pick the loop driver: vsync rAF for action states (smooth 60 FPS play),
+   * coarse setTimeout for static low-power states (menu/pause/game-over/
+   * victory — ~83% less main-thread work, fan stays off). Only one driver is
+   * ever pending; we clear both before scheduling to avoid stragglers when the
+   * state flips mid-frame.
+   */
+  /**
+   * Pick the loop driver: vsync rAF for action states (smooth 60 FPS play),
+   * or nothing for the static low-power states (menu / pause / game-over /
+   * victory) — those are event-driven, so the main thread genuinely sleeps.
+   * Only one driver is ever pending; we clear both before (re)arming to avoid
+   * a straggler rAF/timer waking the thread after the state has flipped.
+   */
+  private scheduleFrame(): void {
+    if (!this.running) return
+    cancelAnimationFrame(this.rafId)
+    this.rafId = 0
+    if (LOW_POWER_STATES.has(this.world.state)) {
+      // True idle: no loop at all. Static-screen input is handled by
+      // `onStaticKey` / mouse handlers, and the on-demand render gate keeps
+      // the canvas correct, so the main thread stays fully asleep — fan off.
+      return
+    }
+    this.rafId = requestAnimationFrame(this.loop)
+  }
+
+  /**
+   * Public re-arm hook for external drivers (the perf harness, automated
+   * tests). The 0-loop idle design only re-arms `loop` from inside
+   * `scheduleFrame()`, which the static input path never reaches. When a
+   * driver changes `world.state` directly to an action state it must call this
+   * to kick the vsync rAF loop; for static states it is a no-op (they stay idle).
+   * Safe to call any time — it cancels any pending driver first.
+   */
+  requestFrame(): void {
+    this.scheduleFrame()
+  }
+
+  /**
+   * Event-driven keyboard handler for the static (idle) screens.
+   *
+   * Registered as a `keydown` listener — and AFTER `Input.attach`, so `Input`'s
+   * own handler has already recorded this event into its polled `justPressed`
+   * set before we read it. For menu / pause / game-over / victory we process
+   * the key exactly as the rAF loop would, repaint only if the visible scene
+   * changed, then return — leaving the main thread asleep. This is the "true
+   * 0-loop" idle: no rAF, no setTimeout, no periodic wake-ups.
+   *
+   * Action states (playing / stageclear / recovery) are intentionally NOT
+   * handled here — the vsync rAF loop owns them — so a stray keydown during
+   * play can never double-fire with the loop.
+   */
+  private onStaticKey = (_e: KeyboardEvent): void => {
+    if (!this.running || this._hidden) return
+    if (!LOW_POWER_STATES.has(this.world.state)) return
+    // UI modals own their own keyboard handling; never double-process.
+    if (this.presentation.ui.snapshotBrowser.isOpen()) return
+    if (this.presentation.ui.isControlsOpen()) return
+
+    // Process the key via the same code path the loop uses, then clear the
+    // per-frame input edges so a single press is consumed exactly once.
+    this.handleStateInput()
+    this.input.endFrame()
+    // Repaint on demand + (re)arm the loop driver if the state changed.
+    this.refreshStaticScreen()
+  }
+
+  /**
+   * Repaint the canvas only if the scene actually changed, sync the HUD,
+   * capture any pending snapshot thumbnail, and (re)arm the right loop driver
+   * for the current state. Shared by `onStaticKey` and the mouse-driven menu
+   * actions so both paths behave identically under 0-loop idle.
+   */
+  private refreshStaticScreen(): void {
+    this.presentation.updateUI(this.world)
+    if (this.presentation.shouldRender(this.world)) {
+      this.presentation.render(this.world, 0)
+      this._lastRenderTime = performance.now()
+    }
+    // A manual snapshot taken while paused enqueues a thumbnail the loop would
+    // normally grab; capture it now so it isn't lost under 0-loop idle. The
+    // canvas already shows the frozen paused frame, so capture from live pixels.
+    if (this.snapshots.hasPendingThumbnails) {
+      this.snapshots.capturePendingThumbnails(() => this.presentation.captureThumbnail())
+    }
+    // If input left the static set (start → playing, load → recovery,
+    // unpause → playing) this re-arms vsync rAF; otherwise it stays idle.
+    this.scheduleFrame()
   }
 
   private loop = (time: number): void => {
@@ -320,7 +460,9 @@ export class Game {
       this.fps = this._frameCount
       this._frameCount = 0
       this._fpsLastTime = time
-      if (this.fps < 45) {
+      // Only warn during active play — static screens run a deliberate
+      // low-power cadence (10 FPS) by design, so a low count there is expected.
+      if (this.fps < 45 && !LOW_POWER_STATES.has(this.world.state)) {
         this._slowSeconds++
         if (this._slowSeconds === 3) {
           console.warn(`[perf] sustained low frame rate: ${this.fps} fps`)
@@ -330,7 +472,7 @@ export class Game {
       }
     }
 
-    this.rafId = requestAnimationFrame(this.loop)
+    this.scheduleFrame()
   }
 
   // ---- State Input ----
@@ -479,6 +621,7 @@ export class Game {
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
+    this.refreshStaticScreen()
   }
 
   /** Mouse: pick a theme option. */
@@ -494,6 +637,7 @@ export class Game {
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
+    this.refreshStaticScreen()
   }
 
   /** Mouse: step the stage selector (dir = -1 prev / +1 next). */
@@ -507,6 +651,7 @@ export class Game {
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
+    this.refreshStaticScreen()
   }
 
   /** Mouse: start button — same as the keyboard confirm (Enter/Space). */
@@ -521,6 +666,7 @@ export class Game {
     // Drop the click so it can't bleed into the first-frame fire input.
     this.input.reset()
     this.saveSettings()
+    this.refreshStaticScreen()
   }
 
   /** Mouse / default-confirm: resume from the last manual snapshot. */
@@ -534,6 +680,7 @@ export class Game {
     this.recovery.beginLoad(this.resumeSnapshot.id, this.world)
     // Drop the input so the click/keypress can't bleed into gameplay.
     this.input.reset()
+    this.refreshStaticScreen()
   }
 
   /**

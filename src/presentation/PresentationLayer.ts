@@ -31,6 +31,9 @@ export class PresentationLayer {
   spriteCache: SpriteCache
   private dpr: number
 
+  /** Throttle window-resize → canvas resize via one rAF per burst. */
+  private _resizeRaf = 0
+
   // ---- On-demand render gating (energy: skip full canvas repaint when idle) ----
   /** Force a repaint on the next shouldRender() check (set on resume/reset). */
   private _needRender = true
@@ -66,6 +69,76 @@ export class PresentationLayer {
       this.dpr,
       spriteLibrary,
     )
+
+    // Size the canvas to fill the viewport (largest possible square) and
+    // keep it responsive to window resizes. Pure presentation — never
+    // touches the World or the canvas' internal (fixed) buffer.
+    this.resizeCanvas()
+    window.addEventListener('resize', this.onResize)
+    window.addEventListener('orientationchange', this.onResize)
+    // Re-run once layout has settled (fonts / stylesheet) so the first frame
+    // is already correctly sized rather than flashing the CSS fallback size.
+    requestAnimationFrame(() => this.resizeCanvas())
+  }
+
+  /** Handle window resize/orientationchange, throttled to one rAF per burst. */
+  private onResize = (): void => {
+    if (this._resizeRaf) return
+    this._resizeRaf = requestAnimationFrame(() => {
+      this._resizeRaf = 0
+      this.resizeCanvas()
+    })
+  }
+
+  /**
+   * Set the canvas' on-screen size to the largest square that fits the
+   * current viewport, accounting for the HUD bar, footer, and (on wide
+   * screens) the Control Center sidebar so the playfield is never hidden
+   * behind it. The canvas' internal buffer stays fixed at FIELD×dpr; only
+   * its CSS display box changes, so this is allocation-free and safe to run
+   * on every resize.
+   */
+  resizeCanvas(): void {
+    const canvas = this.ui.canvas
+    if (!canvas) return
+
+    const PAD_X = 0 // #app has no padding — canvas reaches the window edges
+    const PAD_Y = 0 // HUD/footer frame the top/bottom with no extra margin
+
+    // Control Center sidebar overlaps the left edge on wide screens
+    // (hidden under 900px). Keep the playfield clear of it.
+    let leftReserve = 0
+    const cc = this.ui.controlCenter?.el
+    if (cc) {
+      const style = window.getComputedStyle(cc)
+      if (style.display !== 'none') {
+        leftReserve = cc.getBoundingClientRect().width + 24 // width + gap
+      }
+    }
+
+    const hud = this.ui.hudBarEl
+    const footer = this.ui.footerEl
+
+    // Two passes: setting HUD/footer widths can change their heights (e.g. the
+    // footer wraps to two lines on narrow screens), which feeds back into the
+    // available height. Apply widths once, re-measure, recompute. Converges.
+    let side = 1
+    for (let pass = 0; pass < 2; pass++) {
+      const hudH = hud.offsetHeight
+      const footerH = footer.offsetHeight
+
+      const availW = Math.max(0, window.innerWidth - PAD_X * 2 - leftReserve)
+      const availH = Math.max(0, window.innerHeight - PAD_Y * 2 - hudH - footerH)
+      side = Math.max(1, Math.floor(Math.min(availW, availH)))
+
+      // HUD/footer match the canvas' framed width (canvas + 1px game-container
+      // border on each side), never the whole window.
+      const frameW = side + 2
+      hud.style.width = frameW + 'px'
+      footer.style.width = frameW + 'px'
+      canvas.style.width = side + 'px'
+      canvas.style.height = side + 'px'
+    }
   }
 
   /** Build the sprite cache after the sprite library has loaded. */

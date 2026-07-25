@@ -9,6 +9,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit --incremental",
     "bench": "bun tools/bench-sim.ts",
+    "perf:sim": "bun tools/perf/sim-bench.ts",
     "lint": "oxlint",
     "format": "oxfmt",
     "check": "bun test && tsc --noEmit --incremental && oxlint && oxfmt"

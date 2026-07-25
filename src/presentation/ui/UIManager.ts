@@ -856,6 +856,15 @@ export class UIManager {
     return this.controlsOpen
   }
 
+  /** Expose layout elements so PresentationLayer can measure reserved vertical
+   *  space when sizing the canvas. Read-only access only. */
+  get hudBarEl(): HTMLElement {
+    return this.hudBar
+  }
+  get footerEl(): HTMLElement {
+    return this.footer
+  }
+
   /** Open the controls panel over the menu. */
   openControls(): void {
     if (this.controlsOpen) return
