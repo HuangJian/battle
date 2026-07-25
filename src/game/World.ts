@@ -274,10 +274,11 @@ export class World {
     // their fixed archetype profile (modified only when promoted to elite).
     const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
     const stats = profileToStats(profile)
-    const hp =
-      kind === 'player'
-        ? stats.maxHp
-        : Math.max(1, Math.round(stats.maxHp * this.difficulty.enemyHpMult))
+    // Enemy combat stats (including HP/armor) are fixed per archetype and never
+    // scaled by difficulty — difficulty only makes enemies smarter via
+    // DIFFICULTY_AI (see DECISIONS.md: Tactical Intelligence Framework). Scaling
+    // enemy HP here would "enhance enemy power", which is explicitly forbidden.
+    const hp = stats.maxHp
 
     // Enemy brains are initialized here (on the World — no hidden state).
     // The Tactical Intelligence Framework reads/writes these fields every tick.

@@ -258,9 +258,14 @@ export interface TankConfig {
 
 export interface DifficultyConfig {
   name: string
-  enemySpeedMult: number
-  enemyFireMult: number
-  enemyHpMult: number
+  /**
+   * Difficulty affects ONLY enemy AI (via `DIFFICULTY_AI` in src/ai/config.ts):
+   * dodging, prediction depth, reaction, aggression, and commander-election
+   * chance. It must NEVER scale enemy combat stats — that would "enhance enemy
+   * power" (armor / speed / bullet speed / HP), which is explicitly forbidden by
+   * DECISIONS.md (Tactical Intelligence Framework). Lives and the player's
+   * starting star level are player-side resources, not enemy combat power.
+   */
   startLives: number
   playerStartLevel: number
 }

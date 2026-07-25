@@ -44,7 +44,7 @@ export const ELITE_BUDGET = 360
  *
  *   balanced (basic): everything near average.
  *   fast:             high mobility, weaker everything else.
- *   power:            high firepower, low mobility / armor.
+ *   power:            high firepower + fast bullets (matches lvl-2 player), low mobility / armor.
  *   heavy  (armor):   high armor, low mobility.
  */
 export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> = {
@@ -65,20 +65,26 @@ export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> =
     special: 45,
   },
   power: {
-    firepower: 75,
-    projectileSpeed: 50,
+    firepower: 75, // high firepower (the "power" role) but < 80 → cannot pierce steel
+    // Bullet speed matches the level-2 player (player eats 2 stars → every
+    // dimension 70, projectileSpeed 70). This makes power shells noticeably
+    // faster / harder to dodge WITHOUT raising firepower — power still can't
+    // destroy steel (firepower 75 < STEEL_PIERCE_FIREPOWER 80). The +20
+    // projectileSpeed is funded by dropping `special` (no stat mapping) to 30,
+    // keeping the total at BASELINE_BUDGET (300). Contract asserted in
+    // tests/combat.test.ts (power-bullet-speed section).
+    projectileSpeed: 70,
     // Fire-rate fairness invariant: NO enemy archetype may out-fire the
     // unbuffed player (level 0, fireControl 50 → 420 ms). fireCooldown is
     // 620 − fireControl×4, so any enemy fireControl above 50 would win a
     // head-on duel purely on cadence (bullets cancel 1:1; the faster firer
     // always lands the surplus shell). power was 55 (400 ms — strictly
-    // faster than the player); rebalanced to 50 with the 5 freed points
-    // moved to `special` (no stat mapping) so the 300 budget still holds.
+    // faster than the player); rebalanced to 50 so the 300 budget still holds.
     // Guarded by tests/fire-rate-duel.test.ts.
     fireControl: 50,
     mobility: 30,
     armor: 45,
-    special: 50,
+    special: 30,
   },
   armor: {
     firepower: 55,
@@ -205,14 +211,18 @@ export function profileToStats(profile: CombatProfile): TankStats {
   //
   // 2026-07-22 tuning: all tank speeds were cut 40% (SPEED_SCALE) and bullet
   // speeds cut by the SAME proportion (BULLET_SPEED_SCALE) so the relative
-  // race holds at the slower scale:
-  //   tank speed   : 0.9 – 2.1 px/tick   (mobility 30 → 100)   [was 1.5 – 3.5]
-  //   bullet speed : 3.6 – 6.0 px/tick   (projectileSpeed 40 → 100) [was 6–10]
-  // Even the fastest tank (mobility 100 → 2.1) is outrun ~1.7× by the weakest
-  // bullet (3.6); a fast enemy (mobility 80 → 1.76) is outrun ~2.2× by its own
-  // bullet (projectileSpeed 45 → 3.8). Bullets always win the race.
+  // race holds at the slower scale. 2026-07-25: a further global cut — tank
+  // speed −20% (×0.8) and bullet speed −30% (×0.7) — for a calmer, more
+  // readable pace. Both are pure multipliers on the same linear map, so the
+  // per-role ordering is preserved and EVERY bullet still outruns the fastest
+  // tank (~1.9× in the worst practical case):
+  //   tank speed   : 0.72 – 1.68 px/tick   (mobility 30 → 100)   [was 1.5 – 3.5]
+  //   bullet speed : 2.52 – 3.78 px/tick   (projectileSpeed 40 → 100) [was 6–10]
+  // Bullets always win the race: the weakest bullet (projectileSpeed 40 → 2.52)
+  // beats the fastest tank (mobility 100 → 1.68) by ~1.5×, and a fast enemy
+  // (mobility 80 → 1.41) is outrun ~1.9× by its own bullet (projectileSpeed 45 → 2.63).
   // The player's per-star "speed buff" is proportional: each star lifts
-  // mobility +10 → speed +~0.17 px/tick and bullet speed +~0.24 px/tick.
+  // mobility +10 → speed +~0.14 px/tick and bullet speed +~0.21 px/tick.
   const speed = clamp(
     (1.5 + ((profile.mobility - 30) * 2) / 70) * SPEED_SCALE,
     1.5 * SPEED_SCALE,
@@ -235,12 +245,14 @@ export function profileToStats(profile: CombatProfile): TankStats {
   return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown }
 }
 
-/** Global tank-speed multiplier — 0.6 = −40% (user tuning, 2026-07-22). */
-const SPEED_SCALE = 0.6
+/** Global tank-speed multiplier. History: −40% (2026-07-22) then −20%
+ *  (2026-07-25) ⇒ 0.6 × 0.8 = 0.48 total (~−52% vs the original 1.0 map). */
+const SPEED_SCALE = 0.48
 
-/** Global bullet-speed multiplier — same proportion as tanks so the
- *  bullet-always-faster invariant holds at the slower scale. */
-const BULLET_SPEED_SCALE = 0.6
+/** Global bullet-speed multiplier. History: −40% (2026-07-22) then −30%
+ *  (2026-07-25) ⇒ 0.6 × 0.7 = 0.42 total (~−58% vs the original 1.0 map).
+ *  Bullets remain clearly faster than every tank (see the invariant note above). */
+const BULLET_SPEED_SCALE = 0.42
 
 /** Minimum firepower for a bullet to destroy steel (bulletPower 2).
  *  Tuned so default power (75) cannot pierce steel; only elite power (~86)

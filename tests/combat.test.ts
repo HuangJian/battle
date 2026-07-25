@@ -99,8 +99,10 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     }
   })
 
-  it('tank & bullet speeds are globally scaled down 40% (SPEED_SCALE)', () => {
-    // mobility 30 → 0.9, mobility 100 → 2.1 px/tick
+  it('tank & bullet speeds are globally scaled (SPEED_SCALE / BULLET_SPEED_SCALE)', () => {
+    // 2026-07-25: tank speed cut an extra 20% (×0.8) and bullet speed an extra
+    // 30% (×0.7) on top of the original −40% → SPEED_SCALE 0.48, BULLET 0.42.
+    // mobility 30 → 0.72, mobility 100 → 1.68 px/tick
     const slowest = profileToStats({
       firepower: 50,
       projectileSpeed: 40,
@@ -117,9 +119,9 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
       armor: 50,
       special: 50,
     }).speed
-    expect(slowest).toBeCloseTo(0.9, 5)
-    expect(fastest).toBeCloseTo(2.1, 5)
-    // projectileSpeed 40 → 3.6 px/tick (proportional reduction)
+    expect(slowest).toBeCloseTo(0.72, 5)
+    expect(fastest).toBeCloseTo(1.68, 5)
+    // projectileSpeed 40 → 2.52 px/tick (proportional reduction)
     const slowBullet = profileToStats({
       firepower: 50,
       projectileSpeed: 40,
@@ -128,7 +130,7 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
       armor: 50,
       special: 50,
     }).bulletSpeed
-    expect(slowBullet).toBeCloseTo(3.6, 5)
+    expect(slowBullet).toBeCloseTo(2.52, 5)
   })
 
   it('higher fire control yields a shorter fire cooldown', () => {
@@ -149,6 +151,52 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
       special: 50,
     }).fireCooldown
     expect(high).toBeLessThan(low)
+  })
+})
+
+// ============================================================
+// Power enemy — faster bullets (≈ lvl-2 player), NO steel pierce (user req)
+// ============================================================
+
+describe('Combat Capability — power enemy bullet speed (user req)', () => {
+  it('power bullet speed equals the level-2 player (2 stars) bullet speed', () => {
+    // Player eats two stars → every dimension 70, projectileSpeed 70. Both the
+    // power enemy and the lvl-2 player scale by BULLET_SPEED_SCALE, so the
+    // "≈ lvl-2 player" relationship is preserved by the global tuning.
+    const lvl2 = profileToStats(playerProfile(2)).bulletSpeed
+    const powerBullet = profileToStats(TANK_PROFILES.power).bulletSpeed
+    expect(powerBullet).toBe(lvl2)
+    // Document the concrete value so a silent regression is obvious.
+    expect(powerBullet).toBeCloseTo(3.15, 5)
+  })
+
+  it('power projectileSpeed is exactly 70 (the level-2 player value)', () => {
+    expect(TANK_PROFILES.power.projectileSpeed).toBe(70)
+  })
+
+  it('power firepower is unchanged and still cannot destroy steel', () => {
+    // Firepower must NOT be raised — power must stay a non-steel-piercing unit.
+    expect(TANK_PROFILES.power.firepower).toBe(75)
+    expect(TANK_PROFILES.power.firepower).toBeLessThan(STEEL_PIERCE_FIREPOWER)
+    expect(profileToStats(TANK_PROFILES.power).bulletPower).toBe(1)
+  })
+
+  it('power keeps its fire-rate fairness (no faster than unbuffed player)', () => {
+    // fireControl unchanged at 50 → same 420 ms cooldown as the level-0 player.
+    const powerCd = profileToStats(TANK_PROFILES.power).fireCooldown
+    const playerCd = profileToStats(playerProfile(0)).fireCooldown
+    expect(powerCd).toBeGreaterThanOrEqual(playerCd)
+  })
+
+  it('power bullet still clearly outruns every tank (race invariant)', () => {
+    const power = profileToStats(TANK_PROFILES.power)
+    const fast = profileToStats(TANK_PROFILES.fast) // fastest-moving enemy
+    expect(power.bulletSpeed).toBeGreaterThan(power.speed) // beats its own tank
+    expect(power.bulletSpeed).toBeGreaterThan(fast.speed) // beats the fastest tank
+  })
+
+  it('power profile still sums to the baseline budget (300)', () => {
+    expect(totalBudget(TANK_PROFILES.power)).toBe(BASELINE_BUDGET)
   })
 })
 

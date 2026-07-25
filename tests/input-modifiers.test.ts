@@ -217,9 +217,9 @@ describe('Input — modifier isolation for non-combat shortcuts', () => {
     )
     expect(input.isSnapshotPressed()).toBe(true)
     expect(claimed).toBe(true)
-  keyup(input, makeEvent('KeyS', { altKey: true }))
-  input.endFrame()
-  expect(input.isSnapshotPressed()).toBe(false)
+    keyup(input, makeEvent('KeyS', { altKey: true }))
+    input.endFrame()
+    expect(input.isSnapshotPressed()).toBe(false)
   })
 })
 
