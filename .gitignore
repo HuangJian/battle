@@ -9,3 +9,6 @@ tools/perf/results/
 .DS_Store
 
 *.tsbuildinfo
+
+*.chat.md
+

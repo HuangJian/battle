@@ -356,21 +356,21 @@ export interface KeyBindings {
   fire: string
   pause: string
   /**
-   * Reset-to-menu shortcut. Bound to a *modifier* combo (e.g. 'Shift+KeyR')
+   * Reset-to-menu shortcut. Bound to a *modifier* combo (e.g. 'Alt+KeyR')
    * rather than a bare key so it can't be hit by accident mid-play. The Input
    * layer matches the full modifier+code spec, so a plain 'R' no longer fires.
    */
   reset: string
   /**
    * Manual-save (snapshot) shortcut. Bound to a *modifier* combo
-   * ('Shift+KeyS' by default) so it can't be hit by accident and stays clear
+   * ('Alt+KeyS' by default) so it can't be hit by accident and stays clear
    * of browser-reserved combos. It is also distinct from the bare 'KeyS' used
    * for menu navigation (the Input layer matches the full modifier+code spec).
    * See `reset` above for the rationale. (Snapshot Management Framework §3.)
    */
   snapshot: string
   /**
-   * Theme-cycle shortcut. Also a modifier combo ('Shift+KeyT') — see `reset`
+   * Theme-cycle shortcut. Also a modifier combo ('Alt+KeyT') — see `reset`
    * above for why non-combat shortcuts use modifiers. Free of browser-reserved
    * combos (unlike Ctrl+R / Ctrl+T, which collide with reload / new-tab).
    */

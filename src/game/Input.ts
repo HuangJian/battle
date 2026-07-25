@@ -4,13 +4,13 @@ import type { KeyBindings } from '../types'
 /**
  * Default key bindings.
  *
- * Non-combat shortcuts (reset / theme) use a *modifier* combo so they can't
- * be hit by accident mid-play, and — crucially — they avoid browser-reserved
- * combos: Ctrl+R (reload) and Ctrl+T (new tab) are off-limits, so we use
- * Shift+R / Shift+T, which no browser claims.
+ * Non-combat shortcuts (reset / theme / snapshot) use a *modifier* combo so
+ * they can't be hit by accident mid-play, and — crucially — they avoid
+ * browser-reserved combos: Ctrl+R (reload) and Ctrl+T (new tab) are off-limits,
+ * so we use Alt+R / Alt+T / Alt+S, which no browser claims.
  *
  * A binding string is `Modifier+...Modifier+Code` (modifiers optional, any
- * order, case-insensitive): e.g. 'Shift+KeyR', 'Control+KeyT', 'ArrowUp'.
+ * order, case-insensitive): e.g. 'Alt+KeyR', 'Control+KeyT', 'ArrowUp'.
  * The Input layer matches the FULL modifier+code spec, so a bare 'R' no longer
  * triggers reset and Ctrl+R no longer gets swallowed.
  */
@@ -21,9 +21,21 @@ export const DEFAULT_KEYS: KeyBindings = {
   right: 'ArrowRight',
   fire: 'Space',
   pause: 'KeyP',
-  reset: 'Shift+KeyR',
-  snapshot: 'Shift+KeyS',
-  theme: 'Shift+KeyT',
+  reset: 'Alt+KeyR',
+  snapshot: 'Alt+KeyS',
+  theme: 'Alt+KeyT',
+}
+
+/**
+ * Ensure every action has a binding, filling missing fields in place on the
+ * passed object and returning the SAME reference. Used by the Input constructor
+ * so the live key-bindings object stays shared with settings + the Controls UI.
+ */
+function ensureKeys(keys: KeyBindings): KeyBindings {
+  for (const action of Object.keys(DEFAULT_KEYS) as (keyof KeyBindings)[]) {
+    if (keys[action] === undefined) keys[action] = DEFAULT_KEYS[action]
+  }
+  return keys
 }
 
 /** A parsed binding: the physical `code` plus which modifiers must be held. */
@@ -59,9 +71,32 @@ export function parseBinding(s: string): BindingSpec {
 }
 
 /**
+ * Physical key codes that are *pure modifiers* — they have no "primary" key of
+ * their own. A binding must end in a non-modifier code, so these are rejected
+ * as the final segment. This is what stops the rebind UI from capturing
+ * "Alt+S" as the Alt key's own keydown ("Alt+AltLeft") instead of waiting for
+ * the real key. (See UIManager.onControlsKeyDown.)
+ */
+export const MODIFIER_CODES = new Set<string>([
+  'AltLeft',
+  'AltRight',
+  'ShiftLeft',
+  'ShiftRight',
+  'ControlLeft',
+  'ControlRight',
+  'MetaLeft',
+  'MetaRight',
+])
+
+/** True if `code` is a pure modifier key (Alt/Shift/Ctrl/Meta), not a primary key. */
+export function isModifierCode(code: string): boolean {
+  return MODIFIER_CODES.has(code)
+}
+
+/**
  * Canonical id for a binding spec, e.g. 'S:KeyR' (shift) or ':ArrowUp' (none).
  * Two ids are equal iff they describe the exact same physical key + modifier
- * state, which is what lets Shift+R and R coexist as distinct keys.
+ * state, which is what lets Alt+R and R coexist as distinct keys.
  */
 function specKeyId(spec: BindingSpec): string {
   return `${spec.ctrl ? 'C' : ''}${spec.shift ? 'S' : ''}${spec.alt ? 'A' : ''}${spec.meta ? 'M' : ''}:${spec.code}`
@@ -80,7 +115,7 @@ function keyIdFromBinding(s: string): string {
 /**
  * Build a binding string from a live keyboard event, preserving any held
  * modifiers in the same `Modifier+Code` format `parseBinding` expects (e.g.
- * Shift+KeyR). Exported so the controls-rebind UI can capture modifier combos
+ * Alt+KeyR). Exported so the controls-rebind UI can capture modifier combos
  * instead of losing them (a bare `e.code` would drop Shift/Ctrl/Alt/Meta).
  */
 export function eventToBinding(e: KeyboardEvent): string {
@@ -116,9 +151,14 @@ export class Input {
   menuBack = false
 
   constructor(keys?: KeyBindings) {
-    // Merge with defaults so any missing field (e.g. a `theme` saved before
-    // it existed) falls back to a valid binding rather than undefined.
-    this.keys = { ...DEFAULT_KEYS, ...keys }
+    // Hold the SAME key-bindings object the rest of the app shares (the
+    // settings object + the Controls panel's `controlsBindings`). That way a
+    // live rebind in the Controls UI mutates this exact object and gameplay
+    // sees it immediately — without it, a clone here would go stale the moment
+    // the user remaps a key (e.g. movement → EDSF would update the UI label
+    // but never reach `getMoveDirection()`). We only fill in any missing field
+    // in place (older saves that predate an added action).
+    this.keys = keys ? ensureKeys(keys) : { ...DEFAULT_KEYS }
   }
 
   attach(target: Window = window): void {
@@ -145,7 +185,7 @@ export class Input {
     const id = eventKeyId(e)
     // Prevent page scroll / browser default ONLY for keys we actually own
     // (exact modifier+code match). A bare 'R' or Ctrl+R is no longer ours,
-    // so the browser keeps its reload; Shift+R is ours → we claim it.
+    // so the browser keeps its reload; Alt+R is ours → we claim it.
     if (this.isGameKey(e)) {
       e.preventDefault()
     }
@@ -237,12 +277,12 @@ export class Input {
     return this.wasPressed(this.keys.reset)
   }
 
-  /** Theme-cycle shortcut (configurable, default Shift+T). */
+  /** Theme-cycle shortcut (configurable, default Alt+T). */
   isThemePressed(): boolean {
     return this.wasPressed(this.keys.theme)
   }
 
-  /** Manual snapshot shortcut (configurable, default Shift+S). */
+  /** Manual snapshot shortcut (configurable, default Alt+S). */
   isSnapshotPressed(): boolean {
     return this.wasPressed(this.keys.snapshot)
   }

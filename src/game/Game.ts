@@ -1,6 +1,6 @@
 import { World } from './World'
 import { Simulation } from './Simulation'
-import { Input, DEFAULT_KEYS } from './Input'
+import { Input, DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
 import { SnapshotManager } from '../snapshot/SnapshotManager'
 import { createDefaultStorage } from '../snapshot/storage'
 import {
@@ -15,7 +15,7 @@ import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { STAGES } from '../config/stages'
 import { TICK_MS, PERF_MODE_RENDER_FPS } from '../constants'
-import type { GameSettings } from '../types'
+import type { GameSettings, KeyBindings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
 
 const SETTINGS_KEY = 'bc_settings'
@@ -624,7 +624,7 @@ export class Game {
           this.audio.playMenuSelect()
         }
       }
-      // Theme shortcut (Shift+T by default — see KeyBindings)
+      // Theme shortcut (Alt+T by default — see KeyBindings)
       if (this.input.isThemePressed()) {
         this.themeIndex = (this.themeIndex + 1) % THEME_KEYS.length
         w.themeKey = THEME_KEYS[this.themeIndex]
@@ -667,7 +667,7 @@ export class Game {
           this.snapshots.create('pause', w)
         }
       }
-      // Manual snapshot — Shift+S by default (plan §3, Manual); rebindable.
+      // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
       if (this.input.isSnapshotPressed()) {
         this.manualSnapshot()
       }
@@ -817,7 +817,7 @@ export class Game {
   // ---- Snapshots (plan §3, §10, §12) ----
 
   /**
-   * Create a Manual snapshot (Shift+S by default / Control Center button). Manual
+   * Create a Manual snapshot (Alt+S by default / Control Center button). Manual
    * snapshots are never overwritten — when all 100 slots are used, the
    * player is asked to clean up instead (plan §3).
    */
@@ -949,12 +949,33 @@ export class Game {
       const raw = localStorage.getItem(SETTINGS_KEY)
       if (raw) {
         const saved = JSON.parse(raw)
-        return { ...defaults, ...saved, keys: { ...defaults.keys, ...saved.keys } }
+        const merged = { ...defaults, ...saved, keys: { ...defaults.keys, ...saved.keys } }
+        // Repair any previously-saved binding whose primary key is a pure
+        // modifier (e.g. the old "Alt+AltLeft" capture bug). Such a binding can
+        // never fire, so we fall back to its default.
+        merged.keys = this.sanitizeKeys(merged.keys)
+        return merged
       }
     } catch {
       /* ignore */
     }
     return defaults
+  }
+
+  /**
+   * Reset any binding whose primary key is a pure modifier (Alt/Shift/Ctrl/
+   * Meta themselves) — these are un-fireable — back to its default. Guards
+   * against the historical rebind bug and any corrupt saved value.
+   */
+  private sanitizeKeys(keys: KeyBindings): KeyBindings {
+    const out: KeyBindings = { ...keys }
+    for (const action of Object.keys(DEFAULT_KEYS) as (keyof KeyBindings)[]) {
+      const binding = out[action]
+      if (!binding || isModifierCode(parseBinding(binding).code)) {
+        out[action] = DEFAULT_KEYS[action]
+      }
+    }
+    return out
   }
 
   saveSettings(): void {

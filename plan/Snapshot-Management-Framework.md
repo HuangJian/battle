@@ -314,7 +314,7 @@ after entering a stage.
 Shortcut:
 
 ```
-Shift+S
+Alt+S
 ```
 
 Configurable (rebindable in Controls).

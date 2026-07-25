@@ -1,6 +1,6 @@
 import type { World } from '../../game/World'
 import type { ThemeColors, KeyBindings } from '../../types'
-import { DEFAULT_KEYS, eventToBinding, parseBinding } from '../../game/Input'
+import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../../game/Input'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
@@ -218,7 +218,7 @@ export class UIManager {
     this.gameOverScreen.innerHTML = `
       <div class="ui-panel">
         <h2 class="ui-title ui-danger">GAME OVER</h2>
-        <p class="ui-hint">Press <kbd>Shift+R</kbd> or <kbd>Enter</kbd> to return to menu</p>
+        <p class="ui-hint">Press <kbd>Alt+R</kbd> or <kbd>Enter</kbd> to return to menu</p>
       </div>
     `
 
@@ -237,7 +237,7 @@ export class UIManager {
       <div class="ui-panel">
         <h2 class="ui-title ui-success">VICTORY!</h2>
         <p class="ui-score-display">Final Score: <span data-victory="score">0</span></p>
-        <p class="ui-hint">Press <kbd>Shift+R</kbd> or <kbd>Enter</kbd> to play again</p>
+        <p class="ui-hint">Press <kbd>Alt+R</kbd> or <kbd>Enter</kbd> to play again</p>
       </div>
     `
 
@@ -274,9 +274,9 @@ export class UIManager {
       <span>←→</span> Change &nbsp;·&nbsp;
       <span>Enter</span> Start &nbsp;·&nbsp;
       <span>P</span> Pause &nbsp;·&nbsp;
-      <span>Shift+R</span> Reset &nbsp;·&nbsp;
-      <span>Shift+T</span> Theme &nbsp;·&nbsp;
-      <span>Shift+S</span> Save
+      <span>Alt+R</span> Reset &nbsp;·&nbsp;
+      <span>Alt+T</span> Theme &nbsp;·&nbsp;
+      <span>Alt+S</span> Save
     `
 
     // Performance Observatory (F6) — fixed-position dev overlay (read-only).
@@ -376,8 +376,8 @@ export class UIManager {
         <div class="menu-controls">
           <span>↑ ↓ Select Row</span>
           <span>← → Change</span>
-          <span><kbd>Shift+T</kbd> Theme</span>
-          <span><kbd>Shift+S</kbd> Save</span>
+          <span><kbd>Alt+T</kbd> Theme</span>
+          <span><kbd>Alt+S</kbd> Save</span>
           <span><kbd>C</kbd> Controls</span>
           <span><kbd>Enter</kbd> Confirm</span>
         </div>
@@ -814,7 +814,7 @@ export class UIManager {
         <div class="recovery-controls">
           <span>↑ ↓ Select</span>
           <span><kbd>Enter</kbd> Confirm</span>
-          <span><kbd>Shift+R</kbd> Menu</span>
+          <span><kbd>Alt+R</kbd> Menu</span>
         </div>
       </div>
       <div class="recovery-countdown" data-recovery="countdown">
@@ -1055,6 +1055,16 @@ export class UIManager {
     return mods.length ? `${mods.join('+')}+${base}` : base
   }
 
+  /** Modifier prefix for a live event, e.g. "Alt" or "Ctrl+Shift". */
+  private modifierPrefix(e: KeyboardEvent): string {
+    const mods: string[] = []
+    if (e.ctrlKey) mods.push('Ctrl')
+    if (e.shiftKey) mods.push('Shift')
+    if (e.altKey) mods.push('Alt')
+    if (e.metaKey) mods.push('Meta')
+    return mods.join('+')
+  }
+
   /** Render a bare `KeyboardEvent.code` (no modifiers) into a short label. */
   private formatCode(code: string): string {
     if (code.startsWith('Arrow')) {
@@ -1086,8 +1096,17 @@ export class UIManager {
 
     if (this.listeningAction) {
       const action = this.listeningAction
+      const btn = this.controlsKeyButtons.get(action)
       if (e.code === 'Escape') {
         this.cancelListening()
+        return
+      }
+      // A pure modifier key (Alt/Shift/Ctrl/Meta) can't be a binding's primary
+      // key. Ignore its keydown so capturing "Alt+S" doesn't finalize on the
+      // Alt key itself ("Alt+AltLeft"); show a live preview of the held
+      // modifiers instead and wait for the real primary key.
+      if (isModifierCode(e.code)) {
+        if (btn) btn.textContent = `${this.modifierPrefix(e)}+…`
         return
       }
       const binding = eventToBinding(e)

@@ -49,7 +49,7 @@ export class ControlCenter {
         <section class="cc-section">
           <h3 class="cc-section-title">SNAPSHOT MANAGER</h3>
           <button class="cc-btn" data-cc="save" type="button">
-            <span>Manual Save</span><kbd>Shift+S</kbd>
+            <span>Manual Save</span><kbd>Alt+S</kbd>
           </button>
           <button class="cc-btn" data-cc="browser" type="button">
             <span>Snapshot Browser</span><span class="cc-btn-arrow">›</span>
