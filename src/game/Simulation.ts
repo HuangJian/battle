@@ -21,7 +21,7 @@ import {
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
-import { rollSpeedJitter } from '../config/speed'
+import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { genId } from './World'
 import { Input } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
@@ -395,7 +395,13 @@ export class Simulation {
       ownerId: tank.id,
       ownerKind: tank.kind,
       isPlayer: tank.isPlayer ?? false,
-      speed: tank.bulletSpeed,
+      // Per-bullet speed jitter: actual = base × random(0.95, 1.05). The jitter
+      // seeds off the World's monotonic `bulletSeq` (not the module-level
+      // genId, not the AI's world-RNG), so it is reproducible across runs and
+      // snapshot-safe while NEVER perturbing enemy AI decisions (see
+      // config/speed.ts). The base (tank.bulletSpeed) comes from the per-kind
+      // table there.
+      speed: spawnBulletSpeedPxPerTick(tank.kind, tank.level ?? 0, w.bulletSeq++, w.frame),
       power: tank.bulletPower,
     }
 

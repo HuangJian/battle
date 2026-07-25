@@ -14,7 +14,7 @@ import {
   ELITE_BONUS,
   STEEL_PIERCE_FIREPOWER,
 } from '../src/config/combat'
-import { baseSpeedPxPerTick } from '../src/config/speed'
+import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick, BULLET_SPEED_RATIO, cpsToPxPerTick } from '../src/config/speed'
 import type { TankKind } from '../src/types'
 
 /**
@@ -100,20 +100,16 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     }
   })
 
-  it('bullet speeds are globally scaled (BULLET_SPEED_SCALE)', () => {
-    // Tank speed is no longer a global multiplier (it is fixed per kind in
-    // config/speed.ts); only bullets keep BULLET_SPEED_SCALE. 2026-07-25: bullet
-    // speed cut an extra 30% (×0.7) on top of the original −40% → 0.42 total.
-    // projectileSpeed 40 → 2.52 px/tick (proportional reduction)
-    const slowBullet = profileToStats({
-      firepower: 50,
-      projectileSpeed: 40,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    }).bulletSpeed
-    expect(slowBullet).toBeCloseTo(2.52, 5)
+  it('basic bullet speed is anchored to 4× the balanced-enemy movement speed', () => {
+    // The bullet-speed model was redesigned (2026-07-26): bullet speed is a
+    // per-kind table anchored to BALANCED_ENEMY_CPS × BULLET_SPEED_RATIO (×4),
+    // not the old projectileSpeed × BULLET_SPEED_SCALE formula.
+    const basicBullet = profileToStats(TANK_PROFILES.basic, 'basic').bulletSpeed
+    const basicMove = baseSpeedPxPerTick('basic')
+    expect(basicBullet).toBeCloseTo(basicMove * BULLET_SPEED_RATIO, 9)
+    // concrete value (10.0 cells/sec → 2.6667 px/tick)
+    expect(basicBullet).toBeCloseTo(cpsToPxPerTick(10.0), 9)
+    expect(baseBulletSpeedPxPerTick('basic')).toBeCloseTo(basicBullet, 9)
   })
 
   it('higher fire control yields a shorter fire cooldown', () => {
@@ -142,15 +138,15 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
 // ============================================================
 
 describe('Combat Capability — power enemy bullet speed (user req)', () => {
-  it('power bullet speed equals the level-2 player (2 stars) bullet speed', () => {
-    // Player eats two stars → every dimension 70, projectileSpeed 70. Both the
-    // power enemy and the lvl-2 player scale by BULLET_SPEED_SCALE, so the
-    // "≈ lvl-2 player" relationship is preserved by the global tuning.
-    const lvl2 = profileToStats(playerProfile(2)).bulletSpeed
-    const powerBullet = profileToStats(TANK_PROFILES.power).bulletSpeed
-    expect(powerBullet).toBe(lvl2)
+  it('power bullet base = 0.95 × the balanced-enemy (basic) bullet speed', () => {
+    // Redesigned bullet model (2026-07-26): bullet speed is a per-kind table,
+    // so power fires at 0.95 × the basic bullet (the spec's "强力敌人弹速 =
+    // 均衡敌人弹速 × 95%") — NOT at the level-2 player's bullet speed.
+    const powerBullet = profileToStats(TANK_PROFILES.power, 'power').bulletSpeed
+    const basicBullet = profileToStats(TANK_PROFILES.basic, 'basic').bulletSpeed
+    expect(powerBullet).toBeCloseTo(basicBullet * 0.95, 9)
     // Document the concrete value so a silent regression is obvious.
-    expect(powerBullet).toBeCloseTo(3.15, 5)
+    expect(powerBullet).toBeCloseTo(cpsToPxPerTick(9.5), 9) // 2.5333 px/tick
   })
 
   it('power projectileSpeed is exactly 70 (the level-2 player value)', () => {

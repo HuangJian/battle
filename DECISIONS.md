@@ -613,6 +613,46 @@ only HP (not position/speed), so the determinism test is preserved.
   die to the surplus shells. Verified the tests FAIL with the old power
   profile. `tsc --noEmit` clean, `bun test` 75/75.
 
+**Feature (2026-07-26) — bullet-speed redesign: per-kind table anchored to
+movement × 4, with per-bullet jitter (user spec):**
+- Bullet speed is now a **per-kind data table** in `src/config/speed.ts`
+  (`BASE_BULLET_SPEED_CPS`), mirroring the movement-speed table `BASE_SPEED_CPS`:
+  - 均衡(basic) 弹速 = 均衡敌人移动速度 × 4  → 2.5 cps × 4 = 10.0 cps (2.6667 px/tick)
+  - 快速(fast)   = × 1.05 → 10.5 cps (2.8 px/tick)
+  - 强力(power)  = × 0.95 →  9.5 cps (2.5333 px/tick)
+  - 重甲(armor)  = × 0.90 →  9.0 cps (2.4 px/tick)
+  - 无星星玩家    = × 1.05 → 10.5 cps (2.8 px/tick); player scales +0.5 cps/star
+    (universal growth, capped at 12.0 cps / 3.2 px/tick at 3★).
+  `BULLET_SPEED_RATIO = 4` and `BULLET_SPEED_MULT` encode the spec ratios;
+  `baseBulletSpeedPxPerTick(kind, level)` is the canonical lookup.
+- **Why a table, not a CombatProfile dimension:** basic and the no-star player
+  share `projectileSpeed` 50 yet must fire at different bullet speeds (×1.00 vs
+  ×1.05), so bullet speed cannot be a pure function of one capability axis —
+  exactly the same reason movement speed is per-kind data. The `projectileSpeed`
+  dimension is retained on `CombatProfile` for AI/extensibility symmetry but no
+  longer drives bullet speed. `profileToStats` now returns the per-kind table
+  value (synthetic no-kind profiles fall back to the balanced enemy); the old
+  `BULLET_SPEED_SCALE` constant is removed.
+- **Per-bullet jitter: actual = base × random(0.95, 1.05).** Implemented as
+  `bulletSpeedJitter(seq, frame)` — a deterministic hash of the World's
+  monotonic `bulletSeq` counter + `frame` — applied in `Simulation.tryFire`
+  via `spawnBulletSpeedPxPerTick`. It deliberately does NOT draw from
+  `world.rng`: bullets fire far more often than tanks spawn, so an rng draw per
+  shot would interleave thousands of draws into the AI's decision stream and
+  silently alter enemy behaviour. `bulletSeq` lives on the World, resets per
+  World, and is snapshotted by `WorldSerializer`, so jitter is reproducible
+  across runs and recovery (AGENTS §2.3). It also does NOT use the module-level
+  `genId()` counter, which is not reset between Worlds and would break
+  cross-run determinism.
+- **Race invariant preserved:** every bullet outruns every tank. Slowest bullet
+  (armor, 2.4 px/tick) = exactly 3× the fastest tank (fast, 0.8 px/tick).
+- **Tests:** new `tests/bullet-speed.test.ts` (anchor, per-kind multipliers,
+  concrete px/tick values, no-star player == fast, player star scaling, jitter
+  range/determinism/AI-independence, spawn composition, race invariant,
+  `profileToStats` integration). `tests/combat.test.ts` updated (basic bullet =
+  4× move; power bullet = 0.95× basic bullet, no longer "= lvl-2 player"). Full
+  suite green: `bun test` 185/185, `tsc --noEmit` clean.
+
 **Feature (2026-07-23) — Snapshot Management Framework (replaces RecoverySystem):**
 - The monolithic `RecoverySystem` (auto-numbered snapshot files + inline
   recovery UI) is **retired** (file deleted; only historical doc-comment

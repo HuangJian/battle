@@ -121,6 +121,16 @@ export class World {
   // Animation frame counter
   frame: number
 
+  /**
+   * Monotonic per-world counter incremented each time a bullet is fired. It is
+   * the deterministic seed for per-bullet speed jitter (see config/speed.ts
+   * `bulletSpeedJitter`) so cosmetic variation never depends on the
+   * module-level `genId()` counter (which is NOT reset between Worlds and would
+   * break cross-run determinism) nor on the AI's world-RNG stream. Snapshotted
+   * by WorldSerializer so recovery restores a consistent jitter sequence.
+   */
+  bulletSeq: number
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -163,6 +173,7 @@ export class World {
     this.rng = new RNG(Date.now())
     this.events = []
     this.frame = 0
+    this.bulletSeq = 0
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false

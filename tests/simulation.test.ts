@@ -54,6 +54,10 @@ function snapshot(world: World): string {
     dir: b.dir,
     isPlayer: b.isPlayer,
     alive: b.alive,
+    // speed is included so per-bullet jitter (seeded off world.bulletSeq, NOT
+    // genId) is checked for determinism — a non-deterministic jitter would
+    // make bullets travel different distances and diverge the world state.
+    speed: b.speed,
   }))
   const powerUps = world.powerUps.map((p) => ({ type: p.type, x: p.x, y: p.y, alive: p.alive }))
   const explosions = world.explosions.map((e) => ({ x: e.x, y: e.y, kind: e.kind, timer: e.timer }))

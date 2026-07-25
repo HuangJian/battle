@@ -1,6 +1,6 @@
 import type { TankKind } from '../types'
 import type { CombatProfile, CombatDimension, TankStats } from '../types'
-import { baseSpeedPxPerTick } from './speed'
+import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick } from './speed'
 
 /**
  * config/combat.ts — the heart of the Combat Capability System.
@@ -221,11 +221,12 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   const speed = kind
     ? baseSpeedPxPerTick(kind, level)
     : clamp(1.5 + ((profile.mobility - 30) * 2) / 70, 1.5, 3.5)
-  const bulletSpeed = clamp(
-    (6 + (profile.projectileSpeed - 40) * 0.05) * BULLET_SPEED_SCALE,
-    6 * BULLET_SPEED_SCALE,
-    10 * BULLET_SPEED_SCALE,
-  )
+  // Bullet speed is a per-kind data table anchored to the balanced-enemy
+  // movement speed × BULLET_SPEED_RATIO (see config/speed.ts), NOT derived from
+  // the projectileSpeed capability — basic & player share projectileSpeed 50 yet
+  // fire at different bullet speeds, so the table is the single source of truth.
+  // Synthetic (test) profiles without a kind fall back to the balanced enemy.
+  const bulletSpeed = baseBulletSpeedPxPerTick(kind ?? 'basic', level)
   // armor 45→1, 50→1, 70→3, 90→4, 100→5
   const maxHp = clamp(Math.round((profile.armor - 35) / 13), 1, 8)
   // Steel is only destroyed by bulletPower 2. We set the firepower threshold so
@@ -238,13 +239,11 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown }
 }
 
-/** Global bullet-speed multiplier. History: −40% (2026-07-22) then −30%
- *  (2026-07-25) ⇒ 0.6 × 0.7 = 0.42 total (~−58% vs the original 1.0 map).
- *  Bullets remain clearly faster than every tank (see the invariant note above).
- *  Tank speed no longer uses a global multiplier — it is fixed per kind in
- *  config/speed.ts (BASE_SPEED_CPS) so the spec's absolute cells/sec values are
- *  exact and difficulty can never scale enemy movement. */
-const BULLET_SPEED_SCALE = 0.42
+/** Global bullet-speed scale removed (2026-07-26): bullet speed is now a
+ *  per-kind data table anchored to the balanced-enemy movement speed × 4 in
+ *  config/speed.ts (BASE_BULLET_SPEED_CPS), per the bullet-speed design spec.
+ *  The `projectileSpeed` capability dimension is retained on CombatProfile for
+ *  AI/extensibility symmetry but no longer drives bullet speed. */
 
 /** Minimum firepower for a bullet to destroy steel (bulletPower 2).
  *  Tuned so default power (75) cannot pierce steel; only elite power (~86)

@@ -66,6 +66,7 @@ export function cloneWorld(world: World): WorldSnapshot {
     spawnTimer: world.spawnTimer,
     rngState: world.rng.getState(),
     frame: world.frame,
+    bulletSeq: world.bulletSeq,
   }
 }
 
@@ -127,6 +128,9 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
 
   // Frame counter
   world.frame = snap.frame
+
+  // Bullet counter (per-bullet jitter seed)
+  world.bulletSeq = snap.bulletSeq ?? 0
 
   // Resume playing
   world.state = 'playing'

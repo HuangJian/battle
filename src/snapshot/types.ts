@@ -103,6 +103,9 @@ export interface WorldSnapshot {
 
   // Simulation frame counter
   frame: number
+
+  // Monotonic bullet counter — seed for per-bullet speed jitter (determinism)
+  bulletSeq: number
 }
 
 /**
