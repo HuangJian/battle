@@ -653,6 +653,46 @@ movement × 4, with per-bullet jitter (user spec):**
   4× move; power bullet = 0.95× basic bullet, no longer "= lvl-2 player"). Full
   suite green: `bun test` 185/185, `tsc --noEmit` clean.
 
+**Feature (2026-07-26) — fire-rate standard (user spec, replaces the
+2026-07-23 fire-rate fairness invariant):**
+- Fire cadence is now a SINGLE data-driven standard in `src/config/fire-rate.ts`,
+  NOT the old `620 − fireControl×4` formula (and NOT the 2026-07-23 "player never
+  out-fired" fairness invariant, which this spec deliberately reverses).
+- **Core constraint:** a balanced (basic) enemy firing straight down from the
+  top must have AT MOST 3 bullets on the vertical route — the 3rd is fired
+  exactly when the 1st reaches the bottom. That pins the balanced interval to
+  half the bullet's full-field travel time: `FIELD / basicBulletSpeed` → 156
+  ticks → 2600 ms travel → **`BALANCED_FIRE_INTERVAL_MS = 1300`** exactly.
+- **Firing-frequency multipliers (higher = fires more often = shorter interval):**
+  `basic 1.00×, fast 1.05×, power 1.10×, armor 0.90×, player 1.05×` (no-star).
+  Interval = `BALANCED_FIRE_INTERVAL_MS / multiplier` (power 1181.8ms, player0
+  1238.1ms, basic 1300ms, armor 1444.4ms). Player gains +0.05×/star
+  (`PLAYER_FIRE_FREQUENCY_PER_STAR`), so a max-level (3★) player reaches 1.20×
+  and out-rates even power.
+- **Per-fire random variation:** actual next interval = base × random(0.95,
+  1.05). Implemented as `fireIntervalJitter(seed, frame)` — a deterministic hash
+  of the tank's **per-World `fireCount`** + `frame` — frozen into `tank.nextFireInterval`
+  at each shot in `Simulation.tryFire`. Like the bullet-speed jitter it does NOT
+  draw from `world.rng` (keeps the AI decision stream pure) and does NOT use the
+  global `genId` counter (which is NOT reset between Worlds → would break
+  cross-run determinism, AGENTS §2.3). `fireCount` resets per World and is
+  shallow-cloned by `WorldSerializer`, so it survives snapshots/Replay.
+- **Wiring:** `profileToStats` now returns `fireCooldown = round(baseFireIntervalMs(kind, level))`;
+  the gate in `tryFire` is `now − lastFire < nextFireInterval`; the AI's
+  `brain.fireTimer` re-decision delay tracks `nextFireInterval`. Elite promotion
+  leaves cadence unchanged (resets `nextFireInterval` to the base).
+- **Ordering consequence (explicit new design):** the no-star player out-rates
+  basic/fast(=tie)/armor but is OUT-RATED by power (1.10× > 1.05×) — the opposite
+  of the 2026-07-23 invariant, which the user's new spec overrides.
+- **Tests:** new `tests/fire-rate.test.ts` (derived baseline, 3-bullet math,
+  per-kind multipliers/ordering, jitter band/determinism/variety, ±5% mean);
+  `tests/fire-rate-duel.test.ts` rewritten to assert the NEW ordering (player
+  not out-fired by basic/fast/armor; power out-rates no-star player; max-level
+  player beats power); `tests/combat.test.ts` updated (fireCooldown now = the
+  standard's base, not fireControl; power out-rates player); `tests/simulation.test.ts`
+  fire-cadence tolerance widened to the ±5% band. Full suite green: `bun test`
+  204/204, `tsc --noEmit` + `oxlint` + `vite build` clean.
+
 **Feature (2026-07-23) — Snapshot Management Framework (replaces RecoverySystem):**
 - The monolithic `RecoverySystem` (auto-numbered snapshot files + inline
   recovery UI) is **retired** (file deleted; only historical doc-comment

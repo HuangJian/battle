@@ -1,6 +1,7 @@
 import type { TankKind } from '../types'
 import type { CombatProfile, CombatDimension, TankStats } from '../types'
 import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick } from './speed'
+import { baseFireIntervalMs } from './fire-rate'
 
 /**
  * config/combat.ts — the heart of the Combat Capability System.
@@ -234,8 +235,17 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   // ELITE power tank reaches it — its +15% firepower boost lifts 75 → 86 — and
   // the max-level player (firepower 80) does too, matching classic Battle City.
   const bulletPower = profile.firepower >= STEEL_PIERCE_FIREPOWER ? 2 : 1
-  // fireControl 45→440ms, 50→420, 80→300
-  const fireCooldown = clamp(Math.round(620 - profile.fireControl * 4), 220, 800)
+  // Fire cadence is now driven by the fire-rate standard (config/fire-rate.ts),
+  // NOT the `fireControl` capability: the balanced (basic) enemy's interval is
+  // pinned by the "3 bullets on the vertical route" constraint, and every other
+  // kind's interval is that baseline divided by its firing-frequency multiplier
+  // (so a higher multiplier ⇒ shorter interval ⇒ fires more often). This makes
+  // fire rate a single, testable, data-driven standard instead of a per-profile
+  // formula. Note: this intentionally supersedes the old 620 − fireControl×4
+  // mapping (and the 2026-07-23 "player never out-fired" fairness invariant —
+  // see DECISIONS.md: the new spec lets the power enemy out-rate the no-star
+  // player, which is the explicit user design).
+  const fireCooldown = Math.round(baseFireIntervalMs(kind ?? 'basic', level))
   return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown }
 }
 

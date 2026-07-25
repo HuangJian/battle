@@ -492,13 +492,12 @@ export class TacticalIntelligence {
 
     if (shoot) {
       fire(tank)
-      // Fire cadence is a fixed per-type value: exactly `fireCooldown`
-      // (derived once from the tank's combat profile). It must NOT be jittered
-      // by RNG — "same type ⇒ fixed fire rate" — and it must not depend on
-      // whether the shot connected. The hard `fireCooldown` gate in
-      // Simulation.tryFire already enforces this; the AI's own re-decision
-      // delay is set to match it so the two never disagree.
-      brain.fireTimer = tank.fireCooldown
+      // Fire cadence is a fixed per-type base, jittered per shot by ±5% (the
+      // fire-rate standard). The actual gate in Simulation.tryFire uses the
+      // tank's frozen `nextFireInterval`. The AI's own re-decision delay tracks
+      // that same frozen value so the two never disagree and the tank re-tries
+      // right as the gate opens (rather than every 250 ms).
+      brain.fireTimer = tank.nextFireInterval
     } else {
       brain.fireTimer = 250 // re-check soon
     }
@@ -561,6 +560,9 @@ export class TacticalIntelligence {
     best.bulletSpeed = eliteStats.bulletSpeed
     best.bulletPower = eliteStats.bulletPower
     best.fireCooldown = eliteStats.fireCooldown
+    // Elite promotion never changes fire cadence, but reset the jittered
+    // next-shot interval to the base so it stays in sync with fireCooldown.
+    best.nextFireInterval = eliteStats.fireCooldown
     best.maxHp = eliteStats.maxHp
     best.hp = eliteStats.maxHp
   }

@@ -335,6 +335,8 @@ export class World {
       bulletPower: stats.bulletPower,
       bulletSpeed: stats.bulletSpeed,
       fireCooldown: stats.fireCooldown,
+      nextFireInterval: stats.fireCooldown,
+      fireCount: 0,
       lastFire: 0,
       moving: false,
       vx: 0,

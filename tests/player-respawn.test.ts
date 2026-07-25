@@ -86,9 +86,10 @@ describe('Bug #2 — start key must not auto-fire the player', () => {
     world.startGame('classic', 'modern', 0)
     const sim = new Simulation(world, input)
     fw.dispatch('keydown', 'Space') // held from pressing "start"
-    // Run past the spawn animation (1s) + fire cooldown. With the key still
-    // held, the player opens fire on its own — the reported auto-fire.
-    for (let i = 0; i < 70; i++) sim.tick()
+    // Run past the spawn animation (1s) + the player's per-shot fire interval
+    // (~1.24s at level 0). With the key still held, the player opens fire on
+    // its own — the reported auto-fire.
+    for (let i = 0; i < 100; i++) sim.tick()
     expect(world.bullets.some((b) => b.isPlayer)).toBe(true) // bug: auto-fired
   })
 

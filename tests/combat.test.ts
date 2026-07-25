@@ -15,6 +15,7 @@ import {
   STEEL_PIERCE_FIREPOWER,
 } from '../src/config/combat'
 import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick, BULLET_SPEED_RATIO, cpsToPxPerTick } from '../src/config/speed'
+import { BALANCED_FIRE_INTERVAL_MS } from '../src/config/fire-rate'
 import type { TankKind } from '../src/types'
 
 /**
@@ -112,7 +113,10 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     expect(baseBulletSpeedPxPerTick('basic')).toBeCloseTo(basicBullet, 9)
   })
 
-  it('higher fire control yields a shorter fire cooldown', () => {
+  it('fire cooldown is driven by the fire-rate standard, not the fireControl capability', () => {
+    // Fire cadence is now a single data-driven standard (config/fire-rate.ts):
+    // a kind-less (synthetic) profile resolves to the balanced (basic) enemy's
+    // base interval, and the `fireControl` capability no longer affects it.
     const low = profileToStats({
       firepower: 50,
       projectileSpeed: 50,
@@ -129,7 +133,10 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
       armor: 50,
       special: 50,
     }).fireCooldown
-    expect(high).toBeLessThan(low)
+    // fireControl no longer shortens the cooldown:
+    expect(high).toBe(low)
+    // The value equals the standard's balanced base interval (1300 ms).
+    expect(low).toBe(BALANCED_FIRE_INTERVAL_MS)
   })
 })
 
@@ -160,11 +167,13 @@ describe('Combat Capability — power enemy bullet speed (user req)', () => {
     expect(profileToStats(TANK_PROFILES.power).bulletPower).toBe(1)
   })
 
-  it('power keeps its fire-rate fairness (no faster than unbuffed player)', () => {
-    // fireControl unchanged at 50 → same 420 ms cooldown as the level-0 player.
-    const powerCd = profileToStats(TANK_PROFILES.power).fireCooldown
-    const playerCd = profileToStats(playerProfile(0)).fireCooldown
-    expect(powerCd).toBeGreaterThanOrEqual(playerCd)
+  it('power out-rates the unbuffed player (new spec: 1.10× > 1.05×)', () => {
+    // Fire cadence is the fire-rate standard: power fires at 1.10× frequency,
+    // the level-0 player at 1.05×, so power's interval is strictly shorter.
+    // This deliberately reverses the old "player never out-fired" invariant.
+    const powerCd = profileToStats(TANK_PROFILES.power, 'power').fireCooldown
+    const playerCd = profileToStats(playerProfile(0), 'player', 0).fireCooldown
+    expect(powerCd).toBeLessThan(playerCd)
   })
 
   it('power bullet still clearly outruns every tank (race invariant)', () => {

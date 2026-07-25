@@ -82,7 +82,23 @@ export interface Tank extends Entity {
   bulletPower: number
   /** Bullet travel speed (derived from projectileSpeed). */
   bulletSpeed: number
+  /** Base (no-jitter) fire interval in ms, derived from the fire-rate standard. */
   fireCooldown: number
+  /**
+   * The *actual* cooldown (ms) the tank must wait before its NEXT shot. It is
+   * the base interval (`fireCooldown`) multiplied by a per-fire jitter in
+   * random(0.95, 1.05), frozen at fire time (see `nextFireIntervalMs` in
+   * config/fire-rate.ts). Stored on the tank — not recomputed per tick — so the
+   * jitter stays deterministic/snapshot-safe and the gate is stable.
+   */
+  nextFireInterval: number
+  /**
+   * Monotonic count of shots this tank has fired (per-World, reset at spawn).
+   * Used as the deterministic seed for the per-fire jitter so the jitter does
+   * NOT depend on the global `genId` counter (which is NOT reset between
+   * Worlds) — keeping firing timing reproducible across runs / snapshots.
+   */
+  fireCount: number
   lastFire: number
   moving: boolean
   /**

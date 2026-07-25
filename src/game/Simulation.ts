@@ -22,6 +22,7 @@ import {
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
+import { nextFireIntervalMs } from '../config/fire-rate'
 import { genId } from './World'
 import { Input } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
@@ -364,10 +365,12 @@ export class Simulation {
   private tryFire(tank: Tank): void {
     const w = this.world
     const now = w.frame * (1000 / 60)
-    // Fire rate is governed SOLELY by the tank's `fireCooldown` — a value
-    // derived once from the tank's combat profile (combat.ts). It is a fixed
-    // per-type cadence measured in time, and therefore cannot depend on
-    // whether any previous bullet is still in flight or has hit something.
+    // Fire rate is governed SOLELY by the tank's `nextFireInterval` — a value
+    // frozen at the previous shot from the fire-rate standard (config/fire-rate.ts):
+    // the kind's base interval × a deterministic per-fire jitter in
+    // random(0.95, 1.05). It is a fixed per-type cadence measured in time, and
+    // therefore cannot depend on whether any previous bullet is still in flight
+    // or has hit something.
     //
     // A previous implementation additionally gated the PLAYER on a
     // max-concurrent-bullets count (1 at base level, 2 once promoted). That
@@ -375,8 +378,8 @@ export class Simulation {
     // bullet only disappears after it strikes terrain/a tank or leaves the
     // field, the next shot was forced to wait for the previous one to
     // resolve — so the effective rate depended on whether the last shell hit.
-    // The cap is intentionally removed: fire rate is `fireCooldown`, period.
-    if (now - tank.lastFire < tank.fireCooldown) return
+    // The cap is intentionally removed: fire rate is `nextFireInterval`, period.
+    if (now - tank.lastFire < tank.nextFireInterval) return
 
     const v = DIR_VECTORS[tank.dir]
 
@@ -407,6 +410,15 @@ export class Simulation {
 
     w.addBullet(bullet)
     tank.lastFire = now
+    // Freeze the NEXT shot's interval now: base interval × per-fire jitter
+    // random(0.95, 1.05), seeded deterministically from (tank fire-count,
+    // world frame) so it is reproducible from World state (snapshot/Replay-safe)
+    // and — critically — does NOT depend on the global `genId` counter, which
+    // is NOT reset between Worlds. Using the per-World fire-count keeps firing
+    // timing identical across separate runs (determinism invariant, AGENTS §2.3)
+    // and never draws from `world.rng` (which would perturb the AI's stream).
+    tank.fireCount += 1
+    tank.nextFireInterval = nextFireIntervalMs(tank.kind, tank.level ?? 0, tank.fireCount, w.frame)
     w.pushEvent({ type: 'bullet_fired', bullet })
   }
 

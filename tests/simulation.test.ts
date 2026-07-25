@@ -354,9 +354,10 @@ describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
  * it strikes terrain/a tank or leaves the field, that cap coupled the next
  * shot to the *lifetime* of the previous one — so the effective rate depended
  * on whether the last shell hit. The fix removes that cap; fire rate is now
- * governed solely by `tank.fireCooldown` (a fixed per-type value from the
- * combat profile), measured in time, so it is identical whether the previous
- * bullet is still flying or has just hit a wall.
+ * governed solely by the tank's frozen per-shot cooldown (`nextFireInterval`,
+ * the fire-rate standard's base interval × a deterministic ±5% jitter),
+ * measured in time, so it is identical whether the previous bullet is still
+ * flying or has just hit a wall.
  *
  * The test fires the player upward in two scenarios and compares the gap
  * between the first two shots:
@@ -366,7 +367,8 @@ describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
  *            on the very next tick.
  * With the bug, the OPEN gap ≈ bullet-flight-time (much larger than the
  * cooldown) while WALL's gap ≈ cooldown. With the fix, both gaps equal the
- * cooldown, proving the rate is hit-independent and fixed per type.
+ * cooldown (within the ±5% jitter band), proving the rate is hit-independent
+ * and fixed per type.
  */
 describe('Fire rate is fixed per type and independent of hit outcomes', () => {
   interface FireRun {
@@ -433,12 +435,27 @@ describe('Fire rate is fixed per type and independent of hit outcomes', () => {
     const openFirstGap = open.gaps[0]
     const wallFirstGap = wall.gaps[0]
 
-    // Both gaps must equal the type's fixed cooldown (allow a 2-tick tolerance).
-    expect(Math.abs(openFirstGap - open.fireCooldownTicks)).toBeLessThanOrEqual(2)
-    expect(Math.abs(wallFirstGap - wall.fireCooldownTicks)).toBeLessThanOrEqual(2)
+    // Each gap must lie within the ±5% per-fire jitter band around the type's
+    // fixed base cooldown (allow a small slack for integer-tick rounding).
+    const lo = 0.94 * open.fireCooldownTicks - 1
+    const hi = 1.06 * open.fireCooldownTicks + 1
+    expect(openFirstGap).toBeGreaterThanOrEqual(lo)
+    expect(openFirstGap).toBeLessThanOrEqual(hi)
+    expect(wallFirstGap).toBeGreaterThanOrEqual(lo)
+    expect(wallFirstGap).toBeLessThanOrEqual(hi)
+    // Every gap in both runs stays inside the band (cadence is stable per type).
+    for (const g of open.gaps) {
+      expect(g).toBeGreaterThanOrEqual(lo)
+      expect(g).toBeLessThanOrEqual(hi)
+    }
+    for (const g of wall.gaps) {
+      expect(g).toBeGreaterThanOrEqual(lo)
+      expect(g).toBeLessThanOrEqual(hi)
+    }
 
     // And the two scenarios must agree — the previous bullet's fate must not
-    // change the cadence.
+    // change the cadence. (Identical first-fire frame ⇒ identical jitter seed ⇒
+    // identical first gap; allow 2 ticks for any phase difference.)
     expect(Math.abs(openFirstGap - wallFirstGap)).toBeLessThanOrEqual(2)
   })
 })
