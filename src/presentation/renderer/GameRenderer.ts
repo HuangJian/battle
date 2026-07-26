@@ -73,6 +73,9 @@ export class GameRenderer {
   private waterSpriteDirty = true
   private bulletSpriteDirty = true
 
+  /** Base (eagle) damage fraction 0..1, derived from world each frame. */
+  private baseDamageFrac = 0
+
   // ---- Base transform components (for allocation-free debris rendering) ----
   private _baseDpr = 1
   private _baseCamX = 0
@@ -224,6 +227,8 @@ export class GameRenderer {
 
   render(world: World): void {
     this.setTheme(world.theme)
+    this.baseDamageFrac =
+      world.baseMaxHp > 0 ? Math.max(0, 1 - world.baseHp / world.baseMaxHp) : 0
     const ctx = this.ctx
     const dpr = this.dpr
 
@@ -437,7 +442,7 @@ export class GameRenderer {
         let tlR = r
         while (tlC > 0 && tm.get(tlC - 1, tlR) === 'base') tlC--
         while (tlR > 0 && tm.get(tlC, tlR - 1) === 'base') tlR--
-        artist.drawBase(tlC * CELL, tlR * CELL, CELL * 2, false)
+        artist.drawBase(tlC * CELL, tlR * CELL, CELL * 2, false, this.baseDamageFrac)
         break
       }
     }
@@ -488,7 +493,7 @@ export class GameRenderer {
           case 'base':
             // Draw the whole 2×2 base as ONE crystal (only from its top-left cell).
             if (tm.isBaseTopLeft(c, r)) {
-              artist.drawBase(c * CELL, r * CELL, CELL * 2, false)
+              artist.drawBase(c * CELL, r * CELL, CELL * 2, false, this.baseDamageFrac)
             }
             break
         }

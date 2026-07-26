@@ -71,6 +71,8 @@ export function cloneWorld(world: World): WorldSnapshot {
     activeCommanderId: world.activeCommanderId,
     commanderQuotaRemaining: world.commanderQuotaRemaining,
     directiveSeqCounter: world.directiveSeqCounter,
+    baseHp: world.baseHp,
+    baseMaxHp: world.baseMaxHp,
   }
 }
 
@@ -141,6 +143,10 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.activeCommanderId = snap.activeCommanderId ?? null
   world.commanderQuotaRemaining = snap.commanderQuotaRemaining ?? 0
   world.directiveSeqCounter = snap.directiveSeqCounter ?? 0
+
+  // Base (eagle) HP
+  world.baseMaxHp = snap.baseMaxHp ?? 0
+  world.baseHp = snap.baseHp ?? world.baseMaxHp ?? 0
 
   // Resume playing
   world.state = 'playing'

@@ -116,6 +116,10 @@ export interface WorldSnapshot {
   commanderQuotaRemaining: number
   /** Monotonic counter incremented on every active-Commander broadcast. */
   directiveSeqCounter: number
+
+  // ---- Base (eagle) HP (2026-07-27) ----
+  baseHp: number
+  baseMaxHp: number
 }
 
 /**

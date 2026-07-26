@@ -21,6 +21,7 @@ import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
 import { rollSpeedJitter } from '../config/speed'
 import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
+import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
 import {
@@ -162,6 +163,11 @@ export class World {
    */
   directiveSeqCounter: number
 
+  // Base (eagle) hit points (2026-07-27): ONE fixed HP (BASE_MAX_HP) on every
+  // difficulty; damage per bullet equals the shooter's firepower value.
+  baseHp: number
+  baseMaxHp: number
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -209,6 +215,8 @@ export class World {
     this.activeCommanderId = null
     this.commanderQuotaRemaining = 0
     this.directiveSeqCounter = 0
+    this.baseHp = 1
+    this.baseMaxHp = 1
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false
@@ -252,6 +260,11 @@ export class World {
     // Hard 2 / Chaos 4 / Classic 0. Decremented per Commander roll in
     // Simulation.updateSpawning; never reset per stage beyond this point.
     this.commanderQuotaRemaining = COMMANDER_FLOOR[this.difficultyKey] ?? 0
+    // Base (eagle) HP resets to full for the (re)loaded stage. Classic is
+    // the authentic one-shot (HP 1); every other difficulty uses BASE_MAX_HP
+    // (one fixed pool, hit by raw firepower).
+    this.baseMaxHp = this.difficultyKey === 'classic' ? CLASSIC_BASE_MAX_HP : BASE_MAX_HP
+    this.baseHp = this.baseMaxHp
     this.freezeTimer = 0
     this.stageClearTimer = 0
     this.gameOverTimer = 0
@@ -293,6 +306,9 @@ export class World {
     const stage = STAGES[index]
     if (!stage) return
     this.tileMap.loadStage(stage)
+    // Preview shows an intact base behind the menu (no damage overlay).
+    this.baseMaxHp = this.difficultyKey === 'classic' ? CLASSIC_BASE_MAX_HP : BASE_MAX_HP
+    this.baseHp = this.baseMaxHp
     this.player = null
     this.tanks = []
     this.bullets = []

@@ -375,9 +375,12 @@ export class SpriteArtist {
    * crystal spanning the whole block (not four separate tiles) — the caller
    * (GameRenderer) only invokes this once, for the block's top-left cell.
    */
-  drawBase(x: number, y: number, size: number, destroyed: boolean): void {
+  drawBase(x: number, y: number, size: number, destroyed: boolean, damage = 0): void {
     const key = destroyed ? 'terrain.base_ruins' : 'terrain.base'
-    if (this.drawSvgCentered(key, x, y, size)) return
+    if (this.drawSvgCentered(key, x, y, size)) {
+      if (damage > 0 && !destroyed) this.drawBaseDamage(x, y, size, damage)
+      return
+    }
 
     // Procedural fallback (only when the SVG is not yet loaded)
     const ctx = this.ctx
@@ -417,6 +420,59 @@ export class SpriteArtist {
     ctx.ellipse(cx, y + size * 0.5, size * 0.1, size * 0.14, 0, 0, Math.PI * 2)
     ctx.fill()
     ctx.globalAlpha = 1
+    if (damage > 0) this.drawBaseDamage(x, y, size, damage)
+  }
+
+  /**
+   * Deterministic (no RNG) crack + scorch overlay drawn on top of the base
+   * crystal. `damage` is 0..1; more damage → more / darker cracks. Geometry is
+   * derived from the crack index (never from random draws) so the overlay stays
+   * stable across frames (no flicker).
+   */
+  private drawBaseDamage(x: number, y: number, size: number, damage: number): void {
+    const ctx = this.ctx
+    const cx = x + size / 2
+    const cy = y + size / 2
+    const d = Math.max(0, Math.min(1, damage))
+
+    // Scorch tint over the crystal body.
+    ctx.save()
+    ctx.globalAlpha = 0.16 + d * 0.34
+    ctx.fillStyle = '#14181d'
+    ctx.beginPath()
+    ctx.moveTo(cx, y + size * 0.12)
+    ctx.lineTo(x + size * 0.2, y + size * 0.45)
+    ctx.lineTo(cx, y + size * 0.55)
+    ctx.lineTo(x + size * 0.8, y + size * 0.45)
+    ctx.closePath()
+    ctx.fill()
+    ctx.restore()
+
+    // Jagged cracks radiating in from the perimeter toward the core.
+    const n = Math.max(1, Math.round(d * 6))
+    ctx.save()
+    ctx.strokeStyle = 'rgba(15,18,22,0.85)'
+    ctx.lineWidth = Math.max(1, size * 0.03)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    for (let i = 0; i < n; i++) {
+      const ang = (Math.PI * 2 * i) / n + ((i * 2.3999632) % 1) * 0.7
+      const r0 = size * 0.5
+      const r1 = size * (0.1 + (i % 3) * 0.06)
+      const px = cx + Math.cos(ang) * r0
+      const py = cy + Math.sin(ang) * r0
+      const ex = cx + Math.cos(ang) * r1
+      const ey = cy + Math.sin(ang) * r1
+      const kink = (i % 2 === 0 ? 1 : -1) * size * 0.09
+      const mx = cx + Math.cos(ang) * (r0 + r1) / 2 + Math.sin(ang) * kink
+      const my = cy + Math.sin(ang) * (r0 + r1) / 2 - Math.cos(ang) * kink
+      ctx.beginPath()
+      ctx.moveTo(px, py)
+      ctx.lineTo(mx, my)
+      ctx.lineTo(ex, ey)
+      ctx.stroke()
+    }
+    ctx.restore()
   }
 
   // ================================================================

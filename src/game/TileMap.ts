@@ -128,6 +128,17 @@ export class TileMap {
     this.dirty = true
   }
 
+  /**
+   * Mark the base cells dirty so the renderer repaints the (damaged) crystal
+   * after a non-fatal hit. Used by Simulation.damageBase — only the visible
+   * damage overlay changes; the base stays intact.
+   */
+  markBaseDamaged(): void {
+    for (const cell of this.baseCells) {
+      this.dirtyCells.push(cell.r * GRID + cell.c)
+    }
+  }
+
   /** Rebuild cached base state from the grid. Called after loadStage and snapshot restore. */
   rebuildBaseCache(): void {
     this.baseCells = []

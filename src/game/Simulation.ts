@@ -600,12 +600,12 @@ export class Simulation {
         if (type === 'empty') continue
 
         if (type === 'base') {
-          // Destroy ALL base cells at once — any hit ends the game
-          // Use cached base cell positions (O(4)) instead of scanning the entire grid (O(676))
-          w.tileMap.destroyAllBaseCells()
-          hit = true
-          this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'big')
-          w.pushEvent({ type: 'base_destroyed' })
+          // Player AND enemy bullets damage the base via the same firepower
+          // formula (classic still instakills). Returning immediately consumes
+          // the bullet on the first overlapping base cell (the base spans 2×2),
+          // so damage is applied exactly once per shot.
+          this.damageBase(this.bulletFirePower(bullet))
+          return true
         } else if (type === 'brick') {
           w.tileMap.destroy(c, r)
           hit = true
@@ -623,6 +623,47 @@ export class Simulation {
       }
     }
     return hit
+  }
+
+  /**
+   * Resolve a bullet's shooter into a single `firepower` number (0..100), which
+   * is all the base-damage routine needs. The player's firepower scales with
+   * its current star level; enemy tiers do NOT change firepower (level 0).
+   */
+  private bulletFirePower(bullet: Bullet): number {
+    const w = this.world
+    return bullet.ownerKind === 'player'
+      ? resolveProfile('player', w.playerLevel).firepower
+      : resolveProfile(bullet.ownerKind, 0).firepower
+  }
+
+  /**
+   * Apply one bullet's damage to the base (eagle). The only input is the
+   * shooter's `firePower` number — nothing about the kind, star level, or
+   * difficulty is known here. Damage IS the firepower value (user spec:
+   * `damage = firePower`), so a stronger gun chips more off the single pool.
+   * Player and enemy bullets use the SAME path (same `bulletFirePower`
+   * resolver upstream).
+   *
+   * Only when baseHp reaches 0 are all base cells cleared and the
+   * `base_destroyed` event emitted; otherwise the base stays up but its damage
+   * overlay is refreshed for the renderer.
+   */
+  private damageBase(firePower: number): void {
+    const w = this.world
+    const dmg = firePower
+    const bp = w.tileMap.getBasePos()
+    if (bp) {
+      this.createExplosion(bp.x + CELL, bp.y + CELL, 'small')
+    }
+    if (dmg >= w.baseHp) {
+      w.baseHp = 0
+      w.tileMap.destroyAllBaseCells()
+      w.pushEvent({ type: 'base_destroyed' })
+    } else {
+      w.baseHp -= dmg
+      w.tileMap.markBaseDamaged()
+    }
   }
 
   private bulletHitsTank(bullet: Bullet): boolean {
