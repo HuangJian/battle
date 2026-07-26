@@ -135,6 +135,12 @@ body {
   letter-spacing: 2px;
 }
 
+.hud-star {
+  color: var(--theme-accent-primary);
+  letter-spacing: 1px;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--theme-accent-primary) 45%, transparent);
+}
+
 /* Pause indicator — sits in the HUD's STAGE area (hud-center) so pausing never
    covers the battle field. Hidden unless the HUD bar has the .paused class. */
 .hud-pause {

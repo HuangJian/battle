@@ -4,6 +4,8 @@ import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../.
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
+import { PLAYER_PROGRESSION } from '../../config/combat'
+import { clamp } from '../../utils/helpers'
 import { SnapshotBrowser } from './SnapshotBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
@@ -45,6 +47,7 @@ export class UIManager {
   private hudStage: HTMLElement
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
+  private hudStar: HTMLElement
   private hudPauseHint: HTMLElement | null = null
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
@@ -130,6 +133,7 @@ export class UIManager {
   private lastStage = -1
   private lastEnemies = -1
   private lastLives = -1
+  private lastStar = -1
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -156,6 +160,10 @@ export class UIManager {
         <div class="hud-item">
           <span class="hud-label">HI</span>
           <span class="hud-value hud-hi" data-hud="hiscore">000000</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">STAR</span>
+          <span class="hud-value hud-star" data-hud="star">☆☆☆</span>
         </div>
       </div>
       <div class="hud-group hud-center">
@@ -296,6 +304,7 @@ export class UIManager {
     this.hudStage = this.hudBar.querySelector('[data-hud="stage"]')!
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
+    this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
@@ -606,6 +615,16 @@ export class UIManager {
       const hearts = '♥'.repeat(Math.max(0, world.lives))
       this.hudLives.textContent = hearts || '—'
       this.lastLives = world.lives
+    }
+
+    // Player star level (★ power-up) — rendered as filled/empty stars up to
+    // the progression cap so the player can read their enhancement tier at a
+    // glance. Only written when the level actually changes.
+    if (world.playerLevel !== this.lastStar) {
+      const max = PLAYER_PROGRESSION.maximumLevel
+      const lvl = clamp(world.playerLevel, 0, max)
+      this.hudStar.textContent = '★'.repeat(lvl) + '☆'.repeat(max - lvl)
+      this.lastStar = world.playerLevel
     }
 
     // Active timed buffs (shield / freeze) — countdown shown outside the field
