@@ -44,6 +44,8 @@ export class SpriteCache {
   private starbufSprites = new Map<string, CanvasImageSource[]>()
   /** Enemy hit/damage overlays — same reasoning as star-buffers: the art mimics the tank silhouette with side "tread" bars, so it must rotate with the enemy tank. */
   private hitSprites = new Map<string, CanvasImageSource[]>()
+  /** Rank insignia (Rookie/Soldier/Veteran): non-rotated centered chevron badges, drawn on the hull before the commander crown (plan §6). */
+  private insigniaSprites = new Map<string, CanvasImageSource>()
   private itemSprites = new Map<string, CanvasImageSource>()
   private bulletSprite: CanvasImageSource | null = null
   private explosionSprite: CanvasImageSource | null = null
@@ -122,6 +124,19 @@ export class SpriteCache {
         canvases.push(this.renderRotated(img, TANK_RENDER_SIZE, rot))
       }
       this.hitSprites.set(key, canvases)
+    }
+
+    // --- Rank insignia (fx.insignia.rookie/soldier/veteran) ---
+    // Non-rotated centered badges (like the shield): a small chevron
+    // cluster reads identically at any tank facing, so it needn't follow
+    // the hull rotation. Drawn after the hull + hit overlay, before the
+    // commander crown (plan §6). Pre-rasterized here for the same
+    // GPU-blit reason as every other overlay.
+    const insigniaKeys = ['fx.insignia.rookie', 'fx.insignia.soldier', 'fx.insignia.veteran']
+    for (const key of insigniaKeys) {
+      const img = lib.get(key)
+      if (!img) continue
+      this.insigniaSprites.set(key, this.renderEffect(img))
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
@@ -254,6 +269,11 @@ export class SpriteCache {
     return this.hitSprites.get(`fx.hit${stage}`)?.[dirIndex]
   }
 
+  /** Rank insignia overlay for the given tier (Rookie/Soldier/Veteran), centered on the hull. */
+  getInsigniaSprite(level: string): CanvasImageSource | undefined {
+    return this.insigniaSprites.get(`fx.insignia.${level}`)
+  }
+
   getItemSprite(key: string): CanvasImageSource | undefined {
     return this.itemSprites.get(key)
   }
@@ -275,6 +295,7 @@ export class SpriteCache {
     this.effectSprites.clear()
     this.starbufSprites.clear()
     this.hitSprites.clear()
+    this.insigniaSprites.clear()
     this.itemSprites.clear()
     this.bulletSprite = null
     this.explosionSprite = null

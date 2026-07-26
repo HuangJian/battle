@@ -172,7 +172,7 @@ export class SnapshotManager {
       maxHp: p?.maxHp ?? 0,
       combatLevel,
       enemiesRemaining: world.enemiesRemaining,
-      commanderPresent: world.tanks.some((t) => t.alive && t.aiState?.isCommander === true),
+      commanderPresent: world.activeCommanderId !== null,
       killCount: world.killCount,
       score: world.score,
       playTimeMs: world.playTimeMs,

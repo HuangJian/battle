@@ -1,28 +1,58 @@
-import type { TankKind, IntelligenceLevel } from '../types'
-import { DIFFICULTIES } from '../config/difficulty'
-import type { DifficultyAIScaling, IntelligenceConfig, ResolvedConfig } from './types'
+import type { IntelligenceLevel } from '../types'
+import type { RNG } from '../utils/RNG'
+import type { IntelligenceConfig } from './types'
 
 /**
  * ai/config.ts — the heart of "configuration defines intelligence".
  *
- * Every enemy tank runs the exact same decision pipeline
+ * Every enemy tank above 'none' runs the exact same decision pipeline
  * (`TacticalIntelligence`). What makes a Rookie different from a Commander is
  * entirely described by the data below. Adding a new tier = appending one
- * entry to `INTELLIGENCE_LEVELS` (plus, optionally, a `KIND_TO_LEVEL` entry).
- * No engine code changes.
+ * entry to `INTELLIGENCE_LEVELS` (plus a distribution weight). No engine code
+ * changes.
  *
- * Values follow the plan's §16 example, extended with goal weights and the
- * imperfection levers (reactionTime / aimError / routeNoise) required by the
- * Imperfection Model (§13) and Testing Strategy (§18: "lower levels exhibit
- * believable mistakes").
+ * Revision (plan/AI-Tier-System-Revision.md):
+ * - Tiers are ROLLED AT SPAWN TIME from `DIFFICULTY_TIER_DISTRIBUTION`; tank
+ *   kind no longer implies a tier (`KIND_TO_LEVEL` retired).
+ * - Tier capability values are FIXED — difficulty never scales them
+ *   (`DIFFICULTY_AI` / `resolveConfig` retired). The single difficulty→AI
+ *   lever is the distribution.
+ * - `teamwork` is split: issuing directives is exclusive to the ACTIVE
+ *   Commander; obeying is universal, gated per-tier by `compliance` [D1].
+ * - 'none' is a separate minimal classic-behavior branch (§3); its capability
+ *   numbers here are unused placeholders except `compliance: 0` (deaf).
  */
 
 export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> = {
+  // ----- None: classic Battle City behavior — separate branch, no pipeline.
+  // Values below (other than compliance) are never read: `updateNoneTank`
+  // bypasses perception/goals/dodge entirely (AI-Tier-System-Revision §3).
+  none: {
+    name: 'None',
+    strategicThinking: false,
+    compliance: 0, // deaf — ignores directives entirely
+    dodgeProbability: 0,
+    predictionDepth: 0,
+    routeLookAhead: 0,
+    aggression: 0,
+    reactionTime: 0,
+    aimError: 0,
+    routeNoise: 0,
+    weights: {
+      attackBase: 0,
+      attackPlayer: 0,
+      destroyWall: 0,
+      retreat: 0,
+      regroup: 0,
+      advance: 0,
+    },
+  },
+
   // ----- Rookie: shortsighted, jumpy, forgetful -----
   rookie: {
     name: 'Rookie',
     strategicThinking: false,
-    teamwork: false,
+    compliance: 0.5,
     dodgeProbability: 0.2,
     predictionDepth: 1,
     routeLookAhead: 2,
@@ -44,7 +74,7 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
   soldier: {
     name: 'Soldier',
     strategicThinking: false,
-    teamwork: false,
+    compliance: 0.7,
     dodgeProbability: 0.45,
     predictionDepth: 2,
     routeLookAhead: 4,
@@ -62,11 +92,13 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
     },
   },
 
-  // ----- Veteran: advanced prediction, strong base pressure -----
+  // ----- Veteran: advanced prediction, strong base pressure.
+  // No strategic thinking and no command — obeying directives at 80% is
+  // baseline soldiering, not "teamwork" [D1].
   veteran: {
     name: 'Veteran',
-    strategicThinking: true,
-    teamwork: true,
+    strategicThinking: false,
+    compliance: 0.8,
     dodgeProbability: 0.75,
     predictionDepth: 4,
     routeLookAhead: 6,
@@ -84,11 +116,13 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
     },
   },
 
-  // ----- Commander: full capability (born as a spawn-time elite) -----
+  // ----- Commander: full capability. Strategic thinking + broadcasting are
+  // exercised only while holding ACTIVE command (world.activeCommanderId);
+  // inactive Commanders fight as "super Veterans" (§4).
   commander: {
     name: 'Commander',
     strategicThinking: true,
-    teamwork: true,
+    compliance: 0.9,
     dodgeProbability: 0.9,
     predictionDepth: 8,
     routeLookAhead: 10,
@@ -107,95 +141,75 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
   },
 }
 
+/** Fixed roll order — determinism requires a stable cumulative walk. */
+export const TIER_ROLL_ORDER: IntelligenceLevel[] = [
+  'none',
+  'rookie',
+  'soldier',
+  'veteran',
+  'commander',
+]
+
 /**
- * Base intelligence tier for each enemy kind.
- * Difficulty does NOT change tiers — it scales capabilities (see DIFFICULTY_AI).
- * This keeps "intelligence" and "difficulty" as orthogonal axes, exactly as the
- * plan's Vision demands ("Difficulty should primarily arise from better
- * decisions, not stronger enemy statistics").
- *
- * NOTE: a `commander` is created ONLY when `Simulation.updateSpawning` rolls an
- * elite (driven by `difficulty.eliteChance`) and assigns that spawned tank
- * `level = 'commander'` + `isCommander = true`. There is no commander election;
- * all other enemies keep their base kind tier.
+ * The single difficulty→AI lever [D8]: per-difficulty tier distribution,
+ * applied per spawn in `Simulation.updateSpawning`. Each row sums to 1
+ * (unit-tested). Classic is 100% None — the faithful-recreation mode outside
+ * the difficulty ladder (§3) — and consumes ZERO RNG for the tier roll.
  */
-export const KIND_TO_LEVEL: Record<TankKind, IntelligenceLevel> = {
-  player: 'rookie', // unused for the player, but keeps the map total
-  basic: 'rookie',
-  fast: 'soldier',
-  power: 'veteran',
-  armor: 'veteran',
+export const DIFFICULTY_TIER_DISTRIBUTION: Record<
+  string,
+  Partial<Record<IntelligenceLevel, number>>
+> = {
+  classic: { none: 1 },
+  relax: { rookie: 0.6, soldier: 0.2, veteran: 0.15, commander: 0.05 },
+  hard: { rookie: 0.3, soldier: 0.3, veteran: 0.28, commander: 0.12 },
+  chaos: { rookie: 0.2, soldier: 0.3, veteran: 0.25, commander: 0.25 },
 }
 
 /**
- * Per-difficulty capability scaling. Applied on top of a tier's base config so
- * that "Hard" makes the *same* tanks smarter (better dodging, earlier
- * prediction) rather than just faster/tougher. Commander spawning is governed by
- * `difficulty.eliteChance` (see config/difficulty.ts), not by this table.
+ * Per-stage Commander floor [D9]: minimum Commander *attempts* (rolls) per
+ * stage. Quota decrements on every Commander roll, INCLUDING cap-downgraded
+ * ones [D9-fix] — the floor guarantees attempts, not survivors, so it is
+ * always satisfiable within the stage's 20 spawns.
  */
-export const DIFFICULTY_AI: Record<string, DifficultyAIScaling> = {
-  relax: {
-    dodgeMult: 0.6,
-    predictAdd: 0,
-    reactionMult: 1.4,
-    aggressionMult: 0.8,
-  },
-  classic: {
-    dodgeMult: 1.0,
-    predictAdd: 0,
-    reactionMult: 1.0,
-    aggressionMult: 1.0,
-  },
-  hard: {
-    dodgeMult: 1.2,
-    predictAdd: 1,
-    reactionMult: 0.8,
-    aggressionMult: 1.15,
-  },
-  chaos: {
-    dodgeMult: 1.4,
-    predictAdd: 2,
-    reactionMult: 0.6,
-    aggressionMult: 1.3,
-  },
+export const COMMANDER_FLOOR: Record<string, number> = {
+  classic: 0,
+  relax: 1,
+  hard: 2,
+  chaos: 4,
 }
 
+/** Hard readability/fairness limit: at most 2 Commander-tier tanks alive. */
+export const COMMANDER_ALIVE_CAP = 2
+
 /**
- * Resolve the effective config for a tier on a given difficulty.
- *
- * Memoized: there are only (levels × difficulties) distinct combinations, and
- * the returned object is immutable (the AI only ever reads it), so sharing one
- * reference is safe and keeps the per-tick path allocation-free (AGENTS §25).
+ * Map one uniform draw in [0,1) to a tier via a cumulative walk over the
+ * distribution in `TIER_ROLL_ORDER`. Pure — the caller supplies the draw
+ * (from `world.rng`), keeping all randomness on the World's stream.
  */
-const _configCache = new Map<string, ResolvedConfig>()
-export function resolveConfig(level: IntelligenceLevel, difficultyKey: string): ResolvedConfig {
-  const key = level + ':' + difficultyKey
-  const cached = _configCache.get(key)
-  if (cached) return cached
-  const base = INTELLIGENCE_LEVELS[level]
-  const scale = DIFFICULTY_AI[difficultyKey] ?? DIFFICULTY_AI.classic
-  const dodge = Math.min(0.95, base.dodgeProbability * scale.dodgeMult)
-  const resolved: ResolvedConfig = {
-    ...base,
-    level,
-    difficultyKey,
-    dodgeProbability: dodge,
-    predictionDepth: base.predictionDepth + scale.predictAdd,
-    reactionTime: Math.round(base.reactionTime * scale.reactionMult),
-    aggression: Math.min(1, base.aggression * scale.aggressionMult),
-    // Weights are not scaled — they express judgement, which is tier-owned.
-    weights: { ...base.weights },
+export function pickTier(
+  dist: Partial<Record<IntelligenceLevel, number>>,
+  r: number,
+): IntelligenceLevel {
+  let acc = 0
+  for (const tier of TIER_ROLL_ORDER) {
+    acc += dist[tier] ?? 0
+    if (r < acc) return tier
   }
-  _configCache.set(key, resolved)
-  return resolved
+  // Float-edge fallback (r ≈ 1 or a row summing < 1): last tier with weight.
+  for (let i = TIER_ROLL_ORDER.length - 1; i >= 0; i--) {
+    if ((dist[TIER_ROLL_ORDER[i]] ?? 0) > 0) return TIER_ROLL_ORDER[i]
+  }
+  return 'none'
 }
 
-/** Base tier for a freshly spawned enemy of the given kind. */
-export function levelForKind(kind: TankKind): IntelligenceLevel {
-  return KIND_TO_LEVEL[kind] ?? 'rookie'
-}
-
-/** True if `difficultyKey` is a known key (defensive guard). */
-export function hasDifficultyAI(difficultyKey: string): boolean {
-  return difficultyKey in DIFFICULTIES
+/**
+ * Roll a tier for one spawn on the given difficulty. Consumes exactly one
+ * `rng` draw when the distribution has any non-None weight, and ZERO draws
+ * for a 100%-None distribution (classic) — the tier-roll gate (§7).
+ */
+export function rollTier(difficultyKey: string, rng: RNG): IntelligenceLevel {
+  const dist = DIFFICULTY_TIER_DISTRIBUTION[difficultyKey] ?? DIFFICULTY_TIER_DISTRIBUTION.classic
+  if ((dist.none ?? 0) >= 1) return 'none'
+  return pickTier(dist, rng.next())
 }

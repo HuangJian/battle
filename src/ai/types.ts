@@ -1,5 +1,5 @@
 import type { Direction } from '../constants'
-import type { GoalType, CommanderDirective, IntelligenceLevel } from '../types'
+import type { GoalType, CommanderDirective } from '../types'
 
 /**
  * ai/types.ts — shared data structures for the Tactical Intelligence Framework.
@@ -98,10 +98,17 @@ export interface GoalWeights {
  */
 export interface IntelligenceConfig {
   name: string
-  /** Does this tier perform strategic (20s) re-evaluation? */
+  /** Does this tier perform strategic (20s) re-evaluation? (Commander only,
+   *  and only while holding active command — see AI-Tier-System-Revision §4.) */
   strategicThinking: boolean
-  /** Does this tier heed commander directives? */
-  teamwork: boolean
+  /**
+   * 指令遵从度 — probability (0..1) that this unit receives, understands and
+   * executes a commander directive. Rolled ONCE per directive on arrival
+   * (cached in `aiState.directiveCompliant`). Replaces the old boolean
+   * `teamwork`: issuing directives is exclusive to the active Commander;
+   * obeying is universal and compliance-gated. None-tier is deaf (0).
+   */
+  compliance: number
   /** Probability (0..1) the tank successfully dodges an incoming bullet. */
   dodgeProbability: number
   /** How many cells ahead bullets are predicted (1 = reacts late). */
@@ -118,20 +125,6 @@ export interface IntelligenceConfig {
   routeNoise: number
   /** Dynamic goal scoring weights. */
   weights: GoalWeights
-}
-
-/** Per-difficulty scaling applied on top of a tier's base config. */
-export interface DifficultyAIScaling {
-  dodgeMult: number
-  predictAdd: number
-  reactionMult: number
-  aggressionMult: number
-}
-
-/** A resolved (difficulty-scaled) config for one tank on this stage. */
-export interface ResolvedConfig extends IntelligenceConfig {
-  level: IntelligenceLevel
-  difficultyKey: string
 }
 
 export type { GoalType, CommanderDirective }

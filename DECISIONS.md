@@ -111,13 +111,19 @@ weighted-random direction picker entirely.
 - **Three thinking layers, distinct time scales:** strategic (~20 s, stable
   long-term objective), tactical (~5 s, dynamic goal + route target), reactive
   (every tick, bullet avoidance + committed-dodge hold).
-- **Intelligence is configuration, not code.** Tiers `rookie / soldier /
-  veteran / commander` live in `src/ai/config.ts` (`INTELLIGENCE_LEVELS`) with
-  capability flags + dynamic goal weights. Enemy kind → base tier via
-  `KIND_TO_LEVEL` (basic→rookie, fast→soldier, power/armor→veteran). Difficulty
-  scales capabilities (dodge, prediction depth, reaction, aggression) through
-  `DIFFICULTY_AI` — never the tank stats. New tiers are added by appending one
-  registry entry; no engine change.
+- **Intelligence is configuration, not code.** Tiers `none / rookie /
+  soldier / veteran / commander` live in `src/ai/config.ts`
+  (`INTELLIGENCE_LEVELS`) with capability flags + dynamic goal weights.
+  A tank's tier is **rolled at spawn time** from the per-difficulty
+  distribution table `DIFFICULTY_TIER_DISTRIBUTION` (in `Simulation.
+  updateSpawning`); **tank kind no longer implies a tier** (`KIND_TO_LEVEL`
+  is retired). The **only** difficulty→AI lever is that distribution — difficulty
+  never scales the capability numbers (`DIFFICULTY_AI` / `resolveConfig`
+  retired). `none` is a separate minimal classic branch (`updateNoneTank`),
+  outside the perception/goals/dodge pipeline. `teamwork` is split: issuing
+  directives is exclusive to the active Commander; obeying is universal,
+  gated per-tier by `compliance` (None = 0, deaf). New tiers = append one
+  `INTELLIGENCE_LEVELS` entry + a distribution weight; no engine change.
 - **Dynamic goal scoring** replaces fixed priority lists (`evaluateGoals`):
   each candidate goal (attackBase / attackPlayer / destroyWall / retreat /
   regroup / advance) gets a weighted score from situation factors; the highest
@@ -125,15 +131,19 @@ weighted-random direction picker entirely.
 - **Bullet avoidance** scales with intelligence: prediction depth (how early a
   bullet is seen), dodge probability, and a delayed-reaction model. Lower tiers
   react late and fail to dodge more often.
-- **Commander system:** a commander is the coordination role. The **only** way
-  an enemy becomes a commander is by being born as a spawn-time elite — when
-  `Simulation.updateSpawning` rolls `difficulty.eliteChance` it assigns that
-  tank `level = 'commander'` + `isCommander = true` and a +15% combat-profile
-  boost (DECISIONS.md §29). A commander broadcasts lightweight directives
-  (pushLeft / pushRight / defendBase / attackTogether / spreadOut) every ~20 s.
-  Directives *influence* — teamwork tiers heed them (goal/route bias);
-  non-teamwork tiers ignore them. The commander never overrides an autonomous
-  tank. There is no runtime commander election.
+- **Commander system:** a commander is the coordination role. The active
+  commander is the **alive** `commander`-tier tank with the highest `spawnSeq`
+  (per-World monotonic counter assigned at `createTank`, recomputed every tick
+  by `Simulation.recomputeActiveCommander()` — no election). On death the
+  previous-born commander regains command; a 1 s office delay (`commanderTimer`)
+  is overwritten on each succession. **Every** `commander`-tier tank — including
+  inactive ones — gets the +15% combat-profile boost (DECISIONS §29, D10
+  carve-out); only the newest-born issues directives. If 2 commanders are
+  already alive, a rolled commander is **downgraded to veteran** (no boost). A
+  commander broadcasts lightweight directives (pushLeft / pushRight / defendBase /
+  attackTogether / spreadOut) every ~20 s; obedience is gated per-tier by
+  `compliance` and cached per broadcast. The commander never overrides an
+  autonomous tank.
 - **Imperfection model:** `reactionTime`, `aimError`, `routeNoise` make higher
   tiers commit fewer mistakes while never becoming flawless (dodge probability
   clamped to ≤ 0.95).
@@ -156,8 +166,13 @@ weighted-random direction picker entirely.
   are data.
 
 **Testing:** `tests/tactical-ai.test.ts` guards determinism, no-stall
-  navigation, strategic-goal stability, commander election/broadcast,
-  intelligence-scaled bullet avoidance, and config-driven tiers.
+  navigation, strategic-goal stability, tier-roll distribution + the
+  classic-zero-RNG gate, command authority (highest-spawnSeq active
+  commander, succession, 1s office-delay overwrite) + directive broadcast,
+  floor (attempt-based quota) + cap (≤2 alive, downgrade-to-veteran),
+  the +15% commander boost carve-out, intelligence-scaled bullet avoidance,
+  compliance (one roll per directive, cached, None deaf), the None classic
+  branch, and snapshot round-trip of the command-authority fields.
 
 ---
 
@@ -529,12 +544,14 @@ profile distributions, not code branches.
 **Rationale / specifics:**
 - **Budgets:** every normal enemy archetype sums to `BASELINE_BUDGET = 300`
   (balanced/fast/power/heavy in `TANK_PROFILES`); difficulty = variety, not
-  inflation. Commanders (born as spawn-time elites) break the budget via a
+  inflation. Commanders (spawn-rolled `commander` tier) break the budget via a
   +15% boost to their kind-specific dimension (`ELITE_DIMENSION` / `ELITE_BONUS`),
   applied once at spawn in `Simulation.updateSpawning` (a fresh object, never
-  mutating the shared base profile — safe for shallow-clone recovery). Since
-  commander is the only elite path, there is no compounding ("elite = elite,
-  never more").
+  mutating the shared base profile — safe for shallow-clone recovery). Every
+  `commander`-tier tank is boosted (including inactive commanders); a
+  cap-downgraded commander becomes a `veteran` and is NOT boosted. Since the
+  boost is applied exactly once to a fresh profile, there is no compounding
+  ("commander = +15%, never more"). See DECISIONS §29 (D10 carve-out).
 - **Player progression:** universal growth — every star raises ALL six dimensions
   together (level 0→50, 1→60, 2→70, 3→80). Ceiling is `PLAYER_PROGRESSION`
   (`maximumLevel`, `maxMultiplier`) so hardcore/challenge modes can out-scale
@@ -815,56 +832,85 @@ matrix changes in exactly one cell: power→fast goes from 1 (one-shot) to 2.
 
 ---
 
-## 29. Spawn-Time Elite Enemies = Born Commanders (2026-07-26)
+## 29. Spawn-Rolled 5-Tier Enemy AI (2026-07-26, revises former "born-commander" model)
 
-**Decision:** An elite enemy *is* a commander. The only way an enemy becomes a
-commander is by being **born** as a spawn-time elite — there is **no runtime
-commander election**. The per-difficulty `eliteChance` knob in
-`config/difficulty.ts` (`relax 0.05`, `classic 0.0`, `hard 0.12`, `chaos 0.25`)
-drives the roll inside `Simulation.updateSpawning`. When it succeeds, the spawned
-tank:
+**Decision:** The enemy intelligence tier is **rolled at spawn time** from a
+per-difficulty distribution table (`DIFFICULTY_TIER_DISTRIBUTION` in
+`src/ai/config.ts`). Tank *kind* no longer implies a tier — `KIND_TO_LEVEL`,
+`DIFFICULTY_AI`, `resolveConfig`, `levelForKind`, and the per-difficulty
+`eliteChance` knob are all **retired**. The five tiers are
+`none / rookie / soldier / veteran / commander`.
 
-1. gets the **+15%** combat-profile boost (`applyEliteModifier` on its kind's
-   `*_DIMENSION`), re-deriving concrete stats; and
-2. is assigned `level = 'commander'` + `isCommander = true`, i.e. it runs the
-   full commander AI tier and immediately coordinates its squad via the
-   directive-broadcast mechanism (`TacticalIntelligence.updateTank`, gated on
-   `isCommander && commanderTimer <= 0`). `commanderTimer` is cleared to 0 at
-   spawn so the first directive broadcasts as soon as the spawn animation ends.
+**Difficulty no longer scales capability numbers.** The *only* difficulty→AI
+lever is the tier distribution. `relax` skews low (mostly none/rookie), `hard`
+shifts mass toward veteran, `chaos` adds commander weight; `classic` may be
+100% `none` (consuming **zero RNG** — the roll is skipped when the
+distribution is a single tier).
 
-There is exactly **one** commander concept (`'commander'` in `IntelligenceLevel`)
-and one coordination path (born-elite). The former distinct `elite` tier and the
-`commanderChance` election probability have both been deleted.
+**The `none` tier is a separate minimal classic branch**, not a zeroed pipeline:
+random wander biased down + random fire, implemented in
+`TacticalIntelligence.updateNoneTank` with its own timing constants
+(`NONE_TURN_MIN_MS`, `NONE_TURN_JITTER_MS`, `NONE_FIRE_JITTER_MS`). It is
+deaf to directives (`compliance` is 0) and carries no rank insignia.
 
-**Why conflate elite with commander (not a separate tier):** the user's explicit
-direction is that becoming an elite *is* the only promotion path, and it should
-grant the commander role (stats boost + squad coordination). Keeping a separate
-non-commander `elite` tier added a redundant concept and a second commander-like
-visual with no gameplay payoff.
+**Command authority (succession, no election):** the active commander is the
+**alive** commander with the highest `spawnSeq` (a per-World monotonic counter
+in `World`, `spawnSeqCounter`, assigned at `createTank` — `genId()` is *not*
+used for this so sequencing is independent of entity reuse). On death, the
+previous-born commander automatically regains command. A 1s office delay
+(`commanderTimer = 1000`) is measured **from the moment a tank becomes active**
+and **overwritten** (not added) on each succession. `activeCommanderId` is
+recomputed every tick by `Simulation.recomputeActiveCommander()` (the AI layer is
+read-only; it never writes World state).
 
-**No-compounding guaranteed by construction:** the +15% boost is applied exactly
-once, at spawn, to a fresh profile object (`applyEliteModifier(resolveProfile(kind,
-0), kind)`). There is no second code path that could re-boost it (the election is
-gone), so the combat budget gate holds by design — "elite = elite, never more".
+**Boost rides the tier, not the command role (D10 carve-out, provisional):** the
++15% combat-profile boost (`applyEliteModifier` on the kind's `ELITE_DIMENSION`)
+is applied to **every** spawned `commander`-tier tank — including inactive
+commanders. Only the **newest-born** commander issues directives; the older
+commander(s) obey like any other tier. If the live commander cap (`COMMANDER_ALIVE_CAP = 2`)
+is already saturated when a commander tier is rolled, it is **downgraded to
+`veteran` and receives no boost**. `veteran` itself lost `strategicThinking`
+and `teamwork` (it is now a pure combat tier, D1).
 
-**RNG placement:** the elite roll lives in `Simulation.updateSpawning`, gated on
-`eliteChance > 0`. On `classic` (`eliteChance === 0`) the roll is skipped and
-zero RNG is consumed for elites; on other difficulties the cost is paid
-per-spawn, matching the spawn cadence. All entropy still flows through
-`world.rng`, so determinism (same seed ⇒ same elite sequence) holds.
+**Floor / cap guarantees:** `COMMANDER_FLOOR` (`relax ≥ 1`, `hard ≥ 2`,
+`chaos ≥ 4`) is expressed as a **remaining-attempts quota**
+(`commanderQuotaRemaining`), initialized from the floor at `loadStage`. The quota
+**decrements on every commander roll** (forced floor *and* natural roll,
+including cap-downgraded ones) and **clamps at 0** — so it never goes negative
+and the floor is always satisfiable within the stage's 20 spawns. When
+`remainingSpawns <= commanderQuotaRemaining` the floor forces the next spawn to
+be a commander with **no RNG**. The live cap is enforced at spawn: if 2
+commanders are already alive, the rolled commander becomes a veteran.
 
-**Visuals:** a born-commander elite renders with the standard golden commander
-crown (`drawCommanderAura`, `SpriteArtist`) — no separate elite aura. Snapshot
-metadata expose `commanderPresent` (a tank with `isCommander === true`); the
-separate `elitePresent` flag and `ELITE` badge were removed.
+**Compliance (directive obedience):** the old `teamwork: boolean` is replaced by
+a per-tier `compliance` probability. On each directive broadcast,
+`broadcastDirective` **bumps `world.directiveSeqCounter`** and **rolls
+`directiveCompliant` once per receiver**, cached until the next broadcast
+(succession-safe — keyed on the World seq, not per-tank age). `none` is always
+deaf. Higher tiers have higher `compliance`, so they obey more reliably.
 
-**Testing:** `tests/elite-spawn.test.ts` guards (1) elite determinism — same RNG
-seed reproduces the same elite sequence; (2) classic (`eliteChance 0`) spawns
-zero elites; (3) the elite stat boost is exactly +15% on the kind dimension;
-(4) a spawned elite is `level === 'commander'` **and** `isCommander === true`
-(so it broadcasts directives); (5) at most one commander path exists — there is
-no election, so the only commander is the spawn-time elite. `tests/tactical-ai.
-test.ts` no longer references `commanderChanceFor` and asserts four intelligence
-tiers (`rookie / soldier / veteran / commander`).
+**Visuals:** rank insignia (gold chevrons: 1/2/3 for
+rookie/soldier/veteran — `fx.insignia.*.svg`, pre-rasterized in `SpriteCache`)
+render on enemy tanks when `level !== 'none' && !isCommander`; the golden crown
+renders only when `isCommander` (crown XOR insignia). Snapshot metadata
+`commanderPresent` is now `world.activeCommanderId !== null` (was the per-tank
+`isCommander` scan).
+
+**Testing:** `tests/elite-spawn.test.ts` was **deleted** (it assumed the retired
+`eliteChance` model). `tests/tactical-ai.test.ts` now guards: tier-roll
+distribution sums + determinism + classic-zero-RNG; headless determinism; no-stall
+classic wander; strategic-goal stability; command authority (classic none,
+highest-spawnSeq, succession + office-delay overwrite); floor (attempt-based
+quota) + cap (≤2 alive, downgrade-to-veteran no boost); boost carve-out
+(every commander +15%, two commanders both boosted); bullet avoidance; compliance
+(none deaf, cached-per-directive, higher tiers comply more); none-branch
+deterministic/no-freeze/fires; snapshot round-trip of the 4 new World fields;
+`commanderPresent` metadata. **240/240 tests pass; `tsc --noEmit` clean.**
+
+**Snapshot/Recovery safety:** the 4 new World-level fields
+(`spawnSeqCounter`, `activeCommanderId`, `commanderQuotaRemaining`,
+`directiveSeqCounter`) are cloned/restored by `WorldSerializer`; per-tank new
+fields (`spawnSeq`, `directiveSeq`, `directiveCompliant`) ride the shallow-copied
+`aiState`. All wiring is shallow-clone safe.
 
 

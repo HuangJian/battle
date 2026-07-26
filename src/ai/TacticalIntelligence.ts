@@ -10,11 +10,14 @@ import {
   STRATEGIC_INTERVAL_MS,
   COMMANDER_INTERVAL_MS,
   DODGE_LOCK_MS,
+  NONE_TURN_MIN_MS,
+  NONE_TURN_JITTER_MS,
+  NONE_FIRE_JITTER_MS,
 } from '../constants'
 import { opposite, ALL_DIRS, snap } from '../utils/helpers'
-import { resolveConfig } from './config'
+import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
-import type { ResolvedConfig, Situation, Perception } from './types'
+import type { IntelligenceConfig, Situation, Perception } from './types'
 import { perceive, analyze, dirToward, manhattan } from './perception'
 
 /**
@@ -52,14 +55,73 @@ export class TacticalIntelligence {
       return
     }
 
-    // Commander coordination (directive broadcast) is handled per-tank inside
-    // updateTank for any tank born as a commander (spawn-time elite). There is
-    // no runtime commander election — being an elite is the only path.
+    // Command authority (world.activeCommanderId) is recomputed by Simulation
+    // once per tick BEFORE this update runs — the AI layer only reads it
+    // (One-Author invariant, AI-Tier-System-Revision §4).
 
     for (const tank of world.tanks) {
       if (!tank.alive || tank.spawnTimer > 0 || !tank.aiState) continue
-      this.updateTank(world, tank, fire)
+      if (tank.aiState.level === 'none') {
+        // Classic branch (§3): minimal wander+fire, no tactical pipeline.
+        this.updateNoneTank(world, tank, fire)
+      } else {
+        this.updateTank(world, tank, fire)
+      }
     }
+  }
+
+  // ================================================================
+  // None tier — classic Battle City behavior branch (§3)
+  // ================================================================
+
+  /**
+   * Random wander with a downward/toward-base bias, random fire on a
+   * cooldown-plus-jitter schedule, direction re-roll on wall collision or
+   * timer expiry. No perception, no goals, no dodging, deaf to directives.
+   * All randomness through `world.rng` — deterministic and snapshot-safe.
+   */
+  private updateNoneTank(world: World, tank: Tank, fire: (tank: Tank) => void): void {
+    const brain = tank.aiState!
+    brain.thinkTimer -= this.dt
+    brain.fireTimer -= this.dt
+
+    // Blocked ahead? (terrain/bounds only — tank-vs-tank jams unstick via the
+    // periodic timer re-roll, like the original game's bump-and-turn feel).
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const v = DIR_VECTORS[brain.currentDir]
+    const nx = gx + v.dx * CELL
+    const ny = gy + v.dy * CELL
+    const blocked = !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
+
+    if (brain.thinkTimer <= 0 || blocked) {
+      const open: Direction[] = []
+      for (const d of ALL_DIRS) {
+        const dv = DIR_VECTORS[d]
+        const ox = gx + dv.dx * CELL
+        const oy = gy + dv.dy * CELL
+        if (world.isInBounds(ox, oy, TANK, TANK) && !world.rectHitsTerrain(ox, oy, TANK, TANK)) {
+          open.push(d)
+        }
+      }
+      if (open.length === 0) {
+        // Fully boxed in — back out (see chooseDirection's jam note).
+        brain.currentDir = opposite(brain.currentDir)
+      } else {
+        brain.currentDir = pickClassicDir(open, world)
+      }
+      brain.thinkTimer = NONE_TURN_MIN_MS + world.rng.next() * NONE_TURN_JITTER_MS
+    }
+
+    if (brain.fireTimer <= 0) {
+      fire(tank)
+      // Cooldown + jitter: guarantees ≥1 fire attempt per
+      // (nextFireInterval + NONE_FIRE_JITTER_MS) window (objective floor, §3).
+      brain.fireTimer = tank.nextFireInterval + world.rng.next() * NONE_FIRE_JITTER_MS
+    }
+
+    tank.dir = brain.currentDir
+    tank.moving = true
   }
 
   // ================================================================
@@ -68,7 +130,8 @@ export class TacticalIntelligence {
 
   private updateTank(world: World, tank: Tank, fire: (tank: Tank) => void): void {
     const brain = tank.aiState!
-    const cfg = resolveConfig(brain.level, world.difficultyKey)
+    // Tier capabilities are fixed data — no difficulty scaling (revision §2).
+    const cfg = INTELLIGENCE_LEVELS[brain.level]
 
     // --- Decrement timers (all in ms) ---
     brain.thinkTimer -= this.dt
@@ -79,8 +142,10 @@ export class TacticalIntelligence {
     brain.directiveAge += this.dt
     brain.commanderTimer -= this.dt
 
-    // --- Commander broadcast (this tank is the elected commander) ---
-    if (brain.isCommander && brain.commanderTimer <= 0) {
+    // --- Commander broadcast — ACTIVE command identity gates it, not the
+    // born-as-commander flag (revision §4). Inactive Commanders never
+    // broadcast; they fight as "super Veterans".
+    if (tank.id === world.activeCommanderId && brain.commanderTimer <= 0) {
       this.broadcastDirective(world, tank, cfg)
       brain.commanderTimer = COMMANDER_INTERVAL_MS * (0.8 + world.rng.next() * 0.4)
     }
@@ -89,8 +154,9 @@ export class TacticalIntelligence {
     const p = perceive(world, tank, cfg)
     const s = analyze(world, tank, p, cfg)
 
-    // --- Strategic layer (stable long-term objective) ---
-    if (cfg.strategicThinking && brain.strategicTimer <= 0) {
+    // --- Strategic layer (stable long-term objective) — active Commander
+    // only: inactive Commanders lose strategic thinking (revision §4).
+    if (cfg.strategicThinking && tank.id === world.activeCommanderId && brain.strategicTimer <= 0) {
       this.strategicThink(world, tank, brain, cfg, p, s)
       brain.strategicTimer = STRATEGIC_INTERVAL_MS * (0.85 + world.rng.next() * 0.3)
     }
@@ -120,7 +186,7 @@ export class TacticalIntelligence {
     world: World,
     _tank: Tank,
     brain: AIState,
-    _cfg: ResolvedConfig,
+    _cfg: IntelligenceConfig,
     p: Perception,
     s: Situation,
   ): void {
@@ -145,7 +211,7 @@ export class TacticalIntelligence {
     world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    cfg: IntelligenceConfig,
     p: Perception,
     s: Situation,
   ): void {
@@ -164,7 +230,7 @@ export class TacticalIntelligence {
     _world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    cfg: IntelligenceConfig,
     p: Perception,
     s: Situation,
   ): GoalType {
@@ -172,7 +238,7 @@ export class TacticalIntelligence {
     const maxDist = FIELD
     const threatPenalty = s.threat ? 0.35 : 0
     const followsDirective =
-      brain.directive !== 'none' && cfg.teamwork && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
+      brain.directive !== 'none' && brain.directiveCompliant && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
 
     // Combat Capability bias (plan §14): the tank evaluates its OWN strengths.
     // A high-mobility tank presses/flanks harder; a high-armor tank pushes more
@@ -243,7 +309,7 @@ export class TacticalIntelligence {
     _world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    _cfg: IntelligenceConfig,
     p: Perception,
     _s: Situation,
     goal: GoalType,
@@ -280,7 +346,7 @@ export class TacticalIntelligence {
     // Directive bias (teamwork tanks only; others ignore it — §14).
     if (
       brain.directive !== 'none' &&
-      cfg.teamwork &&
+      brain.directiveCompliant &&
       brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
     ) {
       switch (brain.directive) {
@@ -323,7 +389,7 @@ export class TacticalIntelligence {
     world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    cfg: IntelligenceConfig,
     p: Perception,
     _s: Situation,
     tx: number,
@@ -407,7 +473,7 @@ export class TacticalIntelligence {
     world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    cfg: IntelligenceConfig,
     p: Perception,
     s: Situation,
   ): void {
@@ -462,7 +528,7 @@ export class TacticalIntelligence {
     world: World,
     tank: Tank,
     brain: AIState,
-    cfg: ResolvedConfig,
+    cfg: IntelligenceConfig,
     _p: Perception,
     s: Situation,
     fire: (tank: Tank) => void,
@@ -503,16 +569,27 @@ export class TacticalIntelligence {
   // ================================================================
 
   /** The commander evaluates the battlefield and broadcasts a directive. */
-  private broadcastDirective(world: World, commander: Tank, cfg: ResolvedConfig): void {
+  private broadcastDirective(world: World, commander: Tank, cfg: IntelligenceConfig): void {
     const directive = this.chooseDirective(world, commander, cfg)
+    // Bump the world-level directive seq BEFORE assigning, so every receiver
+    // caches the new (seq-keyed) compliance roll against this exact broadcast
+    // (revision §2.2 [D7]). Succession-safe: a new commander incrementing
+    // the counter automatically invalidates stale cached rolls.
+    world.directiveSeqCounter += 1
+    const seq = world.directiveSeqCounter
     for (const t of world.tanks) {
       if (!t.alive || t.spawnTimer > 0 || t === commander || !t.aiState) continue
+      if (t.aiState.level === 'none') continue // deaf — separate branch, ignores directives
       t.aiState.directive = directive
       t.aiState.directiveAge = 0
+      t.aiState.directiveSeq = seq
+      // One compliance roll per directive, cached until the next broadcast.
+      const lvl = INTELLIGENCE_LEVELS[t.aiState.level]
+      t.aiState.directiveCompliant = world.rng.next() < lvl.compliance
     }
   }
 
-  private chooseDirective(world: World, commander: Tank, cfg: ResolvedConfig): CommanderDirective {
+  private chooseDirective(world: World, commander: Tank, cfg: IntelligenceConfig): CommanderDirective {
     const p = perceive(world, commander, cfg)
     const baseX = p.baseX
     const baseY = p.baseY
@@ -566,11 +643,30 @@ function tankHp(tank: Tank): number {
  * directly with AI). A fire-control 80 tank fires ~0.94×aggression; a 50 tank
  * ~0.85×. Bounded to [0,1].
  */
-function effectiveAggression(cfg: ResolvedConfig, tank: Tank): number {
+function effectiveAggression(cfg: IntelligenceConfig, tank: Tank): number {
   const fc = tank.profile ? tank.profile.fireControl : 50
   return Math.min(1, cfg.aggression * (0.7 + 0.3 * (fc / 100)))
 }
 
 function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v
+}
+
+/**
+ * pickClassicDir — classic wander bias (§3). Among open directions, weight
+ * toward the base (downward — enemies spawn at the top and the eagle sits at
+ * the bottom, so "down" is "toward base") so None-tier tanks still drift
+ * toward the objective like the original game while allowing lateral jukes. A
+ * single `world.rng` draw keeps the None branch fully deterministic.
+ */
+function pickClassicDir(open: Direction[], world: World): Direction {
+  const weights: Record<Direction, number> = { down: 3, left: 1, right: 1, up: 0.35 }
+  let total = 0
+  for (const d of open) total += weights[d]
+  let r = world.rng.next() * total
+  for (const d of open) {
+    r -= weights[d]
+    if (r <= 0) return d
+  }
+  return open[open.length - 1]
 }

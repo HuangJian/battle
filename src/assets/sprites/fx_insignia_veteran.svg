@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 41 41" width="41" height="41">
+  <!-- Rank insignia: 3 chevrons (Veteran). Dark outline + gold fill for contrast on any enemy hull. -->
+  <path d="M9.5 11 L20.5 3 L31.5 11 M9.5 19 L20.5 11 L31.5 19 M9.5 27 L20.5 19 L31.5 27" fill="none" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9.5 11 L20.5 3 L31.5 11 M9.5 19 L20.5 11 L31.5 19 M9.5 27 L20.5 19 L31.5 27" fill="none" stroke="#FFD54A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

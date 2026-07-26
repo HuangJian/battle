@@ -144,11 +144,14 @@ export interface Tank extends Entity {
 }
 
 /**
- * Intelligence tier names. Every AI tank runs the same decision pipeline;
- * differences are entirely configuration-driven (see `src/ai/config.ts`).
- * New tiers can be added there without touching the engine.
+ * Intelligence tier names. Every AI tank above 'none' runs the same decision
+ * pipeline; differences are entirely configuration-driven (see
+ * `src/ai/config.ts`). 'none' is a separate minimal classic-behavior branch
+ * (random wander + base bias + random fire — AI-Tier-System-Revision §3).
+ * The tier is ROLLED AT SPAWN TIME from the difficulty's distribution table;
+ * tank kind no longer implies a tier.
  */
-export type IntelligenceLevel = 'rookie' | 'soldier' | 'veteran' | 'commander'
+export type IntelligenceLevel = 'none' | 'rookie' | 'soldier' | 'veteran' | 'commander'
 
 /**
  * Candidate tactical/strategic goals. Goals compete through dynamic scores
@@ -189,7 +192,12 @@ export type CommanderDirective =
 export interface AIState {
   // ---- Identity / intelligence ----
   level: IntelligenceLevel
+  /** Born at Commander tier (render flag for crown/aura; NOT command authority —
+   *  the active commander is `world.activeCommanderId`). */
   isCommander: boolean
+  /** Monotonic per-World birth order (from `world.spawnSeqCounter`). The alive
+   *  Commander with the highest spawnSeq holds command authority. */
+  spawnSeq: number
 
   // ---- Tactical layer (reactive + short horizon) ----
   thinkTimer: number // ms until the next tactical re-evaluation
@@ -211,6 +219,10 @@ export interface AIState {
   commanderTimer: number // ms until this commander's next broadcast
   directive: CommanderDirective // last directive received (or 'none')
   directiveAge: number // ms since the directive was received
+  /** Seq id (world.directiveSeqCounter) of the directive last rolled for. */
+  directiveSeq: number
+  /** Cached compliance roll for that directive (rolled once, on arrival). */
+  directiveCompliant: boolean
 }
 
 export interface Bullet extends Entity {
@@ -294,21 +306,19 @@ export interface TankConfig {
 export interface DifficultyConfig {
   name: string
   /**
-   * Difficulty affects ONLY enemy AI (via `DIFFICULTY_AI` in src/ai/config.ts):
-   * dodging, prediction depth, reaction, aggression, and commander-election
-   * chance. It must NEVER scale enemy combat stats — that would "enhance enemy
-   * power" (armor / speed / bullet speed / HP), which is explicitly forbidden by
-   * DECISIONS.md (Tactical Intelligence Framework). Lives and the player's
-   * starting star level are player-side resources, not enemy combat power.
+   * Difficulty affects enemy AI ONLY through the spawn-time tier distribution
+   * (`DIFFICULTY_TIER_DISTRIBUTION` in src/ai/config.ts). Tier capability
+   * numbers are FIXED — difficulty never scales them, and it must NEVER scale
+   * enemy combat stats (armor / speed / bullet speed / HP), which is explicitly
+   * forbidden by DECISIONS.md. Lives and the player's starting star level are
+   * player-side resources, not enemy combat power.
    *
-   * `eliteChance`: probability (0-1) that a spawned enemy is an elite. An elite
-   * is born AS a commander (`level === 'commander'`, `isCommander === true`) and
-   * is the ONLY way an enemy becomes a commander — there is no separate commander
-   * election. Elites get a +15% combat-profile boost and the commander AI tier.
+   * Scoped carve-out [D10]: a Commander-tier spawn receives the +15% elite
+   * combat boost (`applyEliteModifier`), and the Commander probability is
+   * difficulty-driven. Provisional — see plan/AI-Tier-System-Revision.md §5.3.
    */
   startLives: number
   playerStartLevel: number
-  eliteChance: number
 }
 
 export interface StageData {

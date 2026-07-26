@@ -31,6 +31,9 @@ import fx_hit1 from './fx_hit1.svg?url'
 import fx_hit2 from './fx_hit2.svg?url'
 import fx_hit3 from './fx_hit3.svg?url'
 import fx_hit4 from './fx_hit4.svg?url'
+import fx_insignia_rookie from './fx_insignia_rookie.svg?url'
+import fx_insignia_soldier from './fx_insignia_soldier.svg?url'
+import fx_insignia_veteran from './fx_insignia_veteran.svg?url'
 
 export const SPRITE_URLS: Record<string, string> = {
   // Tanks (face "up"; renderer rotates per direction)
@@ -67,6 +70,13 @@ export const SPRITE_URLS: Record<string, string> = {
   'fx.hit2': fx_hit2,
   'fx.hit3': fx_hit3,
   'fx.hit4': fx_hit4,
+  // Rank insignia (Rookie / Soldier / Veteran): chevron overlays
+  // composited on the enemy hull, drawn after the hull + hit overlay
+  // and before the commander crown (plan §6 — crown-xor-insignia: a
+  // Commander draws the crown INSTEAD, never both; None draws nothing).
+  'fx.insignia.rookie': fx_insignia_rookie,
+  'fx.insignia.soldier': fx_insignia_soldier,
+  'fx.insignia.veteran': fx_insignia_veteran,
 }
 
 export type SpriteKey = keyof typeof SPRITE_URLS

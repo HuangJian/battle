@@ -136,6 +136,17 @@ export const COMMANDER_INTERVAL_MS = 20000
 /** How long (ms) a committed dodge direction is held before re-evaluating. */
 export const DODGE_LOCK_MS = 350
 
+// ================================================================
+// None-tier (classic) behavior branch timing
+// ================================================================
+
+/** Min ms before a None-tier tank re-rolls its wander direction. */
+export const NONE_TURN_MIN_MS = 700
+/** Uniform jitter (ms) added on top of NONE_TURN_MIN_MS. */
+export const NONE_TURN_JITTER_MS = 900
+/** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
+export const NONE_FIRE_JITTER_MS = 1400
+
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
 // which keeps bullets strictly faster than tanks (see that file for the

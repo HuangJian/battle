@@ -20,7 +20,7 @@ import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
 import { rollSpeedJitter } from '../config/speed'
-import { resolveConfig, levelForKind } from '../ai/config'
+import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
 import {
@@ -131,6 +131,37 @@ export class World {
    */
   bulletSeq: number
 
+  /**
+   * Per-World monotonic birth-order counter. Incremented in createTank for
+   * every enemy tank; the value is stamped onto `aiState.spawnSeq`. Command
+   * authority is `argmax(spawnSeq)` over alive commander-tier tanks, so this
+   * must be a *per-World* counter (NOT genId(), which is not reset between
+   * Worlds). Monotonic — not reset per stage (plan §7). Snapshotted.
+   */
+  spawnSeqCounter: number
+
+  /**
+   * The tank currently holding command authority (highest-spawnSeq alive
+   * commander-tier tank), or null when none is alive. Recomputed once per
+   * tick by Simulation (before ai.update) — the AI layer only reads it.
+   */
+  activeCommanderId: number | null
+
+  /**
+   * Per-stage remaining Commander *spawn attempts* (the floor guarantee,
+   * plan §5.1 [D9]). Decremented on every Commander roll (incl.
+   * cap-downgraded ones) so the floor is always satisfiable. Initialized
+   * from the difficulty floor in `loadStage`.
+   */
+  commanderQuotaRemaining: number
+
+  /**
+   * Monotonic counter incremented on every active-Commander broadcast.
+   * Each directive carries this seq; receiving tanks re-roll compliance only
+   * when it changes (plan §2.2 [D7]). Snapshotted.
+   */
+  directiveSeqCounter: number
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -174,6 +205,10 @@ export class World {
     this.events = []
     this.frame = 0
     this.bulletSeq = 0
+    this.spawnSeqCounter = 0
+    this.activeCommanderId = null
+    this.commanderQuotaRemaining = 0
+    this.directiveSeqCounter = 0
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false
@@ -213,6 +248,10 @@ export class World {
     this.enemiesSpawned = 0
     this.enemiesRemaining = ENEMIES_PER_STAGE
     this.spawnPointIndex = 0
+    // Commander floor quota for this stage (plan §5.1 [D9]). Relax 1 /
+    // Hard 2 / Chaos 4 / Classic 0. Decremented per Commander roll in
+    // Simulation.updateSpawning; never reset per stage beyond this point.
+    this.commanderQuotaRemaining = COMMANDER_FLOOR[this.difficultyKey] ?? 0
     this.freezeTimer = 0
     this.stageClearTimer = 0
     this.gameOverTimer = 0
@@ -220,11 +259,12 @@ export class World {
     this.pickupWindowTimer = 0
     this.pickupWindowEntered = false
 
-    // Build spawn queue. The elite roll is intentionally NOT performed here:
+    // Build spawn queue. The tier roll is intentionally NOT performed here:
     // it happens at spawn time in `Simulation.updateSpawning` so the RNG cost
-    // is paid per-spawn (and is skipped entirely on difficulties with
-    // `eliteChance === 0`, e.g. classic) instead of consuming 20 RNG calls
-    // up front and shifting the whole downstream stream (DECISIONS.md).
+    // is paid per-spawn (and is skipped entirely on difficulties whose
+    // distribution is a single tier, e.g. 100%-none classic) instead of
+    // consuming 20 RNG calls up front and shifting the whole downstream stream
+    // (DECISIONS.md).
     this.spawnQueue = []
     const enemies = stage.enemies
     for (let i = 0; i < ENEMIES_PER_STAGE; i++) {
@@ -291,21 +331,25 @@ export class World {
     const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
     const stats = profileToStats(profile, kind, kind === 'player' ? this.playerLevel : 0)
     // Enemy combat stats (including HP/armor) are fixed per archetype and never
-    // scaled by difficulty — difficulty only makes enemies smarter via
-    // DIFFICULTY_AI (see DECISIONS.md: Tactical Intelligence Framework). Scaling
+    // scaled by difficulty — difficulty only changes the tier distribution that
+    // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
     // enemy HP here would "enhance enemy power", which is explicitly forbidden.
     const hp = stats.maxHp
 
     // Enemy brains are initialized here (on the World — no hidden state).
     // The Tactical Intelligence Framework reads/writes these fields every tick.
+    // `level` is a PLACEHOLDER ('rookie'); the real tier is rolled at spawn
+    // time in `Simulation.updateSpawning` (plan §5) which overwrites
+    // `aiState.level` / `isCommander` there. `spawnSeq` is stamped from
+    // the World's monotonic counter so command authority is derivable.
     let aiState: AIState | undefined
     if (kind !== 'player') {
-      const level = levelForKind(kind)
-      const ai = resolveConfig(level, this.difficultyKey)
       const base = this.tileMap.getBasePos()
+      const placeholder = INTELLIGENCE_LEVELS['rookie']
       aiState = {
-        level,
+        level: 'rookie',
         isCommander: false,
+        spawnSeq: this.spawnSeqCounter++,
         thinkTimer: 200 + this.rng.next() * 600,
         fireTimer: 400 + this.rng.next() * 600,
         currentDir: dir,
@@ -314,11 +358,13 @@ export class World {
         targetY: base ? base.y + CELL : y + TANK / 2,
         strategicTimer: STRATEGIC_INTERVAL_MS * (0.8 + this.rng.next() * 0.4),
         strategicGoal: 'attackBase' as GoalType,
-        reactionTimer: ai.reactionTime,
+        reactionTimer: placeholder.reactionTime,
         dodgeLock: 0,
         commanderTimer: COMMANDER_INTERVAL_MS,
         directive: 'none',
         directiveAge: 1e9,
+        directiveSeq: 0,
+        directiveCompliant: false,
       }
     }
 

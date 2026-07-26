@@ -67,6 +67,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     rngState: world.rng.getState(),
     frame: world.frame,
     bulletSeq: world.bulletSeq,
+    spawnSeqCounter: world.spawnSeqCounter,
+    activeCommanderId: world.activeCommanderId,
+    commanderQuotaRemaining: world.commanderQuotaRemaining,
+    directiveSeqCounter: world.directiveSeqCounter,
   }
 }
 
@@ -131,6 +135,12 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
 
   // Bullet counter (per-bullet jitter seed)
   world.bulletSeq = snap.bulletSeq ?? 0
+
+  // AI command authority (plan §4, §7)
+  world.spawnSeqCounter = snap.spawnSeqCounter ?? 0
+  world.activeCommanderId = snap.activeCommanderId ?? null
+  world.commanderQuotaRemaining = snap.commanderQuotaRemaining ?? 0
+  world.directiveSeqCounter = snap.directiveSeqCounter ?? 0
 
   // Resume playing
   world.state = 'playing'

@@ -106,6 +106,16 @@ export interface WorldSnapshot {
 
   // Monotonic bullet counter — seed for per-bullet speed jitter (determinism)
   bulletSeq: number
+
+  // ---- AI command authority (plan §4, §7) ----
+  /** Per-World monotonic enemy birth order (stamped onto aiState.spawnSeq). */
+  spawnSeqCounter: number
+  /** Tank currently holding command, or null. */
+  activeCommanderId: number | null
+  /** Remaining Commander *spawn attempts* (floor guarantee, decremented per roll). */
+  commanderQuotaRemaining: number
+  /** Monotonic counter incremented on every active-Commander broadcast. */
+  directiveSeqCounter: number
 }
 
 /**

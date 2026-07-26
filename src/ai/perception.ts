@@ -3,7 +3,7 @@ import type { Tank } from '../types'
 import type { Direction } from '../constants'
 import { CELL, TANK, DIR_VECTORS, FIELD } from '../constants'
 import { aabb, snap } from '../utils/helpers'
-import type { Perception, Situation, BulletObservation, ResolvedConfig } from './types'
+import type { Perception, Situation, BulletObservation, IntelligenceConfig } from './types'
 
 /**
  * ai/perception.ts — the "eyes" of the framework.
@@ -115,7 +115,7 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
 }
 
 /** Build the observation snapshot for one tank. */
-export function perceive(world: World, tank: Tank, cfg: ResolvedConfig): Perception {
+export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Perception {
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
   const player = world.player
@@ -176,7 +176,7 @@ export function perceive(world: World, tank: Tank, cfg: ResolvedConfig): Percept
 }
 
 /** Convert perception into tactical knowledge (analysis only, no decisions). */
-export function analyze(world: World, tank: Tank, p: Perception, cfg: ResolvedConfig): Situation {
+export function analyze(world: World, tank: Tank, p: Perception, cfg: IntelligenceConfig): Situation {
   const maxDist = FIELD
   const distToBase = p.hasBase ? manhattan(p.selfX, p.selfY, p.baseX, p.baseY) : Infinity
   const distToPlayer = p.hasPlayer ? manhattan(p.selfX, p.selfY, p.playerX, p.playerY) : Infinity

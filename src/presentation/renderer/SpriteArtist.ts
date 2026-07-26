@@ -609,6 +609,10 @@ export class SpriteArtist {
           const overlay = cache.getHitSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
         }
+        // Rank insignia (Rookie/Soldier/Veteran) is now drawn by the caller
+        // LAST (see `drawInsignia`) so it sits above the HP level border,
+        // bonus frame, and shield. Commanders draw the crown INSTEAD
+        // (crown-xor-insignia, no stacking); None draws nothing (plan §6).
         // Commander visual decoration (prominent aura)
         if (isCommander) {
           this.drawCommanderAura(x, y, size, animFrame)
@@ -623,6 +627,7 @@ export class SpriteArtist {
     if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
       if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, rot, 1.28)
+      // Insignia drawn by the caller last (see `drawInsignia`).
       if (isCommander) this.drawCommanderAura(x, y, size, animFrame)
       return
     }
@@ -656,6 +661,49 @@ export class SpriteArtist {
     if (isCommander) {
       this.drawCommanderAura(x, y, size, animFrame)
     }
+  }
+
+  /**
+   * Draw the rank insignia (Rookie/Soldier/Veteran) as a standalone,
+   * caller-driven pass. Kept OUT of `drawEnemyTank` so the renderer can
+   * invoke it LAST — guaranteeing it renders above the HP level border,
+   * the bonus frame, and the shield bubble (user: z-index above HP 等级边框).
+   * Commanders draw the crown instead (crown-xor-insignia); None draws nothing.
+   * The badge is enlarged 1.5× then a further 1.4× over the base
+   * (cs/6 → cs/4 → ~cs/2.86) and "rides on" the tank's top-right corner
+   * — its center sits on the corner point, so it straddles the edge (half
+   * inside, half outside the hull). It is rotated 180° about its own center.
+   */
+  drawInsignia(
+    x: number,
+    y: number,
+    size: number,
+    level: string,
+    isCommander = false,
+  ): void {
+    if (isCommander || level === 'none') return
+    const cache = this.spriteCache
+    const cs = cache?.canvasSize ?? Math.ceil(size * Math.SQRT2)
+    const ins = (cs / 6) * 1.5 * 1.4 // base 1/6, +1.5×, +1.4×
+    const cx = x + size / 2
+    const cy = y + size / 2
+    // Ride on the top-right corner: badge center on the corner point.
+    const ix = cx + size / 2 - ins / 2
+    const iy = cy - size / 2 - ins / 2
+    if (cache?.built) {
+      const img = cache.getInsigniaSprite(level)
+      if (img) {
+        const ctx = this.ctx
+        ctx.save()
+        ctx.translate(ix + ins / 2, iy + ins / 2)
+        ctx.rotate(Math.PI)
+        ctx.drawImage(img, -ins / 2, -ins / 2, ins, ins)
+        ctx.restore()
+        return
+      }
+    }
+    // SVG fallback — drawSvgCentered rotates about the badge center.
+    this.drawSvgCentered(`fx.insignia.${level}`, ix, iy, ins, Math.PI, 1)
   }
 
   // ================================================================

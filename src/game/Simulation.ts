@@ -1,5 +1,5 @@
 import type { World } from './World'
-import type { Tank, Bullet, PowerUpType } from '../types'
+import type { Tank, Bullet, PowerUpType, IntelligenceLevel } from '../types'
 import {
   CELL,
   TANK,
@@ -7,6 +7,7 @@ import {
   FIELD,
   TICK_MS,
   MAX_ENEMIES_ALIVE,
+  ENEMIES_PER_STAGE,
   DIR_VECTORS,
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
@@ -30,6 +31,7 @@ import { nextFireIntervalMs } from '../config/fire-rate'
 import { genId } from './World'
 import { Input } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
+import { rollTier, COMMANDER_ALIVE_CAP } from '../ai/config'
 import { snap, aabb } from '../utils/helpers'
 
 // Spawn points derived from the design constants (ENEMY_SPAWNS, in tile
@@ -201,17 +203,51 @@ export class Simulation {
       }
       if (!canSpawn) continue
 
-      // Create the enemy tank
+      // Create the enemy tank (base profile/stats; tier & boost applied after).
       const tank = w.createTank(entry.kind, pt.x, pt.y, 'down')
       tank.bonus = entry.bonus
-      // Roll elite status at spawn time (not at loadStage) so the RNG cost is
-      // paid per-spawn and is skipped entirely when eliteChance is 0 (classic),
-      // avoiding an upstream RNG-stream shift. Gated on eliteChance > 0 so
-      // classic consumes zero RNG for elites (DECISIONS.md: Combat Capability
-      // System — spawn-time elite path).
-      const eliteChance = w.difficulty.eliteChance
-      const isElite = eliteChance > 0 && w.rng.next() < eliteChance
-      if (isElite) {
+
+      // ---- Spawn-time tier roll (plan §5) ----
+      // Decide the FINAL tier BEFORE finalizing stats so a cap downgrade can
+      // veto the +15% boost cleanly (§5.3 [D10-fix]).
+      const remainingSpawns = ENEMIES_PER_STAGE - w.enemiesSpawned
+      let tier: IntelligenceLevel
+      if (w.commanderQuotaRemaining > 0 && remainingSpawns <= w.commanderQuotaRemaining) {
+        // Floor guarantee: force a Commander attempt so the difficulty's
+        // minimum commander count is always satisfiable (§5.1 [D9-fix]).
+        // Forced rolls consume NO RNG draw (tier-roll gate spirit).
+        tier = 'commander'
+        w.commanderQuotaRemaining -= 1
+      } else {
+        tier = rollTier(w.difficultyKey, w.rng)
+        // Count a natural commander roll against the floor only while it is
+        // still outstanding. The floor is a MINIMUM guarantee, so the counter
+        // clamps at 0 (never negative) once satisfied — extra natural
+        // commander spawns beyond the floor are just bonus, not debt.
+        if (tier === 'commander' && w.commanderQuotaRemaining > 0) w.commanderQuotaRemaining -= 1
+      }
+
+      let isCommander = false
+      let finalLevel = tier
+      if (tier === 'commander') {
+        // Cap: at most COMMANDER_ALIVE_CAP commander-tier tanks alive on
+        // screen (active + inactive both count, §5.1). A roll against a
+        // full cap downgrades to ACTUAL Veteran — no boost, no crown.
+        let aliveCmd = 0
+        for (const t of w.tanks) {
+          if (t.alive && t.aiState?.level === 'commander') aliveCmd++
+        }
+        if (aliveCmd >= COMMANDER_ALIVE_CAP) {
+          finalLevel = 'veteran'
+        } else {
+          isCommander = true
+        }
+      }
+
+      // Apply the +15% combat boost to EVERY commander-tier spawn (incl.
+      // inactive ones), per §5.3 [D10]. A cap-downgraded Veteran gets
+      // nothing — decide tier first, then boost conditionally.
+      if (isCommander) {
         const eliteProfile = applyEliteModifier(
           tank.profile ?? resolveProfile(tank.kind, 0),
           tank.kind,
@@ -226,17 +262,16 @@ export class Simulation {
         tank.nextFireInterval = eliteStats.fireCooldown
         tank.maxHp = eliteStats.maxHp
         tank.hp = eliteStats.maxHp
-        // An elite is born AS a commander: it gets the +15% combat boost, the
-        // 'commander' AI tier, and immediately coordinates its squad. There is
-        // no separate election, so this is the ONLY way an enemy becomes a
-        // commander (DECISIONS.md §29). commanderTimer is cleared so the first
-        // directive broadcasts as soon as the spawn animation finishes.
-        if (tank.aiState) {
-          tank.aiState.level = 'commander'
-          tank.aiState.isCommander = true
-          tank.aiState.commanderTimer = 0
-        }
       }
+
+      // Stamp the rolled tier onto the brain (createTank used a placeholder).
+      // commanderTimer stays at its createTank default; Simulation sets the
+      // 1s office delay when this tank BECOMES the active commander.
+      if (tank.aiState) {
+        tank.aiState.level = finalLevel
+        tank.aiState.isCommander = isCommander
+      }
+
       w.tanks.push(tank)
       w.spawnQueue.shift()
       w.enemiesSpawned++
@@ -279,10 +314,44 @@ export class Simulation {
   // ================================================================
 
   private updateEnemyAI(): void {
+    // Recompute command authority ONCE per tick, before the AI layer runs
+    // (plan §4). The One-Author invariant: Simulation owns World writes;
+    // the AI layer only reads `world.activeCommanderId`.
+    this.recomputeActiveCommander()
     // Delegate all enemy decision-making to the Tactical Intelligence
     // Framework. It reads the World (Perception) and writes tank intent
     // (direction / firing) back — never hidden state, never Math.random().
     this.ai.update(this.world, (tank) => this.tryFire(tank))
+  }
+
+  /**
+   * Derive command authority for this tick (plan §4 [D2][D3]).
+   * Active Commander = the alive commander-tier tank with the highest
+   * `spawnSeq` (most-recently born); null when none is alive. On a
+   * change, the new active tank's `commanderTimer` is overwritten to
+   * 1000 ms — its 1s office delay measured from taking office (not
+   * from spawn). Succession is automatic: when the active dies, the
+   * previously-born survivor is now the argmax and regains command.
+   */
+  private recomputeActiveCommander(): void {
+    const w = this.world
+    let bestId: number | null = null
+    let bestSeq = -Infinity
+    for (const t of w.tanks) {
+      if (!t.alive || t.spawnTimer > 0 || !t.aiState) continue
+      if (t.aiState.level === 'commander') {
+        if (t.aiState.spawnSeq > bestSeq) {
+          bestSeq = t.aiState.spawnSeq
+          bestId = t.id
+        }
+      }
+    }
+    const prev = w.activeCommanderId
+    w.activeCommanderId = bestId
+    if (bestId !== null && bestId !== prev) {
+      const active = w.tanks.find((t) => t.id === bestId)
+      if (active?.aiState) active.aiState.commanderTimer = 1000
+    }
   }
 
   // ================================================================

@@ -584,7 +584,7 @@ export class GameRenderer {
           animFrame,
           (tank.flashTimer ?? 0) > 0,
           tank.hp,
-          Math.min(tank.hitCount ?? 0, 4),
+          Math.min          (tank.hitCount ?? 0, 4),
           isCommander,
         )
       }
@@ -601,6 +601,16 @@ export class GameRenderer {
       if (tank.shieldTimer && tank.shieldTimer > 0) {
         artist.drawShield(tank.x, tank.y, tank.w, frame)
       }
+
+      // Rank insignia drawn LAST so it sits above the HP level border,
+      // bonus frame, and shield (user: z-index above HP 等级边框).
+      artist.drawInsignia(
+        tank.x,
+        tank.y,
+        tank.w,
+        tank.aiState?.level ?? 'none',
+        tank.aiState?.isCommander === true,
+      )
     }
   }
 
