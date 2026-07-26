@@ -58,7 +58,6 @@ export const CLASSIC_THEME: ThemeColors = {
   success: '#40e060',
 
   // Ambient
-  gridLineColor: 'rgba(255, 255, 255, 0.03)',
   vignetteColor: 'rgba(0, 0, 0, 0.4)',
 }
 
@@ -120,7 +119,6 @@ export const NEON_THEME: ThemeColors = {
   success: '#39ff14',
 
   // Ambient
-  gridLineColor: 'rgba(0, 255, 255, 0.04)',
   vignetteColor: 'rgba(0, 0, 0, 0.5)',
 }
 
@@ -184,7 +182,6 @@ export const MODERN_RETRO_THEME: ThemeColors = {
   success: '#3fae5a',
 
   // Ambient
-  gridLineColor: 'rgba(43, 43, 43, 0.05)',
   vignetteColor: 'rgba(43, 43, 43, 0.06)',
 }
 

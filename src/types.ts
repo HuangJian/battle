@@ -359,7 +359,6 @@ export interface ThemeColors {
   danger: string
   success: string
   // Ambient
-  gridLineColor: string
   vignetteColor: string
 }
 

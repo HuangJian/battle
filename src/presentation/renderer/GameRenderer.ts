@@ -16,8 +16,9 @@ import { getHpLevel } from '../../config/hp-level'
  * GameRenderer — renders the game world to a canvas.
  *
  * Advanced performance techniques:
- * 1. Terrain cache: static tiles (grid + brick/steel/ice/base) pre-rendered to
- *    an offscreen canvas, rebuilt only when terrain or theme changes.
+ * 1. Terrain cache: static tiles (brick/steel/ice/base) pre-rendered to
+ *    an offscreen canvas, rebuilt only when terrain or theme changes. Empty
+ *    cells stay flat — no grid lines on plain ground (DECISIONS §29).
  * 2. Water separation: water tiles drawn directly each frame (cheap, few tiles)
  *    so the terrain cache stays static — no rebuilds for water animation.
  * 3. Forest cache: forest tiles pre-rendered to a separate offscreen canvas.
@@ -47,7 +48,7 @@ export class GameRenderer {
   private _origFill: ((...a: any[]) => void) | null = null
   private _origStrokeRect: ((...a: any[]) => void) | null = null
 
-  // ---- Terrain cache (static: grid + brick/steel/ice/base, NO water) ----
+  // ---- Terrain cache (static: brick/steel/ice/base, NO water, NO grid) ----
   private terrainCache: CanvasImageSource
   private terrainCacheCtx: CanvasRenderingContext2D
   private terrainCacheDirty = true
@@ -240,7 +241,7 @@ export class GameRenderer {
     // 1. Background fill
     this.fillBackground(world)
 
-    // 2. Static terrain cache (grid + brick/steel/ice/base — NO water)
+    // 2. Static terrain cache (brick/steel/ice/base — NO water, NO grid)
     this.updateTerrainCache(world)
     ctx.drawImage(this.terrainCache, 0, 0, FIELD, FIELD)
 
@@ -375,7 +376,7 @@ export class GameRenderer {
   /**
    * Redraw a single terrain cell in place (used for incremental updates).
    * Reproduces exactly what the full rebuild would draw for that cell:
-   * grid lines for empty space, or the tile art for a solid tile.
+   * flat clear for empty space, or the tile art for a solid tile.
    */
   /**
    * Orthogonal same-type neighbour mask for auto-tiling. Returns [n, e, s, w];
@@ -405,7 +406,7 @@ export class GameRenderer {
     ctx.clearRect(x, y, CELL, CELL)
 
     if (type === 'empty') {
-      // Empty space: no grid lines (clean flat ground).
+      // Empty space: clean flat ground (cleared above).
       return
     }
 
@@ -451,19 +452,8 @@ export class GameRenderer {
 
     ctx.clearRect(0, 0, FIELD, FIELD)
 
-    // Grid lines
-    ctx.strokeStyle = world.theme.gridLineColor
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    for (let i = 0; i <= GRID; i++) {
-      ctx.moveTo(i * CELL, 0)
-      ctx.lineTo(i * CELL, FIELD)
-      ctx.moveTo(0, i * CELL)
-      ctx.lineTo(FIELD, i * CELL)
-    }
-    ctx.stroke()
-
-    // Static terrain only (NO water — water is rendered separately each frame)
+    // Static terrain only (NO water — water is rendered separately each frame).
+    // No grid lines on empty ground — flat cell feel, see DECISIONS.md §29.
     for (let r = 0; r < GRID; r++) {
       for (let c = 0; c < GRID; c++) {
         const type = tm.get(c, r)
