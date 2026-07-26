@@ -790,3 +790,21 @@ matrix changes in exactly one cell: power→fast goes from 1 (one-shot) to 2.
   player kills power in ceil(200/105) = 2 hits, power kills player in
   ceil(263/128) = 3 hits. Previously it was a tie (both 2) that power won via
   faster fire rate — the new balance is more player-friendly.
+
+---
+
+## 28. Tank HP Level Visual Aura Decoration (2026-07-26)
+
+**Decision:** Render distinct, dynamic visual light-ring (aura) shapes under/around tanks according to their current remaining HP (Level 1~6, where Level 1 = no extra aura, and Level 2~6 feature emerald green circle, sky blue double ring, amethyst purple diamond, flame orange hexagon, crimson red solar radiation respectively).
+
+**Rationale:**
+- **Hits-to-Kill Standard**: Map remaining HP against standard base damage (100 HP = 1 hit). `getHpLevel(hp)` computes `ceil(hp / 100)`, clamped to [1, 6]. Level 6 reserves space for promoted elite heavy tanks (600 HP / 6 hits).
+- **Dynamic Degradation**: As tanks take damage in real time, the HP level drops (e.g. Level 3 -> Level 2), providing intuitive visual feedback on how many hits remain to kill the target.
+- **Architectural Purity**: `World` and `Simulation` remain unpolluted by visual state (AGENTS §2.1/§2.5). The calculation is a pure function in `src/config/hp-level.ts`, and rendering is handled entirely in `SpriteArtist.ts` / `GameRenderer.ts`.
+- **Symmetry**: Players and enemy tanks share identical HP aura rules.
+
+**Implications:**
+- Players can immediately identify high-threat or high-HP targets at a glance without cluttered health bars.
+- 0 runtime/memory footprint overhead: decorative shapes are drawn via 2D Canvas primitives with frame-based pulse animations.
+- Test coverage: `tests/hp-level.test.ts` validates mapping boundaries (0~600+ HP) and color/shape configurations.
+

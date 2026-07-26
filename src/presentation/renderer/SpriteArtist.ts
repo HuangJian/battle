@@ -1026,4 +1026,132 @@ export class SpriteArtist {
       ctx.globalAlpha = 1
     }
   }
+
+  /**
+   * Draw visual HP Level aura decoration around/under tank.
+   * Levels 2~6 each feature a visually distinct ring shape & color.
+   */
+  drawHpLevelAura(x: number, y: number, size: number, hpLevel: number, frame: number): void {
+    if (hpLevel <= 1 || hpLevel > 6) return
+    const ctx = this.ctx
+
+    // Square bounding box slightly larger than the tank cell
+    const margin = 2
+    const bx = x - margin
+    const by = y - margin
+    const bw = size + margin * 2
+    const bh = size + margin * 2
+
+    ctx.save()
+
+    // Helper helper to draw a rectangle with slight jagged (sawtooth) edges
+    const strokeJaggedRect = (rx: number, ry: number, rw: number, rh: number, notch = 2) => {
+      ctx.beginPath()
+      // Top edge
+      ctx.moveTo(rx, ry)
+      ctx.lineTo(rx + rw * 0.33, ry - notch)
+      ctx.lineTo(rx + rw * 0.66, ry + notch)
+      ctx.lineTo(rx + rw, ry)
+
+      // Right edge
+      ctx.lineTo(rx + rw + notch, ry + rh * 0.33)
+      ctx.lineTo(rx + rw - notch, ry + rh * 0.66)
+      ctx.lineTo(rx + rw, ry + rh)
+
+      // Bottom edge
+      ctx.lineTo(rx + rw * 0.66, ry + rh + notch)
+      ctx.lineTo(rx + rw * 0.33, ry + rh - notch)
+      ctx.lineTo(rx, ry + rh)
+
+      // Left edge
+      ctx.lineTo(rx - notch, ry + rh * 0.66)
+      ctx.lineTo(rx + notch, ry + rh * 0.33)
+      ctx.closePath()
+      ctx.stroke()
+    }
+
+    switch (hpLevel) {
+      case 2: {
+        // Level 2: Single thin square aura (#2ecc71 emerald green)
+        const pulse = Math.sin(frame * 0.08) * 0.5 + 0.5
+        ctx.strokeStyle = '#2ecc71'
+        ctx.lineWidth = 1.5
+        ctx.globalAlpha = 0.75 + pulse * 0.25
+        ctx.strokeRect(bx, by, bw, bh)
+        break
+      }
+      case 3: {
+        // Level 3: Double square aura (#3498db sky blue)
+        const pulse = Math.sin(frame * 0.1) * 0.5 + 0.5
+        ctx.strokeStyle = '#3498db'
+        ctx.lineWidth = 1.5
+        ctx.globalAlpha = 0.85
+        ctx.strokeRect(bx, by, bw, bh)
+
+        const gap = 3 + pulse * 1.5
+        ctx.lineWidth = 1
+        ctx.globalAlpha = 0.4 + pulse * 0.4
+        ctx.strokeRect(bx - gap, by - gap, bw + gap * 2, bh + gap * 2)
+        break
+      }
+      case 4: {
+        // Level 4: Jagged / Sawtooth square aura (#9b59b6 amethyst purple)
+        const pulse = Math.sin(frame * 0.12) * 0.5 + 0.5
+        ctx.strokeStyle = '#9b59b6'
+        ctx.lineWidth = 2
+        ctx.globalAlpha = 0.85 + pulse * 0.15
+        strokeJaggedRect(bx, by, bw, bh, 2 + pulse * 1)
+        break
+      }
+      case 5: {
+        // Level 5: Double Jagged / Tech Bracket square aura (#e67e22 flame orange)
+        const pulse = Math.sin(frame * 0.14) * 0.5 + 0.5
+        ctx.strokeStyle = '#e67e22'
+        ctx.lineWidth = 2
+        ctx.globalAlpha = 0.9
+        strokeJaggedRect(bx, by, bw, bh, 2.5)
+
+        // Outer corner bracket notches
+        const len = 5
+        ctx.lineWidth = 1.5
+        ctx.globalAlpha = 0.6 + pulse * 0.3
+        const g = 3
+        // TL
+        ctx.beginPath()
+        ctx.moveTo(bx - g, by - g + len)
+        ctx.lineTo(bx - g, by - g)
+        ctx.lineTo(bx - g + len, by - g)
+        // TR
+        ctx.moveTo(bx + bw + g - len, by - g)
+        ctx.lineTo(bx + bw + g, by - g)
+        ctx.lineTo(bx + bw + g, by - g + len)
+        // BR
+        ctx.moveTo(bx + bw + g, by + bh + g - len)
+        ctx.lineTo(bx + bw + g, by + bh + g)
+        ctx.lineTo(bx + bw + g - len, by + bh + g)
+        // BL
+        ctx.moveTo(bx - g + len, by + bh + g)
+        ctx.lineTo(bx - g, by + bh + g)
+        ctx.lineTo(bx - g, by + bh + g - len)
+        ctx.stroke()
+        break
+      }
+      case 6: {
+        // Level 6: Crimson Solar Jagged Double Aura (#e74c3c crimson red)
+        const pulse = Math.sin(frame * 0.16) * 0.5 + 0.5
+        ctx.strokeStyle = '#e74c3c'
+        ctx.lineWidth = 2.5
+        ctx.globalAlpha = 0.95
+        strokeJaggedRect(bx, by, bw, bh, 3)
+
+        // Outer jagged shell
+        const g = 4 + pulse * 2
+        ctx.lineWidth = 1.5
+        ctx.globalAlpha = 0.5 + pulse * 0.4
+        strokeJaggedRect(bx - g, by - g, bw + g * 2, bh + g * 2, 3.5)
+        break
+      }
+    }
+    ctx.restore()
+  }
 }

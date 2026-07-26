@@ -10,6 +10,7 @@ import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
 import type { ThemeColors, TerrainType } from '../../types'
 import { createOffscreenCanvas } from '../../utils/canvas'
+import { getHpLevel } from '../../config/hp-level'
 
 /**
  * GameRenderer — renders the game world to a canvas.
@@ -582,6 +583,12 @@ export class GameRenderer {
 
       const vc = this.animations.get(tank.id)
       const animFrame = vc ? this.animations.getFrame(vc) : (frame >> 2) & 1
+
+      // Draw HP level visual decoration aura (Level 2~6)
+      const hpLevel = getHpLevel(tank.hp)
+      if (hpLevel > 1) {
+        artist.drawHpLevelAura(tank.x, tank.y, tank.w, hpLevel, frame)
+      }
 
       if (tank.isPlayer) {
         artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
