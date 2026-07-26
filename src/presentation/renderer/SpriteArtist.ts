@@ -60,6 +60,8 @@ const ITEM_KEY_MAP: Record<string, string> = {
   freeze: 'item.freeze',
   tank: 'item.tank',
   helmet: 'item.helmet',
+  fence: 'item.fence',
+  boat: 'item.boat',
 }
 
 /**
@@ -851,7 +853,7 @@ export class SpriteArtist {
   }
 
   /** Last-resort draw if the SVG sprite is missing: a plain gold pentagon + glyph. */
-  private drawPowerUpFallback(x: number, y: number, size: number, _type: string): void {
+  private drawPowerUpFallback(x: number, y: number, size: number, type: string): void {
     const ctx = this.ctx
     const cx = x + size / 2
     const cy = y + size / 2
@@ -865,12 +867,31 @@ export class SpriteArtist {
       else ctx.lineTo(px, py)
     }
     ctx.closePath()
-    ctx.fillStyle = '#28409E'
+
+    // Type-specific colors
+    let fillColor = '#28409E'
+    let strokeColor = '#F4C430'
+    let glyphColor = '#FFE9A8'
+
+    switch (type) {
+      case 'fence':
+        fillColor = '#808080'
+        strokeColor = '#C0C0C0'
+        glyphColor = '#E0E0E0'
+        break
+      case 'boat':
+        fillColor = '#2060A0'
+        strokeColor = '#40A0FF'
+        glyphColor = '#80D0FF'
+        break
+    }
+
+    ctx.fillStyle = fillColor
     ctx.fill()
-    ctx.strokeStyle = '#F4C430'
+    ctx.strokeStyle = strokeColor
     ctx.lineWidth = Math.max(1.5, size * 0.08)
     ctx.stroke()
-    ctx.fillStyle = '#FFE9A8'
+    ctx.fillStyle = glyphColor
     ctx.beginPath()
     ctx.arc(cx, cy, size * 0.18, 0, Math.PI * 2)
     ctx.fill()

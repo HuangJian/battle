@@ -10,14 +10,17 @@ import {
   DIR_VECTORS,
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
-  FREEZE_DURATION_MS,
-  SHIELD_DURATION_MS,
   RESPAWN_SHIELD_MS,
   ENEMY_SPAWNS,
   POWERUP_TIMEOUT_MS,
   POWERUP_PICKUP_WINDOW_MS,
   POWERUP_PICKUP_END_DELAY_MS,
   STAGE_CLEAR_DELAY_MS,
+  POWERUP_DURATION_MS,
+  FENCE_STEEL_COUNT,
+  BOAT_DURATION_MS,
+  BASE_POS,
+  GRID,
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
@@ -37,7 +40,16 @@ import { snap, aabb } from '../utils/helpers'
 const ENEMY_SPAWN_POINTS = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
 
 /** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
-const POWERUP_TYPES: PowerUpType[] = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet']
+const POWERUP_TYPES: PowerUpType[] = [
+  'star',
+  'bomb',
+  'shield',
+  'freeze',
+  'tank',
+  'helmet',
+  'fence',
+  'boat',
+]
 
 /**
  * Simulation — the only layer allowed to modify the World.
@@ -83,6 +95,12 @@ export class Simulation {
     if (w.freezeTimer > 0) w.freezeTimer -= 1000 / 60
     if (w.spawnTimer > 0) w.spawnTimer -= 1000 / 60
     if (w.pickupWindowTimer > 0) w.pickupWindowTimer -= TICK_MS
+
+    // Update player boat timer
+    if (w.player && w.player.boatTimer && w.player.boatTimer > 0) {
+      w.player.boatTimer -= 1000 / 60
+      if (w.player.boatTimer < 0) w.player.boatTimer = 0
+    }
 
     // Update spawn animations
     this.updateSpawnTimers()
@@ -130,6 +148,10 @@ export class Simulation {
       if (tank.shieldTimer && tank.shieldTimer > 0) {
         tank.shieldTimer -= 1000 / 60
         if (tank.shieldTimer < 0) tank.shieldTimer = 0
+      }
+      if (tank.boatTimer && tank.boatTimer > 0) {
+        tank.boatTimer -= 1000 / 60
+        if (tank.boatTimer < 0) tank.boatTimer = 0
       }
       if (tank.flashTimer !== undefined && tank.flashTimer > 0) {
         tank.flashTimer -= 1000 / 60
@@ -310,7 +332,8 @@ export class Simulation {
       }
 
       // Check terrain collision
-      if (w.rectHitsTerrain(newX, newY, tank.w, tank.h)) {
+      const canTraverseWater = w.canTankTraverseWater(tank)
+      if (w.rectHitsTerrain(newX, newY, tank.w, tank.h, canTraverseWater)) {
         // Snap to the cell boundary on the travel axis and stop there.
         if (axis === 'x') {
           tank.x = snap(tank.x, CELL)
@@ -685,11 +708,11 @@ export class Simulation {
         break
 
       case 'shield':
-        p.shieldTimer = SHIELD_DURATION_MS
+        p.shieldTimer = POWERUP_DURATION_MS
         break
 
       case 'freeze':
-        w.freezeTimer = FREEZE_DURATION_MS
+        w.freezeTimer = POWERUP_DURATION_MS
         break
 
       case 'tank':
@@ -699,7 +722,64 @@ export class Simulation {
       case 'helmet':
         p.shieldTimer = RESPAWN_SHIELD_MS
         break
+
+      case 'fence':
+        // Place steel tiles around the base (eagle) to protect it
+        this.applyFencePowerUp()
+        break
+
+      case 'boat':
+        // Grant amphibious movement: can traverse water and ice without penalty
+        this.applyBoatPowerUp()
+        break
     }
+  }
+
+  private applyFencePowerUp(): void {
+    const w = this.world
+    const baseCol = BASE_POS.col
+    const baseRow = BASE_POS.row
+
+    // Place steel tiles around the base (2x2 base at col 12, row 24)
+    // Create a protective fence: 3 tiles wide on each side of the base
+    const positions: { col: number; row: number }[] = []
+
+    // Top row (above base)
+    for (let c = baseCol - 1; c <= baseCol + 2; c++) {
+      if (c >= 0 && c < GRID) positions.push({ col: c, row: baseRow - 1 })
+    }
+    // Bottom row (below base)
+    for (let c = baseCol - 1; c <= baseCol + 2; c++) {
+      if (c >= 0 && c < GRID) positions.push({ col: c, row: baseRow + 2 })
+    }
+    // Left column
+    for (let r = baseRow - 1; r <= baseRow + 2; r++) {
+      if (r >= 0 && r < GRID) positions.push({ col: baseCol - 1, row: r })
+    }
+    // Right column
+    for (let r = baseRow - 1; r <= baseRow + 2; r++) {
+      if (r >= 0 && r < GRID) positions.push({ col: baseCol + 2, row: r })
+    }
+
+    // Place steel tiles (up to FENCE_STEEL_COUNT)
+    let placed = 0
+    for (const pos of positions) {
+      if (placed >= FENCE_STEEL_COUNT) break
+      const existing = w.tileMap.get(pos.col, pos.row)
+      if (existing === 'empty' || existing === 'brick') {
+        w.tileMap.set(pos.col, pos.row, 'steel')
+        placed++
+      }
+    }
+  }
+
+  private applyBoatPowerUp(): void {
+    const w = this.world
+    const p = w.player
+    if (!p) return
+
+    // Grant amphibious movement for BOAT_DURATION_MS
+    p.boatTimer = BOAT_DURATION_MS
   }
 
   // ================================================================

@@ -61,15 +61,20 @@ export const ENEMY_SPAWNS = [
 /** Spawn protection duration (ms) */
 export const SPAWN_PROTECTION_MS = 2000
 
-/** Power-up duration (ms) */
-export const FREEZE_DURATION_MS = 8000
-export const SHIELD_DURATION_MS = 10000
+/** Power-up duration (ms) — unified to 20s for all timed power-ups */
+export const POWERUP_DURATION_MS = 20000
 
 /** Star power-up respawn invulnerability */
 export const RESPAWN_SHIELD_MS = 3000
 
 /** Power-up despawn timeout (ms) — how long a power-up stays on the field before disappearing */
 export const POWERUP_TIMEOUT_MS = 20000
+
+/** Fence power-up: number of steel tiles to place around base */
+export const FENCE_STEEL_COUNT = 12
+
+/** Boat power-up: amphibious movement duration (ms) */
+export const BOAT_DURATION_MS = 20000
 
 /**
  * After the last enemy is destroyed, if power-ups are still on the field the

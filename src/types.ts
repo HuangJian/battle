@@ -17,7 +17,17 @@ export type TerrainType = 'empty' | 'brick' | 'steel' | 'water' | 'forest' | 'ic
 
 export type TankKind = 'player' | 'basic' | 'fast' | 'power' | 'armor'
 
-export type PowerUpType = 'star' | 'bomb' | 'shield' | 'freeze' | 'tank' | 'helmet'
+export type PowerUpType =
+  | 'star'
+  | 'bomb'
+  | 'shield'
+  | 'freeze'
+  | 'tank'
+  | 'helmet'
+  | 'fence'
+  | 'boat'
+  | 'fence'
+  | 'boat'
 
 export interface Vec2 {
   x: number
@@ -124,6 +134,7 @@ export interface Tank extends Entity {
   // Player-specific
   level?: number
   shieldTimer?: number
+  boatTimer?: number // amphibious boat power-up timer
   isPlayer?: boolean
   // Combat Capability System — every tank owns a profile (immutable config).
   profile: CombatProfile
@@ -342,6 +353,10 @@ export interface ThemeColors {
   bulletGlow: string
   powerUp: string
   powerUpGlow: string
+  powerUpFence: string
+  powerUpFenceGlow: string
+  powerUpBoat: string
+  powerUpBoatGlow: string
   spawn: string
   // UI — HTML overlay
   panelBg: string

@@ -487,17 +487,26 @@ export class World {
   }
 
   /** Check if a rectangle (in pixels) collides with blocking terrain */
-  rectHitsTerrain(x: number, y: number, w: number, h: number): boolean {
+  rectHitsTerrain(x: number, y: number, w: number, h: number, ignoreWater = false): boolean {
     const c0 = Math.floor(x / CELL)
     const r0 = Math.floor(y / CELL)
     const c1 = Math.floor((x + w - 1) / CELL)
     const r1 = Math.floor((y + h - 1) / CELL)
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
-        if (TileMap.blocksTank(this.tileMap.get(c, r))) return true
+        const type = this.tileMap.get(c, r)
+        if (TileMap.blocksTank(type)) {
+          if (ignoreWater && type === 'water') continue
+          return true
+        }
       }
     }
     return false
+  }
+
+  /** Check if a tank can move through water (has boat power-up) */
+  canTankTraverseWater(tank: { boatTimer?: number }): boolean {
+    return !!(tank.boatTimer && tank.boatTimer > 0)
   }
 
   /** Check if a rect is fully inside the playfield */

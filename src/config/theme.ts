@@ -39,6 +39,10 @@ export const CLASSIC_THEME: ThemeColors = {
   bulletGlow: '#ffe060',
   powerUp: '#e84040',
   powerUpGlow: '#ffe040',
+  powerUpFence: '#b0b0b0',
+  powerUpFenceGlow: '#d0d0d0',
+  powerUpBoat: '#2080d8',
+  powerUpBoatGlow: '#40a0ff',
   spawn: '#f0f0f0',
 
   // HTML UI
@@ -100,6 +104,10 @@ export const NEON_THEME: ThemeColors = {
   bulletGlow: '#00ffff',
   powerUp: '#ff00ff',
   powerUpGlow: '#00ffff',
+  powerUpFence: '#3a3a5c',
+  powerUpFenceGlow: '#5a5a7c',
+  powerUpBoat: '#00f0ff',
+  powerUpBoatGlow: '#80ffff',
   spawn: '#00ffff',
 
   // HTML UI
@@ -163,6 +171,10 @@ export const MODERN_RETRO_THEME: ThemeColors = {
   bulletGlow: '#f4c430',
   powerUp: '#e07a5f',
   powerUpGlow: '#f4c430',
+  powerUpFence: '#c9c9c9',
+  powerUpFenceGlow: '#f4c430',
+  powerUpBoat: '#5bb8e8',
+  powerUpBoatGlow: '#f4c430',
   spawn: '#f4c430',
 
   // HTML UI
