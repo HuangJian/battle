@@ -425,12 +425,21 @@ export class GameRenderer {
         artist.drawIce(x, y, CELL, nn, ne, ns, nw)
         break
       }
-      case 'base':
-        // The base is ONE crystal spanning 2×2; only the top-left cell draws it.
-        if (tm.isBaseTopLeft(c, r)) {
-          artist.drawBase(x, y, CELL * 2, false)
-        }
+      case 'base': {
+        // The base is ONE crystal spanning 2×2, drawn from the block's
+        // TOP-LEFT cell. This cell may be a NON-top-left base cell reached via
+        // neighbour expansion (e.g. an adjacent brick was destroyed). If we only
+        // cleared this single 16×16 cell and drew nothing (because isBaseTopLeft
+        // is false), the chunk of the crystal overlapping this cell would be
+        // erased forever — the reported "base loses a piece" bug. So always
+        // walk back to the block's top-left and repaint the full crystal.
+        let tlC = c
+        let tlR = r
+        while (tlC > 0 && tm.get(tlC - 1, tlR) === 'base') tlC--
+        while (tlR > 0 && tm.get(tlC, tlR - 1) === 'base') tlR--
+        artist.drawBase(tlC * CELL, tlR * CELL, CELL * 2, false)
         break
+      }
     }
   }
 
