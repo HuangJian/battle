@@ -68,8 +68,14 @@ export type CombatDimension = keyof CombatProfile
 export interface TankStats {
   speed: number
   bulletSpeed: number
+  /** 1 = normal bullet, 2 = can destroy steel (player-only, level-gated). */
   bulletPower: number
+  /** Maximum HP ("HP 值"). Derived from `armor` via HP_SCALE. */
   maxHp: number
+  /** Per-shot damage ("火力强度值"). Derived from `firepower` via DAMAGE_SCALE. */
+  damage: number
+  /** True only for the player at/above STEEL_PIERCE_PLAYER_LEVEL. */
+  canPierceSteel: boolean
   fireCooldown: number
 }
 
@@ -78,8 +84,10 @@ export interface Tank extends Entity {
   speed: number
   hp: number
   maxHp: number
-  /** Damage dealt per bullet (derived from firepower). */
+  /** Damage dealt per bullet (derived from firepower, kept for terrain/legacy refs). */
   bulletPower: number
+  /** Per-shot damage dealt to tanks ("火力强度值"). */
+  damage: number
   /** Bullet travel speed (derived from projectileSpeed). */
   bulletSpeed: number
   /** Base (no-jitter) fire interval in ms, derived from the fire-rate standard. */
@@ -202,6 +210,8 @@ export interface Bullet extends Entity {
   isPlayer: boolean
   speed: number
   power: number // 1 = normal, 2 = destroys steel
+  /** Per-shot damage dealt to tanks. */
+  damage: number
 }
 
 export interface PowerUp {

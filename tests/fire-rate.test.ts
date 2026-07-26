@@ -65,8 +65,14 @@ describe('Fire-rate standard — per-kind frequency multipliers', () => {
 
   it('player gains +0.05 per star on top of the no-star 1.05×', () => {
     expect(fireFrequencyMultiplier('player', 0)).toBeCloseTo(1.05, 9)
-    expect(fireFrequencyMultiplier('player', 1)).toBeCloseTo(1.05 + PLAYER_FIRE_FREQUENCY_PER_STAR, 9)
-    expect(fireFrequencyMultiplier('player', 3)).toBeCloseTo(1.05 + 3 * PLAYER_FIRE_FREQUENCY_PER_STAR, 9)
+    expect(fireFrequencyMultiplier('player', 1)).toBeCloseTo(
+      1.05 + PLAYER_FIRE_FREQUENCY_PER_STAR,
+      9,
+    )
+    expect(fireFrequencyMultiplier('player', 3)).toBeCloseTo(
+      1.05 + 3 * PLAYER_FIRE_FREQUENCY_PER_STAR,
+      9,
+    )
     // A max-level player out-rates even the power enemy (the strongest enemy).
     expect(fireFrequencyMultiplier('player', 3)).toBeGreaterThan(fireFrequencyMultiplier('power'))
   })

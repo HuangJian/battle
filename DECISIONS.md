@@ -747,3 +747,46 @@ movement × 4, with per-bullet jitter (user spec):**
   round-trip + determinism reproduction + delete, 15s fallback rule, queries,
   RecoveryController 5-option/availability/flow, storage backend contract).
   `tsc --noEmit` clean, `oxlint` 0 warnings, `vite build` OK.
+
+---
+
+### 27. Power Tank Firepower Rebalance (firepower 80 → 64, 2026-07-26)
+
+**Decision:** Lower the power enemy's `firepower` capability from 80 to 64 (per-shot
+damage 160 → 128) and raise its `armor` from 36 to 40 (HP 180 → 200), redistributing
+the budget to `special` (34 → 46) to keep the 300-budget invariant. The hits-to-kill
+matrix changes in exactly one cell: power→fast goes from 1 (one-shot) to 2.
+
+**Rationale:**
+- Power's specialty shifted to **firing frequency** (1.10×, the highest among all
+  tanks — see `config/fire-rate.ts`). Having both the highest fire rate AND a
+  one-shot ability (damage 160 > fast HP 150) made power overwhelmingly dominant:
+  it killed every archetype faster than they could kill it, and elite power
+  (firepower 80×1.15 = 92, damage 184) one-shot multiple archetypes.
+- At firepower 64 (damage 128), power is **still the strongest enemy gun**
+  (128 > basic 100 > armor 86 > fast 72) and still kills basic/power in 2 hits
+  and armor in 3 — but no longer one-shots any enemy. Elite power (firepower 74,
+  damage 148) also cannot one-shot the frailest fast (HP 150): ceil(150/148) = 2.
+- Raising armor 36 → 40 (HP 180 → 200) makes "略低 HP" (slightly low HP) more
+  accurate relative to basic (250): 200/250 = 80% vs the old 180/250 = 72%. No
+  other matrix cell changes because all ceil divisions round the same way.
+- Steel-pierce was already decoupled from firepower (player-only, level-gated via
+  `STEEL_PIERCE_PLAYER_LEVEL`); this change is purely about DPS balance, not steel.
+
+**Implications:**
+- The adjusted hits-to-kill matrix (only power→fast changed: 1 → 2):
+
+  | source\target | 均衡 | 快速 | 强力 | 重甲 |
+  |---|---|---|---|---|
+  | 均衡 | 3 | 2 | 2 | 4 |
+  | 快速 | 4 | 3 | 3 | 5 |
+  | 强力 | 2 | **2** | 2 | 3 |
+  | 重甲 | 3 | 2 | 3 | 5 |
+
+- No enemy archetype can one-shot another (minimum 2 hits in every cell). This is
+  a deliberate design principle: one-shots belong to the max-level player
+  (steel-pierce + high damage), not to any enemy.
+- The no-star player (damage 105, HP 263) now beats power in a straight duel:
+  player kills power in ceil(200/105) = 2 hits, power kills player in
+  ceil(263/128) = 3 hits. Previously it was a tie (both 2) that power won via
+  faster fire rate — the new balance is more player-friendly.

@@ -406,6 +406,7 @@ export class Simulation {
       // table there.
       speed: spawnBulletSpeedPxPerTick(tank.kind, tank.level ?? 0, w.bulletSeq++, w.frame),
       power: tank.bulletPower,
+      damage: tank.damage,
     }
 
     w.addBullet(bullet)
@@ -518,9 +519,11 @@ export class Simulation {
       // change a tank's identity or combat capability (issue #2): we do not
       // swap `kind`, mutate `profile`, or alter any derived stat (speed,
       // bulletSpeed, fireCooldown, bulletPower). The tank keeps its type and
-      // appearance; only `hp` drops and a damage *decoration* (hitCount) rises
-      // so the renderer can layer on type-preserving scorch/crack decals.
-      tank.hp--
+      // appearance; only `hp` drops (by the bullet's per-shot `damage`) and a
+      // damage *decoration* (hitCount) rises so the renderer can layer on
+      // type-preserving scorch/crack decals. This is the canonical
+      // firepower/HP model: hits-to-kill = ceil(target.maxHp / bullet.damage).
+      tank.hp -= bullet.damage
       tank.hitCount = Math.min((tank.hitCount ?? 0) + 1, 4)
       this.createExplosion(bullet.x, bullet.y, 'small')
 

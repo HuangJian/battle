@@ -102,6 +102,7 @@ function spawnStress(enemies: number, bullets: number): void {
       isPlayer: i % 2 === 0,
       speed: 6,
       power: 1,
+      damage: 100,
     })
   }
 }
@@ -129,6 +130,7 @@ function startTopUp(bullets: number): void {
         isPlayer: i % 2 === 0,
         speed: 6,
         power: 1,
+        damage: 100,
       })
       alive++
       i++

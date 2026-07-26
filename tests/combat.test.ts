@@ -12,9 +12,14 @@ import {
   capabilityBias,
   ELITE_DIMENSION,
   ELITE_BONUS,
-  STEEL_PIERCE_FIREPOWER,
+  STEEL_PIERCE_PLAYER_LEVEL,
 } from '../src/config/combat'
-import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick, BULLET_SPEED_RATIO, cpsToPxPerTick } from '../src/config/speed'
+import {
+  baseSpeedPxPerTick,
+  baseBulletSpeedPxPerTick,
+  BULLET_SPEED_RATIO,
+  cpsToPxPerTick,
+} from '../src/config/speed'
 import { BALANCED_FIRE_INTERVAL_MS } from '../src/config/fire-rate'
 import type { TankKind } from '../src/types'
 
@@ -84,21 +89,38 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     expect(heavy).toBeGreaterThan(fast)
   })
 
-  it('default power tank cannot pierce steel (bulletPower 1)', () => {
-    // default power firepower (75) sits below the steel-pierce threshold
-    expect(profileToStats(TANK_PROFILES.power).bulletPower).toBe(1)
-    expect(profileToStats(TANK_PROFILES.basic).bulletPower).toBe(1)
+  it('no enemy ever pierces steel — steel-pierce is player-only (user req)', () => {
+    // Steel-pierce is decoupled from raw firepower; ELITE power may hit
+    // hardest but still uses bulletPower 1 (cannot destroy steel).
+    for (const k of ENEMY_KINDS) {
+      expect(profileToStats(TANK_PROFILES[k], k).bulletPower).toBe(1)
+      expect(profileToStats(TANK_PROFILES[k], k).canPierceSteel).toBe(false)
+      // even the elite commander of every kind cannot pierce steel
+      const elite = applyEliteModifier(TANK_PROFILES[k], k)
+      expect(profileToStats(elite, k).bulletPower).toBe(1)
+      expect(profileToStats(elite, k).canPierceSteel).toBe(false)
+    }
   })
 
-  it('only ELITE power pierces steel — bulletPower 2', () => {
-    // elite power gets a +15% firepower boost (75 → 86), clearing the threshold
-    const elitePower = applyEliteModifier(TANK_PROFILES.power, 'power')
-    expect(elitePower.firepower).toBeGreaterThanOrEqual(STEEL_PIERCE_FIREPOWER)
-    expect(profileToStats(elitePower).bulletPower).toBe(2)
-    // other elite kinds do NOT reach the threshold → cannot destroy steel
-    for (const k of ['basic', 'fast', 'armor'] as const) {
-      expect(profileToStats(applyEliteModifier(TANK_PROFILES[k], k)).bulletPower).toBe(1)
-    }
+  it('only the max-level player pierces steel (classic Battle City)', () => {
+    // Below the gate: no pierce.
+    expect(profileToStats(playerProfile(0), 'player', 0).canPierceSteel).toBe(false)
+    expect(
+      profileToStats(
+        playerProfile(STEEL_PIERCE_PLAYER_LEVEL - 1),
+        'player',
+        STEEL_PIERCE_PLAYER_LEVEL - 1,
+      ).canPierceSteel,
+    ).toBe(false)
+    // At the gate: pierce.
+    expect(
+      profileToStats(playerProfile(STEEL_PIERCE_PLAYER_LEVEL), 'player', STEEL_PIERCE_PLAYER_LEVEL)
+        .canPierceSteel,
+    ).toBe(true)
+    expect(
+      profileToStats(playerProfile(STEEL_PIERCE_PLAYER_LEVEL), 'player', STEEL_PIERCE_PLAYER_LEVEL)
+        .bulletPower,
+    ).toBe(2)
   })
 
   it('basic bullet speed is anchored to 4× the balanced-enemy movement speed', () => {
@@ -160,11 +182,15 @@ describe('Combat Capability — power enemy bullet speed (user req)', () => {
     expect(TANK_PROFILES.power.projectileSpeed).toBe(70)
   })
 
-  it('power firepower is unchanged and still cannot destroy steel', () => {
-    // Firepower must NOT be raised — power must stay a non-steel-piercing unit.
-    expect(TANK_PROFILES.power.firepower).toBe(75)
-    expect(TANK_PROFILES.power.firepower).toBeLessThan(STEEL_PIERCE_FIREPOWER)
-    expect(profileToStats(TANK_PROFILES.power).bulletPower).toBe(1)
+  it('power keeps the highest enemy firepower and still cannot destroy steel', () => {
+    // Per the hits matrix power is "最强火力" (strongest gun) — so its
+    // firepower stays the highest among enemies. Steel-pierce is player-only,
+    // so power (elite or not) never gets bulletPower 2 regardless of firepower.
+    expect(TANK_PROFILES.power.firepower).toBeGreaterThan(TANK_PROFILES.basic.firepower)
+    expect(TANK_PROFILES.power.firepower).toBeGreaterThan(TANK_PROFILES.armor.firepower)
+    expect(TANK_PROFILES.power.firepower).toBeGreaterThan(TANK_PROFILES.fast.firepower)
+    expect(profileToStats(TANK_PROFILES.power, 'power').bulletPower).toBe(1)
+    expect(profileToStats(TANK_PROFILES.power, 'power').canPierceSteel).toBe(false)
   })
 
   it('power out-rates the unbuffed player (new spec: 1.10× > 1.05×)', () => {

@@ -559,6 +559,7 @@ export class TacticalIntelligence {
     best.speed = eliteStats.speed
     best.bulletSpeed = eliteStats.bulletSpeed
     best.bulletPower = eliteStats.bulletPower
+    best.damage = eliteStats.damage
     best.fireCooldown = eliteStats.fireCooldown
     // Elite promotion never changes fire cadence, but reset the jittered
     // next-shot interval to the base so it stays in sync with fireCooldown.

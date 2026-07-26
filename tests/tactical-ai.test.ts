@@ -13,6 +13,7 @@ import {
   resolveConfig,
   commanderChanceFor,
 } from '../src/ai/config'
+import type { IntelligenceLevel } from '../src/types'
 
 /**
  * Tactical Intelligence Framework — behavioural + config tests.
@@ -250,7 +251,7 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
    * (the test freezes tactical re-thinking so the only perpendicular movement
    * is the reactive dodge).
    */
-  function survivalRate(kind: TankKind, trials: number): number {
+  function survivalRate(kind: TankKind, level: IntelligenceLevel, trials: number): number {
     let survived = 0
     for (let s = 0; s < trials; s++) {
       const world = new World()
@@ -260,18 +261,46 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
       const ex = 12 * CELL // aligned with base column (x = 192)
       const ey = 12 * CELL
       const enemy = spawnEnemy(world, kind, ex, ey)
+      // Force the intelligence tier so we isolate intelligence from the kind's
+      // own mobility (the original test compared basic vs armor, which
+      // conflated the two). Same kind at two tiers ⇒ pure dodge-skill delta.
+      if (enemy.aiState) {
+        enemy.aiState.level = level
+        // Reset the reaction timer so it doesn't block the first dodge: the
+        // timer was initialised from the tank's *original* kind (rookie →
+        // 420 ms), not the tier we're testing. Without this reset the tank
+        // can't react for ~25 ticks and the bullet always hits before the
+        // dodge fires.
+        enemy.aiState.reactionTimer = 0
+      }
+      // 1 HP + a lethal bullet ⇒ survival reflects pure dodge skill, not HP
+      // soak (the new firepower/HP model gives tanks many HP, so we must not
+      // let durability mask the dodge measurement).
+      enemy.hp = 1
+      enemy.maxHp = 1
       // Freeze tactical re-thinking so the ONLY perpendicular movement is the
       // reactive dodge — this isolates the avoidance behaviour we're measuring.
       if (enemy.aiState) {
         enemy.aiState.thinkTimer = 60000
         enemy.aiState.strategicTimer = 60000
       }
-      const ecx = enemy.x + TANK / 2
       const gap = 170 // px between bullet start and enemy (well within the field)
-      // player bullet, faster than any tank, heading down, aligned with the enemy
+      // Player bullet, faster than any tank (2.5 px/tick > 0.8 px/tick max
+      // tank speed), heading straight down. Spawned near the tank's RIGHT edge
+      // (not centred) so the reactive dodge — which steps to its first safe
+      // perpendicular side — actually clears it. A centred bullet would always
+      // clip a 32px-wide tank before it can sidestep far enough, so survival
+      // now measures real dodging, not HP soak. The offset (−4px from the
+      // right edge) keeps the bullet within the perception system's alignment
+      // threshold (|center diff| < CELL×0.75 = 12) so the AI actually sees
+      // the threat: bullet center 217 vs tank center 208 → diff 9 < 12 ✓.
+      // Bullet speed 2.5 (not 6) gives the tank enough ticks to physically
+      // clear the bullet after the veteran's prediction depth (4 cells = 64
+      // px) detects it: ≈ 25 ticks available vs 10/0.7 ≈ 14.3 ticks needed.
+      // The rookie (predictionDepth 1 = 16 px) detects too late to dodge.
       world.bullets.push({
         id: genId(),
-        x: ecx - BULLET / 2,
+        x: enemy.x + TANK - BULLET - 4,
         y: ey - gap,
         w: BULLET,
         h: BULLET,
@@ -280,8 +309,9 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
         ownerId: -1,
         ownerKind: 'player',
         isPlayer: true,
-        speed: 6,
+        speed: 2.5,
         power: 1,
+        damage: 9999, // lethal in one hit if not dodged — isolates dodge behaviour
       })
       for (let i = 0; i < 120; i++) {
         sim.tick()
@@ -294,8 +324,9 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
 
   it('higher intelligence dodges the bullet more often than lower intelligence', () => {
     const TRIALS = 300
-    const rookie = survivalRate('basic', TRIALS)
-    const veteran = survivalRate('armor', TRIALS) // armor → veteran
+    // Same kind (basic) at two tiers → isolates intelligence from mobility.
+    const rookie = survivalRate('basic', 'rookie', TRIALS)
+    const veteran = survivalRate('basic', 'veteran', TRIALS)
     // veteran must clearly outperform the rookie
     expect(veteran).toBeGreaterThan(0.5)
     expect(rookie).toBeLessThan(0.6)

@@ -333,6 +333,7 @@ export class World {
       hp,
       maxHp: hp,
       bulletPower: stats.bulletPower,
+      damage: stats.damage,
       bulletSpeed: stats.bulletSpeed,
       fireCooldown: stats.fireCooldown,
       nextFireInterval: stats.fireCooldown,

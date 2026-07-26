@@ -36,6 +36,45 @@ export const BASELINE_BUDGET = 300
 export const ELITE_BUDGET = 360
 
 // ============================================================
+// Firepower / HP scales — the Combat Capability System maps the abstract
+// 0..100 `firepower` / `armor` dimensions onto concrete per-shot damage and
+// maximum HP via these linear scales. They are chosen so the four archetypes
+// reproduce the user-specified hits-to-kill matrix exactly (see
+// tests/combat-power-hp.test.ts):
+//
+//   damage   = round(firepower * DAMAGE_SCALE)          (enemies)
+//   maxHp    = round(armor    * HP_SCALE)              (enemies)
+//
+// with basic = firepower 50 / armor 50  →  damage 100 / HP 250, which gives
+// the reference "3 shots to kill a peer" cell (250/100 = 2.5 → 3).
+// ============================================================
+
+/** Multiplier from the `firepower` capability (0..100) to per-shot damage. */
+export const DAMAGE_SCALE = 2
+
+/** Multiplier from the `armor` capability (0..100) to maximum HP. */
+export const HP_SCALE = 5
+
+/**
+ * The no-star player's firepower and HP are each the balanced (basic) enemy's
+ * value × 1.05 (user spec: 无星星玩家 = 均衡敌人 × 105%). Player stats then
+ * grow universally with star level on top of this baseline bonus.
+ */
+export const PLAYER_FIREPOWER_MULT = 1.05
+export const PLAYER_HP_MULT = 1.05
+
+/**
+ * Steel (the indestructible-by-default terrain) can ONLY be destroyed by the
+ * player, and only once the player reaches this star level (classic Battle
+ * City: the top-tier tank breaks steel; enemies never do). This deliberately
+ * keeps elite power from breaking steel. Power's firepower was lowered from
+ * 80 to 64 (2026-07-26) because its specialty shifted to firing frequency;
+ * power stays the highest-damage enemy per the hits matrix, and steel-pierce
+ * is decoupled from raw firepower magnitude entirely.
+ */
+export const STEEL_PIERCE_PLAYER_LEVEL = 3
+
+// ============================================================
 // Tank-type profiles (normal enemies) — budget = 300 each
 // ============================================================
 
@@ -46,11 +85,14 @@ export const ELITE_BUDGET = 360
  *
  *   balanced (basic): everything near average.
  *   fast:             high mobility, weaker everything else.
- *   power:            high firepower + fast bullets (matches lvl-2 player), low mobility / armor.
+ *   power:            high firepower + fast bullets + fast fire rate, low mobility / armor.
  *   heavy  (armor):   high armor, low mobility.
  */
 export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> = {
   basic: {
+    // The reference archetype: every dimension at the 50 baseline. Its
+    // firepower (50) and armor (50) are the anchors for the player's
+    // no-star stats (player = basic × 1.05, see PLAYER_*_MULT).
     firepower: 50,
     projectileSpeed: 50,
     fireControl: 50,
@@ -59,42 +101,47 @@ export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> =
     special: 50,
   },
   fast: {
-    firepower: 40,
+    // Weakest gun (firepower 36), lowest durability (armor 30), highest
+    // mobility (80). Glass cannon that zips around but melts fast.
+    firepower: 36,
     projectileSpeed: 45,
     fireControl: 45,
     mobility: 80,
-    armor: 45,
-    special: 45,
+    armor: 30,
+    special: 64,
   },
   power: {
-    firepower: 75, // high firepower (the "power" role) but < 80 → cannot pierce steel
-    // Bullet speed matches the level-2 player (player eats 2 stars → every
-    // dimension 70, projectileSpeed 70). This makes power shells noticeably
-    // faster / harder to dodge WITHOUT raising firepower — power still can't
-    // destroy steel (firepower 75 < STEEL_PIERCE_FIREPOWER 80). The +20
-    // projectileSpeed is funded by dropping `special` (no stat mapping) to 30,
-    // keeping the total at BASELINE_BUDGET (300). Contract asserted in
-    // tests/combat.test.ts (power-bullet-speed section).
+    // Strongest gun (firepower 64 — the "power" role) and a fast bullet, but
+    // slightly low durability (armor 40). Its identity is now BOTH a high
+    // fire RATE (1.10× frequency, config/fire-rate.ts) AND the highest
+    // per-shot damage — a glass cannon. Firepower was lowered from 80 to 64
+    // (2026-07-26) because the specialty shifted to firing frequency: with
+    // 1.10× fire rate AND the old damage 160, power was too dominant (it
+    // one-shot the fast tank and elite power reached damage 184). At damage
+    // 128 power still kills most enemies in 2 hits but can no longer one-shot
+    // any archetype — and elite power (firepower 74, damage 148) also cannot
+    // one-shot the frailest fast (HP 150). Steel-piercing is intentionally
+    // withheld from every enemy (see STEEL_PIERCE_PLAYER_LEVEL): elite power
+    // may hit harder but still cannot destroy steel, which stays a player-only
+    // privilege (classic Battle City). The +20 projectileSpeed (funded by
+    // dropping `special`) keeps the bullet noticeably faster without touching
+    // firepower.
+    firepower: 64,
     projectileSpeed: 70,
-    // Fire-rate fairness invariant: NO enemy archetype may out-fire the
-    // unbuffed player (level 0, fireControl 50 → 420 ms). fireCooldown is
-    // 620 − fireControl×4, so any enemy fireControl above 50 would win a
-    // head-on duel purely on cadence (bullets cancel 1:1; the faster firer
-    // always lands the surplus shell). power was 55 (400 ms — strictly
-    // faster than the player); rebalanced to 50 so the 300 budget still holds.
-    // Guarded by tests/fire-rate-duel.test.ts.
     fireControl: 50,
     mobility: 30,
-    armor: 45,
-    special: 30,
+    armor: 40,
+    special: 46,
   },
   armor: {
-    firepower: 55,
+    // Highest durability (armor 70), slightly-below-average gun (firepower
+    // 43), sluggish (mobility 30). A wall that wears you down.
+    firepower: 43,
     projectileSpeed: 40,
     fireControl: 45,
     mobility: 30,
-    armor: 90,
-    special: 40,
+    armor: 70,
+    special: 72,
   },
 }
 
@@ -228,13 +275,27 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   // fire at different bullet speeds, so the table is the single source of truth.
   // Synthetic (test) profiles without a kind fall back to the balanced enemy.
   const bulletSpeed = baseBulletSpeedPxPerTick(kind ?? 'basic', level)
-  // armor 45→1, 50→1, 70→3, 90→4, 100→5
-  const maxHp = clamp(Math.round((profile.armor - 35) / 13), 1, 8)
-  // Steel is only destroyed by bulletPower 2. We set the firepower threshold so
-  // that the DEFAULT power tank (firepower 75) CANNOT pierce steel; only an
-  // ELITE power tank reaches it — its +15% firepower boost lifts 75 → 86 — and
-  // the max-level player (firepower 80) does too, matching classic Battle City.
-  const bulletPower = profile.firepower >= STEEL_PIERCE_FIREPOWER ? 2 : 1
+  // ── Firepower → per-shot damage ─────────────────────────────────────────
+  // The "火力强度值" (firepower strength) the user spec talks about is this
+  // concrete per-shot damage. Linear in the `firepower` capability:
+  //   damage = round(firepower * DAMAGE_SCALE)   (×1.05 for the no-star player)
+  // basic → 50×2 = 100 (reference); the player at level 0 → 105.
+  const isPlayer = kind === 'player'
+  const effFirepower = profile.firepower * (isPlayer ? PLAYER_FIREPOWER_MULT : 1)
+  const damage = Math.round(effFirepower * DAMAGE_SCALE)
+  // ── Armor → max HP ──────────────────────────────────────────────────────
+  // The "HP 值" is linear in the `armor` capability:
+  //   maxHp = round(armor * HP_SCALE)   (×1.05 for the no-star player)
+  // basic → 50×5 = 250 (reference: a peer kills it in 3 shots); player L0 → 263.
+  const effArmor = profile.armor * (isPlayer ? PLAYER_HP_MULT : 1)
+  const maxHp = Math.round(effArmor * HP_SCALE)
+  // ── Steel-pierce: player-only, level-gated ─────────────────────────────
+  // Steel is destroyed solely by the player at/above STEEL_PIERCE_PLAYER_LEVEL.
+  // Enemies — including ELITE power — NEVER pierce steel, regardless of how
+  // high their firepower climbs. `bulletPower` keeps its 1/2 meaning (2 = can
+  // destroy steel) for the terrain code; `canPierceSteel` is the canonical flag.
+  const canPierceSteel = isPlayer && level >= STEEL_PIERCE_PLAYER_LEVEL
+  const bulletPower = canPierceSteel ? 2 : 1
   // Fire cadence is now driven by the fire-rate standard (config/fire-rate.ts),
   // NOT the `fireControl` capability: the balanced (basic) enemy's interval is
   // pinned by the "3 bullets on the vertical route" constraint, and every other
@@ -246,7 +307,7 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   // see DECISIONS.md: the new spec lets the power enemy out-rate the no-star
   // player, which is the explicit user design).
   const fireCooldown = Math.round(baseFireIntervalMs(kind ?? 'basic', level))
-  return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown }
+  return { speed, bulletSpeed, bulletPower, maxHp, fireCooldown, damage, canPierceSteel }
 }
 
 /** Global bullet-speed scale removed (2026-07-26): bullet speed is now a
@@ -255,10 +316,9 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
  *  The `projectileSpeed` capability dimension is retained on CombatProfile for
  *  AI/extensibility symmetry but no longer drives bullet speed. */
 
-/** Minimum firepower for a bullet to destroy steel (bulletPower 2).
- *  Tuned so default power (75) cannot pierce steel; only elite power (~86)
- *  and max-level player (80) can. */
-export const STEEL_PIERCE_FIREPOWER = 80
+// NOTE: the old `STEEL_PIERCE_FIREPOWER` threshold is gone. Steel-pierce is
+// now player-only and level-gated (STEEL_PIERCE_PLAYER_LEVEL); no enemy —
+// elite or not — can destroy steel regardless of firepower.
 
 // ============================================================
 // AI capability bias (plan §14) — combat attributes steer decisions
@@ -278,7 +338,7 @@ export const NEUTRAL_BIAS: CapabilityBias = { flank: 0, push: 0, attack: 0 }
 /**
  * Convert a profile into decision-weight biases in roughly [-1, +1].
  * 50 (baseline) → 0; 80 (fast mobility) → +0.6 flank; 90 (heavy armor) → +0.8
- * push; 75 (power firepower) → +0.5 attack.  The AI adds these to its goal
+ * push; 64 (power firepower) → +0.28 attack.  The AI adds these to its goal
  * scores so every tank "plays to its strengths" without bespoke scripts.
  */
 export function capabilityBias(profile: CombatProfile): CapabilityBias {

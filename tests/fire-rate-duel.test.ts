@@ -5,11 +5,7 @@ import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { Tank, TankKind } from '../src/types'
-import {
-  TANK_PROFILES,
-  applyEliteModifier,
-  profileToStats,
-} from '../src/config/combat'
+import { TANK_PROFILES, applyEliteModifier, profileToStats } from '../src/config/combat'
 import { FIRE_FREQUENCY_MULTIPLIER, baseFireIntervalMs } from '../src/config/fire-rate'
 
 /**
