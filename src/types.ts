@@ -26,8 +26,6 @@ export type PowerUpType =
   | 'helmet'
   | 'fence'
   | 'boat'
-  | 'fence'
-  | 'boat'
 
 export interface Vec2 {
   x: number
@@ -302,9 +300,15 @@ export interface DifficultyConfig {
    * power" (armor / speed / bullet speed / HP), which is explicitly forbidden by
    * DECISIONS.md (Tactical Intelligence Framework). Lives and the player's
    * starting star level are player-side resources, not enemy combat power.
+   *
+   * `eliteChance`: probability (0-1) that a spawned enemy is an elite. An elite
+   * is born AS a commander (`level === 'commander'`, `isCommander === true`) and
+   * is the ONLY way an enemy becomes a commander — there is no separate commander
+   * election. Elites get a +15% combat-profile boost and the commander AI tier.
    */
   startLives: number
   playerStartLevel: number
+  eliteChance: number
 }
 
 export interface StageData {

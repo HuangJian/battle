@@ -126,8 +126,6 @@ export interface DifficultyAIScaling {
   predictAdd: number
   reactionMult: number
   aggressionMult: number
-  /** Probability per election check (≈1s) that a commander is elected. */
-  commanderChance: number
 }
 
 /** A resolved (difficulty-scaled) config for one tank on this stage. */

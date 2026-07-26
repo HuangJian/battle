@@ -7,12 +7,7 @@ import { genId } from '../src/game/World'
 import { CELL, TANK, BULLET, GRID } from '../src/constants'
 import type { TankKind, Tank } from '../src/types'
 import type { Direction } from '../src/constants'
-import {
-  INTELLIGENCE_LEVELS,
-  KIND_TO_LEVEL,
-  resolveConfig,
-  commanderChanceFor,
-} from '../src/ai/config'
+import { INTELLIGENCE_LEVELS, KIND_TO_LEVEL, resolveConfig } from '../src/ai/config'
 import type { IntelligenceLevel } from '../src/types'
 
 /**
@@ -179,8 +174,8 @@ describe('Tactical Intelligence — strategic stability (plan §12)', () => {
 // ============================================================
 
 describe('Tactical Intelligence — commander (DoD #4)', () => {
-  it('relax difficulty never elects a commander', () => {
-    const { world, sim } = seededWorld(2024, 'relax')
+  it('classic (eliteChance 0) never yields a commander — no election fallback', () => {
+    const { world, sim } = seededWorld(2024, 'classic')
     let sawCommander = false
     for (let i = 0; i < 3600; i++) {
       sim.tick()
@@ -191,48 +186,12 @@ describe('Tactical Intelligence — commander (DoD #4)', () => {
     expect(sawCommander).toBe(false)
   })
 
-  it('chaos elects a commander that broadcasts directives to others', () => {
-    const { world, sim } = seededWorld(2024, 'chaos')
-    // Capture the base cells so the commander-coordination assertion isn't
-    // disturbed by the base being destroyed. Enemies reaching the base triggers
-    // loadStage(), which wipes every enemy (including the commander) — that is
-    // correct game behaviour but incidental to what this test checks (a
-    // commander *broadcasts* directives). Navigation improvements make enemies
-    // reach the base sooner, so we keep the base alive in place to isolate the
-    // broadcast behaviour. The Definition of Done ("commander coordinates but
-    // never overrides") is fully preserved.
-    const baseCells: Array<{ c: number; r: number }> = []
-    for (let r = 0; r < GRID; r++) {
-      for (let c = 0; c < GRID; c++) {
-        if (world.tileMap.grid[r][c] === 'base') baseCells.push({ c, r })
-      }
-    }
-    const restoreBase = () => {
-      for (const { c, r } of baseCells) world.tileMap.grid[r][c] = 'base'
-      world.tileMap.rebuildBaseCache()
-    }
-    let sawCommander = false
-    let sawDirective = false
-    for (let i = 0; i < 3600; i++) {
-      sim.tick()
-      if (world.tileMap.isBaseDestroyed()) {
-        restoreBase()
-        world.state = 'playing'
-      }
-      const cmd = world.tanks.find((t) => t.alive && t.aiState?.isCommander)
-      if (cmd) {
-        sawCommander = true
-        if (cmd.aiState?.level === 'commander') {
-          // some other tank received a directive
-          if (world.tanks.some((t) => t.alive && t !== cmd && t.aiState?.directive !== 'none')) {
-            sawDirective = true
-          }
-        }
-      }
-      if (!world.player || !world.player.alive) world.spawnPlayer()
-    }
-    expect(sawCommander).toBe(true)
-    expect(sawDirective).toBe(true)
+  it('a spawn-time elite is the only commander path (no separate election)', () => {
+    // 'commander' is the single commander role; there is no dynamic election.
+    // On a difficulty whose eliteChance is 0, no commander can ever appear.
+    expect(INTELLIGENCE_LEVELS.commander).toBeDefined()
+    // The removed election knob must not exist anymore.
+    expect((INTELLIGENCE_LEVELS as Record<string, unknown>).elite).toBeUndefined()
   })
 })
 
@@ -364,16 +323,13 @@ describe('Tactical Intelligence — configuration (DoD #2, #9)', () => {
   })
 
   it('every enemy kind maps to a known tier and four tiers exist', () => {
+    // Intelligence tiers: rookie / soldier / veteran / commander. The former
+    // distinct 'elite' tier was removed — an elite *is* a born commander.
     expect(Object.keys(INTELLIGENCE_LEVELS).sort()).toEqual(
       ['commander', 'rookie', 'soldier', 'veteran'].sort(),
     )
     for (const k of ['basic', 'fast', 'power', 'armor'] as TankKind[]) {
       expect(INTELLIGENCE_LEVELS[KIND_TO_LEVEL[k]]).toBeDefined()
     }
-  })
-
-  it('commander chance is difficulty-gated (0 for relax, >0 for chaos)', () => {
-    expect(commanderChanceFor('relax')).toBe(0)
-    expect(commanderChanceFor('chaos')).toBeGreaterThan(0)
   })
 })

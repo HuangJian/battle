@@ -24,6 +24,7 @@ import {
 } from '../constants'
 import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
+import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { nextFireIntervalMs } from '../config/fire-rate'
 import { genId } from './World'
@@ -203,6 +204,39 @@ export class Simulation {
       // Create the enemy tank
       const tank = w.createTank(entry.kind, pt.x, pt.y, 'down')
       tank.bonus = entry.bonus
+      // Roll elite status at spawn time (not at loadStage) so the RNG cost is
+      // paid per-spawn and is skipped entirely when eliteChance is 0 (classic),
+      // avoiding an upstream RNG-stream shift. Gated on eliteChance > 0 so
+      // classic consumes zero RNG for elites (DECISIONS.md: Combat Capability
+      // System — spawn-time elite path).
+      const eliteChance = w.difficulty.eliteChance
+      const isElite = eliteChance > 0 && w.rng.next() < eliteChance
+      if (isElite) {
+        const eliteProfile = applyEliteModifier(
+          tank.profile ?? resolveProfile(tank.kind, 0),
+          tank.kind,
+        )
+        tank.profile = eliteProfile
+        const eliteStats = profileToStats(eliteProfile, tank.kind, tank.level ?? 0)
+        tank.speed = eliteStats.speed
+        tank.bulletSpeed = eliteStats.bulletSpeed
+        tank.bulletPower = eliteStats.bulletPower
+        tank.damage = eliteStats.damage
+        tank.fireCooldown = eliteStats.fireCooldown
+        tank.nextFireInterval = eliteStats.fireCooldown
+        tank.maxHp = eliteStats.maxHp
+        tank.hp = eliteStats.maxHp
+        // An elite is born AS a commander: it gets the +15% combat boost, the
+        // 'commander' AI tier, and immediately coordinates its squad. There is
+        // no separate election, so this is the ONLY way an enemy becomes a
+        // commander (DECISIONS.md §29). commanderTimer is cleared so the first
+        // directive broadcasts as soon as the spawn animation finishes.
+        if (tank.aiState) {
+          tank.aiState.level = 'commander'
+          tank.aiState.isCommander = true
+          tank.aiState.commanderTimer = 0
+        }
+      }
       w.tanks.push(tank)
       w.spawnQueue.shift()
       w.enemiesSpawned++

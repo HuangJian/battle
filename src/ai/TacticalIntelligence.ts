@@ -9,17 +9,11 @@ import {
   TACTICAL_INTERVAL_MS,
   STRATEGIC_INTERVAL_MS,
   COMMANDER_INTERVAL_MS,
-  ELECTION_CHECK_TICKS,
   DODGE_LOCK_MS,
 } from '../constants'
 import { opposite, ALL_DIRS, snap } from '../utils/helpers'
-import { resolveConfig, commanderChanceFor } from './config'
-import {
-  capabilityBias,
-  applyEliteModifier,
-  profileToStats,
-  resolveProfile,
-} from '../config/combat'
+import { resolveConfig } from './config'
+import { capabilityBias } from '../config/combat'
 import type { ResolvedConfig, Situation, Perception } from './types'
 import { perceive, analyze, dirToward, manhattan } from './perception'
 
@@ -58,8 +52,9 @@ export class TacticalIntelligence {
       return
     }
 
-    // Strategic coordination layer: maybe elect / keep a commander.
-    this.updateCommanderElection(world)
+    // Commander coordination (directive broadcast) is handled per-tank inside
+    // updateTank for any tank born as a commander (spawn-time elite). There is
+    // no runtime commander election — being an elite is the only path.
 
     for (const tank of world.tanks) {
       if (!tank.alive || tank.spawnTimer > 0 || !tank.aiState) continue
@@ -506,67 +501,6 @@ export class TacticalIntelligence {
   // ================================================================
   // Commander system (§8) — influence, never control
   // ================================================================
-
-  /** Elect a commander when none exists (difficulty-gated, deterministic). */
-  private updateCommanderElection(world: World): void {
-    if (world.frame % ELECTION_CHECK_TICKS !== 0) return
-    const chance = commanderChanceFor(world.difficultyKey)
-    if (chance <= 0) return
-
-    let exists = false
-    for (const t of world.tanks) {
-      if (t.alive && t.spawnTimer <= 0 && t.aiState?.isCommander) {
-        exists = true
-        break
-      }
-    }
-    if (exists) return
-    if (world.rng.next() >= chance) return
-
-    // Promote the highest-tier available enemy (armor/veteran preferred).
-    const order: Record<string, number> = { rookie: 0, soldier: 1, veteran: 2, commander: 3 }
-    let best: Tank | null = null
-    let bestLevel = -1
-    for (const t of world.tanks) {
-      if (!t.alive || t.spawnTimer > 0 || t.isPlayer || !t.aiState) continue
-      const lvl = order[t.aiState.level]
-      if (best === null || lvl > bestLevel) {
-        best = t
-        bestLevel = lvl
-      }
-    }
-    const bestAi = best?.aiState
-    if (!best || !bestAi) return
-
-    bestAi.isCommander = true
-    bestAi.level = 'commander'
-    // Broadcast the FIRST directive on the very next tick (timer already <= 0).
-    // This matters because a freshly-elected commander can be killed by
-    // friendly fire before its nominal interval elapses; broadcasting
-    // immediately on election guarantees coordination kicks in right away
-    // instead of depending on the commander surviving ~COMMANDER_INTERVAL_MS.
-    bestAi.commanderTimer = 0
-    bestAi.strategicGoal = 'attackBase'
-
-    // Elite commander combat modifier (plan §8, §10): boost the kind's primary
-    // dimension by +15% and re-derive the tank's concrete stats. Note we only
-    // touch THIS tank's profile (a fresh object from applyEliteModifier), so
-    // other tanks of the same kind keep their base archetype. The commander
-    // also enters at full health to feel like an exceptional unit.
-    const eliteProfile = applyEliteModifier(best.profile ?? resolveProfile(best.kind, 0), best.kind)
-    best.profile = eliteProfile
-    const eliteStats = profileToStats(eliteProfile, best.kind, best.level ?? 0)
-    best.speed = eliteStats.speed
-    best.bulletSpeed = eliteStats.bulletSpeed
-    best.bulletPower = eliteStats.bulletPower
-    best.damage = eliteStats.damage
-    best.fireCooldown = eliteStats.fireCooldown
-    // Elite promotion never changes fire cadence, but reset the jittered
-    // next-shot interval to the base so it stays in sync with fireCooldown.
-    best.nextFireInterval = eliteStats.fireCooldown
-    best.maxHp = eliteStats.maxHp
-    best.hp = eliteStats.maxHp
-  }
 
   /** The commander evaluates the battlefield and broadcasts a directive. */
   private broadcastDirective(world: World, commander: Tank, cfg: ResolvedConfig): void {

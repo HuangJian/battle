@@ -332,11 +332,12 @@ Only stronger configuration.
 
 Most enemies behave independently.
 
-Occasionally, one enemy becomes the battlefield commander.
+An enemy becomes the battlefield commander only by spawning as a spawn-time
+elite — driven by the per-difficulty `eliteChance` knob. There is **no runtime
+commander election**: being an elite *is* the only promotion path, and it grants
+both the +15% combat boost and the coordination role at birth.
 
-Commander probability depends on difficulty.
-
-Only one commander exists at a time.
+Only one commander path exists.
 
 Every 20 seconds:
 
@@ -620,7 +621,7 @@ Strategic Layer
 
 Commander System
 
-* commander election
+* spawn-time elite commander (born as commander, no election)
 * tactical directives
 * lightweight cooperation
 

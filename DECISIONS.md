@@ -115,9 +115,9 @@ weighted-random direction picker entirely.
   veteran / commander` live in `src/ai/config.ts` (`INTELLIGENCE_LEVELS`) with
   capability flags + dynamic goal weights. Enemy kind → base tier via
   `KIND_TO_LEVEL` (basic→rookie, fast→soldier, power/armor→veteran). Difficulty
-  scales capabilities (dodge, prediction depth, reaction, aggression,
-  commander-election chance) through `DIFFICULTY_AI` — never the tank stats. New
-  tiers are added by appending one registry entry; no engine change.
+  scales capabilities (dodge, prediction depth, reaction, aggression) through
+  `DIFFICULTY_AI` — never the tank stats. New tiers are added by appending one
+  registry entry; no engine change.
 - **Dynamic goal scoring** replaces fixed priority lists (`evaluateGoals`):
   each candidate goal (attackBase / attackPlayer / destroyWall / retreat /
   regroup / advance) gets a weighted score from situation factors; the highest
@@ -125,12 +125,15 @@ weighted-random direction picker entirely.
 - **Bullet avoidance** scales with intelligence: prediction depth (how early a
   bullet is seen), dodge probability, and a delayed-reaction model. Lower tiers
   react late and fail to dodge more often.
-- **Commander system:** on difficulties with `commanderChance > 0`, one alive
-  enemy is elected commander (highest tier wins) and broadcasts lightweight
-  directives (pushLeft / pushRight / defendBase / attackTogether / spreadOut)
-  every ~20 s. Directives *influence* — teamwork tiers heed them (goal/route
-  bias); non-teamwork tiers ignore them. The commander never overrides an
-  autonomous tank.
+- **Commander system:** a commander is the coordination role. The **only** way
+  an enemy becomes a commander is by being born as a spawn-time elite — when
+  `Simulation.updateSpawning` rolls `difficulty.eliteChance` it assigns that
+  tank `level = 'commander'` + `isCommander = true` and a +15% combat-profile
+  boost (DECISIONS.md §29). A commander broadcasts lightweight directives
+  (pushLeft / pushRight / defendBase / attackTogether / spreadOut) every ~20 s.
+  Directives *influence* — teamwork tiers heed them (goal/route bias);
+  non-teamwork tiers ignore them. The commander never overrides an autonomous
+  tank. There is no runtime commander election.
 - **Imperfection model:** `reactionTime`, `aimError`, `routeNoise` make higher
   tiers commit fewer mistakes while never becoming flawless (dodge probability
   clamped to ≤ 0.95).
@@ -526,10 +529,12 @@ profile distributions, not code branches.
 **Rationale / specifics:**
 - **Budgets:** every normal enemy archetype sums to `BASELINE_BUDGET = 300`
   (balanced/fast/power/heavy in `TANK_PROFILES`); difficulty = variety, not
-  inflation. Elite commanders break the budget via a +15% boost to their
-  kind-specific dimension (`ELITE_DIMENSION` / `ELITE_BONUS`), applied at
-  commander election in `TacticalIntelligence` (a fresh object, never mutating the
-  shared base profile — safe for shallow-clone recovery).
+  inflation. Commanders (born as spawn-time elites) break the budget via a
+  +15% boost to their kind-specific dimension (`ELITE_DIMENSION` / `ELITE_BONUS`),
+  applied once at spawn in `Simulation.updateSpawning` (a fresh object, never
+  mutating the shared base profile — safe for shallow-clone recovery). Since
+  commander is the only elite path, there is no compounding ("elite = elite,
+  never more").
 - **Player progression:** universal growth — every star raises ALL six dimensions
   together (level 0→50, 1→60, 2→70, 3→80). Ceiling is `PLAYER_PROGRESSION`
   (`maximumLevel`, `maxMultiplier`) so hardcore/challenge modes can out-scale
@@ -807,4 +812,59 @@ matrix changes in exactly one cell: power→fast goes from 1 (one-shot) to 2.
 - Players can immediately identify high-threat or high-HP targets at a glance without cluttered health bars.
 - 0 runtime/memory footprint overhead: decorative shapes are drawn via 2D Canvas primitives with frame-based pulse animations.
 - Test coverage: `tests/hp-level.test.ts` validates mapping boundaries (0~600+ HP) and color/shape configurations.
+
+---
+
+## 29. Spawn-Time Elite Enemies = Born Commanders (2026-07-26)
+
+**Decision:** An elite enemy *is* a commander. The only way an enemy becomes a
+commander is by being **born** as a spawn-time elite — there is **no runtime
+commander election**. The per-difficulty `eliteChance` knob in
+`config/difficulty.ts` (`relax 0.05`, `classic 0.0`, `hard 0.12`, `chaos 0.25`)
+drives the roll inside `Simulation.updateSpawning`. When it succeeds, the spawned
+tank:
+
+1. gets the **+15%** combat-profile boost (`applyEliteModifier` on its kind's
+   `*_DIMENSION`), re-deriving concrete stats; and
+2. is assigned `level = 'commander'` + `isCommander = true`, i.e. it runs the
+   full commander AI tier and immediately coordinates its squad via the
+   directive-broadcast mechanism (`TacticalIntelligence.updateTank`, gated on
+   `isCommander && commanderTimer <= 0`). `commanderTimer` is cleared to 0 at
+   spawn so the first directive broadcasts as soon as the spawn animation ends.
+
+There is exactly **one** commander concept (`'commander'` in `IntelligenceLevel`)
+and one coordination path (born-elite). The former distinct `elite` tier and the
+`commanderChance` election probability have both been deleted.
+
+**Why conflate elite with commander (not a separate tier):** the user's explicit
+direction is that becoming an elite *is* the only promotion path, and it should
+grant the commander role (stats boost + squad coordination). Keeping a separate
+non-commander `elite` tier added a redundant concept and a second commander-like
+visual with no gameplay payoff.
+
+**No-compounding guaranteed by construction:** the +15% boost is applied exactly
+once, at spawn, to a fresh profile object (`applyEliteModifier(resolveProfile(kind,
+0), kind)`). There is no second code path that could re-boost it (the election is
+gone), so the combat budget gate holds by design — "elite = elite, never more".
+
+**RNG placement:** the elite roll lives in `Simulation.updateSpawning`, gated on
+`eliteChance > 0`. On `classic` (`eliteChance === 0`) the roll is skipped and
+zero RNG is consumed for elites; on other difficulties the cost is paid
+per-spawn, matching the spawn cadence. All entropy still flows through
+`world.rng`, so determinism (same seed ⇒ same elite sequence) holds.
+
+**Visuals:** a born-commander elite renders with the standard golden commander
+crown (`drawCommanderAura`, `SpriteArtist`) — no separate elite aura. Snapshot
+metadata expose `commanderPresent` (a tank with `isCommander === true`); the
+separate `elitePresent` flag and `ELITE` badge were removed.
+
+**Testing:** `tests/elite-spawn.test.ts` guards (1) elite determinism — same RNG
+seed reproduces the same elite sequence; (2) classic (`eliteChance 0`) spawns
+zero elites; (3) the elite stat boost is exactly +15% on the kind dimension;
+(4) a spawned elite is `level === 'commander'` **and** `isCommander === true`
+(so it broadcasts directives); (5) at most one commander path exists — there is
+no election, so the only commander is the spawn-time elite. `tests/tactical-ai.
+test.ts` no longer references `commanderChanceFor` and asserts four intelligence
+tiers (`rookie / soldier / veteran / commander`).
+
 

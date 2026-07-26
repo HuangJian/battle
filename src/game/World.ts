@@ -220,7 +220,11 @@ export class World {
     this.pickupWindowTimer = 0
     this.pickupWindowEntered = false
 
-    // Build spawn queue
+    // Build spawn queue. The elite roll is intentionally NOT performed here:
+    // it happens at spawn time in `Simulation.updateSpawning` so the RNG cost
+    // is paid per-spawn (and is skipped entirely on difficulties with
+    // `eliteChance === 0`, e.g. classic) instead of consuming 20 RNG calls
+    // up front and shifting the whole downstream stream (DECISIONS.md).
     this.spawnQueue = []
     const enemies = stage.enemies
     for (let i = 0; i < ENEMIES_PER_STAGE; i++) {

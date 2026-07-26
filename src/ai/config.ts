@@ -84,7 +84,7 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
     },
   },
 
-  // ----- Commander: full capability (elected role, never flawless) -----
+  // ----- Commander: full capability (born as a spawn-time elite) -----
   commander: {
     name: 'Commander',
     strategicThinking: true,
@@ -109,11 +109,15 @@ export const INTELLIGENCE_LEVELS: Record<IntelligenceLevel, IntelligenceConfig> 
 
 /**
  * Base intelligence tier for each enemy kind.
- * Difficulty does NOT change tiers — it scales capabilities (see DIFFICULTY_AI)
- * and the chance a commander is elected. This keeps "intelligence" and
- * "difficulty" as orthogonal axes, exactly as the plan's Vision demands
- * ("Difficulty should primarily arise from better decisions, not stronger
- * enemy statistics").
+ * Difficulty does NOT change tiers — it scales capabilities (see DIFFICULTY_AI).
+ * This keeps "intelligence" and "difficulty" as orthogonal axes, exactly as the
+ * plan's Vision demands ("Difficulty should primarily arise from better
+ * decisions, not stronger enemy statistics").
+ *
+ * NOTE: a `commander` is created ONLY when `Simulation.updateSpawning` rolls an
+ * elite (driven by `difficulty.eliteChance`) and assigns that spawned tank
+ * `level = 'commander'` + `isCommander = true`. There is no commander election;
+ * all other enemies keep their base kind tier.
  */
 export const KIND_TO_LEVEL: Record<TankKind, IntelligenceLevel> = {
   player: 'rookie', // unused for the player, but keeps the map total
@@ -126,7 +130,8 @@ export const KIND_TO_LEVEL: Record<TankKind, IntelligenceLevel> = {
 /**
  * Per-difficulty capability scaling. Applied on top of a tier's base config so
  * that "Hard" makes the *same* tanks smarter (better dodging, earlier
- * prediction, more likely to have a commander) rather than just faster/tougher.
+ * prediction) rather than just faster/tougher. Commander spawning is governed by
+ * `difficulty.eliteChance` (see config/difficulty.ts), not by this table.
  */
 export const DIFFICULTY_AI: Record<string, DifficultyAIScaling> = {
   relax: {
@@ -134,28 +139,24 @@ export const DIFFICULTY_AI: Record<string, DifficultyAIScaling> = {
     predictAdd: 0,
     reactionMult: 1.4,
     aggressionMult: 0.8,
-    commanderChance: 0.0,
   },
   classic: {
     dodgeMult: 1.0,
     predictAdd: 0,
     reactionMult: 1.0,
     aggressionMult: 1.0,
-    commanderChance: 0.15,
   },
   hard: {
     dodgeMult: 1.2,
     predictAdd: 1,
     reactionMult: 0.8,
     aggressionMult: 1.15,
-    commanderChance: 0.3,
   },
   chaos: {
     dodgeMult: 1.4,
     predictAdd: 2,
     reactionMult: 0.6,
     aggressionMult: 1.3,
-    commanderChance: 0.5,
   },
 }
 
@@ -192,11 +193,6 @@ export function resolveConfig(level: IntelligenceLevel, difficultyKey: string): 
 /** Base tier for a freshly spawned enemy of the given kind. */
 export function levelForKind(kind: TankKind): IntelligenceLevel {
   return KIND_TO_LEVEL[kind] ?? 'rookie'
-}
-
-/** Commander-election probability for a difficulty (0 = never). */
-export function commanderChanceFor(difficultyKey: string): number {
-  return DIFFICULTY_AI[difficultyKey]?.commanderChance ?? 0
 }
 
 /** True if `difficultyKey` is a known key (defensive guard). */

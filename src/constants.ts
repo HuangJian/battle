@@ -133,9 +133,6 @@ export const STRATEGIC_INTERVAL_MS = 20000
 /** Commander broadcast cadence (20s). */
 export const COMMANDER_INTERVAL_MS = 20000
 
-/** Commander election is attempted every N ticks (~1s at 60fps). */
-export const ELECTION_CHECK_TICKS = 60
-
 /** How long (ms) a committed dodge direction is held before re-evaluating. */
 export const DODGE_LOCK_MS = 350
 
