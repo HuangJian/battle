@@ -583,6 +583,7 @@ export class SpriteArtist {
     flash: boolean,
     hp: number,
     hitStage = 0,
+    isCommander = false,
   ): void {
     const key = TANK_KEY_MAP[kind] ?? 'tank.basic'
 
@@ -606,6 +607,10 @@ export class SpriteArtist {
           const overlay = cache.getHitSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
         }
+        // Commander visual decoration (prominent aura)
+        if (isCommander) {
+          this.drawCommanderAura(x, y, size, animFrame)
+        }
         return
       }
     }
@@ -616,6 +621,7 @@ export class SpriteArtist {
     if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
       if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, rot, 1.28)
+      if (isCommander) this.drawCommanderAura(x, y, size, animFrame)
       return
     }
     const t = this.theme
@@ -645,6 +651,9 @@ export class SpriteArtist {
     }
 
     this.drawTank(x, y, size, dir, body, turret, animFrame, 0)
+    if (isCommander) {
+      this.drawCommanderAura(x, y, size, animFrame)
+    }
   }
 
   // ================================================================
@@ -1152,6 +1161,73 @@ export class SpriteArtist {
         break
       }
     }
+    ctx.restore()
+  }
+
+  /**
+   * Draw elite commander visual decoration — a prominent pulsing aura
+   * that makes commanders immediately recognizable on the battlefield.
+   */
+  drawCommanderAura(x: number, y: number, size: number, frame: number): void {
+    const ctx = this.ctx
+    const margin = 4
+    const bx = x - margin
+    const by = y - margin
+    const bw = size + margin * 2
+    const bh = size + margin * 2
+
+    ctx.save()
+
+    // Pulsing golden crown-like aura
+    const pulse = Math.sin(frame * 0.12) * 0.5 + 0.5
+    const pulse2 = Math.sin(frame * 0.08 + Math.PI / 3) * 0.5 + 0.5
+
+    // Outer golden ring
+    ctx.strokeStyle = '#f4c430'
+    ctx.lineWidth = 2.5
+    ctx.globalAlpha = 0.8 + pulse * 0.2
+    ctx.beginPath()
+    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.6, bh * 0.6, 0, 0, Math.PI * 2)
+    ctx.stroke()
+
+    // Inner pulsing ring
+    ctx.strokeStyle = '#ffd700'
+    ctx.lineWidth = 1.5
+    ctx.globalAlpha = 0.6 + pulse2 * 0.4
+    ctx.beginPath()
+    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.45, bh * 0.45, 0, 0, Math.PI * 2)
+    ctx.stroke()
+
+    // Crown points (4 spikes at cardinal directions)
+    const cx = bx + bw / 2
+    const cy = by + bh / 2
+    const spikeLen = 8 + pulse * 3
+    ctx.fillStyle = '#f4c430'
+    ctx.globalAlpha = 0.9
+    for (let i = 0; i < 4; i++) {
+      const angle = (i * Math.PI) / 2 - Math.PI / 2
+      const baseR = Math.max(bw, bh) * 0.55
+      ctx.beginPath()
+      ctx.moveTo(cx + Math.cos(angle) * baseR, cy + Math.sin(angle) * baseR)
+      ctx.lineTo(
+        cx + Math.cos(angle) * (baseR + spikeLen),
+        cy + Math.sin(angle) * (baseR + spikeLen),
+      )
+      ctx.lineTo(cx + Math.cos(angle + 0.15) * baseR, cy + Math.sin(angle + 0.15) * baseR)
+      ctx.closePath()
+      ctx.fill()
+    }
+
+    // Central glow
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(bw, bh) * 0.4)
+    glow.addColorStop(0, `rgba(255, 215, 0, ${0.3 + pulse * 0.2})`)
+    glow.addColorStop(1, 'rgba(255, 215, 0, 0)')
+    ctx.fillStyle = glow
+    ctx.globalAlpha = 0.5
+    ctx.beginPath()
+    ctx.arc(cx, cy, Math.max(bw, bh) * 0.4, 0, Math.PI * 2)
+    ctx.fill()
+
     ctx.restore()
   }
 }

@@ -488,6 +488,9 @@ export class Simulation {
           if (bullet.power >= 2) {
             w.tileMap.destroy(c, r)
             this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
+          } else {
+            // Ricochet effect on steel — small spark explosion even when not destroyed
+            this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
           }
           hit = true // Bullet stops regardless
         }

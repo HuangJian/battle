@@ -362,7 +362,7 @@ export class GameRenderer {
           this.terrainCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
         } else {
           artist.ctx = this.terrainCacheCtx
-          this.redrawTerrainCell(c, r, type, world.theme, tm)
+          this.redrawTerrainCell(c, r, type, tm)
           // Clear any stale forest overlay left at this cell.
           this.forestCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
         }
@@ -398,32 +398,14 @@ export class GameRenderer {
     ]
   }
 
-  private redrawTerrainCell(
-    c: number,
-    r: number,
-    type: TerrainType,
-    theme: ThemeColors,
-    tm: TileMap,
-  ): void {
+  private redrawTerrainCell(c: number, r: number, type: TerrainType, tm: TileMap): void {
     const ctx = this.terrainCacheCtx
     const x = c * CELL
     const y = r * CELL
     ctx.clearRect(x, y, CELL, CELL)
 
     if (type === 'empty') {
-      // Empty space: just the grid lines crossing this cell.
-      ctx.strokeStyle = theme.gridLineColor
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(x, y)
-      ctx.lineTo(x + CELL, y)
-      ctx.moveTo(x, y + CELL)
-      ctx.lineTo(x + CELL, y + CELL)
-      ctx.moveTo(x, y)
-      ctx.lineTo(x, y + CELL)
-      ctx.moveTo(x + CELL, y)
-      ctx.lineTo(x + CELL, y + CELL)
-      ctx.stroke()
+      // Empty space: no grid lines (clean flat ground).
       return
     }
 
@@ -593,6 +575,7 @@ export class GameRenderer {
       if (tank.isPlayer) {
         artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
       } else {
+        const isCommander = tank.aiState?.isCommander === true
         artist.drawEnemyTank(
           tank.x,
           tank.y,
@@ -603,6 +586,7 @@ export class GameRenderer {
           (tank.flashTimer ?? 0) > 0,
           tank.hp,
           Math.min(tank.hitCount ?? 0, 4),
+          isCommander,
         )
       }
 
