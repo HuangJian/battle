@@ -200,7 +200,6 @@ export class PresentationLayer {
 
   private onExplosion(x: number, y: number, kind: 'small' | 'big'): void {
     if (kind === 'big') {
-      this.camera.shakeScreen(6)
       this.effects.triggerFlash('#ffaa40', 0.15)
 
       // Flash particle
@@ -218,8 +217,6 @@ export class PresentationLayer {
       // Smoke
       this.particles.emit(this.makeSmokeEmitter(x, y, 5))
     } else {
-      this.camera.shakeScreen(2)
-
       // Small sparks
       this.particles.emit(this.makeSparkEmitter(x, y, 5, 1, 3))
     }
@@ -239,7 +236,6 @@ export class PresentationLayer {
       // Extra debris for player
       this.particles.emit(this.makeDebrisEmitter(cx, cy, 12))
     } else if (by === 'player') {
-      this.camera.shakeScreen(4)
       // Debris from destroyed enemy
       this.particles.emit(this.makeDebrisEmitter(cx, cy, 6))
     }
