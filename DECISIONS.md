@@ -1046,3 +1046,28 @@ Four themes (forest/ice/fortress/mixed) control terrain type fractions. Forest �
 3. **Pass gate**: Changed `totalScore = hardPass ? 1000 + softScore : 0` (where the 700 threshold was dead code since 1000+anything ≥ 700) to `totalScore = hardPass ? softScore : 0` with `passThreshold = 70`. The gate is now meaningful: a stage must score ≥70/100 on soft metrics to pass.
 
 **Rationale:** The original threatRate was inflated by 10× (sampleInterval mismatch) and used a crude proxy instead of actual bullet trajectories. The weight sum of 1.30 meant `softScore` could exceed 100, and the 1000-point hard-pass bonus made the 700 threshold unreachable — `pass` was always `true` when `hardPass` was `true`, making the soft-score gate meaningless.
+
+---
+
+## 30. Item Drop Rules — Elite Kills + Every-10-Kills (2026-07-27)
+
+**Decision:** Power-up drops are now triggered by three independent, OR-combined conditions evaluated in the enemy-kill handler (`Simulation.ts`):
+
+1. **Bonus enemies** — level-design flagged (`tank.bonus`, from `stageData` spawn-queue entries) drop a power-up on death (pre-existing behavior, preserved).
+2. **Elite enemies** — any commander-tier enemy (`tank.aiState?.isCommander === true`, the +15% boosted "elite" tier per §29/§5.3 [D10]) drops a power-up on death, regardless of the `bonus` flag.
+3. **Kill-cadence reward** — every 10th enemy killed (`world.killCount % 10 === 0` after increment) drops a power-up.
+
+All three call the single `spawnPowerUp(at?)` helper, which now accepts an optional death-tile `{x, y}`. When provided and the tile is terrain-clear, the drop lands on the slain enemy's position; otherwise it falls back to a random clear tile (entropy from `world.rng`, preserving determinism).
+
+**Deferred drops (stage-clear buffering):** If a drop is triggered by the FINAL enemy of a *non-final* stage (`world.enemiesRemaining <= 0` after the kill AND a next stage exists), the drop is NOT spawned immediately — it is buffered on `world.pendingDrops` (a `{type, x, y}[]` resolved deterministically at kill time via `world.rng`). The buffer is flushed on the **first enemy kill of the following stage** (`flushPendingDrops()`), so a deferred reward isn't wiped by the stage-clear transition. Because the buffer may hold more than one entry, a single kill in the new stage can release several power-ups at once. The final stage's last enemy drops immediately (there is no next stage to defer to).
+
+**Rationale:**
+- Two explicit player requests: "kill elite enemies drop items" and "every 10 kills drop an item."
+- Reuses the existing `PowerUp` entity and `spawnPowerUp`/`applyPowerUp` pipeline. The only new World field is `pendingDrops` — a tiny deterministic buffer needed because a drop triggered by the stage's last enemy would otherwise be discarded when the stage clears. It is snapshotted (WorldSerializer) so a rewind restores it faithfully. Keeps the architecture simple (Three Gates §2.7).
+- Determinism preserved: drop *type* still comes from `world.rng.pick(POWERUP_TYPES)`, and buffered drops resolve their type+position at kill time (so flushing later performs no extra RNG consumption). Snapshots remain faithful.
+- A killed elite that is also the 10th kill drops exactly **one** power-up (single OR-branch call), avoiding screen clutter.
+
+**Non-goals / known edge cases:**
+- The `bomb` power-up (clears all on-screen enemies, `applyPowerUp` case `'bomb'`) increments `killCount` per slain enemy but does **not** spawn drops — its own screen-clear is the reward. This means a bomb can shift the `killCount % 10` cadence (e.g. a bomb killing 8 enemies may skip the next 10-drop). Intentional: keeps the bomb path simple and the bomb itself is the payoff. Revisit only if the cadence feels unfair in playtesting.
+- Downgraded commanders (cap-exceeded, `isCommander === false`) are NOT elites for drop purposes — only true commander-tier tanks (crown) drop on the elite rule.
+- Deferred drops live on `world.pendingDrops` until the **next** stage's first enemy kill. Since every stage is cleared by killing enemies, the buffer always flushes before another stage can end; it is reset on `loadStageData`/`previewStage` and snapshotted for recovery. The HUD `DROP` cadence counter originally proposed here was removed at the player's request — the 10-kill rule remains in effect, just unshown.

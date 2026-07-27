@@ -718,9 +718,26 @@ export class Simulation {
           })
           w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
 
-          // Drop power-up if bonus enemy
-          if (tank.bonus) {
-            this.spawnPowerUp()
+          // --- Item drop rules (item-drop v1, DECISIONS.md §30) ---
+          // 1) Bonus enemies (level-design flagged) drop a power-up on death.
+          // 2) Elite (commander-tier) enemies always drop a power-up on death.
+          // 3) Every 10th enemy killed drops a power-up (kill-cadence reward).
+          // A drop triggered by the FINAL enemy of a non-final stage is deferred
+          // (buffered on world.pendingDrops) so the stage-clear transition
+          // doesn't wipe it; it is released on the first enemy kill of the next
+          // stage — which may therefore drop several power-ups at once.
+          this.flushPendingDrops() // release drops deferred from a prior stage
+          const isElite = tank.aiState?.isCommander === true
+          const isTenthKill = w.killCount % 10 === 0
+          if (tank.bonus || isElite || isTenthKill) {
+            const at = { x: tank.x, y: tank.y }
+            const isFinalEnemy = w.enemiesRemaining <= 0
+            const hasNextStage = w.stageIndex + 1 < w.totalStages
+            if (isFinalEnemy && hasNextStage) {
+              w.pendingDrops.push(this.buildDrop(at)) // defer to next stage
+            } else {
+              this.spawnPowerUp(at) // drop immediately
+            }
           }
         }
       } else {
@@ -753,31 +770,64 @@ export class Simulation {
   // Power-up System
   // ================================================================
 
-  private spawnPowerUp(): void {
+  /**
+   * Build a drop descriptor (type + terrain-safe position). The `world.rng`
+   * pick happens HERE so a buffered drop is fully resolved and deterministic —
+   * flushing later only materialises it (no extra RNG consumption).
+   */
+  private buildDrop(at?: { x: number; y: number }): { type: PowerUpType; x: number; y: number } {
     const w = this.world
     const type = w.rng.pick(POWERUP_TYPES)
 
-    // Random position (not on walls) — entropy from world.rng for determinism.
+    // Prefer the slain enemy's tile so the reward feels earned. Fall back to a
+    // random clear tile if that spot is blocked (entropy from world.rng so the
+    // whole sequence stays deterministic / snapshot-safe).
     let x = 0,
       y = 0
-    let tries = 0
-    do {
-      x = w.rng.int(12) * 2 * CELL
-      y = w.rng.int(12) * 2 * CELL
-      tries++
-    } while (tries < 20 && w.rectHitsTerrain(x, y, TANK, TANK))
+    let placed = false
+    if (at && !w.rectHitsTerrain(at.x, at.y, TANK, TANK)) {
+      x = at.x
+      y = at.y
+      placed = true
+    }
+    if (!placed) {
+      let tries = 0
+      do {
+        x = w.rng.int(12) * 2 * CELL
+        y = w.rng.int(12) * 2 * CELL
+        tries++
+      } while (tries < 20 && w.rectHitsTerrain(x, y, TANK, TANK))
+    }
 
+    return { type, x, y }
+  }
+
+  /** Spawn a power-up immediately at the given (or random) position. */
+  private spawnPowerUp(at?: { x: number; y: number }): void {
+    this.spawnBuiltDrop(this.buildDrop(at))
+  }
+
+  private spawnBuiltDrop(d: { type: PowerUpType; x: number; y: number }): void {
+    const w = this.world
     w.addPowerUp({
       id: genId(),
-      type,
-      x,
-      y,
+      type: d.type,
+      x: d.x,
+      y: d.y,
       w: TANK,
       h: TANK,
       alive: true,
       blinkTimer: 0,
       lifeTimer: 0,
     })
+  }
+
+  /** Release every drop deferred from a previous stage (item-drop v1). */
+  private flushPendingDrops(): void {
+    const w = this.world
+    if (w.pendingDrops.length === 0) return
+    for (const d of w.pendingDrops) this.spawnBuiltDrop(d)
+    w.pendingDrops = []
   }
 
   private updatePowerUps(): void {

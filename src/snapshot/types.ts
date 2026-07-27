@@ -1,4 +1,4 @@
-import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
+import type { Tank, Bullet, PowerUp, PowerUpType, TerrainType } from '../types'
 import type { SpawnEntry } from '../game/World'
 
 // ================================================================
@@ -75,6 +75,9 @@ export interface WorldSnapshot {
   tanks: Tank[]
   bullets: Bullet[]
   powerUps: PowerUp[]
+  /** Drops deferred from a prior stage (released on the next stage's first
+   *  enemy kill). Buffered so a rewind restores them deterministically. */
+  pendingDrops: { type: PowerUpType; x: number; y: number }[]
 
   // Stage info
   stageIndex: number

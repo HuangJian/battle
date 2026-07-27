@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
+import { World, genId } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -26,6 +26,17 @@ function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)
   return { world, sim }
+}
+
+/** Find a terrain-clear 32×32 tile so a bullet can reach a planted enemy. */
+function findClearTile(world: World): { x: number; y: number } {
+  const span = GRID * CELL
+  for (let y = 0; y < span; y += CELL) {
+    for (let x = 0; x < span; x += CELL) {
+      if (!world.rectHitsTerrain(x, y, TANK, TANK)) return { x, y }
+    }
+  }
+  throw new Error('no clear tile found')
 }
 
 /**
@@ -482,5 +493,183 @@ describe('Star progression — classic cap vs unbounded (spec: 星星增益无�
     expect(world.playerLevel).toBe(5) // keeps growing
     // dimension follows the decayed curve (balanced×150% = 75 threshold crossed)
     expect(world.player!.profile!.firepower).toBe(84) // level 5 → 50+30+2·2
+  })
+})
+
+describe('Item drop rules (DECISIONS.md §30)', () => {
+  /**
+   * Both rules reuse the single `spawnPowerUp` helper (terrain-safe,
+   * world.rng-driven) so they stay deterministic and snapshot-safe.
+   */
+  it('elite (commander-tier) enemy drops a power-up on death', () => {
+    const { world, sim } = buildSeededWorld(123)
+    world.tanks.length = 0
+    world.spawnQueue.length = 0
+    world.enemiesRemaining = 1000 // avoid a stage-clear transition
+
+    const e = world.createTank('basic', 0, 0, 'down')
+    e.spawnTimer = 0 // clear invulnerable spawn state so the bullet lands
+    e.bonus = false
+    if (e.aiState) {
+      e.aiState.level = 'commander'
+      e.aiState.isCommander = true
+    }
+    const at = findClearTile(world)
+    e.x = at.x
+    e.y = at.y
+    world.tanks.push(e)
+
+    const before = world.powerUps.length
+    world.addBullet({
+      id: genId(),
+      ownerId: world.player!.id,
+      ownerKind: 'player',
+      isPlayer: true,
+      x: e.x + 8,
+      y: e.y + 8,
+      w: 4,
+      h: 4,
+      dir: 'up',
+      speed: 0,
+      power: 1,
+      damage: 999,
+      alive: true,
+    })
+    sim.tick()
+
+    expect(world.powerUps.length).toBe(before + 1)
+    const pu = world.powerUps[world.powerUps.length - 1]
+    expect(pu.alive).toBe(true)
+    // Drop lands on the slain enemy's tile (not a random far tile).
+    expect(pu.x).toBe(e.x)
+    expect(pu.y).toBe(e.y)
+  })
+
+  it('every 10th kill drops a power-up; kills 1–9 do not', () => {
+    const { world, sim } = buildSeededWorld(7)
+    world.tanks.length = 0
+    world.spawnQueue.length = 0
+    world.enemiesRemaining = 1000
+
+    const killOne = () => {
+      const e = world.createTank('basic', 0, 0, 'down')
+      e.spawnTimer = 0
+      e.bonus = false
+      if (e.aiState) {
+        e.aiState.level = 'rookie'
+        e.aiState.isCommander = false
+      }
+      const at = findClearTile(world)
+      e.x = at.x
+      e.y = at.y
+      world.tanks.push(e)
+      world.addBullet({
+        id: genId(),
+        ownerId: world.player!.id,
+        ownerKind: 'player',
+        isPlayer: true,
+        x: e.x + 8,
+        y: e.y + 8,
+        w: 4,
+        h: 4,
+        dir: 'up',
+        speed: 0,
+        power: 1,
+        damage: 999,
+        alive: true,
+      })
+      sim.tick()
+    }
+
+    for (let i = 0; i < 9; i++) killOne()
+    expect(world.killCount).toBe(9)
+    expect(world.powerUps.length).toBe(0) // no cadence drop before the 10th
+
+    killOne() // 10th kill
+    expect(world.killCount).toBe(10)
+    expect(world.powerUps.length).toBe(1) // exactly one drop on the 10th
+  })
+
+  it('drop triggered by the FINAL enemy of a stage is deferred, then released on the next stage\'s first kill', () => {
+    const { world, sim } = buildSeededWorld(99)
+    world.tanks.length = 0
+    world.spawnQueue.length = 0
+    world.enemiesRemaining = 1 // this kill will be the stage's last enemy
+
+    // A bonus enemy so a drop is triggered.
+    const e = world.createTank('basic', 0, 0, 'down')
+    e.spawnTimer = 0
+    e.bonus = true
+    if (e.aiState) {
+      e.aiState.level = 'rookie'
+      e.aiState.isCommander = false
+    }
+    const at = findClearTile(world)
+    e.x = at.x
+    e.y = at.y
+    world.tanks.push(e)
+    world.addBullet({
+      id: genId(),
+      ownerId: world.player!.id,
+      ownerKind: 'player',
+      isPlayer: true,
+      x: e.x + 8,
+      y: e.y + 8,
+      w: 4,
+      h: 4,
+      dir: 'up',
+      speed: 0,
+      power: 1,
+      damage: 999,
+      alive: true,
+    })
+    sim.tick()
+
+    // The drop is NOT spawned immediately (stage is clearing)...
+    expect(world.powerUps.length).toBe(0)
+    // ...it is buffered on the World.
+    expect(world.pendingDrops.length).toBe(1)
+    expect(world.killCount).toBe(1)
+
+    // Stage transition happens (loadStage does NOT wipe the buffer).
+    const nextIndex = world.stageIndex + 1
+    expect(nextIndex).toBeLessThan(world.totalStages) // has a next stage
+    world.loadStage(nextIndex)
+    expect(world.pendingDrops.length).toBe(1) // buffer survived the transition
+
+    // First enemy kill of the new stage flushes the deferred drop.
+    world.tanks.length = 0
+    world.spawnQueue.length = 0
+    world.enemiesRemaining = 1000 // not the final enemy of this stage
+    const e2 = world.createTank('basic', 0, 0, 'down')
+    e2.spawnTimer = 0
+    e2.bonus = false
+    if (e2.aiState) {
+      e2.aiState.level = 'rookie'
+      e2.aiState.isCommander = false
+    }
+    const at2 = findClearTile(world)
+    e2.x = at2.x
+    e2.y = at2.y
+    world.tanks.push(e2)
+    world.addBullet({
+      id: genId(),
+      ownerId: world.player!.id,
+      ownerKind: 'player',
+      isPlayer: true,
+      x: e2.x + 8,
+      y: e2.y + 8,
+      w: 4,
+      h: 4,
+      dir: 'up',
+      speed: 0,
+      power: 1,
+      damage: 999,
+      alive: true,
+    })
+    sim.tick()
+
+    expect(world.powerUps.length).toBe(1) // the deferred drop is now released
+    expect(world.pendingDrops.length).toBe(0) // buffer cleared after flush
   })
 })

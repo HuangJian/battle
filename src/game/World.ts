@@ -2,6 +2,7 @@ import type {
   Tank,
   Bullet,
   PowerUp,
+  PowerUpType,
   Explosion,
   ScorePopup,
   GameEvent,
@@ -63,6 +64,14 @@ export class World {
   powerUps: PowerUp[]
   explosions: Explosion[]
   popups: ScorePopup[]
+  /**
+   * Power-up drops deferred because they were triggered by the FINAL enemy of
+   * a stage (dropping them would have them wiped by the stage-clear
+   * transition). Released on the first enemy kill of the following stage
+   * (item-drop v1, DECISIONS.md §30). Stores the already-resolved type +
+   * position so the buffered drop stays deterministic and snapshot-safe.
+   */
+  pendingDrops: { type: PowerUpType; x: number; y: number }[]
 
   // Stage info
   stageIndex: number
@@ -182,6 +191,7 @@ export class World {
     this.powerUps = []
     this.explosions = []
     this.popups = []
+    this.pendingDrops = []
     this.stageIndex = 0
     this.spawnQueue = []
     this.enemiesSpawned = 0
@@ -235,6 +245,9 @@ export class World {
     this.playerLevel = this.difficulty.playerStartLevel
     this.killCount = 0
     this.playTimeMs = 0
+    // Fresh run: clear any deferred drops left over from a previous game
+    // (e.g. a buffered drop from the final stage of a won run).
+    this.pendingDrops = []
     this.loadStage(startStage)
   }
 
@@ -332,6 +345,7 @@ export class World {
     this.powerUps = []
     this.explosions = []
     this.popups = []
+    this.pendingDrops = []
     this.events = []
     this.stageIndex = index
   }

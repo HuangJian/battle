@@ -49,6 +49,7 @@ export function cloneWorld(world: World): WorldSnapshot {
     tanks: world.tanks.map(cloneTank),
     bullets: world.bullets.map(cloneBullet),
     powerUps: world.powerUps.map(clonePowerUp),
+    pendingDrops: world.pendingDrops.map((d) => ({ type: d.type, x: d.x, y: d.y })),
     stageIndex: world.stageIndex,
     spawnQueue: world.spawnQueue.map(cloneSpawnEntry),
     enemiesSpawned: world.enemiesSpawned,
@@ -102,6 +103,9 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.tanks = snap.tanks.map(cloneTank)
   world.bullets = snap.bullets.map(cloneBullet)
   world.powerUps = snap.powerUps.map(clonePowerUp)
+  world.pendingDrops = snap.pendingDrops
+    ? snap.pendingDrops.map((d) => ({ type: d.type, x: d.x, y: d.y }))
+    : []
 
   // Clear transient visual data — Presentation will rebuild
   world.explosions = []
