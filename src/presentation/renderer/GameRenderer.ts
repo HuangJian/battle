@@ -227,8 +227,7 @@ export class GameRenderer {
 
   render(world: World): void {
     this.setTheme(world.theme)
-    this.baseDamageFrac =
-      world.baseMaxHp > 0 ? Math.max(0, 1 - world.baseHp / world.baseMaxHp) : 0
+    this.baseDamageFrac = world.baseMaxHp > 0 ? Math.max(0, 1 - world.baseHp / world.baseMaxHp) : 0
     const ctx = this.ctx
     const dpr = this.dpr
 
@@ -589,7 +588,7 @@ export class GameRenderer {
           animFrame,
           (tank.flashTimer ?? 0) > 0,
           tank.hp,
-          Math.min          (tank.hitCount ?? 0, 4),
+          Math.min(tank.hitCount ?? 0, 4),
           isCommander,
         )
       }

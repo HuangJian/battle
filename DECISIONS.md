@@ -1046,3 +1046,23 @@ Four themes (forest/ice/fortress/mixed) control terrain type fractions. Forest �
 3. **Pass gate**: Changed `totalScore = hardPass ? 1000 + softScore : 0` (where the 700 threshold was dead code since 1000+anything ≥ 700) to `totalScore = hardPass ? softScore : 0` with `passThreshold = 70`. The gate is now meaningful: a stage must score ≥70/100 on soft metrics to pass.
 
 **Rationale:** The original threatRate was inflated by 10× (sampleInterval mismatch) and used a crude proxy instead of actual bullet trajectories. The weight sum of 1.30 meant `softScore` could exceed 100, and the 1000-point hard-pass bonus made the 700 threshold unreachable — `pass` was always `true` when `hardPass` was `true`, making the soft-score gate meaningless.
+
+## 27. God AI CMA-ES Auto-Tuning + T2a Cooldown Fix (2026-07-28)
+
+**Decision:** Two changes to God AI tuning:
+
+1. **All threshold constants moved into `GodAIParams`** (data-over-code, AGENTS §2.4). Nine previously hardcoded constants (`defenseRowOffset`, `defenseColSpread`, `threatRangeCells`, `maxPlayerDistFromBase`, `t8MaxInterceptDistCells`, `baseWallScanRadius`, `replanInterval`, `powerupMaxDivertDistance`, `endgameEnemyThreshold`) are now configurable fields on `GodAIParams`, enabling automated optimization.
+
+2. **T2a stop-and-aim no longer triggers on cooldown.** The condition changed from `if (aimDir)` to `if (aimDir && !onCooldown)`. When on cooldown, the player falls through to navigation instead of stopping dead. This was the #1 decision mistake found by CMA-ES trace analysis: the player fired only 7 times in 10116 ticks because it kept stopping in T2a but couldn't fire due to the ~74-tick cooldown.
+
+3. **CMA-ES optimized default parameters** via sep-CMA-ES (30 generations × 11 population × 5 seeds). The optimizer found a "贴身龟缩" (hug-the-base) strategy: `defenseRowOffset=1, defenseColSpread=3, threatRangeCells=8, maxPlayerDistFromBase=4`. Base survival improved from 40% to 80%, avg kills from 2.2 to 5.6.
+
+4. **`SKILLED_HUMAN_PARAMS` derivation** updated to use `Math.max(minimum, God * factor)` instead of bare multiplication, ensuring the human proxy is always weaker than God AI even when God has perfect (0) imperfection values.
+
+**Rationale:**
+- The T2a cooldown fix addresses a catastrophic inefficiency: 307 idle ticks per game where the player stood still with enemies present but couldn't fire. Falling through to navigation keeps the player mobile during cooldown.
+- CMA-ES was chosen over grid search because the 12-dimensional parameter space makes grid search exponential. Sep-CMA-ES adapts the search distribution per-dimension, efficient for 10-20D.
+- The optimizer found that staying very close to the base (offset=1, dist=4) with narrow defense (spread=3) and only responding to nearby threats (range=8) maximizes base survival. This is a pure defense strategy — it can't clear stages but keeps the base alive.
+- Rejected: wider defense (spread=13) — base survival dropped to 60%. Rejected: chasing power-ups (divert=15) — takes player away from base at critical moments.
+
+**Implications:** The optimized strategy proves base defense is solvable with parameters alone, but stage clearing requires code-level changes (S6 attack-defense switching, better fire efficiency). The CMA-ES optimizer and decision trace tools are reusable for future tuning rounds.

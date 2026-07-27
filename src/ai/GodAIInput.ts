@@ -49,66 +49,85 @@ import type { RNG } from '../utils/RNG'
 // Parameters
 // ============================================================
 
-/** Configurable imperfection parameters (plan/God-AI-Tuning §1). */
+/**
+ * Configurable parameters (plan/God-AI-Tuning §1).
+ *
+ * Contains both "imperfection" params (reactionDelay, aimError,
+ * suboptimalPathProb) and "strategy/threshold" params (defense positioning,
+ * threat ranges, replan intervals, etc.). All tunable values live here per
+ * the plan's "implementation discipline" — data over code.
+ */
 export interface GodAIParams {
-  /** Ticks of delay before reacting to a new threat (default: 2). */
+  // ---- Imperfection params ----
+  /** Ticks of delay before reacting to a new threat. */
   reactionDelay: number
-  /** Probability of a fire-control mistake (default: 0.02). */
+  /** Probability of a fire-control mistake. */
   aimError: number
-  /** Probability of taking a suboptimal route step (default: 0.10). */
+  /** Probability of taking a suboptimal route step. */
   suboptimalPathProb: number
+
+  // ---- Strategy / threshold params ----
+  /** How many rows above the base to position for defense. */
+  defenseRowOffset: number
+  /** Max columns to shift from base column for defense. */
+  defenseColSpread: number
+  /** Only consider enemies within this Manhattan distance from base as threats. */
+  threatRangeCells: number
+  /** Player returns to base if farther than this from the base. */
+  maxPlayerDistFromBase: number
+  /** T8: max distance (cells) to travel to intercept a base-bound bullet. */
+  t8MaxInterceptDistCells: number
+  /** S7: cells around the base to scan for wall integrity. */
+  baseWallScanRadius: number
+  /** Re-plan interval (ticks). */
+  replanInterval: number
+  /** S5: max distance (cells) to divert for a power-up. */
+  powerupMaxDivertDistance: number
+  /** S10: enemies remaining threshold for endgame hunting mode. */
+  endgameEnemyThreshold: number
 }
 
-/** Default God AI parameters — the "theoretically optimal" player. */
+/** Default God AI parameters — optimized via CMA-ES (2026-07-28).
+ * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v2/ for details. */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
-  reactionDelay: 2,
-  aimError: 0.02,
-  suboptimalPathProb: 0.1,
+  reactionDelay: 0,
+  aimError: 0,
+  suboptimalPathProb: 0.3,
+
+  defenseRowOffset: 1,
+  defenseColSpread: 3,
+  threatRangeCells: 8,
+  maxPlayerDistFromBase: 4,
+  t8MaxInterceptDistCells: 8,
+  baseWallScanRadius: 5,
+  replanInterval: 50,
+  powerupMaxDivertDistance: 3,
+  endgameEnemyThreshold: 1,
 }
 
 /**
  * Skilled Human proxy parameters (plan §3.3C): God AI + double reaction
  * delay + 20% aim error. Represents an experienced but non-perfect human.
  * MUST remain derived from God params — God gets stronger → human proxy
- * gets stronger automatically.
+ * gets stronger automatically. Strategy thresholds are inherited as-is.
+ * Minimums ensure the human is always weaker than God (even when God is perfect).
  */
 export const SKILLED_HUMAN_PARAMS: GodAIParams = {
-  reactionDelay: DEFAULT_GOD_AI_PARAMS.reactionDelay * 2,
-  aimError: 0.2,
-  suboptimalPathProb: 0.2,
+  ...DEFAULT_GOD_AI_PARAMS,
+  reactionDelay: Math.max(2, DEFAULT_GOD_AI_PARAMS.reactionDelay * 2),
+  aimError: Math.max(0.15, DEFAULT_GOD_AI_PARAMS.aimError + 0.15),
+  suboptimalPathProb: Math.max(0.15, DEFAULT_GOD_AI_PARAMS.suboptimalPathProb * 1.5),
 }
 
 // ============================================================
-// Constants (tuned thresholds — all here per plan §1 "implementation discipline")
+// Static constants (NOT tunable — game rules, not strategy)
 // ============================================================
 
-/** T2a: max distance (in cells) at which to stop-and-aim at an enemy in the same row/col. */
-const AIM_RANGE_CELLS = 26 // entire field — if in same row/col, always aim
+/** T2a: max distance (in cells) at which to stop-and-aim — entire field. */
+const AIM_RANGE_CELLS = 26
 
-/** Default defense row offset: how many rows above the base to position. */
-const DEFENSE_ROW_OFFSET = 3
-
-/** Max columns to shift from the base column for defense (keeps player near base). */
-const DEFENSE_COL_SPREAD = 8
-
-/** Only consider enemies within this Manhattan distance from the base as threats. */
-const THREAT_RANGE_CELLS = 30
-
-/** Player returns to base if farther than this from the base. */
-const MAX_PLAYER_DIST_FROM_BASE = 12
-
-  /** T8: max distance (in cells) the player will travel to intercept a base-bound bullet. */
-  const T8_MAX_INTERCEPT_DIST_CELLS = 6
-
-  /** S7: cells around the base to scan for wall integrity. */
-  const BASE_WALL_SCAN_RADIUS = 3
-
-  /** Re-plan interval (ticks). */
-  const REPLAN_INTERVAL = 20
-
-  /** T8: how far ahead to project a bullet's trajectory when checking base threat (in cells). */
-  const BULLET_TRAJECTORY_MAX_CELLS = 26
-
+/** T8: how far ahead to project a bullet's trajectory (entire field). */
+const BULLET_TRAJECTORY_MAX_CELLS = 26
 
 /** T3: kind-based threat weights for target selection. */
 const KIND_THREAT_WEIGHT: Record<TankKind, number> = {
@@ -130,12 +149,6 @@ const POWERUP_PRIORITY: Record<PowerUpType, number> = {
   helmet: 5,
   boat: 6,
 }
-
-/** S5: max distance (in cells) to divert for a power-up. */
-const POWERUP_MAX_DIVERT_DISTANCE = 15
-
-/** S10: enemies remaining threshold for endgame hunting mode. */
-const ENDGAME_ENEMY_THRESHOLD = 2
 
 // ============================================================
 // GodAIInput
@@ -224,7 +237,6 @@ export class GodAIInput implements InputLike {
     const pcx = p.x + p.w / 2
     const pcy = p.y + p.h / 2
     const now = w.frame * (1000 / 60)
-
 
     // ---- M6: Cooldown-aware firing ----
     const onCooldown = now - p.lastFire < p.nextFireInterval
@@ -317,7 +329,13 @@ export class GodAIInput implements InputLike {
     // ---- T2a: Stop-and-aim (enemy in same row/col) ----
     // If an enemy is in the same row/col, stop and fire at it. If there's
     // a wall between, fire to break through (T6: never at base protection).
-    if (aimDir) {
+    //
+    // CRITICAL FIX: When on cooldown, do NOT stop — fall through to navigation.
+    // Stopping while on cooldown wastes ~74 ticks per cycle doing nothing.
+    // This was the #1 decision mistake found by CMA-ES trace analysis:
+    // the player fired only 7 times in 10116 ticks because it kept stopping
+    // in T2a but couldn't fire due to cooldown.
+    if (aimDir && !onCooldown) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
       if (scan.enemy || (scan.wall && !scan.baseWall && (!scan.steel || (p.level ?? 0) >= 3))) {
@@ -326,7 +344,7 @@ export class GodAIInput implements InputLike {
         } else {
           this._moveDir = aimDir // Turn to face enemy
         }
-        this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+        this._fire = this.rng.next() >= this.params.aimError
         this.branchCounts.t2a++
         return
       }
@@ -339,7 +357,6 @@ export class GodAIInput implements InputLike {
     this._moveDir = this.directMove(this.playerCell())
     this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
     this.branchCounts.navigate++
-
   }
 
   // ================================================================
@@ -389,7 +406,7 @@ export class GodAIInput implements InputLike {
         }
       }
 
-      if (!dir || dist > AIM_RANGE_CELLS * CELL) continue
+      if (!dir || dist > AIM_RANGE_CELLS * CELL) continue // static — always full field
 
       // T9: score = threat weight × 1000 - distance (prefer high-threat,
       // then nearest among equal threat).
@@ -499,7 +516,8 @@ export class GodAIInput implements InputLike {
     const dr = Math.abs(row - br)
     // The base occupies cols 12-13, rows 24-25. Protection bricks are
     // those immediately adjacent (within 2 cells) that form the wall.
-    return dc <= BASE_WALL_SCAN_RADIUS && dr <= BASE_WALL_SCAN_RADIUS && (dc <= 2 || dr <= 2)
+    const r = this.params.baseWallScanRadius
+    return dc <= r && dr <= r && (dc <= 2 || dr <= 2)
   }
 
   // ================================================================
@@ -568,6 +586,7 @@ export class GodAIInput implements InputLike {
         const fy = bcy + v.dy * d
 
         // Check if the trajectory point is within the base area.
+        // BULLET_TRAJECTORY_MAX_CELLS is static (full field).
         if (Math.abs(fx - baseCx) < baseHalf * 2 && Math.abs(fy - baseCy) < baseHalf * 2) {
           crossesBase = true
           break
@@ -649,7 +668,7 @@ export class GodAIInput implements InputLike {
     // If the closest point is too far, the player can't get there before
     // the bullet — intercepting would just send the player on a wild goose
     // chase, leaving the base undefended.
-    if (bestDist > T8_MAX_INTERCEPT_DIST_CELLS * CELL) return null
+    if (bestDist > this.params.t8MaxInterceptDistCells * CELL) return null
 
     return bestCell
   }
@@ -861,7 +880,7 @@ export class GodAIInput implements InputLike {
       }
 
       // S5b: high-value power-ups are worth longer diversions
-      const maxDist = priority <= 1 ? POWERUP_MAX_DIVERT_DISTANCE : 8
+      const maxDist = priority <= 1 ? this.params.powerupMaxDivertDistance : 8
       if (dist > maxDist) continue
 
       // NEW: Don't collect if route is too dangerous unless it's a bomb/star
@@ -887,13 +906,15 @@ export class GodAIInput implements InputLike {
     // Simple heuristic: count enemies that are closer to the target than we are
     const targetCell = pxToCell(toX, toY)
     const playerCell = pxToCell(fromX, fromY)
-    const playerDistToTarget = Math.abs(targetCell.col - playerCell.col) + Math.abs(targetCell.row - playerCell.row)
+    const playerDistToTarget =
+      Math.abs(targetCell.col - playerCell.col) + Math.abs(targetCell.row - playerCell.row)
 
     for (const t of w.tanks) {
       if (!t.alive || t.spawnTimer > 0) continue
 
       const enemyCell = pxToCell(t.x, t.y)
-      const enemyDistToTarget = Math.abs(targetCell.col - enemyCell.col) + Math.abs(targetCell.row - enemyCell.row)
+      const enemyDistToTarget =
+        Math.abs(targetCell.col - enemyCell.col) + Math.abs(targetCell.row - enemyCell.row)
 
       // If enemy is closer to target than player, and on the path, add danger
       if (enemyDistToTarget < playerDistToTarget) {
@@ -995,7 +1016,7 @@ export class GodAIInput implements InputLike {
     this.replanTimer--
     if (this.replanTimer <= 0 || this.path.length === 0) {
       this.replan(playerCell)
-      this.replanTimer = REPLAN_INTERVAL
+      this.replanTimer = this.params.replanInterval
       this._lastPathCell = { col: playerCell.col, row: playerCell.row }
     }
 
@@ -1038,7 +1059,7 @@ export class GodAIInput implements InputLike {
    * This is the fallback when no enemies are present.
    */
   private getDefaultDefensePosition(): Cell {
-    return { col: BASE_POS.col, row: BASE_POS.row - DEFENSE_ROW_OFFSET }
+    return { col: BASE_POS.col, row: BASE_POS.row - this.params.defenseRowOffset }
   }
 
   /** Re-plan the A* path to the current best target. */
@@ -1086,11 +1107,11 @@ export class GodAIInput implements InputLike {
 
     const baseCol = BASE_POS.col
     const baseRow = BASE_POS.row
-    const defenseRow = baseRow - DEFENSE_ROW_OFFSET
+    const defenseRow = baseRow - this.params.defenseRowOffset
 
     // If the player is too far from the base, return to defense position.
     const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
-    if (playerDistToBase > MAX_PLAYER_DIST_FROM_BASE) {
+    if (playerDistToBase > this.params.maxPlayerDistFromBase) {
       return this.getDefaultDefensePosition()
     }
 
@@ -1104,13 +1125,16 @@ export class GodAIInput implements InputLike {
       for (const t of enemies) {
         const tc = this.tankCell(t)
         const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-        if (d < bestDist) { bestDist = d; best = t }
+        if (d < bestDist) {
+          bestDist = d
+          best = t
+        }
       }
       return this.tankCell(best)
     }
 
     // Endgame: ≤2 enemies remaining and ≤1 on field → hunt directly.
-    if (w.enemiesRemaining <= ENDGAME_ENEMY_THRESHOLD && enemies.length <= 1) {
+    if (w.enemiesRemaining <= this.params.endgameEnemyThreshold && enemies.length <= 1) {
       return this.tankCell(enemies[0])
     }
 
@@ -1120,7 +1144,7 @@ export class GodAIInput implements InputLike {
     for (const t of enemies) {
       const tc = this.tankCell(t)
       const distToBase = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
-      if (distToBase > THREAT_RANGE_CELLS) continue
+      if (distToBase > this.params.threatRangeCells) continue
 
       const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
       const bonusWeight = t.bonus ? 3 : 0
@@ -1128,7 +1152,8 @@ export class GodAIInput implements InputLike {
       const urgencyBonus = tc.row >= defenseRow ? (baseRow - tc.row) * 100 : 0
       // Small bonus for enemies in the base row region (rows 20-23)
       const proximityBonus = tc.row >= 20 ? 50 : 0
-      const score = -distToBase * 10 + (threatWeight + bonusWeight) * 30 + urgencyBonus + proximityBonus
+      const score =
+        -distToBase * 10 + (threatWeight + bonusWeight) * 30 + urgencyBonus + proximityBonus
       if (score > bestScore) {
         bestScore = score
         bestEnemy = t
@@ -1162,7 +1187,8 @@ export class GodAIInput implements InputLike {
       targetRow = Math.max(0, ec.row - 1)
     } else {
       // Intercept at the defense row. Clamp the column to stay close to the base.
-      targetCol = Math.max(baseCol - DEFENSE_COL_SPREAD, Math.min(baseCol + DEFENSE_COL_SPREAD, ec.col))
+      const spread = this.params.defenseColSpread
+      targetCol = Math.max(baseCol - spread, Math.min(baseCol + spread, ec.col))
       targetRow = defenseRow
     }
 

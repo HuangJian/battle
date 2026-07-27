@@ -178,9 +178,7 @@ export function runSimulation(opts: RunOptions): SimResult {
         const pcy = world.player.y + world.player.h / 2
         const bcx = BASE_POS.col * CELL + CELL
         const bcy = BASE_POS.row * CELL + CELL
-        failure.playerDistToBase = Math.round(
-          (Math.abs(pcx - bcx) + Math.abs(pcy - bcy)) / CELL,
-        )
+        failure.playerDistToBase = Math.round((Math.abs(pcx - bcx) + Math.abs(pcy - bcy)) / CELL)
       }
       break
     }

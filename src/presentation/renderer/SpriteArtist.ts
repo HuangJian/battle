@@ -464,8 +464,8 @@ export class SpriteArtist {
       const ex = cx + Math.cos(ang) * r1
       const ey = cy + Math.sin(ang) * r1
       const kink = (i % 2 === 0 ? 1 : -1) * size * 0.09
-      const mx = cx + Math.cos(ang) * (r0 + r1) / 2 + Math.sin(ang) * kink
-      const my = cy + Math.sin(ang) * (r0 + r1) / 2 - Math.cos(ang) * kink
+      const mx = cx + (Math.cos(ang) * (r0 + r1)) / 2 + Math.sin(ang) * kink
+      const my = cy + (Math.sin(ang) * (r0 + r1)) / 2 - Math.cos(ang) * kink
       ctx.beginPath()
       ctx.moveTo(px, py)
       ctx.lineTo(mx, my)
@@ -730,13 +730,7 @@ export class SpriteArtist {
    * — its center sits on the corner point, so it straddles the edge (half
    * inside, half outside the hull). It is rotated 180° about its own center.
    */
-  drawInsignia(
-    x: number,
-    y: number,
-    size: number,
-    level: string,
-    isCommander = false,
-  ): void {
+  drawInsignia(x: number, y: number, size: number, level: string, isCommander = false): void {
     if (isCommander || level === 'none') return
     const cache = this.spriteCache
     const cs = cache?.canvasSize ?? Math.ceil(size * Math.SQRT2)

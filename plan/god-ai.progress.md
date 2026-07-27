@@ -1,54 +1,60 @@
 当前 God AI 状态：
 
 **已实现的核心改进：**
-1. ✅ `directMove` 拆墙功能 —— 坦克会转向墙并开火打破砖墙
-2. ✅ 开火方向修复 —— 使用新的 `_moveDir` 而非旧的 `p.dir`
-3. ✅ 迫切性奖励 —— 通过防守行的敌人获得 100x 奖励
-4. ✅ 防守范围优化 —— 防守行在 row 21，列范围 8
+1. ✅ 阈值常量全部移入 `GodAIParams` — 可被 CMA-ES 优化器自动调参
+2. ✅ CMA-ES 自动参数优化器 (`tools/optimize-godai.ts`) — sep-CMA-ES 算法
+3. ✅ 决策追踪系统 (`tools/decision-trace.ts`) — 每 tick 记录完整决策过程
+4. ✅ T2a 冷却中停车修复 — 冷却时不再进入 T2a 停车，直接 fall through 到导航
+5. ✅ CMA-ES 优化的默认参数 — 基地存活率 40%→80%，击杀 2.2→5.6
 
-**当前性能：**
-- 击杀数：0-3/20（基线是 0-4/20）
-- 失败模式：基地被毁
-- 平均 tick：1110-3409（基线是 1136-2802）
-- 测试：0/3 通过（要求 2/3）
+**当前性能（classic stage 0, 5 seeds）：**
+- 胜率：0/5（需要过关但 AI 仍无法清场）
+- 基地存活率：4/5 = 80%（之前 0-1/5 = 0-20%）
+- 击杀数：4-8/20（之前 0-3/20）
+- 失败模式：4/5 lives_exhausted, 1/5 base_destroyed
+- 首杀时间：tick 1149-2528（19-42s，仍然偏慢）
+
+**关键决策失误分析（通过 CMA-ES + 决策追踪发现）：**
+
+1. **T2a 冷却空转（头号败因，已修复）**：
+   - 玩家 10116 tick 仅开火 7 次，最大间隔 4896 tick（81s）
+   - T2a 停车瞄准但冷却中不开火也不移动，浪费大量时间
+   - 修复：T2a 仅在非冷却时触发
+
+2. **防守位置偏左（已优化）**：
+   - 玩家 95% 时间在 col 8-9，但基地在 col 12
+   - CMA-ES 找到 defenseColSpread=3 + threatRangeCells=8 最优
+
+3. **首杀太慢（待解决）**：
+   - 首杀在 tick 1149-2528（19-42s）
+   - 玩家初期导航到防守位置期间不主动交战
+
+4. **开火频率极低（待解决）**：
+   - 即使修复 T2a，每场仅开火 7-8 次
+   - navigate 分支的 shouldFireInDir 太保守
+
+**优化器找到的最优参数：**
+```
+reactionDelay: 0          (2→0  无延迟)
+aimError: 0               (0.02→0  完美瞄准)
+suboptimalPathProb: 0.3   (0.1→0.3)
+defenseRowOffset: 1       (3→1  紧贴基地)
+defenseColSpread: 3       (8→3  窄防守)
+threatRangeCells: 8       (30→8  只响应近敌)
+maxPlayerDistFromBase: 4  (12→4)
+t8MaxInterceptDistCells: 8 (6→8)
+baseWallScanRadius: 5     (3→5)
+replanInterval: 50        (20→50)
+powerupMaxDivertDistance: 3 (15→3  不追道具)
+endgameEnemyThreshold: 1  (2→1)
+```
 
 **下一步调优方向：**
-1. 玩家可能被夹在墙中无法到达拦截点
-2. 敌人可能绕过防守行从其他方向进攻
-3. 玩家需要更快响应多个同时进攻的敌人
+1. S6 攻守切换 — 当前「贴身龟缩」是纯防守策略，需要加入进攻切换才能过关
+2. S10 终局猎杀 — 终局逻辑需要更强的主动追杀能力
+3. 开火效率 — navigate 分支需要更积极的开火（朝目标方向 proactive fire）
+4. T2a 对齐阈值 — 边缘对齐导致 T2a 触发但 scanAhead 找不到目标
 
-总结本次调优会话完成的工作：
-
-## 完成的改进
-
-### 1. 拆墙功能
-- **问题**：`directMove` 用 `canMoveDir` 过滤方向，被墙挡住时返回 null，导致坦克不转向也不拆墙
-- **解决**：新增 `canMoveOrBreak` 辅助函数，允许返回被砖墙挡住的方向。坦克会转向墙，`shouldFireInDir` 开火打破它
-
-### 2. 开火方向修复
-- **问题**：`shouldFireInFacingDir` 使用旧的 `p.dir`，但坦克会在 `updatePlayer` 中更新到新的 `_moveDir`。开火决策与执行方向不匹配
-- **解决**：将 `shouldFireInFacingDir` 改为 `shouldFireInDir`，接受 `dir` 参数。所有调用处传入 `_moveDir ?? p.dir`（有效方向）
-
-### 3. 目标选择优化
-- **问题**：敌人威胁评估的紧迫性奖励太低（20x），基地附近敌人（rows 20-23）没有额外加成
-- **解决**：通过防守行的紧迫性奖励提升到 100x，添加基地区域邻近加成 50
-
-### 4. 防守范围调整
-- **初始**：`DEFENSE_ROW_OFFSET = 2`（防守行 row 22）
-- **问题**：防守行太低，敌人已经逼近才响应
-- **解决**：提升到 `DEFENSE_ROW_OFFSET = 3`（防守行 row 21），给予更多反应时间
-
-## 当前性能
-
-| 指标 | 之前 | 之后 |
-|------|------|------|
-| 击杀数（5 种子平均） | 0-4/20 | 0-3/20 |
-| 失败 tick | 1136-2802 | 1110-3409 |
-| 失败模式 | 基地被毁 | 基地被毁 |
-| 测试通过 | 0/3 | 0/3 |
-
-Typecheck ✓，Build ✓，Test ✗
-
-## 未完成的工作
-
-AI 仍未能过关目标（0/3 种子通过 stageClear）。需要继续迭代调优以改善击杀效率和多敌人处理能力。关键改进点已实现（拆墙、开火方向、紧迫性奖励），但需要进一步微调参数和策略以达到过关目标。
+**测试状态：**
+- 368 pass, 2 fail (god-ai-gates 门禁测试 + ai-calibrate 已修复)
+- Typecheck ✓, Lint ✓, Format ✓, Build ✓

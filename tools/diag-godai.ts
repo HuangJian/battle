@@ -44,7 +44,10 @@ while (tick < 18000) {
       const bcy = BASE_POS.row * CELL + CELL
       console.log('=== BASE DESTROYED at tick', tick, '===')
       console.log('Player pos (cell):', Math.floor(pcx / CELL), Math.floor(pcy / CELL))
-      console.log('Player dist to base (cells):', Math.round((Math.abs(pcx - bcx) + Math.abs(pcy - bcy)) / CELL))
+      console.log(
+        'Player dist to base (cells):',
+        Math.round((Math.abs(pcx - bcx) + Math.abs(pcy - bcy)) / CELL),
+      )
       console.log('Kills:', world.killCount, 'Lives:', world.lives)
       console.log('First kill at tick:', firstKillTick)
       console.log('Branch counts:', JSON.stringify(input.branchCounts))
