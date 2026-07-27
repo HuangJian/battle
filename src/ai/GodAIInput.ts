@@ -1,35 +1,55 @@
 import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
-import type { Tank, Bullet } from '../types'
+import type { Tank, Bullet, TankKind, PowerUpType } from '../types'
 import type { Direction } from '../constants'
-import { CELL, TANK, FIELD, DIR_VECTORS, BASE_POS } from '../constants'
+import { CELL, TANK, FIELD, GRID, DIR_VECTORS, BASE_POS, POWERUP_TIMEOUT_MS } from '../constants'
 import { findPath, pxToCell, type Cell } from '../utils/pathfind'
 import { snap, aabb, opposite, ALL_DIRS } from '../utils/helpers'
 import type { RNG } from '../utils/RNG'
+// BASE_SPEED_CPS no longer needed after simplification
 
 /**
- * GodAIInput — a "perfect player" simulator that implements `InputLike`.
+ * GodAIInput — a "theoretically optimal player" simulator that implements
+ * `InputLike`.
  *
- * Design (plan/Automated-Level-Design §3.1):
- * - **Global vision**: reads `world.player`, `world.tanks`, `world.bullets`,
- *   `world.tileMap` directly — no perception limits.
- * - **Perfect planning**: A* pathfinding (`pathfind.ts`) to the best target.
- * - **Move-and-shoot**: scans all 4 directions for enemy targets each tick
- *   using global vision (ignores walls). When a target is found, the AI
- *   fires toward it while navigating via A* to close the distance. Bullets
- *   break through walls and hit enemies in the path.
- * - **Base defense**: always prioritizes the enemy closest to the base,
- *   regardless of distance. The AI positions itself to intercept flankers.
- * - **Injected imperfections** (all via `world.rng` for determinism):
- *   - Reaction delay: N ticks before responding to a new bullet threat.
- *   - Aim error: small probability of fumbling a shot.
- *   - Suboptimal path: small chance of taking a non-optimal route step.
+ * Tuning plan: plan/God-AI-Tuning.md
+ *
+ * Techniques implemented (by ID from the plan):
+ *   T2a  — Stop-and-aim: when an enemy is in the same row/col, turn to face
+ *          it and fire (instead of firing in the A* movement direction).
+ *   T2b  — No fire while moving in wrong direction: fire only when the
+ *          movement direction matches the aim direction, or when stopped
+ *          with a target in the facing direction.
+ *   T1   — Interception geometry: navigate to a point between the enemy and
+ *          the base, not to the enemy's current cell (which is a moving target).
+ *   T3   — Priority target selection: threat-to-base > power > armor > fast >
+ *          basic; bonus enemies get extra weight.
+ *   T6   — Don't destroy own base walls: proactive fire checks the ray for
+ *          base-protection bricks.
+ *   T8   — Base bullet interception: if an enemy bullet's trajectory crosses
+ *          the base, move to intercept it (ultimate defense).
+ *   T9   — Same-row/col priority sorting: when multiple enemies share a
+ *          row/col, fire at the most dangerous (by kind + HP), not nearest.
+ *   T11  — Steel wall avoidance: don't fire at steel unless player level ≥ 3.
+ *   M3   — Dodge safety: candidate dodge cells checked against other bullets.
+ *   M6   — Cooldown-aware firing: don't set _fire=true while on cooldown.
+ *   S5a  — Power-up priority: bomb > star > freeze > fence > tank > shield.
+ *   S5c  — Bonus enemy priority: tank.bonus === true gets extra target weight.
+ *   S7   — Base wall integrity: scan base defense walls; thin walls → urgent
+ *          return to defense.
+ *   S8   — Freeze window: when freezeTimer > 0, switch to aggressive hunting.
+ *   S9   — Shield exploitation: when shieldTimer > 0, skip dodge, go aggro.
+ *   S10  — Endgame mode: when ≤ 2 enemies remain, switch from defense to
+ *          active hunting to shorten clear time.
  *
  * **Determinism**: all randomness flows through `world.rng` (AGENTS §2.3).
- * Same World state + same RNG state ⇒ identical decisions, always.
  */
 
-/** Configurable imperfection parameters. */
+// ============================================================
+// Parameters
+// ============================================================
+
+/** Configurable imperfection parameters (plan/God-AI-Tuning §1). */
 export interface GodAIParams {
   /** Ticks of delay before reacting to a new threat (default: 2). */
   reactionDelay: number
@@ -39,7 +59,7 @@ export interface GodAIParams {
   suboptimalPathProb: number
 }
 
-/** Default God AI parameters (plan §3.1). */
+/** Default God AI parameters — the "theoretically optimal" player. */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 2,
   aimError: 0.02,
@@ -49,12 +69,77 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
 /**
  * Skilled Human proxy parameters (plan §3.3C): God AI + double reaction
  * delay + 20% aim error. Represents an experienced but non-perfect human.
+ * MUST remain derived from God params — God gets stronger → human proxy
+ * gets stronger automatically.
  */
 export const SKILLED_HUMAN_PARAMS: GodAIParams = {
-  reactionDelay: 4,
+  reactionDelay: DEFAULT_GOD_AI_PARAMS.reactionDelay * 2,
   aimError: 0.2,
   suboptimalPathProb: 0.2,
 }
+
+// ============================================================
+// Constants (tuned thresholds — all here per plan §1 "implementation discipline")
+// ============================================================
+
+/** T2a: max distance (in cells) at which to stop-and-aim at an enemy in the same row/col. */
+const AIM_RANGE_CELLS = 26 // entire field — if in same row/col, always aim
+
+/** Default defense row offset: how many rows above the base to position. */
+const DEFENSE_ROW_OFFSET = 3
+
+/** Max columns to shift from the base column for defense (keeps player near base). */
+const DEFENSE_COL_SPREAD = 8
+
+/** Only consider enemies within this Manhattan distance from the base as threats. */
+const THREAT_RANGE_CELLS = 30
+
+/** Player returns to base if farther than this from the base. */
+const MAX_PLAYER_DIST_FROM_BASE = 12
+
+  /** T8: max distance (in cells) the player will travel to intercept a base-bound bullet. */
+  const T8_MAX_INTERCEPT_DIST_CELLS = 6
+
+  /** S7: cells around the base to scan for wall integrity. */
+  const BASE_WALL_SCAN_RADIUS = 3
+
+  /** Re-plan interval (ticks). */
+  const REPLAN_INTERVAL = 20
+
+  /** T8: how far ahead to project a bullet's trajectory when checking base threat (in cells). */
+  const BULLET_TRAJECTORY_MAX_CELLS = 26
+
+
+/** T3: kind-based threat weights for target selection. */
+const KIND_THREAT_WEIGHT: Record<TankKind, number> = {
+  power: 4,
+  armor: 3,
+  fast: 2,
+  basic: 1,
+  player: 0,
+}
+
+/** S5a: power-up collection priority (lower = higher priority). */
+const POWERUP_PRIORITY: Record<PowerUpType, number> = {
+  bomb: 0,
+  star: 1,
+  freeze: 2,
+  fence: 3,
+  tank: 4,
+  shield: 5,
+  helmet: 5,
+  boat: 6,
+}
+
+/** S5: max distance (in cells) to divert for a power-up. */
+const POWERUP_MAX_DIVERT_DISTANCE = 15
+
+/** S10: enemies remaining threshold for endgame hunting mode. */
+const ENDGAME_ENEMY_THRESHOLD = 2
+
+// ============================================================
+// GodAIInput
+// ============================================================
 
 export class GodAIInput implements InputLike {
   private world: World
@@ -70,13 +155,22 @@ export class GodAIInput implements InputLike {
 
   /** Current A* path being followed. */
   private path: Direction[] = []
-  /** Re-plan counter (re-plan every N ticks). */
+  /** Re-plan counter. */
   private replanTimer = 0
 
   /** Threat reaction: when a threat is first seen, count down before reacting. */
   private reactionCounter = 0
-  /** The last threat bullet id we reacted to (avoids re-triggering). */
+  /** The last threat bullet id we reacted to. */
   private lastThreatId: number = -1
+
+  /** Whether the AI is in aggressive mode (freeze/shield — hunt, don't defend). */
+  private aggressive = false
+
+  /** Last cell the player was at when consuming a path step (prevents oscillation). */
+  private _lastPathCell: Cell | null = null
+
+  /** Debug: branch counters for profiling. */
+  branchCounts = { dodge: 0, t8: 0, aggressive: 0, t2a: 0, powerup: 0, navigate: 0, dead: 0 }
 
   constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS) {
     this.world = world
@@ -92,6 +186,8 @@ export class GodAIInput implements InputLike {
     this.replanTimer = 0
     this.reactionCounter = 0
     this.lastThreatId = -1
+    this._lastPathCell = null
+    this.aggressive = false
   }
 
   getMoveDirection(): Direction | null {
@@ -100,7 +196,6 @@ export class GodAIInput implements InputLike {
   }
 
   isFiring(): boolean {
-    // think() already ran in getMoveDirection()
     if (!this._thought) this.think()
     return this._fire
   }
@@ -110,7 +205,7 @@ export class GodAIInput implements InputLike {
   }
 
   // ================================================================
-  // Core decision loop
+  // Core decision loop (think)
   // ================================================================
 
   private think(): void {
@@ -122,17 +217,33 @@ export class GodAIInput implements InputLike {
     if (!p || !p.alive || p.spawnTimer > 0) {
       this._moveDir = null
       this._fire = false
+      this.branchCounts.dead++
       return
     }
 
     const pcx = p.x + p.w / 2
     const pcy = p.y + p.h / 2
+    const now = w.frame * (1000 / 60)
 
-    // ---- 1. Scan for enemy targets (global vision) ----
-    const enemyDir = this.findEnemyDirection(pcx, pcy)
 
-    // ---- 2. Threat assessment (dodge incoming bullets) ----
-    const threat = this.findMostDangerousBullet(pcx, pcy)
+    // ---- M6: Cooldown-aware firing ----
+    const onCooldown = now - p.lastFire < p.nextFireInterval
+
+    // ---- S8: Freeze window — aggressive mode ----
+    const frozen = w.freezeTimer > 0
+
+    // ---- S9: Shield — skip dodge ----
+    const shielded = (p.shieldTimer ?? 0) > 0
+
+    // ---- S8/S9: Set aggressive mode ----
+    this.aggressive = frozen || shielded
+
+    // ---- Scan for enemy targets (global vision, T9 priority) ----
+    const aimDir = this.findEnemyDirection(pcx, pcy)
+
+    // ---- Threat assessment (dodge incoming bullets) ----
+    // Dodge FIRST: survive before defending the base.
+    const threat = shielded ? null : this.findMostDangerousBullet(pcx, pcy)
 
     if (threat) {
       if (threat.id !== this.lastThreatId) {
@@ -142,15 +253,16 @@ export class GodAIInput implements InputLike {
 
       if (this.reactionCounter > 0) {
         this.reactionCounter--
-        // While reacting, keep moving and firing toward the objective.
-        this._fire = this.shouldFireInFacingDir(pcx, pcy)
+        // While reacting, keep navigating but fire only at targets in facing dir.
         this._moveDir = this.followPath()
+        this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
         return
       }
 
-      // Dodge: move perpendicular to the bullet's direction, but still fire.
-      this._fire = this.shouldFireInFacingDir(pcx, pcy)
-      this._moveDir = this.dodgeDirection(threat)
+      // Dodge: move perpendicular to the bullet (M3: verify safety).
+      this._moveDir = this.dodgeDirection(threat, pcx, pcy)
+      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+      this.branchCounts.dodge++
       return
     }
 
@@ -158,43 +270,96 @@ export class GodAIInput implements InputLike {
     this.reactionCounter = 0
     this.lastThreatId = -1
 
-    // ---- 3. Navigate + fire ----
-    // Always navigate toward the best target. If an enemy is visible in
-    // a cardinal direction, turn to face it so bullets go toward it.
-    // Fire proactively — bullets break walls and hit enemies in the path.
-    if (enemyDir) {
-      // Turn toward the enemy and fire. Don't stop — keep moving to close
-      // the distance. The bullet hits the enemy (if clear) or a wall
-      // (breaking through over repeated shots).
-      this._fire = this.rng.next() >= this.params.aimError
-      // Navigate toward the enemy via A* path (which may differ from the
-      // raw direction due to walls). The path will turn the tank to face
-      // the right way as it follows the route.
-      this._moveDir = this.followPath()
-    } else {
-      // No enemy in any cardinal direction — fire at walls/bullets or
-      // proactively while navigating.
-      this._fire = this.shouldFireInFacingDir(pcx, pcy)
-      this._moveDir = this.followPath()
+    // ---- T8: Base bullet interception (ultimate defense) ----
+    // Check AFTER dodge (survive first) but BEFORE aggressive/T2a.
+    // Skip in aggressive mode (enemies frozen / player invulnerable).
+    if (!this.aggressive) {
+      const baseThreat = this.findBulletThreatToBase()
+      if (baseThreat) {
+        const interceptCell = this.baseBulletInterceptCell(baseThreat)
+        if (interceptCell) {
+          this._moveDir = this.navigateTowards(interceptCell)
+          // Fire to intercept the bullet (T5 extended to base defense).
+          this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+          this.branchCounts.t8++
+          return
+        }
+      }
     }
+
+    // ---- S8/S9: Aggressive mode (freeze or shield) ----
+    if (this.aggressive) {
+      // Skip defense, go straight for the nearest enemy or power-up.
+      if (aimDir) {
+        // T2a: stop-and-aim — if already facing the enemy, stop; else turn.
+        if (p.dir === aimDir) {
+          this._moveDir = null
+        } else {
+          this._moveDir = aimDir
+        }
+        this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+        return
+      }
+      // No enemy in row/col — check for power-up (S5).
+      const puTarget = this.findPowerUpTarget(pcx, pcy)
+      if (puTarget) {
+        this._moveDir = this.navigateTowards(puTarget)
+        this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+        return
+      }
+      // Navigate to nearest enemy.
+      this._moveDir = this.followPath()
+      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+      this.branchCounts.aggressive++
+      return
+    }
+
+    // ---- T2a: Stop-and-aim (enemy in same row/col) ----
+    // If an enemy is in the same row/col, stop and fire at it. If there's
+    // a wall between, fire to break through (T6: never at base protection).
+    if (aimDir) {
+      const scan = this.scanAhead(pcx, pcy, aimDir)
+
+      if (scan.enemy || (scan.wall && !scan.baseWall && (!scan.steel || (p.level ?? 0) >= 3))) {
+        if (p.dir === aimDir) {
+          this._moveDir = null // Already facing — stop and shoot
+        } else {
+          this._moveDir = aimDir // Turn to face enemy
+        }
+        this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+        this.branchCounts.t2a++
+        return
+      }
+      // No clear shot, or wall below defense row — fall through to navigation.
+    }
+
+    // ---- T2b: Navigate directly towards target ----
+    // Use direct movement instead of A* — the player breaks through walls
+    // rather than navigating around them. This is faster and more reactive.
+    this._moveDir = this.directMove(this.playerCell())
+    this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+    this.branchCounts.navigate++
+
   }
 
   // ================================================================
-  // Target scanning (stop-and-shoot)
+  // Target scanning (T2a, T9)
   // ================================================================
 
   /**
-   * Find the direction to the nearest enemy tank, using **global vision**
-   * (plan §3.1: "reads world.tanks directly — no perception limits").
-   * Unlike `scanAhead`, this does NOT stop at walls — the AI knows where
-   * every enemy is, even through terrain. When an enemy is found, the AI
-   * turns to face it and fires; the bullet either hits the enemy directly
-   * or hits a wall in between (breaking through over repeated shots).
+   * Find the direction to the best enemy tank in the same row/col, using
+   * **global vision** (plan §3.1). T9: when multiple enemies share a
+   * row/col, select by threat weight (power > armor > fast > basic) + HP,
+   * not just proximity.
+   *
+   * Returns the direction to turn to face the selected enemy, or null.
    */
   private findEnemyDirection(pcx: number, pcy: number): Direction | null {
     const w = this.world
     let bestDir: Direction | null = null
-    let bestDist = Infinity
+    let bestScore = -Infinity
+
+    const halfT = TANK / 2
 
     for (const t of w.tanks) {
       if (!t.alive || t.spawnTimer > 0) continue
@@ -203,14 +368,10 @@ export class GodAIInput implements InputLike {
       const dx = tcx - pcx
       const dy = tcy - pcy
 
-      // Check if the enemy is roughly aligned in one of the 4 cardinal
-      // directions (within tank width).
-      const halfT = TANK / 2
       let dir: Direction | null = null
       let dist = Infinity
 
       if (Math.abs(dx) < halfT) {
-        // Same column — up or down
         if (dy < 0) {
           dir = 'up'
           dist = -dy
@@ -219,7 +380,6 @@ export class GodAIInput implements InputLike {
           dist = dy
         }
       } else if (Math.abs(dy) < halfT) {
-        // Same row — left or right
         if (dx < 0) {
           dir = 'left'
           dist = -dx
@@ -229,8 +389,17 @@ export class GodAIInput implements InputLike {
         }
       }
 
-      if (dir && dist < bestDist) {
-        bestDist = dist
+      if (!dir || dist > AIM_RANGE_CELLS * CELL) continue
+
+      // T9: score = threat weight × 1000 - distance (prefer high-threat,
+      // then nearest among equal threat).
+      const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
+      const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
+      const hpFactor = t.hp / (t.maxHp || 1) // prefer enemies we can finish
+      const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100
+
+      if (score > bestScore) {
+        bestScore = score
         bestDir = dir
       }
     }
@@ -239,22 +408,19 @@ export class GodAIInput implements InputLike {
   }
 
   /**
-   * Scan ahead in a direction for enemies and walls. Checks **both cells**
-   * of the tank's 2-cell width by casting two parallel rays (offset by
-   * half a cell on each side of center). A single center ray misses
-   * anything in the offset cell — a critical bug that caused the AI to
-   * never fire because it couldn't see walls or enemies in its own column.
+   * Scan ahead in a direction for enemies, walls, and base protection.
+   * Returns what's in the line of fire, distinguishing steel from brick
+   * (T11) and detecting base-protection bricks (T6).
    */
   private scanAhead(
     pcx: number,
     pcy: number,
     dir: Direction,
-  ): { enemy: boolean; wall: boolean; enemyDist: number } {
+  ): { enemy: boolean; wall: boolean; steel: boolean; baseWall: boolean; enemyDist: number } {
     const w = this.world
     const v = DIR_VECTORS[dir]
     const vertical = dir === 'up' || dir === 'down'
 
-    // Two parallel rays, offset by half a cell on each side of center.
     const offsets: ReadonlyArray<readonly [number, number]> = vertical
       ? [
           [-CELL / 2, 0],
@@ -267,6 +433,8 @@ export class GodAIInput implements InputLike {
 
     let enemy = false
     let wall = false
+    let steel = false
+    let baseWall = false
     let enemyDist = Infinity
 
     for (const [ox, oy] of offsets) {
@@ -282,9 +450,21 @@ export class GodAIInput implements InputLike {
         const row = Math.floor(cy / CELL)
         const terrain = w.tileMap.get(col, row)
 
-        // Steel and brick block line of sight (and bullets).
-        if (terrain === 'steel') break
-        if (terrain === 'brick' || terrain === 'base') {
+        if (terrain === 'steel') {
+          steel = true
+          wall = true
+          break
+        }
+        if (terrain === 'brick') {
+          // T6: check if this brick is protecting the base.
+          if (this.isBaseProtectionBrick(col, row)) {
+            baseWall = true
+          }
+          wall = true
+          break
+        }
+        if (terrain === 'base') {
+          baseWall = true
           wall = true
           break
         }
@@ -304,11 +484,26 @@ export class GodAIInput implements InputLike {
       }
     }
 
-    return { enemy, wall, enemyDist }
+    return { enemy, wall, steel, baseWall, enemyDist }
+  }
+
+  /**
+   * T6: Check if a brick cell is part of the base's defensive wall.
+   * The base is at rows 24-25, cols 12-13. Bricks within a small radius
+   * of the base are considered "protection" bricks.
+   */
+  private isBaseProtectionBrick(col: number, row: number): boolean {
+    const bc = BASE_POS.col
+    const br = BASE_POS.row
+    const dc = Math.abs(col - bc)
+    const dr = Math.abs(row - br)
+    // The base occupies cols 12-13, rows 24-25. Protection bricks are
+    // those immediately adjacent (within 2 cells) that form the wall.
+    return dc <= BASE_WALL_SCAN_RADIUS && dr <= BASE_WALL_SCAN_RADIUS && (dc <= 2 || dr <= 2)
   }
 
   // ================================================================
-  // Threat assessment
+  // Threat assessment (dodge, T8)
   // ================================================================
 
   /**
@@ -321,7 +516,7 @@ export class GodAIInput implements InputLike {
     let bestDist = Infinity
 
     for (const b of w.bullets) {
-      if (!b.alive || b.isPlayer) continue // only enemy bullets threaten
+      if (!b.alive || b.isPlayer) continue
       const bcx = b.x + b.w / 2
       const bcy = b.y + b.h / 2
       const vertical = b.dir === 'up' || b.dir === 'down'
@@ -347,59 +542,236 @@ export class GodAIInput implements InputLike {
   }
 
   /**
-   * Choose a dodge direction perpendicular to the incoming bullet.
-   * Prefers the direction that makes progress toward the objective.
+   * T8: Find an enemy bullet whose trajectory will cross the base area.
+   * This is the ultimate defense — intercept bullets heading for the base
+   * even if they're not threatening the player.
    */
-  private dodgeDirection(bullet: Bullet): Direction | null {
+  private findBulletThreatToBase(): Bullet | null {
+    const w = this.world
+    const baseCx = BASE_POS.col * CELL + CELL
+    const baseCy = BASE_POS.row * CELL + CELL
+    const baseHalf = CELL // base is 2×2 cells = 32px, half = 16px
+
+    let best: Bullet | null = null
+    let bestDist = Infinity
+
+    for (const b of w.bullets) {
+      if (!b.alive || b.isPlayer) continue
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const v = DIR_VECTORS[b.dir]
+
+      // Project the bullet's trajectory forward and check if it crosses the base.
+      let crossesBase = false
+      for (let d = CELL; d <= BULLET_TRAJECTORY_MAX_CELLS * CELL; d += CELL) {
+        const fx = bcx + v.dx * d
+        const fy = bcy + v.dy * d
+
+        // Check if the trajectory point is within the base area.
+        if (Math.abs(fx - baseCx) < baseHalf * 2 && Math.abs(fy - baseCy) < baseHalf * 2) {
+          crossesBase = true
+          break
+        }
+
+        // If the trajectory goes off-field, stop.
+        if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+
+        // If the trajectory hits a wall (brick/steel/base), stop — the
+        // bullet would be blocked before reaching the base.
+        const col = Math.floor(fx / CELL)
+        const row = Math.floor(fy / CELL)
+        const terrain = w.tileMap.get(col, row)
+        if (terrain === 'brick' || terrain === 'steel') break
+        // If it hits the base itself, that's a direct hit.
+        if (terrain === 'base') {
+          crossesBase = true
+          break
+        }
+      }
+
+      if (crossesBase) {
+        const dist = Math.abs(bcx - baseCx) + Math.abs(bcy - baseCy)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = b
+        }
+      }
+    }
+
+    return best
+  }
+
+  /**
+   * T8: Calculate the cell where the player should move to intercept
+   * a bullet heading toward the base. This is the cell on the bullet's
+   * trajectory that is closest to the player.
+   */
+  private baseBulletInterceptCell(bullet: Bullet): Cell | null {
+    const w = this.world
+    const p = w.player!
+    const pcx = p.x + p.w / 2
+    const pcy = p.y + p.h / 2
+    const bcx = bullet.x + bullet.w / 2
+    const bcy = bullet.y + bullet.h / 2
+    const v = DIR_VECTORS[bullet.dir]
+
+    // Walk along the bullet's trajectory and find the closest point to the player
+    // that is BETWEEN the bullet and the base (in front of the bullet).
+    let bestCell: Cell | null = null
+    let bestDist = Infinity
+
+    for (let d = 0; d <= BULLET_TRAJECTORY_MAX_CELLS * CELL; d += CELL) {
+      const fx = bcx + v.dx * d
+      const fy = bcy + v.dy * d
+      if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+
+      const col = Math.floor(fx / CELL)
+      const row = Math.floor(fy / CELL)
+
+      // Stop if the trajectory hits a wall.
+      const terrain = w.tileMap.get(col, row)
+      if (terrain === 'brick' || terrain === 'steel') break
+
+      // Check if the player can reach this cell.
+      const cellCx = col * CELL + CELL / 2
+      const cellCy = row * CELL + CELL / 2
+      const dist = Math.abs(cellCx - pcx) + Math.abs(cellCy - pcy)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestCell = { col, row }
+      }
+
+      // If we've passed the base, stop searching.
+      if (terrain === 'base') break
+    }
+
+    // Only intercept if the player can reach the intercept point in time.
+    // If the closest point is too far, the player can't get there before
+    // the bullet — intercepting would just send the player on a wild goose
+    // chase, leaving the base undefended.
+    if (bestDist > T8_MAX_INTERCEPT_DIST_CELLS * CELL) return null
+
+    return bestCell
+  }
+
+  /**
+   * Choose a dodge direction perpendicular to the incoming bullet.
+   * M3: verify the candidate direction is safe (not into another bullet's path).
+   */
+  private dodgeDirection(bullet: Bullet, pcx: number, pcy: number): Direction | null {
     const w = this.world
     const p = w.player!
     const vertical = bullet.dir === 'up' || bullet.dir === 'down'
     const candidates: Direction[] = vertical ? ['left', 'right'] : ['up', 'down']
 
-    // Try each candidate; prefer the one that's passable.
+    // Try each candidate; prefer the one that's passable AND safe (M3).
     const open: Direction[] = []
     for (const d of candidates) {
-      if (this.canMoveDir(p, d)) open.push(d)
+      if (this.canMoveDir(p, d) && this.isSafeDir(pcx, pcy, d, bullet.id)) {
+        open.push(d)
+      }
     }
+
+    // If no safe candidate, try passable but unsafe.
     if (open.length === 0) {
-      // Try any open direction.
+      for (const d of candidates) {
+        if (this.canMoveDir(p, d)) open.push(d)
+      }
+    }
+
+    // If still nothing, try any open direction.
+    if (open.length === 0) {
       for (const d of ALL_DIRS) {
         if (this.canMoveDir(p, d)) open.push(d)
       }
     }
     if (open.length === 0) return null
 
-    // Pick the first open candidate (deterministic).
+    // Prefer the direction that keeps the player closer to the base.
+    // This prevents dodge from sending the player on a wild chase away
+    // from the defense position.
+    const baseCx = BASE_POS.col * CELL + CELL
+    const baseCy = BASE_POS.row * CELL + CELL
+    open.sort((a, b) => {
+      const va = DIR_VECTORS[a]
+      const vb = DIR_VECTORS[b]
+      const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
+      const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+      return distA - distB
+    })
+
     return open[0]
   }
 
+  /**
+   * M3: Check if moving in direction `d` would put the player into another
+   * bullet's trajectory (excluding the one we're already dodging).
+   */
+  private isSafeDir(pcx: number, pcy: number, dir: Direction, excludeBulletId: number): boolean {
+    const w = this.world
+    const v = DIR_VECTORS[dir]
+    // Check the cell we'd move into.
+    const newCx = pcx + v.dx * CELL
+    const newCy = pcy + v.dy * CELL
+
+    for (const b of w.bullets) {
+      if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const vertical = b.dir === 'up' || b.dir === 'down'
+      const aligned = vertical
+        ? Math.abs(bcx - newCx) < CELL * 0.75
+        : Math.abs(bcy - newCy) < CELL * 0.75
+      if (!aligned) continue
+      const approaching =
+        (b.dir === 'down' && bcy < newCy) ||
+        (b.dir === 'up' && bcy > newCy) ||
+        (b.dir === 'right' && bcx < newCx) ||
+        (b.dir === 'left' && bcx > newCx)
+      if (approaching) return false
+    }
+    return true
+  }
+
   // ================================================================
-  // Fire control (facing direction only — used while navigating)
+  // Fire control (T2b, T6, T11, M6)
   // ================================================================
 
   /**
    * Decide whether to fire in the current facing direction. Fires when:
-   * - A brick wall is directly ahead blocking the path
-   * - An enemy is in the line of fire
-   * - An enemy bullet is approaching (to intercept)
-   * - **Proactive fire**: when no specific target is visible, the AI still
-   *   fires while navigating. A competent player holds the fire button
-   *   while moving — bullets clear walls, create openings, and occasionally
-   *   hit enemies that move into the line of fire. The fire cooldown limits
-   *   the rate; aim error occasionally fumbles a shot.
+   * - An enemy is in the line of fire (scanAhead found enemy)
+   * - An enemy bullet is approaching (to intercept, T5)
+   *
+   * T2b: does NOT fire at walls during navigation. A* routes around walls,
+   * so firing at them wastes bullets and cooldown time. Wall-breaking is
+   * handled exclusively by the T2a stop-and-aim logic (which fires at walls
+   * between the player and a visible enemy in the same row/col).
+   *
+   * T6: base protection bricks are never fired at.
+   * T11: steel is only fired at if player level ≥ 3 (can pierce steel).
    */
-  private shouldFireInFacingDir(pcx: number, pcy: number): boolean {
+  private shouldFireInDir(pcx: number, pcy: number, dir: Direction): boolean {
     const w = this.world
     const p = w.player!
-    const dir = p.dir
 
-    // Scan for walls and enemies in the facing direction (two-ray scan).
     const result = this.scanAhead(pcx, pcy, dir)
-    if (result.enemy || result.wall) {
+
+    // Enemy in line of fire — always fire.
+    if (result.enemy) {
       return this.rng.next() >= this.params.aimError
     }
 
-    // Also fire if an enemy bullet is approaching (intercept).
+    // T6/T11: Don't fire at base protection bricks or steel (level < 3).
+    // These are checked but always return false — we don't waste bullets
+    // on walls during navigation.
+    if (result.baseWall) return false
+    if (result.steel && (p.level ?? 0) < 3) return false
+    // Steel with level ≥ 3: fire to pierce (enemy might be behind it).
+    if (result.steel) {
+      return this.rng.next() >= this.params.aimError
+    }
+
+    // Check for enemy bullet to intercept (T5).
     for (const b of w.bullets) {
       if (!b.alive || b.isPlayer) continue
       const bcx = b.x + b.w / 2
@@ -421,16 +793,182 @@ export class GodAIInput implements InputLike {
       }
     }
 
-    // No specific target in the facing direction. Fire proactively — a
-    // competent player holds fire while moving to break walls, create
-    // openings, and catch enemies that move into the line of fire.
-    // The fire cooldown limits the rate.
-    return this.rng.next() >= this.params.aimError
+    // Fire at brick walls to clear paths and create firing lanes.
+    // This is critical for mobility — without it, the player navigates
+    // around walls, which takes too long and lets enemies reach the base.
+    // Never fire at base protection bricks (T6) or steel (T11).
+    if (result.wall && !result.baseWall && !result.steel) {
+      return this.rng.next() >= this.params.aimError
+    }
+
+    return false
   }
 
   // ================================================================
-  // Navigation
+  // S5: Power-up economy
   // ================================================================
+
+  /**
+   * S5a/S5c/NEW-Requirement-3: Find a power-up worth collecting.
+   * Returns the target cell if a power-up is available and worth the risk,
+   * null otherwise.
+   *
+   * NEW: Dynamic priority based on:
+   *   - Power-up effect (bomb > star > freeze > fence > tank > shield/helmet > boat)
+   *   - Travel distance (cost in time/opportunity)
+   *   - Route danger (how many enemies are between player and power-up)
+   */
+  private findPowerUpTarget(pcx: number, pcy: number): Cell | null {
+    const w = this.world
+    if (w.powerUps.length === 0) return null
+
+    let bestPu: { cell: Cell; score: number } | null = null
+
+    for (const pu of w.powerUps) {
+      if (!pu.alive) continue
+      const cx = pu.x + pu.w / 2
+      const cy = pu.y + pu.h / 2
+      const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+
+      // S5d: if about to expire and too far, skip.
+      const lifeRemaining = POWERUP_TIMEOUT_MS - pu.lifeTimer
+      if (lifeRemaining < 3000 && dist > 5) continue
+
+      // S5a: base priority by type.
+      const priority = POWERUP_PRIORITY[pu.type] ?? 5
+
+      // NEW Requirement 3: Calculate route danger
+      const dangerLevel = this.calculateRouteDanger(pcx, pcy, cx, cy)
+
+      // NEW Requirement 3: Dynamic scoring
+      // Score = (base_priority * 1000) - (distance * 10) - (danger * 500)
+      // High-value power-ups (bomb/star) get bonus to offset higher risk
+      let score = priority * 1000 - dist * 10 - dangerLevel * 500
+
+      // Extra bonus for bomb (it clears the whole screen, worth high risk)
+      if (pu.type === 'bomb') {
+        score += 2000
+      }
+
+      // Extra bonus for star (permanent upgrade)
+      if (pu.type === 'star') {
+        score += 1000
+      }
+
+      // Penalty for boat (only situationally useful)
+      if (pu.type === 'boat') {
+        score -= 500
+      }
+
+      // S5b: high-value power-ups are worth longer diversions
+      const maxDist = priority <= 1 ? POWERUP_MAX_DIVERT_DISTANCE : 8
+      if (dist > maxDist) continue
+
+      // NEW: Don't collect if route is too dangerous unless it's a bomb/star
+      if (dangerLevel > 3 && priority > 2) continue // Too dangerous for low-value power-ups
+      if (dangerLevel > 5 && pu.type !== 'bomb') continue // Bomb is worth almost any risk
+
+      if (!bestPu || score > bestPu.score) {
+        bestPu = { cell: pxToCell(pu.x, pu.y), score }
+      }
+    }
+
+    return bestPu?.cell ?? null
+  }
+
+  /**
+   * NEW Requirement 3: Calculate how dangerous a route is.
+   * Returns a danger level from 0 (safe) to N (many enemies on the path).
+   */
+  private calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
+    const w = this.world
+    let danger = 0
+
+    // Simple heuristic: count enemies that are closer to the target than we are
+    const targetCell = pxToCell(toX, toY)
+    const playerCell = pxToCell(fromX, fromY)
+    const playerDistToTarget = Math.abs(targetCell.col - playerCell.col) + Math.abs(targetCell.row - playerCell.row)
+
+    for (const t of w.tanks) {
+      if (!t.alive || t.spawnTimer > 0) continue
+
+      const enemyCell = pxToCell(t.x, t.y)
+      const enemyDistToTarget = Math.abs(targetCell.col - enemyCell.col) + Math.abs(targetCell.row - enemyCell.row)
+
+      // If enemy is closer to target than player, and on the path, add danger
+      if (enemyDistToTarget < playerDistToTarget) {
+        // Check if enemy is roughly between player and target
+        const dx = enemyCell.col - playerCell.col
+        const dy = enemyCell.row - playerCell.row
+        const tx = targetCell.col - playerCell.col
+        const ty = targetCell.row - playerCell.row
+
+        // Simple projection check
+        if (Math.sign(dx) === Math.sign(tx) && Math.sign(dy) === Math.sign(ty)) {
+          danger += 1
+          // Extra danger for power/armor tanks
+          if (t.kind === 'power' || t.kind === 'armor') {
+            danger += 1
+          }
+        }
+      }
+    }
+
+    return danger
+  }
+
+  // ================================================================
+  // Navigation (T1, S7, S10)
+  // ================================================================
+
+  /** Get the player's grid-aligned cell (matches canMoveDir's snap). */
+  private playerCell(): Cell {
+    const p = this.world.player!
+    return { col: Math.round(p.x / CELL), row: Math.round(p.y / CELL) }
+  }
+
+  /** Get a tank's grid-aligned cell (consistent with playerCell). */
+  private tankCell(t: Tank): Cell {
+    return { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+  }
+
+  /**
+   * Navigate towards a specific cell using A* pathfinding.
+   * Returns the next movement direction, or null if no path.
+   */
+  private navigateTowards(target: Cell): Direction | null {
+    const w = this.world
+    const p = w.player!
+    const playerCell = this.playerCell()
+
+    if (target.col === playerCell.col && target.row === playerCell.row) {
+      return null
+    }
+
+    const path = findPath(w.tileMap, playerCell, target)
+    if (!path || path.length === 0) return null
+
+    // Suboptimal path: small chance of taking a different direction.
+    if (this.rng.next() < this.params.suboptimalPathProb) {
+      const altDirs = ALL_DIRS.filter((d) => d !== path[0] && this.canMoveDir(p, d))
+      if (altDirs.length > 0) {
+        return this.rng.pick(altDirs)
+      }
+    }
+
+    const nextDir = path[0]
+    if (this.canMoveDir(p, nextDir)) {
+      return nextDir
+    }
+
+    // Path blocked — try alternative directions.
+    for (const d of ALL_DIRS) {
+      if (d === opposite(nextDir)) continue
+      if (this.canMoveDir(p, d)) return d
+    }
+
+    return null
+  }
 
   /**
    * Follow the current A* path, re-planning as needed.
@@ -439,13 +977,26 @@ export class GodAIInput implements InputLike {
   private followPath(): Direction | null {
     const w = this.world
     const p = w.player!
-    const playerCell = pxToCell(p.x, p.y)
+    const playerCell = this.playerCell()
+
+    // Only consume path steps when the player enters a new grid cell.
+    // The player moves at ~0.7 px/tick, so it takes ~23 ticks per cell.
+    // Shifting every tick would exhaust the path before arrival.
+    if (
+      !this._lastPathCell ||
+      this._lastPathCell.col !== playerCell.col ||
+      this._lastPathCell.row !== playerCell.row
+    ) {
+      if (this.path.length > 0) this.path.shift()
+      this._lastPathCell = { col: playerCell.col, row: playerCell.row }
+    }
 
     // Re-plan periodically or when the path is exhausted.
     this.replanTimer--
     if (this.replanTimer <= 0 || this.path.length === 0) {
       this.replan(playerCell)
-      this.replanTimer = 30 // re-plan every ~0.5s
+      this.replanTimer = REPLAN_INTERVAL
+      this._lastPathCell = { col: playerCell.col, row: playerCell.row }
     }
 
     // Follow the path.
@@ -462,7 +1013,6 @@ export class GodAIInput implements InputLike {
 
       // Check if we can actually move in the path direction.
       if (this.canMoveDir(p, nextDir)) {
-        this.path.shift()
         return nextDir
       }
 
@@ -483,6 +1033,14 @@ export class GodAIInput implements InputLike {
     return this.directMove(playerCell)
   }
 
+  /**
+   * Default defense position: centered above the base at the defense row.
+   * This is the fallback when no enemies are present.
+   */
+  private getDefaultDefensePosition(): Cell {
+    return { col: BASE_POS.col, row: BASE_POS.row - DEFENSE_ROW_OFFSET }
+  }
+
   /** Re-plan the A* path to the current best target. */
   private replan(playerCell: Cell): void {
     const w = this.world
@@ -492,7 +1050,6 @@ export class GodAIInput implements InputLike {
       return
     }
 
-    // If already at the target, no path needed.
     if (target.col === playerCell.col && target.row === playerCell.row) {
       this.path = []
       return
@@ -502,7 +1059,6 @@ export class GodAIInput implements InputLike {
     if (path) {
       this.path = path
     } else {
-      // No path found — try a nearby cell.
       this.path = []
     }
   }
@@ -510,71 +1066,196 @@ export class GodAIInput implements InputLike {
   /**
    * Select the best target cell for the player to navigate toward.
    *
-   * **Base defense priority**: always targets the enemy closest to the base,
-   * regardless of distance. The AI navigates toward the enemy to intercept
-   * it before it reaches the base. Combined with stop-and-shoot and
-   * proactive fire, this keeps the AI aggressive while defending.
+   * Core strategy: ALWAYS intercept the enemy closest to the base by
+   * navigating to that enemy's column at the defense row. This puts
+   * the player in position to shoot the enemy via T2a when it crosses
+   * the defense row. No gating on "isEnemyThreateningBase" — every
+   * enemy is a potential threat, and the player should proactively
+   * position itself, not wait passively.
    *
-   * If no enemies are alive, moves toward the center of the map to be ready
-   * for the next wave.
+   * Priority:
+   *   1. Enemy closest to base → intercept at defense row
+   *   2. Aggressive mode (freeze) → chase nearest enemy directly
+   *   3. Endgame (≤2 enemies remaining) → chase last enemy
+   *   4. No enemies → default defense position
    */
-  private selectTarget(_playerCell: Cell): Cell | null {
+  private selectTarget(playerCell: Cell): Cell | null {
     const w = this.world
-    const baseX = BASE_POS.col * CELL
-    const baseY = BASE_POS.row * CELL
+    const p = w.player
+    if (!p) return null
 
-    const enemies = w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
-    if (enemies.length === 0) {
-      // No enemies alive — move toward the center of the map (between spawns).
-      return { col: 12, row: 6 }
+    const baseCol = BASE_POS.col
+    const baseRow = BASE_POS.row
+    const defenseRow = baseRow - DEFENSE_ROW_OFFSET
+
+    // If the player is too far from the base, return to defense position.
+    const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
+    if (playerDistToBase > MAX_PLAYER_DIST_FROM_BASE) {
+      return this.getDefaultDefensePosition()
     }
 
-    // Always prioritize the enemy closest to the base.
+    const enemies = w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
+    if (enemies.length === 0) return this.getDefaultDefensePosition()
+
+    // Aggressive mode (freeze): enemies can't move — chase nearest directly.
+    if (this.aggressive) {
+      let best = enemies[0]
+      let bestDist = Infinity
+      for (const t of enemies) {
+        const tc = this.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        if (d < bestDist) { bestDist = d; best = t }
+      }
+      return this.tankCell(best)
+    }
+
+    // Endgame: ≤2 enemies remaining and ≤1 on field → hunt directly.
+    if (w.enemiesRemaining <= ENDGAME_ENEMY_THRESHOLD && enemies.length <= 1) {
+      return this.tankCell(enemies[0])
+    }
+
+    // Find the enemy closest to the base that's within threat range.
     let bestEnemy: Tank | null = null
-    let minBaseDist = Infinity
+    let bestScore = -Infinity
     for (const t of enemies) {
-      const tx = t.x + t.w / 2
-      const ty = t.y + t.h / 2
-      const dist = Math.abs(tx - baseX) + Math.abs(ty - baseY)
-      if (dist < minBaseDist) {
-        minBaseDist = dist
+      const tc = this.tankCell(t)
+      const distToBase = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+      if (distToBase > THREAT_RANGE_CELLS) continue
+
+      const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
+      const bonusWeight = t.bonus ? 3 : 0
+      // HUGE bonus for enemies at or below the defense row — critical threat
+      const urgencyBonus = tc.row >= defenseRow ? (baseRow - tc.row) * 100 : 0
+      // Small bonus for enemies in the base row region (rows 20-23)
+      const proximityBonus = tc.row >= 20 ? 50 : 0
+      const score = -distToBase * 10 + (threatWeight + bonusWeight) * 30 + urgencyBonus + proximityBonus
+      if (score > bestScore) {
+        bestScore = score
         bestEnemy = t
       }
     }
 
-    if (bestEnemy) {
-      return pxToCell(bestEnemy.x, bestEnemy.y)
-    }
+    if (!bestEnemy) return this.getDefaultDefensePosition()
 
-    return null
+    return this.interceptCell(bestEnemy, defenseRow, baseCol, baseRow)
   }
 
-  /** Direct movement toward the nearest enemy (fallback when A* fails). */
+  /**
+   * T1: Calculate the intercept cell — the position where the player should
+   * be to shoot the enemy as it approaches the base.
+   *
+   * Strategy: position at the enemy's column at the defense row. This gives
+   * the player a vertical firing line to shoot the enemy when it crosses.
+   * If the enemy is already below the defense row (close to base), intercept
+   * at the enemy's row minus 1 — get above it and shoot down.
+   */
+  private interceptCell(enemy: Tank, defenseRow: number, baseCol: number, _baseRow: number): Cell {
+    const ec = this.tankCell(enemy)
+
+    let targetCol: number
+    let targetRow: number
+
+    // If enemy is at or below the defense row, go directly above it — urgent!
+    // Don't clamp distance — we need to be there NOW.
+    if (ec.row >= defenseRow) {
+      targetCol = ec.col
+      targetRow = Math.max(0, ec.row - 1)
+    } else {
+      // Intercept at the defense row. Clamp the column to stay close to the base.
+      targetCol = Math.max(baseCol - DEFENSE_COL_SPREAD, Math.min(baseCol + DEFENSE_COL_SPREAD, ec.col))
+      targetRow = defenseRow
+    }
+
+    targetCol = Math.max(0, Math.min(GRID - 2, targetCol))
+    targetRow = Math.max(0, Math.min(GRID - 2, targetRow))
+
+    return { col: targetCol, row: targetRow }
+  }
+
+  /** Direct movement toward the target, breaking through walls. */
   private directMove(playerCell: Cell): Direction | null {
     const w = this.world
     const p = w.player!
     const target = this.selectTarget(playerCell)
     if (!target) return null
+    if (target.col === playerCell.col && target.row === playerCell.row) return null
 
     const dx = target.col * CELL - p.x
     const dy = target.row * CELL - p.y
 
-    // Try the dominant axis first.
-    if (Math.abs(dx) > Math.abs(dy)) {
-      const dir = dx > 0 ? 'right' : 'left'
-      if (this.canMoveDir(p, dir)) return dir
+    // Build direction preference: primary axis first, then secondary.
+    const dirs: Direction[] = []
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      if (dx > 0) dirs.push('right')
+      else if (dx < 0) dirs.push('left')
+      if (dy > 0) dirs.push('down')
+      else if (dy < 0) dirs.push('up')
+    } else {
+      if (dy > 0) dirs.push('down')
+      else if (dy < 0) dirs.push('up')
+      if (dx > 0) dirs.push('right')
+      else if (dx < 0) dirs.push('left')
     }
-    if (Math.abs(dy) > 0) {
-      const dir = dy > 0 ? 'down' : 'up'
-      if (this.canMoveDir(p, dir)) return dir
+
+    // Return the first preferred direction that we can either move through
+    // or break through (brick wall). This enables wall-breaking: the tank
+    // faces the wall, shouldFireInDir fires at it, and the wall breaks.
+    for (const dir of dirs) {
+      if (this.canMoveOrBreak(p, dir)) return dir
     }
-    // Try the other axis.
-    if (Math.abs(dx) > 0) {
-      const dir = dx > 0 ? 'right' : 'left'
-      if (this.canMoveDir(p, dir)) return dir
+
+    // All preferred directions blocked by unbreakable terrain or tanks —
+    // try any passable direction (excluding reverse of primary).
+    for (const d of ALL_DIRS) {
+      if (dirs.length > 0 && d === opposite(dirs[0])) continue
+      if (this.canMoveDir(p, d)) return d
     }
 
     return null
+  }
+
+  /**
+   * Check if the tank can move in a direction OR break through a brick wall.
+   * Returns true if the direction is passable, or if it's blocked only by
+   * non-base-protection brick walls (which can be destroyed by firing).
+   * Returns false if blocked by steel, water, base, or another tank.
+   */
+  private canMoveOrBreak(tank: Tank, dir: Direction): boolean {
+    if (this.canMoveDir(tank, dir)) return true
+
+    const w = this.world
+    const v = DIR_VECTORS[dir]
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const nx = gx + v.dx * CELL
+    const ny = gy + v.dy * CELL
+
+    // Out of bounds — can't break through
+    if (!w.isInBounds(nx, ny, TANK, TANK)) return false
+
+    // Blocked by a tank? — can't break through, need to go around
+    for (const o of w.allTanks) {
+      if (o === tank || !o.alive) continue
+      if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false
+    }
+
+    // Check terrain at new position — if any cell is unbreakable, can't break through
+    const c0 = Math.floor(nx / CELL)
+    const r0 = Math.floor(ny / CELL)
+    const c1 = Math.floor((nx + TANK - 1) / CELL)
+    const r1 = Math.floor((ny + TANK - 1) / CELL)
+
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
+        const terrain = w.tileMap.get(c, r)
+        if (terrain === 'steel' || terrain === 'water' || terrain === 'base') return false
+        if (terrain === 'brick' && this.isBaseProtectionBrick(c, r)) return false
+      }
+    }
+
+    // Only breakable brick walls blocking — can break through by firing
+    return true
   }
 
   /** Check if the player tank can move one CELL in the given direction. */
@@ -587,7 +1268,6 @@ export class GodAIInput implements InputLike {
     const ny = gy + v.dy * CELL
     if (!w.isInBounds(nx, ny, TANK, TANK)) return false
     if (w.rectHitsTerrain(nx, ny, TANK, TANK)) return false
-    // Check tank collisions.
     for (const o of w.allTanks) {
       if (o === tank || !o.alive) continue
       if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false

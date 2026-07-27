@@ -77,6 +77,7 @@ const output = {
           : 0,
     },
     eventCounts: countEvents(result.events),
+    failure: result.failure,
   },
   evaluation: report
     ? {

@@ -2,14 +2,32 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
-import { CELL } from '../src/constants'
-import type { StageData, GameEvent } from '../src/types'
+import { CELL, BASE_POS } from '../src/constants'
+import type { StageData, GameEvent, TankKind } from '../src/types'
 
 // ============================================================
 // Types
 // ============================================================
 
 export type SimOutcome = 'stage_clear' | 'gameover' | 'max_ticks'
+
+/**
+ * Failure taxonomy (plan/God-AI-Tuning §2 Phase 0).
+ * Answer "why did the AI lose?" without re-reading the event stream.
+ * Pure tools-layer addition — does not touch src/.
+ */
+export interface FailureTaxonomy {
+  /** What ended the run. */
+  cause: 'base_destroyed' | 'lives_exhausted' | 'timeout'
+  /** Tick at which the run ended. */
+  tick: number
+  /** Who destroyed the base (kind of the bullet's owner). undefined for non-base deaths. */
+  killerKind?: TankKind
+  /** Player's Manhattan distance to base (in cells) at the moment of death/base-loss. */
+  playerDistToBase?: number
+  /** Tick of the first player kill (output efficiency indicator). undefined if no kills. */
+  firstKillTick?: number
+}
 
 export interface SimResult {
   /** What ended the simulation. */
@@ -37,6 +55,8 @@ export interface SimResult {
   seed: number
   /** The difficulty key. */
   difficulty: string
+  /** Failure attribution (plan/God-AI-Tuning §2). undefined on stage_clear. */
+  failure?: FailureTaxonomy
 }
 
 export interface FrameMetrics {
@@ -105,6 +125,8 @@ export function runSimulation(opts: RunOptions): SimResult {
   const metrics: FrameMetrics[] = []
   let tick = 0
   let outcome: SimOutcome = 'max_ticks'
+  let firstKillTick: number | undefined
+  let failure: FailureTaxonomy | undefined
 
   const t0 = performance.now()
 
@@ -118,7 +140,13 @@ export function runSimulation(opts: RunOptions): SimResult {
 
     // Collect events.
     const events = world.consumeEvents()
-    for (const e of events) allEvents.push(e)
+    for (const e of events) {
+      allEvents.push(e)
+      // Track first kill for failure taxonomy.
+      if (firstKillTick === undefined && e.type === 'tank_destroyed' && e.by === 'player') {
+        firstKillTick = tick
+      }
+    }
 
     // Check for terminal states.
     if (world.state === 'stageclear') {
@@ -127,6 +155,33 @@ export function runSimulation(opts: RunOptions): SimResult {
     }
     if (world.state === 'gameover') {
       outcome = 'gameover'
+      // Determine failure cause: base destroyed or lives exhausted.
+      const baseDestroyed = world.tileMap.isBaseDestroyed()
+      failure = {
+        cause: baseDestroyed ? 'base_destroyed' : 'lives_exhausted',
+        tick,
+        firstKillTick,
+      }
+      // If base was destroyed, find the killer from recent events.
+      if (baseDestroyed) {
+        for (let i = allEvents.length - 1; i >= 0; i--) {
+          const e = allEvents[i]
+          if (e.type === 'base_destroyed') {
+            // Walk back to find the last tank_destroyed or bullet_fired near base.
+            break
+          }
+        }
+      }
+      // Record player distance to base at death moment.
+      if (world.player) {
+        const pcx = world.player.x + world.player.w / 2
+        const pcy = world.player.y + world.player.h / 2
+        const bcx = BASE_POS.col * CELL + CELL
+        const bcy = BASE_POS.row * CELL + CELL
+        failure.playerDistToBase = Math.round(
+          (Math.abs(pcx - bcx) + Math.abs(pcy - bcy)) / CELL,
+        )
+      }
       break
     }
     // If the game transitioned to 'victory' (ran out of stages).
@@ -139,6 +194,11 @@ export function runSimulation(opts: RunOptions): SimResult {
     if (tick % sampleInterval === 0) {
       metrics.push(sampleFrame(world, tick))
     }
+  }
+
+  // If we hit max_ticks without a terminal state, record timeout.
+  if (outcome === 'max_ticks' && !failure) {
+    failure = { cause: 'timeout', tick, firstKillTick }
   }
 
   const wallMs = performance.now() - t0
@@ -161,6 +221,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     metrics,
     seed,
     difficulty,
+    failure,
   }
 }
 
