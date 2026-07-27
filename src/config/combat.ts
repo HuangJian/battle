@@ -151,19 +151,33 @@ export const TANK_PROFILES: Record<Exclude<TankKind, 'player'>, CombatProfile> =
 
 /**
  * Player capability grows *universally* with star level (unlike enemy
- * specialization).  At the default `maxMultiplier = 1.0` the curve is exactly
- * the plan's §11 ladder: level 0 → 50, 1 → 60, 2 → 70, 3 → 80.
+ * specialization).  The growth is now *decaying*: every star adds `gainFull`
+ * (the spec's initial "+10%") to all six dimensions while the dimension is
+ * below the decay threshold — balanced-enemy firepower × `thresholdMult`
+ * (= 50 × 1.5 = 75) — and `gainDecay` (the spec's "+2%") once that threshold
+ * is crossed.  Classic mode additionally caps the *level* at `maximumLevel`
+ * (enforced at pickup time in Simulation); every other mode lets the level
+ * accumulate WITHOUT bound, so the dimension keeps creeping up (and saturates
+ * at 100) long after the player has far out-scaled the balanced enemy.
  *
  * `maxMultiplier` is the configurable ceiling (plan §13 Option A/B/C): raise it
  * for hardcore/challenge modes so the player can out-scale even commanders.
  */
 export interface PlayerProgressionConfig {
-  /** Highest reachable star level (cap on universal growth). */
+  /** Classic-mode hard cap on star *level*. Other modes accumulate unbounded
+   *  (the dimension still saturates at 100 in playerProfile). */
   maximumLevel: number
-  /** Baseline dimension at level 0. */
+  /** Baseline dimension (all six capabilities) at level 0. */
   baseDim: number
-  /** Dimension gain per star level. */
-  perLevel: number
+  /** Per-star dimension gain while below the decay threshold (initial boost).
+   *  On the 0..100 scale this is the spec's "initial +10%". */
+  gainFull: number
+  /** Per-star dimension gain once the decay threshold is crossed (decayed
+   *  boost — the spec's "+2%"). */
+  gainDecay: number
+  /** Decay threshold = balanced-enemy firepower × this multiplier. Once the
+   *  player's dimension exceeds it, the per-star gain drops to `gainDecay`. */
+  thresholdMult: number
   /** Global multiplier on the final dimensions (player power ceiling). */
   maxMultiplier: number
 }
@@ -171,7 +185,9 @@ export interface PlayerProgressionConfig {
 export const PLAYER_PROGRESSION: PlayerProgressionConfig = {
   maximumLevel: 3,
   baseDim: 50,
-  perLevel: 10,
+  gainFull: 10,
+  gainDecay: 2,
+  thresholdMult: 1.5,
   maxMultiplier: 1.0,
 }
 
@@ -203,11 +219,35 @@ function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v
 }
 
-/** Player profile for a given star level (universal growth, capped & scaled). */
+/**
+ * Player profile for a given star level (universal growth with decay).
+ *
+ * Classic mode caps the *level* at `maximumLevel` (enforced at pickup time in
+ * Simulation), so this function only ever sees levels ≤ 3 there and the decay
+ * branch below is inert for classic — the curve is exactly the plan §11 ladder
+ * (level 0 → 50 … 3 → 80). Other modes let the level grow WITHOUT bound; the
+ * per-star dimension gain is `gainFull` while the dimension is below the decay
+ * threshold (balanced-enemy firepower × `thresholdMult`), then `gainDecay`
+ * afterwards — so early stars hit hard (+10%) and later stars taper (+2%),
+ * matching the spec. The dimension itself is hard-clamped to 100.
+ */
 export function playerProfile(level: number): CombatProfile {
-  const { baseDim, perLevel, maximumLevel, maxMultiplier } = PLAYER_PROGRESSION
-  const L = clamp(Math.round(level), 0, maximumLevel)
-  const dim = Math.min(100, Math.round((baseDim + L * perLevel) * maxMultiplier))
+  const { baseDim, gainFull, gainDecay, thresholdMult, maxMultiplier } = PLAYER_PROGRESSION
+  const L = Math.max(0, Math.round(level))
+  // Threshold in dimension units, data-driven off the balanced enemy's
+  // firepower (the "均衡敌人 × 150%" the spec references).
+  const threshold = TANK_PROFILES.basic.firepower * thresholdMult
+  // How many of the first stars still receive the full gain before the
+  // threshold is crossed. ceil() so the star that *pushes* past the threshold
+  // keeps the full gain; decay applies to the following star.
+  const fullStars = Math.max(0, Math.ceil((threshold - baseDim) / gainFull))
+  const dim = Math.min(
+    100,
+    Math.round(
+      (baseDim + gainFull * Math.min(L, fullStars) + gainDecay * Math.max(0, L - fullStars)) *
+        maxMultiplier,
+    ),
+  )
   return {
     firepower: dim,
     projectileSpeed: dim,

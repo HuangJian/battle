@@ -459,3 +459,28 @@ describe('Fire rate is fixed per type and independent of hit outcomes', () => {
     expect(Math.abs(openFirstGap - wallFirstGap)).toBeLessThanOrEqual(2)
   })
 })
+
+describe('Star progression — classic cap vs unbounded (spec: 星星增益无限累加)', () => {
+  it('classic mode caps the level at maximumLevel (no 4th star)', () => {
+    const { world, sim } = buildSeededWorld(12345)
+    world.startGame('classic', 'modern', 0)
+    world.playerLevel = 3
+    world.player!.level = 3
+    ;(sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp('star')
+    expect(world.playerLevel).toBe(3) // capped, did NOT increment
+  })
+
+  it('non-classic modes accumulate the level WITHOUT bound', () => {
+    const { world, sim } = buildSeededWorld(12345)
+    world.startGame('hard', 'modern', 0)
+    world.playerLevel = 3
+    world.player!.level = 3
+    const apply = (sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp.bind(sim)
+    apply('star')
+    expect(world.playerLevel).toBe(4) // first unbounded star
+    apply('star')
+    expect(world.playerLevel).toBe(5) // keeps growing
+    // dimension follows the decayed curve (balanced×150% = 75 threshold crossed)
+    expect(world.player!.profile!.firepower).toBe(84) // level 5 → 50+30+2·2
+  })
+})

@@ -262,20 +262,34 @@ describe('Combat Capability — player progression (DoD #5, #6)', () => {
     }
   })
 
-  it('respects the configurable maximum level (never grows past it)', () => {
-    expect(playerProfile(5).firepower).toBe(
-      playerProfile(PLAYER_PROGRESSION.maximumLevel).firepower,
-    )
+  it('keeps growing past level 3 with a decayed gain, dimension saturates at 100', () => {
+    // plan §11 ladder still holds for the capped range
+    expect(playerProfile(0).firepower).toBe(50)
+    expect(playerProfile(3).firepower).toBe(80)
+    // decayed +2% per star once the balanced×150% threshold (75) is crossed
+    expect(playerProfile(4).firepower).toBe(82)
+    expect(playerProfile(5).firepower).toBe(84)
+    // dimension hard-clamps at 100 (level 13 already saturates)
+    expect(playerProfile(13).firepower).toBe(100)
+    expect(playerProfile(50).firepower).toBe(100)
+  })
+
+  it('negative levels clamp to the level-0 baseline', () => {
     expect(playerProfile(-1).firepower).toBe(playerProfile(0).firepower)
+  })
+
+  it('decay threshold = balanced enemy firepower × 150% (data-driven)', () => {
+    const threshold = TANK_PROFILES.basic.firepower * PLAYER_PROGRESSION.thresholdMult
+    expect(threshold).toBe(75) // 50 × 1.5
+    // The star that pushes past 75 keeps the full +10; the NEXT star decays to +2.
+    expect(playerProfile(3).firepower).toBe(80) // 50 + 3×10 = 80 (crossed 75)
+    expect(playerProfile(4).firepower).toBe(82) // +2, not +10
   })
 
   it('maxMultiplier scales the player power ceiling (Option B/C modes)', () => {
     const cfg = { ...PLAYER_PROGRESSION, maxMultiplier: 1.5 }
-    const dim = Math.min(
-      100,
-      Math.round((cfg.baseDim + cfg.maximumLevel * cfg.perLevel) * cfg.maxMultiplier),
-    )
-    expect(dim).toBeGreaterThan(playerProfile(cfg.maximumLevel).firepower)
+    const dim = Math.min(100, Math.round((cfg.baseDim + cfg.gainFull * 3) * cfg.maxMultiplier))
+    expect(dim).toBeGreaterThan(playerProfile(3).firepower)
   })
 })
 

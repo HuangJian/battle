@@ -818,7 +818,13 @@ export class Simulation {
         // dimensions together (plan §11). Re-derive the tank's concrete stats
         // from the new profile. Current HP is intentionally NOT refilled — a
         // star is power, not a repair.
-        if ((p.level ?? 0) < PLAYER_PROGRESSION.maximumLevel) {
+        // Classic mode caps the star *level* at maximumLevel; every other mode
+        // accumulates WITHOUT bound (the per-star gain decays past the
+        // balanced×150% threshold inside playerProfile). The cap is a
+        // classic-only, pickup-time constraint.
+        const classicCap = w.difficultyKey === 'classic'
+        const atCap = classicCap && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
+        if (!atCap) {
           p.level = (p.level ?? 0) + 1
           w.playerLevel = p.level
           const stats = profileToStats(resolveProfile('player', p.level), 'player', p.level)

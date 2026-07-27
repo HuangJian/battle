@@ -617,13 +617,18 @@ export class UIManager {
       this.lastLives = world.lives
     }
 
-    // Player star level (★ power-up) — rendered as filled/empty stars up to
-    // the progression cap so the player can read their enhancement tier at a
-    // glance. Only written when the level actually changes.
+    // Player star level (★ power-up). Classic caps at `maximumLevel` (tier
+    // display of filled/empty stars); every other mode accumulates without
+    // bound, so we show the raw star COUNT (it can exceed the classic cap).
+    // Only written when the level actually changes.
     if (world.playerLevel !== this.lastStar) {
-      const max = PLAYER_PROGRESSION.maximumLevel
-      const lvl = clamp(world.playerLevel, 0, max)
-      this.hudStar.textContent = '★'.repeat(lvl) + '☆'.repeat(max - lvl)
+      if (world.difficultyKey === 'classic') {
+        const max = PLAYER_PROGRESSION.maximumLevel
+        const lvl = clamp(world.playerLevel, 0, max)
+        this.hudStar.textContent = '★'.repeat(lvl) + '☆'.repeat(max - lvl)
+      } else {
+        this.hudStar.textContent = `★ ${Math.max(0, world.playerLevel)}`
+      }
       this.lastStar = world.playerLevel
     }
 
