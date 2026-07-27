@@ -71,7 +71,7 @@ export class SpriteCache {
     if (this._built) return
 
     // --- Tank sprites: pre-render all 4 directions ---
-    const tankKeys = ['tank.player1', 'tank.basic', 'tank.fast', 'tank.power', 'tank.armor']
+    const tankKeys = ['tank.player1', 'tank.basic', 'tank.fast', 'tank.power', 'tank.armor', 'tank.ally']
     for (const key of tankKeys) {
       const img = lib.get(key)
       if (!img) continue

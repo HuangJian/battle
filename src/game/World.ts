@@ -60,6 +60,7 @@ export class World {
   // Entities
   player: Tank | null
   tanks: Tank[] // enemy tanks
+  allies: Tank[] // 天降神兵 allied guard tanks (third faction, DECISIONS.md §31 Phase 2)
   bullets: Bullet[]
   powerUps: PowerUp[]
   explosions: Explosion[]
@@ -178,6 +179,19 @@ export class World {
   baseHp: number
   baseMaxHp: number
 
+  // --- Super power-up inventory & frenzy state (DECISIONS.md §31) ---
+  // Accumulated counts from picking up super power-ups (强力道具).
+  guardStock: number // 天降神兵 — Phase 2 summons a base guard
+  frenzyStock: number // 狂暴宣泄 — active F6 barrage
+  sacrificeStock: number // 同归于尽 — passive AoE on losing a life
+  // Active 狂暴宣泄 barrage runtime. Snapshot-safe so a rewind mid-barrage
+  // (and the enemy-kill that may trigger it) is faithful.
+  frenzyTimer: number // ms remaining in the current barrage (0 = inactive)
+  frenzyShotsLeft: number // shells left to fire this barrage
+  frenzyLastFire: number // ms timestamp of the last frenzy shell
+  frenzyInterval: number // ms between frenzy shells (= player fire interval / 5)
+  frenzyDir: Direction // locked firing direction during the barrage
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -187,6 +201,7 @@ export class World {
     this.tileMap = new TileMap()
     this.player = null
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
@@ -231,6 +246,15 @@ export class World {
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false
+    // Super power-up inventory & frenzy (DECISIONS.md §31)
+    this.guardStock = 0
+    this.frenzyStock = 0
+    this.sacrificeStock = 0
+    this.frenzyTimer = 0
+    this.frenzyShotsLeft = 0
+    this.frenzyLastFire = 0
+    this.frenzyInterval = 0
+    this.frenzyDir = 'up'
   }
 
   // ---- Lifecycle ----
@@ -248,6 +272,15 @@ export class World {
     // Fresh run: clear any deferred drops left over from a previous game
     // (e.g. a buffered drop from the final stage of a won run).
     this.pendingDrops = []
+    // Fresh run: reset super power-up inventory & frenzy state (§31).
+    this.guardStock = 0
+    this.frenzyStock = 0
+    this.sacrificeStock = 0
+    this.frenzyTimer = 0
+    this.frenzyShotsLeft = 0
+    this.frenzyLastFire = 0
+    this.frenzyInterval = 0
+    this.frenzyDir = 'up'
     this.loadStage(startStage)
   }
 
@@ -277,6 +310,7 @@ export class World {
   loadStageData(stage: StageData, index = 0): void {
     this.tileMap.loadStage(stage)
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
@@ -341,6 +375,7 @@ export class World {
     this.baseHp = this.baseMaxHp
     this.player = null
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
@@ -443,6 +478,7 @@ export class World {
       level: kind === 'player' ? this.playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
+      allegiance: kind === 'player' ? 'player' : 'enemy',
       profile,
       flashTimer: 0,
       hitCount: 0,
@@ -486,6 +522,7 @@ export class World {
   removeDeadEntities(): void {
     // In-place compaction — avoids creating 5 new arrays every tick
     this.compact(this.tanks, (t) => t.alive)
+    this.compact(this.allies, (t) => t.alive)
     this.compact(this.bullets, (b) => b.alive)
     this.compact(this.powerUps, (p) => p.alive)
     this.compact(this.explosions, (e) => e.timer > 0)
@@ -506,24 +543,26 @@ export class World {
   // ---- Queries ----
 
   get allTanks(): Tank[] {
-    if (this.player) {
-      // Reuse buffer — avoids creating a new array every call (called ~10×/tick)
-      this._allTanksBuf[0] = this.player
-      const tanks = this.tanks
-      for (let i = 0; i < tanks.length; i++) {
-        this._allTanksBuf[i + 1] = tanks[i]
-      }
-      this._allTanksBuf.length = tanks.length + 1
-      return this._allTanksBuf
-    }
-    return this.tanks
+    // Reuse buffer — avoids creating a new array every call (called ~10×/tick).
+    // Order: player, then allied guards, then enemy tanks.
+    const buf = this._allTanksBuf
+    let i = 0
+    if (this.player) buf[i++] = this.player
+    const allies = this.allies
+    for (let a = 0; a < allies.length; a++) buf[i++] = allies[a]
+    const tanks = this.tanks
+    for (let t = 0; t < tanks.length; t++) buf[i++] = tanks[t]
+    buf.length = i
+    return buf
   }
 
   get enemyCount(): number {
     let count = 0
     const tanks = this.tanks
     for (let i = 0; i < tanks.length; i++) {
-      if (tanks[i].spawnTimer <= 0) count++
+      // Accompanying "balance" enemies (isExtra) are outside the per-stage
+      // 20-enemy cap (DECISIONS.md §31 Phase 2).
+      if (tanks[i].spawnTimer <= 0 && !tanks[i].isExtra) count++
     }
     return count
   }

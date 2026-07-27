@@ -26,6 +26,11 @@ export type PowerUpType =
   | 'helmet'
   | 'fence'
   | 'boat'
+  // --- Super power-ups (强力道具, DECISIONS.md §31) ---
+  // Picked up into an inventory (accumulated), not applied instantly.
+  | 'guard' // 天降神兵 — summon a base guard (Phase 2: spawn + ally AI + faction)
+  | 'frenzy' // 狂暴宣泄 — active F6 barrage (Phase 1)
+  | 'sacrifice' // 同归于尽 — passive AoE on losing a life (Phase 1)
 
 export interface Vec2 {
   x: number
@@ -141,6 +146,18 @@ export interface Tank extends Entity {
   hitCount?: number // number of non-lethal hits taken (drives hit-state overlay)
   aiState?: AIState
   bonus?: boolean // drops a power-up when destroyed
+  // --- Faction (third-faction ally, DECISIONS.md §31 Phase 2) ---
+  /** Combat allegiance. Drives bullet friendly-fire rules and AI targeting.
+   *  `player` + `ally` are on the same team (no friendly fire between them);
+   *  `enemy` is hostile to both. `isPlayer` is derived (= allegiance==='player'). */
+  allegiance: 'player' | 'enemy' | 'ally'
+  /** True for the balance "accompanying enemy" spawned by 天降神兵. Excluded
+   *  from the per-stage 20-enemy cap (MAX_ENEMIES_ALIVE) and from
+   *  `enemiesRemaining` (stage-clear count); still counts killCount/score. */
+  isExtra?: boolean
+  /** Absolute world.frame at which an allied guard auto-expires (2-min
+   *  lifespan). Undefined for non-guard tanks. */
+  guardExpireFrame?: number
 }
 
 /**
@@ -164,6 +181,7 @@ export type GoalType =
   | 'retreat'
   | 'regroup'
   | 'advance'
+  | 'defendBase' // 天降神兵 allied guard posture (§31 Phase 2)
 
 /**
  * Lightweight cooperation directives broadcast by the (elected) commander.
@@ -229,6 +247,9 @@ export interface Bullet extends Entity {
   ownerId: number
   ownerKind: TankKind
   isPlayer: boolean
+  /** Combat allegiance of the firing tank (mirrors Tank.allegiance). Drives
+   *  the 3-way friendly-fire rule in Simulation.bulletHitsTank. */
+  allegiance: 'player' | 'enemy' | 'ally'
   speed: number
   power: number // 1 = normal, 2 = destroys steel
   /** Per-shot damage dealt to tanks. */
@@ -424,6 +445,10 @@ export interface KeyBindings {
    * combos (unlike Ctrl+R / Ctrl+T, which collide with reload / new-tab).
    */
   theme: string
+  /** Active super-item: summon base guard (天降神兵). Default F5. */
+  guard: string
+  /** Active super-item: frenzy barrage (狂暴宣泄). Default F6. */
+  frenzy: string
 }
 
 // ============================================================

@@ -1,5 +1,5 @@
 import type { World } from './World'
-import type { Tank, Bullet, PowerUpType, IntelligenceLevel } from '../types'
+import type { Tank, Bullet, PowerUpType, IntelligenceLevel, TankKind } from '../types'
 import {
   CELL,
   TANK,
@@ -9,6 +9,7 @@ import {
   MAX_ENEMIES_ALIVE,
   ENEMIES_PER_STAGE,
   DIR_VECTORS,
+  Direction,
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
   RESPAWN_SHIELD_MS,
@@ -25,6 +26,12 @@ import {
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { killScore, stageClearScore, ITEM_SCORE, SCORE_DROP_INTERVAL } from '../config/score'
+import {
+  SUPER_POWERUP_DROP_CHANCE,
+  SUPER_POWERUP_TYPES,
+  FRENZY_SHOTS,
+  SACRIFICE_BASE_RADIUS_CELLS,
+} from '../config/powerups'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { nextFireIntervalMs } from '../config/fire-rate'
@@ -41,6 +48,13 @@ import { snap, aabb } from '../utils/helpers'
 // down/left; two such tanks meeting at the edge deadlock with zero free
 // directions). See fix in updateSpawning().
 const ENEMY_SPAWN_POINTS = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+
+/** 天降神兵 guard lifespan: 2 minutes at 60 ticks/s (§31 Phase 2). */
+const GUARD_LIFESPAN_FRAMES = 120 * 60
+/** Guard kinds are randomly chosen; all use normal enemy combat stats. */
+const GUARD_KINDS: TankKind[] = ['basic', 'fast', 'power', 'armor']
+/** Accompanying "balance" enemies use a lighter pool. */
+const EXTRA_ENEMY_KINDS: TankKind[] = ['basic', 'fast', 'power']
 
 /** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
 const POWERUP_TYPES: PowerUpType[] = [
@@ -116,6 +130,10 @@ export class Simulation {
 
     // Enemy AI
     this.updateEnemyAI()
+
+    // Allied guard AI (天降神兵, §31 Phase 2) — runs before movement so the
+    // guard's intent (dir/moving) is applied this tick.
+    this.updateGuards()
 
     // Movement
     this.updateMovement()
@@ -294,6 +312,23 @@ export class Simulation {
     if (!p || !p.alive) return
     if (p.spawnTimer > 0) return // still spawning
 
+    // --- 狂暴宣泄 barrage in progress: player is locked (no move / turn /
+    //     other items). Auto-fire only. ---
+    if (w.frenzyTimer > 0) {
+      this.updateFrenzy(p)
+      return
+    }
+
+    // --- Active super-item release (F5 天降神兵 / F6 狂暴宣泄) ---
+    // 天降神兵 is Phase 2 (ally AI + faction); in Phase 1 the super pool
+    // excludes 'guard', so guardStock is always 0 and this is a no-op.
+    if (this.input.wasItemPressed('guard') && w.guardStock > 0) {
+      this.activateGuard(p)
+    }
+    if (this.input.wasItemPressed('frenzy') && w.frenzyStock > 0) {
+      this.activateFrenzy(p)
+    }
+
     // Movement
     const dir = this.input.getMoveDirection()
     if (dir !== null) {
@@ -307,6 +342,351 @@ export class Simulation {
     if (this.input.isFiring()) {
       this.tryFire(p)
     }
+  }
+
+  /**
+   * Advance an active 狂暴宣泄 barrage. The player is locked to `frenzyDir`
+   * and cannot move/turn/use other items (updatePlayer returns before reading
+   * movement). Shells fire at 1/5 of the player's normal fire interval using
+   * the player's CURRENT bullet stats (star buff included). Driven by the same
+   * `frame * (1000/60)` clock as tryFire so it is deterministic/snapshot-safe.
+   */
+  private updateFrenzy(p: Tank): void {
+    const w = this.world
+    const now = w.frame * (1000 / 60)
+    p.dir = w.frenzyDir
+    p.moving = false
+    while (w.frenzyShotsLeft > 0 && now - w.frenzyLastFire >= w.frenzyInterval) {
+      this.spawnFrenzyShot(p)
+      w.frenzyShotsLeft -= 1
+      w.frenzyLastFire += w.frenzyInterval
+    }
+    w.frenzyTimer -= 1000 / 60
+    if (w.frenzyTimer <= 0 || w.frenzyShotsLeft <= 0) {
+      w.frenzyTimer = 0
+      w.frenzyShotsLeft = 0
+    }
+  }
+
+  /** Fire one 狂暴宣泄 shell (player's current stats, locked direction). */
+  private spawnFrenzyShot(p: Tank): void {
+    const w = this.world
+    const v = DIR_VECTORS[w.frenzyDir]
+    const bx = p.x + p.w / 2 - BULLET / 2 + v.dx * (p.w / 2)
+    const by = p.y + p.h / 2 - BULLET / 2 + v.dy * (p.h / 2)
+    const bullet: Bullet = {
+      id: genId(),
+      x: bx,
+      y: by,
+      w: BULLET,
+      h: BULLET,
+      dir: w.frenzyDir,
+      alive: true,
+      ownerId: p.id,
+      ownerKind: p.kind,
+      isPlayer: true,
+      allegiance: 'player',
+      speed: spawnBulletSpeedPxPerTick(p.kind, p.level ?? 0, w.bulletSeq++, w.frame),
+      power: p.bulletPower,
+      damage: p.damage,
+    }
+    w.addBullet(bullet)
+    w.pushEvent({ type: 'bullet_fired', bullet })
+  }
+
+  /** Activate a 狂暴宣泄 barrage (consume one from inventory). */
+  private activateFrenzy(p: Tank): void {
+    const w = this.world
+    w.frenzyStock--
+    const interval = Math.max(1, p.nextFireInterval / 5)
+    w.frenzyInterval = interval
+    w.frenzyShotsLeft = FRENZY_SHOTS
+    w.frenzyDir = p.dir
+    // Fire the first shell immediately on the next tick.
+    w.frenzyLastFire = w.frame * (1000 / 60) - interval
+    w.frenzyTimer = FRENZY_SHOTS * interval
+  }
+
+  /**
+   * Activate 天降神兵 (DECISIONS.md §31 Phase 2): summon a base guard ally and
+   * (for balance) accompanying "balance" enemies that are outside the per-stage
+   * 20-enemy cap. When no guards are currently active, 1 accompanying enemy is
+   * spawned; once 1+ guards are active, each new summon adds 2 (one already
+   * alive + the one being summoned counts as "active" only after this check,
+   * so the FIRST guard → 1, subsequent → 2).
+   */
+  private activateGuard(p: Tank): void {
+    const w = this.world
+    if (w.guardStock <= 0) return
+
+    let activeGuards = 0
+    for (const a of w.allies) {
+      if (a.alive && a.spawnTimer <= 0) activeGuards++
+    }
+    const extraCount = activeGuards === 0 ? 1 : 2
+
+    w.guardStock--
+    this.spawnGuard(p)
+    for (let i = 0; i < extraCount; i++) this.spawnAccompanyingEnemy(p)
+  }
+
+  /** Spawn one allied guard of a random type beside the base. */
+  private spawnGuard(p: Tank): void {
+    const w = this.world
+    const kind = GUARD_KINDS[Math.floor(w.rng.next() * GUARD_KINDS.length)]
+    const base = w.tileMap.getBasePos()
+    // Spawn on the side of the base OPPOSITE the player (spec): if the player is
+    // left of the base, spawn right; otherwise left.
+    let side: 'left' | 'right' = 'right'
+    if (base) {
+      const baseCx = base.x + CELL
+      const playerCx = p.x + p.w / 2
+      side = playerCx < baseCx ? 'right' : 'left'
+    }
+    const pos = this.baseSideSpawnCell(side)
+    const tank = w.createTank(kind, pos.x, pos.y, 'up')
+    // Promotion to third faction (§31 Phase 2).
+    tank.allegiance = 'ally'
+    tank.isPlayer = false
+    tank.spawnTimer = 1000
+    if (tank.aiState) {
+      // Commander-grade brain so the guard fights competently; pinned to a
+      // base-defence posture. It is NEVER considered for enemy command
+      // authority (recomputeActiveCommander only scans world.tanks).
+      tank.aiState.level = 'commander'
+      tank.aiState.isCommander = true
+      tank.aiState.strategicGoal = 'defendBase'
+      tank.aiState.tacticalGoal = 'defendBase'
+      const bx = base ? base.x + CELL : pos.x
+      const by = base ? base.y + CELL : pos.y
+      tank.aiState.targetX = bx
+      tank.aiState.targetY = by
+    }
+    // 2-minute lifespan (absolute frame).
+    tank.guardExpireFrame = w.frame + GUARD_LIFESPAN_FRAMES
+    w.allies.push(tank)
+  }
+
+  /**
+   * Find a clear spawn cell on the requested side of the base (scanning rows
+   * around the base for terrain- and tank-free space). Falls back to the base's
+   * own column if every candidate is blocked.
+   */
+  private baseSideSpawnCell(side: 'left' | 'right'): { x: number; y: number } {
+    const w = this.world
+    const base = w.tileMap.getBasePos()
+    const fallback = { x: CELL * 8, y: CELL * 24 }
+    if (!base) return fallback
+    const baseCol = Math.floor(base.x / CELL)
+    const baseRow = Math.floor(base.y / CELL)
+    // One cell to the right of the 2×2 base (col baseCol+2) or one to the left
+    // (col baseCol-1).
+    const col = side === 'right' ? baseCol + 2 : baseCol - 1
+    for (let r = baseRow - 2; r <= baseRow + 2; r++) {
+      const x = col * CELL
+      const y = r * CELL
+      if (!w.isInBounds(x, y, TANK, TANK)) continue
+      if (w.rectHitsTerrain(x, y, TANK, TANK)) continue
+      let blocked = false
+      for (const t of w.allTanks) {
+        if (t.alive && aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) {
+          blocked = true
+          break
+        }
+      }
+      if (!blocked) return { x, y }
+    }
+    return { x: col * CELL, y: baseRow * CELL }
+  }
+
+  /**
+   * Spawn one accompanying "balance" enemy (outside the per-stage 20-cap). Uses
+   * the normal enemy spawn points and AI; flagged isExtra so it never counts
+   * toward enemiesRemaining / stage clear, but still scores when killed.
+   */
+  private spawnAccompanyingEnemy(_p: Tank): void {
+    const w = this.world
+    const pt = this.findClearEnemySpawnPoint()
+    if (!pt) return // all spawn points blocked — skip (never force a jam)
+    const kind = EXTRA_ENEMY_KINDS[Math.floor(w.rng.next() * EXTRA_ENEMY_KINDS.length)]
+    const tank = w.createTank(kind, pt.x, pt.y, 'down')
+    tank.isExtra = true
+    tank.bonus = false
+    // Note: does NOT increment enemiesSpawned / enemiesRemaining — deliberately
+    // outside the per-stage progression (§31 Phase 2).
+    w.tanks.push(tank)
+  }
+
+  /** Pick the first clear enemy spawn point (rotation starts at spawnPointIndex). */
+  private findClearEnemySpawnPoint(): { x: number; y: number } | null {
+    const w = this.world
+    const n = ENEMY_SPAWN_POINTS.length
+    for (let i = 0; i < n; i++) {
+      const idx = (w.spawnPointIndex + i) % n
+      const pt = ENEMY_SPAWN_POINTS[idx]
+      if (w.rectHitsTerrain(pt.x, pt.y, TANK, TANK)) continue
+      let can = true
+      for (const t of w.allTanks) {
+        if (t.alive && aabb(pt.x, pt.y, TANK, TANK, t.x, t.y, t.w, t.h)) {
+          can = false
+          break
+        }
+      }
+      if (can) return pt
+    }
+    return null
+  }
+
+  /**
+   * Allied guard AI (天降神兵, §31 Phase 2). A focused "Commander-defend"
+   * policy (deterministic via world.rng): seek the nearest enemy, defend the
+   * base when none, and fire only when aligned with a target and the line of
+   * sight is clear of terrain. Reuses the standard movement/fire primitives so
+   * the guard obeys the same collision & friendly-fire rules as everyone else.
+   *
+   * (Design note: the spec says "use the Commander AI". The enemy tactical
+   * pipeline is goaled at ATTACKING the base/player, so running it verbatim on
+   * an ally would steer it into the player's base. This dedicated defender
+   * policy honours the observable intent — competent, base-defending fire —
+   * without that hazard. It can be promoted to the full pipeline later if a
+   * 'defendBase'-only goal branch is added.)
+   */
+  private updateGuards(): void {
+    const w = this.world
+    for (const g of w.allies) {
+      if (!g.alive) continue
+      if (g.spawnTimer > 0) continue // still spawning — no intent yet
+
+      // Lifespan expiry → retire the guard (no score, no drops).
+      if (g.guardExpireFrame !== undefined && w.frame >= g.guardExpireFrame) {
+        g.alive = false
+        this.createExplosion(g.x + g.w / 2, g.y + g.h / 2, 'big')
+        continue
+      }
+
+      const gx = g.x + g.w / 2
+      const gy = g.y + g.h / 2
+
+      // Nearest hostile tank.
+      let target: Tank | null = null
+      let bestD = Infinity
+      for (const e of w.tanks) {
+        if (!e.alive || e.spawnTimer > 0 || e.allegiance !== 'enemy') continue
+        const d = Math.hypot(e.x + e.w / 2 - gx, e.y + e.h / 2 - gy)
+        if (d < bestD) {
+          bestD = d
+          target = e
+        }
+      }
+
+      let tx = gx
+      let ty = gy
+      if (target) {
+        tx = target.x + target.w / 2
+        ty = target.y + target.h / 2
+      } else {
+        const base = w.tileMap.getBasePos()
+        if (base) {
+          tx = base.x + CELL
+          ty = base.y + CELL
+        }
+      }
+
+      // Primary-axis direction toward the target (defend-by-intercept).
+      const dx = tx - gx
+      const dy = ty - gy
+      const dir: Direction =
+        Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+      g.dir = dir
+      g.moving = true
+
+      // Fire when aligned with the target and the LOS is clear of terrain.
+      if (target) {
+        const ex = target.x + target.w / 2
+        const ey = target.y + target.h / 2
+        let fireDir: Direction | null = null
+        if (Math.abs(ex - gx) < CELL * 0.6 && Math.abs(ey - gy) > CELL * 0.6) {
+          fireDir = ey < gy ? 'up' : 'down'
+        } else if (Math.abs(ey - gy) < CELL * 0.6 && Math.abs(ex - gx) > CELL * 0.6) {
+          fireDir = ex < gx ? 'left' : 'right'
+        }
+        if (fireDir && this.lineClearForAlly(g, fireDir, target)) {
+          g.dir = fireDir
+          this.tryFire(g)
+        }
+      }
+    }
+  }
+
+  /** True if no brick/steel/base tile lies between the guard and its target. */
+  private lineClearForAlly(g: Tank, dir: Direction, target: Tank): boolean {
+    const w = this.world
+    const v = DIR_VECTORS[dir]
+    const sx = g.x + g.w / 2
+    const sy = g.y + g.h / 2
+    const tx = target.x + target.w / 2
+    const ty = target.y + target.h / 2
+    const maxDist = Math.hypot(tx - sx, ty - sy)
+    for (let d = CELL; d <= maxDist; d += CELL) {
+      const cx = sx + v.dx * d
+      const cy = sy + v.dy * d
+      const col = Math.floor(cx / CELL)
+      const row = Math.floor(cy / CELL)
+      const tt = w.tileMap.get(col, row)
+      if (tt === 'brick' || tt === 'steel' || tt === 'base') return false
+    }
+    return true
+  }
+
+  /**
+   * 同归于尽 (DECISIONS.md §31): when the player loses a life, release ALL
+   * accumulated sacrifice items at once. Blast radius = 5 + (stock−1) cells,
+   * destroying every enemy and every brick wall within it. Enemies killed by
+   * the blast use the normal kill accounting (score / killCount /
+   * enemiesRemaining), so they count exactly like a regular kill.
+   */
+  private triggerSacrificeAoE(player: Tank): void {
+    const w = this.world
+    if (w.sacrificeStock <= 0) return
+
+    const radiusCells = SACRIFICE_BASE_RADIUS_CELLS + (w.sacrificeStock - 1)
+    const radiusPx = radiusCells * CELL
+    const cx = player.x + player.w / 2
+    const cy = player.y + player.h / 2
+
+    // Destroy enemies within radius (normal kill accounting). Allies are
+    // friendly — the blast only consumes hostile tanks (§31 Phase 2).
+    for (const t of w.tanks) {
+      if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+      const tx = t.x + t.w / 2
+      const ty = t.y + t.h / 2
+      if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
+        t.alive = false
+        this.createExplosion(t.x + t.w / 2, t.y + t.h / 2, 'big')
+        const gained = killScore(w.difficultyKey, t.aiState?.level, w.stageIndex)
+        w.score += gained
+        w.enemiesRemaining--
+        w.killCount++
+        w.addPopup({ id: genId(), x: t.x, y: t.y, text: String(gained), timer: 1500 })
+        w.pushEvent({ type: 'tank_destroyed', tank: t, by: 'player' })
+      }
+    }
+
+    // Destroy brick walls within radius (16×16 cells).
+    const c0 = Math.max(0, Math.floor((cx - radiusPx) / CELL))
+    const c1 = Math.min(GRID - 1, Math.floor((cx + radiusPx) / CELL))
+    const r0 = Math.max(0, Math.floor((cy - radiusPx) / CELL))
+    const r1 = Math.min(GRID - 1, Math.floor((cy + radiusPx) / CELL))
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (w.tileMap.get(c, r) === 'brick') {
+          w.tileMap.destroy(c, r)
+        }
+      }
+    }
+
+    this.createExplosion(cx, cy, 'big')
+    w.sacrificeStock = 0
   }
 
   // ================================================================
@@ -524,6 +904,7 @@ export class Simulation {
       ownerId: tank.id,
       ownerKind: tank.kind,
       isPlayer: tank.isPlayer ?? false,
+      allegiance: tank.allegiance,
       // Per-bullet speed jitter: actual = base × random(0.95, 1.05). The jitter
       // seeds off the World's monotonic `bulletSeq` (not the module-level
       // genId, not the AI's world-RNG), so it is reproducible across runs and
@@ -601,10 +982,10 @@ export class Simulation {
 
         if (type === 'base') {
           // Player AND enemy bullets damage the base via the same firepower
-          // formula (classic still instakills). Returning immediately consumes
-          // the bullet on the first overlapping base cell (the base spans 2×2),
-          // so damage is applied exactly once per shot.
-          this.damageBase(this.bulletFirePower(bullet))
+          // formula (classic still instakills). Allied guard bullets DEFEND the
+          // base and must never damage it (§31 Phase 2) — but they still stop
+          // on it.
+          if (bullet.allegiance !== 'ally') this.damageBase(this.bulletFirePower(bullet))
           return true
         } else if (type === 'brick') {
           w.tileMap.destroy(c, r)
@@ -672,9 +1053,13 @@ export class Simulation {
       if (!tank.alive || tank.id === bullet.ownerId) continue
       if (tank.spawnTimer > 0) continue // spawning = invulnerable
 
-      // Player bullets hit enemies, enemy bullets hit player
-      if (bullet.isPlayer && tank.isPlayer) continue
-      if (!bullet.isPlayer && !tank.isPlayer) continue
+      // 3-way friendly-fire (DECISIONS.md §31 Phase 2): a bullet hits a tank
+      // only when exactly one of them is on the enemy side. The player+ally
+      // team has no friendly fire among/between itself; enemy bullets also
+      // strike allied guards.
+      const bulletEnemy = bullet.allegiance === 'enemy'
+      const tankEnemy = tank.allegiance === 'enemy'
+      if (bulletEnemy === tankEnemy) continue
 
       if (!aabb(bullet.x, bullet.y, bullet.w, bullet.h, tank.x, tank.y, tank.w, tank.h)) continue
 
@@ -704,11 +1089,19 @@ export class Simulation {
         if (tank.isPlayer) {
           w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
           w.pushEvent({ type: 'player_hit' })
+        } else if (tank.allegiance === 'ally') {
+          // Allied guard destroyed — no score, no kill credit, no drops. The
+          // guard simply stops fighting (§31 Phase 2).
+          w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
         } else {
           const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex)
           w.score += gained
-          w.enemiesRemaining--
           w.killCount++
+          // Accompanying "balance" enemies (isExtra) are outside the per-stage
+          // 20-enemy count, so they never decrement enemiesRemaining / block
+          // stage clear — but they still count as a normal kill for score
+          // (§31 Phase 2).
+          if (!tank.isExtra) w.enemiesRemaining--
           w.addPopup({
             id: genId(),
             x: tank.x,
@@ -729,33 +1122,36 @@ export class Simulation {
           // (buffered on world.pendingDrops) so the stage-clear transition
           // doesn't wipe it; it is released on the first enemy kill of the next
           // stage — which may therefore drop several power-ups at once.
-          this.flushPendingDrops() // release drops deferred from a prior stage
-          const isElite = tank.aiState?.isCommander === true
-          const isTenthKill = w.killCount % 10 === 0
+          // Extra (balance) enemies are excluded — they don't progress drops.
+          if (!tank.isExtra) {
+            this.flushPendingDrops() // release drops deferred from a prior stage
+            const isElite = tank.aiState?.isCommander === true
+            const isTenthKill = w.killCount % 10 === 0
 
-          // Collect this kill's guaranteed drops, each anchored on the slain
-          // enemy's tile.
-          const drops: { x: number; y: number }[] = []
-          if (tank.bonus || isElite || isTenthKill) {
-            drops.push({ x: tank.x, y: tank.y })
-          }
+            // Collect this kill's guaranteed drops, each anchored on the slain
+            // enemy's tile.
+            const drops: { x: number; y: number }[] = []
+            if (tank.bonus || isElite || isTenthKill) {
+              drops.push({ x: tank.x, y: tank.y })
+            }
 
-          // Rule 4 — score milestone. Count how many SCORE_DROP_INTERVAL
-          // boundaries the new score crossed *in this single kill* so a big
-          // jackpot can drop several power-ups at once.
-          const beforeScore = w.score - gained
-          const milestones =
-            Math.floor(w.score / SCORE_DROP_INTERVAL) -
-            Math.floor(beforeScore / SCORE_DROP_INTERVAL)
-          for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
+            // Rule 4 — score milestone. Count how many SCORE_DROP_INTERVAL
+            // boundaries the new score crossed *in this single kill* so a big
+            // jackpot can drop several power-ups at once.
+            const beforeScore = w.score - gained
+            const milestones =
+              Math.floor(w.score / SCORE_DROP_INTERVAL) -
+              Math.floor(beforeScore / SCORE_DROP_INTERVAL)
+            for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
 
-          if (drops.length > 0) {
-            const isFinalEnemy = w.enemiesRemaining <= 0
-            const hasNextStage = w.stageIndex + 1 < w.totalStages
-            if (isFinalEnemy && hasNextStage) {
-              for (const d of drops) w.pendingDrops.push(this.buildDrop(d)) // defer
-            } else {
-              for (const d of drops) this.spawnPowerUp(d) // drop immediately
+            if (drops.length > 0) {
+              const isFinalEnemy = w.enemiesRemaining <= 0
+              const hasNextStage = w.stageIndex + 1 < w.totalStages
+              if (isFinalEnemy && hasNextStage) {
+                for (const d of drops) w.pendingDrops.push(this.buildDrop(d)) // defer
+              } else {
+                for (const d of drops) this.spawnPowerUp(d) // drop immediately
+              }
             }
           }
         }
@@ -774,8 +1170,10 @@ export class Simulation {
     const w = this.world
     for (const other of w.bullets) {
       if (other === bullet || !other.alive) continue
-      // Player bullet vs enemy bullet
-      if (bullet.isPlayer === other.isPlayer) continue
+      // Bullets cancel only across opposing sides (player/ally vs enemy).
+      const bulletEnemy = bullet.allegiance === 'enemy'
+      const otherEnemy = other.allegiance === 'enemy'
+      if (bulletEnemy === otherEnemy) continue
       if (aabb(bullet.x, bullet.y, bullet.w, bullet.h, other.x, other.y, other.w, other.h)) {
         other.alive = false
         this.createExplosion((bullet.x + other.x) / 2, (bullet.y + other.y) / 2, 'small')
@@ -796,7 +1194,7 @@ export class Simulation {
    */
   private buildDrop(at?: { x: number; y: number }): { type: PowerUpType; x: number; y: number } {
     const w = this.world
-    const type = w.rng.pick(POWERUP_TYPES)
+    const type = this.rollPowerUpType()
 
     // Prefer the slain enemy's tile so the reward feels earned. Fall back to a
     // random clear tile if that spot is blocked (entropy from world.rng so the
@@ -819,6 +1217,21 @@ export class Simulation {
     }
 
     return { type, x, y }
+  }
+
+  /**
+   * Pick a power-up type for a drop (DECISIONS.md §31). Every drop source
+   * (elite / every-10-kills / every-5000-pts / bonus) funnels through here, so
+   * the 10% super-item chance is uniform across all of them. A super drop rolls
+   * equally among `SUPER_POWERUP_TYPES` (Phase 1: frenzy + sacrifice; guard
+   * joins in Phase 2). All randomness comes from `world.rng` → deterministic.
+   */
+  private rollPowerUpType(): PowerUpType {
+    const w = this.world
+    if (w.rng.next() < SUPER_POWERUP_DROP_CHANCE) {
+      return w.rng.pick(SUPER_POWERUP_TYPES)
+    }
+    return w.rng.pick(POWERUP_TYPES)
   }
 
   /** Spawn a power-up immediately at the given (or random) position. */
@@ -952,6 +1365,21 @@ export class Simulation {
         // Grant amphibious movement: can traverse water and ice without penalty
         this.applyBoatPowerUp()
         break
+
+      // ---- Super power-ups (强力道具, DECISIONS.md §31) ----
+      // Picked up into an inventory (accumulated), not applied instantly.
+      case 'guard':
+        // 天降神兵 — accumulate; released actively with F5 (Phase 2 summon).
+        w.guardStock++
+        break
+      case 'frenzy':
+        // 狂暴宣泄 — accumulate; released actively with F6.
+        w.frenzyStock++
+        break
+      case 'sacrifice':
+        // 同归于尽 — accumulate; released passively when a life is lost.
+        w.sacrificeStock++
+        break
     }
   }
 
@@ -1054,6 +1482,12 @@ export class Simulation {
 
     // Player destroyed
     if (w.player && !w.player.alive) {
+      // 同归于尽 (DECISIONS.md §31): passively release ALL accumulated
+      // sacrifice items, destroying enemies + brick walls within a radius.
+      this.triggerSacrificeAoE(w.player)
+      // A dead player can't keep a barrage running — cancel any active frenzy.
+      w.frenzyTimer = 0
+      w.frenzyShotsLeft = 0
       w.lives--
       if (w.lives <= 0) {
         w.state = 'gameover'
@@ -1073,8 +1507,10 @@ export class Simulation {
       return
     }
 
-    // Stage clear — all enemies defeated
-    if (w.enemiesRemaining <= 0 && w.tanks.length === 0) {
+    // Stage clear — all (non-extra) enemies defeated. Accompanying "balance"
+    // enemies (isExtra) are outside the per-stage count and must NOT block
+    // stage clear (§31 Phase 2).
+    if (w.enemiesRemaining <= 0 && w.tanks.every((t) => t.isExtra || !t.alive)) {
       const hasAlivePowerUp = w.powerUps.some((p) => p.alive)
 
       if (!hasAlivePowerUp) {

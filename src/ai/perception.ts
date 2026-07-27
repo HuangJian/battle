@@ -124,7 +124,9 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
   const threats: BulletObservation[] = []
   const range = cfg.predictionDepth * CELL
   for (const b of world.bullets) {
-    if (!b.alive || !b.isPlayer) continue // only player bullets threaten enemies
+    // Only hostile-to-enemy bullets are a threat: player OR ally fire (ally
+    // bullets carry allegiance 'ally', never 'enemy').
+    if (!b.alive || b.allegiance === 'enemy') continue
     const bx = b.x + b.w / 2
     const by = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'

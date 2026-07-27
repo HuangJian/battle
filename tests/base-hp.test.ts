@@ -70,6 +70,7 @@ function shootOnce(world: World, sim: Simulation, kind: TankKind): void {
     ownerId: -1,
     ownerKind: kind,
     isPlayer: kind === 'player',
+    allegiance: kind === 'player' ? 'player' : 'enemy',
     speed: 6,
     power: 1,
     damage: 1,

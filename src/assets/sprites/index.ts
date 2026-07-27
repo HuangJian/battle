@@ -7,6 +7,7 @@ import enemy_basic from './enemy_basic.svg?url'
 import enemy_fast from './enemy_fast.svg?url'
 import enemy_power from './enemy_power.svg?url'
 import enemy_armor from './enemy_armor.svg?url'
+import tank_ally from './tank.ally.svg?url'
 import base from './base.svg?url'
 import base_ruins from './base_ruins.svg?url'
 import bullet from './bullet.svg?url'
@@ -21,6 +22,9 @@ import item_tank from './item_tank.svg?url'
 import item_helmet from './item_helmet.svg?url'
 import item_fence from './item_fence.svg?url'
 import item_boat from './item_boat.svg?url'
+import item_frenzy from './item_frenzy.svg?url'
+import item_sacrifice from './item_sacrifice.svg?url'
+import item_guard from './item_guard.svg?url'
 import explosion from './explosion.svg?url'
 import fx_shield from './fx_shield.svg?url'
 import fx_starbuf1 from './fx_starbuf1.svg?url'
@@ -43,6 +47,7 @@ export const SPRITE_URLS: Record<string, string> = {
   'tank.fast': enemy_fast,
   'tank.power': enemy_power,
   'tank.armor': enemy_armor,
+  'tank.ally': tank_ally,
   // Terrain
   'terrain.base': base,
   'terrain.base_ruins': base_ruins,
@@ -59,6 +64,9 @@ export const SPRITE_URLS: Record<string, string> = {
   'item.helmet': item_helmet,
   'item.fence': item_fence,
   'item.boat': item_boat,
+  'item.frenzy': item_frenzy,
+  'item.sacrifice': item_sacrifice,
+  'item.guard': item_guard,
   // Effects
   'fx.explosion': explosion,
   'fx.shield': fx_shield,

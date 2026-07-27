@@ -14,6 +14,8 @@ import type { KeyBindings } from '../types'
 export interface InputLike {
   getMoveDirection(): Direction | null
   isFiring(): boolean
+  /** Whether a super-item release key (guard/frenzy) was pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy'): boolean
   endFrame(): void
   reset(): void
 }
@@ -41,6 +43,8 @@ export const DEFAULT_KEYS: KeyBindings = {
   reset: 'Alt+KeyR',
   snapshot: 'Alt+KeyS',
   theme: 'Alt+KeyT',
+  guard: 'F5',
+  frenzy: 'F6',
 }
 
 /**
@@ -239,7 +243,9 @@ export class Input implements InputLike {
       id === keyIdFromBinding(k.pause) ||
       id === keyIdFromBinding(k.reset) ||
       id === keyIdFromBinding(k.snapshot) ||
-      id === keyIdFromBinding(k.theme)
+      id === keyIdFromBinding(k.theme) ||
+      id === keyIdFromBinding(k.guard) ||
+      id === keyIdFromBinding(k.frenzy)
     ) {
       return true
     }
@@ -297,6 +303,11 @@ export class Input implements InputLike {
   /** Theme-cycle shortcut (configurable, default Alt+T). */
   isThemePressed(): boolean {
     return this.wasPressed(this.keys.theme)
+  }
+
+  /** Super-item release key (guard/frenzy) pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+    return this.wasPressed(this.keys[kind])
   }
 
   /** Manual snapshot shortcut (configurable, default Alt+S). */

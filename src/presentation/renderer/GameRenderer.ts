@@ -576,7 +576,10 @@ export class GameRenderer {
         artist.drawHpLevelAura(tank.x, tank.y, tank.w, hpLevel, frame)
       }
 
-      if (tank.isPlayer) {
+      if (tank.allegiance === 'ally') {
+        // 天降神兵 allied guard — distinct purple unit (no enemy crown/insignia).
+        artist.drawAllyTank(tank.x, tank.y, tank.w, tank.dir, animFrame)
+      } else if (tank.isPlayer) {
         artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
       } else {
         const isCommander = tank.aiState?.isCommander === true
@@ -607,15 +610,20 @@ export class GameRenderer {
         artist.drawShield(tank.x, tank.y, tank.w, frame)
       }
 
-      // Rank insignia drawn LAST so it sits above the HP level border,
-      // bonus frame, and shield (user: z-index above HP 等级边框).
-      artist.drawInsignia(
-        tank.x,
-        tank.y,
-        tank.w,
-        tank.aiState?.level ?? 'none',
-        tank.aiState?.isCommander === true,
-      )
+      // Allies get a distinct purple friendly aura (not the enemy rank
+      // insignia / commander crown); everyone else draws the insignia LAST so
+      // it sits above the HP level border, bonus frame, and shield.
+      if (tank.allegiance === 'ally') {
+        artist.drawAllyAura(tank.x, tank.y, tank.w, frame)
+      } else {
+        artist.drawInsignia(
+          tank.x,
+          tank.y,
+          tank.w,
+          tank.aiState?.level ?? 'none',
+          tank.aiState?.isCommander === true,
+        )
+      }
     }
   }
 
