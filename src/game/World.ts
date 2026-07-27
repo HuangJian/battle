@@ -11,6 +11,7 @@ import type {
   ThemeColors,
   AIState,
   GoalType,
+  StageData,
 } from '../types'
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
@@ -244,7 +245,23 @@ export class World {
       this.pushEvent({ type: 'stage_clear', stage: this.stageIndex })
       return
     }
+    this.loadStageData(stage, index)
+  }
 
+  /**
+   * Load an arbitrary `StageData` into the World (plan/Automated-Level-Design
+   * §3.5 / Phase 0.3). This is the entry point for headless simulation of
+   * generated or custom stages — it accepts any `StageData` (not just one from
+   * the `STAGES` config array) and performs the exact same setup as
+   * `loadStage(index)`: terrain load, entity reset, spawn-queue build, player
+   * spawn, and state transition to `'playing'`.
+   *
+   * The `index` parameter defaults to 0 and is used only for scoring formulas
+   * (`killScore` / `stageClearScore` scale with stage index). Generated stages
+   * use index 0 so their scoring matches stage 1 — the simulation runner cares
+   * about pass/fail, not score magnitude.
+   */
+  loadStageData(stage: StageData, index = 0): void {
     this.tileMap.loadStage(stage)
     this.tanks = []
     this.bullets = []

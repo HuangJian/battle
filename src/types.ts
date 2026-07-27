@@ -293,8 +293,6 @@ export type GameEvent =
 // Config Types
 // ============================================================
 
-
-
 export interface DifficultyConfig {
   name: string
   /**

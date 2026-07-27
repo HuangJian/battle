@@ -92,7 +92,8 @@ export class TacticalIntelligence {
     const v = DIR_VECTORS[brain.currentDir]
     const nx = gx + v.dx * CELL
     const ny = gy + v.dy * CELL
-    const blocked = !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
+    const blocked =
+      !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
 
     if (brain.thinkTimer <= 0 || blocked) {
       const open: Direction[] = []
@@ -238,7 +239,9 @@ export class TacticalIntelligence {
     const maxDist = FIELD
     const threatPenalty = s.threat ? 0.35 : 0
     const followsDirective =
-      brain.directive !== 'none' && brain.directiveCompliant && brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
+      brain.directive !== 'none' &&
+      brain.directiveCompliant &&
+      brain.directiveAge < COMMANDER_INTERVAL_MS * 1.5
 
     // Combat Capability bias (plan §14): the tank evaluates its OWN strengths.
     // A high-mobility tank presses/flanks harder; a high-armor tank pushes more
@@ -589,7 +592,11 @@ export class TacticalIntelligence {
     }
   }
 
-  private chooseDirective(world: World, commander: Tank, cfg: IntelligenceConfig): CommanderDirective {
+  private chooseDirective(
+    world: World,
+    commander: Tank,
+    cfg: IntelligenceConfig,
+  ): CommanderDirective {
     const p = perceive(world, commander, cfg)
     const baseX = p.baseX
     const baseY = p.baseY

@@ -940,3 +940,109 @@ the Simulation — AGENTS §2.4 data over code). Replaces the old per-kind
 **Tests:** `tests/score.test.ts` locks every coefficient and key sample values
 (classic rookie stage1 = 105; hard commander stage1 = 252; chaos veteran
 stage20 ≈ 597; stage-clear stage1 = 1050, stage20 ≈ 2653). 266/266 suite green.
+
+---
+
+## 21. InputLike Interface Extraction (2026-07-27)
+
+**Decision:** Extract a minimal `InputLike` interface from the concrete `Input` class (`src/game/Input.ts`). `Simulation` now depends on `InputLike` instead of `Input`, enabling headless tools (GodAIInput, level-sim) to inject programmatic input sources without a DOM.
+
+**Rationale:**
+- The Automated Level Design plan (§3.4) requires a `GodAIInput` that implements the same contract as `Input`. Without an interface, `Simulation.input` was typed as the concrete `Input` class, making injection impossible without inheritance hacks.
+- `Simulation` only calls `getMoveDirection()` and `isFiring()`; `endFrame()` and `reset()` are included so `Game.ts` can still call them on the same reference it hands to `Simulation`.
+- Pure type change — no behavioral impact, no violation of One Author (§2.1). `Game.ts` still holds its own `input: Input` reference.
+
+**Implications:** Any class implementing `InputLike` can drive the Simulation. This is the foundation for the God AI player simulator and headless simulation tooling.
+
+---
+
+## 22. Generic Pathfinding Module — `src/utils/pathfind.ts` (2026-07-27)
+
+**Decision:** Implement A* pathfinding, BFS reachability, and flood-fill as pure functions in `src/utils/pathfind.ts`. All three account for the 2×2-block tank footprint (checking all four sub-blocks at each candidate position).
+
+**Rationale:**
+- The codebase had zero pathfinding (verified: `src/` full search for `aStar|pathfind|BFS|findPath` returned no matches). Both the God AI (navigation) and the level generator (connectivity validation) need it.
+- Placed in `utils/` per AGENTS §5 — pure functions shared by the game layer and tools layer.
+- `TileMap.blocksTank()` is reused for terrain passability; `ignoreWater` constraint supports the boat power-up scenario.
+- A* uses Manhattan-distance heuristic on a 4-connected grid; the 26×26 grid (676 nodes) is small enough for a flat-array open set without a binary heap, keeping the code simple (MANIFEST §10).
+
+**Implications:** `findPath()` returns `Direction[]` (one CELL step per direction), `isReachable()` returns boolean, `floodFill()` returns `Set<string>` of reachable cells. All are deterministic (no RNG) and don't mutate the World/TileMap.
+
+---
+
+## 23. `World.loadStageData(stage)` — Custom Stage Loading API (2026-07-27)
+
+**Decision:** Add `loadStageData(stage: StageData, index = 0)` to `World`. It performs the exact same setup as `loadStage(index)` — terrain load, entity reset, spawn-queue build, player spawn, state transition — but accepts an arbitrary `StageData` instead of looking up `STAGES[index]`. `loadStage(index)` now delegates to `loadStageData`.
+
+**Rationale:**
+- The headless simulation runner needs to load generated/custom stages that aren't in the `STAGES` config array. Without this API, the only way to load a stage was by index into `STAGES`.
+- The `index` parameter (default 0) is used only for scoring formulas (`killScore` / `stageClearScore`); generated stages use index 0 since the simulation runner cares about pass/fail, not score magnitude.
+- Reuses all existing spawn-queue construction and state reset logic — no duplication.
+
+**Implications:** Headless tools can now call `world.loadStageData(generatedStage)` to simulate any stage. The runtime consumption path (§3.6) can also use this to inject generated stages into the live game.
+
+---
+
+## 24. Level Generator — Layered Procedural Generation (2026-07-27)
+
+**Decision:** Implement `tools/level-gen.ts` as a pure-function procedural level generator using a 7-layer pipeline:
+
+1. **Layer 0**: 26×26 empty grid (all `.`)
+2. **Layer 1**: Base placement (`E` at 12-13, 24-25)
+3. **Layer 2**: Classic U-shape brick/steel defense around base (8 cells)
+4. **Layer 3** (implicit): Spawn areas + defense cells added to a `RESERVED_CELLS` set — all cluster placement skips these
+5. **Layer 4**: Tactical cover clusters (brick/steel, size 3-8, frontier-based organic growth)
+6. **Layer 5**: Environmental terrain clusters (water/forest/ice, size 4-12)
+7. **Layer 6**: Single-cell noise (~3% of remaining empty cells)
+8. **Layer 7**: Enemy formation (20 tanks, fixed count distribution per difficulty, Fisher-Yates shuffled)
+9. **Force overrides**: Clear all spawn 2×2 areas, ensure base is `E`
+10. **Validation + carving**: `validateStage()` checks base/spawns/connectivity; if fails, carve 2-cell-wide L-shaped corridors (spawn→row 12 + player→row 12) and re-validate
+11. **Retry**: Up to 10 attempts with sub-seeds (`seed * 1000 + attempt`)
+
+Four themes (forest/ice/fortress/mixed) control terrain type fractions. Forest ≥30% forest, ice ≥25% ice, fortress ≥20% steel.
+
+**Rationale:**
+- **Frontier-based cluster growth** (`growCluster`) creates organic, connected terrain shapes — no isolated single cells (except noise layer). Average cluster size ≥ 4.
+- **Reserved cells** prevent clusters from blocking spawn areas or overwriting base defense. No post-hoc cleanup needed.
+- **2-cell-wide corridor carving** ensures 2×2 tank passability. The player corridor (cols 8-9, rows 12-24) connects the player at row 24 to the horizontal corridor network at row 12 that links all three spawn points.
+- **Sub-seed per retry** maintains determinism (same input → same output) while allowing each attempt to explore different terrain.
+- **Fixed enemy count distribution** (not probabilistic) ensures exact difficulty scaling: relax 14/4/1/1, classic 10/5/3/2, hard 7/5/4/4, chaos 4/6/5/5.
+
+**Rejected alternatives:**
+- Cellular automata (CA) for terrain generation: too unpredictable, hard to guarantee connectivity. Cluster-based growth gives more control.
+- Pre-designated road network: too rigid, creates unnatural straight corridors. Post-generation carving is more flexible.
+- BFS path carving (single-cell-wide): doesn't work for 2×2 tanks. Fixed with 2-cell-wide L-shaped corridors.
+
+**Implications:** `generateStage({ seed, difficulty, theme })` produces a valid `StageData` in < 50ms. 100% of generated stages pass `validateStage()`. Generated stages can be consumed by `SimulationRunner` via `world.loadStageData()`.
+
+## 25. God AI Fixes — endFrame, Global Vision, Move-and-Shoot
+
+**Decision:** Four fixes to the God AI based on the auto-level-review-1 audit:
+
+1. **`input.endFrame()` in simulation runner** (critical bug): The headless `simulation-runner.ts` never called `input.endFrame()` after `sim.tick()`. `Game.ts` calls it in the live game loop, but the headless path didn't. This meant `GodAIInput._thought` stayed `true` after the first tick, so `think()` only ran once — the AI made one decision and cached it forever. Fix: added `input.endFrame()` after each `sim.tick()` in the runner loop.
+
+2. **Global vision for `findEnemyDirection`**: Replaced the line-of-sight scan (which stopped at walls) with a global check that reads `world.tanks` directly and finds enemies in the same row/column regardless of terrain. This matches the plan §3.1 spec ("reads world.tanks directly — no perception limits"). The AI now fires toward enemies even through walls — bullets hit walls (breaking through over repeated shots) or hit the enemy directly.
+
+3. **Two-ray scan for `scanAhead`**: The wall/enemy scan was a single ray from the tank's center, which checked only one column of the tank's 2-cell width. A wall in the offset column was invisible. Fix: cast two parallel rays offset by ±CELL/2, covering both cells. This is used by `shouldFireInFacingDir` to detect walls to shoot through.
+
+4. **Proactive fire**: When no specific target (enemy, wall, or bullet) is in the facing direction, the AI fires anyway (`return this.rng.next() >= this.params.aimError`). A competent player holds the fire button while moving — bullets clear walls, create openings, and catch enemies that move into the line of fire. The fire cooldown limits the rate.
+
+**Rationale:** The original AI fired 0 bullets and got 0 kills because (a) it only thought once (endFrame bug), (b) it couldn't see through walls (line-of-sight scan), and (c) it only fired when a target was in the exact facing direction (single-ray scan missed offset targets). These four fixes make the AI functional: it fires 15-43 bullets per run and kills 0-4 enemies on stage 0 classic.
+
+**Rejected alternatives:**
+- "Stop and shoot" (stop moving when a target is visible): The AI wasted too much time standing still. "Move and shoot" (navigate via A* while firing) is more aggressive and effective.
+- Defensive positioning (stay near base, don't chase): Enemies overwhelmed the base faster than the AI could break through walls to see them. Chasing enemies (the original `selectTarget`) is more effective because the AI gets closer to enemies and has more shooting opportunities.
+
+**Implications:** The AI is functional but not optimal — it can play the game (fire, kill, survive 20-54 seconds) but cannot yet clear stage 0. Further tuning (target leading, smarter navigation, fire discipline) is a follow-up task. The calibration gates (God AI Hard ≥70%) will likely fail until the AI is improved further.
+
+## 26. Evaluator Fixes — threatRate, Weights, Pass Gate
+
+**Decision:** Three fixes to the evaluator based on the auto-level-review-1 audit:
+
+1. **`threatRate` formula**: Replaced the proxy metric (`bullets > 0 && enemyCount > 0` divided by `metrics.length / 60`) with actual bullet trajectory intersection. Added `incomingThreats: number` to `FrameMetrics` (counted at sample time by checking if enemy bullets are aligned with and approaching the player). The formula now uses `threatSamples * sampleInterval / (totalTicks / 60)`, which correctly accounts for the sampling interval and produces threats/second instead of the inflated proxy value.
+
+2. **Soft-metric weights**: Normalized from 1.30 (kpm .3 + bulletDensity .25 + threatRate .25 + formationVar .2 + killDiversity .1 + terrainUtil .1 + noDeadZones .1) to exactly 1.0 (kpm .25 + bulletDensity .2 + threatRate .2 + formationVar .15 + killDiversity .08 + terrainUtil .07 + noDeadZones .05). Now `softScore` ranges 0–100 as documented.
+
+3. **Pass gate**: Changed `totalScore = hardPass ? 1000 + softScore : 0` (where the 700 threshold was dead code since 1000+anything ≥ 700) to `totalScore = hardPass ? softScore : 0` with `passThreshold = 70`. The gate is now meaningful: a stage must score ≥70/100 on soft metrics to pass.
+
+**Rationale:** The original threatRate was inflated by 10× (sampleInterval mismatch) and used a crude proxy instead of actual bullet trajectories. The weight sum of 1.30 meant `softScore` could exceed 100, and the 1000-point hard-pass bonus made the 700 threshold unreachable — `pass` was always `true` when `hardPass` was `true`, making the soft-score gate meaningless.

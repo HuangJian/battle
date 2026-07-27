@@ -176,7 +176,12 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
 }
 
 /** Convert perception into tactical knowledge (analysis only, no decisions). */
-export function analyze(world: World, tank: Tank, p: Perception, cfg: IntelligenceConfig): Situation {
+export function analyze(
+  world: World,
+  tank: Tank,
+  p: Perception,
+  cfg: IntelligenceConfig,
+): Situation {
   const maxDist = FIELD
   const distToBase = p.hasBase ? manhattan(p.selfX, p.selfY, p.baseX, p.baseY) : Infinity
   const distToPlayer = p.hasPlayer ? manhattan(p.selfX, p.selfY, p.playerX, p.playerY) : Infinity

@@ -2,6 +2,23 @@ import type { Direction } from '../constants'
 import type { KeyBindings } from '../types'
 
 /**
+ * Minimal input contract the Simulation consumes.
+ *
+ * Extracted from the concrete `Input` class so headless tools (GodAIInput,
+ * level-sim, etc.) can inject a programmatic input source without a DOM.
+ * Simulation only ever calls `getMoveDirection()` and `isFiring()`; the
+ * remaining methods exist so Game.ts can call `endFrame()` / `reset()` on
+ * the same reference it hands to Simulation (AGENTS §2.1 — only Simulation
+ * mutates the World, but input state cleanup is Input's own concern).
+ */
+export interface InputLike {
+  getMoveDirection(): Direction | null
+  isFiring(): boolean
+  endFrame(): void
+  reset(): void
+}
+
+/**
  * Default key bindings.
  *
  * Non-combat shortcuts (reset / theme / snapshot) use a *modifier* combo so
@@ -131,7 +148,7 @@ export function eventToBinding(e: KeyboardEvent): string {
  * Input — captures keyboard state.
  * The simulation reads from this; Input never modifies the World.
  */
-export class Input {
+export class Input implements InputLike {
   private pressed = new Set<string>()
   private justPressed = new Set<string>()
   private justReleased = new Set<string>()

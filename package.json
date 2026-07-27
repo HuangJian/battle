@@ -10,6 +10,13 @@
     "typecheck": "tsc --noEmit --incremental",
     "bench": "bun tools/bench-sim.ts",
     "perf:sim": "bun tools/perf/sim-bench.ts",
+    "gen-levels": "bun tools/level-gen.ts",
+    "sim-levels": "bun tools/batch-sim.ts",
+    "ai-calibrate": "bun tools/ai-calibrate.ts",
+    "calibrate": "bun tools/calibrate.ts",
+    "gen-thumbnails": "bun tools/gen-thumbnails.ts",
+    "gen-library": "bun tools/gen-library.ts",
+    "play-generated": "bun tools/play-generated.ts",
     "lint": "oxlint",
     "format": "oxfmt",
     "check": "bun test && tsc --noEmit --incremental && oxlint && oxfmt"

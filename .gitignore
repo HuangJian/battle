@@ -12,3 +12,4 @@ tools/perf/results/
 
 *.chat.md
 
+generated-stages.json

@@ -29,7 +29,7 @@ import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { nextFireIntervalMs } from '../config/fire-rate'
 import { genId } from './World'
-import { Input } from './Input'
+import type { InputLike } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
 import { rollTier, COMMANDER_ALIVE_CAP } from '../ai/config'
 import { snap, aabb } from '../utils/helpers'
@@ -60,11 +60,11 @@ const POWERUP_TYPES: PowerUpType[] = [
  */
 export class Simulation {
   world: World
-  input: Input
+  input: InputLike
   /** Tactical Intelligence Framework — owns all enemy decision-making. */
   private ai: TacticalIntelligence
 
-  constructor(world: World, input: Input) {
+  constructor(world: World, input: InputLike) {
     this.world = world
     this.input = input
     this.ai = new TacticalIntelligence()
