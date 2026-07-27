@@ -16,6 +16,8 @@
  */
 import { describe, it, expect, beforeAll } from 'bun:test'
 import { mock } from 'bun:test'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const FAKE_BASE_IMG = { __base: true } as unknown as CanvasImageSource
 
@@ -67,8 +69,18 @@ const rec: Recorder = { baseDraws: [] }
 const fakeCtx = makeFakeCtx(rec)
 
 // Mock the offscreen canvas factory so we control the 2D context.
-// Use the absolute realpath so it matches GameRenderer's resolved import.
-mock.module('/Users/hj/dev/github/battle/src/utils/canvas', () => ({
+// Resolve the module path relative to this test file (no hardcoded machine
+// path) so the mock matches GameRenderer's resolved import on any platform.
+// Without this mock, the real createOffscreenCanvas falls back to
+// document.createElement('canvas'), which is undefined in the bun runtime.
+const canvasModulePath = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'src',
+  'utils',
+  'canvas',
+)
+mock.module(canvasModulePath, () => ({
   createOffscreenCanvas: (_w: number, _h: number, _s?: number) => ({
     canvas: {} as any,
     ctx: fakeCtx,
