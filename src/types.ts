@@ -23,7 +23,6 @@ export type PowerUpType =
   | 'shield'
   | 'freeze'
   | 'tank'
-  | 'helmet'
   | 'fence'
   | 'boat'
   // --- Super power-ups (强力道具, DECISIONS.md §31) ---

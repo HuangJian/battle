@@ -709,7 +709,7 @@ export class UIManager {
   /**
    * Update the timed-buff countdown chips in the HUD. Only the buffs that are
    * genuinely time-limited get a countdown: the player's SHIELD
-   * (shield/helmet pickup + spawn protection, via player.shieldTimer) and the
+   * (spawn protection, via player.shieldTimer) and the
    * enemy FREEZE (freeze/clock pickup, via world.freezeTimer). Star / extra
    * life / bomb are instant or permanent and intentionally have no timer.
    *

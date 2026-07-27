@@ -59,7 +59,6 @@ const ITEM_KEY_MAP: Record<string, string> = {
   shield: 'item.shield',
   freeze: 'item.freeze',
   tank: 'item.tank',
-  helmet: 'item.helmet',
   fence: 'item.fence',
   boat: 'item.boat',
   frenzy: 'item.frenzy',

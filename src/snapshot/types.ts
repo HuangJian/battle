@@ -136,6 +136,7 @@ export interface WorldSnapshot {
   frenzyLastFire: number
   frenzyInterval: number
   frenzyDir: Direction
+  fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
 }
 
 /**

@@ -450,7 +450,7 @@ function iceSprite() {
 //   1. a soft golden halo behind,
 //   2. a regular (point-up) pentagon GOLD outer border (double-line),
 //   3. a dark inner field,
-//   4. a distinct icon (star / bomb / plasma-shield / snowflake / tank / helmet),
+//   4. a distinct icon (star / bomb / plasma-shield / snowflake / tank),
 //   5. the "sparkle" twinkle is animated on top in SpriteArtist.drawPowerUp.
 const PENTA_OUTER = 'M48 6 L87.95 35.02 L72.69 81.98 L23.31 81.98 L8.06 35.02 Z'
 const PENTA_INNER = 'M48 12 L82.24 36.88 L69.16 77.13 L26.84 77.13 L13.76 36.88 Z'
@@ -568,21 +568,6 @@ function itemTank() {
     `<path d="${starPath(48, 55, 6, 2.4)}" fill="#fff" stroke="#D9A91E" stroke-width="0.6"/>`
   return { defs, inner }
 }
-// respawn shield → soldier helmet
-function itemHelmet() {
-  const id = 'ik'
-  const defs =
-    itemDefs(id) +
-    `<linearGradient id="${id}st" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#DDE6F0"/><stop offset="1" stop-color="#8A93A3"/></linearGradient>`
-  const inner =
-    itemFrame(id) +
-    `<path d="M28 52 Q28 30 48 30 Q68 30 68 52 L68 55 Q48 63 28 55 Z" fill="url(#${id}st)" stroke="#E6ECF5" stroke-width="1.5"/>` +
-    `<ellipse cx="48" cy="52" rx="21" ry="5" fill="#7c8595"/>` +
-    `<path d="M48 32 L48 50" stroke="#E6ECF5" stroke-width="1.5" opacity="0.55"/>` +
-    `<path d="M40 40 Q48 34 56 40" fill="none" stroke="#FFFFFF" stroke-width="1.4" opacity="0.5"/>`
-  return { defs, inner }
-}
-
 // ---------- explosion ----------
 function explosionSprite() {
   const defs =
@@ -740,7 +725,6 @@ const files = {
   item_shield: itemShield(),
   item_freeze: itemFreeze(),
   item_tank: itemTank(),
-  item_helmet: itemHelmet(),
   explosion: explosionSprite(),
   fx_shield: shieldFx(),
   fx_starbuf1: starbuf(1),

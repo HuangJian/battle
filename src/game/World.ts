@@ -191,6 +191,9 @@ export class World {
   frenzyLastFire: number // ms timestamp of the last frenzy shell
   frenzyInterval: number // ms between frenzy shells (= player fire interval / 5)
   frenzyDir: Direction // locked firing direction during the barrage
+  // 栅栏道具 (fence): the frame at which the temporary steel ring around the
+  // base reverts to brick. undefined = no active fence. Snapshot-safe.
+  fenceExpireFrame?: number
 
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
@@ -255,6 +258,7 @@ export class World {
     this.frenzyLastFire = 0
     this.frenzyInterval = 0
     this.frenzyDir = 'up'
+    this.fenceExpireFrame = undefined
   }
 
   // ---- Lifecycle ----
@@ -335,6 +339,7 @@ export class World {
     this.spawnTimer = 0
     this.pickupWindowTimer = 0
     this.pickupWindowEntered = false
+    this.fenceExpireFrame = undefined // fence is stage-scoped; never carries across stages
 
     // Build spawn queue. The tier roll is intentionally NOT performed here:
     // it happens at spawn time in `Simulation.updateSpawning` so the RNG cost
@@ -383,6 +388,7 @@ export class World {
     this.pendingDrops = []
     this.events = []
     this.stageIndex = index
+    this.fenceExpireFrame = undefined
   }
 
   /**

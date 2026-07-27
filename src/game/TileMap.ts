@@ -27,6 +27,8 @@ export class TileMap {
   private basePos: { x: number; y: number } | null = null
   /** Whether any base cell is still intact. */
   private baseAlive = false
+  /** Whether the stage contains any water (boat power-up only drops on water stages). */
+  private waterPresent = false
 
   constructor() {
     this.grid = []
@@ -144,17 +146,27 @@ export class TileMap {
     this.baseCells = []
     this.basePos = null
     this.baseAlive = false
+    this.waterPresent = false
     for (let r = 0; r < GRID; r++) {
       for (let c = 0; c < GRID; c++) {
-        if (this.grid[r][c] === 'base') {
+        const t = this.grid[r][c]
+        if (t === 'base') {
           this.baseAlive = true
           this.baseCells.push({ c, r })
           if (!this.basePos) {
             this.basePos = { x: c * CELL, y: r * CELL }
           }
+        } else if (t === 'water') {
+          this.waterPresent = true
         }
       }
     }
+  }
+
+  /** True if the current stage has any water. Water is static during a stage,
+   *  so this is cached at loadStage/snapshot-restore (rebuildBaseCache). */
+  hasWater(): boolean {
+    return this.waterPresent
   }
 
   /** Check if terrain blocks tank movement */

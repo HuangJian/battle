@@ -20,6 +20,7 @@ import {
   STAGE_CLEAR_DELAY_MS,
   POWERUP_DURATION_MS,
   FENCE_STEEL_COUNT,
+  FENCE_DURATION_FRAMES,
   BOAT_DURATION_MS,
   BASE_POS,
   GRID,
@@ -56,6 +57,32 @@ const GUARD_KINDS: TankKind[] = ['basic', 'fast', 'power', 'armor']
 /** Accompanying "balance" enemies use a lighter pool. */
 const EXTRA_ENEMY_KINDS: TankKind[] = ['basic', 'fast', 'power']
 
+/**
+ * In-grid cells forming the 1-tile-thick protective ring around the 2×2 base
+ * (base at BASE_POS col/row). Shared by applyFencePowerUp (place steel) and
+ * updateFence/ expireFence (revert to brick) so both always agree on which
+ * cells are "the ring". The bottom edge (row BASE_POS.row + 2) is off-grid
+ * (GRID=26, base at row 24), so the ring is the 3 in-grid sides (top + left +
+ * right) — exactly where the original permanent fence placed its steel.
+ */
+function baseRingPositions(): Array<{ col: number; row: number }> {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  const cells: Array<{ col: number; row: number }> = []
+  const consider = (col: number, row: number) => {
+    if (col >= 0 && col < GRID && row >= 0 && row < GRID) cells.push({ col, row })
+  }
+  // Top edge
+  for (let c = bc - 1; c <= bc + 2; c++) consider(c, br - 1)
+  // Left edge (mid rows only; corners already covered by top edge)
+  consider(bc - 1, br)
+  consider(bc - 1, br + 1)
+  // Right edge (mid rows only)
+  consider(bc + 2, br)
+  consider(bc + 2, br + 1)
+  return cells
+}
+
 /** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
 const POWERUP_TYPES: PowerUpType[] = [
   'star',
@@ -63,10 +90,13 @@ const POWERUP_TYPES: PowerUpType[] = [
   'shield',
   'freeze',
   'tank',
-  'helmet',
   'fence',
   'boat',
 ]
+
+/** Normal pool with `boat` removed — used on stages that have no water, since
+ *  the boat (amphibious) power-up is useless without water to cross. */
+const POWERUP_TYPES_NO_BOAT: PowerUpType[] = POWERUP_TYPES.filter((t) => t !== 'boat')
 
 /**
  * Simulation — the only layer allowed to modify the World.
@@ -134,6 +164,9 @@ export class Simulation {
     // Allied guard AI (天降神兵, §31 Phase 2) — runs before movement so the
     // guard's intent (dir/moving) is applied this tick.
     this.updateGuards()
+
+    // Fence power-up: revert steel ring to brick when its timer expires.
+    this.updateFence()
 
     // Movement
     this.updateMovement()
@@ -1231,7 +1264,10 @@ export class Simulation {
     if (w.rng.next() < SUPER_POWERUP_DROP_CHANCE) {
       return w.rng.pick(SUPER_POWERUP_TYPES)
     }
-    return w.rng.pick(POWERUP_TYPES)
+    // The boat (amphibious) power-up is only meaningful where there is water to
+    // cross — drop it only on water stages (DECISIONS.md §31 follow-up).
+    const pool = w.tileMap.hasWater() ? POWERUP_TYPES : POWERUP_TYPES_NO_BOAT
+    return w.rng.pick(pool)
   }
 
   /** Spawn a power-up immediately at the given (or random) position. */
@@ -1258,7 +1294,14 @@ export class Simulation {
   private flushPendingDrops(): void {
     const w = this.world
     if (w.pendingDrops.length === 0) return
-    for (const d of w.pendingDrops) this.spawnBuiltDrop(d)
+    const hasWater = w.tileMap.hasWater()
+    for (const d of w.pendingDrops) {
+      // Don't materialise a boat drop on a stage with no water (it would be
+      // useless and look like a bug). Deferred drops keep their already-rolled
+      // type/position, so we just skip them here rather than re-rolling.
+      if (d.type === 'boat' && !hasWater) continue
+      this.spawnBuiltDrop(d)
+    }
     w.pendingDrops = []
   }
 
@@ -1352,10 +1395,6 @@ export class Simulation {
         w.lives++
         break
 
-      case 'helmet':
-        p.shieldTimer = RESPAWN_SHIELD_MS
-        break
-
       case 'fence':
         // Place steel tiles around the base (eagle) to protect it
         this.applyFencePowerUp()
@@ -1385,33 +1424,11 @@ export class Simulation {
 
   private applyFencePowerUp(): void {
     const w = this.world
-    const baseCol = BASE_POS.col
-    const baseRow = BASE_POS.row
-
-    // Place steel tiles around the base (2x2 base at col 12, row 24)
-    // Create a protective fence: 3 tiles wide on each side of the base
-    const positions: { col: number; row: number }[] = []
-
-    // Top row (above base)
-    for (let c = baseCol - 1; c <= baseCol + 2; c++) {
-      if (c >= 0 && c < GRID) positions.push({ col: c, row: baseRow - 1 })
-    }
-    // Bottom row (below base)
-    for (let c = baseCol - 1; c <= baseCol + 2; c++) {
-      if (c >= 0 && c < GRID) positions.push({ col: c, row: baseRow + 2 })
-    }
-    // Left column
-    for (let r = baseRow - 1; r <= baseRow + 2; r++) {
-      if (r >= 0 && r < GRID) positions.push({ col: baseCol - 1, row: r })
-    }
-    // Right column
-    for (let r = baseRow - 1; r <= baseRow + 2; r++) {
-      if (r >= 0 && r < GRID) positions.push({ col: baseCol + 2, row: r })
-    }
-
-    // Place steel tiles (up to FENCE_STEEL_COUNT)
+    // Place a protective steel ring around the base (top + left + right sides;
+    // the bottom edge is off-grid). The ring lasts FENCE_DURATION_FRAMES, then
+    // reverts to brick in updateFence().
     let placed = 0
-    for (const pos of positions) {
+    for (const pos of baseRingPositions()) {
       if (placed >= FENCE_STEEL_COUNT) break
       const existing = w.tileMap.get(pos.col, pos.row)
       if (existing === 'empty' || existing === 'brick') {
@@ -1419,6 +1436,24 @@ export class Simulation {
         placed++
       }
     }
+    w.fenceExpireFrame = w.frame + FENCE_DURATION_FRAMES
+  }
+
+  /**
+   * Tick the fence power-up: when its steel ring timer expires, revert the ring
+   * cells that are still steel back to brick walls. Cells left as steel are the
+   * ones the fence created; original brick/empty/steel terrain is untouched.
+   */
+  private updateFence(): void {
+    const w = this.world
+    if (w.fenceExpireFrame === undefined) return
+    if (w.frame < w.fenceExpireFrame) return
+    for (const pos of baseRingPositions()) {
+      if (w.tileMap.get(pos.col, pos.row) === 'steel') {
+        w.tileMap.set(pos.col, pos.row, 'brick')
+      }
+    }
+    w.fenceExpireFrame = undefined
   }
 
   private applyBoatPowerUp(): void {

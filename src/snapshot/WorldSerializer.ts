@@ -84,6 +84,7 @@ export function cloneWorld(world: World): WorldSnapshot {
     frenzyLastFire: world.frenzyLastFire,
     frenzyInterval: world.frenzyInterval,
     frenzyDir: world.frenzyDir,
+    fenceExpireFrame: world.fenceExpireFrame,
   }
 }
 
@@ -172,6 +173,7 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.frenzyLastFire = snap.frenzyLastFire ?? 0
   world.frenzyInterval = snap.frenzyInterval ?? 0
   world.frenzyDir = snap.frenzyDir ?? 'up'
+  world.fenceExpireFrame = snap.fenceExpireFrame
 
   // Resume playing
   world.state = 'playing'

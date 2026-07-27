@@ -146,7 +146,6 @@ export class SpriteCache {
       'item.shield',
       'item.freeze',
       'item.tank',
-      'item.helmet',
     ]
     for (const key of itemKeys) {
       const img = lib.get(key)

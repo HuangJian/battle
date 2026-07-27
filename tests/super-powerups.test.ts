@@ -3,6 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input, type InputLike } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
+import { GRID, FENCE_DURATION_FRAMES } from '../src/constants'
 import type { Direction } from '../src/constants'
 import {
   SUPER_POWERUP_TYPES,
@@ -23,7 +24,7 @@ import {
  * Phase 2 (天降神兵 summon) is intentionally excluded from the pool here.
  */
 
-const NORMAL_POWERUP_TYPES = ['star', 'bomb', 'shield', 'freeze', 'tank', 'helmet', 'fence', 'boat'] as const
+const NORMAL_POWERUP_TYPES = ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat'] as const
 
 /** Fresh, seeded World on stage 0 in 'playing' state. */
 function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
@@ -233,5 +234,133 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
     // (frenzyDir) and suppresses normal firing/movement.
     expect(p.dir).toBe('right')
     expect(p.moving).toBe(false)
+  })
+})
+
+describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow-up)', () => {
+  /** Strip every water cell from the current stage and refresh the cache. */
+  function clearWater(world: World) {
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (world.tileMap.grid[r][c] === 'water') world.tileMap.grid[r][c] = 'empty'
+      }
+    }
+    world.tileMap.rebuildBaseCache()
+  }
+
+  /** Inject a single water cell so the stage counts as having water. */
+  function addWater(world: World) {
+    world.tileMap.grid[5][5] = 'water'
+    world.tileMap.rebuildBaseCache()
+  }
+
+  it('rollPowerUpType never returns boat on a no-water stage', () => {
+    const { world, sim } = buildSeededWorld(123)
+    clearWater(world)
+    expect(world.tileMap.hasWater()).toBe(false)
+    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+    for (let i = 0; i < 500; i++) {
+      expect(roll.call(sim)).not.toBe('boat')
+    }
+  })
+
+  it('boat is only reachable when the stage has water', () => {
+    const { world, sim } = buildSeededWorld(123)
+    // Normal branch, and force rng.pick to return the LAST element of whichever
+    // pool is passed — boat is last in the full pool, fence is last in NO_BOAT.
+    world.rng.next = () => 0.5
+    ;(world.rng as unknown as { pick: (a: string[]) => string }).pick = (a) => a[a.length - 1]
+    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+
+    addWater(world)
+    expect(world.tileMap.hasWater()).toBe(true)
+    expect(roll.call(sim)).toBe('boat')
+
+    clearWater(world)
+    expect(world.tileMap.hasWater()).toBe(false)
+    expect(roll.call(sim)).toBe('fence')
+  })
+
+  it('flushPendingDrops skips a deferred boat on a no-water stage', () => {
+    const { world, sim } = buildSeededWorld(123)
+    clearWater(world)
+    world.pendingDrops = [{ type: 'boat', x: 128, y: 128 }]
+    ;(sim as unknown as { flushPendingDrops: () => void }).flushPendingDrops()
+    expect(world.powerUps.length).toBe(0)
+  })
+
+  it('flushPendingDrops releases a deferred boat on a water stage', () => {
+    const { world, sim } = buildSeededWorld(123)
+    addWater(world)
+    world.pendingDrops = [{ type: 'boat', x: 128, y: 128 }]
+    ;(sim as unknown as { flushPendingDrops: () => void }).flushPendingDrops()
+    expect(world.powerUps.length).toBe(1)
+    expect(world.powerUps[0].type).toBe('boat')
+  })
+})
+
+describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DECISIONS.md §31)', () => {
+  /** Mirror of Simulation.baseRingPositions for assertions (base at 12,24). */
+  function baseRingCells(): Array<{ col: number; row: number }> {
+    const bc = 12
+    const br = 24
+    const cells: Array<{ col: number; row: number }> = []
+    const consider = (c: number, r: number) => {
+      if (c >= 0 && c < GRID && r >= 0 && r < GRID) cells.push({ col: c, row: r })
+    }
+    for (let c = bc - 1; c <= bc + 2; c++) consider(c, br - 1)
+    consider(bc - 1, br)
+    consider(bc - 1, br + 1)
+    consider(bc + 2, br)
+    consider(bc + 2, br + 1)
+    return cells
+  }
+
+  it('places a steel ring around the base and arms a 20s (1200-frame) timer', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
+    for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
+
+    apply('fence')
+
+    for (const { col, row } of baseRingCells()) {
+      expect(world.tileMap.get(col, row)).toBe('steel')
+    }
+    expect(world.fenceExpireFrame).toBe(world.frame + FENCE_DURATION_FRAMES)
+  })
+
+  it('reverts the steel ring to brick when the timer expires', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
+    const updateFence = (sim as unknown as { updateFence: () => void }).updateFence.bind(sim)
+    for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
+
+    apply('fence')
+    expect(world.fenceExpireFrame).toBeDefined()
+
+    // Advance to the expiry frame and tick the fence system.
+    world.frame = world.fenceExpireFrame!
+    updateFence()
+
+    for (const { col, row } of baseRingCells()) {
+      expect(world.tileMap.get(col, row)).toBe('brick')
+    }
+    expect(world.fenceExpireFrame).toBeUndefined()
+  })
+
+  it('does NOT revert before the timer elapses', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
+    const updateFence = (sim as unknown as { updateFence: () => void }).updateFence.bind(sim)
+    for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
+
+    apply('fence')
+    world.frame = (world.fenceExpireFrame ?? 0) - 1
+    updateFence()
+
+    for (const { col, row } of baseRingCells()) {
+      expect(world.tileMap.get(col, row)).toBe('steel')
+    }
+    expect(world.fenceExpireFrame).toBeDefined()
   })
 })
