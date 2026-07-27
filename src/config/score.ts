@@ -23,6 +23,14 @@ export const KILL_BASE_SCORE = 100
 /** Points granted per power-up collected. */
 export const ITEM_SCORE = 100
 
+/**
+ * Score milestone that guarantees a power-up drop. Every time the player's
+ * accumulated score crosses a multiple of this value (5000), one power-up is
+ * dropped. A single large score gain can cross several milestones at once and
+ * therefore drop several power-ups.
+ */
+export const SCORE_DROP_INTERVAL = 5000
+
 /** Difficulty multiplier on kill score. */
 export const DIFFICULTY_SCORE_FACTOR: Record<string, number> = {
   classic: 1.0,

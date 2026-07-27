@@ -24,7 +24,7 @@ import {
   GRID,
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
-import { killScore, stageClearScore, ITEM_SCORE } from '../config/score'
+import { killScore, stageClearScore, ITEM_SCORE, SCORE_DROP_INTERVAL } from '../config/score'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { nextFireIntervalMs } from '../config/fire-rate'
@@ -722,6 +722,9 @@ export class Simulation {
           // 1) Bonus enemies (level-design flagged) drop a power-up on death.
           // 2) Elite (commander-tier) enemies always drop a power-up on death.
           // 3) Every 10th enemy killed drops a power-up (kill-cadence reward).
+          // 4) Score milestone: every SCORE_DROP_INTERVAL (5000) points
+          //    accumulated drops a power-up. A single large score gain can
+          //    cross several milestones at once and thus drop several.
           // A drop triggered by the FINAL enemy of a non-final stage is deferred
           // (buffered on world.pendingDrops) so the stage-clear transition
           // doesn't wipe it; it is released on the first enemy kill of the next
@@ -729,14 +732,30 @@ export class Simulation {
           this.flushPendingDrops() // release drops deferred from a prior stage
           const isElite = tank.aiState?.isCommander === true
           const isTenthKill = w.killCount % 10 === 0
+
+          // Collect this kill's guaranteed drops, each anchored on the slain
+          // enemy's tile.
+          const drops: { x: number; y: number }[] = []
           if (tank.bonus || isElite || isTenthKill) {
-            const at = { x: tank.x, y: tank.y }
+            drops.push({ x: tank.x, y: tank.y })
+          }
+
+          // Rule 4 — score milestone. Count how many SCORE_DROP_INTERVAL
+          // boundaries the new score crossed *in this single kill* so a big
+          // jackpot can drop several power-ups at once.
+          const beforeScore = w.score - gained
+          const milestones =
+            Math.floor(w.score / SCORE_DROP_INTERVAL) -
+            Math.floor(beforeScore / SCORE_DROP_INTERVAL)
+          for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
+
+          if (drops.length > 0) {
             const isFinalEnemy = w.enemiesRemaining <= 0
             const hasNextStage = w.stageIndex + 1 < w.totalStages
             if (isFinalEnemy && hasNextStage) {
-              w.pendingDrops.push(this.buildDrop(at)) // defer to next stage
+              for (const d of drops) w.pendingDrops.push(this.buildDrop(d)) // defer
             } else {
-              this.spawnPowerUp(at) // drop immediately
+              for (const d of drops) this.spawnPowerUp(d) // drop immediately
             }
           }
         }

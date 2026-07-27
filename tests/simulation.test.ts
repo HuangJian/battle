@@ -590,6 +590,53 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
     expect(world.powerUps.length).toBe(1) // exactly one drop on the 10th
   })
 
+  it('every 5000 points accumulated drops a power-up (score milestone)', () => {
+    const { world, sim } = buildSeededWorld(2026)
+    world.tanks.length = 0
+    world.spawnQueue.length = 0
+    world.enemiesRemaining = 1000 // avoid a stage-clear transition
+
+    const e = world.createTank('basic', 0, 0, 'down')
+    e.spawnTimer = 0
+    e.bonus = false
+    if (e.aiState) {
+      e.aiState.level = 'rookie'
+      e.aiState.isCommander = false
+    }
+    const at = findClearTile(world)
+    e.x = at.x
+    e.y = at.y
+    world.tanks.push(e)
+
+    // Park the score just below a 5000 boundary so this single rookie kill
+    // (grants ~105 pts) crosses it exactly once.
+    world.score = 4950
+    const before = world.powerUps.length
+    world.addBullet({
+      id: genId(),
+      ownerId: world.player!.id,
+      ownerKind: 'player',
+      isPlayer: true,
+      x: e.x + 8,
+      y: e.y + 8,
+      w: 4,
+      h: 4,
+      dir: 'up',
+      speed: 0,
+      power: 1,
+      damage: 999,
+      alive: true,
+    })
+    sim.tick()
+
+    // No elite/bonus/10th-kill rule fires (single rookie kill, killCount 0→1),
+    // so the only drop is the 5000-point milestone → exactly one power-up.
+    expect(world.powerUps.length).toBe(before + 1)
+    const pu = world.powerUps[world.powerUps.length - 1]
+    expect(pu.x).toBe(e.x)
+    expect(pu.y).toBe(e.y)
+  })
+
   it('drop triggered by the FINAL enemy of a stage is deferred, then released on the next stage\'s first kill', () => {
     const { world, sim } = buildSeededWorld(99)
     world.tanks.length = 0
