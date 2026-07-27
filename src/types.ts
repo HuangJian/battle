@@ -293,15 +293,7 @@ export type GameEvent =
 // Config Types
 // ============================================================
 
-export interface TankConfig {
-  kind: TankKind
-  /** Display color (kept for themes/UI that sample it). */
-  color: string
-  /** Score awarded when this tank is destroyed. */
-  score: number
-  /** Whether a bonus variant of this tank can drop a power-up. */
-  dropsBonus: boolean
-}
+
 
 export interface DifficultyConfig {
   name: string

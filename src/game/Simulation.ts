@@ -23,8 +23,8 @@ import {
   BASE_POS,
   GRID,
 } from '../constants'
-import { TANK_CONFIGS } from '../config/tanks'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
+import { killScore, stageClearScore, ITEM_SCORE } from '../config/score'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { nextFireIntervalMs } from '../config/fire-rate'
@@ -705,15 +705,15 @@ export class Simulation {
           w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
           w.pushEvent({ type: 'player_hit' })
         } else {
-          const cfg = TANK_CONFIGS[tank.kind]
-          w.score += cfg.score
+          const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex)
+          w.score += gained
           w.enemiesRemaining--
           w.killCount++
           w.addPopup({
             id: genId(),
             x: tank.x,
             y: tank.y,
-            text: String(cfg.score),
+            text: String(gained),
             timer: 1500,
           })
           w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
@@ -802,6 +802,7 @@ export class Simulation {
       if (aabb(p.x, p.y, p.w, p.h, pu.x, pu.y, pu.w, pu.h)) {
         pu.alive = false
         this.applyPowerUp(pu.type)
+        w.score += ITEM_SCORE
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
       }
     }
@@ -843,15 +844,15 @@ export class Simulation {
           if (!tank.alive) continue
           tank.alive = false
           this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-          const cfg = TANK_CONFIGS[tank.kind]
-          w.score += cfg.score
+          const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex)
+          w.score += gained
           w.enemiesRemaining--
           w.killCount++
           w.addPopup({
             id: genId(),
             x: tank.x,
             y: tank.y,
-            text: String(cfg.score),
+            text: String(gained),
             timer: 1500,
           })
         }
@@ -1017,6 +1018,7 @@ export class Simulation {
           : STAGE_CLEAR_DELAY_MS
         w.pickupWindowTimer = 0
         w.pickupWindowEntered = false
+        w.score += stageClearScore(w.stageIndex)
         w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
         return
       }
@@ -1042,6 +1044,7 @@ export class Simulation {
         w.state = 'stageclear'
         w.stageClearTimer = POWERUP_PICKUP_END_DELAY_MS
         w.pickupWindowEntered = false
+        w.score += stageClearScore(w.stageIndex)
         w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
         return
       }

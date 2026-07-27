@@ -914,3 +914,29 @@ fields (`spawnSeq`, `directiveSeq`, `directiveCompliant`) ride the shallow-copie
 `aiState`. All wiring is shallow-clone safe.
 
 
+
+---
+
+## Centralized Score Calculation (2026-07-27)
+
+All scoring is derived from `src/config/score.ts` (no per-kind magic numbers in
+the Simulation — AGENTS §2.4 data over code). Replaces the old per-kind
+`TANK_CONFIGS[kind].score` (100/200/300/400) which was deleted.
+
+**Formulas (user spec):**
+- **Kill:** `round(100 * DIFFICULTY_SCORE_FACTOR[d] * 1.05^(stageIndex+1) * AI_SCORE_FACTOR[aiLevel])`.
+  - Difficulty: classic 1.0, relax 1.0, hard 1.2, chaos 1.5.
+  - AI tier: none/rookie 1.0, soldier 1.2, veteran 1.5, commander 2.0 (tier read
+    from `tank.aiState.level` at kill time; applies to bullet kills AND the
+    bomb power-up).
+  - Stage index is 0-based in code; the spec's "第 N 关" is 1-based, so the
+    level number is `stageIndex + 1` (single constant `STAGE_INDEX_OFFSET`).
+- **Stage clear:** `round(1000 * 1.05^(stageIndex+1))`, awarded once when the
+  stage transitions to `stageclear` (both immediate-clear and bonus-window
+  timeout branches in `Simulation.checkConditions`).
+- **Item:** `+100` (`ITEM_SCORE`) per power-up collected, added in
+  `Simulation.updatePowerUps` at pickup (covers every type, including bomb).
+
+**Tests:** `tests/score.test.ts` locks every coefficient and key sample values
+(classic rookie stage1 = 105; hard commander stage1 = 252; chaos veteran
+stage20 ≈ 597; stage-clear stage1 = 1050, stage20 ≈ 2653). 266/266 suite green.
