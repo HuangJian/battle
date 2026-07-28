@@ -265,6 +265,10 @@ body {
   max-width: 100vw;
   max-height: calc(100vh - 96px);
   background: var(--theme-bg);
+  /* The canvas is focusable (tabindex) so the game can reclaim keyboard
+     focus after a stage transition / browser overlay. Hide the focus ring —
+     this is a game surface, not a form control. */
+  outline: none;
 }
 
 /* ================================================================

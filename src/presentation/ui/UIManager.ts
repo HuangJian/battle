@@ -230,6 +230,10 @@ export class UIManager {
     // Canvas (created by UIManager, managed by PresentationLayer)
     this.canvas = document.createElement('canvas')
     this.canvas.className = 'game-canvas'
+    // Make the canvas focusable so the game can programmatically reclaim
+    // keyboard focus (e.g. after a stage transition or when returning from a
+    // browser overlay) instead of requiring a manual click. See Game.refocusGame.
+    this.canvas.tabIndex = 0
     gameContainer.appendChild(this.canvas)
 
     // Overlay (covers canvas)

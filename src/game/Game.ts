@@ -64,6 +64,8 @@ export class Game {
   private running = false
   private rafId = 0
   private prevStageIndex = -1
+  /** Previous world state, used to detect the transition into `playing`. */
+  private prevWorldState: World['state'] = 'menu'
   /** Timestamp of the last canvas repaint (for the render-FPS throttle). */
   private _lastRenderTime = 0
   /** Render FPS cap (0 = uncapped). Driven by Performance Mode. */
@@ -546,10 +548,39 @@ export class Game {
       })
     }
 
+    // Reclaim keyboard focus whenever we (re)enter active play. After a stage
+    // transition, an unpause, a recovery resume, or a fresh start the browser
+    // may have moved focus elsewhere (stage-clear overlay, the Alt menu, the
+    // address bar), which silently breaks Alt+S/R/T until the player clicks
+    // the canvas. Focusing the tabbable canvas restores the document focus so
+    // the window-level keydown keeps firing — no manual click required.
+    if (this.world.state === 'playing' && this.prevWorldState !== 'playing') {
+      this.refocusGame()
+    }
+    this.prevWorldState = this.world.state
+
     this.scheduleFrame()
   }
 
-  // ---- State Input ----
+  /**
+   * Reclaim keyboard focus for the page by focusing the (now tabbable) canvas.
+   *
+   * `Input` listens on `window`, so shortcuts like Alt+S only fire while the
+   * *document* has keyboard focus. After a stage transition, an unpause, a
+   * recovery resume, or a fresh start, the browser may have moved focus
+   * elsewhere (stage-clear overlay, the Alt menu, the address bar), which
+   * silently breaks Alt+S/R/T until the player clicks the canvas. Focusing a
+   * focusable element inside the document is the reliable way to restore focus
+   * — and `canvas.focus()` does not require a user gesture, so it works the
+   * instant a new stage begins.
+   */
+  private refocusGame(): void {
+    try {
+      this.presentation.ui.canvas.focus({ preventScroll: true })
+    } catch {
+      /* focus() is a no-op / throws in unsupported or headless contexts */
+    }
+  }
 
   private handleStateInput(): void {
     const w = this.world

@@ -210,6 +210,15 @@ export class Input implements InputLike {
     if (this.isGameKey(e)) {
       e.preventDefault()
     }
+    // Suppress the browser's Alt menu / access-key focus-steal. On Windows a
+    // bare Alt press moves keyboard focus out of the page (to the browser
+    // chrome), so a followed Alt+S/R/T keydown never reaches `window` and the
+    // shortcuts silently die until the player clicks back into the canvas.
+    // Claiming the Alt keydown prevents that. Alt+Tab is OS-level and
+    // unaffected by preventDefault.
+    if (e.altKey && (e.code === 'AltLeft' || e.code === 'AltRight')) {
+      e.preventDefault()
+    }
     if (!this.pressed.has(id)) {
       this.justPressed.add(id)
       // Track movement keys in press order for "last pressed wins" priority.
