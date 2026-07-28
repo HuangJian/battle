@@ -2,6 +2,9 @@ import type { World, SpawnEntry } from '../game/World'
 import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
 import type { WorldSnapshot } from './types'
 import { GRID } from '../constants'
+import { RULES, DEFAULT_RULES } from '../config/rules'
+import { DIFFICULTIES } from '../config/difficulty'
+import { THEMES, DEFAULT_THEME } from '../config/theme'
 
 // ================================================================
 // World (De)Serialization — deep clone & atomic restore
@@ -62,6 +65,11 @@ export function cloneWorld(world: World): WorldSnapshot {
     highScore: world.highScore,
     killCount: world.killCount,
     playTimeMs: world.playTimeMs,
+    // Run profile — persisted so a loaded save restores the exact rules
+    // profile it was created with (bug: a classic save must not run modern
+    // rules after load). rules/difficulty/theme are re-derived on restore.
+    difficultyKey: world.difficultyKey,
+    themeKey: world.themeKey,
     freezeTimer: world.freezeTimer,
     stageClearTimer: world.stageClearTimer,
     gameOverTimer: world.gameOverTimer,
@@ -138,6 +146,18 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.highScore = snap.highScore
   world.killCount = snap.killCount ?? 0
   world.playTimeMs = snap.playTimeMs ?? 0
+
+  // Run profile: restore the difficulty/theme keys and re-derive the rules,
+  // difficulty, and theme so a loaded save plays with the EXACT profile it was
+  // created under. Previously restoreWorld left `rules`/`difficulty`/`theme`
+  // untouched, so a classic save loaded into a World holding modern rules (the
+  // menu default) silently ran the modern ruleset. A snapshot is a complete
+  // World description (Constitution §6), so the profile must travel with it.
+  world.difficultyKey = snap.difficultyKey ?? world.difficultyKey
+  world.themeKey = snap.themeKey ?? world.themeKey
+  world.rules = RULES[world.difficultyKey] ?? DEFAULT_RULES
+  world.difficulty = DIFFICULTIES[world.difficultyKey] ?? DIFFICULTIES['classic']
+  world.theme = THEMES[world.themeKey] ?? THEMES[DEFAULT_THEME]
 
   // Timers
   world.freezeTimer = snap.freezeTimer

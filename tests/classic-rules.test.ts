@@ -43,11 +43,10 @@ describe('GameplayRules — classic profile vs default', () => {
     expect(w.rules).toBe(DEFAULT_RULES)
   })
 
-  it('snapshot rewind never clobbers world.rules (issue #3, by design)', () => {
-    // Design decision: rules are set ONCE per run by startGame and are
-    // constant for the run's lifetime, so restoreWorld deliberately does not
-    // serialize/overwrite them — a rewind must leave the active profile
-    // exactly as it was (see plan/classic-faithful-feel.md issue #3).
+  it('snapshot rewind preserves the run profile (difficulty travels in the snapshot)', () => {
+    // The profile (rules/difficulty/theme) is now part of the snapshot via
+    // difficultyKey/themeKey, so restoreWorld restores it atomically. A rewind
+    // leaves the active profile exactly as it was when the snapshot was taken.
     const w = new World()
     w.startGame('classic', 'modern', 0)
     const snap = cloneWorld(w)
@@ -58,9 +57,45 @@ describe('GameplayRules — classic profile vs default', () => {
     expect(w.score).toBe(0)
     expect(w.killCount).toBe(0)
     // The faithful profile survived the rewind untouched.
+    expect(w.difficultyKey).toBe('classic')
     expect(w.rules).toBe(RULES.classic)
     expect(w.rules.combatModel).toBe('instant')
-    // And the snapshot itself carries no rules payload to drift out of sync.
+    // The snapshot stores the profile keys (not the rules object itself).
+    expect(snap.difficultyKey).toBe('classic')
     expect('rules' in snap).toBe(false)
+  })
+
+  it('loading a classic save restores classic rules even when the World holds modern rules (bug fix)', () => {
+    // Reproduces the reported bug: a classic save, when loaded into a World
+    // whose current rules are the modern DEFAULT_RULES (e.g. the menu default),
+    // must NOT silently apply modern rules. The snapshot carries its own
+    // difficultyKey, so restoreWorld re-derives the faithful classic profile.
+    const modern = new World()
+    modern.startGame('relax', 'modern', 0)
+    expect(modern.rules).toBe(DEFAULT_RULES) // sanity: modern World pre-load
+    const modernSnap = cloneWorld(modern) // capture the modern save FIRST
+
+    const classicWorld = new World()
+    classicWorld.startGame('classic', 'modern', 0)
+    const classicSnap = cloneWorld(classicWorld)
+
+    // Load the classic save into the modern World.
+    restoreWorld(modern, classicSnap)
+
+    expect(modern.difficultyKey).toBe('classic')
+    expect(modern.themeKey).toBe('modern')
+    expect(modern.rules).toBe(RULES.classic)
+    expect(modern.rules.combatModel).toBe('instant')
+    expect(modern.rules.starModel).toBe('functional')
+    expect(modern.rules.dropSchedule).toBe('fixed')
+
+    // And a modern save loaded into a classic World restores modern rules too.
+    const classic = new World()
+    classic.startGame('classic', 'modern', 0)
+    restoreWorld(classic, modernSnap)
+    expect(classic.difficultyKey).toBe('relax')
+    expect(classic.themeKey).toBe('modern')
+    expect(classic.rules).toBe(DEFAULT_RULES)
+    expect(classic.rules.combatModel).toBe('pool')
   })
 })
