@@ -17,19 +17,24 @@ import type { TankKind } from '../types'
  * All speeds are in CELLS PER SECOND on normal terrain. The simulation runs at
  * a fixed 60 Hz with CELL = 16 px, so we convert to the engine's px/tick unit
  * via `cpsToPxPerTick`.
+ *
+ * Modern mode adjustment (2026-07-28):
+ * - Balanced (basic) tank uses classic FC-faithful speed (3.75 cps)
+ * - Other tanks maintain their original proportional relationships to basic
+ * - This ensures classic's combat rhythm while preserving modern's variety
  */
 
-/** Reference baseline: a balanced (basic) enemy moves at 2.5 cells/s. */
-export const BALANCED_ENEMY_CPS = 2.5
+/** Reference baseline: a balanced (basic) enemy moves at 3.75 cells/s (matching classic). */
+export const BALANCED_ENEMY_CPS = 3.75
 
 /**
  * Base movement speed on normal terrain, in cells/second, per tank kind.
- * Each value is exactly the spec multiplier applied to BALANCED_ENEMY_CPS:
- *   basic  = 1.00 ×  → 2.500   (balanced enemy — the reference)
- *   fast   = 1.20 ×  → 3.000
- *   power  = 0.95 ×  → 2.375
- *   armor  = 0.85 ×  → 2.125
- *   player = 1.05 ×  → 2.625   (no star; player scales up with stars below)
+ * Balanced (basic) matches classic FC speed; others maintain original ratios:
+ *   basic  = 3.75 cps   (balanced enemy — the reference, classic speed)
+ *   fast   = 4.50 cps   (1.20 × basic, original modern ratio)
+ *   power  = 3.5625 cps (0.95 × basic, original modern ratio)
+ *   armor  = 3.1875 cps (0.85 × basic, original modern ratio)
+ *   player = 3.9375 cps (1.05 × basic, original modern ratio)
  */
 export const BASE_SPEED_CPS: Record<TankKind, number> = {
   basic: BALANCED_ENEMY_CPS,
@@ -41,12 +46,13 @@ export const BASE_SPEED_CPS: Record<TankKind, number> = {
 
 /**
  * Player universal-growth speed bonus: each star adds this many cells/sec on
- * top of the level-0 base. ≈ +5% of the balanced baseline per star, so a
- * max-level (3★) player reaches 2.625 + 3 × 0.125 = 3.0 cells/s — matching the
- * fastest enemy. Keeps the "every star makes you a bit faster" feel without
- * violating the spec (which only fixes the no-star speed).
+ * top of the level-0 base. ~5% of balanced baseline per star:
+ *   0★: 3.9375 cps
+ *   1★: 4.1875 cps (+0.25)
+ *   2★: 4.4375 cps (+0.25)
+ *   3★: 4.6875 cps (+0.25) — approaching fast enemy speed
  */
-export const PLAYER_SPEED_PER_STAR_CPS = 0.125
+export const PLAYER_SPEED_PER_STAR_CPS = 0.25
 
 /** Per-instance speed jitter band: actual = base × random(0.95, 1.05). */
 export const SPEED_JITTER_MIN = 0.95
@@ -117,12 +123,12 @@ export function spawnSpeedPxPerTick(kind: TankKind, level: number, rng: RNG): nu
 export const BULLET_SPEED_RATIO = 4
 
 /**
- * Per-kind multiplier on the balanced-enemy bullet speed (the spec's ratios):
- *   basic  = 1.00 ×  → the reference (均衡敌人)
- *   fast   = 1.05 ×  → 快速敌人
- *   power  = 0.95 ×  → 强力敌人
- *   armor  = 0.90 ×  → 重甲敌人
- *   player = 1.05 ×  → 无星星玩家 (no-star player; scales up with stars below)
+ * Per-kind multiplier on the balanced-enemy bullet speed (original modern ratios):
+ *   basic  = 1.00 ×  → 15.00 cps (the reference, classic speed)
+ *   fast   = 1.05 ×  → 15.75 cps (original modern ratio)
+ *   power  = 0.95 ×  → 14.25 cps (original modern ratio)
+ *   armor  = 0.90 ×  → 13.50 cps (original modern ratio)
+ *   player = 1.05 ×  → 15.75 cps (original modern ratio)
  */
 export const BULLET_SPEED_MULT: Record<TankKind, number> = {
   basic: 1.0,
@@ -133,13 +139,13 @@ export const BULLET_SPEED_MULT: Record<TankKind, number> = {
 }
 
 /**
- * Base (no jitter) bullet speed in cells/second, per kind. Carrying the ×4
- * anchor explicitly so the value is self-documenting:
- *   basic  = 2.5 × 4 × 1.00 = 10.00 cps
- *   fast   = 2.5 × 4 × 1.05 = 10.50 cps
- *   power  = 2.5 × 4 × 0.95 =  9.50 cps
- *   armor  = 2.5 × 4 × 0.90 =  9.00 cps
- *   player = 2.5 × 4 × 1.05 = 10.50 cps (no star)
+ * Base (no jitter) bullet speed in cells/second, per kind. Balanced (basic)
+ * matches classic FC speed; others maintain original modern ratios:
+ *   basic  = 3.75 × 4 × 1.00 = 15.00 cps
+ *   fast   = 3.75 × 4 × 1.05 = 15.75 cps
+ *   power  = 3.75 × 4 × 0.95 = 14.25 cps
+ *   armor  = 3.75 × 4 × 0.90 = 13.50 cps
+ *   player = 3.75 × 4 × 1.05 = 15.75 cps (no star)
  */
 export const BASE_BULLET_SPEED_CPS: Record<TankKind, number> = {
   basic: BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO * BULLET_SPEED_MULT.basic,
@@ -152,9 +158,9 @@ export const BASE_BULLET_SPEED_CPS: Record<TankKind, number> = {
 /**
  * Player universal-growth bullet bonus: each star adds this many cells/sec on
  * top of the level-0 base (parallel to PLAYER_SPEED_PER_STAR_CPS for movement).
- * A max-level (3★) player reaches 10.5 + 3 × 0.5 = 12.0 cps — clearly faster
- * than the no-star value and every enemy bullet, while the no-star value stays
- * exactly the spec's 1.05 × balanced bullet.
+ * A max-level (3★) player reaches 15.75 + 3 × 0.5 = 17.25 cps — faster than
+ * the no-star value and every enemy bullet, while the no-star value stays
+ * at the original modern ratio.
  */
 export const PLAYER_BULLET_SPEED_PER_STAR_CPS = 0.5
 

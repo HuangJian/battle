@@ -130,8 +130,8 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     const basicBullet = profileToStats(TANK_PROFILES.basic, 'basic').bulletSpeed
     const basicMove = baseSpeedPxPerTick('basic')
     expect(basicBullet).toBeCloseTo(basicMove * BULLET_SPEED_RATIO, 9)
-    // concrete value (10.0 cells/sec → 2.6667 px/tick)
-    expect(basicBullet).toBeCloseTo(cpsToPxPerTick(10.0), 9)
+    // concrete value (15.0 cells/sec → 4.0 px/tick)
+    expect(basicBullet).toBeCloseTo(cpsToPxPerTick(15.0), 9)
     expect(baseBulletSpeedPxPerTick('basic')).toBeCloseTo(basicBullet, 9)
   })
 
@@ -157,8 +157,8 @@ describe('Combat Capability — stat derivation (DoD #1)', () => {
     }).fireCooldown
     // fireControl no longer shortens the cooldown:
     expect(high).toBe(low)
-    // The value equals the standard's balanced base interval (1300 ms).
-    expect(low).toBe(BALANCED_FIRE_INTERVAL_MS)
+    // The value equals the standard's balanced base interval (rounded to nearest integer).
+    expect(low).toBe(Math.round(BALANCED_FIRE_INTERVAL_MS))
   })
 })
 
@@ -175,7 +175,7 @@ describe('Combat Capability — power enemy bullet speed (user req)', () => {
     const basicBullet = profileToStats(TANK_PROFILES.basic, 'basic').bulletSpeed
     expect(powerBullet).toBeCloseTo(basicBullet * 0.95, 9)
     // Document the concrete value so a silent regression is obvious.
-    expect(powerBullet).toBeCloseTo(cpsToPxPerTick(9.5), 9) // 2.5333 px/tick
+    expect(powerBullet).toBeCloseTo(cpsToPxPerTick(14.25), 9) // 3.8 px/tick
   })
 
   it('power projectileSpeed is exactly 70 (the level-2 player value)', () => {

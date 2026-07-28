@@ -210,11 +210,11 @@ export const DEFAULT_RULES: GameplayRules = {
 
   speedJitter: true, // current ±5% jitter ON
 
-  speedCps: BASE_SPEED_CPS, // current differentiated table (2.5/3.0/2.375/2.125/2.625)
-  playerSpeedPerStarCps: PLAYER_SPEED_PER_STAR_CPS, // +0.125/star (→ 3.0 cps at 3★)
+  speedCps: BASE_SPEED_CPS, // balanced=classic(3.75), others keep original ratios
+  playerSpeedPerStarCps: PLAYER_SPEED_PER_STAR_CPS, // +0.25/star (→ 4.6875 cps at 3★)
 
-  bulletSpeedCps: BASE_BULLET_SPEED_CPS, // current ×4 differentiated table
-  playerBulletSpeedPerStarCps: PLAYER_BULLET_SPEED_PER_STAR_CPS, // +0.5/star (→ 12.0 cps at 3★)
+  bulletSpeedCps: BASE_BULLET_SPEED_CPS, // balanced=classic(15), others keep original ratios
+  playerBulletSpeedPerStarCps: PLAYER_BULLET_SPEED_PER_STAR_CPS, // +0.5/star (→ 17.25 cps at 3★)
 
   scoreModel: 'flat',
   scoreByKind: {},

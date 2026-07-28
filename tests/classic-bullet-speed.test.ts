@@ -116,11 +116,12 @@ describe('classic bullet speed — faithful FC table via config', () => {
     expect(fired).toBeLessThan(cpsToPxPerTick(30) * 1.05)
   })
 
-  it('classic bullets are faster than modern in absolute terms (FC tanks are brisk)', () => {
+  it('modern balanced bullet speed matches classic (both 15 cps, same ×4 ratio)', () => {
     const classic = classicRules()
     const modern = modernRules()
-    expect(classic.bulletSpeedCps.basic).toBeGreaterThan(modern.bulletSpeedCps.basic)
-    // but the bullet:tank speed RATIO is the same 4× in both (faithful geometry).
+    // Modern now matches classic's balanced speed for comparable combat pace
+    expect(modern.bulletSpeedCps.basic).toBeCloseTo(classic.bulletSpeedCps.basic, 6)
+    // the bullet:tank speed RATIO is the same 4× in both (faithful geometry).
     expect(classic.bulletSpeedCps.basic / classic.speedCps.basic).toBeCloseTo(4, 6)
     expect(modern.bulletSpeedCps.basic / modern.speedCps.basic).toBeCloseTo(4, 6)
   })

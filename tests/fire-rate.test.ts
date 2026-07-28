@@ -31,18 +31,18 @@ const msToTicks = (ms: number) => (ms * 60) / 1000
  * Every shot's NEXT interval is the base × random(0.95, 1.05).
  */
 describe('Fire-rate standard — derived balanced baseline', () => {
-  it('basic bullet crosses the full field in 156 ticks (2.5cps × 4 → 10cps → 156 ticks)', () => {
-    expect(BALANCED_BULLET_TRAVEL_TICKS).toBe(156)
-    // FIELD(416) / bulletSpeed(160/60) == 156 exactly.
-    expect(BALANCED_BULLET_TRAVEL_TICKS).toBeCloseTo(416 / (160 / 60), 9)
+  it('basic bullet crosses the full field in 104 ticks (3.75cps × 4 → 15cps → 104 ticks)', () => {
+    expect(BALANCED_BULLET_TRAVEL_TICKS).toBe(104)
+    // FIELD(416) / bulletSpeed(240/60) == 104 exactly.
+    expect(BALANCED_BULLET_TRAVEL_TICKS).toBeCloseTo(416 / (240 / 60), 9)
   })
 
-  it('full-field travel time is 2600 ms', () => {
-    expect(BALANCED_BULLET_TRAVEL_MS).toBe(2600)
+  it('full-field travel time is ~1733 ms', () => {
+    expect(BALANCED_BULLET_TRAVEL_MS).toBeCloseTo(1733.33, 1)
   })
 
   it('balanced fire interval is exactly half the travel time (the 3-bullet constraint)', () => {
-    expect(BALANCED_FIRE_INTERVAL_MS).toBe(1300)
+    expect(BALANCED_FIRE_INTERVAL_MS).toBeCloseTo(866.67, 1)
     expect(BALANCED_FIRE_INTERVAL_MS).toBeCloseTo(BALANCED_BULLET_TRAVEL_MS / 2, 9)
     // Two intervals span exactly the full-field travel: 1st fired → 3rd fired
     // == 1st reaches bottom.
@@ -78,13 +78,13 @@ describe('Fire-rate standard — per-kind frequency multipliers', () => {
   })
 
   it('base intervals are the balanced baseline divided by the multiplier', () => {
-    expect(baseFireIntervalMs('basic')).toBeCloseTo(1300 / 1.0, 9)
-    expect(baseFireIntervalMs('fast')).toBeCloseTo(1300 / 1.05, 9)
-    expect(baseFireIntervalMs('power')).toBeCloseTo(1300 / 1.1, 9)
-    expect(baseFireIntervalMs('armor')).toBeCloseTo(1300 / 0.9, 9)
-    expect(baseFireIntervalMs('player', 0)).toBeCloseTo(1300 / 1.05, 9)
-    expect(baseFireIntervalMs('player', 1)).toBeCloseTo(1300 / 1.1, 9)
-    expect(baseFireIntervalMs('player', 3)).toBeCloseTo(1300 / 1.2, 9)
+    expect(baseFireIntervalMs('basic')).toBeCloseTo(866.67 / 1.0, 0)
+    expect(baseFireIntervalMs('fast')).toBeCloseTo(866.67 / 1.05, 0)
+    expect(baseFireIntervalMs('power')).toBeCloseTo(866.67 / 1.1, 0)
+    expect(baseFireIntervalMs('armor')).toBeCloseTo(866.67 / 0.9, 0)
+    expect(baseFireIntervalMs('player', 0)).toBeCloseTo(866.67 / 1.05, 0)
+    expect(baseFireIntervalMs('player', 1)).toBeCloseTo(866.67 / 1.1, 0)
+    expect(baseFireIntervalMs('player', 3)).toBeCloseTo(866.67 / 1.2, 0)
   })
 
   it('ordering: armor slowest, then basic, then fast == no-star player, power fastest; max player beats all', () => {
