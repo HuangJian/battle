@@ -92,12 +92,12 @@ export interface GodAIParams {
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
   aimError: 0,
-  suboptimalPathProb: 0.3,
+  suboptimalPathProb: 0.05,
 
   defenseRowOffset: 1,
   defenseColSpread: 3,
-  threatRangeCells: 8,
-  maxPlayerDistFromBase: 4,
+  threatRangeCells: 18,
+  maxPlayerDistFromBase: 8,
   t8MaxInterceptDistCells: 8,
   baseWallScanRadius: 5,
   replanInterval: 50,
@@ -321,7 +321,9 @@ export class GodAIInput implements InputLike {
       }
       // Navigate to nearest enemy.
       this._moveDir = this.followPath()
-      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+      // Proactive fire: always fire while moving to catch enemies
+      // that cross the line of fire. The fire cooldown limits the rate.
+      this._fire = !onCooldown
       this.branchCounts.aggressive++
       return
     }
@@ -330,11 +332,9 @@ export class GodAIInput implements InputLike {
     // If an enemy is in the same row/col, stop and fire at it. If there's
     // a wall between, fire to break through (T6: never at base protection).
     //
-    // CRITICAL FIX: When on cooldown, do NOT stop — fall through to navigation.
-    // Stopping while on cooldown wastes ~74 ticks per cycle doing nothing.
-    // This was the #1 decision mistake found by CMA-ES trace analysis:
-    // the player fired only 7 times in 10116 ticks because it kept stopping
-    // in T2a but couldn't fire due to cooldown.
+    // Decision §27: T2a only triggers when !onCooldown. When on cooldown,
+    // the AI falls through to navigation (with proactive fire) instead of
+    // stopping dead. This keeps the AI mobile during cooldown.
     if (aimDir && !onCooldown) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
@@ -351,11 +351,29 @@ export class GodAIInput implements InputLike {
       // No clear shot, or wall below defense row — fall through to navigation.
     }
 
+    // ---- S5: Power-up economy (normal mode) ----
+    // Check for power-ups when no enemy is in line of fire. Previously this
+    // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
+    // Now the AI opportunistically grabs power-ups when it's safe to divert.
+    if (!aimDir || onCooldown) {
+      const puTarget = this.findPowerUpTarget(pcx, pcy)
+      if (puTarget) {
+        this._moveDir = this.navigateTowards(puTarget)
+        this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+        this.branchCounts.powerup++
+        return
+      }
+    }
+
     // ---- T2b: Navigate directly towards target ----
     // Use direct movement instead of A* — the player breaks through walls
     // rather than navigating around them. This is faster and more reactive.
+    // Smart proactive fire: fire proactively when NO enemy is in the same
+    // row/col (catches enemies that cross the line of fire). When an enemy
+    // IS in the same row/col, use shouldFireInDir to fire at visible targets
+    // only — this saves the cooldown for T2a to fire at the aligned enemy.
     this._moveDir = this.directMove(this.playerCell())
-    this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+    this._fire = !onCooldown && (!aimDir || this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir))
     this.branchCounts.navigate++
   }
 
@@ -376,7 +394,11 @@ export class GodAIInput implements InputLike {
     let bestDir: Direction | null = null
     let bestScore = -Infinity
 
-    const halfT = TANK / 2
+    // Widen alignment threshold from TANK/2 (16px) to TANK (32px).
+    // This makes T2a trigger when enemies are within 2 cells of alignment,
+    // not just exactly aligned. Critical for getting kills — the tight
+    // threshold meant the AI almost never aligned with moving enemies.
+    const halfT = TANK
 
     for (const t of w.tanks) {
       if (!t.alive || t.spawnTimer > 0) continue
@@ -580,29 +602,34 @@ export class GodAIInput implements InputLike {
       const v = DIR_VECTORS[b.dir]
 
       // Project the bullet's trajectory forward and check if it crosses the base.
+      // Fix Bug 4: terrain check must come BEFORE base-area check — otherwise
+      // walls protecting the base are ignored, causing false-positive threats
+      // and wasted interception actions.
       let crossesBase = false
       for (let d = CELL; d <= BULLET_TRAJECTORY_MAX_CELLS * CELL; d += CELL) {
         const fx = bcx + v.dx * d
         const fy = bcy + v.dy * d
 
-        // Check if the trajectory point is within the base area.
-        // BULLET_TRAJECTORY_MAX_CELLS is static (full field).
-        if (Math.abs(fx - baseCx) < baseHalf * 2 && Math.abs(fy - baseCy) < baseHalf * 2) {
-          crossesBase = true
-          break
-        }
-
         // If the trajectory goes off-field, stop.
         if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
 
-        // If the trajectory hits a wall (brick/steel/base), stop — the
-        // bullet would be blocked before reaching the base.
+        // Check terrain FIRST — if a wall blocks the bullet, it never
+        // reaches the base, so there's no threat.
         const col = Math.floor(fx / CELL)
         const row = Math.floor(fy / CELL)
         const terrain = w.tileMap.get(col, row)
         if (terrain === 'brick' || terrain === 'steel') break
+
         // If it hits the base itself, that's a direct hit.
         if (terrain === 'base') {
+          crossesBase = true
+          break
+        }
+
+        // Check if the trajectory point is within the base area.
+        // Use baseHalf (16px = 1 cell) instead of baseHalf * 2 — the base
+        // is 2×2 cells centered at (baseCx, baseCy), so half-width = CELL.
+        if (Math.abs(fx - baseCx) < baseHalf && Math.abs(fy - baseCy) < baseHalf) {
           crossesBase = true
           break
         }
@@ -859,10 +886,10 @@ export class GodAIInput implements InputLike {
       // NEW Requirement 3: Calculate route danger
       const dangerLevel = this.calculateRouteDanger(pcx, pcy, cx, cy)
 
-      // NEW Requirement 3: Dynamic scoring
-      // Score = (base_priority * 1000) - (distance * 10) - (danger * 500)
-      // High-value power-ups (bomb/star) get bonus to offset higher risk
-      let score = priority * 1000 - dist * 10 - dangerLevel * 500
+      // Fix Bug 2: Score formula was reversed — priority * 1000 gave bomb
+      // (priority=0) a base score of 0 and boat (priority=6) a base of 6000.
+      // Now (6 - priority) * 1000 gives bomb the highest base score.
+      let score = (6 - priority) * 1000 - dist * 10 - dangerLevel * 500
 
       // Extra bonus for bomb (it clears the whole screen, worth high risk)
       if (pu.type === 'bomb') {
@@ -879,8 +906,9 @@ export class GodAIInput implements InputLike {
         score -= 500
       }
 
-      // S5b: high-value power-ups are worth longer diversions
-      const maxDist = priority <= 1 ? this.params.powerupMaxDivertDistance : 8
+      // Fix Bug 3: maxDist logic was reversed — high-value power-ups (bomb/star)
+      // should allow LONGER diversion distance, not shorter.
+      const maxDist = priority <= 1 ? 8 : this.params.powerupMaxDivertDistance
       if (dist > maxDist) continue
 
       // NEW: Don't collect if route is too dangerous unless it's a bomb/star
@@ -1087,18 +1115,17 @@ export class GodAIInput implements InputLike {
   /**
    * Select the best target cell for the player to navigate toward.
    *
-   * Core strategy: ALWAYS intercept the enemy closest to the base by
-   * navigating to that enemy's column at the defense row. This puts
-   * the player in position to shoot the enemy via T2a when it crosses
-   * the defense row. No gating on "isEnemyThreateningBase" — every
-   * enemy is a potential threat, and the player should proactively
-   * position itself, not wait passively.
+   * S6 Attack-defense switching (core strategy):
+   *   - Emergency defense: enemies close to base → strict defense position
+   *   - Aggressive hunt: few enemies remaining → chase directly, relax distance
+   *   - Normal defense: intercept at defense row (default)
    *
    * Priority:
-   *   1. Enemy closest to base → intercept at defense row
-   *   2. Aggressive mode (freeze) → chase nearest enemy directly
-   *   3. Endgame (≤2 enemies remaining) → chase last enemy
-   *   4. No enemies → default defense position
+   *   1. Aggressive mode (freeze/shield) → chase nearest enemy directly
+   *   2. S6 hunt mode (few enemies remaining) → chase nearest enemy directly
+   *   3. S6 emergency defense → return to defense position, intercept close enemies
+   *   4. Normal: enemy closest to base → intercept at defense row
+   *   5. No enemies → default defense position
    */
   private selectTarget(playerCell: Cell): Cell | null {
     const w = this.world
@@ -1109,14 +1136,36 @@ export class GodAIInput implements InputLike {
     const baseRow = BASE_POS.row
     const defenseRow = baseRow - this.params.defenseRowOffset
 
-    // If the player is too far from the base, return to defense position.
-    const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
-    if (playerDistToBase > this.params.maxPlayerDistFromBase) {
-      return this.getDefaultDefensePosition()
-    }
-
     const enemies = w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
     if (enemies.length === 0) return this.getDefaultDefensePosition()
+
+    // ---- S6: Determine strategy mode ----
+    // Emergency defense: any enemy within 2 cols of the base and at or below
+    // the defense row — these are immediate threats that need direct interception.
+    const baseUnderThreat = enemies.some((t) => {
+      const tc = this.tankCell(t)
+      return Math.abs(tc.col - baseCol) <= 2 && tc.row >= defenseRow
+    })
+
+    // Aggressive hunt: few enemies on field OR few remaining in queue.
+    // This is the key to clearing stages — the player stops hugging the
+    // base and actively hunts down the remaining enemies.
+    const canHunt = (enemies.length <= 2 || w.enemiesRemaining <= 5) && !baseUnderThreat
+
+    // If the player is too far from the base, return to defense position.
+    // In hunt mode, the player can roam freely.
+    // When base is under threat, use strict defense distance.
+    // When base is NOT under threat, allow the player to go further to
+    // intercept enemies before they reach the base (2× the strict distance).
+    const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
+    const maxDist = canHunt
+      ? GRID
+      : baseUnderThreat
+        ? this.params.maxPlayerDistFromBase
+        : this.params.maxPlayerDistFromBase * 2
+    if (playerDistToBase > maxDist) {
+      return this.getDefaultDefensePosition()
+    }
 
     // Aggressive mode (freeze): enemies can't move — chase nearest directly.
     if (this.aggressive) {
@@ -1133,9 +1182,24 @@ export class GodAIInput implements InputLike {
       return this.tankCell(best)
     }
 
-    // Endgame: ≤2 enemies remaining and ≤1 on field → hunt directly.
-    if (w.enemiesRemaining <= this.params.endgameEnemyThreshold && enemies.length <= 1) {
-      return this.tankCell(enemies[0])
+    // ---- S6: Aggressive hunt mode ----
+    // When few enemies remain, go directly for the nearest enemy.
+    // This replaces the old endgame check (which was too restrictive:
+    // enemiesRemaining <= 1 && enemies.length <= 1).
+    if (canHunt) {
+      let best = enemies[0]
+      let bestDist = Infinity
+      for (const t of enemies) {
+        const tc = this.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        // Prefer bonus enemies (they drop power-ups) when distances are close.
+        const adjustedDist = d - (t.bonus ? 2 : 0)
+        if (adjustedDist < bestDist) {
+          bestDist = adjustedDist
+          best = t
+        }
+      }
+      return this.tankCell(best)
     }
 
     // Find the enemy closest to the base that's within threat range.
@@ -1148,8 +1212,11 @@ export class GodAIInput implements InputLike {
 
       const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
       const bonusWeight = t.bonus ? 3 : 0
-      // HUGE bonus for enemies at or below the defense row — critical threat
-      const urgencyBonus = tc.row >= defenseRow ? (baseRow - tc.row) * 100 : 0
+      // HUGE bonus for enemies at or below the defense row — critical threat.
+      // Fix Bug 1: urgencyBonus was reversed — (baseRow - tc.row) gave 0 at
+      // baseRow and negative below. Now (tc.row - defenseRow + 1) gives higher
+      // bonus the closer the enemy is to the base.
+      const urgencyBonus = tc.row >= defenseRow ? (tc.row - defenseRow + 1) * 100 : 0
       // Small bonus for enemies in the base row region (rows 20-23)
       const proximityBonus = tc.row >= 20 ? 50 : 0
       const score =
@@ -1162,40 +1229,11 @@ export class GodAIInput implements InputLike {
 
     if (!bestEnemy) return this.getDefaultDefensePosition()
 
-    return this.interceptCell(bestEnemy, defenseRow, baseCol, baseRow)
-  }
-
-  /**
-   * T1: Calculate the intercept cell — the position where the player should
-   * be to shoot the enemy as it approaches the base.
-   *
-   * Strategy: position at the enemy's column at the defense row. This gives
-   * the player a vertical firing line to shoot the enemy when it crosses.
-   * If the enemy is already below the defense row (close to base), intercept
-   * at the enemy's row minus 1 — get above it and shoot down.
-   */
-  private interceptCell(enemy: Tank, defenseRow: number, baseCol: number, _baseRow: number): Cell {
-    const ec = this.tankCell(enemy)
-
-    let targetCol: number
-    let targetRow: number
-
-    // If enemy is at or below the defense row, go directly above it — urgent!
-    // Don't clamp distance — we need to be there NOW.
-    if (ec.row >= defenseRow) {
-      targetCol = ec.col
-      targetRow = Math.max(0, ec.row - 1)
-    } else {
-      // Intercept at the defense row. Clamp the column to stay close to the base.
-      const spread = this.params.defenseColSpread
-      targetCol = Math.max(baseCol - spread, Math.min(baseCol + spread, ec.col))
-      targetRow = defenseRow
-    }
-
-    targetCol = Math.max(0, Math.min(GRID - 2, targetCol))
-    targetRow = Math.max(0, Math.min(GRID - 2, targetRow))
-
-    return { col: targetCol, row: targetRow }
+    // In normal defense mode, go directly toward the best enemy.
+    // Previously used interceptCell (defense row at enemy's column), but this
+    // was too passive — the AI sat at the defense row and waited. Going
+    // directly toward the enemy means the AI gets into firing range sooner.
+    return this.tankCell(bestEnemy)
   }
 
   /** Direct movement toward the target, breaking through walls. */
@@ -1209,9 +1247,12 @@ export class GodAIInput implements InputLike {
     const dx = target.col * CELL - p.x
     const dy = target.row * CELL - p.y
 
-    // Build direction preference: primary axis first, then secondary.
+    // Build direction preference: always prioritize horizontal movement
+    // first to align with the enemy's column. This ensures the AI gets
+    // into the enemy's column, so T2a can fire when the enemy crosses.
+    // Only prioritize vertical when already in the same column (dx ≈ 0).
     const dirs: Direction[] = []
-    if (Math.abs(dx) >= Math.abs(dy)) {
+    if (Math.abs(dx) > CELL / 2) {
       if (dx > 0) dirs.push('right')
       else if (dx < 0) dirs.push('left')
       if (dy > 0) dirs.push('down')

@@ -162,12 +162,14 @@ export function runSimulation(opts: RunOptions): SimResult {
         tick,
         firstKillTick,
       }
-      // If base was destroyed, find the killer from recent events.
+      // Fix Bug 5: Populate killerKind — walk back through events to find
+      // the last enemy bullet_fired before the base_destroyed event. That
+      // bullet's ownerKind is the tank kind that destroyed the base.
       if (baseDestroyed) {
         for (let i = allEvents.length - 1; i >= 0; i--) {
           const e = allEvents[i]
-          if (e.type === 'base_destroyed') {
-            // Walk back to find the last tank_destroyed or bullet_fired near base.
+          if (e.type === 'bullet_fired' && !e.bullet.isPlayer) {
+            failure.killerKind = e.bullet.ownerKind
             break
           }
         }
