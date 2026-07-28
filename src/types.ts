@@ -232,6 +232,11 @@ export interface AIState {
   reactionTimer: number // ms of remaining "delayed reaction" before dodging
   dodgeLock: number // ms the current dodge direction is committed
 
+  // ---- Dead-end recovery ----
+  /** ms spent confined to a single-axis channel (no lateral open direction).
+   *  Drives the tunnel-out behavior in TacticalIntelligence. */
+  vertOnlyTicks: number
+
   // ---- Commander ----
   commanderTimer: number // ms until this commander's next broadcast
   directive: CommanderDirective // last directive received (or 'none')

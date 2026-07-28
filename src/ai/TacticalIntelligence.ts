@@ -14,6 +14,7 @@ import {
   NONE_TURN_MIN_MS,
   NONE_TURN_JITTER_MS,
   NONE_FIRE_JITTER_MS,
+  VERT_TUNNEL_THRESHOLD_MS,
 } from '../constants'
 import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
@@ -139,6 +140,9 @@ export class TacticalIntelligence {
       brain.fireTimer = tank.nextFireInterval + world.rng.next() * NONE_FIRE_JITTER_MS
     }
 
+    // Dead-end recovery: tunnel out of a 1-wide shaft if confined laterally.
+    this.maybeTunnelOut(world, tank, brain)
+
     tank.dir = brain.currentDir
     tank.moving = true
   }
@@ -188,6 +192,9 @@ export class TacticalIntelligence {
 
     // --- Reactive layer (bullet avoidance, every tick) ---
     this.reactiveDodge(world, tank, brain, cfg, p, s)
+
+    // --- Dead-end recovery (tunnel out of a 1-wide shaft) ---
+    this.maybeTunnelOut(world, tank, brain)
 
     // --- Firing decision ---
     this.updateFiring(world, tank, brain, cfg, p, s, fire)
@@ -539,6 +546,84 @@ export class TacticalIntelligence {
     const nx = tank.x + v.dx * CELL
     const ny = tank.y + v.dy * CELL
     return manhattan(tank.x, tank.y, tx, ty) - manhattan(nx, ny, tx, ty)
+  }
+
+  // ================================================================
+  // Dead-end recovery — tunnel out of a 1-wide shaft (§StuckSpawn)
+  // ================================================================
+
+  /**
+   * Recover a tank that has been confined to a single-axis channel (its open
+   * directions contain no lateral move) — the classic "spins up/down in a
+   * 1-wide shaft, never turns left/right" trap (e.g. Stage 8 middle spawn).
+   *
+   * When the channel lasts past VERT_TUNNEL_THRESHOLD_MS, face the side whose
+   * adjacent cell is a destructible brick and let the firing layer break it
+   * (updateFiring sees `wallInLineOfFire`); once the wall is gone the lateral
+   * direction opens and normal routing carries the tank out. A pure
+   * steel/water box has nothing to break, so it harmlessly keeps oscillating.
+   *
+   * Pure terrain read — no hidden state, deterministic (world.rng unused).
+   */
+  private maybeTunnelOut(world: World, tank: Tank, brain: AIState): void {
+    const hasLateral = this.canStepLat(world, tank, 'left') || this.canStepLat(world, tank, 'right')
+    if (hasLateral) {
+      brain.vertOnlyTicks = 0
+      return
+    }
+    brain.vertOnlyTicks += this.dt
+    if (brain.vertOnlyTicks < VERT_TUNNEL_THRESHOLD_MS) return
+
+    const base = world.tileMap.getBasePos()
+    const targetX = base ? base.x + CELL : tank.x + tank.w / 2
+    const sides: Direction[] =
+      tank.x + tank.w / 2 < targetX ? ['right', 'left'] : ['left', 'right']
+    for (const side of sides) {
+      if (this.adjacentDestructible(world, tank, side)) {
+        brain.currentDir = side
+        tank.dir = side
+        tank.moving = true
+        return
+      }
+    }
+    // No destructible wall on either side — genuinely boxed; leave as-is.
+  }
+
+  /** Terrain-only step check along `dir` (ignores transient tank blocks). */
+  private canStepLat(world: World, tank: Tank, dir: Direction): boolean {
+    const v = DIR_VECTORS[dir]
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const nx = gx + v.dx * TANK
+    const ny = gy + v.dy * TANK
+    const sx = Math.min(gx, nx)
+    const sy = Math.min(gy, ny)
+    const sw = Math.abs(nx - gx) + TANK
+    const sh = Math.abs(ny - gy) + TANK
+    if (!world.isInBounds(sx, sy, sw, sh)) return false
+    return !world.rectHitsTerrain(sx, sy, sw, sh)
+  }
+
+  /** True if the cell(s) immediately to `side` of the tank are destructible brick. */
+  private adjacentDestructible(world: World, tank: Tank, side: Direction): boolean {
+    const v = DIR_VECTORS[side]
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const rx = v.dx !== 0 ? gx + v.dx * CELL : gx
+    const ry = v.dy !== 0 ? gy + v.dy * CELL : gy
+    const rw = v.dx !== 0 ? CELL : TANK
+    const rh = v.dy !== 0 ? CELL : TANK
+    if (!world.isInBounds(rx, ry, rw, rh)) return false
+    const c0 = Math.floor(rx / CELL)
+    const r0 = Math.floor(ry / CELL)
+    const c1 = Math.floor((rx + rw - 1) / CELL)
+    const r1 = Math.floor((ry + rh - 1) / CELL)
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (world.tileMap.get(c, r) === 'brick') return true
+      }
+    }
+    return false
   }
 
   // ================================================================

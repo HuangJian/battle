@@ -488,6 +488,7 @@ export class World {
         strategicGoal: 'attackBase' as GoalType,
         reactionTimer: placeholder.reactionTime,
         dodgeLock: 0,
+        vertOnlyTicks: 0,
         commanderTimer: COMMANDER_INTERVAL_MS,
         directive: 'none',
         directiveAge: 1e9,

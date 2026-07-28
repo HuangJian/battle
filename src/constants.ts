@@ -151,6 +151,17 @@ export const NONE_TURN_JITTER_MS = 900
 /** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
 export const NONE_FIRE_JITTER_MS = 1400
 
+/**
+ * Dead-end recovery: if an enemy is confined to a vertical-only (or
+ * horizontal-only) channel — open directions contain no lateral axis — for
+ * this long without escaping, it faces a destructible brick wall on the side
+ * and fires to tunnel out. Prevents the "stuck spinning up/down in a 1-wide
+ * shaft" trap (e.g. Stage 8's middle spawn, bounded by brick/steel/water).
+ * A pure steel/water box has nothing to break, so it still oscillates — but
+ * authentic stages box spawns only with destructible brick, which we clear.
+ */
+export const VERT_TUNNEL_THRESHOLD_MS = 450
+
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
 // which keeps bullets strictly faster than tanks (see that file for the

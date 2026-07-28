@@ -1145,3 +1145,21 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 **No duration cap** was requested (the user's example is an unbounded add), so stacking is open-ended; this is a player-side power choice.
 
 **Regression tests:** `tests/super-powerups.test.ts` → describe "Timed power-ups stack their duration when re-picked (DECISIONS.md §33)": freeze 3 s → 23 s, shield/boat/fence accumulate, and re-pickup never *resets* a full-duration buff to less. Full suite **450 pass / 0 fail**; tsc clean.
+
+---
+
+## §34 Enemy dead-end shaft recovery (tunnel out of a 1-wide channel)
+
+**Date:** 2026-07-28 · **Type:** bug fix (gameplay / AI) · **Gates:** all three
+
+**Symptom (user bug report):** on Stage 8's middle enemy spawn point, two enemies spawn and then stay stuck there — spinning up/down at very high speed, firing randomly, never turning left/right.
+
+**Root cause:** the middle enemy spawn (original tile col 6 → sub-cols 12–13 → `x = 192`) sits in a 1-tank-wide **vertical shaft** on Stage 8 (Riverbed): up is out-of-bounds, left is brick, right is steel, and the bottom is steel/water. A goal-driven enemy descends into it and can only move vertically, so it shuttles up/down forever — `openDirs` never contains a lateral direction, so it never turns left/right and never faces the destructible brick it could break. The classic `None` branch and the higher-tier `TacticalIntelligence` branch both exhibit this (the `None` branch re-rolls among a vertical-only `open` set; the higher branch's `chooseDirection` returns a vertical dir because progress is only available vertically).
+
+**Decision:** add dead-end recovery to the enemy AI. When an enemy is confined to a single-axis channel — its open directions contain **no lateral axis** — for longer than `VERT_TUNNEL_THRESHOLD_MS` (450 ms), it faces the side whose adjacent cell is a **destructible brick** and fires to tunnel out; once the wall breaks the lateral direction opens and normal routing carries it out. A pure steel/water box has nothing to break, so it harmlessly keeps oscillating (authentic stages box spawns only with destructible brick, which we clear).
+
+**Implementation** (`src/ai/TacticalIntelligence.ts`): new `maybeTunnelOut(world, tank, brain)` called every tick from both `updateTank` (after `reactiveDodge`, before `updateFiring`) and `updateNoneTank` (before execution). It uses a terrain-only `canStepLat` to detect "no lateral open" (ignores transient tank blocks) and an `adjacentDestructible` cell scan to find the brick side (prefers the side toward the base). State lives on `AIState.vertOnlyTicks` (new field, auto-persisted by the shallow spread in `WorldSerializer.cloneTank`, no snapshot wiring needed). Pure terrain read — no `world.rng`, fully deterministic. Firing is delegated to the existing `updateFiring` layer, which already reports `wallInLineOfFire` for a brick ahead via `scanAhead`.
+
+**Why faithful / simple:** authentic Battle City enemies break bricks to advance; this merely lets a wedged enemy do the same instead of freezing. It is a small, localized addition to the AI brain and adds no gameplay state outside the World.
+
+**Regression tests:** `tests/classic-ai-jam.test.ts` → describe "Dead-end shaft recovery — tunnel out of a 1-wide vertical channel": a `None` and a `veteran` enemy force-spawned at the Stage 8 middle spawn must each span >1 cell horizontally within 1500 ticks (buggy behavior pins `x` to 192 → span ≈ 0). Full suite **452 pass / 0 fail**; tsc clean.

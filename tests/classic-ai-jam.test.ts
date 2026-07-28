@@ -160,3 +160,54 @@ describe('Classic AI jam fix — tank-tank collision detection', () => {
     expect(uniqueDirs.size).toBeGreaterThan(1)
   })
 })
+
+/**
+ * Dead-end shaft recovery (§StuckSpawn): an enemy that spawns into a 1-tank-wide
+ * vertical shaft — open directions contain no lateral axis (up/down only) —
+ * must tunnel out through a destructible brick wall instead of spinning up/down
+ * forever. Reproduces the Stage 8 middle-spawn trap (bounded by brick / steel /
+ * water, out-of-bounds on top): without recovery the tank pins to x=192 and
+ * shuttles vertically; with recovery it breaks the side brick and escapes.
+ */
+describe('Dead-end shaft recovery — tunnel out of a 1-wide vertical channel', () => {
+  function runShaft(level: 'none' | 'veteran', seed: number): { spanX: number; spanY: number } {
+    const world = new World()
+    world.rng = new RNG(seed)
+    const sim = new Simulation(world, new Input())
+    world.startGame('classic', 'modern', 7) // Stage 8 (Riverbed)
+
+    // Geographic middle enemy spawn (original tile col 6 → sub-cols 12-13 → x=192).
+    const tank = world.createTank('basic', 12 * CELL, 0, 'down')
+    if (tank.aiState) tank.aiState.level = level
+    tank.spawnTimer = 0
+    world.tanks.push(tank)
+    world.enemiesSpawned = 1
+
+    let minX = tank.x
+    let maxX = tank.x
+    let minY = tank.y
+    let maxY = tank.y
+    for (let i = 0; i < 1500; i++) {
+      sim.tick()
+      if (world.state !== 'playing') world.state = 'playing'
+      if (!world.player || !world.player.alive) world.spawnPlayer()
+      minX = Math.min(minX, tank.x)
+      maxX = Math.max(maxX, tank.x)
+      minY = Math.min(minY, tank.y)
+      maxY = Math.max(maxY, tank.y)
+    }
+    return { spanX: maxX - minX, spanY: maxY - minY }
+  }
+
+  it('a None-tier tank tunnels out of the Stage 8 middle shaft (moves laterally)', () => {
+    const { spanX } = runShaft('none', 999)
+    // Buggy behavior pins x to 192 → spanX ≈ 0. Recovered behavior breaks the
+    // side brick and escapes, so the tank spans at least a cell horizontally.
+    expect(spanX).toBeGreaterThan(CELL)
+  })
+
+  it('a higher-tier tank tunnels out of the Stage 8 middle shaft (moves laterally)', () => {
+    const { spanX } = runShaft('veteran', 999)
+    expect(spanX).toBeGreaterThan(CELL)
+  })
+})
