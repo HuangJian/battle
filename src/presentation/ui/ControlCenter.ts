@@ -17,17 +17,22 @@ import type { World } from '../../game/World'
 export interface ControlCenterCallbacks {
   onManualSave: () => void
   onOpenBrowser: () => void
+  /** Open the Replay Browser. */
+  onOpenReplays: () => void
   onOpenControls: () => void
   /** Toggle the developer Performance Observatory overlay (F6). */
   onTogglePerf: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
+  /** Replay counts for the status line. */
+  getReplayCounts: () => { total: number; favorites: number }
 }
 
 export class ControlCenter {
   readonly el: HTMLElement
   private callbacks: ControlCenterCallbacks | null = null
   private countLine: HTMLElement
+  private replayCountLine: HTMLElement
   private gameplayInfo: HTMLElement
   private collapsed = false
   private perfBtn: HTMLButtonElement | null = null
@@ -35,6 +40,7 @@ export class ControlCenter {
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
+  private lastReplayCounts = ''
   private lastGameplay = ''
 
   constructor() {
@@ -55,6 +61,13 @@ export class ControlCenter {
             <span>Snapshot Browser</span><span class="cc-btn-arrow">›</span>
           </button>
           <div class="cc-info" data-cc="counts">No snapshots</div>
+        </section>
+        <section class="cc-section">
+          <h3 class="cc-section-title">REPLAYS</h3>
+          <button class="cc-btn" data-cc="replays" type="button">
+            <span>Replay Browser</span><span class="cc-btn-arrow">›</span>
+          </button>
+          <div class="cc-info" data-cc="replay-counts">No replays</div>
         </section>
         <section class="cc-section">
           <h3 class="cc-section-title">CONTROLS</h3>
@@ -84,6 +97,7 @@ export class ControlCenter {
     `
 
     this.countLine = this.el.querySelector('[data-cc="counts"]')!
+    this.replayCountLine = this.el.querySelector('[data-cc="replay-counts"]')!
     this.gameplayInfo = this.el.querySelector('[data-cc="gameplay"]')!
 
     const wire = (sel: string, fn: () => void) => {
@@ -96,6 +110,7 @@ export class ControlCenter {
     }
     wire('[data-cc="save"]', () => this.callbacks?.onManualSave())
     wire('[data-cc="browser"]', () => this.callbacks?.onOpenBrowser())
+    wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays())
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls())
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
 
@@ -141,6 +156,18 @@ export class ControlCenter {
     if (countsText !== this.lastCounts) {
       this.lastCounts = countsText
       this.countLine.textContent = countsText
+    }
+
+    const rc = this.callbacks.getReplayCounts()
+    const replayText =
+      rc.total === 0
+        ? 'No replays'
+        : rc.favorites > 0
+          ? `${rc.total} replay${rc.total === 1 ? '' : 's'} · ★ ${rc.favorites}`
+          : `${rc.total} replay${rc.total === 1 ? '' : 's'}`
+    if (replayText !== this.lastReplayCounts) {
+      this.lastReplayCounts = replayText
+      this.replayCountLine.textContent = replayText
     }
 
     const inRun = world.state !== 'menu' && world.state !== 'victory'

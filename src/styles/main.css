@@ -1133,6 +1133,34 @@ body {
   z-index: 30; /* above pause / recovery screens */
 }
 
+/* Replay Browser reuses the Snapshot Browser chrome, so it shares the
+   full-viewport modal positioning. */
+.ui-replays {
+  position: fixed;
+  inset: 0;
+  background: var(--theme-overlay-bg);
+  z-index: 30; /* above pause / recovery screens */
+}
+
+/* Replay type badges (victory green / defeat red). */
+.snap-type-victory {
+  color: var(--theme-success);
+  border-color: var(--theme-success);
+}
+.snap-type-defeat {
+  color: var(--theme-danger);
+  border-color: var(--theme-danger);
+}
+
+/* Favorite toggle button in the Replay Browser. */
+.snap-fav {
+  color: var(--theme-text-secondary);
+}
+.snap-fav-on {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+}
+
 .snap-panel {
   display: flex;
   flex-direction: column;

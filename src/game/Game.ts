@@ -17,6 +17,13 @@ import { STAGES } from '../config/stages'
 import { TICK_MS, PERF_MODE_RENDER_FPS } from '../constants'
 import type { GameSettings, KeyBindings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
+import { InputRecorder } from '../replay/InputRecorder'
+import { ReplayManager } from '../replay/ReplayManager'
+import { PlaybackController } from '../replay/PlaybackController'
+import type { PlaybackSpeed } from '../replay/PlaybackController'
+import { createReplayStorage } from '../replay/storage'
+import type { Replay, ReplayType } from '../replay/types'
+import { GAME_VERSION } from '../snapshot/config'
 
 const SETTINGS_KEY = 'bc_settings'
 const THEME_KEYS = Object.keys(THEMES)
@@ -58,6 +65,10 @@ export class Game {
   audio: AudioManager
   snapshots: SnapshotManager
   recovery: RecoveryController
+  replays: ReplayManager
+  private recorder: InputRecorder
+  /** Presence flag — NOT a world state. When non-null, playback is active. */
+  playback: PlaybackController | null = null
 
   private lastTime = 0
   private accumulator = 0
@@ -125,6 +136,11 @@ export class Game {
     this.recovery = new RecoveryController(this.snapshots)
     this.wireSnapshotUI()
 
+    // Replay System (plan/replay.md)
+    this.replays = new ReplayManager({ backend: createReplayStorage() })
+    this.recorder = new InputRecorder()
+    this.wireReplayUI()
+
     this.audio.setVolume(this.settings.volume)
 
     // Apply saved settings
@@ -169,6 +185,7 @@ export class Game {
     ui.controlCenter.init({
       onManualSave: () => this.manualSnapshot(),
       onOpenBrowser: () => this.openSnapshotBrowser(),
+      onOpenReplays: () => this.openReplayBrowser(),
       onTogglePerf: () => ui.togglePerfOverlay(),
       onOpenControls: () => {
         if (this.world.state === 'menu') {
@@ -181,6 +198,10 @@ export class Game {
         total: this.snapshots.count(),
         manual: this.snapshots.count('manual'),
         manualLimit: this.snapshots.policyFor('manual').limit,
+      }),
+      getReplayCounts: () => ({
+        total: this.replays.count(),
+        favorites: this.replays.favoriteCount(),
       }),
     })
   }
@@ -198,6 +219,7 @@ export class Game {
     window.addEventListener('keydown', this.onPerfKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
+    await this.replays.hydrate()
     // Default-load behaviour: if a manual snapshot exists, surface it as the
     // start screen's RESUME target so reopening the page continues from it.
     this.resumeSnapshot = this.snapshots.latest({ type: 'manual' })
@@ -284,7 +306,11 @@ export class Game {
     if (!this.running) return
     cancelAnimationFrame(this.rafId)
     this.rafId = 0
-    if (LOW_POWER_STATES.has(this.world.state)) {
+    // Playback is an ACTION state regardless of world.state: a replay can
+    // drive the world into 'gameover' (∈ LOW_POWER_STATES), and the rAF loop
+    // must keep running so PlaybackController.update() and
+    // handlePlaybackInput() stay alive (Esc / speed keys / end detection).
+    if (!this.playback && LOW_POWER_STATES.has(this.world.state)) {
       // True idle: no loop at all. Static-screen input is handled by
       // `onStaticKey` / mouse handlers, and the on-demand render gate keeps
       // the canvas correct, so the main thread stays fully asleep — fan off.
@@ -321,9 +347,14 @@ export class Game {
    */
   private onStaticKey = (_e: KeyboardEvent): void => {
     if (!this.running || this._hidden) return
+    // During playback the vsync rAF loop owns ALL input (handlePlaybackInput)
+    // — never double-process here, even if the replay drove the world into a
+    // LOW_POWER state (e.g. 'gameover' at the end of a defeat replay).
+    if (this.playback) return
     if (!LOW_POWER_STATES.has(this.world.state)) return
     // UI modals own their own keyboard handling; never double-process.
     if (this.presentation.ui.snapshotBrowser.isOpen()) return
+    if (this.presentation.ui.replayBrowser.isOpen()) return
     if (this.presentation.ui.isControlsOpen()) return
 
     // Process the key via the same code path the loop uses, then clear the
@@ -396,36 +427,64 @@ export class Game {
     }
 
     // Handle menu/game state input
-    this.handleStateInput()
+    if (this.playback) {
+      this.handlePlaybackInput()
+    } else {
+      this.handleStateInput()
+    }
 
     // Fixed timestep simulation
     let steps = 0
     let enteredGameOver = false
     if (probe) simT0 = performance.now()
-    while (this.accumulator >= TICK_MS && steps < 5) {
-      if (
-        this.world.state === 'playing' ||
-        this.world.state === 'stageclear' ||
-        this.world.state === 'gameover'
-      ) {
-        this.simulation.tick()
-
-        // Detect stage change → Stage Start snapshot (plan §3, §10)
-        if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
-          this.snapshots.create('stage-start', this.world)
-          this.snapshots.resetAutoTimer()
-          this.prevStageIndex = this.world.stageIndex
-        }
-
-        // Detect game over → intercept for recovery
-        if (this.world.state === 'gameover' && !enteredGameOver) {
-          enteredGameOver = true
-          this.startRecovery()
-          break // stop ticking — simulation is now suspended
-        }
+    if (this.playback) {
+      // Playback mode: PlaybackController drives ticks directly
+      this.playback.update(dt)
+      // Replay ran out of frames → leave playback EXPLICITLY. Without this
+      // the replay world (still 'playing'/'stageclear') would fall through
+      // to the live branch next frame: the keyboard would take over the
+      // replay's tank, and the stage-change detector would start recording
+      // a bogus session from mid-replay state.
+      if (this.playback.isEnded) {
+        this.finishPlayback()
       }
-      this.accumulator -= TICK_MS
-      steps++
+    } else {
+      // Live gameplay: record input per tick, inside the while-loop
+      while (this.accumulator >= TICK_MS && steps < 5) {
+        if (
+          this.world.state === 'playing' ||
+          this.world.state === 'stageclear' ||
+          this.world.state === 'gameover'
+        ) {
+          this.simulation.tick()
+          // Record THIS tick's input (one frame per tick)
+          this.recorder.recordFrame(this.input)
+
+          // Detect stage change → Stage Start snapshot (plan §3, §10)
+          if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
+            this.snapshots.create('stage-start', this.world)
+            this.snapshots.resetAutoTimer()
+            this.prevStageIndex = this.world.stageIndex
+            // Start a new recording session for the new stage
+            this.recorder.startNew(this.world)
+          }
+
+          // Detect stage clear → save victory replay
+          if (this.world.state === 'stageclear' && this.prevWorldState !== 'stageclear') {
+            this.finalizeRecording('victory')
+          }
+
+          // Detect game over → intercept for recovery
+          if (this.world.state === 'gameover' && !enteredGameOver) {
+            this.finalizeRecording('defeat')
+            enteredGameOver = true
+            this.startRecovery()
+            break // stop ticking — simulation is now suspended
+          }
+        }
+        this.accumulator -= TICK_MS
+        steps++
+      }
     }
     if (probe) simDt = performance.now() - simT0
 
@@ -444,6 +503,18 @@ export class Game {
       if (this.recovery.phase === 'countdown' && this.prevRecoveryPhase === 'fading') {
         this.presentation.reset()
         this.audio.stopAll()
+        // The world was just atomically restored (or freshly restarted) —
+        // this is the exact deterministic boundary a replay must start from.
+        // Recording is restarted HERE, never at beginLoad() time: the restore
+        // is deferred until the fade completes, so an earlier startNew()
+        // would capture the pre-restore world (a corrupted replay). This
+        // also revives the recorder after a defeat finalized it (recovery →
+        // load/restart must produce a fresh recording session).
+        this.recorder.startNew(this.world)
+        // The restored stage is not a "stage change" — keep the detector
+        // quiet so it doesn't overwrite this session / snapshot a mid-stage
+        // world as 'stage-start'.
+        this.prevStageIndex = this.world.stageIndex
       }
 
       // Countdown beeps — play a tone each time the number changes
@@ -504,6 +575,15 @@ export class Game {
         this.snapshots.capturePendingThumbnails(() => this.presentation.captureThumbnail())
       } else {
         // Force a repaint next frame so the pending previews can be taken.
+        this.presentation.markNeedsRender()
+      }
+    }
+    // Replay thumbnails — same pattern (a replay is finalized on stage clear /
+    // game over; its preview is the frame that was on screen at that moment).
+    if (this.replays.hasPendingThumbnails) {
+      if (rendered) {
+        this.replays.capturePendingThumbnails(() => this.presentation.captureThumbnail())
+      } else {
         this.presentation.markNeedsRender()
       }
     }
@@ -585,9 +665,10 @@ export class Game {
   private handleStateInput(): void {
     const w = this.world
 
-    // The Snapshot Browser is a UI-modal that owns key input while open
-    // (Esc is captured by the browser itself); skip game state input.
+    // The Snapshot / Replay Browsers are UI-modals that own key input while
+    // open (Esc is captured by the browser itself); skip game state input.
     if (this.presentation.ui.snapshotBrowser.isOpen()) return
+    if (this.presentation.ui.replayBrowser.isOpen()) return
 
     if (w.state === 'menu') {
       // The controls panel is a UI-modal that owns all key input while open;
@@ -780,6 +861,9 @@ export class Game {
     this.recovery.reset()
     this.prevStageIndex = -1
     this.world.startGame(this.world.difficultyKey, this.world.themeKey, this.world.selectedStage)
+    // NOTE: recording is NOT started here — the stage-change detector in
+    // loop() starts the session on the first played tick (same as the
+    // keyboard start path), so both entry points share one code path.
     // Drop the click so it can't bleed into the first-frame fire input.
     this.input.reset()
     this.saveSettings()
@@ -795,6 +879,11 @@ export class Game {
     // Avoid a spurious stage-start snapshot when the resumed stage begins.
     this.prevStageIndex = this.resumeSnapshot.metadata.stage
     this.recovery.beginLoad(this.resumeSnapshot.id, this.world)
+    // NOTE: recording is NOT started here — beginLoad() defers the actual
+    // restore until its fade completes, so a startNew() at this point would
+    // capture the MENU PREVIEW world as the replay's initial snapshot
+    // (corrupted replay). The recording session starts at the recovery
+    // fading→countdown transition in loop(), right after restoreWorld.
     // Drop the input so the click/keypress can't bleed into gameplay.
     this.input.reset()
     this.refreshStaticScreen()
@@ -955,7 +1044,10 @@ export class Game {
     this.world.recoveryCountdown = 0
     this.world.recoveryFading = false
     this.recovery.reset()
+    this.stopPlayback()
+    this.recorder.reset()
     this.presentation.ui.snapshotBrowser.close()
+    this.presentation.ui.replayBrowser.close()
     this.prevStageIndex = -1
     // Re-open the menu on its default row and render the matching battlefield.
     this.world.menuCursor = 0
@@ -1023,5 +1115,165 @@ export class Game {
     this.settings.volume = v
     this.audio.setVolume(v)
     this.saveSettings()
+  }
+
+  // ---- Replay System (plan/replay.md) ----
+
+  /**
+   * Finalize the current recording and save as a replay.
+   * Called on stage clear (victory) or game over (defeat).
+   */
+  private finalizeRecording(type: ReplayType): void {
+    const result = this.recorder.finalize()
+    if (!result) return // empty recording
+
+    const w = this.world
+    const metadata = {
+      stage: w.stageIndex,
+      stageName: STAGES[w.stageIndex]?.name ?? '?',
+      difficulty: w.difficultyKey,
+      lives: w.lives,
+      playerLevel: w.playerLevel,
+      score: w.score,
+      killCount: w.killCount,
+      enemiesTotal: w.enemiesSpawned,
+      playTimeMs: w.playTimeMs,
+    }
+    const replay = this.replays.create(type, result.snapshot, result.frames, result.tickCount, metadata)
+    this.replays.enqueueThumbnail(replay.id)
+  }
+
+  /**
+   * Start replay playback. Operates on Game's own world and simulation.
+   * Returns false (with a toast) when the replay's frame format is not
+   * playable by this build (plan/replay.md §17.2).
+   */
+  startPlayback(replay: Replay): boolean {
+    if (!this.replays.canPlay(replay)) {
+      this.presentation.ui.notify('Replay format not supported by this version', 'warn')
+      return false
+    }
+    if (replay.gameVersion !== GAME_VERSION) {
+      // Different simulation build — playable, but determinism is not
+      // guaranteed. Warn instead of silently desyncing.
+      this.presentation.ui.notify(
+        `Recorded on v${replay.gameVersion} — playback may desync`,
+        'warn',
+      )
+    }
+    // Exit any existing playback first
+    this.stopPlayback()
+    // Discard any in-progress recording
+    this.recorder.reset()
+    this.recovery.reset()
+    this.presentation.ui.snapshotBrowser.close()
+    this.presentation.ui.replayBrowser.close()
+    this.playback = new PlaybackController(replay)
+    this.playback.start(this.world, this.simulation)
+    // Presentation is disposable (AGENTS §2.5): the world was atomically
+    // replaced — rebuild all visual state (particles, camera, animations).
+    this.presentation.reset()
+    this.presentation.markNeedsRender()
+    this.prevWorldState = this.world.state
+    this.prevStageIndex = this.world.stageIndex
+    this.accumulator = 0
+    this.lastTime = performance.now()
+    this.scheduleFrame()
+    this.presentation.ui.notify('REPLAY — Esc exit · P pause · 1-4 speed')
+    return true
+  }
+
+  /**
+   * Stop playback, restore real Input, clean up.
+   */
+  stopPlayback(): void {
+    if (!this.playback) return
+    this.playback.exit(this.simulation, this.input)
+    this.playback = null
+    this.accumulator = 0
+    this.lastTime = performance.now()
+  }
+
+  /**
+   * The replay consumed all frames — leave playback cleanly. The replay
+   * world must never fall through into live play (C2): return to the menu,
+   * which resets world + presentation + recorder in one place.
+   */
+  private finishPlayback(): void {
+    this.stopPlayback()
+    this.resetToMenu()
+    this.presentation.ui.notify('Replay finished')
+  }
+
+  /**
+   * Dedicated handler for playback keyboard (ESC, pause, speed).
+   * Replaces handleStateInput() during playback so live-game shortcuts
+   * (Alt+S, Alt+R, KeyP) don't fire on the replay world.
+   */
+  private handlePlaybackInput(): void {
+    if (!this.playback) return
+    if (this.input.wasPressed('Escape')) {
+      this.stopPlayback()
+      this.resetToMenu()
+      return
+    }
+    if (this.input.isPausePressed()) {
+      this.playback.togglePause()
+      this.presentation.ui.notify(this.playback.isPaused ? 'Replay paused' : 'Replay resumed')
+    }
+    // Speed keys 1-4
+    if (this.input.wasPressed('Digit1')) this.setPlaybackSpeed(1)
+    if (this.input.wasPressed('Digit2')) this.setPlaybackSpeed(1.5)
+    if (this.input.wasPressed('Digit3')) this.setPlaybackSpeed(2)
+    if (this.input.wasPressed('Digit4')) this.setPlaybackSpeed(4)
+  }
+
+  private setPlaybackSpeed(speed: PlaybackSpeed): void {
+    if (!this.playback || this.playback.currentSpeed === speed) return
+    this.playback.setSpeed(speed)
+    this.presentation.ui.notify(`Replay speed ×${speed}`)
+  }
+
+  /** Wire the Replay Browser + Control Center replay entry. */
+  private wireReplayUI(): void {
+    const ui = this.presentation.ui
+
+    ui.replayBrowser.init({
+      getReplays: () => this.replays.getAll(),
+      onPlay: (id) => {
+        const replay = this.replays.get(id)
+        if (replay) this.startPlayback(replay)
+      },
+      onDelete: (id) => {
+        this.replays.delete(id)
+        ui.notify('Replay deleted')
+      },
+      onToggleFavorite: (id) => {
+        const replay = this.replays.get(id)
+        if (!replay) return false
+        const wasFavorite = replay.isFavorite
+        const nowFavorite = this.replays.toggleFavorite(id)
+        if (!wasFavorite && !nowFavorite) {
+          ui.notify('Favorites are full — unfavorite some replays first', 'warn')
+        }
+        return nowFavorite
+      },
+      onClose: () => {
+        // Regular screen sync resumes automatically (mirrors SnapshotBrowser).
+      },
+    })
+  }
+
+  /** Open the Replay Browser (Control Center button). */
+  private openReplayBrowser(): void {
+    // Never on top of an active playback or the recovery flow.
+    if (this.playback) return
+    if (this.world.state === 'recovery') return
+    // Playing → pause first so the world doesn't run behind the modal.
+    if (this.world.state === 'playing') {
+      this.simulation.togglePause()
+      this.snapshots.create('pause', this.world)
+    }
+    this.presentation.ui.replayBrowser.open()
   }
 }

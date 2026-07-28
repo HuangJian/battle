@@ -6,6 +6,7 @@ import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
 
 import { SnapshotBrowser } from './SnapshotBrowser'
+import { ReplayBrowser } from './ReplayBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
@@ -68,6 +69,7 @@ export class UIManager {
 
   // ---- Snapshot framework UI (plan §12, §13) ----
   readonly snapshotBrowser: SnapshotBrowser
+  readonly replayBrowser: ReplayBrowser
   readonly controlCenter: ControlCenter
   private toastEl: HTMLElement
   private toastTimer = 0
@@ -296,6 +298,10 @@ export class UIManager {
     // Snapshot Browser (plan §12) — full-overlay modal screen
     this.snapshotBrowser = new SnapshotBrowser()
     this.overlay.appendChild(this.snapshotBrowser.screen)
+
+    // Replay Browser (plan/replay.md) — full-overlay modal screen
+    this.replayBrowser = new ReplayBrowser()
+    this.overlay.appendChild(this.replayBrowser.screen)
 
     // Control Center sidebar (plan §13)
     this.controlCenter = new ControlCenter()

@@ -1,0 +1,297 @@
+import type { Replay, ReplayID, ReplayType } from '../../replay/types'
+
+// ================================================================
+// Replay Browser (plan/replay.md §11)
+//
+// Lists every stored replay (victory / defeat) as a timeline of
+// moments — thumbnail, type, stage, score, kills, play time and
+// creation time — plus PLAY / FAVORITE / DELETE actions. The square
+// thumbnail is the frame captured at the victory/defeat moment.
+//
+// Pure DOM component: reads replays through a provider callback and
+// reports Play / Delete / Favorite intents back to Game. Never
+// touches the World.
+// ================================================================
+
+export interface ReplayBrowserCallbacks {
+  /** Replay list provider (already sorted newest-first). */
+  getReplays: () => Replay[]
+  /** Play a replay (Game swaps input + drives the sim). */
+  onPlay: (id: ReplayID) => void
+  /** Delete a replay. */
+  onDelete: (id: ReplayID) => void
+  /** Toggle favorite. Return value reflects the new state (false = blocked). */
+  onToggleFavorite: (id: ReplayID) => boolean
+  onClose: () => void
+}
+
+const TYPE_LABELS: Record<ReplayType, string> = {
+  victory: 'VICTORY',
+  defeat: 'DEFEAT',
+}
+
+/** Toggle-group filters. */
+type FilterKey = 'all' | 'victory' | 'defeat' | 'favorite'
+
+const FILTERS: { key: FilterKey; label: string }[] = [
+  { key: 'all', label: 'ALL' },
+  { key: 'victory', label: 'VICTORY' },
+  { key: 'defeat', label: 'DEFEAT' },
+  { key: 'favorite', label: 'FAV ★' },
+]
+
+function formatPlayTime(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatCreated(epochMs: number): string {
+  const d = new Date(epochMs)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+export class ReplayBrowser {
+  readonly screen: HTMLElement
+  private listEl: HTMLElement
+  private countEl: HTMLElement
+  private callbacks: ReplayBrowserCallbacks | null = null
+  private openFlag = false
+  /** Entry pending delete confirmation (two-step delete). */
+  private confirmingDelete: ReplayID | null = null
+  /** Active list filter (toggle group). */
+  private filter: FilterKey = 'all'
+
+  constructor() {
+    this.screen = document.createElement('div')
+    this.screen.className = 'ui-screen ui-replays'
+    this.screen.innerHTML = `
+      <div class="snap-panel">
+        <div class="snap-header">
+          <h2 class="ui-title">REPLAY BROWSER</h2>
+          <div class="snap-filters" data-replay="filters"></div>
+          <div class="snap-header-right">
+            <span class="snap-count" data-replay="count"></span>
+            <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close</button>
+          </div>
+        </div>
+        <div class="snap-list" data-replay="list"></div>
+        <p class="ui-hint"><kbd>Esc</kbd> to close · <kbd>P</kbd> pause · <kbd>1-4</kbd> speed during playback</p>
+      </div>
+    `
+    this.listEl = this.screen.querySelector('[data-replay="list"]')!
+    this.countEl = this.screen.querySelector('[data-replay="count"]')!
+    const closeBtn = this.screen.querySelector('[data-replay="close"]') as HTMLElement
+    closeBtn.addEventListener('click', () => this.requestClose())
+
+    // Build the filter toggle group (ALL | VICTORY | DEFEAT | FAV ★).
+    const filtersEl = this.screen.querySelector('[data-replay="filters"]')!
+    for (const f of FILTERS) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'snap-filter' + (f.key === this.filter ? ' active' : '')
+      btn.textContent = f.label
+      btn.dataset.filter = f.key
+      btn.addEventListener('click', () => this.setFilter(f.key))
+      filtersEl.appendChild(btn)
+    }
+
+    // Own Esc while open (capture phase, before the game Input sees it).
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (!this.openFlag) return
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        if (e.code === 'Escape') this.requestClose()
+      },
+      true,
+    )
+  }
+
+  init(callbacks: ReplayBrowserCallbacks): void {
+    this.callbacks = callbacks
+  }
+
+  isOpen(): boolean {
+    return this.openFlag
+  }
+
+  open(): void {
+    if (this.openFlag) return
+    this.openFlag = true
+    this.confirmingDelete = null
+    this.refresh()
+    this.screen.classList.add('active')
+  }
+
+  close(): void {
+    if (!this.openFlag) return
+    this.openFlag = false
+    this.confirmingDelete = null
+    this.screen.classList.remove('active')
+  }
+
+  private requestClose(): void {
+    this.close()
+    this.callbacks?.onClose()
+  }
+
+  /** Switch the active filter and re-render the list. */
+  private setFilter(key: FilterKey): void {
+    if (this.filter === key) return
+    this.filter = key
+    this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
+      b.classList.toggle('active', b.dataset.filter === key)
+    })
+    this.refresh()
+  }
+
+  /** Rebuild the replay list from the provider, honouring the active filter. */
+  refresh(): void {
+    if (!this.callbacks) return
+    const all = this.callbacks.getReplays()
+    const replays =
+      this.filter === 'all'
+        ? all
+        : this.filter === 'favorite'
+          ? all.filter((r) => r.isFavorite)
+          : all.filter((r) => r.type === this.filter)
+    const total = all.length
+    const shown = replays.length
+
+    this.countEl.textContent =
+      this.filter === 'all' ? `${total} replay${total === 1 ? '' : 's'}` : `${shown} / ${total}`
+    this.listEl.textContent = ''
+
+    if (shown === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'snap-empty'
+      if (total > 0) {
+        const label =
+          this.filter === 'favorite'
+            ? 'favorited'
+            : this.filter === 'victory' || this.filter === 'defeat'
+              ? TYPE_LABELS[this.filter]
+              : ''
+        empty.textContent = label
+          ? `No ${label} replays — pick another filter.`
+          : 'No replays match this filter.'
+      } else {
+        empty.textContent = 'No replays yet — finish a stage (win or lose) to record one.'
+      }
+      this.listEl.appendChild(empty)
+      return
+    }
+
+    for (const replay of replays) {
+      this.listEl.appendChild(this.buildEntry(replay))
+    }
+  }
+
+  private buildEntry(replay: Replay): HTMLElement {
+    const m = replay.metadata
+    const entry = document.createElement('div')
+    entry.className = 'snap-entry'
+    entry.dataset.type = replay.type
+
+    const thumb = document.createElement('div')
+    thumb.className = 'snap-thumb'
+    if (replay.thumbnail) {
+      const img = document.createElement('img')
+      img.src = replay.thumbnail
+      img.alt = `Stage ${m.stage + 1} replay`
+      img.draggable = false
+      thumb.appendChild(img)
+    } else {
+      thumb.classList.add('snap-thumb-empty')
+      thumb.textContent = 'NO PREVIEW'
+    }
+
+    const info = document.createElement('div')
+    info.className = 'snap-info'
+    const typeLabel = TYPE_LABELS[replay.type] ?? String(replay.type).toUpperCase()
+    const star = m.playerLevel > 0 ? '★'.repeat(m.playerLevel) : '—'
+    info.innerHTML = `
+      <div class="snap-info-top">
+        <span class="snap-type snap-type-${replay.type}">${typeLabel}</span>
+        <span class="snap-stage">Stage ${String(m.stage + 1).padStart(2, '0')} · ${m.stageName}</span>
+        <span class="snap-created">${formatCreated(replay.createdAt)}</span>
+      </div>
+      <div class="snap-stats">
+        <span title="Score">⚑ ${m.score}</span>
+        <span title="Kills">☠ ${m.killCount}</span>
+        <span title="Player level">${star}</span>
+        <span title="Lives left">♥ ${m.lives}</span>
+        <span title="Duration">⏱ ${formatPlayTime(replay.durationMs)}</span>
+        ${replay.isFavorite ? '<span class="snap-commander" title="Favorited">★ FAV</span>' : ''}
+      </div>
+    `
+
+    const actions = document.createElement('div')
+    actions.className = 'snap-actions'
+
+    const playBtn = document.createElement('button')
+    playBtn.type = 'button'
+    playBtn.className = 'controls-btn controls-btn-primary snap-load'
+    playBtn.textContent = 'PLAY'
+    playBtn.addEventListener('click', () => {
+      // Close first (state becomes 'playing' action state), then play so the
+      // vsync rAF loop re-arms from inside startPlayback().
+      this.close()
+      this.callbacks?.onPlay(replay.id)
+    })
+
+    const favBtn = document.createElement('button')
+    favBtn.type = 'button'
+    favBtn.className = 'controls-btn snap-fav' + (replay.isFavorite ? ' snap-fav-on' : '')
+    favBtn.textContent = replay.isFavorite ? '★ FAV' : '☆ FAV'
+    favBtn.addEventListener('click', () => {
+      const nowFav = this.callbacks?.onToggleFavorite(replay.id) ?? false
+      replay.isFavorite = nowFav
+      favBtn.textContent = nowFav ? '★ FAV' : '☆ FAV'
+      favBtn.classList.toggle('snap-fav-on', nowFav)
+      // Update the inline badge in the info row.
+      const badge = info.querySelector('.snap-commander')
+      if (nowFav && !badge) {
+        const b = document.createElement('span')
+        b.className = 'snap-commander'
+        b.title = 'Favorited'
+        b.textContent = '★ FAV'
+        info.querySelector('.snap-stats')!.appendChild(b)
+      } else if (!nowFav && badge) {
+        badge.remove()
+      }
+      // A filter of 'favorite' now hides this entry if unfavorited.
+      if (this.filter === 'favorite' && !nowFav) this.refresh()
+    })
+
+    const delBtn = document.createElement('button')
+    delBtn.type = 'button'
+    delBtn.className = 'controls-btn snap-delete'
+    delBtn.textContent = 'DELETE'
+    delBtn.addEventListener('click', () => {
+      // Two-step: first click arms, second click confirms.
+      if (this.confirmingDelete === replay.id) {
+        this.confirmingDelete = null
+        this.callbacks?.onDelete(replay.id)
+        this.refresh()
+      } else {
+        this.confirmingDelete = replay.id
+        delBtn.textContent = 'SURE?'
+        delBtn.classList.add('snap-delete-arm')
+      }
+    })
+
+    actions.appendChild(playBtn)
+    actions.appendChild(favBtn)
+    actions.appendChild(delBtn)
+
+    entry.appendChild(thumb)
+    entry.appendChild(info)
+    entry.appendChild(actions)
+    return entry
+  }
+}
