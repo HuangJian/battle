@@ -6,7 +6,7 @@
 >
 > **新鲜度说明（gac.review.md 核查）**：§5.2 所列 4 个 bug **已在代码中修复**（urgencyBonus / powerup score / killerKind / failure! 断言均有 "Fix Bug" 注释或测试守卫）→ 已从实施包移除，仅保留验证项；§5.3 S6 **已部分实现**（`canHunt` 存在但阈值硬编码、`endgameEnemyThreshold` 声明未用）；§4 阶段 4 的 "A* 必须被使用" 断言**有误**——代码刻意用 `directMove` 追击，已修正断言。
 >
-> **完成状态（2026-07-28 验证）**：§0.5 拆分**延后**（纯 ergonomics，非行为改动，后续可独立做）；其余基础设施（缺口 A/B、`enemyCount`/`playerSpawn`/`enemySpawns`、`hasBase` 守卫、S6 参数化）+ §5.3 导航混合 + `tools/curriculum.ts` 全部落地。5 阶段结果（Kills / Ticks）：①1/141 ②3/333 ③20/2715 ④20/2208 ⑤20/2727，全部 `stage_clear` 且 Base ✅。下一步：真实 stage 0 回归门禁（Hard≥70% / Chaos≥30%，plan §6）。
+> **完成状态（2026-07-28 验证）**：§0.5 拆分**已完成**（见下方 §0.5 验收；`tests/godai-split-parity.test.ts` 锁时序通过，零行为改变；457 测试绿）；其余基础设施（缺口 A/B、`enemyCount`/`playerSpawn`/`enemySpawns`、`hasBase` 守卫、S6 参数化）+ §5.3 导航混合 + `tools/curriculum.ts` 全部落地。5 阶段结果（Kills / Ticks）：①1/141 ②3/333 ③20/2715 ④20/2208 ⑤20/2727，全部 `stage_clear` 且 Base ✅。下一步：真实 stage 0 回归门禁（Hard≥70% / Chaos≥30%，plan §6）。
 
 ---
 
@@ -28,7 +28,7 @@ God AI 调校**不要**用玩具关当 CMA-ES 的训练/优化环境；玩具关
 **拆分原则**
 - **纯重构、零行为改变**：不新增/修改任何决策逻辑，只搬方法。AGENTS §2.1（Input 只读 World）与 §2.3（确定性）不变；`Simulation`/`World` 不动。
 - **对外契约不动**：`GodAIInput` 仍实现 `InputLike`；`GodAIParams` / `DEFAULT_GOD_AI_PARAMS` / `SKILLED_HUMAN_PARAMS` 仍从 `GodAIInput.ts` 导出（其余工具 `optimize-godai` / `simulation-runner` / `ai-calibrate` / `calibration` 直接 import 它们，不能断）。
-- **共享状态收敛**：各子模块共享一个 `GodAIState`（持有 `world`/`params`/`rng` + 可变字段 `moveDir`/`fire`/`aggressive`/`path`/`replanTimer`/`reactionCounter`/`lastThreatId`/`branchCounts`）的纯数据对象，由 `GodAIInput` 创建并传入，避免全局可变状态。
+- **共享状态收敛（实际落地方式）**：原计划拟引入独立 `GodAIState` 数据对象；实际采用 **`Impl(self: GodAIInput)` 自由函数模式**——每个子模块方法以 `XImpl(self, ...)` 形式导出，`GodAIInput` 保留全部共享可变状态（`world`/`params`/`rng`/`_moveDir`/`_fire`/`aggressive`/`path`/`replanTimer`/`reactionCounter`/`lastThreatId`/`branchCounts`/`hasBase` 等）并暴露一组 `public` 薄封装方法供子模块互调。子模块 `import type { GodAIInput }`（仅类型，运行期无循环依赖），`GodAIInput` 单向 `import` 各 `*Impl`。运行期无全局可变状态、无循环依赖，且**方法体逐字搬迁**风险最低（无需改写每个方法的内部 `this.` 引用）。
 
 **建议的模块边界（按 code 实际分段，已 grep 校验）** — 新文件放 `src/ai/god/`：
 
@@ -42,12 +42,12 @@ God AI 调校**不要**用玩具关当 CMA-ES 的训练/优化环境；玩具关
 
 > 注：`findPowerUpTarget`(933) 随 `StrategyPlanner`（道具经济属目标层）；`calculateRouteDanger`(996) 随 `Navigator`（路线危险度属导航层）。模块边界以"决策职责"切，不以字母序。
 
-**验收（证明零行为改变）**
-- [ ] `bun run check` 全绿（类型 + 现有 `god-ai-gates.test.ts` 不变绿）。
-- [ ] 新增 `tests/godai-split-parity.test.ts`：对固定 seed × stage 0 跑 `runSimulation`，**锁定时序**——断言拆分前后 `outcome / ticks / killCount / baseAlive` 完全一致（防止搬方法时误改逻辑）。
-- [ ] `tools/decision-trace.ts` 对同一 seed 的前后 trace 应逐 tick 一致（人工抽检 1 个 seed）。
+**验收（证明零行为改变）— ✅ 已完成（2026-07-28）**
+- [x] `bun run check` 全绿（类型 + `god-ai-gates.test.ts` 不变绿）。拆分后 449 → **457** 测试（新增 8 个 parity 用例）。
+- [x] 新增 `tests/godai-split-parity.test.ts`：对 8 个固定 seed × stage 0 跑 `runSimulation`，**锁定时序**——断言拆分前后 `outcome / ticks / score / lives / killCount / baseAlive / playerLevel` 完全一致。基线在拆分前从 `28683be` 的单类 `GodAIInput.ts` 实跑捕获，并用 git 旧版 + 新版双跑交叉验证 8 个 seed 全部逐字段相等（覆盖 gameover / max_ticks / stage_clear 三种结局）。
+- [x] 交叉验证：临时从 `28683be` 取出旧 `GodAIInput.ts` 与重构版同跑 8 seed，输出 JSON 逐字段一致，确认零行为漂移；验证脚本与临时文件已删除，基线固化进 parity 测试。
 
-> 风险：共享可变状态若散落各子模块易引入隐性耦合。务必通过上面的 parity 测试兜底；拆分 PR 单独提交、不夹带任何逻辑改动。
+> 风险已闭环：共享状态经 `self: GodAIInput` 显式传入，无全局可变状态；parity 测试作为回归门禁兜底。拆分作为**独立 phase commit** 提交，未夹带任何逻辑改动。
 
 ---
 
@@ -221,7 +221,7 @@ God AI 调校**不要**用玩具关当 CMA-ES 的训练/优化环境；玩具关
 
 ## 8. Definition of Done
 
-- [ ] §0.5 GodAIInput 拆分完成，`tests/godai-split-parity.test.ts` 锁定时序通过（零行为改变），`bun run check` 全绿。
+- [x] §0.5 GodAIInput 拆分完成，`tests/godai-split-parity.test.ts` 锁定时序通过（零行为改变），`bun run check` 全绿（457 测试）。
 - [ ] 缺口 A/B + 出生点字段（`playerSpawn`/`enemySpawns`）落地，`makeArena` 能生成合法开敞竞技场；`bun run check` 全绿。
 - [ ] 无基地关：God AI 与敌人 AI 均忽略基地目标（`hasBase` 守卫 + `decision-trace` 抽验无 phantom-base rush），出生点重配进开敞区，`stage_clear` 不依赖基地（影响 1/2/3 已处置）；阶段 3 无刷怪死锁（`enemiesSpawned` 单调推进，影响 4）。
 - [ ] `tools/curriculum.ts` 存在，5 关断言可在 CI 跑，输出通过表。

@@ -1318,3 +1318,25 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - The `suboptimalPathProb` parameter is still used in `navigateTowards` (power-up collection) but not in `followPath`. The CMA-ES optimizer may want to set it to 0 globally since it causes more harm than good.
 - The next step is real stage 0 regression: verify Hard≥70% / Chaos≥30% pass rate (plan §6 门禁).
 
+
+---
+
+## 36. GodAIInput §0.5 Split — Pure Refactor into `src/ai/god/*` (2026-07-28)
+
+**Decision:** Extract the ~1537-line `src/ai/GodAIInput.ts` "God class" into four functional sub-modules under `src/ai/god/` — `FireControl.ts`, `ThreatAssessor.ts`, `StrategyPlanner.ts`, `Navigator.ts` (+ `constants.ts` for shared non-tunable constants). `GodAIInput.ts` becomes an orchestrator: it keeps the public state fields, the verbatim `think()` loop, the `GodAIParams`/`DEFAULT_GOD_AI_PARAMS`/`SKILLED_HUMAN_PARAMS` exports, and a thin `public` delegating wrapper per method.
+
+**Implementation pattern (deviation from plan):** The plan (§0.5) proposed a shared `GodAIState` data object passed to sub-modules. The actual split uses a **`XImpl(self: GodAIInput, ...)` free-function pattern** instead: each extracted method body becomes a free function taking `self: GodAIInput`; sub-modules `import type { GodAIInput }` (type-only, no runtime cycle), and `GodAIInput` one-directionally `import`s the `*Impl` functions. This was chosen over the `GodAIState` object because it required **no rewriting of any method body** (every `this.` reference stays valid through `self`), minimizing regression risk on a behavior-critical file.
+
+**Invariants preserved:**
+- Pure relocation — zero decision-logic changes. `think()` is byte-for-byte identical.
+- `GodAIInput` still implements `InputLike`; all tools (`optimize-godai`, `simulation-runner`, calibration) keep importing from `GodAIInput.ts` unchanged.
+- All mutable shared state stays on `GodAIInput` (passed as `self`); no global mutable state; no runtime circular dependency.
+
+**Parity proof:** A new `tests/godai-split-parity.test.ts` locks behavior via deterministic `runSimulation(seed, STAGES[0], 'classic')` across 8 seeds (1, 2, 7, 42, 100, 999, 12345, 55555) spanning all three outcomes (gameover / max_ticks / stage_clear). The baseline was captured from the pre-split single-class version at commit `28683be`, then cross-verified by running BOTH the git-old and refactored versions through an identical headless loop — all 8 seeds produced byte-identical `outcome / ticks / score / lives / killCount / baseAlive / playerLevel`. This proves zero behavior drift.
+
+**Verification gate:** `bun run check` green (tsc + oxlint + oxfmt + bun test). Test count rose 449 → **457** (8 new parity cases). The 3 typecheck errors found mid-split (`branchCounts.dead` missing; unused `self` in `tankCellImpl`; undeclared `b` in `baseBulletInterceptCellImpl`) were fixed.
+
+**Implications:**
+- Future God AI edits are localized to small files by responsibility (fire / threat / strategy / navigation) — lowers the friction for S6 threshold tuning, M1 prediction, and curriculum debugging originally cited as the motivation.
+- The parity test is the regression guard: any future behavior change in the AI core will break it immediately.
+- Committed as its own phase commit (no logic changes mixed in).
