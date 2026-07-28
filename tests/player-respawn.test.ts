@@ -41,7 +41,7 @@ describe('Bug #1 — star buff is lost on respawn', () => {
     expect(world.playerLevel).toBe(0) // reset to baseline, NOT 1
     expect(world.player!.level).toBe(0)
     // Derived stats reflect the baseline, not the pre-death upgraded tank.
-    const base = profileToStats(resolveProfile('player', 0), 'player', 0)
+    const base = profileToStats(resolveProfile('player', 0), 'player', 0, world.rules)
     // Speed carries a ±5% per-instance jitter (drawn from world.rng), so we
     // assert it lands inside the jitter band rather than an exact value.
     expect(world.player!.speed).toBeGreaterThanOrEqual(base.speed * SPEED_JITTER_MIN - 1e-9)

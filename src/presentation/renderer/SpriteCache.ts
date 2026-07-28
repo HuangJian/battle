@@ -71,7 +71,14 @@ export class SpriteCache {
     if (this._built) return
 
     // --- Tank sprites: pre-render all 4 directions ---
-    const tankKeys = ['tank.player1', 'tank.basic', 'tank.fast', 'tank.power', 'tank.armor', 'tank.ally']
+    const tankKeys = [
+      'tank.player1',
+      'tank.basic',
+      'tank.fast',
+      'tank.power',
+      'tank.armor',
+      'tank.ally',
+    ]
     for (const key of tankKeys) {
       const img = lib.get(key)
       if (!img) continue
@@ -140,13 +147,7 @@ export class SpriteCache {
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
-    const itemKeys = [
-      'item.star',
-      'item.bomb',
-      'item.shield',
-      'item.freeze',
-      'item.tank',
-    ]
+    const itemKeys = ['item.star', 'item.bomb', 'item.shield', 'item.freeze', 'item.tank']
     for (const key of itemKeys) {
       const img = lib.get(key)
       if (!img) continue

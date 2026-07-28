@@ -21,6 +21,8 @@ import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
+import { RULES, DEFAULT_RULES, hasStarPerk } from '../config/rules'
+import type { GameplayRules } from '../config/rules'
 import { rollSpeedJitter } from '../config/speed'
 import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
@@ -114,6 +116,10 @@ export class World {
   theme: ThemeColors
   themeKey: string
   difficultyKey: string
+  /** Active gameplay-rules profile (MANIFEST §2.2: lives on the World, never a
+   *  module global). Set in `startGame` from `RULES[difficultyKey]`. Survives
+   *  snapshot rewind because `restoreWorld` never touches it (plan §1). */
+  rules: GameplayRules
   menuCursor: number
   selectedStage: number
   rng: RNG
@@ -230,6 +236,11 @@ export class World {
     this.pickupWindowEntered = false
     this.difficulty = DIFFICULTIES['classic']
     this.difficultyKey = 'classic'
+    // Before startGame() is called there is no real game; use the modern
+    // DEFAULT_RULES so a pre-game World (and the menu preview) behaves like
+    // every modern difficulty. startGame() re-derives `rules` from the chosen
+    // difficulty — including the faithful classic profile.
+    this.rules = DEFAULT_RULES
     this.theme = THEMES[DEFAULT_THEME]
     this.themeKey = DEFAULT_THEME
     this.menuCursor = 0
@@ -265,6 +276,7 @@ export class World {
 
   startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
     this.difficultyKey = difficultyKey
+    this.rules = RULES[difficultyKey] ?? DEFAULT_RULES
     this.themeKey = themeKey
     this.difficulty = DIFFICULTIES[difficultyKey] ?? DIFFICULTIES['classic']
     this.theme = THEMES[themeKey] ?? THEMES[DEFAULT_THEME]
@@ -349,11 +361,22 @@ export class World {
     // (DECISIONS.md).
     this.spawnQueue = []
     const enemies = stage.enemies
+    const r = this.rules
     for (let i = 0; i < ENEMIES_PER_STAGE; i++) {
       const kind = enemies[i % enemies.length]
+      // The bonus carrier flag is DATA, not a hardcoded cadence (MANIFEST §2.4).
+      //  - classic (`fixed`): carriers are the stage's power-up enemies from
+      //    `fixedDropKillIndices` (1-based spawn index) — the red-box enemies
+      //    that drop when destroyed (faithful 1985 FC).
+      //  - modern: every `bonusEnemyEveryNSpawns`-th spawned enemy is a carrier
+      //    (the old `i % 4 === 3` cadence, now config-driven).
+      const isCarrier =
+        r.dropSchedule === 'fixed'
+          ? r.fixedDropKillIndices.includes(i + 1)
+          : r.bonusEnemyEveryNSpawns > 0 && (i + 1) % r.bonusEnemyEveryNSpawns === 0
       this.spawnQueue.push({
         kind,
-        bonus: i % 4 === 3,
+        bonus: isCarrier,
         spawnIndex: i,
       })
     }
@@ -417,12 +440,29 @@ export class World {
     // hardcoded numbers. Player profiles scale with star level; enemies use
     // their fixed archetype profile (modified only when promoted to elite).
     const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
-    const stats = profileToStats(profile, kind, kind === 'player' ? this.playerLevel : 0)
+    const stats = profileToStats(
+      profile,
+      kind,
+      kind === 'player' ? this.playerLevel : 0,
+      this.rules,
+    )
     // Enemy combat stats (including HP/armor) are fixed per archetype and never
     // scaled by difficulty — difficulty only changes the tier distribution that
     // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
     // enemy HP here would "enhance enemy power", which is explicitly forbidden.
     const hp = stats.maxHp
+
+    // Functional star ladder: the player's `fastBullet` perk (classic) is a
+    // multiplier on the base bullet speed. Apply it at spawn so a stage-
+    // persistent star level is correct, not just on star pickup (Simulation).
+    let bulletSpeed = stats.bulletSpeed
+    if (
+      kind === 'player' &&
+      this.rules.starModel === 'functional' &&
+      hasStarPerk(this.rules, this.playerLevel, 'fastBullet')
+    ) {
+      bulletSpeed *= this.rules.fastBulletMult
+    }
 
     // Enemy brains are initialized here (on the World — no hidden state).
     // The Tactical Intelligence Framework reads/writes these fields every tick.
@@ -467,12 +507,12 @@ export class World {
       kind,
       // Per-instance speed jitter (±5%): identical archetypes don't move in
       // lockstep, but it's drawn from world.rng so it stays deterministic.
-      speed: stats.speed * rollSpeedJitter(this.rng),
+      speed: stats.speed * (this.rules.speedJitter ? rollSpeedJitter(this.rng) : 1),
       hp,
       maxHp: hp,
       bulletPower: stats.bulletPower,
       damage: stats.damage,
-      bulletSpeed: stats.bulletSpeed,
+      bulletSpeed,
       fireCooldown: stats.fireCooldown,
       nextFireInterval: stats.fireCooldown,
       fireCount: 0,

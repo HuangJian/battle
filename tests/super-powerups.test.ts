@@ -26,19 +26,25 @@ import {
 
 const NORMAL_POWERUP_TYPES = ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat'] as const
 
-/** Fresh, seeded World on stage 0 in 'playing' state. */
-function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
+/** Fresh, seeded World on stage 0 in 'playing' state. Defaults to 'classic'
+ *  (used by the classic-coupled inventory/AoE tests), but callers that verify
+ *  the MODERN super-drop feature pass 'hard' so they aren't affected by
+ *  classic's faithful no-super / no-boat profile. */
+function buildSeededWorld(
+  seed: number,
+  difficulty: string = 'classic',
+): { world: World; sim: Simulation } {
   const world = new World()
   world.rng = new RNG(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
-  world.startGame('classic', 'modern', 0)
+  world.startGame(difficulty, 'modern', 0)
   return { world, sim }
 }
 
 describe('Super power-up — 10% super-item roll (DECISIONS.md §31)', () => {
   it('rollPowerUpType returns a SUPER type when rng < 10% chance', () => {
-    const { world, sim } = buildSeededWorld(11)
+    const { world, sim } = buildSeededWorld(11, 'hard')
     // Force the super branch every call.
     world.rng.next = () => 0.01
     const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
@@ -46,14 +52,14 @@ describe('Super power-up — 10% super-item roll (DECISIONS.md §31)', () => {
   })
 
   it('rollPowerUpType returns a NORMAL type when rng >= 10% chance', () => {
-    const { world, sim } = buildSeededWorld(11)
+    const { world, sim } = buildSeededWorld(11, 'hard')
     world.rng.next = () => 0.5
     const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
     expect(NORMAL_POWERUP_TYPES as readonly string[]).toContain(t)
   })
 
   it('super roll probability is ~10% over many deterministic samples', () => {
-    const { sim } = buildSeededWorld(0x5eed)
+    const { sim } = buildSeededWorld(0x5eed, 'hard')
     let superCount = 0
     const N = 4000
     for (let i = 0; i < N; i++) {
@@ -108,7 +114,9 @@ describe('Super power-up — 同归于尽 (sacrifice) AoE (DECISIONS.md §31)', 
     const p = world.player!
     p.x = 200
     p.y = 200 // center ≈ (216, 216)
-    const trigger = (sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }).triggerSacrificeAoE.bind(sim)
+    const trigger = (
+      sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }
+    ).triggerSacrificeAoE.bind(sim)
 
     // Enemy at the blast center → should die.
     const near = plantEnemy(world, p.x, p.y)
@@ -138,7 +146,9 @@ describe('Super power-up — 同归于尽 (sacrifice) AoE (DECISIONS.md §31)', 
     const p = world.player!
     p.x = 200
     p.y = 200
-    const trigger = (sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }).triggerSacrificeAoE.bind(sim)
+    const trigger = (
+      sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }
+    ).triggerSacrificeAoE.bind(sim)
 
     // Mid enemy at ~88px from center: inside 6 cells (96px) but outside 5 (80px).
     const mid = plantEnemy(world, p.x + 88, p.y)
@@ -171,7 +181,9 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
     p.spawnTimer = 0
     world.frenzyStock = 1
 
-    const activate = (sim as unknown as { activateFrenzy: (pl: unknown) => void }).activateFrenzy.bind(sim)
+    const activate = (
+      sim as unknown as { activateFrenzy: (pl: unknown) => void }
+    ).activateFrenzy.bind(sim)
     activate(p)
 
     expect(world.frenzyStock).toBe(0)
@@ -223,7 +235,9 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
       reset: () => {},
     }
     const sim2 = new Simulation(world, mockInput)
-    const activate = (sim2 as unknown as { activateFrenzy: (pl: unknown) => void }).activateFrenzy.bind(sim2)
+    const activate = (
+      sim2 as unknown as { activateFrenzy: (pl: unknown) => void }
+    ).activateFrenzy.bind(sim2)
     const updatePlayer = (sim2 as unknown as { updatePlayer: () => void }).updatePlayer.bind(sim2)
 
     activate(p)
@@ -255,7 +269,7 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
   }
 
   it('rollPowerUpType never returns boat on a no-water stage', () => {
-    const { world, sim } = buildSeededWorld(123)
+    const { world, sim } = buildSeededWorld(123, 'hard')
     clearWater(world)
     expect(world.tileMap.hasWater()).toBe(false)
     const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
@@ -265,7 +279,7 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
   })
 
   it('boat is only reachable when the stage has water', () => {
-    const { world, sim } = buildSeededWorld(123)
+    const { world, sim } = buildSeededWorld(123, 'hard')
     // Normal branch, and force rng.pick to return the LAST element of whichever
     // pool is passed — boat is last in the full pool, fence is last in NO_BOAT.
     world.rng.next = () => 0.5

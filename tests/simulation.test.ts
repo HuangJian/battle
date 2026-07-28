@@ -392,7 +392,7 @@ describe('Fire rate is fixed per type and independent of hit outcomes', () => {
     world.rng = new RNG(7)
     const input = new Input()
     const sim = new Simulation(world, input)
-    world.startGame('classic', 'modern', 0)
+    world.startGame('hard', 'modern', 0)
     // Isolate the fire-rate measurement: no enemies to shoot the player, and
     // skip the spawn-grace delay.
     world.spawnQueue.length = 0
@@ -503,6 +503,7 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
    */
   it('elite (commander-tier) enemy drops a power-up on death', () => {
     const { world, sim } = buildSeededWorld(123)
+    world.startGame('hard', 'modern', 0) // modern drop rules (classic uses fixed schedule)
     world.tanks.length = 0
     world.spawnQueue.length = 0
     world.enemiesRemaining = 1000 // avoid a stage-clear transition
@@ -548,6 +549,7 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
 
   it('every 10th kill drops a power-up; kills 1–9 do not', () => {
     const { world, sim } = buildSeededWorld(7)
+    world.startGame('hard', 'modern', 0) // modern drop rules (classic uses fixed schedule)
     world.tanks.length = 0
     world.spawnQueue.length = 0
     world.enemiesRemaining = 1000
@@ -594,6 +596,7 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
 
   it('every 5000 points accumulated drops a power-up (score milestone)', () => {
     const { world, sim } = buildSeededWorld(2026)
+    world.startGame('hard', 'modern', 0) // modern drop rules (classic uses fixed schedule)
     world.tanks.length = 0
     world.spawnQueue.length = 0
     world.enemiesRemaining = 1000 // avoid a stage-clear transition
@@ -640,8 +643,9 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
     expect(pu.y).toBe(e.y)
   })
 
-  it('drop triggered by the FINAL enemy of a stage is deferred, then released on the next stage\'s first kill', () => {
+  it("drop triggered by the FINAL enemy of a stage is deferred, then released on the next stage's first kill", () => {
     const { world, sim } = buildSeededWorld(99)
+    world.startGame('hard', 'modern', 0) // modern drop rules (classic uses fixed schedule)
     world.tanks.length = 0
     world.spawnQueue.length = 0
     world.enemiesRemaining = 1 // this kill will be the stage's last enemy

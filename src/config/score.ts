@@ -1,4 +1,6 @@
-import type { IntelligenceLevel } from '../types'
+import type { IntelligenceLevel, TankKind } from '../types'
+import type { GameplayRules } from './rules'
+import { DEFAULT_RULES } from './rules'
 
 /**
  * Centralized scoring formulas (user spec 2026-07-27).
@@ -55,13 +57,19 @@ export function levelFactor(stageIndex: number): number {
 
 /**
  * Score for destroying one enemy tank.
- *   base 100 * difficulty * level * AI
+ *   modern (flat):   base 100 * difficulty * level * AI
+ *   classic (byKind): scoreByKind[kind] — flat, no AI/difficulty/stage scaling
  */
 export function killScore(
   difficultyKey: string,
   aiLevel: IntelligenceLevel | undefined,
   stageIndex: number,
+  rules: GameplayRules = DEFAULT_RULES,
+  tankKind?: TankKind,
 ): number {
+  if (rules.scoreModel === 'byKind') {
+    return rules.scoreByKind[tankKind ?? 'basic'] ?? 100
+  }
   const diff = DIFFICULTY_SCORE_FACTOR[difficultyKey] ?? 1.0
   const ai = aiLevel ? (AI_SCORE_FACTOR[aiLevel] ?? 1.0) : 1.0
   const raw = KILL_BASE_SCORE * diff * levelFactor(stageIndex) * ai
@@ -69,6 +77,6 @@ export function killScore(
 }
 
 /** Score awarded for clearing the stage at the given (0-based) index. */
-export function stageClearScore(stageIndex: number): number {
-  return Math.round(1000 * levelFactor(stageIndex))
+export function stageClearScore(stageIndex: number, rules: GameplayRules = DEFAULT_RULES): number {
+  return Math.round(1000 * Math.pow(rules.scoreStageFactor, stageIndex + STAGE_INDEX_OFFSET))
 }

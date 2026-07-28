@@ -26,15 +26,11 @@ import {
   GRID,
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
-import { killScore, stageClearScore, ITEM_SCORE, SCORE_DROP_INTERVAL } from '../config/score'
-import {
-  SUPER_POWERUP_DROP_CHANCE,
-  SUPER_POWERUP_TYPES,
-  FRENZY_SHOTS,
-  SACRIFICE_BASE_RADIUS_CELLS,
-} from '../config/powerups'
+import { killScore, stageClearScore } from '../config/score'
+import { SUPER_POWERUP_TYPES, FRENZY_SHOTS, SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
+import { hasStarPerk } from '../config/rules'
 import { nextFireIntervalMs } from '../config/fire-rate'
 import { genId } from './World'
 import type { InputLike } from './Input'
@@ -82,21 +78,6 @@ function baseRingPositions(): Array<{ col: number; row: number }> {
   consider(bc + 2, br + 1)
   return cells
 }
-
-/** Power-up types a bonus enemy can drop (module-level to avoid per-drop allocation). */
-const POWERUP_TYPES: PowerUpType[] = [
-  'star',
-  'bomb',
-  'shield',
-  'freeze',
-  'tank',
-  'fence',
-  'boat',
-]
-
-/** Normal pool with `boat` removed — used on stages that have no water, since
- *  the boat (amphibious) power-up is useless without water to cross. */
-const POWERUP_TYPES_NO_BOAT: PowerUpType[] = POWERUP_TYPES.filter((t) => t !== 'boat')
 
 /**
  * Simulation — the only layer allowed to modify the World.
@@ -304,7 +285,7 @@ export class Simulation {
           tank.kind,
         )
         tank.profile = eliteProfile
-        const eliteStats = profileToStats(eliteProfile, tank.kind, tank.level ?? 0)
+        const eliteStats = profileToStats(eliteProfile, tank.kind, tank.level ?? 0, w.rules)
         tank.speed = eliteStats.speed
         tank.bulletSpeed = eliteStats.bulletSpeed
         tank.bulletPower = eliteStats.bulletPower
@@ -326,7 +307,7 @@ export class Simulation {
       w.tanks.push(tank)
       w.spawnQueue.shift()
       w.enemiesSpawned++
-      w.spawnTimer = 1500 // 1.5s between spawns
+      w.spawnTimer = w.rules.spawnIntervalMs // classic 1.8s, others 1.5s
       w.spawnPointIndex = (idx + 1) % n
       return
     }
@@ -419,7 +400,14 @@ export class Simulation {
       ownerKind: p.kind,
       isPlayer: true,
       allegiance: 'player',
-      speed: spawnBulletSpeedPxPerTick(p.kind, p.level ?? 0, w.bulletSeq++, w.frame),
+      speed: spawnBulletSpeedPxPerTick(
+        p.kind,
+        p.level ?? 0,
+        w.bulletSeq++,
+        w.frame,
+        w.rules.bulletSpeedCps,
+        w.rules.playerBulletSpeedPerStarCps,
+      ),
       power: p.bulletPower,
       damage: p.damage,
     }
@@ -696,7 +684,7 @@ export class Simulation {
       if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
         t.alive = false
         this.createExplosion(t.x + t.w / 2, t.y + t.h / 2, 'big')
-        const gained = killScore(w.difficultyKey, t.aiState?.level, w.stageIndex)
+        const gained = killScore(w.difficultyKey, t.aiState?.level, w.stageIndex, w.rules, t.kind)
         w.score += gained
         w.enemiesRemaining--
         w.killCount++
@@ -904,21 +892,43 @@ export class Simulation {
   private tryFire(tank: Tank): void {
     const w = this.world
     const now = w.frame * (1000 / 60)
-    // Fire rate is governed SOLELY by the tank's `nextFireInterval` — a value
-    // frozen at the previous shot from the fire-rate standard (config/fire-rate.ts):
-    // the kind's base interval × a deterministic per-fire jitter in
-    // random(0.95, 1.05). It is a fixed per-type cadence measured in time, and
-    // therefore cannot depend on whether any previous bullet is still in flight
-    // or has hit something.
+
+    // Fire-rate limiter — two mutually-exclusive models (config/rules.ts,
+    // plan/classic-faithful-feel.md Phase 2):
     //
-    // A previous implementation additionally gated the PLAYER on a
-    // max-concurrent-bullets count (1 at base level, 2 once promoted). That
-    // cap coupled the player's fire rate to bullet *lifetime*: because a
-    // bullet only disappears after it strikes terrain/a tank or leaves the
-    // field, the next shot was forced to wait for the previous one to
-    // resolve — so the effective rate depended on whether the last shell hit.
-    // The cap is intentionally removed: fire rate is `nextFireInterval`, period.
-    if (now - tank.lastFire < tank.nextFireInterval) return
+    //  - 'cooldown' (modern relax/hard/chaos): a fixed per-type TIME gate.
+    //    `nextFireInterval` is frozen at the previous shot from the fire-rate
+    //    standard (config/fire-rate.ts: base interval × deterministic per-fire
+    //    jitter). Rate is independent of whether the previous bullet is still
+    //    in flight — purely a time cadence.
+    //
+    //  - 'bulletCap' (classic FC-1985): fire rate is governed ONLY by the
+    //    on-screen bullet cap. The player may fire again the instant the
+    //    previous shell resolves (strikes terrain/a tank or leaves the field)
+    //    — there is NO separate time cooldown. This is the faithful FC feel:
+    //    holding fire yields a steady cadence paced by bullet *travel*, not by
+    //    an artificial timer. A prior draft layered `baseFireIntervalMs()` on
+    //    top of the cap; that produced a spurious ~1.2 s wait after every shot
+    //    and is removed (user-reported bug, 2026-07-28).
+    if (w.rules.fireModel === 'cooldown') {
+      if (now - tank.lastFire < tank.nextFireInterval) return
+    }
+
+    // On-screen bullet cap (classic 'bulletCap' model, plan Phase 2). Count the
+    // tank's own live bullets; block the shot once the cap is reached. The
+    // cap is `maxBullets[kind]`, plus +1 for the player at/above
+    // `playerDoubleShotLevel` (2★ → double-shot, FC-style). A canceled bullet
+    // frees its slot on the next frame (no twin-spawn — issue #12).
+    if (w.rules.fireModel === 'bulletCap') {
+      const cap =
+        (w.rules.maxBullets[tank.kind] ?? 1) +
+        (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
+      let inFlight = 0
+      for (const b of w.bullets) {
+        if (b.alive && b.ownerId === tank.id) inFlight++
+      }
+      if (inFlight >= cap) return
+    }
 
     const v = DIR_VECTORS[tank.dir]
 
@@ -944,7 +954,14 @@ export class Simulation {
       // snapshot-safe while NEVER perturbing enemy AI decisions (see
       // config/speed.ts). The base (tank.bulletSpeed) comes from the per-kind
       // table there.
-      speed: spawnBulletSpeedPxPerTick(tank.kind, tank.level ?? 0, w.bulletSeq++, w.frame),
+      speed: spawnBulletSpeedPxPerTick(
+        tank.kind,
+        tank.level ?? 0,
+        w.bulletSeq++,
+        w.frame,
+        w.rules.bulletSpeedCps,
+        w.rules.playerBulletSpeedPerStarCps,
+      ),
       power: tank.bulletPower,
       damage: tank.damage,
     }
@@ -1127,7 +1144,13 @@ export class Simulation {
           // guard simply stops fighting (§31 Phase 2).
           w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
         } else {
-          const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex)
+          const gained = killScore(
+            w.difficultyKey,
+            tank.aiState?.level,
+            w.stageIndex,
+            w.rules,
+            tank.kind,
+          )
           w.score += gained
           w.killCount++
           // Accompanying "balance" enemies (isExtra) are outside the per-stage
@@ -1158,24 +1181,38 @@ export class Simulation {
           // Extra (balance) enemies are excluded — they don't progress drops.
           if (!tank.isExtra) {
             this.flushPendingDrops() // release drops deferred from a prior stage
-            const isElite = tank.aiState?.isCommander === true
-            const isTenthKill = w.killCount % 10 === 0
-
+            const r = w.rules
             // Collect this kill's guaranteed drops, each anchored on the slain
-            // enemy's tile.
+            // enemy's tile. The rule set depends on the active GameplayRules.
             const drops: { x: number; y: number }[] = []
-            if (tank.bonus || isElite || isTenthKill) {
-              drops.push({ x: tank.x, y: tank.y })
+            if (r.dropSchedule === 'fixed') {
+              // FC: the power-up carrier enemies (marked `bonus` at spawn from
+              // `fixedDropKillIndices`) drop when destroyed — faithful to the
+              // 1985 game where the flashing red enemy IS the drop, regardless
+              // of kill order. No kill-counter logic leaks in here.
+              if (tank.bonus) {
+                drops.push({ x: tank.x, y: tank.y })
+              }
+            } else {
+              const isElite = tank.aiState?.isCommander === true
+              const isTenthKill = w.killCount % 10 === 0
+              if (
+                tank.bonus ||
+                (r.dropOnEliteKill && isElite) ||
+                (r.dropOnEveryNKills > 0 && isTenthKill)
+              ) {
+                drops.push({ x: tank.x, y: tank.y })
+              }
+              // Score milestone: every `dropOnScoreMilestone` points crossed in
+              // this single kill can drop several power-ups at once.
+              if (r.dropOnScoreMilestone > 0) {
+                const beforeScore = w.score - gained
+                const milestones =
+                  Math.floor(w.score / r.dropOnScoreMilestone) -
+                  Math.floor(beforeScore / r.dropOnScoreMilestone)
+                for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
+              }
             }
-
-            // Rule 4 — score milestone. Count how many SCORE_DROP_INTERVAL
-            // boundaries the new score crossed *in this single kill* so a big
-            // jackpot can drop several power-ups at once.
-            const beforeScore = w.score - gained
-            const milestones =
-              Math.floor(w.score / SCORE_DROP_INTERVAL) -
-              Math.floor(beforeScore / SCORE_DROP_INTERVAL)
-            for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
 
             if (drops.length > 0) {
               const isFinalEnemy = w.enemiesRemaining <= 0
@@ -1261,12 +1298,19 @@ export class Simulation {
    */
   private rollPowerUpType(): PowerUpType {
     const w = this.world
-    if (w.rng.next() < SUPER_POWERUP_DROP_CHANCE) {
+    const r = w.rules
+    // Super power-ups (强力道具) are gated by `superDropChance` (0 disables
+    // them entirely — classic sets it to 0, plan Phase 4).
+    if (r.superDropChance > 0 && w.rng.next() < r.superDropChance) {
       return w.rng.pick(SUPER_POWERUP_TYPES)
     }
-    // The boat (amphibious) power-up is only meaningful where there is water to
-    // cross — drop it only on water stages (DECISIONS.md §31 follow-up).
-    const pool = w.tileMap.hasWater() ? POWERUP_TYPES : POWERUP_TYPES_NO_BOAT
+    // The normal pool is filtered to `allowedPowerups`; the boat (amphibious)
+    // power-up is only meaningful where there is water to cross, so it is
+    // dropped only on water stages (DECISIONS.md §31 follow-up).
+    let pool = r.allowedPowerups
+    if (!w.tileMap.hasWater()) {
+      pool = pool.filter((t) => t !== 'boat')
+    }
     return w.rng.pick(pool)
   }
 
@@ -1327,7 +1371,7 @@ export class Simulation {
       if (aabb(p.x, p.y, p.w, p.h, pu.x, pu.y, pu.w, pu.h)) {
         pu.alive = false
         this.applyPowerUp(pu.type)
-        w.score += ITEM_SCORE
+        w.score += w.rules.itemScore
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
       }
     }
@@ -1348,18 +1392,37 @@ export class Simulation {
         // accumulates WITHOUT bound (the per-star gain decays past the
         // balanced×150% threshold inside playerProfile). The cap is a
         // classic-only, pickup-time constraint.
-        const classicCap = w.difficultyKey === 'classic'
-        const atCap = classicCap && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
+        const atCap =
+          w.difficultyKey === 'classic' && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
         if (!atCap) {
           p.level = (p.level ?? 0) + 1
           w.playerLevel = p.level
-          const stats = profileToStats(resolveProfile('player', p.level), 'player', p.level)
-          p.speed = stats.speed * rollSpeedJitter(this.world.rng)
+          const stats = profileToStats(
+            resolveProfile('player', p.level),
+            'player',
+            p.level,
+            w.rules,
+          )
+          p.speed = stats.speed * (w.rules.speedJitter ? rollSpeedJitter(this.world.rng) : 1)
           p.bulletSpeed = stats.bulletSpeed
           p.bulletPower = stats.bulletPower
           p.fireCooldown = stats.fireCooldown
           p.maxHp = stats.maxHp
           p.profile = resolveProfile('player', p.level)
+          // Functional star ladder (classic only, plan Phase 3). Matches FC:
+          // 1★ fast bullet → 2★ double-shot (realized by the bullet cap in
+          // tryFire) → 3★ steel-pierce. Non-classic stays universal-growth.
+          if (w.rules.starModel === 'functional') {
+            // Perks are cumulative in FC (a 2★ tank keeps the fast bullet it
+            // earned at 1★), so query across every level ≤ current, not just
+            // the current level's introduced-perk list (see hasStarPerk).
+            if (hasStarPerk(w.rules, p.level ?? 0, 'fastBullet')) {
+              p.bulletSpeed = stats.bulletSpeed * w.rules.fastBulletMult
+            }
+            if (hasStarPerk(w.rules, p.level ?? 0, 'steelPierce')) {
+              p.bulletPower = 2
+            }
+          }
         }
         break
 
@@ -1369,7 +1432,13 @@ export class Simulation {
           if (!tank.alive) continue
           tank.alive = false
           this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-          const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex)
+          const gained = killScore(
+            w.difficultyKey,
+            tank.aiState?.level,
+            w.stageIndex,
+            w.rules,
+            tank.kind,
+          )
           w.score += gained
           w.enemiesRemaining--
           w.killCount++
@@ -1558,7 +1627,7 @@ export class Simulation {
           : STAGE_CLEAR_DELAY_MS
         w.pickupWindowTimer = 0
         w.pickupWindowEntered = false
-        w.score += stageClearScore(w.stageIndex)
+        w.score += stageClearScore(w.stageIndex, w.rules)
         w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
         return
       }
@@ -1584,7 +1653,7 @@ export class Simulation {
         w.state = 'stageclear'
         w.stageClearTimer = POWERUP_PICKUP_END_DELAY_MS
         w.pickupWindowEntered = false
-        w.score += stageClearScore(w.stageIndex)
+        w.score += stageClearScore(w.stageIndex, w.rules)
         w.pushEvent({ type: 'stage_clear', stage: w.stageIndex })
         return
       }

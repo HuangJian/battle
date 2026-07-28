@@ -72,7 +72,9 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     const alliesBefore = world.allies.length
     const tanksBefore = world.tanks.length
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(sim)
+    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
+      sim,
+    )
     activate(p)
 
     // One ally appears.
@@ -97,7 +99,9 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     p.spawnTimer = 0
     world.guardStock = 2
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(sim)
+    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
+      sim,
+    )
 
     // First summon.
     activate(p)
@@ -121,7 +125,9 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     const alliesBefore = world.allies.length
     const tanksBefore = world.tanks.length
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(sim)
+    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
+      sim,
+    )
     activate(p)
 
     expect(world.allies.length).toBe(alliesBefore)
@@ -277,7 +283,9 @@ describe('天降神兵 — 同归于尽 ignores allied guards (DECISIONS.md §31
     world.allies.push(ally)
 
     world.sacrificeStock = 1
-    const trigger = (sim as unknown as { triggerSacrificeAoE: (pl: Tank) => void }).triggerSacrificeAoE.bind(sim)
+    const trigger = (
+      sim as unknown as { triggerSacrificeAoE: (pl: Tank) => void }
+    ).triggerSacrificeAoE.bind(sim)
     trigger(p)
 
     expect(ally.alive).toBe(true) // allies are never harmed by the player's AoE
