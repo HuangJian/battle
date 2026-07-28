@@ -1,4 +1,5 @@
 import type { TankKind, PowerUpType } from '../types'
+import type { Direction } from '../constants'
 import { SCORE_DROP_INTERVAL, ITEM_SCORE } from './score'
 import { SUPER_POWERUP_DROP_CHANCE } from './powerups'
 import {
@@ -127,9 +128,19 @@ export interface GameplayRules {
   /** Stage-clear score multiplier base (1.05^N modern, 1.0 FC). */
   scoreStageFactor: number
 
-  // ── Enemy behavior ───────────────────────────────────────────
+  // ── Enemy behavior (classic none-tier branch) ────────────────
   /** 'phased' is a NON-faithful modern extra; classic stays 'wander'. */
   enemyBehavior: 'wander' | 'phased'
+  /** Direction-weight table for classic wander bias (updateNoneTank → pickClassicDir).
+   *  Keys are cardinal directions; higher weight = more likely to be chosen.
+   *  FC-1985: enemies wander with a VERY slight downward bias (the eagle sits
+   *  at the bottom), but lateral directions are nearly equal. */
+  classicDirWeights: Record<Direction, number>
+  /** If true, classic none-tier enemies ONLY re-roll direction on collision
+   *  with terrain/bounds — no timer-based re-roll. FC-1985 faithful behavior.
+   *  If false, enemies also re-roll periodically (modern convenience that
+   *  prevents permanent jams). */
+  turnOnCollisionOnly: boolean
 
   // ── Terrain (stretch, not implemented) ───────────────────────
   brickGranularity: 'cell' | 'quarter'
@@ -195,6 +206,8 @@ export const DEFAULT_RULES: GameplayRules = {
   scoreStageFactor: 1.05, // current 1.05^stage
 
   enemyBehavior: 'wander', // current 100%-none constant wander
+  classicDirWeights: { down: 3, left: 1, right: 1, up: 0.35 }, // modern strong downward bias
+  turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
   brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
 }
@@ -261,6 +274,20 @@ export const RULES: Record<string, GameplayRules> = {
     scoreStageFactor: 1.0, // FC score is flat (no stage scaling)
 
     enemyBehavior: 'wander', // FAITHFUL: constant random wander, NO chase/push phases
+    // FC-1985 direction weights: enemies wander with a VERY slight downward bias
+    // (the eagle is at the bottom of the field), but lateral directions are nearly
+    // equal. The original game has no strong directional preference — enemies
+    // stumble into the base by chance or aggressive forward pressure, not by
+    // a weighted bias. The slight down preference (1.2×) reproduces this feel
+    // without the modern strong pull (down=3).
+    classicDirWeights: { down: 1.2, left: 1.0, right: 1.0, up: 1.0 },
+    // FC-1985: enemies ONLY change direction when they hit an obstacle (wall,
+    // water, or the edge of the field). There is NO timer-based re-roll.
+    // This matches the original's "bump and turn" behavior where enemies
+    // walk in straight lines until blocked, then randomly pick a new open
+    // direction. The modern timer re-roll (turnOnCollisionOnly: false) is
+    // a convenience that prevents permanent jams in tight corridors.
+    turnOnCollisionOnly: true,
     brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
   },

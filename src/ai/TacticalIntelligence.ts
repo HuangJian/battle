@@ -1,6 +1,7 @@
 import type { World } from '../game/World'
 import type { Tank, AIState, GoalType, CommanderDirective } from '../types'
 import type { Direction } from '../constants'
+import type { GameplayRules } from '../config/rules'
 import {
   CELL,
   TANK,
@@ -63,7 +64,7 @@ export class TacticalIntelligence {
       if (!tank.alive || tank.spawnTimer > 0 || !tank.aiState) continue
       if (tank.aiState.level === 'none') {
         // Classic branch (§3): minimal wander+fire, no tactical pipeline.
-        this.updateNoneTank(world, tank, fire)
+        this.updateNoneTank(world, tank, fire, world.rules)
       } else {
         this.updateTank(world, tank, fire)
       }
@@ -80,7 +81,12 @@ export class TacticalIntelligence {
    * timer expiry. No perception, no goals, no dodging, deaf to directives.
    * All randomness through `world.rng` — deterministic and snapshot-safe.
    */
-  private updateNoneTank(world: World, tank: Tank, fire: (tank: Tank) => void): void {
+  private updateNoneTank(
+    world: World,
+    tank: Tank,
+    fire: (tank: Tank) => void,
+    rules: GameplayRules,
+  ): void {
     const brain = tank.aiState!
     brain.thinkTimer -= this.dt
     brain.fireTimer -= this.dt
@@ -95,7 +101,11 @@ export class TacticalIntelligence {
     const blocked =
       !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
 
-    if (brain.thinkTimer <= 0 || blocked) {
+    // Direction re-roll trigger: FC-1985 faithful mode re-rolls ONLY on
+    // collision; modern mode also re-rolls on timer expiry to prevent jams.
+    const shouldReroll = rules.turnOnCollisionOnly ? blocked : brain.thinkTimer <= 0 || blocked
+
+    if (shouldReroll) {
       const open: Direction[] = []
       for (const d of ALL_DIRS) {
         const dv = DIR_VECTORS[d]
@@ -109,7 +119,7 @@ export class TacticalIntelligence {
         // Fully boxed in — back out (see chooseDirection's jam note).
         brain.currentDir = opposite(brain.currentDir)
       } else {
-        brain.currentDir = pickClassicDir(open, world)
+        brain.currentDir = pickClassicDir(open, world, rules)
       }
       brain.thinkTimer = NONE_TURN_MIN_MS + world.rng.next() * NONE_TURN_JITTER_MS
     }
@@ -665,9 +675,13 @@ function clamp(v: number, min: number, max: number): number {
  * the bottom, so "down" is "toward base") so None-tier tanks still drift
  * toward the objective like the original game while allowing lateral jukes. A
  * single `world.rng` draw keeps the None branch fully deterministic.
+ *
+ * The direction weights come from `world.rules.classicDirWeights` so that
+ * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
+ * while modern modes keep the strong downward pull (down: 3, up: 0.35).
  */
-function pickClassicDir(open: Direction[], world: World): Direction {
-  const weights: Record<Direction, number> = { down: 3, left: 1, right: 1, up: 0.35 }
+function pickClassicDir(open: Direction[], world: World, rules: GameplayRules): Direction {
+  const weights = rules.classicDirWeights
   let total = 0
   for (const d of open) total += weights[d]
   let r = world.rng.next() * total
