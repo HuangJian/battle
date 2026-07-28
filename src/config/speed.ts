@@ -61,11 +61,13 @@ export function cpsToPxPerTick(cps: number): number {
  * Base (no jitter) speed in px/tick for a kind, with player star scaling.
  * Enemies ignore `level`; only the player grows with stars.
  */
-export function baseSpeedPxPerTick(kind: TankKind, level = 0): number {
-  const cps =
-    kind === 'player'
-      ? BASE_SPEED_CPS.player + level * PLAYER_SPEED_PER_STAR_CPS
-      : BASE_SPEED_CPS[kind]
+export function baseSpeedPxPerTick(
+  kind: TankKind,
+  level = 0,
+  speedCps: Record<TankKind, number> = BASE_SPEED_CPS,
+  playerPerStar: number = PLAYER_SPEED_PER_STAR_CPS,
+): number {
+  const cps = kind === 'player' ? speedCps.player + level * playerPerStar : speedCps[kind]
   return cpsToPxPerTick(cps)
 }
 
@@ -161,11 +163,14 @@ export const PLAYER_BULLET_SPEED_PER_STAR_CPS = 0.5
  * Enemies ignore `level`; only the player grows with stars. This is the
  * canonical per-kind bullet-speed lookup used by `profileToStats`.
  */
-export function baseBulletSpeedPxPerTick(kind: TankKind, level = 0): number {
+export function baseBulletSpeedPxPerTick(
+  kind: TankKind,
+  level = 0,
+  bulletSpeedCps: Record<TankKind, number> = BASE_BULLET_SPEED_CPS,
+  playerPerStar: number = PLAYER_BULLET_SPEED_PER_STAR_CPS,
+): number {
   const cps =
-    kind === 'player'
-      ? BASE_BULLET_SPEED_CPS.player + level * PLAYER_BULLET_SPEED_PER_STAR_CPS
-      : BASE_BULLET_SPEED_CPS[kind]
+    kind === 'player' ? bulletSpeedCps.player + level * playerPerStar : bulletSpeedCps[kind]
   return cpsToPxPerTick(cps)
 }
 
@@ -204,6 +209,11 @@ export function spawnBulletSpeedPxPerTick(
   level: number,
   id: number,
   frame: number,
+  bulletSpeedCps: Record<TankKind, number> = BASE_BULLET_SPEED_CPS,
+  playerPerStar: number = PLAYER_BULLET_SPEED_PER_STAR_CPS,
 ): number {
-  return baseBulletSpeedPxPerTick(kind, level) * bulletSpeedJitter(id, frame)
+  return (
+    baseBulletSpeedPxPerTick(kind, level, bulletSpeedCps, playerPerStar) *
+    bulletSpeedJitter(id, frame)
+  )
 }

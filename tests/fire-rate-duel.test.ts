@@ -107,7 +107,7 @@ function runDuel(kind: Exclude<TankKind, 'player'>, ticks: number): DuelResult {
   world.rng = new RNG(1234)
   const input = new Input()
   const sim = new Simulation(world, input)
-  world.startGame('classic', 'modern', 0)
+  world.startGame('hard', 'modern', 0)
 
   // No other enemies — this is a 1v1 duel.
   world.spawnQueue.length = 0
@@ -223,7 +223,7 @@ describe('Fire-rate standard — head-on duel vs every enemy type (no buffs)', (
     world.rng = new RNG(99)
     const input = new Input()
     const sim = new Simulation(world, input)
-    world.startGame('classic', 'modern', 0)
+    world.startGame('hard', 'modern', 0)
 
     world.spawnQueue.length = 0
     const player = world.player!

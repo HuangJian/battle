@@ -1,4 +1,5 @@
-import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
+import type { Tank, Bullet, PowerUp, PowerUpType, TerrainType } from '../types'
+import type { Direction } from '../constants'
 import type { SpawnEntry } from '../game/World'
 
 // ================================================================
@@ -73,8 +74,13 @@ export interface WorldSnapshot {
   // Entities
   player: Tank | null
   tanks: Tank[]
+  /** Allied 天降神兵 guard tanks (third faction, DECISIONS.md §31 Phase 2). */
+  allies: Tank[]
   bullets: Bullet[]
   powerUps: PowerUp[]
+  /** Drops deferred from a prior stage (released on the next stage's first
+   *  enemy kill). Buffered so a rewind restores them deterministically. */
+  pendingDrops: { type: PowerUpType; x: number; y: number }[]
 
   // Stage info
   stageIndex: number
@@ -120,6 +126,17 @@ export interface WorldSnapshot {
   // ---- Base (eagle) HP (2026-07-27) ----
   baseHp: number
   baseMaxHp: number
+
+  // ---- Super power-up inventory & frenzy state (DECISIONS.md §31) ----
+  guardStock: number
+  frenzyStock: number
+  sacrificeStock: number
+  frenzyTimer: number
+  frenzyShotsLeft: number
+  frenzyLastFire: number
+  frenzyInterval: number
+  frenzyDir: Direction
+  fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
 }
 
 /**

@@ -59,9 +59,11 @@ const ITEM_KEY_MAP: Record<string, string> = {
   shield: 'item.shield',
   freeze: 'item.freeze',
   tank: 'item.tank',
-  helmet: 'item.helmet',
   fence: 'item.fence',
   boat: 'item.boat',
+  frenzy: 'item.frenzy',
+  sacrifice: 'item.sacrifice',
+  guard: 'item.guard',
 }
 
 /**
@@ -717,6 +719,84 @@ export class SpriteArtist {
     if (isCommander) {
       this.drawCommanderAura(x, y, size, animFrame)
     }
+  }
+
+  /**
+   * Draws the 天降神兵 allied guard — a TANK (same silhouette as every other
+   * unit so it reads as a real combatant) but with a distinct PURPLE body and a
+   * shield emblem on the turret in place of the player's star. Uses the
+   * dedicated `tank.ally` sprite. Rotates to face direction like any tank.
+   *
+   * The underlying `kind` still governs HP/AI behaviour, but every ally reads as
+   * the same friendly purple guard. Allies deliberately do NOT draw the enemy
+   * rank insignia or commander crown — their friendly status is conveyed by the
+   * purple body + shield emblem + ally aura.
+   */
+  drawAllyTank(x: number, y: number, size: number, dir: Direction, animFrame: number): void {
+    const key = 'tank.ally'
+
+    // Non-rotating ground shadow (same as every other tank)
+    this.drawTankShadow(x, y, size)
+
+    // Fast path: pre-rasterized + pre-rotated sprite
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const sprite = cache.getTankSprite(key, dirIdx)
+      if (sprite) {
+        const cs = cache.canvasSize
+        const cx = x + size / 2
+        const cy = y + size / 2
+        this.ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
+        return
+      }
+    }
+
+    // SVG fallback
+    const rot =
+      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) return
+
+    // Procedural fallback — purple ally tank (hardcoded; the real path is the
+    // pre-rasterized purple sprite above, so theming the fallback isn't needed).
+    this.drawTank(x, y, size, dir, '#8A4FD8', '#A06BE8', animFrame, 0)
+  }
+
+  /**
+   * Draw the allied-guard aura — a soft pulsing purple ring + a small upward
+   * chevron "friendly beacon" so the ally stays unmistakable on a busy field
+   * (deliberately distinct from the gold enemy commander crown).
+   */
+  drawAllyAura(x: number, y: number, size: number, frame: number): void {
+    const ctx = this.ctx
+    const m = 3
+    const bx = x - m
+    const by = y - m
+    const bw = size + m * 2
+    const bh = size + m * 2
+    const pulse = Math.sin(frame * 0.13) * 0.5 + 0.5
+
+    ctx.save()
+    // Soft pulsing purple ring
+    ctx.strokeStyle = '#B98CFF'
+    ctx.lineWidth = 2
+    ctx.globalAlpha = 0.7 + pulse * 0.3
+    ctx.beginPath()
+    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.55, bh * 0.55, 0, 0, Math.PI * 2)
+    ctx.stroke()
+
+    // Small upward chevron marker at the top-center (friendly beacon)
+    const cx = bx + bw / 2
+    const top = by + 1
+    ctx.globalAlpha = 0.9
+    ctx.fillStyle = '#E6D4FF'
+    ctx.beginPath()
+    ctx.moveTo(cx, top + 5)
+    ctx.lineTo(cx - 4, top + 1)
+    ctx.lineTo(cx + 4, top + 1)
+    ctx.closePath()
+    ctx.fill()
+    ctx.restore()
   }
 
   /**

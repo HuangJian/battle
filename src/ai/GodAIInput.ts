@@ -213,6 +213,10 @@ export class GodAIInput implements InputLike {
     return this._fire
   }
 
+  wasItemPressed(_kind: 'guard' | 'frenzy'): boolean {
+    return false
+  }
+
   endFrame(): void {
     this._thought = false
   }

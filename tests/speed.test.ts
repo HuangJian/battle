@@ -201,7 +201,7 @@ describe('Integration — World spawns tanks at a jittered base speed', () => {
     world.rng = new RNG(2024)
     world.startGame('classic', 'modern', 0)
     const p = world.player!
-    const base = baseSpeedPxPerTick('player', world.playerLevel)
+    const base = cpsToPxPerTick(world.rules.speedCps.player)
     expect(p.speed).toBeGreaterThanOrEqual(base * SPEED_JITTER_MIN - 1e-9)
     expect(p.speed).toBeLessThanOrEqual(base * SPEED_JITTER_MAX + 1e-9)
   })
@@ -212,7 +212,7 @@ describe('Integration — World spawns tanks at a jittered base speed', () => {
     world.startGame('classic', 'modern', 0)
     for (const kind of ENEMY_KINDS) {
       const t = world.createTank(kind, 8 * CELL, 8 * CELL, 'down')
-      const base = baseSpeedPxPerTick(kind)
+      const base = cpsToPxPerTick(world.rules.speedCps[kind])
       expect(t.speed).toBeGreaterThanOrEqual(base * SPEED_JITTER_MIN - 1e-9)
       expect(t.speed).toBeLessThanOrEqual(base * SPEED_JITTER_MAX + 1e-9)
     }
@@ -231,22 +231,23 @@ describe('Integration — World spawns tanks at a jittered base speed', () => {
   })
 })
 
-describe('Speed is a per-kind constant — difficulty never scales it', () => {
-  it('base speed is identical regardless of difficulty (function of kind only)', () => {
-    // baseSpeedPxPerTick ignores difficulty entirely; this locks that contract.
-    const classic = baseSpeedPxPerTick('fast')
+describe('Speed is a per-kind constant for the modern difficulties', () => {
+  it('modern difficulties share one speed table (classic carries its own)', () => {
+    // baseSpeedPxPerTick default = the modern table, independent of difficulty.
+    const hard = baseSpeedPxPerTick('fast')
     const chaos = baseSpeedPxPerTick('fast') // same computation, any difficulty
-    expect(classic).toBe(chaos)
-    // And a spawned tank on any difficulty still sits in the jitter band.
-    for (const diff of ['classic', 'relax', 'hard', 'chaos'] as const) {
+    expect(hard).toBe(chaos)
+    // Every MODERN difficulty spawns within its (modern) jitter band.
+    for (const diff of ['relax', 'hard', 'chaos'] as const) {
       const w = new World()
       w.rng = new RNG(8)
       w.startGame(diff, 'modern', 0)
       const t = w.createTank('armor', 8 * CELL, 8 * CELL, 'down')
-      const base = baseSpeedPxPerTick('armor')
+      const base = cpsToPxPerTick(w.rules.speedCps.armor)
       expect(t.speed).toBeGreaterThanOrEqual(base * SPEED_JITTER_MIN - 1e-9)
       expect(t.speed).toBeLessThanOrEqual(base * SPEED_JITTER_MAX + 1e-9)
     }
+    // classic uses a DIFFERENT (faithful FC) table — covered by classic-speed.test.ts.
   })
 })
 

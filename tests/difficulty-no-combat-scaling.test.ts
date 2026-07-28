@@ -31,12 +31,17 @@ describe('Difficulty does not scale enemy combat power', () => {
     }
   })
 
-  it('every enemy kind has identical combat stats across all difficulties', () => {
+  it('every enemy kind has identical combat stats across the modern difficulties', () => {
+    // NOTE: `classic` intentionally uses its OWN faithful profile (instant-kill
+    // TTK, 1-bullet cap, functional star ladder, fixed drops) — it is NOT a
+    // "scaled" version of the modern modes, so it is excluded here. This test
+    // locks the contract that the modern difficulties (relax/hard/chaos) never
+    // scale enemy combat power.
     // Baseline (classic) stats per kind.
     const baseline = new Map<Exclude<TankKind, 'player'>, ReturnType<typeof profileToStats>>()
     for (const kind of ENEMY_KINDS) baseline.set(kind, profileToStats(resolveProfile(kind), kind))
 
-    for (const key of DIFFICULTY_KEYS) {
+    for (const key of ['relax', 'hard', 'chaos'] as const) {
       const world = new World()
       world.startGame(key, 'modern', 0)
       for (const kind of ENEMY_KINDS) {

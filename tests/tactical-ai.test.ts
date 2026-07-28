@@ -475,6 +475,7 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
         ownerId: -1,
         ownerKind: 'player',
         isPlayer: true,
+        allegiance: 'player',
         speed: 2.5,
         power: 1,
         damage: 9999, // lethal in one hit if not dodged — isolates dodge

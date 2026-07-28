@@ -1,4 +1,6 @@
-import type { IntelligenceLevel } from '../types'
+import type { IntelligenceLevel, TankKind } from '../types'
+import type { GameplayRules } from './rules'
+import { DEFAULT_RULES } from './rules'
 
 /**
  * Centralized scoring formulas (user spec 2026-07-27).
@@ -22,6 +24,14 @@ export const KILL_BASE_SCORE = 100
 
 /** Points granted per power-up collected. */
 export const ITEM_SCORE = 100
+
+/**
+ * Score milestone that guarantees a power-up drop. Every time the player's
+ * accumulated score crosses a multiple of this value (5000), one power-up is
+ * dropped. A single large score gain can cross several milestones at once and
+ * therefore drop several power-ups.
+ */
+export const SCORE_DROP_INTERVAL = 5000
 
 /** Difficulty multiplier on kill score. */
 export const DIFFICULTY_SCORE_FACTOR: Record<string, number> = {
@@ -47,13 +57,19 @@ export function levelFactor(stageIndex: number): number {
 
 /**
  * Score for destroying one enemy tank.
- *   base 100 * difficulty * level * AI
+ *   modern (flat):   base 100 * difficulty * level * AI
+ *   classic (byKind): scoreByKind[kind] — flat, no AI/difficulty/stage scaling
  */
 export function killScore(
   difficultyKey: string,
   aiLevel: IntelligenceLevel | undefined,
   stageIndex: number,
+  rules: GameplayRules = DEFAULT_RULES,
+  tankKind?: TankKind,
 ): number {
+  if (rules.scoreModel === 'byKind') {
+    return rules.scoreByKind[tankKind ?? 'basic'] ?? 100
+  }
   const diff = DIFFICULTY_SCORE_FACTOR[difficultyKey] ?? 1.0
   const ai = aiLevel ? (AI_SCORE_FACTOR[aiLevel] ?? 1.0) : 1.0
   const raw = KILL_BASE_SCORE * diff * levelFactor(stageIndex) * ai
@@ -61,6 +77,6 @@ export function killScore(
 }
 
 /** Score awarded for clearing the stage at the given (0-based) index. */
-export function stageClearScore(stageIndex: number): number {
-  return Math.round(1000 * levelFactor(stageIndex))
+export function stageClearScore(stageIndex: number, rules: GameplayRules = DEFAULT_RULES): number {
+  return Math.round(1000 * Math.pow(rules.scoreStageFactor, stageIndex + STAGE_INDEX_OFFSET))
 }

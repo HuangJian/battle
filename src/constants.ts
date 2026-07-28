@@ -76,6 +76,10 @@ export const FENCE_STEEL_COUNT = 12
 /** Boat power-up: amphibious movement duration (ms) */
 export const BOAT_DURATION_MS = 20000
 
+/** Fence power-up: how long the steel ring around the base stays up (frames @ 60fps = 20s).
+ *  After it expires the ring reverts to brick walls. */
+export const FENCE_DURATION_FRAMES = 20 * 60
+
 /**
  * After the last enemy is destroyed, if power-ups are still on the field the
  * player gets this long (ms) to drive over and collect them before the stage

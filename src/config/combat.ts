@@ -2,6 +2,8 @@ import type { TankKind } from '../types'
 import type { CombatProfile, CombatDimension, TankStats } from '../types'
 import { baseSpeedPxPerTick, baseBulletSpeedPxPerTick } from './speed'
 import { baseFireIntervalMs } from './fire-rate'
+import type { GameplayRules } from './rules'
+import { DEFAULT_RULES } from './rules'
 
 /**
  * config/combat.ts — the heart of the Combat Capability System.
@@ -292,14 +294,20 @@ export function totalBudget(profile: CombatProfile): number {
  * (fast = fastest, heavy = toughest, power = hardest-hitting).
  *
  * Speed note: movement speed is NOT derived from the `mobility` dimension
- * here. Per-kind base speeds live in `config/speed.ts` (BASE_SPEED_CPS) because
- * the spec anchors absolute cells/sec values, and two archetypes (power &
- * armor) share mobility 30 yet move at different speeds. So `speed` is taken
- * from the data table whenever a `kind` is supplied; only synthetic (test)
+ * here. Per-kind base speeds come from `rules.speedCps` (config/rules.ts):
+ * classic carries the faithful FC table (basic/power/armor 0.5, fast 1.0
+ * px/frame) while modern carries the differentiated table (BASE_SPEED_CPS in
+ * config/speed.ts, the default for `baseSpeedPxPerTick`). So `speed` is taken
+ * from the rules table whenever a `kind` is supplied; only synthetic (test)
  * profiles without a kind fall back to the legacy mobility map. Every other
  * stat (bullet speed / HP / fire cadence) is still derived from the profile.
  */
-export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 0): TankStats {
+export function profileToStats(
+  profile: CombatProfile,
+  kind?: TankKind,
+  level = 0,
+  rules: GameplayRules = DEFAULT_RULES,
+): TankStats {
   // ── Speed (per-kind base, see config/speed.ts) ──────────────────────────
   // The hard invariant: EVERY bullet must travel clearly faster than the tank
   // that fired it, and than the fastest tank on the field. The base speeds top
@@ -307,28 +315,47 @@ export function profileToStats(profile: CombatProfile, kind?: TankKind, level = 
   // slowest bullet is 2.52 px/tick — a ~3.15× margin in the worst case. So the
   // race can never invert regardless of kind or jitter.
   const speed = kind
-    ? baseSpeedPxPerTick(kind, level)
+    ? baseSpeedPxPerTick(kind, level, rules.speedCps, rules.playerSpeedPerStarCps)
     : clamp(1.5 + ((profile.mobility - 30) * 2) / 70, 1.5, 3.5)
   // Bullet speed is a per-kind data table anchored to the balanced-enemy
   // movement speed × BULLET_SPEED_RATIO (see config/speed.ts), NOT derived from
   // the projectileSpeed capability — basic & player share projectileSpeed 50 yet
   // fire at different bullet speeds, so the table is the single source of truth.
-  // Synthetic (test) profiles without a kind fall back to the balanced enemy.
-  const bulletSpeed = baseBulletSpeedPxPerTick(kind ?? 'basic', level)
+  // The table comes from `rules.bulletSpeedCps` (config/rules.ts) so classic can
+  // carry the faithful FC table (most 15 cps, Power 30 cps) while modern keeps
+  // the differentiated ×4 table. Synthetic (test) profiles without a kind fall
+  // back to the balanced enemy.
+  const bulletSpeed = baseBulletSpeedPxPerTick(
+    kind ?? 'basic',
+    level,
+    rules.bulletSpeedCps,
+    rules.playerBulletSpeedPerStarCps,
+  )
   // ── Firepower → per-shot damage ─────────────────────────────────────────
   // The "火力强度值" (firepower strength) the user spec talks about is this
   // concrete per-shot damage. Linear in the `firepower` capability:
   //   damage = round(firepower * DAMAGE_SCALE)   (×1.05 for the no-star player)
   // basic → 50×2 = 100 (reference); the player at level 0 → 105.
   const isPlayer = kind === 'player'
-  const effFirepower = profile.firepower * (isPlayer ? PLAYER_FIREPOWER_MULT : 1)
-  const damage = Math.round(effFirepower * DAMAGE_SCALE)
-  // ── Armor → max HP ──────────────────────────────────────────────────────
-  // The "HP 值" is linear in the `armor` capability:
-  //   maxHp = round(armor * HP_SCALE)   (×1.05 for the no-star player)
-  // basic → 50×5 = 250 (reference: a peer kills it in 3 shots); player L0 → 263.
-  const effArmor = profile.armor * (isPlayer ? PLAYER_HP_MULT : 1)
-  const maxHp = Math.round(effArmor * HP_SCALE)
+  // ── Combat model: 'instant' (classic) vs 'pool' (modern) ───────────────
+  // 'instant': every bullet deals exactly `referenceDamage` (a flat, faithful
+  // FC "one hit = one kill" model where the only variation is each kind's
+  // `hitsToKill` count — e.g. armor takes 4). This keeps the math coherent
+  // across all shooters: a fast enemy (whose pool-model damage would be only
+  // 72) also deals the full `referenceDamage`, so it one-shots too (issue #2).
+  // 'pool': the original armor×5 / firepower×2 blood-pool model.
+  let damage: number
+  let maxHp: number
+  if (rules.combatModel === 'instant') {
+    damage = rules.referenceDamage
+    const hits = rules.hitsToKill[kind ?? 'basic'] ?? 1
+    maxHp = hits * rules.referenceDamage
+  } else {
+    const effFirepower = profile.firepower * (isPlayer ? PLAYER_FIREPOWER_MULT : 1)
+    damage = Math.round(effFirepower * DAMAGE_SCALE)
+    const effArmor = profile.armor * (isPlayer ? PLAYER_HP_MULT : 1)
+    maxHp = Math.round(effArmor * HP_SCALE)
+  }
   // ── Steel-pierce: player-only, level-gated ─────────────────────────────
   // Steel is destroyed solely by the player at/above STEEL_PIERCE_PLAYER_LEVEL.
   // Enemies — including ELITE power — NEVER pierce steel, regardless of how

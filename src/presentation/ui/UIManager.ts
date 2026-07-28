@@ -134,6 +134,13 @@ export class UIManager {
   private lastEnemies = -1
   private lastLives = -1
   private lastStar = -1
+  // Super power-up inventory counters (DECISIONS.md §31)
+  private hudGuard: HTMLElement
+  private hudFrenzy: HTMLElement
+  private hudSacrifice: HTMLElement
+  private lastGuard = -1
+  private lastFrenzy = -1
+  private lastSacrifice = -1
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -194,6 +201,18 @@ export class UIManager {
         <div class="hud-item">
           <span class="hud-label">ENEMY</span>
           <span class="hud-value" data-hud="enemies">20</span>
+        </div>
+        <div class="hud-item hud-super">
+          <span class="hud-label">天兵<F5></span>
+          <span class="hud-value" data-hud="guard">0</span>
+        </div>
+        <div class="hud-item hud-super">
+          <span class="hud-label">狂暴<F6></span>
+          <span class="hud-value" data-hud="frenzy">0</span>
+        </div>
+        <div class="hud-item hud-super">
+          <span class="hud-label">同归</span>
+          <span class="hud-value" data-hud="sacrifice">0</span>
         </div>
       </div>
     `
@@ -305,6 +324,9 @@ export class UIManager {
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
+    this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
+    this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
+    this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
@@ -632,6 +654,21 @@ export class UIManager {
       this.lastStar = world.playerLevel
     }
 
+    // Super power-up inventory counters (DECISIONS.md §31). Written only when
+    // the count actually changes. 天降神兵 is Phase 2 (shows 0 until then).
+    if (world.guardStock !== this.lastGuard) {
+      this.hudGuard.textContent = String(world.guardStock)
+      this.lastGuard = world.guardStock
+    }
+    if (world.frenzyStock !== this.lastFrenzy) {
+      this.hudFrenzy.textContent = String(world.frenzyStock)
+      this.lastFrenzy = world.frenzyStock
+    }
+    if (world.sacrificeStock !== this.lastSacrifice) {
+      this.hudSacrifice.textContent = String(world.sacrificeStock)
+      this.lastSacrifice = world.sacrificeStock
+    }
+
     // Active timed buffs (shield / freeze) — countdown shown outside the field
     this.updateBuffs(world)
 
@@ -672,7 +709,7 @@ export class UIManager {
   /**
    * Update the timed-buff countdown chips in the HUD. Only the buffs that are
    * genuinely time-limited get a countdown: the player's SHIELD
-   * (shield/helmet pickup + spawn protection, via player.shieldTimer) and the
+   * (spawn protection, via player.shieldTimer) and the
    * enemy FREEZE (freeze/clock pickup, via world.freezeTimer). Star / extra
    * life / bomb are instant or permanent and intentionally have no timer.
    *

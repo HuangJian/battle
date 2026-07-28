@@ -2,6 +2,7 @@ import type {
   Tank,
   Bullet,
   PowerUp,
+  PowerUpType,
   Explosion,
   ScorePopup,
   GameEvent,
@@ -20,6 +21,8 @@ import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
+import { RULES, DEFAULT_RULES, hasStarPerk } from '../config/rules'
+import type { GameplayRules } from '../config/rules'
 import { rollSpeedJitter } from '../config/speed'
 import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
@@ -59,10 +62,19 @@ export class World {
   // Entities
   player: Tank | null
   tanks: Tank[] // enemy tanks
+  allies: Tank[] // 天降神兵 allied guard tanks (third faction, DECISIONS.md §31 Phase 2)
   bullets: Bullet[]
   powerUps: PowerUp[]
   explosions: Explosion[]
   popups: ScorePopup[]
+  /**
+   * Power-up drops deferred because they were triggered by the FINAL enemy of
+   * a stage (dropping them would have them wiped by the stage-clear
+   * transition). Released on the first enemy kill of the following stage
+   * (item-drop v1, DECISIONS.md §30). Stores the already-resolved type +
+   * position so the buffered drop stays deterministic and snapshot-safe.
+   */
+  pendingDrops: { type: PowerUpType; x: number; y: number }[]
 
   // Stage info
   stageIndex: number
@@ -104,6 +116,10 @@ export class World {
   theme: ThemeColors
   themeKey: string
   difficultyKey: string
+  /** Active gameplay-rules profile (MANIFEST §2.2: lives on the World, never a
+   *  module global). Set in `startGame` from `RULES[difficultyKey]`. Survives
+   *  snapshot rewind because `restoreWorld` never touches it (plan §1). */
+  rules: GameplayRules
   menuCursor: number
   selectedStage: number
   rng: RNG
@@ -169,6 +185,22 @@ export class World {
   baseHp: number
   baseMaxHp: number
 
+  // --- Super power-up inventory & frenzy state (DECISIONS.md §31) ---
+  // Accumulated counts from picking up super power-ups (强力道具).
+  guardStock: number // 天降神兵 — Phase 2 summons a base guard
+  frenzyStock: number // 狂暴宣泄 — active F6 barrage
+  sacrificeStock: number // 同归于尽 — passive AoE on losing a life
+  // Active 狂暴宣泄 barrage runtime. Snapshot-safe so a rewind mid-barrage
+  // (and the enemy-kill that may trigger it) is faithful.
+  frenzyTimer: number // ms remaining in the current barrage (0 = inactive)
+  frenzyShotsLeft: number // shells left to fire this barrage
+  frenzyLastFire: number // ms timestamp of the last frenzy shell
+  frenzyInterval: number // ms between frenzy shells (= player fire interval / 5)
+  frenzyDir: Direction // locked firing direction during the barrage
+  // 栅栏道具 (fence): the frame at which the temporary steel ring around the
+  // base reverts to brick. undefined = no active fence. Snapshot-safe.
+  fenceExpireFrame?: number
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -178,10 +210,12 @@ export class World {
     this.tileMap = new TileMap()
     this.player = null
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
     this.popups = []
+    this.pendingDrops = []
     this.stageIndex = 0
     this.spawnQueue = []
     this.enemiesSpawned = 0
@@ -202,6 +236,11 @@ export class World {
     this.pickupWindowEntered = false
     this.difficulty = DIFFICULTIES['classic']
     this.difficultyKey = 'classic'
+    // Before startGame() is called there is no real game; use the modern
+    // DEFAULT_RULES so a pre-game World (and the menu preview) behaves like
+    // every modern difficulty. startGame() re-derives `rules` from the chosen
+    // difficulty — including the faithful classic profile.
+    this.rules = DEFAULT_RULES
     this.theme = THEMES[DEFAULT_THEME]
     this.themeKey = DEFAULT_THEME
     this.menuCursor = 0
@@ -221,12 +260,23 @@ export class World {
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false
+    // Super power-up inventory & frenzy (DECISIONS.md §31)
+    this.guardStock = 0
+    this.frenzyStock = 0
+    this.sacrificeStock = 0
+    this.frenzyTimer = 0
+    this.frenzyShotsLeft = 0
+    this.frenzyLastFire = 0
+    this.frenzyInterval = 0
+    this.frenzyDir = 'up'
+    this.fenceExpireFrame = undefined
   }
 
   // ---- Lifecycle ----
 
   startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
     this.difficultyKey = difficultyKey
+    this.rules = RULES[difficultyKey] ?? DEFAULT_RULES
     this.themeKey = themeKey
     this.difficulty = DIFFICULTIES[difficultyKey] ?? DIFFICULTIES['classic']
     this.theme = THEMES[themeKey] ?? THEMES[DEFAULT_THEME]
@@ -235,6 +285,18 @@ export class World {
     this.playerLevel = this.difficulty.playerStartLevel
     this.killCount = 0
     this.playTimeMs = 0
+    // Fresh run: clear any deferred drops left over from a previous game
+    // (e.g. a buffered drop from the final stage of a won run).
+    this.pendingDrops = []
+    // Fresh run: reset super power-up inventory & frenzy state (§31).
+    this.guardStock = 0
+    this.frenzyStock = 0
+    this.sacrificeStock = 0
+    this.frenzyTimer = 0
+    this.frenzyShotsLeft = 0
+    this.frenzyLastFire = 0
+    this.frenzyInterval = 0
+    this.frenzyDir = 'up'
     this.loadStage(startStage)
   }
 
@@ -264,6 +326,7 @@ export class World {
   loadStageData(stage: StageData, index = 0): void {
     this.tileMap.loadStage(stage)
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
@@ -288,6 +351,7 @@ export class World {
     this.spawnTimer = 0
     this.pickupWindowTimer = 0
     this.pickupWindowEntered = false
+    this.fenceExpireFrame = undefined // fence is stage-scoped; never carries across stages
 
     // Build spawn queue. The tier roll is intentionally NOT performed here:
     // it happens at spawn time in `Simulation.updateSpawning` so the RNG cost
@@ -297,11 +361,22 @@ export class World {
     // (DECISIONS.md).
     this.spawnQueue = []
     const enemies = stage.enemies
+    const r = this.rules
     for (let i = 0; i < ENEMIES_PER_STAGE; i++) {
       const kind = enemies[i % enemies.length]
+      // The bonus carrier flag is DATA, not a hardcoded cadence (MANIFEST §2.4).
+      //  - classic (`fixed`): carriers are the stage's power-up enemies from
+      //    `fixedDropKillIndices` (1-based spawn index) — the red-box enemies
+      //    that drop when destroyed (faithful 1985 FC).
+      //  - modern: every `bonusEnemyEveryNSpawns`-th spawned enemy is a carrier
+      //    (the old `i % 4 === 3` cadence, now config-driven).
+      const isCarrier =
+        r.dropSchedule === 'fixed'
+          ? r.fixedDropKillIndices.includes(i + 1)
+          : r.bonusEnemyEveryNSpawns > 0 && (i + 1) % r.bonusEnemyEveryNSpawns === 0
       this.spawnQueue.push({
         kind,
-        bonus: i % 4 === 3,
+        bonus: isCarrier,
         spawnIndex: i,
       })
     }
@@ -328,12 +403,15 @@ export class World {
     this.baseHp = this.baseMaxHp
     this.player = null
     this.tanks = []
+    this.allies = []
     this.bullets = []
     this.powerUps = []
     this.explosions = []
     this.popups = []
+    this.pendingDrops = []
     this.events = []
     this.stageIndex = index
+    this.fenceExpireFrame = undefined
   }
 
   /**
@@ -362,12 +440,29 @@ export class World {
     // hardcoded numbers. Player profiles scale with star level; enemies use
     // their fixed archetype profile (modified only when promoted to elite).
     const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
-    const stats = profileToStats(profile, kind, kind === 'player' ? this.playerLevel : 0)
+    const stats = profileToStats(
+      profile,
+      kind,
+      kind === 'player' ? this.playerLevel : 0,
+      this.rules,
+    )
     // Enemy combat stats (including HP/armor) are fixed per archetype and never
     // scaled by difficulty — difficulty only changes the tier distribution that
     // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
     // enemy HP here would "enhance enemy power", which is explicitly forbidden.
     const hp = stats.maxHp
+
+    // Functional star ladder: the player's `fastBullet` perk (classic) is a
+    // multiplier on the base bullet speed. Apply it at spawn so a stage-
+    // persistent star level is correct, not just on star pickup (Simulation).
+    let bulletSpeed = stats.bulletSpeed
+    if (
+      kind === 'player' &&
+      this.rules.starModel === 'functional' &&
+      hasStarPerk(this.rules, this.playerLevel, 'fastBullet')
+    ) {
+      bulletSpeed *= this.rules.fastBulletMult
+    }
 
     // Enemy brains are initialized here (on the World — no hidden state).
     // The Tactical Intelligence Framework reads/writes these fields every tick.
@@ -412,12 +507,12 @@ export class World {
       kind,
       // Per-instance speed jitter (±5%): identical archetypes don't move in
       // lockstep, but it's drawn from world.rng so it stays deterministic.
-      speed: stats.speed * rollSpeedJitter(this.rng),
+      speed: stats.speed * (this.rules.speedJitter ? rollSpeedJitter(this.rng) : 1),
       hp,
       maxHp: hp,
       bulletPower: stats.bulletPower,
       damage: stats.damage,
-      bulletSpeed: stats.bulletSpeed,
+      bulletSpeed,
       fireCooldown: stats.fireCooldown,
       nextFireInterval: stats.fireCooldown,
       fireCount: 0,
@@ -429,6 +524,7 @@ export class World {
       level: kind === 'player' ? this.playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
+      allegiance: kind === 'player' ? 'player' : 'enemy',
       profile,
       flashTimer: 0,
       hitCount: 0,
@@ -472,6 +568,7 @@ export class World {
   removeDeadEntities(): void {
     // In-place compaction — avoids creating 5 new arrays every tick
     this.compact(this.tanks, (t) => t.alive)
+    this.compact(this.allies, (t) => t.alive)
     this.compact(this.bullets, (b) => b.alive)
     this.compact(this.powerUps, (p) => p.alive)
     this.compact(this.explosions, (e) => e.timer > 0)
@@ -492,24 +589,26 @@ export class World {
   // ---- Queries ----
 
   get allTanks(): Tank[] {
-    if (this.player) {
-      // Reuse buffer — avoids creating a new array every call (called ~10×/tick)
-      this._allTanksBuf[0] = this.player
-      const tanks = this.tanks
-      for (let i = 0; i < tanks.length; i++) {
-        this._allTanksBuf[i + 1] = tanks[i]
-      }
-      this._allTanksBuf.length = tanks.length + 1
-      return this._allTanksBuf
-    }
-    return this.tanks
+    // Reuse buffer — avoids creating a new array every call (called ~10×/tick).
+    // Order: player, then allied guards, then enemy tanks.
+    const buf = this._allTanksBuf
+    let i = 0
+    if (this.player) buf[i++] = this.player
+    const allies = this.allies
+    for (let a = 0; a < allies.length; a++) buf[i++] = allies[a]
+    const tanks = this.tanks
+    for (let t = 0; t < tanks.length; t++) buf[i++] = tanks[t]
+    buf.length = i
+    return buf
   }
 
   get enemyCount(): number {
     let count = 0
     const tanks = this.tanks
     for (let i = 0; i < tanks.length; i++) {
-      if (tanks[i].spawnTimer <= 0) count++
+      // Accompanying "balance" enemies (isExtra) are outside the per-stage
+      // 20-enemy cap (DECISIONS.md §31 Phase 2).
+      if (tanks[i].spawnTimer <= 0 && !tanks[i].isExtra) count++
     }
     return count
   }

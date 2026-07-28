@@ -47,8 +47,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     tileGrid,
     player: world.player ? cloneTank(world.player) : null,
     tanks: world.tanks.map(cloneTank),
+    allies: world.allies.map(cloneTank),
     bullets: world.bullets.map(cloneBullet),
     powerUps: world.powerUps.map(clonePowerUp),
+    pendingDrops: world.pendingDrops.map((d) => ({ type: d.type, x: d.x, y: d.y })),
     stageIndex: world.stageIndex,
     spawnQueue: world.spawnQueue.map(cloneSpawnEntry),
     enemiesSpawned: world.enemiesSpawned,
@@ -73,6 +75,16 @@ export function cloneWorld(world: World): WorldSnapshot {
     directiveSeqCounter: world.directiveSeqCounter,
     baseHp: world.baseHp,
     baseMaxHp: world.baseMaxHp,
+    // Super power-up inventory & frenzy state (§31)
+    guardStock: world.guardStock,
+    frenzyStock: world.frenzyStock,
+    sacrificeStock: world.sacrificeStock,
+    frenzyTimer: world.frenzyTimer,
+    frenzyShotsLeft: world.frenzyShotsLeft,
+    frenzyLastFire: world.frenzyLastFire,
+    frenzyInterval: world.frenzyInterval,
+    frenzyDir: world.frenzyDir,
+    fenceExpireFrame: world.fenceExpireFrame,
   }
 }
 
@@ -100,8 +112,12 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   // Entities — clone from snapshot so the snapshot stays pristine
   world.player = snap.player ? cloneTank(snap.player) : null
   world.tanks = snap.tanks.map(cloneTank)
+  world.allies = snap.allies ? snap.allies.map(cloneTank) : []
   world.bullets = snap.bullets.map(cloneBullet)
   world.powerUps = snap.powerUps.map(clonePowerUp)
+  world.pendingDrops = snap.pendingDrops
+    ? snap.pendingDrops.map((d) => ({ type: d.type, x: d.x, y: d.y }))
+    : []
 
   // Clear transient visual data — Presentation will rebuild
   world.explosions = []
@@ -147,6 +163,17 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   // Base (eagle) HP
   world.baseMaxHp = snap.baseMaxHp ?? 0
   world.baseHp = snap.baseHp ?? world.baseMaxHp ?? 0
+
+  // Super power-up inventory & frenzy state (§31)
+  world.guardStock = snap.guardStock ?? 0
+  world.frenzyStock = snap.frenzyStock ?? 0
+  world.sacrificeStock = snap.sacrificeStock ?? 0
+  world.frenzyTimer = snap.frenzyTimer ?? 0
+  world.frenzyShotsLeft = snap.frenzyShotsLeft ?? 0
+  world.frenzyLastFire = snap.frenzyLastFire ?? 0
+  world.frenzyInterval = snap.frenzyInterval ?? 0
+  world.frenzyDir = snap.frenzyDir ?? 'up'
+  world.fenceExpireFrame = snap.fenceExpireFrame
 
   // Resume playing
   world.state = 'playing'
