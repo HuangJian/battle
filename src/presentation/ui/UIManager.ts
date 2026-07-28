@@ -52,6 +52,8 @@ export class UIManager {
   private buffShieldTime: HTMLElement
   private buffFreeze: HTMLElement
   private buffFreezeTime: HTMLElement
+  private buffFence: HTMLElement
+  private buffFenceTime: HTMLElement
   private overlay: HTMLElement
   private menuScreen: HTMLElement
   private pauseScreen: HTMLElement
@@ -144,6 +146,7 @@ export class UIManager {
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
+  private lastFenceSec = -1
   private lastMenuCursor = -1
   private lastDifficultyKey = ''
   private lastThemeKeyMenu = ''
@@ -186,6 +189,10 @@ export class UIManager {
           <div class="buff-chip buff-freeze" data-buff="freeze" hidden>
             <span class="buff-icon">❄</span>
             <span class="buff-time" data-buff-time="freeze">0</span>
+          </div>
+          <div class="buff-chip buff-fence" data-buff="fence" hidden>
+            <span class="buff-icon">🔧</span>
+            <span class="buff-time" data-buff-time="fence">0</span>
           </div>
         </div>
         <div class="hud-pause" data-hud="pause">
@@ -333,6 +340,8 @@ export class UIManager {
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
     this.buffFreeze = this.hudBar.querySelector('[data-buff="freeze"]')!
     this.buffFreezeTime = this.hudBar.querySelector('[data-buff-time="freeze"]')!
+    this.buffFence = this.hudBar.querySelector('[data-buff="fence"]')!
+    this.buffFenceTime = this.hudBar.querySelector('[data-buff-time="fence"]')!
 
     // Cache menu DOM elements (avoid querySelectorAll every frame)
     this.menuDiffOptions = Array.from(
@@ -707,11 +716,11 @@ export class UIManager {
   }
 
   /**
-   * Update the timed-buff countdown chips in the HUD. Only the buffs that are
-   * genuinely time-limited get a countdown: the player's SHIELD
-   * (spawn protection, via player.shieldTimer) and the
-   * enemy FREEZE (freeze/clock pickup, via world.freezeTimer). Star / extra
-   * life / bomb are instant or permanent and intentionally have no timer.
+   * Update the timed-buff countdown chips in the HUD. Time-limited buffs:
+   * SHIELD (spawn protection, via player.shieldTimer), FREEZE (freeze/clock
+   * pickup, via world.freezeTimer), and FENCE (steel ring, via
+   * fenceExpireFrame). Star / extra life / bomb are instant or permanent and
+   * intentionally have no timer.
    *
    * DOM writes are keyed on the remaining WHOLE second so the text only
    * changes ~once per second, and a chip's `hidden` attribute flips only on
@@ -722,6 +731,13 @@ export class UIManager {
     this.updateBuffChip(this.buffShield, this.buffShieldTime, shieldMs, 'shield')
 
     this.updateBuffChip(this.buffFreeze, this.buffFreezeTime, world.freezeTimer, 'freeze')
+
+    // Fence countdown: fenceExpireFrame is absolute; convert to ms remaining.
+    const fenceMs =
+      world.fenceExpireFrame !== undefined && world.fenceExpireFrame > world.frame
+        ? (world.fenceExpireFrame - world.frame) * (1000 / 60)
+        : 0
+    this.updateBuffChip(this.buffFence, this.buffFenceTime, fenceMs, 'fence')
   }
 
   /** Reflect a single buff's remaining time into its chip; hide it at 0. */
@@ -729,12 +745,18 @@ export class UIManager {
     chip: HTMLElement,
     timeEl: HTMLElement,
     ms: number,
-    which: 'shield' | 'freeze',
+    which: 'shield' | 'freeze' | 'fence',
   ): void {
     const sec = ms > 0 ? Math.ceil(ms / 1000) : 0
-    const last = which === 'shield' ? this.lastShieldSec : this.lastFreezeSec
+    const last =
+      which === 'shield'
+        ? this.lastShieldSec
+        : which === 'fence'
+          ? this.lastFenceSec
+          : this.lastFreezeSec
     if (sec === last) return
     if (which === 'shield') this.lastShieldSec = sec
+    else if (which === 'fence') this.lastFenceSec = sec
     else this.lastFreezeSec = sec
 
     if (sec > 0) {
