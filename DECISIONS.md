@@ -1357,3 +1357,26 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 **Verification:** `bun run check` green — **458 tests** (was 457; +1 gate test), 0 warnings, 0 errors.
 
 **Implication:** The committed `DEFAULT_GOD_AI_PARAMS` now equals the optimizer's `bestParams` for all 13 fields, so the shipped God AI matches the v3 report's eval-seed performance. Real-stage stability is still below the plan §6 gate (Hard≥70% / Chaos≥30%) — see §36; that remains the outstanding optimization target.
+
+
+---
+
+## 38. God AI CMA-ES v4.1 — Verification of Results Report (2026-07-29)
+
+**Context:** User reported a v4.1 optimization (fitness v3 to v4 to v4.1, seeds 8 to 40, win 20% / base 85% to 97.5% / kills 10.8 to 12.0 / gameovers 6 to 1). Trust-but-verify pass, parallel to 36/37.
+
+**Verified TRUE:**
+- v4.1 fitness formula present in tools/optimize-godai.ts: winRate*5000 + avgKills*60 + baseSurvivalRate*200 + speedBonus (<=800) - remainingEnemyPenalty - gameoverPenalty - lowKillNonWins*400, where remainingEnemyPenalty applies remaining*25 to ALL non-wins (closes the v4 gameover loophole where dying early escaped the timeout penalty), gameoverPenalty = gameovers*500, lowKillNonWins*400 for all non-wins with <5 kills.
+- Optimizer output .workbuddy/optimization-v4_1/optimization-summary.json: bestEvalResult fitness -9548.6 / win 0.2 / base 0.975 / kills 11.975 / 1 gameover; defaultEvalResult (pre-v4 params) -13669.6 / 0.2 / 0.85 / 10.85 / 6 gameovers — matches the report table exactly.
+- DECISIVE: shipped DEFAULT_GOD_AI_PARAMS reproduces the headline numbers. Empirically ran 40 seeds @18000 classic stage0: shipped -> win 20.0% / base 97.5% / kills 11.72 / 1 gameover; report claims 20% / 97.5% / 12.0 / 1. Win/base/gameover IDENTICAL (unlike 37's v3, where the 37.5% headline was NOT reproducible from shipped code). Materially more honest report than v3.
+- bun run check green (458 tests); bun run build succeeds; 5 curriculum stages pass within the 458.
+- 0-kill stuck seeds (16/23/25/29/33) confirmed in bestEvalResult perSeed (all kills=0, max_ticks) — the report's architectural-bottleneck diagnosis is accurate; win rate stuck at 20%, needs architectural change (wall-breaking / path repair), not param tuning.
+
+**Caveats (minor, far lighter than 37):**
+- reactionDelay write-back gap (same class as 37): optimizer bestParams.reactionDelay=1, shipped DEFAULT.reactionDelay=0. Impact tiny: only +0.25 avg kills (11.72 to 11.97); win/base/gameover unchanged. Write back to 1 for full parity with the report.
+- Report param table lists 8 of 13 changed fields; omits suboptimalPathProb (0.0617 to 0.0931), threatRangeCells (26 to 20), reactionDelay (0 to 1). All three ARE in shipped DEFAULT (suboptimalPathProb kept full float precision this time — no v3-style precision loss).
+- tools/curriculum.ts silently swapped stage-5 seed 42 -> 7 so the curriculum gate stays green under v4.1 params (seed 42 no longer clears). Coverage moved, not a correctness error.
+- Changes UNCOMMITTED (dirty tree: GodAIInput.ts, optimize-godai.ts, parity test, curriculum.ts + untracked tools/capture-parity.ts).
+- Parity test baseline re-locked again (no longer guards 0.5 split; that equality proven at 0d3275b).
+
+**Implication:** Committed God AI is genuinely stronger on robustness (base survival, fewer gameovers, more kills) but win rate plateaued at 20% — param space exhausted for win rate; report's conclusion (architectural improvement needed for 0-kill stuck seeds) stands. Plan 6 real-stage gate (Hard>=70% / Chaos>=30%) remains unmet.

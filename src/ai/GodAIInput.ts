@@ -132,40 +132,48 @@ export interface GodAIParams {
   huntAllyCount: number
 }
 
-/** Default God AI parameters — optimized via CMA-ES v3 (2026-07-28).
- * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v3/ for details.
+/** Default God AI parameters — optimized via CMA-ES v4.1 (2026-07-28).
+ * See .workbuddy/optimization-v4_1/ for details.
  *
- * CMA-ES v3 used a kill-centric fitness function (win*5000 + kills*60 +
- * base*150 + speed - lowKillTimeout*250) with IPOP restarts. The optimizer
- * found a "defense-first, chase-when-safe" strategy: tight base defense
- * (offset=1, spread=5, scanRadius=1) with moderate roaming (dist=10) and
- * very frequent replanning (interval=3). endgameEnemyThreshold=1 means the
- * AI relies on the !baseUnderThreat chase branch for most of the game,
- * only activating full hunt mode for the last enemy.
+ * CMA-ES v4.1 used a clear-speed-centric fitness function with a
+ * gameover-loophole fix:
+ *   win*5000 + kills*60 + base*200 + speed*800
+ *   - remaining*25 - gameover*500 - lowKill*400
  *
- * Win-rate numbers below are from the optimizer's NARROW eval set
- * (seeds 1–8, 18000 ticks) — NOT a wide regression. On a 60-seed classic
- * spread the realistic figures are ~23% win / ~83% base survival /
- * ~10–14 avg kills. The two float params that carry most of the gain
- * (aimError, suboptimalPathProb) were dropped during the initial write-back
- * and restored on 2026-07-28:
- *   optimizer best (seeds 1–8):  37.5% win / 100% base / 16.4 kills
- *   shipped pre-fix (same seeds): 25.0% win / 100% base / 13.9 kills */
+ * The fitness penalizes ALL non-wins for remaining enemies (not just
+ * timeouts), adds an extra gameover penalty (base lost = always worse
+ * than timeout), and was evaluated across 40 seeds (up from 8).
+ *
+ * v4.1 results (40 seeds, 18000 ticks, classic stage 0):
+ *   Default (v3): 20% win / 85% base / 10.8 kills / 6 gameovers
+ *   Optimized:    20% win / 97.5% base / 12.0 kills / 1 gameover
+ *
+ * Key strategy changes from v3 (all 11 optimizer-tuned fields; replanInterval=3
+ * and powerupMaxDivertDistance=9 were set in the earlier v3 work and unchanged here):
+ *   - reactionDelay 0→1 (slightly slower reactions → less jittery firing)
+ *   - aimError 0.0024→0 (perfect aim)
+ *   - suboptimalPathProb 0.062→0.093 (more path noise / willingness to take imperfect routes)
+ *   - Wider defense (spread 5→9, offset 1→2) with larger wall scan (1→2)
+ *   - threatRangeCells 26→20 (tighter enemy threat sensing window)
+ *   - Longer bullet interception range (3→7) for better base protection
+ *   - Earlier hunting (endgameEnemyThreshold 1→3) with more enemies allowed (huntAllyCount 4→6)
+ *   - Further roaming distance (10→14) for aggressive kill pursuit
+ */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
-  reactionDelay: 0,
-  aimError: 0.002423129688943702,
-  suboptimalPathProb: 0.06178084394496533,
+  reactionDelay: 1,
+  aimError: 0,
+  suboptimalPathProb: 0.09313768317029014,
 
-  defenseRowOffset: 1,
-  defenseColSpread: 5,
-  threatRangeCells: 26,
-  maxPlayerDistFromBase: 10,
-  t8MaxInterceptDistCells: 3,
-  baseWallScanRadius: 1,
+  defenseRowOffset: 2,
+  defenseColSpread: 9,
+  threatRangeCells: 20,
+  maxPlayerDistFromBase: 14,
+  t8MaxInterceptDistCells: 7,
+  baseWallScanRadius: 2,
   replanInterval: 3,
   powerupMaxDivertDistance: 9,
-  endgameEnemyThreshold: 1,
-  huntAllyCount: 4,
+  endgameEnemyThreshold: 3,
+  huntAllyCount: 6,
 }
 
 /**

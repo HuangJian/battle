@@ -16,6 +16,7 @@
  */
 
 import { STAGES } from '../src/config/stages'
+import { ENEMIES_PER_STAGE } from '../src/constants'
 import { runSimulation } from './simulation-runner'
 import { traceSimulation, analyzeTrace } from './decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
@@ -40,19 +41,21 @@ interface ParamSpec {
 
 // Init values match current DEFAULT_GOD_AI_PARAMS so CMA-ES starts from the
 // best known operating point and explores outward.
+// Init values synced with DEFAULT_GOD_AI_PARAMS (2026-07-28 v3 results).
+// Ranges widened where the optimizer previously hit bounds.
 const SEARCH_SPACE: ParamSpec[] = [
   { name: 'reactionDelay', min: 0, max: 6, isInteger: true, init: 0, stepFrac: 0.25 },
-  { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0, stepFrac: 0.3 },
-  { name: 'suboptimalPathProb', min: 0, max: 0.2, isInteger: false, init: 0.05, stepFrac: 0.3 },
+  { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0.0024, stepFrac: 0.3 },
+  { name: 'suboptimalPathProb', min: 0, max: 0.2, isInteger: false, init: 0.062, stepFrac: 0.3 },
   { name: 'defenseRowOffset', min: 1, max: 5, isInteger: true, init: 1, stepFrac: 0.25 },
-  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 5, stepFrac: 0.25 },
   { name: 'threatRangeCells', min: 8, max: 26, isInteger: true, init: 26, stepFrac: 0.2 },
-  { name: 'maxPlayerDistFromBase', min: 4, max: 26, isInteger: true, init: 7, stepFrac: 0.25 },
-  { name: 't8MaxInterceptDistCells', min: 2, max: 13, isInteger: true, init: 8, stepFrac: 0.3 },
-  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 5, stepFrac: 0.3 },
-  { name: 'replanInterval', min: 3, max: 50, isInteger: true, init: 10, stepFrac: 0.25 },
-  { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 3, stepFrac: 0.25 },
-  { name: 'endgameEnemyThreshold', min: 1, max: 20, isInteger: true, init: 6, stepFrac: 0.3 },
+  { name: 'maxPlayerDistFromBase', min: 4, max: 26, isInteger: true, init: 10, stepFrac: 0.25 },
+  { name: 't8MaxInterceptDistCells', min: 2, max: 13, isInteger: true, init: 3, stepFrac: 0.3 },
+  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 1, stepFrac: 0.3 },
+  { name: 'replanInterval', min: 1, max: 50, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 9, stepFrac: 0.25 },
+  { name: 'endgameEnemyThreshold', min: 1, max: 10, isInteger: true, init: 1, stepFrac: 0.3 },
   { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 4, stepFrac: 0.3 },
 ]
 
@@ -99,6 +102,12 @@ interface EvalResult {
   baseSurvivalRate: number
   avgKills: number
   avgTicks: number
+  /** Total penalty from remaining enemies on ALL non-win seeds (v4.1). */
+  remainingEnemyPenalty: number
+  /** Count of non-win seeds with <5 kills (catastrophic paralysis). */
+  lowKillNonWins: number
+  /** Extra penalty for gameovers (base lost). */
+  gameoverPenalty: number
   perSeed: Array<{
     seed: number
     outcome: string
@@ -111,17 +120,21 @@ interface EvalResult {
 /**
  * Evaluate a parameter set by running simulations.
  *
- * Fitness v3 (kill-centric): The previous fitness (v1/v2) rewarded base
- * survival (300) far more than kills (20/kill), causing CMA-ES to converge
- * on turtling strategies with 0% win rate. The new fitness makes kills the
- * dominant factor — you can't win without killing all 20 enemies.
+ * Fitness v4.1 (clear-speed-centric, gameover-loophole fixed):
  *
- * Components:
- *   winRate * 5000          — massive reward for clearing the stage
- *   avgKills * 60           — kills are the path to winning (was 20)
- *   baseSurvivalRate * 150  — moderate base survival (was 300)
- *   -lowKillTimeouts * 250  — penalize seeds that timeout with <5 kills
- *   +speedBonus             — reward fast clears (faster = more bonus)
+ * v4 only penalized timeouts (max_ticks) for remaining enemies. The
+ * optimizer exploited this: it found that letting the base die early
+ * (gameover) avoids the timeout penalty entirely. It converted 0-kill
+ * timeouts into 3-kill gameovers — worse gameplay, higher fitness.
+ *
+ * v4.1 closes the loophole:
+ *   1. remainingEnemyPenalty applies to ALL non-wins (timeout AND gameover).
+ *      Per-enemy penalty reduced 30→25 to keep it proportional to win bonus.
+ *   2. lowKillNonWins applies to ALL non-wins with <5 kills (was max_ticks
+ *      only). A 0-kill gameover is just as catastrophic as a 0-kill timeout.
+ *   3. gameoverPenalty: extra 500 per gameover — losing the base is ALWAYS
+ *      worse than timing out, because timing out means the base was defended.
+ *   4. speedBonus (800) and baseSurvivalRate (200) retained from v4.
  */
 function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   const perSeed: EvalResult['perSeed'] = []
@@ -129,8 +142,10 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   let baseSurvived = 0
   let totalKills = 0
   let totalTicks = 0
-  let lowKillTimeouts = 0
+  let lowKillNonWins = 0
   let winTicksSum = 0
+  let remainingEnemyPenalty = 0
+  let gameoverCount = 0
 
   for (const seed of config.seeds) {
     try {
@@ -152,10 +167,23 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
       totalKills += result.finalState.killCount
       totalTicks += result.ticks
 
-      // Count catastrophic failures: timeout with <5 kills means the AI
-      // was stuck/paralyzed — the worst possible outcome.
-      if (result.outcome === 'max_ticks' && result.finalState.killCount < 5) {
-        lowKillTimeouts++
+      // v4.1: Penalize remaining enemies on ALL non-wins, not just timeouts.
+      // This closes the gameover loophole — dying early to avoid timeout
+      // penalty is no longer rewarded.
+      if (!won) {
+        const remaining = ENEMIES_PER_STAGE - result.finalState.killCount
+        remainingEnemyPenalty += remaining * 25
+
+        // Catastrophic failure: <5 kills on ANY non-win (was max_ticks only).
+        if (result.finalState.killCount < 5) {
+          lowKillNonWins++
+        }
+
+        // Extra penalty for gameover — losing the base is worse than
+        // timing out, because timing out means the base was defended.
+        if (result.outcome === 'gameover') {
+          gameoverCount++
+        }
       }
 
       perSeed.push({
@@ -175,7 +203,9 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
         ticks: 0,
         baseAlive: false,
       })
-      lowKillTimeouts++
+      lowKillNonWins++
+      gameoverCount++
+      remainingEnemyPenalty += ENEMIES_PER_STAGE * 25 // maximum penalty
     }
   }
 
@@ -186,14 +216,32 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   const avgTicks = totalTicks / n
 
   // Speed bonus: if any wins occurred, reward faster average win time.
-  // A 2000-tick clear gets ~400 bonus; a 10000-tick clear gets ~0.
+  // A 2000-tick clear gets ~800 bonus; an 18000-tick clear gets ~0.
   const avgWinTicks = wins > 0 ? winTicksSum / wins : config.maxTicks
-  const speedBonus = wins > 0 ? Math.max(0, (1 - avgWinTicks / config.maxTicks) * 400) : 0
+  const speedBonus = wins > 0 ? Math.max(0, (1 - avgWinTicks / config.maxTicks) * 800) : 0
+
+  const gameoverPenalty = gameoverCount * 500
 
   const fitness =
-    winRate * 5000 + avgKills * 60 + baseSurvivalRate * 150 + speedBonus - lowKillTimeouts * 250
+    winRate * 5000 +
+    avgKills * 60 +
+    baseSurvivalRate * 200 +
+    speedBonus -
+    remainingEnemyPenalty -
+    gameoverPenalty -
+    lowKillNonWins * 400
 
-  return { fitness, winRate, baseSurvivalRate, avgKills, avgTicks, perSeed }
+  return {
+    fitness,
+    winRate,
+    baseSurvivalRate,
+    avgKills,
+    avgTicks,
+    remainingEnemyPenalty,
+    lowKillNonWins,
+    gameoverPenalty,
+    perSeed,
+  }
 }
 
 // ============================================================
@@ -456,7 +504,9 @@ function optimize(
   process.stderr.write(
     `Evaluation: stage "${evalConfig.stage.name}", ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
   )
-  process.stderr.write(`Fitness v3: win*5000 + kills*60 + base*150 + speed - lowKillTimeout*250\n`)
+  process.stderr.write(
+    `Fitness v4.1: win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400\n`,
+  )
   process.stderr.write(`${'='.repeat(70)}\n\n`)
 
   for (let gen = 0; gen < generations; gen++) {
@@ -525,6 +575,8 @@ function optimize(
         `win=${best.evalResult.winRate.toFixed(2)} ` +
         `base=${best.evalResult.baseSurvivalRate.toFixed(2)} ` +
         `kills=${best.evalResult.avgKills.toFixed(1)} ` +
+        `rem=${best.evalResult.remainingEnemyPenalty.toFixed(0)} ` +
+        `go=${best.evalResult.gameoverPenalty.toFixed(0)} ` +
         `σ=${state.sigma.toFixed(3)} ` +
         `stag=${state.stagnationCount}` +
         (restartCount > 0 ? ` R${restartCount}` : '') +
@@ -654,11 +706,11 @@ if (import.meta.main) {
 
   const stageIdx = parseInt(arg('stage', '0')!, 10)
   const difficulty = arg('difficulty', 'classic')!
-  const seedCount = parseInt(arg('seeds', '8')!, 10)
-  const generations = parseInt(arg('generations', '50')!, 10)
+  const seedCount = parseInt(arg('seeds', '40')!, 10)
+  const generations = parseInt(arg('generations', '40')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
   const verbose = process.argv.includes('--verbose')
-  const outputDir = arg('output', '.workbuddy/optimization-v3')
+  const outputDir = arg('output', '.workbuddy/optimization-v4')
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const stage = STAGES[stageIdx]
