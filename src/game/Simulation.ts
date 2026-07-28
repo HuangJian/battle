@@ -1511,11 +1511,15 @@ export class Simulation {
         break
 
       case 'shield':
-        p.shieldTimer = POWERUP_DURATION_MS
+        // Timed buff: accumulate duration so picking up another while one is
+        // active stacks (e.g. 3s left + 20s = 23s). See DECISIONS.md §33.
+        p.shieldTimer = (p.shieldTimer ?? 0) + POWERUP_DURATION_MS
         break
 
       case 'freeze':
-        w.freezeTimer = POWERUP_DURATION_MS
+        // Timed buff: accumulate duration (same rule as shield). Freezing all
+        // enemies again adds a full POWERUP_DURATION_MS on top of any remaining.
+        w.freezeTimer = w.freezeTimer + POWERUP_DURATION_MS
         break
 
       case 'tank':
@@ -1563,7 +1567,11 @@ export class Simulation {
         placed++
       }
     }
-    w.fenceExpireFrame = w.frame + FENCE_DURATION_FRAMES
+    // Timed buff: accumulate duration rather than reset. If a fence ring is
+    // already up, picking up another extends it by a full FENCE_DURATION_FRAMES
+    // (same stacking rule as shield/freeze/boat). The steel ring is re-laid
+    // idempotently over empty/brick cells, so re-applying is safe.
+    w.fenceExpireFrame = (w.fenceExpireFrame ?? w.frame) + FENCE_DURATION_FRAMES
   }
 
   /**
@@ -1588,8 +1596,9 @@ export class Simulation {
     const p = w.player
     if (!p) return
 
-    // Grant amphibious movement for BOAT_DURATION_MS
-    p.boatTimer = BOAT_DURATION_MS
+    // Timed buff: accumulate duration (same rule as shield/freeze). Picking up
+    // another boat while one is active extends amphibious movement.
+    p.boatTimer = (p.boatTimer ?? 0) + BOAT_DURATION_MS
   }
 
   // ================================================================

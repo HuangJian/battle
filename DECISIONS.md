@@ -1131,3 +1131,17 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 **No hidden state:** rules live on the World (AGENTS §2.2), never in a module global. A pre-`startGame` World defaults to `DEFAULT_RULES` (constructor), so incidental Worlds (menus, tools, tests) behave modern unless a difficulty explicitly selects classic.
 
 **Regression tests:** `tests/classic-rules.test.ts` (profile diff + wiring + rewind), `tests/classic-combat.test.ts` (instant TTK incl. fast one-shot + modern pool regression), `tests/classic-fire-cap.test.ts` (0★ cap 1 / 2★ cap 2 / enemy cap / modern no-cap / **no time cooldown after shell resolves**), `tests/classic-powerup.test.ts` (carriers at 4/11/18 drop; a carrier killed out of order still drops; no elite/milestone/super/boat rolls; spawn-queue carriers config-driven — classic [4,11,18] / modern every-4th), `tests/classic-stage.integration.test.ts` (spawn cadence 1800, TTK + byKind scoring end-to-end through real ticks, jitter-off speeds), `tests/classic-speed.test.ts` (FC table equality; basic/power/armor equal; fast = 2×; player T1→T4 3.75→7.5; classic faster than modern). Existing suites that used `classic` as a stand-in for modern behavior were repointed at `hard`; speed tests now compare against each world's own `rules.speedCps` (cells/sec) converted to px/tick. Full suite **422 pass / 0 fail**; oxlint + tsc clean; vite bundle valid (89 modules) — `bun run build`'s dist-empty step is blocked only by the sandbox safe-delete shim, not a code error.
+
+## 33. Timed Power-ups Stack Their Duration on Re-Pickup (2026-07-28)
+
+**Decision:** picking up a **second timed power-up while the first is still active accumulates** the full duration on top of the remaining time, rather than resetting to a fresh duration. Canonical example (user request): an active FREEZE with 3 s remaining, pick up another FREEZE → 23 s (3 + `POWERUP_DURATION_MS` 20 s).
+
+**Affected power-ups** (all "限时类道具"): `shield` (player `shieldTimer`), `freeze` (world `freezeTimer`), `boat` (player `boatTimer`), `fence` (world `fenceExpireFrame`). Implementation in `Simulation.applyPowerUp` / `applyFencePowerUp` (`src/game/Simulation.ts`): replace the `=` overwrite with `+= FULL_DURATION`. Per-buff: `p.shieldTimer = (p.shieldTimer ?? 0) + POWERUP_DURATION_MS`, `w.freezeTimer += POWERUP_DURATION_MS`, `p.boatTimer = (p.boatTimer ?? 0) + BOAT_DURATION_MS`, and `w.fenceExpireFrame = (w.fenceExpireFrame ?? w.frame) + FENCE_DURATION_FRAMES` (the `?? w.frame` guard handles a no-active-fence re-pick; the steel ring is re-laid idempotently over empty/brick cells, so re-applying is safe).
+
+**Display:** `UIManager.updateBuffs` already renders `Math.ceil(ms / 1000)`, so an accumulated >20 s countdown shows correctly with no HUD change.
+
+**Known interaction:** the player's spawn-protection shield (`RESPAWN_SHIELD_MS` = 3000 ms) shares the `shieldTimer` field, so the first shield pickup after spawn adds onto that 3 s rather than replacing it — consistent with the accumulate rule; it is not a separate buff.
+
+**No duration cap** was requested (the user's example is an unbounded add), so stacking is open-ended; this is a player-side power choice.
+
+**Regression tests:** `tests/super-powerups.test.ts` → describe "Timed power-ups stack their duration when re-picked (DECISIONS.md §33)": freeze 3 s → 23 s, shield/boat/fence accumulate, and re-pickup never *resets* a full-duration buff to less. Full suite **450 pass / 0 fail**; tsc clean.

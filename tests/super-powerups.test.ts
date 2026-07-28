@@ -3,7 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input, type InputLike } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
-import { GRID, FENCE_DURATION_FRAMES } from '../src/constants'
+import { GRID, FENCE_DURATION_FRAMES, POWERUP_DURATION_MS, BOAT_DURATION_MS } from '../src/constants'
 import type { Direction } from '../src/constants'
 import {
   SUPER_POWERUP_TYPES,
@@ -376,5 +376,67 @@ describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DEC
       expect(world.tileMap.get(col, row)).toBe('steel')
     }
     expect(world.fenceExpireFrame).toBeDefined()
+  })
+})
+
+describe('Timed power-ups stack their duration when re-picked (DECISIONS.md §33)', () => {
+  /**
+   * Per the gameplay change, picking up a SECOND timed power-up while the
+   * first is still active must ADD a full duration on top of the remaining
+   * time — not reset to a fresh duration. Verifies the canonical example
+   * (freeze: 3s left + 20s → 23s) and the same rule for shield/boat/fence.
+   */
+  const apply = (sim: Simulation, t: string) =>
+    (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)(t)
+
+  it('freeze accumulates: 3s remaining + 20s → 23s', () => {
+    const { world, sim } = buildSeededWorld(7)
+    apply(sim, 'freeze')
+    expect(world.freezeTimer).toBe(POWERUP_DURATION_MS) // fresh: full 20s
+    world.freezeTimer = 3000 // simulate 3s remaining
+    apply(sim, 'freeze')
+    expect(world.freezeTimer).toBe(3000 + POWERUP_DURATION_MS) // 23000 ms = 23s
+  })
+
+  it('shield accumulates on the player tank', () => {
+    const { world, sim } = buildSeededWorld(7)
+    const p = world.player!
+    // Clear the 3s spawn-protection shield so the first pickup starts clean.
+    p.shieldTimer = 0
+    apply(sim, 'shield')
+    expect(p.shieldTimer).toBe(POWERUP_DURATION_MS)
+    p.shieldTimer = 5000
+    apply(sim, 'shield')
+    expect(p.shieldTimer).toBe(5000 + POWERUP_DURATION_MS)
+  })
+
+  it('boat accumulates on the player tank', () => {
+    const { world, sim } = buildSeededWorld(7)
+    const p = world.player!
+    apply(sim, 'boat')
+    expect(p.boatTimer).toBe(BOAT_DURATION_MS)
+    p.boatTimer = 4000
+    apply(sim, 'boat')
+    expect(p.boatTimer).toBe(4000 + BOAT_DURATION_MS)
+  })
+
+  it('fence accumulates its frame duration when already active', () => {
+    const { world, sim } = buildSeededWorld(5)
+    apply(sim, 'fence')
+    const firstExpire = world.fenceExpireFrame!
+    expect(firstExpire).toBe(world.frame + FENCE_DURATION_FRAMES)
+    // Simulate the ring being partway through its life.
+    world.frame += 300
+    apply(sim, 'fence')
+    // Remaining frames (firstExpire - frame) + a fresh FENCE_DURATION_FRAMES.
+    expect(world.fenceExpireFrame).toBe(firstExpire + FENCE_DURATION_FRAMES)
+  })
+
+  it('re-pickup does NOT reset a full-duration buff to less', () => {
+    const { world, sim } = buildSeededWorld(7)
+    apply(sim, 'freeze')
+    const full = world.freezeTimer
+    apply(sim, 'freeze')
+    expect(world.freezeTimer).toBe(full + POWERUP_DURATION_MS)
   })
 })
