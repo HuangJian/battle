@@ -6,19 +6,11 @@ import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
 import { RecoveryController } from '../src/snapshot/RecoveryController'
-import {
-  EMP_DURATION_MS,
-  MINE_ARM_MS,
-  CELL,
-  GRID,
-} from '../src/constants'
+import { EMP_DURATION_MS, MINE_ARM_MS, CELL, GRID } from '../src/constants'
 import { DECOY_LIFESPAN_FRAMES } from '../src/constants'
 import { perceive, analyze } from '../src/ai/perception'
 import { INTELLIGENCE_LEVELS } from '../src/ai/config'
-import {
-  POWERUP_TIERS,
-  SUPER_POWERUP_TYPES,
-} from '../src/config/powerups'
+import { POWERUP_TIERS, SUPER_POWERUP_TYPES } from '../src/config/powerups'
 
 /**
  * New power-ups (new-powerups-plan):

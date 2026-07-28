@@ -614,6 +614,17 @@ export class Game {
     // overlays stay live even when the canvas repaint is skipped.
     if (probe) uiT0 = performance.now()
     this.presentation.updateUI(this.world)
+    // Sync replay progress bar and time during playback
+    if (this.playback) {
+      this.presentation.ui.setReplayProgress(this.playback.progress)
+      const replay = this.playback.replay
+      if (replay) {
+        this.presentation.ui.setReplayTime(
+          Math.round(this.playback.progress * replay.durationMs),
+          replay.durationMs,
+        )
+      }
+    }
     if (probe) uiDt = performance.now() - uiT0
 
     // Clear per-frame input state
@@ -1227,7 +1238,31 @@ export class Game {
     this.accumulator = 0
     this.lastTime = performance.now()
     this.scheduleFrame()
+    // Show persistent REPLAY badge in HUD + video player controller
+    this.presentation.ui.setReplayMode(true, false)
+    this.presentation.ui.setReplaySpeed(this.playback.currentSpeed)
     this.presentation.ui.notify('REPLAY — Esc exit · P pause · 1-4 speed')
+    // Wire the video player controller callbacks
+    this.presentation.ui.replayController.init({
+      onPlayPause: () => {
+        if (!this.playback) return
+        this.playback.togglePause()
+        this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+      },
+      onSeek: (_progress: number) => {
+        // Seeking is not supported yet — reset to start as fallback
+        if (!this.playback) return
+        this.playback.togglePause()
+        this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+      },
+      onSpeedChange: (speed: number) => {
+        this.setPlaybackSpeed(speed as import('../replay/PlaybackController').PlaybackSpeed)
+      },
+      onExit: () => {
+        this.stopPlayback()
+        this.resetToMenu()
+      },
+    })
     return true
   }
 
@@ -1238,6 +1273,8 @@ export class Game {
     if (!this.playback) return
     this.playback.exit(this.simulation, this.input)
     this.playback = null
+    // Hide the persistent REPLAY badge from the HUD
+    this.presentation.ui.setReplayMode(false)
     this.accumulator = 0
     this.lastTime = performance.now()
   }
@@ -1267,7 +1304,7 @@ export class Game {
     }
     if (this.input.isPausePressed()) {
       this.playback.togglePause()
-      this.presentation.ui.notify(this.playback.isPaused ? 'Replay paused' : 'Replay resumed')
+      this.presentation.ui.setReplayMode(true, this.playback.isPaused)
     }
     // Speed keys 1-4
     if (this.input.wasPressed('Digit1')) this.setPlaybackSpeed(1)
@@ -1279,6 +1316,7 @@ export class Game {
   private setPlaybackSpeed(speed: PlaybackSpeed): void {
     if (!this.playback || this.playback.currentSpeed === speed) return
     this.playback.setSpeed(speed)
+    this.presentation.ui.setReplaySpeed(speed)
     this.presentation.ui.notify(`Replay speed ×${speed}`)
   }
 

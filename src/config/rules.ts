@@ -197,7 +197,19 @@ export const DEFAULT_RULES: GameplayRules = {
   fastBulletMult: 1.0, // unused in 'universal'
 
   superDropChance: SUPER_POWERUP_DROP_CHANCE, // 0.1 — current 强力道具 roll
-  allowedPowerups: ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat', 'repair', 'emp', 'decoy', 'mine'],
+  allowedPowerups: [
+    'star',
+    'bomb',
+    'shield',
+    'freeze',
+    'tank',
+    'fence',
+    'boat',
+    'repair',
+    'emp',
+    'decoy',
+    'mine',
+  ],
   dropSchedule: 'modern',
   fixedDropKillIndices: [],
   dropOnEveryNKills: 5, // Phase 0: every-5-kills drop

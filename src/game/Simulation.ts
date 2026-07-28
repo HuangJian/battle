@@ -27,8 +27,19 @@ import {
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { killScore, stageClearScore } from '../config/score'
-import { SUPER_POWERUP_TYPES, POWERUP_TIERS, POWERUP_TIER_WEIGHTS, FRENZY_SHOTS, SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
-import { EMP_DURATION_MS, MINE_ARM_MS, MINE_RADIUS_CELLS, DECOY_LIFESPAN_FRAMES } from '../constants'
+import {
+  SUPER_POWERUP_TYPES,
+  POWERUP_TIERS,
+  POWERUP_TIER_WEIGHTS,
+  FRENZY_SHOTS,
+  SACRIFICE_BASE_RADIUS_CELLS,
+} from '../config/powerups'
+import {
+  EMP_DURATION_MS,
+  MINE_ARM_MS,
+  MINE_RADIUS_CELLS,
+  DECOY_LIFESPAN_FRAMES,
+} from '../constants'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { hasStarPerk } from '../config/rules'
@@ -560,7 +571,13 @@ export class Simulation {
           if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
             tank.alive = false
             this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-            const gained = killScore(w.difficultyKey, tank.aiState?.level, w.stageIndex, w.rules, tank.kind)
+            const gained = killScore(
+              w.difficultyKey,
+              tank.aiState?.level,
+              w.stageIndex,
+              w.rules,
+              tank.kind,
+            )
             w.score += gained
             w.enemiesRemaining--
             w.killCount++
@@ -1547,14 +1564,22 @@ export class Simulation {
       }
       const practicalItems = POWERUP_TIERS.practical
       if (practicalItems.length > 0) {
-        activeTiers.push({ name: 'practical', items: practicalItems, weight: POWERUP_TIER_WEIGHTS.practical })
+        activeTiers.push({
+          name: 'practical',
+          items: practicalItems,
+          weight: POWERUP_TIER_WEIGHTS.practical,
+        })
       }
       let normalItems = POWERUP_TIERS.normal
       if (!w.tileMap.hasWater()) {
         normalItems = normalItems.filter((t) => t !== 'boat')
       }
       if (normalItems.length > 0) {
-        activeTiers.push({ name: 'normal', items: normalItems, weight: POWERUP_TIER_WEIGHTS.normal })
+        activeTiers.push({
+          name: 'normal',
+          items: normalItems,
+          weight: POWERUP_TIER_WEIGHTS.normal,
+        })
       }
 
       // Normalize weights across active tiers and pick one tier

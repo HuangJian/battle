@@ -1,4 +1,5 @@
 import './styles/main.css'
+import './styles/replay-controller.css'
 import { Game } from './game/Game'
 
 const app = document.getElementById('app')

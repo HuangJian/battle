@@ -24,7 +24,11 @@ export const SUPER_POWERUP_DROP_CHANCE = SUPER_TIER_WEIGHT
  * 3-tier power-up pool (plan §3.1). Each tier contains the PowerUpType
  * values that may drop from it; picks within a tier are uniform.
  */
-export const POWERUP_TIERS: { super: PowerUpType[]; practical: PowerUpType[]; normal: PowerUpType[] } = {
+export const POWERUP_TIERS: {
+  super: PowerUpType[]
+  practical: PowerUpType[]
+  normal: PowerUpType[]
+} = {
   super: ['frenzy', 'sacrifice', 'guard', 'rewind'],
   practical: ['star', 'tank', 'bomb', 'freeze'],
   normal: ['shield', 'fence', 'boat', 'repair', 'emp', 'decoy', 'mine'],

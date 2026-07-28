@@ -9,6 +9,7 @@ import { SnapshotBrowser } from './SnapshotBrowser'
 import { ReplayBrowser } from './ReplayBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
+import { ReplayController } from './ReplayController'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
 
 /**
@@ -48,6 +49,8 @@ export class UIManager {
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
   private hudStar: HTMLElement
+  private hudReplay: HTMLElement
+  readonly replayController: ReplayController
   private hudPauseHint: HTMLElement | null = null
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
@@ -179,8 +182,10 @@ export class UIManager {
           <span class="hud-label">STAR</span>
           <span class="hud-value hud-star" data-hud="star"></span>
         </div>
-      </div>
-      <div class="hud-group hud-center">
+      </div>        <div class="hud-group hud-center">
+        <div class="hud-item hud-replay" data-hud="replay" hidden>
+          <span class="hud-label">REPLAY MODE</span>
+        </div>
         <div class="hud-item">
           <span class="hud-label">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
@@ -347,6 +352,12 @@ export class UIManager {
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
+    this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
+    
+    // Replay Controller (video player style)
+    this.replayController = new ReplayController()
+    this.replayController.hide()
+    this.root.appendChild(this.replayController.el)
     this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
     this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
@@ -734,6 +745,32 @@ export class UIManager {
 
     // Show correct screen
     this.showScreen(world.state)
+  }
+
+  /** Show or hide the persistent REPLAY indicator in the HUD center area. */
+  setReplayMode(isReplay: boolean, isPaused: boolean = false): void {
+    this.hudReplay.hidden = !isReplay
+    if (isReplay) {
+      this.replayController.show()
+      this.replayController.setPaused(isPaused)
+    } else {
+      this.replayController.hide()
+    }
+  }
+
+  /** Update the replay progress bar (0 → 1). */
+  setReplayProgress(progress: number): void {
+    this.replayController.updateProgress(progress)
+  }
+
+  /** Update the replay time display. */
+  setReplayTime(currentMs: number, totalMs: number): void {
+    this.replayController.updateTime(currentMs, totalMs)
+  }
+
+  /** Update the replay speed display. */
+  setReplaySpeed(speed: number): void {
+    this.replayController.setSpeed(speed)
   }
 
   /**

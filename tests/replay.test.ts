@@ -33,9 +33,8 @@ class ScriptedInput implements InputLike {
   private seq: InputFrame[]
   private i = 0
   constructor(seq: InputFrame[]) {
-    this.seq = seq.length > 0 ? seq : [
-      { direction: null, firing: false, guard: false, frenzy: false },
-    ]
+    this.seq =
+      seq.length > 0 ? seq : [{ direction: null, firing: false, guard: false, frenzy: false }]
   }
   private cur(): InputFrame {
     return this.seq[Math.min(this.i, this.seq.length - 1)]
@@ -194,13 +193,17 @@ describe('ReplayManager', () => {
 
   it('canPlay() rejects replays with a wrong schema version (L3)', () => {
     const mgr = new ReplayManager()
-    const good = mgr.create(
-      'victory',
-      {} as any,
-      packFrames(SAMPLE_FRAMES),
-      SAMPLE_FRAMES.length,
-      { stage: 0, stageName: '', difficulty: '', lives: 0, playerLevel: 0, score: 0, killCount: 0, enemiesTotal: 0, playTimeMs: 0 },
-    )
+    const good = mgr.create('victory', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
+      stage: 0,
+      stageName: '',
+      difficulty: '',
+      lives: 0,
+      playerLevel: 0,
+      score: 0,
+      killCount: 0,
+      enemiesTotal: 0,
+      playTimeMs: 0,
+    })
     expect(mgr.canPlay(good)).toBe(true)
     const bad = { ...good, schemaVersion: 0x99, frames: new Uint8Array([0x99, 0x00]) }
     expect(mgr.canPlay(bad)).toBe(false)
@@ -210,13 +213,17 @@ describe('ReplayManager', () => {
   it('enforces retention policy (circular overwrite, favorited exempt)', () => {
     const mgr = new ReplayManager({ now: () => 0 })
     const make = (fav = false) => {
-      const r = mgr.create(
-        'victory',
-        {} as any,
-        packFrames(SAMPLE_FRAMES),
-        SAMPLE_FRAMES.length,
-        { stage: 0, stageName: '', difficulty: '', lives: 0, playerLevel: 0, score: 0, killCount: 0, enemiesTotal: 0, playTimeMs: 0 },
-      )
+      const r = mgr.create('victory', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
+        stage: 0,
+        stageName: '',
+        difficulty: '',
+        lives: 0,
+        playerLevel: 0,
+        score: 0,
+        killCount: 0,
+        enemiesTotal: 0,
+        playTimeMs: 0,
+      })
       if (fav) mgr.toggleFavorite(r.id)
       return r
     }
@@ -270,7 +277,13 @@ describe('Replay determinism (record → replay)', () => {
       enemiesTotal: liveWorld.enemiesSpawned,
       playTimeMs: liveWorld.playTimeMs,
     }
-    const replay = mgr.create('victory', result!.snapshot, result!.frames, result!.tickCount, metadata)
+    const replay = mgr.create(
+      'victory',
+      result!.snapshot,
+      result!.frames,
+      result!.tickCount,
+      metadata,
+    )
     expect(mgr.canPlay(replay)).toBe(true)
 
     // ---- REPLAY run via the real PlaybackController path ----

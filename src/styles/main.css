@@ -116,6 +116,7 @@ body {
 .hud-bar.visible {
   opacity: 1;
   transform: translateY(0);
+  pointer-events: auto;
 }
 
 .hud-group {
@@ -168,6 +169,62 @@ body {
   color: var(--theme-accent-primary);
   letter-spacing: 1px;
   text-shadow: 0 0 8px color-mix(in srgb, var(--theme-accent-primary) 45%, transparent);
+}
+
+/* Replay indicator — persistent badge in the HUD center area during playback. */
+.hud-replay {
+  margin-right: 8px;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.hud-replay:hover {
+  transform: scale(1.05);
+}
+.hud-replay-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #ff4040;
+  text-shadow: 0 0 10px rgba(255, 64, 64, 0.6);
+  animation: replay-pulse 1.5s ease-in-out infinite;
+}
+
+.hud-replay.replay-paused .hud-replay-text {
+  color: var(--theme-accent-primary);
+  text-shadow: 0 0 10px rgba(232, 200, 64, 0.6);
+  animation: none;
+}
+
+.hud-replay-progress {
+  width: 80px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 6px;
+}
+
+.hud-replay-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #ff4040;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.hud-replay.replay-paused .hud-replay-progress-bar {
+  background: var(--theme-accent-primary);
+}
+
+@keyframes replay-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 /* Pause indicator — sits in the HUD's STAGE area (hud-center) so pausing never
