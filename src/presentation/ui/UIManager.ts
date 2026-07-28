@@ -4,8 +4,7 @@ import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../.
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
-import { PLAYER_PROGRESSION } from '../../config/combat'
-import { clamp } from '../../utils/helpers'
+
 import { SnapshotBrowser } from './SnapshotBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
@@ -170,7 +169,7 @@ export class UIManager {
         </div>
         <div class="hud-item">
           <span class="hud-label">STAR</span>
-          <span class="hud-value hud-star" data-hud="star">☆☆☆</span>
+          <span class="hud-value hud-star" data-hud="star"></span>
         </div>
       </div>
       <div class="hud-group hud-center">
@@ -639,18 +638,11 @@ export class UIManager {
       this.lastLives = world.lives
     }
 
-    // Player star level (★ power-up). Classic caps at `maximumLevel` (tier
-    // display of filled/empty stars); every other mode accumulates without
-    // bound, so we show the raw star COUNT (it can exceed the classic cap).
-    // Only written when the level actually changes.
+    // Player star level (★ power-up). Show only filled stars; no empty
+    // placeholders. If the player has no stars, show nothing.
     if (world.playerLevel !== this.lastStar) {
-      if (world.difficultyKey === 'classic') {
-        const max = PLAYER_PROGRESSION.maximumLevel
-        const lvl = clamp(world.playerLevel, 0, max)
-        this.hudStar.textContent = '★'.repeat(lvl) + '☆'.repeat(max - lvl)
-      } else {
-        this.hudStar.textContent = `★ ${Math.max(0, world.playerLevel)}`
-      }
+      const lvl = Math.max(0, world.playerLevel)
+      this.hudStar.textContent = lvl > 0 ? '★'.repeat(lvl) : ''
       this.lastStar = world.playerLevel
     }
 
