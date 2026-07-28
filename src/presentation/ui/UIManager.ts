@@ -137,6 +137,7 @@ export class UIManager {
   private hudGuard: HTMLElement
   private hudFrenzy: HTMLElement
   private hudSacrifice: HTMLElement
+  private superItems: HTMLElement[]
   private lastGuard = -1
   private lastFrenzy = -1
   private lastSacrifice = -1
@@ -326,6 +327,7 @@ export class UIManager {
     this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
     this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
+    this.superItems = Array.from(this.hudBar.querySelectorAll('.hud-super'))
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
@@ -647,18 +649,24 @@ export class UIManager {
     }
 
     // Super power-up inventory counters (DECISIONS.md §31). Written only when
-    // the count actually changes. 天降神兵 is Phase 2 (shows 0 until then).
-    if (world.guardStock !== this.lastGuard) {
-      this.hudGuard.textContent = String(world.guardStock)
-      this.lastGuard = world.guardStock
+    // the count actually changes. Hidden in classic mode (no 强力道具).
+    const hideSuper = world.rules.superDropChance === 0
+    for (const el of this.superItems) {
+      if (el.hidden !== hideSuper) el.hidden = hideSuper
     }
-    if (world.frenzyStock !== this.lastFrenzy) {
-      this.hudFrenzy.textContent = String(world.frenzyStock)
-      this.lastFrenzy = world.frenzyStock
-    }
-    if (world.sacrificeStock !== this.lastSacrifice) {
-      this.hudSacrifice.textContent = String(world.sacrificeStock)
-      this.lastSacrifice = world.sacrificeStock
+    if (!hideSuper) {
+      if (world.guardStock !== this.lastGuard) {
+        this.hudGuard.textContent = String(world.guardStock)
+        this.lastGuard = world.guardStock
+      }
+      if (world.frenzyStock !== this.lastFrenzy) {
+        this.hudFrenzy.textContent = String(world.frenzyStock)
+        this.lastFrenzy = world.frenzyStock
+      }
+      if (world.sacrificeStock !== this.lastSacrifice) {
+        this.hudSacrifice.textContent = String(world.sacrificeStock)
+        this.lastSacrifice = world.sacrificeStock
+      }
     }
 
     // Active timed buffs (shield / freeze) — countdown shown outside the field
