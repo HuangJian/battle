@@ -7,6 +7,8 @@
 > **新鲜度说明（gac.review.md 核查）**：§5.2 所列 4 个 bug **已在代码中修复**（urgencyBonus / powerup score / killerKind / failure! 断言均有 "Fix Bug" 注释或测试守卫）→ 已从实施包移除，仅保留验证项；§5.3 S6 **已部分实现**（`canHunt` 存在但阈值硬编码、`endgameEnemyThreshold` 声明未用）；§4 阶段 4 的 "A* 必须被使用" 断言**有误**——代码刻意用 `directMove` 追击，已修正断言。
 >
 > **完成状态（2026-07-28 验证）**：§0.5 拆分**已完成**（见下方 §0.5 验收；`tests/godai-split-parity.test.ts` 锁时序通过，零行为改变；457 测试绿）；其余基础设施（缺口 A/B、`enemyCount`/`playerSpawn`/`enemySpawns`、`hasBase` 守卫、S6 参数化）+ §5.3 导航混合 + `tools/curriculum.ts` 全部落地。5 阶段结果（Kills / Ticks）：①1/141 ②3/333 ③20/2715 ④20/2208 ⑤20/2727，全部 `stage_clear` 且 Base ✅。下一步：真实 stage 0 回归门禁（Hard≥70% / Chaos≥30%，plan §6）。
+>
+> **补充（2026-07-28 晚）**：v3 调参写回时漏掉 `aimError`/`suboptimalPathProb` 两个浮点参数，已补回 `DEFAULT_GOD_AI_PARAMS`（全部 13 字段现与 optimizer `bestParams` 一致，见 DECISIONS §37）；新增 `tests/god-ai-regression-gate.test.ts` 宽 seed(1..30) 回归门禁（plan §6 真正调参门禁），测试数 457 → **458**，全绿。
 
 ---
 
@@ -46,8 +48,9 @@ God AI 调校**不要**用玩具关当 CMA-ES 的训练/优化环境；玩具关
 - [x] `bun run check` 全绿（类型 + `god-ai-gates.test.ts` 不变绿）。拆分后 449 → **457** 测试（新增 8 个 parity 用例）。
 - [x] 新增 `tests/godai-split-parity.test.ts`：对 8 个固定 seed × stage 0 跑 `runSimulation`，**锁定时序**——断言拆分前后 `outcome / ticks / score / lives / killCount / baseAlive / playerLevel` 完全一致。基线在拆分前从 `28683be` 的单类 `GodAIInput.ts` 实跑捕获，并用 git 旧版 + 新版双跑交叉验证 8 个 seed 全部逐字段相等（覆盖 gameover / max_ticks / stage_clear 三种结局）。
 - [x] 交叉验证：临时从 `28683be` 取出旧 `GodAIInput.ts` 与重构版同跑 8 seed，输出 JSON 逐字段一致，确认零行为漂移；验证脚本与临时文件已删除，基线固化进 parity 测试。
+- [x] （2026-07-28 晚补充）v3 调参后 parity 基线已重锁（doc 注释改为如实说明：当前基线锁"重构后 + v3 参数"行为，拆分等价性已在 `0d3275b` 证明）；新增 `tests/god-ai-regression-gate.test.ts` 宽 seed(1..30) @classic @18000 聚合下限门禁（wins≥6 / baseAlive≥25 / avgKills≥9，实测 7/26/11.3），即 plan §6 的真正调参回归门禁。测试数 457 → **458**，全绿。
 
-> 风险已闭环：共享状态经 `self: GodAIInput` 显式传入，无全局可变状态；parity 测试作为回归门禁兜底。拆分作为**独立 phase commit** 提交，未夹带任何逻辑改动。
+> 风险已闭环：共享状态经 `self: GodAIInput` 显式传入，无全局可变状态；parity 测试作为重构行为锁 + `god-ai-regression-gate` 作为调参门禁双兜底。拆分作为**独立 phase commit** 提交，未夹带任何逻辑改动。
 
 ---
 

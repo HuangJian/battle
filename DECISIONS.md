@@ -1340,3 +1340,20 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - Future God AI edits are localized to small files by responsibility (fire / threat / strategy / navigation) — lowers the friction for S6 threshold tuning, M1 prediction, and curriculum debugging originally cited as the motivation.
 - The parity test is the regression guard: any future behavior change in the AI core will break it immediately.
 - Committed as its own phase commit (no logic changes mixed in).
+
+---
+
+## 37. God AI v3 Float-Param Write-Back Fix + Regression Gate (2026-07-28)
+
+**Decision:** During CMA-ES v3 tuning, the optimizer's `bestParams` (`optimization-v3/optimization-summary.json`) included two FLOAT fields that carry most of the win-rate gain: `aimError = 0.002423129688943702` and `suboptimalPathProb = 0.06178084394496533`. On the optimizer's eval seeds (1–8, 18000 ticks) these produce **37.5% win / 16.4 kills / 100% base**, versus **25% / 13.9 kills** for the rounded shipped values (`aimError → 0`, `suboptimalPathProb → 0.06`). The initial write-back dropped the two floats, so the shipped AI was weaker than the reported result. On 2026-07-28 the precise floats were written back into `DEFAULT_GOD_AI_PARAMS`, restoring the optimizer's discovered strength.
+
+**Corrections applied in the same change:**
+- `GodAIInput.ts` comment block (was "20%→30% / 70%→100% / 12.8→15.4"): rewritten to state these are the optimizer's NARROW eval-seed numbers and to give the realistic 60-seed classic spread (~23% win / ~83% base / ~10–14 kills). The "100% base" came from the `hasBase` guard logic, not the (misreported) 800 weight — the actual fitness base weight is **150**, and there is **no 300/life term** (it was `speedBonus` + `-lowKillTimeout*250`).
+- `tests/godai-split-parity.test.ts` doc comment: the baseline was re-locked after v3 tuning (it no longer represents the pre-split single-class output; the §0.5 split equality was proven at commit `0d3275b`). The baseline numbers are unchanged for the fixed params because the two floats do not shift 36000-tick outcomes on the 8 parity seeds — the 25%↔37.5% gap only appears at the shorter 18000-tick eval window.
+- Added `tests/god-ai-regression-gate.test.ts`: a WIDE-seed (1..30) classic @18000 aggregate floor — `wins ≥ 6`, `baseAlive ≥ 25`, `avgKills ≥ 9` — reflecting the 2026-07-28 state (measured 7 / 26 / 11.3). This is the real tuning regression gate (plan §6), as distinct from the exact-lock parity test.
+
+**Cleanup:** Deleted 5 scratch tuning tools (`tools/validate-params.ts`, `validate-variants.ts`, `validate-wallbreak.ts`, `baseline-check.ts`, `capture-parity.ts`) — untracked, not part of the commit.
+
+**Verification:** `bun run check` green — **458 tests** (was 457; +1 gate test), 0 warnings, 0 errors.
+
+**Implication:** The committed `DEFAULT_GOD_AI_PARAMS` now equals the optimizer's `bestParams` for all 13 fields, so the shipped God AI matches the v3 report's eval-seed performance. Real-stage stability is still below the plan §6 gate (Hard≥70% / Chaos≥30%) — see §36; that remains the outstanding optimization target.

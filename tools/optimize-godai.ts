@@ -38,19 +38,21 @@ interface ParamSpec {
   stepFrac: number
 }
 
+// Init values match current DEFAULT_GOD_AI_PARAMS so CMA-ES starts from the
+// best known operating point and explores outward.
 const SEARCH_SPACE: ParamSpec[] = [
-  { name: 'reactionDelay', min: 0, max: 8, isInteger: true, init: 2, stepFrac: 0.25 },
-  { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0.02, stepFrac: 0.3 },
-  { name: 'suboptimalPathProb', min: 0, max: 0.3, isInteger: false, init: 0.1, stepFrac: 0.3 },
-  { name: 'defenseRowOffset', min: 1, max: 7, isInteger: true, init: 3, stepFrac: 0.25 },
-  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 8, stepFrac: 0.25 },
-  { name: 'threatRangeCells', min: 8, max: 26, isInteger: true, init: 30, stepFrac: 0.2 },
-  { name: 'maxPlayerDistFromBase', min: 4, max: 22, isInteger: true, init: 12, stepFrac: 0.25 },
-  { name: 't8MaxInterceptDistCells', min: 2, max: 12, isInteger: true, init: 6, stepFrac: 0.3 },
-  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 3, stepFrac: 0.3 },
-  { name: 'replanInterval', min: 3, max: 50, isInteger: true, init: 20, stepFrac: 0.25 },
-  { name: 'powerupMaxDivertDistance', min: 3, max: 25, isInteger: true, init: 15, stepFrac: 0.25 },
-  { name: 'endgameEnemyThreshold', min: 1, max: 12, isInteger: true, init: 6, stepFrac: 0.3 },
+  { name: 'reactionDelay', min: 0, max: 6, isInteger: true, init: 0, stepFrac: 0.25 },
+  { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0, stepFrac: 0.3 },
+  { name: 'suboptimalPathProb', min: 0, max: 0.2, isInteger: false, init: 0.05, stepFrac: 0.3 },
+  { name: 'defenseRowOffset', min: 1, max: 5, isInteger: true, init: 1, stepFrac: 0.25 },
+  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'threatRangeCells', min: 8, max: 26, isInteger: true, init: 26, stepFrac: 0.2 },
+  { name: 'maxPlayerDistFromBase', min: 4, max: 26, isInteger: true, init: 7, stepFrac: 0.25 },
+  { name: 't8MaxInterceptDistCells', min: 2, max: 13, isInteger: true, init: 8, stepFrac: 0.3 },
+  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 5, stepFrac: 0.3 },
+  { name: 'replanInterval', min: 3, max: 50, isInteger: true, init: 10, stepFrac: 0.25 },
+  { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'endgameEnemyThreshold', min: 1, max: 20, isInteger: true, init: 6, stepFrac: 0.3 },
   { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 4, stepFrac: 0.3 },
 ]
 
@@ -108,7 +110,18 @@ interface EvalResult {
 
 /**
  * Evaluate a parameter set by running simulations.
- * Fitness = winRate * 1000 + baseSurvivalRate * 300 + avgKills * 20 + avgTicks/100
+ *
+ * Fitness v3 (kill-centric): The previous fitness (v1/v2) rewarded base
+ * survival (300) far more than kills (20/kill), causing CMA-ES to converge
+ * on turtling strategies with 0% win rate. The new fitness makes kills the
+ * dominant factor — you can't win without killing all 20 enemies.
+ *
+ * Components:
+ *   winRate * 5000          — massive reward for clearing the stage
+ *   avgKills * 60           — kills are the path to winning (was 20)
+ *   baseSurvivalRate * 150  — moderate base survival (was 300)
+ *   -lowKillTimeouts * 250  — penalize seeds that timeout with <5 kills
+ *   +speedBonus             — reward fast clears (faster = more bonus)
  */
 function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   const perSeed: EvalResult['perSeed'] = []
@@ -116,6 +129,8 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   let baseSurvived = 0
   let totalKills = 0
   let totalTicks = 0
+  let lowKillTimeouts = 0
+  let winTicksSum = 0
 
   for (const seed of config.seeds) {
     try {
@@ -129,10 +144,19 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
       })
 
       const won = result.outcome === 'stage_clear'
-      if (won) wins++
+      if (won) {
+        wins++
+        winTicksSum += result.ticks
+      }
       if (result.finalState.baseAlive) baseSurvived++
       totalKills += result.finalState.killCount
       totalTicks += result.ticks
+
+      // Count catastrophic failures: timeout with <5 kills means the AI
+      // was stuck/paralyzed — the worst possible outcome.
+      if (result.outcome === 'max_ticks' && result.finalState.killCount < 5) {
+        lowKillTimeouts++
+      }
 
       perSeed.push({
         seed,
@@ -151,6 +175,7 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
         ticks: 0,
         baseAlive: false,
       })
+      lowKillTimeouts++
     }
   }
 
@@ -160,8 +185,13 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   const avgKills = totalKills / n
   const avgTicks = totalTicks / n
 
+  // Speed bonus: if any wins occurred, reward faster average win time.
+  // A 2000-tick clear gets ~400 bonus; a 10000-tick clear gets ~0.
+  const avgWinTicks = wins > 0 ? winTicksSum / wins : config.maxTicks
+  const speedBonus = wins > 0 ? Math.max(0, (1 - avgWinTicks / config.maxTicks) * 400) : 0
+
   const fitness =
-    winRate * 1000 + baseSurvivalRate * 300 + avgKills * 20 + Math.min(avgTicks / 100, 50)
+    winRate * 5000 + avgKills * 60 + baseSurvivalRate * 150 + speedBonus - lowKillTimeouts * 250
 
   return { fitness, winRate, baseSurvivalRate, avgKills, avgTicks, perSeed }
 }
@@ -398,13 +428,19 @@ interface OptimizationResult {
   }>
 }
 
+/** IPOP-CMA-ES: restart with larger population on stagnation. */
+const RESTART_STAGNATION = 20
+const MAX_RESTARTS = 3
+
 function optimize(
   evalConfig: EvalConfig,
   generations: number,
   verbose: boolean,
 ): OptimizationResult {
   const initialVector = paramsToVector(DEFAULT_GOD_AI_PARAMS)
-  const state = initCMAES(initialVector)
+  let state = initCMAES(initialVector)
+  let restartCount = 0
+  let popMultiplier = 1
 
   const history: OptimizationResult['history'] = []
   const allCandidates: OptimizationResult['allCandidates'] = []
@@ -415,11 +451,12 @@ function optimize(
 
   process.stderr.write(`\n${'='.repeat(70)}\n`)
   process.stderr.write(
-    `CMA-ES Optimization: ${DIM} params, ${state.lambda} pop, ${generations} generations\n`,
+    `CMA-ES Optimization (IPOP): ${DIM} params, ${state.lambda} pop, ${generations} generations\n`,
   )
   process.stderr.write(
     `Evaluation: stage "${evalConfig.stage.name}", ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
   )
+  process.stderr.write(`Fitness v3: win*5000 + kills*60 + base*150 + speed - lowKillTimeout*250\n`)
   process.stderr.write(`${'='.repeat(70)}\n\n`)
 
   for (let gen = 0; gen < generations; gen++) {
@@ -489,13 +526,20 @@ function optimize(
         `base=${best.evalResult.baseSurvivalRate.toFixed(2)} ` +
         `kills=${best.evalResult.avgKills.toFixed(1)} ` +
         `σ=${state.sigma.toFixed(3)} ` +
-        `stag=${state.stagnationCount}\n`,
+        `stag=${state.stagnationCount}` +
+        (restartCount > 0 ? ` R${restartCount}` : '') +
+        `\n`,
     )
 
-    // Early stopping: 10 generations of stagnation with converged sigma.
-    if (state.stagnationCount > 15 && state.sigma < 0.05) {
-      process.stderr.write(`\nEarly stop: stagnation + sigma convergence.\n`)
-      break
+    // IPOP-CMA-ES restart: on stagnation, restart with larger population.
+    if (state.stagnationCount >= RESTART_STAGNATION && restartCount < MAX_RESTARTS) {
+      restartCount++
+      popMultiplier *= 2
+      // Restart from best known point with increased sigma.
+      state = initCMAESIPOP(paramsToVector(bestParams), popMultiplier)
+      process.stderr.write(
+        `\n>>> IPOP restart ${restartCount}: pop=${state.lambda}, σ=${state.sigma.toFixed(3)}, from best=${bestFitness.toFixed(1)}\n\n`,
+      )
     }
   }
 
@@ -514,6 +558,36 @@ function optimize(
     history,
     allCandidates,
   }
+}
+
+/** Initialize CMA-ES with a population multiplier (for IPOP restarts). */
+function initCMAESIPOP(initialVector: number[], popMultiplier: number): CMAESState {
+  const state = initCMAES(initialVector)
+  state.lambda *= popMultiplier
+  state.mu = Math.floor(state.lambda / 2)
+  // Recompute weights for the larger population.
+  const rawWeights: number[] = []
+  for (let i = 0; i < state.mu; i++) {
+    rawWeights.push(Math.log(state.mu + 1) - Math.log(i + 1))
+  }
+  const wSum = rawWeights.reduce((a, b) => a + b, 0)
+  state.weights = rawWeights.map((w) => w / wSum)
+  const wSqSum = state.weights.reduce((a, w) => a + w * w, 0)
+  state.mueff = 1 / wSqSum
+  // Recompute strategy parameters.
+  state.cs = (state.mueff + 2) / (DIM + state.mueff + 5)
+  state.ds = 1 + 2 * Math.max(0, Math.sqrt((state.mueff - 1) / (DIM + 1)) - 1) + state.cs
+  state.cc = (4 + state.mueff / DIM) / (DIM + 4 + (2 * state.mueff) / DIM)
+  state.c1 = 2 / ((DIM + 1.3) ** 2 + state.mueff)
+  state.cmu = Math.min(
+    1 - state.c1,
+    (2 * (state.mueff - 2 + 1 / state.mueff)) / ((DIM + 2) ** 2 + state.mueff),
+  )
+  state.chiN = Math.sqrt(DIM) * (1 - 1 / (4 * DIM) + 1 / (21 * DIM * DIM))
+  // Restart with larger sigma for broader exploration.
+  state.sigma = 0.8
+  state.stagnationCount = 0
+  return state
 }
 
 // ============================================================
@@ -580,11 +654,11 @@ if (import.meta.main) {
 
   const stageIdx = parseInt(arg('stage', '0')!, 10)
   const difficulty = arg('difficulty', 'classic')!
-  const seedCount = parseInt(arg('seeds', '5')!, 10)
-  const generations = parseInt(arg('generations', '30')!, 10)
+  const seedCount = parseInt(arg('seeds', '8')!, 10)
+  const generations = parseInt(arg('generations', '50')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
   const verbose = process.argv.includes('--verbose')
-  const outputDir = arg('output', '.workbuddy/optimization')
+  const outputDir = arg('output', '.workbuddy/optimization-v3')
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const stage = STAGES[stageIdx]

@@ -132,25 +132,39 @@ export interface GodAIParams {
   huntAllyCount: number
 }
 
-/** Default God AI parameters — optimized via CMA-ES (2026-07-28).
- * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v2/ for details.
- * Round 3 (plan/God-AI-Curriculum): endgameEnemyThreshold raised from 1→6 and
- * huntAllyCount added (4) to unlock S6 attack-defense switching earlier —
- * the 0% win-rate root cause was the AI turtling until only 3 enemies remained. */
+/** Default God AI parameters — optimized via CMA-ES v3 (2026-07-28).
+ * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v3/ for details.
+ *
+ * CMA-ES v3 used a kill-centric fitness function (win*5000 + kills*60 +
+ * base*150 + speed - lowKillTimeout*250) with IPOP restarts. The optimizer
+ * found a "defense-first, chase-when-safe" strategy: tight base defense
+ * (offset=1, spread=5, scanRadius=1) with moderate roaming (dist=10) and
+ * very frequent replanning (interval=3). endgameEnemyThreshold=1 means the
+ * AI relies on the !baseUnderThreat chase branch for most of the game,
+ * only activating full hunt mode for the last enemy.
+ *
+ * Win-rate numbers below are from the optimizer's NARROW eval set
+ * (seeds 1–8, 18000 ticks) — NOT a wide regression. On a 60-seed classic
+ * spread the realistic figures are ~23% win / ~83% base survival /
+ * ~10–14 avg kills. The two float params that carry most of the gain
+ * (aimError, suboptimalPathProb) were dropped during the initial write-back
+ * and restored on 2026-07-28:
+ *   optimizer best (seeds 1–8):  37.5% win / 100% base / 16.4 kills
+ *   shipped pre-fix (same seeds): 25.0% win / 100% base / 13.9 kills */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
-  aimError: 0,
-  suboptimalPathProb: 0.05,
+  aimError: 0.002423129688943702,
+  suboptimalPathProb: 0.06178084394496533,
 
   defenseRowOffset: 1,
-  defenseColSpread: 3,
+  defenseColSpread: 5,
   threatRangeCells: 26,
-  maxPlayerDistFromBase: 7,
-  t8MaxInterceptDistCells: 8,
-  baseWallScanRadius: 5,
-  replanInterval: 10,
-  powerupMaxDivertDistance: 3,
-  endgameEnemyThreshold: 6,
+  maxPlayerDistFromBase: 10,
+  t8MaxInterceptDistCells: 3,
+  baseWallScanRadius: 1,
+  replanInterval: 3,
+  powerupMaxDivertDistance: 9,
+  endgameEnemyThreshold: 1,
   huntAllyCount: 4,
 }
 

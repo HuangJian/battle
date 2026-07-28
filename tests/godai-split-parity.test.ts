@@ -3,19 +3,22 @@ import { runSimulation } from '../tools/simulation-runner'
 import { STAGES } from '../src/config/stages'
 
 // ============================================================
-// God AI Split Parity Test (plan/God-AI-Curriculum §0.5)
+// God AI Behavior-Lock Test (plan/God-AI-Curriculum §0.5)
 //
-// The God AI "God class" (src/ai/GodAIInput.ts, ~1537 lines) was
-// extracted into functional sub-modules (src/ai/god/*) during the
-// §0.5 split. This is a PURE REFACTOR — runtime behavior must be
-// identical to the pre-split single-class implementation.
+// During the §0.5 split, src/ai/GodAIInput.ts (~1537-line "God class")
+// was extracted into functional sub-modules (src/ai/god/*). The split
+// itself was proven behavior-preserving at commit 0d3275b: the
+// refactored code was diffed against the pre-split single-class version
+// (commit 28683be) across 8 seeds and produced byte-identical
+// outcome/ticks/score/lives/kills/baseAlive/playerLevel.
 //
-// The baseline below was captured BEFORE the split (from commit
-// 28683be's single-class GodAIInput.ts) and re-verified to match the
-// refactored version exactly across 8 diverse seeds (outcomes span
-// gameover / max_ticks / stage_clear). Any future behavior change in
-// the AI core will break this test, catching regressions the moment
-// they land.
+// This test is the LIVING guard that resulted from that proof. The
+// baseline below was re-locked after the CMA-ES v3 param tuning
+// (2026-07-28) so it pins the current refactored behavior under the v3
+// params. Any future accidental behavior change in the god/* sub-modules
+// will break it, catching regressions the moment they land. If a change
+// is intentional (e.g. further tuning), re-capture the baseline from the
+// deterministic harness rather than deleting the test.
 //
 // Run: bun test tests/godai-split-parity.test.ts
 // ============================================================
@@ -30,14 +33,19 @@ interface Expected {
   playerLevel: number
 }
 
+// Baseline updated for CMA-ES v3 params (2026-07-28). The v3 optimizer
+// found a kill-centric strategy that trades slightly lower kills on some
+// seeds for 100% base survival (was 5/8 base alive with old params).
+// Key changes: seeds 1, 999, 55555 no longer lose the base (gameover →
+// max_ticks), seed 7 clears with more lives saved (1→4).
 const BASELINE: Record<number, Expected> = {
   1: {
-    outcome: 'gameover',
-    ticks: 9309,
-    score: 1500,
+    outcome: 'max_ticks',
+    ticks: 36000,
+    score: 1900,
     lives: 3,
-    killCount: 15,
-    baseAlive: false,
+    killCount: 17,
+    baseAlive: true,
     playerLevel: 0,
   },
   2: {
@@ -51,17 +59,17 @@ const BASELINE: Record<number, Expected> = {
   },
   7: {
     outcome: 'stage_clear',
-    ticks: 2845,
+    ticks: 3376,
     score: 4700,
-    lives: 1,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 2,
+    playerLevel: 0,
   },
   42: {
     outcome: 'stage_clear',
-    ticks: 2727,
-    score: 4200,
+    ticks: 2499,
+    score: 4700,
     lives: 3,
     killCount: 20,
     baseAlive: true,
@@ -77,30 +85,30 @@ const BASELINE: Record<number, Expected> = {
     playerLevel: 0,
   },
   999: {
-    outcome: 'gameover',
-    ticks: 5809,
-    score: 300,
+    outcome: 'max_ticks',
+    ticks: 36000,
+    score: 1200,
     lives: 3,
-    killCount: 3,
-    baseAlive: false,
+    killCount: 12,
+    baseAlive: true,
     playerLevel: 0,
   },
   12345: {
     outcome: 'max_ticks',
     ticks: 36000,
-    score: 600,
+    score: 200,
     lives: 3,
-    killCount: 6,
+    killCount: 2,
     baseAlive: true,
     playerLevel: 0,
   },
   55555: {
-    outcome: 'gameover',
-    ticks: 2237,
-    score: 800,
+    outcome: 'max_ticks',
+    ticks: 36000,
+    score: 1200,
     lives: 2,
-    killCount: 8,
-    baseAlive: false,
+    killCount: 7,
+    baseAlive: true,
     playerLevel: 0,
   },
 }
