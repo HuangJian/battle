@@ -106,3 +106,73 @@ DEFAULT_GOD_AI_PARAMS = {
    边缘对齐会导致 T2a 触发但 `scanAhead` 找不到目标。需要更严格的对齐检查。
 4. **开火效率**：即使修复了 T2a 冷却问题，玩家每场仅开火 7-8 次。
    需要让玩家在导航时更积极地朝目标方向开火（当前 `shouldFireInDir` 太保守）。
+
+---
+
+## Round 2 — Classic 模式适配 + 13 项修复 (2026-07-28)
+
+### 背景
+
+Classic 模式（§32）将敌人 AI 和战斗能力调整为忠实原版（难度下降）。但仿真工具
+（`simulation-runner.ts`）未设置 `world.rules`，所有仿真实际跑的是现代规则。
+God AI 的 `onCooldown` 也用了时间冷却（classic 应为子弹数冷却），导致开火极少。
+两项根本性 bug 叠加，AI 表现为 0% 基地存活 / 0 击杀。
+
+### 改动
+
+| 项目 | 详情 |
+|------|------|
+| 技巧# | 13 项修复（见 DECISIONS §33） |
+| 代码改动 | `GodAIInput.ts`: onCooldown 子弹数感知；shield 不触发 aggressive；navigate 不打基地；canHunt 收紧；baseUnderThreat 提前；selectTarget 追击最近敌；directMove 垂直优先；T2a-hold；智能打墙；AIM_RANGE=15；followPath 无路径不 fallback；POWERUP_PRIORITY 补全 |
+| 工具修复 | `simulation-runner.ts`: 设置 `world.rules = RULES[difficulty]` |
+
+### 优化结果
+
+| 指标 | Round 1 (modern rules, CMA-ES) | Round 2 (classic rules, 13 fixes) | Δ |
+|------|------|------|---|
+| 基地存活率 | 80% | **100%** | +20% |
+| 平均击杀 | 5.6 | 2.6 | -3.0 |
+| 最佳种子击杀 | 8 | **17** | +9 |
+| 胜率 | 0% | 0% | 0% |
+| 0 杀种子占比 | 0% | 55% | +55% |
+
+### 关键发现
+
+1. **仿真工具漏设 `world.rules`** — 头号 bug。Classic 规则从未生效。
+2. **`onCooldown` 时间冷却 vs 子弹数冷却** — AI 每场仅开火 1-2 次的根因。
+3. **navigate 分支无条件开火摧毁自家基地** — classic 基地 HP=1，一枪自毁。
+4. **shield 触发 aggressive 导致放弃防守** — 玩家追敌外出，基地裸奔。
+5. **directMove 水平优先** — 玩家横向移动无法进入敌人所在行，T2a 无法触发。
+   改为垂直优先后，击杀从 0 跃升至 17（seed 3）。
+6. **T2a-hold** — 冷却中保持对齐，不追其他目标。显著提升有效开火率。
+7. **55% 种子 0 击杀** — 敌人移动模式导致玩家无法进入同行/列。需 M1 预判射击。
+
+### 当前参数
+
+```typescript
+DEFAULT_GOD_AI_PARAMS = {
+  reactionDelay: 0,
+  aimError: 0,
+  suboptimalPathProb: 0.05,
+  defenseRowOffset: 1,
+  defenseColSpread: 3,
+  threatRangeCells: 26,
+  maxPlayerDistFromBase: 7,
+  t8MaxInterceptDistCells: 8,
+  baseWallScanRadius: 5,
+  replanInterval: 50,
+  powerupMaxDivertDistance: 3,
+  endgameEnemyThreshold: 1,
+}
+AIM_RANGE_CELLS = 15
+```
+
+### 下一步方向
+
+1. **M1 预判射击**：当前玩家朝敌人当前位置射击，但敌人移动导致命中率极低。
+   需要预测敌人移动方向，射击其未来位置。这是解决 0 击杀种子的关键。
+2. **S6 攻守切换**：当前玩家过于防守（baseUnderThreat 时紧贴基地），需要根据
+   场上敌人数量/类型动态切换进攻/防守。在敌人少且基地安全时应主动追击。
+3. **T2a-hold 死亡问题**：玩家在冷却中原地等待，被敌方子弹击杀。
+   需要在 T2a-hold 中加入威胁检测，有来袭子弹时放弃 hold 转为闪避。
+4. **AIM_RANGE_CELLS 调优**：15 是当前值，但可能不是最优。需要实验不同值。

@@ -2,6 +2,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { CELL, BASE_POS } from '../src/constants'
 import type { StageData, GameEvent, TankKind } from '../src/types'
 
@@ -108,8 +109,13 @@ export function runSimulation(opts: RunOptions): SimResult {
   world.rng.reseed(seed)
 
   // Set difficulty BEFORE loading the stage (loadStageData reads difficultyKey).
+  // CRITICAL: must also set world.rules — startGame() does this but the
+  // simulation runner calls loadStageData directly, so without this line every
+  // simulation runs with DEFAULT_RULES (modern) regardless of the difficulty
+  // key. Classic mode's bulletCap/instant/wander rules never took effect.
   world.difficultyKey = difficulty
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+  world.rules = RULES[difficulty] ?? DEFAULT_RULES
 
   // Create the God AI input and Simulation.
   const input = new GodAIInput(world, godAIParams)

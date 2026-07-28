@@ -1204,3 +1204,43 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 **No hidden state:** rules live on the World (AGENTS §2.2), never in a module global. A pre-`startGame` World defaults to `DEFAULT_RULES` (constructor), so incidental Worlds (menus, tools, tests) behave modern unless a difficulty explicitly selects classic.
 
 **Regression tests:** `tests/classic-rules.test.ts` (profile diff + wiring + rewind), `tests/classic-combat.test.ts` (instant TTK incl. fast one-shot + modern pool regression), `tests/classic-fire-cap.test.ts` (0★ cap 1 / 2★ cap 2 / enemy cap / modern no-cap / **no time cooldown after shell resolves**), `tests/classic-powerup.test.ts` (carriers at 4/11/18 drop; a carrier killed out of order still drops; no elite/milestone/super/boat rolls; spawn-queue carriers config-driven — classic [4,11,18] / modern every-4th), `tests/classic-stage.integration.test.ts` (spawn cadence 1800, TTK + byKind scoring end-to-end through real ticks, jitter-off speeds), `tests/classic-speed.test.ts` (FC table equality; basic/power/armor equal; fast = 2×; player T1→T4 3.75→7.5; classic faster than modern). Existing suites that used `classic` as a stand-in for modern behavior were repointed at `hard`; speed tests now compare against each world's own `rules.speedCps` (cells/sec) converted to px/tick. Full suite **422 pass / 0 fail**; oxlint + tsc clean; vite bundle valid (89 modules) — `bun run build`'s dist-empty step is blocked only by the sandbox safe-delete shim, not a code error.
+
+## 33. God AI Classic Mode — Bullet-Cap-Aware Cooldown + Defense Fixes (2026-07-28)
+
+**Decision:** Thirteen fixes to `GodAIInput.ts` and `tools/simulation-runner.ts` to make the God AI functional in classic mode (§32 rules). The AI went from **0% base survival / 0 kills** to **100% base survival / avg 2.6 kills** (best seed: 17/20 kills).
+
+**Root causes fixed (in priority order):**
+
+1. **Simulation runner never set `world.rules`** (`tools/simulation-runner.ts`): The runner called `loadStageData` directly instead of `startGame`, so `world.rules` stayed at `DEFAULT_RULES` (modern). All simulations ran with modern rules regardless of the `--difficulty` flag. Classic mode's `bulletCap`/`instant`/`wander` rules never took effect. Fix: `world.rules = RULES[difficulty] ?? DEFAULT_RULES` before `loadStageData`.
+
+2. **`onCooldown` used time-based check in bulletCap mode** (`GodAIInput.ts`): `const onCooldown = now - p.lastFire < p.nextFireInterval` suppressed fire for ~1.3s after each shot even though classic's `bulletCap` model has NO time cooldown — the engine only limits by on-screen bullet count. Fix: in `bulletCap` mode, `onCooldown = (player's in-flight bullets >= cap)`; in `cooldown` mode, keep the time check.
+
+3. **Navigate branch fired unconditionally toward the base** (`GodAIInput.ts`): The old code `this._fire = !onCooldown && (!aimDir || this.shouldFireInDir(...))` fired when no enemy was aligned (`!aimDir = true`), without checking `shouldFireInDir`. The player fired right toward the base (col 12), destroying it in 1 hit (classic base HP=1). Fix: always call `shouldFireInDir`, which checks for base protection (T6).
+
+4. **Shield triggered aggressive hunt, abandoning base defense** (`GodAIInput.ts`): `this.aggressive = frozen || shielded` made the player chase enemies across the map during the 3-second respawn shield, leaving the base undefended. Fix: `this.aggressive = frozen` only — shield skips dodge (player is invulnerable) but doesn't abandon defense.
+
+5. **`canHunt` too aggressive** (`GodAIInput.ts`): `(enemies.length <= 2 || w.enemiesRemaining <= 5)` triggered during the 1.8s spawn gap (enemies.length dips to 0-1), sending the player far from base. Fix: `(enemies.length <= 2 && w.enemiesRemaining <= 3)` — both conditions must hold.
+
+6. **`baseUnderThreat` too late** (`GodAIInput.ts`): Checked `tc.row >= defenseRow (23)` — the enemy was already adjacent to the base. Fix: `tc.row >= 20` (within 4 rows of the base) and widened col range to ±3.
+
+7. **`selectTarget` idle when enemies out of range** (`GodAIInput.ts`): When no enemy was within `threatRangeCells`, the AI returned the default defense position and sat idle. Fix: fall back to the nearest enemy regardless of threat range.
+
+8. **`directMove` horizontal-first** (`GodAIInput.ts`): The player zigzagged horizontally across the map without ever getting into the same row as an enemy. Fix: vertical-first priority — move up/down to close the row gap, then horizontal to align. This doubled the kill count on good seeds (0→17 on seed 3).
+
+9. **T2a-hold** (`GodAIInput.ts`): When the player's bullet was in flight (bulletCap) AND an enemy was in the same row/col, the AI navigated away to chase a different target. By the time the bullet resolved, the player was no longer aligned. Fix: hold position and face the enemy during cooldown — the bullet resolves quickly in classic (hits a wall/enemy nearby) and T2a fires again.
+
+10. **Smart wall-firing** (`GodAIInput.ts`): The navigate branch fired at walls via `shouldFireInDir`, wasting the bullet cap. Fix: fire at walls ONLY when blocked (can't move in the path direction); when moving freely, fire only at enemies (`allowWallFire=false`). `shouldFireInDir` gained an `allowWallFire` parameter.
+
+11. **`POWERUP_PRIORITY` missing super power-up types** (`GodAIInput.ts`): The record didn't include `frenzy`/`guard`/`sacrifice` (added in §31) and still had `helmet` (removed in §32). Fix: remove `helmet`, add the three super types.
+
+12. **`AIM_RANGE_CELLS` reduced from 26 to 15** (`GodAIInput.ts`): At 26 cells, the player fired at distant enemies whose bullets took 200+ ticks to arrive — the enemy moved out of alignment long before the bullet hit. At 15 cells (240px), the bullet arrives in ~120 ticks, giving a reasonable hit probability.
+
+13. **`followPath` fallback** (`GodAIInput.ts`): When A* found no path, `followPath` fell back to `directMove` which broke through walls, wasting the bullet cap. Fix: return `null` (stay in place) and let the re-plan find a path next tick.
+
+**Remaining issues (next round):**
+- 55% of seeds get 0 kills — the player can't catch moving enemies in many configurations. The vertical-first movement helps (17 kills on best seed) but doesn't work for all enemy movement patterns.
+- T2a-hold causes the player to stand still during cooldown, sometimes getting killed by enemy bullets.
+- 0% win rate — the player never clears the stage (needs 20 kills). Even the best seed (17 kills) runs out of time.
+- The 0-kill issue likely requires M1 (lead shot — predict enemy movement) and better S6 (attack-defense switching) to resolve.
+
+**Regression tests:** All 437 existing tests pass; oxlint + tsc clean; oxfmt clean.

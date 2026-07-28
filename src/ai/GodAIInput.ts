@@ -96,8 +96,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
 
   defenseRowOffset: 1,
   defenseColSpread: 3,
-  threatRangeCells: 18,
-  maxPlayerDistFromBase: 8,
+  threatRangeCells: 26,
+  maxPlayerDistFromBase: 7,
   t8MaxInterceptDistCells: 8,
   baseWallScanRadius: 5,
   replanInterval: 50,
@@ -123,8 +123,12 @@ export const SKILLED_HUMAN_PARAMS: GodAIParams = {
 // Static constants (NOT tunable — game rules, not strategy)
 // ============================================================
 
-/** T2a: max distance (in cells) at which to stop-and-aim — entire field. */
-const AIM_RANGE_CELLS = 26
+/** T2a: max distance (in cells) at which to stop-and-aim.
+ * At 15 cells (240px), the bullet takes ~120 ticks to arrive. An enemy
+ * moving perpendicular at 1px/tick moves 120px = 7.5 cells in that time.
+ * This is a balance: too short and the player rarely fires; too long and
+ * the player wastes bullets on enemies that dodge. */
+const AIM_RANGE_CELLS = 15
 
 /** T8: how far ahead to project a bullet's trajectory (entire field). */
 const BULLET_TRAJECTORY_MAX_CELLS = 26
@@ -146,8 +150,10 @@ const POWERUP_PRIORITY: Record<PowerUpType, number> = {
   fence: 3,
   tank: 4,
   shield: 5,
-  helmet: 5,
   boat: 6,
+  frenzy: 5,
+  guard: 3,
+  sacrifice: 5,
 }
 
 // ============================================================
@@ -243,16 +249,41 @@ export class GodAIInput implements InputLike {
     const now = w.frame * (1000 / 60)
 
     // ---- M6: Cooldown-aware firing ----
-    const onCooldown = now - p.lastFire < p.nextFireInterval
+    // In 'bulletCap' mode (classic FC), the engine gates fire by on-screen
+    // bullet count, NOT by a time cooldown. The AI must mirror this:
+    // "on cooldown" means the player's bullet is still in flight (cap
+    // reached), not that a timer hasn't elapsed. Using the time check here
+    // would suppress fire for ~1.3s after each shot even though the engine
+    // allows refire the instant the previous bullet resolves — this was the
+    // #1 root cause of the AI's abysmal kill count (1-3 kills/game) in classic.
+    let onCooldown: boolean
+    if (w.rules.fireModel === 'bulletCap') {
+      const cap =
+        (w.rules.maxBullets['player'] ?? 1) +
+        ((p.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
+      let inFlight = 0
+      for (const b of w.bullets) {
+        if (b.alive && b.ownerId === p.id) inFlight++
+      }
+      onCooldown = inFlight >= cap
+    } else {
+      onCooldown = now - p.lastFire < p.nextFireInterval
+    }
 
-    // ---- S8: Freeze window — aggressive mode ----
+    // ---- S8: Freeze window — aggressive hunt mode ----
+    // When enemies are frozen, the player can hunt freely — enemies can't
+    // fight back or approach the base. This is a free-clear window.
     const frozen = w.freezeTimer > 0
 
-    // ---- S9: Shield — skip dodge ----
+    // ---- S9: Shield — skip dodge but DON'T abandon defense ----
+    // The 3-second respawn shield makes the player invulnerable, so dodge
+    // is unnecessary. But the player must STILL defend the base — chasing
+    // enemies across the map during the shield window leaves the base
+    // undefended (the #1 cause of 330-tick base losses in classic).
     const shielded = (p.shieldTimer ?? 0) > 0
 
-    // ---- S8/S9: Set aggressive mode ----
-    this.aggressive = frozen || shielded
+    // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
+    this.aggressive = frozen
 
     // ---- Scan for enemy targets (global vision, T9 priority) ----
     const aimDir = this.findEnemyDirection(pcx, pcy)
@@ -288,7 +319,9 @@ export class GodAIInput implements InputLike {
 
     // ---- T8: Base bullet interception (ultimate defense) ----
     // Check AFTER dodge (survive first) but BEFORE aggressive/T2a.
-    // Skip in aggressive mode (enemies frozen / player invulnerable).
+    // Skip only when enemies are frozen (aggressive hunt — no bullets to
+    // intercept). When shielded, the player can still intercept bullets
+    // headed for the base — the shield protects the player, not the base.
     if (!this.aggressive) {
       const baseThreat = this.findBulletThreatToBase()
       if (baseThreat) {
@@ -325,9 +358,10 @@ export class GodAIInput implements InputLike {
       }
       // Navigate to nearest enemy.
       this._moveDir = this.followPath()
-      // Proactive fire: always fire while moving to catch enemies
-      // that cross the line of fire. The fire cooldown limits the rate.
-      this._fire = !onCooldown
+      // Proactive fire — but ALWAYS check shouldFireInDir to avoid shooting
+      // the player's own base (T6). In classic instant combat the base has
+      // 1 HP, so a single self-inflicted bullet destroys it.
+      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
       this.branchCounts.aggressive++
       return
     }
@@ -335,10 +369,6 @@ export class GodAIInput implements InputLike {
     // ---- T2a: Stop-and-aim (enemy in same row/col) ----
     // If an enemy is in the same row/col, stop and fire at it. If there's
     // a wall between, fire to break through (T6: never at base protection).
-    //
-    // Decision §27: T2a only triggers when !onCooldown. When on cooldown,
-    // the AI falls through to navigation (with proactive fire) instead of
-    // stopping dead. This keeps the AI mobile during cooldown.
     if (aimDir && !onCooldown) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
@@ -355,6 +385,18 @@ export class GodAIInput implements InputLike {
       // No clear shot, or wall below defense row — fall through to navigation.
     }
 
+    // ---- T2a-hold: Aligned with enemy but on cooldown ----
+    // When the player's bullet is in flight AND an enemy is in the same
+    // row/col, hold position and wait for the bullet to resolve. This
+    // prevents the player from navigating away from an aligned enemy
+    // during the bullet's flight, which was the #1 cause of 0-kill games.
+    if (aimDir && onCooldown) {
+      this._moveDir = p.dir === aimDir ? null : aimDir
+      this._fire = false
+      this.branchCounts.t2a++
+      return
+    }
+
     // ---- S5: Power-up economy (normal mode) ----
     // Check for power-ups when no enemy is in line of fire. Previously this
     // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
@@ -369,15 +411,32 @@ export class GodAIInput implements InputLike {
       }
     }
 
-    // ---- T2b: Navigate directly towards target ----
-    // Use direct movement instead of A* — the player breaks through walls
-    // rather than navigating around them. This is faster and more reactive.
-    // Smart proactive fire: fire proactively when NO enemy is in the same
-    // row/col (catches enemies that cross the line of fire). When an enemy
-    // IS in the same row/col, use shouldFireInDir to fire at visible targets
-    // only — this saves the cooldown for T2a to fire at the aligned enemy.
+    // ---- T2b: Navigate towards target ----
+    // Use direct movement — the player moves toward the target, breaking
+    // through walls when blocked. A* pathfinding was too slow to catch
+    // wandering enemies; direct movement gets the player into firing
+    // position faster.
+    //
+    // Fire control in classic bulletCap mode (1 bullet in flight):
+    // - If blocked by a wall in the path direction → fire to break through.
+    //   This is essential for mobility — without it the player is stuck.
+    // - If moving freely → fire only at enemies in the line of fire.
+    //   Don't waste the bullet cap on walls or enemy bullets.
+    // T2a handles wall-breaking when an enemy is in the same row/col.
+    // The dodge/T8 branches handle bullet interception.
     this._moveDir = this.directMove(this.playerCell())
-    this._fire = !onCooldown && (!aimDir || this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir))
+    // Fire control: when blocked by a breakable wall (verified by
+    // canMoveOrBreak in directMove), fire immediately to break through.
+    // Don't check shouldFireInDir here — it might fire at enemy bullets
+    // (T5) instead of the wall, leaving the player stuck. When moving
+    // freely, fire only at enemies (not walls) to save the bullet cap.
+    if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
+      // Blocked by a breakable wall or enemy tank — fire to break through.
+      // canMoveOrBreak already verified the wall is non-base-protection.
+      this._fire = !onCooldown
+    } else {
+      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir, false)
+    }
     this.branchCounts.navigate++
   }
 
@@ -800,7 +859,7 @@ export class GodAIInput implements InputLike {
    * T6: base protection bricks are never fired at.
    * T11: steel is only fired at if player level ≥ 3 (can pierce steel).
    */
-  private shouldFireInDir(pcx: number, pcy: number, dir: Direction): boolean {
+  private shouldFireInDir(pcx: number, pcy: number, dir: Direction, allowWallFire = true): boolean {
     const w = this.world
     const p = w.player!
 
@@ -847,7 +906,10 @@ export class GodAIInput implements InputLike {
     // This is critical for mobility — without it, the player navigates
     // around walls, which takes too long and lets enemies reach the base.
     // Never fire at base protection bricks (T6) or steel (T11).
-    if (result.wall && !result.baseWall && !result.steel) {
+    // When allowWallFire is false (moving freely during navigation in
+    // classic bulletCap mode), skip wall-firing to reserve the bullet cap
+    // for enemies and enemy bullets.
+    if (allowWallFire && result.wall && !result.baseWall && !result.steel) {
       return this.rng.next() >= this.params.aimError
     }
 
@@ -1082,8 +1144,10 @@ export class GodAIInput implements InputLike {
       this.replanTimer = 0
     }
 
-    // No path — try to move toward the nearest enemy directly.
-    return this.directMove(playerCell)
+    // No path — stay in place and fire at enemies in the facing direction.
+    // Don't fall back to directMove (which breaks through walls and wastes
+    // the bullet cap in classic mode). The re-plan will find a path next tick.
+    return null
   }
 
   /**
@@ -1144,17 +1208,21 @@ export class GodAIInput implements InputLike {
     if (enemies.length === 0) return this.getDefaultDefensePosition()
 
     // ---- S6: Determine strategy mode ----
-    // Emergency defense: any enemy within 2 cols of the base and at or below
-    // the defense row — these are immediate threats that need direct interception.
+    // Emergency defense: any enemy within 3 cols of the base and at or
+    // below row 20 (within 4 rows of the base) — these are immediate
+    // threats that need direct interception. The old check (row >=
+    // defenseRow = 23) triggered too late — the enemy was already adjacent
+    // to the base and the player couldn't get back in time.
     const baseUnderThreat = enemies.some((t) => {
       const tc = this.tankCell(t)
-      return Math.abs(tc.col - baseCol) <= 2 && tc.row >= defenseRow
+      return Math.abs(tc.col - baseCol) <= 3 && tc.row >= 20
     })
 
-    // Aggressive hunt: few enemies on field OR few remaining in queue.
-    // This is the key to clearing stages — the player stops hugging the
-    // base and actively hunts down the remaining enemies.
-    const canHunt = (enemies.length <= 2 || w.enemiesRemaining <= 5) && !baseUnderThreat
+    // Aggressive hunt: few enemies on field AND few remaining in queue.
+    // Both conditions must hold — requiring only one sent the player chasing
+    // across the map between spawns (enemies.length dips to 0-1 during the
+    // 1.8s spawn gap), leaving the base undefended.
+    const canHunt = enemies.length <= 2 && w.enemiesRemaining <= 3 && !baseUnderThreat
 
     // If the player is too far from the base, return to defense position.
     // In hunt mode, the player can roam freely.
@@ -1163,7 +1231,7 @@ export class GodAIInput implements InputLike {
     // intercept enemies before they reach the base (2× the strict distance).
     const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
     const maxDist = canHunt
-      ? GRID
+      ? this.params.maxPlayerDistFromBase * 3
       : baseUnderThreat
         ? this.params.maxPlayerDistFromBase
         : this.params.maxPlayerDistFromBase * 2
@@ -1231,12 +1299,27 @@ export class GodAIInput implements InputLike {
       }
     }
 
-    if (!bestEnemy) return this.getDefaultDefensePosition()
+    if (!bestEnemy) {
+      // No enemy within threat range — go after the nearest enemy anyway.
+      // Sitting idle at the defense position while enemies roam the top of
+      // the map means the player never engages and never clears the stage.
+      let nearest = enemies[0]
+      let nearestDist = Infinity
+      for (const t of enemies) {
+        const tc = this.tankCell(t)
+        const d = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+        if (d < nearestDist) {
+          nearestDist = d
+          nearest = t
+        }
+      }
+      return this.tankCell(nearest)
+    }
 
-    // In normal defense mode, go directly toward the best enemy.
-    // Previously used interceptCell (defense row at enemy's column), but this
-    // was too passive — the AI sat at the defense row and waited. Going
-    // directly toward the enemy means the AI gets into firing range sooner.
+    // Go directly toward the best enemy. With the bulletCap-aware onCooldown
+    // fix, the player fires frequently and can kill enemies while pursuing.
+    // The interception-point strategy was abandoned because wandering enemies
+    // rarely cross the fixed interception column, leaving the player idle.
     return this.tankCell(bestEnemy)
   }
 
@@ -1251,21 +1334,22 @@ export class GodAIInput implements InputLike {
     const dx = target.col * CELL - p.x
     const dy = target.row * CELL - p.y
 
-    // Build direction preference: always prioritize horizontal movement
-    // first to align with the enemy's column. This ensures the AI gets
-    // into the enemy's column, so T2a can fire when the enemy crosses.
-    // Only prioritize vertical when already in the same column (dx ≈ 0).
+    // Build direction preference: prioritize vertical movement (up/down)
+    // first to close the row gap with the enemy. This gives more chances
+    // to fire at enemies in the same row once aligned. The old horizontal-
+    // first approach made the player zigzag across the map without ever
+    // getting into the same row as an enemy.
     const dirs: Direction[] = []
-    if (Math.abs(dx) > CELL / 2) {
-      if (dx > 0) dirs.push('right')
-      else if (dx < 0) dirs.push('left')
+    if (Math.abs(dy) > CELL / 2) {
       if (dy > 0) dirs.push('down')
       else if (dy < 0) dirs.push('up')
+      if (dx > 0) dirs.push('right')
+      else if (dx < 0) dirs.push('left')
     } else {
-      if (dy > 0) dirs.push('down')
-      else if (dy < 0) dirs.push('up')
       if (dx > 0) dirs.push('right')
       else if (dx < 0) dirs.push('left')
+      if (dy > 0) dirs.push('down')
+      else if (dy < 0) dirs.push('up')
     }
 
     // Return the first preferred direction that we can either move through
