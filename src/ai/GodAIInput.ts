@@ -130,6 +130,27 @@ export interface GodAIParams {
    * `endgameEnemyThreshold` (queue count), not field count.
    */
   huntAllyCount: number
+
+  // ---- P0: Anti-camp / T2a deadlock fix (plan/God-AI-Next-Round) ----
+  /**
+   * P0.1: max ticks the player may camp (stop-and-aim) at the same cell
+   * with no kills before falling through to navigate. Eliminates the T2a
+   * deadlock where the player stops and fires at a wall/enemy forever.
+   */
+  campTimeoutTicks: number
+  /**
+   * P0.1: ticks to suppress T2a camping after an anti-camp escape. Ensures
+   * the player gets enough consecutive navigate ticks to actually move
+   * away from the stuck position (otherwise the next tick re-enters T2a
+   * and the cycle repeats with no movement).
+   */
+  antiCampSuppressTicks: number
+  /**
+   * P0.3: max ticks the player may stay at the same cell in the navigate
+   * branch without a kill before forcing a roam to the map center. Breaks
+   * pursuit loops where the player chases a faster enemy indefinitely.
+   */
+  navStuckTicks: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES v4.1 (2026-07-28).
@@ -174,6 +195,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   powerupMaxDivertDistance: 9,
   endgameEnemyThreshold: 3,
   huntAllyCount: 6,
+
+  // P0: Anti-camp / T2a deadlock fix (plan/God-AI-Next-Round).
+  // campTimeoutTicks=90 (1.5s) — if the player hasn't gotten a kill in 1.5s
+  // of camping, something is wrong (enemy dodging, wall in the way, etc.).
+  // antiCampSuppressTicks=60 (1s) — enough to move ~2 cells at player speed,
+  // changing the tactical situation before T2a can re-trigger.
+  campTimeoutTicks: 90,
+  antiCampSuppressTicks: 60,
+  // P0.3: navStuckTicks=180 (3s) — if the player hasn't progressed (stayed
+  // at the same cell) for 3 seconds of navigating, force a roam to the map
+  // center. This breaks pursuit loops with faster enemies.
+  navStuckTicks: 180,
 }
 
 /**
@@ -234,6 +267,20 @@ export class GodAIInput implements InputLike {
   /** Last cell the player was at when consuming a path step (prevents oscillation). */
   _lastPathCell: Cell | null = null
 
+  /** P0.1: the cell where the player is currently camping (T2a stop-and-aim). */
+  _campCell: Cell | null = null
+  /** P0.1: consecutive ticks spent at _campCell in T2a. */
+  _campTicks = 0
+  /** P0.1: world.killCount when camping started (to detect "no kills during camp"). */
+  _campKillsAtStart = 0
+  /** P0.1: countdown to suppress T2a after an anti-camp escape. */
+  _antiCampSuppress = 0
+
+  /** P0.3: the cell where the player is currently stuck in navigate. */
+  _navStuckCell: Cell | null = null
+  /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
+  _navStuckTicks = 0
+
   /** Debug: branch counters for profiling. */
   branchCounts = { dodge: 0, t8: 0, aggressive: 0, t2a: 0, powerup: 0, navigate: 0, dead: 0 }
 
@@ -252,6 +299,12 @@ export class GodAIInput implements InputLike {
     this.reactionCounter = 0
     this.lastThreatId = -1
     this._lastPathCell = null
+    this._campCell = null
+    this._campTicks = 0
+    this._campKillsAtStart = 0
+    this._antiCampSuppress = 0
+    this._navStuckCell = null
+    this._navStuckTicks = 0
     this.aggressive = false
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
@@ -296,6 +349,9 @@ export class GodAIInput implements InputLike {
     const pcx = p.x + p.w / 2
     const pcy = p.y + p.h / 2
     const now = w.frame * (1000 / 60)
+
+    // P0.1: Decrement anti-camp suppression every tick the player is alive.
+    if (this._antiCampSuppress > 0) this._antiCampSuppress--
 
     // ---- M6: Cooldown-aware firing ----
     // In 'bulletCap' mode (classic FC), the engine gates fire by on-screen
@@ -423,34 +479,66 @@ export class GodAIInput implements InputLike {
     }
 
     // ---- T2a: Stop-and-aim (enemy in same row/col) ----
-    // If an enemy is in the same row/col, stop and fire at it. If there's
-    // a wall between, fire to break through (T6: never at base protection).
-    if (aimDir && !onCooldown) {
+    // P0.2: Only camp when there's a REAL enemy in the line of fire
+    // (scan.enemy == true). The old code also camped when there was just a
+    // wall (scan.wall && !scan.baseWall), which caused the T2a deadlock:
+    // the player would stop and fire at a wall endlessly, never advancing.
+    // Now the player only stops to aim when there's an actual enemy to shoot.
+    // When the enemy is behind a wall, the player falls through to navigate,
+    // which moves toward the enemy and breaks walls via directMove/canMoveOrBreak.
+    //
+    // P0.1: Anti-camp escape — track how long the player has been at the
+    // same cell in T2a. If camping exceeds campTimeoutTicks with no kills,
+    // fall through to navigate and hunt the enemy directly. A suppression
+    // timer (antiCampSuppressTicks) ensures the player gets enough
+    // consecutive navigate ticks to actually move away from the stuck cell.
+    if (aimDir && this._antiCampSuppress <= 0) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
-      if (scan.enemy || (scan.wall && !scan.baseWall && (!scan.steel || (p.level ?? 0) >= 3))) {
-        if (p.dir === aimDir) {
-          this._moveDir = null // Already facing — stop and shoot
+      if (scan.enemy) {
+        // Track camping duration at this cell.
+        const pc = this.playerCell()
+        if (this._campCell && this._campCell.col === pc.col && this._campCell.row === pc.row) {
+          this._campTicks++
+          // If a kill happened since camping started, reset the camp timer.
+          // The player is being productive — let it continue camping.
+          if (w.killCount !== this._campKillsAtStart) {
+            this._campTicks = 1
+            this._campKillsAtStart = w.killCount
+          }
         } else {
-          this._moveDir = aimDir // Turn to face enemy
+          // Moved to a new cell — start fresh camp tracking.
+          this._campCell = { col: pc.col, row: pc.row }
+          this._campTicks = 1
+          this._campKillsAtStart = w.killCount
         }
-        this._fire = this.rng.next() >= this.params.aimError
-        this.branchCounts.t2a++
-        return
-      }
-      // No clear shot, or wall below defense row — fall through to navigation.
-    }
 
-    // ---- T2a-hold: Aligned with enemy but on cooldown ----
-    // When the player's bullet is in flight AND an enemy is in the same
-    // row/col, hold position and wait for the bullet to resolve. This
-    // prevents the player from navigating away from an aligned enemy
-    // during the bullet's flight, which was the #1 cause of 0-kill games.
-    if (aimDir && onCooldown) {
-      this._moveDir = p.dir === aimDir ? null : aimDir
-      this._fire = false
-      this.branchCounts.t2a++
-      return
+        // Anti-camp: if too long at this cell with no kills, break out.
+        const campedTooLong =
+          this._campTicks > this.params.campTimeoutTicks && w.killCount === this._campKillsAtStart
+
+        if (!campedTooLong) {
+          if (p.dir === aimDir) {
+            this._moveDir = null // Already facing — stop and shoot
+          } else {
+            this._moveDir = aimDir // Turn to face enemy
+          }
+          this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+          this.branchCounts.t2a++
+          return
+        }
+
+        // Camped too long with no kills — suppress T2a and fall through
+        // to navigate, which will move the player toward the enemy.
+        this._campCell = null
+        this._campTicks = 0
+        this._antiCampSuppress = this.params.antiCampSuppressTicks
+      }
+      // No real enemy in line of fire (wall-only or clear) — fall through.
+    } else if (this._campCell) {
+      // Not in T2a (suppressed or no aimDir) — reset camp tracking.
+      this._campCell = null
+      this._campTicks = 0
     }
 
     // ---- S5: Power-up economy (normal mode) ----
@@ -480,24 +568,62 @@ export class GodAIInput implements InputLike {
     // When A* can't find a path (target walled off), directMove breaks
     // through brick walls by firing at them.
     //
+    // P0.3: Navigate stuck escape — if the player has been at the same cell
+    // in the navigate branch for too long (pursuit loop with a faster enemy),
+    // override the target to the map center. This breaks the loop by moving
+    // the player to a crossroads position where enemies are more likely to
+    // cross its row/col, creating new T2a opportunities.
+    //
     // Fire control in classic bulletCap mode (1 bullet in flight):
     // - If blocked by a wall in the path direction → fire to break through.
     // - If moving freely → fire only at enemies in the line of fire.
-    const navTarget = this.selectTarget(this.playerCell())
+    const pc = this.playerCell()
+    if (
+      this._navStuckCell &&
+      this._navStuckCell.col === pc.col &&
+      this._navStuckCell.row === pc.row
+    ) {
+      this._navStuckTicks++
+    } else {
+      this._navStuckCell = { col: pc.col, row: pc.row }
+      this._navStuckTicks = 1
+    }
+
+    // Reset stuck timer when a kill happens (player is making progress).
+    if (this._navStuckTicks > 1 && w.killCount !== this._campKillsAtStart) {
+      this._navStuckTicks = 1
+      this._campKillsAtStart = w.killCount
+    }
+
+    const navStuck = this._navStuckTicks > this.params.navStuckTicks
+
+    let navTarget: Cell | null
+    if (navStuck) {
+      // Stuck too long — roam to map center to break the pursuit loop.
+      navTarget = { col: 12, row: 12 }
+    } else {
+      navTarget = this.selectTarget(pc)
+    }
+
     const navDist = navTarget
-      ? Math.abs(navTarget.col - this.playerCell().col) +
-        Math.abs(navTarget.row - this.playerCell().row)
+      ? Math.abs(navTarget.col - pc.col) + Math.abs(navTarget.row - pc.row)
       : Infinity
 
-    if (navDist <= 5) {
+    if (navStuck) {
+      // Use A* to find a path to the center (don't chase the enemy).
+      this._moveDir = this.navigateTowards(navTarget!)
+      if (!this._moveDir) {
+        this._moveDir = this.directMove(pc)
+      }
+    } else if (navDist <= 5) {
       // Close range — directMove (responsive, tracks moving enemies).
-      this._moveDir = this.directMove(this.playerCell())
+      this._moveDir = this.directMove(pc)
     } else {
       // Long range — A* pathfinding (finds corridors in mazes).
       this._moveDir = this.followPath()
       if (!this._moveDir) {
         // A* failed or path exhausted — fall back to direct movement.
-        this._moveDir = this.directMove(this.playerCell())
+        this._moveDir = this.directMove(pc)
       }
     }
     // Fire control: when blocked by a breakable wall (verified by

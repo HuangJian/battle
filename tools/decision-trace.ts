@@ -13,6 +13,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { CELL, BASE_POS } from '../src/constants'
 import type { StageData, TankKind, Direction } from '../src/types'
 
@@ -108,6 +109,10 @@ export function traceSimulation(opts: TraceOptions): DecisionTrace {
   world.rng.reseed(seed)
   world.difficultyKey = difficulty
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+  // CRITICAL: mirror simulation-runner.ts — must set world.rules too, else
+  // the trace runs under DEFAULT_RULES (modern) regardless of difficulty,
+  // making "why did it fail" analysis invalid.
+  world.rules = RULES[difficulty] ?? DEFAULT_RULES
 
   const input = new GodAIInput(world, params)
   const sim = new Simulation(world, input)

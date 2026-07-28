@@ -33,84 +33,84 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 for CMA-ES v4.1 params with reactionDelay
-// restored to 1 — the optimizer's true best (matches the report's "Optimized"
-// numbers: 20% win / 97.5% base / 12.0 kills / 1 gameover). reactionDelay had
-// been briefly reverted 1→0, but that did NOT fix curriculum stage 3 (seed 42
-// still ends in gameover under v4.1 params — a defense-regression case), so
-// stage 3 seed was changed 42→7 and reactionDelay restored to 1. Of the 8
-// seeds, only seed 999 shifts vs the prior baseline: 9→14 kills (score
-// 900→1400) as a side effect of the restored reaction delay.
+// Baseline re-captured 2026-07-29 for P0 T2a deadlock fix (plan/God-AI-Next-Round).
+// P0.1: Anti-camp escape — campTimeoutTicks=90, antiCampSuppressTicks=60.
+// P0.2: T2a camping threshold — only camp when scan.enemy==true.
+// P0.3: Navigate stuck escape — navStuckTicks=180, roam to map center.
+// These changes fix the T2a deadlock that caused 77.5% of games to timeout.
+// Seeds 1, 100, 999, 55555 went from timeout to stage_clear; seed 2 and 12345
+// went from timeout to gameover (aggressive movement exposes the player to
+// more bullets — a known trade-off of fixing the deadlock).
 const BASELINE: Record<number, Expected> = {
   1: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 1900,
-    lives: 3,
-    killCount: 17,
-    baseAlive: true,
-    playerLevel: 0,
-  },
-  2: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 1100,
-    lives: 3,
-    killCount: 11,
-    baseAlive: true,
-    playerLevel: 0,
-  },
-  7: {
     outcome: 'stage_clear',
-    ticks: 3376,
-    score: 4700,
-    lives: 4,
+    ticks: 5331,
+    score: 4200,
+    lives: 1,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
+  2: {
+    outcome: 'gameover',
+    ticks: 4379,
+    score: 300,
+    lives: 3,
+    killCount: 3,
+    baseAlive: false,
+    playerLevel: 0,
+  },
+  7: {
+    outcome: 'stage_clear',
+    ticks: 5620,
+    score: 4700,
+    lives: 4,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 1,
+  },
   42: {
     outcome: 'stage_clear',
-    ticks: 2499,
+    ticks: 2420,
+    score: 4700,
+    lives: 5,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 0,
+  },
+  100: {
+    outcome: 'stage_clear',
+    ticks: 6321,
     score: 4700,
     lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
-  100: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 0,
-    lives: 3,
-    killCount: 0,
-    baseAlive: true,
-    playerLevel: 0,
-  },
   999: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 1400,
-    lives: 3,
-    killCount: 14,
+    outcome: 'stage_clear',
+    ticks: 2448,
+    score: 4700,
+    lives: 2,
+    killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   12345: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 200,
-    lives: 3,
-    killCount: 2,
+    outcome: 'gameover',
+    ticks: 1235,
+    score: 0,
+    lives: 0,
+    killCount: 0,
     baseAlive: true,
     playerLevel: 0,
   },
   55555: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 900,
+    outcome: 'stage_clear',
+    ticks: 2802,
+    score: 4700,
     lives: 2,
-    killCount: 4,
+    killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },

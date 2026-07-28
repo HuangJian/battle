@@ -1380,3 +1380,33 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - Parity test baseline re-locked again (no longer guards 0.5 split; that equality proven at 0d3275b).
 
 **Implication:** Committed God AI is genuinely stronger on robustness (base survival, fewer gameovers, more kills) but win rate plateaued at 20% — param space exhausted for win rate; report's conclusion (architectural improvement needed for 0-kill stuck seeds) stands. Plan 6 real-stage gate (Hard>=70% / Chaos>=30%) remains unmet.
+
+---
+
+## 39. God AI P0 — T2a Deadlock Fix: Anti-Camp + scan.enemy Gate + Nav-Stuck Escape (2026-07-29)
+
+**Decision:** Implement the three P0 behavioral fixes from plan/God-AI-Next-Round.md to break the T2a decision-flow deadlock that capped Stage 0/1 Classic win rate at ~20%.
+
+1. **P0.2 — T2a camping threshold**: The T2a stop-and-aim branch now only triggers when `scan.enemy == true` (a real enemy is in the line of fire). The old code also camped when `scan.wall && !scan.baseWall` (just a wall), which caused the deadlock: the player would stop and fire at a wall endlessly, never advancing. Wall-breaking is now handled exclusively by the navigate branch's `directMove` + `canMoveOrBreak` logic, which moves the player forward through walls instead of camping in front of them. The old T2a-hold branch (aligned with enemy but on cooldown) is merged into the new T2a branch — both cases are handled by the same `scan.enemy` gate, with fire gated by `!onCooldown`.
+
+2. **P0.1 — Anti-camp escape**: Track how many consecutive ticks the player has been at the same cell in the T2a branch (`_campCell`, `_campTicks`, `_campKillsAtStart`). If camping exceeds `campTimeoutTicks` (90 = 1.5s) with no kills, suppress T2a for `antiCampSuppressTicks` (60 = 1s) and fall through to navigate. The suppression timer ensures the player gets enough consecutive navigate ticks to actually move away from the stuck cell (otherwise the next tick re-enters T2a and the cycle repeats with no movement). The camp timer resets when a kill happens (the player is being productive).
+
+3. **P0.3 — Navigate stuck escape**: Track how many consecutive ticks the player has been at the same cell in the navigate branch (`_navStuckCell`, `_navStuckTicks`). If stuck exceeds `navStuckTicks` (180 = 3s), override the target to the map center (col=12, row=12) and use A* to path there. This breaks pursuit loops where the player chases a faster enemy indefinitely without catching it — the player moves to a crossroads position where enemies are more likely to cross its row/col, creating new T2a opportunities.
+
+**Rationale:**
+- The plan (God-AI-Next-Round.md §1) proved the 20% win rate ceiling was caused by a **hardcoded behavioral deadlock**, not parameter values. Doubling the time budget (18000→36000 ticks) produced 0 new wins — all 31 timeouts were true deadlocks, not slow clears. 5 seeds (16/23/25/29/33) had 0 kills with byte-identical branch counts, proving a deterministic deadlock independent of seed.
+- The deadlock root cause: `findEnemyDirection` uses global vision with a wide threshold (TANK=32px). It finds an enemy "in the same row/col" even when it's 2 cells off-alignment. `scanAhead` then finds a wall (not the enemy) in the line of fire. The old T2a code fired at the wall (`scan.wall && !scan.baseWall`), but the player never advanced — it camped at the same cell for ~5900 ticks (16% of the game) firing at nothing. The navigate branch was never reached (`navigate` count ≈ 378 out of 28600 ticks).
+- P0.2 is the highest-leverage fix: by requiring `scan.enemy == true`, the player only camps when there's a real target. Wall-breaking falls through to navigate, which moves the player forward. This single change took Stage 1 Classic from 22.5% → 87.5% win rate and Stage 0 Classic from 20% → 65%.
+- P0.1 and P0.3 address residual edge cases: P0.1 handles the "camping at a real enemy but can't hit it" case (enemy dodging), and P0.3 handles the "chasing a faster enemy forever" case.
+- The trade-off: aggressive movement (P0.2 fall-through) exposes the player to more enemy bullets. Seeds 2 and 12345 went from timeout → gameover (lives exhausted). This is a known and acceptable trade-off — the net win rate improvement far outweighs the 2 new gameovers.
+
+**Results (40 seeds, 36000 ticks, classic):**
+| Stage | Before P0 | After P0.1+P0.2 | After P0.3 |
+|-------|-----------|----------------|------------|
+| 0 Classic | 8/40 (20%) | 26/40 (65%) | 28/40 (70%) |
+| 1 Classic | 9/40 (22.5%) | 35/40 (87.5%) | 35/40 (87.5%) |
+
+**Implications:**
+- The T2a deadlock is broken. The remaining 5 Stage 1 failures (3 timeouts with 16-18 kills, 2 gameovers) are pursuit/survival edge cases, not deadlocks.
+- CMA-ES parameter optimization (P2) can now be re-run on the fixed architecture — the search space is no longer dominated by the deadlock. Expected to converge to a higher win rate than the previous 20% ceiling.
+- The parity test baseline is re-locked to the new behavior. 5 of 8 seeds went from timeout → stage_clear.

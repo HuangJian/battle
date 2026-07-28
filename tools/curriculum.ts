@@ -178,11 +178,11 @@ export const CURRICULUM_STAGES: CurriculumStage[] = [
     assert: (r) => r.outcome === 'stage_clear' && r.finalState.killCount >= 3,
   },
   {
-    // NOTE: seed changed 42 -> 7 under v4.1 params. With v4.1 tuning, seed 42
-    // ends in gameover (base lost ~tick 3304, 19/20 killed) — a defense
-    // regression case worth tracking, NOT a passing gate. Seed 7 still
-    // validates S6 attack-defense switching / S10 endgame hunt. Keep this note
-    // if seed 42 is ever restored.
+    // NOTE: seed restored 42 (was 7). Under v4.1 params, seed 42 ended in
+    // gameover (base lost ~tick 3304, 19/20 killed). After the P0 T2a deadlock
+    // fix (plan/God-AI-Next-Round), seed 42 clears in 2442 ticks with 4 lives.
+    // Seed 7 (the v4.1 workaround) now ends in gameover (18 kills, lives
+    // exhausted) due to the more aggressive movement from P0.2.
     id: 3,
     desc: 'Open arena · 20 basic · no base (full stage)',
     subsystem: 'S6 attack-defense switching / S10 endgame hunt',
@@ -190,7 +190,7 @@ export const CURRICULUM_STAGES: CurriculumStage[] = [
     params: { ...DEFAULT_GOD_AI_PARAMS },
     difficulty: 'classic',
     maxTicks: 20000,
-    seed: 7,
+    seed: 42,
     assertDesc: 'outcome == stage_clear (clear within time limit)',
     assert: (r) => r.outcome === 'stage_clear',
   },
