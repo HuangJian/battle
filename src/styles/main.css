@@ -108,6 +108,13 @@ body {
   align-items: center;
   gap: 2px;
 }
+/* The `hidden` attribute must win over the `display: flex` above, otherwise
+   setting el.hidden on a HUD item (e.g. the super-power-up counters in
+   classic mode, where superDropChance === 0) has no visual effect. Mirrors
+   the `.buff-chip[hidden]` rule already used for timed-buff chips. */
+.hud-item[hidden] {
+  display: none;
+}
 
 .hud-label {
   font-size: 9px;
