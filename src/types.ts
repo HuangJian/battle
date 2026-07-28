@@ -480,6 +480,12 @@ export interface KeyBindings {
   guard: string
   /** Active super-item: frenzy barrage (狂暴宣泄). Default F6. */
   frenzy: string
+  /**
+   * Fullscreen toggle shortcut. Bound to a modifier combo ('Alt+KeyF')
+   * to avoid browser conflicts (Alt+F opens browser menus in some browsers).
+   * See `reset` above for why non-combat shortcuts use modifiers.
+   */
+  fullscreen: string
 }
 
 // ============================================================

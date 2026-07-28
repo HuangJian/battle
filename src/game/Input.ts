@@ -45,6 +45,7 @@ export const DEFAULT_KEYS: KeyBindings = {
   theme: 'Alt+KeyT',
   guard: 'F5',
   frenzy: 'F6',
+  fullscreen: 'Alt+KeyF',
 }
 
 /**
@@ -254,7 +255,8 @@ export class Input implements InputLike {
       id === keyIdFromBinding(k.snapshot) ||
       id === keyIdFromBinding(k.theme) ||
       id === keyIdFromBinding(k.guard) ||
-      id === keyIdFromBinding(k.frenzy)
+      id === keyIdFromBinding(k.frenzy) ||
+      id === keyIdFromBinding(k.fullscreen!)
     ) {
       return true
     }
@@ -326,6 +328,11 @@ export class Input implements InputLike {
   /** Manual snapshot shortcut (configurable, default Alt+S). */
   isSnapshotPressed(): boolean {
     return this.wasPressed(this.keys.snapshot)
+  }
+
+  /** Fullscreen toggle shortcut (configurable, default Alt+F). */
+  isFullscreenPressed(): boolean {
+    return this.wasPressed(this.keys.fullscreen)
   }
 
   isConfirmPressed(): boolean {

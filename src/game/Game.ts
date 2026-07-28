@@ -83,6 +83,12 @@ export class Game {
   private renderFpsCap = 0
   /** True while the tab is hidden (loop paused by visibilitychange). */
   private _hidden = false
+  /**
+   * Tracks whether we were in fullscreen on the previous frame so we can
+   * suppress the Esc-triggered pause when the browser exits fullscreen
+   * (plan §5.2: Esc double-trigger).
+   */
+  private _wasFullscreen = false
   private prevRecoveryPhase = 'idle'
   private prevCountdown = 0
   /** The last manually-saved snapshot, if any — offered as the default RESUME on the start screen. */
@@ -187,6 +193,7 @@ export class Game {
       onOpenBrowser: () => this.openSnapshotBrowser(),
       onOpenReplays: () => this.openReplayBrowser(),
       onTogglePerf: () => ui.togglePerfOverlay(),
+      onToggleFullscreen: () => this.presentation.toggleFullscreen(),
       onOpenControls: () => {
         if (this.world.state === 'menu') {
           ui.openControls()
@@ -685,6 +692,11 @@ export class Game {
     if (this.presentation.ui.snapshotBrowser.isOpen()) return
     if (this.presentation.ui.replayBrowser.isOpen()) return
 
+    // Fullscreen toggle — available in all states (menu / playing / paused).
+    if (this.input.isFullscreenPressed()) {
+      this.presentation.toggleFullscreen()
+    }
+
     if (w.state === 'menu') {
       // The controls panel is a UI-modal that owns all key input while open;
       // skip menu navigation so it doesn't fight the panel.
@@ -784,14 +796,29 @@ export class Game {
       return
     }
 
+    // Suppress the Esc-triggered pause when the browser exits fullscreen
+    // via its built-in Esc handler (plan §5.2). The browser fires both
+    // fullscreenchange AND keydown(Escape); without this guard, exiting
+    // fullscreen also pauses the game.
+    // Suppress the Esc-triggered pause when the browser exits fullscreen
+    // via its built-in Esc handler (plan §5.2). The browser fires both
+    // fullscreenchange AND keydown(Escape); without this guard, exiting
+    // fullscreen also pauses the game.
+    const justExitedFullscreen = this._wasFullscreen && !document.fullscreenElement
+    this._wasFullscreen = !!document.fullscreenElement
+
     if (w.state === 'playing' || w.state === 'paused') {
       if (this.input.isPausePressed()) {
-        this.simulation.togglePause()
-        this.audio.playPause()
-        // Entering pause → Pause snapshot (plan §3: created on pause,
-        // captures the exact moment for a safe later return).
-        if (w.state === 'paused') {
-          this.snapshots.create('pause', w)
+        if (justExitedFullscreen) {
+          // Consume the Esc without toggling pause
+        } else {
+          this.simulation.togglePause()
+          this.audio.playPause()
+          // Entering pause → Pause snapshot (plan §3: created on pause,
+          // captures the exact moment for a safe later return).
+          if (w.state === 'paused') {
+            this.snapshots.create('pause', w)
+          }
         }
       }
       // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
@@ -1154,7 +1181,13 @@ export class Game {
       enemiesTotal: w.enemiesSpawned,
       playTimeMs: w.playTimeMs,
     }
-    const replay = this.replays.create(type, result.snapshot, result.frames, result.tickCount, metadata)
+    const replay = this.replays.create(
+      type,
+      result.snapshot,
+      result.frames,
+      result.tickCount,
+      metadata,
+    )
     this.replays.enqueueThumbnail(replay.id)
   }
 

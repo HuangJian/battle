@@ -22,6 +22,8 @@ export interface ControlCenterCallbacks {
   onOpenControls: () => void
   /** Toggle the developer Performance Observatory overlay (F6). */
   onTogglePerf: () => void
+  /** Toggle fullscreen mode (Alt+F). */
+  onToggleFullscreen: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -37,6 +39,8 @@ export class ControlCenter {
   private collapsed = false
   private perfBtn: HTMLButtonElement | null = null
   private perfState: HTMLElement | null = null
+  private fullscreenBtn: HTMLButtonElement | null = null
+  private fullscreenState: HTMLElement | null = null
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
@@ -80,6 +84,13 @@ export class ControlCenter {
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
         <section class="cc-section">
+          <h3 class="cc-section-title">DISPLAY</h3>
+          <button class="cc-btn" data-cc="fullscreen" type="button" aria-pressed="false" title="Toggle fullscreen mode (Alt+F)">
+            <span>Fullscreen</span>
+            <span class="cc-perf-meta"><kbd>Alt+F</kbd><span class="cc-perf-state" data-cc="fullscreen-state">OFF</span></span>
+          </button>
+        </section>
+        <section class="cc-section">
           <h3 class="cc-section-title">DEVELOPER</h3>
           <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD">
             <span>Debug Overlay</span>
@@ -113,9 +124,12 @@ export class ControlCenter {
     wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays())
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls())
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
+    wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
     this.perfState = this.el.querySelector('[data-cc="perf-state"]')
+    this.fullscreenBtn = this.el.querySelector('[data-cc="fullscreen"]') as HTMLButtonElement
+    this.fullscreenState = this.el.querySelector('[data-cc="fullscreen-state"]')
 
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
@@ -141,6 +155,18 @@ export class ControlCenter {
     if (this.perfState) {
       this.perfState.textContent = on ? 'ON' : 'OFF'
       this.perfState.classList.toggle('on', on)
+    }
+  }
+
+  /** Reflect fullscreen state in the DISPLAY panel button. */
+  setFullscreenState(on: boolean): void {
+    if (this.fullscreenBtn) {
+      this.fullscreenBtn.classList.toggle('selected', on)
+      this.fullscreenBtn.setAttribute('aria-pressed', String(on))
+    }
+    if (this.fullscreenState) {
+      this.fullscreenState.textContent = on ? 'ON' : 'OFF'
+      this.fullscreenState.classList.toggle('on', on)
     }
   }
 

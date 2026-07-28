@@ -58,6 +58,28 @@ body {
   justify-content: center;
 }
 
+/* Fullscreen mode — the app fills the entire screen.
+   Uses the native :fullscreen pseudo-class + a .is-maximized CSS fallback
+   for iOS Safari and browsers that don't support the Fullscreen API. */
+#app:fullscreen,
+#app.is-maximized {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
+  background: #000;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#app:fullscreen .game-canvas,
+#app.is-maximized .game-canvas {
+  max-width: none;
+  max-height: none;
+}
+
 .game-wrapper {
   display: flex;
   flex-direction: column;
