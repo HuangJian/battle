@@ -56,6 +56,8 @@ export interface SimResult {
   seed: number
   /** The difficulty key. */
   difficulty: string
+  /** Tick of the first player kill (output efficiency indicator). undefined if no kills. */
+  firstKillTick?: number
   /** Failure attribution (plan/God-AI-Tuning §2). undefined on stage_clear. */
   failure?: FailureTaxonomy
 }
@@ -227,6 +229,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     metrics,
     seed,
     difficulty,
+    firstKillTick,
     failure,
   }
 }

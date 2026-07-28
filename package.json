@@ -14,6 +14,7 @@
     "sim-levels": "bun tools/batch-sim.ts",
     "ai-calibrate": "bun tools/ai-calibrate.ts",
     "calibrate": "bun tools/calibrate.ts",
+    "curriculum": "bun tools/curriculum.ts",
     "gen-thumbnails": "bun tools/gen-thumbnails.ts",
     "gen-library": "bun tools/gen-library.ts",
     "play-generated": "bun tools/play-generated.ts",

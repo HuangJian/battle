@@ -36,6 +36,8 @@ import {
   START_LIVES,
   STRATEGIC_INTERVAL_MS,
   COMMANDER_INTERVAL_MS,
+  PLAYER_SPAWN,
+  ENEMY_SPAWNS,
 } from '../constants'
 
 let nextId = 1
@@ -81,6 +83,23 @@ export class World {
   spawnQueue: SpawnEntry[]
   enemiesSpawned: number
   enemiesRemaining: number
+  /**
+   * Total enemies for this stage (plan/God-AI-Curriculum §3 Gap A).
+   * Defaults to `ENEMIES_PER_STAGE`; overridden by `StageData.enemyCount`.
+   * Snapshotted so RecoverySystem restores the correct count.
+   */
+  enemiesTotal: number
+  /**
+   * Pixel-coordinate enemy spawn points for this stage (plan §3.5 影响 1).
+   * Cached from `StageData.enemySpawns` at `loadStageData`; defaults to the
+   * module-level `ENEMY_SPAWN_POINTS` derived from `ENEMY_SPAWNS`.
+   */
+  enemySpawnPoints: { x: number; y: number }[]
+  /**
+   * Player spawn point in sub-block coords for this stage (plan §3.5 影响 1).
+   * Cached from `StageData.playerSpawn`; defaults to `PLAYER_SPAWN`.
+   */
+  playerSpawnPoint: { col: number; row: number }
   /**
    * Round-robin cursor over the enemy spawn points. Lives on the World (not
    * the Simulation) because it affects gameplay — a rewound World must
@@ -220,6 +239,9 @@ export class World {
     this.spawnQueue = []
     this.enemiesSpawned = 0
     this.enemiesRemaining = 0
+    this.enemiesTotal = ENEMIES_PER_STAGE
+    this.enemySpawnPoints = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+    this.playerSpawnPoint = { ...PLAYER_SPAWN }
     this.spawnPointIndex = 0
     this.state = 'menu'
     this.score = 0
@@ -334,7 +356,15 @@ export class World {
 
     this.stageIndex = index
     this.enemiesSpawned = 0
-    this.enemiesRemaining = ENEMIES_PER_STAGE
+    // Gap A (plan/God-AI-Curriculum §3): respect per-stage enemy count.
+    this.enemiesTotal = stage.enemyCount ?? ENEMIES_PER_STAGE
+    this.enemiesRemaining = this.enemiesTotal
+    // 影响 1 (plan §3.5): respect per-stage spawn-point overrides.
+    this.enemySpawnPoints =
+      stage.enemySpawns && stage.enemySpawns.length > 0
+        ? stage.enemySpawns.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+        : ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+    this.playerSpawnPoint = stage.playerSpawn ?? PLAYER_SPAWN
     this.spawnPointIndex = 0
     // Commander floor quota for this stage (plan §5.1 [D9]). Relax 1 /
     // Hard 2 / Chaos 4 / Classic 0. Decremented per Commander roll in
@@ -362,7 +392,8 @@ export class World {
     this.spawnQueue = []
     const enemies = stage.enemies
     const r = this.rules
-    for (let i = 0; i < ENEMIES_PER_STAGE; i++) {
+    const total = this.enemiesTotal
+    for (let i = 0; i < total; i++) {
       const kind = enemies[i % enemies.length]
       // The bonus carrier flag is DATA, not a hardcoded cadence (MANIFEST §2.4).
       //  - classic (`fixed`): carriers are the stage's power-up enemies from
@@ -427,8 +458,9 @@ export class World {
   }
 
   spawnPlayer(): void {
-    const col = 8 // sub-block coords
-    const row = 24
+    // 影响 1 (plan §3.5): respect per-stage player spawn override.
+    const col = this.playerSpawnPoint.col
+    const row = this.playerSpawnPoint.row
     this.player = this.createTank('player', col * CELL, row * CELL, 'up')
     this.player.level = this.playerLevel
     this.player.shieldTimer = 3000

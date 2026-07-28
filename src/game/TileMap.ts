@@ -194,14 +194,27 @@ export class TileMap {
     return Math.floor(px / CELL)
   }
 
-  /** Check if the base is destroyed — O(1) via cached state */
+  /** Check if the base is destroyed — O(1) via cached state.
+   *  Gap B (plan/God-AI-Curriculum §3.5 影响 3): when the stage has no base at
+   *  all, returns false — a non-existent base is not "destroyed". Without this
+   *  guard, no-base stages immediately trigger gameover on the first tick. */
   isBaseDestroyed(): boolean {
-    return !this.baseAlive
+    return this.basePos !== null && !this.baseAlive
   }
 
   /** Find base position in pixels — O(1) via cached state */
   getBasePos(): { x: number; y: number } | null {
     return this.basePos
+  }
+
+  /**
+   * Whether the current stage contains a base at all (plan/God-AI-Curriculum §3
+   * Gap B). Curriculum "no-base" stages omit the `E` tile entirely; the God AI
+   * and enemy AI use this to skip all base-defense logic instead of guarding a
+   * ghost base at the hardcoded `BASE_POS`.
+   */
+  hasBase(): boolean {
+    return this.basePos !== null
   }
 
   /**

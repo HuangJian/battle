@@ -338,6 +338,26 @@ export interface StageData {
   tiles: string[]
   /** Enemy queue: list of tank kinds */
   enemies: TankKind[]
+  /**
+   * Optional override for the total enemy count this stage (plan/God-AI-Curriculum
+   * §3 Gap A). When omitted, falls back to `ENEMIES_PER_STAGE` (20). The enemy
+   * `enemies` array still determines the *kind* queue (cycled if shorter); this
+   * field controls how many enemies spawn in total. Data-over-code (AGENTS §2.4) —
+   * existing stages are unaffected (they don't set this field).
+   */
+  enemyCount?: number
+  /**
+   * Optional override for the player spawn position in sub-block coords (plan §3.5
+   * 影响 1). When omitted, falls back to `PLAYER_SPAWN`. Curriculum arenas use this
+   * to place the player inside the open area instead of the default bottom-left.
+   */
+  playerSpawn?: { col: number; row: number }
+  /**
+   * Optional override for enemy spawn positions in sub-block coords (plan §3.5
+   * 影响 1). When omitted, falls back to `ENEMY_SPAWNS`. Curriculum arenas use this
+   * to place enemies inside the open area.
+   */
+  enemySpawns?: { col: number; row: number }[]
 }
 
 export interface ThemeColors {

@@ -55,7 +55,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     spawnQueue: world.spawnQueue.map(cloneSpawnEntry),
     enemiesSpawned: world.enemiesSpawned,
     enemiesRemaining: world.enemiesRemaining,
+    enemiesTotal: world.enemiesTotal,
     spawnPointIndex: world.spawnPointIndex,
+    enemySpawnPoints: world.enemySpawnPoints.map((p) => ({ x: p.x, y: p.y })),
+    playerSpawnPoint: { ...world.playerSpawnPoint },
     score: world.score,
     lives: world.lives,
     playerLevel: world.playerLevel,
@@ -129,7 +132,15 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.spawnQueue = snap.spawnQueue.map(cloneSpawnEntry)
   world.enemiesSpawned = snap.enemiesSpawned
   world.enemiesRemaining = snap.enemiesRemaining
+  world.enemiesTotal = snap.enemiesTotal ?? snap.enemiesRemaining // legacy fallback
   world.spawnPointIndex = snap.spawnPointIndex ?? 0
+  // Restore stage-specific spawn points (plan/God-AI-Curriculum §3.5)
+  world.enemySpawnPoints = snap.enemySpawnPoints
+    ? snap.enemySpawnPoints.map((p) => ({ x: p.x, y: p.y }))
+    : world.enemySpawnPoints // keep defaults if missing (legacy snapshot)
+  world.playerSpawnPoint = snap.playerSpawnPoint
+    ? { ...snap.playerSpawnPoint }
+    : world.playerSpawnPoint
 
   // Game state
   world.score = snap.score

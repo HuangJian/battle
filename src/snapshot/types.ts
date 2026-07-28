@@ -87,6 +87,10 @@ export interface WorldSnapshot {
   spawnQueue: SpawnEntry[]
   enemiesSpawned: number
   enemiesRemaining: number
+  /** Total enemies for this stage (plan/God-AI-Curriculum §3 Gap A).
+   *  Falls back to `ENEMIES_PER_STAGE` when undefined (legacy snapshots).
+   *  Persisted so RecoverySystem restores the correct enemy count. */
+  enemiesTotal?: number
   /** Round-robin spawn-point cursor (determinism — AGENTS §2.3). */
   spawnPointIndex: number
 
@@ -126,6 +130,13 @@ export interface WorldSnapshot {
   // ---- Base (eagle) HP (2026-07-27) ----
   baseHp: number
   baseMaxHp: number
+
+  // ---- Stage spawn-point overrides (plan/God-AI-Curriculum §3.5) ----
+  /** Pixel-coordinate enemy spawn points for this stage (cached from StageData).
+   *  Undefined = use default ENEMY_SPAWN_POINTS (legacy snapshots). */
+  enemySpawnPoints?: { x: number; y: number }[]
+  /** Player spawn point in sub-block coords for this stage. Undefined = default. */
+  playerSpawnPoint?: { col: number; row: number }
 
   // ---- Super power-up inventory & frenzy state (DECISIONS.md §31) ----
   guardStock: number

@@ -7,13 +7,11 @@ import {
   FIELD,
   TICK_MS,
   MAX_ENEMIES_ALIVE,
-  ENEMIES_PER_STAGE,
   DIR_VECTORS,
   Direction,
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
   RESPAWN_SHIELD_MS,
-  ENEMY_SPAWNS,
   POWERUP_TIMEOUT_MS,
   POWERUP_PICKUP_WINDOW_MS,
   POWERUP_PICKUP_END_DELAY_MS,
@@ -38,13 +36,15 @@ import { TacticalIntelligence } from '../ai/TacticalIntelligence'
 import { rollTier, COMMANDER_ALIVE_CAP } from '../ai/config'
 import { snap, aabb } from '../utils/helpers'
 
-// Spawn points derived from the design constants (ENEMY_SPAWNS, in tile
-// coords). The third authentic point is col 6 (x = 96), NOT the old hardcoded
-// col 24 (x = 384) which jammed a tank against the right wall (FIELD = 416,
-// tank = 32 ⇒ a tank at x = 384 occupies x = 384..416 and can only move
-// down/left; two such tanks meeting at the edge deadlock with zero free
-// directions). See fix in updateSpawning().
-const ENEMY_SPAWN_POINTS = ENEMY_SPAWNS.map((s) => ({ x: s.col * CELL, y: s.row * CELL }))
+// Spawn points: the defaults are derived from ENEMY_SPAWNS in constants.ts and
+// cached on `world.enemySpawnPoints` at loadStageData. The third authentic
+// point is col 6 (x = 96), NOT the old hardcoded col 24 (x = 384) which jammed
+// a tank against the right wall (FIELD = 416, tank = 32 ⇒ a tank at x = 384
+// occupies x = 384..416 and can only move down/left; two such tanks meeting at
+// the edge deadlock with zero free directions). See fix in updateSpawning().
+// NOTE: per-stage overrides now live on `world.enemySpawnPoints`
+// (plan/God-AI-Curriculum §3.5 影响 1). Simulation reads from the World, not
+// from any module-level constant.
 
 /** 天降神兵 guard lifespan: 2 minutes at 60 ticks/s (§31 Phase 2). */
 const GUARD_LIFESPAN_FRAMES = 120 * 60
@@ -201,7 +201,8 @@ export class Simulation {
     if (w.spawnTimer > 0) return
 
     const entry = w.spawnQueue[0]
-    const n = ENEMY_SPAWN_POINTS.length
+    const spawnPoints = w.enemySpawnPoints
+    const n = spawnPoints.length
 
     // Try every spawn point in rotation and use the first one that is clear of
     // tanks. Previously the code retried only the *current* point (decrementing
@@ -211,7 +212,7 @@ export class Simulation {
     // start index so we don't keep re-checking the same blocked point first.
     for (let i = 0; i < n; i++) {
       const idx = (w.spawnPointIndex + i) % n
-      const pt = ENEMY_SPAWN_POINTS[idx]
+      const pt = spawnPoints[idx]
 
       // Skip spawn points overlapping blocking terrain (brick/steel/water/base).
       // Several authentic stages place terrain on top of a spawn cell — e.g.
@@ -242,7 +243,7 @@ export class Simulation {
       // ---- Spawn-time tier roll (plan §5) ----
       // Decide the FINAL tier BEFORE finalizing stats so a cap downgrade can
       // veto the +15% boost cleanly (§5.3 [D10-fix]).
-      const remainingSpawns = ENEMIES_PER_STAGE - w.enemiesSpawned
+      const remainingSpawns = w.enemiesTotal - w.enemiesSpawned
       let tier: IntelligenceLevel
       if (w.commanderQuotaRemaining > 0 && remainingSpawns <= w.commanderQuotaRemaining) {
         // Floor guarantee: force a Commander attempt so the difficulty's
@@ -541,10 +542,11 @@ export class Simulation {
   /** Pick the first clear enemy spawn point (rotation starts at spawnPointIndex). */
   private findClearEnemySpawnPoint(): { x: number; y: number } | null {
     const w = this.world
-    const n = ENEMY_SPAWN_POINTS.length
+    const spawnPoints = w.enemySpawnPoints
+    const n = spawnPoints.length
     for (let i = 0; i < n; i++) {
       const idx = (w.spawnPointIndex + i) % n
-      const pt = ENEMY_SPAWN_POINTS[idx]
+      const pt = spawnPoints[idx]
       if (w.rectHitsTerrain(pt.x, pt.y, TANK, TANK)) continue
       let can = true
       for (const t of w.allTanks) {

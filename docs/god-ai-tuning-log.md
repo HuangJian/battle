@@ -176,3 +176,69 @@ AIM_RANGE_CELLS = 15
 3. **T2a-hold 死亡问题**：玩家在冷却中原地等待，被敌方子弹击杀。
    需要在 T2a-hold 中加入威胁检测，有来袭子弹时放弃 hold 转为闪避。
 4. **AIM_RANGE_CELLS 调优**：15 是当前值，但可能不是最优。需要实验不同值。
+
+---
+
+## Round 3 — 分阶段验证框架 + S6 参数化 + hasBase 守卫 (2026-07-28)
+
+### 背景
+
+Round 2 修复了 13 项 classic 模式 bug 后，AI 基地存活率达 100% 但胜率仍 0%。
+诊断（plan/God-AI-Curriculum §0）：**0% 过关不是"stage 0 太复杂"，而是 AI 缺决策分支
+（S6 攻守切换、M1 预判）且失败归因不可见**。CMA-ES 已陷"贴身龟缩"局部最优。
+
+### 改动
+
+| 项目 | 详情 |
+|------|------|
+| 框架 | `tools/curriculum.ts` — 5 阶段验证脚手架（makeArena + makeMazeStage + 断言） |
+| 基础设施 | Gap A: `StageData.enemyCount/playerSpawn/enemySpawns` + `World.enemiesTotal/enemySpawnPoints/playerSpawnPoint` + WorldSerializer 持久化 |
+| hasBase 守卫 | Gap B: `TileMap.hasBase()` + GodAIInput 所有 BASE_POS 逻辑在 `!hasBase` 时跳过 |
+| S6 参数化 | `GodAIParams.huntAllyCount`（场上敌数门，替代硬编码 2）；`endgameEnemyThreshold` 接上（队列敌数门，替代硬编码 3，默认 1→6） |
+| 测试 | `tests/god-ai-curriculum.test.ts` — hasBase 守卫 + 确定性 + 5 阶段回归 |
+
+### 关键决策
+
+1. **S6 `canHunt` 阈值过保守是 0% 胜率的真因**：硬编码 `enemiesRemaining <= 3` 意味着
+   AI 整局 20 敌几乎都在"防守（可能不存在的）基地"，直到最后 3 敌才猎杀 → 清不完场 → timeout。
+   放宽到 `endgameEnemyThreshold = 6` 让 AI 在剩余 6 敌时就转入猎杀模式。
+
+2. **`endgameEnemyThreshold` 声明未用是潜在 bug**：`GodAIParams` 有该字段（默认 1），
+   但 `canHunt` 里硬编码了 `2`/`3`，从未读取它。现已接上。
+
+3. **hasBase 守卫是无基地关的硬前置**：无基地时 `baseUnderThreat` 指向 `BASE_POS`、
+   `getDefaultDefensePosition` 返回 `BASE_POS`、T8 拦截守幽灵子弹 → 迷你关假阴性。
+   现在无基地时 AI 退化为纯猎杀（追最近敌）。
+
+4. **§0.5 GodAIInput 拆分延后**：纯重构、零行为改变，不优化 AI 本身。实际优化（hasBase
+   守卫、S6 调参、curriculum）直接在现有文件完成。拆分作为后续任务。
+
+### 当前参数
+
+```typescript
+DEFAULT_GOD_AI_PARAMS = {
+  // ... (不变)
+  endgameEnemyThreshold: 6,   // 1 → 6  (更早进入猎杀模式)
+  huntAllyCount: 4,           // 新增 (场上敌数门 = MAX_ENEMIES_ALIVE)
+}
+```
+
+### 验证框架
+
+`bun run curriculum` 运行 5 个迷你关：
+
+| # | 环境 | 验证子系统 | 断言 |
+|---|------|-----------|------|
+| 1 | 开敞竞技场 · 1 敌 · 无基地 | 火控命中 + 开敞导航 | stage_clear 且首杀 < 600 tick |
+| 2 | 开敞竞技场 · 3 敌 · 无基地 | 威胁优先级 + 火控纪律 | stage_clear 且击杀 ≥ 3 |
+| 3 | 开敞竞技场 · 20 敌 · 无基地 | S6 攻守切换 / 终局猎杀 | stage_clear（限时内清场） |
+| 4 | 26×26 砖墙迷宫 · 无基地 | directMove 破墙追击 | stage_clear |
+| 5 | 26×26 砖墙迷宫 · 有基地 | 防守完整性（回归） | baseAlive 且 stage_clear |
+
+### 下一步方向
+
+1. 运行 `bun run curriculum` 验证各阶段通过情况。
+2. 若阶段 3 仍 timeout → 需 M1 预判射击（朝敌人未来位置射击）。
+3. 若阶段 5 基地被毁 → 检查 S6 放宽后是否过于激进、放弃防守。
+4. 用 CMA-ES 在真实 stage 0 上优化 `endgameEnemyThreshold`/`huntAllyCount`。
+5. 最终门禁：Hard≥70% / Chaos≥30%（God-AI-Tuning §4）。

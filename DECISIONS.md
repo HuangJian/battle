@@ -1244,3 +1244,77 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - The 0-kill issue likely requires M1 (lead shot — predict enemy movement) and better S6 (attack-defense switching) to resolve.
 
 **Regression tests:** All 437 existing tests pass; oxlint + tsc clean; oxfmt clean.
+
+---
+
+## 34. God AI Curriculum — 分阶段验证框架 + S6 参数化 + hasBase 守卫 (2026-07-28)
+
+**Decision:** Implement the God-AI-Curriculum plan (§3, §5.1, §5.3, §5.4) — infrastructure for per-subsystem verification, the `hasBase` guard, S6 `canHunt` threshold parameterization, and the `tools/curriculum.ts` scaffold.
+
+**Rationale:**
+- The 0% win-rate root cause (per plan §0 诊断) is the AI **lacking decision branches** (S6 attack-defense switching) and **failure attribution being invisible**. The curriculum framework makes "which subsystem is broken" observable via isolated mini-stages.
+- `canHunt` hardcoded `enemies.length <= 2 && w.enemiesRemaining <= 3` — the AI only hunted when ≤3 enemies remained in the queue, spending 85% of the game turtling. Raising `endgameEnemyThreshold` to 6 and `huntAllyCount` to 4 lets the AI start clearing when ≤6 enemies remain.
+- `hasBase` guard (Gap B) is a **hard prerequisite** for no-base curriculum stages: without it, `selectTarget`/`findBulletThreatToBase`/`dodgeDirection`/`getDefaultDefensePosition` all reference the hardcoded `BASE_POS`, making the AI guard a ghost base at `(12,24)`.
+- `enemyCount`/`playerSpawn`/`enemySpawns` on `StageData` (Gap A + §3.5 影响 1) are **data-over-code** (AGENTS §2.4) — existing stages don't set these fields, so zero impact on real gameplay.
+- The §0.5 GodAIInput split (P0 pure refactor) is **deferred**: it's a developer-ergonomics prerequisite, not a behavior change. The actual AI optimization (hasBase guard, S6 tuning, curriculum) was done directly in the existing file. The split can be done later without changing behavior.
+
+**Changes:**
+- `src/types.ts`: `StageData` gains optional `enemyCount?`, `playerSpawn?`, `enemySpawns?`.
+- `src/game/World.ts`: `enemiesTotal`, `enemySpawnPoints`, `playerSpawnPoint` fields; `loadStageData` + `spawnPlayer` use them.
+- `src/game/Simulation.ts`: `updateSpawning`/`findClearEnemySpawnPoint` read from `w.enemySpawnPoints`; `remainingSpawns` uses `w.enemiesTotal`. Module-level `ENEMY_SPAWN_POINTS` constant removed.
+- `src/game/TileMap.ts`: `hasBase()` method.
+- `src/snapshot/types.ts` + `WorldSerializer.ts`: `enemiesTotal`, `enemySpawnPoints`, `playerSpawnPoint` persisted/restored (snapshot safety — AGENTS §2.2).
+- `src/ai/GodAIInput.ts`:
+  - `hasBase` field cached in `reset()`; all `BASE_POS`-dependent logic guarded.
+  - `GodAIParams` gains `huntAllyCount`; `endgameEnemyThreshold` wired up (was declared but unused — latent bug).
+  - `DEFAULT_GOD_AI_PARAMS`: `endgameEnemyThreshold` 1→6, `huntAllyCount` 4.
+  - `selectTarget`: no-base fast path (pure hunting); `canHunt` reads params instead of hardcoded 2/3.
+- `tools/curriculum.ts`: `makeArena()`, `makeMazeStage()`, 5-stage ladder, CLI.
+- `tools/optimize-godai.ts`: `huntAllyCount` added to CMA-ES search space.
+- `tests/god-ai-curriculum.test.ts`: hasBase guard, determinism, stage ladder.
+- `package.json`: `curriculum` script.
+
+**Implications:**
+- Curriculum stages 1-2 (fire control, threat priority) are hard CI gates. Stages 3-5 are soft gates (warn but don't fail) until the AI reaches the corresponding capability level.
+- The `endgameEnemyThreshold = 6` tuning is a starting point — the curriculum tool + CMA-ES can refine it. The plan's thesis is that this alone should move the win rate from 0% toward the门禁 (Hard≥70% / Chaos≥30%).
+- The deferred GodAIInput split (§0.5) remains a follow-up task — it's pure refactor with no behavior change.
+
+---
+
+## 35. God AI Navigation — Distance-Adaptive A* + directMove Hybrid (2026-07-28)
+
+**Decision:** Replace the `directMove`-only navigation with a distance-adaptive hybrid: A* pathfinding (`followPath`) for long-range navigation (>5 cells Manhattan), `directMove` for close-range pursuit (≤5 cells). Additionally, remove `suboptimalPathProb` from `followPath`, relax base-defense constraints when the base is not under threat, and allow `canHunt` without the `!baseUnderThreat` gate.
+
+**Rationale:**
+- The `directMove`-only approach (Stage 4/5 of the curriculum) achieved only 0-3 kills in 20000 ticks on maze stages — it constantly hit walls and spent the bullet cap breaking through one cell at a time.
+- Pure A* (`followPath` first) improved Stage 4 to 11 kills but caused a Stage 3 regression (gameover at 19 kills) because `replanInterval=50` made the path too stale for open arenas — the player chased dead enemies into bullet fire.
+- The hybrid approach (A* for far, `directMove` for near) gives the best of both: A* finds corridors in mazes, `directMove` tracks moving enemies at close range. With `replanInterval=10` (0.17s), the path is re-evaluated frequently enough for open arenas.
+- `suboptimalPathProb` in `followPath` caused **axis-lock snap oscillation**: random perpendicular directions made the Simulation's axis-lock snap the other axis back, trapping the player in a 1-pixel oscillation (e.g., alternating right/up at pixel (33,32) indefinitely). Removing it from `followPath` fixed the oscillation while keeping it in `navigateTowards` (power-up collection, where it's harmless).
+- The `!baseUnderThreat` gate on `canHunt` prevented the AI from hunting in the endgame when the last few enemies wandered near the base — the AI kept switching between hunting and defending, never killing the last 2 enemies. Removing the gate lets the AI chase the nearest enemy in the endgame while still dodging bullets and intercepting base-bound bullets (T8).
+- The `maxPlayerDistFromBase` distance constraint (applied when `baseUnderThreat` and `!canHunt`) was too restrictive — the AI couldn't reach enemies at the top of the map. Removing it when `canHunt` is true or when the base is not under threat allows free hunting while preserving defense when threats appear.
+
+**Changes:**
+- `DEFAULT_GOD_AI_PARAMS.replanInterval`: 50→10 (faster re-planning for open arenas).
+- `think()` navigation section: distance-adaptive — `followPath` for >5 cells, `directMove` for ≤5 cells, with `directMove` fallback when A* fails.
+- `followPath()`: removed `suboptimalPathProb` random-direction block (caused axis-lock oscillation).
+- `followPath()`: returns `null` when no path found (instead of staying put), so the caller falls back to `directMove` (wall-breaking).
+- `selectTarget()`: `canHunt` no longer requires `!baseUnderThreat` — the AI hunts freely in the endgame.
+- `selectTarget()`: distance constraint only applies when `!canHunt && baseUnderThreat` — free hunting otherwise.
+- `selectTarget()`: when `!baseUnderThreat`, chase the nearest enemy to the player (like the no-base case) instead of the enemy closest to the base.
+- `think()`: aggressive and reaction-delay branches also fall back to `directMove` when `followPath` returns null.
+- `tests/god-ai-curriculum.test.ts`: all 5 stages are now hard CI gates.
+
+**Results (all 5 curriculum stages pass):**
+| Stage | Outcome | Kills | Ticks | Base |
+|-------|---------|-------|-------|------|
+| 1 (open arena, 1 enemy) | stage_clear | 1 | 141 | ✅ |
+| 2 (open arena, 3 enemies) | stage_clear | 3 | 333 | ✅ |
+| 3 (open arena, 20 enemies) | stage_clear | 20 | 2715 | ✅ |
+| 4 (maze, no base) | stage_clear | 20 | 2208 | ✅ |
+| 5 (maze, with base) | stage_clear | 20 | 2727 | ✅ |
+
+**Implications:**
+- All 5 curriculum stages pass as hard CI gates — any navigation regression will be caught.
+- The `suboptimalPathProb` parameter is still used in `navigateTowards` (power-up collection) but not in `followPath`. The CMA-ES optimizer may want to set it to 0 globally since it causes more harm than good.
+- The next step is real stage 0 regression: verify Hard≥70% / Chaos≥30% pass rate (plan §6 门禁).
+

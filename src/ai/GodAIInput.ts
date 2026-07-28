@@ -83,12 +83,27 @@ export interface GodAIParams {
   replanInterval: number
   /** S5: max distance (cells) to divert for a power-up. */
   powerupMaxDivertDistance: number
-  /** S10: enemies remaining threshold for endgame hunting mode. */
+  /**
+   * S6/S10: enemies remaining in the spawn queue at which the AI switches
+   * from defense to aggressive hunting (plan/God-AI-Curriculum §5.3).
+   * Previously hardcoded to 3 (too conservative — 0% win rate root cause).
+   * Raising it lets the AI start clearing earlier instead of turtling.
+   */
   endgameEnemyThreshold: number
+  /**
+   * S6: max enemies *alive on field* at which the AI may enter hunt mode
+   * (plan/God-AI-Curriculum §5.3). Replaces the hardcoded `2` in `canHunt`.
+   * Set to 4 (= MAX_ENEMIES_ALIVE) so the binding constraint is
+   * `endgameEnemyThreshold` (queue count), not field count.
+   */
+  huntAllyCount: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES (2026-07-28).
- * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v2/ for details. */
+ * See docs/god-ai-tuning-log.md and .workbuddy/optimization-v2/ for details.
+ * Round 3 (plan/God-AI-Curriculum): endgameEnemyThreshold raised from 1→6 and
+ * huntAllyCount added (4) to unlock S6 attack-defense switching earlier —
+ * the 0% win-rate root cause was the AI turtling until only 3 enemies remained. */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
   aimError: 0,
@@ -100,9 +115,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   maxPlayerDistFromBase: 7,
   t8MaxInterceptDistCells: 8,
   baseWallScanRadius: 5,
-  replanInterval: 50,
+  replanInterval: 10,
   powerupMaxDivertDistance: 3,
-  endgameEnemyThreshold: 1,
+  endgameEnemyThreshold: 6,
+  huntAllyCount: 4,
 }
 
 /**
@@ -185,6 +201,15 @@ export class GodAIInput implements InputLike {
   /** Whether the AI is in aggressive mode (freeze/shield — hunt, don't defend). */
   private aggressive = false
 
+  /**
+   * Whether the current stage has a base (plan/God-AI-Curriculum §3 Gap B).
+   * Cached in reset() from `world.tileMap.hasBase()`. When false, ALL base-
+   * defense logic is skipped: no T8 bullet interception, no defense positioning,
+   * no `baseUnderThreat` check, no `playerDistToBase` constraint. The AI
+   * degrades to pure hunting (chase nearest enemy).
+   */
+  private hasBase = true
+
   /** Last cell the player was at when consuming a path step (prevents oscillation). */
   private _lastPathCell: Cell | null = null
 
@@ -207,6 +232,9 @@ export class GodAIInput implements InputLike {
     this.lastThreatId = -1
     this._lastPathCell = null
     this.aggressive = false
+    // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
+    // dependent logic checks this flag instead of assuming a base exists.
+    this.hasBase = this.world.tileMap.hasBase()
   }
 
   getMoveDirection(): Direction | null {
@@ -302,6 +330,7 @@ export class GodAIInput implements InputLike {
         this.reactionCounter--
         // While reacting, keep navigating but fire only at targets in facing dir.
         this._moveDir = this.followPath()
+        if (!this._moveDir) this._moveDir = this.directMove(this.playerCell())
         this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
         return
       }
@@ -322,7 +351,8 @@ export class GodAIInput implements InputLike {
     // Skip only when enemies are frozen (aggressive hunt — no bullets to
     // intercept). When shielded, the player can still intercept bullets
     // headed for the base — the shield protects the player, not the base.
-    if (!this.aggressive) {
+    // Gap B (plan §3): skip entirely when the stage has no base.
+    if (!this.aggressive && this.hasBase) {
       const baseThreat = this.findBulletThreatToBase()
       if (baseThreat) {
         const interceptCell = this.baseBulletInterceptCell(baseThreat)
@@ -358,10 +388,15 @@ export class GodAIInput implements InputLike {
       }
       // Navigate to nearest enemy.
       this._moveDir = this.followPath()
+      if (!this._moveDir) this._moveDir = this.directMove(this.playerCell())
       // Proactive fire — but ALWAYS check shouldFireInDir to avoid shooting
       // the player's own base (T6). In classic instant combat the base has
       // 1 HP, so a single self-inflicted bullet destroys it.
-      this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+      if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
+        this._fire = !onCooldown
+      } else {
+        this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+      }
       this.branchCounts.aggressive++
       return
     }
@@ -411,20 +446,39 @@ export class GodAIInput implements InputLike {
       }
     }
 
-    // ---- T2b: Navigate towards target ----
-    // Use direct movement — the player moves toward the target, breaking
-    // through walls when blocked. A* pathfinding was too slow to catch
-    // wandering enemies; direct movement gets the player into firing
-    // position faster.
+    // ---- T2b: Navigate towards target (distance-adaptive) ----
+    // Far from target (>5 cells): A* pathfinding routes around walls via
+    // corridors — essential for maze stages. A* finds the corridor, not the
+    // direct path through walls.
+    //
+    // Close to target (≤5 cells): directMove chases the moving enemy
+    // directly, adjusting every tick. A* paths go stale before the player
+    // arrives (the enemy moves away), causing the player to chase the
+    // enemy's old position — directMove tracks the enemy's current position.
+    //
+    // When A* can't find a path (target walled off), directMove breaks
+    // through brick walls by firing at them.
     //
     // Fire control in classic bulletCap mode (1 bullet in flight):
     // - If blocked by a wall in the path direction → fire to break through.
-    //   This is essential for mobility — without it the player is stuck.
     // - If moving freely → fire only at enemies in the line of fire.
-    //   Don't waste the bullet cap on walls or enemy bullets.
-    // T2a handles wall-breaking when an enemy is in the same row/col.
-    // The dodge/T8 branches handle bullet interception.
-    this._moveDir = this.directMove(this.playerCell())
+    const navTarget = this.selectTarget(this.playerCell())
+    const navDist = navTarget
+      ? Math.abs(navTarget.col - this.playerCell().col) +
+        Math.abs(navTarget.row - this.playerCell().row)
+      : Infinity
+
+    if (navDist <= 5) {
+      // Close range — directMove (responsive, tracks moving enemies).
+      this._moveDir = this.directMove(this.playerCell())
+    } else {
+      // Long range — A* pathfinding (finds corridors in mazes).
+      this._moveDir = this.followPath()
+      if (!this._moveDir) {
+        // A* failed or path exhausted — fall back to direct movement.
+        this._moveDir = this.directMove(this.playerCell())
+      }
+    }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.
     // Don't check shouldFireInDir here — it might fire at enemy bullets
@@ -593,8 +647,10 @@ export class GodAIInput implements InputLike {
    * T6: Check if a brick cell is part of the base's defensive wall.
    * The base is at rows 24-25, cols 12-13. Bricks within a small radius
    * of the base are considered "protection" bricks.
+   * Gap B: returns false when the stage has no base.
    */
   private isBaseProtectionBrick(col: number, row: number): boolean {
+    if (!this.hasBase) return false
     const bc = BASE_POS.col
     const br = BASE_POS.row
     const dc = Math.abs(col - bc)
@@ -648,8 +704,10 @@ export class GodAIInput implements InputLike {
    * T8: Find an enemy bullet whose trajectory will cross the base area.
    * This is the ultimate defense — intercept bullets heading for the base
    * even if they're not threatening the player.
+   * Gap B: returns null when the stage has no base.
    */
   private findBulletThreatToBase(): Bullet | null {
+    if (!this.hasBase) return null
     const w = this.world
     const baseCx = BASE_POS.col * CELL + CELL
     const baseCy = BASE_POS.row * CELL + CELL
@@ -799,15 +857,19 @@ export class GodAIInput implements InputLike {
     // Prefer the direction that keeps the player closer to the base.
     // This prevents dodge from sending the player on a wild chase away
     // from the defense position.
-    const baseCx = BASE_POS.col * CELL + CELL
-    const baseCy = BASE_POS.row * CELL + CELL
-    open.sort((a, b) => {
-      const va = DIR_VECTORS[a]
-      const vb = DIR_VECTORS[b]
-      const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
-      const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
-      return distA - distB
-    })
+    // Gap B: when the stage has no base, skip the base-preference sort —
+    // the first safe candidate is fine (no defense position to maintain).
+    if (this.hasBase) {
+      const baseCx = BASE_POS.col * CELL + CELL
+      const baseCy = BASE_POS.row * CELL + CELL
+      open.sort((a, b) => {
+        const va = DIR_VECTORS[a]
+        const vb = DIR_VECTORS[b]
+        const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
+        const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+        return distA - distB
+      })
+    }
 
     return open[0]
   }
@@ -1118,14 +1180,6 @@ export class GodAIInput implements InputLike {
     if (this.path.length > 0) {
       const nextDir = this.path[0]
 
-      // Suboptimal path: small chance of taking a different direction.
-      if (this.rng.next() < this.params.suboptimalPathProb) {
-        const altDirs = ALL_DIRS.filter((d) => d !== nextDir && this.canMoveDir(p, d))
-        if (altDirs.length > 0) {
-          return this.rng.pick(altDirs)
-        }
-      }
-
       // Check if we can actually move in the path direction.
       if (this.canMoveDir(p, nextDir)) {
         return nextDir
@@ -1144,17 +1198,20 @@ export class GodAIInput implements InputLike {
       this.replanTimer = 0
     }
 
-    // No path — stay in place and fire at enemies in the facing direction.
-    // Don't fall back to directMove (which breaks through walls and wastes
-    // the bullet cap in classic mode). The re-plan will find a path next tick.
+    // No path found — return null so the caller (think) can fall back to
+    // directMove, which breaks through walls toward the target. This is
+    // essential when the target is walled off and A* can't route around.
     return null
   }
 
   /**
    * Default defense position: centered above the base at the defense row.
    * This is the fallback when no enemies are present.
+   * Gap B: when the stage has no base, returns the player's current cell
+   * (stay put — there's nothing to defend).
    */
   private getDefaultDefensePosition(): Cell {
+    if (!this.hasBase) return this.playerCell()
     return { col: BASE_POS.col, row: BASE_POS.row - this.params.defenseRowOffset }
   }
 
@@ -1207,6 +1264,27 @@ export class GodAIInput implements InputLike {
     const enemies = w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
     if (enemies.length === 0) return this.getDefaultDefensePosition()
 
+    // ---- Gap B: no-base fast path (plan/God-AI-Curriculum §3) ----
+    // When the stage has no base, the AI is a pure hunter: always chase the
+    // nearest enemy. No defense positioning, no base-threat checks, no
+    // distance-from-base constraint. This is the correct behavior for
+    // curriculum stages 1-4 (no-base) and also for real stages where the
+    // base has already been destroyed (the AI should still try to clear).
+    if (!this.hasBase) {
+      let best = enemies[0]
+      let bestDist = Infinity
+      for (const t of enemies) {
+        const tc = this.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        const adjustedDist = d - (t.bonus ? 2 : 0)
+        if (adjustedDist < bestDist) {
+          bestDist = adjustedDist
+          best = t
+        }
+      }
+      return this.tankCell(best)
+    }
+
     // ---- S6: Determine strategy mode ----
     // Emergency defense: any enemy within 3 cols of the base and at or
     // below row 20 (within 4 rows of the base) — these are immediate
@@ -1218,24 +1296,30 @@ export class GodAIInput implements InputLike {
       return Math.abs(tc.col - baseCol) <= 3 && tc.row >= 20
     })
 
-    // Aggressive hunt: few enemies on field AND few remaining in queue.
-    // Both conditions must hold — requiring only one sent the player chasing
-    // across the map between spawns (enemies.length dips to 0-1 during the
-    // 1.8s spawn gap), leaving the base undefended.
-    const canHunt = enemies.length <= 2 && w.enemiesRemaining <= 3 && !baseUnderThreat
+    // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
+    // queue. Both conditions must hold — requiring only one sent the player
+    // chasing across the map between spawns (enemies.length dips to 0-1
+    // during the 1.8s spawn gap), leaving the base undefended.
+    //
+    // §5.3 parameterization: the old hardcoded 2/3 thresholds were the root
+    // cause of 0% win rate — the AI only hunted when ≤3 enemies remained in
+    // the queue, spending 85% of the game turtling. Now reads from params:
+    //   huntAllyCount (default 4 = MAX_ENEMIES_ALIVE) — field count gate
+    //   endgameEnemyThreshold (default 6) — queue count gate
+    const canHunt =
+      enemies.length <= this.params.huntAllyCount &&
+      w.enemiesRemaining <= this.params.endgameEnemyThreshold
 
     // If the player is too far from the base, return to defense position.
     // In hunt mode, the player can roam freely.
     // When base is under threat, use strict defense distance.
-    // When base is NOT under threat, allow the player to go further to
-    // intercept enemies before they reach the base (2× the strict distance).
+    // When base is NOT under threat, allow free hunting — the AI checks
+    // for threats every tick and will immediately return to defense if
+    // an enemy approaches the base. This prevents the "0-kill turtle"
+    // where the AI sits at the defense position while enemies roam the
+    // top of the map, unable to reach them.
     const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
-    const maxDist = canHunt
-      ? this.params.maxPlayerDistFromBase * 3
-      : baseUnderThreat
-        ? this.params.maxPlayerDistFromBase
-        : this.params.maxPlayerDistFromBase * 2
-    if (playerDistToBase > maxDist) {
+    if (!canHunt && baseUnderThreat && playerDistToBase > this.params.maxPlayerDistFromBase) {
       return this.getDefaultDefensePosition()
     }
 
@@ -1274,7 +1358,28 @@ export class GodAIInput implements InputLike {
       return this.tankCell(best)
     }
 
-    // Find the enemy closest to the base that's within threat range.
+    // When the base is NOT under threat, behave like the no-base case:
+    // chase the nearest enemy to the player. This prevents the AI from
+    // chasing enemies near the base while ignoring closer enemies,
+    // which was the #1 cause of low kill counts in maze stages.
+    // The baseUnderThreat check runs every tick, so the AI immediately
+    // switches to defense mode when an enemy approaches the base.
+    if (!baseUnderThreat) {
+      let best = enemies[0]
+      let bestDist = Infinity
+      for (const t of enemies) {
+        const tc = this.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        const adjustedDist = d - (t.bonus ? 2 : 0)
+        if (adjustedDist < bestDist) {
+          bestDist = adjustedDist
+          best = t
+        }
+      }
+      return this.tankCell(best)
+    }
+
+    // Base is under threat — find the enemy closest to the base.
     let bestEnemy: Tank | null = null
     let bestScore = -Infinity
     for (const t of enemies) {

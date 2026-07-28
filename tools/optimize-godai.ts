@@ -50,7 +50,8 @@ const SEARCH_SPACE: ParamSpec[] = [
   { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 3, stepFrac: 0.3 },
   { name: 'replanInterval', min: 3, max: 50, isInteger: true, init: 20, stepFrac: 0.25 },
   { name: 'powerupMaxDivertDistance', min: 3, max: 25, isInteger: true, init: 15, stepFrac: 0.25 },
-  { name: 'endgameEnemyThreshold', min: 1, max: 5, isInteger: true, init: 2, stepFrac: 0.3 },
+  { name: 'endgameEnemyThreshold', min: 1, max: 12, isInteger: true, init: 6, stepFrac: 0.3 },
+  { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 4, stepFrac: 0.3 },
 ]
 
 const DIM = SEARCH_SPACE.length
