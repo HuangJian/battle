@@ -97,23 +97,60 @@ describe('classic fire cap — enemies', () => {
   })
 })
 
-describe('classic fire cap — no time cooldown after bullet resolves', () => {
-  it('player refires instantly once the shell hits a wall (no ~1.2s wait)', () => {
+describe('classic fire cap — minimum cooldown floor', () => {
+  it('player cannot refire before bulletCapMinCooldownMs (300ms) after last shot', () => {
     const { world, sim } = buildSeededWorld(45, 'classic')
     const p = world.player!
     expect(world.rules.fireModel).toBe('bulletCap')
+    expect(world.rules.bulletCapMinCooldownMs).toBe(300)
 
-    // Fire the first shell — lastFire is set to NOW. Do NOT clear the cooldown.
+    // ReadyToFire clears the initial cooldown so the first shot succeeds.
+    readyToFire(p)
     fire(sim, p)
-    expect(liveBullets(world, p.id)).toBe(1)
-
-    // The shell strikes a wall this frame → it dies. The time gate must NOT
-    // block the next shot (faithful FC: fire again as soon as it resolves).
+    // Kill the bullet so the cap allows a new one.
     for (const b of world.bullets) if (b.ownerId === p.id) b.alive = false
 
-    fire(sim, p) // no readyToFire() — proves there is no residual time gate
-    expect(liveBullets(world, p.id)).toBe(1) // exactly one live bullet again
-    expect(world.bullets.filter((b) => b.ownerId === p.id).length).toBe(2) // old + new
+    // Do NOT clear lastFire — the cooldown floor must block the next shot.
+    // 300ms ≈ 18 frames; after just 1 frame the cooldown is not elapsed.
+    fire(sim, p)
+    // No new bullet should have been created — cooldown blocks it.
+    const newBullets = world.bullets.filter((b) => b.ownerId === p.id)
+    expect(newBullets.length).toBe(1) // still only the dead one
+  })
+
+  it('player can refire after bulletCapMinCooldownMs has elapsed', () => {
+    const { world, sim } = buildSeededWorld(45, 'classic')
+    const p = world.player!
+    expect(world.rules.bulletCapMinCooldownMs).toBe(300)
+
+    // ReadyToFire clears the initial cooldown so the first shot succeeds.
+    readyToFire(p)
+    fire(sim, p)
+    // Kill the bullet.
+    for (const b of world.bullets) if (b.ownerId === p.id) b.alive = false
+
+    // Advance world clock by 400ms (> 300ms cooldown).
+    const now = world.frame * (1000 / 60)
+    p.lastFire = now - 400 // 400ms ago — past the 300ms floor
+
+    fire(sim, p)
+    expect(liveBullets(world, p.id)).toBe(1) // cooldown elapsed, new shot fires
+  })
+
+  it('cooldown floor of 0 disables the check (bullet cap only)', () => {
+    const { world, sim } = buildSeededWorld(45, 'classic')
+    // Override the rule to 0 — no cooldown floor.
+    world.rules.bulletCapMinCooldownMs = 0
+    const p = world.player!
+
+    // ReadyToFire so the first shot succeeds.
+    readyToFire(p)
+    fire(sim, p)
+    for (const b of world.bullets) if (b.ownerId === p.id) b.alive = false
+
+    // Cooldown floor is 0 so the check is skipped — no readyToFire() needed.
+    fire(sim, p)
+    expect(liveBullets(world, p.id)).toBe(1) // fires immediately (cap-only)
   })
 })
 

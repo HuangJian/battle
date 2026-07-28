@@ -920,6 +920,17 @@ export class Simulation {
     // `playerDoubleShotLevel` (2★ → double-shot, FC-style). A canceled bullet
     // frees its slot on the next frame (no twin-spawn — issue #12).
     if (w.rules.fireModel === 'bulletCap') {
+      // Minimum cooldown between shots: prevents instant refire when a bullet
+      // resolves at close range. Without this floor, a bullet that hits a tank
+      // 1 cell away resolves in 1 frame and the player fires again immediately
+      // — machine-gun feel. 300ms ≈ 18 frames at 60fps is responsive but
+      // prevents the exploit. (Data: rules.bulletCapMinCooldownMs.)
+      if (
+        w.rules.bulletCapMinCooldownMs > 0 &&
+        now - tank.lastFire < w.rules.bulletCapMinCooldownMs
+      ) {
+        return
+      }
       const cap =
         (w.rules.maxBullets[tank.kind] ?? 1) +
         (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)

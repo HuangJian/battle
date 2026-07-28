@@ -58,6 +58,11 @@ export interface GameplayRules {
   maxBullets: Partial<Record<TankKind, number>>
   /** Star level that raises the player's bullet cap by +1 (2★ double-shot). */
   playerDoubleShotLevel: number
+  /** Minimum cooldown (ms) between shots in 'bulletCap' mode. Even though
+   *  the bullet cap is the primary limiter, this floor prevents instant
+   *  refire when a bullet resolves at close range — a single-frame gap
+   *  is too fast and feels like a machine gun. 0 = no minimum (pure cap). */
+  bulletCapMinCooldownMs: number
 
   // ── Star progression ─────────────────────────────────────────
   /** 'universal' = all-dim growth (modern); 'functional' = FC ladder. */
@@ -177,6 +182,7 @@ export const DEFAULT_RULES: GameplayRules = {
   fireModel: 'cooldown',
   maxBullets: {},
   playerDoubleShotLevel: 2, // unused in 'cooldown'
+  bulletCapMinCooldownMs: 0, // unused in 'cooldown'
 
   starModel: 'universal',
   starPerks: {},
@@ -229,6 +235,14 @@ export const RULES: Record<string, GameplayRules> = {
     fireModel: 'bulletCap',
     maxBullets: { basic: 1, fast: 1, power: 1, armor: 1, player: 1 },
     playerDoubleShotLevel: 2, // 2★ raises player cap to 2
+    // Minimum cooldown between shots: 300ms ≈ 18 frames at 60fps. This
+    // prevents instant refire when a bullet resolves at close range —
+    // the original FC had a natural ~0.5s cadence because bullets traveled
+    // slowly across the full field. At close range the bullet resolves in
+    // 1-2 frames, so without this floor the player would fire like a
+    // machine gun. 300ms is aggressive enough to feel responsive but slow
+    // enough to prevent the "hold fire = instakill" exploit.
+    bulletCapMinCooldownMs: 300,
 
     starModel: 'functional',
     starPerks: {
