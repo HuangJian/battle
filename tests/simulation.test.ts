@@ -542,9 +542,14 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
     expect(world.powerUps.length).toBe(before + 1)
     const pu = world.powerUps[world.powerUps.length - 1]
     expect(pu.alive).toBe(true)
-    // Drop lands on the slain enemy's tile (not a random far tile).
-    expect(pu.x).toBe(e.x)
-    expect(pu.y).toBe(e.y)
+    // Drop position is randomized around the enemy tile (within tier range).
+    // Verify it's on-grid and within field bounds.
+    expect(pu.x % CELL).toBe(0)
+    expect(pu.y % CELL).toBe(0)
+    expect(pu.x).toBeGreaterThanOrEqual(0)
+    expect(pu.y).toBeGreaterThanOrEqual(0)
+    expect(pu.x).toBeLessThan(416) // FIELD
+    expect(pu.y).toBeLessThan(416)
   })
 
   it('every 10th kill drops a power-up; kills 1–9 do not', () => {
@@ -639,8 +644,11 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
     // so the only drop is the 5000-point milestone → exactly one power-up.
     expect(world.powerUps.length).toBe(before + 1)
     const pu = world.powerUps[world.powerUps.length - 1]
-    expect(pu.x).toBe(e.x)
-    expect(pu.y).toBe(e.y)
+    // Drop position is randomized around the enemy tile.
+    expect(pu.x % CELL).toBe(0)
+    expect(pu.y % CELL).toBe(0)
+    expect(pu.x).toBeGreaterThanOrEqual(0)
+    expect(pu.y).toBeGreaterThanOrEqual(0)
   })
 
   it("drop triggered by the FINAL enemy of a stage is deferred, then released on the next stage's first kill", () => {

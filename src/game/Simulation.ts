@@ -1272,22 +1272,69 @@ export class Simulation {
    * Build a drop descriptor (type + terrain-safe position). The `world.rng`
    * pick happens HERE so a buffered drop is fully resolved and deterministic —
    * flushing later only materialises it (no extra RNG consumption).
+   *
+   * Position randomization: applies a weighted random offset from the enemy's
+   * position based on `rules.dropPositionWeights` (50/30/20 near/mid/far).
+   * The offset is snapped to grid-aligned cells and falls back to a random
+   * clear tile if the offset position is blocked (terrain/out-of-bounds).
    */
   private buildDrop(at?: { x: number; y: number }): { type: PowerUpType; x: number; y: number } {
     const w = this.world
     const type = this.rollPowerUpType()
 
-    // Prefer the slain enemy's tile so the reward feels earned. Fall back to a
-    // random clear tile if that spot is blocked (entropy from world.rng so the
-    // whole sequence stays deterministic / snapshot-safe).
-    let x = 0,
-      y = 0
+    // --- Position: weighted random offset from enemy position ---
+    // Roll a tier (near/mid/far) from the configured weights, then pick a
+    // random direction and distance within that tier's range. All randomness
+    // flows through world.rng → deterministic / snapshot-safe.
+    let x = 0
+    let y = 0
     let placed = false
-    if (at && !w.rectHitsTerrain(at.x, at.y, TANK, TANK)) {
-      x = at.x
-      y = at.y
-      placed = true
+
+    if (at) {
+      // Roll tier: near(0.5) / mid(0.3) / far(0.2)
+      const weights = w.rules.dropPositionWeights
+      const ranges = w.rules.dropPositionRanges
+      const totalWeight = weights.near + weights.mid + weights.far
+
+      // Guard: if all weights are 0, no offset — use exact enemy position.
+      let tierRange = 0
+      if (totalWeight > 0) {
+        const roll = w.rng.next() * totalWeight
+        if (roll < weights.near) {
+          tierRange = ranges.near
+        } else if (roll < weights.near + weights.mid) {
+          tierRange = ranges.mid
+        } else {
+          tierRange = ranges.far
+        }
+      }
+
+      // Pick a random direction (4 cardinal) and distance (1..tierRange cells).
+      const dirs = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+      ]
+      const dirIdx = Math.floor(w.rng.next() * 4)
+      const dir = dirs[dirIdx]
+      const dist = 1 + Math.floor(w.rng.next() * tierRange)
+
+      // Snap anchor to grid — tank.x/y may not be grid-aligned after
+      // movement (on-axis coordinate is not snapped, only off-axis).
+      const anchorX = Math.round(at.x / CELL) * CELL
+      const anchorY = Math.round(at.y / CELL) * CELL
+      const clampedX = Math.max(0, Math.min(FIELD - TANK, anchorX + dir.dx * dist * CELL))
+      const clampedY = Math.max(0, Math.min(FIELD - TANK, anchorY + dir.dy * dist * CELL))
+
+      if (!w.rectHitsTerrain(clampedX, clampedY, TANK, TANK)) {
+        x = clampedX
+        y = clampedY
+        placed = true
+      }
     }
+
+    // Fallback: random clear tile (unchanged from original).
     if (!placed) {
       let tries = 0
       do {

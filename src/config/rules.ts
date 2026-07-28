@@ -150,6 +150,14 @@ export interface GameplayRules {
   // ── Terrain (stretch, not implemented) ───────────────────────
   brickGranularity: 'cell' | 'quarter'
 
+  // ── Drop position randomization ─────────────────────────────
+  /** Probability weights for near/mid/far drop positions relative to the
+   *  killed enemy position. Weights are normalized internally. Near: 0-1 cells
+   *  offset; Mid: 1-2 cells; Far: 2-3 cells. */
+  dropPositionWeights: { near: number; mid: number; far: number }
+  /** Maximum offset distance in cells for each tier. */
+  dropPositionRanges: { near: number; mid: number; far: number }
+
   // ── Cadence ──────────────────────────────────────────────────
   /** Delay between enemy spawns (ms). */
   spawnIntervalMs: number
@@ -196,6 +204,9 @@ export const DEFAULT_RULES: GameplayRules = {
   dropOnScoreMilestone: SCORE_DROP_INTERVAL, // 5000
   dropOnEliteKill: true, // isElite
   bonusEnemyEveryNSpawns: 4, // every 4th spawned enemy is a bonus carrier
+
+  dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
+  dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
 
   speedJitter: true, // current ±5% jitter ON
 
@@ -260,6 +271,9 @@ export const RULES: Record<string, GameplayRules> = {
     dropOnScoreMilestone: 0,
     dropOnEliteKill: false,
     bonusEnemyEveryNSpawns: 0, // classic uses fixedDropKillIndices for carriers
+
+    dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
+    dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
 
     speedJitter: false, // no ±5% jitter (issue #7: BOTH tank + bullet)
 
