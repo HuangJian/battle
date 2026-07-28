@@ -15,7 +15,7 @@ import {
   NONE_TURN_JITTER_MS,
   NONE_FIRE_JITTER_MS,
 } from '../constants'
-import { opposite, ALL_DIRS, snap } from '../utils/helpers'
+import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
@@ -91,18 +91,22 @@ export class TacticalIntelligence {
     brain.thinkTimer -= this.dt
     brain.fireTimer -= this.dt
 
-    // Blocked ahead? (terrain/bounds only — tank-vs-tank jams unstick via the
-    // periodic timer re-roll, like the original game's bump-and-turn feel).
+    // Check if blocked by terrain/bounds OR by another tank ahead.
+    // Tank-tank jams now trigger re-roll so enemies don't permanently
+    // deadlock when facing each other in corridors.
     const gx = snap(tank.x, CELL)
     const gy = snap(tank.y, CELL)
     const v = DIR_VECTORS[brain.currentDir]
     const nx = gx + v.dx * CELL
     const ny = gy + v.dy * CELL
-    const blocked =
+    const terrainBlocked =
       !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
+    const tankBlocked = !terrainBlocked && isTankAhead(world, tank, nx, ny)
+    const blocked = terrainBlocked || tankBlocked
 
     // Direction re-roll trigger: FC-1985 faithful mode re-rolls ONLY on
-    // collision; modern mode also re-rolls on timer expiry to prevent jams.
+    // collision (terrain, bounds, or tank-tank); modern mode also re-rolls
+    // on timer expiry to prevent jams.
     const shouldReroll = rules.turnOnCollisionOnly ? blocked : brain.thinkTimer <= 0 || blocked
 
     if (shouldReroll) {
@@ -111,9 +115,13 @@ export class TacticalIntelligence {
         const dv = DIR_VECTORS[d]
         const ox = gx + dv.dx * CELL
         const oy = gy + dv.dy * CELL
-        if (world.isInBounds(ox, oy, TANK, TANK) && !world.rectHitsTerrain(ox, oy, TANK, TANK)) {
-          open.push(d)
-        }
+        if (!world.isInBounds(ox, oy, TANK, TANK)) continue
+        if (world.rectHitsTerrain(ox, oy, TANK, TANK)) continue
+        // Also filter out directions blocked by other tanks (except the
+        // tank itself). This prevents the AI from re-choosing a direction
+        // that is immediately blocked by another tank.
+        if (isTankAhead(world, tank, ox, oy)) continue
+        open.push(d)
       }
       if (open.length === 0) {
         // Fully boxed in — back out (see chooseDirection's jam note).
@@ -680,6 +688,15 @@ function clamp(v: number, min: number, max: number): number {
  * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
  * while modern modes keep the strong downward pull (down: 3, up: 0.35).
  */
+/** True if a live tank (other than `self`) occupies the given cell region. */
+function isTankAhead(world: World, self: Tank, x: number, y: number): boolean {
+  for (const t of world.allTanks) {
+    if (t === self || !t.alive) continue
+    if (aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) return true
+  }
+  return false
+}
+
 function pickClassicDir(open: Direction[], world: World, rules: GameplayRules): Direction {
   const weights = rules.classicDirWeights
   let total = 0
