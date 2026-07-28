@@ -11,13 +11,13 @@
  * decision traces are recorded for the best and worst candidates.
  *
  * Usage:
- *   bun tools/optimize-godai.ts --generations 30 --pop 12 --seeds 5
+ *   bun tools/optimize-godai.ts --generations 30 --seeds 5
  *   bun tools/optimize-godai.ts --stage 0 --difficulty classic --generations 50
  */
 
 import { STAGES } from '../src/config/stages'
 import { runSimulation } from './simulation-runner'
-import { traceSimulation, analyzeTrace, type DecisionTrace } from './decision-trace'
+import { traceSimulation, analyzeTrace } from './decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import type { StageData } from '../src/types'
 import { writeFileSync, mkdirSync } from 'fs'
@@ -141,7 +141,7 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
         ticks: result.ticks,
         baseAlive: result.finalState.baseAlive,
       })
-    } catch (e) {
+    } catch {
       // Parameter combination caused a runtime error (e.g. invalid pathfinding).
       // Penalize heavily — this candidate is invalid.
       perSeed.push({
@@ -244,8 +244,8 @@ function initCMAES(initialVector: number[]): CMAESState {
     mean: [...initialVector],
     sigma: 1.0,
     D,
-    pc: new Array(dim).fill(0),
-    ps: new Array(dim).fill(0),
+    pc: Array.from({ length: dim }, () => 0),
+    ps: Array.from({ length: dim }, () => 0),
     generation: 0,
     lambda,
     mu,
@@ -289,7 +289,7 @@ function updateCMAES(state: CMAESState, sortedCandidates: Candidate[]): void {
   const oldMean = [...state.mean]
 
   // Update mean: weighted average of top-mu candidates.
-  const newMean: number[] = new Array(DIM).fill(0)
+  const newMean: number[] = Array.from({ length: DIM }, () => 0)
   for (let i = 0; i < state.mu; i++) {
     for (let d = 0; d < DIM; d++) {
       newMean[d] += state.weights[i] * sortedCandidates[i].vector[d]
@@ -297,7 +297,7 @@ function updateCMAES(state: CMAESState, sortedCandidates: Candidate[]): void {
   }
 
   // Mean step (normalized by sigma).
-  const yw: number[] = new Array(DIM).fill(0)
+  const yw: number[] = Array.from({ length: DIM }, () => 0)
   for (let d = 0; d < DIM; d++) {
     yw[d] = (newMean[d] - oldMean[d]) / state.sigma
   }
@@ -306,7 +306,7 @@ function updateCMAES(state: CMAESState, sortedCandidates: Candidate[]): void {
   const invSqrtC: number[] = state.D.map((d) => 1 / Math.max(1e-10, d))
 
   // Update evolution path for sigma.
-  const psNorm: number[] = new Array(DIM).fill(0)
+  const psNorm: number[] = Array.from({ length: DIM }, () => 0)
   for (let d = 0; d < DIM; d++) {
     psNorm[d] = invSqrtC[d] * yw[d]
   }
@@ -582,7 +582,6 @@ if (import.meta.main) {
   const difficulty = arg('difficulty', 'classic')!
   const seedCount = parseInt(arg('seeds', '5')!, 10)
   const generations = parseInt(arg('generations', '30')!, 10)
-  const popSize = parseInt(arg('pop', '0')!, 10) // 0 = auto
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
   const verbose = process.argv.includes('--verbose')
   const outputDir = arg('output', '.workbuddy/optimization')

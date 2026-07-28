@@ -13,8 +13,8 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
-import { CELL, BASE_POS, TANK } from '../src/constants'
-import type { StageData, GameEvent, TankKind, Direction } from '../src/types'
+import { CELL, BASE_POS } from '../src/constants'
+import type { StageData, TankKind, Direction } from '../src/types'
 
 // ============================================================
 // Types
