@@ -93,6 +93,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     frenzyInterval: world.frenzyInterval,
     frenzyDir: world.frenzyDir,
     fenceExpireFrame: world.fenceExpireFrame,
+    // New power-ups (new-powerups-plan.md)
+    empTimer: world.empTimer,
+    rewindStock: world.rewindStock,
+    mines: world.mines.map((m) => ({ ...m })),
   }
 }
 
@@ -194,6 +198,11 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.frenzyInterval = snap.frenzyInterval ?? 0
   world.frenzyDir = snap.frenzyDir ?? 'up'
   world.fenceExpireFrame = snap.fenceExpireFrame
+
+  // New power-ups (new-powerups-plan.md)
+  world.empTimer = snap.empTimer ?? 0
+  world.rewindStock = snap.rewindStock ?? 0
+  world.mines = snap.mines ? snap.mines.map((m) => ({ ...m })) : []
 
   // Resume playing
   world.state = 'playing'

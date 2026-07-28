@@ -45,6 +45,11 @@ export interface Perception {
   hasBase: boolean
   baseX: number
   baseY: number
+  /** Whether a live decoy (诱饵) exists on the battlefield. */
+  hasDecoy: boolean
+  /** Pixel center of the nearest decoy, or 0 when none. */
+  decoyX: number
+  decoyY: number
   /** Incoming bullets that could threaten this tank (player bullets only). */
   threats: BulletObservation[]
   teammates: TeammateObservation[]
@@ -65,6 +70,7 @@ export interface Situation {
   playerVisible: boolean // player exists & is roughly on the battlefield
   playerInLineOfFire: boolean // firing currentDir would hit the player
   wallInLineOfFire: boolean // firing currentDir would break a (brick) wall
+  decoyInLineOfFire: boolean // firing currentDir would strike a decoy (诱饵)
   pathBlocked: boolean // a wall sits directly ahead toward the objective
   threat: BulletObservation | null // most urgent incoming bullet (or null)
   threatDir: Direction | null // safe axis to step toward to dodge
@@ -87,6 +93,7 @@ export interface GoalWeights {
   attackBase: number
   attackPlayer: number
   destroyWall: number
+  attackAlly: number
   retreat: number
   regroup: number
   advance: number

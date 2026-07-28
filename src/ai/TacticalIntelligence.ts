@@ -221,7 +221,11 @@ export class TacticalIntelligence {
     // cornered and fragile. Goal stability (§12): this changes rarely.
     let goal: GoalType = 'attackBase'
     const r = world.rng.next()
-    if (p.hasPlayer && s.distToPlayer < FIELD * 0.4 && r < 0.4) {
+    // A decoy (诱饵) is a high-priority lure: when one is up, lean the
+    // long-term objective toward destroying it (new-powerups-plan §4.4).
+    if (p.hasDecoy && r < 0.6) {
+      goal = 'attackAlly'
+    } else if (p.hasPlayer && s.distToPlayer < FIELD * 0.4 && r < 0.4) {
       goal = 'attackPlayer'
     } else if (s.threat && _tank.hp <= 1 && r < 0.3) {
       goal = 'retreat'
@@ -320,6 +324,18 @@ export class TacticalIntelligence {
     // advance (always-present baseline; mobility makes flanking cheaper)
     const advance = w.advance * 0.3 + bias.flank * 0.6
 
+    // attackAlly (decoy) — when a decoy (诱饵) is on the field, enemies
+    // prefer to shoot it instead of pressing the base/player. Closeness boosts
+    // the pull so nearby decoys dominate; distant ones are a weaker lure
+    // (new-powerups-plan §4.4).
+    let attackAlly = -Infinity
+    if (p.hasDecoy) {
+      const distToDecoy = manhattan(tank.x + tank.w / 2, tank.y + tank.h / 2, p.decoyX, p.decoyY)
+      const closeness = 1 - Math.min(1, distToDecoy / maxDist)
+      attackAlly = w.attackAlly * (0.5 + 0.5 * closeness) + pushAttack
+      if (brain.strategicGoal === 'attackAlly') attackAlly += 0.5
+    }
+
     const scores: Array<[GoalType, number]> = [
       ['attackBase', attackBase],
       ['attackPlayer', attackPlayer],
@@ -327,6 +343,7 @@ export class TacticalIntelligence {
       ['retreat', retreat],
       ['regroup', regroup],
       ['advance', advance],
+      ['attackAlly', attackAlly],
     ]
     scores.sort((a, b) => b[1] - a[1])
     return scores[0][0]
@@ -344,6 +361,12 @@ export class TacticalIntelligence {
   ): { x: number; y: number } {
     const cx = tank.x + tank.w / 2
     const cy = tank.y + tank.h / 2
+
+    // Decoy (诱饵) target — steer toward the fake tank so it enters line of
+    // fire and draws shots away from the player (new-powerups-plan §4.4).
+    if (goal === 'attackAlly' && p.hasDecoy) {
+      return { x: p.decoyX, y: p.decoyY }
+    }
 
     // Baseline objective: base if present, else player, else forward.
     let tx = p.hasBase ? p.baseX : p.hasPlayer ? p.playerX : cx
@@ -576,8 +599,7 @@ export class TacticalIntelligence {
 
     const base = world.tileMap.getBasePos()
     const targetX = base ? base.x + CELL : tank.x + tank.w / 2
-    const sides: Direction[] =
-      tank.x + tank.w / 2 < targetX ? ['right', 'left'] : ['left', 'right']
+    const sides: Direction[] = tank.x + tank.w / 2 < targetX ? ['right', 'left'] : ['left', 'right']
     for (const side of sides) {
       if (this.adjacentDestructible(world, tank, side)) {
         brain.currentDir = side
@@ -642,18 +664,23 @@ export class TacticalIntelligence {
     if (brain.fireTimer > 0) return
 
     let shoot = false
-    if (s.baseInLineOfFire || s.playerInLineOfFire) {
-      shoot = true // always take a clear kill / base shot
+    if (s.baseInLineOfFire || s.playerInLineOfFire || s.decoyInLineOfFire) {
+      shoot = true // always take a clear kill / base / decoy shot
     } else if (s.wallInLineOfFire) {
       // Break a wall that blocks progress toward the objective.
       const g = brain.tacticalGoal
-      if (g === 'destroyWall' || g === 'attackBase' || g === 'attackPlayer') shoot = true
+      if (g === 'destroyWall' || g === 'attackBase' || g === 'attackPlayer' || g === 'attackAlly')
+        shoot = true
     } else if (world.rng.next() < effectiveAggression(cfg, tank)) {
       shoot = true // opportunistic fire when no clear shot
     }
 
     // aimError: even a good shot can be "fumbled" by low intelligence.
-    if (shoot && (s.baseInLineOfFire || s.playerInLineOfFire) && world.rng.next() < cfg.aimError) {
+    if (
+      shoot &&
+      (s.baseInLineOfFire || s.playerInLineOfFire || s.decoyInLineOfFire) &&
+      world.rng.next() < cfg.aimError
+    ) {
       shoot = false
     }
 

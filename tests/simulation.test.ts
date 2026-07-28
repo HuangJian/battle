@@ -552,7 +552,7 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
     expect(pu.y).toBeLessThan(416)
   })
 
-  it('every 10th kill drops a power-up; kills 1–9 do not', () => {
+  it('every 5th kill drops a power-up; kills 1–4 do not', () => {
     const { world, sim } = buildSeededWorld(7)
     world.startGame('hard', 'modern', 0) // modern drop rules (classic uses fixed schedule)
     world.tanks.length = 0
@@ -590,13 +590,13 @@ describe('Item drop rules (DECISIONS.md §30)', () => {
       sim.tick()
     }
 
-    for (let i = 0; i < 9; i++) killOne()
-    expect(world.killCount).toBe(9)
-    expect(world.powerUps.length).toBe(0) // no cadence drop before the 10th
+    for (let i = 0; i < 4; i++) killOne()
+    expect(world.killCount).toBe(4)
+    expect(world.powerUps.length).toBe(0) // no cadence drop before the 5th
 
-    killOne() // 10th kill
-    expect(world.killCount).toBe(10)
-    expect(world.powerUps.length).toBe(1) // exactly one drop on the 10th
+    killOne() // 5th kill
+    expect(world.killCount).toBe(5)
+    expect(world.powerUps.length).toBe(1) // exactly one drop on the 5th
   })
 
   it('every 5000 points accumulated drops a power-up (score milestone)', () => {

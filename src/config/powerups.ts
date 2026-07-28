@@ -1,25 +1,48 @@
 import type { PowerUpType } from '../types'
 
-/**
- * Super power-up (强力道具) configuration — DECISIONS.md §31.
- *
- * When ANY power-up drop occurs (elite kill / every-10-kills / every-5000-pts /
- * bonus enemy), there is a `SUPER_POWERUP_DROP_CHANCE` probability that the
- * dropped item is a super power-up instead of a normal one. A super drop rolls
- * equally among `SUPER_POWERUP_TYPES`.
- *
- * Super power-ups are accumulated into an inventory on pickup (not applied
- * instantly): 天降神兵/狂暴宣泄 are released actively (F5/F6), 同归于尽 releases
- * passively when the player loses a life.
- *
- * Phase split (user decision): Phase 1 shipped 同归于尽 + 狂暴宣泄. 天降神兵
- * (guard) joined the pool in Phase 2 once the ally AI + third-faction
- * collision landed — it is now a real, droppable super power-up.
- */
-export const SUPER_POWERUP_DROP_CHANCE = 0.1
+// ================================================================
+// Power-up tier system (plan/new-powerups-plan.md §3.1)
+//
+// Drops are no longer uniform: a weighted 3-tier system replaces the
+// old single-pool pick. This gives designers control over rare vs common
+// drops while keeping the logic in config (MANIFEST §2.4).
+// ================================================================
 
-/** All three 强力道具 are in the drop pool now that Phase 2 is complete. */
-export const SUPER_POWERUP_TYPES: PowerUpType[] = ['frenzy', 'sacrifice', 'guard']
+/**
+ * SUPER_TIER_WEIGHT — probability weight for the "super" (强力) tier.
+ * Renamed from SUPER_POWERUP_DROP_CHANCE to avoid semantic confusion
+ * (was: "probability of super drop"; now: "weight of super tier in
+ * the 3-tier weighted pick").
+ */
+export const SUPER_TIER_WEIGHT = 0.1
+
+/** Backward-compat alias — existing code that references
+ * SUPER_POWERUP_DROP_CHANCE continues to work. */
+export const SUPER_POWERUP_DROP_CHANCE = SUPER_TIER_WEIGHT
+
+/**
+ * 3-tier power-up pool (plan §3.1). Each tier contains the PowerUpType
+ * values that may drop from it; picks within a tier are uniform.
+ */
+export const POWERUP_TIERS: { super: PowerUpType[]; practical: PowerUpType[]; normal: PowerUpType[] } = {
+  super: ['frenzy', 'sacrifice', 'guard', 'rewind'],
+  practical: ['star', 'tank', 'bomb', 'freeze'],
+  normal: ['shield', 'fence', 'boat', 'repair', 'emp', 'decoy', 'mine'],
+}
+
+/**
+ * Tier weights — must sum to 1.0 after normalization.
+ * Super: 10%, Practical: 40%, Normal: 50%.
+ */
+export const POWERUP_TIER_WEIGHTS: Record<string, number> = {
+  super: SUPER_TIER_WEIGHT,
+  practical: 0.4,
+  normal: 0.5,
+}
+
+/** All super power-ups (强力道具). `rewind` (时光宝盒) joined the pool with
+ *  the new-powerups-plan expansion. */
+export const SUPER_POWERUP_TYPES: PowerUpType[] = ['frenzy', 'sacrifice', 'guard', 'rewind']
 
 /** 狂暴宣泄: number of shells fired during one activation. */
 export const FRENZY_SHOTS = 20

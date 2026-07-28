@@ -14,8 +14,8 @@ import type { KeyBindings } from '../types'
 export interface InputLike {
   getMoveDirection(): Direction | null
   isFiring(): boolean
-  /** Whether a super-item release key (guard/frenzy) was pressed this frame. */
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean
+  /** Whether a super-item release key (guard/frenzy/rewind) was pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean
   endFrame(): void
   reset(): void
 }
@@ -258,6 +258,8 @@ export class Input implements InputLike {
     ) {
       return true
     }
+    // Rewind (F7) is always owned (not rebindable)
+    if (e.code === 'F7') return true
     // Enter / Escape are always owned (menu confirm / pause toggle).
     return e.code === 'Enter' || e.code === 'Escape'
   }
@@ -314,8 +316,10 @@ export class Input implements InputLike {
     return this.wasPressed(this.keys.theme)
   }
 
-  /** Super-item release key (guard/frenzy) pressed this frame. */
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+  /** Super-item release key (guard/frenzy/rewind) pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
+    // 'rewind' is not in keys — it uses F7 which is hardcoded
+    if (kind === 'rewind') return this.wasPressed('F7')
     return this.wasPressed(this.keys[kind])
   }
 

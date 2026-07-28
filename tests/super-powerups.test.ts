@@ -3,7 +3,12 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input, type InputLike } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
-import { GRID, FENCE_DURATION_FRAMES, POWERUP_DURATION_MS, BOAT_DURATION_MS } from '../src/constants'
+import {
+  GRID,
+  FENCE_DURATION_FRAMES,
+  POWERUP_DURATION_MS,
+  BOAT_DURATION_MS,
+} from '../src/constants'
 import type { Direction } from '../src/constants'
 import {
   SUPER_POWERUP_TYPES,
@@ -24,7 +29,19 @@ import {
  * Phase 2 (天降神兵 summon) is intentionally excluded from the pool here.
  */
 
-const NORMAL_POWERUP_TYPES = ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat'] as const
+const NORMAL_POWERUP_TYPES = [
+  'star',
+  'bomb',
+  'shield',
+  'freeze',
+  'tank',
+  'fence',
+  'boat',
+  'repair',
+  'emp',
+  'decoy',
+  'mine',
+] as const
 
 /** Fresh, seeded World on stage 0 in 'playing' state. Defaults to 'classic'
  *  (used by the classic-coupled inventory/AoE tests), but callers that verify
@@ -280,19 +297,26 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
 
   it('boat is only reachable when the stage has water', () => {
     const { world, sim } = buildSeededWorld(123, 'hard')
-    // Normal branch, and force rng.pick to return the LAST element of whichever
-    // pool is passed — boat is last in the full pool, fence is last in NO_BOAT.
-    world.rng.next = () => 0.5
-    ;(world.rng as unknown as { pick: (a: string[]) => string }).pick = (a) => a[a.length - 1]
     const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
 
+    // With water: boat lives in the normal tier — it must be a reachable roll.
     addWater(world)
     expect(world.tileMap.hasWater()).toBe(true)
-    expect(roll.call(sim)).toBe('boat')
+    let sawBoat = false
+    for (let i = 0; i < 4000; i++) {
+      if (roll.call(sim) === 'boat') {
+        sawBoat = true
+        break
+      }
+    }
+    expect(sawBoat).toBe(true)
 
+    // Without water: boat is filtered out of the normal tier — never reachable.
     clearWater(world)
     expect(world.tileMap.hasWater()).toBe(false)
-    expect(roll.call(sim)).toBe('fence')
+    for (let i = 0; i < 500; i++) {
+      expect(roll.call(sim)).not.toBe('boat')
+    }
   })
 
   it('flushPendingDrops skips a deferred boat on a no-water stage', () => {

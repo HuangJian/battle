@@ -30,6 +30,29 @@ export type PowerUpType =
   | 'guard' // 天降神兵 — summon a base guard (Phase 2: spawn + ally AI + faction)
   | 'frenzy' // 狂暴宣泄 — active F6 barrage (Phase 1)
   | 'sacrifice' // 同归于尽 — passive AoE on losing a life (Phase 1)
+  | 'rewind' // 时光宝盒 — active F7 rewind to recent snapshot (new-powerups-plan §4.3)
+  // --- Normal power-ups (new-powerups-plan §4) ---
+  | 'repair' // 维修 — restore player HP to max (§4.1)
+  | 'emp' // 电磁静默 — silence enemy fire (§4.2)
+  | 'decoy' // 诱饵 — spawn a fake player that draws enemy fire (§4.4)
+  | 'mine' // 地雷 — place a mine at player position (§4.5)
+
+/**
+ * Mine entity — a stationary explosive placed by the player.
+ * Lives on World.mines[] and is cloned/restored by WorldSerializer.
+ * armTimer > 0 means the mine is still arming (no detonation yet).
+ */
+export interface Mine {
+  id: number
+  x: number
+  y: number
+  w: number
+  h: number
+  /** Arming delay (ms). Mine does not detonate while armTimer > 0.
+   *  Set to MINE_ARM_MS on creation; decremented in updatePlaying. */
+  armTimer: number
+  alive: boolean
+}
 
 export interface Vec2 {
   x: number
@@ -157,6 +180,9 @@ export interface Tank extends Entity {
   /** Absolute world.frame at which an allied guard auto-expires (2-min
    *  lifespan). Undefined for non-guard tanks. */
   guardExpireFrame?: number
+  /** True for a Decoy tank (诱饵). Decoys move toward enemies but never fire.
+   *  Lives on the World via allies[].isDecoy for snapshot safety. */
+  isDecoy?: boolean
 }
 
 /**
@@ -181,6 +207,7 @@ export type GoalType =
   | 'regroup'
   | 'advance'
   | 'defendBase' // 天降神兵 allied guard posture (§31 Phase 2)
+  | 'attackAlly' // Decoy: attack ally/decoy targets (new-powerups-plan §4.4)
 
 /**
  * Lightweight cooperation directives broadcast by the (elected) commander.

@@ -141,10 +141,12 @@ export class UIManager {
   private hudGuard: HTMLElement
   private hudFrenzy: HTMLElement
   private hudSacrifice: HTMLElement
+  private hudRewind: HTMLElement
   private superItems: HTMLElement[]
   private lastGuard = -1
   private lastFrenzy = -1
   private lastSacrifice = -1
+  private lastRewind = -1
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -222,6 +224,10 @@ export class UIManager {
         <div class="hud-item hud-super">
           <span class="hud-label">同归</span>
           <span class="hud-value" data-hud="sacrifice">0</span>
+        </div>
+        <div class="hud-item hud-super">
+          <span class="hud-label">宝盒&lt;F7&gt;</span>
+          <span class="hud-value" data-hud="rewind">0</span>
         </div>
       </div>
     `
@@ -344,6 +350,7 @@ export class UIManager {
     this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
     this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
+    this.hudRewind = this.hudBar.querySelector('[data-hud="rewind"]')!
     this.superItems = Array.from(this.hudBar.querySelectorAll('.hud-super'))
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
@@ -685,6 +692,10 @@ export class UIManager {
       if (world.sacrificeStock !== this.lastSacrifice) {
         this.hudSacrifice.textContent = String(world.sacrificeStock)
         this.lastSacrifice = world.sacrificeStock
+      }
+      if (world.rewindStock !== this.lastRewind) {
+        this.hudRewind.textContent = String(world.rewindStock)
+        this.lastRewind = world.rewindStock
       }
     }
 

@@ -76,6 +76,21 @@ export const FENCE_STEEL_COUNT = 12
 /** Boat power-up: amphibious movement duration (ms) */
 export const BOAT_DURATION_MS = 20000
 
+/** EMP power-up: enemy silence duration (ms) — enemies can move but not fire */
+export const EMP_DURATION_MS = 8000
+
+/** Mine power-up: arming delay (ms) before the mine becomes live */
+export const MINE_ARM_MS = 500
+
+/** Mine power-up: explosion radius (cells) */
+export const MINE_RADIUS_CELLS = 3
+
+/** Repair power-up: fraction of base max HP restored per pickup */
+export const REPAIR_HEAL_RATIO = 0.2
+
+/** Decoy power-up: lifespan (frames @ 60fps = 30s) */
+export const DECOY_LIFESPAN_FRAMES = 30 * 60
+
 /** Fence power-up: how long the steel ring around the base stays up (frames @ 60fps = 20s).
  *  After it expires the ring reverts to brick walls. */
 export const FENCE_DURATION_FRAMES = 20 * 60

@@ -485,6 +485,21 @@ export class Game {
         this.accumulator -= TICK_MS
         steps++
       }
+
+      // Manual "时光宝盒" rewind — consume the pending flag set by
+      // Simulation.activateRewind (F7). The actual fade→restore→countdown
+      // is owned by RecoveryController (same flow as Load Latest). Stock was
+      // already spent in activateRewind; refund it if the rewind can't start.
+      if (this.world.rewindPending) {
+        this.world.rewindPending = false
+        const canStart = this.recovery.phase === 'idle' && this.world.state === 'playing'
+        if (canStart && this.recovery.beginManualRewind(this.world)) {
+          this.audio.playRecoveryStart()
+          this.presentation.ui.notify('时光宝盒：时间回溯！', 'info')
+        } else {
+          this.world.rewindStock++
+        }
+      }
     }
     if (probe) simDt = performance.now() - simT0
 

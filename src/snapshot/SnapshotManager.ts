@@ -292,6 +292,22 @@ export class SnapshotManager {
     return latest
   }
 
+  /**
+   * Target snapshot for a manual "时光宝盒" rewind (new-powerups-plan §4.3):
+   * prefer the newest `auto` snapshot (≤30s of history), falling back to the
+   * current stage's `stage-start` snapshot when no auto snapshot exists yet
+   * (early in a stage). Returns null when no history is available at all —
+   * the caller should refund the spent charge instead of rewinding.
+   *
+   * Deterministic by snapshot set (not wall-clock dependent): auto snapshots
+   * are ordered by creation time, and `getAll` already returns newest-first.
+   */
+  pickRewindSnapshot(world: World): GameSnapshot | null {
+    const autos = this.getAll({ type: 'auto' })
+    if (autos.length > 0) return autos[0]
+    return this.latest({ type: 'stage-start', stage: world.stageIndex })
+  }
+
   // ================================================================
   // Thumbnails (plan §8)
   // ================================================================

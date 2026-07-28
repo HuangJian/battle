@@ -197,10 +197,10 @@ export const DEFAULT_RULES: GameplayRules = {
   fastBulletMult: 1.0, // unused in 'universal'
 
   superDropChance: SUPER_POWERUP_DROP_CHANCE, // 0.1 — current 强力道具 roll
-  allowedPowerups: ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat'],
+  allowedPowerups: ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat', 'repair', 'emp', 'decoy', 'mine'],
   dropSchedule: 'modern',
   fixedDropKillIndices: [],
-  dropOnEveryNKills: 10, // isTenthKill
+  dropOnEveryNKills: 5, // Phase 0: every-5-kills drop
   dropOnScoreMilestone: SCORE_DROP_INTERVAL, // 5000
   dropOnEliteKill: true, // isElite
   bonusEnemyEveryNSpawns: 4, // every 4th spawned enemy is a bonus carrier

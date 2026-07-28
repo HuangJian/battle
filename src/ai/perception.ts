@@ -77,7 +77,7 @@ export function canStep(world: World, tank: Tank, dir: Direction, considerTanks:
 
 /** Result of scanning ahead along a direction. */
 export interface ScanResult {
-  hit: 'none' | 'base' | 'player' | 'wall' | 'steel'
+  hit: 'none' | 'base' | 'player' | 'decoy' | 'wall' | 'steel'
   dist: number
 }
 
@@ -109,6 +109,17 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
       aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)
     ) {
       return { hit: 'player', dist: d }
+    }
+    // Decoy (诱饵): a fake tank that draws enemy fire. If an enemy's line of
+    // fire crosses a decoy, the decoy is a valid (and desirable) target so the
+    // enemy shoots it instead of pushing toward the base/player (new-powerups
+    // §4.4). Bullets pass through allies, but the decoy is the exception we
+    // want enemies to aim at.
+    for (const dec of world.allies) {
+      if (!dec.alive || !dec.isDecoy || dec.spawnTimer > 0) continue
+      if (aabb(cx - 1, cy - 1, 2, 2, dec.x, dec.y, dec.w, dec.h)) {
+        return { hit: 'decoy', dist: d }
+      }
     }
   }
   return { hit: 'none', dist: maxDist }
@@ -146,10 +157,23 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
 
   const teammates: Perception['teammates'] = []
   let congestion = 0
+  // Nearest live decoy (for decoy-targeting). Decoys are allies, so they are
+  // excluded from the teammate list below (they are not fellow enemies).
+  let nearestDecoy: { x: number; y: number } | null = null
+  let nearestDecoyDist = Infinity
   const all = world.allTanks
   for (let i = 0; i < all.length; i++) {
     const o = all[i]
-    if (o === tank || !o.alive || o.spawnTimer > 0 || o.isPlayer) continue
+    if (o === tank || !o.alive || o.spawnTimer > 0) continue
+    if (o.isPlayer) continue
+    if (o.isDecoy) {
+      const d = manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2)
+      if (d < nearestDecoyDist) {
+        nearestDecoyDist = d
+        nearestDecoy = { x: o.x + o.w / 2, y: o.y + o.h / 2 }
+      }
+      continue
+    }
     teammates.push({ id: o.id, x: o.x + o.w / 2, y: o.y + o.h / 2, dir: o.dir })
     if (manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2) < CELL * 8) congestion++
   }
@@ -170,6 +194,9 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
     hasBase: !!base,
     baseX: base ? base.x + CELL : 0,
     baseY: base ? base.y + CELL : 0,
+    hasDecoy: nearestDecoy !== null,
+    decoyX: nearestDecoy ? nearestDecoy.x : 0,
+    decoyY: nearestDecoy ? nearestDecoy.y : 0,
     threats,
     teammates,
     congestion,
@@ -192,6 +219,7 @@ export function analyze(
   const baseLOS = scanAhead(world, tank, tank.dir, losRange)
   const baseInLineOfFire = baseLOS.hit === 'base'
   const playerInLineOfFire = baseLOS.hit === 'player'
+  const decoyInLineOfFire = baseLOS.hit === 'decoy'
   const wallInLineOfFire = baseLOS.hit === 'wall'
 
   // Path blocked by a breakable brick directly ahead toward the objective?
@@ -212,6 +240,7 @@ export function analyze(
     baseInLineOfFire,
     playerVisible: p.hasPlayer,
     playerInLineOfFire,
+    decoyInLineOfFire,
     wallInLineOfFire,
     pathBlocked,
     threat,
