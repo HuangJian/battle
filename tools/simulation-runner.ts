@@ -1,6 +1,7 @@
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
+import { applyStageOverrides } from '../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { CELL, BASE_POS } from '../src/constants'
@@ -90,6 +91,13 @@ export interface RunOptions {
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
   sampleInterval?: number
+  /**
+   * Skip the per-stage GOD AI overrides (src/ai/godai-stage-overrides.ts)
+   * and run with the given params verbatim. Used by probing tools that
+   * need to measure the raw effect of a parameter set on a stage.
+   * Default false: overrides apply, matching real evaluation conditions.
+   */
+  skipStageOverrides?: boolean
 }
 
 /**
@@ -102,9 +110,15 @@ export interface RunOptions {
  * Deterministic: same seed + same stage + same difficulty ⇒ identical result.
  */
 export function runSimulation(opts: RunOptions): SimResult {
-  const { seed, stage, difficulty, godAIParams = DEFAULT_GOD_AI_PARAMS } = opts
+  const { seed, stage, difficulty } = opts
   const maxTicks = opts.maxTicks ?? MAX_TICKS
   const sampleInterval = opts.sampleInterval ?? 1
+  // P4: per-stage tactical overrides (data over code — see
+  // src/ai/godai-stage-overrides.ts for rationale + validation protocol).
+  const baseParams = opts.godAIParams ?? DEFAULT_GOD_AI_PARAMS
+  const godAIParams = opts.skipStageOverrides
+    ? baseParams
+    : applyStageOverrides(stage.name, baseParams)
 
   // Create a fresh World (avoids any state leakage between runs).
   const world = new World()

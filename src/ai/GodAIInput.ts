@@ -110,6 +110,32 @@ export interface GodAIParams {
   threatRangeCells: number
   /** Player returns to base if farther than this from the base. */
   maxPlayerDistFromBase: number
+  /**
+   * P4: race-to-base check range. An enemy within this Manhattan distance
+   * of the base triggers emergency defense IF the player would lose the
+   * race back (player farther from base than the enemy, plus margin).
+   * Catches flanking runners that the static ±3-col threat box misses
+   * (S6 Iron Curtain: enemies sweep the bottom edge from the far corner
+   * while the player roams the steel maze 20+ cells away).
+   */
+  baseRaceRangeCells: number
+  /**
+   * P4: safety margin (cells) for the race check. The player must be at
+   * least this many cells CLOSER to the base than the enemy to keep
+   * hunting; otherwise it returns to defense.
+   */
+  baseRaceMarginCells: number
+  /**
+   * P4.2: outnumbered retreat — if at least this many live enemies are
+   * within `outnumberedRadiusCells` of the player, fall back to the
+   * defense position instead of pressing the attack. Fixes the S18
+   * (Frozen Field) failure family: the AI over-extends into the corridor
+   * band below the enemy spawn rows and dies in 3-way crossfire.
+   * Set to 5+ to effectively disable (max 4 enemies alive on field).
+   */
+  outnumberedEnemyCount: number
+  /** P4.2: radius (cells) for the outnumbered check. */
+  outnumberedRadiusCells: number
   /** T8: max distance (cells) to travel to intercept a base-bound bullet. */
   t8MaxInterceptDistCells: number
   /** S7: cells around the base to scan for wall integrity. */
@@ -155,43 +181,60 @@ export interface GodAIParams {
   navStuckTicks: number
 }
 
-/** Default God AI parameters — optimized via CMA-ES P3 (2026-07-29).
- * See .workbuddy/optimization-p3/ for details.
+/** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
+ * See .workbuddy/optimization-p4-r7/ for details.
  *
- * P3 CMA-ES used a multi-stage aggregate fitness (S0/S3/S6/S9, 6 seeds
- * each, 18000 ticks) with the v4.1 fitness function. The optimizer
- * started from the P3 structural fix params (A* dig-through-brick +
- * nav-stuck center fix + power-up diversion reduction).
+ * P4 R7 CMA-ES used the floor-aware v5.0 fitness over ALL 35 classic
+ * stages × 20 seeds (18000 ticks), warm-started from R6, with the
+ * per-stage override table (godai-stage-overrides.ts) active in the
+ * inner loop — the optimizer pushes the global mean while the override
+ * table guards the per-stage floor.
  *
- * P3 CMA-ES results (24 evals, 4 stages × 6 seeds, 18000 ticks, classic):
- *   Pre-opt (P3 structural): 63% win / 92% base / 15.6 kills / 1.5 GO
- *   Optimized:              75% win / 100% base / 17.5 kills / 0 GO
+ * P4 R7 truth-scale results (35 stages × 60 seeds, classic, 18000 ticks,
+ * override table active):
+ *   Mean win rate: 81.9%  (target > 80% — PASS)
+ *   Below 60% floor: 1/35 — S32 Diamond 52% (known structural hard case;
+ *   verified not param-tunable at 60 seeds: manual probes on R6+R7 bases
+ *   and a dedicated single-stage CMA-ES all scored at or below base).
  *
- * Key strategy changes from v4.1:
- *   - suboptimalPathProb 0.093→0.038 (less path noise → less oscillation)
- *   - replanInterval 3→50 (much less frequent replanning → committed paths)
- *   - powerupMaxDivertDistance 9→3 (focus on combat, not power-ups)
- *   - maxPlayerDistFromBase 14→19 (allow further aggressive roaming)
- *   - reactionDelay 1→0 (instant reactions → better dodging)
- *   - defenseRowOffset 2→1 (closer to base for defense)
- *   - t8MaxInterceptDistCells 7→2 (shorter intercept range, less wild chases)
- *   - endgameEnemyThreshold 3→4 (slightly earlier endgame hunting)
+ * Key changes from P3:
+ *   - defenseColSpread 9→5, threatRangeCells 20→10 (defense triggers only
+ *     on real threats; the race-to-base check covers flankers)
+ *   - maxPlayerDistFromBase 19→26 (roam freely; race check guards base)
+ *   - baseRaceRangeCells 12→11, margin 2→0 (leaner race-to-base trigger)
+ *   - t8MaxInterceptDistCells 2→8, baseWallScanRadius 1→3 (protect base
+ *     bricks more actively)
+ *   - powerupMaxDivertDistance 3→16 (power-ups are worth a detour)
+ *   - endgameEnemyThreshold 4→6, huntAllyCount 6→1 (hunt earlier, alone)
+ *   - aimError 0→0.03 (counter-intuitive: tiny aim noise breaks mutual-
+ *     block standoffs; per-stage overrides set it back to 0 where armor
+ *     density punishes wasted shots)
  */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
-  aimError: 0,
-  suboptimalPathProb: 0.037964058921814106,
+  aimError: 0.03030591179971963,
+  suboptimalPathProb: 0,
 
   defenseRowOffset: 1,
-  defenseColSpread: 9,
-  threatRangeCells: 20,
-  maxPlayerDistFromBase: 19,
-  t8MaxInterceptDistCells: 2,
-  baseWallScanRadius: 1,
+  defenseColSpread: 5,
+  threatRangeCells: 10,
+  maxPlayerDistFromBase: 26,
+  // P4: race-to-base emergency defense (see interface docs). Range 11 keeps
+  // the check regional; margin 0 = defend only when the enemy would win
+  // the race outright.
+  baseRaceRangeCells: 11,
+  baseRaceMarginCells: 0,
+  // P4.2: retreat when 3+ enemies converge within 9 cells — the player
+  // trades 1-for-1 at best in open crossfire; falling back to the defense
+  // row funnels enemies into single-file corridors instead.
+  outnumberedEnemyCount: 3,
+  outnumberedRadiusCells: 9,
+  t8MaxInterceptDistCells: 8,
+  baseWallScanRadius: 3,
   replanInterval: 50,
-  powerupMaxDivertDistance: 3,
-  endgameEnemyThreshold: 4,
-  huntAllyCount: 6,
+  powerupMaxDivertDistance: 16,
+  endgameEnemyThreshold: 6,
+  huntAllyCount: 1,
 
   // P0: Anti-camp / T2a deadlock fix (plan/God-AI-Next-Round).
   // campTimeoutTicks=90 (1.5s) — if the player hasn't gotten a kill in 1.5s
@@ -793,13 +836,33 @@ export class GodAIInput implements InputLike {
   isBaseUnderThreat(): boolean {
     if (!this.hasBase) return false
     const bc = BASE_POS.col
+    const br = BASE_POS.row
+    // P4: race-to-base check — player's distance to the base. If the player
+    // is dead/respawning, treat any near-base enemy as a threat.
+    const p = this.world.player
+    const pc = p ? this.playerCell() : null
+    const playerDistToBase = pc
+      ? Math.abs(pc.col - bc) + Math.abs(pc.row - br)
+      : Infinity
     // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
     // if think() hasn't populated it yet — should never happen in normal flow).
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
     for (const t of list) {
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = this.tankCell(t)
+      // Static box: close lateral threat (original P1/P2.3 rule).
       if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true
+      // P4: race check — enemy is in the base region AND would beat the
+      // player back to the base (with safety margin). Catches flanking
+      // runners along the map edges that the static box misses (S6 root
+      // cause: base died with the player 20+ cells away behind steel).
+      const enemyDistToBase = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
+      if (
+        enemyDistToBase <= this.params.baseRaceRangeCells &&
+        playerDistToBase + this.params.baseRaceMarginCells >= enemyDistToBase
+      ) {
+        return true
+      }
     }
     return false
   }

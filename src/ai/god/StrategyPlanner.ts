@@ -193,13 +193,11 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   }
 
   // ---- S6: Determine strategy mode ----
-  // Emergency defense: any enemy within 3 cols of the base and at or
-  // below row 18 (within 6 rows of the base) — these are immediate
-  // threats that need direct interception.
-  const baseUnderThreat = enemies.some((t) => {
-    const tc = self.tankCell(t)
-    return Math.abs(tc.col - baseCol) <= 3 && tc.row >= 18
-  })
+  // Emergency defense: delegated to isBaseUnderThreat() so target selection
+  // and the T2a/power-up defense skips share ONE threat model. This includes
+  // the static ±3-col box AND the P4 race-to-base check (flanking runners
+  // that would beat the player back to the base).
+  const baseUnderThreat = self.isBaseUnderThreat()
 
   // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
   // queue. Both conditions must hold — requiring only one sent the player
@@ -222,6 +220,25 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
   if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
     return self.getDefaultDefensePosition()
+  }
+
+  // ---- P4.2: Outnumbered retreat (S18 crossfire family) ----
+  // When several enemies converge on the player away from the base, pressing
+  // the attack trades 1-for-1 at best (three tanks can fire from three
+  // directions; the player has one barrel). Fall back toward the defense
+  // position: corridors funnel pursuers into single file, and the base
+  // gains a defender. Skipped when the base is already under threat (the
+  // defense logic below handles that) and in aggressive/freeze mode.
+  if (!baseUnderThreat && !self.aggressive) {
+    let nearby = 0
+    for (const t of enemies) {
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      if (d <= self.params.outnumberedRadiusCells) nearby++
+    }
+    if (nearby >= self.params.outnumberedEnemyCount && playerDistToBase > 6) {
+      return self.getDefaultDefensePosition()
+    }
   }
 
   // Aggressive mode (freeze): enemies can't move — chase nearest directly.

@@ -32,89 +32,87 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 after merging `main` into `god-ai` (HEAD
-// b21baba). The god-ai split code itself (src/ai/god/*, GodAIInput.ts,
-// tools/simulation-runner.ts) is UNCHANGED by that merge — the parity break was
-// caused solely by `main`'s intentional speed/config tuning:
-//   - src/config/speed.ts: BALANCED_ENEMY_CPS 2.5→3.75 (modern=classic FC speed),
-//     PLAYER_SPEED_PER_STAR_CPS 0.125→0.25 ("Modern mode adjustment 2026-07-28")
-//   - plus powerups/rules/Simulation changes on main (all validated by main's
-//     own test suite; every other test still passes).
-// This shifts the full-simulation baseline, which is exactly the case the test
-// docstring anticipates: re-capture the baseline from the deterministic harness
-// rather than deleting the test. The god-ai split remains behavior-preserving.
+// Baseline re-locked 2026-07-29 after the P4 tuning campaign (rounds 1-7):
+//   - DEFAULT_GOD_AI_PARAMS updated to the R7 CMA-ES optimum (GodAIInput.ts)
+//   - two new behaviors added during P4: race-to-base check in
+//     isBaseUnderThreat() and the outnumbered-retreat rule (StrategyPlanner)
+//   - per-stage override table (godai-stage-overrides.ts) now applied by
+//     tools/simulation-runner.ts; Stage 0 (Outpost) has no override, so this
+//     baseline locks the pure R7 defaults.
+// All three are intentional behavior changes — this is the documented
+// re-capture path (run `bun tools/relock-parity.ts` and paste the output).
 // NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
-// game params. Re-run tools/recapture-godai-baseline.ts after any future
-// intentional tuning to refresh these numbers.
+// game params. Re-run tools/relock-parity.ts after any future intentional
+// tuning to refresh these numbers.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 4299,
-    score: 4700,
-    lives: 5,
+    ticks: 2770,
+    score: 4200,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 0,
+    playerLevel: 1,
   },
   2: {
     outcome: 'stage_clear',
-    ticks: 2803,
-    score: 3700,
-    lives: 3,
+    ticks: 5195,
+    score: 4700,
+    lives: 2,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   7: {
     outcome: 'stage_clear',
-    ticks: 4229,
-    score: 4200,
-    lives: 3,
+    ticks: 3138,
+    score: 4700,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
   42: {
     outcome: 'stage_clear',
-    ticks: 2180,
+    ticks: 2355,
     score: 4700,
-    lives: 4,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 2367,
+    ticks: 3114,
     score: 4200,
-    lives: 3,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 1,
-  },
-  999: {
-    outcome: 'stage_clear',
-    ticks: 2970,
-    score: 4200,
-    lives: 2,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
-  12345: {
+  999: {
     outcome: 'stage_clear',
-    ticks: 2408,
+    ticks: 4274,
     score: 4700,
     lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
+  12345: {
+    outcome: 'stage_clear',
+    ticks: 2698,
+    score: 4700,
+    lives: 3,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 0,
+  },
   55555: {
     outcome: 'stage_clear',
-    ticks: 3501,
-    score: 3700,
-    lives: 2,
+    ticks: 3247,
+    score: 4200,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,

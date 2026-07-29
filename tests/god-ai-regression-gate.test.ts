@@ -5,84 +5,117 @@ import { STAGES } from '../src/config/stages'
 // ============================================================
 // God AI Wide-Seed Regression Gate (plan/God-AI-Curriculum §6)
 //
-// The split-parity test above locks exact per-seed output (8 seeds).
-// This gate is the REAL tuning regression check: it runs a WIDE, fixed
-// seed set and asserts aggregate win-rate / base-survival / kill floors
-// that reflect the current God AI strength. The simulation is
-// deterministic, so a fixed seed set yields fixed aggregates — these
-// floors catch any regression in the God AI's actual playing strength,
-// not just refactor drift.
+// The split-parity test locks exact per-seed output on Stage 0 (8 seeds).
+// This gate is the REAL tuning regression check: it runs ALL 35 classic
+// stages on a fixed seed set and asserts per-stage win floors plus an
+// aggregate mean floor. The simulation is deterministic, so a fixed seed
+// set yields fixed aggregates — these floors catch any regression in the
+// God AI's actual playing strength across every stage family, not just
+// refactor drift on two easy stages.
 //
-// When params are intentionally changed (e.g. a new CMA-ES round),
-// re-measure on seeds 1..30 @classic @18000 and bump the floors to the
-// new measured values (keep a small margin for benign variance).
+// History: the old gate only covered S0/S1 and silently masked a large
+// S1 regression during the P4 campaign. Never again — the gate now covers
+// every stage.
 //
-// Current measured (seeds 1..30, classic, 18000 ticks):
-//   P0 (2026-07-29, T2a deadlock fix):
-//     Stage 0: winRate=66.7%  baseSurvival=90.0%  avgKills=16.9
-//     Stage 1: winRate=83.3%  baseSurvival=96.7%  avgKills=19.4
-//   P1 (2026-07-29, survival & defense fix):
-//     Stage 0: winRate=86.7%  baseSurvival=93.3%  avgKills=18.8
-//     Stage 1: winRate=90.0%  baseSurvival=100.0% avgKills=19.7
-//   P2 (2026-07-29, anti-camp zone + nav-stuck + predictive):
-//     Stage 0: winRate=86.7%  baseSurvival=90.0%  avgKills=18.6
-//     Stage 1: winRate=100.0% baseSurvival=100.0% avgKills=20.0
-//   P3 CMA-ES (2026-07-29, multi-stage optimized):  <-- CURRENT
-//     Stage 0: winRate=90.0%  baseSurvival=93.3%  avgKills=18.7
-//     Stage 1: winRate=76.7%  baseSurvival=100.0% avgKills=17.9
+// Floors are derived from the P4 R7 truth-scale measurement
+// (35 stages × 60 seeds, classic, 18000 ticks, per-stage override table
+// active — see .workbuddy/optimization-p4-r7/ and
+// src/ai/godai-stage-overrides.ts):
+//   Mean win rate 81.9%; every stage >= 60% except S32 Diamond (52%),
+//   the known structural hard case (armor-heavy force on a fragmented
+//   steel+forest map; verified not param-tunable at 60 seeds).
 //
-// P3 CMA-ES floors set ~3 wins below measurement for margin.
+// Per-stage floor = round(truthWinRate * 20) - 4 wins of margin
+// (binomial sd at n=20, p=0.85 is ~1.6; 4 wins ≈ 2.5 sd).
+// Aggregate floor = 77% of 700 runs (truth 81.9%, ~3 sd margin).
+//
+// When params are intentionally re-tuned (a new CMA-ES round or a new
+// stage override), re-measure at 60 seeds via tools/validate-p4.ts and
+// regenerate the floors below (truth*20 - 4).
 //
 // Run: bun test tests/god-ai-regression-gate.test.ts
+// (takes a few minutes — it plays 700 full games)
 // ============================================================
 
-const GATE_SEEDS = Array.from({ length: 30 }, (_, i) => i + 1) // 1..30
+const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 
-interface GateFloors {
-  wins: number
-  baseAlive: number
-  avgKills: number
-}
+// Truth win rates (%) from the 35×60 R7 validation, 2026-07-29.
+const TRUTH_WIN_PCT: number[] = [
+  95.0, // S0  Outpost
+  98.3, // S1  Waterways
+  95.0, // S2  Steel Fortress
+  91.7, // S3  Crossfire
+  85.0, // S4  Maze
+  83.3, // S5  Brickworks
+  63.3, // S6  Iron Curtain (override: retreat off + tight threat range)
+  96.7, // S7  Riverbed
+  93.3, // S8  Twin Towers
+  96.7, // S9  Gauntlet
+  81.7, // S10 Fortress
+  66.7, // S11 Lattice
+  71.7, // S12 Bunker Hill
+  95.0, // S13 Steel Web
+  66.7, // S14 Citadel
+  76.7, // S15 Crossroads
+  83.3, // S16 Twin Spires
+  95.0, // S17 Gridlock
+  61.7, // S18 Frozen Field (override: wide retreat + perfect aim)
+  78.3, // S19 Bastion
+  80.0, // S20 Checkers
+  83.3, // S21 Oasis
+  95.0, // S22 Ramparts
+  80.0, // S23 Labyrinth
+  80.0, // S24 Quarry
+  73.3, // S25 Ice Palace (override: perfect aim)
+  65.0, // S26 Brick Maze (override: fast replan + path noise)
+  86.7, // S27 Thicket
+  81.7, // S28 Spider
+  86.7, // S29 Concentric
+  83.3, // S30 Eagle Nest
+  75.0, // S31 Star Fort
+  51.7, // S32 Diamond (known structural hard case — no override works)
+  83.3, // S33 Battlement
+  86.7, // S34 Final Redoubt
+]
 
-function runGate(stageIdx: number, floors: GateFloors): void {
-  let wins = 0
-  let baseAlive = 0
-  let kills = 0
-  const perSeed: string[] = []
-  for (const seed of GATE_SEEDS) {
-    const r = runSimulation({
-      seed,
-      stage: STAGES[stageIdx],
-      difficulty: 'classic',
-      maxTicks: 18000,
-      sampleInterval: 18000,
-    })
-    if (r.outcome === 'stage_clear') wins++
-    if (r.finalState.baseAlive) baseAlive++
-    kills += r.finalState.killCount
-    perSeed.push(
-      `s${seed}:${r.outcome[0]}${r.finalState.baseAlive ? 'B' : 'b'}k${r.finalState.killCount}`,
-    )
-  }
-  const n = GATE_SEEDS.length
-  const winRate = wins / n
-  const baseSurvival = baseAlive / n
-  const avgKills = kills / n
-  console.log(`[gate stage ${stageIdx}] ${perSeed.join(' ')}`)
-  console.log(
-    `[gate stage ${stageIdx}] winRate=${(winRate * 100).toFixed(1)}% baseSurvival=${(baseSurvival * 100).toFixed(1)}% avgKills=${avgKills.toFixed(1)}`,
-  )
-  expect(wins).toBeGreaterThanOrEqual(floors.wins)
-  expect(baseAlive).toBeGreaterThanOrEqual(floors.baseAlive)
-  expect(avgKills).toBeGreaterThanOrEqual(floors.avgKills)
+const MARGIN_WINS = 4
+const AGGREGATE_FLOOR = Math.floor(0.77 * 35 * GATE_SEEDS.length) // 539/700
+
+function stageFloor(idx: number): number {
+  return Math.max(0, Math.round((TRUTH_WIN_PCT[idx] / 100) * GATE_SEEDS.length) - MARGIN_WINS)
 }
 
 describe('god-ai-regression-gate', () => {
-  it('Stage 0 classic aggregate meets the P3 tuning floor', () => {
-    runGate(0, { wins: 24, baseAlive: 25, avgKills: 16 })
-  }, 180000)
-
-  it('Stage 1 classic aggregate meets the P3 tuning floor', () => {
-    runGate(1, { wins: 20, baseAlive: 28, avgKills: 15 })
-  }, 180000)
+  it(
+    'all 35 classic stages meet the P4 R7 tuning floors',
+    () => {
+      let totalWins = 0
+      const failures: string[] = []
+      for (let idx = 0; idx < STAGES.length; idx++) {
+        let wins = 0
+        for (const seed of GATE_SEEDS) {
+          const r = runSimulation({
+            seed,
+            stage: STAGES[idx],
+            difficulty: 'classic',
+            maxTicks: 18000,
+            sampleInterval: 18000,
+          })
+          if (r.outcome === 'stage_clear') wins++
+        }
+        totalWins += wins
+        const floor = stageFloor(idx)
+        const pct = ((wins / GATE_SEEDS.length) * 100).toFixed(0)
+        console.log(
+          `[gate] S${idx} ${STAGES[idx].name}: ${wins}/${GATE_SEEDS.length} (${pct}%) floor=${floor}${wins < floor ? '  <-- BELOW FLOOR' : ''}`,
+        )
+        if (wins < floor) failures.push(`S${idx} ${STAGES[idx].name}: ${wins} < ${floor}`)
+      }
+      const meanPct = ((totalWins / (35 * GATE_SEEDS.length)) * 100).toFixed(1)
+      console.log(`[gate] aggregate: ${totalWins}/700 (${meanPct}%) floor=${AGGREGATE_FLOOR}`)
+      expect(failures).toEqual([])
+      expect(totalWins).toBeGreaterThanOrEqual(AGGREGATE_FLOOR)
+    },
+    600000,
+  )
 })

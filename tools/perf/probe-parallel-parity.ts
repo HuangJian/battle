@@ -51,7 +51,9 @@ const config: EvalConfig = {
   maxTicks: 18000,
 }
 
-console.log(`probe-parallel-parity: ${N_CANDIDATES} candidates x ${N_SEEDS} seeds (stage 0, classic)`)
+console.log(
+  `probe-parallel-parity: ${N_CANDIDATES} candidates x ${N_SEEDS} seeds (stage 0, classic)`,
+)
 
 // --- Serial reference (warmed: first pass amortizes main-thread JIT) ---
 candidates.map((p) => evaluateParams(p, config))

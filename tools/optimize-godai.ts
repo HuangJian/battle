@@ -28,7 +28,7 @@ import type { SimTask } from './sim-worker'
 import { traceSimulation, analyzeTrace } from './decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import type { StageData } from '../src/types'
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 
 // ============================================================
@@ -64,6 +64,15 @@ export const SEARCH_SPACE: ParamSpec[] = [
   { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 9, stepFrac: 0.25 },
   { name: 'endgameEnemyThreshold', min: 1, max: 10, isInteger: true, init: 1, stepFrac: 0.3 },
   { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 4, stepFrac: 0.3 },
+  // P4: race-to-base emergency defense (behavioral fix for S6/S32 flanking
+  // runners). Range 0 disables the check entirely — the optimizer can turn
+  // it off for stages where it hurts.
+  { name: 'baseRaceRangeCells', min: 0, max: 18, isInteger: true, init: 12, stepFrac: 0.25 },
+  { name: 'baseRaceMarginCells', min: 0, max: 6, isInteger: true, init: 2, stepFrac: 0.3 },
+  // P4.2: outnumbered retreat (S18 crossfire family). Count 5 disables
+  // (max 4 enemies alive on field) — the optimizer can turn it off.
+  { name: 'outnumberedEnemyCount', min: 2, max: 5, isInteger: true, init: 3, stepFrac: 0.3 },
+  { name: 'outnumberedRadiusCells', min: 4, max: 14, isInteger: true, init: 8, stepFrac: 0.25 },
 ]
 
 const DIM = SEARCH_SPACE.length
@@ -104,7 +113,18 @@ export interface EvalConfig {
   difficulty: string
   seeds: number[]
   maxTicks: number
+  /**
+   * P4: per-stage win-rate floor. Any stage whose measured win rate falls
+   * below `floor` incurs a proportional penalty, so the optimizer is pushed
+   * to lift the *weakest* stages (not just average strength). Default 0.6.
+   */
+  floor?: number
 }
+
+/** P4 goal: every classic stage must clear above this win rate (floor). */
+export const DEFAULT_FLOOR = 0.6
+/** P4 goal: penalty weight per unit of floor deficit (0.6 win-rate deficit → 4800). */
+const FLOOR_PENALTY_WEIGHT = 8000
 
 export interface EvalResult {
   fitness: number
@@ -118,6 +138,12 @@ export interface EvalResult {
   lowKillNonWins: number
   /** Extra penalty for gameovers (base lost). */
   gameoverPenalty: number
+  /** P4: sum over stages of max(0, floor − stageWinRate) * weight. */
+  floorPenalty: number
+  /** P4: per-stage win rates (stage-major order), for floor monitoring. */
+  perStageWin: number[]
+  /** P4: minimum per-stage win rate across the eval set (the floor monitor). */
+  minStageWin: number
   perSeed: Array<{
     seed: number
     outcome: string
@@ -221,6 +247,30 @@ function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
   const avgKills = totalKills / n
   const avgTicks = totalTicks / n
 
+  // P4: per-stage win-rate floor monitoring + penalty.
+  // Records arrive stage-major, seed-minor (see runList / evaluateCandidatesParallel),
+  // so we can chunk them by stage to recover each stage's win rate.
+  const stageCount = config.stages && config.stages.length > 0 ? config.stages.length : 1
+  const seedsPerStage = Math.max(1, Math.floor(n / stageCount))
+  const perStageWin: number[] = []
+  let floorPenalty = 0
+  const floor = config.floor ?? DEFAULT_FLOOR
+  for (let s = 0; s < stageCount; s++) {
+    const groupStart = s * seedsPerStage
+    const groupEnd = Math.min(n, groupStart + seedsPerStage)
+    let sw = 0
+    let sn = 0
+    for (let i = groupStart; i < groupEnd; i++) {
+      const rec = records[i]
+      sn++
+      if (rec.ok && rec.outcome === 'stage_clear') sw++
+    }
+    const wr = sn > 0 ? sw / sn : 0
+    perStageWin.push(wr)
+    if (wr < floor) floorPenalty += (floor - wr) * FLOOR_PENALTY_WEIGHT
+  }
+  const minStageWin = perStageWin.length > 0 ? Math.min(...perStageWin) : 0
+
   const avgWinTicks = wins > 0 ? winTicksSum / wins : config.maxTicks
   const speedBonus = wins > 0 ? Math.max(0, (1 - avgWinTicks / config.maxTicks) * 800) : 0
 
@@ -233,7 +283,8 @@ function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
     speedBonus -
     remainingEnemyPenalty -
     gameoverPenalty -
-    lowKillNonWins * 400
+    lowKillNonWins * 400 -
+    floorPenalty
 
   return {
     fitness,
@@ -244,6 +295,9 @@ function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
     remainingEnemyPenalty,
     lowKillNonWins,
     gameoverPenalty,
+    floorPenalty,
+    perStageWin,
+    minStageWin,
     perSeed,
   }
 }
@@ -579,9 +633,12 @@ async function optimize(
   generations: number,
   verbose: boolean,
   pool: SimWorkerPool | null,
+  initParams: GodAIParams = DEFAULT_GOD_AI_PARAMS,
+  initialSigma = 1.0,
 ): Promise<OptimizationResult> {
-  const initialVector = paramsToVector(DEFAULT_GOD_AI_PARAMS)
+  const initialVector = paramsToVector(initParams)
   let state = initCMAES(initialVector)
+  state.sigma = initialSigma
   let restartCount = 0
   let popMultiplier = 1
 
@@ -589,7 +646,7 @@ async function optimize(
   const allCandidates: OptimizationResult['allCandidates'] = []
 
   let bestFitness = -Infinity
-  let bestParams = DEFAULT_GOD_AI_PARAMS
+  let bestParams = initParams
   let bestEvalResult: EvalResult | null = null
 
   process.stderr.write(`\n${'='.repeat(70)}\n`)
@@ -600,7 +657,7 @@ async function optimize(
     `Evaluation: stages ${(evalConfig.stages ?? [evalConfig.stage]).map((s) => s.name).join(', ')}, ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
   )
   process.stderr.write(
-    `Fitness v4.1: win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400\n`,
+    `Fitness v5.0 (P4): win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400 - floorPenalty(floor=${evalConfig.floor ?? DEFAULT_FLOOR}, w=${FLOOR_PENALTY_WEIGHT})\n`,
   )
   process.stderr.write(`${'='.repeat(70)}\n\n`)
 
@@ -674,6 +731,8 @@ async function optimize(
       `gen ${gen.toString().padStart(3)} | ` +
         `best=${best.fitness.toFixed(1).padStart(7)} ` +
         `win=${best.evalResult.winRate.toFixed(2)} ` +
+        `minW=${best.evalResult.minStageWin.toFixed(2)} ` +
+        `floor=${best.evalResult.floorPenalty.toFixed(0)} ` +
         `base=${best.evalResult.baseSurvivalRate.toFixed(2)} ` +
         `kills=${best.evalResult.avgKills.toFixed(1)} ` +
         `rem=${best.evalResult.remainingEnemyPenalty.toFixed(0)} ` +
@@ -812,9 +871,20 @@ if (import.meta.main) {
   const seedCount = parseInt(arg('seeds', '8')!, 10)
   const generations = parseInt(arg('generations', '40')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
+  const floor = parseFloat(arg('floor', '0.6')!)
   const verbose = process.argv.includes('--verbose')
   const serial = process.argv.includes('--serial')
-  const outputDir = arg('output', '.workbuddy/optimization-p3')
+  const outputDir = arg('output', '.workbuddy/optimization-p4')
+  // Warm start: --init <summary.json or params json> seeds the CMA-ES mean
+  // from a previous round's bestParams instead of DEFAULT_GOD_AI_PARAMS.
+  const initFile = arg('init', '')
+  const initialSigma = parseFloat(arg('sigma', '1.0')!)
+  let initParams: GodAIParams = DEFAULT_GOD_AI_PARAMS
+  if (initFile) {
+    const raw = JSON.parse(readFileSync(initFile, 'utf8'))
+    initParams = { ...DEFAULT_GOD_AI_PARAMS, ...(raw.bestParams ?? raw) }
+    process.stderr.write(`Warm start from ${initFile} (sigma=${initialSigma})\n`)
+  }
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const stages = stageIdxs.map((idx) => STAGES[idx]).filter(Boolean)
@@ -824,11 +894,11 @@ if (import.meta.main) {
     process.exit(1)
   }
 
-  process.stderr.write(`\nGod AI CMA-ES Optimizer (P3 multi-stage)\n`)
+  process.stderr.write(`\nGod AI CMA-ES Optimizer (P4 — floor-aware, all-35 classic)\n`)
   process.stderr.write(
     `Stages: ${stages.map((s, i) => `S${stageIdxs[i]}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
   )
-  process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks}\n`)
+  process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks} | Floor: ${floor}\n`)
 
   const evalConfig: EvalConfig = {
     stage: stages[0],
@@ -836,6 +906,7 @@ if (import.meta.main) {
     difficulty,
     seeds,
     maxTicks,
+    floor,
   }
 
   // Worker pool: hw.ncpu − 1 workers by default (leave one core for the
@@ -848,7 +919,7 @@ if (import.meta.main) {
   )
 
   // Run optimization.
-  const result = await optimize(evalConfig, generations, verbose, pool)
+  const result = await optimize(evalConfig, generations, verbose, pool, initParams, initialSigma)
   pool?.terminate()
 
   // Save optimization results.
@@ -882,6 +953,8 @@ if (import.meta.main) {
       meanFit: Math.round(h.meanFitness * 10) / 10,
       sigma: Math.round(h.sigma * 1000) / 1000,
       win: h.bestEvalResult.winRate,
+      minW: Math.round(h.bestEvalResult.minStageWin * 1000) / 1000,
+      floorPenalty: Math.round(h.bestEvalResult.floorPenalty),
       base: h.bestEvalResult.baseSurvivalRate,
       kills: Math.round(h.bestEvalResult.avgKills * 10) / 10,
       params: h.bestParams,
@@ -967,11 +1040,11 @@ if (import.meta.main) {
   logLines.push(``)
   logLines.push(`## Generation History`)
   logLines.push(``)
-  logLines.push(`| Gen | Best Fit | Mean Fit | σ | Win | Base | Kills |`)
-  logLines.push(`|-----|----------|----------|---|-----|------|-------|`)
+  logLines.push(`| Gen | Best Fit | Mean Fit | σ | Win | MinW | Base | Kills | FloorPen |`)
+  logLines.push(`|-----|----------|----------|---|-----|------|------|-------|----------|`)
   for (const h of summary.history) {
     logLines.push(
-      `| ${h.gen} | ${h.bestFit} | ${h.meanFit} | ${h.sigma} | ${(h.win * 100).toFixed(0)}% | ${(h.base * 100).toFixed(0)}% | ${h.kills} |`,
+      `| ${h.gen} | ${h.bestFit} | ${h.meanFit} | ${h.sigma} | ${(h.win * 100).toFixed(0)}% | ${(h.minW * 100).toFixed(0)}% | ${(h.base * 100).toFixed(0)}% | ${h.kills} | ${h.floorPenalty} |`,
     )
   }
 

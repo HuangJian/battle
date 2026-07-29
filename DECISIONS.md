@@ -1563,3 +1563,23 @@ These require further structural work (defense hardening, better pursuit) and ad
 **Why faithful / simple:** authentic Battle City enemies break bricks to advance; this merely lets a wedged enemy do the same instead of freezing. It is a small, localized addition to the AI brain and adds no gameplay state outside the World.
 
 **Regression tests:** `tests/classic-ai-jam.test.ts` → describe "Dead-end shaft recovery — tunnel out of a 1-wide vertical channel": a `None` and a `veteran` enemy force-spawned at the Stage 8 middle spawn must each span >1 cell horizontally within 1500 ticks (buggy behavior pins `x` to 192 → span ≈ 0). Full suite **452 pass / 0 fail**; tsc clean.
+
+---
+
+## 36. GOD AI P4: floor-aware all-35 tuning + per-stage parameter override table
+
+**Date:** 2026-07-29 · **Type:** AI tuning / architecture (data over code) · **Gates:** all three
+
+**Goal (user directive):** on all 35 classic stages, GOD AI clear rate stably > 60% per stage (floor) AND mean clear rate > 80%, using the perf-optimized worker-pool simulation.
+
+**Campaign:** 7 CMA-ES rounds (IPOP, 15-worker pool, fitness v5.0 = per-stage win chunks + deficit×8000 floor penalty) over the 20-dim `GodAIParams` space, inner loop = all 35 stages × 20 seeds. Two structural behaviors added along the way (race-to-base check in `isBaseUnderThreat()`, outnumbered-retreat in `selectTargetImpl`); two candidate behaviors (race-path inflation, spawn-band hunt clamp) were A/B-rejected and reverted.
+
+**Key finding:** a single global parameter set CANNOT satisfy all 35 stages — the weak-stage failure families demand opposite behaviors (S6 Iron Curtain wants retreat OFF; S18 Frozen Field wants retreat WIDER + perfect aim; tuning either globally regresses the other by up to −30pp at 60 seeds). A second finding: 20-seed probes carry ±11pp binomial noise and select mirage gains — every decisive measurement in this campaign is 60 seeds.
+
+**Decision:** introduce a **per-stage parameter override table** — `src/ai/godai-stage-overrides.ts`, a `Record<stageName, Partial<GodAIParams>>` merged over the global optimum by `applyStageOverrides()` in `tools/simulation-runner.ts`. This is data over code (MANIFEST §2.4): a human player also adapts tactics per map; the engine stays generic. Every override must be validated at ≥60 seeds vs the same base without it. Current table: S6 (retreat off + tight threat range, 57→63%), S18 (wide retreat + aimError 0, 52→67%), S25 Ice Palace (aimError 0, 57→73%), S26 Brick Maze (replanInterval 30 + suboptimalPathProb 0.05, 53→65%).
+
+**Result (truth scale, 35×60 seeds, classic, 18000t):** mean **81.9%** (target >80% — PASS); 34/35 stages ≥ 60%. **S32 Diamond (52%) is a known structural hard case**: armor-heavy force (8 armor/8 fast/4 power) on a fragmented steel+forest map with an open bottom band; verified not param-tunable at 60 seeds (manual probes on two bases + a dedicated single-stage CMA-ES all scored at or below base — the single-stage "win" of 60% @30 seeds re-measured at 43% on 60 fresh seeds). Fixing S32 needs a structural feature (maze-aware navigation or an armor-stage base guard), recorded as future work in plan/God-AI-Next-Round.md.
+
+**Defaults updated:** `DEFAULT_GOD_AI_PARAMS` = R7 optimum (notable: threatRangeCells 20→10, maxPlayerDistFromBase 19→26, powerupMaxDivertDistance 3→16, huntAllyCount 6→1, aimError 0→0.03 — tiny aim noise breaks mutual-block standoffs globally; per-stage overrides restore 0 where armor density punishes wasted shots). `SKILLED_HUMAN_PARAMS` derives automatically.
+
+**Regression tests:** parity baseline re-locked (`tools/relock-parity.ts`); **regression gate rewritten** from 2 stages to ALL 35 stages × 20 seeds with per-stage floors derived from the 60-seed truth minus a 4-win margin plus an aggregate 77% floor (`tests/god-ai-regression-gate.test.ts`, ~13s) — the old S0/S1-only gate had silently masked a real regression. Curriculum toy stage 4 re-pinned (aimError=0, seed 7) to keep isolating maze navigation rather than aim tolerance. Full suite **530 pass / 0 fail**; tsc clean.
