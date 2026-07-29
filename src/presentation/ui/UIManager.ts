@@ -561,12 +561,15 @@ export class UIManager {
   applyThemeIfChanged(colors: ThemeColors, themeKey: string): void {
     if (themeKey === this.lastThemeKey) return
     this.lastThemeKey = themeKey
-    this.applyTheme(colors)
+    this.applyTheme(colors, themeKey)
   }
 
   /** Apply theme colors as CSS variables */
-  private applyTheme(colors: ThemeColors): void {
+  private applyTheme(colors: ThemeColors, themeKey?: string): void {
     const root = document.documentElement
+    // Toggle body class for theme-specific CSS overrides (e.g. .ui-menu
+    // text colours on dark overlay for Modern Retro only).
+    document.body.classList.toggle('theme-modern', themeKey === 'modern')
     const vars: Record<string, string> = {
       '--theme-bg': colors.bgGradient
         ? `linear-gradient(180deg, ${colors.bgGradient[0]}, ${colors.bgGradient[1]})`

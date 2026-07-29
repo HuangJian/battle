@@ -161,9 +161,14 @@ export class GameRenderer {
     this.bulletSpriteDirty = true
   }
 
-  setTheme(theme: ThemeColors): void {
+  setTheme(theme: ThemeColors, themeKey?: string): void {
     if (theme === this.artist.theme) return
     this.artist.setTheme(theme)
+    // SVG sprites are tuned for the Modern Retro palette. Classic and Neon
+    // themes have different colour priorities (e.g. NES-authentic grays vs.
+    // the SVG's red enemy_basic), so their tanks/terrain must use the
+    // theme-aware procedural fallback in SpriteArtist instead.
+    this.artist.skipSvg = themeKey !== undefined && themeKey !== 'modern'
     this.terrainCacheDirty = true
     this.cachedBgGradient = null
     this.vignetteDirty = true
@@ -226,7 +231,8 @@ export class GameRenderer {
   // ================================================================
 
   render(world: World): void {
-    this.setTheme(world.theme)
+    // Pass theme key so skipSvg is set correctly for Classic/Neon themes.
+    this.setTheme(world.theme, world.themeKey)
     this.baseDamageFrac = world.baseMaxHp > 0 ? Math.max(0, 1 - world.baseHp / world.baseMaxHp) : 0
     const ctx = this.ctx
     const dpr = this.dpr

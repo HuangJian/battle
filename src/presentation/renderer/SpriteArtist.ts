@@ -80,6 +80,14 @@ export class SpriteArtist {
   theme: ThemeColors
   lib: SpriteLibrary | null = null
   spriteCache: SpriteCache | null = null
+  /**
+   * When true, skip all SVG sprite rendering and fall through to the
+   * theme-aware procedural drawing path. Set per-theme: Classic and Neon
+   * themes have different palette priorities than the SVGs (which are
+   * tuned for Modern Retro), so their tanks/terrain must use the procedural
+   * fallback that reads from `this.theme`.
+   */
+  skipSvg = false
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
     this.ctx = ctx
@@ -140,7 +148,7 @@ export class SpriteArtist {
   // ================================================================
 
   drawBrick(x: number, y: number, size: number): void {
-    if (this.drawSvgCentered('terrain.brick', x, y, size)) return
+    if (!this.skipSvg && this.drawSvgCentered('terrain.brick', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -299,7 +307,7 @@ export class SpriteArtist {
   }
 
   drawForest(x: number, y: number, size: number): void {
-    if (this.drawSvgCentered('terrain.forest', x, y, size)) return
+    if (!this.skipSvg && this.drawSvgCentered('terrain.forest', x, y, size)) return
     const t = this.theme
     const ctx = this.ctx
     const s = size / 4
@@ -379,7 +387,7 @@ export class SpriteArtist {
    */
   drawBase(x: number, y: number, size: number, destroyed: boolean, damage = 0): void {
     const key = destroyed ? 'terrain.base_ruins' : 'terrain.base'
-    if (this.drawSvgCentered(key, x, y, size)) {
+    if (!this.skipSvg && this.drawSvgCentered(key, x, y, size)) {
       if (damage > 0 && !destroyed) this.drawBaseDamage(x, y, size, damage)
       return
     }
@@ -600,8 +608,10 @@ export class SpriteArtist {
     this.drawTankShadow(x, y, size)
 
     // Fast path: use pre-rasterized + pre-rotated sprite (no save/translate/rotate/restore)
+    // Skip when skipSvg is set (Classic/Neon themes use procedural fallback
+    // with theme-aware colors instead of the Modern-Retro-tuned SVGs).
     const cache = this.spriteCache
-    if (cache?.built) {
+    if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
       const sprite = cache.getTankSprite('tank.player1', dirIdx)
       if (sprite) {
@@ -620,10 +630,10 @@ export class SpriteArtist {
       }
     }
 
-    // SVG fallback
+    // SVG fallback (also skipped when skipSvg is set)
     const rot =
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
-    if (this.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
+    if (!this.skipSvg && this.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(level ?? 0, 3))
       if (stage > 0) this.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, rot, 1.28)
       return
@@ -651,8 +661,10 @@ export class SpriteArtist {
     this.drawTankShadow(x, y, size)
 
     // Fast path: use pre-rasterized + pre-rotated sprite
+    // Skip when skipSvg is set (Classic/Neon themes use procedural fallback
+    // with theme-aware colors instead of the Modern-Retro-tuned SVGs).
     const cache = this.spriteCache
-    if (cache?.built) {
+    if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
       const sprite = cache.getTankSprite(key, dirIdx)
       if (sprite) {
@@ -679,10 +691,10 @@ export class SpriteArtist {
       }
     }
 
-    // SVG fallback
+    // SVG fallback (also skipped when skipSvg is set)
     const rot =
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
-    if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
+    if (!this.skipSvg && this.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
       if (stage > 0) this.drawSvgCentered(`fx.hit${stage}`, x, y, size, rot, 1.28)
       // Insignia drawn by the caller last (see `drawInsignia`).
@@ -739,8 +751,9 @@ export class SpriteArtist {
     this.drawTankShadow(x, y, size)
 
     // Fast path: pre-rasterized + pre-rotated sprite
+    // Skip when skipSvg is set (Classic/Neon themes use procedural fallback).
     const cache = this.spriteCache
-    if (cache?.built) {
+    if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
       const sprite = cache.getTankSprite(key, dirIdx)
       if (sprite) {
@@ -752,10 +765,10 @@ export class SpriteArtist {
       }
     }
 
-    // SVG fallback
+    // SVG fallback (also skipped when skipSvg is set)
     const rot =
       dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
-    if (this.drawSvgCentered(key, x, y, size, rot, 1.28)) return
+    if (!this.skipSvg && this.drawSvgCentered(key, x, y, size, rot, 1.28)) return
 
     // Procedural fallback — purple ally tank (hardcoded; the real path is the
     // pre-rasterized purple sprite above, so theming the fallback isn't needed).

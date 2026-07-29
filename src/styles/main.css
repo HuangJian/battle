@@ -192,7 +192,7 @@ body {
 
 .hud-replay.replay-paused .hud-replay-text {
   color: var(--theme-accent-primary);
-  text-shadow: 0 0 10px rgba(232, 200, 64, 0.6);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--theme-accent-primary) 60%, transparent);
   animation: none;
 }
 
@@ -237,9 +237,9 @@ body {
   margin-left: 4px;
   padding: 3px 12px;
   border-radius: 999px;
-  background: rgba(232, 200, 64, 0.16);
+  background: color-mix(in srgb, var(--theme-accent-primary) 16%, transparent);
   border: 1px solid var(--theme-accent-primary);
-  box-shadow: 0 0 10px rgba(232, 200, 64, 0.25);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--theme-accent-primary) 25%, transparent);
 }
 .hud-bar.paused .hud-pause {
   display: flex;
@@ -434,6 +434,17 @@ body {
   background: var(--theme-overlay-bg);
 }
 
+/* Override text colours for dark overlay readability — applies only when
+   the body has class "theme-modern" (set by UIManager on theme change).
+   Modern Retro's text tokens are tuned for the cream canvas; on the
+   semi-transparent dark overlay they become unreadable. Classic and Neon
+   already have light-on-dark tokens and don't need these overrides. */
+body.theme-modern .ui-menu {
+  --theme-text-primary: #f8f4ec;
+  --theme-text-secondary: #e8dcc8;
+  --theme-text-muted: #e0d0b0;
+}
+
 .menu-panel {
   display: flex;
   flex-direction: column;
@@ -525,7 +536,7 @@ body {
   color: var(--theme-accent-primary);
   background: var(--theme-button-active);
   border-color: var(--theme-accent-primary);
-  box-shadow: 0 0 12px rgba(232, 200, 64, 0.3);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--theme-accent-primary) 30%, transparent);
 }
 
 .menu-option:hover {
@@ -618,10 +629,10 @@ body {
 @keyframes pulse-border {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(232, 200, 64, 0.4);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--theme-accent-primary) 40%, transparent);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(232, 200, 64, 0);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--theme-accent-primary) 0%, transparent);
   }
 }
 
@@ -682,7 +693,7 @@ body {
 }
 
 .menu-row.selected.menu-resume {
-  box-shadow: 0 0 16px rgba(232, 200, 64, 0.5);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--theme-accent-primary) 50%, transparent);
 }
 
 .menu-controls {
@@ -893,8 +904,8 @@ body {
   background: var(--theme-button-active);
   border-color: var(--theme-accent-primary);
   box-shadow:
-    0 0 16px rgba(232, 200, 64, 0.25),
-    inset 0 0 12px rgba(232, 200, 64, 0.08);
+    0 0 16px color-mix(in srgb, var(--theme-accent-primary) 25%, transparent),
+    inset 0 0 12px color-mix(in srgb, var(--theme-accent-primary) 8%, transparent);
   transform: translateX(4px);
 }
 
@@ -1585,7 +1596,7 @@ body {
   font-size: 8px;
   font-weight: 700;
   letter-spacing: 1.5px;
-  color: var(--theme-text-muted);
+  color: var(--theme-text-secondary);
   margin-bottom: 2px;
 }
 
@@ -1615,10 +1626,10 @@ body {
 }
 
 .cc-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
   color: var(--theme-text-muted);
-  border-color: transparent;
+  border-color: var(--theme-panel-border);
 }
 
 .cc-btn:disabled:hover {
@@ -1653,7 +1664,7 @@ body {
 }
 
 .cc-btn-disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -1758,7 +1769,7 @@ body {
   width: 268px;
   padding: 8px 10px;
   background: rgba(8, 10, 14, 0.82);
-  border: 1px solid rgba(232, 200, 64, 0.3);
+  border: 1px solid color-mix(in srgb, var(--theme-accent-primary) 30%, transparent);
   border-radius: 6px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(6px);
@@ -1854,8 +1865,8 @@ body {
   font-weight: 700;
   letter-spacing: 0.3px;
   color: var(--theme-accent-primary);
-  background: rgba(232, 200, 64, 0.12);
-  border: 1px solid rgba(232, 200, 64, 0.45);
+  background: color-mix(in srgb, var(--theme-accent-primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--theme-accent-primary) 45%, transparent);
   border-radius: 5px;
   cursor: pointer;
   transition:
@@ -1865,7 +1876,7 @@ body {
 }
 
 .perf-copy:hover {
-  background: rgba(232, 200, 64, 0.25);
+  background: color-mix(in srgb, var(--theme-accent-primary) 25%, transparent);
   color: #fff;
 }
 
