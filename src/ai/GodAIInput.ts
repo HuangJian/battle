@@ -5,6 +5,7 @@ import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
 import { BASE_POS } from '../constants'
+import { ALL_DIRS } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
   scanAheadImpl,
@@ -508,9 +509,21 @@ export class GodAIInput implements InputLike {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
       if (scan.enemy) {
-        // Track camping duration at this cell.
+        // Track camping duration in a ZONE (±1 cell), not exact cell.
+        // P2.1fix: the old exact-cell check was defeated by sub-cell
+        // oscillation — the player bounces between two adjacent cells
+        // (e.g., x=32→40→32) at the TANK/CELL boundary, resetting the
+        // camp cell each time the boundary is crossed. This prevented
+        // the anti-camp escape from EVER firing, causing the Stage 3/4
+        // deadlocks (player stuck at one spot for 17000+ ticks). The
+        // zone fix accumulates camp time across nearby cells, so the
+        // escape triggers even if the player wiggles between two cells.
         const pc = this.playerCell()
-        if (this._campCell && this._campCell.col === pc.col && this._campCell.row === pc.row) {
+        if (
+          this._campCell &&
+          Math.abs(this._campCell.col - pc.col) <= 1 &&
+          Math.abs(this._campCell.row - pc.row) <= 1
+        ) {
           this._campTicks++
           // If a kill happened since camping started, reset the camp timer.
           // The player is being productive — let it continue camping.
@@ -519,7 +532,7 @@ export class GodAIInput implements InputLike {
             this._campKillsAtStart = w.killCount
           }
         } else {
-          // Moved to a new cell — start fresh camp tracking.
+          // Moved outside the camp zone — start fresh camp tracking.
           this._campCell = { col: pc.col, row: pc.row }
           this._campTicks = 1
           this._campKillsAtStart = w.killCount
@@ -623,10 +636,42 @@ export class GodAIInput implements InputLike {
       : Infinity
 
     if (navStuck) {
-      // Use A* to find a path to the center (don't chase the enemy).
+      // P2.2: Stuck too long — break the loop. Try A* to center first, then
+      // fall back to any passable direction (not directMove, which would
+      // re-select the enemy target and re-enter the stuck loop). Trying any
+      // open direction ensures the player physically moves away from the
+      // stuck cell, which is the whole point of the escape.
       this._moveDir = this.navigateTowards(navTarget!)
       if (!this._moveDir) {
-        this._moveDir = this.directMove(pc)
+        // A* failed (walled off) — try directions toward center first,
+        // then any passable direction.
+        const dx = navTarget!.col - pc.col
+        const dy = navTarget!.row - pc.row
+        const pref: Direction[] = []
+        if (Math.abs(dy) > Math.abs(dx)) {
+          pref.push(dy > 0 ? 'down' : 'up')
+          pref.push(dx > 0 ? 'right' : 'left')
+        } else {
+          pref.push(dx > 0 ? 'right' : 'left')
+          pref.push(dy > 0 ? 'down' : 'up')
+        }
+        let moved = false
+        for (const d of pref) {
+          if (this.canMoveDir(p, d)) {
+            this._moveDir = d
+            moved = true
+            break
+          }
+        }
+        if (!moved) {
+          // All preferred directions blocked — try any open direction.
+          for (const d of ALL_DIRS) {
+            if (this.canMoveDir(p, d)) {
+              this._moveDir = d
+              break
+            }
+          }
+        }
       }
     } else if (navDist <= 5) {
       // Close range — directMove (responsive, tracks moving enemies).
@@ -666,8 +711,10 @@ export class GodAIInput implements InputLike {
   }
 
   /**
-   * P1: Check if any enemy is near the base (within 3 cols, row >= 18).
-   * Used to skip power-ups and prioritize defense.
+   * P1/P2.3: Check if any enemy is threatening the base. An enemy is a
+   * threat if:
+   *   - Within 3 cols of base AND row >= 18 (close lateral threat), OR
+   * Used to skip power-ups/T2a and prioritize defense.
    */
   isBaseUnderThreat(): boolean {
     if (!this.hasBase) return false

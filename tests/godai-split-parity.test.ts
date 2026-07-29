@@ -33,18 +33,24 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 for P1 survival/defense fixes.
-// P1 changes on top of P0:
-// - Dodge detection widened from CELL*0.75 to TANK (more bullets detected).
-// - baseUnderThreat widened to row>=18; !canHunt gate removed (always defend).
-// - Power-ups and T2a skipped when base is under threat.
-// Seeds 1, 7, 12345 improved (more lives / faster clear). Seeds 999, 55555
-// regressed to timeout (RNG perturbation from wider dodge). Net: Stage 0
-// 70%→87.5%, Stage 1 87.5%→92.5%, Stage 1 gameovers 2→0.
+// Baseline re-captured 2026-07-29 for P2 anti-camp zone fix + nav-stuck
+// fallback + predictive firing.
+// P2 changes on top of P1:
+// - Anti-camp zone tracking (±1 cell instead of exact cell) — fixes
+//   deadlock where player oscillates between two cells at TANK/CELL
+//   boundary, resetting camp cell each time, preventing anti-camp escape.
+// - Nav-stuck fallback: A* to center → try directions toward center →
+//   any open direction (instead of directMove which re-selects enemy).
+// - Predictive firing (lead the target): pure check (no RNG) for enemy
+//   crossing — fires preemptively when enemy moving perpendicular will
+//   cross bullet path at the right time.
+// Seed 2: gameover→stage_clear (anti-camp fix). Seed 7: clear→gameover
+// (RNG perturbation). Seed 42: lives 5→2. Net: Stage 0 85%→86.7%,
+// Stage 1 95%→100%, Stage 3 50%→66.7%.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 5227,
+    ticks: 5056,
     score: 4200,
     lives: 3,
     killCount: 20,
@@ -52,37 +58,37 @@ const BASELINE: Record<number, Expected> = {
     playerLevel: 1,
   },
   2: {
-    outcome: 'gameover',
-    ticks: 4379,
-    score: 300,
+    outcome: 'stage_clear',
+    ticks: 6930,
+    score: 4700,
     lives: 3,
-    killCount: 3,
-    baseAlive: false,
+    killCount: 20,
+    baseAlive: true,
     playerLevel: 0,
   },
   7: {
-    outcome: 'stage_clear',
-    ticks: 5242,
-    score: 4700,
-    lives: 4,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 1,
+    outcome: 'gameover',
+    ticks: 6919,
+    score: 700,
+    lives: 3,
+    killCount: 7,
+    baseAlive: false,
+    playerLevel: 0,
   },
   42: {
     outcome: 'stage_clear',
-    ticks: 2420,
+    ticks: 2577,
     score: 4700,
-    lives: 5,
+    lives: 2,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 6321,
+    ticks: 5622,
     score: 4700,
-    lives: 3,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
@@ -98,7 +104,7 @@ const BASELINE: Record<number, Expected> = {
   },
   12345: {
     outcome: 'stage_clear',
-    ticks: 3638,
+    ticks: 3665,
     score: 4700,
     lives: 3,
     killCount: 20,

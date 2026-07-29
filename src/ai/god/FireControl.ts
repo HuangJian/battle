@@ -181,9 +181,87 @@ export function isBaseProtectionBrickImpl(self: GodAIInput, col: number, row: nu
 }
 
 /**
+ * P2.4: Predictive firing (lead the target). When an enemy is moving
+ * perpendicular to the player's facing direction and will cross the
+ * line of fire at the same time the bullet arrives, fire preemptively.
+ * This is critical for hitting fast enemies (2 px/tick) that dodge
+ * bullets by moving perpendicular — the player can't catch them in a
+ * chase (1 px/tick), but can intercept them with a well-timed shot.
+ *
+ * Algorithm: for each enemy moving perpendicular to the player's aim
+ * direction, calculate:
+ *   - enemyTimeToCross = perpendicular distance / enemy speed
+ *   - bulletTimeToReach = parallel distance / bullet speed
+ * If |enemyTimeToCross - bulletTimeToReach| ≤ tolerance, fire.
+ * Tolerance = half the tank-crossing time + small slack, so the bullet
+ * arrives while the enemy's body is still straddling the line of fire.
+ */
+function predictEnemyCrossingImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+): boolean {
+  const w = self.world
+  const p = w.player!
+  const bulletSpeed = p.bulletSpeed
+  if (bulletSpeed <= 0) return false
+
+  const vertical = dir === 'up' || dir === 'down'
+
+  for (const t of w.tanks) {
+    if (!t.alive || t.spawnTimer > 0) continue
+    if (!t.moving) continue
+
+    // Enemy must be moving perpendicular to the player's facing dir.
+    const enemyVertical = t.dir === 'up' || t.dir === 'down'
+    if (vertical === enemyVertical) continue
+
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const dx = tcx - pcx
+    const dy = tcy - pcy
+
+    // Enemy must be in front of the player (in the facing direction).
+    const inFront = vertical
+      ? (dir === 'up' && dy < 0) || (dir === 'down' && dy > 0)
+      : (dir === 'left' && dx < 0) || (dir === 'right' && dx > 0)
+    if (!inFront) continue
+
+    // Enemy must be moving toward the player's line (not away).
+    const movingToward = vertical
+      ? (t.dir === 'left' && dx > 0) || (t.dir === 'right' && dx < 0)
+      : (t.dir === 'up' && dy > 0) || (t.dir === 'down' && dy < 0)
+    if (!movingToward) continue
+
+    // Perpendicular distance: how far the enemy is from the player's line.
+    const perpDist = vertical ? Math.abs(dx) : Math.abs(dy)
+    // Parallel distance: how far the enemy is along the facing direction.
+    const parallelDist = vertical ? Math.abs(dy) : Math.abs(dx)
+    if (parallelDist > AIM_RANGE_CELLS * CELL) continue // too far for bullet
+
+    const enemySpeed = t.speed
+    if (enemySpeed <= 0) continue
+
+    const enemyTimeToCross = perpDist / enemySpeed
+    const bulletTimeToReach = parallelDist / bulletSpeed
+
+    // Tolerance: the time it takes for half the tank body to cross the
+    // line, plus a few ticks of slack for sub-pixel jitter.
+    const tolerance = TANK / (2 * enemySpeed) + 6
+    if (Math.abs(enemyTimeToCross - bulletTimeToReach) <= tolerance) {
+      return true // pure check — caller handles RNG
+    }
+  }
+  return false
+}
+
+/**
  * Decide whether to fire in the current facing direction. Fires when:
  * - An enemy is in the line of fire (scanAhead found enemy)
  * - An enemy bullet is approaching (to intercept, T5)
+ * - P2.4: An enemy is moving perpendicular and will cross the line of fire
+ *   at the right time (predictive firing / lead the target)
  *
  * T2b: does NOT fire at walls during navigation. A* routes around walls,
  * so firing at them wastes bullets and cooldown time. Wall-breaking is
@@ -238,6 +316,16 @@ export function shouldFireInDirImpl(
     if (!inFront) continue
     const d = Math.abs(dir === 'up' || dir === 'down' ? bcy - pcy : bcx - pcx)
     if (d < TANK * 4) {
+      return self.rng.next() >= self.params.aimError
+    }
+  }
+
+  // P2.4: Predictive firing (lead the target). If no wall blocks the
+  // line of fire, check if an enemy moving perpendicular will cross
+  // the bullet's path at the right time. This lets the player hit
+  // fast enemies that dodge bullets by moving sideways.
+  if (!result.wall) {
+    if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
       return self.rng.next() >= self.params.aimError
     }
   }

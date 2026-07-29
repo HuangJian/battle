@@ -1,15 +1,41 @@
-# 下一轮 God AI 调优方向论证
+# God AI 调优方向论证与进度
 
-> 结论先行：**下一轮不应再跑"纯 CMA-ES 参数搜索"。** 当前 20% 的胜率天花板是
-> **行为/架构层面的决策流死锁**导致的，不是参数问题。在修复死锁之前再跑任何一轮
-> CMA-ES，都会重新收敛到 ~20%。下一轮的最高杠杆是 **P0：修 T2a 死锁 + 加 anti-camp
-> 逃逸 + walled-off 目标 systematic dig**；其次是 **P1：强化 hard/chaos 防御并让优化器
-> 跨难度/跨 stage 评测**（因为 §6 门槛 Hard≥70%/Chaos≥30% 当前优化器根本没碰过）；
-> **P2：架构修复之后再跑一轮 CMA-ES 对准 §6 门槛。**
+> **最新状态（2026-07-29）**：P0（T2a 死锁修复）、P1（生存与防御加固）、P2（反驻扎区域
+> 修复 + nav-stuck 改进 + 预测瞄准）均已完成。Classic 胜率：
+> - Stage 0: 86.7%（30 seed @18000t）
+> - Stage 1: **100%**（完美通关！）
+> - Stage 2: 93.3%
+> - Stage 3: **66.7%**（从 50% 大幅提升 — 反驻扎区域修复打破了迷宫地图死锁）
+> - Stage 4: 56.7%（RNG 扰动导致退步，需 CMA-ES 重新优化参数）
+> - 总体: 80.7%
+>
+> P2 核心发现：P0 的精确格子跟踪被 TANK/CELL 边界的子格振荡击败——玩家在两个相邻格之间
+> 振荡（如 x=32↔40），每次跨越边界都重置驻扎格子，导致反驻扎逃逸永远不触发。±1 格区域
+> 修复解决了这个根因。下一步：CMA-ES 重新优化参数（架构修复已到位）。
+
+## 进度总览
+
+| 阶段 | 状态 | Classic 胜率（30 seed / 18000t） | 关键改动 |
+|------|------|----------------------------------|----------|
+| P0 — T2a 死锁修复 | ✅ 已完成（aec21f4） | Stage 0 20%→70%，Stage 1 22.5%→87.5% | `scan.enemy` 门（P0.2）+ anti-camp 逃逸（P0.1）+ nav-stuck 逃逸（P0.3） |
+| P1 — 生存与防御加固 | ✅ 已完成（2cedb7a） | Stage 0 70%→87.5%，Stage 1 87.5%→92.5% | 闪避检测加宽（P1.1）+ 基地威胁 `row>=18`（P1.2）+ 终局回防（P1.3）+ 跳过 T2a/道具（P1.4） |
+| P2 — 反驻扎区域 + 预测瞄准 | ✅ 已完成 | Stage 0 86.7%, Stage 1 **100%**, Stage 3 50%→**66.7%** | 反驻扎区域跟踪（±1格）+ nav-stuck 任意方向逃逸 + 预测瞄准（纯检测不消耗 RNG） |
+| P3 — CMA-ES 重新优化 | ⏳ 下一步 | 待定 | 架构修复已到位，重跑 CMA-ES 对准跨难度/stage |
+
+**剩余失败（P1 之后，seeds 1–40，36000t）**：
+- **2 个 gameover**（Stage 0 seed 2 / 13）：敌人沿基地行从远处走过来，玩家来不及回防。
+- **6 个 timeout**（Stage 0 seed 20/25/39，Stage 1 seed 8/24/27）：追击快速敌人，差 2–4 击杀清不掉 → 需**预测瞄准 / lead the target**。
+- **Hard / Chaos 仍为防御崩溃体制**（§6 门槛未触碰）：当前 God AI 只在 classic 上训练，需 P2 跨难度评测才能进入优化目标。
+
+> 回归门禁（`tests/god-ai-regression-gate.test.ts`）已收紧到 P1 基线：Stage 0
+> `wins≥24/base≥27/kills≥16`，Stage 1 `wins≥25/base≥29/kills≥17`（seeds 1–30 @18000t）。
 
 ---
 
-## 1. 证据
+## 1. 证据（P0 / P1 修复前的基线，2026-07-29 之前）
+
+> 以下证据用于说明**为什么要做 P0 / P1**，反映的是死锁+弱防御时代的 God AI 行为。
+> 修复后的实际胜率见上方「进度总览」。
 
 ### 证据 1 — 时间预算翻倍对胜率零影响（不是"太慢"，是"卡死"）
 
@@ -111,52 +137,74 @@ decision-trace 的"为什么失败"分析都应按修正后的 rules 重做**（
 
 ## 3. 下一轮方向（按杠杆排序）
 
-### P0 — 修 T2a 死锁（架构/行为，最高杠杆）
+### P0 — ✅ 修 T2a 死锁（架构/行为，最高杠杆 — 已完成，commit `aec21f4`）
 
-目标：把 31 个卡死局中的相当一部分转为胜利。具体改动点（都在 `think()` / `FireControl` /
-`StrategyPlanner`）：
+**状态：已完成并验证。** 实测（40 seed / 36000t / classic）：Stage 0 20%→**70%**、Stage 1 22.5%→**87.5%**。
 
-1. **Anti-camp 逃逸**：记录"同格驻扎 tick 数"。若在某格 `t2a` 驻扎超过 `N` ticks（如 90）
-   且期间无击杀，则**强制 fall-through 到 `navigate` / `selectTarget`** 主动狩猎最近敌人，
-   而不是继续原地开火。
-2. **T2a 驻扎门槛**：仅当 `scan.enemy == true`（真实弹道上有可击杀敌人）才进入"stop-and-aim
-   驻扎"；若 `aimDir` 触发但 `scan.enemy` 为假（敌人在墙后/远处），**不驻扎**，改为走导航
-   去绕/挖。
-3. **Walled-off 目标 systematic dig**：当 `selectTarget` 选中的敌人被 A* 判定不可达
-   （砖墙封死）时，让 AI 沿朝敌人的方向**系统性破墙掘进**（已有 `canMoveOrBreak` /
-   `directMove` 做近距破墙，但 >5 格走 A* 会直接放弃 → 需要补"不可达则朝目标方向 dig"）。
+实现对应原计划的 3 个改动点（都在 `think()` / `FireControl` / `StrategyPlanner`）：
 
-预计收益：5 个 0-kill 死锁 + 多数"清到 17/20 收不掉"的局，应能显著转化。
+1. **Anti-camp 逃逸（P0.1）**：记录"同格驻扎 tick 数"。若在某格 `t2a` 驻扎超过 `campTimeoutTicks`（90）且期间无击杀，则**强制 fall-through 到 `navigate` / `selectTarget`** 主动狩猎，并抑制 T2a `antiCampSuppressTicks`（60）保证移动时间。
+2. **T2a 驻扎门槛（P0.2，最高杠杆）**：仅当 `scan.enemy == true`（真实弹道上有可击杀敌人）才进入"stop-and-aim 驻扎"；墙壁不再触发驻扎，改由 navigate 分支的 `directMove` / `canMoveOrBreak` 边走边破墙。原计划的第 3 点（walled-off systematic dig）被此改动**吸收**——破墙不再原地循环，而是随导航前进。
+3. **Nav-stuck 逃逸（P0.3）**：记录 navigate 分支同格停留 tick，超过 `navStuckTicks`（180）则改道地图中心 (12,12)，打破追击快速敌人的循环。
 
-### P1 — 强化 hard/chaos 防御 + 让优化器跨难度评测（对准 §6 门槛）
+结果：5 个 0-kill 死锁 + 多数"清到 17/20 收不掉"的局显著转化（详见 `plan/God-AI-P0-Verification.md`）。
 
-- 防御加固：预判性修基地保护墙、对多发基地弹道的多目标拦截（当前 T8 是单发拦截）。
-- **优化器评测集改为多难度 × 多 stage**（至少 classic+hard+chaos，stage 0/1/2），
-  fitness 直接对准 §6 门槛的聚合胜率。否则 Hard/Chaos 的 100% 基地被毁永远无法进入优化目标。
-- 这一步可以和 P0 并行：即便 P0 修好 classic 进攻，hard/chaos 仍会因防御崩溃而 0 胜。
+### P1 — ✅ 生存与防御加固（已完成，commit `2cedb7a`）
 
-### P2 — 架构修复之后再跑一轮 CMA-ES
+**状态：已完成并验证。** 实测（40 seed / 36000t / classic）：Stage 0 70%→**87.5%**（2 gameover）、Stage 1 87.5%→**92.5%**（0 gameover）。
 
-- 在 P0/P1 落地后，跑一轮 IPOP-CMA-ES，评测集覆盖 §6 门槛，fitness 保留 v4.1 的
-  gameover 漏洞修补，并**加强 anti-stall 项**（对"超时且剩余敌人多"给更大惩罚）。
-- **在 P0 之前再跑 CMA-ES 是浪费**：搜索空间会被同一个死锁主导，重新收敛到 ~20%。
+落在 classic 上的防御加固（原计划 P1 的"hard/chaos 跨难度评测"部分留到 P3）：
+
+- **P1.1 闪避检测加宽**（`ThreatAssessor.ts`）：对齐阈值 `CELL*0.75`（12px）→ `TANK`（32px），检测到更多近失子弹。
+- **P1.2 基地威胁检测加宽**（`StrategyPlanner.ts` + `GodAIInput.ts`）：`row>=20`→`row>=18`，新增 `isBaseUnderThreat()`。
+- **P1.3 始终回防**（`StrategyPlanner.ts`）：回防逻辑移到 `if (canHunt)` 之前，终局也回防。
+- **P1.4 跳过 T2a / 道具**（`GodAIInput.ts`）：基地受威胁且玩家太远时跳过 T2a 驻扎与道具收集。
+
+详见 `plan/God-AI-P1-Verification.md`。
+
+### P2 — ✅ 反驻扎区域修复 + nav-stuck 改进 + 预测瞄准（已完成，待提交）
+
+**状态：已完成并独立验证。** 实测（30 seed / 18000t / classic，覆盖 Stage 0–4）：
+总体 **80.7%**（P1 基线 80.0%），Stage 1 **100%** 完美通关、Stage 3 50%→**66.7%**、
+Stage 4 75%→56.7%（−5，RNG 时序扰动，在门禁覆盖范围外）。详见 `plan/God-AI-P2-Verification.md`。
+
+- **P2.1fix 反驻扎区域跟踪**（`GodAIInput.ts:523–525`）：驻扎判定由精确格改为 ±1 格
+  区域，破解 TANK/CELL 边界子格振荡导致的反驻扎逃逸永不触发（迷宫地图死锁根因）。
+- **P2.2 nav-stuck 逃逸改进**（`GodAIInput.ts:638–664`）：A* 到中心失败后，先试朝中心
+  方向、再试任意可通行方向，不再 `directMove` 重新选敌回到死循环。
+- **P2.4 预测瞄准 / lead the target**（`FireControl.ts:199–257`，纯检测）：敌人横向移动
+  将在子弹到达时穿越弹道则提前开火，解决快速敌躲避子弹、玩家差 2–4 击杀清不掉的问题。
+- 拒绝方案（DECISIONS §41）：T2a 仅对准才开火、baseUnderThreat 扩到 row≥22/23/24、
+  campTimeout=60——均导致其他 stage 退步。
+
+### P3 — ⏳ 下一步：架构已修，重跑 CMA-ES 对准 §6（待做）
+
+- **前提已满足**：P0/P1/P2 落地后，搜索空间不再被死锁主导，现在跑 CMA-ES 才会收敛到高于 ~80%。
+- **评测集改为多难度 × 多 stage**（至少 classic + hard + chaos，stage 0..4），fitness 直接
+  对准 §6 门槛（Hard≥70% / Chaos≥30%）的聚合胜率，并**加强 anti-stall 项**（对"超时且
+  剩余敌人多"给更大惩罚）啃掉剩余卡死型 timeout 与 Stage 4 退化。
+- **在 P0/P2 行为修复之前跑 CMA-ES 是浪费**（历史已证明）：搜索空间被同一死锁主导，
+  重新收敛到 ~20%。
 
 ---
 
-## 4. 验证实验（廉价，先确认 P0 假设）
+## 4. 验证实验（已运行，假设成立）
 
-仅给当前 `DEFAULT_GOD_AI_PARAMS` + P0 的 anti-camp 行为改动，复测 Stage 0 Classic
-（seeds 1–40, 36000 ticks）：
+计划的验证实验（仅加 P0 行为改动，复测 Stage 0 Classic seeds 1–40 @36000t）**已实际执行**，
+结果远超 ">40%" 的阈值，确认死锁假设成立：
 
-- 若胜率从 20% 明显跳升（例如 >40%）→ P0 假设成立，继续 P1/P2。
-- 若几乎不变 → 死锁机制判断有误，需回看 `scanAhead`/`findEnemyDirection` 的微观命中线。
+- Stage 0 Classic：20% → **70%**（28/40）；Stage 1 Classic：22.5% → **87.5%**（35/40）。
+- 后续 P1 防御加固进一步推到 Stage 0 **87.5%** / Stage 1 **92.5%**（详见 §3 与两份 Verification 文档）。
+
+→ P0/P1 方向正确，进入 P2。
 
 ---
 
 ## 5. 风险与注意
 
 - **Parity 测试**：`tests/godai-split-parity.test.ts` 在改动 `think()` 行为后必须重锁基线
-  （§0.5 的"零行为漂移"保证只针对拆分，不覆盖本次行为改动）。
+  （§0.5 的"零行为漂移"保证只针对拆分，不覆盖本次行为改动）。P0、P1、P2 均已重锁；
+  **P3 若改动行为同样需要重锁**。
 - **不要混淆两套体制**：classic 的修复（P0）不会自动修复 hard/chaos 防御（P1），需分开验证。
 - **trace 工具**：后续分析一律用已修复 rules 的 `traceSimulation`；旧的 v3/v4.1 轨迹文件
   视为在 modern 规则下产出，结论不可直接套用到 classic。

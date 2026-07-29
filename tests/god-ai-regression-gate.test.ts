@@ -21,9 +21,12 @@ import { STAGES } from '../src/config/stages'
 //   P0 (2026-07-29, T2a deadlock fix):
 //     Stage 0: winRate=66.7%  baseSurvival=90.0%  avgKills=16.9
 //     Stage 1: winRate=83.3%  baseSurvival=96.7%  avgKills=19.4
-//   P1 (2026-07-29, survival & defense fix):  <-- CURRENT BASELINE
+//   P1 (2026-07-29, survival & defense fix):
 //     Stage 0: winRate=86.7%  baseSurvival=93.3%  avgKills=18.8
 //     Stage 1: winRate=90.0%  baseSurvival=100.0% avgKills=19.7
+//   P2 (2026-07-29, anti-camp zone + nav-stuck + predictive):  <-- CURRENT
+//     Stage 0: winRate=86.7%  baseSurvival=90.0%  avgKills=18.6
+//     Stage 1: winRate=100.0% baseSurvival=100.0% avgKills=20.0
 //
 // Floors are set ~2 wins below the P1 measurement to leave margin for
 // benign P2 tuning, while staying far above the deadlock era
