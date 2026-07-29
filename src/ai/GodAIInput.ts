@@ -155,47 +155,42 @@ export interface GodAIParams {
   navStuckTicks: number
 }
 
-/** Default God AI parameters — optimized via CMA-ES v4.1 (2026-07-28).
- * See .workbuddy/optimization-v4_1/ for details.
+/** Default God AI parameters — optimized via CMA-ES P3 (2026-07-29).
+ * See .workbuddy/optimization-p3/ for details.
  *
- * CMA-ES v4.1 used a clear-speed-centric fitness function with a
- * gameover-loophole fix:
- *   win*5000 + kills*60 + base*200 + speed*800
- *   - remaining*25 - gameover*500 - lowKill*400
+ * P3 CMA-ES used a multi-stage aggregate fitness (S0/S3/S6/S9, 6 seeds
+ * each, 18000 ticks) with the v4.1 fitness function. The optimizer
+ * started from the P3 structural fix params (A* dig-through-brick +
+ * nav-stuck center fix + power-up diversion reduction).
  *
- * The fitness penalizes ALL non-wins for remaining enemies (not just
- * timeouts), adds an extra gameover penalty (base lost = always worse
- * than timeout), and was evaluated across 40 seeds (up from 8).
+ * P3 CMA-ES results (24 evals, 4 stages × 6 seeds, 18000 ticks, classic):
+ *   Pre-opt (P3 structural): 63% win / 92% base / 15.6 kills / 1.5 GO
+ *   Optimized:              75% win / 100% base / 17.5 kills / 0 GO
  *
- * v4.1 results (40 seeds, 18000 ticks, classic stage 0):
- *   Default (v3): 20% win / 85% base / 10.8 kills / 6 gameovers
- *   Optimized:    20% win / 97.5% base / 12.0 kills / 1 gameover
- *
- * Key strategy changes from v3 (all 11 optimizer-tuned fields; replanInterval=3
- * and powerupMaxDivertDistance=9 were set in the earlier v3 work and unchanged here):
- *   - reactionDelay 0→1 (slightly slower reactions → less jittery firing)
- *   - aimError 0.0024→0 (perfect aim)
- *   - suboptimalPathProb 0.062→0.093 (more path noise / willingness to take imperfect routes)
- *   - Wider defense (spread 5→9, offset 1→2) with larger wall scan (1→2)
- *   - threatRangeCells 26→20 (tighter enemy threat sensing window)
- *   - Longer bullet interception range (3→7) for better base protection
- *   - Earlier hunting (endgameEnemyThreshold 1→3) with more enemies allowed (huntAllyCount 4→6)
- *   - Further roaming distance (10→14) for aggressive kill pursuit
+ * Key strategy changes from v4.1:
+ *   - suboptimalPathProb 0.093→0.038 (less path noise → less oscillation)
+ *   - replanInterval 3→50 (much less frequent replanning → committed paths)
+ *   - powerupMaxDivertDistance 9→3 (focus on combat, not power-ups)
+ *   - maxPlayerDistFromBase 14→19 (allow further aggressive roaming)
+ *   - reactionDelay 1→0 (instant reactions → better dodging)
+ *   - defenseRowOffset 2→1 (closer to base for defense)
+ *   - t8MaxInterceptDistCells 7→2 (shorter intercept range, less wild chases)
+ *   - endgameEnemyThreshold 3→4 (slightly earlier endgame hunting)
  */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
-  reactionDelay: 1,
+  reactionDelay: 0,
   aimError: 0,
-  suboptimalPathProb: 0.09313768317029014,
+  suboptimalPathProb: 0.037964058921814106,
 
-  defenseRowOffset: 2,
+  defenseRowOffset: 1,
   defenseColSpread: 9,
   threatRangeCells: 20,
-  maxPlayerDistFromBase: 14,
-  t8MaxInterceptDistCells: 7,
-  baseWallScanRadius: 2,
-  replanInterval: 3,
-  powerupMaxDivertDistance: 9,
-  endgameEnemyThreshold: 3,
+  maxPlayerDistFromBase: 19,
+  t8MaxInterceptDistCells: 2,
+  baseWallScanRadius: 1,
+  replanInterval: 50,
+  powerupMaxDivertDistance: 3,
+  endgameEnemyThreshold: 4,
   huntAllyCount: 6,
 
   // P0: Anti-camp / T2a deadlock fix (plan/God-AI-Next-Round).
@@ -571,13 +566,30 @@ export class GodAIInput implements InputLike {
     // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
     // Now the AI opportunistically grabs power-ups when it's safe to divert.
     // P1: Skip power-ups when the base is under threat — defense first.
+    // P3.2: Also skip when there are enemies within 5 cells of the player —
+    // chasing power-ups while enemies are nearby was a major cause of
+    // defense-collapse gameovers on S6/S26/S32 (player diverted to a power-up
+    // at the top of the map while enemies destroyed the base).
     if ((!aimDir || onCooldown) && !(this.hasBase && this.isBaseUnderThreat())) {
-      const puTarget = this.findPowerUpTarget(pcx, pcy)
-      if (puTarget) {
-        this._moveDir = this.navigateTowards(puTarget)
-        this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
-        this.branchCounts.powerup++
-        return
+      // P3.2: Don't divert to power-ups when enemies are close.
+      const pc2 = this.playerCell()
+      let nearbyEnemy = false
+      for (const t of w.tanks) {
+        if (!t.alive || t.spawnTimer > 0) continue
+        const tc = this.tankCell(t)
+        if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
+          nearbyEnemy = true
+          break
+        }
+      }
+      if (!nearbyEnemy) {
+        const puTarget = this.findPowerUpTarget(pcx, pcy)
+        if (puTarget) {
+          this._moveDir = this.navigateTowards(puTarget)
+          this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
+          this.branchCounts.powerup++
+          return
+        }
       }
     }
 
@@ -624,8 +636,15 @@ export class GodAIInput implements InputLike {
     const navStuck = this._navStuckTicks > this.params.navStuckTicks
 
     let navTarget: Cell | null
-    if (navStuck) {
-      // Stuck too long — roam to map center to break the pursuit loop.
+    // P3.1: When nav-stuck triggers, only go to center if the player is
+    // NOT already at/near center. Going to center when already there causes
+    // a deadlock (target == current cell → no movement → stuck forever,
+    // which was the S9 root cause: player stuck at (12,12) for 2600+ ticks).
+    // When the player IS at/near center, chase the nearest enemy directly
+    // (directMove breaks through walls) — this gets the player moving.
+    const distToCenter = Math.abs(pc.col - 12) + Math.abs(pc.row - 12)
+    const stuckAtCenter = distToCenter <= 2
+    if (navStuck && !stuckAtCenter) {
       navTarget = { col: 12, row: 12 }
     } else {
       navTarget = this.selectTarget(pc)
@@ -635,7 +654,7 @@ export class GodAIInput implements InputLike {
       ? Math.abs(navTarget.col - pc.col) + Math.abs(navTarget.row - pc.row)
       : Infinity
 
-    if (navStuck) {
+    if (navStuck && !stuckAtCenter) {
       // P2.2: Stuck too long — break the loop. Try A* to center first, then
       // fall back to any passable direction (not directMove, which would
       // re-select the enemy target and re-enter the stuck loop). Trying any
@@ -670,6 +689,21 @@ export class GodAIInput implements InputLike {
               this._moveDir = d
               break
             }
+          }
+        }
+      }
+    } else if (navStuck && stuckAtCenter) {
+      // P3.1: Stuck at/near center — chase nearest enemy directly instead
+      // of re-targeting center. directMove breaks through brick walls,
+      // which (combined with the A* dig-through-brick fix) gets the player
+      // moving toward enemies instead of deadlocking at center.
+      this._moveDir = this.directMove(pc)
+      if (!this._moveDir) {
+        // directMove also failed — try any passable direction to get moving.
+        for (const d of ALL_DIRS) {
+          if (this.canMoveDir(p, d)) {
+            this._moveDir = d
+            break
           }
         }
       }

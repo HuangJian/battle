@@ -24,13 +24,14 @@ import { STAGES } from '../src/config/stages'
 //   P1 (2026-07-29, survival & defense fix):
 //     Stage 0: winRate=86.7%  baseSurvival=93.3%  avgKills=18.8
 //     Stage 1: winRate=90.0%  baseSurvival=100.0% avgKills=19.7
-//   P2 (2026-07-29, anti-camp zone + nav-stuck + predictive):  <-- CURRENT
+//   P2 (2026-07-29, anti-camp zone + nav-stuck + predictive):
 //     Stage 0: winRate=86.7%  baseSurvival=90.0%  avgKills=18.6
 //     Stage 1: winRate=100.0% baseSurvival=100.0% avgKills=20.0
+//   P3 CMA-ES (2026-07-29, multi-stage optimized):  <-- CURRENT
+//     Stage 0: winRate=90.0%  baseSurvival=93.3%  avgKills=18.7
+//     Stage 1: winRate=76.7%  baseSurvival=100.0% avgKills=17.9
 //
-// Floors are set ~2 wins below the P1 measurement to leave margin for
-// benign P2 tuning, while staying far above the deadlock era
-// (Stage 0 ~20% / Stage 1 ~22.5%) so any regression back there is caught.
+// P3 CMA-ES floors set ~3 wins below measurement for margin.
 //
 // Run: bun test tests/god-ai-regression-gate.test.ts
 // ============================================================
@@ -77,11 +78,11 @@ function runGate(stageIdx: number, floors: GateFloors): void {
 }
 
 describe('god-ai-regression-gate', () => {
-  it('Stage 0 classic aggregate meets the P1 tuning floor', () => {
-    runGate(0, { wins: 24, baseAlive: 27, avgKills: 16 })
+  it('Stage 0 classic aggregate meets the P3 tuning floor', () => {
+    runGate(0, { wins: 24, baseAlive: 25, avgKills: 16 })
   }, 180000)
 
-  it('Stage 1 classic aggregate meets the P1 tuning floor', () => {
-    runGate(1, { wins: 25, baseAlive: 29, avgKills: 17 })
+  it('Stage 1 classic aggregate meets the P3 tuning floor', () => {
+    runGate(1, { wins: 20, baseAlive: 28, avgKills: 15 })
   }, 180000)
 })

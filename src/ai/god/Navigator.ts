@@ -2,7 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
 import { CELL, TANK, GRID, DIR_VECTORS, type Direction } from '../../constants'
-import { findPath } from '../../utils/pathfind'
+import { findPath, type PathConstraints } from '../../utils/pathfind'
 import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 
 // ============================================================
@@ -26,6 +26,13 @@ export function tankCellImpl(_self: GodAIInput, t: Tank): Cell {
 /**
  * Navigate towards a specific cell using A* pathfinding.
  * Returns the next movement direction, or null if no path.
+ *
+ * P3.1: tries regular A* first (corridors only). If it fails, falls back to
+ * `breakBrick` A* which treats brick walls as passable (the player will fire
+ * to clear them while following the path). This is the "systematic dig" fix
+ * that breaks the navigation paralysis on maze stages — without it, A*
+ * treats brick as impassable and the player gets stuck whenever the only
+ * route to an enemy goes through brick walls.
  */
 export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction | null {
   const w = self.world
@@ -36,11 +43,21 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     return null
   }
 
-  const path = findPath(w.tileMap, playerCell, target)
+  // Try regular A* (corridors only) first.
+  let path = findPath(w.tileMap, playerCell, target)
+
+  // P3.1: If no corridor path, try dig-through-brick path.
+  // This finds paths through brick walls — the player follows them and
+  // fires at bricks to clear the way (handled by followPath + think()).
+  if (!path || path.length === 0) {
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true } as PathConstraints)
+  }
+
   if (!path || path.length === 0) return null
 
   // Suboptimal path: small chance of taking a different direction.
-  if (self.rng.next() < self.params.suboptimalPathProb) {
+  // Only when the primary direction is passable (don't add noise to dig paths).
+  if (self.rng.next() < self.params.suboptimalPathProb && self.canMoveDir(p, path[0])) {
     const altDirs = ALL_DIRS.filter((d) => d !== path[0] && self.canMoveDir(p, d))
     if (altDirs.length > 0) {
       return self.rng.pick(altDirs)
@@ -52,7 +69,14 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     return nextDir
   }
 
-  // Path blocked — try alternative directions.
+  // P3.1: Path direction blocked by a breakable wall — return it anyway so
+  // the caller (think()) can face the wall and fire. canMoveOrBreak verifies
+  // it's a breakable brick, not steel/water/base.
+  if (self.canMoveOrBreak(p, nextDir)) {
+    return nextDir
+  }
+
+  // Path blocked by unbreakable terrain — try alternative directions.
   for (const d of ALL_DIRS) {
     if (d === opposite(nextDir)) continue
     if (self.canMoveDir(p, d)) return d
@@ -99,7 +123,16 @@ export function followPathImpl(self: GodAIInput): Direction | null {
       return nextDir
     }
 
-    // Path blocked (by a tank?) — try alternative directions.
+    // P3.1: Path direction blocked by a breakable wall — return it anyway
+    // so the caller (think()) can face the wall and fire. This is the key
+    // fix for maze-stage paralysis: the player follows a dig path through
+    // brick walls, and when it hits a brick, it fires to clear it instead of
+    // abandoning the path and getting stuck.
+    if (self.canMoveOrBreak(p, nextDir)) {
+      return nextDir
+    }
+
+    // Path blocked by unbreakable terrain or tank — try alternative directions.
     for (const d of ALL_DIRS) {
       if (d === opposite(nextDir)) continue
       if (self.canMoveDir(p, d)) {
@@ -118,7 +151,13 @@ export function followPathImpl(self: GodAIInput): Direction | null {
   return null
 }
 
-/** Re-plan the A* path to the current best target. */
+/**
+ * Re-plan the A* path to the current best target.
+ *
+ * P3.1: tries regular A* first, then falls back to dig-through-brick A*.
+ * This ensures the player always has a path to the target, even on maze
+ * stages where the only route goes through brick walls.
+ */
 export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   const w = self.world
   const target = self.selectTarget(playerCell)
@@ -132,7 +171,14 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     return
   }
 
-  const path = findPath(w.tileMap, playerCell, target)
+  // Try regular A* (corridors only) first.
+  let path = findPath(w.tileMap, playerCell, target)
+
+  // P3.1: If no corridor path, try dig-through-brick path.
+  if (!path) {
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true } as PathConstraints)
+  }
+
   if (path) {
     self.path = path
   } else {

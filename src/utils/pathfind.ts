@@ -27,6 +27,14 @@ export interface Cell {
 export interface PathConstraints {
   /** If true, water does not block movement (boat power-up / amphibious). */
   ignoreWater?: boolean
+  /**
+   * If true, treat **brick** as passable terrain with a higher traversal cost
+   * (wall-breaking / "dig" mode). The God AI uses this to find paths through
+   * brick walls when no pure-corridor path exists — the player follows the
+   * path and fires at the bricks to clear them. Steel, water, and base remain
+   * impassable.
+   */
+  breakBrick?: boolean
 }
 
 // ---- internal helpers -------------------------------------------------------
@@ -39,8 +47,17 @@ function key(col: number, row: number): string {
 /**
  * Can a 2×2-block tank occupy the position whose top-left sub-block is
  * (col, row)? Checks all four sub-blocks for blocking terrain.
+ *
+ * `breakBrick`: when true, brick is treated as passable (the player can fire
+ * to destroy it). Steel, water, and base always block.
  */
-function isPassable(tileMap: TileMap, col: number, row: number, ignoreWater: boolean): boolean {
+function isPassable(
+  tileMap: TileMap,
+  col: number,
+  row: number,
+  ignoreWater: boolean,
+  breakBrick = false,
+): boolean {
   // A 2×2 tank needs cols [col, col+1] and rows [row, row+1] inside the grid.
   if (col < 0 || col + 1 >= GRID || row < 0 || row + 1 >= GRID) return false
   for (let dr = 0; dr <= 1; dr++) {
@@ -48,6 +65,7 @@ function isPassable(tileMap: TileMap, col: number, row: number, ignoreWater: boo
       const type = tileMap.get(col + dc, row + dr)
       if (TileMap.blocksTank(type)) {
         if (ignoreWater && type === 'water') continue
+        if (breakBrick && type === 'brick') continue
         return false
       }
     }
@@ -80,10 +98,11 @@ export function findPath(
   constraints?: PathConstraints,
 ): Direction[] | null {
   const ignoreWater = constraints?.ignoreWater ?? false
+  const breakBrick = constraints?.breakBrick ?? false
 
   // Quick reject: start or goal impassable.
-  if (!isPassable(tileMap, from.col, from.row, ignoreWater)) return null
-  if (!isPassable(tileMap, to.col, to.row, ignoreWater)) return null
+  if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
+  if (!isPassable(tileMap, to.col, to.row, ignoreWater, breakBrick)) return null
   if (from.col === to.col && from.row === to.row) return []
 
   // A* with a simple binary-heap-free approach. The grid is at most 26×26 =
@@ -96,6 +115,21 @@ export function findPath(
 
   const startKey = key(from.col, from.row)
   const goalKey = key(to.col, to.row)
+
+  // In breakBrick mode, stepping onto a brick cell costs more (5 instead
+  // of 1) — the player must fire to clear it, which takes time + bullets.
+  // This makes A* prefer corridor routes and only dig through walls when no
+  // open path exists, which is exactly the desired behavior.
+  const stepCost = (col: number, row: number): number => {
+    if (!breakBrick) return 1
+    // Check if any sub-block of the 2×2 footprint is brick.
+    for (let dr = 0; dr <= 1; dr++) {
+      for (let dc = 0; dc <= 1; dc++) {
+        if (tileMap.get(col + dc, row + dr) === 'brick') return 5
+      }
+    }
+    return 1
+  }
 
   gScore.set(startKey, 0)
   fScore.set(startKey, manhattan(from.col, from.row, to.col, to.row))
@@ -132,9 +166,10 @@ export function findPath(
     for (const [dc, dr, dir] of STEPS) {
       const nc = cc + dc
       const nr = cr + dr
-      if (!isPassable(tileMap, nc, nr, ignoreWater)) continue
+      if (!isPassable(tileMap, nc, nr, ignoreWater, breakBrick)) continue
       const nk = key(nc, nr)
-      const tentativeG = (gScore.get(currentKey) ?? Infinity) + 1
+      const cost = stepCost(nc, nr)
+      const tentativeG = (gScore.get(currentKey) ?? Infinity) + cost
       if (tentativeG < (gScore.get(nk) ?? Infinity)) {
         cameFrom.set(nk, { parent: currentKey, dir })
         gScore.set(nk, tentativeG)

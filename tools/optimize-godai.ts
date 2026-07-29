@@ -90,7 +90,10 @@ function vectorToParams(vec: number[]): GodAIParams {
 // ============================================================
 
 interface EvalConfig {
+  /** Single stage (legacy) or first of multi-stage set. */
   stage: StageData
+  /** P3.5: multiple stages for aggregate fitness. If empty, uses `stage` only. */
+  stages?: StageData[]
   difficulty: string
   seeds: number[]
   maxTicks: number
@@ -147,76 +150,72 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   let remainingEnemyPenalty = 0
   let gameoverCount = 0
 
-  for (const seed of config.seeds) {
-    try {
-      const result = runSimulation({
-        seed,
-        stage: config.stage,
-        difficulty: config.difficulty,
-        godAIParams: params,
-        maxTicks: config.maxTicks,
-        sampleInterval: 60, // minimal sampling for speed
-      })
+  // P3.5: Determine which stages to evaluate on.
+  const stages = config.stages && config.stages.length > 0 ? config.stages : [config.stage]
+  let n = 0
 
-      const won = result.outcome === 'stage_clear'
-      if (won) {
-        wins++
-        winTicksSum += result.ticks
-      }
-      if (result.finalState.baseAlive) baseSurvived++
-      totalKills += result.finalState.killCount
-      totalTicks += result.ticks
+  for (const stage of stages) {
+    for (const seed of config.seeds) {
+      n++
+      try {
+        const result = runSimulation({
+          seed,
+          stage,
+          difficulty: config.difficulty,
+          godAIParams: params,
+          maxTicks: config.maxTicks,
+          sampleInterval: 60, // minimal sampling for speed
+        })
 
-      // v4.1: Penalize remaining enemies on ALL non-wins, not just timeouts.
-      // This closes the gameover loophole — dying early to avoid timeout
-      // penalty is no longer rewarded.
-      if (!won) {
-        const remaining = ENEMIES_PER_STAGE - result.finalState.killCount
-        remainingEnemyPenalty += remaining * 25
+        const won = result.outcome === 'stage_clear'
+        if (won) {
+          wins++
+          winTicksSum += result.ticks
+        }
+        if (result.finalState.baseAlive) baseSurvived++
+        totalKills += result.finalState.killCount
+        totalTicks += result.ticks
 
-        // Catastrophic failure: <5 kills on ANY non-win (was max_ticks only).
-        if (result.finalState.killCount < 5) {
-          lowKillNonWins++
+        if (!won) {
+          const remaining = ENEMIES_PER_STAGE - result.finalState.killCount
+          remainingEnemyPenalty += remaining * 25
+
+          if (result.finalState.killCount < 5) {
+            lowKillNonWins++
+          }
+
+          if (result.outcome === 'gameover') {
+            gameoverCount++
+          }
         }
 
-        // Extra penalty for gameover — losing the base is worse than
-        // timing out, because timing out means the base was defended.
-        if (result.outcome === 'gameover') {
-          gameoverCount++
-        }
+        perSeed.push({
+          seed,
+          outcome: result.outcome,
+          kills: result.finalState.killCount,
+          ticks: result.ticks,
+          baseAlive: result.finalState.baseAlive,
+        })
+      } catch {
+        perSeed.push({
+          seed,
+          outcome: 'error',
+          kills: 0,
+          ticks: 0,
+          baseAlive: false,
+        })
+        lowKillNonWins++
+        gameoverCount++
+        remainingEnemyPenalty += ENEMIES_PER_STAGE * 25
       }
-
-      perSeed.push({
-        seed,
-        outcome: result.outcome,
-        kills: result.finalState.killCount,
-        ticks: result.ticks,
-        baseAlive: result.finalState.baseAlive,
-      })
-    } catch {
-      // Parameter combination caused a runtime error (e.g. invalid pathfinding).
-      // Penalize heavily — this candidate is invalid.
-      perSeed.push({
-        seed,
-        outcome: 'error',
-        kills: 0,
-        ticks: 0,
-        baseAlive: false,
-      })
-      lowKillNonWins++
-      gameoverCount++
-      remainingEnemyPenalty += ENEMIES_PER_STAGE * 25 // maximum penalty
     }
   }
 
-  const n = config.seeds.length
   const winRate = wins / n
   const baseSurvivalRate = baseSurvived / n
   const avgKills = totalKills / n
   const avgTicks = totalTicks / n
 
-  // Speed bonus: if any wins occurred, reward faster average win time.
-  // A 2000-tick clear gets ~800 bonus; an 18000-tick clear gets ~0.
   const avgWinTicks = wins > 0 ? winTicksSum / wins : config.maxTicks
   const speedBonus = wins > 0 ? Math.max(0, (1 - avgWinTicks / config.maxTicks) * 800) : 0
 
@@ -502,7 +501,7 @@ function optimize(
     `CMA-ES Optimization (IPOP): ${DIM} params, ${state.lambda} pop, ${generations} generations\n`,
   )
   process.stderr.write(
-    `Evaluation: stage "${evalConfig.stage.name}", ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
+    `Evaluation: stages ${(evalConfig.stages ?? [evalConfig.stage]).map((s) => s.name).join(', ')}, ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
   )
   process.stderr.write(
     `Fitness v4.1: win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400\n`,
@@ -704,29 +703,37 @@ if (import.meta.main) {
     return i >= 0 ? process.argv[i + 1] : fallback
   }
 
-  const stageIdx = parseInt(arg('stage', '0')!, 10)
+  const stageIdxs = arg('stages', arg('stage', '0'))!
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
   const difficulty = arg('difficulty', 'classic')!
-  const seedCount = parseInt(arg('seeds', '40')!, 10)
+  const seedCount = parseInt(arg('seeds', '8')!, 10)
   const generations = parseInt(arg('generations', '40')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
   const verbose = process.argv.includes('--verbose')
-  const outputDir = arg('output', '.workbuddy/optimization-v4')
+  const outputDir = arg('output', '.workbuddy/optimization-p3')
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
-  const stage = STAGES[stageIdx]
+  const stages = stageIdxs.map((idx) => STAGES[idx]).filter(Boolean)
 
-  if (!stage) {
-    console.error(`Stage ${stageIdx} not found (0..${STAGES.length - 1})`)
+  if (stages.length === 0) {
+    console.error(`No valid stages found: ${stageIdxs.join(',')}`)
     process.exit(1)
   }
 
-  process.stderr.write(`\nGod AI CMA-ES Optimizer\n`)
+  process.stderr.write(`\nGod AI CMA-ES Optimizer (P3 multi-stage)\n`)
   process.stderr.write(
-    `Stage: ${stage.name} (idx ${stageIdx}) | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
+    `Stages: ${stages.map((s, i) => `S${stageIdxs[i]}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
   )
   process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks}\n`)
 
-  const evalConfig: EvalConfig = { stage, difficulty, seeds, maxTicks }
+  const evalConfig: EvalConfig = {
+    stage: stages[0],
+    stages,
+    difficulty,
+    seeds,
+    maxTicks,
+  }
 
   // Run optimization.
   const result = optimize(evalConfig, generations, verbose)
@@ -736,7 +743,14 @@ if (import.meta.main) {
 
   const summary = {
     timestamp: new Date().toISOString(),
-    config: { stageIdx, stageName: stage.name, difficulty, seeds, generations, maxTicks },
+    config: {
+      stageIdxs,
+      stageNames: stages.map((s) => s.name),
+      difficulty,
+      seeds,
+      generations,
+      maxTicks,
+    },
     searchSpace: SEARCH_SPACE.map((s) => ({
       name: s.name,
       min: s.min,
@@ -786,9 +800,11 @@ if (import.meta.main) {
   )
   process.stderr.write(`Saved all candidates to ${allCandidatesFile}\n`)
 
-  // Run comparison traces.
-  const traceDir = join(outputDir, 'traces')
-  runComparisonTraces(result.bestParams, evalConfig, traceDir)
+  // P3.5: Skip comparison traces for multi-stage (too many traces)
+  if (!stages || stages.length === 1) {
+    const traceDir = join(outputDir, 'traces')
+    runComparisonTraces(result.bestParams, evalConfig, traceDir)
+  }
 
   // Generate optimization log.
   const logLines: string[] = []
@@ -796,7 +812,7 @@ if (import.meta.main) {
   logLines.push(``)
   logLines.push(`**Date**: ${summary.timestamp}`)
   logLines.push(
-    `**Stage**: ${stage.name} (idx ${stageIdx}) | **Difficulty**: ${difficulty} | **Seeds**: ${seeds.join(',')}`,
+    `**Stages**: ${stages.map((s, i) => `S${stageIdxs[i]}(${s.name})`).join(', ')} | **Difficulty**: ${difficulty} | **Seeds**: ${seeds.join(',')}`,
   )
   logLines.push(
     `**Generations**: ${generations} | **Population**: ${result.history[0]?.bestFitness ?? 'N/A'}`,

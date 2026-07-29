@@ -13,9 +13,8 @@ import { STAGES } from '../src/config/stages'
 // outcome/ticks/score/lives/kills/baseAlive/playerLevel.
 //
 // This test is the LIVING guard that resulted from that proof. The
-// baseline below was re-locked after the CMA-ES v3 param tuning
-// (2026-07-28) so it pins the current refactored behavior under the v3
-// params. Any future accidental behavior change in the god/* sub-modules
+// baseline below was re-locked after each behavior change.
+// Any future accidental behavior change in the god/* sub-modules
 // will break it, catching regressions the moment they land. If a change
 // is intentional (e.g. further tuning), re-capture the baseline from the
 // deterministic harness rather than deleting the test.
@@ -33,25 +32,21 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 for P2 anti-camp zone fix + nav-stuck
-// fallback + predictive firing.
-// P2 changes on top of P1:
-// - Anti-camp zone tracking (±1 cell instead of exact cell) — fixes
-//   deadlock where player oscillates between two cells at TANK/CELL
-//   boundary, resetting camp cell each time, preventing anti-camp escape.
-// - Nav-stuck fallback: A* to center → try directions toward center →
-//   any open direction (instead of directMove which re-selects enemy).
-// - Predictive firing (lead the target): pure check (no RNG) for enemy
-//   crossing — fires preemptively when enemy moving perpendicular will
-//   cross bullet path at the right time.
-// Seed 2: gameover→stage_clear (anti-camp fix). Seed 7: clear→gameover
-// (RNG perturbation). Seed 42: lives 5→2. Net: Stage 0 85%→86.7%,
-// Stage 1 95%→100%, Stage 3 50%→66.7%.
+// Baseline re-captured 2026-07-29 for P3 CMA-ES optimized params.
+// P3 changes:
+// - A* dig-through-brick: findPath accepts { breakBrick: true }
+// - followPath: returns direction when blocked by breakable brick
+// - Nav-stuck center deadlock fix: chase enemy when at/near center
+// - Power-up diversion: skip when enemies within 5 cells
+// - CMA-ES multi-stage optimization (S0/S3/S6/S9, 6 seeds, 30 gen)
+//   Key param changes: suboptimalPathProb 0.093→0.038, replanInterval 3→50,
+//   powerupMaxDivertDistance 9→3, maxPlayerDistFromBase 14→19
+// All 8 seeds now stage_clear (previously 2 were max_ticks, 1 was gameover).
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 5056,
-    score: 4200,
+    ticks: 4293,
+    score: 4700,
     lives: 3,
     killCount: 20,
     baseAlive: true,
@@ -59,64 +54,64 @@ const BASELINE: Record<number, Expected> = {
   },
   2: {
     outcome: 'stage_clear',
-    ticks: 6930,
-    score: 4700,
-    lives: 3,
+    ticks: 3417,
+    score: 4200,
+    lives: 4,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 1,
+  },
+  7: {
+    outcome: 'stage_clear',
+    ticks: 6723,
+    score: 4200,
+    lives: 5,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
-  7: {
-    outcome: 'gameover',
-    ticks: 6919,
-    score: 700,
-    lives: 3,
-    killCount: 7,
-    baseAlive: false,
-    playerLevel: 0,
-  },
   42: {
     outcome: 'stage_clear',
-    ticks: 2577,
-    score: 4700,
-    lives: 2,
+    ticks: 2887,
+    score: 4200,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 5622,
-    score: 4700,
-    lives: 4,
+    ticks: 5091,
+    score: 4200,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
   999: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 3400,
-    lives: 3,
-    killCount: 18,
+    outcome: 'stage_clear',
+    ticks: 2973,
+    score: 4700,
+    lives: 2,
+    killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
   12345: {
     outcome: 'stage_clear',
-    ticks: 3665,
-    score: 4700,
+    ticks: 2892,
+    score: 4200,
     lives: 3,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 0,
+    playerLevel: 1,
   },
   55555: {
-    outcome: 'max_ticks',
-    ticks: 36000,
-    score: 3300,
-    lives: 3,
-    killCount: 17,
+    outcome: 'stage_clear',
+    ticks: 3155,
+    score: 4700,
+    lives: 4,
+    killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
