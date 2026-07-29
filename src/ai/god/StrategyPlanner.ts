@@ -4,6 +4,7 @@ import type { Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
 import { pxToCell } from '../../utils/pathfind'
 import { POWERUP_PRIORITY, KIND_THREAT_WEIGHT } from './constants'
+import { enemyCanShootBase } from './SmartThreatModel'
 
 // ============================================================
 // StrategyPlanner — target selection (S6 attack-defense), power-up
@@ -316,7 +317,13 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
     return self.tankCell(best)
   }
 
-  // Base is under threat — find the enemy closest to the base.
+  // Base is under threat — find the most threatening enemy.
+  // Phase A: when smartThreatModel is ON, use defense-priority kind weights
+  // (fast > power > armor > basic) AND a canShootBaseFrom bonus.
+  // canShootBaseFrom gives a HUGE bonus to enemies that have a clear shot
+  // at the base (aligned + no walls in between) — these enemies can
+  // destroy the base with their next bullet and must be prioritized.
+  // When OFF, use the original scoring (byte-identical).
   let bestEnemy: Tank | null = null
   let bestScore = -Infinity
   for (const t of enemies) {
@@ -324,17 +331,29 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
     const distToBase = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
     if (distToBase > self.params.threatRangeCells) continue
 
-    const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
+    // Phase A: defense-priority kind weights when smartThreatModel is ON.
+    const defenseKindWeight =
+      self.params.smartThreatModel > 0
+        ? t.kind === 'fast'
+          ? 4
+          : t.kind === 'power'
+            ? 3
+            : t.kind === 'armor'
+              ? 2
+              : 1
+        : (KIND_THREAT_WEIGHT[t.kind] ?? 1)
     const bonusWeight = t.bonus ? 3 : 0
-    // HUGE bonus for enemies at or below the defense row — critical threat.
-    // Fix Bug 1: urgencyBonus was reversed — (baseRow - tc.row) gave 0 at
-    // baseRow and negative below. Now (tc.row - defenseRow + 1) gives higher
-    // bonus the closer the enemy is to the base.
     const urgencyBonus = tc.row >= defenseRow ? (tc.row - defenseRow + 1) * 100 : 0
-    // Small bonus for enemies in the base row region (rows 20-23)
     const proximityBonus = tc.row >= 20 ? 50 : 0
+    // Phase A: canShootBaseFrom bonus — enemy has a clear shot at the base.
+    // This is the highest-priority target: it can destroy the base NOW.
+    const clearShotBonus = self.params.smartThreatModel > 0 && enemyCanShootBase(self, t) ? 500 : 0
     const score =
-      -distToBase * 10 + (threatWeight + bonusWeight) * 30 + urgencyBonus + proximityBonus
+      -distToBase * 10 +
+      (defenseKindWeight + bonusWeight) * 30 +
+      urgencyBonus +
+      proximityBonus +
+      clearShotBonus
     if (score > bestScore) {
       bestScore = score
       bestEnemy = t

@@ -1618,3 +1618,50 @@ Supporting parameters (all S32-only via override table):
 - Parity baseline re-locked (seed 42 shifted beneficially: 2355→2194 ticks, 3→4 lives).
 
 **Implications:** The `t2aMaxRange` parameter is a general-purpose close-combat control. It defaults to 15 (no change) but can be tuned per-stage for any armor-heavy or high-HP scenario. The S32 result (72.5%@120 seeds) is below the 80% target but represents a structural breakthrough: the core strategy (close combat) directly implements the user's brainstorm and is the first approach to produce a positive delta on S32 after all parameter and structural alternatives were exhausted. Remaining gap (72.5%→80%) is in the base_destroyed tail (21/120) — future work could explore proactive base-wall defense or terrain-aware navigation (D3 from progress doc).
+
+## §44. Smart Base Threat Model — Phase A (Type/Speed/Facing/HP-Aware Scoring)
+
+**Date:** 2026-07-30 · **Type:** AI tuning / structural (data over code) · **Gates:** all three
+
+**Problem:** `isBaseUnderThreat()` (GodAIInput.ts) is type-blind + terrain-blind — it treats a slow 4-HP armor tank the same as a 1-HP fast tank at the same distance. This causes `skipT2aForDefense` to interrupt efficient armor grinding (t2aMaxRange=2 close combat) for non-urgent "threats," and `selectTargetImpl` to target the wrong enemy in defense mode. Root cause of S32's remaining base_destroyed tail (21/120=17.5%).
+
+**Decision:** introduce `smartThreatModel` parameter (default 0=OFF, non-zero=ON). When ON, three behavioral changes (all strict refinements — OFF = byte-identical):
+
+1. **`isBaseUnderThreat()`** → `smartIsBaseUnderThreat()`: returns true if any enemy has `threatScore ≥ smartThreatThreshold`. Score = weighted sum of four features (plan §3.2):
+   - **Speed** (w=0.5): fast=1.0, power=0.6, basic=0.4, armor=0.3 — speed dominates (fast tanks can rush base before player kills them).
+   - **Facing** (w=0.15): dot product of enemy facing dir vs (base−enemy) dir, mapped to [0,1].
+   - **HP** (w=0.1): hp/maxHp — higher HP = harder to neutralize.
+   - **Distance** (w=0.25): `max(0, 1 − distToBase/smartThreatDistRange)` — closer = more urgent.
+
+2. **`selectTargetImpl`** base-threat branch: sort enemies by `threatScore` (descending) instead of the old `−distToBase×10 + (KIND_THREAT_WEIGHT+bonus)×30 + urgencyBonus + proximityBonus`. Naturally prioritizes fast rushers over slow armor.
+
+3. **`skipT2aForDefense`**: replaced by `hasTrueRusherNearBase()` — only interrupts T2a armor grinding when a fast/power tank is heading toward the base within `baseRaceRangeCells`. Slow armor never triggers the skip → armor grinding is preserved.
+
+**Rationale:**
+- MANIFEST §2.4 (data over code): new behavior is entirely parameter-gated, default OFF.
+- MANIFEST §2.7 (Three Gates): more enjoyable (base survives more), simpler (one scoring function replaces ad-hoc box + race checks), respects original (authentic threat prioritization).
+- The speed weight (0.5) is deliberately dominant: armor at 6 cells scores 0.525 (barely above threshold 0.5), while fast at 6 cells scores 0.875. This ensures slow armor doesn't trigger false defense alarms while fast rushers do.
+
+**Rejected alternatives:** keeping the old `isBaseUnderThreat` box + race check and only changing `skipT2aForDefense` — insufficient because `selectTargetImpl` also uses `isBaseUnderThreat` and would still target the wrong enemy. The three changes must be atomic for the smart model to work.
+
+**Update (2026-07-30, post-implementation):** Phase A was implemented and tested extensively. **All variants were REJECTED on S32** — none improved over the 72.5% baseline. The smart model infrastructure (parameters, `SmartThreatModel.ts`, `canShootBaseFrom` predicate, defense-priority kind weights) remains in the codebase, default OFF (byte-identical when OFF), for potential future use. Key findings:
+
+1. **Plan's assumption was wrong**: diagnostic (120 seeds) showed armor(10/19=53%)+power(7/19=37%) are the primary base killers on S32, NOT fast tanks(2/19=10%). The plan's "fast rusher" model doesn't match S32's actual failure mode.
+
+2. **Close-combat fragility**: S32's `t2aMaxRange=2` strategy is fragile — ANY change that modifies target selection, threat detection, or T2a interruption causes `lives_exhausted` to spike (12→27 in the worst variant). The player MUST stay committed to armor grinding; any switching is net-negative.
+
+3. **Timing, not detection, is the bottleneck**: 15/19 base destructions happen before tick 3000 (early game wave). 7/19 happen when the player is 0-5 cells from the base — the player IS there but can't prevent destruction. T8 bullet interception doesn't trigger for the killing bullets because they're fired from close range after protection walls are destroyed.
+
+4. **Variants tested and rejected** (all @120 seeds, S32 Diamond):
+   - Full smart model (isBaseUnderThreat + selectTarget + skipT2a via `hasTrueRusherNearBase`): -20pp (72.5%→52.5%, lives 12→32)
+   - Smart isBaseUnderThreat (time-to-base scoring) + selectTarget: -15pp (base 21→33)
+   - selectTarget only (threatScore replacing old scoring): -7.5pp (base 21→26, lives 12→16)
+   - Defense-priority kind weights only (fast=4,armor=2): -1.7pp (within noise, neutral)
+   - Extended race range for fast tanks (baseRaceRangeCells+4): -10.8pp (base 21→19 ✓, lives 12→27 ✗)
+   - `canShootBaseFrom` bonus (+500 in defense target selection): -2.5pp (base 21→24, lives 12→12)
+   - `t8MaxInterceptDistCells` 8→20: 0pp (T8 doesn't trigger for killing bullets)
+   - Various campTimeoutTicks/navStuckTicks/defenseRowOffset: all ≤0pp
+
+5. **35×20 A/B (defense-priority kind weights)**: mean 86.9%→86.6% (-0.3pp), 0 stages improved, 0 stages regressed beyond noise. The smart model is neutral on all 35 stages.
+
+**Implications for future work:** The plan's Phase B (route/turn-count) and Phase C (interception geometry) are unlikely to help S32 either, because the problem isn't threat detection or target selection — it's response time in the early game wave. A more promising direction would be: (a) early-game defensive positioning (stay closer to base in first 50s), (b) proactive wall defense (detect and reinforce thin base walls), or (c) game-rule changes (base HP in classic mode). All require further investigation.

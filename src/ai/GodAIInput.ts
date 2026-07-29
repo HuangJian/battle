@@ -35,6 +35,7 @@ import {
   canMoveOrBreakImpl,
   canMoveDirImpl,
 } from './god/Navigator'
+import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
 
 /**
  * GodAIInput — a "theoretically optimal player" simulator that implements
@@ -212,6 +213,49 @@ export interface GodAIParams {
    * keeps moving to close the distance.
    */
   t2aMaxRange: number
+
+  // ---- Smart threat model (Phase A, plan/God-AI-Next-Round §3) ----
+  /**
+   * 0=OFF (default), non-zero=ON. When ON, selectTargetImpl base-threat
+   * branch uses type/speed/facing/HP-aware threat scoring to prioritize
+   * fast rushers over slow armor. isBaseUnderThreat() and skipT2aForDefense
+   * are NOT changed (the old box + race check remains for threat detection).
+   * OFF = byte-identical to pre-smart-model behavior.
+   */
+  smartThreatModel: number
+  /**
+   * Minimum threat score [0..1] for an enemy to be considered a base
+   * threat. Default 0.55 — armor at 3 cells scores ~0.5 (not a threat),
+   * fast at 6 cells scores ~0.7 (threat), armor at 1 cell scores ~0.83
+   * (threat).
+   */
+  smartThreatThreshold: number
+  /**
+   * Weight for the time-to-base feature (distToBase / speedFactor) in
+   * threat scoring (default 0.6 — dominant). This combines speed and
+   * distance into "how soon can this enemy reach the base?"
+   */
+  smartThreatSpeedWeight: number
+  /** Weight for enemy facing direction in threat scoring (default 0.2). */
+  smartThreatFacingWeight: number
+  /** Weight for enemy HP in threat scoring (default 0.2). */
+  smartThreatHpWeight: number
+  /**
+   * Time-to-base normalization range (default 12). Enemies whose
+   * timeToBase (= distToBase / speedFactor) ≥ this value get timeScore 0.
+   * Effectively: a fast tank at 12+ cells or an armor at 4+ cells won't
+   * trigger the threat threshold via the time feature alone.
+   */
+  smartThreatDistRange: number
+  /**
+   * Phase A: extra race-check range (cells) for fast/power tanks when
+   * smartThreatModel is ON. Extends the base race range
+   * (baseRaceRangeCells) by this amount for fast/power tanks in the
+   * lower half of the map (row ≥ 10). Default 4 → effective range 15
+   * for fast tanks vs 11 for armor/basic. Detects fast rushers earlier,
+   * giving the player more time to intercept.
+   */
+  smartRushDetectBonus: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -290,6 +334,17 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   damagedArmorBonus: 0,
   // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior).
   t2aMaxRange: 15,
+
+  // Smart threat model (Phase A): default OFF (0). All 35 stages are
+  // byte-identical when OFF. Only stages with smartThreatModel > 0 in
+  // the override table activate the smart scoring.
+  smartThreatModel: 0,
+  smartThreatThreshold: 0.55,
+  smartThreatSpeedWeight: 0.6,
+  smartThreatFacingWeight: 0.2,
+  smartThreatHpWeight: 0.2,
+  smartThreatDistRange: 12,
+  smartRushDetectBonus: 4,
 }
 
 /**
@@ -941,6 +996,16 @@ export class GodAIInput implements InputLike {
       if (enemyDist <= this.params.baseRaceRangeCells) return true
     }
     return false
+  }
+
+  // --- SmartThreatModel (Phase A, plan/God-AI-Next-Round §3) ---
+  /** Threat score for an enemy [0..1]. Higher = more dangerous to base. */
+  threatScore(t: Tank): number {
+    return threatScoreImpl(this, t)
+  }
+  /** Smart isBaseUnderThreat: any enemy with threatScore ≥ threshold. */
+  smartIsBaseUnderThreat(): boolean {
+    return smartIsBaseUnderThreatImpl(this)
   }
 
   scanAhead(

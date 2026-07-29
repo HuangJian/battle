@@ -89,11 +89,19 @@ export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
     //   damagedArmorBonus: 1 — finish damaged armor (damage is permanent)
     //   navStuckTicks: 90 — faster stuck recovery (1.5s vs 3s)
     //
-    // Verified @120 seeds: 43.3% → 72.5% (+29.2pp). Failure mode shift:
-    //   base_destroyed: 43→21, lives_exhausted: 25→12.
+    // Verified @120 seeds: 43.3% → 72.5% (+29.2pp) with close-combat params.
+    //   Failure mode shift: base_destroyed 43→21, lives_exhausted 25→12.
     // guardBandMode (T2a skip) was tested and REJECTED: it causes the
     // player to abandon in-progress armor kills to chase fast tanks,
     // which is strictly worse (50.8% @120 seeds vs 72.5% without).
+    // smartThreatModel (Phase A) was also tested and REJECTED on S32:
+    //   - Full model (isBaseUnderThreat + selectTarget + skipT2a): -20pp
+    //   - selectTarget only (threatScore): -7.5pp
+    //   - Extended race range for fast tanks: -10.8pp (base↓2 but lives↑15)
+    //   Root cause: S32's close-combat strategy is fragile — ANY
+    //   interruption to armor grinding causes lives_exhausted to spike.
+    //   Diagnostic showed armor(10)+power(7) are the primary base killers,
+    //   NOT fast tanks(2) — the plan's 'fast rusher' assumption was wrong.
     campTimeoutTicks: 50,
     antiCampSuppressTicks: 50,
     t2aMaxRange: 2,
