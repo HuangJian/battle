@@ -555,8 +555,10 @@ export class Game {
       this.prevCountdown = 0
     }
 
-    // Auto snapshots — every 30 s of real gameplay (plan §3, §10)
-    if (this.world.state === 'playing') {
+    // Auto snapshots — every 30 s of live gameplay (plan §3, §10).
+    // Guarded by !this.playback: replays drive a synthetic world that
+    // should never trigger persistence side-effects.
+    if (this.world.state === 'playing' && !this.playback) {
       this.snapshots.updateAuto(this.world, dt)
     }
 
