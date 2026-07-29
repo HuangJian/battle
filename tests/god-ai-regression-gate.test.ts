@@ -73,7 +73,7 @@ const TRUTH_WIN_PCT: number[] = [
   86.7, // S29 Concentric
   83.3, // S30 Eagle Nest
   75.0, // S31 Star Fort
-  51.7, // S32 Diamond (known structural hard case — no override works)
+  72.5, // S32 Diamond (override: t2aMaxRange=2 close-combat — 43.3%→72.5% @120 seeds, Round 5)
   83.3, // S33 Battlement
   86.7, // S34 Final Redoubt
 ]
@@ -86,36 +86,32 @@ function stageFloor(idx: number): number {
 }
 
 describe('god-ai-regression-gate', () => {
-  it(
-    'all 35 classic stages meet the P4 R7 tuning floors',
-    () => {
-      let totalWins = 0
-      const failures: string[] = []
-      for (let idx = 0; idx < STAGES.length; idx++) {
-        let wins = 0
-        for (const seed of GATE_SEEDS) {
-          const r = runSimulation({
-            seed,
-            stage: STAGES[idx],
-            difficulty: 'classic',
-            maxTicks: 18000,
-            sampleInterval: 18000,
-          })
-          if (r.outcome === 'stage_clear') wins++
-        }
-        totalWins += wins
-        const floor = stageFloor(idx)
-        const pct = ((wins / GATE_SEEDS.length) * 100).toFixed(0)
-        console.log(
-          `[gate] S${idx} ${STAGES[idx].name}: ${wins}/${GATE_SEEDS.length} (${pct}%) floor=${floor}${wins < floor ? '  <-- BELOW FLOOR' : ''}`,
-        )
-        if (wins < floor) failures.push(`S${idx} ${STAGES[idx].name}: ${wins} < ${floor}`)
+  it('all 35 classic stages meet the P4 R7 tuning floors', () => {
+    let totalWins = 0
+    const failures: string[] = []
+    for (let idx = 0; idx < STAGES.length; idx++) {
+      let wins = 0
+      for (const seed of GATE_SEEDS) {
+        const r = runSimulation({
+          seed,
+          stage: STAGES[idx],
+          difficulty: 'classic',
+          maxTicks: 18000,
+          sampleInterval: 18000,
+        })
+        if (r.outcome === 'stage_clear') wins++
       }
-      const meanPct = ((totalWins / (35 * GATE_SEEDS.length)) * 100).toFixed(1)
-      console.log(`[gate] aggregate: ${totalWins}/700 (${meanPct}%) floor=${AGGREGATE_FLOOR}`)
-      expect(failures).toEqual([])
-      expect(totalWins).toBeGreaterThanOrEqual(AGGREGATE_FLOOR)
-    },
-    600000,
-  )
+      totalWins += wins
+      const floor = stageFloor(idx)
+      const pct = ((wins / GATE_SEEDS.length) * 100).toFixed(0)
+      console.log(
+        `[gate] S${idx} ${STAGES[idx].name}: ${wins}/${GATE_SEEDS.length} (${pct}%) floor=${floor}${wins < floor ? '  <-- BELOW FLOOR' : ''}`,
+      )
+      if (wins < floor) failures.push(`S${idx} ${STAGES[idx].name}: ${wins} < ${floor}`)
+    }
+    const meanPct = ((totalWins / (35 * GATE_SEEDS.length)) * 100).toFixed(1)
+    console.log(`[gate] aggregate: ${totalWins}/700 (${meanPct}%) floor=${AGGREGATE_FLOOR}`)
+    expect(failures).toEqual([])
+    expect(totalWins).toBeGreaterThanOrEqual(AGGREGATE_FLOOR)
+  }, 600000)
 })

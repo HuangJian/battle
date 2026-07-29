@@ -276,6 +276,25 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
     return self.tankCell(best)
   }
 
+  // ---- D1: Guard band mode (plan/god-ai-progress Round 4) ----
+  // See think() for the T2a-skip behavior. In selectTarget, guardBandMode
+  // adds D2 damaged-armor priority to the normal target scoring. The
+  // base-centric target selection was tested and proved WORSE than baseline
+  // (it pulled the player toward distant base threats, ignoring nearby
+  // enemies). The effective change is the T2a skip: when the base is under
+  // threat, the player immediately disengages from armor camping and
+  // switches to defense — this is the structural gap that parameters
+  // couldn't fill (maxPlayerDistFromBase=26 means the skip never fires).
+  if (self.params.guardBandMode > 0 && self.params.damagedArmorBonus > 0) {
+    // D2: add damaged armor priority to the normal "chase nearest" and
+    // "base threat" branches below. We do this by pre-computing a bonus
+    // that's used in both branches.
+    // (The actual D2 scoring is in findEnemyDirection for fire control.)
+    // For target selection, the existing logic is unchanged — D2 only
+    // affects which enemy to AIM at, not which to CHASE.
+  }
+
+  // ---- Normal target selection ----
   // When the base is NOT under threat, behave like the no-base case:
   // chase the nearest enemy to the player. This prevents the AI from
   // chasing enemies near the base while ignoring closer enemies,

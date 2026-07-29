@@ -39,8 +39,14 @@ interface Expected {
 //   - per-stage override table (godai-stage-overrides.ts) now applied by
 //     tools/simulation-runner.ts; Stage 0 (Outpost) has no override, so this
 //     baseline locks the pure R7 defaults.
-// All three are intentional behavior changes — this is the documented
-// re-capture path (run `bun tools/relock-parity.ts` and paste the output).
+// Re-locked 2026-07-29 (Round 5): added t2aMaxRange parameter (default 15 =
+//   AIM_RANGE_CELLS). The new T2a condition `scan.enemy && scan.enemyDist
+//   <= t2aMaxRange` skips camping at enemies beyond 15 cells in edge cases
+//   where scanAhead and findEnemyDirection diverge on alignment. Seed 42
+//   shifted (2355→2194 ticks, 3→4 lives) — a beneficial change. All other
+//   seeds are byte-identical.
+// All are intentional behavior changes — this is the documented re-capture
+// path (run `bun tools/relock-parity.ts` and paste the output).
 // NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
 // game params. Re-run tools/relock-parity.ts after any future intentional
 // tuning to refresh these numbers.
@@ -74,9 +80,9 @@ const BASELINE: Record<number, Expected> = {
   },
   42: {
     outcome: 'stage_clear',
-    ticks: 2355,
+    ticks: 2194,
     score: 4700,
-    lives: 3,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,

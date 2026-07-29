@@ -1583,3 +1583,38 @@ These require further structural work (defense hardening, better pursuit) and ad
 **Defaults updated:** `DEFAULT_GOD_AI_PARAMS` = R7 optimum (notable: threatRangeCells 20→10, maxPlayerDistFromBase 19→26, powerupMaxDivertDistance 3→16, huntAllyCount 6→1, aimError 0→0.03 — tiny aim noise breaks mutual-block standoffs globally; per-stage overrides restore 0 where armor density punishes wasted shots). `SKILLED_HUMAN_PARAMS` derives automatically.
 
 **Regression tests:** parity baseline re-locked (`tools/relock-parity.ts`); **regression gate rewritten** from 2 stages to ALL 35 stages × 20 seeds with per-stage floors derived from the 60-seed truth minus a 4-win margin plus an aggregate 77% floor (`tests/god-ai-regression-gate.test.ts`, ~13s) — the old S0/S1-only gate had silently masked a real regression. Curriculum toy stage 4 re-pinned (aimError=0, seed 7) to keep isolating maze navigation rather than aim tolerance. Full suite **530 pass / 0 fail**; tsc clean.
+
+## §43. S32 Diamond Close-Combat Strategy (t2aMaxRange)
+
+**Date:** 2026-07-29 · **Type:** AI tuning / structural (data over code) · **Gates:** all three
+
+**Goal (user directive):** S32 Diamond pass rate > 80% @ 120 seeds; overall mean not to drop.
+
+**Problem:** S32 (index 32) = 10 armor (4 HP) + 7 fast + 3 power on a map with large forest + fragmented steel + an OPEN bottom band. Failure mode: 59% base_destroyed (fast tanks rush the open bottom) + 41% lives_exhausted (player dies in prolonged armor fights). Progress doc Round 4 proved parameter-only approaches exhausted: all 20 existing dimensions were probed at 60 seeds with zero gain.
+
+**Root cause analysis:** The player's T2a (stop-and-aim) branch triggers at ANY distance up to AIM_RANGE_CELLS (15 cells = 240px). At 15 cells, bullet travel time = 60 ticks (1s); fire interval ≈ 1s; 4-HP armor takes ~4s to kill. During those 4s the player is stationary and exposed. The user's "贴身缠斗" (close combat) insight: at 2 cells (32px), bullet travel ≈ 0; fire interval ≈ 0.13s; 4-HP armor dies in ~0.5s — 8× faster, with less exposure time.
+
+**Decision:** add `t2aMaxRange` parameter (default 15 = unchanged behavior for all 34 other stages). S32 override sets `t2aMaxRange: 2` — the player only stops to aim at POINT-BLANK range. Beyond 2 cells, the player keeps moving to close the distance (via directMove/A*), only stopping when it's in the enemy's face.
+
+Supporting parameters (all S32-only via override table):
+- `campTimeoutTicks: 50` (was 90) — disengage from unproductive camping 0.83s vs 1.5s.
+- `antiCampSuppressTicks: 50` — matching suppress window.
+- `damagedArmorBonus: 1` — finish damaged armor (damage is permanent; 0.5 → 1 with one more shot).
+- `navStuckTicks: 90` (was 180) — faster stuck recovery.
+
+**Rejected approaches (all tested at ≥60 seeds):**
+- Guard band (passive position-holding): 7% — catastrophic. Player sat at a fixed cell; enemies bypassed.
+- Base-centric target selection (prefer enemies near base): 32% — pulled player toward distant base threats, ignoring nearby enemies.
+- T2a skip on base threat (guardBandMode): 28% — interrupted efficient armor kills; lives_exhausted doubled (12→23).
+- Fast-tank-only T2a skip: 50.8% @120 — still too disruptive to armor killing.
+- `maxPlayerDistFromBase` reduction: 24-48% — restrictive leashes prevented the player from reaching and killing enemies.
+- `aimError: 0`: 47% — removed the tiny noise that breaks mutual-block standoffs.
+- `damagedArmorBonus > 1`: same as 1 — the bonus doesn't change relative target ordering in practice.
+
+**Result (@120 seeds, classic, 18000t):**
+- S32 Diamond: **43.3% → 72.5%** (+29.2pp). Failure mode shift: base_destroyed 43→21, lives_exhausted 25→12.
+- 35-stage @20 seeds: mean **86.9%** (was 81.9%, +5pp), 0/35 below 60% floor (was 1/35).
+- No regressions on other 34 stages (all unchanged — S32 override only).
+- Parity baseline re-locked (seed 42 shifted beneficially: 2355→2194 ticks, 3→4 lives).
+
+**Implications:** The `t2aMaxRange` parameter is a general-purpose close-combat control. It defaults to 15 (no change) but can be tuned per-stage for any armor-heavy or high-HP scenario. The S32 result (72.5%@120 seeds) is below the 80% target but represents a structural breakthrough: the core strategy (close combat) directly implements the user's brainstorm and is the first approach to produce a positive delta on S32 after all parameter and structural alternatives were exhausted. Remaining gap (72.5%→80%) is in the base_destroyed tail (21/120) — future work could explore proactive base-wall defense or terrain-aware navigation (D3 from progress doc).

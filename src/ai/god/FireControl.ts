@@ -69,8 +69,18 @@ export function findEnemyDirectionImpl(
     // then nearest among equal threat).
     const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
     const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
-    const hpFactor = t.hp / (t.maxHp || 1) // prefer enemies we can finish
-    const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100
+    // D2: when damagedArmorBonus > 0, add a bonus for finishing damaged
+    // armor tanks. The base hpFactor (hp/maxHp) preferentially weights
+    // full-HP targets — which is backwards for armor-heavy stages where
+    // spreading damage across 4 fresh armor tanks kills none. The bonus
+    // inverts the priority: a 1/4-HP armor gets damagedArmorBonus×1000
+    // extra, making the AI commit to the kill.
+    const hpFactor = t.hp / (t.maxHp || 1)
+    const damagedBonus =
+      self.params.damagedArmorBonus > 0 && t.maxHp > 1
+        ? (1 - hpFactor) * self.params.damagedArmorBonus * 1000
+        : 0
+    const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100 + damagedBonus
 
     if (score > bestScore) {
       bestScore = score

@@ -19,7 +19,9 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : fallback
 }
 
-const stageIdxs = arg('stages', '6,14,18,32')!.split(',').map((s) => parseInt(s, 10))
+const stageIdxs = arg('stages', '6,14,18,32')!
+  .split(',')
+  .map((s) => parseInt(s, 10))
 const seedCount = parseInt(arg('seeds', '20')!, 10)
 const paramsFile = arg('params', '')
 const maxTicks = 18000

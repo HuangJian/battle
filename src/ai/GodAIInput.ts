@@ -179,6 +179,39 @@ export interface GodAIParams {
    * pursuit loops where the player chases a faster enemy indefinitely.
    */
   navStuckTicks: number
+
+  // ---- D1: Guard band mode (plan/god-ai-progress Round 4) ----
+  /**
+   * D1: 0=off, 1=on. When on, the player stays in a horizontal band above
+   * the base, engaging enemies that enter the band rather than chasing
+   * across the map. Designed for armor-heavy stages with an open bottom
+   * (S32 Diamond): armor tanks are slow and must approach the player,
+   * giving close-range fire rate (kills 4-HP armor faster); fast tanks
+   * are intercepted before reaching the base.
+   */
+  guardBandMode: number
+  /** D1: the guard row (player patrols at this row when idle). */
+  guardBandRow: number
+  /** D1: half-width of the patrol zone (cols from base col). */
+  guardBandHalfWidth: number
+  /**
+   * D2: score bonus for targeting damaged armor tanks. When > 0, the AI
+   * prefers finishing an armor tank that has already taken damage, avoiding
+   * the "spread damage across 4 full-HP armor" trap where each gets 1-2
+   * hits but none dies. Damage is persistent (HP doesn't regen), so
+   * finishing a damaged tank is strictly better than starting a new one.
+   */
+  damagedArmorBonus: number
+  /**
+   * Close-combat T2a range: max distance (in cells) at which the player
+   * stops to aim-and-fire at an enemy in the same row/col. Default 15
+   * (AIM_RANGE_CELLS — unchanged behavior). When set lower (e.g. 5), the
+   * player only stops at POINT-BLANK range, maximizing fire rate against
+   * high-HP armor tanks (bullet travel time ≈ 0 → kills 4-HP armor in
+   * ~0.5s instead of ~4s at long range). Beyond this range, the player
+   * keeps moving to close the distance.
+   */
+  t2aMaxRange: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -247,6 +280,16 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // at the same cell) for 3 seconds of navigating, force a roam to the map
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
+
+  // D1/D2: Guard band mode + damaged armor priority. Default OFF (0) so
+  // all 34 other stages are byte-identical. Only the S32 override enables
+  // these — regression-safe by construction.
+  guardBandMode: 0,
+  guardBandRow: 20,
+  guardBandHalfWidth: 7,
+  damagedArmorBonus: 0,
+  // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior).
+  t2aMaxRange: 15,
 }
 
 /**
@@ -574,17 +617,28 @@ export class GodAIInput implements InputLike {
     // P1: Skip T2a when the base is under threat and the player is too far
     // from the base. Camping far from the base while enemies approach it
     // was the #1 cause of base_destroyed gameovers.
+    //
+    // D1 (guard band mode): when enabled, skip T2a on fast/power tank
+    // threats near the base ONLY (not armor — armor is slow and can wait).
+    // This is the targeted version of the guard band: the player camps at
+    // armor for efficient point-blank kills, but the instant a fast tank
+    // approaches the base, it disengages to intercept. The previous
+    // untargeted version (any base threat) was too aggressive and caused
+    // the player to disengage from armor too often, increasing deaths.
+    const fastThreat = this.params.guardBandMode > 0 && this.hasFastThreatNearBase()
+
     const skipT2aForDefense =
       this.hasBase &&
-      this.isBaseUnderThreat() &&
-      Math.abs(this.playerCell().col - BASE_POS.col) +
-        Math.abs(this.playerCell().row - BASE_POS.row) >
-        this.params.maxPlayerDistFromBase
+      (fastThreat ||
+        (this.isBaseUnderThreat() &&
+          Math.abs(this.playerCell().col - BASE_POS.col) +
+            Math.abs(this.playerCell().row - BASE_POS.row) >
+            this.params.maxPlayerDistFromBase))
 
     if (aimDir && this._antiCampSuppress <= 0 && !skipT2aForDefense) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
-      if (scan.enemy) {
+      if (scan.enemy && scan.enemyDist <= this.params.t2aMaxRange) {
         // Track camping duration in a ZONE (±1 cell), not exact cell.
         // P2.1fix: the old exact-cell check was defeated by sub-cell
         // oscillation — the player bounces between two adjacent cells
@@ -841,9 +895,7 @@ export class GodAIInput implements InputLike {
     // is dead/respawning, treat any near-base enemy as a threat.
     const p = this.world.player
     const pc = p ? this.playerCell() : null
-    const playerDistToBase = pc
-      ? Math.abs(pc.col - bc) + Math.abs(pc.row - br)
-      : Infinity
+    const playerDistToBase = pc ? Math.abs(pc.col - bc) + Math.abs(pc.row - br) : Infinity
     // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
     // if think() hasn't populated it yet — should never happen in normal flow).
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
@@ -863,6 +915,30 @@ export class GodAIInput implements InputLike {
       ) {
         return true
       }
+    }
+    return false
+  }
+
+  /**
+   * D1: Check if any fast/power tank is near the base (within the existing
+   * threat detection zone). Used by the T2a skip to decide whether the
+   * player should disengage from armor camping. Only checks fast/power
+   * kinds — armor tanks are slow and don't require immediate disengagement.
+   */
+  hasFastThreatNearBase(): boolean {
+    if (!this.hasBase) return false
+    const bc = BASE_POS.col
+    const br = BASE_POS.row
+    const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
+    for (const t of list) {
+      if (!t.alive || t.spawnTimer > 0) continue
+      if (t.kind !== 'fast' && t.kind !== 'power') continue
+      const tc = this.tankCell(t)
+      // Static box: within 3 cols of base AND row >= 18
+      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true
+      // Race check: within baseRaceRangeCells of base
+      const enemyDist = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
+      if (enemyDist <= this.params.baseRaceRangeCells) return true
     }
     return false
   }

@@ -71,6 +71,35 @@ export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
     replanInterval: 30,
     suboptimalPathProb: 0.05,
   },
+  Diamond: {
+    // S32 (index 32): 10 armor (4 HP) + 7 fast + 3 power on a map with
+    // large forest + fragmented steel + an OPEN bottom band.
+    //
+    // Core strategy: CLOSE COMBAT (贴身缠斗). The player only stops to
+    // aim at enemies within 2 cells (32px), maximizing fire rate against
+    // 4-HP armor. At point-blank, bullet travel time ≈ 0, so the player
+    // kills armor in ~0.5s instead of ~4s at long range. Faster kills =
+    // less exposure = fewer deaths AND more time to respond to base
+    // threats between targets.
+    //
+    // Parameters:
+    //   t2aMaxRange: 2 — point-blank stop-and-aim
+    //   campTimeoutTicks: 50 — shorter unproductive camp (0.83s vs 1.5s)
+    //   antiCampSuppressTicks: 50 — matching camp suppress
+    //   damagedArmorBonus: 1 — finish damaged armor (damage is permanent)
+    //   navStuckTicks: 90 — faster stuck recovery (1.5s vs 3s)
+    //
+    // Verified @120 seeds: 43.3% → 72.5% (+29.2pp). Failure mode shift:
+    //   base_destroyed: 43→21, lives_exhausted: 25→12.
+    // guardBandMode (T2a skip) was tested and REJECTED: it causes the
+    // player to abandon in-progress armor kills to chase fast tanks,
+    // which is strictly worse (50.8% @120 seeds vs 72.5% without).
+    campTimeoutTicks: 50,
+    antiCampSuppressTicks: 50,
+    t2aMaxRange: 2,
+    damagedArmorBonus: 1,
+    navStuckTicks: 90,
+  },
 }
 
 /**

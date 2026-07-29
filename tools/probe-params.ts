@@ -38,9 +38,7 @@ if (baseFile) {
   base = { ...DEFAULT_GOD_AI_PARAMS, ...(raw.bestParams ?? raw) }
 }
 
-const variants: Array<{ label: string; params: GodAIParams }> = [
-  { label: 'BASE', params: base },
-]
+const variants: Array<{ label: string; params: GodAIParams }> = [{ label: 'BASE', params: base }]
 for (const spec of variantsSpec.split(';')) {
   if (!spec.trim()) continue
   const overrides: Record<string, number> = {}

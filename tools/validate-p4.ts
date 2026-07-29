@@ -46,7 +46,14 @@ async function main(): Promise<void> {
   const tasks = []
   for (let s = 0; s < STAGES.length; s++) {
     for (const seed of SEEDS) {
-      tasks.push({ id: tasks.length, seed, stage: STAGES[s], difficulty: 'classic', params, maxTicks: MAX_TICKS })
+      tasks.push({
+        id: tasks.length,
+        seed,
+        stage: STAGES[s],
+        difficulty: 'classic',
+        params,
+        maxTicks: MAX_TICKS,
+      })
     }
   }
 
@@ -79,7 +86,15 @@ async function main(): Promise<void> {
       if (r.ok && r.outcome === 'max_ticks') timeout++
     }
     const n = SEEDS.length
-    perStage.push({ idx: s, name: STAGES[s].name, winRate: wins / n, avgKills: kills / n, gameovers: go, timeouts: timeout, baseAlive: baseAlive / n })
+    perStage.push({
+      idx: s,
+      name: STAGES[s].name,
+      winRate: wins / n,
+      avgKills: kills / n,
+      gameovers: go,
+      timeouts: timeout,
+      baseAlive: baseAlive / n,
+    })
     totalWins += wins
   }
 
@@ -96,15 +111,23 @@ async function main(): Promise<void> {
     )
   }
 
-  console.log(`\nMean win rate: ${(mean * 100).toFixed(1)}%  (target > ${MEAN_TARGET * 100}%)  -> ${mean > MEAN_TARGET ? 'PASS' : 'FAIL'}`)
-  console.log(`Stages below floor ${FLOOR * 100}%: ${belowFloor.length} / ${STAGES.length}  -> ${belowFloor.length === 0 ? 'PASS' : 'FAIL'}`)
+  console.log(
+    `\nMean win rate: ${(mean * 100).toFixed(1)}%  (target > ${MEAN_TARGET * 100}%)  -> ${mean > MEAN_TARGET ? 'PASS' : 'FAIL'}`,
+  )
+  console.log(
+    `Stages below floor ${FLOOR * 100}%: ${belowFloor.length} / ${STAGES.length}  -> ${belowFloor.length === 0 ? 'PASS' : 'FAIL'}`,
+  )
   if (belowFloor.length > 0) {
-    console.log(`  below floor: ${belowFloor.map((s) => `S${s.idx}(${(s.winRate * 100).toFixed(0)}%)`).join(', ')}`)
+    console.log(
+      `  below floor: ${belowFloor.map((s) => `S${s.idx}(${(s.winRate * 100).toFixed(0)}%)`).join(', ')}`,
+    )
   }
   console.log(`Stages below mean ${MEAN_TARGET * 100}%: ${belowMean.length} / ${STAGES.length}`)
 
   // Emit machine-readable JSON to stdout (for downstream tooling).
-  process.stdout.write(`\n__JSON__${JSON.stringify({ mean, floor: FLOOR, meanTarget: MEAN_TARGET, belowFloor: belowFloor.map((s) => s.idx), perStage })}__JSON__\n`)
+  process.stdout.write(
+    `\n__JSON__${JSON.stringify({ mean, floor: FLOOR, meanTarget: MEAN_TARGET, belowFloor: belowFloor.map((s) => s.idx), perStage })}__JSON__\n`,
+  )
 }
 
 main()
