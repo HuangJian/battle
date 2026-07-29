@@ -26,18 +26,25 @@ export type PlaybackSpeed = 1 | 1.5 | 2 | 4
  */
 const MAX_STEPS_PER_FRAME = 8
 
+/** Capture a keyframe every N simulation ticks. */
+const KEYFRAME_INTERVAL = 60 // 1 second at 60fps
+
 export type PlaybackPhase = 'playing' | 'paused' | 'ended'
 
 export class PlaybackController {
-  private replay: Replay
+  private _replay: Replay
   private simulation: Simulation | null = null
   private input: ReplayInput | null = null
   private speed: PlaybackSpeed = 1
   private accumulator: number = 0
   private phase: PlaybackPhase = 'playing'
 
+  /** Pre-computed thumbnail keyframes: frame → ImageData. */
+  private _keyframes: Map<number, ImageData> = new Map()
+  private _keyframeInterval = KEYFRAME_INTERVAL
+
   constructor(replay: Replay) {
-    this.replay = replay
+    this._replay = replay
   }
 
   /**
@@ -50,12 +57,106 @@ export class PlaybackController {
    */
   start(world: World, simulation: Simulation): void {
     this.simulation = simulation
-    restoreWorld(world, this.replay.initialSnapshot)
-    this.input = new ReplayInput(this.replay.frames)
+    restoreWorld(world, this._replay.initialSnapshot)
+    this.input = new ReplayInput(this._replay.frames)
     simulation.input = this.input // swap input source
     world.state = 'playing'
     this.phase = 'playing'
     this.accumulator = 0
+  }
+
+  /**
+   * Pre-compute thumbnail keyframes for instant hover preview.
+   * Replays the entire simulation once, capturing the canvas at regular
+   * intervals. Should be called after start() and before any hover.
+   *
+   * @param world   The game world (will be temporarily modified and restored)
+   * @param simulation The simulation engine
+   * @param renderFn   Renders the world to the main canvas (for capture)
+   * @param captureFn  Captures a 160×160 ImageData from the canvas
+   * @param onProgress Called with (current, total) during build for progress UI
+   */
+  buildKeyframes(
+    world: World,
+    simulation: Simulation,
+    renderFn: (w: World) => void,
+    captureFn: () => ImageData,
+    onProgress?: (current: number, total: number) => void,
+  ): void {
+    this._keyframes.clear()
+    if (!this.input) return
+
+    const totalFrames = this.input.totalFrames
+    // Adaptive interval: for very long replays, space keyframes further apart
+    // to keep memory bounded (~300 keyframes max).
+    this._keyframeInterval = Math.max(KEYFRAME_INTERVAL, Math.floor(totalFrames / 300))
+
+    // Save current playback state
+    const savedPhase = this.phase
+    const savedAccum = this.accumulator
+    const currentFrame = Math.floor(this.input.progress * totalFrames)
+
+    // Restore world from initial snapshot
+    restoreWorld(world, this._replay.initialSnapshot)
+    const buildInput = new ReplayInput(this._replay.frames)
+    simulation.input = buildInput
+
+    // Replay the entire simulation and capture keyframes
+    let lastCapturedFrame = -this._keyframeInterval // force frame 0 capture
+    for (let frame = 0; frame < totalFrames; frame++) {
+      simulation.tick()
+      buildInput.advance()
+
+      if (frame - lastCapturedFrame >= this._keyframeInterval || frame === totalFrames - 1) {
+        // Render and capture
+        renderFn(world)
+        this._keyframes.set(frame, captureFn())
+        lastCapturedFrame = frame
+        onProgress?.(frame, totalFrames)
+      }
+    }
+
+    // Restore to current playback position
+    restoreWorld(world, this._replay.initialSnapshot)
+    const restoredInput = new ReplayInput(this._replay.frames)
+    restoredInput.seekTo(currentFrame)
+    this.input = restoredInput
+    simulation.input = restoredInput
+    for (let i = 0; i < currentFrame; i++) {
+      simulation.tick()
+    }
+    this.phase = savedPhase
+    this.accumulator = savedAccum
+  }
+
+  /**
+   * Get a pre-computed thumbnail for the given progress (0..1).
+   * Returns the nearest keyframe's ImageData, or null if no keyframes exist.
+   */
+  getThumbnailAt(progress: number): ImageData | null {
+    if (this._keyframes.size === 0 || !this.input) return null
+    const targetFrame = Math.floor(progress * this.input.totalFrames)
+
+    // Find the nearest keyframe ≤ targetFrame
+    let bestFrame = 0
+    for (const frame of this._keyframes.keys()) {
+      if (frame <= targetFrame) {
+        bestFrame = frame
+      } else {
+        break // keys are inserted in order
+      }
+    }
+    return this._keyframes.get(bestFrame) ?? null
+  }
+
+  /** Number of pre-computed keyframes. */
+  get keyframeCount(): number {
+    return this._keyframes.size
+  }
+
+  /** Clear keyframes (e.g. on exit). */
+  clearKeyframes(): void {
+    this._keyframes.clear()
   }
 
   /**
@@ -95,6 +196,28 @@ export class PlaybackController {
   }
 
   /**
+   * Seek to a specific progress (0..1). Restores the world from the initial
+   * snapshot, then fast-forwards to the target frame. Pauses after seek.
+   */
+  seekTo(world: World, simulation: Simulation, progress: number): void {
+    if (!this.input) return
+    const targetFrame = Math.floor(progress * this.input.totalFrames)
+    // Restore world from initial snapshot
+    restoreWorld(world, this._replay.initialSnapshot)
+    // Re-create ReplayInput from frames and seek to target
+    this.input = new ReplayInput(this._replay.frames)
+    this.input.seekTo(targetFrame)
+    simulation.input = this.input
+    // Fast-forward: run simulation ticks to replay up to the target frame
+    for (let i = 0; i < targetFrame; i++) {
+      simulation.tick()
+    }
+    // Pause after seek
+    this.phase = 'paused'
+    this.accumulator = 0
+  }
+
+  /**
    * Exit playback. Restores the real Input and cleans up.
    * Game calls this to stop playback.
    */
@@ -117,6 +240,11 @@ export class PlaybackController {
 
   get currentSpeed(): PlaybackSpeed {
     return this.speed
+  }
+
+  /** Access the underlying replay data. */
+  get replay(): Replay {
+    return this._replay
   }
 
   /** Progress through the replay (0..1). */

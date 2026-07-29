@@ -73,6 +73,16 @@ export class ReplayInput implements InputLike {
     this.cursor++
   }
 
+  /** Seek to a specific frame index. */
+  seekTo(frameIndex: number): void {
+    this.cursor = Math.max(0, Math.min(frameIndex, this.frames.length))
+  }
+
+  /** Total number of frames. */
+  get totalFrames(): number {
+    return this.frames.length
+  }
+
   /** Progress through the replay (0..1). */
   get progress(): number {
     return this.frames.length > 0 ? this.cursor / this.frames.length : 1

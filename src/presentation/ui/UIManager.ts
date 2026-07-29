@@ -353,7 +353,7 @@ export class UIManager {
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
     this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
-    
+
     // Replay Controller (video player style)
     this.replayController = new ReplayController()
     this.replayController.hide()

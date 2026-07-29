@@ -1249,11 +1249,11 @@ export class Game {
         this.playback.togglePause()
         this.presentation.ui.setReplayMode(true, this.playback.isPaused)
       },
-      onSeek: (_progress: number) => {
-        // Seeking is not supported yet — reset to start as fallback
+      onSeek: (progress: number) => {
         if (!this.playback) return
-        this.playback.togglePause()
-        this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+        this.playback.seekTo(this.world, this.simulation, progress)
+        this.presentation.ui.setReplayMode(true, true)
+        this.presentation.markNeedsRender()
       },
       onSpeedChange: (speed: number) => {
         this.setPlaybackSpeed(speed as import('../replay/PlaybackController').PlaybackSpeed)
@@ -1262,8 +1262,67 @@ export class Game {
         this.stopPlayback()
         this.resetToMenu()
       },
+      onReplayAgain: () => {
+        // Replay the same replay from the beginning
+        if (!this.playback) return
+        const replay = this.playback.replay
+        this.stopPlayback()
+        if (replay) this.startPlayback(replay)
+      },
+      onBackToMenu: () => {
+        this.stopPlayback()
+        this.resetToMenu()
+      },
+      onProgressHover: (progress: number) => {
+        // Instant thumbnail from pre-computed keyframes — no simulation replay
+        if (!this.playback || this.playback.isEnded) return
+        const thumbData = this.playback.getThumbnailAt(progress)
+        if (thumbData) {
+          const thumbCanvas = this.presentation.ui.replayController.getThumbnailCanvas()
+          const ctx = thumbCanvas.getContext('2d')
+          if (ctx) {
+            ctx.putImageData(thumbData, 0, 0)
+          }
+        }
+      },
+      onHoverStart: () => {
+        /* no-op: keyframes are pre-computed at playback start */
+      },
+      onProgressHoverEnd: () => {
+        /* no-op: keyframes are pre-computed at playback start */
+      },
     })
+    // Pre-compute thumbnail keyframes for instant hover preview
+    this.buildThumbnailKeyframes()
     return true
+  }
+
+  /**
+   * Build thumbnail keyframes for the current replay by replaying the
+   * simulation once and capturing the canvas at regular intervals.
+   * Runs synchronously — the brief freeze is acceptable for instant hover.
+   */
+  private buildThumbnailKeyframes(): void {
+    if (!this.playback) return
+    this.playback.buildKeyframes(
+      this.world,
+      this.simulation,
+      (w) => {
+        if (this.presentation.shouldRender(w)) {
+          this.presentation.render(w, 0)
+        }
+      },
+      () => {
+        // Capture 160×160 thumbnail from the main canvas
+        const canvas = this.presentation.ui.canvas
+        const tmpCanvas = document.createElement('canvas')
+        tmpCanvas.width = 160
+        tmpCanvas.height = 160
+        const ctx = tmpCanvas.getContext('2d')!
+        ctx.drawImage(canvas, 0, 0, 160, 160)
+        return ctx.getImageData(0, 0, 160, 160)
+      },
+    )
   }
 
   /**
@@ -1280,14 +1339,45 @@ export class Game {
   }
 
   /**
-   * The replay consumed all frames — leave playback cleanly. The replay
-   * world must never fall through into live play (C2): return to the menu,
-   * which resets world + presentation + recorder in one place.
+   * The replay consumed all frames — stop playback but stay on the last frame.
+   * The controller stays visible so the user can scrub back or exit manually.
+   * We keep the rAF loop alive by NOT entering idle mode (playback acts as
+   * a sentinel), so the canvas keeps rendering the final frame.
    */
   private finishPlayback(): void {
-    this.stopPlayback()
-    this.resetToMenu()
+    if (!this.playback) return
+    const replay = this.playback.replay
+    // Exit the playback controller but keep it as a sentinel so scheduleFrame()
+    // keeps the rAF loop alive (the world may be in a LOW_POWER state like
+    // 'gameover' which would otherwise stop the loop).
+    this.playback.exit(this.simulation, this.input)
+    // Hide the REPLAY badge but keep the controller visible (persistent mode)
+    this.presentation.ui.setReplayMode(false)
+    // Populate end overlay with replay metadata
+    if (replay) {
+      const m = replay.metadata
+      const stageLabel = `Stage ${String(m.stage + 1).padStart(2, '0')}: ${m.stageName}`
+      const resultLabel = replay.type === 'victory' ? 'VICTORY' : 'DEFEAT'
+      const durationSec = Math.floor(replay.durationMs / 1000)
+      const durMin = Math.floor(durationSec / 60)
+      const durSec = durationSec % 60
+      const durationStr = `${durMin}:${String(durSec).padStart(2, '0')}`
+      const detailParts = [
+        resultLabel,
+        `Score: ${String(m.score).padStart(6, '0')}`,
+        durationStr,
+        `Kills: ${m.killCount}/${m.enemiesTotal}`,
+      ]
+      this.presentation.ui.replayController.setEndMetadata({
+        title: stageLabel,
+        details: detailParts.join('  ·  '),
+      })
+    }
+    this.presentation.ui.replayController.showPersistent()
+    this.presentation.markNeedsRender()
     this.presentation.ui.notify('Replay finished')
+    // DO NOT null out this.playback — it acts as a sentinel to keep the loop alive.
+    // The loop will continue to render the final frame without ticking.
   }
 
   /**
@@ -1317,7 +1407,6 @@ export class Game {
     if (!this.playback || this.playback.currentSpeed === speed) return
     this.playback.setSpeed(speed)
     this.presentation.ui.setReplaySpeed(speed)
-    this.presentation.ui.notify(`Replay speed ×${speed}`)
   }
 
   /** Wire the Replay Browser + Control Center replay entry. */
