@@ -164,3 +164,42 @@
 ---
 
 > 本报告由工程保障团队 AI 协作生成，关键决策请由人类工程负责人复核。
+
+---
+
+## ➕ 追加：D — 调参评估环节 Worker 池并行化（2026-07-29 下午）
+
+微优化之后的最大机会不在单局仿真，而在**调参主循环是单线程串行**（`optimize-godai.ts` 逐候选逐 seed 顺序跑）。CMA-ES 每代 λ 个候选相互独立（每局 fresh World + 种子 RNG，零共享状态——AGENTS §2.2/§2.3 架构红利），是 embarrassingly parallel 场景。
+
+### 实现
+
+| 文件 | 作用 |
+|---|---|
+| `tools/sim-worker.ts` | Worker 入口：单局仿真任务进 → 只回传 `outcome/ticks/killCount/baseAlive`（events/metrics 本就被 fitness 丢弃，省序列化） |
+| `tools/sim-pool.ts` | `SimWorkerPool`：默认 **物理核 − 1** 个 worker（留 1 核给主线程 + 系统），`SIM_POOL_WORKERS` 可覆写；结果按任务 id 落位回序 |
+| `tools/optimize-godai.ts` | 聚合逻辑抽成共享 `aggregateEval(records)`；串行 `evaluateParams`（参考路径，`--serial`）与并行 `evaluateCandidatesParallel` 共用同一聚合代码 |
+| `tools/perf/probe-parallel-parity.ts` | 等价性探针：固定种子生成候选集，串行 vs 并行全量 `EvalResult`（含 fitness 浮点、perSeed 明细）JSON 逐字节比对 + 提速测量 |
+
+### 确定性等价证明
+
+- 任务编号 = 候选主序 × (stage-major, seed-minor) —— 与串行三层循环完全同序；结果按 id 回序后每候选 records 顺序不变 ⇒ **浮点累加顺序不变 ⇒ fitness 逐字节一致**。
+- 每局仿真是 (seed, stage, difficulty, params) 的纯函数，跑在哪个线程、何时跑不影响结果。
+- 探针实测：**16 候选 × 8 seed，mismatches=0，PARITY OK**（多轮、多 worker 数配置下均 0 mismatch）。
+- 全量 `bun test`：**531 pass / 0 fail**。
+
+### Worker 数标定（本机 i7-4770HQ，4 物理核/8 逻辑核）
+
+| workers | speedup（16 cand × 8 seed，warmed） |
+|---|---|
+| 2 | 1.83x |
+| **3（=物理核−1，默认）** | **2.40x**（多轮 2.0–2.4x；一轮受热节流干扰测得 4.71x 偏高，弃用） |
+| 4 | 1.55–2.28x（不稳定） |
+| 6–7 | 1.44–1.70x（**劣化**） |
+
+**关键发现：超线程 worker 是负收益。** 仿真是缓存敏感的紧凑循环，同物理核的 HT 兄弟线程互抢 L1/L2，>物理核−1 的并行度反而变慢。故默认取 `hw.physicalcpu − 1`（macOS 下 `sysctl` 探测，其余平台退化为逻辑核数−1 的保守近似——现代无 HT 的 Apple Silicon 上 `cpus().length` 即物理核）。本机热节流明显（2014 老机），长调参跑建议注意散热。
+
+### 叠加总效果（对"跑很多很多遍"的调参工作流）
+
+- 单局微优化（A+B）：perTick 0.052 → 0.020ms（**−62%**）
+- 评估并行化（D）：再 **×2.0–2.4**（本机 3 worker；物理核更多的机器收益线性更高）
+- 合计吞吐：**约 5–6 倍**于优化前，且每一步都有逐字节等价证明。

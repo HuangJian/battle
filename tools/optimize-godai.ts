@@ -13,11 +13,18 @@
  * Usage:
  *   bun tools/optimize-godai.ts --generations 30 --seeds 5
  *   bun tools/optimize-godai.ts --stage 0 --difficulty classic --generations 50
+ *
+ * Evaluation runs in parallel on a Bun Worker pool (physical cores − 1;
+ * override with SIM_POOL_WORKERS). Results are byte-identical to serial —
+ * see tools/perf/probe-parallel-parity.ts. Use --serial to force the
+ * single-threaded reference path.
  */
 
 import { STAGES } from '../src/config/stages'
 import { ENEMIES_PER_STAGE } from '../src/constants'
 import { runSimulation } from './simulation-runner'
+import { SimWorkerPool } from './sim-pool'
+import type { SimTask } from './sim-worker'
 import { traceSimulation, analyzeTrace } from './decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import type { StageData } from '../src/types'
@@ -43,7 +50,7 @@ interface ParamSpec {
 // best known operating point and explores outward.
 // Init values synced with DEFAULT_GOD_AI_PARAMS (2026-07-28 v3 results).
 // Ranges widened where the optimizer previously hit bounds.
-const SEARCH_SPACE: ParamSpec[] = [
+export const SEARCH_SPACE: ParamSpec[] = [
   { name: 'reactionDelay', min: 0, max: 6, isInteger: true, init: 0, stepFrac: 0.25 },
   { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0.0024, stepFrac: 0.3 },
   { name: 'suboptimalPathProb', min: 0, max: 0.2, isInteger: false, init: 0.062, stepFrac: 0.3 },
@@ -71,7 +78,7 @@ function paramsToVector(params: GodAIParams): number[] {
 }
 
 /** Convert a flat number array back to a GodAIParams object, with clipping and rounding. */
-function vectorToParams(vec: number[]): GodAIParams {
+export function vectorToParams(vec: number[]): GodAIParams {
   const params = { ...DEFAULT_GOD_AI_PARAMS }
   for (let i = 0; i < DIM; i++) {
     const spec = SEARCH_SPACE[i]
@@ -89,7 +96,7 @@ function vectorToParams(vec: number[]): GodAIParams {
 // Fitness Evaluation
 // ============================================================
 
-interface EvalConfig {
+export interface EvalConfig {
   /** Single stage (legacy) or first of multi-stage set. */
   stage: StageData
   /** P3.5: multiple stages for aggregate fitness. If empty, uses `stage` only. */
@@ -99,7 +106,7 @@ interface EvalConfig {
   maxTicks: number
 }
 
-interface EvalResult {
+export interface EvalResult {
   fitness: number
   winRate: number
   baseSurvivalRate: number
@@ -139,7 +146,23 @@ interface EvalResult {
  *      worse than timing out, because timing out means the base was defended.
  *   4. speedBonus (800) and baseSurvivalRate (200) retained from v4.
  */
-function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
+/**
+ * One simulation record — the exact fields the fitness aggregation consumes.
+ * Produced either serially (evaluateParams) or by the worker pool
+ * (evaluateGenerationParallel); aggregation is shared so both paths yield
+ * byte-identical EvalResults (same record order ⇒ same float summation order).
+ */
+interface RunRecord {
+  seed: number
+  ok: boolean
+  outcome: string
+  ticks: number
+  killCount: number
+  baseAlive: boolean
+}
+
+/** Aggregate run records (stage-major, seed-minor order) into an EvalResult. */
+function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
   const perSeed: EvalResult['perSeed'] = []
   let wins = 0
   let baseSurvived = 0
@@ -149,66 +172,48 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   let winTicksSum = 0
   let remainingEnemyPenalty = 0
   let gameoverCount = 0
-
-  // P3.5: Determine which stages to evaluate on.
-  const stages = config.stages && config.stages.length > 0 ? config.stages : [config.stage]
   let n = 0
 
-  for (const stage of stages) {
-    for (const seed of config.seeds) {
-      n++
-      try {
-        const result = runSimulation({
-          seed,
-          stage,
-          difficulty: config.difficulty,
-          godAIParams: params,
-          maxTicks: config.maxTicks,
-          sampleInterval: 60, // minimal sampling for speed
-        })
+  for (const rec of records) {
+    n++
+    if (!rec.ok) {
+      // Mirrors the serial catch branch: error counts as catastrophic.
+      perSeed.push({ seed: rec.seed, outcome: 'error', kills: 0, ticks: 0, baseAlive: false })
+      lowKillNonWins++
+      gameoverCount++
+      remainingEnemyPenalty += ENEMIES_PER_STAGE * 25
+      continue
+    }
 
-        const won = result.outcome === 'stage_clear'
-        if (won) {
-          wins++
-          winTicksSum += result.ticks
-        }
-        if (result.finalState.baseAlive) baseSurvived++
-        totalKills += result.finalState.killCount
-        totalTicks += result.ticks
+    const won = rec.outcome === 'stage_clear'
+    if (won) {
+      wins++
+      winTicksSum += rec.ticks
+    }
+    if (rec.baseAlive) baseSurvived++
+    totalKills += rec.killCount
+    totalTicks += rec.ticks
 
-        if (!won) {
-          const remaining = ENEMIES_PER_STAGE - result.finalState.killCount
-          remainingEnemyPenalty += remaining * 25
+    if (!won) {
+      const remaining = ENEMIES_PER_STAGE - rec.killCount
+      remainingEnemyPenalty += remaining * 25
 
-          if (result.finalState.killCount < 5) {
-            lowKillNonWins++
-          }
-
-          if (result.outcome === 'gameover') {
-            gameoverCount++
-          }
-        }
-
-        perSeed.push({
-          seed,
-          outcome: result.outcome,
-          kills: result.finalState.killCount,
-          ticks: result.ticks,
-          baseAlive: result.finalState.baseAlive,
-        })
-      } catch {
-        perSeed.push({
-          seed,
-          outcome: 'error',
-          kills: 0,
-          ticks: 0,
-          baseAlive: false,
-        })
+      if (rec.killCount < 5) {
         lowKillNonWins++
+      }
+
+      if (rec.outcome === 'gameover') {
         gameoverCount++
-        remainingEnemyPenalty += ENEMIES_PER_STAGE * 25
       }
     }
+
+    perSeed.push({
+      seed: rec.seed,
+      outcome: rec.outcome,
+      kills: rec.killCount,
+      ticks: rec.ticks,
+      baseAlive: rec.baseAlive,
+    })
   }
 
   const winRate = wins / n
@@ -241,6 +246,96 @@ function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
     gameoverPenalty,
     perSeed,
   }
+}
+
+/** Build the (stage, seed) run list in the canonical serial order. */
+function runList(config: EvalConfig): Array<{ stage: StageData; seed: number }> {
+  const stages = config.stages && config.stages.length > 0 ? config.stages : [config.stage]
+  const list: Array<{ stage: StageData; seed: number }> = []
+  for (const stage of stages) {
+    for (const seed of config.seeds) {
+      list.push({ stage, seed })
+    }
+  }
+  return list
+}
+
+/** Evaluate a parameter set by running simulations serially (reference path). */
+export function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
+  const records: RunRecord[] = []
+  for (const { stage, seed } of runList(config)) {
+    try {
+      const result = runSimulation({
+        seed,
+        stage,
+        difficulty: config.difficulty,
+        godAIParams: params,
+        maxTicks: config.maxTicks,
+        sampleInterval: 60, // minimal sampling for speed
+      })
+      records.push({
+        seed,
+        ok: true,
+        outcome: result.outcome,
+        ticks: result.ticks,
+        killCount: result.finalState.killCount,
+        baseAlive: result.finalState.baseAlive,
+      })
+    } catch {
+      records.push({ seed, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false })
+    }
+  }
+  return aggregateEval(records, config)
+}
+
+/**
+ * Evaluate a whole batch of candidates in parallel on the worker pool.
+ *
+ * Task ids are assigned candidate-major, then (stage, seed) in the same
+ * order as the serial loop; results are re-ordered by id by the pool, so
+ * each candidate's records — and therefore each EvalResult — are
+ * byte-identical to the serial evaluateParams() output.
+ */
+export async function evaluateCandidatesParallel(
+  pool: SimWorkerPool,
+  paramsList: GodAIParams[],
+  config: EvalConfig,
+): Promise<EvalResult[]> {
+  const runs = runList(config)
+  const runsPerCandidate = runs.length
+  const tasks: SimTask[] = []
+  for (let c = 0; c < paramsList.length; c++) {
+    for (const { stage, seed } of runs) {
+      tasks.push({
+        id: tasks.length,
+        seed,
+        stage,
+        difficulty: config.difficulty,
+        params: paramsList[c],
+        maxTicks: config.maxTicks,
+      })
+    }
+  }
+
+  const results = await pool.runBatch(tasks)
+
+  const evals: EvalResult[] = []
+  for (let c = 0; c < paramsList.length; c++) {
+    const records: RunRecord[] = []
+    for (let r = 0; r < runsPerCandidate; r++) {
+      const res = results[c * runsPerCandidate + r]
+      records.push({
+        seed: runs[r].seed,
+        ok: res.ok,
+        outcome: res.outcome,
+        ticks: res.ticks,
+        killCount: res.killCount,
+        baseAlive: res.baseAlive,
+      })
+    }
+    evals.push(aggregateEval(records, config))
+  }
+  return evals
 }
 
 // ============================================================
@@ -479,11 +574,12 @@ interface OptimizationResult {
 const RESTART_STAGNATION = 20
 const MAX_RESTARTS = 3
 
-function optimize(
+async function optimize(
   evalConfig: EvalConfig,
   generations: number,
   verbose: boolean,
-): OptimizationResult {
+  pool: SimWorkerPool | null,
+): Promise<OptimizationResult> {
   const initialVector = paramsToVector(DEFAULT_GOD_AI_PARAMS)
   let state = initCMAES(initialVector)
   let restartCount = 0
@@ -511,12 +607,18 @@ function optimize(
   for (let gen = 0; gen < generations; gen++) {
     // Sample candidates.
     const vectors = sampleCandidates(state)
+    const paramsList = vectors.map(vectorToParams)
 
-    // Evaluate each candidate.
+    // Evaluate candidates — parallel across the worker pool (candidates
+    // within a generation are independent), or serial as reference path.
+    const evalResults = pool
+      ? await evaluateCandidatesParallel(pool, paramsList, evalConfig)
+      : paramsList.map((p) => evaluateParams(p, evalConfig))
+
     const candidates: Candidate[] = []
     for (let i = 0; i < vectors.length; i++) {
-      const params = vectorToParams(vectors[i])
-      const evalResult = evaluateParams(params, evalConfig)
+      const params = paramsList[i]
+      const evalResult = evalResults[i]
       candidates.push({
         vector: vectors[i],
         params,
@@ -711,6 +813,7 @@ if (import.meta.main) {
   const generations = parseInt(arg('generations', '40')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
   const verbose = process.argv.includes('--verbose')
+  const serial = process.argv.includes('--serial')
   const outputDir = arg('output', '.workbuddy/optimization-p3')
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
@@ -735,8 +838,18 @@ if (import.meta.main) {
     maxTicks,
   }
 
+  // Worker pool: hw.ncpu − 1 workers by default (leave one core for the
+  // system); --serial forces the single-threaded reference path.
+  const pool = serial ? null : new SimWorkerPool()
+  process.stderr.write(
+    pool
+      ? `Parallel evaluation: ${pool.size} workers (1 core reserved for the system)\n`
+      : `Serial evaluation (--serial)\n`,
+  )
+
   // Run optimization.
-  const result = optimize(evalConfig, generations, verbose)
+  const result = await optimize(evalConfig, generations, verbose, pool)
+  pool?.terminate()
 
   // Save optimization results.
   mkdirSync(outputDir, { recursive: true })
