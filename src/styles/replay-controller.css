@@ -224,38 +224,58 @@
   color: #ff4040;
 }
 
-/* End-of-replay overlay */
+/* End-of-replay overlay — centered card above the battlefield */
 .rc-end-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding: 6px 16px;
+  gap: 18px;
+  padding: 24px 36px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  /* Opacity-only: the element's transform is reserved for centering. */
   animation: rc-end-in 0.4s ease;
+}
+
+/* Result tint — reinforces the replay's outcome without a separate popup */
+.rc-end-overlay.rc-end-victory .rc-end-title {
+  color: #7CFF9B;
+}
+.rc-end-overlay.rc-end-defeat .rc-end-title {
+  color: #ff8080;
 }
 
 .rc-end-info {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
+  gap: 4px;
+  width: 100%;
 }
 
 .rc-end-title {
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.7);
-  letter-spacing: 1px;
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 1.5px;
   text-transform: uppercase;
 }
 
 .rc-end-meta {
   font-family: var(--font-mono, monospace);
-  font-size: 10px;
-  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -264,11 +284,9 @@
 @keyframes rc-end-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -322,17 +340,17 @@
   border-color: rgba(255, 64, 64, 0.5);
 }
 
-/* Thumbnail Preview */
+/* Thumbnail Preview — fixed to viewport so it positions relative to cursor */
 .rc-thumbnail {
-  position: absolute;
-  bottom: 100%;
-  margin-bottom: 12px;
+  position: fixed;
+  bottom: auto;
+  top: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   pointer-events: none;
-  z-index: 10;
+  z-index: 1001;
   animation: rc-thumb-in 0.15s ease;
 }
 

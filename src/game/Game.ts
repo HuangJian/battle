@@ -1250,7 +1250,10 @@ export class Game {
     // Show persistent REPLAY badge in HUD + video player controller
     this.presentation.ui.setReplayMode(true, false)
     this.presentation.ui.setReplaySpeed(this.playback.currentSpeed)
-    this.presentation.ui.notify('REPLAY — Esc exit · P pause · 1-4 speed')
+    this.presentation.ui.notify('REPLAY — Esc exit')
+    // Wire canvas click/mousemove for playback interaction
+    this.presentation.ui.canvas.addEventListener('click', this.onReplayCanvasClick)
+    this.presentation.ui.canvas.addEventListener('mousemove', this.onReplayCanvasMouseMove)
     // Wire the video player controller callbacks
     this.presentation.ui.replayController.init({
       onPlayPause: () => {
@@ -1343,6 +1346,9 @@ export class Game {
     this.playback = null
     // Hide the persistent REPLAY badge from the HUD
     this.presentation.ui.setReplayMode(false)
+    // Remove canvas listeners
+    this.presentation.ui.canvas.removeEventListener('click', this.onReplayCanvasClick)
+    this.presentation.ui.canvas.removeEventListener('mousemove', this.onReplayCanvasMouseMove)
     this.accumulator = 0
     this.lastTime = performance.now()
   }
@@ -1380,6 +1386,7 @@ export class Game {
       this.presentation.ui.replayController.setEndMetadata({
         title: stageLabel,
         details: detailParts.join('  ·  '),
+        result: replay.type,
       })
     }
     this.presentation.ui.replayController.showPersistent()
@@ -1401,6 +1408,20 @@ export class Game {
       this.resetToMenu()
       return
     }
+  }
+
+  /** Canvas click during replay → toggle play/pause and show controller. */
+  private onReplayCanvasClick = (): void => {
+    if (!this.playback) return
+    this.playback.togglePause()
+    this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+  }
+
+  /** Canvas mousemove during replay → show controller and reset auto-hide. */
+  private onReplayCanvasMouseMove = (): void => {
+    if (!this.playback || this.playback.isEnded) return
+    this.presentation.ui.replayController.show()
+    this.presentation.ui.setReplayMode(true, this.playback.isPaused)
   }
 
   private setPlaybackSpeed(speed: PlaybackSpeed): void {

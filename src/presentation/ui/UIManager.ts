@@ -751,8 +751,19 @@ export class UIManager {
       this.updateRecovery(world)
     }
 
-    // Show correct screen
-    this.showScreen(world.state)
+    // During replay playback (and after it ends) the world can reach a
+    // terminal state (gameover / victory / stageclear) by replaying the
+    // original run. We must NOT surface the normal GAME OVER / VICTORY
+    // popups — the replay's own centered end overlay is the canonical
+    // end-of-replay UI. Keep the battlefield visible behind it.
+    let screen = world.state
+    if (
+      this.replayController.isActive &&
+      (screen === 'gameover' || screen === 'victory' || screen === 'stageclear')
+    ) {
+      screen = 'playing'
+    }
+    this.showScreen(screen)
   }
 
   /** Show or hide the persistent REPLAY indicator in the HUD center area. */

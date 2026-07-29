@@ -90,19 +90,9 @@ export class ReplayController {
 
         <button class="rc-btn rc-exit" type="button" aria-label="Exit replay">✕</button>
       </div>
-      <div class="rc-end-overlay" style="display:none">
-        <div class="rc-end-info">
-          <span class="rc-end-title"></span>
-          <span class="rc-end-meta"></span>
-        </div>
-        <div class="rc-end-actions">
-          <button class="rc-end-btn rc-end-replay" type="button">↻ REPLAY</button>
-          <button class="rc-end-btn rc-end-menu" type="button">✕ MENU</button>
-        </div>
-      </div>
     `
 
-    // Cache elements
+    // Cache controller elements
     this.playPauseBtn = this.el.querySelector('.rc-play-pause')!
     this.progressTrack = this.el.querySelector('.rc-progress-track')!
     this.progressFill = this.el.querySelector('.rc-progress-fill')!
@@ -111,16 +101,34 @@ export class ReplayController {
     this.speedDropdown = this.el.querySelector('.rc-speed-dropdown')!
     this.timeDisplay = this.el.querySelector('.rc-time')!
     this.exitBtn = this.el.querySelector('.rc-exit')!
-    this.endOverlay = this.el.querySelector('.rc-end-overlay')!
-    this.endTitle = this.el.querySelector('.rc-end-title')!
-    this.endMeta = this.el.querySelector('.rc-end-meta')!
-    this.replayAgainBtn = this.el.querySelector('.rc-end-replay')!
-    this.backToMenuBtn = this.el.querySelector('.rc-end-menu')!
 
-    // Thumbnail elements
+    // Thumbnail — move to document.body so position:fixed is relative to
+    // the viewport (backdrop-filter on the controller would trap it).
     this.thumbnailEl = this.el.querySelector('.rc-thumbnail')!
     this.thumbnailCanvas = this.el.querySelector('.rc-thumbnail-canvas') as HTMLCanvasElement
     this.thumbnailCtx = this.thumbnailCanvas.getContext('2d')!
+    document.body.appendChild(this.thumbnailEl)
+
+    // End overlay — create as a separate element on document.body so it
+    // is completely independent of the controller's DOM tree.
+    this.endOverlay = document.createElement('div')
+    this.endOverlay.className = 'rc-end-overlay'
+    this.endOverlay.style.display = 'none'
+    this.endOverlay.innerHTML = `
+      <div class="rc-end-info">
+        <span class="rc-end-title"></span>
+        <span class="rc-end-meta"></span>
+      </div>
+      <div class="rc-end-actions">
+        <button class="rc-end-btn rc-end-replay" type="button">↻ REPLAY</button>
+        <button class="rc-end-btn rc-end-menu" type="button">✕ MENU</button>
+      </div>
+    `
+    document.body.appendChild(this.endOverlay)
+    this.endTitle = this.endOverlay.querySelector('.rc-end-title')!
+    this.endMeta = this.endOverlay.querySelector('.rc-end-meta')!
+    this.replayAgainBtn = this.endOverlay.querySelector('.rc-end-replay')!
+    this.backToMenuBtn = this.endOverlay.querySelector('.rc-end-menu')!
 
     this.setupEventListeners()
   }
@@ -136,11 +144,20 @@ export class ReplayController {
     })
 
     // Progress bar click — seek to position
+    // Guard against click events fired after a drag (mouseup triggers click)
+    let _draggedSinceLastClick = false
     this.progressTrack.addEventListener('click', (e) => {
-      if (this._isDragging) return
+      if (this._isDragging || _draggedSinceLastClick) {
+        _draggedSinceLastClick = false
+        return
+      }
       const rect = this.progressTrack.getBoundingClientRect()
       const progress = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
       this.callbacks?.onSeek(progress)
+    })
+    // Track drag starts so the subsequent click is suppressed
+    this.progressHandle.addEventListener('mousedown', () => {
+      _draggedSinceLastClick = true
     })
 
     // Progress bar drag — seek on mouse up
@@ -201,7 +218,7 @@ export class ReplayController {
       if (this._isDragging) return
       const rect = this.progressTrack.getBoundingClientRect()
       const progress = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      this._showThumbnail(progress, e.clientX)
+      this._showThumbnail(progress, e.clientX, e.clientY)
     })
 
     this.progressTrack.addEventListener('mouseleave', () => {
@@ -280,9 +297,11 @@ export class ReplayController {
   }
 
   /** Populate the end overlay with replay metadata. */
-  setEndMetadata(meta: { title: string; details: string }): void {
+  setEndMetadata(meta: { title: string; details: string; result?: 'victory' | 'defeat' }): void {
     this.endTitle.textContent = meta.title
     this.endMeta.textContent = meta.details
+    this.endOverlay.classList.toggle('rc-end-victory', meta.result === 'victory')
+    this.endOverlay.classList.toggle('rc-end-defeat', meta.result === 'defeat')
   }
 
   setPaused(paused: boolean): void {
@@ -341,24 +360,37 @@ export class ReplayController {
     return this.thumbnailCanvas
   }
 
-  private _showThumbnail(progress: number, mouseX: number): void {
+  private _showThumbnail(progress: number, mouseX: number, mouseY?: number): void {
     if (this._duration <= 0) return
     const currentMs = Math.round(progress * this._duration)
     const timeEl = this.thumbnailEl.querySelector('.rc-thumbnail-time')
     if (timeEl) timeEl.textContent = formatTime(currentMs)
 
-    // Position thumbnail above the cursor
-    const wrapperRect = this.progressTrack.getBoundingClientRect()
+    // Position thumbnail using viewport-relative coordinates (position: fixed).
+    // Vertically: center the thumbnail on the mouse Y.
+    // Horizontally: center on mouse X, fully above the cursor.
     const thumbWidth = 160
-    let left = mouseX - wrapperRect.left - thumbWidth / 2
-    left = Math.max(0, Math.min(left, wrapperRect.width - thumbWidth))
+    const thumbHeight = 160
+    const gap = 12
+    const my = mouseY ?? 0
+
+    let left = mouseX - thumbWidth / 2
+    left = Math.max(8, Math.min(left, window.innerWidth - thumbWidth - 8))
+
+    // Center vertically on mouse Y, but clamp so the entire thumbnail
+    // stays above the cursor (bottom edge ≤ mouse Y - gap).
+    let top = my - thumbHeight - gap
+    top = Math.max(8, top)
+
     this.thumbnailEl.style.left = `${left}px`
+    this.thumbnailEl.style.top = `${top}px`
+    this.thumbnailEl.style.bottom = 'auto'
     this.thumbnailEl.style.display = 'block'
 
     // Skip expensive thumbnail render if progress hasn't changed meaningfully
     if (Math.abs(progress - this._lastHoverProgress) < 0.005) return
     this._lastHoverProgress = progress
-    this.callbacks?.onProgressHover(progress, mouseX, 0)
+    this.callbacks?.onProgressHover(progress, mouseX, mouseY ?? 0)
   }
 
   private _hideThumbnail(): void {
