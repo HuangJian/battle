@@ -45,6 +45,7 @@ export const DEFAULT_KEYS: KeyBindings = {
   theme: 'Alt+KeyT',
   guard: 'F5',
   frenzy: 'F6',
+  rewind: 'F7',
   fullscreen: 'Alt+KeyF',
 }
 
@@ -256,12 +257,11 @@ export class Input implements InputLike {
       id === keyIdFromBinding(k.theme) ||
       id === keyIdFromBinding(k.guard) ||
       id === keyIdFromBinding(k.frenzy) ||
+      id === keyIdFromBinding(k.rewind) ||
       id === keyIdFromBinding(k.fullscreen!)
     ) {
       return true
     }
-    // Rewind (F7) is always owned (not rebindable)
-    if (e.code === 'F7') return true
     // Enter / Escape are always owned (menu confirm / pause toggle).
     return e.code === 'Enter' || e.code === 'Escape'
   }
@@ -320,8 +320,6 @@ export class Input implements InputLike {
 
   /** Super-item release key (guard/frenzy/rewind) pressed this frame. */
   wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
-    // 'rewind' is not in keys — it uses F7 which is hardcoded
-    if (kind === 'rewind') return this.wasPressed('F7')
     return this.wasPressed(this.keys[kind])
   }
 

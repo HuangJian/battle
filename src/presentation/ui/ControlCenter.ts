@@ -28,6 +28,10 @@ export interface ControlCenterCallbacks {
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
   getReplayCounts: () => { total: number; favorites: number }
+  /** Check if the game is currently playing (for auto-pause). */
+  isPlaying: () => boolean
+  /** Pause the game. */
+  onPause: () => void
 }
 
 export class ControlCenter {
@@ -37,6 +41,8 @@ export class ControlCenter {
   private replayCountLine: HTMLElement
   private gameplayInfo: HTMLElement
   private collapsed = false
+  /** Save button — disabled when not in a gameplay state. */
+  private saveBtnEl: HTMLButtonElement | null = null
   private perfBtn: HTMLButtonElement | null = null
   private perfState: HTMLElement | null = null
   private fullscreenBtn: HTMLButtonElement | null = null
@@ -59,7 +65,7 @@ export class ControlCenter {
         <section class="cc-section">
           <h3 class="cc-section-title">SNAPSHOT MANAGER</h3>
           <button class="cc-btn" data-cc="save" type="button">
-            <span>Manual Save</span><kbd>Alt+S</kbd>
+            <span>Save Snapshot Now</span><kbd>Alt+S</kbd>
           </button>
           <button class="cc-btn" data-cc="browser" type="button">
             <span>Snapshot Browser</span><span class="cc-btn-arrow">›</span>
@@ -94,7 +100,7 @@ export class ControlCenter {
           <h3 class="cc-section-title">DEVELOPER</h3>
           <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD">
             <span>Debug Overlay</span>
-            <span class="cc-perf-meta"><kbd>F6</kbd><span class="cc-perf-state" data-cc="perf-state">OFF</span></span>
+            <span class="cc-perf-meta"><kbd>Alt+D</kbd><span class="cc-perf-state" data-cc="perf-state">OFF</span></span>
           </button>
         </section>
         <section class="cc-section cc-reserved">
@@ -111,18 +117,23 @@ export class ControlCenter {
     this.replayCountLine = this.el.querySelector('[data-cc="replay-counts"]')!
     this.gameplayInfo = this.el.querySelector('[data-cc="gameplay"]')!
 
-    const wire = (sel: string, fn: () => void) => {
+    const wire = (sel: string, fn: () => void, autoPause = false) => {
       const btn = this.el.querySelector(sel) as HTMLButtonElement
       btn.addEventListener('click', () => {
         // Blur so Space/Enter can't re-trigger the button during gameplay.
         btn.blur()
+        // Auto-pause when clicking CC buttons during active gameplay.
+        if (autoPause && this.callbacks?.isPlaying()) {
+          this.callbacks.onPause()
+        }
         fn()
       })
     }
+    this.saveBtnEl = this.el.querySelector('[data-cc="save"]') as HTMLButtonElement
     wire('[data-cc="save"]', () => this.callbacks?.onManualSave())
-    wire('[data-cc="browser"]', () => this.callbacks?.onOpenBrowser())
-    wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays())
-    wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls())
+    wire('[data-cc="browser"]', () => this.callbacks?.onOpenBrowser(), true)
+    wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays(), true)
+    wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls(), true)
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
 
@@ -170,9 +181,19 @@ export class ControlCenter {
     }
   }
 
-  /** Refresh status lines from the World (cheap, change-guarded). */
+  /**
+   * Refresh status lines from the World (cheap, change-guarded).
+   * Also auto-pauses the game when any CC button is clicked during play,
+   * and disables the Save button when not in a gameplay state.
+   */
   update(world: World): void {
     if (!this.callbacks) return
+
+    // Enable / disable the save button based on game state.
+    const inPlay = world.state === 'playing' || world.state === 'paused'
+    if (this.saveBtnEl) {
+      this.saveBtnEl.disabled = !inPlay
+    }
 
     const c = this.callbacks.getCounts()
     const countsText =

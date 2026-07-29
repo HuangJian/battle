@@ -256,6 +256,32 @@ export class ReplayManager {
   }
 
   // ================================================================
+  // Storage estimation
+  // ================================================================
+
+  /**
+   * Estimate the total storage bytes used by all loaded replays.
+   * Measures via TextEncoder (accurate UTF-8 byte count) rather than
+   * navigator.storage.estimate() which reports origin-level totals.
+   */
+  estimateBytes(): number {
+    const encoder = new TextEncoder()
+    let bytes = 0
+    for (const replay of this.replays) {
+      // Frames Uint8Array is the largest component
+      bytes += replay.frames.byteLength
+      // Thumbnail data-URL
+      bytes += encoder.encode(replay.thumbnail ?? '').byteLength
+      // Initial snapshot world state + metadata
+      bytes += encoder.encode(JSON.stringify(replay.initialSnapshot)).byteLength
+      bytes += encoder.encode(JSON.stringify(replay.metadata)).byteLength
+      // Overhead for id, type, etc.
+      bytes += 300
+    }
+    return bytes
+  }
+
+  // ================================================================
   // Persistence (internal)
   // ================================================================
 

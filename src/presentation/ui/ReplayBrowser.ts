@@ -23,6 +23,8 @@ export interface ReplayBrowserCallbacks {
   /** Toggle favorite. Return value reflects the new state (false = blocked). */
   onToggleFavorite: (id: ReplayID) => boolean
   onClose: () => void
+  /** Return estimated storage usage for replays (bytes). */
+  getStorageBytes?: () => Promise<number>
 }
 
 const TYPE_LABELS: Record<ReplayType, string> = {
@@ -43,20 +45,25 @@ const FILTERS: { key: FilterKey; label: string }[] = [
 function formatPlayTime(ms: number): string {
   const total = Math.floor(ms / 1000)
   const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${String(m).padStart(2, '0')}m`
 }
 
 function formatCreated(epochMs: number): string {
   const d = new Date(epochMs)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export class ReplayBrowser {
   readonly screen: HTMLElement
   private listEl: HTMLElement
-  private countEl: HTMLElement
+  private storageEl: HTMLElement | null = null
   private callbacks: ReplayBrowserCallbacks | null = null
   private openFlag = false
   /** Entry pending delete confirmation (two-step delete). */
@@ -73,16 +80,15 @@ export class ReplayBrowser {
           <h2 class="ui-title">REPLAY BROWSER</h2>
           <div class="snap-filters" data-replay="filters"></div>
           <div class="snap-header-right">
-            <span class="snap-count" data-replay="count"></span>
-            <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close</button>
+            <span class="snap-storage" data-replay="storage"></span>
+            <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close <kbd>Esc</kbd></button>
           </div>
         </div>
         <div class="snap-list" data-replay="list"></div>
-        <p class="ui-hint"><kbd>Esc</kbd> to close · <kbd>P</kbd> pause · <kbd>1-4</kbd> speed during playback</p>
       </div>
     `
     this.listEl = this.screen.querySelector('[data-replay="list"]')!
-    this.countEl = this.screen.querySelector('[data-replay="count"]')!
+    this.storageEl = this.screen.querySelector('[data-replay="storage"]')
     const closeBtn = this.screen.querySelector('[data-replay="close"]') as HTMLElement
     closeBtn.addEventListener('click', () => this.requestClose())
 
@@ -162,8 +168,29 @@ export class ReplayBrowser {
     const total = all.length
     const shown = replays.length
 
-    this.countEl.textContent =
-      this.filter === 'all' ? `${total} replay${total === 1 ? '' : 's'}` : `${shown} / ${total}`
+    // Update tab button labels to show per-type counts.
+    const countMap = new Map<string, number>()
+    countMap.set('all', total)
+    for (const r of all) {
+      countMap.set(r.type, (countMap.get(r.type) ?? 0) + 1)
+    }
+    // Also count favorites.
+    const favCount = all.filter((r) => r.isFavorite).length
+    this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
+      const key = b.dataset.filter!
+      const count = key === 'favorite' ? favCount : (countMap.get(key) ?? 0)
+      const base = FILTERS.find((f) => f.key === key)?.label ?? key.toUpperCase()
+      b.textContent = count > 0 ? `${base} (${count})` : base
+    })
+
+    // Update storage size header.
+    if (this.storageEl && this.callbacks.getStorageBytes) {
+      this.callbacks.getStorageBytes().then((bytes) => {
+        if (!this.storageEl) return
+        this.storageEl.textContent = formatBytes(bytes)
+      })
+    }
+
     this.listEl.textContent = ''
 
     if (shown === 0) {

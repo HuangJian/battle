@@ -1290,6 +1290,28 @@ body {
   white-space: nowrap;
 }
 
+.snap-close kbd {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 3px;
+  color: var(--theme-text-secondary);
+  margin-left: 4px;
+}
+
+.snap-storage {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--theme-text-muted);
+  white-space: nowrap;
+  padding: 4px 8px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 4px;
+}
+
 .snap-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -1586,10 +1608,21 @@ body {
   text-align: left;
 }
 
-.cc-btn:hover:not(.cc-btn-disabled) {
+.cc-btn:hover:not(.cc-btn-disabled):not(:disabled) {
   color: var(--theme-text-primary);
   background: var(--theme-button-hover);
   border-color: var(--theme-accent-primary);
+}
+
+.cc-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--theme-text-muted);
+  border-color: transparent;
+}
+
+.cc-btn:disabled:hover {
+  background: var(--theme-button-bg);
 }
 
 .cc-btn.selected {
@@ -1621,7 +1654,7 @@ body {
 
 .cc-btn-disabled {
   opacity: 0.45;
-  cursor: default;
+  cursor: not-allowed;
 }
 
 .cc-soon {

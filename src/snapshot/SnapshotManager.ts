@@ -339,6 +339,30 @@ export class SnapshotManager {
   }
 
   // ================================================================
+  // Storage estimation
+  // ================================================================
+
+  /**
+   * Estimate the total storage bytes used by all loaded snapshots.
+   * Measures via TextEncoder (accurate UTF-8 byte count) rather than
+   * navigator.storage.estimate() which reports origin-level totals.
+   */
+  estimateBytes(): number {
+    const encoder = new TextEncoder()
+    let bytes = 0
+    for (const snap of this.snapshots) {
+      // Thumbnail data-URLs are the largest component by far
+      bytes += encoder.encode(snap.thumbnail ?? '').byteLength
+      // World state + metadata
+      bytes += encoder.encode(JSON.stringify(snap.metadata)).byteLength
+      bytes += encoder.encode(JSON.stringify(snap.world)).byteLength
+      // Overhead for id, type, parentId, etc.
+      bytes += 200
+    }
+    return bytes
+  }
+
+  // ================================================================
   // Persistence (internal)
   // ================================================================
 

@@ -186,6 +186,7 @@ export class Game {
         // still active underneath — nothing to do. Elsewhere (paused /
         // menu) the regular screen sync resumes automatically.
       },
+      getStorageBytes: () => Promise.resolve(this.snapshots.estimateBytes()),
     })
 
     ui.controlCenter.init({
@@ -210,6 +211,14 @@ export class Game {
         total: this.replays.count(),
         favorites: this.replays.favoriteCount(),
       }),
+      isPlaying: () => this.world.state === 'playing',
+      onPause: () => {
+        if (this.world.state === 'playing') {
+          this.simulation.togglePause()
+          this.snapshots.create('pause', this.world)
+          this.audio.playPause()
+        }
+      },
     })
   }
 
@@ -378,7 +387,7 @@ export class Game {
    * renderer's draw-call counter, which is zero-cost while off.
    */
   private onPerfKey = (e: KeyboardEvent): void => {
-    if (e.code !== 'F6') return
+    if (!(e.altKey && e.code === 'KeyD')) return
     e.preventDefault()
     const perf = this.presentation.ui.perfOverlay
     perf.toggle()
@@ -562,6 +571,14 @@ export class Game {
       this.snapshots.updateAuto(this.world, dt)
     }
 
+    // Replay thumbnails — capture BEFORE events trigger visual effects
+    // (stage-clear flash, camera shake, particles). The canvas still shows
+    // the previous frame's clean render at this point, which is exactly
+    // what we want for the thumbnail — no overlay, no flash.
+    if (this.replays.hasPendingThumbnails) {
+      this.replays.capturePendingThumbnails(() => this.presentation.captureThumbnail())
+    }
+
     // Process events — pass to both audio and presentation
     const events = this.world.consumeEvents()
     this.audio.handleEvents(events)
@@ -602,16 +619,6 @@ export class Game {
         this.presentation.markNeedsRender()
       }
     }
-    // Replay thumbnails — same pattern (a replay is finalized on stage clear /
-    // game over; its preview is the frame that was on screen at that moment).
-    if (this.replays.hasPendingThumbnails) {
-      if (rendered) {
-        this.replays.capturePendingThumbnails(() => this.presentation.captureThumbnail())
-      } else {
-        this.presentation.markNeedsRender()
-      }
-    }
-
     // Update the HTML HUD every frame (cheap, internally guarded) so menu/pause
     // overlays stay live even when the canvas repaint is skipped.
     if (probe) uiT0 = performance.now()
@@ -1394,15 +1401,6 @@ export class Game {
       this.resetToMenu()
       return
     }
-    if (this.input.isPausePressed()) {
-      this.playback.togglePause()
-      this.presentation.ui.setReplayMode(true, this.playback.isPaused)
-    }
-    // Speed keys 1-4
-    if (this.input.wasPressed('Digit1')) this.setPlaybackSpeed(1)
-    if (this.input.wasPressed('Digit2')) this.setPlaybackSpeed(1.5)
-    if (this.input.wasPressed('Digit3')) this.setPlaybackSpeed(2)
-    if (this.input.wasPressed('Digit4')) this.setPlaybackSpeed(4)
   }
 
   private setPlaybackSpeed(speed: PlaybackSpeed): void {
@@ -1438,6 +1436,7 @@ export class Game {
       onClose: () => {
         // Regular screen sync resumes automatically (mirrors SnapshotBrowser).
       },
+      getStorageBytes: () => Promise.resolve(this.replays.estimateBytes()),
     })
   }
 

@@ -91,7 +91,8 @@ export class UIManager {
   /** Menu action callbacks (mouse support). Registered by Game. */
   private menuActions: MenuActions | null = null
 
-  /** Ordered list of rebindable actions shown in the controls panel. */
+  /** Ordered list of rebindable gameplay actions shown in the controls panel.
+   *  Only gameplay-relevant keys: movement, fire, pause, and active items. */
   private static readonly CONTROL_ACTIONS: ReadonlyArray<{
     action: keyof KeyBindings
     label: string
@@ -102,9 +103,9 @@ export class UIManager {
     { action: 'right', label: 'Move Right' },
     { action: 'fire', label: 'Fire' },
     { action: 'pause', label: 'Pause' },
-    { action: 'reset', label: 'Reset to Menu' },
-    { action: 'theme', label: 'Cycle Theme' },
-    { action: 'snapshot', label: 'Manual Save' },
+    { action: 'guard', label: 'Guard (天降神兵)' },
+    { action: 'frenzy', label: 'Frenzy (狂暴宣泄)' },
+    { action: 'rewind', label: 'Rewind (时光宝盒)' },
   ]
 
   // Start as a sentinel so the first showScreen('menu') in the constructor
@@ -150,6 +151,10 @@ export class UIManager {
   private lastFrenzy = -1
   private lastSacrifice = -1
   private lastRewind = -1
+  // Super item key labels (dynamic, reflects rebound keys)
+  private hudGuardLabel: HTMLElement | null = null
+  private hudFrenzyLabel: HTMLElement | null = null
+  private hudRewindLabel: HTMLElement | null = null
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
@@ -219,11 +224,11 @@ export class UIManager {
           <span class="hud-value" data-hud="enemies">20</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">天兵<F5></span>
+          <span class="hud-label" data-hud-super-label="guard">天兵<F5></span>
           <span class="hud-value" data-hud="guard">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">狂暴<F6></span>
+          <span class="hud-label" data-hud-super-label="frenzy">狂暴<F6></span>
           <span class="hud-value" data-hud="frenzy">0</span>
         </div>
         <div class="hud-item hud-super">
@@ -231,7 +236,7 @@ export class UIManager {
           <span class="hud-value" data-hud="sacrifice">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">宝盒&lt;F7&gt;</span>
+          <span class="hud-label" data-hud-super-label="rewind">宝盒&lt;F7&gt;</span>
           <span class="hud-value" data-hud="rewind">0</span>
         </div>
       </div>
@@ -363,6 +368,9 @@ export class UIManager {
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
     this.hudRewind = this.hudBar.querySelector('[data-hud="rewind"]')!
     this.superItems = Array.from(this.hudBar.querySelectorAll('.hud-super'))
+    this.hudGuardLabel = this.hudBar.querySelector('[data-hud-super-label="guard"]')
+    this.hudFrenzyLabel = this.hudBar.querySelector('[data-hud-super-label="frenzy"]')
+    this.hudRewindLabel = this.hudBar.querySelector('[data-hud-super-label="rewind"]')
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
@@ -1040,6 +1048,7 @@ export class UIManager {
     this.controlsBindings = bindings
     this.controlsOnChanged = onChanged
     this.refreshAllKeyButtons()
+    this.updateSuperKeyLabels()
     // Capture-phase listener so a rebind key never reaches the game Input
     // (which listens on window in the bubble phase). We only act while the
     // panel is open, so normal gameplay input is unaffected.
@@ -1083,7 +1092,7 @@ export class UIManager {
     const screen = this.createElement('div', 'ui-screen ui-controls')
     const panel = this.createElement('div', 'ui-panel controls-panel')
     panel.innerHTML = `
-      <h2 class="ui-title">CONTROLS</h2>
+      <h2 class="ui-title">KEY BINDINGS</h2>
       <p class="ui-hint">Click a key, then press a new one</p>
       <div class="controls-list" data-controls="list"></div>
       <div class="controls-actions">
@@ -1151,6 +1160,7 @@ export class UIManager {
     }
     this.listeningAction = null
     this.refreshAllKeyButtons()
+    this.updateSuperKeyLabels()
     this.controlsOnChanged?.()
   }
 
@@ -1165,6 +1175,19 @@ export class UIManager {
     if (!btn) return
     btn.classList.remove('listening', 'conflict')
     btn.textContent = this.formatKey(this.controlsBindings[action])
+  }
+
+  /** Update HUD super-item key labels (天兵, 狂暴, 宝盒) to reflect current bindings. */
+  private updateSuperKeyLabels(): void {
+    const pairs: Array<[HTMLElement | null, keyof KeyBindings, string]> = [
+      [this.hudGuardLabel, 'guard', '天兵'],
+      [this.hudFrenzyLabel, 'frenzy', '狂暴'],
+      [this.hudRewindLabel, 'rewind', '宝盒'],
+    ]
+    for (const [el, action, name] of pairs) {
+      if (el)
+        el.textContent = `${name}<${this.formatCode(parseBinding(this.controlsBindings[action]).code)}>`
+    }
   }
 
   /** Reject keys reserved for panel navigation, and duplicates of other actions. */
@@ -1259,6 +1282,7 @@ export class UIManager {
       this.controlsBindings[action] = binding
       this.listeningAction = null
       this.refreshKeyButton(action)
+      this.updateSuperKeyLabels()
       this.controlsOnChanged?.()
       return
     }

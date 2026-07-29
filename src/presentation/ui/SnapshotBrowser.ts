@@ -18,6 +18,8 @@ export interface SnapshotBrowserCallbacks {
   onLoad: (id: SnapshotID) => void
   onDelete: (id: SnapshotID) => void
   onClose: () => void
+  /** Return estimated storage usage for snapshots (bytes). */
+  getStorageBytes?: () => Promise<number>
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -41,26 +43,31 @@ const FILTERS: { key: FilterKey; label: string }[] = [
 function formatPlayTime(ms: number): string {
   const total = Math.floor(ms / 1000)
   const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  return `${String(m).padStart(2, '0')}m`
 }
 
 function formatCreated(epochMs: number): string {
   const d = new Date(epochMs)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export class SnapshotBrowser {
   readonly screen: HTMLElement
   private listEl: HTMLElement
-  private countEl: HTMLElement
   private callbacks: SnapshotBrowserCallbacks | null = null
   private openFlag = false
   /** Entry pending delete confirmation (two-step delete). */
   private confirmingDelete: SnapshotID | null = null
+  private storageEl: HTMLElement | null = null
   /** Active list filter (toggle group). */
-  private filter: FilterKey = 'all'
+  private filter: FilterKey = 'manual'
 
   constructor() {
     this.screen = document.createElement('div')
@@ -71,16 +78,16 @@ export class SnapshotBrowser {
           <h2 class="ui-title">SNAPSHOT BROWSER</h2>
           <div class="snap-filters" data-snap="filters"></div>
           <div class="snap-header-right">
-            <span class="snap-count" data-snap="count"></span>
-            <button class="controls-btn snap-close" data-snap="close" type="button">✕ Close</button>
+            <span class="snap-storage" data-snap="storage"></span>
+            <button class="controls-btn snap-close" data-snap="close" type="button">✕ Close <kbd>Esc</kbd></button>
           </div>
         </div>
         <div class="snap-list" data-snap="list"></div>
-        <p class="ui-hint"><kbd>Esc</kbd> to close</p>
+
       </div>
     `
     this.listEl = this.screen.querySelector('[data-snap="list"]')!
-    this.countEl = this.screen.querySelector('[data-snap="count"]')!
+    this.storageEl = this.screen.querySelector('[data-snap="storage"]')
     const closeBtn = this.screen.querySelector('[data-snap="close"]') as HTMLElement
     closeBtn.addEventListener('click', () => this.requestClose())
 
@@ -121,6 +128,11 @@ export class SnapshotBrowser {
     if (this.openFlag) return
     this.openFlag = true
     this.confirmingDelete = null
+    // Default to the MANUAL tab.
+    this.filter = 'manual'
+    this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
+      b.classList.toggle('active', b.dataset.filter === 'manual')
+    })
     this.refresh()
     this.screen.classList.add('active')
   }
@@ -155,8 +167,27 @@ export class SnapshotBrowser {
     const total = all.length
     const shown = snaps.length
 
-    this.countEl.textContent =
-      this.filter === 'all' ? `${total} snapshot${total === 1 ? '' : 's'}` : `${shown} / ${total}`
+    // Update tab button labels to show per-type counts.
+    const countMap = new Map<string, number>()
+    countMap.set('all', total)
+    for (const s of all) {
+      countMap.set(s.type, (countMap.get(s.type) ?? 0) + 1)
+    }
+    this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
+      const key = b.dataset.filter!
+      const count = countMap.get(key) ?? 0
+      const base = FILTERS.find((f) => f.key === key)?.label ?? key.toUpperCase()
+      b.textContent = count > 0 ? `${base} (${count})` : base
+    })
+
+    // Update storage size header.
+    if (this.storageEl && this.callbacks.getStorageBytes) {
+      this.callbacks.getStorageBytes().then((bytes) => {
+        if (!this.storageEl) return
+        this.storageEl.textContent = formatBytes(bytes)
+      })
+    }
+
     this.listEl.textContent = ''
 
     if (shown === 0) {

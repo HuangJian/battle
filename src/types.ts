@@ -480,6 +480,8 @@ export interface KeyBindings {
   guard: string
   /** Active super-item: frenzy barrage (狂暴宣泄). Default F6. */
   frenzy: string
+  /** Active super-item: rewind to recent snapshot (时光宝盒). Default F7. */
+  rewind: string
   /**
    * Fullscreen toggle shortcut. Bound to a modifier combo ('Alt+KeyF')
    * to avoid browser conflicts (Alt+F opens browser menus in some browsers).
