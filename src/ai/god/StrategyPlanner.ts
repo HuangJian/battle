@@ -102,7 +102,9 @@ export function calculateRouteDangerImpl(
   const playerDistToTarget =
     Math.abs(targetCell.col - playerCell.col) + Math.abs(targetCell.row - playerCell.row)
 
-  for (const t of w.tanks) {
+  // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
+  const dangerScan = self._enemies.length > 0 ? self._enemies : w.tanks
+  for (const t of dangerScan) {
     if (!t.alive || t.spawnTimer > 0) continue
 
     const enemyCell = pxToCell(t.x, t.y)

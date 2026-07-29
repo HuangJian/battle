@@ -281,6 +281,25 @@ export class GodAIInput implements InputLike {
   /** Debug: branch counters for profiling. */
   branchCounts = { dodge: 0, t8: 0, aggressive: 0, t2a: 0, powerup: 0, navigate: 0, dead: 0 }
 
+  /**
+   * Cluster C (perf): per-tick snapshot of live, fully-spawned enemy tanks —
+   * identical to `w.tanks.filter(t => t.alive && t.spawnTimer <= 0)` in both
+   * membership and iteration order. Reused by `isBaseUnderThreat`,
+   * `selectTarget`, and `calculateRouteDanger` instead of re-filtering
+   * `w.tanks` on every call. Same filter + order ⇒ byte-identical decisions
+   * (incl. `enemies[0]` tie-breaks), so calibration stays valid.
+   */
+  _enemies: Tank[] = []
+
+  /**
+   * Cluster C (perf): per-tick snapshot of all live tanks (player included) —
+   * identical to `w.allTanks.filter(o => o.alive)` in membership/order.
+   * Reused by `canMoveOrBreak`/`canMoveDir` for collision checks (the loop
+   * still does `if (o === tank ...) continue`, so every caller — only the
+   * player in practice — gets the exact same obstacle set as before).
+   */
+  _otherTanks: Tank[] = []
+
   constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS) {
     this.world = world
     this.rng = world.rng
@@ -303,6 +322,8 @@ export class GodAIInput implements InputLike {
     this._navStuckCell = null
     this._navStuckTicks = 0
     this.aggressive = false
+    this._enemies = []
+    this._otherTanks = []
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
@@ -341,6 +362,23 @@ export class GodAIInput implements InputLike {
       this._fire = false
       this.branchCounts.dead++
       return
+    }
+
+    // ---- Cluster C: per-tick snapshots (built once, reused across modules) ----
+    // These mirror the exact filters the god/* sub-modules used to run on every
+    // call, in the same iteration order, so no decision (incl. enemies[0]
+    // tie-breaks) changes. Pure recomputation elimination, not a behavior change.
+    const tanks = w.tanks
+    this._enemies.length = 0
+    for (let i = 0; i < tanks.length; i++) {
+      const t = tanks[i]
+      if (t.alive && t.spawnTimer <= 0) this._enemies.push(t)
+    }
+    const all = w.allTanks
+    this._otherTanks.length = 0
+    for (let i = 0; i < all.length; i++) {
+      const o = all[i]
+      if (o.alive) this._otherTanks.push(o)
     }
 
     const pcx = p.x + p.w / 2
@@ -574,7 +612,9 @@ export class GodAIInput implements InputLike {
       // P3.2: Don't divert to power-ups when enemies are close.
       const pc2 = this.playerCell()
       let nearbyEnemy = false
-      for (const t of w.tanks) {
+      // Cluster C: reuse the per-tick enemy snapshot.
+      const nearbyScan = this._enemies.length > 0 ? this._enemies : w.tanks
+      for (const t of nearbyScan) {
         if (!t.alive || t.spawnTimer > 0) continue
         const tc = this.tankCell(t)
         if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
@@ -752,9 +792,11 @@ export class GodAIInput implements InputLike {
    */
   isBaseUnderThreat(): boolean {
     if (!this.hasBase) return false
-    const w = this.world
     const bc = BASE_POS.col
-    for (const t of w.tanks) {
+    // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
+    // if think() hasn't populated it yet — should never happen in normal flow).
+    const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
+    for (const t of list) {
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = this.tankCell(t)
       if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true

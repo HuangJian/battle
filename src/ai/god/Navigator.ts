@@ -254,7 +254,10 @@ export function canMoveOrBreakImpl(self: GodAIInput, tank: Tank, dir: Direction)
   if (!w.isInBounds(nx, ny, TANK, TANK)) return false
 
   // Blocked by a tank? — can't break through, need to go around
-  for (const o of w.allTanks) {
+  // Cluster C: reuse the per-tick snapshot (same set+order as w.allTanks
+  // filtered for o.alive; `o === tank` skip still applied below).
+  const scan = self._otherTanks.length > 0 ? self._otherTanks : w.allTanks
+  for (const o of scan) {
     if (o === tank || !o.alive) continue
     if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false
   }
@@ -288,7 +291,10 @@ export function canMoveDirImpl(self: GodAIInput, tank: Tank, dir: Direction): bo
   const ny = gy + v.dy * CELL
   if (!w.isInBounds(nx, ny, TANK, TANK)) return false
   if (w.rectHitsTerrain(nx, ny, TANK, TANK)) return false
-  for (const o of w.allTanks) {
+  // Cluster C: reuse the per-tick snapshot (same set+order as w.allTanks
+  // filtered for o.alive; `o === tank` skip still applied below).
+  const scan = self._otherTanks.length > 0 ? self._otherTanks : w.allTanks
+  for (const o of scan) {
     if (o === tank || !o.alive) continue
     if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false
   }

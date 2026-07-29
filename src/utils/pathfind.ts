@@ -39,7 +39,13 @@ export interface PathConstraints {
 
 // ---- internal helpers -------------------------------------------------------
 
-/** Key for Set/Map storage. */
+/**
+ * String key for a grid cell, used by the **offline** helpers
+ * (`isReachable`, `floodFill`) whose returned `Set<string>` is part of a
+ * stable external contract (tests + level generator + evaluator). The hot
+ * `findPath` uses its own integer key (see `cellKey`) to avoid string
+ * allocation in its inner loop.
+ */
 function key(col: number, row: number): string {
   return `${col},${row}`
 }
@@ -105,16 +111,30 @@ export function findPath(
   if (!isPassable(tileMap, to.col, to.row, ignoreWater, breakBrick)) return null
   if (from.col === to.col && from.row === to.row) return []
 
-  // A* with a simple binary-heap-free approach. The grid is at most 26×26 =
-  // 676 nodes, so a flat-array open set with linear scan is fast enough and
-  // keeps the code simple (no heap dependency).
-  const cameFrom = new Map<string, { parent: string; dir: Direction }>()
-  const gScore = new Map<string, number>()
-  const fScore = new Map<string, number>()
-  const open = new Set<string>()
+  // A* over a 26×26 grid (≤ 676 nodes). State lives in flat typed arrays
+  // indexed by integer cell key (row*GRID+col) — no Map/Set/string churn in
+  // the hot loop. The open set is scanned linearly in **insertion order**
+  // (entries are never reordered, only flagged closed), so the lowest-f
+  // tie-break is identical to the original Set-iterated implementation and
+  // the returned Direction[] sequence is byte-for-byte the same. Only the
+  // allocations changed — search result is preserved.
+  const N = GRID * GRID
+  // Local integer key for the hot loop (kept separate from `key()` so the
+  // offline helpers can keep their string-keyed external contract).
+  const cellKey = (col: number, row: number): number => row * GRID + col
+  const gScore = new Float64Array(N).fill(Infinity)
+  const fScore = new Float64Array(N)
+  const cameFrom = new Int32Array(N).fill(-1)
+  // Direction taken to reach each cell, encoded as the STEPS index (0..3).
+  const cameDir = new Uint8Array(N)
+  const inOpen = new Uint8Array(N)
+  const closed = new Uint8Array(N)
+  // Open set preserving insertion order; stale (popped) entries are skipped
+  // via the `closed` flag during the linear scan.
+  const openList: number[] = []
 
-  const startKey = key(from.col, from.row)
-  const goalKey = key(to.col, to.row)
+  const startKey = cellKey(from.col, from.row)
+  const goalKey = cellKey(to.col, to.row)
 
   // In breakBrick mode, stepping onto a brick cell costs more (5 instead
   // of 1) — the player must fire to clear it, which takes time + bullets.
@@ -131,50 +151,62 @@ export function findPath(
     return 1
   }
 
-  gScore.set(startKey, 0)
-  fScore.set(startKey, manhattan(from.col, from.row, to.col, to.row))
-  open.add(startKey)
+  gScore[startKey] = 0
+  fScore[startKey] = manhattan(from.col, from.row, to.col, to.row)
+  inOpen[startKey] = 1
+  openList.push(startKey)
 
-  while (open.size > 0) {
-    // Find the node with the lowest fScore in the open set.
-    let currentKey = ''
+  while (openList.length > 0) {
+    // Lowest fScore; on ties keep the earliest-inserted entry — matches the
+    // original Set iteration order so the chosen path is unchanged.
+    let currentKey = -1
     let currentF = Infinity
-    for (const k of open) {
-      const f = fScore.get(k) ?? Infinity
+    for (let i = 0; i < openList.length; i++) {
+      const k = openList[i]
+      if (closed[k]) continue
+      const f = fScore[k]
       if (f < currentF) {
         currentF = f
         currentKey = k
       }
     }
+    if (currentKey === -1) break // open set exhausted, no path
 
     if (currentKey === goalKey) {
-      // Reconstruct path.
+      // Reconstruct path by walking cameFrom back to the start.
       const path: Direction[] = []
       let ck = currentKey
       while (ck !== startKey) {
-        const cf = cameFrom.get(ck)!
-        path.push(cf.dir)
-        ck = cf.parent
+        path.push(STEPS[cameDir[ck]][2])
+        ck = cameFrom[ck]
       }
       path.reverse()
       return path
     }
 
-    open.delete(currentKey)
-    const [cc, cr] = currentKey.split(',').map(Number)
+    closed[currentKey] = 1
+    inOpen[currentKey] = 0
+    const cc = currentKey % GRID
+    const cr = (currentKey - cc) / GRID
 
-    for (const [dc, dr, dir] of STEPS) {
+    for (let s = 0; s < STEPS.length; s++) {
+      const [dc, dr] = STEPS[s]
       const nc = cc + dc
       const nr = cr + dr
       if (!isPassable(tileMap, nc, nr, ignoreWater, breakBrick)) continue
-      const nk = key(nc, nr)
+      const nk = cellKey(nc, nr)
+      if (closed[nk]) continue
       const cost = stepCost(nc, nr)
-      const tentativeG = (gScore.get(currentKey) ?? Infinity) + cost
-      if (tentativeG < (gScore.get(nk) ?? Infinity)) {
-        cameFrom.set(nk, { parent: currentKey, dir })
-        gScore.set(nk, tentativeG)
-        fScore.set(nk, tentativeG + manhattan(nc, nr, to.col, to.row))
-        open.add(nk)
+      const tentativeG = gScore[currentKey] + cost
+      if (tentativeG < gScore[nk]) {
+        cameFrom[nk] = currentKey
+        cameDir[nk] = s
+        gScore[nk] = tentativeG
+        fScore[nk] = tentativeG + manhattan(nc, nr, to.col, to.row)
+        if (!inOpen[nk]) {
+          inOpen[nk] = 1
+          openList.push(nk)
+        }
       }
     }
   }

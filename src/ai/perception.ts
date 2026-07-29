@@ -42,7 +42,13 @@ export function dirToward(x: number, y: number, tx: number, ty: number): Directi
  * catches the obstacle the tank is adjacent to, so such a direction is
  * correctly reported as blocked.
  */
-export function canStep(world: World, tank: Tank, dir: Direction, considerTanks: boolean): boolean {
+export function canStep(
+  world: World,
+  tank: Tank,
+  dir: Direction,
+  considerTanks: boolean,
+  others?: Tank[],
+): boolean {
   const v = DIR_VECTORS[dir]
   // Reason about the tank on its conceptual grid. The cross-axis is kept
   // aligned by `alignTank` every tick, but the movement axis can accumulate
@@ -65,9 +71,12 @@ export function canStep(world: World, tank: Tank, dir: Direction, considerTanks:
   if (!world.isInBounds(sx, sy, sw, sh)) return false
   if (world.rectHitsTerrain(sx, sy, sw, sh)) return false
   if (considerTanks) {
-    const all = world.allTanks
-    for (let i = 0; i < all.length; i++) {
-      const o = all[i]
+    // `others` (when provided by perceive) is the precomputed set of all
+    // other live tanks — avoids re-scanning world.allTanks for every one of
+    // the 4 direction checks. Falls back to world.allTanks otherwise.
+    const list = others ?? world.allTanks
+    for (let i = 0; i < list.length; i++) {
+      const o = list[i]
       if (o === tank || !o.alive || o.spawnTimer > 0) continue
       if (aabb(sx, sy, sw, sh, o.x, o.y, o.w, o.h)) return false
     }
@@ -155,16 +164,28 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
   }
   threats.sort((a, b) => a.distance - b.distance)
 
+  // Scan all other live tanks ONCE and reuse the list for both teammate
+  // classification and canStep's tank-blocking checks. Previously perceive
+  // rebuilt world.allTanks (a fresh array) and rescanned it ~5× per enemy per
+  // tick (4× in canStep for openDirs + 1× here). With many enemies this was
+  // the dominant per-tick cost. Behavior is unchanged: `others` is exactly
+  // the set canStep would iterate (all other live tanks, in the same order).
+  const all = world.allTanks
+  const others: Tank[] = []
+  for (let i = 0; i < all.length; i++) {
+    const o = all[i]
+    if (o === tank || !o.alive || o.spawnTimer > 0) continue
+    others.push(o)
+  }
+
   const teammates: Perception['teammates'] = []
   let congestion = 0
   // Nearest live decoy (for decoy-targeting). Decoys are allies, so they are
   // excluded from the teammate list below (they are not fellow enemies).
   let nearestDecoy: { x: number; y: number } | null = null
   let nearestDecoyDist = Infinity
-  const all = world.allTanks
-  for (let i = 0; i < all.length; i++) {
-    const o = all[i]
-    if (o === tank || !o.alive || o.spawnTimer > 0) continue
+  for (let i = 0; i < others.length; i++) {
+    const o = others[i]
     if (o.isPlayer) continue
     if (o.isDecoy) {
       const d = manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2)
@@ -181,7 +202,7 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
   const openDirs: Direction[] = []
   const dirs: Direction[] = ['up', 'down', 'left', 'right']
   for (const d of dirs) {
-    if (canStep(world, tank, d, true)) openDirs.push(d)
+    if (canStep(world, tank, d, true, others)) openDirs.push(d)
   }
 
   return {
@@ -226,7 +247,10 @@ export function analyze(
   const objX = p.hasBase ? p.baseX : p.playerX
   const objY = p.hasBase ? p.baseY : p.playerY
   const objDir = p.hasBase || p.hasPlayer ? dirToward(p.selfX, p.selfY, objX, objY) : tank.dir
-  const ahead = scanAhead(world, tank, objDir, losRange)
+  // The objective sits in the tank's current facing direction → the base
+  // scan already covers it, so reuse it instead of re-walking the same line.
+  // Result is identical to scanning objDir again (pure perf win).
+  const ahead = objDir === tank.dir ? baseLOS : scanAhead(world, tank, objDir, losRange)
   const pathBlocked = ahead.hit === 'wall'
 
   const threat = p.threats.length > 0 ? p.threats[0] : null
