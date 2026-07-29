@@ -17,14 +17,17 @@ import { STAGES } from '../src/config/stages'
 // re-measure on seeds 1..30 @classic @18000 and bump the floors to the
 // new measured values (keep a small margin for benign variance).
 //
-// Current measured (seeds 1..30, classic, 18000 ticks) AFTER the P0 T2a
-// deadlock fix (2026-07-29, plan/God-AI-Next-Round.md):
-//   Stage 0: winRate=66.7%  baseSurvival=90.0%  avgKills=16.9
-//   Stage 1: winRate=83.3%  baseSurvival=96.7%  avgKills=19.4
+// Current measured (seeds 1..30, classic, 18000 ticks):
+//   P0 (2026-07-29, T2a deadlock fix):
+//     Stage 0: winRate=66.7%  baseSurvival=90.0%  avgKills=16.9
+//     Stage 1: winRate=83.3%  baseSurvival=96.7%  avgKills=19.4
+//   P1 (2026-07-29, survival & defense fix):  <-- CURRENT BASELINE
+//     Stage 0: winRate=86.7%  baseSurvival=93.3%  avgKills=18.8
+//     Stage 1: winRate=90.0%  baseSurvival=100.0% avgKills=19.7
 //
-// Before P0 (deadlock era), Stage 0 was ~20% / Stage 1 ~22.5% — the
-// floors below sit comfortably above those baselines so a regression
-// back to the deadlock is caught, while leaving margin for benign tuning.
+// Floors are set ~2 wins below the P1 measurement to leave margin for
+// benign P2 tuning, while staying far above the deadlock era
+// (Stage 0 ~20% / Stage 1 ~22.5%) so any regression back there is caught.
 //
 // Run: bun test tests/god-ai-regression-gate.test.ts
 // ============================================================
@@ -71,11 +74,11 @@ function runGate(stageIdx: number, floors: GateFloors): void {
 }
 
 describe('god-ai-regression-gate', () => {
-  it('Stage 0 classic aggregate meets the P0 tuning floor', () => {
-    runGate(0, { wins: 16, baseAlive: 25, avgKills: 12 })
+  it('Stage 0 classic aggregate meets the P1 tuning floor', () => {
+    runGate(0, { wins: 24, baseAlive: 27, avgKills: 16 })
   }, 180000)
 
-  it('Stage 1 classic aggregate meets the P0 tuning floor', () => {
-    runGate(1, { wins: 20, baseAlive: 27, avgKills: 14 })
+  it('Stage 1 classic aggregate meets the P1 tuning floor', () => {
+    runGate(1, { wins: 25, baseAlive: 29, avgKills: 17 })
   }, 180000)
 })

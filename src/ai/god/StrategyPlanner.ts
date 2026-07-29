@@ -192,13 +192,11 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
 
   // ---- S6: Determine strategy mode ----
   // Emergency defense: any enemy within 3 cols of the base and at or
-  // below row 20 (within 4 rows of the base) — these are immediate
-  // threats that need direct interception. The old check (row >=
-  // defenseRow = 23) triggered too late — the enemy was already adjacent
-  // to the base and the player couldn't get back in time.
+  // below row 18 (within 6 rows of the base) — these are immediate
+  // threats that need direct interception.
   const baseUnderThreat = enemies.some((t) => {
     const tc = self.tankCell(t)
-    return Math.abs(tc.col - baseCol) <= 3 && tc.row >= 20
+    return Math.abs(tc.col - baseCol) <= 3 && tc.row >= 18
   })
 
   // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
@@ -215,16 +213,12 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
     enemies.length <= self.params.huntAllyCount &&
     w.enemiesRemaining <= self.params.endgameEnemyThreshold
 
-  // If the player is too far from the base, return to defense position.
-  // In hunt mode, the player can roam freely.
-  // When base is under threat, use strict defense distance.
-  // When base is NOT under threat, allow free hunting — the AI checks
-  // for threats every tick and will immediately return to defense if
-  // an enemy approaches the base. This prevents the "0-kill turtle"
-  // where the AI sits at the defense position while enemies roam the
-  // top of the map, unable to reach them.
+  // If the player is too far from the base when it's under threat, return
+  // to defense position. This applies regardless of canHunt — even in the
+  // endgame, base defense takes priority over hunting when the player is
+  // too far away to intercept in time.
   const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
-  if (!canHunt && baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
+  if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
     return self.getDefaultDefensePosition()
   }
 

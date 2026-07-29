@@ -1410,3 +1410,35 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - The T2a deadlock is broken. The remaining 5 Stage 1 failures (3 timeouts with 16-18 kills, 2 gameovers) are pursuit/survival edge cases, not deadlocks.
 - CMA-ES parameter optimization (P2) can now be re-run on the fixed architecture — the search space is no longer dominated by the deadlock. Expected to converge to a higher win rate than the previous 20% ceiling.
 - The parity test baseline is re-locked to the new behavior. 5 of 8 seeds went from timeout → stage_clear.
+
+---
+
+## 40. God AI P1 — Survival & Defense Fixes: Wider Dodge + Proactive Base Defense (2026-07-29)
+
+**Decision:** Implement four P1 fixes targeting the dominant failure mode (gameovers from player death and base destruction) that remained after the P0 T2a deadlock fix.
+
+1. **Wider dodge detection** (`ThreatAssessor.ts`): Changed the bullet alignment threshold in `findMostDangerousBullet` from `CELL * 0.75` (12px) to `TANK` (32px). The old threshold was narrower than the tank's hitbox (16px half-width), meaning bullets that would hit the player weren't detected. The wider range also catches bullets the player is about to move INTO, not just bullets already aligned. This was the single highest-leverage fix: Stage 0 gameovers dropped from 8 → 2, Stage 1 gameovers from 2 → 0.
+
+2. **Proactive baseUnderThreat** (`StrategyPlanner.ts` + `GodAIInput.ts`): Widened the `baseUnderThreat` detection from `row >= 20` to `row >= 18` (6 rows of warning instead of 4). Added `isBaseUnderThreat()` method on `GodAIInput` so `think()` can check it without going through `selectTarget`.
+
+3. **Always return to defense when threatened** (`StrategyPlanner.ts`): Removed the `!canHunt` gate from the `maxPlayerDistFromBase` check. Previously, in the endgame (`canHunt == true`), the player could roam freely even when the base was under threat. Now the player ALWAYS returns to defense when `baseUnderThreat && playerDistToBase > maxPlayerDistFromBase`, regardless of hunt mode.
+
+4. **Skip T2a and power-ups when base threatened** (`GodAIInput.ts`): Added `skipT2aForDefense` guard — when the base is under threat and the player is too far, T2a camping is skipped (falls through to navigate → defense). Added `isBaseUnderThreat()` check to the power-up branch — power-ups are skipped when the base is threatened.
+
+**Rationale:**
+- Decision traces showed 0 dodge ticks in most gameover seeds — the dodge logic almost never triggered because the alignment threshold was too narrow (12px vs 16px tank half-width). The player was running INTO bullets it couldn't detect.
+- Seeds 14, 18 (Stage 0) died at tick ~1700 with only 4-6 kills, 27-31 cells from the base. The player was roaming far from the base and getting killed by enemy bullets it didn't dodge.
+- Seed 37 (Stage 0) had the base destroyed while the player was in the `powerup` branch — chasing a power-up instead of defending.
+- The `!canHunt` gate on `maxPlayerDistFromBase` allowed the player to ignore base threats in the endgame, leading to `base_destroyed` losses.
+
+**Results (40 seeds, 36000 ticks, classic):**
+| Stage | After P0 | After P1 | Change |
+|-------|----------|----------|--------|
+| 0 Classic | 28/40 (70%) | 35/40 (87.5%) | +7 wins |
+| 1 Classic | 35/40 (87.5%) | 37/40 (92.5%) | +2 wins |
+| 1 gameovers | 2 | 0 | Eliminated |
+
+**Trade-offs:**
+- Seeds 999 and 55555 regressed from stage_clear to timeout (RNG perturbation from the wider dodge range changing the AI's movement sequence). Net improvement is strongly positive (+9 wins, -2 regressions).
+- The wider `baseUnderThreat` (8 cols, row >= 20) was tested and rejected — it caused excessive turtling and reduced win rates. The 3-col / row >= 18 version is the optimal balance.
+- Remaining failures: 2 gameovers (seeds 2, 13 on Stage 0 — enemy walks along base row from far away), 6 timeouts (pursuit problem with 16-18 kills — fast enemies dodge bullets).

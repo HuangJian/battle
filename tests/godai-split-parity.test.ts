@@ -33,23 +33,23 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 for P0 T2a deadlock fix (plan/God-AI-Next-Round).
-// P0.1: Anti-camp escape — campTimeoutTicks=90, antiCampSuppressTicks=60.
-// P0.2: T2a camping threshold — only camp when scan.enemy==true.
-// P0.3: Navigate stuck escape — navStuckTicks=180, roam to map center.
-// These changes fix the T2a deadlock that caused 77.5% of games to timeout.
-// Seeds 1, 100, 999, 55555 went from timeout to stage_clear; seed 2 and 12345
-// went from timeout to gameover (aggressive movement exposes the player to
-// more bullets — a known trade-off of fixing the deadlock).
+// Baseline re-captured 2026-07-29 for P1 survival/defense fixes.
+// P1 changes on top of P0:
+// - Dodge detection widened from CELL*0.75 to TANK (more bullets detected).
+// - baseUnderThreat widened to row>=18; !canHunt gate removed (always defend).
+// - Power-ups and T2a skipped when base is under threat.
+// Seeds 1, 7, 12345 improved (more lives / faster clear). Seeds 999, 55555
+// regressed to timeout (RNG perturbation from wider dodge). Net: Stage 0
+// 70%→87.5%, Stage 1 87.5%→92.5%, Stage 1 gameovers 2→0.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 5331,
+    ticks: 5227,
     score: 4200,
-    lives: 1,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 0,
+    playerLevel: 1,
   },
   2: {
     outcome: 'gameover',
@@ -62,7 +62,7 @@ const BASELINE: Record<number, Expected> = {
   },
   7: {
     outcome: 'stage_clear',
-    ticks: 5620,
+    ticks: 5242,
     score: 4700,
     lives: 4,
     killCount: 20,
@@ -88,29 +88,29 @@ const BASELINE: Record<number, Expected> = {
     playerLevel: 1,
   },
   999: {
-    outcome: 'stage_clear',
-    ticks: 2448,
-    score: 4700,
-    lives: 2,
-    killCount: 20,
+    outcome: 'max_ticks',
+    ticks: 36000,
+    score: 3400,
+    lives: 3,
+    killCount: 18,
     baseAlive: true,
-    playerLevel: 0,
+    playerLevel: 1,
   },
   12345: {
-    outcome: 'gameover',
-    ticks: 1235,
-    score: 0,
-    lives: 0,
-    killCount: 0,
+    outcome: 'stage_clear',
+    ticks: 3638,
+    score: 4700,
+    lives: 3,
+    killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   55555: {
-    outcome: 'stage_clear',
-    ticks: 2802,
-    score: 4700,
-    lives: 2,
-    killCount: 20,
+    outcome: 'max_ticks',
+    ticks: 36000,
+    score: 3300,
+    lives: 3,
+    killCount: 17,
     baseAlive: true,
     playerLevel: 0,
   },

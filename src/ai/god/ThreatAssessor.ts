@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Bullet } from '../../types'
 import type { Direction } from '../../constants'
-import { CELL, DIR_VECTORS, BASE_POS, FIELD } from '../../constants'
+import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
@@ -31,7 +31,7 @@ export function findMostDangerousBulletImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < CELL * 0.75 : Math.abs(bcy - pcy) < CELL * 0.75
+    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
     if (!aligned) continue
 
     const approaching =

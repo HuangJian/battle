@@ -4,6 +4,7 @@ import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
+import { BASE_POS } from '../constants'
 import {
   findEnemyDirectionImpl,
   scanAheadImpl,
@@ -492,7 +493,18 @@ export class GodAIInput implements InputLike {
     // fall through to navigate and hunt the enemy directly. A suppression
     // timer (antiCampSuppressTicks) ensures the player gets enough
     // consecutive navigate ticks to actually move away from the stuck cell.
-    if (aimDir && this._antiCampSuppress <= 0) {
+    //
+    // P1: Skip T2a when the base is under threat and the player is too far
+    // from the base. Camping far from the base while enemies approach it
+    // was the #1 cause of base_destroyed gameovers.
+    const skipT2aForDefense =
+      this.hasBase &&
+      this.isBaseUnderThreat() &&
+      Math.abs(this.playerCell().col - BASE_POS.col) +
+        Math.abs(this.playerCell().row - BASE_POS.row) >
+        this.params.maxPlayerDistFromBase
+
+    if (aimDir && this._antiCampSuppress <= 0 && !skipT2aForDefense) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
       if (scan.enemy) {
@@ -545,7 +557,8 @@ export class GodAIInput implements InputLike {
     // Check for power-ups when no enemy is in line of fire. Previously this
     // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
     // Now the AI opportunistically grabs power-ups when it's safe to divert.
-    if (!aimDir || onCooldown) {
+    // P1: Skip power-ups when the base is under threat — defense first.
+    if ((!aimDir || onCooldown) && !(this.hasBase && this.isBaseUnderThreat())) {
       const puTarget = this.findPowerUpTarget(pcx, pcy)
       if (puTarget) {
         this._moveDir = this.navigateTowards(puTarget)
@@ -651,6 +664,23 @@ export class GodAIInput implements InputLike {
   findEnemyDirection(pcx: number, pcy: number): Direction | null {
     return findEnemyDirectionImpl(this, pcx, pcy)
   }
+
+  /**
+   * P1: Check if any enemy is near the base (within 3 cols, row >= 18).
+   * Used to skip power-ups and prioritize defense.
+   */
+  isBaseUnderThreat(): boolean {
+    if (!this.hasBase) return false
+    const w = this.world
+    const bc = BASE_POS.col
+    for (const t of w.tanks) {
+      if (!t.alive || t.spawnTimer > 0) continue
+      const tc = this.tankCell(t)
+      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true
+    }
+    return false
+  }
+
   scanAhead(
     pcx: number,
     pcy: number,
