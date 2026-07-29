@@ -7,9 +7,11 @@ import type { World } from '../../game/World'
 //
 //   Control Center
 //   ├── Snapshot Manager   (manual save · snapshot browser · counts)
-//   ├── Controls           (key bindings)
-//   ├── Gameplay           (current run info)
-//   └── Reserved           (themes / accessibility / mods / statistics)
+//   ├── Replays            (replay browser · counts)
+//   ├── Gameplay           (key bindings · current run info)
+//   ├── Display            (fullscreen · performance mode)
+//   ├── Developer          (debug overlay)
+//   └── Reserved           (mods / statistics)
 //
 // Read-only on the World; every action is a callback into Game.
 // ================================================================
@@ -24,6 +26,8 @@ export interface ControlCenterCallbacks {
   onTogglePerf: () => void
   /** Toggle fullscreen mode (Alt+F). */
   onToggleFullscreen: () => void
+  /** Toggle Performance Mode (DPR cap + render-FPS cap). */
+  onTogglePerformance: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -47,6 +51,8 @@ export class ControlCenter {
   private perfState: HTMLElement | null = null
   private fullscreenBtn: HTMLButtonElement | null = null
   private fullscreenState: HTMLElement | null = null
+  private perfModeBtn: HTMLButtonElement | null = null
+  private perfModeState: HTMLElement | null = null
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
@@ -80,13 +86,10 @@ export class ControlCenter {
           <div class="cc-info" data-cc="replay-counts">No replays</div>
         </section>
         <section class="cc-section">
-          <h3 class="cc-section-title">CONTROLS</h3>
+          <h3 class="cc-section-title">GAMEPLAY</h3>
           <button class="cc-btn" data-cc="controls" type="button">
             <span>Key Bindings</span><span class="cc-btn-arrow">›</span>
           </button>
-        </section>
-        <section class="cc-section">
-          <h3 class="cc-section-title">GAMEPLAY</h3>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
         <section class="cc-section">
@@ -94,6 +97,10 @@ export class ControlCenter {
           <button class="cc-btn" data-cc="fullscreen" type="button" aria-pressed="false" title="Toggle fullscreen mode (Alt+F)">
             <span>Fullscreen</span>
             <span class="cc-perf-meta"><kbd>Alt+F</kbd><span class="cc-perf-state" data-cc="fullscreen-state">OFF</span></span>
+          </button>
+          <button class="cc-btn" data-cc="perfmode" type="button" aria-pressed="false" title="Toggle Performance Mode (DPR cap + render FPS cap)">
+            <span>Performance Mode</span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="perfmode-state">OFF</span></span>
           </button>
         </section>
         <section class="cc-section">
@@ -105,8 +112,6 @@ export class ControlCenter {
         </section>
         <section class="cc-section cc-reserved">
           <h3 class="cc-section-title">RESERVED</h3>
-          <div class="cc-btn cc-btn-disabled"><span>Themes</span><span class="cc-soon">SOON</span></div>
-          <div class="cc-btn cc-btn-disabled"><span>Accessibility</span><span class="cc-soon">SOON</span></div>
           <div class="cc-btn cc-btn-disabled"><span>Mods</span><span class="cc-soon">SOON</span></div>
           <div class="cc-btn cc-btn-disabled"><span>Statistics</span><span class="cc-soon">SOON</span></div>
         </section>
@@ -136,11 +141,14 @@ export class ControlCenter {
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls(), true)
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
+    wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
     this.perfState = this.el.querySelector('[data-cc="perf-state"]')
     this.fullscreenBtn = this.el.querySelector('[data-cc="fullscreen"]') as HTMLButtonElement
     this.fullscreenState = this.el.querySelector('[data-cc="fullscreen-state"]')
+    this.perfModeBtn = this.el.querySelector('[data-cc="perfmode"]') as HTMLButtonElement
+    this.perfModeState = this.el.querySelector('[data-cc="perfmode-state"]')
 
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
@@ -178,6 +186,18 @@ export class ControlCenter {
     if (this.fullscreenState) {
       this.fullscreenState.textContent = on ? 'ON' : 'OFF'
       this.fullscreenState.classList.toggle('on', on)
+    }
+  }
+
+  /** Reflect Performance Mode state in the DISPLAY panel button. */
+  setPerfModeState(on: boolean): void {
+    if (this.perfModeBtn) {
+      this.perfModeBtn.classList.toggle('selected', on)
+      this.perfModeBtn.setAttribute('aria-pressed', String(on))
+    }
+    if (this.perfModeState) {
+      this.perfModeState.textContent = on ? 'ON' : 'OFF'
+      this.perfModeState.classList.toggle('on', on)
     }
   }
 

@@ -24,12 +24,12 @@ export interface MenuActions {
   selectTheme(key: string): void
   /** Step the stage selector by -1 (prev) or +1 (next). */
   cycleStage(dir: -1 | 1): void
+  /** Select a specific stage by index. */
+  selectStage(index: number): void
   /** Start the game with the current menu selections. */
   start(): void
   /** Resume from the last manually-saved snapshot (only offered when one exists). */
   resume(): void
-  /** Toggle Performance Mode (DPR cap + render-FPS cap) on/off. */
-  togglePerformance(): void
   /** Open the controls / key-bindings panel. */
   openControls(): void
 }
@@ -51,7 +51,6 @@ export class UIManager {
   private hudStar: HTMLElement
   private hudReplay: HTMLElement
   readonly replayController: ReplayController
-  private hudPauseHint: HTMLElement | null = null
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
   private buffFreeze: HTMLElement
@@ -120,14 +119,18 @@ export class UIManager {
   // Cached DOM elements for menu (avoid querySelectorAll every frame)
   private menuDiffOptions: HTMLElement[] = []
   private menuThemeOptions: HTMLElement[] = []
-  private menuPerfOptions: HTMLElement[] = []
   private menuRows: HTMLElement[] = []
   private menuStageValue: HTMLElement | null = null
   private menuStageName: HTMLElement | null = null
+  private menuStageDropdown: HTMLElement | null = null
+  private stageDropdownOpen = false
   private menuHiScore: HTMLElement | null = null
   private menuResumeStage: HTMLElement | null = null
   private menuResumeInfo: HTMLElement | null = null
   private menuStartBtn: HTMLElement | null = null
+  private menuResumeHint: HTMLElement | null = null
+  private menuStartHint: HTMLElement | null = null
+  private menuControlsHint: HTMLElement | null = null
   /** Whether a resumable manual snapshot exists (set after boot hydration). */
   private hasResume = false
   private stageClearName: HTMLElement | null = null
@@ -211,7 +214,7 @@ export class UIManager {
         </div>
         <div class="hud-pause" data-hud="pause">
           <span class="hud-pause-title"><span class="hud-pause-dot"></span>PAUSED</span>
-          <span class="hud-pause-hint">← → Perf: OFF · P Resume</span>
+          <span class="hud-pause-hint">P Resume</span>
         </div>
       </div>
       <div class="hud-group hud-right">
@@ -330,12 +333,8 @@ export class UIManager {
     // Footer
     this.footer = this.createElement('div', 'footer')
     this.footer.innerHTML = `
-      <span>↑↓</span> Select &nbsp;·&nbsp;
-      <span>←→</span> Change &nbsp;·&nbsp;
-      <span>Enter</span> Start &nbsp;·&nbsp;
       <span>P</span> Pause &nbsp;·&nbsp;
       <span>Alt+R</span> Reset &nbsp;·&nbsp;
-      <span>Alt+T</span> Theme &nbsp;·&nbsp;
       <span>Alt+S</span> Save
     `
 
@@ -371,7 +370,6 @@ export class UIManager {
     this.hudGuardLabel = this.hudBar.querySelector('[data-hud-super-label="guard"]')
     this.hudFrenzyLabel = this.hudBar.querySelector('[data-hud-super-label="frenzy"]')
     this.hudRewindLabel = this.hudBar.querySelector('[data-hud-super-label="rewind"]')
-    this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
     this.buffFreeze = this.hudBar.querySelector('[data-buff="freeze"]')!
@@ -389,10 +387,14 @@ export class UIManager {
     this.menuRows = Array.from(this.menuScreen.querySelectorAll('.menu-row')) as HTMLElement[]
     this.menuStageValue = this.menuScreen.querySelector('[data-stage="value"]')
     this.menuStageName = this.menuScreen.querySelector('[data-stage="name"]')
+    this.menuStageDropdown = this.menuScreen.querySelector('[data-stage="dropdown"]')
     this.menuHiScore = this.menuScreen.querySelector('[data-menu="hiscore"]')
     this.menuResumeStage = this.menuScreen.querySelector('[data-menu="resume-stage"]')
     this.menuResumeInfo = this.menuScreen.querySelector('[data-menu="resume-info"]')
     this.menuStartBtn = this.menuScreen.querySelector('[data-menu="start"]')
+    this.menuResumeHint = this.menuScreen.querySelector('[data-menu="resume-hint"]')
+    this.menuStartHint = this.menuScreen.querySelector('[data-menu="start-hint"]')
+    this.menuControlsHint = this.menuScreen.querySelector('[data-menu="controls-hint"]')
     this.stageClearName = this.stageClearScreen.querySelector('[data-stage="name"]')
     this.victoryScoreEl = this.victoryScreen.querySelector('[data-victory="score"]')
     this.recoveryCountdownNum = this.recoveryScreen.querySelector(
@@ -423,6 +425,7 @@ export class UIManager {
               <span class="menu-resume-stage" data-menu="resume-stage">STAGE 01</span>
             </div>
             <div class="menu-resume-info" data-menu="resume-info">Continue from your last manual save</div>
+            <span class="menu-enter-hint" data-menu="resume-hint">Enter ↵</span>
           </div>
           <div class="menu-row" data-menu="difficulty">
             <span class="menu-label">DIFFICULTY</span>
@@ -434,29 +437,26 @@ export class UIManager {
           </div>
           <div class="menu-row" data-menu="stage">
             <span class="menu-label">STAGE</span>
-            <div class="menu-stage-selector">
-              <span class="menu-stage-arrow" data-stage="prev">◀</span>
-              <span class="menu-stage-value" data-stage="value">01 / 35</span>
-              <span class="menu-stage-arrow" data-stage="next">▶</span>
+            <div class="menu-stage-dropdown" data-stage="dropdown">
+              <div class="menu-stage-trigger" data-stage="trigger">
+                <span class="menu-stage-value" data-stage="value">01 / 35</span>
+                <span class="menu-stage-name" data-stage="name">Outpost</span>
+                <span class="menu-stage-chevron">▾</span>
+              </div>
+              <div class="menu-stage-list" data-stage="list"></div>
             </div>
-            <span class="menu-stage-name" data-stage="name">Outpost</span>
           </div>
-          <div class="menu-row" data-menu="perf">
-            <span class="menu-label">PERFORMANCE</span>
-            <div class="menu-options" data-perf="options"></div>
-          </div>
+          <div class="menu-row" data-menu="start-row">
+          <div class="menu-start-button" data-menu="start">NEW GAME</div>
+          <span class="menu-enter-hint" data-menu="start-hint">Enter ↵</span>
         </div>
-        <div class="menu-start">
-          <div class="menu-start-button" data-menu="start">PRESS ENTER / CLICK TO START</div>
+        <div class="menu-row" data-menu="controls">
+          <div class="menu-controls-button">⚙ CONTROLS</div>
+          <span class="menu-enter-hint" data-menu="controls-hint">Enter ↵</span>
         </div>
-        <div class="menu-controls-button" data-menu="controls">⚙ CONTROLS</div>
         <div class="menu-controls">
-          <span>↑ ↓ Select Row</span>
+          <span>↑ ↓ Select</span>
           <span>← → Change</span>
-          <span><kbd>Alt+T</kbd> Theme</span>
-          <span><kbd>Alt+S</kbd> Save</span>
-          <span><kbd>C</kbd> Controls</span>
-          <span><kbd>Enter</kbd> Confirm</span>
         </div>
         <div class="menu-hiscore">
           High Score: <span data-menu="hiscore">0</span>
@@ -485,24 +485,28 @@ export class UIManager {
       themeContainer.appendChild(opt)
     }
 
-    // Populate Performance Mode options (ON / OFF)
-    const perfContainer = screen.querySelector('[data-perf="options"]')!
-    for (const label of ['ON', 'OFF']) {
-      const opt = this.createElement('div', 'menu-option')
-      opt.dataset.value = label
-      opt.textContent = label
-      opt.addEventListener('click', () => this.menuActions?.togglePerformance())
-      perfContainer.appendChild(opt)
+    // Stage dropdown — populate and wire
+    const stageList = screen.querySelector('[data-stage="list"]') as HTMLElement | null
+    const stageTrigger = screen.querySelector('[data-stage="trigger"]') as HTMLElement | null
+    if (stageList) {
+      for (let i = 0; i < STAGES.length; i++) {
+        const item = this.createElement('div', 'menu-stage-item')
+        item.dataset.stageIndex = String(i)
+        item.innerHTML = `<span class="menu-stage-item-num">${String(i + 1).padStart(2, '0')}</span><span class="menu-stage-item-name">${STAGES[i].name}</span>`
+        item.addEventListener('click', (e) => {
+          e.stopPropagation()
+          this.menuActions?.selectStage(i)
+          this.closeStageDropdown()
+        })
+        stageList.appendChild(item)
+      }
     }
-    this.menuPerfOptions = Array.from(
-      perfContainer.querySelectorAll('.menu-option'),
-    ) as HTMLElement[]
-
-    // Stage selector arrows
-    const stagePrev = screen.querySelector('[data-stage="prev"]') as HTMLElement | null
-    const stageNext = screen.querySelector('[data-stage="next"]') as HTMLElement | null
-    stagePrev?.addEventListener('click', () => this.menuActions?.cycleStage(-1))
-    stageNext?.addEventListener('click', () => this.menuActions?.cycleStage(1))
+    stageTrigger?.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.toggleStageDropdown()
+    })
+    // Close dropdown when clicking outside
+    screen.addEventListener('click', () => this.closeStageDropdown())
 
     // Start button — mouse equivalent of Enter/Space (new game)
     const startBtn = screen.querySelector('[data-menu="start"]') as HTMLElement | null
@@ -553,7 +557,7 @@ export class UIManager {
         : 'Continue from your last manual save'
     }
     if (this.menuStartBtn) {
-      this.menuStartBtn.textContent = this.hasResume ? 'NEW GAME ▶' : 'PRESS ENTER / CLICK TO START'
+      this.menuStartBtn.textContent = this.hasResume ? 'NEW GAME' : 'START GAME'
     }
   }
 
@@ -617,6 +621,11 @@ export class UIManager {
       }
     }
 
+    // Close stage dropdown when leaving menu
+    if (screen !== 'menu') {
+      this.closeStageDropdown()
+    }
+
     // Show/hide HUD based on state
     if (screen === 'menu' || screen === 'victory') {
       this.hudBar.classList.remove('visible')
@@ -627,6 +636,16 @@ export class UIManager {
     // Pause indicator lives in the STAGE area of the HUD bar (not a floating
     // overlay) so the battle field stays fully visible for screenshots.
     this.hudBar.classList.toggle('paused', screen === 'paused')
+
+    // Footer hints (P Pause · Alt+R Reset · Alt+S Save) — only during gameplay,
+    // not on menu / victory / recovery screens.
+    this.footer.classList.toggle(
+      'visible',
+      screen === 'playing' ||
+        screen === 'paused' ||
+        screen === 'gameover' ||
+        screen === 'stageclear',
+    )
 
     // Reset recovery screen sub-state when leaving recovery
     if (screen !== 'recovery') {
@@ -847,25 +866,24 @@ export class UIManager {
     }
   }
 
-  /** Reflect the current Performance Mode in the menu (ON/OFF highlight) and
-   *  on the HUD pause pill (so an in-game switch while paused is visible
-   *  without an overlay covering the battle field). Called at boot and
-   *  whenever the mode is toggled. The value lives on GameSettings, not the
-   *  World, so Game pushes it here directly. */
-  setPerformanceMode(on: boolean): void {
-    for (const opt of this.menuPerfOptions) {
-      opt.classList.toggle('selected', (opt.dataset.value === 'ON') === on)
-    }
-    if (this.hudPauseHint) {
-      this.hudPauseHint.textContent = `← → Perf: ${on ? 'ON' : 'OFF'} · P Resume`
-    }
-  }
-
   /** Toggle the developer Performance Observatory overlay (F6 hotkey / Control
    *  Center button). Keeps the Control Center's DEVELOPER button in sync. */
   togglePerfOverlay(): void {
     this.perfOverlay.toggle()
     this.controlCenter.setPerfState(this.perfOverlay.active)
+  }
+
+  // ---- Stage dropdown ----
+
+  private toggleStageDropdown(): void {
+    this.stageDropdownOpen = !this.stageDropdownOpen
+    this.menuStageDropdown?.classList.toggle('open', this.stageDropdownOpen)
+  }
+
+  private closeStageDropdown(): void {
+    if (!this.stageDropdownOpen) return
+    this.stageDropdownOpen = false
+    this.menuStageDropdown?.classList.remove('open')
   }
 
   private updateMenu(world: World): void {
@@ -887,9 +905,14 @@ export class UIManager {
 
     // Highlight selected menu row (cursor) — only when changed.
     // Row indices shift down by one when the RESUME row is present.
+    // Full order: RESUME? / DIFFICULTY / THEME / STAGE / NEW GAME / CONTROLS
     if (world.menuCursor !== this.lastMenuCursor) {
       this.lastMenuCursor = world.menuCursor
       const off = this.hasResume ? 1 : 0
+      // Close stage dropdown when cursor moves away from STAGE row
+      if (world.menuCursor !== off + 2) {
+        this.closeStageDropdown()
+      }
       for (const row of this.menuRows) {
         const idx =
           row.dataset.menu === 'resume'
@@ -900,10 +923,22 @@ export class UIManager {
                 ? off + 1
                 : row.dataset.menu === 'stage'
                   ? off + 2
-                  : row.dataset.menu === 'perf'
+                  : row.dataset.menu === 'start-row'
                     ? off + 3
-                    : -1
+                    : row.dataset.menu === 'controls'
+                      ? off + 4
+                      : -1
         row.classList.toggle('selected', idx === world.menuCursor)
+      }
+      // Show ENTER hint only on RESUME and NEW GAME rows when selected
+      if (this.menuResumeHint) {
+        this.menuResumeHint.classList.toggle('visible', this.hasResume && world.menuCursor === 0)
+      }
+      if (this.menuStartHint) {
+        this.menuStartHint.classList.toggle('visible', world.menuCursor === off + 3)
+      }
+      if (this.menuControlsHint) {
+        this.menuControlsHint.classList.toggle('visible', world.menuCursor === off + 4)
       }
     }
 
