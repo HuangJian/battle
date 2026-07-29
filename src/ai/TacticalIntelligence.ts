@@ -14,8 +14,9 @@ import {
   NONE_TURN_MIN_MS,
   NONE_TURN_JITTER_MS,
   NONE_FIRE_JITTER_MS,
+  VERT_TUNNEL_THRESHOLD_MS,
 } from '../constants'
-import { opposite, ALL_DIRS, snap } from '../utils/helpers'
+import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
@@ -91,18 +92,22 @@ export class TacticalIntelligence {
     brain.thinkTimer -= this.dt
     brain.fireTimer -= this.dt
 
-    // Blocked ahead? (terrain/bounds only — tank-vs-tank jams unstick via the
-    // periodic timer re-roll, like the original game's bump-and-turn feel).
+    // Check if blocked by terrain/bounds OR by another tank ahead.
+    // Tank-tank jams now trigger re-roll so enemies don't permanently
+    // deadlock when facing each other in corridors.
     const gx = snap(tank.x, CELL)
     const gy = snap(tank.y, CELL)
     const v = DIR_VECTORS[brain.currentDir]
     const nx = gx + v.dx * CELL
     const ny = gy + v.dy * CELL
-    const blocked =
+    const terrainBlocked =
       !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
+    const tankBlocked = !terrainBlocked && isTankAhead(world, tank, nx, ny)
+    const blocked = terrainBlocked || tankBlocked
 
     // Direction re-roll trigger: FC-1985 faithful mode re-rolls ONLY on
-    // collision; modern mode also re-rolls on timer expiry to prevent jams.
+    // collision (terrain, bounds, or tank-tank); modern mode also re-rolls
+    // on timer expiry to prevent jams.
     const shouldReroll = rules.turnOnCollisionOnly ? blocked : brain.thinkTimer <= 0 || blocked
 
     if (shouldReroll) {
@@ -111,9 +116,13 @@ export class TacticalIntelligence {
         const dv = DIR_VECTORS[d]
         const ox = gx + dv.dx * CELL
         const oy = gy + dv.dy * CELL
-        if (world.isInBounds(ox, oy, TANK, TANK) && !world.rectHitsTerrain(ox, oy, TANK, TANK)) {
-          open.push(d)
-        }
+        if (!world.isInBounds(ox, oy, TANK, TANK)) continue
+        if (world.rectHitsTerrain(ox, oy, TANK, TANK)) continue
+        // Also filter out directions blocked by other tanks (except the
+        // tank itself). This prevents the AI from re-choosing a direction
+        // that is immediately blocked by another tank.
+        if (isTankAhead(world, tank, ox, oy)) continue
+        open.push(d)
       }
       if (open.length === 0) {
         // Fully boxed in — back out (see chooseDirection's jam note).
@@ -130,6 +139,9 @@ export class TacticalIntelligence {
       // (nextFireInterval + NONE_FIRE_JITTER_MS) window (objective floor, §3).
       brain.fireTimer = tank.nextFireInterval + world.rng.next() * NONE_FIRE_JITTER_MS
     }
+
+    // Dead-end recovery: tunnel out of a 1-wide shaft if confined laterally.
+    this.maybeTunnelOut(world, tank, brain)
 
     tank.dir = brain.currentDir
     tank.moving = true
@@ -181,6 +193,9 @@ export class TacticalIntelligence {
     // --- Reactive layer (bullet avoidance, every tick) ---
     this.reactiveDodge(world, tank, brain, cfg, p, s)
 
+    // --- Dead-end recovery (tunnel out of a 1-wide shaft) ---
+    this.maybeTunnelOut(world, tank, brain)
+
     // --- Firing decision ---
     this.updateFiring(world, tank, brain, cfg, p, s, fire)
 
@@ -206,7 +221,11 @@ export class TacticalIntelligence {
     // cornered and fragile. Goal stability (§12): this changes rarely.
     let goal: GoalType = 'attackBase'
     const r = world.rng.next()
-    if (p.hasPlayer && s.distToPlayer < FIELD * 0.4 && r < 0.4) {
+    // A decoy (诱饵) is a high-priority lure: when one is up, lean the
+    // long-term objective toward destroying it (new-powerups-plan §4.4).
+    if (p.hasDecoy && r < 0.6) {
+      goal = 'attackAlly'
+    } else if (p.hasPlayer && s.distToPlayer < FIELD * 0.4 && r < 0.4) {
       goal = 'attackPlayer'
     } else if (s.threat && _tank.hp <= 1 && r < 0.3) {
       goal = 'retreat'
@@ -305,6 +324,18 @@ export class TacticalIntelligence {
     // advance (always-present baseline; mobility makes flanking cheaper)
     const advance = w.advance * 0.3 + bias.flank * 0.6
 
+    // attackAlly (decoy) — when a decoy (诱饵) is on the field, enemies
+    // prefer to shoot it instead of pressing the base/player. Closeness boosts
+    // the pull so nearby decoys dominate; distant ones are a weaker lure
+    // (new-powerups-plan §4.4).
+    let attackAlly = -Infinity
+    if (p.hasDecoy) {
+      const distToDecoy = manhattan(tank.x + tank.w / 2, tank.y + tank.h / 2, p.decoyX, p.decoyY)
+      const closeness = 1 - Math.min(1, distToDecoy / maxDist)
+      attackAlly = w.attackAlly * (0.5 + 0.5 * closeness) + pushAttack
+      if (brain.strategicGoal === 'attackAlly') attackAlly += 0.5
+    }
+
     const scores: Array<[GoalType, number]> = [
       ['attackBase', attackBase],
       ['attackPlayer', attackPlayer],
@@ -312,6 +343,7 @@ export class TacticalIntelligence {
       ['retreat', retreat],
       ['regroup', regroup],
       ['advance', advance],
+      ['attackAlly', attackAlly],
     ]
     scores.sort((a, b) => b[1] - a[1])
     return scores[0][0]
@@ -329,6 +361,12 @@ export class TacticalIntelligence {
   ): { x: number; y: number } {
     const cx = tank.x + tank.w / 2
     const cy = tank.y + tank.h / 2
+
+    // Decoy (诱饵) target — steer toward the fake tank so it enters line of
+    // fire and draws shots away from the player (new-powerups-plan §4.4).
+    if (goal === 'attackAlly' && p.hasDecoy) {
+      return { x: p.decoyX, y: p.decoyY }
+    }
 
     // Baseline objective: base if present, else player, else forward.
     let tx = p.hasBase ? p.baseX : p.hasPlayer ? p.playerX : cx
@@ -534,6 +572,83 @@ export class TacticalIntelligence {
   }
 
   // ================================================================
+  // Dead-end recovery — tunnel out of a 1-wide shaft (§StuckSpawn)
+  // ================================================================
+
+  /**
+   * Recover a tank that has been confined to a single-axis channel (its open
+   * directions contain no lateral move) — the classic "spins up/down in a
+   * 1-wide shaft, never turns left/right" trap (e.g. Stage 8 middle spawn).
+   *
+   * When the channel lasts past VERT_TUNNEL_THRESHOLD_MS, face the side whose
+   * adjacent cell is a destructible brick and let the firing layer break it
+   * (updateFiring sees `wallInLineOfFire`); once the wall is gone the lateral
+   * direction opens and normal routing carries the tank out. A pure
+   * steel/water box has nothing to break, so it harmlessly keeps oscillating.
+   *
+   * Pure terrain read — no hidden state, deterministic (world.rng unused).
+   */
+  private maybeTunnelOut(world: World, tank: Tank, brain: AIState): void {
+    const hasLateral = this.canStepLat(world, tank, 'left') || this.canStepLat(world, tank, 'right')
+    if (hasLateral) {
+      brain.vertOnlyTicks = 0
+      return
+    }
+    brain.vertOnlyTicks += this.dt
+    if (brain.vertOnlyTicks < VERT_TUNNEL_THRESHOLD_MS) return
+
+    const base = world.tileMap.getBasePos()
+    const targetX = base ? base.x + CELL : tank.x + tank.w / 2
+    const sides: Direction[] = tank.x + tank.w / 2 < targetX ? ['right', 'left'] : ['left', 'right']
+    for (const side of sides) {
+      if (this.adjacentDestructible(world, tank, side)) {
+        brain.currentDir = side
+        tank.dir = side
+        tank.moving = true
+        return
+      }
+    }
+    // No destructible wall on either side — genuinely boxed; leave as-is.
+  }
+
+  /** Terrain-only step check along `dir` (ignores transient tank blocks). */
+  private canStepLat(world: World, tank: Tank, dir: Direction): boolean {
+    const v = DIR_VECTORS[dir]
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const nx = gx + v.dx * TANK
+    const ny = gy + v.dy * TANK
+    const sx = Math.min(gx, nx)
+    const sy = Math.min(gy, ny)
+    const sw = Math.abs(nx - gx) + TANK
+    const sh = Math.abs(ny - gy) + TANK
+    if (!world.isInBounds(sx, sy, sw, sh)) return false
+    return !world.rectHitsTerrain(sx, sy, sw, sh)
+  }
+
+  /** True if the cell(s) immediately to `side` of the tank are destructible brick. */
+  private adjacentDestructible(world: World, tank: Tank, side: Direction): boolean {
+    const v = DIR_VECTORS[side]
+    const gx = snap(tank.x, CELL)
+    const gy = snap(tank.y, CELL)
+    const rx = v.dx !== 0 ? gx + v.dx * CELL : gx
+    const ry = v.dy !== 0 ? gy + v.dy * CELL : gy
+    const rw = v.dx !== 0 ? CELL : TANK
+    const rh = v.dy !== 0 ? CELL : TANK
+    if (!world.isInBounds(rx, ry, rw, rh)) return false
+    const c0 = Math.floor(rx / CELL)
+    const r0 = Math.floor(ry / CELL)
+    const c1 = Math.floor((rx + rw - 1) / CELL)
+    const r1 = Math.floor((ry + rh - 1) / CELL)
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (world.tileMap.get(c, r) === 'brick') return true
+      }
+    }
+    return false
+  }
+
+  // ================================================================
   // Firing decision
   // ================================================================
 
@@ -549,18 +664,23 @@ export class TacticalIntelligence {
     if (brain.fireTimer > 0) return
 
     let shoot = false
-    if (s.baseInLineOfFire || s.playerInLineOfFire) {
-      shoot = true // always take a clear kill / base shot
+    if (s.baseInLineOfFire || s.playerInLineOfFire || s.decoyInLineOfFire) {
+      shoot = true // always take a clear kill / base / decoy shot
     } else if (s.wallInLineOfFire) {
       // Break a wall that blocks progress toward the objective.
       const g = brain.tacticalGoal
-      if (g === 'destroyWall' || g === 'attackBase' || g === 'attackPlayer') shoot = true
+      if (g === 'destroyWall' || g === 'attackBase' || g === 'attackPlayer' || g === 'attackAlly')
+        shoot = true
     } else if (world.rng.next() < effectiveAggression(cfg, tank)) {
       shoot = true // opportunistic fire when no clear shot
     }
 
     // aimError: even a good shot can be "fumbled" by low intelligence.
-    if (shoot && (s.baseInLineOfFire || s.playerInLineOfFire) && world.rng.next() < cfg.aimError) {
+    if (
+      shoot &&
+      (s.baseInLineOfFire || s.playerInLineOfFire || s.decoyInLineOfFire) &&
+      world.rng.next() < cfg.aimError
+    ) {
       shoot = false
     }
 
@@ -680,6 +800,15 @@ function clamp(v: number, min: number, max: number): number {
  * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
  * while modern modes keep the strong downward pull (down: 3, up: 0.35).
  */
+/** True if a live tank (other than `self`) occupies the given cell region. */
+function isTankAhead(world: World, self: Tank, x: number, y: number): boolean {
+  for (const t of world.allTanks) {
+    if (t === self || !t.alive) continue
+    if (aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) return true
+  }
+  return false
+}
+
 function pickClassicDir(open: Direction[], world: World, rules: GameplayRules): Direction {
   const weights = rules.classicDirWeights
   let total = 0

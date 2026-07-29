@@ -58,6 +58,28 @@ body {
   justify-content: center;
 }
 
+/* Fullscreen mode — the app fills the entire screen.
+   Uses the native :fullscreen pseudo-class + a .is-maximized CSS fallback
+   for iOS Safari and browsers that don't support the Fullscreen API. */
+#app:fullscreen,
+#app.is-maximized {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
+  background: #000;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#app:fullscreen .game-canvas,
+#app.is-maximized .game-canvas {
+  max-width: none;
+  max-height: none;
+}
+
 .game-wrapper {
   display: flex;
   flex-direction: column;
@@ -94,6 +116,7 @@ body {
 .hud-bar.visible {
   opacity: 1;
   transform: translateY(0);
+  pointer-events: auto;
 }
 
 .hud-group {
@@ -107,6 +130,13 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 2px;
+}
+/* The `hidden` attribute must win over the `display: flex` above, otherwise
+   setting el.hidden on a HUD item (e.g. the super-power-up counters in
+   classic mode, where superDropChance === 0) has no visual effect. Mirrors
+   the `.buff-chip[hidden]` rule already used for timed-buff chips. */
+.hud-item[hidden] {
+  display: none;
 }
 
 .hud-label {
@@ -139,6 +169,62 @@ body {
   color: var(--theme-accent-primary);
   letter-spacing: 1px;
   text-shadow: 0 0 8px color-mix(in srgb, var(--theme-accent-primary) 45%, transparent);
+}
+
+/* Replay indicator — persistent badge in the HUD center area during playback. */
+.hud-replay {
+  margin-right: 8px;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.hud-replay:hover {
+  transform: scale(1.05);
+}
+.hud-replay-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #ff4040;
+  text-shadow: 0 0 10px rgba(255, 64, 64, 0.6);
+  animation: replay-pulse 1.5s ease-in-out infinite;
+}
+
+.hud-replay.replay-paused .hud-replay-text {
+  color: var(--theme-accent-primary);
+  text-shadow: 0 0 10px rgba(232, 200, 64, 0.6);
+  animation: none;
+}
+
+.hud-replay-progress {
+  width: 80px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 6px;
+}
+
+.hud-replay-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #ff4040;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.hud-replay.replay-paused .hud-replay-progress-bar {
+  background: var(--theme-accent-primary);
+}
+
+@keyframes replay-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 /* Pause indicator — sits in the HUD's STAGE area (hud-center) so pausing never
@@ -265,6 +351,10 @@ body {
   max-width: 100vw;
   max-height: calc(100vh - 96px);
   background: var(--theme-bg);
+  /* The canvas is focusable (tabindex) so the game can reclaim keyboard
+     focus after a stage transition / browser overlay. Hide the focus ring —
+     this is a game surface, not a form control. */
+  outline: none;
 }
 
 /* ================================================================
@@ -1122,6 +1212,34 @@ body {
   z-index: 30; /* above pause / recovery screens */
 }
 
+/* Replay Browser reuses the Snapshot Browser chrome, so it shares the
+   full-viewport modal positioning. */
+.ui-replays {
+  position: fixed;
+  inset: 0;
+  background: var(--theme-overlay-bg);
+  z-index: 30; /* above pause / recovery screens */
+}
+
+/* Replay type badges (victory green / defeat red). */
+.snap-type-victory {
+  color: var(--theme-success);
+  border-color: var(--theme-success);
+}
+.snap-type-defeat {
+  color: var(--theme-danger);
+  border-color: var(--theme-danger);
+}
+
+/* Favorite toggle button in the Replay Browser. */
+.snap-fav {
+  color: var(--theme-text-secondary);
+}
+.snap-fav-on {
+  color: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+}
+
 .snap-panel {
   display: flex;
   flex-direction: column;
@@ -1170,6 +1288,28 @@ body {
 .snap-close {
   padding: 6px 12px;
   white-space: nowrap;
+}
+
+.snap-close kbd {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 3px;
+  color: var(--theme-text-secondary);
+  margin-left: 4px;
+}
+
+.snap-storage {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--theme-text-muted);
+  white-space: nowrap;
+  padding: 4px 8px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 4px;
 }
 
 .snap-list {
@@ -1468,10 +1608,21 @@ body {
   text-align: left;
 }
 
-.cc-btn:hover:not(.cc-btn-disabled) {
+.cc-btn:hover:not(.cc-btn-disabled):not(:disabled) {
   color: var(--theme-text-primary);
   background: var(--theme-button-hover);
   border-color: var(--theme-accent-primary);
+}
+
+.cc-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--theme-text-muted);
+  border-color: transparent;
+}
+
+.cc-btn:disabled:hover {
+  background: var(--theme-button-bg);
 }
 
 .cc-btn.selected {
@@ -1503,7 +1654,7 @@ body {
 
 .cc-btn-disabled {
   opacity: 0.45;
-  cursor: default;
+  cursor: not-allowed;
 }
 
 .cc-soon {

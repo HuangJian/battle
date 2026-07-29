@@ -58,6 +58,11 @@ export interface GameplayRules {
   maxBullets: Partial<Record<TankKind, number>>
   /** Star level that raises the player's bullet cap by +1 (2★ double-shot). */
   playerDoubleShotLevel: number
+  /** Minimum cooldown (ms) between shots in 'bulletCap' mode. Even though
+   *  the bullet cap is the primary limiter, this floor prevents instant
+   *  refire when a bullet resolves at close range — a single-frame gap
+   *  is too fast and feels like a machine gun. 0 = no minimum (pure cap). */
+  bulletCapMinCooldownMs: number
 
   // ── Star progression ─────────────────────────────────────────
   /** 'universal' = all-dim growth (modern); 'functional' = FC ladder. */
@@ -145,6 +150,14 @@ export interface GameplayRules {
   // ── Terrain (stretch, not implemented) ───────────────────────
   brickGranularity: 'cell' | 'quarter'
 
+  // ── Drop position randomization ─────────────────────────────
+  /** Probability weights for near/mid/far drop positions relative to the
+   *  killed enemy position. Weights are normalized internally. Near: 0-1 cells
+   *  offset; Mid: 1-2 cells; Far: 2-3 cells. */
+  dropPositionWeights: { near: number; mid: number; far: number }
+  /** Maximum offset distance in cells for each tier. */
+  dropPositionRanges: { near: number; mid: number; far: number }
+
   // ── Cadence ──────────────────────────────────────────────────
   /** Delay between enemy spawns (ms). */
   spawnIntervalMs: number
@@ -177,27 +190,43 @@ export const DEFAULT_RULES: GameplayRules = {
   fireModel: 'cooldown',
   maxBullets: {},
   playerDoubleShotLevel: 2, // unused in 'cooldown'
+  bulletCapMinCooldownMs: 0, // unused in 'cooldown'
 
   starModel: 'universal',
   starPerks: {},
   fastBulletMult: 1.0, // unused in 'universal'
 
   superDropChance: SUPER_POWERUP_DROP_CHANCE, // 0.1 — current 强力道具 roll
-  allowedPowerups: ['star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat'],
+  allowedPowerups: [
+    'star',
+    'bomb',
+    'shield',
+    'freeze',
+    'tank',
+    'fence',
+    'boat',
+    'repair',
+    'emp',
+    'decoy',
+    'mine',
+  ],
   dropSchedule: 'modern',
   fixedDropKillIndices: [],
-  dropOnEveryNKills: 10, // isTenthKill
+  dropOnEveryNKills: 5, // Phase 0: every-5-kills drop
   dropOnScoreMilestone: SCORE_DROP_INTERVAL, // 5000
   dropOnEliteKill: true, // isElite
   bonusEnemyEveryNSpawns: 4, // every 4th spawned enemy is a bonus carrier
 
+  dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
+  dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
+
   speedJitter: true, // current ±5% jitter ON
 
-  speedCps: BASE_SPEED_CPS, // current differentiated table (2.5/3.0/2.375/2.125/2.625)
-  playerSpeedPerStarCps: PLAYER_SPEED_PER_STAR_CPS, // +0.125/star (→ 3.0 cps at 3★)
+  speedCps: BASE_SPEED_CPS, // balanced=classic(3.75), others keep original ratios
+  playerSpeedPerStarCps: PLAYER_SPEED_PER_STAR_CPS, // +0.25/star (→ 4.6875 cps at 3★)
 
-  bulletSpeedCps: BASE_BULLET_SPEED_CPS, // current ×4 differentiated table
-  playerBulletSpeedPerStarCps: PLAYER_BULLET_SPEED_PER_STAR_CPS, // +0.5/star (→ 12.0 cps at 3★)
+  bulletSpeedCps: BASE_BULLET_SPEED_CPS, // balanced=classic(15), others keep original ratios
+  playerBulletSpeedPerStarCps: PLAYER_BULLET_SPEED_PER_STAR_CPS, // +0.5/star (→ 17.25 cps at 3★)
 
   scoreModel: 'flat',
   scoreByKind: {},
@@ -229,6 +258,14 @@ export const RULES: Record<string, GameplayRules> = {
     fireModel: 'bulletCap',
     maxBullets: { basic: 1, fast: 1, power: 1, armor: 1, player: 1 },
     playerDoubleShotLevel: 2, // 2★ raises player cap to 2
+    // Minimum cooldown between shots: 300ms ≈ 18 frames at 60fps. This
+    // prevents instant refire when a bullet resolves at close range —
+    // the original FC had a natural ~0.5s cadence because bullets traveled
+    // slowly across the full field. At close range the bullet resolves in
+    // 1-2 frames, so without this floor the player would fire like a
+    // machine gun. 300ms is aggressive enough to feel responsive but slow
+    // enough to prevent the "hold fire = instakill" exploit.
+    bulletCapMinCooldownMs: 300,
 
     starModel: 'functional',
     starPerks: {
@@ -246,6 +283,9 @@ export const RULES: Record<string, GameplayRules> = {
     dropOnScoreMilestone: 0,
     dropOnEliteKill: false,
     bonusEnemyEveryNSpawns: 0, // classic uses fixedDropKillIndices for carriers
+
+    dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
+    dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
 
     speedJitter: false, // no ±5% jitter (issue #7: BOTH tank + bullet)
 

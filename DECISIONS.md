@@ -1197,7 +1197,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 8. **Bullet speed `'bulletSpeedCps'`** — the per-kind bullet-speed table is now **config-driven** (user request 2026-07-28 follow-up: the in-flight bullet computed at fire time via `spawnBulletSpeedPxPerTick` previously ignored `world.rules` and always used modern `BASE_BULLET_SPEED_CPS`, so classic shells fired at modern speed). Classic carries the faithful FC table in **cells/sec** via the same ×7.5 conversion: most tanks **15 cps (= 2 px/frame, the "slow" projectile)**, Power **30 cps (= 4 px/frame, the "fast" projectile)**, player base **15 cps**. FC does NOT spread bullet speed per kind (1.05/0.95/0.90 like modern) — Power alone is 2×. Player growth is **perk-driven, not linear**: `playerBulletSpeedPerStarCps: 0` in classic, and the 1★ `fastBullet` perk multiplies the base by `fastBulletMult` (set to **2.0** for classic → 15 → 30 cps = 2 → 4 px/frame, faithful); the perk then stays for every higher star level. Modern keeps the differentiated ×4 `BASE_BULLET_SPEED_CPS` table via `DEFAULT_RULES.bulletSpeedCps` with `fastBulletMult: 1.0` (unused) and `playerBulletSpeedPerStarCps: PLAYER_BULLET_SPEED_PER_STAR_CPS` (+0.5/star). Wired through **both** `profileToStats` (tank stat) **and** `spawnBulletSpeedPxPerTick` (the actual fired bullet) at Simulation fire sites (lines ~406, ~953), and `baseBulletSpeedPxPerTick` gained optional `bulletSpeedCps`/`playerPerStar` params defaulting to the modern constants so all non-rules callers stay green.
 
-**Snapshot semantics (issues #1/#3):** `world.rules` is intentionally **NOT serialized**. Rules are set once per run by `startGame` and are constant for the run's lifetime; `restoreWorld` overwrites gameplay state but never touches `rules`/`difficultyKey`, so the active profile survives rewind automatically and there is no second copy to drift out of sync. `tests/classic-rules.test.ts` locks this in (including asserting the snapshot carries no `rules` payload).
+**Snapshot semantics (issues #1/#3, corrected 2026-07-28):** the run profile (`rules` / `difficulty` / `theme`) now **travels with the snapshot**. `WorldSnapshot` carries `difficultyKey` + `themeKey`; `cloneWorld` writes them and `restoreWorld` re-derives `world.rules = RULES[key]`, `world.difficulty = DIFFICULTIES[key]`, `world.theme = THEMES[key]` on restore. This fixes a reported bug where a **classic save loaded into a World holding modern rules (the menu default) silently ran the modern ruleset** — the old assumption ("rules set once per run, rewind auto-preserves them") only held within a single run, not across sessions/from-menu loads. Within a run, restoreWorld still returns the same profile (the snapshot captured the run's difficulty key), so rewind behavior is unchanged. The snapshot still carries no `rules` *object* (the profile is re-derived from the keys), keeping a single source of truth.
 
 **Non-goals:** `enemyBehavior: 'phased'` (the tactical-intelligence framework) is a deliberate non-faithful extra and stays enabled in classic — it passed the Three Gates on fun where the FC AI would not (recorded during plan review). Brick quarter-cell granularity (plan Phase 8) is deferred; `brickGranularity` exists in the rules shape so that future change stays data-driven too.
 
@@ -1247,7 +1247,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 34. God AI Curriculum — 分阶段验证框架 + S6 参数化 + hasBase 守卫 (2026-07-28)
+## 36. God AI Curriculum — 分阶段验证框架 + S6 参数化 + hasBase 守卫 (2026-07-28)
 
 **Decision:** Implement the God-AI-Curriculum plan (§3, §5.1, §5.3, §5.4) — infrastructure for per-subsystem verification, the `hasBase` guard, S6 `canHunt` threshold parameterization, and the `tools/curriculum.ts` scaffold.
 
@@ -1281,7 +1281,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 35. God AI Navigation — Distance-Adaptive A* + directMove Hybrid (2026-07-28)
+## 37. God AI Navigation — Distance-Adaptive A* + directMove Hybrid (2026-07-28)
 
 **Decision:** Replace the `directMove`-only navigation with a distance-adaptive hybrid: A* pathfinding (`followPath`) for long-range navigation (>5 cells Manhattan), `directMove` for close-range pursuit (≤5 cells). Additionally, remove `suboptimalPathProb` from `followPath`, relax base-defense constraints when the base is not under threat, and allow `canHunt` without the `!baseUnderThreat` gate.
 
@@ -1343,7 +1343,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 37. God AI v3 Float-Param Write-Back Fix + Regression Gate (2026-07-28)
+## 39. God AI v3 Float-Param Write-Back Fix + Regression Gate (2026-07-28)
 
 **Decision:** During CMA-ES v3 tuning, the optimizer's `bestParams` (`optimization-v3/optimization-summary.json`) included two FLOAT fields that carry most of the win-rate gain: `aimError = 0.002423129688943702` and `suboptimalPathProb = 0.06178084394496533`. On the optimizer's eval seeds (1–8, 18000 ticks) these produce **37.5% win / 16.4 kills / 100% base**, versus **25% / 13.9 kills** for the rounded shipped values (`aimError → 0`, `suboptimalPathProb → 0.06`). The initial write-back dropped the two floats, so the shipped AI was weaker than the reported result. On 2026-07-28 the precise floats were written back into `DEFAULT_GOD_AI_PARAMS`, restoring the optimizer's discovered strength.
 
@@ -1361,7 +1361,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 38. God AI CMA-ES v4.1 — Verification of Results Report (2026-07-29)
+## 40. God AI CMA-ES v4.1 — Verification of Results Report (2026-07-29)
 
 **Context:** User reported a v4.1 optimization (fitness v3 to v4 to v4.1, seeds 8 to 40, win 20% / base 85% to 97.5% / kills 10.8 to 12.0 / gameovers 6 to 1). Trust-but-verify pass, parallel to 36/37.
 
@@ -1383,7 +1383,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 39. God AI P0 — T2a Deadlock Fix: Anti-Camp + scan.enemy Gate + Nav-Stuck Escape (2026-07-29)
+## 41. God AI P0 — T2a Deadlock Fix: Anti-Camp + scan.enemy Gate + Nav-Stuck Escape (2026-07-29)
 
 **Decision:** Implement the three P0 behavioral fixes from plan/God-AI-Next-Round.md to break the T2a decision-flow deadlock that capped Stage 0/1 Classic win rate at ~20%.
 
@@ -1413,7 +1413,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 
 ---
 
-## 40. God AI P1 — Survival & Defense Fixes: Wider Dodge + Proactive Base Defense (2026-07-29)
+## 42. God AI P1 — Survival & Defense Fixes: Wider Dodge + Proactive Base Defense (2026-07-29)
 
 **Decision:** Implement four P1 fixes targeting the dominant failure mode (gameovers from player death and base destruction) that remained after the P0 T2a deadlock fix.
 
@@ -1443,7 +1443,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - The wider `baseUnderThreat` (8 cols, row >= 20) was tested and rejected — it caused excessive turtling and reduced win rates. The 3-col / row >= 18 version is the optimal balance.
 - Remaining failures: 2 gameovers (seeds 2, 13 on Stage 0 — enemy walks along base row from far away), 6 timeouts (pursuit problem with 16-18 kills — fast enemies dodge bullets).
 
-## 41. God AI P2 — Anti-Camp Zone Fix + Nav-Stuck Fallback + Predictive Firing (2026-07-29)
+## 43. God AI P2 — Anti-Camp Zone Fix + Nav-Stuck Fallback + Predictive Firing (2026-07-29)
 
 **Decision:** Three targeted behavioral fixes for the remaining failure modes after P0/P1:
 
@@ -1476,7 +1476,7 @@ All three call the single `spawnPowerUp(at?)` helper, which now accepts an optio
 - Remaining failures: Stage 3/4 low-kill timeouts (k0-k7, same stuck pattern but on different seeds), Stage 0 gameovers (player too far from base), Stage 4 pursuit timeouts (k17-k18, can't finish last 2-3 enemies).
 - Next step: CMA-ES parameter re-optimization (P2 original plan) to tune all params together now that the architecture fixes are in place.
 
-## 42. God AI P3 — A* Dig-Through-Brick + Nav-Stuck Center Fix + Multi-Stage CMA-ES (2026-07-29)
+## 44. God AI P3 — A* Dig-Through-Brick + Nav-Stuck Center Fix + Multi-Stage CMA-ES (2026-07-29)
 
 **Decision:** Three structural navigation fixes + multi-stage CMA-ES optimization to address the "navigation/aiming paralysis" root cause identified in the full 35-stage baseline scan (plan/God-AI-P3-Direction.md).
 
@@ -1532,3 +1532,34 @@ These require further structural work (defense hardening, better pursuit) and ad
 - The CMA-ES multi-stage optimization is the first time the optimizer evaluated on more than one stage, preventing overfit to S0. The key discovery: reducing oscillation (suboptimalPathProb 0.093→0.038, replanInterval 3→50) is more important than any single strategy param.
 - The roaming constraint was reverted because defense constraint strategies consistently cause the negative feedback loop documented in §41: constraining movement → fewer kills → more enemies through → more gameovers. The correct approach to defense collapse is improving survival ability (dodge, positioning), not constraining movement.
 
+## 34. Timed Power-ups Stack Their Duration on Re-Pickup (2026-07-28)
+
+**Decision:** picking up a **second timed power-up while the first is still active accumulates** the full duration on top of the remaining time, rather than resetting to a fresh duration. Canonical example (user request): an active FREEZE with 3 s remaining, pick up another FREEZE → 23 s (3 + `POWERUP_DURATION_MS` 20 s).
+
+**Affected power-ups** (all "限时类道具"): `shield` (player `shieldTimer`), `freeze` (world `freezeTimer`), `boat` (player `boatTimer`), `fence` (world `fenceExpireFrame`). Implementation in `Simulation.applyPowerUp` / `applyFencePowerUp` (`src/game/Simulation.ts`): replace the `=` overwrite with `+= FULL_DURATION`. Per-buff: `p.shieldTimer = (p.shieldTimer ?? 0) + POWERUP_DURATION_MS`, `w.freezeTimer += POWERUP_DURATION_MS`, `p.boatTimer = (p.boatTimer ?? 0) + BOAT_DURATION_MS`, and `w.fenceExpireFrame = (w.fenceExpireFrame ?? w.frame) + FENCE_DURATION_FRAMES` (the `?? w.frame` guard handles a no-active-fence re-pick; the steel ring is re-laid idempotently over empty/brick cells, so re-applying is safe).
+
+**Display:** `UIManager.updateBuffs` already renders `Math.ceil(ms / 1000)`, so an accumulated >20 s countdown shows correctly with no HUD change.
+
+**Known interaction:** the player's spawn-protection shield (`RESPAWN_SHIELD_MS` = 3000 ms) shares the `shieldTimer` field, so the first shield pickup after spawn adds onto that 3 s rather than replacing it — consistent with the accumulate rule; it is not a separate buff.
+
+**No duration cap** was requested (the user's example is an unbounded add), so stacking is open-ended; this is a player-side power choice.
+
+**Regression tests:** `tests/super-powerups.test.ts` → describe "Timed power-ups stack their duration when re-picked (DECISIONS.md §33)": freeze 3 s → 23 s, shield/boat/fence accumulate, and re-pickup never *resets* a full-duration buff to less. Full suite **450 pass / 0 fail**; tsc clean.
+
+---
+
+## 35. Enemy dead-end shaft recovery (tunnel out of a 1-wide channel)
+
+**Date:** 2026-07-28 · **Type:** bug fix (gameplay / AI) · **Gates:** all three
+
+**Symptom (user bug report):** on Stage 8's middle enemy spawn point, two enemies spawn and then stay stuck there — spinning up/down at very high speed, firing randomly, never turning left/right.
+
+**Root cause:** the middle enemy spawn (original tile col 6 → sub-cols 12–13 → `x = 192`) sits in a 1-tank-wide **vertical shaft** on Stage 8 (Riverbed): up is out-of-bounds, left is brick, right is steel, and the bottom is steel/water. A goal-driven enemy descends into it and can only move vertically, so it shuttles up/down forever — `openDirs` never contains a lateral direction, so it never turns left/right and never faces the destructible brick it could break. The classic `None` branch and the higher-tier `TacticalIntelligence` branch both exhibit this (the `None` branch re-rolls among a vertical-only `open` set; the higher branch's `chooseDirection` returns a vertical dir because progress is only available vertically).
+
+**Decision:** add dead-end recovery to the enemy AI. When an enemy is confined to a single-axis channel — its open directions contain **no lateral axis** — for longer than `VERT_TUNNEL_THRESHOLD_MS` (450 ms), it faces the side whose adjacent cell is a **destructible brick** and fires to tunnel out; once the wall breaks the lateral direction opens and normal routing carries it out. A pure steel/water box has nothing to break, so it harmlessly keeps oscillating (authentic stages box spawns only with destructible brick, which we clear).
+
+**Implementation** (`src/ai/TacticalIntelligence.ts`): new `maybeTunnelOut(world, tank, brain)` called every tick from both `updateTank` (after `reactiveDodge`, before `updateFiring`) and `updateNoneTank` (before execution). It uses a terrain-only `canStepLat` to detect "no lateral open" (ignores transient tank blocks) and an `adjacentDestructible` cell scan to find the brick side (prefers the side toward the base). State lives on `AIState.vertOnlyTicks` (new field, auto-persisted by the shallow spread in `WorldSerializer.cloneTank`, no snapshot wiring needed). Pure terrain read — no `world.rng`, fully deterministic. Firing is delegated to the existing `updateFiring` layer, which already reports `wallInLineOfFire` for a brick ahead via `scanAhead`.
+
+**Why faithful / simple:** authentic Battle City enemies break bricks to advance; this merely lets a wedged enemy do the same instead of freezing. It is a small, localized addition to the AI brain and adds no gameplay state outside the World.
+
+**Regression tests:** `tests/classic-ai-jam.test.ts` → describe "Dead-end shaft recovery — tunnel out of a 1-wide vertical channel": a `None` and a `veteran` enemy force-spawned at the Stage 8 middle spawn must each span >1 cell horizontally within 1500 ticks (buggy behavior pins `x` to 192 → span ≈ 0). Full suite **452 pass / 0 fail**; tsc clean.

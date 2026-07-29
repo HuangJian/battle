@@ -76,6 +76,21 @@ export const FENCE_STEEL_COUNT = 12
 /** Boat power-up: amphibious movement duration (ms) */
 export const BOAT_DURATION_MS = 20000
 
+/** EMP power-up: enemy silence duration (ms) — enemies can move but not fire */
+export const EMP_DURATION_MS = 8000
+
+/** Mine power-up: arming delay (ms) before the mine becomes live */
+export const MINE_ARM_MS = 500
+
+/** Mine power-up: explosion radius (cells) */
+export const MINE_RADIUS_CELLS = 3
+
+/** Repair power-up: fraction of base max HP restored per pickup */
+export const REPAIR_HEAL_RATIO = 0.2
+
+/** Decoy power-up: lifespan (frames @ 60fps = 30s) */
+export const DECOY_LIFESPAN_FRAMES = 30 * 60
+
 /** Fence power-up: how long the steel ring around the base stays up (frames @ 60fps = 20s).
  *  After it expires the ring reverts to brick walls. */
 export const FENCE_DURATION_FRAMES = 20 * 60
@@ -150,6 +165,17 @@ export const NONE_TURN_MIN_MS = 700
 export const NONE_TURN_JITTER_MS = 900
 /** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
 export const NONE_FIRE_JITTER_MS = 1400
+
+/**
+ * Dead-end recovery: if an enemy is confined to a vertical-only (or
+ * horizontal-only) channel — open directions contain no lateral axis — for
+ * this long without escaping, it faces a destructible brick wall on the side
+ * and fires to tunnel out. Prevents the "stuck spinning up/down in a 1-wide
+ * shaft" trap (e.g. Stage 8's middle spawn, bounded by brick/steel/water).
+ * A pure steel/water box has nothing to break, so it still oscillates — but
+ * authentic stages box spawns only with destructible brick, which we clear.
+ */
+export const VERT_TUNNEL_THRESHOLD_MS = 450
 
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,

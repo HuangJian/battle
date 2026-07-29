@@ -26,7 +26,12 @@ export const KIND_THREAT_WEIGHT: Record<TankKind, number> = {
   player: 0,
 }
 
-/** S5a: power-up collection priority (lower = higher priority). */
+/** S5a: power-up collection priority (lower = higher priority).
+ * New types added by main's powerup work (new-powerups-plan §4 / §4.3):
+ *   - normal pool: repair (heal), emp (silence fire), decoy (draw fire), mine (AoE)
+ *   - super pool:   rewind (rewind to snapshot)
+ * Priorities mirror the existing scale: strong defensive/save effects rank
+ * high (low number), situational offensive utility ranks mid. */
 export const POWERUP_PRIORITY: Record<PowerUpType, number> = {
   bomb: 0,
   star: 1,
@@ -38,4 +43,11 @@ export const POWERUP_PRIORITY: Record<PowerUpType, number> = {
   frenzy: 5,
   guard: 3,
   sacrifice: 5,
+  // --- new normal power-ups (new-powerups-plan §4) ---
+  repair: 3, // 维修 — restore HP to max (defensive utility)
+  emp: 2, // 电磁静默 — silence enemy fire (strong crowd-control-like)
+  decoy: 4, // 诱饵 — spawn fake player (situational, defensive)
+  mine: 4, // 地雷 — place AoE mine (situational, offensive)
+  // --- new super power-up (§4.3) ---
+  rewind: 1, // 时光宝盒 — rewind to recent snapshot (high-value "save" card)
 }

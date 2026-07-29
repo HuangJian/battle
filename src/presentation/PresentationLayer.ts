@@ -26,6 +26,8 @@ export class PresentationLayer {
   ui: UIManager
   spriteCache: SpriteCache
   private dpr: number
+  /** Root element (#app) — stored for fullscreen API calls. */
+  private root: HTMLElement
 
   /** Throttle window-resize → canvas resize via one rAF per burst. */
   private _resizeRaf = 0
@@ -44,6 +46,7 @@ export class PresentationLayer {
   private _lastRecoveryCountdown = -1
 
   constructor(root: HTMLElement, performanceMode = false) {
+    this.root = root
     this.camera = new Camera()
     this.animations = new AnimationSystem()
     this.particles = new ParticleSystem()
@@ -74,6 +77,8 @@ export class PresentationLayer {
     this.resizeCanvas()
     window.addEventListener('resize', this.onResize)
     window.addEventListener('orientationchange', this.onResize)
+    // Listen for fullscreen changes to re-layout the canvas.
+    document.addEventListener('fullscreenchange', this.onFullscreenChange)
     // Re-run once layout has settled (fonts / stylesheet) so the first frame
     // is already correctly sized rather than flashing the CSS fallback size.
     requestAnimationFrame(() => this.resizeCanvas())
@@ -107,6 +112,53 @@ export class PresentationLayer {
       this._resizeRaf = 0
       this.resizeCanvas()
     })
+  }
+
+  /** Handle fullscreen change — re-layout canvas and sync UI state. */
+  private onFullscreenChange = (): void => {
+    this.resizeCanvas()
+    this.markNeedsRender()
+    // Sync the Control Center button label (ON/OFF).
+    this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+  }
+
+  /** Whether the Fullscreen API is supported on the root element. */
+  isFullscreenSupported(): boolean {
+    return 'requestFullscreen' in (this.root as HTMLElement)
+  }
+
+  /**
+   * Toggle fullscreen mode. Uses the Fullscreen API when available;
+   * falls back to a CSS `.is-maximized` class for iOS Safari and other
+   * browsers that don't support the API.
+   */
+  toggleFullscreen(): void {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {
+        // Ignore — browser may reject if no user gesture
+      })
+      return
+    }
+    if (this.isFullscreenSupported()) {
+      this.root.requestFullscreen().catch(() => {
+        // Fullscreen rejected (no user gesture? iframe?) → CSS fallback
+        this.root.classList.toggle('is-maximized')
+        this.resizeCanvas()
+        this.markNeedsRender()
+        this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+      })
+    } else {
+      // iOS Safari / unsupported → CSS fallback
+      this.root.classList.toggle('is-maximized')
+      this.resizeCanvas()
+      this.markNeedsRender()
+      this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+    }
+  }
+
+  /** Whether we are currently in fullscreen (API or CSS fallback). */
+  get isFullscreen(): boolean {
+    return !!(document.fullscreenElement || this.root.classList.contains('is-maximized'))
   }
 
   /**

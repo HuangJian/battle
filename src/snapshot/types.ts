@@ -1,4 +1,4 @@
-import type { Tank, Bullet, PowerUp, PowerUpType, TerrainType } from '../types'
+import type { Tank, Bullet, PowerUp, Mine, PowerUpType, TerrainType } from '../types'
 import type { Direction } from '../constants'
 import type { SpawnEntry } from '../game/World'
 
@@ -102,6 +102,14 @@ export interface WorldSnapshot {
   killCount: number
   playTimeMs: number
 
+  // Run profile — active difficulty/theme keys. Persisted so a loaded save
+  // restores the EXACT rules profile it was created with (a classic save must
+  // NOT silently run modern rules after load). The `rules` / `difficulty` /
+  // `theme` objects are re-derived from these keys on restore (Constitution §6:
+  // a snapshot is a complete World description).
+  difficultyKey: string
+  themeKey: string
+
   // Timers
   freezeTimer: number
   stageClearTimer: number
@@ -148,6 +156,11 @@ export interface WorldSnapshot {
   frenzyInterval: number
   frenzyDir: Direction
   fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
+
+  // ---- New power-ups (new-powerups-plan.md) ----
+  empTimer: number // 电磁静默: enemy silence timer
+  rewindStock: number // 时光宝盒: inventory count
+  mines: Mine[] // 地雷: active mines
 }
 
 /**

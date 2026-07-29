@@ -4,11 +4,12 @@ import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../.
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES } from '../../config/stages'
-import { PLAYER_PROGRESSION } from '../../config/combat'
-import { clamp } from '../../utils/helpers'
+
 import { SnapshotBrowser } from './SnapshotBrowser'
+import { ReplayBrowser } from './ReplayBrowser'
 import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
+import { ReplayController } from './ReplayController'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
 
 /**
@@ -48,11 +49,15 @@ export class UIManager {
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
   private hudStar: HTMLElement
+  private hudReplay: HTMLElement
+  readonly replayController: ReplayController
   private hudPauseHint: HTMLElement | null = null
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
   private buffFreeze: HTMLElement
   private buffFreezeTime: HTMLElement
+  private buffFence: HTMLElement
+  private buffFenceTime: HTMLElement
   private overlay: HTMLElement
   private menuScreen: HTMLElement
   private pauseScreen: HTMLElement
@@ -67,6 +72,7 @@ export class UIManager {
 
   // ---- Snapshot framework UI (plan §12, §13) ----
   readonly snapshotBrowser: SnapshotBrowser
+  readonly replayBrowser: ReplayBrowser
   readonly controlCenter: ControlCenter
   private toastEl: HTMLElement
   private toastTimer = 0
@@ -85,7 +91,8 @@ export class UIManager {
   /** Menu action callbacks (mouse support). Registered by Game. */
   private menuActions: MenuActions | null = null
 
-  /** Ordered list of rebindable actions shown in the controls panel. */
+  /** Ordered list of rebindable gameplay actions shown in the controls panel.
+   *  Only gameplay-relevant keys: movement, fire, pause, and active items. */
   private static readonly CONTROL_ACTIONS: ReadonlyArray<{
     action: keyof KeyBindings
     label: string
@@ -96,9 +103,9 @@ export class UIManager {
     { action: 'right', label: 'Move Right' },
     { action: 'fire', label: 'Fire' },
     { action: 'pause', label: 'Pause' },
-    { action: 'reset', label: 'Reset to Menu' },
-    { action: 'theme', label: 'Cycle Theme' },
-    { action: 'snapshot', label: 'Manual Save' },
+    { action: 'guard', label: 'Guard (天降神兵)' },
+    { action: 'frenzy', label: 'Frenzy (狂暴宣泄)' },
+    { action: 'rewind', label: 'Rewind (时光宝盒)' },
   ]
 
   // Start as a sentinel so the first showScreen('menu') in the constructor
@@ -138,12 +145,20 @@ export class UIManager {
   private hudGuard: HTMLElement
   private hudFrenzy: HTMLElement
   private hudSacrifice: HTMLElement
+  private hudRewind: HTMLElement
+  private superItems: HTMLElement[]
   private lastGuard = -1
   private lastFrenzy = -1
   private lastSacrifice = -1
+  private lastRewind = -1
+  // Super item key labels (dynamic, reflects rebound keys)
+  private hudGuardLabel: HTMLElement | null = null
+  private hudFrenzyLabel: HTMLElement | null = null
+  private hudRewindLabel: HTMLElement | null = null
   // Buff countdowns: remaining whole seconds last written (-1 = chip hidden).
   private lastShieldSec = -1
   private lastFreezeSec = -1
+  private lastFenceSec = -1
   private lastMenuCursor = -1
   private lastDifficultyKey = ''
   private lastThemeKeyMenu = ''
@@ -170,10 +185,12 @@ export class UIManager {
         </div>
         <div class="hud-item">
           <span class="hud-label">STAR</span>
-          <span class="hud-value hud-star" data-hud="star">☆☆☆</span>
+          <span class="hud-value hud-star" data-hud="star"></span>
         </div>
-      </div>
-      <div class="hud-group hud-center">
+      </div>        <div class="hud-group hud-center">
+        <div class="hud-item hud-replay" data-hud="replay" hidden>
+          <span class="hud-label">REPLAY MODE</span>
+        </div>
         <div class="hud-item">
           <span class="hud-label">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
@@ -186,6 +203,10 @@ export class UIManager {
           <div class="buff-chip buff-freeze" data-buff="freeze" hidden>
             <span class="buff-icon">❄</span>
             <span class="buff-time" data-buff-time="freeze">0</span>
+          </div>
+          <div class="buff-chip buff-fence" data-buff="fence" hidden>
+            <span class="buff-icon">🔧</span>
+            <span class="buff-time" data-buff-time="fence">0</span>
           </div>
         </div>
         <div class="hud-pause" data-hud="pause">
@@ -203,16 +224,20 @@ export class UIManager {
           <span class="hud-value" data-hud="enemies">20</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">天兵<F5></span>
+          <span class="hud-label" data-hud-super-label="guard">天兵<F5></span>
           <span class="hud-value" data-hud="guard">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">狂暴<F6></span>
+          <span class="hud-label" data-hud-super-label="frenzy">狂暴<F6></span>
           <span class="hud-value" data-hud="frenzy">0</span>
         </div>
         <div class="hud-item hud-super">
           <span class="hud-label">同归</span>
           <span class="hud-value" data-hud="sacrifice">0</span>
+        </div>
+        <div class="hud-item hud-super">
+          <span class="hud-label" data-hud-super-label="rewind">宝盒&lt;F7&gt;</span>
+          <span class="hud-value" data-hud="rewind">0</span>
         </div>
       </div>
     `
@@ -223,6 +248,10 @@ export class UIManager {
     // Canvas (created by UIManager, managed by PresentationLayer)
     this.canvas = document.createElement('canvas')
     this.canvas.className = 'game-canvas'
+    // Make the canvas focusable so the game can programmatically reclaim
+    // keyboard focus (e.g. after a stage transition or when returning from a
+    // browser overlay) instead of requiring a manual click. See Game.refocusGame.
+    this.canvas.tabIndex = 0
     gameContainer.appendChild(this.canvas)
 
     // Overlay (covers canvas)
@@ -286,6 +315,10 @@ export class UIManager {
     this.snapshotBrowser = new SnapshotBrowser()
     this.overlay.appendChild(this.snapshotBrowser.screen)
 
+    // Replay Browser (plan/replay.md) — full-overlay modal screen
+    this.replayBrowser = new ReplayBrowser()
+    this.overlay.appendChild(this.replayBrowser.screen)
+
     // Control Center sidebar (plan §13)
     this.controlCenter = new ControlCenter()
     this.root.appendChild(this.controlCenter.el)
@@ -324,14 +357,27 @@ export class UIManager {
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
+    this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
+
+    // Replay Controller (video player style)
+    this.replayController = new ReplayController()
+    this.replayController.hide()
+    this.root.appendChild(this.replayController.el)
     this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
     this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
+    this.hudRewind = this.hudBar.querySelector('[data-hud="rewind"]')!
+    this.superItems = Array.from(this.hudBar.querySelectorAll('.hud-super'))
+    this.hudGuardLabel = this.hudBar.querySelector('[data-hud-super-label="guard"]')
+    this.hudFrenzyLabel = this.hudBar.querySelector('[data-hud-super-label="frenzy"]')
+    this.hudRewindLabel = this.hudBar.querySelector('[data-hud-super-label="rewind"]')
     this.hudPauseHint = this.hudBar.querySelector('[data-hud="pause"] .hud-pause-hint')
     this.buffShield = this.hudBar.querySelector('[data-buff="shield"]')!
     this.buffShieldTime = this.hudBar.querySelector('[data-buff-time="shield"]')!
     this.buffFreeze = this.hudBar.querySelector('[data-buff="freeze"]')!
     this.buffFreezeTime = this.hudBar.querySelector('[data-buff-time="freeze"]')!
+    this.buffFence = this.hudBar.querySelector('[data-buff="fence"]')!
+    this.buffFenceTime = this.hudBar.querySelector('[data-buff-time="fence"]')!
 
     // Cache menu DOM elements (avoid querySelectorAll every frame)
     this.menuDiffOptions = Array.from(
@@ -639,34 +685,37 @@ export class UIManager {
       this.lastLives = world.lives
     }
 
-    // Player star level (★ power-up). Classic caps at `maximumLevel` (tier
-    // display of filled/empty stars); every other mode accumulates without
-    // bound, so we show the raw star COUNT (it can exceed the classic cap).
-    // Only written when the level actually changes.
+    // Player star level (★ power-up). Show only filled stars; no empty
+    // placeholders. If the player has no stars, show nothing.
     if (world.playerLevel !== this.lastStar) {
-      if (world.difficultyKey === 'classic') {
-        const max = PLAYER_PROGRESSION.maximumLevel
-        const lvl = clamp(world.playerLevel, 0, max)
-        this.hudStar.textContent = '★'.repeat(lvl) + '☆'.repeat(max - lvl)
-      } else {
-        this.hudStar.textContent = `★ ${Math.max(0, world.playerLevel)}`
-      }
+      const lvl = Math.max(0, world.playerLevel)
+      this.hudStar.textContent = lvl > 0 ? '★'.repeat(lvl) : ''
       this.lastStar = world.playerLevel
     }
 
     // Super power-up inventory counters (DECISIONS.md §31). Written only when
-    // the count actually changes. 天降神兵 is Phase 2 (shows 0 until then).
-    if (world.guardStock !== this.lastGuard) {
-      this.hudGuard.textContent = String(world.guardStock)
-      this.lastGuard = world.guardStock
+    // the count actually changes. Hidden in classic mode (no 强力道具).
+    const hideSuper = world.rules.superDropChance === 0
+    for (const el of this.superItems) {
+      if (el.hidden !== hideSuper) el.hidden = hideSuper
     }
-    if (world.frenzyStock !== this.lastFrenzy) {
-      this.hudFrenzy.textContent = String(world.frenzyStock)
-      this.lastFrenzy = world.frenzyStock
-    }
-    if (world.sacrificeStock !== this.lastSacrifice) {
-      this.hudSacrifice.textContent = String(world.sacrificeStock)
-      this.lastSacrifice = world.sacrificeStock
+    if (!hideSuper) {
+      if (world.guardStock !== this.lastGuard) {
+        this.hudGuard.textContent = String(world.guardStock)
+        this.lastGuard = world.guardStock
+      }
+      if (world.frenzyStock !== this.lastFrenzy) {
+        this.hudFrenzy.textContent = String(world.frenzyStock)
+        this.lastFrenzy = world.frenzyStock
+      }
+      if (world.sacrificeStock !== this.lastSacrifice) {
+        this.hudSacrifice.textContent = String(world.sacrificeStock)
+        this.lastSacrifice = world.sacrificeStock
+      }
+      if (world.rewindStock !== this.lastRewind) {
+        this.hudRewind.textContent = String(world.rewindStock)
+        this.lastRewind = world.rewindStock
+      }
     }
 
     // Active timed buffs (shield / freeze) — countdown shown outside the field
@@ -702,16 +751,53 @@ export class UIManager {
       this.updateRecovery(world)
     }
 
-    // Show correct screen
-    this.showScreen(world.state)
+    // During replay playback (and after it ends) the world can reach a
+    // terminal state (gameover / victory / stageclear) by replaying the
+    // original run. We must NOT surface the normal GAME OVER / VICTORY
+    // popups — the replay's own centered end overlay is the canonical
+    // end-of-replay UI. Keep the battlefield visible behind it.
+    let screen = world.state
+    if (
+      this.replayController.isActive &&
+      (screen === 'gameover' || screen === 'victory' || screen === 'stageclear')
+    ) {
+      screen = 'playing'
+    }
+    this.showScreen(screen)
+  }
+
+  /** Show or hide the persistent REPLAY indicator in the HUD center area. */
+  setReplayMode(isReplay: boolean, isPaused: boolean = false): void {
+    this.hudReplay.hidden = !isReplay
+    if (isReplay) {
+      this.replayController.show()
+      this.replayController.setPaused(isPaused)
+    } else {
+      this.replayController.hide()
+    }
+  }
+
+  /** Update the replay progress bar (0 → 1). */
+  setReplayProgress(progress: number): void {
+    this.replayController.updateProgress(progress)
+  }
+
+  /** Update the replay time display. */
+  setReplayTime(currentMs: number, totalMs: number): void {
+    this.replayController.updateTime(currentMs, totalMs)
+  }
+
+  /** Update the replay speed display. */
+  setReplaySpeed(speed: number): void {
+    this.replayController.setSpeed(speed)
   }
 
   /**
-   * Update the timed-buff countdown chips in the HUD. Only the buffs that are
-   * genuinely time-limited get a countdown: the player's SHIELD
-   * (spawn protection, via player.shieldTimer) and the
-   * enemy FREEZE (freeze/clock pickup, via world.freezeTimer). Star / extra
-   * life / bomb are instant or permanent and intentionally have no timer.
+   * Update the timed-buff countdown chips in the HUD. Time-limited buffs:
+   * SHIELD (spawn protection, via player.shieldTimer), FREEZE (freeze/clock
+   * pickup, via world.freezeTimer), and FENCE (steel ring, via
+   * fenceExpireFrame). Star / extra life / bomb are instant or permanent and
+   * intentionally have no timer.
    *
    * DOM writes are keyed on the remaining WHOLE second so the text only
    * changes ~once per second, and a chip's `hidden` attribute flips only on
@@ -722,6 +808,13 @@ export class UIManager {
     this.updateBuffChip(this.buffShield, this.buffShieldTime, shieldMs, 'shield')
 
     this.updateBuffChip(this.buffFreeze, this.buffFreezeTime, world.freezeTimer, 'freeze')
+
+    // Fence countdown: fenceExpireFrame is absolute; convert to ms remaining.
+    const fenceMs =
+      world.fenceExpireFrame !== undefined && world.fenceExpireFrame > world.frame
+        ? (world.fenceExpireFrame - world.frame) * (1000 / 60)
+        : 0
+    this.updateBuffChip(this.buffFence, this.buffFenceTime, fenceMs, 'fence')
   }
 
   /** Reflect a single buff's remaining time into its chip; hide it at 0. */
@@ -729,12 +822,18 @@ export class UIManager {
     chip: HTMLElement,
     timeEl: HTMLElement,
     ms: number,
-    which: 'shield' | 'freeze',
+    which: 'shield' | 'freeze' | 'fence',
   ): void {
     const sec = ms > 0 ? Math.ceil(ms / 1000) : 0
-    const last = which === 'shield' ? this.lastShieldSec : this.lastFreezeSec
+    const last =
+      which === 'shield'
+        ? this.lastShieldSec
+        : which === 'fence'
+          ? this.lastFenceSec
+          : this.lastFreezeSec
     if (sec === last) return
     if (which === 'shield') this.lastShieldSec = sec
+    else if (which === 'fence') this.lastFenceSec = sec
     else this.lastFreezeSec = sec
 
     if (sec > 0) {
@@ -960,6 +1059,7 @@ export class UIManager {
     this.controlsBindings = bindings
     this.controlsOnChanged = onChanged
     this.refreshAllKeyButtons()
+    this.updateSuperKeyLabels()
     // Capture-phase listener so a rebind key never reaches the game Input
     // (which listens on window in the bubble phase). We only act while the
     // panel is open, so normal gameplay input is unaffected.
@@ -1003,7 +1103,7 @@ export class UIManager {
     const screen = this.createElement('div', 'ui-screen ui-controls')
     const panel = this.createElement('div', 'ui-panel controls-panel')
     panel.innerHTML = `
-      <h2 class="ui-title">CONTROLS</h2>
+      <h2 class="ui-title">KEY BINDINGS</h2>
       <p class="ui-hint">Click a key, then press a new one</p>
       <div class="controls-list" data-controls="list"></div>
       <div class="controls-actions">
@@ -1071,6 +1171,7 @@ export class UIManager {
     }
     this.listeningAction = null
     this.refreshAllKeyButtons()
+    this.updateSuperKeyLabels()
     this.controlsOnChanged?.()
   }
 
@@ -1085,6 +1186,19 @@ export class UIManager {
     if (!btn) return
     btn.classList.remove('listening', 'conflict')
     btn.textContent = this.formatKey(this.controlsBindings[action])
+  }
+
+  /** Update HUD super-item key labels (天兵, 狂暴, 宝盒) to reflect current bindings. */
+  private updateSuperKeyLabels(): void {
+    const pairs: Array<[HTMLElement | null, keyof KeyBindings, string]> = [
+      [this.hudGuardLabel, 'guard', '天兵'],
+      [this.hudFrenzyLabel, 'frenzy', '狂暴'],
+      [this.hudRewindLabel, 'rewind', '宝盒'],
+    ]
+    for (const [el, action, name] of pairs) {
+      if (el)
+        el.textContent = `${name}<${this.formatCode(parseBinding(this.controlsBindings[action]).code)}>`
+    }
   }
 
   /** Reject keys reserved for panel navigation, and duplicates of other actions. */
@@ -1179,6 +1293,7 @@ export class UIManager {
       this.controlsBindings[action] = binding
       this.listeningAction = null
       this.refreshKeyButton(action)
+      this.updateSuperKeyLabels()
       this.controlsOnChanged?.()
       return
     }

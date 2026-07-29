@@ -40,7 +40,7 @@ const ENEMY_KINDS: Exclude<TankKind, 'player'>[] = ['basic', 'fast', 'power', 'a
 describe('Bullet speed — anchored to 4× the balanced-enemy movement (spec)', () => {
   it('the balanced-enemy bullet speed is exactly BALANCED_ENEMY_CPS × 4', () => {
     expect(BASE_BULLET_SPEED_CPS.basic).toBe(BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO)
-    expect(BASE_BULLET_SPEED_CPS.basic).toBeCloseTo(10.0, 12) // 2.5 × 4
+    expect(BASE_BULLET_SPEED_CPS.basic).toBeCloseTo(15.0, 12) // 3.75 × 4
   })
 
   it('the basic bullet (px/tick) equals 4× the basic tank movement (px/tick)', () => {
@@ -51,11 +51,11 @@ describe('Bullet speed — anchored to 4× the balanced-enemy movement (spec)', 
 
   it('concrete base bullet speeds in px/tick match the spec table', () => {
     // cps → px/tick = cps * CELL / 60 = cps * 0.26666…
-    expect(baseBulletSpeedPxPerTick('basic')).toBeCloseTo(cpsToPxPerTick(10.0), 9) // 2.6667
-    expect(baseBulletSpeedPxPerTick('fast')).toBeCloseTo(cpsToPxPerTick(10.5), 9) // 2.8
-    expect(baseBulletSpeedPxPerTick('power')).toBeCloseTo(cpsToPxPerTick(9.5), 9) // 2.5333
-    expect(baseBulletSpeedPxPerTick('armor')).toBeCloseTo(cpsToPxPerTick(9.0), 9) // 2.4
-    expect(baseBulletSpeedPxPerTick('player', 0)).toBeCloseTo(cpsToPxPerTick(10.5), 9) // 2.8
+    expect(baseBulletSpeedPxPerTick('basic')).toBeCloseTo(cpsToPxPerTick(15.0), 9) // 4.0
+    expect(baseBulletSpeedPxPerTick('fast')).toBeCloseTo(cpsToPxPerTick(15.75), 9) // 4.2
+    expect(baseBulletSpeedPxPerTick('power')).toBeCloseTo(cpsToPxPerTick(14.25), 9) // 3.8
+    expect(baseBulletSpeedPxPerTick('armor')).toBeCloseTo(cpsToPxPerTick(13.5), 9) // 3.6
+    expect(baseBulletSpeedPxPerTick('player', 0)).toBeCloseTo(cpsToPxPerTick(15.75), 9) // 4.2
   })
 })
 
@@ -123,10 +123,10 @@ describe('Bullet speed — player universal-growth scaling', () => {
     expect(step).toBeCloseTo(cpsToPxPerTick(PLAYER_BULLET_SPEED_PER_STAR_CPS), 12)
   })
 
-  it('max-level (3★) player bullet reaches 12.0 cells/sec (faster than any enemy)', () => {
+  it('max-level (3★) player bullet reaches 17.25 cells/sec (faster than any enemy)', () => {
     const cps = BASE_BULLET_SPEED_CPS.player + 3 * PLAYER_BULLET_SPEED_PER_STAR_CPS
-    expect(cps).toBeCloseTo(12.0, 12)
-    expect(baseBulletSpeedPxPerTick('player', 3)).toBeCloseTo(cpsToPxPerTick(12.0), 9)
+    expect(cps).toBeCloseTo(17.25, 12)
+    expect(baseBulletSpeedPxPerTick('player', 3)).toBeCloseTo(cpsToPxPerTick(17.25), 9)
   })
 })
 
@@ -237,12 +237,12 @@ describe('Bullet speed — bullet-vs-tank race invariant (global safety)', () =>
     // By construction the slowest bullet (armor, 0.9× basic) fires at exactly
     // 3× the fastest tank (fast, 1.2× basic move): (0.9×4) / 1.2 = 3.0. Assert
     // the exact ratio (with fp tolerance) and a comfortably wide margin.
-    const slowestBullet = baseBulletSpeedPxPerTick('armor') // 2.4 px/tick
-    const fastestTank = baseSpeedPxPerTick('fast') // 3.0 cps → 0.8 px/tick
+    const slowestBullet = baseBulletSpeedPxPerTick('armor') // 3.6 px/tick
+    const fastestTank = baseSpeedPxPerTick('fast') // 4.5 cps → 1.2 px/tick
     expect(slowestBullet / fastestTank).toBeCloseTo(3, 6)
     expect(slowestBullet).toBeGreaterThan(fastestTank * 2.9)
-    // also beats the max-level player tank
-    expect(slowestBullet).toBeGreaterThan(baseSpeedPxPerTick('player', 3) * 2.9)
+    // also beats the max-level player tank (2.88× margin)
+    expect(slowestBullet).toBeGreaterThan(baseSpeedPxPerTick('player', 3) * 2.8)
   })
 })
 

@@ -32,56 +32,60 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-captured 2026-07-29 for P3 CMA-ES optimized params.
-// P3 changes:
-// - A* dig-through-brick: findPath accepts { breakBrick: true }
-// - followPath: returns direction when blocked by breakable brick
-// - Nav-stuck center deadlock fix: chase enemy when at/near center
-// - Power-up diversion: skip when enemies within 5 cells
-// - CMA-ES multi-stage optimization (S0/S3/S6/S9, 6 seeds, 30 gen)
-//   Key param changes: suboptimalPathProb 0.093→0.038, replanInterval 3→50,
-//   powerupMaxDivertDistance 9→3, maxPlayerDistFromBase 14→19
-// All 8 seeds now stage_clear (previously 2 were max_ticks, 1 was gameover).
+// Baseline re-captured 2026-07-29 after merging `main` into `god-ai` (HEAD
+// b21baba). The god-ai split code itself (src/ai/god/*, GodAIInput.ts,
+// tools/simulation-runner.ts) is UNCHANGED by that merge — the parity break was
+// caused solely by `main`'s intentional speed/config tuning:
+//   - src/config/speed.ts: BALANCED_ENEMY_CPS 2.5→3.75 (modern=classic FC speed),
+//     PLAYER_SPEED_PER_STAR_CPS 0.125→0.25 ("Modern mode adjustment 2026-07-28")
+//   - plus powerups/rules/Simulation changes on main (all validated by main's
+//     own test suite; every other test still passes).
+// This shifts the full-simulation baseline, which is exactly the case the test
+// docstring anticipates: re-capture the baseline from the deterministic harness
+// rather than deleting the test. The god-ai split remains behavior-preserving.
+// NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
+// game params. Re-run tools/recapture-godai-baseline.ts after any future
+// intentional tuning to refresh these numbers.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 4293,
+    ticks: 4299,
     score: 4700,
-    lives: 3,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 1,
-  },
-  2: {
-    outcome: 'stage_clear',
-    ticks: 3417,
-    score: 4200,
-    lives: 4,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 1,
-  },
-  7: {
-    outcome: 'stage_clear',
-    ticks: 6723,
-    score: 4200,
     lives: 5,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
-  42: {
+  2: {
     outcome: 'stage_clear',
-    ticks: 2887,
+    ticks: 2803,
+    score: 3700,
+    lives: 3,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 0,
+  },
+  7: {
+    outcome: 'stage_clear',
+    ticks: 4229,
     score: 4200,
     lives: 3,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 1,
+  },
+  42: {
+    outcome: 'stage_clear',
+    ticks: 2180,
+    score: 4700,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 5091,
+    ticks: 2367,
     score: 4200,
     lives: 3,
     killCount: 20,
@@ -90,27 +94,27 @@ const BASELINE: Record<number, Expected> = {
   },
   999: {
     outcome: 'stage_clear',
-    ticks: 2973,
-    score: 4700,
+    ticks: 2970,
+    score: 4200,
     lives: 2,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 1,
+    playerLevel: 0,
   },
   12345: {
     outcome: 'stage_clear',
-    ticks: 2892,
-    score: 4200,
-    lives: 3,
+    ticks: 2408,
+    score: 4700,
+    lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
   55555: {
     outcome: 'stage_clear',
-    ticks: 3155,
-    score: 4700,
-    lives: 4,
+    ticks: 3501,
+    score: 3700,
+    lives: 2,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,

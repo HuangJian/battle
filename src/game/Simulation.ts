@@ -25,7 +25,19 @@ import {
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { killScore, stageClearScore } from '../config/score'
-import { SUPER_POWERUP_TYPES, FRENZY_SHOTS, SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
+import {
+  SUPER_POWERUP_TYPES,
+  POWERUP_TIERS,
+  POWERUP_TIER_WEIGHTS,
+  FRENZY_SHOTS,
+  SACRIFICE_BASE_RADIUS_CELLS,
+} from '../config/powerups'
+import {
+  EMP_DURATION_MS,
+  MINE_ARM_MS,
+  MINE_RADIUS_CELLS,
+  DECOY_LIFESPAN_FRAMES,
+} from '../constants'
 import { applyEliteModifier } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { hasStarPerk } from '../config/rules'
@@ -121,8 +133,17 @@ export class Simulation {
 
     // Update timers
     if (w.freezeTimer > 0) w.freezeTimer -= 1000 / 60
+    if (w.empTimer > 0) w.empTimer -= 1000 / 60
     if (w.spawnTimer > 0) w.spawnTimer -= 1000 / 60
     if (w.pickupWindowTimer > 0) w.pickupWindowTimer -= TICK_MS
+
+    // Update mine arm timers
+    for (const mine of w.mines) {
+      if (mine.alive && mine.armTimer > 0) {
+        mine.armTimer -= 1000 / 60
+        if (mine.armTimer < 0) mine.armTimer = 0
+      }
+    }
 
     // Update player boat timer
     if (w.player && w.player.boatTimer && w.player.boatTimer > 0) {
@@ -157,6 +178,9 @@ export class Simulation {
 
     // Power-ups
     this.updatePowerUps()
+
+    // Mine collision detection (after bullets, before cleanup)
+    this.updateMines()
 
     // Explosions & popups
     this.updateExplosions()
@@ -343,6 +367,10 @@ export class Simulation {
     if (this.input.wasItemPressed('frenzy') && w.frenzyStock > 0) {
       this.activateFrenzy(p)
     }
+    // Rewind (时光宝盒): triggered by F7
+    if (this.input.wasItemPressed('rewind') && w.rewindStock > 0) {
+      this.activateRewind(p)
+    }
 
     // Movement
     const dir = this.input.getMoveDirection()
@@ -427,6 +455,156 @@ export class Simulation {
     // Fire the first shell immediately on the next tick.
     w.frenzyLastFire = w.frame * (1000 / 60) - interval
     w.frenzyTimer = FRENZY_SHOTS * interval
+  }
+
+  /**
+   * Activate 时光宝盒 (new-powerups-plan §4.3): consume one rewind stock and
+   * trigger a manual rewind to the most recent snapshot.
+   */
+  private activateRewind(_p: Tank): void {
+    const w = this.world
+    if (w.rewindStock <= 0) return
+    if (w.state !== 'playing') return
+    // Signal Game.ts to trigger RecoveryController.beginManualRewind()
+    // (actual rewind logic is in Game.ts, not Simulation — AGENTS §2.1)
+    w.rewindStock--
+    w.rewindPending = true
+  }
+
+  // ================================================================
+  // Decoy System (new-powerups-plan §4.4)
+  // ================================================================
+
+  /**
+   * Activate 诱饵 (Decoy): spawn a fake player ally that draws enemy fire.
+   * The decoy moves toward enemies but never fires.
+   */
+  private activateDecoy(p: Tank): void {
+    const w = this.world
+    // Spawn as basic tank (minimal stats) then override for decoy role
+    const tank = w.createTank('basic', p.x, p.y, p.dir)
+    tank.allegiance = 'ally'
+    tank.isPlayer = false
+    tank.isDecoy = true
+    tank.kind = 'player' // visual: looks like the player
+    tank.spawnTimer = 500
+    // Decoy has 1 HP and moves toward enemies (never fires)
+    tank.hp = 1
+    tank.maxHp = 1
+    if (tank.aiState) {
+      tank.aiState.strategicGoal = 'advance' // move toward enemies
+      tank.aiState.tacticalGoal = 'advance'
+    }
+    // Lifespan expiry (absolute frame)
+    tank.guardExpireFrame = w.frame + DECOY_LIFESPAN_FRAMES
+    w.allies.push(tank)
+  }
+
+  // ================================================================
+  // Mine System (new-powerups-plan §4.5)
+  // ================================================================
+
+  /**
+   * Place a mine at the player's current grid position.
+   * Called when the player picks up a 'mine' power-up.
+   */
+  private placeMine(p: Tank): void {
+    const w = this.world
+    const x = Math.round(p.x / CELL) * CELL
+    const y = Math.round(p.y / CELL) * CELL
+    w.mines.push({
+      id: genId(),
+      x,
+      y,
+      w: TANK,
+      h: TANK,
+      armTimer: MINE_ARM_MS,
+      alive: true,
+    })
+  }
+
+  /**
+   * Check mine collisions: enemy tanks stepping on armed mines, or enemy
+   * bullets hitting armed mines. On detonation, deal AoE damage to nearby
+   * enemies and destroy nearby brick walls (same pattern as sacrifice).
+   */
+  private updateMines(): void {
+    const w = this.world
+    for (const mine of w.mines) {
+      if (!mine.alive) continue
+      // Mine must be armed (armTimer <= 0) to detonate
+      if (mine.armTimer > 0) continue
+
+      let detonate = false
+
+      // Check enemy tank collision
+      for (const tank of w.tanks) {
+        if (!tank.alive || tank.allegiance !== 'enemy' || tank.spawnTimer > 0) continue
+        if (aabb(mine.x, mine.y, mine.w, mine.h, tank.x, tank.y, tank.w, tank.h)) {
+          detonate = true
+          break
+        }
+      }
+
+      // Check enemy bullet collision
+      if (!detonate) {
+        for (const bullet of w.bullets) {
+          if (!bullet.alive || bullet.allegiance !== 'enemy') continue
+          if (aabb(mine.x, mine.y, mine.w, mine.h, bullet.x, bullet.y, bullet.w, bullet.h)) {
+            detonate = true
+            bullet.alive = false
+            break
+          }
+        }
+      }
+
+      if (detonate) {
+        mine.alive = false
+        const cx = mine.x + mine.w / 2
+        const cy = mine.y + mine.h / 2
+        const radiusPx = MINE_RADIUS_CELLS * CELL
+
+        // Damage enemies in radius (normal kill accounting)
+        for (const tank of w.tanks) {
+          if (!tank.alive || tank.allegiance !== 'enemy' || tank.spawnTimer > 0) continue
+          const tx = tank.x + tank.w / 2
+          const ty = tank.y + tank.h / 2
+          if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
+            tank.alive = false
+            this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
+            const gained = killScore(
+              w.difficultyKey,
+              tank.aiState?.level,
+              w.stageIndex,
+              w.rules,
+              tank.kind,
+            )
+            w.score += gained
+            w.enemiesRemaining--
+            w.killCount++
+            w.addPopup({ id: genId(), x: tank.x, y: tank.y, text: String(gained), timer: 1500 })
+            w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
+          }
+        }
+
+        // Destroy brick walls in radius
+        const c0 = Math.max(0, Math.floor((cx - radiusPx) / CELL))
+        const c1 = Math.min(GRID - 1, Math.floor((cx + radiusPx) / CELL))
+        const r0 = Math.max(0, Math.floor((cy - radiusPx) / CELL))
+        const r1 = Math.min(GRID - 1, Math.floor((cy + radiusPx) / CELL))
+        for (let r = r0; r <= r1; r++) {
+          for (let c = c0; c <= c1; c++) {
+            if (w.tileMap.get(c, r) === 'brick') {
+              w.tileMap.destroy(c, r)
+            }
+          }
+        }
+
+        this.createExplosion(cx, cy, 'big')
+      }
+    }
+    // Remove dead mines
+    w.mines = w.mines.filter((m) => m.alive)
   }
 
   /**
@@ -895,6 +1073,15 @@ export class Simulation {
     const w = this.world
     const now = w.frame * (1000 / 60)
 
+    // EMP silencer: when empTimer > 0, ENEMY tanks cannot fire. Friendly
+    // 天降神兵 guards must keep firing — they are allies, not hostiles, so the
+    // player's own EMP must not neutralize them (new-powerups-plan §4.2).
+    if (tank.allegiance === 'enemy' && w.empTimer > 0) return
+
+    // Decoys never fire — they are fake tanks whose only job is to draw enemy
+    // fire, never to shoot back (new-powerups-plan §4.4).
+    if (tank.isDecoy) return
+
     // Fire-rate limiter — two mutually-exclusive models (config/rules.ts,
     // plan/classic-faithful-feel.md Phase 2):
     //
@@ -922,6 +1109,17 @@ export class Simulation {
     // `playerDoubleShotLevel` (2★ → double-shot, FC-style). A canceled bullet
     // frees its slot on the next frame (no twin-spawn — issue #12).
     if (w.rules.fireModel === 'bulletCap') {
+      // Minimum cooldown between shots: prevents instant refire when a bullet
+      // resolves at close range. Without this floor, a bullet that hits a tank
+      // 1 cell away resolves in 1 frame and the player fires again immediately
+      // — machine-gun feel. 300ms ≈ 18 frames at 60fps is responsive but
+      // prevents the exploit. (Data: rules.bulletCapMinCooldownMs.)
+      if (
+        w.rules.bulletCapMinCooldownMs > 0 &&
+        now - tank.lastFire < w.rules.bulletCapMinCooldownMs
+      ) {
+        return
+      }
       const cap =
         (w.rules.maxBullets[tank.kind] ?? 1) +
         (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
@@ -1197,7 +1395,7 @@ export class Simulation {
               }
             } else {
               const isElite = tank.aiState?.isCommander === true
-              const isTenthKill = w.killCount % 10 === 0
+              const isTenthKill = r.dropOnEveryNKills > 0 && w.killCount % r.dropOnEveryNKills === 0
               if (
                 tank.bonus ||
                 (r.dropOnEliteKill && isElite) ||
@@ -1263,22 +1461,69 @@ export class Simulation {
    * Build a drop descriptor (type + terrain-safe position). The `world.rng`
    * pick happens HERE so a buffered drop is fully resolved and deterministic —
    * flushing later only materialises it (no extra RNG consumption).
+   *
+   * Position randomization: applies a weighted random offset from the enemy's
+   * position based on `rules.dropPositionWeights` (50/30/20 near/mid/far).
+   * The offset is snapped to grid-aligned cells and falls back to a random
+   * clear tile if the offset position is blocked (terrain/out-of-bounds).
    */
   private buildDrop(at?: { x: number; y: number }): { type: PowerUpType; x: number; y: number } {
     const w = this.world
     const type = this.rollPowerUpType()
 
-    // Prefer the slain enemy's tile so the reward feels earned. Fall back to a
-    // random clear tile if that spot is blocked (entropy from world.rng so the
-    // whole sequence stays deterministic / snapshot-safe).
-    let x = 0,
-      y = 0
+    // --- Position: weighted random offset from enemy position ---
+    // Roll a tier (near/mid/far) from the configured weights, then pick a
+    // random direction and distance within that tier's range. All randomness
+    // flows through world.rng → deterministic / snapshot-safe.
+    let x = 0
+    let y = 0
     let placed = false
-    if (at && !w.rectHitsTerrain(at.x, at.y, TANK, TANK)) {
-      x = at.x
-      y = at.y
-      placed = true
+
+    if (at) {
+      // Roll tier: near(0.5) / mid(0.3) / far(0.2)
+      const weights = w.rules.dropPositionWeights
+      const ranges = w.rules.dropPositionRanges
+      const totalWeight = weights.near + weights.mid + weights.far
+
+      // Guard: if all weights are 0, no offset — use exact enemy position.
+      let tierRange = 0
+      if (totalWeight > 0) {
+        const roll = w.rng.next() * totalWeight
+        if (roll < weights.near) {
+          tierRange = ranges.near
+        } else if (roll < weights.near + weights.mid) {
+          tierRange = ranges.mid
+        } else {
+          tierRange = ranges.far
+        }
+      }
+
+      // Pick a random direction (4 cardinal) and distance (1..tierRange cells).
+      const dirs = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+      ]
+      const dirIdx = Math.floor(w.rng.next() * 4)
+      const dir = dirs[dirIdx]
+      const dist = 1 + Math.floor(w.rng.next() * tierRange)
+
+      // Snap anchor to grid — tank.x/y may not be grid-aligned after
+      // movement (on-axis coordinate is not snapped, only off-axis).
+      const anchorX = Math.round(at.x / CELL) * CELL
+      const anchorY = Math.round(at.y / CELL) * CELL
+      const clampedX = Math.max(0, Math.min(FIELD - TANK, anchorX + dir.dx * dist * CELL))
+      const clampedY = Math.max(0, Math.min(FIELD - TANK, anchorY + dir.dy * dist * CELL))
+
+      if (!w.rectHitsTerrain(clampedX, clampedY, TANK, TANK)) {
+        x = clampedX
+        y = clampedY
+        placed = true
+      }
     }
+
+    // Fallback: random clear tile (unchanged from original).
     if (!placed) {
       let tries = 0
       do {
@@ -1295,20 +1540,73 @@ export class Simulation {
    * Pick a power-up type for a drop (DECISIONS.md §31). Every drop source
    * (elite / every-10-kills / every-5000-pts / bonus) funnels through here, so
    * the 10% super-item chance is uniform across all of them. A super drop rolls
-   * equally among `SUPER_POWERUP_TYPES` (Phase 1: frenzy + sacrifice; guard
-   * joins in Phase 2). All randomness comes from `world.rng` → deterministic.
+   * equally among `SUPER_POWERUP_TYPES` (frenzy / sacrifice / guard / rewind).
+   * All randomness comes from `world.rng` → deterministic.
    */
   private rollPowerUpType(): PowerUpType {
     const w = this.world
     const r = w.rules
-    // Super power-ups (强力道具) are gated by `superDropChance` (0 disables
-    // them entirely — classic sets it to 0, plan Phase 4).
+
+    // Only modern mode uses the 3-tier weighted system (plan §3.1).
+    // Classic uses fixedDropKillIndices and does not run this path.
+    if (r.dropSchedule === 'modern') {
+      // Build active tiers (super only if superDropChance > 0)
+      const activeTiers: { name: string; items: PowerUpType[]; weight: number }[] = []
+      // The 3-tier system (plan §3.1) defines the drop pool directly via
+      // POWERUP_TIERS — these lists are the source of truth, NOT
+      // r.allowedPowerups (which only gates classic-vs-modern and the old
+      // single pool). Filtering the SUPER tier against allowedPowerups would
+      // DROP every 强力道具 in modern mode, because super items are
+      // intentionally absent from allowedPowerups — they are inventory/stock
+      // items, not instant pickups. So we use the tier lists verbatim and only
+      // apply the (unchanged) water-gate to the boat.
+      const superItems = POWERUP_TIERS.super
+      if (r.superDropChance > 0 && superItems.length > 0) {
+        activeTiers.push({ name: 'super', items: superItems, weight: POWERUP_TIER_WEIGHTS.super })
+      }
+      const practicalItems = POWERUP_TIERS.practical
+      if (practicalItems.length > 0) {
+        activeTiers.push({
+          name: 'practical',
+          items: practicalItems,
+          weight: POWERUP_TIER_WEIGHTS.practical,
+        })
+      }
+      let normalItems = POWERUP_TIERS.normal
+      if (!w.tileMap.hasWater()) {
+        normalItems = normalItems.filter((t) => t !== 'boat')
+      }
+      if (normalItems.length > 0) {
+        activeTiers.push({
+          name: 'normal',
+          items: normalItems,
+          weight: POWERUP_TIER_WEIGHTS.normal,
+        })
+      }
+
+      // Normalize weights across active tiers and pick one tier
+      const totalWeight = activeTiers.reduce((s, t) => s + t.weight, 0)
+      if (totalWeight <= 0) {
+        // Fallback: pick from allowedPowerups directly
+        let pool = r.allowedPowerups
+        if (!w.tileMap.hasWater()) pool = pool.filter((t) => t !== 'boat')
+        return w.rng.pick(pool)
+      }
+      const roll = w.rng.next() * totalWeight
+      let cumulative = 0
+      for (const tier of activeTiers) {
+        cumulative += tier.weight
+        if (roll < cumulative) {
+          return w.rng.pick(tier.items)
+        }
+      }
+      return w.rng.pick(activeTiers[activeTiers.length - 1].items)
+    }
+
+    // Classic path: use SUPER_POWERUP_TYPES directly (unchanged)
     if (r.superDropChance > 0 && w.rng.next() < r.superDropChance) {
       return w.rng.pick(SUPER_POWERUP_TYPES)
     }
-    // The normal pool is filtered to `allowedPowerups`; the boat (amphibious)
-    // power-up is only meaningful where there is water to cross, so it is
-    // dropped only on water stages (DECISIONS.md §31 follow-up).
     let pool = r.allowedPowerups
     if (!w.tileMap.hasWater()) {
       pool = pool.filter((t) => t !== 'boat')
@@ -1455,11 +1753,15 @@ export class Simulation {
         break
 
       case 'shield':
-        p.shieldTimer = POWERUP_DURATION_MS
+        // Timed buff: accumulate duration so picking up another while one is
+        // active stacks (e.g. 3s left + 20s = 23s). See DECISIONS.md §33.
+        p.shieldTimer = (p.shieldTimer ?? 0) + POWERUP_DURATION_MS
         break
 
       case 'freeze':
-        w.freezeTimer = POWERUP_DURATION_MS
+        // Timed buff: accumulate duration (same rule as shield). Freezing all
+        // enemies again adds a full POWERUP_DURATION_MS on top of any remaining.
+        w.freezeTimer = w.freezeTimer + POWERUP_DURATION_MS
         break
 
       case 'tank':
@@ -1474,6 +1776,32 @@ export class Simulation {
       case 'boat':
         // Grant amphibious movement: can traverse water and ice without penalty
         this.applyBoatPowerUp()
+        break
+
+      // ---- New power-ups (new-powerups-plan) ----
+      case 'repair':
+        // Fully restore the PLAYER tank's HP (new-powerups-plan §4.1).
+        this.applyRepairPowerUp()
+        break
+
+      case 'emp':
+        // Freeze all enemies for EMP_DURATION_MS (accumulates on re-pickup)
+        w.empTimer += EMP_DURATION_MS
+        break
+
+      case 'rewind':
+        // Add one rewind stock (accumulated); activated with F7
+        w.rewindStock++
+        break
+
+      case 'decoy':
+        // Spawn an ally decoy that attracts enemy fire
+        this.activateDecoy(p)
+        break
+
+      case 'mine':
+        // Place a mine at the player's current position
+        this.placeMine(p)
         break
 
       // ---- Super power-ups (强力道具, DECISIONS.md §31) ----
@@ -1507,7 +1835,11 @@ export class Simulation {
         placed++
       }
     }
-    w.fenceExpireFrame = w.frame + FENCE_DURATION_FRAMES
+    // Timed buff: accumulate duration rather than reset. If a fence ring is
+    // already up, picking up another extends it by a full FENCE_DURATION_FRAMES
+    // (same stacking rule as shield/freeze/boat). The steel ring is re-laid
+    // idempotently over empty/brick cells, so re-applying is safe.
+    w.fenceExpireFrame = (w.fenceExpireFrame ?? w.frame) + FENCE_DURATION_FRAMES
   }
 
   /**
@@ -1532,8 +1864,22 @@ export class Simulation {
     const p = w.player
     if (!p) return
 
-    // Grant amphibious movement for BOAT_DURATION_MS
-    p.boatTimer = BOAT_DURATION_MS
+    // Timed buff: accumulate duration (same rule as shield/freeze). Picking up
+    // another boat while one is active extends amphibious movement.
+    p.boatTimer = (p.boatTimer ?? 0) + BOAT_DURATION_MS
+  }
+
+  /**
+   * Apply Repair power-up (new-powerups-plan §4.1): fully restore the PLAYER
+   * tank's HP. Unlike 星星 (star) — which deliberately does NOT refill HP —
+   * Repair is the dedicated healing item that fills the gap left by star's
+   * omission. (The eagle/base has its own HP and is unaffected.)
+   */
+  private applyRepairPowerUp(): void {
+    const w = this.world
+    const p = w.player
+    if (!p) return
+    p.hp = p.maxHp
   }
 
   // ================================================================

@@ -14,8 +14,8 @@ import type { KeyBindings } from '../types'
 export interface InputLike {
   getMoveDirection(): Direction | null
   isFiring(): boolean
-  /** Whether a super-item release key (guard/frenzy) was pressed this frame. */
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean
+  /** Whether a super-item release key (guard/frenzy/rewind) was pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean
   endFrame(): void
   reset(): void
 }
@@ -45,6 +45,8 @@ export const DEFAULT_KEYS: KeyBindings = {
   theme: 'Alt+KeyT',
   guard: 'F5',
   frenzy: 'F6',
+  rewind: 'F7',
+  fullscreen: 'Alt+KeyF',
 }
 
 /**
@@ -210,6 +212,15 @@ export class Input implements InputLike {
     if (this.isGameKey(e)) {
       e.preventDefault()
     }
+    // Suppress the browser's Alt menu / access-key focus-steal. On Windows a
+    // bare Alt press moves keyboard focus out of the page (to the browser
+    // chrome), so a followed Alt+S/R/T keydown never reaches `window` and the
+    // shortcuts silently die until the player clicks back into the canvas.
+    // Claiming the Alt keydown prevents that. Alt+Tab is OS-level and
+    // unaffected by preventDefault.
+    if (e.altKey && (e.code === 'AltLeft' || e.code === 'AltRight')) {
+      e.preventDefault()
+    }
     if (!this.pressed.has(id)) {
       this.justPressed.add(id)
       // Track movement keys in press order for "last pressed wins" priority.
@@ -245,7 +256,9 @@ export class Input implements InputLike {
       id === keyIdFromBinding(k.snapshot) ||
       id === keyIdFromBinding(k.theme) ||
       id === keyIdFromBinding(k.guard) ||
-      id === keyIdFromBinding(k.frenzy)
+      id === keyIdFromBinding(k.frenzy) ||
+      id === keyIdFromBinding(k.rewind) ||
+      id === keyIdFromBinding(k.fullscreen!)
     ) {
       return true
     }
@@ -305,14 +318,19 @@ export class Input implements InputLike {
     return this.wasPressed(this.keys.theme)
   }
 
-  /** Super-item release key (guard/frenzy) pressed this frame. */
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+  /** Super-item release key (guard/frenzy/rewind) pressed this frame. */
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
     return this.wasPressed(this.keys[kind])
   }
 
   /** Manual snapshot shortcut (configurable, default Alt+S). */
   isSnapshotPressed(): boolean {
     return this.wasPressed(this.keys.snapshot)
+  }
+
+  /** Fullscreen toggle shortcut (configurable, default Alt+F). */
+  isFullscreenPressed(): boolean {
+    return this.wasPressed(this.keys.fullscreen)
   }
 
   isConfirmPressed(): boolean {

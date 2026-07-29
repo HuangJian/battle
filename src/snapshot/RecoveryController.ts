@@ -137,6 +137,28 @@ export class RecoveryController {
     }
   }
 
+  /**
+   * Manual "时光宝盒" rewind (new-powerups-plan §4.3): start the same
+   * fade→restore→countdown flow as Load Latest, but triggered by the player
+   * mid-game (F7) with a stock charge, NOT by a Mission Failed.
+   *
+   * Returns false (and changes nothing) when:
+   *  - the controller is already busy (phase !== 'idle'), or
+   *  - the world is not in active play, or
+   *  - no rewindable snapshot exists (auto / stage-start).
+   * The caller (Game.ts) consumes the `rewindPending` flag and refunds the
+   * spent stock charge on a false return.
+   */
+  beginManualRewind(world: World): boolean {
+    if (this.phase !== 'idle' || world.state !== 'playing') return false
+    const snap = this.manager.pickRewindSnapshot(world)
+    if (!snap) return false
+    this.pendingSnap = snap
+    this.pendingRestart = false
+    this.beginTransition(world)
+    return true
+  }
+
   // ================================================================
   // Flow (fade → apply → countdown)
   // ================================================================

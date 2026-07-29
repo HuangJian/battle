@@ -69,7 +69,7 @@ describe('classic movement speed — faithful FC table via config', () => {
     expect(profileToStats({} as never, 'player', 3, r).speed).toBeCloseTo(cpsToPxPerTick(7.5), 6)
   })
 
-  it('classic is faster than modern (FC tanks move briskly; modern baseline is slower)', () => {
+  it('modern balanced speed matches classic (both 3.75 cps, same baseline)', () => {
     const classic = classicRules()
     const modern = (() => {
       const w = new World()
@@ -78,7 +78,8 @@ describe('classic movement speed — faithful FC table via config', () => {
       w.startGame('hard', 'modern', 0)
       return w.rules
     })()
-    expect(classic.speedCps.basic).toBeGreaterThan(modern.speedCps.basic)
+    // Modern now matches classic's balanced speed for comparable combat pace
+    expect(modern.speedCps.basic).toBeCloseTo(classic.speedCps.basic, 6)
     // modern differentiates basic/power/armor; FC keeps them equal.
     expect(modern.speedCps.basic).not.toBeCloseTo(modern.speedCps.power, 6)
   })

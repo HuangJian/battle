@@ -3,6 +3,7 @@ import type {
   Bullet,
   PowerUp,
   PowerUpType,
+  Mine,
   Explosion,
   ScorePopup,
   GameEvent,
@@ -220,6 +221,18 @@ export class World {
   // base reverts to brick. undefined = no active fence. Snapshot-safe.
   fenceExpireFrame?: number
 
+  // --- New power-ups (new-powerups-plan.md) ---
+  /** EMP timer: when > 0, all enemy tanks are silenced (can move but not fire). */
+  empTimer: number
+  /** Rewind stock: number of 时光宝盒 items in inventory. */
+  rewindStock: number
+  /** Signal flag: set by Simulation.activateRewind, consumed by Game.ts to
+   *  trigger RecoveryController.beginManualRewind(). Cleared by Game.ts.
+   *  Lives on the World (no hidden state outside it — AGENTS §2.2). */
+  rewindPending: boolean
+  /** Active mines placed by the player. Snapshot-safe. */
+  mines: Mine[]
+
   // Recovery UI state (read by UIManager, written by RecoveryController)
   recoveryCursor: number // selected recovery menu option index
   recoveryCountdown: number // 0 = none, 3/2/1 = counting down
@@ -292,6 +305,10 @@ export class World {
     this.frenzyInterval = 0
     this.frenzyDir = 'up'
     this.fenceExpireFrame = undefined
+    this.empTimer = 0
+    this.rewindStock = 0
+    this.rewindPending = false
+    this.mines = []
   }
 
   // ---- Lifecycle ----
@@ -520,6 +537,7 @@ export class World {
         strategicGoal: 'attackBase' as GoalType,
         reactionTimer: placeholder.reactionTime,
         dodgeLock: 0,
+        vertOnlyTicks: 0,
         commanderTimer: COMMANDER_INTERVAL_MS,
         directive: 'none',
         directiveAge: 1e9,

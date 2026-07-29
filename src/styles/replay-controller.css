@@ -1,0 +1,419 @@
+/* ================================================================
+   Replay Controller — video-player-style overlay at screen bottom
+   ================================================================ */
+.replay-controller {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  padding: 8px 16px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: auto;
+  transition: opacity 0.3s ease;
+}
+
+.replay-controller[hidden] {
+  display: none;
+}
+
+.rc-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Play/Pause Button */
+.rc-play-pause {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.rc-play-pause:hover {
+  background: rgba(255, 255, 255, 0.25);
+  transform: scale(1.1);
+}
+
+.rc-play-pause:active {
+  transform: scale(0.95);
+}
+
+.rc-icon-pause,
+.rc-icon-play {
+  line-height: 1;
+}
+
+/* Progress Bar */
+.rc-progress-wrapper {
+  flex: 1;
+  padding: 8px 0;
+  cursor: pointer;
+}
+
+.rc-progress-track {
+  position: relative;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: height 0.15s ease;
+}
+
+.rc-progress-wrapper:hover .rc-progress-track {
+  height: 6px;
+}
+
+.rc-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #ff4040, #ff6060);
+  border-radius: 2px;
+  transition: width 0.1s linear;
+}
+
+.rc-progress-handle {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 0.15s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.rc-progress-wrapper:hover .rc-progress-handle {
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* Time Display */
+.rc-time {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  min-width: 90px;
+  text-align: center;
+}
+
+/* Speed Button + Dropdown */
+.rc-speed-wrapper {
+  position: relative;
+}
+
+.rc-speed {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.rc-speed:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.rc-speed-fast {
+  color: #ff4040;
+}
+
+.rc-speed-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+  animation: rc-dropdown-in 0.15s ease;
+}
+
+@keyframes rc-dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.rc-speed-option {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.rc-speed-option:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+}
+
+.rc-speed-option.selected {
+  background: rgba(255, 64, 64, 0.3);
+  color: #ff6060;
+}
+
+/* Exit Button */
+.rc-exit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.rc-exit:hover {
+  background: rgba(255, 64, 64, 0.3);
+  color: #ff4040;
+}
+
+/* End-of-replay overlay — centered card above the battlefield */
+.rc-end-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px 36px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  /* Opacity-only: the element's transform is reserved for centering. */
+  animation: rc-end-in 0.4s ease;
+}
+
+/* Result tint — reinforces the replay's outcome without a separate popup */
+.rc-end-overlay.rc-end-victory .rc-end-title {
+  color: #7cff9b;
+}
+.rc-end-overlay.rc-end-defeat .rc-end-title {
+  color: #ff8080;
+}
+
+.rc-end-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.rc-end-title {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.rc-end-meta {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes rc-end-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.rc-end-text {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.rc-end-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.rc-end-btn {
+  padding: 5px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.rc-end-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: white;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.rc-end-btn:active {
+  transform: scale(0.96);
+}
+
+.rc-end-replay {
+  background: rgba(255, 64, 64, 0.15);
+  border-color: rgba(255, 64, 64, 0.3);
+  color: #ff8080;
+}
+
+.rc-end-replay:hover {
+  background: rgba(255, 64, 64, 0.3);
+  color: #ff6060;
+  border-color: rgba(255, 64, 64, 0.5);
+}
+
+/* Thumbnail Preview — fixed to viewport so it positions relative to cursor */
+.rc-thumbnail {
+  position: fixed;
+  bottom: auto;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 1001;
+  animation: rc-thumb-in 0.15s ease;
+}
+
+@keyframes rc-thumb-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.rc-thumbnail-canvas {
+  width: 160px;
+  height: 160px;
+  border-radius: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  image-rendering: pixelated;
+  background: #000;
+}
+
+.rc-thumbnail-time {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.7);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Auto-hide transition */
+.replay-controller {
+  transition: opacity 0.4s ease;
+}
+
+.replay-controller.rc-fading {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .rc-inner {
+    padding: 6px 12px;
+    gap: 8px;
+  }
+
+  .rc-play-pause {
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
+  }
+
+  .rc-time {
+    font-size: 10px;
+    min-width: 70px;
+  }
+
+  .rc-speed {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+}

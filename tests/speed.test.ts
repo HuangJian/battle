@@ -31,24 +31,24 @@ import { profileToStats } from '../src/config/combat'
 const ENEMY_KINDS: Exclude<TankKind, 'player'>[] = ['basic', 'fast', 'power', 'armor']
 
 describe('Base speeds match the spec multipliers (cells/sec)', () => {
-  it('balanced enemy baseline is exactly 2.5 cells/sec', () => {
-    expect(BALANCED_ENEMY_CPS).toBe(2.5)
-    expect(BASE_SPEED_CPS.basic).toBe(2.5)
+  it('balanced enemy baseline is exactly 3.75 cells/sec (matching classic)', () => {
+    expect(BALANCED_ENEMY_CPS).toBe(3.75)
+    expect(BASE_SPEED_CPS.basic).toBe(3.75)
   })
 
   it('each kind is the exact spec multiplier of the balanced baseline', () => {
-    expect(BASE_SPEED_CPS.fast).toBeCloseTo(2.5 * 1.2, 10) // ×120% = 3.0
-    expect(BASE_SPEED_CPS.power).toBeCloseTo(2.5 * 0.95, 10) // ×95% = 2.375
-    expect(BASE_SPEED_CPS.armor).toBeCloseTo(2.5 * 0.85, 10) // ×85% = 2.125
-    expect(BASE_SPEED_CPS.player).toBeCloseTo(2.5 * 1.05, 10) // ×105% = 2.625
+    expect(BASE_SPEED_CPS.fast).toBeCloseTo(3.75 * 1.2, 10) // ×120% = 4.5
+    expect(BASE_SPEED_CPS.power).toBeCloseTo(3.75 * 0.95, 10) // ×95% = 3.5625
+    expect(BASE_SPEED_CPS.armor).toBeCloseTo(3.75 * 0.85, 10) // ×85% = 3.1875
+    expect(BASE_SPEED_CPS.player).toBeCloseTo(3.75 * 1.05, 10) // ×105% = 3.9375
   })
 
   it('documented concrete values', () => {
-    expect(BASE_SPEED_CPS.basic).toBe(2.5)
-    expect(BASE_SPEED_CPS.fast).toBe(3.0)
-    expect(BASE_SPEED_CPS.power).toBe(2.375)
-    expect(BASE_SPEED_CPS.armor).toBe(2.125)
-    expect(BASE_SPEED_CPS.player).toBe(2.625)
+    expect(BASE_SPEED_CPS.basic).toBe(3.75)
+    expect(BASE_SPEED_CPS.fast).toBe(4.5)
+    expect(BASE_SPEED_CPS.power).toBeCloseTo(3.5625, 10)
+    expect(BASE_SPEED_CPS.armor).toBeCloseTo(3.1875, 10)
+    expect(BASE_SPEED_CPS.player).toBeCloseTo(3.9375, 10)
   })
 })
 
@@ -89,10 +89,10 @@ describe('Speed ordering (the design hierarchy)', () => {
 })
 
 describe('Player universal-growth speed (star scaling)', () => {
-  it('level 0 equals the spec no-star speed (2.625 cells/sec)', () => {
-    expect(BASE_SPEED_CPS.player).toBeCloseTo(2.625, 12)
+  it('level 0 equals the spec no-star speed (3.9375 cells/sec)', () => {
+    expect(BASE_SPEED_CPS.player).toBeCloseTo(3.9375, 12)
     // px/tick form is the converted value, not the cells/sec literal
-    expect(baseSpeedPxPerTick('player', 0)).toBeCloseTo(cpsToPxPerTick(2.625), 12)
+    expect(baseSpeedPxPerTick('player', 0)).toBeCloseTo(cpsToPxPerTick(3.9375), 12)
   })
 
   it('each star adds a fixed increment and is strictly increasing', () => {
@@ -107,9 +107,9 @@ describe('Player universal-growth speed (star scaling)', () => {
     expect(step).toBeCloseTo(cpsToPxPerTick(PLAYER_SPEED_PER_STAR_CPS), 12)
   })
 
-  it('max-level (3★) player reaches 3.0 cells/sec (matches the fastest enemy)', () => {
-    expect(BASE_SPEED_CPS.player + 3 * PLAYER_SPEED_PER_STAR_CPS).toBeCloseTo(3.0, 12)
-    expect(baseSpeedPxPerTick('player', 3)).toBeCloseTo(cpsToPxPerTick(3.0), 12)
+  it('max-level (3★) player reaches 4.6875 cells/sec (approaching fast enemy)', () => {
+    expect(BASE_SPEED_CPS.player + 3 * PLAYER_SPEED_PER_STAR_CPS).toBeCloseTo(4.6875, 12)
+    expect(baseSpeedPxPerTick('player', 3)).toBeCloseTo(cpsToPxPerTick(4.6875), 12)
   })
 
   it('star scaling never exceeds the bullet-speed floor (race invariant preserved)', () => {
