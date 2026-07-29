@@ -119,9 +119,9 @@ export class Game {
       selectDifficulty: (key) => this.menuSelectDifficulty(key),
       selectTheme: (key) => this.menuSelectTheme(key),
       cycleStage: (dir) => this.menuCycleStage(dir),
+      selectStage: (index) => this.menuSelectStage(index),
       start: () => this.menuStart(),
       resume: () => this.menuResume(),
-      togglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       openControls: () => {
         if (this.world.state === 'menu') {
           this.presentation.ui.openControls()
@@ -131,9 +131,9 @@ export class Game {
 
     // Reflect the persisted Performance Mode in the UI (DPR is already applied
     // via the PresentationLayer constructor; here we set the render-FPS cap
-    // and the menu's ON/OFF highlight).
+    // and the Control Center button state).
     this.renderFpsCap = this.settings.performanceMode ? PERF_MODE_RENDER_FPS : 0
-    this.presentation.ui.setPerformanceMode(this.settings.performanceMode)
+    this.presentation.ui.controlCenter.setPerfModeState(this.settings.performanceMode)
 
     this.audio = new AudioManager()
 
@@ -195,6 +195,7 @@ export class Game {
       onOpenReplays: () => this.openReplayBrowser(),
       onTogglePerf: () => ui.togglePerfOverlay(),
       onToggleFullscreen: () => this.presentation.toggleFullscreen(),
+      onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       onOpenControls: () => {
         if (this.world.state === 'menu') {
           ui.openControls()
@@ -722,35 +723,32 @@ export class Game {
       // skip menu navigation so it doesn't fight the panel.
       if (this.presentation.ui.isControlsOpen()) return
 
-      // Open the controls / key-bindings panel (mouse users use the menu button).
-      if (this.input.wasPressed('KeyC')) {
-        this.presentation.ui.openControls()
-        this.audio.init()
-        this.audio.resume()
-        this.audio.playMenuSelect()
-        return
-      }
-
       // Row count grows by one when a resumable manual snapshot is offered
       // (the RESUME row sits at index 0, pushing the config rows down).
-      const rowCount = this.resumeSnapshot ? 5 : 4
+      // Full order: RESUME? / DIFFICULTY / THEME / STAGE / NEW GAME / CONTROLS
+      const rowCount = this.resumeSnapshot ? 6 : 5
       // Move cursor between rows (RESUME? / DIFFICULTY / THEME / STAGE)
+      // Canvas preview only switches for RESUME (0), STAGE (off+2), NEW GAME (off+3).
+      const off = this.resumeSnapshot ? 1 : 0
       if (this.input.isUpPressed()) {
         w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
-        this.applyMenuPreview()
+        if (w.menuCursor === 0 || w.menuCursor === off + 2 || w.menuCursor === off + 3) {
+          this.applyMenuPreview()
+        }
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
       if (this.input.isDownPressed()) {
         w.menuCursor = (w.menuCursor + 1) % rowCount
-        this.applyMenuPreview()
+        if (w.menuCursor === 0 || w.menuCursor === off + 2 || w.menuCursor === off + 3) {
+          this.applyMenuPreview()
+        }
         this.audio.init()
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Change value of the selected row (off = index of the first config row)
-      const off = this.resumeSnapshot ? 1 : 0
+      // Change value of the selected row
       const left = this.input.wasPressed('ArrowLeft') || this.input.wasPressed('KeyA')
       const right = this.input.wasPressed('ArrowRight') || this.input.wasPressed('KeyD')
       if (left || right) {
@@ -770,9 +768,6 @@ export class Game {
         } else if (w.menuCursor === off + 2) {
           w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
           changed = true
-        } else if (w.menuCursor === off + 3) {
-          // PERFORMANCE row — toggle Performance Mode on/off.
-          this.setPerformanceMode(!this.settings.performanceMode)
         }
         if (changed) {
           // Swap the battle-field preview to match the new selection immediately
@@ -794,23 +789,21 @@ export class Game {
         this.audio.resume()
         this.audio.playMenuSelect()
       }
-      // Confirm — default action depends on the highlighted row:
-      // on the RESUME row (index 0, only when a snapshot exists) it resumes;
-      // otherwise it starts a fresh game with the current selections.
+      // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter:
+      // RESUME (index 0, only when a snapshot exists) resumes;
+      // NEW GAME (off + 3) starts a fresh game;
+      // CONTROLS (off + 4) opens the key-bindings panel.
+      const controlsIdx = off + 4
       if (this.input.isConfirmPressed()) {
         if (this.resumeSnapshot && w.menuCursor === 0) {
           this.menuResume()
-        } else {
+        } else if (w.menuCursor === off + 3) {
+          this.menuStart()
+        } else if (w.menuCursor === controlsIdx) {
+          this.presentation.ui.openControls()
           this.audio.init()
           this.audio.resume()
           this.audio.playMenuSelect()
-          this.recovery.reset()
-          this.prevStageIndex = -1
-          w.startGame(w.difficultyKey, w.themeKey, w.selectedStage)
-          // Drop the confirm keypress (Space/Enter) so it can't bleed into the
-          // gameplay fire input and make the player auto-fire on the first frame.
-          this.input.reset()
-          this.saveSettings()
         }
       }
       return
@@ -847,16 +840,6 @@ export class Game {
       }
       if (this.input.isResetPressed()) {
         this.resetToMenu()
-      }
-      // In-game Performance Mode switch — while paused, ←/→ flips
-      // Performance ↔ Quality without quitting to the menu. The change is
-      // reflected on the HUD pause pill + a toast, and persisted.
-      if (w.state === 'paused') {
-        const left = this.input.wasPressed('ArrowLeft') || this.input.wasPressed('KeyA')
-        const right = this.input.wasPressed('ArrowRight') || this.input.wasPressed('KeyD')
-        if (left || right) {
-          this.setPerformanceMode(!this.settings.performanceMode)
-        }
       }
     }
 
@@ -907,6 +890,19 @@ export class Game {
     this.world.selectedStage = (this.world.selectedStage + dir + STAGES.length) % STAGES.length
     this.world.menuCursor = this.resumeSnapshot ? 3 : 2
     // Swap the battle-field preview to the newly selected stage's layout.
+    this.applyMenuPreview()
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    this.refreshStaticScreen()
+  }
+
+  /** Mouse: select a specific stage from the dropdown list. */
+  private menuSelectStage(index: number): void {
+    if (this.world.state !== 'menu') return
+    if (index < 0 || index >= STAGES.length) return
+    this.world.selectedStage = index
+    this.world.menuCursor = this.resumeSnapshot ? 3 : 2
     this.applyMenuPreview()
     this.audio.init()
     this.audio.resume()
@@ -970,7 +966,7 @@ export class Game {
     this.settings.performanceMode = on
     this.renderFpsCap = on ? PERF_MODE_RENDER_FPS : 0
     this.presentation.applyPerformanceMode(on)
-    this.presentation.ui.setPerformanceMode(on)
+    this.presentation.ui.controlCenter.setPerfModeState(on)
     this.presentation.markNeedsRender()
     this.saveSettings()
     this.audio.init()

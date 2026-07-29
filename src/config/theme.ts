@@ -4,129 +4,142 @@ import type { ThemeColors, ThemeDefinition } from '../types'
  * Classic NES-inspired theme — enhanced with modern UI colors.
  */
 export const CLASSIC_THEME: ThemeColors = {
-  bg: '#0d0d0d',
-  brick: '#b85c28',
-  brickDark: '#7a3c18',
-  steel: '#b0b0b0',
-  steelDark: '#707070',
-  water: '#2038d8',
-  waterDark: '#1020a0',
-  forest: '#00a000',
-  forestDark: '#006000',
-  ice: '#80d0ff',
-  base: '#e8c840',
-  baseDark: '#a88820',
+  // ── NES-authentic Battle City (FC 1985) palette ──────────────
+  // Background: pure black, matching the original playfield.
+  bg: '#000000',
+  // Terrain — NES PPU-inspired warm tones.
+  brick: '#c84830', // warm orange-brown (NES brick)
+  brickDark: '#782818', // mortar / shadow
+  steel: '#bcbcbc', // NES light gray
+  steelDark: '#7c7c7c',
+  water: '#3cbcfc', // NES bright blue
+  waterDark: '#0058f8', // NES dark blue (wave lines)
+  forest: '#00a800', // NES green
+  forestDark: '#005800',
+  ice: '#b8f8f8', // NES ice cyan-white
+  base: '#f8d878', // NES gold (eagle / base crystal)
+  baseDark: '#b89020',
 
-  playerBody: '#e8c840',
-  playerTurret: '#f8f8f8',
-  playerBody2: '#e8c840',
-  playerBody3: '#f0f0f0',
+  // Tanks — each enemy kind has a distinct NES hue.
+  playerBody: '#d8a000', // warm gold (1P body, level 0)
+  playerTurret: '#f0e8c0', // lighter cream turret for clear body/turret distinction
+  playerBody2: '#d8a000', // level 2+ same gold
+  playerBody3: '#f0e8c0', // level 3 brightens slightly
 
-  enemyBasic: '#b0b0b0',
-  enemyFast: '#50d0d0',
-  enemyPower: '#d080d0',
-  enemyArmor: '#d0d050',
-  enemyArmorFlash: '#f0f0f0',
+  enemyBasic: '#bcbcbc', // NES gray (the grunts)
+  enemyFast: '#00e8d8', // NES cyan (speed demon)
+  enemyPower: '#d800cc', // NES magenta (heavy hitter)
+  enemyArmor: '#a8a800', // NES olive-green (armored tank)
+  enemyArmorFlash: '#fcfcfc', // white flash on hit
 
-  hudBg: '#1a1a1a',
+  // HUD — dark, unobtrusive, matching the black field.
+  hudBg: '#000000',
   hudText: '#e0e0e0',
-  hudAccent: '#e8c840',
+  hudAccent: '#f8d878', // gold eagle color carried to HUD
 
-  explosion1: '#ffe040',
-  explosion2: '#ff8020',
-  explosion3: '#c04020',
-  bullet: '#f8f8f8',
-  bulletGlow: '#ffe060',
-  powerUp: '#e84040',
-  powerUpGlow: '#ffe040',
-  powerUpFence: '#b0b0b0',
-  powerUpFenceGlow: '#d0d0d0',
-  powerUpBoat: '#2080d8',
-  powerUpBoatGlow: '#40a0ff',
-  spawn: '#f0f0f0',
+  // Effects — NES fire/explosion palette.
+  explosion1: '#f8d878', // bright core (gold)
+  explosion2: '#e07020', // mid ring (orange)
+  explosion3: '#a01010', // outer ring (dark red)
+  bullet: '#fcfcfc', // white bullet (NES style)
+  bulletGlow: '#f8d878', // golden glow trail
+  powerUp: '#e04040', // red flashing item
+  powerUpGlow: '#f8d878',
+  powerUpFence: '#bcbcbc',
+  powerUpFenceGlow: '#e0e0e0',
+  powerUpBoat: '#3cbcfc',
+  powerUpBoatGlow: '#80d8ff',
+  spawn: '#fcfcfc', // white spawn flash
 
-  // HTML UI
-  panelBg: 'rgba(20, 20, 24, 0.92)',
-  panelBorder: 'rgba(232, 200, 64, 0.25)',
-  panelShadow: 'rgba(0, 0, 0, 0.6)',
+  // HTML UI — high-contrast light-on-dark, NES terminal aesthetic.
+  panelBg: 'rgba(0, 0, 0, 0.88)',
+  panelBorder: 'rgba(248, 216, 120, 0.3)',
+  panelShadow: 'rgba(0, 0, 0, 0.7)',
   textPrimary: '#f0f0f0',
-  textSecondary: '#b0b0b0',
-  textMuted: '#707070',
-  accentPrimary: '#e8c840',
-  accentSecondary: '#ff8040',
-  buttonBg: 'rgba(232, 200, 64, 0.1)',
-  buttonHover: 'rgba(232, 200, 64, 0.2)',
-  buttonActive: 'rgba(232, 200, 64, 0.3)',
-  overlayBg: 'rgba(0, 0, 0, 0.7)',
-  danger: '#ff4040',
-  success: '#40e060',
+  textSecondary: '#dcdcdc', // bright enough to read on 62%-black overlay
+  textMuted: '#b0b0b0', // lifted from #7c7c7c — hint/label text must be legible
+  accentPrimary: '#f8d878', // gold — the signature NES hue
+  accentSecondary: '#e07020', // warm orange accent
+  buttonBg: 'rgba(248, 216, 120, 0.08)',
+  buttonHover: 'rgba(248, 216, 120, 0.18)',
+  buttonActive: 'rgba(248, 216, 120, 0.28)',
+  // Semi-transparent overlay: dark enough for text readability,
+  // transparent enough for the map to show through on the menu.
+  overlayBg: 'rgba(0, 0, 0, 0.62)',
+  danger: '#e04040',
+  success: '#40c060',
 
-  // Ambient
-  vignetteColor: 'rgba(0, 0, 0, 0.4)',
+  // Ambient — subtle dark vignette, NES-like.
+  vignetteColor: 'rgba(0, 0, 0, 0.45)',
 }
 
 /**
  * Neon cyberpunk theme — vibrant glowing colors on dark background.
  */
 export const NEON_THEME: ThemeColors = {
+  // ── Neon cyberpunk — vibrant glowing colors on deep dark background ──
   bg: '#0a0014',
-  brick: '#ff006e',
+  // Terrain — saturated neon hues.
+  brick: '#ff006e', // hot pink brick
   brickDark: '#8a0040',
-  steel: '#3a3a5c',
-  steelDark: '#2a2a3c',
-  water: '#00f0ff',
-  waterDark: '#0080a0',
-  forest: '#39ff14',
+  steel: '#4a4a6c', // slightly brighter steel for visibility
+  steelDark: '#2e2e48',
+  water: '#00f0ff', // electric cyan
+  waterDark: '#0088aa',
+  forest: '#39ff14', // laser green
   forestDark: '#1a8a08',
-  ice: '#b0ffff',
-  base: '#ffea00',
-  baseDark: '#8a8000',
+  ice: '#b8ffff', // pale cyan
+  base: '#ffea00', // bright neon yellow
+  baseDark: '#aa9800',
 
-  playerBody: '#00ffff',
+  // Tanks — each kind gets a unique neon color.
+  playerBody: '#00e8ff', // electric cyan (player)
   playerTurret: '#ffffff',
-  playerBody2: '#00ffff',
+  playerBody2: '#00e8ff',
   playerBody3: '#ffffff',
 
-  enemyBasic: '#ff00ff',
-  enemyFast: '#00ff88',
-  enemyPower: '#ff6600',
-  enemyArmor: '#ffff00',
+  enemyBasic: '#ff00ff', // magenta
+  enemyFast: '#00ff88', // neon green
+  enemyPower: '#ff6600', // neon orange
+  enemyArmor: '#ffee00', // bright yellow
   enemyArmorFlash: '#ffffff',
 
-  hudBg: '#0d001a',
-  hudText: '#e0e0ff',
-  hudAccent: '#00ffff',
+  // HUD — deep purple-black, matching the void.
+  hudBg: '#0a0014',
+  hudText: '#d8d8ff', // light lavender for readability
+  hudAccent: '#00f0ff',
 
-  explosion1: '#ffff00',
-  explosion2: '#ff00ff',
-  explosion3: '#ff0066',
+  // Effects — neon fire palette.
+  explosion1: '#ffee00', // yellow core
+  explosion2: '#ff00ff', // magenta mid
+  explosion3: '#ff0066', // hot pink outer
   bullet: '#ffffff',
-  bulletGlow: '#00ffff',
+  bulletGlow: '#00f0ff',
   powerUp: '#ff00ff',
-  powerUpGlow: '#00ffff',
-  powerUpFence: '#3a3a5c',
-  powerUpFenceGlow: '#5a5a7c',
+  powerUpGlow: '#00f0ff',
+  powerUpFence: '#4a4a6c',
+  powerUpFenceGlow: '#6a6a9c',
   powerUpBoat: '#00f0ff',
   powerUpBoatGlow: '#80ffff',
-  spawn: '#00ffff',
+  spawn: '#00f0ff',
 
-  // HTML UI
-  panelBg: 'rgba(10, 0, 20, 0.92)',
-  panelBorder: 'rgba(0, 255, 255, 0.3)',
+  // HTML UI — deep dark panels with cyan accents.
+  panelBg: 'rgba(10, 0, 24, 0.92)',
+  panelBorder: 'rgba(0, 240, 255, 0.35)', // brighter border for clarity
   panelShadow: 'rgba(0, 0, 0, 0.8)',
-  textPrimary: '#e0e0ff',
-  textSecondary: '#8080c0',
-  textMuted: '#505070',
-  accentPrimary: '#00ffff',
-  accentSecondary: '#ff00ff',
-  buttonBg: 'rgba(0, 255, 255, 0.08)',
-  buttonHover: 'rgba(0, 255, 255, 0.18)',
-  buttonActive: 'rgba(0, 255, 255, 0.28)',
-  overlayBg: 'rgba(0, 0, 0, 0.8)',
+  textPrimary: '#e8e8ff', // near-white lavender
+  textSecondary: '#b0b0d8', // brighter lavender for menu readability
+  textMuted: '#8888aa', // lifted from #606088 — hint text must be legible on dark overlay
+  accentPrimary: '#00f0ff', // cyan accent
+  accentSecondary: '#ff00ff', // magenta secondary
+  buttonBg: 'rgba(0, 240, 255, 0.08)',
+  buttonHover: 'rgba(0, 240, 255, 0.2)',
+  buttonActive: 'rgba(0, 240, 255, 0.32)',
+  overlayBg: 'rgba(6, 0, 16, 0.75)', // slightly less opaque for map visibility
   danger: '#ff0066',
   success: '#39ff14',
 
-  // Ambient
+  // Ambient — deep vignette for the void feel.
   vignetteColor: 'rgba(0, 0, 0, 0.5)',
 }
 
@@ -135,66 +148,73 @@ export const NEON_THEME: ThemeColors = {
  * Warm, light, playful; matches the Ardot "Modern Presentation" art direction.
  */
 export const MODERN_RETRO_THEME: ThemeColors = {
-  bg: '#fbe6c4', // mid-cream, used for spawn-flash masking
-  bgGradient: ['#FFF7E6', '#FCE3B4'], // warm cream → deeper cream (vertical)
-  brick: '#d98a4f',
-  brickDark: '#a85f2c',
-  steel: '#c9c9c9',
-  steelDark: '#9a9a9a',
-  water: '#5bb8e8',
-  waterDark: '#2f8fc4',
-  forest: '#5bbf6a',
-  forestDark: '#2f8f43',
-  ice: '#a9e0f5',
-  base: '#f4c430',
-  baseDark: '#c8941f',
+  // ── Modern Retro — warm cream canvas, playful & light ──────────
+  bg: '#fbe6c4',
+  bgGradient: ['#FFF7E6', '#FCE3B4'],
+  // Terrain — muted, earthy tones that complement the cream.
+  brick: '#c87a42', // slightly deeper orange for better contrast on cream
+  brickDark: '#905028',
+  steel: '#b8b8b8', // cooler gray to distinguish from warm cream
+  steelDark: '#8a8a8a',
+  water: '#4aa8dc', // friendly blue
+  waterDark: '#2880b0',
+  forest: '#50b860', // fresh green
+  forestDark: '#288038',
+  ice: '#a0d8f0', // soft ice blue
+  base: '#f0b828', // warm amber-gold
+  baseDark: '#c08818',
 
-  playerBody: '#f4c430',
-  playerTurret: '#fff7e6',
-  playerBody2: '#f4c430',
-  playerBody3: '#fff7e6',
+  // Tanks — bold, distinguishable colors on cream.
+  playerBody: '#f0b828', // warm amber-gold
+  playerTurret: '#fff8ee', // near-white cream
+  playerBody2: '#f0b828',
+  playerBody3: '#fff8ee',
 
-  enemyBasic: '#e23b2c',
-  enemyFast: '#22c3dc',
-  enemyPower: '#8b5cf6',
-  enemyArmor: '#7a8290',
+  enemyBasic: '#d83828', // warm red
+  enemyFast: '#18b8d0', // teal
+  enemyPower: '#7c4ce0', // violet
+  enemyArmor: '#687888', // slate gray
   enemyArmorFlash: '#ffffff',
 
-  hudBg: 'rgba(255, 247, 230, 0.92)',
-  hudText: '#2b2b2b',
-  hudAccent: '#e07a5f',
+  // HUD — cream-tinted glass panel.
+  hudBg: 'rgba(255, 247, 230, 0.94)',
+  hudText: '#282018', // near-black warm brown
+  hudAccent: '#d06848', // terracotta accent
 
-  explosion1: '#ffd23f',
-  explosion2: '#ff7a3c',
-  explosion3: '#e0432b',
-  bullet: '#2b2b2b',
-  bulletGlow: '#f4c430',
-  powerUp: '#e07a5f',
-  powerUpGlow: '#f4c430',
-  powerUpFence: '#c9c9c9',
-  powerUpFenceGlow: '#f4c430',
-  powerUpBoat: '#5bb8e8',
-  powerUpBoatGlow: '#f4c430',
-  spawn: '#f4c430',
+  // Effects — warm fire palette.
+  explosion1: '#f8c830',
+  explosion2: '#e86830',
+  explosion3: '#c83820',
+  bullet: '#282018', // dark bullet (reads on cream)
+  bulletGlow: '#f0b828',
+  powerUp: '#d06848',
+  powerUpGlow: '#f0b828',
+  powerUpFence: '#b8b8b8',
+  powerUpFenceGlow: '#f0b828',
+  powerUpBoat: '#4aa8dc',
+  powerUpBoatGlow: '#f0b828',
+  spawn: '#f0b828',
 
-  // HTML UI
-  panelBg: 'rgba(255, 247, 230, 0.92)',
-  panelBorder: 'rgba(224, 122, 95, 0.3)',
-  panelShadow: 'rgba(0, 0, 0, 0.15)',
-  textPrimary: '#2b2b2b',
-  textSecondary: '#6b5848',
-  textMuted: '#a08a72',
-  accentPrimary: '#f4c430',
-  accentSecondary: '#e07a5f',
-  buttonBg: 'rgba(224, 122, 95, 0.1)',
-  buttonHover: 'rgba(224, 122, 95, 0.18)',
-  buttonActive: 'rgba(224, 122, 95, 0.28)',
-  overlayBg: 'rgba(43, 43, 43, 0.5)',
-  danger: '#e0432b',
-  success: '#3fae5a',
+  // HTML UI — warm, light panels with terracotta accents.
+  panelBg: 'rgba(255, 248, 232, 0.94)',
+  panelBorder: 'rgba(208, 104, 72, 0.35)', // stronger border for definition
+  panelShadow: 'rgba(0, 0, 0, 0.12)',
+  textPrimary: '#282018', // warm near-black
+  textSecondary: '#605040', // warm mid-brown (for cream canvas)
+  textMuted: '#988068', // muted tan (for cream canvas)
+  accentPrimary: '#f0b828', // amber-gold
+  accentSecondary: '#d06848', // terracotta
+  buttonBg: 'rgba(208, 104, 72, 0.08)',
+  buttonHover: 'rgba(208, 104, 72, 0.18)',
+  buttonActive: 'rgba(208, 104, 72, 0.28)',
+  // Semi-transparent dark overlay on cream — map shows through,
+  // menu text stays sharp with dark-on-dark.
+  overlayBg: 'rgba(40, 32, 24, 0.55)',
+  danger: '#c83820',
+  success: '#38a050',
 
-  // Ambient
-  vignetteColor: 'rgba(43, 43, 43, 0.06)',
+  // Ambient — very subtle, light feel.
+  vignetteColor: 'rgba(40, 32, 24, 0.06)',
 }
 
 export const THEME_DEFINITIONS: ThemeDefinition[] = [

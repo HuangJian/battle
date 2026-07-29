@@ -140,7 +140,12 @@ describe('classic fire cap — minimum cooldown floor', () => {
   it('cooldown floor of 0 disables the check (bullet cap only)', () => {
     const { world, sim } = buildSeededWorld(45, 'classic')
     // Override the rule to 0 — no cooldown floor.
-    world.rules.bulletCapMinCooldownMs = 0
+    // IMPORTANT: clone the rules object. `world.rules` is a reference to the
+    // shared `RULES['classic']` config; mutating it in place leaks the change
+    // into every later test (and silently breaks the god-ai-split-parity
+    // determinism guard, which reads the same global). See classic-drop-position.test.ts
+    // for the same clone pattern.
+    world.rules = { ...world.rules, bulletCapMinCooldownMs: 0 }
     const p = world.player!
 
     // ReadyToFire so the first shot succeeds.
