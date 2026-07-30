@@ -92,6 +92,20 @@ function baseRingPositions(): Array<{ col: number; row: number }> {
 }
 
 /**
+ * Return whether a cell belongs to the permanent in-grid base protection
+ * ring. This mirrors baseRingPositions() without allocating in the bullet
+ * hot path. The bottom edge is outside the field, so only the top, left, and
+ * right edges are valid protection cells.
+ */
+function isBaseProtectionCell(col: number, row: number): boolean {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
+  if (col === bc - 1 && (row === br || row === br + 1)) return true
+  return col === bc + 2 && (row === br || row === br + 1)
+}
+
+/**
  * Simulation — the only layer allowed to modify the World.
  * Runs all game systems in a fixed timestep.
  */
@@ -1232,6 +1246,42 @@ export class Simulation {
     const c1 = Math.floor((bullet.x + bullet.w - 1) / CELL)
     const r1 = Math.floor((bullet.y + bullet.h - 1) / CELL)
 
+    // A bullet can overlap the last protection brick and the base in the same
+    // tick. The normal scan intentionally preserves the existing multi-brick
+    // break-through behavior used by dense maze stages, but the permanent
+    // base ring must be a real barrier: destroy the ring cell and stop before
+    // the bullet can damage the base behind it. This also prevents a player
+    // bullet from self-destroying the base through its protection wall.
+    if (w.tileMap.hasBase()) {
+      const v = DIR_VECTORS[bullet.dir]
+      const rowStep = v.dy < 0 ? -1 : 1
+      const colStep = v.dx < 0 ? -1 : 1
+      const rowStart = v.dy < 0 ? r1 : r0
+      const rowEnd = v.dy < 0 ? r0 : r1
+      const colStart = v.dx < 0 ? c1 : c0
+      const colEnd = v.dx < 0 ? c0 : c1
+      for (let r = rowStart; v.dy < 0 ? r >= rowEnd : r <= rowEnd; r += rowStep) {
+        for (let c = colStart; v.dx < 0 ? c >= colEnd : c <= colEnd; c += colStep) {
+          if (!isBaseProtectionCell(c, r)) continue
+          const type = w.tileMap.get(c, r)
+          if (type === 'brick') {
+            w.tileMap.destroy(c, r)
+            this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
+            return true
+          }
+          if (type === 'steel') {
+            if (bullet.power >= 2) {
+              w.tileMap.destroy(c, r)
+              this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
+            } else {
+              this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
+            }
+            return true
+          }
+        }
+      }
+    }
+
     let hit = false
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
@@ -1243,7 +1293,7 @@ export class Simulation {
           // formula (classic still instakills). Allied guard bullets DEFEND the
           // base and must never damage it (§31 Phase 2) — but they still stop
           // on it.
-          if (bullet.allegiance !== 'ally') this.damageBase(this.bulletFirePower(bullet))
+          if (bullet.allegiance !== 'ally') this.damageBase(bullet)
           return true
         } else if (type === 'brick') {
           w.tileMap.destroy(c, r)
@@ -1277,20 +1327,18 @@ export class Simulation {
   }
 
   /**
-   * Apply one bullet's damage to the base (eagle). The only input is the
-   * shooter's `firePower` number — nothing about the kind, star level, or
-   * difficulty is known here. Damage IS the firepower value (user spec:
-   * `damage = firePower`), so a stronger gun chips more off the single pool.
-   * Player and enemy bullets use the SAME path (same `bulletFirePower`
-   * resolver upstream).
+   * Apply one bullet's damage to the base (eagle). The bullet is retained as
+   * the input so the terminal event can identify the actual shooter. Damage
+   * is still resolved only from the shooter's firepower, preserving the
+   * single-pool base rule.
    *
    * Only when baseHp reaches 0 are all base cells cleared and the
    * `base_destroyed` event emitted; otherwise the base stays up but its damage
    * overlay is refreshed for the renderer.
    */
-  private damageBase(firePower: number): void {
+  private damageBase(bullet: Bullet): void {
     const w = this.world
-    const dmg = firePower
+    const dmg = this.bulletFirePower(bullet)
     const bp = w.tileMap.getBasePos()
     if (bp) {
       this.createExplosion(bp.x + CELL, bp.y + CELL, 'small')
@@ -1298,7 +1346,7 @@ export class Simulation {
     if (dmg >= w.baseHp) {
       w.baseHp = 0
       w.tileMap.destroyAllBaseCells()
-      w.pushEvent({ type: 'base_destroyed' })
+      w.pushEvent({ type: 'base_destroyed', by: bullet.ownerKind })
     } else {
       w.baseHp -= dmg
       w.tileMap.markBaseDamaged()

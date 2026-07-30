@@ -182,6 +182,125 @@ describe('Base HP — classic is one-shot', () => {
     expect(world.tileMap.isBaseDestroyed()).toBe(true)
     expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(true)
   })
+
+  it('a protection brick blocks a bullet before it can hit the base in the same tick', () => {
+    const { world, sim } = seededWorld(7, 'classic')
+    openArena(world)
+    world.tileMap.grid[24][11] = 'brick'
+
+    world.bullets.push({
+      id: genId(),
+      x: 11 * CELL + CELL - BULLET / 2,
+      y: 24 * CELL + 4,
+      w: BULLET,
+      h: BULLET,
+      dir: 'right',
+      alive: true,
+      ownerId: -1,
+      ownerKind: 'fast',
+      isPlayer: false,
+      allegiance: 'enemy',
+      speed: 0,
+      power: 1,
+      damage: 1,
+    })
+
+    sim.tick()
+
+    expect(world.tileMap.get(11, 24)).toBe('empty')
+    expect(world.tileMap.isBaseDestroyed()).toBe(false)
+    expect(world.baseHp).toBe(CLASSIC_BASE_MAX_HP)
+    expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(false)
+  })
+
+  it('base_destroyed records the owner kind of the bullet that hit it', () => {
+    const { world, sim } = seededWorld(7, 'classic')
+    openArena(world)
+
+    world.bullets.push({
+      id: genId(),
+      x: 13 * CELL - BULLET / 2,
+      y: 24 * CELL - 2,
+      w: BULLET,
+      h: BULLET,
+      dir: 'down',
+      alive: true,
+      ownerId: -1,
+      ownerKind: 'fast',
+      isPlayer: false,
+      allegiance: 'enemy',
+      speed: 0,
+      power: 1,
+      damage: 1,
+    })
+
+    sim.tick()
+
+    const event = world.events.find((e) => e.type === 'base_destroyed')
+    expect(event).toEqual({ type: 'base_destroyed', by: 'fast' })
+  })
+
+  it('a player bullet cannot self-destroy the base through a protection brick', () => {
+    const { world, sim } = seededWorld(7, 'classic')
+    openArena(world)
+    // Place a protection brick at the top-left of the base ring (col 11, row 23).
+    world.tileMap.grid[23][11] = 'brick'
+
+    world.bullets.push({
+      id: genId(),
+      x: 11 * CELL + CELL - BULLET / 2,
+      y: 23 * CELL - 2,
+      w: BULLET,
+      h: BULLET,
+      dir: 'down',
+      alive: true,
+      ownerId: 0,
+      ownerKind: 'player',
+      isPlayer: true,
+      allegiance: 'player',
+      speed: 0,
+      power: 1,
+      damage: 1,
+    })
+
+    sim.tick()
+
+    // The protection brick is destroyed, but the base survives.
+    expect(world.tileMap.get(11, 23)).toBe('empty')
+    expect(world.tileMap.isBaseDestroyed()).toBe(false)
+    expect(world.baseHp).toBe(CLASSIC_BASE_MAX_HP)
+  })
+
+  it('a steel protection cell blocks a normal-power bullet without being destroyed', () => {
+    const { world, sim } = seededWorld(7, 'classic')
+    openArena(world)
+    // Place steel at the top-left of the base ring (col 11, row 23).
+    world.tileMap.grid[23][11] = 'steel'
+
+    world.bullets.push({
+      id: genId(),
+      x: 11 * CELL + CELL / 2 - BULLET / 2,
+      y: 22 * CELL + 4,
+      w: BULLET,
+      h: BULLET,
+      dir: 'down',
+      alive: true,
+      ownerId: -1,
+      ownerKind: 'fast',
+      isPlayer: false,
+      allegiance: 'enemy',
+      speed: 0,
+      power: 1,
+      damage: 1,
+    })
+
+    sim.tick()
+
+    // Steel survives (power 1 < 2), base survives, bullet is stopped.
+    expect(world.tileMap.get(11, 23)).toBe('steel')
+    expect(world.tileMap.isBaseDestroyed()).toBe(false)
+    expect(world.baseHp).toBe(CLASSIC_BASE_MAX_HP)
+  })
 })
 
 describe('Base HP — snapshot round-trips baseHp / baseMaxHp', () => {

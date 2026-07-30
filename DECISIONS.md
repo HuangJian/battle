@@ -1695,3 +1695,91 @@ Supporting parameters (all S32-only via override table):
 **Measured:** perTick 0.009ms → 0.006-0.007ms (~25-33% improvement, 60-game classic/stage0). Wall time 1737ms → ~1275ms (~27%). Noise is ±5% due to i7-4770HQ thermal throttling; determinism signature is the reliable correctness metric.
 
 **Implications:** The remaining bottlenecks (`think` 13%, `rectHitsTerrain` 8%, `updateNoneTank` 8%) are core simulation functions that are already lean — further gains would require algorithmic changes (spatial indexing, etc.) that violate "simple beats clever" (MANIFEST §10) for <2% marginal improvement.
+
+## 47. Base Protection Ring Collision and Destruction Attribution (2026-07-30)
+
+**Decision:** Treat the permanent in-grid base protection ring as a blocking
+barrier before resolving a bullet collision with the base. When a bullet
+overlaps a ring brick or steel cell and the base in the same tick, the ring
+cell is resolved first and the bullet stops. Preserve the existing
+multi-brick behavior everywhere outside the base ring. Record the actual
+bullet owner kind on `base_destroyed` events and use that field for failure
+diagnostics.
+
+**Rationale:**
+- The previous terrain scan could destroy a ring brick and continue scanning
+  the same bullet bounds until it damaged the base, including for a player
+  bullet. This violated the intended protection-wall semantics and polluted
+  God AI tuning results.
+- A global first-blocking-cell rewrite improved S32 but regressed Brick Maze
+  by changing ordinary maze-breaking behavior. Limiting the fix to the base
+  ring preserves existing stage navigation while fixing the actual exploit.
+- The prior `killerKind` diagnostic walked backward to the last enemy
+  `bullet_fired` event, which was not necessarily the bullet that hit the
+  base. The terminal event now carries the source directly.
+
+**Validation:** A temporary simulation patch raised S32 from 87/120 (72.5%)
+to 102/120 (85.0%) and the 35×20-seed aggregate from 86.9% to 88.7%, with no
+stage below the 60% floor. The production change is guarded by regression
+tests for same-tick ring protection and source attribution.
+**Formal re-measurement (2026-07-30, this fix alone, §48 reverted):** S32
+85.0% @120 seeds (base=6, lives=12) — confirmed; 35×60 mean **87.7%** (old
+truth 81.9%), S32 90.0% @60, 0/35 below the 60% floor. Regression-gate
+truths regenerated from the new 35×60 run.
+
+**Supersedes:** The causal attribution in §44 that identified armor/power as
+the primary S32 base killers. The intervention rejection remains valid, but
+the corrected 120-seed attribution is fast=14, armor=4, power=2, player=1.
+
+## 48. God AI Bullet Evasion Terrain Occlusion — REJECTED, terrain-blind is load-bearing (2026-07-30)
+
+**Decision:** Do NOT add a terrain trajectory (occlusion) check to
+`findMostDangerousBulletImpl` (M3) or `isSafeDirImpl` in
+`ThreatAssessor.ts`. The apparent "false evasion" defect (dodging bullets
+currently blocked by a brick/steel wall) is deliberate, load-bearing
+behavior and is now locked by `tests/threat-assessor.test.ts`.
+
+**Context:** The T8 base-defense function (`findBulletThreatToBaseImpl`)
+gained a trajectory terrain check during Phase A ("Fix Bug 4"), and M3 was
+flagged as having the same blindness. A candidate fix (same scan pattern as
+T8, capped at the distance to the player / candidate dodge cell) was
+implemented and measured.
+
+**Measured results (the fix was implemented, then reverted):**
+
+| Config | S32 @120 seeds | 35×60 mean |
+|---|---|---|
+| §47 only (baseline after ring fix) | **85.0%** (base=6, lives=12) | **87.7%** (S32 90.0%) |
+| §47 + full §48 occlusion | 75.0% (base=8, lives=**22**) | 86.7% (S32 76.7%) |
+| §47 + occlusion in `findMostDangerousBulletImpl` only | 75.0% (base=8, lives=22) | — |
+| §47 + occlusion in `isSafeDirImpl` only | 85.0% (base=6, lives=12) | 87.6% (S32 90.0%) |
+
+Attribution is unambiguous: the `findMostDangerousBulletImpl` occlusion
+skip alone causes the full −10pp; lives_exhausted nearly doubles (12→22).
+The `isSafeDirImpl` occlusion check alone is neutral (87.6% vs 87.7%,
+within noise) and is rejected per the "neutral structural change = reject"
+discipline.
+
+**Why terrain-blind dodging wins:** in close combat (S32 t2aMaxRange=2 and
+generally in brick-dense fights) the brick "blocking" an aligned enemy
+bullet is usually destroyed by that same bullet stream within a few ticks.
+The instantaneous-occlusion model treats the wall as permanent cover, so
+the AI stands still against a threat that becomes real one tick after the
+brick dies — too late to dodge. The "false evasion" is in fact anticipatory
+dodging against imminent wall-breach, which the simple aligned+approaching
+heuristic captures for free. A correct fix would need a time-to-breach
+model (brick HP vs bullet stream), which is not worth the complexity given
+the current heuristic already outperforms the "accurate" one.
+
+**Implications:**
+- `findMostDangerousBulletImpl` / `isSafeDirImpl` stay byte-identical to
+  their pre-§48 implementation.
+- `tests/threat-assessor.test.ts` locks the terrain-blind behavior with
+  explicit "STILL detects behind wall" tests so a future cleanup cannot
+  silently land this regression again. Changing this requires re-running
+  S32 @120 + 35×60 A/B first.
+- The parity baseline (seed 42) stays at its pre-§48 value; only §47
+  (simulation-layer ring fix) shifts simulation behavior this round.
+- Progress doc §4: "假闪避" is reclassified from "known defect" to
+  "verified-beneficial heuristic (do not fix)".
+
