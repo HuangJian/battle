@@ -139,16 +139,17 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 ## 6. 参数与覆盖表现状
 
 - **全局默认**：`DEFAULT_GOD_AI_PARAMS` = P4 R7 最优（关键：threatRangeCells 10、maxPlayerDistFromBase 26、powerupMaxDivertDistance 16、huntAllyCount 1、aimError 0.03 —— 微量瞄准噪声全局打破互堵僵局）。
-- **覆盖表**（`src/ai/godai-stage-overrides.ts`，4 条，全部 ≥60 seeds 验证）：
+- **覆盖表**（`src/ai/godai-stage-overrides.ts`，2 条，全部 ≥120 seeds 验证）：
 
-| 关 | 覆盖 | 60-seed 提升 |
+| 关 | 覆盖 | 120-seed 对比 |
 |---|---|---|
-| S18 Frozen Field | outnumberedRadiusCells:14, aimError:0 | 52→67% |
-| S25 Ice Palace | aimError:0 | 57→73% |
-| S26 Brick Maze | replanInterval:30, suboptimalPathProb:0.05 | 53→65% |
-| S32 Diamond | t2aMaxRange:2 + camp/armor/navStuck 辅助 | 43.3→72.5% @120 |
+| S26 Brick Maze | replanInterval:30, suboptimalPathProb:0.05 | 68.3% vs 裸默认 67.5% (+0.8pp, 防 base) |
+| S32 Diamond | t2aMaxRange:2 + camp/armor/navStuck 辅助 | 72.5% vs 裸默认 48.3% (+24.2pp, 必需) |
 
 - ~~S6 Iron Curtain~~ 覆盖已移除（§54, 2026-07-30）：R8 保守覆盖（maxPlayerDistFromBase:16 等）在 RNG split + §47 后过时，120-seed 探针覆盖 59.2% < 裸默认 62.5%，且 base 破坏数反增（43 vs 30）。移除后 35×60 S6 从 57%→72%，suite +0.019。
+- ~~S18 Frozen Field~~ 覆盖已移除（§55, 2026-07-30）：outnumberedRadiusCells:14 导致过早回撤丢失中盘控制权，120-seed 覆盖 56.7% < 裸默认 60.8%。aimError:0 也已无效（默认 0.03 已足够小）。
+- ~~S25 Ice Palace~~ 覆盖已移除（§55, 2026-07-30）：aimError:0 vs 默认 0.0303 逐种子完全相同（77.5% = 77.5%），覆盖完全无效。
+- **审计结论**：5 个原始覆盖中 3 个（S6/S18/S25）已过时，过时率 60%。基线变动后必须重新审计所有覆盖。
 
 - **保留未启用**：`smartThreatModel` 族 7 参数（Phase A，默认 OFF）、`guardBandMode`（已否决）。
 

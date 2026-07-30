@@ -63,14 +63,14 @@ const TRUTH_WIN_PCT: number[] = [
   85.0, // S15 Crossroads
   93.3, // S16 Twin Spires
   98.3, // S17 Gridlock
-  71.7, // S18 Frozen Field (override: wide retreat + perfect aim)
+  60.8, // S18 Frozen Field (override REMOVED §55: radius14 caused -5.8pp, aimError:0 neutral)
   85.0, // S19 Bastion
   80.0, // S20 Checkers
   90.0, // S21 Oasis
   91.7, // S22 Ramparts
   85.0, // S23 Labyrinth
   85.0, // S24 Quarry
-  73.3, // S25 Ice Palace (override: perfect aim)
+  77.5, // S25 Ice Palace (override REMOVED §55: aimError:0 vs default 0.03 = identical behavior)
   66.7, // S26 Brick Maze (override: fast replan + path noise)
   90.0, // S27 Thicket
   86.7, // S28 Spider

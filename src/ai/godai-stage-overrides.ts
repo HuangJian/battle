@@ -4,12 +4,8 @@ import type { GodAIParams } from './GodAIInput'
  * Per-stage GOD AI parameter overrides (P4, plan/God-AI-Next-Round).
  *
  * Why this exists: CMA-ES rounds 1-6 proved that a single global parameter
- * set CANNOT satisfy all 35 classic stages — the failure families demand
- * opposite behaviors:
- *
- *   - S18 Frozen Field (open ice, 8 armor tanks, 3-way crossfire): wants a
- *     WIDER outnumbered-retreat radius (fall back before the pincer closes)
- *     and perfect aim (armor tanks take 4 hits; wasted shots are lethal).
+ * set CANNOT satisfy all 35 classic stages — some stages demand opposite
+ * behaviors from the global default.
  *
  * This is data over code (MANIFEST §2.4): a human player also adapts
  * tactics per map. The table is keyed by stage NAME (stable across index
@@ -20,51 +16,43 @@ import type { GodAIParams } from './GodAIInput'
  * tools/probe-params.ts). 20-seed probes are noise (binomial +/-11pp) —
  * they were shown to select mirage gains that vanish on fresh seeds.
  *
- * Validated 2026-07-29 against R6 base params, 60 seeds each:
- *   S18 Frozen Field: 52% -> 67%
- * Validated 2026-07-29 against R7 base params, 60 seeds each:
- *   S25 Ice Palace:   57% -> 73%
- *   S26 Brick Maze:   53% -> 65%
+ * STALE OVERRIDE AUDIT (2026-07-30, DECISIONS.md §54-§55):
+ * All overrides were re-probed at 120 seeds against the current global
+ * default (post-RNG-split, post-§47 base protection ring). Results:
  *
- * S6 Iron Curtain override REMOVED (2026-07-30, DECISIONS.md §54):
- * The R8 override (outnumberedEnemyCount:2, maxPlayerDistFromBase:16,
- * defenseRowOffset:3, ...) was designed for a pre-RNG-split baseline.
- * After §47 (base protection ring) + RNG split + v7 evaluation changes,
- * the global default params became strong enough that the override's
- * conservative leash (maxPlayerDistFromBase:16 vs default 26) actively
- * harmed S6: it restricted mid-game map control, slowed kill tempo, and
- * paradoxically INCREASED base destructions (43 vs 30 per 120 seeds).
- * 120-seed probe: override 59.2% < naked default 62.5%. Minimal overrides
- * tested (maxPlayerDistFromBase:28, t8MaxInterceptDistCells:10) showed
- * no significant improvement over naked default at 120 seeds (60.0% vs
- * 62.5%). Conclusion: stale overrides must be removed, not patched.
+ *   S6  Iron Curtain  — REMOVED (§54): override 59.2% < naked 62.5%.
+ *     The conservative leash (maxPlayerDistFromBase:16) restricted mid-game
+ *     map control and paradoxically increased base destructions (43 vs 30).
+ *   S18 Frozen Field  — REMOVED (§55): override 56.7% < naked 60.8%.
+ *     The wider retreat radius (outnumberedRadiusCells:14) caused the player
+ *     to fall back too early, losing map control. aimError:0 was also neutral
+ *     (59.2% vs 60.8%, within noise). Original validation (52→67%) is stale.
+ *   S25 Ice Palace    — REMOVED (§55): override 77.5% = naked 77.5% (identical).
+ *     The default aimError (0.0303) is already so small that setting it to 0
+ *     produces zero behavioral difference on this stage.
  *
- * Known hard case (NOT override-tunable, verified at 60 seeds against both
- * R6 and R7 bases): S32 Diamond (~52%). Armor-heavy force (8 armor / 8
- * fast / 4 power) on a fragmented steel+forest map with an open bottom
- * band; every single/double param change scored at or below base. Needs a
- * structural fix (maze-aware navigation or an armor-stage base guard).
+ *   S26 Brick Maze    — KEPT: override 68.3% ≈ naked 67.5% (+0.8pp, within
+ *     noise) but prevents base destruction (0 vs 2). The faster replanning +
+ *     path randomness synergy breaks deadlock patrol loops. Individual
+ *     params are each slightly worse (65.8%), but the combination works.
+ *   S32 Diamond       — KEPT: override 72.5% >> naked 48.3% (+24.2pp).
+ *     Close-combat strategy (t2aMaxRange:2) is essential for armor grinding.
+ *
+ * LESSON: overrides are data, and data goes stale. After RNG split, §47
+ * collision fix, and v7 evaluation changes, the global default improved
+ * dramatically. Every override must be re-validated after major baseline
+ * shifts — otherwise stale overrides silently harm the stages they were
+ * meant to help (as happened with S6 and S18).
  */
 export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
-  'Frozen Field': {
-    // Wider retreat radius: fall back before the 3-way pincer closes on
-    // the open ice field (deaths cluster at rows 5-10, the corridor band
-    // below the enemy spawn rows).
-    outnumberedRadiusCells: 14,
-    // Perfect aim: 8 of 20 enemies are 4-hit armor tanks; wasted shots
-    // extend exposure time in open terrain.
-    aimError: 0,
-  },
-  'Ice Palace': {
-    // Perfect aim: like Frozen Field this is an ice map where wasted
-    // shots extend exposure; consistent +16pp across seed windows.
-    aimError: 0,
-  },
   'Brick Maze': {
     // Failure mode is pure lives_exhausted (base almost never falls).
     // Faster replanning + a dash of path randomness break the deadlock
     // patrol loops in the dense brick maze where the AI and enemies
     // otherwise circle each other until lives run out.
+    // 120-seed probe (2026-07-30): 68.3% vs naked 67.5% (+0.8pp, within
+    // noise) but prevents base destruction (0 vs 2). Individual params
+    // each 65.8% — the synergy is real but marginal. Kept for base safety.
     replanInterval: 30,
     suboptimalPathProb: 0.05,
   },
@@ -88,6 +76,7 @@ export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
     //
     // Verified @120 seeds: 43.3% → 72.5% (+29.2pp) with close-combat params.
     //   Failure mode shift: base_destroyed 43→21, lives_exhausted 25→12.
+    // 120-seed re-audit (2026-07-30): 72.5% vs naked 48.3% (+24.2pp) — STILL ESSENTIAL.
     // guardBandMode (T2a skip) was tested and REJECTED: it causes the
     // player to abandon in-progress armor kills to chase fast tanks,
     // which is strictly worse (50.8% @120 seeds vs 72.5% without).
