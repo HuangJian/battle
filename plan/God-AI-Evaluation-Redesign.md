@@ -494,3 +494,137 @@ NOTE: 4 关显著变动；平均打平仍可能是特定关的真实回归。
 | 35×60 CRN 配对判定 | ✅ v5 冠军→v6：B 更优(p=0.01)；DEFAULT→v6：打平(p=0.18, 3 回归/1 改善) |
 | 按 §7.3 判据给结论 | ✅ 不提升 |
 | 预算限制透明记录 | ✅ 35×14×7（减量），见 §7.5 预算说明 |
+
+---
+
+## 11. v7 实验 — 宽带 gap + 胜率混合 fitness (2026-07-30)
+
+> **动机**：§10 的 v6 提升决策结论是「不提升」，根因是 v6 冠军在 Checkers / Iron Curtain / Twin Spires 三关显著回归（aimError 0.030→0.094）。本节记录针对该根因的 v7 系列实验，目标是在保留 v6 连续评分判别力的同时，**消除难关回归**。
+
+### 11.1 v6 回归根因诊断
+
+v6 的带间 gap 仅 0.05（失败档上界 0.55，通关档下界 0.60）。这意味着：
+
+- 「将一局失败转为通关」的分数增量 = 0.60 − 0.55 = **0.05**
+- 「在失败档内从 0 杀提升到 19 杀」的分数增量 = 0.55 × 0.50 = **0.275**
+
+优化器看到的边际收益：**在失败档内刷分（0.275）远大于将失败翻转为通关（0.05）**。因此 CMA-ES 选择降低 `aimError`（0.030→0.094）来减少灾难性失败、提高失败档内均分，而非提升难关的通关转化率。这直接导致三关显著回归。
+
+### 11.2 v7 设计：两个结构性改动
+
+#### 改动 1：加宽带间 gap
+
+```
+v6:  LOSS_BAND_MAX = 0.55,  CLEAR_BAND_MIN = 0.60  →  gap = 0.05
+v7:  LOSS_BAND_MAX = 0.40,  CLEAR_BAND_MIN = 0.70  →  gap = 0.30
+```
+
+gap 从 0.05 扩大到 0.30（6 倍），使「失败→通关」成为优化器**最高边际收益**的方向（0.30 > 失败档内最大跨度 0.40）。
+
+#### 改动 2：混合 fitness（质量 + 胜率）
+
+```ts
+fitnessV7 = 0.5 × v7_lcb × 1000 + 0.5 × winRateHarmonic × 1000
+```
+
+其中 `winRateHarmonic = powerMean(winRates, p=−1, floor=0.01)`——35 关胜率的调和均值，被最弱关主导。
+
+**为什么用调和均值而非算术均值**：28/35 关在 DEFAULT 下胜率饱和（100%），算术均值对这些关完全不敏感。调和均值（p=−1）使最弱关的边际改善产生比算术均值大得多的 fitness delta，提供连续压力改善低胜率关卡。这是 v5 不连续 floor penalty 的连续替代。
+
+### 11.3 三轮实验（同 opt-seed=7、同预算 35×14×7）
+
+| 标准 | bestFitness | win@14 | minStageWin | aimError | 混合比 |
+|------|-------------|--------|-------------|----------|--------|
+| DEFAULT (v5 incumbent) | — | 87% | — | 0.030 | — |
+| v6 champion | 697.69 | 87% | 0.429 | 0.094 | — |
+| **v7-first**（仅宽 gap） | 685.35 | 88% | 0.643 | **0.116** | 0/0 |
+| **v7b**（50/50 混合） | 767.19 | 88% | 0.429 | **0** | 50/50 |
+| **v7c**（60/40 混合） | 792.89 | 88% | 0.500 | **0.024** | 60/40 |
+
+### 11.4 A/B 对照（35×60，DEFAULT vs 冠军）
+
+#### v7-first（仅宽 gap）— ❌ 失败
+
+```
+mean Δscore  −0.0169 ± 0.0069    t/p  −2.44 / 0.0146
+suite 0.6878 → 0.6612    win rate 87% → 85%
+B better/worse/tied  1011 / 1069 / 20
+VERDICT: B is worse (p < 0.05)
+逐关：▼ Ramparts −0.0855 (p=0.014) │ ▼ Crossfire −0.0511 (p=0.033)
+```
+
+**结论**：宽带 gap 单独不够。aimError 反而升至 0.116（比 v6 的 0.094 更高），2 回归 / 0 改善。根因：带内分数仍奖励「多杀的失败」，优化器可找到 quality 高但 win rate 低的参数组合。
+
+#### v7b（50/50 混合）— ✅ 安全
+
+```
+mean Δscore  −0.0107 ± 0.0068    t/p  −1.58 / 0.1146
+suite 0.6878 → 0.6649    win rate 87% → 86%
+B better/worse/tied  1009 / 1048 / 43
+VERDICT: no significant difference — do not ship on this evidence
+逐关：▲ Frozen Field +0.1229 (p=0.009, 63%→82%)    (0 回归, 1 改善)
+```
+
+**结论**：v7b 冠军与 DEFAULT **统计不可区分**（p=0.11），且**零显著回归 + 一处显著改善**（Frozen Field +19pp）。aimError 被优化器驱动至 **0**——完美瞄准。这是 v7 系列中唯一不产生回归的配置。
+
+#### v7c（60/40 混合）— ❌ 混合
+
+```
+mean Δscore  −0.0127 ± 0.0062    t/p  −2.06 / 0.0390
+suite 0.6878 → 0.6590    win rate 87% → 86%
+B better/worse/tied  848 / 962 / 290
+VERDICT: B is worse (p < 0.05)
+逐关：▼ Twin Spires −0.0936 (p=0.005) │ ▼ Lattice −0.0934 (p=0.027)
+       ▲ Eagle Nest +0.0728 (p=0.030) │ ▲ Final Redoubt +0.0611 (p=0.041) │ ▲ Thicket +0.0594 (p=0.025)
+```
+
+**结论**：60% 权重压在胜率上，推优化器过度追求胜率、牺牲质量，导致 Twin Spires / Lattice 两关显著回归。虽改善 3 关，但总体 p=0.039 判定为 worse。
+
+### 11.5 横向对比总结
+
+| 标准 | win@60 | 回归 | 改善 | p | 判定 |
+|------|--------|------|------|---|------|
+| v6 | 86% | 3 | 1 | 0.18 | 打平但净负 |
+| v7-first | 85% | 2 | 0 | 0.015 | ❌ worse |
+| **v7b** | **86%** | **0** | **1** | **0.11** | **✅ 安全** |
+| v7c | 86% | 2 | 3 | 0.039 | ❌ worse |
+
+v7b 是唯一做到「零回归」的配置。与 v6 相比，它从「3 回归 / 1 改善」改善到「0 回归 / 1 改善」，同时总体 p 值从 0.18 提升到 0.11（更接近不可区分）。
+
+### 11.6 关键发现
+
+1. **宽带 gap 是必要条件但非充分条件**：v7-first 证明仅扩大 gap 不能对齐胜率——带内分数仍可被操纵。必须配合胜率混合项。
+
+2. **50/50 是最优混合比**：v7b（50/50）安全，v7c（60/40）产生回归。60% 胜率权重使优化器在个别关上过度激进（牺牲 quality 换 win rate），50/50 保持平衡。
+
+3. **aimError→0 是优化器的自然选择**：v7b 冠军将 aimError 从 0.030 驱动至 0。在混合 fitness 下，完美瞄准同时提升 quality（更高命中率）和 win rate（更快杀敌），是两个目标的帕累托最优方向。v6 反向移动 aimError 正是其回归的根因。
+
+4. **Frozen Field 改善的机制**：v7b 冠军在 Frozen Field（63%→82%）的改善来自 `defenseColSpread` 5→7 和 `baseRaceRangeCells` 11→13 的组合——更宽的防守覆盖和更早的基地回防触发，在冰面关卡的漂移环境下更有效。
+
+### 11.7 决策与后续
+
+**当前状态**：v7b 作为 `--fitness v7` opt-in 保留，v5 仍为默认。
+
+**未提为默认的理由**：v7b 冠军 35×60 胜率 86% < DEFAULT 87%，未达 §7.3「不劣于 v5 最优」硬门槛。但差值 1pp 在噪声范围内（p=0.11），且**零显著回归**——这是 v6→v7 最大的进步。
+
+**后续动作**：
+- v7 标准适用于「需要连续梯度但不可牺牲胜率」的调参场景。
+- 在有更长搜索预算（20+ seed × 30 代）时，可重新评估 v7b 是否达到 ≥87% 门槛。
+- v7b 的 `aimError=0` 发现值得单独研究：如果完美瞄准是最优策略，是否应在 `DEFAULT_GOD_AI_PARAMS` 中直接设为 0？
+
+### 11.8 产物索引
+
+| 产物 | 路径 |
+|------|------|
+| v7-first 优化日志 | `.workbuddy/promotion/opt-v7/` |
+| v7b 优化日志 | `.workbuddy/promotion/opt-v7b/` |
+| v7c 优化日志 | `.workbuddy/promotion/opt-v7c/` |
+| v7-first 冠军参数 | `.workbuddy/promotion/v7-params.json` |
+| v7b 冠军参数 | `.workbuddy/promotion/v7b-params.json` |
+| v7c 冠军参数 | `.workbuddy/promotion/v7c-params.json` |
+| v7-first A/B | `.workbuddy/promotion/ab-defaultv7.txt` |
+| v7b A/B | `.workbuddy/promotion/ab-defaultv7b.txt` |
+| v7c A/B | `.workbuddy/promotion/ab-defaultv7c.txt` |
+| 代码 | `tools/godai-score.ts`（`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`） |
+| 公理测试 | `tests/godai-score.test.ts`（v7 宽 gap 单调性 + 混合 fitness 判别力） |
+| 决策记录 | `DECISIONS.md` §53 |

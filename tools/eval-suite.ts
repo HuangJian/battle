@@ -38,6 +38,7 @@ import {
   fitnessV6,
   DEFAULT_STAGE_REFS,
   DEFAULT_SCORE_CONFIG,
+  V7_SCORE_CONFIG,
   DEFAULT_WIN_WEIGHTS,
   DEFAULT_LOSS_WEIGHTS,
   type StageRefs,
@@ -87,8 +88,13 @@ function loadRefs(): RefsFile {
   }
 }
 
+/** Select the base score config from the --fitness flag. */
+function scoreConfigBase(): ScoreConfig {
+  return arg('fitness') === 'v7' ? V7_SCORE_CONFIG : DEFAULT_SCORE_CONFIG
+}
+
 function configFor(stageName: string, refsFile: RefsFile): ScoreConfig {
-  return { ...DEFAULT_SCORE_CONFIG, refs: refsFile[stageName] ?? DEFAULT_STAGE_REFS }
+  return { ...scoreConfigBase(), refs: refsFile[stageName] ?? DEFAULT_STAGE_REFS }
 }
 
 // ============================================================

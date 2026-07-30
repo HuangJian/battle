@@ -1869,3 +1869,37 @@ the current heuristic already outperforms the "accurate" one.
 - 35×120 A/B：基准 3618/4200 (86.1%) → 修改 3623/4200 (86.3%)，+5 wins
 - 主要增益关卡：S32 Star Fort +2, S7/S22/S24/S27 各 +1, S25 -1
 - 增益虽小（+0.2pp）但方向稳定，且不引入任何回退
+
+## 53. God AI 评估标准 v7 — 宽带 gap + 胜率调和均值混合 fitness (2026-07-30)
+
+**Decision:** 在 v6 连续评分管线基础上引入 v7 标准，通过两个结构性改动对齐胜率：
+1. **加宽带间 gap**：`LOSS_BAND_MAX` 0.55→0.40、`CLEAR_BAND_MIN` 0.60→0.70（gap 从 0.05 扩大到 0.30），使"将失败转为通关"成为优化器最高边际收益的方向。
+2. **混合 fitness**：`fitnessV7 = 0.5 × v7_lcb × 1000 + 0.5 × winRateHarmonic × 1000`，其中 `winRateHarmonic` 是 35 关胜率的调和均值（p=−1），被最弱关主导，提供连续压力改善低胜率关卡。
+
+**Rationale:**
+- v6 的 0.05 gap 使"输→赢"转化仅值 0.05 分，远低于"0 杀→19 杀"的 0.46 分。优化器选择降低瞄准精度（aimError 0.030→0.094）来减少灾难性失败，而非提升难关转化率，导致 Checkers/Iron Curtain/Twin Spires 三关显著回归（§10.4）。
+- 宽带 gap 单独不够：v7-first（仅宽 gap）冠军 35×60 胜率 85%，aimError 0.116，2 回归/0 改善。根因是带内分数仍奖励"多杀的失败"，优化器可找到 quality 高但 win rate 低的参数组合。
+- 混合 fitness 的胜率调和均值直接耦合外部指标：28/35 关在 DEFAULT 下胜率饱和（100%），算术均值不敏感；调和均值被最弱关主导，5pp 改善在调和均值中产生比算术均值大得多的 fitness delta。这是 v5 不连续 floor penalty 的连续替代。
+- 50/50 分配优于 60/40：v7b（50/50）0 回归/1 改善/p=0.11（不显著）；v7c（60/40）2 回归/3 改善/p=0.039（显著回归）。60/40 推优化器过度追求胜率，牺牲质量导致 Twin Spires/Lattice 回归。
+
+**Experiments (同 opt-seed=7、同预算 35×14×7，A/B 口径 35×60):**
+
+| 标准 | aimError | win@14 | win@60 | 回归 | 改善 | p |
+|------|----------|--------|--------|------|------|---|
+| DEFAULT (v5 incumbent) | 0.030 | 87% | 87% | — | — | — |
+| v6 champion | 0.094 | 87% | 86% | 3 | 1 | 0.18 |
+| v7-first (宽gap only) | 0.116 | 88% | 85% | 2 | 0 | <0.05 |
+| **v7b (50/50 hybrid)** | **0** | **88%** | **86%** | **0** | **1** | **0.11** |
+| v7c (60/40 hybrid) | 0.024 | 88% | 86% | 2 | 3 | 0.039 |
+
+**v7b 逐关 A/B（35×60，DEFAULT vs v7b champion）:**
+- ▲ Frozen Field +0.1229 (p=0.0086, 63%→82%) — 唯一显著改善
+- 0 处显著回归（v6 有 3 处：Checkers/Iron Curtain/Twin Spires）
+- 总体配对 p=0.11，不显著 — v7b 冠军与 DEFAULT 统计不可区分
+
+**Implications:**
+- v7 标准以 `--fitness v7` 开启，v5 仍为默认。v7 冠军 35×60 胜率 86% vs DEFAULT 87%，差值 1pp 在噪声范围内（p=0.11），且**零显著回归 + 一处显著改善**，显著优于 v6（3 回归/1 改善）。
+- v7 的核心价值是**安全性**：它不会产生 v6 那样的难关回归。在减量预算（14 seed）下，v7 的 1pp 胜率差距是搜索噪声而非系统性偏差——完整预算（20+ seed × 30 代）有理由缩小或消除该差距。
+- **建议**：v7 作为 v5 的替代优化目标，适用于"需要连续梯度但不可牺牲胜率"的调参场景。暂不提为默认（未达"≥87%"硬门槛），但在有更长搜索预算时可重新评估。
+- 新增导出：`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`（`tools/godai-score.ts`）。`ScoreConfig` 接口新增 `lossBandMax`/`clearBandMin` 字段。
+

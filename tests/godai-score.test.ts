@@ -9,10 +9,14 @@ import {
   comparePaired,
   diagnoseWeights,
   fitnessV6,
+  fitnessV7,
   LOSS_BAND_MAX,
   CLEAR_BAND_MIN,
+  DEFAULT_SCORE_CONFIG,
+  V7_LOSS_BAND_MAX,
+  V7_CLEAR_BAND_MIN,
+  V7_SCORE_CONFIG,
   DEFAULT_STAGE_REFS,
-  DEFAULT_WIN_WEIGHTS,
   DEFAULT_LOSS_WEIGHTS,
   type ScorableRun,
   type RunScore,
@@ -301,13 +305,11 @@ describe('A6 — difficulty neutrality', () => {
   it('the same clear time scores differently under different stage references', () => {
     const r = clear({ ticks: 7000 })
     const easy = scoreRun(r, {
-      winWeights: DEFAULT_WIN_WEIGHTS,
-      lossWeights: DEFAULT_LOSS_WEIGHTS,
+      ...DEFAULT_SCORE_CONFIG,
       refs: { ...DEFAULT_STAGE_REFS, clearTicksFast: 2000, clearTicksSlow: 6000 },
     })
     const hard = scoreRun(r, {
-      winWeights: DEFAULT_WIN_WEIGHTS,
-      lossWeights: DEFAULT_LOSS_WEIGHTS,
+      ...DEFAULT_SCORE_CONFIG,
       refs: { ...DEFAULT_STAGE_REFS, clearTicksFast: 6000, clearTicksSlow: 20000 },
     })
     // 7000 ticks is slow for the easy stage, brisk for the hard one.
@@ -423,6 +425,36 @@ describe('aggregation math', () => {
     expect(fitnessV6(s)).toBeCloseTo(s.lcb * 1000, 10)
   })
 
+  it('v7 fitness blends quality with win-rate harmonic mean', () => {
+    // Two suites with the same quality but different win-rate distributions.
+    // The one with a weak stage (50% win) must score lower than the one
+    // where all stages are at 80%.
+    const mkStage = (name: string, scores: number[]) =>
+      aggregateStage(
+        name,
+        scores.map((v) => ({
+          score: v,
+          quality: v,
+          cleared: v >= CLEAR_BAND_MIN,
+          dims: {} as never,
+          effectiveWeights: {},
+        })),
+      )
+    // Override winRate manually after construction.
+    const mk = (name: string, scores: number[], wr: number) => {
+      const s = mkStage(name, scores)
+      return { ...s, winRate: wr }
+    }
+    const balanced = aggregateSuite([mk('a', [0.8, 0.8], 0.8), mk('b', [0.8, 0.8], 0.8)])
+    const spiky = aggregateSuite([mk('a', [0.8, 0.8], 1.0), mk('b', [0.8, 0.8], 0.6)])
+    // Same arithmetic mean win rate (0.8), but the spiky one has a 60% stage.
+    expect(spiky.meanWinRate).toBeCloseTo(balanced.meanWinRate, 10)
+    // v6 fitness ignores win rate entirely → identical.
+    expect(fitnessV6(spiky)).toBe(fitnessV6(balanced))
+    // v7 fitness penalises the weak stage via harmonic mean.
+    expect(fitnessV7(spiky)).toBeLessThan(fitnessV7(balanced))
+  })
+
   it('empty inputs are handled without NaN', () => {
     const s = aggregateSuite([])
     expect(s.suite).toBe(0)
@@ -485,8 +517,7 @@ describe('weight diagnostics', () => {
     // Every run maxes out `tempo`, so its nominal weight buys no ranking power.
     const runs = [5, 10, 15, 20].map((k) =>
       scoreRun(run({ finalState: { killCount: k, lives: 1, baseAlive: true } }, {}), {
-        winWeights: DEFAULT_WIN_WEIGHTS,
-        lossWeights: DEFAULT_LOSS_WEIGHTS,
+        ...DEFAULT_SCORE_CONFIG,
         refs: { ...DEFAULT_STAGE_REFS, kpmRef: 0.001 },
       }),
     )
@@ -566,5 +597,85 @@ describe('the four scenarios from the brief', () => {
     // meaningfully spread, not merely ordered.
     expect(nearMissLoss - zeroKillLoss).toBeGreaterThan(0.3)
     expect(cleanClear - uglyClear).toBeGreaterThan(0.2)
+  })
+})
+
+describe('v7 — widened band gap', () => {
+  it('the v7 gap is 6× wider than v6, making loss→win conversion the top-margin move', () => {
+    const v6Gap = CLEAR_BAND_MIN - LOSS_BAND_MAX
+    const v7Gap = V7_CLEAR_BAND_MIN - V7_LOSS_BAND_MAX
+    expect(v6Gap).toBeCloseTo(0.05, 10)
+    expect(v7Gap).toBeCloseTo(0.3, 10)
+    expect(v7Gap).toBeGreaterThan(v6Gap * 5)
+  })
+
+  it('A1 still holds: the best v7 loss is below the worst v7 clear', () => {
+    const bestLoss = scoreRun(
+      run(
+        { ticks: 3600, finalState: { killCount: 19, lives: 3, baseAlive: true } },
+        {
+          playerShots: 20,
+          powerUpsCollected: 2,
+          finalPlayerLevel: 3,
+          basePressureMean: 0,
+          cellsVisited: 400,
+        },
+      ),
+      V7_SCORE_CONFIG,
+    )
+    const worstClear = scoreRun(
+      clear(
+        { ticks: 18000, finalState: { killCount: 20, lives: 0, baseAlive: true } },
+        {
+          playerShots: 2000,
+          powerUpsSpawned: 4,
+          powerUpsCollected: 0,
+          finalPlayerLevel: 0,
+          baseWallIntact: 0,
+          basePressureMean: 1,
+          cellsVisited: 1,
+        },
+      ),
+      V7_SCORE_CONFIG,
+    )
+    expect(bestLoss.score).toBeLessThanOrEqual(V7_LOSS_BAND_MAX)
+    expect(worstClear.score).toBeGreaterThanOrEqual(V7_CLEAR_BAND_MIN)
+    expect(bestLoss.score).toBeLessThan(worstClear.score)
+  })
+
+  it('v7 within-band discrimination is preserved (0-kill loss ≠ 19-kill loss)', () => {
+    const zeroKill = scoreRun(
+      run({ finalState: { killCount: 0, lives: 1, baseAlive: true } }),
+      V7_SCORE_CONFIG,
+    ).score
+    const nineteenKill = scoreRun(
+      run({ finalState: { killCount: 19, lives: 1, baseAlive: true } }),
+      V7_SCORE_CONFIG,
+    ).score
+    // With lossBandMax=0.40, the within-band range is narrower than v6's 0.55,
+    // but the 0→19 kill spread still produces >0.15 of discrimination.
+    expect(nineteenKill - zeroKill).toBeGreaterThan(0.15)
+    expect(nineteenKill).toBeLessThanOrEqual(V7_LOSS_BAND_MAX)
+  })
+
+  it('v7 makes a mixed-win-rate stage score lower than v6 does (steeper boundary)', () => {
+    // A stage with 50% win rate: half losses (best-case), half clears (worst-case).
+    const lossRun = run(
+      { ticks: 3600, finalState: { killCount: 19, lives: 3, baseAlive: true } },
+      { playerShots: 20, powerUpsCollected: 2, finalPlayerLevel: 3, basePressureMean: 0 },
+    )
+    const clearRun = clear(
+      { ticks: 18000, finalState: { killCount: 20, lives: 0, baseAlive: true } },
+      { playerShots: 2000, baseWallIntact: 0, basePressureMean: 1, finalPlayerLevel: 0 },
+    )
+    const v6Loss = scoreRun(lossRun).score
+    const v6Clear = scoreRun(clearRun).score
+    const v7Loss = scoreRun(lossRun, V7_SCORE_CONFIG).score
+    const v7Clear = scoreRun(clearRun, V7_SCORE_CONFIG).score
+    // The v7 loss is lower and the v7 clear is higher, so the harmonic mean
+    // of a mixed stage is pulled down harder — exactly the property that
+    // pushes the optimizer to convert losses to wins.
+    expect(v7Loss).toBeLessThan(v6Loss)
+    expect(v7Clear).toBeGreaterThan(v6Clear)
   })
 })

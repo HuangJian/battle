@@ -280,16 +280,47 @@ export const DEFAULT_LOSS_WEIGHTS: Weights = {
 export const LOSS_BAND_MAX = 0.55
 export const CLEAR_BAND_MIN = 0.6
 
+/**
+ * v7 band geometry — widened gap to realign the optimizer with win rate.
+ *
+ * v6's 0.05 gap (0.55 → 0.60) made “convert a loss to a win” worth only 0.05
+ * points — less than “improve a 0-kill loss to a 19-kill loss” (0.46). The
+ * optimizer therefore preferred making losses graceful (lower aimError,
+ * shorter threat range) over converting near-misses to wins, which caused
+ * regressions on hard stages (Checkers, Iron Curtain, Twin Spires).
+ *
+ * v7 widens the gap to 0.30 (0.40 → 0.70): converting a loss to a win is now
+ * the single highest-margin improvement available, while within-band
+ * discrimination is preserved (loss range 0.40, clear range 0.30). All six
+ * axioms still hold — A1 is trivially satisfied (0.40 < 0.70), and the others
+ * are unaffected by the band affine transform.
+ */
+export const V7_LOSS_BAND_MAX = 0.4
+export const V7_CLEAR_BAND_MIN = 0.7
+
 export interface ScoreConfig {
   winWeights: Weights
   lossWeights: Weights
   refs: StageRefs
+  /** Ceiling of the loss band. A perfect loss scores at most this. */
+  lossBandMax: number
+  /** Floor of the clear band. The worst clear scores at least this. */
+  clearBandMin: number
 }
 
 export const DEFAULT_SCORE_CONFIG: ScoreConfig = {
   winWeights: DEFAULT_WIN_WEIGHTS,
   lossWeights: DEFAULT_LOSS_WEIGHTS,
   refs: DEFAULT_STAGE_REFS,
+  lossBandMax: LOSS_BAND_MAX,
+  clearBandMin: CLEAR_BAND_MIN,
+}
+
+/** v7 config: wider band gap for stronger win-rate alignment. */
+export const V7_SCORE_CONFIG: ScoreConfig = {
+  ...DEFAULT_SCORE_CONFIG,
+  lossBandMax: V7_LOSS_BAND_MAX,
+  clearBandMin: V7_CLEAR_BAND_MIN,
 }
 
 export interface RunScore {
@@ -338,7 +369,9 @@ export function scoreRun(
   const cleared = result.outcome === 'stage_clear'
   const weights = cleared ? config.winWeights : config.lossWeights
   const { quality, used } = weightedQuality(dims, weights)
-  const score = cleared ? CLEAR_BAND_MIN + (1 - CLEAR_BAND_MIN) * quality : LOSS_BAND_MAX * quality
+  const score = cleared
+    ? config.clearBandMin + (1 - config.clearBandMin) * quality
+    : config.lossBandMax * quality
   return { score, quality, cleared, dims, effectiveWeights: used }
 }
 
@@ -527,6 +560,29 @@ export function aggregateSuite(
 /** The scalar CMA-ES maximises. ×1000 is cosmetic — ranking is scale-free. */
 export function fitnessV6(suite: SuiteScore): number {
   return suite.lcb * 1000
+}
+
+/**
+ * v7 fitness: 50% quality (v7 LCB with widened bands) + 50% win-rate harmonic mean.
+ *
+ * The widened band gap alone was not enough — the optimizer still found
+ * parameter sets that scored well on quality but had poor win rates, because
+ * “losing with many kills” still earns substantial within-band score. The
+ * win-rate harmonic mean closes that gap: it is dominated by the weakest
+ * stage's win rate, providing *continuous* pressure to improve low-win-rate
+ * stages even when they sit above the 60% floor.
+ *
+ * Why the harmonic mean (p = −1) and not the arithmetic mean: 28/35 stages
+ * sit at 100% win rate under DEFAULT params, so the arithmetic mean is
+ * saturated and insensitive — improving a 60% stage to 65% barely moves it.
+ * The harmonic mean is pulled hard toward the weakest stage, so that same
+ * 5pp improvement produces a much larger fitness delta. This is the smooth,
+ * continuous analog of v5’s discontinuous floor penalty.
+ */
+export function fitnessV7(suite: SuiteScore): number {
+  const wr = suite.stages.map((s) => Math.max(0.01, s.winRate))
+  const winRateHarmonic = powerMean(wr, -1, 0.01)
+  return suite.lcb * 500 + winRateHarmonic * 500
 }
 
 // ============================================================
