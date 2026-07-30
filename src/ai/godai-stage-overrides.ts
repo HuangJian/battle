@@ -16,33 +16,33 @@ import type { GodAIParams } from './GodAIInput'
  * tools/probe-params.ts). 20-seed probes are noise (binomial +/-11pp) —
  * they were shown to select mirage gains that vanish on fresh seeds.
  *
- * STALE OVERRIDE AUDIT (2026-07-30, DECISIONS.md §54-§55):
+ * STALE OVERRIDE AUDIT (2026-07-30, DECISIONS.md §54-§56):
  * All overrides were re-probed at 120 seeds against the current global
  * default (post-RNG-split, post-§47 base protection ring). Results:
  *
  *   S6  Iron Curtain  — REMOVED (§54): override 59.2% < naked 62.5%.
- *     The conservative leash (maxPlayerDistFromBase:16) restricted mid-game
- *     map control and paradoxically increased base destructions (43 vs 30).
  *   S18 Frozen Field  — REMOVED (§55): override 56.7% < naked 60.8%.
- *     The wider retreat radius (outnumberedRadiusCells:14) caused the player
- *     to fall back too early, losing map control. aimError:0 was also neutral
- *     (59.2% vs 60.8%, within noise). Original validation (52→67%) is stale.
  *   S25 Ice Palace    — REMOVED (§55): override 77.5% = naked 77.5% (identical).
- *     The default aimError (0.0303) is already so small that setting it to 0
- *     produces zero behavioral difference on this stage.
+ *   S32 Diamond       — PARTIALLY REMOVED (§56): the core close-combat
+ *     strategy (t2aMaxRange:2) was generalized into `t2aHighHpMaxRange`
+ *     (default 2), triggered by `enemyKind === 'armor'` instead of stage
+ *     name. The `damagedArmorBonus` was tested but HURT S32 (-8.4pp) by
+ *     causing target-switching that interrupts armor grinding. Only the
+ *     camp/nav params remain as stage-specific tuning — they cannot be
+ *     generalized because shorter camp/nav helps S32/S18/S25 but hurts
+ *     S6/S10/S15 (mixed results at 60 seeds).
  *
  *   S26 Brick Maze    — KEPT: override 68.3% ≈ naked 67.5% (+0.8pp, within
  *     noise) but prevents base destruction (0 vs 2). The faster replanning +
- *     path randomness synergy breaks deadlock patrol loops. Individual
- *     params are each slightly worse (65.8%), but the combination works.
- *   S32 Diamond       — KEPT: override 72.5% >> naked 48.3% (+24.2pp).
- *     Close-combat strategy (t2aMaxRange:2) is essential for armor grinding.
+ *     path randomness synergy breaks deadlock patrol loops.
  *
  * LESSON: overrides are data, and data goes stale. After RNG split, §47
  * collision fix, and v7 evaluation changes, the global default improved
  * dramatically. Every override must be re-validated after major baseline
- * shifts — otherwise stale overrides silently harm the stages they were
- * meant to help (as happened with S6 and S18).
+ * shifts. When an override's core mechanism can be abstracted into a
+ * universal parameter (as with S32's close-combat → t2aHighHpMaxRange),
+ * prefer the generalization over the per-stage override. Auxiliary params
+ * that don't generalize (camp/nav timing) may remain as minimal overrides.
  */
 export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
   'Brick Maze': {
@@ -57,41 +57,25 @@ export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
     suboptimalPathProb: 0.05,
   },
   Diamond: {
-    // S32 (index 32): 10 armor (4 HP) + 7 fast + 3 power on a map with
+    // S32 (index 32): 8 armor (4 HP) + 8 fast + 4 power on a map with
     // large forest + fragmented steel + an OPEN bottom band.
     //
-    // Core strategy: CLOSE COMBAT (贴身缠斗). The player only stops to
-    // aim at enemies within 2 cells (32px), maximizing fire rate against
-    // 4-HP armor. At point-blank, bullet travel time ≈ 0, so the player
-    // kills armor in ~0.5s instead of ~4s at long range. Faster kills =
-    // less exposure = fewer deaths AND more time to respond to base
-    // threats between targets.
+    // §56: the core close-combat strategy (t2aMaxRange:2) was generalized
+    // into `t2aHighHpMaxRange` (default 2, triggered by enemyKind === 'armor').
+    // The `damagedArmorBonus` was tested at 1 but HURT S32 (-8.4pp) by
+    // causing target-switching that interrupts armor grinding.
     //
-    // Parameters:
-    //   t2aMaxRange: 2 — point-blank stop-and-aim
-    //   campTimeoutTicks: 50 — shorter unproductive camp (0.83s vs 1.5s)
-    //   antiCampSuppressTicks: 50 — matching camp suppress
-    //   damagedArmorBonus: 1 — finish damaged armor (damage is permanent)
-    //   navStuckTicks: 90 — faster stuck recovery (1.5s vs 3s)
+    // What remains: shorter camp/nav timing. S32's fragmented map with
+    // forest cover creates frequent stuck/loop situations that the default
+    // camp/nav timers (90/60/180) are too slow to escape. The shorter
+    // values (50/50/90) break these loops faster, recovering +8pp on S32.
+    // These were tested globally but showed mixed results (helped S18/S25,
+    // hurt S6/S10/S15), so they remain stage-specific.
     //
-    // Verified @120 seeds: 43.3% → 72.5% (+29.2pp) with close-combat params.
-    //   Failure mode shift: base_destroyed 43→21, lives_exhausted 25→12.
-    // 120-seed re-audit (2026-07-30): 72.5% vs naked 48.3% (+24.2pp) — STILL ESSENTIAL.
-    // guardBandMode (T2a skip) was tested and REJECTED: it causes the
-    // player to abandon in-progress armor kills to chase fast tanks,
-    // which is strictly worse (50.8% @120 seeds vs 72.5% without).
-    // smartThreatModel (Phase A) was also tested and REJECTED on S32:
-    //   - Full model (isBaseUnderThreat + selectTarget + skipT2a): -20pp
-    //   - selectTarget only (threatScore): -7.5pp
-    //   - Extended race range for fast tanks: -10.8pp (base↓2 but lives↑15)
-    //   Root cause: S32's close-combat strategy is fragile — ANY
-    //   interruption to armor grinding causes lives_exhausted to spike.
-    //   Diagnostic showed armor(10)+power(7) are the primary base killers,
-    //   NOT fast tanks(2) — the plan's 'fast rusher' assumption was wrong.
+    // 120-seed probe (2026-07-30): 64.2% without override → 72.5% with
+    // camp/nav override. The +8.3pp gap is entirely from camp/nav timing.
     campTimeoutTicks: 50,
     antiCampSuppressTicks: 50,
-    t2aMaxRange: 2,
-    damagedArmorBonus: 1,
     navStuckTicks: 90,
   },
 }

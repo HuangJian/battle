@@ -1,6 +1,6 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
-import type { Tank } from '../../types'
+import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, DIR_VECTORS, BASE_POS } from '../../constants'
 import { aabb } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, KIND_THREAT_WEIGHT } from './constants'
@@ -116,7 +116,16 @@ export function scanAheadImpl(
   pcx: number,
   pcy: number,
   dir: Direction,
-): { enemy: boolean; wall: boolean; steel: boolean; baseWall: boolean; enemyDist: number } {
+): {
+  enemy: boolean
+  wall: boolean
+  steel: boolean
+  baseWall: boolean
+  enemyDist: number
+  enemyKind: TankKind
+  enemyHp: number
+  enemyMaxHp: number
+} {
   const w = self.world
   const v = DIR_VECTORS[dir]
   const vertical = dir === 'up' || dir === 'down'
@@ -129,6 +138,9 @@ export function scanAheadImpl(
   r.steel = false
   r.baseWall = false
   r.enemyDist = Infinity
+  r.enemyKind = 'basic'
+  r.enemyHp = 1
+  r.enemyMaxHp = 1
 
   // Reusable aligned-tank buffer (perf): pre-filter tanks whose perpendicular
   // position overlaps the scan line. For a vertical scan, the x-condition of
@@ -191,7 +203,12 @@ export function scanAheadImpl(
       for (let ai = 0; ai < alignedCount; ai++) {
         const t = aligned[ai]
         if (aabb(cx - 1, cy - 1, 2, 2, t.x, t.y, t.w, t.h)) {
-          if (d / CELL < r.enemyDist) r.enemyDist = d / CELL
+          if (d / CELL < r.enemyDist) {
+            r.enemyDist = d / CELL
+            r.enemyKind = t.kind
+            r.enemyHp = t.hp
+            r.enemyMaxHp = t.maxHp
+          }
           r.enemy = true
           found = true
           break

@@ -1990,3 +1990,62 @@ the current heuristic already outperforms the "accurate" one.
 - 35×60 eval-suite：suite 0.7045（±0.0043），平均胜率 88%，与移除前（0.7063）差异在噪声内。
 - **审计结论**：5 个原始覆盖中 3 个（S6/S18/S25）已过时，2 个（S26/S32）仍有效。过时率 60%——验证了 §54 的教训：基线变动后必须重新审计所有覆盖。
 
+## 56. S32 close-combat 策略泛化 — t2aHighHpMaxRange 按敌型触发 (2026-07-31)
+
+**Decision:** 将 S32 的 `t2aMaxRange:2`（贴身缠斗）从关卡特判泛化为按敌人类型触发的通用机制。新增 `t2aHighHpMaxRange` 参数（默认 2），当扫描到的敌人是 armor 时使用短射程（贴身缠斗），其他敌人类型使用默认长射程（15）。S32 覆盖表从 5 参数缩减为 3 参数（仅保留 camp/nav 定时）。
+
+**Rationale:**
+
+### 核心洞察
+
+S32 覆盖的核心价值在于 `t2aMaxRange:2`——迫使玩家不在远距离停火对射装甲，而是逼近到 2 格内再停。这不是 S32 独有的需求，而是**所有装甲关卡的通用需求**：
+
+- 4HP 装甲在 15 格距离：4 发 × 1s 飞行 = 4s 停桩（暴露在敌方火力下）
+- 4HP 装甲在 2 格距离：4 发 × 0.1s 飞行 = 0.5s 停桩（几乎无暴露）
+
+### 实现路径
+
+1. **`scanAheadImpl` 扩展**：新增 `enemyKind`/`enemyHp`/`enemyMaxHp` 返回字段，使 `think()` 能获取扫描到的敌人类型和血量。
+2. **`think()` 动态射程**：`effectiveRange = enemyKind === 'armor' ? t2aHighHpMaxRange : t2aMaxRange`
+3. **关键 bugfix**：instant 战斗模型中 `maxHp = hitsToKill × referenceDamage`（basic=100, armor=400），所以 `maxHp > 1` 对所有敌人恒为真。必须用 `enemyKind === 'armor'` 而非 `maxHp > 1` 来判断。
+4. **`damagedArmorBonus` 保持 0**：测试发现设为 1 会伤害 S32（-8.4pp），因为它导致目标切换打断 armor grinding 节奏。
+
+### 被否决的方案
+
+| 方案 | S32 (120s) | S2 (120s) | S18 (120s) | 否决原因 |
+|------|-----------|----------|-----------|---------|
+| 固定 t2aMaxRange=2 for ALL | 68.3% | 88.3% | 66.7% | S2/S10/S15 回归 10-12pp |
+| HP 插值 (full→1 线性) | 55.8% | 93.3% | 70.0% | S32 崩塌（中距离停火最差） |
+| HP 阈值 50% (hp>50%→close) | 61.7% | 97.5% | 70.0% | S32 仍不足 |
+| HP 阈值 25% (hp>25%→close) | 65.0% | 97.5% | 60.8% | S18 退化 |
+| **kind-based (no threshold)** | **64.2%** | **98.3%** | **64.2%** | **采纳**：S2/S10/S15 无回归 |
+| kind + camp/nav override | 72.5% | 98.3% | 64.2% | **最终方案**：+8.3pp from camp/nav |
+
+### camp/nav 参数无法泛化
+
+全局缩短 camp/nav（50/50/90 vs 90/60/180）在 60 seeds 上显示混合结果：
+- 帮助：S32(+4), S18(+9), S25(+7)
+- 损害：S6(-4), S10(-3), S15(-3)
+
+因此 camp/nav 保留为 S32 专属覆盖。
+
+**Experiments (120 seeds, classic, key stages):**
+
+| 关卡 | 旧（S32 全覆盖） | 新（kind-based + camp/nav） | Δ |
+|------|----------------|---------------------------|---|
+| S32 Diamond | 72.5% | 72.5% | 0pp ✅ |
+| S2 Steel Fortress | 100% | 98.3% | -1.7pp (噪声) |
+| S10 Fortress | 88.3% | 90.0% | +1.7pp ✅ |
+| S15 Crossroads | 88.3% | 91.7% | +3.4pp ✅ |
+| S18 Frozen Field | 55.0% | 64.2% | +9.2pp ✅ |
+| S25 Ice Palace | 77.5% | 78.3% | +0.8pp ✅ |
+| S0 Outpost | 98.3% | 97.5% | -0.8pp (噪声) |
+
+**Implications:**
+- S32 覆盖表从 5 参数（t2aMaxRange + camp + anticamp + damagedArmorBonus + navStuck）缩减为 3 参数（camp + anticamp + navStuck）。核心策略已泛化。
+- 新增 `GodAIParams.t2aHighHpMaxRange`（默认 2）。`scanAheadImpl` 新增 `enemyKind`/`enemyHp`/`enemyMaxHp` 返回字段。
+- `damagedArmorBonus` 保持默认 0（测试证明有害）。
+- S0/S6（无装甲）byte-identical（parity test 通过）。
+- 回归门禁 S32 truth 保持 72.5%。`bun run check` 全绿（601 tests pass）。
+- **教训**：在 instant 战斗模型中，`maxHp` 不等于 `hitsToKill`——`maxHp = hitsToKill × referenceDamage`。判断敌人类型必须用 `kind`，不能用 `maxHp > 1`。
+

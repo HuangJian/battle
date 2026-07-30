@@ -77,7 +77,7 @@ const TRUTH_WIN_PCT: number[] = [
   85.0, // S29 Concentric
   85.0, // S30 Eagle Nest
   88.3, // S31 Star Fort
-  90.0, // S32 Diamond (override: t2aMaxRange=2 close-combat; §47 ring fix 72.5→85.0 @120, 90.0 @60)
+  72.5, // S32 Diamond (§56: close-combat generalized to t2aHighHpMaxRange; camp/nav override retained; 72.5% @120)
   88.3, // S33 Battlement
   91.7, // S34 Final Redoubt
 ]
