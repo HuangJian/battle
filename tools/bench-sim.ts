@@ -81,7 +81,7 @@ tm.grid[24][12] = 'base'
 tm.dirty = false
 tm.dirtyCells.length = 0
 tm.destroyAllBaseCells()
-const baseOk = tm.dirty === true
+const baseOk = (tm.dirty as boolean) === true
 console.log(`[terrain] base destroy → dirty=${tm.dirty} (expect true): ${baseOk ? 'PASS' : 'FAIL'}`)
 
 const allPass = distinct <= 2 && incrementalOk && baseOk

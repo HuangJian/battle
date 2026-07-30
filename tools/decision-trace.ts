@@ -15,7 +15,8 @@ import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/G
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { CELL, BASE_POS } from '../src/constants'
-import type { StageData, TankKind, Direction } from '../src/types'
+import type { Direction } from '../src/constants'
+import type { StageData, TankKind } from '../src/types'
 
 // ============================================================
 // Types

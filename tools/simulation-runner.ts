@@ -4,7 +4,7 @@ import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/G
 import { applyStageOverrides } from '../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
-import { CELL, BASE_POS } from '../src/constants'
+import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE } from '../src/constants'
 import { RNG } from '../src/utils/RNG'
 import { InputRecorder } from '../src/replay/InputRecorder'
 import type { StageData, GameEvent, TankKind } from '../src/types'
@@ -31,6 +31,56 @@ export interface FailureTaxonomy {
   playerDistToBase?: number
   /** Tick of the first player kill (output efficiency indicator). undefined if no kills. */
   firstKillTick?: number
+}
+
+/**
+ * Per-run telemetry for the v6 evaluation model
+ * (plan/God-AI-Evaluation-Redesign.md §3).
+ *
+ * Opt-in via `RunOptions.telemetry`. When the flag is off, none of the
+ * collection code runs and the simulation path is byte-identical to before —
+ * `validate-p4` / the regression gate / the optimizer's v5 fitness are
+ * unaffected.
+ *
+ * Everything here is a read-only observation of the World (AGENTS §2.1): the
+ * collector never mutates state and never consumes `world.rng`, so a run with
+ * telemetry on produces the same outcome as the same run with it off.
+ */
+export interface RunTelemetry {
+  /** Enemies the stage requires (stage.enemyCount ?? ENEMIES_PER_STAGE). */
+  enemyTotal: number
+  /** Lives the player started with (difficulty.startLives). */
+  startLives: number
+  /** Times the player tank was destroyed. */
+  playerDeaths: number
+  /** Bullets fired by the player. */
+  playerShots: number
+  /** Power-ups that appeared on the field during the run. */
+  powerUpsSpawned: number
+  /** Power-ups the player picked up. */
+  powerUpsCollected: number
+  /** Star power-ups specifically (the firepower-growth currency). */
+  starsCollected: number
+  /** Player star level at the end of the run. */
+  finalPlayerLevel: number
+  /** Base protection-ring cells still solid (brick/steel) at the end. */
+  baseWallIntact: number
+  /** Base protection-ring cells solid at stage load — the denominator. */
+  baseWallTotal: number
+  /**
+   * Mean base pressure over the run, in [0,1]. Each sample takes the closest
+   * alive enemy and maps its Manhattan cell distance to the base through
+   * `clamp(1 - dist / BASE_PRESSURE_RADIUS)`. 0 = no enemy ever came near the
+   * base; 1 = an enemy sat on the base the whole run.
+   *
+   * This is the dense proxy for `base_destroyed` (a rare binary event): it
+   * gives the optimizer gradient in the "not losing yet but dangerous" region.
+   */
+  basePressureMean: number
+  /** Number of pressure samples taken (for reproducibility auditing). */
+  basePressureSamples: number
+  /** Distinct grid cells the player visited — the anti-oscillation signal. */
+  cellsVisited: number
 }
 
 export interface SimResult {
@@ -63,6 +113,8 @@ export interface SimResult {
   firstKillTick?: number
   /** Failure attribution (plan/God-AI-Tuning §2). undefined on stage_clear. */
   failure?: FailureTaxonomy
+  /** v6 evaluation telemetry (only when `telemetry: true`). */
+  telemetry?: RunTelemetry
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../src/snapshot/types').WorldSnapshot
@@ -108,6 +160,53 @@ export interface RunOptions {
   skipStageOverrides?: boolean
   /** Record input frames for replay playback (plan/God-AI-Replay-Visualization §4.1). */
   record?: boolean
+  /**
+   * Collect v6 evaluation telemetry (plan/God-AI-Evaluation-Redesign.md §3).
+   * Default false — when off, the run path is byte-identical to before.
+   */
+  telemetry?: boolean
+}
+
+// ============================================================
+// Telemetry constants (plan/God-AI-Evaluation-Redesign.md §3.4)
+// ============================================================
+
+/** Base-pressure sampling cadence in ticks (10 Hz at 60 fps). */
+const TELEMETRY_SAMPLE_TICKS = 6
+/** Enemies closer than this (Manhattan cells) contribute base pressure. */
+const BASE_PRESSURE_RADIUS = 12
+
+/**
+ * The 8 cells that form the classic base protection ring: the border of the
+ * 4×4 box centred on the 2×2 base, clipped to the grid. Computed once — the
+ * base position is a fixed constant (`BASE_POS`).
+ */
+const BASE_RING_CELLS: Array<{ col: number; row: number }> = (() => {
+  const cells: Array<{ col: number; row: number }> = []
+  for (let row = BASE_POS.row - 1; row <= BASE_POS.row + 2; row++) {
+    for (let col = BASE_POS.col - 1; col <= BASE_POS.col + 2; col++) {
+      if (col < 0 || col >= GRID || row < 0 || row >= GRID) continue
+      // Skip the 2×2 base itself — only the surrounding wall counts.
+      const isBaseCell =
+        col >= BASE_POS.col &&
+        col <= BASE_POS.col + 1 &&
+        row >= BASE_POS.row &&
+        row <= BASE_POS.row + 1
+      if (isBaseCell) continue
+      cells.push({ col, row })
+    }
+  }
+  return cells
+})()
+
+/** Count protection-ring cells that are still solid (brick or steel). */
+function countBaseWall(world: World): number {
+  let n = 0
+  for (const { col, row } of BASE_RING_CELLS) {
+    const t = world.tileMap.get(col, row)
+    if (t === 'brick' || t === 'steel') n++
+  }
+  return n
 }
 
 /**
@@ -170,6 +269,20 @@ export function runSimulation(opts: RunOptions): SimResult {
   let firstKillTick: number | undefined
   let failure: FailureTaxonomy | undefined
 
+  // ---- v6 telemetry accumulators (only touched when opts.telemetry) ----
+  const wantTelemetry = opts.telemetry === true
+  const baseWallTotal = wantTelemetry ? countBaseWall(world) : 0
+  const seenPowerUpIds = wantTelemetry ? new Set<number>() : null
+  let prevLivePowerUpIds = wantTelemetry ? new Set<number>() : null
+  const visitedCells = wantTelemetry ? new Set<number>() : null
+  let playerDeaths = 0
+  let playerShots = 0
+  let powerUpsSpawned = 0
+  let powerUpsCollected = 0
+  let starsCollected = 0
+  let basePressureSum = 0
+  let basePressureSamples = 0
+
   const t0 = performance.now()
 
   while (tick < maxTicks) {
@@ -183,12 +296,59 @@ export function runSimulation(opts: RunOptions): SimResult {
     tick++
 
     // Collect events.
+    let collectedThisTick = 0
     const events = world.consumeEvents()
     for (const e of events) {
       allEvents.push(e)
       // Track first kill for failure taxonomy.
       if (firstKillTick === undefined && e.type === 'tank_destroyed' && e.by === 'player') {
         firstKillTick = tick
+      }
+      if (wantTelemetry) {
+        if (e.type === 'tank_destroyed' && e.tank.kind === 'player') playerDeaths++
+        else if (e.type === 'bullet_fired' && e.bullet.isPlayer) playerShots++
+        else if (e.type === 'powerup_collected') {
+          collectedThisTick++
+          powerUpsCollected++
+          if (e.powerUp === 'star') starsCollected++
+        }
+      }
+    }
+
+    // Telemetry sampling — read-only, never consumes world.rng.
+    if (wantTelemetry) {
+      // Power-up spawn census. `updateBullets` (which drops power-ups on a
+      // kill) runs BEFORE `updatePowerUps` in the same tick, so a drop that
+      // lands on the player is collected before we ever observe it in
+      // `world.powerUps`. Counting only observed ids therefore undercounts.
+      //
+      // We reconcile per tick: ids newly present are fresh spawns; collections
+      // that cannot be explained by an id vanishing from the live set must be
+      // same-tick pickups, so they are fresh spawns too. (A pickup and a
+      // timeout-despawn colliding in one tick can still undercount by one —
+      // rare, and only ever biases `powerUpsSpawned` downward, which makes the
+      // loot-capture dimension conservative rather than inflated.)
+      const liveIds = new Set<number>()
+      for (const pu of world.powerUps) {
+        liveIds.add(pu.id)
+        if (!seenPowerUpIds!.has(pu.id)) {
+          seenPowerUpIds!.add(pu.id)
+          powerUpsSpawned++
+        }
+      }
+      let vanished = 0
+      for (const id of prevLivePowerUpIds!) if (!liveIds.has(id)) vanished++
+      powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
+      prevLivePowerUpIds = liveIds
+
+      if (tick % TELEMETRY_SAMPLE_TICKS === 0) {
+        basePressureSamples++
+        basePressureSum += sampleBasePressure(world)
+        if (world.player?.alive) {
+          const col = Math.floor((world.player.x + world.player.w / 2) / CELL)
+          const row = Math.floor((world.player.y + world.player.h / 2) / CELL)
+          visitedCells!.add(row * GRID + col)
+        }
       }
     }
 
@@ -270,6 +430,24 @@ export function runSimulation(opts: RunOptions): SimResult {
     failure,
   }
 
+  if (wantTelemetry) {
+    result.telemetry = {
+      enemyTotal: stage.enemyCount ?? ENEMIES_PER_STAGE,
+      startLives: world.difficulty.startLives,
+      playerDeaths,
+      playerShots,
+      powerUpsSpawned,
+      powerUpsCollected,
+      starsCollected,
+      finalPlayerLevel: world.playerLevel,
+      baseWallIntact: countBaseWall(world),
+      baseWallTotal,
+      basePressureMean: basePressureSamples > 0 ? basePressureSum / basePressureSamples : 0,
+      basePressureSamples,
+      cellsVisited: visitedCells!.size,
+    }
+  }
+
   // Finalize recording if active
   if (recorder) {
     const rec = recorder.finalize()
@@ -300,6 +478,30 @@ function sampleFrame(world: World, tick: number): FrameMetrics {
     enemyPositions,
     incomingThreats: countIncomingThreats(world),
   }
+}
+
+/**
+ * Instantaneous base pressure in [0,1] — how close the nearest live enemy is
+ * to the base, on a linear ramp over `BASE_PRESSURE_RADIUS` cells.
+ *
+ * Stages without a base (curriculum arenas) report 0: there is nothing to
+ * pressure, and the scorer drops the dimension rather than crediting safety
+ * the AI did not earn.
+ */
+function sampleBasePressure(world: World): number {
+  if (!world.tileMap.hasBase()) return 0
+  const baseCol = BASE_POS.col
+  const baseRow = BASE_POS.row
+  let worst = 0
+  for (const t of world.tanks) {
+    if (!t.alive || t.spawnTimer > 0) continue
+    const col = Math.floor((t.x + t.w / 2) / CELL)
+    const row = Math.floor((t.y + t.h / 2) / CELL)
+    const dist = Math.abs(col - baseCol) + Math.abs(row - baseRow)
+    const p = 1 - dist / BASE_PRESSURE_RADIUS
+    if (p > worst) worst = p
+  }
+  return worst > 0 ? Math.min(1, worst) : 0
 }
 
 /**

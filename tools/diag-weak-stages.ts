@@ -51,8 +51,6 @@ for (const si of stageIdxs) {
       difficulty: 'classic',
       godAIParams: params,
       maxTicks,
-      collectEvents: false,
-      collectMetrics: false,
     })
     if (r.outcome === 'stage_clear') {
       wins++
