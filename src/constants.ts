@@ -67,6 +67,15 @@ export const POWERUP_DURATION_MS = 20000
 /** Star power-up respawn invulnerability */
 export const RESPAWN_SHIELD_MS = 3000
 
+/**
+ * Classic FC "star shield" grace: when a 3★ player is hit and spends its top
+ * star to survive (dropping to 2★), it gets this brief invulnerability so a
+ * coincident bullet in the same volley can't instantly re-kill the now-2★
+ * tank. Shorter than the respawn shield — it is a one-time protection, not a
+ * respawn.
+ */
+export const STAR_SHIELD_GRACE_MS = 1500
+
 /** Power-up despawn timeout (ms) — how long a power-up stays on the field before disappearing */
 export const POWERUP_TIMEOUT_MS = 20000
 

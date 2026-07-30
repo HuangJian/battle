@@ -12,6 +12,7 @@ import {
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
   RESPAWN_SHIELD_MS,
+  STAR_SHIELD_GRACE_MS,
   POWERUP_TIMEOUT_MS,
   POWERUP_PICKUP_WINDOW_MS,
   POWERUP_PICKUP_END_DELAY_MS,
@@ -1390,6 +1391,18 @@ export class Simulation {
       this.createExplosion(bullet.x, bullet.y, 'small')
 
       if (tank.hp <= 0) {
+        // Classic FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态).
+        // A 3★ player does NOT die from a would-be-lethal hit: the shield is
+        // spent and the tank drops back to 2★, keeping its life. 0..2★ players
+        // die in one hit (faithful 一击毙命). Only classic honours this tradition.
+        if (
+          tank.isPlayer &&
+          w.difficultyKey === 'classic' &&
+          (tank.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
+        ) {
+          this.spendStarShield(tank)
+          return true
+        }
         tank.alive = false
         this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
 
@@ -1491,6 +1504,47 @@ export class Simulation {
       return true
     }
     return false
+  }
+
+  /**
+   * Classic FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态).
+   *
+   * Called from `bulletHitsTank` when a 3★ player would otherwise take a
+   * lethal hit. The top star is spent: the tank reverts to the next-lower
+   * star level (2★), its stats are re-derived from the new profile, HP is
+   * restored to full, and a brief `STAR_SHIELD_GRACE_MS` invulnerability is
+   * granted so a coincident bullet in the same volley cannot instantly
+   * re-kill the now-2★ tank. The player does NOT lose a life. Both the live
+   * `tank.level` and `world.playerLevel` are kept in sync (the canonical
+   * source for base-damage derivation).
+   */
+  private spendStarShield(tank: Tank): void {
+    const w = this.world
+    const newLevel = PLAYER_PROGRESSION.maximumLevel - 1 // 3★ → 2★
+    tank.level = newLevel
+    w.playerLevel = newLevel
+    const stats = profileToStats(resolveProfile('player', newLevel), 'player', newLevel, w.rules)
+    tank.speed = stats.speed * (w.rules.speedJitter ? rollSpeedJitter(w.rng) : 1)
+    tank.bulletSpeed = stats.bulletSpeed
+    tank.bulletPower = stats.bulletPower
+    tank.fireCooldown = stats.fireCooldown
+    tank.maxHp = stats.maxHp
+    tank.hp = stats.maxHp
+    tank.profile = resolveProfile('player', newLevel)
+    // Functional star ladder (classic): perks are cumulative (a 2★ tank keeps
+    // the fast bullet earned at 1★), so query across every level ≤ current.
+    if (w.rules.starModel === 'functional') {
+      if (hasStarPerk(w.rules, newLevel, 'fastBullet')) {
+        tank.bulletSpeed = stats.bulletSpeed * w.rules.fastBulletMult
+      }
+      if (hasStarPerk(w.rules, newLevel, 'steelPierce')) {
+        tank.bulletPower = 2
+      }
+    }
+    // Brief grace: the shield was just spent, so a same-volley bullet can't
+    // immediately re-kill the demoted 2★ player.
+    tank.shieldTimer = STAR_SHIELD_GRACE_MS
+    w.pushEvent({ type: 'player_hit' })
   }
 
   private bulletHitsBullet(bullet: Bullet): boolean {
