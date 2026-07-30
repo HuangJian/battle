@@ -1,0 +1,173 @@
+# God AI 调校进展总览（系统化整理）
+
+> 汇编自：`DECISIONS.md`（§25–28a, §33, §36–44 等权威决策记录）、git commit history、
+> 历史日志与各阶段计划/验证文档（这些源文档已于 2026-07-30 清理归档，见 §8）、
+> `.workbuddy/memory/`（每日工作日志）。
+> 整理日期：2026-07-30。此文档为**只读汇总**，新决策仍以 DECISIONS.md 为准。
+> **本档 + DECISIONS.md + `plan/God-AI-Next-Round.md` 是 God AI 调校仅存的三份文档**，其余历史文档已删除以避免混淆。
+
+---
+
+## 0. 当前状态速览（截至 commit `7435089`, 2026-07-30）
+
+| 指标 | 数值 | 口径 |
+|---|---|---|
+| 全 35 关平均过关率 | **86.9%** | 35 关 × 20 seeds, classic, 18000t |
+| 全 35 关真值均值（P4 定稿口径） | **81.9%** | 35 关 × 60 seeds |
+| 低于 60% floor 的关卡数 | **0 / 35** | S32 已从 52% 提升至 72.5% |
+| 最弱关 S32 Diamond | **72.5%** | 120 seeds（目标 80%，未达） |
+| 质量门禁 | 530 测试全绿 | tsc + oxlint + oxfmt clean |
+| 回归门禁 | 全 35 关 × 20 seeds，逐关 floor + 聚合 77%，~11s | `tests/god-ai-regression-gate.test.ts` |
+
+**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）。
+
+---
+
+## 1. 目标与评价体系
+
+- **最终目标（P4 用户指令）**：全 35 classic 关，逐关过关率稳定 > 60%（floor），且平均 > 80%。✅ 已达成并超出（86.9%）。
+- **延伸目标（Round 5）**：S32 Diamond > 80% @120 seeds。⚠️ 72.5%，未达，已确认剩余差距为结构性问题（见 §4）。
+- **测量纪律**：20-seed 探针有 ±11pp 二项噪声，只用于筛选方向；**一切决定性结论必须 ≥60 seeds**（P4 教训，多次证伪过 20/30-seed 的"海市蜃楼"增益）。
+
+---
+
+## 2. 时间线总览
+
+| 阶段 | 日期 | commit | 主题 | 关键成果 |
+|---|---|---|---|---|
+| 基础设施 | 07-27/28 | `62d1270`…`5378f8f` | GodAIParams 参数化 + CMA-ES 优化器 + 决策追踪 | 基地存活 40%→80%（stage 0），胜率 0% |
+| Round 2 | 07-28 | `6d44663` 等 | Classic 模式适配，13 项根本性修复（§33） | 基地存活 100%，胜率仍 0%（全 timeout） |
+| Round 3 | 07-28 | `28683be` | 分阶段验证框架（curriculum）+ S6 参数化 + hasBase 守卫 | 失败归因可见化；canHunt 阈值接参 |
+| 重构 | 07-28 | `0d3275b` | GodAIInput 拆分为 `src/ai/god/*`（纯重构，parity 验证） | ThreatAssessor / FireControl / StrategyPlanner / Navigator |
+| v3/v4.1 | 07-28/29 | `f010823`, `fd126ae` | CMA-ES v3→v4.1 + 回归门禁 | 胜率 20% 封顶，基地存活 97.5% — 证明参数空间已穷尽，需改架构 |
+| **P0** | 07-29 | `aec21f4` | T2a 死锁修复（§41） | S0 20%→70%，S1 22.5%→87.5% |
+| **P1** | 07-29 | `2cedb7a` | 生存与防御修复（§42） | S0 87.5%，S1 92.5%，gameover 清零 |
+| **P2** | 07-29 | `6780322` | 反驻扎区域 + 卡死兜底 + 预判射击（§43） | S1 100%，S3 50%→66.7% |
+| **P3** | 07-29 | `c01985f` | A* 拆砖寻路 + 中心死锁修复 + 多关 CMA-ES（§44） | S9 0%→80%⭐，35 关均值 51.7%→53.9% |
+| **P4** | 07-29 | `2d9fa77` | 7 轮 floor-aware CMA-ES + 逐关覆盖表（#36） | 均值 **81.9%**@60 seeds，34/35 ≥60% |
+| **Round 5** | 07-29 | `49b1011` | S32 贴身缠斗 `t2aMaxRange=2`（§43-S32） | S32 43.3%→**72.5%**@120，均值 86.9%@20 |
+| **Phase A** | 07-30 | `7435089` | 智能基地威胁模型（§44-SmartThreat） | **负结果**：8+ 变体全否决，基础设施保留默认 OFF |
+
+> 注：DECISIONS.md 存在编号复用（两个 §36、§43、§44），引用时以标题+日期区分。
+
+---
+
+## 3. 各阶段详情
+
+### 3.1 基础设施与早期轮次（2026-07-27/28）
+
+- **参数化**：阈值常量全部移入 `GodAIParams`，供 CMA-ES 自动调参（12→20 维）。
+- **工具**：`tools/optimize-godai.ts`（sep-CMA-ES）、`tools/decision-trace.ts` + `analyze-trace.ts`（决策追踪，用它找到 T2a 冷却空转、防守偏左、首杀过慢三大失误）。
+- **Round 2 关键发现（§33）**：仿真工具漏设 `world.rules`（classic 规则从未生效，头号 bug）、`onCooldown` 需用子弹数冷却、navigate 分支曾无条件开火自毁基地、directMove 改垂直优先后单种子击杀 0→17。
+- **Round 3（curriculum）**：5 个迷你关隔离验证子系统（火控/威胁优先级/S6 切换/破墙追击/防守回归）；`hasBase()` 守卫修复无基地关假阴性；`endgameEnemyThreshold` 声明未用的潜在 bug 接上（1→6）。
+- **v4.1 结论（§40）**：胜率钉死 20%，5 个 0 杀种子是确定性死锁 —— **参数调优已到天花板，必须改行为架构**。这个判断催生了 P0–P3。
+
+### 3.2 P0–P3：行为死锁逐个击破（2026-07-29）
+
+| 阶段 | 修复 | 根因 | 效果 |
+|---|---|---|---|
+| P0（§41） | T2a 仅当 `scan.enemy==true` 才驻车；反驻扎计时；卡死逃逸向地图中心 | 旧代码对着墙无限开火不前进（单种子 5900 tick 空转） | S1 22.5%→87.5%（单项最大杠杆） |
+| P1（§42） | 闪避对齐阈值 12px→32px；`baseUnderThreat` 提前到 row≥18；受威胁时无条件回防；受威胁时跳过 T2a/道具 | 闪避阈值窄于坦克判定箱 → 玩家撞向检测不到的子弹 | S0 70%→87.5%，S1 gameover 清零 |
+| P2（§43） | 驻扎判定改 ±1 格区域（防亚格振荡重置计时）；卡死兜底任意可通行方向；`predictEnemyCrossing` 预判横穿射击 | 精确格匹配被 32↔40px 振荡打败，逃逸从未触发 | S1 100%，S3 50%→66.7% |
+| P3（§44-P3） | **A* 拆砖寻路**（brick 可通行 5× 代价）；followPath 对砖开火；中心附近卡死改追最近敌 | A* 视砖不可通行 → 密砖关永远找不到路（S9 瘫痪根因） | **S9 0%→80%**，多关 CMA-ES 首次防单关过拟合 |
+
+P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环**（约束移动→杀敌少→漏敌多→更多 gameover），验证了 §41 的警告 —— 此教训在后续 Round 5 / Phase A 反复重现。
+
+### 3.3 P4 战役：全 35 关 floor-aware 调优（2026-07-29, `2d9fa77`）
+
+- **7 轮 CMA-ES**（IPOP，15-worker 池，fitness v5.0 = 逐关胜率块 + deficit×8000 floor 惩罚），内环 35 关 × 20 seeds，决策全部 60 seeds 复核。
+- **两大方法论发现**：
+  1. **单一全局参数集无法满足 35 关** —— 失败家族需求相反（S6 要禁回撤，S18 要更宽回撤；全局动任一方向另一关掉 −30pp）。
+  2. **20-seed 探针会选中海市蜃楼**（S32 单关 CMA-ES 的 60%@30 seeds 在 60 fresh seeds 复测仅 43%）。
+- **解法：逐关参数覆盖表**（`src/ai/godai-stage-overrides.ts`，data over code）。每条覆盖须 ≥60 seeds 与无覆盖对照验证。
+- **结构性行为保留**：race-to-base 判定并入 `isBaseUnderThreat()`；寡不敌众回撤进 `selectTargetImpl`。否决回滚：race 路径膨胀、猎杀出生带规避。
+- **定稿**：均值 81.9%@60 seeds；34/35 ≥60%；唯 S32 Diamond 52%。回归门禁从 2 关重写为全 35 关。
+
+### 3.4 Round 5：S32 贴身缠斗（2026-07-29, `49b1011`）
+
+- **用户洞察**：4 血重甲远程对射极低效（15 格弹道 1s / 4 枪 4s），贴身 2 格弹道 ≈0、0.5s 击毙 —— **8 倍效率**。
+- **实现**：新参数 `t2aMaxRange`（默认 15 = 其余 34 关逐字节不变），S32 覆盖设 2；辅助 `campTimeoutTicks:50`、`antiCampSuppressTicks:50`、`damagedArmorBonus:1`、`navStuckTicks:90`。
+- **成绩**：S32 43.3%→**72.5%** @120 seeds（base_destroyed 43→21，lives_exhausted 25→12）；35 关均值 86.9%@20 seeds，0/35 破 floor。
+- **7 个否决方案**（全部 ≥60 seeds）：守卫带 7%、基地中心目标 32%、T2a 全跳 28%、T2a 快车跳 50.8%@120、缩 leash 24–48%、aimError=0 47%、damagedArmorBonus>1 无差异。共同教训：**任何打断重甲击杀的干预都是净负**。
+
+### 3.5 Phase A：智能基地威胁模型（2026-07-30, `7435089`）—— 高价值负结果
+
+- **假设**（plan/God-AI-Next-Round.md）：`isBaseUnderThreat()` 类型盲+地形盲是 S32 剩余 base_destroyed 尾部的根因；引入速度/朝向/HP/距离加权威胁评分应能改善。
+- **实现**：`src/ai/god/SmartThreatModel.ts`（threatScore / canShootBaseFrom / smartIsBaseUnderThreat）+ 7 个新参数全默认 OFF（OFF 时逐字节不变，已独立复验）。
+- **结果：8+ 变体 @120 seeds 全部否决**（最差 −20pp；类型权重单项 −1.7pp 噪声内；35×20 A/B 全关中性）。
+- **三条推翻计划假设的诊断发现**：
+  1. S32 基地杀手是 **armor 53% + power 37%，不是快车 10%** —— "快车冲家"模型不匹配实际。
+  2. 贴身缠斗极脆弱：任何目标切换都让 lives_exhausted 暴涨（12→32 最差）。
+  3. **瓶颈是响应时间不是检测**：15/19 拆家发生在前 3000 tick 早期波；7/19 时玩家就在基地 0–5 格却来不及；致命子弹是护墙毁后近距发射，T8 拦截无法触发。
+- **处置**：S32 覆盖回退原配置（72.5% 不变）；基础设施保留默认 OFF 备用；计划文档顶部加"已实测否决"横幅。
+
+---
+
+## 4. 未解决问题与下一步方向
+
+**S32 剩余差距（72.5%→80%）**：base_destroyed 尾部 21/120。已证明"检测精度"路线（Phase A/B/C）此路不通，问题在早期波的**响应时间**。候选方向：
+
+- **(a) 早期防御站位**：前 50 秒留在基地附近（风险：重蹈"打断磨甲→lives 暴涨"覆辙，早期恰是清兵关键期）。
+- **(b) 主动墙体防御**：检测并加固薄弱基地墙 —— 与"玩家在旁边但来不及"的诊断更对口。
+- **建议先补数据再选**：用 `tools/diagnose-s32.ts` 统计"基地墙被拆穿时刻分布 vs 玩家位置"，据此在 a/b 间做数据决策。
+
+**已知代码层面的"几何/地形盲"缺陷**（分析已确认，未修）：
+- 子弹闪避不查弹道遮挡（隔钢墙也躲，"假闪避"）—— 对比 T8 基地子弹检测是查的。
+- 回防点几乎写死（(12, 24−defenseRowOffset)，仅列向 ±5 平移），不看地形。
+- nav-stuck 逃逸盲目朝 (12,12)（有兜底与瞬态性，风险有限）。
+- God AI 无"主动占据要道"概念 —— 默认行为 = 追最近敌 + 对齐才停火。多敌 A* 通路交点选防守位的设计已写入 plan（未实施，Phase B/C 因 Phase A 负结果已冻结）。
+
+---
+
+## 5. 方法论沉淀（可复用纪律）
+
+1. **60-seed 规则**：20-seed ±11pp 噪声只配筛方向；决定性结论必须 ≥60 seeds（S32 用 120）。
+2. **Trust-but-verify**：每轮他人/上轮报告的数字先独立复跑再采信（v3 曾出现 37.5% 头条不可复现；v4.1 起报告诚实度显著提升）。
+3. **参数门控默认 OFF**：新行为一律 `param=0` 默认关闭，OFF 时逐字节不变 → 回归门禁天然守护其余 34 关。
+4. **Data over code**：逐关差异走覆盖表，不写关卡特判代码。
+5. **负结果照常提交并全记录**（DECISIONS §44-SmartThreat 是范本）：基础设施可复用，诊断数据扭转方向。
+6. **回归门禁随收益上调 floor**，禁止静默降低（S32 truth 51.7→72.5 已同步）。
+7. **警惕负反馈循环**：一切"约束移动保基地"的方案（P3 漫游约束、Round 5 守卫带、Phase A skipT2a）都因同一机制失败 —— 约束→杀敌少→漏敌多→更多失败。
+
+---
+
+## 6. 参数与覆盖表现状
+
+- **全局默认**：`DEFAULT_GOD_AI_PARAMS` = P4 R7 最优（关键：threatRangeCells 10、maxPlayerDistFromBase 26、powerupMaxDivertDistance 16、huntAllyCount 1、aimError 0.03 —— 微量瞄准噪声全局打破互堵僵局）。
+- **覆盖表**（`src/ai/godai-stage-overrides.ts`，5 条，全部 ≥60 seeds 验证）：
+
+| 关 | 覆盖 | 60-seed 提升 |
+|---|---|---|
+| S6 Iron Curtain | outnumberedEnemyCount:5, threatRangeCells:14 | 57→63% |
+| S18 Frozen Field | outnumberedRadiusCells:14, aimError:0 | 52→67% |
+| S25 Ice Palace | aimError:0 | 57→73% |
+| S26 Brick Maze | replanInterval:30, suboptimalPathProb:0.05 | 53→65% |
+| S32 Diamond | t2aMaxRange:2 + camp/armor/navStuck 辅助 | 43.3→72.5% @120 |
+
+- **保留未启用**：`smartThreatModel` 族 7 参数（Phase A，默认 OFF）、`guardBandMode`（已否决）。
+
+---
+
+## 7. 工具链索引
+
+| 工具 | 用途 |
+|---|---|
+| `tools/optimize-godai.ts` | CMA-ES 参数优化（--stages 多关聚合 fitness） |
+| `tools/simulation-runner.ts` + `sim-pool/sim-worker.ts` | 并行仿真（默认应用覆盖表） |
+| `tools/validate-p4.ts --seeds N` | 全 35 关扫描终审 |
+| `tools/probe-params.ts` / `probe-s32.ts` | 参数敏感度探针（`--skipStageOverrides` 量纯参数） |
+| `tools/diagnose-s32.ts` | 失败归因诊断（拆家时刻/玩家位置/凶手类型） |
+| `tools/ab-test-smart-threat.ts` | 35 关 off/on A/B |
+| `tools/decision-trace.ts` + `analyze-trace.ts` | 逐 tick 决策追踪 |
+| `tools/relock-parity.ts` | parity 基线重锁 |
+| `tools/curriculum.ts`（`bun run curriculum`） | 5 迷你关子系统隔离验证 |
+| `tests/god-ai-regression-gate.test.ts` | 全 35×20 回归门禁（~11s） |
+
+---
+
+## 8. 文献索引
+
+- **权威决策**：DECISIONS.md §27/§28a/§33（早期）、§36-curriculum/§37/§39/§40（框架与 CMA-ES）、§41–§44-P3（P0–P3）、#36-P4（战役）、§43-S32（Round 5）、§44-SmartThreat（Phase A 负结果）。
+- **现存设计文档**：`plan/God-AI-Next-Round.md`（智能威胁模型设计规格，顶部有"Phase A 已否决"状态横幅；`SmartThreatModel.ts` / `GodAIInput.ts` / 覆盖表的代码注释直接引用其章节号，故保留）。
+- **已归档的历史文档（2026-07-30 清理，内容已并入本档 + DECISIONS.md，如需原文用 git 历史找回）**：`docs/god-ai-tuning-log.md`（Round 1–3 详录）、`plan/god-ai.progress.md`（P4/Round 5 进度）、`plan/God-AI-Tuning.md`（初始目标）、`plan/god-ai-analysis.md`、`plan/God-AI-Curriculum.md`、`plan/gac.review.md`、`plan/God-AI-P0~P3-Verification.md`（4 份）、`plan/God-AI-P3-Direction.md`。找回方式：`git log --diff-filter=D --oneline -- <path>` + `git show <hash>^:<path>`。
+- **每日工作记录**：`.workbuddy/memory/2026-07-27.md` 起。
