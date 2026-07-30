@@ -183,7 +183,7 @@ describe('ReplayManager', () => {
       enemiesTotal: 20,
       playTimeMs: 12345, // wall-clock — must NOT leak into duration
     }
-    const replay = mgr.create('victory', snapshot, frames, SAMPLE_FRAMES.length, metadata)
+    const replay = mgr.create('clear', snapshot, frames, SAMPLE_FRAMES.length, metadata)
     expect(replay.totalTicks).toBe(SAMPLE_FRAMES.length)
     expect(replay.durationMs).toBe(Math.round(SAMPLE_FRAMES.length * (1000 / 60)))
     expect(replay.durationMs).not.toBe(12345)
@@ -193,7 +193,7 @@ describe('ReplayManager', () => {
 
   it('canPlay() rejects replays with a wrong schema version (L3)', () => {
     const mgr = new ReplayManager()
-    const good = mgr.create('victory', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
+    const good = mgr.create('clear', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
       stage: 0,
       stageName: '',
       difficulty: '',
@@ -213,7 +213,7 @@ describe('ReplayManager', () => {
   it('enforces retention policy (circular overwrite, favorited exempt)', () => {
     const mgr = new ReplayManager({ now: () => 0 })
     const make = (fav = false) => {
-      const r = mgr.create('victory', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
+      const r = mgr.create('clear', {} as any, packFrames(SAMPLE_FRAMES), SAMPLE_FRAMES.length, {
         stage: 0,
         stageName: '',
         difficulty: '',
@@ -227,9 +227,9 @@ describe('ReplayManager', () => {
       if (fav) mgr.toggleFavorite(r.id)
       return r
     }
-    // Policy limit is 20 for victory; create 25, keep the newest 20.
+    // Policy limit is 20 for clear; create 25, keep the newest 20.
     for (let i = 0; i < 25; i++) make(false)
-    expect(mgr.count('victory')).toBe(20)
+    expect(mgr.count('clear')).toBe(20)
     // A favorited replay is never evicted even past the limit.
     const fav = make(true)
     for (let i = 0; i < 10; i++) make(false)
@@ -278,7 +278,7 @@ describe('Replay determinism (record → replay)', () => {
       playTimeMs: liveWorld.playTimeMs,
     }
     const replay = mgr.create(
-      'victory',
+      'clear',
       result!.snapshot,
       result!.frames,
       result!.tickCount,

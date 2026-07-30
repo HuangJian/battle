@@ -31,7 +31,7 @@ describe('ReplayManager.estimateBytes()', () => {
   it('returns > 0 after creating a replay (the core fix)', () => {
     const mgr = new ReplayManager({ now: () => 1_000_000 })
     const frames = packFrames(SAMPLE_FRAMES)
-    mgr.create('victory', {} as any, frames, SAMPLE_FRAMES.length, {
+    mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, {
       stage: 0,
       stageName: 'STAGE 1',
       difficulty: 'classic',
@@ -63,10 +63,10 @@ describe('ReplayManager.estimateBytes()', () => {
       enemiesTotal: 20,
       playTimeMs: 12345,
     }
-    mgr.create('victory', {} as any, frames, SAMPLE_FRAMES.length, metadata)
+    mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, metadata)
     const bytes1 = mgr.estimateBytes()
 
-    mgr.create('victory', {} as any, frames, SAMPLE_FRAMES.length, metadata)
+    mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, metadata)
     const bytes2 = mgr.estimateBytes()
 
     // Two replays should use roughly 2× the storage of one
@@ -93,7 +93,7 @@ describe('ReplayManager.estimateBytes()', () => {
     }
     // Create 3 replays so estimateBytes() is clearly > 0
     for (let i = 0; i < 3; i++) {
-      mgr.create('victory', {} as any, frames, SAMPLE_FRAMES.length, metadata)
+      mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, metadata)
     }
     const fromEstimateBytes = mgr.estimateBytes()
     expect(fromEstimateBytes).toBeGreaterThan(0)

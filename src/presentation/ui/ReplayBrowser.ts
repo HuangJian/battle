@@ -25,20 +25,28 @@ export interface ReplayBrowserCallbacks {
   onClose: () => void
   /** Return estimated storage usage for replays (bytes). */
   getStorageBytes?: () => Promise<number>
+  /** Import a .replay file (transient, in-memory only). */
+  onImport?: (replay: Replay) => void
+  /** Export a replay as .replay file download. */
+  onExport?: (id: ReplayID) => void
 }
 
 const TYPE_LABELS: Record<ReplayType, string> = {
-  victory: 'VICTORY',
-  defeat: 'DEFEAT',
+  clear: 'CLEAR',
+  base: 'BASE DOWN',
+  died: 'DIED',
+  timeout: 'TIMEOUT',
 }
 
 /** Toggle-group filters. */
-type FilterKey = 'all' | 'victory' | 'defeat' | 'favorite'
+type FilterKey = 'all' | ReplayType | 'favorite'
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'all', label: 'ALL' },
-  { key: 'victory', label: 'VICTORY' },
-  { key: 'defeat', label: 'DEFEAT' },
+  { key: 'clear', label: 'CLEAR' },
+  { key: 'base', label: 'BASE DOWN' },
+  { key: 'died', label: 'DIED' },
+  { key: 'timeout', label: 'TIMEOUT' },
   { key: 'favorite', label: 'FAV ★' },
 ]
 
@@ -81,6 +89,7 @@ export class ReplayBrowser {
           <div class="snap-filters" data-replay="filters"></div>
           <div class="snap-header-right">
             <span class="snap-storage" data-replay="storage"></span>
+            <button class="controls-btn snap-import" data-replay="import" type="button">↓ Import</button>
             <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close <kbd>Esc</kbd></button>
           </div>
         </div>
@@ -91,6 +100,13 @@ export class ReplayBrowser {
     this.storageEl = this.screen.querySelector('[data-replay="storage"]')
     const closeBtn = this.screen.querySelector('[data-replay="close"]') as HTMLElement
     closeBtn.addEventListener('click', () => this.requestClose())
+
+    // Import button — triggers file picker for .replay files
+    const importBtn = this.screen.querySelector('[data-replay="import"]') as HTMLElement
+    importBtn.addEventListener('click', () => this.triggerImport())
+
+    // Drag-and-drop overlay
+    this.setupDragDrop()
 
     // Build the filter toggle group (ALL | VICTORY | DEFEAT | FAV ★).
     const filtersEl = this.screen.querySelector('[data-replay="filters"]')!
@@ -200,8 +216,8 @@ export class ReplayBrowser {
         const label =
           this.filter === 'favorite'
             ? 'favorited'
-            : this.filter === 'victory' || this.filter === 'defeat'
-              ? TYPE_LABELS[this.filter]
+            : this.filter in TYPE_LABELS
+              ? TYPE_LABELS[this.filter as ReplayType]
               : ''
         empty.textContent = label
           ? `No ${label} replays — pick another filter.`
@@ -215,6 +231,69 @@ export class ReplayBrowser {
 
     for (const replay of replays) {
       this.listEl.appendChild(this.buildEntry(replay))
+    }
+  }
+
+  /** Trigger file picker for .replay import. */
+  private triggerImport(): void {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.replay'
+    input.multiple = true
+    input.addEventListener('change', () => {
+      for (const file of input.files ?? []) {
+        this.importFile(file)
+      }
+    })
+    input.click()
+  }
+
+  /** Handle drag-and-drop overlay for .replay import. */
+  private setupDragDrop(): void {
+    let dragCount = 0
+    const overlay = document.createElement('div')
+    overlay.className = 'snap-drag-overlay'
+    overlay.textContent = '拖放 .replay 文件到此处'
+    overlay.style.cssText = 'display:none;position:absolute;inset:0;background:rgba(0,0,0,0.3);color:#fff;font-size:1.2em;display:none;align-items:center;justify-content:center;z-index:10;pointer-events:none;'
+    const panel = this.screen.querySelector('.snap-panel')! as HTMLElement
+    panel.style.position = 'relative'
+    panel.appendChild(overlay)
+
+    panel.addEventListener('dragenter', (e) => {
+      e.preventDefault()
+      dragCount++
+      overlay.style.display = 'flex'
+    })
+    panel.addEventListener('dragover', (e) => e.preventDefault())
+    panel.addEventListener('dragleave', () => {
+      dragCount--
+      if (dragCount <= 0) { dragCount = 0; overlay.style.display = 'none' }
+    })
+    panel.addEventListener('drop', (e) => {
+      e.preventDefault()
+      dragCount = 0
+      overlay.style.display = 'none'
+      for (const file of e.dataTransfer?.files ?? []) {
+        if (file.name.endsWith('.replay')) this.importFile(file)
+      }
+    })
+  }
+
+  /** Read and import a .replay file. */
+  private async importFile(file: File): Promise<void> {
+    try {
+      const text = await file.text()
+      const { parseReplayFile } = await import('../../replay/file')
+      const result = parseReplayFile(text)
+      if ('error' in result) {
+        console.warn(`[replay] import failed: ${result.error}`)
+        return
+      }
+      result.replay.transient = true
+      this.callbacks?.onImport?.(result.replay)
+      this.refresh()
+    } catch (err) {
+      console.warn('[replay] import error:', err)
     }
   }
 
@@ -311,6 +390,17 @@ export class ReplayBrowser {
         delBtn.classList.add('snap-delete-arm')
       }
     })
+
+    // Export button (download .replay file)
+    if (this.callbacks?.onExport) {
+      const exportBtn = document.createElement('button')
+      exportBtn.type = 'button'
+      exportBtn.className = 'controls-btn snap-export'
+      exportBtn.textContent = '↓'
+      exportBtn.title = 'Export .replay'
+      exportBtn.addEventListener('click', () => this.callbacks?.onExport!(replay.id))
+      actions.appendChild(exportBtn)
+    }
 
     actions.appendChild(playBtn)
     actions.appendChild(favBtn)

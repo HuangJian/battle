@@ -297,11 +297,11 @@ export class ReplayController {
   }
 
   /** Populate the end overlay with replay metadata. */
-  setEndMetadata(meta: { title: string; details: string; result?: 'victory' | 'defeat' }): void {
+  setEndMetadata(meta: { title: string; details: string; result?: string }): void {
     this.endTitle.textContent = meta.title
     this.endMeta.textContent = meta.details
-    this.endOverlay.classList.toggle('rc-end-victory', meta.result === 'victory')
-    this.endOverlay.classList.toggle('rc-end-defeat', meta.result === 'defeat')
+    this.endOverlay.classList.toggle('rc-end-victory', meta.result === 'clear')
+    this.endOverlay.classList.toggle('rc-end-defeat', meta.result !== 'clear' && meta.result != null)
   }
 
   setPaused(paused: boolean): void {

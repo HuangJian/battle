@@ -1695,3 +1695,19 @@ Supporting parameters (all S32-only via override table):
 **Measured:** perTick 0.009ms → 0.006-0.007ms (~25-33% improvement, 60-game classic/stage0). Wall time 1737ms → ~1275ms (~27%). Noise is ±5% due to i7-4770HQ thermal throttling; determinism signature is the reliable correctness metric.
 
 **Implications:** The remaining bottlenecks (`think` 13%, `rectHitsTerrain` 8%, `updateNoneTank` 8%) are core simulation functions that are already lean — further gains would require algorithmic changes (spatial indexing, etc.) that violate "simple beats clever" (MANIFEST §10) for <2% marginal improvement.
+
+## 47. God AI RNG Split for Replay Fidelity (2026-07-30)
+
+**Decision:** `GodAIInput` gets its own seeded RNG (`new RNG((seed ^ 0x9e3779b9) >>> 0)`, passed as an optional constructor parameter by `runSimulation`) instead of sharing `world.rng`. This enables recording headless God-AI games as input-stream replays (`.replay` files) that play back faithfully in the browser's existing replay system. Plan: `plan/God-AI-Replay-Visualization.md`.
+
+**Rationale:**
+- Replay playback = restore initialSnapshot (incl. `rngState`) + re-feed recorded inputs. During playback the God AI is absent, so any `world.rng` consumption by `think()` (aimError, suboptimalPathProb, `god/FireControl.ts`, `god/Navigator.ts`) desynchronizes the world RNG stream → enemy behavior diverges → guaranteed desync. Human-game replays never had this problem because hands don't consume RNG.
+- Alternatives rejected:
+  - **Store seed+params, re-run God AI in browser:** zero baseline impact, tiny files — but any subsequent God AI code change silently rewrites history. Directly conflicts with the purpose ("watch how the AI played *back then*"). Rejected.
+  - **Keep shared RNG, replay via re-simulation with desync detection:** same history-fidelity flaw. Rejected.
+- The split keeps determinism intact (same seed → same AI decision stream; AGENTS §2.3 spirit: seeded, reproducible). God AI RNG state is NOT added to `WorldSnapshot` — playback has no God AI to restore, and sim recordings always start from a stage-start snapshot.
+- Browser gameplay never instantiates `GodAIInput`, so the change is tools-pipeline-only in effect; the constructor default (`world.rng`) preserves the old signature for any other caller.
+
+**Cost (accepted):** `world.rng` consumption order changes → **all simulation baselines shift once**. One-time relock protocol (single dedicated commit): re-run `tools/relock-parity.ts`, re-run full stage evaluation, update determinism-signature tests, spot-check `godai-stage-overrides.ts` key stages (S32) for drift beyond noise. No re-tuning in this scope — that belongs to God-AI-Tuning.
+
+**Implications:** After this decision, a `.replay` file is a faithful historical artifact of a tuning-era game: God AI code/params can evolve freely without corrupting recorded history. Only changes to the Simulation core itself can invalidate old replays, which the file envelope surfaces via `gameVersion` soft-warning (consistent with replay L3 semantics).

@@ -62,6 +62,11 @@ export class ReplayManager {
       const stored = await this.backend.loadAll()
       stored.sort((a, b) => a.createdAt - b.createdAt)
       for (const replay of stored) {
+        // Migrate legacy ReplayType values (plan/God-AI-Replay-Visualization §3.1)
+        // Cast needed: old IndexedDB entries may still have 'victory'/'defeat'
+        const legacy = replay.type as string
+        if (legacy === 'victory') replay.type = 'clear'
+        else if (legacy === 'defeat') replay.type = 'died'
         if (this.byId.has(replay.id)) continue
         this.replays.push(replay)
         this.byId.set(replay.id, replay)
@@ -285,8 +290,19 @@ export class ReplayManager {
   // Persistence (internal)
   // ================================================================
 
-  private persist(replay: Replay): void {
+  persist(replay: Replay): void {
     if (!this.backend) return
     this.backend.save(replay).catch(() => {})
+  }
+
+  /**
+   * Add an external replay (e.g. imported .replay file) to in-memory state
+   * and persist to backend. The replay is assumed to be fully formed.
+   */
+  addReplay(replay: Replay): void {
+    if (this.byId.has(replay.id)) return
+    this.replays.push(replay)
+    this.byId.set(replay.id, replay)
+    this.persist(replay)
   }
 }

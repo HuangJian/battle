@@ -9,16 +9,20 @@ import type { ReplayType } from './types'
 // ================================================================
 
 /**
- * Retention policies per replay type (plan/replay.md §4).
+ * Retention policies per replay type (plan/God-AI-Replay-Visualization §3.1).
  *
  * | Type     | Limit | Overwrite |
  * | -------- | ----: | --------- |
- * | victory  |    20 | circular  |
- * | defeat   |    20 | circular  |
+ * | clear    |    20 | circular  |
+ * | base     |    20 | circular  |
+ * | died     |    20 | circular  |
+ * | timeout  |    20 | circular  |
  */
 export const REPLAY_RETENTION_POLICIES: Record<ReplayType, RetentionPolicy> = {
-  victory: { limit: 20, overwrite: 'circular' },
-  defeat: { limit: 20, overwrite: 'circular' },
+  clear: { limit: 20, overwrite: 'circular' },
+  base: { limit: 20, overwrite: 'circular' },
+  died: { limit: 20, overwrite: 'circular' },
+  timeout: { limit: 20, overwrite: 'circular' },
 }
 
 /** Maximum number of favorited replays. Enforced in toggleFavorite(). */

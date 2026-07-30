@@ -5,6 +5,8 @@ import { applyStageOverrides } from '../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { CELL, BASE_POS } from '../src/constants'
+import { RNG } from '../src/utils/RNG'
+import { InputRecorder } from '../src/replay/InputRecorder'
 import type { StageData, GameEvent, TankKind } from '../src/types'
 
 // ============================================================
@@ -61,6 +63,12 @@ export interface SimResult {
   firstKillTick?: number
   /** Failure attribution (plan/God-AI-Tuning §2). undefined on stage_clear. */
   failure?: FailureTaxonomy
+  /** Replay data (only when record=true). */
+  replay?: {
+    initialSnapshot: import('../src/snapshot/types').WorldSnapshot
+    frames: Uint8Array
+    tickCount: number
+  }
 }
 
 export interface FrameMetrics {
@@ -98,6 +106,8 @@ export interface RunOptions {
    * Default false: overrides apply, matching real evaluation conditions.
    */
   skipStageOverrides?: boolean
+  /** Record input frames for replay playback (plan/God-AI-Replay-Visualization §4.1). */
+  record?: boolean
 }
 
 /**
@@ -133,8 +143,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
 
-  // Create the God AI input and Simulation.
-  const input = new GodAIInput(world, godAIParams)
+  // Create the God AI input with an independent RNG (DECISIONS #47).
+  // This decouples God AI decisions from the world RNG stream, enabling
+  // faithful replay playback where the God AI is absent.
+  const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
+  const input = new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Load the stage (this also spawns the player and sets state to 'playing').
@@ -142,6 +155,13 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   // Reset the input to pick up the new World state.
   input.reset()
+
+  // Set up recording if requested (plan/God-AI-Replay-Visualization §4.1)
+  // Note: InputRecorder.startNew() calls cloneWorld() internally to capture
+  // the initial snapshot. The order is safe: loadStageData → input.reset()
+  // → recorder.startNew(world) because reset() doesn't mutate world state.
+  const recorder = opts.record ? new InputRecorder() : null
+  if (recorder) recorder.startNew(world)
 
   const allEvents: GameEvent[] = []
   const metrics: FrameMetrics[] = []
@@ -154,6 +174,8 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   while (tick < maxTicks) {
     sim.tick()
+    // Record this tick's input BEFORE endFrame clears the cached state.
+    if (recorder) recorder.recordFrame(input)
     // Game.ts calls input.endFrame() after each tick; the headless runner
     // must do the same so GodAIInput's _thought flag resets and the AI
     // re-evaluates every tick (not just the first one).
@@ -225,7 +247,7 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   const wallMs = performance.now() - t0
 
-  return {
+  const result: SimResult = {
     outcome,
     ticks: tick,
     wallMs,
@@ -246,6 +268,16 @@ export function runSimulation(opts: RunOptions): SimResult {
     firstKillTick,
     failure,
   }
+
+  // Finalize recording if active
+  if (recorder) {
+    const rec = recorder.finalize()
+    if (rec) {
+      result.replay = { initialSnapshot: rec.snapshot, frames: rec.frames, tickCount: rec.tickCount }
+    }
+  }
+
+  return result
 }
 
 /** Sample per-frame metrics from the World. */

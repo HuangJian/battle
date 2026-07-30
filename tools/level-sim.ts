@@ -19,6 +19,7 @@
 import { STAGES } from '../src/config/stages'
 import { runSimulation } from './simulation-runner'
 import { evaluate, DEFAULT_BASELINE } from './evaluator'
+import { writeReplayFile } from './replay-writer'
 
 // ---- Parse args ----
 function arg(name: string, fallback?: string): string | undefined {
@@ -32,6 +33,7 @@ const seed = parseInt(arg('seed', '1')!, 10)
 const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
 const doEval = process.argv.includes('--eval')
 const pretty = process.argv.includes('--pretty')
+const replayDir = arg('replay')
 
 // ---- Load stage ----
 const stage = STAGES[stageIdx]
@@ -47,6 +49,7 @@ const result = runSimulation({
   difficulty,
   maxTicks,
   sampleInterval: 6, // sample every 100ms for compact output
+  record: !!replayDir,
 })
 
 // ---- Optionally evaluate ----
@@ -103,6 +106,17 @@ if (pretty) {
   console.log(JSON.stringify(output, null, 2))
 } else {
   console.log(JSON.stringify(output))
+}
+
+// ---- Write replay file if requested ----
+if (replayDir && result.replay) {
+  const path = await writeReplayFile({
+    result,
+    dir: replayDir,
+    stageIndex: stageIdx,
+    stageName: stage.name,
+  })
+  if (path) console.error(`[replay] wrote ${path}`)
 }
 
 // ---- Helpers ----

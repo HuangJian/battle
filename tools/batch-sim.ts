@@ -15,6 +15,7 @@ import { STAGES } from '../src/config/stages'
 import { runSimulation, type SimResult, type RunOptions } from './simulation-runner'
 import { evaluate, type EvaluationReport, type BaselineConfig, DEFAULT_BASELINE } from './evaluator'
 import { generateStages, type Theme } from './level-gen'
+import { writeReplayFile } from './replay-writer'
 import type { StageData } from '../src/types'
 
 // ============================================================
@@ -31,6 +32,9 @@ export interface BatchOptions {
   sampleInterval?: number
   evaluate?: boolean
   baseline?: BaselineConfig
+  /** Record replays. 'all' records every run; 'failures' records only non-clear runs. */
+  replay?: 'all' | 'failures'
+  replayDir?: string
 }
 
 export interface BatchResult {
@@ -103,6 +107,7 @@ export function batchRun(opts: BatchOptions): BatchResult[] {
         godAIParams: opts.godAIParams,
         maxTicks: opts.maxTicks,
         sampleInterval: opts.sampleInterval ?? 6,
+        record: !!opts.replay,
       })
 
       let evalReport: EvaluationReport | undefined
@@ -274,6 +279,10 @@ if (import.meta.main) {
     `[batch-sim] ${stages.length} stages × ${seeds.length} seeds = ${stages.length * seeds.length} runs\n`,
   )
 
+  const replayMode = process.argv.includes('--replay-failures') ? 'failures' as const
+    : process.argv.includes('--replay') ? 'all' as const : undefined
+  const replayDir = arg('replay-dir') ?? 'replays'
+
   const results = batchRun({
     stages,
     stageNames,
@@ -281,7 +290,24 @@ if (import.meta.main) {
     seeds,
     maxTicks,
     evaluate: doEval,
+    replay: replayMode,
+    replayDir,
   })
+
+  // Write replay files for non-clear outcomes (if --replay-failures)
+  if (replayMode) {
+    for (const r of results) {
+      const shouldWrite = replayMode === 'all' || r.simResult.outcome !== 'stage_clear'
+      if (shouldWrite && r.simResult.replay) {
+        await writeReplayFile({
+          result: r.simResult,
+          dir: replayDir,
+          stageIndex: r.stageIndex,
+          stageName: r.stageName,
+        })
+      }
+    }
+  }
 
   const summary = summarize(results)
 

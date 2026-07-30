@@ -75,7 +75,7 @@ function makeReplay(ticks: number) {
 
   const result = recorder.finalize()!
   const mgr = new ReplayManager({ now: () => 1_000_000 })
-  const replay = mgr.create('victory', result.snapshot, result.frames, result.tickCount, {
+  const replay = mgr.create('clear', result.snapshot, result.frames, result.tickCount, {
     stage: world.stageIndex,
     stageName: 'STAGE 1',
     difficulty: 'classic',

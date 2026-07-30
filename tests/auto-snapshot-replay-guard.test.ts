@@ -21,7 +21,7 @@ function makeMinimalReplay(world: World, tickCount = 300): Replay {
 
   return {
     id: 'test-replay-000',
-    type: 'victory',
+    type: 'clear',
     createdAt: Date.now(),
     gameVersion: '0.1.0',
     schemaVersion: 1,

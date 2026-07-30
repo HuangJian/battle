@@ -7,11 +7,16 @@ import type { WorldSnapshot } from '../snapshot/types'
 // ================================================================
 
 /**
- * Replay result type. Determines the auto-save bucket and retention policy.
- * - 'victory' — stage completed successfully
- * - 'defeat' — base destroyed or game over
+ * Replay result type. Four-state enum matching .replay filename status.
+ * - 'clear' — stage completed successfully
+ * - 'base' — base destroyed
+ * - 'died' — lives exhausted
+ * - 'timeout' — max ticks reached (sim-only; browser games never timeout)
+ *
+ * Legacy 'victory' | 'defeat' values from IndexedDB are migrated on load
+ * (plan/God-AI-Replay-Visualization §3.1).
  */
-export type ReplayType = 'victory' | 'defeat'
+export type ReplayType = 'clear' | 'base' | 'died' | 'timeout'
 
 /** Replays are addressed by UUID. */
 export type ReplayID = string
@@ -82,6 +87,9 @@ export interface Replay {
 
   isFavorite: boolean
   favoriteAt: number | null // epoch ms when favorited
+
+  /** Runtime-only flag: imported .replay files are transient (Q3). */
+  transient?: boolean
 }
 
 /** Filter for browsing/searching replays. */

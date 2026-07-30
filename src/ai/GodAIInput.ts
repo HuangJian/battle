@@ -71,7 +71,10 @@ import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatMo
  *   S10  — Endgame mode: when ≤ 2 enemies remain, switch from defense to
  *          active hunting to shorten clear time.
  *
- * **Determinism**: all randomness flows through `world.rng` (AGENTS §2.3).
+ * **Determinism**: all randomness flows through `this.rng` (AGENTS §2.3).
+ * When an independent RNG is provided (headless sim recording), `this.rng`
+ * is decoupled from `world.rng` so God AI decisions don't consume the
+ * world RNG stream — enabling faithful replay playback (DECISIONS #47).
  *
  * **§0.5 split (plan/God-AI-Curriculum)**: the decision logic was extracted
  * into `./god/*` sub-modules (FireControl, ThreatAssessor, StrategyPlanner,
@@ -481,9 +484,9 @@ export class GodAIInput implements InputLike {
   _canMoveComputed = 0
   _canMoveResult = 0
 
-  constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS) {
+  constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS, rng?: RNG) {
     this.world = world
-    this.rng = world.rng
+    this.rng = rng ?? world.rng
     this.params = params
   }
 

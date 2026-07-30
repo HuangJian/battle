@@ -32,83 +32,75 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-locked 2026-07-29 after the P4 tuning campaign (rounds 1-7):
-//   - DEFAULT_GOD_AI_PARAMS updated to the R7 CMA-ES optimum (GodAIInput.ts)
-//   - two new behaviors added during P4: race-to-base check in
-//     isBaseUnderThreat() and the outnumbered-retreat rule (StrategyPlanner)
-//   - per-stage override table (godai-stage-overrides.ts) now applied by
-//     tools/simulation-runner.ts; Stage 0 (Outpost) has no override, so this
-//     baseline locks the pure R7 defaults.
-// Re-locked 2026-07-29 (Round 5): added t2aMaxRange parameter (default 15 =
-//   AIM_RANGE_CELLS). The new T2a condition `scan.enemy && scan.enemyDist
-//   <= t2aMaxRange` skips camping at enemies beyond 15 cells in edge cases
-//   where scanAhead and findEnemyDirection diverge on alignment. Seed 42
-//   shifted (2355→2194 ticks, 3→4 lives) — a beneficial change. All other
-//   seeds are byte-identical.
-// All are intentional behavior changes — this is the documented re-capture
-// path (run `bun tools/relock-parity.ts` and paste the output).
+// Baseline re-locked 2026-07-30 after God AI RNG split (DECISIONS §47):
+//   GodAIInput now gets its own seeded RNG instead of sharing world.rng,
+//   enabling headless God-AI games to be recorded as input-stream replays.
+//   The split changes world.rng consumption order → all baselines shift.
+//   This is a one-time relock; all 8 seeds moved but outcome is still
+//   stage_clear for all (Stage 0 is an easy stage for the God AI).
+// Re-locked via `bun tools/relock-parity.ts` and pasted here.
 // NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
 // game params. Re-run tools/relock-parity.ts after any future intentional
 // tuning to refresh these numbers.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 2770,
+    ticks: 3677,
     score: 4200,
-    lives: 3,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 1,
-  },
-  2: {
-    outcome: 'stage_clear',
-    ticks: 5195,
-    score: 4700,
     lives: 2,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
-  7: {
+  2: {
     outcome: 'stage_clear',
-    ticks: 3138,
+    ticks: 3406,
     score: 4700,
     lives: 4,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
+  7: {
+    outcome: 'stage_clear',
+    ticks: 2574,
+    score: 4200,
+    lives: 3,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 0,
+  },
   42: {
     outcome: 'stage_clear',
-    ticks: 2194,
-    score: 4700,
-    lives: 4,
+    ticks: 2985,
+    score: 4200,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 0,
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 3114,
+    ticks: 3013,
     score: 4200,
-    lives: 4,
-    killCount: 20,
-    baseAlive: true,
-    playerLevel: 0,
-  },
-  999: {
-    outcome: 'stage_clear',
-    ticks: 4274,
-    score: 4700,
-    lives: 4,
+    lives: 3,
     killCount: 20,
     baseAlive: true,
     playerLevel: 1,
   },
+  999: {
+    outcome: 'stage_clear',
+    ticks: 2494,
+    score: 4200,
+    lives: 3,
+    killCount: 20,
+    baseAlive: true,
+    playerLevel: 2,
+  },
   12345: {
     outcome: 'stage_clear',
-    ticks: 2698,
-    score: 4700,
+    ticks: 2856,
+    score: 4200,
     lives: 3,
     killCount: 20,
     baseAlive: true,
@@ -116,8 +108,8 @@ const BASELINE: Record<number, Expected> = {
   },
   55555: {
     outcome: 'stage_clear',
-    ticks: 3247,
-    score: 4200,
+    ticks: 2779,
+    score: 4700,
     lives: 3,
     killCount: 20,
     baseAlive: true,

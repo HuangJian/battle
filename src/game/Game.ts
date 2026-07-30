@@ -24,6 +24,7 @@ import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { createReplayStorage } from '../replay/storage'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
+import { serializeReplayFile, buildReplayFilename } from '../replay/file'
 
 const SETTINGS_KEY = 'bc_settings'
 const THEME_KEYS = Object.keys(THEMES)
@@ -488,12 +489,14 @@ export class Game {
 
           // Detect stage clear → save victory replay
           if (this.world.state === 'stageclear' && this.prevWorldState !== 'stageclear') {
-            this.finalizeRecording('victory')
+            this.finalizeRecording('clear')
           }
 
           // Detect game over → intercept for recovery
           if (this.world.state === 'gameover' && !enteredGameOver) {
-            this.finalizeRecording('defeat')
+            // Determine specific defeat cause for the four-state ReplayType
+            const defeatType = this.world.tileMap.isBaseDestroyed() ? 'base' : 'died'
+            this.finalizeRecording(defeatType)
             enteredGameOver = true
             this.startRecovery()
             break // stop ticking — simulation is now suspended
@@ -1368,7 +1371,7 @@ export class Game {
     if (replay) {
       const m = replay.metadata
       const stageLabel = `Stage ${String(m.stage + 1).padStart(2, '0')}: ${m.stageName}`
-      const resultLabel = replay.type === 'victory' ? 'VICTORY' : 'DEFEAT'
+      const resultLabel = replay.type === 'clear' ? 'VICTORY' : 'DEFEAT'
       const durationSec = Math.floor(replay.durationMs / 1000)
       const durMin = Math.floor(durationSec / 60)
       const durSec = durationSec % 60
@@ -1382,7 +1385,7 @@ export class Game {
       this.presentation.ui.replayController.setEndMetadata({
         title: stageLabel,
         details: detailParts.join('  ·  '),
-        result: replay.type,
+        result: replay.type as 'clear' | 'base' | 'died',
       })
     }
     this.presentation.ui.replayController.showPersistent()
@@ -1454,6 +1457,37 @@ export class Game {
         // Regular screen sync resumes automatically (mirrors SnapshotBrowser).
       },
       getStorageBytes: () => Promise.resolve(this.replays.estimateBytes()),
+      onImport: (replay) => {
+        this.replays.addReplay(replay)
+        ui.notify(`Imported: Stage ${String(replay.metadata.stage + 1).padStart(2, '0')} — ${replay.metadata.stageName}`)
+      },
+      onExport: (id) => {
+        const replay = this.replays.get(id)
+        if (!replay) return
+        const envelope = serializeReplayFile({
+          source: 'browser',
+          initialSnapshot: replay.initialSnapshot,
+          frames: replay.frames,
+          totalTicks: replay.totalTicks,
+          metadata: replay.metadata,
+        })
+        const filename = buildReplayFilename({
+          difficulty: replay.metadata.difficulty,
+          stageIndex: replay.metadata.stage,
+          status: replay.type,
+          lives: replay.metadata.lives,
+          totalTicks: replay.totalTicks,
+          seed: 0,
+        })
+        const blob = new Blob([envelope], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+        ui.notify(`Exported: ${filename}`)
+      },
     })
   }
 

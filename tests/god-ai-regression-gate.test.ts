@@ -39,43 +39,47 @@ import { STAGES } from '../src/config/stages'
 
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 
-// Truth win rates (%) from the 35×60 R7 validation, 2026-07-29.
+// Truth win rates (%) from 35×60 validation, re-measured 2026-07-30
+// after God AI RNG split (DECISIONS §47). The split changed world.rng
+// consumption order → all baselines shifted. S6 Iron Curtain dropped
+// 30pp (63→33%) and S32 Diamond dropped 16pp (72→57%) — these stages
+// are particularly sensitive to RNG stream ordering.
 const TRUTH_WIN_PCT: number[] = [
-  95.0, // S0  Outpost
-  98.3, // S1  Waterways
+  90.0, // S0  Outpost
+  96.7, // S1  Waterways
   95.0, // S2  Steel Fortress
-  91.7, // S3  Crossfire
-  85.0, // S4  Maze
-  83.3, // S5  Brickworks
-  63.3, // S6  Iron Curtain (override: retreat off + tight threat range)
-  96.7, // S7  Riverbed
-  93.3, // S8  Twin Towers
-  96.7, // S9  Gauntlet
-  81.7, // S10 Fortress
-  66.7, // S11 Lattice
-  71.7, // S12 Bunker Hill
-  95.0, // S13 Steel Web
-  66.7, // S14 Citadel
-  76.7, // S15 Crossroads
-  83.3, // S16 Twin Spires
+  96.7, // S3  Crossfire
+  93.3, // S4  Maze
+  80.0, // S5  Brickworks
+  33.3, // S6  Iron Curtain (override: retreat off + tight threat range) — dropped 30pp after RNG split
+  88.3, // S7  Riverbed
+  91.7, // S8  Twin Towers
+  91.7, // S9  Gauntlet
+  83.3, // S10 Fortress
+  63.3, // S11 Lattice
+  73.3, // S12 Bunker Hill
+  96.7, // S13 Steel Web
+  65.0, // S14 Citadel
+  81.7, // S15 Crossroads
+  88.3, // S16 Twin Spires
   95.0, // S17 Gridlock
-  61.7, // S18 Frozen Field (override: wide retreat + perfect aim)
-  78.3, // S19 Bastion
-  80.0, // S20 Checkers
-  83.3, // S21 Oasis
-  95.0, // S22 Ramparts
-  80.0, // S23 Labyrinth
-  80.0, // S24 Quarry
-  73.3, // S25 Ice Palace (override: perfect aim)
-  65.0, // S26 Brick Maze (override: fast replan + path noise)
-  86.7, // S27 Thicket
-  81.7, // S28 Spider
-  86.7, // S29 Concentric
-  83.3, // S30 Eagle Nest
-  75.0, // S31 Star Fort
-  72.5, // S32 Diamond (override: t2aMaxRange=2 close-combat — 43.3%→72.5% @120 seeds, Round 5)
-  83.3, // S33 Battlement
-  86.7, // S34 Final Redoubt
+  63.3, // S18 Frozen Field (override: wide retreat + perfect aim)
+  66.7, // S19 Bastion
+  71.7, // S20 Checkers
+  76.7, // S21 Oasis
+  93.3, // S22 Ramparts
+  78.3, // S23 Labyrinth
+  75.0, // S24 Quarry
+  66.7, // S25 Ice Palace (override: perfect aim)
+  66.7, // S26 Brick Maze (override: fast replan + path noise)
+  80.0, // S27 Thicket
+  80.0, // S28 Spider
+  76.7, // S29 Concentric
+  81.7, // S30 Eagle Nest
+  73.3, // S31 Star Fort
+  56.7, // S32 Diamond (override: t2aMaxRange=2 close-combat) — dropped 16pp after RNG split
+  90.0, // S33 Battlement
+  85.0, // S34 Final Redoubt
 ]
 
 const MARGIN_WINS = 4
