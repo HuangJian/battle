@@ -17,17 +17,16 @@ import { STAGES } from '../src/config/stages'
 // S1 regression during the P4 campaign. Never again — the gate now covers
 // every stage.
 //
-// Floors are derived from the P4 R7 truth-scale measurement
-// (35 stages × 60 seeds, classic, 18000 ticks, per-stage override table
-// active — see .workbuddy/optimization-p4-r7/ and
-// src/ai/godai-stage-overrides.ts):
-//   Mean win rate 81.9%; every stage >= 60% except S32 Diamond (52%),
-//   the known structural hard case (armor-heavy force on a fragmented
-//   steel+forest map; verified not param-tunable at 60 seeds).
+// Floors are derived from the 2026-07-30 truth-scale measurement taken
+// after the §47 base protection ring collision fix (35 stages × 60 seeds,
+// classic, 18000 ticks, per-stage override table active — see
+// src/ai/godai-stage-overrides.ts and DECISIONS.md §47):
+//   Mean win rate 87.7%; every stage >= 60%. S32 Diamond reached 90.0% @60
+//   (85.0% @120) once the ring collision exploit was fixed.
 //
 // Per-stage floor = round(truthWinRate * 20) - 4 wins of margin
 // (binomial sd at n=20, p=0.85 is ~1.6; 4 wins ≈ 2.5 sd).
-// Aggregate floor = 77% of 700 runs (truth 81.9%, ~3 sd margin).
+// Aggregate floor = 83% of 700 runs (truth 87.7%, ~3 sd margin).
 //
 // When params are intentionally re-tuned (a new CMA-ES round or a new
 // stage override), re-measure at 60 seeds via tools/validate-p4.ts and
@@ -39,50 +38,53 @@ import { STAGES } from '../src/config/stages'
 
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 
-// Truth win rates (%) from 35×60 validation, re-measured 2026-07-30
-// after God AI RNG split (DECISIONS §47) + S6 CMA-ES R8 re-tuning.
-// S6 went 33% -> 37% with new override strategy (enabled outnumbered
-// retreat + tighter threat + wider player range). S32 Diamond unchanged.
+// Truth win rates (%) from the 35×60 validation after the §47 base
+// protection ring collision fix (2026-07-30, mean 87.7%). Previous truths
+// (P4 R7, 2026-07-29, mean 81.9%) are obsolete because §47 changed
+// simulation-layer bullet/base collision semantics.
+// NOTE: These values are before the §49 God AI RNG split, which may
+// cause minor drift in win rates.
 const TRUTH_WIN_PCT: number[] = [
-  90.0, // S0  Outpost
+  98.3, // S0  Outpost
   96.7, // S1  Waterways
-  95.0, // S2  Steel Fortress
-  96.7, // S3  Crossfire
-  93.3, // S4  Maze
-  80.0, // S5  Brickworks
-  36.7, // S6  Iron Curtain (R8 override: enabled outnumbered retreat, tighter threat, wider player range)
-  88.3, // S7  Riverbed
-  91.7, // S8  Twin Towers
-  91.7, // S9  Gauntlet
-  83.3, // S10 Fortress
-  63.3, // S11 Lattice
-  73.3, // S12 Bunker Hill
+  98.3, // S2  Steel Fortress
+  93.3, // S3  Crossfire
+  95.0, // S4  Maze
+  90.0, // S5  Brickworks
+  68.3, // S6  Iron Curtain (override: retreat off + tight threat range)
+  91.7, // S7  Riverbed
+  95.0, // S8  Twin Towers
+  98.3, // S9  Gauntlet
+  86.7, // S10 Fortress
+  83.3, // S11 Lattice
+  86.7, // S12 Bunker Hill
   96.7, // S13 Steel Web
-  65.0, // S14 Citadel
-  81.7, // S15 Crossroads
-  88.3, // S16 Twin Spires
-  95.0, // S17 Gridlock
-  63.3, // S18 Frozen Field (override: wide retreat + perfect aim)
-  66.7, // S19 Bastion
-  71.7, // S20 Checkers
-  76.7, // S21 Oasis
-  93.3, // S22 Ramparts
-  78.3, // S23 Labyrinth
-  75.0, // S24 Quarry
-  66.7, // S25 Ice Palace (override: perfect aim)
+  80.0, // S14 Citadel
+  85.0, // S15 Crossroads
+  93.3, // S16 Twin Spires
+  98.3, // S17 Gridlock
+  71.7, // S18 Frozen Field (override: wide retreat + perfect aim)
+  85.0, // S19 Bastion
+  80.0, // S20 Checkers
+  90.0, // S21 Oasis
+  91.7, // S22 Ramparts
+  85.0, // S23 Labyrinth
+  85.0, // S24 Quarry
+  73.3, // S25 Ice Palace (override: perfect aim)
   66.7, // S26 Brick Maze (override: fast replan + path noise)
-  80.0, // S27 Thicket
-  80.0, // S28 Spider
-  76.7, // S29 Concentric
-  81.7, // S30 Eagle Nest
-  73.3, // S31 Star Fort
-  56.7, // S32 Diamond (override: t2aMaxRange=2 close-combat) — dropped 16pp after RNG split
-  90.0, // S33 Battlement
-  85.0, // S34 Final Redoubt
+  90.0, // S27 Thicket
+  86.7, // S28 Spider
+  85.0, // S29 Concentric
+  85.0, // S30 Eagle Nest
+  88.3, // S31 Star Fort
+  90.0, // S32 Diamond (override: t2aMaxRange=2 close-combat; §47 ring fix 72.5→85.0 @120, 90.0 @60)
+  88.3, // S33 Battlement
+  91.7, // S34 Final Redoubt
 ]
 
 const MARGIN_WINS = 4
-const AGGREGATE_FLOOR = Math.floor(0.77 * 35 * GATE_SEEDS.length) // 539/700
+// Truth mean 87.7% @60 seeds; binomial 3 sd at n=700 is ~3.7pp → 83% floor.
+const AGGREGATE_FLOOR = Math.floor(0.83 * 35 * GATE_SEEDS.length) // 581/700
 
 function stageFloor(idx: number): number {
   return Math.max(0, Math.round((TRUTH_WIN_PCT[idx] / 100) * GATE_SEEDS.length) - MARGIN_WINS)

@@ -206,14 +206,15 @@ export function runSimulation(opts: RunOptions): SimResult {
         tick,
         firstKillTick,
       }
-      // Fix Bug 5: Populate killerKind — walk back through events to find
-      // the last enemy bullet_fired before the base_destroyed event. That
-      // bullet's ownerKind is the tank kind that destroyed the base.
+      // Populate killerKind from the base_destroyed event. The Simulation
+      // records the actual bullet owner when the base collision resolves;
+      // using the last bullet_fired event would misattribute an unrelated
+      // shot fired before the killing bullet arrived.
       if (baseDestroyed) {
         for (let i = allEvents.length - 1; i >= 0; i--) {
           const e = allEvents[i]
-          if (e.type === 'bullet_fired' && !e.bullet.isPlayer) {
-            failure.killerKind = e.bullet.ownerKind
+          if (e.type === 'base_destroyed') {
+            failure.killerKind = e.by
             break
           }
         }

@@ -336,7 +336,7 @@ export type GameEvent =
   | { type: 'tank_destroyed'; tank: Tank; by: 'player' | 'enemy' | 'self' }
   | { type: 'bullet_fired'; bullet: Bullet }
   | { type: 'powerup_collected'; powerUp: PowerUpType; by: 'player' }
-  | { type: 'base_destroyed' }
+  | { type: 'base_destroyed'; by: TankKind }
   | { type: 'stage_clear'; stage: number }
   | { type: 'player_hit' }
   | { type: 'explosion'; x: number; y: number; kind: 'small' | 'big' }
