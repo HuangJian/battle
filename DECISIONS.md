@@ -1903,3 +1903,42 @@ the current heuristic already outperforms the "accurate" one.
 - **建议**：v7 作为 v5 的替代优化目标，适用于"需要连续梯度但不可牺牲胜率"的调参场景。暂不提为默认（未达"≥87%"硬门槛），但在有更长搜索预算时可重新评估。
 - 新增导出：`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`（`tools/godai-score.ts`）。`ScoreConfig` 接口新增 `lossBandMax`/`clearBandMin` 字段。
 
+## 54. S6 Iron Curtain 覆盖表移除 — 过时保守策略反噬 (2026-07-30)
+
+**Decision:** 从 `GOD_AI_STAGE_OVERRIDES` 中移除 S6 'Iron Curtain' 条目。该覆盖在 RNG split + §47 基地保护环 + v7 评估改造后已过时，全局默认参数在 S6 上已优于覆盖配置。
+
+**Rationale:**
+- S6 覆盖（R8 版本）的设计目标是"收紧活动半径 + 提前回防 + 早回撤"：`maxPlayerDistFromBase:16`（默认 26）、`outnumberedEnemyCount:2`（默认 3）、`defenseRowOffset:3`（默认 1）、`replanInterval:36`（默认 50）等。
+- 120-seed 探针证实覆盖**有害**：覆盖 59.2% < 裸默认 62.5%。失败模式分析揭示矛盾：覆盖的保守 leash 导致 base 破坏数**增加**（43 vs 30 per 120 seeds），直接违背其"保护基地"的设计目的。
+- 机制：收紧 leash → 中盘丢掉迷宫控制权 → 杀敌节奏变慢 → 侧翼压力和基地压力反而变大 → 既没清场也没守住。
+- 用户建议的最小覆盖 `{maxPlayerDistFromBase:28, t8MaxInterceptDistCells:10}` 在 60 seeds 上表现优异（75%），但 120 seeds 显示 `maxPlayerDistFromBase:28` 是双刃剑——窗口 1 有利（73.3%），窗口 2 有害（45.0%）。`t8MaxInterceptDistCells:10` 单独在 120 seeds 略优（63.3%），但与裸默认差距（0.8pp）在噪声范围内。
+- **结论**：stale override 必须**移除**而非 patch。全局默认在 S6 上已足够强。
+
+**Experiments (120 seeds, S6 Iron Curtain, classic):**
+
+| 配置 | win% | base | lives |
+|------|------|------|-------|
+| 当前覆盖（R8 保守） | 59.2% | 43 | 6 |
+| **裸默认（移除覆盖）** | **62.5%** | **30** | **15** |
+| min: dist28+t8=10 | 60.0% | 32 | 16 |
+| min: t8=10 only | 63.3% | 29 | 15 |
+| min: dist28 only | 59.2% | 33 | 15 |
+
+**35×60 eval-suite 对比（DEFAULT params, 移除 S6 覆盖前后）:**
+
+| 指标 | 旧（带 S6 覆盖） | 新（移除 S6 覆盖） | Δ |
+|------|-----------------|------------------|---|
+| Suite | 0.6878 | 0.7063 | +0.019 |
+| LCB | 0.6828 | 0.7020 | +0.019 |
+| 平均胜率 | 87% | 88% | +1pp |
+| S6 score | 0.488 | 0.609 | +0.121 |
+| S6 win% | 57% | 72% | +15pp |
+| 最弱关 | Iron Curtain (57%) | Frozen Field (63%) | S6 不再是短板 |
+
+**Implications:**
+- S6 覆盖表条目已从 `src/ai/godai-stage-overrides.ts` 中删除。
+- 回归门禁 `tests/god-ai-regression-gate.test.ts` 的 S6 truth 值更新为 72.0%，20-seed gate 实测 16/20（80%），远超 floor 10。
+- 进展文档 `docs/god-ai-tuning.progress.md` 的覆盖表更新为 4 条（移除 S6）。
+- **教训**：覆盖表是"数据而非代码"（MANIFEST §2.4），但数据会过时。RNG split、碰撞修复、评估改造等基线变动后，每个覆盖都需要重新 truth-scale 复核。否则优化器在"带着坏覆盖"的世界里调全局参数，永远无法发现"删掉覆盖更好"。
+- 用户建议的优先级 3（把 override 纳入"需要重新验证"的调校对象）记录为后续待办。
+

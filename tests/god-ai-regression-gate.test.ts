@@ -51,7 +51,7 @@ const TRUTH_WIN_PCT: number[] = [
   93.3, // S3  Crossfire
   95.0, // S4  Maze
   90.0, // S5  Brickworks
-  68.3, // S6  Iron Curtain (override: retreat off + tight threat range)
+  72.0, // S6  Iron Curtain (override REMOVED §54: stale conservative leash harmed S6)
   91.7, // S7  Riverbed
   95.0, // S8  Twin Towers
   98.3, // S9  Gauntlet

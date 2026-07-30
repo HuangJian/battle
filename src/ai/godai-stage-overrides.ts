@@ -7,16 +7,9 @@ import type { GodAIParams } from './GodAIInput'
  * set CANNOT satisfy all 35 classic stages — the failure families demand
  * opposite behaviors:
  *
- *   - S6 Iron Curtain (steel maze, flanking base-runs): wants the
- *     outnumbered-retreat OFF (count=5 disables it; retreating just cedes
- *     map control and the flankers race the base) and a tighter threat
- *     range so defense only triggers on real threats.
  *   - S18 Frozen Field (open ice, 8 armor tanks, 3-way crossfire): wants a
  *     WIDER outnumbered-retreat radius (fall back before the pincer closes)
  *     and perfect aim (armor tanks take 4 hits; wasted shots are lethal).
- *
- * Tuning one of these globally regresses the other (verified at 60 seeds:
- * radius=14 lifts S18 +15pp but costs S6 -30pp and S32 -30pp).
  *
  * This is data over code (MANIFEST §2.4): a human player also adapts
  * tactics per map. The table is keyed by stage NAME (stable across index
@@ -28,11 +21,23 @@ import type { GodAIParams } from './GodAIInput'
  * they were shown to select mirage gains that vanish on fresh seeds.
  *
  * Validated 2026-07-29 against R6 base params, 60 seeds each:
- *   S6  Iron Curtain: 57% -> 63%
  *   S18 Frozen Field: 52% -> 67%
  * Validated 2026-07-29 against R7 base params, 60 seeds each:
  *   S25 Ice Palace:   57% -> 73%
  *   S26 Brick Maze:   53% -> 65%
+ *
+ * S6 Iron Curtain override REMOVED (2026-07-30, DECISIONS.md §54):
+ * The R8 override (outnumberedEnemyCount:2, maxPlayerDistFromBase:16,
+ * defenseRowOffset:3, ...) was designed for a pre-RNG-split baseline.
+ * After §47 (base protection ring) + RNG split + v7 evaluation changes,
+ * the global default params became strong enough that the override's
+ * conservative leash (maxPlayerDistFromBase:16 vs default 26) actively
+ * harmed S6: it restricted mid-game map control, slowed kill tempo, and
+ * paradoxically INCREASED base destructions (43 vs 30 per 120 seeds).
+ * 120-seed probe: override 59.2% < naked default 62.5%. Minimal overrides
+ * tested (maxPlayerDistFromBase:28, t8MaxInterceptDistCells:10) showed
+ * no significant improvement over naked default at 120 seeds (60.0% vs
+ * 62.5%). Conclusion: stale overrides must be removed, not patched.
  *
  * Known hard case (NOT override-tunable, verified at 60 seeds against both
  * R6 and R7 bases): S32 Diamond (~52%). Armor-heavy force (8 armor / 8
@@ -41,26 +46,6 @@ import type { GodAIParams } from './GodAIInput'
  * structural fix (maze-aware navigation or an armor-stage base guard).
  */
 export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
-  'Iron Curtain': {
-    // CMA-ES R8 (2026-07-30): RNG split shifted baselines 30pp.
-    // New strategy: ENABLE outnumbered retreat with small radius (2) so
-    // the player falls back early in the steel maze instead of fighting
-    // through pincers. Tighter threat range (10) + wider player range (16)
-    // + aggressive hunting (6) + wider intercept (9) + less frequent
-    // replanning (36) + wider powerup search (18).
-    // Validated @60 seeds: 33% -> 37% (+3.4pp).
-    outnumberedEnemyCount: 2,
-    outnumberedRadiusCells: 8,
-    threatRangeCells: 10,
-    defenseRowOffset: 3,
-    maxPlayerDistFromBase: 16,
-    baseRaceRangeCells: 8,
-    baseRaceMarginCells: 3,
-    t8MaxInterceptDistCells: 9,
-    replanInterval: 36,
-    powerupMaxDivertDistance: 18,
-    huntAllyCount: 6,
-  },
   'Frozen Field': {
     // Wider retreat radius: fall back before the 3-way pincer closes on
     // the open ice field (deaths cluster at rows 5-10, the corridor band
