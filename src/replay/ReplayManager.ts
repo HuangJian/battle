@@ -79,6 +79,7 @@ export class ReplayManager {
     frames: Uint8Array,
     tickCount: number,
     metadata: ReplayMetadata,
+    seed = 0,
   ): Replay {
     const policy = REPLAY_RETENTION_POLICIES[type]
 
@@ -99,6 +100,7 @@ export class ReplayManager {
       createdAt: this.now(),
       gameVersion: GAME_VERSION,
       schemaVersion: FRAME_SCHEMA_VERSION,
+      seed,
       initialSnapshot,
       frames,
       totalTicks: safeTicks,

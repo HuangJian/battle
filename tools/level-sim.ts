@@ -78,6 +78,7 @@ for (let i = 0; i < size; i++) {
     seed: gameSeed,
     stage,
     difficulty,
+    stageIndex: stageIdx,
     maxTicks,
     sampleInterval: 6, // sample every 100ms for compact output
     record: saveReplays,

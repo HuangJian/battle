@@ -143,6 +143,9 @@ export class World {
   menuCursor: number
   selectedStage: number
   rng: RNG
+  /** Initial RNG seed (Date.now() at construction). Surfaces as the replay
+   *  filename seed so browser recordings are reproducible / round-trippable. */
+  seed: number
 
   // Events (consumed by renderer/audio/stats)
   events: GameEvent[]
@@ -282,7 +285,8 @@ export class World {
     this.selectedStage = 0
     // Show the selected stage's layout behind the start menu from the outset.
     this.previewStage(this.selectedStage)
-    this.rng = new RNG(Date.now())
+    this.seed = Date.now()
+    this.rng = new RNG(this.seed)
     this.events = []
     this.frame = 0
     this.bulletSeq = 0

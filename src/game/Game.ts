@@ -1207,6 +1207,7 @@ export class Game {
       result.frames,
       result.tickCount,
       metadata,
+      w.seed,
     )
     this.replays.enqueueThumbnail(replay.id)
   }
@@ -1469,6 +1470,7 @@ export class Game {
         if (!replay) return
         const envelope = serializeReplayFile({
           source: 'browser',
+          seed: replay.seed,
           initialSnapshot: replay.initialSnapshot,
           frames: replay.frames,
           totalTicks: replay.totalTicks,
@@ -1480,7 +1482,7 @@ export class Game {
           status: replay.type,
           lives: replay.metadata.lives,
           totalTicks: replay.totalTicks,
-          seed: 0,
+          seed: replay.seed,
         })
         const blob = new Blob([envelope], { type: 'application/json' })
         const url = URL.createObjectURL(blob)

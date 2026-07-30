@@ -93,6 +93,14 @@ export interface RunOptions {
   seed: number
   stage: StageData
   difficulty: string
+  /**
+   * 0-based index of the stage being simulated. Recorded into the World via
+   * loadStageData so the resulting snapshot (and any replay) carries the real
+   * stage number. Without this the World defaults to stage 0, which makes
+   * imported replays display "STAGE 01" even though they were recorded on a
+   * later stage (bug: import 的 S32 replay 播放时显示 STAGE 01).
+   */
+  stageIndex?: number
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
   /** Max ticks before stopping (default: MAX_TICKS). */
@@ -151,7 +159,9 @@ export function runSimulation(opts: RunOptions): SimResult {
   const sim = new Simulation(world, input)
 
   // Load the stage (this also spawns the player and sets state to 'playing').
-  world.loadStageData(stage, 0)
+  // Pass the real stage index so the World's stageIndex (and therefore the
+  // recorded snapshot / replay) reflects the actual stage being simulated.
+  world.loadStageData(stage, opts.stageIndex ?? 0)
 
   // Reset the input to pick up the new World state.
   input.reset()

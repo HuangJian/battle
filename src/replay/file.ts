@@ -39,6 +39,7 @@ interface ReplayEnvelope {
   framesBase64: string
   totalTicks: number
   metadata: ReplayMetadata
+  seed: number
 }
 
 interface FileEnvelope {
@@ -97,6 +98,8 @@ const fromBase64: (b64: string) => Uint8Array =
 
 export interface SerializeInput {
   source: 'sim' | 'browser'
+  /** RNG seed of the run — surfaces in the .replay filename / round-trips. */
+  seed: number
   /** Simulation metadata (only for source === 'sim'). */
   sim?: {
     seed: number
@@ -133,6 +136,7 @@ export function serializeReplayFile(input: SerializeInput): string {
       framesBase64: toBase64(input.frames),
       totalTicks: input.totalTicks,
       metadata: input.metadata,
+      seed: input.seed,
     },
   }
 
@@ -219,6 +223,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     createdAt: Date.now(),
     gameVersion: (env.gameVersion as string) ?? GAME_VERSION,
     schemaVersion: FRAME_SCHEMA_VERSION,
+    seed: (replay.seed as number) ?? (env.sim as SimEnvelope | undefined)?.seed ?? 0,
     initialSnapshot: replay.initialSnapshot as WorldSnapshot,
     frames,
     totalTicks: replay.totalTicks as number,
@@ -237,6 +242,16 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     thumbnail: null,
     isFavorite: false,
     favoriteAt: null,
+  }
+
+  // Reconcile the snapshot's stage index with the authoritative metadata.
+  // Sim-generated replays historically recorded the stage via
+  // loadStageData(stage, 0), leaving initialSnapshot.stageIndex === 0 even
+  // though metadata.stage is correct. Without this, playback restores
+  // stageIndex 0 and the HUD shows "STAGE 01" for a later stage (bug: import
+  // 的 S32 replay 播放时显示 STAGE 01). metadata.stage is the source of truth.
+  if (built.initialSnapshot && built.initialSnapshot.stageIndex !== built.metadata.stage) {
+    built.initialSnapshot.stageIndex = built.metadata.stage
   }
 
   return { replay: built, envelope: env as unknown as FileEnvelope }

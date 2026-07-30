@@ -51,6 +51,7 @@ export async function writeReplayFile(opts: WriteReplayOptions): Promise<string 
 
   const text = serializeReplayFile({
     source: 'sim',
+    seed: result.seed,
     sim: {
       seed: result.seed,
       difficulty: result.difficulty,

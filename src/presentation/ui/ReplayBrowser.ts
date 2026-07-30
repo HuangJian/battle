@@ -305,7 +305,6 @@ export class ReplayBrowser {
   private buildEntry(replay: Replay): HTMLElement {
     const m = replay.metadata
     const entry = document.createElement('div')
-    const isTransient = replay.transient
     entry.className = 'snap-entry'
     entry.dataset.type = replay.type
 
@@ -400,7 +399,9 @@ export class ReplayBrowser {
     actions.appendChild(playBtn)
 
     // Export button (download .replay file) — right after PLAY
-    if (this.callbacks?.onExport && !isTransient) {
+    // Imported replays (transient) are also exportable: they live in the
+    // same store and serialize identically to native recordings.
+    if (this.callbacks?.onExport) {
       const exportBtn = document.createElement('button')
       exportBtn.type = 'button'
       exportBtn.className = 'controls-btn snap-export'

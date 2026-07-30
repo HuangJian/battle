@@ -25,6 +25,7 @@ function makeMinimalReplay(world: World, tickCount = 300): Replay {
     createdAt: Date.now(),
     gameVersion: '0.1.0',
     schemaVersion: 1,
+    seed: 0,
     initialSnapshot: snapshot,
     frames,
     totalTicks: tickCount,

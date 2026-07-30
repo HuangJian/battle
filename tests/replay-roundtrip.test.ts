@@ -66,6 +66,7 @@ function replayFromSerialized(original: any, maxTicks: number) {
   // Serialize then parse (full file pipeline)
   const text = serializeReplayFile({
     source: 'sim',
+    seed: original.seed,
     sim: {
       seed: original.seed,
       difficulty: original.difficulty,

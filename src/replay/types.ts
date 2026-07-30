@@ -65,6 +65,11 @@ export interface Replay {
   /** Packed-frame format version (for future format changes). */
   schemaVersion: number
 
+  /** RNG seed of the run (surfaces in the .replay filename / round-trips).
+   *  Browser recordings use the World's Date.now() seed; sim recordings carry
+   *  the --seed value. 0 only when genuinely unknown. */
+  seed: number
+
   /** The starting WorldSnapshot (stage-start or loaded-save). */
   initialSnapshot: WorldSnapshot
 

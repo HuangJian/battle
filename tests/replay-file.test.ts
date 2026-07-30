@@ -50,6 +50,7 @@ describe('Replay file format round-trip', () => {
     const frames = packFrames(SAMPLE_FRAMES)
     const text = serializeReplayFile({
       source: 'sim',
+      seed: 42,
       sim: {
         seed: 42,
         difficulty: 'classic',
@@ -110,6 +111,8 @@ describe('Replay file format round-trip', () => {
     // Thumbnail null in headless
     expect(replay.thumbnail).toBeNull()
     expect(replay.isFavorite).toBe(false)
+    // Seed round-trips (carried in the replay envelope, not just sim)
+    expect(replay.seed).toBe(42)
   })
 
   it('serializes and parses a browser-source replay', () => {
@@ -117,6 +120,7 @@ describe('Replay file format round-trip', () => {
     const frames = packFrames(SAMPLE_FRAMES)
     const text = serializeReplayFile({
       source: 'browser',
+      seed: 12345,
       initialSnapshot: snapshot,
       frames,
       totalTicks: 3,
@@ -138,6 +142,52 @@ describe('Replay file format round-trip', () => {
     if ('error' in result) throw new Error(`Parse failed: ${result.error}`)
     expect((result as any).envelope.source).toBe('browser')
     expect((result as any).envelope.sim).toBeUndefined()
+    // Browser-source seed still round-trips via the replay envelope
+    expect((result as any).replay.seed).toBe(12345)
+  })
+
+  it('reconciles initialSnapshot.stageIndex with metadata.stage (S32 bug)', () => {
+    // Regression: sim-generated replays recorded the stage via
+    // loadStageData(stage, 0), so the snapshot carried stageIndex 0 even
+    // though metadata.stage was correct (e.g. 31 = S32). On playback the
+    // world was restored with stageIndex 0 and the HUD showed "STAGE 01".
+    const snapshot = makeMinimalSnapshot() // stageIndex: 0
+    const frames = packFrames(SAMPLE_FRAMES)
+    const text = serializeReplayFile({
+      source: 'sim',
+      seed: 2483393699,
+      sim: {
+        seed: 2483393699,
+        difficulty: 'classic',
+        stageIndex: 31,
+        stageName: 'Diamond',
+        outcome: 'stage_clear',
+        status: 'clear',
+        maxTicks: 36000,
+      },
+      initialSnapshot: snapshot,
+      frames,
+      totalTicks: 3,
+      metadata: {
+        stage: 31,
+        stageName: 'Diamond',
+        difficulty: 'classic',
+        lives: 3,
+        playerLevel: 1,
+        score: 5400,
+        killCount: 15,
+        enemiesTotal: 20,
+        playTimeMs: 160,
+      },
+    })
+
+    const result = parseReplayFile(text)
+    if ('error' in result) throw new Error(`Parse failed: ${result.error}`)
+    const { replay } = result as { replay: any }
+
+    // The snapshot's stale stageIndex must be corrected to match metadata.
+    expect(replay.initialSnapshot.stageIndex).toBe(31)
+    expect(replay.metadata.stage).toBe(31)
   })
 })
 
