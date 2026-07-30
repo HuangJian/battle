@@ -3,6 +3,7 @@ import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
 import { SnapshotManager } from '../snapshot/SnapshotManager'
 import { createDefaultStorage } from '../snapshot/storage'
+import { restoreWorld, cloneWorld } from '../snapshot/WorldSerializer'
 import {
   RecoveryController,
   RECOVERY_OPTIONS,
@@ -22,6 +23,7 @@ import { ReplayManager } from '../replay/ReplayManager'
 import { PlaybackController } from '../replay/PlaybackController'
 import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { createReplayStorage } from '../replay/storage'
+import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { serializeReplayFile, buildReplayFilename } from '../replay/file'
@@ -1339,6 +1341,51 @@ export class Game {
   }
 
   /**
+   * Render an imported replay's final frame to a thumbnail data URL so it
+   * shows a battlefield preview in the Replay Browser (native recordings
+   * already capture one at game-over). Drives the LIVE simulation to the end
+   * on a throwaway input, captures the canvas, then restores the live world
+   * exactly (cloneWorld/restoreWorld clear transient events and re-derive the
+   * difficulty/theme profile). The intermediate canvas paint is never shown
+   * because all of this runs inside one task and we re-render the restored
+   * world before returning.
+   */
+  private renderImportedReplayThumbnail(replay: Replay): string | null {
+    if (!replay.frames || replay.frames.length === 0) return null
+    // Save the live world + input + state so we can hand the stage back.
+    const savedSnap = cloneWorld(this.world)
+    const savedInput = this.simulation.input
+    const savedState = this.world.state
+
+    let thumb: string | null = null
+    try {
+      // Restore the replay's starting world and swap to its recorded input.
+      restoreWorld(this.world, replay.initialSnapshot)
+      const input = new ReplayInput(replay.frames)
+      this.simulation.input = input
+      this.world.state = 'playing'
+      // Fast-forward to the final frame (no rendering during the loop).
+      while (!input.isFinished) {
+        this.simulation.tick()
+        input.advance()
+      }
+      // Paint the final frame and capture it as a thumbnail data URL.
+      this.presentation.render(this.world, 0)
+      thumb = this.presentation.captureThumbnail()
+    } catch (err) {
+      console.warn('[replay] thumbnail render failed:', err)
+    } finally {
+      // Hand the stage back to the live game, exactly as we found it.
+      restoreWorld(this.world, savedSnap)
+      this.simulation.input = savedInput
+      this.world.state = savedState
+      // Repaint the restored world so the canvas never holds the replay frame.
+      this.presentation.render(this.world, 0)
+    }
+    return thumb
+  }
+
+  /**
    * Stop playback, restore real Input, clean up.
    */
   stopPlayback(): void {
@@ -1461,6 +1508,16 @@ export class Game {
       getStorageBytes: () => Promise.resolve(this.replays.estimateBytes()),
       onImport: (replay) => {
         this.replays.addReplay(replay)
+        // Imported replays carry no captured thumbnail (the browser only
+        // snapshots native recordings at game-over). Render the replay's
+        // final frame so the Replay Browser shows a battlefield preview.
+        if (!replay.thumbnail) {
+          const thumb = this.renderImportedReplayThumbnail(replay)
+          if (thumb) {
+            replay.thumbnail = thumb
+            this.replays.persist(replay)
+          }
+        }
         ui.notify(
           `Imported: Stage ${String(replay.metadata.stage + 1).padStart(2, '0')} — ${replay.metadata.stageName}`,
         )
