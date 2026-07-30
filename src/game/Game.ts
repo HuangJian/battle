@@ -1,4 +1,5 @@
 import { World } from './World'
+import { RNG } from '../utils/RNG'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
 import { SnapshotManager } from '../snapshot/SnapshotManager'
@@ -22,6 +23,8 @@ import { InputRecorder } from '../replay/InputRecorder'
 import { ReplayManager } from '../replay/ReplayManager'
 import { PlaybackController } from '../replay/PlaybackController'
 import type { PlaybackSpeed } from '../replay/PlaybackController'
+import { GodAIInput } from '../ai/GodAIInput'
+import { AutoFireInput } from './AutoFireInput'
 import { createReplayStorage } from '../replay/storage'
 import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
@@ -97,6 +100,12 @@ export class Game {
   /** The last manually-saved snapshot, if any — offered as the default RESUME on the start screen. */
   private resumeSnapshot: GameSnapshot | null = null
 
+  // ---- Lie-Back-Win-Mode (coop) ----
+  /** God AI input for player2 — created on demand when coop is toggled. */
+  private godInput: GodAIInput | null = null
+  /** Auto-fire wrapper around the human input — re-armed each stage. */
+  private autoFireInput: AutoFireInput | null = null
+
   /** Rolling FPS (updated once per second) — cheap regression signal. */
   fps = 0
   private _frameCount = 0
@@ -164,6 +173,56 @@ export class Game {
     this.world.theme = THEMES[this.world.themeKey]
   }
 
+  // ---- Lie-Back-Win-Mode: coop toggle ----
+
+  /**
+   * Toggle coop mode on/off. Available from both menu and paused states.
+   * When enabled: spawns God AI as player2 with initial difficulty stats.
+   * When disabled: removes God AI (no life donation per Q5).
+   */
+  requestCoopToggle(): void {
+    const w = this.world
+    if (w.state !== 'menu' && w.state !== 'paused') return
+
+    if (w.coop) {
+      // Disable coop: World mutation deferred to Simulation (One-Author).
+      this.simulation.requestCoopToggle(false)
+      // Apply immediately since we are paused/menu (no tick will fire).
+      w.coop = false
+      w.player2 = null
+      w.lives2 = 0
+      w.playerLevel2 = 0
+      // Wire AI inputs
+      this.godInput = null
+      this.simulation.input2 = null
+      this.autoFireInput = null
+      this.simulation.input = this.input
+      this.presentation.ui.notify('Co-op: OFF', 'info')
+    } else {
+      // Enable coop: World mutation deferred to Simulation (One-Author).
+      this.simulation.requestCoopToggle(true)
+      // Apply immediately since we are paused/menu (no tick will fire).
+      w.coop = true
+      const d = w.difficulty
+      w.lives2 = d?.startLives ?? 3
+      w.playerLevel2 = d?.playerStartLevel ?? 0
+      const p1Col = w.playerSpawnPoint?.col ?? 8
+      w.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+      w.spawnPlayer2()
+      // Wire AI inputs
+      const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+      this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
+      this.simulation.input2 = this.godInput
+      this.autoFireInput = new AutoFireInput(this.input)
+      this.simulation.input = this.autoFireInput
+      this.presentation.ui.notify('Co-op: ON — God Player activated!', 'info')
+      this.audio.player2Id = w.player2?.id ?? null
+    }
+    this.presentation.ui.controlCenter.setCoopState(w.coop)
+    this.presentation.updateUI(w)
+    this.presentation.markNeedsRender()
+  }
+
   /** Wire the Snapshot Browser + Control Center callbacks into the framework. */
   private wireSnapshotUI(): void {
     const ui = this.presentation.ui
@@ -200,6 +259,7 @@ export class Game {
       onTogglePerf: () => ui.togglePerfOverlay(),
       onToggleFullscreen: () => this.presentation.toggleFullscreen(),
       onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
+      onToggleCoop: () => this.requestCoopToggle(),
       onOpenControls: () => {
         if (this.world.state === 'menu') {
           ui.openControls()
@@ -483,7 +543,7 @@ export class Game {
         ) {
           this.simulation.tick()
           // Record THIS tick's input (one frame per tick)
-          this.recorder.recordFrame(this.input)
+          this.recorder.recordFrame(this.input, this.godInput)
 
           // Detect stage change → Stage Start snapshot (plan §3, §10)
           if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
@@ -492,6 +552,8 @@ export class Game {
             this.prevStageIndex = this.world.stageIndex
             // Start a new recording session for the new stage
             this.recorder.startNew(this.world)
+            // Lie-Back-Win-Mode §3.4: re-arm auto-fire each stage.
+            if (this.autoFireInput) this.autoFireInput.reset()
           }
 
           // Detect stage clear → save victory replay
@@ -557,6 +619,27 @@ export class Game {
         // quiet so it doesn't overwrite this session / snapshot a mid-stage
         // world as 'stage-start'.
         this.prevStageIndex = this.world.stageIndex
+        // Lie-Back-Win-Mode: if the restored snapshot has coop enabled but
+        // godInput was cleared (e.g. loaded a coop snapshot from browser while
+        // coop was off), re-create the God AI input for player2.
+        if (this.world.coop && !this.godInput && this.world.player2) {
+          const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
+          this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
+          this.simulation.input2 = this.godInput
+          // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
+          this.autoFireInput = new AutoFireInput(this.input)
+          this.simulation.input = this.autoFireInput
+          this.audio.player2Id = this.world.player2?.id ?? null
+          this.presentation.ui.controlCenter.setCoopState(true)
+        } else if (!this.world.coop) {
+          // Snapshot restored without coop — ensure input2 is cleared.
+          this.godInput = null
+          this.autoFireInput = null
+          this.simulation.input = this.input
+          this.simulation.input2 = null
+          this.audio.player2Id = null
+          this.presentation.ui.controlCenter.setCoopState(false)
+        }
       }
 
       // Countdown beeps — play a tone each time the number changes
@@ -649,6 +732,8 @@ export class Game {
 
     // Clear per-frame input state
     this.input.endFrame()
+    // Lie-Back-Win-Mode: invalidate God AI per-tick caches.
+    this.godInput?.endFrame()
 
     // --- Performance sampler (regression guard, allocation-free) ---
     this._frameCount++
@@ -1111,6 +1196,19 @@ export class Game {
     this.world.spawnQueue = []
     this.world.recoveryCountdown = 0
     this.world.recoveryFading = false
+    // Lie-Back-Win-Mode: clean up coop state on return to menu.
+    this.world.coop = false
+    this.world.player2 = null
+    this.world.lives2 = 0
+    this.world.playerLevel2 = 0
+    this.world.score2 = 0
+    this.godInput = null
+    this.autoFireInput = null
+    this.simulation.clearPendingCoopToggle()
+    this.simulation.input = this.input
+    this.simulation.input2 = null
+    this.audio.player2Id = null
+    this.presentation.ui.controlCenter.setCoopState(false)
     this.recovery.reset()
     this.stopPlayback()
     this.recorder.reset()
@@ -1206,6 +1304,7 @@ export class Game {
       killCount: w.killCount,
       enemiesTotal: w.enemiesSpawned,
       playTimeMs: w.playTimeMs,
+      coop: w.coop,
     }
     const replay = this.replays.create(
       type,
@@ -1214,6 +1313,7 @@ export class Game {
       result.tickCount,
       metadata,
       w.seed,
+      result.frames2,
     )
     this.replays.enqueueThumbnail(replay.id)
   }
@@ -1245,6 +1345,10 @@ export class Game {
     this.presentation.ui.replayBrowser.close()
     this.playback = new PlaybackController(replay)
     this.playback.start(this.world, this.simulation)
+    // Lie-Back-Win-Mode: attenuate God (player2) shots in coop replays.
+    // playback.start() restored the world from the replay snapshot, so
+    // world.player2.id is now the replay's God tank id.
+    this.audio.player2Id = this.world.player2?.id ?? null
     // Replay playback is a sound-producing action, but unlike live gameplay
     // its entry points (clicking Play / Replay-Again in the browser) never
     // go through the menu handlers that call audio.init()/resume(). If the
@@ -1276,7 +1380,11 @@ export class Game {
       onPlayPause: () => {
         if (!this.playback) return
         this.playback.togglePause()
-        this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+        this.presentation.ui.setReplayMode(
+          true,
+          this.playback.isPaused,
+          this.playback.replay?.metadata.difficulty,
+        )
       },
       onSeek: (progress: number) => {
         if (!this.playback) return
@@ -1369,6 +1477,7 @@ export class Game {
     // Save the live world + input + state so we can hand the stage back.
     const savedSnap = cloneWorld(this.world)
     const savedInput = this.simulation.input
+    const savedInput2 = this.simulation.input2
     const savedState = this.world.state
 
     let thumb: string | null = null
@@ -1377,6 +1486,8 @@ export class Game {
       restoreWorld(this.world, replay.initialSnapshot)
       const input = new ReplayInput(replay.frames)
       this.simulation.input = input
+      // Lie-Back-Win-Mode: wire replay input2 for coop replays.
+      this.simulation.input2 = input.input2 ?? null
       this.world.state = 'playing'
       // Fast-forward to the final frame (no rendering during the loop).
       while (!input.isFinished) {
@@ -1392,6 +1503,7 @@ export class Game {
       // Hand the stage back to the live game, exactly as we found it.
       restoreWorld(this.world, savedSnap)
       this.simulation.input = savedInput
+      this.simulation.input2 = savedInput2
       this.world.state = savedState
       // Repaint the restored world so the canvas never holds the replay frame.
       this.presentation.render(this.world, 0)
@@ -1406,6 +1518,8 @@ export class Game {
     if (!this.playback) return
     this.playback.exit(this.simulation, this.input)
     this.playback = null
+    // Clear replay-sourced audio attenuation (no God tank outside playback).
+    this.audio.player2Id = null
     // Hide the persistent REPLAY badge from the HUD
     this.presentation.ui.setReplayMode(false)
     // Remove canvas listeners
@@ -1476,14 +1590,22 @@ export class Game {
   private onReplayCanvasClick = (): void => {
     if (!this.playback) return
     this.playback.togglePause()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+    this.presentation.ui.setReplayMode(
+      true,
+      this.playback.isPaused,
+      this.playback.replay?.metadata.difficulty,
+    )
   }
 
   /** Canvas mousemove during replay → show controller and reset auto-hide. */
   private onReplayCanvasMouseMove = (): void => {
     if (!this.playback || this.playback.isEnded) return
     this.presentation.ui.replayController.show()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+    this.presentation.ui.setReplayMode(
+      true,
+      this.playback.isPaused,
+      this.playback.replay?.metadata.difficulty,
+    )
   }
 
   private setPlaybackSpeed(speed: PlaybackSpeed): void {

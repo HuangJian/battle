@@ -44,7 +44,11 @@ export class UIManager {
   canvas: HTMLCanvasElement
   private hudBar: HTMLElement
   private hudScore: HTMLElement
+  private hudScore2: HTMLElement | null = null
+  private hudScore2Wrap: HTMLElement | null = null
   private hudLives: HTMLElement
+  private hudLives2: HTMLElement | null = null
+  private hudCoopLives: HTMLElement | null = null
   private hudStage: HTMLElement
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
@@ -144,6 +148,8 @@ export class UIManager {
   private lastStage = -1
   private lastEnemies = -1
   private lastLives = -1
+  private lastLives2 = -1
+  private lastScore2 = -1
   private lastStar = -1
   // Super power-up inventory counters (DECISIONS.md §31)
   private hudGuard: HTMLElement
@@ -182,6 +188,10 @@ export class UIManager {
         <div class="hud-item">
           <span class="hud-label">SCORE</span>
           <span class="hud-value" data-hud="score">000000</span>
+        </div>
+        <div class="hud-item" data-hud="score2-wrap" style="display:none">
+          <span class="hud-label" style="color:#f0c040">GOD</span>
+          <span class="hud-value" data-hud="score2" style="color:#f0c040">000000</span>
         </div>
         <div class="hud-item">
           <span class="hud-label">HI</span>
@@ -223,6 +233,10 @@ export class UIManager {
         <div class="hud-item">
           <span class="hud-label">LIVES</span>
           <span class="hud-value hud-lives" data-hud="lives">♥♥♥</span>
+        </div>
+        <div class="hud-item" data-hud="coop-lives" style="display:none">
+          <span class="hud-label">GOD</span>
+          <span class="hud-value hud-lives" data-hud="lives2" style="color:#f0c040">—</span>
         </div>
         <div class="hud-item">
           <span class="hud-label">ENEMY</span>
@@ -353,7 +367,11 @@ export class UIManager {
 
     // Cache elements
     this.hudScore = this.hudBar.querySelector('[data-hud="score"]')!
+    this.hudScore2 = this.hudBar.querySelector('[data-hud="score2"]')
+    this.hudScore2Wrap = this.hudBar.querySelector('[data-hud="score2-wrap"]')
     this.hudLives = this.hudBar.querySelector('[data-hud="lives"]')!
+    this.hudLives2 = this.hudBar.querySelector('[data-hud="lives2"]')
+    this.hudCoopLives = this.hudBar.querySelector('[data-hud="coop-lives"]')
     this.hudStage = this.hudBar.querySelector('[data-hud="stage"]')!
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
@@ -708,6 +726,24 @@ export class UIManager {
       const hearts = '♥'.repeat(Math.max(0, world.lives))
       this.hudLives.textContent = hearts || '—'
       this.lastLives = world.lives
+    }
+    // Co-op God score (Lie-Back-Win-Mode Q1)
+    if (this.hudScore2Wrap && this.hudScore2) {
+      const showScore2 = world.coop
+      this.hudScore2Wrap.style.display = showScore2 ? '' : 'none'
+      if (showScore2 && world.score2 !== this.lastScore2) {
+        this.hudScore2.textContent = String(world.score2).padStart(6, '0')
+        this.lastScore2 = world.score2
+      }
+    }
+    // Co-op God lives (Lie-Back-Win-Mode)
+    if (this.hudCoopLives && this.hudLives2) {
+      const showCoop = world.coop && world.lives2 > 0
+      this.hudCoopLives.style.display = showCoop ? '' : 'none'
+      if (showCoop && world.lives2 !== this.lastLives2) {
+        this.hudLives2.textContent = '♥'.repeat(Math.max(0, world.lives2))
+        this.lastLives2 = world.lives2
+      }
     }
 
     // Player star level (★ power-up). Show only filled stars; no empty

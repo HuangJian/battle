@@ -65,6 +65,13 @@ export function cloneWorld(world: World): WorldSnapshot {
     score: world.score,
     lives: world.lives,
     playerLevel: world.playerLevel,
+    // Lie-Back-Win-Mode: coop state
+    coop: world.coop,
+    player2: world.player2 ? cloneTank(world.player2) : null,
+    lives2: world.lives2,
+    playerLevel2: world.playerLevel2,
+    score2: world.score2,
+    player2SpawnPoint: world.player2SpawnPoint ? { ...world.player2SpawnPoint } : undefined,
     highScore: world.highScore,
     killCount: world.killCount,
     playTimeMs: world.playTimeMs,
@@ -90,11 +97,6 @@ export function cloneWorld(world: World): WorldSnapshot {
     guardStock: world.guardStock,
     frenzyStock: world.frenzyStock,
     sacrificeStock: world.sacrificeStock,
-    frenzyTimer: world.frenzyTimer,
-    frenzyShotsLeft: world.frenzyShotsLeft,
-    frenzyLastFire: world.frenzyLastFire,
-    frenzyInterval: world.frenzyInterval,
-    frenzyDir: world.frenzyDir,
     fenceExpireFrame: world.fenceExpireFrame,
     // New power-ups (new-powerups-plan.md)
     empTimer: world.empTimer,
@@ -158,6 +160,13 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.score = snap.score
   world.lives = snap.lives
   world.playerLevel = snap.playerLevel
+  // Lie-Back-Win-Mode: restore coop state (backward compat: default to off)
+  world.coop = snap.coop ?? false
+  world.player2 = snap.player2 ? cloneTank(snap.player2) : null
+  world.lives2 = snap.lives2 ?? 0
+  world.playerLevel2 = snap.playerLevel2 ?? 0
+  world.score2 = snap.score2 ?? 0
+  world.player2SpawnPoint = snap.player2SpawnPoint ?? { col: 16, row: 24 }
   world.highScore = snap.highScore
   world.killCount = snap.killCount ?? 0
   world.playTimeMs = snap.playTimeMs ?? 0
@@ -203,11 +212,6 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.guardStock = snap.guardStock ?? 0
   world.frenzyStock = snap.frenzyStock ?? 0
   world.sacrificeStock = snap.sacrificeStock ?? 0
-  world.frenzyTimer = snap.frenzyTimer ?? 0
-  world.frenzyShotsLeft = snap.frenzyShotsLeft ?? 0
-  world.frenzyLastFire = snap.frenzyLastFire ?? 0
-  world.frenzyInterval = snap.frenzyInterval ?? 0
-  world.frenzyDir = snap.frenzyDir ?? 'up'
   world.fenceExpireFrame = snap.fenceExpireFrame
 
   // New power-ups (new-powerups-plan.md)

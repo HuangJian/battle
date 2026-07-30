@@ -585,7 +585,12 @@ export class GameRenderer {
         // 天降神兵 allied guard — distinct purple unit (no enemy crown/insignia).
         artist.drawAllyTank(tank.x, tank.y, tank.w, tank.dir, animFrame)
       } else if (tank.isPlayer) {
-        artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
+        // Lie-Back-Win-Mode: use player2 sprite for God AI tank.
+        if (tank === world.player2) {
+          artist.drawPlayer2Tank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
+        } else {
+          artist.drawPlayerTank(tank.x, tank.y, tank.w, tank.dir, tank.level ?? 0, animFrame)
+        }
       } else {
         const isCommander = tank.aiState?.isCommander === true
         artist.drawEnemyTank(

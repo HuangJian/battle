@@ -102,7 +102,9 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
   const v = DIR_VECTORS[dir]
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
+  // Lie-Back-Win-Mode §3.8 P3: detect both players in line of fire.
   const player = world.player
+  const player2 = world.coop ? world.player2 : null
   for (let d = CELL; d <= maxDist; d += CELL) {
     const cx = sx + v.dx * d
     const cy = sy + v.dy * d
@@ -119,6 +121,13 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
       player &&
       player.alive &&
       aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)
+    ) {
+      return 'player'
+    }
+    if (
+      player2 &&
+      player2.alive &&
+      aabb(cx - 1, cy - 1, 2, 2, player2.x, player2.y, player2.w, player2.h)
     ) {
       return 'player'
     }
@@ -163,7 +172,17 @@ export function perceive(
 ): Perception {
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
-  const player = world.player
+  // Lie-Back-Win-Mode §3.8 P3: pick the closest player as the perception target.
+  let player = world.player
+  if (world.coop && world.player2) {
+    const p1Dist = player
+      ? Math.abs(player.x + player.w / 2 - sx) + Math.abs(player.y + player.h / 2 - sy)
+      : Infinity
+    const p2Dist =
+      Math.abs(world.player2.x + world.player2.w / 2 - sx) +
+      Math.abs(world.player2.y + world.player2.h / 2 - sy)
+    if (p2Dist < p1Dist) player = world.player2
+  }
   const base = world.tileMap.getBasePos()
 
   const threats: BulletObservation[] = []

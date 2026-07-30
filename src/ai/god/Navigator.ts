@@ -18,7 +18,7 @@ import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
  * within a tick. Reuses a single Cell object — callers must not mutate it. */
 export function playerCellImpl(self: GodAIInput): Cell {
   if (self._playerCellValid) return self._playerCellCache
-  const p = self.world.player!
+  const p = self.controlledTank(self.world)!
   self._playerCellCache.col = Math.round(p.x / CELL)
   self._playerCellCache.row = Math.round(p.y / CELL)
   self._playerCellValid = true
@@ -304,7 +304,7 @@ export function canMoveOrBreakImpl(self: GodAIInput, tank: Tank, dir: Direction)
  * byte-identical within a tick. A bitmask cache avoids redundant
  * rectHitsTerrain + tank-loop scans. Invalidated in endFrame(). */
 export function canMoveDirImpl(self: GodAIInput, tank: Tank, dir: Direction): boolean {
-  if (tank === self.world.player) {
+  if (tank === self.controlledTank(self.world)) {
     const idx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
     const bit = 1 << idx
     if (self._canMoveComputed & bit) return (self._canMoveResult & bit) !== 0

@@ -183,6 +183,18 @@ export interface Tank extends Entity {
   /** True for a Decoy tank (诱饵). Decoys move toward enemies but never fire.
    *  Lives on the World via allies[].isDecoy for snapshot safety. */
   isDecoy?: boolean
+
+  // --- Per-tank frenzy state (Lie-Back-Win-Mode Q9: God unaffected by human frenzy) ---
+  /** Active 狂暴宣泄 barrage ms remaining (0 = inactive). Only used by human player tanks. */
+  frenzyTimer?: number
+  /** Shells left to fire this barrage. */
+  frenzyShotsLeft?: number
+  /** Locked firing direction during the barrage. */
+  frenzyDir?: Direction
+  /** Ms between frenzy shells (= player fire interval / 5). */
+  frenzyInterval?: number
+  /** Ms timestamp of the last frenzy shell. */
+  frenzyLastFire?: number
 }
 
 /**

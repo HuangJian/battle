@@ -60,6 +60,8 @@ export class PlaybackController {
     restoreWorld(world, this._replay.initialSnapshot)
     this.input = new ReplayInput(this._replay.frames)
     simulation.input = this.input // swap input source
+    // Lie-Back-Win-Mode: wire replay input2 for coop replays.
+    simulation.input2 = this.input.input2 ?? null
     world.state = 'playing'
     this.phase = 'playing'
     this.accumulator = 0
@@ -100,6 +102,8 @@ export class PlaybackController {
     restoreWorld(world, this._replay.initialSnapshot)
     const buildInput = new ReplayInput(this._replay.frames)
     simulation.input = buildInput
+    // Lie-Back-Win-Mode: wire replay input2 for coop replays.
+    simulation.input2 = buildInput.input2 ?? null
 
     // Replay the entire simulation and capture keyframes
     let lastCapturedFrame = -this._keyframeInterval // force frame 0 capture
@@ -122,6 +126,8 @@ export class PlaybackController {
     restoredInput.seekTo(currentFrame)
     this.input = restoredInput
     simulation.input = restoredInput
+    // Lie-Back-Win-Mode: restore input2 for coop replays.
+    simulation.input2 = restoredInput.input2 ?? null
     for (let i = 0; i < currentFrame; i++) {
       simulation.tick()
     }
@@ -208,6 +214,8 @@ export class PlaybackController {
     this.input = new ReplayInput(this._replay.frames)
     this.input.seekTo(targetFrame)
     simulation.input = this.input
+    // Lie-Back-Win-Mode: wire replay input2 for coop replays.
+    simulation.input2 = this.input.input2 ?? null
     // Fast-forward: run simulation ticks to replay up to the target frame
     for (let i = 0; i < targetFrame; i++) {
       simulation.tick()
@@ -223,6 +231,7 @@ export class PlaybackController {
    */
   exit(simulation: Simulation, realInput: InputLike): void {
     simulation.input = realInput // restore live input
+    simulation.input2 = null // Lie-Back-Win-Mode: caller re-wires if coop is active
     this.phase = 'ended'
   }
 

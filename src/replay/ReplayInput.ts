@@ -1,10 +1,16 @@
 import type { Direction } from '../constants'
 import type { InputLike } from '../game/Input'
 import type { InputFrame } from './types'
-import { unpackFrame } from './pack'
-import { FRAME_SCHEMA_VERSION } from './config'
+import { unpackFrames } from './pack'
 
-/** Idle frame returned when cursor is past the end. */
+// ================================================================
+// ReplayInput — feeds recorded inputs during playback
+// (plan/replay.md §3, §10)
+//
+// v1 replays: single stream (p1 only, p2 = idle).
+// v2 replays: dual interleaved streams.
+// ================================================================
+
 const IDLE_FRAME: InputFrame = {
   direction: null,
   firing: false,
@@ -13,83 +19,124 @@ const IDLE_FRAME: InputFrame = {
 }
 
 /**
- * ReplayInput — an InputLike implementation that feeds recorded inputs
- * during playback. The cursor advances **only** via advance(), called
- * once per sim tick by PlaybackController.
- *
- * endFrame() is a **no-op** — it exists solely to satisfy the InputLike
- * interface contract. Game.loop() calls it every render frame, so if it
- * advanced the cursor, playback would double-step.
+ * InputLike wrapper over packed replay frames.
+ * Cursor advances via advance() (once per sim tick), not per render frame.
  */
 export class ReplayInput implements InputLike {
-  private frames: Uint8Array
-  private cursor: number = 0
+  private frames1: InputFrame[]
+  private frames2: InputFrame[] | null
+  private cursor = 0
+  /** Current tick index into the interleaved stream (v2) or simple cursor (v1). */
+  private tick = 0
+  private _totalTicks: number
 
-  constructor(frames: Uint8Array) {
-    // The first byte is the schema version. Validate it instead of blindly
-    // skipping: an unknown layout must never be silently mis-decoded as
-    // input (it would "play" garbage). Callers should pre-check via
-    // ReplayManager.canPlay(); this guard is the defensive backstop —
-    // unknown version ⇒ zero frames ⇒ playback ends immediately.
-    if (frames.length > 0 && frames[0] === FRAME_SCHEMA_VERSION) {
-      this.frames = frames.subarray(1)
+  /**
+   * @param data  Packed frame bytes (Uint8Array), prefixed with schema version.
+   */
+  constructor(data: Uint8Array) {
+    const result = unpackFrames(data)
+    if (result) {
+      this.frames1 = result.p1
+      this.frames2 = result.p2
     } else {
-      this.frames = new Uint8Array(0)
+      this.frames1 = []
+      this.frames2 = null
     }
+    this._totalTicks = this.frames1.length
   }
 
-  private get currentFrame(): InputFrame {
-    if (this.cursor >= this.frames.length) return IDLE_FRAME
-    return unpackFrame(this.frames[this.cursor])
+  /** Second player input (God AI). Null for v1 replays. */
+  get input2(): InputLike | null {
+    if (!this.frames2) return null
+    return new ReplayInputSlice(this.frames2, () => this.tick)
   }
+
+  // ---- InputLike implementation (player1) ----
 
   getMoveDirection(): Direction | null {
-    return this.currentFrame.direction
+    const frame = this.frames1[this.cursor]
+    return frame?.direction ?? IDLE_FRAME.direction
   }
 
   isFiring(): boolean {
-    return this.currentFrame.firing
+    const frame = this.frames1[this.cursor]
+    return frame?.firing ?? IDLE_FRAME.firing
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
-    return kind === 'guard' ? this.currentFrame.guard : this.currentFrame.frenzy
+    const frame = this.frames1[this.cursor]
+    if (!frame) return false
+    return kind === 'guard' ? frame.guard : frame.frenzy
   }
 
-  /**
-   * No-op. Exists to satisfy InputLike. Game.loop() calls this every
-   * render frame; during playback the cursor is advanced only by
-   * advance(), once per sim tick, inside PlaybackController.update().
-   */
   endFrame(): void {
-    /* intentionally empty */
+    // Intentional no-op — cursor advances via advance(), not per render frame.
+  }
+
+  // ---- Playback control ----
+
+  /** Advance the cursor by one tick. Called by PlaybackController after each sim tick. */
+  advance(): void {
+    this.cursor++
+    this.tick++
   }
 
   reset(): void {
     this.cursor = 0
+    this.tick = 0
   }
 
-  /** Advance cursor by one frame. Called once per sim tick. */
-  advance(): void {
-    this.cursor++
-  }
-
-  /** Seek to a specific frame index. */
   seekTo(frameIndex: number): void {
-    this.cursor = Math.max(0, Math.min(frameIndex, this.frames.length))
+    this.cursor = Math.max(0, Math.min(frameIndex, this.frames1.length))
+    this.tick = this.cursor
   }
 
-  /** Total number of frames. */
   get totalFrames(): number {
-    return this.frames.length
+    return this.frames1.length
   }
 
-  /** Progress through the replay (0..1). */
+  get totalTicks(): number {
+    return this._totalTicks
+  }
+
   get progress(): number {
-    return this.frames.length > 0 ? this.cursor / this.frames.length : 1
+    return this._totalTicks > 0 ? this.cursor / this._totalTicks : 0
   }
 
-  /** Whether all frames have been consumed. */
   get isFinished(): boolean {
-    return this.cursor >= this.frames.length
+    return this.cursor >= this.frames1.length
   }
+}
+
+/**
+ * Thin InputLike slice for the second player stream in v2 replays.
+ * Shares the tick counter with the parent ReplayInput.
+ */
+class ReplayInputSlice implements InputLike {
+  private frames: InputFrame[]
+  private getTick: () => number
+
+  constructor(frames: InputFrame[], getTick: () => number) {
+    this.frames = frames
+    this.getTick = getTick
+  }
+
+  getMoveDirection(): Direction | null {
+    const frame = this.frames[this.getTick()]
+    return frame?.direction ?? IDLE_FRAME.direction
+  }
+
+  isFiring(): boolean {
+    const frame = this.frames[this.getTick()]
+    return frame?.firing ?? IDLE_FRAME.firing
+  }
+
+  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+    const frame = this.frames[this.getTick()]
+    if (!frame) return false
+    return kind === 'guard' ? frame.guard : frame.frenzy
+  }
+
+  endFrame(): void {}
+  reset(): void {}
 }

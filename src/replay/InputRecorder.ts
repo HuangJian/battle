@@ -1,50 +1,52 @@
-import type { InputLike } from '../game/Input'
+import { type InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import type { WorldSnapshot } from '../snapshot/types'
 import { cloneWorld } from '../snapshot/WorldSerializer'
-import { FRAME_SCHEMA_VERSION } from './config'
 import { packFrame } from './pack'
+import { FRAME_SCHEMA_VERSION } from './config'
 
 // ================================================================
-// InputRecorder — captures player input per simulation tick
-// (plan/replay.md §13)
+// InputRecorder — passively captures player input per tick
+// (plan/replay.md §3, §10)
 //
-// Recording is passive: it reads the Input interface and never touches
-// the World. Each tick's input is packed to 1 byte and appended to a
-// buffer. On finalize, the buffer is converted to a Uint8Array with a
-// schema version prefix.
+// One recordFrame() call per simulation tick. The recorder reads
+// from the InputLike interface without mutating the World.
 // ================================================================
 
 export interface RecorderResult {
   snapshot: WorldSnapshot
+  /** Packed input frames (Uint8Array), prefixed with schema version byte. */
   frames: Uint8Array
+  /** Lie-Back-Win-Mode: packed God AI frames (v2 only). Null when no coop. */
+  frames2: Uint8Array | null
   tickCount: number
 }
 
 export class InputRecorder {
   private frames: number[] = []
+  private frames2: number[] = []
   private active = false
   private initialSnapshot: WorldSnapshot | null = null
+  /** Lie-Back-Win-Mode Q10: captured at recording start, never changes mid-session. */
+  private coopAtStart = false
 
-  /**
-   * Start a new recording session. Captures the current World state
-   * as the initial snapshot.
-   */
+  /** Begin a new recording session. */
   startNew(world: World): void {
     this.frames = []
+    this.frames2 = []
     this.active = true
     this.initialSnapshot = cloneWorld(world)
+    this.coopAtStart = world.coop
   }
 
   /**
-   * Record one frame of input. Called once per simulation tick,
-   * after simulation.tick() and before input.endFrame().
-   *
-   * The recorded frame must exactly match what the simulation
-   * consumed that tick — this is the determinism contract.
+   * Record one tick of input from both player inputs.
+   * Called once per simulation tick (after tick, before endFrame).
    */
-  recordFrame(input: InputLike): void {
+  recordFrame(input: InputLike, input2?: InputLike | null): void {
     if (!this.active) return
+
+    // Record player1 input
     this.frames.push(
       packFrame({
         direction: input.getMoveDirection(),
@@ -53,45 +55,81 @@ export class InputRecorder {
         frenzy: input.wasItemPressed('frenzy'),
       }),
     )
+
+    // Record player2 (God AI) input when coop is active
+    if (input2) {
+      this.frames2.push(
+        packFrame({
+          direction: input2.getMoveDirection(),
+          firing: input2.isFiring(),
+          guard: input2.wasItemPressed('guard'),
+          frenzy: input2.wasItemPressed('frenzy'),
+        }),
+      )
+    } else {
+      // Pad with idle frame to keep streams aligned
+      this.frames2.push(packFrame({ direction: null, firing: false, guard: false, frenzy: false }))
+    }
   }
 
   /**
-   * Finalize the recording and return the result.
-   * Returns null if no frames were captured (empty recording).
-   *
-   * After finalize(), the recorder is inactive — recordFrame() becomes
-   * a no-op until startNew() is called again.
+   * Finalize the recording session.
+   * Prepends the schema version byte to each stream.
+   * v1 compat: if no coop was active (frames2 all idle), downgrade to v1.
    */
   finalize(): RecorderResult | null {
-    if (!this.active || this.frames.length === 0) {
-      this.active = false
-      return null
-    }
-    this.active = false
-
-    // Prepend schema version byte
-    const packed = new Uint8Array(this.frames.length + 1)
-    packed[0] = FRAME_SCHEMA_VERSION
-    for (let i = 0; i < this.frames.length; i++) {
-      packed[i + 1] = this.frames[i]
-    }
+    if (!this.active || this.frames.length === 0) return null
 
     const snapshot = this.initialSnapshot!
+    const tickCount = this.frames.length
+
+    // Lie-Back-Win-Mode Q10: flags fixed at recording start — use coopAtStart,
+    // NOT derived from frames2 content. This ensures hasP2 is stable even if
+    // God AI never produces non-idle input.
+    const hasCoopInput = this.coopAtStart && this.frames2.length > 0
+
+    let frames: Uint8Array
+    let frames2: Uint8Array | null = null
+
+    if (hasCoopInput) {
+      // v2: [version][flags:hasP2][p1_0][p2_0][p1_1][p2_1]...
+      const packed = new Uint8Array(2 + tickCount * 2)
+      packed[0] = FRAME_SCHEMA_VERSION
+      packed[1] = 0x01 // hasP2 flag
+      for (let i = 0; i < tickCount; i++) {
+        const base = 2 + i * 2
+        packed[base] = this.frames[i]
+        packed[base + 1] = this.frames2[i]
+      }
+      frames = packed
+      // Also store frames2 separately for the Replay.frames2 field
+      frames2 = new Uint8Array(tickCount + 1)
+      frames2[0] = FRAME_SCHEMA_VERSION
+      for (let i = 0; i < tickCount; i++) {
+        frames2[i + 1] = this.frames2[i]
+      }
+    } else {
+      // v1: [version][frame0][frame1]... — downgrade for backward compat
+      frames = new Uint8Array(tickCount + 1)
+      frames[0] = 0x01 // FRAME_SCHEMA_V1
+      for (let i = 0; i < tickCount; i++) {
+        frames[i + 1] = this.frames[i]
+      }
+    }
+
+    this.active = false
     this.initialSnapshot = null
-    return { snapshot, frames: packed, tickCount: this.frames.length }
+
+    return { snapshot, frames, frames2, tickCount }
   }
 
-  /**
-   * Discard the current recording without saving.
-   * Called on return-to-menu or recovery → restart.
-   */
   reset(): void {
     this.frames = []
+    this.frames2 = []
     this.active = false
     this.initialSnapshot = null
   }
 
-  /** Whether the recorder is currently capturing frames. */
   get isActive(): boolean {
     return this.active
   }

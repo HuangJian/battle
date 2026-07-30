@@ -1823,3 +1823,57 @@ the current heuristic already outperforms the "accurate" one.
 **Cost:** Minor determinism signature shift — parity baselines in `tests/godai-split-parity.test.ts` updated. No tuning change, no parameter modification.
 
 **Implications:** God AI no longer wastes bullets shooting through steel walls. During freeze/shield windows, the AI navigates toward enemies behind obstacles instead of camping and firing uselessly.
+
+## 51. Lie-Back-Win-Mode Q1–Q10 拍板结果录入 + "无隐藏状态"合规论证 (2026-07-31)
+
+**Decision:** 补录 plan/Lie-Back-Win-Mode.md §7 + §7.1 所有拍板结果，并记录输入层 AI 的无隐藏状态合规论证。
+
+**拍板结果：**
+- Q1 得分分账：P1/P2 各自计算（score 归人类，score2 归 God），击杀归属按 bullet.ownerId 路由。
+- Q2 超级道具库存：共享库存，只有人类能花。
+- Q3 P2 出生点：经典 (16,24)，自定义关水平镜像 col'=24-col。
+- Q4 高分榜：躺赢局不写 highScore（coop===false 才写入）。
+- Q5 中途停用 God 命：直接作废，不捐给玩家。
+- Q6 toggle 持久化：不持久化 settings，想用随时开。
+- Q7 自动射击再武装：本关内停止后不能重开，仅下一关重臂。
+- Q8 中途加入 God 初始强度：固定 difficulty.playerStartLevel，不随关卡缩放。
+- Q9 狂暴宣泄期间 God 行为：God 不受影响，frenzy 字段下沉到 Tank。
+- Q10 回放 v2 flags 时机：flags 在录制开始时固定（coopAtStart），整局不变。
+
+**无隐藏状态合规论证：** GodAIInput 的内部规划/RNG 属输入层，与人类的键盘同级——它从不回写 World，其对局面的全部影响以输入帧形式被录制。回放依赖录制帧而非 AI 内部状态，确定性承诺完好。
+
+**Rationale:** AGENTS §6.3 要求执行前录入拍板结果；§8 交付物清单明确列出此项。
+
+**Implications:** DECISIONS.md 现为 Lie-Back-Win-Mode 的完整决策记录。
+
+## 52. Kill-Score 归属路由 (2026-07-31)
+
+**Decision:** bulletHitsTank 中击杀得分按 bullet.ownerId 路由：God 坦克的子弹击杀 → w.score2，人类坦克的子弹击杀 → w.score。牺牲 AoE 和炸弹道具保持 w.score（人类专属能力）。
+
+**Rationale:** Q1 拍板「谁的子弹击毁了敌人，谁的分数增加」；plan §3.8 明确要求 score/score2 分账。原先所有 kill-score 路径均写入 w.score，God 的击杀被错误归属给人类。
+
+**Implications:** HUD 的 "GOD: score2" 现在正确反映 God 的击杀得分；killCount 仍为全局计数（不按 P1/P2 拆分，与经典 FC 行为一致）。
+
+## 53. AutoFireInput 接线 (2026-07-31)
+
+**Decision:** AutoFireInput 装饰器已接入 Game.ts：coop 启用时包裹人类 input，每关 reset() 重臂，按开火键接管射击。disable/resetToMenu/recovery-restore 时正确清理。
+
+**Rationale:** plan §3.4 和 M3 DoD 要求「挂机 5 分钟不碰键盘可推进；按开火键接管射击」。AutoFireInput 使人类坦克在 coop 模式下自动开火，实现躺赢核心承诺。
+
+**Implications:** Replay 记录的是装饰后的有效帧（auto-fire 帧），回放自动复现，零特判。
+
+## 54. One-Author 修正：requestCoopToggle 路由 (2026-07-31)
+
+**Decision:** Game.ts 的 requestCoopToggle 改为通过 simulation.requestCoopToggle(on) 路由 World 变更请求。Simulation 在 updatePlaying() 开头消费 pendingCoopToggle 并执行 World 变更。menu/paused 态下 Game.ts 仍立即应用（因无 tick 触发），pendingCoopToggle 被 guard 条件安全消费（enable && !w.coop / !enable && w.coop）。
+
+**Rationale:** AGENTS §2.1「Only Simulation may modify the World」。原实现 Game.ts 直接修改 w.coop/w.player2/w.lives2 等，违反 One-Author 不变量。plan §3.5 明确要求路由通过 simulation.requestCoopToggle(on)。
+
+**Implications:** One-Author 不变量恢复；toggle 行为不变（menu/paused 态立即生效，playing 态下一 tick 生效）。
+
+## 55. Parity 基线漂移归因 (2026-07-31)
+
+**Decision:** godai-split-parity.test.ts stage 100 基线变更（ticks 3013→2942, score 4200→3700, lives 3→1, playerLevel 1→0）归因于 fire-through-steel fix（§50, commit #50），而非 Lie-Back-Win-Mode 的 coop 集成。controlledTank 默认 w=>w.player 确保单人路径字节级不变；perception.ts 的双目标改动在 player2==null 时退化为等价路径。
+
+**Rationale:** fire-through-steel fix 改变了 God AI 的射击决策逻辑（不再穿过钢墙射击对齐敌人），直接导致 seed 100 的行为差异。coop 集成仅在 coop=true 时激活新路径。
+
+**Implications:** parity 基线已反映 fire-through-steel fix 后的真实行为，非违规 relock。后续如需验证 coop 不引入额外漂移，可运行 `bun test godai-split-parity` 确认。

@@ -37,5 +37,9 @@ export const REPLAY_THUMBNAIL_QUALITY = 0.72
 /**
  * Packed-frame schema version. Bump when the bit layout changes.
  * Stored as the first byte of every packed-frame blob.
+ *
+ * v1 (0x01): single input stream per tick.
+ * v2 (0x02): dual input stream when coop is active — [flags byte][p1][p2] per tick.
  */
-export const FRAME_SCHEMA_VERSION = 0x01
+export const FRAME_SCHEMA_VERSION = 0x02
+export const FRAME_SCHEMA_V1 = 0x01

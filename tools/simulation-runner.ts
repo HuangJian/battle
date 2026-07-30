@@ -50,6 +50,12 @@ export interface SimResult {
     baseAlive: boolean
     playerAlive: boolean
     playerLevel: number
+    /** Lie-Back-Win-Mode: God AI score (coop only). */
+    score2?: number
+    /** Lie-Back-Win-Mode: God AI lives (coop only). */
+    lives2?: number
+    /** Lie-Back-Win-Mode: God AI alive (coop only). */
+    player2Alive?: boolean
   }
   /** All events collected during the run. */
   events: GameEvent[]
@@ -116,6 +122,8 @@ export interface RunOptions {
   skipStageOverrides?: boolean
   /** Record input frames for replay playback (plan/God-AI-Replay-Visualization §4.1). */
   record?: boolean
+  /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
+  coop?: boolean
 }
 
 /**
@@ -158,6 +166,10 @@ export function runSimulation(opts: RunOptions): SimResult {
   const input = new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
+  // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
+  const coop = opts.coop ?? false
+  let coopInput: GodAIInput | null = null
+
   // Load the stage (this also spawns the player and sets state to 'playing').
   // Pass the real stage index so the World's stageIndex (and therefore the
   // recorded snapshot / replay) reflects the actual stage being simulated.
@@ -165,6 +177,22 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   // Reset the input to pick up the new World state.
   input.reset()
+
+  // Lie-Back-Win-Mode: set up coop (God AI as player2, human idle).
+  if (coop) {
+    world.coop = true
+    const d = world.difficulty
+    world.lives2 = d?.startLives ?? 3
+    world.playerLevel2 = d?.playerStartLevel ?? 0
+    const p1Col = world.playerSpawnPoint?.col ?? 8
+    world.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+    world.spawnPlayer2()
+    // God AI controls player2 with an independent RNG.
+    const coopRng = new RNG((seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+    coopInput = new GodAIInput(world, godAIParams, coopRng, (w) => w.player2)
+    coopInput.reset()
+    sim.input2 = coopInput
+  }
 
   // Set up recording if requested (plan/God-AI-Replay-Visualization §4.1)
   // Note: InputRecorder.startNew() calls cloneWorld() internally to capture
@@ -185,11 +213,12 @@ export function runSimulation(opts: RunOptions): SimResult {
   while (tick < maxTicks) {
     sim.tick()
     // Record this tick's input BEFORE endFrame clears the cached state.
-    if (recorder) recorder.recordFrame(input)
+    if (recorder) recorder.recordFrame(input, coopInput)
     // Game.ts calls input.endFrame() after each tick; the headless runner
     // must do the same so GodAIInput's _thought flag resets and the AI
     // re-evaluates every tick (not just the first one).
     input.endFrame()
+    coopInput?.endFrame()
     tick++
 
     // Collect events.
@@ -271,6 +300,9 @@ export function runSimulation(opts: RunOptions): SimResult {
       baseAlive: !world.tileMap.isBaseDestroyed(),
       playerAlive: !!world.player?.alive,
       playerLevel: world.playerLevel,
+      ...(coop
+        ? { score2: world.score2, lives2: world.lives2, player2Alive: !!world.player2?.alive }
+        : {}),
     },
     events: allEvents,
     metrics,

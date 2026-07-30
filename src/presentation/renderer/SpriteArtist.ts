@@ -643,6 +643,46 @@ export class SpriteArtist {
     this.drawTank(x, y, size, dir, body, t.playerTurret, animFrame, level)
   }
 
+  drawPlayer2Tank(
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    level: number,
+    animFrame: number,
+  ): void {
+    // Lie-Back-Win-Mode: God AI tank uses the tank.player2 sprite.
+    this.drawTankShadow(x, y, size)
+    const cache = this.spriteCache
+    if (cache?.built && !this.skipSvg) {
+      const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const sprite = cache.getTankSprite('tank.player2', dirIdx)
+      if (sprite) {
+        const cs = cache.canvasSize
+        const cx = x + size / 2
+        const cy = y + size / 2
+        this.ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
+        const stage = Math.max(0, Math.min(level ?? 0, 3))
+        if (stage > 0) {
+          const overlay = cache.getStarbufSprite(stage, dirIdx)
+          if (overlay) this.ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
+        }
+        return
+      }
+    }
+    // SVG fallback: use tank.player2 asset.
+    const rot =
+      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    if (!this.skipSvg && this.drawSvgCentered('tank.player2', x, y, size, rot, 1.28)) {
+      const stage = Math.max(0, Math.min(level ?? 0, 3))
+      if (stage > 0) this.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, rot, 1.28)
+      return
+    }
+    // Procedural fallback — use silver/green colors for player2.
+    const t = this.theme
+    this.drawTank(x, y, size, dir, t.playerBody2, t.playerTurret, animFrame, level)
+  }
+
   drawEnemyTank(
     x: number,
     y: number,

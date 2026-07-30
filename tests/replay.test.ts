@@ -98,15 +98,39 @@ describe('Replay frame packing', () => {
 
   it('packFrames prefixes the schema version and unpackFrames validates it', () => {
     const packed = packFrames(SAMPLE_FRAMES)
-    expect(packed[0]).toBe(FRAME_SCHEMA_VERSION)
+    // v1 when no frames2: first byte is 0x01 (FRAME_SCHEMA_V1)
+    expect(packed[0]).toBe(0x01)
     expect(packed.length).toBe(SAMPLE_FRAMES.length + 1)
     const out = unpackFrames(packed)
     expect(out).not.toBeNull()
-    expect(out!.length).toBe(SAMPLE_FRAMES.length)
+    expect(out!.p1.length).toBe(SAMPLE_FRAMES.length)
+    expect(out!.p2).toBeNull()
     for (let i = 0; i < SAMPLE_FRAMES.length; i++) {
-      expect(out![i].direction).toBe(SAMPLE_FRAMES[i].direction)
-      expect(out![i].firing).toBe(SAMPLE_FRAMES[i].firing)
+      expect(out!.p1[i].direction).toBe(SAMPLE_FRAMES[i].direction)
+      expect(out!.p1[i].firing).toBe(SAMPLE_FRAMES[i].firing)
     }
+  })
+
+  it('packFrames with frames2 produces v2 format', () => {
+    const p2frames: InputFrame[] = [
+      { direction: 'left', firing: true, guard: false, frenzy: false },
+      { direction: null, firing: false, guard: false, frenzy: false },
+    ]
+    const packed = packFrames(SAMPLE_FRAMES, p2frames)
+    expect(packed[0]).toBe(FRAME_SCHEMA_VERSION) // v2
+    expect(packed[1] & 0x01).toBe(1) // hasP2 flag
+    const out = unpackFrames(packed)
+    expect(out).not.toBeNull()
+    // v2 interleaved: tickCount = P1 length (5); P2 is shorter → padded with idle frames
+    expect(out!.p1.length).toBe(SAMPLE_FRAMES.length)
+    expect(out!.p2).not.toBeNull()
+    expect(out!.p2!.length).toBe(SAMPLE_FRAMES.length)
+    // First two P2 frames match the provided data
+    expect(out!.p2![0].direction).toBe('left')
+    expect(out!.p2![0].firing).toBe(true)
+    expect(out!.p2![1].direction).toBe(null)
+    // Remaining P2 frames are idle (defaulted)
+    expect(out!.p2![2].firing).toBe(false)
   })
 
   it('unpackFrames returns null on schema-version mismatch (L3 guard)', () => {

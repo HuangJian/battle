@@ -227,7 +227,11 @@ describe('Replay file parse errors', () => {
 
   it('rejects missing replay section', () => {
     const r = parseReplayFile(
-      JSON.stringify({ format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 1 }),
+      JSON.stringify({
+        format: 'bc-replay',
+        formatVersion: 1,
+        frameSchemaVersion: FRAME_SCHEMA_VERSION,
+      }),
     )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/Missing replay/)
@@ -238,7 +242,7 @@ describe('Replay file parse errors', () => {
       JSON.stringify({
         format: 'bc-replay',
         formatVersion: 1,
-        frameSchemaVersion: 1,
+        frameSchemaVersion: FRAME_SCHEMA_VERSION,
         replay: { framesBase64: 'AA==', totalTicks: 1, metadata: {} },
       }),
     )

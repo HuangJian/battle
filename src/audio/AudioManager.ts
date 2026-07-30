@@ -8,6 +8,12 @@ export class AudioManager {
   private ctx: AudioContext | null = null
   private masterGain: GainNode | null = null
   private volume = 0.3
+  /**
+   * Lie-Back-Win-Mode §3.7: id of the God AI's tank (player2). Bullets
+   * whose ownerId matches this get the attenuated shoot sound (50% vol).
+   * null = no attenuation (single-player or coop disabled).
+   */
+  player2Id: number | null = null
   private enabled = true
 
   init(): void {
@@ -110,8 +116,10 @@ export class AudioManager {
 
   // ---- Game sound effects ----
 
-  playShoot(): void {
-    this.sweep(800, 200, 0.08, 'square', 0.15)
+  playShoot(reduced = false): void {
+    // Lie-Back-Win-Mode §3.7: God AI (player2) shots attenuated 50%.
+    const vol = reduced ? 0.04 : 0.08
+    this.sweep(800, 200, vol, 'square', 0.15)
   }
 
   playEnemyShoot(): void {
@@ -199,7 +207,7 @@ export class AudioManager {
     for (const event of events) {
       switch (event.type) {
         case 'bullet_fired':
-          if (event.bullet.isPlayer) this.playShoot()
+          if (event.bullet.isPlayer) this.playShoot(event.bullet.ownerId === this.player2Id)
           else this.playEnemyShoot()
           break
         case 'explosion':

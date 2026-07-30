@@ -337,6 +337,7 @@ export class ReplayBrowser {
         <span title="Player level">${star}</span>
         <span title="Lives left">♥ ${m.lives}</span>
         <span title="Duration">⏱ ${formatPlayTime(replay.durationMs)}</span>
+        ${replay.metadata.coop ? '<span class="snap-commander" title="Co-op (God AI)" style="color:#f0c040">COOP</span>' : ''}
         ${replay.isFavorite ? '<span class="snap-commander" title="Favorited">★ FAV</span>' : ''}
       </div>
     `

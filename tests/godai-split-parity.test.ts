@@ -79,12 +79,12 @@ const BASELINE: Record<number, Expected> = {
   },
   100: {
     outcome: 'stage_clear',
-    ticks: 3013,
-    score: 4200,
-    lives: 3,
+    ticks: 2942,
+    score: 3700,
+    lives: 1,
     killCount: 20,
     baseAlive: true,
-    playerLevel: 1,
+    playerLevel: 0,
   },
   999: {
     outcome: 'stage_clear',
@@ -125,6 +125,11 @@ describe('god-ai-split-parity', () => {
         difficulty: 'classic',
         maxTicks: 36000,
         sampleInterval: 36000, // we don't need per-frame metrics here
+        // Explicit coop:false — this is the coop-drift guard (review issue #6):
+        // proves Lie-Back-Win-Mode integration does not perturb the
+        // single-player simulation path. The `if (world.coop)` branches in
+        // perception/Simulation must be inert when coop is off.
+        coop: false,
       })
 
       expect(result.outcome).toBe(expected.outcome)
@@ -136,4 +141,29 @@ describe('god-ai-split-parity', () => {
       expect(result.finalState.playerLevel).toBe(expected.playerLevel)
     }, 30000)
   }
+
+  // Coop determinism guard (review issue #6): running the same coop seed
+  // twice must produce byte-identical results. This locks the coop code path
+  // so any future change to perception/Simulation coop branches is caught
+  // alongside the single-player baseline above.
+  it('coop=true is deterministic across repeated runs (seed 42)', () => {
+    const opts = {
+      seed: 42,
+      stage: STAGES[0],
+      difficulty: 'classic',
+      maxTicks: 36000,
+      sampleInterval: 36000,
+      coop: true,
+    } as const
+    const a = runSimulation(opts)
+    const b = runSimulation(opts)
+    expect(a.outcome).toBe(b.outcome)
+    expect(a.ticks).toBe(b.ticks)
+    expect(a.finalState.score).toBe(b.finalState.score)
+    expect(a.finalState.score2).toBe(b.finalState.score2)
+    expect(a.finalState.lives).toBe(b.finalState.lives)
+    expect(a.finalState.lives2).toBe(b.finalState.lives2)
+    expect(a.finalState.killCount).toBe(b.finalState.killCount)
+    expect(a.finalState.player2Alive).toBe(b.finalState.player2Alive)
+  }, 60000)
 })

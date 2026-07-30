@@ -204,9 +204,9 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
     activate(p)
 
     expect(world.frenzyStock).toBe(0)
-    expect(world.frenzyTimer).toBeGreaterThan(0)
-    expect(world.frenzyShotsLeft).toBe(FRENZY_SHOTS)
-    expect(world.frenzyDir).toBe('right')
+    expect(p.frenzyTimer).toBeGreaterThan(0)
+    expect(p.frenzyShotsLeft).toBe(FRENZY_SHOTS)
+    expect(p.frenzyDir).toBe('right')
 
     // Count player bullets added during the barrage (wrapper on addBullet).
     let playerShells = 0
@@ -216,17 +216,19 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
       return orig(b as never)
     }) as typeof world.addBullet
 
-    const updatePlayer = (sim as unknown as { updatePlayer: () => void }).updatePlayer.bind(sim)
+    const updatePlayerTank = (
+      sim as unknown as { updatePlayerTank: (t: any, i: any) => void }
+    ).updatePlayerTank.bind(sim)
     let guard = 0
-    while (world.frenzyShotsLeft > 0 && guard < 500) {
+    while ((p.frenzyShotsLeft ?? 0) > 0 && guard < 500) {
       world.frame++
-      updatePlayer()
+      updatePlayerTank(world.player, sim.input)
       guard++
     }
 
     expect(playerShells).toBe(FRENZY_SHOTS)
-    expect(world.frenzyTimer).toBe(0)
-    expect(world.frenzyShotsLeft).toBe(0)
+    expect(p.frenzyTimer).toBe(0)
+    expect(p.frenzyShotsLeft).toBe(0)
     // Player never moved during the barrage (locked to frenzyDir).
     expect(p.x).toBe(100)
     expect(p.y).toBe(100)
@@ -255,11 +257,13 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
     const activate = (
       sim2 as unknown as { activateFrenzy: (pl: unknown) => void }
     ).activateFrenzy.bind(sim2)
-    const updatePlayer = (sim2 as unknown as { updatePlayer: () => void }).updatePlayer.bind(sim2)
+    const updatePlayerTank2 = (
+      sim2 as unknown as { updatePlayerTank: (t: any, i: any) => void }
+    ).updatePlayerTank.bind(sim2)
 
     activate(p)
     world.frame++
-    updatePlayer()
+    updatePlayerTank2(world.player, mockInput)
 
     // Despite the input demanding LEFT + fire, the barrage forces 'right'
     // (frenzyDir) and suppresses normal firing/movement.

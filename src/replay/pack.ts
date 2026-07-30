@@ -1,6 +1,6 @@
 import type { Direction } from '../constants'
 import type { InputFrame } from './types'
-import { FRAME_SCHEMA_VERSION } from './config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from './config'
 
 // ================================================================
 // Input Frame Packing — InputFrame ↔ Uint8Array
@@ -12,6 +12,10 @@ import { FRAME_SCHEMA_VERSION } from './config'
 //   bit 5:    guard
 //   bit 6:    frenzy
 //   bit 7:    reserved
+//
+// v2 adds a flags byte after the version byte:
+//   bit 0:    hasP2 — whether the replay includes a second input stream
+//   bits 1–7: reserved
 // ================================================================
 
 /** Direction → packed value mapping. */
@@ -35,6 +39,9 @@ const DIR_MASK = 0x0f
 const FIRE_BIT = 1 << 4
 const GUARD_BIT = 1 << 5
 const FRENZY_BIT = 1 << 6
+
+/** V2 flags byte bits */
+const HAS_P2_BIT = 1 << 0
 
 /**
  * Pack an InputFrame into a single byte.
@@ -62,28 +69,84 @@ export function unpackFrame(packed: number): InputFrame {
 /**
  * Build a packed Uint8Array from an array of InputFrames, prefixed with
  * the schema version byte.
+ *
+ * v1 (no coop): [0x01][frame0][frame1]...
+ * v2 (coop):    [0x02][flags:0x01][p1_frame0][p2_frame0][p1_frame1][p2_frame1]...
  */
-export function packFrames(frames: InputFrame[]): Uint8Array {
-  const packed = new Uint8Array(frames.length + 1)
+export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null): Uint8Array {
+  const hasP2 = frames2 && frames2.length > 0
+  if (!hasP2) {
+    // v1 format — single stream, no flags byte
+    const packed = new Uint8Array(frames.length + 1)
+    packed[0] = FRAME_SCHEMA_V1
+    for (let i = 0; i < frames.length; i++) {
+      packed[i + 1] = packFrame(frames[i])
+    }
+    return packed
+  }
+
+  // v2 format — flags byte + interleaved dual streams
+  const tickCount = frames.length
+  // [version][flags][p1_0][p2_0][p1_1][p2_1]... = 2 + tickCount * 2
+  const packed = new Uint8Array(2 + tickCount * 2)
   packed[0] = FRAME_SCHEMA_VERSION
-  for (let i = 0; i < frames.length; i++) {
-    packed[i + 1] = packFrame(frames[i])
+  packed[1] = HAS_P2_BIT
+  for (let i = 0; i < tickCount; i++) {
+    const base = 2 + i * 2
+    packed[base] = packFrame(frames[i])
+    packed[base + 1] = packFrame(
+      frames2![i] ?? { direction: null, firing: false, guard: false, frenzy: false },
+    )
   }
   return packed
 }
 
 /**
  * Unpack a Uint8Array (prefixed with schema version byte) into InputFrames.
+ * Returns { p1, p2 } where p2 is null for v1 replays or when no coop data.
  * Returns null if the schema version is unrecognized.
  */
-export function unpackFrames(data: Uint8Array): InputFrame[] | null {
+export function unpackFrames(
+  data: Uint8Array,
+): { p1: InputFrame[]; p2: InputFrame[] | null } | null {
   if (data.length < 1) return null
   const schemaVersion = data[0]
-  if (schemaVersion !== FRAME_SCHEMA_VERSION) return null
 
-  const frames: InputFrame[] = []
-  for (let i = 1; i < data.length; i++) {
-    frames.push(unpackFrame(data[i]))
+  if (schemaVersion === FRAME_SCHEMA_V1) {
+    // v1: single stream
+    const frames: InputFrame[] = []
+    for (let i = 1; i < data.length; i++) {
+      frames.push(unpackFrame(data[i]))
+    }
+    return { p1: frames, p2: null }
   }
-  return frames
+
+  if (schemaVersion === FRAME_SCHEMA_VERSION) {
+    // v2: check flags byte
+    if (data.length < 2) return null
+    const flags = data[1]
+    const hasP2 = (flags & HAS_P2_BIT) !== 0
+
+    if (!hasP2) {
+      // v2 without P2 — single stream after flags byte
+      const frames: InputFrame[] = []
+      for (let i = 2; i < data.length; i++) {
+        frames.push(unpackFrame(data[i]))
+      }
+      return { p1: frames, p2: null }
+    }
+
+    // v2 with interleaved dual streams
+    const tickCount = (data.length - 2) / 2
+    const p1: InputFrame[] = []
+    const p2: InputFrame[] = []
+    for (let i = 0; i < tickCount; i++) {
+      const base = 2 + i * 2
+      p1.push(unpackFrame(data[base]))
+      p2.push(unpackFrame(data[base + 1]))
+    }
+    return { p1, p2 }
+  }
+
+  return null
 }

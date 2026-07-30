@@ -146,15 +146,31 @@ export interface WorldSnapshot {
   /** Player spawn point in sub-block coords for this stage. Undefined = default. */
   playerSpawnPoint?: { col: number; row: number }
 
+  // ---- Lie-Back-Win-Mode (coop) fields ----
+  /** Whether cooperative mode was active at snapshot time. */
+  coop?: boolean
+  /** Player2 tank snapshot (null when coop is off, absent in old snapshots). */
+  player2?: Tank | null
+  /** God AI lives at snapshot time. */
+  lives2?: number
+  /** God AI star level at snapshot time. */
+  playerLevel2?: number
+  /** God AI score at snapshot time. */
+  score2?: number
+  /** Player2 spawn point (col/row in sub-block coords). */
+  player2SpawnPoint?: { col: number; row: number }
+
   // ---- Super power-up inventory & frenzy state (DECISIONS.md §31) ----
   guardStock: number
   frenzyStock: number
   sacrificeStock: number
-  frenzyTimer: number
-  frenzyShotsLeft: number
-  frenzyLastFire: number
-  frenzyInterval: number
-  frenzyDir: Direction
+  // Per-tank frenzy fields (Q9): now live on Tank, not World.
+  // Optional here for backward compat with old snapshots that had them.
+  frenzyTimer?: number
+  frenzyShotsLeft?: number
+  frenzyLastFire?: number
+  frenzyInterval?: number
+  frenzyDir?: Direction
   fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
 
   // ---- New power-ups (new-powerups-plan.md) ----

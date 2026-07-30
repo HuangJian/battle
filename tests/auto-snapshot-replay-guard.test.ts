@@ -28,6 +28,7 @@ function makeMinimalReplay(world: World, tickCount = 300): Replay {
     seed: 0,
     initialSnapshot: snapshot,
     frames,
+    frames2: null,
     totalTicks: tickCount,
     durationMs: tickCount * TICK_MS,
     metadata: {

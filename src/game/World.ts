@@ -64,6 +64,7 @@ export class World {
 
   // Entities
   player: Tank | null
+  player2: Tank | null = null // Lie-Back-Win-Mode: God AI controlled second player
   tanks: Tank[] // enemy tanks
   allies: Tank[] // 天降神兵 allied guard tanks (third faction, DECISIONS.md §31 Phase 2)
   bullets: Bullet[]
@@ -111,8 +112,11 @@ export class World {
   // Game state
   state: GameState
   score: number
+  score2: number // Lie-Back-Win-Mode: God AI score (Q1: separate scoring)
   lives: number
+  lives2: number // Lie-Back-Win-Mode: God AI lives
   playerLevel: number
+  playerLevel2: number // Lie-Back-Win-Mode: God AI star level
   highScore: number
   /** Enemies destroyed by the player this run (snapshot metadata). */
   killCount: number
@@ -208,6 +212,12 @@ export class World {
   baseHp: number
   baseMaxHp: number
 
+  // --- Lie-Back-Win-Mode: cooperative mode state ---
+  /** Whether cooperative mode is active (God AI as P2). */
+  coop: boolean
+  /** P2 spawn point in sub-block coords (经典位 col 16, row 24). */
+  player2SpawnPoint: { col: number; row: number }
+
   // --- Super power-up inventory & frenzy state (DECISIONS.md §31) ---
   // Accumulated counts from picking up super power-ups (强力道具).
   guardStock: number // 天降神兵 — Phase 2 summons a base guard
@@ -215,11 +225,6 @@ export class World {
   sacrificeStock: number // 同归于尽 — passive AoE on losing a life
   // Active 狂暴宣泄 barrage runtime. Snapshot-safe so a rewind mid-barrage
   // (and the enemy-kill that may trigger it) is faithful.
-  frenzyTimer: number // ms remaining in the current barrage (0 = inactive)
-  frenzyShotsLeft: number // shells left to fire this barrage
-  frenzyLastFire: number // ms timestamp of the last frenzy shell
-  frenzyInterval: number // ms between frenzy shells (= player fire interval / 5)
-  frenzyDir: Direction // locked firing direction during the barrage
   // 栅栏道具 (fence): the frame at which the temporary steel ring around the
   // base reverts to brick. undefined = no active fence. Snapshot-safe.
   fenceExpireFrame?: number
@@ -261,8 +266,11 @@ export class World {
     this.spawnPointIndex = 0
     this.state = 'menu'
     this.score = 0
+    this.score2 = 0
     this.lives = START_LIVES
+    this.lives2 = 0
     this.playerLevel = 0
+    this.playerLevel2 = 0
     this.killCount = 0
     this.playTimeMs = 0
     this.highScore = this.loadHighScore()
@@ -296,6 +304,8 @@ export class World {
     this.directiveSeqCounter = 0
     this.baseHp = 1
     this.baseMaxHp = 1
+    this.coop = false
+    this.player2SpawnPoint = { col: 16, row: 24 }
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
     this.recoveryFading = false
@@ -303,11 +313,6 @@ export class World {
     this.guardStock = 0
     this.frenzyStock = 0
     this.sacrificeStock = 0
-    this.frenzyTimer = 0
-    this.frenzyShotsLeft = 0
-    this.frenzyLastFire = 0
-    this.frenzyInterval = 0
-    this.frenzyDir = 'up'
     this.fenceExpireFrame = undefined
     this.empTimer = 0
     this.rewindStock = 0
@@ -324,10 +329,14 @@ export class World {
     this.difficulty = DIFFICULTIES[difficultyKey] ?? DIFFICULTIES['classic']
     this.theme = THEMES[themeKey] ?? THEMES[DEFAULT_THEME]
     this.score = 0
+    this.score2 = 0
     this.lives = this.difficulty.startLives
+    this.lives2 = 0
     this.playerLevel = this.difficulty.playerStartLevel
+    this.playerLevel2 = 0
     this.killCount = 0
     this.playTimeMs = 0
+    this.coop = false
     // Fresh run: clear any deferred drops left over from a previous game
     // (e.g. a buffered drop from the final stage of a won run).
     this.pendingDrops = []
@@ -335,11 +344,6 @@ export class World {
     this.guardStock = 0
     this.frenzyStock = 0
     this.sacrificeStock = 0
-    this.frenzyTimer = 0
-    this.frenzyShotsLeft = 0
-    this.frenzyLastFire = 0
-    this.frenzyInterval = 0
-    this.frenzyDir = 'up'
     this.loadStage(startStage)
   }
 
@@ -435,6 +439,13 @@ export class World {
 
     // Spawn player
     this.spawnPlayer()
+    // Lie-Back-Win-Mode §3.8: recompute P2 spawn point from new stage's
+    // playerSpawn and respawn player2 if coop is active.
+    if (this.coop) {
+      const p1Col = this.playerSpawnPoint.col
+      this.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+      this.spawnPlayer2()
+    }
     this.state = 'playing'
   }
 
@@ -454,6 +465,7 @@ export class World {
     this.baseMaxHp = this.difficultyKey === 'classic' ? CLASSIC_BASE_MAX_HP : BASE_MAX_HP
     this.baseHp = this.baseMaxHp
     this.player = null
+    this.player2 = null
     this.tanks = []
     this.allies = []
     this.bullets = []
@@ -486,6 +498,19 @@ export class World {
     this.player.level = this.playerLevel
     this.player.shieldTimer = 3000
     this.player.isPlayer = true
+  }
+
+  /**
+   * Spawn player2 (God AI tank) at the P2 spawn point.
+   * Lie-Back-Win-Mode §3.8: symmetric to spawnPlayer.
+   */
+  spawnPlayer2(): void {
+    const col = this.player2SpawnPoint.col
+    const row = this.player2SpawnPoint.row
+    this.player2 = this.createTank('player', col * CELL, row * CELL, 'up')
+    this.player2.level = this.playerLevel2
+    this.player2.shieldTimer = 3000
+    this.player2.isPlayer = true
   }
 
   createTank(kind: TankKind, x: number, y: number, dir: Direction): Tank {
@@ -675,10 +700,11 @@ export class World {
 
   get allTanks(): Tank[] {
     // Reuse buffer — avoids creating a new array every call (called ~10×/tick).
-    // Order: player, then allied guards, then enemy tanks.
+    // Order: player, player2, allied guards, then enemy tanks.
     const buf = this._allTanksBuf
     let i = 0
     if (this.player) buf[i++] = this.player
+    if (this.player2) buf[i++] = this.player2
     const allies = this.allies
     for (let a = 0; a < allies.length; a++) buf[i++] = allies[a]
     const tanks = this.tanks

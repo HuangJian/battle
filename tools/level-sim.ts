@@ -21,6 +21,7 @@
  *   --output                 Output JSON to stdout (default: true; --no-output to suppress)
  *   --save-replays           Save replay files to replays/ directory
  *   --replay-failures-only   Only save replays for failed games (requires --save-replays)
+ *   --coop                   Enable coop mode (God AI controls player2, human idle)
  */
 import { STAGES } from '../src/config/stages'
 import { runSimulation } from './simulation-runner'
@@ -41,6 +42,7 @@ const pretty = process.argv.includes('--pretty')
 const saveReplays = process.argv.includes('--save-replays')
 const replayFailuresOnly = process.argv.includes('--replay-failures-only')
 const doOutput = !process.argv.includes('--no-output')
+const coop = process.argv.includes('--coop')
 
 // --seed: random if not provided
 const seedArg = arg('seed')
@@ -82,6 +84,7 @@ for (let i = 0; i < size; i++) {
     maxTicks,
     sampleInterval: 6, // sample every 100ms for compact output
     record: saveReplays,
+    coop,
   })
 
   const isWin = result.outcome === 'stage_clear'
@@ -94,6 +97,7 @@ for (let i = 0; i < size; i++) {
   const output = {
     stage: { id: stage.id, name: stage.name, index: stageIdx },
     difficulty,
+    coop,
     seed: gameSeed,
     result: {
       outcome: result.outcome,
@@ -173,6 +177,7 @@ if (size > 1) {
   const summary = {
     stage: { id: stage.id, name: stage.name, index: stageIdx },
     difficulty,
+    coop,
     seed,
     size,
     winCount,

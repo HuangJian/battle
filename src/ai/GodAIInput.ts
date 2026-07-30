@@ -376,6 +376,13 @@ export class GodAIInput implements InputLike {
   rng: RNG
   params: GodAIParams
 
+  /**
+   * Lie-Back-Win-Mode §3.8 P1: returns the tank this AI controls.
+   * Default: `w => w.player` (single-player / parity-safe).
+   * Co-op mode: pass `w => w.player2` to make God AI control P2.
+   */
+  controlledTank: (w: World) => Tank | null = (w) => w.player
+
   /** Cached move direction for this tick. */
   _moveDir: Direction | null = null
   /** Cached fire decision for this tick. */
@@ -484,10 +491,16 @@ export class GodAIInput implements InputLike {
   _canMoveComputed = 0
   _canMoveResult = 0
 
-  constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS, rng?: RNG) {
+  constructor(
+    world: World,
+    params: GodAIParams = DEFAULT_GOD_AI_PARAMS,
+    rng?: RNG,
+    controlledTank?: (w: World) => Tank | null,
+  ) {
     this.world = world
     this.rng = rng ?? world.rng
     this.params = params
+    if (controlledTank) this.controlledTank = controlledTank
   }
 
   reset(): void {
@@ -545,7 +558,7 @@ export class GodAIInput implements InputLike {
     this._thought = true
 
     const w = this.world
-    const p = w.player
+    const p = this.controlledTank(w)
     if (!p || !p.alive || p.spawnTimer > 0) {
       this._moveDir = null
       this._fire = false
@@ -1007,7 +1020,7 @@ export class GodAIInput implements InputLike {
     const br = BASE_POS.row
     // P4: race-to-base check — player's distance to the base. If the player
     // is dead/respawning, treat any near-base enemy as a threat.
-    const p = this.world.player
+    const p = this.controlledTank(this.world)
     const pc = p ? this.playerCell() : null
     const playerDistToBase = pc ? Math.abs(pc.col - bc) + Math.abs(pc.row - br) : Infinity
     // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only

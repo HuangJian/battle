@@ -50,6 +50,8 @@ export interface ReplayMetadata {
   killCount: number
   enemiesTotal: number // total enemies spawned this stage
   playTimeMs: number
+  /** Lie-Back-Win-Mode: whether this replay used cooperative mode. */
+  coop?: boolean
 }
 
 /**
@@ -75,6 +77,9 @@ export interface Replay {
 
   /** Packed input frames (Uint8Array), prefixed with schema version byte. */
   frames: Uint8Array
+
+  /** Lie-Back-Win-Mode: packed God AI input frames (v2 only). Null for v1 replays. */
+  frames2: Uint8Array | null
 
   /** Number of ticks in the recording. */
   totalTicks: number

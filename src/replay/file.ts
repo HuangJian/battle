@@ -226,6 +226,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     seed: (replay.seed as number) ?? (env.sim as SimEnvelope | undefined)?.seed ?? 0,
     initialSnapshot: replay.initialSnapshot as WorldSnapshot,
     frames,
+    frames2: null,
     totalTicks: replay.totalTicks as number,
     durationMs,
     metadata: {

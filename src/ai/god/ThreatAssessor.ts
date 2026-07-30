@@ -139,7 +139,7 @@ export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
  */
 export function baseBulletInterceptCellImpl(self: GodAIInput, bullet: Bullet): Cell | null {
   const w = self.world
-  const p = w.player!
+  const p = self.controlledTank(self.world)!
   const pcx = p.x + p.w / 2
   const pcy = p.y + p.h / 2
   const bcx = bullet.x + bullet.w / 2
@@ -195,8 +195,7 @@ export function dodgeDirectionImpl(
   pcx: number,
   pcy: number,
 ): Direction | null {
-  const w = self.world
-  const p = w.player!
+  const p = self.controlledTank(self.world)!
   const vertical = bullet.dir === 'up' || bullet.dir === 'down'
   // Use module-level constants instead of allocating arrays on every dodge.
   const candA: Direction = vertical ? 'left' : 'up'

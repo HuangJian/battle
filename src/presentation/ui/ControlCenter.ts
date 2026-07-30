@@ -30,6 +30,8 @@ export interface ControlCenterCallbacks {
   onToggleFullscreen: () => void
   /** Toggle Performance Mode (DPR cap + render-FPS cap). */
   onTogglePerformance: () => void
+  /** Toggle Lie-Back-Win-Mode (coop with God AI). */
+  onToggleCoop: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -55,6 +57,8 @@ export class ControlCenter {
   private fullscreenState: HTMLElement | null = null
   private perfModeBtn: HTMLButtonElement | null = null
   private perfModeState: HTMLElement | null = null
+  private coopBtn: HTMLButtonElement | null = null
+  private coopState: HTMLElement | null = null
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
@@ -94,6 +98,10 @@ export class ControlCenter {
           <h3 class="cc-section-title">GAMEPLAY</h3>
           <button class="cc-btn" data-cc="controls" type="button">
             <span>Key Bindings</span><span class="cc-btn-arrow">›</span>
+          </button>
+          <button class="cc-btn" data-cc="coop" type="button" aria-pressed="false" title="Toggle Lie-Back-Win-Mode (God AI co-op)">
+            <span>Lie-Back Win</span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="coop-state">OFF</span></span>
           </button>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
@@ -148,6 +156,7 @@ export class ControlCenter {
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
+    wire('[data-cc="coop"]', () => this.callbacks?.onToggleCoop())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
     this.perfState = this.el.querySelector('[data-cc="perf-state"]')
@@ -155,6 +164,8 @@ export class ControlCenter {
     this.fullscreenState = this.el.querySelector('[data-cc="fullscreen-state"]')
     this.perfModeBtn = this.el.querySelector('[data-cc="perfmode"]') as HTMLButtonElement
     this.perfModeState = this.el.querySelector('[data-cc="perfmode-state"]')
+    this.coopBtn = this.el.querySelector('[data-cc="coop"]') as HTMLButtonElement
+    this.coopState = this.el.querySelector('[data-cc="coop-state"]')
 
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
@@ -204,6 +215,18 @@ export class ControlCenter {
     if (this.perfModeState) {
       this.perfModeState.textContent = on ? 'ON' : 'OFF'
       this.perfModeState.classList.toggle('on', on)
+    }
+  }
+
+  /** Reflect coop (Lie-Back-Win) state in the GAMEPLAY panel button. */
+  setCoopState(on: boolean): void {
+    if (this.coopBtn) {
+      this.coopBtn.classList.toggle('selected', on)
+      this.coopBtn.setAttribute('aria-pressed', String(on))
+    }
+    if (this.coopState) {
+      this.coopState.textContent = on ? 'ON' : 'OFF'
+      this.coopState.classList.toggle('on', on)
     }
   }
 

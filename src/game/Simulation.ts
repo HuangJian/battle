@@ -113,6 +113,14 @@ function isBaseProtectionCell(col: number, row: number): boolean {
 export class Simulation {
   world: World
   input: InputLike
+  /** Lie-Back-Win-Mode: second player input (God AI or null). */
+  input2: InputLike | null = null
+  /**
+   * Lie-Back-Win-Mode §3.5: pending coop toggle, set by Game.ts.
+   * Applied at the start of updatePlaying() so the One-Author invariant
+   * (only Simulation mutates World) is preserved.
+   */
+  private pendingCoopToggle: boolean | null = null
   /** Tactical Intelligence Framework — owns all enemy decision-making. */
   private ai: TacticalIntelligence
 
@@ -120,6 +128,24 @@ export class Simulation {
     this.world = world
     this.input = input
     this.ai = new TacticalIntelligence()
+  }
+
+  /**
+   * Lie-Back-Win-Mode §3.5: request a coop toggle (called by Game.ts).
+   * The actual World mutation is deferred to updatePlaying() to preserve
+   * the One-Author invariant.
+   */
+  requestCoopToggle(on: boolean): void {
+    this.pendingCoopToggle = on
+  }
+
+  /**
+   * Lie-Back-Win-Mode §3.5: cancel any pending coop toggle. Called when
+   * returning to menu — a stale pending toggle would otherwise fire on the
+   * next playing tick and re-enable coop against the player's intent.
+   */
+  clearPendingCoopToggle(): void {
+    this.pendingCoopToggle = null
   }
 
   /** Run one simulation tick (1/60s) */
@@ -143,6 +169,27 @@ export class Simulation {
   private updatePlaying(): void {
     const w = this.world
 
+    // Lie-Back-Win-Mode §3.5: apply deferred coop toggle at tick start.
+    if (this.pendingCoopToggle !== null) {
+      const enable = this.pendingCoopToggle
+      this.pendingCoopToggle = null
+      if (enable && !w.coop) {
+        w.coop = true
+        const d = w.difficulty
+        w.lives2 = d?.startLives ?? 3
+        w.playerLevel2 = d?.playerStartLevel ?? 0
+        const p1Col = w.playerSpawnPoint?.col ?? 8
+        w.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+        w.spawnPlayer2()
+        w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+      } else if (!enable && w.coop) {
+        w.coop = false
+        w.player2 = null
+        w.lives2 = 0
+        w.playerLevel2 = 0
+      }
+    }
+
     // Run statistics — total play time advances only while playing.
     w.playTimeMs += 1000 / 60
 
@@ -160,10 +207,14 @@ export class Simulation {
       }
     }
 
-    // Update player boat timer
+    // Update player boat timers (both players)
     if (w.player && w.player.boatTimer && w.player.boatTimer > 0) {
       w.player.boatTimer -= 1000 / 60
       if (w.player.boatTimer < 0) w.player.boatTimer = 0
+    }
+    if (w.player2 && w.player2.boatTimer && w.player2.boatTimer > 0) {
+      w.player2.boatTimer -= 1000 / 60
+      if (w.player2.boatTimer < 0) w.player2.boatTimer = 0
     }
 
     // Update spawn animations
@@ -172,8 +223,9 @@ export class Simulation {
     // Spawn enemies
     this.updateSpawning()
 
-    // Player input
-    this.updatePlayer()
+    // Player input (both players)
+    this.updatePlayerTank(w.player, this.input)
+    this.updatePlayerTank(w.player2, this.input2)
 
     // Enemy AI
     this.updateEnemyAI()
@@ -360,35 +412,40 @@ export class Simulation {
   // Player System
   // ================================================================
 
-  private updatePlayer(): void {
+  /**
+   * Generalized player update: drives one player tank with one input source.
+   * Called twice per tick when coop is active (once for human, once for God AI).
+   * When input is null (coop disabled or player2 dead), this is a no-op.
+   * Lie-Back-Win-Mode §3.1: per-tank frenzy check (Q9).
+   */
+  private updatePlayerTank(p: Tank | null, input: InputLike | null): void {
     const w = this.world
-    const p = w.player
     if (!p || !p.alive) return
     if (p.spawnTimer > 0) return // still spawning
 
-    // --- 狂暴宣泄 barrage in progress: player is locked (no move / turn /
-    //     other items). Auto-fire only. ---
-    if (w.frenzyTimer > 0) {
+    // --- Per-tank 狂暴宣泄 barrage in progress: player is locked (no move /
+    //     turn / other items). Auto-fire only. ---
+    if ((p.frenzyTimer ?? 0) > 0) {
       this.updateFrenzy(p)
       return
     }
 
     // --- Active super-item release (F5 天降神兵 / F6 狂暴宣泄) ---
-    // 天降神兵 is Phase 2 (ally AI + faction); in Phase 1 the super pool
-    // excludes 'guard', so guardStock is always 0 and this is a no-op.
-    if (this.input.wasItemPressed('guard') && w.guardStock > 0) {
+    // Super items are human-only (God AI wasItemPressed returns false).
+    if (input && input.wasItemPressed('guard') && w.guardStock > 0) {
       this.activateGuard(p)
     }
-    if (this.input.wasItemPressed('frenzy') && w.frenzyStock > 0) {
+    if (input && input.wasItemPressed('frenzy') && w.frenzyStock > 0) {
       this.activateFrenzy(p)
     }
     // Rewind (时光宝盒): triggered by F7
-    if (this.input.wasItemPressed('rewind') && w.rewindStock > 0) {
+    if (input && input.wasItemPressed('rewind') && w.rewindStock > 0) {
       this.activateRewind(p)
     }
 
     // Movement
-    const dir = this.input.getMoveDirection()
+    if (!input) return // no input source (God AI tank without input2)
+    const dir = input.getMoveDirection()
     if (dir !== null) {
       p.dir = dir
       p.moving = true
@@ -397,7 +454,7 @@ export class Simulation {
     }
 
     // Firing
-    if (this.input.isFiring()) {
+    if (input.isFiring()) {
       this.tryFire(p)
     }
   }
@@ -412,24 +469,31 @@ export class Simulation {
   private updateFrenzy(p: Tank): void {
     const w = this.world
     const now = w.frame * (1000 / 60)
-    p.dir = w.frenzyDir
+    const dir = p.frenzyDir ?? 'up'
+    const interval = p.frenzyInterval ?? 1
+    let shotsLeft = p.frenzyShotsLeft ?? 0
+    let lastFire = p.frenzyLastFire ?? 0
+    p.dir = dir
     p.moving = false
-    while (w.frenzyShotsLeft > 0 && now - w.frenzyLastFire >= w.frenzyInterval) {
-      this.spawnFrenzyShot(p)
-      w.frenzyShotsLeft -= 1
-      w.frenzyLastFire += w.frenzyInterval
+    while (shotsLeft > 0 && now - lastFire >= interval) {
+      this.spawnFrenzyShot(p, dir)
+      shotsLeft -= 1
+      lastFire += interval
     }
-    w.frenzyTimer -= 1000 / 60
-    if (w.frenzyTimer <= 0 || w.frenzyShotsLeft <= 0) {
-      w.frenzyTimer = 0
-      w.frenzyShotsLeft = 0
+    p.frenzyShotsLeft = shotsLeft
+    p.frenzyLastFire = lastFire
+    const timer = (p.frenzyTimer ?? 0) - 1000 / 60
+    p.frenzyTimer = timer
+    if (timer <= 0 || shotsLeft <= 0) {
+      p.frenzyTimer = 0
+      p.frenzyShotsLeft = 0
     }
   }
 
   /** Fire one 狂暴宣泄 shell (player's current stats, locked direction). */
-  private spawnFrenzyShot(p: Tank): void {
+  private spawnFrenzyShot(p: Tank, dir: Direction): void {
     const w = this.world
-    const v = DIR_VECTORS[w.frenzyDir]
+    const v = DIR_VECTORS[dir]
     const bx = p.x + p.w / 2 - BULLET / 2 + v.dx * (p.w / 2)
     const by = p.y + p.h / 2 - BULLET / 2 + v.dy * (p.h / 2)
     const bullet: Bullet = {
@@ -438,7 +502,7 @@ export class Simulation {
       y: by,
       w: BULLET,
       h: BULLET,
-      dir: w.frenzyDir,
+      dir,
       alive: true,
       ownerId: p.id,
       ownerKind: p.kind,
@@ -464,12 +528,12 @@ export class Simulation {
     const w = this.world
     w.frenzyStock--
     const interval = Math.max(1, p.nextFireInterval / 5)
-    w.frenzyInterval = interval
-    w.frenzyShotsLeft = FRENZY_SHOTS
-    w.frenzyDir = p.dir
+    p.frenzyInterval = interval
+    p.frenzyShotsLeft = FRENZY_SHOTS
+    p.frenzyDir = p.dir
     // Fire the first shell immediately on the next tick.
-    w.frenzyLastFire = w.frame * (1000 / 60) - interval
-    w.frenzyTimer = FRENZY_SHOTS * interval
+    p.frenzyLastFire = w.frame * (1000 / 60) - interval
+    p.frenzyTimer = FRENZY_SHOTS * interval
   }
 
   /**
@@ -1421,7 +1485,13 @@ export class Simulation {
             w.rules,
             tank.kind,
           )
-          w.score += gained
+          // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
+          const isGodKill = w.coop && bullet.ownerId === w.player2?.id
+          if (isGodKill) {
+            w.score2 += gained
+          } else {
+            w.score += gained
+          }
           w.killCount++
           // Accompanying "balance" enemies (isExtra) are outside the per-stage
           // 20-enemy count, so they never decrement enemiesRemaining / block
@@ -1762,9 +1832,6 @@ export class Simulation {
 
   private updatePowerUps(): void {
     const w = this.world
-    const p = w.player
-    if (!p || !p.alive) return
-
     const dt = 1000 / 60
 
     for (const pu of w.powerUps) {
@@ -1778,20 +1845,31 @@ export class Simulation {
         continue
       }
 
-      // Check player pickup
-      if (aabb(p.x, p.y, p.w, p.h, pu.x, pu.y, pu.w, pu.h)) {
+      // Check player1 pickup
+      const p1 = w.player
+      if (p1 && p1.alive && aabb(p1.x, p1.y, p1.w, p1.h, pu.x, pu.y, pu.w, pu.h)) {
         pu.alive = false
-        this.applyPowerUp(pu.type)
+        this.applyPowerUp(pu.type, p1)
         w.score += w.rules.itemScore
+        w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
+        continue
+      }
+      // Check player2 pickup (Lie-Back-Win-Mode §3.1)
+      const p2 = w.player2
+      if (p2 && p2.alive && aabb(p2.x, p2.y, p2.w, p2.h, pu.x, pu.y, pu.w, pu.h)) {
+        pu.alive = false
+        this.applyPowerUp(pu.type, p2)
+        w.score2 += w.rules.itemScore
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
       }
     }
   }
 
-  private applyPowerUp(type: PowerUpType): void {
+  private applyPowerUp(type: PowerUpType, collector?: Tank): void {
     const w = this.world
-    const p = w.player
+    const p = collector ?? w.player
     if (!p) return
+    const isP1 = p === w.player
 
     switch (type) {
       case 'star':
@@ -1807,7 +1885,8 @@ export class Simulation {
           w.difficultyKey === 'classic' && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
         if (!atCap) {
           p.level = (p.level ?? 0) + 1
-          w.playerLevel = p.level
+          if (isP1) w.playerLevel = p.level
+          else w.playerLevel2 = p.level
           const stats = profileToStats(
             resolveProfile('player', p.level),
             'player',
@@ -1876,7 +1955,9 @@ export class Simulation {
         break
 
       case 'tank':
-        w.lives++
+        // Q1: lives go to the collector's pool (§3.1)
+        if (isP1) w.lives++
+        else w.lives2++
         break
 
       case 'fence':
@@ -2038,36 +2119,75 @@ export class Simulation {
     if (w.tileMap.isBaseDestroyed()) {
       w.state = 'gameover'
       w.gameOverTimer = 3000
-      w.saveHighScore()
+      if (!w.coop) w.saveHighScore()
       this.createExplosion(FIELD / 2, FIELD - CELL * 2, 'big')
       return
     }
 
-    // Player destroyed
-    if (w.player && !w.player.alive) {
-      // 同归于尽 (DECISIONS.md §31): passively release ALL accumulated
-      // sacrifice items, destroying enemies + brick walls within a radius.
-      this.triggerSacrificeAoE(w.player)
-      // A dead player can't keep a barrage running — cancel any active frenzy.
-      w.frenzyTimer = 0
-      w.frenzyShotsLeft = 0
+    // --- Per-player death handling (Lie-Back-Win-Mode §3.2) ---
+    // Process each player independently, then check life-sharing.
+    const p1Dead = w.player && !w.player.alive
+    const p2Dead = w.coop && w.player2 && !w.player2.alive
+
+    if (p1Dead) {
+      this.triggerSacrificeAoE(w.player!)
+      // Cancel frenzy for this player (per-tank frenzy, §7.1 Q9)
+      w.player!.frenzyTimer = 0
+      w.player!.frenzyShotsLeft = 0
       w.lives--
+      if (w.lives > 0) {
+        w.playerLevel = w.difficulty.playerStartLevel
+        w.spawnPlayer()
+        w.player!.shieldTimer = RESPAWN_SHIELD_MS
+      }
+    }
+
+    if (p2Dead) {
+      this.triggerSacrificeAoE(w.player2!)
+      w.player2!.frenzyTimer = 0
+      w.player2!.frenzyShotsLeft = 0
+      w.lives2--
+      if (w.lives2 > 0) {
+        w.playerLevel2 = w.difficulty.playerStartLevel
+        w.spawnPlayer2()
+        w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+      }
+    }
+
+    // --- Life sharing (§3.2): if one player is out and the other has > 2 lives ---
+    if (w.coop) {
+      // Player out, God has lives to share
+      if (w.lives <= 0 && !w.player?.alive && w.lives2 > 2) {
+        w.lives2--
+        w.lives = 1
+        w.playerLevel = w.difficulty.playerStartLevel
+        w.spawnPlayer()
+        w.player!.shieldTimer = RESPAWN_SHIELD_MS
+      }
+      // God out, player has lives to share
+      if (w.lives2 <= 0 && !w.player2?.alive && w.lives > 2) {
+        w.lives--
+        w.lives2 = 1
+        w.playerLevel2 = w.difficulty.playerStartLevel
+        w.spawnPlayer2()
+        w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+      }
+      // Game over: both players dead and cannot share
+      // Lie-Back-Win-Mode Q4: coop games never save high scores.
+      const bothDead = w.lives <= 0 && !w.player?.alive && w.lives2 <= 0 && !w.player2?.alive
+      if (bothDead) {
+        w.state = 'gameover'
+        w.gameOverTimer = 3000
+        return
+      }
+    } else {
+      // Single-player game over (original logic)
       if (w.lives <= 0) {
         w.state = 'gameover'
         w.gameOverTimer = 3000
-        w.saveHighScore()
-      } else {
-        // Star buff does NOT persist across respawns (user bug fix): losing the
-        // tank discards ALL earned star upgrades and reverts the player to the
-        // difficulty's starting level — classic Battle City behaviour (death
-        // resets the tank to its baseline form). The respawned player is then
-        // rebuilt from this reset level; only the difficulty baseline remains.
-        w.playerLevel = w.difficulty.playerStartLevel
-        // Respawn player
-        w.spawnPlayer()
-        w.player.shieldTimer = RESPAWN_SHIELD_MS
+        if (!w.coop) w.saveHighScore()
+        return
       }
-      return
     }
 
     // Stage clear — all (non-extra) enemies defeated. Accompanying "balance"
