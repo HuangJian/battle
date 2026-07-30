@@ -1,7 +1,7 @@
 import type { World } from '../game/World'
 import type { Tank } from '../types'
 import type { Direction } from '../constants'
-import { CELL, TANK, DIR_VECTORS, FIELD } from '../constants'
+import { CELL, TANK, DIR_VECTORS, FIELD, GRID } from '../constants'
 import { aabb, snap } from '../utils/helpers'
 import type { Perception, Situation, BulletObservation, IntelligenceConfig } from './types'
 
@@ -85,10 +85,7 @@ export function canStep(
 }
 
 /** Result of scanning ahead along a direction. */
-export interface ScanResult {
-  hit: 'none' | 'base' | 'player' | 'decoy' | 'wall' | 'steel'
-  dist: number
-}
+export type ScanHit = 'none' | 'base' | 'player' | 'decoy' | 'wall' | 'steel'
 
 /**
  * Step along `dir` (in CELL increments) up to `maxDist` px and report the
@@ -97,8 +94,11 @@ export interface ScanResult {
  * are skipped. Other enemy tanks never block enemy bullets, so they are
  * ignored — only the player tank and terrain matter for an enemy's line of
  * fire.
+ *
+ * Returns the hit type as a string (no object allocation) — the caller
+ * (`analyze`) only checks the hit category, never the distance.
  */
-export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: number): ScanResult {
+export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: number): ScanHit {
   const v = DIR_VECTORS[dir]
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
@@ -108,16 +108,19 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     const cy = sy + v.dy * d
     const col = Math.floor(cx / CELL)
     const row = Math.floor(cy / CELL)
+    // Out-of-bounds is treated as steel (impassable) — matches TileMap.get's
+    // behavior for the original string grid.
+    if (col < 0 || col >= GRID || row < 0 || row >= GRID) return 'steel'
     const tt = world.tileMap.get(col, row)
-    if (tt === 'base') return { hit: 'base', dist: d }
-    if (tt === 'brick') return { hit: 'wall', dist: d }
-    if (tt === 'steel') return { hit: 'steel', dist: d }
+    if (tt === 'base') return 'base'
+    if (tt === 'brick') return 'wall'
+    if (tt === 'steel') return 'steel'
     if (
       player &&
       player.alive &&
       aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)
     ) {
-      return { hit: 'player', dist: d }
+      return 'player'
     }
     // Decoy (诱饵): a fake tank that draws enemy fire. If an enemy's line of
     // fire crosses a decoy, the decoy is a valid (and desirable) target so the
@@ -127,15 +130,37 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     for (const dec of world.allies) {
       if (!dec.alive || !dec.isDecoy || dec.spawnTimer > 0) continue
       if (aabb(cx - 1, cy - 1, 2, 2, dec.x, dec.y, dec.w, dec.h)) {
-        return { hit: 'decoy', dist: d }
+        return 'decoy'
       }
     }
   }
-  return { hit: 'none', dist: maxDist }
+  return 'none'
 }
 
-/** Build the observation snapshot for one tank. */
-export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Perception {
+// Hoisted constant — avoids allocating a 4-element array on every perceive call.
+const PERCEIVE_DIRS: readonly Direction[] = ['up', 'down', 'left', 'right']
+
+/** Compute open directions (4 × canStep). Exported for lazy on-demand use
+ * by reactiveDodge when perceive skipped this computation (perf: the scan
+ * is ~100 ops but only needed by throttled tacticalThink or rare threat-dodge). */
+export function computeOpenDirs(world: World, tank: Tank, all: Tank[]): Direction[] {
+  const openDirs: Direction[] = []
+  for (let i = 0; i < PERCEIVE_DIRS.length; i++) {
+    if (canStep(world, tank, PERCEIVE_DIRS[i], true, all)) openDirs.push(PERCEIVE_DIRS[i])
+  }
+  return openDirs
+}
+
+/** Build the observation snapshot for one tank.
+ * When `computeOpenDirs` is false, the expensive 4 × canStep scan is skipped
+ * (openDirs = []). The caller (reactiveDodge) must call computeOpenDirs()
+ * on demand if it needs openDirs on a tick where perceive skipped it. */
+export function perceive(
+  world: World,
+  tank: Tank,
+  cfg: IntelligenceConfig,
+  needOpenDirs = true,
+): Perception {
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
   const player = world.player
@@ -162,21 +187,15 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
     if (dist > range) continue
     threats.push({ x: bx, y: by, dir: b.dir, aligned: true, approaching: true, distance: dist })
   }
-  threats.sort((a, b) => a.distance - b.distance)
+  // Skip sort when 0 or 1 threats — avoids V8 sort overhead on empty arrays.
+  if (threats.length > 1) threats.sort((a, b) => a.distance - b.distance)
 
-  // Scan all other live tanks ONCE and reuse the list for both teammate
-  // classification and canStep's tank-blocking checks. Previously perceive
-  // rebuilt world.allTanks (a fresh array) and rescanned it ~5× per enemy per
-  // tick (4× in canStep for openDirs + 1× here). With many enemies this was
-  // the dominant per-tick cost. Behavior is unchanged: `others` is exactly
-  // the set canStep would iterate (all other live tanks, in the same order).
+  // Reuse the allTanks buffer directly instead of building a filtered `others`
+  // array. canStep already skips dead/spawning/self entries with the same
+  // filter (`o === tank || !o.alive || o.spawnTimer > 0`), so passing `all`
+  // yields identical results. This eliminates one array allocation + N pushes
+  // per perceive call (~550K allocs over a 30-game batch).
   const all = world.allTanks
-  const others: Tank[] = []
-  for (let i = 0; i < all.length; i++) {
-    const o = all[i]
-    if (o === tank || !o.alive || o.spawnTimer > 0) continue
-    others.push(o)
-  }
 
   const teammates: Perception['teammates'] = []
   let congestion = 0
@@ -184,8 +203,9 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
   // excluded from the teammate list below (they are not fellow enemies).
   let nearestDecoy: { x: number; y: number } | null = null
   let nearestDecoyDist = Infinity
-  for (let i = 0; i < others.length; i++) {
-    const o = others[i]
+  for (let i = 0; i < all.length; i++) {
+    const o = all[i]
+    if (o === tank || !o.alive || o.spawnTimer > 0) continue
     if (o.isPlayer) continue
     if (o.isDecoy) {
       const d = manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2)
@@ -199,11 +219,7 @@ export function perceive(world: World, tank: Tank, cfg: IntelligenceConfig): Per
     if (manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2) < CELL * 8) congestion++
   }
 
-  const openDirs: Direction[] = []
-  const dirs: Direction[] = ['up', 'down', 'left', 'right']
-  for (const d of dirs) {
-    if (canStep(world, tank, d, true, others)) openDirs.push(d)
-  }
+  const openDirs: Direction[] = needOpenDirs ? computeOpenDirs(world, tank, all) : []
 
   return {
     selfX: sx,
@@ -238,10 +254,10 @@ export function analyze(
 
   const losRange = cfg.predictionDepth * CELL + TANK
   const baseLOS = scanAhead(world, tank, tank.dir, losRange)
-  const baseInLineOfFire = baseLOS.hit === 'base'
-  const playerInLineOfFire = baseLOS.hit === 'player'
-  const decoyInLineOfFire = baseLOS.hit === 'decoy'
-  const wallInLineOfFire = baseLOS.hit === 'wall'
+  const baseInLineOfFire = baseLOS === 'base'
+  const playerInLineOfFire = baseLOS === 'player'
+  const decoyInLineOfFire = baseLOS === 'decoy'
+  const wallInLineOfFire = baseLOS === 'wall'
 
   // Path blocked by a breakable brick directly ahead toward the objective?
   const objX = p.hasBase ? p.baseX : p.playerX
@@ -251,7 +267,7 @@ export function analyze(
   // scan already covers it, so reuse it instead of re-walking the same line.
   // Result is identical to scanning objDir again (pure perf win).
   const ahead = objDir === tank.dir ? baseLOS : scanAhead(world, tank, objDir, losRange)
-  const pathBlocked = ahead.hit === 'wall'
+  const pathBlocked = ahead === 'wall'
 
   const threat = p.threats.length > 0 ? p.threats[0] : null
   const threatDir: Direction | null = null // computed by the decision layer (needs objective)

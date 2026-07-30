@@ -378,3 +378,49 @@ Game states: `'menu' | 'playing' | 'paused' | 'stageclear' | 'gameover' | 'victo
 > Simple beats clever. Readable in six months is worth more than elegant today. (MANIFEST §10)
 
 When this file and your instincts disagree, this file wins. When this file and the MANIFEST disagree, the MANIFEST wins. When the MANIFEST is silent, choose the option that keeps the game small, the architecture clean, and the player smiling — then write it down in `DECISIONS.md` so the next agent does not have to re-derive it.
+
+---
+
+## 14. Performance Anti-Patterns — Hot-Path Rules
+
+> The God-AI tuning loop runs thousands of headless simulations. Any per-tick allocation or redundant scan is amplified ×millions. The rules below were discovered via `bun --cpu-prof` profiling + determinism-signature verification (see `tools/perf/perf-optimize-godai.md`). Violating them in hot paths is a bug, even if the tests pass.
+
+### 14.1 No array allocations in per-tick functions
+
+Functions called once per enemy per tick (or once per tick for the God AI) must not allocate arrays. This includes:
+
+- **Constant arrays**: `const dirs = ['up', 'down', 'left', 'right']` inside `perceive()` allocated a 4-element array ~550K times per 30-game batch. **Fix**: hoist to module scope (`const PERCEIVE_DIRS = [...]`).
+- **Filtered arrays**: `w.tanks.filter(t => t.alive && t.spawnTimer <= 0)` builds a new array every call. **Fix**: iterate the source array directly with an inline `if` guard (the guard is the same filter, just without the allocation).
+- **Result arrays**: `const open: Direction[] = []` followed by `open.push(d)` in a 2-iteration loop. **Fix**: replace with local boolean variables (`let safeA = false; let safeB = false`).
+
+> V8 does not eliminate short-lived arrays. Each `[]` + `push` creates a heap object that survives until the next minor GC. In a tight 60 FPS / 0.02ms-per-tick budget, GC pauses eat the frame.
+
+### 14.2 No object allocations for return values in hot paths
+
+Functions called per-tick that return an object (`return { enemy, wall, steel, baseWall, enemyDist }`) allocate a heap object each call. If the caller consumes the result immediately and never stores the reference:
+
+- **Fix**: use a reusable result object stored on the owning class (`self._scanResult`), or return a primitive (string/number) when only one field is used.
+
+Example: `scanAhead()` in `perception.ts` was changed to return a `ScanHit` string instead of `{ hit, dist }` — the caller (`analyze`) only checks the hit category, never the distance.
+
+### 14.3 Guard `.sort()` against empty arrays
+
+`threats.sort((a, b) => a.distance - b.distance)` on a 0-element array still pays the sort-setup cost. **Fix**: `if (threats.length > 1) threats.sort(...)`.
+
+### 14.4 V8 string interning is fast — don't fight it
+
+Terrain types are `TerrainType` strings (`'brick'`, `'steel'`, etc.). V8 interns string literals, so `type === 'brick'` is a pointer comparison — **very fast**. Attempting to "optimize" by converting to numeric codes + a `Uint8Array` lookup table + `TERRAIN_CODES.xxx` property lookups was measured as a **28% regression** because:
+
+1. `TERRAIN_CODES` is an exported mutable object — V8 cannot constant-fold `.brick` / `.steel` property lookups.
+2. The `TERRAIN_NAMES[code]` reverse-lookup in `get()` adds overhead that outweighs the flat-array cache locality benefit.
+3. `getRaw()` method-call overhead + bounds checking is not cheaper than the original `get()` + inlined `blocksTank()`.
+
+**Rule**: keep terrain as strings in the TileMap. If you want numeric encoding for a specific hot path, use inline numeric literals (`=== 1`, `=== 2`) — never `TERRAIN_CODES.xxx` — and benchmark against the string baseline with the determinism-signature gate.
+
+### 14.5 Avoid `.filter()` + `.sort()` chains in per-tick paths
+
+`evaluateGoals()` in `TacticalIntelligence` builds a 7-element `scores` array and sorts it every tactical-think cycle. While this is throttled (~5s interval, not per-tick), the pattern of `array.filter().sort()` in any per-tick path is a red flag. Prefer inline scoring with a running best.
+
+### 14.6 Reuse `allTanks` buffer — don't rebuild
+
+`World.allTanks` is a getter that rebuilds `_allTanksBuf` on each call. If multiple consumers in the same tick need the tank list, call the getter once and pass the reference. The `perceive()` function does this: `const all = world.allTanks` then passes `all` to `canStep()` 4× (instead of having `canStep` call the getter 4×).

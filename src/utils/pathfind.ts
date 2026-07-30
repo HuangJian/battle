@@ -57,6 +57,7 @@ function key(col: number, row: number): string {
  * `breakBrick`: when true, brick is treated as passable (the player can fire
  * to destroy it). Steel, water, and base always block.
  */
+
 function isPassable(
   tileMap: TileMap,
   col: number,
@@ -89,6 +90,22 @@ const STEPS: ReadonlyArray<readonly [number, number, Direction]> = [
 
 // ---- public API --------------------------------------------------------------
 
+// Module-level reusable A* buffers (perf): findPath is called from the God AI
+// every replan interval and from navigateTowards. Each call previously
+// allocated 6 typed arrays (≈11 KB) that became garbage immediately after.
+// findPath is synchronous and never reentrant (God AI think() and the offline
+// level generator are the only callers, never concurrent), so the buffers can
+// be safely reused across calls. The search result is byte-for-byte identical
+// — only the allocations changed.
+const PF_N = GRID * GRID
+const _pfGScore = new Float64Array(PF_N)
+const _pfFScore = new Float64Array(PF_N)
+const _pfCameFrom = new Int32Array(PF_N)
+const _pfCameDir = new Uint8Array(PF_N)
+const _pfInOpen = new Uint8Array(PF_N)
+const _pfClosed = new Uint8Array(PF_N)
+const _pfOpenList: number[] = []
+
 /**
  * A* pathfinding: returns the sequence of `Direction`s to move a 2×2-block
  * tank from `from` to `to`, or `null` if no path exists.
@@ -118,20 +135,26 @@ export function findPath(
   // tie-break is identical to the original Set-iterated implementation and
   // the returned Direction[] sequence is byte-for-byte the same. Only the
   // allocations changed — search result is preserved.
-  const N = GRID * GRID
+  //
+  // Reusable module-level buffers are reset here. Only the 3 arrays whose
+  // "unvisited" default is non-zero need resetting (gScore→Infinity,
+  // closed→0, inOpen→0). fScore/cameFrom/cameDir are only read for cells
+  // discovered this call (they're written before read), so stale values from
+  // a previous call are never observed.
+  const gScore = _pfGScore
+  gScore.fill(Infinity)
+  const fScore = _pfFScore
+  const cameFrom = _pfCameFrom
+  const cameDir = _pfCameDir
+  const inOpen = _pfInOpen
+  inOpen.fill(0)
+  const closed = _pfClosed
+  closed.fill(0)
+  const openList = _pfOpenList
+  openList.length = 0
   // Local integer key for the hot loop (kept separate from `key()` so the
   // offline helpers can keep their string-keyed external contract).
   const cellKey = (col: number, row: number): number => row * GRID + col
-  const gScore = new Float64Array(N).fill(Infinity)
-  const fScore = new Float64Array(N)
-  const cameFrom = new Int32Array(N).fill(-1)
-  // Direction taken to reach each cell, encoded as the STEPS index (0..3).
-  const cameDir = new Uint8Array(N)
-  const inOpen = new Uint8Array(N)
-  const closed = new Uint8Array(N)
-  // Open set preserving insertion order; stale (popped) entries are skipped
-  // via the `closed` flag during the linear scan.
-  const openList: number[] = []
 
   const startKey = cellKey(from.col, from.row)
   const goalKey = cellKey(to.col, to.row)

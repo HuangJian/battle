@@ -422,6 +422,25 @@ export class GodAIInput implements InputLike {
   /** Debug: branch counters for profiling. */
   branchCounts = { dodge: 0, t8: 0, aggressive: 0, t2a: 0, powerup: 0, navigate: 0, dead: 0 }
 
+  /** Reusable scan result for scanAheadImpl — avoids allocating a result object on every call. */
+  _scanResult: {
+    enemy: boolean
+    wall: boolean
+    steel: boolean
+    baseWall: boolean
+    enemyDist: number
+  } = {
+    enemy: false,
+    wall: false,
+    steel: false,
+    baseWall: false,
+    enemyDist: Infinity,
+  }
+
+  /** Reusable buffer for scanAheadImpl's per-offset aligned-tank pre-filter.
+   * Reset (via alignedCount=0) at the start of each offset — no allocation. */
+  _scanAligned: Tank[] = []
+
   /**
    * Cluster C (perf): per-tick snapshot of live, fully-spawned enemy tanks —
    * identical to `w.tanks.filter(t => t.alive && t.spawnTimer <= 0)` in both
@@ -440,6 +459,27 @@ export class GodAIInput implements InputLike {
    * player in practice — gets the exact same obstacle set as before).
    */
   _otherTanks: Tank[] = []
+
+  /**
+   * Per-tick lazy caches (perf): these methods are pure functions of World
+   * state and are called multiple times per tick from different branches of
+   * think(). The player doesn't move during think() (movement is applied
+   * later in Simulation.updateMovement), so caching within a tick is
+   * byte-identical. Invalidated in endFrame() alongside _thought.
+   */
+  _baseUnderThreatCache: boolean | null = null
+  _fastThreatCache: boolean | null = null
+  _playerCellCache: Cell = { col: 0, row: 0 }
+  _playerCellValid = false
+  /** Reusable buffer for tankCellImpl — avoids allocating a {col,row} per call
+   * (tankCell is called ~15× per think, many in enemy loops). Callers must
+   * consume the result before calling tankCell again. */
+  _tankCellBuf: Cell = { col: 0, row: 0 }
+  /** Per-tick canMoveDir cache for the player (perf): bitmask. Bit i
+   * (0=up,1=down,2=left,3=right) set in _canMoveComputed when computed,
+   * in _canMoveResult when passable. Invalidated in endFrame(). */
+  _canMoveComputed = 0
+  _canMoveResult = 0
 
   constructor(world: World, params: GodAIParams = DEFAULT_GOD_AI_PARAMS) {
     this.world = world
@@ -486,6 +526,11 @@ export class GodAIInput implements InputLike {
 
   endFrame(): void {
     this._thought = false
+    // Invalidate per-tick lazy caches.
+    this._baseUnderThreatCache = null
+    this._fastThreatCache = null
+    this._playerCellValid = false
+    this._canMoveComputed = 0
   }
 
   // ================================================================
@@ -544,7 +589,9 @@ export class GodAIInput implements InputLike {
         ((p.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
       let inFlight = 0
       for (const b of w.bullets) {
-        if (b.alive && b.ownerId === p.id) inFlight++
+        if (b.alive && b.ownerId === p.id) {
+          if (++inFlight >= cap) break // early exit — cap reached
+        }
       }
       onCooldown = inFlight >= cap
     } else {
@@ -944,6 +991,9 @@ export class GodAIInput implements InputLike {
    */
   isBaseUnderThreat(): boolean {
     if (!this.hasBase) return false
+    // Per-tick cache: called up to 3× per tick (think skipT2a, think powerup
+    // gate, selectTarget). Pure function of World state — byte-identical.
+    if (this._baseUnderThreatCache !== null) return this._baseUnderThreatCache
     const bc = BASE_POS.col
     const br = BASE_POS.row
     // P4: race-to-base check — player's distance to the base. If the player
@@ -954,11 +1004,15 @@ export class GodAIInput implements InputLike {
     // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
     // if think() hasn't populated it yet — should never happen in normal flow).
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
+    let result = false
     for (const t of list) {
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = this.tankCell(t)
       // Static box: close lateral threat (original P1/P2.3 rule).
-      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true
+      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
+        result = true
+        break
+      }
       // P4: race check — enemy is in the base region AND would beat the
       // player back to the base (with safety margin). Catches flanking
       // runners along the map edges that the static box misses (S6 root
@@ -968,10 +1022,12 @@ export class GodAIInput implements InputLike {
         enemyDistToBase <= this.params.baseRaceRangeCells &&
         playerDistToBase + this.params.baseRaceMarginCells >= enemyDistToBase
       ) {
-        return true
+        result = true
+        break
       }
     }
-    return false
+    this._baseUnderThreatCache = result
+    return result
   }
 
   /**
@@ -982,20 +1038,31 @@ export class GodAIInput implements InputLike {
    */
   hasFastThreatNearBase(): boolean {
     if (!this.hasBase) return false
+    // Per-tick cache: called once per tick from think() (only when
+    // guardBandMode > 0). Pure function of World state — byte-identical.
+    if (this._fastThreatCache !== null) return this._fastThreatCache
     const bc = BASE_POS.col
     const br = BASE_POS.row
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
+    let result = false
     for (const t of list) {
       if (!t.alive || t.spawnTimer > 0) continue
       if (t.kind !== 'fast' && t.kind !== 'power') continue
       const tc = this.tankCell(t)
       // Static box: within 3 cols of base AND row >= 18
-      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) return true
+      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
+        result = true
+        break
+      }
       // Race check: within baseRaceRangeCells of base
       const enemyDist = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
-      if (enemyDist <= this.params.baseRaceRangeCells) return true
+      if (enemyDist <= this.params.baseRaceRangeCells) {
+        result = true
+        break
+      }
     }
-    return false
+    this._fastThreatCache = result
+    return result
   }
 
   // --- SmartThreatModel (Phase A, plan/God-AI-Next-Round §3) ---

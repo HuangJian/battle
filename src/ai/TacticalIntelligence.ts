@@ -20,7 +20,7 @@ import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
-import { perceive, analyze, dirToward, manhattan } from './perception'
+import { perceive, analyze, dirToward, manhattan, computeOpenDirs } from './perception'
 
 /**
  * ai/TacticalIntelligence.ts — the decision pipeline.
@@ -57,6 +57,12 @@ export class TacticalIntelligence {
       return
     }
 
+    // Compute allTanks once per tick — isTankAhead/canStep call this getter
+    // repeatedly (N enemies × M direction checks). The buffer is stable for
+    // the duration of this update (no tanks are added/removed during AI
+    // planning — movement/bullets happen later in the tick).
+    const allTanks = world.allTanks
+
     // Command authority (world.activeCommanderId) is recomputed by Simulation
     // once per tick BEFORE this update runs — the AI layer only reads it
     // (One-Author invariant, AI-Tier-System-Revision §4).
@@ -65,7 +71,7 @@ export class TacticalIntelligence {
       if (!tank.alive || tank.spawnTimer > 0 || !tank.aiState) continue
       if (tank.aiState.level === 'none') {
         // Classic branch (§3): minimal wander+fire, no tactical pipeline.
-        this.updateNoneTank(world, tank, fire, world.rules)
+        this.updateNoneTank(world, tank, fire, world.rules, allTanks)
       } else {
         this.updateTank(world, tank, fire)
       }
@@ -87,6 +93,7 @@ export class TacticalIntelligence {
     tank: Tank,
     fire: (tank: Tank) => void,
     rules: GameplayRules,
+    allTanks: Tank[],
   ): void {
     const brain = tank.aiState!
     brain.thinkTimer -= this.dt
@@ -102,7 +109,7 @@ export class TacticalIntelligence {
     const ny = gy + v.dy * CELL
     const terrainBlocked =
       !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
-    const tankBlocked = !terrainBlocked && isTankAhead(world, tank, nx, ny)
+    const tankBlocked = !terrainBlocked && isTankAhead(allTanks, tank, nx, ny)
     const blocked = terrainBlocked || tankBlocked
 
     // Direction re-roll trigger: FC-1985 faithful mode re-rolls ONLY on
@@ -121,7 +128,7 @@ export class TacticalIntelligence {
         // Also filter out directions blocked by other tanks (except the
         // tank itself). This prevents the AI from re-choosing a direction
         // that is immediately blocked by another tank.
-        if (isTankAhead(world, tank, ox, oy)) continue
+        if (isTankAhead(allTanks, tank, ox, oy)) continue
         open.push(d)
       }
       if (open.length === 0) {
@@ -174,7 +181,12 @@ export class TacticalIntelligence {
     }
 
     // --- Observe once; reuse for tactical + reactive + firing ---
-    const p = perceive(world, tank, cfg)
+    // Perf: skip the expensive 4 × canStep openDirs scan on most ticks.
+    // openDirs is only needed by chooseDirection (throttled tacticalThink)
+    // and reactiveDodge (only when a bullet threat exists). On the rare ticks
+    // where reactiveDodge needs it but perceive skipped it, compute on demand.
+    const willTacticalThink = brain.thinkTimer <= 0
+    const p = perceive(world, tank, cfg, willTacticalThink)
     const s = analyze(world, tank, p, cfg)
 
     // --- Strategic layer (stable long-term objective) — active Commander
@@ -541,23 +553,43 @@ export class TacticalIntelligence {
       return
     }
 
+    // Perf: openDirs may be empty if perceive skipped the canStep scan.
+    // Compute on demand — this only runs when a threat actually exists.
+    let openDirs = p.openDirs
+    if (openDirs.length === 0) {
+      openDirs = computeOpenDirs(world, tank, world.allTanks)
+      p.openDirs = openDirs
+    }
+
     const bullet = s.threat
     const vertical = bullet.dir === 'up' || bullet.dir === 'down'
-    const candidates: Direction[] = vertical ? ['left', 'right'] : ['up', 'down']
-    const safe = candidates.filter((d) => p.openDirs.includes(d))
+    // Use local variables instead of allocating arrays (AGENTS §14.1).
+    const candA: Direction = vertical ? 'left' : 'up'
+    const candB: Direction = vertical ? 'right' : 'down'
 
-    if (safe.length > 0) {
+    // Check which perpendicular candidates are in openDirs.
+    const aOpen = openDirs.includes(candA)
+    const bOpen = openDirs.includes(candB)
+
+    if (aOpen || bOpen) {
       // Prefer the escape that keeps making progress toward the objective.
-      safe.sort(
-        (a, b) =>
-          this.dirProgress(tank, a, brain.targetX, brain.targetY) -
-          this.dirProgress(tank, b, brain.targetX, brain.targetY),
-      )
-      brain.currentDir = safe[0]
-    } else if (p.openDirs.length > 0) {
+      if (aOpen && bOpen) {
+        const progA = this.dirProgress(tank, candA, brain.targetX, brain.targetY)
+        const progB = this.dirProgress(tank, candB, brain.targetX, brain.targetY)
+        brain.currentDir = progA <= progB ? candA : candB
+      } else {
+        brain.currentDir = aOpen ? candA : candB
+      }
+    } else if (openDirs.length > 0) {
       // No perpendicular escape — step any open way that isn't into the bullet.
-      const away = p.openDirs.filter((d) => d !== bullet.dir)
-      brain.currentDir = away.length > 0 ? away[0] : p.openDirs[0]
+      let chosen: Direction | null = null
+      for (let oi = 0; oi < openDirs.length; oi++) {
+        if (openDirs[oi] !== bullet.dir) {
+          chosen = openDirs[oi]
+          break
+        }
+      }
+      brain.currentDir = chosen ?? openDirs[0]
     }
 
     brain.dodgeLock = DODGE_LOCK_MS
@@ -800,9 +832,11 @@ function clamp(v: number, min: number, max: number): number {
  * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
  * while modern modes keep the strong downward pull (down: 3, up: 0.35).
  */
-/** True if a live tank (other than `self`) occupies the given cell region. */
-function isTankAhead(world: World, self: Tank, x: number, y: number): boolean {
-  for (const t of world.allTanks) {
+/** True if a live tank (other than `self`) occupies the given cell region.
+ * Accepts the pre-computed allTanks buffer to avoid N getter calls per tick. */
+function isTankAhead(allTanks: Tank[], self: Tank, x: number, y: number): boolean {
+  for (let i = 0; i < allTanks.length; i++) {
+    const t = allTanks[i]
     if (t === self || !t.alive) continue
     if (aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) return true
   }

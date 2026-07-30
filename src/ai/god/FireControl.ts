@@ -91,10 +91,24 @@ export function findEnemyDirectionImpl(
   return bestDir
 }
 
+// Hoisted constants — avoids allocating 2-element tuple arrays on every call.
+const VERTICAL_OFFSETS: readonly (readonly [number, number])[] = [
+  [-CELL / 2, 0],
+  [CELL / 2, 0],
+]
+const HORIZONTAL_OFFSETS: readonly (readonly [number, number])[] = [
+  [0, -CELL / 2],
+  [0, CELL / 2],
+]
+
 /**
  * Scan ahead in a direction for enemies, walls, and base protection.
  * Returns what's in the line of fire, distinguishing steel from brick
  * (T11) and detecting base-protection bricks (T6).
+ *
+ * Writes into `self._scanResult` (a reusable object) to avoid allocating
+ * a result object on every call. Callers use the result immediately and
+ * never store the reference, so this is safe.
  */
 export function scanAheadImpl(
   self: GodAIInput,
@@ -105,26 +119,42 @@ export function scanAheadImpl(
   const w = self.world
   const v = DIR_VECTORS[dir]
   const vertical = dir === 'up' || dir === 'down'
+  const offsets = vertical ? VERTICAL_OFFSETS : HORIZONTAL_OFFSETS
+  const tanksArr = w.tanks
 
-  const offsets: ReadonlyArray<readonly [number, number]> = vertical
-    ? [
-        [-CELL / 2, 0],
-        [CELL / 2, 0],
-      ]
-    : [
-        [0, -CELL / 2],
-        [0, CELL / 2],
-      ]
+  const r = self._scanResult
+  r.enemy = false
+  r.wall = false
+  r.steel = false
+  r.baseWall = false
+  r.enemyDist = Infinity
 
-  let enemy = false
-  let wall = false
-  let steel = false
-  let baseWall = false
-  let enemyDist = Infinity
+  // Reusable aligned-tank buffer (perf): pre-filter tanks whose perpendicular
+  // position overlaps the scan line. For a vertical scan, the x-condition of
+  // the aabb (t.x − 1 < sx < t.x + 33) is constant per offset — if it fails,
+  // the tank can NEVER be hit at any cell step. This reduces the per-cell tank
+  // loop from O(N) to O(alignedN), where alignedN is typically 0-2. The aabb
+  // check at each cell is identical to the original — just fewer iterations.
+  const aligned = self._scanAligned
 
-  for (const [ox, oy] of offsets) {
+  for (let oi = 0; oi < offsets.length; oi++) {
+    const ox = offsets[oi][0]
+    const oy = offsets[oi][1]
     const sx = pcx + ox
     const sy = pcy + oy
+
+    // Pre-filter: collect tanks whose perpendicular axis overlaps this offset's
+    // scan line (the constant half of the aabb condition).
+    let alignedCount = 0
+    for (let ti = 0; ti < tanksArr.length; ti++) {
+      const t = tanksArr[ti]
+      if (!t.alive || t.spawnTimer > 0) continue
+      if (vertical) {
+        if (sx > t.x - 1 && sx < t.x + 33) aligned[alignedCount++] = t
+      } else {
+        if (sy > t.y - 1 && sy < t.y + 33) aligned[alignedCount++] = t
+      }
+    }
 
     for (let d = CELL; d <= FIELD; d += CELL) {
       const cx = sx + v.dx * d
@@ -136,31 +166,32 @@ export function scanAheadImpl(
       const terrain = w.tileMap.get(col, row)
 
       if (terrain === 'steel') {
-        steel = true
-        wall = true
+        r.steel = true
+        r.wall = true
         break
       }
       if (terrain === 'brick') {
         // T6: check if this brick is protecting the base.
         if (self.isBaseProtectionBrick(col, row)) {
-          baseWall = true
+          r.baseWall = true
         }
-        wall = true
+        r.wall = true
         break
       }
       if (terrain === 'base') {
-        baseWall = true
-        wall = true
+        r.baseWall = true
+        r.wall = true
         break
       }
 
-      // Check for enemy tank at this position.
+      // Check only pre-filtered aligned tanks (not all tanks). When
+      // alignedCount is 0 this loop body is skipped entirely.
       let found = false
-      for (const t of w.tanks) {
-        if (!t.alive || t.spawnTimer > 0) continue
+      for (let ai = 0; ai < alignedCount; ai++) {
+        const t = aligned[ai]
         if (aabb(cx - 1, cy - 1, 2, 2, t.x, t.y, t.w, t.h)) {
-          if (d / CELL < enemyDist) enemyDist = d / CELL
-          enemy = true
+          if (d / CELL < r.enemyDist) r.enemyDist = d / CELL
+          r.enemy = true
           found = true
           break
         }
@@ -169,7 +200,7 @@ export function scanAheadImpl(
     }
   }
 
-  return { enemy, wall, steel, baseWall, enemyDist }
+  return r
 }
 
 /**

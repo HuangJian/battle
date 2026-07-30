@@ -941,7 +941,11 @@ export class Simulation {
 
   private updateMovement(): void {
     const w = this.world
-    for (const tank of w.allTanks) {
+    // Cache allTanks once — tankHitsTank calls the getter per moving tank.
+    // The buffer is stable during movement (no tanks added/removed).
+    const allTanks = w.allTanks
+    for (let ti = 0; ti < allTanks.length; ti++) {
+      const tank = allTanks[ti]
       if (!tank.alive || tank.spawnTimer > 0) continue
       // A non-moving tank with residual ice velocity must still be simulated
       // so it keeps gliding to a stop; only a fully-stopped, idle tank is skipped.
@@ -1031,7 +1035,7 @@ export class Simulation {
       }
 
       // Check tank-tank collision
-      if (this.tankHitsTank(tank, newX, newY)) {
+      if (this.tankHitsTank(tank, newX, newY, allTanks)) {
         if (axis === 'x') tank.vx = 0
         else tank.vy = 0
         if (tank.aiState) tank.aiState.thinkTimer = 0
@@ -1044,9 +1048,9 @@ export class Simulation {
     }
   }
 
-  private tankHitsTank(self: Tank, newX: number, newY: number): boolean {
-    const w = this.world
-    for (const other of w.allTanks) {
+  private tankHitsTank(self: Tank, newX: number, newY: number, allTanks: Tank[]): boolean {
+    for (let i = 0; i < allTanks.length; i++) {
+      const other = allTanks[i]
       if (other === self || !other.alive) continue
       // NOTE: spawning tanks (spawnTimer > 0) DO block movement. Previously
       // they were skipped here, which let a moving tank drive *into* a tank
@@ -1182,6 +1186,10 @@ export class Simulation {
 
   private updateBullets(): void {
     const w = this.world
+    // Cache allTanks once — bulletHitsTank calls the getter per bullet.
+    // The buffer is stable during bullet updates (tanks may be flagged dead
+    // but are not removed from the array until removeDeadEntities).
+    const allTanks = w.allTanks
     for (const bullet of w.bullets) {
       if (!bullet.alive) continue
 
@@ -1204,7 +1212,7 @@ export class Simulation {
       }
 
       // Check tank collision
-      if (this.bulletHitsTank(bullet)) {
+      if (this.bulletHitsTank(bullet, allTanks)) {
         bullet.alive = false
         continue
       }
@@ -1297,9 +1305,10 @@ export class Simulation {
     }
   }
 
-  private bulletHitsTank(bullet: Bullet): boolean {
+  private bulletHitsTank(bullet: Bullet, allTanks: Tank[]): boolean {
     const w = this.world
-    for (const tank of w.allTanks) {
+    for (let i = 0; i < allTanks.length; i++) {
+      const tank = allTanks[i]
       if (!tank.alive || tank.id === bullet.ownerId) continue
       if (tank.spawnTimer > 0) continue // spawning = invulnerable
 

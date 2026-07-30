@@ -71,6 +71,19 @@ export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
 
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
+
+    // Directional pre-filter (perf): the base sits at rows 24-25 (bottom of
+    // the field). Skip bullets that physically cannot reach it, avoiding the
+    // per-cell trajectory scan for the majority of in-flight bullets.
+    // - 'up' bullets move away from the base → never a threat.
+    // - 'left'/'right' bullets stay at their row → only a threat if already
+    //   in the base's row band (≥ row 22, generous — base is rows 24-25).
+    // - 'down' bullets move toward the base → always potentially a threat.
+    // Strict superset: any filtered bullet provably cannot cross the base
+    // area or hit base terrain, so no threat is missed.
+    if (b.dir === 'up') continue
+    if ((b.dir === 'left' || b.dir === 'right') && bcy < 22 * CELL) continue
+
     const v = DIR_VECTORS[b.dir]
 
     // Project the bullet's trajectory forward and check if it crosses the base.
@@ -185,49 +198,73 @@ export function dodgeDirectionImpl(
   const w = self.world
   const p = w.player!
   const vertical = bullet.dir === 'up' || bullet.dir === 'down'
-  const candidates: Direction[] = vertical ? ['left', 'right'] : ['up', 'down']
+  // Use module-level constants instead of allocating arrays on every dodge.
+  const candA: Direction = vertical ? 'left' : 'up'
+  const candB: Direction = vertical ? 'right' : 'down'
 
   // Try each candidate; prefer the one that's passable AND safe (M3).
-  const open: Direction[] = []
-  for (const d of candidates) {
-    if (self.canMoveDir(p, d) && self.isSafeDir(pcx, pcy, d, bullet.id)) {
-      open.push(d)
-    }
-  }
+  // Use local booleans instead of allocating an `open` array.
+  let safeA = false
+  let safeB = false
+  if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
+  if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
 
   // If no safe candidate, try passable but unsafe.
-  if (open.length === 0) {
-    for (const d of candidates) {
-      if (self.canMoveDir(p, d)) open.push(d)
-    }
+  if (!safeA && !safeB) {
+    if (self.canMoveDir(p, candA)) safeA = true
+    if (self.canMoveDir(p, candB)) safeB = true
   }
 
   // If still nothing, try any open direction.
-  if (open.length === 0) {
-    for (const d of ALL_DIRS) {
-      if (self.canMoveDir(p, d)) open.push(d)
+  if (!safeA && !safeB) {
+    if (self.hasBase) {
+      // Find the open direction closest to the base (replicates sort-by-distance).
+      const baseCx = BASE_POS.col * CELL + CELL
+      const baseCy = BASE_POS.row * CELL + CELL
+      let bestDist = Infinity
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (!self.canMoveDir(p, d)) continue
+        const vd = DIR_VECTORS[d]
+        const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
+        if (dist < bestDist) {
+          bestDist = dist
+        }
+      }
+      if (bestDist === Infinity) return null
+      // Re-iterate to pick the first direction with the best distance
+      // (matches sort-stable behavior: ALL_DIRS order on ties).
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (!self.canMoveDir(p, d)) continue
+        const vd = DIR_VECTORS[d]
+        const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
+        if (dist === bestDist) return d
+      }
+      return null
+    } else {
+      // No base — first open direction.
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        if (self.canMoveDir(p, ALL_DIRS[di])) return ALL_DIRS[di]
+      }
+      return null
     }
   }
-  if (open.length === 0) return null
 
+  // We have at least one perpendicular candidate (safeA or safeB).
   // Prefer the direction that keeps the player closer to the base.
-  // This prevents dodge from sending the player on a wild chase away
-  // from the defense position.
-  // Gap B: when the stage has no base, skip the base-preference sort —
-  // the first safe candidate is fine (no defense position to maintain).
   if (self.hasBase) {
     const baseCx = BASE_POS.col * CELL + CELL
     const baseCy = BASE_POS.row * CELL + CELL
-    open.sort((a, b) => {
-      const va = DIR_VECTORS[a]
-      const vb = DIR_VECTORS[b]
-      const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
-      const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
-      return distA - distB
-    })
+    const va = DIR_VECTORS[candA]
+    const vb = DIR_VECTORS[candB]
+    const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
+    const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+    if (safeA && safeB) return distA <= distB ? candA : candB
+    return safeA ? candA : candB
   }
-
-  return open[0]
+  // No base — first safe candidate.
+  return safeA ? candA : candB
 }
 
 /**

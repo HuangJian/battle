@@ -1665,3 +1665,33 @@ Supporting parameters (all S32-only via override table):
 5. **35×20 A/B (defense-priority kind weights)**: mean 86.9%→86.6% (-0.3pp), 0 stages improved, 0 stages regressed beyond noise. The smart model is neutral on all 35 stages.
 
 **Implications for future work:** The plan's Phase B (route/turn-count) and Phase C (interception geometry) are unlikely to help S32 either, because the problem isn't threat detection or target selection — it's response time in the early game wave. A more promising direction would be: (a) early-game defensive positioning (stay closer to base in first 50s), (b) proactive wall defense (detect and reinforce thin base walls), or (c) game-rule changes (base HP in classic mode). All require further investigation.
+
+## 45. Simulation Performance: Allocation Elimination (2026-07-30)
+
+**Decision:** Eliminate per-tick array/object allocations in hot AI functions. Reverted a TileMap numeric-encoding attempt that regressed due to V8 string-interning overhead.
+
+**Rationale:**
+- CPU profiling (`bun --cpu-prof`) showed `perceive` at 23.4% self-time, `scanAhead` at 6.1%, `scanAheadImpl` at 3.9%, `dodgeDirectionImpl` and `reactiveDodge` each allocating 2-3 short-lived arrays per call. Over 120 games (480K ticks × 4 enemies), this is millions of GC-pressure allocations.
+- Round 1+2 (allocation elimination): hoisted constant arrays to module scope, replaced `.filter()` with inline iteration, replaced result-object returns with primitives or reusable buffers, guarded `.sort()` against empty arrays. Measured ~25% perTick improvement (0.024ms→0.018ms on a cool machine; thermal throttling makes repeated measurements vary ±30%).
+- Round 3 (TileMap numeric encoding): changed `TerrainType[][]` to flat `Uint8Array` with `TERRAIN_CODES`/`TERRAIN_NAMES` lookup. **Reverted** because V8 interns string literals (`'brick'` === pointer comparison), making `type === 'brick'` faster than `TERRAIN_CODES.xxx` property lookups (which V8 can't constant-fold on exported mutable objects). The `getRaw()` method-call overhead + `TERRAIN_NAMES` reverse-lookup in `get()` caused a net 28% regression vs the original string-based grid.
+- Anti-pattern scan: fixed `reactiveDodge` (candidates.filter → local booleans) and `selectTargetImpl` (w.tanks.filter → cached `self._enemies`). Both are behavior-preserving (determinism signature unchanged: `ticks=137139 win=3 go=27` for 30-game chaos/stage0).
+
+**Implications:** All 6 anti-patterns are documented in AGENTS.md §14 ("Performance Anti-Patterns — Hot-Path Rules") to prevent re-introduction. The `getRaw()` method remains on `TileMap` for future use if a hot path is found where numeric encoding genuinely helps (with inline numeric literals, not `TERRAIN_CODES.xxx`).
+
+## 46. Simulation Performance: Classic-Mode Caching & Pre-Filtering (2026-07-30)
+
+**Decision:** Re-baselined performance optimization to **classic mode** (the real God-AI tuning workload — `optimize-godai.ts` defaults to `classic`), then applied 7 optimizations targeting the classic-mode CPU profile. All preserve the determinism signature exactly (`ticks=190184 win=59 go=1 timeout=0` @60 games classic/stage0).
+
+**Rationale:**
+- Previous rounds (§45) measured chaos mode; the actual tuning loop runs classic, which is ~2× faster (fewer enemies, bullet-cap fire model). Classic-mode profiling revealed a different bottleneck distribution.
+- **findPath array reuse** (7.8%→2.1%): A* allocated 6 typed arrays (≈11 KB) per call. Reused module-level buffers with `.fill()` reset — zero allocation, identical search result.
+- **tankCellImpl buffer reuse** (3.1%→~0%): `tankCell` allocated a fresh `{col,row}` on every call (~15× per think, many in `selectTargetImpl` loops). Reused a single `_tankCellBuf` (same pattern as `playerCellImpl`).
+- **scanAheadImpl alignment pre-filter** (11.9%→3.6%): The per-cell tank loop (2 offsets × ≤26 cells × N tanks of aabb checks) was the #1 bottleneck after other fixes. Pre-filtering tanks by perpendicular-axis alignment (the constant half of the aabb condition) per offset reduces the loop from O(N) to O(alignedN≈0-2) per cell. The aabb check itself is unchanged — just fewer iterations.
+- **findBulletThreatToBaseImpl directional filter** (6.4%→2.6%): Skip bullets that physically cannot reach the base (up-bullets move away; left/right bullets above row 22 stay at the wrong row). Strict superset — no threat missed.
+- **canMoveDir per-tick bitmask cache** (1.4%→~0%): `canMoveDir` is called ~10× per think(), always with the player, whose position is constant during think(). A 4-bit bitmask caches the 4 directional results. **Bug found**: stale result bits from previous ticks caused false `true` returns when a direction changed from passable to blocked — fixed by clearing the bit (`&= ~bit`) on the not-passable path.
+- **onCooldown early-exit**: Break the bullet-count loop when `inFlight >= cap` (cap=1 in classic → break after first player bullet found).
+- **removeDeadEntities inline**: Inlined the 6 generic `compact<T>(arr, predicate)` calls to avoid callback overhead. No measurable change (V8 already inlined the callbacks), but kept for clarity.
+
+**Measured:** perTick 0.009ms → 0.006-0.007ms (~25-33% improvement, 60-game classic/stage0). Wall time 1737ms → ~1275ms (~27%). Noise is ±5% due to i7-4770HQ thermal throttling; determinism signature is the reliable correctness metric.
+
+**Implications:** The remaining bottlenecks (`think` 13%, `rectHitsTerrain` 8%, `updateNoneTank` 8%) are core simulation functions that are already lean — further gains would require algorithmic changes (spatial indexing, etc.) that violate "simple beats clever" (MANIFEST §10) for <2% marginal improvement.

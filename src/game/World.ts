@@ -616,24 +616,55 @@ export class World {
   }
 
   removeDeadEntities(): void {
-    // In-place compaction — avoids creating 5 new arrays every tick
-    this.compact(this.tanks, (t) => t.alive)
-    this.compact(this.allies, (t) => t.alive)
-    this.compact(this.bullets, (b) => b.alive)
-    this.compact(this.powerUps, (p) => p.alive)
-    this.compact(this.explosions, (e) => e.timer > 0)
-    this.compact(this.popups, (p) => p.timer > 0)
-  }
-
-  /** Remove elements that don't match the predicate, in-place (swap-and-pop). */
-  private compact<T>(arr: T[], predicate: (item: T) => boolean): void {
-    let w = 0
-    for (let r = 0; r < arr.length; r++) {
-      if (predicate(arr[r])) {
-        arr[w++] = arr[r]
-      }
+    // In-place compaction (swap-and-pop) — avoids creating new arrays every
+    // tick. Inlined per-array (perf): the generic `compact<T>(arr, predicate)`
+    // version paid a per-element callback-call overhead V8 could not inline
+    // (6 arrays × varying element types ⇒ polymorphic call site). Inlining the
+    // property check directly lets V8 keep it monomorphic and branch-free.
+    // Behavior is identical: keep elements matching the predicate, preserve
+    // relative order, truncate the tail.
+    let w: number
+    const tanks = this.tanks
+    w = 0
+    for (let r = 0; r < tanks.length; r++) {
+      if (tanks[r].alive) tanks[w++] = tanks[r]
     }
-    arr.length = w
+    tanks.length = w
+
+    const allies = this.allies
+    w = 0
+    for (let r = 0; r < allies.length; r++) {
+      if (allies[r].alive) allies[w++] = allies[r]
+    }
+    allies.length = w
+
+    const bullets = this.bullets
+    w = 0
+    for (let r = 0; r < bullets.length; r++) {
+      if (bullets[r].alive) bullets[w++] = bullets[r]
+    }
+    bullets.length = w
+
+    const powerUps = this.powerUps
+    w = 0
+    for (let r = 0; r < powerUps.length; r++) {
+      if (powerUps[r].alive) powerUps[w++] = powerUps[r]
+    }
+    powerUps.length = w
+
+    const explosions = this.explosions
+    w = 0
+    for (let r = 0; r < explosions.length; r++) {
+      if (explosions[r].timer > 0) explosions[w++] = explosions[r]
+    }
+    explosions.length = w
+
+    const popups = this.popups
+    w = 0
+    for (let r = 0; r < popups.length; r++) {
+      if (popups[r].timer > 0) popups[w++] = popups[r]
+    }
+    popups.length = w
   }
 
   // ---- Queries ----

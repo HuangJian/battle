@@ -12,15 +12,29 @@ import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 // call sibling methods via the public wrappers on GodAIInput.
 // ============================================================
 
-/** Get the player's grid-aligned cell (matches canMoveDir's snap). */
+/** Get the player's grid-aligned cell (matches canMoveDir's snap).
+ * Per-tick cached: the player doesn't move during think() (movement is
+ * applied later in Simulation.updateMovement), so the cell is constant
+ * within a tick. Reuses a single Cell object — callers must not mutate it. */
 export function playerCellImpl(self: GodAIInput): Cell {
+  if (self._playerCellValid) return self._playerCellCache
   const p = self.world.player!
-  return { col: Math.round(p.x / CELL), row: Math.round(p.y / CELL) }
+  self._playerCellCache.col = Math.round(p.x / CELL)
+  self._playerCellCache.row = Math.round(p.y / CELL)
+  self._playerCellValid = true
+  return self._playerCellCache
 }
 
-/** Get a tank's grid-aligned cell (consistent with playerCell). */
-export function tankCellImpl(_self: GodAIInput, t: Tank): Cell {
-  return { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+/** Get a tank's grid-aligned cell (consistent with playerCell).
+ * Writes into `self._tankCellBuf` (a reusable object) to avoid allocating a
+ * fresh {col, row} on every call — tankCell is called ~15× per think() (many
+ * in enemy loops inside selectTargetImpl). Callers MUST consume the result
+ * before calling tankCell again (same contract as playerCell). */
+export function tankCellImpl(self: GodAIInput, t: Tank): Cell {
+  const buf = self._tankCellBuf
+  buf.col = Math.round(t.x / CELL)
+  buf.row = Math.round(t.y / CELL)
+  return buf
 }
 
 /**
@@ -281,8 +295,29 @@ export function canMoveOrBreakImpl(self: GodAIInput, tank: Tank, dir: Direction)
   return true
 }
 
-/** Check if the player tank can move one CELL in the given direction. */
+/** Check if the player tank can move one CELL in the given direction.
+ * Per-tick cached for the player (perf): canMoveDir is called ~10× per think()
+ * from navigateTowards / directMove / followPath / canMoveOrBreak /
+ * dodgeDirection — always with the player. The player doesn't move during
+ * think() (movement is applied later in Simulation.updateMovement), and no
+ * other tank moves during think() either, so the 4 directional results are
+ * byte-identical within a tick. A bitmask cache avoids redundant
+ * rectHitsTerrain + tank-loop scans. Invalidated in endFrame(). */
 export function canMoveDirImpl(self: GodAIInput, tank: Tank, dir: Direction): boolean {
+  if (tank === self.world.player) {
+    const idx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+    const bit = 1 << idx
+    if (self._canMoveComputed & bit) return (self._canMoveResult & bit) !== 0
+    const passable = canMoveDirRaw(self, tank, dir)
+    self._canMoveComputed |= bit
+    if (passable) self._canMoveResult |= bit
+    else self._canMoveResult &= ~bit
+    return passable
+  }
+  return canMoveDirRaw(self, tank, dir)
+}
+
+function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
   const w = self.world
   const v = DIR_VECTORS[dir]
   const gx = snap(tank.x, CELL)

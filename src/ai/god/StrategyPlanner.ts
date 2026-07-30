@@ -169,7 +169,11 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   const baseRow = BASE_POS.row
   const defenseRow = baseRow - self.params.defenseRowOffset
 
-  const enemies = w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
+  // Cluster C: reuse the per-tick enemy snapshot (built in think()) instead
+  // of allocating a filtered array on every call (AGENTS §14.1).
+  // Falls back to a fresh scan only if think() hasn't populated it yet.
+  const enemies =
+    self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
   if (enemies.length === 0) return self.getDefaultDefensePosition()
 
   // ---- Gap B: no-base fast path (plan/God-AI-Curriculum §3) ----

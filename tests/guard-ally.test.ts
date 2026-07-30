@@ -144,7 +144,12 @@ describe('天降神兵 — 3-way friendly fire (DECISIONS.md §31 Phase 2)', () 
     if (target.allegiance === 'ally') world.allies.push(target)
     else if (target.allegiance === 'enemy') world.tanks.push(target)
     else world.player = target
-    ;(sim as unknown as { bulletHitsTank: (b: Bullet) => boolean }).bulletHitsTank.bind(sim)(bullet)
+    // bulletHitsTank takes the allTanks buffer as a parameter (perf: avoids
+    // N getter calls per tick). Must pass a fresh snapshot that includes the
+    // just-pushed target.
+    ;(sim as unknown as { bulletHitsTank: (b: Bullet, a: Tank[]) => boolean }).bulletHitsTank.bind(
+      sim,
+    )(bullet, world.allTanks)
   }
 
   it('ally bullet strikes an enemy (opposing sides)', () => {
