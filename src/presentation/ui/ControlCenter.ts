@@ -21,6 +21,8 @@ export interface ControlCenterCallbacks {
   onOpenBrowser: () => void
   /** Open the Replay Browser. */
   onOpenReplays: () => void
+  /** Open a local .replay file (not imported to database). */
+  onOpenLocalReplay?: () => void
   onOpenControls: () => void
   /** Toggle the developer Performance Observatory overlay (F6). */
   onTogglePerf: () => void
@@ -83,6 +85,9 @@ export class ControlCenter {
           <button class="cc-btn" data-cc="replays" type="button">
             <span>Replay Browser</span><span class="cc-btn-arrow">›</span>
           </button>
+          <button class="cc-btn" data-cc="local-replay" type="button">
+            <span>Open Local Replay</span><span class="cc-btn-arrow">›</span>
+          </button>
           <div class="cc-info" data-cc="replay-counts">No replays</div>
         </section>
         <section class="cc-section">
@@ -138,6 +143,7 @@ export class ControlCenter {
     wire('[data-cc="save"]', () => this.callbacks?.onManualSave())
     wire('[data-cc="browser"]', () => this.callbacks?.onOpenBrowser(), true)
     wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays(), true)
+    wire('[data-cc="local-replay"]', () => this.callbacks?.onOpenLocalReplay?.(), true)
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls(), true)
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())

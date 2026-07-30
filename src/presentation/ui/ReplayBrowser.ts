@@ -53,7 +53,8 @@ const FILTERS: { key: FilterKey; label: string }[] = [
 function formatPlayTime(ms: number): string {
   const total = Math.floor(ms / 1000)
   const m = Math.floor(total / 60)
-  return `${String(m).padStart(2, '0')}m`
+  const s = total % 60
+  return m > 0 ? `${String(m).padStart(2, '0')}m` : `${s}s`
 }
 
 function formatCreated(epochMs: number): string {
@@ -89,7 +90,7 @@ export class ReplayBrowser {
           <div class="snap-filters" data-replay="filters"></div>
           <div class="snap-header-right">
             <span class="snap-storage" data-replay="storage"></span>
-            <button class="controls-btn snap-import" data-replay="import" type="button">↓ Import</button>
+            <button class="controls-btn snap-import" data-replay="import" type="button">Import</button>
             <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close <kbd>Esc</kbd></button>
           </div>
         </div>
@@ -304,6 +305,7 @@ export class ReplayBrowser {
   private buildEntry(replay: Replay): HTMLElement {
     const m = replay.metadata
     const entry = document.createElement('div')
+    const isTransient = replay.transient
     entry.className = 'snap-entry'
     entry.dataset.type = replay.type
 
@@ -395,18 +397,19 @@ export class ReplayBrowser {
       }
     })
 
-    // Export button (download .replay file)
-    if (this.callbacks?.onExport) {
+    actions.appendChild(playBtn)
+
+    // Export button (download .replay file) — right after PLAY
+    if (this.callbacks?.onExport && !isTransient) {
       const exportBtn = document.createElement('button')
       exportBtn.type = 'button'
       exportBtn.className = 'controls-btn snap-export'
-      exportBtn.textContent = '↓'
+      exportBtn.textContent = 'Export'
       exportBtn.title = 'Export .replay'
       exportBtn.addEventListener('click', () => this.callbacks?.onExport!(replay.id))
       actions.appendChild(exportBtn)
     }
 
-    actions.appendChild(playBtn)
     actions.appendChild(favBtn)
     actions.appendChild(delBtn)
 

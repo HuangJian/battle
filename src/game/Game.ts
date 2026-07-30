@@ -194,6 +194,7 @@ export class Game {
       onManualSave: () => this.manualSnapshot(),
       onOpenBrowser: () => this.openSnapshotBrowser(),
       onOpenReplays: () => this.openReplayBrowser(),
+      onOpenLocalReplay: () => this.openLocalReplay(),
       onTogglePerf: () => ui.togglePerfOverlay(),
       onToggleFullscreen: () => this.presentation.toggleFullscreen(),
       onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
@@ -1247,7 +1248,7 @@ export class Game {
     this.lastTime = performance.now()
     this.scheduleFrame()
     // Show persistent REPLAY badge in HUD + video player controller
-    this.presentation.ui.setReplayMode(true, false)
+    this.presentation.ui.setReplayMode(true, false, replay.metadata.difficulty)
     this.presentation.ui.setReplaySpeed(this.playback.currentSpeed)
     this.presentation.ui.notify('REPLAY — Esc exit')
     // Wire canvas click/mousemove for playback interaction
@@ -1258,12 +1259,12 @@ export class Game {
       onPlayPause: () => {
         if (!this.playback) return
         this.playback.togglePause()
-        this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+        this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
       },
       onSeek: (progress: number) => {
         if (!this.playback) return
         this.playback.seekTo(this.world, this.simulation, progress)
-        this.presentation.ui.setReplayMode(true, true)
+        this.presentation.ui.setReplayMode(true, true, this.playback.replay?.metadata.difficulty)
         this.presentation.markNeedsRender()
       },
       onSpeedChange: (speed: number) => {
@@ -1413,14 +1414,14 @@ export class Game {
   private onReplayCanvasClick = (): void => {
     if (!this.playback) return
     this.playback.togglePause()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
   }
 
   /** Canvas mousemove during replay → show controller and reset auto-hide. */
   private onReplayCanvasMouseMove = (): void => {
     if (!this.playback || this.playback.isEnded) return
     this.presentation.ui.replayController.show()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused)
+    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
   }
 
   private setPlaybackSpeed(speed: PlaybackSpeed): void {
@@ -1491,6 +1492,31 @@ export class Game {
         ui.notify(`Exported: ${filename}`)
       },
     })
+  }
+
+  /** Open a local .replay file for playback (not imported to database). */
+  private openLocalReplay(): void {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.replay'
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      try {
+        const text = await file.text()
+        const { parseReplayFile } = await import('../replay/file')
+        const result = parseReplayFile(text)
+        if ('error' in result) {
+          this.presentation.ui.notify(`Failed to parse replay: ${result.error}`, 'warn')
+          return
+        }
+        this.startPlayback(result.replay)
+      } catch (err) {
+        this.presentation.ui.notify('Failed to read replay file', 'warn')
+        console.warn('[replay] local load error:', err)
+      }
+    })
+    input.click()
   }
 
   /** Open the Replay Browser (Control Center button). */

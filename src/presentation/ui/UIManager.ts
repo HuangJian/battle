@@ -50,6 +50,7 @@ export class UIManager {
   private hudHiScore: HTMLElement
   private hudStar: HTMLElement
   private hudReplay: HTMLElement
+  private hudReplayDifficulty: HTMLElement
   readonly replayController: ReplayController
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
@@ -193,6 +194,7 @@ export class UIManager {
       </div>        <div class="hud-group hud-center">
         <div class="hud-item hud-replay" data-hud="replay" hidden>
           <span class="hud-label">REPLAY MODE</span>
+          <span class="hud-replay-difficulty" data-hud="replay-difficulty"></span>
         </div>
         <div class="hud-item">
           <span class="hud-label">STAGE</span>
@@ -357,6 +359,7 @@ export class UIManager {
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
     this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
+    this.hudReplayDifficulty = this.hudBar.querySelector('[data-hud="replay-difficulty"]')!
 
     // Replay Controller (video player style)
     this.replayController = new ReplayController()
@@ -789,12 +792,14 @@ export class UIManager {
   }
 
   /** Show or hide the persistent REPLAY indicator in the HUD center area. */
-  setReplayMode(isReplay: boolean, isPaused: boolean = false): void {
+  setReplayMode(isReplay: boolean, isPaused = false, difficulty?: string): void {
     this.hudReplay.hidden = !isReplay
     if (isReplay) {
+      this.hudReplayDifficulty.textContent = difficulty ?? ''
       this.replayController.show()
       this.replayController.setPaused(isPaused)
     } else {
+      this.hudReplayDifficulty.textContent = ''
       this.replayController.hide()
     }
   }
