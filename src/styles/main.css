@@ -1545,19 +1545,20 @@ body.theme-modern .ui-menu {
 .snap-info-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px;
 }
 
 .snap-type {
   font-family: var(--font-mono);
   font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  padding: 2px 6px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  padding: 2px 5px;
   border-radius: 3px;
   border: 1px solid var(--theme-panel-border);
   color: var(--theme-text-secondary);
+  white-space: nowrap;
 }
 
 .snap-type-manual {
@@ -1579,6 +1580,7 @@ body.theme-modern .ui-menu {
   font-size: 11px;
   font-weight: 700;
   color: var(--theme-text-primary);
+  white-space: nowrap;
 }
 
 .snap-created {
@@ -1586,12 +1588,15 @@ body.theme-modern .ui-menu {
   font-size: 9px;
   color: var(--theme-text-muted);
   margin-left: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .snap-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: baseline;
+  gap: 10px 14px;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--theme-text-secondary);
@@ -1610,9 +1615,11 @@ body.theme-modern .ui-menu {
 
 .snap-actions .controls-btn {
   flex: 1;
-  padding: 7px 12px;
-  font-size: 10px;
+  min-width: 0;
+  padding: 7px 8px;
+  font-size: 11px;
   text-align: center;
+  justify-content: center;
 }
 
 .snap-delete-arm {
