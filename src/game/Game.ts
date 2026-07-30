@@ -1459,7 +1459,9 @@ export class Game {
       getStorageBytes: () => Promise.resolve(this.replays.estimateBytes()),
       onImport: (replay) => {
         this.replays.addReplay(replay)
-        ui.notify(`Imported: Stage ${String(replay.metadata.stage + 1).padStart(2, '0')} — ${replay.metadata.stageName}`)
+        ui.notify(
+          `Imported: Stage ${String(replay.metadata.stage + 1).padStart(2, '0')} — ${replay.metadata.stageName}`,
+        )
       },
       onExport: (id) => {
         const replay = this.replays.get(id)

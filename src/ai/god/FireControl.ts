@@ -324,17 +324,21 @@ export function shouldFireInDirImpl(
 
   const result = self.scanAhead(pcx, pcy, dir)
 
-  // Enemy in line of fire — always fire.
+  // T6/T11: Don't fire at base protection bricks or steel (level < 3).
+  // These checks MUST come before the enemy check because scanAhead uses
+  // two independent offset scan lines — if offset 0 finds steel and offset 1
+  // finds an enemy, BOTH result.steel and result.enemy are true. Checking
+  // enemy first would cause the AI to fire through steel.
+  if (result.baseWall) return false
+  if (result.steel && (p.level ?? 0) < 3) return false
+  // Steel with level ≥ 3: fall through to enemy check (can pierce).
+
+  // Enemy in line of fire — fire.
   if (result.enemy) {
     return self.rng.next() >= self.params.aimError
   }
 
-  // T6/T11: Don't fire at base protection bricks or steel (level < 3).
-  // These are checked but always return false — we don't waste bullets
-  // on walls during navigation.
-  if (result.baseWall) return false
-  if (result.steel && (p.level ?? 0) < 3) return false
-  // Steel with level ≥ 3: fire to pierce (enemy might be behind it).
+  // Steel with level ≥ 3 (no enemy found): fire to pierce.
   if (result.steel) {
     return self.rng.next() >= self.params.aimError
   }

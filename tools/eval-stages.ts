@@ -32,7 +32,12 @@ for (const stageIdx of STAGE_INDICES) {
     })
     // Write replay file for failures if requested
     if (replayFailures && r.replay && r.outcome !== 'stage_clear') {
-      await writeReplayFile({ result: r, dir: replayDir, stageIndex: stageIdx, stageName: STAGES[stageIdx].name })
+      await writeReplayFile({
+        result: r,
+        dir: replayDir,
+        stageIndex: stageIdx,
+        stageName: STAGES[stageIdx].name,
+      })
     }
     if (r.outcome === 'stage_clear') wins++
     if (r.finalState.baseAlive) baseAlive++

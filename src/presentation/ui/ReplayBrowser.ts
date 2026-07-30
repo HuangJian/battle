@@ -254,7 +254,8 @@ export class ReplayBrowser {
     const overlay = document.createElement('div')
     overlay.className = 'snap-drag-overlay'
     overlay.textContent = '拖放 .replay 文件到此处'
-    overlay.style.cssText = 'display:none;position:absolute;inset:0;background:rgba(0,0,0,0.3);color:#fff;font-size:1.2em;display:none;align-items:center;justify-content:center;z-index:10;pointer-events:none;'
+    overlay.style.cssText =
+      'display:none;position:absolute;inset:0;background:rgba(0,0,0,0.3);color:#fff;font-size:1.2em;display:none;align-items:center;justify-content:center;z-index:10;pointer-events:none;'
     const panel = this.screen.querySelector('.snap-panel')! as HTMLElement
     panel.style.position = 'relative'
     panel.appendChild(overlay)
@@ -267,7 +268,10 @@ export class ReplayBrowser {
     panel.addEventListener('dragover', (e) => e.preventDefault())
     panel.addEventListener('dragleave', () => {
       dragCount--
-      if (dragCount <= 0) { dragCount = 0; overlay.style.display = 'none' }
+      if (dragCount <= 0) {
+        dragCount = 0
+        overlay.style.display = 'none'
+      }
     })
     panel.addEventListener('drop', (e) => {
       e.preventDefault()

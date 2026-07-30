@@ -1798,3 +1798,28 @@ the current heuristic already outperforms the "accurate" one.
 **Cost (accepted):** `world.rng` consumption order changes → **all simulation baselines shift once**. One-time relock protocol (single dedicated commit): re-run `tools/relock-parity.ts`, re-run full stage evaluation, update determinism-signature tests, spot-check `godai-stage-overrides.ts` key stages (S32) for drift beyond noise. No re-tuning in this scope — that belongs to God-AI-Tuning.
 
 **Implications:** After this decision, a `.replay` file is a faithful historical artifact of a tuning-era game: God AI code/params can evolve freely without corrupting recorded history. Only changes to the Simulation core itself can invalidate old replays, which the file envelope surfaces via `gameVersion` soft-warning (consistent with replay L3 semantics).
+
+## 50. God AI Fire-Through-Steel Fix (2026-07-30)
+
+**Decision:** Fix God AI firing at enemies through steel walls by:
+1. Moving steel/baseWall checks BEFORE enemy check in `shouldFireInDirImpl`
+2. Adding `scanAhead` check in `think()`'s aggressive mode before firing
+
+**Rationale:**
+- `scanAheadImpl` uses two independent offset scan lines (left/right edge of the 32px tank). If offset 0 finds steel but offset 1 finds an enemy, BOTH `result.steel=true` AND `result.enemy=true` are set.
+- The old `shouldFireInDirImpl` checked `result.enemy` FIRST, so it fired through steel when both flags were true.
+- In aggressive mode (freeze/shield), the AI fired at `aimDir` from `findEnemyDirection` (global vision) with NO `scanAhead` check at all.
+
+**Fix:**
+- `shouldFireInDirImpl`: steel/baseWall now blocks fire at level < 3 before enemy check. Level >= 3 falls through to enemy check (can pierce steel).
+- Aggressive mode: added `scanAhead` check — only fires when `aggScan.enemy` confirms enemy is visible. Falls through to navigate when behind obstacle.
+
+**Validation:**
+- 7 new unit tests in `tests/fire-control-steel-block.test.ts` all pass
+- 565 tests total, 0 failures (full gate: test + typecheck + lint + format)
+- 35-stage eval: 88.0% mean @20 seeds (no regression from previous 87.7%)
+- Parity baselines re-locked (determinism signature shifted for seeds 1, 2)
+
+**Cost:** Minor determinism signature shift — parity baselines in `tests/godai-split-parity.test.ts` updated. No tuning change, no parameter modification.
+
+**Implications:** God AI no longer wastes bullets shooting through steel walls. During freeze/shield windows, the AI navigates toward enemies behind obstacles instead of camping and firing uselessly.

@@ -301,7 +301,10 @@ export class ReplayController {
     this.endTitle.textContent = meta.title
     this.endMeta.textContent = meta.details
     this.endOverlay.classList.toggle('rc-end-victory', meta.result === 'clear')
-    this.endOverlay.classList.toggle('rc-end-defeat', meta.result !== 'clear' && meta.result != null)
+    this.endOverlay.classList.toggle(
+      'rc-end-defeat',
+      meta.result !== 'clear' && meta.result != null,
+    )
   }
 
   setPaused(paused: boolean): void {

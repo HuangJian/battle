@@ -210,7 +210,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
 
   // Rebuild Replay object
   const metadata = (replay.metadata ?? {}) as Partial<ReplayMetadata>
-  const type: ReplayType = (env.sim as SimEnvelope | undefined)?.status as ReplayType ?? 'clear'
+  const type: ReplayType = ((env.sim as SimEnvelope | undefined)?.status as ReplayType) ?? 'clear'
   const durationMs = (replay.totalTicks as number) * (1000 / 60)
 
   const built: Replay = {

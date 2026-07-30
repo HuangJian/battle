@@ -66,11 +66,29 @@ function replayFromSerialized(original: any, maxTicks: number) {
   // Serialize then parse (full file pipeline)
   const text = serializeReplayFile({
     source: 'sim',
-    sim: { seed: original.seed, difficulty: original.difficulty, stageIndex: original.stageIndex, stageName: original.stageName, outcome: 'stage_clear', status: 'clear', maxTicks: 36000 },
+    sim: {
+      seed: original.seed,
+      difficulty: original.difficulty,
+      stageIndex: original.stageIndex,
+      stageName: original.stageName,
+      outcome: 'stage_clear',
+      status: 'clear',
+      maxTicks: 36000,
+    },
     initialSnapshot: result.snapshot,
     frames: result.frames,
     totalTicks: result.tickCount,
-    metadata: { stage: original.stageIndex, stageName: original.stageName, difficulty: original.difficulty, lives: 3, playerLevel: 0, score: 0, killCount: 0, enemiesTotal: 20, playTimeMs: 0 },
+    metadata: {
+      stage: original.stageIndex,
+      stageName: original.stageName,
+      difficulty: original.difficulty,
+      lives: 3,
+      playerLevel: 0,
+      score: 0,
+      killCount: 0,
+      enemiesTotal: 20,
+      playTimeMs: 0,
+    },
   })
 
   const parsed = parseReplayFile(text)

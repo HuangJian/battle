@@ -279,8 +279,11 @@ if (import.meta.main) {
     `[batch-sim] ${stages.length} stages × ${seeds.length} seeds = ${stages.length * seeds.length} runs\n`,
   )
 
-  const replayMode = process.argv.includes('--replay-failures') ? 'failures' as const
-    : process.argv.includes('--replay') ? 'all' as const : undefined
+  const replayMode = process.argv.includes('--replay-failures')
+    ? ('failures' as const)
+    : process.argv.includes('--replay')
+      ? ('all' as const)
+      : undefined
   const replayDir = arg('replay-dir') ?? 'replays'
 
   const results = batchRun({

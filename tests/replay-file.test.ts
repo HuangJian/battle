@@ -152,34 +152,46 @@ describe('Replay file parse errors', () => {
   })
 
   it('rejects unknown format', () => {
-    const r = parseReplayFile(JSON.stringify({ format: 'wrong', formatVersion: 1, frameSchemaVersion: 1 }))
+    const r = parseReplayFile(
+      JSON.stringify({ format: 'wrong', formatVersion: 1, frameSchemaVersion: 1 }),
+    )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/Unknown format/)
   })
 
   it('rejects bad formatVersion', () => {
-    const r = parseReplayFile(JSON.stringify({ format: 'bc-replay', formatVersion: 99, frameSchemaVersion: 1 }))
+    const r = parseReplayFile(
+      JSON.stringify({ format: 'bc-replay', formatVersion: 99, frameSchemaVersion: 1 }),
+    )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/format version/)
   })
 
   it('rejects bad frameSchemaVersion', () => {
-    const r = parseReplayFile(JSON.stringify({ format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 99 }))
+    const r = parseReplayFile(
+      JSON.stringify({ format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 99 }),
+    )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/frame schema version/)
   })
 
   it('rejects missing replay section', () => {
-    const r = parseReplayFile(JSON.stringify({ format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 1 }))
+    const r = parseReplayFile(
+      JSON.stringify({ format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 1 }),
+    )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/Missing replay/)
   })
 
   it('rejects missing initialSnapshot', () => {
-    const r = parseReplayFile(JSON.stringify({
-      format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 1,
-      replay: { framesBase64: 'AA==', totalTicks: 1, metadata: {} },
-    }))
+    const r = parseReplayFile(
+      JSON.stringify({
+        format: 'bc-replay',
+        formatVersion: 1,
+        frameSchemaVersion: 1,
+        replay: { framesBase64: 'AA==', totalTicks: 1, metadata: {} },
+      }),
+    )
     expect(r).toHaveProperty('error')
     expect((r as any).error).toMatch(/initialSnapshot/)
   })
@@ -187,10 +199,14 @@ describe('Replay file parse errors', () => {
   it('handles garbage base64 gracefully (either error or decode)', () => {
     // Bun's Buffer.from is lenient with invalid base64 — it may decode
     // garbage without throwing. The important thing is no crash.
-    const r = parseReplayFile(JSON.stringify({
-      format: 'bc-replay', formatVersion: 1, frameSchemaVersion: 1,
-      replay: { initialSnapshot: {}, framesBase64: '!!!invalid!!!', totalTicks: 1, metadata: {} },
-    }))
+    const r = parseReplayFile(
+      JSON.stringify({
+        format: 'bc-replay',
+        formatVersion: 1,
+        frameSchemaVersion: 1,
+        replay: { initialSnapshot: {}, framesBase64: '!!!invalid!!!', totalTicks: 1, metadata: {} },
+      }),
+    )
     // Either parse succeeds (garbage decoded) or returns error — both acceptable
     expect(r).toBeDefined()
   })

@@ -274,7 +274,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   if (recorder) {
     const rec = recorder.finalize()
     if (rec) {
-      result.replay = { initialSnapshot: rec.snapshot, frames: rec.frames, tickCount: rec.tickCount }
+      result.replay = {
+        initialSnapshot: rec.snapshot,
+        frames: rec.frames,
+        tickCount: rec.tickCount,
+      }
     }
   }
 

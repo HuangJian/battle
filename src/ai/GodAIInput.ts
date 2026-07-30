@@ -673,14 +673,20 @@ export class GodAIInput implements InputLike {
     if (this.aggressive) {
       // Skip defense, go straight for the nearest enemy or power-up.
       if (aimDir) {
-        // T2a: stop-and-aim — if already facing the enemy, stop; else turn.
-        if (p.dir === aimDir) {
-          this._moveDir = null
-        } else {
-          this._moveDir = aimDir
+        // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
+        // Without this check, the AI fires through steel walls at enemies
+        // it can see via global vision but cannot actually hit.
+        const aggScan = this.scanAhead(pcx, pcy, aimDir)
+        if (aggScan.enemy) {
+          if (p.dir === aimDir) {
+            this._moveDir = null
+          } else {
+            this._moveDir = aimDir
+          }
+          this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+          return
         }
-        this._fire = !onCooldown && this.rng.next() >= this.params.aimError
-        return
+        // Enemy behind obstacle — fall through to navigate toward it.
       }
       // No enemy in row/col — check for power-up (S5).
       const puTarget = this.findPowerUpTarget(pcx, pcy)

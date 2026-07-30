@@ -32,20 +32,18 @@ interface Expected {
   playerLevel: number
 }
 
-// Baseline re-locked 2026-07-30 after God AI RNG split (DECISIONS §47):
-//   GodAIInput now gets its own seeded RNG instead of sharing world.rng,
-//   enabling headless God-AI games to be recorded as input-stream replays.
-//   The split changes world.rng consumption order → all baselines shift.
-//   This is a one-time relock; all 8 seeds moved but outcome is still
-//   stage_clear for all (Stage 0 is an easy stage for the God AI).
-// Re-locked via `bun tools/relock-parity.ts` and pasted here.
+// Baseline re-locked 2026-07-30 after steel-blocking fix (§49):
+//   shouldFireInDirImpl now checks steel BEFORE enemy, preventing the
+//   AI from firing through steel walls at aligned enemies. This shifts
+//   the determinism signature for seeds where the dual-offset scan
+//   previously allowed fire through steel.
+// Re-locked via direct simulation. All 8 seeds still stage_clear.
 // NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
-// game params. Re-run tools/relock-parity.ts after any future intentional
-// tuning to refresh these numbers.
+// game params. Re-run after any future intentional tuning to refresh these numbers.
 const BASELINE: Record<number, Expected> = {
   1: {
     outcome: 'stage_clear',
-    ticks: 3677,
+    ticks: 3673,
     score: 4200,
     lives: 2,
     killCount: 20,
@@ -54,7 +52,7 @@ const BASELINE: Record<number, Expected> = {
   },
   2: {
     outcome: 'stage_clear',
-    ticks: 3406,
+    ticks: 3004,
     score: 4700,
     lives: 4,
     killCount: 20,
