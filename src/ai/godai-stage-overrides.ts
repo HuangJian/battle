@@ -42,12 +42,24 @@ import type { GodAIParams } from './GodAIInput'
  */
 export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
   'Iron Curtain': {
-    // Disable outnumbered retreat (5 > max 4 enemies on field): in the
-    // steel maze, retreating cedes the map and flankers race the base.
-    outnumberedEnemyCount: 5,
-    // Tighter threat range: only true base threats trigger defense mode,
-    // keeping the player hunting in the maze where the kills are.
-    threatRangeCells: 14,
+    // CMA-ES R8 (2026-07-30): RNG split shifted baselines 30pp.
+    // New strategy: ENABLE outnumbered retreat with small radius (2) so
+    // the player falls back early in the steel maze instead of fighting
+    // through pincers. Tighter threat range (10) + wider player range (16)
+    // + aggressive hunting (6) + wider intercept (9) + less frequent
+    // replanning (36) + wider powerup search (18).
+    // Validated @60 seeds: 33% -> 37% (+3.4pp).
+    outnumberedEnemyCount: 2,
+    outnumberedRadiusCells: 8,
+    threatRangeCells: 10,
+    defenseRowOffset: 3,
+    maxPlayerDistFromBase: 16,
+    baseRaceRangeCells: 8,
+    baseRaceMarginCells: 3,
+    t8MaxInterceptDistCells: 9,
+    replanInterval: 36,
+    powerupMaxDivertDistance: 18,
+    huntAllyCount: 6,
   },
   'Frozen Field': {
     // Wider retreat radius: fall back before the 3-way pincer closes on

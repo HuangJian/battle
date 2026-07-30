@@ -40,10 +40,9 @@ import { STAGES } from '../src/config/stages'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 
 // Truth win rates (%) from 35×60 validation, re-measured 2026-07-30
-// after God AI RNG split (DECISIONS §47). The split changed world.rng
-// consumption order → all baselines shifted. S6 Iron Curtain dropped
-// 30pp (63→33%) and S32 Diamond dropped 16pp (72→57%) — these stages
-// are particularly sensitive to RNG stream ordering.
+// after God AI RNG split (DECISIONS §47) + S6 CMA-ES R8 re-tuning.
+// S6 went 33% -> 37% with new override strategy (enabled outnumbered
+// retreat + tighter threat + wider player range). S32 Diamond unchanged.
 const TRUTH_WIN_PCT: number[] = [
   90.0, // S0  Outpost
   96.7, // S1  Waterways
@@ -51,7 +50,7 @@ const TRUTH_WIN_PCT: number[] = [
   96.7, // S3  Crossfire
   93.3, // S4  Maze
   80.0, // S5  Brickworks
-  33.3, // S6  Iron Curtain (override: retreat off + tight threat range) — dropped 30pp after RNG split
+  36.7, // S6  Iron Curtain (R8 override: enabled outnumbered retreat, tighter threat, wider player range)
   88.3, // S7  Riverbed
   91.7, // S8  Twin Towers
   91.7, // S9  Gauntlet
