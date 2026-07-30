@@ -2,6 +2,7 @@ import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { FRAME_SCHEMA_VERSION } from './config'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
+import { generateUUID } from './uuid'
 
 // ================================================================
 // Replay File Format — .replay envelope serialization
@@ -213,7 +214,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   const durationMs = (replay.totalTicks as number) * (1000 / 60)
 
   const built: Replay = {
-    id: crypto.randomUUID(),
+    id: generateUUID(),
     type,
     createdAt: Date.now(),
     gameVersion: (env.gameVersion as string) ?? GAME_VERSION,

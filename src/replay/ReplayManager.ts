@@ -12,20 +12,7 @@ import type {
 import { REPLAY_RETENTION_POLICIES, REPLAY_FAVORITE_LIMIT } from './config'
 import { GAME_VERSION } from '../snapshot/config'
 import { FRAME_SCHEMA_VERSION } from './config'
-
-/** Generate a UUID (crypto.randomUUID when available, fallback otherwise). */
-function generateUUID(): string {
-  const c = globalThis.crypto as Crypto | undefined
-  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
-  let out = ''
-  const hex = '0123456789abcdef'
-  for (let i = 0; i < 36; i++) {
-    if (i === 8 || i === 13 || i === 18 || i === 23) out += '-'
-    else if (i === 14) out += '4'
-    else out += hex[Math.floor(Math.random() * 16)]
-  }
-  return out
-}
+import { generateUUID } from './uuid'
 
 export interface ReplayManagerOptions {
   backend?: ReplayStorageBackend | null
