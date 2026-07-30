@@ -14,5 +14,5 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["bun"]
   },
-  "include": ["src", "tests", "types/vite-env.d.ts"]
+  "include": ["src", "tests", "tools", "types/vite-env.d.ts"]
 }

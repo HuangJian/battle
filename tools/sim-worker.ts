@@ -9,7 +9,7 @@
  * Errors inside a run are caught and reported as `ok: false`, mirroring
  * the serial evaluateParams() catch branch exactly.
  */
-import { runSimulation } from './simulation-runner'
+import { runSimulation, type RunTelemetry } from './simulation-runner'
 import type { GodAIParams } from '../src/ai/GodAIInput'
 import type { StageData } from '../src/types'
 
@@ -21,6 +21,13 @@ export interface SimTask {
   difficulty: string
   params: GodAIParams
   maxTicks: number
+  /**
+   * Collect v6 evaluation telemetry and return the extra scoring fields
+   * (plan/God-AI-Evaluation-Redesign.md). Default off: the v5 fitness path
+   * ships exactly the same four fields it always did, so its payload size
+   * and aggregation order are unchanged.
+   */
+  telemetry?: boolean
 }
 
 export interface SimTaskResult {
@@ -30,6 +37,10 @@ export interface SimTaskResult {
   ticks: number
   killCount: number
   baseAlive: boolean
+  /** Only populated when the task requested telemetry. */
+  lives?: number
+  firstKillTick?: number
+  telemetry?: RunTelemetry
 }
 
 declare var self: Worker
@@ -45,6 +56,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       godAIParams: task.params,
       maxTicks: task.maxTicks,
       sampleInterval: 60, // same as the serial path (metrics are discarded)
+      telemetry: task.telemetry === true,
     })
     msg = {
       id: task.id,
@@ -53,6 +65,11 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       ticks: result.ticks,
       killCount: result.finalState.killCount,
       baseAlive: result.finalState.baseAlive,
+    }
+    if (task.telemetry === true) {
+      msg.lives = result.finalState.lives
+      msg.firstKillTick = result.firstKillTick
+      msg.telemetry = result.telemetry
     }
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }

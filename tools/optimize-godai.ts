@@ -28,7 +28,22 @@ import type { SimTask } from './sim-worker'
 import { traceSimulation, analyzeTrace } from './decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import type { StageData } from '../src/types'
-import { writeFileSync, mkdirSync, readFileSync } from 'fs'
+import { RNG } from '../src/utils/RNG'
+import {
+  scoreRun,
+  aggregateStage,
+  aggregateSuite,
+  fitnessV6,
+  fitnessV7,
+  DEFAULT_SCORE_CONFIG,
+  V7_SCORE_CONFIG,
+  DEFAULT_STAGE_REFS,
+  type StageRefs,
+  type ScorableRun,
+  type ScoreConfig,
+} from './godai-score'
+import type { RunTelemetry } from './simulation-runner'
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 
 // ============================================================
@@ -119,6 +134,33 @@ export interface EvalConfig {
    * to lift the *weakest* stages (not just average strength). Default 0.6.
    */
   floor?: number
+  /**
+   * Which fitness to rank candidates on.
+   *
+   *   'v5' (default) — the magic-number sum this file has always used.
+   *   'v6'           — the banded, risk-adjusted score from godai-score.ts
+   *                    (plan/God-AI-Evaluation-Redesign.md).
+   *
+   * v6 is opt-in so that existing tuning runs, the regression gate and every
+   * recorded baseline keep comparing like with like. All the v5 reporting
+   * fields are still populated under v6 — only `fitness` changes.
+   */
+  fitnessVersion?: 'v5' | 'v6' | 'v7'
+  /** Per-stage references for v6/v7, keyed by stage name (tools/eval-refs.json). */
+  stageRefs?: Record<string, StageRefs>
+  /** Base score config (bands + weights). Defaults to v6; v7 uses wider bands. */
+  scoreConfigBase?: ScoreConfig
+}
+
+/** Load per-stage v6 references if they have been calibrated. */
+export function loadStageRefs(): Record<string, StageRefs> {
+  const file = join(import.meta.dir, 'eval-refs.json')
+  if (!existsSync(file)) return {}
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).stages ?? {}
+  } catch {
+    return {}
+  }
 }
 
 /** P4 goal: every classic stage must clear above this win rate (floor). */
@@ -185,6 +227,24 @@ interface RunRecord {
   ticks: number
   killCount: number
   baseAlive: boolean
+  /** v6 only — absent under v5, where nothing reads them. */
+  lives?: number
+  firstKillTick?: number
+  telemetry?: RunTelemetry
+}
+
+/** A failed run is scored as the worst possible outcome, never dropped. */
+function recordToScorable(rec: RunRecord): ScorableRun {
+  if (!rec.ok) {
+    return { outcome: 'error', ticks: 0, finalState: { killCount: 0, lives: 0, baseAlive: false } }
+  }
+  return {
+    outcome: rec.outcome,
+    ticks: rec.ticks,
+    finalState: { killCount: rec.killCount, lives: rec.lives ?? 0, baseAlive: rec.baseAlive },
+    firstKillTick: rec.firstKillTick,
+    telemetry: rec.telemetry,
+  }
 }
 
 /** Aggregate run records (stage-major, seed-minor order) into an EvalResult. */
@@ -276,7 +336,7 @@ function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
 
   const gameoverPenalty = gameoverCount * 500
 
-  const fitness =
+  const fitnessV5 =
     winRate * 5000 +
     avgKills * 60 +
     baseSurvivalRate * 200 +
@@ -285,6 +345,31 @@ function aggregateEval(records: RunRecord[], config: EvalConfig): EvalResult {
     gameoverPenalty -
     lowKillNonWins * 400 -
     floorPenalty
+
+  // v6: re-score the same records through the banded model. The stage
+  // chunking mirrors the floor-penalty loop above, so both fitnesses see
+  // exactly the same partition of the same records in the same order.
+  let fitness = fitnessV5
+  if (config.fitnessVersion === 'v6' || config.fitnessVersion === 'v7') {
+    const configBase = config.scoreConfigBase ?? DEFAULT_SCORE_CONFIG
+    const stageList = config.stages && config.stages.length > 0 ? config.stages : [config.stage]
+    const aggregates = []
+    for (let s = 0; s < stageCount; s++) {
+      const groupStart = s * seedsPerStage
+      const groupEnd = Math.min(n, groupStart + seedsPerStage)
+      const name = stageList[s]?.name ?? `stage${s}`
+      const refs = config.stageRefs?.[name] ?? DEFAULT_STAGE_REFS
+      const scored = []
+      for (let i = groupStart; i < groupEnd; i++) {
+        scored.push(scoreRun(recordToScorable(records[i]), { ...configBase, refs }))
+      }
+      aggregates.push(aggregateStage(name, scored))
+    }
+    fitness =
+      config.fitnessVersion === 'v7'
+        ? fitnessV7(aggregateSuite(aggregates))
+        : fitnessV6(aggregateSuite(aggregates))
+  }
 
   return {
     fitness,
@@ -317,6 +402,7 @@ function runList(config: EvalConfig): Array<{ stage: StageData; seed: number }> 
 /** Evaluate a parameter set by running simulations serially (reference path). */
 export function evaluateParams(params: GodAIParams, config: EvalConfig): EvalResult {
   const records: RunRecord[] = []
+  const wantTelemetry = config.fitnessVersion === 'v6' || config.fitnessVersion === 'v7'
   for (const { stage, seed } of runList(config)) {
     try {
       const result = runSimulation({
@@ -326,6 +412,7 @@ export function evaluateParams(params: GodAIParams, config: EvalConfig): EvalRes
         godAIParams: params,
         maxTicks: config.maxTicks,
         sampleInterval: 60, // minimal sampling for speed
+        telemetry: wantTelemetry,
       })
       records.push({
         seed,
@@ -334,6 +421,9 @@ export function evaluateParams(params: GodAIParams, config: EvalConfig): EvalRes
         ticks: result.ticks,
         killCount: result.finalState.killCount,
         baseAlive: result.finalState.baseAlive,
+        lives: wantTelemetry ? result.finalState.lives : undefined,
+        firstKillTick: wantTelemetry ? result.firstKillTick : undefined,
+        telemetry: result.telemetry,
       })
     } catch {
       records.push({ seed, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false })
@@ -367,6 +457,7 @@ export async function evaluateCandidatesParallel(
         difficulty: config.difficulty,
         params: paramsList[c],
         maxTicks: config.maxTicks,
+        telemetry: config.fitnessVersion !== 'v5',
       })
     }
   }
@@ -385,6 +476,9 @@ export async function evaluateCandidatesParallel(
         ticks: res.ticks,
         killCount: res.killCount,
         baseAlive: res.baseAlive,
+        lives: res.lives,
+        firstKillTick: res.firstKillTick,
+        telemetry: res.telemetry,
       })
     }
     evals.push(aggregateEval(records, config))
@@ -425,12 +519,27 @@ interface CMAESState {
   stagnationCount: number
 }
 
-/** Box-Muller transform for standard normal random number. */
+/**
+ * Search RNG. Seeded so an optimisation run is reproducible.
+ *
+ * This used to be bare `Math.random()`, which made every invocation explore a
+ * different set of candidates. That is fatal for the thing tuning exists to do:
+ * if you change a heuristic, re-run, and the fitness moves, you cannot tell
+ * whether the change helped or whether CMA-ES simply drew a luckier population.
+ * With a fixed seed the search path is fixed, so a fitness delta is attributable
+ * to the change. Vary `--opt-seed` deliberately to check a result is not an
+ * artefact of one search trajectory.
+ *
+ * The simulation RNG is separate (`world.rng`, per config seed) and unaffected.
+ */
+let searchRng = new RNG(1)
+
+/** Box-Muller transform for a standard normal, drawn from the seeded search RNG. */
 function randNormal(): number {
   let u = 0,
     v = 0
-  while (u === 0) u = Math.random()
-  while (v === 0) v = Math.random()
+  while (u === 0) u = searchRng.next()
+  while (v === 0) v = searchRng.next()
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
 }
 
@@ -656,9 +765,24 @@ async function optimize(
   process.stderr.write(
     `Evaluation: stages ${(evalConfig.stages ?? [evalConfig.stage]).map((s) => s.name).join(', ')}, ${evalConfig.difficulty}, seeds ${evalConfig.seeds.join(',')}\n`,
   )
-  process.stderr.write(
-    `Fitness v5.0 (P4): win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400 - floorPenalty(floor=${evalConfig.floor ?? DEFAULT_FLOOR}, w=${FLOOR_PENALTY_WEIGHT})\n`,
-  )
+  if (evalConfig.fitnessVersion === 'v7') {
+    const refCount = Object.keys(evalConfig.stageRefs ?? {}).length
+    process.stderr.write(
+      `Fitness v7: widened band gap (loss≤0.40 < clear≥0.70) for stronger win-rate alignment.\n` +
+        `  Same L1–L4 pipeline as v6, same per-stage refs: ${refCount > 0 ? `${refCount} calibrated stages` : 'DEFAULTS'}\n`,
+    )
+  } else if (evalConfig.fitnessVersion === 'v6') {
+    const refCount = Object.keys(evalConfig.stageRefs ?? {}).length
+    process.stderr.write(
+      `Fitness v6: banded per-run score (loss<=0.55 < clear>=0.60), seed CVaR, ` +
+        `cross-stage harmonic mean, lower confidence bound. ×1000.\n` +
+        `  per-stage refs: ${refCount > 0 ? `${refCount} calibrated stages` : 'DEFAULTS (run eval-suite --calibrate first)'}\n`,
+    )
+  } else {
+    process.stderr.write(
+      `Fitness v5.0 (P4): win*5000 + kills*60 + base*200 + speed*800 - remaining*25 - gameover*500 - lowKill*400 - floorPenalty(floor=${evalConfig.floor ?? DEFAULT_FLOOR}, w=${FLOOR_PENALTY_WEIGHT})\n`,
+    )
+  }
   process.stderr.write(`${'='.repeat(70)}\n\n`)
 
   for (let gen = 0; gen < generations; gen++) {
@@ -859,6 +983,12 @@ function runComparisonTraces(
 // ============================================================
 
 if (import.meta.main) {
+  // Overloaded so that supplying a fallback narrows the result to `string`.
+  // Without this every call site with a default still had to be unwrapped with
+  // `!`, and the ones that forgot silently passed `string | undefined` into
+  // path helpers.
+  function arg(name: string, fallback: string): string
+  function arg(name: string): string | undefined
   function arg(name: string, fallback?: string): string | undefined {
     const i = process.argv.indexOf(`--${name}`)
     return i >= 0 ? process.argv[i + 1] : fallback
@@ -900,6 +1030,12 @@ if (import.meta.main) {
   )
   process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks} | Floor: ${floor}\n`)
 
+  const optSeed = Number(arg('opt-seed', '1'))
+  searchRng = new RNG(Number.isFinite(optSeed) ? optSeed : 1)
+  process.stderr.write(`Search seed: ${optSeed} (--opt-seed to vary; runs are reproducible)\n`)
+
+  const fitnessVersion = arg('fitness', 'v5')
+  const fv = fitnessVersion === 'v7' ? 'v7' : fitnessVersion === 'v6' ? 'v6' : 'v5'
   const evalConfig: EvalConfig = {
     stage: stages[0],
     stages,
@@ -907,6 +1043,9 @@ if (import.meta.main) {
     seeds,
     maxTicks,
     floor,
+    fitnessVersion: fv,
+    stageRefs: fv !== 'v5' ? loadStageRefs() : undefined,
+    scoreConfigBase: fv === 'v7' ? V7_SCORE_CONFIG : DEFAULT_SCORE_CONFIG,
   }
 
   // Worker pool: hw.ncpu − 1 workers by default (leave one core for the

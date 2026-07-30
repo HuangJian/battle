@@ -4,19 +4,8 @@ import type { GodAIParams } from './GodAIInput'
  * Per-stage GOD AI parameter overrides (P4, plan/God-AI-Next-Round).
  *
  * Why this exists: CMA-ES rounds 1-6 proved that a single global parameter
- * set CANNOT satisfy all 35 classic stages — the failure families demand
- * opposite behaviors:
- *
- *   - S6 Iron Curtain (steel maze, flanking base-runs): wants the
- *     outnumbered-retreat OFF (count=5 disables it; retreating just cedes
- *     map control and the flankers race the base) and a tighter threat
- *     range so defense only triggers on real threats.
- *   - S18 Frozen Field (open ice, 8 armor tanks, 3-way crossfire): wants a
- *     WIDER outnumbered-retreat radius (fall back before the pincer closes)
- *     and perfect aim (armor tanks take 4 hits; wasted shots are lethal).
- *
- * Tuning one of these globally regresses the other (verified at 60 seeds:
- * radius=14 lifts S18 +15pp but costs S6 -30pp and S32 -30pp).
+ * set CANNOT satisfy all 35 classic stages — some stages demand opposite
+ * behaviors from the global default.
  *
  * This is data over code (MANIFEST §2.4): a human player also adapts
  * tactics per map. The table is keyed by stage NAME (stable across index
@@ -27,97 +16,66 @@ import type { GodAIParams } from './GodAIInput'
  * tools/probe-params.ts). 20-seed probes are noise (binomial +/-11pp) —
  * they were shown to select mirage gains that vanish on fresh seeds.
  *
- * Validated 2026-07-29 against R6 base params, 60 seeds each:
- *   S6  Iron Curtain: 57% -> 63%
- *   S18 Frozen Field: 52% -> 67%
- * Validated 2026-07-29 against R7 base params, 60 seeds each:
- *   S25 Ice Palace:   57% -> 73%
- *   S26 Brick Maze:   53% -> 65%
+ * STALE OVERRIDE AUDIT (2026-07-30, DECISIONS.md §54-§56):
+ * All overrides were re-probed at 120 seeds against the current global
+ * default (post-RNG-split, post-§47 base protection ring). Results:
  *
- * Known hard case (NOT override-tunable, verified at 60 seeds against both
- * R6 and R7 bases): S32 Diamond (~52%). Armor-heavy force (8 armor / 8
- * fast / 4 power) on a fragmented steel+forest map with an open bottom
- * band; every single/double param change scored at or below base. Needs a
- * structural fix (maze-aware navigation or an armor-stage base guard).
+ *   S6  Iron Curtain  — REMOVED (§54): override 59.2% < naked 62.5%.
+ *   S18 Frozen Field  — REMOVED (§55): override 56.7% < naked 60.8%.
+ *   S25 Ice Palace    — REMOVED (§55): override 77.5% = naked 77.5% (identical).
+ *   S32 Diamond       — PARTIALLY REMOVED (§56): the core close-combat
+ *     strategy (t2aMaxRange:2) was generalized into `t2aHighHpMaxRange`
+ *     (default 2), triggered by `enemyKind === 'armor'` instead of stage
+ *     name. The `damagedArmorBonus` was tested but HURT S32 (-8.4pp) by
+ *     causing target-switching that interrupts armor grinding. Only the
+ *     camp/nav params remain as stage-specific tuning — they cannot be
+ *     generalized because shorter camp/nav helps S32/S18/S25 but hurts
+ *     S6/S10/S15 (mixed results at 60 seeds).
+ *
+ *   S26 Brick Maze    — KEPT: override 68.3% ≈ naked 67.5% (+0.8pp, within
+ *     noise) but prevents base destruction (0 vs 2). The faster replanning +
+ *     path randomness synergy breaks deadlock patrol loops.
+ *
+ * LESSON: overrides are data, and data goes stale. After RNG split, §47
+ * collision fix, and v7 evaluation changes, the global default improved
+ * dramatically. Every override must be re-validated after major baseline
+ * shifts. When an override's core mechanism can be abstracted into a
+ * universal parameter (as with S32's close-combat → t2aHighHpMaxRange),
+ * prefer the generalization over the per-stage override. Auxiliary params
+ * that don't generalize (camp/nav timing) may remain as minimal overrides.
  */
 export const GOD_AI_STAGE_OVERRIDES: Record<string, Partial<GodAIParams>> = {
-  'Iron Curtain': {
-    // CMA-ES R8 (2026-07-30): RNG split shifted baselines 30pp.
-    // New strategy: ENABLE outnumbered retreat with small radius (2) so
-    // the player falls back early in the steel maze instead of fighting
-    // through pincers. Tighter threat range (10) + wider player range (16)
-    // + aggressive hunting (6) + wider intercept (9) + less frequent
-    // replanning (36) + wider powerup search (18).
-    // Validated @60 seeds: 33% -> 37% (+3.4pp).
-    outnumberedEnemyCount: 2,
-    outnumberedRadiusCells: 8,
-    threatRangeCells: 10,
-    defenseRowOffset: 3,
-    maxPlayerDistFromBase: 16,
-    baseRaceRangeCells: 8,
-    baseRaceMarginCells: 3,
-    t8MaxInterceptDistCells: 9,
-    replanInterval: 36,
-    powerupMaxDivertDistance: 18,
-    huntAllyCount: 6,
-  },
-  'Frozen Field': {
-    // Wider retreat radius: fall back before the 3-way pincer closes on
-    // the open ice field (deaths cluster at rows 5-10, the corridor band
-    // below the enemy spawn rows).
-    outnumberedRadiusCells: 14,
-    // Perfect aim: 8 of 20 enemies are 4-hit armor tanks; wasted shots
-    // extend exposure time in open terrain.
-    aimError: 0,
-  },
-  'Ice Palace': {
-    // Perfect aim: like Frozen Field this is an ice map where wasted
-    // shots extend exposure; consistent +16pp across seed windows.
-    aimError: 0,
-  },
   'Brick Maze': {
     // Failure mode is pure lives_exhausted (base almost never falls).
     // Faster replanning + a dash of path randomness break the deadlock
     // patrol loops in the dense brick maze where the AI and enemies
     // otherwise circle each other until lives run out.
+    // 120-seed probe (2026-07-30): 68.3% vs naked 67.5% (+0.8pp, within
+    // noise) but prevents base destruction (0 vs 2). Individual params
+    // each 65.8% — the synergy is real but marginal. Kept for base safety.
     replanInterval: 30,
     suboptimalPathProb: 0.05,
   },
   Diamond: {
-    // S32 (index 32): 10 armor (4 HP) + 7 fast + 3 power on a map with
+    // S32 (index 32): 8 armor (4 HP) + 8 fast + 4 power on a map with
     // large forest + fragmented steel + an OPEN bottom band.
     //
-    // Core strategy: CLOSE COMBAT (贴身缠斗). The player only stops to
-    // aim at enemies within 2 cells (32px), maximizing fire rate against
-    // 4-HP armor. At point-blank, bullet travel time ≈ 0, so the player
-    // kills armor in ~0.5s instead of ~4s at long range. Faster kills =
-    // less exposure = fewer deaths AND more time to respond to base
-    // threats between targets.
+    // §56: the core close-combat strategy (t2aMaxRange:2) was generalized
+    // into `t2aHighHpMaxRange` (default 2, triggered by enemyKind === 'armor').
+    // The `damagedArmorBonus` was tested at 1 but HURT S32 (-8.4pp) by
+    // causing target-switching that interrupts armor grinding.
     //
-    // Parameters:
-    //   t2aMaxRange: 2 — point-blank stop-and-aim
-    //   campTimeoutTicks: 50 — shorter unproductive camp (0.83s vs 1.5s)
-    //   antiCampSuppressTicks: 50 — matching camp suppress
-    //   damagedArmorBonus: 1 — finish damaged armor (damage is permanent)
-    //   navStuckTicks: 90 — faster stuck recovery (1.5s vs 3s)
+    // What remains: shorter camp/nav timing. S32's fragmented map with
+    // forest cover creates frequent stuck/loop situations that the default
+    // camp/nav timers (90/60/180) are too slow to escape. The shorter
+    // values (50/50/90) break these loops faster, recovering +8pp on S32.
+    // These were tested globally but showed mixed results (helped S18/S25,
+    // hurt S6/S10/S15), so they remain stage-specific.
     //
-    // Verified @120 seeds: 43.3% → 72.5% (+29.2pp) with close-combat params.
-    //   Failure mode shift: base_destroyed 43→21, lives_exhausted 25→12.
-    // guardBandMode (T2a skip) was tested and REJECTED: it causes the
-    // player to abandon in-progress armor kills to chase fast tanks,
-    // which is strictly worse (50.8% @120 seeds vs 72.5% without).
-    // smartThreatModel (Phase A) was also tested and REJECTED on S32:
-    //   - Full model (isBaseUnderThreat + selectTarget + skipT2a): -20pp
-    //   - selectTarget only (threatScore): -7.5pp
-    //   - Extended race range for fast tanks: -10.8pp (base↓2 but lives↑15)
-    //   Root cause: S32's close-combat strategy is fragile — ANY
-    //   interruption to armor grinding causes lives_exhausted to spike.
-    //   Diagnostic showed armor(10)+power(7) are the primary base killers,
-    //   NOT fast tanks(2) — the plan's 'fast rusher' assumption was wrong.
+    // 120-seed probe (2026-07-30): 64.2% without override → 72.5% with
+    // camp/nav override. The +8.3pp gap is entirely from camp/nav timing.
     campTimeoutTicks: 50,
     antiCampSuppressTicks: 50,
-    t2aMaxRange: 2,
-    damagedArmorBonus: 1,
     navStuckTicks: 90,
   },
 }

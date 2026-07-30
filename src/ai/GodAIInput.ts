@@ -1,13 +1,14 @@
 import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
-import type { Tank, Bullet } from '../types'
+import type { Tank, Bullet, TankKind } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS } from '../constants'
+import { BASE_POS, CELL } from '../constants'
 import { ALL_DIRS } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
+  findEnemyFacingPlayerImpl,
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
@@ -18,6 +19,7 @@ import {
   baseBulletInterceptCellImpl,
   dodgeDirectionImpl,
   isSafeDirImpl,
+  hasEnemyBulletInLineImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -214,8 +216,28 @@ export interface GodAIParams {
    * high-HP armor tanks (bullet travel time ≈ 0 → kills 4-HP armor in
    * ~0.5s instead of ~4s at long range). Beyond this range, the player
    * keeps moving to close the distance.
+   *
+   * This applies to 1-HP enemies (basic/fast/power). For multi-HP enemies
+   * (armor, maxHp > 1), see `t2aHighHpMaxRange`.
    */
   t2aMaxRange: number
+  /**
+   * §56: Close-combat T2a range for HIGH-HP enemies (maxHp > 1, i.e. armor).
+   * Default 2 — the player only stops to aim at multi-HP enemies when at
+   * point-blank range. At longer ranges, the player keeps NAVIGATING to
+   * close the distance instead of stopping for a low-DPS long-range duel.
+   *
+   * Rationale: a 4-HP armor tank at 15 cells takes ~4s to kill (4 bullets
+   * × ~1s travel time each). During that time the enemy advances ~12 cells
+   * and fires back. At 2 cells, bullet travel time ≈ 0, so 4 shots land in
+   * ~0.5s — the enemy barely moves or fires. This generalizes the S32
+   * close-combat strategy into a universal mechanism triggered by enemy
+   * HP, not by stage name.
+   *
+   * For 1-HP enemies, `t2aMaxRange` (default 15) still applies — one shot
+   * kills regardless of distance, so there's no DPS penalty for long range.
+   */
+  t2aHighHpMaxRange: number
 
   // ---- Smart threat model (Phase A, plan/God-AI-Next-Round §3) ----
   /**
@@ -328,15 +350,20 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
 
-  // D1/D2: Guard band mode + damaged armor priority. Default OFF (0) so
-  // all 34 other stages are byte-identical. Only the S32 override enables
-  // these — regression-safe by construction.
+  // D1/D2: Guard band mode + damaged armor priority. Default OFF (0) for
+  // both — regression-safe. damagedArmorBonus was tested at 1 but HURT S32
+  // (-8.4pp) by causing target-switching that interrupts armor grinding.
+  // The HP-dependent t2aHighHpMaxRange already handles the "finish damaged
+  // armor" use case by extending range as HP drops.
   guardBandMode: 0,
   guardBandRow: 20,
   guardBandHalfWidth: 7,
   damagedArmorBonus: 0,
-  // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior).
+  // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior for
+  // 1-HP enemies). For multi-HP enemies (armor), t2aHighHpMaxRange=2
+  // triggers point-blank engagement (§56 — generalizes S32 close-combat).
   t2aMaxRange: 15,
+  t2aHighHpMaxRange: 2,
 
   // Smart threat model (Phase A): default OFF (0). All 35 stages are
   // byte-identical when OFF. Only stages with smartThreatModel > 0 in
@@ -439,12 +466,18 @@ export class GodAIInput implements InputLike {
     steel: boolean
     baseWall: boolean
     enemyDist: number
+    enemyKind: TankKind
+    enemyHp: number
+    enemyMaxHp: number
   } = {
     enemy: false,
     wall: false,
     steel: false,
     baseWall: false,
     enemyDist: Infinity,
+    enemyKind: 'basic',
+    enemyHp: 1,
+    enemyMaxHp: 1,
   }
 
   /** Reusable buffer for scanAheadImpl's per-offset aligned-tank pre-filter.
@@ -762,56 +795,113 @@ export class GodAIInput implements InputLike {
     if (aimDir && this._antiCampSuppress <= 0 && !skipT2aForDefense) {
       const scan = this.scanAhead(pcx, pcy, aimDir)
 
-      if (scan.enemy && scan.enemyDist <= this.params.t2aMaxRange) {
-        // Track camping duration in a ZONE (±1 cell), not exact cell.
-        // P2.1fix: the old exact-cell check was defeated by sub-cell
-        // oscillation — the player bounces between two adjacent cells
-        // (e.g., x=32→40→32) at the TANK/CELL boundary, resetting the
-        // camp cell each time the boundary is crossed. This prevented
-        // the anti-camp escape from EVER firing, causing the Stage 3/4
-        // deadlocks (player stuck at one spot for 17000+ ticks). The
-        // zone fix accumulates camp time across nearby cells, so the
-        // escape triggers even if the player wiggles between two cells.
-        const pc = this.playerCell()
-        if (
-          this._campCell &&
-          Math.abs(this._campCell.col - pc.col) <= 1 &&
-          Math.abs(this._campCell.row - pc.row) <= 1
-        ) {
-          this._campTicks++
-          // If a kill happened since camping started, reset the camp timer.
-          // The player is being productive — let it continue camping.
-          if (w.killCount !== this._campKillsAtStart) {
+      if (scan.enemy) {
+        // §56: dynamic T2a range based on enemy kind.
+        // For non-armor enemies (basic/fast/power): use t2aMaxRange (15) —
+        // one shot kills at any distance, no DPS penalty for range.
+        // For armor (4 hitsToKill): use t2aHighHpMaxRange (2) — close combat.
+        // At long range, 4 shots × 1s travel = 4s of camping; at point-blank,
+        // 4 shots in <0.5s. The approach time is always worth it for 4-HP armor.
+        // Note: in the instant combat model, maxHp = hitsToKill × referenceDamage,
+        // so ALL enemies have maxHp >= 100. The kind check is the correct way
+        // to identify armor (4 hitsToKill) vs basic/fast/power (1 hitsToKill).
+        const effectiveRange =
+          scan.enemyKind === 'armor' ? this.params.t2aHighHpMaxRange : this.params.t2aMaxRange
+        if (scan.enemyDist <= effectiveRange) {
+          // Track camping duration in a ZONE (±1 cell), not exact cell.
+          // P2.1fix: the old exact-cell check was defeated by sub-cell
+          // oscillation — the player bounces between two adjacent cells
+          // (e.g., x=32→40→32) at the TANK/CELL boundary, resetting the
+          // camp cell each time the boundary is crossed. This prevented
+          // the anti-camp escape from EVER firing, causing the Stage 3/4
+          // deadlocks (player stuck at one spot for 17000+ ticks). The
+          // zone fix accumulates camp time across nearby cells, so the
+          // escape triggers even if the player wiggles between two cells.
+          const pc = this.playerCell()
+          if (
+            this._campCell &&
+            Math.abs(this._campCell.col - pc.col) <= 1 &&
+            Math.abs(this._campCell.row - pc.row) <= 1
+          ) {
+            this._campTicks++
+            // If a kill happened since camping started, reset the camp timer.
+            // The player is being productive — let it continue camping.
+            if (w.killCount !== this._campKillsAtStart) {
+              this._campTicks = 1
+              this._campKillsAtStart = w.killCount
+            }
+          } else {
+            // Moved outside the camp zone — start fresh camp tracking.
+            this._campCell = { col: pc.col, row: pc.row }
             this._campTicks = 1
             this._campKillsAtStart = w.killCount
           }
-        } else {
-          // Moved outside the camp zone — start fresh camp tracking.
-          this._campCell = { col: pc.col, row: pc.row }
-          this._campTicks = 1
-          this._campKillsAtStart = w.killCount
-        }
 
-        // Anti-camp: if too long at this cell with no kills, break out.
-        const campedTooLong =
-          this._campTicks > this.params.campTimeoutTicks && w.killCount === this._campKillsAtStart
+          // Anti-camp: if too long at this cell with no kills, break out.
+          const campedTooLong =
+            this._campTicks > this.params.campTimeoutTicks && w.killCount === this._campKillsAtStart
 
-        if (!campedTooLong) {
-          if (p.dir === aimDir) {
-            this._moveDir = null // Already facing — stop and shoot
-          } else {
-            this._moveDir = aimDir // Turn to face enemy
+          if (!campedTooLong) {
+            // ---- §49: 炮口相向分场景策略 ----
+            // 当敌人面向 player 时，根据敌人类型采取不同策略：
+            //   - 冰面：跳过（垂直移动在冰面上失控）
+            //   - 1HP 敌人：正常 T2a 开火（一枪击毙），但对枪抵消仍然生效
+            //     （对枪是开火行为，不是移动闪避——与"1HP 不闪避"不矛盾）
+            //   - Armor（多血）：对枪抵消 + 保持对齐等待
+            //
+            // 对枪抵消对所有敌人类型都适用：当敌方子弹已在直线上时，
+            // 开火抵消比打死敌人更安全（子弹被消除→玩家安全）。
+            // 120-seed 验证：对枪对 ALL 敌人 +5 wins，仅 armor +1 win。
+            const facing = this.findEnemyFacingPlayer(pcx, pcy, aimDir)
+            const onIce = w.isTankOnIce(p)
+
+            if (facing && !onIce && facing.dist <= 5 * CELL) {
+              // ---- 对枪抵消逻辑（适用于所有敌人类型）----
+              const enemyBulletInLine = this.hasEnemyBulletInLine(pcx, pcy, aimDir)
+
+              if (enemyBulletInLine && !onCooldown) {
+                // 对枪：敌方子弹已在直线上 → 开火抵消
+                if (p.dir === aimDir) {
+                  this._moveDir = null
+                } else {
+                  this._moveDir = aimDir
+                }
+                this._fire = true
+                this.branchCounts.t2a++
+                return
+              }
+
+              // 先手开火 / 冷却中等待：保持对齐以备对枪
+              // 不横移——横移会脱离防守位，在密集关卡导致更多死亡
+              if (p.dir === aimDir) {
+                this._moveDir = null
+              } else {
+                this._moveDir = aimDir
+              }
+              this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+              this.branchCounts.t2a++
+              return
+            }
+
+            // ---- 正常 T2a（非炮口相向 / 1HP / 冰面）----
+            if (p.dir === aimDir) {
+              this._moveDir = null // Already facing — stop and shoot
+            } else {
+              this._moveDir = aimDir // Turn to face enemy
+            }
+            this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+            this.branchCounts.t2a++
+            return
           }
-          this._fire = !onCooldown && this.rng.next() >= this.params.aimError
-          this.branchCounts.t2a++
-          return
-        }
 
-        // Camped too long with no kills — suppress T2a and fall through
-        // to navigate, which will move the player toward the enemy.
-        this._campCell = null
-        this._campTicks = 0
-        this._antiCampSuppress = this.params.antiCampSuppressTicks
+          // Camped too long with no kills — suppress T2a and fall through
+          // to navigate, which will move the player toward the enemy.
+          this._campCell = null
+          this._campTicks = 0
+          this._antiCampSuppress = this.params.antiCampSuppressTicks
+        }
+        // Enemy in line of fire but beyond effective range — fall through
+        // to navigate (close the distance for high-HP enemies).
       }
       // No real enemy in line of fire (wall-only or clear) — fall through.
     } else if (this._campCell) {
@@ -1004,6 +1094,13 @@ export class GodAIInput implements InputLike {
   findEnemyDirection(pcx: number, pcy: number): Direction | null {
     return findEnemyDirectionImpl(this, pcx, pcy)
   }
+  findEnemyFacingPlayer(
+    pcx: number,
+    pcy: number,
+    aimDir: Direction,
+  ): { enemy: Tank; dist: number } | null {
+    return findEnemyFacingPlayerImpl(this, pcx, pcy, aimDir)
+  }
 
   /**
    * P1/P2.3: Check if any enemy is threatening the base. An enemy is a
@@ -1101,7 +1198,16 @@ export class GodAIInput implements InputLike {
     pcx: number,
     pcy: number,
     dir: Direction,
-  ): { enemy: boolean; wall: boolean; steel: boolean; baseWall: boolean; enemyDist: number } {
+  ): {
+    enemy: boolean
+    wall: boolean
+    steel: boolean
+    baseWall: boolean
+    enemyDist: number
+    enemyKind: TankKind
+    enemyHp: number
+    enemyMaxHp: number
+  } {
     return scanAheadImpl(this, pcx, pcy, dir)
   }
   isBaseProtectionBrick(col: number, row: number): boolean {
@@ -1126,6 +1232,9 @@ export class GodAIInput implements InputLike {
   }
   isSafeDir(pcx: number, pcy: number, dir: Direction, excludeBulletId: number): boolean {
     return isSafeDirImpl(this, pcx, pcy, dir, excludeBulletId)
+  }
+  hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
+    return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
 
   // --- StrategyPlanner ---

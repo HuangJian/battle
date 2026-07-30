@@ -105,8 +105,10 @@ function buildStressWorld(enemies: number, bullets: number): { world: World; sim
       ownerId: -1 - i,
       ownerKind: 'basic',
       isPlayer: i % 2 === 0,
+      allegiance: 'enemy',
       speed: 6,
       power: 1,
+      damage: 1,
     })
   }
   return { world, sim: new Simulation(world, new Input()) }
@@ -130,8 +132,10 @@ function topUpBullets(world: World, target: number): void {
       ownerId: -1000 - i,
       ownerKind: 'basic',
       isPlayer: i % 2 === 0,
+      allegiance: 'enemy',
       speed: 6,
       power: 1,
+      damage: 1,
     })
     alive++
     i++

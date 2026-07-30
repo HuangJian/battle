@@ -1824,7 +1824,234 @@ the current heuristic already outperforms the "accurate" one.
 
 **Implications:** God AI no longer wastes bullets shooting through steel walls. During freeze/shield windows, the AI navigates toward enemies behind obstacles instead of camping and firing uselessly.
 
-## 51. Lie-Back-Win-Mode Q1–Q10 拍板结果录入 + "无隐藏状态"合规论证 (2026-07-31)
+---
+
+## 51. 炮口相向火后闪避 = 负结果（已回退）
+
+**Decision:** 尝试在 T2a 中检测敌人炮口相向，开火后立即垂直闪避。实测为负结果，已回退。
+
+**Rationale:**
+- 用户洞察正确：炮口相向时错开半格开火导致双方子弹不抵消，互相击中
+- 但"火后立即闪避"的实现方式有根本缺陷：
+  1. `_postFireDodgeDir` 在 `think()` 顶部优先于子弹威胁检测（threat → T8 → T2a 链被打断）
+  2. 冰面关 S18 暴降 25pp（65→40%）——垂直闪避在冰面上失控滑入更危险位置
+  3. 对 1HP 敌人不必要的闪避（一枪就死，不需要躲），白白浪费 tick
+  4. 打断 armor 多枪击杀循环——开一枪就跑让敌人恢复
+- 35×20 严格 A/B（同 seed 集）：修改后 85.0% vs 基准 87.6%（**-2.6pp**）
+- 逐关对比：S18 -25pp、S28 -15pp、S32 -5pp；仅 S6 +5pp
+- 代码已回退（`src/ai/GodAIInput.ts` + `src/ai/god/FireControl.ts` 恢复原状）
+
+**Implications:**
+- 教训：任何在 `think()` 顶部插入新分支的改动都会打断既定优先级链（threat → T8 → aggressive → T2a → powerup → navigate），后果不可预测
+- 用户的需求（炮口相向不送命）仍然有效，但需要不同的实现路径——例如在 T2a fire 决策中内联处理，而非引入新的顶层分支
+- 现有的 threat 检测系统已经在敌人子弹发出后处理闪避；问题在于同一帧双方同时开火导致子弹同时到达
+
+## 52. 炮口相向·对枪抵消（§49 v2，T2a 内联实现）
+
+**Decision:** 在 T2a 分支内部（非 `think()` 顶部）实现炮口相向策略。当敌人面向 player 且不在冰面时：
+1. **对枪抵消**（所有敌人类型）：检测到敌方子弹在直线上 → 强制开火抵消（`_fire = true`，跳过 aimError）
+2. **先手开火**（无子弹时）：正常 T2a 开火逻辑
+3. **冰面排除**：player 在冰面时跳过整个策略，走正常 T2a
+4. **不横移**：火后垂直移动在密集关卡导致脱离防守位（20-seed 验证 S26 -10pp），已移除
+
+**Rationale:**
+- §51 失败根因：在 `think()` 顶部插入 `_postFireDodgeDir` 分支，打断了 threat → T8 → T2a 优先级链
+- 本版将逻辑完全内联到 T2a 分支内，threat 检测仍然先于对枪逻辑执行
+- 用户分场景需求：
+  - 冰面：✅ 排除（冰面横移失控）
+  - 1HP 敌人：对枪抵消仍然生效（对枪是开火行为，非移动闪避；120-seed 验证对 ALL 敌人对枪 +5 wins，仅 armor +1 win）
+  - Armor：对枪抵消 + 保持对齐等待
+- 横移策略（用户建议的"错开半格开火然后对齐"）已测试并移除：4-tick 横移导致 S26 -10pp、S6 -5pp
+
+**Implications:**
+- `findEnemyFacingPlayerImpl` (FireControl.ts)：检测敌人是否面向 player
+- `hasEnemyBulletInLineImpl` (ThreatAssessor.ts)：检测直线上是否有敌方子弹
+- 35×120 A/B：基准 3618/4200 (86.1%) → 修改 3623/4200 (86.3%)，+5 wins
+- 主要增益关卡：S32 Star Fort +2, S7/S22/S24/S27 各 +1, S25 -1
+- 增益虽小（+0.2pp）但方向稳定，且不引入任何回退
+
+## 53. God AI 评估标准 v7 — 宽带 gap + 胜率调和均值混合 fitness (2026-07-30)
+
+**Decision:** 在 v6 连续评分管线基础上引入 v7 标准，通过两个结构性改动对齐胜率：
+1. **加宽带间 gap**：`LOSS_BAND_MAX` 0.55→0.40、`CLEAR_BAND_MIN` 0.60→0.70（gap 从 0.05 扩大到 0.30），使"将失败转为通关"成为优化器最高边际收益的方向。
+2. **混合 fitness**：`fitnessV7 = 0.5 × v7_lcb × 1000 + 0.5 × winRateHarmonic × 1000`，其中 `winRateHarmonic` 是 35 关胜率的调和均值（p=−1），被最弱关主导，提供连续压力改善低胜率关卡。
+
+**Rationale:**
+- v6 的 0.05 gap 使"输→赢"转化仅值 0.05 分，远低于"0 杀→19 杀"的 0.46 分。优化器选择降低瞄准精度（aimError 0.030→0.094）来减少灾难性失败，而非提升难关转化率，导致 Checkers/Iron Curtain/Twin Spires 三关显著回归（§10.4）。
+- 宽带 gap 单独不够：v7-first（仅宽 gap）冠军 35×60 胜率 85%，aimError 0.116，2 回归/0 改善。根因是带内分数仍奖励"多杀的失败"，优化器可找到 quality 高但 win rate 低的参数组合。
+- 混合 fitness 的胜率调和均值直接耦合外部指标：28/35 关在 DEFAULT 下胜率饱和（100%），算术均值不敏感；调和均值被最弱关主导，5pp 改善在调和均值中产生比算术均值大得多的 fitness delta。这是 v5 不连续 floor penalty 的连续替代。
+- 50/50 分配优于 60/40：v7b（50/50）0 回归/1 改善/p=0.11（不显著）；v7c（60/40）2 回归/3 改善/p=0.039（显著回归）。60/40 推优化器过度追求胜率，牺牲质量导致 Twin Spires/Lattice 回归。
+
+**Experiments (同 opt-seed=7、同预算 35×14×7，A/B 口径 35×60):**
+
+| 标准 | aimError | win@14 | win@60 | 回归 | 改善 | p |
+|------|----------|--------|--------|------|------|---|
+| DEFAULT (v5 incumbent) | 0.030 | 87% | 87% | — | — | — |
+| v6 champion | 0.094 | 87% | 86% | 3 | 1 | 0.18 |
+| v7-first (宽gap only) | 0.116 | 88% | 85% | 2 | 0 | <0.05 |
+| **v7b (50/50 hybrid)** | **0** | **88%** | **86%** | **0** | **1** | **0.11** |
+| v7c (60/40 hybrid) | 0.024 | 88% | 86% | 2 | 3 | 0.039 |
+
+**v7b 逐关 A/B（35×60，DEFAULT vs v7b champion）:**
+- ▲ Frozen Field +0.1229 (p=0.0086, 63%→82%) — 唯一显著改善
+- 0 处显著回归（v6 有 3 处：Checkers/Iron Curtain/Twin Spires）
+- 总体配对 p=0.11，不显著 — v7b 冠军与 DEFAULT 统计不可区分
+
+**Implications:**
+- v7 标准以 `--fitness v7` 开启，v5 仍为默认。v7 冠军 35×60 胜率 86% vs DEFAULT 87%，差值 1pp 在噪声范围内（p=0.11），且**零显著回归 + 一处显著改善**，显著优于 v6（3 回归/1 改善）。
+- v7 的核心价值是**安全性**：它不会产生 v6 那样的难关回归。在减量预算（14 seed）下，v7 的 1pp 胜率差距是搜索噪声而非系统性偏差——完整预算（20+ seed × 30 代）有理由缩小或消除该差距。
+- **建议**：v7 作为 v5 的替代优化目标，适用于"需要连续梯度但不可牺牲胜率"的调参场景。暂不提为默认（未达"≥87%"硬门槛），但在有更长搜索预算时可重新评估。
+- 新增导出：`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`（`tools/godai-score.ts`）。`ScoreConfig` 接口新增 `lossBandMax`/`clearBandMin` 字段。
+
+## 54. S6 Iron Curtain 覆盖表移除 — 过时保守策略反噬 (2026-07-30)
+
+**Decision:** 从 `GOD_AI_STAGE_OVERRIDES` 中移除 S6 'Iron Curtain' 条目。该覆盖在 RNG split + §47 基地保护环 + v7 评估改造后已过时，全局默认参数在 S6 上已优于覆盖配置。
+
+**Rationale:**
+- S6 覆盖（R8 版本）的设计目标是"收紧活动半径 + 提前回防 + 早回撤"：`maxPlayerDistFromBase:16`（默认 26）、`outnumberedEnemyCount:2`（默认 3）、`defenseRowOffset:3`（默认 1）、`replanInterval:36`（默认 50）等。
+- 120-seed 探针证实覆盖**有害**：覆盖 59.2% < 裸默认 62.5%。失败模式分析揭示矛盾：覆盖的保守 leash 导致 base 破坏数**增加**（43 vs 30 per 120 seeds），直接违背其"保护基地"的设计目的。
+- 机制：收紧 leash → 中盘丢掉迷宫控制权 → 杀敌节奏变慢 → 侧翼压力和基地压力反而变大 → 既没清场也没守住。
+- 用户建议的最小覆盖 `{maxPlayerDistFromBase:28, t8MaxInterceptDistCells:10}` 在 60 seeds 上表现优异（75%），但 120 seeds 显示 `maxPlayerDistFromBase:28` 是双刃剑——窗口 1 有利（73.3%），窗口 2 有害（45.0%）。`t8MaxInterceptDistCells:10` 单独在 120 seeds 略优（63.3%），但与裸默认差距（0.8pp）在噪声范围内。
+- **结论**：stale override 必须**移除**而非 patch。全局默认在 S6 上已足够强。
+
+**Experiments (120 seeds, S6 Iron Curtain, classic):**
+
+| 配置 | win% | base | lives |
+|------|------|------|-------|
+| 当前覆盖（R8 保守） | 59.2% | 43 | 6 |
+| **裸默认（移除覆盖）** | **62.5%** | **30** | **15** |
+| min: dist28+t8=10 | 60.0% | 32 | 16 |
+| min: t8=10 only | 63.3% | 29 | 15 |
+| min: dist28 only | 59.2% | 33 | 15 |
+
+**35×60 eval-suite 对比（DEFAULT params, 移除 S6 覆盖前后）:**
+
+| 指标 | 旧（带 S6 覆盖） | 新（移除 S6 覆盖） | Δ |
+|------|-----------------|------------------|---|
+| Suite | 0.6878 | 0.7063 | +0.019 |
+| LCB | 0.6828 | 0.7020 | +0.019 |
+| 平均胜率 | 87% | 88% | +1pp |
+| S6 score | 0.488 | 0.609 | +0.121 |
+| S6 win% | 57% | 72% | +15pp |
+| 最弱关 | Iron Curtain (57%) | Frozen Field (63%) | S6 不再是短板 |
+
+**Implications:**
+- S6 覆盖表条目已从 `src/ai/godai-stage-overrides.ts` 中删除。
+- 回归门禁 `tests/god-ai-regression-gate.test.ts` 的 S6 truth 值更新为 72.0%，20-seed gate 实测 16/20（80%），远超 floor 10。
+- 进展文档 `docs/god-ai-tuning.progress.md` 的覆盖表更新为 4 条（移除 S6）。
+- **教训**：覆盖表是"数据而非代码"（MANIFEST §2.4），但数据会过时。RNG split、碰撞修复、评估改造等基线变动后，每个覆盖都需要重新 truth-scale 复核。否则优化器在"带着坏覆盖"的世界里调全局参数，永远无法发现"删掉覆盖更好"。
+- 用户建议的优先级 3（把 override 纳入"需要重新验证"的调校对象）记录为后续待办。
+
+## 55. S18/S25 覆盖表移除 + S26/S32 审计保留 — 全覆盖表过时检查 (2026-07-30)
+
+**Decision:** 对全部 4 个剩余覆盖表条目进行 120-seed 过时审计。移除 S18 Frozen Field 和 S25 Ice Palace 覆盖，保留 S26 Brick Maze 和 S32 Diamond。
+
+**Rationale:**
+
+### S18 Frozen Field — 覆盖有害，移除
+
+- 覆盖内容：`outnumberedRadiusCells:14, aimError:0`（设计于 R6 基线，原始验证 52→67%）
+- 120-seed 探针：覆盖 56.7% < 裸默认 60.8%（-4.1pp）
+- 分解实验：`outnumberedRadiusCells:14` 是罪魁祸首（55.0% vs 裸默认 60.8%，-5.8pp）；`aimError:0` 单独也略差（59.2%，噪声内）
+- 机制：更宽的 retreat radius（14 vs 默认 9）导致 player 在冰面开阔地上过早回撤，丢失中盘控制权——与 S6 相同的"保守反噬"模式
+- 两窗口分解揭示高方差：W1(1-60) 覆盖 63.3% > 裸默认 55.0%，但 W2(61-120) 覆盖 50.0% << 裸默认 66.7%。120-seed 真值更可靠
+
+### S25 Ice Palace — 覆盖完全无效，移除
+
+- 覆盖内容：`aimError:0`（原始验证 57→73%）
+- 120-seed 探针：覆盖 77.5% = 裸默认 77.5%（**逐种子完全相同**，base=5 lives=22 一致）
+- 原因：当前默认 `aimError:0.0303` 已极小，在 S25 上设为 0 不产生任何行为差异。原始验证时的 +16pp 提升已随基线改善而蒸发
+
+### S26 Brick Maze — 边际中性，保留
+
+- 覆盖内容：`replanInterval:30, suboptimalPathProb:0.05`（原始验证 53→65%）
+- 120-seed 探针：覆盖 68.3% ≈ 裸默认 67.5%（+0.8pp，噪声内）
+- 分解实验：单独 replan30 或 subopt0.05 各 65.8%（反而略差），但组合有协同效应
+- 保留理由：base 破坏 0 vs 2 是真实信号；组合的协同效应在分解中可见；不产生任何回归
+
+### S32 Diamond — 覆盖必需，保留不动
+
+- 覆盖内容：`t2aMaxRange:2, campTimeoutTicks:50, ...`（close-combat 策略）
+- 120-seed 探针：覆盖 72.5% >> 裸默认 48.3%（+24.2pp）
+- 仍然是全部覆盖中价值最大的，close-combat 策略对 armor-heavy 关卡不可替代
+
+**Experiments (120 seeds, classic):**
+
+| 关卡 | 覆盖 | 裸默认 | Δ | 判定 |
+|------|------|--------|---|------|
+| S18 Frozen Field | 56.7% | 60.8% | -4.1pp | ❌ 移除 |
+| S25 Ice Palace | 77.5% | 77.5% | 0.0pp | ❌ 移除（无效） |
+| S26 Brick Maze | 68.3% | 67.5% | +0.8pp | ✅ 保留（边际正+防base） |
+| S32 Diamond | 72.5% | 48.3% | +24.2pp | ✅ 保留（必需） |
+
+**Implications:**
+- 覆盖表从 4 条缩减为 2 条（S26 + S32）。文件头注释新增完整审计记录。
+- 回归门禁 S18 truth 71.7→60.8%，S25 truth 73.3→77.5%。20-seed gate 实测 S18=10/20（floor 8）、S25=17/20（floor 12），均通过。
+- 35×60 eval-suite：suite 0.7045（±0.0043），平均胜率 88%，与移除前（0.7063）差异在噪声内。
+- **审计结论**：5 个原始覆盖中 3 个（S6/S18/S25）已过时，2 个（S26/S32）仍有效。过时率 60%——验证了 §54 的教训：基线变动后必须重新审计所有覆盖。
+
+## 56. S32 close-combat 策略泛化 — t2aHighHpMaxRange 按敌型触发 (2026-07-31)
+
+**Decision:** 将 S32 的 `t2aMaxRange:2`（贴身缠斗）从关卡特判泛化为按敌人类型触发的通用机制。新增 `t2aHighHpMaxRange` 参数（默认 2），当扫描到的敌人是 armor 时使用短射程（贴身缠斗），其他敌人类型使用默认长射程（15）。S32 覆盖表从 5 参数缩减为 3 参数（仅保留 camp/nav 定时）。
+
+**Rationale:**
+
+### 核心洞察
+
+S32 覆盖的核心价值在于 `t2aMaxRange:2`——迫使玩家不在远距离停火对射装甲，而是逼近到 2 格内再停。这不是 S32 独有的需求，而是**所有装甲关卡的通用需求**：
+
+- 4HP 装甲在 15 格距离：4 发 × 1s 飞行 = 4s 停桩（暴露在敌方火力下）
+- 4HP 装甲在 2 格距离：4 发 × 0.1s 飞行 = 0.5s 停桩（几乎无暴露）
+
+### 实现路径
+
+1. **`scanAheadImpl` 扩展**：新增 `enemyKind`/`enemyHp`/`enemyMaxHp` 返回字段，使 `think()` 能获取扫描到的敌人类型和血量。
+2. **`think()` 动态射程**：`effectiveRange = enemyKind === 'armor' ? t2aHighHpMaxRange : t2aMaxRange`
+3. **关键 bugfix**：instant 战斗模型中 `maxHp = hitsToKill × referenceDamage`（basic=100, armor=400），所以 `maxHp > 1` 对所有敌人恒为真。必须用 `enemyKind === 'armor'` 而非 `maxHp > 1` 来判断。
+4. **`damagedArmorBonus` 保持 0**：测试发现设为 1 会伤害 S32（-8.4pp），因为它导致目标切换打断 armor grinding 节奏。
+
+### 被否决的方案
+
+| 方案 | S32 (120s) | S2 (120s) | S18 (120s) | 否决原因 |
+|------|-----------|----------|-----------|---------|
+| 固定 t2aMaxRange=2 for ALL | 68.3% | 88.3% | 66.7% | S2/S10/S15 回归 10-12pp |
+| HP 插值 (full→1 线性) | 55.8% | 93.3% | 70.0% | S32 崩塌（中距离停火最差） |
+| HP 阈值 50% (hp>50%→close) | 61.7% | 97.5% | 70.0% | S32 仍不足 |
+| HP 阈值 25% (hp>25%→close) | 65.0% | 97.5% | 60.8% | S18 退化 |
+| **kind-based (no threshold)** | **64.2%** | **98.3%** | **64.2%** | **采纳**：S2/S10/S15 无回归 |
+| kind + camp/nav override | 72.5% | 98.3% | 64.2% | **最终方案**：+8.3pp from camp/nav |
+
+### camp/nav 参数无法泛化
+
+全局缩短 camp/nav（50/50/90 vs 90/60/180）在 60 seeds 上显示混合结果：
+- 帮助：S32(+4), S18(+9), S25(+7)
+- 损害：S6(-4), S10(-3), S15(-3)
+
+因此 camp/nav 保留为 S32 专属覆盖。
+
+**Experiments (120 seeds, classic, key stages):**
+
+| 关卡 | 旧（S32 全覆盖） | 新（kind-based + camp/nav） | Δ |
+|------|----------------|---------------------------|---|
+| S32 Diamond | 72.5% | 72.5% | 0pp ✅ |
+| S2 Steel Fortress | 100% | 98.3% | -1.7pp (噪声) |
+| S10 Fortress | 88.3% | 90.0% | +1.7pp ✅ |
+| S15 Crossroads | 88.3% | 91.7% | +3.4pp ✅ |
+| S18 Frozen Field | 55.0% | 64.2% | +9.2pp ✅ |
+| S25 Ice Palace | 77.5% | 78.3% | +0.8pp ✅ |
+| S0 Outpost | 98.3% | 97.5% | -0.8pp (噪声) |
+
+**Implications:**
+- S32 覆盖表从 5 参数（t2aMaxRange + camp + anticamp + damagedArmorBonus + navStuck）缩减为 3 参数（camp + anticamp + navStuck）。核心策略已泛化。
+- 新增 `GodAIParams.t2aHighHpMaxRange`（默认 2）。`scanAheadImpl` 新增 `enemyKind`/`enemyHp`/`enemyMaxHp` 返回字段。
+- `damagedArmorBonus` 保持默认 0（测试证明有害）。
+- S0/S6（无装甲）byte-identical（parity test 通过）。
+- 回归门禁 S32 truth 保持 72.5%。`bun run check` 全绿（601 tests pass）。
+- **教训**：在 instant 战斗模型中，`maxHp` 不等于 `hitsToKill`——`maxHp = hitsToKill × referenceDamage`。判断敌人类型必须用 `kind`，不能用 `maxHp > 1`。
+
+---
+
+## 57. Lie-Back-Win-Mode Q1–Q10 拍板结果录入 + "无隐藏状态"合规论证 (2026-07-31)
 
 **Decision:** 补录 plan/Lie-Back-Win-Mode.md §7 + §7.1 所有拍板结果，并记录输入层 AI 的无隐藏状态合规论证。
 
@@ -1846,7 +2073,7 @@ the current heuristic already outperforms the "accurate" one.
 
 **Implications:** DECISIONS.md 现为 Lie-Back-Win-Mode 的完整决策记录。
 
-## 52. Kill-Score 归属路由 (2026-07-31)
+## 58. Kill-Score 归属路由 (2026-07-31)
 
 **Decision:** bulletHitsTank 中击杀得分按 bullet.ownerId 路由：God 坦克的子弹击杀 → w.score2，人类坦克的子弹击杀 → w.score。牺牲 AoE 和炸弹道具保持 w.score（人类专属能力）。
 
@@ -1854,7 +2081,7 @@ the current heuristic already outperforms the "accurate" one.
 
 **Implications:** HUD 的 "GOD: score2" 现在正确反映 God 的击杀得分；killCount 仍为全局计数（不按 P1/P2 拆分，与经典 FC 行为一致）。
 
-## 53. AutoFireInput 接线 (2026-07-31)
+## 59. AutoFireInput 接线 (2026-07-31)
 
 **Decision:** AutoFireInput 装饰器已接入 Game.ts：coop 启用时包裹人类 input，每关 reset() 重臂，按开火键接管射击。disable/resetToMenu/recovery-restore 时正确清理。
 
@@ -1862,7 +2089,7 @@ the current heuristic already outperforms the "accurate" one.
 
 **Implications:** Replay 记录的是装饰后的有效帧（auto-fire 帧），回放自动复现，零特判。
 
-## 54. One-Author 修正：requestCoopToggle 路由 (2026-07-31)
+## 60. One-Author 修正：requestCoopToggle 路由 (2026-07-31)
 
 **Decision:** Game.ts 的 requestCoopToggle 改为通过 simulation.requestCoopToggle(on) 路由 World 变更请求。Simulation 在 updatePlaying() 开头消费 pendingCoopToggle 并执行 World 变更。menu/paused 态下 Game.ts 仍立即应用（因无 tick 触发），pendingCoopToggle 被 guard 条件安全消费（enable && !w.coop / !enable && w.coop）。
 
@@ -1870,7 +2097,7 @@ the current heuristic already outperforms the "accurate" one.
 
 **Implications:** One-Author 不变量恢复；toggle 行为不变（menu/paused 态立即生效，playing 态下一 tick 生效）。
 
-## 55. Parity 基线漂移归因 (2026-07-31)
+## 61. Parity 基线漂移归因 (2026-07-31)
 
 **Decision:** godai-split-parity.test.ts stage 100 基线变更（ticks 3013→2942, score 4200→3700, lives 3→1, playerLevel 1→0）归因于 fire-through-steel fix（§50, commit #50），而非 Lie-Back-Win-Mode 的 coop 集成。controlledTank 默认 w=>w.player 确保单人路径字节级不变；perception.ts 的双目标改动在 player2==null 时退化为等价路径。
 
