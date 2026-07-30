@@ -291,6 +291,10 @@ export class Game {
     } else if (this._hidden) {
       this._hidden = false
       if (this.running) {
+        // The AudioContext is often auto-suspended while the tab is hidden;
+        // resume it when we come back so a running replay (or live game)
+        // doesn't fall silent. resume() is a no-op if already running.
+        this.audio.resume()
         this.lastTime = performance.now()
         if (LOW_POWER_STATES.has(this.world.state)) {
           // No loop runs while idle — repaint once so the canvas isn't blank
@@ -1241,6 +1245,16 @@ export class Game {
     this.presentation.ui.replayBrowser.close()
     this.playback = new PlaybackController(replay)
     this.playback.start(this.world, this.simulation)
+    // Replay playback is a sound-producing action, but unlike live gameplay
+    // its entry points (clicking Play / Replay-Again in the browser) never
+    // go through the menu handlers that call audio.init()/resume(). If the
+    // AudioContext was auto-suspended (idle, backgrounded tab, or the user's
+    // first interaction was just opening the replay browser) we'd get no sound
+    // — intermittently. Resume it here, inside the user gesture that started
+    // playback, so audio is always live. (Matches every other interactive
+    // entry point in the file.)
+    this.audio.init()
+    this.audio.resume()
     // Presentation is disposable (AGENTS §2.5): the world was atomically
     // replaced — rebuild all visual state (particles, camera, animations).
     this.presentation.reset()
@@ -1580,11 +1594,18 @@ export class Game {
 
   /** Open the Replay Browser (Control Center button). */
   private openReplayBrowser(): void {
-    // Never on top of an active playback or the recovery flow.
-    if (this.playback) return
+    // Never on top of the recovery flow.
     if (this.world.state === 'recovery') return
-    // Playing → pause first so the world doesn't run behind the modal.
-    if (this.world.state === 'playing') {
+    // A replay is playing/paused/ended → leave it and return to the menu
+    // before showing the browser. Mirrors the Escape-during-playback path
+    // (stopPlayback + resetToMenu). This is required: clearing this.playback
+    // without resetting would let the LIVE simulation take over from the
+    // replay's world state with the real input the very next frame.
+    // resetToMenu() also closes any open modal and stops playback internally.
+    if (this.playback) {
+      this.resetToMenu()
+    } else if (this.world.state === 'playing') {
+      // Live game → pause first so the world doesn't run behind the modal.
       this.simulation.togglePause()
       this.snapshots.create('pause', this.world)
     }
