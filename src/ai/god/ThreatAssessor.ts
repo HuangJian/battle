@@ -302,3 +302,47 @@ export function isSafeDirImpl(
   }
   return true
 }
+
+/**
+ * §49: Check if there's an enemy bullet traveling toward the player in the
+ * given direction's line of fire. Used by the armor "对枪" (trade-shots)
+ * logic to decide whether to fire for bullet cancellation.
+ *
+ * Returns true if an enemy bullet is in the line, approaching the player,
+ * within a reasonable distance.
+ */
+export function hasEnemyBulletInLineImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  aimDir: Direction,
+): boolean {
+  const w = self.world
+  const vertical = aimDir === 'up' || aimDir === 'down'
+  const bullets = w.bullets
+
+  for (let i = 0; i < bullets.length; i++) {
+    const b = bullets[i]
+    if (!b.alive || b.isPlayer) continue
+
+    const bcx = b.x + b.w / 2
+    const bcy = b.y + b.h / 2
+
+    // Bullet must be roughly aligned with the player in the aimDir line
+    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
+    if (!aligned) continue
+
+    // Bullet must be approaching the player (in front, heading toward player)
+    const approaching =
+      (aimDir === 'up' && b.dir === 'down' && bcy < pcy) ||
+      (aimDir === 'down' && b.dir === 'up' && bcy > pcy) ||
+      (aimDir === 'left' && b.dir === 'right' && bcx < pcx) ||
+      (aimDir === 'right' && b.dir === 'left' && bcx > pcx)
+    if (!approaching) continue
+
+    // Within a reasonable distance (8 cells)
+    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    if (dist < TANK * 8) return true
+  }
+  return false
+}

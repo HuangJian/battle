@@ -1823,3 +1823,49 @@ the current heuristic already outperforms the "accurate" one.
 **Cost:** Minor determinism signature shift — parity baselines in `tests/godai-split-parity.test.ts` updated. No tuning change, no parameter modification.
 
 **Implications:** God AI no longer wastes bullets shooting through steel walls. During freeze/shield windows, the AI navigates toward enemies behind obstacles instead of camping and firing uselessly.
+
+---
+
+## 51. 炮口相向火后闪避 = 负结果（已回退）
+
+**Decision:** 尝试在 T2a 中检测敌人炮口相向，开火后立即垂直闪避。实测为负结果，已回退。
+
+**Rationale:**
+- 用户洞察正确：炮口相向时错开半格开火导致双方子弹不抵消，互相击中
+- 但"火后立即闪避"的实现方式有根本缺陷：
+  1. `_postFireDodgeDir` 在 `think()` 顶部优先于子弹威胁检测（threat → T8 → T2a 链被打断）
+  2. 冰面关 S18 暴降 25pp（65→40%）——垂直闪避在冰面上失控滑入更危险位置
+  3. 对 1HP 敌人不必要的闪避（一枪就死，不需要躲），白白浪费 tick
+  4. 打断 armor 多枪击杀循环——开一枪就跑让敌人恢复
+- 35×20 严格 A/B（同 seed 集）：修改后 85.0% vs 基准 87.6%（**-2.6pp**）
+- 逐关对比：S18 -25pp、S28 -15pp、S32 -5pp；仅 S6 +5pp
+- 代码已回退（`src/ai/GodAIInput.ts` + `src/ai/god/FireControl.ts` 恢复原状）
+
+**Implications:**
+- 教训：任何在 `think()` 顶部插入新分支的改动都会打断既定优先级链（threat → T8 → aggressive → T2a → powerup → navigate），后果不可预测
+- 用户的需求（炮口相向不送命）仍然有效，但需要不同的实现路径——例如在 T2a fire 决策中内联处理，而非引入新的顶层分支
+- 现有的 threat 检测系统已经在敌人子弹发出后处理闪避；问题在于同一帧双方同时开火导致子弹同时到达
+
+## 52. 炮口相向·对枪抵消（§49 v2，T2a 内联实现）
+
+**Decision:** 在 T2a 分支内部（非 `think()` 顶部）实现炮口相向策略。当敌人面向 player 且不在冰面时：
+1. **对枪抵消**（所有敌人类型）：检测到敌方子弹在直线上 → 强制开火抵消（`_fire = true`，跳过 aimError）
+2. **先手开火**（无子弹时）：正常 T2a 开火逻辑
+3. **冰面排除**：player 在冰面时跳过整个策略，走正常 T2a
+4. **不横移**：火后垂直移动在密集关卡导致脱离防守位（20-seed 验证 S26 -10pp），已移除
+
+**Rationale:**
+- §51 失败根因：在 `think()` 顶部插入 `_postFireDodgeDir` 分支，打断了 threat → T8 → T2a 优先级链
+- 本版将逻辑完全内联到 T2a 分支内，threat 检测仍然先于对枪逻辑执行
+- 用户分场景需求：
+  - 冰面：✅ 排除（冰面横移失控）
+  - 1HP 敌人：对枪抵消仍然生效（对枪是开火行为，非移动闪避；120-seed 验证对 ALL 敌人对枪 +5 wins，仅 armor +1 win）
+  - Armor：对枪抵消 + 保持对齐等待
+- 横移策略（用户建议的"错开半格开火然后对齐"）已测试并移除：4-tick 横移导致 S26 -10pp、S6 -5pp
+
+**Implications:**
+- `findEnemyFacingPlayerImpl` (FireControl.ts)：检测敌人是否面向 player
+- `hasEnemyBulletInLineImpl` (ThreatAssessor.ts)：检测直线上是否有敌方子弹
+- 35×120 A/B：基准 3618/4200 (86.1%) → 修改 3623/4200 (86.3%)，+5 wins
+- 主要增益关卡：S32 Star Fort +2, S7/S22/S24/S27 各 +1, S25 -1
+- 增益虽小（+0.2pp）但方向稳定，且不引入任何回退

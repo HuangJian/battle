@@ -4,10 +4,11 @@ import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS } from '../constants'
+import { BASE_POS, CELL } from '../constants'
 import { ALL_DIRS } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
+  findEnemyFacingPlayerImpl,
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
@@ -18,6 +19,7 @@ import {
   baseBulletInterceptCellImpl,
   dodgeDirectionImpl,
   isSafeDirImpl,
+  hasEnemyBulletInLineImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -784,6 +786,48 @@ export class GodAIInput implements InputLike {
           this._campTicks > this.params.campTimeoutTicks && w.killCount === this._campKillsAtStart
 
         if (!campedTooLong) {
+          // ---- §49: 炮口相向分场景策略 ----
+          // 当敌人面向 player 时，根据敌人类型采取不同策略：
+          //   - 冰面：跳过（垂直移动在冰面上失控）
+          //   - 1HP 敌人：正常 T2a 开火（一枪击毙），但对枪抵消仍然生效
+          //     （对枪是开火行为，不是移动闪避——与"1HP 不闪避"不矛盾）
+          //   - Armor（多血）：对枪抵消 + 保持对齐等待
+          //
+          // 对枪抵消对所有敌人类型都适用：当敌方子弹已在直线上时，
+          // 开火抵消比打死敌人更安全（子弹被消除→玩家安全）。
+          // 120-seed 验证：对枪对 ALL 敌人 +5 wins，仅 armor +1 win。
+          const facing = this.findEnemyFacingPlayer(pcx, pcy, aimDir)
+          const onIce = w.isTankOnIce(p)
+
+          if (facing && !onIce && facing.dist <= 5 * CELL) {
+            // ---- 对枪抵消逻辑（适用于所有敌人类型）----
+            const enemyBulletInLine = this.hasEnemyBulletInLine(pcx, pcy, aimDir)
+
+            if (enemyBulletInLine && !onCooldown) {
+              // 对枪：敌方子弹已在直线上 → 开火抵消
+              if (p.dir === aimDir) {
+                this._moveDir = null
+              } else {
+                this._moveDir = aimDir
+              }
+              this._fire = true
+              this.branchCounts.t2a++
+              return
+            }
+
+            // 先手开火 / 冷却中等待：保持对齐以备对枪
+            // 不横移——横移会脱离防守位，在密集关卡导致更多死亡
+            if (p.dir === aimDir) {
+              this._moveDir = null
+            } else {
+              this._moveDir = aimDir
+            }
+            this._fire = !onCooldown && this.rng.next() >= this.params.aimError
+            this.branchCounts.t2a++
+            return
+          }
+
+          // ---- 正常 T2a（非炮口相向 / 1HP / 冰面）----
           if (p.dir === aimDir) {
             this._moveDir = null // Already facing — stop and shoot
           } else {
@@ -991,6 +1035,13 @@ export class GodAIInput implements InputLike {
   findEnemyDirection(pcx: number, pcy: number): Direction | null {
     return findEnemyDirectionImpl(this, pcx, pcy)
   }
+  findEnemyFacingPlayer(
+    pcx: number,
+    pcy: number,
+    aimDir: Direction,
+  ): { enemy: Tank; dist: number } | null {
+    return findEnemyFacingPlayerImpl(this, pcx, pcy, aimDir)
+  }
 
   /**
    * P1/P2.3: Check if any enemy is threatening the base. An enemy is a
@@ -1113,6 +1164,9 @@ export class GodAIInput implements InputLike {
   }
   isSafeDir(pcx: number, pcy: number, dir: Direction, excludeBulletId: number): boolean {
     return isSafeDirImpl(this, pcx, pcy, dir, excludeBulletId)
+  }
+  hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
+    return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
 
   // --- StrategyPlanner ---

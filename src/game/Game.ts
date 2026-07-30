@@ -1259,7 +1259,11 @@ export class Game {
       onPlayPause: () => {
         if (!this.playback) return
         this.playback.togglePause()
-        this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+        this.presentation.ui.setReplayMode(
+          true,
+          this.playback.isPaused,
+          this.playback.replay?.metadata.difficulty,
+        )
       },
       onSeek: (progress: number) => {
         if (!this.playback) return
@@ -1414,14 +1418,22 @@ export class Game {
   private onReplayCanvasClick = (): void => {
     if (!this.playback) return
     this.playback.togglePause()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+    this.presentation.ui.setReplayMode(
+      true,
+      this.playback.isPaused,
+      this.playback.replay?.metadata.difficulty,
+    )
   }
 
   /** Canvas mousemove during replay → show controller and reset auto-hide. */
   private onReplayCanvasMouseMove = (): void => {
     if (!this.playback || this.playback.isEnded) return
     this.presentation.ui.replayController.show()
-    this.presentation.ui.setReplayMode(true, this.playback.isPaused, this.playback.replay?.metadata.difficulty)
+    this.presentation.ui.setReplayMode(
+      true,
+      this.playback.isPaused,
+      this.playback.replay?.metadata.difficulty,
+    )
   }
 
   private setPlaybackSpeed(speed: PlaybackSpeed): void {
