@@ -383,7 +383,7 @@ When this file and your instincts disagree, this file wins. When this file and t
 
 ## 14. Performance Anti-Patterns — Hot-Path Rules
 
-> The God-AI tuning loop runs thousands of headless simulations. Any per-tick allocation or redundant scan is amplified ×millions. The rules below were discovered via `bun --cpu-prof` profiling + determinism-signature verification (see `tools/perf/perf-optimize-godai.md`). Violating them in hot paths is a bug, even if the tests pass.
+> The God-AI tuning loop runs thousands of headless simulations. Any per-tick allocation or redundant scan is amplified ×millions. The rules below were discovered via `bun --cpu-prof` profiling + determinism-signature verification (see `docs/perf-optimization.progress.md`). Violating them in hot paths is a bug, even if the tests pass.
 
 ### 14.1 No array allocations in per-tick functions
 

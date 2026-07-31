@@ -16,3 +16,4 @@ generated-stages.json
 
 # Call history archive (plan/God-AI-Replay-Visualization)
 replays/
+*.cpuprofile
