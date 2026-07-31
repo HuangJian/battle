@@ -1,8 +1,9 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
-import { CELL, TANK, GRID, DIR_VECTORS, type Direction } from '../../constants'
-import { findPath, type PathConstraints } from '../../utils/pathfind'
+import { CELL, TANK, GRID, DIR_VECTORS, FIELD, type Direction } from '../../constants'
+import { findPath } from '../../utils/pathfind'
+import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 
 // ============================================================
@@ -84,14 +85,16 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   }
 
   // Cache miss — recompute.
+  // §69-B: compute threat costs for A* (undefined when crossfirePathCost <= 0).
+  const tc = self.computeThreatCosts(playerCell, p.speed)
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target)
+  let path = findPath(w.tileMap, playerCell, target, tc ? { threatCosts: tc } : undefined)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   // This finds paths through brick walls — the player follows them and
   // fires at bricks to clear the way (handled by followPath + think()).
   if (!path || path.length === 0) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true } as PathConstraints)
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, threatCosts: tc })
   }
 
   let result: Direction | null = null
@@ -241,12 +244,15 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     return
   }
 
+  // §69-B: compute threat costs for A* (undefined when crossfirePathCost <= 0).
+  const p = w.player!
+  const tc = self.computeThreatCosts(playerCell, p.speed)
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target)
+  let path = findPath(w.tileMap, playerCell, target, tc ? { threatCosts: tc } : undefined)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   if (!path) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true } as PathConstraints)
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, threatCosts: tc })
   }
 
   if (path) {
@@ -400,4 +406,76 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
     if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false
   }
   return true
+}
+
+/**
+ * §69-B: Compute per-cell threat costs for A* pathfinding.
+ *
+ * For each enemy bullet, projects its trajectory forward. For each cell along
+ * the trajectory, estimates:
+ *   - bulletArrivalTick = distance_from_bullet / bullet.speed
+ *   - playerArrivalTick = manhattanDist(fromCell, cell) * CELL / playerSpeed
+ *
+ * If the times overlap within ±10 ticks (collision window), the cell gets a
+ * threat cost penalty (= crossfirePathCost). This makes A* prefer routes that
+ * avoid cells where the player and a bullet would arrive simultaneously.
+ *
+ * Returns undefined when crossfirePathCost <= 0 (no threat costs — byte-identical).
+ * Returns the reusable _threatCostsBuf when crossfirePathCost > 0.
+ *
+ * Called from navigateTowardsImpl and replanImpl on A* cache miss / replan.
+ * Not per-tick — only when A* is actually re-run (~every 23-60 ticks).
+ */
+export function computeThreatCostsImpl(
+  self: GodAIInput,
+  fromCell: Cell,
+  playerSpeed: number,
+): Float64Array | undefined {
+  if (self.params.crossfirePathCost <= 0) return undefined
+
+  const w = self.world
+  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+  const penalty = self.params.crossfirePathCost
+  const threatWin = 10 // same collision window as findPathThreatImpl
+  const buf = self._threatCostsBuf
+  buf.fill(0)
+
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
+    if (!b.alive || b.isPlayer) continue
+
+    const bcx = b.x + b.w / 2
+    const bcy = b.y + b.h / 2
+    const v = DIR_VECTORS[b.dir]
+
+    // Project the bullet's trajectory forward, cell by cell.
+    for (let d = 0; d <= BULLET_TRAJECTORY_MAX_CELLS * CELL; d += CELL) {
+      const fx = bcx + v.dx * d
+      const fy = bcy + v.dy * d
+      if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+
+      const col = Math.floor(fx / CELL)
+      const row = Math.floor(fy / CELL)
+      const terrain = w.tileMap.get(col, row)
+      if (terrain === 'brick' || terrain === 'steel') break
+
+      // Estimate arrival times.
+      const bulletArrivalTick = d / b.speed
+      const playerArrivalTick =
+        ((Math.abs(col - fromCell.col) + Math.abs(row - fromCell.row)) * CELL) / ps
+
+      // Collision window: bullet and player would be at the same cell at the
+      // same time. Same ±10 tick threshold as findPathThreatImpl.
+      if (
+        bulletArrivalTick >= playerArrivalTick - threatWin &&
+        bulletArrivalTick <= playerArrivalTick + threatWin
+      ) {
+        const idx = row * GRID + col
+        if (buf[idx] < penalty) buf[idx] = penalty
+      }
+    }
+  }
+
+  return buf
 }

@@ -143,8 +143,10 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 | §48 terrain-occlusion evasion (rejected, terrain-blind is load-bearing) | `docs/god-ai-tuning.progress.md` §4 |
 | §49/§52 muzzle-to-muzzle (v1 rejected, v2 counter-fire neutral) | `docs/god-ai-tuning.progress.md` §9 |
 | §67 stop tuning at 88.5% (flat optimum confirmed) | `docs/god-ai-tuning.progress.md` §4 |
+| §68 crossfire awareness v2 (negative -1.1pp, default OFF, infra preserved) | `docs/god-ai-tuning.progress.md` §10 |
+| §69 crossfire terrain-gate + A* threat cost (both negative, infra preserved) | `docs/god-ai-tuning.progress.md` §10 |
 
-**Current state**: 87.7% mean, 0/35 below floor, 2 stage overrides (S26, S32). Default params frozen.
+**Current state**: 88.9% mean (post-§58 generalization), 0/35 below floor, 0 stage overrides (all generalized to data-driven adaptation). Default params frozen.
 
 ## Performance Optimization
 

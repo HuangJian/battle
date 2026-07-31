@@ -20,6 +20,8 @@ import {
   dodgeDirectionImpl,
   isSafeDirImpl,
   hasEnemyBulletInLineImpl,
+  findPathThreatImpl,
+  findSafeMoveDirImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -36,6 +38,7 @@ import {
   directMoveImpl,
   canMoveOrBreakImpl,
   canMoveDirImpl,
+  computeThreatCostsImpl,
 } from './god/Navigator'
 import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
 
@@ -467,6 +470,60 @@ export interface GodAIParams {
    * across all 35 stages. Probes: S6 +16pp (72% → 88%, 60 seeds).
    */
   steelMazeCampTimeoutTicks: number
+
+  /**
+   * §68-v2: Crossfire awareness via time-aware path threat projection.
+   *
+   * When > 0, the navigation branch checks the player's movement path
+   * (4 cells ahead) for bullets that would arrive at any cell before the
+   * player clears it. Unlike the old v1 approach (which only checked the
+   * next cell with a fixed proximity threshold), this uses actual bullet
+   * speed for time-of-arrival estimation, checking ALL enemy bullets from
+   * ALL directions.
+   *
+   * When a threat is detected, the player tries alternative directions
+   * (perpendicular first, then backward) or stays put — NOT a perpendicular
+   * dodge like v1. This avoids the navigation oscillation that plagued v1-v3.
+   *
+   * The check runs in the navigation section (T2b) only, after the existing
+   * dodge (findMostDangerousBullet) has already handled current-position
+   * threats. T8 base interception and T2a close combat are not affected.
+   */
+  crossfireAwareness: number
+  /**
+   * §69: Terrain-gated crossfire awareness. When > 0, crossfire awareness is
+   * automatically enabled on "open" stages (obstacle density < this ratio AND
+   * not a steel maze). On maze stages, diversion from the A* path is too
+   * expensive — the cost of taking an alternative route outweighs the bullet
+   * risk. 0 = never auto-enable (byte-identical to pre-§69).
+   *
+   * Obstacle density = (brick + steel + water) / totalCells. Water is included
+   * because it creates impassable corridors just like walls.
+   *
+   * Default 0.40 — gates off S3 (43%), S7 (39%), S9 (42%), S24 (43%), S30 (44%),
+   * S34 (45%) plus steel mazes S6/S32. Keeps improvements S1 (37%), S8 (23%),
+   * S27 (9%), S28 (29%) enabled. Residual regressions S14/S18/S26 remain ON
+   * — terrain density cannot fully separate them (see §69 analysis).
+   */
+  crossfireOpenObstacleRatio: number
+
+  /**
+   * §69-B: A* pathfinding threat cost. When > 0, the A* pathfinder adds a
+   * threat cost penalty to cells where enemy bullets are expected to arrive
+   * at the same time as the player. Unlike §68-v2's post-hoc diversion
+   * (which switches direction AFTER the path is computed), this bakes threat
+   * avoidance into the path itself — A* finds the optimal trade-off between
+   * path length and safety.
+   *
+   * The threat cost is time-aware: for each cell in a bullet's trajectory,
+   * the bullet's arrival tick (dist / bullet.speed) is compared with the
+   * player's estimated arrival tick (manhattanDist * CELL / playerSpeed).
+   * If they overlap within ±10 ticks, the cell gets a threat cost penalty.
+   *
+   * 0 = OFF (byte-identical to pre-§69-B). 3 = a threatened cell costs as
+   * much as 4 safe cells (1 + 3), so A* prefers detours up to 3 extra cells.
+   */
+  crossfirePathCost: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -618,6 +675,17 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   armorMazeSuboptimalPathProb: 0,
   // §66: steel-maze non-armor camp timeout. Only S6 matches. +16pp (60 seeds).
   steelMazeCampTimeoutTicks: 20,
+
+  // §68-v2: Crossfire awareness — see interface docs. Default 0 (OFF).
+  // v1 was neutral (-0.4pp); v2 uses time-aware projection + multi-strategy
+  // response instead of fixed-proximity + perpendicular dodge.
+  crossfireAwareness: 0,
+  // §69: Terrain-gated crossfire. 0 = never auto-enable (byte-identical).
+  // 0.40 = enable on open stages (obstacle density < 40%, not steel maze).
+  crossfireOpenObstacleRatio: 0,
+  // §69-B: A* threat cost. 0 = OFF (byte-identical). 3 = prefer detours up
+  // to 3 extra cells to avoid bullet-threatened cells.
+  crossfirePathCost: 0,
 }
 
 /**
@@ -824,6 +892,19 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       overrides.campTimeoutTicks = p.steelMazeCampTimeoutTicks
       adapted = true
     }
+
+    // §69: Terrain-gated crossfire awareness. Enable crossfire on open stages
+    // (low obstacle density, not a steel maze). On maze stages, diversion from
+    // the A* path is too expensive — §68 showed -15pp on S6/S26 (maze) vs
+    // +12pp on S28 (open). Obstacle density = (brick+steel+water)/totalCells.
+    // Water is included because it creates impassable corridors.
+    if (p.crossfireOpenObstacleRatio > 0 && base.crossfireAwareness === 0 && !isSteelMaze) {
+      const obstacleDensity = (brickCount + steelCount + waterCount) / totalCells
+      if (obstacleDensity < p.crossfireOpenObstacleRatio) {
+        overrides.crossfireAwareness = 1
+        adapted = true
+      }
+    }
   }
 
   return adapted ? { ...base, ...overrides } : base
@@ -997,6 +1078,16 @@ export class GodAIInput implements InputLike {
   _navCache: Direction | null = null
   _navReplanTimer = 0
   _navReplanMax = 60
+
+  /**
+   * §69-B: Reusable threat cost buffer for A* pathfinding. Size GRID*GRID.
+   * When crossfirePathCost > 0, computeThreatCosts fills this array with
+   * per-cell threat penalties based on current bullet trajectories, and
+   * navigateTowards/replan pass it to findPath via PathConstraints.threatCosts.
+   * Reused across calls (same as _pfGScore etc. in pathfind.ts) — findPath
+   * is synchronous and never reentrant.
+   */
+  _threatCostsBuf: Float64Array = new Float64Array(GRID * GRID)
 
   constructor(
     world: World,
@@ -1559,6 +1650,26 @@ export class GodAIInput implements InputLike {
         this._moveDir = this.directMove(pc)
       }
     }
+    // §68-v2: Path threat check — don't move into crossfire.
+    // After navigation determines _moveDir, check if the path ahead has
+    // bullets that would arrive at any cell before the player clears it.
+    // If threatened: try alternative directions (perpendicular first,
+    // then backward) or stay put. Does NOT do a perpendicular dodge —
+    // the player either detours or waits, avoiding navigation oscillation.
+    // Only runs in the navigate branch (T2b); T8/T2a/aggressive are exempt.
+    if (!shielded && this.params.crossfireAwareness > 0 && this._moveDir && p.speed > 0.1) {
+      const pathThreat = this.findPathThreat(pcx, pcy, this._moveDir, p.speed)
+      if (pathThreat) {
+        // Try to find a safe alternative direction. If none found,
+        // KEEP the original direction — don't stop! Stopping in a crossfire
+        // is more dangerous than continuing; the existing dodge system
+        // (findMostDangerousBullet) will handle the bullet when it arrives.
+        const safeDir = this.findSafeMoveDir(pcx, pcy, this._moveDir, p.speed)
+        if (safeDir) {
+          this._moveDir = safeDir
+        }
+      }
+    }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.
     // Don't check shouldFireInDir here — it might fire at enemy bullets
@@ -1728,6 +1839,17 @@ export class GodAIInput implements InputLike {
   hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
     return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
+  findPathThreat(pcx: number, pcy: number, moveDir: Direction, playerSpeed: number): Bullet | null {
+    return findPathThreatImpl(this, pcx, pcy, moveDir, playerSpeed)
+  }
+  findSafeMoveDir(
+    pcx: number,
+    pcy: number,
+    threatenedDir: Direction,
+    playerSpeed: number,
+  ): Direction | null {
+    return findSafeMoveDirImpl(this, pcx, pcy, threatenedDir, playerSpeed)
+  }
 
   // --- StrategyPlanner ---
   findPowerUpTarget(pcx: number, pcy: number): Cell | null {
@@ -1767,5 +1889,8 @@ export class GodAIInput implements InputLike {
   }
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
+  }
+  computeThreatCosts(fromCell: Cell, playerSpeed: number): Float64Array | undefined {
+    return computeThreatCostsImpl(this, fromCell, playerSpeed)
   }
 }

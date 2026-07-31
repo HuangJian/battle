@@ -312,6 +312,175 @@ export function isSafeDirImpl(
 }
 
 /**
+ * §68-v2: Time-aware path threat projection.
+ *
+ * Scans the player's movement path from cell 1 to LOOKAHEAD cells ahead in
+ * moveDir. For each cell, checks ALL enemy bullets (from target or non-target
+ * enemies) using time-of-arrival estimation:
+ *
+ *   - Player arrives at cell i at tick:  i * CELL / playerSpeed
+ *   - Player departs (clears TANK hitbox) at tick:  arrival + TANK / playerSpeed
+ *   - Bullet arrives at cell i at tick:  dist / bullet.speed
+ *   - Threat if bullet arrives before player departs the cell
+ *
+ * This replaces the old fixed-proximity approach (which used TANK or TANK*2
+ * as a distance threshold). The time-aware check naturally adapts to bullet
+ * speed: a fast bullet (4.2 px/tick) is flagged at a greater distance than
+ * a slow one (3.6 px/tick), giving the player appropriate warning time.
+ *
+ * The current position (i=0) is NOT checked here — findMostDangerousBullet
+ * in the dodge section of think() already handles it. This function only
+ * catches threats to FUTURE positions: bullets the player would move INTO
+ * by following moveDir.
+ *
+ * Returns the bullet with the earliest arrival time, or null if the path
+ * is safe.
+ */
+const PATH_THREAT_LOOKAHEAD = 3
+
+export function findPathThreatImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  moveDir: Direction,
+  playerSpeed: number,
+): Bullet | null {
+  const w = self.world
+  const v = DIR_VECTORS[moveDir]
+  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+
+  let bestBullet: Bullet | null = null
+  let bestThreatTick = Infinity
+
+  const bullets = w.bullets
+  for (let i = 1; i <= PATH_THREAT_LOOKAHEAD; i++) {
+    const ccx = pcx + v.dx * i * CELL
+    const ccy = pcy + v.dy * i * CELL
+
+    const playerArrivalTick = (i * CELL) / ps
+    // Collision window: both player and bullet hitboxes must overlap the cell
+    // at the same time. Player hitbox (TANK=32px) + bullet hitbox (BULLET=6px)
+    // → centers must be within (TANK+BULLET)/2 = 19px at the same tick.
+    // At bullet speed ~4px/tick, that's ~5 ticks. At player speed ~1px/tick,
+    // that's ~19 ticks. We use ±10 ticks as a balance: catches genuine
+    // same-time collisions without flagging bullets that arrive much earlier
+    // (already passed) or much later (player has moved on).
+    // This is MUCH tighter than ±TANK/ps (±30 ticks), which caused
+    // false positives on maze stages (S6/S12/S14/S22/S26 regressions).
+    const threatWindow = 10
+    const playerDepartureTick = playerArrivalTick + threatWindow
+    const playerEnterTick = playerArrivalTick - threatWindow
+
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const b = bullets[bi]
+      if (!b.alive || b.isPlayer) continue
+
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const vertical = b.dir === 'up' || b.dir === 'down'
+
+      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      if (!aligned) continue
+
+      const approaching =
+        (b.dir === 'down' && bcy < ccy) ||
+        (b.dir === 'up' && bcy > ccy) ||
+        (b.dir === 'right' && bcx < ccx) ||
+        (b.dir === 'left' && bcx > ccx)
+      if (!approaching) continue
+
+      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      const bulletArrivalTick = dist / b.speed
+
+      if (bulletArrivalTick >= playerEnterTick && bulletArrivalTick <= playerDepartureTick) {
+        if (bulletArrivalTick < bestThreatTick) {
+          bestThreatTick = bulletArrivalTick
+          bestBullet = b
+        }
+      }
+    }
+  }
+
+  return bestBullet
+}
+
+/**
+ * §68-v2: Find a safe alternative movement direction.
+ *
+ * Called when findPathThreat detected a threat in the current movement
+ * direction. Checks perpendicular and backward directions for immediate
+ * safety (cell 1 only — not the full 3-cell path). This is less conservative
+ * than checking the full path: a direction is accepted if the immediate next
+ * cell is safe, even if farther cells have threats. The full path check will
+ * run again next tick for the new direction.
+ *
+ * Returns the first safe direction, or null if no direction is safe.
+ * Caller keeps the original direction when null is returned — never stops.
+ */
+export function findSafeMoveDirImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  threatenedDir: Direction,
+  playerSpeed: number,
+): Direction | null {
+  const p = self.controlledTank(self.world)!
+  const w = self.world
+  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+
+  // Time window for cell 1 (immediate next cell) — same tight ±10 as findPathThreat
+  const arrivalTick = CELL / ps
+  const threatWin = 10
+  const departTick = arrivalTick + threatWin
+  const enterTick = arrivalTick - threatWin
+
+  // Check if cell 1 in direction `dir` is safe from bullets
+  function isCell1Safe(dir: Direction): boolean {
+    const v = DIR_VECTORS[dir]
+    const ccx = pcx + v.dx * CELL
+    const ccy = pcy + v.dy * CELL
+    const bullets = w.bullets
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const b = bullets[bi]
+      if (!b.alive || b.isPlayer) continue
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const vertical = b.dir === 'up' || b.dir === 'down'
+      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      if (!aligned) continue
+      const approaching =
+        (b.dir === 'down' && bcy < ccy) ||
+        (b.dir === 'up' && bcy > ccy) ||
+        (b.dir === 'right' && bcx < ccx) ||
+        (b.dir === 'left' && bcx > ccx)
+      if (!approaching) continue
+      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      const bat = dist / b.speed
+      if (bat >= enterTick && bat <= departTick) return false
+    }
+    return true
+  }
+
+  const threatenedVertical = threatenedDir === 'up' || threatenedDir === 'down'
+  const perpA: Direction = threatenedVertical ? 'left' : 'up'
+  const perpB: Direction = threatenedVertical ? 'right' : 'down'
+  const backward: Direction =
+    threatenedDir === 'up'
+      ? 'down'
+      : threatenedDir === 'down'
+        ? 'up'
+        : threatenedDir === 'left'
+          ? 'right'
+          : 'left'
+
+  if (self.canMoveDir(p, perpA) && isCell1Safe(perpA)) return perpA
+  if (self.canMoveDir(p, perpB) && isCell1Safe(perpB)) return perpB
+  if (self.canMoveDir(p, backward) && isCell1Safe(backward)) return backward
+
+  return null
+}
+
+/**
  * §49: Check if there's an enemy bullet traveling toward the player in the
  * given direction's line of fire. Used by the armor "对枪" (trade-shots)
  * logic to decide whether to fire for bullet cancellation.

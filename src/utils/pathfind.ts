@@ -35,6 +35,21 @@ export interface PathConstraints {
    * impassable.
    */
   breakBrick?: boolean
+  /**
+   * §69: Per-cell threat cost array (GRID*GRID Float64Array). When provided,
+   * each cell's threat cost is added to the A* step cost, making the pathfinder
+   * naturally prefer routes that avoid cells where enemy bullets are expected
+   * to arrive at the same time as the player. 0 = no threat (safe cell).
+   *
+   * The array is indexed by `row * GRID + col` (same as the A* internal
+   * cellKey). Pre-computed by the caller (Navigator.computeThreatCostsImpl)
+   * based on current bullet positions and estimated player arrival times.
+   *
+   * Unlike post-hoc diversion (§68-v2), this bakes threat avoidance into the
+   * path itself — A* finds the optimal trade-off between path length and
+   * safety, avoiding the "divert into a dead-end" problem.
+   */
+  threatCosts?: Float64Array
 }
 
 // ---- internal helpers -------------------------------------------------------
@@ -136,6 +151,8 @@ export function findPath(
 ): Direction[] | null {
   const ignoreWater = constraints?.ignoreWater ?? false
   const breakBrick = constraints?.breakBrick ?? false
+  // §69: optional per-cell threat costs. When provided, added to step cost.
+  const threatCosts = constraints?.threatCosts
 
   // Quick reject: start or goal impassable.
   if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
@@ -243,8 +260,8 @@ export function findPath(
         if (blocked) continue
         const nk = nr * GRID + nc
         if (closed[nk]) continue
-        // stepCost=1 in this branch (breakBrick=false).
-        const tentativeG = gScore[currentKey] + 1
+        // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
+        const tentativeG = gScore[currentKey] + 1 + (threatCosts ? threatCosts[nk] : 0)
         if (tentativeG < gScore[nk]) {
           cameFrom[nk] = currentKey
           cameDir[nk] = s
@@ -296,6 +313,7 @@ export function findPath(
         const nk = nr * GRID + nc
         if (closed[nk]) continue
         // Inline stepCost: 5 if any sub-block is brick, else 1.
+        // §69: add threat cost.
         let cost = 1
         for (let dr = 0; dr <= 1; dr++) {
           const grow = grid[nr + dr]
@@ -307,7 +325,7 @@ export function findPath(
           }
           if (cost === 5) break
         }
-        const tentativeG = gScore[currentKey] + cost
+        const tentativeG = gScore[currentKey] + cost + (threatCosts ? threatCosts[nk] : 0)
         if (tentativeG < gScore[nk]) {
           cameFrom[nk] = currentKey
           cameDir[nk] = s
