@@ -204,7 +204,7 @@ M1 交付物新增：`World.spawnPlayer2()` 方法——读 `world.player2SpawnP
 
 ### M2 — God Player 大脑接入
 - `GodAIInput` 加 `controlledTank` 访问器（默认 P1，parity 不变）+ coopMode 行为门控（人类坦克视为障碍/友军）；独立 RNG 播种；覆盖表生效；不触发超级道具。
-- （可选）`tools/level-sim.ts --coop`：无头跑「God 带飞」局，量化躺赢胜率，验证「挂机可赢」成立。
+- （可选）`tools/optimize/level-sim.ts --coop`：无头跑「God 带飞」局，量化躺赢胜率，验证「挂机可赢」成立。
 - **DoD**：`godai-split-parity` 与回归门禁原样通过；coop 无头仿真 classic 全 35 关挂机（人类零输入）胜率 ≥ 有意义的下限（跑完基线后定数）。
 
 ### M3 — 游戏接线 + UI（玩家可见的躺赢模式）

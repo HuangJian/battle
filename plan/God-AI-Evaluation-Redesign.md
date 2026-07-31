@@ -1,6 +1,6 @@
 # God AI 策略评估体系重构（Evaluation Redesign v6）
 
-> **状态**：设计 + 参考实现已落地（`tools/godai-score.ts`、`tools/eval-suite.ts`、`simulation-runner` 遥测）。
+> **状态**：设计 + 参考实现已落地（`tools/eval/godai-score.ts`、`tools/eval/eval-suite.ts`、`simulation-runner` 遥测）。
 > **默认行为不变**：新评分器是**加性模块**，`optimize-godai.ts` 的 v5 fitness 仍是默认；v6 通过 `--fitness v6` 开启。
 > **上游文档**：`AGENTS.md` §2（架构不变量）、`docs/god-ai-tuning.progress.md` §1（测量纪律）、`DECISIONS.md`。
 
@@ -103,7 +103,7 @@ win*5000 + kills*60 + base*200 + speed*800 − remaining*25 − gameover*500 −
 
 > **候选但暂不纳入的维度**（记录理由，避免以后重复讨论）：
 > - **score（游戏分数）**：与 kills 高度共线（相关系数 ~0.97），加进来只是给 π 偷偷加权。
-> - **killDiversity（击杀种类数）**：这是**关卡设计**指标（`tools/evaluator.ts` 用它评关卡质量），不是 AI 策略指标——AI 无法选择敌人出场顺序。
+> - **killDiversity（击杀种类数）**：这是**关卡设计**指标（`tools/eval/evaluator.ts` 用它评关卡质量），不是 AI 策略指标——AI 无法选择敌人出场顺序。
 > - **failure.killerKind / playerDistToBase**：诊断字段，不是评价字段。归因用，不进分数（否则会激励 AI 去操纵「死法」而非少死）。
 > - **bulletDensity / formationVar**：同样是关卡节奏指标，AI 只能间接影响。
 
@@ -127,7 +127,7 @@ win*5000 + kills*60 + base*200 + speed*800 − remaining*25 − gameover*500 −
 μ = clamp01(positionEntropy / entropyRef)
 ```
 
-所有 `_ref` 来自逐关标定文件 `tools/eval-refs.json`（§6），缺失时回退到全局默认。
+所有 `_ref` 来自逐关标定文件 `tools/eval/eval-refs.json`（§6），缺失时回退到全局默认。
 
 ### 4.2 L2 — 分档合成
 
@@ -231,7 +231,7 @@ effectiveWeight_i = w_i · σ_i / Σ_j (w_j · σ_j)
 
 这样 Q_loss 不再是拍脑袋，而是「在这个游戏里，什么样的失败真的更接近成功」的经验答案。通关档 Q_win 保留人工先验——「什么叫赢得漂亮」是价值判断，没有 ground truth 可回归。
 
-> 校准工具：`bun tools/eval-suite.ts --calibrate`。产出 `tools/eval-refs.json`（逐关参考值 + 维度方差 + 建议权重）。
+> 校准工具：`bun tools/eval/eval-suite.ts --calibrate`。产出 `tools/eval/eval-refs.json`（逐关参考值 + 维度方差 + 建议权重）。
 
 ---
 
@@ -253,17 +253,17 @@ effectiveWeight_i = w_i · σ_i / Σ_j (w_j · σ_j)
 
 | 文件 | 作用 |
 |---|---|
-| `tools/godai-score.ts` | 评分器：L1–L4 全部算法、权重表、缺失维度重归一化、聚合与 LCB |
-| `tools/eval-suite.ts` | CLI：跑全关套件、打印记分卡、`--calibrate` 生成参考值、`--compare` 配对检验 |
+| `tools/eval/godai-score.ts` | 评分器：L1–L4 全部算法、权重表、缺失维度重归一化、聚合与 LCB |
+| `tools/eval/eval-suite.ts` | CLI：跑全关套件、打印记分卡、`--calibrate` 生成参考值、`--compare` 配对检验 |
 | `tests/godai-score.test.ts` | A1–A6 公理的机械验证 |
 
 ### 7.2 改动文件（全部向后兼容）
 
 | 文件 | 改动 |
 |---|---|
-| `tools/simulation-runner.ts` | 新增 `RunOptions.telemetry?: boolean`（默认 false）与 `SimResult.telemetry?`。**关闭时执行路径逐字节不变** |
-| `tools/sim-worker.ts` | 透传 telemetry（仅在任务请求时采集） |
-| `tools/optimize-godai.ts` | 新增 `--fitness v6`；不加则走 v5 原路径 |
+| `tools/sim/simulation-runner.ts` | 新增 `RunOptions.telemetry?: boolean`（默认 false）与 `SimResult.telemetry?`。**关闭时执行路径逐字节不变** |
+| `tools/sim/sim-worker.ts` | 透传 telemetry（仅在任务请求时采集） |
+| `tools/optimize/optimize-godai.ts` | 新增 `--fitness v6`；不加则走 v5 原路径 |
 
 ### 7.3 不动的东西
 
@@ -275,9 +275,9 @@ effectiveWeight_i = w_i · σ_i / Σ_j (w_j · σ_j)
 
 1. `tests/godai-score.test.ts` 全绿，A1–A6 均有断言。
 2. `bun run check` 全绿（tsc + oxlint + oxfmt + 全部测试）。
-3. `bun tools/eval-suite.ts --seeds 20` 能对 `DEFAULT_GOD_AI_PARAMS` 输出完整记分卡（逐关 Ŝ、维度分解、名义/有效权重、LCB）。
-4. `--calibrate` 能生成 `tools/eval-refs.json`。
-5. 遥测关闭时，`tools/validate-p4.ts` 的输出与改动前逐字节一致（parity）。
+3. `bun tools/eval/eval-suite.ts --seeds 20` 能对 `DEFAULT_GOD_AI_PARAMS` 输出完整记分卡（逐关 Ŝ、维度分解、名义/有效权重、LCB）。
+4. `--calibrate` 能生成 `tools/eval/eval-refs.json`。
+5. 遥测关闭时，`tools/eval/validate-p4.ts` 的输出与改动前逐字节一致（parity）。
 
 ### 7.5 提升决策（2026-07-30 完成 — 结论：**暂不提升**）
 
@@ -303,9 +303,9 @@ effectiveWeight_i = w_i · σ_i / Σ_j (w_j · σ_j)
 
 ---
 
-## 附录 A：与 `tools/evaluator.ts` 的关系
+## 附录 A：与 `tools/eval/evaluator.ts` 的关系
 
-`tools/evaluator.ts` 评的是**关卡质量**（这关好不好玩），本文档评的是**AI 策略质量**（这套参数打得好不好）。两者维度看似重叠（都有 kpm、terrain），但语义正交：
+`tools/eval/evaluator.ts` 评的是**关卡质量**（这关好不好玩），本文档评的是**AI 策略质量**（这套参数打得好不好）。两者维度看似重叠（都有 kpm、terrain），但语义正交：
 
 - 关卡评估：固定 AI，变关卡 → 问「这关设计得如何」
 - 策略评估：固定关卡，变 AI 参数 → 问「这套参数打得如何」
@@ -431,7 +431,7 @@ per-stage Δ:
 
 | 项 | 值 |
 |---|---|
-| 优化器 | `tools/optimize-godai.ts`（sep-CMA-ES，λ=12，17 维搜索空间） |
+| 优化器 | `tools/optimize/optimize-godai.ts`（sep-CMA-ES，λ=12，17 维搜索空间） |
 | 预算（减量） | 35 关 × 14 seed × 7 代 / fitness（完整 35×20×30 不可在本沙箱运行，见 §7.5 预算说明） |
 | A/B 口径 | 35 关 × 60 seed = 2100 配对格，CRN 配对（A/B 同随机号 → 低方差） |
 | 决策判据 | §7.3：v6 冠军 35×60 胜率**不劣于** v5 最优 |
@@ -625,6 +625,6 @@ v7b 是唯一做到「零回归」的配置。与 v6 相比，它从「3 回归 
 | v7-first A/B | `.workbuddy/promotion/ab-defaultv7.txt` |
 | v7b A/B | `.workbuddy/promotion/ab-defaultv7b.txt` |
 | v7c A/B | `.workbuddy/promotion/ab-defaultv7c.txt` |
-| 代码 | `tools/godai-score.ts`（`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`） |
+| 代码 | `tools/eval/godai-score.ts`（`V7_LOSS_BAND_MAX`, `V7_CLEAR_BAND_MIN`, `V7_SCORE_CONFIG`, `fitnessV7`） |
 | 公理测试 | `tests/godai-score.test.ts`（v7 宽 gap 单调性 + 混合 fitness 判别力） |
 | 决策记录 | `DECISIONS.md` §53 |

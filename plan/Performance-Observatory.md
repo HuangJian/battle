@@ -42,10 +42,10 @@ infrastructure:
 | Render-FPS cap + DPR cap (Performance Mode toggle) | `Game.renderFpsCap`, `PresentationLayer.dpr`, `PERF_MODE_RENDER_FPS` |
 | Sprite cache (pre-rasterized SVG → canvas bitmaps) | `src/presentation/renderer/SpriteCache.ts` |
 | Static-layer offscreen caches (terrain / forest / vignette) | `GameRenderer` (`terrainCache`, `forestCache`, `vignetteCanvas`) |
-| Incremental terrain redraw (dirty cells, not full rebuild) | `TileMap.dirtyCells`, DECISIONS §22 |
+| Incremental terrain redraw (dirty cells, not full rebuild) | `TileMap.dirtyCells`, `docs/perf-optimization.progress.md` §1.2 |
 | OffscreenCanvas helper | `src/utils/canvas.ts` `createOffscreenCanvas` |
-| Per-frame allocation elimination | DECISIONS §21, §24 |
-| Performance report (baseline numbers) | `docs/performance-report.md` |
+| Per-frame allocation elimination | `docs/perf-optimization.progress.md` §1.1 |
+| Performance report (baseline numbers) | `docs/perf-optimization.progress.md` |
 
 The "Rendering Optimizer" milestones of the original plan (sprite cache,
 offscreen rendering, layered rendering, dirty regions) are **already
@@ -130,7 +130,7 @@ state or omitted.
 - [ ] No new `Math.random()` in the overlay (it is pure presentation, but there is no reason for any randomness).
 - [ ] No new module-level mutable gameplay state (AGENTS §2.2).
 - [ ] Numbers match `browser-harness.ts` within noise (cross-check during dev).
-- [ ] A note is appended to `docs/performance-report.md` pointing at the overlay as the live-debug path.
+- [ ] A note is appended to `docs/perf-optimization.progress.md` pointing at the overlay as the live-debug path.
 
 ---
 

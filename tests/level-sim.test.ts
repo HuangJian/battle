@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
-import { runSimulation } from '../tools/simulation-runner'
-import { evaluate, DEFAULT_BASELINE } from '../tools/evaluator'
+import { runSimulation } from '../tools/sim/simulation-runner'
+import { evaluate, DEFAULT_BASELINE } from '../tools/eval/evaluator'
 import { STAGES } from '../src/config/stages'
 import type { StageData } from '../src/types'
 import { GRID } from '../src/constants'

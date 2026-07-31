@@ -2,14 +2,14 @@
 
 **日期**：2026-07-29
 **工作流**：性能剖析 / 瓶颈定位（Workflow 0 — 尚未进入优化阶段）
-**参与成员**：Zhen（工程督导，主导）；剖析框架由 `profile-godai.ts` + `analyze-profile.ts` 承载
+**参与成员**：Zhen（工程督导，主导）；剖析框架由 `profile-and-analyze.ts`（合并自原 profile-godai.ts + analyze-profile.ts）承载
 
 ---
 
 ## 📌 TL;DR（执行摘要，3-5 行）
 
 - 测量对象：God AI 真实调参负载 `runSimulation`（World + `Simulation.tick` + `GodAIInput.endFrame`），30 局 chaos / stage 0，共 107,371 ticks。
-- 已建立可复用剖析框架：Bun 原生 `--cpu-prof` 采集 V8 `.cpuprofile`，`analyze-profile.ts` 按「自耗时（self-time）」聚合为函数级与模块级热点。
+- 已建立可复用剖析框架：Bun 原生 `--cpu-prof` 采集 V8 `.cpuprofile`，`profile-and-analyze.ts` 按「自耗时（self-time）」聚合为函数级与模块级热点。
 - 瓶颈高度集中：**前 5 个函数占全部自耗时的 47.1%，前 10 个占 60.1%**。
 - 最大单点：`perceive`(17.8%) + `scanAhead`(8.7%) + `canStep`(4.1%) + `analyze`(1.6%) = `ai/perception.ts` 独占 **32.3%**，是绝对第一杠杆。
 - 次高：`findPath` 9.6%（A* 字符串键 + Map/Set + `split` 解析）、God AI 决策管线 ~16.7%（ThreatAssessor/FireControl/Navigator/StrategyPlanner/GodAIInput）。
@@ -45,7 +45,7 @@
 | 9 | 54.2ms | 1.7% | 58.5% | think @ ai/GodAIInput.ts |
 | 10 | 51.9ms | 1.6% | 60.1% | analyze @ ai/perception.ts |
 
-> 注：截图自 `analyze-profile.ts` 的 Top-40（`bun tools/perf/analyze-profile.ts tools/perf/results/sim-godai.cpuprofile 40`）；完整 40 行见原始 cpuprofile。V8 内建/匿名模块（含 `Array.sort`/`filter`/`map`、`stringSplitFast`、`loadAndEvaluateModule` 等）合计 332.7ms / 10.5%，属运行时原语，不在「业务可优化」范畴内单独归因。
+> 注：截图自 `profile-and-analyze.ts` 的 Top-40（`bun tools/perf/profile-and-analyze.ts tools/perf/results/sim-godai.cpuprofile 40`）；完整 40 行见原始 cpuprofile。V8 内建/匿名模块（含 `Array.sort`/`filter`/`map`、`stringSplitFast`、`loadAndEvaluateModule` 等）合计 332.7ms / 10.5%，属运行时原语，不在「业务可优化」范畴内单独归因。
 
 ### 模块级（自耗时）
 
@@ -121,11 +121,11 @@
 
 ## 📚 数据来源 & 成员产出索引
 
-- 剖析框架：`tools/perf/profile-godai.ts`（真实负载复现）、`tools/perf/analyze-profile.ts`（V8 cpuprofile → self-time 聚合，按函数/模块）。
+- 剖析框架：`tools/perf/profile-and-analyze.ts`（真实负载复现）、`tools/perf/profile-and-analyze.ts`（V8 cpuprofile → self-time 聚合，按函数/模块）。
 - 原始采样：`tools/perf/results/sim-godai.cpuprofile`（V8 格式，3157ms 采样 / 2381 样本）。
 - 复现命令：
-  `bun --cpu-prof --cpu-prof-dir=tools/perf/results --cpu-prof-name=sim-godai.cpuprofile tools/perf/profile-godai.ts --games=30 --diff=chaos --stage=0`
+  `bun --cpu-prof --cpu-prof-dir=tools/perf/results --cpu-prof-name=sim-godai.cpuprofile tools/perf/profile-and-analyze.ts --games=30 --diff=chaos --stage=0`
 - 聚合命令：
-  `bun tools/perf/analyze-profile.ts tools/perf/results/sim-godai.cpuprofile 40`
+  `bun tools/perf/profile-and-analyze.ts tools/perf/results/sim-godai.cpuprofile 40`
 
 > 本报告由工程保障团队 AI 协作生成，关键决策请由人类工程负责人复核。

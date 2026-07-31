@@ -5,7 +5,7 @@ import {
   validateStage,
   computeStats,
   type Theme,
-} from '../tools/level-gen'
+} from '../tools/level/level-gen'
 import { GRID, ENEMIES_PER_STAGE } from '../src/constants'
 import type { TankKind } from '../src/types'
 

@@ -1,10 +1,8 @@
 # God AI 调校进展总览（系统化整理）
 
-> 汇编自：`DECISIONS.md`（§25–28a, §33, §36–44 等权威决策记录）、git commit history、
-> 历史日志与各阶段计划/验证文档（这些源文档已于 2026-07-30 清理归档，见 §8）、
-> `.workbuddy/memory/`（每日工作日志）。
-> 整理日期：2026-07-30。此文档为**只读汇总**，新决策仍以 DECISIONS.md 为准。
-> **本档 + DECISIONS.md + `plan/God-AI-Next-Round.md` 是 God AI 调校仅存的三份文档**，其余历史文档已删除以避免混淆。
+> 汇编自：git commit history、历史日志、各阶段计划/验证文档、`.workbuddy/memory/`（每日工作日志）。
+> 整理日期：2026-07-30。此文档为**只读汇总**。DECISIONS.md 已精简为索引（2026-07-31），
+> 新决策仍以 DECISIONS.md 为准，详细内容以本文档为准。
 
 ---
 
@@ -53,7 +51,7 @@
 | **§48** | 07-30 | (已回退) | 假闪避地形遮挡"修复" | **负结果**：S32 -10pp@120（lives 12→22），闪避地形盲是承重行为，测试锁定禁止再"修" |
 | **§49** | 07-30 | (已回退) | 炮口相向火后闪避 | **负结果**：35×20 A/B 85.0% vs 基准 87.6%（-2.6pp），S18 -25pp、S28 -15pp；post-fire dodge 打断 threat 检测 + 冰面失控 |
 
-> 注：DECISIONS.md 存在编号复用（两个 §36、§43、§44），引用时以标题+日期区分。
+> 注：DECISIONS.md 已精简为索引（2026-07-31），详细决策见本文档和 `docs/perf-optimization.progress.md`。
 
 ---
 
@@ -62,7 +60,7 @@
 ### 3.1 基础设施与早期轮次（2026-07-27/28）
 
 - **参数化**：阈值常量全部移入 `GodAIParams`，供 CMA-ES 自动调参（12→20 维）。
-- **工具**：`tools/optimize-godai.ts`（sep-CMA-ES）、`tools/decision-trace.ts` + `analyze-trace.ts`（决策追踪，用它找到 T2a 冷却空转、防守偏左、首杀过慢三大失误）。
+- **工具**：`tools/optimize/optimize-godai.ts`（sep-CMA-ES）、`tools/diag/decision-trace.ts` + `tools/diag/analyze-trace.ts`（决策追踪，用它找到 T2a 冷却空转、防守偏左、首杀过慢三大失误）。
 - **Round 2 关键发现（§33）**：仿真工具漏设 `world.rules`（classic 规则从未生效，头号 bug）、`onCooldown` 需用子弹数冷却、navigate 分支曾无条件开火自毁基地、directMove 改垂直优先后单种子击杀 0→17。
 - **Round 3（curriculum）**：5 个迷你关隔离验证子系统（火控/威胁优先级/S6 切换/破墙追击/防守回归）；`hasBase()` 守卫修复无基地关假阴性；`endgameEnemyThreshold` 声明未用的潜在 bug 接上（1→6）。
 - **v4.1 结论（§40）**：胜率钉死 20%，5 个 0 杀种子是确定性死锁 —— **参数调优已到天花板，必须改行为架构**。这个判断催生了 P0–P3。
@@ -159,15 +157,15 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 
 | 工具 | 用途 |
 |---|---|
-| `tools/optimize-godai.ts` | CMA-ES 参数优化（--stages 多关聚合 fitness） |
-| `tools/simulation-runner.ts` + `sim-pool/sim-worker.ts` | 并行仿真（默认应用覆盖表） |
-| `tools/validate-p4.ts --seeds N` | 全 35 关扫描终审 |
-| `tools/probe-params.ts` / `probe-s32.ts` | 参数敏感度探针（`--skipStageOverrides` 量纯参数） |
-| `tools/diagnose-s32.ts` | 失败归因诊断（拆家时刻/玩家位置/凶手类型） |
-| `tools/ab-test-smart-threat.ts` | 35 关 off/on A/B |
-| `tools/decision-trace.ts` + `analyze-trace.ts` | 逐 tick 决策追踪 |
-| `tools/relock-parity.ts` | parity 基线重锁 |
-| `tools/curriculum.ts`（`bun run curriculum`） | 5 迷你关子系统隔离验证 |
+| `tools/optimize/optimize-godai.ts` | CMA-ES 参数优化（--stages 多关聚合 fitness） |
+| `tools/sim/simulation-runner.ts` + `tools/sim/sim-pool.ts` / `tools/sim/sim-worker.ts` | 并行仿真（默认应用覆盖表） |
+| `tools/eval/validate-p4.ts --seeds N` | 全 35 关扫描终审 |
+| `tools/optimize/probe-params.ts` / `tools/diag/probe-s32.ts` | 参数敏感度探针（`--skipStageOverrides` 量纯参数） |
+| `tools/diag/diagnose-s32.ts` | 失败归因诊断（拆家时刻/玩家位置/凶手类型） |
+| `tools/optimize/ab-test-smart-threat.ts` | 35 关 off/on A/B |
+| `tools/diag/decision-trace.ts` + `tools/diag/analyze-trace.ts` | 逐 tick 决策追踪 |
+| `tools/relock-parity.ts`（已移除，一次性脚本） | parity 基线重锁 |
+| `tools/optimize/curriculum.ts`（`bun run curriculum`） | 5 迷你关子系统隔离验证 |
 | `tests/god-ai-regression-gate.test.ts` | 全 35×20 回归门禁（~11s） |
 
 ---
