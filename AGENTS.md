@@ -423,4 +423,4 @@ Terrain types are `TerrainType` strings (`'brick'`, `'steel'`, etc.). V8 interns
 
 ### 14.6 Reuse `allTanks` buffer — don't rebuild
 
-`World.allTanks` is a getter that rebuilds `_allTanksBuf` on each call. If multiple consumers in the same tick need the tank list, call the getter once and pass the reference. The `perceive()` function does this: `const all = world.allTanks` then passes `all` to `canStep()` 4× (instead of having `canStep` call the getter 4×).
+`World.allTanks` is a getter that rebuilds `_allTanksBuf` on each call. If multiple consumers in the same tick need the tank list, call the getter once and pass the reference. The `perceive()` function does this: callers (TacticalIntelligence.update / updateTank) pass the already-cached `allTanks` buffer in via the optional `all?` parameter, then perceive passes it to `canStep()` 4× instead of having `canStep` call the getter 4×.

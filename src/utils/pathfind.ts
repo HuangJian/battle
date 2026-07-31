@@ -56,8 +56,12 @@ function key(col: number, row: number): string {
  *
  * `breakBrick`: when true, brick is treated as passable (the player can fire
  * to destroy it). Steel, water, and base always block.
+ *
+ * Inlined `tileMap.get` + `TileMap.blocksTank` (perf): isPassable is called
+ * 4× per A* node expansion in findPath, which is called every God-AI replan
+ * interval. Direct grid[row][col] access skips two method calls per cell.
+ * Bounds check mirrors `TileMap.get`'s 'steel' fallback for OOB cells.
  */
-
 function isPassable(
   tileMap: TileMap,
   col: number,
@@ -67,12 +71,20 @@ function isPassable(
 ): boolean {
   // A 2×2 tank needs cols [col, col+1] and rows [row, row+1] inside the grid.
   if (col < 0 || col + 1 >= GRID || row < 0 || row + 1 >= GRID) return false
+  const grid = tileMap.grid
   for (let dr = 0; dr <= 1; dr++) {
+    const r = row + dr
+    const grow = grid[r]
     for (let dc = 0; dc <= 1; dc++) {
-      const type = tileMap.get(col + dc, row + dr)
-      if (TileMap.blocksTank(type)) {
-        if (ignoreWater && type === 'water') continue
-        if (breakBrick && type === 'brick') continue
+      const type = grow[col + dc]
+      // Inlined TileMap.blocksTank: brick|steel|water|base block tanks.
+      if (type === 'brick') {
+        if (breakBrick) continue
+        return false
+      }
+      if (type === 'steel' || type === 'base') return false
+      if (type === 'water') {
+        if (ignoreWater) continue
         return false
       }
     }
@@ -80,13 +92,15 @@ function isPassable(
   return true
 }
 
-/** The four cardinal directions as (dcol, drow, Direction) tuples. */
-const STEPS: ReadonlyArray<readonly [number, number, Direction]> = [
-  [0, -1, 'up'],
-  [0, 1, 'down'],
-  [-1, 0, 'left'],
-  [1, 0, 'right'],
-]
+/** The four cardinal directions as flat arrays (perf): tuple destructuring
+ * `const [dc, dr] = STEPS[s]` allocates an iterator per expansion in the A*
+ * inner loop. Two parallel typed arrays let the loop read `STEP_DC[s]` and
+ * `STEP_DR[s]` directly — no iterator, no tuple, no allocation. The
+ * Direction label is recovered from the index via STEP_DIR (used only at
+ * path reconstruction, not in the hot loop). */
+const STEP_DC: readonly number[] = [0, 0, -1, 1]
+const STEP_DR: readonly number[] = [-1, 1, 0, 0]
+const STEP_DIR: readonly Direction[] = ['up', 'down', 'left', 'right']
 
 // ---- public API --------------------------------------------------------------
 
@@ -152,83 +166,157 @@ export function findPath(
   closed.fill(0)
   const openList = _pfOpenList
   openList.length = 0
-  // Local integer key for the hot loop (kept separate from `key()` so the
-  // offline helpers can keep their string-keyed external contract).
-  const cellKey = (col: number, row: number): number => row * GRID + col
 
-  const startKey = cellKey(from.col, from.row)
-  const goalKey = cellKey(to.col, to.row)
-
-  // In breakBrick mode, stepping onto a brick cell costs more (5 instead
-  // of 1) — the player must fire to clear it, which takes time + bullets.
-  // This makes A* prefer corridor routes and only dig through walls when no
-  // open path exists, which is exactly the desired behavior.
-  const stepCost = (col: number, row: number): number => {
-    if (!breakBrick) return 1
-    // Check if any sub-block of the 2×2 footprint is brick.
-    for (let dr = 0; dr <= 1; dr++) {
-      for (let dc = 0; dc <= 1; dc++) {
-        if (tileMap.get(col + dc, row + dr) === 'brick') return 5
-      }
-    }
-    return 1
-  }
+  const startKey = from.row * GRID + from.col
+  const goalKey = to.row * GRID + to.col
+  // Hoist goal coords (used in heuristic every neighbor expansion).
+  const toCol = to.col
+  const toRow = to.row
+  const grid = tileMap.grid
 
   gScore[startKey] = 0
-  fScore[startKey] = manhattan(from.col, from.row, to.col, to.row)
+  fScore[startKey] = Math.abs(from.col - toCol) + Math.abs(from.row - toRow)
   inOpen[startKey] = 1
   openList.push(startKey)
 
-  while (openList.length > 0) {
-    // Lowest fScore; on ties keep the earliest-inserted entry — matches the
-    // original Set iteration order so the chosen path is unchanged.
-    let currentKey = -1
-    let currentF = Infinity
-    for (let i = 0; i < openList.length; i++) {
-      const k = openList[i]
-      if (closed[k]) continue
-      const f = fScore[k]
-      if (f < currentF) {
-        currentF = f
-        currentKey = k
+  // Two specialized hot loops: the common case (breakBrick=false) inlines a
+  // constant stepCost=1 and skips the brick-footprint scan, saving 4
+  // tileMap.get calls per neighbor. breakBrick=true keeps the scan.
+  if (!breakBrick) {
+    while (openList.length > 0) {
+      // Lowest fScore; on ties keep the earliest-inserted entry — matches the
+      // original Set iteration order so the chosen path is unchanged.
+      let currentKey = -1
+      let currentF = Infinity
+      for (let i = 0; i < openList.length; i++) {
+        const k = openList[i]
+        if (closed[k]) continue
+        const f = fScore[k]
+        if (f < currentF) {
+          currentF = f
+          currentKey = k
+        }
+      }
+      if (currentKey === -1) break // open set exhausted, no path
+
+      if (currentKey === goalKey) {
+        // Reconstruct path by walking cameFrom back to the start.
+        const path: Direction[] = []
+        let ck = currentKey
+        while (ck !== startKey) {
+          path.push(STEP_DIR[cameDir[ck]])
+          ck = cameFrom[ck]
+        }
+        path.reverse()
+        return path
+      }
+
+      closed[currentKey] = 1
+      inOpen[currentKey] = 0
+      const cc = currentKey % GRID
+      const cr = (currentKey - cc) / GRID
+
+      for (let s = 0; s < 4; s++) {
+        const nc = cc + STEP_DC[s]
+        const nr = cr + STEP_DR[s]
+        // Inline isPassable (breakBrick=false branch): bounds + 2×2 footprint
+        // scan against grid directly. Avoids the function call and the
+        // breakBrick parameter check on every neighbor.
+        if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
+        let blocked = false
+        for (let dr = 0; dr <= 1 && !blocked; dr++) {
+          const grow = grid[nr + dr]
+          for (let dc = 0; dc <= 1; dc++) {
+            const type = grow[nc + dc]
+            if (type === 'brick' || type === 'steel' || type === 'base') {
+              blocked = true
+              break
+            }
+            if (type === 'water') {
+              if (!ignoreWater) {
+                blocked = true
+                break
+              }
+            }
+          }
+        }
+        if (blocked) continue
+        const nk = nr * GRID + nc
+        if (closed[nk]) continue
+        // stepCost=1 in this branch (breakBrick=false).
+        const tentativeG = gScore[currentKey] + 1
+        if (tentativeG < gScore[nk]) {
+          cameFrom[nk] = currentKey
+          cameDir[nk] = s
+          gScore[nk] = tentativeG
+          fScore[nk] = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
+          if (!inOpen[nk]) {
+            inOpen[nk] = 1
+            openList.push(nk)
+          }
+        }
       }
     }
-    if (currentKey === -1) break // open set exhausted, no path
-
-    if (currentKey === goalKey) {
-      // Reconstruct path by walking cameFrom back to the start.
-      const path: Direction[] = []
-      let ck = currentKey
-      while (ck !== startKey) {
-        path.push(STEPS[cameDir[ck]][2])
-        ck = cameFrom[ck]
+  } else {
+    // breakBrick=true branch — keeps the brick-footprint stepCost scan.
+    while (openList.length > 0) {
+      let currentKey = -1
+      let currentF = Infinity
+      for (let i = 0; i < openList.length; i++) {
+        const k = openList[i]
+        if (closed[k]) continue
+        const f = fScore[k]
+        if (f < currentF) {
+          currentF = f
+          currentKey = k
+        }
       }
-      path.reverse()
-      return path
-    }
+      if (currentKey === -1) break
 
-    closed[currentKey] = 1
-    inOpen[currentKey] = 0
-    const cc = currentKey % GRID
-    const cr = (currentKey - cc) / GRID
+      if (currentKey === goalKey) {
+        const path: Direction[] = []
+        let ck = currentKey
+        while (ck !== startKey) {
+          path.push(STEP_DIR[cameDir[ck]])
+          ck = cameFrom[ck]
+        }
+        path.reverse()
+        return path
+      }
 
-    for (let s = 0; s < STEPS.length; s++) {
-      const [dc, dr] = STEPS[s]
-      const nc = cc + dc
-      const nr = cr + dr
-      if (!isPassable(tileMap, nc, nr, ignoreWater, breakBrick)) continue
-      const nk = cellKey(nc, nr)
-      if (closed[nk]) continue
-      const cost = stepCost(nc, nr)
-      const tentativeG = gScore[currentKey] + cost
-      if (tentativeG < gScore[nk]) {
-        cameFrom[nk] = currentKey
-        cameDir[nk] = s
-        gScore[nk] = tentativeG
-        fScore[nk] = tentativeG + manhattan(nc, nr, to.col, to.row)
-        if (!inOpen[nk]) {
-          inOpen[nk] = 1
-          openList.push(nk)
+      closed[currentKey] = 1
+      inOpen[currentKey] = 0
+      const cc = currentKey % GRID
+      const cr = (currentKey - cc) / GRID
+
+      for (let s = 0; s < 4; s++) {
+        const nc = cc + STEP_DC[s]
+        const nr = cr + STEP_DR[s]
+        if (!isPassable(tileMap, nc, nr, ignoreWater, true)) continue
+        const nk = nr * GRID + nc
+        if (closed[nk]) continue
+        // Inline stepCost: 5 if any sub-block is brick, else 1.
+        let cost = 1
+        for (let dr = 0; dr <= 1; dr++) {
+          const grow = grid[nr + dr]
+          for (let dc = 0; dc <= 1; dc++) {
+            if (grow[nc + dc] === 'brick') {
+              cost = 5
+              break
+            }
+          }
+          if (cost === 5) break
+        }
+        const tentativeG = gScore[currentKey] + cost
+        if (tentativeG < gScore[nk]) {
+          cameFrom[nk] = currentKey
+          cameDir[nk] = s
+          gScore[nk] = tentativeG
+          fScore[nk] = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
+          if (!inOpen[nk]) {
+            inOpen[nk] = 1
+            openList.push(nk)
+          }
         }
       }
     }
@@ -252,9 +340,9 @@ export function isReachable(tileMap: TileMap, from: Cell, to: Cell): boolean {
 
   while (queue.length > 0) {
     const cur = queue.shift()!
-    for (const [dc, dr, _dir] of STEPS) {
-      const nc = cur.col + dc
-      const nr = cur.row + dr
+    for (let s = 0; s < 4; s++) {
+      const nc = cur.col + STEP_DC[s]
+      const nr = cur.row + STEP_DR[s]
       const nk = key(nc, nr)
       if (visited.has(nk)) continue
       if (!isPassable(tileMap, nc, nr, false)) continue
@@ -280,9 +368,9 @@ export function floodFill(tileMap: TileMap, from: Cell): Set<string> {
 
   while (queue.length > 0) {
     const cur = queue.shift()!
-    for (const [dc, dr] of STEPS) {
-      const nc = cur.col + dc
-      const nr = cur.row + dr
+    for (let s = 0; s < 4; s++) {
+      const nc = cur.col + STEP_DC[s]
+      const nr = cur.row + STEP_DR[s]
       const nk = key(nc, nr)
       if (reachable.has(nk)) continue
       if (!isPassable(tileMap, nc, nr, false)) continue
@@ -294,11 +382,6 @@ export function floodFill(tileMap: TileMap, from: Cell): Set<string> {
 }
 
 // ---- pure utility ------------------------------------------------------------
-
-/** Manhattan distance in grid cells. */
-function manhattan(c1: number, r1: number, c2: number, r2: number): number {
-  return Math.abs(c1 - c2) + Math.abs(r1 - r2)
-}
 
 /**
  * Convert a pixel position to a grid cell (top-left sub-block of the 2×2

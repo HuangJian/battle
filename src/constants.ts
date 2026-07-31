@@ -128,6 +128,22 @@ export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
   right: { dx: 1, dy: 0 },
 }
 
+/**
+ * Flat parallel arrays for hot-path direction lookups (perf §64):
+ * `DIR_VECTORS[dir]` is a string-keyed Record lookup that allocates a
+ * {dx,dy} object reference and forces a dict hash probe. The flat arrays
+ * let callers do `const i = dirIdx(dir); DIR_DX[i], DIR_DY[i]` — index
+ * access only, no dict probe. dirIdx is a 4-way ternary.
+ *
+ * `dirIdx` is provided as a helper so all hot-path callers share the same
+ * string→index conversion; cold-path code can keep using `DIR_VECTORS`.
+ */
+export const DIR_DX: readonly number[] = [0, 0, -1, 1] // up, down, left, right
+export const DIR_DY: readonly number[] = [-1, 1, 0, 0]
+export function dirIdx(dir: Direction): number {
+  return dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+}
+
 export type Direction = 'up' | 'down' | 'left' | 'right'
 
 // ================================================================

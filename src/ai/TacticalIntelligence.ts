@@ -22,6 +22,21 @@ import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
 import { perceive, analyze, dirToward, manhattan, computeOpenDirs } from './perception'
 
+// Flat direction vectors (perf): `DIR_VECTORS[d]` is a Record lookup that
+// returns an object; in the per-tick hot loop of updateNoneTank's re-roll,
+// the lookup + property access (dv.dx / dv.dy) is repeated 4× per tank per
+// tick. Two flat arrays let the loop read DIR_DX[i] / DIR_DY[i] directly.
+// Index order MUST match ALL_DIRS ('up','down','left','right').
+const DIR_DX: readonly number[] = [0, 0, -1, 1]
+const DIR_DY: readonly number[] = [-1, 1, 0, 0]
+
+// Reusable 4-element buffer for updateNoneTank's open-direction scan.
+// At most 4 directions can be open (up/down/left/right), so a fixed-size
+// array indexed by `openCount` avoids the per-tick `[]` + `push` allocation
+// of the previous `const open: Direction[] = []`. The buffer is consumed
+// synchronously inside the shouldReroll branch — never held across calls.
+const _noneOpenBuf: Direction[] = ['up', 'up', 'up', 'up']
+
 /**
  * ai/TacticalIntelligence.ts — the decision pipeline.
  *
@@ -51,7 +66,10 @@ export class TacticalIntelligence {
     const frozen = world.freezeTimer > 0
     if (frozen) {
       // Enemy freeze (power-up): stop, think nothing. Reactivity resumes after.
-      for (const t of world.tanks) {
+      // Indexed loop (AGENTS §14.1): runs every tick while freezeTimer > 0.
+      const ft = world.tanks
+      for (let fi = 0; fi < ft.length; fi++) {
+        const t = ft[fi]
         if (t.alive && t.spawnTimer <= 0 && t.aiState) t.moving = false
       }
       return
@@ -67,13 +85,15 @@ export class TacticalIntelligence {
     // once per tick BEFORE this update runs — the AI layer only reads it
     // (One-Author invariant, AI-Tier-System-Revision §4).
 
-    for (const tank of world.tanks) {
+    const tanks = world.tanks
+    for (let ti = 0; ti < tanks.length; ti++) {
+      const tank = tanks[ti]
       if (!tank.alive || tank.spawnTimer > 0 || !tank.aiState) continue
       if (tank.aiState.level === 'none') {
         // Classic branch (§3): minimal wander+fire, no tactical pipeline.
         this.updateNoneTank(world, tank, fire, world.rules, allTanks)
       } else {
-        this.updateTank(world, tank, fire)
+        this.updateTank(world, tank, fire, allTanks)
       }
     }
   }
@@ -104,9 +124,18 @@ export class TacticalIntelligence {
     // deadlock when facing each other in corridors.
     const gx = snap(tank.x, CELL)
     const gy = snap(tank.y, CELL)
-    const v = DIR_VECTORS[brain.currentDir]
-    const nx = gx + v.dx * CELL
-    const ny = gy + v.dy * CELL
+    // Index of currentDir in ALL_DIRS (up=0,down=1,left=2,right=3) — lets us
+    // use flat DIR_DX/DIR_DY arrays instead of DIR_VECTORS[d] lookup.
+    const curDirIdx =
+      brain.currentDir === 'up'
+        ? 0
+        : brain.currentDir === 'down'
+          ? 1
+          : brain.currentDir === 'left'
+            ? 2
+            : 3
+    const nx = gx + DIR_DX[curDirIdx] * CELL
+    const ny = gy + DIR_DY[curDirIdx] * CELL
     const terrainBlocked =
       !world.isInBounds(nx, ny, TANK, TANK) || world.rectHitsTerrain(nx, ny, TANK, TANK)
     const tankBlocked = !terrainBlocked && isTankAhead(allTanks, tank, nx, ny)
@@ -118,24 +147,29 @@ export class TacticalIntelligence {
     const shouldReroll = rules.turnOnCollisionOnly ? blocked : brain.thinkTimer <= 0 || blocked
 
     if (shouldReroll) {
-      const open: Direction[] = []
-      for (const d of ALL_DIRS) {
-        const dv = DIR_VECTORS[d]
-        const ox = gx + dv.dx * CELL
-        const oy = gy + dv.dy * CELL
+      // Inline the open-dir scan: indexed loop over ALL_DIRS via flat arrays,
+      // avoiding the iterator allocation of `for (const d of ALL_DIRS)` and the
+      // DIR_VECTORS[d] Record lookup. Reuse a module-level buffer (no per-tick
+      // array allocation) — updateNoneTank runs up to 4× per tick (one per
+      // enemy), and the buffer is consumed synchronously inside this branch.
+      const openBuf = _noneOpenBuf
+      let openCount = 0
+      for (let i = 0; i < 4; i++) {
+        const ox = gx + DIR_DX[i] * CELL
+        const oy = gy + DIR_DY[i] * CELL
         if (!world.isInBounds(ox, oy, TANK, TANK)) continue
         if (world.rectHitsTerrain(ox, oy, TANK, TANK)) continue
         // Also filter out directions blocked by other tanks (except the
         // tank itself). This prevents the AI from re-choosing a direction
         // that is immediately blocked by another tank.
         if (isTankAhead(allTanks, tank, ox, oy)) continue
-        open.push(d)
+        openBuf[openCount++] = ALL_DIRS[i]
       }
-      if (open.length === 0) {
+      if (openCount === 0) {
         // Fully boxed in — back out (see chooseDirection's jam note).
         brain.currentDir = opposite(brain.currentDir)
       } else {
-        brain.currentDir = pickClassicDir(open, world, rules)
+        brain.currentDir = pickClassicDirFast(openBuf, openCount, world, rules)
       }
       brain.thinkTimer = NONE_TURN_MIN_MS + world.rng.next() * NONE_TURN_JITTER_MS
     }
@@ -158,7 +192,7 @@ export class TacticalIntelligence {
   // Per-tank pipeline
   // ================================================================
 
-  private updateTank(world: World, tank: Tank, fire: (tank: Tank) => void): void {
+  private updateTank(world: World, tank: Tank, fire: (tank: Tank) => void, allTanks: Tank[]): void {
     const brain = tank.aiState!
     // Tier capabilities are fixed data — no difficulty scaling (revision §2).
     const cfg = INTELLIGENCE_LEVELS[brain.level]
@@ -186,7 +220,7 @@ export class TacticalIntelligence {
     // and reactiveDodge (only when a bullet threat exists). On the rare ticks
     // where reactiveDodge needs it but perceive skipped it, compute on demand.
     const willTacticalThink = brain.thinkTimer <= 0
-    const p = perceive(world, tank, cfg, willTacticalThink)
+    const p = perceive(world, tank, cfg, willTacticalThink, allTanks)
     const s = analyze(world, tank, p, cfg)
 
     // --- Strategic layer (stable long-term objective) — active Commander
@@ -239,7 +273,7 @@ export class TacticalIntelligence {
       goal = 'attackAlly'
     } else if (p.hasPlayer && s.distToPlayer < FIELD * 0.4 && r < 0.4) {
       goal = 'attackPlayer'
-    } else if (s.threat && _tank.hp <= 1 && r < 0.3) {
+    } else if (s.hasThreat && _tank.hp <= 1 && r < 0.3) {
       goal = 'retreat'
     }
     brain.strategicGoal = goal
@@ -278,7 +312,7 @@ export class TacticalIntelligence {
   ): GoalType {
     const w = cfg.weights
     const maxDist = FIELD
-    const threatPenalty = s.threat ? 0.35 : 0
+    const threatPenalty = s.hasThreat ? 0.35 : 0
     const followsDirective =
       brain.directive !== 'none' &&
       brain.directiveCompliant &&
@@ -321,7 +355,7 @@ export class TacticalIntelligence {
     // retreat (fragile + threatened). High armor already self-limits this by
     // shrinking the "fragile" window, so heavy tanks naturally retreat less.
     let retreat = -Infinity
-    if (s.threat && tankHp(tank) <= 1) {
+    if (s.hasThreat && tankHp(tank) <= 1) {
       retreat = w.retreat * 0.9 - bias.push * 0.3
     }
 
@@ -420,16 +454,12 @@ export class TacticalIntelligence {
           tx = Math.max(tx, FIELD * 0.66)
           break
         case 'spreadOut': {
-          // Steer away from the teammate centroid.
-          if (p.teammates.length > 0) {
-            let mx = 0
-            let my = 0
-            for (const t of p.teammates) {
-              mx += t.x
-              my += t.y
-            }
-            mx /= p.teammates.length
-            my /= p.teammates.length
+          // Steer away from the teammate centroid. The centroid is the only
+          // field any consumer reads from teammates — perceive now exposes it
+          // as flat sum/count fields (no TeammateObservation[] allocation).
+          if (p.teammateCount > 0) {
+            const mx = p.teammateSumX / p.teammateCount
+            const my = p.teammateSumY / p.teammateCount
             tx = clamp(tx + (cx - mx) * 0.6, CELL, FIELD - CELL)
             ty = clamp(ty + (cy - my) * 0.6, CELL, FIELD - CELL)
           }
@@ -519,7 +549,12 @@ export class TacticalIntelligence {
     const gx = snap(x, CELL)
     const gy = snap(y, CELL)
     let c = 0
-    for (const d of ALL_DIRS) {
+    // Indexed loop (AGENTS §14.1): openCountAt is called by dirScore, which
+    // is called once per candidate direction in chooseDirection (throttled
+    // to ~5s) — but runs 4× per call, and `for (const d of ALL_DIRS)`
+    // allocates an iterator per call.
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
       const v = DIR_VECTORS[d]
       const nx = gx + v.dx * TANK
       const ny = gy + v.dy * TANK
@@ -540,7 +575,7 @@ export class TacticalIntelligence {
     p: Perception,
     s: Situation,
   ): void {
-    if (!s.threat) return // no incoming bullet — stay the course
+    if (!s.hasThreat) return // no incoming bullet — stay the course
 
     // Delayed reaction (imperfection): ignore the threat until the delay elapses.
     if (brain.reactionTimer > 0) return
@@ -561,8 +596,8 @@ export class TacticalIntelligence {
       p.openDirs = openDirs
     }
 
-    const bullet = s.threat
-    const vertical = bullet.dir === 'up' || bullet.dir === 'down'
+    const bulletDir = s.threatDir!
+    const vertical = bulletDir === 'up' || bulletDir === 'down'
     // Use local variables instead of allocating arrays (AGENTS §14.1).
     const candA: Direction = vertical ? 'left' : 'up'
     const candB: Direction = vertical ? 'right' : 'down'
@@ -584,7 +619,7 @@ export class TacticalIntelligence {
       // No perpendicular escape — step any open way that isn't into the bullet.
       let chosen: Direction | null = null
       for (let oi = 0; oi < openDirs.length; oi++) {
-        if (openDirs[oi] !== bullet.dir) {
+        if (openDirs[oi] !== bulletDir) {
           chosen = openDirs[oi]
           break
         }
@@ -631,14 +666,21 @@ export class TacticalIntelligence {
 
     const base = world.tileMap.getBasePos()
     const targetX = base ? base.x + CELL : tank.x + tank.w / 2
-    const sides: Direction[] = tank.x + tank.w / 2 < targetX ? ['right', 'left'] : ['left', 'right']
-    for (const side of sides) {
-      if (this.adjacentDestructible(world, tank, side)) {
-        brain.currentDir = side
-        tank.dir = side
-        tank.moving = true
-        return
-      }
+    // Inline 2-element sides array as scalars (AGENTS §14.1) — maybeTunnelOut
+    // runs every tick per tank (called from updateTank).
+    const sideA: Direction = tank.x + tank.w / 2 < targetX ? 'right' : 'left'
+    const sideB: Direction = sideA === 'right' ? 'left' : 'right'
+    if (this.adjacentDestructible(world, tank, sideA)) {
+      brain.currentDir = sideA
+      tank.dir = sideA
+      tank.moving = true
+      return
+    }
+    if (this.adjacentDestructible(world, tank, sideB)) {
+      brain.currentDir = sideB
+      tank.dir = sideB
+      tank.moving = true
+      return
     }
     // No destructible wall on either side — genuinely boxed; leave as-is.
   }
@@ -742,7 +784,11 @@ export class TacticalIntelligence {
     // the counter automatically invalidates stale cached rolls.
     world.directiveSeqCounter += 1
     const seq = world.directiveSeqCounter
-    for (const t of world.tanks) {
+    // Indexed loop (AGENTS §14.1): broadcastDirective runs every ~20s, but
+    // the iterator allocation here is unnecessary.
+    const bt = world.tanks
+    for (let bi = 0; bi < bt.length; bi++) {
+      const t = bt[bi]
       if (!t.alive || t.spawnTimer > 0 || t === commander || !t.aiState) continue
       if (t.aiState.level === 'none') continue // deaf — separate branch, ignores directives
       t.aiState.directive = directive
@@ -759,13 +805,18 @@ export class TacticalIntelligence {
     commander: Tank,
     cfg: IntelligenceConfig,
   ): CommanderDirective {
-    const p = perceive(world, commander, cfg)
+    // Need openDirs=false: chooseDirective only reads player/base/congestion,
+    // never direction data — skipping the 4 × canStep scan saves ~100 ops.
+    const p = perceive(world, commander, cfg, false, world.allTanks)
     const baseX = p.baseX
     const baseY = p.baseY
 
     // Base under pressure → defend it.
     let minBaseDist = Infinity
-    for (const t of world.tanks) {
+    // Indexed loop (AGENTS §14.1).
+    const mbt = world.tanks
+    for (let mi = 0; mi < mbt.length; mi++) {
+      const t = mbt[mi]
       if (!t.alive || t.spawnTimer > 0 || !t.aiState) continue
       const d = manhattan(t.x + t.w / 2, t.y + t.h / 2, baseX, baseY)
       if (d < minBaseDist) minBaseDist = d
@@ -783,7 +834,10 @@ export class TacticalIntelligence {
     // Side bias → push the under-defended flank.
     let left = 0
     let right = 0
-    for (const t of world.tanks) {
+    // Indexed loop (AGENTS §14.1).
+    const sbt = world.tanks
+    for (let si = 0; si < sbt.length; si++) {
+      const t = sbt[si]
       if (!t.alive || t.spawnTimer > 0 || t.isPlayer || !t.aiState) continue
       if (t.x + t.w / 2 <= FIELD / 2) left++
       else right++
@@ -843,14 +897,19 @@ function isTankAhead(allTanks: Tank[], self: Tank, x: number, y: number): boolea
   return false
 }
 
-function pickClassicDir(open: Direction[], world: World, rules: GameplayRules): Direction {
+function pickClassicDirFast(
+  open: Direction[],
+  count: number,
+  world: World,
+  rules: GameplayRules,
+): Direction {
   const weights = rules.classicDirWeights
   let total = 0
-  for (const d of open) total += weights[d]
+  for (let i = 0; i < count; i++) total += weights[open[i]]
   let r = world.rng.next() * total
-  for (const d of open) {
-    r -= weights[d]
-    if (r <= 0) return d
+  for (let i = 0; i < count; i++) {
+    r -= weights[open[i]]
+    if (r <= 0) return open[i]
   }
-  return open[open.length - 1]
+  return open[count - 1]
 }

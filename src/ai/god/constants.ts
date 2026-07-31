@@ -26,6 +26,30 @@ export const KIND_THREAT_WEIGHT: Record<TankKind, number> = {
   player: 0,
 }
 
+/**
+ * (perf) Kind → threat weight as a switch. `KIND_THREAT_WEIGHT[t.kind]` is a
+ * string-keyed Record lookup that V8 cannot constant-fold (Record is a mutable
+ * exported object); in `findEnemyDirectionImpl` and `selectTargetImpl` it runs
+ * once per live enemy per tick. A switch over the 5 literal kinds compiles to
+ * a jump table — ~1ns vs ~5-8ns for the dict probe. Same return values as the
+ * Record for every TankKind. The original `?? 1` defensive fallback at the
+ * call sites was a no-op (TankKind is a closed 5-member union, all covered).
+ */
+export function kindThreatWeight(kind: TankKind): number {
+  switch (kind) {
+    case 'power':
+      return 4
+    case 'armor':
+      return 3
+    case 'fast':
+      return 2
+    case 'basic':
+      return 1
+    default:
+      return 0 // 'player'
+  }
+}
+
 /** S5a: power-up collection priority (lower = higher priority).
  * New types added by main's powerup work (new-powerups-plan §4 / §4.3):
  *   - normal pool: repair (heal), emp (silence fire), decoy (draw fire), mine (AoE)

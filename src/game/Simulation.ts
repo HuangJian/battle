@@ -8,6 +8,8 @@ import {
   TICK_MS,
   MAX_ENEMIES_ALIVE,
   DIR_VECTORS,
+  DIR_DX,
+  DIR_DY,
   Direction,
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
@@ -107,6 +109,20 @@ function isBaseProtectionCell(col: number, row: number): boolean {
 }
 
 /**
+ * True when every enemy in the list is either an "extra" (balance spawn,
+ * §31 Phase 2 — outside the per-stage count) or already dead. Used by
+ * `checkConditions` to decide stage clear. Indexed loop avoids allocating a
+ * `.every()` closure every tick the stage-clear gate is evaluated (AGENTS §14.1).
+ */
+function allNonExtraEnemiesDead(tanks: Tank[]): boolean {
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.isExtra && t.alive) return false
+  }
+  return true
+}
+
+/**
  * Simulation — the only layer allowed to modify the World.
  * Runs all game systems in a fixed timestep.
  */
@@ -199,11 +215,17 @@ export class Simulation {
     if (w.spawnTimer > 0) w.spawnTimer -= 1000 / 60
     if (w.pickupWindowTimer > 0) w.pickupWindowTimer -= TICK_MS
 
-    // Update mine arm timers
-    for (const mine of w.mines) {
-      if (mine.alive && mine.armTimer > 0) {
-        mine.armTimer -= 1000 / 60
-        if (mine.armTimer < 0) mine.armTimer = 0
+    // Update mine arm timers (indexed loop — AGENTS §14.1)
+    // (perf §68) Skip the loop when no mines exist — classic mode rarely
+    // uses mines, so this saves the per-tick array-length + property probe.
+    if (w._hasActiveMines) {
+      const armMines = w.mines
+      for (let mi = 0; mi < armMines.length; mi++) {
+        const mine = armMines[mi]
+        if (mine.alive && mine.armTimer > 0) {
+          mine.armTimer -= 1000 / 60
+          if (mine.armTimer < 0) mine.armTimer = 0
+        }
       }
     }
 
@@ -266,7 +288,12 @@ export class Simulation {
 
   private updateSpawnTimers(): void {
     const w = this.world
-    for (const tank of w.allTanks) {
+    // Indexed loop — `for...of` allocates an iterator object per call (AGENTS
+    // §14.1). This runs every tick over allTanks (which the getter rebuilds
+    // into a reused buffer).
+    const tanks = w.allTanks
+    for (let i = 0; i < tanks.length; i++) {
+      const tank = tanks[i]
       if (tank.spawnTimer > 0) {
         tank.spawnTimer -= 1000 / 60
         if (tank.spawnTimer < 0) tank.spawnTimer = 0
@@ -319,7 +346,9 @@ export class Simulation {
 
       // Check if spawn area is clear of other tanks (inline rect — no per-retry allocation)
       let canSpawn = true
-      for (const tank of w.allTanks) {
+      const checkTanks = w.allTanks
+      for (let ci = 0; ci < checkTanks.length; ci++) {
+        const tank = checkTanks[ci]
         if (aabb(pt.x, pt.y, TANK, TANK, tank.x, tank.y, tank.w, tank.h)) {
           canSpawn = false
           break
@@ -358,7 +387,9 @@ export class Simulation {
         // screen (active + inactive both count, §5.1). A roll against a
         // full cap downgrades to ACTUAL Veteran — no boost, no crown.
         let aliveCmd = 0
-        for (const t of w.tanks) {
+        const cmdTanks = w.tanks
+        for (let ci = 0; ci < cmdTanks.length; ci++) {
+          const t = cmdTanks[ci]
           if (t.alive && t.aiState?.level === 'commander') aliveCmd++
         }
         if (aliveCmd >= COMMANDER_ALIVE_CAP) {
@@ -600,6 +631,8 @@ export class Simulation {
       armTimer: MINE_ARM_MS,
       alive: true,
     })
+    // (perf §68) New mine added — enable the updateMines loop.
+    w._hasActiveMines = true
   }
 
   /**
@@ -609,15 +642,33 @@ export class Simulation {
    */
   private updateMines(): void {
     const w = this.world
-    for (const mine of w.mines) {
+    // (perf §68 Round 9) Fast path: skip the entire mines scan when no mines
+    // are on the field. classic mode rarely uses mines, so this saves the
+    // per-tick arm-timer loop + per-mine × per-tank AABB checks on the vast
+    // majority of ticks. The flag is set by placeMine and cleared below when
+    // compaction removes the last mine.
+    if (!w._hasActiveMines) return
+
+    // In-place compaction (swap-and-pop pattern of removeDeadEntities) —
+    // avoids allocating a fresh array via `.filter()` every tick (AGENTS §14.1).
+    // Mines are usually empty; even so the old code paid for a new [] each tick.
+    const mines = w.mines
+    let mw = 0
+    for (let mi = 0; mi < mines.length; mi++) {
+      const mine = mines[mi]
       if (!mine.alive) continue
       // Mine must be armed (armTimer <= 0) to detonate
-      if (mine.armTimer > 0) continue
+      if (mine.armTimer > 0) {
+        mines[mw++] = mine
+        continue
+      }
 
       let detonate = false
 
       // Check enemy tank collision
-      for (const tank of w.tanks) {
+      const tanks = w.tanks
+      for (let ti = 0; ti < tanks.length; ti++) {
+        const tank = tanks[ti]
         if (!tank.alive || tank.allegiance !== 'enemy' || tank.spawnTimer > 0) continue
         if (aabb(mine.x, mine.y, mine.w, mine.h, tank.x, tank.y, tank.w, tank.h)) {
           detonate = true
@@ -627,29 +678,37 @@ export class Simulation {
 
       // Check enemy bullet collision
       if (!detonate) {
-        for (const bullet of w.bullets) {
+        const bullets = w.bullets
+        for (let bi = 0; bi < bullets.length; bi++) {
+          const bullet = bullets[bi]
           if (!bullet.alive || bullet.allegiance !== 'enemy') continue
           if (aabb(mine.x, mine.y, mine.w, mine.h, bullet.x, bullet.y, bullet.w, bullet.h)) {
             detonate = true
             bullet.alive = false
+            w._needsCleanup = true
             break
           }
         }
       }
 
       if (detonate) {
+        // Mark consumed (matches original semantics; the mine is dropped from
+        // the compacted tail below so it won't be observable next tick).
         mine.alive = false
+        w._needsCleanup = true
         const cx = mine.x + mine.w / 2
         const cy = mine.y + mine.h / 2
         const radiusPx = MINE_RADIUS_CELLS * CELL
 
         // Damage enemies in radius (normal kill accounting)
-        for (const tank of w.tanks) {
+        for (let ti = 0; ti < tanks.length; ti++) {
+          const tank = tanks[ti]
           if (!tank.alive || tank.allegiance !== 'enemy' || tank.spawnTimer > 0) continue
           const tx = tank.x + tank.w / 2
           const ty = tank.y + tank.h / 2
           if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
             tank.alive = false
+            w._needsCleanup = true
             this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
             const gained = killScore(
               w.difficultyKey,
@@ -680,10 +739,16 @@ export class Simulation {
         }
 
         this.createExplosion(cx, cy, 'big')
+        // mine is consumed — do NOT copy to compacted tail
+      } else {
+        mines[mw++] = mine
       }
     }
-    // Remove dead mines
-    w.mines = w.mines.filter((m) => m.alive)
+    mines.length = mw
+    // (perf §68) Clear the flag when all mines have been removed by
+    // detonation / compaction. Next tick updateMines will early-return until
+    // placeMine sets it true again.
+    if (mines.length === 0) w._hasActiveMines = false
   }
 
   /**
@@ -833,13 +898,17 @@ export class Simulation {
    */
   private updateGuards(): void {
     const w = this.world
-    for (const g of w.allies) {
+    const allies = w.allies
+    const enemyTanks = w.tanks
+    for (let ai = 0; ai < allies.length; ai++) {
+      const g = allies[ai]
       if (!g.alive) continue
       if (g.spawnTimer > 0) continue // still spawning — no intent yet
 
       // Lifespan expiry → retire the guard (no score, no drops).
       if (g.guardExpireFrame !== undefined && w.frame >= g.guardExpireFrame) {
         g.alive = false
+        w._needsCleanup = true
         this.createExplosion(g.x + g.w / 2, g.y + g.h / 2, 'big')
         continue
       }
@@ -850,7 +919,8 @@ export class Simulation {
       // Nearest hostile tank.
       let target: Tank | null = null
       let bestD = Infinity
-      for (const e of w.tanks) {
+      for (let ei = 0; ei < enemyTanks.length; ei++) {
+        const e = enemyTanks[ei]
         if (!e.alive || e.spawnTimer > 0 || e.allegiance !== 'enemy') continue
         const d = Math.hypot(e.x + e.w / 2 - gx, e.y + e.h / 2 - gy)
         if (d < bestD) {
@@ -942,6 +1012,7 @@ export class Simulation {
       const ty = t.y + t.h / 2
       if (Math.hypot(tx - cx, ty - cy) <= radiusPx) {
         t.alive = false
+        w._needsCleanup = true
         this.createExplosion(t.x + t.w / 2, t.y + t.h / 2, 'big')
         const gained = killScore(w.difficultyKey, t.aiState?.level, w.stageIndex, w.rules, t.kind)
         w.score += gained
@@ -997,7 +1068,9 @@ export class Simulation {
     const w = this.world
     let bestId: number | null = null
     let bestSeq = -Infinity
-    for (const t of w.tanks) {
+    const tanks = w.tanks
+    for (let i = 0; i < tanks.length; i++) {
+      const t = tanks[i]
       if (!t.alive || t.spawnTimer > 0 || !t.aiState) continue
       if (t.aiState.level === 'commander') {
         if (t.aiState.spawnSeq > bestSeq) {
@@ -1009,8 +1082,15 @@ export class Simulation {
     const prev = w.activeCommanderId
     w.activeCommanderId = bestId
     if (bestId !== null && bestId !== prev) {
-      const active = w.tanks.find((t) => t.id === bestId)
-      if (active?.aiState) active.aiState.commanderTimer = 1000
+      // Linear scan — only on commander change (rare). Avoids allocating a
+      // `.find()` closure every tick (AGENTS §14.1).
+      for (let i = 0; i < tanks.length; i++) {
+        if (tanks[i].id === bestId) {
+          const active = tanks[i]
+          if (active.aiState) active.aiState.commanderTimer = 1000
+          break
+        }
+      }
     }
   }
 
@@ -1023,6 +1103,16 @@ export class Simulation {
     // Cache allTanks once — tankHitsTank calls the getter per moving tank.
     // The buffer is stable during movement (no tanks added/removed).
     const allTanks = w.allTanks
+    // Cache grid + FIELD for inlined isTankOnIce + isInBounds (perf §64):
+    // - isTankOnIce(tank) does tileMap.get(c,r)==='ice' — direct grid[r][c]
+    //   access skips one method dispatch per tank per tick.
+    // - isInBounds(...) is a 4-compare boolean; inlined as `newX < 0 || ...`.
+    // - canTankTraverseWater(tank) is `!!(boatTimer && boatTimer > 0)`.
+    // tank.w/h are TANK=32 by invariant (World.createTank); using the literal
+    // skips 2 property accesses per call site. The bounds check in
+    // updateMovement guarantees tank.x ∈ [0, FIELD-TANK] ⇒ the inlined
+    // isTankOnIce cell coords (floor((tank.x+16)/CELL)) are always in [0, GRID-1].
+    const grid = w.tileMap.grid
     for (let ti = 0; ti < allTanks.length; ti++) {
       const tank = allTanks[ti]
       if (!tank.alive || tank.spawnTimer > 0) continue
@@ -1039,11 +1129,20 @@ export class Simulation {
 
       // ---- Velocity / ice-momentum integration ----
       // Desired velocity comes from the tank's movement intent (dir when moving).
-      const dirV = DIR_VECTORS[tank.dir]
-      const wantX = tank.moving ? dirV.dx * tank.speed : 0
-      const wantY = tank.moving ? dirV.dy * tank.speed : 0
+      // Inline DIR_VECTORS[tank.dir] with flat DIR_DX/DIR_DY arrays — avoids
+      // a string-keyed Record lookup per tank per tick (perf §64).
+      const di = tank.dir === 'up' ? 0 : tank.dir === 'down' ? 1 : tank.dir === 'left' ? 2 : 3
+      const dirDx = DIR_DX[di]
+      const dirDy = DIR_DY[di]
+      const wantX = tank.moving ? dirDx * tank.speed : 0
+      const wantY = tank.moving ? dirDy * tank.speed : 0
 
-      const onIce = w.isTankOnIce(tank)
+      // Inline isTankOnIce: tank center cell, direct grid access.
+      // Equivalent to `w.tileMap.get(ic, ir) === 'ice'` for in-bounds tanks
+      // (which all tanks are — see invariant above).
+      const ic = Math.floor((tank.x + 16) / CELL)
+      const ir = Math.floor((tank.y + 16) / CELL)
+      const onIce = grid[ir][ic] === 'ice'
       if (onIce) {
         // Low traction: ease velocity toward the desired value. Accelerating
         // (target non-zero) uses ICE_ACCEL_TRACTION; decelerating (target zero
@@ -1085,22 +1184,23 @@ export class Simulation {
       const newX = tank.x + tank.vx
       const newY = tank.y + tank.vy
 
-      // Check bounds
-      if (!w.isInBounds(newX, newY, tank.w, tank.h)) {
+      // Inline isInBounds(newX, newY, TANK, TANK): TANK=32, FIELD=GRID*CELL.
+      // `!isInBounds(...)` ⟺ `newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD`.
+      if (newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD) {
         if (axis === 'x') {
-          tank.x = tank.vx < 0 ? 0 : FIELD - tank.w
+          tank.x = tank.vx < 0 ? 0 : FIELD - 32
           tank.vx = 0
         } else {
-          tank.y = tank.vy < 0 ? 0 : FIELD - tank.h
+          tank.y = tank.vy < 0 ? 0 : FIELD - 32
           tank.vy = 0
         }
         if (tank.aiState) tank.aiState.thinkTimer = 0
         continue
       }
 
-      // Check terrain collision
-      const canTraverseWater = w.canTankTraverseWater(tank)
-      if (w.rectHitsTerrain(newX, newY, tank.w, tank.h, canTraverseWater)) {
+      // Inline canTankTraverseWater: `!!(tank.boatTimer && tank.boatTimer > 0)`.
+      const canTraverseWater = !!(tank.boatTimer && tank.boatTimer > 0)
+      if (w.rectHitsTerrain(newX, newY, 32, 32, canTraverseWater)) {
         // Snap to the cell boundary on the travel axis and stop there.
         if (axis === 'x') {
           tank.x = snap(tank.x, CELL)
@@ -1207,7 +1307,9 @@ export class Simulation {
         (w.rules.maxBullets[tank.kind] ?? 1) +
         (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
       let inFlight = 0
-      for (const b of w.bullets) {
+      const liveBullets = w.bullets
+      for (let bi = 0; bi < liveBullets.length; bi++) {
+        const b = liveBullets[bi]
         if (b.alive && b.ownerId === tank.id) inFlight++
       }
       if (inFlight >= cap) return
@@ -1269,7 +1371,10 @@ export class Simulation {
     // The buffer is stable during bullet updates (tanks may be flagged dead
     // but are not removed from the array until removeDeadEntities).
     const allTanks = w.allTanks
-    for (const bullet of w.bullets) {
+    // Indexed loop — `for...of` allocates an iterator per tick (AGENTS §14.1).
+    const bullets = w.bullets
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const bullet = bullets[bi]
       if (!bullet.alive) continue
 
       // Move
@@ -1280,6 +1385,7 @@ export class Simulation {
       // Out of bounds
       if (bullet.x < 0 || bullet.x > FIELD || bullet.y < 0 || bullet.y > FIELD) {
         bullet.alive = false
+        w._needsCleanup = true
         this.createExplosion(bullet.x, bullet.y, 'small')
         continue
       }
@@ -1287,18 +1393,21 @@ export class Simulation {
       // Check terrain collision
       if (this.bulletHitsTerrain(bullet)) {
         bullet.alive = false
+        w._needsCleanup = true
         continue
       }
 
       // Check tank collision
       if (this.bulletHitsTank(bullet, allTanks)) {
         bullet.alive = false
+        w._needsCleanup = true
         continue
       }
 
       // Check bullet-bullet collision
       if (this.bulletHitsBullet(bullet)) {
         bullet.alive = false
+        w._needsCleanup = true
         continue
       }
     }
@@ -1310,6 +1419,12 @@ export class Simulation {
     const r0 = Math.floor(bullet.y / CELL)
     const c1 = Math.floor((bullet.x + bullet.w - 1) / CELL)
     const r1 = Math.floor((bullet.y + bullet.h - 1) / CELL)
+
+    // Cache grid for inlined tileMap.get (perf §66): bulletHitsTerrain is
+    // called per bullet per tick; each w.tileMap.get(c,r) is a method dispatch
+    // + bounds check. Inline as grid[r][c] with the same OOB→'steel' fallback
+    // that TileMap.get uses (bullets at the trailing edge can reach c1/r1 = GRID).
+    const grid = w.tileMap.grid
 
     // A bullet can overlap the last protection brick and the base in the same
     // tick. The normal scan intentionally preserves the existing multi-brick
@@ -1326,9 +1441,11 @@ export class Simulation {
       const colStart = v.dx < 0 ? c1 : c0
       const colEnd = v.dx < 0 ? c0 : c1
       for (let r = rowStart; v.dy < 0 ? r >= rowEnd : r <= rowEnd; r += rowStep) {
+        const row = r >= 0 && r < GRID ? grid[r] : null
         for (let c = colStart; v.dx < 0 ? c >= colEnd : c <= colEnd; c += colStep) {
           if (!isBaseProtectionCell(c, r)) continue
-          const type = w.tileMap.get(c, r)
+          // Inline tileMap.get with OOB→'steel' (matches TileMap.get bounds).
+          const type = row && c >= 0 && c < GRID ? row[c] : 'steel'
           if (type === 'brick') {
             w.tileMap.destroy(c, r)
             this.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
@@ -1349,8 +1466,10 @@ export class Simulation {
 
     let hit = false
     for (let r = r0; r <= r1; r++) {
+      const row = r >= 0 && r < GRID ? grid[r] : null
       for (let c = c0; c <= c1; c++) {
-        const type = w.tileMap.get(c, r)
+        // Inline tileMap.get with OOB→'steel' (matches TileMap.get bounds).
+        const type = row && c >= 0 && c < GRID ? row[c] : 'steel'
         if (type === 'empty') continue
 
         if (type === 'base') {
@@ -1468,6 +1587,7 @@ export class Simulation {
           return true
         }
         tank.alive = false
+        w._needsCleanup = true
         this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
 
         if (tank.isPlayer) {
@@ -1619,7 +1739,9 @@ export class Simulation {
 
   private bulletHitsBullet(bullet: Bullet): boolean {
     const w = this.world
-    for (const other of w.bullets) {
+    const bullets = w.bullets
+    for (let i = 0; i < bullets.length; i++) {
+      const other = bullets[i]
       if (other === bullet || !other.alive) continue
       // Bullets cancel only across opposing sides (player/ally vs enemy).
       const bulletEnemy = bullet.allegiance === 'enemy'
@@ -1627,6 +1749,7 @@ export class Simulation {
       if (bulletEnemy === otherEnemy) continue
       if (aabb(bullet.x, bullet.y, bullet.w, bullet.h, other.x, other.y, other.w, other.h)) {
         other.alive = false
+        w._needsCleanup = true
         this.createExplosion((bullet.x + other.x) / 2, (bullet.y + other.y) / 2, 'small')
         return true
       }
@@ -1834,7 +1957,9 @@ export class Simulation {
     const w = this.world
     const dt = 1000 / 60
 
-    for (const pu of w.powerUps) {
+    const pus = w.powerUps
+    for (let i = 0; i < pus.length; i++) {
+      const pu = pus[i]
       if (!pu.alive) continue
       pu.blinkTimer += dt
       pu.lifeTimer += dt
@@ -1842,6 +1967,7 @@ export class Simulation {
       // Despawn power-up after timeout
       if (pu.lifeTimer >= POWERUP_TIMEOUT_MS) {
         pu.alive = false
+        w._needsCleanup = true
         continue
       }
 
@@ -1849,6 +1975,7 @@ export class Simulation {
       const p1 = w.player
       if (p1 && p1.alive && aabb(p1.x, p1.y, p1.w, p1.h, pu.x, pu.y, pu.w, pu.h)) {
         pu.alive = false
+        w._needsCleanup = true
         this.applyPowerUp(pu.type, p1)
         w.score += w.rules.itemScore
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
@@ -1858,6 +1985,7 @@ export class Simulation {
       const p2 = w.player2
       if (p2 && p2.alive && aabb(p2.x, p2.y, p2.w, p2.h, pu.x, pu.y, pu.w, pu.h)) {
         pu.alive = false
+        w._needsCleanup = true
         this.applyPowerUp(pu.type, p2)
         w.score2 += w.rules.itemScore
         w.pushEvent({ type: 'powerup_collected', powerUp: pu.type, by: 'player' })
@@ -1921,6 +2049,7 @@ export class Simulation {
         for (const tank of w.tanks) {
           if (!tank.alive) continue
           tank.alive = false
+          w._needsCleanup = true
           this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
           const gained = killScore(
             w.difficultyKey,
@@ -2096,15 +2225,28 @@ export class Simulation {
 
   private updateExplosions(): void {
     const w = this.world
-    for (const exp of w.explosions) {
-      exp.timer -= 1000 / 60
+    // Indexed loop — `for...of` allocates an iterator every tick even when
+    // explosions is empty (AGENTS §14.1). Mark _needsCleanup when any timer
+    // reaches 0 so removeDeadEntities reclaims the slot (perf §67 — most ticks
+    // have no explosions expiring, so this is a precise signal rather than
+    // always-on).
+    const exps = w.explosions
+    const step = 1000 / 60
+    for (let i = 0; i < exps.length; i++) {
+      const t = exps[i].timer - step
+      exps[i].timer = t
+      if (t <= 0) w._needsCleanup = true
     }
   }
 
   private updatePopups(): void {
     const w = this.world
-    for (const popup of w.popups) {
-      popup.timer -= 1000 / 60
+    const popups = w.popups
+    const step = 1000 / 60
+    for (let i = 0; i < popups.length; i++) {
+      const t = popups[i].timer - step
+      popups[i].timer = t
+      if (t <= 0) w._needsCleanup = true
     }
   }
 
@@ -2193,7 +2335,7 @@ export class Simulation {
     // Stage clear — all (non-extra) enemies defeated. Accompanying "balance"
     // enemies (isExtra) are outside the per-stage count and must NOT block
     // stage clear (§31 Phase 2).
-    if (w.enemiesRemaining <= 0 && w.tanks.every((t) => t.isExtra || !t.alive)) {
+    if (w.enemiesRemaining <= 0 && allNonExtraEnemiesDead(w.tanks)) {
       const hasAlivePowerUp = w.powerUps.some((p) => p.alive)
 
       if (!hasAlivePowerUp) {

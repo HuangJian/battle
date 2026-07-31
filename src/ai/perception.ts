@@ -3,7 +3,7 @@ import type { Tank } from '../types'
 import type { Direction } from '../constants'
 import { CELL, TANK, DIR_VECTORS, FIELD, GRID } from '../constants'
 import { aabb, snap } from '../utils/helpers'
-import type { Perception, Situation, BulletObservation, IntelligenceConfig } from './types'
+import type { Perception, Situation, IntelligenceConfig } from './types'
 
 /**
  * ai/perception.ts — the "eyes" of the framework.
@@ -136,7 +136,9 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     // enemy shoots it instead of pushing toward the base/player (new-powerups
     // §4.4). Bullets pass through allies, but the decoy is the exception we
     // want enemies to aim at.
-    for (const dec of world.allies) {
+    const allies = world.allies
+    for (let ai = 0; ai < allies.length; ai++) {
+      const dec = allies[ai]
       if (!dec.alive || !dec.isDecoy || dec.spawnTimer > 0) continue
       if (aabb(cx - 1, cy - 1, 2, 2, dec.x, dec.y, dec.w, dec.h)) {
         return 'decoy'
@@ -163,12 +165,21 @@ export function computeOpenDirs(world: World, tank: Tank, all: Tank[]): Directio
 /** Build the observation snapshot for one tank.
  * When `computeOpenDirs` is false, the expensive 4 × canStep scan is skipped
  * (openDirs = []). The caller (reactiveDodge) must call computeOpenDirs()
- * on demand if it needs openDirs on a tick where perceive skipped it. */
+ * on demand if it needs openDirs on a tick where perceive skipped it.
+ *
+ * `all` (when provided) is the precomputed `world.allTanks` buffer — passing
+ * it avoids re-fetching the getter (AGENTS.md §14.6). Tests may omit it; the
+ * function falls back to `world.allTanks` (slower path, but identical result).
+ *
+ * The returned Perception is allocation-free in the hot path: it carries flat
+ * threat + teammate aggregates instead of `BulletObservation[]` /
+ * `TeammateObservation[]` (those types were removed; see types.ts). */
 export function perceive(
   world: World,
   tank: Tank,
   cfg: IntelligenceConfig,
   needOpenDirs = true,
+  all?: Tank[],
 ): Perception {
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
@@ -185,9 +196,18 @@ export function perceive(
   }
   const base = world.tileMap.getBasePos()
 
-  const threats: BulletObservation[] = []
+  // Track the single closest threat via flat fields — consumers only read the
+  // threat's direction (analyze → s.threatDir, used by reactiveDodge). The
+  // prior design allocated a `BulletObservation[]` + per-element objects here
+  // every call (~1.1M allocs per 30-game batch); the new design allocates
+  // nothing.
   const range = cfg.predictionDepth * CELL
-  for (const b of world.bullets) {
+  let hasThreat = false
+  let threatDist = Infinity
+  let threatDir: Direction = 'up'
+  const bullets = world.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     // Only hostile-to-enemy bullets are a threat: player OR ally fire (ally
     // bullets carry allegiance 'ally', never 'enemy').
     if (!b.alive || b.allegiance === 'enemy') continue
@@ -204,41 +224,59 @@ export function perceive(
     if (!approaching) continue
     const dist = vertical ? Math.abs(by - sy) : Math.abs(bx - sx)
     if (dist > range) continue
-    threats.push({ x: bx, y: by, dir: b.dir, aligned: true, approaching: true, distance: dist })
+    // Track the closest threat. Sorting was only needed to pick threats[0];
+    // a running min replaces the sort + array entirely.
+    if (dist < threatDist) {
+      threatDist = dist
+      threatDir = b.dir
+      hasThreat = true
+    }
   }
-  // Skip sort when 0 or 1 threats — avoids V8 sort overhead on empty arrays.
-  if (threats.length > 1) threats.sort((a, b) => a.distance - b.distance)
 
   // Reuse the allTanks buffer directly instead of building a filtered `others`
   // array. canStep already skips dead/spawning/self entries with the same
   // filter (`o === tank || !o.alive || o.spawnTimer > 0`), so passing `all`
   // yields identical results. This eliminates one array allocation + N pushes
   // per perceive call (~550K allocs over a 30-game batch).
-  const all = world.allTanks
+  const list = all ?? world.allTanks
 
-  const teammates: Perception['teammates'] = []
+  // Teammate aggregates: centroid (sumX/sumY/count) replaces the
+  // TeammateObservation[] array. `targetForGoal`'s spreadOut directive is the
+  // only consumer, and it only computes the centroid — never per-element data.
+  let teammateCount = 0
+  let teammateSumX = 0
+  let teammateSumY = 0
   let congestion = 0
   // Nearest live decoy (for decoy-targeting). Decoys are allies, so they are
-  // excluded from the teammate list below (they are not fellow enemies).
-  let nearestDecoy: { x: number; y: number } | null = null
+  // excluded from the teammate aggregates (they are not fellow enemies).
+  // Tracked as flat fields — no object allocation.
+  let hasDecoy = false
+  let decoyX = 0
+  let decoyY = 0
   let nearestDecoyDist = Infinity
-  for (let i = 0; i < all.length; i++) {
-    const o = all[i]
+  for (let i = 0; i < list.length; i++) {
+    const o = list[i]
     if (o === tank || !o.alive || o.spawnTimer > 0) continue
     if (o.isPlayer) continue
+    const ocx = o.x + o.w / 2
+    const ocy = o.y + o.h / 2
     if (o.isDecoy) {
-      const d = manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2)
+      const d = manhattan(sx, sy, ocx, ocy)
       if (d < nearestDecoyDist) {
         nearestDecoyDist = d
-        nearestDecoy = { x: o.x + o.w / 2, y: o.y + o.h / 2 }
+        hasDecoy = true
+        decoyX = ocx
+        decoyY = ocy
       }
       continue
     }
-    teammates.push({ id: o.id, x: o.x + o.w / 2, y: o.y + o.h / 2, dir: o.dir })
-    if (manhattan(sx, sy, o.x + o.w / 2, o.y + o.h / 2) < CELL * 8) congestion++
+    teammateCount++
+    teammateSumX += ocx
+    teammateSumY += ocy
+    if (manhattan(sx, sy, ocx, ocy) < CELL * 8) congestion++
   }
 
-  const openDirs: Direction[] = needOpenDirs ? computeOpenDirs(world, tank, all) : []
+  const openDirs: Direction[] = needOpenDirs ? computeOpenDirs(world, tank, list) : []
 
   return {
     selfX: sx,
@@ -250,11 +288,14 @@ export function perceive(
     hasBase: !!base,
     baseX: base ? base.x + CELL : 0,
     baseY: base ? base.y + CELL : 0,
-    hasDecoy: nearestDecoy !== null,
-    decoyX: nearestDecoy ? nearestDecoy.x : 0,
-    decoyY: nearestDecoy ? nearestDecoy.y : 0,
-    threats,
-    teammates,
+    hasDecoy,
+    decoyX,
+    decoyY,
+    hasThreat,
+    threatDir,
+    teammateCount,
+    teammateSumX,
+    teammateSumY,
     congestion,
     openDirs,
   }
@@ -288,9 +329,6 @@ export function analyze(
   const ahead = objDir === tank.dir ? baseLOS : scanAhead(world, tank, objDir, losRange)
   const pathBlocked = ahead === 'wall'
 
-  const threat = p.threats.length > 0 ? p.threats[0] : null
-  const threatDir: Direction | null = null // computed by the decision layer (needs objective)
-
   const baseDanger = p.hasBase ? Math.max(0, 1 - distToBase / maxDist) : 0
 
   return {
@@ -302,10 +340,10 @@ export function analyze(
     decoyInLineOfFire,
     wallInLineOfFire,
     pathBlocked,
-    threat,
-    threatDir,
+    hasThreat: p.hasThreat,
+    threatDir: p.hasThreat ? p.threatDir : null,
     baseDanger,
-    teammateCount: p.teammates.length,
+    teammateCount: p.teammateCount,
     congestion: p.congestion,
     openDirs: p.openDirs,
   }

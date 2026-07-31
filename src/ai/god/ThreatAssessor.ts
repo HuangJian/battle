@@ -26,7 +26,9 @@ export function findMostDangerousBulletImpl(
   let best: Bullet | null = null
   let bestDist = Infinity
 
-  for (const b of w.bullets) {
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
@@ -66,7 +68,9 @@ export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
   let best: Bullet | null = null
   let bestDist = Infinity
 
-  for (const b of w.bullets) {
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer) continue
 
     const bcx = b.x + b.w / 2
@@ -283,7 +287,12 @@ export function isSafeDirImpl(
   const newCx = pcx + v.dx * CELL
   const newCy = pcy + v.dy * CELL
 
-  for (const b of w.bullets) {
+  // Indexed loop (AGENTS §14.1): isSafeDir is called up to 2× per dodge
+  // (candA + candB), and dodgeDirection runs whenever a threat is detected.
+  // `for (const b of w.bullets)` allocates an iterator per call.
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
