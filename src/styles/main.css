@@ -1788,7 +1788,7 @@ body.theme-modern .ui-menu {
   padding: 1px 4px;
 }
 
-/* DEVELOPER section — Debug Overlay toggle (F6) */
+/* DEVELOPER section — Debug Overlay toggle (Alt+D) */
 .cc-perf-meta {
   display: flex;
   align-items: center;
@@ -1865,7 +1865,7 @@ body.theme-modern .ui-menu {
 }
 
 /* ================================================================
-   Performance Observatory (F6 dev overlay)
+   Performance Observatory (Alt+D dev overlay)
    Fixed top-right, semi-transparent dark panel — never obscures the
    battle field. Read-only debug HUD; not drawn on the canvas.
    Width is fixed and every value cell is a fixed-width tabular-nums

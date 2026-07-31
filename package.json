@@ -25,6 +25,7 @@
     "check": "bun test && tsc --noEmit --incremental && oxlint && oxfmt"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.3",
     "@types/bun": "^1.3.14",
     "oxfmt": "^0.59.0",
     "oxlint": "^1.74.0",

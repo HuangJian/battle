@@ -295,8 +295,8 @@ export class Game {
     // screens. Registered AFTER input.attach so Input.onKeyDown populates the
     // polled `justPressed` set before we read it.
     window.addEventListener('keydown', this.onStaticKey)
-    // Developer Performance Observatory hotkey (F6). Toggle only — never
-    // consumes the key during gameplay (other F-keys are free, F6 is unbound).
+    // Developer Performance Observatory hotkey (Alt+D). Toggle only — never
+    // consumes the key during gameplay (F6 is bound to the frenzy super-item).
     window.addEventListener('keydown', this.onPerfKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
@@ -451,7 +451,7 @@ export class Game {
   }
 
   /**
-   * Toggle the developer Performance Observatory (F6). The overlay is a
+   * Toggle the developer Performance Observatory (Alt+D). The overlay is a
    * read-only debug HUD — toggling it only flips a flag and arms/disarms the
    * renderer's draw-call counter, which is zero-cost while off.
    */

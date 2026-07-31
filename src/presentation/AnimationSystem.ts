@@ -106,13 +106,20 @@ export class AnimationSystem {
    * Remove visual components whose entity was not seen alive this frame.
    * Uses a frame stamp (set on the component by the presentation layer) instead
    * of a per-frame Set, so cleanup is allocation-free and O(components).
+   *
+   * P3: `forEach` instead of `for...of`. The iterator protocol used by
+   * `for...of` over a Map allocates an iterator-result object + a fresh
+   * `[id, vc]` tuple per entry per call — ~12 short-lived objects/frame with
+   * ~6 tanks. `forEach` is spec-safe to `delete` during iteration and uses no
+   * iterator protocol. Saves the per-entry allocation in the steady-state
+   * per-frame path.
    */
   cleanup(currentFrame: number): void {
-    for (const [id, vc] of this.components) {
+    this.components.forEach((vc, id) => {
       if (vc.lastSeenFrame !== currentFrame) {
         this.components.delete(id)
       }
-    }
+    })
   }
 
   /** Get a component by entity ID */

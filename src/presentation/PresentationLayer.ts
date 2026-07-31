@@ -1,5 +1,5 @@
 import type { World } from '../game/World'
-import type { GameEvent, EmitterConfig } from '../types'
+import type { GameEvent, EmitterConfig, Tank } from '../types'
 import { FIELD, TANK } from '../constants'
 import { THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, THUMBNAIL_QUALITY } from '../snapshot/config'
 import { Camera } from './Camera'
@@ -37,6 +37,13 @@ export class PresentationLayer {
   private _needRender = true
   /** Cheap signature of everything that affects painted pixels. */
   private _lastSceneSig = 0
+  /**
+   * Cached `world.allTanks` buffer fetched inside `computeSceneSig`, consumed
+   * by the next `render()` call (P2). Null after consumption or before first
+   * use. Safe because `_allTanksBuf` is only mutated by the getter itself, and
+   * no sim tick runs between `shouldRender` and `render`.
+   */
+  private _sigTanks: Tank[] | null = null
   // Structural / UI-driving fields whose change must force a repaint.
   private _lastState = ''
   private _lastThemeKey = ''
@@ -70,6 +77,8 @@ export class PresentationLayer {
       this.dpr,
       spriteLibrary,
     )
+    // Sync initial low-quality state with the initial performance mode.
+    this.renderer.lowQuality = performanceMode
 
     // Size the canvas to fill the viewport (largest possible square) and
     // keep it responsive to window resizes. Pure presentation — never
@@ -102,6 +111,12 @@ export class PresentationLayer {
       this.renderer.setDpr(newDpr)
       this.dpr = newDpr
     }
+    // Low-quality mode: skip decorative rendering (vignette blit, tank shadows).
+    // On software rasterizers (old machines without GPU), the vignette alone is
+    // the single most expensive operation (~1.4ms/frame on Skia, estimated
+    // 7–14ms on a 20-year-old machine). Gated behind Performance Mode so normal
+    // play is unaffected.
+    this.renderer.lowQuality = on
     this.markNeedsRender()
   }
 
@@ -451,8 +466,20 @@ export class PresentationLayer {
 
   /** Update visual state from world, then render everything */
   render(world: World, dt: number): void {
+    // `world.allTanks` is a getter that rebuilds a shared buffer on every access.
+    // Nothing in the presentation path mutates the World, so one rebuild per
+    // frame is enough — thread it through the two consumers (R1/P1-B).
+    //
+    // P2: when `shouldRender` already fetched the buffer for `computeSceneSig`,
+    // reuse that reference instead of re-fetching. Skips the second ~6-10 entry
+    // array write per repainted frame. Safe because `_allTanksBuf` is only
+    // mutated by the getter itself, and no sim tick runs between shouldRender
+    // and render.
+    const tanks = this._sigTanks ?? world.allTanks
+    this._sigTanks = null // consume; next shouldRender will re-fetch
+
     // Update visual state from world
-    this.updateVisualState(world)
+    this.updateVisualState(world, tanks)
 
     // Update presentation systems
     this.animations.update(dt)
@@ -464,7 +491,7 @@ export class PresentationLayer {
     this.ui.applyThemeIfChanged(world.theme, world.themeKey)
 
     // Render game world
-    this.renderer.render(world)
+    this.renderer.render(world, tanks)
   }
 
   /**
@@ -516,8 +543,9 @@ export class PresentationLayer {
     // Static scene signature.
     const sig = this.computeSceneSig(world)
     if (sig !== this._lastSceneSig) {
-      this._lastSceneSig = sig
-      this.recordRendered(world)
+      // Hand the freshly computed signature to recordRendered so it does not
+      // walk every tank/bullet/power-up a second time (R1/P1-A).
+      this.recordRendered(world, sig)
       return true
     }
     return false
@@ -533,9 +561,16 @@ export class PresentationLayer {
     return true
   }
 
-  /** Snapshot the structural/UI fields and scene signature as "last painted". */
-  private recordRendered(world: World): void {
-    this._lastSceneSig = this.computeSceneSig(world)
+  /**
+   * Snapshot the structural/UI fields and scene signature as "last painted".
+   *
+   * @param sig Pre-computed scene signature. `shouldRender`'s signature branch
+   * has already computed it for this exact World state; passing it in avoids a
+   * second full walk of tanks + bullets + power-ups (R1/P1-A). Omit it on the
+   * force paths, where no signature has been computed yet.
+   */
+  private recordRendered(world: World, sig?: number): void {
+    this._lastSceneSig = sig ?? this.computeSceneSig(world)
     this._lastState = world.state
     this._lastThemeKey = world.themeKey
     this._lastMenuCursor = world.menuCursor
@@ -564,8 +599,9 @@ export class PresentationLayer {
       if (!b.alive) continue
       sig = (sig * 31 + ((b.x >> 3) + (b.y >> 3) * 64)) | 0
     }
-    // Tanks.
-    const tanks = world.allTanks
+    // Tanks. P2: cache the fetched buffer so `render()` can reuse it instead of
+    // re-fetching `world.allTanks` (which rebuilds the same `_allTanksBuf`).
+    const tanks = (this._sigTanks = world.allTanks)
     const animPhase = Math.floor(frame / 4) // spawn(0-3)/shield(0-1)/flash(0-1) cadence
     for (let i = 0; i < tanks.length; i++) {
       const t = tanks[i]
@@ -609,10 +645,11 @@ export class PresentationLayer {
   }
 
   /** Sync visual components with simulation entities */
-  private updateVisualState(world: World): void {
+  private updateVisualState(world: World, tanks: Tank[]): void {
     const frame = world.frame
 
-    for (const tank of world.allTanks) {
+    for (let ti = 0; ti < tanks.length; ti++) {
+      const tank = tanks[ti]
       if (!tank.alive) continue
 
       const vc = this.animations.getOrCreate(tank.id, 'tank', tank.dir, tank.level ?? 0)

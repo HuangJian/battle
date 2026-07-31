@@ -24,7 +24,7 @@ export interface ControlCenterCallbacks {
   /** Open a local .replay file (not imported to database). */
   onOpenLocalReplay?: () => void
   onOpenControls: () => void
-  /** Toggle the developer Performance Observatory overlay (F6). */
+  /** Toggle the developer Performance Observatory overlay (Alt+D). */
   onTogglePerf: () => void
   /** Toggle fullscreen mode (Alt+F). */
   onToggleFullscreen: () => void
@@ -182,7 +182,7 @@ export class ControlCenter {
 
   /** Reflect the Performance Observatory overlay's on/off state in the
    *  DEVELOPER panel button (highlighted + ON/OFF label). Keeps the Control
-   *  Center in sync whether the overlay was toggled here or via the F6 key. */
+   *  Center in sync whether the overlay was toggled here or via the Alt+D key. */
   setPerfState(on: boolean): void {
     if (this.perfBtn) {
       this.perfBtn.classList.toggle('selected', on)

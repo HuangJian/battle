@@ -81,7 +81,7 @@ export class UIManager {
   private toastEl: HTMLElement
   private toastTimer = 0
 
-  // ---- Performance Observatory (F6 dev overlay) ----
+  // ---- Performance Observatory (Alt+D dev overlay) ----
   readonly perfOverlay: PerfOverlay
 
   // ---- Controls / key-bindings panel ----
@@ -354,7 +354,7 @@ export class UIManager {
       <span>Alt+S</span> Save
     `
 
-    // Performance Observatory (F6) — fixed-position dev overlay (read-only).
+    // Performance Observatory (Alt+D) — fixed-position dev overlay (read-only).
     this.perfOverlay = new PerfOverlay()
     this.perfOverlay.onCopied = () => this.notify('Performance report copied', 'info')
     this.root.appendChild(this.perfOverlay.el)
@@ -907,7 +907,7 @@ export class UIManager {
     }
   }
 
-  /** Toggle the developer Performance Observatory overlay (F6 hotkey / Control
+  /** Toggle the developer Performance Observatory overlay (Alt+D hotkey / Control
    *  Center button). Keeps the Control Center's DEVELOPER button in sync. */
   togglePerfOverlay(): void {
     this.perfOverlay.toggle()

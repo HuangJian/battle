@@ -2,7 +2,7 @@ import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
 import type { SpriteLibrary } from './SpriteLibrary'
 import type { SpriteCache } from './SpriteCache'
-import { DIR_TO_INDEX } from './SpriteCache'
+import { DIR_TO_INDEX, POWERUP_GLOW_FREQ } from './SpriteCache'
 
 /**
  * Draw a single water tile (procedural, theme-aware, phase-animated) into `ctx`
@@ -42,6 +42,267 @@ export function drawWaterTile(
     ctx.fillRect(x + s * 2, y + s - 2, s * 2, 1)
     ctx.fillRect(x + s, y + s * 3 - 2, s * 2, 1)
   }
+}
+
+// ================================================================
+// Aura pre-rendering (R3 — eliminates per-frame path rasterization)
+// ================================================================
+//
+// Auras (ally / hp-level / commander) are per-tank decorative rings whose
+// only animation is a slow sine pulse on alpha (and a few shape params).
+// Drawing them every frame via `beginPath`+`stroke`/`fill`+`createRadialGradient`
+// is the dominant per-tank cost on software rasterizers (old machines w/o GPU).
+//
+// Strategy: pre-render N=16 pulse buckets per (type, level) into offscreen
+// bitmaps at init time. At runtime, quantize the frame-derived pulse to a
+// bucket index and `drawImage` the bitmap — 1 blit replaces 2–7 path ops,
+// and the per-frame `createRadialGradient` (commander glow) is eliminated.
+//
+// Lossy aspect (DECISIONS.md §N): pulse is quantized to 16 buckets, so alpha
+// changes in 6.25% steps instead of continuously. Visually indistinguishable
+// at the pulse frequencies used (period ~50–80 frames). Anti-aliasing of path
+// edges is preserved because the bitmap is rasterized at full alpha and blitted
+// with the bucket's alpha baked in (drawImage multiplies per-pixel alpha).
+//
+// For commander, two out-of-phase pulses (0.12 + 0.08) drive different rings.
+// Pre-rendering collapses them to a single pulse (pulse2 := pulse1); the inner
+// ring then pulses in sync with the outer instead of slightly offset. This is
+// the only visible approximation, and it is subtle (both are slow sine waves).
+
+/** Number of pulse buckets per aura variant. 16 = ~6% alpha steps, visually smooth. */
+export const AURA_BUCKETS = 16
+
+export interface AuraConfig {
+  /** Offscreen canvas size (logical px, before DPR). */
+  canvasSize: number
+  /** Aura bbox top-left offset from tank top-left: bitmap drawn at (tankX - offset, tankY - offset). */
+  offset: number
+  /** Pulse frequency: pulse = sin(frame * freq) * 0.5 + 0.5. */
+  freq: number
+}
+
+/**
+ * Per-aura config. `canvasSize` is sized to fit the largest extent of that aura
+ * (e.g. commander crown spikes extend ~33px from center → 72px canvas with
+ * offset 20 so center sits at canvas-relative (36, 36)).
+ */
+export const AURA_CONFIGS: Record<string, AuraConfig> = {
+  ally: { canvasSize: 38, offset: 3, freq: 0.13 },
+  hp2: { canvasSize: 40, offset: 4, freq: 0.08 },
+  hp3: { canvasSize: 50, offset: 7, freq: 0.1 },
+  hp4: { canvasSize: 44, offset: 6, freq: 0.12 },
+  hp5: { canvasSize: 48, offset: 8, freq: 0.14 },
+  hp6: { canvasSize: 56, offset: 12, freq: 0.16 },
+  commander: { canvasSize: 72, offset: 20, freq: 0.12 },
+}
+
+/** Quantize a frame-based pulse into a bucket index [0, AURA_BUCKETS). */
+export function auraBucket(frame: number, freq: number): number {
+  const pulse = Math.sin(frame * freq) * 0.5 + 0.5
+  const b = (pulse * AURA_BUCKETS) | 0
+  return b < 0 ? 0 : b >= AURA_BUCKETS ? AURA_BUCKETS - 1 : b
+}
+
+/** Maps hpLevel (2–6) → aura config key. */
+const HP_LEVEL_KEYS: Record<number, string> = { 2: 'hp2', 3: 'hp3', 4: 'hp4', 5: 'hp5', 6: 'hp6' }
+
+/** Draw ally aura paths at absolute coords (x, y = tank top-left). No save/restore. */
+export function drawAllyAuraPaths(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  pulse: number,
+): void {
+  const m = 3
+  const bx = x - m
+  const by = y - m
+  const bw = size + m * 2
+  const bh = size + m * 2
+
+  ctx.strokeStyle = '#B98CFF'
+  ctx.lineWidth = 2
+  ctx.globalAlpha = 0.7 + pulse * 0.3
+  ctx.beginPath()
+  ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.55, bh * 0.55, 0, 0, Math.PI * 2)
+  ctx.stroke()
+
+  const cx = bx + bw / 2
+  const top = by + 1
+  ctx.globalAlpha = 0.9
+  ctx.fillStyle = '#E6D4FF'
+  ctx.beginPath()
+  ctx.moveTo(cx, top + 5)
+  ctx.lineTo(cx - 4, top + 1)
+  ctx.lineTo(cx + 4, top + 1)
+  ctx.closePath()
+  ctx.fill()
+}
+
+/** Jagged (sawtooth) rectangle stroke helper for hp-level auras. */
+function strokeJaggedRect(
+  ctx: CanvasRenderingContext2D,
+  rx: number,
+  ry: number,
+  rw: number,
+  rh: number,
+  notch = 2,
+): void {
+  ctx.beginPath()
+  ctx.moveTo(rx, ry)
+  ctx.lineTo(rx + rw * 0.33, ry - notch)
+  ctx.lineTo(rx + rw * 0.66, ry + notch)
+  ctx.lineTo(rx + rw, ry)
+
+  ctx.lineTo(rx + rw + notch, ry + rh * 0.33)
+  ctx.lineTo(rx + rw - notch, ry + rh * 0.66)
+  ctx.lineTo(rx + rw, ry + rh)
+
+  ctx.lineTo(rx + rw * 0.66, ry + rh + notch)
+  ctx.lineTo(rx + rw * 0.33, ry + rh - notch)
+  ctx.lineTo(rx, ry + rh)
+
+  ctx.lineTo(rx - notch, ry + rh * 0.66)
+  ctx.lineTo(rx + notch, ry + rh * 0.33)
+  ctx.closePath()
+  ctx.stroke()
+}
+
+/** Draw hp-level aura paths (level 2–6) at absolute coords. No save/restore. */
+export function drawHpLevelAuraPaths(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  hpLevel: number,
+  pulse: number,
+): void {
+  if (hpLevel <= 1 || hpLevel > 6) return
+  const margin = 2
+  const bx = x - margin
+  const by = y - margin
+  const bw = size + margin * 2
+  const bh = size + margin * 2
+
+  switch (hpLevel) {
+    case 2: {
+      ctx.strokeStyle = '#2ecc71'
+      ctx.lineWidth = 1.5
+      ctx.globalAlpha = 0.75 + pulse * 0.25
+      ctx.strokeRect(bx, by, bw, bh)
+      break
+    }
+    case 3: {
+      ctx.strokeStyle = '#3498db'
+      ctx.lineWidth = 1.5
+      ctx.globalAlpha = 0.85
+      ctx.strokeRect(bx, by, bw, bh)
+      const gap = 3 + pulse * 1.5
+      ctx.lineWidth = 1
+      ctx.globalAlpha = 0.4 + pulse * 0.4
+      ctx.strokeRect(bx - gap, by - gap, bw + gap * 2, bh + gap * 2)
+      break
+    }
+    case 4: {
+      ctx.strokeStyle = '#9b59b6'
+      ctx.lineWidth = 2
+      ctx.globalAlpha = 0.85 + pulse * 0.15
+      strokeJaggedRect(ctx, bx, by, bw, bh, 2 + pulse * 1)
+      break
+    }
+    case 5: {
+      ctx.strokeStyle = '#e67e22'
+      ctx.lineWidth = 2
+      ctx.globalAlpha = 0.9
+      strokeJaggedRect(ctx, bx, by, bw, bh, 2.5)
+      const len = 5
+      ctx.lineWidth = 1.5
+      ctx.globalAlpha = 0.6 + pulse * 0.3
+      const g = 3
+      ctx.beginPath()
+      ctx.moveTo(bx - g, by - g + len)
+      ctx.lineTo(bx - g, by - g)
+      ctx.lineTo(bx - g + len, by - g)
+      ctx.moveTo(bx + bw + g - len, by - g)
+      ctx.lineTo(bx + bw + g, by - g)
+      ctx.lineTo(bx + bw + g, by - g + len)
+      ctx.moveTo(bx + bw + g, by + bh + g - len)
+      ctx.lineTo(bx + bw + g, by + bh + g)
+      ctx.lineTo(bx + bw + g - len, by + bh + g)
+      ctx.moveTo(bx - g + len, by + bh + g)
+      ctx.lineTo(bx - g, by + bh + g)
+      ctx.lineTo(bx - g, by + bh + g - len)
+      ctx.stroke()
+      break
+    }
+    case 6: {
+      ctx.strokeStyle = '#e74c3c'
+      ctx.lineWidth = 2.5
+      ctx.globalAlpha = 0.95
+      strokeJaggedRect(ctx, bx, by, bw, bh, 3)
+      const g = 4 + pulse * 2
+      ctx.lineWidth = 1.5
+      ctx.globalAlpha = 0.5 + pulse * 0.4
+      strokeJaggedRect(ctx, bx - g, by - g, bw + g * 2, bh + g * 2, 3.5)
+      break
+    }
+  }
+}
+
+/** Draw commander aura paths at absolute coords. No save/restore. */
+export function drawCommanderAuraPaths(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  pulse: number,
+): void {
+  const margin = 4
+  const bx = x - margin
+  const by = y - margin
+  const bw = size + margin * 2
+  const bh = size + margin * 2
+  // Collapse two out-of-phase pulses (0.12 + 0.08) into one for bucketing.
+  const pulse2 = pulse
+
+  ctx.strokeStyle = '#f4c430'
+  ctx.lineWidth = 2.5
+  ctx.globalAlpha = 0.8 + pulse * 0.2
+  ctx.beginPath()
+  ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.6, bh * 0.6, 0, 0, Math.PI * 2)
+  ctx.stroke()
+
+  ctx.strokeStyle = '#ffd700'
+  ctx.lineWidth = 1.5
+  ctx.globalAlpha = 0.6 + pulse2 * 0.4
+  ctx.beginPath()
+  ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.45, bh * 0.45, 0, 0, Math.PI * 2)
+  ctx.stroke()
+
+  const cx = bx + bw / 2
+  const cy = by + bh / 2
+  const spikeLen = 8 + pulse * 3
+  ctx.fillStyle = '#f4c430'
+  ctx.globalAlpha = 0.9
+  for (let i = 0; i < 4; i++) {
+    const angle = (i * Math.PI) / 2 - Math.PI / 2
+    const baseR = Math.max(bw, bh) * 0.55
+    ctx.beginPath()
+    ctx.moveTo(cx + Math.cos(angle) * baseR, cy + Math.sin(angle) * baseR)
+    ctx.lineTo(cx + Math.cos(angle) * (baseR + spikeLen), cy + Math.sin(angle) * (baseR + spikeLen))
+    ctx.lineTo(cx + Math.cos(angle + 0.15) * baseR, cy + Math.sin(angle + 0.15) * baseR)
+    ctx.closePath()
+    ctx.fill()
+  }
+
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(bw, bh) * 0.4)
+  glow.addColorStop(0, `rgba(255, 215, 0, ${0.3 + pulse * 0.2})`)
+  glow.addColorStop(1, 'rgba(255, 215, 0, 0)')
+  ctx.fillStyle = glow
+  ctx.globalAlpha = 0.5
+  ctx.beginPath()
+  ctx.arc(cx, cy, Math.max(bw, bh) * 0.4, 0, Math.PI * 2)
+  ctx.fill()
 }
 
 /** Maps enemy tank kind → sprite key (module-level to avoid per-call allocation). */
@@ -88,6 +349,33 @@ export class SpriteArtist {
    * fallback that reads from `this.theme`.
    */
   skipSvg = false
+
+  /**
+   * Low-quality render mode (mirrors GameRenderer.lowQuality). When true,
+   * skips the tank contact shadow — a decorative ellipse that adds one
+   * fillRect-equivalent draw per tank (6/frame in a typical scene). The shadow
+   * is absent from the classic original; skipping it does not affect gameplay
+   * readability.
+   */
+  lowQuality = false
+
+  /**
+   * Cached `measureText` widths for power-up countdown digits (R4 / P2-A).
+   * Nested by `fontSize` (number — no string allocation) then by digit text.
+   * The font is derived deterministically from the power-up size, so the key
+   * space is tiny; caching avoids a ~6 µs `measureText` call per power-up per
+   * frame. Nested structure replaces the old `Record<string, number>` keyed by
+   * ``${fontSize}:${text}`` — that template string was 1 allocation per
+   * power-up per frame.
+   */
+  private digitWidthCache: Record<number, Record<string, number>> = {}
+
+  /**
+   * Cached `ctx.font` strings per `fontSize` (P0 GC fix). Power-ups are always
+   * CELL-sized, so `fontSize` is constant → the font string is computed once
+   * and reused. Avoids a template-string allocation per power-up per frame.
+   */
+  private fontStringCache: Record<number, string> = {}
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
     this.ctx = ctx
@@ -445,8 +733,15 @@ export class SpriteArtist {
     const cy = y + size / 2
     const d = Math.max(0, Math.min(1, damage))
 
+    // Save only the properties we mutate (avoids save()/restore() allocation).
+    const prevAlpha = ctx.globalAlpha
+    const prevFill = ctx.fillStyle
+    const prevStroke = ctx.strokeStyle
+    const prevLW = ctx.lineWidth
+    const prevCap = ctx.lineCap
+    const prevJoin = ctx.lineJoin
+
     // Scorch tint over the crystal body.
-    ctx.save()
     ctx.globalAlpha = 0.16 + d * 0.34
     ctx.fillStyle = '#14181d'
     ctx.beginPath()
@@ -456,11 +751,9 @@ export class SpriteArtist {
     ctx.lineTo(x + size * 0.8, y + size * 0.45)
     ctx.closePath()
     ctx.fill()
-    ctx.restore()
 
     // Jagged cracks radiating in from the perimeter toward the core.
     const n = Math.max(1, Math.round(d * 6))
-    ctx.save()
     ctx.strokeStyle = 'rgba(15,18,22,0.85)'
     ctx.lineWidth = Math.max(1, size * 0.03)
     ctx.lineCap = 'round'
@@ -482,7 +775,13 @@ export class SpriteArtist {
       ctx.lineTo(ex, ey)
       ctx.stroke()
     }
-    ctx.restore()
+
+    ctx.globalAlpha = prevAlpha
+    ctx.fillStyle = prevFill
+    ctx.strokeStyle = prevStroke
+    ctx.lineWidth = prevLW
+    ctx.lineCap = prevCap
+    ctx.lineJoin = prevJoin
   }
 
   // ================================================================
@@ -496,17 +795,20 @@ export class SpriteArtist {
    * tank's footprint regardless of direction.
    */
   private drawTankShadow(x: number, y: number, size: number): void {
+    if (this.lowQuality) return // decorative — skipped in Performance Mode
     const ctx = this.ctx
     const cx = x + size / 2
     // Contact shadow sits at the BOTTOM of the footprint, low enough that a
     // clear crescent peeks out below the tank body (not hidden under it).
     const cy = y + size * 0.95
-    ctx.save()
+    // Only `fillStyle` is mutated here, so a cheap save/restore of that one
+    // property replaces a full `save()`/`restore()` graphics-state push (R3 / P1-D).
+    const prev = ctx.fillStyle
     ctx.fillStyle = 'rgba(0,0,0,0.22)'
     ctx.beginPath()
     ctx.ellipse(cx, cy, size * 0.45, size * 0.126, 0, 0, Math.PI * 2)
     ctx.fill()
-    ctx.restore()
+    ctx.fillStyle = prev
   }
 
   drawTank(
@@ -613,15 +915,23 @@ export class SpriteArtist {
     const cache = this.spriteCache
     if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const stage = Math.max(0, Math.min(level ?? 0, 3))
+      const cs = cache.canvasSize
+      const cx = x + size / 2
+      const cy = y + size / 2
+      // R5-B: if there's a starbuf overlay, use the lazy-built composite bitmap
+      // (body + overlay in one) — 1 drawImage instead of 2.
+      if (stage > 0) {
+        const composite = cache.getCompositeTankSprite('tank.player1', dirIdx, 'starbuf', stage)
+        if (composite) {
+          this.ctx.drawImage(composite, cx - cs / 2, cy - cs / 2, cs, cs)
+          return
+        }
+      }
       const sprite = cache.getTankSprite('tank.player1', dirIdx)
       if (sprite) {
-        const cs = cache.canvasSize
-        const cx = x + size / 2
-        const cy = y + size / 2
         const ctx = this.ctx
         ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
-        // Star buffer overlay (pre-rotated to match the tank direction)
-        const stage = Math.max(0, Math.min(level ?? 0, 3))
         if (stage > 0) {
           const overlay = cache.getStarbufSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
@@ -656,13 +966,21 @@ export class SpriteArtist {
     const cache = this.spriteCache
     if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const stage = Math.max(0, Math.min(level ?? 0, 3))
+      const cs = cache.canvasSize
+      const cx = x + size / 2
+      const cy = y + size / 2
+      // R5-B: composite body + starbuf overlay into one blit.
+      if (stage > 0) {
+        const composite = cache.getCompositeTankSprite('tank.player2', dirIdx, 'starbuf', stage)
+        if (composite) {
+          this.ctx.drawImage(composite, cx - cs / 2, cy - cs / 2, cs, cs)
+          return
+        }
+      }
       const sprite = cache.getTankSprite('tank.player2', dirIdx)
       if (sprite) {
-        const cs = cache.canvasSize
-        const cx = x + size / 2
-        const cy = y + size / 2
         this.ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
-        const stage = Math.max(0, Math.min(level ?? 0, 3))
         if (stage > 0) {
           const overlay = cache.getStarbufSprite(stage, dirIdx)
           if (overlay) this.ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
@@ -706,15 +1024,24 @@ export class SpriteArtist {
     const cache = this.spriteCache
     if (cache?.built && !this.skipSvg) {
       const dirIdx = DIR_TO_INDEX[dir] ?? 0
+      const stage = Math.max(0, Math.min(hitStage, 4))
+      const cs = cache.canvasSize
+      const cx = x + size / 2
+      const cy = y + size / 2
+      const ctx = this.ctx
+      // R5-B: if there's a hit overlay, use the lazy-built composite bitmap
+      // (body + overlay in one) — 1 drawImage instead of 2.
+      if (stage > 0) {
+        const composite = cache.getCompositeTankSprite(key, dirIdx, 'hit', stage)
+        if (composite) {
+          ctx.drawImage(composite, cx - cs / 2, cy - cs / 2, cs, cs)
+          if (isCommander) this.drawCommanderAura(x, y, size, animFrame)
+          return
+        }
+      }
       const sprite = cache.getTankSprite(key, dirIdx)
       if (sprite) {
-        const cs = cache.canvasSize
-        const cx = x + size / 2
-        const cy = y + size / 2
-        const ctx = this.ctx
         ctx.drawImage(sprite, cx - cs / 2, cy - cs / 2, cs, cs)
-        // Hit overlay — rotates with the enemy tank (it mimics the tank silhouette with side "tread" bars).
-        const stage = Math.max(0, Math.min(hitStage, 4))
         if (stage > 0) {
           const overlay = cache.getHitSprite(stage, dirIdx)
           if (overlay) ctx.drawImage(overlay, cx - cs / 2, cy - cs / 2, cs, cs)
@@ -819,37 +1146,32 @@ export class SpriteArtist {
    * Draw the allied-guard aura — a soft pulsing purple ring + a small upward
    * chevron "friendly beacon" so the ally stays unmistakable on a busy field
    * (deliberately distinct from the gold enemy commander crown).
+   *
+   * R3: fast path blits a pre-rendered bitmap (16 pulse buckets) — 1 drawImage
+   * replaces 2 path ops + manual property save/restore. Fallback draws paths
+   * directly when the SpriteCache is not built.
    */
   drawAllyAura(x: number, y: number, size: number, frame: number): void {
+    const cfg = AURA_CONFIGS.ally
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const sprite = cache.getAuraSprite('ally', auraBucket(frame, cfg.freq))
+      if (sprite) {
+        this.ctx.drawImage(sprite, x - cfg.offset, y - cfg.offset, cfg.canvasSize, cfg.canvasSize)
+        return
+      }
+    }
     const ctx = this.ctx
-    const m = 3
-    const bx = x - m
-    const by = y - m
-    const bw = size + m * 2
-    const bh = size + m * 2
-    const pulse = Math.sin(frame * 0.13) * 0.5 + 0.5
-
-    ctx.save()
-    // Soft pulsing purple ring
-    ctx.strokeStyle = '#B98CFF'
-    ctx.lineWidth = 2
-    ctx.globalAlpha = 0.7 + pulse * 0.3
-    ctx.beginPath()
-    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.55, bh * 0.55, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    // Small upward chevron marker at the top-center (friendly beacon)
-    const cx = bx + bw / 2
-    const top = by + 1
-    ctx.globalAlpha = 0.9
-    ctx.fillStyle = '#E6D4FF'
-    ctx.beginPath()
-    ctx.moveTo(cx, top + 5)
-    ctx.lineTo(cx - 4, top + 1)
-    ctx.lineTo(cx + 4, top + 1)
-    ctx.closePath()
-    ctx.fill()
-    ctx.restore()
+    const pulse = Math.sin(frame * cfg.freq) * 0.5 + 0.5
+    const prevStroke = ctx.strokeStyle
+    const prevLW = ctx.lineWidth
+    const prevAlpha = ctx.globalAlpha
+    const prevFill = ctx.fillStyle
+    drawAllyAuraPaths(ctx, x, y, size, pulse)
+    ctx.strokeStyle = prevStroke
+    ctx.lineWidth = prevLW
+    ctx.globalAlpha = prevAlpha
+    ctx.fillStyle = prevFill
   }
 
   /**
@@ -876,12 +1198,9 @@ export class SpriteArtist {
     if (cache?.built) {
       const img = cache.getInsigniaSprite(level)
       if (img) {
-        const ctx = this.ctx
-        ctx.save()
-        ctx.translate(ix + ins / 2, iy + ins / 2)
-        ctx.rotate(Math.PI)
-        ctx.drawImage(img, -ins / 2, -ins / 2, ins, ins)
-        ctx.restore()
+        // Sprite is pre-rotated 180° at bake time (SpriteCache.renderRotated),
+        // so a plain drawImage suffices — no save/translate/rotate/restore.
+        this.ctx.drawImage(img, ix, iy, ins, ins)
         return
       }
     }
@@ -962,18 +1281,20 @@ export class SpriteArtist {
     const key = ITEM_KEY_MAP[type]
 
     // --- animated golden halo (the "sparkle / glow" base of the unified look) ---
-    const pulse = 0.5 + 0.5 * Math.sin(frame * 0.11)
-    const glowR = size * (0.66 + 0.06 * pulse)
-    const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
-    g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
-    g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
-    g.addColorStop(1, 'rgba(255, 200, 70, 0)')
-    ctx.save()
-    ctx.fillStyle = g
-    ctx.beginPath()
-    ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.restore()
+    // R4-glow: pre-rendered 16-pulse-bucket bitmap replaces per-frame
+    // createRadialGradient + 3 addColorStop + arc fill. Pixel-identical.
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const glowSprite = cache.getPowerUpGlowSprite(auraBucket(frame, POWERUP_GLOW_FREQ))
+      if (glowSprite) {
+        const gs = cache.powerUpGlowCanvasSize
+        ctx.drawImage(glowSprite, cx - gs / 2, cy - gs / 2, gs, gs)
+      } else {
+        this.drawPowerUpGlowDirect(cx, cy, size, frame)
+      }
+    } else {
+      this.drawPowerUpGlowDirect(cx, cy, size, frame)
+    }
 
     // --- pre-rasterized (or direct SVG) pentagon-framed item bitmap ---
     let drawn = false
@@ -1003,6 +1324,30 @@ export class SpriteArtist {
     }
   }
 
+  /**
+   * Direct (non-cached) power-up glow — fallback when SpriteCache is not
+   * available (procedural / no-cache themes). Pixel-identical to the
+   * pre-rendered bitmap path (R4-glow): same colors, same radii, same pulse
+   * formula (`sin(frame * 0.11) * 0.5 + 0.5`). Inner radius `size * 0.12`,
+   * outer `size * (0.66 + 0.06 * pulse)` — matches `rebuildPowerUpGlow` since
+   * power-ups are always CELL-sized (size === CELL).
+   */
+  private drawPowerUpGlowDirect(cx: number, cy: number, size: number, frame: number): void {
+    const ctx = this.ctx
+    const pulse = 0.5 + 0.5 * Math.sin(frame * 0.11)
+    const glowR = size * (0.66 + 0.06 * pulse)
+    const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
+    g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
+    g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
+    g.addColorStop(1, 'rgba(255, 200, 70, 0)')
+    const prevFill = ctx.fillStyle
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = prevFill
+  }
+
   /** Draw countdown timer on power-up (top-right corner, visible from spawn) */
   private drawPowerUpCountdown(
     cx: number,
@@ -1023,13 +1368,29 @@ export class SpriteArtist {
 
     // Font size: reasonable, not covering the power-up shape
     const fontSize = Math.max(9, size * 0.28)
-    ctx.save()
-    ctx.font = `bold ${fontSize}px monospace`
+    const prevFont = ctx.font
+    const prevAlign = ctx.textAlign
+    const prevBaseline = ctx.textBaseline
+    const prevFillStyle = ctx.fillStyle
+    // P0 GC fix: cache the font string per fontSize (power-ups are always
+    // CELL-sized → fontSize is constant → string computed once, reused).
+    ctx.font =
+      this.fontStringCache[fontSize] ??
+      (this.fontStringCache[fontSize] = `bold ${fontSize}px monospace`)
     ctx.textAlign = 'right'
     ctx.textBaseline = 'top'
 
     // Background rounded rect for readability (small, top-right)
-    const textWidth = ctx.measureText(String(seconds)).width
+    // Cache the width: the font is deterministic in `fontSize`, so key on it.
+    // P0 GC fix: nested cache (fontSize → text → width) replaces the old
+    // `Record<"${fontSize}:${text}", width>` — no template-string key alloc.
+    const secStr = String(seconds)
+    let sizeCache = this.digitWidthCache[fontSize]
+    if (!sizeCache) {
+      sizeCache = {}
+      this.digitWidthCache[fontSize] = sizeCache
+    }
+    const textWidth = sizeCache[secStr] ?? (sizeCache[secStr] = ctx.measureText(secStr).width)
     const bgPadding = fontSize * 0.25
     const bgWidth = textWidth + bgPadding * 2
     const bgHeight = fontSize + bgPadding * 0.8
@@ -1053,8 +1414,11 @@ export class SpriteArtist {
       ctx.fillStyle = '#ffffff' // White for normal
     }
 
-    ctx.fillText(String(seconds), x, y)
-    ctx.restore()
+    ctx.fillText(secStr, x, y)
+    ctx.font = prevFont
+    ctx.textAlign = prevAlign
+    ctx.textBaseline = prevBaseline
+    ctx.fillStyle = prevFillStyle
   }
 
   /** Twinkling 4-point sparkles orbiting the item — the animated "sparkle". */
@@ -1062,7 +1426,10 @@ export class SpriteArtist {
     const ctx = this.ctx
     const n = 4
     const R = size * 0.44
-    ctx.save()
+    const prevCap = ctx.lineCap
+    const prevAlpha = ctx.globalAlpha
+    const prevStroke = ctx.strokeStyle
+    const prevLW = ctx.lineWidth
     ctx.lineCap = 'round'
     for (let i = 0; i < n; i++) {
       const ang = (i / n) * Math.PI * 2 + frame * 0.025
@@ -1080,7 +1447,10 @@ export class SpriteArtist {
       ctx.lineTo(sx, sy + len)
       ctx.stroke()
     }
-    ctx.restore()
+    ctx.lineCap = prevCap
+    ctx.globalAlpha = prevAlpha
+    ctx.strokeStyle = prevStroke
+    ctx.lineWidth = prevLW
   }
 
   /** Last-resort draw if the SVG sprite is missing: a plain gold pentagon + glyph. */
@@ -1291,195 +1661,66 @@ export class SpriteArtist {
   /**
    * Draw visual HP Level aura decoration around/under tank.
    * Levels 2~6 each feature a visually distinct ring shape & color.
+   *
+   * R3: fast path blits a pre-rendered bitmap (16 pulse buckets per level) —
+   * 1 drawImage replaces 1–2 path ops + manual property save/restore. Fallback
+   * draws paths directly when the SpriteCache is not built.
    */
   drawHpLevelAura(x: number, y: number, size: number, hpLevel: number, frame: number): void {
     if (hpLevel <= 1 || hpLevel > 6) return
+    const key = HP_LEVEL_KEYS[hpLevel]
+    const cfg = AURA_CONFIGS[key]
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const sprite = cache.getAuraSprite(key, auraBucket(frame, cfg.freq))
+      if (sprite) {
+        this.ctx.drawImage(sprite, x - cfg.offset, y - cfg.offset, cfg.canvasSize, cfg.canvasSize)
+        return
+      }
+    }
     const ctx = this.ctx
-
-    // Square bounding box slightly larger than the tank cell
-    const margin = 2
-    const bx = x - margin
-    const by = y - margin
-    const bw = size + margin * 2
-    const bh = size + margin * 2
-
-    ctx.save()
-
-    // Helper helper to draw a rectangle with slight jagged (sawtooth) edges
-    const strokeJaggedRect = (rx: number, ry: number, rw: number, rh: number, notch = 2) => {
-      ctx.beginPath()
-      // Top edge
-      ctx.moveTo(rx, ry)
-      ctx.lineTo(rx + rw * 0.33, ry - notch)
-      ctx.lineTo(rx + rw * 0.66, ry + notch)
-      ctx.lineTo(rx + rw, ry)
-
-      // Right edge
-      ctx.lineTo(rx + rw + notch, ry + rh * 0.33)
-      ctx.lineTo(rx + rw - notch, ry + rh * 0.66)
-      ctx.lineTo(rx + rw, ry + rh)
-
-      // Bottom edge
-      ctx.lineTo(rx + rw * 0.66, ry + rh + notch)
-      ctx.lineTo(rx + rw * 0.33, ry + rh - notch)
-      ctx.lineTo(rx, ry + rh)
-
-      // Left edge
-      ctx.lineTo(rx - notch, ry + rh * 0.66)
-      ctx.lineTo(rx + notch, ry + rh * 0.33)
-      ctx.closePath()
-      ctx.stroke()
-    }
-
-    switch (hpLevel) {
-      case 2: {
-        // Level 2: Single thin square aura (#2ecc71 emerald green)
-        const pulse = Math.sin(frame * 0.08) * 0.5 + 0.5
-        ctx.strokeStyle = '#2ecc71'
-        ctx.lineWidth = 1.5
-        ctx.globalAlpha = 0.75 + pulse * 0.25
-        ctx.strokeRect(bx, by, bw, bh)
-        break
-      }
-      case 3: {
-        // Level 3: Double square aura (#3498db sky blue)
-        const pulse = Math.sin(frame * 0.1) * 0.5 + 0.5
-        ctx.strokeStyle = '#3498db'
-        ctx.lineWidth = 1.5
-        ctx.globalAlpha = 0.85
-        ctx.strokeRect(bx, by, bw, bh)
-
-        const gap = 3 + pulse * 1.5
-        ctx.lineWidth = 1
-        ctx.globalAlpha = 0.4 + pulse * 0.4
-        ctx.strokeRect(bx - gap, by - gap, bw + gap * 2, bh + gap * 2)
-        break
-      }
-      case 4: {
-        // Level 4: Jagged / Sawtooth square aura (#9b59b6 amethyst purple)
-        const pulse = Math.sin(frame * 0.12) * 0.5 + 0.5
-        ctx.strokeStyle = '#9b59b6'
-        ctx.lineWidth = 2
-        ctx.globalAlpha = 0.85 + pulse * 0.15
-        strokeJaggedRect(bx, by, bw, bh, 2 + pulse * 1)
-        break
-      }
-      case 5: {
-        // Level 5: Double Jagged / Tech Bracket square aura (#e67e22 flame orange)
-        const pulse = Math.sin(frame * 0.14) * 0.5 + 0.5
-        ctx.strokeStyle = '#e67e22'
-        ctx.lineWidth = 2
-        ctx.globalAlpha = 0.9
-        strokeJaggedRect(bx, by, bw, bh, 2.5)
-
-        // Outer corner bracket notches
-        const len = 5
-        ctx.lineWidth = 1.5
-        ctx.globalAlpha = 0.6 + pulse * 0.3
-        const g = 3
-        // TL
-        ctx.beginPath()
-        ctx.moveTo(bx - g, by - g + len)
-        ctx.lineTo(bx - g, by - g)
-        ctx.lineTo(bx - g + len, by - g)
-        // TR
-        ctx.moveTo(bx + bw + g - len, by - g)
-        ctx.lineTo(bx + bw + g, by - g)
-        ctx.lineTo(bx + bw + g, by - g + len)
-        // BR
-        ctx.moveTo(bx + bw + g, by + bh + g - len)
-        ctx.lineTo(bx + bw + g, by + bh + g)
-        ctx.lineTo(bx + bw + g - len, by + bh + g)
-        // BL
-        ctx.moveTo(bx - g + len, by + bh + g)
-        ctx.lineTo(bx - g, by + bh + g)
-        ctx.lineTo(bx - g, by + bh + g - len)
-        ctx.stroke()
-        break
-      }
-      case 6: {
-        // Level 6: Crimson Solar Jagged Double Aura (#e74c3c crimson red)
-        const pulse = Math.sin(frame * 0.16) * 0.5 + 0.5
-        ctx.strokeStyle = '#e74c3c'
-        ctx.lineWidth = 2.5
-        ctx.globalAlpha = 0.95
-        strokeJaggedRect(bx, by, bw, bh, 3)
-
-        // Outer jagged shell
-        const g = 4 + pulse * 2
-        ctx.lineWidth = 1.5
-        ctx.globalAlpha = 0.5 + pulse * 0.4
-        strokeJaggedRect(bx - g, by - g, bw + g * 2, bh + g * 2, 3.5)
-        break
-      }
-    }
-    ctx.restore()
+    const pulse = Math.sin(frame * cfg.freq) * 0.5 + 0.5
+    const prevStroke = ctx.strokeStyle
+    const prevLW = ctx.lineWidth
+    const prevAlpha = ctx.globalAlpha
+    const prevFill = ctx.fillStyle
+    drawHpLevelAuraPaths(ctx, x, y, size, hpLevel, pulse)
+    ctx.strokeStyle = prevStroke
+    ctx.lineWidth = prevLW
+    ctx.globalAlpha = prevAlpha
+    ctx.fillStyle = prevFill
   }
 
   /**
    * Draw elite commander visual decoration — a prominent pulsing aura
    * that makes commanders immediately recognizable on the battlefield.
+   *
+   * R3: fast path blits a pre-rendered bitmap (16 pulse buckets) — 1 drawImage
+   * replaces 7 path ops (2 ring strokes + 4 spike fills + 1 gradient fill) +
+   * manual property save/restore + a per-frame `createRadialGradient`. The
+   * gradient allocation alone is a measurable cost on software rasterizers.
+   * Fallback draws paths directly when the SpriteCache is not built.
    */
   drawCommanderAura(x: number, y: number, size: number, frame: number): void {
-    const ctx = this.ctx
-    const margin = 4
-    const bx = x - margin
-    const by = y - margin
-    const bw = size + margin * 2
-    const bh = size + margin * 2
-
-    ctx.save()
-
-    // Pulsing golden crown-like aura
-    const pulse = Math.sin(frame * 0.12) * 0.5 + 0.5
-    const pulse2 = Math.sin(frame * 0.08 + Math.PI / 3) * 0.5 + 0.5
-
-    // Outer golden ring
-    ctx.strokeStyle = '#f4c430'
-    ctx.lineWidth = 2.5
-    ctx.globalAlpha = 0.8 + pulse * 0.2
-    ctx.beginPath()
-    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.6, bh * 0.6, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    // Inner pulsing ring
-    ctx.strokeStyle = '#ffd700'
-    ctx.lineWidth = 1.5
-    ctx.globalAlpha = 0.6 + pulse2 * 0.4
-    ctx.beginPath()
-    ctx.ellipse(bx + bw / 2, by + bh / 2, bw * 0.45, bh * 0.45, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    // Crown points (4 spikes at cardinal directions)
-    const cx = bx + bw / 2
-    const cy = by + bh / 2
-    const spikeLen = 8 + pulse * 3
-    ctx.fillStyle = '#f4c430'
-    ctx.globalAlpha = 0.9
-    for (let i = 0; i < 4; i++) {
-      const angle = (i * Math.PI) / 2 - Math.PI / 2
-      const baseR = Math.max(bw, bh) * 0.55
-      ctx.beginPath()
-      ctx.moveTo(cx + Math.cos(angle) * baseR, cy + Math.sin(angle) * baseR)
-      ctx.lineTo(
-        cx + Math.cos(angle) * (baseR + spikeLen),
-        cy + Math.sin(angle) * (baseR + spikeLen),
-      )
-      ctx.lineTo(cx + Math.cos(angle + 0.15) * baseR, cy + Math.sin(angle + 0.15) * baseR)
-      ctx.closePath()
-      ctx.fill()
+    const cfg = AURA_CONFIGS.commander
+    const cache = this.spriteCache
+    if (cache?.built) {
+      const sprite = cache.getAuraSprite('commander', auraBucket(frame, cfg.freq))
+      if (sprite) {
+        this.ctx.drawImage(sprite, x - cfg.offset, y - cfg.offset, cfg.canvasSize, cfg.canvasSize)
+        return
+      }
     }
-
-    // Central glow
-    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(bw, bh) * 0.4)
-    glow.addColorStop(0, `rgba(255, 215, 0, ${0.3 + pulse * 0.2})`)
-    glow.addColorStop(1, 'rgba(255, 215, 0, 0)')
-    ctx.fillStyle = glow
-    ctx.globalAlpha = 0.5
-    ctx.beginPath()
-    ctx.arc(cx, cy, Math.max(bw, bh) * 0.4, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.restore()
+    const ctx = this.ctx
+    const pulse = Math.sin(frame * cfg.freq) * 0.5 + 0.5
+    const prevStroke = ctx.strokeStyle
+    const prevLW = ctx.lineWidth
+    const prevAlpha = ctx.globalAlpha
+    const prevFill = ctx.fillStyle
+    drawCommanderAuraPaths(ctx, x, y, size, pulse)
+    ctx.strokeStyle = prevStroke
+    ctx.lineWidth = prevLW
+    ctx.globalAlpha = prevAlpha
+    ctx.fillStyle = prevFill
   }
 }
