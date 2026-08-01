@@ -249,7 +249,10 @@ describe('PlaybackController.seekTo reproduces the timeline (no fast-forward des
     world.difficulty = DIFFICULTIES['classic']
     world.rules = RULES['classic'] ?? DEFAULT_RULES
     world.loadStageData(stage, rec.stageIdx)
-    const replay = { initialSnapshot: rec.result.snapshot, frames: rec.result.frames } as unknown as Replay
+    const replay = {
+      initialSnapshot: rec.result.snapshot,
+      frames: rec.result.frames,
+    } as unknown as Replay
     const pb = new PlaybackController(replay)
     pb.start(world, new Simulation(world, null as any))
     const sim = (pb as unknown as { simulation: Simulation }).simulation
@@ -286,7 +289,10 @@ describe('PlaybackController seek leaves no audio backlog (DECISIONS #78)', () =
     world.difficulty = DIFFICULTIES['classic']
     world.rules = RULES['classic'] ?? DEFAULT_RULES
     world.loadStageData(stage, rec.stageIdx)
-    const replay = { initialSnapshot: rec.result.snapshot, frames: rec.result.frames } as unknown as Replay
+    const replay = {
+      initialSnapshot: rec.result.snapshot,
+      frames: rec.result.frames,
+    } as unknown as Replay
     const pb = new PlaybackController(replay)
     pb.start(world, new Simulation(world, null as any))
     const sim = (pb as unknown as { simulation: Simulation }).simulation
@@ -315,12 +321,20 @@ describe('PlaybackController seek leaves no audio backlog (DECISIONS #78)', () =
     world.difficulty = DIFFICULTIES['classic']
     world.rules = RULES['classic'] ?? DEFAULT_RULES
     world.loadStageData(stage, rec.stageIdx)
-    const replay = { initialSnapshot: rec.result.snapshot, frames: rec.result.frames } as unknown as Replay
+    const replay = {
+      initialSnapshot: rec.result.snapshot,
+      frames: rec.result.frames,
+    } as unknown as Replay
     const pb = new PlaybackController(replay)
     pb.start(world, new Simulation(world, null as any))
     const sim = (pb as unknown as { simulation: Simulation }).simulation
     // renderFn / captureFn are no-ops here; only the catch-up audio side matters.
-    pb.buildKeyframes(world, sim, () => {}, () => ({}) as unknown as ImageData)
+    pb.buildKeyframes(
+      world,
+      sim,
+      () => {},
+      () => ({}) as unknown as ImageData,
+    )
     expect(world.events.length).toBe(0)
   })
 })

@@ -41,14 +41,7 @@ function filterLabel(key: FilterKey): string {
 /** Toggle-group filters. */
 type FilterKey = 'all' | ReplayType | 'favorite'
 
-const FILTERS: FilterKey[] = [
-  'all',
-  'clear',
-  'base',
-  'died',
-  'timeout',
-  'favorite',
-]
+const FILTERS: FilterKey[] = ['all', 'clear', 'base', 'died', 'timeout', 'favorite']
 
 function formatPlayTime(ms: number): string {
   const total = Math.floor(ms / 1000)

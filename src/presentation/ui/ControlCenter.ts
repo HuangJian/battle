@@ -364,7 +364,8 @@ export class ControlCenter {
     }
 
     // Theme switcher label + dropdown highlight — only when the theme changes.
-    const themeName = t(`theme.${world.themeKey}`) || this.themeNames.get(world.themeKey) || world.themeKey
+    const themeName =
+      t(`theme.${world.themeKey}`) || this.themeNames.get(world.themeKey) || world.themeKey
     if (themeName !== this.lastThemeName) {
       this.lastThemeName = themeName
       if (this.themeNameEl) this.themeNameEl.textContent = themeName

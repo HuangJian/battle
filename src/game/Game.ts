@@ -912,7 +912,10 @@ export class Game {
         } else if (w.menuCursor === off + 2) {
           // LANGUAGE row — cycle to the next available locale.
           i18n.cycleLocale()
-          this.presentation.ui.notify(t('toast.languageSet', { name: i18n.name(i18n.locale) }), 'info')
+          this.presentation.ui.notify(
+            t('toast.languageSet', { name: i18n.name(i18n.locale) }),
+            'info',
+          )
           changed = true
         } else if (w.menuCursor === off + 3) {
           w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
@@ -1696,7 +1699,8 @@ export class Game {
     if (replay) {
       const m = replay.metadata
       const stageLabel = t('replay.endStage', { n: m.stage + 1, name: localizedStageName(m.stage) })
-      const resultLabel = replay.type === 'clear' ? t('replay.result.victory') : t('replay.result.defeat')
+      const resultLabel =
+        replay.type === 'clear' ? t('replay.result.victory') : t('replay.result.defeat')
       const durationSec = Math.floor(replay.durationMs / 1000)
       const durMin = Math.floor(durationSec / 60)
       const durSec = durationSec % 60

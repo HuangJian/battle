@@ -214,7 +214,8 @@ export const STAGES: StageData[] = LEVELS.map((grid, i) => ({
  * switches live with the LANGUAGE menu without touching the World.
  */
 export function localizedStageName(index: number): string {
-  if (i18n.locale === 'zh') return STAGE_NAMES_ZH[index] ?? STAGE_NAMES[index] ?? `Stage ${index + 1}`
+  if (i18n.locale === 'zh')
+    return STAGE_NAMES_ZH[index] ?? STAGE_NAMES[index] ?? `Stage ${index + 1}`
   return STAGE_NAMES[index] ?? `Stage ${index + 1}`
 }
 

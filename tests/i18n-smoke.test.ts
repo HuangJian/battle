@@ -102,9 +102,15 @@ describe('i18n core', () => {
     textContent = ''
     private attrs: Record<string, string> = {}
     private children: FakeNode[] = []
-    setAttribute(k: string, v: string) { this.attrs[k] = v }
-    getAttr(k: string) { return this.attrs[k] }
-    append(child: FakeNode) { this.children.push(child) }
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v
+    }
+    getAttr(k: string) {
+      return this.attrs[k]
+    }
+    append(child: FakeNode) {
+      this.children.push(child)
+    }
     querySelectorAll(sel: string): FakeNode[] {
       const out: FakeNode[] = []
       const visit = (n: FakeNode) => {
@@ -145,8 +151,14 @@ describe('i18n core', () => {
 
 describe('classic stage names (i18n)', () => {
   it('resolves en + zh names for all 35 classic stages, no fallback', () => {
-    const en = (i: number) => { singleton.setLocale('en'); return localizedStageName(i) }
-    const zh = (i: number) => { singleton.setLocale('zh'); return localizedStageName(i) }
+    const en = (i: number) => {
+      singleton.setLocale('en')
+      return localizedStageName(i)
+    }
+    const zh = (i: number) => {
+      singleton.setLocale('zh')
+      return localizedStageName(i)
+    }
     // Spot-check the first and last names in both locales.
     expect(en(0)).toBe('Outpost')
     expect(zh(0)).toBe('前哨')
@@ -172,24 +184,28 @@ describe('classic stage names (i18n)', () => {
 describe('control center status lines (i18n)', () => {
   it('cc status keys resolve in both locales (no raw-key fallback)', () => {
     singleton.setLocale('en')
-    expect(t('cc.counts.fmt', { total: 20, manual: 16, limit: 100 }))
-      .toBe('20 snapshots · manual 16/100')
+    expect(t('cc.counts.fmt', { total: 20, manual: 16, limit: 100 })).toBe(
+      '20 snapshots · manual 16/100',
+    )
     expect(t('cc.replays.fmt', { total: 3 })).toBe('3 replays')
     expect(t('cc.replays.fmtFav', { total: 3, fav: 1 })).toBe('3 replays · ★ 1')
-    expect(t('cc.gameplay.inRun', { difficulty: 'Classic', n: '07', name: 'Outpost' }))
-      .toBe('Classic · Stage 07 · Outpost')
-    expect(t('cc.gameplay.menu', { difficulty: 'Classic', theme: 'Classic' }))
-      .toBe('Classic · Classic')
+    expect(t('cc.gameplay.inRun', { difficulty: 'Classic', n: '07', name: 'Outpost' })).toBe(
+      'Classic · Stage 07 · Outpost',
+    )
+    expect(t('cc.gameplay.menu', { difficulty: 'Classic', theme: 'Classic' })).toBe(
+      'Classic · Classic',
+    )
 
     singleton.setLocale('zh')
-    expect(t('cc.counts.fmt', { total: 20, manual: 16, limit: 100 }))
-      .toBe('20 个存档 · 手动 16/100')
+    expect(t('cc.counts.fmt', { total: 20, manual: 16, limit: 100 })).toBe(
+      '20 个存档 · 手动 16/100',
+    )
     expect(t('cc.replays.fmt', { total: 3 })).toBe('3 个回放')
     expect(t('cc.replays.fmtFav', { total: 3, fav: 1 })).toBe('3 个回放 · ★ 1')
-    expect(t('cc.gameplay.inRun', { difficulty: '经典', n: '07', name: '前哨' }))
-      .toBe('经典 · 第 07 关 · 前哨')
-    expect(t('cc.gameplay.menu', { difficulty: '经典', theme: '经典' }))
-      .toBe('经典 · 经典')
+    expect(t('cc.gameplay.inRun', { difficulty: '经典', n: '07', name: '前哨' })).toBe(
+      '经典 · 第 07 关 · 前哨',
+    )
+    expect(t('cc.gameplay.menu', { difficulty: '经典', theme: '经典' })).toBe('经典 · 经典')
     // Tooltip keys also exist in zh.
     expect(t('cc.titleCollapse')).toBe('收起')
     expect(t('cc.titleCoop')).toBe('切换躺赢模式（神级 AI 合作）')
