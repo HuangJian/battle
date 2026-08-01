@@ -171,7 +171,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - Regression gate passes with the shipped default (644/700, 92.0% vs 581 floor) — S6/S32 now play occlusion-ON in the gate.
 - S32 base_destroyed 11→18 but lives_exhausted 27→16: the trade is base-risk for survival — net positive.
 
-**Implications:** Default `evasionSteelOcclusionBrickRatio = 0.1` is ON (S6/S32 only). `evasionSteelOcclusion = 0` stays the explicit master switch; the gate auto-enables on qualifying stages. Tooling: `tools/diag/ab-test-steel-occlusion.ts --brickGate R`（本地不入库，§0.C）, `per-seed-diff --set evasionSteelOcclusion=1 --set evasionSteelOcclusionBrickRatio=R`（通用 --set 标志）.
+**Implications:** Default `evasionSteelOcclusionBrickRatio = 0.1` is ON (S6/S32 only). `evasionSteelOcclusion = 0` stays the explicit master switch; the gate auto-enables on qualifying stages. Tooling: `tools/diag/ab-test-steel-occlusion.ts --brickGate R`（本地不入库，§0.C）, `per-seed-diff --set evasionSteelOcclusionBrickRatio=R`（通用 --set 标志；与旧 --brickGate R 等价，由地形门控按关自动启用）.
 
 ## 72. §49-Revisit: 炮口相向对枪抵消 Parameterized + Re-Validated (SHIPPED, default unchanged)
 
@@ -193,7 +193,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - Regression gate passes with production default (644/700, 92.0% vs 581 floor) — the parameterized default plays identically to the hardcoded shipped behavior.
 - New unit tests (`tests/counter-fire.test.ts`, 10 tests) lock the detection primitives + shipped default.
 
-**Implications:** Default `counterFire = 1` / `counterFireMaxRange = 5` unchanged. Tooling: `tools/diag/ab-test-counter-fire.ts --all --seeds N`, `per-seed-diff --noCounterFire`.
+**Implications:** Default `counterFire = 1` / `counterFireMaxRange = 5` unchanged. Tooling: `tools/diag/ab-test-counter-fire.ts --all --seeds N`（本地不入库，§0.C）, `per-seed-diff --set counterFire=0`（通用 --set 标志）.
 
 ## 73. §68-Revisit: Crossfire Awareness v2 Re-Tuned with per-seed tick-diff (REJECTED, stays OFF)
 
