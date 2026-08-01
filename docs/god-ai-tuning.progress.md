@@ -27,6 +27,8 @@
 
 > **§79（2026-08-01）**：coop（躺赢模式）God AI 在 `src/ai/god/` 7 处误读 `w.player`（P1）而非 `self.controlledTank(w)`（P2），导致 P2 重生后卡在出生点 00:56–01:41 并打穿基地保护墙。修复后单人逐字节不变（无回归）；coop 过关率 100%、P2 平均剩余命 buggy −7.63 → fixed +2.90（消除死亡螺旋）。详见 DECISIONS §79。
 
+> **§80（2026-08-01）**：冰冻窗口 aim/navigate 转身抖动死锁（replay `classic-s11-…seed1785622102123` 0:31–0:47：P2 冰冻期间原地对空开火）。根因：转向不是免费的——`Simulation.updateMovement` 每次换轴都 snap 垂直坐标，非网格对齐的坦克一转身就被推开最多 CELL/2 px，目标被甩出 `scanAhead` 的 ±8px 偏移线；aggressive 分支没有任何反驻车守卫（T2a 有 `_campTicks`，navigate 有 `_navStuckTicks`）。修复：新参数 `aimTurnSnapGuard`（默认 1 = ON；0 = OFF 逐字节不变），aggressive 分支在 commit 停火转向**之前**用**转身后**的位置重跑扫描，若敌人已不在线上则判定"假瞄准"→ 落入 navigate。**35×60×2 真值终验：冰冻窗口击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）**；过关率 coop 98.8%→99.0%（+0.2pp，net +3）、single 88.8%→89.7%（**+0.9pp，net +20**）；逐关 ≥5pp 回退 **0 关**（最大负向 Diamond/Ramparts −1.7pp = 1 seed 噪声），改善 Lattice +8.3pp / Riverbed +5pp。**S32 Star Fort 10/30-seed 回退（−10pp/−3.3pp）在 60 seeds 确认为种子噪声：Δ0.0pp 完全持平**（coop 60/60 双态、single 55/60 双态）；per-seed tick-diff 定位的机制（t1226 守卫拒绝转向 → navigate 死路）仍是真实失败模式，但真值尺度净中性。详见 DECISIONS §80。
+
 **演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）**。
 
 ---
@@ -91,6 +93,7 @@
 | **§48-revisit** | 08-01 | (默认 ON, 门控) | 钢墙专用闪避遮挡 + 地形门控 + 钉死位门控 | **首个通过验收的 §48 变体**：35×60 net +1 flip、0 关回退；S32 +3.3pp@120、S6 +0.8pp@120。钢迷宫关（brickWallRatio<0.10）启用，砖密关（S14/S26）逐字节不变 |
 | **§49-revisit** | 08-01 | (默认 ON, 参数化) | §52 v2 对枪抵消参数化 + 当前树重验 | **第二个通过"零负结果"验收**：35×60 net +3 flips、0 ON→OFF 负翻转（S26 +2.5pp@120、S20 +0.8pp@120）。逐字节验证参数化默认 = 已提交硬编码基线（§70 纪律） |
 | **§68-revisit** | 08-01 | (默认 OFF, 否决) | per-seed tick-diff 重新调优 §68-v2（4 变体全负） | **方法论级负结果**：raw -18 / 提前量上限 -25 / 开阔度门控 -14 / 组合 -25 全负；坏翻转 12.6-23.1t 过早转向 vs 好翻转 8.3-8.4t 逃生；全地形指标无法区分好坏关。代码回退，crossfire 维持默认 OFF |
+| **§80** | 08-01 | (默认 ON, 修复) | 冰冻窗口转身抖动守卫（aggressive 分支停火转向前置转身后扫描） | **修复验收（35×60×2 真值）**：冰冻击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）；过关率 coop +0.2pp（net +3）、single +0.9pp（**net +20**），≥5pp 回退 0 关；S32 Star Fort 60-seed 持平 Δ0.0pp（10/30-seed 回退确认为种子噪声，机制已 per-seed 定位）；最坏 streak（Brick Maze s27/seed1 1166t）两态逐字节相同（守卫惰性，另一机制，留作后续） |
 
 > 注：DECISIONS.md 已精简为索引（2026-07-31），详细决策见本文档和 `docs/perf-optimization.progress.md`。
 
@@ -454,3 +457,44 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 ### 质量门禁
 - `bun run check`：644 测试全绿，tsc + oxlint + oxfmt clean
 - 回归 gate 原始 truth 值不变，floor 不降
+
+---
+
+## §80 冰冻窗口转身抖动守卫（修复 freeze-window aim/navigate thrash）
+
+### 背景（用户报告）
+`classic-s11-clear-l1-t51-seed1785622102123.replay` 0:31–0:47：冰冻道具生效期间 player2（God AI）站在无法击中敌人的位置持续开火，而不是游走到合适位置击杀。
+
+### 根因
+转向不是免费的：`Simulation.updateMovement` 在换轴时把垂直坐标 snap 到网格（`axis === 'x' ? tank.y = snap(tank.y, CELL) : tank.x = snap(...)`）。停在非网格对齐的亚格偏移上的坦克，一转身边缘最多被推开 CELL/2 px——目标被甩出 `scanAhead` 的 ±CELL/2 偏移线。`aggressive`（冰冻）分支自身没有任何反驻车守卫（T2a 有 `_campTicks`，navigate 有 `_navStuckTicks`），一旦转轴 snap 断掉射击线就断掉了：整个冰冻窗口（游戏里价值最高的窗口——敌人完全无助）原地空射浪费。
+
+### 修复
+- 新参数 `aimTurnSnapGuard`（默认 1 = ON；0 = OFF 逐字节不变，即 A/B 基线）。
+- `aimSurvivesTurnImpl`（`FireControl.ts`）：在 commit 停火转向之前，用**转身后**（post-snap）位置重跑 `scanAheadImpl`；敌人不在线上 → "假瞄准" → 落入 navigate（有真实卡死检测）。
+- 调用顺序是承重的：守卫与分支自身的 `scanAheadImpl` 共用 `self._scanResult`，`&&` 短路保证守卫先消费结果。
+- 已网格对齐时守卫提前返回（snap 无操作）——常见情形逐字节不变，只在病态几何下介入。
+
+### 验证（35 关 × 60 seeds × 2 模式真值终验，`tools/sim/freeze-thrash-audit.ts --set aimTurnSnapGuard=0` 为基线；10/30-seed 筛查数字见上节与 per-seed 诊断）
+
+| 指标 | guard OFF（§80 前） | guard ON（修复） |
+|---|---|---|
+| 冰冻窗口击杀（coop） | 2415 | **5688（+136%）** |
+| 冰冻窗口击杀（single） | 1363 | **3503（+157%）** |
+| 过关率（coop） | 98.8%（2075/2100） | **99.0%（2078/2100，+0.2pp，net +3）** |
+| 过关率（single） | 88.8%（1864/2100） | **89.7%（1884/2100，+0.9pp，net +20）** |
+| single ≥5pp 改善关 | — | Lattice +8.3pp（net +5）/ Riverbed +5pp（net +3） |
+| ≥5pp 回退关 | — | **0 关**（最大负向 Diamond/Ramparts −1.7pp = 1 seed 噪声） |
+
+### per-seed 诊断（S32 Star Fort seed7 翻转）
+- 首分歧 **tick 1226**：A(ON) `up|.|up`（继续 navigate 上行）vs B(OFF) `left|F|left`（转身开火后停驻）。
+- ON 坦克继续上行进入**顶部死墙**（t800–1800 被钉在 y=16–49），基地失守 t2524；OFF 坦克因"假瞄准"开火后意外停驻保命，t3673 通关。
+- coop 同 seed 两态完全一致（t2435 双通）——翻转仅存在于 single。
+- **60-seed 终验结论**：S32 Star Fort 10/30-seed 回退（−10pp@10 / −3.3pp@30，seed7 单翻转）在真值尺度**完全抵消为 Δ0.0pp**（coop 60/60 双态、single 55/60 双态）。机制本身真实存在（t1226 守卫拒绝 → navigate 死路是 navigate 既有弱点），但净效应为噪声级。不追加修复（简单胜于聪明）。
+
+### 残余现象（如实记录）
+- 朴素 period-2 抖动检测器最坏 streak：10-seed 筛查中 Brick Maze s27/seed1 = 1166t 两态**逐字节相同**——守卫在那里惰性（另一机制，未逐 tick 追溯，网格对齐 early-return 是候选之一）；**60-seed 真值下 OFF 基线的最坏 streak 在两种模式都长于 ON（coop 1199t vs 1166t、single 1186t vs 1159t）**——反向佐证守卫有效。aggressive 分支仍无反驻车兜底，留作后续候选。
+- single 部分关卡检测器计数 ON 高于 OFF（Waterways/Quarry/Diamond）但**结局逐字节相同**——检测器现在把"主动狩猎移动"误计为抖动；`freezeKills` 才是有效指标。
+
+### 质量门禁
+- `bun run check`：746 测试全绿，tsc + oxlint + oxfmt clean
+- 新单元测试 `tests/godai-turn-snap-guard.test.ts`（8 条）：守卫几何（门控 OFF 恒真 / 已朝向 / 已对齐 / 拒假瞄准 / 收真瞄准 / 默认 ON）+ 集成臂（ON 900 ticks 内击杀冰冻敌 / OFF 整窗口空废，0 杀、亚格位移）。2 seed × 2 guard 矩阵验证 seed 无关性。

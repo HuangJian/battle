@@ -2,6 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
+import { snap } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 
 // ============================================================
@@ -422,6 +423,56 @@ function predictEnemyCrossingImpl(
     }
   }
   return false
+}
+
+/**
+ * §80: Turn-snap aim guard — will this aim still see the enemy AFTER the
+ * turn physically moves the tank?
+ *
+ * `Simulation.updateMovement` axis-locks movement to one axis per tick and
+ * **snaps the perpendicular coordinate to the grid** on every direction
+ * change (`axis === 'x' ? tank.y = snap(tank.y, CELL) : tank.x = snap(...)`).
+ * A tank sitting at a non-grid-aligned sub-cell offset therefore *teleports*
+ * up to CELL/2 px sideways the instant it turns — which can drag the target
+ * out of `scanAhead`'s ±CELL/2 offset lines.
+ *
+ * That produces a period-2 deadlock in the aggressive (freeze) branch, which
+ * — unlike T2a (`_campTicks`) and navigate (`_navStuckTicks`) — has **no
+ * anti-stall guard**:
+ *
+ *   tick A: off-grid, scan sees enemy → turn to aim → snap pushes tank off
+ *           the firing line
+ *   tick B: on-grid, scan sees nothing → navigate perpendicular → snap
+ *           pushes tank back to the tick-A position
+ *   → repeat forever, zero net displacement, for the whole freeze window.
+ *
+ * Observed in `classic-s11-clear-l1-t51-seed…123.replay` (P2 pinned at
+ * cell (1,4) for the entire 20s freeze) and reproduced across the sweep:
+ * 4.3% of all co-op freeze ticks were burned this way, worst case 1166 of
+ * 1200 freeze ticks (97%) on s27.
+ *
+ * The guard re-runs the scan from the **post-snap** position. If the enemy
+ * survives the turn, the aim is real — commit. If not, the aim is an
+ * illusion; return false so the caller falls through to navigate (which has
+ * its own stall detection and will actually reposition the tank).
+ *
+ * @param gateOn via `self.params.aimTurnSnapGuard` — 0 = OFF, byte-identical
+ *   to pre-§80 behavior (returns true without scanning).
+ */
+export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction): boolean {
+  if (self.params.aimTurnSnapGuard <= 0) return true
+  // Already facing that way — no turn, therefore no snap.
+  if (p.dir === aimDir) return true
+  // Mirror Simulation.updateMovement: horizontal move snaps y, vertical snaps x.
+  const horizontal = aimDir === 'left' || aimDir === 'right'
+  const nx = horizontal ? p.x : snap(p.x, CELL)
+  const ny = horizontal ? snap(p.y, CELL) : p.y
+  // Already grid-aligned on the perpendicular axis — the snap is a no-op.
+  if (nx === p.x && ny === p.y) return true
+  // NOTE: scanAheadImpl writes into the shared `self._scanResult`. Callers
+  // must invoke this guard BEFORE computing their own scan result, never
+  // after, or their result gets clobbered.
+  return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir).enemy
 }
 
 /**

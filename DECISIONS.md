@@ -588,3 +588,26 @@ vs P2, `canMoveOrBreak` refuses the base wall for P2 while P1 is clear, single-p
 parity. `tools/sim/regression-check.ts` A/B (classic, stages 0–15, seeds 1–3):
 single-player clear rate parity 93.75% = 93.75%; co-op clear rate 100% = 100%; co-op
 P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
+
+## 80. §80: Turn-Snap Aim Guard — Don't Commit to a Stop-and-Aim Turn Whose Grid-Snap Breaks the Firing Line (SHIPPED)
+
+**Symptom:** `classic-s11-clear-l1-t51-seed1785622102123.replay` (0:31–0:47): during a freeze window, player 2 (God AI) stood in one spot firing at nothing instead of roaming to kill the helpless enemies.
+
+**Root cause:** turning is not free. `Simulation.updateMovement` axis-locks movement and snaps the PERPENDICULAR coordinate to the grid on every direction change (`axis === 'x' ? tank.y = snap(tank.y, CELL) : tank.x = snap(...)`). A tank parked at a non-grid-aligned sub-cell offset teleports up to CELL/2 px sideways the instant it turns — dragging the target off `scanAhead`'s ±CELL/2 offset lines. The `aggressive` (freeze) branch has NO anti-stall guard of its own (T2a has `_campTicks`, navigate has `_navStuckTicks`), so once the snap broke the line it stayed broken: the whole freeze window — the highest-value window in the game, when enemies are helpless — burned firing at nothing.
+
+**Decision:** New param `aimTurnSnapGuard` (default **1** = ON; 0 = OFF = byte-identical pre-§80). When ON, the aggressive branch re-runs `scanAheadImpl` from the POST-snap position before committing to a stop-and-aim TURN; if the enemy is no longer on that line, the aim is a lie → fall through to navigate (which has real stall detection). Implemented as `aimSurvivesTurnImpl` (`FireControl.ts`), evaluated BEFORE the branch's own scan — both write the shared `self._scanResult`, so the `&&` short-circuit ordering is load-bearing.
+
+**Rationale:**
+- Turning's axis-snap is cheap and invisible when the tank is grid-aligned (the overwhelmingly common case), so the guard early-returns and is byte-identical there — the fix only engages in the pathological geometry that causes the deadlock (post-snap scan misses a target the pre-snap scan saw).
+- MANIFEST §13 Three Gates: (1) the freeze window actually producing kills is more enjoyable; (2) one param + one predicate is simple; (3) not aim-jittering at a target one's own turn moved out of reach respects the original.
+
+**Results (2026-08-01, classic 35 stages × 60 seeds × 2 modes — truth scale):**
+- **Freeze-window kills: coop 2415 → 5688 (+136%), single 1363 → 3503 (+157%)** — the reported bug (freeze window fired at nothing) is fixed.
+- Win rate: coop 98.8% → 99.0% (+0.2pp, net +3 flips); single 88.8% → 89.7% (**+0.9pp, net +20 flips**). Per-stage @60: **0 regressions ≥5pp** (largest negative Diamond −1.7pp coop / Ramparts −1.7pp single = 1-seed binomial noise); improvements Lattice +8.3pp (net +5) / Riverbed +5pp (net +3) single.
+- **S32 Star Fort regression was seed noise — confirmed at 60 seeds: exactly even (Δ0.0pp, net 0; coop 60/60 both, single 55/60 both).** The −10pp @10 / −3.3pp @30 (seed-7 single flip) cancelled out across the full seed set. Per-seed mechanism (still a real failure mode, but net-neutral at truth scale): t1226 the guard rejected a stop-and-aim turn (A `up|.|up` vs B `left|F|left`), the ON tank marched into a top-wall dead-end (base fell t2524) while OFF's accidental stop-and-hold cleared (t3673) — a pre-existing navigate dead-end weakness (the tank changes cells along the wall, so `_navStuckTicks` never fires), not a guard defect.
+- Naive period-2 thrash detector: at 10-seed screening the worst streak (Brick Maze s27/seed1 = 1166t) was byte-identical in both states → the guard is inert on that run (different mechanism). At 60 seeds the OFF baseline's aggregate worst streak EXCEEDS ON's in both modes (coop 1199t vs 1166t; single 1186t vs 1159t) — mildly supportive of the fix. Some single stages show HIGHER detector counts with the guard ON but byte-identical outcomes — the detector now counts productive hunting motion; `freezeKills` is the meaningful metric.
+- Regression gates pass; `bun run check` green (746 tests).
+
+**Tests:** `tests/godai-turn-snap-guard.test.ts` (8 tests) — guard geometry (gate OFF → always true, already-facing → true, grid-aligned → true, lie-aim rejected, real aim accepted, default ON) + integration arms on a crafted lie-aim arena: guard ON kills the frozen enemy within 900 ticks; guard OFF wastes the window (0 kills, sub-cell displacement). Seed-independence verified via a 2-seed × 2-guard matrix.
+
+**Implications:** Default ON (the fix ships). A/B baseline: `per-seed-diff --set aimTurnSnapGuard=0`; freeze-window quantification: `tools/sim/freeze-thrash-audit.ts --set aimTurnSnapGuard=0` (added a generic `--set` override + per-stage JSON). Known residual: aggressive-branch anti-stall remains absent for grid-aligned oscillation (s27/seed1) — a candidate follow-up.

@@ -13,6 +13,7 @@ import {
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
   shouldFireBreakThroughImpl,
+  aimSurvivesTurnImpl,
 } from './god/FireControl'
 import {
   findMostDangerousBulletImpl,
@@ -666,6 +667,58 @@ export interface GodAIParams {
    * 1 = ON (default — the fix).
    */
   steelFireGate: number
+
+  /**
+   * §80: Turn-snap aim guard — don't commit to a stop-and-aim TURN whose own
+   * grid-snap would take the tank off the line it wanted to fire along.
+   *
+   * Root cause (replay classic-s11-…-seed1785622102123, 0:31–0:47):
+   * turning is not free. `Simulation.updateMovement` axis-locks the tank and
+   * snaps the PERPENDICULAR coordinate to the grid on every direction change
+   * (`axis === 'x' ? tank.y = snap(tank.y, CELL) : tank.x = snap(...)`).
+   * A tank sitting at a non-grid-aligned sub-cell offset therefore MOVES up
+   * to CELL/2 px sideways just by turning — which can slide the enemy out of
+   * its firing line.
+   *
+   * That creates a stable period-2 deadlock in the `aggressive` (freeze)
+   * branch, which has no anti-stall guard of its own (T2a has the
+   * `_campTicks` escape, navigate has `_navStuckTicks`; aggressive has
+   * neither, and during a freeze window it is the ONLY branch that runs):
+   *
+   *   tick A: not aligned → `scanAhead(aimDir).enemy` false → fall through to
+   *           navigate → move along path (perpendicular) → snap puts the tank
+   *           BACK on the firing line
+   *   tick B: `scanAhead(aimDir).enemy` true → turn to aim → snap puts the
+   *           tank back OFF the firing line → back to tick A
+   *
+   * Net displacement per 2 ticks: zero. The AI burns the entire freeze
+   * window — the single highest-value window in the game, when enemies are
+   * helpless — jittering between two sub-cell positions while firing at
+   * nothing. Measured pre-fix over 35 stages × 10 seeds: 4.3% of all freeze
+   * ticks (coop) / 2.9% (single) were this oscillation, with worst-case runs
+   * losing 1166 of 1200 freeze ticks (97% of the window).
+   *
+   * The guard re-runs the line-of-fire scan from the position the tank would
+   * actually occupy AFTER the turn-snap. If the enemy is no longer on that
+   * line, the aim is a lie — fall through to navigate and keep moving.
+   *
+   * Inert when the tank is already grid-aligned on the perpendicular axis
+   * (`snap(v) === v`), which is the overwhelmingly common case — so this is
+   * byte-identical to pre-§80 behavior except in the pathological geometry
+   * that causes the deadlock.
+   *
+   * Known residual (measured, 2026-08-01): the guard does NOT eliminate ALL
+   * freeze-window oscillation — the worst measured streak (Brick Maze
+   * s27/seed1, 1166 of 1200 freeze ticks) is byte-identical with the guard
+   * ON: the guard is inert on that run (its scans never change the outcome).
+   * The mechanism was not per-tick traced; a grid-aligned early-return is one
+   * candidate. The aggressive branch still lacks an anti-stall guard for this
+   * residual — see DECISIONS §80.
+   *
+   * 0 = OFF (byte-identical to pre-§80 behavior — A/B baseline).
+   * 1 = ON (default — the fix).
+   */
+  aimTurnSnapGuard: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -860,6 +913,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §74: Steel-fire gate — 1 = ON (default). 0 = OFF (pre-§74 behavior,
   // A/B baseline). See interface docs.
   steelFireGate: 1,
+  // §80: Turn-snap aim guard — 1 = ON (default, the fix). 0 = OFF (pre-§80
+  // behavior, A/B baseline). See interface docs.
+  aimTurnSnapGuard: 1,
 }
 
 /**
@@ -1494,7 +1550,15 @@ export class GodAIInput implements InputLike {
     // ---- S8/S9: Aggressive mode (freeze or shield) ----
     if (this.aggressive) {
       // Skip defense, go straight for the nearest enemy or power-up.
-      if (aimDir) {
+      //
+      // §80: `aimSurvivesTurnImpl` MUST be evaluated BEFORE `scanAheadImpl`
+      // below — both write into the shared `this._scanResult`, so running the
+      // guard afterwards would clobber `aggScan`. The `&&` short-circuit gives
+      // us that ordering for free. When the guard rejects the aim (the turn's
+      // grid-snap would shove the tank off the firing line) we fall through to
+      // the navigate path, which has real stall detection — this is what
+      // breaks the period-2 freeze-window deadlock.
+      if (aimDir && aimSurvivesTurnImpl(this, p, aimDir)) {
         // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
         // Without this check, the AI fires through steel walls at enemies
         // it can see via global vision but cannot actually hit.
