@@ -612,6 +612,28 @@ export interface GodAIParams {
   trapEnemyRadiusCells: number
   /** Min live enemies within the radius that make a low-exit cell a trap. */
   trapEnemyCount: number
+
+  /**
+   * §49-revisit: 炮口相向对枪抵消（§52 v2，T2a 内联，当前保留形态）。
+   *
+   * When > 0, the T2a branch detects an enemy facing the player within
+   * `counterFireMaxRange` cells (and not on ice) and: (a) if an enemy bullet
+   * is already in the line of fire, fires to cancel it (对枪抵消 — bullet
+   * elimination is safer than trading hits); (b) otherwise keeps alignment
+   * toward the enemy without strafing (保持对齐以备对枪).
+   *
+   * When 0, T2a uses the plain stop-and-aim behavior (pre-§52 form — turn
+   * to face and fire, no facing-enemy special-casing).
+   *
+   * Default 1 = current shipped behavior (byte-identical to pre-parameter-
+   * ization). OFF (0) is the A/B baseline (pre-§52 v2).
+   */
+  counterFire: number
+  /**
+   * §49-revisit: max distance (cells) for the facing-enemy counter-fire /
+   * keep-alignment block in T2a. The original hardcoded value was 5.
+   */
+  counterFireMaxRange: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -797,6 +819,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   trapAvoidance: 0,
   trapEnemyRadiusCells: 5,
   trapEnemyCount: 2,
+  // §49-revisit: 炮口相向对枪抵消 (§52 v2). 1 = ON (current shipped
+  // behavior, byte-identical to pre-parameterization). 0 = OFF (plain T2a).
+  counterFire: 1,
+  // Max range (cells) for the facing-enemy block. 5 = the original §52 v2
+  // hardcoded value.
+  counterFireMaxRange: 5,
 }
 
 /**
@@ -1570,10 +1598,13 @@ export class GodAIInput implements InputLike {
             // 对枪抵消对所有敌人类型都适用：当敌方子弹已在直线上时，
             // 开火抵消比打死敌人更安全（子弹被消除→玩家安全）。
             // 120-seed 验证：对枪对 ALL 敌人 +5 wins，仅 armor +1 win。
-            const facing = this.findEnemyFacingPlayer(pcx, pcy, aimDir)
+            // §49-revisit: 炮口相向对枪抵消 is parameterized for A/B.
+            // counterFire=0 → facing stays null → plain T2a (pre-§52 form).
+            const facing =
+              this.params.counterFire > 0 ? this.findEnemyFacingPlayer(pcx, pcy, aimDir) : null
             const onIce = w.isTankOnIce(p)
 
-            if (facing && !onIce && facing.dist <= 5 * CELL) {
+            if (facing && !onIce && facing.dist <= this.params.counterFireMaxRange * CELL) {
               // ---- 对枪抵消逻辑（适用于所有敌人类型）----
               const enemyBulletInLine = this.hasEnemyBulletInLine(pcx, pcy, aimDir)
 

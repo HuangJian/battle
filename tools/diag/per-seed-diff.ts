@@ -40,6 +40,8 @@ Usage:
 
 Diagnostic flags (dump mode only):
   --steelOcclusion   Enable §48-revisit steel-only evasion occlusion
+  --noCounterFire    Disable §49-revisit 炮口相向对枪抵消 (§52 v2) — dumps
+                     the pre-§52 plain-T2a behavior (A/B OFF arm)
 
 Workflow:
   1. bun tools/diag/per-seed-diff.ts dump 32 5 > /tmp/before.txt
@@ -53,6 +55,11 @@ function dump(stageIdx: number, seed: number): void {
   // Diagnostic flag: --steelOcclusion enables §48-revisit steel-only occlusion.
   if (process.argv.includes('--steelOcclusion')) {
     godAIParams.evasionSteelOcclusion = 1
+  }
+  // Diagnostic flag: --noCounterFire disables §49-revisit 对枪抵消 (§52 v2),
+  // dumping the pre-§52 plain-T2a form (the A/B OFF arm).
+  if (process.argv.includes('--noCounterFire')) {
+    godAIParams.counterFire = 0
   }
   // Diagnostic flag: --brickGate <ratio> enables occlusion via the terrain
   // gate (computeStageAdaptedParams auto-enables it on steel-maze stages only).
