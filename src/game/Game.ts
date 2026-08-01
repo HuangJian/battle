@@ -1507,6 +1507,9 @@ export class Game {
         this.stopPlayback()
         this.resetToMenu()
       },
+      onExport: () => {
+        this.exportReplay(this.playback?.replay)
+      },
       onProgressHover: (progress: number) => {
         // Instant thumbnail from pre-computed keyframes — no simulation replay
         if (!this.playback || this.playback.isEnded) return
@@ -1762,34 +1765,46 @@ export class Game {
         )
       },
       onExport: (id) => {
-        const replay = this.replays.get(id)
-        if (!replay) return
-        const envelope = serializeReplayFile({
-          source: 'browser',
-          seed: replay.seed,
-          initialSnapshot: replay.initialSnapshot,
-          frames: replay.frames,
-          totalTicks: replay.totalTicks,
-          metadata: replay.metadata,
-        })
-        const filename = buildReplayFilename({
-          difficulty: replay.metadata.difficulty,
-          stageIndex: replay.metadata.stage,
-          status: replay.type,
-          lives: replay.metadata.lives,
-          totalTicks: replay.totalTicks,
-          seed: replay.seed,
-        })
-        const blob = new Blob([envelope], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = filename
-        a.click()
-        URL.revokeObjectURL(url)
-        ui.notify(`Exported: ${filename}`)
+        this.exportReplay(this.replays.get(id))
       },
     })
+  }
+
+  /**
+   * Serialize a replay into the .replay file format and trigger a browser
+   * download. Shared by the Replay Browser (gallery) and the in-playback
+   * ReplayController export button.
+   */
+  private exportReplay(replay: Replay | null | undefined): void {
+    const ui = this.presentation.ui
+    if (!replay) {
+      ui.notify('No replay to export', 'warn')
+      return
+    }
+    const envelope = serializeReplayFile({
+      source: 'browser',
+      seed: replay.seed,
+      initialSnapshot: replay.initialSnapshot,
+      frames: replay.frames,
+      totalTicks: replay.totalTicks,
+      metadata: replay.metadata,
+    })
+    const filename = buildReplayFilename({
+      difficulty: replay.metadata.difficulty,
+      stageIndex: replay.metadata.stage,
+      status: replay.type,
+      lives: replay.metadata.lives,
+      totalTicks: replay.totalTicks,
+      seed: replay.seed,
+    })
+    const blob = new Blob([envelope], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    ui.notify(`Exported: ${filename}`)
   }
 
   /** Open a local .replay file for playback (not imported to database). */

@@ -15,6 +15,7 @@ export interface ReplayControllerCallbacks {
   onProgressHoverEnd: () => void
   onReplayAgain: () => void
   onBackToMenu: () => void
+  onExport: () => void
 }
 
 const SPEEDS = [0.5, 1, 1.5, 2, 4]
@@ -35,6 +36,7 @@ export class ReplayController {
   private speedDropdown: HTMLElement
   private timeDisplay: HTMLElement
   private exitBtn: HTMLElement
+  private exportBtn: HTMLElement
   private endOverlay: HTMLElement
   private endTitle: HTMLElement
   private endMeta: HTMLElement
@@ -88,6 +90,8 @@ export class ReplayController {
           </div>
         </div>
 
+        <button class="rc-btn rc-export" type="button" aria-label="Export replay" title="Export .replay file">⤓</button>
+
         <button class="rc-btn rc-exit" type="button" aria-label="Exit replay">✕</button>
       </div>
     `
@@ -101,6 +105,7 @@ export class ReplayController {
     this.speedDropdown = this.el.querySelector('.rc-speed-dropdown')!
     this.timeDisplay = this.el.querySelector('.rc-time')!
     this.exitBtn = this.el.querySelector('.rc-exit')!
+    this.exportBtn = this.el.querySelector('.rc-export')!
 
     // Thumbnail — move to document.body so position:fixed is relative to
     // the viewport (backdrop-filter on the controller would trap it).
@@ -252,6 +257,11 @@ export class ReplayController {
     // Exit
     this.exitBtn.addEventListener('click', () => {
       this.callbacks?.onExit()
+    })
+
+    // Export
+    this.exportBtn.addEventListener('click', () => {
+      this.callbacks?.onExport()
     })
 
     // End-of-replay overlay buttons
