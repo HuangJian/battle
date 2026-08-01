@@ -307,3 +307,190 @@ Full baseline + per-milestone deltas in `docs/render-optimization.progress.md`. 
 - Coop base suicide: eliminated (confirmed via `repro-base-suicide.ts`).
 - **No floor adjustment needed**: the regression gate passes with original truth values.
 - **Lesson**: adding computation to a V8 JIT-hot loop (called thousands of times per simulation) can change optimization decisions that cascade into behavioral differences, even when the computation is functionally a no-op. Hot-loop changes must be validated with per-seed comparison, not just aggregate win rates.
+
+---
+
+## 75. Replay Recording Must Tap the Decorated Input (Lie-Back-Win-Mode desync) (SHIPPED)
+
+**Symptom:** A 躺赢模式 (coop) stage-clear replay played back as a defeat — the
+tank drove into and shot its own base. Reproduced headlessly on the reported
+artifact `classic-s15-clear-l2-t105-seed1785585133360.replay`:
+recorded `clear` @6312 ticks (score 11300 / 40 kills) → played back as
+`gameover` @3205 ticks with the base destroyed.
+
+**Root cause:** `Game.loop()` recorded the *raw* keyboard object, not the object
+the Simulation actually consumed:
+
+    this.simulation.tick()                                // consumed simulation.input === AutoFireInput
+    this.recorder.recordFrame(this.input, this.godInput)  // recorded the bare Input   [WRONG]
+
+In coop, `requestCoopToggle()` sets `simulation.input = new AutoFireInput(this.input)`.
+`AutoFireInput.isFiring()` returns `true` on every tick while armed, so the live
+run fires from tick 0, while the raw keyboard reports "not firing" until the
+human's first real press (tick 118 in the reported file). Every auto-fired shot
+was therefore missing from the P1 stream: playback diverged at tick 0, the enemy
+population and `world.rng` draw sequence drifted, and P2's literally-correct God
+AI frames were then applied to a world that no longer matched — steering the God
+tank into the base. This contradicted `AutoFireInput`'s own documented contract
+("the decorated (auto-fired) input is what the replay records").
+
+**Decision:** The recorder always taps `simulation.input` / `simulation.input2` —
+the exact objects the preceding `tick()` consumed — never the raw `Input` /
+`godInput` fields. This is decoration-agnostic: any future input decorator is
+recorded correctly by construction.
+
+**Blast radius:** Browser (`source: 'browser'`) coop recordings only.
+
+- Single-player is unaffected: `simulation.input === this.input`, so the tap is identical.
+- Sim-generated replays are unaffected: `tools/sim/simulation-runner.ts:329` already
+  recorded the same object the sim consumed. Verified empirically.
+- P2 is unaffected: `simulation.input2` and `this.godInput` are always assigned together.
+- Every coop replay *type* (`clear` / `base` / `died`) was affected, not just `clear`.
+
+**Not the cause (ruled out):** God AI RNG (deliberately independent per #47);
+`endFrame()` running once per rAF rather than per tick (stale `_thought` caching
+is shared by sim *and* recorder, so it stays self-consistent through playback).
+
+**Salvage:** the loss is exactly reconstructible, because AutoFireInput is
+deterministic — armed from stage start (one recording session == one stage),
+firing every tick until the human's first real press, pass-through after. So
+`fire = true` for ticks `0..T-1` where `T` is the first recorded fire bit.
+`tools/replay/repair-coop-replay.ts` applies this; the reported file then replays
+back to `stageclear` @6312 with score 11300 / 40 kills — an exact match to its
+recorded metadata.
+
+**Tooling added:**
+
+- `tools/replay/verify-replay.ts` — headless `.replay` verifier (mirrors
+  `PlaybackController` wiring; exit 1 on desync). No such tool existed before.
+- `tools/replay/repair-coop-replay.ts` — salvages pre-fix coop replays.
+- `tests/replay-coop-autofire.test.ts` — records through the real `AutoFireInput`
+  + `GodAIInput` wiring across 3 stages, asserts P1 fires from tick 0, covers the
+  non-coop path, and pins the old buggy tap as a desync.
+
+**Known gap (unrelated, pre-existing):** `parseReplayFile` hard-rejects
+`frameSchemaVersion: 1` even though `unpackFrames`/`ReplayInput` still handle v1,
+so the seven v1 files in `replays/` cannot be imported or verified.
+→ Closed by #76.
+
+---
+
+## 76. The Packed Blob Is the Only Authority on Frame Schema (SHIPPED)
+
+Two loose ends left by #75, both instances of "a declaration drifted from the
+thing it declares".
+
+### 76a — v1 replays were unreadable for no reason
+
+**Symptom:** the seven `.replay` files in `replays/` could not be imported or
+verified: `parseReplayFile` returned `Unsupported frame schema version: 1`.
+
+**Root cause:** three layers disagreed about what "schema version" means.
+
+| Layer | What it did |
+| --- | --- |
+| `packFrames` / `InputRecorder` | Emits **v1** bytes for a single-stream recording (deliberate downgrade), **v2** only for coop. |
+| `serializeReplayFile` | Always stamped the envelope `frameSchemaVersion: 0x02` — a lie for every single-player file. |
+| `parseReplayFile` / `canPlay` | Demanded `=== FRAME_SCHEMA_VERSION` (0x02). |
+
+`unpackFrames` and `ReplayInput` had always auto-detected from the blob's
+leading byte and handled both. Only the gatekeepers were strict, and they were
+strict against a field the writer filled in wrong.
+
+**Decision:** the packed blob's **leading byte** is the single authority on
+layout. Everything else is descriptive and must agree with it.
+
+- `SUPPORTED_FRAME_SCHEMA_VERSIONS` + `isSupportedFrameSchema()` (`config.ts`) —
+  readers accept every schema this build can decode, not just the newest.
+- `frameSchemaVersionOf(blob)` (`pack.ts`) — the one way to ask the question.
+- `serializeReplayFile` stamps the envelope with the blob's actual version, so a
+  single-stream file declares v1 and stays readable by v1-era readers.
+- `parseReplayFile` gates on the envelope *and* re-checks the decoded blob;
+  `Replay.schemaVersion` comes from the blob instead of being hardcoded. A file
+  that declares v2 but carries v1 bytes (every pre-fix browser recording) parses
+  as the v1 replay it actually is.
+- `ReplayManager.canPlay()` gates on the blob too, precisely so those
+  historically mis-stamped records stay playable.
+- `ReplayManager.create()` records the blob's version instead of hardcoding 0x02.
+- `parseReplayFile` now also rebuilds `Replay.frames2` for imported coop replays;
+  import previously dropped it while recording kept it.
+- Adjacent fix: `InputRecorder` stamped the standalone `frames2` stream with the
+  **v2** header despite it being single-stream. Dormant (nothing decoded it) but
+  the same bug class — now `FRAME_SCHEMA_V1`.
+
+**Result:** all seven legacy files import *and* reproduce their recorded outcomes
+exactly under `tools/replay/verify-replay.ts`.
+
+### 76b — leaving a replay mid-coop dropped both live inputs
+
+**Root cause:** `PlaybackController.exit()` took only the raw input and
+hard-nulled `input2`, with the comment *"caller re-wires if coop is active"*.
+Neither `stopPlayback()` nor `finishPlayback()` re-wired. Resuming a coop game
+after a replay would therefore hand the Simulation the **bare keyboard**
+(auto-fire decoration gone — a mute P1) and **no player-2 input** (a frozen God
+tank). Latent today only because every exit path happens to funnel through
+`resetToMenu()`, which clears coop anyway — a comment-shaped landmine.
+
+**Decision:** an exit restores exactly what was live; it never guesses.
+
+- `exit(simulation, realInput, realInput2 = null)` — both streams explicit.
+- `Game` grows one source of truth: `liveInput` (`autoFireInput ?? input`),
+  `liveInput2` (`godInput`), and `wireLiveInputs()`. All five wiring sites
+  (coop on, coop off, recovery restore with and without coop, `resetToMenu`) go
+  through it, and both playback exits pass `liveInput` / `liveInput2`.
+
+The rule is the same one as #75, one layer up: **hand over the object the
+Simulation actually consumes, never the undecorated field behind it.**
+
+**Tests:** `tests/replay-v1-compat.test.ts` (blob-is-authority, v1/v2 parse, the
+historical envelope lie, both rejection paths, plus a data-driven guard that
+imports and starts playback on every file in `replays/`) and three exit-rewire
+cases in `tests/replay-coop-autofire.test.ts`. Gate: 713 pass / 0 fail; tsc,
+oxlint and oxfmt clean.
+
+## 77. Playback seek must advance the input (drag-the-bar desync) (SHIPPED)
+
+Follow-up to #75/#76: the repaired coop replay played correctly start-to-finish,
+but **dragging the progress bar then resuming desynced** ("重放又乱了").
+
+**Root cause:** `PlaybackController.seekTo()` (and the matching restore loop in
+`buildKeyframes()`) restored the initial snapshot, re-created the `ReplayInput`,
+called `input.seekTo(targetFrame)` to pin the cursor at the target, then ran a
+fast-forward loop — but **never called `input.advance()`**:
+
+```ts
+this.input.seekTo(targetFrame)          // cursor pinned at target
+for (let i = 0; i < targetFrame; i++) {
+  simulation.tick()                     // every tick reads frame[targetFrame]
+}                                        // cursor never moves → advance() missing
+```
+
+So every one of the `targetFrame` fast-forward ticks re-consumed the **same**
+frame, and frames `0..targetFrame-1` were never applied. The world landed in a
+state that had nothing to do with the real timeline at `targetFrame`, so the
+resumed playback diverged immediately (reproduced on the coop replay as
+`gameover @13`, base destroyed, instead of `stageclear @6311`).
+
+Normal playback was unaffected because `update()` calls `input.advance()` once
+per tick.
+
+**Decision:** the fast-forward loop must replay frames `0..targetFrame-1` exactly
+like `update()` does — `simulation.tick()` then `this.input.advance()` — so the
+world lands on the true timeline at the seek target and resume is seamless.
+
+- `seekTo()`: dropped the pre-seek `input.seekTo(targetFrame)` (the fresh
+  `ReplayInput` already starts at cursor 0) and added `this.input.advance()`
+  inside the loop. `input2` (the coop God-AI slice, which shares the parent
+  `tick` counter) advances in lockstep.
+- `buildKeyframes()` restore loop: same fix — `restoredInput.advance()` per tick,
+  so the world handed back after thumbnail capture matches the cursor.
+
+**Reproduction / proof:** `tools/replay/repro-seek.ts` drives the REAL
+`PlaybackController` (full playback vs seek-then-resume). On the pre-fix code it
+prints `[DESYNC]` for the coop replay; after the fix `[OK]` at 0.1/0.33/0.5/0.66/0.9,
+and a v1 single-stream replay also seeks cleanly.
+
+**Tests:** `tests/replay-seek.test.ts` — coop (stages 15 & 1) and single-player
+(stages 3 & 8) each seek at five fractions and must reproduce the clean full
+playback outcome; plus a direct guard that the cursor sits at the expected
+offset after `seekTo(0.5)`. Gate: 713 pass / 0 fail; tsc, oxlint clean.

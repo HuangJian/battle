@@ -11,7 +11,8 @@ import type {
 } from './types'
 import { REPLAY_RETENTION_POLICIES, REPLAY_FAVORITE_LIMIT } from './config'
 import { GAME_VERSION } from '../snapshot/config'
-import { FRAME_SCHEMA_VERSION } from './config'
+import { isSupportedFrameSchema } from './config'
+import { frameSchemaVersionOf } from './pack'
 import { generateUUID } from './uuid'
 
 export interface ReplayManagerOptions {
@@ -100,7 +101,9 @@ export class ReplayManager {
       type,
       createdAt: this.now(),
       gameVersion: GAME_VERSION,
-      schemaVersion: FRAME_SCHEMA_VERSION,
+      // Record the schema the bytes actually carry (v1 for a single-stream
+      // recording, v2 for coop) — not the newest one this build knows about.
+      schemaVersion: frameSchemaVersionOf(frames),
       seed,
       initialSnapshot,
       frames,
@@ -203,14 +206,19 @@ export class ReplayManager {
 
   /**
    * Whether a replay can actually be played back. Strict on the packed-frame
-   * format version — a mismatch means the bytes cannot be unpacked. The
-   * game-version mismatch (GAME_VERSION) is a soft warning handled by the
-   * caller, not a hard block. (L3)
+   * format version — a version this build cannot decode means the bytes cannot
+   * be unpacked. The game-version mismatch (GAME_VERSION) is a soft warning
+   * handled by the caller, not a hard block. (L3)
+   *
+   * The gate reads the BLOB's leading byte, not `replay.schemaVersion`: the
+   * blob is what `ReplayInput` decodes, and older builds stored a descriptive
+   * `schemaVersion` that lied (always 0x02, even for a v1 blob). Both v1 and
+   * v2 are decodable, so both are playable (DECISIONS #76).
    */
   canPlay(replay: Replay): boolean {
     if (!replay) return false
-    if (replay.schemaVersion !== FRAME_SCHEMA_VERSION) return false
     if (!replay.frames || replay.frames.length === 0) return false
+    if (!isSupportedFrameSchema(frameSchemaVersionOf(replay.frames))) return false
     if (!replay.initialSnapshot) return false
     return true
   }

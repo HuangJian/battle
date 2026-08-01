@@ -2,6 +2,7 @@ import { World } from './World'
 import { RNG } from '../utils/RNG'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
+import type { InputLike } from './Input'
 import { SnapshotManager } from '../snapshot/SnapshotManager'
 import { createDefaultStorage } from '../snapshot/storage'
 import { restoreWorld, cloneWorld } from '../snapshot/WorldSerializer'
@@ -107,6 +108,31 @@ export class Game {
   /** Auto-fire wrapper around the human input — re-armed each stage. */
   private autoFireInput: AutoFireInput | null = null
 
+  /**
+   * The player-1 input the LIVE simulation must consume right now.
+   * In Lie-Back-Win-Mode the raw keyboard is decorated by AutoFireInput, and
+   * that decorated object — not `this.input` — is what the sim ticks on and
+   * what the recorder taps (DECISIONS #75).
+   */
+  private get liveInput(): InputLike {
+    return this.autoFireInput ?? this.input
+  }
+
+  /** The player-2 input the LIVE simulation must consume — null unless coop. */
+  private get liveInput2(): InputLike | null {
+    return this.godInput
+  }
+
+  /**
+   * Point the simulation back at the live inputs. Single source of truth for
+   * the wiring, so no exit path can restore only half of it (DECISIONS #76).
+   * Call AFTER `godInput` / `autoFireInput` have been set to their new values.
+   */
+  private wireLiveInputs(): void {
+    this.simulation.input = this.liveInput
+    this.simulation.input2 = this.liveInput2
+  }
+
   /** Rolling FPS (updated once per second) — cheap regression signal. */
   fps = 0
   private _frameCount = 0
@@ -198,9 +224,8 @@ export class Game {
       w.playerLevel2 = 0
       // Wire AI inputs
       this.godInput = null
-      this.simulation.input2 = null
       this.autoFireInput = null
-      this.simulation.input = this.input
+      this.wireLiveInputs()
       this.presentation.ui.notify('Co-op: OFF', 'info')
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
@@ -216,9 +241,8 @@ export class Game {
       // Wire AI inputs
       const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
-      this.simulation.input2 = this.godInput
       this.autoFireInput = new AutoFireInput(this.input)
-      this.simulation.input = this.autoFireInput
+      this.wireLiveInputs()
       this.presentation.ui.notify('Co-op: ON — God Player activated!', 'info')
       this.audio.player2Id = w.player2?.id ?? null
     }
@@ -556,8 +580,18 @@ export class Game {
           this.world.state === 'gameover'
         ) {
           this.simulation.tick()
-          // Record THIS tick's input (one frame per tick)
-          this.recorder.recordFrame(this.input, this.godInput)
+          // Record THIS tick's input (one frame per tick).
+          //
+          // MUST record `this.simulation.input` / `this.simulation.input2` —
+          // the exact objects the tick above consumed — NOT the raw
+          // `this.input` / `this.godInput` fields. In Lie-Back-Win-Mode the
+          // human input is decorated by AutoFireInput, so the sim fires every
+          // tick while the raw keyboard reports "not firing". Recording the
+          // raw input dropped every auto-fired shot, desyncing playback from
+          // tick 0 (the replay looked like the player suicided into its own
+          // base). See AutoFireInput's contract: the decorated input is what
+          // the replay records.
+          this.recorder.recordFrame(this.simulation.input, this.simulation.input2)
 
           // Detect stage change → Stage Start snapshot (plan §3, §10)
           if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
@@ -639,18 +673,16 @@ export class Game {
         if (this.world.coop && !this.godInput && this.world.player2) {
           const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
           this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
-          this.simulation.input2 = this.godInput
           // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
           this.autoFireInput = new AutoFireInput(this.input)
-          this.simulation.input = this.autoFireInput
+          this.wireLiveInputs()
           this.audio.player2Id = this.world.player2?.id ?? null
           this.presentation.ui.controlCenter.setCoopState(true)
         } else if (!this.world.coop) {
           // Snapshot restored without coop — ensure input2 is cleared.
           this.godInput = null
           this.autoFireInput = null
-          this.simulation.input = this.input
-          this.simulation.input2 = null
+          this.wireLiveInputs()
           this.audio.player2Id = null
           this.presentation.ui.controlCenter.setCoopState(false)
         }
@@ -1302,8 +1334,7 @@ export class Game {
     this.godInput = null
     this.autoFireInput = null
     this.simulation.clearPendingCoopToggle()
-    this.simulation.input = this.input
-    this.simulation.input2 = null
+    this.wireLiveInputs()
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
     this.recovery.reset()
@@ -1616,7 +1647,8 @@ export class Game {
    */
   stopPlayback(): void {
     if (!this.playback) return
-    this.playback.exit(this.simulation, this.input)
+    // Hand back the LIVE inputs, decoration included — see wireLiveInputs().
+    this.playback.exit(this.simulation, this.liveInput, this.liveInput2)
     this.playback = null
     // Clear replay-sourced audio attenuation (no God tank outside playback).
     this.audio.player2Id = null
@@ -1641,7 +1673,7 @@ export class Game {
     // Exit the playback controller but keep it as a sentinel so scheduleFrame()
     // keeps the rAF loop alive (the world may be in a LOW_POWER state like
     // 'gameover' which would otherwise stop the loop).
-    this.playback.exit(this.simulation, this.input)
+    this.playback.exit(this.simulation, this.liveInput, this.liveInput2)
     // Hide the REPLAY badge but keep the controller visible (persistent mode)
     this.presentation.ui.setReplayMode(false)
     // Populate end overlay with replay metadata

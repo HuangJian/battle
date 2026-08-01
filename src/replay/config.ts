@@ -43,3 +43,22 @@ export const REPLAY_THUMBNAIL_QUALITY = 0.72
  */
 export const FRAME_SCHEMA_VERSION = 0x02
 export const FRAME_SCHEMA_V1 = 0x01
+
+/**
+ * Every packed-frame schema this build can decode (see `unpackFrames`).
+ *
+ * The writer still *emits* the newest layout it needs, but a v1 blob stays v1
+ * forever: single-stream recordings are deliberately downgraded so older
+ * readers keep working. Readers must therefore accept the whole set — gating
+ * on `=== FRAME_SCHEMA_VERSION` silently orphans perfectly playable files
+ * (DECISIONS #76).
+ */
+export const SUPPORTED_FRAME_SCHEMA_VERSIONS: readonly number[] = [
+  FRAME_SCHEMA_V1,
+  FRAME_SCHEMA_VERSION,
+]
+
+/** Whether this build can decode a packed-frame blob of the given version. */
+export function isSupportedFrameSchema(version: unknown): boolean {
+  return typeof version === 'number' && SUPPORTED_FRAME_SCHEMA_VERSIONS.includes(version)
+}

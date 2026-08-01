@@ -7,7 +7,7 @@ import { ReplayManager } from '../src/replay/ReplayManager'
 import { PlaybackController } from '../src/replay/PlaybackController'
 import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import { packFrame, unpackFrame, packFrames, unpackFrames } from '../src/replay/pack'
-import { FRAME_SCHEMA_VERSION } from '../src/replay/config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from '../src/replay/config'
 import type { Direction } from '../src/constants'
 import type { InputLike } from '../src/game/Input'
 import type { InputFrame } from '../src/replay/types'
@@ -212,7 +212,29 @@ describe('ReplayManager', () => {
     expect(replay.durationMs).toBe(Math.round(SAMPLE_FRAMES.length * (1000 / 60)))
     expect(replay.durationMs).not.toBe(12345)
     expect(replay.thumbnail).toBeNull()
+    // schemaVersion mirrors the blob's leading byte, not the newest schema
+    // this build knows: SAMPLE_FRAMES has no P2 stream → packFrames emits v1.
+    expect(frames[0]).toBe(FRAME_SCHEMA_V1)
+    expect(replay.schemaVersion).toBe(FRAME_SCHEMA_V1)
+  })
+
+  it('create() records v2 for a coop (dual-stream) recording', () => {
+    const mgr = new ReplayManager({ now: () => 0 })
+    const frames = packFrames(SAMPLE_FRAMES, SAMPLE_FRAMES)
+    const replay = mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, {
+      stage: 0,
+      stageName: '',
+      difficulty: '',
+      lives: 0,
+      playerLevel: 0,
+      score: 0,
+      killCount: 0,
+      enemiesTotal: 0,
+      playTimeMs: 0,
+    })
+    expect(frames[0]).toBe(FRAME_SCHEMA_VERSION)
     expect(replay.schemaVersion).toBe(FRAME_SCHEMA_VERSION)
+    expect(mgr.canPlay(replay)).toBe(true)
   })
 
   it('canPlay() rejects replays with a wrong schema version (L3)', () => {
@@ -232,6 +254,10 @@ describe('ReplayManager', () => {
     const bad = { ...good, schemaVersion: 0x99, frames: new Uint8Array([0x99, 0x00]) }
     expect(mgr.canPlay(bad)).toBe(false)
     expect(mgr.canPlay({ ...good, frames: new Uint8Array(0) } as any)).toBe(false)
+    // The BLOB is the gate, not the descriptive `schemaVersion` field: older
+    // builds stamped 0x02 on every replay including v1 blobs, and those files
+    // are perfectly playable. (DECISIONS #76)
+    expect(mgr.canPlay({ ...good, schemaVersion: FRAME_SCHEMA_VERSION })).toBe(true)
   })
 
   it('enforces retention policy (circular overwrite, favorited exempt)', () => {

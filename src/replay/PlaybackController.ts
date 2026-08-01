@@ -123,13 +123,15 @@ export class PlaybackController {
     // Restore to current playback position
     restoreWorld(world, this._replay.initialSnapshot)
     const restoredInput = new ReplayInput(this._replay.frames)
-    restoredInput.seekTo(currentFrame)
     this.input = restoredInput
     simulation.input = restoredInput
     // Lie-Back-Win-Mode: restore input2 for coop replays.
     simulation.input2 = restoredInput.input2 ?? null
+    // Replay frames 0..currentFrame-1 (advance each tick) so the world matches
+    // the cursor — same contract as seekTo()/update().
     for (let i = 0; i < currentFrame; i++) {
       simulation.tick()
+      restoredInput.advance()
     }
     this.phase = savedPhase
     this.accumulator = savedAccum
@@ -210,15 +212,18 @@ export class PlaybackController {
     const targetFrame = Math.floor(progress * this.input.totalFrames)
     // Restore world from initial snapshot
     restoreWorld(world, this._replay.initialSnapshot)
-    // Re-create ReplayInput from frames and seek to target
+    // Re-create ReplayInput from frames and replay up to the target frame.
     this.input = new ReplayInput(this._replay.frames)
-    this.input.seekTo(targetFrame)
     simulation.input = this.input
     // Lie-Back-Win-Mode: wire replay input2 for coop replays.
     simulation.input2 = this.input.input2 ?? null
-    // Fast-forward: run simulation ticks to replay up to the target frame
+    // Fast-forward: replay frames 0..targetFrame-1 so the world lands exactly
+    // at the target frame, then resume. advance() MUST be called once per tick
+    // (mirroring update()); without it every tick re-consumes the same frame and
+    // the timeline desyncs — the "drag the seek bar → replay breaks" bug.
     for (let i = 0; i < targetFrame; i++) {
       simulation.tick()
+      this.input.advance()
     }
     // Pause after seek
     this.phase = 'paused'
@@ -226,12 +231,22 @@ export class PlaybackController {
   }
 
   /**
-   * Exit playback. Restores the real Input and cleans up.
+   * Exit playback. Restores the live inputs and cleans up.
    * Game calls this to stop playback.
+   *
+   * The caller passes BOTH live inputs because only it knows the current
+   * wiring: in Lie-Back-Win-Mode the human input is decorated by AutoFireInput
+   * and player 2 is driven by GodAIInput. Defaulting `realInput2` to null and
+   * telling the caller to "re-wire if coop is active" was a trap — no caller
+   * ever did, so exiting a replay mid-coop silently dropped both the auto-fire
+   * decoration and the God AI (DECISIONS #76).
+   *
+   * @param realInput  The live player-1 input, already decorated if applicable.
+   * @param realInput2 The live player-2 input, or null when coop is off.
    */
-  exit(simulation: Simulation, realInput: InputLike): void {
-    simulation.input = realInput // restore live input
-    simulation.input2 = null // Lie-Back-Win-Mode: caller re-wires if coop is active
+  exit(simulation: Simulation, realInput: InputLike, realInput2: InputLike | null = null): void {
+    simulation.input = realInput
+    simulation.input2 = realInput2
     this.phase = 'ended'
   }
 

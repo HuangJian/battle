@@ -1,6 +1,7 @@
 import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
-import { FRAME_SCHEMA_VERSION } from './config'
+import { FRAME_SCHEMA_VERSION, isSupportedFrameSchema } from './config'
+import { frameSchemaVersionOf, packFrames, unpackFrames } from './pack'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
 import { generateUUID } from './uuid'
 
@@ -125,11 +126,16 @@ export interface SerializeInput {
  * Returns a string ready for Blob / Bun.write.
  */
 export function serializeReplayFile(input: SerializeInput): string {
+  // Declare the schema the BYTES actually use, not the newest one this build
+  // knows. A single-stream recording is packed as v1 (packFrames / InputRecorder
+  // downgrade for backward compat), so stamping the envelope with 0x02 was a
+  // lie that made the file unreadable to v1-era readers for no reason.
+  const blobSchema = frameSchemaVersionOf(input.frames)
   const envelope: FileEnvelope = {
     format: FORMAT_ID,
     formatVersion: FORMAT_VERSION,
     gameVersion: GAME_VERSION,
-    frameSchemaVersion: FRAME_SCHEMA_VERSION,
+    frameSchemaVersion: isSupportedFrameSchema(blobSchema) ? blobSchema : FRAME_SCHEMA_VERSION,
     source: input.source,
     replay: {
       initialSnapshot: input.initialSnapshot,
@@ -182,7 +188,10 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   if (env.formatVersion !== FORMAT_VERSION) {
     return { error: `Unsupported format version: ${String(env.formatVersion)}` }
   }
-  if (env.frameSchemaVersion !== FRAME_SCHEMA_VERSION) {
+  // Accept every schema this build can decode — NOT just the newest one.
+  // v1 files are still perfectly playable (unpackFrames / ReplayInput handle
+  // them), so rejecting them here orphaned real artifacts (DECISIONS #76).
+  if (!isSupportedFrameSchema(env.frameSchemaVersion)) {
     return { error: `Unsupported frame schema version: ${String(env.frameSchemaVersion)}` }
   }
 
@@ -212,6 +221,18 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     return { error: 'Invalid base64 frames data' }
   }
 
+  // The blob's leading byte is authoritative — the envelope field is only a
+  // declaration and older writers got it wrong. Gate on what we must decode.
+  const blobSchema = frameSchemaVersionOf(frames)
+  if (!isSupportedFrameSchema(blobSchema)) {
+    return { error: `Unsupported frame schema version: ${blobSchema}` }
+  }
+
+  // Re-derive the standalone P2 stream so an imported coop replay carries the
+  // same `frames2` an in-session recording would (InputRecorder produces it).
+  const streams = unpackFrames(frames)
+  const frames2 = streams?.p2 && streams.p2.length > 0 ? packFrames(streams.p2) : null
+
   // Rebuild Replay object
   const metadata = (replay.metadata ?? {}) as Partial<ReplayMetadata>
   const type: ReplayType = ((env.sim as SimEnvelope | undefined)?.status as ReplayType) ?? 'clear'
@@ -222,11 +243,11 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     type,
     createdAt: Date.now(),
     gameVersion: (env.gameVersion as string) ?? GAME_VERSION,
-    schemaVersion: FRAME_SCHEMA_VERSION,
+    schemaVersion: blobSchema,
     seed: (replay.seed as number) ?? (env.sim as SimEnvelope | undefined)?.seed ?? 0,
     initialSnapshot: replay.initialSnapshot as WorldSnapshot,
     frames,
-    frames2: null,
+    frames2,
     totalTicks: replay.totalTicks as number,
     durationMs,
     metadata: {
