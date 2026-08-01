@@ -210,6 +210,25 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** `crossfireAwareness` stays 0 (OFF). No new production params shipped. Local diagnostics (gitignored, never committed): `tools/diag/ab-test-crossfire.ts` (A/B, `--fix key=value`) persists locally; the ephemeral `tmp/cf-trace.ts` (diversion tracer) and `tmp/stage-metrics.ts` (metric correlation) were deleted before commit per §0.C rule 3.
 
+## 74. Steel-Fire Gate: Never Fire at Unpierceable Steel to Break Through (SHIPPED)
+
+**Decision:** New param `steelFireGate` (default **1** = ON; 0 = OFF = byte-identical pre-§74). When ON, the two navigate **break-through** fire sites in `think()` (aggressive navigate + T2b navigate) — which fire WITHOUT calling `shouldFireInDirImpl` — apply the same T11 steel gate that `shouldFireInDirImpl` already enforces: steel blocks fire while `p.level < STEEL_PIERCE_PLAYER_LEVEL` (3). Implemented as `steelFireBlockedImpl` (the T11 predicate) + `shouldFireBreakThroughImpl` (steel gate + §70 base-ring guard) in `FireControl.ts`, used at both sites.
+
+**Rationale:**
+- User report (2026-08-01): "player 不具备破钢能力时，不要射击钢铁障碍物来试图开路" — the AI fired at indestructible steel to open a path, wasted the bullet cap, then camped at the wall for the full camp timeout, cutting combat efficiency.
+- Root cause: T11 lives in `shouldFireInDirImpl`, but the break-through sites bypass it entirely, firing at whatever blocks the move direction — including steel.
+- Scope (per-seed A/B, 2026-08-01): deliberately applied ONLY to the break-through sites. The T2a/aggressive stop-and-aim sites fire on `scan.enemy` and are left ungated — the dual-offset case (steel on one scan line, enemy on the other) means the enemy is genuinely reachable by the center-line bullet, and a distance-blind gate there costs kills (arena A/B: 20 kills → 7 kills, gameover @1634 vs clear @4592).
+- Replay confirmation: `classic-s05-clear-l3-t67-seed1785579063833.replay` (coop, player2 = God AI) — player2 parked at (20,20) facing right and held fire at a steel wall for 80+ consecutive ticks (t≈450–530, "8秒"); 2051 of 2461 recorded fire ticks had steel in the line of fire with no enemy. Live coop re-sim from the same snapshot with the gate ON drops steel-fires 270 → 47 (−83%).
+- MANIFEST §13 Three Gates: (1) not wasting bullets on indestructible walls is more enjoyable; (2) one param + one predicate is simple; (3) the AI should not fight terrain it cannot affect.
+
+**Results (2026-08-01):**
+- 35×60 A/B (single-player corpus): suite 0.7685 → 0.7594, win rate 92% → 91%, mean Δ −0.0040 ± 0.0041 (t=−0.99, p=0.32) — **no stage moved significantly** (all p ≥ 0.05), so no per-seed tick-diff was triggered per §0.B. The gate is near-inert on the single-player corpus because A*/directMove never point `_moveDir` *into* steel; its measurable win is in coop (see replay evidence above).
+- Arena A/B (steel-ring curriculum): byte-identical (4592 ticks / 20 kills both arms) — zero kill loss from the scoped gate.
+- Regression gates pass: `godai-split-parity` / `god-ai-regression-gate` / `god-ai-curriculum` 22/22; full `bun run check` 686 tests green.
+- New unit tests (`tests/steel-fire-gate.test.ts`, 21 tests) lock the predicate, the break-through decision, the ungated-T2a scope decision, and the shipped default.
+
+**Implications:** Known non-goal — the gate does NOT suppress T2a/aggressive stop-and-aim fire in the dual-offset case (that fire is load-bearing). Known theoretical edge — `shouldFireBreakThroughImpl` blocks on `bs.steel` from either offset line, so a brick wall with steel closer on one offset line could suppress a legitimate brick-break; not observed on the 35×60 corpus (p=0.32), revisit only if a larger-seed run flips a stage. Tooling: A/B via `eval-suite --compare` with `{"steelFireGate":0}` vs default; per-seed via `per-seed-diff --set steelFireGate=0`.
+
 ## Performance Optimization
 
 Full history in `docs/perf-optimization.progress.md`.

@@ -12,6 +12,7 @@ import {
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
+  shouldFireBreakThroughImpl,
 } from './god/FireControl'
 import {
   findMostDangerousBulletImpl,
@@ -634,6 +635,37 @@ export interface GodAIParams {
    * keep-alignment block in T2a. The original hardcoded value was 5.
    */
   counterFireMaxRange: number
+
+  /**
+   * §74: Steel-fire gate — don't fire at steel walls the player cannot
+   * pierce while trying to BREAK THROUGH a wall. When > 0, the two
+   * break-through fire sites in think() that bypass shouldFireInDirImpl
+   * (aggressive navigate break-through + T2b navigate break-through) apply
+   * the same steel gate that shouldFireInDirImpl's T11 already enforces:
+   * steel blocks fire while `p.level < STEEL_PIERCE_PLAYER_LEVEL` (3).
+   *
+   * Without this gate, the AI fires at indestructible steel to open a path
+   * (wasting the bullet cap) and then camps at the wall for the full
+   * campTimeoutTicks (90 default) before the anti-camp escape — the
+   * reported "shoot steel, can't break through, stuck in place" behavior.
+   * With the gate ON, the AI falls through to navigation instead, which
+   * routes AROUND the steel via corridors (steel is impassable to A*),
+   * restoring mobility.
+   *
+   * Scope note (per-seed A/B, 2026-08-01): deliberately NOT applied to the
+   * T2a/aggressive stop-and-aim sites (which fire when scan.enemy is true)
+   * — the dual-offset case (steel on one scan line, enemy on the other)
+   * means the enemy is genuinely reachable by the center-line bullet, and
+   * suppressing that fire costs kills (arena A/B: 20 kills → 7 kills).
+   *
+   * At level ≥ 3 the player CAN pierce steel, so break-through fire at
+   * steel is correct and the gate is inert (byte-identical to pre-§74
+   * behavior).
+   *
+   * 0 = OFF (byte-identical to pre-§74 behavior — A/B baseline).
+   * 1 = ON (default — the fix).
+   */
+  steelFireGate: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -825,6 +857,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // Max range (cells) for the facing-enemy block. 5 = the original §52 v2
   // hardcoded value.
   counterFireMaxRange: 5,
+  // §74: Steel-fire gate — 1 = ON (default). 0 = OFF (pre-§74 behavior,
+  // A/B baseline). See interface docs.
+  steelFireGate: 1,
 }
 
 /**
@@ -1490,10 +1525,14 @@ export class GodAIInput implements InputLike {
       // the player's own base (T6). In classic instant combat the base has
       // 1 HP, so a single self-inflicted bullet destroys it.
       if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-        // §70: guard the base ring — never fire through base brick/steel.
+        // §70/§74: break-through fire — never fire through base brick/steel
+        // (§70) or at steel the player can't pierce (§74). Both guards live
+        // in shouldFireBreakThroughImpl.
         const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
         const lvl = p.level ?? 0
-        if (bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))) this._fire = !onCooldown
+        if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {
+          this._fire = !onCooldown
+        }
       } else {
         this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
       }
@@ -1853,10 +1892,14 @@ export class GodAIInput implements InputLike {
     // (T5) instead of the wall, leaving the player stuck. When moving
     // freely, fire only at enemies (not walls) to save the bullet cap.
     if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-      // §70: guard the base ring — never fire through base brick/steel.
+      // §70/§74: break-through fire — never fire through base brick/steel
+      // (§70) or at steel the player can't pierce (§74). Both guards live
+      // in shouldFireBreakThroughImpl.
       const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
       const lvl = p.level ?? 0
-      if (bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))) this._fire = !onCooldown
+      if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {
+        this._fire = !onCooldown
+      }
     } else {
       this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir, false)
     }

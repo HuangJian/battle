@@ -520,6 +520,66 @@ export function shouldFireInDirImpl(
 }
 
 /**
+ * §74: Steel-fire gate — should the given scan result block firing?
+ *
+ * Mirrors the T11 steel check in shouldFireInDirImpl exactly (which inlines
+ * the same `result.steel && !result.baseSteel && level < 3` check):
+ * `result.steel && !result.baseSteel && level < STEEL_PIERCE_PLAYER_LEVEL`.
+ * Used by shouldFireBreakThroughImpl (the navigate break-through sites in
+ * think()), so the steel gate is uniform everywhere the AI might fire at a
+ * wall — the navigate sites previously bypassed shouldFireInDirImpl and
+ * never applied T11.
+ *
+ * Base-ring steel (`baseSteel`) is deliberately NOT blocked here: base-ring
+ * steel is already handled by the §70 guard at each call site, and at
+ * level < 3 the player cannot pierce base steel either, so T6's
+ * "never destroy own base" concern is moot below the pierce level.
+ *
+ * @param gateOn the steelFireGate param value (0 = OFF = byte-identical
+ *   to pre-§74 behavior).
+ */
+export function steelFireBlockedImpl(
+  result: { steel: boolean; baseSteel: boolean },
+  level: number | undefined,
+  gateOn: number,
+): boolean {
+  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < 3
+}
+
+/**
+ * §74: Break-through fire decision (T2b navigate + aggressive navigate).
+ *
+ * The navigate branches fire at a wall in the movement direction to break
+ * through it (dig path). That fire is FUTILE when the wall is steel and the
+ * player cannot pierce steel (level < 3) — the bullet does nothing, the AI
+ * wastes the bullet cap, and then camps at the wall for the full camp
+ * timeout (the reported "shoot steel → can't break → stuck in place"
+ * behavior). This helper applies the steel-fire gate to the break-through
+ * condition.
+ *
+ * NOTE (per-seed A/B finding, 2026-08-01): this gate is applied ONLY to the
+ * break-through sites. It is deliberately NOT applied to the T2a/aggressive
+ * stop-and-aim fire (which fires when scan.enemy is true) — the dual-offset
+ * case there (steel on one scan line, enemy on the other) means the enemy is
+ * genuinely reachable by the center-line bullet, and suppressing that fire
+ * costs kills (arena A/B: 20 kills → 7 kills, gameover @1634 vs clear @4592).
+ */
+export function shouldFireBreakThroughImpl(
+  bs: {
+    enemy: boolean
+    baseWall: boolean
+    baseSteel: boolean
+    steel: boolean
+  },
+  level: number | undefined,
+  gateOn: number,
+): boolean {
+  if (steelFireBlockedImpl(bs, level, gateOn)) return false
+  // §70: never fire through base brick/steel. Enemy in line of fire wins.
+  return bs.enemy || (!bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3))
+}
+
+/**
  * §49: Check if an enemy is facing toward the player (炮口相向) and is in
  * the player's line of fire. Returns the enemy + distance, or null.
  *
