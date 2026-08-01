@@ -132,6 +132,7 @@ export function scanAheadImpl(
   wall: boolean
   steel: boolean
   baseWall: boolean
+  baseWallDist: number
   baseSteel: boolean
   steelCol: number
   steelRow: number
@@ -161,6 +162,7 @@ export function scanAheadImpl(
   r.wall = false
   r.steel = false
   r.baseWall = false
+  r.baseWallDist = Infinity
   r.baseSteel = false
   r.steelCol = -1
   r.steelRow = -1
@@ -237,6 +239,7 @@ export function scanAheadImpl(
           const ar = dr < 0 ? -dr : dr
           if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
             r.baseWall = true
+            r.baseWallDist = stepCount
           }
         }
         r.wall = true
@@ -244,6 +247,7 @@ export function scanAheadImpl(
       }
       if (terrain === 'base') {
         r.baseWall = true
+        r.baseWallDist = stepCount
         r.wall = true
         break
       }
@@ -575,8 +579,13 @@ export function shouldFireBreakThroughImpl(
   gateOn: number,
 ): boolean {
   if (steelFireBlockedImpl(bs, level, gateOn)) return false
-  // §70: never fire through base brick/steel. Enemy in line of fire wins.
-  return bs.enemy || (!bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3))
+  // §70/§74 base-ring guard: never fire through base brick/steel. NO `bs.enemy ||
+  // ...` short-circuit — the old `bs.enemy || (!bs.baseWall && ...)` fired through
+  // the base wall on dual-offset scans (see DECISIONS §75 / commit 54600f9),
+  // causing 4 player-suicide base destructions in S32. Break-through is for
+  // breaking walls, so only fire when the wall ahead is breakable (not a base
+  // wall / base-ring steel). Enemy-as-obstacle still fires (baseWall=false).
+  return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3)
 }
 
 /**
