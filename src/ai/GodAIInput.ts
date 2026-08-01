@@ -990,6 +990,9 @@ export class GodAIInput implements InputLike {
     wall: boolean
     steel: boolean
     baseWall: boolean
+    baseSteel: boolean
+    steelCol: number
+    steelRow: number
     enemyDist: number
     enemyKind: TankKind
     enemyHp: number
@@ -999,6 +1002,9 @@ export class GodAIInput implements InputLike {
     wall: false,
     steel: false,
     baseWall: false,
+    baseSteel: false,
+    steelCol: -1,
+    steelRow: -1,
     enemyDist: Infinity,
     enemyKind: 'basic',
     enemyHp: 1,
@@ -1327,7 +1333,10 @@ export class GodAIInput implements InputLike {
       // the player's own base (T6). In classic instant combat the base has
       // 1 HP, so a single self-inflicted bullet destroys it.
       if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-        this._fire = !onCooldown
+        // §70: guard the base ring — never fire through base brick/steel.
+        const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
+        const lvl = p.level ?? 0
+        if (bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))) this._fire = !onCooldown
       } else {
         this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
       }
@@ -1676,9 +1685,10 @@ export class GodAIInput implements InputLike {
     // (T5) instead of the wall, leaving the player stuck. When moving
     // freely, fire only at enemies (not walls) to save the bullet cap.
     if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-      // Blocked by a breakable wall or enemy tank — fire to break through.
-      // canMoveOrBreak already verified the wall is non-base-protection.
-      this._fire = !onCooldown
+      // §70: guard the base ring — never fire through base brick/steel.
+      const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
+      const lvl = p.level ?? 0
+      if (bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))) this._fire = !onCooldown
     } else {
       this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir, false)
     }

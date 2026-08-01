@@ -132,6 +132,9 @@ export function scanAheadImpl(
   wall: boolean
   steel: boolean
   baseWall: boolean
+  baseSteel: boolean
+  steelCol: number
+  steelRow: number
   enemyDist: number
   enemyKind: TankKind
   enemyHp: number
@@ -158,6 +161,9 @@ export function scanAheadImpl(
   r.wall = false
   r.steel = false
   r.baseWall = false
+  r.baseSteel = false
+  r.steelCol = -1
+  r.steelRow = -1
   r.enemyDist = Infinity
   r.enemyKind = 'basic'
   r.enemyHp = 1
@@ -212,6 +218,10 @@ export function scanAheadImpl(
       }
 
       if (terrain === 'steel') {
+        // Store steel cell coords for post-loop baseSteel check (§70).
+        // Only two assignments — keeps the hot loop untouched (V8 JIT stable).
+        r.steelCol = col
+        r.steelRow = row
         r.steel = true
         r.wall = true
         break
@@ -286,6 +296,27 @@ export function scanAheadImpl(
       col += vdx
       row += vdy
       stepCount++
+    }
+  }
+
+  // §70: Post-loop baseSteel detection. Compute OUTSIDE the hot scan loop
+  // to avoid changing V8's JIT optimization of the per-cell iteration.
+  // OOB cells (steelCol=-1 or out of grid) are field edges, not base
+  // protection — skip them.
+  if (
+    r.steel &&
+    hasBase &&
+    r.steelCol >= 0 &&
+    r.steelCol < GRID &&
+    r.steelRow >= 0 &&
+    r.steelRow < GRID
+  ) {
+    const dc = r.steelCol - baseCol
+    const dr = r.steelRow - baseRow
+    const ad = dc < 0 ? -dc : dc
+    const ar = dr < 0 ? -dr : dr
+    if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
+      r.baseSteel = true
     }
   }
 
@@ -425,8 +456,10 @@ export function shouldFireInDirImpl(
   // finds an enemy, BOTH result.steel and result.enemy are true. Checking
   // enemy first would cause the AI to fire through steel.
   if (result.baseWall) return false
-  if (result.steel && (p.level ?? 0) < 3) return false
-  // Steel with level ≥ 3: fall through to enemy check (can pierce).
+  if (result.baseSteel && (p.level ?? 0) >= 3) return false
+  // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
+  // level ≥ 3 falls through to the enemy check (can pierce).
+  if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
 
   // Enemy in line of fire — fire.
   if (result.enemy) {

@@ -342,3 +342,54 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 - `crossfirePathCost` 默认 **0（OFF）**
 - 所有基础设施（`computeThreatCostsImpl`、`threatCosts` in `PathConstraints`、`crossfireOpenObstacleRatio` 门控）**完整保留**，默认 OFF 时字节一致
 - **交叉火力感知实验系列正式终结**（§68-v1 → §68-v2 → §69-A → §69-B）
+
+---
+
+## §70 基地环开火保护（修复 coop 自杀 + V8 JIT 热循环敏感性发现）
+
+### 背景
+`plan/fix-suicide.task.md`：God AI 在 coop 模式（player2 出生在基地右侧）会打破基地保护砖/钢铁自杀。
+
+### 根因（三层逐层剥洋葱）
+
+1. **自杀根因**：T2b 导航开火分支用 `!canMoveDir` 触发开火，绕过 T6 基地保护检查。coop 模式 `_moveDir=left` 指向基地砖墙直接开火打掉。
+
+2. **S32 -5pp 回归根因（OOB 假阳性）**：`baseSteel` 检测放在 `scanAheadImpl` 热循环的 steel 分支里，对 OOB 格子（默认 `'steel'`）也运行。S32 底边 `row=GRID`（dr=|26-24|=2）被误判为 `baseSteel`，导致 T6 的非基地钢铁守卫 `result.steel && !result.baseSteel && level < 3` 变 false——AI 不再阻止对场边射击，浪费子弹。
+
+3. **S32 -1pp 残留回归根因（V8 JIT 敏感性）**：即使加了 OOB 边界检查，steel 分支里多出的变量声明和比较改变了 V8 对 `scanAheadImpl` 的 JIT 优化，导致 `shouldFireInDir` 路径出现微妙行为差异。
+
+### 修复方案
+
+**不在热循环里做 baseSteel 检测**。steel 分支只做两个赋值（`r.steelCol = col; r.steelRow = row`），循环结束后在 post-loop 块做一次 baseSteel 带状检查。OOB 天然排除（steelCol=-1 或越界）。
+
+### 60-seed A/B 对比（`bun tools/eval/eval-suite.ts --seeds 60`）
+
+| 指标 | 修复前 | 修复后 | Δ |
+|---|---|---|---|
+| Suite score | 0.7254 | 0.7291 | +0.0037 |
+| LCB | 0.7205 | 0.7242 | +0.0037 |
+| Fitness v6 | 720.5 | 724.2 | +3.7 |
+| Mean win rate | 89% | 89% | 0 |
+| S32 Diamond score | 0.527 | 0.532 | +0.005 |
+| S32 Diamond win | 67% | 67% | 0 |
+| Coop 自杀 | 有 | 0 | 消除 |
+
+**零净回归。** Suite score 和 fitness 均有微小提升（在 ±se=0.0049 范围内）。
+
+### 方法论创新：per-seed tick-diff 诊断法
+
+本次研究过程中发现了一种高效的 God AI 回归诊断方法，已固化为可复用脚本 `tools/diag/per-seed-diff.ts`。
+
+**方法**：
+1. 用 `dump` 模式运行一个翻转 seed 的完整仿真，导出逐 tick 紧凑签名（位置、方向、开火、移动方向、敌人数、子弹数、游戏状态）
+2. `git stash` 回退代码，再运行一次 `dump`
+3. `git stash pop` 恢复代码
+4. 用 `diff` 模式比较两次输出，找到第一个分歧 tick 和变化的字段
+
+**为什么需要**：总胜率对比（eval-suite）只能告诉你"回归了多少"，但不能告诉你"哪个 tick、哪个决策导致了翻转"。per-seed tick-diff 能精确定位第一个分歧点，然后回溯到导致分歧的代码变更。
+
+**V8 JIT 教训**：在每秒调用数千次的热循环里加代码（即使功能上是 no-op）会改变 V8 的优化决策，导致 cascade 行为差异。热循环改动必须用 per-seed 对比验证，不能只看总胜率。本次的 -1pp 残留回归就是通过此方法发现的——diff 显示 tick 1062 的 `fire` 字段从 `.` 变成 `F`，由此追溯到 steel 分支里的额外计算改变了 V8 对 `scanAheadImpl` 的 JIT 优化。
+
+### 质量门禁
+- `bun run check`：644 测试全绿，tsc + oxlint + oxfmt clean
+- 回归 gate 原始 truth 值不变，floor 不降
