@@ -16,7 +16,7 @@
 // By comparing tick-by-tick signatures, you can pinpoint the exact tick and
 // decision (fire/moveDir/position) where the AI diverges, then trace that
 // back to the code change responsible. See DECISIONS.md §70 for the full
-// case study.
+// case study; method write-up: docs/god-ai-tuning.progress.md §0.B.
 //
 // NOTE: Requires the GodAIInput to be the player's input (solo mode, not coop).
 
@@ -39,40 +39,40 @@ Usage:
   bun tools/diag/per-seed-diff.ts diff <fileA> <fileB>     Compare two dumps
 
 Diagnostic flags (dump mode only):
-  --steelOcclusion   Enable §48-revisit steel-only evasion occlusion
-  --noCounterFire    Disable §49-revisit 炮口相向对枪抵消 (§52 v2) — dumps
-                     the pre-§52 plain-T2a behavior (A/B OFF arm)
+  --set <key>=<value>   Override any numeric GodAIParams key (repeatable).
+                        Generic — reuse for any future parameter diagnostic
+                        without tool changes (progress doc §0.C rule 2).
+                        e.g. --set evasionSteelOcclusion=1 / --set counterFire=0
 
 Workflow:
   1. bun tools/diag/per-seed-diff.ts dump 32 5 > /tmp/before.txt
-  2. bun tools/diag/per-seed-diff.ts dump 32 5 --steelOcclusion > /tmp/after.txt
+  2. bun tools/diag/per-seed-diff.ts dump 32 5 --set evasionSteelOcclusion=1 > /tmp/after.txt
   3. bun tools/diag/per-seed-diff.ts diff /tmp/before.txt /tmp/after.txt
 `
 
 function dump(stageIdx: number, seed: number): void {
   const stage = STAGES[stageIdx]
   const godAIParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
-  // Diagnostic flag: --steelOcclusion enables §48-revisit steel-only occlusion.
-  if (process.argv.includes('--steelOcclusion')) {
-    godAIParams.evasionSteelOcclusion = 1
+  // Generic param override (dump mode only): --set <key>=<value>, repeatable.
+  // Any numeric GodAIParams key — future diagnostics need no tool changes.
+  // Param-specific hardcoded flags (--steelOcclusion / --noCounterFire /
+  // --brickGate) are deliberately unsupported; see progress doc §0.C rule 2.
+  for (let ai = 0; ai < process.argv.length; ai++) {
+    if (process.argv[ai] !== '--set') continue
+    const kv = process.argv[ai + 1]
+    if (!kv || !kv.includes('=')) {
+      console.error('--set expects key=value (e.g. --set counterFire=0)')
+      process.exit(1)
+    }
+    const eq = kv.indexOf('=')
+    const key = kv.slice(0, eq)
+    const val = Number(kv.slice(eq + 1))
+    if (isNaN(val) || !(key in godAIParams)) {
+      console.error(`--set: unknown or non-numeric param '${key}'`)
+      process.exit(1)
+    }
+    ;(godAIParams as unknown as Record<string, number>)[key] = val
   }
-  // Diagnostic flag: --noCounterFire disables §49-revisit 对枪抵消 (§52 v2),
-  // dumping the pre-§52 plain-T2a form (the A/B OFF arm).
-  if (process.argv.includes('--noCounterFire')) {
-    godAIParams.counterFire = 0
-  }
-  // Diagnostic flag: --brickGate <ratio> enables occlusion via the terrain
-  // gate (computeStageAdaptedParams auto-enables it on steel-maze stages only).
-  const brickGateArg = process.argv.indexOf('--brickGate')
-  if (brickGateArg >= 0) {
-    godAIParams.evasionSteelOcclusionBrickRatio = parseFloat(process.argv[brickGateArg + 1] ?? '0')
-  }
-  // Diagnostic flag: --naiveOcclusion simulates the original §48 fix (brick +
-  // steel occlusion) by setting evasionSteelOcclusion=1 AND a sentinel that
-  // the dump path reads. NOTE: the production code only implements
-  // steel-only; the naive brick+steel variant is simulated by temporarily
-  // editing ThreatAssessor.ts (see DECISIONS §48-revisit). This flag just
-  // sets the param so the dump runs with occlusion ON.
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = 'classic'

@@ -6,7 +6,7 @@
 
 ---
 
-## 0. 当前状态速览（截至 2026-08-01 §68 交叉火力感知实验）
+## 0.A 当前状态速览（截至 2026-08-01 §68 交叉火力感知实验）
 
 | 指标 | 数值 | 口径 |
 |---|---|---|
@@ -24,6 +24,32 @@
 > parity 8 seeds 保持 pre-§48 基线（§47 仿真层修复对 parity 关卡 S0 无影响）。
 
 **演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）。
+
+---
+
+## 0.B 方法论创新：per-seed tick-diff 诊断法
+
+本次研究过程中发现了一种高效的 God AI 回归诊断方法，已固化为可复用脚本 `tools/diag/per-seed-diff.ts`。
+
+**方法**：
+1. 用 `dump` 模式运行一个翻转 seed 的完整仿真，导出逐 tick 紧凑签名（位置、方向、开火、移动方向、敌人数、子弹数、游戏状态）
+2. `git stash` 回退代码，再运行一次 `dump`
+3. `git stash pop` 恢复代码
+4. 用 `diff` 模式比较两次输出，找到第一个分歧 tick 和变化的字段
+
+**为什么需要**：总胜率对比（eval-suite）只能告诉你“回归了多少”，但不能告诉你“哪个 tick、哪个决策导致了翻转”。per-seed tick-diff 能精确定位第一个分歧点，然后回溯到导致分歧的代码变更。
+
+**V8 JIT 教训**：在每秒调用数千次的热循环里加代码（即使功能上是 no-op）会改变 V8 的优化决策，导致 cascade 行为差异。热循环改动必须用 per-seed 对比验证，不能只看总胜率。本次的 -1pp 残留回归就是通过此方法发现的——diff 显示 tick 1062 的 `fire` 字段从 `.` 变成 `F`，由此追溯到 steel 分支里的额外计算改变了 V8 对 `scanAheadImpl` 的 JIT 优化。
+
+---
+
+## 0.C 调优签入规则（per-seed tick-diff 方法）
+
+调优循环（A/B → per-seed tick-diff → 修复 → 组合重验）产出的非交付物按以下规则处理：
+
+1. **A/B test 脚本不做版本管理**：验证完毕后的 `ab-test-*.ts` 不入库。它们是一次性诊断脚本，保留价值在结果而非代码——本地保留（`.gitignore` 已忽略），需要时直接重跑。
+2. **per-seed-diff.ts 的修改必须可泛化**：验证过程中对 `tools/diag/per-seed-diff.ts` 的修改，只有能泛化到将来其它参数诊断的才入库。参数覆盖统一走通用 `--set <key>=<value>` 标志（可重复，任意数值型 GodAIParams key）；参数特化的硬编码标志（如 `--steelOcclusion`、`--noCounterFire`、`--brickGate`）不入库。
+3. **临时数据文件不入库**：验证产生的临时数据文件（如 `tmp/` 下的 tick-dump、A/B 输出）在 `.gitignore` 中忽略，并在每次 commit 前删除。
 
 ---
 
@@ -171,11 +197,13 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 | `tools/eval/validate-p4.ts --seeds N` | 全 35 关扫描终审 |
 | `tools/optimize/probe-params.ts` / `tools/diag/probe-s32.ts` | 参数敏感度探针（`--skipStageOverrides` 量纯参数） |
 | `tools/diag/diagnose-s32.ts` | 失败归因诊断（拆家时刻/玩家位置/凶手类型） |
-| `tools/optimize/ab-test-smart-threat.ts` | 35 关 off/on A/B |
+| `tools/optimize/ab-test-smart-threat.ts`（不入库，见 §0.C） | 35 关 off/on A/B |
 | `tools/diag/decision-trace.ts` + `tools/diag/analyze-trace.ts` | 逐 tick 决策追踪 |
 | `tools/relock-parity.ts`（已移除，一次性脚本） | parity 基线重锁 |
 | `tools/optimize/curriculum.ts`（`bun run curriculum`） | 5 迷你关子系统隔离验证 |
 | `tests/god-ai-regression-gate.test.ts` | 全 35×20 回归门禁（~11s） |
+
+> 注：A/B 诊断脚本（`ab-test-*.ts`，含 `tools/diag/ab-test-counter-fire.ts`、`tools/diag/ab-test-steel-occlusion.ts`）验证完毕后不入库，本地保留可重跑（§0.C 规则 1）。
 
 ---
 
@@ -396,20 +424,6 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 | Coop 自杀 | 有 | 0 | 消除 |
 
 **零净回归。** Suite score 和 fitness 均有微小提升（在 ±se=0.0049 范围内）。
-
-### 方法论创新：per-seed tick-diff 诊断法
-
-本次研究过程中发现了一种高效的 God AI 回归诊断方法，已固化为可复用脚本 `tools/diag/per-seed-diff.ts`。
-
-**方法**：
-1. 用 `dump` 模式运行一个翻转 seed 的完整仿真，导出逐 tick 紧凑签名（位置、方向、开火、移动方向、敌人数、子弹数、游戏状态）
-2. `git stash` 回退代码，再运行一次 `dump`
-3. `git stash pop` 恢复代码
-4. 用 `diff` 模式比较两次输出，找到第一个分歧 tick 和变化的字段
-
-**为什么需要**：总胜率对比（eval-suite）只能告诉你"回归了多少"，但不能告诉你"哪个 tick、哪个决策导致了翻转"。per-seed tick-diff 能精确定位第一个分歧点，然后回溯到导致分歧的代码变更。
-
-**V8 JIT 教训**：在每秒调用数千次的热循环里加代码（即使功能上是 no-op）会改变 V8 的优化决策，导致 cascade 行为差异。热循环改动必须用 per-seed 对比验证，不能只看总胜率。本次的 -1pp 残留回归就是通过此方法发现的——diff 显示 tick 1062 的 `fire` 字段从 `.` 变成 `F`，由此追溯到 steel 分支里的额外计算改变了 V8 对 `scanAheadImpl` 的 JIT 优化。
 
 ### 质量门禁
 - `bun run check`：644 测试全绿，tsc + oxlint + oxfmt clean

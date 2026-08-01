@@ -17,3 +17,7 @@ generated-stages.json
 # Call history archive (plan/God-AI-Replay-Visualization)
 replays/
 *.cpuprofile
+
+# God AI 调优一次性诊断产物（progress doc §0.C：A/B 脚本不入库，临时数据 commit 前删除）
+tmp/
+ab-test-*.ts
