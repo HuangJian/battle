@@ -182,7 +182,10 @@ export class Game {
    */
   requestCoopToggle(): void {
     const w = this.world
-    if (w.state !== 'menu' && w.state !== 'paused') return
+    // Available from the menu, a paused game, and the MISSION FAILED (recovery)
+    // screen so co-op can be armed before retrying. (A live 'playing' game and
+    // terminal 'gameover'/'victory' states intentionally fall through to no-op.)
+    if (w.state !== 'menu' && w.state !== 'paused' && w.state !== 'recovery') return
 
     if (w.coop) {
       // Disable coop: World mutation deferred to Simulation (One-Author).
@@ -261,12 +264,22 @@ export class Game {
       onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       onToggleCoop: () => this.requestCoopToggle(),
       onOpenControls: () => {
-        if (this.world.state === 'menu') {
+        const s = this.world.state
+        // The panel is a static modal; it opens over any static screen (menu /
+        // paused / MISSION FAILED recovery / classic game over). ('paused' is
+        // reached when clicking Key Bindings during play: the Control Center
+        // auto-pauses before invoking this callback, so a static screen is
+        // already underneath the modal.) Elsewhere the live world is running
+        // and the panel can't be shown over it.
+        if (s === 'menu' || s === 'recovery' || s === 'gameover' || s === 'paused') {
           ui.openControls()
         } else {
-          ui.notify('Key bindings are available from the main menu', 'warn')
+          ui.notify('Key bindings are available when the game is paused', 'warn')
         }
       },
+      onThemePause: () => this.themePause(),
+      onThemeCycle: () => this.themeCycle(),
+      onSelectTheme: (key: string) => this.selectThemeByKey(key),
       getCounts: () => ({
         total: this.snapshots.count(),
         manual: this.snapshots.count('manual'),
@@ -933,6 +946,11 @@ export class Game {
       if (this.input.isSnapshotPressed()) {
         this.manualSnapshot()
       }
+      // Theme cycle — Alt+T (configurable). Pauses the game and advances to
+      // the next theme. Re-binding to a key other than Alt+T is supported.
+      if (this.input.isThemePressed()) {
+        this.themeCycle()
+      }
       if (this.input.isResetPressed()) {
         this.resetToMenu()
       }
@@ -1003,6 +1021,76 @@ export class Game {
     this.audio.resume()
     this.audio.playMenuSelect()
     this.refreshStaticScreen()
+  }
+
+  /**
+   * Pause so the theme dropdown / cycle can be shown. Idempotent: only pauses
+   * a live game that is currently 'playing' (a 'pause' snapshot is captured,
+   * matching the normal P-pause), or a replay that is currently playing. If
+   * the game is already paused (or the replay already paused, or we're on the
+   * menu) it is a no-op, so repeated Alt+T presses or a dropdown open never
+   * un-pause the player.
+   */
+  private themePause(): void {
+    if (this.playback) {
+      if (!this.playback.isPaused) {
+        this.playback.togglePause()
+        this.presentation.ui.setReplayMode(true, true, this.playback.replay?.metadata.difficulty)
+      }
+    } else if (this.world.state === 'playing') {
+      this.simulation.togglePause()
+      this.snapshots.create('pause', this.world)
+      this.audio.playPause()
+    }
+    this.presentation.markNeedsRender()
+    this.presentation.updateUI(this.world)
+  }
+
+  /** Alt+T (or theme-cycle button): pause, then advance to the next theme. */
+  private themeCycle(): void {
+    this.themePause()
+    const current = THEME_KEYS.indexOf(this.world.themeKey)
+    const next = (current + 1) % THEME_KEYS.length
+    this.applyThemeAndRepaint(next, !this.playback)
+  }
+
+  /** Dropdown pick: pause, then switch to a specific theme by config key. */
+  private selectThemeByKey(key: string): void {
+    const idx = THEME_KEYS.indexOf(key)
+    if (idx < 0) return
+    this.themePause()
+    this.applyThemeAndRepaint(idx, !this.playback)
+  }
+
+  /**
+   * Set the world theme to `index` and repaint. The HTML UI theme variables
+   * are re-applied automatically by `PresentationLayer.updateUI` (which calls
+   * `applyThemeIfChanged`) on the next frame; we additionally force an
+   * immediate repaint when the loop would otherwise be idle (menu / paused /
+   * ended replay with no rAF driver) so the change is visible at once.
+   *
+   * `persist` writes the choice to saved settings — skipped during replay so a
+   * replay's visual theme never pollutes the player's default theme.
+   */
+  private applyThemeAndRepaint(index: number, persist: boolean): void {
+    this.themeIndex = index
+    this.world.themeKey = THEME_KEYS[index]
+    this.world.theme = THEMES[this.world.themeKey]
+    this.presentation.markNeedsRender()
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    if (persist) this.saveSettings()
+    // When there is no rAF loop driving repaints (idle/low-power states, and
+    // not mid-replay where the loop is alive) render the new theme now.
+    if (!this.playback && LOW_POWER_STATES.has(this.world.state)) {
+      this.presentation.updateUI(this.world)
+      if (this.presentation.shouldRender(this.world)) {
+        this.presentation.render(this.world, 0)
+      }
+    } else {
+      this.presentation.updateUI(this.world)
+    }
   }
 
   /** Mouse: start button — same as the keyboard confirm (Enter/Space). */
@@ -1146,6 +1234,14 @@ export class Game {
     // The Snapshot Browser overlays the recovery menu when opened via
     // "Choose a Snapshot…" — it owns all input until closed.
     if (this.presentation.ui.snapshotBrowser.isOpen()) return
+    // The Replay Browser can be opened over the recovery menu from the
+    // Control Center — it owns all key input while open, so don't let arrow
+    // keys move the recovery cursor underneath it.
+    if (this.presentation.ui.replayBrowser.isOpen()) return
+    // The Key Bindings panel can also be opened over the recovery menu from
+    // the Control Center — don't let arrow keys move the recovery cursor
+    // underneath it.
+    if (this.presentation.ui.isControlsOpen()) return
 
     // Navigate up/down
     if (this.input.isUpPressed()) {
@@ -1584,6 +1680,12 @@ export class Game {
       this.resetToMenu()
       return
     }
+    // Theme cycle — Alt+T (configurable). Pauses the replay and advances to
+    // the next theme. (Replay playback is presentation-only, so switching the
+    // visual theme never disturbs the replay's determinism.)
+    if (this.input.isThemePressed()) {
+      this.themeCycle()
+    }
   }
 
   /** Canvas click during replay → toggle play/pause and show controller. */
@@ -1716,8 +1818,6 @@ export class Game {
 
   /** Open the Replay Browser (Control Center button). */
   private openReplayBrowser(): void {
-    // Never on top of the recovery flow.
-    if (this.world.state === 'recovery') return
     // A replay is playing/paused/ended → leave it and return to the menu
     // before showing the browser. Mirrors the Escape-during-playback path
     // (stopPlayback + resetToMenu). This is required: clearing this.playback
@@ -1731,6 +1831,9 @@ export class Game {
       this.simulation.togglePause()
       this.snapshots.create('pause', this.world)
     }
+    // Allowed on the MISSION FAILED (recovery) screen too: the browser is a
+    // z-index-30 fixed modal and its onClose is a no-op there, so it layers
+    // cleanly over the recovery menu and returns to it when closed.
     this.presentation.ui.replayBrowser.open()
   }
 }

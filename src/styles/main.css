@@ -1821,6 +1821,82 @@ body.theme-modern .ui-menu {
   padding: 2px 2px 0;
 }
 
+/* GAMEPLAY — Theme switcher button + dropdown (Alt+T) */
+.cc-theme-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cc-theme-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cc-theme-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--theme-panel-bg);
+  border: 1px solid var(--theme-accent-primary);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--theme-panel-shadow);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.cc-theme-dropdown[hidden] {
+  display: none;
+}
+
+.cc-theme-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--theme-text-secondary);
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.cc-theme-option:hover {
+  color: var(--theme-text-primary);
+  background: var(--theme-button-hover);
+  border-color: var(--theme-accent-primary);
+}
+
+.cc-theme-option.selected {
+  color: var(--theme-text-primary);
+  background: var(--theme-accent-primary);
+  border-color: var(--theme-accent-primary);
+}
+
+.cc-theme-option.selected .cc-theme-name {
+  color: #0a0c10;
+}
+
+.cc-theme-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  flex: 0 0 auto;
+}
+
 /* Hide the sidebar on narrow screens — the playfield comes first */
 @media (max-width: 900px) {
   .control-center {

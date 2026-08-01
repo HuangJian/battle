@@ -1159,23 +1159,30 @@ export class UIManager {
     return this.footer
   }
 
-  /** Open the controls panel over the menu. */
+  /**
+   * Open the controls panel as a modal overlay over whatever screen is
+   * currently active (menu, recovery, gameover). The underlying screen
+   * keeps its `active` class; `showScreen()` will re-sync on close.
+   */
   openControls(): void {
     if (this.controlsOpen) return
     this.controlsOpen = true
-    this.menuScreen.classList.remove('active')
     this.controlsScreen.classList.add('active')
     this.listeningAction = null
     this.refreshAllKeyButtons()
   }
 
-  /** Close the controls panel and return to the menu. */
+  /**
+   * Close the controls panel. The underlying screen's `active` class was
+   * never removed, so it is already visible; `update() → showScreen()` on
+   * the next frame will confirm the correct screen (menu, recovery, or
+   * gameover) — no forced class swap needed.
+   */
   closeControls(): void {
     if (!this.controlsOpen) return
     this.controlsOpen = false
     this.listeningAction = null
     this.controlsScreen.classList.remove('active')
-    this.menuScreen.classList.add('active')
   }
 
   private createControlsScreen(): HTMLElement {
