@@ -126,6 +126,7 @@ held keys by "last pressed wins" order.
 | Timed power-ups stack duration on re-pickup | `docs/features.md` §1.3 |
 | Enemy dead-end shaft recovery (tunnel out of 1-wide channel) | `docs/features.md` §4 |
 | Snapshot management framework (one model, four origins, policy-driven retention) | `docs/architecture.md` §7 |
+| Recovery-screen UI state guards extracted to pure predicates (`uiFlowGates.ts`) | The MISSION FAILED (recovery) screen buttons (Replay Browser / Lie-Back Win / Key Bindings) were dead / erroring because their *state guards* in Game.ts forgot `'recovery'`. The guards were extracted into a DOM-free module so the fix is regression-tested headlessly (`tests/recovery-screen-flow.test.ts`). Game.ts consults the same predicates — one source of truth, no behavior change. |
 
 ## God AI Tuning
 

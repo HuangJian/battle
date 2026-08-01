@@ -25,6 +25,7 @@ import { PlaybackController } from '../replay/PlaybackController'
 import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
+import { canOpenControls, canToggleCoop, isReplayBrowserBlocked } from './uiFlowGates'
 import { createReplayStorage } from '../replay/storage'
 import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
@@ -185,7 +186,7 @@ export class Game {
     // Available from the menu, a paused game, and the MISSION FAILED (recovery)
     // screen so co-op can be armed before retrying. (A live 'playing' game and
     // terminal 'gameover'/'victory' states intentionally fall through to no-op.)
-    if (w.state !== 'menu' && w.state !== 'paused' && w.state !== 'recovery') return
+    if (!canToggleCoop(w.state)) return
 
     if (w.coop) {
       // Disable coop: World mutation deferred to Simulation (One-Author).
@@ -271,7 +272,7 @@ export class Game {
         // auto-pauses before invoking this callback, so a static screen is
         // already underneath the modal.) Elsewhere the live world is running
         // and the panel can't be shown over it.
-        if (s === 'menu' || s === 'recovery' || s === 'gameover' || s === 'paused') {
+        if (canOpenControls(s)) {
           ui.openControls()
         } else {
           ui.notify('Key bindings are available when the game is paused', 'warn')
@@ -1818,6 +1819,11 @@ export class Game {
 
   /** Open the Replay Browser (Control Center button). */
   private openReplayBrowser(): void {
+    // The browser is never blocked by the current screen — it layers over any
+    // static state (menu / paused / MISSION FAILED recovery / gameover) as a
+    // fixed z-index-30 modal, and a live game is paused below first. This
+    // guard is a regression pin: it once early-returned on 'recovery'.
+    if (isReplayBrowserBlocked(this.world.state)) return
     // A replay is playing/paused/ended → leave it and return to the menu
     // before showing the browser. Mirrors the Escape-during-playback path
     // (stopPlayback + resetToMenu). This is required: clearing this.playback
