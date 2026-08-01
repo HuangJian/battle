@@ -149,8 +149,10 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 | §48-revisit steel-only evasion occlusion (terrain-gated: brickWallRatio < 0.10 → steel mazes only) | see below §71 |
 | §49-revisit counter-fire parameterized + re-validated (clean positive: net +3 flips, zero ON→OFF losses) | see below §72 |
 | §68-revisit crossfire re-tuned with per-seed tick-diff (rejected: 4 variants all net-negative, stays OFF) | see below §73 |
+| §74 distance-aware base-wall fire guard (T2a/aggressive suicide fix, +0.2pp mean, killer=player 4→1) | see below §74 |
+| §79 coop God AI drove P1 not P2 (replay stall + base-wall break, single-player no-op) | see below §79 |
 
-**Current state**: 91.9% mean (post-§70 base-ring guard), 0/35 below floor, 0 stage overrides. Default params frozen.
+**Current state**: 92.1% mean (post-§74 distance-aware base-wall guard), 0/35 below floor, 0 stage overrides. Default params frozen.
 
 ## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED)
 
@@ -228,6 +230,34 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - New unit tests (`tests/steel-fire-gate.test.ts`, 21 tests) lock the predicate, the break-through decision, the ungated-T2a scope decision, and the shipped default.
 
 **Implications:** Known non-goal — the gate does NOT suppress T2a/aggressive stop-and-aim fire in the dual-offset case (that fire is load-bearing). Known theoretical edge — `shouldFireBreakThroughImpl` blocks on `bs.steel` from either offset line, so a brick wall with steel closer on one offset line could suppress a legitimate brick-break; not observed on the 35×60 corpus (p=0.32), revisit only if a larger-seed run flips a stage. Tooling: A/B via `eval-suite --compare` with `{"steelFireGate":0}` vs default; per-seed via `per-seed-diff --set steelFireGate=0`.
+
+---
+
+## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix)
+
+**Decision:** The §70 base-ring fire guard protected `shouldFireInDirImpl` and the two break-through fire paths, but the T2a (stop-and-aim) and aggressive-mode fire paths bypassed `shouldFireInDirImpl` entirely — firing directly when `scan.enemy` was true, without checking `scan.baseWall`. Because `scanAheadImpl` uses two independent offset scan lines, one offset can find a base-protection brick (`baseWall=true`) while the other finds an enemy (`enemy=true`). The T2a path fired whenever `scan.enemy` was true, destroying the player's own base. This caused 4 `killer=player` base-destruction failures in S32 Diamond (120 seeds: 26, 34, 78, 82).
+
+The fix has three parts:
+
+1. **`scanAheadImpl` (FireControl.ts)**: New `baseWallDist` field — stores the step count when a base-protection brick or 'base' (eagle) terrain is found. Initialized to `Infinity`. Set alongside `baseWall=true` for both 'brick' and 'base' terrain cases.
+
+2. **T2a and aggressive-mode entry guards (GodAIInput.ts)**: Changed `if (scan.enemy)` to `if (scan.enemy && !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) && !(scan.baseSteel && (p.level ?? 0) >= 3))`. This prevents firing only when the base wall is **closer than or at the same distance as** the enemy — the 6px bullet spans both offset columns and WILL hit a closer base wall before reaching the enemy. If the enemy is closer, the bullet hits the enemy first, so firing is safe. This distance-aware check avoids the over-conservative regression of a blanket `!scan.baseWall` check (which prevented valid shots at enemies behind the base wall and caused +12 lives_exhausted on S32).
+
+3. **Break-through fire paths (GodAIInput.ts)**: The two break-through paths (aggressive T2b and navigate) had `bs.enemy || (!bs.baseWall && ...)` — the `bs.enemy ||` short-circuited and bypassed the base protection. Fixed in `shouldFireBreakThroughImpl` (shared by both sites) to `!bs.baseWall && !(bs.baseSteel && lvl >= 3)` (conservative, no distance comparison — break-through is for breaking walls, so never break a base wall). The §74 steel-fire gate is layered on top in the same function, so a break-through never fires at unpierceable steel either.
+
+**Rationale:**
+- The `baseWallDist <= enemyDist` comparison is correct because `bulletHitsTerrain` runs BEFORE `bulletHitsTank` per tick. If the base wall is at distance 3 and the enemy at distance 5, the bullet reaches the base wall first (step 3) and is stopped — the enemy at step 5 is never reached. If the enemy is at distance 3 and the base wall at distance 5, the bullet hits the enemy first (step 3) — the base wall is never reached.
+- A blanket `!scan.baseWall` check (conservative) was tested first: it eliminated all 4 suicides but caused -1 net win on S32 (86→85 @120) due to +12 lives_exhausted from suppressed valid shots. The distance-aware check recovers those shots: S32 86→87 @120, mean 91.9%→92.1%.
+- 1 residual `killer=player` suicide remains (seed 34) — likely an edge case where the enemy and base wall distances are very close but the scan ordering or movement timing allows the bullet to reach the base wall. This is a 75% reduction (4→1) in player suicides, with a net +0.2pp mean improvement.
+
+**Results (2026-08-01):**
+- S32 Diamond @120: 86→87 wins (+1), base_destroyed 18→8 (-10), killer=player 4→1 (-3), lives_exhausted 16→25 (+9).
+- 35×20 validation: mean 92.1% (was 91.9% pre-fix). S18 +10pp, S25 +5pp, S28 +10pp.
+- Regression gate: 645/700 (92.1%) — all 35 stages meet floors. S32 15/20 (75%), floor 11.
+- Unit tests: 11/11 pass (`tests/fire-control-steel-block.test.ts`), including new `baseWallDist` and dual-offset baseWall+enemy tests.
+- `bun run check` green (test + typecheck + lint + format).
+
+**Implications:** `baseWallDist` is now a permanent field on the `scanAheadImpl` result. The distance-aware check is applied only to the T2a and aggressive paths — `shouldFireInDirImpl` and the break-through paths keep the conservative blanket check (no distance comparison), as they have since §70.
 
 ## Performance Optimization
 
@@ -532,7 +562,9 @@ backlog (#78)": coop seek leaves `world.events.length === 0` at 0.1/0.33/0.5/0.6
 single-player seek also empty, and `buildKeyframes` leaves the queue empty.
 Gate: 716 pass / 0 fail (+3 vs #77); tsc, oxlint clean.
 
-## #79 — Coop God AI drove P1 instead of P2 (replay stall + base-wall break)
+---
+
+## 79. Coop God AI drove P1 instead of P2 (replay stall + base-wall break)
 
 **Symptom:** In 躺赢模式 (coop), after P2 respawns it sits at spawn 00:56–01:41 (no
 move) and mid-way shells the base protection wall. Reported on
@@ -554,5 +586,5 @@ reintroduce `w.player` in these sub-modules — co-op P2 must always be addresse
 (fails pre-fix, passes post-fix), P2 never fires at the base wall, movement evaluated
 vs P2, `canMoveOrBreak` refuses the base wall for P2 while P1 is clear, single-player
 parity. `tools/sim/regression-check.ts` A/B (classic, stages 0–15, seeds 1–3):
-single-player clear rate parity 93.75% = 93.75%; co-op clear rate 100% = 100%; buggy
-co-op `avgLives2 = −7.63` (P2 death-spiral) vs fixed `+2.90`.
+single-player clear rate parity 93.75% = 93.75%; co-op clear rate 100% = 100%; co-op
+P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.

@@ -1182,6 +1182,7 @@ export class GodAIInput implements InputLike {
     wall: boolean
     steel: boolean
     baseWall: boolean
+    baseWallDist: number
     baseSteel: boolean
     steelCol: number
     steelRow: number
@@ -1194,6 +1195,7 @@ export class GodAIInput implements InputLike {
     wall: false,
     steel: false,
     baseWall: false,
+    baseWallDist: Infinity,
     baseSteel: false,
     steelCol: -1,
     steelRow: -1,
@@ -1500,7 +1502,19 @@ export class GodAIInput implements InputLike {
         // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
         // V8 does not inline it because scanAheadImpl is large (100+ lines).
         const aggScan = scanAheadImpl(this, pcx, pcy, aimDir)
-        if (aggScan.enemy) {
+        // §74: Don't fire when a base-protection wall is on the other offset
+        // line — the bullet travels from the player center (one of the two
+        // offset columns) and would hit the base wall, not the enemy.
+        // §74: Don't fire when a base-protection wall is closer than (or at
+        // the same distance as) the enemy on the other offset line. The
+        // 6px bullet spans both offset columns, so it WILL hit a closer base
+        // wall before reaching the enemy. But if the enemy is closer, the
+        // bullet hits the enemy first — firing is safe.
+        if (
+          aggScan.enemy &&
+          !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
+          !(aggScan.baseSteel && (p.level ?? 0) >= 3)
+        ) {
           if (p.dir === aimDir) {
             this._moveDir = null
           } else {
@@ -1527,7 +1541,9 @@ export class GodAIInput implements InputLike {
       if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
         // §70/§74: break-through fire — never fire through base brick/steel
         // (§70) or at steel the player can't pierce (§74). Both guards live
-        // in shouldFireBreakThroughImpl.
+        // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
+        // ...` short-circuit that fired through the base wall on dual-offset
+        // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
         const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
         const lvl = p.level ?? 0
         if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {
@@ -1580,7 +1596,17 @@ export class GodAIInput implements InputLike {
       // Inline scanAheadImpl (perf §66, see aggressive branch above).
       const scan = scanAheadImpl(this, pcx, pcy, aimDir)
 
-      if (scan.enemy) {
+      // §74: Don't enter T2a when a base-protection wall is closer than
+      // (or at the same distance as) the enemy on the other offset line.
+      // The 6px bullet spans both offset columns. If the base wall is
+      // closer, the bullet hits it before the enemy → suicide. If the
+      // enemy is closer, the bullet hits the enemy first → safe to fire.
+      // Fall through to navigate when blocked by a closer base wall.
+      if (
+        scan.enemy &&
+        !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
+        !(scan.baseSteel && (p.level ?? 0) >= 3)
+      ) {
         // §56: dynamic T2a range based on enemy kind.
         // For non-armor enemies (basic/fast/power): use t2aMaxRange (15) —
         // one shot kills at any distance, no DPS penalty for range.
@@ -1894,7 +1920,9 @@ export class GodAIInput implements InputLike {
     if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
       // §70/§74: break-through fire — never fire through base brick/steel
       // (§70) or at steel the player can't pierce (§74). Both guards live
-      // in shouldFireBreakThroughImpl.
+      // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
+      // ...` short-circuit that fired through the base wall on dual-offset
+      // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
       const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
       const lvl = p.level ?? 0
       if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {

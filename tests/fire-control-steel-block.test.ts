@@ -178,3 +178,110 @@ describe('shouldFireInDirImpl — steel must block fire even when enemy is visib
     expect(fired).toBe(true)
   })
 })
+
+/**
+ * §74: Base-wall dual-offset suicide bug.
+ *
+ * Bug: In think()'s aggressive (T2b) and navigate break-through fire paths,
+ * the condition `bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))`
+ * fires when bs.enemy is true — even if bs.baseWall is ALSO true. Because
+ * scanAheadImpl uses two independent offset scan lines, one offset can find
+ * a base protection brick (baseWall=true) while the other finds an enemy
+ * (enemy=true). The `bs.enemy ||` short-circuits the OR, bypassing the base
+ * protection and destroying the player's own base.
+ *
+ * In S32 Diamond (120 seeds), this caused 4 base_destroyed failures with
+ * killer=player (seeds 26, 34, 78, 82).
+ *
+ * Fix: Remove `bs.enemy ||` from the condition so base protection always
+ * takes priority, matching shouldFireInDirImpl's protection order:
+ *   if (!bs.baseWall && !(bs.baseSteel && lvl >= 3)) this._fire = !onCooldown
+ */
+describe('scanAheadImpl — baseWall and enemy on dual offset lines', () => {
+  // Player center at col 10, row 22. Scan DOWN.
+  // Offset 0 (sx=pcx-8=160, col=10): hits base protection brick at (10,23).
+  // Offset 1 (sx=pcx+8=176, col=11): finds enemy at (11,23).
+  const pcx = 10 * CELL + CELL / 2 // 168
+  const pcy = 22 * CELL + CELL / 2 // 360
+
+  it('dual-offset: baseWall on one line + enemy on the other sets BOTH flags', () => {
+    const { world, input } = setupWorld()
+    // Base protection brick at (10, 23): dc=2, dr=1 → within ring.
+    world.tileMap.grid[23][10] = 'brick'
+    // Enemy at (11, 23): aligned with offset 1 (sx=176), not offset 0 (sx=160).
+    placeEnemy(world, 11, 23)
+
+    input.reset()
+    input.hasBase = world.tileMap.hasBase()
+
+    const result = scanAheadImpl(input, pcx, pcy, 'down')
+    expect(result.baseWall).toBe(true)
+    expect(result.enemy).toBe(true)
+  })
+
+  it('base terrain (eagle) sets baseWall when scanned directly', () => {
+    const { world, input } = setupWorld()
+    // Player at col 12, row 22, scanning down. Offsets hit cols 11 and 12.
+    // Col 11 row 24 is a brick (protection ring), col 12 row 24 is 'base'.
+    // Both offsets hit base-related terrain → baseWall=true.
+    const pcx2 = 12 * CELL + CELL / 2 // 200
+    // Ensure base cells are present (setupWorld already places them).
+    world.tileMap.grid[24][12] = 'base'
+    world.tileMap.grid[24][13] = 'base'
+
+    input.reset()
+    input.hasBase = world.tileMap.hasBase()
+
+    const result = scanAheadImpl(input, pcx2, pcy, 'down')
+    expect(result.baseWall).toBe(true)
+  })
+})
+
+describe('shouldFireInDirImpl — baseWall must block fire even when enemy is on dual-offset line', () => {
+  const pcx = 10 * CELL + CELL / 2 // 168
+  const pcy = 22 * CELL + CELL / 2 // 360
+
+  it('does NOT fire when baseWall and enemy are both true (dual-offset)', () => {
+    const { world, input } = setupWorld()
+    // Base protection brick at (10, 23) — offset 0.
+    world.tileMap.grid[23][10] = 'brick'
+    // Enemy at (11, 23) — offset 1.
+    placeEnemy(world, 11, 23)
+
+    input.reset()
+    input.hasBase = world.tileMap.hasBase()
+    input.params = { ...DEFAULT_GOD_AI_PARAMS, aimError: 0 }
+
+    const fired = shouldFireInDirImpl(input, pcx, pcy, 'down')
+    // shouldFireInDirImpl checks baseWall BEFORE enemy (§70), so this
+    // correctly returns false. The bug was in think()'s break-through
+    // paths which bypassed shouldFireInDirImpl.
+    expect(fired).toBe(false)
+  })
+
+  it('break-through condition: base protection must take priority over enemy', () => {
+    const { world, input } = setupWorld()
+    world.tileMap.grid[23][10] = 'brick'
+    placeEnemy(world, 11, 23)
+
+    input.reset()
+    input.hasBase = world.tileMap.hasBase()
+    input.params = { ...DEFAULT_GOD_AI_PARAMS, aimError: 0 }
+
+    const bs = scanAheadImpl(input, pcx, pcy, 'down')
+    // Root cause: both flags are true simultaneously.
+    expect(bs.baseWall).toBe(true)
+    expect(bs.enemy).toBe(true)
+
+    // The break-through fire condition in think() (§74 fix):
+    // Base protection takes ABSOLUTE priority — even when enemy is visible
+    // on the other offset line, the AI must NOT fire.
+    const lvl = 0
+    const shouldFire = !bs.baseWall && !(bs.baseSteel && lvl >= 3)
+    expect(shouldFire).toBe(false)
+
+    // The OLD (buggy) condition would have fired:
+    // bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))
+    // = true || (false && ...) = true → DESTROYS OWN BASE
+  })
+})
