@@ -219,7 +219,7 @@ export const zh: Catalog = {
   'cc.section.gameplay': '玩法',
   'cc.section.display': '显示',
   'cc.section.developer': '开发者',
-  'cc.section.reserved': '预留',
+  'cc.language': '语言',
   'cc.save': '立即保存存档',
   'cc.snapshotBrowser': '存档浏览器',
   'cc.replayBrowser': '回放浏览器',
@@ -230,9 +230,6 @@ export const zh: Catalog = {
   'cc.fullscreen': '全屏',
   'cc.perfMode': '性能模式',
   'cc.debugOverlay': '调试浮层',
-  'cc.mods': '模组',
-  'cc.statistics': '统计',
-  'cc.soon': '敬请期待',
   'cc.noSnapshots': '暂无存档',
   'cc.noReplays': '暂无回放',
   // ---- Control Center dynamic status lines (update()) ----
@@ -243,6 +240,7 @@ export const zh: Catalog = {
   'cc.gameplay.menu': '{difficulty} · {theme}',
   // ---- Control Center button tooltips (title=) ----
   'cc.titleCollapse': '收起',
+  'cc.titleLanguage': '切换语言',
   'cc.titleTheme': '切换主题 (Alt+T) — 点击选择',
   'cc.titleCoop': '切换躺赢模式（神级 AI 合作）',
   'cc.titleFullscreen': '切换全屏模式 (Alt+F)',

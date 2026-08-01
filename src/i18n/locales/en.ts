@@ -223,7 +223,7 @@ export const en: Catalog = {
   'cc.section.gameplay': 'GAMEPLAY',
   'cc.section.display': 'DISPLAY',
   'cc.section.developer': 'DEVELOPER',
-  'cc.section.reserved': 'RESERVED',
+  'cc.language': 'Language',
   'cc.save': 'Save Snapshot Now',
   'cc.snapshotBrowser': 'Snapshot Browser',
   'cc.replayBrowser': 'Replay Browser',
@@ -234,9 +234,6 @@ export const en: Catalog = {
   'cc.fullscreen': 'Fullscreen',
   'cc.perfMode': 'Performance Mode',
   'cc.debugOverlay': 'Debug Overlay',
-  'cc.mods': 'Mods',
-  'cc.statistics': 'Statistics',
-  'cc.soon': 'SOON',
   'cc.noSnapshots': 'No snapshots',
   'cc.noReplays': 'No replays',
   // ---- Control Center dynamic status lines (update()) ----
@@ -247,6 +244,7 @@ export const en: Catalog = {
   'cc.gameplay.menu': '{difficulty} · {theme}',
   // ---- Control Center button tooltips (title=) ----
   'cc.titleCollapse': 'Collapse',
+  'cc.titleLanguage': 'Switch language',
   'cc.titleTheme': 'Switch theme (Alt+T) — click to pick',
   'cc.titleCoop': 'Toggle Lie-Back-Win-Mode (God AI co-op)',
   'cc.titleFullscreen': 'Toggle fullscreen mode (Alt+F)',

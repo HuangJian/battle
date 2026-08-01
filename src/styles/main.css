@@ -1729,7 +1729,7 @@ body.theme-modern .ui-menu {
   text-align: left;
 }
 
-.cc-btn:hover:not(.cc-btn-disabled):not(:disabled) {
+.cc-btn:hover:not(:disabled) {
   color: var(--theme-text-primary);
   background: var(--theme-button-hover);
   border-color: var(--theme-accent-primary);
@@ -1773,19 +1773,16 @@ body.theme-modern .ui-menu {
   font-size: 13px;
 }
 
-.cc-btn-disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
+/* Folder-open icon for the Open Local Replay button (replaces the › arrow). */
+.cc-btn-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--theme-text-muted);
 }
 
-.cc-soon {
-  font-family: var(--font-mono);
-  font-size: 8px;
-  letter-spacing: 1px;
-  color: var(--theme-text-muted);
-  border: 1px solid var(--theme-panel-border);
-  border-radius: 3px;
-  padding: 1px 4px;
+.cc-btn:hover .cc-btn-icon {
+  color: var(--theme-accent-primary);
 }
 
 /* DEVELOPER section — Debug Overlay toggle (Alt+D) */

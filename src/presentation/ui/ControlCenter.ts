@@ -1,6 +1,6 @@
 import type { World } from '../../game/World'
 import { THEME_DEFINITIONS } from '../../config/theme'
-import { t, localizeRoot } from '../../i18n'
+import { i18n, t, localizeRoot } from '../../i18n'
 
 // ================================================================
 // Control Center (plan §13)
@@ -8,12 +8,11 @@ import { t, localizeRoot } from '../../i18n'
 // The left sidebar is the unified access point for meta-game modules:
 //
 //   Control Center
+//   ├── Gameplay           (theme · key bindings · lie-back win · run info)
+//   ├── Display            (language · fullscreen · performance mode)
 //   ├── Snapshot Manager   (manual save · snapshot browser · counts)
-//   ├── Replays            (replay browser · counts)
-//   ├── Gameplay           (key bindings · current run info)
-//   ├── Display            (fullscreen · performance mode)
-//   ├── Developer          (debug overlay)
-//   └── Reserved           (mods / statistics)
+//   ├── Replays            (open local replay · replay browser · counts)
+//   └── Developer          (debug overlay)
 //
 // Read-only on the World; every action is a callback into Game.
 // ================================================================
@@ -67,6 +66,7 @@ export class ControlCenter {
   private perfModeState: HTMLElement | null = null
   private coopBtn: HTMLButtonElement | null = null
   private coopState: HTMLElement | null = null
+  private langNameEl: HTMLElement | null = null
 
   // Theme switcher (GAMEPLAY) — button label + dropdown
   private themeBtnEl: HTMLButtonElement | null = null
@@ -93,26 +93,6 @@ export class ControlCenter {
       </div>
       <div class="cc-body" data-cc="body">
         <section class="cc-section">
-          <h3 class="cc-section-title" data-i18n="cc.section.snapshots">SNAPSHOT MANAGER</h3>
-          <button class="cc-btn" data-cc="save" type="button">
-            <span data-i18n="cc.save">Save Snapshot Now</span><kbd>Alt+S</kbd>
-          </button>
-          <button class="cc-btn" data-cc="browser" type="button">
-            <span data-i18n="cc.snapshotBrowser">Snapshot Browser</span><span class="cc-btn-arrow">›</span>
-          </button>
-          <div class="cc-info" data-cc="counts" data-i18n="cc.noSnapshots">No snapshots</div>
-        </section>
-        <section class="cc-section">
-          <h3 class="cc-section-title" data-i18n="cc.section.replays">REPLAYS</h3>
-          <button class="cc-btn" data-cc="replays" type="button">
-            <span data-i18n="cc.replayBrowser">Replay Browser</span><span class="cc-btn-arrow">›</span>
-          </button>
-          <button class="cc-btn" data-cc="local-replay" type="button">
-            <span data-i18n="cc.openLocalReplay">Open Local Replay</span><span class="cc-btn-arrow">›</span>
-          </button>
-          <div class="cc-info" data-cc="replay-counts" data-i18n="cc.noReplays">No replays</div>
-        </section>
-        <section class="cc-section">
           <h3 class="cc-section-title" data-i18n="cc.section.gameplay">GAMEPLAY</h3>
           <div class="cc-theme-wrap">
             <button class="cc-btn" data-cc="theme" type="button" aria-pressed="false" title="Switch theme (Alt+T) — click to pick" data-i18n-attr="title:cc.titleTheme">
@@ -132,9 +112,12 @@ export class ControlCenter {
         </section>
         <section class="cc-section">
           <h3 class="cc-section-title" data-i18n="cc.section.display">DISPLAY</h3>
+          <button class="cc-btn" data-cc="language" type="button" title="Switch language" data-i18n-attr="title:cc.titleLanguage">
+            <span class="cc-theme-label"><span data-i18n="cc.language">Language</span>: <span data-cc="lang-name">—</span></span>
+          </button>
           <button class="cc-btn" data-cc="fullscreen" type="button" aria-pressed="false" title="Toggle fullscreen mode (Alt+F)" data-i18n-attr="title:cc.titleFullscreen">
             <span data-i18n="cc.fullscreen">Fullscreen</span>
-            <span class="cc-perf-meta"><kbd>Alt+F</kbd><span class="cc-perf-state" data-cc="fullscreen-state">OFF</span></span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="fullscreen-state">OFF</span><kbd>Alt+F</kbd></span>
           </button>
           <button class="cc-btn" data-cc="perfmode" type="button" aria-pressed="false" title="Toggle Performance Mode (DPR cap + render FPS cap)" data-i18n-attr="title:cc.titlePerfMode">
             <span data-i18n="cc.perfMode">Performance Mode</span>
@@ -142,16 +125,35 @@ export class ControlCenter {
           </button>
         </section>
         <section class="cc-section">
+          <h3 class="cc-section-title" data-i18n="cc.section.snapshots">SNAPSHOT MANAGER</h3>
+          <button class="cc-btn" data-cc="save" type="button">
+            <span data-i18n="cc.save">Save Snapshot Now</span><kbd>Alt+S</kbd>
+          </button>
+          <button class="cc-btn" data-cc="browser" type="button">
+            <span data-i18n="cc.snapshotBrowser">Snapshot Browser</span><span class="cc-btn-arrow">›</span>
+          </button>
+          <div class="cc-info" data-cc="counts" data-i18n="cc.noSnapshots">No snapshots</div>
+        </section>
+        <section class="cc-section">
+          <h3 class="cc-section-title" data-i18n="cc.section.replays">REPLAYS</h3>
+          <button class="cc-btn" data-cc="local-replay" type="button">
+            <span data-i18n="cc.openLocalReplay">Open Local Replay</span>
+            <svg class="cc-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              <path d="M3 19l3-9h15l-3 9z"/>
+            </svg>
+          </button>
+          <button class="cc-btn" data-cc="replays" type="button">
+            <span data-i18n="cc.replayBrowser">Replay Browser</span><span class="cc-btn-arrow">›</span>
+          </button>
+          <div class="cc-info" data-cc="replay-counts" data-i18n="cc.noReplays">No replays</div>
+        </section>
+        <section class="cc-section">
           <h3 class="cc-section-title" data-i18n="cc.section.developer">DEVELOPER</h3>
           <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD" data-i18n-attr="title:cc.titleDebug">
             <span data-i18n="cc.debugOverlay">Debug Overlay</span>
-            <span class="cc-perf-meta"><kbd>Alt+D</kbd><span class="cc-perf-state" data-cc="perf-state">OFF</span></span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="perf-state">OFF</span><kbd>Alt+D</kbd></span>
           </button>
-        </section>
-        <section class="cc-section cc-reserved">
-          <h3 class="cc-section-title" data-i18n="cc.section.reserved">RESERVED</h3>
-          <div class="cc-btn cc-btn-disabled"><span data-i18n="cc.mods">Mods</span><span class="cc-soon" data-i18n="cc.soon">SOON</span></div>
-          <div class="cc-btn cc-btn-disabled"><span data-i18n="cc.statistics">Statistics</span><span class="cc-soon" data-i18n="cc.soon">SOON</span></div>
         </section>
       </div>
     `
@@ -159,6 +161,7 @@ export class ControlCenter {
     this.countLine = this.el.querySelector('[data-cc="counts"]')!
     this.replayCountLine = this.el.querySelector('[data-cc="replay-counts"]')!
     this.gameplayInfo = this.el.querySelector('[data-cc="gameplay"]')!
+    this.langNameEl = this.el.querySelector('[data-cc="lang-name"]')
 
     const wire = (sel: string, fn: () => void, autoPause = false) => {
       const btn = this.el.querySelector(sel) as HTMLButtonElement
@@ -178,6 +181,10 @@ export class ControlCenter {
     wire('[data-cc="replays"]', () => this.callbacks?.onOpenReplays(), true)
     wire('[data-cc="local-replay"]', () => this.callbacks?.onOpenLocalReplay?.(), true)
     wire('[data-cc="controls"]', () => this.callbacks?.onOpenControls(), true)
+    wire('[data-cc="language"]', () => {
+      i18n.cycleLocale()
+      this.updateLangName()
+    })
     wire('[data-cc="perf"]', () => this.callbacks?.onTogglePerf())
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
@@ -226,6 +233,11 @@ export class ControlCenter {
       this.closeThemeDropdown()
     })
 
+    // Language switch — keep the DISPLAY button label in sync with the active
+    // locale, including changes made elsewhere (menu LANGUAGE row / hotkey).
+    i18n.subscribe(() => this.updateLangName())
+    this.updateLangName()
+
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
       collapseBtn.blur()
@@ -241,6 +253,11 @@ export class ControlCenter {
 
   init(callbacks: ControlCenterCallbacks): void {
     this.callbacks = callbacks
+  }
+
+  /** Reflect the active locale name on the DISPLAY language button. */
+  private updateLangName(): void {
+    if (this.langNameEl) this.langNameEl.textContent = i18n.name(i18n.locale)
   }
 
   /** Reflect the Performance Observatory overlay's on/off state in the
