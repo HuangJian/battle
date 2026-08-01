@@ -1,8 +1,9 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
-import { CELL, TANK, GRID, DIR_VECTORS, FIELD, type Direction } from '../../constants'
+import { CELL, TANK, GRID, DIR_VECTORS, FIELD, BASE_POS, type Direction } from '../../constants'
 import { findPath } from '../../utils/pathfind'
+import { TileMap } from '../../game/TileMap'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 
@@ -406,6 +407,91 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
     if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) return false
   }
   return true
+}
+
+/**
+ * §48-revisit: Count the passable terrain exits of a grid cell (0-4). A cell
+ * with ≤ 2 exits is a corridor / corner / dead-end — a position where
+ * enemies can surround the player. Cell-level approximation (ignores the
+ * 2×2 tank footprint) — good enough for a pre-move surround heuristic.
+ * Indexed loop (AGENTS §14.1): called up to 5× per tick when trapAvoidance
+ * is ON (1 trap check + up to 4 candidate directions).
+ */
+function countPassableExits(self: GodAIInput, col: number, row: number): number {
+  const grid = self.world.tileMap.grid
+  let n = 0
+  for (let di = 0; di < ALL_DIRS.length; di++) {
+    const v = DIR_VECTORS[ALL_DIRS[di]]
+    const c = col + v.dx
+    const r = row + v.dy
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
+    if (!TileMap.blocksTank(grid[r][c])) n++
+  }
+  return n
+}
+
+/**
+ * §48-revisit: Trap avoidance (user idea 2 — don't walk into surround
+ * positions). Given the player's chosen move direction, check whether the
+ * NEXT cell is a surround risk: few passable exits (≤ 2) AND
+ * `trapEnemyCount`+ live enemies within `trapEnemyRadiusCells` of it. If so,
+ * override to the open direction whose next cell has the most exits
+ * (tie-broken toward the base), but only when that is STRICTLY more open
+ * than the trap cell (never trade one dead-end for another).
+ *
+ * Returns the original direction when the next cell is not a trap.
+ * Called from think()'s navigate branch (T2b), AFTER _moveDir is chosen —
+ * it only perturbs the final move, never the dodge / T8 / T2a priorities.
+ */
+export function trapAvoidanceImpl(self: GodAIInput, p: Tank, moveDir: Direction): Direction {
+  const pc = self.playerCell()
+  const v = DIR_VECTORS[moveDir]
+  const nx = pc.col + v.dx
+  const ny = pc.row + v.dy
+
+  // Out-of-bounds destination (near a wall) — treat as safe (no override).
+  if (nx < 0 || nx >= GRID || ny < 0 || ny >= GRID) return moveDir
+
+  const exits = countPassableExits(self, nx, ny)
+  if (exits > 2) return moveDir // open cell — no surround risk
+
+  // Count live enemies within trapEnemyRadiusCells of the destination cell.
+  const radius = self.params.trapEnemyRadiusCells
+  const need = self.params.trapEnemyCount
+  let nearby = 0
+  const enemies = self._enemies
+  for (let i = 0; i < enemies.length; i++) {
+    const ec = self.tankCell(enemies[i])
+    const d = Math.abs(ec.col - nx) + Math.abs(ec.row - ny)
+    if (d <= radius) {
+      if (++nearby >= need) break
+    }
+  }
+  if (nearby < need) return moveDir // no surround risk
+
+  // Trap: pick the best open alternative from the CURRENT cell. Strictly
+  // more exits than the trap cell, tie-broken toward the base.
+  const baseCol = BASE_POS.col + 1
+  const baseRow = BASE_POS.row + 1
+  let bestDir: Direction | null = null
+  let bestExits = exits // only strictly-more-open alternatives count
+  let bestBaseDist = Infinity
+  for (let di = 0; di < ALL_DIRS.length; di++) {
+    const d = ALL_DIRS[di]
+    if (d === moveDir) continue
+    if (!self.canMoveDir(p, d)) continue
+    const dv = DIR_VECTORS[d]
+    const cx = pc.col + dv.dx
+    const cy = pc.row + dv.dy
+    const dExits = countPassableExits(self, cx, cy)
+    const baseDist = Math.abs(cx - baseCol) + Math.abs(cy - baseRow)
+    if (dExits > bestExits || (dExits === bestExits && baseDist < bestBaseDist)) {
+      bestDir = d
+      bestExits = dExits
+      bestBaseDist = baseDist
+    }
+  }
+  return bestDir ?? moveDir
 }
 
 /**

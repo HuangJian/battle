@@ -39,6 +39,7 @@ import {
   canMoveOrBreakImpl,
   canMoveDirImpl,
   computeThreatCostsImpl,
+  trapAvoidanceImpl,
 } from './god/Navigator'
 import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
 
@@ -524,6 +525,93 @@ export interface GodAIParams {
    * much as 4 safe cells (1 + 3), so A* prefers detours up to 3 extra cells.
    */
   crossfirePathCost: number
+
+  /**
+   * §48-revisit: Steel-only evasion occlusion. When > 0, the bullet-threat
+   * scanner (`findMostDangerousBulletImpl`) skips enemy bullets whose path to
+   * the player is blocked by STEEL. Steel is a permanent barrier for enemy
+   * bullets — `STEEL_PIERCE_PLAYER_LEVEL = 3` is a player-only privilege, so
+   * every enemy bullet (basic/fast/power/armor) dies on steel and can never
+   * pass through, nor can any future bullet from the same direction. Dodging
+   * a steel-blocked bullet is therefore purely wasteful: it moves the player
+   * off-position for a threat that can never arrive.
+   *
+   * BRICK is deliberately NOT treated as occlusion (the original §48 fix's
+   * mistake). Brick is temporary — the bullet destroys it and dies, but the
+   * enemy fires again and the next bullet comes through. Dodging a
+   * brick-blocked bullet is load-bearing "anticipatory dodging" (DECISIONS
+   * §48 negative result: blocking brick cost S32 −10pp @120).
+   *
+   * The scan walks the full bullet→player path checking every cell for steel.
+   * It does NOT stop at brick (there may be steel behind a brick that the
+   * bullet will eventually clear through to). OOB cells cause a break (not a
+   * false "steel" — avoiding the TileMap.get OOB→'steel' default that caused
+   * §70's baseSteel false positive).
+   *
+   * 0 = OFF (byte-identical to pre-§48-revisit). 1 = ON.
+   *
+   * NOTE (per-seed tick-diff finding, S32 seed 11): a blanket steel occlusion
+   * is NET NEUTRAL — suppressing a dodge removes load-bearing repositioning,
+   * so the player can get pinned in a corner (mechanism confirmed at tick 738:
+   * near steel-blocked bullet, player stayed at (0,1) and died, while the
+   * baseline dodged down and won). The `evasionSteelOcclusionRange` gate
+   * addresses this by only suppressing FAR blocked bullets (dist >= range
+   * cells), whose dodge is genuinely wasteful, while keeping NEAR dodges.
+   */
+  evasionSteelOcclusion: number
+
+  /**
+   * §48-revisit: distance gate (cells) for `evasionSteelOcclusion`. Only
+   * suppress the dodge for a steel-blocked bullet when it is at least this
+   * many cells from the player. A far blocked bullet's dodge is genuinely
+   * wasteful (the player is not in imminent danger); a near blocked bullet's
+   * dodge is load-bearing repositioning (the player is being pressured and
+   * needs to move) — keeping it avoids the S32 pinning regression.
+   *
+   * 0 = suppress ALL steel-blocked bullets (no distance gate). N = suppress
+   * only blocked bullets at dist >= N cells.
+   */
+  evasionSteelOcclusionRange: number
+
+  /**
+   * §48-revisit (terrain gate): brick/(brick+steel) ratio BELOW which
+   * `evasionSteelOcclusion` is auto-enabled in computeStageAdaptedParams.
+   * 0 = never auto-enable (byte-identical to pre-§48-revisit).
+   *
+   * Discriminator discovered via per-seed tick-diff + stage probes: steel
+   * ratio is NOT the predictor (S26 Brick Maze has MORE steel than S32
+   * Diamond — 26% vs 18% — yet regresses while S32 gains). The predictor
+   * is brickWallRatio:
+   *   - Steel mazes (S32 0.063, S6 0.04): occlusion HELPS (+2.5~3.3pp S32
+   *     @120). The player fights in open guard bands / steel corridors;
+   *     a steel-blocked bullet's dodge is genuinely wasteful.
+   *   - Brick-heavy (S14 0.915, S26 0.254): occlusion HURTS (-5pp S14,
+   *     -6.7pp S26 @120). Dodging a blocked bullet is load-bearing
+   *     repositioning through breakable cover; skipping it re-ranks the
+   *     scan to a farther bullet (S26 seed-7: player dodged down one tick
+   *     early and lost).
+   * Default 0.10 = enable on steel mazes only (matches isSteelMaze / §60).
+   */
+  evasionSteelOcclusionBrickRatio: number
+
+  /**
+   * §48-revisit: Trap avoidance (user idea 2 — don't walk into surround
+   * positions). When > 0, the navigation branch (T2b) checks the NEXT cell
+   * before committing to the current move direction: if that cell has few
+   * passable exits (≤ 2 — a corridor / corner / dead-end) AND `trapEnemyCount`
+   * or more enemies are within `trapEnemyRadiusCells` of it, the player is
+   * at risk of being surrounded there. The move direction is overridden to
+   * the open direction whose next cell has the most exits (tie-broken toward
+   * the base). Runs at the END of navigation (after _moveDir is chosen), so
+   * it only perturbs the final move — dodge / T8 / T2a priorities are intact.
+   *
+   * 0 = OFF (byte-identical). 1 = ON.
+   */
+  trapAvoidance: number
+  /** Radius (cells) around the destination cell for the trap enemy census. */
+  trapEnemyRadiusCells: number
+  /** Min live enemies within the radius that make a low-exit cell a trap. */
+  trapEnemyCount: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -686,6 +774,29 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §69-B: A* threat cost. 0 = OFF (byte-identical). 3 = prefer detours up
   // to 3 extra cells to avoid bullet-threatened cells.
   crossfirePathCost: 0,
+
+  // §48-revisit: Steel-only evasion occlusion. 0 = OFF (byte-identical to
+  // pre-§48-revisit). See interface docs. Only steel (permanent for enemy
+  // bullets) is treated as occlusion; brick (temporary) is NOT — dodging
+  // brick-blocked bullets is load-bearing anticipatory dodging (DECISIONS §48).
+  // Default range 0 = suppress ALL steel-blocked (per-seed tick-diff showed
+  // this is NET NEUTRAL — see interface docs for the pinning mechanism).
+  evasionSteelOcclusion: 0,
+  // Distance gate for steel occlusion (cells). 0 = no gate (suppress all).
+  // >0 suppresses only blocked bullets at dist >= range.
+  evasionSteelOcclusionRange: 0,
+  // §48-revisit terrain gate: 0 = never auto-enable (byte-identical).
+  // 0.10 = auto-enable occlusion on steel-maze stages (brickWallRatio below
+  // 0.10 — S32 Diamond 0.063, S6 Iron Curtain 0.04). Brick-heavy stages
+  // (S14 0.915, S26 0.254) stay OFF — they regress under occlusion (the
+  // dodge is load-bearing repositioning). Verified 2026-08-01: 35×60 net 0
+  // with zero per-stage regressions (S14/S26 byte-identical); 120-seed
+  // confirmations S32 +2.5pp (68.3→70.8), S6 +0.8pp (80.0→80.8).
+  evasionSteelOcclusionBrickRatio: 0.1,
+  // §48-revisit: trap avoidance (user idea 2). 0 = OFF (byte-identical).
+  trapAvoidance: 0,
+  trapEnemyRadiusCells: 5,
+  trapEnemyCount: 2,
 }
 
 /**
@@ -904,6 +1015,24 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
         overrides.crossfireAwareness = 1
         adapted = true
       }
+    }
+
+    // §48-revisit: terrain-gated steel-only evasion occlusion. Auto-enable
+    // ONLY on steel-maze stages (brickWallRatio < evasionSteelOcclusionBrickRatio).
+    // Steel ratio is NOT the predictor: S26 Brick Maze has MORE steel (26%)
+    // than S32 Diamond (18%) yet regresses while S32 gains. The predictor is
+    // brickWallRatio — steel mazes (S32 0.063, S6 0.04) gain +2.5~3.3pp @120,
+    // brick-heavy stages (S14 0.915, S26 0.254) lose -5~6.7pp (dodge
+    // suppression removes load-bearing repositioning; S26 seed-7 re-ranks to
+    // a farther bullet and dodges one tick early). 0 = never auto-enable
+    // (byte-identical to pre-§48-revisit).
+    if (
+      p.evasionSteelOcclusionBrickRatio > 0 &&
+      base.evasionSteelOcclusion === 0 &&
+      brickWallRatio < p.evasionSteelOcclusionBrickRatio
+    ) {
+      overrides.evasionSteelOcclusion = 1
+      adapted = true
     }
   }
 
@@ -1679,6 +1808,14 @@ export class GodAIInput implements InputLike {
         }
       }
     }
+    // §48-revisit: Trap avoidance (user idea 2). After navigation determines
+    // _moveDir, check the NEXT cell for a surround risk (few exits + enemies
+    // nearby). If it's a trap, override toward open space / the base. Runs at
+    // the END of navigation, so it only perturbs the final move — dodge/T8/T2a
+    // priorities are intact (same placement discipline as §68-v2 above).
+    if (!shielded && this.params.trapAvoidance > 0 && this._moveDir) {
+      this._moveDir = this.trapAvoidance(p, this._moveDir)
+    }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.
     // Don't check shouldFireInDir here — it might fire at enemy bullets
@@ -1899,6 +2036,9 @@ export class GodAIInput implements InputLike {
   }
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
+  }
+  trapAvoidance(tank: Tank, moveDir: Direction): Direction {
+    return trapAvoidanceImpl(this, tank, moveDir)
   }
   computeThreatCosts(fromCell: Cell, playerSpeed: number): Float64Array | undefined {
     return computeThreatCostsImpl(this, fromCell, playerSpeed)

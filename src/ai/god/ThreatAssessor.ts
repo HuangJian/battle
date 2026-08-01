@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Bullet } from '../../types'
 import type { Direction } from '../../constants'
-import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD } from '../../constants'
+import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
@@ -26,6 +26,38 @@ export function findMostDangerousBulletImpl(
   let best: Bullet | null = null
   let bestDist = Infinity
 
+  // §48-revisit: steel-only occlusion. When ON, skip bullets whose path to
+  // the player is blocked by steel (permanent for enemy bullets —
+  // STEEL_PIERCE_PLAYER_LEVEL is player-only). Brick is NOT checked: dodging
+  // brick-blocked bullets is load-bearing anticipatory dodging (DECISIONS
+  // §48). Computed once (loop-invariant) so V8 guards the scan block when OFF.
+  const steelOcclusion = self.params.evasionSteelOcclusion > 0
+  // Distance gate (px): 0 = suppress all steel-blocked bullets; >0 suppresses
+  // only blocked bullets at dist >= range. Near blocked bullets keep their
+  // dodge (load-bearing repositioning — per-seed tick-diff, S32 seed 11).
+  const steelOcclusionRangePx =
+    self.params.evasionSteelOcclusionRange > 0 ? self.params.evasionSteelOcclusionRange * CELL : 0
+
+  // Pinned-position gate (user finding, §48-revisit): the S32 seed-11
+  // regression is NOT about dodging vs not dodging — it's that suppressing
+  // the dodge left the player PINNED in a corner (tick 738: player at (0,1)
+  // stayed + fired while the baseline dodged down and escaped). When the
+  // player is geometrically constrained (≤ 2 open directions), the dodge IS
+  // the escape — never suppress it, even for a steel-blocked bullet. Only in
+  // open space (3-4 open directions) is a steel-blocked dodge genuinely
+  // wasteful. Computed only when occlusion is active (OFF stays byte-identical).
+  let playerConstrained = false
+  if (steelOcclusion) {
+    const pTank = self.controlledTank(self.world)
+    if (pTank) {
+      let openDirs = 0
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        if (self.canMoveDir(pTank, ALL_DIRS[di])) openDirs++
+      }
+      playerConstrained = openDirs <= 2
+    }
+  }
+
   const bullets = w.bullets
   for (let bi = 0; bi < bullets.length; bi++) {
     const b = bullets[bi]
@@ -44,6 +76,36 @@ export function findMostDangerousBulletImpl(
     if (!approaching) continue
 
     const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+
+    // §48-revisit: scan the bullet→player path for steel. If any steel cell
+    // blocks the path, this bullet (and all future bullets from this enemy
+    // in this direction) can never reach the player — skip the threat.
+    // OOB-safe: break on off-field, never use TileMap.get's OOB→'steel'
+    // default (the §70 false-positive bug). Brick does NOT cause a skip —
+    // keep scanning past brick for steel behind it.
+    // Distance gate: only suppress when dist >= the range threshold, so
+    // NEAR blocked bullets keep their load-bearing repositioning dodge.
+    if (steelOcclusion && dist >= steelOcclusionRangePx) {
+      const v = DIR_VECTORS[b.dir]
+      const grid = w.tileMap.grid
+      let steelBlocked = false
+      for (let d = CELL; d < dist; d += CELL) {
+        const fx = bcx + v.dx * d
+        const fy = bcy + v.dy * d
+        const col = Math.floor(fx / CELL)
+        const row = Math.floor(fy / CELL)
+        if (col < 0 || col >= GRID || row < 0 || row >= GRID) break
+        if (grid[row][col] === 'steel') {
+          steelBlocked = true
+          break
+        }
+      }
+      // Pinned gate: only suppress when the player is NOT geometrically
+      // constrained. When pinned (≤2 open directions), the dodge is the
+      // escape from the corner — keep it (S32 seed-11 regression mechanism).
+      if (steelBlocked && !playerConstrained) continue
+    }
+
     if (dist < bestDist) {
       bestDist = dist
       best = b

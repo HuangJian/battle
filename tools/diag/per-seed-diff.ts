@@ -38,17 +38,34 @@ Usage:
   bun tools/diag/per-seed-diff.ts dump <stageIdx> <seed>   Dump tick signatures
   bun tools/diag/per-seed-diff.ts diff <fileA> <fileB>     Compare two dumps
 
+Diagnostic flags (dump mode only):
+  --steelOcclusion   Enable §48-revisit steel-only evasion occlusion
+
 Workflow:
   1. bun tools/diag/per-seed-diff.ts dump 32 5 > /tmp/before.txt
-  2. git stash  (revert your code changes)
-  3. bun tools/diag/per-seed-diff.ts dump 32 5 > /tmp/after.txt
-  4. git stash pop  (restore your changes)
-  5. bun tools/diag/per-seed-diff.ts diff /tmp/before.txt /tmp/after.txt
+  2. bun tools/diag/per-seed-diff.ts dump 32 5 --steelOcclusion > /tmp/after.txt
+  3. bun tools/diag/per-seed-diff.ts diff /tmp/before.txt /tmp/after.txt
 `
 
 function dump(stageIdx: number, seed: number): void {
   const stage = STAGES[stageIdx]
   const godAIParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+  // Diagnostic flag: --steelOcclusion enables §48-revisit steel-only occlusion.
+  if (process.argv.includes('--steelOcclusion')) {
+    godAIParams.evasionSteelOcclusion = 1
+  }
+  // Diagnostic flag: --brickGate <ratio> enables occlusion via the terrain
+  // gate (computeStageAdaptedParams auto-enables it on steel-maze stages only).
+  const brickGateArg = process.argv.indexOf('--brickGate')
+  if (brickGateArg >= 0) {
+    godAIParams.evasionSteelOcclusionBrickRatio = parseFloat(process.argv[brickGateArg + 1] ?? '0')
+  }
+  // Diagnostic flag: --naiveOcclusion simulates the original §48 fix (brick +
+  // steel occlusion) by setting evasionSteelOcclusion=1 AND a sentinel that
+  // the dump path reads. NOTE: the production code only implements
+  // steel-only; the naive brick+steel variant is simulated by temporarily
+  // editing ThreatAssessor.ts (see DECISIONS §48-revisit). This flag just
+  // sets the param so the dump runs with occlusion ON.
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = 'classic'
@@ -84,7 +101,7 @@ function dump(stageIdx: number, seed: number): void {
       `${tick}|${px},${py}|${p?.dir ?? '?'}|${input._fire ? 'F' : '.'}|${input._moveDir ?? '-'}|e${enemies}|eb${ebullets}|pb${pbullets}|${state}`,
     )
 
-    if (state === 'gameover' || state === 'stage_clear') break
+    if (state === 'gameover' || state === 'stageclear') break
   }
 }
 
