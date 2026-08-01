@@ -23,8 +23,8 @@ import {
   evaluateParams,
   evaluateCandidatesParallel,
   type EvalConfig,
-} from '../optimize-godai'
-import { SimWorkerPool } from '../sim-pool'
+} from '../optimize/optimize-godai'
+import { SimWorkerPool } from '../sim/sim-pool'
 
 function argNum(name: string, fallback: number): number {
   const m = process.argv.find((a) => a.startsWith(`--${name}=`))

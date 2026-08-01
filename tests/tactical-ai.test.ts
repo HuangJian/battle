@@ -318,7 +318,10 @@ describe('Tier roll — floor (attempt-based) + cap (§5.1 [D9-fix])', () => {
         }
       }
       // Drain: kill all enemies so the spawn queue actually advances.
+      // (perf §67) Manual kill must signal _needsCleanup — Simulation sets
+      // this whenever it kills an entity, but here we bypass Simulation.
       for (const t of world.tanks) t.alive = false
+      world._needsCleanup = true
       if (world.state !== 'playing') world.state = 'playing'
       if (!world.player || !world.player.alive) world.spawnPlayer()
       guard++

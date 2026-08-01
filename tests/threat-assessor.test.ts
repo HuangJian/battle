@@ -132,6 +132,83 @@ describe('ThreatAssessor — deliberate terrain-blind evasion (DECISIONS §48)',
     })
   })
 
+  describe('findMostDangerousBullet — §48-revisit steel-only occlusion (DECISIONS §71)', () => {
+    /** Enable the terrain-gated steel-only occlusion path directly on the input. */
+    function enableOcclusion(input: GodAIInput): void {
+      input.params.evasionSteelOcclusion = 1
+    }
+
+    /** Place the player tank at a known cell so the pinned gate is deterministic. */
+    function positionPlayer(world: World, col: number, row: number): void {
+      const p = world.player!
+      p.x = col * CELL
+      p.y = row * CELL
+    }
+
+    it('skips a steel-blocked bullet when the player is NOT pinned (wasteful dodge suppressed)', () => {
+      const { world, input } = setupWorld()
+      enableOcclusion(input)
+      positionPlayer(world, 8, 10)
+      const pcx = 8 * CELL + CELL / 2
+      const pcy = 10 * CELL + CELL / 2
+
+      // Steel between bullet (row 5) and player (row 10). Steel is permanent
+      // for enemy bullets — the dodge could never be needed. Player is in
+      // open space (4 open directions), so the pinned gate does NOT fire.
+      world.tileMap.grid[7][8] = 'steel'
+      world.bullets.push(makeBullet(pcx - BULLET / 2, 5 * CELL, 'down'))
+      input.hasBase = world.tileMap.hasBase()
+
+      const threat = findMostDangerousBulletImpl(input, pcx, pcy)
+      expect(threat).toBeNull()
+    })
+
+    it('STILL detects a brick-blocked bullet even with occlusion ON (brick never occludes)', () => {
+      const { world, input } = setupWorld()
+      enableOcclusion(input)
+      positionPlayer(world, 8, 10)
+      const pcx = 8 * CELL + CELL / 2
+      const pcy = 10 * CELL + CELL / 2
+
+      // Brick is temporary — the enemy re-fires through it within ticks, so
+      // dodging a brick-blocked bullet is load-bearing anticipatory dodging
+      // (DECISIONS §48 / §71). The steel-only scan must NOT skip it.
+      world.tileMap.grid[7][8] = 'brick'
+      world.bullets.push(makeBullet(pcx - BULLET / 2, 5 * CELL, 'down'))
+      input.hasBase = world.tileMap.hasBase()
+
+      const threat = findMostDangerousBulletImpl(input, pcx, pcy)
+      expect(threat).not.toBeNull()
+    })
+
+    it('KEEPS dodging a steel-blocked bullet when the player IS pinned (dodge is the escape)', () => {
+      const { world, input } = setupWorld()
+      enableOcclusion(input)
+      positionPlayer(world, 8, 10)
+      const pcx = 8 * CELL + CELL / 2
+      const pcy = 10 * CELL + CELL / 2
+
+      // Pin the player at (8,10): steel walls above (rows 8-9, cols 8-9) and
+      // to the left (rows 10-11, cols 6-7) → only right/down remain open
+      // (≤ 2 open directions = pinned). The S32 seed-11 lesson: when pinned,
+      // the dodge IS the escape — never suppress it, even for a steel-blocked
+      // bullet.
+      for (let r = 8; r <= 9; r++) {
+        for (let c = 8; c <= 9; c++) world.tileMap.grid[r][c] = 'steel'
+      }
+      for (let r = 10; r <= 11; r++) {
+        for (let c = 6; c <= 7; c++) world.tileMap.grid[r][c] = 'steel'
+      }
+
+      world.tileMap.grid[7][8] = 'steel' // blocked bullet path
+      world.bullets.push(makeBullet(pcx - BULLET / 2, 5 * CELL, 'down'))
+      input.hasBase = world.tileMap.hasBase()
+
+      const threat = findMostDangerousBulletImpl(input, pcx, pcy)
+      expect(threat).not.toBeNull()
+    })
+  })
+
   describe('isSafeDir', () => {
     it('reports a direction as safe when no bullets threaten it', () => {
       const { world, input } = setupWorld()

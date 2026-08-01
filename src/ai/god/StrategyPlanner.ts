@@ -2,8 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
-import { pxToCell } from '../../utils/pathfind'
-import { POWERUP_PRIORITY, KIND_THREAT_WEIGHT } from './constants'
+import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import { enemyCanShootBase } from './SmartThreatModel'
 
 // ============================================================
@@ -26,11 +25,21 @@ import { enemyCanShootBase } from './SmartThreatModel'
  */
 export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
   const w = self.world
-  if (w.powerUps.length === 0) return null
+  const powerUps = w.powerUps
+  if (powerUps.length === 0) return null
 
-  let bestPu: { cell: Cell; score: number } | null = null
+  // Reusable best-cell fields (perf §65): avoid allocating `{cell, score}`
+  // per upgrade — track the best cell's (col,row) + score as scalars, and
+  // return a single fresh Cell at the end. findPowerUpTarget is called up
+  // to ~2× per think (normal + aggressive branches); each call used to
+  // allocate up to N (1 per power-up) intermediate `{cell, score}` objects.
+  let bestCol = 0
+  let bestRow = 0
+  let bestScore = -Infinity
+  let hasBest = false
 
-  for (const pu of w.powerUps) {
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
     if (!pu.alive) continue
     const cx = pu.x + pu.w / 2
     const cy = pu.y + pu.h / 2
@@ -75,17 +84,26 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
     if (dangerLevel > 3 && priority > 2) continue // Too dangerous for low-value power-ups
     if (dangerLevel > 5 && pu.type !== 'bomb') continue // Bomb is worth almost any risk
 
-    if (!bestPu || score > bestPu.score) {
-      bestPu = { cell: pxToCell(pu.x, pu.y), score }
+    if (score > bestScore) {
+      bestScore = score
+      bestCol = Math.floor(pu.x / CELL)
+      bestRow = Math.floor(pu.y / CELL)
+      hasBest = true
     }
   }
 
-  return bestPu?.cell ?? null
+  return hasBest ? { col: bestCol, row: bestRow } : null
 }
 
 /**
  * NEW Requirement 3: Calculate how dangerous a route is.
  * Returns a danger level from 0 (safe) to N (many enemies on the path).
+ *
+ * (perf §65): eliminated the 3× `pxToCell` Cell allocations per call
+ * (target/player/enemy cells). calculateRouteDanger is called once per
+ * power-up candidate per think → with N power-ups and M enemies this was
+ * up to N×M Cell allocations per think, ~3M allocs over a 30-game batch.
+ * Scalar col/row locals are byte-identical (same Math.floor division).
  */
 export function calculateRouteDangerImpl(
   self: GodAIInput,
@@ -97,28 +115,32 @@ export function calculateRouteDangerImpl(
   const w = self.world
   let danger = 0
 
-  // Simple heuristic: count enemies that are closer to the target than we are
-  const targetCell = pxToCell(toX, toY)
-  const playerCell = pxToCell(fromX, fromY)
-  const playerDistToTarget =
-    Math.abs(targetCell.col - playerCell.col) + Math.abs(targetCell.row - playerCell.row)
+  // Simple heuristic: count enemies that are closer to the target than we are.
+  // Inline pxToCell as scalar col/row — no Cell allocation.
+  const targetCol = Math.floor(toX / CELL)
+  const targetRow = Math.floor(toY / CELL)
+  const playerCol = Math.floor(fromX / CELL)
+  const playerRow = Math.floor(fromY / CELL)
+  const playerDistToTarget = Math.abs(targetCol - playerCol) + Math.abs(targetRow - playerRow)
 
   // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
   const dangerScan = self._enemies.length > 0 ? self._enemies : w.tanks
-  for (const t of dangerScan) {
+  for (let ti = 0; ti < dangerScan.length; ti++) {
+    const t = dangerScan[ti]
     if (!t.alive || t.spawnTimer > 0) continue
 
-    const enemyCell = pxToCell(t.x, t.y)
-    const enemyDistToTarget =
-      Math.abs(targetCell.col - enemyCell.col) + Math.abs(targetCell.row - enemyCell.row)
+    // Inline pxToCell(t.x, t.y) — scalar col/row, no Cell allocation.
+    const enemyCol = Math.floor(t.x / CELL)
+    const enemyRow = Math.floor(t.y / CELL)
+    const enemyDistToTarget = Math.abs(targetCol - enemyCol) + Math.abs(targetRow - enemyRow)
 
     // If enemy is closer to target than player, and on the path, add danger
     if (enemyDistToTarget < playerDistToTarget) {
       // Check if enemy is roughly between player and target
-      const dx = enemyCell.col - playerCell.col
-      const dy = enemyCell.row - playerCell.row
-      const tx = targetCell.col - playerCell.col
-      const ty = targetCell.row - playerCell.row
+      const dx = enemyCol - playerCol
+      const dy = enemyRow - playerRow
+      const tx = targetCol - playerCol
+      const ty = targetRow - playerRow
 
       // Simple projection check
       if (Math.sign(dx) === Math.sign(tx) && Math.sign(dy) === Math.sign(ty)) {
@@ -161,8 +183,22 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
  *   5. No enemies → default defense position
  */
 export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | null {
+  // (perf §68 Round 9) NOTE: cross-tick caching was evaluated and REJECTED.
+  // A 30-tick (0.5s) cache caused S6 Iron Curtain win rate to drop from
+  // 72% to 40% — the stage has heavy steel walls forcing frequent target
+  // switches, and 0.5s staleness leaves the player stuck behind walls too
+  // long. The per-tick cost (~3% self-time) is the price of responsiveness.
+  // Kept the wrapper signature so callers don't change; the body is just
+  // a direct call to the uncached implementation.
+  return selectTargetUncached(self, playerCell)
+}
+
+function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
-  const p = w.player
+  // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
+  // gating target selection on P1's existence would blank P2's target list
+  // whenever P1 is permanently dead.
+  const p = self.controlledTank(w)
   if (!p) return null
 
   const baseCol = BASE_POS.col
@@ -185,7 +221,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   if (!self.hasBase) {
     let best = enemies[0]
     let bestDist = Infinity
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       const adjustedDist = d - (t.bonus ? 2 : 0)
@@ -236,7 +273,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   // defense logic below handles that) and in aggressive/freeze mode.
   if (!baseUnderThreat && !self.aggressive) {
     let nearby = 0
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       if (d <= self.params.outnumberedRadiusCells) nearby++
@@ -250,7 +288,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   if (self.aggressive) {
     let best = enemies[0]
     let bestDist = Infinity
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       if (d < bestDist) {
@@ -268,7 +307,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   if (canHunt) {
     let best = enemies[0]
     let bestDist = Infinity
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       // Prefer bonus enemies (they drop power-ups) when distances are close.
@@ -309,7 +349,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   if (!baseUnderThreat) {
     let best = enemies[0]
     let bestDist = Infinity
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       const adjustedDist = d - (t.bonus ? 2 : 0)
@@ -330,10 +371,17 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   // When OFF, use the original scoring (byte-identical).
   let bestEnemy: Tank | null = null
   let bestScore = -Infinity
-  for (const t of enemies) {
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
     const tc = self.tankCell(t)
     const distToBase = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
-    if (distToBase > self.params.threatRangeCells) continue
+    // §59: an enemy with a clear shot at the base is always considered,
+    // even beyond threatRangeCells — it can destroy the base NOW from any
+    // distance. Other enemies are filtered by threatRangeCells as before.
+    const hasClearShot =
+      (self.params.defenseClearShotBonus > 0 || self.params.smartThreatModel > 0) &&
+      enemyCanShootBase(self, t)
+    if (distToBase > self.params.threatRangeCells && !hasClearShot) continue
 
     // Phase A: defense-priority kind weights when smartThreatModel is ON.
     const defenseKindWeight =
@@ -345,13 +393,18 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
             : t.kind === 'armor'
               ? 2
               : 1
-        : (KIND_THREAT_WEIGHT[t.kind] ?? 1)
+        : kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 3 : 0
     const urgencyBonus = tc.row >= defenseRow ? (tc.row - defenseRow + 1) * 100 : 0
     const proximityBonus = tc.row >= 20 ? 50 : 0
-    // Phase A: canShootBaseFrom bonus — enemy has a clear shot at the base.
-    // This is the highest-priority target: it can destroy the base NOW.
-    const clearShotBonus = self.params.smartThreatModel > 0 && enemyCanShootBase(self, t) ? 500 : 0
+    // Phase A / §59: canShootBaseFrom bonus — enemy has a clear shot at the
+    // base. This is the highest-priority target: it can destroy the base NOW.
+    // §59 (Strategy C): decoupled from smartThreatModel — controlled by
+    // defenseClearShotBonus (default 500, 0 = OFF = byte-identical to pre-§59).
+    // When smartThreatModel is also ON, take the max so either gate can enable.
+    const clearShotBonus = hasClearShot
+      ? Math.max(self.params.defenseClearShotBonus, self.params.smartThreatModel > 0 ? 500 : 0)
+      : 0
     const score =
       -distToBase * 10 +
       (defenseKindWeight + bonusWeight) * 30 +
@@ -370,7 +423,8 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
     // the map means the player never engages and never clears the stage.
     let nearest = enemies[0]
     let nearestDist = Infinity
-    for (const t of enemies) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
       if (d < nearestDist) {

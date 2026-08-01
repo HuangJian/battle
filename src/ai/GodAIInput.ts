@@ -4,7 +4,7 @@ import type { Tank, Bullet, TankKind } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS, CELL } from '../constants'
+import { BASE_POS, CELL, GRID } from '../constants'
 import { ALL_DIRS } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
@@ -12,6 +12,7 @@ import {
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
+  shouldFireBreakThroughImpl,
 } from './god/FireControl'
 import {
   findMostDangerousBulletImpl,
@@ -20,6 +21,8 @@ import {
   dodgeDirectionImpl,
   isSafeDirImpl,
   hasEnemyBulletInLineImpl,
+  findPathThreatImpl,
+  findSafeMoveDirImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -36,6 +39,8 @@ import {
   directMoveImpl,
   canMoveOrBreakImpl,
   canMoveDirImpl,
+  computeThreatCostsImpl,
+  trapAvoidanceImpl,
 } from './god/Navigator'
 import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
 
@@ -281,6 +286,386 @@ export interface GodAIParams {
    * giving the player more time to intercept.
    */
   smartRushDetectBonus: number
+
+  // ---- §58: Stage-level adaptive params (Strategy G, replaces override table) ----
+  /**
+   * §58 / Strategy G: armor ratio in the stage's enemy queue above which the
+   * AI switches to close-combat camp/nav timing. 0 = never adapt.
+   *
+   * Armor-heavy stages (S32 Diamond 40%, S18 Frozen Field 45%, S25 Ice Palace
+   * 50%) suffer from T2a deadlocks and pursuit loops: armor is slow and creates
+   * traffic jams, so the player gets stuck camping or chasing. Shorter camp/nav
+   * timers (the old S32 override values) break these loops faster.
+   *
+   * Default 0.35 — catches S18/S25/S32/S16/S24/S27/S30/S34 (≥35% armor) without
+   * affecting low-armor stages like S6 (0%), S10 (25%), S15 (10%). The threshold
+   * was chosen so the adaptation fires on stages where the failure mode is
+   * lives_exhausted (stuck chasing armor) rather than base_destroyed.
+   */
+  armorAdaptRatio: number
+  /** §58: camp timeout for armor-heavy stages (default 50 = S32 override value). */
+  armorCampTimeoutTicks: number
+  /** §58: anti-camp suppress for armor-heavy stages (default 50). */
+  armorAntiCampSuppressTicks: number
+  /** §58: nav stuck for armor-heavy stages (default 90). */
+  armorNavStuckTicks: number
+  /**
+   * §58: brick density (fraction of solid cells that are brick) above which
+   * the AI uses faster replanning + path noise. 0 = never adapt.
+   *
+   * Brick-dense stages (S26 Brick Maze, S4 Maze) cause deadlock patrol loops
+   * where the player and enemies circle each other through narrow corridors.
+   * Faster replan (30 vs 50) + small path noise (0.05) break the symmetry.
+   * Default 0.45 — catches S26/S4 without affecting open stages.
+   */
+  brickDenseAdaptRatio: number
+  /** §58: replan interval for brick-dense stages (default 30 = S26 override). */
+  brickDenseReplanInterval: number
+  /** §58: path noise for brick-dense stages (default 0.05). */
+  brickDenseSuboptimalPathProb: number
+
+  /**
+   * §59 / Strategy C: score bonus in defense-mode target selection for
+   * enemies that have a CLEAR shot at the base (aligned + no brick/steel
+   * in between). Such enemies can destroy the base with their next bullet,
+   * so they must be the highest-priority target. 0 = OFF (byte-identical
+   * to pre-§59). Default 500 — large enough to dominate the scoring
+   * (urgencyBonus maxes at ~1000 for row 25, proximityBonus is 50, kind
+   * weight is 30-120). Decouples the clear-shot bonus from the
+   * smartThreatModel gate so it can be A/B-tested independently.
+   */
+  defenseClearShotBonus: number
+
+  // ---- §60: Open-defense adaptation (baseRaceRangeCells by terrain) ----
+  /**
+   * §60: brick/(brick+steel) ratio at or above which the stage is eligible
+   * for "open defense" (wider baseRaceRangeCells). Stages below this ratio
+   * are "steel mazes" — enemies approach through indestructible corridors
+   * that bypass the defense position, so early retreat HURTS (the player
+   * can't intercept from the defense cell). 0 = never adapt.
+   *
+   * Default 0.10 — protects S6 Iron Curtain (3.7%) and S32 Diamond (5.3%)
+   * while letting all other stages (≥12.5%) use the wider range. Verified
+   * via 30-seed probes: baseRaceRangeCells=14 gives +13pp on S12/S26/S33
+   * but -16pp on S6 and -33pp on S32.
+   */
+  openDefenseBrickWallRatio: number
+  /** §60: baseRaceRangeCells for open-defense stages (default 14). */
+  openDefenseBaseRaceRangeCells: number
+
+  // ---- §61: Terrain-adaptive T2a range for high-HP enemies ----
+  /**
+   * §61: forest density below which the stage is "open sightline" for armor
+   * engagement. On open stages, the player can see and hit armor from range 4
+   * (bullets travel through empty space fast). On forest-dense stages, enemies
+   * are hidden in trees — engaging from range 4 wastes bullets on invisible
+   * targets and the player takes ambush damage. 0 = never adapt.
+   *
+   * Default 0.15 — catches S26 (7%), S30 (12%), S16/S19/S24/S31 (0-9%) while
+   * protecting S14 (31%), S18 (18%), S32 (16%), S34 (17%). Verified via
+   * 40-seed probes: t2aHighHpMaxRange=4 gives +12pp on S26, +17pp on S30,
+   * but -25pp on S18, -8pp on S34.
+   */
+  openT2aForestRatio: number
+  /**
+   * §61: t2aHighHpMaxRange for open-sightline stages (default 4). At range 4,
+   * the player engages armor from 4 cells away instead of 2 — bullet travel
+   * time is still short (~0.3s for 4 cells) but the player has room to dodge
+   * return fire. On forest-dense stages, keep the default 2 (point-blank).
+   */
+  openT2aHighHpMaxRange: number
+  /**
+   * §61: water density at or above which the stage is "open sightline"
+   * (water creates unobstructed lanes). Overrides the forest check — even
+   * with forest, high water means open firing lanes. Default 0.25 — catches
+   * S30 Eagle Nest (36% water) which has 12% forest (below threshold anyway)
+   * but this also future-proofs for high-water stages.
+   */
+  openT2aWaterRatio: number
+  /**
+   * §62: armor ratio at or above which open-T2a is SUPPRESSED (on forest-triggered,
+   * non-steel-heavy stages). Stages with significant armor need point-blank
+   * engagement (range 2) in open terrain — armor tanks take 4 hits, and at
+   * range 4 the player trades kills inefficiently. 1 = never suppress.
+   *
+   * SUPPRESSION IS BYPASSED (open-T2a fires) when:
+   *   - The open-sightline trigger was WATER (waterRatio ≥ openT2aWaterRatio) —
+   *     water lanes allow safe long-range engagement (S30: 36% water, 30% armor).
+   *   - OR the stage is steel-heavy (steelRatio ≥ openT2aSteelRatio) — steel
+   *     corridors force head-on encounters where range 4 gives reaction time
+   *     (S26: 26% steel, 40% armor).
+   *
+   * Default 0.25 — suppresses on S11 (30% armor, 4% steel), S16 (50%, 3%),
+   * S19 (40%, 4%) while keeping open-T2a on S26 (40% armor, 26% steel) and
+   * S30 (30% armor, 36% water).
+   */
+  openT2aMaxArmorRatio: number
+  /**
+   * §62: steel density at or above which armor suppression is BYPASSED
+   * (open-T2a fires even with heavy armor). Steel corridors force head-on
+   * encounters where the player needs range 4 to react. Default 0.15.
+   */
+  openT2aSteelRatio: number
+  /**
+   * §62: forest density at or above which armor-heavy stages use range 3
+   * (instead of the default 2) for high-HP T2a. On forest-dense armor stages,
+   * the forest absorbs enemy bullets, giving the player room to maneuver at
+   * range 3 without taking damage. Range 2 is too close (point-blank hits),
+   * range 4 is too far in forest (bullets hit trees). 0 = never adapt.
+   * Default 0.25 — catches S14 (31%) while leaving S18 (18%) and S32 (16%)
+   * at range 2 (range 3 hurt both in probes).
+   */
+  armorForestDenseRatio: number
+  /** §62: t2aHighHpMaxRange for forest-dense armor-heavy stages (default 3). */
+  armorForestDenseRange: number
+
+  /**
+   * §63: t2aMaxRange for 1-HP enemies on open-sightline, non-armor-heavy
+   * stages. When > 0 AND the stage has open sightline (low forest or high
+   * water, same trigger as open-T2a for high-HP) AND armor ratio < 35%,
+   * t2aMaxRange is reduced from 15 to this value. On open stages, the
+   * player closes in on 1-HP enemies for more reliable kills (less bullet
+   * travel time, better positioning for base defense). On brick/forest-dense
+   * stages, the default 15 is kept — close combat in corridors is dangerous.
+   * 0 = OFF (byte-identical to pre-§63).
+   *
+   * Default 12 — probes showed S1 +7pp, S7 +13pp, S11 +8pp, S12 neutral,
+   * while brick-dense stages (S3/S5/S18) prefer the default 15.
+   */
+  openT2a1HpMaxRange: number
+
+  /**
+   * §64: outnumberedRadiusCells for armor-heavy + high-steel + non-steel-maze
+   * stages. On these stages (only S26 Brick Maze: 40% armor, 26% steel,
+   * brickWallRatio 0.26), the player gets swarmed in steel corridors and
+   * needs to retreat from a wider radius (12 vs default 9) to avoid being
+   * pinned. 9 = no change (byte-identical to pre-§64).
+   *
+   * Gated by: armorHeavy AND steelRatio ≥ openT2aSteelRatio AND !isSteelMaze.
+   * Only S26 matches this regime across all 35 stages. Probes: S26 +10pp
+   * (75% → 85%, 30 seeds). S32 (steel-maze) is excluded — it needs the
+   * opposite (range 12 hurts S32 by -7pp).
+   */
+  armorSteelOutnumberedRadiusCells: number
+
+  /**
+   * §65: suboptimalPathProb for armor-heavy + steel-maze stages. On these
+   * stages (only S32 Diamond: 40% armor, brickWallRatio 0.05), the player
+   * gets pinned in predictable positions by the steel corridors. Adding
+   * path randomness (0.05) breaks the deterministic pinning pattern and
+   * improves survival. 0 = no change (byte-identical to pre-§65).
+   *
+   * Gated by: armorHeavy AND isSteelMaze. Only S32 matches this regime
+   * across all 35 stages. Probes: S32 +3pp (77% → 80%, 30 seeds).
+   */
+  armorMazeSuboptimalPathProb: number
+
+  /**
+   * §66: campTimeoutTicks for steel-maze stages with low armor. On these
+   * stages (only S6 Iron Curtain: 0% armor, brickWallRatio 0.04), the
+   * player gets stuck camping at indestructible steel walls — the default
+   * 60-tick camp timeout is far too long, wasting ~1s per deadlock. A
+   * shorter timeout (20) breaks the camping deadlock fast, letting the
+   * player reposition through alternative corridors.
+   *
+   * Gated by: isSteelMaze AND !armorHeavy. Only S6 matches this regime
+   * across all 35 stages. Probes: S6 +16pp (72% → 88%, 60 seeds).
+   */
+  steelMazeCampTimeoutTicks: number
+
+  /**
+   * §68-v2: Crossfire awareness via time-aware path threat projection.
+   *
+   * When > 0, the navigation branch checks the player's movement path
+   * (4 cells ahead) for bullets that would arrive at any cell before the
+   * player clears it. Unlike the old v1 approach (which only checked the
+   * next cell with a fixed proximity threshold), this uses actual bullet
+   * speed for time-of-arrival estimation, checking ALL enemy bullets from
+   * ALL directions.
+   *
+   * When a threat is detected, the player tries alternative directions
+   * (perpendicular first, then backward) or stays put — NOT a perpendicular
+   * dodge like v1. This avoids the navigation oscillation that plagued v1-v3.
+   *
+   * The check runs in the navigation section (T2b) only, after the existing
+   * dodge (findMostDangerousBullet) has already handled current-position
+   * threats. T8 base interception and T2a close combat are not affected.
+   */
+  crossfireAwareness: number
+  /**
+   * §69: Terrain-gated crossfire awareness. When > 0, crossfire awareness is
+   * automatically enabled on "open" stages (obstacle density < this ratio AND
+   * not a steel maze). On maze stages, diversion from the A* path is too
+   * expensive — the cost of taking an alternative route outweighs the bullet
+   * risk. 0 = never auto-enable (byte-identical to pre-§69).
+   *
+   * Obstacle density = (brick + steel + water) / totalCells. Water is included
+   * because it creates impassable corridors just like walls.
+   *
+   * Default 0.40 — gates off S3 (43%), S7 (39%), S9 (42%), S24 (43%), S30 (44%),
+   * S34 (45%) plus steel mazes S6/S32. Keeps improvements S1 (37%), S8 (23%),
+   * S27 (9%), S28 (29%) enabled. Residual regressions S14/S18/S26 remain ON
+   * — terrain density cannot fully separate them (see §69 analysis).
+   */
+  crossfireOpenObstacleRatio: number
+
+  /**
+   * §69-B: A* pathfinding threat cost. When > 0, the A* pathfinder adds a
+   * threat cost penalty to cells where enemy bullets are expected to arrive
+   * at the same time as the player. Unlike §68-v2's post-hoc diversion
+   * (which switches direction AFTER the path is computed), this bakes threat
+   * avoidance into the path itself — A* finds the optimal trade-off between
+   * path length and safety.
+   *
+   * The threat cost is time-aware: for each cell in a bullet's trajectory,
+   * the bullet's arrival tick (dist / bullet.speed) is compared with the
+   * player's estimated arrival tick (manhattanDist * CELL / playerSpeed).
+   * If they overlap within ±10 ticks, the cell gets a threat cost penalty.
+   *
+   * 0 = OFF (byte-identical to pre-§69-B). 3 = a threatened cell costs as
+   * much as 4 safe cells (1 + 3), so A* prefers detours up to 3 extra cells.
+   */
+  crossfirePathCost: number
+
+  /**
+   * §48-revisit: Steel-only evasion occlusion. When > 0, the bullet-threat
+   * scanner (`findMostDangerousBulletImpl`) skips enemy bullets whose path to
+   * the player is blocked by STEEL. Steel is a permanent barrier for enemy
+   * bullets — `STEEL_PIERCE_PLAYER_LEVEL = 3` is a player-only privilege, so
+   * every enemy bullet (basic/fast/power/armor) dies on steel and can never
+   * pass through, nor can any future bullet from the same direction. Dodging
+   * a steel-blocked bullet is therefore purely wasteful: it moves the player
+   * off-position for a threat that can never arrive.
+   *
+   * BRICK is deliberately NOT treated as occlusion (the original §48 fix's
+   * mistake). Brick is temporary — the bullet destroys it and dies, but the
+   * enemy fires again and the next bullet comes through. Dodging a
+   * brick-blocked bullet is load-bearing "anticipatory dodging" (DECISIONS
+   * §48 negative result: blocking brick cost S32 −10pp @120).
+   *
+   * The scan walks the full bullet→player path checking every cell for steel.
+   * It does NOT stop at brick (there may be steel behind a brick that the
+   * bullet will eventually clear through to). OOB cells cause a break (not a
+   * false "steel" — avoiding the TileMap.get OOB→'steel' default that caused
+   * §70's baseSteel false positive).
+   *
+   * 0 = OFF (byte-identical to pre-§48-revisit). 1 = ON.
+   *
+   * NOTE (per-seed tick-diff finding, S32 seed 11): a blanket steel occlusion
+   * is NET NEUTRAL — suppressing a dodge removes load-bearing repositioning,
+   * so the player can get pinned in a corner (mechanism confirmed at tick 738:
+   * near steel-blocked bullet, player stayed at (0,1) and died, while the
+   * baseline dodged down and won). The `evasionSteelOcclusionRange` gate
+   * addresses this by only suppressing FAR blocked bullets (dist >= range
+   * cells), whose dodge is genuinely wasteful, while keeping NEAR dodges.
+   */
+  evasionSteelOcclusion: number
+
+  /**
+   * §48-revisit: distance gate (cells) for `evasionSteelOcclusion`. Only
+   * suppress the dodge for a steel-blocked bullet when it is at least this
+   * many cells from the player. A far blocked bullet's dodge is genuinely
+   * wasteful (the player is not in imminent danger); a near blocked bullet's
+   * dodge is load-bearing repositioning (the player is being pressured and
+   * needs to move) — keeping it avoids the S32 pinning regression.
+   *
+   * 0 = suppress ALL steel-blocked bullets (no distance gate). N = suppress
+   * only blocked bullets at dist >= N cells.
+   */
+  evasionSteelOcclusionRange: number
+
+  /**
+   * §48-revisit (terrain gate): brick/(brick+steel) ratio BELOW which
+   * `evasionSteelOcclusion` is auto-enabled in computeStageAdaptedParams.
+   * 0 = never auto-enable (byte-identical to pre-§48-revisit).
+   *
+   * Discriminator discovered via per-seed tick-diff + stage probes: steel
+   * ratio is NOT the predictor (S26 Brick Maze has MORE steel than S32
+   * Diamond — 26% vs 18% — yet regresses while S32 gains). The predictor
+   * is brickWallRatio:
+   *   - Steel mazes (S32 0.063, S6 0.04): occlusion HELPS (+2.5~3.3pp S32
+   *     @120). The player fights in open guard bands / steel corridors;
+   *     a steel-blocked bullet's dodge is genuinely wasteful.
+   *   - Brick-heavy (S14 0.915, S26 0.254): occlusion HURTS (-5pp S14,
+   *     -6.7pp S26 @120). Dodging a blocked bullet is load-bearing
+   *     repositioning through breakable cover; skipping it re-ranks the
+   *     scan to a farther bullet (S26 seed-7: player dodged down one tick
+   *     early and lost).
+   * Default 0.10 = enable on steel mazes only (matches isSteelMaze / §60).
+   */
+  evasionSteelOcclusionBrickRatio: number
+
+  /**
+   * §48-revisit: Trap avoidance (user idea 2 — don't walk into surround
+   * positions). When > 0, the navigation branch (T2b) checks the NEXT cell
+   * before committing to the current move direction: if that cell has few
+   * passable exits (≤ 2 — a corridor / corner / dead-end) AND `trapEnemyCount`
+   * or more enemies are within `trapEnemyRadiusCells` of it, the player is
+   * at risk of being surrounded there. The move direction is overridden to
+   * the open direction whose next cell has the most exits (tie-broken toward
+   * the base). Runs at the END of navigation (after _moveDir is chosen), so
+   * it only perturbs the final move — dodge / T8 / T2a priorities are intact.
+   *
+   * 0 = OFF (byte-identical). 1 = ON.
+   */
+  trapAvoidance: number
+  /** Radius (cells) around the destination cell for the trap enemy census. */
+  trapEnemyRadiusCells: number
+  /** Min live enemies within the radius that make a low-exit cell a trap. */
+  trapEnemyCount: number
+
+  /**
+   * §49-revisit: 炮口相向对枪抵消（§52 v2，T2a 内联，当前保留形态）。
+   *
+   * When > 0, the T2a branch detects an enemy facing the player within
+   * `counterFireMaxRange` cells (and not on ice) and: (a) if an enemy bullet
+   * is already in the line of fire, fires to cancel it (对枪抵消 — bullet
+   * elimination is safer than trading hits); (b) otherwise keeps alignment
+   * toward the enemy without strafing (保持对齐以备对枪).
+   *
+   * When 0, T2a uses the plain stop-and-aim behavior (pre-§52 form — turn
+   * to face and fire, no facing-enemy special-casing).
+   *
+   * Default 1 = current shipped behavior (byte-identical to pre-parameter-
+   * ization). OFF (0) is the A/B baseline (pre-§52 v2).
+   */
+  counterFire: number
+  /**
+   * §49-revisit: max distance (cells) for the facing-enemy counter-fire /
+   * keep-alignment block in T2a. The original hardcoded value was 5.
+   */
+  counterFireMaxRange: number
+
+  /**
+   * §74: Steel-fire gate — don't fire at steel walls the player cannot
+   * pierce while trying to BREAK THROUGH a wall. When > 0, the two
+   * break-through fire sites in think() that bypass shouldFireInDirImpl
+   * (aggressive navigate break-through + T2b navigate break-through) apply
+   * the same steel gate that shouldFireInDirImpl's T11 already enforces:
+   * steel blocks fire while `p.level < STEEL_PIERCE_PLAYER_LEVEL` (3).
+   *
+   * Without this gate, the AI fires at indestructible steel to open a path
+   * (wasting the bullet cap) and then camps at the wall for the full
+   * campTimeoutTicks (90 default) before the anti-camp escape — the
+   * reported "shoot steel, can't break through, stuck in place" behavior.
+   * With the gate ON, the AI falls through to navigation instead, which
+   * routes AROUND the steel via corridors (steel is impassable to A*),
+   * restoring mobility.
+   *
+   * Scope note (per-seed A/B, 2026-08-01): deliberately NOT applied to the
+   * T2a/aggressive stop-and-aim sites (which fire when scan.enemy is true)
+   * — the dual-offset case (steel on one scan line, enemy on the other)
+   * means the enemy is genuinely reachable by the center-line bullet, and
+   * suppressing that fire costs kills (arena A/B: 20 kills → 7 kills).
+   *
+   * At level ≥ 3 the player CAN pierce steel, so break-through fire at
+   * steel is correct and the gate is inert (byte-identical to pre-§74
+   * behavior).
+   *
+   * 0 = OFF (byte-identical to pre-§74 behavior — A/B baseline).
+   * 1 = ON (default — the fix).
+   */
+  steelFireGate: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -375,6 +760,106 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   smartThreatHpWeight: 0.2,
   smartThreatDistRange: 12,
   smartRushDetectBonus: 4,
+
+  // §58: Stage-level adaptive params (Strategy G). These generalize the old
+  // per-stage override table (godai-stage-overrides.ts) into a data-driven
+  // adaptation based on stage characteristics computed in reset(). Default ON
+  // — the thresholds and adapted values are tuned to match the old overrides
+  // exactly on the stages they covered (S26 Brick Maze, S32 Diamond), while
+  // leaving other stages on the base params. See DECISIONS §58.
+  armorAdaptRatio: 0.35,
+  armorCampTimeoutTicks: 50,
+  armorAntiCampSuppressTicks: 50,
+  armorNavStuckTicks: 90,
+  brickDenseAdaptRatio: 0.45,
+  brickDenseReplanInterval: 30,
+  brickDenseSuboptimalPathProb: 0.05,
+
+  // §59 / Strategy C: clear-shot bonus in defense-mode target selection.
+  // Default 500 — prioritizes enemies with a clear line of fire to the base.
+  // 0 = OFF (byte-identical to pre-§59). Decoupled from smartThreatModel.
+  defenseClearShotBonus: 500,
+
+  // §60: Open-defense adaptation. On non-steel-maze stages, widen
+  // baseRaceRangeCells from 11 to 14 for earlier threat detection. Steel
+  // mazes (brick/(brick+steel) < 0.10) keep the default 11 — early retreat
+  // hurts there because enemies bypass the defense position via corridors.
+  openDefenseBrickWallRatio: 0.1,
+  openDefenseBaseRaceRangeCells: 14,
+
+  // §61: Terrain-adaptive T2a range. On open-sightline stages (low forest or
+  // high water), engage armor from range 4 instead of 2 — faster kills, less
+  // damage taken. On forest-dense stages, keep point-blank (range 2).
+  // §62: suppressed when armor ratio ≥ 25% — armor-heavy stages need
+  // point-blank regardless of sightline (range 4 trades inefficiently).
+  openT2aForestRatio: 0.15,
+  openT2aHighHpMaxRange: 4,
+  openT2aWaterRatio: 0.25,
+  openT2aMaxArmorRatio: 0.25,
+  openT2aSteelRatio: 0.15,
+  // §62: forest-dense armor T2a range. On armor-heavy stages with forest
+  // ≥ 25%, use range 3 (not 2) — the forest absorbs enemy bullets, giving
+  // the player room to maneuver at range 3 without taking damage. Range 2
+  // is too close (player takes point-blank hits), range 4 is too far in
+  // forest (bullets hit trees). Probes: S14 +10pp with range 3.
+  armorForestDenseRatio: 0.25,
+  armorForestDenseRange: 3,
+  // §63: REVERTED — open-sightline 1-HP T2a range. Probes showed improvement
+  // on S1/S7 but regression on S8/S11/S30/S33 in full 60-seed validation.
+  // The adaptation is net negative (-0.6pp mean). Kept as 0 (OFF) for safety.
+  openT2a1HpMaxRange: 0,
+  // §64: armor-heavy + high-steel + non-steel-maze → widen outnumberedRadius.
+  // Only S26 matches. Probes: S26 +10pp (75% → 85%, 30 seeds). 9 = no change.
+  armorSteelOutnumberedRadiusCells: 12,
+  // §65: REVERTED — armor-heavy + steel-maze path randomness. 30-seed probe
+  // showed S32 +3pp, but 60-seed validation showed -1.7pp (66.7% → 65%).
+  // The 30-seed gain was seed-specific noise. Kept as 0 (OFF) for safety.
+  armorMazeSuboptimalPathProb: 0,
+  // §66: steel-maze non-armor camp timeout. Only S6 matches. +16pp (60 seeds).
+  steelMazeCampTimeoutTicks: 20,
+
+  // §68-v2: Crossfire awareness — see interface docs. Default 0 (OFF).
+  // v1 was neutral (-0.4pp); v2 uses time-aware projection + multi-strategy
+  // response instead of fixed-proximity + perpendicular dodge.
+  crossfireAwareness: 0,
+  // §69: Terrain-gated crossfire. 0 = never auto-enable (byte-identical).
+  // 0.40 = enable on open stages (obstacle density < 40%, not steel maze).
+  crossfireOpenObstacleRatio: 0,
+  // §69-B: A* threat cost. 0 = OFF (byte-identical). 3 = prefer detours up
+  // to 3 extra cells to avoid bullet-threatened cells.
+  crossfirePathCost: 0,
+
+  // §48-revisit: Steel-only evasion occlusion. 0 = OFF (byte-identical to
+  // pre-§48-revisit). See interface docs. Only steel (permanent for enemy
+  // bullets) is treated as occlusion; brick (temporary) is NOT — dodging
+  // brick-blocked bullets is load-bearing anticipatory dodging (DECISIONS §48).
+  // Default range 0 = suppress ALL steel-blocked (per-seed tick-diff showed
+  // this is NET NEUTRAL — see interface docs for the pinning mechanism).
+  evasionSteelOcclusion: 0,
+  // Distance gate for steel occlusion (cells). 0 = no gate (suppress all).
+  // >0 suppresses only blocked bullets at dist >= range.
+  evasionSteelOcclusionRange: 0,
+  // §48-revisit terrain gate: 0 = never auto-enable (byte-identical).
+  // 0.10 = auto-enable occlusion on steel-maze stages (brickWallRatio below
+  // 0.10 — S32 Diamond 0.063, S6 Iron Curtain 0.04). Brick-heavy stages
+  // (S14 0.915, S26 0.254) stay OFF — they regress under occlusion (the
+  // dodge is load-bearing repositioning). Verified 2026-08-01: 35×60 net 0
+  // with zero per-stage regressions (S14/S26 byte-identical); 120-seed
+  // confirmations S32 +2.5pp (68.3→70.8), S6 +0.8pp (80.0→80.8).
+  evasionSteelOcclusionBrickRatio: 0.1,
+  // §48-revisit: trap avoidance (user idea 2). 0 = OFF (byte-identical).
+  trapAvoidance: 0,
+  trapEnemyRadiusCells: 5,
+  trapEnemyCount: 2,
+  // §49-revisit: 炮口相向对枪抵消 (§52 v2). 1 = ON (current shipped
+  // behavior, byte-identical to pre-parameterization). 0 = OFF (plain T2a).
+  counterFire: 1,
+  // Max range (cells) for the facing-enemy block. 5 = the original §52 v2
+  // hardcoded value.
+  counterFireMaxRange: 5,
+  // §74: Steel-fire gate — 1 = ON (default). 0 = OFF (pre-§74 behavior,
+  // A/B baseline). See interface docs.
+  steelFireGate: 1,
 }
 
 /**
@@ -392,6 +877,232 @@ export const SKILLED_HUMAN_PARAMS: GodAIParams = {
 }
 
 // ============================================================
+// §58: Stage-level adaptive params (Strategy G)
+// ============================================================
+
+/**
+ * §58 / Strategy G: compute stage-adapted God AI params from stage
+ * characteristics, replacing the per-stage override table.
+ *
+ * Two adaptations are applied (both data-driven, both OFF when the threshold
+ * param is 0):
+ *
+ *  1. Armor-ratio adaptation: when the stage's enemy queue has an armor
+ *     ratio ≥ `armorAdaptRatio`, switch to close-combat camp/nav timing
+ *     (`armorCampTimeoutTicks` / `armorAntiCampSuppressTicks` /
+ *     `armorNavStuckTicks`). Armor-heavy stages suffer from T2a deadlocks
+ *     and pursuit loops — armor is slow and creates traffic jams. Shorter
+ *     timers break these loops faster (generalizes the old S32 override).
+ *
+ *  2. Brick-density adaptation: when the stage's terrain has a brick
+ *     density ≥ `brickDenseAdaptRatio`, use faster replanning + small path
+ *     noise (`brickDenseReplanInterval` / `brickDenseSuboptimalPathProb`).
+ *     Brick-dense stages cause deadlock patrol loops in narrow corridors;
+ *     faster replan + noise break the symmetry (generalizes the old S26
+ *     override).
+ *
+ *  3. Open-defense adaptation (§60): when the stage's brick/(brick+steel)
+ *     ratio ≥ `openDefenseBrickWallRatio`, widen `baseRaceRangeCells` to
+ *     `openDefenseBaseRaceRangeCells` (14) for earlier threat detection.
+ *     Steel-maze stages (brick/(brick+steel) < 0.10, e.g. S6/S32) keep the
+ *     default — early retreat hurts there because enemies bypass the defense
+ *     position through indestructible corridors.
+ *
+ * Determinism: both computations are pure functions of World state
+ * (spawnQueue + tileMap), so the same stage always yields the same adapted
+ * params. Called once per reset() — never per-tick.
+ */
+export function computeStageAdaptedParams(base: GodAIParams, world: World): GodAIParams {
+  const p = base
+  let adapted = false
+  const overrides: Partial<GodAIParams> = {}
+
+  // ---- 1. Armor-ratio adaptation ----
+  // Compute armor ratio once — reused by open-T2a suppression (§62).
+  let armorHeavy = false
+  let armorRatio = 0
+  if (world.spawnQueue.length > 0) {
+    let armorCount = 0
+    for (let i = 0; i < world.spawnQueue.length; i++) {
+      if (world.spawnQueue[i].kind === 'armor') armorCount++
+    }
+    armorRatio = armorCount / world.spawnQueue.length
+  }
+  if (p.armorAdaptRatio > 0 && armorRatio >= p.armorAdaptRatio) {
+    overrides.campTimeoutTicks = p.armorCampTimeoutTicks
+    overrides.antiCampSuppressTicks = p.armorAntiCampSuppressTicks
+    overrides.navStuckTicks = p.armorNavStuckTicks
+    armorHeavy = true
+    adapted = true
+  }
+
+  // ---- 2. Terrain scan: brick-density + open-defense + open-T2a + aimError (§60/§61/§62) ----
+  // All terrain-based adaptations share one scan. Called once per reset() —
+  // never per-tick — so the 676-cell iteration is not a hot path.
+  {
+    const tm = world.tileMap
+    let brickCount = 0
+    let steelCount = 0
+    let forestCount = 0
+    let waterCount = 0
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        const t = tm.get(col, row)
+        if (t === 'brick') brickCount++
+        else if (t === 'steel') steelCount++
+        else if (t === 'forest') forestCount++
+        else if (t === 'water') waterCount++
+      }
+    }
+    const totalCells = GRID * GRID
+    const steelRatio = steelCount / totalCells
+
+    // §62: on armor-heavy stages with LOW steel, eliminate aim noise — armor
+    // takes 4 hits, so every wasted shot extends the fight. Probes showed
+    // aimError=0 gives +4-8pp on S14/S19 (low steel). On steel-heavy stages
+    // (S26: 26% steel), the noise breaks corridor standoffs — keep it.
+    if (armorHeavy && steelRatio < p.openT2aSteelRatio) {
+      overrides.aimError = 0
+      adapted = true
+    }
+
+    const brickRatio = brickCount / totalCells
+    if (p.brickDenseAdaptRatio > 0 && brickRatio >= p.brickDenseAdaptRatio) {
+      overrides.replanInterval = p.brickDenseReplanInterval
+      overrides.suboptimalPathProb = p.brickDenseSuboptimalPathProb
+      adapted = true
+    }
+
+    // Compute brick/(brick+steel) once — used by both open-defense and open-T2a.
+    const wallCount = brickCount + steelCount
+    const brickWallRatio = wallCount > 0 ? brickCount / wallCount : 1
+    const isSteelMaze = brickWallRatio < p.openDefenseBrickWallRatio
+
+    // §60: open-defense — widen baseRaceRangeCells on non-steel-maze stages.
+    // SKIPPED on armor-heavy stages (armor requires aggressive close-combat;
+    // early retreat trades base defense for lives exhausted).
+    if (p.openDefenseBrickWallRatio > 0 && !armorHeavy && !isSteelMaze) {
+      overrides.baseRaceRangeCells = p.openDefenseBaseRaceRangeCells
+      adapted = true
+    }
+
+    // §61/§62: open-T2a — widen t2aHighHpMaxRange on open-sightline stages.
+    // On open stages (low forest or high water), the player can see and hit
+    // armor from range 4 — faster kills, less damage taken. On forest-dense
+    // stages, enemies are hidden — keep point-blank (range 2). Steel mazes
+    // also keep range 2 (enemies advance through corridors, range 4 wastes
+    // bullets on walls).
+    // §62: SUPPRESSED when armor ratio ≥ openT2aMaxArmorRatio AND the trigger
+    // was forest (not water) AND the stage is not steel-heavy. Bypassed when:
+    //   - water-triggered (water lanes allow safe long-range engagement), OR
+    //   - steel-heavy (steel corridors force head-on encounters needing range 4).
+    // §63: openSightline is also reused for the 1-HP t2aMaxRange adaptation.
+    const forestRatio = forestCount / totalCells
+    const waterRatio = waterCount / totalCells
+    const waterTriggered = waterRatio >= p.openT2aWaterRatio
+    const openSightline = !isSteelMaze && (forestRatio < p.openT2aForestRatio || waterTriggered)
+    if (openSightline) {
+      const armorSuppress =
+        armorRatio >= p.openT2aMaxArmorRatio && !waterTriggered && steelRatio < p.openT2aSteelRatio
+      if (!armorSuppress) {
+        overrides.t2aHighHpMaxRange = p.openT2aHighHpMaxRange
+        adapted = true
+      }
+
+      // §63: on open-sightline non-armor-heavy stages, reduce t2aMaxRange for
+      // 1-HP enemies. The player closes in for more reliable kills (less
+      // bullet travel time) and better base-defense positioning. Suppressed
+      // on armor-heavy stages (most enemies are armor; 1-HP range is less
+      // relevant, and armor needs aggressive close-combat).
+      if (p.openT2a1HpMaxRange > 0 && !armorHeavy) {
+        overrides.t2aMaxRange = p.openT2a1HpMaxRange
+        adapted = true
+      }
+    }
+
+    // §62: forest-dense armor T2a range. On armor-heavy stages with forest
+    // ≥ 25%, the forest absorbs enemy bullets, giving the player room to
+    // engage at range 3 instead of point-blank 2. Only fires when open-T2a
+    // did NOT already set a range (forest ≥ 15% blocks open-T2a, so these
+    // stages would otherwise stay at the default 2). Probes: S14 +10pp.
+    if (armorHeavy && p.armorForestDenseRatio > 0) {
+      if (forestRatio >= p.armorForestDenseRatio) {
+        overrides.t2aHighHpMaxRange = p.armorForestDenseRange
+        adapted = true
+      }
+    }
+
+    // §64: armor-heavy + high-steel + non-steel-maze → widen retreat radius.
+    // On S26 (40% armor, 26% steel, brickWallRatio 0.26), the player gets
+    // swarmed in steel corridors. Retreating from radius 12 (vs default 9)
+    // gives more room to avoid being pinned. Excluded: S32 (steel-maze,
+    // brickWallRatio 0.05) where wider retreat HURTS (-7pp). Only S26
+    // matches this regime across all 35 stages.
+    if (
+      armorHeavy &&
+      !isSteelMaze &&
+      steelRatio >= p.openT2aSteelRatio &&
+      p.armorSteelOutnumberedRadiusCells !== base.outnumberedRadiusCells
+    ) {
+      overrides.outnumberedRadiusCells = p.armorSteelOutnumberedRadiusCells
+      adapted = true
+    }
+
+    // §65: armor-heavy + steel-maze → add path randomness. On S32 (40% armor,
+    // brickWallRatio 0.05), the player gets pinned in predictable positions
+    // by the steel corridors. Path randomness (0.05) breaks the deterministic
+    // pinning pattern and improves survival. Only S32 matches this regime.
+    if (armorHeavy && isSteelMaze && p.armorMazeSuboptimalPathProb !== base.suboptimalPathProb) {
+      overrides.suboptimalPathProb = p.armorMazeSuboptimalPathProb
+      adapted = true
+    }
+
+    // §66: steel-maze + low-armor → shorter camp timeout. On S6 Iron Curtain
+    // (0% armor, brickWallRatio 0.04), the player camps at indestructible
+    // steel walls for the full 60-tick timeout, wasting ~1s per deadlock.
+    // A 20-tick timeout breaks the deadlock 3× faster. Excluded: S32
+    // (armor-heavy steel-maze) where the armor camp timing already applies.
+    if (isSteelMaze && !armorHeavy && p.steelMazeCampTimeoutTicks !== base.campTimeoutTicks) {
+      overrides.campTimeoutTicks = p.steelMazeCampTimeoutTicks
+      adapted = true
+    }
+
+    // §69: Terrain-gated crossfire awareness. Enable crossfire on open stages
+    // (low obstacle density, not a steel maze). On maze stages, diversion from
+    // the A* path is too expensive — §68 showed -15pp on S6/S26 (maze) vs
+    // +12pp on S28 (open). Obstacle density = (brick+steel+water)/totalCells.
+    // Water is included because it creates impassable corridors.
+    if (p.crossfireOpenObstacleRatio > 0 && base.crossfireAwareness === 0 && !isSteelMaze) {
+      const obstacleDensity = (brickCount + steelCount + waterCount) / totalCells
+      if (obstacleDensity < p.crossfireOpenObstacleRatio) {
+        overrides.crossfireAwareness = 1
+        adapted = true
+      }
+    }
+
+    // §48-revisit: terrain-gated steel-only evasion occlusion. Auto-enable
+    // ONLY on steel-maze stages (brickWallRatio < evasionSteelOcclusionBrickRatio).
+    // Steel ratio is NOT the predictor: S26 Brick Maze has MORE steel (26%)
+    // than S32 Diamond (18%) yet regresses while S32 gains. The predictor is
+    // brickWallRatio — steel mazes (S32 0.063, S6 0.04) gain +2.5~3.3pp @120,
+    // brick-heavy stages (S14 0.915, S26 0.254) lose -5~6.7pp (dodge
+    // suppression removes load-bearing repositioning; S26 seed-7 re-ranks to
+    // a farther bullet and dodges one tick early). 0 = never auto-enable
+    // (byte-identical to pre-§48-revisit).
+    if (
+      p.evasionSteelOcclusionBrickRatio > 0 &&
+      base.evasionSteelOcclusion === 0 &&
+      brickWallRatio < p.evasionSteelOcclusionBrickRatio
+    ) {
+      overrides.evasionSteelOcclusion = 1
+      adapted = true
+    }
+  }
+
+  return adapted ? { ...base, ...overrides } : base
+}
+
+// ============================================================
 // GodAIInput (orchestrator)
 // ============================================================
 
@@ -402,6 +1113,12 @@ export class GodAIInput implements InputLike {
   world: World
   rng: RNG
   params: GodAIParams
+  /**
+   * §58: the original params passed to the constructor, before stage-level
+   * adaptation is applied in reset(). reset() computes `this.params` from
+   * this base each time, so the adaptation never compounds across resets.
+   */
+  _baseParams: GodAIParams
 
   /**
    * Lie-Back-Win-Mode §3.8 P1: returns the tank this AI controls.
@@ -465,6 +1182,9 @@ export class GodAIInput implements InputLike {
     wall: boolean
     steel: boolean
     baseWall: boolean
+    baseSteel: boolean
+    steelCol: number
+    steelRow: number
     enemyDist: number
     enemyKind: TankKind
     enemyHp: number
@@ -474,6 +1194,9 @@ export class GodAIInput implements InputLike {
     wall: false,
     steel: false,
     baseWall: false,
+    baseSteel: false,
+    steelCol: -1,
+    steelRow: -1,
     enemyDist: Infinity,
     enemyKind: 'basic',
     enemyHp: 1,
@@ -524,6 +1247,46 @@ export class GodAIInput implements InputLike {
   _canMoveComputed = 0
   _canMoveResult = 0
 
+  /**
+   * (perf §68 Round 9) Cross-tick navigateTowards cache.
+   *
+   * `navigateTowardsImpl` is called every tick from think()'s navigate branch,
+   * but its inputs (playerCell + targetCell) only change when the player
+   * crosses a cell boundary (~every 23 ticks at player speed) or the target
+   * cell changes (also second-scale, since enemies move at most ~1 cell/sec).
+   * The terrain that A* reads also only changes when a brick is destroyed,
+   * which always coincides with the player entering a new cell or a target
+   * shift. Re-running A* while `(playerCell, target)` is unchanged is pure
+   * waste — the result is byte-identical.
+   *
+   * The cache holds the last (playerCell, target, result) triple and is
+   * reused while both inputs are stable. A safety timer forces a replan
+   * every `_navReplanMax` ticks (default 60 = 1 second) to bound staleness
+   * in edge cases (e.g. an enemy destroys a brick between cells).
+   *
+   * NOT invalidated in endFrame() — this is intentionally a cross-tick cache
+   * (the inputs are the same across ticks; that's the whole point). It is
+   * reset on resetForRun() / loadStage().
+   */
+  _navCacheValid = false
+  _navPlayerCol = 0
+  _navPlayerRow = 0
+  _navTargetCol = 0
+  _navTargetRow = 0
+  _navCache: Direction | null = null
+  _navReplanTimer = 0
+  _navReplanMax = 60
+
+  /**
+   * §69-B: Reusable threat cost buffer for A* pathfinding. Size GRID*GRID.
+   * When crossfirePathCost > 0, computeThreatCosts fills this array with
+   * per-cell threat penalties based on current bullet trajectories, and
+   * navigateTowards/replan pass it to findPath via PathConstraints.threatCosts.
+   * Reused across calls (same as _pfGScore etc. in pathfind.ts) — findPath
+   * is synchronous and never reentrant.
+   */
+  _threatCostsBuf: Float64Array = new Float64Array(GRID * GRID)
+
   constructor(
     world: World,
     params: GodAIParams = DEFAULT_GOD_AI_PARAMS,
@@ -532,6 +1295,7 @@ export class GodAIInput implements InputLike {
   ) {
     this.world = world
     this.rng = rng ?? world.rng
+    this._baseParams = params
     this.params = params
     if (controlledTank) this.controlledTank = controlledTank
   }
@@ -554,9 +1318,17 @@ export class GodAIInput implements InputLike {
     this.aggressive = false
     this._enemies = []
     this._otherTanks = []
+    // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
+    // stage reset — the next tick must recompute A* from scratch.
+    this._navCacheValid = false
+    this._navReplanTimer = 0
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
+    // §58: compute stage-level adaptive params from the base params. This
+    // replaces the per-stage override table with a data-driven adaptation
+    // based on stage characteristics (armor ratio, brick density).
+    this.params = computeStageAdaptedParams(this._baseParams, this.world)
   }
 
   getMoveDirection(): Direction | null {
@@ -637,7 +1409,9 @@ export class GodAIInput implements InputLike {
         (w.rules.maxBullets['player'] ?? 1) +
         ((p.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
       let inFlight = 0
-      for (const b of w.bullets) {
+      const bullets = w.bullets
+      for (let bi = 0; bi < bullets.length; bi++) {
+        const b = bullets[bi]
         if (b.alive && b.ownerId === p.id) {
           if (++inFlight >= cap) break // early exit — cap reached
         }
@@ -722,7 +1496,10 @@ export class GodAIInput implements InputLike {
         // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
         // Without this check, the AI fires through steel walls at enemies
         // it can see via global vision but cannot actually hit.
-        const aggScan = this.scanAhead(pcx, pcy, aimDir)
+        // Inline scanAheadImpl directly (perf §66): the thin scanAhead
+        // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
+        // V8 does not inline it because scanAheadImpl is large (100+ lines).
+        const aggScan = scanAheadImpl(this, pcx, pcy, aimDir)
         if (aggScan.enemy) {
           if (p.dir === aimDir) {
             this._moveDir = null
@@ -748,7 +1525,14 @@ export class GodAIInput implements InputLike {
       // the player's own base (T6). In classic instant combat the base has
       // 1 HP, so a single self-inflicted bullet destroys it.
       if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-        this._fire = !onCooldown
+        // §70/§74: break-through fire — never fire through base brick/steel
+        // (§70) or at steel the player can't pierce (§74). Both guards live
+        // in shouldFireBreakThroughImpl.
+        const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
+        const lvl = p.level ?? 0
+        if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {
+          this._fire = !onCooldown
+        }
       } else {
         this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir)
       }
@@ -793,7 +1577,8 @@ export class GodAIInput implements InputLike {
             this.params.maxPlayerDistFromBase))
 
     if (aimDir && this._antiCampSuppress <= 0 && !skipT2aForDefense) {
-      const scan = this.scanAhead(pcx, pcy, aimDir)
+      // Inline scanAheadImpl (perf §66, see aggressive branch above).
+      const scan = scanAheadImpl(this, pcx, pcy, aimDir)
 
       if (scan.enemy) {
         // §56: dynamic T2a range based on enemy kind.
@@ -852,10 +1637,13 @@ export class GodAIInput implements InputLike {
             // 对枪抵消对所有敌人类型都适用：当敌方子弹已在直线上时，
             // 开火抵消比打死敌人更安全（子弹被消除→玩家安全）。
             // 120-seed 验证：对枪对 ALL 敌人 +5 wins，仅 armor +1 win。
-            const facing = this.findEnemyFacingPlayer(pcx, pcy, aimDir)
+            // §49-revisit: 炮口相向对枪抵消 is parameterized for A/B.
+            // counterFire=0 → facing stays null → plain T2a (pre-§52 form).
+            const facing =
+              this.params.counterFire > 0 ? this.findEnemyFacingPlayer(pcx, pcy, aimDir) : null
             const onIce = w.isTankOnIce(p)
 
-            if (facing && !onIce && facing.dist <= 5 * CELL) {
+            if (facing && !onIce && facing.dist <= this.params.counterFireMaxRange * CELL) {
               // ---- 对枪抵消逻辑（适用于所有敌人类型）----
               const enemyBulletInLine = this.hasEnemyBulletInLine(pcx, pcy, aimDir)
 
@@ -925,7 +1713,8 @@ export class GodAIInput implements InputLike {
       let nearbyEnemy = false
       // Cluster C: reuse the per-tick enemy snapshot.
       const nearbyScan = this._enemies.length > 0 ? this._enemies : w.tanks
-      for (const t of nearbyScan) {
+      for (let ni = 0; ni < nearbyScan.length; ni++) {
+        const t = nearbyScan[ni]
         if (!t.alive || t.spawnTimer > 0) continue
         const tc = this.tankCell(t)
         if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
@@ -1069,15 +1858,48 @@ export class GodAIInput implements InputLike {
         this._moveDir = this.directMove(pc)
       }
     }
+    // §68-v2: Path threat check — don't move into crossfire.
+    // After navigation determines _moveDir, check if the path ahead has
+    // bullets that would arrive at any cell before the player clears it.
+    // If threatened: try alternative directions (perpendicular first,
+    // then backward) or stay put. Does NOT do a perpendicular dodge —
+    // the player either detours or waits, avoiding navigation oscillation.
+    // Only runs in the navigate branch (T2b); T8/T2a/aggressive are exempt.
+    if (!shielded && this.params.crossfireAwareness > 0 && this._moveDir && p.speed > 0.1) {
+      const pathThreat = this.findPathThreat(pcx, pcy, this._moveDir, p.speed)
+      if (pathThreat) {
+        // Try to find a safe alternative direction. If none found,
+        // KEEP the original direction — don't stop! Stopping in a crossfire
+        // is more dangerous than continuing; the existing dodge system
+        // (findMostDangerousBullet) will handle the bullet when it arrives.
+        const safeDir = this.findSafeMoveDir(pcx, pcy, this._moveDir, p.speed)
+        if (safeDir) {
+          this._moveDir = safeDir
+        }
+      }
+    }
+    // §48-revisit: Trap avoidance (user idea 2). After navigation determines
+    // _moveDir, check the NEXT cell for a surround risk (few exits + enemies
+    // nearby). If it's a trap, override toward open space / the base. Runs at
+    // the END of navigation, so it only perturbs the final move — dodge/T8/T2a
+    // priorities are intact (same placement discipline as §68-v2 above).
+    if (!shielded && this.params.trapAvoidance > 0 && this._moveDir) {
+      this._moveDir = this.trapAvoidance(p, this._moveDir)
+    }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.
     // Don't check shouldFireInDir here — it might fire at enemy bullets
     // (T5) instead of the wall, leaving the player stuck. When moving
     // freely, fire only at enemies (not walls) to save the bullet cap.
     if (this._moveDir && !this.canMoveDir(p, this._moveDir)) {
-      // Blocked by a breakable wall or enemy tank — fire to break through.
-      // canMoveOrBreak already verified the wall is non-base-protection.
-      this._fire = !onCooldown
+      // §70/§74: break-through fire — never fire through base brick/steel
+      // (§70) or at steel the player can't pierce (§74). Both guards live
+      // in shouldFireBreakThroughImpl.
+      const bs = scanAheadImpl(this, pcx, pcy, this._moveDir)
+      const lvl = p.level ?? 0
+      if (shouldFireBreakThroughImpl(bs, lvl, this.params.steelFireGate)) {
+        this._fire = !onCooldown
+      }
     } else {
       this._fire = !onCooldown && this.shouldFireInDir(pcx, pcy, this._moveDir ?? p.dir, false)
     }
@@ -1124,7 +1946,8 @@ export class GodAIInput implements InputLike {
     // if think() hasn't populated it yet — should never happen in normal flow).
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
     let result = false
-    for (const t of list) {
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = this.tankCell(t)
       // Static box: close lateral threat (original P1/P2.3 rule).
@@ -1164,7 +1987,8 @@ export class GodAIInput implements InputLike {
     const br = BASE_POS.row
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
     let result = false
-    for (const t of list) {
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
       if (!t.alive || t.spawnTimer > 0) continue
       if (t.kind !== 'fast' && t.kind !== 'power') continue
       const tc = this.tankCell(t)
@@ -1236,6 +2060,17 @@ export class GodAIInput implements InputLike {
   hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
     return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
+  findPathThreat(pcx: number, pcy: number, moveDir: Direction, playerSpeed: number): Bullet | null {
+    return findPathThreatImpl(this, pcx, pcy, moveDir, playerSpeed)
+  }
+  findSafeMoveDir(
+    pcx: number,
+    pcy: number,
+    threatenedDir: Direction,
+    playerSpeed: number,
+  ): Direction | null {
+    return findSafeMoveDirImpl(this, pcx, pcy, threatenedDir, playerSpeed)
+  }
 
   // --- StrategyPlanner ---
   findPowerUpTarget(pcx: number, pcy: number): Cell | null {
@@ -1275,5 +2110,11 @@ export class GodAIInput implements InputLike {
   }
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
+  }
+  trapAvoidance(tank: Tank, moveDir: Direction): Direction {
+    return trapAvoidanceImpl(this, tank, moveDir)
+  }
+  computeThreatCosts(fromCell: Cell, playerSpeed: number): Float64Array | undefined {
+    return computeThreatCostsImpl(this, fromCell, playerSpeed)
   }
 }

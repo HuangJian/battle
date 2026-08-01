@@ -13,28 +13,19 @@ import type { GoalType, CommanderDirective } from '../types'
 // Perception — what the AI can observe of the battlefield
 // ============================================================
 
-/** A bullet observation (the AI never reads Bullet objects directly). */
-export interface BulletObservation {
-  x: number
-  y: number
-  dir: Direction
-  /** Aligned to the tank's column (vertical bullet) or row (horizontal). */
-  aligned: boolean
-  /** Approaching the observer (heading toward it along the shared axis). */
-  approaching: boolean
-  /** Distance from the observer's center, in px (positive = ahead). */
-  distance: number
-}
-
-/** A teammate observation (another alive enemy tank). */
-export interface TeammateObservation {
-  id: number
-  x: number
-  y: number
-  dir: Direction
-}
-
-/** The full observation snapshot for one thinking tank. */
+/** The full observation snapshot for one thinking tank.
+ *
+ * Field design is allocation-free in the hot path: instead of returning arrays
+ * of {BulletObservation} and {TeammateObservation} (which were allocated every
+ * perceive call → millions of short-lived objects under the God-AI tuning
+ * loop), the snapshot carries the flat aggregates each consumer actually reads:
+ *   - threat: tracked as `hasThreat` + `threatDir` (the only fields any
+ *     consumer ever reads from a threat — analyze + reactiveDodge).
+ *   - teammates: tracked as `teammateCount` + centroid sum (the only fields
+ *     any consumer ever reads — `targetForGoal`'s spreadOut directive).
+ * Consumers iterate `world.bullets` / `world.allTanks` directly when they need
+ * per-element data. (AGENTS.md §14.1 / §14.2.)
+ */
 export interface Perception {
   selfX: number
   selfY: number
@@ -50,9 +41,16 @@ export interface Perception {
   /** Pixel center of the nearest decoy, or 0 when none. */
   decoyX: number
   decoyY: number
-  /** Incoming bullets that could threaten this tank (player bullets only). */
-  threats: BulletObservation[]
-  teammates: TeammateObservation[]
+  /** Whether any incoming hostile bullet threatens this tank. */
+  hasThreat: boolean
+  /** Direction of the closest incoming threat. Meaningful only when hasThreat. */
+  threatDir: Direction
+  /** Number of live enemy teammates (self excluded). */
+  teammateCount: number
+  /** Sum of teammate x-centers — divide by teammateCount for the centroid. */
+  teammateSumX: number
+  /** Sum of teammate y-centers — divide by teammateCount for the centroid. */
+  teammateSumY: number
   /** Number of tanks (self excluded) in the same 8×8 cell neighbourhood. */
   congestion: number
   /** Open directions from the tank's current, grid-aligned position. */
@@ -72,7 +70,9 @@ export interface Situation {
   wallInLineOfFire: boolean // firing currentDir would break a (brick) wall
   decoyInLineOfFire: boolean // firing currentDir would strike a decoy (诱饵)
   pathBlocked: boolean // a wall sits directly ahead toward the objective
-  threat: BulletObservation | null // most urgent incoming bullet (or null)
+  /** Whether an incoming hostile bullet threatens this tank. */
+  hasThreat: boolean
+  /** Direction of the threat (null when hasThreat is false). */
   threatDir: Direction | null // safe axis to step toward to dodge
   baseDanger: number // 0..1 — how exposed the base currently is
   teammateCount: number

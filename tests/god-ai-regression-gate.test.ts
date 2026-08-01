@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { runSimulation } from '../tools/simulation-runner'
+import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 
 // ============================================================

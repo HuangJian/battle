@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { serializeReplayFile, parseReplayFile, buildReplayFilename } from '../src/replay/file'
 import { GAME_VERSION } from '../src/snapshot/config'
-import { FRAME_SCHEMA_VERSION } from '../src/replay/config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from '../src/replay/config'
 import { packFrames } from '../src/replay/pack'
 import type { InputFrame } from '../src/replay/types'
 
@@ -87,7 +87,11 @@ describe('Replay file format round-trip', () => {
     expect(envelope.format).toBe('bc-replay')
     expect(envelope.formatVersion).toBe(1)
     expect(envelope.gameVersion).toBe(GAME_VERSION)
-    expect(envelope.frameSchemaVersion).toBe(FRAME_SCHEMA_VERSION)
+    // The envelope declares the schema the BYTES carry, not the newest schema
+    // this build knows. SAMPLE_FRAMES has no P2 stream → packFrames emits v1.
+    expect(frames[0]).toBe(FRAME_SCHEMA_V1)
+    expect(envelope.frameSchemaVersion).toBe(FRAME_SCHEMA_V1)
+    expect(replay.schemaVersion).toBe(FRAME_SCHEMA_V1)
     expect(envelope.source).toBe('sim')
     expect(envelope.sim?.seed).toBe(42)
     expect(envelope.sim?.status).toBe('clear')

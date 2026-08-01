@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'bun:test'
-import { batchRun, summarize, parseSeeds, type BatchOptions } from '../tools/batch-sim'
-import { generateReport, formatReport } from '../tools/report'
-import { runAICalibration } from '../tools/ai-calibrate'
-import { runEvaluationCalibration } from '../tools/calibrate'
+import { batchRun, summarize, parseSeeds, type BatchOptions } from '../tools/sim/batch-sim'
+import { generateReport, formatReport } from '../tools/sim/report'
+import { runAICalibration } from '../tools/eval/ai-calibrate'
+import { runEvaluationCalibration } from '../tools/eval/calibrate'
 import { STAGES } from '../src/config/stages'
-import { generateStage } from '../tools/level-gen'
+import { generateStage } from '../tools/level/level-gen'
 
 // ============================================================
 // Helpers

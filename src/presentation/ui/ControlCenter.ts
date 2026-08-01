@@ -1,4 +1,5 @@
 import type { World } from '../../game/World'
+import { THEME_DEFINITIONS } from '../../config/theme'
 
 // ================================================================
 // Control Center (plan §13)
@@ -24,7 +25,13 @@ export interface ControlCenterCallbacks {
   /** Open a local .replay file (not imported to database). */
   onOpenLocalReplay?: () => void
   onOpenControls: () => void
-  /** Toggle the developer Performance Observatory overlay (F6). */
+  /** Pause the game/replay so the theme dropdown can be shown (idempotent). */
+  onThemePause: () => void
+  /** Cycle to the next theme (Alt+T): pauses then advances (idempotent pause). */
+  onThemeCycle: () => void
+  /** Switch to a specific theme by config key (dropdown pick): pauses then sets. */
+  onSelectTheme: (key: string) => void
+  /** Toggle the developer Performance Observatory overlay (Alt+D). */
   onTogglePerf: () => void
   /** Toggle fullscreen mode (Alt+F). */
   onToggleFullscreen: () => void
@@ -59,6 +66,16 @@ export class ControlCenter {
   private perfModeState: HTMLElement | null = null
   private coopBtn: HTMLButtonElement | null = null
   private coopState: HTMLElement | null = null
+
+  // Theme switcher (GAMEPLAY) — button label + dropdown
+  private themeBtnEl: HTMLButtonElement | null = null
+  private themeNameEl: HTMLElement | null = null
+  private themeDropdownEl: HTMLElement | null = null
+  private themeOptionEls: HTMLElement[] = []
+  private themeDropdownOpen = false
+  /** key → display name, for the live label. */
+  private themeNames = new Map<string, string>()
+  private lastThemeName = ''
 
   // Cached last-written values (avoid per-frame DOM churn)
   private lastCounts = ''
@@ -96,6 +113,13 @@ export class ControlCenter {
         </section>
         <section class="cc-section">
           <h3 class="cc-section-title">GAMEPLAY</h3>
+          <div class="cc-theme-wrap">
+            <button class="cc-btn" data-cc="theme" type="button" aria-pressed="false" title="Switch theme (Alt+T) — click to pick">
+              <span class="cc-theme-label">Theme: <span data-cc="theme-name">—</span></span>
+              <kbd>Alt+T</kbd>
+            </button>
+            <div class="cc-theme-dropdown" data-cc="theme-dropdown" hidden></div>
+          </div>
           <button class="cc-btn" data-cc="controls" type="button">
             <span>Key Bindings</span><span class="cc-btn-arrow">›</span>
           </button>
@@ -167,6 +191,40 @@ export class ControlCenter {
     this.coopBtn = this.el.querySelector('[data-cc="coop"]') as HTMLButtonElement
     this.coopState = this.el.querySelector('[data-cc="coop-state"]')
 
+    // Theme switcher — build the dropdown list and wire the button.
+    this.themeBtnEl = this.el.querySelector('[data-cc="theme"]') as HTMLButtonElement
+    this.themeNameEl = this.el.querySelector('[data-cc="theme-name"]')
+    this.themeDropdownEl = this.el.querySelector('[data-cc="theme-dropdown"]')
+    for (const def of THEME_DEFINITIONS) {
+      this.themeNames.set(def.key, def.name)
+      const opt = document.createElement('div')
+      opt.className = 'cc-theme-option'
+      opt.dataset.themeKey = def.key
+      opt.innerHTML = `<span class="cc-theme-swatch" style="background:${def.colors.accentPrimary}"></span><span class="cc-theme-name">${def.name}</span>`
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation()
+        this.callbacks?.onSelectTheme(def.key)
+        this.closeThemeDropdown()
+      })
+      this.themeDropdownEl?.appendChild(opt)
+      this.themeOptionEls.push(opt)
+    }
+    this.themeBtnEl?.addEventListener('click', () => {
+      this.themeBtnEl?.blur()
+      // Pause the game/replay on open (no-op if already paused / in menu).
+      if (!this.themeDropdownOpen) {
+        this.callbacks?.onThemePause()
+      }
+      this.toggleThemeDropdown()
+    })
+    // Close the dropdown when clicking anywhere outside the theme control.
+    document.addEventListener('click', (e) => {
+      if (!this.themeDropdownOpen) return
+      const t = e.target as Node
+      if (this.themeBtnEl?.contains(t) || this.themeDropdownEl?.contains(t)) return
+      this.closeThemeDropdown()
+    })
+
     const collapseBtn = this.el.querySelector('[data-cc="collapse"]') as HTMLButtonElement
     collapseBtn.addEventListener('click', () => {
       collapseBtn.blur()
@@ -182,7 +240,7 @@ export class ControlCenter {
 
   /** Reflect the Performance Observatory overlay's on/off state in the
    *  DEVELOPER panel button (highlighted + ON/OFF label). Keeps the Control
-   *  Center in sync whether the overlay was toggled here or via the F6 key. */
+   *  Center in sync whether the overlay was toggled here or via the Alt+D key. */
   setPerfState(on: boolean): void {
     if (this.perfBtn) {
       this.perfBtn.classList.toggle('selected', on)
@@ -230,6 +288,23 @@ export class ControlCenter {
     }
   }
 
+  /** Toggle the theme dropdown open/closed (and the button's aria state). */
+  private toggleThemeDropdown(): void {
+    this.themeDropdownOpen = !this.themeDropdownOpen
+    this.themeDropdownEl?.classList.toggle('open', this.themeDropdownOpen)
+    this.themeDropdownEl?.toggleAttribute('hidden', !this.themeDropdownOpen)
+    this.themeBtnEl?.setAttribute('aria-pressed', String(this.themeDropdownOpen))
+  }
+
+  /** Close the theme dropdown (e.g. after a selection or an outside click). */
+  private closeThemeDropdown(): void {
+    if (!this.themeDropdownOpen) return
+    this.themeDropdownOpen = false
+    this.themeDropdownEl?.classList.remove('open')
+    this.themeDropdownEl?.setAttribute('hidden', '')
+    this.themeBtnEl?.setAttribute('aria-pressed', 'false')
+  }
+
   /**
    * Refresh status lines from the World (cheap, change-guarded).
    * Also auto-pauses the game when any CC button is clicked during play,
@@ -273,6 +348,16 @@ export class ControlCenter {
     if (gameplayText !== this.lastGameplay) {
       this.lastGameplay = gameplayText
       this.gameplayInfo.textContent = gameplayText
+    }
+
+    // Theme switcher label + dropdown highlight — only when the theme changes.
+    const themeName = this.themeNames.get(world.themeKey) ?? world.themeKey
+    if (themeName !== this.lastThemeName) {
+      this.lastThemeName = themeName
+      if (this.themeNameEl) this.themeNameEl.textContent = themeName
+      for (const opt of this.themeOptionEls) {
+        opt.classList.toggle('selected', opt.dataset.themeKey === world.themeKey)
+      }
     }
   }
 }

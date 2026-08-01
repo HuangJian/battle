@@ -31,6 +31,20 @@ export class SpriteLibrary {
     this._ready = true
   }
 
+  /**
+   * Inject pre-decoded sprite sources (already-loaded CanvasImageSources) keyed
+   * by sprite name. Used by the headless render benchmark to feed disk-decoded
+   * SVGs without the DOM `new Image()` / Vite `?url` path (plan §5.2).
+   * Idempotent like `load()` / `loadFromUrls`.
+   */
+  loadFromSources(sources: Record<string, CanvasImageSource>): void {
+    if (this._ready) return
+    for (const [key, img] of Object.entries(sources)) {
+      this.images.set(key, img)
+    }
+    this._ready = true
+  }
+
   private async loadOneFromUrl(key: string, url: string): Promise<void> {
     try {
       const response = await fetch(url)

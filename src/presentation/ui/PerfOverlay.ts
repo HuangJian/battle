@@ -46,7 +46,7 @@ const BREACH_THROTTLE_MS = 1500
  *
  * Surfaces engine-computed numbers plus a few cheap per-frame counters as a
  * compact, fixed-position HTML panel (top-right of the viewport). Toggled with
- * `F6` (also via the Control Center). It never mutates the World and never
+ * `Alt+D` (also via the Control Center). It never mutates the World and never
  * draws on the game canvas (AGENTS §2.5 — UI is HTML/CSS).
  *
  * Every timing probe is gated on {@link active}, so when the overlay is off it

@@ -2,6 +2,7 @@ import { World } from './World'
 import { RNG } from '../utils/RNG'
 import { Simulation } from './Simulation'
 import { Input, DEFAULT_KEYS, isModifierCode, parseBinding } from './Input'
+import type { InputLike } from './Input'
 import { SnapshotManager } from '../snapshot/SnapshotManager'
 import { createDefaultStorage } from '../snapshot/storage'
 import { restoreWorld, cloneWorld } from '../snapshot/WorldSerializer'
@@ -25,6 +26,7 @@ import { PlaybackController } from '../replay/PlaybackController'
 import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
+import { canOpenControls, canToggleCoop, isReplayBrowserBlocked } from './uiFlowGates'
 import { createReplayStorage } from '../replay/storage'
 import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
@@ -106,6 +108,31 @@ export class Game {
   /** Auto-fire wrapper around the human input — re-armed each stage. */
   private autoFireInput: AutoFireInput | null = null
 
+  /**
+   * The player-1 input the LIVE simulation must consume right now.
+   * In Lie-Back-Win-Mode the raw keyboard is decorated by AutoFireInput, and
+   * that decorated object — not `this.input` — is what the sim ticks on and
+   * what the recorder taps (DECISIONS #75).
+   */
+  private get liveInput(): InputLike {
+    return this.autoFireInput ?? this.input
+  }
+
+  /** The player-2 input the LIVE simulation must consume — null unless coop. */
+  private get liveInput2(): InputLike | null {
+    return this.godInput
+  }
+
+  /**
+   * Point the simulation back at the live inputs. Single source of truth for
+   * the wiring, so no exit path can restore only half of it (DECISIONS #76).
+   * Call AFTER `godInput` / `autoFireInput` have been set to their new values.
+   */
+  private wireLiveInputs(): void {
+    this.simulation.input = this.liveInput
+    this.simulation.input2 = this.liveInput2
+  }
+
   /** Rolling FPS (updated once per second) — cheap regression signal. */
   fps = 0
   private _frameCount = 0
@@ -182,7 +209,10 @@ export class Game {
    */
   requestCoopToggle(): void {
     const w = this.world
-    if (w.state !== 'menu' && w.state !== 'paused') return
+    // Available from the menu, a paused game, and the MISSION FAILED (recovery)
+    // screen so co-op can be armed before retrying. (A live 'playing' game and
+    // terminal 'gameover'/'victory' states intentionally fall through to no-op.)
+    if (!canToggleCoop(w.state)) return
 
     if (w.coop) {
       // Disable coop: World mutation deferred to Simulation (One-Author).
@@ -194,9 +224,8 @@ export class Game {
       w.playerLevel2 = 0
       // Wire AI inputs
       this.godInput = null
-      this.simulation.input2 = null
       this.autoFireInput = null
-      this.simulation.input = this.input
+      this.wireLiveInputs()
       this.presentation.ui.notify('Co-op: OFF', 'info')
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
@@ -212,9 +241,8 @@ export class Game {
       // Wire AI inputs
       const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
-      this.simulation.input2 = this.godInput
       this.autoFireInput = new AutoFireInput(this.input)
-      this.simulation.input = this.autoFireInput
+      this.wireLiveInputs()
       this.presentation.ui.notify('Co-op: ON — God Player activated!', 'info')
       this.audio.player2Id = w.player2?.id ?? null
     }
@@ -261,12 +289,22 @@ export class Game {
       onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       onToggleCoop: () => this.requestCoopToggle(),
       onOpenControls: () => {
-        if (this.world.state === 'menu') {
+        const s = this.world.state
+        // The panel is a static modal; it opens over any static screen (menu /
+        // paused / MISSION FAILED recovery / classic game over). ('paused' is
+        // reached when clicking Key Bindings during play: the Control Center
+        // auto-pauses before invoking this callback, so a static screen is
+        // already underneath the modal.) Elsewhere the live world is running
+        // and the panel can't be shown over it.
+        if (canOpenControls(s)) {
           ui.openControls()
         } else {
-          ui.notify('Key bindings are available from the main menu', 'warn')
+          ui.notify('Key bindings are available when the game is paused', 'warn')
         }
       },
+      onThemePause: () => this.themePause(),
+      onThemeCycle: () => this.themeCycle(),
+      onSelectTheme: (key: string) => this.selectThemeByKey(key),
       getCounts: () => ({
         total: this.snapshots.count(),
         manual: this.snapshots.count('manual'),
@@ -295,8 +333,8 @@ export class Game {
     // screens. Registered AFTER input.attach so Input.onKeyDown populates the
     // polled `justPressed` set before we read it.
     window.addEventListener('keydown', this.onStaticKey)
-    // Developer Performance Observatory hotkey (F6). Toggle only — never
-    // consumes the key during gameplay (other F-keys are free, F6 is unbound).
+    // Developer Performance Observatory hotkey (Alt+D). Toggle only — never
+    // consumes the key during gameplay (F6 is bound to the frenzy super-item).
     window.addEventListener('keydown', this.onPerfKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
@@ -451,7 +489,7 @@ export class Game {
   }
 
   /**
-   * Toggle the developer Performance Observatory (F6). The overlay is a
+   * Toggle the developer Performance Observatory (Alt+D). The overlay is a
    * read-only debug HUD — toggling it only flips a flag and arms/disarms the
    * renderer's draw-call counter, which is zero-cost while off.
    */
@@ -542,8 +580,18 @@ export class Game {
           this.world.state === 'gameover'
         ) {
           this.simulation.tick()
-          // Record THIS tick's input (one frame per tick)
-          this.recorder.recordFrame(this.input, this.godInput)
+          // Record THIS tick's input (one frame per tick).
+          //
+          // MUST record `this.simulation.input` / `this.simulation.input2` —
+          // the exact objects the tick above consumed — NOT the raw
+          // `this.input` / `this.godInput` fields. In Lie-Back-Win-Mode the
+          // human input is decorated by AutoFireInput, so the sim fires every
+          // tick while the raw keyboard reports "not firing". Recording the
+          // raw input dropped every auto-fired shot, desyncing playback from
+          // tick 0 (the replay looked like the player suicided into its own
+          // base). See AutoFireInput's contract: the decorated input is what
+          // the replay records.
+          this.recorder.recordFrame(this.simulation.input, this.simulation.input2)
 
           // Detect stage change → Stage Start snapshot (plan §3, §10)
           if (this.world.stageIndex !== this.prevStageIndex && this.world.state === 'playing') {
@@ -625,18 +673,16 @@ export class Game {
         if (this.world.coop && !this.godInput && this.world.player2) {
           const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
           this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
-          this.simulation.input2 = this.godInput
           // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
           this.autoFireInput = new AutoFireInput(this.input)
-          this.simulation.input = this.autoFireInput
+          this.wireLiveInputs()
           this.audio.player2Id = this.world.player2?.id ?? null
           this.presentation.ui.controlCenter.setCoopState(true)
         } else if (!this.world.coop) {
           // Snapshot restored without coop — ensure input2 is cleared.
           this.godInput = null
           this.autoFireInput = null
-          this.simulation.input = this.input
-          this.simulation.input2 = null
+          this.wireLiveInputs()
           this.audio.player2Id = null
           this.presentation.ui.controlCenter.setCoopState(false)
         }
@@ -933,6 +979,11 @@ export class Game {
       if (this.input.isSnapshotPressed()) {
         this.manualSnapshot()
       }
+      // Theme cycle — Alt+T (configurable). Pauses the game and advances to
+      // the next theme. Re-binding to a key other than Alt+T is supported.
+      if (this.input.isThemePressed()) {
+        this.themeCycle()
+      }
       if (this.input.isResetPressed()) {
         this.resetToMenu()
       }
@@ -1003,6 +1054,76 @@ export class Game {
     this.audio.resume()
     this.audio.playMenuSelect()
     this.refreshStaticScreen()
+  }
+
+  /**
+   * Pause so the theme dropdown / cycle can be shown. Idempotent: only pauses
+   * a live game that is currently 'playing' (a 'pause' snapshot is captured,
+   * matching the normal P-pause), or a replay that is currently playing. If
+   * the game is already paused (or the replay already paused, or we're on the
+   * menu) it is a no-op, so repeated Alt+T presses or a dropdown open never
+   * un-pause the player.
+   */
+  private themePause(): void {
+    if (this.playback) {
+      if (!this.playback.isPaused) {
+        this.playback.togglePause()
+        this.presentation.ui.setReplayMode(true, true, this.playback.replay?.metadata.difficulty)
+      }
+    } else if (this.world.state === 'playing') {
+      this.simulation.togglePause()
+      this.snapshots.create('pause', this.world)
+      this.audio.playPause()
+    }
+    this.presentation.markNeedsRender()
+    this.presentation.updateUI(this.world)
+  }
+
+  /** Alt+T (or theme-cycle button): pause, then advance to the next theme. */
+  private themeCycle(): void {
+    this.themePause()
+    const current = THEME_KEYS.indexOf(this.world.themeKey)
+    const next = (current + 1) % THEME_KEYS.length
+    this.applyThemeAndRepaint(next, !this.playback)
+  }
+
+  /** Dropdown pick: pause, then switch to a specific theme by config key. */
+  private selectThemeByKey(key: string): void {
+    const idx = THEME_KEYS.indexOf(key)
+    if (idx < 0) return
+    this.themePause()
+    this.applyThemeAndRepaint(idx, !this.playback)
+  }
+
+  /**
+   * Set the world theme to `index` and repaint. The HTML UI theme variables
+   * are re-applied automatically by `PresentationLayer.updateUI` (which calls
+   * `applyThemeIfChanged`) on the next frame; we additionally force an
+   * immediate repaint when the loop would otherwise be idle (menu / paused /
+   * ended replay with no rAF driver) so the change is visible at once.
+   *
+   * `persist` writes the choice to saved settings — skipped during replay so a
+   * replay's visual theme never pollutes the player's default theme.
+   */
+  private applyThemeAndRepaint(index: number, persist: boolean): void {
+    this.themeIndex = index
+    this.world.themeKey = THEME_KEYS[index]
+    this.world.theme = THEMES[this.world.themeKey]
+    this.presentation.markNeedsRender()
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
+    if (persist) this.saveSettings()
+    // When there is no rAF loop driving repaints (idle/low-power states, and
+    // not mid-replay where the loop is alive) render the new theme now.
+    if (!this.playback && LOW_POWER_STATES.has(this.world.state)) {
+      this.presentation.updateUI(this.world)
+      if (this.presentation.shouldRender(this.world)) {
+        this.presentation.render(this.world, 0)
+      }
+    } else {
+      this.presentation.updateUI(this.world)
+    }
   }
 
   /** Mouse: start button — same as the keyboard confirm (Enter/Space). */
@@ -1146,6 +1267,14 @@ export class Game {
     // The Snapshot Browser overlays the recovery menu when opened via
     // "Choose a Snapshot…" — it owns all input until closed.
     if (this.presentation.ui.snapshotBrowser.isOpen()) return
+    // The Replay Browser can be opened over the recovery menu from the
+    // Control Center — it owns all key input while open, so don't let arrow
+    // keys move the recovery cursor underneath it.
+    if (this.presentation.ui.replayBrowser.isOpen()) return
+    // The Key Bindings panel can also be opened over the recovery menu from
+    // the Control Center — don't let arrow keys move the recovery cursor
+    // underneath it.
+    if (this.presentation.ui.isControlsOpen()) return
 
     // Navigate up/down
     if (this.input.isUpPressed()) {
@@ -1205,8 +1334,7 @@ export class Game {
     this.godInput = null
     this.autoFireInput = null
     this.simulation.clearPendingCoopToggle()
-    this.simulation.input = this.input
-    this.simulation.input2 = null
+    this.wireLiveInputs()
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
     this.recovery.reset()
@@ -1410,6 +1538,9 @@ export class Game {
         this.stopPlayback()
         this.resetToMenu()
       },
+      onExport: () => {
+        this.exportReplay(this.playback?.replay)
+      },
       onProgressHover: (progress: number) => {
         // Instant thumbnail from pre-computed keyframes — no simulation replay
         if (!this.playback || this.playback.isEnded) return
@@ -1516,7 +1647,8 @@ export class Game {
    */
   stopPlayback(): void {
     if (!this.playback) return
-    this.playback.exit(this.simulation, this.input)
+    // Hand back the LIVE inputs, decoration included — see wireLiveInputs().
+    this.playback.exit(this.simulation, this.liveInput, this.liveInput2)
     this.playback = null
     // Clear replay-sourced audio attenuation (no God tank outside playback).
     this.audio.player2Id = null
@@ -1541,7 +1673,7 @@ export class Game {
     // Exit the playback controller but keep it as a sentinel so scheduleFrame()
     // keeps the rAF loop alive (the world may be in a LOW_POWER state like
     // 'gameover' which would otherwise stop the loop).
-    this.playback.exit(this.simulation, this.input)
+    this.playback.exit(this.simulation, this.liveInput, this.liveInput2)
     // Hide the REPLAY badge but keep the controller visible (persistent mode)
     this.presentation.ui.setReplayMode(false)
     // Populate end overlay with replay metadata
@@ -1583,6 +1715,12 @@ export class Game {
       this.stopPlayback()
       this.resetToMenu()
       return
+    }
+    // Theme cycle — Alt+T (configurable). Pauses the replay and advances to
+    // the next theme. (Replay playback is presentation-only, so switching the
+    // visual theme never disturbs the replay's determinism.)
+    if (this.input.isThemePressed()) {
+      this.themeCycle()
     }
   }
 
@@ -1659,34 +1797,46 @@ export class Game {
         )
       },
       onExport: (id) => {
-        const replay = this.replays.get(id)
-        if (!replay) return
-        const envelope = serializeReplayFile({
-          source: 'browser',
-          seed: replay.seed,
-          initialSnapshot: replay.initialSnapshot,
-          frames: replay.frames,
-          totalTicks: replay.totalTicks,
-          metadata: replay.metadata,
-        })
-        const filename = buildReplayFilename({
-          difficulty: replay.metadata.difficulty,
-          stageIndex: replay.metadata.stage,
-          status: replay.type,
-          lives: replay.metadata.lives,
-          totalTicks: replay.totalTicks,
-          seed: replay.seed,
-        })
-        const blob = new Blob([envelope], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = filename
-        a.click()
-        URL.revokeObjectURL(url)
-        ui.notify(`Exported: ${filename}`)
+        this.exportReplay(this.replays.get(id))
       },
     })
+  }
+
+  /**
+   * Serialize a replay into the .replay file format and trigger a browser
+   * download. Shared by the Replay Browser (gallery) and the in-playback
+   * ReplayController export button.
+   */
+  private exportReplay(replay: Replay | null | undefined): void {
+    const ui = this.presentation.ui
+    if (!replay) {
+      ui.notify('No replay to export', 'warn')
+      return
+    }
+    const envelope = serializeReplayFile({
+      source: 'browser',
+      seed: replay.seed,
+      initialSnapshot: replay.initialSnapshot,
+      frames: replay.frames,
+      totalTicks: replay.totalTicks,
+      metadata: replay.metadata,
+    })
+    const filename = buildReplayFilename({
+      difficulty: replay.metadata.difficulty,
+      stageIndex: replay.metadata.stage,
+      status: replay.type,
+      lives: replay.metadata.lives,
+      totalTicks: replay.totalTicks,
+      seed: replay.seed,
+    })
+    const blob = new Blob([envelope], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    ui.notify(`Exported: ${filename}`)
   }
 
   /** Open a local .replay file for playback (not imported to database). */
@@ -1716,8 +1866,11 @@ export class Game {
 
   /** Open the Replay Browser (Control Center button). */
   private openReplayBrowser(): void {
-    // Never on top of the recovery flow.
-    if (this.world.state === 'recovery') return
+    // The browser is never blocked by the current screen — it layers over any
+    // static state (menu / paused / MISSION FAILED recovery / gameover) as a
+    // fixed z-index-30 modal, and a live game is paused below first. This
+    // guard is a regression pin: it once early-returned on 'recovery'.
+    if (isReplayBrowserBlocked(this.world.state)) return
     // A replay is playing/paused/ended → leave it and return to the menu
     // before showing the browser. Mirrors the Escape-during-playback path
     // (stopPlayback + resetToMenu). This is required: clearing this.playback
@@ -1731,6 +1884,9 @@ export class Game {
       this.simulation.togglePause()
       this.snapshots.create('pause', this.world)
     }
+    // Allowed on the MISSION FAILED (recovery) screen too: the browser is a
+    // z-index-30 fixed modal and its onClose is a no-op there, so it layers
+    // cleanly over the recovery menu and returns to it when closed.
     this.presentation.ui.replayBrowser.open()
   }
 }

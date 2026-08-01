@@ -2,7 +2,14 @@ import { TANK, BULLET, CELL } from '../../constants'
 import type { SpriteLibrary } from './SpriteLibrary'
 import { createOffscreenCanvas } from '../../utils/canvas'
 import type { ThemeColors } from '../../types'
-import { drawWaterTile } from './SpriteArtist'
+import {
+  drawWaterTile,
+  AURA_CONFIGS,
+  AURA_BUCKETS,
+  drawAllyAuraPaths,
+  drawHpLevelAuraPaths,
+  drawCommanderAuraPaths,
+} from './SpriteArtist'
 
 /**
  * SpriteCache — pre-rasterizes SVG sprites to canvas bitmaps at init time.
@@ -26,6 +33,34 @@ const BULLET_RENDER_SIZE = BULLET * 1.5 // 9px
 
 /** Explosion pre-render size (SVG artboard is 96×96) */
 const EXPLOSION_SIZE = 96
+
+/**
+ * Power-up glow pulse frequency (matches SpriteArtist.drawPowerUp's
+ * `Math.sin(frame * 0.11)`). Used by `auraBucket(frame, POWERUP_GLOW_FREQ)`
+ * to quantize the pulse into 16 buckets for pre-rendered glow bitmaps.
+ */
+export const POWERUP_GLOW_FREQ = 0.11
+
+/**
+ * Canvas size for pre-rendered power-up glow bitmaps (logical px). Sized to
+ * fit the max glow radius: `CELL * (0.66 + 0.06 * 1.0) * 2 = CELL * 1.44 ≈ 24`.
+ */
+const POWERUP_GLOW_CANVAS_SIZE = Math.ceil(CELL * 0.72 * 2) // 24
+
+/**
+ * Pre-computed sprite keys for starbuf/hit/insignia overlays. Module-level
+ * constants replace per-call template strings (`fx.starbuf${stage}` etc.) —
+ * those were GC pressure in the per-tank-per-frame hot path (6 tanks × 1-2
+ * overlays = up to 12 short-lived strings/frame). Array/object indexing is
+ * zero-allocation.
+ */
+const STARBUF_KEYS = ['fx.starbuf1', 'fx.starbuf2', 'fx.starbuf3'] as const
+const HIT_KEYS = ['fx.hit1', 'fx.hit2', 'fx.hit3', 'fx.hit4'] as const
+const INSIGNIA_KEYS: Record<string, string> = {
+  rookie: 'fx.insignia.rookie',
+  soldier: 'fx.insignia.soldier',
+  veteran: 'fx.insignia.veteran',
+}
 
 /** Rotation values for each direction (matches SpriteArtist) */
 const ROTATIONS = [0, Math.PI / 2, Math.PI, -Math.PI / 2] // up, right, down, left
@@ -51,6 +86,35 @@ export class SpriteCache {
   private explosionSprite: CanvasImageSource | null = null
   /** Two phase-animated water frames (theme-aware), rebuilt on theme change. */
   private waterSprites: CanvasImageSource[] = []
+  /**
+   * Pre-rendered aura bitmaps (R3). Key = aura type (`'ally'`, `'hp2'`–`'hp6'`,
+   * `'commander'`); value = array of `AURA_BUCKETS` bitmaps, one per pulse
+   * bucket. Built once at init; rebuilt on DPR change. Eliminates per-frame
+   * path rasterization for auras — 1 `drawImage` replaces 2–7 path ops.
+   */
+  private auraSprites = new Map<string, CanvasImageSource[]>()
+  /**
+   * Pre-rendered power-up glow bitmaps (R4-glow). 16 pulse buckets, each
+   * rasterizing the golden radial gradient at the bucket's pulse value.
+   * Eliminates per-frame `createRadialGradient` + 3 `addColorStop` + path
+   * rasterization — replaced by a single `drawImage` blit. The glow is
+   * theme-independent (fixed golden colors), so safe to bake at build time.
+   */
+  private powerUpGlowSprites: CanvasImageSource[] = []
+  /**
+   * Lazy-built composite tank bitmaps (R5-B). Outer key = `tankKey` (passed
+   * through from caller, no construction). Inner array indexed by
+   * `dirIndex * 20 + overlayNum * 10 + stage` (numeric — zero allocation).
+   * Replaces the old `Map<string, CanvasImageSource>` with template-string
+   * keys (`${tankKey}:${dirIdx}:${overlay}:${stage}`) — that was 1 short-lived
+   * string per tank-with-overlay per frame (up to 12/frame in combat), which
+   * is GC pressure on old machines. Array indexing is zero-allocation.
+   *
+   * Memory: ≤ 6 tankKeys × 80 slots × 8 bytes = 3.8 KB for the index arrays;
+   * bitmaps themselves are lazy-built (~54 KB each, typically 10–20 entries).
+   */
+  private compositeTankCache = new Map<string, (CanvasImageSource | undefined)[]>()
+  private static readonly COMPOSITE_TANK_ARR_SIZE = 80 // 4 dirs × 2 overlays × 10 stages (sparse)
   private dpr: number
   private _built = false
 
@@ -134,16 +198,15 @@ export class SpriteCache {
     }
 
     // --- Rank insignia (fx.insignia.rookie/soldier/veteran) ---
-    // Non-rotated centered badges (like the shield): a small chevron
-    // cluster reads identically at any tank facing, so it needn't follow
-    // the hull rotation. Drawn after the hull + hit overlay, before the
-    // commander crown (plan §6). Pre-rasterized here for the same
-    // GPU-blit reason as every other overlay.
+    // Pre-rotated 180° at bake time: drawInsignia always rotates the badge
+    // by PI about its center, so baking that rotation into the sprite lets the
+    // render path use a plain drawImage instead of save/translate/rotate/
+    // restore — eliminating one save/restore pair per non-commander tank.
     const insigniaKeys = ['fx.insignia.rookie', 'fx.insignia.soldier', 'fx.insignia.veteran']
     for (const key of insigniaKeys) {
       const img = lib.get(key)
       if (!img) continue
-      this.insigniaSprites.set(key, this.renderEffect(img))
+      this.insigniaSprites.set(key, this.renderRotated(img, TANK_RENDER_SIZE, Math.PI))
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
@@ -166,6 +229,15 @@ export class SpriteCache {
       this.explosionSprite = this.renderItemAtSize(expImg, EXPLOSION_SIZE)
     }
 
+    // --- Aura bitmaps (R3): pre-render 16 pulse buckets per aura variant.
+    // Theme-independent (aura colors are hardcoded), so safe to bake here.
+    // Eliminates per-frame path rasterization for ally/hp/commander auras.
+    this.rebuildAuras()
+
+    // --- Power-up glow bitmaps (R4-glow): pre-render 16 pulse buckets of the
+    // golden radial gradient. Eliminates per-frame createRadialGradient.
+    this.rebuildPowerUpGlow()
+
     this._built = true
   }
 
@@ -181,6 +253,85 @@ export class SpriteCache {
       const { canvas, ctx } = createOffscreenCanvas(CELL * this.dpr, CELL * this.dpr, this.dpr)
       drawWaterTile(ctx, 0, 0, CELL, theme, phase)
       this.waterSprites.push(canvas)
+    }
+  }
+
+  /**
+   * Pre-rasterize all aura variants (ally / hp2–hp6 / commander) into bitmaps,
+   * `AURA_BUCKETS` (=16) pulse buckets each (R3). Called once at init; rebuilt
+   * on DPR change. Each bitmap is rasterized at a bucket-center pulse value;
+   * at runtime `SpriteArtist.draw*Aura` quantizes the frame pulse to a bucket
+   * index and `drawImage`s the bitmap — eliminating per-frame path
+   * rasterization, `createRadialGradient` (commander), and manual property
+   * save/restore.
+   *
+   * Memory: ~7 variants × 16 buckets × (38²–72²) px × 4 bytes ≈ 1.5 MB at DPR=2.
+   * Acceptable: auras are gameplay-relevant (HP level / commander ID) and
+   * always drawn; the bitmap blit is the cheapest possible draw path.
+   */
+  rebuildAuras(): void {
+    this.auraSprites.clear()
+    for (const key in AURA_CONFIGS) {
+      const cfg = AURA_CONFIGS[key]
+      const buckets: CanvasImageSource[] = []
+      for (let b = 0; b < AURA_BUCKETS; b++) {
+        const pulse = (b + 0.5) / AURA_BUCKETS
+        const { canvas, ctx } = createOffscreenCanvas(
+          cfg.canvasSize * this.dpr,
+          cfg.canvasSize * this.dpr,
+          this.dpr,
+        )
+        // Draw at (offset, offset) so the aura bbox top-left sits at canvas (0, 0).
+        const ox = cfg.offset
+        const oy = cfg.offset
+        if (key === 'ally') {
+          drawAllyAuraPaths(ctx, ox, oy, TANK, pulse)
+        } else if (key === 'commander') {
+          drawCommanderAuraPaths(ctx, ox, oy, TANK, pulse)
+        } else {
+          const level = parseInt(key.slice(2), 10)
+          drawHpLevelAuraPaths(ctx, ox, oy, TANK, level, pulse)
+        }
+        // Reset ctx state (the path functions mutate fillStyle/strokeStyle/etc.).
+        ctx.globalAlpha = 1
+        buckets.push(canvas)
+      }
+      this.auraSprites.set(key, buckets)
+    }
+  }
+
+  /**
+   * Pre-rasterize the power-up glow halo (golden radial gradient) into 16
+   * pulse-bucket bitmaps (R4-glow). Each bitmap bakes in the bucket's pulse
+   * value, which determines the gradient's outer radius and per-stop alphas.
+   * At runtime, `drawPowerUp` quantizes the frame pulse to a bucket index and
+   * `drawImage`s the bitmap — eliminating per-frame `createRadialGradient` +
+   * 3 `addColorStop` + `beginPath`+`arc`+`fill`.
+   *
+   * The glow is drawn at CELL size (power-ups are always CELL×CELL). The
+   * bitmap is `POWERUP_GLOW_CANVAS_SIZE` (24px) wide, centered on the glow
+   * center. Pixel-identical to the direct gradient fill (same colors, same
+   * radius, same alphas — just pre-rasterized).
+   *
+   * Memory: 16 × (24 × dpr)² × 4 bytes ≈ 147 KB @ DPR=2. Negligible.
+   */
+  rebuildPowerUpGlow(): void {
+    this.powerUpGlowSprites = []
+    const cs = POWERUP_GLOW_CANVAS_SIZE
+    const half = cs / 2
+    for (let b = 0; b < AURA_BUCKETS; b++) {
+      const pulse = (b + 0.5) / AURA_BUCKETS
+      const glowR = CELL * (0.66 + 0.06 * pulse)
+      const { canvas, ctx } = createOffscreenCanvas(cs * this.dpr, cs * this.dpr, this.dpr)
+      const g = ctx.createRadialGradient(half, half, CELL * 0.12, half, half, glowR)
+      g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
+      g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
+      g.addColorStop(1, 'rgba(255, 200, 70, 0)')
+      ctx.fillStyle = g
+      ctx.beginPath()
+      ctx.arc(half, half, glowR, 0, Math.PI * 2)
+      ctx.fill()
+      this.powerUpGlowSprites.push(canvas)
     }
   }
 
@@ -261,17 +412,17 @@ export class SpriteCache {
 
   /** Player level-up star-buffer overlay for the given stage (1–3), pre-rotated to the tank's direction. */
   getStarbufSprite(stage: number, dirIndex: number): CanvasImageSource | undefined {
-    return this.starbufSprites.get(`fx.starbuf${stage}`)?.[dirIndex]
+    return this.starbufSprites.get(STARBUF_KEYS[stage - 1])?.[dirIndex]
   }
 
   /** Enemy hit/damage overlay for the given stage (1–4), pre-rotated to the tank's direction. */
   getHitSprite(stage: number, dirIndex: number): CanvasImageSource | undefined {
-    return this.hitSprites.get(`fx.hit${stage}`)?.[dirIndex]
+    return this.hitSprites.get(HIT_KEYS[stage - 1])?.[dirIndex]
   }
 
   /** Rank insignia overlay for the given tier (Rookie/Soldier/Veteran), centered on the hull. */
   getInsigniaSprite(level: string): CanvasImageSource | undefined {
-    return this.insigniaSprites.get(`fx.insignia.${level}`)
+    return this.insigniaSprites.get(INSIGNIA_KEYS[level])
   }
 
   getItemSprite(key: string): CanvasImageSource | undefined {
@@ -290,6 +441,69 @@ export class SpriteCache {
     return this.waterSprites[phase % 2]
   }
 
+  /** Pre-rendered aura bitmap for the given type and pulse bucket (R3). */
+  getAuraSprite(key: string, bucket: number): CanvasImageSource | undefined {
+    return this.auraSprites.get(key)?.[bucket]
+  }
+
+  /** Pre-rendered power-up glow bitmap for the given pulse bucket (R4-glow). */
+  getPowerUpGlowSprite(bucket: number): CanvasImageSource | undefined {
+    return this.powerUpGlowSprites[bucket]
+  }
+
+  /** Canvas size (logical px) for power-up glow bitmaps — for draw positioning. */
+  get powerUpGlowCanvasSize(): number {
+    return POWERUP_GLOW_CANVAS_SIZE
+  }
+
+  /**
+   * Lazy-built composite tank bitmap (R5-B). Returns a single bitmap that is
+   * the tank body sprite + overlay (starbuf/hit) composited together, so the
+   * render path issues 1 `drawImage` instead of 2. Built on first access for a
+   * given (tankKey, dirIndex, overlayKind, stage); stored in a numeric-indexed
+   * array per tankKey (zero-allocation lookup — no string key construction).
+   * Returns `undefined` if either source sprite is missing (caller falls back
+   * to the 2-draw path).
+   *
+   * @param tankKey  Sprite key for the tank body (e.g. `'tank.player1'`).
+   * @param dirIndex 0–3 (up/right/down/left).
+   * @param overlayKind `'starbuf'` (player level overlay) or `'hit'` (enemy hit overlay).
+   * @param stage  1–3 for starbuf, 1–4 for hit. MUST be > 0 (stage 0 = no overlay = no composite).
+   */
+  getCompositeTankSprite(
+    tankKey: string,
+    dirIndex: number,
+    overlayKind: 'starbuf' | 'hit',
+    stage: number,
+  ): CanvasImageSource | undefined {
+    // Numeric index: dirIndex(0-3) × 20 + overlayNum(0-1) × 10 + stage(0-4).
+    // Max index = 3×20 + 1×10 + 4 = 74 < 80 (COMPOSITE_TANK_ARR_SIZE).
+    const overlayNum = overlayKind === 'starbuf' ? 0 : 1
+    const idx = dirIndex * 20 + overlayNum * 10 + stage
+    let arr = this.compositeTankCache.get(tankKey)
+    if (!arr) {
+      arr = Array.from({
+        length: SpriteCache.COMPOSITE_TANK_ARR_SIZE,
+      }) as (CanvasImageSource | undefined)[]
+      this.compositeTankCache.set(tankKey, arr)
+    }
+    const cached = arr[idx]
+    if (cached) return cached
+    const body = this.tankSprites.get(tankKey)?.[dirIndex]
+    if (!body) return undefined
+    const overlay =
+      overlayKind === 'starbuf'
+        ? this.starbufSprites.get(STARBUF_KEYS[stage - 1])?.[dirIndex]
+        : this.hitSprites.get(HIT_KEYS[stage - 1])?.[dirIndex]
+    if (!overlay) return undefined
+    const cs = SPRITE_CANVAS_SIZE
+    const { canvas, ctx } = createOffscreenCanvas(cs * this.dpr, cs * this.dpr, this.dpr)
+    ctx.drawImage(body, 0, 0, cs, cs)
+    ctx.drawImage(overlay, 0, 0, cs, cs)
+    arr[idx] = canvas
+    return canvas
+  }
+
   clear(): void {
     this.tankSprites.clear()
     this.effectSprites.clear()
@@ -300,6 +514,9 @@ export class SpriteCache {
     this.bulletSprite = null
     this.explosionSprite = null
     this.waterSprites = []
+    this.auraSprites.clear()
+    this.powerUpGlowSprites = []
+    this.compositeTankCache.clear()
     this._built = false
   }
 }

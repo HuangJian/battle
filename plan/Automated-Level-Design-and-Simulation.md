@@ -17,8 +17,8 @@
 |------|------|
 | `src/utils/pathfind.ts` | **新建**：通用 A* 寻路 + BFS 可达性 (纯函数，God AI 与关卡生成器共用) |
 | `src/ai/GodAIInput.ts` | 完美玩家模拟器 (实现 `InputLike` 接口) |
-| `tools/level-sim.ts` | 无头仿真 CLI，支持批量并行运行 |
-| `tools/level-gen.ts` | 关卡生成器 (细胞自动机 + 约束覆盖 + A* 验证) |
+| `tools/optimize/level-sim.ts` | 无头仿真 CLI，支持批量并行运行 |
+| `tools/level/level-gen.ts` | 关卡生成器 (细胞自动机 + 约束覆盖 + A* 验证) |
 | `tools/level-eval.ts` | 筛选器 (硬性门槛 + 软性复合指标 + 基准校准) |
 | `evaluation-baseline.json` | 35 经典关卡实测反向拟合的黄金标准 |
 | `ai-baseline.json` | God AI + 敌人 AI 联合调校后的固定对手基准 (含 Skilled Human 代理参数) |
@@ -231,7 +231,7 @@ export function floodFill(
 
 - **启动期注入**：在 `STAGES` 之外维护 `GENERATED_STAGES: StageData[]`，关卡选择 UI 提供「经典 / 生成」切换入口；
 - **或合并构建**：在 `src/config/stages.ts` 组装 `STAGES` 时并入 `generated-stages.json` 内容（需 JSON 加载器，注意与现有 `LEVELS` 13×13→26×26 解码路径区分）；
-- **人工试玩验证**：提供 `tools/play-generated.ts` 或复用 `previewStage` / 新增的 `loadStageData` 在本地直接加载单关验证。
+- **人工试玩验证**：提供 `tools/level/play-generated.ts` 或复用 `previewStage` / 新增的 `loadStageData` 在本地直接加载单关验证。
 
 无论哪种路径，生成的 `StageData` 必须完全符合 §3.5 的字符契约，且 `enemies` 为 `TankKind[]`（生成器填充 20 只编队，沿用 `ENEMIES_PER_STAGE` 循环取样逻辑，`World.loadStageData` 已内置）。
 
@@ -255,10 +255,10 @@ export function floodFill(
 
 | 任务 | 产出 | 验收标准 |
 |------|------|----------|
-| 1.1 创建 `tools/level-sim.ts` | 无头仿真 CLI | `bun tools/level-sim.ts --stage 0 --difficulty hard --seed 123` 可跑通并输出 JSON |
+| 1.1 创建 `tools/optimize/level-sim.ts` | 无头仿真 CLI | `bun tools/optimize/level-sim.ts --stage 0 --difficulty hard --seed 123` 可跑通并输出 JSON |
 | 1.2 实现 `GodAIInput` | `src/ai/GodAIInput.ts` | 实现 `InputLike` 接口，使用 `pathfind.ts` 寻路，能驱动玩家移动/开火 |
-| 1.3 实现 `SimulationRunner` | `tools/simulation-runner.ts` | `run(seed, stage, difficulty)` → `SimResult` |
-| 1.4 实现 `Evaluator` | `tools/evaluator.ts` | `evaluate(result, baseline)` → `EvaluationReport` |
+| 1.3 实现 `SimulationRunner` | `tools/sim/simulation-runner.ts` | `run(seed, stage, difficulty)` → `SimResult` |
+| 1.4 实现 `Evaluator` | `tools/eval/evaluator.ts` | `evaluate(result, baseline)` → `EvaluationReport` |
 | 1.5 单元测试 | `tests/level-sim.test.ts` | 确定性验证：同种子同结果；指标计算正确 |
 
 **技术要点**：
@@ -271,7 +271,7 @@ export function floodFill(
 
 | 任务 | 产出 | 验收标准 |
 |------|------|----------|
-| 2.1 实现 `LevelGenerator.generate()` | `tools/level-gen.ts` | 输入 seed/difficulty/theme → 输出合法 `StageData` |
+| 2.1 实现 `LevelGenerator.generate()` | `tools/level/level-gen.ts` | 输入 seed/difficulty/theme → 输出合法 `StageData` |
 | 2.2 分层生成算法 | 细胞自动机 + 约束覆盖 | 7 层生成流程完整跑通 |
 | 2.3 连续性算法 | `growCluster()` 等 | 同类地形聚类，最小簇 ≥4 格 |
 | 2.4 硬性约束验证 | `validateStage()` (使用 `pathfind.ts` 的 `isReachable`/`floodFill`) | A* 可达性、基地保护、出生点安全全通过 |
@@ -297,10 +297,10 @@ export function floodFill(
 
 | 任务 | 产出 | 验收标准 |
 |------|------|----------|
-| 3a.1 批量运行器 | `tools/batch-sim.ts` | `for seed in 0..99: run() → collect` 并行执行 |
-| 3a.2 统计聚合报告 | `tools/report.ts` | 通过率、P90时间、软指标分布、死亡热力图 |
-| 3a.3 AI 调校脚本 | `tools/ai-calibrate.ts` | God AI 迭代 + 敌人 AI 兜底 + Skilled Human 代理验证 |
-| 3a.4 评分校准脚本 | `tools/calibrate.ts` | 跑 35 经典关 (用 ai-baseline.json) → 反向拟合阈值权重 |
+| 3a.1 批量运行器 | `tools/sim/batch-sim.ts` | `for seed in 0..99: run() → collect` 并行执行 |
+| 3a.2 统计聚合报告 | （已移除） | 通过率、P90时间、软指标分布、死亡热力图 |
+| 3a.3 AI 调校脚本 | `tools/eval/ai-calibrate.ts` | God AI 迭代 + 敌人 AI 兜底 + Skilled Human 代理验证 |
+| 3a.4 评分校准脚本 | `tools/eval/calibrate.ts` | 跑 35 经典关 (用 ai-baseline.json) → 反向拟合阈值权重 |
 
 **并行化策略**：
 - 使用 `worker_threads` 多进程跑仿真 (每进程独立 World/Simulation)
@@ -325,7 +325,7 @@ export function floodFill(
 | 4.2 仿真 CLI | `package.json` scripts | `bun run sim-levels --input generated-stages.json --difficulty hard` |
 | 4.3 AI 调校 CLI | `package.json` scripts | `bun run ai-calibrate --difficulty hard` |
 | 4.4 评分校准 CLI | `package.json` scripts | `bun run calibrate --difficulty hard` |
-| 4.5 关卡缩略图生成 | `tools/gen-thumbnails.ts` | 复用 `TileMap` + `SpriteCache` 离屏渲染 PNG |
+| 4.5 关卡缩略图生成 | `tools/level/gen-thumbnails.ts` | 复用 `TileMap` + `SpriteCache` 离屏渲染 PNG |
 
 ---
 
@@ -333,9 +333,9 @@ export function floodFill(
 
 | 现有文件 | 复用内容 | 新建文件 |
 |----------|----------|----------|
-| `tools/perf/sim-bench.ts` | 无头 World/Simulation 启动模式 | `tools/level-sim.ts` |
+| `tools/perf/sim-bench.ts` | 无头 World/Simulation 启动模式 | `tools/optimize/level-sim.ts` |
 | `src/ai/TacticalIntelligence.ts` | 感知/寻路/威胁评估算法 | `src/ai/GodAIInput.ts` |
-| `src/game/TileMap.ts` | 地形加载/查询/销毁 + 静态谓词 (`blocksTank`/`blocksBullet`/`isDestructible`/`isSteel`)。**不含**可达性/A*——寻路由新建的 `src/utils/pathfind.ts` 提供，生成器与 God AI 共用 | `tools/level-gen.ts` (复用地形查询) |
+| `src/game/TileMap.ts` | 地形加载/查询/销毁 + 静态谓词 (`blocksTank`/`blocksBullet`/`isDestructible`/`isSteel`)。**不含**可达性/A*——寻路由新建的 `src/utils/pathfind.ts` 提供，生成器与 God AI 共用 | `tools/level/level-gen.ts` (复用地形查询) |
 | `src/config/stages.ts` | `StageData` 结构、字符编码 | - |
 | `src/snapshot/WorldSerializer.ts` | 完整状态序列化 (可选，回放用) | - |
 | `src/utils/RNG.ts` | 确定性随机数 | - |
@@ -348,7 +348,7 @@ export function floodFill(
 
 ### 6.1 Phase 1 完成标准
 
-- [ ] `bun tools/level-sim.ts --stage 0 --difficulty hard --seed 1` 输出完整 JSON 报告
+- [ ] `bun tools/optimize/level-sim.ts --stage 0 --difficulty hard --seed 1` 输出完整 JSON 报告
 - [ ] `GodAIInput` 能在无渲染下驱动玩家完成基本移动/射击
 - [ ] `SimulationRunner` 正确处理 `stage_clear`/`gameover`/`maxTicks` 三种终局
 - [ ] `Evaluator` 硬性指标判定正确，软性指标计算与定义一致

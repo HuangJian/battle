@@ -102,6 +102,18 @@ export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null):
 }
 
 /**
+ * The schema version a packed-frame blob actually carries — its leading byte.
+ *
+ * This is the ONLY authoritative answer to "what layout are these bytes?".
+ * Envelope fields and `Replay.schemaVersion` are descriptive metadata that
+ * historically drifted from the blob (older builds always wrote 0x02, even
+ * for a v1 single-stream blob). Returns 0 for an empty/missing blob.
+ */
+export function frameSchemaVersionOf(data: Uint8Array | null | undefined): number {
+  return data && data.length > 0 ? data[0] : 0
+}
+
+/**
  * Unpack a Uint8Array (prefixed with schema version byte) into InputFrames.
  * Returns { p1, p2 } where p2 is null for v1 replays or when no coop data.
  * Returns null if the schema version is unrecognized.

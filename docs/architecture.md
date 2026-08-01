@@ -152,7 +152,7 @@ Four optimization passes converted the steady-state path to allocation-free (DEC
 * **On-demand render skip** — `PresentationLayer.shouldRender` compares a cheap scene signature and skips the full-canvas repaint when nothing visible moved; a hidden tab stops the loop entirely. The simulation still ticks at 60Hz for determinism — only painting rests.
 * **DPR cap** at ≤2 prevents overdraw on retina displays.
 
-A `tools/bench-sim.ts` headless harness and a rolling FPS sampler (warn only after 3 consecutive sub-45fps seconds) guard regressions.
+A `tools/sim/bench-sim.ts` headless harness and a rolling FPS sampler (warn only after 3 consecutive sub-45fps seconds) guard regressions.
 
 ---
 

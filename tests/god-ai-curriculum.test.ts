@@ -11,8 +11,8 @@ import {
   makeMazeStage,
   CURRICULUM_STAGES,
   runCurriculumStage,
-} from '../tools/curriculum'
-import { runSimulation } from '../tools/simulation-runner'
+} from '../tools/optimize/curriculum'
+import { runSimulation } from '../tools/sim/simulation-runner'
 
 // ============================================================
 // God AI Curriculum Tests (plan/God-AI-Curriculum §4, §5.4)

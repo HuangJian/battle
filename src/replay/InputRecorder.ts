@@ -3,7 +3,7 @@ import type { World } from '../game/World'
 import type { WorldSnapshot } from '../snapshot/types'
 import { cloneWorld } from '../snapshot/WorldSerializer'
 import { packFrame } from './pack'
-import { FRAME_SCHEMA_VERSION } from './config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from './config'
 
 // ================================================================
 // InputRecorder — passively captures player input per tick
@@ -102,16 +102,19 @@ export class InputRecorder {
         packed[base + 1] = this.frames2[i]
       }
       frames = packed
-      // Also store frames2 separately for the Replay.frames2 field
+      // Also store frames2 separately for the Replay.frames2 field.
+      // It is a SINGLE stream, so it must carry the v1 header — stamping it
+      // 0x02 declared a dual-stream layout it does not have, and any reader
+      // that unpacked it would consume byte 1 as a flags byte.
       frames2 = new Uint8Array(tickCount + 1)
-      frames2[0] = FRAME_SCHEMA_VERSION
+      frames2[0] = FRAME_SCHEMA_V1
       for (let i = 0; i < tickCount; i++) {
         frames2[i + 1] = this.frames2[i]
       }
     } else {
       // v1: [version][frame0][frame1]... — downgrade for backward compat
       frames = new Uint8Array(tickCount + 1)
-      frames[0] = 0x01 // FRAME_SCHEMA_V1
+      frames[0] = FRAME_SCHEMA_V1
       for (let i = 0; i < tickCount; i++) {
         frames[i + 1] = this.frames[i]
       }

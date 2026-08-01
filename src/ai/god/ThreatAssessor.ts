@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Bullet } from '../../types'
 import type { Direction } from '../../constants'
-import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD } from '../../constants'
+import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
@@ -26,7 +26,41 @@ export function findMostDangerousBulletImpl(
   let best: Bullet | null = null
   let bestDist = Infinity
 
-  for (const b of w.bullets) {
+  // §48-revisit: steel-only occlusion. When ON, skip bullets whose path to
+  // the player is blocked by steel (permanent for enemy bullets —
+  // STEEL_PIERCE_PLAYER_LEVEL is player-only). Brick is NOT checked: dodging
+  // brick-blocked bullets is load-bearing anticipatory dodging (DECISIONS
+  // §48). Computed once (loop-invariant) so V8 guards the scan block when OFF.
+  const steelOcclusion = self.params.evasionSteelOcclusion > 0
+  // Distance gate (px): 0 = suppress all steel-blocked bullets; >0 suppresses
+  // only blocked bullets at dist >= range. Near blocked bullets keep their
+  // dodge (load-bearing repositioning — per-seed tick-diff, S32 seed 11).
+  const steelOcclusionRangePx =
+    self.params.evasionSteelOcclusionRange > 0 ? self.params.evasionSteelOcclusionRange * CELL : 0
+
+  // Pinned-position gate (user finding, §48-revisit): the S32 seed-11
+  // regression is NOT about dodging vs not dodging — it's that suppressing
+  // the dodge left the player PINNED in a corner (tick 738: player at (0,1)
+  // stayed + fired while the baseline dodged down and escaped). When the
+  // player is geometrically constrained (≤ 2 open directions), the dodge IS
+  // the escape — never suppress it, even for a steel-blocked bullet. Only in
+  // open space (3-4 open directions) is a steel-blocked dodge genuinely
+  // wasteful. Computed only when occlusion is active (OFF stays byte-identical).
+  let playerConstrained = false
+  if (steelOcclusion) {
+    const pTank = self.controlledTank(self.world)
+    if (pTank) {
+      let openDirs = 0
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        if (self.canMoveDir(pTank, ALL_DIRS[di])) openDirs++
+      }
+      playerConstrained = openDirs <= 2
+    }
+  }
+
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
@@ -42,6 +76,36 @@ export function findMostDangerousBulletImpl(
     if (!approaching) continue
 
     const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+
+    // §48-revisit: scan the bullet→player path for steel. If any steel cell
+    // blocks the path, this bullet (and all future bullets from this enemy
+    // in this direction) can never reach the player — skip the threat.
+    // OOB-safe: break on off-field, never use TileMap.get's OOB→'steel'
+    // default (the §70 false-positive bug). Brick does NOT cause a skip —
+    // keep scanning past brick for steel behind it.
+    // Distance gate: only suppress when dist >= the range threshold, so
+    // NEAR blocked bullets keep their load-bearing repositioning dodge.
+    if (steelOcclusion && dist >= steelOcclusionRangePx) {
+      const v = DIR_VECTORS[b.dir]
+      const grid = w.tileMap.grid
+      let steelBlocked = false
+      for (let d = CELL; d < dist; d += CELL) {
+        const fx = bcx + v.dx * d
+        const fy = bcy + v.dy * d
+        const col = Math.floor(fx / CELL)
+        const row = Math.floor(fy / CELL)
+        if (col < 0 || col >= GRID || row < 0 || row >= GRID) break
+        if (grid[row][col] === 'steel') {
+          steelBlocked = true
+          break
+        }
+      }
+      // Pinned gate: only suppress when the player is NOT geometrically
+      // constrained. When pinned (≤2 open directions), the dodge is the
+      // escape from the corner — keep it (S32 seed-11 regression mechanism).
+      if (steelBlocked && !playerConstrained) continue
+    }
+
     if (dist < bestDist) {
       bestDist = dist
       best = b
@@ -66,7 +130,9 @@ export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
   let best: Bullet | null = null
   let bestDist = Infinity
 
-  for (const b of w.bullets) {
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer) continue
 
     const bcx = b.x + b.w / 2
@@ -283,7 +349,12 @@ export function isSafeDirImpl(
   const newCx = pcx + v.dx * CELL
   const newCy = pcy + v.dy * CELL
 
-  for (const b of w.bullets) {
+  // Indexed loop (AGENTS §14.1): isSafeDir is called up to 2× per dodge
+  // (candA + candB), and dodgeDirection runs whenever a threat is detected.
+  // `for (const b of w.bullets)` allocates an iterator per call.
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
@@ -300,6 +371,175 @@ export function isSafeDirImpl(
     if (approaching) return false
   }
   return true
+}
+
+/**
+ * §68-v2: Time-aware path threat projection.
+ *
+ * Scans the player's movement path from cell 1 to LOOKAHEAD cells ahead in
+ * moveDir. For each cell, checks ALL enemy bullets (from target or non-target
+ * enemies) using time-of-arrival estimation:
+ *
+ *   - Player arrives at cell i at tick:  i * CELL / playerSpeed
+ *   - Player departs (clears TANK hitbox) at tick:  arrival + TANK / playerSpeed
+ *   - Bullet arrives at cell i at tick:  dist / bullet.speed
+ *   - Threat if bullet arrives before player departs the cell
+ *
+ * This replaces the old fixed-proximity approach (which used TANK or TANK*2
+ * as a distance threshold). The time-aware check naturally adapts to bullet
+ * speed: a fast bullet (4.2 px/tick) is flagged at a greater distance than
+ * a slow one (3.6 px/tick), giving the player appropriate warning time.
+ *
+ * The current position (i=0) is NOT checked here — findMostDangerousBullet
+ * in the dodge section of think() already handles it. This function only
+ * catches threats to FUTURE positions: bullets the player would move INTO
+ * by following moveDir.
+ *
+ * Returns the bullet with the earliest arrival time, or null if the path
+ * is safe.
+ */
+const PATH_THREAT_LOOKAHEAD = 3
+
+export function findPathThreatImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  moveDir: Direction,
+  playerSpeed: number,
+): Bullet | null {
+  const w = self.world
+  const v = DIR_VECTORS[moveDir]
+  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+
+  let bestBullet: Bullet | null = null
+  let bestThreatTick = Infinity
+
+  const bullets = w.bullets
+  for (let i = 1; i <= PATH_THREAT_LOOKAHEAD; i++) {
+    const ccx = pcx + v.dx * i * CELL
+    const ccy = pcy + v.dy * i * CELL
+
+    const playerArrivalTick = (i * CELL) / ps
+    // Collision window: both player and bullet hitboxes must overlap the cell
+    // at the same time. Player hitbox (TANK=32px) + bullet hitbox (BULLET=6px)
+    // → centers must be within (TANK+BULLET)/2 = 19px at the same tick.
+    // At bullet speed ~4px/tick, that's ~5 ticks. At player speed ~1px/tick,
+    // that's ~19 ticks. We use ±10 ticks as a balance: catches genuine
+    // same-time collisions without flagging bullets that arrive much earlier
+    // (already passed) or much later (player has moved on).
+    // This is MUCH tighter than ±TANK/ps (±30 ticks), which caused
+    // false positives on maze stages (S6/S12/S14/S22/S26 regressions).
+    const threatWindow = 10
+    const playerDepartureTick = playerArrivalTick + threatWindow
+    const playerEnterTick = playerArrivalTick - threatWindow
+
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const b = bullets[bi]
+      if (!b.alive || b.isPlayer) continue
+
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const vertical = b.dir === 'up' || b.dir === 'down'
+
+      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      if (!aligned) continue
+
+      const approaching =
+        (b.dir === 'down' && bcy < ccy) ||
+        (b.dir === 'up' && bcy > ccy) ||
+        (b.dir === 'right' && bcx < ccx) ||
+        (b.dir === 'left' && bcx > ccx)
+      if (!approaching) continue
+
+      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      const bulletArrivalTick = dist / b.speed
+
+      if (bulletArrivalTick >= playerEnterTick && bulletArrivalTick <= playerDepartureTick) {
+        if (bulletArrivalTick < bestThreatTick) {
+          bestThreatTick = bulletArrivalTick
+          bestBullet = b
+        }
+      }
+    }
+  }
+
+  return bestBullet
+}
+
+/**
+ * §68-v2: Find a safe alternative movement direction.
+ *
+ * Called when findPathThreat detected a threat in the current movement
+ * direction. Checks perpendicular and backward directions for immediate
+ * safety (cell 1 only — not the full 3-cell path). This is less conservative
+ * than checking the full path: a direction is accepted if the immediate next
+ * cell is safe, even if farther cells have threats. The full path check will
+ * run again next tick for the new direction.
+ *
+ * Returns the first safe direction, or null if no direction is safe.
+ * Caller keeps the original direction when null is returned — never stops.
+ */
+export function findSafeMoveDirImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  threatenedDir: Direction,
+  playerSpeed: number,
+): Direction | null {
+  const p = self.controlledTank(self.world)!
+  const w = self.world
+  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+
+  // Time window for cell 1 (immediate next cell) — same tight ±10 as findPathThreat
+  const arrivalTick = CELL / ps
+  const threatWin = 10
+  const departTick = arrivalTick + threatWin
+  const enterTick = arrivalTick - threatWin
+
+  // Check if cell 1 in direction `dir` is safe from bullets
+  function isCell1Safe(dir: Direction): boolean {
+    const v = DIR_VECTORS[dir]
+    const ccx = pcx + v.dx * CELL
+    const ccy = pcy + v.dy * CELL
+    const bullets = w.bullets
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const b = bullets[bi]
+      if (!b.alive || b.isPlayer) continue
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      const vertical = b.dir === 'up' || b.dir === 'down'
+      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      if (!aligned) continue
+      const approaching =
+        (b.dir === 'down' && bcy < ccy) ||
+        (b.dir === 'up' && bcy > ccy) ||
+        (b.dir === 'right' && bcx < ccx) ||
+        (b.dir === 'left' && bcx > ccx)
+      if (!approaching) continue
+      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      const bat = dist / b.speed
+      if (bat >= enterTick && bat <= departTick) return false
+    }
+    return true
+  }
+
+  const threatenedVertical = threatenedDir === 'up' || threatenedDir === 'down'
+  const perpA: Direction = threatenedVertical ? 'left' : 'up'
+  const perpB: Direction = threatenedVertical ? 'right' : 'down'
+  const backward: Direction =
+    threatenedDir === 'up'
+      ? 'down'
+      : threatenedDir === 'down'
+        ? 'up'
+        : threatenedDir === 'left'
+          ? 'right'
+          : 'left'
+
+  if (self.canMoveDir(p, perpA) && isCell1Safe(perpA)) return perpA
+  if (self.canMoveDir(p, perpB) && isCell1Safe(perpB)) return perpB
+  if (self.canMoveDir(p, backward) && isCell1Safe(backward)) return backward
+
+  return null
 }
 
 /**

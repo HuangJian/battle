@@ -383,7 +383,7 @@ When this file and your instincts disagree, this file wins. When this file and t
 
 ## 14. Performance Anti-Patterns — Hot-Path Rules
 
-> The God-AI tuning loop runs thousands of headless simulations. Any per-tick allocation or redundant scan is amplified ×millions. The rules below were discovered via `bun --cpu-prof` profiling + determinism-signature verification (see `tools/perf/perf-optimize-godai.md`). Violating them in hot paths is a bug, even if the tests pass.
+> The God-AI tuning loop runs thousands of headless simulations. Any per-tick allocation or redundant scan is amplified ×millions. The rules below were discovered via `bun --cpu-prof` profiling + determinism-signature verification (see `docs/perf-optimization.progress.md`). Violating them in hot paths is a bug, even if the tests pass.
 
 ### 14.1 No array allocations in per-tick functions
 
@@ -423,4 +423,4 @@ Terrain types are `TerrainType` strings (`'brick'`, `'steel'`, etc.). V8 interns
 
 ### 14.6 Reuse `allTanks` buffer — don't rebuild
 
-`World.allTanks` is a getter that rebuilds `_allTanksBuf` on each call. If multiple consumers in the same tick need the tank list, call the getter once and pass the reference. The `perceive()` function does this: `const all = world.allTanks` then passes `all` to `canStep()` 4× (instead of having `canStep` call the getter 4×).
+`World.allTanks` is a getter that rebuilds `_allTanksBuf` on each call. If multiple consumers in the same tick need the tank list, call the getter once and pass the reference. The `perceive()` function does this: callers (TacticalIntelligence.update / updateTank) pass the already-cached `allTanks` buffer in via the optional `all?` parameter, then perceive passes it to `canStep()` 4× instead of having `canStep` call the getter 4×.

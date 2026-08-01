@@ -8,7 +8,7 @@ import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
-import type { ThemeColors, TerrainType } from '../../types'
+import type { ThemeColors, TerrainType, Tank } from '../../types'
 import { createOffscreenCanvas } from '../../utils/canvas'
 import { getHpLevel } from '../../config/hp-level'
 
@@ -39,7 +39,20 @@ export class GameRenderer {
 
   private dpr: number
 
-  // ---- Dev draw-call counter (Performance Observatory, F6 overlay) ----
+  /**
+   * Low-quality render mode (set by Performance Mode). When true, skips purely
+   * decorative rendering that is expensive on software rasterizers:
+   *   - Vignette full-screen blit (~1.4ms/frame on Skia software — the single
+   *     most expensive operation in the render path; on a 20-year-old machine
+   *     with no GPU this could be 7–14ms, nearly the entire frame budget).
+   *   - Tank contact shadow (6 fillRect-equivalents per frame in a 6-tank scene;
+   *     the shadow is a modern decoration, absent from the classic original).
+   * Gameplay-relevant visuals (auras, insignia, hit overlays, shields) are
+   * NEVER skipped — only decorative elements that don't affect readability.
+   */
+  lowQuality = false
+
+  // ---- Dev draw-call counter (Performance Observatory, Alt+D overlay) ----
   /** Count of drawImage/fill/strokeRect calls in the most recent frame. */
   debugDrawCalls = 0
   private _countDraws = false
@@ -56,6 +69,17 @@ export class GameRenderer {
   // ---- Forest cache ----
   private forestCache: CanvasImageSource
   private forestCacheCtx: CanvasRenderingContext2D
+  /**
+   * Whether the stage has any forest tiles. Compositing the full 1024×1024
+   * forest surface costs a full-screen drawImage every frame even though it is
+   * mostly transparent; on forest-free stages that draw is a pure no-op but
+   * still pays the full-blit cost, so we skip it entirely. Recomputed whenever
+   * the terrain/forest cache is rebuilt (see `recomputeHasForest`); the blit
+   * itself is always a full-field drawImage — a sub-rect "bbox" blit was
+   * prototyped and rejected because the 9-arg drawImage is ~2-3× slower than
+   * the whole-image fast path in the Skia backend.
+   */
+  private hasForest = false
 
   // ---- Water cell positions (for direct rendering each frame) ----
   private waterCells: Array<{ c: number; r: number }> = []
@@ -68,6 +92,16 @@ export class GameRenderer {
   // ---- Gradient cache ----
   private cachedBgGradient: CanvasGradient | null = null
   private cachedTheme: ThemeColors | null = null
+  /**
+   * Bg gradient + theme cached for the TERRAIN CACHE context (R5-A). A separate
+   * gradient is required because `CanvasGradient` objects are tied to the context
+   * they were created on — the terrainCacheCtx is a different context from the
+   * main one. Bakes the background fill into the static terrain layer so the
+   * per-frame full-field `fillRect` is eliminated (camera-at-rest path: a single
+   * opaque `drawImage` replaces `fillRect` + alpha-blended `drawImage`).
+   */
+  private cachedCacheBgGradient: CanvasGradient | null = null
+  private cachedCacheTheme: ThemeColors | null = null
 
   // ---- Water sprite cache (theme-aware, phase-animated) ----
   private waterSpriteDirty = true
@@ -80,6 +114,18 @@ export class GameRenderer {
   private _baseDpr = 1
   private _baseCamX = 0
   private _baseCamY = 0
+
+  // ---- Reusable buffers for incremental terrain cache rebuild (P1) ----
+  // Replaces a per-call `new Set<number>(tm.dirtyCells)` + 4-element neighbor
+  // array of tuples — those were ~7 short-lived heap objects every time a
+  // bullet impacted terrain (combat/burst). On a 20-year-old machine the
+  // resulting minor GC churn is felt as frame hitches.
+  //
+  // `_dirtyMark` is a 676-byte flat tag grid (1 = cell needs repaint, 0 = skip).
+  // `_dirtyList` is the sparse list of marked indices, reset to length=0 after
+  // each rebuild. Both are zero-allocation in steady state.
+  private _dirtyMark = new Uint8Array(GRID * GRID)
+  private _dirtyList: number[] = []
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -157,6 +203,8 @@ export class GameRenderer {
     this.vignetteDirty = true
     this.cachedBgGradient = null
     this.cachedTheme = null
+    this.cachedCacheBgGradient = null
+    this.cachedCacheTheme = null
     this.waterSpriteDirty = true
     this.bulletSpriteDirty = true
   }
@@ -182,7 +230,7 @@ export class GameRenderer {
 
   /**
    * Arm/disarm a dev-only draw-call counter for the Performance Observatory
-   * (F6) overlay. When on, `drawImage`/`fillRect`/`fill`/`strokeRect` on the
+   * (Alt+D) overlay. When on, `drawImage`/`fillRect`/`fill`/`strokeRect` on the
    * main canvas context are wrapped to increment {@link debugDrawCalls}; when
    * off the context methods are restored and the counter is reset to 0.
    *
@@ -230,9 +278,18 @@ export class GameRenderer {
   // Main render
   // ================================================================
 
-  render(world: World): void {
+  /**
+   * @param tanks Optional pre-computed `world.allTanks` buffer. `allTanks` is a
+   * getter that rebuilds a shared array on every access; the caller
+   * (PresentationLayer.render) already needs it for `updateVisualState`, so it
+   * threads the same buffer here instead of paying for a second rebuild. When
+   * omitted (tests, tools, direct callers) the getter is used — identical result.
+   */
+  render(world: World, tanks?: Tank[]): void {
     // Pass theme key so skipSvg is set correctly for Classic/Neon themes.
     this.setTheme(world.theme, world.themeKey)
+    // Sync low-quality flag to artist (cheap boolean write; gates shadow skip).
+    this.artist.lowQuality = this.lowQuality
     this.baseDamageFrac = world.baseMaxHp > 0 ? Math.max(0, 1 - world.baseHp / world.baseMaxHp) : 0
     const ctx = this.ctx
     const dpr = this.dpr
@@ -248,12 +305,20 @@ export class GameRenderer {
     this._baseCamX = cam.x
     this._baseCamY = cam.y
 
-    // 1. Background fill
-    this.fillBackground(world)
-
-    // 2. Static terrain cache (brick/steel/ice/base — NO water, NO grid)
+    // 1+2. Static layer — bg baked into terrainCache (R5-A).
+    //   Camera at rest: a single opaque `drawImage` replaces the old
+    //   `fillRect`(bg) + alpha-blended `drawImage`(terrain) pair. The cache is
+    //   opaque (bg + tiles), so the blit is a fast source-copy rather than a
+    //   per-pixel alpha blend — meaningful on software rasterizers (old machines
+    //   without GPU), where a full-field gradient `fillRect` + alpha blit can
+    //   eat a large fraction of the frame budget.
+    //   Camera shifted (shake/pan): fill the overscroll border with bg first so
+    //   no stale pixels leak at the edges, then blit the cache over the interior.
     this.updateTerrainCache(world)
-    ctx.drawImage(this.terrainCache, 0, 0, FIELD, FIELD)
+    if (cam.x !== 0 || cam.y !== 0) {
+      this.fillBackground(world)
+    }
+    this.blitTerrain()
 
     // 3. Water tiles (drawn directly — cheap, few tiles, animated)
     if (this.waterSpriteDirty) {
@@ -263,7 +328,7 @@ export class GameRenderer {
     this.renderWater(world)
 
     // 4. Tanks
-    this.renderTanks(world)
+    this.renderTanks(world, tanks ?? world.allTanks)
 
     // 5. Bullets (rebuild the theme-colored bullet bitmap if the theme changed)
     if (this.bulletSpriteDirty) {
@@ -276,7 +341,7 @@ export class GameRenderer {
     this.renderPowerUps(world)
 
     // 7. Forest (cached, drawn on top of tanks for hiding)
-    ctx.drawImage(this.forestCache, 0, 0, FIELD, FIELD)
+    this.blitForest()
 
     // 8. Explosions
     this.renderExplosions(world)
@@ -300,7 +365,50 @@ export class GameRenderer {
     }
 
     // 12. Vignette (cached offscreen canvas — one drawImage)
-    this.drawVignette(world)
+    // Skipped in low-quality mode: the full-screen alpha blit is the single
+    // most expensive operation on software rasterizers (~1.4ms/frame on Skia,
+    // estimated 7–14ms on a 20-year-old machine without GPU). The vignette is
+    // purely decorative — its absence does not affect gameplay readability.
+    if (!this.lowQuality) {
+      this.drawVignette(world)
+    }
+  }
+
+  /**
+   * Composite the static terrain layer. Its own method (rather than an inline
+   * `drawImage`) so the ablation benchmark can no-op exactly this stage, and so
+   * the blit rectangle has one place to change.
+   */
+  private blitTerrain(): void {
+    this.ctx.drawImage(this.terrainCache, 0, 0, FIELD, FIELD)
+  }
+
+  /**
+   * Composite the forest layer over the tanks. Skipped entirely when the stage
+   * has no forest (`hasForest`); otherwise a single full-field drawImage. Source
+   * coordinates are in cache bitmap pixels (the cache is FIELD*dpr wide);
+   * destination coordinates are logical, because the main context already
+   * carries the DPR transform.
+   */
+  private blitForest(): void {
+    if (!this.hasForest) return // stage has no forest — nothing to composite
+    this.ctx.drawImage(this.forestCache, 0, 0, FIELD, FIELD)
+  }
+
+  /**
+   * Recompute `hasForest` from the tile map. Cheap (676 cells) and only runs
+   * when the terrain/forest cache changes, so it is not a per-frame cost.
+   */
+  private recomputeHasForest(tm: TileMap): void {
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (tm.get(c, r) === 'forest') {
+          this.hasForest = true
+          return
+        }
+      }
+    }
+    this.hasForest = false
   }
 
   // ---- Background ----
@@ -324,6 +432,39 @@ export class GameRenderer {
     ctx.fillRect(-10, -10, FIELD + 20, FIELD + 20)
   }
 
+  /**
+   * Paint the background into a rect of the TERRAIN CACHE context (R5-A). The
+   * bg is baked into the static cache so the per-frame full-field `fillRect` is
+   * skipped when the camera is at rest. Uses the same gradient definition as
+   * `fillBackground` (absolute user-space coords `0,-10 → 0,FIELD+10`) so a
+   * sub-rect `fillRect(x,y,w,h)` paints the identical slice the main-canvas
+   * fill would have produced there. Gradient is cached per-theme on this
+   * context (separate from the main ctx's `cachedBgGradient` because
+   * `CanvasGradient` is context-bound).
+   */
+  private paintCacheBg(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    theme: ThemeColors,
+  ): void {
+    if (theme.bgGradient) {
+      if (!this.cachedCacheBgGradient || this.cachedCacheTheme !== theme) {
+        const g = ctx.createLinearGradient(0, -10, 0, FIELD + 10)
+        g.addColorStop(0, theme.bgGradient[0])
+        g.addColorStop(1, theme.bgGradient[1])
+        this.cachedCacheBgGradient = g
+        this.cachedCacheTheme = theme
+      }
+      ctx.fillStyle = this.cachedCacheBgGradient
+    } else {
+      ctx.fillStyle = theme.bg
+    }
+    ctx.fillRect(x, y, w, h)
+  }
+
   // ---- Terrain cache ----
 
   private updateTerrainCache(world: World): void {
@@ -336,6 +477,7 @@ export class GameRenderer {
       tm.dirty = false
       this.rebuildTerrainCache(world)
       this.rebuildForestCache(world)
+      this.recomputeHasForest(tm)
       this.scanWaterCells(world)
       tm.dirtyCells.length = 0
     } else {
@@ -343,25 +485,60 @@ export class GameRenderer {
       // orthogonal neighbours, so auto-tiled steel/ice re-derive their patch
       // perimeter when a neighbour is destroyed). Turns "a brick got shot" from
       // a full 26×26 cache rebuild into O(changed cells).
-      const expanded = new Set<number>(tm.dirtyCells)
-      for (const idx of tm.dirtyCells) {
+      //
+      // Zero-allocation path (P1): the previous implementation built a `Set`
+      // and a 4-element tuple array per call — short-lived heap objects that
+      // triggered minor GC on every terrain-damage frame. We now mark cells in
+      // a reusable Uint8Array and collect the unique indices in a reusable
+      // number[], then walk that list and clear marks in the same pass.
+      const mark = this._dirtyMark
+      const list = this._dirtyList
+      // Phase 1 — mark dirty cells + orthogonal neighbours (dedup via mark).
+      for (let i = 0; i < tm.dirtyCells.length; i++) {
+        const idx = tm.dirtyCells[i]
+        if (mark[idx] === 0) {
+          mark[idx] = 1
+          list.push(idx)
+        }
         const c = idx % GRID
         const r = (idx - c) / GRID
-        const neigh: Array<[number, number]> = [
-          [c - 1, r],
-          [c + 1, r],
-          [c, r - 1],
-          [c, r + 1],
-        ]
-        for (const [nc, nr] of neigh) {
-          if (nc >= 0 && nc < GRID && nr >= 0 && nr < GRID) {
-            expanded.add(nr * GRID + nc)
+        // Inline the 4-neighbour scan — avoids allocating a tuple array.
+        if (c > 0) {
+          const n = idx - 1
+          if (mark[n] === 0) {
+            mark[n] = 1
+            list.push(n)
+          }
+        }
+        if (c < GRID - 1) {
+          const n = idx + 1
+          if (mark[n] === 0) {
+            mark[n] = 1
+            list.push(n)
+          }
+        }
+        if (r > 0) {
+          const n = idx - GRID
+          if (mark[n] === 0) {
+            mark[n] = 1
+            list.push(n)
+          }
+        }
+        if (r < GRID - 1) {
+          const n = idx + GRID
+          if (mark[n] === 0) {
+            mark[n] = 1
+            list.push(n)
           }
         }
       }
+      // Phase 2 — repaint each marked cell, then clear its mark in the same
+      // iteration so the buffers are clean for the next call.
       const artist = this.artist
       const savedCtx = artist.ctx // restore after — draw helpers use artist.ctx
-      for (const idx of expanded) {
+      for (let i = 0; i < list.length; i++) {
+        const idx = list[i]
+        mark[idx] = 0 // reset for next call
         const c = idx % GRID
         const r = (idx - c) / GRID
         const type = tm.get(c, r)
@@ -369,8 +546,12 @@ export class GameRenderer {
         if (type === 'forest') {
           artist.ctx = this.forestCacheCtx
           this.redrawForestCell(c, r)
-          // Clear any stale terrain tile under the (opaque) forest overlay.
-          this.terrainCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
+          // Repaint bg on the terrain cache under the forest overlay (R5-A: the
+          // cache is opaque — a `clearRect` would punch a transparent hole and
+          // show stale canvas content beneath the blit). Forest hides terrain,
+          // so only the bg should appear under the (separately drawn) forest
+          // overlay.
+          this.paintCacheBg(this.terrainCacheCtx, c * CELL, r * CELL, CELL, CELL, this.artist.theme)
         } else {
           artist.ctx = this.terrainCacheCtx
           this.redrawTerrainCell(c, r, type, tm)
@@ -378,9 +559,47 @@ export class GameRenderer {
           this.forestCacheCtx.clearRect(c * CELL, r * CELL, CELL, CELL)
         }
       }
+      list.length = 0
       artist.ctx = savedCtx
+      // A destroyed forest cell can shrink the box and a newly drawn one can
+      // grow it, so recompute rather than only expanding — otherwise the box
+      // would ratchet outward and lose the saving over a long stage.
+      this.recomputeHasForest(tm)
       tm.dirtyCells.length = 0
     }
+  }
+
+  /**
+   * Reusable 4-slot neighbour mask buffer (P4). Avoids allocating a fresh
+   * `[boolean, boolean, boolean, boolean]` tuple + the `at` closure on every
+   * call to {@link neighborMask}. Reads are `arr[0..3]` = (n, e, s, w).
+   * Callers must consume the values before the next call to `neighborMask`.
+   */
+  private _nmask: boolean[] = [false, false, false, false]
+
+  /**
+   * Fill {@link _nmask} with the 4-neighbour same-type flags for cell (c, r).
+   *
+   * P4: previously returned a fresh 4-tuple AND allocated a closure (`at`) per
+   * call. With 4 call sites inside the per-dirty-cell `redrawTerrainCell` /
+   * `rebuildTerrainCache` paths, a brick-destroy burst could allocate ~12
+   * short-lived objects (4 calls × (1 tuple + 1 closure + destructuring
+   * intermediate)). Inlined bounds checks + reusable buffer = zero allocation.
+   */
+  private neighborMask(tm: TileMap, c: number, r: number, type: TerrainType): void {
+    // North
+    const hasN = r > 0 && tm.get(c, r - 1) === type
+    // East
+    const hasE = c < GRID - 1 && tm.get(c + 1, r) === type
+    // South
+    const hasS = r < GRID - 1 && tm.get(c, r + 1) === type
+    // West
+    const hasW = c > 0 && tm.get(c - 1, r) === type
+    const m = this._nmask
+    m[0] = hasN
+    m[1] = hasE
+    m[2] = hasS
+    m[3] = hasW
   }
 
   /**
@@ -388,35 +607,18 @@ export class GameRenderer {
    * Reproduces exactly what the full rebuild would draw for that cell:
    * flat clear for empty space, or the tile art for a solid tile.
    */
-  /**
-   * Orthogonal same-type neighbour mask for auto-tiling. Returns [n, e, s, w];
-   * out-of-bounds is treated as a boundary (different), so a patch that reaches
-   * the field edge still gets an outline there.
-   */
-  private neighborMask(
-    tm: TileMap,
-    c: number,
-    r: number,
-    type: TerrainType,
-  ): [boolean, boolean, boolean, boolean] {
-    const at = (cc: number, rr: number): TerrainType | null =>
-      cc >= 0 && cc < GRID && rr >= 0 && rr < GRID ? tm.get(cc, rr) : null
-    return [
-      at(c, r - 1) === type, // n
-      at(c + 1, r) === type, // e
-      at(c, r + 1) === type, // s
-      at(c - 1, r) === type, // w
-    ]
-  }
-
   private redrawTerrainCell(c: number, r: number, type: TerrainType, tm: TileMap): void {
     const ctx = this.terrainCacheCtx
     const x = c * CELL
     const y = r * CELL
-    ctx.clearRect(x, y, CELL, CELL)
+    // Repaint bg for this cell (R5-A: bg is baked into the opaque cache, so a
+    // destroyed tile reveals the bg rather than transparency). Equivalent to
+    // the old `clearRect` for the visual result, because the cache is composited
+    // as an opaque blit — there is no "behind the cache" to show through.
+    this.paintCacheBg(ctx, x, y, CELL, CELL, this.artist.theme)
 
     if (type === 'empty') {
-      // Empty space: clean flat ground (cleared above).
+      // Empty space: clean flat ground (bg painted above).
       return
     }
 
@@ -426,23 +628,26 @@ export class GameRenderer {
         artist.drawBrick(x, y, CELL)
         break
       case 'steel': {
-        const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'steel')
-        artist.drawSteel(x, y, CELL, nn, ne, ns, nw)
+        this.neighborMask(tm, c, r, 'steel')
+        const m = this._nmask
+        artist.drawSteel(x, y, CELL, m[0], m[1], m[2], m[3])
         break
       }
       case 'ice': {
-        const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'ice')
-        artist.drawIce(x, y, CELL, nn, ne, ns, nw)
+        this.neighborMask(tm, c, r, 'ice')
+        const m = this._nmask
+        artist.drawIce(x, y, CELL, m[0], m[1], m[2], m[3])
         break
       }
       case 'base': {
         // The base is ONE crystal spanning 2×2, drawn from the block's
         // TOP-LEFT cell. This cell may be a NON-top-left base cell reached via
         // neighbour expansion (e.g. an adjacent brick was destroyed). If we only
-        // cleared this single 16×16 cell and drew nothing (because isBaseTopLeft
-        // is false), the chunk of the crystal overlapping this cell would be
-        // erased forever — the reported "base loses a piece" bug. So always
-        // walk back to the block's top-left and repaint the full crystal.
+        // repainted this single 16×16 cell and drew nothing (because
+        // isBaseTopLeft is false), the chunk of the crystal overlapping this
+        // cell would be erased forever — the reported "base loses a piece" bug.
+        // So always walk back to the block's top-left and repaint the full
+        // crystal.
         let tlC = c
         let tlR = r
         while (tlC > 0 && tm.get(tlC - 1, tlR) === 'base') tlC--
@@ -469,7 +674,13 @@ export class GameRenderer {
     const savedCtx = artist.ctx
     artist.ctx = ctx
 
-    ctx.clearRect(0, 0, FIELD, FIELD)
+    // Bake the background into the static cache (R5-A). The cache becomes
+    // opaque (bg + tiles), so the per-frame blit is a fast source-copy and the
+    // separate full-field `fillRect` is eliminated on the camera-at-rest path.
+    // Replaces the old `clearRect(0,0,FIELD,FIELD)` — empty cells now carry the
+    // bg colour/gradient instead of transparency, which is what makes the
+    // single-blit replacement visually equivalent.
+    this.paintCacheBg(ctx, 0, 0, FIELD, FIELD, world.theme)
 
     // Static terrain only (NO water — water is rendered separately each frame).
     // No grid lines on empty ground — flat cell feel, see DECISIONS.md §29.
@@ -486,13 +697,15 @@ export class GameRenderer {
             artist.drawBrick(x, y, CELL)
             break
           case 'steel': {
-            const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'steel')
-            artist.drawSteel(x, y, CELL, nn, ne, ns, nw)
+            this.neighborMask(tm, c, r, 'steel')
+            const m = this._nmask
+            artist.drawSteel(x, y, CELL, m[0], m[1], m[2], m[3])
             break
           }
           case 'ice': {
-            const [nn, ne, ns, nw] = this.neighborMask(tm, c, r, 'ice')
-            artist.drawIce(x, y, CELL, nn, ne, ns, nw)
+            this.neighborMask(tm, c, r, 'ice')
+            const m = this._nmask
+            artist.drawIce(x, y, CELL, m[0], m[1], m[2], m[3])
             break
           }
           case 'base':
@@ -560,11 +773,12 @@ export class GameRenderer {
 
   // ---- Tanks ----
 
-  private renderTanks(world: World): void {
+  private renderTanks(world: World, tanks: Tank[]): void {
     const ctx = this.ctx
     const frame = world.frame
     const artist = this.artist
-    for (const tank of world.allTanks) {
+    for (let ti = 0; ti < tanks.length; ti++) {
+      const tank = tanks[ti]
       if (!tank.alive) continue
 
       if (tank.spawnTimer > 0) {
@@ -641,7 +855,13 @@ export class GameRenderer {
 
   private renderBullets(world: World): void {
     const artist = this.artist
-    for (const bullet of world.bullets) {
+    const bullets = world.bullets
+    // P6: index loop instead of `for...of` — dense arrays optimize identically
+    // in V8, but `for...of` may allocate an iterator object on holey arrays
+    // (post-compaction). The cost is zero on dev hardware and a real win on
+    // older JS engines.
+    for (let i = 0; i < bullets.length; i++) {
+      const bullet = bullets[i]
       if (!bullet.alive) continue
       artist.drawBullet(bullet.x, bullet.y, bullet.w, bullet.dir)
     }
@@ -652,7 +872,9 @@ export class GameRenderer {
   private renderPowerUps(world: World): void {
     const frame = world.frame
     const artist = this.artist
-    for (const pu of world.powerUps) {
+    const pus = world.powerUps
+    for (let i = 0; i < pus.length; i++) {
+      const pu = pus[i]
       if (!pu.alive) continue
       artist.drawPowerUp(pu.x, pu.y, pu.w, pu.type, frame, pu.lifeTimer, POWERUP_TIMEOUT_MS)
     }
@@ -662,7 +884,9 @@ export class GameRenderer {
 
   private renderExplosions(world: World): void {
     const artist = this.artist
-    for (const exp of world.explosions) {
+    const exps = world.explosions
+    for (let i = 0; i < exps.length; i++) {
+      const exp = exps[i]
       const progress = 1 - exp.timer / exp.maxTimer
       artist.drawExplosion(exp.x, exp.y, exp.size, progress, exp.kind)
     }
@@ -674,6 +898,14 @@ export class GameRenderer {
     const ctx = this.ctx
     const pool = this.particles.pool
     const count = this.particles.activeCount
+    // Common case: no live particles. Skip five loop set-ups and — more
+    // importantly — the unconditional `setTransform` below, which is a real
+    // Skia/napi call. Still normalize globalAlpha exactly as the full path does,
+    // so a leftover alpha from an earlier stage cannot bleed into popups.
+    if (count === 0) {
+      ctx.globalAlpha = 1
+      return
+    }
 
     // Pass 1: spark particles (fillRect — batch fillStyle changes)
     let lastFill = ''
@@ -688,12 +920,27 @@ export class GameRenderer {
       ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size)
     }
 
+    // Low-quality mode: skip the four decorative particle passes below (debris,
+    // smoke, ring, flash). These use expensive per-particle path rasterization
+    // (`beginPath`+`arc`+`fill`/`stroke`) or per-particle `setTransform`+`rotate`
+    // — the dominant render cost during explosions on software rasterizers (old
+    // machines without GPU). The explosion sprite itself (`renderExplosions`)
+    // is still drawn, so the event remains clearly visible; sparks (pass 1) are
+    // retained as hit-direction feedback. This is the single largest lowQuality
+    // saving during the burst-heavy frames that would otherwise drop FPS.
+    if (this.lowQuality) {
+      ctx.globalAlpha = 1
+      return
+    }
+
     // Pass 2: debris particles (rotated). Use setTransform directly instead of
     // save()/restore() per particle — save() allocates a graphics-state object
     // on every call, which is GC pressure during explosions (lots of debris).
+    let drewDebris = false
     for (let i = 0; i < count; i++) {
       const p = pool[i]
       if (!p.active || p.type !== 'debris') continue
+      drewDebris = true
       ctx.globalAlpha = p.life / p.maxLife
       ctx.fillStyle = p.color
       // Equivalent to translate(p) then rotate, without pushing a saved state:
@@ -709,15 +956,19 @@ export class GameRenderer {
       ctx.rotate(p.rotation)
       ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size)
     }
-    // Restore base transform for the remaining passes (smoke/ring/flash/popups)
-    ctx.setTransform(
-      this._baseDpr,
-      0,
-      0,
-      this._baseDpr,
-      this._baseCamX * this._baseDpr,
-      this._baseCamY * this._baseDpr,
-    )
+    // Restore base transform for the remaining passes (smoke/ring/flash/popups).
+    // Only needed if pass 2 actually moved the transform — a `setTransform` is a
+    // real napi/Skia call (~300ns), and on the common frame there is no debris.
+    if (drewDebris) {
+      ctx.setTransform(
+        this._baseDpr,
+        0,
+        0,
+        this._baseDpr,
+        this._baseCamX * this._baseDpr,
+        this._baseCamY * this._baseDpr,
+      )
+    }
 
     // Pass 3: smoke particles (arc fill — batch by minimizing fillStyle changes)
     lastFill = ''
@@ -781,7 +1032,9 @@ export class GameRenderer {
     const ctx = this.ctx
     ctx.font = 'bold 11px "Courier New", monospace'
     ctx.textAlign = 'center'
-    for (const popup of world.popups) {
+    const popups = world.popups
+    for (let i = 0; i < popups.length; i++) {
+      const popup = popups[i]
       const alpha = Math.min(1, popup.timer / 500)
       const offsetY = (1 - popup.timer / 1500) * 20
       ctx.globalAlpha = alpha
@@ -819,6 +1072,12 @@ export class GameRenderer {
       this.vignetteDirty = false
     }
 
+    // Single full-field composite. NOTE: a sub-rect "ring" blit (skipping the
+    // fully-transparent center) was prototyped and *rejected* — in the Skia
+    // backend the 9-arg drawImage pays an extractSubset overhead that makes it
+    // ~2-3× slower than this whole-image fast path, i.e. a regression. The
+    // transparent center is a no-op source-over here, so the full blit is both
+    // correct and the fastest path. See DECISIONS.md §10 (render perf).
     ctx.drawImage(this.vignetteCanvas, 0, 0, FIELD, FIELD)
   }
 }

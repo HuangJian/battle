@@ -81,7 +81,7 @@ export class UIManager {
   private toastEl: HTMLElement
   private toastTimer = 0
 
-  // ---- Performance Observatory (F6 dev overlay) ----
+  // ---- Performance Observatory (Alt+D dev overlay) ----
   readonly perfOverlay: PerfOverlay
 
   // ---- Controls / key-bindings panel ----
@@ -354,7 +354,7 @@ export class UIManager {
       <span>Alt+S</span> Save
     `
 
-    // Performance Observatory (F6) — fixed-position dev overlay (read-only).
+    // Performance Observatory (Alt+D) — fixed-position dev overlay (read-only).
     this.perfOverlay = new PerfOverlay()
     this.perfOverlay.onCopied = () => this.notify('Performance report copied', 'info')
     this.root.appendChild(this.perfOverlay.el)
@@ -907,7 +907,7 @@ export class UIManager {
     }
   }
 
-  /** Toggle the developer Performance Observatory overlay (F6 hotkey / Control
+  /** Toggle the developer Performance Observatory overlay (Alt+D hotkey / Control
    *  Center button). Keeps the Control Center's DEVELOPER button in sync. */
   togglePerfOverlay(): void {
     this.perfOverlay.toggle()
@@ -1159,23 +1159,30 @@ export class UIManager {
     return this.footer
   }
 
-  /** Open the controls panel over the menu. */
+  /**
+   * Open the controls panel as a modal overlay over whatever screen is
+   * currently active (menu, recovery, gameover). The underlying screen
+   * keeps its `active` class; `showScreen()` will re-sync on close.
+   */
   openControls(): void {
     if (this.controlsOpen) return
     this.controlsOpen = true
-    this.menuScreen.classList.remove('active')
     this.controlsScreen.classList.add('active')
     this.listeningAction = null
     this.refreshAllKeyButtons()
   }
 
-  /** Close the controls panel and return to the menu. */
+  /**
+   * Close the controls panel. The underlying screen's `active` class was
+   * never removed, so it is already visible; `update() → showScreen()` on
+   * the next frame will confirm the correct screen (menu, recovery, or
+   * gameover) — no forced class swap needed.
+   */
   closeControls(): void {
     if (!this.controlsOpen) return
     this.controlsOpen = false
     this.listeningAction = null
     this.controlsScreen.classList.remove('active')
-    this.menuScreen.classList.add('active')
   }
 
   private createControlsScreen(): HTMLElement {

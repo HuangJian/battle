@@ -20,8 +20,8 @@ import {
   DEFAULT_LOSS_WEIGHTS,
   type ScorableRun,
   type RunScore,
-} from '../tools/godai-score'
-import type { RunTelemetry } from '../tools/simulation-runner'
+} from '../tools/eval/godai-score'
+import type { RunTelemetry } from '../tools/sim/simulation-runner'
 
 /**
  * v6 evaluation model — axiom tests (plan/God-AI-Evaluation-Redesign.md §2).

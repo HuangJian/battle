@@ -1,9 +1,8 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
-import { CELL, TANK, FIELD, DIR_VECTORS, BASE_POS } from '../../constants'
-import { aabb } from '../../utils/helpers'
-import { AIM_RANGE_CELLS, KIND_THREAT_WEIGHT } from './constants'
+import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
+import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 
 // ============================================================
 // FireControl — target scanning + fire decisions (T2a, T9, T2b, T6, T11, M6)
@@ -36,7 +35,9 @@ export function findEnemyDirectionImpl(
   // threshold meant the AI almost never aligned with moving enemies.
   const halfT = TANK
 
-  for (const t of w.tanks) {
+  const tanks = w.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
     if (!t.alive || t.spawnTimer > 0) continue
     const tcx = t.x + t.w / 2
     const tcy = t.y + t.h / 2
@@ -68,7 +69,7 @@ export function findEnemyDirectionImpl(
 
     // T9: score = threat weight × 1000 - distance (prefer high-threat,
     // then nearest among equal threat).
-    const threatWeight = KIND_THREAT_WEIGHT[t.kind] ?? 1
+    const threatWeight = kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
     // D2: when damagedArmorBonus > 0, add a bonus for finishing damaged
     // armor tanks. The base hpFactor (hp/maxHp) preferentially weights
@@ -92,15 +93,18 @@ export function findEnemyDirectionImpl(
   return bestDir
 }
 
-// Hoisted constants — avoids allocating 2-element tuple arrays on every call.
-const VERTICAL_OFFSETS: readonly (readonly [number, number])[] = [
-  [-CELL / 2, 0],
-  [CELL / 2, 0],
-]
-const HORIZONTAL_OFFSETS: readonly (readonly [number, number])[] = [
-  [0, -CELL / 2],
-  [0, CELL / 2],
-]
+// Hoisted constants — flat arrays (perf §63): tuple destructuring
+// `const [ox, oy] = offsets[oi]` allocates an iterator per scan-offset loop;
+// a single flat array lets the loop read `PERP_OFFSETS[oi]` directly.
+//
+// DIR_DX/DIR_DY replace DIR_VECTORS[dir] (a Record<string,{dx,dy}> lookup
+// that forces a string-keyed dict probe). Index by `dirIdx` instead —
+// string→index is a 4-way ternary, no dict hash.
+const DIR_DX: readonly number[] = [0, 0, -1, 1] // up, down, left, right
+const DIR_DY: readonly number[] = [-1, 1, 0, 0]
+// Perpendicular pixel offsets: for a vertical scan (up/down) the offset is on
+// the X axis (±CELL/2), for horizontal scans on Y. Same magnitude both axes.
+const PERP_OFFSETS: readonly number[] = [-CELL / 2, CELL / 2]
 
 /**
  * Scan ahead in a direction for enemies, walls, and base protection.
@@ -110,6 +114,13 @@ const HORIZONTAL_OFFSETS: readonly (readonly [number, number])[] = [
  * Writes into `self._scanResult` (a reusable object) to avoid allocating
  * a result object on every call. Callers use the result immediately and
  * never store the reference, so this is safe.
+ *
+ * (perf §63): DIR_VECTORS lookup, tileMap.get, isBaseProtectionBrick, aabb
+ * are all inlined. The aligned-tank pre-filter guarantees the perpendicular
+ * axis of the aabb is satisfied, so the inner scan-axis check needs only 2
+ * comparisons instead of 4. Cell indices `col/row` are tracked incrementally
+ * (col += vdx) to skip per-step Math.floor; pixel positions `cx/cy` are kept
+ * to preserve the original `cx > FIELD` boundary semantics exactly.
  */
 export function scanAheadImpl(
   self: GodAIInput,
@@ -121,22 +132,38 @@ export function scanAheadImpl(
   wall: boolean
   steel: boolean
   baseWall: boolean
+  baseSteel: boolean
+  steelCol: number
+  steelRow: number
   enemyDist: number
   enemyKind: TankKind
   enemyHp: number
   enemyMaxHp: number
 } {
   const w = self.world
-  const v = DIR_VECTORS[dir]
-  const vertical = dir === 'up' || dir === 'down'
-  const offsets = vertical ? VERTICAL_OFFSETS : HORIZONTAL_OFFSETS
+  // Fast dir → index (avoid DIR_VECTORS string-keyed dict lookup).
+  const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+  const vdx = DIR_DX[dirIdx]
+  const vdy = DIR_DY[dirIdx]
+  const vertical = vdx === 0 // up or down
+  const offsets = PERP_OFFSETS
   const tanksArr = w.tanks
+  // Direct grid access — inlines tileMap.get (with OOB→'steel' fallback below).
+  const grid = w.tileMap.grid
+  // Hoist hasBase + base position params — inlines isBaseProtectionBrick.
+  const hasBase = self.hasBase
+  const baseCol = BASE_POS.col // 12
+  const baseRow = BASE_POS.row // 24
+  const wallScanR = self.params.baseWallScanRadius
 
   const r = self._scanResult
   r.enemy = false
   r.wall = false
   r.steel = false
   r.baseWall = false
+  r.baseSteel = false
+  r.steelCol = -1
+  r.steelRow = -1
   r.enemyDist = Infinity
   r.enemyKind = 'basic'
   r.enemyHp = 1
@@ -150,14 +177,13 @@ export function scanAheadImpl(
   // check at each cell is identical to the original — just fewer iterations.
   const aligned = self._scanAligned
 
-  for (let oi = 0; oi < offsets.length; oi++) {
-    const ox = offsets[oi][0]
-    const oy = offsets[oi][1]
-    const sx = pcx + ox
-    const sy = pcy + oy
+  for (let oi = 0; oi < 2; oi++) {
+    const off = offsets[oi]
+    const sx = vertical ? pcx + off : pcx
+    const sy = vertical ? pcy : pcy + off
 
     // Pre-filter: collect tanks whose perpendicular axis overlaps this offset's
-    // scan line (the constant half of the aabb condition).
+    // scan line (the constant half of the aabb condition). 33 = TANK + 1.
     let alignedCount = 0
     for (let ti = 0; ti < tanksArr.length; ti++) {
       const t = tanksArr[ti]
@@ -169,24 +195,49 @@ export function scanAheadImpl(
       }
     }
 
-    for (let d = CELL; d <= FIELD; d += CELL) {
-      const cx = sx + v.dx * d
-      const cy = sy + v.dy * d
-      if (cx < 0 || cx > FIELD || cy < 0 || cy > FIELD) break
+    // First step (d = CELL): pixel position + cell index.
+    let cx = sx + vdx * CELL
+    let cy = sy + vdy * CELL
+    let col = Math.floor(cx / CELL)
+    let row = Math.floor(cy / CELL)
+    // stepCount = d / CELL, tracked incrementally (no per-step division).
+    let stepCount = 1
 
-      const col = Math.floor(cx / CELL)
-      const row = Math.floor(cy / CELL)
-      const terrain = w.tileMap.get(col, row)
+    // Loop matches original boundary check exactly: `cx > FIELD` (strict
+    // greater-than) lets cx == FIELD enter, which makes col = GRID (= 26)
+    // hit the OOB→'steel' branch — preserving the original tileMap.get
+    // fallback behavior at the field edge for cell-aligned scan starts.
+    while (cx >= 0 && cx <= FIELD && cy >= 0 && cy <= FIELD) {
+      // Inline tileMap.get(col, row): bounds check + direct grid access.
+      // OOB returns 'steel' (matches TileMap.get fallback for off-grid cells).
+      let terrain: string
+      if (col < 0 || col >= GRID || row < 0 || row >= GRID) {
+        terrain = 'steel'
+      } else {
+        terrain = grid[row][col]
+      }
 
       if (terrain === 'steel') {
+        // Store steel cell coords for post-loop baseSteel check (§70).
+        // Only two assignments — keeps the hot loop untouched (V8 JIT stable).
+        r.steelCol = col
+        r.steelRow = row
         r.steel = true
         r.wall = true
         break
       }
       if (terrain === 'brick') {
-        // T6: check if this brick is protecting the base.
-        if (self.isBaseProtectionBrick(col, row)) {
-          r.baseWall = true
+        // Inline isBaseProtectionBrick: only when stage has a base, and
+        // the brick is within the configured radius AND the cross-shaped
+        // band (within 2 on at least one axis) of the base.
+        if (hasBase) {
+          const dc = col - baseCol
+          const dr = row - baseRow
+          const ad = dc < 0 ? -dc : dc
+          const ar = dr < 0 ? -dr : dr
+          if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
+            r.baseWall = true
+          }
         }
         r.wall = true
         break
@@ -197,24 +248,75 @@ export function scanAheadImpl(
         break
       }
 
-      // Check only pre-filtered aligned tanks (not all tanks). When
-      // alignedCount is 0 this loop body is skipped entirely.
+      // Aligned tank check — inlined aabb. The perpendicular axis was
+      // pre-filtered (sx > t.x-1 && sx < t.x+33 ⟺ perp half of aabb), so
+      // only the scan-axis half (2 comparisons) is needed here. TANK=32.
       let found = false
-      for (let ai = 0; ai < alignedCount; ai++) {
-        const t = aligned[ai]
-        if (aabb(cx - 1, cy - 1, 2, 2, t.x, t.y, t.w, t.h)) {
-          if (d / CELL < r.enemyDist) {
-            r.enemyDist = d / CELL
-            r.enemyKind = t.kind
-            r.enemyHp = t.hp
-            r.enemyMaxHp = t.maxHp
+      if (vertical) {
+        // cx = sx (constant per offset); cy varies. Check cy vs t.y.
+        for (let ai = 0; ai < alignedCount; ai++) {
+          const t = aligned[ai]
+          // aabb(cx-1, cy-1, 2, 2, t.x, t.y, TANK, TANK) ⟺
+          //   cx-1 < t.x+TANK && t.x < cx+1 (perp, pre-filtered)  AND
+          //   cy-1 < t.y+TANK && t.y < cy+1 (scan axis — checked here)
+          if (cy - 1 < t.y + 32 && t.y < cy + 1) {
+            if (stepCount < r.enemyDist) {
+              r.enemyDist = stepCount
+              r.enemyKind = t.kind
+              r.enemyHp = t.hp
+              r.enemyMaxHp = t.maxHp
+            }
+            r.enemy = true
+            found = true
+            break
           }
-          r.enemy = true
-          found = true
-          break
+        }
+      } else {
+        // cy = sy (constant per offset); cx varies. Check cx vs t.x.
+        for (let ai = 0; ai < alignedCount; ai++) {
+          const t = aligned[ai]
+          if (cx - 1 < t.x + 32 && t.x < cx + 1) {
+            if (stepCount < r.enemyDist) {
+              r.enemyDist = stepCount
+              r.enemyKind = t.kind
+              r.enemyHp = t.hp
+              r.enemyMaxHp = t.maxHp
+            }
+            r.enemy = true
+            found = true
+            break
+          }
         }
       }
       if (found) break
+
+      // Advance to next cell (pixel + cell index in lockstep).
+      cx += vdx * CELL
+      cy += vdy * CELL
+      col += vdx
+      row += vdy
+      stepCount++
+    }
+  }
+
+  // §70: Post-loop baseSteel detection. Compute OUTSIDE the hot scan loop
+  // to avoid changing V8's JIT optimization of the per-cell iteration.
+  // OOB cells (steelCol=-1 or out of grid) are field edges, not base
+  // protection — skip them.
+  if (
+    r.steel &&
+    hasBase &&
+    r.steelCol >= 0 &&
+    r.steelCol < GRID &&
+    r.steelRow >= 0 &&
+    r.steelRow < GRID
+  ) {
+    const dc = r.steelCol - baseCol
+    const dr = r.steelRow - baseRow
+    const ad = dc < 0 ? -dc : dc
+    const ar = dr < 0 ? -dr : dr
+    if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
+      r.baseSteel = true
     }
   }
 
@@ -262,13 +364,16 @@ function predictEnemyCrossingImpl(
   dir: Direction,
 ): boolean {
   const w = self.world
-  const p = w.player!
+  // §79: controlled tank, not `w.player` — bullet speed is per-tank.
+  const p = self.controlledTank(w)!
   const bulletSpeed = p.bulletSpeed
   if (bulletSpeed <= 0) return false
 
   const vertical = dir === 'up' || dir === 'down'
 
-  for (const t of w.tanks) {
+  const tanks = w.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
     if (!t.alive || t.spawnTimer > 0) continue
     if (!t.moving) continue
 
@@ -338,9 +443,15 @@ export function shouldFireInDirImpl(
   allowWallFire = true,
 ): boolean {
   const w = self.world
-  const p = w.player!
+  // §79: controlled tank, not `w.player` — the T11 steel-pierce gate reads
+  // `p.level`, which is per-tank (P1 and P2 upgrade independently).
+  const p = self.controlledTank(w)!
 
-  const result = self.scanAhead(pcx, pcy, dir)
+  // Inline scanAheadImpl (perf §66): the thin self.scanAhead wrapper adds
+  // ~14ms (2.8%) of function-call overhead. shouldFireInDir is called up to
+  // ~3× per think; each call goes through the wrapper. Calling scanAheadImpl
+  // directly (same module) skips one V8 call frame.
+  const result = scanAheadImpl(self, pcx, pcy, dir)
 
   // T6/T11: Don't fire at base protection bricks or steel (level < 3).
   // These checks MUST come before the enemy check because scanAhead uses
@@ -348,8 +459,10 @@ export function shouldFireInDirImpl(
   // finds an enemy, BOTH result.steel and result.enemy are true. Checking
   // enemy first would cause the AI to fire through steel.
   if (result.baseWall) return false
-  if (result.steel && (p.level ?? 0) < 3) return false
-  // Steel with level ≥ 3: fall through to enemy check (can pierce).
+  if (result.baseSteel && (p.level ?? 0) >= 3) return false
+  // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
+  // level ≥ 3 falls through to the enemy check (can pierce).
+  if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
 
   // Enemy in line of fire — fire.
   if (result.enemy) {
@@ -362,7 +475,9 @@ export function shouldFireInDirImpl(
   }
 
   // Check for enemy bullet to intercept (T5).
-  for (const b of w.bullets) {
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
@@ -405,6 +520,66 @@ export function shouldFireInDirImpl(
   }
 
   return false
+}
+
+/**
+ * §74: Steel-fire gate — should the given scan result block firing?
+ *
+ * Mirrors the T11 steel check in shouldFireInDirImpl exactly (which inlines
+ * the same `result.steel && !result.baseSteel && level < 3` check):
+ * `result.steel && !result.baseSteel && level < STEEL_PIERCE_PLAYER_LEVEL`.
+ * Used by shouldFireBreakThroughImpl (the navigate break-through sites in
+ * think()), so the steel gate is uniform everywhere the AI might fire at a
+ * wall — the navigate sites previously bypassed shouldFireInDirImpl and
+ * never applied T11.
+ *
+ * Base-ring steel (`baseSteel`) is deliberately NOT blocked here: base-ring
+ * steel is already handled by the §70 guard at each call site, and at
+ * level < 3 the player cannot pierce base steel either, so T6's
+ * "never destroy own base" concern is moot below the pierce level.
+ *
+ * @param gateOn the steelFireGate param value (0 = OFF = byte-identical
+ *   to pre-§74 behavior).
+ */
+export function steelFireBlockedImpl(
+  result: { steel: boolean; baseSteel: boolean },
+  level: number | undefined,
+  gateOn: number,
+): boolean {
+  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < 3
+}
+
+/**
+ * §74: Break-through fire decision (T2b navigate + aggressive navigate).
+ *
+ * The navigate branches fire at a wall in the movement direction to break
+ * through it (dig path). That fire is FUTILE when the wall is steel and the
+ * player cannot pierce steel (level < 3) — the bullet does nothing, the AI
+ * wastes the bullet cap, and then camps at the wall for the full camp
+ * timeout (the reported "shoot steel → can't break → stuck in place"
+ * behavior). This helper applies the steel-fire gate to the break-through
+ * condition.
+ *
+ * NOTE (per-seed A/B finding, 2026-08-01): this gate is applied ONLY to the
+ * break-through sites. It is deliberately NOT applied to the T2a/aggressive
+ * stop-and-aim fire (which fires when scan.enemy is true) — the dual-offset
+ * case there (steel on one scan line, enemy on the other) means the enemy is
+ * genuinely reachable by the center-line bullet, and suppressing that fire
+ * costs kills (arena A/B: 20 kills → 7 kills, gameover @1634 vs clear @4592).
+ */
+export function shouldFireBreakThroughImpl(
+  bs: {
+    enemy: boolean
+    baseWall: boolean
+    baseSteel: boolean
+    steel: boolean
+  },
+  level: number | undefined,
+  gateOn: number,
+): boolean {
+  if (steelFireBlockedImpl(bs, level, gateOn)) return false
+  // §70: never fire through base brick/steel. Enemy in line of fire wins.
+  return bs.enemy || (!bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3))
 }
 
 /**

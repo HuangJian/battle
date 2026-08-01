@@ -8,9 +8,9 @@
 
 ## 0. TL;DR
 
-Battle City Web 的 God AI 目前用 `tools/optimize-godai.ts`（sep-CMA-ES）调 17 个策略参数。
-它需要一个**评分标准**当 fitness。我们已经有一套 v6 连续评分标准（`tools/godai-score.ts` +
-`tools/eval-suite.ts`），它比纯胜率更能区分「打得好但没赢」和「赢得丑」。
+Battle City Web 的 God AI 目前用 `tools/optimize/optimize-godai.ts`（sep-CMA-ES）调 17 个策略参数。
+它需要一个**评分标准**当 fitness。我们已经有一套 v6 连续评分标准（`tools/eval/godai-score.ts` +
+`tools/eval/eval-suite.ts`），它比纯胜率更能区分「打得好但没赢」和「赢得丑」。
 
 **当前状态**：v6 设计、标定、公理测试都已完成，但 §7.5 提升决策结论是**暂不把 v6 提为默认**
 （`--fitness v5` 仍是默认，v6 维持 opt-in）。原因是 v6 冠军在 35×60 胜率口径（86%）低于 incumbent
@@ -25,10 +25,10 @@ DEFAULT（87%），且个别硬关显著回归。
 
 1. `plan/God-AI-Evaluation-Redesign.md` —— **主设计文档**。§1–§8 设计，§9 标定实测，§10 提升决策（含完整 A/B 数据与「不提升」结论）。**先读这个**，否则会重复踩坑。
 2. `AGENTS.md` —— 仓库契约。重点 §2（架构不变量）、§2.3（确定性）、§4（执行计划流程）。
-3. `tools/godai-score.ts` —— v6 评分管线（L1–L4）、`DEFAULT_LOSS_WEIGHTS` / `DEFAULT_WIN_WEIGHTS`、11 个维度定义、A1–A6 公理。
-4. `tools/eval-suite.ts` —— 记分卡、`--calibrate`（分组 5 折 CV AUC + 收缩）、`--compare`（CRN 配对 A/B + 逐关分解）、`fitLossWeights` / `groupedCvAuc` / `shrinkToPrior`。
-5. `tools/optimize-godai.ts` —— CMA-ES 优化器；`--fitness v5|v6`、`--opt-seed`、17 维搜索空间。
-6. `tools/eval-refs.json` —— 35 关参考值 + `lossWeightFit`（cvAuc 0.780、收缩后权重）。
+3. `tools/eval/godai-score.ts` —— v6 评分管线（L1–L4）、`DEFAULT_LOSS_WEIGHTS` / `DEFAULT_WIN_WEIGHTS`、11 个维度定义、A1–A6 公理。
+4. `tools/eval/eval-suite.ts` —— 记分卡、`--calibrate`（分组 5 折 CV AUC + 收缩）、`--compare`（CRN 配对 A/B + 逐关分解）、`fitLossWeights` / `groupedCvAuc` / `shrinkToPrior`。
+5. `tools/optimize/optimize-godai.ts` —— CMA-ES 优化器；`--fitness v5|v6`、`--opt-seed`、17 维搜索空间。
+6. `tools/eval/eval-refs.json` —— 35 关参考值 + `lossWeightFit`（cvAuc 0.780、收缩后权重）。
 7. `tests/godai-score.test.ts` —— 31 条公理测试。**改任何评分逻辑后必须全绿。**
 8. `.workbuddy/promotion/ab-defaultv6.txt` 与 `ab-v5v6.txt` —— 上次提升决策的原始 A/B 输出，看逐关回归细节。
 
@@ -102,17 +102,17 @@ bun run check                                   # src+tests+tools 全绿
 bun test tests/godai-score.test.ts              # 31 条公理测试
 
 # 1) 记分卡（看维度分解 / 名义 vs 有效权重）
-bun tools/eval-suite.ts --seeds 60 --dims --weights
+bun tools/eval/eval-suite.ts --seeds 60 --dims --weights
 
 # 2) 改了坦克/AI/评分逻辑后重标定
-bun tools/eval-suite.ts --calibrate --seeds 30   # 写 tools/eval-refs.json
+bun tools/eval/eval-suite.ts --calibrate --seeds 30   # 写 tools/eval/eval-refs.json
 
 # 3) A/B 两个参数文件（CRN 配对 + 逐关分解）
-bun tools/eval-suite.ts --compare a.json b.json --seeds 60
+bun tools/eval/eval-suite.ts --compare a.json b.json --seeds 60
 
 # 4) 优化（受控：同 seed，仅 fitness 不同；预算适配沙箱 ≤10min）
 STAGES=$(python3 -c "print(','.join(map(str,range(35))))")
-bun tools/optimize-godai.ts --fitness v6 --stages "$STAGES" \
+bun tools/optimize/optimize-godai.ts --fitness v6 --stages "$STAGES" \
   --seeds 14 --generations 7 --opt-seed 7 --output .workbuddy/promotion/opt-v6
 
 # 5) 提升判据（§7.3）：新标准冠军的 35×60 胜率 不劣于 DEFAULT
