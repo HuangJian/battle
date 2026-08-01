@@ -3,7 +3,7 @@ import type { ThemeColors, KeyBindings } from '../../types'
 import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../../game/Input'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
-import { STAGES } from '../../config/stages'
+import { STAGES, localizedStageName } from '../../config/stages'
 
 import { SnapshotBrowser } from './SnapshotBrowser'
 import { ReplayBrowser } from './ReplayBrowser'
@@ -11,6 +11,7 @@ import { ControlCenter } from './ControlCenter'
 import { PerfOverlay } from './PerfOverlay'
 import { ReplayController } from './ReplayController'
 import { RECOVERY_OPTION_COUNT } from '../../snapshot/RecoveryController'
+import { i18n, t, localizeRoot } from '../../i18n'
 
 /**
  * Menu action callbacks registered by Game so mouse clicks on the start
@@ -22,6 +23,8 @@ export interface MenuActions {
   selectDifficulty(key: string): void
   /** Select a theme by its config key (e.g. 'default'). */
   selectTheme(key: string): void
+  /** Select a language/locale by its code (e.g. 'en', 'zh'). */
+  selectLanguage(code: string): void
   /** Step the stage selector by -1 (prev) or +1 (next). */
   cycleStage(dir: -1 | 1): void
   /** Select a specific stage by index. */
@@ -97,19 +100,16 @@ export class UIManager {
 
   /** Ordered list of rebindable gameplay actions shown in the controls panel.
    *  Only gameplay-relevant keys: movement, fire, pause, and active items. */
-  private static readonly CONTROL_ACTIONS: ReadonlyArray<{
-    action: keyof KeyBindings
-    label: string
-  }> = [
-    { action: 'up', label: 'Move Up' },
-    { action: 'down', label: 'Move Down' },
-    { action: 'left', label: 'Move Left' },
-    { action: 'right', label: 'Move Right' },
-    { action: 'fire', label: 'Fire' },
-    { action: 'pause', label: 'Pause' },
-    { action: 'guard', label: 'Guard (天降神兵)' },
-    { action: 'frenzy', label: 'Frenzy (狂暴宣泄)' },
-    { action: 'rewind', label: 'Rewind (时光宝盒)' },
+  private static readonly CONTROL_ACTIONS: ReadonlyArray<keyof KeyBindings> = [
+    'up',
+    'down',
+    'left',
+    'right',
+    'fire',
+    'pause',
+    'guard',
+    'frenzy',
+    'rewind',
   ]
 
   // Start as a sentinel so the first showScreen('menu') in the constructor
@@ -124,6 +124,7 @@ export class UIManager {
   // Cached DOM elements for menu (avoid querySelectorAll every frame)
   private menuDiffOptions: HTMLElement[] = []
   private menuThemeOptions: HTMLElement[] = []
+  private menuLangOptions: HTMLElement[] = []
   private menuRows: HTMLElement[] = []
   private menuStageValue: HTMLElement | null = null
   private menuStageName: HTMLElement | null = null
@@ -131,6 +132,7 @@ export class UIManager {
   private stageDropdownOpen = false
   private menuHiScore: HTMLElement | null = null
   private menuResumeStage: HTMLElement | null = null
+  private resumeTarget: { stage: number; stageName: string; score: number } | null = null
   private menuResumeInfo: HTMLElement | null = null
   private menuStartBtn: HTMLElement | null = null
   private menuResumeHint: HTMLElement | null = null
@@ -186,28 +188,28 @@ export class UIManager {
     this.hudBar.innerHTML = `
       <div class="hud-group hud-left">
         <div class="hud-item">
-          <span class="hud-label">SCORE</span>
+          <span class="hud-label" data-i18n="hud.score">SCORE</span>
           <span class="hud-value" data-hud="score">000000</span>
         </div>
         <div class="hud-item" data-hud="score2-wrap" style="display:none">
-          <span class="hud-label" style="color:#f0c040">GOD</span>
+          <span class="hud-label" style="color:#f0c040" data-i18n="hud.god">GOD</span>
           <span class="hud-value" data-hud="score2" style="color:#f0c040">000000</span>
         </div>
         <div class="hud-item">
-          <span class="hud-label">HI</span>
+          <span class="hud-label" data-i18n="hud.hi">HI</span>
           <span class="hud-value hud-hi" data-hud="hiscore">000000</span>
         </div>
         <div class="hud-item">
-          <span class="hud-label">STAR</span>
+          <span class="hud-label" data-i18n="hud.star">STAR</span>
           <span class="hud-value hud-star" data-hud="star"></span>
         </div>
       </div>        <div class="hud-group hud-center">
         <div class="hud-item hud-replay" data-hud="replay" hidden>
-          <span class="hud-label">REPLAY MODE</span>
+          <span class="hud-label" data-i18n="hud.replayMode">REPLAY MODE</span>
           <span class="hud-replay-difficulty" data-hud="replay-difficulty"></span>
         </div>
         <div class="hud-item">
-          <span class="hud-label">STAGE</span>
+          <span class="hud-label" data-i18n="hud.stage">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
         </div>
         <div class="hud-buffs" data-hud="buffs">
@@ -225,37 +227,37 @@ export class UIManager {
           </div>
         </div>
         <div class="hud-pause" data-hud="pause">
-          <span class="hud-pause-title"><span class="hud-pause-dot"></span>PAUSED</span>
-          <span class="hud-pause-hint">P Resume</span>
+          <span class="hud-pause-title"><span class="hud-pause-dot"></span><span data-i18n="pause.title">PAUSED</span></span>
+          <span class="hud-pause-hint" data-i18n="hud.pauseHint">P Resume</span>
         </div>
       </div>
       <div class="hud-group hud-right">
         <div class="hud-item">
-          <span class="hud-label">LIVES</span>
+          <span class="hud-label" data-i18n="hud.lives">LIVES</span>
           <span class="hud-value hud-lives" data-hud="lives">♥♥♥</span>
         </div>
         <div class="hud-item" data-hud="coop-lives" style="display:none">
-          <span class="hud-label">GOD</span>
+          <span class="hud-label" data-i18n="hud.god">GOD</span>
           <span class="hud-value hud-lives" data-hud="lives2" style="color:#f0c040">—</span>
         </div>
         <div class="hud-item">
-          <span class="hud-label">ENEMY</span>
+          <span class="hud-label" data-i18n="hud.enemy">ENEMY</span>
           <span class="hud-value" data-hud="enemies">20</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="guard">天兵<F5></span>
+          <span class="hud-label" data-hud-super-label="guard">Guardian&lt;F5&gt;</span>
           <span class="hud-value" data-hud="guard">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="frenzy">狂暴<F6></span>
+          <span class="hud-label" data-hud-super-label="frenzy">Frenzy&lt;F6&gt;</span>
           <span class="hud-value" data-hud="frenzy">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label">同归</span>
+          <span class="hud-label" data-i18n="hud.sacrifice">同归</span>
           <span class="hud-value" data-hud="sacrifice">0</span>
         </div>
         <div class="hud-item hud-super">
-          <span class="hud-label" data-hud-super-label="rewind">宝盒&lt;F7&gt;</span>
+          <span class="hud-label" data-hud-super-label="rewind">Time Box&lt;F7&gt;</span>
           <span class="hud-value" data-hud="rewind">0</span>
         </div>
       </div>
@@ -283,8 +285,8 @@ export class UIManager {
     this.pauseScreen = this.createElement('div', 'ui-screen ui-paused')
     this.pauseScreen.innerHTML = `
       <div class="ui-panel">
-        <h2 class="ui-title">PAUSED</h2>
-        <p class="ui-hint">Press <kbd>P</kbd> to resume</p>
+        <h2 class="ui-title" data-i18n="pause.title">PAUSED</h2>
+        <p class="ui-hint" data-i18n="pause.hint">Press P to resume</p>
       </div>
     `
 
@@ -292,8 +294,8 @@ export class UIManager {
     this.gameOverScreen = this.createElement('div', 'ui-screen ui-gameover')
     this.gameOverScreen.innerHTML = `
       <div class="ui-panel">
-        <h2 class="ui-title ui-danger">GAME OVER</h2>
-        <p class="ui-hint">Press <kbd>Alt+R</kbd> or <kbd>Enter</kbd> to return to menu</p>
+        <h2 class="ui-title ui-danger" data-i18n="gameover.title">GAME OVER</h2>
+        <p class="ui-hint" data-i18n="gameover.hint">Press Alt+R or Enter to return to menu</p>
       </div>
     `
 
@@ -301,7 +303,7 @@ export class UIManager {
     this.stageClearScreen = this.createElement('div', 'ui-screen ui-stageclear')
     this.stageClearScreen.innerHTML = `
       <div class="ui-panel">
-        <h2 class="ui-title ui-success">STAGE CLEAR</h2>
+        <h2 class="ui-title ui-success" data-i18n="stageclear.title">STAGE CLEAR</h2>
         <p class="ui-stage-name" data-stage="name">Stage 1 Complete</p>
       </div>
     `
@@ -310,9 +312,9 @@ export class UIManager {
     this.victoryScreen = this.createElement('div', 'ui-screen ui-victory')
     this.victoryScreen.innerHTML = `
       <div class="ui-panel">
-        <h2 class="ui-title ui-success">VICTORY!</h2>
+        <h2 class="ui-title ui-success" data-i18n="victory.title">VICTORY!</h2>
         <p class="ui-score-display">Final Score: <span data-victory="score">0</span></p>
-        <p class="ui-hint">Press <kbd>Alt+R</kbd> or <kbd>Enter</kbd> to play again</p>
+        <p class="ui-hint" data-i18n="victory.hint">Press Alt+R or Enter to play again</p>
       </div>
     `
 
@@ -349,14 +351,14 @@ export class UIManager {
     // Footer
     this.footer = this.createElement('div', 'footer')
     this.footer.innerHTML = `
-      <span>P</span> Pause &nbsp;·&nbsp;
-      <span>Alt+R</span> Reset &nbsp;·&nbsp;
-      <span>Alt+S</span> Save
+      <span>P</span> <span data-i18n="footer.pause">Pause</span> &nbsp;·&nbsp;
+      <span>Alt+R</span> <span data-i18n="footer.reset">Reset</span> &nbsp;·&nbsp;
+      <span>Alt+S</span> <span data-i18n="footer.save">Save</span>
     `
 
     // Performance Observatory (Alt+D) — fixed-position dev overlay (read-only).
     this.perfOverlay = new PerfOverlay()
-    this.perfOverlay.onCopied = () => this.notify('Performance report copied', 'info')
+    this.perfOverlay.onCopied = () => this.notify(t('toast.perfCopied'), 'info')
     this.root.appendChild(this.perfOverlay.el)
 
     // Assemble
@@ -405,6 +407,9 @@ export class UIManager {
     this.menuThemeOptions = Array.from(
       this.menuScreen.querySelectorAll('[data-theme="options"] .menu-option'),
     ) as HTMLElement[]
+    this.menuLangOptions = Array.from(
+      this.menuScreen.querySelectorAll('[data-language="options"] .menu-option'),
+    ) as HTMLElement[]
     this.menuRows = Array.from(this.menuScreen.querySelectorAll('.menu-row')) as HTMLElement[]
     this.menuStageValue = this.menuScreen.querySelector('[data-stage="value"]')
     this.menuStageName = this.menuScreen.querySelector('[data-stage="name"]')
@@ -423,6 +428,11 @@ export class UIManager {
     )
 
     this.showScreen('menu')
+
+    // Re-localize the entire UI (including the persisted choice) on boot and
+    // whenever the language changes at runtime.
+    i18n.subscribe(() => this.refreshText())
+    this.refreshText()
   }
 
   private createElement(tag: string, className: string): HTMLElement {
@@ -436,28 +446,32 @@ export class UIManager {
     screen.innerHTML = `
       <div class="menu-panel">
         <div class="menu-header">
-          <h1 class="menu-title">BATTLE CITY</h1>
-          <p class="menu-subtitle">Faithful to the classic. Designed for the future.</p>
+          <h1 class="menu-title" data-i18n="menu.title">BATTLE CITY</h1>
+          <p class="menu-subtitle" data-i18n="menu.subtitle">Faithful to the classic. Designed for the future.</p>
         </div>
         <div class="menu-section">
           <div class="menu-row menu-resume" data-menu="resume">
             <div class="menu-resume-main">
-              <span class="menu-resume-label">RESUME</span>
+              <span class="menu-resume-label" data-i18n="menu.resume.label">RESUME</span>
               <span class="menu-resume-stage" data-menu="resume-stage">STAGE 01</span>
             </div>
-            <div class="menu-resume-info" data-menu="resume-info">Continue from your last manual save</div>
-            <span class="menu-enter-hint" data-menu="resume-hint">Enter ↵</span>
+            <div class="menu-resume-info" data-menu="resume-info" data-i18n="menu.resume.info">Continue from your last manual save</div>
+            <span class="menu-enter-hint" data-menu="resume-hint" data-i18n="menu.resume.hint">Enter ↵</span>
           </div>
           <div class="menu-row" data-menu="difficulty">
-            <span class="menu-label">DIFFICULTY</span>
+            <span class="menu-label" data-i18n="menu.difficulty">DIFFICULTY</span>
             <div class="menu-options" data-difficulty="options"></div>
           </div>
           <div class="menu-row" data-menu="theme">
-            <span class="menu-label">THEME</span>
+            <span class="menu-label" data-i18n="menu.theme">THEME</span>
             <div class="menu-options" data-theme="options"></div>
           </div>
+          <div class="menu-row" data-menu="language">
+            <span class="menu-label" data-i18n="menu.language">LANGUAGE</span>
+            <div class="menu-options" data-language="options"></div>
+          </div>
           <div class="menu-row" data-menu="stage">
-            <span class="menu-label">STAGE</span>
+            <span class="menu-label" data-i18n="menu.stage">STAGE</span>
             <div class="menu-stage-dropdown" data-stage="dropdown">
               <div class="menu-stage-trigger" data-stage="trigger">
                 <span class="menu-stage-value" data-stage="value">01 / 35</span>
@@ -468,19 +482,19 @@ export class UIManager {
             </div>
           </div>
           <div class="menu-row" data-menu="start-row">
-          <div class="menu-start-button" data-menu="start">NEW GAME</div>
-          <span class="menu-enter-hint" data-menu="start-hint">Enter ↵</span>
+          <div class="menu-start-button" data-menu="start" data-i18n="menu.start.newGame">NEW GAME</div>
+          <span class="menu-enter-hint" data-menu="start-hint" data-i18n="menu.start.hint">Enter ↵</span>
         </div>
         <div class="menu-row" data-menu="controls">
-          <div class="menu-controls-button">⚙ CONTROLS</div>
-          <span class="menu-enter-hint" data-menu="controls-hint">Enter ↵</span>
+          <div class="menu-controls-button" data-i18n="menu.controls">⚙ CONTROLS</div>
+          <span class="menu-enter-hint" data-menu="controls-hint" data-i18n="menu.controls.hint">Enter ↵</span>
         </div>
         <div class="menu-controls">
-          <span>↑ ↓ Select</span>
-          <span>← → Change</span>
+          <span data-i18n="menu.nav.select">↑ ↓ Select</span>
+          <span data-i18n="menu.nav.change">← → Change</span>
         </div>
         <div class="menu-hiscore">
-          High Score: <span data-menu="hiscore">0</span>
+          <span data-i18n="menu.hiscoreLabel">High Score:</span> <span data-menu="hiscore">0</span>
         </div>
       </div>
     `
@@ -491,7 +505,7 @@ export class UIManager {
       const diff = DIFFICULTIES[key]
       const opt = this.createElement('div', 'menu-option')
       opt.dataset.value = key
-      opt.textContent = diff.name
+      opt.textContent = t(`difficulty.${key}`) || diff.name
       opt.addEventListener('click', () => this.menuActions?.selectDifficulty(key))
       diffContainer.appendChild(opt)
     }
@@ -501,9 +515,19 @@ export class UIManager {
     for (const def of THEME_DEFINITIONS) {
       const opt = this.createElement('div', 'menu-option')
       opt.dataset.value = def.key
-      opt.textContent = def.name
+      opt.textContent = t(`theme.${def.key}`) || def.name
       opt.addEventListener('click', () => this.menuActions?.selectTheme(def.key))
       themeContainer.appendChild(opt)
+    }
+
+    // Populate language options — native names, cycleable via the menu.
+    const langContainer = screen.querySelector('[data-language="options"]')!
+    for (const code of i18n.available) {
+      const opt = this.createElement('div', 'menu-option')
+      opt.dataset.value = code
+      opt.textContent = i18n.name(code)
+      opt.addEventListener('click', () => this.menuActions?.selectLanguage(code))
+      langContainer.appendChild(opt)
     }
 
     // Stage dropdown — populate and wire
@@ -513,7 +537,7 @@ export class UIManager {
       for (let i = 0; i < STAGES.length; i++) {
         const item = this.createElement('div', 'menu-stage-item')
         item.dataset.stageIndex = String(i)
-        item.innerHTML = `<span class="menu-stage-item-num">${String(i + 1).padStart(2, '0')}</span><span class="menu-stage-item-name">${STAGES[i].name}</span>`
+        item.innerHTML = `<span class="menu-stage-item-num">${String(i + 1).padStart(2, '0')}</span><span class="menu-stage-item-name">${localizedStageName(i)}</span>`
         item.addEventListener('click', (e) => {
           e.stopPropagation()
           this.menuActions?.selectStage(i)
@@ -564,21 +588,85 @@ export class UIManager {
    * start behaviour is preserved.
    */
   setResumeTarget(target: { stage: number; stageName: string; score: number } | null): void {
+    this.resumeTarget = target
     this.hasResume = !!target
     this.menuScreen.classList.toggle('has-resume', this.hasResume)
 
     if (this.menuResumeStage) {
       this.menuResumeStage.textContent = target
-        ? `STAGE ${String(target.stage + 1).padStart(2, '0')}`
-        : 'STAGE 01'
+        ? t('menu.resume.stageFormat', { n: String(target.stage + 1).padStart(2, '0') })
+        : t('menu.resume.stageFormat', { n: '01' })
     }
     if (this.menuResumeInfo) {
       this.menuResumeInfo.textContent = target
-        ? `Continue from Stage ${target.stage + 1} · ${target.stageName} · Score ${target.score}`
-        : 'Continue from your last manual save'
+        ? t('menu.resume.infoDetailed', {
+            stage: String(target.stage + 1),
+            name: localizedStageName(target.stage),
+            score: target.score,
+          })
+        : t('menu.resume.info')
     }
     if (this.menuStartBtn) {
-      this.menuStartBtn.textContent = this.hasResume ? 'NEW GAME' : 'START GAME'
+      this.menuStartBtn.textContent = this.hasResume
+        ? t('menu.start.newGame')
+        : t('menu.start.startGame')
+    }
+  }
+
+  /**
+   * Re-localize every static string in the UI. Called once at boot and again
+   * whenever the active locale changes (subscribed via `i18n.subscribe`).
+   * Elements declare keys with `data-i18n`; a few labels that depend on live
+   * data — difficulty/theme/language option text and the super-item key
+   * bindings — are refreshed explicitly here.
+   */
+  refreshText(): void {
+    // Localize everything under the app root, plus any overlays the
+    // ReplayController appends directly to <body> (the end-of-replay card).
+    localizeRoot(document.body)
+    // Difficulty / theme option labels are built once from config; re-apply
+    // the catalog strings so they follow the active locale.
+    for (const opt of this.menuDiffOptions) {
+      const key = opt.dataset.value
+      if (key) {
+        const label = t(`difficulty.${key}`)
+        opt.textContent = label === `difficulty.${key}` ? DIFFICULTIES[key].name : label
+      }
+    }
+    for (const opt of this.menuThemeOptions) {
+      const key = opt.dataset.value
+      if (key) {
+        const label = t(`theme.${key}`)
+        opt.textContent = label === `theme.${key}` ? key : label
+      }
+    }
+    // Language option labels are native names — no re-localization needed,
+    // but the selected highlight must follow the active locale (e.g. when the
+    // user clicks an option, or the LANGUAGE menu row cycles it).
+    this.updateLanguageHighlight()
+    // Stage list + resume-target names are built once; re-localize them so a
+    // live language switch updates the menu without a full rebuild.
+    this.refreshStageList()
+    if (this.resumeTarget) this.setResumeTarget(this.resumeTarget)
+    // Super-item key labels (name + current binding) follow the locale.
+    this.updateSuperKeyLabels()
+  }
+
+  /** Re-apply localized names to the (once-built) menu stage dropdown items. */
+  private refreshStageList(): void {
+    const list = this.menuScreen.querySelector('[data-stage="list"]')
+    if (!list) return
+    list.querySelectorAll<HTMLElement>('.menu-stage-item').forEach((item) => {
+      const idx = Number(item.dataset.stageIndex)
+      const nameEl = item.querySelector<HTMLElement>('.menu-stage-item-name')
+      if (nameEl && !Number.isNaN(idx)) nameEl.textContent = localizedStageName(idx)
+    })
+  }
+
+  /** Highlight the active language option in the LANGUAGE menu row. */
+  private updateLanguageHighlight(): void {
+    for (const opt of this.menuLangOptions) {
+      opt.classList.toggle('selected', opt.dataset.value === i18n.locale)
     }
   }
 
@@ -791,7 +879,7 @@ export class UIManager {
     // only when the text changed. Previously this rebuilt a template-literal
     // string and wrote a hidden element's textContent EVERY frame during play.
     if (world.state === 'stageclear' && this.stageClearName) {
-      const txt = `Stage ${world.stageIndex + 1}: ${world.currentStageName} Complete`
+      const txt = t('stageclear.name', { n: world.stageIndex + 1, name: world.currentStageName })
       if (txt !== this.lastStageClear) {
         this.stageClearName.textContent = txt
         this.lastStageClear = txt
@@ -944,14 +1032,18 @@ export class UIManager {
       }
     }
 
+    // Highlight selected language (also re-applied on locale change via
+    // refreshText, so this stays correct after a click or menu-cycle).
+    this.updateLanguageHighlight()
+
     // Highlight selected menu row (cursor) — only when changed.
     // Row indices shift down by one when the RESUME row is present.
-    // Full order: RESUME? / DIFFICULTY / THEME / STAGE / NEW GAME / CONTROLS
+    // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
     if (world.menuCursor !== this.lastMenuCursor) {
       this.lastMenuCursor = world.menuCursor
       const off = this.hasResume ? 1 : 0
       // Close stage dropdown when cursor moves away from STAGE row
-      if (world.menuCursor !== off + 2) {
+      if (world.menuCursor !== off + 3) {
         this.closeStageDropdown()
       }
       for (const row of this.menuRows) {
@@ -962,13 +1054,15 @@ export class UIManager {
               ? off
               : row.dataset.menu === 'theme'
                 ? off + 1
-                : row.dataset.menu === 'stage'
+                : row.dataset.menu === 'language'
                   ? off + 2
-                  : row.dataset.menu === 'start-row'
+                  : row.dataset.menu === 'stage'
                     ? off + 3
-                    : row.dataset.menu === 'controls'
+                    : row.dataset.menu === 'start-row'
                       ? off + 4
-                      : -1
+                      : row.dataset.menu === 'controls'
+                        ? off + 5
+                        : -1
         row.classList.toggle('selected', idx === world.menuCursor)
       }
       // Show ENTER hint only on RESUME and NEW GAME rows when selected
@@ -976,10 +1070,10 @@ export class UIManager {
         this.menuResumeHint.classList.toggle('visible', this.hasResume && world.menuCursor === 0)
       }
       if (this.menuStartHint) {
-        this.menuStartHint.classList.toggle('visible', world.menuCursor === off + 3)
+        this.menuStartHint.classList.toggle('visible', world.menuCursor === off + 4)
       }
       if (this.menuControlsHint) {
-        this.menuControlsHint.classList.toggle('visible', world.menuCursor === off + 4)
+        this.menuControlsHint.classList.toggle('visible', world.menuCursor === off + 5)
       }
     }
 
@@ -990,7 +1084,7 @@ export class UIManager {
         this.menuStageValue.textContent = `${String(world.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
       }
       if (this.menuStageName) {
-        this.menuStageName.textContent = STAGES[world.selectedStage]?.name ?? ''
+        this.menuStageName.textContent = localizedStageName(world.selectedStage) ?? ''
       }
     }
 
@@ -1011,54 +1105,52 @@ export class UIManager {
     // continue · loadLatest · replayStage · restartStage · chooseSnapshot
     screen.innerHTML = `
       <div class="recovery-menu" data-recovery="menu">
-        <h2 class="recovery-title ui-danger">MISSION FAILED</h2>
-        <p class="recovery-subtitle">Rewind time and try again</p>
+        <h2 class="recovery-title ui-danger" data-i18n="recovery.title">MISSION FAILED</h2>
+        <p class="recovery-subtitle" data-i18n="recovery.subtitle">Rewind time and try again</p>
         <div class="recovery-options">
           <div class="recovery-option" data-recovery-option="0">
             <span class="recovery-option-icon">🏳</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Continue</span>
-              <span class="recovery-option-desc">Accept defeat — classic game over</span>
+              <span class="recovery-option-label" data-i18n="recovery.option.continue.label">Continue</span>
+              <span class="recovery-option-desc" data-i18n="recovery.option.continue.desc">Accept defeat — classic game over</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="1">
             <span class="recovery-option-icon">⏪</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Load Latest Snapshot</span>
-              <span class="recovery-option-desc">Return to the most recent safe moment</span>
+              <span class="recovery-option-label" data-i18n="recovery.option.loadLatest.label">Load Latest Snapshot</span>
+              <span class="recovery-option-desc" data-i18n="recovery.option.loadLatest.desc">Return to the most recent safe moment</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="2">
             <span class="recovery-option-icon">↻</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Replay This Stage</span>
-              <span class="recovery-option-desc">Load the stage-start snapshot</span>
+              <span class="recovery-option-label" data-i18n="recovery.option.replay.label">Replay This Stage</span>
+              <span class="recovery-option-desc" data-i18n="recovery.option.replay.desc">Load the stage-start snapshot</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="3">
             <span class="recovery-option-icon">⚑</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Restart Without Loading</span>
+              <span class="recovery-option-label" data-i18n="recovery.option.restart.label">Restart Without Loading</span>
               <span class="recovery-option-desc">Fresh stage start — no snapshot</span>
             </div>
           </div>
           <div class="recovery-option" data-recovery-option="4">
             <span class="recovery-option-icon">🗂</span>
             <div class="recovery-option-text">
-              <span class="recovery-option-label">Choose a Snapshot…</span>
-              <span class="recovery-option-desc">Open the Snapshot Browser</span>
+              <span class="recovery-option-label" data-i18n="recovery.option.choose.label">Choose a Snapshot…</span>
+              <span class="recovery-option-desc" data-i18n="recovery.option.choose.desc">Open the Snapshot Browser</span>
             </div>
           </div>
         </div>
         <div class="recovery-controls">
-          <span>↑ ↓ Select</span>
-          <span><kbd>Enter</kbd> Confirm</span>
-          <span><kbd>Alt+R</kbd> Menu</span>
+          <span data-i18n="recovery.controls">↑ ↓ Select    Enter Confirm    Alt+R Menu</span>
         </div>
       </div>
       <div class="recovery-countdown" data-recovery="countdown">
         <span class="countdown-number" data-recovery="countdown-number">3</span>
-        <span class="countdown-label">READY</span>
+        <span class="countdown-label" data-i18n="recovery.countdown">READY</span>
       </div>
     `
 
@@ -1189,21 +1281,21 @@ export class UIManager {
     const screen = this.createElement('div', 'ui-screen ui-controls')
     const panel = this.createElement('div', 'ui-panel controls-panel')
     panel.innerHTML = `
-      <h2 class="ui-title">KEY BINDINGS</h2>
-      <p class="ui-hint">Click a key, then press a new one</p>
+      <h2 class="ui-title" data-i18n="controls.title">KEY BINDINGS</h2>
+      <p class="ui-hint" data-i18n="controls.hint">Click a key, then press a new one</p>
       <div class="controls-list" data-controls="list"></div>
       <div class="controls-actions">
-        <button class="controls-btn" data-controls="reset" type="button">Reset Defaults</button>
-        <button class="controls-btn controls-btn-primary" data-controls="back" type="button">Back</button>
+        <button class="controls-btn" data-controls="reset" type="button" data-i18n="controls.reset">Reset Defaults</button>
+        <button class="controls-btn controls-btn-primary" data-controls="back" type="button" data-i18n="controls.back">Back</button>
       </div>
-      <p class="ui-hint">Press <kbd>Esc</kbd> to go back</p>
+      <p class="ui-hint" data-i18n="controls.escHint">Press Esc to go back</p>
     `
 
     const list = panel.querySelector('[data-controls="list"]') as HTMLElement
-    for (const { action, label } of UIManager.CONTROL_ACTIONS) {
+    for (const action of UIManager.CONTROL_ACTIONS) {
       const row = this.createElement('div', 'controls-row')
       const labelEl = this.createElement('span', 'controls-label')
-      labelEl.textContent = label
+      labelEl.dataset.i18n = `controls.actions.${action}`
       const btn = this.createElement('button', 'controls-key-btn') as HTMLButtonElement
       btn.type = 'button'
       btn.dataset.action = action
@@ -1235,7 +1327,7 @@ export class UIManager {
     if (btn) {
       btn.classList.add('listening')
       btn.classList.remove('conflict')
-      btn.textContent = 'Press a key…'
+      btn.textContent = t('controls.pressKey')
     }
     // Clear listening state on any other buttons.
     for (const [other, otherBtn] of this.controlsKeyButtons) {
@@ -1252,7 +1344,7 @@ export class UIManager {
   }
 
   private resetBindings(): void {
-    for (const { action } of UIManager.CONTROL_ACTIONS) {
+    for (const action of UIManager.CONTROL_ACTIONS) {
       this.controlsBindings[action] = DEFAULT_KEYS[action]
     }
     this.listeningAction = null
@@ -1262,7 +1354,7 @@ export class UIManager {
   }
 
   private refreshAllKeyButtons(): void {
-    for (const { action } of UIManager.CONTROL_ACTIONS) {
+    for (const action of UIManager.CONTROL_ACTIONS) {
       this.refreshKeyButton(action)
     }
   }
@@ -1274,12 +1366,12 @@ export class UIManager {
     btn.textContent = this.formatKey(this.controlsBindings[action])
   }
 
-  /** Update HUD super-item key labels (天兵, 狂暴, 宝盒) to reflect current bindings. */
+  /** Update HUD super-item key labels (Guardian / Frenzy / Time Box) to reflect current bindings + locale. */
   private updateSuperKeyLabels(): void {
     const pairs: Array<[HTMLElement | null, keyof KeyBindings, string]> = [
-      [this.hudGuardLabel, 'guard', '天兵'],
-      [this.hudFrenzyLabel, 'frenzy', '狂暴'],
-      [this.hudRewindLabel, 'rewind', '宝盒'],
+      [this.hudGuardLabel, 'guard', t('hud.guard')],
+      [this.hudFrenzyLabel, 'frenzy', t('hud.frenzy')],
+      [this.hudRewindLabel, 'rewind', t('hud.rewind')],
     ]
     for (const [el, action, name] of pairs) {
       if (el)
@@ -1290,7 +1382,7 @@ export class UIManager {
   /** Reject keys reserved for panel navigation, and duplicates of other actions. */
   private findConflict(action: keyof KeyBindings, binding: string): keyof KeyBindings | null {
     if (binding === 'Escape' || binding === 'Tab') return action // reserved
-    for (const { action: other } of UIManager.CONTROL_ACTIONS) {
+    for (const other of UIManager.CONTROL_ACTIONS) {
       // Exact binding-string match: a modifier combo (Shift+R) is distinct
       // from its bare key (R), so they must not collide on the same action.
       if (other !== action && this.controlsBindings[other] === binding) return other

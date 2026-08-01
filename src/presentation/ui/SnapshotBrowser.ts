@@ -1,4 +1,6 @@
 import type { GameSnapshot, SnapshotID } from '../../snapshot/types'
+import { t } from '../../i18n'
+import { localizedStageName } from '../../config/stages'
 
 // ================================================================
 // Snapshot Browser (plan §12)
@@ -22,23 +24,15 @@ export interface SnapshotBrowserCallbacks {
   getStorageBytes?: () => Promise<number>
 }
 
-const TYPE_LABELS: Record<string, string> = {
-  'stage-start': 'STAGE',
-  pause: 'PAUSE',
-  auto: 'AUTO',
-  manual: 'MANUAL',
-}
-
 /** Toggle-group filters: ALL shows everything; the rest map to a SnapshotType. */
 type FilterKey = 'all' | 'stage-start' | 'pause' | 'auto' | 'manual'
 
-const FILTERS: { key: FilterKey; label: string }[] = [
-  { key: 'all', label: 'ALL' },
-  { key: 'manual', label: 'MANUAL' },
-  { key: 'pause', label: 'PAUSE' },
-  { key: 'stage-start', label: 'STAGE' },
-  { key: 'auto', label: 'AUTO' },
-]
+const FILTERS: FilterKey[] = ['all', 'manual', 'pause', 'stage-start', 'auto']
+
+/** Localized label for a snapshot-filter tab. */
+function filterLabel(key: FilterKey): string {
+  return t(`browser.snapshot.filter.${key}`)
+}
 
 function formatPlayTime(ms: number): string {
   const total = Math.floor(ms / 1000)
@@ -75,11 +69,11 @@ export class SnapshotBrowser {
     this.screen.innerHTML = `
       <div class="snap-panel">
         <div class="snap-header">
-          <h2 class="ui-title">SNAPSHOT BROWSER</h2>
+          <h2 class="ui-title" data-i18n="browser.snapshot.title">SNAPSHOT BROWSER</h2>
           <div class="snap-filters" data-snap="filters"></div>
           <div class="snap-header-right">
             <span class="snap-storage" data-snap="storage"></span>
-            <button class="controls-btn snap-close" data-snap="close" type="button">✕ Close <kbd>Esc</kbd></button>
+            <button class="controls-btn snap-close" data-snap="close" type="button">✕ <span data-i18n="browser.snapshot.close">Close</span> <kbd>Esc</kbd></button>
           </div>
         </div>
         <div class="snap-list" data-snap="list"></div>
@@ -96,10 +90,10 @@ export class SnapshotBrowser {
     for (const f of FILTERS) {
       const btn = document.createElement('button')
       btn.type = 'button'
-      btn.className = 'snap-filter' + (f.key === this.filter ? ' active' : '')
-      btn.textContent = f.label
-      btn.dataset.filter = f.key
-      btn.addEventListener('click', () => this.setFilter(f.key))
+      btn.className = 'snap-filter' + (f === this.filter ? ' active' : '')
+      btn.textContent = filterLabel(f)
+      btn.dataset.filter = f
+      btn.addEventListener('click', () => this.setFilter(f))
       filtersEl.appendChild(btn)
     }
 
@@ -174,9 +168,9 @@ export class SnapshotBrowser {
       countMap.set(s.type, (countMap.get(s.type) ?? 0) + 1)
     }
     this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
-      const key = b.dataset.filter!
+      const key = b.dataset.filter as FilterKey
       const count = countMap.get(key) ?? 0
-      const base = FILTERS.find((f) => f.key === key)?.label ?? key.toUpperCase()
+      const base = filterLabel(key)
       b.textContent = count > 0 ? `${base} (${count})` : base
     })
 
@@ -194,12 +188,12 @@ export class SnapshotBrowser {
       const empty = document.createElement('div')
       empty.className = 'snap-empty'
       if (total > 0) {
-        const label = this.filter === 'all' ? '' : (TYPE_LABELS[this.filter] ?? '')
+        const label = this.filter === 'all' ? '' : filterLabel(this.filter)
         empty.textContent = label
-          ? `No ${label} snapshots — pick another filter.`
-          : 'No snapshots match this filter.'
+          ? t('browser.snapshot.emptyFiltered', { label })
+          : t('browser.snapshot.emptyNoMatch')
       } else {
-        empty.textContent = 'No snapshots yet — play a stage, pause, or press Alt+S to save one.'
+        empty.textContent = t('browser.snapshot.empty')
       }
       this.listEl.appendChild(empty)
       return
@@ -226,28 +220,28 @@ export class SnapshotBrowser {
       thumb.appendChild(img)
     } else {
       thumb.classList.add('snap-thumb-empty')
-      thumb.textContent = 'NO PREVIEW'
+      thumb.textContent = t('browser.snapshot.noPreview')
     }
 
     const info = document.createElement('div')
     info.className = 'snap-info'
-    const typeLabel = TYPE_LABELS[snap.type] ?? String(snap.type).toUpperCase()
+    const typeLabel = filterLabel(snap.type as FilterKey)
     const stars = m.starLevel > 0 ? '★'.repeat(m.starLevel) : '—'
     info.innerHTML = `
       <div class="snap-info-top">
         <span class="snap-type snap-type-${snap.type}">${typeLabel}</span>
-        <span class="snap-stage">Stage ${String(m.stage + 1).padStart(2, '0')} · ${m.stageName}</span>
+        <span class="snap-stage">Stage ${String(m.stage + 1).padStart(2, '0')} · ${localizedStageName(m.stage)}</span>
         <span class="snap-created">${formatCreated(snap.createdAt)}</span>
       </div>
       <div class="snap-stats">
-        <span title="Lives">♥ ${m.lives}</span>
-        <span title="Star level">${stars}</span>
-        <span title="HP">HP ${m.hp}/${m.maxHp}</span>
-        <span title="Score">⚑ ${m.score}</span>
-        <span title="Kills">☠ ${m.killCount}</span>
-        <span title="Enemies remaining">⚔ ${m.enemiesRemaining}</span>
-        <span title="Play time">⏱ ${formatPlayTime(m.playTimeMs)}</span>
-        ${m.commanderPresent ? '<span class="snap-commander" title="Commander on field">CMD</span>' : ''}
+        <span title="${t('browser.snapshot.info.lives')}">♥ ${m.lives}</span>
+        <span title="${t('browser.snapshot.info.star')}">${stars}</span>
+        <span title="${t('browser.snapshot.info.hp')}">HP ${m.hp}/${m.maxHp}</span>
+        <span title="${t('browser.snapshot.info.score')}">⚑ ${m.score}</span>
+        <span title="${t('browser.snapshot.info.kills')}">☠ ${m.killCount}</span>
+        <span title="${t('browser.snapshot.info.enemies')}">⚔ ${m.enemiesRemaining}</span>
+        <span title="${t('browser.snapshot.info.playtime')}">⏱ ${formatPlayTime(m.playTimeMs)}</span>
+        ${m.commanderPresent ? `<span class="snap-commander" title="${t('browser.snapshot.info.commander')}">CMD</span>` : ''}
       </div>
     `
 
@@ -257,7 +251,7 @@ export class SnapshotBrowser {
     const loadBtn = document.createElement('button')
     loadBtn.type = 'button'
     loadBtn.className = 'controls-btn controls-btn-primary snap-load'
-    loadBtn.textContent = 'LOAD'
+    loadBtn.textContent = t('browser.snapshot.load')
     loadBtn.addEventListener('click', () => {
       this.close()
       this.callbacks?.onLoad(snap.id)
@@ -266,7 +260,7 @@ export class SnapshotBrowser {
     const delBtn = document.createElement('button')
     delBtn.type = 'button'
     delBtn.className = 'controls-btn snap-delete'
-    delBtn.textContent = 'DELETE'
+    delBtn.textContent = t('browser.snapshot.delete')
     delBtn.addEventListener('click', () => {
       // Two-step: first click arms, second click confirms.
       if (this.confirmingDelete === snap.id) {
@@ -275,7 +269,7 @@ export class SnapshotBrowser {
         this.refresh()
       } else {
         this.confirmingDelete = snap.id
-        delBtn.textContent = 'SURE?'
+        delBtn.textContent = t('browser.snapshot.confirm')
         delBtn.classList.add('snap-delete-arm')
       }
     })

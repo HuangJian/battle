@@ -1,6 +1,7 @@
 import type { World } from '../../game/World'
 import type { GameRenderer } from '../renderer/GameRenderer'
 import type { ParticleSystem } from '../ParticleSystem'
+import { t } from '../../i18n'
 
 /** Per-frame timing + state samples fed to {@link PerfOverlay.update}. */
 export interface PerfTimings {
@@ -154,7 +155,7 @@ export class PerfOverlay {
     this.copyBtnIcon.textContent = '⚠'
     this.copyBtnIcon.hidden = true
     const copyLabel = document.createElement('span')
-    copyLabel.textContent = 'Copy report'
+    copyLabel.textContent = t('perf.copyReport')
     this.copyBtn.append(this.copyBtnIcon, copyLabel)
     this.copyBtn.addEventListener('click', () => this.copyReport())
     footer.append(this.breachBadge, this.copyBtn)

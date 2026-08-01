@@ -1,4 +1,6 @@
 import type { Replay, ReplayID, ReplayType } from '../../replay/types'
+import { t } from '../../i18n'
+import { localizedStageName } from '../../config/stages'
 
 // ================================================================
 // Replay Browser (plan/replay.md §11)
@@ -31,23 +33,21 @@ export interface ReplayBrowserCallbacks {
   onExport?: (id: ReplayID) => void
 }
 
-const TYPE_LABELS: Record<ReplayType, string> = {
-  clear: 'CLEAR',
-  base: 'BASE DOWN',
-  died: 'DIED',
-  timeout: 'TIMEOUT',
+/** Localized label for a replay type / filter tab. */
+function filterLabel(key: FilterKey): string {
+  return t(`browser.replay.filter.${key}`)
 }
 
 /** Toggle-group filters. */
 type FilterKey = 'all' | ReplayType | 'favorite'
 
-const FILTERS: { key: FilterKey; label: string }[] = [
-  { key: 'all', label: 'ALL' },
-  { key: 'clear', label: 'CLEAR' },
-  { key: 'base', label: 'BASE DOWN' },
-  { key: 'died', label: 'DIED' },
-  { key: 'timeout', label: 'TIMEOUT' },
-  { key: 'favorite', label: 'FAV ★' },
+const FILTERS: FilterKey[] = [
+  'all',
+  'clear',
+  'base',
+  'died',
+  'timeout',
+  'favorite',
 ]
 
 function formatPlayTime(ms: number): string {
@@ -86,12 +86,12 @@ export class ReplayBrowser {
     this.screen.innerHTML = `
       <div class="snap-panel">
         <div class="snap-header">
-          <h2 class="ui-title">REPLAY BROWSER</h2>
+          <h2 class="ui-title" data-i18n="browser.replay.title">REPLAY BROWSER</h2>
           <div class="snap-filters" data-replay="filters"></div>
           <div class="snap-header-right">
             <span class="snap-storage" data-replay="storage"></span>
-            <button class="controls-btn snap-import" data-replay="import" type="button">Import</button>
-            <button class="controls-btn snap-close" data-replay="close" type="button">✕ Close <kbd>Esc</kbd></button>
+            <button class="controls-btn snap-import" data-replay="import" type="button" data-i18n="browser.replay.import">Import</button>
+            <button class="controls-btn snap-close" data-replay="close" type="button">✕ <span data-i18n="browser.replay.close">Close</span> <kbd>Esc</kbd></button>
           </div>
         </div>
         <div class="snap-list" data-replay="list"></div>
@@ -114,10 +114,10 @@ export class ReplayBrowser {
     for (const f of FILTERS) {
       const btn = document.createElement('button')
       btn.type = 'button'
-      btn.className = 'snap-filter' + (f.key === this.filter ? ' active' : '')
-      btn.textContent = f.label
-      btn.dataset.filter = f.key
-      btn.addEventListener('click', () => this.setFilter(f.key))
+      btn.className = 'snap-filter' + (f === this.filter ? ' active' : '')
+      btn.textContent = filterLabel(f)
+      btn.dataset.filter = f
+      btn.addEventListener('click', () => this.setFilter(f))
       filtersEl.appendChild(btn)
     }
 
@@ -196,7 +196,7 @@ export class ReplayBrowser {
     this.screen.querySelectorAll<HTMLElement>('.snap-filter').forEach((b) => {
       const key = b.dataset.filter!
       const count = key === 'favorite' ? favCount : (countMap.get(key) ?? 0)
-      const base = FILTERS.find((f) => f.key === key)?.label ?? key.toUpperCase()
+      const base = filterLabel(key as FilterKey)
       b.textContent = count > 0 ? `${base} (${count})` : base
     })
 
@@ -214,17 +214,12 @@ export class ReplayBrowser {
       const empty = document.createElement('div')
       empty.className = 'snap-empty'
       if (total > 0) {
-        const label =
-          this.filter === 'favorite'
-            ? 'favorited'
-            : this.filter in TYPE_LABELS
-              ? TYPE_LABELS[this.filter as ReplayType]
-              : ''
+        const label = filterLabel(this.filter)
         empty.textContent = label
-          ? `No ${label} replays — pick another filter.`
-          : 'No replays match this filter.'
+          ? t('browser.replay.emptyFiltered', { label })
+          : t('browser.replay.emptyNoMatch')
       } else {
-        empty.textContent = 'No replays yet — finish a stage (win or lose) to record one.'
+        empty.textContent = t('browser.replay.empty')
       }
       this.listEl.appendChild(empty)
       return
@@ -254,7 +249,7 @@ export class ReplayBrowser {
     let dragCount = 0
     const overlay = document.createElement('div')
     overlay.className = 'snap-drag-overlay'
-    overlay.textContent = '拖放 .replay 文件到此处'
+    overlay.textContent = t('browser.replay.dropHint')
     overlay.style.cssText =
       'display:none;position:absolute;inset:0;background:rgba(0,0,0,0.3);color:#fff;font-size:1.2em;display:none;align-items:center;justify-content:center;z-index:10;pointer-events:none;'
     const panel = this.screen.querySelector('.snap-panel')! as HTMLElement
@@ -318,27 +313,27 @@ export class ReplayBrowser {
       thumb.appendChild(img)
     } else {
       thumb.classList.add('snap-thumb-empty')
-      thumb.textContent = 'NO PREVIEW'
+      thumb.textContent = t('browser.replay.noPreview')
     }
 
     const info = document.createElement('div')
     info.className = 'snap-info'
-    const typeLabel = TYPE_LABELS[replay.type] ?? String(replay.type).toUpperCase()
+    const typeLabel = filterLabel(replay.type)
     const star = m.playerLevel > 0 ? '★'.repeat(m.playerLevel) : '—'
     info.innerHTML = `
       <div class="snap-info-top">
         <span class="snap-type snap-type-${replay.type}">${typeLabel}</span>
-        <span class="snap-stage">Stage ${String(m.stage + 1).padStart(2, '0')} · ${m.stageName}</span>
+        <span class="snap-stage">Stage ${String(m.stage + 1).padStart(2, '0')} · ${localizedStageName(m.stage)}</span>
         <span class="snap-created">${formatCreated(replay.createdAt)}</span>
       </div>
       <div class="snap-stats">
-        <span title="Score">⚑ ${m.score}</span>
-        <span title="Kills">☠ ${m.killCount}</span>
-        <span title="Player level">${star}</span>
-        <span title="Lives left">♥ ${m.lives}</span>
-        <span title="Duration">⏱ ${formatPlayTime(replay.durationMs)}</span>
-        ${replay.metadata.coop ? '<span class="snap-commander" title="Co-op (God AI)" style="color:#f0c040">COOP</span>' : ''}
-        ${replay.isFavorite ? '<span class="snap-commander" title="Favorited">★ FAV</span>' : ''}
+        <span title="${t('browser.replay.info.score')}">⚑ ${m.score}</span>
+        <span title="${t('browser.replay.info.kills')}">☠ ${m.killCount}</span>
+        <span title="${t('browser.replay.info.star')}">${star}</span>
+        <span title="${t('browser.replay.info.lives')}">♥ ${m.lives}</span>
+        <span title="${t('browser.replay.info.duration')}">⏱ ${formatPlayTime(replay.durationMs)}</span>
+        ${replay.metadata.coop ? `<span class="snap-commander" title="${t('browser.replay.info.coop')}" style="color:#f0c040">COOP</span>` : ''}
+        ${replay.isFavorite ? `<span class="snap-commander" title="${t('browser.replay.info.fav')}">★ FAV</span>` : ''}
       </div>
     `
 
@@ -348,7 +343,7 @@ export class ReplayBrowser {
     const playBtn = document.createElement('button')
     playBtn.type = 'button'
     playBtn.className = 'controls-btn controls-btn-primary snap-load'
-    playBtn.textContent = 'PLAY'
+    playBtn.textContent = t('browser.replay.play')
     playBtn.addEventListener('click', () => {
       // Close first (state becomes 'playing' action state), then play so the
       // vsync rAF loop re-arms from inside startPlayback().
@@ -359,18 +354,18 @@ export class ReplayBrowser {
     const favBtn = document.createElement('button')
     favBtn.type = 'button'
     favBtn.className = 'controls-btn snap-fav' + (replay.isFavorite ? ' snap-fav-on' : '')
-    favBtn.textContent = replay.isFavorite ? '★ FAV' : '☆ FAV'
+    favBtn.textContent = replay.isFavorite ? t('browser.replay.favOn') : t('browser.replay.favOff')
     favBtn.addEventListener('click', () => {
       const nowFav = this.callbacks?.onToggleFavorite(replay.id) ?? false
       replay.isFavorite = nowFav
-      favBtn.textContent = nowFav ? '★ FAV' : '☆ FAV'
+      favBtn.textContent = nowFav ? t('browser.replay.favOn') : t('browser.replay.favOff')
       favBtn.classList.toggle('snap-fav-on', nowFav)
       // Update the inline badge in the info row.
       const badge = info.querySelector('.snap-commander')
       if (nowFav && !badge) {
         const b = document.createElement('span')
         b.className = 'snap-commander'
-        b.title = 'Favorited'
+        b.title = t('browser.replay.info.fav')
         b.textContent = '★ FAV'
         info.querySelector('.snap-stats')!.appendChild(b)
       } else if (!nowFav && badge) {
@@ -383,7 +378,7 @@ export class ReplayBrowser {
     const delBtn = document.createElement('button')
     delBtn.type = 'button'
     delBtn.className = 'controls-btn snap-delete'
-    delBtn.textContent = 'DELETE'
+    delBtn.textContent = t('browser.replay.delete')
     delBtn.addEventListener('click', () => {
       // Two-step: first click arms, second click confirms.
       if (this.confirmingDelete === replay.id) {
@@ -392,7 +387,7 @@ export class ReplayBrowser {
         this.refresh()
       } else {
         this.confirmingDelete = replay.id
-        delBtn.textContent = 'SURE?'
+        delBtn.textContent = t('browser.replay.confirm')
         delBtn.classList.add('snap-delete-arm')
       }
     })
@@ -406,8 +401,8 @@ export class ReplayBrowser {
       const exportBtn = document.createElement('button')
       exportBtn.type = 'button'
       exportBtn.className = 'controls-btn snap-export'
-      exportBtn.textContent = 'Export'
-      exportBtn.title = 'Export .replay'
+      exportBtn.textContent = t('browser.replay.export')
+      exportBtn.title = t('browser.replay.exportTitle')
       exportBtn.addEventListener('click', () => this.callbacks?.onExport!(replay.id))
       actions.appendChild(exportBtn)
     }

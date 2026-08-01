@@ -16,7 +16,7 @@ import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
 import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
-import { STAGES } from '../config/stages'
+import { STAGES, localizedStageName } from '../config/stages'
 import { TICK_MS, PERF_MODE_RENDER_FPS } from '../constants'
 import type { GameSettings, KeyBindings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
@@ -32,6 +32,8 @@ import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { serializeReplayFile, buildReplayFilename } from '../replay/file'
+import { i18n, t, AVAILABLE_LOCALES } from '../i18n'
+import type { Locale } from '../i18n/types'
 
 const SETTINGS_KEY = 'bc_settings'
 const THEME_KEYS = Object.keys(THEMES)
@@ -157,6 +159,7 @@ export class Game {
     this.presentation.ui.initMenuActions({
       selectDifficulty: (key) => this.menuSelectDifficulty(key),
       selectTheme: (key) => this.menuSelectTheme(key),
+      selectLanguage: (code) => this.menuSelectLanguage(code),
       cycleStage: (dir) => this.menuCycleStage(dir),
       selectStage: (index) => this.menuSelectStage(index),
       start: () => this.menuStart(),
@@ -226,7 +229,7 @@ export class Game {
       this.godInput = null
       this.autoFireInput = null
       this.wireLiveInputs()
-      this.presentation.ui.notify('Co-op: OFF', 'info')
+      this.presentation.ui.notify(t('toast.coopOff'), 'info')
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
       this.simulation.requestCoopToggle(true)
@@ -243,7 +246,7 @@ export class Game {
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
       this.autoFireInput = new AutoFireInput(this.input)
       this.wireLiveInputs()
-      this.presentation.ui.notify('Co-op: ON — God Player activated!', 'info')
+      this.presentation.ui.notify(t('toast.coopOn'), 'info')
       this.audio.player2Id = w.player2?.id ?? null
     }
     this.presentation.ui.controlCenter.setCoopState(w.coop)
@@ -269,7 +272,7 @@ export class Game {
       },
       onDelete: (id) => {
         this.snapshots.delete(id)
-        ui.notify('Snapshot deleted')
+        ui.notify(t('toast.snapshotDeleted'))
       },
       onClose: () => {
         // If the browser was opened from the recovery menu, the menu is
@@ -299,7 +302,7 @@ export class Game {
         if (canOpenControls(s)) {
           ui.openControls()
         } else {
-          ui.notify('Key bindings are available when the game is paused', 'warn')
+          ui.notify(t('toast.keyBindingsPaused'), 'warn')
         }
       },
       onThemePause: () => this.themePause(),
@@ -632,7 +635,7 @@ export class Game {
         const canStart = this.recovery.phase === 'idle' && this.world.state === 'playing'
         if (canStart && this.recovery.beginManualRewind(this.world)) {
           this.audio.playRecoveryStart()
-          this.presentation.ui.notify('时光宝盒：时间回溯！', 'info')
+          this.presentation.ui.notify(t('toast.rewindActivated'), 'info')
         } else {
           this.world.rewindStock++
         }
@@ -866,14 +869,14 @@ export class Game {
 
       // Row count grows by one when a resumable manual snapshot is offered
       // (the RESUME row sits at index 0, pushing the config rows down).
-      // Full order: RESUME? / DIFFICULTY / THEME / STAGE / NEW GAME / CONTROLS
-      const rowCount = this.resumeSnapshot ? 6 : 5
-      // Move cursor between rows (RESUME? / DIFFICULTY / THEME / STAGE)
-      // Canvas preview only switches for RESUME (0), STAGE (off+2), NEW GAME (off+3).
+      // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
+      const rowCount = this.resumeSnapshot ? 7 : 6
+      // Move cursor between rows (RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE)
+      // Canvas preview only switches for RESUME (0), STAGE (off+3), NEW GAME (off+4).
       const off = this.resumeSnapshot ? 1 : 0
       if (this.input.isUpPressed()) {
         w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
-        if (w.menuCursor === 0 || w.menuCursor === off + 2 || w.menuCursor === off + 3) {
+        if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
           this.applyMenuPreview()
         }
         this.audio.init()
@@ -882,7 +885,7 @@ export class Game {
       }
       if (this.input.isDownPressed()) {
         w.menuCursor = (w.menuCursor + 1) % rowCount
-        if (w.menuCursor === 0 || w.menuCursor === off + 2 || w.menuCursor === off + 3) {
+        if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
           this.applyMenuPreview()
         }
         this.audio.init()
@@ -907,6 +910,11 @@ export class Game {
           w.theme = THEMES[w.themeKey]
           changed = true
         } else if (w.menuCursor === off + 2) {
+          // LANGUAGE row — cycle to the next available locale.
+          i18n.cycleLocale()
+          this.presentation.ui.notify(t('toast.languageSet', { name: i18n.name(i18n.locale) }), 'info')
+          changed = true
+        } else if (w.menuCursor === off + 3) {
           w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
           changed = true
         }
@@ -932,13 +940,13 @@ export class Game {
       }
       // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter:
       // RESUME (index 0, only when a snapshot exists) resumes;
-      // NEW GAME (off + 3) starts a fresh game;
-      // CONTROLS (off + 4) opens the key-bindings panel.
-      const controlsIdx = off + 4
+      // NEW GAME (off + 4) starts a fresh game;
+      // CONTROLS (off + 5) opens the key-bindings panel.
+      const controlsIdx = off + 5
       if (this.input.isConfirmPressed()) {
         if (this.resumeSnapshot && w.menuCursor === 0) {
           this.menuResume()
-        } else if (w.menuCursor === off + 3) {
+        } else if (w.menuCursor === off + 4) {
           this.menuStart()
         } else if (w.menuCursor === controlsIdx) {
           this.presentation.ui.openControls()
@@ -1034,7 +1042,7 @@ export class Game {
   private menuCycleStage(dir: -1 | 1): void {
     if (this.world.state !== 'menu') return
     this.world.selectedStage = (this.world.selectedStage + dir + STAGES.length) % STAGES.length
-    this.world.menuCursor = this.resumeSnapshot ? 3 : 2
+    this.world.menuCursor = this.resumeSnapshot ? 4 : 3
     // Swap the battle-field preview to the newly selected stage's layout.
     this.applyMenuPreview()
     this.audio.init()
@@ -1048,12 +1056,23 @@ export class Game {
     if (this.world.state !== 'menu') return
     if (index < 0 || index >= STAGES.length) return
     this.world.selectedStage = index
-    this.world.menuCursor = this.resumeSnapshot ? 3 : 2
+    this.world.menuCursor = this.resumeSnapshot ? 4 : 3
     this.applyMenuPreview()
     this.audio.init()
     this.audio.resume()
     this.audio.playMenuSelect()
     this.refreshStaticScreen()
+  }
+
+  /** Mouse: pick a language option. */
+  private menuSelectLanguage(code: string): void {
+    if (this.world.state !== 'menu') return
+    if (!(AVAILABLE_LOCALES as string[]).includes(code)) return
+    i18n.setLocale(code as Locale)
+    this.presentation.ui.notify(t('toast.languageSet', { name: i18n.name(code as Locale) }), 'info')
+    this.audio.init()
+    this.audio.resume()
+    this.audio.playMenuSelect()
   }
 
   /**
@@ -1191,7 +1210,7 @@ export class Game {
     // Confirm the switch in-game (menu / pause) so the player sees the result
     // without an overlay covering the battle field.
     this.presentation.ui.notify(
-      this.settings.performanceMode ? 'Performance Mode: ON' : 'Performance Mode: OFF (Quality)',
+      this.settings.performanceMode ? t('toast.perfModeOn') : t('toast.perfModeOff'),
       'info',
     )
   }
@@ -1223,14 +1242,11 @@ export class Game {
     const ui = this.presentation.ui
     if (snap) {
       const m = snap.metadata
-      ui.notify(`Snapshot saved — Stage ${String(m.stage + 1).padStart(2, '0')} · ${m.stageName}`)
+      ui.notify(t('toast.snapshotSaved', { stage: m.stage + 1, name: localizedStageName(m.stage) }))
       this.audio.playMenuSelect()
     } else {
       const limit = this.snapshots.policyFor('manual').limit
-      ui.notify(
-        `Manual slots full (${limit}/${limit}) — delete old snapshots in the Browser`,
-        'warn',
-      )
+      ui.notify(t('toast.snapshotFull', { n: limit }), 'warn')
     }
   }
 
@@ -1453,14 +1469,14 @@ export class Game {
    */
   startPlayback(replay: Replay): boolean {
     if (!this.replays.canPlay(replay)) {
-      this.presentation.ui.notify('Replay format not supported by this version', 'warn')
+      this.presentation.ui.notify(t('toast.replayUnsupported'), 'warn')
       return false
     }
     if (replay.gameVersion !== GAME_VERSION) {
       // Different simulation build — playable, but determinism is not
       // guaranteed. Warn instead of silently desyncing.
       this.presentation.ui.notify(
-        `Recorded on v${replay.gameVersion} — playback may desync`,
+        t('toast.replayVersionMismatch', { version: replay.gameVersion }),
         'warn',
       )
     }
@@ -1499,7 +1515,7 @@ export class Game {
     // Show persistent REPLAY badge in HUD + video player controller
     this.presentation.ui.setReplayMode(true, false, replay.metadata.difficulty)
     this.presentation.ui.setReplaySpeed(this.playback.currentSpeed)
-    this.presentation.ui.notify('REPLAY — Esc exit')
+    this.presentation.ui.notify(t('toast.replayEscExit'))
     // Wire canvas click/mousemove for playback interaction
     this.presentation.ui.canvas.addEventListener('click', this.onReplayCanvasClick)
     this.presentation.ui.canvas.addEventListener('mousemove', this.onReplayCanvasMouseMove)
@@ -1679,17 +1695,17 @@ export class Game {
     // Populate end overlay with replay metadata
     if (replay) {
       const m = replay.metadata
-      const stageLabel = `Stage ${String(m.stage + 1).padStart(2, '0')}: ${m.stageName}`
-      const resultLabel = replay.type === 'clear' ? 'VICTORY' : 'DEFEAT'
+      const stageLabel = t('replay.endStage', { n: m.stage + 1, name: localizedStageName(m.stage) })
+      const resultLabel = replay.type === 'clear' ? t('replay.result.victory') : t('replay.result.defeat')
       const durationSec = Math.floor(replay.durationMs / 1000)
       const durMin = Math.floor(durationSec / 60)
       const durSec = durationSec % 60
       const durationStr = `${durMin}:${String(durSec).padStart(2, '0')}`
       const detailParts = [
         resultLabel,
-        `Score: ${String(m.score).padStart(6, '0')}`,
+        `${t('replay.detail.score')}: ${String(m.score).padStart(6, '0')}`,
         durationStr,
-        `Kills: ${m.killCount}/${m.enemiesTotal}`,
+        `${t('replay.detail.kills')}: ${m.killCount}/${m.enemiesTotal}`,
       ]
       this.presentation.ui.replayController.setEndMetadata({
         title: stageLabel,
@@ -1699,7 +1715,7 @@ export class Game {
     }
     this.presentation.ui.replayController.showPersistent()
     this.presentation.markNeedsRender()
-    this.presentation.ui.notify('Replay finished')
+    this.presentation.ui.notify(t('toast.replayFinished'))
     // DO NOT null out this.playback — it acts as a sentinel to keep the loop alive.
     // The loop will continue to render the final frame without ticking.
   }
@@ -1764,7 +1780,7 @@ export class Game {
       },
       onDelete: (id) => {
         this.replays.delete(id)
-        ui.notify('Replay deleted')
+        ui.notify(t('toast.replayDeleted'))
       },
       onToggleFavorite: (id) => {
         const replay = this.replays.get(id)
@@ -1772,7 +1788,7 @@ export class Game {
         const wasFavorite = replay.isFavorite
         const nowFavorite = this.replays.toggleFavorite(id)
         if (!wasFavorite && !nowFavorite) {
-          ui.notify('Favorites are full — unfavorite some replays first', 'warn')
+          ui.notify(t('toast.favoritesFull'), 'warn')
         }
         return nowFavorite
       },
@@ -1793,7 +1809,10 @@ export class Game {
           }
         }
         ui.notify(
-          `Imported: Stage ${String(replay.metadata.stage + 1).padStart(2, '0')} — ${replay.metadata.stageName}`,
+          t('toast.replayImported', {
+            stage: replay.metadata.stage + 1,
+            name: replay.metadata.stageName,
+          }),
         )
       },
       onExport: (id) => {
@@ -1810,7 +1829,7 @@ export class Game {
   private exportReplay(replay: Replay | null | undefined): void {
     const ui = this.presentation.ui
     if (!replay) {
-      ui.notify('No replay to export', 'warn')
+      ui.notify(t('toast.noReplayExport'), 'warn')
       return
     }
     const envelope = serializeReplayFile({
@@ -1836,7 +1855,7 @@ export class Game {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-    ui.notify(`Exported: ${filename}`)
+    ui.notify(t('toast.replayExported', { filename }))
   }
 
   /** Open a local .replay file for playback (not imported to database). */
@@ -1852,12 +1871,12 @@ export class Game {
         const { parseReplayFile } = await import('../replay/file')
         const result = parseReplayFile(text)
         if ('error' in result) {
-          this.presentation.ui.notify(`Failed to parse replay: ${result.error}`, 'warn')
+          this.presentation.ui.notify(t('toast.replayParseError', { error: result.error }), 'warn')
           return
         }
         this.startPlayback(result.replay)
       } catch (err) {
-        this.presentation.ui.notify('Failed to read replay file', 'warn')
+        this.presentation.ui.notify(t('toast.replayReadError'), 'warn')
         console.warn('[replay] local load error:', err)
       }
     })

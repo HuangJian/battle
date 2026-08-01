@@ -1,5 +1,6 @@
 import type { StageData, TankKind } from '../types'
 import { LEVELS, ENEMY_FORCES } from './stageData'
+import { i18n } from '../i18n'
 
 /**
  * Classic Battle City stages.
@@ -107,6 +108,49 @@ const STAGE_NAMES = [
   'Final Redoubt',
 ]
 
+/**
+ * Chinese names for the classic 35 stages, in the same order as `STAGE_NAMES`.
+ * Stage names are presentation-only strings (never gameplay state), so the
+ * active language is resolved at display time via `localizedStageName`.
+ */
+const STAGE_NAMES_ZH = [
+  '前哨',
+  '水道',
+  '钢铁堡垒',
+  '交叉火力',
+  '迷宫',
+  '砖窑',
+  '铁幕',
+  '河床',
+  '双塔',
+  '夹道',
+  '堡垒',
+  '栅格',
+  '碉堡山',
+  '钢网',
+  '要塞',
+  '十字路口',
+  '双尖塔',
+  '网格封锁',
+  '冰封原野',
+  '棱堡',
+  '棋盘',
+  '绿洲',
+  '壁垒',
+  '迷阵',
+  '采石场',
+  '冰宫',
+  '砖迷宫',
+  '密林',
+  '蛛网',
+  '同心圆',
+  '鹰巢',
+  '星堡',
+  '菱形阵',
+  '城垛',
+  '终极堡垒',
+]
+
 /** Decode one 13×13 numeric level into a 26×26 char grid (one char per sub-block). */
 function decodeLevel(grid: number[][]): string[] {
   const rows: string[] = []
@@ -162,6 +206,17 @@ export const STAGES: StageData[] = LEVELS.map((grid, i) => ({
   tiles: decodeLevel(grid),
   enemies: decodeForces(i),
 }))
+
+/**
+ * Localized stage name for `index`, resolved against the active UI language.
+ * `STAGES[i].name` stays the canonical English data (also baked into snapshot /
+ * replay metadata); the displayed name follows the locale at call time so it
+ * switches live with the LANGUAGE menu without touching the World.
+ */
+export function localizedStageName(index: number): string {
+  if (i18n.locale === 'zh') return STAGE_NAMES_ZH[index] ?? STAGE_NAMES[index] ?? `Stage ${index + 1}`
+  return STAGE_NAMES[index] ?? `Stage ${index + 1}`
+}
 
 /** Bonus enemy indices (0-based): every 4th enemy drops a power-up */
 export function isBonusEnemy(index: number): boolean {

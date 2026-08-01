@@ -18,7 +18,7 @@ import type {
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
 import { RNG } from '../utils/RNG'
-import { STAGES } from '../config/stages'
+import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
 import { resolveProfile, profileToStats } from '../config/combat'
@@ -765,7 +765,9 @@ export class World {
   }
 
   get currentStageName(): string {
-    return STAGES[this.stageIndex]?.name ?? '?'
+    // Localized at read time so the stage-clear / status-line name follows
+    // the active language without storing locale on the World.
+    return localizedStageName(this.stageIndex)
   }
 
   get totalStages(): number {

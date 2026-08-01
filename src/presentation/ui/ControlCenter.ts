@@ -1,5 +1,6 @@
 import type { World } from '../../game/World'
 import { THEME_DEFINITIONS } from '../../config/theme'
+import { t, localizeRoot } from '../../i18n'
 
 // ================================================================
 // Control Center (plan §13)
@@ -87,70 +88,70 @@ export class ControlCenter {
     this.el.className = 'control-center'
     this.el.innerHTML = `
       <div class="cc-header">
-        <span class="cc-title">CONTROL CENTER</span>
-        <button class="cc-collapse" data-cc="collapse" type="button" title="Collapse">◀</button>
+        <span class="cc-title" data-i18n="cc.title">CONTROL CENTER</span>
+        <button class="cc-collapse" data-cc="collapse" type="button" title="Collapse" data-i18n-attr="title:cc.titleCollapse">◀</button>
       </div>
       <div class="cc-body" data-cc="body">
         <section class="cc-section">
-          <h3 class="cc-section-title">SNAPSHOT MANAGER</h3>
+          <h3 class="cc-section-title" data-i18n="cc.section.snapshots">SNAPSHOT MANAGER</h3>
           <button class="cc-btn" data-cc="save" type="button">
-            <span>Save Snapshot Now</span><kbd>Alt+S</kbd>
+            <span data-i18n="cc.save">Save Snapshot Now</span><kbd>Alt+S</kbd>
           </button>
           <button class="cc-btn" data-cc="browser" type="button">
-            <span>Snapshot Browser</span><span class="cc-btn-arrow">›</span>
+            <span data-i18n="cc.snapshotBrowser">Snapshot Browser</span><span class="cc-btn-arrow">›</span>
           </button>
-          <div class="cc-info" data-cc="counts">No snapshots</div>
+          <div class="cc-info" data-cc="counts" data-i18n="cc.noSnapshots">No snapshots</div>
         </section>
         <section class="cc-section">
-          <h3 class="cc-section-title">REPLAYS</h3>
+          <h3 class="cc-section-title" data-i18n="cc.section.replays">REPLAYS</h3>
           <button class="cc-btn" data-cc="replays" type="button">
-            <span>Replay Browser</span><span class="cc-btn-arrow">›</span>
+            <span data-i18n="cc.replayBrowser">Replay Browser</span><span class="cc-btn-arrow">›</span>
           </button>
           <button class="cc-btn" data-cc="local-replay" type="button">
-            <span>Open Local Replay</span><span class="cc-btn-arrow">›</span>
+            <span data-i18n="cc.openLocalReplay">Open Local Replay</span><span class="cc-btn-arrow">›</span>
           </button>
-          <div class="cc-info" data-cc="replay-counts">No replays</div>
+          <div class="cc-info" data-cc="replay-counts" data-i18n="cc.noReplays">No replays</div>
         </section>
         <section class="cc-section">
-          <h3 class="cc-section-title">GAMEPLAY</h3>
+          <h3 class="cc-section-title" data-i18n="cc.section.gameplay">GAMEPLAY</h3>
           <div class="cc-theme-wrap">
-            <button class="cc-btn" data-cc="theme" type="button" aria-pressed="false" title="Switch theme (Alt+T) — click to pick">
-              <span class="cc-theme-label">Theme: <span data-cc="theme-name">—</span></span>
+            <button class="cc-btn" data-cc="theme" type="button" aria-pressed="false" title="Switch theme (Alt+T) — click to pick" data-i18n-attr="title:cc.titleTheme">
+              <span class="cc-theme-label"><span data-i18n="cc.theme">Theme</span>: <span data-cc="theme-name">—</span></span>
               <kbd>Alt+T</kbd>
             </button>
             <div class="cc-theme-dropdown" data-cc="theme-dropdown" hidden></div>
           </div>
           <button class="cc-btn" data-cc="controls" type="button">
-            <span>Key Bindings</span><span class="cc-btn-arrow">›</span>
+            <span data-i18n="cc.keyBindings">Key Bindings</span><span class="cc-btn-arrow">›</span>
           </button>
-          <button class="cc-btn" data-cc="coop" type="button" aria-pressed="false" title="Toggle Lie-Back-Win-Mode (God AI co-op)">
-            <span>Lie-Back Win</span>
+          <button class="cc-btn" data-cc="coop" type="button" aria-pressed="false" title="Toggle Lie-Back-Win-Mode (God AI co-op)" data-i18n-attr="title:cc.titleCoop">
+            <span data-i18n="cc.lieBackWin">Lie-Back Win</span>
             <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="coop-state">OFF</span></span>
           </button>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
         <section class="cc-section">
-          <h3 class="cc-section-title">DISPLAY</h3>
-          <button class="cc-btn" data-cc="fullscreen" type="button" aria-pressed="false" title="Toggle fullscreen mode (Alt+F)">
-            <span>Fullscreen</span>
+          <h3 class="cc-section-title" data-i18n="cc.section.display">DISPLAY</h3>
+          <button class="cc-btn" data-cc="fullscreen" type="button" aria-pressed="false" title="Toggle fullscreen mode (Alt+F)" data-i18n-attr="title:cc.titleFullscreen">
+            <span data-i18n="cc.fullscreen">Fullscreen</span>
             <span class="cc-perf-meta"><kbd>Alt+F</kbd><span class="cc-perf-state" data-cc="fullscreen-state">OFF</span></span>
           </button>
-          <button class="cc-btn" data-cc="perfmode" type="button" aria-pressed="false" title="Toggle Performance Mode (DPR cap + render FPS cap)">
-            <span>Performance Mode</span>
+          <button class="cc-btn" data-cc="perfmode" type="button" aria-pressed="false" title="Toggle Performance Mode (DPR cap + render FPS cap)" data-i18n-attr="title:cc.titlePerfMode">
+            <span data-i18n="cc.perfMode">Performance Mode</span>
             <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="perfmode-state">OFF</span></span>
           </button>
         </section>
         <section class="cc-section">
-          <h3 class="cc-section-title">DEVELOPER</h3>
-          <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD">
-            <span>Debug Overlay</span>
+          <h3 class="cc-section-title" data-i18n="cc.section.developer">DEVELOPER</h3>
+          <button class="cc-btn" data-cc="perf" type="button" aria-pressed="false" title="Toggle the Performance Observatory debug HUD" data-i18n-attr="title:cc.titleDebug">
+            <span data-i18n="cc.debugOverlay">Debug Overlay</span>
             <span class="cc-perf-meta"><kbd>Alt+D</kbd><span class="cc-perf-state" data-cc="perf-state">OFF</span></span>
           </button>
         </section>
         <section class="cc-section cc-reserved">
-          <h3 class="cc-section-title">RESERVED</h3>
-          <div class="cc-btn cc-btn-disabled"><span>Mods</span><span class="cc-soon">SOON</span></div>
-          <div class="cc-btn cc-btn-disabled"><span>Statistics</span><span class="cc-soon">SOON</span></div>
+          <h3 class="cc-section-title" data-i18n="cc.section.reserved">RESERVED</h3>
+          <div class="cc-btn cc-btn-disabled"><span data-i18n="cc.mods">Mods</span><span class="cc-soon" data-i18n="cc.soon">SOON</span></div>
+          <div class="cc-btn cc-btn-disabled"><span data-i18n="cc.statistics">Statistics</span><span class="cc-soon" data-i18n="cc.soon">SOON</span></div>
         </section>
       </div>
     `
@@ -200,7 +201,7 @@ export class ControlCenter {
       const opt = document.createElement('div')
       opt.className = 'cc-theme-option'
       opt.dataset.themeKey = def.key
-      opt.innerHTML = `<span class="cc-theme-swatch" style="background:${def.colors.accentPrimary}"></span><span class="cc-theme-name">${def.name}</span>`
+      opt.innerHTML = `<span class="cc-theme-swatch" style="background:${def.colors.accentPrimary}"></span><span class="cc-theme-name">${t(`theme.${def.key}`)}</span>`
       opt.addEventListener('click', (e) => {
         e.stopPropagation()
         this.callbacks?.onSelectTheme(def.key)
@@ -232,6 +233,10 @@ export class ControlCenter {
       this.el.classList.toggle('collapsed', this.collapsed)
       collapseBtn.textContent = this.collapsed ? '▶' : '◀'
     })
+
+    // Localize this panel's static strings (incl. the data-i18n-attr tooltips)
+    // at construction, so they're correct even before UIManager.refreshText().
+    localizeRoot(this.el)
   }
 
   init(callbacks: ControlCenterCallbacks): void {
@@ -322,8 +327,8 @@ export class ControlCenter {
     const c = this.callbacks.getCounts()
     const countsText =
       c.total === 0
-        ? 'No snapshots'
-        : `${c.total} snapshot${c.total === 1 ? '' : 's'} · manual ${c.manual}/${c.manualLimit}`
+        ? t('cc.noSnapshots')
+        : t('cc.counts.fmt', { total: c.total, manual: c.manual, limit: c.manualLimit })
     if (countsText !== this.lastCounts) {
       this.lastCounts = countsText
       this.countLine.textContent = countsText
@@ -332,26 +337,34 @@ export class ControlCenter {
     const rc = this.callbacks.getReplayCounts()
     const replayText =
       rc.total === 0
-        ? 'No replays'
+        ? t('cc.noReplays')
         : rc.favorites > 0
-          ? `${rc.total} replay${rc.total === 1 ? '' : 's'} · ★ ${rc.favorites}`
-          : `${rc.total} replay${rc.total === 1 ? '' : 's'}`
+          ? t('cc.replays.fmtFav', { total: rc.total, fav: rc.favorites })
+          : t('cc.replays.fmt', { total: rc.total })
     if (replayText !== this.lastReplayCounts) {
       this.lastReplayCounts = replayText
       this.replayCountLine.textContent = replayText
     }
 
+    const diffName = t(`difficulty.${world.difficultyKey}`) || world.difficulty.name
     const inRun = world.state !== 'menu' && world.state !== 'victory'
     const gameplayText = inRun
-      ? `${world.difficulty.name} · Stage ${String(world.stageIndex + 1).padStart(2, '0')} · ${world.currentStageName}`
-      : `${world.difficulty.name} · ${world.themeKey}`
+      ? t('cc.gameplay.inRun', {
+          difficulty: diffName,
+          n: String(world.stageIndex + 1).padStart(2, '0'),
+          name: world.currentStageName,
+        })
+      : t('cc.gameplay.menu', {
+          difficulty: diffName,
+          theme: t(`theme.${world.themeKey}`) || world.themeKey,
+        })
     if (gameplayText !== this.lastGameplay) {
       this.lastGameplay = gameplayText
       this.gameplayInfo.textContent = gameplayText
     }
 
     // Theme switcher label + dropdown highlight — only when the theme changes.
-    const themeName = this.themeNames.get(world.themeKey) ?? world.themeKey
+    const themeName = t(`theme.${world.themeKey}`) || this.themeNames.get(world.themeKey) || world.themeKey
     if (themeName !== this.lastThemeName) {
       this.lastThemeName = themeName
       if (this.themeNameEl) this.themeNameEl.textContent = themeName

@@ -125,8 +125,8 @@ export class ReplayController {
         <span class="rc-end-meta"></span>
       </div>
       <div class="rc-end-actions">
-        <button class="rc-end-btn rc-end-replay" type="button">↻ REPLAY</button>
-        <button class="rc-end-btn rc-end-menu" type="button">✕ MENU</button>
+        <button class="rc-end-btn rc-end-replay" type="button" data-i18n="replay.ctrl.replayAgain">↻ REPLAY</button>
+        <button class="rc-end-btn rc-end-menu" type="button" data-i18n="replay.ctrl.backToMenu">✕ MENU</button>
       </div>
     `
     document.body.appendChild(this.endOverlay)
