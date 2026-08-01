@@ -262,3 +262,65 @@ describe('PlaybackController.seekTo reproduces the timeline (no fast-forward des
     expect(ri.cursor).toBe(expectedCursor)
   })
 })
+
+// ================================================================
+// PlaybackController seek must NOT queue an audio burst (DECISIONS #78).
+//
+// Bug: seekTo() (and buildKeyframes) fast-forward N sim ticks; each tick
+// pushes sound events into world.events, but nobody drains them during the
+// catch-up — the render loop only consumes one frame's worth per rendered
+// frame. So the whole stage's sound effects pile up and detonate at once when
+// the next frame runs world.consumeEvents() -> the harsh burst on "drag the
+// seek bar". Fix: the catch-up loop drains (discards) events every tick.
+// ================================================================
+
+describe('PlaybackController seek leaves no audio backlog (DECISIONS #78)', () => {
+  function pendingEventsAfterSeek(
+    rec: ReturnType<typeof recordCoop> | ReturnType<typeof recordSingle>,
+    frac: number,
+  ): number {
+    const stage = STAGES[rec.stageIdx]
+    const world = new World()
+    world.rng.reseed(rec.seed)
+    world.difficultyKey = 'classic'
+    world.difficulty = DIFFICULTIES['classic']
+    world.rules = RULES['classic'] ?? DEFAULT_RULES
+    world.loadStageData(stage, rec.stageIdx)
+    const replay = { initialSnapshot: rec.result.snapshot, frames: rec.result.frames } as unknown as Replay
+    const pb = new PlaybackController(replay)
+    pb.start(world, new Simulation(world, null as any))
+    const sim = (pb as unknown as { simulation: Simulation }).simulation
+    pb.seekTo(world, sim, frac)
+    return world.events.length
+  }
+
+  it('coop seekTo leaves the world event queue empty at every seek point', () => {
+    const rec = recordCoop(14, 1785585133360, 6000) // the original bug stage
+    for (const frac of [0.1, 0.33, 0.5, 0.66, 0.9]) {
+      expect(pendingEventsAfterSeek(rec, frac)).toBe(0)
+    }
+  })
+
+  it('single-player seekTo also leaves the event queue empty', () => {
+    const rec = recordSingle(2, 777, 3000)
+    expect(pendingEventsAfterSeek(rec, 0.5)).toBe(0)
+  })
+
+  it('buildKeyframes leaves no audio backlog', () => {
+    const rec = recordCoop(0, 12345, 600)
+    const stage = STAGES[rec.stageIdx]
+    const world = new World()
+    world.rng.reseed(rec.seed)
+    world.difficultyKey = 'classic'
+    world.difficulty = DIFFICULTIES['classic']
+    world.rules = RULES['classic'] ?? DEFAULT_RULES
+    world.loadStageData(stage, rec.stageIdx)
+    const replay = { initialSnapshot: rec.result.snapshot, frames: rec.result.frames } as unknown as Replay
+    const pb = new PlaybackController(replay)
+    pb.start(world, new Simulation(world, null as any))
+    const sim = (pb as unknown as { simulation: Simulation }).simulation
+    // renderFn / captureFn are no-ops here; only the catch-up audio side matters.
+    pb.buildKeyframes(world, sim, () => {}, () => ({}) as unknown as ImageData)
+    expect(world.events.length).toBe(0)
+  })
+})

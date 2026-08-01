@@ -110,6 +110,9 @@ export class PlaybackController {
     for (let frame = 0; frame < totalFrames; frame++) {
       simulation.tick()
       buildInput.advance()
+      // #78: silent catch-up — drain events so the keyframe pass never leaves
+      // an audio/presentation backlog for the render loop to fire at once.
+      world.consumeEvents()
 
       if (frame - lastCapturedFrame >= this._keyframeInterval || frame === totalFrames - 1) {
         // Render and capture
@@ -132,6 +135,8 @@ export class PlaybackController {
     for (let i = 0; i < currentFrame; i++) {
       simulation.tick()
       restoredInput.advance()
+      // #78: drain so the restored position has no pending audio backlog.
+      world.consumeEvents()
     }
     this.phase = savedPhase
     this.accumulator = savedAccum
@@ -224,6 +229,14 @@ export class PlaybackController {
     for (let i = 0; i < targetFrame; i++) {
       simulation.tick()
       this.input.advance()
+      // DECISIONS #78: the catch-up loop MUST drain (and discard) world events
+      // every tick. Otherwise the sound effects generated across all
+      // `targetFrame` ticks pile up in world.events and detonate at once when
+      // the next render frame runs world.consumeEvents() -> a harsh burst of the
+      // whole stage's audio on "drag the seek bar". (The render loop normally
+      // drains one frame's worth per frame; during fast-forward nobody does, so
+      // we drain here instead and stay silent.)
+      world.consumeEvents()
     }
     // Pause after seek
     this.phase = 'paused'

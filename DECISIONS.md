@@ -494,3 +494,40 @@ and a v1 single-stream replay also seeks cleanly.
 (stages 3 & 8) each seek at five fractions and must reproduce the clean full
 playback outcome; plus a direct guard that the cursor sits at the expected
 offset after `seekTo(0.5)`. Gate: 713 pass / 0 fail; tsc, oxlint clean.
+
+## 78. Seek catch-up must drain (discard) world events — no audio burst (SHIPPED)
+
+Follow-up to #77: after the seek desync was fixed, **dragging the progress bar
+emitted a harsh burst of sound** — "把一个阶段的游戏音效一下子播放出来了". Same
+catch-up loops, a second side effect.
+
+**Root cause:** the render loop (`Game.ts`) calls `world.consumeEvents()` once per
+*rendered* frame, draining one frame's worth of events into audio + presentation.
+The seek fast-forward (`seekTo`) and thumbnail pre-pass (`buildKeyframes`) run
+`targetFrame` / `currentFrame` sim ticks with **nobody draining** in between. Each
+`tick()` pushes its sound effects into `world.events`; `restoreWorld` clears the
+buffer up front, then it silently accumulates across the whole catch-up. When the
+next rendered frame finally runs `consumeEvents()`, it plays the *entire*
+backlog at once — hundreds of shots/explosions detonating simultaneously.
+
+(`Game.ts:1624`'s "fast-forward to final frame for a thumbnail" loop is NOT
+affected: it ends with `restoreWorld(savedSnap)`, which clears `world.events`.)
+
+**Decision:** a silent catch-up must drain events every tick — mirrors what the
+render loop does, we just don't play them. The world state is already updated by
+`tick()`, so discarding the observation events is safe and keeps both audio AND
+presentation backlogs empty after seek (no stale particle/flash burst either).
+
+- `seekTo()`: `world.consumeEvents()` inside the fast-forward loop, per tick.
+- `buildKeyframes()`: `world.consumeEvents()` in BOTH the full replay loop and the
+  restore loop, per tick.
+
+**Reproduction / proof:** `tools/replay/repro-seek-audio.ts` measures the pending
+queue after a real `seekTo`. Pre-fix (non-draining equivalent) would queue **424**
+events on the coop replay and **142** on a v1 single-stream replay; post-fix the
+pending queue is **0** at every seek point.
+
+**Tests:** `tests/replay-seek.test.ts` — "PlaybackController seek leaves no audio
+backlog (#78)": coop seek leaves `world.events.length === 0` at 0.1/0.33/0.5/0.66/0.9,
+single-player seek also empty, and `buildKeyframes` leaves the queue empty.
+Gate: 716 pass / 0 fail (+3 vs #77); tsc, oxlint clean.
