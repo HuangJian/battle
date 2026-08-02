@@ -206,3 +206,33 @@ export const VERT_TUNNEL_THRESHOLD_MS = 450
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
 // which keeps bullets strictly faster than tanks (see that file for the
 // speed-ratio invariant). These old constants are intentionally removed.
+
+// ============================================================
+// Game loop policy (Game / loop driver)
+// ============================================================
+
+/**
+ * True idle for static screens — event-driven 0-loop.
+ *
+ * The game must hold 60 FPS while *playing* (the vsync rAF loop). But on the
+ * menu / pause / game-over / victory screens nothing animates at 60 FPS, and
+ * the on-demand render gate already skips the canvas repaint there, so the
+ * GPU is already idle. These static states are therefore fully *event-driven*:
+ * a single `keydown` listener processes menu/pause/recovery input the instant
+ * a key is pressed — the main thread goes fully to sleep. The moment input
+ * changes the state (start → playing, snapshot load → recovery, unpause →
+ * playing) the vsync rAF loop is re-armed with zero perceptible delay.
+ *
+ * Playback is an ACTION state regardless of world.state: a replay can drive
+ * the world into 'gameover' (∈ LOW_POWER_STATES), and the rAF loop must keep
+ * running so PlaybackController.update() and handlePlaybackInput() stay alive.
+ */
+export const LOW_POWER_STATES = new Set(['menu', 'paused', 'gameover', 'victory'])
+
+/**
+ * Max live sim ticks per render frame. Covers the fastest battle speed (×4 →
+ * 4 ticks/frame at 60 FPS) with headroom for frame-rate dips; anything beyond
+ * is dropped by the anti-spiral clamp below instead of spiraling. Mirrors
+ * PlaybackController.MAX_STEPS_PER_FRAME (DECISIONS #78 pattern).
+ */
+export const MAX_LIVE_STEPS = 8

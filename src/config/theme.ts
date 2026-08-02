@@ -244,4 +244,7 @@ export const THEMES: Record<string, ThemeColors> = {
   modern: MODERN_RETRO_THEME,
 }
 
+/** All theme keys, in registration order (menu cycling / selection). */
+export const THEME_KEYS = Object.keys(THEMES)
+
 export const DEFAULT_THEME = 'modern'
