@@ -5,6 +5,7 @@ import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS, opposite } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
+import { scanAheadImpl } from './FireControl'
 
 // ============================================================
 // ThreatAssessor — bullet-threat assessment + dodging (T8, M3)
@@ -608,4 +609,94 @@ export function hasEnemyBulletInLineImpl(
     if (dist < TANK * 8) return true
   }
   return false
+}
+
+/**
+ * §85: Close-range enemy exposure check — is the player about to turn its
+ * back on a close enemy that could fire and kill it before it can dodge?
+ *
+ * The navigate branch only checks for BULLET threats (findPathThreat). But
+ * an enemy tank that is aligned with the player (same row/col), close
+ * (within `range` cells), and has no wall between them can fire at any
+ * moment. If the player's moveDir moves it ALONG the enemy's line of fire
+ * (not perpendicular — a perpendicular move would be a dodge), the player
+ * is exposed: the enemy fires, the bullet is faster, and the player gets
+ * hit in the back.
+ *
+ * This function returns the direction the player should face to engage the
+ * threatening enemy (stop-and-fire), or null if no close-range exposure
+ * is detected.
+ *
+ * Condition for "exposed":
+ *   1. Enemy within `range` cells (Manhattan distance in the scan axis)
+ *   2. Enemy aligned with the player (same row or col, within TANK px)
+ *   3. No wall/steel between player and enemy (scanAhead finds enemy, not wall)
+ *   4. The player's moveDir is NOT toward the enemy (turning away)
+ *
+ * When exposed, the player should stop and fire at the enemy instead of
+ * moving away. If the enemy is in a different direction than the player's
+ * current facing, the player should turn to face the enemy.
+ */
+export function closeCombatExposureImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  moveDir: Direction | null,
+  range: number,
+): Direction | null {
+  if (!moveDir) return null
+  const w = self.world
+  const tanksArr = w.tanks
+  const rangePx = range * CELL
+
+  for (let ti = 0; ti < tanksArr.length; ti++) {
+    const t = tanksArr[ti]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const dx = tcx - pcx
+    const dy = tcy - pcy
+
+    // Check alignment: same row or col (within TANK px)
+    let enemyDir: Direction | null = null
+    let scanDist = 0
+    if (Math.abs(dx) < TANK) {
+      if (dy < 0) {
+        enemyDir = 'up'
+        scanDist = -dy
+      } else {
+        enemyDir = 'down'
+        scanDist = dy
+      }
+    } else if (Math.abs(dy) < TANK) {
+      if (dx < 0) {
+        enemyDir = 'left'
+        scanDist = -dx
+      } else {
+        enemyDir = 'right'
+        scanDist = dx
+      }
+    }
+    if (!enemyDir) continue
+    if (scanDist > rangePx) continue
+
+    // Check no wall between player and enemy (scanAhead finds enemy)
+    const scan = scanAheadImpl(self, pcx, pcy, enemyDir)
+    if (!scan.enemy) continue
+
+    // Check if moveDir is NOT toward the enemy — the player is turning away.
+    // "Toward the enemy" = same direction as enemyDir (closing distance — safe).
+    // Perpendicular moves are dodges — also safe (the player clears the
+    // enemy's line of fire before a bullet can arrive).
+    // Only FLEEING (moving in the opposite direction = exposing the back)
+    // is the dangerous case the check is designed to prevent.
+    if (moveDir === enemyDir) continue // moving toward enemy — safe
+    if (moveDir !== opposite(enemyDir)) continue // perpendicular — dodge, safe
+
+    // The player is fleeing from a close enemy with a clear shot.
+    // Return the direction to face the enemy and fire instead.
+    return enemyDir
+  }
+  return null
 }

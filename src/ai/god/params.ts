@@ -630,6 +630,47 @@ export interface GodAIParams {
    * 1 = ON (default — the fix).
    */
   aimTurnSnapGuard: number
+
+  /**
+   * §84: Aggressive branch stall detection. When > 0, the aggressive
+   * (freeze/shield) stop-and-aim code tracks how long the player has been
+   * stopped at the same cell with no kills. If the player camps for more
+   * than `aggCampTimeoutTicks` ticks without a kill, the AI falls through
+   * to navigate (which repositions the player toward the enemy).
+   *
+   * Root cause (replay classic-s03-…-seed1785643123096, 0:20–0:36):
+   * the aggressive branch has NO anti-stall guard (unlike T2a which has
+   * `_campTicks` and navigate which has `_navStuckTicks`). When the player
+   * stops to aim at an enemy but the bullet keeps missing (enemy slightly
+   * offset in the perpendicular axis, so the 6px bullet passes above/below
+   * the 32px tank), the player stays put firing at nothing for the ENTIRE
+   * freeze window — measured at 1080+ ticks (18 seconds) in the replay.
+   *
+   * 0 = OFF (byte-identical to pre-§84 behavior). 120 = 2 seconds (default).
+   */
+  aggCampTimeoutTicks: number
+
+  /**
+   * §85: Close-range enemy exposure check in navigate. When > 0, the
+   * navigate branch checks if the player's _moveDir would expose the
+   * player to a close-range enemy's line of fire. If an enemy is within
+   * `closeCombatDangerRange` cells, aligned with the player (same row/col),
+   * has no wall between them, and the player's moveDir is NOT toward that
+   * enemy, the move is cancelled — the player stops and fires at the
+   * enemy instead (or turns to face it).
+   *
+   * Root cause (replay classic-s03-…-seed1785643123096, 1:03): the player
+   * was in close combat with an enemy, turned away (moveDir = away from
+   * enemy), and was killed by the enemy's bullet before it could dodge.
+   * The navigate branch only checks for BULLET threats (findPathThreat),
+   * not for enemy tanks that could fire. This check adds enemy-tank
+   * threat assessment: "don't turn your back on a close enemy."
+   *
+   * 0 = OFF (byte-identical to pre-§85). 1 = ON (default).
+   */
+  closeCombatDangerCheck: number
+  /** §85: max distance (cells) for the close-range enemy exposure check. */
+  closeCombatDangerRange: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -827,6 +868,15 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §80: Turn-snap aim guard — 1 = ON (default, the fix). 0 = OFF (pre-§80
   // behavior, A/B baseline). See interface docs.
   aimTurnSnapGuard: 1,
+  // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
+  aggCampTimeoutTicks: 120,
+  // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.
+  closeCombatDangerCheck: 1,
+  // §85: max distance (cells) for the exposure check. Default 2 (point-blank)
+  // — at range 4 the check was too aggressive, causing -1.6pp regression by
+  // cancelling legitimate navigation. At range 2, the check only fires when
+  // the enemy is truly adjacent (32px), where fleeing is almost certainly death.
+  closeCombatDangerRange: 2,
 }
 
 /**

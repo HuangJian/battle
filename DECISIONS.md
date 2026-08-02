@@ -671,3 +671,54 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 
 **Implications:** 默认随代码 SHIPPED（无参数开关，逻辑内联）。已修复真实 replay 致命 bug 且无评估框架回归。推进方向：若想让该修复在 God AI 调优 framework 上显现价值，需给 sim-runner 的受困走廊场景构造/加权重，或用浏览器 spectate 同源 RNG 接线复现——但那属于评估基建，非本 bug 修复范围。
 
+
+## 84. §84: Aggressive branch stall detection — freeze window no longer wasted firing at nothing (SHIPPED)
+
+**Symptom:** `classic-s03-clear-l3-t79-seed1785643123096.replay` (0:20–0:36): during a freeze window the player sat at cell (16,5) facing left, firing at a fast enemy 3 cells away but slightly offset in Y. The 6px bullet passed above/below the 32px enemy body, so every shot missed. The aggressive branch has NO anti-stall guard (unlike T2a's `_campTicks` and navigate's `_navStuckTicks`), so the player wasted the ENTIRE freeze window (1080+ ticks / 18 seconds) in one spot.
+
+**Root cause:** the aggressive (freeze/shield) branch's stop-and-aim code has no escape mechanism. When `scanAhead` finds an enemy (via the ±8px offset lines) but the actual bullet (6px, centered) misses, the player stops and fires indefinitely. T2a has `_campTicks` + `_antiCampSuppress` to break deadlocks; navigate has `_navStuckTicks`. The aggressive branch had neither — and during a freeze window it is the ONLY branch that runs.
+
+**Decision:** New param `aggCampTimeoutTicks` (default **120** = 2 seconds; 0 = OFF = byte-identical pre-§84). When ON, the aggressive stop-and-aim tracks how long the player has been at the same cell zone (±1 cell, same as T2a's zone tracking). When camping exceeds `aggCampTimeoutTicks` with no kills, the AI sets `_aggCampSuppress = antiCampSuppressTicks` (reusing the existing T2a suppress param, 60 ticks) and falls through to navigate. The suppress timer prevents re-entry into stop-and-aim for 60 ticks, giving the player enough consecutive navigate ticks to actually reposition.
+
+**Rationale:**
+- The freeze window is the highest-value window in the game (enemies are helpless). Wasting it firing at nothing is the worst possible outcome — worse than navigating suboptimally.
+- The suppress mechanism reuses `antiCampSuppressTicks` (not a new param) because the semantics are identical: "suppress stop-and-aim for N ticks to let the player navigate." AGENTS §10: Simple beats clever.
+- MANIFEST §13 Three Gates: (1) freeze window kills are more enjoyable; (2) one param + one suppress field is simple; (3) breaking deadlocks respects the original.
+
+**Results (2026-08-02, classic 35 stages × 20 seeds, 18000 ticks):**
+- §84 ON alone (§85 OFF): **92.9%** vs baseline 92.6% = **+0.3pp**, 0 stages below 80%. No regressions.
+- §84 + §85 ON (final shipped): **93.0%**, 0 stages below 80%.
+
+**Tests:** `tests/godai-stall-exposure.test.ts` — 4 tests: default param check, stall OFF (player stays stuck 300+ ticks), stall ON (player breaks free <200 ticks), kill resets timer (productive camping unaffected).
+
+**Implications:** Default ON (ships). The §80 turn-snap guard test was updated to disable §84 (`aggCampTimeoutTicks=0`) when isolating the guard-OFF behavior, since §84 now provides a safety net that breaks the same deadlock the guard prevents.
+
+---
+
+## 85. §85: Close-range enemy exposure check — don't flee from point-blank enemies (SHIPPED)
+
+**Symptom:** `classic-s03-clear-l3-t79-seed1785643123096.replay` (1:03): the player was in close combat with an enemy, turned away (moveDir = away from enemy), and was killed by the enemy's bullet before it could dodge. The navigate branch only checks for BULLET threats (`findPathThreat`), not for enemy tanks that could fire.
+
+**Root cause:** the navigate branch determines `_moveDir` via A*/directMove, then checks for bullet threats. But it doesn't check for enemy tanks that are aligned, close, and have a clear shot. If the player's moveDir takes it AWAY from such an enemy (fleeing), the enemy fires, the bullet is faster, and the player gets hit in the back.
+
+**Decision:** New params `closeCombatDangerCheck` (default **1** = ON; 0 = OFF) and `closeCombatDangerRange` (default **2** = point-blank, 32px). When ON, after the navigate branch determines `_moveDir`, `closeCombatExposureImpl` checks: is there an enemy within `range` cells, aligned (same row/col, within TANK px), with no wall between (scanAhead finds enemy), AND the player's moveDir is the OPPOSITE of the enemy's direction (fleeing)? If so, cancel the move — face the enemy and fire instead.
+
+**Critical design choices (discovered via A/B testing):**
+1. **Perpendicular moves are safe** — the initial implementation caught ALL non-toward moves (including perpendicular dodges), causing -1.7pp regression. Fixed: only `moveDir === opposite(enemyDir)` (fleeing) triggers the check. Perpendicular moves are dodges and are always safe.
+2. **Range 2, not 4** — at range 4, the check fired too often, cancelling legitimate navigation (retreating to defend, repositioning). A/B at 35×20: range 4 = 91.0% (-1.6pp), range 2 = 93.0% (+0.4pp), range 1 = 92.9% (+0.3pp). Range 2 is the sweet spot — the enemy is truly adjacent (32px), where fleeing is almost certainly death.
+
+**Rationale:**
+- At point-blank range (2 cells = 32px), the enemy's bullet travel time is ~8 ticks. The player's dodge reaction delay is 0 ticks (God AI), but the player must TURN to face the bullet first (1+ tick for axis-snap), then the bullet-cancellation fire must not be on cooldown. Fleeing gives the enemy a free shot at the player's back — almost certainly lethal.
+- At range 4+ (64px+), the bullet travel time is ~16 ticks — enough time for the existing dodge system (findMostDangerousBullet) to handle the threat. The §85 check is unnecessary and harmful at that range.
+- MANIFEST §13 Three Gates: (1) eliminating "flee and die" at point-blank is more enjoyable; (2) one param + one range param is simple; (3) facing the enemy to trade shots respects the original.
+
+**Results (2026-08-02, classic 35 stages × 20 seeds, 18000 ticks):**
+- §85 ON, range=4: **91.0%** (-1.6pp) — REJECTED (too aggressive).
+- §85 ON, range=2: **93.0%** (+0.4pp) — SHIPPED. 0 stages below 80%.
+- A/B: baseline (both OFF) 92.6% → final (both ON, range=2) 93.0% = **+0.4pp, 0 regressions**.
+
+**Tests:** `tests/godai-stall-exposure.test.ts` — 8 tests: default params, perpendicular=safe, fleeing=exposed, toward=safe, wall-blocks=safe, beyond-range=safe, disabled=safe.
+
+**Implications:** Default ON with range=2 (ships). The check is deliberately conservative — only point-blank fleeing triggers it. This ensures it catches the reported bug (player flees from adjacent enemy) without disrupting normal navigation.
+
+

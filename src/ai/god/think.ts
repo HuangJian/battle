@@ -44,6 +44,8 @@ export function thinkImpl(self: GodAIInput): void {
 
   // P0.1: Decrement anti-camp suppression every tick the player is alive.
   if (self._antiCampSuppress > 0) self._antiCampSuppress--
+  // §84: Decrement aggressive camp suppression every tick.
+  if (self._aggCampSuppress > 0) self._aggCampSuppress--
 
   // ---- M6: Cooldown-aware firing ----
   // In 'bulletCap' mode (classic FC), the engine gates fire by on-screen
@@ -150,7 +152,7 @@ export function thinkImpl(self: GodAIInput): void {
     // grid-snap would shove the tank off the firing line) we fall through to
     // the navigate path, which has real stall detection — this is what
     // breaks the period-2 freeze-window deadlock.
-    if (aimDir && aimSurvivesTurnImpl(self, p, aimDir)) {
+    if (aimDir && self._aggCampSuppress <= 0 && aimSurvivesTurnImpl(self, p, aimDir)) {
       // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
       // Without this check, the AI fires through steel walls at enemies
       // it can see via global vision but cannot actually hit.
@@ -171,13 +173,64 @@ export function thinkImpl(self: GodAIInput): void {
         !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
         !(aggScan.baseSteel && (p.level ?? 0) >= 3)
       ) {
-        if (p.dir === aimDir) {
-          self._moveDir = null
+        // §84: Aggressive stall detection — track how long the player has
+        // been stopped at this cell. The aggressive branch has NO anti-stall
+        // guard (unlike T2a's _campTicks and navigate's _navStuckTicks).
+        // Without this, the player can sit at one cell firing at an enemy
+        // whose body is slightly offset from the bullet path (the 6px bullet
+        // passes above/below the 32px tank) for the ENTIRE freeze window.
+        // When camping exceeds aggCampTimeoutTicks with no kills, fall
+        // through to navigate, which repositions the player toward the enemy.
+        if (self.params.aggCampTimeoutTicks > 0) {
+          const pc84 = self.playerCell()
+          if (
+            self._aggCampCell &&
+            Math.abs(self._aggCampCell.col - pc84.col) <= 1 &&
+            Math.abs(self._aggCampCell.row - pc84.row) <= 1
+          ) {
+            self._aggCampTicks++
+            if (w.killCount !== self._aggCampKillsAtStart) {
+              self._aggCampTicks = 1
+              self._aggCampKillsAtStart = w.killCount
+            }
+          } else {
+            self._aggCampCell = { col: pc84.col, row: pc84.row }
+            self._aggCampTicks = 1
+            self._aggCampKillsAtStart = w.killCount
+          }
+
+          if (
+            self._aggCampTicks > self.params.aggCampTimeoutTicks &&
+            w.killCount === self._aggCampKillsAtStart
+          ) {
+            // Camped too long with no kills — suppress aggressive
+            // stop-and-aim for a while and fall through to navigate.
+            // Without the suppress, the player re-enters stop-and-aim on
+            // the very next tick (aimDir still finds the enemy, scanAhead
+            // still finds it) and camps for another full timeout cycle —
+            // net movement: ~1 tick of navigate per 120 ticks of camp.
+            self._aggCampCell = null
+            self._aggCampTicks = 0
+            self._aggCampSuppress = self.params.antiCampSuppressTicks
+            // Fall through to power-up / navigate below.
+          } else {
+            if (p.dir === aimDir) {
+              self._moveDir = null
+            } else {
+              self._moveDir = aimDir
+            }
+            self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+            return
+          }
         } else {
-          self._moveDir = aimDir
+          if (p.dir === aimDir) {
+            self._moveDir = null
+          } else {
+            self._moveDir = aimDir
+          }
+          self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+          return
         }
-        self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-        return
       }
       // Enemy behind obstacle — fall through to navigate toward it.
     }
@@ -211,6 +264,13 @@ export function thinkImpl(self: GodAIInput): void {
     self.branchCounts.aggressive++
     return
   }
+
+  // §84: Reset aggressive camp tracking when not in aggressive mode.
+  if (self._aggCampCell) {
+    self._aggCampCell = null
+    self._aggCampTicks = 0
+  }
+  if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
 
   // ---- T2a: Stop-and-aim (enemy in same row/col) ----
   // P0.2: Only camp when there's a REAL enemy in the line of fire
@@ -567,6 +627,27 @@ export function thinkImpl(self: GodAIInput): void {
   // priorities are intact (same placement discipline as §68-v2 above).
   if (!shielded && self.params.trapAvoidance > 0 && self._moveDir) {
     self._moveDir = self.trapAvoidance(p, self._moveDir)
+  }
+  // §85: Close-range enemy exposure check — don't turn your back on a
+  // close enemy. If an enemy is within closeCombatDangerRange cells,
+  // aligned with the player (same row/col), has no wall between them,
+  // and the player's moveDir is NOT toward that enemy, cancel the move
+  // and face the enemy to fire instead. This prevents the "turn and walk
+  // away from a close enemy, get shot in the back" death pattern.
+  if (!shielded && self.params.closeCombatDangerCheck > 0 && self._moveDir) {
+    const dangerDir = self.closeCombatExposure(
+      pcx,
+      pcy,
+      self._moveDir,
+      self.params.closeCombatDangerRange,
+    )
+    if (dangerDir) {
+      // Cancel the move — face the enemy and fire.
+      self._moveDir = p.dir === dangerDir ? null : dangerDir
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dangerDir)
+      self.branchCounts.navigate++
+      return
+    }
   }
   // Fire control: when blocked by a breakable wall (verified by
   // canMoveOrBreak in directMove), fire immediately to break through.
