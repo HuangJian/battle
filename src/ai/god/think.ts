@@ -164,7 +164,7 @@ export function thinkImpl(self: GodAIInput): void {
     }
   }
 
-  // ---- §87: Urgent power-up pickup (user request 2026-08-02) ----
+  // ---- §87/§88: Urgent power-up pickup (user request 2026-08-02) ----
   // A CLOSE power-up with a SAFE PATH outranks kill (T2a) and base defense
   // (selectTarget's defense position). bomb/freeze/fence within
   // pickupPriorityHighRange, star/tank/shield within pickupPriorityMidRange,
@@ -178,8 +178,19 @@ export function thinkImpl(self: GodAIInput): void {
   // power-ups when no enemy is aligned, and an aligned frozen enemy is a
   // free kill we must not interrupt. Gated by pickupPriorityMode (0 = OFF,
   // byte-identical to pre-§87).
+  //
+  // §88 (chokepointMode>0) reorders per the user's rule-4 chain:
+  //   炸弹/冰冻/护栏（8格以内） > 回防基地 > 星星/加命/护盾（4格以内） > 据守咽喉要地
+  // So HIGH-tier (bomb/freeze/fence) still outranks base defense and is
+  // checked here; MID-tier (star/tank/shield) yields to base defense and is
+  // checked AFTER the T2a section (see the §88 MID branch below). When
+  // chokepointMode==0, the original all-tiers-together order is kept
+  // (byte-identical to pre-§88).
   if (!self.aggressive && self.params.pickupPriorityMode > 0) {
-    const urgentTarget = self.findUrgentPowerUpTarget(pcx, pcy)
+    const urgentTarget =
+      self.params.chokepointMode > 0
+        ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
+        : self.findUrgentPowerUpTarget(pcx, pcy)
     if (urgentTarget) {
       self._moveDir = self.navigateTowards(urgentTarget)
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
@@ -318,6 +329,37 @@ export function thinkImpl(self: GodAIInput): void {
     self._aggCampTicks = 0
   }
   if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
+
+  // ---- §88: MID-tier urgent pickup (star/tank/shield 4格) ----
+  // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
+  // tier (bomb/freeze/fence) was already checked before T2a. Only runs when
+  // chokepointMode > 0; otherwise the single §87 branch above handled all
+  // tiers (byte-identical).
+  //
+  // (placement fixes, A/B rounds 2-3) This branch sits BEFORE T2a — the §87
+  // invariant is that urgent pickups outrank stop-and-aim kill (T2a). Two
+  // per-seed tick-diff findings drove the current form:
+  //   - Round 2: placing it AFTER T2a demoted a 4-cell shield to "keep
+  //     killing" (S19 seed 14) — moved before T2a.
+  //   - Round 3: gating it on `!(hasBase && isBaseUnderThreat())` made the
+  //     player ABANDON a 3-cell star to "defend" — the old baseUnderThreat
+  //     box (enemy near base) fired while the star was safe to grab (S32
+  //     seed 17: A grabbed star@(6,12) at t1684, B turned back down and
+  //     eventually lost). The §87 urgent-pickup gates (nearby-enemy 5 格,
+  //     route-danger, A*-reachability) already make a close pickup safe;
+  //     double-gating on baseUnderThreat only burns the star. Rule 4's
+  //     "回防基地 > 星星/加命/护盾" is honored by the HIGH tier outranking
+  //     base defense while MID yields to 据守 (the hold arm below), not by
+  //     abandoning safe point-blank pickups.
+  if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
+    const midTarget = self.findUrgentPowerUpTarget(pcx, pcy, 'midlow')
+    if (midTarget) {
+      self._moveDir = self.navigateTowards(midTarget)
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+      self.branchCounts.powerup++
+      return
+    }
+  }
 
   // ---- T2a: Stop-and-aim (enemy in same row/col) ----
   // P0.2: Only camp when there's a REAL enemy in the line of fire

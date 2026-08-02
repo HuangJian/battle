@@ -5,6 +5,7 @@ import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase } from './SmartThreatModel'
+import { blocksBullet } from './Chokepoint'
 
 // ============================================================
 // StrategyPlanner — target selection (S6 attack-defense), power-up
@@ -154,10 +155,25 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
  * passable neighbour) or null. Gated by pickupPriorityMode — the caller
  * (think) only invokes this when > 0, so OFF is byte-identical.
  */
+/** §88 tier filter: HIGH = bomb/freeze/fence (+ modern emp/guard); MID/LOW = the rest. */
+function urgentTier(type: PowerUpType): 'high' | 'midlow' {
+  switch (type) {
+    case 'bomb':
+    case 'freeze':
+    case 'fence':
+    case 'emp':
+    case 'guard':
+      return 'high'
+    default:
+      return 'midlow'
+  }
+}
+
 export function findUrgentPowerUpTargetImpl(
   self: GodAIInput,
   pcx: number,
   pcy: number,
+  tier: 'all' | 'high' | 'midlow' = 'all',
 ): Cell | null {
   const w = self.world
   const powerUps = w.powerUps
@@ -198,6 +214,9 @@ export function findUrgentPowerUpTargetImpl(
     if (!pu.alive) continue
     const cx = pu.x + pu.w / 2
     const cy = pu.y + pu.h / 2
+    // §88 tier gate: only consider items of the requested tier (default 'all'
+    // = pre-§88 behavior, byte-identical).
+    if (tier !== 'all' && urgentTier(pu.type) !== tier) continue
     const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
     const range = urgentPickupRange(pu.type, p)
     // Distance gate by category — the core of the tuning sweep.
@@ -389,6 +408,65 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
  *   4. Normal: enemy closest to base → intercept at defense row
  *   5. No enemies → default defense position
  */
+/**
+ * §88 A/B round 3: can a tank parked at `choke` shoot the imminent enemy
+ * (cell `enemy`) or its nearest threat point? Same row or column with clear
+ * bullet LOS (brick/steel/base block). Used to decide chase-vs-hold: when the
+ * chokepoint covers the enemy's approach, holding is strictly better than a
+ * direct chase (the player shoots the enemy as it crosses); when it does NOT
+ * cover the approach, the player must chase the enemy directly (S32 seed 23:
+ * chokepoint (15,18) could not shoot a fast at (24,22) heading for the base).
+ *
+ * This is an ENDPOINT proxy for path coverage: the real threat path is the
+ * A* corridor from the enemy to its nearest threat point, and a path can
+ * pass through a cell sharing the chokepoint's row/col even when neither
+ * endpoint does. The endpoints are a sound approximation for the short
+ * (<= chaseMaxDist 3 cells) imminent corridors that drive this decision —
+ * do NOT "fix" this into a per-path A* re-walk without A/B evidence.
+ */
+function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell): boolean {
+  const w = self.world
+  const tm = w.tileMap
+  const plan = self._chokepointPlan
+  // Enemy's nearest threat point (reuse the throttled plan's cached set).
+  let tpCol = -1
+  let tpRow = -1
+  let tpDist = Infinity
+  if (plan) {
+    for (let ti = 0; ti < plan.threatPoints.length; ti++) {
+      const t = plan.threatPoints[ti]
+      const d = Math.abs(t.col - enemy.col) + Math.abs(t.row - enemy.row)
+      if (d < tpDist) {
+        tpDist = d
+        tpCol = t.col
+        tpRow = t.row
+      }
+    }
+  }
+
+  // LOS check from the chokepoint to a target cell: same row or column with
+  // no brick/steel/base between. (Water lets bullets pass — blocksBullet.)
+  const clear = (c: number, r: number): boolean => {
+    if (choke.col === c) {
+      const step = choke.row < r ? 1 : -1
+      for (let rr = choke.row + step; rr !== r; rr += step) {
+        if (blocksBullet(tm.grid[rr][c])) return false
+      }
+      return true
+    }
+    if (choke.row === r) {
+      const step = choke.col < c ? 1 : -1
+      for (let cc = choke.col + step; cc !== c; cc += step) {
+        if (blocksBullet(tm.grid[r][cc])) return false
+      }
+      return true
+    }
+    return false
+  }
+  if (clear(enemy.col, enemy.row)) return true
+  return tpCol >= 0 && clear(tpCol, tpRow)
+}
+
 export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | null {
   // (perf §68 Round 9) NOTE: cross-tick caching was evaluated and REJECTED.
   // A 30-tick (0.5s) cache caused S6 Iron Curtain win rate to drop from
@@ -505,6 +583,57 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       }
     }
     return self.tankCell(best)
+  }
+
+  // ---- §88: 据守咽喉要地 (chokepoint holding, user request 2026-08-02) ----
+  // Rule 2: when the base is NOT under threat, hold the chokepoint (咽喉要地)
+  // while swarmed — enemies on field > chokepointHoldThreshold — and chase the
+  // enemy nearest a threat point otherwise (<= threshold). The chokepoint is
+  // the lower-half cell that can shoot the most threat paths (see
+  // Chokepoint.ts); navigating there and holding lets the player intercept
+  // base-bound enemies instead of roaming. Gated by chokepointMode (0 = OFF,
+  // byte-identical to pre-§88). Falls through to the normal target selection
+  // below when no chokepoint/coverage exists (no threat points, no enemies
+  // heading for the base, steel-sealed base, etc.).
+  //
+  // A/B round 2 (per-seed tick-diff): the hold arm ALSO requires a live
+  // imminent threat (threatChaseTarget non-null — some enemy within
+  // chokepointChaseMaxDist of a threat point). Without it the player walked
+  // to the (30-tick cached) chokepoint, found the enemies had turned away,
+  // and idled there while the base fell from another side (S19 seed 23:
+  // player oscillated at (4,20) for ~1200 ticks). Once at the hold cell with
+  // no imminent threat, fall through to the normal nearest-enemy chase.
+  if (self.params.chokepointMode > 0 && self.hasBase && !baseUnderThreat) {
+    // ---- Rule 1 (imminent enemy) outranks rule 2 (hold) ----
+    // An enemy within chokepointChaseMaxDist of a threat point, facing the
+    // base, is about to attack it — 优先击杀这些敌人. Chase it directly
+    // UNLESS the chokepoint already covers its approach (same row/col with
+    // clear LOS to the enemy or its nearest threat point): then holding lets
+    // the player shoot it as it crosses — strictly better than a chase.
+    // A/B round 3 (S32 seed 23): without this, the hold arm (enemies > 2)
+    // marched the player to a chokepoint that could NOT shoot the imminent
+    // fast tank's lane, and the fast broke through while A chased it.
+    // (chase computed once — the hold arm reuses it, same-tick identical.)
+    const chase = self.threatChaseTarget()
+    const choke = self.chokepointCell()
+    if (chase && (!choke || !chokepointCoversEnemy(self, choke, chase))) {
+      self.branchCounts.chokepoint++
+      return chase
+    }
+    if (enemies.length > self.params.chokepointHoldThreshold && choke) {
+      // Hold only when an enemy is still approaching a threat point (the
+      // imminence gate) AND the hold cell is close enough to march to — a
+      // far hold cell is pure march time the enemy turns during (S26 seed
+      // 12). Otherwise fall through to the normal hunt below.
+      const holdDist = Math.abs(choke.col - playerCell.col) + Math.abs(choke.row - playerCell.row)
+      if (
+        chase &&
+        (self.params.chokepointHoldMaxDist <= 0 || holdDist <= self.params.chokepointHoldMaxDist)
+      ) {
+        self.branchCounts.chokepoint++
+        return choke
+      }
+    }
   }
 
   // ---- S6: Aggressive hunt mode ----

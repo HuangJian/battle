@@ -48,6 +48,12 @@ const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 // §87 defaults (urgent power-up pickup ON: 8/4/2 + danger 0 + minEnemyDist 5
 // + spawnRowMax 3). Mean 90.9% (1908/2100) — the §87 A/B's B arm
 // (tmp/pickup-on-8-4-2-g6.json), see DECISIONS §87.
+// §88/§94 (2026-08-03): regenerated from the 35×60 measurement of the SHIPPED
+// §88 defaults (chokepoint holding ON — DECISIONS §94). Mean 90.9% — identical
+// to §87, with gains S6 +1.7pp (73.3→75.0), S16 +1.7pp (95.0→96.7),
+// S28 +5.0pp (86.7→91.7) and NO stage below its §87 truth. S28 keeps its
+// conservative pre-§87 truth: in the full-suite gate context Spider swings
+// 13-20/20, so the 91.7% @60 truth (floor 14) fails on context noise.
 const TRUTH_WIN_PCT: number[] = [
   98.3, // S0  Outpost
   96.7, // S1  Waterways
@@ -55,7 +61,7 @@ const TRUTH_WIN_PCT: number[] = [
   96.7, // S3  Crossfire
   91.7, // S4  Maze
   83.3, // S5  Brickworks
-  73.3, // S6  Iron Curtain (override REMOVED §54: stale conservative leash harmed S6)
+  75.0, // S6  Iron Curtain (§94 +1.7pp: chokepoint holding covers the western lane)
   93.3, // S7  Riverbed
   98.3, // S8  Twin Towers
   98.3, // S9  Gauntlet
@@ -65,7 +71,7 @@ const TRUTH_WIN_PCT: number[] = [
   100.0, // S13 Steel Web
   81.7, // S14 Citadel
   96.7, // S15 Crossroads
-  95.0, // S16 Twin Spires
+  96.7, // S16 Twin Spires (§94 +1.7pp)
   98.3, // S17 Gridlock
   85.0, // S18 Frozen Field (override REMOVED §55; §87 pickup priority +4 wins @60)
   98.3, // S19 Bastion
@@ -79,8 +85,8 @@ const TRUTH_WIN_PCT: number[] = [
   90.0, // S27 Thicket
   86.7, // S28 Spider — gate-context floor kept at pre-§87 level: the full-suite
   //   context is order-dependent (module-level genId counter, World.ts) and
-  //   Spider swings 13-20/20 between contexts; §87 eval shows 91.7% @60 (+1),
-  //   but a floor of 14 fails on pre-existing context noise, not on §87.
+  //   Spider swings 13-20/20 between contexts; §94 eval shows 91.7% @60 (+5),
+  //   but a floor of 14 fails on pre-existing context noise, not on §94.
   90.0, // S29 Concentric
   76.7, // S30 Eagle Nest
   93.3, // S31 Star Fort

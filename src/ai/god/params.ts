@@ -780,6 +780,100 @@ export interface GodAIParams {
    * an urgent short-range errand.
    */
   pickupPrioritySpawnRowMax: number
+
+  // ---- §88: 据守咽喉要地 (chokepoint holding, user request 2026-08-02) ----
+  /**
+   * §88: 0 = OFF (byte-identical to pre-§88). 1 = ON: when the base is NOT
+   * under threat, the player HOLDS a 咽喉要地 (chokepoint) instead of chasing
+   * the nearest enemy — a lower-half map cell from which the player can
+   * shoot enemies traversing the most 威胁路径 (threat paths: A* routes
+   * from each enemy to its nearest 威胁点, facing-gated per rule 3). When
+   * few enemies remain (<= chokepointHoldThreshold), the player chases the
+   * enemy nearest a threat point instead.
+   *
+   * 威胁点 (threat point) = a cell from which an enemy can directly shoot the
+   * base — exactly the `canShootBaseFrom` predicate (SmartThreatModel).
+   *
+   * §88 also reorders the §87 urgent-pickup priority chain to the user's
+   * spec: HIGH tier (bomb/freeze/fence 8格) > 回防基地 > MID tier
+   * (star/tank/shield 4格) > 据守咽喉要地. Only active when chokepointMode
+   * is ON; when OFF, §87 keeps its shipped all-tiers-before-defense order
+   * (byte-identical).
+   */
+  chokepointMode: number
+  /**
+   * §88: margin (cells) around a threat point that still counts as "base
+   * threatened" (rule 1: 威胁点外 2 格, needs tuning). An enemy within this
+   * Manhattan distance of ANY threat point triggers the base-threat state.
+   */
+  threatPointMargin: number
+  /**
+   * §88: hold-threshold (rule 2: 敌人数目 > 2 → 据守). When the number of
+   * live enemies on field is GREATER than this value (and the base is not
+   * threatened), the player holds the chokepoint; at or below it, the
+   * player chases the enemy nearest a threat point.
+   */
+  chokepointHoldThreshold: number
+  /** §88: lowest row for chokepoint candidates (地图下半区, default 13). */
+  chokepointMinRow: number
+  /**
+   * §88: tie-break weight for STEEL cover around a chokepoint candidate
+   * (rule 5: 钢铁优先级远高于砖墙). Steel-adjacent cells score
+   * chokepointSteelWeight each; brick cells chokepointBrickWeight.
+   */
+  chokepointSteelWeight: number
+  /** §88: tie-break weight for BRICK cover around a chokepoint candidate. */
+  chokepointBrickWeight: number
+  /**
+   * §88: facing gate (rule 3). 1 = a threat path is only counted when the
+   * enemy's turret (炮口朝向) is along the path's dominant direction toward
+   * the threat point (an enemy facing AWAY from the base is not about to
+   * attack it). 0 = ignore facing (all paths counted).
+   */
+  chokepointFacingGate: number
+  /**
+   * §88: max number of nearest threat points per enemy to A*-path (throttled
+   * chokepoint computation — bounds cost; default 4). The threat-point set
+   * itself is terrain-derived and small (base column + base rows).
+   */
+  chokepointPathsPerEnemy: number
+  /**
+   * §88: enemies farther than this Manhattan distance from their NEAREST
+   * threat point contribute NO threat paths (perf bound: a failed A* explores
+   * the whole grid — skipping far enemies keeps the throttled plan cheap; a
+   * distant enemy is not an imminent base threat, so its path adds little to
+   * chokepoint selection). Default 14. 0 = no cap.
+   */
+  chokepointMaxThreatDist: number
+  /** §88: recompute interval (ticks) for the throttled chokepoint plan. */
+  chokepointReplanTicks: number
+  /**
+   * §88 A/B round 2: chase arm imminence gate (cells). Only enemies whose
+   * NEAREST threat point is within this Manhattan distance count as imminent
+   * base threats worth diverting for — otherwise the chase arm dragged the
+   * player after distant enemies (S15 seed 24) and the hold arm idled at a
+   * stale chokepoint (S19 seed 23). 0 = gate off (chase any nearest).
+   */
+  chokepointChaseMaxDist: number
+  /**
+   * §88 A/B round 3: hold-arm max distance. A chokepoint 9 cells away is not
+   * worth marching to — the enemy turns / gets killed en route and the player
+   * idles (S26 seed 12: player at (7,14) marched to hold (14,16), the fast
+   * threat died, and the stale path derailed navigation). When the hold cell
+   * is farther than this, prefer chasing the imminent threat directly. 0 = unlimited.
+   */
+  chokepointHoldMaxDist: number
+  /** §88 A/B round 2: hold-arm imminence re-check cadence (unused, reserved). */
+  chokepointHoldCheckTicks: number
+  /**
+   * §88 A/B round 3: chase-arm max PLAYER distance. The chase arm intercepts
+   * an enemy about to reach a threat point, but only pays off when the player
+   * can actually get there in time. S32 seed 10: chase sent the player from
+   * (8,3) on a 27-cell march to intercept (0,22) — the enemy reached the
+   * threat point long before the player arrived, and the march derailed the
+   * game while A's normal nearest-enemy hunt won. 0 = unlimited (pre-round-3).
+   */
+  chokepointChaseMaxPlayerDist: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1021,6 +1115,42 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   pickupPriorityMaxDanger: 0,
   pickupPriorityMinEnemyDist: 5,
   pickupPrioritySpawnRowMax: 3,
+
+  // ── §88: 据守咽喉要地 (chokepoint holding) ────────────────────────
+  // SHIPPED ON (2026-08-03, DECISIONS §93/§94): 120-seed A/B on S6/S16/S32
+  // confirmed 全面持平或提升 (S6 0.000, S16 +0.018, S32 +0.011; win 83→85%,
+  // 13 better / 8 worse / 339 tied), no stage regression. Tuned knobs:
+  // margin 1 (威胁点外 1 格 — A/B round 3 从用户规格 2 下调: margin=2 在
+  // S32 把玩家拖离击杀过频), hold threshold 2 (敌人数目 > 2), minRow 13
+  // (下半区), steel 10 / brick 1 (钢铁优先远高于砖墙), facing gate ON,
+  // 4 paths/enemy, replan every 30 ticks, chaseMaxDist 3 / holdMaxDist 6 /
+  // chaseMaxPlayerDist 10 (速度缩放).
+  chokepointMode: 1,
+  threatPointMargin: 1,
+  chokepointHoldThreshold: 2,
+  chokepointMinRow: 13,
+  chokepointSteelWeight: 10,
+  chokepointBrickWeight: 1,
+  chokepointFacingGate: 1,
+  chokepointPathsPerEnemy: 4,
+  chokepointMaxThreatDist: 14,
+  chokepointReplanTicks: 30,
+  // A/B round 2 (per-seed tick-diff): chase 分支把玩家引去追距威胁点 10 格
+  // 的远敌（S15 seed 24），拖慢清场。chase 的本意是拦截「即将到达威胁点」
+  // 的敌人——距威胁点超过 chaseMaxDist 格不算紧迫威胁，fall-through 到原
+  // 最近敌人追杀（S6/正常选择），与 OFF 字节相同。
+  chokepointChaseMaxDist: 3,
+  // A/B round 2 (per-seed tick-diff): 玩家到达据守点后敌人已转向、威胁路径
+  // 消失，缓存计划仍锁死玩家守株待兔（S19 seed 23：玩家在 (4,20) 空转 ~1200
+  // tick 直到 base 从另一侧被破）。到达据守点后若威胁态已解除（threatState
+  // false），fall-through 到正常目标选择。
+  chokepointHoldCheckTicks: 1,
+  // A/B round 3: 据守点超过 6 格（chokepointHoldMaxDist）不值得走过去——
+  // 敌人中途转向/被杀，玩家空转且路径残留污染导航（S26 seed 12）。
+  chokepointHoldMaxDist: 6,
+  // A/B round 3: chase 目标距玩家超过 10 格同样不值得追（S32 seed 10：玩家在
+  // (8,3) 被引去 27 格外追 (0,22)，敌先到威胁点，玩家白跑整局）。
+  chokepointChaseMaxPlayerDist: 10,
 }
 
 /**

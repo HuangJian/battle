@@ -52,6 +52,12 @@ import {
   trapAvoidanceImpl,
 } from './god/Navigator'
 import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
+import {
+  computeChokepointPlanImpl,
+  isThreatStateImpl,
+  threatChaseTargetImpl,
+} from './god/Chokepoint'
+import type { ChokepointPlan } from './god/Chokepoint'
 
 /**
  * GodAIInput — a "theoretically optimal player" simulator that implements
@@ -202,7 +208,16 @@ export class GodAIInput implements InputLike {
   _navStuckTicks = 0
 
   /** Debug: branch counters for profiling. */
-  branchCounts = { dodge: 0, t8: 0, aggressive: 0, t2a: 0, powerup: 0, navigate: 0, dead: 0 }
+  branchCounts = {
+    dodge: 0,
+    t8: 0,
+    aggressive: 0,
+    t2a: 0,
+    powerup: 0,
+    navigate: 0,
+    dead: 0,
+    chokepoint: 0,
+  }
 
   /** Reusable scan result for scanAheadImpl — avoids allocating a result object on every call. */
   _scanResult: {
@@ -317,6 +332,15 @@ export class GodAIInput implements InputLike {
    */
   _threatCostsBuf: Float64Array = new Float64Array(GRID * GRID)
 
+  /**
+   * §88: throttled chokepoint plan (threat points + selected 咽喉要地 cell).
+   * Recomputed every chokepointReplanTicks (default 30) or when missing — the
+   * same cross-tick cache discipline as _navCacheValid (threat points only
+   * change when bricks are destroyed). Pure function of World state + frame:
+   * deterministic, replay-safe. Reset in reset() per stage.
+   */
+  _chokepointPlan: ChokepointPlan | null = null
+
   constructor(
     world: World,
     params: GodAIParams = DEFAULT_GOD_AI_PARAMS,
@@ -356,6 +380,8 @@ export class GodAIInput implements InputLike {
     this.aggressive = false
     this._enemies = []
     this._otherTanks = []
+    // §88: invalidate the throttled chokepoint plan on stage reset.
+    this._chokepointPlan = null
     // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
     // stage reset — the next tick must recompute A* from scratch.
     this._navCacheValid = false
@@ -460,6 +486,17 @@ export class GodAIInput implements InputLike {
       ) {
         result = true
         break
+      }
+    }
+    // §88 rule 1: an enemy at/near a threat point (威胁点外 margin 格) also
+    // puts the base into the threatened state — the enemy can shoot the base
+    // from there, so defense must outrank MID-tier pickups and chokepoint
+    // holding. OR'd with the existing box/race detection (never reduces it).
+    if (!result && this.params.chokepointMode > 0) {
+      this.chokepointPlan() // ensure the throttled threat-point cache
+      const plan = this._chokepointPlan
+      if (plan && plan.threatPoints.length > 0 && isThreatStateImpl(this, plan.threatPoints)) {
+        result = true
       }
     }
     this._baseUnderThreatCache = result
@@ -580,9 +617,15 @@ export class GodAIInput implements InputLike {
   findPowerUpTarget(pcx: number, pcy: number): Cell | null {
     return findPowerUpTargetImpl(this, pcx, pcy)
   }
-  /** §87: urgent power-up target (close + safe path), see StrategyPlanner. */
-  findUrgentPowerUpTarget(pcx: number, pcy: number): Cell | null {
-    return findUrgentPowerUpTargetImpl(this, pcx, pcy)
+  /** §87: urgent power-up target (close + safe path), see StrategyPlanner.
+   * §88: `tier` restricts to 'high' (bomb/freeze/fence) or 'midlow' — the
+   * reordered priority chain; default 'all' = pre-§88 behavior. */
+  findUrgentPowerUpTarget(
+    pcx: number,
+    pcy: number,
+    tier: 'all' | 'high' | 'midlow' = 'all',
+  ): Cell | null {
+    return findUrgentPowerUpTargetImpl(this, pcx, pcy, tier)
   }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)
@@ -592,6 +635,40 @@ export class GodAIInput implements InputLike {
   }
   selectTarget(playerCell: Cell): Cell | null {
     return selectTargetImpl(this, playerCell)
+  }
+
+  // --- Chokepoint (§88) ---
+  /**
+   * §88: throttled chokepoint plan accessor. Recomputed every
+   * chokepointReplanTicks (or when missing) — pure function of World state +
+   * frame, so the throttle is deterministic and replay-safe. OFF when
+   * chokepointMode <= 0 (returns null, byte-identical to pre-§88).
+   */
+  chokepointPlan(): ChokepointPlan | null {
+    if (this.params.chokepointMode <= 0) return null
+    const p = this._chokepointPlan
+    if (p && this.world.frame - p.tick < this.params.chokepointReplanTicks) return p
+    this._chokepointPlan = computeChokepointPlanImpl(this)
+    return this._chokepointPlan
+  }
+  /** §88: the selected 咽喉要地 cell, or null (OFF / no coverage). */
+  chokepointCell(): Cell | null {
+    const plan = this.chokepointPlan()
+    return plan ? plan.chokepoint : null
+  }
+  /** §88 rule 1: base-threat state — enemy within threatPointMargin of a threat point. */
+  isThreatState(): boolean {
+    if (this.params.chokepointMode <= 0) return false
+    const plan = this.chokepointPlan()
+    return !!plan && plan.threatPoints.length > 0 && isThreatStateImpl(this, plan.threatPoints)
+  }
+  /** §88 rule 2: cell of the enemy nearest a threat point (chase arm), or null. */
+  threatChaseTarget(): Cell | null {
+    if (this.params.chokepointMode <= 0) return null
+    const plan = this.chokepointPlan()
+    return plan && plan.threatPoints.length > 0
+      ? threatChaseTargetImpl(this, plan.threatPoints)
+      : null
   }
 
   // --- Navigator ---

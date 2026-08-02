@@ -556,3 +556,40 @@ per-seed tick-diff：S6 seed5 / S32 seed11，OFF（mode=0）与 pre-§87 基线 
 - `bun run check`：820 测试全绿，tsc + oxlint + oxfmt clean；`bun run build` 成功。
 - 新单元测试 `tests/pickup-priority.test.ts`（15 条）：三档类别门控、三个安全守卫、平局规则、think() 集成、冰冻窗口排除（aggressive 主导拾取）、SHIPPED 默认值锁定。
 - 建议后续：Diamond / Frozen Field 120-seed 确认。
+## §88 据守咽喉要地（威胁点 + 威胁路径 + 咽喉要地，2026-08-03）—— 候选集（默认 OFF）
+
+> DECISIONS §93。用户需求：敌人可直接射击基地的格子 = 威胁点；敌人到最近威胁点的 A* 路径（炮口朝向门控）= 威胁路径；下半区能射击最多威胁路径的格子 = 咽喉要地（钢铁掩护 >> 砖墙）。策略：威胁 → 杀；安全 + 敌>2 → 据守；敌≤2 → 追最近威胁点敌人；HIGH 拾取 > 回防 > MID 拾取 > 据守。
+
+### 实现
+- `src/ai/god/Chokepoint.ts`：威胁点（canShootBaseFrom + 2×2 可驻留）、facing 门控威胁路径、coverage 印章式咽喉要地选择（规则 5 掩护权重）、威胁态 + chase 目标。
+- `src/ai/god/StrategyPlanner.ts`：规则 4 链（HIGH 拾取 > 回防 > MID 拾取 > 据守）+ 据守/追杀切换。
+- 全部走 `chokepointMode` 门控（0 = OFF 字节不变）。计划 30-tick 节流缓存。
+
+### 3 轮 A/B 调优（35×60 classic，paired CRN，per-seed tick-diff）
+
+| 轮次 | 机制修复 | 关卡证据 |
+|---|---|---|
+| R1 | MID 拾取分支移到 T2a 前 | S19 s14（4 格盾被降级为继续杀）|
+| R1 | chase 距离门控 chaseMaxDist=3 | S15 s24 / S32 s22（跨图追远敌）|
+| R2 | MID 拾取不再让位回防 | S32 s17（弃 3 格 star 回防 → 死）|
+| R2 | 据守需实时 imminence + 距离上限 6 | S19 s23（据守点空转 ~1200 tick）|
+| R3 | 威胁态/chase 加炮口朝基地方向门控 | S26 s12（(12,12) 朝右 armor 被误报）|
+| R3 | 据守点不覆盖紧迫敌人 → chase 优先 | S32 s23（(15,18) 打不到 (24,22) 快车）|
+| R3 | chase 玩家距离上限（按敌速缩放） | S32 s10（27 格追 power 输）/ s48（25 格追 armor 赢）|
+
+### 终值 35×60 A/B（候选集 ON vs OFF）
+- suite 0.7551 → **0.7561（+0.0010）**，过关率 91%→91%，mean Δscore +0.0010 ± 0.0010（**p=0.30 无显著差异**），B better/worse/tied 9/6/2085。
+- **改善关**：S16 +0.022（95%→97%）、S6 +0.007（73%→75%）、S18 +0.004（score）。
+- **S26 修复**：-0.019 → 0.000（per-seed IDENTICAL）。
+- **S32 噪声内**：单 seed-29 回退（规格正确的 rule-1 拦截——敌人在威胁点上 — 但失去节奏）被 seed-48 收益抵消，无显著负向关。
+
+### OFF 字节不变验证
+per-seed tick-diff：S6 s5 / S32 s11 OFF（mode=0）与 pre-§88 基线 IDENTICAL（与 §87 相同的 V8 JIT 级联排除）。
+
+### 质量门禁
+- `bun run check`：844 测试全绿（新增 chokepoint 测试 24 条），tsc + oxlint + oxfmt clean；`bun run build` 成功。
+- `tests/chokepoint.test.ts`（24 条）：威胁点 LOS/钢铁遮蔽、咽喉要地选择 + 掩护平局、facing 门控、威胁态 + facing、chase（imminence + 玩家距离 + 速度缩放）、据守 vs chase + coverage 门控、think() 规则 4 集成、OFF 惰性。
+
+### 结论与后续（2026-08-03 更新：SHIPPED）
+- **120-seed 确认（S6/S16/S32，360 对）**：suite 0.6712→0.6880（mean Δ +0.0091，p=0.106），过关率 83%→85%，B better/worse/tied 13/8/339；S16 +0.018（93→95%）、S32 +0.011（78→79%）、S6 0.000——三关全部 ≥ 持平，无下降，符合用户「全面提升或持平」标准。
+- **用户拍板启用（DECISIONS §94）**：`chokepointMode` 默认 **1**（ON），门禁真值重生成（TRUTH_WIN_PCT S6 75.0 / S16 96.7；S28 保持 86.7 保守值，聚合 90.9% 不变）。发货后 35×60：mean 90.9% 与 §87 持平，S6 +1.7pp / S16 +1.7pp / S28 +5.0pp，**零关卡下降**；门禁实测 639/700（91.3%），35 关全过 floor。`bun run check` 844 测试全绿，`build` 成功。

@@ -905,4 +905,57 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Implications:** SHIPPED ON. New tests `tests/pickup-priority.test.ts` (15 tests) lock the category gates, all three safety gates, tie-breaks, think() integration, the freeze-window exclusion, and shipped defaults. 120-seed confirmation of Diamond/Frozen Field is a recommended follow-up.
 
+## 93. §88: 据守咽喉要地 (Chokepoint Holding) — Rule-1/2/3/4 Base-Defense Strategy (CANDIDATE, A/B-Tuned) _(superseded by §94 — SHIPPED default ON)_
+
+> Progress-doc numbering: **§88**. Code comments use §88. Shipped default: mode OFF (byte-identical to pre-§88); the A/B candidate set below is ready to flip `chokepointMode=1`.
+
+**Decision:** User directive (2026-08-02): implement 据守咽喉要地 — threat points (cells from which an enemy can directly shoot the base), threat paths (A* corridor to the nearest threat point, gated by turret facing), and the lower-half cell that can shoot the most threat paths (steel cover >> brick cover). Strategy: (1) enemy enters a threat point (or margin outside) → base threatened → kill those enemies; (2) base safe + enemies > holdThreshold → hold the chokepoint, ≤ holdThreshold → chase the enemy nearest a threat point; (3) fire at enemies encountered; (4) HIGH pickup > 回防 > MID pickup > 据守.
+
+**Architecture:** `src/ai/god/Chokepoint.ts` (pure World-state reads: threat points via `canShootBaseFrom` + passability, facing-gated threat paths, coverage-stamped chokepoint selection, threat-state + chase-target impls) and a rule-4 branch in `src/ai/god/StrategyPlanner.ts`. Throttled plan cache (chokepointReplanTicks) like the navigateTowards cache. All gated by `chokepointMode` (0 = OFF, byte-identical).
+
+**A/B candidate set (tuned, in DEFAULT_GOD_AI_PARAMS):** `chokepointMode=0`, `threatPointMargin=1`, `chokepointHoldThreshold=2`, `chokepointMinRow=13`, `chokepointSteelWeight=10`, `chokepointBrickWeight=1`, `chokepointFacingGate=1`, `chokepointPathsPerEnemy=4`, `chokepointMaxThreatDist=14`, `chokepointReplanTicks=30`, `chokepointChaseMaxDist=3`, `chokepointHoldMaxDist=6`, `chokepointChaseMaxPlayerDist=10`.
+
+**Tuning loop (35×60 classic, paired CRN, per-seed tick-diff method §0.B):** the feature went through 3 A/B rounds; each round's regressions were traced to a distinct mechanism and fixed:
+
+1. **MID-pickup branch placement (S19 seed 14):** placing the §88 MID branch AFTER T2a demoted a 4-cell shield to "keep killing" — moved before T2a (S19 -0.042 → -0.021).
+2. **Chase distance gate (S15 seed 24 / S32 seed 22):** chase dragged the player across the map after an enemy 10 cells from any threat point → `chokepointChaseMaxDist=3` (enemy-to-threat-point).
+3. **MID pickup must not defer to 回防 (S32 seed 17):** gating MID on `isBaseUnderThreat()` made the player abandon a 3-cell star to "defend" — removed the gate; §87's own safety gates (nearby-enemy 5 格, route danger, reachability) already make close pickups safe.
+4. **Hold-arm idling (S19 seed 23):** player marched to the (30-tick cached) chokepoint, found enemies had turned away, idled → hold requires a live imminent threat (`threatChaseTarget` non-null) + `chokepointHoldMaxDist=6` march cap.
+5. **Facing gate on threat-state/chase (S26 seed 12):** an armor at (12,12) facing RIGHT (away from the base below) tripped the margin check and dragged the player 14 cells to "intercept" a non-threat → `facingTowardBase` gate applied to `isThreatState` and `threatChaseTarget` (rule 3). S26 -0.019 → 0.000.
+6. **Rule-1 outranks hold via chokepoint coverage (S32 seed 23):** with enemies>2 the hold arm marched to chokepoint (15,18) while a fast at (24,22) headed for the base through a lane the chokepoint could NOT shoot → when the chokepoint can't cover the imminent enemy's approach (same row/col + clear LOS to the enemy or its nearest threat point), chase wins over hold.
+7. **Speed-scaled chase player-distance cap (S32 seed 10 / 48):** a 27-cell chase of a POWER tank is a lost race (player can't arrive in time) while a 25-cell chase of a slow ARMOR is winnable → `chokepointChaseMaxPlayerDist=10` scaled ×3 armor / ×2 basic / ×1.5 power / ×1 fast.
+
+**Final 35×60 A/B (candidate set, mode ON):** suite 0.7551 → 0.7561 (+0.0010), win rate 91%→91% (unchanged), mean Δscore +0.0010 ± 0.0010 (p=0.30, no significant difference), B better/worse/tied 9/6/2085. Per-stage: S16 +0.022, S6 +0.007, S18 +0.004 (score), S26 0.000 (fixed), S32 within noise (single seed-29 regression — a spec-correct rule-1 interception of an enemy ON a threat point that loses tempo — offset by a seed-48 gain). No stage moved significantly negative.
+
+**Per-seed verification:** all previously-fixed flip seeds (S15 s24, S19 s14/s23, S26 s12, S32 s5/s17/s22/s23/s10, S20 s1, S31 s1) are IDENTICAL to OFF when the mechanism is gated correctly; OFF (mode=0) is byte-identical by construction.
+
+**Implications:** CANDIDATE — default OFF (shipped game unchanged), candidate set ready in `DEFAULT_GOD_AI_PARAMS`. New tests `tests/chokepoint.test.ts` (24 tests) lock: threat-point computation (LOS, steel occlusion), chokepoint selection + cover tie-break, facing gate, threat state + facing gate, chase (imminence + player-distance + speed-scaling), hold vs chase + coverage gate, rule-4 think() integration, and OFF inertness. Flip `chokepointMode=1` and regenerate the regression-gate truths to ship. A 120-seed confirmation of S32/S16/S6 is the recommended follow-up.
+
+---
+
+## 94. §88 据守咽喉要地 (Chokepoint Holding) — SHIPPED (default ON, supersedes §93 candidate)
+
+> DECISIONS §93 的后续：120-seed 确认满足用户的「过关率全面提升或持平 → 计入调优文档」标准后，用户拍板**启用（默认 ON）**。Progress-doc 编号保持 §88；本条目记录发货决定与重生成的门禁真值。§93 的 (CANDIDATE) 状态被本条目取代。
+
+**Decision:** `chokepointMode` 默认值 **0 → 1**（`src/ai/god/params.ts`）。§93 的全部调优参数（margin 1、holdThreshold 2、minRow 13、steel 10/brick 1、facingGate 1、pathsPerEnemy 4、maxThreatDist 14、replan 30、chaseMaxDist 3、holdMaxDist 6、chaseMaxPlayerDist 10 速度缩放）随默认 ON 一并生效，不再需要 A/B JSON 单独翻开关。
+
+**120-seed 确认（S6/S16/S32，paired CRN，360 对）：** suite 0.6712 → **0.6880**（mean Δscore **+0.0091 ± 0.0057**，p=0.106 未达 0.05 显著，但方向一致为正），过关率 **83% → 85%**，B better/worse/tied **13/8/339**（无系统性负向）。分关：**S16 +0.018（93%→95%）、S32 +0.011（78%→79%）、S6 0.000（持平）**——三关全部 ≥ 持平，符合用户验收标准「全面提升或持平」，无任何关卡下降。
+
+**发货后 35×60 全量回归（shipped default）：** mean **90.9%**（与 §87 的 1908/2100 持平，新真值 3183/35 = 90.9%），**S6 73.3→75.0（+1.7pp）、S16 95.0→96.7（+1.7pp）、S28 86.7→91.7（+5.0pp）**，**其余 32 关零变化，无任何关卡低于其 §87 真值**。
+
+**门禁真值重生成（`tests/god-ai-regression-gate.test.ts`）：** TRUTH_WIN_PCT 更新 S6/S16 两行（S28 保持 86.7 保守值——门禁上下文下 Spider 在 13-20/20 摆动，floor 14 会因上下文噪声失败，与 §87 相同的处理）。聚合均值 90.9% 不变 → AGGREGATE_FLOOR 610/700 不变。门禁实测：**639/700（91.3%），35 关全过 floor，S28 Spider 20/20（100%）**。
+
+**Behavior-lock 验证：** `tests/godai-split-parity.test.ts`（S0 8 种子，relaxed 后只锁 outcome）全部 outcome 不变（stage_clear ×7 + gameover ×1），无需重锁；`tests/chokepoint.test.ts` 的默认值断言改为 `chokepointMode=1`，OFF-inert 测试改为显式 `offParams()`（默认 ON 后 OFF 惰性仍保证 byte-identical 回退路径）。
+
+**Rationale（MANIFEST §13 三门）：**
+- 更有趣：敌人压境时据守咽喉要地而非无脑追杀，减少「追杀过远回防不及」的败因（§88 的 S16 +2pp / S28 +5pp 佐证）。
+- 架构简单：全走 `chokepointMode` 门控，ON/OFF 一刀切，无新增系统。
+- 尊重原作：据守关键通道、保护基地是 Battle City 的防守本质。
+
+**Results (2026-08-03):** `bun run check` 844 测试全绿（含重生成后的门禁 639/700 与更新后的 chokepoint 测试），`bun run build` 成功。工具链回归：`godai-split-parity` / `god-ai-regression-gate` / `god-ai-curriculum` 全过。
+
+**Implications:** 发货默认 = §88 全开。OFF（`chokepointMode=0`）仍可作为 A/B 对照臂（byte-identical to pre-§88）。`SKILLED_HUMAN_PARAMS`（coop/躺赢模式的 God AI）由 `DEFAULT_GOD_AI_PARAMS` 派生，因此 co-op 玩家 2 也随本次启用执行据守咽喉要地（feature 本来就是 God AI 全局策略，coop 行为因此与单机一致）。后续如需再调，直接改默认参数并以门禁真值重测。
+
+
+
 
