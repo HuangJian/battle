@@ -160,6 +160,29 @@ body {
   font-size: 13px;
 }
 
+/* STAGE HUD: "STAGE 01" on one line, localized name on its own line below. */
+.hud-stage {
+  gap: 2px;
+}
+.hud-stage-head {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 4px;
+}
+.hud-stage-name {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-muted);
+  line-height: 1;
+  margin-top: 1px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .hud-lives {
   color: var(--theme-danger);
   letter-spacing: 2px;

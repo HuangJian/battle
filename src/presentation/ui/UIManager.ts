@@ -53,6 +53,8 @@ export class UIManager {
   private hudLives2: HTMLElement | null = null
   private hudCoopLives: HTMLElement | null = null
   private hudStage: HTMLElement
+  /** Localized stage name shown under the stage number in the HUD center. */
+  private hudStageName: HTMLElement
   private hudEnemies: HTMLElement
   private hudHiScore: HTMLElement
   private hudStar: HTMLElement
@@ -155,6 +157,8 @@ export class UIManager {
   private lastScore = -1
   private lastHiScore = -1
   private lastStage = -1
+  /** Last written localized stage name, so a language switch re-renders it. */
+  private lastStageName = ''
   private lastEnemies = -1
   private lastLives = -1
   private lastLives2 = -1
@@ -222,9 +226,12 @@ export class UIManager {
           <span class="hud-label" data-i18n="hud.speed">SPEED</span>
           <span class="hud-value hud-speed-value" data-hud="speed-value">×1</span>
         </div>
-        <div class="hud-item">
-          <span class="hud-label" data-i18n="hud.stage">STAGE</span>
-          <span class="hud-value" data-hud="stage">01</span>
+        <div class="hud-item hud-stage">
+          <div class="hud-stage-head">
+            <span class="hud-label" data-i18n="hud.stage">STAGE</span>
+            <span class="hud-value" data-hud="stage">01</span>
+          </div>
+          <span class="hud-stage-name" data-hud="stage-name"></span>
         </div>
         <div class="hud-buffs" data-hud="buffs">
           <div class="buff-chip buff-shield" data-buff="shield" hidden>
@@ -390,6 +397,7 @@ export class UIManager {
     this.hudLives2 = this.hudBar.querySelector('[data-hud="lives2"]')
     this.hudCoopLives = this.hudBar.querySelector('[data-hud="coop-lives"]')
     this.hudStage = this.hudBar.querySelector('[data-hud="stage"]')!
+    this.hudStageName = this.hudBar.querySelector('[data-hud="stage-name"]')!
     this.hudEnemies = this.hudBar.querySelector('[data-hud="enemies"]')!
     this.hudHiScore = this.hudBar.querySelector('[data-hud="hiscore"]')!
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
@@ -823,6 +831,15 @@ export class UIManager {
     if (world.stageIndex !== this.lastStage) {
       this.hudStage.textContent = String(world.stageIndex + 1).padStart(2, '0')
       this.lastStage = world.stageIndex
+      this.lastStageName = '' // force the name to re-render for the new stage
+    }
+    // Stage name (localized) — re-render when the stage changes OR when the
+    // active language changed (the number guard above leaves same-stage
+    // language switches untouched, so check the name string too).
+    const stageName = localizedStageName(world.stageIndex)
+    if (stageName !== this.lastStageName) {
+      this.hudStageName.textContent = stageName
+      this.lastStageName = stageName
     }
     if (world.enemiesRemaining !== this.lastEnemies) {
       this.hudEnemies.textContent = String(world.enemiesRemaining)
@@ -862,7 +879,7 @@ export class UIManager {
     // placeholders. If the player has no stars, show nothing.
     if (world.playerLevel !== this.lastStar) {
       const lvl = Math.max(0, world.playerLevel)
-      this.hudStar.textContent = lvl > 0 ? '★'.repeat(lvl) : ''
+      this.hudStar.textContent = lvl > 0 ? '★'.repeat(lvl) : '--'
       this.lastStar = world.playerLevel
     }
 
