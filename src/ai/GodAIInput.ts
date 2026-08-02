@@ -34,6 +34,7 @@ import {
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
+  findUrgentPowerUpTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   selectTargetImpl,
@@ -578,6 +579,10 @@ export class GodAIInput implements InputLike {
   // --- StrategyPlanner ---
   findPowerUpTarget(pcx: number, pcy: number): Cell | null {
     return findPowerUpTargetImpl(this, pcx, pcy)
+  }
+  /** §87: urgent power-up target (close + safe path), see StrategyPlanner. */
+  findUrgentPowerUpTarget(pcx: number, pcy: number): Cell | null {
+    return findUrgentPowerUpTargetImpl(this, pcx, pcy)
   }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)

@@ -164,6 +164,30 @@ export function thinkImpl(self: GodAIInput): void {
     }
   }
 
+  // ---- §87: Urgent power-up pickup (user request 2026-08-02) ----
+  // A CLOSE power-up with a SAFE PATH outranks kill (T2a) and base defense
+  // (selectTarget's defense position). bomb/freeze/fence within
+  // pickupPriorityHighRange, star/tank/shield within pickupPriorityMidRange,
+  // boat within pickupPriorityLowRange — each only when no enemy lies
+  // between the player and the item (calculateRouteDanger <= pickupPriorityMaxDanger)
+  // and the item is A*-reachable (steel/water pockets skipped).
+  //
+  // Placement: AFTER dodge (survive first) and T8 (intercept an in-flight
+  // bullet aimed at the base — an immediate loss), BEFORE aggressive/T2a/S5.
+  // NORMAL mode only: during freeze the aggressive branch already grabs
+  // power-ups when no enemy is aligned, and an aligned frozen enemy is a
+  // free kill we must not interrupt. Gated by pickupPriorityMode (0 = OFF,
+  // byte-identical to pre-§87).
+  if (!self.aggressive && self.params.pickupPriorityMode > 0) {
+    const urgentTarget = self.findUrgentPowerUpTarget(pcx, pcy)
+    if (urgentTarget) {
+      self._moveDir = self.navigateTowards(urgentTarget)
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+      self.branchCounts.powerup++
+      return
+    }
+  }
+
   // ---- S8/S9: Aggressive mode (freeze or shield) ----
   if (self.aggressive) {
     // Skip defense, go straight for the nearest enemy or power-up.

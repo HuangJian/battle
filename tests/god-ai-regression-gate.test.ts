@@ -17,15 +17,16 @@ import { STAGES } from '../src/config/stages'
 // S1 regression during the P4 campaign. Never again — the gate now covers
 // every stage.
 //
-// Floors are derived from the 2026-07-30 truth-scale measurement taken
-// after the §47 base protection ring collision fix (35 stages × 60 seeds,
-// classic, 18000 ticks, per-stage overrides active — DECISIONS.md §47).
-//   Mean win rate 87.7%; every stage >= 60%. S32 Diamond reached 90.0% @60
-//   (85.0% @120) once the ring collision exploit was fixed.
+// Floors are derived from truth-scale measurements (35 stages × 60 seeds,
+// classic, 18000 ticks). Baseline: after the §47 base protection ring
+// collision fix (2026-07-30, mean 87.7% — DECISIONS.md §47).
+// §87 (2026-08-02): regenerated for the shipped §87 defaults (urgent
+// power-up pickup priority, DECISIONS §87) — mean 90.9% (1908/2100).
 //
 // Per-stage floor = round(truthWinRate * 20) - 4 wins of margin
 // (binomial sd at n=20, p=0.85 is ~1.6; 4 wins ≈ 2.5 sd).
-// Aggregate floor = 83% of 700 runs (truth 87.7%, ~3 sd margin).
+// Aggregate floor = truth − 3.7pp (3 binomial sd at n=700): 90.9% → 87.2%
+// → 610/700.
 //
 // When params are intentionally re-tuned (a new CMA-ES round or a new
 // stage-adaptation threshold), re-measure at 60 seeds via tools/validate-p4.ts
@@ -43,47 +44,55 @@ const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 // simulation-layer bullet/base collision semantics.
 // NOTE: These values are before the §49 God AI RNG split, which may
 // cause minor drift in win rates.
+// §87 (2026-08-02): regenerated from the 35×60 measurement of the SHIPPED
+// §87 defaults (urgent power-up pickup ON: 8/4/2 + danger 0 + minEnemyDist 5
+// + spawnRowMax 3). Mean 90.9% (1908/2100) — the §87 A/B's B arm
+// (tmp/pickup-on-8-4-2-g6.json), see DECISIONS §87.
 const TRUTH_WIN_PCT: number[] = [
   98.3, // S0  Outpost
   96.7, // S1  Waterways
   98.3, // S2  Steel Fortress
-  93.3, // S3  Crossfire
-  95.0, // S4  Maze
-  90.0, // S5  Brickworks
-  72.0, // S6  Iron Curtain (override REMOVED §54: stale conservative leash harmed S6)
-  91.7, // S7  Riverbed
-  95.0, // S8  Twin Towers
+  96.7, // S3  Crossfire
+  91.7, // S4  Maze
+  83.3, // S5  Brickworks
+  73.3, // S6  Iron Curtain (override REMOVED §54: stale conservative leash harmed S6)
+  93.3, // S7  Riverbed
+  98.3, // S8  Twin Towers
   98.3, // S9  Gauntlet
-  86.7, // S10 Fortress
-  83.3, // S11 Lattice
-  86.7, // S12 Bunker Hill
-  96.7, // S13 Steel Web
-  80.0, // S14 Citadel
-  85.0, // S15 Crossroads
-  93.3, // S16 Twin Spires
+  93.3, // S10 Fortress
+  88.3, // S11 Lattice
+  90.0, // S12 Bunker Hill
+  100.0, // S13 Steel Web
+  81.7, // S14 Citadel
+  96.7, // S15 Crossroads
+  95.0, // S16 Twin Spires
   98.3, // S17 Gridlock
-  60.8, // S18 Frozen Field (override REMOVED §55: radius14 caused -5.8pp, aimError:0 neutral)
-  85.0, // S19 Bastion
+  85.0, // S18 Frozen Field (override REMOVED §55; §87 pickup priority +4 wins @60)
+  98.3, // S19 Bastion
   80.0, // S20 Checkers
-  90.0, // S21 Oasis
-  91.7, // S22 Ramparts
-  85.0, // S23 Labyrinth
-  85.0, // S24 Quarry
-  77.5, // S25 Ice Palace (override REMOVED §55: aimError:0 vs default 0.03 = identical behavior)
-  66.7, // S26 Brick Maze (§58 data-driven: brickDenseAdaptRatio → fast replan + path noise)
+  91.7, // S21 Oasis
+  96.7, // S22 Ramparts
+  95.0, // S23 Labyrinth
+  90.0, // S24 Quarry
+  85.0, // S25 Ice Palace (override REMOVED §55)
+  85.0, // S26 Brick Maze (§58 data-driven: brickDenseAdaptRatio → fast replan + path noise)
   90.0, // S27 Thicket
-  86.7, // S28 Spider
-  85.0, // S29 Concentric
-  85.0, // S30 Eagle Nest
-  88.3, // S31 Star Fort
-  72.5, // S32 Diamond (§56 close-combat → t2aHighHpMaxRange; §58 armorAdaptRatio → camp/nav timing; 72.5% @120)
-  88.3, // S33 Battlement
-  91.7, // S34 Final Redoubt
+  86.7, // S28 Spider — gate-context floor kept at pre-§87 level: the full-suite
+  //   context is order-dependent (module-level genId counter, World.ts) and
+  //   Spider swings 13-20/20 between contexts; §87 eval shows 91.7% @60 (+1),
+  //   but a floor of 14 fails on pre-existing context noise, not on §87.
+  90.0, // S29 Concentric
+  76.7, // S30 Eagle Nest
+  93.3, // S31 Star Fort
+  75.0, // S32 Diamond (§56 close-combat → t2aHighHpMaxRange; §58 armorAdaptRatio → camp/nav timing; §87 +5 wins @60)
+  91.7, // S33 Battlement
+  93.3, // S34 Final Redoubt
 ]
 
 const MARGIN_WINS = 4
-// Truth mean 87.7% @60 seeds; binomial 3 sd at n=700 is ~3.7pp → 83% floor.
-const AGGREGATE_FLOOR = Math.floor(0.83 * 35 * GATE_SEEDS.length) // 581/700
+// Truth mean 90.9% @60 seeds (DECISIONS §87); binomial 3 sd at n=700 is
+// ~3.7pp → 87.2% floor.
+const AGGREGATE_FLOOR = Math.floor(0.872 * 35 * GATE_SEEDS.length) // 610/700
 
 function stageFloor(idx: number): number {
   return Math.max(0, Math.round((TRUTH_WIN_PCT[idx] / 100) * GATE_SEEDS.length) - MARGIN_WINS)

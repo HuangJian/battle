@@ -869,4 +869,40 @@ The oscillation counter-fire (§90, `dodgeOscillationCounterFire: 1`) was design
 
 **Implications:** The turn cooldown is the canonical fix for oscillation. The §90 AI-layer counter-fire is a defense-in-depth fallback that activates only when the simulation-layer cooldown is insufficient (e.g., oscillation at the cooldown boundary). Future oscillation-related work should focus on the simulation layer, not the AI layer.
 
+## 92. §87: Urgent Power-Up Pickup Priority — Close + Safe-Path Pickups Outrank Defense/Kill (SHIPPED)
+
+> Progress-doc numbering: **§87**. Code comments use §87.
+
+**Decision:** User directive (2026-08-02): "炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全时，拾取优先级 > 回防/杀敌；然后全 35 关仿真验证，下降严重的用 per-seed tick-diff 分析处理。"
+
+New `think()` branch placed AFTER dodge (survive) and T8 (in-flight bullet aimed at the base — an immediate loss) but BEFORE aggressive/T2a/S5: a power-up within its category range AND with a safe path diverts the player immediately, overriding stop-and-aim kills and base-defense repositioning. Normal mode only (during freeze, the aggressive branch already grabs pickups when no enemy is aligned, and an aligned frozen enemy is a free kill not to interrupt).
+
+**Params (SHIPPED defaults):** `pickupPriorityMode=1`, `pickupPriorityHighRange=8` (bomb/freeze/fence + modern emp/guard), `pickupPriorityMidRange=4` (star/tank/shield + remaining modern items), `pickupPriorityLowRange=2` (boat), plus three safety gates discovered by the tuning loop:
+
+1. **`pickupPriorityMaxDanger=0`** — route danger (enemies strictly BETWEEN player and item, `calculateRouteDanger`) must be 0.
+2. **`pickupPriorityMinEnemyDist=5`** — no fully-spawned enemy within 5 cells of the player (same radius as S5 P3.2). Added after Lattice s2 / Battlement s3 per-seed diffs: an enemy 5 cells away (or an active firefight) was abandoned while the player walked to the item, then the player stalled/stopped firing and died.
+3. **`pickupPrioritySpawnRowMax=3`** — items in the classic enemy spawn band (rows ≤ 3; spawns at row 0) are never urgent errands. Added after Lattice s2/s32 diffs: diving for a "safe" pickup in the top band put the player inside the spawn corridor (s32 walked up to a fence at (1,0) while an enemy spawned at (0,0) beside it).
+
+All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verified via per-seed tick-diff, S6 s5 / S32 s11 IDENTICAL).
+
+**Tuning loop (35×60 classic, paired CRN, eval-suite --compare):**
+
+| Config | Net wins vs baseline | Notable |
+|---|---|---|
+| 8/4/2, danger=0 only | **-10** | Lattice -8, Star Fort -5, Battlement -4 (real); Frozen Field +6, Diamond +5 (real) |
+| + nearby-enemy gate (5) | 0 | Lattice -8 persists; Battlement -4→-2 |
+| + spawn-zone gate (rows≤3) | **+9** | **Lattice -8→-2, Star Fort -5→+1, Diamond +5, Frozen Field +4, Final Redoubt +3, Ice Palace +2**; no significant regression |
+
+**Final 35×60 A/B (SHIPPED defaults):** 1899/2100 → 1908/2100 (**+9 wins**), win rate 90%→91%, suite 0.7439→0.7551, mean Δscore +0.0038 ± 0.0033 (p=0.245), net flips +54/−45. No stage moved significantly negative (the only p<0.05 move was Steel Web -0.0053 score with 0 win change = noise).
+
+**Per-seed mechanisms found & fixed (per-seed tick-diff method, §0.B):**
+- Lattice s2: diverted 2 cells to a star (enemy 5 cells away, path "clean") → stalled ~80 ticks at (8,2) → died. → nearby-enemy gate.
+- Lattice s32: at lives=2, dove up to a fence at (1,0); enemy spawned at (0,0) beside it → died. → spawn-zone gate.
+- Battlement s3: stopped firing mid-engagement (3 enemies) to divert up → lost the fight. → nearby-enemy gate.
+- Star Fort s10: fence pickup (2 cells) + downstream cascade chaos — not surgically fixable; resolved by the gates + 60-seed averaging (Star Fort ends +1).
+
+**Gate truths regenerated** (35×60, mean 90.9%): `TRUTH_WIN_PCT` in `tests/god-ai-regression-gate.test.ts`, aggregate floor raised 581→610 per "随收益上调" discipline. **S28 Spider floor kept at pre-§87 level** — the gate's full-suite context is order-dependent (module-level `genId()` counter, World.ts documented caveat; pre-existing, proven by stashing src: standalone 631 vs full-suite 625 WITHOUT §87) and Spider swings 13-20/20 between contexts; the 60-seed eval shows Spider 91.7% with §87 (+1).
+
+**Implications:** SHIPPED ON. New tests `tests/pickup-priority.test.ts` (15 tests) lock the category gates, all three safety gates, tie-breaks, think() integration, the freeze-window exclusion, and shipped defaults. 120-seed confirmation of Diamond/Frozen Field is a recommended follow-up.
+
 

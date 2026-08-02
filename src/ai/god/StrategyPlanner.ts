@@ -1,8 +1,9 @@
 import type { GodAIInput } from '../GodAIInput'
-import type { Tank } from '../../types'
+import type { Tank, PowerUpType } from '../../types'
 import { findPath, type Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
+import type { GodAIParams } from './params'
 import { enemyCanShootBase } from './SmartThreatModel'
 
 // ============================================================
@@ -131,6 +132,122 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
   }
 
   return hasBest ? { col: bestCol, row: bestRow } : null
+}
+
+/**
+ * §87 (user request 2026-08-02): urgent power-up pickup — a CLOSE power-up
+ * with a SAFE PATH outranks base defense (回防) and enemy-kill (杀敌)
+ * targets.
+ *
+ * Categories (distance gates, tunable):
+ *   HIGH — bomb/freeze/fence:   pickupPriorityHighRange cells (target 8)
+ *   MID  — star/tank/shield:    pickupPriorityMidRange cells (target 4)
+ *   LOW  — boat:                pickupPriorityLowRange cells (target 2)
+ *
+ * "Path safe" = route danger (enemies between the player and the item,
+ * calculateRouteDanger) <= pickupPriorityMaxDanger (target 0) AND the item
+ * is reachable via A* (powerUpCollectCell — the same corridor/dig path the
+ * navigator drives; steel/water-enclosed pockets are skipped, never chased).
+ *
+ * Nearest-first, ties broken toward the higher-value item (lower
+ * POWERUP_PRIORITY). Returns the collect cell (possibly an overlapping
+ * passable neighbour) or null. Gated by pickupPriorityMode — the caller
+ * (think) only invokes this when > 0, so OFF is byte-identical.
+ */
+export function findUrgentPowerUpTargetImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+): Cell | null {
+  const w = self.world
+  const powerUps = w.powerUps
+  if (powerUps.length === 0) return null
+  const p = self.params
+  if (p.pickupPriorityMode <= 0) return null
+
+  // Nearby-enemy gate (per-seed tick-diff finding, Lattice s2 / Battlement
+  // s3): "path safe" must also mean no enemy is breathing down the player's
+  // neck. The route-danger check below only counts enemies BETWEEN the player
+  // and the item; an enemy 5 cells away (or an active firefight) was still
+  // abandoned while the player walked to the item, then the player stalled
+  // or stopped firing and died. Same radius as the S5 P3.2 gate (5 cells).
+  if (p.pickupPriorityMinEnemyDist > 0) {
+    const playerCol = Math.floor(pcx / CELL)
+    const playerRow = Math.floor(pcy / CELL)
+    // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
+    const nearbyScan = self._enemies.length > 0 ? self._enemies : w.tanks
+    for (let ni = 0; ni < nearbyScan.length; ni++) {
+      const t = nearbyScan[ni]
+      if (!t.alive || t.spawnTimer > 0) continue
+      const eCol = Math.floor(t.x / CELL)
+      const eRow = Math.floor(t.y / CELL)
+      if (Math.abs(eCol - playerCol) + Math.abs(eRow - playerRow) <= p.pickupPriorityMinEnemyDist) {
+        return null
+      }
+    }
+  }
+
+  let bestCol = 0
+  let bestRow = 0
+  let bestDist = Infinity
+  let bestPriority = Infinity
+  let hasBest = false
+
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    const cx = pu.x + pu.w / 2
+    const cy = pu.y + pu.h / 2
+    const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+    const range = urgentPickupRange(pu.type, p)
+    // Distance gate by category — the core of the tuning sweep.
+    if (range <= 0 || dist > range) continue
+
+    // Enemy spawn-zone gate (per-seed tick-diff finding, Lattice s2/s32):
+    // items in the enemy spawn band (classic spawns at row 0) are traps —
+    // the player dives in and meets fresh spawns. Never treat the band as
+    // an urgent errand; S5 navigation can still fetch far items there.
+    if (p.pickupPrioritySpawnRowMax > 0 && Math.floor(pu.y / CELL) <= p.pickupPrioritySpawnRowMax) {
+      continue
+    }
+
+    // Path safety gate: no enemy between the player and the item.
+    if (self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger) continue
+
+    // Reachability gate: the tank must be able to drive to a cell that
+    // overlaps the item (same A* as the bonus window). Without this the
+    // player would chase a steel/water-enclosed pocket every tick.
+    const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), Math.floor(pu.y / CELL))
+    if (!collect) continue
+
+    const priority = POWERUP_PRIORITY[pu.type] ?? 5
+    if (dist < bestDist || (dist === bestDist && priority < bestPriority)) {
+      bestDist = dist
+      bestPriority = priority
+      bestCol = collect.col
+      bestRow = collect.row
+      hasBest = true
+    }
+  }
+
+  return hasBest ? { col: bestCol, row: bestRow } : null
+}
+
+/** §87: distance gate (cells) for a power-up type. 0 = never urgent. */
+function urgentPickupRange(type: PowerUpType, p: GodAIParams): number {
+  switch (type) {
+    case 'bomb':
+    case 'freeze':
+    case 'fence':
+    case 'emp': // modern: crowd-control, freeze-like
+    case 'guard': // modern: base protection, fence-like
+      return p.pickupPriorityHighRange
+    case 'boat':
+      return p.pickupPriorityLowRange
+    default:
+      // star / tank / shield (+ modern extras rewind/repair/decoy/mine/…)
+      return p.pickupPriorityMidRange
+  }
 }
 
 /**

@@ -39,8 +39,10 @@
 >
 > **最终 A/B（35×20, 18000t）**：baseline 92.6% → shipped 93.0%（**+0.4pp，0 关低于 80%**）。详见 DECISIONS §84/§85。
 
+> **§87（2026-08-02）**：近距离安全路径拾取优先级（用户指令：炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全 → 拾取 > 回防/杀敌）。新 `think()` 分支位于 dodge 与 T8 之后、aggressive/T2a/S5 之前；`pickupPriorityMode=1` + 三档范围 + **三个由调优循环发现的守卫**：`pickupPriorityMaxDanger=0`（路上无敌人）、`pickupPriorityMinEnemyDist=5`（5 格内无完全生成敌人，Lattice s2/Battlement s3 per-seed 定位）、`pickupPrioritySpawnRowMax=3`（出生带行 ≤3 的拾取永不紧急，Lattice s2/s32 per-seed 定位）。**35×60 A/B（SHIPPED 默认）：1899→1908（+9 wins，90%→91%，suite 0.7439→0.7551）**；无显著负向关（唯一 p<0.05 的 Steel Web 为 0 win 变化 = 噪声）；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3。OFF（mode=0）逐字节不变已验（S6 s5 / S32 s11 IDENTICAL）。门禁真值重生成（35×60，均值 90.9%，聚合 floor 581→610），S28 Spider floor 因既有 genId 顺序依赖噪声保持 pre-§87 水平。详见 DECISIONS §92。
 
-**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）**。
+
+**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）** → **§87 近距离安全路径拾取优先级（8/4/2 格 + 三守卫，+9 wins）**。
 
 ---
 
@@ -105,6 +107,7 @@
 | **§49-revisit** | 08-01 | (默认 ON, 参数化) | §52 v2 对枪抵消参数化 + 当前树重验 | **第二个通过"零负结果"验收**：35×60 net +3 flips、0 ON→OFF 负翻转（S26 +2.5pp@120、S20 +0.8pp@120）。逐字节验证参数化默认 = 已提交硬编码基线（§70 纪律） |
 | **§68-revisit** | 08-01 | (默认 OFF, 否决) | per-seed tick-diff 重新调优 §68-v2（4 变体全负） | **方法论级负结果**：raw -18 / 提前量上限 -25 / 开阔度门控 -14 / 组合 -25 全负；坏翻转 12.6-23.1t 过早转向 vs 好翻转 8.3-8.4t 逃生；全地形指标无法区分好坏关。代码回退，crossfire 维持默认 OFF |
 | **§80** | 08-01 | (默认 ON, 修复) | 冰冻窗口转身抖动守卫（aggressive 分支停火转向前置转身后扫描） | **修复验收（35×60×2 真值）**：冰冻击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）；过关率 coop +0.2pp（net +3）、single +0.9pp（**net +20**），≥5pp 回退 0 关；S32 Star Fort 60-seed 持平 Δ0.0pp（10/30-seed 回退确认为种子噪声，机制已 per-seed 定位）；最坏 streak（Brick Maze s27/seed1 1166t）两态逐字节相同（守卫惰性，另一机制，留作后续） |
+| **§87** | 08-02 | (默认 ON) | 近距离安全路径拾取优先级（炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格，路径安全） | **35×60 A/B（SHIPPED 默认）**：1899→1908（**+9 wins**，90%→91%，suite 0.7439→0.7551）；无显著负向关；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3；三个守卫（maxDanger=0 / minEnemyDist=5 / spawnRowMax=3）由 per-seed tick-diff 定位机制后加入；OFF 逐字节不变；门禁真值重生成（聚合 floor 581→610） |
 
 > 注：DECISIONS.md 已精简为索引（2026-07-31），详细决策见本文档和 `docs/perf-optimization.progress.md`。
 
@@ -509,3 +512,47 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 ### 质量门禁
 - `bun run check`：746 测试全绿，tsc + oxlint + oxfmt clean
 - 新单元测试 `tests/godai-turn-snap-guard.test.ts`（8 条）：守卫几何（门控 OFF 恒真 / 已朝向 / 已对齐 / 拒假瞄准 / 收真瞄准 / 默认 ON）+ 集成臂（ON 900 ticks 内击杀冰冻敌 / OFF 整窗口空废，0 杀、亚格位移）。2 seed × 2 guard 矩阵验证 seed 无关性。
+
+---
+
+## §87 近距离安全路径拾取优先级（炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格，路径安全 → 拾取 > 回防/杀敌）—— 通过验收（默认 ON）
+
+### 背景（用户指令）
+"优化 GOD AI 拾取道具优先级：炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全时，拾取优先级 > 回防/杀敌；然后全 35 关仿真验证，下降严重的用 per-seed tick-diff 诊断处理。"
+
+### 实现
+- 新参数族（`GodAIParams`，全部 0-able，OFF 时逐字节不变）：
+  - `pickupPriorityMode`（默认 **1** = ON）、`pickupPriorityHighRange`（默认 **8**，bomb/freeze/fence + modern emp/guard）、`pickupPriorityMidRange`（默认 **4**，star/tank/shield + 其余 modern 道具）、`pickupPriorityLowRange`（默认 **2**，boat）。
+  - 三个由调优循环发现的守卫：`pickupPriorityMaxDanger`（默认 **0**——路上严格位于玩家与道具之间的敌人数为 0）、`pickupPriorityMinEnemyDist`（默认 **5**——5 格内无完全生成敌人，与 S5 P3.2 同半径）、`pickupPrioritySpawnRowMax`（默认 **3**——经典出生带行 ≤3 的拾取永不紧急）。
+- 新 `think()` 分支位于 **dodge（保命）与 T8（飞向基地的子弹 = 即时损失）之后、aggressive/T2a/S5 之前**：类别范围内且路径安全的拾取立即优先，覆盖停火击杀与回防重定位。仅 normal 模式（冰冻窗口内 aggressive 分支已在无对齐敌人时拾取，且对齐的冰冻敌人是免费击杀不应打断）。
+- `findUrgentPowerUpTargetImpl`（`StrategyPlanner.ts`）+ `urgentPickupRange` 包装（`GodAIInput.ts`）。
+
+### 调优循环（35×60 classic，paired CRN，`eval-suite --compare`）
+
+| 配置 | 净 wins vs baseline | 要点 |
+|---|---|---|
+| 8/4/2，仅 danger=0 | **-10** | Lattice -8、Star Fort -5、Battlement -4（真实）；Frozen Field +6、Diamond +5（真实） |
+| + 近敌门控（5） | 0 | Lattice -8 持续；Battlement -4→-2 |
+| + 出生带门控（rows≤3） | **+9** | **Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3、Ice Palace +2**；无显著负向关 |
+
+### 最终 35×60 A/B（SHIPPED 默认）
+1899/2100 → 1908/2100（**+9 wins**），过关率 90%→91%，suite 0.7439→0.7551，mean Δscore +0.0038 ± 0.0033（p=0.245），net flips +54/−45。**无显著负向关**（唯一 p<0.05 的 Steel Web -0.0053 分数变动为 0 win 变化 = 噪声）。
+
+### per-seed tick-diff 定位的机制与修复（§0.B 方法）
+- **Lattice s2**：绕 2 格去捡 star（敌人 5 格远、路径"干净"）→ (8,2) 停驻 ~80 ticks → 阵亡。→ 近敌门控。
+- **Lattice s32**：lives=2 时向 (1,0) 的 fence 上行，敌人在 (0,0) 出生点旁生成 → 阵亡。→ 出生带门控。
+- **Battlement s3**：交战中（3 敌）停火上行去拾取 → 输掉对枪。→ 近敌门控。
+- **Star Fort s10**：fence 拾取（2 格）+ 下游级联混乱——不可外科修复；由门控 + 60-seed 平均化解（终值 +1）。
+- **非 JIT 级联验证**：mode=1 但全范围=0 与 OFF 逐字节 IDENTICAL（排除 V8 JIT 热循环漂移，§0.B 教训）。
+
+### OFF 逐字节不变验证
+per-seed tick-diff：S6 seed5 / S32 seed11，OFF（mode=0）与 pre-§87 基线 **IDENTICAL**。
+
+### 门禁真值重生成
+- `TRUTH_WIN_PCT` 按新 35×60 测量（均值 **90.9%**）重生成，聚合 floor 581→610（"随收益上调"纪律）。
+- **S28 Spider floor 保持 pre-§87 水平**：门禁 full-suite 上下文存在顺序依赖（模块级 `genId()` 计数器，World.ts 已记录的 caveat；stash src 验证 pre-existing：standalone 631 vs full-suite 625——无 §87 亦然），Spider 在上下文间 13-20/20 摆动；60-seed eval 显示 §87 下 Spider 91.7%（+1）。
+
+### 质量门禁
+- `bun run check`：820 测试全绿，tsc + oxlint + oxfmt clean；`bun run build` 成功。
+- 新单元测试 `tests/pickup-priority.test.ts`（15 条）：三档类别门控、三个安全守卫、平局规则、think() 集成、冰冻窗口排除（aggressive 主导拾取）、SHIPPED 默认值锁定。
+- 建议后续：Diamond / Frozen Field 120-seed 确认。

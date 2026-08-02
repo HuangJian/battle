@@ -711,6 +711,75 @@ export interface GodAIParams {
    * never in shipped default; REJECTED).
    */
   canMoveDirFloorSnap: number
+
+  // ---- §87: Urgent power-up pickup priority (user request 2026-08-02) ----
+  /**
+   * §87: 0 = OFF (byte-identical to pre-§87). 1 = ON: a CLOSE power-up with a
+   * SAFE PATH outranks base defense (回防) and enemy-kill (杀敌) targets.
+   *
+   * When ON, the think() loop checks — before T2a stop-and-aim and before the
+   * normal S5 power-up economy — whether a power-up within its category range
+   * (see below) has a safe path (route danger <= pickupPriorityMaxDanger,
+   * i.e. no enemy between the player and the item) and is actually reachable
+   * (A*, same corridor/dig path the navigator drives). If so, the player
+   * diverts to collect it instead of camping on an aligned enemy or returning
+   * to the defense position.
+   *
+   * Deliberately placed AFTER dodge (survive) and T8 (intercept an in-flight
+   * bullet aimed at the base — an immediate loss) and gated to NORMAL mode
+   * (not freeze/aggressive: during a freeze window an aligned frozen enemy
+   * is a free kill the aggressive branch already exploits, and it already
+   * grabs power-ups when no enemy is aligned).
+   *
+   * Why: in classic the AI ignored nearby power-ups whenever it was fighting
+   * (aimDir set, not on cooldown) or defending (base under threat) — the S5
+   * gate `(!aimDir || onCooldown) && !baseUnderThreat && no enemies within 5
+   * cells` never fired. A bomb/freeze/fence at 5 cells that would clear the
+   * screen or buy the base a steel ring was walked past. Ranges are the
+   * tuning knobs for the A/B sweep (default target: 8/4/2).
+   */
+  pickupPriorityMode: number
+  /** §87: max distance (cells) for HIGH-value power-ups: bomb/freeze/fence. */
+  pickupPriorityHighRange: number
+  /** §87: max distance (cells) for MID-value power-ups: star/tank/shield. */
+  pickupPriorityMidRange: number
+  /** §87: max distance (cells) for LOW-value power-ups: boat. */
+  pickupPriorityLowRange: number
+  /**
+   * §87: max route danger for the path to be considered "safe" (see
+   * calculateRouteDanger). 0 = no enemy between player and item — the
+   * strictest, intended default.
+   */
+  pickupPriorityMaxDanger: number
+  /**
+   * §87: nearby-enemy radius (cells). When any fully-spawned enemy is within
+   * this Manhattan distance of the PLAYER, urgent pickups are skipped — even
+   * if no enemy lies strictly between the player and the item.
+   *
+   * per-seed tick-diff finding (2026-08-02, Lattice s2 / Battlement s3):
+   * the original "path safe" gate (danger <= maxDanger) only counted enemies
+   * BETWEEN player and item. An enemy 5 cells away, or an active firefight,
+   * still got abandoned while the player walked to the item — the player
+   * then stalled or stopped firing and died. Same radius as S5's P3.2 gate
+   * (5 cells) — this is the "don't divert while enemies are breathing down
+   * your neck" rule, applied to the urgent branch.
+   */
+  pickupPriorityMinEnemyDist: number
+  /**
+   * §87: enemy spawn-zone gate. When > 0, urgent pickups whose ITEM cell row
+   * is <= this value are skipped — classic enemies spawn at row 0 (ENEMY_SPAWNS
+   * {0,0}/{12,0}/{6,0}), so rows 0..max are the spawn band where the player
+   * gets funneled into fresh enemies.
+   *
+   * per-seed tick-diff finding (2026-08-02, Lattice s2/s32): diving for a
+   * "safe" pickup in the top band put the player inside the enemy spawn
+   * corridor — s32 walked up to a fence at (1,0) while an enemy spawned at
+   * (0,0) beside it; s2 diverted to a star at row 2. Both died. The gate
+   * excludes the band outright — the S5 economy can still fetch far items
+   * there via normal navigation, but the AI never treats the spawn band as
+   * an urgent short-range errand.
+   */
+  pickupPrioritySpawnRowMax: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -936,6 +1005,22 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // Math.floor in canMoveDirRaw breaks ALL navigation predictions, not just
   // dodging. REJECTED. A/B-only: never in shipped default.
   canMoveDirFloorSnap: 0,
+
+  // ── §87: Urgent power-up pickup priority (user request 2026-08-02) ───
+  // SHIPPED default: ON with the A/B-validated ranges/gates (DECISIONS §87).
+  // 35×60 A/B (classic, 18000t): 1899/2100 → 1908/2100 (+9 wins), win rate
+  // 90%→91%, suite 0.7439→0.7551, net flips +54/−45, zero significant
+  // regressions (Lattice −8→−2, Star Fort −5→+1 after the gates).
+  // Setting pickupPriorityMode=0 (and/or any gate to 0) restores the
+  // pre-§87 behavior — the OFF state was verified byte-identical via
+  // per-seed tick-diff.
+  pickupPriorityMode: 1,
+  pickupPriorityHighRange: 8,
+  pickupPriorityMidRange: 4,
+  pickupPriorityLowRange: 2,
+  pickupPriorityMaxDanger: 0,
+  pickupPriorityMinEnemyDist: 5,
+  pickupPrioritySpawnRowMax: 3,
 }
 
 /**
