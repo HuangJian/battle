@@ -91,7 +91,15 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           // doesn't fall silent. resume() is a no-op if already running.
           this.audio.resume()
           this.lastTime = performance.now()
-          if (LOW_POWER_STATES.has(this.world.state)) {
+          const lowPower = LOW_POWER_STATES.has(this.world.state)
+          // A paused replay (or an ended replay kept alive by the playback
+          // sentinel) sits in a LOW_POWER state yet MUST keep the rAF loop
+          // alive: play / resume / seek and the progress bar are driven by the
+          // loop, so going truly idle here freezes the replay controls after the
+          // tab returns from the background. Only sleep when there is no
+          // playback at all.
+          const idle = lowPower && !this.playback
+          if (lowPower) {
             // No loop runs while idle — repaint once so the canvas isn't blank
             // after the tab was hidden (browsers may discard the backing store).
             this.presentation.markNeedsRender()
@@ -99,8 +107,8 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
             if (this.presentation.shouldRender(this.world)) {
               this.presentation.render(this.world, 0)
             }
-            // Stay idle (no driver scheduled).
-          } else {
+          }
+          if (!idle) {
             this.presentation.markNeedsRender()
             this.scheduleFrame()
           }
