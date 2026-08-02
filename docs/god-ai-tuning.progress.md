@@ -60,6 +60,24 @@
 
 **V8 JIT 教训**：在每秒调用数千次的热循环里加代码（即使功能上是 no-op）会改变 V8 的优化决策，导致 cascade 行为差异。热循环改动必须用 per-seed 对比验证，不能只看总胜率。本次的 -1pp 残留回归就是通过此方法发现的——diff 显示 tick 1062 的 `fire` 字段从 `.` 变成 `F`，由此追溯到 steel 分支里的额外计算改变了 V8 对 `scanAheadImpl` 的 JIT 优化。
 
+**方法工具箱（§88 战役固化，2026-08-03）**：§88 据守咽喉要地的调优把 §0.B 的手工环节全部固化为可复用脚本，后续策略开发直接套用：
+
+| 工具 | 命令 | 替代的手工环节 |
+|---|---|---|
+| `tools/eval/eval-suite.ts --compare a.json b.json` | 全量 A/B（35×60 paired CRN） | — （已存在） |
+| `tools/diag/per-seed-diff.ts` | `dump` + `diff`（含 `--set` 覆盖） | 单种子 tick 级分歧定位 |
+| **`tools/diag/flip-scan.ts`** | `--stages 6,16,32 --seeds 1-60 --set k=v` | **手写 bash 翻转扫描循环**（60×2 次全量 dump → 并行 worker 池秒级完成；自动分类 FLIP-TO-WIN / FLIP-TO-LOSE / TIED 并列出种子） |
+| **`tools/diag/decision-probe.ts`** | `<stage> <seed> <tick> [--set ...]` | **每次手写 tmp/probe-*.ts**（一次打印该 tick 的完整决策上下文：selectTarget / 威胁态 / chase / 据守计划 / 分支计数） |
+| **`tools/eval/gate-truth.ts`** | `<eval-suite --json 输出>` | **手工 awk 提取门禁真值**（生成可直接粘贴的 TRUTH_WIN_PCT 代码块 + AGGREGATE_FLOOR） |
+
+**推荐的完整循环（§88 验证过的路径）**：
+1. `eval-suite --compare` 或 `flip-scan --set <候选参数>` 找到翻转关卡/种子
+2. `flip-scan` 列出 FLIP-TO-LOSE 种子（回归）与 FLIP-TO-WIN 种子（收益）
+3. 对每个回归种子：`per-seed-diff dump/diff` 找首个分歧 tick → `decision-probe <stage> <seed> <tick>` 看该 tick 的决策差异 → 定位根因机制
+4. 修复 → 重跑 `flip-scan` 确认回归消失、收益保留
+5. 定向确认：`eval-suite --stages <改善关> --seeds 120 --compare`
+6. 启用/发货后：`eval-suite --seeds 60 --json out.json` → `gate-truth out.json` 重生成门禁真值
+
 ---
 
 ## 0.C 调优签入规则（per-seed tick-diff 方法）
