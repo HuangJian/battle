@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBE08A"/>
+      <stop offset="0.5" stop-color="#F4C430"/>
+      <stop offset="1" stop-color="#D9A91E"/>
+    </linearGradient>
+    <linearGradient id="headGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCE4A6"/>
+      <stop offset="0.5" stop-color="#F4C430"/>
+      <stop offset="1" stop-color="#E0B22A"/>
+    </linearGradient>
+    <linearGradient id="cannonGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a3a"/>
+      <stop offset="1" stop-color="#1a1a1a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tracks / feet -->
+  <rect x="9" y="46" width="12" height="14" rx="4" fill="#161616"/>
+  <rect x="43" y="46" width="12" height="14" rx="4" fill="#161616"/>
+  <g fill="#9a9a9a">
+    <rect x="11" y="48" width="8" height="1.6" rx="0.8"/>
+    <rect x="11" y="51.5" width="8" height="1.6" rx="0.8"/>
+    <rect x="11" y="55" width="8" height="1.6" rx="0.8"/>
+    <rect x="11" y="58" width="8" height="1.6" rx="0.8"/>
+    <rect x="45" y="48" width="8" height="1.6" rx="0.8"/>
+    <rect x="45" y="51.5" width="8" height="1.6" rx="0.8"/>
+    <rect x="45" y="55" width="8" height="1.6" rx="0.8"/>
+    <rect x="45" y="58" width="8" height="1.6" rx="0.8"/>
+  </g>
+
+  <!-- Hull / body -->
+  <rect x="12" y="30" width="40" height="20" rx="8" fill="url(#bodyGrad)" stroke="#141414" stroke-width="1.5"/>
+  <rect x="15" y="33" width="34" height="3" rx="1.5" fill="#ffffff" opacity="0.25"/>
+  <rect x="12" y="44" width="40" height="6" rx="3" fill="#141414" opacity="0.12"/>
+
+  <!-- Turret / head -->
+  <rect x="20" y="12" width="24" height="22" rx="10" fill="url(#headGrad)" stroke="#141414" stroke-width="1.5"/>
+  <ellipse cx="30" cy="16" rx="6" ry="3" fill="#ffffff" opacity="0.2"/>
+
+  <!-- Cannon (slightly tilted for playfulness) -->
+  <g transform="rotate(-7 32 14)">
+    <rect x="29" y="3" width="6" height="12" rx="2" fill="url(#cannonGrad)" stroke="#141414" stroke-width="1"/>
+    <rect x="28.5" y="4.5" width="7" height="2.4" rx="1.2" fill="#D9A91E"/>
+  </g>
+
+  <!-- Face -->
+  <circle cx="23" cy="26" r="3" fill="#f2888a" opacity="0.55"/>
+  <circle cx="41" cy="26" r="3" fill="#f2888a" opacity="0.55"/>
+  <!-- eyes -->
+  <circle cx="27" cy="21" r="5" fill="#ffffff" stroke="#141414" stroke-width="1"/>
+  <circle cx="37" cy="21" r="5" fill="#ffffff" stroke="#141414" stroke-width="1"/>
+  <circle cx="28" cy="22.4" r="2.6" fill="#1a1a1a"/>
+  <circle cx="38" cy="22.4" r="2.6" fill="#1a1a1a"/>
+  <circle cx="29" cy="20.8" r="0.9" fill="#ffffff"/>
+  <circle cx="39" cy="20.8" r="0.9" fill="#ffffff"/>
+  <!-- eyebrows (cheeky) -->
+  <path d="M24 15 q3 -2.5 6 0" stroke="#141414" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+  <path d="M34 15 q3 -2.5 6 0" stroke="#141414" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+  <!-- smile -->
+  <path d="M28 28 q4 4 8 0" stroke="#141414" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+</svg>
