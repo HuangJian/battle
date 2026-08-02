@@ -2,7 +2,6 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { applyStageOverrides } from '../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { STAGES } from '../src/config/stages'
@@ -24,7 +23,7 @@ function runWithRecording(stageIdx: number, seed: number, maxTicks: number) {
   world.difficultyKey = difficulty
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
-  const godAIParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+  const godAIParams = DEFAULT_GOD_AI_PARAMS
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const input = new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)

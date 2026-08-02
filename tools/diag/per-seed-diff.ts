@@ -23,7 +23,6 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { applyStageOverrides } from '../../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL } from '../../src/constants'
@@ -52,7 +51,8 @@ Workflow:
 
 function dump(stageIdx: number, seed: number): void {
   const stage = STAGES[stageIdx]
-  const godAIParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+  // Fresh copy — --set mutates params below, never touch the shared default.
+  const godAIParams = { ...DEFAULT_GOD_AI_PARAMS }
   // Generic param override (dump mode only): --set <key>=<value>, repeatable.
   // Any numeric GodAIParams key — future diagnostics need no tool changes.
   // Param-specific hardcoded flags (--steelOcclusion / --noCounterFire /

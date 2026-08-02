@@ -62,9 +62,6 @@ for (const v of variants) {
       difficulty: 'classic',
       godAIParams: v.params,
       maxTicks,
-      // Raw measurement: bypass the per-stage override table so the
-      // variant's own values are what actually runs.
-      skipStageOverrides: true,
     })
     if (r.outcome === 'stage_clear') wins++
     else if ((r as { failure?: { cause?: string } }).failure?.cause === 'base_destroyed')

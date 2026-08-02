@@ -25,7 +25,7 @@
 |---|---|---|
 | God AI 大脑 | `src/ai/god/*`、`src/ai/GodAIInput.ts` | ✅ P4 调优完毕，`InputLike` 接口，只读 World，不回写 |
 | 独立 RNG | `GodAIInput` 构造第三参 `rng?: RNG`（DECISIONS #47） | ✅ 已拆分，浏览器接入不污染 `world.rng` |
-| 逐关参数覆盖表 | `src/ai/godai-stage-overrides.ts` | ✅ 直接复用（S6/S18/S25/S26 已调） |
+| 数据驱动关卡适配 | `computeStageAdaptedParams()`（`src/ai/GodAIInput.ts`） | ✅ 自动按关卡特征生效（装甲比/钢砖比/森林/水域），无逐关硬编码 |
 | P2 坦克精灵 | `assets/sprites/player2.svg` → 注册名 `tank.player2` | ✅ 已画好，游戏代码从未引用 |
 | 快照泛化 | `WorldSnapshot` 里 `player` 就是普通 `Tank` 槽位 | ✅ 加一个 `player2` 槽位即可 |
 | replay 版本字段 | `FRAME_SCHEMA_VERSION = 0x01`（帧流首字节）+ envelope `schemaVersion` | ✅ 可升 0x02 且保持 v1 兼容 |

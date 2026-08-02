@@ -1,7 +1,6 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { applyStageOverrides } from '../../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE } from '../../src/constants'
@@ -165,13 +164,6 @@ export interface RunOptions {
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
   sampleInterval?: number
-  /**
-   * Skip the per-stage GOD AI overrides (src/ai/godai-stage-overrides.ts)
-   * and run with the given params verbatim. Used by probing tools that
-   * need to measure the raw effect of a parameter set on a stage.
-   * Default false: overrides apply, matching real evaluation conditions.
-   */
-  skipStageOverrides?: boolean
   /** Record input frames for replay playback (plan/God-AI-Replay-Visualization §4.1). */
   record?: boolean
   /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
@@ -238,12 +230,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   const { seed, stage, difficulty } = opts
   const maxTicks = opts.maxTicks ?? MAX_TICKS
   const sampleInterval = opts.sampleInterval ?? 1
-  // P4: per-stage tactical overrides (data over code — see
-  // src/ai/godai-stage-overrides.ts for rationale + validation protocol).
-  const baseParams = opts.godAIParams ?? DEFAULT_GOD_AI_PARAMS
-  const godAIParams = opts.skipStageOverrides
-    ? baseParams
-    : applyStageOverrides(stage.name, baseParams)
+  // Stage-level adaptation happens inside GodAIInput.reset() via
+  // computeStageAdaptedParams() — a unified, data-driven filter on stage
+  // characteristics (armor ratio, brick/steel/forest/water density).
+  // Per-stage (stage-name-keyed) overrides are forbidden (DECISIONS §81).
+  const godAIParams = opts.godAIParams ?? DEFAULT_GOD_AI_PARAMS
 
   // Create a fresh World (avoids any state leakage between runs).
   const world = new World()

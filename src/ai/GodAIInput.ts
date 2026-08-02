@@ -288,7 +288,7 @@ export interface GodAIParams {
    */
   smartRushDetectBonus: number
 
-  // ---- §58: Stage-level adaptive params (Strategy G, replaces override table) ----
+  // ---- §58: Stage-level adaptive params (Strategy G, data-driven adaptation) ----
   /**
    * §58 / Strategy G: armor ratio in the stage's enemy queue above which the
    * AI switches to close-combat camp/nav timing. 0 = never adapt.
@@ -726,12 +726,11 @@ export interface GodAIParams {
  *
  * P4 R7 CMA-ES used the floor-aware v5.0 fitness over ALL 35 classic
  * stages × 20 seeds (18000 ticks), warm-started from R6, with the
- * per-stage override table (godai-stage-overrides.ts) active in the
- * inner loop — the optimizer pushes the global mean while the override
- * table guards the per-stage floor.
+ * then-active per-stage override table in the inner loop — the
+ * optimizer pushed the global mean while the overrides guarded the
+ * per-stage floor.
  *
- * P4 R7 truth-scale results (35 stages × 60 seeds, classic, 18000 ticks,
- * override table active):
+ * P4 R7 truth-scale results (35 stages × 60 seeds, classic, 18000 ticks):
  *   Mean win rate: 81.9%  (target > 80% — PASS)
  *   Below 60% floor: 1/35 — S32 Diamond 52% (known structural hard case;
  *   verified not param-tunable at 60 seeds: manual probes on R6+R7 bases
@@ -804,8 +803,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   t2aHighHpMaxRange: 2,
 
   // Smart threat model (Phase A): default OFF (0). All 35 stages are
-  // byte-identical when OFF. Only stages with smartThreatModel > 0 in
-  // the override table activate the smart scoring.
+  // byte-identical when OFF. Only consumers passing an explicit
+  // smartThreatModel > 0 activate the smart scoring (no per-stage
+  // override table exists anymore — DECISIONS §81).
   smartThreatModel: 0,
   smartThreatThreshold: 0.55,
   smartThreatSpeedWeight: 0.6,
@@ -815,8 +815,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   smartRushDetectBonus: 4,
 
   // §58: Stage-level adaptive params (Strategy G). These generalize the old
-  // per-stage override table (godai-stage-overrides.ts) into a data-driven
-  // adaptation based on stage characteristics computed in reset(). Default ON
+  // per-stage override mechanism into a data-driven adaptation based on
+  // stage characteristics computed in reset(). Default ON
   // — the thresholds and adapted values are tuned to match the old overrides
   // exactly on the stages they covered (S26 Brick Maze, S32 Diamond), while
   // leaving other stages on the base params. See DECISIONS §58.
@@ -938,10 +938,12 @@ export const SKILLED_HUMAN_PARAMS: GodAIParams = {
 
 /**
  * §58 / Strategy G: compute stage-adapted God AI params from stage
- * characteristics, replacing the per-stage override table.
+ * characteristics — the unified, data-driven replacement for the former
+ * per-stage override table (removed, DECISIONS §81: stage-name
+ * special-casing is forbidden to prevent overfitting).
  *
- * Two adaptations are applied (both data-driven, both OFF when the threshold
- * param is 0):
+ * Multiple adaptations are applied (all data-driven, each OFF when its
+ * threshold param is 0):
  *
  *  1. Armor-ratio adaptation: when the stage's enemy queue has an armor
  *     ratio ≥ `armorAdaptRatio`, switch to close-combat camp/nav timing
@@ -1383,9 +1385,9 @@ export class GodAIInput implements InputLike {
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
-    // §58: compute stage-level adaptive params from the base params. This
-    // replaces the per-stage override table with a data-driven adaptation
-    // based on stage characteristics (armor ratio, brick density).
+    // §58: compute stage-level adaptive params from the base params — the
+    // unified data-driven adaptation based on stage characteristics (armor
+    // ratio, brick/steel/forest/water density). No per-stage special-casing.
     this.params = computeStageAdaptedParams(this._baseParams, this.world)
   }
 

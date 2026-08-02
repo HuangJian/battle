@@ -611,3 +611,20 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 **Tests:** `tests/godai-turn-snap-guard.test.ts` (8 tests) — guard geometry (gate OFF → always true, already-facing → true, grid-aligned → true, lie-aim rejected, real aim accepted, default ON) + integration arms on a crafted lie-aim arena: guard ON kills the frozen enemy within 900 ticks; guard OFF wastes the window (0 kills, sub-cell displacement). Seed-independence verified via a 2-seed × 2-guard matrix.
 
 **Implications:** Default ON (the fix ships). A/B baseline: `per-seed-diff --set aimTurnSnapGuard=0`; freeze-window quantification: `tools/sim/freeze-thrash-audit.ts --set aimTurnSnapGuard=0` (added a generic `--set` override + per-stage JSON). Known residual: aggressive-branch anti-stall remains absent for grid-aligned oscillation (s27/seed1) — a candidate follow-up.
+
+---
+
+## 81. 移除 godai-stage-overrides.ts 机制 — 禁止按关卡名特殊化（防过拟合）
+
+**Decision:** 彻底删除 `src/ai/godai-stage-overrides.ts`（文件、`GOD_AI_STAGE_OVERRIDES` 空表、`applyStageOverrides()`）以及全部 17 处调用点，包括 `simulation-runner.ts` 的 `skipStageOverrides` 选项。今后不允许对关卡做按名特殊化（stage-name-keyed overrides），防止过拟合。如果经过充分验证确需特殊化处理，只能写统一的过滤逻辑：基于关卡特征的阈值（如钢/砖比、森林/水域密度、敌人队列装甲比等），即现有的 `computeStageAdaptedParams()` 模式（§58/§60/§61/§62/§64/§66/§48-revisit terrain gate）。
+
+**Rationale:**
+- 覆盖表在 §58（2026-07-31）已清空，`applyStageOverrides` 成为恒等 no-op；保留空表 + 17 处调用点只是残留复杂度，`skipStageOverrides` 标志已完全失去意义。
+- §54-§56 教训：覆盖是数据，数据会过时。RNG split、§47 碰撞修复、v7 评估之后，全局默认大幅提升，历史上 5 条覆盖被逐一移除或泛化。
+- 按关卡名写覆盖 = 对固定关卡集的过拟合：当关卡数据（stageData）变化或新增关卡时无法泛化。统一过滤逻辑（特征 → 参数）对新关卡自动生效，且每个阈值本身就是可调参数（CMA-ES 可直接优化）。
+- MANIFEST §13 Three Gates：删除残留机制让架构更简单（2）；统一过滤让所有关卡公平竞技（3）；防过拟合提升长期可维护性。
+
+**Implications:**
+- 行为无变化：覆盖表早已为空，删除前后仿真结果逐位一致；`computeStageAdaptedParams()` 继续在 `GodAIInput.reset()` 内负责数据驱动适配。
+- `simulation-runner.ts` 移除 `skipStageOverrides` 选项；`per-seed-diff.ts` / `freeze-thrash-audit.ts` 改为先复制 `DEFAULT_GOD_AI_PARAMS` 再应用 `--set`（顺带修复了空表时代码直接变更共享默认对象引用的隐患）。
+- 文档同步：`plan/tasks.chat.md` 勾选、`docs/god-ai-tuning.progress.md` 现状改写、`plan/Lie-Back-Win-Mode.md` / `plan/God-AI-Next-Round.md` 残留引用更新。

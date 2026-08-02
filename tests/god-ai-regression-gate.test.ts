@@ -19,8 +19,7 @@ import { STAGES } from '../src/config/stages'
 //
 // Floors are derived from the 2026-07-30 truth-scale measurement taken
 // after the §47 base protection ring collision fix (35 stages × 60 seeds,
-// classic, 18000 ticks, per-stage override table active — see
-// src/ai/godai-stage-overrides.ts and DECISIONS.md §47):
+// classic, 18000 ticks, per-stage overrides active — DECISIONS.md §47).
 //   Mean win rate 87.7%; every stage >= 60%. S32 Diamond reached 90.0% @60
 //   (85.0% @120) once the ring collision exploit was fixed.
 //
@@ -29,8 +28,8 @@ import { STAGES } from '../src/config/stages'
 // Aggregate floor = 83% of 700 runs (truth 87.7%, ~3 sd margin).
 //
 // When params are intentionally re-tuned (a new CMA-ES round or a new
-// stage override), re-measure at 60 seeds via tools/validate-p4.ts and
-// regenerate the floors below (truth*20 - 4).
+// stage-adaptation threshold), re-measure at 60 seeds via tools/validate-p4.ts
+// and regenerate the floors below (truth*20 - 4).
 //
 // Run: bun test tests/god-ai-regression-gate.test.ts
 // (takes a few minutes — it plays 700 full games)
@@ -71,13 +70,13 @@ const TRUTH_WIN_PCT: number[] = [
   85.0, // S23 Labyrinth
   85.0, // S24 Quarry
   77.5, // S25 Ice Palace (override REMOVED §55: aimError:0 vs default 0.03 = identical behavior)
-  66.7, // S26 Brick Maze (override: fast replan + path noise)
+  66.7, // S26 Brick Maze (§58 data-driven: brickDenseAdaptRatio → fast replan + path noise)
   90.0, // S27 Thicket
   86.7, // S28 Spider
   85.0, // S29 Concentric
   85.0, // S30 Eagle Nest
   88.3, // S31 Star Fort
-  72.5, // S32 Diamond (§56: close-combat generalized to t2aHighHpMaxRange; camp/nav override retained; 72.5% @120)
+  72.5, // S32 Diamond (§56 close-combat → t2aHighHpMaxRange; §58 armorAdaptRatio → camp/nav timing; 72.5% @120)
   88.3, // S33 Battlement
   91.7, // S34 Final Redoubt
 ]

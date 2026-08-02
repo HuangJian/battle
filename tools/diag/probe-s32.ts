@@ -9,7 +9,6 @@
  */
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
-import { applyStageOverrides } from '../../src/ai/godai-stage-overrides'
 import { runSimulation } from '../sim/simulation-runner'
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -21,7 +20,7 @@ const seedCount = parseInt(arg('seeds', '120')!, 10)
 const variantsSpec = arg('variants', '')!
 
 const stage = STAGES[32]
-const baseParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+const baseParams = DEFAULT_GOD_AI_PARAMS
 
 const variants: Array<{ label: string; params: GodAIParams }> = [
   { label: 'BASELINE', params: baseParams },
@@ -48,7 +47,6 @@ for (const v of variants) {
       difficulty: 'classic',
       godAIParams: v.params,
       maxTicks: 18000,
-      skipStageOverrides: true,
     })
     if (r.outcome === 'stage_clear') wins++
     else if (r.failure?.cause === 'base_destroyed') baseDeaths++

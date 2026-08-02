@@ -30,7 +30,7 @@
  *   bun tools/sim/freeze-thrash-audit.ts --stages 0-34 --seeds 1-10 --set aimTurnSnapGuard=0
  *
  * Param override: --set <key>=<value> (repeatable) overrides any numeric
- * GodAIParams key AFTER applyStageOverrides — same convention as
+ * GodAIParams key on top of the defaults — same convention as
  * tools/diag/per-seed-diff.ts (§0.C rule 2: generic, no tool changes per
  * diagnostic). Used for the §80 A/B: default run = guard ON (the fix),
  * `--set aimTurnSnapGuard=0` = pre-§80 baseline.
@@ -39,7 +39,6 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { applyStageOverrides } from '../../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
@@ -75,8 +74,9 @@ function auditRun(
   overrides: Record<string, number>,
 ): RunAudit {
   const stage = STAGES[stageIdx]
-  const godAIParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
-  // Generic param override (see header) — applied after stage overrides so
+  // Fresh copy — --set mutates params below, never touch the shared default.
+  const godAIParams = { ...DEFAULT_GOD_AI_PARAMS }
+  // Generic param override (see header) — applied on top of the defaults so
   // --set wins, matching per-seed-diff.ts.
   for (const [key, val] of Object.entries(overrides)) {
     ;(godAIParams as unknown as Record<string, number>)[key] = val

@@ -185,7 +185,7 @@ P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环
 ## 6. 参数与覆盖表现状
 
 - **全局默认**：`DEFAULT_GOD_AI_PARAMS` = P4 R7 最优（关键：threatRangeCells 10、maxPlayerDistFromBase 26、powerupMaxDivertDistance 16、huntAllyCount 1、aimError 0.03 —— 微量瞄准噪声全局打破互堵僵局）。
-- **覆盖表**（`src/ai/godai-stage-overrides.ts`）：**§58 后已清空**。S32/S26 覆盖已泛化为数据驱动适配（`armorAdaptRatio` / `brickDenseAdaptRatio`），按关卡特征自动触发，无需逐关硬编码。
+- **覆盖表机制已完全移除**（原 `src/ai/godai-stage-overrides.ts` 已删除，DECISIONS §81）：不允许按关卡名做特殊化（防止过拟合）。统一过滤逻辑为 `computeStageAdaptedParams()`（`armorAdaptRatio` / `brickDenseAdaptRatio` / 钢砖比 / 森林 / 水域密度等），按关卡特征自动触发，无需逐关硬编码。
 
 - ~~S6 Iron Curtain~~ 覆盖已移除（§54, 2026-07-30）：R8 保守覆盖（maxPlayerDistFromBase:16 等）在 RNG split + §47 后过时，120-seed 探针覆盖 59.2% < 裸默认 62.5%，且 base 破坏数反增（43 vs 30）。移除后 35×60 S6 从 57%→72%，suite +0.019。
 - ~~S18 Frozen Field~~ 覆盖已移除（§55, 2026-07-30）：outnumberedRadiusCells:14 导致过早回撤丢失中盘控制权，120-seed 覆盖 56.7% < 裸默认 60.8%。aimError:0 也已无效（默认 0.03 已足够小）。

@@ -4,7 +4,6 @@ import { Simulation } from '../src/game/Simulation'
 import { AutoFireInput } from '../src/game/AutoFireInput'
 import type { InputLike } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { applyStageOverrides } from '../src/ai/godai-stage-overrides'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { STAGES } from '../src/config/stages'
@@ -94,7 +93,7 @@ function makeCoopWorld(stageIdx: number, seed: number) {
   world.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
   world.spawnPlayer2()
 
-  const godParams = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+  const godParams = DEFAULT_GOD_AI_PARAMS
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const godInput = new GodAIInput(world, godParams, godRng, (w) => w.player2)
   godInput.reset()

@@ -5,12 +5,11 @@
  */
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { applyStageOverrides } from '../../src/ai/godai-stage-overrides'
 import { runSimulation } from '../sim/simulation-runner'
 
 const seeds = 120
 const stage = STAGES[32]
-const params = applyStageOverrides(stage.name, DEFAULT_GOD_AI_PARAMS)
+const params = DEFAULT_GOD_AI_PARAMS
 
 let baseDestroyed = 0
 let livesExhausted = 0
@@ -24,7 +23,6 @@ for (let seed = 1; seed <= seeds; seed++) {
     difficulty: 'classic',
     godAIParams: params,
     maxTicks: 18000,
-    skipStageOverrides: true,
   })
   if (r.outcome !== 'stage_clear') {
     if (r.failure?.cause === 'base_destroyed') {
