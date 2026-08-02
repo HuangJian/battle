@@ -195,6 +195,18 @@ export interface Tank extends Entity {
   frenzyInterval?: number
   /** Ms timestamp of the last frenzy shell. */
   frenzyLastFire?: number
+
+  // --- §86c: Turn cooldown (minimum turn period) ---
+  /** The direction used for movement in the previous tick. Used by
+   *  `updateMovement` to detect direction changes and enforce the minimum
+   *  turn period (`turnCooldownMs` in rules). When the input/AI sets
+   *  `tank.dir` to a new direction, `updateMovement` checks if enough time
+   *  has passed since the last turn. If not, it reverts to `prevMoveDir`. */
+  prevMoveDir?: Direction
+  /** Absolute time (ms, derived from `world.frame * 1000/60`) of the last
+   *  accepted direction change. NOT a frame number — it is wall-clock ms.
+   *  Initialized to -9999 so the first turn is always allowed. */
+  lastTurnMs?: number
 }
 
 /**

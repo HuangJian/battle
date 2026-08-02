@@ -105,12 +105,15 @@ const BASELINE: Record<number, Expected> = {
     playerLevel: 0,
   },
   55555: {
-    outcome: 'stage_clear',
-    ticks: 2779,
-    score: 4700,
+    // §87 re-lock: turn cooldown (50ms) changed the outcome from stage_clear
+    // to gameover (base destroyed). The cooldown blocks the AI's per-tick
+    // turning, reducing its base-defense reflex speed.
+    outcome: 'gameover',
+    ticks: 3251,
+    score: 2000,
     lives: 3,
-    killCount: 20,
-    baseAlive: true,
+    killCount: 15,
+    baseAlive: false,
     playerLevel: 0,
   },
 }

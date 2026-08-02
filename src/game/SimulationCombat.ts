@@ -74,6 +74,24 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
         // so it keeps gliding to a stop; only a fully-stopped, idle tank is skipped.
         if (!tank.moving && tank.vx === 0 && tank.vy === 0) continue
 
+        // §86c: Turn cooldown — enforce minimum turn period. After a tank
+        // turns (dir changes), it must wait turnCooldownMs before turning
+        // again. This blocks per-tick direction oscillation at the source
+        // (the simulation refuses to turn faster than this), making the
+        // God AI's dodgeOscillationCounterFire unnecessary in practice.
+        const turnCd = this.world.rules?.turnCooldownMs ?? 0
+        if (turnCd > 0 && tank.dir !== tank.prevMoveDir) {
+          const now = w.frame * (1000 / 60)
+          if (now - (tank.lastTurnMs ?? -9999) < turnCd) {
+            // Cooldown active — revert to the previous movement direction
+            tank.dir = tank.prevMoveDir ?? tank.dir
+          } else {
+            // Cooldown expired — accept the turn
+            tank.prevMoveDir = tank.dir
+            tank.lastTurnMs = now
+          }
+        }
+
         // Enemy freeze — a frozen tank can't act, so bleed off any momentum and skip.
         if (!tank.isPlayer && w.freezeTimer > 0) {
           tank.vx = 0

@@ -397,8 +397,16 @@ export function canMoveDirImpl(self: GodAIInput, tank: Tank, dir: Direction): bo
 function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
   const w = self.world
   const v = DIR_VECTORS[dir]
-  const gx = snap(tank.x, CELL)
-  const gy = snap(tank.y, CELL)
+  // §86: Use Math.floor instead of snap (Math.round) to eliminate the
+  // discontinuity at cell midpoints that causes dodge direction oscillation.
+  // snap(56, 16) = 64 (rounds up), snap(55, 16) = 48 (rounds down) — this
+  // 16px jump flips canMoveDir results, causing the player to oscillate
+  // between two positions every tick. With Math.floor, both y=55 and y=56
+  // snap to 48, eliminating the oscillation at its source.
+  // Gated by `canMoveDirFloorSnap` param: 0 = OFF (snap/round, byte-identical).
+  const useFloor = self.params.canMoveDirFloorSnap > 0
+  const gx = useFloor ? Math.floor(tank.x / CELL) * CELL : snap(tank.x, CELL)
+  const gy = useFloor ? Math.floor(tank.y / CELL) * CELL : snap(tank.y, CELL)
   const nx = gx + v.dx * CELL
   const ny = gy + v.dy * CELL
   if (!w.isInBounds(nx, ny, TANK, TANK)) return false

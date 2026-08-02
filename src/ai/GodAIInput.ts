@@ -30,6 +30,7 @@ import {
   hasEnemyBulletInLineImpl,
   findPathThreatImpl,
   findSafeMoveDirImpl,
+  closeCombatExposureImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -163,6 +164,36 @@ export class GodAIInput implements InputLike {
   _campKillsAtStart = 0
   /** P0.1: countdown to suppress T2a after an anti-camp escape. */
   _antiCampSuppress = 0
+
+  /** §84: the cell where the player is camping in the aggressive branch. */
+  _aggCampCell: Cell | null = null
+  /** §84: consecutive ticks spent at _aggCampCell in aggressive stop-and-aim. */
+  _aggCampTicks = 0
+  /** §84: world.killCount when aggressive camping started. */
+  _aggCampKillsAtStart = 0
+  /** §84: countdown to suppress aggressive stop-and-aim after a stall escape. */
+  _aggCampSuppress = 0
+
+  /**
+   * §86: Dodge direction persistence — the last dodge direction used for a
+   * given threat bullet id. When the same threat persists across ticks and
+   * the last dodge direction is still safe, `dodgeDirectionImpl` returns it
+   * immediately instead of recomputing. This prevents the 1px oscillation
+   * where the player alternates between two positions every tick (e.g.,
+   * y=55↔56), making the player effectively stationary while the bullet
+   * approaches and eventually hits.
+   */
+  _lastDodgeDir: Direction | null = null
+  _lastDodgeThreatId: number = -1
+  /**
+   * §86: Counter for consecutive dodge direction flips (same threat).
+   * When this reaches 3, the player is oscillating (up→down→up→down) and
+   * `dodgeDirectionImpl` switches to counter-fire: face the bullet (turn
+   * toward it) so the think() fire logic cancels it with the player's own
+   * bullet. This is more targeted than persistence (which overrides ALL
+   * direction switches) — it only activates during actual oscillation.
+   */
+  _dodgeFlipCount: number = 0
 
   /** P0.3: the cell where the player is currently stuck in navigate. */
   _navStuckCell: Cell | null = null
@@ -311,6 +342,14 @@ export class GodAIInput implements InputLike {
     this._campTicks = 0
     this._campKillsAtStart = 0
     this._antiCampSuppress = 0
+    this._aggCampCell = null
+    this._aggCampTicks = 0
+    this._aggCampKillsAtStart = 0
+    this._aggCampSuppress = 0
+    // §86: reset dodge direction persistence.
+    this._lastDodgeDir = null
+    this._lastDodgeThreatId = -1
+    this._dodgeFlipCount = 0
     this._navStuckCell = null
     this._navStuckTicks = 0
     this.aggressive = false
@@ -524,6 +563,16 @@ export class GodAIInput implements InputLike {
     playerSpeed: number,
   ): Direction | null {
     return findSafeMoveDirImpl(this, pcx, pcy, threatenedDir, playerSpeed)
+  }
+  /** §85: Check if the player's moveDir exposes it to a close enemy's fire. */
+  closeCombatExposure(
+    pcx: number,
+    pcy: number,
+    moveDir: Direction | null,
+    range: number,
+  ): Direction | null {
+    if (this.params.closeCombatDangerCheck <= 0) return null
+    return closeCombatExposureImpl(this, pcx, pcy, moveDir, range)
   }
 
   // --- StrategyPlanner ---

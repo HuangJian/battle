@@ -5,6 +5,7 @@ import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS, opposite } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
+import { scanAheadImpl } from './FireControl'
 
 // ============================================================
 // ThreatAssessor — bullet-threat assessment + dodging (T8, M3)
@@ -65,7 +66,21 @@ export function findMostDangerousBulletImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
+    // §86: Hysteresis for the recently-dodged threat. When the player
+    // oscillates at the alignment boundary (|dist| = 31 or 32), the threat
+    // flickers between detected and not-detected, causing the player to
+    // alternate between dodge and navigate branches. Use a slightly wider
+    // threshold (TANK + 2) for the bullet that was JUST being dodged, so
+    // it stays "detected" through the 1px oscillation. New threats still
+    // use the standard TANK threshold. This is more targeted than globally
+    // widening the threshold (which caused -37pp on S32 Diamond by detecting
+    // bullets in adjacent steel corridors at exactly 32px).
+    // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
+    const isRecentThreat = self.params.dodgeHysteresis > 0 && b.id === self._lastDodgeThreatId
+    const alignThreshold = isRecentThreat ? TANK + 2 : TANK
+    const aligned = vertical
+      ? Math.abs(bcx - pcx) < alignThreshold
+      : Math.abs(bcy - pcy) < alignThreshold
     if (!aligned) continue
 
     const approaching =
@@ -266,6 +281,43 @@ export function dodgeDirectionImpl(
   // Use module-level constants instead of allocating arrays on every dodge.
   const candA: Direction = vertical ? 'left' : 'up'
   const candB: Direction = vertical ? 'right' : 'down'
+
+  // §86: Dodge direction persistence. When the same threat persists across
+  // ticks, keep the last dodge direction if it's still safe. This prevents
+  // the 1px oscillation where the player alternates between two positions
+  // every tick (e.g., y=55↔56), making the player effectively stationary
+  // while the bullet approaches. Root cause: when the player moves 1px in
+  // the dodge direction, canMoveDir or isSafeDir may flip, causing the
+  // recomputed dodge direction to reverse — the player moves back, the
+  // conditions flip again, and the cycle repeats indefinitely.
+  // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
+  if (
+    self.params.dodgeDirPersistence > 0 &&
+    bullet.id === self._lastDodgeThreatId &&
+    self._lastDodgeDir !== null &&
+    self.canMoveDir(p, self._lastDodgeDir) &&
+    self.isSafeDir(pcx, pcy, self._lastDodgeDir, bullet.id)
+  ) {
+    return self._lastDodgeDir
+  }
+
+  // §86: Oscillation detection + counter-fire. When the dodge direction has
+  // flipped 3+ consecutive times for the same threat, the player is stuck in
+  // an oscillation pattern (up→down→up→down, caused by the snap() function's
+  // Math.round discontinuity at cell midpoints). Instead of continuing to
+  // oscillate (effectively stationary), face the bullet and fire to cancel it
+  // (对枪抵消). This is more targeted than persistence: it only activates
+  // during ACTUAL oscillation, not every time the same threat persists.
+  // A/B: threshold=3 is -0.8pp net (best of all approaches tested).
+  // threshold=2 is -0.9pp. threshold=3+distance_gate is -1.4pp.
+  // persistence is -1.7pp. hysteresis is -1.1pp. floorSnap is -2.6pp.
+  if (
+    self.params.dodgeOscillationCounterFire > 0 &&
+    self._dodgeFlipCount >= 3 &&
+    bullet.id === self._lastDodgeThreatId
+  ) {
+    return opposite(bullet.dir) // face the bullet → think() fire cancels it
+  }
 
   // Try each candidate; prefer the one that's passable AND safe (M3).
   // Use local booleans instead of allocating an `open` array.
@@ -608,4 +660,94 @@ export function hasEnemyBulletInLineImpl(
     if (dist < TANK * 8) return true
   }
   return false
+}
+
+/**
+ * §85: Close-range enemy exposure check — is the player about to turn its
+ * back on a close enemy that could fire and kill it before it can dodge?
+ *
+ * The navigate branch only checks for BULLET threats (findPathThreat). But
+ * an enemy tank that is aligned with the player (same row/col), close
+ * (within `range` cells), and has no wall between them can fire at any
+ * moment. If the player's moveDir moves it ALONG the enemy's line of fire
+ * (not perpendicular — a perpendicular move would be a dodge), the player
+ * is exposed: the enemy fires, the bullet is faster, and the player gets
+ * hit in the back.
+ *
+ * This function returns the direction the player should face to engage the
+ * threatening enemy (stop-and-fire), or null if no close-range exposure
+ * is detected.
+ *
+ * Condition for "exposed":
+ *   1. Enemy within `range` cells (Manhattan distance in the scan axis)
+ *   2. Enemy aligned with the player (same row or col, within TANK px)
+ *   3. No wall/steel between player and enemy (scanAhead finds enemy, not wall)
+ *   4. The player's moveDir is NOT toward the enemy (turning away)
+ *
+ * When exposed, the player should stop and fire at the enemy instead of
+ * moving away. If the enemy is in a different direction than the player's
+ * current facing, the player should turn to face the enemy.
+ */
+export function closeCombatExposureImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  moveDir: Direction | null,
+  range: number,
+): Direction | null {
+  if (!moveDir) return null
+  const w = self.world
+  const tanksArr = w.tanks
+  const rangePx = range * CELL
+
+  for (let ti = 0; ti < tanksArr.length; ti++) {
+    const t = tanksArr[ti]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const dx = tcx - pcx
+    const dy = tcy - pcy
+
+    // Check alignment: same row or col (within TANK px)
+    let enemyDir: Direction | null = null
+    let scanDist = 0
+    if (Math.abs(dx) < TANK) {
+      if (dy < 0) {
+        enemyDir = 'up'
+        scanDist = -dy
+      } else {
+        enemyDir = 'down'
+        scanDist = dy
+      }
+    } else if (Math.abs(dy) < TANK) {
+      if (dx < 0) {
+        enemyDir = 'left'
+        scanDist = -dx
+      } else {
+        enemyDir = 'right'
+        scanDist = dx
+      }
+    }
+    if (!enemyDir) continue
+    if (scanDist > rangePx) continue
+
+    // Check no wall between player and enemy (scanAhead finds enemy)
+    const scan = scanAheadImpl(self, pcx, pcy, enemyDir)
+    if (!scan.enemy) continue
+
+    // Check if moveDir is NOT toward the enemy — the player is turning away.
+    // "Toward the enemy" = same direction as enemyDir (closing distance — safe).
+    // Perpendicular moves are dodges — also safe (the player clears the
+    // enemy's line of fire before a bullet can arrive).
+    // Only FLEEING (moving in the opposite direction = exposing the back)
+    // is the dangerous case the check is designed to prevent.
+    if (moveDir === enemyDir) continue // moving toward enemy — safe
+    if (moveDir !== opposite(enemyDir)) continue // perpendicular — dodge, safe
+
+    // The player is fleeing from a close enemy with a clear shot.
+    // Return the direction to face the enemy and fire instead.
+    return enemyDir
+  }
+  return null
 }

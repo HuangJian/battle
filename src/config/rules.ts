@@ -161,6 +161,17 @@ export interface GameplayRules {
   // ── Cadence ──────────────────────────────────────────────────
   /** Delay between enemy spawns (ms). */
   spawnIntervalMs: number
+
+  // ── §86c: Turn cooldown ───────────────────────────────
+  /** Minimum time (ms) between direction changes for ANY tank (player + enemy).
+   *  0 = OFF (byte-identical to pre-§86c — tanks can turn every tick). >0 = the
+   *  minimum turn period. At 60fps, 50ms ≈ 3 ticks. This blocks the God AI's
+   *  per-tick direction oscillation at the source (the simulation refuses to
+   *  turn faster than this) — the canonical §86c fix. The `dodgeOscillationCounterFire`
+   *  counter-fire (§86) is a no-op in the common case and only catches rare
+   *  3-tick-boundary oscillation; it is the defense-in-depth fallback, not the
+   *  primary fix. */
+  turnCooldownMs: number
 }
 
 /**
@@ -239,6 +250,9 @@ export const DEFAULT_RULES: GameplayRules = {
   turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
   brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
+  // §86c: Turn cooldown — 50ms minimum turn period (3 ticks at 60fps).
+  // Blocks per-tick direction oscillation at the simulation layer.
+  turnCooldownMs: 50,
 }
 
 /**
@@ -330,6 +344,8 @@ export const RULES: Record<string, GameplayRules> = {
     turnOnCollisionOnly: true,
     brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
+    // §86c: Turn cooldown — 50ms minimum turn period (3 ticks at 60fps).
+    turnCooldownMs: 50,
   },
   relax: DEFAULT_RULES,
   hard: DEFAULT_RULES,

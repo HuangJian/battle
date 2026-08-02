@@ -52,14 +52,19 @@ function emptyArena(world: World): void {
  * Spawn player2 and wire a God AI to drive it. Must run BEFORE anyone reads
  * `world.player2` — spawnPlayer2 creates it.
  */
-function coopGod(world: World, guard: number, seed: number): GodAIInput {
+function coopGod(
+  world: World,
+  guard: number,
+  seed: number,
+  extra?: Partial<GodAIParams>,
+): GodAIInput {
   world.coop = true
   world.lives2 = 3
   world.playerLevel2 = 0
   const p1Col = world.playerSpawnPoint?.col ?? 8
   world.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
   world.spawnPlayer2()
-  const params: GodAIParams = { ...DEFAULT_GOD_AI_PARAMS, aimTurnSnapGuard: guard }
+  const params: GodAIParams = { ...DEFAULT_GOD_AI_PARAMS, aimTurnSnapGuard: guard, ...extra }
   const god = new GodAIInput(world, params, new RNG(seed ^ 0xdeadbeef), (w) => w.player2)
   god.reset()
   return god
@@ -279,10 +284,23 @@ describe('§80 aggressive (freeze) branch hunts through the guard', () => {
   })
 
   it('guard OFF: P2 wastes the freeze window pinned next to the enemy', () => {
-    const { world, sim, god } = freezeStandoff(424242, 0)
+    // Disable §84 stall detection (aggCampTimeoutTicks=0) to isolate the §80
+    // guard behavior. In production, §84 provides a safety net that breaks
+    // the pinning after 120 ticks — but this test specifically validates that
+    // the guard ALONE (without stall detection) prevents the waste.
+    const world = lieAimWorld(424242)
+    const god = coopGod(world, 0, 424242, { aggCampTimeoutTicks: 0 })
+    const p2 = world.player2!
+    p2.x = 64
+    p2.y = 101
+    p2.dir = 'up'
+    p2.shieldTimer = 0
+    const sim = new Simulation(world, new Input())
+    sim.input2 = god
+    world.freezeTimer = 20000
 
     const res = runFreeze(world, sim, god, 900)
-    // Pre-§80: the tank commits to the lie-aim turn, the snap slides it off
+    // Pre-§80/§84: the tank commits to the lie-aim turn, the snap slides it off
     // the firing line, and it never reaches a killing line — the whole freeze
     // window is wasted (verified seed-independent: guard=0 pins with every
     // seed, guard=1 kills with every seed).

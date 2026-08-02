@@ -630,6 +630,87 @@ export interface GodAIParams {
    * 1 = ON (default — the fix).
    */
   aimTurnSnapGuard: number
+
+  /**
+   * §84: Aggressive branch stall detection. When > 0, the aggressive
+   * (freeze/shield) stop-and-aim code tracks how long the player has been
+   * stopped at the same cell with no kills. If the player camps for more
+   * than `aggCampTimeoutTicks` ticks without a kill, the AI falls through
+   * to navigate (which repositions the player toward the enemy).
+   *
+   * Root cause (replay classic-s03-…-seed1785643123096, 0:20–0:36):
+   * the aggressive branch has NO anti-stall guard (unlike T2a which has
+   * `_campTicks` and navigate which has `_navStuckTicks`). When the player
+   * stops to aim at an enemy but the bullet keeps missing (enemy slightly
+   * offset in the perpendicular axis, so the 6px bullet passes above/below
+   * the 32px tank), the player stays put firing at nothing for the ENTIRE
+   * freeze window — measured at 1080+ ticks (18 seconds) in the replay.
+   *
+   * 0 = OFF (byte-identical to pre-§84 behavior). 120 = 2 seconds (default).
+   */
+  aggCampTimeoutTicks: number
+
+  /**
+   * §85: Close-range enemy exposure check in navigate. When > 0, the
+   * navigate branch checks if the player's _moveDir would expose the
+   * player to a close-range enemy's line of fire. If an enemy is within
+   * `closeCombatDangerRange` cells, aligned with the player (same row/col),
+   * has no wall between them, and the player's moveDir is NOT toward that
+   * enemy, the move is cancelled — the player stops and fires at the
+   * enemy instead (or turns to face it).
+   *
+   * Root cause (replay classic-s03-…-seed1785643123096, 1:03): the player
+   * was in close combat with an enemy, turned away (moveDir = away from
+   * enemy), and was killed by the enemy's bullet before it could dodge.
+   * The navigate branch only checks for BULLET threats (findPathThreat),
+   * not for enemy tanks that could fire. This check adds enemy-tank
+   * threat assessment: "don't turn your back on a close enemy."
+   *
+   * 0 = OFF (byte-identical to pre-§85). 1 = ON (default).
+   */
+  closeCombatDangerCheck: number
+  /** §85: max distance (cells) for the close-range enemy exposure check. */
+  closeCombatDangerRange: number
+
+  /**
+   * §86: Threat hysteresis — `findMostDangerousBulletImpl` uses TANK+2
+   * alignment threshold for the recently-dodged bullet. Prevents boundary
+   * flickering at |dist|=32. 0 = OFF and is the SHIPPED default
+   * (byte-identical to pre-§86). 1 = ON (experimental, A/B-only — never in
+   * shipped default).
+   */
+  dodgeHysteresis: number
+
+  /**
+   * §86: Dodge direction persistence — `dodgeDirectionImpl` returns the last
+   * dodge direction if the same threat persists. Prevents 1px oscillation.
+   * 0 = OFF and is the SHIPPED default (byte-identical). 1 = ON
+   * (experimental, A/B-only — never in shipped default).
+   */
+  dodgeDirPersistence: number
+
+  /**
+   * §86: Oscillation detection + counter-fire. When the dodge direction
+   * flips 3+ consecutive times for the same threat (oscillation caused by
+   * snap() Math.round discontinuity), face the bullet and fire to cancel it
+   * (对枪抵消). 0 = OFF (A/B baseline). 1 = ON and is the SHIPPED default —
+   * the only §86 param enabled in production. The simulation-layer turn
+   * cooldown (§86c) is the canonical fix, so this AI-layer counter-fire is a
+   * rare-boundary fallback (C-B = +0.1pp per A/B/C).
+   */
+  dodgeOscillationCounterFire: number
+
+  /**
+   * §86: Use `Math.floor` instead of `Math.round` for the snap in
+   * `canMoveDirRaw`. The `snap()` function uses `Math.round(v / CELL) * CELL`,
+   * which has a discontinuity at cell midpoints (e.g., y=56 → snap=64, but
+   * y=55 → snap=48). This 16px jump flips `canMoveDir` results, causing the
+   * dodge direction to oscillate every tick. With `Math.floor`, the snap is
+   * stable across 1px differences (y=55 and y=56 both → 48). 0 = OFF and is
+   * the SHIPPED default (byte-identical). 1 = ON (experimental, A/B-only —
+   * never in shipped default; REJECTED).
+   */
+  canMoveDirFloorSnap: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -827,6 +908,34 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §80: Turn-snap aim guard — 1 = ON (default, the fix). 0 = OFF (pre-§80
   // behavior, A/B baseline). See interface docs.
   aimTurnSnapGuard: 1,
+  // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
+  aggCampTimeoutTicks: 120,
+  // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.
+  closeCombatDangerCheck: 1,
+  // §85: max distance (cells) for the exposure check. Default 2 (point-blank)
+  // — at range 4 the check was too aggressive, causing -1.6pp regression by
+  // cancelling legitimate navigation. At range 2, the check only fires when
+  // the enemy is truly adjacent (32px), where fleeing is almost certainly death.
+  closeCombatDangerRange: 2,
+  // ── §86 oscillation-experiment params (A/B-only knobs) ──────────────
+  // Evaluated for the §86 dodge-oscillation fix. Only `dodgeOscillationCounterFire`
+  // ships ON. The other three are A/B-only and are NEVER part of the shipped
+  // default (intentionally left OFF — see interface docs). The canonical fix
+  // is the simulation-layer turn cooldown (§86c), not these AI-layer patches.
+  // §86: Threat hysteresis — 0 = OFF (A/B showed -1.1pp net regression).
+  // A/B-only: not in shipped default.
+  dodgeHysteresis: 0,
+  // §86: Dodge direction persistence — 0 = OFF (A/B showed -0.6pp net).
+  // A/B-only: not in shipped default.
+  dodgeDirPersistence: 0,
+  // §86: Oscillation detection + counter-fire — 1 = ON (shipped fallback).
+  // 0 = OFF (A/B baseline). Simulation-layer cooldown is canonical; this is a
+  // rare-boundary fallback (C-B = +0.1pp per A/B/C).
+  dodgeOscillationCounterFire: 1,
+  // §86: canMoveDirFloorSnap — 0 = OFF (causes -2.6pp at 35×60, S6 -21.7pp).
+  // Math.floor in canMoveDirRaw breaks ALL navigation predictions, not just
+  // dodging. REJECTED. A/B-only: never in shipped default.
+  canMoveDirFloorSnap: 0,
 }
 
 /**
