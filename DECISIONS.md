@@ -645,3 +645,29 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 - 行为无变化：覆盖表早已为空，删除前后仿真结果逐位一致；`computeStageAdaptedParams()` 继续在 `GodAIInput.reset()` 内负责数据驱动适配。
 - `simulation-runner.ts` 移除 `skipStageOverrides` 选项；`per-seed-diff.ts` / `freeze-thrash-audit.ts` 改为先复制 `DEFAULT_GOD_AI_PARAMS` 再应用 `--set`（顺带修复了空表时代码直接变更共享默认对象引用的隐患）。
 - 文档同步：`plan/tasks.chat.md` 勾选、`docs/god-ai-tuning.progress.md` 现状改写、`plan/Lie-Back-Win-Mode.md` / `plan/God-AI-Next-Round.md` 残留引用更新。
+
+---
+
+## 83. §83: dodgeDirection 回退分支不再沿炮弹飞行方向逃跑 — 受困走廊时回头对枪抵消 (SHIPPED)
+
+**Symptom:** `classic-s02-clear-l1-t62-seed1785636440494.replay` (0:27, tick 1641)：player 在垂直走廊（col 4，左右被封死）里，一颗敌方炮弹在同一列从上方追下来，player `dir=down` 一路往下逃（`rec=[down.]` 持续 39 tick），炮弹更快，追上致死。期望行为是「回头开火，对消敌人炮弹」。
+
+**Root cause:** `dodgeDirectionImpl`（ThreatAssessor.ts）对垂直炮弹的垂直候选是 left/right。当 player 被夹在走廊里（left/right 均不可走）时，落入回退分支：原逻辑选「离基地最近的开方向」。炮弹往下飞（朝向基地），"离基地最近"恰好就是 **炮弹自身的飞行方向（down）** —— player 沿走廊在炮弹的尾流里逃跑，但炮弹更快，必然被追上。（忠实回放 + fresh GodAIInput 无状态诊断逐 tick 确认：`threat=down@d…` 检测到了，`dodge=down` 是问题所在，`aim=up face=Y bInLine=true` 说明 turn-up + T5 本可抵消。）
+
+**Decision:** 回退分支排除炮弹飞行方向（逃跑徒劳且面对反方向、冷却结束的子弹也打反方向 = 必死）；优先选**朝向炮弹的方向**（炮弹飞行的反方向），使 player 转身面对来袭炮弹、`shouldFireInDir` 的 T5 在 128px 内开火抵消（对枪抵消）。仅当朝向方向也被堵死时才退回炮弹方向（最后手段，能动能比站着强）。
+
+**Rationale:**
+- 证明"朝向炮弹"在两种情况下都支配"逃跑"：未冷却时转身即开火抵消、存活；冷却中至少 **面对** 炮弹 —— 其子弹一解析立即开火抵消（逃跑则面对反方向，冷却结束那发也打空 → 必死）。
+- 只在 `!safeA && !safeB`（垂直候选不可行的受困几何）时触发；普通垂直闪避路径逐字节不变，无回归风险。
+- MANIFEST §13 Three Gates：(1) 消除"炮弹尾流里逃跑致死"令人沮丧的行为，更愉悦；(2) 一个局部回退改动，简单；(3) 触发对枪抵消符合 FC 精神。
+
+**Results (2026-08-01, classic 35 关真值 A/B):**
+- **过关率：持平（byte-identical）。** 35×60：修复前 90.05%（1891/2100）＝ 修复后 90.05%（逐关逐 seed 完全一致）；35×20：修复前 92.57% ＝ 修复后 92.57%（干净重跑逐位一致）。
+- **确定性已证**：同一代码同一进程类型重复跑 bulk sweep，输出逐字节一致（`probe` 两跑 IDENTICAL）。
+- **方法论教训（预 seed 重叠验证）**：20-seed（1–20）⊂ 60-seed（1–60）。诊断初期 35×20「+3 进步 / S2/S30/S33 回退」是**污染产物** —— 在我 stash 往复期间，基线那次 bulk run 的 `src/ai/god/ThreatAssessor.ts` 处于修复进行中的残留态（该跑 S2=20 与孤立 per-seed S2=19 矛盾即铁证）。干净重跑后 fixed == baseline。**任何代码改动 A/B 必须在干净 git 态下、且用 per-seed 对比校验，不能只看一次 bulk 总胜率。**
+- 为何"回退分支大量触发（35×20 约 1815 次）却净持平"：sim-runner 用独立 `godRng = (seed ^ 0x9e3779b9)`（浏览器 spectate 用不同接线，replay 场景由浏览器产生），其 seed 分布把致命受困走廊场景稀释到不翻转任何最终结果；修复正确但在此评估框架上不改变 aggregate。
+
+**Tests:** `tests/dodge-corridor-flee.test.ts`（5 tests）——垂直走廊被夹不逃 `down`、回头选 `up`（朝炮弹）；水平走廊不逃 `right`、选 `left`；有垂直候选时仍 `left`（无回归）；端到端 `findMostDangerousBullet` 检测 + dodge 朝炮弹。先红后绿：修复前 `dodge=down`（Fail），修复后 `dodge=up`（Pass）。
+
+**Implications:** 默认随代码 SHIPPED（无参数开关，逻辑内联）。已修复真实 replay 致命 bug 且无评估框架回归。推进方向：若想让该修复在 God AI 调优 framework 上显现价值，需给 sim-runner 的受困走廊场景构造/加权重，或用浏览器 spectate 同源 RNG 接线复现——但那属于评估基建，非本 bug 修复范围。
+

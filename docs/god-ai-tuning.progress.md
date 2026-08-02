@@ -29,6 +29,9 @@
 
 > **§80（2026-08-01）**：冰冻窗口 aim/navigate 转身抖动死锁（replay `classic-s11-…seed1785622102123` 0:31–0:47：P2 冰冻期间原地对空开火）。根因：转向不是免费的——`Simulation.updateMovement` 每次换轴都 snap 垂直坐标，非网格对齐的坦克一转身就被推开最多 CELL/2 px，目标被甩出 `scanAhead` 的 ±8px 偏移线；aggressive 分支没有任何反驻车守卫（T2a 有 `_campTicks`，navigate 有 `_navStuckTicks`）。修复：新参数 `aimTurnSnapGuard`（默认 1 = ON；0 = OFF 逐字节不变），aggressive 分支在 commit 停火转向**之前**用**转身后**的位置重跑扫描，若敌人已不在线上则判定"假瞄准"→ 落入 navigate。**35×60×2 真值终验：冰冻窗口击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）**；过关率 coop 98.8%→99.0%（+0.2pp，net +3）、single 88.8%→89.7%（**+0.9pp，net +20**）；逐关 ≥5pp 回退 **0 关**（最大负向 Diamond/Ramparts −1.7pp = 1 seed 噪声），改善 Lattice +8.3pp / Riverbed +5pp。**S32 Star Fort 10/30-seed 回退（−10pp/−3.3pp）在 60 seeds 确认为种子噪声：Δ0.0pp 完全持平**（coop 60/60 双态、single 55/60 双态）；per-seed tick-diff 定位的机制（t1226 守卫拒绝转向 → navigate 死路）仍是真实失败模式，但真值尺度净中性。详见 DECISIONS §80。
 
+> **§83（2026-08-01）**：`dodgeDirection` 回退分支沿炮弹飞行方向逃跑 = 受困走廊必死 bug（replay `classic-s02-clear-l1-t62-seed1785636440494` 0:27 tick 1641）。修复：回退时排除炮弹飞行方向、优先**朝向炮弹**（转身 → T5 开火抵消 对枪抵消）。**过关率：持平（byte-identical）**——35×60 修复前 90.05% ＝ 后 90.05%（逐关逐 seed 一致）；35×20 修复前 92.57% ＝ 后 92.57%（干净重跑一致）；确定性已证（同代码重复 bulk sweep 逐字节一致）。**方法论教训**：20-seed（1–20）⊂ 60-seed（1–60），若诊断期 git 态不干净（stash 往复污染基线），一次 bulk 总胜率会给出假「+进步 / 回退」——本 bug 早期 35×20 的 ±3 即污染物。bug 真实、已修复并单测锁定，但对 sim-runner 评估框架净中性（其独立 godRng 未把受困走廊场景翻转任何最终结果）。详见 DECISIONS §83。
+
+
 **演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）**。
 
 ---

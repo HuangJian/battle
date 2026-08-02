@@ -3,7 +3,7 @@ import type { Bullet } from '../../types'
 import type { Direction } from '../../constants'
 import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
-import { ALL_DIRS } from '../../utils/helpers'
+import { ALL_DIRS, opposite } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 
 // ============================================================
@@ -280,40 +280,64 @@ export function dodgeDirectionImpl(
     if (self.canMoveDir(p, candB)) safeB = true
   }
 
-  // If still nothing, try any open direction.
+  // If still nothing [no perpendicular dodge passable], the player is pinned
+  // in a corridor aligned with the bullet. §83: NEVER flee in the bullet's own
+  // travel direction — the bullet is faster, so fleeing down the corridor in
+  // its wake is futile death (reproduced in classic-s02 seed 1785636440494
+  // @00:27: player fled 'down' for 39 ticks, bullet overtook it). Instead,
+  // prefer turning TOWARD the bullet (the opposite of its travel): the player
+  // faces the incoming bullet and the T5 fire logic cancels it (对枪抵消). This
+  // dominates fleeing in BOTH cases: when not on cooldown the player cancels
+  // and survives; when on cooldown the player at least FACES the bullet so the
+  // instant its shot resolves it fires to cancel (fleeing faces AWAY → the
+  // cooldown-end shot goes the wrong way → certain death). Only fall back to
+  // the flee direction as an absolute last resort (when toward is blocked too).
   if (!safeA && !safeB) {
-    if (self.hasBase) {
-      // Find the open direction closest to the base (replicates sort-by-distance).
-      const baseCx = BASE_POS.col * CELL + CELL
-      const baseCy = BASE_POS.row * CELL + CELL
-      let bestDist = Infinity
-      for (let di = 0; di < ALL_DIRS.length; di++) {
-        const d = ALL_DIRS[di]
-        if (!self.canMoveDir(p, d)) continue
+    const fleeDir: Direction = bullet.dir
+    const towardDir: Direction = opposite(bullet.dir)
+    const baseCx = BASE_POS.col * CELL + CELL
+    const baseCy = BASE_POS.row * CELL + CELL
+    // First pass: open directions EXCLUDING the futile flee direction. Prefer
+    // towardDir, then (for hasBase) the one closest to the base.
+    let bestDist = Infinity
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
+      if (d === fleeDir) continue
+      if (!self.canMoveDir(p, d)) continue
+      // Toward the bullet wins outright (it enables counter-fire).
+      if (d === towardDir) {
+        bestDist = -1
+        break
+      }
+      if (self.hasBase) {
         const vd = DIR_VECTORS[d]
         const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
-        if (dist < bestDist) {
-          bestDist = dist
+        if (dist < bestDist) bestDist = dist
+      } else {
+        bestDist = 0 // no base — first non-flee open direction
+      }
+    }
+    if (bestDist < Infinity) {
+      if (bestDist === -1) return towardDir
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (d === fleeDir) continue
+        if (!self.canMoveDir(p, d)) continue
+        if (self.hasBase) {
+          const vd = DIR_VECTORS[d]
+          const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
+          if (dist === bestDist) return d
+        } else {
+          return d
         }
       }
-      if (bestDist === Infinity) return null
-      // Re-iterate to pick the first direction with the best distance
-      // (matches sort-stable behavior: ALL_DIRS order on ties).
-      for (let di = 0; di < ALL_DIRS.length; di++) {
-        const d = ALL_DIRS[di]
-        if (!self.canMoveDir(p, d)) continue
-        const vd = DIR_VECTORS[d]
-        const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
-        if (dist === bestDist) return d
-      }
-      return null
-    } else {
-      // No base — first open direction.
-      for (let di = 0; di < ALL_DIRS.length; di++) {
-        if (self.canMoveDir(p, ALL_DIRS[di])) return ALL_DIRS[di]
-      }
-      return null
     }
+    // Last resort: any open direction (including the flee direction — any
+    // movement beats standing still when the player truly cannot turn toward).
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      if (self.canMoveDir(p, ALL_DIRS[di])) return ALL_DIRS[di]
+    }
+    return null
   }
 
   // We have at least one perpendicular candidate (safeA or safeB).
