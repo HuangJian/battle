@@ -671,6 +671,46 @@ export interface GodAIParams {
   closeCombatDangerCheck: number
   /** §85: max distance (cells) for the close-range enemy exposure check. */
   closeCombatDangerRange: number
+
+  /**
+   * §86: Threat hysteresis — `findMostDangerousBulletImpl` uses TANK+2
+   * alignment threshold for the recently-dodged bullet. Prevents boundary
+   * flickering at |dist|=32. 0 = OFF and is the SHIPPED default
+   * (byte-identical to pre-§86). 1 = ON (experimental, A/B-only — never in
+   * shipped default).
+   */
+  dodgeHysteresis: number
+
+  /**
+   * §86: Dodge direction persistence — `dodgeDirectionImpl` returns the last
+   * dodge direction if the same threat persists. Prevents 1px oscillation.
+   * 0 = OFF and is the SHIPPED default (byte-identical). 1 = ON
+   * (experimental, A/B-only — never in shipped default).
+   */
+  dodgeDirPersistence: number
+
+  /**
+   * §86: Oscillation detection + counter-fire. When the dodge direction
+   * flips 3+ consecutive times for the same threat (oscillation caused by
+   * snap() Math.round discontinuity), face the bullet and fire to cancel it
+   * (对枪抵消). 0 = OFF (A/B baseline). 1 = ON and is the SHIPPED default —
+   * the only §86 param enabled in production. The simulation-layer turn
+   * cooldown (§86c) is the canonical fix, so this AI-layer counter-fire is a
+   * rare-boundary fallback (C-B = +0.1pp per A/B/C).
+   */
+  dodgeOscillationCounterFire: number
+
+  /**
+   * §86: Use `Math.floor` instead of `Math.round` for the snap in
+   * `canMoveDirRaw`. The `snap()` function uses `Math.round(v / CELL) * CELL`,
+   * which has a discontinuity at cell midpoints (e.g., y=56 → snap=64, but
+   * y=55 → snap=48). This 16px jump flips `canMoveDir` results, causing the
+   * dodge direction to oscillate every tick. With `Math.floor`, the snap is
+   * stable across 1px differences (y=55 and y=56 both → 48). 0 = OFF and is
+   * the SHIPPED default (byte-identical). 1 = ON (experimental, A/B-only —
+   * never in shipped default; REJECTED).
+   */
+  canMoveDirFloorSnap: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -877,6 +917,25 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // cancelling legitimate navigation. At range 2, the check only fires when
   // the enemy is truly adjacent (32px), where fleeing is almost certainly death.
   closeCombatDangerRange: 2,
+  // ── §86 oscillation-experiment params (A/B-only knobs) ──────────────
+  // Evaluated for the §86 dodge-oscillation fix. Only `dodgeOscillationCounterFire`
+  // ships ON. The other three are A/B-only and are NEVER part of the shipped
+  // default (intentionally left OFF — see interface docs). The canonical fix
+  // is the simulation-layer turn cooldown (§86c), not these AI-layer patches.
+  // §86: Threat hysteresis — 0 = OFF (A/B showed -1.1pp net regression).
+  // A/B-only: not in shipped default.
+  dodgeHysteresis: 0,
+  // §86: Dodge direction persistence — 0 = OFF (A/B showed -0.6pp net).
+  // A/B-only: not in shipped default.
+  dodgeDirPersistence: 0,
+  // §86: Oscillation detection + counter-fire — 1 = ON (shipped fallback).
+  // 0 = OFF (A/B baseline). Simulation-layer cooldown is canonical; this is a
+  // rare-boundary fallback (C-B = +0.1pp per A/B/C).
+  dodgeOscillationCounterFire: 1,
+  // §86: canMoveDirFloorSnap — 0 = OFF (causes -2.6pp at 35×60, S6 -21.7pp).
+  // Math.floor in canMoveDirRaw breaks ALL navigation predictions, not just
+  // dodging. REJECTED. A/B-only: never in shipped default.
+  canMoveDirFloorSnap: 0,
 }
 
 /**

@@ -112,6 +112,25 @@ export function thinkImpl(self: GodAIInput): void {
 
     // Dodge: move perpendicular to the bullet (M3: verify safety).
     self._moveDir = self.dodgeDirection(threat, pcx, pcy)
+    // §86: Track dodge state for oscillation detection + persistence/hysteresis.
+    // _lastDodgeThreatId is always set (needed by oscillation detection,
+    // hysteresis, and persistence in ThreatAssessor). _lastDodgeDir is always
+    // set (needed by oscillation detection to compare against next tick's dir).
+    // _dodgeFlipCount tracks consecutive direction flips for the same threat.
+    if (threat.id === self._lastDodgeThreatId && self._lastDodgeDir !== null) {
+      // Same threat as last tick — check if direction flipped.
+      if (self._moveDir !== null && self._moveDir !== self._lastDodgeDir) {
+        self._dodgeFlipCount++
+      } else {
+        // Direction stable or null — reset flip counter.
+        self._dodgeFlipCount = 0
+      }
+    } else {
+      // New threat — reset flip counter.
+      self._dodgeFlipCount = 0
+    }
+    self._lastDodgeThreatId = threat.id
+    self._lastDodgeDir = self._moveDir
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     self.branchCounts.dodge++
     return
@@ -120,6 +139,10 @@ export function thinkImpl(self: GodAIInput): void {
   // No threat — reset reaction state.
   self.reactionCounter = 0
   self.lastThreatId = -1
+  // §86: reset dodge state when no threat is active.
+  self._lastDodgeThreatId = -1
+  self._lastDodgeDir = null
+  self._dodgeFlipCount = 0
 
   // ---- T8: Base bullet interception (ultimate defense) ----
   // Check AFTER dodge (survive first) but BEFORE aggressive/T2a.

@@ -174,6 +174,27 @@ export class GodAIInput implements InputLike {
   /** §84: countdown to suppress aggressive stop-and-aim after a stall escape. */
   _aggCampSuppress = 0
 
+  /**
+   * §86: Dodge direction persistence — the last dodge direction used for a
+   * given threat bullet id. When the same threat persists across ticks and
+   * the last dodge direction is still safe, `dodgeDirectionImpl` returns it
+   * immediately instead of recomputing. This prevents the 1px oscillation
+   * where the player alternates between two positions every tick (e.g.,
+   * y=55↔56), making the player effectively stationary while the bullet
+   * approaches and eventually hits.
+   */
+  _lastDodgeDir: Direction | null = null
+  _lastDodgeThreatId: number = -1
+  /**
+   * §86: Counter for consecutive dodge direction flips (same threat).
+   * When this reaches 3, the player is oscillating (up→down→up→down) and
+   * `dodgeDirectionImpl` switches to counter-fire: face the bullet (turn
+   * toward it) so the think() fire logic cancels it with the player's own
+   * bullet. This is more targeted than persistence (which overrides ALL
+   * direction switches) — it only activates during actual oscillation.
+   */
+  _dodgeFlipCount: number = 0
+
   /** P0.3: the cell where the player is currently stuck in navigate. */
   _navStuckCell: Cell | null = null
   /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
@@ -325,6 +346,10 @@ export class GodAIInput implements InputLike {
     this._aggCampTicks = 0
     this._aggCampKillsAtStart = 0
     this._aggCampSuppress = 0
+    // §86: reset dodge direction persistence.
+    this._lastDodgeDir = null
+    this._lastDodgeThreatId = -1
+    this._dodgeFlipCount = 0
     this._navStuckCell = null
     this._navStuckTicks = 0
     this.aggressive = false

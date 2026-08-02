@@ -66,7 +66,21 @@ export function findMostDangerousBulletImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
+    // §86: Hysteresis for the recently-dodged threat. When the player
+    // oscillates at the alignment boundary (|dist| = 31 or 32), the threat
+    // flickers between detected and not-detected, causing the player to
+    // alternate between dodge and navigate branches. Use a slightly wider
+    // threshold (TANK + 2) for the bullet that was JUST being dodged, so
+    // it stays "detected" through the 1px oscillation. New threats still
+    // use the standard TANK threshold. This is more targeted than globally
+    // widening the threshold (which caused -37pp on S32 Diamond by detecting
+    // bullets in adjacent steel corridors at exactly 32px).
+    // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
+    const isRecentThreat = self.params.dodgeHysteresis > 0 && b.id === self._lastDodgeThreatId
+    const alignThreshold = isRecentThreat ? TANK + 2 : TANK
+    const aligned = vertical
+      ? Math.abs(bcx - pcx) < alignThreshold
+      : Math.abs(bcy - pcy) < alignThreshold
     if (!aligned) continue
 
     const approaching =
@@ -267,6 +281,43 @@ export function dodgeDirectionImpl(
   // Use module-level constants instead of allocating arrays on every dodge.
   const candA: Direction = vertical ? 'left' : 'up'
   const candB: Direction = vertical ? 'right' : 'down'
+
+  // §86: Dodge direction persistence. When the same threat persists across
+  // ticks, keep the last dodge direction if it's still safe. This prevents
+  // the 1px oscillation where the player alternates between two positions
+  // every tick (e.g., y=55↔56), making the player effectively stationary
+  // while the bullet approaches. Root cause: when the player moves 1px in
+  // the dodge direction, canMoveDir or isSafeDir may flip, causing the
+  // recomputed dodge direction to reverse — the player moves back, the
+  // conditions flip again, and the cycle repeats indefinitely.
+  // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
+  if (
+    self.params.dodgeDirPersistence > 0 &&
+    bullet.id === self._lastDodgeThreatId &&
+    self._lastDodgeDir !== null &&
+    self.canMoveDir(p, self._lastDodgeDir) &&
+    self.isSafeDir(pcx, pcy, self._lastDodgeDir, bullet.id)
+  ) {
+    return self._lastDodgeDir
+  }
+
+  // §86: Oscillation detection + counter-fire. When the dodge direction has
+  // flipped 3+ consecutive times for the same threat, the player is stuck in
+  // an oscillation pattern (up→down→up→down, caused by the snap() function's
+  // Math.round discontinuity at cell midpoints). Instead of continuing to
+  // oscillate (effectively stationary), face the bullet and fire to cancel it
+  // (对枪抵消). This is more targeted than persistence: it only activates
+  // during ACTUAL oscillation, not every time the same threat persists.
+  // A/B: threshold=3 is -0.8pp net (best of all approaches tested).
+  // threshold=2 is -0.9pp. threshold=3+distance_gate is -1.4pp.
+  // persistence is -1.7pp. hysteresis is -1.1pp. floorSnap is -2.6pp.
+  if (
+    self.params.dodgeOscillationCounterFire > 0 &&
+    self._dodgeFlipCount >= 3 &&
+    bullet.id === self._lastDodgeThreatId
+  ) {
+    return opposite(bullet.dir) // face the bullet → think() fire cancels it
+  }
 
   // Try each candidate; prefer the one that's passable AND safe (M3).
   // Use local booleans instead of allocating an `open` array.

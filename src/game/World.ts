@@ -630,6 +630,11 @@ export class World {
       vx: 0,
       vy: 0,
       spawnTimer: 1000,
+      // §86c: Initialize turn cooldown tracking. prevMoveDir = dir so the
+      // first frame doesn't register as a turn. lastTurnMs = -9999 so
+      // the first real turn is always allowed.
+      prevMoveDir: dir,
+      lastTurnMs: -9999,
       level: kind === 'player' ? this.playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
