@@ -149,6 +149,8 @@ export interface WorldSnapshot {
   // ---- Lie-Back-Win-Mode (coop) fields ----
   /** Whether cooperative mode was active at snapshot time. */
   coop?: boolean
+  /** 督战 (supervise) mode: God AI as player1, no human input. */
+  spectate?: boolean
   /** Player2 tank snapshot (null when coop is off, absent in old snapshots). */
   player2?: Tank | null
   /** God AI lives at snapshot time. */

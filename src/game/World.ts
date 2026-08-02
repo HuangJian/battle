@@ -241,6 +241,8 @@ export class World {
   // --- Lie-Back-Win-Mode: cooperative mode state ---
   /** Whether cooperative mode is active (God AI as P2). */
   coop: boolean
+  /** 督战 (supervise) mode: God AI fights as PLAYER1, no human input at all. */
+  spectate: boolean
   /** P2 spawn point in sub-block coords (经典位 col 16, row 24). */
   player2SpawnPoint: { col: number; row: number }
 
@@ -331,6 +333,7 @@ export class World {
     this.baseHp = 1
     this.baseMaxHp = 1
     this.coop = false
+    this.spectate = false
     this.player2SpawnPoint = { col: 16, row: 24 }
     this.recoveryCursor = 0
     this.recoveryCountdown = 0
@@ -363,6 +366,7 @@ export class World {
     this.killCount = 0
     this.playTimeMs = 0
     this.coop = false
+    this.spectate = false
     // Fresh run: clear any deferred drops left over from a previous game
     // (e.g. a buffered drop from the final stage of a won run).
     this.pendingDrops = []

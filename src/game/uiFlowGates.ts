@@ -26,6 +26,14 @@ export function canToggleCoop(state: GameState): boolean {
   return state === 'menu' || state === 'paused' || state === 'recovery'
 }
 
+/** May 督战 (supervise — God AI as player1) be toggled? Same availability
+ *  contract as co-op: menu / paused / MISSION FAILED, so it can be armed
+ *  before a run starts or before retrying. Live play and terminal states
+ *  fall through to no-op. */
+export function canToggleSpectate(state: GameState): boolean {
+  return state === 'menu' || state === 'paused' || state === 'recovery'
+}
+
 /** Is the Replay Browser BLOCKED over this screen? Never. The browser is a
  *  fixed z-index-30 modal that layers over any screen; a live 'playing' game
  *  is auto-paused (and an active playback exited) by the caller before it

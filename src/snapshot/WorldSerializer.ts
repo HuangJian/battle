@@ -67,6 +67,8 @@ export function cloneWorld(world: World): WorldSnapshot {
     playerLevel: world.playerLevel,
     // Lie-Back-Win-Mode: coop state
     coop: world.coop,
+    // 督战 (supervise) mode: God AI as player1
+    spectate: world.spectate,
     player2: world.player2 ? cloneTank(world.player2) : null,
     lives2: world.lives2,
     playerLevel2: world.playerLevel2,
@@ -162,6 +164,8 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.playerLevel = snap.playerLevel
   // Lie-Back-Win-Mode: restore coop state (backward compat: default to off)
   world.coop = snap.coop ?? false
+  // 督战 (supervise) mode: restore spectate state (backward compat: off)
+  world.spectate = snap.spectate ?? false
   world.player2 = snap.player2 ? cloneTank(snap.player2) : null
   world.lives2 = snap.lives2 ?? 0
   world.playerLevel2 = snap.playerLevel2 ?? 0

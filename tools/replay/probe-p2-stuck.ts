@@ -61,13 +61,7 @@ function rawCanMove(t: Tank, dir: Direction): boolean {
   if (world.rectHitsTerrain(nx, ny, TANK, TANK)) return false
   for (const o of world.allTanks) {
     if (o === t || !o.alive) continue
-    if (
-      nx < o.x + o.w &&
-      o.x < nx + TANK &&
-      ny < o.y + o.h &&
-      o.y < ny + TANK
-    )
-      return false
+    if (nx < o.x + o.w && o.x < nx + TANK && ny < o.y + o.h && o.y < ny + TANK) return false
   }
   return true
 }

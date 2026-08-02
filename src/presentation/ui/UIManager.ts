@@ -58,6 +58,13 @@ export class UIManager {
   private hudStar: HTMLElement
   private hudReplay: HTMLElement
   private hudReplayDifficulty: HTMLElement
+  /** 督战 (supervise) HUD badge — visible while God AI fights as player1. */
+  private hudSpectate: HTMLElement
+  /** 督战 battle-speed chip (×1.5 / ×2 / ×4) — hidden at ×1. */
+  private hudSpeed: HTMLElement
+  private hudSpeedValue: HTMLElement
+  private lastBattleSpeed = 1
+  private lastSpectate = false
   readonly replayController: ReplayController
   private buffShield: HTMLElement
   private buffShieldTime: HTMLElement
@@ -208,6 +215,13 @@ export class UIManager {
           <span class="hud-label" data-i18n="hud.replayMode">REPLAY MODE</span>
           <span class="hud-replay-difficulty" data-hud="replay-difficulty"></span>
         </div>
+        <div class="hud-item hud-spectate" data-hud="spectate" hidden>
+          <span class="hud-label" data-i18n="hud.spectate">SPECTATE</span>
+        </div>
+        <div class="hud-item hud-speed" data-hud="speed" hidden>
+          <span class="hud-label" data-i18n="hud.speed">SPEED</span>
+          <span class="hud-value hud-speed-value" data-hud="speed-value">×1</span>
+        </div>
         <div class="hud-item">
           <span class="hud-label" data-i18n="hud.stage">STAGE</span>
           <span class="hud-value" data-hud="stage">01</span>
@@ -353,7 +367,8 @@ export class UIManager {
     this.footer.innerHTML = `
       <span>P</span> <span data-i18n="footer.pause">Pause</span> &nbsp;·&nbsp;
       <span>Alt+R</span> <span data-i18n="footer.reset">Reset</span> &nbsp;·&nbsp;
-      <span>Alt+S</span> <span data-i18n="footer.save">Save</span>
+      <span>Alt+S</span> <span data-i18n="footer.save">Save</span> &nbsp;·&nbsp;
+      <span>Alt+&lt; Alt+&gt;</span> <span data-i18n="footer.speed">Speed</span>
     `
 
     // Performance Observatory (Alt+D) — fixed-position dev overlay (read-only).
@@ -380,6 +395,9 @@ export class UIManager {
     this.hudStar = this.hudBar.querySelector('[data-hud="star"]')!
     this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
     this.hudReplayDifficulty = this.hudBar.querySelector('[data-hud="replay-difficulty"]')!
+    this.hudSpectate = this.hudBar.querySelector('[data-hud="spectate"]')!
+    this.hudSpeed = this.hudBar.querySelector('[data-hud="speed"]')!
+    this.hudSpeedValue = this.hudBar.querySelector('[data-hud="speed-value"]')!
 
     // Replay Controller (video player style)
     this.replayController = new ReplayController()
@@ -810,6 +828,12 @@ export class UIManager {
       this.hudEnemies.textContent = String(world.enemiesRemaining)
       this.lastEnemies = world.enemiesRemaining
     }
+    // 督战 (supervise) badge — synced from the World so toggle, stage restore,
+    // and startGame resets all converge on the same source of truth.
+    if (world.spectate !== this.lastSpectate) {
+      this.lastSpectate = world.spectate
+      this.hudSpectate.hidden = !world.spectate
+    }
     if (world.lives !== this.lastLives) {
       const hearts = '♥'.repeat(Math.max(0, world.lives))
       this.hudLives.textContent = hearts || '—'
@@ -941,6 +965,14 @@ export class UIManager {
   /** Update the replay speed display. */
   setReplaySpeed(speed: number): void {
     this.replayController.setSpeed(speed)
+  }
+
+  /** Show the live battle-speed chip (hidden at ×1). */
+  setBattleSpeed(speed: number): void {
+    if (speed === this.lastBattleSpeed) return
+    this.lastBattleSpeed = speed
+    this.hudSpeed.hidden = speed === 1
+    this.hudSpeedValue.textContent = `×${speed}`
   }
 
   /**

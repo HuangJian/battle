@@ -94,7 +94,14 @@ let minX = Infinity,
   maxX = -Infinity,
   minY = Infinity,
   maxY = -Infinity
-const segments: Array<{ from: number; to: number; spanX: number; spanY: number; x: number; y: number }> = []
+const segments: Array<{
+  from: number
+  to: number
+  spanX: number
+  spanY: number
+  x: number
+  y: number
+}> = []
 
 function closeSeg(t: number) {
   if (minX !== Infinity) {
@@ -181,7 +188,9 @@ while (!input.isFinished && tick < replay.totalTicks + 10) {
 }
 closeSeg(tick)
 
-console.log(`\nfinal=${world.state} @${tick} kills=${world.killCount} baseAlive=${!world.tileMap.isBaseDestroyed()}`)
+console.log(
+  `\nfinal=${world.state} @${tick} kills=${world.killCount} baseAlive=${!world.tileMap.isBaseDestroyed()}`,
+)
 console.log('\n--- P2 life segments (span in px, CELL=16) ---')
 for (const s of segments) {
   const stuck = s.spanX < CELL && s.spanY < CELL

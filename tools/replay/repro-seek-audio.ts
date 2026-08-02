@@ -84,6 +84,8 @@ if (import.meta.main) {
     const bug = buggyBacklog(text, frac)
     console.log(`[FIXED]   pending events after seekTo(${frac}): ${fixed}`)
     console.log(`[OLD-BUG] events a non-draining catch-up would queue: ${bug}`)
-    console.log(`  -> ${bug > 0 && fixed === 0 ? 'FIXED: no audio burst' : (fixed === 0 ? 'no backlog' : 'STILL BROKEN')}`)
+    console.log(
+      `  -> ${bug > 0 && fixed === 0 ? 'FIXED: no audio burst' : fixed === 0 ? 'no backlog' : 'STILL BROKEN'}`,
+    )
   }
 }

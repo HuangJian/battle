@@ -52,6 +52,8 @@ export interface ReplayMetadata {
   playTimeMs: number
   /** Lie-Back-Win-Mode: whether this replay used cooperative mode. */
   coop?: boolean
+  /** 督战 (supervise) mode: whether God AI played as player1 (no human input). */
+  spectate?: boolean
 }
 
 /**

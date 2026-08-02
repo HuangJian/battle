@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'bun:test'
-import { canOpenControls, canToggleCoop, isReplayBrowserBlocked } from '../src/game/uiFlowGates'
+import {
+  canOpenControls,
+  canToggleCoop,
+  canToggleSpectate,
+  isReplayBrowserBlocked,
+} from '../src/game/uiFlowGates'
 import type { GameState } from '../src/types'
 
 /**
@@ -63,6 +68,24 @@ describe('Recovery-screen flow gates (regression)', () => {
       expect(canToggleCoop('stageclear')).toBe(false)
       expect(canToggleCoop('gameover')).toBe(false)
       expect(canToggleCoop('victory')).toBe(false)
+    })
+  })
+
+  describe('督战 Supervise — canToggleSpectate', () => {
+    it('accepts the MISSION FAILED (recovery) screen so supervise can be armed before retrying', () => {
+      expect(canToggleSpectate('recovery')).toBe(true)
+    })
+
+    it('accepts menu and paused', () => {
+      expect(canToggleSpectate('menu')).toBe(true)
+      expect(canToggleSpectate('paused')).toBe(true)
+    })
+
+    it('rejects live play and terminal states (playing / stageclear / gameover / victory)', () => {
+      expect(canToggleSpectate('playing')).toBe(false)
+      expect(canToggleSpectate('stageclear')).toBe(false)
+      expect(canToggleSpectate('gameover')).toBe(false)
+      expect(canToggleSpectate('victory')).toBe(false)
     })
   })
 

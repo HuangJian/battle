@@ -39,6 +39,8 @@ export interface ControlCenterCallbacks {
   onTogglePerformance: () => void
   /** Toggle Lie-Back-Win-Mode (coop with God AI). */
   onToggleCoop: () => void
+  /** Toggle 督战 (supervise) mode (God AI as player1, no human input). */
+  onToggleSpectate: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -66,6 +68,8 @@ export class ControlCenter {
   private perfModeState: HTMLElement | null = null
   private coopBtn: HTMLButtonElement | null = null
   private coopState: HTMLElement | null = null
+  private spectateBtn: HTMLButtonElement | null = null
+  private spectateState: HTMLElement | null = null
   private langNameEl: HTMLElement | null = null
 
   // Theme switcher (GAMEPLAY) — button label + dropdown
@@ -107,6 +111,10 @@ export class ControlCenter {
           <button class="cc-btn" data-cc="coop" type="button" aria-pressed="false" title="Toggle Lie-Back-Win-Mode (God AI co-op)" data-i18n-attr="title:cc.titleCoop">
             <span data-i18n="cc.lieBackWin">Lie-Back Win</span>
             <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="coop-state">OFF</span></span>
+          </button>
+          <button class="cc-btn" data-cc="spectate" type="button" aria-pressed="false" title="Toggle Supervise Mode (God AI as Player 1)" data-i18n-attr="title:cc.titleSpectate">
+            <span data-i18n="cc.spectate">Supervise</span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="spectate-state">OFF</span></span>
           </button>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
@@ -189,6 +197,7 @@ export class ControlCenter {
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
     wire('[data-cc="coop"]', () => this.callbacks?.onToggleCoop())
+    wire('[data-cc="spectate"]', () => this.callbacks?.onToggleSpectate())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
     this.perfState = this.el.querySelector('[data-cc="perf-state"]')
@@ -198,6 +207,8 @@ export class ControlCenter {
     this.perfModeState = this.el.querySelector('[data-cc="perfmode-state"]')
     this.coopBtn = this.el.querySelector('[data-cc="coop"]') as HTMLButtonElement
     this.coopState = this.el.querySelector('[data-cc="coop-state"]')
+    this.spectateBtn = this.el.querySelector('[data-cc="spectate"]') as HTMLButtonElement
+    this.spectateState = this.el.querySelector('[data-cc="spectate-state"]')
 
     // Theme switcher — build the dropdown list and wire the button.
     this.themeBtnEl = this.el.querySelector('[data-cc="theme"]') as HTMLButtonElement
@@ -307,6 +318,18 @@ export class ControlCenter {
     if (this.coopState) {
       this.coopState.textContent = on ? 'ON' : 'OFF'
       this.coopState.classList.toggle('on', on)
+    }
+  }
+
+  /** Reflect 督战 (supervise) state in the GAMEPLAY panel button. */
+  setSpectateState(on: boolean): void {
+    if (this.spectateBtn) {
+      this.spectateBtn.classList.toggle('selected', on)
+      this.spectateBtn.setAttribute('aria-pressed', String(on))
+    }
+    if (this.spectateState) {
+      this.spectateState.textContent = on ? 'ON' : 'OFF'
+      this.spectateState.classList.toggle('on', on)
     }
   }
 

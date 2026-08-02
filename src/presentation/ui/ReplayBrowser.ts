@@ -326,6 +326,7 @@ export class ReplayBrowser {
         <span title="${t('browser.replay.info.lives')}">♥ ${m.lives}</span>
         <span title="${t('browser.replay.info.duration')}">⏱ ${formatPlayTime(replay.durationMs)}</span>
         ${replay.metadata.coop ? `<span class="snap-commander" title="${t('browser.replay.info.coop')}" style="color:#f0c040">COOP</span>` : ''}
+        ${replay.metadata.spectate ? `<span class="snap-commander" title="${t('browser.replay.info.spectate')}" style="color:#7fd0ff">SPECTATE</span>` : ''}
         ${replay.isFavorite ? `<span class="snap-commander" title="${t('browser.replay.info.fav')}">★ FAV</span>` : ''}
       </div>
     `

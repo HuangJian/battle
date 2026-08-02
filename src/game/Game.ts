@@ -26,7 +26,14 @@ import { PlaybackController } from '../replay/PlaybackController'
 import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
-import { canOpenControls, canToggleCoop, isReplayBrowserBlocked } from './uiFlowGates'
+import {
+  canOpenControls,
+  canToggleCoop,
+  canToggleSpectate,
+  isReplayBrowserBlocked,
+} from './uiFlowGates'
+import { cycleBattleSpeed } from './battleSpeed'
+import type { BattleSpeed } from './battleSpeed'
 import { createReplayStorage } from '../replay/storage'
 import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
@@ -64,6 +71,14 @@ const THEME_KEYS = Object.keys(THEMES)
 const LOW_POWER_STATES = new Set(['menu', 'paused', 'gameover', 'victory'])
 
 /**
+ * Max live sim ticks per render frame. Covers the fastest battle speed (×4 →
+ * 4 ticks/frame at 60 FPS) with headroom for frame-rate dips; anything beyond
+ * is dropped by the anti-spiral clamp below instead of spiraling. Mirrors
+ * PlaybackController.MAX_STEPS_PER_FRAME (DECISIONS #78 pattern).
+ */
+const MAX_LIVE_STEPS = 8
+
+/**
  * Game — top-level orchestrator.
  * Owns the game loop, wires all systems together.
  */
@@ -91,6 +106,12 @@ export class Game {
   private _lastRenderTime = 0
   /** Render FPS cap (0 = uncapped). Driven by Performance Mode. */
   private renderFpsCap = 0
+  /**
+   * Live battle-speed multiplier (督战 Alt+</> shortcuts). Presentation/loop
+   * concern only — it scales the accumulator's ms deposition, never the
+   * fixed-timestep ticks themselves, so determinism is untouched (AGENTS §2.3).
+   */
+  private battleSpeed: BattleSpeed = 1
   /** True while the tab is hidden (loop paused by visibilitychange). */
   private _hidden = false
   /**
@@ -117,11 +138,16 @@ export class Game {
    * what the recorder taps (DECISIONS #75).
    */
   private get liveInput(): InputLike {
+    // 督战 (supervise) mode: God AI drives player1; the human keyboard is
+    // disconnected entirely — nobody is at the controls.
+    if (this.world.spectate && this.godInput) return this.godInput
     return this.autoFireInput ?? this.input
   }
 
   /** The player-2 input the LIVE simulation must consume — null unless coop. */
   private get liveInput2(): InputLike | null {
+    // Spectate is strictly single-player (God AI as P1) — never a second tank.
+    if (this.world.spectate) return null
     return this.godInput
   }
 
@@ -233,6 +259,13 @@ export class Game {
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
       this.simulation.requestCoopToggle(true)
+      // 督战 (God AI as P1) and co-op (God AI as P2) are mutually exclusive —
+      // enabling co-op turns supervise off so the two never fight over input.
+      if (w.spectate) {
+        this.simulation.requestSpectateToggle(false)
+        w.spectate = false
+        this.presentation.ui.controlCenter.setSpectateState(false)
+      }
       // Apply immediately since we are paused/menu (no tick will fire).
       w.coop = true
       const d = w.difficulty
@@ -252,6 +285,85 @@ export class Game {
     this.presentation.ui.controlCenter.setCoopState(w.coop)
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
+  }
+
+  // ---- 督战 (supervise) mode: God AI fights as player1, no human input ----
+
+  /**
+   * Toggle supervise mode on/off. Available from the menu, a paused game, and
+   * the MISSION FAILED (recovery) screen (same gate as co-op).
+   * When enabled: God AI takes control of PLAYER1 (default controlledTank =
+   * `w.player`) and the human keyboard is disconnected from gameplay entirely.
+   * When disabled: control returns to the keyboard.
+   */
+  requestSpectateToggle(): void {
+    const w = this.world
+    if (!canToggleSpectate(w.state)) return
+
+    if (w.spectate) {
+      // Disable spectate: World mutation deferred to Simulation (One-Author).
+      this.simulation.requestSpectateToggle(false)
+      // Apply immediately since we are paused/menu (no tick will fire).
+      w.spectate = false
+      // Wire AI inputs
+      this.godInput = null
+      this.autoFireInput = null
+      this.wireLiveInputs()
+      this.audio.player2Id = null
+      this.presentation.ui.notify(t('toast.spectateOff'), 'info')
+    } else {
+      // Enable spectate: World mutation deferred to Simulation (One-Author).
+      this.simulation.requestSpectateToggle(true)
+      // 督战 and co-op are mutually exclusive — exit co-op first.
+      if (w.coop) {
+        this.simulation.requestCoopToggle(false)
+        w.coop = false
+        w.player2 = null
+        w.lives2 = 0
+        w.playerLevel2 = 0
+        this.presentation.ui.controlCenter.setCoopState(false)
+      }
+      // Apply immediately since we are paused/menu (no tick will fire).
+      w.spectate = true
+      // God AI drives player1 (default controlledTank = `w => w.player`).
+      const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+      this.godInput = new GodAIInput(w, undefined, rng)
+      this.autoFireInput = null
+      this.wireLiveInputs()
+      this.audio.player2Id = null
+      this.presentation.ui.notify(t('toast.spectateOn'), 'info')
+    }
+    this.presentation.ui.controlCenter.setSpectateState(w.spectate)
+    this.presentation.updateUI(w)
+    this.presentation.markNeedsRender()
+  }
+
+  // ---- Battle speed (Alt+> faster / Alt+< slower) ----
+
+  /** Step the live battle speed one notch up (+1) or down (−1). */
+  private adjustBattleSpeed(dir: 1 | -1): void {
+    const next = cycleBattleSpeed(this.battleSpeed, dir)
+    if (next === this.battleSpeed) return
+    this.battleSpeed = next
+    this.presentation.ui.setBattleSpeed(next)
+    this.presentation.ui.notify(t('toast.battleSpeed', { speed: next }), 'info')
+  }
+
+  /**
+   * Re-arm the 督战 God AI after a replay whose snapshot carried spectate=true
+   * but whose live session was never spectating (opened from the Replay
+   * Browser). Without this the keyboard would silently take over player1 while
+   * the SPECTATE badge still shows. No-op when spectate is off or already armed.
+   */
+  private rearmSpectateGodInput(): void {
+    const w = this.world
+    if (!w.spectate || this.godInput || !w.player) return
+    const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+    this.godInput = new GodAIInput(w, undefined, rng)
+    this.autoFireInput = null
+    this.wireLiveInputs()
+    this.audio.player2Id = null
+    this.presentation.ui.controlCenter.setSpectateState(true)
   }
 
   /** Wire the Snapshot Browser + Control Center callbacks into the framework. */
@@ -291,6 +403,7 @@ export class Game {
       onToggleFullscreen: () => this.presentation.toggleFullscreen(),
       onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
       onToggleCoop: () => this.requestCoopToggle(),
+      onToggleSpectate: () => this.requestSpectateToggle(),
       onOpenControls: () => {
         const s = this.world.state
         // The panel is a static modal; it opens over any static screen (menu /
@@ -339,6 +452,9 @@ export class Game {
     // Developer Performance Observatory hotkey (Alt+D). Toggle only — never
     // consumes the key during gameplay (F6 is bound to the frenzy super-item).
     window.addEventListener('keydown', this.onPerfKey)
+    // 督战 battle-speed hotkeys (Alt+> faster / Alt+< slower) — live play AND
+    // replay playback, so the same shortcuts work wherever ticks are running.
+    window.addEventListener('keydown', this.onSpeedKey)
     // Load persisted snapshots (IndexedDB) — snapshots survive reloads.
     await this.snapshots.hydrate()
     await this.replays.hydrate()
@@ -376,6 +492,7 @@ export class Game {
     document.removeEventListener('visibilitychange', this.onVisibility)
     window.removeEventListener('keydown', this.onStaticKey)
     window.removeEventListener('keydown', this.onPerfKey)
+    window.removeEventListener('keydown', this.onSpeedKey)
     this.input.detach(window)
   }
 
@@ -492,6 +609,34 @@ export class Game {
   }
 
   /**
+   * 督战 battle-speed hotkeys: Alt+> faster, Alt+< slower (US-layout `>` is
+   * Shift+Period, `<` is Shift+Comma). Event-driven so it fires during live
+   * play, pause, AND replay playback regardless of which driver owns the loop.
+   * Live speed is a Game field (never World state — cadence only, AGENTS §2.3);
+   * during playback it routes to the replay's own speed control.
+   */
+  private onSpeedKey = (e: KeyboardEvent): void => {
+    if (!e.altKey) return
+    let dir: 1 | -1 | null = null
+    if (e.code === 'Period') dir = 1
+    else if (e.code === 'Comma') dir = -1
+    if (dir === null) return
+    // Speed is a live-play viewing aid — ignore it on menu / game-over /
+    // victory / recovery screens so a stray press can't leak a non-×1 speed
+    // into the next fresh run (menuStart never resets it — only resetToMenu
+    // does). Paused stays allowed so the player can set speed before resuming.
+    const s = this.world.state
+    if (!this.playback && s !== 'playing' && s !== 'paused' && s !== 'stageclear') return
+    e.preventDefault()
+    if (this.playback) {
+      const cur = this.playback.currentSpeed
+      this.setPlaybackSpeed(cycleBattleSpeed(cur, dir))
+    } else {
+      this.adjustBattleSpeed(dir)
+    }
+  }
+
+  /**
    * Toggle the developer Performance Observatory (Alt+D). The overlay is a
    * read-only debug HUD — toggling it only flips a flag and arms/disarms the
    * renderer's draw-call counter, which is zero-cost while off.
@@ -533,7 +678,10 @@ export class Game {
 
     const dt = Math.min(time - this.lastTime, 100) // cap at 100ms
     this.lastTime = time
-    this.accumulator += dt
+    // 督战 battle speed: scale the accumulator's ms deposition so ×2 runs two
+    // fixed-timestep ticks per wall-clock frame. The ticks themselves are
+    // untouched, so determinism (AGENTS §2.3) is preserved — only cadence.
+    this.accumulator += dt * this.battleSpeed
 
     // --- Performance Observatory probes (gated: zero cost when overlay off) ---
     const perfOverlay = this.presentation.ui.perfOverlay
@@ -576,7 +724,7 @@ export class Game {
       }
     } else {
       // Live gameplay: record input per tick, inside the while-loop
-      while (this.accumulator >= TICK_MS && steps < 5) {
+      while (this.accumulator >= TICK_MS && steps < MAX_LIVE_STEPS) {
         if (
           this.world.state === 'playing' ||
           this.world.state === 'stageclear' ||
@@ -625,6 +773,10 @@ export class Game {
         this.accumulator -= TICK_MS
         steps++
       }
+      // Anti-spiral clamp: a >1× speed (or a frame hitch at any speed) can
+      // deposit more ms than the step cap drains; drop the excess instead of
+      // fast-forwarding forever (mirrors PlaybackController.update).
+      if (this.accumulator > TICK_MS) this.accumulator = TICK_MS
 
       // Manual "时光宝盒" rewind — consume the pending flag set by
       // Simulation.activateRewind (F7). The actual fade→restore→countdown
@@ -681,13 +833,25 @@ export class Game {
           this.wireLiveInputs()
           this.audio.player2Id = this.world.player2?.id ?? null
           this.presentation.ui.controlCenter.setCoopState(true)
-        } else if (!this.world.coop) {
-          // Snapshot restored without coop — ensure input2 is cleared.
+        } else if (this.world.spectate && !this.godInput && this.world.player) {
+          // 督战: restored snapshot has spectate but godInput was cleared
+          // (e.g. loaded a spectate snapshot from the browser while spectate
+          // was off) — re-create the God AI for player1 (default
+          // controlledTank = `w.player`). No auto-fire: nobody is human here.
+          const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
+          this.godInput = new GodAIInput(this.world, undefined, rng)
+          this.autoFireInput = null
+          this.wireLiveInputs()
+          this.audio.player2Id = null
+          this.presentation.ui.controlCenter.setSpectateState(true)
+        } else if (!this.world.coop && !this.world.spectate) {
+          // Snapshot restored without coop/spectate — ensure inputs are cleared.
           this.godInput = null
           this.autoFireInput = null
           this.wireLiveInputs()
           this.audio.player2Id = null
           this.presentation.ui.controlCenter.setCoopState(false)
+          this.presentation.ui.controlCenter.setSpectateState(false)
         }
       }
 
@@ -1350,12 +1514,20 @@ export class Game {
     this.world.lives2 = 0
     this.world.playerLevel2 = 0
     this.world.score2 = 0
+    // 督战 (supervise) mode: clean up spectate state too.
+    this.world.spectate = false
     this.godInput = null
     this.autoFireInput = null
     this.simulation.clearPendingCoopToggle()
+    this.simulation.clearPendingSpectateToggle()
     this.wireLiveInputs()
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
+    this.presentation.ui.controlCenter.setSpectateState(false)
+    // 督战 battle speed is a per-session viewing aid — return to ×1 on menu so
+    // a fresh run never starts fast by accident.
+    this.battleSpeed = 1
+    this.presentation.ui.setBattleSpeed(1)
     this.recovery.reset()
     this.stopPlayback()
     this.recorder.reset()
@@ -1452,6 +1624,7 @@ export class Game {
       enemiesTotal: w.enemiesSpawned,
       playTimeMs: w.playTimeMs,
       coop: w.coop,
+      spectate: w.spectate,
     }
     const replay = this.replays.create(
       type,
@@ -1671,6 +1844,11 @@ export class Game {
     this.playback = null
     // Clear replay-sourced audio attenuation (no God tank outside playback).
     this.audio.player2Id = null
+    // 督战: a spectate replay's snapshot carries spectate=true even if the
+    // LIVE session was never spectating (opened from the browser). Re-arm the
+    // God AI so the restored world stays AI-driven — otherwise the keyboard
+    // would silently take over player1 while the SPECTATE badge still shows.
+    this.rearmSpectateGodInput()
     // Hide the persistent REPLAY badge from the HUD
     this.presentation.ui.setReplayMode(false)
     // Remove canvas listeners
@@ -1693,6 +1871,9 @@ export class Game {
     // keeps the rAF loop alive (the world may be in a LOW_POWER state like
     // 'gameover' which would otherwise stop the loop).
     this.playback.exit(this.simulation, this.liveInput, this.liveInput2)
+    // 督战: same re-arm contract as stopPlayback — the ended replay's world
+    // may carry spectate=true without a live God AI.
+    this.rearmSpectateGodInput()
     // Hide the REPLAY badge but keep the controller visible (persistent mode)
     this.presentation.ui.setReplayMode(false)
     // Populate end overlay with replay metadata

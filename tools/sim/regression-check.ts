@@ -41,7 +41,12 @@ interface ModeSummary {
   player2AliveRate?: number
 }
 
-function runMode(mode: 'single' | 'coop', stages: StageData[], seeds: number[], difficulty: string): ModeSummary {
+function runMode(
+  mode: 'single' | 'coop',
+  stages: StageData[],
+  seeds: number[],
+  difficulty: string,
+): ModeSummary {
   const coop = mode === 'coop'
   let total = 0
   let stageClear = 0
@@ -116,7 +121,9 @@ if (import.meta.main) {
   const stages = stageIdxs.map((i) => STAGES[i]).filter(Boolean)
   const outputFile = arg('output', '')
 
-  process.stderr.write(`[regression-check] ${stages.length} stages × ${seeds.length} seeds = ${stages.length * seeds.length} runs/mode, difficulty=${difficulty}\n`)
+  process.stderr.write(
+    `[regression-check] ${stages.length} stages × ${seeds.length} seeds = ${stages.length * seeds.length} runs/mode, difficulty=${difficulty}\n`,
+  )
 
   const single = runMode('single', stages, seeds, difficulty)
   const coop = runMode('coop', stages, seeds, difficulty)

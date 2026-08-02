@@ -137,6 +137,11 @@ export class Simulation {
    * (only Simulation mutates World) is preserved.
    */
   private pendingCoopToggle: boolean | null = null
+  /**
+   * 督战 (supervise) mode: pending spectate toggle, set by Game.ts.
+   * Same deferred-application contract as pendingCoopToggle.
+   */
+  private pendingSpectateToggle: boolean | null = null
   /** Tactical Intelligence Framework — owns all enemy decision-making. */
   private ai: TacticalIntelligence
 
@@ -162,6 +167,24 @@ export class Simulation {
    */
   clearPendingCoopToggle(): void {
     this.pendingCoopToggle = null
+  }
+
+  /**
+   * 督战 (supervise) mode: request a spectate toggle (called by Game.ts).
+   * The actual World mutation is deferred to updatePlaying() to preserve
+   * the One-Author invariant.
+   */
+  requestSpectateToggle(on: boolean): void {
+    this.pendingSpectateToggle = on
+  }
+
+  /**
+   * 督战 (supervise) mode: cancel any pending spectate toggle. Called when
+   * returning to menu — a stale pending toggle would otherwise fire on the
+   * next playing tick and re-enable spectate against the player's intent.
+   */
+  clearPendingSpectateToggle(): void {
+    this.pendingSpectateToggle = null
   }
 
   /** Run one simulation tick (1/60s) */
@@ -204,6 +227,12 @@ export class Simulation {
         w.lives2 = 0
         w.playerLevel2 = 0
       }
+    }
+
+    // 督战 (supervise) mode: apply deferred spectate toggle at tick start.
+    if (this.pendingSpectateToggle !== null) {
+      w.spectate = this.pendingSpectateToggle
+      this.pendingSpectateToggle = null
     }
 
     // Run statistics — total play time advances only while playing.
@@ -2261,7 +2290,8 @@ export class Simulation {
     if (w.tileMap.isBaseDestroyed()) {
       w.state = 'gameover'
       w.gameOverTimer = 3000
-      if (!w.coop) w.saveHighScore()
+      // Lie-Back-Win Q4 + 督战: coop/spectate runs never save high scores.
+      if (!w.coop && !w.spectate) w.saveHighScore()
       this.createExplosion(FIELD / 2, FIELD - CELL * 2, 'big')
       return
     }
@@ -2327,7 +2357,8 @@ export class Simulation {
       if (w.lives <= 0) {
         w.state = 'gameover'
         w.gameOverTimer = 3000
-        if (!w.coop) w.saveHighScore()
+        // Lie-Back-Win Q4 + 督战: coop/spectate runs never save high scores.
+        if (!w.coop && !w.spectate) w.saveHighScore()
         return
       }
     }

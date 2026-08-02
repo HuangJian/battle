@@ -614,6 +614,23 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 
 ---
 
+## 82. 督战模式（Supervise）— God AI 作为 player1 全程无人类输入 + 战斗速率快捷键 (SHIPPED)
+
+**Decision:** 新增「督战模式」：与躺赢模式（coop）同源但反其道而行——God AI 控制 **player1**（`GodAIInput` 默认 `controlledTank = w.player`），人类键盘完全脱离游戏输入（`simulation.input = godInput`，`input2 = null`）。`world.spectate` 标记（World 字段 + 快照序列化 + 回放 metadata）。督战与躺赢互斥（`requestSpectateToggle` 开启时先退出 coop，反之亦然）。督战局不存最高分（延续 Q4：无人类参与的成绩不入榜）。
+
+**Rationale:**
+- MANIFEST §2.1 One-Author：与 coop 完全同构——`requestSpectateToggle` 走 `simulation.requestSpectateToggle` 延迟到 `updatePlaying()` 首 tick 应用；Game 在 menu/paused 时立即应用（与 `pendingCoopToggle` 同款）。
+- AGENTS §2.2 No Hidden State：`spectate` 是 World 字段，快照/回放可复原；恢复（recovery restore）时若快照带 spectate 而 `godInput` 已清，重建 God AI（镜像 coop 的 §3.8 路径）。
+- AGENTS §2.3 Determinism：战斗速率（`battleSpeed`）只缩放 accumulator 的毫秒沉积（`accumulator += dt * speed`），tick 本身不变——是 cadence 不是模拟状态，故是 Game 字段（如 renderFpsCap），不入 World、不入快照。
+- 速率阶梯 `[1, 1.5, 2, 4]`（`src/game/battleSpeed.ts` 纯函数，可单测）；Alt+>（Shift+Period）/ Alt+<（Shift+Comma）事件驱动监听（同 onPerfKey 模式），回放时路由到 `setPlaybackSpeed`。
+
+**Implications:**
+- 督战 HUD 徽章（金色 SPECTATE）+ 速率芯片（×1 隐藏）+ footer 提示 + Control Center 按钮 + 回放 SPECTATE 徽章；i18n en/zh。
+- 高分局 gating：`checkConditions` 两处 `saveHighScore` 改为 `!coop && !spectate`。
+- 返回菜单时 `battleSpeed` 复位 ×1（会话级观战辅助，不跨会话）。
+
+---
+
 ## 81. 移除 godai-stage-overrides.ts 机制 — 禁止按关卡名特殊化（防过拟合）
 
 **Decision:** 彻底删除 `src/ai/godai-stage-overrides.ts`（文件、`GOD_AI_STAGE_OVERRIDES` 空表、`applyStageOverrides()`）以及全部 17 处调用点，包括 `simulation-runner.ts` 的 `skipStageOverrides` 选项。今后不允许对关卡做按名特殊化（stage-name-keyed overrides），防止过拟合。如果经过充分验证确需特殊化处理，只能写统一的过滤逻辑：基于关卡特征的阈值（如钢/砖比、森林/水域密度、敌人队列装甲比等），即现有的 `computeStageAdaptedParams()` 模式（§58/§60/§61/§62/§64/§66/§48-revisit terrain gate）。
