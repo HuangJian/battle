@@ -86,6 +86,10 @@ export function cloneWorld(world: World): WorldSnapshot {
     stageClearTimer: world.stageClearTimer,
     gameOverTimer: world.gameOverTimer,
     spawnTimer: world.spawnTimer,
+    // Post-victory bonus pickup window — a mid-window save must restore the
+    // remaining time, not re-open the full 10s window.
+    pickupWindowTimer: world.pickupWindowTimer,
+    pickupWindowEntered: world.pickupWindowEntered,
     rngState: world.rng.getState(),
     frame: world.frame,
     bulletSeq: world.bulletSeq,
@@ -192,6 +196,11 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.stageClearTimer = snap.stageClearTimer
   world.gameOverTimer = 0
   world.spawnTimer = snap.spawnTimer
+  // Bonus pickup window (legacy fallback: pre-window state). A fresh-session
+  // restore mid-window must keep the remaining time — dropping these would
+  // make checkConditions re-open the full 10s window and extend BONUS TIME.
+  world.pickupWindowTimer = snap.pickupWindowTimer ?? 0
+  world.pickupWindowEntered = snap.pickupWindowEntered ?? false
 
   // RNG
   world.rng.reseed(snap.rngState)

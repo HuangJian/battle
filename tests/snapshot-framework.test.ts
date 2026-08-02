@@ -3,6 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
+import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import {
   RecoveryController,
   RECOVERY_OPTIONS,
@@ -276,6 +277,58 @@ describe('Snapshot Framework — restore round-trip', () => {
     expect(mgr.get(snap.id)).toBeNull()
     expect(mgr.count()).toBe(0)
     expect(mgr.restore(snap.id, world)).toBe(false)
+  })
+})
+
+// ============================================================
+// Bonus pickup window (§2.2 — timers are World state) — mid-window save
+// ============================================================
+
+describe('Snapshot Framework — bonus pickup window round-trip', () => {
+  it('preserves the mid-window remaining time — restore must NOT re-open the 10s window', () => {
+    const mgr = makeManager()
+    const world = makePlayingWorld()
+    const sim = new Simulation(world, new Input())
+    for (let i = 0; i < 60; i++) sim.tick() // settle in
+
+    // Mid bonus-time: window entered, 3.5 s of the 10 s window remaining.
+    world.pickupWindowEntered = true
+    world.pickupWindowTimer = 3500
+    const savedEntered = world.pickupWindowEntered
+    const savedTimer = world.pickupWindowTimer
+
+    const snap = mgr.create('manual', world)!
+
+    // A fresh session starts with a never-started window (false / 0).
+    // Restoring must restore the saved mid-window state — otherwise
+    // checkConditions re-opens the window and BONUS TIME extends by up to 10 s.
+    world.pickupWindowEntered = false
+    world.pickupWindowTimer = 0
+    expect(mgr.restore(snap.id, world)).toBe(true)
+    expect(world.pickupWindowEntered).toBe(savedEntered)
+    expect(world.pickupWindowTimer).toBe(savedTimer)
+  })
+
+  it('cloneWorld captures the pickup window fields (serializer completeness)', () => {
+    const world = makePlayingWorld()
+    world.pickupWindowEntered = true
+    world.pickupWindowTimer = 6200
+    const snap = cloneWorld(world)
+    expect(snap.pickupWindowEntered).toBe(true)
+    expect(snap.pickupWindowTimer).toBe(6200)
+  })
+
+  it('restores legacy snapshots without pickup-window fields (defaults, no crash)', () => {
+    const mgr = makeManager()
+    const world = makePlayingWorld()
+    const snap = mgr.create('manual', world)!
+    delete snap.world.pickupWindowEntered
+    delete snap.world.pickupWindowTimer
+    world.pickupWindowEntered = true
+    world.pickupWindowTimer = 1234
+    expect(mgr.restore(snap.id, world)).toBe(true)
+    expect(world.pickupWindowEntered).toBe(false)
+    expect(world.pickupWindowTimer).toBe(0)
   })
 })
 

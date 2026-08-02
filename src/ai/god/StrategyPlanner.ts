@@ -1,6 +1,6 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
-import type { Cell } from '../../utils/pathfind'
+import { findPath, type Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import { enemyCanShootBase } from './SmartThreatModel'
@@ -38,6 +38,20 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
   let bestScore = -Infinity
   let hasBest = false
 
+  // BONUS TIME (DECISIONS §84): the stage is cleared (last enemy destroyed)
+  // and the pickup window is running — the player is in the "grab the bonus"
+  // grace period (POWERUP_PICKUP_WINDOW_MS = 10s) before the stage auto-ends.
+  // With nothing left to fight or defend, the normal divert-distance /
+  // route-danger caps are lifted: the WHOLE field is fair game, and the only
+  // scarce resource is TIME. Items are scored by despawn urgency first (an
+  // item about to expire must be grabbed NOW), then nearest-first to maximize
+  // how many items are collected inside the window, with a small priority
+  // tie-break. Without this, an item farther than `powerupMaxDivertDistance`
+  // cells was never targeted and the AI stood at the defense position while
+  // the window expired (督战 spectate: the God player never collected the
+  // bonus loot).
+  const bonusWindow = w.pickupWindowEntered && w.pickupWindowTimer > 0
+
   for (let pi = 0; pi < powerUps.length; pi++) {
     const pu = powerUps[pi]
     if (!pu.alive) continue
@@ -47,52 +61,128 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
 
     // S5d: if about to expire and too far, skip.
     const lifeRemaining = POWERUP_TIMEOUT_MS - pu.lifeTimer
-    if (lifeRemaining < 3000 && dist > 5) continue
+    if (!bonusWindow && lifeRemaining < 3000 && dist > 5) continue
 
     // S5a: base priority by type.
     const priority = POWERUP_PRIORITY[pu.type] ?? 5
 
-    // NEW Requirement 3: Calculate route danger
-    const dangerLevel = self.calculateRouteDanger(pcx, pcy, cx, cy)
+    let score: number
+    // The cell the tank must drive to — the item's own cell normally, or an
+    // overlapping passable neighbour when the item sits on blocking terrain.
+    let collectCol = Math.floor(pu.x / CELL)
+    let collectRow = Math.floor(pu.y / CELL)
+    if (bonusWindow) {
+      // §84-revisit (DECISIONS §85): skip items the tank can never reach
+      // (steel/water-enclosed pockets). Chasing an unreachable item every
+      // tick burns the whole window — `navigateTowards` always answers null
+      // for it. Uses the exact same A* the navigator drives (corridors, then
+      // dig-through-brick), so this matches what the tank can actually drive.
+      // Pure function of World state — no RNG, no cache mutation.
+      const collect = powerUpCollectCell(self, collectCol, collectRow)
+      if (!collect) continue
+      collectCol = collect.col
+      collectRow = collect.row
+      // Time-boxed loot run: an item with <5s of life left is in imminent
+      // despawn danger — its urgency boost (up to 2000) outweighs any
+      // distance/priority difference. Otherwise nearest-first (dist*10)
+      // sweeps the field, with a mild priority tie-break ((6-priority)*10).
+      const urgency = lifeRemaining < 5000 ? (5000 - lifeRemaining) / 2.5 : 0
+      score = urgency - dist * 10 + (6 - priority) * 10
+    } else {
+      // NEW Requirement 3: Calculate route danger
+      const dangerLevel = self.calculateRouteDanger(pcx, pcy, cx, cy)
 
-    // Fix Bug 2: Score formula was reversed — priority * 1000 gave bomb
-    // (priority=0) a base score of 0 and boat (priority=6) a base of 6000.
-    // Now (6 - priority) * 1000 gives bomb the highest base score.
-    let score = (6 - priority) * 1000 - dist * 10 - dangerLevel * 500
+      // Fix Bug 2: Score formula was reversed — priority * 1000 gave bomb
+      // (priority=0) a base score of 0 and boat (priority=6) a base of 6000.
+      // Now (6 - priority) * 1000 gives bomb the highest base score.
+      score = (6 - priority) * 1000 - dist * 10 - dangerLevel * 500
 
-    // Extra bonus for bomb (it clears the whole screen, worth high risk)
-    if (pu.type === 'bomb') {
-      score += 2000
+      // Extra bonus for bomb (it clears the whole screen, worth high risk)
+      if (pu.type === 'bomb') {
+        score += 2000
+      }
+
+      // Extra bonus for star (permanent upgrade)
+      if (pu.type === 'star') {
+        score += 1000
+      }
+
+      // Penalty for boat (only situationally useful)
+      if (pu.type === 'boat') {
+        score -= 500
+      }
+
+      // Fix Bug 3: maxDist logic was reversed — high-value power-ups (bomb/star)
+      // should allow LONGER diversion distance, not shorter.
+      const maxDist = priority <= 1 ? 8 : self.params.powerupMaxDivertDistance
+      if (dist > maxDist) continue
+
+      // NEW: Don't collect if route is too dangerous unless it's a bomb/star
+      if (dangerLevel > 3 && priority > 2) continue // Too dangerous for low-value power-ups
+      if (dangerLevel > 5 && pu.type !== 'bomb') continue // Bomb is worth almost any risk
     }
-
-    // Extra bonus for star (permanent upgrade)
-    if (pu.type === 'star') {
-      score += 1000
-    }
-
-    // Penalty for boat (only situationally useful)
-    if (pu.type === 'boat') {
-      score -= 500
-    }
-
-    // Fix Bug 3: maxDist logic was reversed — high-value power-ups (bomb/star)
-    // should allow LONGER diversion distance, not shorter.
-    const maxDist = priority <= 1 ? 8 : self.params.powerupMaxDivertDistance
-    if (dist > maxDist) continue
-
-    // NEW: Don't collect if route is too dangerous unless it's a bomb/star
-    if (dangerLevel > 3 && priority > 2) continue // Too dangerous for low-value power-ups
-    if (dangerLevel > 5 && pu.type !== 'bomb') continue // Bomb is worth almost any risk
 
     if (score > bestScore) {
       bestScore = score
-      bestCol = Math.floor(pu.x / CELL)
-      bestRow = Math.floor(pu.y / CELL)
+      bestCol = collectCol
+      bestRow = collectRow
       hasBest = true
     }
   }
 
   return hasBest ? { col: bestCol, row: bestRow } : null
+}
+
+/**
+ * §84-revisit (DECISIONS §85): the tank-position cell from which a power-up
+ * at (col,row) can be collected, or null when it is genuinely unreachable
+ * (steel/water-enclosed pocket). The tank collects by OVERLAPPING the item's
+ * TANK-sized rect, so the item's own cell works normally; when the item sits
+ * on blocking terrain (a deferred drop materialized on another stage's
+ * layout, fence steel placed over a drop), the tank parks on the nearest
+ * overlapping passable neighbour instead — and THAT cell is what the caller
+ * must navigate to (targeting the item's own impassable cell would re-create
+ * the stuck state). Uses the exact same A* the navigator drives (corridor
+ * paths, then dig-through-brick), so this matches what the tank can actually
+ * drive. Pure function of World state: no RNG draws, no cache mutation.
+ */
+function powerUpCollectCell(self: GodAIInput, col: number, row: number): Cell | null {
+  const pc = self.playerCell()
+  if (col === pc.col && row === pc.row) return { col, row }
+  // Item's own cell first — drops always land on passable ground, so this is
+  // the overwhelmingly common case (1-2 A* runs per item).
+  if (powerUpCellReachable(self, col, row)) return { col, row }
+  // Wall/base-adjacent edge case: overlap the item from a neighbouring
+  // passable tank position; prefer the one closest to the player.
+  let bestCol = -1
+  let bestRow = -1
+  let bestDist = Infinity
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      if (dr === 0 && dc === 0) continue
+      const nc = col + dc
+      const nr = row + dr
+      if (nc === pc.col && nr === pc.row) return { col: nc, row: nr }
+      if (!powerUpCellReachable(self, nc, nr)) continue
+      const d = Math.abs(nc - pc.col) + Math.abs(nr - pc.row)
+      if (d < bestDist) {
+        bestDist = d
+        bestCol = nc
+        bestRow = nr
+      }
+    }
+  }
+  return bestCol >= 0 ? { col: bestCol, row: bestRow } : null
+}
+
+/** A* reachability from the player's cell to one specific tank-position cell. */
+function powerUpCellReachable(self: GodAIInput, col: number, row: number): boolean {
+  const pc = self.playerCell()
+  const target: Cell = { col, row }
+  const corridor = findPath(self.world.tileMap, pc, target)
+  if (corridor && corridor.length > 0) return true
+  const dig = findPath(self.world.tileMap, pc, target, { breakBrick: true })
+  return !!dig && dig.length > 0
 }
 
 /**

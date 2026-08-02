@@ -10,6 +10,7 @@ import { InputRecorder } from '../src/replay/InputRecorder'
 import { ReplayInput } from '../src/replay/ReplayInput'
 import { serializeReplayFile, parseReplayFile } from '../src/replay/file'
 import { restoreWorld } from '../src/snapshot/WorldSerializer'
+import type { InputLike } from '../src/game/Input'
 
 // ============================================================
 // Helpers
@@ -178,5 +179,110 @@ describe('Replay round-trip determinism', () => {
       a.finalKillCount === b.finalKillCount &&
       a.finalState === b.finalState
     expect(same).toBe(false)
+  })
+})
+
+// ============================================================
+// Mid-bonus-time recordings (DECISIONS §86 → §87)
+//
+// The replay format carries world state ONLY in the initialSnapshot (a
+// WorldSnapshot from cloneWorld); the packed frame stream is pure input
+// (direction/fire/guard/frenzy). So the pickup window travels with the
+// snapshot — once §86 serialized it, replay inherited the fix with zero
+// changes to file.ts/pack.ts. This test locks that guarantee in end-to-end:
+// a recording that STARTS with the window already open must restore the
+// window on playback and let it tick down identically, not reset it.
+// ============================================================
+
+describe('Replay — recording that starts mid-bonus-time replays the window faithfully', () => {
+  it('initialSnapshot captures the window; playback restores and evolves it identically', () => {
+    const stage = STAGES[0]
+    const difficulty = 'classic'
+    const seed = 4242
+    const TICKS = 120 // ~2 s
+
+    // --- Record: a session whose first tick already sits mid-window ---
+    const world = new World()
+    world.rng.reseed(seed)
+    world.difficultyKey = difficulty
+    world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+    world.rules = RULES[difficulty] ?? DEFAULT_RULES
+    world.loadStageData(stage, 0)
+    // Force mid-window state: entered, 3.5 s of the 10 s window remaining.
+    world.pickupWindowEntered = true
+    world.pickupWindowTimer = 3500
+
+    const idle: InputLike = {
+      getMoveDirection: () => null,
+      isFiring: () => false,
+      wasItemPressed: () => false,
+      endFrame: () => {},
+      reset: () => {},
+    }
+    const sim = new Simulation(world, idle)
+    const recorder = new InputRecorder()
+    recorder.startNew(world)
+    for (let i = 0; i < TICKS; i++) {
+      sim.tick()
+      recorder.recordFrame(idle)
+      world.consumeEvents()
+    }
+    const result = recorder.finalize()!
+    // DECISIONS §86: the snapshot must carry the window state at record time.
+    expect(result.snapshot.pickupWindowEntered).toBe(true)
+    expect(result.snapshot.pickupWindowTimer).toBe(3500)
+
+    // --- Replay: full file pipeline, same tick count ---
+    const text = serializeReplayFile({
+      source: 'sim',
+      seed,
+      sim: {
+        seed,
+        difficulty,
+        stageIndex: 0,
+        stageName: stage.name,
+        outcome: 'stage_clear',
+        status: 'clear',
+        maxTicks: 36000,
+      },
+      initialSnapshot: result.snapshot,
+      frames: result.frames,
+      totalTicks: result.tickCount,
+      metadata: {
+        stage: 0,
+        stageName: stage.name,
+        difficulty,
+        lives: 3,
+        playerLevel: 0,
+        score: 0,
+        killCount: 0,
+        enemiesTotal: 20,
+        playTimeMs: 0,
+      },
+    })
+    const parsed = parseReplayFile(text)
+    if ('error' in parsed) throw new Error(`Parse failed: ${parsed.error}`)
+
+    const replayWorld = new World()
+    replayWorld.rng.reseed(seed)
+    replayWorld.difficultyKey = difficulty
+    replayWorld.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+    replayWorld.rules = RULES[difficulty] ?? DEFAULT_RULES
+    replayWorld.loadStageData(stage, 0)
+    restoreWorld(replayWorld, parsed.replay.initialSnapshot)
+    const replayInput = new ReplayInput(parsed.replay.frames)
+    const rsim = new Simulation(replayWorld, replayInput)
+    for (let i = 0; i < TICKS; i++) {
+      rsim.tick()
+      replayInput.advance()
+      replayWorld.consumeEvents()
+    }
+
+    // Window restored and ticked down identically in both worlds — the replay
+    // world must NOT have reset the window (entered=false → re-open at 10 s).
+    expect(replayWorld.pickupWindowEntered).toBe(true)
+    expect(replayWorld.pickupWindowTimer).toBe(world.pickupWindowTimer)
+    expect(replayWorld.pickupWindowTimer).toBeGreaterThan(0)
+    expect(replayWorld.pickupWindowTimer).toBeLessThan(3500)
   })
 })

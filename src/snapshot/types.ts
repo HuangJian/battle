@@ -115,6 +115,15 @@ export interface WorldSnapshot {
   stageClearTimer: number
   gameOverTimer: number
   spawnTimer: number
+  /**
+   * Post-victory bonus collection window: counts down while the player grabs
+   * any power-ups left after the last enemy is destroyed. Undefined = legacy
+   * snapshot taken before the window fields were serialized (restore falls
+   * back to 0/false — the pre-window state).
+   */
+  pickupWindowTimer?: number
+  /** True once the bonus window has begun for the current stage. */
+  pickupWindowEntered?: boolean
 
   // RNG state (for determinism / future replay)
   rngState: number

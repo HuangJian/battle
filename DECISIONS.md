@@ -671,3 +671,55 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 
 **Implications:** 默认随代码 SHIPPED（无参数开关，逻辑内联）。已修复真实 replay 致命 bug 且无评估框架回归。推进方向：若想让该修复在 God AI 调优 framework 上显现价值，需给 sim-runner 的受困走廊场景构造/加权重，或用浏览器 spectate 同源 RNG 接线复现——但那属于评估基建，非本 bug 修复范围。
 
+
+## 84. BONUS TIME: God AI Collects the Remaining Power-ups in the Pickup Window (SHIPPED)
+
+**Decision:** `findPowerUpTarget` (StrategyPlanner) now lifts the normal-play divert-distance / route-danger caps during the post-clear pickup window (`world.pickupWindowEntered && world.pickupWindowTimer > 0`): the whole field is fair game, and items are scored by despawn urgency first (an item with <5s of life left gets a boost up to 2000), then nearest-first (`-dist*10`) with a small priority tie-break (`(6-priority)*10`). The normal-combat path is byte-identical (same caps, same score formula).
+
+**Rationale:**
+- 督战 spectate task「bonus time, GOD AI player 需要去捡道具」: after the last enemy dies, remaining power-ups can sit anywhere on the 26×26 field, but `powerupMaxDivertDistance` (16 cells; 8 for bomb/star) silently capped the loot radius. A distant item was never targeted — the AI fell through to `selectTarget` → no enemies → defense position and stood there while the 10s window (`POWERUP_PICKUP_WINDOW_MS`) expired.
+- With the stage already cleared there is nothing to fight or defend, so the divert caps (built for combat opportunity cost) are meaningless; TIME is the only scarce resource. Urgency-first + nearest-first maximizes the number of items collected inside the window.
+- Scope: applies to every God AI user (督战 P1, 躺赢 P2, headless sims). Win rate is unaffected (the stage is already cleared when the window runs); score/clear-time improve slightly.
+
+**Results:**
+- New tests `tests/godai-bonus-time.test.ts` (4 tests): far item targeted only in the window, divert cap still respected in combat, expiring item outranks a fresh far item, and a full-sim run where the AI physically collects a 24-cell-away star before the window expires.
+- `bun run check` green.
+
+**Implications:** No new params — the pickup window itself is the gate. If future balance wants the God player to skip low-value loot even in the window, add a param; not needed today.
+
+## 85. §84-Revisit: BONUS TIME Pickup Is Reachability-Aware — Never Chase an Unreachable Item (SHIPPED)
+
+**Decision:** `findPowerUpTarget` now resolves every BONUS TIME candidate to a **collect cell** (`powerUpCollectCell` in StrategyPlanner): the item's own cell when reachable, or the nearest overlapping passable neighbour when the item sits on blocking terrain. Reachability uses the exact same A* the navigator drives (corridor paths, then dig-through-brick — `findPath` with/without `breakBrick`). Genuinely unreachable items (steel/water-enclosed pockets) are skipped; the collect cell is what `navigateTowards` receives, so the AI never targets an impassable cell. The normal-combat path is untouched.
+
+**Rationale:**
+- Follow-up to §84: the whole-field scoring made the AI chase the BEST-scored item even when it sat behind a steel wall or in a water pocket. `navigateTowards` always answers null for such a target, so the S5 branch returned `_moveDir = null` every tick — the AI stood still and burned the entire 10s window on one unreachable item instead of collecting the reachable ones.
+- Reachability uses `findPath` directly (NOT `navigateTowards`), so it is a pure function of World state: no RNG draws (the navigator's suboptimal-path gate draws from the AI RNG stream on cache misses), no cross-tick cache mutation. Determinism preserved; the extra RNG stream is untouched.
+- Scope is BONUS TIME only (the pickup window): during real combat the pre-existing caps remain authoritative. The tank collects by OVERLAPPING the TANK-sized item rect, so every cell in the item's 3×3 neighbourhood overlaps it — when the item cell itself is impassable (a deferred drop materialized on another stage's layout — `flushPendingDrops` never re-validates position — or fence steel placed over a drop), the tank parks on the nearest overlapping passable neighbour and THAT cell is the navigation target. Natural drops never straddle the base (`buildDrop` rejects blocked footprints), so the neighbourhood path is for the deferred/fence edge cases.
+- Water is NOT ignored even for boat-holders: the navigator's own `navigateTowards` never passes `ignoreWater`, so flagging a water-island item reachable would re-create the stuck state. Reachability matches what the tank can actually drive (consistency by construction).
+
+**Results:**
+- New tests in `tests/godai-bonus-time.test.ts` (10 total): a steel-boxed bomb (higher score, first in iteration) is skipped for a reachable star; a field of only-unreachable items yields no target (AI not stuck); a base-straddling item resolves to the adjacent collect cell (10,24) and is physically collected by parking beside it; and a full-sim run collects the reachable star while the boxed bomb stays on the field. Red-green verified (tests fail on the committed baseline).
+- `bun run check` green.
+
+**Implications:** No new params. Perf: `findPath` is called only inside the window (1-2 A* per item; impassable neighbors quick-reject before searching). Known non-goal: items enclosed by steel/water stay uncollected by design — nothing the tank can do, and skipping them frees the window for collectible loot.
+
+## 86. Snapshot Must Preserve the Bonus Pickup Window — Mid-Window Restore Never Re-Opens BONUS TIME (SHIPPED)
+
+**Decision:** `WorldSnapshot` gains `pickupWindowEntered?: boolean` and `pickupWindowTimer?: number` (Timers section). `cloneWorld` serializes both; `restoreWorld` restores them with legacy fallbacks (`?? false` / `?? 0` — the pre-window state). Snapshot type is unchanged for old saves (optional fields).
+
+**Rationale:**
+- Bug (AGENTS §7 repro): `restoreWorld` never touched the window fields. A fresh-session restore (app reload → World constructed with `false`/`0`) left `pickupWindowEntered === false` while alive power-ups sat on the field, so `checkConditions` re-opened the window at the full `POWERUP_PICKUP_WINDOW_MS` (10 s) — a mid-window save silently extended BONUS TIME. `tests/snapshot-framework.test.ts` proves the bug: 3 new tests failed on the unpatched serializer (restore kept diverged values, cloneWorld dropped the fields, legacy path kept stale values) and pass after.
+- The window is gameplay state, so it must travel with the snapshot (Constitution §6: a snapshot is a complete World description). It is also BONUS-TIME pickup logic from §84/§85 — the same spectate feature whose timer this guards.
+- Legacy snapshots (pre-§86) fall back to the pre-window state, which re-opens the window on next tick — the same behavior those saves always had; acceptable.
+
+**Implications:** Old stored snapshots restore as before; new snapshots are fully faithful mid-window.
+
+## 87. Replay Needs No Pickup-Window Changes — It Inherits §86 via the Shared Serializer (VERIFIED + GUARDED)
+
+**Decision:** No changes to `replay/file.ts` or `replay/pack.ts`. The replay format carries world state ONLY in `initialSnapshot` (a `WorldSnapshot` produced by `cloneWorld` in `InputRecorder.startNew` — the same for browser, spectate, coop, and sim-generated replays via `tools/sim/simulation-runner.ts`); the packed frame stream is pure input (direction/fire/guard/frenzy). Playback (`PlaybackController.start`/`seekTo`/`buildKeyframes`) restores via `restoreWorld`, so §86's `pickupWindowEntered`/`pickupWindowTimer` fields travel with the snapshot automatically and the window then evolves deterministically (fixed-timestep decrement + `checkConditions`; no RNG, no wall-clock). Guard: `tests/replay-roundtrip.test.ts` — a recording that STARTS mid-window must restore the window on playback and tick it down identically, not reset it; red without §86 (`pickupWindowEntered` undefined), green with it.
+
+**Rationale:**
+- User asked whether replay serialization needed to carry the window state. Answer: it already does — through the shared `WorldSnapshot` + `cloneWorld`/`restoreWorld` serializer that §86 fixed. Duplicating the state into the frame stream would fight the input-recording design (re-simulation derives world state from inputs + snapshot).
+- Legacy replays recorded mid-window before §86 restore with the pre-window fallback (window re-opens) — same pre-existing behavior as legacy snapshots (§86); recordings only ever start mid-window via exotic paths (manual start mid-session), so the exposure is minimal.
+
+**Implications:** The single serializer remains the one source of truth for both snapshot and replay world state — no fork to maintain.
