@@ -18,8 +18,12 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 // §105). §109 (M11, 2026-08-03) shipped playerStartLevel 1→2 (60-seed hard
 // +9.4pp / chaos +7.5pp), then §110 (2026-08-03) REVERTED it back to 1★ by
 // user decision ("2★ 起步有点儿欺负敌人" — it affects human hard/chaos
-// play, not just God AI). Current truth (20-seed, playerStartLevel=1):
-// hard 48.0% / chaos 48.9% → aggregate floor 310/316 (DECISIONS §110).
+// play, not just God AI). §111 (2026-08-04) extended the 3★ star shield to
+// ALL difficulties (engine change, SimulationCombat — classic-only before;
+// measured impact noise-level since the player rarely reaches 3★, HP probe
+// 35×20: lvl3+ alive-time 1.3-1.6%). Current truth (20-seed,
+// playerStartLevel=1): hard 48.7% / chaos 48.7% → aggregate floor 315/315
+// (DECISIONS §111).
 //
 // These are 20-seed SCREENING floors (same convention as the classic gate's
 // per-stage floors). They catch regressions, not improvements: any shipped
@@ -33,13 +37,14 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 const MARGIN_WINS = 4
 
-// Per-stage wins measured at 35×20 on the §105 baseline (2026-08-03,
-// playerStartLevel=1 AND startLives for hard/chaos — the sim now matches the
-// browser first-life init; DECISIONS §105). §110 reverted §109's 2★ back to
-// 1★ by user decision. Values are WIN COUNTS out of GATE_SEEDS (20).
-// hard = 2 lives (honest).
+// Per-stage wins measured at 35×20 on the §111 baseline (2026-08-04,
+// playerStartLevel=1, startLives for hard/chaos, star shield on all
+// difficulties). §110 reverted §109's 2★ back to 1★ by user decision.
+// §111 extended the star shield to all difficulties (noise-level win change:
+// hard 336→341, chaos 342→341 out of 700). Values are WIN COUNTS out of
+// GATE_SEEDS (20). hard = 2 lives (honest).
 const HARD_TRUTH_WINS: number[] = [
-  8, // S0  Outpost
+  9, // S0  Outpost
   14, // S1  Waterways
   5, // S2  Steel Fortress
   12, // S3  Crossfire
@@ -49,14 +54,14 @@ const HARD_TRUTH_WINS: number[] = [
   8, // S7  Riverbed
   12, // S8  Twin Towers
   15, // S9  Gauntlet
-  10, // S10  Fortress
+  12, // S10  Fortress
   9, // S11  Lattice
   5, // S12  Bunker Hill
   13, // S13  Steel Web
   8, // S14  Citadel
   7, // S15  Crossroads
   10, // S16  Twin Spires
-  11, // S17  Gridlock
+  12, // S17  Gridlock
   8, // S18  Frozen Field
   11, // S19  Bastion
   9, // S20  Checkers
@@ -73,15 +78,15 @@ const HARD_TRUTH_WINS: number[] = [
   8, // S31  Star Fort
   12, // S32  Diamond
   3, // S33  Battlement
-  15, // S34  Final Redoubt
+  16, // S34  Final Redoubt
 ]
 
 const CHAOS_TRUTH_WINS: number[] = [
   9, // S0  Outpost
-  11, // S1  Waterways
+  12, // S1  Waterways
   3, // S2  Steel Fortress
   13, // S3  Crossfire
-  8, // S4  Maze
+  7, // S4  Maze
   9, // S5  Brickworks
   2, // S6  Iron Curtain
   8, // S7  Riverbed
@@ -92,7 +97,7 @@ const CHAOS_TRUTH_WINS: number[] = [
   8, // S12  Bunker Hill
   15, // S13  Steel Web
   9, // S14  Citadel
-  6, // S15  Crossroads
+  5, // S15  Crossroads
   10, // S16  Twin Spires
   17, // S17  Gridlock
   11, // S18  Frozen Field
@@ -115,9 +120,9 @@ const CHAOS_TRUTH_WINS: number[] = [
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §110 (M11 revert): playerStartLevel back to 1 → hard 48.0% / chaos 48.9%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((48.0 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 310/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((48.9 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 316/700
+// §111 (2026-08-04): star shield all difficulties → hard 48.7% / chaos 48.7%.
+const HARD_AGGREGATE_FLOOR = Math.floor(((48.7 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 315/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((48.7 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 315/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).

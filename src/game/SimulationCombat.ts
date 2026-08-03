@@ -565,15 +565,12 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
         this.createExplosion(bullet.x, bullet.y, 'small')
 
         if (tank.hp <= 0) {
-          // Classic FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态).
-          // A 3★ player does NOT die from a would-be-lethal hit: the shield is
-          // spent and the tank drops back to 2★, keeping its life. 0..2★ players
-          // die in one hit (faithful 一击毙命). Only classic honours this tradition.
-          if (
-            tank.isPlayer &&
-            w.difficultyKey === 'classic' &&
-            (tank.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
-          ) {
+          // FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态, DECISIONS
+          // §111: 2026-08-04 从 classic-only 扩展到所有难度). A max-level player does
+          // NOT die from a would-be-lethal hit: the shield is spent and the tank
+          // drops back to 2★, keeping its life. 0..2★ players die on a lethal hit
+          // (classic 一击毙命; pool-model players still burn their whole HP buffer).
+          if (tank.isPlayer && (tank.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel) {
             this.spendStarShield(tank)
             return true
           }
@@ -689,16 +686,24 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
     }
 
     /**
-     * Classic FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态).
+     * FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态; all difficulties
+     * since DECISIONS §111, 2026-08-04).
      *
-     * Called from `bulletHitsTank` when a 3★ player would otherwise take a
-     * lethal hit. The top star is spent: the tank reverts to the next-lower
+     * Called from `bulletHitsTank` when a max-level player would otherwise take
+     * a lethal hit. The top star is spent: the tank reverts to the next-lower
      * star level (2★), its stats are re-derived from the new profile, HP is
      * restored to full, and a brief `STAR_SHIELD_GRACE_MS` invulnerability is
      * granted so a coincident bullet in the same volley cannot instantly
      * re-kill the now-2★ tank. The player does NOT lose a life. Both the live
      * `tank.level` and `world.playerLevel` are kept in sync (the canonical
      * source for base-damage derivation).
+     *
+     * Demotion semantics: always `maximumLevel - 1` (2★) — i.e. below the
+     * shield threshold — NOT "current level − 1". In classic (level cap 3)
+     * that is exactly "lose one star". In pool modes (levels accumulate
+     * unboundedly) a 4★+ player therefore loses more than one star in a single
+     * spend, but the shield can NEVER chain (a demoted player is below the
+     * threshold), preserving the classic single-spend privilege.
      */
     private spendStarShield(tank: Tank): void {
       const w = this.world

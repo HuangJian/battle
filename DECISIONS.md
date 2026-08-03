@@ -1067,3 +1067,34 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 > （Rationale/Implications/方法论教训）见 **docs/god-ai-tuning.progress.md Part II**。
 > v2 设计文档（plan/God-AI-Redesign-Review.md、plan/God-AI-Redesign-v2.md）已于 2026-08-03 删除，
 > 核心内容归档于 progress.md §II.0。
+
+## 111. 星盾扩展到所有难度（引擎改动）+ HP 模型探针选靶（2026-08-04）
+
+**Decision:** ① **引擎改动（用户拍板）**：3★ 星盾从 classic-only 扩展到**所有难度**（`SimulationCombat.bulletHitsTank` 移除 `difficultyKey==='classic'` 守卫；hard/chaos/relax 三星玩家被致命击中掉回 2★ 不死，HP 回满 + 短暂无敌）。② **HP 模型量化探针**（`tmp/probe-hp-model.ts`，35×20 官方口径）产出死亡生态数据。③ **AI HP 规则选靶**：星盾交换伤害**否决**（覆盖率 <2%），玩家 HP 缓冲感知（低血保守）为唯一靶点，敌人剩余命中数补刀推迟。
+
+**Rationale（探针数据，全链路）：**
+- **星盾扩展 win 影响在噪声内**：hard 336→341（48.0→48.7%）、chaos 342→341（48.9→48.7%）。根因：**玩家几乎到不了 3★**——lvl3+ 存活时间仅 hard 1.3% / chaos 1.6%，700 局仅触发 10/15 次（星是稀缺资源，M7 结论复现）。星盾扩展机械正确但当前星经济下覆盖率极低。
+- **磨血是主导死亡模式**：hard 70.1% / chaos 67.5% 的死亡吸收了 ≥3 发子弹（死前平均吸收 2.06/1.95 个 100-damage 单位）；危险区时间（hp≤130，一发即死）占存活时间 hard 19.8% / chaos 19.0%——**玩家约 1/5 时间在死亡边缘仍按满血节奏打**。死亡星级 99% 是 1★。
+- **③ 星盾交换伤害否决**：触发率 0.9-1.1% 生命、覆盖 <2% 存活时间——与 M5（触发率 1% 无统计力）、M2c（覆盖不足）同构。**① 低血保守**直接命中 19-20% 危险区时间；**② 敌人补刀**有 M0.5 damagedArmorBonus（-8.4pp）历史负信号，先不做。
+- **经典零漂移**：守卫移除对 classic 是 no-op（原已生效）——classic 门禁 637/700 不变，split-parity 不受影响。
+
+**Implications:**
+- **门禁真值重生成**：hard/chaos 均 341/700（48.7%），聚合 floor 310/316→**315/315**（-3.7pp 公式）；per-stage 数组更新。
+- **星盾在经典仍有实际意义**（classic 0★ 起步、升级节奏不同），hard/chaos 需先解决星经济或 AI 拾取才见星盾价值。
+- M12 靶点：**玩家 HP 缓冲感知**——低血（≤1-2 发）时 dodge 分支提高承诺度/回防，高血时允许以血换进度（绝境保基地），默认 OFF + 官方口径 60-seed 双目标评估（§107/§108 纪律）。
+- 探针 `tmp/probe-hp-model.ts` 保留为可复用工具；星盾扩展已单测覆盖（classic-star-shield.test.ts 6 用例：全难度 3★ 触发、2★ 仍死、一次性）。
+
+## 112. M12 玩家 HP 缓冲感知：诚实阴性（2026-08-04）
+
+**Decision:** M12（§111 探针选靶的「玩家 HP 缓冲感知」）实现并评估后**不发布**——5 个新参数全部默认 OFF（`playerHpAwareness` / `hpDangerHits` / `hpDangerCommitMargin` / `hpTradeHits` / `hpTradeCommitPenalty`，`src/ai/god/params.ts` + `ThreatAssessor.dodgeDirectionImpl` 的 HP 自适应 commit 余量，pool 模型专属）。实现 + 5 个单元测试（danger 放宽 / trade 加严 / 阈值门控 / pool-only / 默认惰性）作为实验旋钮保留。
+
+**Rationale（20-seed screen + 60-seed 确认全链路）：**
+- **机制设计**（§111 探针驱动）：危险模式（hits-to-die ≤ hpDangerHits=2，覆盖 70% 磨血死亡的时段）把 horizon commit 余量放宽到 hpDangerCommitMargin=1（低血拼命逃脱、不再振荡）；交换模式（hits-to-die ≥ hpTradeHits=4，满血缓冲）加严余量（接受部分闪避保持火力）。引擎事实：1★ pool 玩家 315HP / 敌弹 100 伤害 = 4 hits-to-die。
+- **20-seed screen（700 局/臂）**：hard OFF 48.7 / H 50.6 / H+danger 50.4 / H+both 50.6；chaos OFF 48.7 / H 47.7 / H+danger 47.1 / H+both 47.1。**M12 delta 全部 0.0~-0.6pp（噪声内）**——danger/trade 相对 horizon 基底无增益。
+- **60-seed 确认（2100 局/臂）**：hard H+both +2.3pp（46.7→49.0）/ chaos -2.2pp（47.7→45.5）——**反向抵消净零**；且该信号是 horizon 基底 H 的签名（20-seed H 单独 +1.9pp，M12 delta ≤0.6pp），不是 HP 感知本身。
+- **第三次证伪 dodge 分支**：M3 对枪、M9/M10 horizon 承诺、M12 HP 门控 horizon——同一签名（hard +~2pp / chaos -~2pp，§108 MARGIN6 一模一样）。机制级解释：磨血死亡（70%）分布在整个战场（追猎/回防途中），dodge 分支只在「有子弹飞来」的瞬间介入，其逃脱质量改变不了总量；而 chaos 开阔关的站定/过度承诺闪避仍损失清关效率。**HP 知识本身正确（危险区 19-20% 存活时间、99% 死在 1★），但它在 dodge 分支上没有可兑现的行为杠杆。**
+
+**Implications:**
+- 已证伪方向再 +1：dodge 分支行为族（对枪/clearance/horizon/HP 门控）全部关闭，剩余 knobs 保留供 M4 CMA-ES 标量搜索复用。
+- hard/chaos 的杠杆不在 dodge：M7 归因（回防途中 85-93% 死亡在 chase/engage 分支）与 M4 标量参数搜索是下两个方向。
+- 方法论：本次 20-seed 阴性（≤0.6pp）与 60-seed 一致（±2.2pp 反向）——20-seed 判断「不发布」正确，60-seed 额外确认了硬/混沌反向签名；阴性结果的 60-seed 价值在于排除「隐藏的强信号」。

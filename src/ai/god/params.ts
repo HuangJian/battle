@@ -649,6 +649,56 @@ export interface GodAIParams {
    */
   dodgeHorizonMaxDistCells: number
 
+  // ---- M12: player HP buffer awareness (DECISIONS §112) ----
+  /**
+   * M12: master gate for HP-adaptive dodge commitment. 0 = OFF
+   * (byte-identical — the margin stays dodgeHorizonMinMarginTicks).
+   * 1 = ON. Only applies in the 'pool' combat model (instant/classic has no
+   * HP buffer — 1 hit = death, there is no trade/commit gradient).
+   * Mechanism: adjusts the horizon commit gate inside dodgeDirectionImpl
+   * based on the player's hits-to-die vs the current threat bullet
+   * (ceil(player.hp / bullet.damage)).
+   */
+  playerHpAwareness: number
+
+  /**
+   * M12 danger mode: when hits-to-die <= this value, the player is in the
+   * danger zone (measured: hard 70% / chaos 67% of deaths absorb >= 3 hits,
+   * and ~1/5 of survival time is spent at <= 2 hits — §111 probe). In danger
+   * mode the horizon commit margin is RELAXED to hpDangerCommitMargin — the
+   * escape is survival, not efficiency, so the player commits to the
+   * longer-horizon perpendicular side instead of oscillating inside the hit
+   * band (M9 measured commitment-failure as 32-35% of dodge deaths).
+   * 0 = danger mode disabled.
+   */
+  hpDangerHits: number
+
+  /**
+   * M12 danger-mode commit margin (ticks). When hpDangerHits is satisfied,
+   * the horizon commit gate uses this margin instead of
+   * dodgeHorizonMinMarginTicks. 0 = keep dodgeHorizonMinMarginTicks (danger
+   * mode only removes the distance gate, not tested — keep simple).
+   */
+  hpDangerCommitMargin: number
+
+  /**
+   * M12 trade mode: when hits-to-die >= this value, the player has a full HP
+   * buffer (pool 1★ = 315 HP ≈ 4 hits) and can afford to TRADE a hit for
+   * progress. In trade mode the commit margin is TIGHTENED by
+   * hpTradeCommitPenalty — the player accepts the partial dodge (legacy
+   * binary path, keeps moving/attacking) instead of over-committing to an
+   * escape that costs base-defense and kill efficiency (M9/M10 measured the
+   * ungated escape as an efficiency loss). 0 = trade mode disabled.
+   */
+  hpTradeHits: number
+
+  /**
+   * M12 trade-mode margin penalty (ticks), ADDED to
+   * dodgeHorizonMinMarginTicks when hpTradeHits is satisfied. Larger = more
+   * risk acceptance (fewer horizon commits at high HP).
+   */
+  hpTradeCommitPenalty: number
+
   // ---- §87: Urgent power-up pickup priority (user request 2026-08-02) ----
   /**
    * §87: 0 = OFF (byte-identical to pre-§87). 1 = ON: a CLOSE power-up with a
@@ -1099,6 +1149,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (both 0 = no gate = pure M9 semantics; A/B knobs, DECISIONS §108 pending).
   dodgeHorizonMinMarginTicks: 0,
   dodgeHorizonMaxDistCells: 0,
+  // M12: player HP buffer awareness (DECISIONS §112) — OFF by default; the
+  // A/B runs in the M12 milestone. All five params 0 = byte-identical.
+  playerHpAwareness: 0,
+  hpDangerHits: 0,
+  hpDangerCommitMargin: 0,
+  hpTradeHits: 0,
+  hpTradeCommitPenalty: 0,
 
   // ── §87: Urgent power-up pickup priority (user request 2026-08-02) ───
   // SHIPPED default: ON with the A/B-validated ranges/gates (DECISIONS §87).

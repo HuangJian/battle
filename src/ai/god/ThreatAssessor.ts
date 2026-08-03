@@ -387,7 +387,8 @@ export function dodgeDirectionImpl(
   pcx: number,
   pcy: number,
 ): Direction | null {
-  const p = self.controlledTank(self.world)!
+  const w = self.world
+  const p = self.controlledTank(w)!
   const vertical = bullet.dir === 'up' || bullet.dir === 'down'
   // Use module-level constants instead of allocating arrays on every dodge.
   const candA: Direction = vertical ? 'left' : 'up'
@@ -445,7 +446,33 @@ export function dodgeDirectionImpl(
         const hA = dodgeHorizonTicksImpl(self, p, pcx, pcy, candA)
         const hB = dodgeHorizonTicksImpl(self, p, pcx, pcy, candB)
         const bestH = hA > hB ? hA : hB
-        let commit = bestH >= self.params.dodgeHorizonMinMarginTicks
+        // M12 (DECISIONS §112): player HP buffer awareness — the commit
+        // margin is HP-adaptive, but ONLY in the 'pool' combat model (classic
+        // 'instant' has no HP buffer — 1 hit = death, no commit/trade
+        // gradient exists). hits-to-die = ceil(player.hp / threat.damage).
+        //   danger: hits-to-die <= hpDangerHits → RELAX to hpDangerCommitMargin
+        //     (low HP: the escape is survival — commit to the longer-horizon
+        //     side and stop oscillating inside the hit band; §111 probe: 70%
+        //     of hard/chaos deaths absorb >= 3 hits while grinding).
+        //   trade:  hits-to-die >= hpTradeHits → ADD hpTradeCommitPenalty
+        //     (high HP: the buffer absorbs a hit — accept the partial dodge,
+        //     keep moving/attacking instead of over-committing to an escape
+        //     that costs base-defense and kill efficiency, M9/M10 measured).
+        // Default playerHpAwareness=0 → margin unchanged (byte-identical).
+        let margin = self.params.dodgeHorizonMinMarginTicks
+        if (self.params.playerHpAwareness > 0 && w.rules.combatModel === 'pool') {
+          const hitsToDie = Math.ceil(p.hp / Math.max(1, bullet.damage))
+          // Danger takes precedence: when the danger condition matches, only
+          // hpDangerCommitMargin applies (trade is skipped for that HP range
+          // even if hpTradeHits is also satisfied). Overlapping thresholds
+          // resolve to danger — the more urgent mode.
+          if (self.params.hpDangerHits > 0 && hitsToDie <= self.params.hpDangerHits) {
+            if (self.params.hpDangerCommitMargin > 0) margin = self.params.hpDangerCommitMargin
+          } else if (self.params.hpTradeHits > 0 && hitsToDie >= self.params.hpTradeHits) {
+            margin += self.params.hpTradeCommitPenalty
+          }
+        }
+        let commit = bestH >= margin
         // Distance gate — only meaningful when the stage has a base; on
         // no-base stages the fixed BASE_POS is not a defense anchor.
         if (commit && self.hasBase && self.params.dodgeHorizonMaxDistCells > 0) {
