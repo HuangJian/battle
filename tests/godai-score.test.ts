@@ -55,6 +55,7 @@ function tel(over: Partial<RunTelemetry> = {}): RunTelemetry {
     basePressureMean: 0.05,
     basePressureSamples: 500,
     cellsVisited: 110,
+    deaths: [],
     ...over,
   }
 }

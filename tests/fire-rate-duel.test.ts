@@ -89,7 +89,9 @@ interface DuelResult {
 /**
  * Head-on duel harness.
  *
- * Setup: classic difficulty (level-0 player, no buffs), corridor columns 8–9
+ * Setup: hard difficulty with the player PINNED to level 0 below (the "no
+ * buffs" baseline — hard now starts at 1★ since §104/M6, so the pin is what
+ * guarantees the level-0 cadence, not the difficulty). Corridor columns 8–9
  * cleared of all terrain. The player sits at its spawn (col 8, row 24) facing
  * up; the enemy is pinned at the top of the same corridor facing down. The
  * player holds the fire key; the enemy is force-fired every tick through the
@@ -108,11 +110,23 @@ function runDuel(kind: Exclude<TankKind, 'player'>, ticks: number): DuelResult {
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('hard', 'modern', 0)
+  // §104 (M6): hard now starts at 1★. This duel tests the no-buff ordering,
+  // so pin the player to level 0 regardless of difficulty config. The tank's
+  // cadence fields are frozen at spawn, so they must be reset too — the same
+  // pattern the max-level duel below uses for 3★.
+  world.playerLevel = 0
+  const player = world.player!
+  player.level = 0
+  // Round to match profileToStats' Math.round — the enemy's fireCooldown is
+  // the rounded value, so the 0★ player (same 1.05× multiplier as fast) must
+  // be too, or the <= comparison fails on a float edge (825.3968 vs 825).
+  const base0 = Math.round(baseFireIntervalMs('player', 0))
+  player.fireCooldown = base0
+  player.nextFireInterval = base0
 
   // No other enemies — this is a 1v1 duel.
   world.spawnQueue.length = 0
 
-  const player = world.player!
   player.spawnTimer = 0
   // Shield the player for the whole duel. With opposing bullets cancelling 1:1,
   // the faster cadence wins the exchange; the loser's single surplus shell

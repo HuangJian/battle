@@ -1,9 +1,9 @@
 import type { GodAIInput } from '../GodAIInput'
-import type { Bullet } from '../../types'
+import type { Bullet, Tank } from '../../types'
 import type { Direction } from '../../constants'
 import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
-import { ALL_DIRS, opposite } from '../../utils/helpers'
+import { ALL_DIRS, opposite, snap, aabb } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { scanAheadImpl } from './FireControl'
 
@@ -66,21 +66,9 @@ export function findMostDangerousBulletImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'
-    // §86: Hysteresis for the recently-dodged threat. When the player
-    // oscillates at the alignment boundary (|dist| = 31 or 32), the threat
-    // flickers between detected and not-detected, causing the player to
-    // alternate between dodge and navigate branches. Use a slightly wider
-    // threshold (TANK + 2) for the bullet that was JUST being dodged, so
-    // it stays "detected" through the 1px oscillation. New threats still
-    // use the standard TANK threshold. This is more targeted than globally
-    // widening the threshold (which caused -37pp on S32 Diamond by detecting
-    // bullets in adjacent steel corridors at exactly 32px).
-    // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
-    const isRecentThreat = self.params.dodgeHysteresis > 0 && b.id === self._lastDodgeThreatId
-    const alignThreshold = isRecentThreat ? TANK + 2 : TANK
-    const aligned = vertical
-      ? Math.abs(bcx - pcx) < alignThreshold
-      : Math.abs(bcy - pcy) < alignThreshold
+    // M0.5 退役（2026-08-03）: dodgeHysteresis（TANK+2 对齐阈值）已移入
+    // experimental.ts 归档（A/B -1.1pp，从未发布）——固定标准 TANK 阈值。
+    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
     if (!aligned) continue
 
     const approaching =
@@ -267,6 +255,129 @@ export function baseBulletInterceptCellImpl(self: GodAIInput, bullet: Bullet): C
 }
 
 /**
+ * M9/M10: escape margin of a candidate dodge direction (tick).
+ * For each enemy bullet threatening the player's lane, estimate whether
+ * committing to `dir` can CLEAR the bullet's hit band (TANK/2 + b.w/2 ≈ 19px)
+ * at player speed within the terrain-limited free path, and how much time is
+ * LEFT OVER after the escape (t_arrive − escape_ticks). Returns the MIN across
+ * bullets (most threatening bullet wins):
+ *   > 0  — the direction escapes with that many ticks of margin (higher = safer)
+ *   <= 0 — the direction gets hit (negative ≈ how far past the deadline)
+ * Bullets covering the NEXT cell (dodging INTO a crossfire lane) count as
+ * hits. M10 gates the commitment on this margin so only CLEARLY-winnable
+ * escapes commit (DECISIONS §108); M9 compared min-tick horizons instead.
+ * No allocations (AGENTS §14.1): indexed bullet loop, scalar locals.
+ * Called only when dodgeHorizonScore > 0 (byte-identical to M0 otherwise).
+ */
+function dodgeHorizonTicksImpl(
+  self: GodAIInput,
+  p: Tank,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+): number {
+  const w = self.world
+  const pSpeed = p.speed
+  const v = DIR_VECTORS[dir]
+  const nx = pcx + v.dx * CELL
+  const ny = pcy + v.dy * CELL
+  // Terrain-limited free path in `dir` (px) — caps the escape distance.
+  const freeDist = freePathDistPxImpl(self, p, dir)
+  let minMargin = Infinity
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
+    if (!b.alive || b.isPlayer) continue
+    const bcx = b.x + b.w / 2
+    const bcy = b.y + b.h / 2
+    const vertical = b.dir === 'up' || b.dir === 'down'
+
+    // (1) Next-cell coverage (dodging INTO another bullet's lane) — a hit.
+    const alignedNext = vertical
+      ? Math.abs(bcx - nx) < CELL * 0.75
+      : Math.abs(bcy - ny) < CELL * 0.75
+    if (alignedNext) {
+      const approachingNext =
+        (b.dir === 'down' && bcy < ny) ||
+        (b.dir === 'up' && bcy > ny) ||
+        (b.dir === 'right' && bcx < nx) ||
+        (b.dir === 'left' && bcx > nx)
+      if (approachingNext) {
+        const tArrNext = (vertical ? Math.abs(bcy - ny) : Math.abs(bcx - nx)) / b.speed
+        if (-tArrNext < minMargin) minMargin = -tArrNext
+      }
+    }
+
+    // (2) Current-lane escape model (the primary commitment mechanism).
+    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
+    if (!aligned) continue
+    const approaching =
+      (b.dir === 'down' && bcy < pcy) ||
+      (b.dir === 'up' && bcy > pcy) ||
+      (b.dir === 'right' && bcx < pcx) ||
+      (b.dir === 'left' && bcx > pcx)
+    if (!approaching) continue
+    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    const tArr = dist / b.speed
+    // Is `dir` perpendicular to the bullet's travel (can the player escape its band)?
+    const perp =
+      (vertical && (dir === 'left' || dir === 'right')) ||
+      (!vertical && (dir === 'up' || dir === 'down'))
+    let margin = -tArr // non-perpendicular → the bullet hits at t_arrive
+    if (perp) {
+      const off = vertical ? Math.abs(bcx - pcx) : Math.abs(bcy - pcy)
+      const band = TANK / 2 + b.w / 2
+      const needDist = band - off // lateral movement needed to clear the band
+      if (needDist <= 0) {
+        margin = Infinity // already outside the band — no threat from this bullet
+      } else if (needDist <= freeDist) {
+        const escapeTicks = needDist / pSpeed
+        margin = tArr - escapeTicks // leftover time after clearing the band
+      }
+    }
+    if (margin < minMargin) minMargin = margin
+  }
+  return minMargin
+}
+
+/**
+ * M9: max distance (px) the player can move from its current position in `dir`
+ * before terrain (or the field edge, or another tank) blocks the 32px footprint
+ * — mirrors canMoveDirRaw's snap-to-cell + rectHitsTerrain + tank-AABB checks,
+ * stepping one CELL at a time. Cap 4 cells (64px): beyond that the escape
+ * decision is already made. Called only from dodgeHorizonTicksImpl.
+ */
+function freePathDistPxImpl(self: GodAIInput, p: Tank, dir: Direction): number {
+  const w = self.world
+  const v = DIR_VECTORS[dir]
+  // Mirror canMoveDirRaw: snap the current position, then step CELL by CELL.
+  let gx = snap(p.x, CELL)
+  let gy = snap(p.y, CELL)
+  let dist = 0
+  const scan = self._otherTanks.length > 0 ? self._otherTanks : w.allTanks
+  for (let step = 0; step < 4; step++) {
+    const nx = gx + v.dx * CELL
+    const ny = gy + v.dy * CELL
+    if (!w.isInBounds(nx, ny, TANK, TANK)) break
+    if (w.rectHitsTerrain(nx, ny, TANK, TANK)) break
+    let blocked = false
+    for (let oi = 0; oi < scan.length; oi++) {
+      const o = scan[oi]
+      if (o === p || !o.alive) continue
+      if (aabb(nx, ny, TANK, TANK, o.x, o.y, o.w, o.h)) {
+        blocked = true
+        break
+      }
+    }
+    if (blocked) break
+    gx = nx
+    gy = ny
+    dist += CELL
+  }
+  return dist
+}
+
+/**
  * Choose a dodge direction perpendicular to the incoming bullet.
  * M3: verify the candidate direction is safe (not into another bullet's path).
  */
@@ -282,24 +393,8 @@ export function dodgeDirectionImpl(
   const candA: Direction = vertical ? 'left' : 'up'
   const candB: Direction = vertical ? 'right' : 'down'
 
-  // §86: Dodge direction persistence. When the same threat persists across
-  // ticks, keep the last dodge direction if it's still safe. This prevents
-  // the 1px oscillation where the player alternates between two positions
-  // every tick (e.g., y=55↔56), making the player effectively stationary
-  // while the bullet approaches. Root cause: when the player moves 1px in
-  // the dodge direction, canMoveDir or isSafeDir may flip, causing the
-  // recomputed dodge direction to reverse — the player moves back, the
-  // conditions flip again, and the cycle repeats indefinitely.
-  // Gated by `dodgePersistence` param: 0 = OFF (byte-identical to pre-§86).
-  if (
-    self.params.dodgeDirPersistence > 0 &&
-    bullet.id === self._lastDodgeThreatId &&
-    self._lastDodgeDir !== null &&
-    self.canMoveDir(p, self._lastDodgeDir) &&
-    self.isSafeDir(pcx, pcy, self._lastDodgeDir, bullet.id)
-  ) {
-    return self._lastDodgeDir
-  }
+  // M0.5 退役（2026-08-03）: dodgeDirPersistence（同威胁保持闪避方向）已移入
+  // experimental.ts 归档（A/B -1.7pp，从未发布）。
 
   // §86: Oscillation detection + counter-fire. When the dodge direction has
   // flipped 3+ consecutive times for the same threat, the player is stuck in
@@ -319,17 +414,99 @@ export function dodgeDirectionImpl(
     return opposite(bullet.dir) // face the bullet → think() fire cancels it
   }
 
-  // Try each candidate; prefer the one that's passable AND safe (M3).
-  // Use local booleans instead of allocating an `open` array.
+  // ---- §M3: multi-bullet clearance scoring (default OFF, byte-identical) ----
+  // Score each passable perpendicular candidate by its nearest-bullet
+  // CLEARANCE (min arrival tick of any other enemy bullet at the cell the
+  // player would move into) and pick the candidate with the most clearance.
+  // Prevents dodging INTO crossfire: a cell where another bullet arrives in
+  // 2 ticks scores badly vs one with 15 ticks of clearance.
   let safeA = false
   let safeB = false
-  if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
-  if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
+  // ---- M9/M10: survival-horizon commitment scoring (default OFF, byte-identical) ----
+  // M9 (DECISIONS §107): commits to the longer-horizon perpendicular side,
+  // fixing the measured dominant dodge-death failure mode (commitment failure
+  // — the player oscillated inside the hit band instead of sustaining an
+  // escape). M10 (DECISIONS §108): the commitment is GATED — only commit when
+  // the escape margin is clearly winnable (dodgeHorizonMinMarginTicks) AND the
+  // player is not far from the base (dodgeHorizonMaxDistCells). The ungated
+  // version traded away base-defense/kill efficiency (S10 seed6: 0 deaths but
+  // base destroyed while the player fled 142px away). Gate failure → fall back
+  // to the legacy binary path below (NOTE: with margin=0, when BOTH
+  // perpendiculars are doomed — both margins ≤ 0 — the gate also fails and
+  // the legacy path runs; this differs from M9's later-hit pick, so margin=0
+  // is "any escapable side commits", not a byte-exact M9 replay).
+  // NOTE: horizon wins over dodgeClearanceScore if both are set (only one
+  // block can run per dodge — keep A/B arms mutually exclusive).
+  if (self.params.dodgeHorizonScore > 0) {
+    const passA = self.canMoveDir(p, candA)
+    const passB = self.canMoveDir(p, candB)
+    if (passA || passB) {
+      if (passA && passB) {
+        const hA = dodgeHorizonTicksImpl(self, p, pcx, pcy, candA)
+        const hB = dodgeHorizonTicksImpl(self, p, pcx, pcy, candB)
+        const bestH = hA > hB ? hA : hB
+        let commit = bestH >= self.params.dodgeHorizonMinMarginTicks
+        // Distance gate — only meaningful when the stage has a base; on
+        // no-base stages the fixed BASE_POS is not a defense anchor.
+        if (commit && self.hasBase && self.params.dodgeHorizonMaxDistCells > 0) {
+          const pc = self.playerCell()
+          const baseCol = BASE_POS.col + 1
+          const baseRow = BASE_POS.row + 1
+          const distCells = Math.abs(pc.col - baseCol) + Math.abs(pc.row - baseRow)
+          if (distCells > self.params.dodgeHorizonMaxDistCells) commit = false
+        }
+        if (commit) {
+          if (hA > hB) return candA
+          if (hB > hA) return candB
+        }
+        // Gate failed or tied — legacy binary path (isSafeDir + passable
+        // fallback, same as the default branch below).
+        if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
+        if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
+        if (!safeA && !safeB) {
+          if (self.canMoveDir(p, candA)) safeA = true
+          if (self.canMoveDir(p, candB)) safeB = true
+        }
+      } else {
+        // Only ONE perpendicular is passable — commit to it (the legacy path
+        // also falls back to a passable-but-unsafe side when nothing is safe,
+        // so the outcome is the same; the crossfire next-cell count is
+        // redundant here since there is no alternative direction).
+        return passA ? candA : candB
+      }
+    }
+    // Neither passable → fall through to the pinned (no-escape) logic below.
+  } else if (self.params.dodgeClearanceScore > 0) {
+    const passA = self.canMoveDir(p, candA)
+    const passB = self.canMoveDir(p, candB)
+    if (passA || passB) {
+      if (passA && passB) {
+        const clearA = dodgeClearanceTicksImpl(self, pcx, pcy, candA, bullet.id)
+        const clearB = dodgeClearanceTicksImpl(self, pcx, pcy, candB, bullet.id)
+        if (clearA > clearB) return candA
+        if (clearB > clearA) return candB
+        // Tie — fall through with both safe; the shared base-closer tail
+        // below breaks the tie (same as the binary path).
+        safeA = true
+        safeB = true
+      } else if (passA) {
+        return candA
+      } else {
+        return candB
+      }
+    }
+    // Neither perpendicular passable → fall through to the pinned logic.
+  } else {
+    // Try each candidate; prefer the one that's passable AND safe (M3).
+    // Use local booleans instead of allocating an `open` array.
+    if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
+    if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
 
-  // If no safe candidate, try passable but unsafe.
-  if (!safeA && !safeB) {
-    if (self.canMoveDir(p, candA)) safeA = true
-    if (self.canMoveDir(p, candB)) safeB = true
+    // If no safe candidate, try passable but unsafe.
+    if (!safeA && !safeB) {
+      if (self.canMoveDir(p, candA)) safeA = true
+      if (self.canMoveDir(p, candB)) safeB = true
+    }
   }
 
   // If still nothing [no perpendicular dodge passable], the player is pinned
@@ -447,6 +624,167 @@ export function isSafeDirImpl(
     if (approaching) return false
   }
   return true
+}
+
+/**
+ * §M3: clearance (ticks) of a dodge candidate — the MINIMUM arrival tick of
+ * any enemy bullet (excluding the dodged one) at the cell the player would
+ * occupy after moving one CELL in `dir`. Infinity = clear (no bullet
+ * threatens the new cell). Higher = safer. Used by `dodgeDirectionImpl` when
+ * `dodgeClearanceScore > 0` to pick the perpendicular side with the most
+ * room — dodging into a cell where another bullet arrives in 2 ticks is a
+ * crossfire death, dodging into one with 15 ticks of clearance is safe.
+ * Not called when the param is 0 (byte-identical to pre-§M3).
+ */
+function dodgeClearanceTicksImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  excludeBulletId: number,
+): number {
+  const w = self.world
+  const v = DIR_VECTORS[dir]
+  const newCx = pcx + v.dx * CELL
+  const newCy = pcy + v.dy * CELL
+  let minTicks = Infinity
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
+    if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
+    const bcx = b.x + b.w / 2
+    const bcy = b.y + b.h / 2
+    const vertical = b.dir === 'up' || b.dir === 'down'
+    // Same next-cell alignment gate as isSafeDirImpl.
+    const aligned = vertical
+      ? Math.abs(bcx - newCx) < CELL * 0.75
+      : Math.abs(bcy - newCy) < CELL * 0.75
+    if (!aligned) continue
+    const approaching =
+      (b.dir === 'down' && bcy < newCy) ||
+      (b.dir === 'up' && bcy > newCy) ||
+      (b.dir === 'right' && bcx < newCx) ||
+      (b.dir === 'left' && bcx > newCx)
+    if (!approaching) continue
+    const dist = vertical ? Math.abs(bcy - newCy) : Math.abs(bcx - newCx)
+    const ticks = dist / b.speed
+    if (ticks < minTicks) minTicks = ticks
+  }
+  return minTicks
+}
+
+/**
+ * §M3-revisit round 3 (DECISIONS §101): TERRAIN-ONLY pinning. Returns true
+ * only when BOTH perpendicular directions are impassable — the player is
+ * physically boxed in (corridor/corner) and cannot dodge at all.
+ *
+ * Rationale (round-3 A/B): the timing-aware pinned gate (round 2) gained
+ * +3.4pp chaos at 60-seed but regressed open-field stages (Twin Spires
+ * 55→30%, Bastion 35→15%, Final Redoubt 95→80%): on open ground a bullet
+ * too close to FULLY clear in time still benefits from a PARTIAL dodge
+ * (each tick of sideways movement shrinks the hit window and keeps the
+ * player mobile), while standing to counter-fire — which only works when
+ * the player's 6px shot actually times out — turned those partial dodges
+ * into stationary deaths. Corridor/corner pinning (the M-B maze seeds 2/16
+ * failure mode) is always terrain-based, so the terrain gate covers every
+ * case where the dodge is TRULY impossible, without ever standing still on
+ * open ground.
+ */
+/**
+ * M4: Check if there are other enemy bullets threatening the player's current
+ * position (excludes the one we're already watching). Used as a safety gate
+ * for emergency counter-fire: if crossfire is active, the player should keep
+ * dodging (vertical movement) rather than standing to counter-fire, because
+ * canceling one bullet leaves the player exposed to the others.
+ *
+ * Returns true when at least `threshold` other bullets are approaching the
+ * player within `rangeCells` — i.e., crossfire is active.
+ */
+export function hasCrossFireBulletImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  excludeBulletId: number,
+  rangeCells: number,
+  threshold: number,
+): boolean {
+  const w = self.world
+  const rangePx = rangeCells * CELL
+  let count = 0
+  const bullets = w.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
+    if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
+    const bcx = b.x + b.w / 2
+    const bcy = b.y + b.h / 2
+    const vertical = b.dir === 'up' || b.dir === 'down'
+    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
+    if (!aligned) continue
+    const approaching =
+      (b.dir === 'down' && bcy < pcy) ||
+      (b.dir === 'up' && bcy > pcy) ||
+      (b.dir === 'right' && bcx < pcx) ||
+      (b.dir === 'left' && bcx > pcx)
+    if (!approaching) continue
+    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    if (dist <= rangePx) {
+      if (++count >= threshold) return true
+    }
+  }
+  return false
+}
+
+export function isTerrainPinnedImpl(self: GodAIInput, p: Tank, bullet: Bullet): boolean {
+  const vertical = bullet.dir === 'up' || bullet.dir === 'down'
+  const candA: Direction = vertical ? 'left' : 'up'
+  const candB: Direction = vertical ? 'right' : 'down'
+  return !self.canMoveDir(p, candA) && !self.canMoveDir(p, candB)
+}
+
+/**
+ * §M3: direction to fire in order to CANCEL the incoming threat bullet
+ * (对枪抵消 in the dodge branch), or null when counter-fire is not viable.
+ *
+ * Returns `opposite(bullet.dir)` (face the bullet's source) only when:
+ *   1. The bullet is closely aligned with the player center (lateral offset
+ *      < `dodgeCounterFireAlignPx`) — the player's 6px bullet must actually
+ *      collide with the enemy bullet (SimulationCombat.bulletHitsBullet:
+ *      bullets cancel across opposing sides when their hitboxes overlap).
+ *   2. The lane from the player to the bullet is clear (no brick/steel/base
+ *      before the bullet's cell) — otherwise the player's shot hits the wall
+ *      first and the cancellation never happens.
+ *
+ * Called from think()'s dodge branch when `dodgeCounterFire > 0` and the
+ * threat is within `dodgeCounterFireRangeCells` (too close to out-dodge).
+ */
+export function dodgeCounterFireDirImpl(
+  self: GodAIInput,
+  bullet: Bullet,
+  pcx: number,
+  pcy: number,
+): Direction | null {
+  const bcx = bullet.x + bullet.w / 2
+  const bcy = bullet.y + bullet.h / 2
+  const vertical = bullet.dir === 'up' || bullet.dir === 'down'
+  const offset = vertical ? Math.abs(bcx - pcx) : Math.abs(bcy - pcy)
+  if (offset > self.params.dodgeCounterFireAlignPx) return null
+
+  const faceDir = opposite(bullet.dir)
+  const p = self.controlledTank(self.world)
+  if (!p) return null
+  // Lane-clear check: walk from the player center toward the bullet center.
+  const v = DIR_VECTORS[faceDir]
+  const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+  for (let d = CELL; d < dist; d += CELL) {
+    const fx = pcx + v.dx * d
+    const fy = pcy + v.dy * d
+    if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+    const col = Math.floor(fx / CELL)
+    const row = Math.floor(fy / CELL)
+    const terrain = self.world.tileMap.get(col, row)
+    if (terrain === 'brick' || terrain === 'steel' || terrain === 'base') return null
+  }
+  return faceDir
 }
 
 /**

@@ -106,7 +106,10 @@ const DIM = SEARCH_SPACE.length
 
 /** Convert a GodAIParams object to a flat number array for CMA-ES. */
 function paramsToVector(params: GodAIParams): number[] {
-  return SEARCH_SPACE.map((s) => params[s.name])
+  // SEARCH_SPACE only ever contains number-valued params (M2's
+  // `actionWeights` is a Partial record and deliberately excluded), so the
+  // indexed value is always a number.
+  return SEARCH_SPACE.map((s) => params[s.name] as number)
 }
 
 /** Convert a flat number array back to a GodAIParams object, with clipping and rounding. */

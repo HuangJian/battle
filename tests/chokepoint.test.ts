@@ -6,6 +6,7 @@ import { RNG } from '../src/utils/RNG'
 import { RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { GRID, TANK } from '../src/constants'
+import { chokepointCoversEnemy } from '../src/ai/god/StrategyPlanner'
 import type { StageData, Tank } from '../src/types'
 
 // ================================================================
@@ -491,6 +492,17 @@ describe('§88 think() integration + rule-4 priority chain', () => {
     const dir = ai.getMoveDirection()
     expect(ai.branchCounts.powerup).toBe(1) // MID tier still diverts (safe pickup)
     expect(dir).not.toBeNull()
+  })
+
+  it('enemy ON the chokepoint cell → covered, no OOB crash (60-seed regression, DECISIONS §101)', () => {
+    const { ai } = setup(onParams(), 6, 20)
+    // Same-cell LOS: the zero-length walk used to step off-grid forever
+    // (grid[-1] undefined crash, exposed by 60-seed chaos seeds > 20).
+    expect(chokepointCoversEnemy(ai, { col: 12, row: 20 }, { col: 12, row: 20 })).toBe(true)
+    // Sanity: clear vertical LOS one cell away still works (empty arena).
+    expect(chokepointCoversEnemy(ai, { col: 12, row: 20 }, { col: 12, row: 22 })).toBe(true)
+    // Out-of-bounds target → not covered (no crash).
+    expect(chokepointCoversEnemy(ai, { col: 12, row: 20 }, { col: 12, row: 30 })).toBe(false)
   })
 
   it('MID pickup outranks 据守 — diverts when the base is NOT threatened', () => {

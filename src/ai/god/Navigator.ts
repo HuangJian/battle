@@ -1,10 +1,8 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
-import { CELL, TANK, GRID, DIR_VECTORS, FIELD, BASE_POS, type Direction } from '../../constants'
+import { CELL, TANK, GRID, DIR_VECTORS, type Direction } from '../../constants'
 import { findPath } from '../../utils/pathfind'
-import { TileMap } from '../../game/TileMap'
-import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 
 // ============================================================
@@ -89,16 +87,14 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   }
 
   // Cache miss — recompute.
-  // §69-B: compute threat costs for A* (undefined when crossfirePathCost <= 0).
-  const tc = self.computeThreatCosts(playerCell, p.speed)
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target, tc ? { threatCosts: tc } : undefined)
+  let path = findPath(w.tileMap, playerCell, target)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   // This finds paths through brick walls — the player follows them and
   // fires at bricks to clear the way (handled by followPath + think()).
   if (!path || path.length === 0) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, threatCosts: tc })
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true })
   }
 
   let result: Direction | null = null
@@ -249,16 +245,12 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     return
   }
 
-  // §69-B: compute threat costs for A* (undefined when crossfirePathCost <= 0).
-  // §79: controlled tank, not `w.player` — P1 and P2 can have different speed.
-  const p = self.controlledTank(w)!
-  const tc = self.computeThreatCosts(playerCell, p.speed)
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target, tc ? { threatCosts: tc } : undefined)
+  let path = findPath(w.tileMap, playerCell, target)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   if (!path) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, threatCosts: tc })
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true })
   }
 
   if (path) {
@@ -397,16 +389,9 @@ export function canMoveDirImpl(self: GodAIInput, tank: Tank, dir: Direction): bo
 function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
   const w = self.world
   const v = DIR_VECTORS[dir]
-  // §86: Use Math.floor instead of snap (Math.round) to eliminate the
-  // discontinuity at cell midpoints that causes dodge direction oscillation.
-  // snap(56, 16) = 64 (rounds up), snap(55, 16) = 48 (rounds down) — this
-  // 16px jump flips canMoveDir results, causing the player to oscillate
-  // between two positions every tick. With Math.floor, both y=55 and y=56
-  // snap to 48, eliminating the oscillation at its source.
-  // Gated by `canMoveDirFloorSnap` param: 0 = OFF (snap/round, byte-identical).
-  const useFloor = self.params.canMoveDirFloorSnap > 0
-  const gx = useFloor ? Math.floor(tank.x / CELL) * CELL : snap(tank.x, CELL)
-  const gy = useFloor ? Math.floor(tank.y / CELL) * CELL : snap(tank.y, CELL)
+  // M0.5 (2026-08-03): canMoveDirFloorSnap retired (A/B -2.6pp, never shipped) — fixed snap.
+  const gx = snap(tank.x, CELL)
+  const gy = snap(tank.y, CELL)
   const nx = gx + v.dx * CELL
   const ny = gy + v.dy * CELL
   if (!w.isInBounds(nx, ny, TANK, TANK)) return false
@@ -425,159 +410,6 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
   return true
 }
 
-/**
- * §48-revisit: Count the passable terrain exits of a grid cell (0-4). A cell
- * with ≤ 2 exits is a corridor / corner / dead-end — a position where
- * enemies can surround the player. Cell-level approximation (ignores the
- * 2×2 tank footprint) — good enough for a pre-move surround heuristic.
- * Indexed loop (AGENTS §14.1): called up to 5× per tick when trapAvoidance
- * is ON (1 trap check + up to 4 candidate directions).
- */
-function countPassableExits(self: GodAIInput, col: number, row: number): number {
-  const grid = self.world.tileMap.grid
-  let n = 0
-  for (let di = 0; di < ALL_DIRS.length; di++) {
-    const v = DIR_VECTORS[ALL_DIRS[di]]
-    const c = col + v.dx
-    const r = row + v.dy
-    if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
-    if (!TileMap.blocksTank(grid[r][c])) n++
-  }
-  return n
-}
-
-/**
- * §48-revisit: Trap avoidance (user idea 2 — don't walk into surround
- * positions). Given the player's chosen move direction, check whether the
- * NEXT cell is a surround risk: few passable exits (≤ 2) AND
- * `trapEnemyCount`+ live enemies within `trapEnemyRadiusCells` of it. If so,
- * override to the open direction whose next cell has the most exits
- * (tie-broken toward the base), but only when that is STRICTLY more open
- * than the trap cell (never trade one dead-end for another).
- *
- * Returns the original direction when the next cell is not a trap.
- * Called from think()'s navigate branch (T2b), AFTER _moveDir is chosen —
- * it only perturbs the final move, never the dodge / T8 / T2a priorities.
- */
-export function trapAvoidanceImpl(self: GodAIInput, p: Tank, moveDir: Direction): Direction {
-  const pc = self.playerCell()
-  const v = DIR_VECTORS[moveDir]
-  const nx = pc.col + v.dx
-  const ny = pc.row + v.dy
-
-  // Out-of-bounds destination (near a wall) — treat as safe (no override).
-  if (nx < 0 || nx >= GRID || ny < 0 || ny >= GRID) return moveDir
-
-  const exits = countPassableExits(self, nx, ny)
-  if (exits > 2) return moveDir // open cell — no surround risk
-
-  // Count live enemies within trapEnemyRadiusCells of the destination cell.
-  const radius = self.params.trapEnemyRadiusCells
-  const need = self.params.trapEnemyCount
-  let nearby = 0
-  const enemies = self._enemies
-  for (let i = 0; i < enemies.length; i++) {
-    const ec = self.tankCell(enemies[i])
-    const d = Math.abs(ec.col - nx) + Math.abs(ec.row - ny)
-    if (d <= radius) {
-      if (++nearby >= need) break
-    }
-  }
-  if (nearby < need) return moveDir // no surround risk
-
-  // Trap: pick the best open alternative from the CURRENT cell. Strictly
-  // more exits than the trap cell, tie-broken toward the base.
-  const baseCol = BASE_POS.col + 1
-  const baseRow = BASE_POS.row + 1
-  let bestDir: Direction | null = null
-  let bestExits = exits // only strictly-more-open alternatives count
-  let bestBaseDist = Infinity
-  for (let di = 0; di < ALL_DIRS.length; di++) {
-    const d = ALL_DIRS[di]
-    if (d === moveDir) continue
-    if (!self.canMoveDir(p, d)) continue
-    const dv = DIR_VECTORS[d]
-    const cx = pc.col + dv.dx
-    const cy = pc.row + dv.dy
-    const dExits = countPassableExits(self, cx, cy)
-    const baseDist = Math.abs(cx - baseCol) + Math.abs(cy - baseRow)
-    if (dExits > bestExits || (dExits === bestExits && baseDist < bestBaseDist)) {
-      bestDir = d
-      bestExits = dExits
-      bestBaseDist = baseDist
-    }
-  }
-  return bestDir ?? moveDir
-}
-
-/**
- * §69-B: Compute per-cell threat costs for A* pathfinding.
- *
- * For each enemy bullet, projects its trajectory forward. For each cell along
- * the trajectory, estimates:
- *   - bulletArrivalTick = distance_from_bullet / bullet.speed
- *   - playerArrivalTick = manhattanDist(fromCell, cell) * CELL / playerSpeed
- *
- * If the times overlap within ±10 ticks (collision window), the cell gets a
- * threat cost penalty (= crossfirePathCost). This makes A* prefer routes that
- * avoid cells where the player and a bullet would arrive simultaneously.
- *
- * Returns undefined when crossfirePathCost <= 0 (no threat costs — byte-identical).
- * Returns the reusable _threatCostsBuf when crossfirePathCost > 0.
- *
- * Called from navigateTowardsImpl and replanImpl on A* cache miss / replan.
- * Not per-tick — only when A* is actually re-run (~every 23-60 ticks).
- */
-export function computeThreatCostsImpl(
-  self: GodAIInput,
-  fromCell: Cell,
-  playerSpeed: number,
-): Float64Array | undefined {
-  if (self.params.crossfirePathCost <= 0) return undefined
-
-  const w = self.world
-  const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
-  const penalty = self.params.crossfirePathCost
-  const threatWin = 10 // same collision window as findPathThreatImpl
-  const buf = self._threatCostsBuf
-  buf.fill(0)
-
-  const bullets = w.bullets
-  for (let bi = 0; bi < bullets.length; bi++) {
-    const b = bullets[bi]
-    if (!b.alive || b.isPlayer) continue
-
-    const bcx = b.x + b.w / 2
-    const bcy = b.y + b.h / 2
-    const v = DIR_VECTORS[b.dir]
-
-    // Project the bullet's trajectory forward, cell by cell.
-    for (let d = 0; d <= BULLET_TRAJECTORY_MAX_CELLS * CELL; d += CELL) {
-      const fx = bcx + v.dx * d
-      const fy = bcy + v.dy * d
-      if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
-
-      const col = Math.floor(fx / CELL)
-      const row = Math.floor(fy / CELL)
-      const terrain = w.tileMap.get(col, row)
-      if (terrain === 'brick' || terrain === 'steel') break
-
-      // Estimate arrival times.
-      const bulletArrivalTick = d / b.speed
-      const playerArrivalTick =
-        ((Math.abs(col - fromCell.col) + Math.abs(row - fromCell.row)) * CELL) / ps
-
-      // Collision window: bullet and player would be at the same cell at the
-      // same time. Same ±10 tick threshold as findPathThreatImpl.
-      if (
-        bulletArrivalTick >= playerArrivalTick - threatWin &&
-        bulletArrivalTick <= playerArrivalTick + threatWin
-      ) {
-        const idx = row * GRID + col
-        if (buf[idx] < penalty) buf[idx] = penalty
-      }
-    }
-  }
-
-  return buf
-}
+// M0.5 (2026-08-03): trapAvoidance (Navigator) + crossfirePathCost A* threat
+// costs (computeThreatCostsImpl) retired. Archived verbatim in experimental.ts
+// for the v2 survive candidate / EnemyModel features (design §4.4).

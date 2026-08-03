@@ -2,6 +2,10 @@
 
 > Key decisions. Full details in linked documents.
 > 编号体系：§1–§9 为基石决策，其余为分类索引。
+> **God AI 调校索引**：Classic 纪元（§27–§95，2026-07-27 → 08-01）与 v2 重设计纪元（§96–§110，2026-08-03，
+> M0–M11）的完整进展、数据与方法论教训统一归档于 **`docs/god-ai-tuning.progress.md`**（Part I / Part II）；
+> §96–§110 在本文件为压缩索引，正文全文见该文档。v2 设计文档（plan/God-AI-Redesign-v2.md 等）已删除，
+> 核心设计归档于 progress.md §II.0。
 
 ---
 
@@ -999,3 +1003,67 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Implications:** `turnCooldownMs=100` 为发货默认，同时适用于 player 与 enemy（同一 `GameplayRules`）。AI 层无需为转弯延迟做承诺锁——100ms 在 AI 容忍阈值内。后续若再调转弯周期，直接改该值并重跑门禁真值。
 
+## 96. M0 基线测量 + M0.5 僵尸参数退役（SHIPPED，2026-08-03）
+
+**Summary:** God AI 重设计 v2（plan/God-AI-Redesign-v2，已归档至 docs/god-ai-tuning.progress.md Part II.0）M0/M0.5 一次性落地：① chaos 命数 1→3；② 逐死亡事件 telemetry（`deaths[]`，含 `_lastBranch` 行为分支）；③ 死亡归因工具 `tools/diag/death-attribution.ts`；④ 三难度门禁 `tests/god-ai-hard-chaos-gate.test.ts`；⑤ 22 个僵尸/否决参数退役（interface 95→~73，归档 experimental.ts，结构化 ArchivedSelf 规避模块增强陷阱）。基线：classic 91.0% / hard 38.6% / chaos 34.6%。**关键发现：chaos 命数 1→3 几乎无提升 → 失败是 AI 反复死亡；hard/chaos 83% 死亡发生在 dodge 分支。** 详见 progress.md §II.1。
+
+## 97. §M3 Dodge 质量：dodge 分支近距离对枪抵消（SHIPPED 后回退） _(superseded by §98)_
+
+**Summary:** `dodgeCounterFire`/`dodgeClearanceScore` 初版 35×20 测 "chaos +3.8pp"，但 A/B 脚本传了 stageIndex 与官方口径不一致，为**口径伪影**。官方口径重测 chaos 持平偏负 → 回退 OFF。对枪抵消在任何门控下对 chaos 无发布级杠杆。详见 progress.md §II.4。
+
+## 98. §M3 Dodge 对枪抵消：回退 OFF + Gate 确定性根因修复（2026-08-03）
+
+**Summary:** §97 被本条取代：`dodgeCounterFire` 回退 OFF。**stageIndex 口径伪影完整机制**（killScore levelFactor → 掉宝时机 → RNG 分歧）。**Gate 确定性根因**：bun test 跨文件共享模块状态，测试突变 DEFAULT 单例污染全局 → `GodAIInput` 构造器克隆 `_baseParams` + 门禁传克隆 + 测试显式克隆，gate 在任何测试上下文下确定。方法论：所有 A/B 必须与 eval-suite/gate 同口径；20-seed 只配 screening。详见 progress.md §II.4/§II.9。
+
+## 99. M1 决策链评分制外壳：落地 + Parity 三重验证通过（2026-08-03）
+
+**Summary:** 新建 `src/ai/god/DecisionCore.ts`（ActionId/ACTION_WEIGHTS/DecisionContext/Candidate/runChain），think.ts 顶层链重构为「公共前缀外壳 + 8 候选体权重序循环」（dodge 1000 > interceptBase 900 > pickupHigh 800 > aggro 700 > pickupMid 600 > engage 500 > pickupLow 400 > hunt 200），候选体原样转录，evaluate() 提交即执行。**三重验收**：18 份 per-seed-diff IDENTICAL + split-parity 9/9 + 三 gate 字节持平 M0。性能 +2.6~3.3%（预算内）。M1 窗口（重构不改行为）已关闭。详见 progress.md §II.2。
+
+## 100. M2 权重数据化：actionWeights 基础设施 + classic 重排 A/B 诚实阴性 + M2b 推迟（2026-08-03）
+
+**Summary:** M2a SHIPPED：`actionWeights?: Partial<Record<ActionId, number>>` + `orderedCandidates`（reset() 预构建，禁止每 tick 排序）。M2c 诚实阴性：4 个权重重排实验全部持平/劣化 → **M1 链序是局部最优**，91→93% 需行为改动而非重排。M2b（selectTarget mini-scoring）推迟至 M4（零行为收益 + 高 parity 风险）。详见 progress.md §II.3。
+
+## 101. M3 dodgeCounterFire 三轮门控全部官方口径阴性 + stageIndex 口径伪影完整机制（2026-08-03）
+
+**Summary:** pinned 对枪三轮门控（distance / timing-aware / terrain-only）官方口径全部阴性（classic 0.0 / hard +0.3 / chaos -0.2pp）。**机制级解释**：走廊关 terrain-pinned 保命（+15~25pp）但开阔关站定送死（-10~20pp），净值为零偏负。口径纪律升级为最高优先级纪律。详见 progress.md §II.4。
+
+## 102. M3 敌情感知 EnemyModel + survive 候选 + 命数感知 + M4 紧急对枪：机制落地，默认 OFF（2026-08-03）
+
+**Summary:** 两个里程碑合并记录（原文编号重号）：① M3 机制层一次性落地（EnemyModel 四特征 EMA → estimatedEnemyLevel、survive 候选默认权重 0、survivalModeLives/survivalRiskWeight 命数感知、tierWeightScale/dodgeRateShrinksT2a），全开 A/B 无回退但无净增益 → 默认全部 OFF；② M4 带安全门控的紧急对枪（`hasCrossFireBulletImpl` 排除交叉火力），修正 `godaiParams` 大小写口径事故后 +0.7pp 噪声内 → 不发布。详见 progress.md §II.4/§II.10。
+
+## 103. M5 站位提前规避（pathThreatAvoidance）：机制落地，A/B 阴性，默认 OFF + 口径事故根因（2026-08-03）
+
+**Summary:** HUNT 候选接入 `findPathThreat` + `findSafeMoveDir` 换 cell-1 单步（与 §73 否决的 diversion 区别：不承诺 A* 路径）。触发率 ~1%，classic 0.0 / hard +0.4 / chaos -1.1pp 全噪声 → 不发布。**口径事故**：`godaiParams` vs `godAIParams` 字段名错误让 M4/M5 测了 DEFAULT vs DEFAULT；纪律：A/B 传参后必须 live probe 验证参数真实到达。详见 progress.md §II.4/§II.9。
+
+## 104. M6 出生即一星（playerStartLevel 0→1）：首个强信号发布，hard/chaos +8~9pp（SHIPPED，2026-08-03）
+
+**Summary:** hard/chaos `playerStartLevel` 0→1（评审决议 4 备用档）。**60-seed 确认：hard +9.0pp / chaos +7.9pp**，31/29 关变好——M0 以来唯一 >3σ 发布。靶点：玩家 93% 存活时间 0★（单发慢弹）才是根本瓶颈，非 dodge 分支。方法论固化：**先查星经济/数值配置，再动 AI 行为**。门禁真值重生成。详见 progress.md §II.5。
+
+## 105. M7 追猎死亡探针：真追猎仅 ~3-7% + 模拟口径三重修复（playerLevel / lives / telemetry）（2026-08-03）
+
+**Summary:** ① **模拟口径三重修复**（runSimulation 补 playerLevel 同步、lives 同步、telemetry isPlayer 过滤——诱饵坦克此前被误计，chaos 误捕 29%）：修复后 hard 48.0%（2 命真实难度）/ chaos 48.9%，门禁真值重生成；② **M7 靶点证伪**：§96 的「追猎途中死亡 39%」实为「回防途中」（85-93% 净朝向基地）；SURVIVE（死角包围）触发率 0.4-2% 低杠杆；survivalRetreat 因 hard 死亡 82.7-84% 集中在最后一命而重估为 high-value。口径纪律：直驱探针必须手动同步 playerLevel/lives。详见 progress.md §II.5。
+
+## 106. M8 survivalRetreat 官方口径 60-seed 确认：持平偏负，不发布（2026-08-03）
+
+**Summary:** `survivalRiskWeight`/`survivalModeLives` 60-seed：OFF 46.3% vs ON 46.1%（Δ-3）。机制低覆盖：死亡在 dodge 分支，survivalRetreat 只挂 hunt 分支（权重最低）不改 dodge 死亡本身。**教训固化：凡不改变 dodge 分支本身的候选体杠杆都趋零。** 详见 progress.md §II.6。
+
+## 107. M9 dodgeHorizonScore 多弹道生存视界承诺闪避：机制成立但 60-seed 阴性，不发布（2026-08-03）
+
+**Summary:** 探针证伪「多弹道评分替代二元 isSafeDir」原假设（交叉火力方向误选 ~0%）；真杠杆 = **承诺不足**（起点可闪避 + 从未清带 = hard 31.8% / chaos 35.0%）。`dodgeHorizonScore` 机制上修复 S0 seed2（OFF tick2158 死 vs ON 零死亡）——**证明 dodge 分支行为改动有杠杆，是修法问题**——但 60-seed chaos **-3.5pp**（承诺闪避牺牲防守/杀敌效率，基地被拆）。**方法论升级：双目标评估（生存 + 效率）**。详见 progress.md §II.7。
+
+## 108. M10 dodgeHorizon 门控变体（时间余量 + 距离）：chaos 确凿阴性，不发布（2026-08-03）
+
+**Summary:** 时间余量门控正确把 M9 的 chaos 损失 -3.5pp 减到 -2.4pp（承诺质量问题被识别）但无法转正；MARGIN6 60-seed hard +1.6pp / chaos -2.4pp——**hard/chaos 方向相反是常态，参数全局无法发布**。真实成本是 dist +25px（dodge fireRate 恒 1-2%，非火力是位置）。可复用信号：S13 走廊关双难度大正。dodge 分支第三次同构证伪。详见 progress.md §II.7/§II.11。
+
+## 109. M11 星经济下一档：playerStartLevel 1→2（SHIPPED 后用户否决） _(superseded by §110: 用户否决，回退 1★，2026-08-03)_
+
+**Summary:** hard/chaos `playerStartLevel` 1→2。60-seed 确凿强信号：**hard +9.4pp（46.3→55.7%）、chaos +7.5pp（47.7→55.1%）**，双双破 50% 目标（6-7σ）。实现 + 门禁真值重生成（双 54.7%，floor 357）均完成。**但用户评审否决**（§110）：「起始两星有点儿欺负敌人」——difficulty 配置影响人类体验，非仅 God AI。数据与实现保留在历史中供参考，不再生效。详见 progress.md §II.8。
+
+## 110. 用户否决 §109：hard/chaos 起始二星回退为一星（2026-08-03）
+
+**Summary:** §109 的 `playerStartLevel` 1→2 **回退为 1**（hard/chaos）。门禁真值回退 §105（hard 48.0% / chaos 48.9%，floor 310/316）。**星经济杠杆边界明确：0★→1★ 可（M6，+7.9~9.0pp），1★→2★ 不可（M11，+7.5~9.4pp）——出生星级合理上限 1★。** 剩余路径全部是非星经济杠杆（M4 标量参数 CMA-ES / 生存站位 / 泛化语料）。已证伪方向汇总见 progress.md §II.11。详见 progress.md §II.8。
+
+> **God AI v2 纪元（M0–M11）全文归档说明**：本段 §96–§110 为压缩索引；每个决策的完整正文
+> （Rationale/Implications/方法论教训）见 **docs/god-ai-tuning.progress.md Part II**。
+> v2 设计文档（plan/God-AI-Redesign-Review.md、plan/God-AI-Redesign-v2.md）已于 2026-08-03 删除，
+> 核心内容归档于 progress.md §II.0。

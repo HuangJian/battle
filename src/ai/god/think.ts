@@ -1,12 +1,896 @@
 // Moved verbatim from GodAIInput.ts during the giant-file split — the core
 // decision loop (private think()) relocated as thinkImpl(self) following the
 // §0.5 `<name>Impl(self, ...)` convention.
+//
+// M1 (plan/God-AI-Redesign-v2 §3, DECISIONS §99): the top-level chain is now
+// the decision-chain scoring shell (DecisionCore.ts). The common prefix stays
+// here (dead check → Cluster C snapshots → cooldown → S8/S9 state → aimDir →
+// threat), then the 8 candidates run in weight order with early-exit. Each
+// candidate body is a VERBATIM transcription of the original branch — parity
+// by construction (M1 theorem, doc §3.3). Weights strictly mirror the chain
+// order, so behavior under default params is byte-identical to pre-M1.
 import type { GodAIInput } from '../GodAIInput'
 import type { Cell } from '../../utils/pathfind'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS } from '../../constants'
 import { ALL_DIRS } from '../../utils/helpers'
 import { scanAheadImpl, shouldFireBreakThroughImpl, aimSurvivesTurnImpl } from './FireControl'
+import { dodgeCounterFireDirImpl } from './ThreatAssessor'
+import { runChain, ACTION_WEIGHTS, type Candidate } from './DecisionCore'
+import { survivalPressure, updateEnemyModel } from './EnemyModel'
+
+// ===========================================================================
+// Candidates — verbatim branch transcriptions. One object per action; the
+// shell evaluates them strictly in weight order (chain order), first commit
+// wins. Each evaluate() returns true exactly when the original branch would
+// have `return`ed from the top-level chain.
+// ===========================================================================
+
+/** dodge(1000) — survive first: reaction, M3 counter-fire, perpendicular dodge. */
+const DODGE: Candidate = {
+  id: 'dodge',
+  weight: ACTION_WEIGHTS.dodge,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, threat } = ctx
+    if (threat) {
+      if (threat.id !== self.lastThreatId) {
+        self.lastThreatId = threat.id
+        self.reactionCounter = self.params.reactionDelay
+      }
+
+      if (self.reactionCounter > 0) {
+        self.reactionCounter--
+        // While reacting, keep navigating but fire only at targets in facing dir.
+        self._moveDir = self.followPath()
+        if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+        self._lastBranch = 'dodge'
+        return true
+      }
+
+      // §M3-revisit round 3 (dodge quality, DECISIONS §98/§101): counter-fire
+      // ONLY when the dodge is TERRAIN-pinned (isTerrainPinned: both
+      // perpendicular directions impassable — corridor/corner). Facing the
+      // bullet and firing to cancel it (bullet-bullet collision) is then the
+      // only reliable survival move. Round 1 gated on distance alone and
+      // counter-fired mid-maneuver during a VIABLE dodge (S25 seed 10 →
+      // deterministic regression 5/20→1/20). Round 2 gated on timing-aware
+      // infeasibility and gained +3.4pp chaos at 60-seed but regressed
+      // crossfire stages (Twin Spires/Bastion/Final Redoubt): on open ground
+      // a bullet too close to FULLY clear still benefits from a PARTIAL dodge
+      // (keeps the player mobile), while standing to counter-fire became a
+      // stationary death. Bullet coverage of a dodge cell never pins —
+      // crossfire must keep the player moving. Not on ice (slippery turning
+      // breaks 对枪, same guard as the T2a counter-fire). Default OFF
+      // (0 = byte-identical to M0).
+      if (self.params.dodgeCounterFire > 0 && !onCooldown && !w.isTankOnIce(p)) {
+        if (self.isTerrainPinned(threat)) {
+          const fireDir = dodgeCounterFireDirImpl(self, threat, pcx, pcy)
+          if (fireDir) {
+            self._moveDir = p.dir === fireDir ? null : fireDir
+            self._fire = true
+            // M3 diag: counter-fire trigger counter (pure observation, like
+            // branchCounts — no RNG, no gameplay effect). Read by
+            // tmp/probe-pinned-loss.ts to attribute crossfire-stage losses.
+            self._counterFireTicks++
+            // Keep the §86 dodge state consistent (fresh threat, no oscillation).
+            self._lastDodgeThreatId = threat.id
+            self._lastDodgeDir = self._moveDir
+            self._dodgeFlipCount = 0
+            self.branchCounts.dodge++
+            self._lastBranch = 'dodge'
+            return true
+          }
+        }
+      }
+      // M4 (plan/God-AI-Redesign-v2, DECISIONS §102): 紧急对枪 — 当子弹太近
+      // (<5格) 且不在冷却中且无交叉火力时，放弃垂直闪避（数学上不可行），
+      // 改为朝威胁方向移动并开火。子弹碰撞抵消（bullet-bullet collision）
+      // 是近距离唯一可靠的生存手段。
+      // 安全门控：`hasCrossFireBullet` 检查是否有其他子弹在 5 格内威胁玩家
+      // — 交叉火力存在时保持垂直移动（部分闪避减少被击中概率），避免站定被
+      // 另一颗子弹打死（§101 交叉火力关失败根因）。冰面跳过（滑移破坏对枪）。
+      // 默认 OFF（dodgeCounterFire=0）⇒ byte-identical to M0。
+      if (self.params.dodgeCounterFire > 0 && !onCooldown && !w.isTankOnIce(p)) {
+        const vertical = threat.dir === 'up' || threat.dir === 'down'
+        const dist = vertical
+          ? Math.abs(threat.y + threat.w / 2 - pcy)
+          : Math.abs(threat.x + threat.h / 2 - pcx)
+        // 紧急对枪距离阈值：5格 = 80px。子弹 4px/tick，需 20 tick 到达；
+        // 玩家垂直闪避需 18+ tick。5格内闪避数学上不可行（§M4 测量）。
+        if (dist <= 5 * CELL) {
+          // 安全门控：检查是否有其他子弹在 5 格内
+          const hasCrossfire = self.hasCrossFireBullet(pcx, pcy, threat.id, 5, 1)
+          if (!hasCrossfire) {
+            const fireDir = dodgeCounterFireDirImpl(self, threat, pcx, pcy)
+            if (fireDir) {
+              self._moveDir = p.dir === fireDir ? null : fireDir
+              self._fire = true
+              self._counterFireTicks++
+              self._lastDodgeThreatId = threat.id
+              self._lastDodgeDir = self._moveDir
+              self._dodgeFlipCount = 0
+              self.branchCounts.dodge++
+              self._lastBranch = 'dodge'
+              return true
+            }
+          }
+        }
+      }
+
+      // Dodge: move perpendicular to the bullet (M3: verify safety).
+      self._moveDir = self.dodgeDirection(threat, pcx, pcy)
+      // §86: Track dodge state for oscillation detection + persistence/hysteresis.
+      // _lastDodgeThreatId is always set (needed by oscillation detection,
+      // hysteresis, and persistence in ThreatAssessor). _lastDodgeDir is always
+      // set (needed by oscillation detection to compare against next tick's dir).
+      // _dodgeFlipCount tracks consecutive direction flips for the same threat.
+      if (threat.id === self._lastDodgeThreatId && self._lastDodgeDir !== null) {
+        // Same threat as last tick — check if direction flipped.
+        if (self._moveDir !== null && self._moveDir !== self._lastDodgeDir) {
+          self._dodgeFlipCount++
+        } else {
+          // Direction stable or null — reset flip counter.
+          self._dodgeFlipCount = 0
+        }
+      } else {
+        // New threat — reset flip counter.
+        self._dodgeFlipCount = 0
+      }
+      self._lastDodgeThreatId = threat.id
+      self._lastDodgeDir = self._moveDir
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+      self.branchCounts.dodge++
+      self._lastBranch = 'dodge'
+      return true
+    }
+
+    // No threat — reset reaction state (the dodge section's no-threat resets).
+    self.reactionCounter = 0
+    self.lastThreatId = -1
+    // §86: reset dodge state when no threat is active.
+    self._lastDodgeThreatId = -1
+    self._lastDodgeDir = null
+    self._dodgeFlipCount = 0
+    return false
+  },
+}
+
+/** interceptBase(900) — T8: stop an in-flight bullet aimed at the base. */
+const INTERCEPT_BASE: Candidate = {
+  id: 'interceptBase',
+  weight: ACTION_WEIGHTS.interceptBase,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    // Check AFTER dodge (survive first) but BEFORE aggressive/T2a.
+    // Skip only when enemies are frozen (aggressive hunt — no bullets to
+    // intercept). When shielded, the player can still intercept bullets
+    // headed for the base — the shield protects the player, not the base.
+    // Gap B (plan §3): skip entirely when the stage has no base.
+    if (!self.aggressive && self.hasBase) {
+      const baseThreat = self.findBulletThreatToBase()
+      if (baseThreat) {
+        const interceptCell = self.baseBulletInterceptCell(baseThreat)
+        if (interceptCell) {
+          self._moveDir = self.navigateTowards(interceptCell)
+          // Fire to intercept the bullet (T5 extended to base defense).
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.t8++
+          self._lastBranch = 't8'
+          return true
+        }
+      }
+    }
+    return false
+  },
+}
+
+/** pickupHigh(800) — §87/§88 HIGH-tier urgent pickup (bomb/freeze/fence ≤8格). */
+const PICKUP_HIGH: Candidate = {
+  id: 'pickupHigh',
+  weight: ACTION_WEIGHTS.pickupHigh,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    // NORMAL mode only: during freeze the aggressive branch already grabs
+    // power-ups when no enemy is aligned, and an aligned frozen enemy is a
+    // free kill we must not interrupt. Gated by pickupPriorityMode.
+    // §88 (chokepointMode>0): HIGH-tier outranks base defense and is checked
+    // here; MID-tier (star/tank/shield) yields to base defense and is checked
+    // after the aggressive section (see PICKUP_MID). When chokepointMode==0,
+    // the original all-tiers-together order is kept (byte-identical to pre-§88).
+    if (!self.aggressive && self.params.pickupPriorityMode > 0) {
+      const urgentTarget =
+        self.params.chokepointMode > 0
+          ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
+          : self.findUrgentPowerUpTarget(pcx, pcy)
+      if (urgentTarget) {
+        self._moveDir = self.navigateTowards(urgentTarget)
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+        self.branchCounts.powerup++
+        self._lastBranch = 'powerup'
+        return true
+      }
+    }
+    return false
+  },
+}
+
+/** aggro(700) — S8/S9 freeze/shield window: stop-and-aim → power-up → navigate. */
+const AGGRO: Candidate = {
+  id: 'aggro',
+  weight: ACTION_WEIGHTS.aggro,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    if (self.aggressive) {
+      // Skip defense, go straight for the nearest enemy or power-up.
+      //
+      // §80: `aimSurvivesTurnImpl` MUST be evaluated BEFORE `scanAheadImpl`
+      // below — both write into the shared `self._scanResult`, so running the
+      // guard afterwards would clobber `aggScan`. The `&&` short-circuit gives
+      // us that ordering for free. When the guard rejects the aim (the turn's
+      // grid-snap would shove the tank off the firing line) we fall through to
+      // the navigate path, which has real stall detection — this is what
+      // breaks the period-2 freeze-window deadlock.
+      if (aimDir && self._aggCampSuppress <= 0 && aimSurvivesTurnImpl(self, p, aimDir)) {
+        // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
+        // Inline scanAheadImpl directly (perf §66): the thin scanAhead
+        // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
+        const aggScan = scanAheadImpl(self, pcx, pcy, aimDir)
+        // §74: Don't fire when a base-protection wall is on the other offset
+        // line, or is closer than (or at the same distance as) the enemy — the
+        // 6px bullet spans both offset columns and would hit the wall first.
+        if (
+          aggScan.enemy &&
+          !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
+          !(aggScan.baseSteel && (p.level ?? 0) >= 3)
+        ) {
+          // §84: Aggressive stall detection — the aggressive branch has NO
+          // anti-stall guard (unlike T2a's _campTicks and navigate's
+          // _navStuckTicks). Without this, the player can sit at one cell
+          // firing at an enemy whose body is slightly offset from the bullet
+          // path for the ENTIRE freeze window. When camping exceeds
+          // aggCampTimeoutTicks with no kills, fall through to navigate.
+          if (self.params.aggCampTimeoutTicks > 0) {
+            const pc84 = self.playerCell()
+            if (
+              self._aggCampCell &&
+              Math.abs(self._aggCampCell.col - pc84.col) <= 1 &&
+              Math.abs(self._aggCampCell.row - pc84.row) <= 1
+            ) {
+              self._aggCampTicks++
+              if (w.killCount !== self._aggCampKillsAtStart) {
+                self._aggCampTicks = 1
+                self._aggCampKillsAtStart = w.killCount
+              }
+            } else {
+              self._aggCampCell = { col: pc84.col, row: pc84.row }
+              self._aggCampTicks = 1
+              self._aggCampKillsAtStart = w.killCount
+            }
+
+            if (
+              self._aggCampTicks > self.params.aggCampTimeoutTicks &&
+              w.killCount === self._aggCampKillsAtStart
+            ) {
+              // Camped too long with no kills — suppress aggressive
+              // stop-and-aim for a while and fall through to navigate.
+              self._aggCampCell = null
+              self._aggCampTicks = 0
+              self._aggCampSuppress = self.params.antiCampSuppressTicks
+              // Fall through to power-up / navigate below.
+            } else {
+              if (p.dir === aimDir) {
+                self._moveDir = null
+              } else {
+                self._moveDir = aimDir
+              }
+              self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+              self._lastBranch = 'aggressive'
+              return true
+            }
+          } else {
+            if (p.dir === aimDir) {
+              self._moveDir = null
+            } else {
+              self._moveDir = aimDir
+            }
+            self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+            self._lastBranch = 'aggressive'
+            return true
+          }
+        }
+        // Enemy behind obstacle — fall through to navigate toward it.
+      }
+      // No enemy in row/col — check for power-up (S5).
+      const puTarget = self.findPowerUpTarget(pcx, pcy)
+      if (puTarget) {
+        self._moveDir = self.navigateTowards(puTarget)
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+        self._lastBranch = 'aggressive'
+        return true
+      }
+      // Navigate to nearest enemy.
+      self._moveDir = self.followPath()
+      if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
+      // Proactive fire — but ALWAYS check shouldFireInDir to avoid shooting
+      // the player's own base (T6). In classic instant combat the base has
+      // 1 HP, so a single self-inflicted bullet destroys it.
+      if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
+        // §70/§74: break-through fire — never fire through base brick/steel
+        // (§70) or at steel the player can't pierce (§74). Both guards live
+        // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
+        // ...` short-circuit that fired through the base wall on dual-offset
+        // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
+        const bs = scanAheadImpl(self, pcx, pcy, self._moveDir)
+        const lvl = p.level ?? 0
+        if (shouldFireBreakThroughImpl(bs, lvl, self.params.steelFireGate)) {
+          self._fire = !onCooldown
+        }
+      } else {
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+      }
+      self.branchCounts.aggressive++
+      self._lastBranch = 'aggressive'
+      return true
+    }
+
+    // §84: Reset aggressive camp tracking when not in aggressive mode.
+    if (self._aggCampCell) {
+      self._aggCampCell = null
+      self._aggCampTicks = 0
+    }
+    if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
+    return false
+  },
+}
+
+/** pickupMid(600) — §88 MID-tier urgent pickup (star/tank/shield ≤4格). */
+const PICKUP_MID: Candidate = {
+  id: 'pickupMid',
+  weight: ACTION_WEIGHTS.pickupMid,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
+    // tier (bomb/freeze/fence) was already checked before the aggressive
+    // section. Only runs when chokepointMode > 0; otherwise the single §87
+    // branch above handled all tiers (byte-identical).
+    if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
+      const midTarget = self.findUrgentPowerUpTarget(pcx, pcy, 'midlow')
+      if (midTarget) {
+        self._moveDir = self.navigateTowards(midTarget)
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+        self.branchCounts.powerup++
+        self._lastBranch = 'powerup'
+        return true
+      }
+    }
+    return false
+  },
+}
+
+/** engage(500) — T2a: stop-and-aim when an enemy is in the line of fire. */
+const ENGAGE: Candidate = {
+  id: 'engage',
+  weight: ACTION_WEIGHTS.engage,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    // P0.2: Only camp when there's a REAL enemy in the line of fire
+    // (scan.enemy == true). The old code also camped when there was just a
+    // wall (scan.wall && !scan.baseWall), which caused the T2a deadlock:
+    // the player would stop and fire at a wall endlessly, never advancing.
+    // Now the player only stops to aim when there's an actual enemy to shoot.
+    // When the enemy is behind a wall, the player falls through to navigate,
+    // which moves toward the enemy and breaks walls via directMove/canMoveOrBreak.
+    //
+    // P0.1: Anti-camp escape — track how long the player has been at the
+    // same cell in T2a. If camping exceeds campTimeoutTicks with no kills,
+    // fall through to navigate and hunt the enemy directly.
+    //
+    // P1: Skip T2a when the base is under threat and the player is too far
+    // from the base. Camping far from the base while enemies approach it
+    // was the #1 cause of base_destroyed gameovers.
+    const skipT2aForDefense =
+      self.hasBase &&
+      self.isBaseUnderThreat() &&
+      Math.abs(self.playerCell().col - BASE_POS.col) +
+        Math.abs(self.playerCell().row - BASE_POS.row) >
+        self.params.maxPlayerDistFromBase
+
+    if (aimDir && self._antiCampSuppress <= 0 && !skipT2aForDefense) {
+      // Inline scanAheadImpl (perf §66, see aggressive branch above).
+      const scan = scanAheadImpl(self, pcx, pcy, aimDir)
+
+      // §74: Don't enter T2a when a base-protection wall is closer than
+      // (or at the same distance as) the enemy on the other offset line.
+      // Fall through to navigate when blocked by a closer base wall.
+      if (
+        scan.enemy &&
+        !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
+        !(scan.baseSteel && (p.level ?? 0) >= 3)
+      ) {
+        // §56: dynamic T2a range based on enemy kind.
+        // For non-armor enemies (basic/fast/power): use t2aMaxRange (15) —
+        // one shot kills at any distance, no DPS penalty for range.
+        // For armor (4 hitsToKill): use t2aHighHpMaxRange (2) — close combat.
+        // M3 (dodgeRateShrinksT2a): shrink the 1-HP range by the EnemyModel's
+        // perceived turn discipline — enemies that dodge/redirect a lot make
+        // long-range shots wasteful, so engage point-blank (shorter bullet
+        // travel → fewer dodged shots). 0 at default ⇒ byte-identical.
+        let effectiveRange =
+          scan.enemyKind === 'armor' ? self.params.t2aHighHpMaxRange : self.params.t2aMaxRange
+        if (self.params.dodgeRateShrinksT2a > 0 && scan.enemyKind !== 'armor') {
+          const m = self._enemyModel
+          if (m && m.active) {
+            const shrink = self.params.dodgeRateShrinksT2a * m.discipline
+            if (shrink > 0) effectiveRange = Math.max(1, effectiveRange * (1 - shrink))
+          }
+        }
+        if (scan.enemyDist <= effectiveRange) {
+          // Track camping duration in a ZONE (±1 cell), not exact cell.
+          // P2.1fix: the old exact-cell check was defeated by sub-cell
+          // oscillation — the player bounces between two adjacent cells
+          // (e.g., x=32→40→32) at the TANK/CELL boundary, resetting the
+          // camp cell each time the boundary is crossed. This prevented
+          // the anti-camp escape from EVER firing, causing the Stage 3/4
+          // deadlocks (player stuck at one spot for 17000+ ticks). The
+          // zone fix accumulates camp time across nearby cells, so the
+          // escape triggers even if the player wiggles between two cells.
+          const pc = self.playerCell()
+          if (
+            self._campCell &&
+            Math.abs(self._campCell.col - pc.col) <= 1 &&
+            Math.abs(self._campCell.row - pc.row) <= 1
+          ) {
+            self._campTicks++
+            // If a kill happened since camping started, reset the camp timer.
+            // The player is being productive — let it continue camping.
+            if (w.killCount !== self._campKillsAtStart) {
+              self._campTicks = 1
+              self._campKillsAtStart = w.killCount
+            }
+          } else {
+            // Moved outside the camp zone — start fresh camp tracking.
+            self._campCell = { col: pc.col, row: pc.row }
+            self._campTicks = 1
+            self._campKillsAtStart = w.killCount
+          }
+
+          // Anti-camp: if too long at this cell with no kills, break out.
+          const campedTooLong =
+            self._campTicks > self.params.campTimeoutTicks && w.killCount === self._campKillsAtStart
+
+          if (!campedTooLong) {
+            // ---- §49: 炮口相向分场景策略 ----
+            // When an enemy faces the player, adapt per enemy type: ice skips,
+            // 1HP enemies fight normally (counter-fire still applies — it is a
+            // firing action, not movement dodge), armor uses counter-fire +
+            // keep-alignment. 对枪抵消 applies to ALL kinds: when an enemy
+            // bullet is already in the line, firing to cancel is safer than
+            // trading hits. 120-seed validation: +5 wins all kinds.
+            // §49-revisit: parameterized for A/B.
+            const facing =
+              self.params.counterFire > 0 ? self.findEnemyFacingPlayer(pcx, pcy, aimDir) : null
+            const onIce = w.isTankOnIce(p)
+
+            if (facing && !onIce && facing.dist <= self.params.counterFireMaxRange * CELL) {
+              // ---- 对枪抵消逻辑（适用于所有敌人类型）----
+              const enemyBulletInLine = self.hasEnemyBulletInLine(pcx, pcy, aimDir)
+
+              if (enemyBulletInLine && !onCooldown) {
+                // 对枪：敌方子弹已在直线上 → 开火抵消
+                if (p.dir === aimDir) {
+                  self._moveDir = null
+                } else {
+                  self._moveDir = aimDir
+                }
+                self._fire = true
+                self.branchCounts.t2a++
+                self._lastBranch = 't2a'
+                return true
+              }
+
+              // 先手开火 / 冷却中等待：保持对齐以备对枪
+              // 不横移——横移会脱离防守位，在密集关卡导致更多死亡
+              if (p.dir === aimDir) {
+                self._moveDir = null
+              } else {
+                self._moveDir = aimDir
+              }
+              self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+              self.branchCounts.t2a++
+              self._lastBranch = 't2a'
+              return true
+            }
+
+            // ---- 正常 T2a（非炮口相向 / 1HP / 冰面）----
+            if (p.dir === aimDir) {
+              self._moveDir = null // Already facing — stop and shoot
+            } else {
+              self._moveDir = aimDir // Turn to face enemy
+            }
+            self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+            self.branchCounts.t2a++
+            self._lastBranch = 't2a'
+            return true
+          }
+
+          // Camped too long with no kills — suppress T2a and fall through
+          // to navigate, which will move the player toward the enemy.
+          self._campCell = null
+          self._campTicks = 0
+          self._antiCampSuppress = self.params.antiCampSuppressTicks
+        }
+        // Enemy in line of fire but beyond effective range — fall through
+        // to navigate (close the distance for high-HP enemies).
+      }
+      // No real enemy in line of fire (wall-only or clear) — fall through.
+    } else if (self._campCell) {
+      // Not in T2a (suppressed or no aimDir) — reset camp tracking.
+      self._campCell = null
+      self._campTicks = 0
+    }
+    return false
+  },
+}
+
+/** pickupLow(400) — S5: opportunistic power-up economy in normal mode. */
+const PICKUP_LOW: Candidate = {
+  id: 'pickupLow',
+  weight: ACTION_WEIGHTS.pickupLow,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    // Check for power-ups when no enemy is in line of fire. Previously this
+    // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
+    // Now the AI opportunistically grabs power-ups when it's safe to divert.
+    // P1: Skip power-ups when the base is under threat — defense first.
+    // P3.2: Also skip when there are enemies within 5 cells of the player —
+    // chasing power-ups while enemies are nearby was a major cause of
+    // defense-collapse gameovers on S6/S26/S32.
+    if ((!aimDir || onCooldown) && !(self.hasBase && self.isBaseUnderThreat())) {
+      // P3.2: Don't divert to power-ups when enemies are close.
+      const pc2 = self.playerCell()
+      let nearbyEnemy = false
+      // Cluster C: reuse the per-tick enemy snapshot.
+      const nearbyScan = self._enemies.length > 0 ? self._enemies : w.tanks
+      for (let ni = 0; ni < nearbyScan.length; ni++) {
+        const t = nearbyScan[ni]
+        if (!t.alive || t.spawnTimer > 0) continue
+        const tc = self.tankCell(t)
+        if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
+          nearbyEnemy = true
+          break
+        }
+      }
+      if (!nearbyEnemy) {
+        const puTarget = self.findPowerUpTarget(pcx, pcy)
+        if (puTarget) {
+          self._moveDir = self.navigateTowards(puTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.powerup++
+          self._lastBranch = 'powerup'
+          return true
+        }
+      }
+    }
+    return false
+  },
+}
+
+/** hunt(200) — T2b: navigate towards the target (distance-adaptive). */
+const HUNT: Candidate = {
+  id: 'hunt',
+  weight: ACTION_WEIGHTS.hunt,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, shielded } = ctx
+    // Far from target (>5 cells): A* pathfinding routes around walls via
+    // corridors — essential for maze stages. A* finds the corridor, not the
+    // direct path through walls.
+    //
+    // Close to target (≤5 cells): directMove chases the moving enemy
+    // directly, adjusting every tick.
+    //
+    // P0.3: Navigate stuck escape — if the player has been at the same cell
+    // in the navigate branch for too long (pursuit loop with a faster enemy),
+    // override the target to the map center.
+    const pc = self.playerCell()
+    if (
+      self._navStuckCell &&
+      self._navStuckCell.col === pc.col &&
+      self._navStuckCell.row === pc.row
+    ) {
+      self._navStuckTicks++
+    } else {
+      self._navStuckCell = { col: pc.col, row: pc.row }
+      self._navStuckTicks = 1
+    }
+
+    // Reset stuck timer when a kill happens (player is making progress).
+    if (self._navStuckTicks > 1 && w.killCount !== self._campKillsAtStart) {
+      self._navStuckTicks = 1
+      self._campKillsAtStart = w.killCount
+    }
+
+    const navStuck = self._navStuckTicks > self.params.navStuckTicks
+
+    let navTarget: Cell | null
+    // P3.1: When nav-stuck triggers, only go to center if the player is
+    // NOT already at/near center (target == current cell → deadlock, the S9
+    // root cause). When already at center, chase the nearest enemy directly.
+    const distToCenter = Math.abs(pc.col - 12) + Math.abs(pc.row - 12)
+    const stuckAtCenter = distToCenter <= 2
+    // M3 (survivalRiskWeight, P0-3 命数盲 fix): on the last lives (survival
+    // pressure active), the HUNT candidate retreats to the defense position
+    // instead of deep-hunting — the AI stops chasing far enemies it cannot
+    // afford to die for. The defense position is the default defensive hold
+    // (getDefaultDefensePosition: base column, defenseRowOffset above base).
+    // Gated: only when the risk weight is > 0 AND the player is far from the
+    // base (close to base, normal hunt/defense interplay is fine). 0 at
+    // default ⇒ byte-identical to pre-M3.
+    const survivalRetreat =
+      self.params.survivalRiskWeight > 0 &&
+      survivalPressure(self) > 0 &&
+      Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row) >
+        self.params.baseRaceRangeCells
+    if (navStuck && !stuckAtCenter) {
+      navTarget = { col: 12, row: 12 }
+    } else if (survivalRetreat && self.hasBase) {
+      navTarget = self.getDefaultDefensePosition()
+    } else {
+      navTarget = self.selectTarget(pc)
+    }
+
+    const navDist = navTarget
+      ? Math.abs(navTarget.col - pc.col) + Math.abs(navTarget.row - pc.row)
+      : Infinity
+
+    if (navStuck && !stuckAtCenter) {
+      // P2.2: Stuck too long — break the loop. Try A* to center first, then
+      // fall back to any passable direction (not directMove, which would
+      // re-select the enemy target and re-enter the stuck loop).
+      self._moveDir = self.navigateTowards(navTarget!)
+      if (!self._moveDir) {
+        // A* failed (walled off) — try directions toward center first,
+        // then any passable direction.
+        const dx = navTarget!.col - pc.col
+        const dy = navTarget!.row - pc.row
+        const pref: Direction[] = []
+        if (Math.abs(dy) > Math.abs(dx)) {
+          pref.push(dy > 0 ? 'down' : 'up')
+          pref.push(dx > 0 ? 'right' : 'left')
+        } else {
+          pref.push(dx > 0 ? 'right' : 'left')
+          pref.push(dy > 0 ? 'down' : 'up')
+        }
+        let moved = false
+        for (const d of pref) {
+          if (self.canMoveDir(p, d)) {
+            self._moveDir = d
+            moved = true
+            break
+          }
+        }
+        if (!moved) {
+          // All preferred directions blocked — try any open direction.
+          for (const d of ALL_DIRS) {
+            if (self.canMoveDir(p, d)) {
+              self._moveDir = d
+              break
+            }
+          }
+        }
+      }
+    } else if (navStuck && stuckAtCenter) {
+      // P3.1: Stuck at/near center — chase nearest enemy directly instead
+      // of re-targeting center. directMove breaks through brick walls.
+      self._moveDir = self.directMove(pc)
+      if (!self._moveDir) {
+        // directMove also failed — try any passable direction to get moving.
+        for (const d of ALL_DIRS) {
+          if (self.canMoveDir(p, d)) {
+            self._moveDir = d
+            break
+          }
+        }
+      }
+    } else if (navDist <= 5) {
+      // Close range — directMove (responsive, tracks moving enemies).
+      self._moveDir = self.directMove(pc)
+    } else {
+      // Long range — A* pathfinding (finds corridors in mazes).
+      self._moveDir = self.followPath()
+      if (!self._moveDir) {
+        // A* failed or path exhausted — fall back to direct movement.
+        self._moveDir = self.directMove(pc)
+      }
+    }
+    // §85: Close-range enemy exposure check — don't turn your back on a
+    // close enemy. If an enemy is within closeCombatDangerRange cells,
+    // aligned with the player (same row/col), has no wall between them,
+    // and the player's moveDir is NOT toward that enemy, cancel the move
+    // and face the enemy to fire instead. This prevents the "turn and walk
+    // away from a close enemy, get shot in the back" death pattern.
+    if (!shielded && self.params.closeCombatDangerCheck > 0 && self._moveDir) {
+      const dangerDir = self.closeCombatExposure(
+        pcx,
+        pcy,
+        self._moveDir,
+        self.params.closeCombatDangerRange,
+      )
+      if (dangerDir) {
+        // Cancel the move — face the enemy and fire.
+        self._moveDir = p.dir === dangerDir ? null : dangerDir
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dangerDir)
+        self.branchCounts.navigate++
+        self._lastBranch = 'navigate'
+        return true
+      }
+    }
+    // M5 (plan/God-AI-Redesign-v2 §3.2, DECISIONS §103): 站位提前规避 —
+    // when the path ahead (up to 3 cells) is crossed by an in-flight enemy
+    // bullet that the reactive dodge branch cannot see yet (the bullet is
+    // NOT aligned with the player's CURRENT cell), swap the immediate next
+    // step to a safe alternative via findSafeMoveDir instead of walking
+    // into the crossfire. Distinction from the retired §68-v2 diversion
+    // (DECISIONS §73): this swaps only cell-1 and re-evaluates every tick
+    // — no A* path commitment, no premature perpendicular diversion at
+    // 12-23 tick lead times. 0 at default ⇒ byte-identical to M0.
+    if (self.params.pathThreatAvoidance > 0 && self._moveDir) {
+      const pathBullet = self.findPathThreat(pcx, pcy, self._moveDir, p.speed)
+      if (pathBullet) {
+        const safeDir = self.findSafeMoveDir(pcx, pcy, self._moveDir, p.speed)
+        if (safeDir) {
+          // Step aside — the reactive dodge (next tick if the bullet
+          // becomes aligned) will handle the rest.
+          self._moveDir = safeDir
+        }
+      }
+    }
+    // Fire control: when blocked by a breakable wall (verified by
+    // canMoveOrBreak in directMove), fire immediately to break through.
+    // Don't check shouldFireInDir here — it might fire at enemy bullets
+    // (T5) instead of the wall, leaving the player stuck. When moving
+    // freely, fire only at enemies (not walls) to save the bullet cap.
+    if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
+      // §70/§74: break-through fire — never fire through base brick/steel
+      // (§70) or at steel the player can't pierce (§74). Both guards live
+      // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
+      // ...` short-circuit that fired through the base wall on dual-offset
+      // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
+      const bs = scanAheadImpl(self, pcx, pcy, self._moveDir)
+      const lvl = p.level ?? 0
+      if (shouldFireBreakThroughImpl(bs, lvl, self.params.steelFireGate)) {
+        self._fire = !onCooldown
+      }
+    } else {
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir, false)
+    }
+    self.branchCounts.navigate++
+    self._lastBranch = 'navigate'
+    return true
+  },
+}
+
+/**
+ * survive (M3, plan/God-AI-Redesign-v2 §3.2, P1-3 生存优先) — 主动换位.
+ *
+ * Default weight 0 ⇒ never reached (orderedCandidates sorts it below every
+ * active candidate; hunt is unconditional so the chain always terminates
+ * before it). Promoted via `actionWeights.survive` (M4 tuning surface), it
+ * runs when NO bullet is in flight (dodge declined — the immediate threat is
+ * gone) but the player is in a positional dead-end: surrounded by enemies in
+ * a low-exit cell. The player actively repositions to a safer cell instead
+ * of continuing the current navigate/hunt path into the crossfire.
+ *
+ * Design (plan §4.4 整合: trapAvoidance 族的"包围风险"输入): a cell with
+ * ≤ 2 passable exits is a corridor/corner/dead-end (the §48-revisit surround
+ * heuristic); with `surviveMinEnemies` live enemies within
+ * `surviveEnemyRadiusCells`, that dead-end is a kill box. The candidate picks
+ * the open direction whose next cell has the MOST exits (tie-break toward the
+ * base), strictly better than the current cell — never trades one dead-end
+ * for another. Fire stays gated on the move direction (normal fire control).
+ *
+ * Gated additionally by survival pressure: only when `survivalPressure(self) > 0`
+ * (last lives / high accuracy / surrounded) does the AI spend ticks on
+ * repositioning — otherwise the regular hunt/engage chain is the better play.
+ */
+const SURVIVE: Candidate = {
+  id: 'survive',
+  weight: ACTION_WEIGHTS.survive,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    if (self.aggressive) return false
+    // Only when there is no immediate bullet threat (dodge already declined)
+    // AND survival pressure is active (P1-3: preserve the last lives).
+    if (self.params.surviveMinEnemies <= 0) return false
+    if (survivalPressure(self) <= 0) return false
+    // When an enemy is ALREADY aligned in the line of fire (aimDir set), the
+    // T2a counter-fire / stop-and-aim tactic is the right call — survive is
+    // for MULTI-DIRECTION crossfire (no single shootable enemy, plan §3.2
+    // "无在飞子弹但处于交叉火力/包围位置"), where standing to fire at one
+    // of several threats is death. An aligned target stays engage's job.
+    if (aimDir) return false
+    // The current cell must be a positional dead-end (≤ 2 passable exits).
+    const pc = self.playerCell()
+    let exits = 0
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      if (self.canMoveDir(p, ALL_DIRS[di])) exits++
+    }
+    if (exits > 2) return false
+    // Enemies must be surrounding the dead-end.
+    const radius = self.params.surviveEnemyRadiusCells
+    const need = self.params.surviveMinEnemies
+    let nearby = 0
+    const enemies = self._enemies.length > 0 ? self._enemies : w.tanks
+    for (let i = 0; i < enemies.length; i++) {
+      const t = enemies[i]
+      if (!t.alive || t.spawnTimer > 0) continue
+      const ec = self.tankCell(t)
+      const d = Math.abs(ec.col - pc.col) + Math.abs(ec.row - pc.row)
+      if (d <= radius) {
+        if (++nearby >= need) break
+      }
+    }
+    if (nearby < need) return false
+    // Pick the open direction whose next cell has the most passable exits,
+    // strictly more than the current cell, tie-broken toward the base.
+    const baseCol = BASE_POS.col + 1
+    const baseRow = BASE_POS.row + 1
+    let bestDir: Direction | null = null
+    let bestExits = exits
+    let bestBaseDist = Infinity
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
+      if (!self.canMoveDir(p, d)) continue
+      const dv = DIR_VECTORS[d]
+      const cx = pc.col + dv.dx
+      const cy = pc.row + dv.dy
+      if (cx < 0 || cx >= 26 || cy < 0 || cy >= 26) continue
+      let dExits = 0
+      for (let dj = 0; dj < ALL_DIRS.length; dj++) {
+        const v2 = DIR_VECTORS[ALL_DIRS[dj]]
+        const c2 = cx + v2.dx
+        const r2 = cy + v2.dy
+        if (c2 < 0 || c2 >= 26 || r2 < 0 || r2 >= 26) continue
+        if (!w.isCellBlocked(c2, r2)) dExits++
+      }
+      const baseDist = Math.abs(cx - baseCol) + Math.abs(cy - baseRow)
+      if (dExits > bestExits || (dExits === bestExits && baseDist < bestBaseDist)) {
+        bestDir = d
+        bestExits = dExits
+        bestBaseDist = baseDist
+      }
+    }
+    if (bestDir === null) return false
+    // Strictly-more-open guarantee: never trade a dead-end for a dead-end.
+    if (bestExits <= exits) return false
+    self._moveDir = bestDir
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, bestDir)
+    self.branchCounts.survive++
+    self._lastBranch = 'survive'
+    // Update the last-aim so the engine sees a coherent turn (same as T2b).
+    if (aimDir) void aimDir
+    return true
+  },
+}
+
+/** The M1 chain — weight order strictly mirrors the original top-level order.
+ * Exported for the M1 invariant test (tests/decision-core.test.ts): a reorder
+ * without a matching ACTION_WEIGHTS update is a behavior change. */
+export const CANDIDATES: Candidate[] = [
+  DODGE,
+  INTERCEPT_BASE,
+  PICKUP_HIGH,
+  AGGRO,
+  PICKUP_MID,
+  ENGAGE,
+  PICKUP_LOW,
+  HUNT,
+  SURVIVE,
+]
+
+// ===========================================================================
+// Shell — common prefix + decision chain
+// ===========================================================================
 
 export function thinkImpl(self: GodAIInput): void {
   if (self._thought) return
@@ -18,6 +902,7 @@ export function thinkImpl(self: GodAIInput): void {
     self._moveDir = null
     self._fire = false
     self.branchCounts.dead++
+    self._lastBranch = 'dead'
     return
   }
 
@@ -36,6 +921,14 @@ export function thinkImpl(self: GodAIInput): void {
   for (let i = 0; i < all.length; i++) {
     const o = all[i]
     if (o.alive) self._otherTanks.push(o)
+  }
+
+  // M3 (Pillar B, plan/God-AI-Redesign-v2 §4.2b): per-tick EnemyModel update.
+  // Gated on enemyModelMode > 0 && window > 0 — OFF at default ⇒ the hook is
+  // byte-inert and the gates stay byte-identical to M0. Pure World observation
+  // (no RNG, no difficultyKey reads) — deterministic, replay-safe.
+  if (self.params.enemyModelMode > 0 && self.params.enemyModelWindowTicks > 0) {
+    updateEnemyModel(self)
   }
 
   const pcx = p.x + p.w / 2
@@ -74,8 +967,6 @@ export function thinkImpl(self: GodAIInput): void {
   }
 
   // ---- S8: Freeze window — aggressive hunt mode ----
-  // When enemies are frozen, the player can hunt freely — enemies can't
-  // fight back or approach the base. This is a free-clear window.
   const frozen = w.freezeTimer > 0
 
   // ---- S9: Shield — skip dodge but DON'T abandon defense ----
@@ -95,667 +986,28 @@ export function thinkImpl(self: GodAIInput): void {
   // Dodge FIRST: survive before defending the base.
   const threat = shielded ? null : self.findMostDangerousBullet(pcx, pcy)
 
-  if (threat) {
-    if (threat.id !== self.lastThreatId) {
-      self.lastThreatId = threat.id
-      self.reactionCounter = self.params.reactionDelay
-    }
-
-    if (self.reactionCounter > 0) {
-      self.reactionCounter--
-      // While reacting, keep navigating but fire only at targets in facing dir.
-      self._moveDir = self.followPath()
-      if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      return
-    }
-
-    // Dodge: move perpendicular to the bullet (M3: verify safety).
-    self._moveDir = self.dodgeDirection(threat, pcx, pcy)
-    // §86: Track dodge state for oscillation detection + persistence/hysteresis.
-    // _lastDodgeThreatId is always set (needed by oscillation detection,
-    // hysteresis, and persistence in ThreatAssessor). _lastDodgeDir is always
-    // set (needed by oscillation detection to compare against next tick's dir).
-    // _dodgeFlipCount tracks consecutive direction flips for the same threat.
-    if (threat.id === self._lastDodgeThreatId && self._lastDodgeDir !== null) {
-      // Same threat as last tick — check if direction flipped.
-      if (self._moveDir !== null && self._moveDir !== self._lastDodgeDir) {
-        self._dodgeFlipCount++
-      } else {
-        // Direction stable or null — reset flip counter.
-        self._dodgeFlipCount = 0
-      }
-    } else {
-      // New threat — reset flip counter.
-      self._dodgeFlipCount = 0
-    }
-    self._lastDodgeThreatId = threat.id
-    self._lastDodgeDir = self._moveDir
-    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-    self.branchCounts.dodge++
-    return
-  }
-
-  // No threat — reset reaction state.
-  self.reactionCounter = 0
-  self.lastThreatId = -1
-  // §86: reset dodge state when no threat is active.
-  self._lastDodgeThreatId = -1
-  self._lastDodgeDir = null
-  self._dodgeFlipCount = 0
-
-  // ---- T8: Base bullet interception (ultimate defense) ----
-  // Check AFTER dodge (survive first) but BEFORE aggressive/T2a.
-  // Skip only when enemies are frozen (aggressive hunt — no bullets to
-  // intercept). When shielded, the player can still intercept bullets
-  // headed for the base — the shield protects the player, not the base.
-  // Gap B (plan §3): skip entirely when the stage has no base.
-  if (!self.aggressive && self.hasBase) {
-    const baseThreat = self.findBulletThreatToBase()
-    if (baseThreat) {
-      const interceptCell = self.baseBulletInterceptCell(baseThreat)
-      if (interceptCell) {
-        self._moveDir = self.navigateTowards(interceptCell)
-        // Fire to intercept the bullet (T5 extended to base defense).
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.t8++
-        return
-      }
-    }
-  }
-
-  // ---- §87/§88: Urgent power-up pickup (user request 2026-08-02) ----
-  // A CLOSE power-up with a SAFE PATH outranks kill (T2a) and base defense
-  // (selectTarget's defense position). bomb/freeze/fence within
-  // pickupPriorityHighRange, star/tank/shield within pickupPriorityMidRange,
-  // boat within pickupPriorityLowRange — each only when no enemy lies
-  // between the player and the item (calculateRouteDanger <= pickupPriorityMaxDanger)
-  // and the item is A*-reachable (steel/water pockets skipped).
-  //
-  // Placement: AFTER dodge (survive first) and T8 (intercept an in-flight
-  // bullet aimed at the base — an immediate loss), BEFORE aggressive/T2a/S5.
-  // NORMAL mode only: during freeze the aggressive branch already grabs
-  // power-ups when no enemy is aligned, and an aligned frozen enemy is a
-  // free kill we must not interrupt. Gated by pickupPriorityMode (0 = OFF,
-  // byte-identical to pre-§87).
-  //
-  // §88 (chokepointMode>0) reorders per the user's rule-4 chain:
-  //   炸弹/冰冻/护栏（8格以内） > 回防基地 > 星星/加命/护盾（4格以内） > 据守咽喉要地
-  // So HIGH-tier (bomb/freeze/fence) still outranks base defense and is
-  // checked here; MID-tier (star/tank/shield) yields to base defense and is
-  // checked AFTER the T2a section (see the §88 MID branch below). When
-  // chokepointMode==0, the original all-tiers-together order is kept
-  // (byte-identical to pre-§88).
-  if (!self.aggressive && self.params.pickupPriorityMode > 0) {
-    const urgentTarget =
-      self.params.chokepointMode > 0
-        ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
-        : self.findUrgentPowerUpTarget(pcx, pcy)
-    if (urgentTarget) {
-      self._moveDir = self.navigateTowards(urgentTarget)
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      self.branchCounts.powerup++
-      return
-    }
-  }
-
-  // ---- S8/S9: Aggressive mode (freeze or shield) ----
-  if (self.aggressive) {
-    // Skip defense, go straight for the nearest enemy or power-up.
-    //
-    // §80: `aimSurvivesTurnImpl` MUST be evaluated BEFORE `scanAheadImpl`
-    // below — both write into the shared `self._scanResult`, so running the
-    // guard afterwards would clobber `aggScan`. The `&&` short-circuit gives
-    // us that ordering for free. When the guard rejects the aim (the turn's
-    // grid-snap would shove the tank off the firing line) we fall through to
-    // the navigate path, which has real stall detection — this is what
-    // breaks the period-2 freeze-window deadlock.
-    if (aimDir && self._aggCampSuppress <= 0 && aimSurvivesTurnImpl(self, p, aimDir)) {
-      // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
-      // Without this check, the AI fires through steel walls at enemies
-      // it can see via global vision but cannot actually hit.
-      // Inline scanAheadImpl directly (perf §66): the thin scanAhead
-      // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
-      // V8 does not inline it because scanAheadImpl is large (100+ lines).
-      const aggScan = scanAheadImpl(self, pcx, pcy, aimDir)
-      // §74: Don't fire when a base-protection wall is on the other offset
-      // line — the bullet travels from the player center (one of the two
-      // offset columns) and would hit the base wall, not the enemy.
-      // §74: Don't fire when a base-protection wall is closer than (or at
-      // the same distance as) the enemy on the other offset line. The
-      // 6px bullet spans both offset columns, so it WILL hit a closer base
-      // wall before reaching the enemy. But if the enemy is closer, the
-      // bullet hits the enemy first — firing is safe.
-      if (
-        aggScan.enemy &&
-        !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
-        !(aggScan.baseSteel && (p.level ?? 0) >= 3)
-      ) {
-        // §84: Aggressive stall detection — track how long the player has
-        // been stopped at this cell. The aggressive branch has NO anti-stall
-        // guard (unlike T2a's _campTicks and navigate's _navStuckTicks).
-        // Without this, the player can sit at one cell firing at an enemy
-        // whose body is slightly offset from the bullet path (the 6px bullet
-        // passes above/below the 32px tank) for the ENTIRE freeze window.
-        // When camping exceeds aggCampTimeoutTicks with no kills, fall
-        // through to navigate, which repositions the player toward the enemy.
-        if (self.params.aggCampTimeoutTicks > 0) {
-          const pc84 = self.playerCell()
-          if (
-            self._aggCampCell &&
-            Math.abs(self._aggCampCell.col - pc84.col) <= 1 &&
-            Math.abs(self._aggCampCell.row - pc84.row) <= 1
-          ) {
-            self._aggCampTicks++
-            if (w.killCount !== self._aggCampKillsAtStart) {
-              self._aggCampTicks = 1
-              self._aggCampKillsAtStart = w.killCount
-            }
-          } else {
-            self._aggCampCell = { col: pc84.col, row: pc84.row }
-            self._aggCampTicks = 1
-            self._aggCampKillsAtStart = w.killCount
-          }
-
-          if (
-            self._aggCampTicks > self.params.aggCampTimeoutTicks &&
-            w.killCount === self._aggCampKillsAtStart
-          ) {
-            // Camped too long with no kills — suppress aggressive
-            // stop-and-aim for a while and fall through to navigate.
-            // Without the suppress, the player re-enters stop-and-aim on
-            // the very next tick (aimDir still finds the enemy, scanAhead
-            // still finds it) and camps for another full timeout cycle —
-            // net movement: ~1 tick of navigate per 120 ticks of camp.
-            self._aggCampCell = null
-            self._aggCampTicks = 0
-            self._aggCampSuppress = self.params.antiCampSuppressTicks
-            // Fall through to power-up / navigate below.
-          } else {
-            if (p.dir === aimDir) {
-              self._moveDir = null
-            } else {
-              self._moveDir = aimDir
-            }
-            self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-            return
-          }
-        } else {
-          if (p.dir === aimDir) {
-            self._moveDir = null
-          } else {
-            self._moveDir = aimDir
-          }
-          self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-          return
-        }
-      }
-      // Enemy behind obstacle — fall through to navigate toward it.
-    }
-    // No enemy in row/col — check for power-up (S5).
-    const puTarget = self.findPowerUpTarget(pcx, pcy)
-    if (puTarget) {
-      self._moveDir = self.navigateTowards(puTarget)
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      return
-    }
-    // Navigate to nearest enemy.
-    self._moveDir = self.followPath()
-    if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
-    // Proactive fire — but ALWAYS check shouldFireInDir to avoid shooting
-    // the player's own base (T6). In classic instant combat the base has
-    // 1 HP, so a single self-inflicted bullet destroys it.
-    if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
-      // §70/§74: break-through fire — never fire through base brick/steel
-      // (§70) or at steel the player can't pierce (§74). Both guards live
-      // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
-      // ...` short-circuit that fired through the base wall on dual-offset
-      // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
-      const bs = scanAheadImpl(self, pcx, pcy, self._moveDir)
-      const lvl = p.level ?? 0
-      if (shouldFireBreakThroughImpl(bs, lvl, self.params.steelFireGate)) {
-        self._fire = !onCooldown
-      }
-    } else {
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-    }
-    self.branchCounts.aggressive++
-    return
-  }
-
-  // §84: Reset aggressive camp tracking when not in aggressive mode.
-  if (self._aggCampCell) {
-    self._aggCampCell = null
-    self._aggCampTicks = 0
-  }
-  if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
-
-  // ---- §88: MID-tier urgent pickup (star/tank/shield 4格) ----
-  // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
-  // tier (bomb/freeze/fence) was already checked before T2a. Only runs when
-  // chokepointMode > 0; otherwise the single §87 branch above handled all
-  // tiers (byte-identical).
-  //
-  // (placement fixes, A/B rounds 2-3) This branch sits BEFORE T2a — the §87
-  // invariant is that urgent pickups outrank stop-and-aim kill (T2a). Two
-  // per-seed tick-diff findings drove the current form:
-  //   - Round 2: placing it AFTER T2a demoted a 4-cell shield to "keep
-  //     killing" (S19 seed 14) — moved before T2a.
-  //   - Round 3: gating it on `!(hasBase && isBaseUnderThreat())` made the
-  //     player ABANDON a 3-cell star to "defend" — the old baseUnderThreat
-  //     box (enemy near base) fired while the star was safe to grab (S32
-  //     seed 17: A grabbed star@(6,12) at t1684, B turned back down and
-  //     eventually lost). The §87 urgent-pickup gates (nearby-enemy 5 格,
-  //     route-danger, A*-reachability) already make a close pickup safe;
-  //     double-gating on baseUnderThreat only burns the star. Rule 4's
-  //     "回防基地 > 星星/加命/护盾" is honored by the HIGH tier outranking
-  //     base defense while MID yields to 据守 (the hold arm below), not by
-  //     abandoning safe point-blank pickups.
-  if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
-    const midTarget = self.findUrgentPowerUpTarget(pcx, pcy, 'midlow')
-    if (midTarget) {
-      self._moveDir = self.navigateTowards(midTarget)
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      self.branchCounts.powerup++
-      return
-    }
-  }
-
-  // ---- T2a: Stop-and-aim (enemy in same row/col) ----
-  // P0.2: Only camp when there's a REAL enemy in the line of fire
-  // (scan.enemy == true). The old code also camped when there was just a
-  // wall (scan.wall && !scan.baseWall), which caused the T2a deadlock:
-  // the player would stop and fire at a wall endlessly, never advancing.
-  // Now the player only stops to aim when there's an actual enemy to shoot.
-  // When the enemy is behind a wall, the player falls through to navigate,
-  // which moves toward the enemy and breaks walls via directMove/canMoveOrBreak.
-  //
-  // P0.1: Anti-camp escape — track how long the player has been at the
-  // same cell in T2a. If camping exceeds campTimeoutTicks with no kills,
-  // fall through to navigate and hunt the enemy directly. A suppression
-  // timer (antiCampSuppressTicks) ensures the player gets enough
-  // consecutive navigate ticks to actually move away from the stuck cell.
-  //
-  // P1: Skip T2a when the base is under threat and the player is too far
-  // from the base. Camping far from the base while enemies approach it
-  // was the #1 cause of base_destroyed gameovers.
-  //
-  // D1 (guard band mode): when enabled, skip T2a on fast/power tank
-  // threats near the base ONLY (not armor — armor is slow and can wait).
-  // This is the targeted version of the guard band: the player camps at
-  // armor for efficient point-blank kills, but the instant a fast tank
-  // approaches the base, it disengages to intercept. The previous
-  // untargeted version (any base threat) was too aggressive and caused
-  // the player to disengage from armor too often, increasing deaths.
-  const fastThreat = self.params.guardBandMode > 0 && self.hasFastThreatNearBase()
-
-  const skipT2aForDefense =
-    self.hasBase &&
-    (fastThreat ||
-      (self.isBaseUnderThreat() &&
-        Math.abs(self.playerCell().col - BASE_POS.col) +
-          Math.abs(self.playerCell().row - BASE_POS.row) >
-          self.params.maxPlayerDistFromBase))
-
-  if (aimDir && self._antiCampSuppress <= 0 && !skipT2aForDefense) {
-    // Inline scanAheadImpl (perf §66, see aggressive branch above).
-    const scan = scanAheadImpl(self, pcx, pcy, aimDir)
-
-    // §74: Don't enter T2a when a base-protection wall is closer than
-    // (or at the same distance as) the enemy on the other offset line.
-    // The 6px bullet spans both offset columns. If the base wall is
-    // closer, the bullet hits it before the enemy → suicide. If the
-    // enemy is closer, the bullet hits the enemy first → safe to fire.
-    // Fall through to navigate when blocked by a closer base wall.
-    if (
-      scan.enemy &&
-      !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
-      !(scan.baseSteel && (p.level ?? 0) >= 3)
-    ) {
-      // §56: dynamic T2a range based on enemy kind.
-      // For non-armor enemies (basic/fast/power): use t2aMaxRange (15) —
-      // one shot kills at any distance, no DPS penalty for range.
-      // For armor (4 hitsToKill): use t2aHighHpMaxRange (2) — close combat.
-      // At long range, 4 shots × 1s travel = 4s of camping; at point-blank,
-      // 4 shots in <0.5s. The approach time is always worth it for 4-HP armor.
-      // Note: in the instant combat model, maxHp = hitsToKill × referenceDamage,
-      // so ALL enemies have maxHp >= 100. The kind check is the correct way
-      // to identify armor (4 hitsToKill) vs basic/fast/power (1 hitsToKill).
-      const effectiveRange =
-        scan.enemyKind === 'armor' ? self.params.t2aHighHpMaxRange : self.params.t2aMaxRange
-      if (scan.enemyDist <= effectiveRange) {
-        // Track camping duration in a ZONE (±1 cell), not exact cell.
-        // P2.1fix: the old exact-cell check was defeated by sub-cell
-        // oscillation — the player bounces between two adjacent cells
-        // (e.g., x=32→40→32) at the TANK/CELL boundary, resetting the
-        // camp cell each time the boundary is crossed. This prevented
-        // the anti-camp escape from EVER firing, causing the Stage 3/4
-        // deadlocks (player stuck at one spot for 17000+ ticks). The
-        // zone fix accumulates camp time across nearby cells, so the
-        // escape triggers even if the player wiggles between two cells.
-        const pc = self.playerCell()
-        if (
-          self._campCell &&
-          Math.abs(self._campCell.col - pc.col) <= 1 &&
-          Math.abs(self._campCell.row - pc.row) <= 1
-        ) {
-          self._campTicks++
-          // If a kill happened since camping started, reset the camp timer.
-          // The player is being productive — let it continue camping.
-          if (w.killCount !== self._campKillsAtStart) {
-            self._campTicks = 1
-            self._campKillsAtStart = w.killCount
-          }
-        } else {
-          // Moved outside the camp zone — start fresh camp tracking.
-          self._campCell = { col: pc.col, row: pc.row }
-          self._campTicks = 1
-          self._campKillsAtStart = w.killCount
-        }
-
-        // Anti-camp: if too long at this cell with no kills, break out.
-        const campedTooLong =
-          self._campTicks > self.params.campTimeoutTicks && w.killCount === self._campKillsAtStart
-
-        if (!campedTooLong) {
-          // ---- §49: 炮口相向分场景策略 ----
-          // 当敌人面向 player 时，根据敌人类型采取不同策略：
-          //   - 冰面：跳过（垂直移动在冰面上失控）
-          //   - 1HP 敌人：正常 T2a 开火（一枪击毙），但对枪抵消仍然生效
-          //     （对枪是开火行为，不是移动闪避——与"1HP 不闪避"不矛盾）
-          //   - Armor（多血）：对枪抵消 + 保持对齐等待
-          //
-          // 对枪抵消对所有敌人类型都适用：当敌方子弹已在直线上时，
-          // 开火抵消比打死敌人更安全（子弹被消除→玩家安全）。
-          // 120-seed 验证：对枪对 ALL 敌人 +5 wins，仅 armor +1 win。
-          // §49-revisit: 炮口相向对枪抵消 is parameterized for A/B.
-          // counterFire=0 → facing stays null → plain T2a (pre-§52 form).
-          const facing =
-            self.params.counterFire > 0 ? self.findEnemyFacingPlayer(pcx, pcy, aimDir) : null
-          const onIce = w.isTankOnIce(p)
-
-          if (facing && !onIce && facing.dist <= self.params.counterFireMaxRange * CELL) {
-            // ---- 对枪抵消逻辑（适用于所有敌人类型）----
-            const enemyBulletInLine = self.hasEnemyBulletInLine(pcx, pcy, aimDir)
-
-            if (enemyBulletInLine && !onCooldown) {
-              // 对枪：敌方子弹已在直线上 → 开火抵消
-              if (p.dir === aimDir) {
-                self._moveDir = null
-              } else {
-                self._moveDir = aimDir
-              }
-              self._fire = true
-              self.branchCounts.t2a++
-              return
-            }
-
-            // 先手开火 / 冷却中等待：保持对齐以备对枪
-            // 不横移——横移会脱离防守位，在密集关卡导致更多死亡
-            if (p.dir === aimDir) {
-              self._moveDir = null
-            } else {
-              self._moveDir = aimDir
-            }
-            self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-            self.branchCounts.t2a++
-            return
-          }
-
-          // ---- 正常 T2a（非炮口相向 / 1HP / 冰面）----
-          if (p.dir === aimDir) {
-            self._moveDir = null // Already facing — stop and shoot
-          } else {
-            self._moveDir = aimDir // Turn to face enemy
-          }
-          self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-          self.branchCounts.t2a++
-          return
-        }
-
-        // Camped too long with no kills — suppress T2a and fall through
-        // to navigate, which will move the player toward the enemy.
-        self._campCell = null
-        self._campTicks = 0
-        self._antiCampSuppress = self.params.antiCampSuppressTicks
-      }
-      // Enemy in line of fire but beyond effective range — fall through
-      // to navigate (close the distance for high-HP enemies).
-    }
-    // No real enemy in line of fire (wall-only or clear) — fall through.
-  } else if (self._campCell) {
-    // Not in T2a (suppressed or no aimDir) — reset camp tracking.
-    self._campCell = null
-    self._campTicks = 0
-  }
-
-  // ---- S5: Power-up economy (normal mode) ----
-  // Check for power-ups when no enemy is in line of fire. Previously this
-  // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
-  // Now the AI opportunistically grabs power-ups when it's safe to divert.
-  // P1: Skip power-ups when the base is under threat — defense first.
-  // P3.2: Also skip when there are enemies within 5 cells of the player —
-  // chasing power-ups while enemies are nearby was a major cause of
-  // defense-collapse gameovers on S6/S26/S32 (player diverted to a power-up
-  // at the top of the map while enemies destroyed the base).
-  if ((!aimDir || onCooldown) && !(self.hasBase && self.isBaseUnderThreat())) {
-    // P3.2: Don't divert to power-ups when enemies are close.
-    const pc2 = self.playerCell()
-    let nearbyEnemy = false
-    // Cluster C: reuse the per-tick enemy snapshot.
-    const nearbyScan = self._enemies.length > 0 ? self._enemies : w.tanks
-    for (let ni = 0; ni < nearbyScan.length; ni++) {
-      const t = nearbyScan[ni]
-      if (!t.alive || t.spawnTimer > 0) continue
-      const tc = self.tankCell(t)
-      if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
-        nearbyEnemy = true
-        break
-      }
-    }
-    if (!nearbyEnemy) {
-      const puTarget = self.findPowerUpTarget(pcx, pcy)
-      if (puTarget) {
-        self._moveDir = self.navigateTowards(puTarget)
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.powerup++
-        return
-      }
-    }
-  }
-
-  // ---- T2b: Navigate towards target (distance-adaptive) ----
-  // Far from target (>5 cells): A* pathfinding routes around walls via
-  // corridors — essential for maze stages. A* finds the corridor, not the
-  // direct path through walls.
-  //
-  // Close to target (≤5 cells): directMove chases the moving enemy
-  // directly, adjusting every tick. A* paths go stale before the player
-  // arrives (the enemy moves away), causing the player to chase the
-  // enemy's old position — directMove tracks the enemy's current position.
-  //
-  // When A* can't find a path (target walled off), directMove breaks
-  // through brick walls by firing at them.
-  //
-  // P0.3: Navigate stuck escape — if the player has been at the same cell
-  // in the navigate branch for too long (pursuit loop with a faster enemy),
-  // override the target to the map center. This breaks the loop by moving
-  // the player to a crossroads position where enemies are more likely to
-  // cross its row/col, creating new T2a opportunities.
-  //
-  // Fire control in classic bulletCap mode (1 bullet in flight):
-  // - If blocked by a wall in the path direction → fire to break through.
-  // - If moving freely → fire only at enemies in the line of fire.
-  const pc = self.playerCell()
-  if (
-    self._navStuckCell &&
-    self._navStuckCell.col === pc.col &&
-    self._navStuckCell.row === pc.row
-  ) {
-    self._navStuckTicks++
+  // M1 shell: reuse a per-self ctx buffer (AGENTS §14.2 — no per-tick
+  // allocation). Built lazily on the first think of the first tick; fields
+  // overwritten each tick. Candidates read it synchronously and never retain
+  // it, so reuse is safe.
+  let ctx = self._decisionCtx
+  if (ctx) {
+    ctx.w = w
+    ctx.p = p
+    ctx.pcx = pcx
+    ctx.pcy = pcy
+    ctx.onCooldown = onCooldown
+    ctx.aimDir = aimDir
+    ctx.threat = threat
+    ctx.shielded = shielded
   } else {
-    self._navStuckCell = { col: pc.col, row: pc.row }
-    self._navStuckTicks = 1
+    ctx = self._decisionCtx = { w, p, pcx, pcy, onCooldown, aimDir, threat, shielded }
   }
-
-  // Reset stuck timer when a kill happens (player is making progress).
-  if (self._navStuckTicks > 1 && w.killCount !== self._campKillsAtStart) {
-    self._navStuckTicks = 1
-    self._campKillsAtStart = w.killCount
-  }
-
-  const navStuck = self._navStuckTicks > self.params.navStuckTicks
-
-  let navTarget: Cell | null
-  // P3.1: When nav-stuck triggers, only go to center if the player is
-  // NOT already at/near center. Going to center when already there causes
-  // a deadlock (target == current cell → no movement → stuck forever,
-  // which was the S9 root cause: player stuck at (12,12) for 2600+ ticks).
-  // When the player IS at/near center, chase the nearest enemy directly
-  // (directMove breaks through walls) — this gets the player moving.
-  const distToCenter = Math.abs(pc.col - 12) + Math.abs(pc.row - 12)
-  const stuckAtCenter = distToCenter <= 2
-  if (navStuck && !stuckAtCenter) {
-    navTarget = { col: 12, row: 12 }
-  } else {
-    navTarget = self.selectTarget(pc)
-  }
-
-  const navDist = navTarget
-    ? Math.abs(navTarget.col - pc.col) + Math.abs(navTarget.row - pc.row)
-    : Infinity
-
-  if (navStuck && !stuckAtCenter) {
-    // P2.2: Stuck too long — break the loop. Try A* to center first, then
-    // fall back to any passable direction (not directMove, which would
-    // re-select the enemy target and re-enter the stuck loop). Trying any
-    // open direction ensures the player physically moves away from the
-    // stuck cell, which is the whole point of the escape.
-    self._moveDir = self.navigateTowards(navTarget!)
-    if (!self._moveDir) {
-      // A* failed (walled off) — try directions toward center first,
-      // then any passable direction.
-      const dx = navTarget!.col - pc.col
-      const dy = navTarget!.row - pc.row
-      const pref: Direction[] = []
-      if (Math.abs(dy) > Math.abs(dx)) {
-        pref.push(dy > 0 ? 'down' : 'up')
-        pref.push(dx > 0 ? 'right' : 'left')
-      } else {
-        pref.push(dx > 0 ? 'right' : 'left')
-        pref.push(dy > 0 ? 'down' : 'up')
-      }
-      let moved = false
-      for (const d of pref) {
-        if (self.canMoveDir(p, d)) {
-          self._moveDir = d
-          moved = true
-          break
-        }
-      }
-      if (!moved) {
-        // All preferred directions blocked — try any open direction.
-        for (const d of ALL_DIRS) {
-          if (self.canMoveDir(p, d)) {
-            self._moveDir = d
-            break
-          }
-        }
-      }
-    }
-  } else if (navStuck && stuckAtCenter) {
-    // P3.1: Stuck at/near center — chase nearest enemy directly instead
-    // of re-targeting center. directMove breaks through brick walls,
-    // which (combined with the A* dig-through-brick fix) gets the player
-    // moving toward enemies instead of deadlocking at center.
-    self._moveDir = self.directMove(pc)
-    if (!self._moveDir) {
-      // directMove also failed — try any passable direction to get moving.
-      for (const d of ALL_DIRS) {
-        if (self.canMoveDir(p, d)) {
-          self._moveDir = d
-          break
-        }
-      }
-    }
-  } else if (navDist <= 5) {
-    // Close range — directMove (responsive, tracks moving enemies).
-    self._moveDir = self.directMove(pc)
-  } else {
-    // Long range — A* pathfinding (finds corridors in mazes).
-    self._moveDir = self.followPath()
-    if (!self._moveDir) {
-      // A* failed or path exhausted — fall back to direct movement.
-      self._moveDir = self.directMove(pc)
-    }
-  }
-  // §68-v2: Path threat check — don't move into crossfire.
-  // After navigation determines _moveDir, check if the path ahead has
-  // bullets that would arrive at any cell before the player clears it.
-  // If threatened: try alternative directions (perpendicular first,
-  // then backward) or stay put. Does NOT do a perpendicular dodge —
-  // the player either detours or waits, avoiding navigation oscillation.
-  // Only runs in the navigate branch (T2b); T8/T2a/aggressive are exempt.
-  if (!shielded && self.params.crossfireAwareness > 0 && self._moveDir && p.speed > 0.1) {
-    const pathThreat = self.findPathThreat(pcx, pcy, self._moveDir, p.speed)
-    if (pathThreat) {
-      // Try to find a safe alternative direction. If none found,
-      // KEEP the original direction — don't stop! Stopping in a crossfire
-      // is more dangerous than continuing; the existing dodge system
-      // (findMostDangerousBullet) will handle the bullet when it arrives.
-      const safeDir = self.findSafeMoveDir(pcx, pcy, self._moveDir, p.speed)
-      if (safeDir) {
-        self._moveDir = safeDir
-      }
-    }
-  }
-  // §48-revisit: Trap avoidance (user idea 2). After navigation determines
-  // _moveDir, check the NEXT cell for a surround risk (few exits + enemies
-  // nearby). If it's a trap, override toward open space / the base. Runs at
-  // the END of navigation, so it only perturbs the final move — dodge/T8/T2a
-  // priorities are intact (same placement discipline as §68-v2 above).
-  if (!shielded && self.params.trapAvoidance > 0 && self._moveDir) {
-    self._moveDir = self.trapAvoidance(p, self._moveDir)
-  }
-  // §85: Close-range enemy exposure check — don't turn your back on a
-  // close enemy. If an enemy is within closeCombatDangerRange cells,
-  // aligned with the player (same row/col), has no wall between them,
-  // and the player's moveDir is NOT toward that enemy, cancel the move
-  // and face the enemy to fire instead. This prevents the "turn and walk
-  // away from a close enemy, get shot in the back" death pattern.
-  if (!shielded && self.params.closeCombatDangerCheck > 0 && self._moveDir) {
-    const dangerDir = self.closeCombatExposure(
-      pcx,
-      pcy,
-      self._moveDir,
-      self.params.closeCombatDangerRange,
-    )
-    if (dangerDir) {
-      // Cancel the move — face the enemy and fire.
-      self._moveDir = p.dir === dangerDir ? null : dangerDir
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dangerDir)
-      self.branchCounts.navigate++
-      return
-    }
-  }
-  // Fire control: when blocked by a breakable wall (verified by
-  // canMoveOrBreak in directMove), fire immediately to break through.
-  // Don't check shouldFireInDir here — it might fire at enemy bullets
-  // (T5) instead of the wall, leaving the player stuck. When moving
-  // freely, fire only at enemies (not walls) to save the bullet cap.
-  if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
-    // §70/§74: break-through fire — never fire through base brick/steel
-    // (§70) or at steel the player can't pierce (§74). Both guards live
-    // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
-    // ...` short-circuit that fired through the base wall on dual-offset
-    // scans (DECISIONS §75 / commit 54600f9 — 4 S32 player suicides).
-    const bs = scanAheadImpl(self, pcx, pcy, self._moveDir)
-    const lvl = p.level ?? 0
-    if (shouldFireBreakThroughImpl(bs, lvl, self.params.steelFireGate)) {
-      self._fire = !onCooldown
-    }
-  } else {
-    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir, false)
-  }
-  self.branchCounts.navigate++
+  // First commit wins. hunt is unconditional (always commits), so a null
+  // return is impossible — but a defensive fallback keeps _moveDir/_fire/
+  // _lastBranch from going stale if a candidate-set bug ever made every
+  // candidate decline (DecisionCore.runChain doc).
+  // M2: the chain runs in effective-weight order (pre-built per reset in
+  // GodAIInput._orderedCandidates; default = the M1 chain order).
+  if (!runChain(self, ctx, self._orderedCandidates)) HUNT.evaluate(self, ctx)
 }

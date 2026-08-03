@@ -3,10 +3,10 @@ import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE } from '../../src/constants'
+import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { InputRecorder } from '../../src/replay/InputRecorder'
-import type { StageData, GameEvent, TankKind } from '../../src/types'
+import type { StageData, GameEvent, TankKind, IntelligenceLevel } from '../../src/types'
 
 // ============================================================
 // Types
@@ -30,6 +30,29 @@ export interface FailureTaxonomy {
   playerDistToBase?: number
   /** Tick of the first player kill (output efficiency indicator). undefined if no kills. */
   firstKillTick?: number
+}
+
+/**
+ * One player-death event (M0 death attribution, plan/God-AI-Redesign-v2 §6).
+ * Collected when `telemetry: true` — read-only observation of the World,
+ * never feeds back into gameplay or the RNG stream.
+ */
+export interface PlayerDeath {
+  /** Tick at which the player was destroyed. */
+  tick: number
+  /** Player tank center (px) at death. */
+  x: number
+  y: number
+  /** Player's Manhattan distance to the base (cells) at death. */
+  distToBase: number
+  /** Kind of the tank that fired the killing bullet. */
+  killerKind?: TankKind
+  /** AI tier of the killer tank (aiState.level), if enemy. */
+  killerTier?: IntelligenceLevel
+  /** The think() branch the God AI was in on the death tick. */
+  branch: string
+  /** Player star level at death. */
+  playerLevel: number
 }
 
 /**
@@ -80,6 +103,8 @@ export interface RunTelemetry {
   basePressureSamples: number
   /** Distinct grid cells the player visited — the anti-oscillation signal. */
   cellsVisited: number
+  /** Per-death events (empty when the player never died). */
+  deaths: PlayerDeath[]
 }
 
 export interface SimResult {
@@ -248,6 +273,17 @@ export function runSimulation(opts: RunOptions): SimResult {
   world.difficultyKey = difficulty
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
+  // §105 (M7, 2026-08-03): mirror startGame()'s P1 init. startGame sets
+  // `playerLevel = difficulty.playerStartLevel` and `lives = difficulty.startLives`
+  // BEFORE spawning; the runner calls loadStageData directly, which reads
+  // NEITHER — so the simulated first life ran at level 0 (and 3 default lives)
+  // even for difficulties that ship playerStartLevel=1 / startLives=2
+  // (hard/chaos since §104/M6). The browser (startGame) and the sim
+  // (loadStageData) therefore diverged: gates/A/Bs measured a "first life 0★,
+  // 3 lives" baseline that understates the shipped config. Sync both here so
+  // the simulation matches the real game on the first life.
+  world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+  world.lives = world.difficulty?.startLives ?? START_LIVES
 
   // Create the God AI input with an independent RNG (DECISIONS #47).
   // This decouples God AI decisions from the world RNG stream, enabling
@@ -311,6 +347,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   let starsCollected = 0
   let basePressureSum = 0
   let basePressureSamples = 0
+  // ---- M0 death-attribution accumulators (only touched when telemetry) ----
+  const deaths: PlayerDeath[] = []
+  // Enemy tank id → AI tier, refreshed each tick (the killer is usually still
+  // alive when the player dies, so it cannot be learned from death events).
+  const tankTierById = wantTelemetry ? new Map<number, IntelligenceLevel>() : null
 
   const t0 = performance.now()
 
@@ -335,13 +376,52 @@ export function runSimulation(opts: RunOptions): SimResult {
         firstKillTick = tick
       }
       if (wantTelemetry) {
-        if (e.type === 'tank_destroyed' && e.tank.kind === 'player') playerDeaths++
-        else if (e.type === 'bullet_fired' && e.bullet.isPlayer) playerShots++
+        // isPlayer (not kind === 'player'): the decoy ally tank also carries
+        // kind='player' for its visual (SimulationPlayer.activateDecoy) but is
+        // NOT the player — counting it here inflates playerDeaths and skews
+        // death attribution with 0★ decoy deaths (probe-503, DECISIONS §105).
+        if (e.type === 'tank_destroyed' && e.tank.isPlayer) {
+          playerDeaths++
+          const t = e.tank
+          // Killer attribution: the event carries the killer tank id (additive
+          // byId metadata from SimulationCombat.bulletHitsTank).
+          let killerKind: TankKind | undefined
+          let killerTier: IntelligenceLevel | undefined
+          if (e.byId !== undefined) {
+            const killer = world.tanks.find((k) => k.id === e.byId)
+            killerKind = killer?.kind
+            killerTier = tankTierById!.get(e.byId)
+          }
+          const bcx = BASE_POS.col * CELL + CELL
+          const bcy = BASE_POS.row * CELL + CELL
+          deaths.push({
+            tick,
+            x: t.x + t.w / 2,
+            y: t.y + t.h / 2,
+            distToBase: Math.round(
+              (Math.abs(t.x + t.w / 2 - bcx) + Math.abs(t.y + t.h / 2 - bcy)) / CELL,
+            ),
+            killerKind,
+            killerTier,
+            branch: input._lastBranch,
+            playerLevel: t.level ?? 0,
+          })
+        } else if (e.type === 'bullet_fired' && e.bullet.isPlayer) playerShots++
         else if (e.type === 'powerup_collected') {
           collectedThisTick++
           powerUpsCollected++
           if (e.powerUp === 'star') starsCollected++
         }
+      }
+    }
+
+    // Death attribution: refresh the enemy id → AI-tier map (read-only scan,
+    // O(live tanks) per tick — telemetry-only, never affects gameplay).
+    if (wantTelemetry) {
+      const tanksNow = world.tanks
+      for (let ti = 0; ti < tanksNow.length; ti++) {
+        const t = tanksNow[ti]
+        if (t.aiState) tankTierById!.set(t.id, t.aiState.level)
       }
     }
 
@@ -478,6 +558,7 @@ export function runSimulation(opts: RunOptions): SimResult {
       basePressureMean: basePressureSamples > 0 ? basePressureSum / basePressureSamples : 0,
       basePressureSamples,
       cellsVisited: visitedCells!.size,
+      deaths,
     }
   }
 

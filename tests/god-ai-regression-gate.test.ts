@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
+import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 
 // ============================================================
 // God AI Wide-Seed Regression Gate (plan/God-AI-Curriculum §6)
@@ -122,6 +123,9 @@ describe('god-ai-regression-gate', () => {
           difficulty: 'classic',
           maxTicks: 18000,
           sampleInterval: 18000,
+          // Fresh clone per run — immune to singleton pollution from other
+          // test files in the shared bun test process (DECISIONS §98).
+          godAIParams: { ...DEFAULT_GOD_AI_PARAMS },
         })
         if (r.outcome === 'stage_clear') wins++
       }

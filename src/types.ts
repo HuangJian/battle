@@ -357,7 +357,15 @@ export interface TileData {
 // ============================================================
 
 export type GameEvent =
-  | { type: 'tank_destroyed'; tank: Tank; by: 'player' | 'enemy' | 'self' }
+  | {
+      type: 'tank_destroyed'
+      tank: Tank
+      by: 'player' | 'enemy' | 'self'
+      /** The tank id that fired the killing bullet (additive death-attribution
+       *  metadata; undefined for non-bullet kills). Read-only observation —
+       *  never feeds back into gameplay. */
+      byId?: number
+    }
   | { type: 'bullet_fired'; bullet: Bullet }
   | { type: 'powerup_collected'; powerUp: PowerUpType; by: 'player' }
   | { type: 'base_destroyed'; by: TankKind }

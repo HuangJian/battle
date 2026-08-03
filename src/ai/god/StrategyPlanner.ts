@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import { findPath, type Cell } from '../../utils/pathfind'
-import { CELL, BASE_POS, POWERUP_TIMEOUT_MS } from '../../constants'
+import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase } from './SmartThreatModel'
@@ -424,7 +424,7 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
  * (<= chaseMaxDist 3 cells) imminent corridors that drive this decision —
  * do NOT "fix" this into a per-path A* re-walk without A/B evidence.
  */
-function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell): boolean {
+export function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell): boolean {
   const w = self.world
   const tm = w.tileMap
   const plan = self._chokepointPlan
@@ -447,9 +447,16 @@ function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell): bool
   // LOS check from the chokepoint to a target cell: same row or column with
   // no brick/steel/base between. (Water lets bullets pass — blocksBullet.)
   const clear = (c: number, r: number): boolean => {
+    // Same cell — an enemy standing ON the chokepoint is trivially covered
+    // (point-blank). The zero-length walk below would step off-grid forever
+    // (crash: grid[-1] undefined) — the 60-seed chaos A/B exposed this latent
+    // §88 bug via seeds > 20 (DECISIONS §101).
+    if (c === choke.col && r === choke.row) return true
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
     if (choke.col === c) {
       const step = choke.row < r ? 1 : -1
       for (let rr = choke.row + step; rr !== r; rr += step) {
+        if (rr < 0 || rr >= GRID) return false
         if (blocksBullet(tm.grid[rr][c])) return false
       }
       return true
@@ -457,6 +464,7 @@ function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell): bool
     if (choke.row === r) {
       const step = choke.col < c ? 1 : -1
       for (let cc = choke.col + step; cc !== c; cc += step) {
+        if (cc < 0 || cc >= GRID) return false
         if (blocksBullet(tm.grid[r][cc])) return false
       }
       return true
@@ -657,23 +665,8 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     return self.tankCell(best)
   }
 
-  // ---- D1: Guard band mode (plan/god-ai-progress Round 4) ----
-  // See think() for the T2a-skip behavior. In selectTarget, guardBandMode
-  // adds D2 damaged-armor priority to the normal target scoring. The
-  // base-centric target selection was tested and proved WORSE than baseline
-  // (it pulled the player toward distant base threats, ignoring nearby
-  // enemies). The effective change is the T2a skip: when the base is under
-  // threat, the player immediately disengages from armor camping and
-  // switches to defense — this is the structural gap that parameters
-  // couldn't fill (maxPlayerDistFromBase=26 means the skip never fires).
-  if (self.params.guardBandMode > 0 && self.params.damagedArmorBonus > 0) {
-    // D2: add damaged armor priority to the normal "chase nearest" and
-    // "base threat" branches below. We do this by pre-computing a bonus
-    // that's used in both branches.
-    // (The actual D2 scoring is in findEnemyDirection for fire control.)
-    // For target selection, the existing logic is unchanged — D2 only
-    // affects which enemy to AIM at, not which to CHASE.
-  }
+  // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor 空块已移除
+  // （否决，移入 experimental.ts 归档）。
 
   // ---- Normal target selection ----
   // When the base is NOT under threat, behave like the no-base case:
@@ -698,13 +691,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     return self.tankCell(best)
   }
 
-  // Base is under threat — find the most threatening enemy.
-  // Phase A: when smartThreatModel is ON, use defense-priority kind weights
-  // (fast > power > armor > basic) AND a canShootBaseFrom bonus.
-  // canShootBaseFrom gives a HUGE bonus to enemies that have a clear shot
-  // at the base (aligned + no walls in between) — these enemies can
-  // destroy the base with their next bullet and must be prioritized.
-  // When OFF, use the original scoring (byte-identical).
+  // Base is under threat — find the most threatening enemy. Enemies with a
+  // clear shot at the base (aligned + no walls in between) get a huge bonus
+  // (defenseClearShotBonus, §59) — they can destroy the base with their next
+  // bullet and must be prioritized. Others use kindThreatWeight scoring.
   let bestEnemy: Tank | null = null
   let bestScore = -Infinity
   for (let ti = 0; ti < enemies.length; ti++) {
@@ -714,33 +704,19 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // §59: an enemy with a clear shot at the base is always considered,
     // even beyond threatRangeCells — it can destroy the base NOW from any
     // distance. Other enemies are filtered by threatRangeCells as before.
-    const hasClearShot =
-      (self.params.defenseClearShotBonus > 0 || self.params.smartThreatModel > 0) &&
-      enemyCanShootBase(self, t)
+    const hasClearShot = self.params.defenseClearShotBonus > 0 && enemyCanShootBase(self, t)
     if (distToBase > self.params.threatRangeCells && !hasClearShot) continue
 
-    // Phase A: defense-priority kind weights when smartThreatModel is ON.
-    const defenseKindWeight =
-      self.params.smartThreatModel > 0
-        ? t.kind === 'fast'
-          ? 4
-          : t.kind === 'power'
-            ? 3
-            : t.kind === 'armor'
-              ? 2
-              : 1
-        : kindThreatWeight(t.kind)
+    // M0.5 退役: smartThreatModel 的 defense-priority kind weights 已移除
+    // （Phase A 否决）——始终使用 kindThreatWeight（原 OFF 路径，字节相同）。
+    const defenseKindWeight = kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 3 : 0
     const urgencyBonus = tc.row >= defenseRow ? (tc.row - defenseRow + 1) * 100 : 0
     const proximityBonus = tc.row >= 20 ? 50 : 0
-    // Phase A / §59: canShootBaseFrom bonus — enemy has a clear shot at the
-    // base. This is the highest-priority target: it can destroy the base NOW.
-    // §59 (Strategy C): decoupled from smartThreatModel — controlled by
-    // defenseClearShotBonus (default 500, 0 = OFF = byte-identical to pre-§59).
-    // When smartThreatModel is also ON, take the max so either gate can enable.
-    const clearShotBonus = hasClearShot
-      ? Math.max(self.params.defenseClearShotBonus, self.params.smartThreatModel > 0 ? 500 : 0)
-      : 0
+    // §59: canShootBaseFrom bonus — enemy has a clear shot at the base. This
+    // is the highest-priority target: it can destroy the base NOW. Controlled
+    // by defenseClearShotBonus (default 500, 0 = OFF = byte-identical to pre-§59).
+    const clearShotBonus = hasClearShot ? self.params.defenseClearShotBonus : 0
     const score =
       -distToBase * 10 +
       (defenseKindWeight + bonusWeight) * 30 +

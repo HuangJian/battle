@@ -2,6 +2,7 @@
 // config surface (GodAIParams + DEFAULT/SKILLED_HUMAN + stage adaptation).
 import type { World } from '../../game/World'
 import { GRID } from '../../constants'
+import type { ActionId } from './DecisionCore'
 
 // ============================================================
 // Parameters
@@ -103,28 +104,9 @@ export interface GodAIParams {
    */
   navStuckTicks: number
 
-  // ---- D1: Guard band mode (plan/god-ai-progress Round 4) ----
-  /**
-   * D1: 0=off, 1=on. When on, the player stays in a horizontal band above
-   * the base, engaging enemies that enter the band rather than chasing
-   * across the map. Designed for armor-heavy stages with an open bottom
-   * (S32 Diamond): armor tanks are slow and must approach the player,
-   * giving close-range fire rate (kills 4-HP armor faster); fast tanks
-   * are intercepted before reaching the base.
-   */
-  guardBandMode: number
-  /** D1: the guard row (player patrols at this row when idle). */
-  guardBandRow: number
-  /** D1: half-width of the patrol zone (cols from base col). */
-  guardBandHalfWidth: number
-  /**
-   * D2: score bonus for targeting damaged armor tanks. When > 0, the AI
-   * prefers finishing an armor tank that has already taken damage, avoiding
-   * the "spread damage across 4 full-HP armor" trap where each gets 1-2
-   * hits but none dies. Damage is persistent (HP doesn't regen), so
-   * finishing a damaged tank is strictly better than starting a new one.
-   */
-  damagedArmorBonus: number
+  // ---- M0.5 退役（2026-08-03, DECISIONS §96）----
+  // guardBandMode/Row/HalfWidth + damagedArmorBonus（D1/D2 否决）与
+  // smartThreatModel 族（Phase A 否决）已移入 experimental.ts 归档。
   /**
    * Close-combat T2a range: max distance (in cells) at which the player
    * stops to aim-and-fire at an enemy in the same row/col. Default 15
@@ -155,49 +137,6 @@ export interface GodAIParams {
    * kills regardless of distance, so there's no DPS penalty for long range.
    */
   t2aHighHpMaxRange: number
-
-  // ---- Smart threat model (Phase A, plan/God-AI-Next-Round §3) ----
-  /**
-   * 0=OFF (default), non-zero=ON. When ON, selectTargetImpl base-threat
-   * branch uses type/speed/facing/HP-aware threat scoring to prioritize
-   * fast rushers over slow armor. isBaseUnderThreat() and skipT2aForDefense
-   * are NOT changed (the old box + race check remains for threat detection).
-   * OFF = byte-identical to pre-smart-model behavior.
-   */
-  smartThreatModel: number
-  /**
-   * Minimum threat score [0..1] for an enemy to be considered a base
-   * threat. Default 0.55 — armor at 3 cells scores ~0.5 (not a threat),
-   * fast at 6 cells scores ~0.7 (threat), armor at 1 cell scores ~0.83
-   * (threat).
-   */
-  smartThreatThreshold: number
-  /**
-   * Weight for the time-to-base feature (distToBase / speedFactor) in
-   * threat scoring (default 0.6 — dominant). This combines speed and
-   * distance into "how soon can this enemy reach the base?"
-   */
-  smartThreatSpeedWeight: number
-  /** Weight for enemy facing direction in threat scoring (default 0.2). */
-  smartThreatFacingWeight: number
-  /** Weight for enemy HP in threat scoring (default 0.2). */
-  smartThreatHpWeight: number
-  /**
-   * Time-to-base normalization range (default 12). Enemies whose
-   * timeToBase (= distToBase / speedFactor) ≥ this value get timeScore 0.
-   * Effectively: a fast tank at 12+ cells or an armor at 4+ cells won't
-   * trigger the threat threshold via the time feature alone.
-   */
-  smartThreatDistRange: number
-  /**
-   * Phase A: extra race-check range (cells) for fast/power tanks when
-   * smartThreatModel is ON. Extends the base race range
-   * (baseRaceRangeCells) by this amount for fast/power tanks in the
-   * lower half of the map (row ≥ 10). Default 4 → effective range 15
-   * for fast tanks vs 11 for armor/basic. Detects fast rushers earlier,
-   * giving the player more time to intercept.
-   */
-  smartRushDetectBonus: number
 
   // ---- §58: Stage-level adaptive params (Strategy G, data-driven adaptation) ----
   /**
@@ -243,8 +182,7 @@ export interface GodAIParams {
    * so they must be the highest-priority target. 0 = OFF (byte-identical
    * to pre-§59). Default 500 — large enough to dominate the scoring
    * (urgencyBonus maxes at ~1000 for row 25, proximityBonus is 50, kind
-   * weight is 30-120). Decouples the clear-shot bonus from the
-   * smartThreatModel gate so it can be A/B-tested independently.
+   * weight is 30-120). Gated independently for A/B testing.
    */
   defenseClearShotBonus: number
 
@@ -332,21 +270,6 @@ export interface GodAIParams {
   armorForestDenseRange: number
 
   /**
-   * §63: t2aMaxRange for 1-HP enemies on open-sightline, non-armor-heavy
-   * stages. When > 0 AND the stage has open sightline (low forest or high
-   * water, same trigger as open-T2a for high-HP) AND armor ratio < 35%,
-   * t2aMaxRange is reduced from 15 to this value. On open stages, the
-   * player closes in on 1-HP enemies for more reliable kills (less bullet
-   * travel time, better positioning for base defense). On brick/forest-dense
-   * stages, the default 15 is kept — close combat in corridors is dangerous.
-   * 0 = OFF (byte-identical to pre-§63).
-   *
-   * Default 12 — probes showed S1 +7pp, S7 +13pp, S11 +8pp, S12 neutral,
-   * while brick-dense stages (S3/S5/S18) prefer the default 15.
-   */
-  openT2a1HpMaxRange: number
-
-  /**
    * §64: outnumberedRadiusCells for armor-heavy + high-steel + non-steel-maze
    * stages. On these stages (only S26 Brick Maze: 40% armor, 26% steel,
    * brickWallRatio 0.26), the player gets swarmed in steel corridors and
@@ -361,18 +284,6 @@ export interface GodAIParams {
   armorSteelOutnumberedRadiusCells: number
 
   /**
-   * §65: suboptimalPathProb for armor-heavy + steel-maze stages. On these
-   * stages (only S32 Diamond: 40% armor, brickWallRatio 0.05), the player
-   * gets pinned in predictable positions by the steel corridors. Adding
-   * path randomness (0.05) breaks the deterministic pinning pattern and
-   * improves survival. 0 = no change (byte-identical to pre-§65).
-   *
-   * Gated by: armorHeavy AND isSteelMaze. Only S32 matches this regime
-   * across all 35 stages. Probes: S32 +3pp (77% → 80%, 30 seeds).
-   */
-  armorMazeSuboptimalPathProb: number
-
-  /**
    * §66: campTimeoutTicks for steel-maze stages with low armor. On these
    * stages (only S6 Iron Curtain: 0% armor, brickWallRatio 0.04), the
    * player gets stuck camping at indestructible steel walls — the default
@@ -385,59 +296,10 @@ export interface GodAIParams {
    */
   steelMazeCampTimeoutTicks: number
 
-  /**
-   * §68-v2: Crossfire awareness via time-aware path threat projection.
-   *
-   * When > 0, the navigation branch checks the player's movement path
-   * (4 cells ahead) for bullets that would arrive at any cell before the
-   * player clears it. Unlike the old v1 approach (which only checked the
-   * next cell with a fixed proximity threshold), this uses actual bullet
-   * speed for time-of-arrival estimation, checking ALL enemy bullets from
-   * ALL directions.
-   *
-   * When a threat is detected, the player tries alternative directions
-   * (perpendicular first, then backward) or stays put — NOT a perpendicular
-   * dodge like v1. This avoids the navigation oscillation that plagued v1-v3.
-   *
-   * The check runs in the navigation section (T2b) only, after the existing
-   * dodge (findMostDangerousBullet) has already handled current-position
-   * threats. T8 base interception and T2a close combat are not affected.
-   */
-  crossfireAwareness: number
-  /**
-   * §69: Terrain-gated crossfire awareness. When > 0, crossfire awareness is
-   * automatically enabled on "open" stages (obstacle density < this ratio AND
-   * not a steel maze). On maze stages, diversion from the A* path is too
-   * expensive — the cost of taking an alternative route outweighs the bullet
-   * risk. 0 = never auto-enable (byte-identical to pre-§69).
-   *
-   * Obstacle density = (brick + steel + water) / totalCells. Water is included
-   * because it creates impassable corridors just like walls.
-   *
-   * Default 0.40 — gates off S3 (43%), S7 (39%), S9 (42%), S24 (43%), S30 (44%),
-   * S34 (45%) plus steel mazes S6/S32. Keeps improvements S1 (37%), S8 (23%),
-   * S27 (9%), S28 (29%) enabled. Residual regressions S14/S18/S26 remain ON
-   * — terrain density cannot fully separate them (see §69 analysis).
-   */
-  crossfireOpenObstacleRatio: number
-
-  /**
-   * §69-B: A* pathfinding threat cost. When > 0, the A* pathfinder adds a
-   * threat cost penalty to cells where enemy bullets are expected to arrive
-   * at the same time as the player. Unlike §68-v2's post-hoc diversion
-   * (which switches direction AFTER the path is computed), this bakes threat
-   * avoidance into the path itself — A* finds the optimal trade-off between
-   * path length and safety.
-   *
-   * The threat cost is time-aware: for each cell in a bullet's trajectory,
-   * the bullet's arrival tick (dist / bullet.speed) is compared with the
-   * player's estimated arrival tick (manhattanDist * CELL / playerSpeed).
-   * If they overlap within ±10 ticks, the cell gets a threat cost penalty.
-   *
-   * 0 = OFF (byte-identical to pre-§69-B). 3 = a threatened cell costs as
-   * much as 4 safe cells (1 + 3), so A* prefers detours up to 3 extra cells.
-   */
-  crossfirePathCost: number
+  // M0.5 退役（2026-08-03）: §68-v2 crossfireAwareness / §69-B crossfirePathCost
+  // 已移入 experimental.ts 归档（双否决）。路径威胁基础设施（findPathThreat /
+  // findSafeMoveDir / computeThreatCosts）保留在 experimental.ts 供 v2 survive
+  // 候选与 M2+ risk 分复用（设计 §3.2 / §4.4 整合条款）。
 
   /**
    * §48-revisit: Steel-only evasion occlusion. When > 0, the bullet-threat
@@ -507,24 +369,8 @@ export interface GodAIParams {
    */
   evasionSteelOcclusionBrickRatio: number
 
-  /**
-   * §48-revisit: Trap avoidance (user idea 2 — don't walk into surround
-   * positions). When > 0, the navigation branch (T2b) checks the NEXT cell
-   * before committing to the current move direction: if that cell has few
-   * passable exits (≤ 2 — a corridor / corner / dead-end) AND `trapEnemyCount`
-   * or more enemies are within `trapEnemyRadiusCells` of it, the player is
-   * at risk of being surrounded there. The move direction is overridden to
-   * the open direction whose next cell has the most exits (tie-broken toward
-   * the base). Runs at the END of navigation (after _moveDir is chosen), so
-   * it only perturbs the final move — dodge / T8 / T2a priorities are intact.
-   *
-   * 0 = OFF (byte-identical). 1 = ON.
-   */
-  trapAvoidance: number
-  /** Radius (cells) around the destination cell for the trap enemy census. */
-  trapEnemyRadiusCells: number
-  /** Min live enemies within the radius that make a low-exit cell a trap. */
-  trapEnemyCount: number
+  // M0.5 退役（2026-08-03）: trapAvoidance 族（3 项）已移入 experimental.ts
+  // 归档（默认 0 未发布）。"包围风险"输入并入 v2 survive 候选设计（§3.2）。
 
   /**
    * §49-revisit: 炮口相向对枪抵消（§52 v2，T2a 内联，当前保留形态）。
@@ -673,21 +519,34 @@ export interface GodAIParams {
   closeCombatDangerRange: number
 
   /**
-   * §86: Threat hysteresis — `findMostDangerousBulletImpl` uses TANK+2
-   * alignment threshold for the recently-dodged bullet. Prevents boundary
-   * flickering at |dist|=32. 0 = OFF and is the SHIPPED default
-   * (byte-identical to pre-§86). 1 = ON (experimental, A/B-only — never in
-   * shipped default).
+   * M5 (plan/God-AI-Redesign-v2, DECISIONS §103): 站位提前规避 — path-threat
+   * avoidance in the navigate/hunt branch.
+   *
+   * When > 0, after `_moveDir` is chosen in the HUNT candidate (long-range
+   * followPath or close-range directMove), the path ahead is checked for
+   * in-flight enemy bullets via `findPathThreat` (time-aware, ±10-tick window
+   * over 3 lookahead cells). If a bullet would arrive while the player is
+   * walking into that cell, `findSafeMoveDir` finds a safer alternative
+   * (perpendicular first, backward as fallback, cell-1 only) and overrides
+   * `_moveDir` — the player does NOT walk into crossfire, from the root
+   * reducing the number of times it enters the reactive dodge branch
+   * (83% of deaths on hard/chaos, DECISIONS §96).
+   *
+   * Distinction from the retired §68-v2 diversion (DECISIONS §73): §68
+   * committed to a perpendicular A* path diversion at 12-23 ticks lead time
+   * and died (premature commitment off the path); M5 only swaps the
+   * IMMEDIATE next step (cell-1) when `findPathThreat` already flagged an
+   * imminent collision, and re-evaluates every tick (no path commitment).
+   * The A* path cache is untouched — the next tick re-plans from the new
+   * cell. This is strictly less committed than §68: same detection, but the
+   * response never leaves the current corridor plan for more than one step.
+   *
+   * 0 = OFF (byte-identical to M0). 1 = ON.
    */
-  dodgeHysteresis: number
+  pathThreatAvoidance: number
 
-  /**
-   * §86: Dodge direction persistence — `dodgeDirectionImpl` returns the last
-   * dodge direction if the same threat persists. Prevents 1px oscillation.
-   * 0 = OFF and is the SHIPPED default (byte-identical). 1 = ON
-   * (experimental, A/B-only — never in shipped default).
-   */
-  dodgeDirPersistence: number
+  // M0.5 退役（2026-08-03）: dodgeHysteresis 已移入 experimental.ts 归档
+  // （A/B -1.1pp，未发布）。
 
   /**
    * §86: Oscillation detection + counter-fire. When the dodge direction
@@ -700,17 +559,95 @@ export interface GodAIParams {
    */
   dodgeOscillationCounterFire: number
 
+  // ---- §M3: Dodge quality (plan/God-AI-Redesign-v2 M3) ----
   /**
-   * §86: Use `Math.floor` instead of `Math.round` for the snap in
-   * `canMoveDirRaw`. The `snap()` function uses `Math.round(v / CELL) * CELL`,
-   * which has a discontinuity at cell midpoints (e.g., y=56 → snap=64, but
-   * y=55 → snap=48). This 16px jump flips `canMoveDir` results, causing the
-   * dodge direction to oscillate every tick. With `Math.floor`, the snap is
-   * stable across 1px differences (y=55 and y=56 both → 48). 0 = OFF and is
-   * the SHIPPED default (byte-identical). 1 = ON (experimental, A/B-only —
-   * never in shipped default; REJECTED).
+   * §M3-revisit (round 3): PINNED-GATED counter-fire in the DODGE branch —
+   * "counter-only-when-pinned". When the threat's perpendicular dodge is
+   * mathematically infeasible (isDodgePinnedImpl: no perpendicular direction
+   * can clear the bullet's hit band before arrival, or all are blocked /
+   * covered by other bullets), the player faces the bullet and fires to
+   * cancel it (对枪抵消 — bullet-bullet collision,
+   * SimulationCombat.bulletHitsBullet). Only then is counter-fire the ONLY
+   * reliable survival move.
+   *
+   * Why (DECISIONS §96 death attribution + per-tick traces): 83% of
+   * hard/chaos player deaths occur in the dodge branch; the branch never
+   * fires at the incoming bullet (fire is gated on the MOVE direction only);
+   * a close bullet (~4px/tick) arrives in ~8 ticks while a perpendicular
+   * dodge needs ~19 — the dodge is mathematically futile at close range
+   * (maze seeds 2/16 failure mode). Round 1 gated on DISTANCE alone and was
+   * reverted (DECISIONS §98, 2026-08-03): it counter-fired mid-maneuver
+   * during a VIABLE dodge (S25 Ice Palace seed 10 → deterministic
+   * 5/20→1/20 regression). The pinned gate is the refinement: a dodge that
+   * can actually clear (offset-aware — the player already partially off the
+   * line needs less movement) stays a dodge; only when dodging cannot
+   * possibly save the player does the AI stand and cancel.
+   *
+   * 0 = OFF (shipped default, byte-identical to M0). 1 = ON (A/B knob).
+   * Must be validated with the official 口径 (no stageIndex) + 60-seed truth.
    */
-  canMoveDirFloorSnap: number
+  dodgeCounterFire: number
+  /**
+   * §M3: max lateral offset (px) between the player center and the threat
+   * bullet for the counter-fire to trigger. The player's 6px bullet must
+   * actually collide with the enemy bullet (half-width sum ≈ 6px) — a
+   * bullet more than ~6px off-center passes beside the player's shot.
+   */
+  dodgeCounterFireAlignPx: number
+  /**
+   * §M3: multi-bullet dodge direction scoring. When > 0,
+   * `dodgeDirectionImpl` scores each passable perpendicular candidate by its
+   * nearest-bullet CLEARANCE (minimum arrival tick of any other enemy bullet
+   * at the cell the player would move into) and picks the candidate with the
+   * most clearance, instead of the binary next-cell isSafeDir check.
+   * Addresses crossfire deaths: dodging INTO a cell where another bullet
+   * arrives in 2 ticks scores badly vs one with 15 ticks of clearance.
+   * 0 = OFF (binary, byte-identical). 1 = ON.
+   */
+  dodgeClearanceScore: number
+  /**
+   * M9 (plan/God-AI-Redesign-v2): survival-horizon dodge commitment scoring.
+   * When > 0, `dodgeDirectionImpl` scores each passable perpendicular candidate
+   * by its SURVIVAL HORIZON — the earliest tick any enemy bullet could hit the
+   * player if it COMMITS to moving that way (per-tick hit-time estimation:
+   * t_arrive vs perpendicular escape time to clear the bullet's hit band,
+   * clamped by the terrain-limited free path) — and commits to the
+   * longer-horizon direction.
+   *
+   * Addresses the measured dominant dodge-death failure mode (M9 probe,
+   * probe-m9-commit.ts): hard 31.8% / chaos 35.0% of dodge-branch deaths are
+   * "commitment failures" — the threat was escapable when the dodge started
+   * (t_arrive >= escape time) but the player oscillated within the 32px hit
+   * band (perpendicular displacement < 19px) instead of sustaining an escape
+   * (crossfire direction-mischoice measured ~0%, so the binary next-cell
+   * isSafeDir was NOT the bottleneck). The horizon model fixes both: it
+   * commits to the escaping side and downgrades sides covered by other bullets.
+   * 0 = OFF (byte-identical to M0). 1 = ON (A/B knob).
+   */
+  dodgeHorizonScore: number
+
+  /**
+   * M10: min escape-margin gate for the horizon commitment (tick). Only
+   * commit to a dodge direction when its survival margin exceeds this
+   * threshold — i.e. the escape is CLEARLY winnable, not a marginal knife-edge.
+   * 0 = no margin gate: any escapable side commits; when BOTH perpendiculars
+   * are doomed (both margins ≤ 0) the gate also fails and the legacy binary
+   * path runs (differs from M9's later-hit pick — see ThreatAssessor).
+   * Positive values filter out low-value commitments (DECISIONS §108: MARGIN6
+   * was hard +1.6pp but chaos -2.4pp at 60-seed → not shipped).
+   */
+  dodgeHorizonMinMarginTicks: number
+
+  /**
+   * M10: max distance-to-base gate for the horizon commitment (cells). When
+   * the player is farther than this from the base, horizon commitment is
+   * skipped (legacy binary dodge) — the player must not chase survival
+   * escapes far from the base while the base is undefended. Only applies
+   * when the stage has a base (hasBase). 0 = unlimited (no distance gate).
+   * NOTE: A/B-measured HARMFUL (chaos -4.0pp at maxDist=8, DECISIONS §108)
+   * — kept only as an experimental knob, do not ship.
+   */
+  dodgeHorizonMaxDistCells: number
 
   // ---- §87: Urgent power-up pickup priority (user request 2026-08-02) ----
   /**
@@ -874,6 +811,92 @@ export interface GodAIParams {
    * game while A's normal nearest-enemy hunt won. 0 = unlimited (pre-round-3).
    */
   chokepointChaseMaxPlayerDist: number
+
+  /**
+   * M2 (plan/God-AI-Redesign-v2 §3.2): per-params decision-chain weight
+   * overrides. When provided, the M1 candidate chain is evaluated in
+   * effective-weight order (`overrides[id] ?? ACTION_WEIGHTS[id]`, descending,
+   * stable) instead of the fixed chain order. The ordered candidate list is
+   * pre-built once per reset in GodAIInput — never sorted per tick
+   * (AGENTS §14.3/14.5).
+   *
+   * Default (undefined) = the M1 chain order (dodge > interceptBase >
+   * pickupHigh > aggro > pickupMid > engage > pickupLow > hunt) —
+   * byte-identical to pre-M2. Changing a weight IS a behavior change and
+   * must go through the 60-seed A/B discipline (official 口径, no stageIndex).
+   */
+  actionWeights?: Partial<Record<ActionId, number>>
+
+  // ---- M3: 敌情感知 EnemyModel + 命数感知 (plan/God-AI-Redesign-v2 §4.2b/§4.3) ----
+  /**
+   * M3: 0 = OFF (byte-identical to pre-M3 — the model never updates and all
+   * consumers return 0). 1 = pure dynamic EnemyModel (features only).
+   * 2 = 混合模式 (50/50 blend with the static `aiState.level` prior, which
+   * requires enemyTierWeightCommander/Veteran > 0). The model is a per-tick
+   * EMA of observable enemy behavior (fire accuracy / base approach /
+   * alignment / turn discipline) — pure World observation, no RNG, no
+   * difficultyKey reads (评审决议 3).
+   */
+  enemyModelMode: number
+  /** M3: EMA window (ticks) for the EnemyModel features. >0 required for
+   *  the model to run (`enemyModelMode > 0 && window > 0`). */
+  enemyModelWindowTicks: number
+  /**
+   * M3: 感知敌人强度 → 目标选择加权. When > 0, findEnemyDirectionImpl scales
+   * the T9 threat score by `1 + tierWeightScale * estimatedEnemyLevel` — the
+   * AI commits its fire priority to the enemies it has SEEN play well, rather
+   * than a static kind weight. Default 0 (byte-identical).
+   */
+  tierWeightScale: number
+  /**
+   * M3: 感知闪避率 → 有效 T2a 射程缩放. When > 0, the ENGAGE candidate's
+   * effective 1-HP range shrinks as the model's `discipline` (turn frequency)
+   * rises: `effectiveRange = t2aMaxRange * (1 - dodgeRateShrinksT2a * discipline)`.
+   * A stage where enemies dodge/redirect a lot forces point-blank engagement
+   * (shorter bullet travel → fewer dodged shots). Default 0 (byte-identical).
+   */
+  dodgeRateShrinksT2a: number
+  /**
+   * M3: 配合压力 → 保命压力提前. When > 0, survival pressure activates when
+   * `coordination * weight >= 1` (many enemies aligned with the player at
+   * once) — even while lives are still plentiful. Default 0 (byte-identical).
+   */
+  coordinationRiskWeight: number
+  /**
+   * M3: 敌人命中率 → 保命压力提前. When > 0, survival pressure activates when
+   * the model's estimated fire accuracy reaches this threshold (0..1) — the
+   * enemy is hitting, so stop taking risks NOW, not when lives run out.
+   * Default 0 (byte-identical).
+   */
+  enemyAccuracyRaisesSurvival: number
+  /** M3 (混合模式 prior): static weight for commander-tier enemies in
+   *  `staticPriorLevel`. 0 = no prior signal from commanders. */
+  enemyTierWeightCommander: number
+  /** M3 (混合模式 prior): static weight for veteran-tier enemies. */
+  enemyTierWeightVeteran: number
+  /**
+   * M3 (P0-3 命数盲 fix, plan §4.3): 0 = OFF (byte-identical). >0 = survival
+   * pressure activates when `world.lives <= this value` — the AI stops taking
+   * high-risk actions (deep hunts, long-range duels) on its last lives.
+   * chaos startLives=3 ⇒ survivalModeLives=1 means "act safe on the last life".
+   */
+  survivalModeLives: number
+  /**
+   * M3: 生存模式下高风险动作的风险惩罚系数 γ. When survival pressure is 1,
+   * high-risk candidates (hunt / long-range engage) are suppressed — the
+   * higher this weight, the earlier/deeper the retreat to defense. Default 0
+   * (byte-identical — no suppression).
+   */
+  survivalRiskWeight: number
+  /**
+   * M3: survive 候选（主动换位）的包围触发阈值. When > 0, the survive
+   * candidate may activate: at least this many live enemies within
+   * `surviveEnemyRadiusCells` of a ≤2-exit cell the player occupies. 0 = OFF
+   * (candidate never commits — byte-identical). Default 0.
+   */
+  surviveMinEnemies: number
+  /** M3: survive 候选的包围判定半径 (cells). */
+  surviveEnemyRadiusCells: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -942,32 +965,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
 
-  // D1/D2: Guard band mode + damaged armor priority. Default OFF (0) for
-  // both — regression-safe. damagedArmorBonus was tested at 1 but HURT S32
-  // (-8.4pp) by causing target-switching that interrupts armor grinding.
-  // The HP-dependent t2aHighHpMaxRange already handles the "finish damaged
-  // armor" use case by extending range as HP drops.
-  guardBandMode: 0,
-  guardBandRow: 20,
-  guardBandHalfWidth: 7,
-  damagedArmorBonus: 0,
+  // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor、smartThreatModel
+  // 族已移入 experimental.ts 归档（见该文件参数规格表）。
   // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior for
   // 1-HP enemies). For multi-HP enemies (armor), t2aHighHpMaxRange=2
   // triggers point-blank engagement (§56 — generalizes S32 close-combat).
   t2aMaxRange: 15,
   t2aHighHpMaxRange: 2,
-
-  // Smart threat model (Phase A): default OFF (0). All 35 stages are
-  // byte-identical when OFF. Only consumers passing an explicit
-  // smartThreatModel > 0 activate the smart scoring (no per-stage
-  // override table exists anymore — DECISIONS §81).
-  smartThreatModel: 0,
-  smartThreatThreshold: 0.55,
-  smartThreatSpeedWeight: 0.6,
-  smartThreatFacingWeight: 0.2,
-  smartThreatHpWeight: 0.2,
-  smartThreatDistRange: 12,
-  smartRushDetectBonus: 4,
 
   // §58: Stage-level adaptive params (Strategy G). These generalize the old
   // per-stage override mechanism into a data-driven adaptation based on
@@ -985,7 +989,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
 
   // §59 / Strategy C: clear-shot bonus in defense-mode target selection.
   // Default 500 — prioritizes enemies with a clear line of fire to the base.
-  // 0 = OFF (byte-identical to pre-§59). Decoupled from smartThreatModel.
+  // 0 = OFF (byte-identical to pre-§59).
   defenseClearShotBonus: 500,
 
   // §60: Open-defense adaptation. On non-steel-maze stages, widen
@@ -1012,30 +1016,15 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // forest (bullets hit trees). Probes: S14 +10pp with range 3.
   armorForestDenseRatio: 0.25,
   armorForestDenseRange: 3,
-  // §63: REVERTED — open-sightline 1-HP T2a range. Probes showed improvement
-  // on S1/S7 but regression on S8/S11/S30/S33 in full 60-seed validation.
-  // The adaptation is net negative (-0.6pp mean). Kept as 0 (OFF) for safety.
-  openT2a1HpMaxRange: 0,
   // §64: armor-heavy + high-steel + non-steel-maze → widen outnumberedRadius.
   // Only S26 matches. Probes: S26 +10pp (75% → 85%, 30 seeds). 9 = no change.
   armorSteelOutnumberedRadiusCells: 12,
-  // §65: REVERTED — armor-heavy + steel-maze path randomness. 30-seed probe
-  // showed S32 +3pp, but 60-seed validation showed -1.7pp (66.7% → 65%).
-  // The 30-seed gain was seed-specific noise. Kept as 0 (OFF) for safety.
-  armorMazeSuboptimalPathProb: 0,
   // §66: steel-maze non-armor camp timeout. Only S6 matches. +16pp (60 seeds).
   steelMazeCampTimeoutTicks: 20,
 
-  // §68-v2: Crossfire awareness — see interface docs. Default 0 (OFF).
-  // v1 was neutral (-0.4pp); v2 uses time-aware projection + multi-strategy
-  // response instead of fixed-proximity + perpendicular dodge.
-  crossfireAwareness: 0,
-  // §69: Terrain-gated crossfire. 0 = never auto-enable (byte-identical).
-  // 0.40 = enable on open stages (obstacle density < 40%, not steel maze).
-  crossfireOpenObstacleRatio: 0,
-  // §69-B: A* threat cost. 0 = OFF (byte-identical). 3 = prefer detours up
-  // to 3 extra cells to avoid bullet-threatened cells.
-  crossfirePathCost: 0,
+  // M0.5 退役: §63 openT2a1HpMaxRange / §65 armorMazeSuboptimalPathProb /
+  // crossfire 族（§68-v2/§69/§69-B）已移入 experimental.ts 归档（60-seed 验证
+  // 均为净负或否决）。
 
   // §48-revisit: Steel-only evasion occlusion. 0 = OFF (byte-identical to
   // pre-§48-revisit). See interface docs. Only steel (permanent for enemy
@@ -1055,10 +1044,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // with zero per-stage regressions (S14/S26 byte-identical); 120-seed
   // confirmations S32 +2.5pp (68.3→70.8), S6 +0.8pp (80.0→80.8).
   evasionSteelOcclusionBrickRatio: 0.1,
-  // §48-revisit: trap avoidance (user idea 2). 0 = OFF (byte-identical).
-  trapAvoidance: 0,
-  trapEnemyRadiusCells: 5,
-  trapEnemyCount: 2,
+  // M0.5 退役（2026-08-03）: trapAvoidance 族已移入 experimental.ts 归档
+  // （默认 0 未发布；"包围风险"输入并入 v2 survive 候选设计 §3.2）。
   // §49-revisit: 炮口相向对枪抵消 (§52 v2). 1 = ON (current shipped
   // behavior, byte-identical to pre-parameterization). 0 = OFF (plain T2a).
   counterFire: 1,
@@ -1080,25 +1067,38 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // cancelling legitimate navigation. At range 2, the check only fires when
   // the enemy is truly adjacent (32px), where fleeing is almost certainly death.
   closeCombatDangerRange: 2,
+  // M5: 站位提前规避 — 0 = OFF (byte-identical to M0). 1 = ON (A/B knob).
+  pathThreatAvoidance: 0,
   // ── §86 oscillation-experiment params (A/B-only knobs) ──────────────
   // Evaluated for the §86 dodge-oscillation fix. Only `dodgeOscillationCounterFire`
   // ships ON. The other three are A/B-only and are NEVER part of the shipped
   // default (intentionally left OFF — see interface docs). The canonical fix
   // is the simulation-layer turn cooldown (§86c), not these AI-layer patches.
-  // §86: Threat hysteresis — 0 = OFF (A/B showed -1.1pp net regression).
-  // A/B-only: not in shipped default.
-  dodgeHysteresis: 0,
-  // §86: Dodge direction persistence — 0 = OFF (A/B showed -0.6pp net).
-  // A/B-only: not in shipped default.
-  dodgeDirPersistence: 0,
-  // §86: Oscillation detection + counter-fire — 1 = ON (shipped fallback).
-  // 0 = OFF (A/B baseline). Simulation-layer cooldown is canonical; this is a
-  // rare-boundary fallback (C-B = +0.1pp per A/B/C).
+  // M0.5 退役（2026-08-03）: dodgeHysteresis / dodgeDirPersistence /
+  // canMoveDirFloorSnap 已移入 experimental.ts 归档（A/B 均净负，从未发布；
+  // §86c 模拟层转弯冷却为规范修复，dodgeOscillationCounterFire 为唯一发布项）。
   dodgeOscillationCounterFire: 1,
-  // §86: canMoveDirFloorSnap — 0 = OFF (causes -2.6pp at 35×60, S6 -21.7pp).
-  // Math.floor in canMoveDirRaw breaks ALL navigation predictions, not just
-  // dodging. REJECTED. A/B-only: never in shipped default.
-  canMoveDirFloorSnap: 0,
+
+  // ── §M3: Dodge quality (plan/God-AI-Redesign-v2 M3) ──────────────────
+  // dodgeCounterFire (round 1, distance-gated) REVERTED to OFF (DECISIONS
+  // §98): official-shape 35x20 showed chaos 34.6→34.1% (flat-to-negative)
+  // with a deterministic S25 Ice Palace regression (5/20→1/20 — counter-fire
+  // interrupted a working dodge mid-move). Round 3 (DECISIONS §101) replaces
+  // the distance gate with the PINNED gate (isDodgePinnedImpl) — still OFF by
+  // default; the A/B runs in the M3 milestone. dodgeCounterFireRangeCells
+  // was removed (obsolete: the pinned gate is geometric, not distance-based).
+  // Align 6px = bullet half-width sum (cancellation needs a near-dead-on shot).
+  dodgeCounterFire: 0,
+  dodgeCounterFireAlignPx: 6,
+  dodgeClearanceScore: 0,
+  // M9: survival-horizon dodge commitment (DECISIONS §107 pending) — OFF by
+  // default; the A/B runs in the M9 milestone. See interface docs for the
+  // measured failure mode (commitment failure 32-35% of dodge deaths).
+  dodgeHorizonScore: 0,
+  // M10: time-margin + distance-to-base gates for the horizon commitment
+  // (both 0 = no gate = pure M9 semantics; A/B knobs, DECISIONS §108 pending).
+  dodgeHorizonMinMarginTicks: 0,
+  dodgeHorizonMaxDistCells: 0,
 
   // ── §87: Urgent power-up pickup priority (user request 2026-08-02) ───
   // SHIPPED default: ON with the A/B-validated ranges/gates (DECISIONS §87).
@@ -1151,6 +1151,31 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // A/B round 3: chase 目标距玩家超过 10 格同样不值得追（S32 seed 10：玩家在
   // (8,3) 被引去 27 格外追 (0,22)，敌先到威胁点，玩家白跑整局）。
   chokepointChaseMaxPlayerDist: 10,
+
+  // ── M3: 敌情感知 EnemyModel + 命数感知 (plan/God-AI-Redesign-v2 §4.2b/§4.3) ──
+  // 全部默认 OFF/0 = 逐字节不变（M3 里程碑验收：开启后无回退，而非默认启用）。
+  // enemyModelMode: 0=OFF, 1=纯动态, 2=混合（+静态 aiState 先验）。
+  enemyModelMode: 0,
+  // EMA 窗口（ticks）。>0 且 enemyModelMode>0 时模型每 tick 更新。
+  enemyModelWindowTicks: 0,
+  // 感知敌人强度 → T9 威胁加权（FireControl）。
+  tierWeightScale: 0,
+  // 感知闪避率（discipline）→ 有效 T2a 射程缩放（ENGAGE）。
+  dodgeRateShrinksT2a: 0,
+  // 配合压力（coordination）→ 保命压力提前。
+  coordinationRiskWeight: 0,
+  // 命中率阈值（0..1）→ 保命压力提前。
+  enemyAccuracyRaisesSurvival: 0,
+  // 混合模式静态先验权重（0 = 无先验）。
+  enemyTierWeightCommander: 0,
+  enemyTierWeightVeteran: 0,
+  // 命数 ≤ 该值激活保命压力（chaos 3 命 → 1 = 末命保命）。
+  survivalModeLives: 0,
+  // 保命压力下高风险候选（hunt/远距 engage）的抑制系数。
+  survivalRiskWeight: 0,
+  // survive 候选（主动换位）：0 = OFF（不提交）。
+  surviveMinEnemies: 0,
+  surviveEnemyRadiusCells: 3,
 }
 
 /**
@@ -1302,15 +1327,8 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
         adapted = true
       }
 
-      // §63: on open-sightline non-armor-heavy stages, reduce t2aMaxRange for
-      // 1-HP enemies. The player closes in for more reliable kills (less
-      // bullet travel time) and better base-defense positioning. Suppressed
-      // on armor-heavy stages (most enemies are armor; 1-HP range is less
-      // relevant, and armor needs aggressive close-combat).
-      if (p.openT2a1HpMaxRange > 0 && !armorHeavy) {
-        overrides.t2aMaxRange = p.openT2a1HpMaxRange
-        adapted = true
-      }
+      // M0.5 退役（2026-08-03）: §63 openT2a1HpMaxRange 适配已移入 experimental.ts
+      // 归档（60-seed 验证净负 -0.6pp，回退）。
     }
 
     // §62: forest-dense armor T2a range. On armor-heavy stages with forest
@@ -1341,14 +1359,8 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       adapted = true
     }
 
-    // §65: armor-heavy + steel-maze → add path randomness. On S32 (40% armor,
-    // brickWallRatio 0.05), the player gets pinned in predictable positions
-    // by the steel corridors. Path randomness (0.05) breaks the deterministic
-    // pinning pattern and improves survival. Only S32 matches this regime.
-    if (armorHeavy && isSteelMaze && p.armorMazeSuboptimalPathProb !== base.suboptimalPathProb) {
-      overrides.suboptimalPathProb = p.armorMazeSuboptimalPathProb
-      adapted = true
-    }
+    // M0.5 退役: §65 armorMazeSuboptimalPathProb 适配已移入 experimental.ts
+    // 归档（30-seed +3pp 但 60-seed -1.7pp，回退）。
 
     // §66: steel-maze + low-armor → shorter camp timeout. On S6 Iron Curtain
     // (0% armor, brickWallRatio 0.04), the player camps at indestructible
@@ -1360,18 +1372,8 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       adapted = true
     }
 
-    // §69: Terrain-gated crossfire awareness. Enable crossfire on open stages
-    // (low obstacle density, not a steel maze). On maze stages, diversion from
-    // the A* path is too expensive — §68 showed -15pp on S6/S26 (maze) vs
-    // +12pp on S28 (open). Obstacle density = (brick+steel+water)/totalCells.
-    // Water is included because it creates impassable corridors.
-    if (p.crossfireOpenObstacleRatio > 0 && base.crossfireAwareness === 0 && !isSteelMaze) {
-      const obstacleDensity = (brickCount + steelCount + waterCount) / totalCells
-      if (obstacleDensity < p.crossfireOpenObstacleRatio) {
-        overrides.crossfireAwareness = 1
-        adapted = true
-      }
-    }
+    // M0.5 退役: §69 crossfireOpenObstacleRatio 适配已移入 experimental.ts 归档
+    // （crossfire 族 §68/§69 双否决）。
 
     // §48-revisit: terrain-gated steel-only evasion occlusion. Auto-enable
     // ONLY on steel-maze stages (brickWallRatio < evasionSteelOcclusionBrickRatio).
@@ -1392,5 +1394,12 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
     }
   }
 
-  return adapted ? { ...base, ...overrides } : base
+  // Always return a fresh object, even when unadapted: callers must never be
+  // handed a reference to a shared singleton (DEFAULT_GOD_AI_PARAMS) that they
+  // could mutate. Cross-file module state IS shared inside `bun test`, and a
+  // leaked mutation silently corrupts every later simulation in the process
+  // (DECISIONS §98 — a test mutation flipped the gate's S25 result).
+  // GodAIInput also clones at construction; this closes the vector for ALL
+  // callers of this exported function.
+  return adapted ? { ...base, ...overrides } : { ...base }
 }

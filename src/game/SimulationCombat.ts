@@ -582,12 +582,12 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
           this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
 
           if (tank.isPlayer) {
-            w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
+            w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
             w.pushEvent({ type: 'player_hit' })
           } else if (tank.allegiance === 'ally') {
             // Allied guard destroyed — no score, no kill credit, no drops. The
             // guard simply stops fighting (§31 Phase 2).
-            w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy' })
+            w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
           } else {
             const gained = killScore(
               w.difficultyKey,
@@ -616,7 +616,7 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
               text: String(gained),
               timer: 1500,
             })
-            w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
+            w.pushEvent({ type: 'tank_destroyed', tank, by: 'player', byId: bullet.ownerId })
 
             // --- Item drop rules (item-drop v1, DECISIONS.md §30) ---
             // 1) Bonus enemies (level-design flagged) drop a power-up on death.

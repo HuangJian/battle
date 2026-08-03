@@ -1,113 +1,70 @@
 # God AI 调校进展总览（系统化整理）
 
 > 汇编自：git commit history、历史日志、各阶段计划/验证文档、`.workbuddy/memory/`（每日工作日志）。
-> 整理日期：2026-07-30。此文档为**只读汇总**。DECISIONS.md 已精简为索引（2026-07-31），
-> 新决策仍以 DECISIONS.md 为准，详细内容以本文档为准。
+> 整理日期：**2026-08-03**（v2 重设计纪元 M0–M11 收官后体系化重写，含 2026-07-30 首版内容）。
+> 此文档为**只读汇总**。DECISIONS.md 为决策索引（编号保留、正文压缩，全文在本档 / git 历史）。
+> 两个纪元：**Classic 纪元**（§33–§95，2026-07-27 → 08-01，单一 classic 难度调校）与
+> **v2 重设计纪元**（M0–M11，2026-08-03，三难度体系化重设计，见 Part II）。
 
 ---
 
-## 0.A 当前状态速览（截至 2026-08-01 §74 基地自杀修复）
+# Part 0. 当前状态速览（2026-08-03）
 
-| 指标 | 数值 | 口径 |
+## 0.A 三难度基线（官方口径）
+
+> 官方口径 = 35 关 × N seeds，`runSimulation` 直驱（不传 stageIndex、正确同步 playerLevel/lives），
+> 门禁 seed 1..20，决定性结论 ≥60 seeds。口径历史与修复见 §II.5。
+
+| 难度 | 20-seed 门禁真值 | 60-seed 参考 | 命数/星级 | 目标 | 状态 |
+|---|---|---|---|---|---|
+| classic | **91.0%**（637/700，floor 581） | ~91% | 3 命 / 0★ | >98%（v2 目标） | 门禁全绿，距目标 7pp |
+| hard | **48.0%**（336/700，floor 310） | 46.3%（§105 口径） | **2 命** / 1★ | >80%（v2 目标） | 门禁全绿，差距大 |
+| chaos | **48.9%**（342/700，floor 316） | 47.7%（§105 口径） | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿，**距目标 1.1pp** |
+
+- classic 门禁真值自 M0 起保持 637/700 字节持平（所有 M 行为默认 OFF / 逐字节不变）。
+- hard/chaos 真值在 §105 模拟口径修复后重生成（此前 hard 被 3 命伪口径高估 ~6pp）。
+- 质量门禁：三门禁 + split-parity 12/12 全绿；**891 tests**、0 lint、`bun run build` ✓。
+
+## 0.B v2 纪元发布清单
+
+**SHIPPED（生产默认）**
+| 里程碑 | 内容 | 关键证据 |
 |---|---|---|
-| 全 35 关真值均值 | **92.1%**（前值 91.9%） | 35 关 × 20 seeds, classic, 18000t（§74 距离感知基地墙火控修复后基线） |
-| 低于 60% floor 的关卡数 | **0 / 35** | §47 修复后所有关均达标 |
-| 最弱关 S32 Diamond | **72.5%** @120（75.0% @20） | §74 修复后，killer=player 4→1（seeds 26/78/82 已修复，seed 34 残留） |
-| 质量门禁 | **全绿** | tsc + oxlint + oxfmt clean |
-| 回归门禁 | 全 35 关 × 20 seeds，聚合 645/700 (92.1%)，floor 581 | `tests/god-ai-regression-gate.test.ts` |
+| M0（§96） | 三难度门禁 + 逐死亡 telemetry + 死亡归因工具 + chaos 命数 1→3 | 基线 classic 91.0 / hard 38.6 / chaos 34.6 |
+| M0.5（§96） | 22 个僵尸/否决参数退役（interface 95→~73，归档 experimental.ts） | classic 门禁字节持平 |
+| M1（§99） | 决策链评分制外壳（DecisionCore + 8 候选体权重序） | parity 三重验证 IDENTICAL，性能 +2.6~3.3% |
+| M2a（§100） | actionWeights 权重数据化基础设施 | 默认链序字节持平 |
+| **M6（§104）** | **出生即一星**（hard/chaos playerStartLevel 0→1） | 60-seed hard +9.0pp / chaos +7.9pp，唯一 >3σ 行为外杠杆 |
+| §105（M7） | 模拟口径三重修复（playerLevel / lives / telemetry isPlayer） | hard 真实 2 命口径 48.0%、chaos 48.9% |
 
-> §67（停止调参）：35×60 已达 88.9%，多轮 CMA-ES 探针确认参数空间已收敛到平坦最优——任何方向微调均在 ±1pp 噪声内，无系统性增益。调参正式冻结。
-> §68（交叉火力感知 v2）：60-seed A/B 88.9%（OFF）vs 87.8%（ON）= **-1.1pp 净负**，按"负结果否决"纪律默认关闭，基础设施保留。v1 为 -0.4pp 中性，v2 采用时间感知路径投影但 diversion 响应在迷宫关卡代价过高。
-> §69（交叉火力感知 v3）：地形门控 + A* 威胁成本，双负结果。地形密度无法区分回退/改善关（S1 改善+7pp 密度 37% > S6 回退-15pp 密度 27%）。A* cost=3.0 时 -1pp，cost=1.0 时 -6pp。实验系列终结。
-> **§48-revisit（2026-08-01）**：钢墙专用闪避遮挡 + 地形门控（brickWallRatio < 0.10 的钢迷宫关自动启用），**首个通过"零负结果"验收的 §48 变体**。35×60 全关 A/B net +1 flip、0 关回退；S32 +3.3pp @120（68.3→71.7）、S6 +0.8pp @120。判别量是 brickWallRatio 而非 steel ratio（S26 钢 26% > S32 钢 18% 却回退）。默认 `evasionSteelOcclusionBrickRatio=0.1` 已启用（仅 S6/S32）。详见 DECISIONS §71。
-> **§49-revisit（2026-08-01）**：炮口相向对枪抵消（§52 v2 保留形态）参数化为 `counterFire`（默认 1 = 逐字节不变）+ `counterFireMaxRange`（默认 5），在当前树上重新验证：**35×60 全关 net +3 flips、0 ON→OFF 负翻转**（S26 +2.5pp@120 种子 41/44/61、S20 +0.8pp@120 种子 60，其余 33 关 0pp）。与 §48 不同，对枪价值不随地形分界——无需地形门控。默认不变。详见 DECISIONS §72。
-> **§68-revisit（2026-08-01）**：per-seed tick-diff 重新调优 §68-v2，**方法论级负结果**——4 个变体全负（raw -18 / 提前量上限 -25 / 目的地开阔度门控 -14 / 组合 -25）。per-seed 定位机制：坏翻转 12.6-23.1t 过早转向致死 vs 好翻转 8.3-8.4t 逃生转向；全 35 关地形指标相关性（density/avgPass/open%/brick/steel）无一能区分好坏关。实验代码全回退，crossfire 维持默认 OFF。详见 DECISIONS §73。
-> **§74（2026-08-01）**：T2a/aggressive 火控路径绕过 `shouldFireInDirImpl` 直接开火，当 scanAhead 双偏移扫描一条线看到基地保护砖、另一条线看到敌人时，`scan.enemy` 短路放行，导致玩家打穿自己的基地（S32 @120 killer=player 4 次：seeds 26/34/78/82）。修复：scanAhead 新增 `baseWallDist` 字段；T2a/aggressive 入口检查改为 `!(scan.baseWall && scan.baseWallDist <= scan.enemyDist)`——仅在基地墙比敌人更近时阻止开火（6px 子弹跨两列，会先打中更近的障碍）。突破路径 `bs.enemy ||` 短路也修复为保守检查。S32 @120 86→87 (+1)，killer=player 4→1，base_destroyed 18→8。35×20 均值 92.1%（+0.2pp）。详见 DECISIONS §74。
-> parity 8 seeds 保持 pre-§48 基线（§47 仿真层修复对 parity 关卡 S0 无影响）。
-
-> **§79（2026-08-01）**：coop（躺赢模式）God AI 在 `src/ai/god/` 7 处误读 `w.player`（P1）而非 `self.controlledTank(w)`（P2），导致 P2 重生后卡在出生点 00:56–01:41 并打穿基地保护墙。修复后单人逐字节不变（无回归）；coop 过关率 100%、P2 平均剩余命 buggy −7.63 → fixed +2.90（消除死亡螺旋）。详见 DECISIONS §79。
-
-> **§80（2026-08-01）**：冰冻窗口 aim/navigate 转身抖动死锁（replay `classic-s11-…seed1785622102123` 0:31–0:47：P2 冰冻期间原地对空开火）。根因：转向不是免费的——`Simulation.updateMovement` 每次换轴都 snap 垂直坐标，非网格对齐的坦克一转身就被推开最多 CELL/2 px，目标被甩出 `scanAhead` 的 ±8px 偏移线；aggressive 分支没有任何反驻车守卫（T2a 有 `_campTicks`，navigate 有 `_navStuckTicks`）。修复：新参数 `aimTurnSnapGuard`（默认 1 = ON；0 = OFF 逐字节不变），aggressive 分支在 commit 停火转向**之前**用**转身后**的位置重跑扫描，若敌人已不在线上则判定"假瞄准"→ 落入 navigate。**35×60×2 真值终验：冰冻窗口击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）**；过关率 coop 98.8%→99.0%（+0.2pp，net +3）、single 88.8%→89.7%（**+0.9pp，net +20**）；逐关 ≥5pp 回退 **0 关**（最大负向 Diamond/Ramparts −1.7pp = 1 seed 噪声），改善 Lattice +8.3pp / Riverbed +5pp。**S32 Star Fort 10/30-seed 回退（−10pp/−3.3pp）在 60 seeds 确认为种子噪声：Δ0.0pp 完全持平**（coop 60/60 双态、single 55/60 双态）；per-seed tick-diff 定位的机制（t1226 守卫拒绝转向 → navigate 死路）仍是真实失败模式，但真值尺度净中性。详见 DECISIONS §80。
-
-> **§83（2026-08-01）**：`dodgeDirection` 回退分支沿炮弹飞行方向逃跑 = 受困走廊必死 bug（replay `classic-s02-clear-l1-t62-seed1785636440494` 0:27 tick 1641）。修复：回退时排除炮弹飞行方向、优先**朝向炮弹**（转身 → T5 开火抵消 对枪抵消）。**过关率：持平（byte-identical）**——35×60 修复前 90.05% ＝ 后 90.05%（逐关逐 seed 一致）；35×20 修复前 92.57% ＝ 后 92.57%（干净重跑一致）；确定性已证（同代码重复 bulk sweep 逐字节一致）。**方法论教训**：20-seed（1–20）⊂ 60-seed（1–60），若诊断期 git 态不干净（stash 往复污染基线），一次 bulk 总胜率会给出假「+进步 / 回退」——本 bug 早期 35×20 的 ±3 即污染物。bug 真实、已修复并单测锁定，但对 sim-runner 评估框架净中性（其独立 godRng 未把受困走廊场景翻转任何最终结果）。详见 DECISIONS §83。
-
-> **§84–§85（2026-08-02）**：两个 God AI 行为 bug 修复（replay `classic-s03-clear-l3-t79-seed1785643123096`）。
->
-> **§84**：冰冻窗口激进分支无反驻车机制（0:20–0:36，player 在 (16,5) 原地开火 1080+ tick 打不中微微偏移的敌人）。新参数 `aggCampTimeoutTicks`（默认 120 = 2s）：激进分支停火瞄准时追踪驻车时长，超时无击杀则设 `_aggCampSuppress = antiCampSuppressTicks`（复用 T2a 的 60t 抑制器）并落入 navigate。A/B 35×20：§84 单独 ON = **92.9%**（+0.3pp），0 回归。
->
-> **§85**：导航分支不检查近战敌人威胁（1:03，player 转身离开近战敌人被打死）。新参数 `closeCombatDangerCheck`（默认 1）+ `closeCombatDangerRange`（默认 **2**）。关键设计教训：① 初版捕获所有非朝向移动（含垂直闪避）→ -1.7pp 回退；修复为仅 `moveDir === opposite(enemyDir)`（逃跑）才触发。② range=4 太激进（-1.6pp），range=2 是最优点（+0.4pp）—— 仅 32px 内的逃跑才致命。
->
-> **最终 A/B（35×20, 18000t）**：baseline 92.6% → shipped 93.0%（**+0.4pp，0 关低于 80%**）。详见 DECISIONS §84/§85。
-
-> **§87（2026-08-02）**：近距离安全路径拾取优先级（用户指令：炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全 → 拾取 > 回防/杀敌）。新 `think()` 分支位于 dodge 与 T8 之后、aggressive/T2a/S5 之前；`pickupPriorityMode=1` + 三档范围 + **三个由调优循环发现的守卫**：`pickupPriorityMaxDanger=0`（路上无敌人）、`pickupPriorityMinEnemyDist=5`（5 格内无完全生成敌人，Lattice s2/Battlement s3 per-seed 定位）、`pickupPrioritySpawnRowMax=3`（出生带行 ≤3 的拾取永不紧急，Lattice s2/s32 per-seed 定位）。**35×60 A/B（SHIPPED 默认）：1899→1908（+9 wins，90%→91%，suite 0.7439→0.7551）**；无显著负向关（唯一 p<0.05 的 Steel Web 为 0 win 变化 = 噪声）；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3。OFF（mode=0）逐字节不变已验（S6 s5 / S32 s11 IDENTICAL）。门禁真值重生成（35×60，均值 90.9%，聚合 floor 581→610），S28 Spider floor 因既有 genId 顺序依赖噪声保持 pre-§87 水平。详见 DECISIONS §92。
-
-> **§95（2026-08-03）**：转弯周期限制 turnCooldownMs 50ms → **100ms**（用户指令：player/enemy 转弯周期限制改为 160ms ≈ 360 APM 超级人类水平；A/B 后按用户取舍采用 100ms）。**35×60 全档位扫描：50ms 基线 91.0%（suite 0.7561）→ 160ms 原始 87.4%（net −75）→ 160ms+原地等待 89.8%（net −24）→ 50ms+原地等待 88.9%（net −44）→ 100ms+原地等待 91.2%（net +5，suite 0.7741，SHIPPED）**。per-seed tick-diff 定位两个根源机制：
->
-> 1. **漂移致死（160ms 原始 −75 flips 主因，已修复）**：cooldown 期间 `updateMovement` 把 `tank.dir` 回退为 `prevMoveDir`，坦克沿旧方向继续滑行 ~10 ticks —— S26 s1 想转 `down` 却一直冲 `left` 过弯致死、S12 s6 想转 `left` 却一直 `up` 撞墙。修复：cooldown 期间**原地等待**（`tank.moving = false`，velocity 积分为 0；冰面保留 ICE_DECEL_TRACTION 滑行）——这也是"转弯周期限制"语义上正确的实现（先停再转，符合人类手感）。
-> 2. **AI 每 tick 决策模型假设瞬时转弯（残留）**：160ms 下每次转弯要等 ~9.6 ticks，dodge / T2a 瞄准 / 转身开火节奏全被拖慢；尝试 AI 层"转向承诺锁"（S19 Bastion s3 提交 left 等完冷却立刻又要 right → 每 tick 重新评估被锁 160ms）帮助振荡型迷宫关（Checkers +9、Brick Maze +6）但开阔关更伤（Quarry −6、Star Fort −6——开阔关每 tick 重新瞄准是合法行为），净负已回退。
->
-> **为什么 100ms 是最优**：50ms+等待的 halt 反而伤（净 −44）——3 ticks 的原地停顿打断了 AI 的转向-开火连贯性，旧的 3-tick 漂移对闪避反而有益；160ms 漂移致命、等待后仍有 AI 节奏退化；100ms+等待（6 ticks）恰好兼得：迷宫无过弯漂移 + 闪避/瞄准节奏退化最小。**S30 Eagle Nest +13.3pp、S20 Checkers +10pp、S6 +8.3pp、S12 +8.3pp 受益**；S19 Bastion −8.3pp（唯一 ≥5pp 负向关，其余 ≤−6.7pp 均为 2-4 种子噪声）。门禁真值重生成（均值 91.19%，聚合 floor 610→612）。详见 DECISIONS §95。
->
-> **§95 细粒度确认扫描（2026-08-03，用户指令：测 110/125/140ms）**：35×60 全档扫描确认 **100ms 是该邻域局部最优**——110ms SUITE 0.7389（90%，net **−27**）、125ms 0.7504（90%，net **−20**）、140ms 0.7473（90%，net **−15**），全部劣于 100ms（0.7741，91.2%，net +5）；同样劣于 50ms 基线（0.7561）。曲线形状：100 峰值 → 110 急降 → 125/140 部分回升 → 160 再降。负翻转集中在需要快速重新瞄准的关（Bunker Hill −13@110/−9@140、Battlement、Twin Spires、Checkers、Citadel、Frozen Field），无任何关卡有补偿性增益——110/125/140 均无 ≥+5 的正面关。结论：**维持 100ms 不变**（配置零改动，仅记录）。
-
-
-**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）** → **§87 近距离安全路径拾取优先级（8/4/2 格 + 三守卫，+9 wins）** → **§95 转弯周期限制 50→100ms + 原地等待（35×60 全档扫描选优，net +5 wins，+0.2pp）**。
-
----
-
-## 0.B 方法论创新：per-seed tick-diff 诊断法
-
-本次研究过程中发现了一种高效的 God AI 回归诊断方法，已固化为可复用脚本 `tools/diag/per-seed-diff.ts`。
-
-**方法**：
-1. 用 `dump` 模式运行一个翻转 seed 的完整仿真，导出逐 tick 紧凑签名（位置、方向、开火、移动方向、敌人数、子弹数、游戏状态）
-2. `git stash` 回退代码，再运行一次 `dump`
-3. `git stash pop` 恢复代码
-4. 用 `diff` 模式比较两次输出，找到第一个分歧 tick 和变化的字段
-
-**为什么需要**：总胜率对比（eval-suite）只能告诉你“回归了多少”，但不能告诉你“哪个 tick、哪个决策导致了翻转”。per-seed tick-diff 能精确定位第一个分歧点，然后回溯到导致分歧的代码变更。
-
-**V8 JIT 教训**：在每秒调用数千次的热循环里加代码（即使功能上是 no-op）会改变 V8 的优化决策，导致 cascade 行为差异。热循环改动必须用 per-seed 对比验证，不能只看总胜率。本次的 -1pp 残留回归就是通过此方法发现的——diff 显示 tick 1062 的 `fire` 字段从 `.` 变成 `F`，由此追溯到 steel 分支里的额外计算改变了 V8 对 `scanAheadImpl` 的 JIT 优化。
-
-**方法工具箱（§88 战役固化，2026-08-03）**：§88 据守咽喉要地的调优把 §0.B 的手工环节全部固化为可复用脚本，后续策略开发直接套用：
-
-| 工具 | 命令 | 替代的手工环节 |
+**诚实阴性（不发布，实验旋钮保留）**
+| 里程碑 | 内容 | 结论 |
 |---|---|---|
-| `tools/eval/eval-suite.ts --compare a.json b.json` | 全量 A/B（35×60 paired CRN） | — （已存在） |
-| `tools/diag/per-seed-diff.ts` | `dump` + `diff`（含 `--set` 覆盖） | 单种子 tick 级分歧定位 |
-| **`tools/diag/flip-scan.ts`** | `--stages 6,16,32 --seeds 1-60 --set k=v` | **手写 bash 翻转扫描循环**（60×2 次全量 dump → 并行 worker 池秒级完成；自动分类 FLIP-TO-WIN / FLIP-TO-LOSE / TIED 并列出种子） |
-| **`tools/diag/decision-probe.ts`** | `<stage> <seed> <tick> [--set ...]` | **每次手写 tmp/probe-*.ts**（一次打印该 tick 的完整决策上下文：selectTarget / 威胁态 / chase / 据守计划 / 分支计数） |
-| **`tools/eval/gate-truth.ts`** | `<eval-suite --json 输出>` | **手工 awk 提取门禁真值**（生成可直接粘贴的 TRUTH_WIN_PCT 代码块 + AGGREGATE_FLOOR） |
+| M2c（§100） | 权重重排 4 实验 | 链序是局部最优，纯重排无杠杆 |
+| M3（§97/§98/§101） | dodge 对枪抵消（三轮门控） | 官方口径 chaos 持平偏负；stageIndex 伪影完整机制 |
+| M4（§102） | 带安全门控的紧急对枪 | +0.7pp 噪声内；`godaiParams` 大小写口径事故 |
+| M5（§103） | 站位提前规避（pathThreatAvoidance） | 触发率 ~1%，无信号；口径纪律再升级 |
+| M8（§106） | survivalRetreat 最后一命回防 | 60-seed Δ-3 持平偏负 |
+| M9（§107） | dodgeHorizonScore 生存视界承诺闪避 | 机制成立（S0 seed2 反转）但 60-seed chaos -3.5pp；双目标教训 |
+| M10（§108） | horizon 时间余量门控（MARGIN6） | hard +1.6pp / chaos -2.4pp，参数全局无法发布 |
+| M11（§109→§110） | 星经济二星（playerStartLevel 1→2） | 60-seed +7.5~9.4pp 强信号，**用户否决回退**（"欺负敌人"） |
 
-**推荐的完整循环（§88 验证过的路径）**：
-1. `eval-suite --compare` 或 `flip-scan --set <候选参数>` 找到翻转关卡/种子
-2. `flip-scan` 列出 FLIP-TO-LOSE 种子（回归）与 FLIP-TO-WIN 种子（收益）
-3. 对每个回归种子：`per-seed-diff dump/diff` 找首个分歧 tick → `decision-probe <stage> <seed> <tick>` 看该 tick 的决策差异 → 定位根因机制
-4. 修复 → 重跑 `flip-scan` 确认回归消失、收益保留
-5. 定向确认：`eval-suite --stages <改善关> --seeds 120 --compare`
-6. 启用/发货后：`eval-suite --seeds 60 --json out.json` → `gate-truth out.json` 重生成门禁真值
-
----
-
-## 0.C 调优签入规则（per-seed tick-diff 方法）
-
-调优循环（A/B → per-seed tick-diff → 修复 → 组合重验）产出的非交付物按以下规则处理：
-
-1. **A/B test 脚本不做版本管理**：验证完毕后的 `ab-test-*.ts` 不入库。它们是一次性诊断脚本，保留价值在结果而非代码——本地保留（`.gitignore` 已忽略），需要时直接重跑。
-2. **per-seed-diff.ts 的修改必须可泛化**：验证过程中对 `tools/diag/per-seed-diff.ts` 的修改，只有能泛化到将来其它参数诊断的才入库。参数覆盖统一走通用 `--set <key>=<value>` 标志（可重复，任意数值型 GodAIParams key）；参数特化的硬编码标志（如 `--steelOcclusion`、`--noCounterFire`、`--brickGate`）不入库。
-3. **临时数据文件不入库**：验证产生的临时数据文件（如 `tmp/` 下的 tick-dump、A/B 输出）在 `.gitignore` 中忽略，并在每次 commit 前删除。
+**保留实验旋钮**（默认 0 / OFF，字节持平）：`dodgeCounterFire`、`dodgeClearanceScore`、`pathThreatAvoidance`、
+`survivalModeLives`、`survivalRiskWeight`、`dodgeHorizonScore`、`dodgeHorizonMinMarginTicks`、
+`dodgeHorizonMaxDistCells`、EnemyModel 族（`enemyModelMode`/`tierWeightScale`/`dodgeRateShrinksT2a`/
+`coordinationRiskWeight`/`enemyAccuracyRaisesSurvival`）、`actionWeights.survive`。
 
 ---
 
-## 1. 目标与评价体系
+# Part I. Classic 纪元（§33–§95，2026-07-27 → 08-01）
 
-- **最终目标（P4 用户指令）**：全 35 classic 关，逐关过关率稳定 > 60%（floor），且平均 > 80%。✅ 已达成并超出（86.9%）。
-- **延伸目标（Round 5）**：S32 Diamond > 80% @120 seeds。✅ **85.0% 已达成**——但靠的不是 God AI 策略，而是 §47 仿真层碰撞修复（原"结构性差距"实为碰撞语义 bug + 归因污染，见 §4）。
+## I.1 目标与评价体系
+
+- **最终目标（P4 用户指令）**：全 35 classic 关，逐关过关率稳定 > 60%（floor），且平均 > 80%。✅ 已达成并超出。
+- **延伸目标（Round 5）**：S32 Diamond > 80% @120 seeds。✅ **85.0% 已达成**——靠 §47 仿真层碰撞修复（原"结构性差距"实为碰撞语义 bug + 归因污染）。
 - **测量纪律**：20-seed 探针有 ±11pp 二项噪声，只用于筛选方向；**一切决定性结论必须 ≥60 seeds**（P4 教训，多次证伪过 20/30-seed 的"海市蜃楼"增益）。
 
----
-
-## 2. 时间线总览
+## I.2 时间线总览（Classic 纪元）
 
 | 阶段 | 日期 | commit | 主题 | 关键成果 |
 |---|---|---|---|---|
@@ -123,501 +80,420 @@
 | **P4** | 07-29 | `2d9fa77` | 7 轮 floor-aware CMA-ES + 逐关覆盖表（#36） | 均值 **81.9%**@60 seeds，34/35 ≥60% |
 | **Round 5** | 07-29 | `49b1011` | S32 贴身缠斗 `t2aMaxRange=2`（§43-S32） | S32 43.3%→**72.5%**@120，均值 86.9%@20 |
 | **Phase A** | 07-30 | `7435089` | 智能基地威胁模型（§44-SmartThreat） | **负结果**：8+ 变体全否决，基础设施保留默认 OFF |
-| **§47** | 07-30 | (本轮提交) | 基地保护环碰撞修复 + base_destroyed 归因（§47） | S32 72.5%→**85.0%**@120，35×60 真值 81.9%→**87.7%**，门禁真值重生成 |
-| **§48** | 07-30 | (已回退) | 假闪避地形遮挡"修复" | **负结果**：S32 -10pp@120（lives 12→22），闪避地形盲是承重行为，测试锁定禁止再"修" |
-| **§49** | 07-30 | (已回退) | 炮口相向火后闪避 | **负结果**：35×20 A/B 85.0% vs 基准 87.6%（-2.6pp），S18 -25pp、S28 -15pp；post-fire dodge 打断 threat 检测 + 冰面失控 |
-| **§58** | 07-31 | `godai-stage-overrides.ts` | 覆盖表泛化（逐关硬编码→数据驱动适配） | S32/S26 覆盖泛化为 armorAdaptRatio/brickDenseAdaptRatio，覆盖表清空，均值 87.7%→88.9% |
-| **§67** | 07-31 | — | 调参冻结（平坦最优确认） | 多轮 CMA-ES 探针均在 ±1pp 噪声内，无系统性增益，正式停止调参 |
-| **§68** | 08-01 | (默认 OFF) | 交叉火力感知 v2（时间感知路径威胁投影） | **负结果**：60-seed A/B 88.9% vs 87.8%（-1.1pp），迷宫关 S6/S26 各 -15pp，开阔关 S28 +12pp；检测正确但 diversion 响应在迷宫中有害 |
-| **§69** | 08-01 | (默认 OFF) | 交叉火力感知 v3（地形门控 + A* 威胁成本） | **双负结果**：地形密度无法区分回退/改善关（S1 改善+7pp 密度 37% > S6 回退-15pp 密度 27%）；A* cost=3.0 时 -1pp（p=0.001），cost=1.0 时 -6pp。实验系列终结 |
-| **§48-revisit** | 08-01 | (默认 ON, 门控) | 钢墙专用闪避遮挡 + 地形门控 + 钉死位门控 | **首个通过验收的 §48 变体**：35×60 net +1 flip、0 关回退；S32 +3.3pp@120、S6 +0.8pp@120。钢迷宫关（brickWallRatio<0.10）启用，砖密关（S14/S26）逐字节不变 |
-| **§49-revisit** | 08-01 | (默认 ON, 参数化) | §52 v2 对枪抵消参数化 + 当前树重验 | **第二个通过"零负结果"验收**：35×60 net +3 flips、0 ON→OFF 负翻转（S26 +2.5pp@120、S20 +0.8pp@120）。逐字节验证参数化默认 = 已提交硬编码基线（§70 纪律） |
-| **§68-revisit** | 08-01 | (默认 OFF, 否决) | per-seed tick-diff 重新调优 §68-v2（4 变体全负） | **方法论级负结果**：raw -18 / 提前量上限 -25 / 开阔度门控 -14 / 组合 -25 全负；坏翻转 12.6-23.1t 过早转向 vs 好翻转 8.3-8.4t 逃生；全地形指标无法区分好坏关。代码回退，crossfire 维持默认 OFF |
-| **§80** | 08-01 | (默认 ON, 修复) | 冰冻窗口转身抖动守卫（aggressive 分支停火转向前置转身后扫描） | **修复验收（35×60×2 真值）**：冰冻击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）；过关率 coop +0.2pp（net +3）、single +0.9pp（**net +20**），≥5pp 回退 0 关；S32 Star Fort 60-seed 持平 Δ0.0pp（10/30-seed 回退确认为种子噪声，机制已 per-seed 定位）；最坏 streak（Brick Maze s27/seed1 1166t）两态逐字节相同（守卫惰性，另一机制，留作后续） |
-| **§87** | 08-02 | (默认 ON) | 近距离安全路径拾取优先级（炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格，路径安全） | **35×60 A/B（SHIPPED 默认）**：1899→1908（**+9 wins**，90%→91%，suite 0.7439→0.7551）；无显著负向关；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3；三个守卫（maxDanger=0 / minEnemyDist=5 / spawnRowMax=3）由 per-seed tick-diff 定位机制后加入；OFF 逐字节不变；门禁真值重生成（聚合 floor 581→610） |
-| **§95** | 08-03 | (默认 ON, 100ms) | 转弯周期限制 turnCooldownMs 50→100ms（用户指令 160ms≈360APM，A/B 后取舍为 100ms）+ SimulationCombat cooldown 期间原地等待 | **35×60 全档扫描：50ms 基线 91.0%（suite 0.7561）→ 160ms 原始 87.4%（net −75）→ 160ms+等待 89.8%（net −24）→ 50ms+等待 88.9%（net −44）→ 100ms+等待 91.2%（net +5，suite 0.7741，SHIPPED）**；per-seed 定位漂移致死（S26/S12 过弯/撞墙）→ 原地等待修复；AI 转向承诺锁尝试净负回退；S30 +13.3pp / S20 +10pp 受益，S19 −8.3pp 为唯一 ≥5pp 负向关；门禁真值重生成（均值 91.19%，floor 610→612）；split-parity 55555 gameover→stage_clear 重锁 |
+| **§47** | 07-30 | — | 基地保护环碰撞修复 + base_destroyed 归因（§47） | S32 72.5%→**85.0%**@120，35×60 真值 81.9%→**87.7%**，门禁真值重生成 |
+| **§48** | 07-30 | (已回退) | 假闪避地形遮挡"修复" | **负结果**：S32 -10pp@120，闪避地形盲是承重行为，测试锁定 |
+| **§49** | 07-30 | (已回退) | 炮口相向火后闪避 | **负结果**：35×20 A/B -2.6pp，S18 -25pp、S28 -15pp |
+| **§58** | 07-31 | — | 覆盖表泛化（逐关硬编码→数据驱动适配） | 覆盖表清空，均值 87.7%→88.9% |
+| **§67** | 07-31 | — | 调参冻结（平坦最优确认） | 多轮 CMA-ES 探针均在 ±1pp 噪声内，正式停止调参 |
+| **§68** | 08-01 | (默认 OFF) | 交叉火力感知 v2（时间感知路径威胁投影） | **负结果**：60-seed -1.1pp，迷宫关 -15pp、开阔关 +12pp |
+| **§69** | 08-01 | (默认 OFF) | 交叉火力感知 v3（地形门控 + A* 威胁成本） | **双负结果**；实验系列终结 |
+| **§48-revisit** | 08-01 | (默认 ON, 门控) | 钢墙专用闪避遮挡 + 地形门控 + 钉死位门控 | **首个通过验收的 §48 变体**：35×60 net +1 flip、0 关回退 |
+| **§49-revisit** | 08-01 | (默认 ON, 参数化) | §52 v2 对枪抵消参数化 + 当前树重验 | **零负结果验收**：35×60 net +3 flips、0 ON→OFF 负翻转 |
+| **§68-revisit** | 08-01 | (默认 OFF, 否决) | per-seed tick-diff 重新调优 §68-v2（4 变体全负） | **方法论级负结果**，crossfire 维持默认 OFF |
+| **§80** | 08-01 | (默认 ON, 修复) | 冰冻窗口转身抖动守卫（aimTurnSnapGuard） | 35×60×2：冰冻击杀 +136%~+157%，single +0.9pp（net +20），≥5pp 回退 0 关 |
+| **§87** | 08-02 | (默认 ON) | 近距离安全路径拾取优先级（8/4/2 格 + 三守卫） | **35×60 +9 wins**，0 显著负向关，门禁真值重生成（floor 581→610） |
+| **§95** | 08-03 | (默认 ON, 100ms) | 转弯周期限制 turnCooldownMs 50→100ms + 原地等待 | **35×60 全档扫描选优**：100ms+等待 91.2%（net +5）SHIPPED；门禁 floor 610→612 |
 
-> 注：DECISIONS.md 已精简为索引（2026-07-31），详细决策见本文档和 `docs/perf-optimization.progress.md`。
+> 注：本纪元所有 A/B 均为 classic 单一难度口径（hard/chaos 门禁是 v2 纪元 M0 才建立的）。
 
----
+## I.3 各阶段详情
 
-## 3. 各阶段详情
-
-### 3.1 基础设施与早期轮次（2026-07-27/28）
+### I.3.1 基础设施与早期轮次（2026-07-27/28）
 
 - **参数化**：阈值常量全部移入 `GodAIParams`，供 CMA-ES 自动调参（12→20 维）。
-- **工具**：`tools/optimize/optimize-godai.ts`（sep-CMA-ES）、`tools/diag/decision-trace.ts` + `tools/diag/analyze-trace.ts`（决策追踪，用它找到 T2a 冷却空转、防守偏左、首杀过慢三大失误）。
+- **工具**：`tools/optimize/optimize-godai.ts`（sep-CMA-ES）、`tools/diag/decision-trace.ts` + `analyze-trace.ts`（决策追踪，找到 T2a 冷却空转、防守偏左、首杀过慢三大失误）。
 - **Round 2 关键发现（§33）**：仿真工具漏设 `world.rules`（classic 规则从未生效，头号 bug）、`onCooldown` 需用子弹数冷却、navigate 分支曾无条件开火自毁基地、directMove 改垂直优先后单种子击杀 0→17。
-- **Round 3（curriculum）**：5 个迷你关隔离验证子系统（火控/威胁优先级/S6 切换/破墙追击/防守回归）；`hasBase()` 守卫修复无基地关假阴性；`endgameEnemyThreshold` 声明未用的潜在 bug 接上（1→6）。
-- **v4.1 结论（§40）**：胜率钉死 20%，5 个 0 杀种子是确定性死锁 —— **参数调优已到天花板，必须改行为架构**。这个判断催生了 P0–P3。
+- **Round 3（curriculum）**：5 个迷你关隔离验证子系统；`hasBase()` 守卫修复无基地关假阴性；`endgameEnemyThreshold` 声明未用的潜在 bug 接上。
+- **v4.1 结论（§40）**：胜率钉死 20%，5 个 0 杀种子是确定性死锁 —— **参数调优已到天花板，必须改行为架构**。催生 P0–P3。
 
-### 3.2 P0–P3：行为死锁逐个击破（2026-07-29）
+### I.3.2 P0–P3：行为死锁逐个击破（2026-07-29）
 
 | 阶段 | 修复 | 根因 | 效果 |
 |---|---|---|---|
 | P0（§41） | T2a 仅当 `scan.enemy==true` 才驻车；反驻扎计时；卡死逃逸向地图中心 | 旧代码对着墙无限开火不前进（单种子 5900 tick 空转） | S1 22.5%→87.5%（单项最大杠杆） |
-| P1（§42） | 闪避对齐阈值 12px→32px；`baseUnderThreat` 提前到 row≥18；受威胁时无条件回防；受威胁时跳过 T2a/道具 | 闪避阈值窄于坦克判定箱 → 玩家撞向检测不到的子弹 | S0 70%→87.5%，S1 gameover 清零 |
-| P2（§43） | 驻扎判定改 ±1 格区域（防亚格振荡重置计时）；卡死兜底任意可通行方向；`predictEnemyCrossing` 预判横穿射击 | 精确格匹配被 32↔40px 振荡打败，逃逸从未触发 | S1 100%，S3 50%→66.7% |
+| P1（§42） | 闪避对齐阈值 12px→32px；`baseUnderThreat` 提前到 row≥18；受威胁时无条件回防 | 闪避阈值窄于坦克判定箱 → 撞向检测不到的子弹 | S0 70%→87.5%，S1 gameover 清零 |
+| P2（§43） | 驻扎判定改 ±1 格区域；卡死兜底任意可通行方向；`predictEnemyCrossing` 预判横穿射击 | 精确格匹配被 32↔40px 振荡打败，逃逸从未触发 | S1 100%，S3 50%→66.7% |
 | P3（§44-P3） | **A* 拆砖寻路**（brick 可通行 5× 代价）；followPath 对砖开火；中心附近卡死改追最近敌 | A* 视砖不可通行 → 密砖关永远找不到路（S9 瘫痪根因） | **S9 0%→80%**，多关 CMA-ES 首次防单关过拟合 |
 
-P3 另有重要否决：**漫游约束（回防软约束）引发负反馈循环**（约束移动→杀敌少→漏敌多→更多 gameover），验证了 §41 的警告 —— 此教训在后续 Round 5 / Phase A 反复重现。
+P3 重要否决：**漫游约束（回防软约束）引发负反馈循环**（约束移动→杀敌少→漏敌多→更多 gameover）——此教训在 Round 5 / Phase A / M8 反复重现。
 
-### 3.3 P4 战役：全 35 关 floor-aware 调优（2026-07-29, `2d9fa77`）
+### I.3.3 P4 战役：全 35 关 floor-aware 调优（2026-07-29）
 
-- **7 轮 CMA-ES**（IPOP，15-worker 池，fitness v5.0 = 逐关胜率块 + deficit×8000 floor 惩罚），内环 35 关 × 20 seeds，决策全部 60 seeds 复核。
-- **两大方法论发现**：
-  1. **单一全局参数集无法满足 35 关** —— 失败家族需求相反（S6 要禁回撤，S18 要更宽回撤；全局动任一方向另一关掉 −30pp）。
-  2. **20-seed 探针会选中海市蜃楼**（S32 单关 CMA-ES 的 60%@30 seeds 在 60 fresh seeds 复测仅 43%）。
-- **解法：逐关参数覆盖表**（`src/ai/godai-stage-overrides.ts`，data over code）。每条覆盖须 ≥60 seeds 与无覆盖对照验证。
-- **结构性行为保留**：race-to-base 判定并入 `isBaseUnderThreat()`；寡不敌众回撤进 `selectTargetImpl`。否决回滚：race 路径膨胀、猎杀出生带规避。
-- **定稿**：均值 81.9%@60 seeds；34/35 ≥60%；唯 S32 Diamond 52%。回归门禁从 2 关重写为全 35 关。
+- **7 轮 CMA-ES**（IPOP，15-worker 池，fitness v5.0 = 逐关胜率块 + deficit×8000 floor 惩罚），决策全部 60 seeds 复核。
+- **两大方法论发现**：① 单一全局参数集无法满足 35 关（失败家族需求相反）；② 20-seed 探针会选中海市蜃楼（S32 单关 60%@30 seeds 复测仅 43%）。
+- **解法：逐关参数覆盖表**（后经 §58/§81 泛化移除）。每条覆盖须 ≥60 seeds 与无覆盖对照验证。
+- **定稿**：均值 81.9%@60 seeds；34/35 ≥60%；回归门禁重写为全 35 关。
 
-### 3.4 Round 5：S32 贴身缠斗（2026-07-29, `49b1011`）
+### I.3.4 Round 5：S32 贴身缠斗（2026-07-29）
 
-- **用户洞察**：4 血重甲远程对射极低效（15 格弹道 1s / 4 枪 4s），贴身 2 格弹道 ≈0、0.5s 击毙 —— **8 倍效率**。
-- **实现**：新参数 `t2aMaxRange`（默认 15 = 其余 34 关逐字节不变），S32 覆盖设 2；辅助 `campTimeoutTicks:50`、`antiCampSuppressTicks:50`、`damagedArmorBonus:1`、`navStuckTicks:90`。
-- **成绩**：S32 43.3%→**72.5%** @120 seeds（base_destroyed 43→21，lives_exhausted 25→12）；35 关均值 86.9%@20 seeds，0/35 破 floor。
-- **7 个否决方案**（全部 ≥60 seeds）：守卫带 7%、基地中心目标 32%、T2a 全跳 28%、T2a 快车跳 50.8%@120、缩 leash 24–48%、aimError=0 47%、damagedArmorBonus>1 无差异。共同教训：**任何打断重甲击杀的干预都是净负**。
+- **用户洞察**：4 血重甲远程对射极低效，贴身 2 格弹道 ≈0、0.5s 击毙 —— **8 倍效率**。
+- **实现**：`t2aMaxRange`（默认 15）S32 覆盖设 2 + 辅助参数。
+- **成绩**：S32 43.3%→**72.5%** @120；35 关均值 86.9%@20。
+- **7 个否决方案**（全部 ≥60 seeds）。共同教训：**任何打断重甲击杀的干预都是净负**。
 
-### 3.5 Phase A：智能基地威胁模型（2026-07-30, `7435089`）—— 高价值负结果
+### I.3.5 Phase A：智能基地威胁模型（2026-07-30）—— 高价值负结果
 
-- **假设**（plan/God-AI-Next-Round.md）：`isBaseUnderThreat()` 类型盲+地形盲是 S32 剩余 base_destroyed 尾部的根因；引入速度/朝向/HP/距离加权威胁评分应能改善。
-- **实现**：`src/ai/god/SmartThreatModel.ts`（threatScore / canShootBaseFrom / smartIsBaseUnderThreat）+ 7 个新参数全默认 OFF（OFF 时逐字节不变，已独立复验）。
-- **结果：8+ 变体 @120 seeds 全部否决**（最差 −20pp；类型权重单项 −1.7pp 噪声内；35×20 A/B 全关中性）。
-- **三条推翻计划假设的诊断发现**：
-  1. ~~S32 基地杀手是 armor 53% + power 37%~~ —— **此归因已被 §47 推翻**：当时的 killerKind 是"事发前最后发射的敌方子弹"，非实际命中子弹。真实拦截（120 seeds）：**fast=14、armor=4、power=2、player=1**；且 S32 队列实为 8 armor/8 fast/4 power（旧文档 10/7/3 有误）。Phase A 干预否决结论仍然有效。
-  2. 贴身缠斗极脆弱：任何目标切换都让 lives_exhausted 暴涨（12→32 最差）。
-  3. **瓶颈是响应时间不是检测**：15/19 拆家发生在前 3000 tick 早期波；7/19 时玩家就在基地 0–5 格却来不及；致命子弹是护墙毁后近距发射，T8 拦截无法触发。
-- **处置**：S32 覆盖回退原配置（72.5% 不变）；基础设施保留默认 OFF 备用；计划文档顶部加"已实测否决"横幅。
+- **假设**：`isBaseUnderThreat()` 类型盲+地形盲是 S32 剩余 base_destroyed 尾部的根因。
+- **实现**：`src/ai/god/SmartThreatModel.ts` + 7 个新参数全默认 OFF。
+- **结果：8+ 变体 @120 seeds 全部否决**（最差 −20pp）。
+- **三条诊断发现**：① S32 基地杀手归因被 §47 推翻（killerKind 口径 bug）；② 贴身缠斗极脆弱；③ **瓶颈是响应时间不是检测**（15/19 拆家发生在前 3000 tick）。
+- **处置**：S32 覆盖回退；基础设施保留默认 OFF；计划文档加"已实测否决"横幅。
 
----
+## I.4 Classic 纪元重要实验详情
 
-## 4. 未解决问题与下一步方向
+### I.4.1 §47 基地保护环碰撞修复（S32 破局点）
 
-**S32 差距已关闭（72.5%→85.0% @120，正式值）**：§47 基地保护环碰撞修复将 S32 提升至 85.0%@120 / 90.0%@60，**超过 80% 目标**。修复根因不是 God AI 策略，而是仿真层碰撞语义：`bulletHitsTerrain()` 在同一 tick 内子弹可穿过保护砖命中基地（含玩家自毁）。修复后 base_destroyed 21→6。35×60 真值均值 81.9%→**87.7%**，0/35 破 floor，门禁真值已重生成。
+`bulletHitsTerrain()` 在同一 tick 内子弹可穿过保护砖命中基地（含玩家自毁）。修复后 S32 85.0%@120、base_destroyed 21→6、35×60 真值 81.9%→**87.7%**。**修复根因不是 God AI 策略，而是仿真层碰撞语义。**
 
-**§48 假闪避"修复"= 负结果（已回退）**：给 `findMostDangerousBulletImpl` 加弹道地形遮挡检查实测 S32 **-10pp**@120（85.0→75.0，lives 12→22），35×60 均值 -1.0pp；`isSafeDirImpl` 单独加遮挡为中性，按"中性结构改动一律否决"纪律一并回退。机制：贴身缠斗中"挡住子弹的砖"通常几 tick 内就被同一弹流打穿，地形盲闪避实为**有效的预判闪避**。`tests/threat-assessor.test.ts` 已锁定该行为，未来任何人想"修"它必须先过 S32@120 + 35×60 A/B（DECISIONS §48）。
+### I.4.2 §48 假闪避遮挡：负结果 → §48-revisit 钢墙专用通过
 
-**§48-revisit 钢墙专用遮挡 = 通过验收（默认 ON，地形门控）**：原 §48 失败根因有两个——①遮挡了砖（砖是临时的，几 tick 内被打穿，闪避实为预判）；②无视玩家几何约束（钉死角落时闪避就是逃生）。revisit 只遮挡钢墙，且仅在玩家未钉死（>2 个可移动方向）时生效；再用 `brickWallRatio < 0.10` 地形门控只对钢迷宫关（S6/S32）启用。诊断主线：per-seed tick-diff 找到 S32 seed-11 钉死机制（tick 738 玩家卡 (0,1) 不躲致死）→ 钉死位门控修复 → S26 seed-7 暴露 re-ranking 级联（跳过钢墙阻挡弹后改躲更远的无阻挡弹，tick 2954 提前一 tick 下躲）→ 地形门控让 S26/S14 逐字节不变。A/B 数据：S32 +3.3pp@120、S6 +0.8pp@120、35×60 net +1 flip 零回退。S32 base_destroyed 11→18 但 lives_exhausted 27→16——以基地风险换生存，净胜。
+原 §48（遮挡砖）S32 **-10pp**@120 —— 地形盲闪避实为**有效的预判闪避**（砖几 tick 内被打穿）。`tests/threat-assessor.test.ts` 锁定行为，未来想"修"必须先过 S32@120 + 35×60 A/B。
+§48-revisit 只遮挡钢墙（临时性低）+ 钉死位门控 + `brickWallRatio<0.10` 地形门控（只对 S6/S32 钢迷宫关启用）：**35×60 net +1 flip、0 关回退**，默认 ON。
 
-**§49 炮口相向火后闪避 = 负结果（已回退）**：用户洞察正确——炮口相向时错开半格开火导致双方互中。但"火后立即垂直闪避"的实现方式有根本缺陷：① `_postFireDodgeDir` 在 `think()` 顶部优先于子弹威胁检测，打断真正的闪避；② 冰面关 S18 暴降 25pp（65→40%），垂直闪避在冰面上失控滑入更危险位置；③ 对 1HP 敌人不必要的闪避浪费 tick；④ 打断 armor 多枪击杀循环。35×20 严格 A/B：修改后 85.0% vs 基准 87.6%（**-2.6pp**）。代码已回退。教训：任何在 `think()` 顶部插入新分支的改动都会打断 threat → T8 → T2a 的既定优先级链，后果不可预测。
+### I.4.3 §49 炮口相向火后闪避：负结果 → §49-revisit 对枪抵消通过
 
-**§68 交叉火力感知 v2 = 负结果（默认 OFF，基础设施保留）**：用户修正了 v1 的理解偏差，指出需检查整条移动路径、所有方向炮弹、多策略规避。v2 实现了时间感知路径威胁投影（`findPathThreatImpl` + `findSafeMoveDirImpl`），使用 `b.speed` 估算炮弹到达时间，±10 ticks 碰撞窗口。60-seed A/B：88.9%（OFF）vs 87.8%（ON）= **-1.1pp**（净负）。迷宫关 S6/S26 各 -15pp（diversion 代价极高），开阔关 S28 +12pp。核心诊断：检测正确但 diversion 响应在迷宫中有害——子弹安全 ≠ 位置安全。详见 §10。
+"火后立即垂直闪避"实现有根本缺陷（打断优先级链、冰面失控、打断击杀循环），35×20 A/B **-2.6pp** 回退。
+§52 v2 改为 **T2a 内联对枪抵消**（相向敌人开火时开火抵消敌方子弹）：35×120 **+5 wins**。
+§49-revisit 参数化（`counterFire` 默认 1 + `counterFireMaxRange` 默认 5）：**35×60 net +3 flips、0 ON→OFF 负翻转**，默认 ON。对枪价值不随地形分界。
 
-**已知代码层面的剩余结构性问题**（非碰撞/几何 bug，属设计局限）：
-- 子弹闪避不查弹道遮挡（隔钢墙也躲）——**已实测确认为有益启发式，勿修**（§48 负结果，测试锁定）。
-- 回防点几乎写死（(12, 24−defenseRowOffset)，仅列向 ±5 平移），不看地形。
-- nav-stuck 逃逸盲目朝 (12,12)（有兜底与瞬态性，风险有限）。
-- God AI 无"主动占据要道"概念 —— 默认行为 = 追最近敌 + 对齐才停火。多敌 A* 通路交点选防守位的设计已写入 plan（未实施，Phase B/C 因 Phase A 负结果已冻结）。
+### I.4.4 §68-§69 交叉火力感知实验系列：全部负结果（默认 OFF）
 
----
+- **§68-v2**（时间感知路径威胁投影 `findPathThreatImpl` + `findSafeMoveDirImpl`）：60-seed **-1.1pp**。迷宫关 -15pp（diversion 代价高）、开阔关 +12pp。**检测正确但 diversion 响应在迷宫中有害——子弹安全 ≠ 位置安全。**
+- **§69-A**（地形门控）：S1 改善 +7pp 密度 37% > S6 回退 -15pp 密度 27% —— **地形密度无法区分好坏关**。
+- **§69-B**（A* 威胁成本）：cost=3.0 时 -1pp、cost=1.0 时 -6pp。
+- **§68-revisit**（4 变体 per-seed tick-diff 重调优）：raw -18 / 提前量上限 -25 / 开阔度门控 -14 / 组合 -25 全负；增益与损失共享同一触发（坏翻转 12.6-23.1t 过早转向 vs 好翻转 8.3-8.4t），**不存在干净判别量**。
+- **核心结论**：任何形式的前瞻式炮弹规避（post-hoc diversion 或 A* 威胁成本）都是净负 —— 反应式闪避已足够好，路径偏离代价 > 炮弹风险。基础设施完整保留（M5 曾复用）。
 
-## 5. 方法论沉淀（可复用纪律）
+### I.4.5 §70 基地环开火保护（修复 coop 自杀 + V8 JIT 热循环敏感性）
+
+coop 模式 T2b 导航开火绕过 T6 基地保护检查 → 玩家打掉自家基地保护砖。修复：**不在热循环里做 baseSteel 检测**（steel 分支只做赋值，循环后一次性带状检查）。发现并记录 **V8 JIT 敏感性**：热循环里加 no-op 代码会改变 JIT 优化决策导致行为差异——热循环改动必须 per-seed 对比验证。60-seed A/B：suite 0.7254→0.7291，零净回归。
+
+### I.4.6 §79 coop God AI 误读 w.player（躺赢模式 P2 修复）
+
+`src/ai/god/` 7 处误读 `w.player`（P1）而非 `self.controlledTank(w)`（P2），导致 P2 重生后卡出生点并打穿基地墙。修复后单人逐字节不变，coop 过关率 100%、P2 平均剩余命 -7.63→+2.90。
+
+### I.4.7 §80 冰冻窗口转身抖动守卫（aimTurnSnapGuard）
+
+**根因**：转向不是免费的——`updateMovement` 换轴时 snap 垂直坐标，非网格对齐坦克一转身边缘被推 ≤CELL/2 px，目标甩出 scanAhead 偏移线；aggressive 分支无反驻车守卫。**修复**：commit 停火转向**之前**用转身后位置重跑扫描，假瞄准 → 落入 navigate。**35×60×2 终验**：冰冻击杀 coop +136%、single +157%；single 过关率 +0.9pp（net +20）；≥5pp 回退 0 关。S32 10/30-seed 回退在 60-seed 确认为种子噪声（Δ0.0pp）。
+
+### I.4.8 §83 dodgeDirection 回退分支逃跑 bug
+
+回退分支沿炮弹飞行方向逃跑 = 受困走廊必死。修复：排除飞行方向、优先朝向炮弹（对枪抵消）。**过关率 byte-identical**（35×60 前后 90.05% 相同）——bug 真实、单测锁定，但对 sim-runner 净中性。**方法论教训**：20-seed ⊂ 60-seed，若诊断期 git 态不干净，bulk 总胜率给出假"进步/回退"。
+
+### I.4.9 §84-§85 冰冻驻车 + 近战逃跑检测（默认 ON）
+
+- **§84** `aggCampTimeoutTicks=120`：aggressive 停火瞄准超时无击杀 → 抑制器 + 落入 navigate（35×20 +0.3pp）。
+- **§85** `closeCombatDangerCheck=1` + `closeCombatDangerRange=2`：仅 `moveDir === opposite(enemyDir)`（逃跑）且 32px 内才触发（range=4 太激进 -1.6pp；range=2 最优 +0.4pp）。
+- 最终 35×20：92.6% → **93.0%**（+0.4pp，0 关低于 80%）。
+
+### I.4.10 §87 近距离安全路径拾取优先级（SHIPPED 默认 ON）
+
+用户指令：炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格且路径安全 → 拾取 > 回防/杀敌。
+新 think() 分支位于 dodge 与 T8 之后；`pickupPriorityMode=1` + 三档范围 + **三个调优循环发现的守卫**：
+`pickupPriorityMaxDanger=0`（路上无敌人）、`pickupPriorityMinEnemyDist=5`（5 格内无完全生成敌人）、
+`pickupPrioritySpawnRowMax=3`（出生带行 ≤3 永不紧急）。**35×60 A/B：+9 wins（suite 0.7439→0.7551）**；
+0 显著负向关；OFF 逐字节不变已验证（排除 V8 JIT 级联）。门禁真值重生成（floor 581→610）。
+
+### I.4.11 §88 据守咽喉要地（SHIPPED 默认 ON，DECISIONS §93/§94）
+
+威胁点（可射击基地的格子）→ 威胁路径（炮口朝向门控）→ 咽喉要地（下半区 coverage 印章式选择）。
+3 轮 35×60 调优（per-seed 定位 S19/S26/S32 机制）→ 终值 suite +0.0010（p=0.30 无显著差异）→
+**120-seed 确认（S6/S16/S32 全 ≥ 持平）→ 用户拍板启用**：`chokepointMode` 默认 1，门禁真值重生成。
+
+### I.4.12 §95 转弯周期限制 50→100ms（SHIPPED 默认，DECISIONS §95）
+
+用户指令：player/enemy 转弯周期限制改为 160ms ≈ 360 APM 超级人类水平。**35×60 全档扫描**：
+50ms 基线 91.0% → 160ms 原始 87.4%（net −75）→ 160ms+原地等待 89.8%（net −24）→ 50ms+等待 88.9%（net −44）→
+**100ms+等待 91.2%（net +5，SHIPPED）**。per-seed 定位漂移致死（cooldown 期间沿旧方向滑行 → 改为原地等待）；
+AI 转向承诺锁尝试净负回退。110/125/140ms 细粒度确认 100ms 是邻域局部最优。门禁真值重生成（floor 610→612）。
+
+## I.5 方法论沉淀（Classic 纪元，v2 纪元继承）
 
 1. **60-seed 规则**：20-seed ±11pp 噪声只配筛方向；决定性结论必须 ≥60 seeds（S32 用 120）。
-2. **Trust-but-verify**：每轮他人/上轮报告的数字先独立复跑再采信（v3 曾出现 37.5% 头条不可复现；v4.1 起报告诚实度显著提升）。
+2. **Trust-but-verify**：每轮他人/上轮报告的数字先独立复跑再采信。
 3. **参数门控默认 OFF**：新行为一律 `param=0` 默认关闭，OFF 时逐字节不变 → 回归门禁天然守护其余 34 关。
-4. **Data over code**：逐关差异走覆盖表，不写关卡特判代码。
+4. **Data over code**：逐关差异走覆盖表/`computeStageAdaptedParams` 特征适配，不写关卡特判代码（§81 起禁逐关覆盖表）。
 5. **负结果照常提交并全记录**（DECISIONS §44-SmartThreat 是范本）：基础设施可复用，诊断数据扭转方向。
-6. **回归门禁随收益上调 floor**，禁止静默降低（S32 truth 51.7→72.5→90.0、聚合 77%→83% 已同步；§47 改仿真语义后全表真值按新 35×60 重生成）。
-7. **警惕负反馈循环**：一切"约束移动保基地"的方案（P3 漫游约束、Round 5 守卫带、Phase A skipT2a）都因同一机制失败 —— 约束→杀敌少→漏敌多→更多失败。
+6. **回归门禁随收益上调 floor**，禁止静默降低。
+7. **警惕负反馈循环**：一切"约束移动保基地"的方案（P3 漫游约束、Round 5 守卫带、Phase A skipT2a、M8 survivalRetreat）都因同一机制失败——约束→杀敌少→漏敌多→更多失败。
+8. **per-seed tick-diff 诊断法**（§0.B，见下）+ **V8 JIT 敏感**：热循环改动必须 per-seed 对比验证。
+
+### I.5.1 方法论创新：per-seed tick-diff 诊断法
+
+固化为可复用脚本 `tools/diag/per-seed-diff.ts`：dump 模式导出逐 tick 紧凑签名（位置/方向/开火/移动方向/敌人数/子弹数/状态），git stash 回退代码再 dump，diff 找第一个分歧 tick。总胜率只能告诉你"回归了多少"，per-seed 能定位"哪个 tick、哪个决策"。
+
+**方法工具箱（§88 战役固化，v2 纪元继续使用）**：
+
+| 工具 | 命令 | 替代的手工环节 |
+|---|---|---|
+| `tools/eval/eval-suite.ts --compare a.json b.json` | 全量 A/B（35×60 paired CRN） | — |
+| `tools/diag/per-seed-diff.ts` | `dump` + `diff`（含 `--set` 覆盖） | 单种子 tick 级分歧定位 |
+| `tools/diag/flip-scan.ts` | `--stages X --seeds 1-60 --set k=v` | 手写 bash 翻转扫描循环（自动分类 FLIP-TO-WIN / FLIP-TO-LOSE / TIED） |
+| `tools/diag/decision-probe.ts` | `<stage> <seed> <tick> [--set ...]` | 每次手写 tmp/probe-*.ts（打印该 tick 完整决策上下文） |
+| `tools/eval/gate-truth.ts` | `<eval-suite --json 输出>` | 手工 awk 提取门禁真值（生成可直接粘贴的代码块） |
+
+## I.6 调优签入规则（per-seed tick-diff 方法）
+
+1. **A/B test 脚本不做版本管理**：验证完毕后的 `ab-test-*.ts` 不入库（本地保留，`.gitignore` 已忽略）。
+2. **per-seed-diff.ts 的修改必须可泛化**：参数覆盖统一走通用 `--set <key>=<value>` 标志；参数特化的硬编码标志不入库。
+3. **临时数据文件不入库**：`tmp/` 下的 tick-dump、A/B 输出在 `.gitignore` 中忽略，commit 前删除。
+
+## I.7 参数与覆盖表现状（Classic 纪元遗留）
+
+- **全局默认**：`DEFAULT_GOD_AI_PARAMS` = P4 R7 最优（关键：threatRangeCells 10、maxPlayerDistFromBase 26、powerupMaxDivertDistance 16、huntAllyCount 1、aimError 0.03）。
+- **覆盖表机制已完全移除**（§81）：不允许按关卡名做特殊化；统一 `computeStageAdaptedParams()`（armorAdaptRatio / brickDenseAdaptRatio / 钢砖比 / 森林 / 水域密度等）按关卡特征自动触发。
+- **保留未启用**（M0.5 退役前）：smartThreatModel 族 7 参数、crossfireAwareness 族（§68/§69）、guardBandMode、§86 dodge 族 —— **M0.5 已全部退役/归档至 `experimental.ts`**（见 §II.1）。
+- **Classic 纪元已发布参数默认**：`counterFire=1`、`evasionSteelOcclusionBrickRatio=0.1`、`aimTurnSnapGuard=1`、`pickupPriorityMode=1`（+三守卫）、`chokepointMode=1`、`turnCooldownMs=100`、`aggCampTimeoutTicks=120`、`closeCombatDangerCheck=1`。
 
 ---
 
-## 6. 参数与覆盖表现状
+# Part II. v2 重设计纪元（M0–M11，2026-08-03）
 
-- **全局默认**：`DEFAULT_GOD_AI_PARAMS` = P4 R7 最优（关键：threatRangeCells 10、maxPlayerDistFromBase 26、powerupMaxDivertDistance 16、huntAllyCount 1、aimError 0.03 —— 微量瞄准噪声全局打破互堵僵局）。
-- **覆盖表机制已完全移除**（原 `src/ai/godai-stage-overrides.ts` 已删除，DECISIONS §81）：不允许按关卡名做特殊化（防止过拟合）。统一过滤逻辑为 `computeStageAdaptedParams()`（`armorAdaptRatio` / `brickDenseAdaptRatio` / 钢砖比 / 森林 / 水域密度等），按关卡特征自动触发，无需逐关硬编码。
+## II.0 设计文档（已归档，核心内容保留于此）
 
-- ~~S6 Iron Curtain~~ 覆盖已移除（§54, 2026-07-30）：R8 保守覆盖（maxPlayerDistFromBase:16 等）在 RNG split + §47 后过时，120-seed 探针覆盖 59.2% < 裸默认 62.5%，且 base 破坏数反增（43 vs 30）。移除后 35×60 S6 从 57%→72%，suite +0.019。
-- ~~S18 Frozen Field~~ 覆盖已移除（§55, 2026-07-30）：outnumberedRadiusCells:14 导致过早回撤丢失中盘控制权，120-seed 覆盖 56.7% < 裸默认 60.8%。aimError:0 也已无效（默认 0.03 已足够小）。
-- ~~S25 Ice Palace~~ 覆盖已移除（§55, 2026-07-30）：aimError:0 vs 默认 0.0303 逐种子完全相同（77.5% = 77.5%），覆盖完全无效。
-- **审计结论**：5 个原始覆盖中 3 个（S6/S18/S25）已过时，过时率 60%。基线变动后必须重新审计所有覆盖。
+> `plan/God-AI-Redesign-Review.md`（诊断）与 `plan/God-AI-Redesign-v2.md`（设计）已于 2026-08-03
+> 用户要求瘦身时删除；本节为其核心内容的永久归档。代码注释中的 `plan/God-AI-Redesign-v2 §X`
+> 引用指向本设计文档原文（git 历史可找回未跟踪文件）。
 
-- **保留未启用**：`smartThreatModel` 族 7 参数（Phase A，默认 OFF）、`crossfireAwareness`（§68，默认 OFF）、`crossfireOpenObstacleRatio`（§69-A，默认 OFF）、`crossfirePathCost`（§69-B，默认 OFF）、`guardBandMode`（已否决）。
+### II.0.1 Review 诊断（四项架构级盲区 + 四项用户质疑）
+
+**三个代码验证的盲区**（`god/*` 中引用数均为 0）：
+1. **难度盲**：同一套 `DEFAULT_GOD_AI_PARAMS` 打所有难度（hard/chaos 敌人 rookie~commander 层级是另一个物种）。
+2. **敌人 AI 层级盲**：不读 `tank.aiState.level`，commander（预测深度 8、闪避 0.9、瞄准误差 0.05）与 rookie 同等对待。
+3. **自身命数盲**：不读 `world.lives`，chaos 1 命仍按"3 命可以浪"的 classic 节奏打。
+4. **评估循环只有 classic**：门禁/真值/CMA-ES 全 classic 口径，hard/chaos 无任何护栏。
+
+**实测基线**（35×20）：classic 91%、hard 39%、chaos 35%。**决定性发现：hard/chaos 失败 100% 是
+lives_exhausted（玩家被打死）、0% base_destroyed**（非 classic 基地 HP=120）——瓶颈是玩家自己的生存。
+最弱关全是"敌人容易包围玩家"的密集/迷宫关（Steel Fortress / Labyrinth / Thicket / Battlement）。
+
+**四项用户质疑逐条检验**：
+1. 补丁叠补丁/策略冲突（**证实**）：~20 分支顺序 if-else 即优先级；`GodAIParams` 95 字段；20+ 跨 tick 状态；六处冲突表（导航微调三连、拾取三通道、四个防卡死机制、§86 振荡四方案、chokepoint vs canHunt、适配层无记忆叠加）。
+2. 大量 ON/OFF 开关（**证实且更糟**）：~30 个 0=OFF 开关；4 族僵尸参数 ~16+ 个从未在发布配置生效；2 个已回退死参数仍留 interface。
+3. classic 过拟合（**证实且有实际后果**）：`computeStageAdaptedParams` 阈值注释点名 classic 关；生成库悖论——`gen-library.ts` 默认 hard 验证而 God AI hard 只有 39%，生成库被"classic 调优能力"反向筛选 = **过拟合的镜像**。
+4. 方法论不成体系（**部分证实**）：per-seed-diff/flip-scan/decision-probe/gate-truth 骨架先进，但缺死亡归因工具、无决策直方图、4 个 ab-test 已入库（违反 §0.C）、无三难度门禁。
+
+### II.0.2 v2 设计（三大支柱 + 六条评审决议）
+
+**目标口径**（60-seed 终审）：classic >98%、hard >80%、chaos >50%。
+
+| 支柱 | 解决 | 核心动作 |
+|---|---|---|
+| **A 决策链评分制** | 补丁叠补丁/顺序即优先级 | think() ~20 分支重构为候选行为评分制（与敌方 evaluateGoals 同构）；M1 外壳用"链序权重+二值得分"保证逐字节不变；之后权重数据可调 |
+| **B 战斗感知+自适应** | 僵尸参数/难度盲 | 四层参数（L0 全局基线冻结 / L1 难度增量 / L2 关卡适配 / L3 运行时）；**EnemyModel 敌情感知模型**（评审决议 3 升级：不读难度标签，战斗中感受敌人进攻倾向/配合/纪律） |
+| **C 生成地图泛化测试集** | 过拟合镜像 | 冻结确定性生成语料（35 关 × 20 seeds × 3 难度），God AI 向语料达标（评审决议 5：hard > classic > chaos 分期上线） |
+
+**六条评审决议**（2026-08-03 拍板）：
+1. M1 允许顺手清理分支内部（拆 M1a 外壳 + M1b 内部清理，每个动作单独过 per-seed-diff）。
+2. 僵尸参数移入收纳区，**interface 必须移除**（编译器强制清理引用）。
+3. **L1 降级为初始先验**：God AI 不依赖难度标签，主要自适应由 EnemyModel 承担（支柱 B 最大架构变化）。
+4. **chaos 命数 1→3**；若仍难达，启用备用档"出生即一星"（playerStartLevel 0→1）。M0 基线必须先应用再测量。
+5. 语料 35 关 × 20 seeds，三难度分期上线。
+6. M0.5 退役边界：按策略逻辑整合（trapAvoidance→survive 候选、smartThreat→EnemyModel 特征）或清理。
+
+**执行路线图**：M0 测量 → M0.5 退役 → M1 外壳（parity 窗口，唯一允许"重构不改行为"）→ M2 权重 →
+M3 行为 → M4 调优 → M5 泛化 → M6 收官。**M1 之前禁止任何权重/行为改动。**
+
+## II.1 M0 测量层 + M0.5 僵尸参数退役（SHIPPED，DECISIONS §96）
+
+一次性落地五项：
+1. **chaos 命数 1→3**（`src/config/difficulty.ts`，评审决议 4）——先改配置再测基线；
+2. **逐死亡事件 telemetry**：`SimResult.telemetry.deaths[]`（tick/凶手 AI 层级/凶手 kind/当时行为分支 `_lastBranch`），`tank_destroyed` 事件新增 `byId`；
+3. **死亡归因工具** `tools/diag/death-attribution.ts`（M0 第一交付物）；
+4. **三难度门禁** `tests/god-ai-hard-chaos-gate.test.ts`（hard/chaos 逐关 floor，基于 20-seed 实测容差 4 wins）；
+5. **22 个僵尸/否决参数退役**：interface 95→~73，归档 `experimental.ts`（结构化 `ArchivedSelf` 类型，与生产解耦）。
+
+**基线（35×20，命数调整后）**：classic 91.0%（门禁持平）/ hard 38.6% / chaos 34.6%。
+
+**关键发现**：
+- **chaos 命数 1→3 几乎无提升（35%→34.6%）**→ 失败是 AI 反复死亡，不是命数紧张（推翻"调命数即可达标"假设）。
+- **死亡归因：hard/chaos 各 83% 玩家死亡发生在 dodge 闪避分支**——M3 第一优化靶点。
+- **模块增强陷阱（M0.5a）**：归档代码曾用 `declare module './params'` 读退役字段——TS 模块增强程序全局生效，把生产 interface 字段变 optional，破坏 optimize-godai 的 keyof 索引。改为结构化 `ArchivedSelf` 后修复。教训：归档代码绝不通过模块增强触碰生产 interface。
+
+## II.2 M1 决策链评分制外壳（SHIPPED，DECISIONS §99）
+
+新建 `src/ai/god/DecisionCore.ts`（`ActionId` / `ACTION_WEIGHTS` / `DecisionContext` / `Candidate` / `runChain`），
+think.ts 顶层 if-else 链替换为「公共前缀外壳 + 8 候选体权重序循环」。候选体 = 原分支**原样转录**，
+`evaluate()` 提交即执行（返回 true 当且仅当原分支会 `return`）。权重严格镜像链序：
+`dodge(1000) > interceptBase(900) > pickupHigh(800) > aggro(700) > pickupMid(600) > engage(500) > pickupLow(400) > hunt(200)`。
+
+**四条 M1 定理**：① 仅胜出候选的体执行（前置条件求值无副作用 → 选胜者 → 仅胜者体执行，防污染跨 tick 缓存）；② 前置条件精确复制；③ 内部判定 = 二值（M1 不用连续 value/urgency，否则递减权重 + 连续分 ≠ 链式 first-match）；④ 权重 = 链序，early-exit 精确。
+
+**三重验收全过**：① 18 份 per-seed-diff dump（弱关 S2/S23/S27 + 强关 S0/S22/S34 × 3 seeds）全部 IDENTICAL；② split-parity 9/9；③ 三 gate 字节持平 M0（classic 637/700、hard 270/700、chaos 242/700）。性能 +2.6%~+3.3%（5% 预算内）。
+**M1 是唯一「重构不改行为」窗口，已关闭**；后续任何改动默认走 60-seed A/B + 官方口径。
+
+## II.3 M2 权重数据化（M2a SHIPPED / M2c 诚实阴性 / M2b 推迟，DECISIONS §100）
+
+- **M2a**：`GodAIParams.actionWeights?: Partial<Record<ActionId, number>>` + `orderedCandidates`
+（有效权重降序稳定排序，`GodAIInput.reset()` 预构建，禁止每 tick 排序 AGENTS §14.3）。默认无 overrides = M1 链序（parity 由构造保证）。
+- **M2c 诚实阴性**：classic 35×20 官方口径 4 个重排实验全部持平/劣化（hunt↑ -2.7pp / engage↑MID +0.1 / pickupHigh↑ +0.0 / engage↑HIGH -0.6）——**M1 链序是局部最优**，91→93% 需行为改动而非重排。
+- **M2b**（selectTarget mini-scoring）推迟：零行为收益 + 高 parity 风险，M4 若出现 chokepoint-vs-hunt 信号再议。
+
+## II.4 M3–M5 行为家族：dodge/站位候选全部阴性（默认 OFF 旋钮保留）
+
+| 里程碑 | 候选 | 实现 | 结果（官方口径） |
+|---|---|---|---|
+| M3（§97/§98/§101） | dodge 对枪抵消 | `dodgeCounterFire` + `dodgeClearanceScore`；三轮门控（distance / timing-aware pinned / terrain-only pinned） | 官方口径 chaos 34.6→34.1%（持平偏负）；S25 确定性回归 5/20→1/20；**对枪在任何门控下对 chaos 无发布级杠杆** |
+| M4（§102） | 带安全门控的紧急对枪 | dodge 分支内 `hasCrossFireBulletImpl` 安全门控 + 近距离对枪 | 修正口径事故后 +0.7pp 噪声内，不发布 |
+| M5（§103） | 站位提前规避 | HUNT 候选 `findPathThreat` + `findSafeMoveDir` 换 cell-1 单步 | 触发率 ~1%，classic 0.0 / hard +0.4 / chaos -1.1pp 全噪声，不发布 |
+
+**M3 两轮完整机制记录**：
+- **§97 伪影**：A/B 脚本传 `stageIndex`，与 eval-suite/gate 口径不一致，"chaos +3.8pp" 为伪影。官方口径重测 chaos 持平偏负。**stageIndex 伪影完整机制**（§101 实证）：`killScore` 用 `levelFactor(stageIndex)` 缩放 → `dropOnScoreMilestone` 掉落时机改变 → power-up 掉落不同 → world.rng 流分歧 → 整场模拟分歧。
+- **§98 Gate 确定性根因**：`bun test` 跨文件共享模块状态，测试突变 DEFAULT 单例污染全局。修复：`GodAIInput` 构造器克隆 `_baseParams` + 门禁传克隆 + 测试显式克隆——**gate 在任何 bun test 上下文下都确定**。
+- **§101 机制级结论**：走廊/迷宫关 terrain-pinned 对枪确实保命（+15~25pp）但开阔关站定对枪送死（-10~20pp），净值为零偏负。
+
+## II.5 M6 出生一星（SHIPPED）+ §105 模拟口径三重修复 + M7 追猎探针
+
+### M6 出生即一星（DECISIONS §104，首个 >3σ 发布）
+
+**靶点锁定（全链路数据驱动）**：玩家 **93% 存活时间都是 0★（单发慢弹）是 hard/chaos 打不好的根本瓶颈**。
+- 死亡机制探针：死亡时 0★ 占 hard 90% / chaos 88%；追猎途中（≥18 格）死亡 hard 45% / chaos 37%。
+- 等级暴露探针（排除伪相关）：存活时间内 0★ 占 hard 93% / chaos 88%——**不是死亡重置等级的伪影，是整局几乎从未升过星**（星掉落期望 ~0.4/局，实际收集 0.23-0.29/局）。
+- **60-seed 确认**：hard 36.2→45.3%（**+9.0pp**）、chaos 34.4→42.3%（**+7.9pp**），31/29 关变好。
+- 发布：hard/chaos `playerStartLevel` 0→1（§99 评审决议 4 授权的备用档）。门禁真值重生成。
+- 方法论固化：**先查星经济/数值配置，再动 AI 行为**——行为改动对 0★ 基础火力下的失败模式几乎无杠杆。
+
+### §105 模拟口径三重修复（DECISIONS §105，2026-08-03）
+
+`tools/sim/simulation-runner.ts` 三处与浏览器路径不一致的 bug：
+1. **playerLevel 同步**：此前模拟第一命恒 0★（浏览器第一命 = playerStartLevel），gate/A/B/归因全测的是"第一命 0★、重生 1★"口径。
+2. **lives 同步**：此前模拟 hard 恒用默认 3 命，而浏览器 hard 是 **2 命** —— hard 门禁/A/B 全部高估 ~6pp。
+3. **telemetry isPlayer 过滤**：`tank_destroyed` 从 `kind==='player'` 改为 `isPlayer` —— 诱饵坦克（视觉伪装 `kind='player'` 但 `isPlayer=false`）此前被误计为玩家死亡，chaos 误捕 201/689（29%）。
+
+修复后门禁真值重生成：hard **48.0%**（2 命真实难度）、chaos **48.9%**（lives 同步为 no-op）。
+
+### M7 追猎死亡探针（DECISIONS §105）：靶点证伪
+
+§96 的「追猎途中死亡 39%」是**误读**——死亡时距基地 ≥18 格中，「真追猎」（死亡前 60 tick 净远离基地）仅
+**6.6%（hard）/ 3.9%（chaos）**，**85-93% 是「回防途中」（净朝向基地）**。
+- 回防中死亡画像：dodge 分支 83-87%；凶手 tier 均衡；交叉火力 29-35%；**死角（≤2 出口）仅 0.4-1.5%**。
+- **SURVIVE 候选**（死角+包围触发）几乎永不触发 → 低杠杆，不投入。
+- **survivalRetreat 重新评估为 high-value**：2 命正确口径下 hard 死亡 **82.7-84.0% 发生在最后一命**。
+- 真追猎死亡画像：navigate 分支 54-75%、平均等级 0.00-0.13★——0★ 去追猎 = 送死（进一步支持星经济结论）。
+
+## II.6 M8 survivalRetreat（阴性，DECISIONS §106）
+
+M7 重估的 high-value 靶点，官方口径验证：**60-seed OFF 46.3% vs ON 46.1%（Δ-3 持平偏负）**，15 变好 / 17 变差。
+**机制低覆盖（先验）**：死亡 83-87% 发生在 dodge 分支，而 survivalRetreat 只挂在 hunt 分支（权重 200，最低）——它只改 navTarget，不改变 dodge 分支的死亡事件本身。
+教训固化：**hard/chaos 的死因在 dodge 分支，凡不改变 dodge 分支本身的候选体杠杆都趋零**。
+
+## II.7 M9–M10 horizon 承诺闪避：机制成立但 60-seed 阴性 + 双目标教训
+
+### M9 多弹道生存视界承诺闪避（DECISIONS §107）
+
+**探针证伪原假设**：交叉火力方向误选 ~0%、撞覆盖格 ~0%——「多弹道评分替代二元 isSafeDir」本身无杠杆。
+**真杠杆 = 承诺不足（commitment failure）**：起点可闪避 + 从未清带 = hard 31.8% / chaos 35.0% 的 dodge 死亡。
+S0 seed2 逐 tick trace：横向子弹 36 tick 前开始逼近，玩家在顶角 ±1px 振荡 30+ tick（flip 计数器永不达 3），
+从未垂直移出 32px 命中带——闪避数学完全可行（tArr=36 >> 清带 ~18 tick）却被二元 isSafeDir + base-closer 决胜浪费。
+
+`dodgeHorizonScore`（默认 OFF）：`dodgeHorizonTicksImpl` 对每个垂直候选方向估算生存视界（清带时间 vs t_arrive、
+地形受限自由路径钳制、next-cell 交叉火力保守计数，无分配）。**S0 seed2 机制级验证：OFF 死于 tick2158 vs ON 零死亡过关**——
+**证明 dodge 分支行为改动确实有杠杆（§97/§101 的「dodge 不可修」结论是修法问题）**。
+**但 60-seed 整体阴性**：chaos OFF 47.7% vs ON 44.2%（**-3.5pp**）。S10 seed6 trace 定位根因：ON 玩家 0 死亡却
+gameover——tick1822 基地被拆（承诺闪避提升生存但牺牲防守/杀敌效率，敌多时效率损失主导）。
+**方法论升级：dodge 行为改动必须双目标评估（生存 + 清关效率），只看 winrate 会掩盖机制。**
+
+### M10 时间余量门控变体（DECISIONS §108）
+
+成本机制修正（修正探针 endFrame bug 后）：M9 全开时 dodge tick +6%，**fireRate 恒低 1-2%**（OFF/ON 相同——
+dodge 分支本就极少开火，`shouldFireInDir(moveDir)` 垂直方向无敌人对齐），**真实成本是 dist +25px**（承诺闪避把玩家带离基地/战场）。
+
+门控家族 A/B（全部官方口径）：MARGIN8 20-seed chaos -2.4 / hard 0.0；**MARGIN6 20-seed hard +2.0 / chaos -2.0 →
+60-seed hard +1.6pp / chaos -2.4pp**；距离门控（maxDist=8）chaos -4.0pp **有害**。
+**双目标机制**：hard（2 命）保命收益 > 效率损失 → 弱正；chaos（3 命、敌多）效率损失主导 → 确凿负。参数全局无法按难度发布。
+**可复用信号**：S13 Steel Web 双难度大正（hard +13 / chaos +12）——走廊/窄道关承诺闪避保命收益大。
+
+**dodge 分支第三次同构结论**（§97/§101/§107/§108）：dodge 行为改动（对枪、紧急对枪、horizon、余量门控）在
+chaos 上全部无发布级杠杆；引擎方向耦合（移动 = 面朝 = 开火）使「边闪边打」机械上不可行。
+
+## II.8 M11 星经济二星（SHIPPED → 用户否决回退，DECISIONS §109/§110）
+
+**A/B（官方口径）**：60-seed hard **+9.4pp**（46.3→55.7%）、chaos **+7.5pp**（47.7→55.1%）——6-7σ 确凿强信号，
+双双破 50% 目标。机制：M7 正确口径显示玩家 78% 存活时间困在 1★（单发慢弹被装甲压制），2★ 子弹提速直接对冲。
+实现：hard/chaos `playerStartLevel` 1→2，门禁真值重生成（双 54.7%，floor 357）。
+
+**但用户评审否决**（§110）：「hard/chaos 起始两星，有点儿欺负敌人了」——difficulty 配置影响**人类游戏体验**
+不只是 God AI；2★ 起步稀释难度挑战性（与 MANIFEST「尊重原作精神」冲突）。**回退为 1★**，门禁真值回退 §105
+（hard 48.0% / chaos 48.9%，floor 310/316）。§109 标记 superseded。
+
+**星经济杠杆边界明确**：0★→1★（M6，+7.9~9.0pp）可；1★→2★（M11，+7.5~9.4pp）不可——**出生星级的合理上限是 1★**。
+
+## II.9 v2 纪元方法论沉淀（纪律升级）
+
+1. **口径纪律（四级）**：
+   - **stageIndex**：A/B 必须与 eval-suite/gate 同口径（不传 stageIndex）——stageIndex 进 killScore → 掉落时机 → RNG 分歧（§98/§101）。`tools/optimize/level-sim.ts` 除外（生成地图工具，内部自洽，标注已知偏差）。
+   - **字段名**：A/B 脚本传参后必须用 live probe 验证参数真实到达 sim（`godaiParams` vs `godAIParams` 大小写事故让 M4/M5 测了 DEFAULT vs DEFAULT，§103）。
+   - **lives/playerLevel 同步**：走 `loadStageData` 直驱的探针必须手动同步 `world.playerLevel` 与 `world.lives`（§105）。
+   - **telemetry isPlayer**：死亡归因按 `isPlayer` 过滤（诱饵坦克伪装 kind，§105）。
+2. **双目标评估**：dodge/生存类行为改动必须同时看生存（死亡分布）与效率（清关速度/base 防守）——hard/chaos 方向相反是常态（M9/M10）。
+3. **20-seed 只配 screening，发布前 60-seed 确认**：M8 +1.1pp、M10 +2.0pp 在 60-seed 下归零/衰减（§98/§106/§108）。
+4. **Gate 确定性**：`GodAIInput` 构造器克隆参数 + 门禁传克隆 + 测试显式克隆——任何测试污染共享单例都不会影响门禁（§98）。
+5. **先查星经济/数值配置，再动 AI 行为**（M6 教训）。
+6. **负结果照常全记录 + 实验旋钮保留**：每个失败候选的机制知识（pinned、horizon、margin）都是后续变体的基础设施。
+7. **Gate 真值随口径修复/行为变更重生成**，floor 随收益上调（§105/§109 纪律）。
+
+## II.10 v2 纪元新增基础设施与实验旋钮
+
+**基础设施（SHIPPED）**：`src/ai/god/DecisionCore.ts`（评分制外壳）、`src/ai/god/experimental.ts`（退役归档区，
+结构化 `ArchivedSelf`）、`src/ai/god/EnemyModel.ts`（敌情感知，默认 OFF）、`tools/diag/death-attribution.ts`
+（死亡归因，含逐死亡事件 telemetry）、`tests/god-ai-hard-chaos-gate.test.ts`（三难度门禁）、
+`tests/godai-split-parity.test.ts`（M1 parity 重锁）、探针族 `tmp/probe-chase-death.ts` / `tmp/ab-*.ts`（官方口径模板）。
+
+**实验旋钮**（默认 0/OFF，字节持平，未来变体可复用）：
+- dodge 家族：`dodgeCounterFire`（M3）、`dodgeClearanceScore`（M3）、`dodgeHorizonScore`（M9）、
+  `dodgeHorizonMinMarginTicks` / `dodgeHorizonMaxDistCells`（M10）。
+- 站位/生存家族：`pathThreatAvoidance`（M5）、`survivalModeLives` / `survivalRiskWeight`（M8）、`actionWeights.survive`（M3 survive 候选）。
+- 敌情感知家族：`enemyModelMode` / `enemyModelWindowTicks` / `tierWeightScale` / `dodgeRateShrinksT2a` /
+  `coordinationRiskWeight` / `enemyAccuracyRaisesSurvival` / `enemyTierWeightCommander` / `enemyTierWeightVeteran`（M3）。
+- 权重面：`actionWeights`（M2a，M4 CMA-ES 调优面）。
+
+## II.11 未来探索方向（按已证伪清单过滤）
+
+> 已证伪方向汇总（避免重复投入）：dodge 分支行为（M3 对枪 / M4 紧急对枪 / M9 horizon / M10 余量门控，四次）、
+> 权重重排（M2c）、survivalRetreat 回防（M8）、站位提前规避（M5）、出生 2★（M11/§110 用户否决）、
+> 前瞻式炮弹规避（Classic 纪元 §68/§69/§68-revisit 系列）。
+
+1. **M4 标量参数 CMA-ES（最优候选）**：`optimize-godai.ts` SEARCH_SPACE 基础设施就绪，目标 = 不改变 game feel 的
+   AI 行为参数（hard/chaos 门禁口径为 fitness，60-seed 官方口径验证）。M2c 证明权重重排无杠杆、M3-M10 证明行为改动
+   无杠杆后，标量参数是剩余最干净的杠杆面。
+2. **生存站位（M7 数据支撑）**：回防中死亡占 85-93%（chase/engage 分支，不碰 dodge）——但 M8 的教训是
+   "凡不改变 dodge 分支本身的候选体杠杆趋零"，需先解决 dodge 分支的死亡事件本身或找到 chase/engage 的直接干预点。
+3. **重跑死亡归因**（`tools/diag/death-attribution.ts`）：§110 回退 1★ 后确认最新死亡分布，数据驱动选靶点。
+4. **Pillar C 泛化语料**（评审决议 5）：冻结语料 35 关 × 20 seeds × 3 难度门禁（hard > classic > chaos 分期上线），
+   证明没有过拟合 classic 35——评审已授权，尚未实施。
+5. **S13 走廊承诺信号**：M10 发现走廊/窄道关承诺闪避保命收益大（hard +13 / chaos +12），地形条件承诺
+   （isTerrainPinned 风格）可复用 M9/M10 的 horizon 基础设施。
+6. **道具战术**（Review §4.5）：bomb/freeze 对闪避敌人是唯一稳定清场手段，把 §87 拾取从"顺手牵羊"升级为"战术投资"。
+7. **classic 91→98 收官**（Review 路线）：最弱 10 关逐一攻坚（Ice Palace 等），需 120-seed 逐关攻坚——周期最长。
 
 ---
 
-## 7. 工具链索引
+# 附：工具链索引（合并）
 
 | 工具 | 用途 |
 |---|---|
-| `tools/optimize/optimize-godai.ts` | CMA-ES 参数优化（--stages 多关聚合 fitness） |
-| `tools/sim/simulation-runner.ts` + `tools/sim/sim-pool.ts` / `tools/sim/sim-worker.ts` | 并行仿真（默认应用覆盖表） |
-| `tools/eval/validate-p4.ts --seeds N` | 全 35 关扫描终审 |
-| `tools/optimize/probe-params.ts` / `tools/diag/probe-s32.ts` | 参数敏感度探针（`--skipStageOverrides` 量纯参数） |
-| `tools/diag/diagnose-s32.ts` | 失败归因诊断（拆家时刻/玩家位置/凶手类型） |
-| `tools/optimize/ab-test-smart-threat.ts`（不入库，见 §0.C） | 35 关 off/on A/B |
-| `tools/diag/decision-trace.ts` + `tools/diag/analyze-trace.ts` | 逐 tick 决策追踪 |
-| `tools/relock-parity.ts`（已移除，一次性脚本） | parity 基线重锁 |
-| `tools/optimize/curriculum.ts`（`bun run curriculum`） | 5 迷你关子系统隔离验证 |
-| `tests/god-ai-regression-gate.test.ts` | 全 35×20 回归门禁（~11s） |
-
-> 注：A/B 诊断脚本（`ab-test-*.ts`，含 `tools/diag/ab-test-counter-fire.ts`、`tools/diag/ab-test-steel-occlusion.ts`）验证完毕后不入库，本地保留可重跑（§0.C 规则 1）。
-
----
-
-## 8. 文献索引
-
-- **权威决策**：DECISIONS.md §27/§28a/§33（早期）、§36-curriculum/§37/§39/§40（框架与 CMA-ES）、§41–§44-P3（P0–P3）、#36-P4（战役）、§43-S32（Round 5）、§44-SmartThreat（Phase A 负结果）、§47（基地保护环碰撞修复 + 归因）、§48（假闪避遮挡否决，负结果）。
-- **现存设计文档**：`plan/God-AI-Next-Round.md`（智能威胁模型设计规格，顶部有"Phase A 已否决"状态横幅；`SmartThreatModel.ts` / `GodAIInput.ts` / 覆盖表的代码注释直接引用其章节号，故保留）。
-- **已归档的历史文档（2026-07-30 清理，内容已并入本档 + DECISIONS.md，如需原文用 git 历史找回）**：`docs/god-ai-tuning-log.md`（Round 1–3 详录）、`plan/god-ai.progress.md`（P4/Round 5 进度）、`plan/God-AI-Tuning.md`（初始目标）、`plan/god-ai-analysis.md`、`plan/God-AI-Curriculum.md`、`plan/gac.review.md`、`plan/God-AI-P0~P3-Verification.md`（4 份）、`plan/God-AI-P3-Direction.md`。找回方式：`git log --diff-filter=D --oneline -- <path>` + `git show <hash>^:<path>`。
-- **每日工作记录**：`.workbuddy/memory/2026-07-27.md` 起。
-
----
-
-## 9. 炮口相向策略实验（§49–§52，2026-07-30）
-
-### §51 v1：火后闪避（已回退）
-- **实现**：在 `think()` 顶部插入 `_postFireDodgeDir` 分支，火后垂直移动 4 ticks
-- **结果**：35×20 A/B 85.0% vs 基准 87.6%（**-2.6pp**），S18 -25pp、S28 -15pp
-- **根因**：顶层分支打断 threat → T8 → T2a 优先级链
-
-### §52 v2：对枪抵消（T2a 内联，保留）
-- **实现**：在 T2a 分支内部检测炮口相向 + 对枪抵消
-- **分场景**：
-  - 冰面：跳过（横移失控）
-  - 1HP 敌人：对枪抵消仍生效（开火行为 ≠ 移动闪避）
-  - Armor：对枪抵消 + 保持对齐等待
-  - 横移：已移除（4-tick 横移 S26 -10pp）
-- **35×120 A/B（2026-07-30 原树）**：基准 3618/4200 (86.1%) → 修改 3623/4200 (86.3%)，**+5 wins**
-- **关键发现**：对枪抵消对所有敌人类型都有益（ALL +5 vs armor-only +1）。当 1HP 敌人已开火时，开火抵消比直接打敌人更安全（子弹消除→玩家安全→下一枪杀敌）
-- **新增函数**：`findEnemyFacingPlayerImpl` (FireControl.ts)、`hasEnemyBulletInLineImpl` (ThreatAssessor.ts)
-
-### §49-revisit（2026-08-01）：对枪抵消参数化 + 当前树重验 —— 通过"零负结果"验收
-
-**背景（用户指令）**：用 §48-revisit 的 per-seed tick-diff 方法重新处理 §49，消除负结果；当前树保留的 §52 v2 对枪抵消不保证没问题，发现代码问题则一并修复后组合 A/B 验证。
-
-**参数化**：`counterFire`（默认 1 = 当前行为逐字节不变）+ `counterFireMaxRange`（默认 5 = 原硬编码值）。`counterFire=0` 回退到 pre-§52 普通 T2a（A/B OFF 臂）。`AIM_RANGE_CELLS`=15，`counterFireMaxRange`=5 是绑定门控，未被原语扫描范围遮蔽。
-
-**验证序列**（与 §48-revisit 同方法）：
-1. **逐字节一致性（§70 纪律）**：参数化默认 vs 已提交硬编码基线，per-seed tick-diff 对比 S26 seed-41、S20 seed-60 —— 双 **IDENTICAL**（三元表达式 + `counterFireMaxRange * CELL` 热路径形状变化无 JIT 漂移）。
-2. **35×60 全关 A/B**：**net +3 flips、0 ON→OFF 负翻转**（S20 +2pp、S26 +3pp，其余 33 关 0pp），均值 88.9% → 89.0%。
-3. **120-seed 确认**：S26 +2.5pp（3 胜 0 负，种子 41/44/61）、S20 +0.8pp（1 胜 0 负，种子 60）—— 增益真实，非种子噪声。
-4. **回归门禁（生产默认）**：644/700（92.0%）> floor 581 ✅。`bun run check` 665 测试全绿。
-5. **新单元测试**（`tests/counter-fire.test.ts`，10 条）：锁定 `findEnemyFacingPlayerImpl`（相向检测/同向 null/未对齐 null）+ `hasEnemyBulletInLineImpl`（逼近 true/远离 false/未对齐 false/超 8-tank 范围 false）+ 默认参数（counterFire=1、counterFireMaxRange=5）。
-
-**结论**：与 §48 不同，对枪抵消的价值不随地形分界——不需要地形门控。默认保持 ON，零负结果达标。DECISIONS §72。
-
----
-
-## 10. 交叉火力感知实验（§68-v1 → §68-v2，2026-08-01）—— 负结果
-
-### 用户洞察（v2 修正后）
-
-用户指出 v1 实现的多个根本性理解偏差：
-
-1. **不是"追击方向的前方"**，而是 player 追击产生的位置变化——需要检查整条移动路径
-2. **路径中的每一格**都可能被各个方向的炮弹击中——不只检查对齐的炮弹
-3. **炮弹来自所有敌人**——目标敌人和非目标敌人都要检查
-4. **多策略规避**——寻找新安全路径、留在原地、切换目标，不只是垂直闪避
-5. **静止时也需评估**——不追击时当前位置也要做威胁评估
-6. **2 格太激进**——player 来不及闪避（子弹 8 ticks 到达，player 只能移动 8px，不够清除 32px 判定箱）
-
-### v2 实现：时间感知路径威胁投影
-
-**新增两个函数**（`ThreatAssessor.ts`）：
-
-1. `findPathThreatImpl(pcx, pcy, moveDir, playerSpeed)` — 投影玩家移动路径（3 格前瞻），对每一格检查所有敌方炮弹的到达时间。使用 `b.speed`（实际子弹速度）进行时间估算：如果炮弹在玩家离开该格之前到达，就是威胁。碰撞窗口 ±10 ticks（基于 TANK+BULLET 判定箱重叠时间）。
-
-2. `findSafeMoveDirImpl(pcx, pcy, threatenedDir, playerSpeed)` — 当路径受威胁时，检查垂直和后方方向的第 1 格安全性（cell-1-only，非全路径）。返回安全方向或 null（保持原方向）。
-
-**集成位置**（`GodAIInput.ts` `think()` 导航分支末尾）：
-- 在导航确定 `_moveDir` 后、开火控制前检查路径威胁
-- 发现威胁时：尝试安全替代方向；**无安全方向则保持原方向**（不停止！）
-- 只影响 T2b 导航分支，T8/T2a/aggressive 不受影响
-- 参数 `crossfireAwareness`（默认 0 = OFF）
-
-### v2 迭代过程
-
-| 配置 | 时间窗口 | 前瞻 | 替代方向检查 | 20-seed 结果 | 60-seed 结果 |
-|---|---|---|---|---|---|
-| ±30 ticks, 4 格 | ±TANK/ps (±30) | 4 | 全路径 | -1.9pp | — |
-| ±30 ticks, 3 格, 保持原方向 | ±TANK/ps (±30) | 3 | 全路径 | -2.3pp | — |
-| ±30 ticks, 3 格, cell-1 检查 | ±TANK/ps (±30) | 3 | cell-1 | -2.2pp | — |
-| **±10 ticks, 3 格, cell-1** | **±10** | **3** | **cell-1** | **-1.3pp** | **-1.1pp** |
-| ±10 ticks, 1 格, cell-1 | ±10 | 1 | cell-1 | -2.2pp | — |
-
-最终配置：±10 ticks, 3 格前瞻, cell-1 替代方向检查, 无安全方向时保持原方向。
-
-### v2 60-seed A/B 结果
-
-| | OFF（基线） | ON（crossfireAwareness=1） |
-|---|---|---|
-| 35 关 × 60 seeds | **88.9%** | 87.8% |
-| 差值 | — | **-1.1pp**（净负） |
-
-**回退关卡**（迷宫/bunker 型，diversion 代价高）：
-- S6 Iron Curtain: -15pp（钢墙迷宫，替代路径极长）
-- S26 Brick Maze: -15pp（砖墙迷宫，同上）
-- S14 Citadel: -12pp
-- S30 Eagle Nest: -10pp
-- S18 Frozen Field: -8pp（冰面 diversion 失控）
-
-**改善关卡**（开阔型，有空间绕行）：
-- S28 Spider: +12pp
-- S1 Waterways: +7pp
-- S27 Thicket: +7pp
-- S8 Twin Towers: +5pp
-
-### 核心诊断
-
-**路径威胁检测本身是正确的**——时间感知投影能准确预测炮弹与玩家的时空交叉。问题在于 **diversion 响应策略**：
-
-1. **子弹安全 ≠ 位置安全**：一个方向可能没有炮弹威胁，但通向死胡同或更长路径
-2. **迷宫中 diversion 代价极高**：A* 最优路径偏离 1 格可能意味着多走 10+ 格
-3. **现有反应式闪避已足够好**：`findMostDangerousBullet` 在炮弹到达时触发闪避，系统已充分调优
-4. **与 §48/§49 相同的教训**：任何对 dodge → T8 → T2a → navigate 优先级链的扰动都是净负
-
-### 处置
-
-- `crossfireAwareness` 默认 **0（OFF）**——按"负结果否决"纪律
-- 基础设施（`findPathThreatImpl` + `findSafeMoveDirImpl`）**完整保留**
-- **未来方向**：正确方案应修改 A* 寻路本身（在路径代价中加入炮弹威胁成本），而非在路径确定后 diversion。这需要修改 Navigator 模块，属架构级变更。
-
----
-
-### §69 交叉火力感知 v3：地形门控 + A* 威胁成本（2026-08-01）—— 双负结果
-
-用户指出 §68 的回退全在迷宫/bunker 关卡（S6/S26/S14/S30），改善全在开阔关卡（S28/S1/S27），要求：
-
-1. **方案 A**：通过 A* 路径周围的障碍物密度判断地形类型，仅在开阔地形应用 crossfire 策略
-2. **方案 B**（fallback）：修改 A* 寻路本身，在路径代价中加入炮弹威胁成本
-
-#### 地形密度诊断
-
-对全 35 关计算障碍物密度（brick+steel+water）/totalCells 和平均可通过邻居数（AvgPass）：
-
-| 关卡 | 类型 | 障碍物密度 | AvgPass | §68 结果 |
-|---|---|---|---|---|
-| S6 Iron Curtain | 回退 -15pp | 26.9% | 2.90 | 钢墙迷宫 |
-| S26 Brick Maze | 回退 -15pp | 34.9% | 2.84 | 砖墙迷宫 |
-| S14 Citadel | 回退 -12pp | 31.4% | 2.83 | bunker |
-| S30 Eagle Nest | 回退 -10pp | 43.8% | 2.15 | 高水密度 |
-| **S1 Waterways** | **改善 +7pp** | **37.3%** | **2.43** | "开阔" |
-| **S28 Spider** | **改善 +12pp** | **29.0%** | **2.81** | "开阔" |
-
-**关键发现**：S1（改善 +7pp）的障碍物密度（37.3%）**高于** S6（回退 -15pp，26.9%）。地形密度**无法**区分回退和改善关卡——两者指标完全交叠。
-
-#### 方案 A：地形门控 crossfire（负结果）
-
-- 新增 `crossfireOpenObstacleRatio` 参数（默认 0 = OFF）
-- 在 `computeStageAdaptedParams` 中，当障碍物密度 < 阈值且非钢墙迷宫时，自动启用 `crossfireAwareness`
-- 阈值 0.40 + isSteelMaze 门控：门控掉 S3/S6/S7/S9/S24/S30/S32/S34，保留 S1/S8/S27/S28 ON
-
-**20-seed A/B（9 关键关卡）**：
-- S1 +10pp ✓、S28 +5pp ✓、S6/S30 无变化 ✓（正确门控）
-- **S14 -25pp ✗✗✗、S26 -15pp ✗✗✗**（阈值无法捕获）
-- 净效果：suite 0.794→0.705（-0.089），胜率 92%→89%（-3pp）
-
-#### 方案 B：A* 寻路威胁成本（负结果）
-
-- 新增 `crossfirePathCost` 参数（默认 0 = OFF）
-- 在 `pathfind.ts` 的 `findPath` 中，将 `threatCosts[nk]` 加入步骤代价
-- `computeThreatCostsImpl` 预计算每格威胁成本：基于炮弹轨迹投影 + 时间感知碰撞窗口（±10 ticks）
-- 在 `navigateTowardsImpl` 和 `replanImpl` 中调用，A* 自然绕开威胁格
-
-**20-seed A/B（全 35 关，cost=3.0）**：
-- suite 0.764→0.737（-0.027，p=0.0011），胜率 92%→91%（-1pp）
-- S26 -15pp、S28 -5pp（§68 的改善关也变成回退！）
-- 51 关改善 / 73 关回退 / 576 平
-
-**20-seed A/B（6 回退关卡，cost=1.0）**：
-- suite 0.757→0.685（-0.072，p=0.0093），胜率 89%→83%（-6pp）
-- 所有关卡均回退或持平，无一改善
-
-#### 核心诊断
-
-**任何形式的前瞻式炮弹规避都是净负收益**，无论是 post-hoc diversion（§68-v2）还是 A* 威胁成本（§69-B）。根本原因：
-
-1. **反应式闪避已足够好**：`findMostDangerousBullet` 在炮弹到达时触发垂直闪避，系统已充分调优
-2. **路径偏离代价 > 炮弹风险**：A* 最优路径偏离 1 格可能意味着多走 3-10 格，暴露在更多敌人火力下的时间更长
-3. **威胁成本破坏路径最优性**：即使 cost=1.0（仅偏好 1 格绕行），也会导致路径变长，净效果为负
-4. **与 §48/§49 相同的教训**：对 dodge → T8 → T2a → navigate 优先级链的任何扰动都是净负
-
-#### 处置
-
-- `crossfireOpenObstacleRatio` 默认 **0（OFF）**
-- `crossfirePathCost` 默认 **0（OFF）**
-- 所有基础设施（`computeThreatCostsImpl`、`threatCosts` in `PathConstraints`、`crossfireOpenObstacleRatio` 门控）**完整保留**，默认 OFF 时字节一致
-- **交叉火力感知实验系列正式终结**（§68-v1 → §68-v2 → §69-A → §69-B）
-
-### §68-revisit（2026-08-01）：per-seed tick-diff 重新调优 —— 方法论级负结果（维持默认 OFF）
-
-**背景（用户指令）**：用 §0.B 的 per-seed tick-diff 方法重新调优 §68-v2，期望消除负结果；若现有代码有问题则修复后组合 A/B 验证。
-
-**A/B 复现（当前树 35×60）**：OFF 89.0% vs ON 88.1%（-0.9pp，138→156 net -18）—— 与原始 -1.1pp 一致。
-
-**per-seed 机制（cf-trace 追踪：子类化 GodAIInput 观测每次转向）**：
-
-| 种子 | 类型 | 子弹提前量 | 机制 |
-|---|---|---|---|
-| S26-5 / S6-3 / S14-8 | 坏 | 12.6 / 18.6 / 23.1t | 幻影威胁 → 过早垂直转向离开 A* 路径 → 进入死路（反应式闪避本可处理） |
-| S28-15 / S27-28 | 好 | 8.3 / 8.4t | 紧迫威胁 → 及时逃生转向 |
-
-**四个变体全部净负**：
-1. **提前量上限** `crossfireThreatTicks=10`（只标志 10t 内到达的威胁）：net -25。迷宫关改善（S26 -12→-7、S6 -10→-7、S31 -8→-2、S30 -7→-5）但破坏开阔关增益（S28 +7→-3、S32 +5→-2、S1 +5→+2）。**链断裂机制**：S28-15 的逃生需要第二个 31.7t 提前量的转向（tick 3700），被 cap 抑制 → 整个逃生链崩塌。
-2. **目的地开阔度门控** `crossfireMinExits=3`（只转向 ≥3 出口格）：net -14。坏翻转的死亡 lane 是**局部开阔**（≥3 出口）—— S26-5/S6-3/S14-8 与 raw ON 逐字节相同，出口计数无法区分。
-3. **组合**：net -25（继承 cap 的开阔关破坏）。
-4. **地形指标相关性（全 35 关）**：density / avgPass / open% / brick% / steel% **无一能区分好坏关**（S2 23% 密度坏 vs S8 23% 好；S33 avgPass 2.93 好 vs S30 2.94 坏）—— §69-A 结论扩展：纠缠是动态的（敌方位置/子弹状态/级联），非静态地形。
-
-**结论**：增益与损失共享同一触发——不存在提前量/目的地质量/地形的干净判别量。这是 §68/§69 结论（"任何对 dodge → T8 → T2a → navigate 优先级链的扰动都是净负"）的机制级确认。实验代码全部回退（src/ 逐字节不变），crossfire 维持默认 OFF。DECISIONS §73。
-
----
-
-## §70 基地环开火保护（修复 coop 自杀 + V8 JIT 热循环敏感性发现）
-
-### 背景
-`plan/fix-suicide.task.md`：God AI 在 coop 模式（player2 出生在基地右侧）会打破基地保护砖/钢铁自杀。
-
-### 根因（三层逐层剥洋葱）
-
-1. **自杀根因**：T2b 导航开火分支用 `!canMoveDir` 触发开火，绕过 T6 基地保护检查。coop 模式 `_moveDir=left` 指向基地砖墙直接开火打掉。
-
-2. **S32 -5pp 回归根因（OOB 假阳性）**：`baseSteel` 检测放在 `scanAheadImpl` 热循环的 steel 分支里，对 OOB 格子（默认 `'steel'`）也运行。S32 底边 `row=GRID`（dr=|26-24|=2）被误判为 `baseSteel`，导致 T6 的非基地钢铁守卫 `result.steel && !result.baseSteel && level < 3` 变 false——AI 不再阻止对场边射击，浪费子弹。
-
-3. **S32 -1pp 残留回归根因（V8 JIT 敏感性）**：即使加了 OOB 边界检查，steel 分支里多出的变量声明和比较改变了 V8 对 `scanAheadImpl` 的 JIT 优化，导致 `shouldFireInDir` 路径出现微妙行为差异。
-
-### 修复方案
-
-**不在热循环里做 baseSteel 检测**。steel 分支只做两个赋值（`r.steelCol = col; r.steelRow = row`），循环结束后在 post-loop 块做一次 baseSteel 带状检查。OOB 天然排除（steelCol=-1 或越界）。
-
-### 60-seed A/B 对比（`bun tools/eval/eval-suite.ts --seeds 60`）
-
-| 指标 | 修复前 | 修复后 | Δ |
-|---|---|---|---|
-| Suite score | 0.7254 | 0.7291 | +0.0037 |
-| LCB | 0.7205 | 0.7242 | +0.0037 |
-| Fitness v6 | 720.5 | 724.2 | +3.7 |
-| Mean win rate | 89% | 89% | 0 |
-| S32 Diamond score | 0.527 | 0.532 | +0.005 |
-| S32 Diamond win | 67% | 67% | 0 |
-| Coop 自杀 | 有 | 0 | 消除 |
-
-**零净回归。** Suite score 和 fitness 均有微小提升（在 ±se=0.0049 范围内）。
-
-### 质量门禁
-- `bun run check`：644 测试全绿，tsc + oxlint + oxfmt clean
-- 回归 gate 原始 truth 值不变，floor 不降
-
----
-
-## §80 冰冻窗口转身抖动守卫（修复 freeze-window aim/navigate thrash）
-
-### 背景（用户报告）
-`classic-s11-clear-l1-t51-seed1785622102123.replay` 0:31–0:47：冰冻道具生效期间 player2（God AI）站在无法击中敌人的位置持续开火，而不是游走到合适位置击杀。
-
-### 根因
-转向不是免费的：`Simulation.updateMovement` 在换轴时把垂直坐标 snap 到网格（`axis === 'x' ? tank.y = snap(tank.y, CELL) : tank.x = snap(...)`）。停在非网格对齐的亚格偏移上的坦克，一转身边缘最多被推开 CELL/2 px——目标被甩出 `scanAhead` 的 ±CELL/2 偏移线。`aggressive`（冰冻）分支自身没有任何反驻车守卫（T2a 有 `_campTicks`，navigate 有 `_navStuckTicks`），一旦转轴 snap 断掉射击线就断掉了：整个冰冻窗口（游戏里价值最高的窗口——敌人完全无助）原地空射浪费。
-
-### 修复
-- 新参数 `aimTurnSnapGuard`（默认 1 = ON；0 = OFF 逐字节不变，即 A/B 基线）。
-- `aimSurvivesTurnImpl`（`FireControl.ts`）：在 commit 停火转向之前，用**转身后**（post-snap）位置重跑 `scanAheadImpl`；敌人不在线上 → "假瞄准" → 落入 navigate（有真实卡死检测）。
-- 调用顺序是承重的：守卫与分支自身的 `scanAheadImpl` 共用 `self._scanResult`，`&&` 短路保证守卫先消费结果。
-- 已网格对齐时守卫提前返回（snap 无操作）——常见情形逐字节不变，只在病态几何下介入。
-
-### 验证（35 关 × 60 seeds × 2 模式真值终验，`tools/sim/freeze-thrash-audit.ts --set aimTurnSnapGuard=0` 为基线；10/30-seed 筛查数字见上节与 per-seed 诊断）
-
-| 指标 | guard OFF（§80 前） | guard ON（修复） |
-|---|---|---|
-| 冰冻窗口击杀（coop） | 2415 | **5688（+136%）** |
-| 冰冻窗口击杀（single） | 1363 | **3503（+157%）** |
-| 过关率（coop） | 98.8%（2075/2100） | **99.0%（2078/2100，+0.2pp，net +3）** |
-| 过关率（single） | 88.8%（1864/2100） | **89.7%（1884/2100，+0.9pp，net +20）** |
-| single ≥5pp 改善关 | — | Lattice +8.3pp（net +5）/ Riverbed +5pp（net +3） |
-| ≥5pp 回退关 | — | **0 关**（最大负向 Diamond/Ramparts −1.7pp = 1 seed 噪声） |
-
-### per-seed 诊断（S32 Star Fort seed7 翻转）
-- 首分歧 **tick 1226**：A(ON) `up|.|up`（继续 navigate 上行）vs B(OFF) `left|F|left`（转身开火后停驻）。
-- ON 坦克继续上行进入**顶部死墙**（t800–1800 被钉在 y=16–49），基地失守 t2524；OFF 坦克因"假瞄准"开火后意外停驻保命，t3673 通关。
-- coop 同 seed 两态完全一致（t2435 双通）——翻转仅存在于 single。
-- **60-seed 终验结论**：S32 Star Fort 10/30-seed 回退（−10pp@10 / −3.3pp@30，seed7 单翻转）在真值尺度**完全抵消为 Δ0.0pp**（coop 60/60 双态、single 55/60 双态）。机制本身真实存在（t1226 守卫拒绝 → navigate 死路是 navigate 既有弱点），但净效应为噪声级。不追加修复（简单胜于聪明）。
-
-### 残余现象（如实记录）
-- 朴素 period-2 抖动检测器最坏 streak：10-seed 筛查中 Brick Maze s27/seed1 = 1166t 两态**逐字节相同**——守卫在那里惰性（另一机制，未逐 tick 追溯，网格对齐 early-return 是候选之一）；**60-seed 真值下 OFF 基线的最坏 streak 在两种模式都长于 ON（coop 1199t vs 1166t、single 1186t vs 1159t）**——反向佐证守卫有效。aggressive 分支仍无反驻车兜底，留作后续候选。
-- single 部分关卡检测器计数 ON 高于 OFF（Waterways/Quarry/Diamond）但**结局逐字节相同**——检测器现在把"主动狩猎移动"误计为抖动；`freezeKills` 才是有效指标。
-
-### 质量门禁
-- `bun run check`：746 测试全绿，tsc + oxlint + oxfmt clean
-- 新单元测试 `tests/godai-turn-snap-guard.test.ts`（8 条）：守卫几何（门控 OFF 恒真 / 已朝向 / 已对齐 / 拒假瞄准 / 收真瞄准 / 默认 ON）+ 集成臂（ON 900 ticks 内击杀冰冻敌 / OFF 整窗口空废，0 杀、亚格位移）。2 seed × 2 guard 矩阵验证 seed 无关性。
-
----
-
-## §87 近距离安全路径拾取优先级（炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格，路径安全 → 拾取 > 回防/杀敌）—— 通过验收（默认 ON）
-
-### 背景（用户指令）
-"优化 GOD AI 拾取道具优先级：炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全时，拾取优先级 > 回防/杀敌；然后全 35 关仿真验证，下降严重的用 per-seed tick-diff 诊断处理。"
-
-### 实现
-- 新参数族（`GodAIParams`，全部 0-able，OFF 时逐字节不变）：
-  - `pickupPriorityMode`（默认 **1** = ON）、`pickupPriorityHighRange`（默认 **8**，bomb/freeze/fence + modern emp/guard）、`pickupPriorityMidRange`（默认 **4**，star/tank/shield + 其余 modern 道具）、`pickupPriorityLowRange`（默认 **2**，boat）。
-  - 三个由调优循环发现的守卫：`pickupPriorityMaxDanger`（默认 **0**——路上严格位于玩家与道具之间的敌人数为 0）、`pickupPriorityMinEnemyDist`（默认 **5**——5 格内无完全生成敌人，与 S5 P3.2 同半径）、`pickupPrioritySpawnRowMax`（默认 **3**——经典出生带行 ≤3 的拾取永不紧急）。
-- 新 `think()` 分支位于 **dodge（保命）与 T8（飞向基地的子弹 = 即时损失）之后、aggressive/T2a/S5 之前**：类别范围内且路径安全的拾取立即优先，覆盖停火击杀与回防重定位。仅 normal 模式（冰冻窗口内 aggressive 分支已在无对齐敌人时拾取，且对齐的冰冻敌人是免费击杀不应打断）。
-- `findUrgentPowerUpTargetImpl`（`StrategyPlanner.ts`）+ `urgentPickupRange` 包装（`GodAIInput.ts`）。
-
-### 调优循环（35×60 classic，paired CRN，`eval-suite --compare`）
-
-| 配置 | 净 wins vs baseline | 要点 |
-|---|---|---|
-| 8/4/2，仅 danger=0 | **-10** | Lattice -8、Star Fort -5、Battlement -4（真实）；Frozen Field +6、Diamond +5（真实） |
-| + 近敌门控（5） | 0 | Lattice -8 持续；Battlement -4→-2 |
-| + 出生带门控（rows≤3） | **+9** | **Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3、Ice Palace +2**；无显著负向关 |
-
-### 最终 35×60 A/B（SHIPPED 默认）
-1899/2100 → 1908/2100（**+9 wins**），过关率 90%→91%，suite 0.7439→0.7551，mean Δscore +0.0038 ± 0.0033（p=0.245），net flips +54/−45。**无显著负向关**（唯一 p<0.05 的 Steel Web -0.0053 分数变动为 0 win 变化 = 噪声）。
-
-### per-seed tick-diff 定位的机制与修复（§0.B 方法）
-- **Lattice s2**：绕 2 格去捡 star（敌人 5 格远、路径"干净"）→ (8,2) 停驻 ~80 ticks → 阵亡。→ 近敌门控。
-- **Lattice s32**：lives=2 时向 (1,0) 的 fence 上行，敌人在 (0,0) 出生点旁生成 → 阵亡。→ 出生带门控。
-- **Battlement s3**：交战中（3 敌）停火上行去拾取 → 输掉对枪。→ 近敌门控。
-- **Star Fort s10**：fence 拾取（2 格）+ 下游级联混乱——不可外科修复；由门控 + 60-seed 平均化解（终值 +1）。
-- **非 JIT 级联验证**：mode=1 但全范围=0 与 OFF 逐字节 IDENTICAL（排除 V8 JIT 热循环漂移，§0.B 教训）。
-
-### OFF 逐字节不变验证
-per-seed tick-diff：S6 seed5 / S32 seed11，OFF（mode=0）与 pre-§87 基线 **IDENTICAL**。
-
-### 门禁真值重生成
-- `TRUTH_WIN_PCT` 按新 35×60 测量（均值 **90.9%**）重生成，聚合 floor 581→610（"随收益上调"纪律）。
-- **S28 Spider floor 保持 pre-§87 水平**：门禁 full-suite 上下文存在顺序依赖（模块级 `genId()` 计数器，World.ts 已记录的 caveat；stash src 验证 pre-existing：standalone 631 vs full-suite 625——无 §87 亦然），Spider 在上下文间 13-20/20 摆动；60-seed eval 显示 §87 下 Spider 91.7%（+1）。
-
-### 质量门禁
-- `bun run check`：820 测试全绿，tsc + oxlint + oxfmt clean；`bun run build` 成功。
-- 新单元测试 `tests/pickup-priority.test.ts`（15 条）：三档类别门控、三个安全守卫、平局规则、think() 集成、冰冻窗口排除（aggressive 主导拾取）、SHIPPED 默认值锁定。
-- 建议后续：Diamond / Frozen Field 120-seed 确认。
-## §88 据守咽喉要地（威胁点 + 威胁路径 + 咽喉要地，2026-08-03）—— 候选集（默认 OFF）
-
-> DECISIONS §93。用户需求：敌人可直接射击基地的格子 = 威胁点；敌人到最近威胁点的 A* 路径（炮口朝向门控）= 威胁路径；下半区能射击最多威胁路径的格子 = 咽喉要地（钢铁掩护 >> 砖墙）。策略：威胁 → 杀；安全 + 敌>2 → 据守；敌≤2 → 追最近威胁点敌人；HIGH 拾取 > 回防 > MID 拾取 > 据守。
-
-### 实现
-- `src/ai/god/Chokepoint.ts`：威胁点（canShootBaseFrom + 2×2 可驻留）、facing 门控威胁路径、coverage 印章式咽喉要地选择（规则 5 掩护权重）、威胁态 + chase 目标。
-- `src/ai/god/StrategyPlanner.ts`：规则 4 链（HIGH 拾取 > 回防 > MID 拾取 > 据守）+ 据守/追杀切换。
-- 全部走 `chokepointMode` 门控（0 = OFF 字节不变）。计划 30-tick 节流缓存。
-
-### 3 轮 A/B 调优（35×60 classic，paired CRN，per-seed tick-diff）
-
-| 轮次 | 机制修复 | 关卡证据 |
-|---|---|---|
-| R1 | MID 拾取分支移到 T2a 前 | S19 s14（4 格盾被降级为继续杀）|
-| R1 | chase 距离门控 chaseMaxDist=3 | S15 s24 / S32 s22（跨图追远敌）|
-| R2 | MID 拾取不再让位回防 | S32 s17（弃 3 格 star 回防 → 死）|
-| R2 | 据守需实时 imminence + 距离上限 6 | S19 s23（据守点空转 ~1200 tick）|
-| R3 | 威胁态/chase 加炮口朝基地方向门控 | S26 s12（(12,12) 朝右 armor 被误报）|
-| R3 | 据守点不覆盖紧迫敌人 → chase 优先 | S32 s23（(15,18) 打不到 (24,22) 快车）|
-| R3 | chase 玩家距离上限（按敌速缩放） | S32 s10（27 格追 power 输）/ s48（25 格追 armor 赢）|
-
-### 终值 35×60 A/B（候选集 ON vs OFF）
-- suite 0.7551 → **0.7561（+0.0010）**，过关率 91%→91%，mean Δscore +0.0010 ± 0.0010（**p=0.30 无显著差异**），B better/worse/tied 9/6/2085。
-- **改善关**：S16 +0.022（95%→97%）、S6 +0.007（73%→75%）、S18 +0.004（score）。
-- **S26 修复**：-0.019 → 0.000（per-seed IDENTICAL）。
-- **S32 噪声内**：单 seed-29 回退（规格正确的 rule-1 拦截——敌人在威胁点上 — 但失去节奏）被 seed-48 收益抵消，无显著负向关。
-
-### OFF 字节不变验证
-per-seed tick-diff：S6 s5 / S32 s11 OFF（mode=0）与 pre-§88 基线 IDENTICAL（与 §87 相同的 V8 JIT 级联排除）。
-
-### 质量门禁
-- `bun run check`：844 测试全绿（新增 chokepoint 测试 24 条），tsc + oxlint + oxfmt clean；`bun run build` 成功。
-- `tests/chokepoint.test.ts`（24 条）：威胁点 LOS/钢铁遮蔽、咽喉要地选择 + 掩护平局、facing 门控、威胁态 + facing、chase（imminence + 玩家距离 + 速度缩放）、据守 vs chase + coverage 门控、think() 规则 4 集成、OFF 惰性。
-
-### 结论与后续（2026-08-03 更新：SHIPPED）
-- **120-seed 确认（S6/S16/S32，360 对）**：suite 0.6712→0.6880（mean Δ +0.0091，p=0.106），过关率 83%→85%，B better/worse/tied 13/8/339；S16 +0.018（93→95%）、S32 +0.011（78→79%）、S6 0.000——三关全部 ≥ 持平，无下降，符合用户「全面提升或持平」标准。
-- **用户拍板启用（DECISIONS §94）**：`chokepointMode` 默认 **1**（ON），门禁真值重生成（TRUTH_WIN_PCT S6 75.0 / S16 96.7；S28 保持 86.7 保守值，聚合 90.9% 不变）。发货后 35×60：mean 90.9% 与 §87 持平，S6 +1.7pp / S16 +1.7pp / S28 +5.0pp，**零关卡下降**；门禁实测 639/700（91.3%），35 关全过 floor。`bun run check` 844 测试全绿，`build` 成功。
+| `tools/optimize/optimize-godai.ts` | CMA-ES 参数优化（SEARCH_SPACE 机制，v2 纪元 M4 调优面） |
+| `tools/sim/simulation-runner.ts` + `sim-pool.ts` / `sim-worker.ts` | 并行仿真（官方口径：不传 stageIndex、同步 playerLevel/lives） |
+| `tools/eval/eval-suite.ts` | 全量 A/B（35×60 paired CRN，`--compare a.json b.json`） |
+| `tools/eval/validate-p4.ts` / `gate-truth.ts` | 全 35 关扫描终审 / 门禁真值生成 |
+| `tools/diag/per-seed-diff.ts` | dump + diff（`--set` 覆盖），单种子 tick 级分歧定位 |
+| `tools/diag/flip-scan.ts` | 翻转扫描（FLIP-TO-WIN / FLIP-TO-LOSE / TIED 自动分类） |
+| `tools/diag/decision-probe.ts` | 单 tick 完整决策上下文打印 |
+| `tools/diag/death-attribution.ts` | **v2 纪元**：逐死亡事件归因（tick/凶手层级/行为分支） |
+| `tools/diag/diagnose-s32.ts` / `probe-s32.ts` / `analyze-trace.ts` / `decision-trace.ts` | 失败归因 / 参数敏感度 / 决策追踪 |
+| `tests/god-ai-regression-gate.test.ts` | classic 35×20 回归门禁 |
+| `tests/god-ai-hard-chaos-gate.test.ts` | **v2 纪元**：hard/chaos 三难度门禁（35×20，floor=truth-3.7pp） |
+| `tests/godai-split-parity.test.ts` | **v2 纪元**：M1 决策链 parity 重锁 |
+
+# 附：文献索引
+
+- **权威决策**：DECISIONS.md（编号索引体系；Classic 纪元 §27–§95，v2 纪元 §96–§110 已压缩，全文在本档 / git 历史）。
+- **v2 设计文档**：`plan/God-AI-Redesign-Review.md` + `plan/God-AI-Redesign-v2.md` 已于 2026-08-03 删除，
+  核心内容归档于本档 **Part II.0**；代码注释中的章节引用指向设计原文（未跟踪文件，git 无法找回，以本档为准）。
+- **仍存活的相邻设计文档**：`plan/God-AI-Next-Round.md`（Phase A 已否决，smartThreatModel 冻结）、
+  `plan/Automated-Level-Design-and-Simulation.md`、`plan/Lie-Back-Win-Mode.md`（coop 躺赢模式，§79 相关）。
+- **性能文档**：`docs/perf-optimization.progress.md`（热路径纪律，AGENTS §14 出处）、`docs/render-optimization.progress.md`、`docs/performance-report.md`。
+- **已归档的历史文档**（内容已并入本档，原文用 git 历史找回）：`docs/god-ai-tuning-log.md`、`plan/god-ai.progress.md`、
+  `plan/God-AI-Tuning.md`、`plan/god-ai-analysis.md`、`plan/God-AI-Curriculum.md`、`plan/gac.review.md`、
+  `plan/God-AI-P0~P3-Verification.md`（4 份）、`plan/God-AI-P3-Direction.md`。
+- **每日工作记录**：`.workbuddy/memory/`（2026-07-27 起）。

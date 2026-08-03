@@ -4,7 +4,7 @@ import type { Tank, Bullet, TankKind } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS, GRID } from '../constants'
+import { BASE_POS } from '../constants'
 import {
   findEnemyDirectionImpl,
   findEnemyFacingPlayerImpl,
@@ -12,7 +12,8 @@ import {
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
 } from './god/FireControl'
-import { thinkImpl } from './god/think'
+import { thinkImpl, CANDIDATES } from './god/think'
+import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
 import { DEFAULT_GOD_AI_PARAMS, computeStageAdaptedParams } from './god/params'
 import type { GodAIParams } from './god/params'
 export {
@@ -21,6 +22,7 @@ export {
   computeStageAdaptedParams,
 } from './god/params'
 export type { GodAIParams } from './god/params'
+import { initEnemyModel, type EnemyModelState } from './god/EnemyModel'
 import {
   findMostDangerousBulletImpl,
   findBulletThreatToBaseImpl,
@@ -31,6 +33,8 @@ import {
   findPathThreatImpl,
   findSafeMoveDirImpl,
   closeCombatExposureImpl,
+  isTerrainPinnedImpl,
+  hasCrossFireBulletImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -48,10 +52,7 @@ import {
   directMoveImpl,
   canMoveOrBreakImpl,
   canMoveDirImpl,
-  computeThreatCostsImpl,
-  trapAvoidanceImpl,
 } from './god/Navigator'
-import { threatScoreImpl, smartIsBaseUnderThreatImpl } from './god/SmartThreatModel'
 import {
   computeChokepointPlanImpl,
   isThreatStateImpl,
@@ -207,6 +208,12 @@ export class GodAIInput implements InputLike {
   /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
   _navStuckTicks = 0
 
+  /**
+   * M3 diag: total counter-fire ticks (think.ts dodge branch, DECISIONS §101).
+   * Pure observation — no RNG, no gameplay effect; reset per stage.
+   */
+  _counterFireTicks = 0
+
   /** Debug: branch counters for profiling. */
   branchCounts = {
     dodge: 0,
@@ -217,7 +224,17 @@ export class GodAIInput implements InputLike {
     navigate: 0,
     dead: 0,
     chokepoint: 0,
+    // M3: survive 候选（主动换位）提交计数（纯观察）。
+    survive: 0,
   }
+
+  /**
+   * Death attribution (M0, plan/God-AI-Redesign-v2 §6): the think() branch
+   * taken this tick, set at every return point in thinkImpl. Pure observation
+   * — read by tools/diag/death-attribution.ts via runSimulation telemetry.
+   * No gameplay effect, no RNG, no serialization.
+   */
+  _lastBranch: string = 'navigate'
 
   /** Reusable scan result for scanAheadImpl — avoids allocating a result object on every call. */
   _scanResult: {
@@ -253,6 +270,23 @@ export class GodAIInput implements InputLike {
   _scanAligned: Tank[] = []
 
   /**
+   * M1: reusable per-tick decision context (plan/God-AI-Redesign-v2 §3, §14.2
+   * hot-path rule — no per-tick object allocation in thinkImpl). Built lazily
+   * on the first think of the first tick (world/player already exist then);
+   * the shell overwrites the fields each tick. Candidates read it
+   * synchronously and never retain it, so reuse is safe.
+   */
+  _decisionCtx: DecisionContext | null = null
+
+  /**
+   * M2: the candidate chain in effective-weight order for the CURRENT
+   * params (built once per reset — never sorted per tick, AGENTS §14.3).
+   * Default params ⇒ exactly the M1 chain order (parity by construction);
+   * `actionWeights` overrides reorder it data-driven.
+   */
+  _orderedCandidates: Candidate[] = []
+
+  /**
    * Cluster C (perf): per-tick snapshot of live, fully-spawned enemy tanks —
    * identical to `w.tanks.filter(t => t.alive && t.spawnTimer <= 0)` in both
    * membership and iteration order. Reused by `isBaseUnderThreat`,
@@ -279,7 +313,6 @@ export class GodAIInput implements InputLike {
    * byte-identical. Invalidated in endFrame() alongside _thought.
    */
   _baseUnderThreatCache: boolean | null = null
-  _fastThreatCache: boolean | null = null
   _playerCellCache: Cell = { col: 0, row: 0 }
   _playerCellValid = false
   /** Reusable buffer for tankCellImpl — avoids allocating a {col,row} per call
@@ -323,16 +356,6 @@ export class GodAIInput implements InputLike {
   _navReplanMax = 60
 
   /**
-   * §69-B: Reusable threat cost buffer for A* pathfinding. Size GRID*GRID.
-   * When crossfirePathCost > 0, computeThreatCosts fills this array with
-   * per-cell threat penalties based on current bullet trajectories, and
-   * navigateTowards/replan pass it to findPath via PathConstraints.threatCosts.
-   * Reused across calls (same as _pfGScore etc. in pathfind.ts) — findPath
-   * is synchronous and never reentrant.
-   */
-  _threatCostsBuf: Float64Array = new Float64Array(GRID * GRID)
-
-  /**
    * §88: throttled chokepoint plan (threat points + selected 咽喉要地 cell).
    * Recomputed every chokepointReplanTicks (default 30) or when missing — the
    * same cross-tick cache discipline as _navCacheValid (threat points only
@@ -340,6 +363,18 @@ export class GodAIInput implements InputLike {
    * deterministic, replay-safe. Reset in reset() per stage.
    */
   _chokepointPlan: ChokepointPlan | null = null
+
+  /**
+   * M3 (plan/God-AI-Redesign-v2 §4.2b): 敌情感知模型状态。Per-tick EMA of
+   * observable enemy behavior (fire accuracy / base approach / alignment /
+   * turn discipline) → `estimatedLevel` [0,1] + survival pressure inputs.
+   * Pure World observation, no RNG, no difficultyKey reads. Same snapshot
+   * semantics as `_campTicks` — not serialized, re-converges after a rewind.
+   * Reset per stage. Active only when enemyModelMode > 0 && window > 0.
+   */
+  _enemyModel: EnemyModelState = initEnemyModel(false)
+  /** M3: previous-tick player HP — hit detection for the accuracy feature. */
+  _enemyModelLastHp = 0
 
   constructor(
     world: World,
@@ -349,8 +384,20 @@ export class GodAIInput implements InputLike {
   ) {
     this.world = world
     this.rng = rng ?? world.rng
-    this._baseParams = params
-    this.params = params
+    // Clone the params: per-instance mutations (e.g. tests doing
+    // `input.params.x = y` for A/B) must never leak into the shared
+    // DEFAULT_GOD_AI_PARAMS / SKILLED_HUMAN_PARAMS singletons. Cross-file
+    // module state IS shared inside `bun test` (proven 2026-08-03: a test
+    // setting dodgeClearanceScore=1 on the singleton flipped the hard/chaos
+    // gate's S25 result from 1/20 to 0/20 — a silent global corruption of
+    // every later simulation in the process). DECISIONS §98.
+    this._baseParams = { ...params }
+    this.params = this._baseParams
+    this._orderedCandidates = orderedCandidates(CANDIDATES, this._baseParams.actionWeights)
+    // M3: initialize the EnemyModel (active flag resolved in reset() from the
+    // stage-adapted params — the base params may not have the mode set).
+    this._enemyModel = initEnemyModel(false)
+    this._enemyModelLastHp = 0
     if (controlledTank) this.controlledTank = controlledTank
   }
 
@@ -380,8 +427,16 @@ export class GodAIInput implements InputLike {
     this.aggressive = false
     this._enemies = []
     this._otherTanks = []
+    // M3 diag: reset the counter-fire trigger counter per stage.
+    this._counterFireTicks = 0
     // §88: invalidate the throttled chokepoint plan on stage reset.
     this._chokepointPlan = null
+    // M3: reset the EnemyModel per stage (same cross-tick-cache discipline as
+    // _navCache / _campTicks — the model must not carry knowledge across
+    // stages, and the per-tank trackers reference dead tank ids otherwise).
+    const modelActive = this.params.enemyModelMode > 0 && this.params.enemyModelWindowTicks > 0
+    this._enemyModel = initEnemyModel(modelActive)
+    this._enemyModelLastHp = this.world.player ? this.world.player.hp : 0
     // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
     // stage reset — the next tick must recompute A* from scratch.
     this._navCacheValid = false
@@ -393,6 +448,9 @@ export class GodAIInput implements InputLike {
     // unified data-driven adaptation based on stage characteristics (armor
     // ratio, brick/steel/forest/water density). No per-stage special-casing.
     this.params = computeStageAdaptedParams(this._baseParams, this.world)
+    // M2: rebuild the candidate chain in effective-weight order from the
+    // (possibly stage-adapted) params. Default = M1 chain order.
+    this._orderedCandidates = orderedCandidates(CANDIDATES, this.params.actionWeights)
   }
 
   getMoveDirection(): Direction | null {
@@ -413,7 +471,6 @@ export class GodAIInput implements InputLike {
     this._thought = false
     // Invalidate per-tick lazy caches.
     this._baseUnderThreatCache = null
-    this._fastThreatCache = null
     this._playerCellValid = false
     this._canMoveComputed = 0
   }
@@ -503,51 +560,8 @@ export class GodAIInput implements InputLike {
     return result
   }
 
-  /**
-   * D1: Check if any fast/power tank is near the base (within the existing
-   * threat detection zone). Used by the T2a skip to decide whether the
-   * player should disengage from armor camping. Only checks fast/power
-   * kinds — armor tanks are slow and don't require immediate disengagement.
-   */
-  hasFastThreatNearBase(): boolean {
-    if (!this.hasBase) return false
-    // Per-tick cache: called once per tick from think() (only when
-    // guardBandMode > 0). Pure function of World state — byte-identical.
-    if (this._fastThreatCache !== null) return this._fastThreatCache
-    const bc = BASE_POS.col
-    const br = BASE_POS.row
-    const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
-    let result = false
-    for (let li = 0; li < list.length; li++) {
-      const t = list[li]
-      if (!t.alive || t.spawnTimer > 0) continue
-      if (t.kind !== 'fast' && t.kind !== 'power') continue
-      const tc = this.tankCell(t)
-      // Static box: within 3 cols of base AND row >= 18
-      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
-        result = true
-        break
-      }
-      // Race check: within baseRaceRangeCells of base
-      const enemyDist = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
-      if (enemyDist <= this.params.baseRaceRangeCells) {
-        result = true
-        break
-      }
-    }
-    this._fastThreatCache = result
-    return result
-  }
-
-  // --- SmartThreatModel (Phase A, plan/God-AI-Next-Round §3) ---
-  /** Threat score for an enemy [0..1]. Higher = more dangerous to base. */
-  threatScore(t: Tank): number {
-    return threatScoreImpl(this, t)
-  }
-  /** Smart isBaseUnderThreat: any enemy with threatScore ≥ threshold. */
-  smartIsBaseUnderThreat(): boolean {
-    return smartIsBaseUnderThreatImpl(this)
-  }
+  // M0.5 (2026-08-03): D1 hasFastThreatNearBase + SmartThreatModel wrappers
+  // (threatScore / smartIsBaseUnderThreat) retired — archived in experimental.ts.
 
   scanAhead(
     pcx: number,
@@ -590,6 +604,25 @@ export class GodAIInput implements InputLike {
   }
   hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
     return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
+  }
+  /** §M3-revisit round 3 (DECISIONS §101): terrain-only pinning — true only
+   * when BOTH perpendicular dodge directions are impassable (corridor/corner).
+   * Counter-fire only in that case; open-ground timing pressure keeps the
+   * normal (partial) dodge moving. */
+  isTerrainPinned(bullet: Bullet): boolean {
+    const p = this.controlledTank(this.world)
+    if (!p) return false
+    return isTerrainPinnedImpl(this, p, bullet)
+  }
+  /** M4: check if other bullets are approaching within range (crossfire gate). */
+  hasCrossFireBullet(
+    pcx: number,
+    pcy: number,
+    excludeId: number,
+    rangeCells: number,
+    threshold = 1,
+  ): boolean {
+    return hasCrossFireBulletImpl(this, pcx, pcy, excludeId, rangeCells, threshold)
   }
   findPathThreat(pcx: number, pcy: number, moveDir: Direction, playerSpeed: number): Bullet | null {
     return findPathThreatImpl(this, pcx, pcy, moveDir, playerSpeed)
@@ -696,10 +729,6 @@ export class GodAIInput implements InputLike {
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
   }
-  trapAvoidance(tank: Tank, moveDir: Direction): Direction {
-    return trapAvoidanceImpl(this, tank, moveDir)
-  }
-  computeThreatCosts(fromCell: Cell, playerSpeed: number): Float64Array | undefined {
-    return computeThreatCostsImpl(this, fromCell, playerSpeed)
-  }
+  // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired —
+  // archived in experimental.ts for the v2 survive candidate.
 }

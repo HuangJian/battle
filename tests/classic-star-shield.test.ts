@@ -108,6 +108,11 @@ describe('Classic combat — 3★ star shield (FC tradition)', () => {
     world.enemiesRemaining = 1000
     world.spawnTimer = 1e9
 
+    // §104 (M6): hard now starts at 1★. Pin to 0 so the 3-star apply lands
+    // exactly on 3★ (this test asserts the pool model's no-demotion gate).
+    world.playerLevel = 0
+    world.player!.level = 0
+
     const apply = (sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp.bind(sim)
     for (let i = 0; i < 3; i++) apply('star')
     world.player!.spawnTimer = 0

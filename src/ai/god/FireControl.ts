@@ -4,6 +4,7 @@ import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
 import { snap } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
+import { estimatedEnemyLevel } from './EnemyModel'
 
 // ============================================================
 // FireControl — target scanning + fire decisions (T2a, T9, T2b, T6, T11, M6)
@@ -70,20 +71,21 @@ export function findEnemyDirectionImpl(
 
     // T9: score = threat weight × 1000 - distance (prefer high-threat,
     // then nearest among equal threat).
-    const threatWeight = kindThreatWeight(t.kind)
+    // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp 否决，
+    // 移入 experimental.ts 归档）——hpFactor 保留（原评分组成部分）。
+    let threatWeight = kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
-    // D2: when damagedArmorBonus > 0, add a bonus for finishing damaged
-    // armor tanks. The base hpFactor (hp/maxHp) preferentially weights
-    // full-HP targets — which is backwards for armor-heavy stages where
-    // spreading damage across 4 fresh armor tanks kills none. The bonus
-    // inverts the priority: a 1/4-HP armor gets damagedArmorBonus×1000
-    // extra, making the AI commit to the kill.
     const hpFactor = t.hp / (t.maxHp || 1)
-    const damagedBonus =
-      self.params.damagedArmorBonus > 0 && t.maxHp > 1
-        ? (1 - hpFactor) * self.params.damagedArmorBonus * 1000
-        : 0
-    const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100 + damagedBonus
+    // M3 (plan/God-AI-Redesign-v2 §4.2b, tierWeightScale): when ON, scale the
+    // threat weight by the EnemyModel's estimated level — the AI commits its
+    // fire priority to enemies it has SEEN play well (empirically accurate /
+    // coordinated / disciplined), rather than a static kind weight alone.
+    // 0 at default ⇒ byte-identical to pre-M3.
+    if (self.params.tierWeightScale > 0) {
+      const lvl = estimatedEnemyLevel(self)
+      if (lvl > 0) threatWeight *= 1 + self.params.tierWeightScale * lvl
+    }
+    const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100
 
     if (score > bestScore) {
       bestScore = score
