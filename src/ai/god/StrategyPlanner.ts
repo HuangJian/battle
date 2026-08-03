@@ -577,6 +577,40 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     }
   }
 
+  // ---- M13: field-wide pressure retreat (SHIPPED, DECISIONS §113) ----
+  // P4.2 only fires when 3+ enemies CONVERGE within outnumberedRadiusCells.
+  // The M13 probe showed 70% of hard/chaos deaths happen with the FULL
+  // enemy field alive (4/4) and 39% at >20 cells from the base — the player
+  // deep-hunts while the field is at max pressure, and 1★ single-bullet
+  // firepower cannot out-race 3-4 enemies (grinding death, §111). When the
+  // FIELD count (not just nearby) is at/over outnumberedFieldEnemies and the
+  // player is beyond outnumberedFieldDistCells, return to the defense
+  // position — stop over-extending into a full battlefield. `enemies` here
+  // is the Cluster C field-wide live snapshot, not the nearby count.
+  // A/B (official 口径): 20-seed hard +2.7pp / chaos +2.6pp; 60-seed hard
+  // +2.3pp / chaos +0.6pp — the FIRST mechanism without a chaos downside
+  // (base losses and deaths down in BOTH difficulties; every dodge/horizon
+  // mechanism before had the hard+/chaos- signature). The winning tuning
+  // retreats at 3+ alive (attrition starts at 3, not 4 — 1★ can't out-race
+  // 3 enemies either) beyond 15 cells; ON4@10 was measured HARMFUL
+  // (too passive, base falls: hard -5.3pp). Pool-model only: classic
+  // 'instant' has no grinding deaths (1-shot kills, 91% gate byte-locked).
+  // NOTE (endgame interplay): this block runs BEFORE the S6 aggressive-hunt
+  // below, so with 3+ enemies alive in the endgame (queue <= 6) the player
+  // retreats instead of hunting. The 60-seed A/B empirically validated this
+  // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
+  // regression by reordering the blocks.
+  if (
+    self.params.outnumberedFieldRetreat > 0 &&
+    w.rules.combatModel === 'pool' &&
+    !baseUnderThreat &&
+    !self.aggressive &&
+    playerDistToBase > self.params.outnumberedFieldDistCells &&
+    enemies.length >= self.params.outnumberedFieldEnemies
+  ) {
+    return self.getDefaultDefensePosition()
+  }
+
   // Aggressive mode (freeze): enemies can't move — chase nearest directly.
   if (self.aggressive) {
     let best = enemies[0]

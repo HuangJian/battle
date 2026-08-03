@@ -96,6 +96,13 @@ export const SEARCH_SPACE: ParamSpec[] = [
   // Default 2 (point-blank). Open-sightline stages override to 4, armor-
   // forest-dense stages to 3. CMA-ES optimizes the base value.
   { name: 't2aHighHpMaxRange', min: 2, max: 5, isInteger: true, init: 2, stepFrac: 0.3 },
+  // M13 (DECISIONS §113, SHIPPED): field-wide outnumbered retreat thresholds.
+  // outnumberedFieldEnemies: min 1 (retreat even with 1 enemy — very
+  // defensive), max 5 (never fires — max 4 alive, effectively disables M13).
+  // outnumberedFieldDistCells: min 4 (retreat as soon as the player leaves
+  // the base area), max 26 (only retreat at the far edge).
+  { name: 'outnumberedFieldEnemies', min: 1, max: 5, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'outnumberedFieldDistCells', min: 4, max: 26, isInteger: true, init: 15, stepFrac: 0.25 },
 ]
 
 const DIM = SEARCH_SPACE.length

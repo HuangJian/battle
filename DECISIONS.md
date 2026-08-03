@@ -1098,3 +1098,37 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - 已证伪方向再 +1：dodge 分支行为族（对枪/clearance/horizon/HP 门控）全部关闭，剩余 knobs 保留供 M4 CMA-ES 标量搜索复用。
 - hard/chaos 的杠杆不在 dodge：M7 归因（回防途中 85-93% 死亡在 chase/engage 分支）与 M4 标量参数搜索是下两个方向。
 - 方法论：本次 20-seed 阴性（≤0.6pp）与 60-seed 一致（±2.2pp 反向）——20-seed 判断「不发布」正确，60-seed 额外确认了硬/混沌反向签名；阴性结果的 60-seed 价值在于排除「隐藏的强信号」。
+
+## 113. M13 全场压力撤退（outnumberedFieldRetreat）：SHIPPED，hard +2.3pp / chaos +0.6pp（2026-08-04）
+
+**Decision:** 新增并**发布** `outnumberedFieldRetreat`（1）/ `outnumberedFieldEnemies`（3）/ `outnumberedFieldDistCells`（15），**pool 模型专属**（`w.rules.combatModel==='pool'` 门控——classic instant 无磨血死亡，91% 门禁字节不变）。机制：`selectTarget` 中，场上存活敌人（全场 Cluster C，非 P4.2 的 9 格附近计数）≥3 且玩家距基地 >15 格时返回防守位，停止过度深入。这是**第一个无 chaos 负向的 God AI 行为机制**（此前 M3/M4/M9/M10/M12 全部 hard+/chaos- 反向签名）。
+
+**Rationale（全链路数据驱动）：**
+- **M13 死亡场景探针**（telemetry 扩展 hp/liveEnemies 字段，35×20）：hard/chaos 一致——死亡分支 dodge 84-86%（复现 §96）、**距基地 >20 格 39%**、**场上敌人数 >3（满编）70-73%**、1★ 死亡 80-85%、死亡时 HP 100% ≤100（磨血最后一击，复现 §111）。最大单格 = 「>20格 × dodge」32-33%：玩家在敌满编时过度深入，1★ 单发慢弹火力无法对抗 3-4 只敌人的持续输出 → 磨血死亡。
+- **机制演化**：P4.2（已发布）只在 3 只**聚集到 9 格内**才撤——探针证明 70% 死亡时全场 4 只活着但未必聚集，玩家仍深入送死。M13 把撤退条件升级为全场计数。
+- **A/B 官方口径**：20-seed ON3@15 hard +2.7pp / chaos +2.6pp；**60-seed hard +2.3pp（~2.1σ）/ chaos +0.6pp**——双难度方向一致、死亡↓（0.68→0.65 / 0.71→0.68）、基地失守↓（hard -33 / chaos -16）、无任何关卡系统性回退。**ON4@10 反向探明有害**（等满编 4 只才撤 + 10 格阈值 → 过于被动：hard -5.3pp / chaos -3.3pp，基地失守 +35/+11）——磨血从 3 只就开始了，不是 4。
+- **M5 重测（口径事故纠正）**：§103 的 A/B 因字段名错误测了 DEFAULT vs DEFAULT，本次修正后首测：hard +0.4pp / chaos -0.8pp，死亡数降但 win% 不升（换路更被动）——确认 M5 中性偏负，不发布。
+
+**Implications:**
+- 门禁真值重生成（20-seed）：hard 341→**360/700（51.4%）**、chaos 341→**359/700（51.3%）**，aggregate floor 315/315→**333/333**。classic 门禁不动（pool-only）。
+- 机制上首次绕过「dodge 分支无杠杆」死结：改的是**站位纪律**（不深入满编战场）而非闪避质量——死亡 39% 发生在 >20 格，从源头减少「深入 → 被围 → 磨死」。
+- 下个候选：M4 标量参数 CMA-ES（把 outnumberedField* 加入 SEARCH_SPACE）；或探索 ON3@15 的边界（enemies=3 已验证，enemies=2 过度保守，需谨慎）。
+
+## 114. M4 标量参数 CMA-ES 首轮：子集过拟合阴性 + M13 阈值双重复证（2026-08-04）
+
+**Decision:** M4 首轮 CMA-ES 搜索**无发布**。基础设施落地：`outnumberedFieldEnemies` / `outnumberedFieldDistCells` 加入 `optimize-godai.ts` 的 SEARCH_SPACE（20 参数）。搜索（hard，6 代表关 × 6 seeds，v5 fitness，floor 0.4，25 代）最优解 = 12 参数变动（aimError→0、campTimeoutTicks 90→120、replanInterval 50→36、outnumberedFieldDistCells 15→9 等，子集 win 72→89%）；**60-seed 全量官方口径验证：hard 45.8%（-0.9pp）/ chaos 44.7%（-3.0pp）双难度均劣化——子集过拟合**。聚焦隔离 `outnumberedFieldDistCells=9`：hard -1.8pp / chaos -2.5pp，基地失守 +92/+70——**shipped 的 15 被复证为最优**（更早撤退 = 更被动 = 基地失守，ON4@10 有害模式复现）。`outnumberedFieldEnemies=3` 搜索保持原值（复证）。
+
+**Rationale（方法论教训，最重要）：**
+- **screening 代理失真**：6 关 × 6 seeds 的 v5 fitness 代理与全 35 关 × 60 seeds 官方口径**方向相反**（子集 89% → 全量 45.8%）。aimError=0（完美瞄准）等改动在子集上讨好，在全量上伤害（其他关的瞄准价值不同）。教训：**标量搜索的 fitness 代理必须足够接近官方口径**——子集必须更大/更有代表性，或每 N 代用全 35 关 × 10 seeds 做早期验证剪枝。
+- **M13 阈值边界闭合**：3（enemies）× 15（dist）是局部最优——搜索方向（9）与既有 ON4@10 实验都证明收紧有害；放宽方向无信号。M13 参数从 SEARCH_SPACE 移除价值低（已确认边界），保留供未来全量口径搜索复用。
+- **game-feel 安全检查**：`SKILLED_HUMAN_PARAMS.aimError = max(0.15, god+0.15)` 有绝对下限——即使 God aimError=0 人类代理仍是 0.15（不会变完美），代理派生安全。
+- **未发布的 12 参数集无害**：全量验证已证伪，不进入默认；classic 门禁不受影响（无代码行为变更，仅 tools 文件改动）。
+
+**Implications:**
+- M4 round-2 的正确配置：全 35 关（或 ≥20 关代表性子集）× 8-10 seeds，v5 或 v7（需先校准 hard/chaos 的 eval-refs），generations 15-20，配 mid-search 全量验证剪枝。计算成本 ~1-2h/难度，需用户确认是否投入。
+- M13 阈值边界闭合（补 dist=20 验证，review 补强）：60-seed 全谱 dist=9 44.9/45.2 → **dist=15（shipped）46.7/47.7 → dist=20 46.7/47.4**——15 是明确峰值（9 有害 -1.8/-2.5pp，20 持平无信号），收紧/放宽两个方向均已实证。
+- 口径注明：M4 验证为**非配对比较**（OPT/dist9/dist20 为独立运行，对照 = M13 轮的 OFF 基线 46.7/47.7，同 seeds 同形状）——n=2100 下 1.8-3.0pp 差距足以定论，但严格口径应同 run 配对（后续轮次注意）。
+
+## 114.1 M4 round-2 建议配置（评审决议，未执行）
+
+**Decision:** 不启动（需用户确认计算投入 ~1-2h/难度）。若启动：全 35 关 × 8-10 seeds × 15-20 代，每 5 代全量剪枝验证，fitness 用 win%（或先校准 hard/chaos eval-refs 再 v7）。关键前提：**screening 代理必须接近官方口径**（§114 教训——6 关子集 89% vs 全量 45.8% 方向相反）。

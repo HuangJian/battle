@@ -947,6 +947,27 @@ export interface GodAIParams {
   surviveMinEnemies: number
   /** M3: survive 候选的包围判定半径 (cells). */
   surviveEnemyRadiusCells: number
+
+  // ---- M13: field-wide outnumbered positioning (DECISIONS §113) ----
+  /**
+   * M13: 0 = OFF (byte-identical). 1 = ON: when the FIELD-wide live enemy
+   * count is at/over `outnumberedFieldEnemies` (P4.2 only counts enemies
+   * WITHIN outnumberedRadiusCells — converging) AND the player is beyond
+   * `outnumberedFieldDistCells` from the base, selectTarget returns the
+   * defense position instead of deep-hunting. Targets the dominant death
+   * mode (M13 probe): 70% of hard/chaos deaths happen with the full 4-enemy
+   * field alive, 39% at >20 cells from base, 85% at 1★ — the player
+   * over-extends while outnumbered and gets ground down (1★ single bullet
+   * cannot out-race 4 enemies). Skipped when the base is under threat or in
+   * aggressive (freeze) mode.
+   */
+  outnumberedFieldRetreat: number
+
+  /** M13: field-wide live-enemy threshold for the retreat (default 4 = MAX_ENEMIES_ALIVE). */
+  outnumberedFieldEnemies: number
+
+  /** M13: min player dist-to-base (cells) for the retreat. */
+  outnumberedFieldDistCells: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1233,6 +1254,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // survive 候选（主动换位）：0 = OFF（不提交）。
   surviveMinEnemies: 0,
   surviveEnemyRadiusCells: 3,
+  // M13: 全场压力撤退（DECISIONS §113，SHIPPED 2026-08-04）— 默认 ON，
+  // pool 模型专属（classic instant 无磨血死亡，91% 门禁字节不变）。
+  // 60-seed：hard +2.3pp / chaos +0.6pp（无 chaos 负向；基地失守与死亡
+  // 双难度均下降）。ON4@10 实测有害（-5.3pp 过于被动）——3 只即撤 + 15 格。
+  outnumberedFieldRetreat: 1,
+  outnumberedFieldEnemies: 3,
+  outnumberedFieldDistCells: 15,
 }
 
 /**

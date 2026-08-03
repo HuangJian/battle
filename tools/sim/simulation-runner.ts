@@ -53,6 +53,10 @@ export interface PlayerDeath {
   branch: string
   /** Player star level at death. */
   playerLevel: number
+  /** Player HP at the death tick (pool model — how many hits it absorbed). */
+  hp: number
+  /** Live, fully-spawned enemy count at the death tick (surround context). */
+  liveEnemies: number
 }
 
 /**
@@ -394,6 +398,15 @@ export function runSimulation(opts: RunOptions): SimResult {
           }
           const bcx = BASE_POS.col * CELL + CELL
           const bcy = BASE_POS.row * CELL + CELL
+          // Live-enemy surround context (M13 probe): count alive, fully-spawned
+          // enemies at the death tick. Indexed loop — per-death, not per-tick;
+          // telemetry-only, never feeds back (determinism invariant preserved).
+          let liveEnemies = 0
+          const tanksArr = world.tanks
+          for (let ti = 0; ti < tanksArr.length; ti++) {
+            const o = tanksArr[ti]
+            if (!o.isPlayer && o.alive && o.spawnTimer <= 0) liveEnemies++
+          }
           deaths.push({
             tick,
             x: t.x + t.w / 2,
@@ -405,6 +418,8 @@ export function runSimulation(opts: RunOptions): SimResult {
             killerTier,
             branch: input._lastBranch,
             playerLevel: t.level ?? 0,
+            hp: t.hp,
+            liveEnemies,
           })
         } else if (e.type === 'bullet_fired' && e.bullet.isPlayer) playerShots++
         else if (e.type === 'powerup_collected') {

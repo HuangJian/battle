@@ -21,8 +21,13 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 // play, not just God AI). §111 (2026-08-04) extended the 3★ star shield to
 // ALL difficulties (engine change, SimulationCombat — classic-only before;
 // measured impact noise-level since the player rarely reaches 3★, HP probe
-// 35×20: lvl3+ alive-time 1.3-1.6%). Current truth (20-seed,
-// playerStartLevel=1): hard 48.7% / chaos 48.7% → aggregate floor 315/315
+// 35×20: lvl3+ alive-time 1.3-1.6%). §113 (M13, 2026-08-04) SHIPPED the
+// field-wide outnumbered positioning retreat (outnumberedFieldRetreat=1 /
+// 3 enemies / 15 cells, pool-model only — classic byte-identical): 20-seed
+// hard +2.7pp / chaos +2.6pp, 60-seed hard +2.3pp / chaos +0.6pp — the FIRST
+// mechanism without a chaos downside (base losses + deaths down in BOTH
+// difficulties). Current truth (20-seed, playerStartLevel=1): hard 51.4% /
+// chaos 51.3% → aggregate floor 333/333 (DECISIONS §113).
 // (DECISIONS §111).
 //
 // These are 20-seed SCREENING floors (same convention as the classic gate's
@@ -37,92 +42,91 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 const MARGIN_WINS = 4
 
-// Per-stage wins measured at 35×20 on the §111 baseline (2026-08-04,
+// Per-stage wins measured at 35×20 on the §113 baseline (2026-08-04,
 // playerStartLevel=1, startLives for hard/chaos, star shield on all
-// difficulties). §110 reverted §109's 2★ back to 1★ by user decision.
-// §111 extended the star shield to all difficulties (noise-level win change:
-// hard 336→341, chaos 342→341 out of 700). Values are WIN COUNTS out of
-// GATE_SEEDS (20). hard = 2 lives (honest).
+// difficulties, M13 field-wide retreat ON for pool difficulties). §110
+// reverted §109's 2★ back to 1★ by user decision. Values are WIN COUNTS out
+// of GATE_SEEDS (20). hard = 2 lives (honest).
 const HARD_TRUTH_WINS: number[] = [
-  9, // S0  Outpost
-  14, // S1  Waterways
-  5, // S2  Steel Fortress
-  12, // S3  Crossfire
-  11, // S4  Maze
-  5, // S5  Brickworks
-  7, // S6  Iron Curtain
-  8, // S7  Riverbed
-  12, // S8  Twin Towers
-  15, // S9  Gauntlet
-  12, // S10  Fortress
-  9, // S11  Lattice
-  5, // S12  Bunker Hill
-  13, // S13  Steel Web
+  11, // S0  Outpost
+  9, // S1  Waterways
+  4, // S2  Steel Fortress
+  5, // S3  Crossfire
+  13, // S4  Maze
+  10, // S5  Brickworks
+  14, // S6  Iron Curtain
+  13, // S7  Riverbed
+  8, // S8  Twin Towers
+  7, // S9  Gauntlet
+  14, // S10  Fortress
+  8, // S11  Lattice
+  7, // S12  Bunker Hill
+  14, // S13  Steel Web
   8, // S14  Citadel
-  7, // S15  Crossroads
+  11, // S15  Crossroads
   10, // S16  Twin Spires
-  12, // S17  Gridlock
-  8, // S18  Frozen Field
-  11, // S19  Bastion
-  9, // S20  Checkers
-  7, // S21  Oasis
-  19, // S22  Ramparts
-  6, // S23  Labyrinth
-  11, // S24  Quarry
-  6, // S25  Ice Palace
-  10, // S26  Brick Maze
-  8, // S27  Thicket
-  11, // S28  Spider
-  9, // S29  Concentric
-  13, // S30  Eagle Nest
-  8, // S31  Star Fort
-  12, // S32  Diamond
-  3, // S33  Battlement
+  14, // S17  Gridlock
+  9, // S18  Frozen Field
+  7, // S19  Bastion
+  14, // S20  Checkers
+  10, // S21  Oasis
+  20, // S22  Ramparts
+  4, // S23  Labyrinth
+  10, // S24  Quarry
+  4, // S25  Ice Palace
+  9, // S26  Brick Maze
+  9, // S27  Thicket
+  15, // S28  Spider
+  14, // S29  Concentric
+  12, // S30  Eagle Nest
+  10, // S31  Star Fort
+  13, // S32  Diamond
+  4, // S33  Battlement
   16, // S34  Final Redoubt
 ]
 
 const CHAOS_TRUTH_WINS: number[] = [
-  9, // S0  Outpost
-  12, // S1  Waterways
-  3, // S2  Steel Fortress
-  13, // S3  Crossfire
-  7, // S4  Maze
-  9, // S5  Brickworks
-  2, // S6  Iron Curtain
-  8, // S7  Riverbed
-  8, // S8  Twin Towers
-  13, // S9  Gauntlet
-  12, // S10  Fortress
-  8, // S11  Lattice
-  8, // S12  Bunker Hill
+  14, // S0  Outpost
+  9, // S1  Waterways
+  7, // S2  Steel Fortress
+  5, // S3  Crossfire
+  13, // S4  Maze
+  8, // S5  Brickworks
+  16, // S6  Iron Curtain
+  10, // S7  Riverbed
+  11, // S8  Twin Towers
+  10, // S9  Gauntlet
+  16, // S10  Fortress
+  11, // S11  Lattice
+  9, // S12  Bunker Hill
   15, // S13  Steel Web
-  9, // S14  Citadel
-  5, // S15  Crossroads
+  8, // S14  Citadel
+  9, // S15  Crossroads
   10, // S16  Twin Spires
   17, // S17  Gridlock
-  11, // S18  Frozen Field
-  4, // S19  Bastion
-  11, // S20  Checkers
+  7, // S18  Frozen Field
+  3, // S19  Bastion
+  12, // S20  Checkers
   11, // S21  Oasis
   18, // S22  Ramparts
-  6, // S23  Labyrinth
-  14, // S24  Quarry
-  5, // S25  Ice Palace
-  8, // S26  Brick Maze
-  5, // S27  Thicket
-  13, // S28  Spider
-  13, // S29  Concentric
+  3, // S23  Labyrinth
+  13, // S24  Quarry
+  1, // S25  Ice Palace
+  11, // S26  Brick Maze
+  4, // S27  Thicket
+  15, // S28  Spider
+  16, // S29  Concentric
   7, // S30  Eagle Nest
   11, // S31  Star Fort
-  15, // S32  Diamond
-  5, // S33  Battlement
-  16, // S34  Final Redoubt
+  14, // S32  Diamond
+  2, // S33  Battlement
+  13, // S34  Final Redoubt
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §111 (2026-08-04): star shield all difficulties → hard 48.7% / chaos 48.7%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((48.7 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 315/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((48.7 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 315/700
+// §113 (2026-08-04): M13 field-wide retreat shipped → hard 51.4% / chaos 51.3%.
+const HARD_AGGREGATE_FLOOR = Math.floor(((51.4 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 333/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((51.3 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 333/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).

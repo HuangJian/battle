@@ -418,6 +418,23 @@ chaos 上全部无发布级杠杆；引擎方向耦合（移动 = 面朝 = 开�
 
 **星经济杠杆边界明确**：0★→1★（M6，+7.9~9.0pp）可；1★→2★（M11，+7.5~9.4pp）不可——**出生星级的合理上限是 1★**。
 
+## II.8b §111 星盾全难度 + §112 M12 HP 感知（阴性）+ §113 M13 全场压力撤退（SHIPPED，2026-08-04）
+
+- **§111 星盾全难度扩展（引擎，用户拍板）**：3★ 星盾从 classic-only 扩展到所有难度（移除
+  `SimulationCombat` 的 difficultyKey 守卫，classic 字节不变）。HP 模型探针（35×20）：磨血死亡
+  hard 70% / chaos 67%（≥3 发）、危险区时间 19-20%、3★ 存活时间仅 1.3-1.6%（星盾触发 10-15/700，
+  win 影响噪声内）。hard/chaos 真值重生成 341/700（48.7%）。
+- **§112 M12 玩家 HP 缓冲感知（诚实阴性）**：dodge 分支 HP 自适应 commit 余量（danger 放宽 / trade 加严，
+  5 参数默认 OFF，pool-only）。20-seed delta ≤0.6pp 噪声；60-seed hard +2.3 / chaos -2.2 反向抵消
+  （horizon 基底签名非 M12）。**第三次证伪 dodge 分支行为族**（M3/M9/M10/M12 同一 hard+/chaos- 签名）。
+- **§113 M13 全场压力撤退（SHIPPED，首个无 chaos 负向机制）**：死亡场景探针（telemetry 新增
+  hp/liveEnemies）揭示主导死法 = 敌满编（70-73%）+ 深入 >20 格（39%）+ 1★（80-85%）→ 磨血死亡。
+  `outnumberedFieldRetreat`=1 / 3 只 / 15 格（pool-only）：`selectTarget` 在全场敌人 ≥3 且距基地 >15 格
+  时回防守位。A/B：20-seed hard +2.7 / chaos +2.6pp；60-seed hard +2.3（2.1σ）/ chaos +0.6pp——双目标
+  （死亡↓、基地失守↓）双难度全改善，**无 chaos 负向**（此前所有 dodge 机制都有）。ON4@10 反向有害
+  （-5.3pp 过于被动）。M5 pathThreatAvoidance 口径事故纠正后重测：hard +0.4 / chaos -0.8pp 确认中性
+  偏负不发布。门禁真值：hard/chaos 341→**360/359（51.4%/51.3%）**，floor 315→**333**；classic 不动。
+
 ## II.9 v2 纪元方法论沉淀（纪律升级）
 
 1. **口径纪律（四级）**：
@@ -449,15 +466,16 @@ chaos 上全部无发布级杠杆；引擎方向耦合（移动 = 面朝 = 开�
 
 ## II.11 未来探索方向（按已证伪清单过滤）
 
-> 已证伪方向汇总（避免重复投入）：dodge 分支行为（M3 对枪 / M4 紧急对枪 / M9 horizon / M10 余量门控，四次）、
-> 权重重排（M2c）、survivalRetreat 回防（M8）、站位提前规避（M5）、出生 2★（M11/§110 用户否决）、
-> 前瞻式炮弹规避（Classic 纪元 §68/§69/§68-revisit 系列）。
+> 已证伪方向汇总（避免重复投入）：dodge 分支行为（M3 对枪 / M4 紧急对枪 / M9 horizon / M10 余量门控 /
+> M12 HP 门控，五次）、权重重排（M2c）、survivalRetreat 回防（M8）、站位提前规避（M5，口径纠正重测
+> 后确认中性偏负）、出生 2★（M11/§110 用户否决）、前瞻式炮弹规避（Classic 纪元 §68/§69/§68-revisit 系列）。
 
-1. **M4 标量参数 CMA-ES（最优候选）**：`optimize-godai.ts` SEARCH_SPACE 基础设施就绪，目标 = 不改变 game feel 的
-   AI 行为参数（hard/chaos 门禁口径为 fitness，60-seed 官方口径验证）。M2c 证明权重重排无杠杆、M3-M10 证明行为改动
-   无杠杆后，标量参数是剩余最干净的杠杆面。
-2. **生存站位（M7 数据支撑）**：回防中死亡占 85-93%（chase/engage 分支，不碰 dodge）——但 M8 的教训是
-   "凡不改变 dodge 分支本身的候选体杠杆趋零"，需先解决 dodge 分支的死亡事件本身或找到 chase/engage 的直接干预点。
+1. **M4 标量参数 CMA-ES（首轮已跑，DECISIONS §114）**：`optimize-godai.ts` SEARCH_SPACE 已含 M13 参数（20 个）。
+   首轮（6 关 × 6 seeds 子集）最优解全量 60-seed 验证双难度劣化（-0.9/-3.0pp）——**子集过拟合**；顺带复证
+   M13 阈值 3/15 是局部峰值（9 有害 / 20 持平）。round-2 需全 35 关口径或 mid-search 剪枝，成本 ~1-2h/难度待确认。
+2. **生存站位（已交付 M13，§113）**：全场压力撤退（3 只 + 15 格）已发布并提升 hard/chaos。下阶段可探索
+   M13 参数边界（M4 CMA-ES 加入 SEARCH_SPACE）或「回防路径安全」（navigate 分支回防时用
+   findPathThreat/findSafeMoveDir 规避交叉火力，M5 基础设施可复用）。
 3. **重跑死亡归因**（`tools/diag/death-attribution.ts`）：§110 回退 1★ 后确认最新死亡分布，数据驱动选靶点。
 4. **Pillar C 泛化语料**（评审决议 5）：冻结语料 35 关 × 20 seeds × 3 难度门禁（hard > classic > chaos 分期上线），
    证明没有过拟合 classic 35——评审已授权，尚未实施。
