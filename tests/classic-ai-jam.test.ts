@@ -187,7 +187,11 @@ describe('Dead-end shaft recovery — tunnel out of a 1-wide vertical channel', 
     let maxX = tank.x
     let minY = tank.y
     let maxY = tank.y
-    for (let i = 0; i < 1500; i++) {
+    // Window sized for turnCooldownMs=100 (DECISIONS §95): each deferred turn
+    // waits longer, so the veteran-tier tunnel-out lands at ~655-1736 ticks
+    // (measured seeds 999/100/42/7) vs ~656 at the old 50ms baseline. 2400
+    // covers the worst measured case (seed 999 → 1736) with margin.
+    for (let i = 0; i < 2400; i++) {
       sim.tick()
       if (world.state !== 'playing') world.state = 'playing'
       if (!world.player || !world.player.alive) world.spawnPlayer()

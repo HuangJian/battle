@@ -83,8 +83,18 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
         if (turnCd > 0 && tank.dir !== tank.prevMoveDir) {
           const now = w.frame * (1000 / 60)
           if (now - (tank.lastTurnMs ?? -9999) < turnCd) {
-            // Cooldown active — revert to the previous movement direction
+            // Cooldown active — the requested turn is deferred. Revert to
+            // the previous movement direction AND halt: at turnCooldownMs
+            // ≥160ms the tank would otherwise keep drifting along the old
+            // axis for ~10 ticks, overshooting maze corners / walking into
+            // walls / failing dodges (§95 per-seed tick-diff finding: the
+            // 160ms A/B's flip-to-lose seeds — S10 s1, S12 s6, S26 s1 — all
+            // diverge exactly at a deferred turn). Clearing `moving` makes
+            // the velocity integrate to 0 (instant stop on normal ground;
+            // on ice the residual velocity eases toward 0 via
+            // ICE_DECEL_TRACTION, preserving the glide).
             tank.dir = tank.prevMoveDir ?? tank.dir
+            tank.moving = false
           } else {
             // Cooldown expired — accept the turn
             tank.prevMoveDir = tank.dir

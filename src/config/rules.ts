@@ -165,12 +165,13 @@ export interface GameplayRules {
   // ── §86c: Turn cooldown ───────────────────────────────
   /** Minimum time (ms) between direction changes for ANY tank (player + enemy).
    *  0 = OFF (byte-identical to pre-§86c — tanks can turn every tick). >0 = the
-   *  minimum turn period. At 60fps, 50ms ≈ 3 ticks. This blocks the God AI's
-   *  per-tick direction oscillation at the source (the simulation refuses to
-   *  turn faster than this) — the canonical §86c fix. The `dodgeOscillationCounterFire`
-   *  counter-fire (§86) is a no-op in the common case and only catches rare
-   *  3-tick-boundary oscillation; it is the defense-in-depth fallback, not the
-   *  primary fix. */
+   *  minimum turn period. At 60fps, 160ms ≈ 9.6 ticks (~360 APM — superhuman
+   *  turn rate, so a skilled human is never actually constrained). This blocks
+   *  the God AI's per-tick direction oscillation at the source (the simulation
+   *  refuses to turn faster than this) — the canonical §86c fix. The
+   *  `dodgeOscillationCounterFire` counter-fire (§86) is a no-op in the common
+   *  case and only catches rare cooldown-boundary oscillation; it is the
+   *  defense-in-depth fallback, not the primary fix. */
   turnCooldownMs: number
 }
 
@@ -250,9 +251,16 @@ export const DEFAULT_RULES: GameplayRules = {
   turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
   brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
-  // §86c: Turn cooldown — 50ms minimum turn period (3 ticks at 60fps).
-  // Blocks per-tick direction oscillation at the simulation layer.
-  turnCooldownMs: 50,
+  // §86c: Turn cooldown — 100ms minimum turn period (~6 ticks at 60fps).
+  // §95 A/B (35×60 classic): 100ms + halt-during-cooldown is the best of the
+  // 50/100/160 sweep — net +5 flips (91.2%) vs the 50ms drift baseline
+  // (91.0%), suite 0.7561→0.7741. 160ms + halt regresses to 89.8% (the AI's
+  // per-tick decision model assumes instant turns; at ~9.6 ticks the dodge /
+  // T2a aim / turn-and-fire cadence degrades). 50ms + halt regresses to
+  // 88.9% (the halt stops the tank in the bullet's path — at 3 ticks the old
+  // drift was better for dodging). 100ms is the sweet spot: no maze overshoot
+  // (the halt), minimal dodge-loss (only 6 ticks).
+  turnCooldownMs: 100,
 }
 
 /**
@@ -344,8 +352,9 @@ export const RULES: Record<string, GameplayRules> = {
     turnOnCollisionOnly: true,
     brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
-    // §86c: Turn cooldown — 50ms minimum turn period (3 ticks at 60fps).
-    turnCooldownMs: 50,
+    // §86c: Turn cooldown — 100ms minimum turn period (~6 ticks at 60fps).
+    // §95 A/B best of 50/100/160 (see DEFAULT_RULES note).
+    turnCooldownMs: 100,
   },
   relax: DEFAULT_RULES,
   hard: DEFAULT_RULES,

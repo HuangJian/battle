@@ -54,51 +54,56 @@ const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 // S28 +5.0pp (86.7→91.7) and NO stage below its §87 truth. S28 keeps its
 // conservative pre-§87 truth: in the full-suite gate context Spider swings
 // 13-20/20, so the 91.7% @60 truth (floor 14) fails on context noise.
+// §95 (2026-08-03): regenerated from the 35×60 measurement of the SHIPPED
+// §95 defaults (turn cooldown 100ms + halt-during-cooldown — DECISIONS §95).
+// Mean 91.19% — the best of the 50/100/160 sweep (50ms drift 91.0% baseline,
+// 100ms+halt 91.2% net +5, 160ms+halt 89.8% net −24). S28 keeps its
+// conservative gate-context floor (same order-dependent noise as §94).
 const TRUTH_WIN_PCT: number[] = [
   98.3, // S0  Outpost
-  96.7, // S1  Waterways
-  98.3, // S2  Steel Fortress
-  96.7, // S3  Crossfire
-  91.7, // S4  Maze
-  83.3, // S5  Brickworks
-  75.0, // S6  Iron Curtain (§94 +1.7pp: chokepoint holding covers the western lane)
-  93.3, // S7  Riverbed
-  98.3, // S8  Twin Towers
-  98.3, // S9  Gauntlet
-  93.3, // S10 Fortress
+  98.3, // S1  Waterways
+  96.7, // S2  Steel Fortress
+  95.0, // S3  Crossfire
+  100.0, // S4  Maze (§95 +8.3pp)
+  88.3, // S5  Brickworks
+  83.3, // S6  Iron Curtain (§95 +8.3pp)
+  86.7, // S7  Riverbed
+  96.7, // S8  Twin Towers
+  100.0, // S9  Gauntlet (§95 +1.7pp)
+  88.3, // S10 Fortress
   88.3, // S11 Lattice
-  90.0, // S12 Bunker Hill
-  100.0, // S13 Steel Web
-  81.7, // S14 Citadel
-  96.7, // S15 Crossroads
-  96.7, // S16 Twin Spires (§94 +1.7pp)
-  98.3, // S17 Gridlock
-  85.0, // S18 Frozen Field (override REMOVED §55; §87 pickup priority +4 wins @60)
-  98.3, // S19 Bastion
-  80.0, // S20 Checkers
-  91.7, // S21 Oasis
-  96.7, // S22 Ramparts
-  95.0, // S23 Labyrinth
-  90.0, // S24 Quarry
-  85.0, // S25 Ice Palace (override REMOVED §55)
-  85.0, // S26 Brick Maze (§58 data-driven: brickDenseAdaptRatio → fast replan + path noise)
-  90.0, // S27 Thicket
-  86.7, // S28 Spider — gate-context floor kept at pre-§87 level: the full-suite
+  98.3, // S12 Bunker Hill (§95 +8.3pp)
+  98.3, // S13 Steel Web
+  88.3, // S14 Citadel (§95 +6.6pp)
+  90.0, // S15 Crossroads
+  98.3, // S16 Twin Spires
+  95.0, // S17 Gridlock
+  80.0, // S18 Frozen Field
+  90.0, // S19 Bastion
+  90.0, // S20 Checkers (§95 +10pp)
+  93.3, // S21 Oasis
+  95.0, // S22 Ramparts
+  90.0, // S23 Labyrinth
+  85.0, // S24 Quarry
+  83.3, // S25 Ice Palace
+  81.7, // S26 Brick Maze
+  91.7, // S27 Thicket
+  91.7, // S28 Spider — gate-context floor kept at pre-§87 level: the full-suite
   //   context is order-dependent (module-level genId counter, World.ts) and
-  //   Spider swings 13-20/20 between contexts; §94 eval shows 91.7% @60 (+5),
-  //   but a floor of 14 fails on pre-existing context noise, not on §94.
+  //   Spider swings 13-20/20 between contexts; §95 eval shows 91.7% @60 (+5),
+  //   but a floor of 14 fails on pre-existing context noise, not on §95.
   90.0, // S29 Concentric
-  76.7, // S30 Eagle Nest
-  93.3, // S31 Star Fort
-  75.0, // S32 Diamond (§56 close-combat → t2aHighHpMaxRange; §58 armorAdaptRatio → camp/nav timing; §87 +5 wins @60)
-  91.7, // S33 Battlement
-  93.3, // S34 Final Redoubt
+  90.0, // S30 Eagle Nest (§95 +13.3pp)
+  86.7, // S31 Star Fort
+  80.0, // S32 Diamond (§95 +5pp)
+  96.7, // S33 Battlement (§95 +5pp)
+  88.3, // S34 Final Redoubt
 ]
 
 const MARGIN_WINS = 4
-// Truth mean 90.9% @60 seeds (DECISIONS §87); binomial 3 sd at n=700 is
-// ~3.7pp → 87.2% floor.
-const AGGREGATE_FLOOR = Math.floor(0.872 * 35 * GATE_SEEDS.length) // 610/700
+// Truth mean 91.19% @60 seeds (§95 — DECISIONS §95); binomial 3 sd at n=700
+// is ~3.7pp → 87.5% floor.
+const AGGREGATE_FLOOR = Math.floor(0.875 * 35 * GATE_SEEDS.length) // 612/700
 
 function stageFloor(idx: number): number {
   return Math.max(0, Math.round((TRUTH_WIN_PCT[idx] / 100) * GATE_SEEDS.length) - MARGIN_WINS)

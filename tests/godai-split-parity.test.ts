@@ -37,7 +37,9 @@ interface Expected {
 //   AI from firing through steel walls at aligned enemies. This shifts
 //   the determinism signature for seeds where the dual-offset scan
 //   previously allowed fire through steel.
-// Re-locked via direct simulation. All 8 seeds still stage_clear.
+// §95 re-lock (2026-08-03): turn cooldown 50→100ms + halt-during-cooldown
+// (DECISIONS §95) flipped seed 55555 back to stage_clear. All 8 seeds clear.
+// Re-locked via direct simulation.
 // NOTE: the split guard only certifies god/* behavior; it does NOT lock main's
 // game params. Re-run after any future intentional tuning to refresh these numbers.
 const BASELINE: Record<number, Expected> = {
@@ -105,15 +107,16 @@ const BASELINE: Record<number, Expected> = {
     playerLevel: 0,
   },
   55555: {
-    // §87 re-lock: turn cooldown (50ms) changed the outcome from stage_clear
-    // to gameover (base destroyed). The cooldown blocks the AI's per-tick
-    // turning, reducing its base-defense reflex speed.
-    outcome: 'gameover',
-    ticks: 3251,
-    score: 2000,
+    // §95 re-lock: turn cooldown 50→100ms + halt-during-cooldown (DECISIONS
+    // §95) flipped this seed back from gameover (the §87 50ms-cooldown lock)
+    // to stage_clear — the halt stops the tank in place while the turn is
+    // deferred instead of drifting into the base-defense failure mode.
+    outcome: 'stage_clear',
+    ticks: 2208,
+    score: 4700,
     lives: 3,
-    killCount: 15,
-    baseAlive: false,
+    killCount: 20,
+    baseAlive: true,
     playerLevel: 0,
   },
 }

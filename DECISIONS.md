@@ -956,6 +956,46 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Implications:** 发货默认 = §88 全开。OFF（`chokepointMode=0`）仍可作为 A/B 对照臂（byte-identical to pre-§88）。`SKILLED_HUMAN_PARAMS`（coop/躺赢模式的 God AI）由 `DEFAULT_GOD_AI_PARAMS` 派生，因此 co-op 玩家 2 也随本次启用执行据守咽喉要地（feature 本来就是 God AI 全局策略，coop 行为因此与单机一致）。后续如需再调，直接改默认参数并以门禁真值重测。
 
+---
 
+## 95. Turn Cooldown 50ms → 100ms + Halt-During-Cooldown (SHIPPED)
 
+> 用户指令：player/enemy 转弯周期限制改为 160ms（≈360 APM 超级人类水平），classic 全 35 关仿真验证——全面提升/持平则计入调优文档，下降严重则 per-seed tick-diff 逐一处理，仍难解决则报告取舍。实测 160ms 是净回归，A/B 至 100ms 后反而为全局最优，用户拍板**采用 100ms**（2026-08-03）。Progress-doc 编号 **§95**。
+
+**Decision:** `turnCooldownMs` 默认 **50 → 100**（`src/config/rules.ts`，`DEFAULT_RULES` + `RULES.classic` 两处）。同时修复 `src/game/SimulationCombat.ts`：冷却期间被拒绝的转向请求不再沿旧方向继续滑行，而是**原地等待**（`moving=false`，`prevMoveDir` 保持）直到冷却落地——「转弯周期限制」语义上正确的实现（按键后先停再转），也是人类手感。
+
+**Tuning loop（35×60 classic single-player corpus, paired CRN, eval-suite）：**
+
+| 方案 | win rate | suite | net flips vs 50ms 基线 |
+|---|---|---|---|
+| 基线 turnCooldownMs=50（未改） | 91.0% | 0.7561 | — |
+| 160ms 原始（冷却期间漂移） | 87.4% | 0.6999 | **−75** |
+| 160ms + 原地等待修复 | 89.8% | 0.7393 | −24 |
+| 160ms + 等待 + AI 转向承诺锁（已回退） | 89.3% | 0.7345 | −34 |
+| **100ms + 原地等待修复（SHIPPED）** | **91.2%** | **0.7741** | **+5** |
+| 50ms + 原地等待修复（只加等待不加值） | 88.8% | 0.7225 | −17 |
+
+**per-seed tick-diff 定位的两个根源机制：**
+
+1. **漂移致死（已修复）**：160ms 冷却期间坦克沿旧方向滑行 ~10 ticks——S26 s1 想转 `down` 却一直冲 `left` 过弯撞死、S12 s6 想转 `left` 却一直 `up` 卡墙。修复为冷却期间原地等待后，此类死亡消除。
+2. **AI 每 tick 决策模型假设瞬时转弯（残留 −24 flips @160ms）**：160ms 下每次转弯等 ~10 ticks，dodge / T2a 瞄准 / 转身开火节奏全部被拖慢。尝试的 AI 层「转向承诺锁」（提交方向后跨冷却窗口保持）帮助振荡型迷宫关（Checkers +9、Brick Maze +6）但更伤开阔关（Quarry −6、Star Fort −6）——开阔关每 tick 重新瞄准是合法行为，净负已回退。
+
+**为何 100ms 是全局最优：** 50ms+halt 反而比 50ms 基线更差（−17 flips）——原地等待打断了原 50ms 时 3-tick 漂移已被 AI 隐式利用的滑行补偿；160ms 超出 AI 决策模型承受阈值；100ms 恰好落在「AI 可容忍的转向延迟」与「振荡抑制收益」的交汇点，净 +5 flips（Frozen Field −2 / Battlement −2 与 Eagle Nest +4 / Thicket +3 等互抵后为正）。
+
+**门禁与行为锁重生成：**
+- `tests/god-ai-regression-gate.test.ts`：TRUTH_WIN_PCT 按 `gate-truth.ts` 新真值（mean **91.19%**，floor **612/700**）重生成。
+- `tests/godai-split-parity.test.ts`：seed 55555 翻转 gameover→stage_clear（160ms/100ms 体系下该局获胜），重锁为 stage_clear；其余 7 种子 outcome 不变。
+- `tests/turn-cooldown.test.ts` 机制测试传显式值，不受默认值变更影响。
+- `tests/classic-ai-jam.test.ts`：shaft-recovery 测试窗口 1500 → 2400 ticks——100ms 下每次被延迟的转向等待更久，veteran 级 tunnel-out 落地从 ~656 ticks 推迟到 655–1736 ticks（实测 seeds 999/100/42/7），原窗口漏掉 seed 999 的 1736 逃出；2400 覆盖最坏情况有余量。功能本身未退化（tank 仍会凿穿侧砖逃出）。
+
+**Rationale（MANIFEST §13 三门）：**
+- 更有趣：更真实的最小转弯周期（超级人类 APM 仍被尊重——100ms ≈ 10 转/秒）同时抑制 §86c 的振荡。
+- 架构简单：一个 config 值 + SimulationCombat 一处 wait 语义，无新系统。
+- 尊重原作：Battle City 坦克转弯需要时间，原地转身符合原作手感。
+
+**Results (2026-08-03):** 35×60 net **+5 flips**（1908/2100 → 1915/2100，91.2%），suite 0.7561 → 0.7741，无关卡严重负向。`bun run check` 全绿。
+
+**细粒度确认扫描（2026-08-03，用户指令：测 110/125/140ms）：** 100ms 确认为该邻域局部最优——110ms net **−27**（suite 0.7389）、125ms net **−20**（0.7504）、140ms net **−15**（0.7473），全部劣于 100ms（且劣于 50ms 基线 0.7561）。曲线形状 100 峰值 → 110 急降 → 125/140 部分回升 → 160 再降。负翻转集中在快速重新瞄准关（Bunker Hill −13@110 / −9@140、Battlement、Twin Spires、Checkers、Citadel），无任何 ≥+5 的补偿性正面关。**结论：维持 100ms 不变，配置零改动。**
+
+**Implications:** `turnCooldownMs=100` 为发货默认，同时适用于 player 与 enemy（同一 `GameplayRules`）。AI 层无需为转弯延迟做承诺锁——100ms 在 AI 容忍阈值内。后续若再调转弯周期，直接改该值并重跑门禁真值。
 

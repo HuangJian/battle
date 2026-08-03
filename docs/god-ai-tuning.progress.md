@@ -41,8 +41,17 @@
 
 > **§87（2026-08-02）**：近距离安全路径拾取优先级（用户指令：炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全 → 拾取 > 回防/杀敌）。新 `think()` 分支位于 dodge 与 T8 之后、aggressive/T2a/S5 之前；`pickupPriorityMode=1` + 三档范围 + **三个由调优循环发现的守卫**：`pickupPriorityMaxDanger=0`（路上无敌人）、`pickupPriorityMinEnemyDist=5`（5 格内无完全生成敌人，Lattice s2/Battlement s3 per-seed 定位）、`pickupPrioritySpawnRowMax=3`（出生带行 ≤3 的拾取永不紧急，Lattice s2/s32 per-seed 定位）。**35×60 A/B（SHIPPED 默认）：1899→1908（+9 wins，90%→91%，suite 0.7439→0.7551）**；无显著负向关（唯一 p<0.05 的 Steel Web 为 0 win 变化 = 噪声）；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3。OFF（mode=0）逐字节不变已验（S6 s5 / S32 s11 IDENTICAL）。门禁真值重生成（35×60，均值 90.9%，聚合 floor 581→610），S28 Spider floor 因既有 genId 顺序依赖噪声保持 pre-§87 水平。详见 DECISIONS §92。
 
+> **§95（2026-08-03）**：转弯周期限制 turnCooldownMs 50ms → **100ms**（用户指令：player/enemy 转弯周期限制改为 160ms ≈ 360 APM 超级人类水平；A/B 后按用户取舍采用 100ms）。**35×60 全档位扫描：50ms 基线 91.0%（suite 0.7561）→ 160ms 原始 87.4%（net −75）→ 160ms+原地等待 89.8%（net −24）→ 50ms+原地等待 88.9%（net −44）→ 100ms+原地等待 91.2%（net +5，suite 0.7741，SHIPPED）**。per-seed tick-diff 定位两个根源机制：
+>
+> 1. **漂移致死（160ms 原始 −75 flips 主因，已修复）**：cooldown 期间 `updateMovement` 把 `tank.dir` 回退为 `prevMoveDir`，坦克沿旧方向继续滑行 ~10 ticks —— S26 s1 想转 `down` 却一直冲 `left` 过弯致死、S12 s6 想转 `left` 却一直 `up` 撞墙。修复：cooldown 期间**原地等待**（`tank.moving = false`，velocity 积分为 0；冰面保留 ICE_DECEL_TRACTION 滑行）——这也是"转弯周期限制"语义上正确的实现（先停再转，符合人类手感）。
+> 2. **AI 每 tick 决策模型假设瞬时转弯（残留）**：160ms 下每次转弯要等 ~9.6 ticks，dodge / T2a 瞄准 / 转身开火节奏全被拖慢；尝试 AI 层"转向承诺锁"（S19 Bastion s3 提交 left 等完冷却立刻又要 right → 每 tick 重新评估被锁 160ms）帮助振荡型迷宫关（Checkers +9、Brick Maze +6）但开阔关更伤（Quarry −6、Star Fort −6——开阔关每 tick 重新瞄准是合法行为），净负已回退。
+>
+> **为什么 100ms 是最优**：50ms+等待的 halt 反而伤（净 −44）——3 ticks 的原地停顿打断了 AI 的转向-开火连贯性，旧的 3-tick 漂移对闪避反而有益；160ms 漂移致命、等待后仍有 AI 节奏退化；100ms+等待（6 ticks）恰好兼得：迷宫无过弯漂移 + 闪避/瞄准节奏退化最小。**S30 Eagle Nest +13.3pp、S20 Checkers +10pp、S6 +8.3pp、S12 +8.3pp 受益**；S19 Bastion −8.3pp（唯一 ≥5pp 负向关，其余 ≤−6.7pp 均为 2-4 种子噪声）。门禁真值重生成（均值 91.19%，聚合 floor 610→612）。详见 DECISIONS §95。
+>
+> **§95 细粒度确认扫描（2026-08-03，用户指令：测 110/125/140ms）**：35×60 全档扫描确认 **100ms 是该邻域局部最优**——110ms SUITE 0.7389（90%，net **−27**）、125ms 0.7504（90%，net **−20**）、140ms 0.7473（90%，net **−15**），全部劣于 100ms（0.7741，91.2%，net +5）；同样劣于 50ms 基线（0.7561）。曲线形状：100 峰值 → 110 急降 → 125/140 部分回升 → 160 再降。负翻转集中在需要快速重新瞄准的关（Bunker Hill −13@110/−9@140、Battlement、Twin Spires、Checkers、Citadel、Frozen Field），无任何关卡有补偿性增益——110/125/140 均无 ≥+5 的正面关。结论：**维持 100ms 不变**（配置零改动，仅记录）。
 
-**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）** → **§87 近距离安全路径拾取优先级（8/4/2 格 + 三守卫，+9 wins）**。
+
+**演进主线**：基础设施 → classic 适配 → 死锁修复（P0–P3）→ 全关战役（P4）→ 单关攻坚（Round 5）→ 智能威胁模型（Phase A，负结果）→ **§47 基地保护环碰撞修复（真正的 S32 破局点）+ §48 假闪避"修复"否决** → §58 覆盖表泛化（逐关硬编码→数据驱动适配）→ §67 调参冻结 → §68-§69 交叉火力感知实验系列（全部负结果，默认 OFF）→ **§79 coop God AI 接管 controlledTank 修复（躺赢模式 P2 卡死/破基地墙）** → **§87 近距离安全路径拾取优先级（8/4/2 格 + 三守卫，+9 wins）** → **§95 转弯周期限制 50→100ms + 原地等待（35×60 全档扫描选优，net +5 wins，+0.2pp）**。
 
 ---
 
@@ -126,6 +135,7 @@
 | **§68-revisit** | 08-01 | (默认 OFF, 否决) | per-seed tick-diff 重新调优 §68-v2（4 变体全负） | **方法论级负结果**：raw -18 / 提前量上限 -25 / 开阔度门控 -14 / 组合 -25 全负；坏翻转 12.6-23.1t 过早转向 vs 好翻转 8.3-8.4t 逃生；全地形指标无法区分好坏关。代码回退，crossfire 维持默认 OFF |
 | **§80** | 08-01 | (默认 ON, 修复) | 冰冻窗口转身抖动守卫（aggressive 分支停火转向前置转身后扫描） | **修复验收（35×60×2 真值）**：冰冻击杀 coop 2415→5688（+136%）、single 1363→3503（+157%）；过关率 coop +0.2pp（net +3）、single +0.9pp（**net +20**），≥5pp 回退 0 关；S32 Star Fort 60-seed 持平 Δ0.0pp（10/30-seed 回退确认为种子噪声，机制已 per-seed 定位）；最坏 streak（Brick Maze s27/seed1 1166t）两态逐字节相同（守卫惰性，另一机制，留作后续） |
 | **§87** | 08-02 | (默认 ON) | 近距离安全路径拾取优先级（炸弹/冰冻/护栏 8 格、星星/加命/护盾 4 格、船 2 格，路径安全） | **35×60 A/B（SHIPPED 默认）**：1899→1908（**+9 wins**，90%→91%，suite 0.7439→0.7551）；无显著负向关；Lattice -8→-2、Star Fort -5→+1、Diamond +5、Frozen Field +4、Final Redoubt +3；三个守卫（maxDanger=0 / minEnemyDist=5 / spawnRowMax=3）由 per-seed tick-diff 定位机制后加入；OFF 逐字节不变；门禁真值重生成（聚合 floor 581→610） |
+| **§95** | 08-03 | (默认 ON, 100ms) | 转弯周期限制 turnCooldownMs 50→100ms（用户指令 160ms≈360APM，A/B 后取舍为 100ms）+ SimulationCombat cooldown 期间原地等待 | **35×60 全档扫描：50ms 基线 91.0%（suite 0.7561）→ 160ms 原始 87.4%（net −75）→ 160ms+等待 89.8%（net −24）→ 50ms+等待 88.9%（net −44）→ 100ms+等待 91.2%（net +5，suite 0.7741，SHIPPED）**；per-seed 定位漂移致死（S26/S12 过弯/撞墙）→ 原地等待修复；AI 转向承诺锁尝试净负回退；S30 +13.3pp / S20 +10pp 受益，S19 −8.3pp 为唯一 ≥5pp 负向关；门禁真值重生成（均值 91.19%，floor 610→612）；split-parity 55555 gameover→stage_clear 重锁 |
 
 > 注：DECISIONS.md 已精简为索引（2026-07-31），详细决策见本文档和 `docs/perf-optimization.progress.md`。
 
