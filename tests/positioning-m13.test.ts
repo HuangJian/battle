@@ -9,8 +9,12 @@ import type { Tank } from '../src/types'
 
 /**
  * M13 (DECISIONS §113, SHIPPED 2026-08-04): field-wide outnumbered positioning
- * retreat — unit tests. Shipped defaults: outnumberedFieldRetreat=1,
+ * retreat — unit tests. Original shipped defaults: outnumberedFieldRetreat=1,
  * outnumberedFieldEnemies=3, outnumberedFieldDistCells=15, pool-model ONLY.
+ * §115 (M4 round-2) widened the pool defaults to 4/26 — this test uses the
+ * explicit M13_PARAMS constant (3/15) below so it keeps testing M13's own
+ * contract independent of the M4 retune (classic keeps 3/15 via
+ * CLASSIC_MODEL_PARAMS).
  *
  * P4.2 (shipped earlier) only retreats when 3+ enemies CONVERGE within
  * outnumberedRadiusCells (9). M13 extends this to the FIELD-wide count: when

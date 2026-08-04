@@ -470,9 +470,14 @@ chaos 上全部无发布级杠杆；引擎方向耦合（移动 = 面朝 = 开�
 > M12 HP 门控，五次）、权重重排（M2c）、survivalRetreat 回防（M8）、站位提前规避（M5，口径纠正重测
 > 后确认中性偏负）、出生 2★（M11/§110 用户否决）、前瞻式炮弹规避（Classic 纪元 §68/§69/§68-revisit 系列）。
 
-1. **M4 标量参数 CMA-ES（首轮已跑，DECISIONS §114）**：`optimize-godai.ts` SEARCH_SPACE 已含 M13 参数（20 个）。
-   首轮（6 关 × 6 seeds 子集）最优解全量 60-seed 验证双难度劣化（-0.9/-3.0pp）——**子集过拟合**；顺带复证
-   M13 阈值 3/15 是局部峰值（9 有害 / 20 持平）。round-2 需全 35 关口径或 mid-search 剪枝，成本 ~1-2h/难度待确认。
+1. **M4 标量参数 CMA-ES（round-2 SHIPPED，DECISIONS §115）**：`optimize-godai.ts` SEARCH_SPACE 20 个参数。
+   首轮（6 关子集）全量 60-seed 双难度劣化（-0.9/-3.0pp）——子集过拟合（§114）。
+   **round-2 全 35 关 × 10 seeds × 20 代**（fitness 即官方口径，天然规避过拟合）：hard 51→59% / chaos 50→58%（训练集）。
+   60-seed 交叉验证 HARD_BEST 双向强信号（hard 53.2 / chaos 56.9）→ 发布 14 参数（replan=1 / threatRange 23 /
+   campTimeout 20 / baseRace 18+2 / defenseColSpread 3 / endgameThreshold 10 / M13 阈值放宽等），
+   **剥离 game-feel 参数**（aimError / suboptimalPathProb 保留默认——搜索噪声，剥离后 54.0/56.5 增益保持）。
+   pool 模型专属：新增 `CLASSIC_MODEL_PARAMS` 还原表（classic instant 实测 -2.4pp，还原保 91% 门禁字节）。
+   发布路径验证：hard 53.0 / chaos 56.6 / classic 91.2（60-seed，DEFAULT 默认参数）。
 2. **生存站位（已交付 M13，§113）**：全场压力撤退（3 只 + 15 格）已发布并提升 hard/chaos。下阶段可探索
    M13 参数边界（M4 CMA-ES 加入 SEARCH_SPACE）或「回防路径安全」（navigate 分支回防时用
    findPathThreat/findSafeMoveDir 规避交叉火力，M5 基础设施可复用）。

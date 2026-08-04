@@ -14,7 +14,11 @@ import {
 } from './god/FireControl'
 import { thinkImpl, CANDIDATES } from './god/think'
 import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
-import { DEFAULT_GOD_AI_PARAMS, computeStageAdaptedParams } from './god/params'
+import {
+  DEFAULT_GOD_AI_PARAMS,
+  computeStageAdaptedParams,
+  CLASSIC_MODEL_PARAMS,
+} from './god/params'
 import type { GodAIParams } from './god/params'
 export {
   DEFAULT_GOD_AI_PARAMS,
@@ -447,7 +451,32 @@ export class GodAIInput implements InputLike {
     // §58: compute stage-level adaptive params from the base params — the
     // unified data-driven adaptation based on stage characteristics (armor
     // ratio, brick/steel/forest/water density). No per-stage special-casing.
-    this.params = computeStageAdaptedParams(this._baseParams, this.world)
+    // §115 (M4 round-2): the M4 defaults are POOL-model tuning (hard/chaos,
+    // HP-buffer combat). classic ('instant', flat damage) measured -2.4pp if
+    // they leak in (91.0% → 88.6%), so restore the pre-M4 values here. The
+    // restore is applied BEFORE computeStageAdaptedParams so stage adaptations
+    // still override on top, exactly as they did pre-M4.
+    let baseForAdapt = this._baseParams
+    if (this.world.rules.combatModel === 'instant') {
+      // Copy before restoring — never mutate the caller's params object.
+      baseForAdapt = { ...this._baseParams }
+      // Restore only params still at their M4 DEFAULT value — a caller that
+      // EXPLICITLY overrode an M4 param (A/B script, custom difficulty) keeps
+      // its override; the default flow (gate, browser) restores classic values.
+      // SENTINEL LIMITATION: an override that sets a param TO its M4 value on
+      // classic (e.g. replanInterval=1) is indistinguishable from "at default"
+      // and gets restored — classic A/Bs should override to NON-M4 values.
+      // (DECISIONS §115)
+      for (const key in CLASSIC_MODEL_PARAMS) {
+        const k = key as keyof GodAIParams
+        if (baseForAdapt[k] === DEFAULT_GOD_AI_PARAMS[k]) {
+          ;(baseForAdapt as unknown as Record<string, number>)[key] = (
+            CLASSIC_MODEL_PARAMS as unknown as Record<string, number>
+          )[key]
+        }
+      }
+    }
+    this.params = computeStageAdaptedParams(baseForAdapt, this.world)
     // M2: rebuild the candidate chain in effective-weight order from the
     // (possibly stage-adapted) params. Default = M1 chain order.
     this._orderedCandidates = orderedCandidates(CANDIDATES, this.params.actionWeights)

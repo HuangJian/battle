@@ -1132,3 +1132,20 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 ## 114.1 M4 round-2 建议配置（评审决议，未执行）
 
 **Decision:** 不启动（需用户确认计算投入 ~1-2h/难度）。若启动：全 35 关 × 8-10 seeds × 15-20 代，每 5 代全量剪枝验证，fitness 用 win%（或先校准 hard/chaos eval-refs 再 v7）。关键前提：**screening 代理必须接近官方口径**（§114 教训——6 关子集 89% vs 全量 45.8% 方向相反）。
+
+## 115. M4 round-2 全语料 CMA-ES：SHIPPED，pool 模型 +5.0/+8.3pp（classic 还原表保 91%）（2026-08-04）
+
+**Decision:** M4 round-2 搜索**发布**（14 个参数写入 `DEFAULT_GOD_AI_PARAMS`，pool 模型专属——新增 `CLASSIC_MODEL_PARAMS` 还原表，`GodAIInput.reset()` 在 `combatModel==='instant'`（classic）时把仍是 M4 默认值的参数还原为 M4 前值）。60-seed 官方口径发布验证：hard **53.0%**（+4.0pp vs §113 基线 49.0）/ chaos **56.6%**（+8.3pp vs 48.3）/ **classic 91.2%**（还原表生效，门禁字节持平）。hard/chaos 门禁真值重生成 381/407（54.4%/58.1%），floor 333→354/380。
+
+**Rationale（§114 round-1 过拟合教训的反面教材）：**
+- **搜索本身跑全 35 关**（round-1 是 6 关子集 → 60-seed 全量双难度劣化 -0.9/-3.0pp）。round-2 每代 fitness 即全量口径 → 60-seed 交叉验证保持强信号（hard 53.2/chaos 56.9；CHAOS_BEST 50.3/56.8 略逊 → 选 HARD_BEST 统一发布）。
+- **game-feel 剥离验证**（用户约束：不改变 game feel）：aimError 0.03→0.12 与 suboptimalPathProb 0→0.14 是搜索噪声——剥离后 54.0/56.5（增益保持甚至略高），且这两个是 `SKILLED_HUMAN_PARAMS` 派生参数（human 代理 = max(0.15, god+0.15)），保留默认即 human 不受影响。**发布集 = HARD_BEST − aimError − suboptimalPathProb**。
+- **性能安全检查**：`replanInterval 50→1`（每 tick A* 重规划）是 hard 增益引擎（剥离后 hard 48.8% 塌回基线），实测 S23 迷宫关 +52% 模拟耗时（29.3→44.7ms/局 ≈ +0.003ms/tick，远在 6ms sim 预算内）——可接受。
+- **classic 回退根因**：classic instant 无磨血死亡，搜索调优的激进进攻（replan=1/更宽 threatRange/更短 camp）在 instant 下净负 -2.4pp（91.0→88.6）。还原表只在参数仍为 M4 默认时还原（显式 A/B 覆盖优先），stage 适配照常叠在还原之上（S0 open-defense baseRace 11→14 属 §60 正常适配）。
+- **逐关回退检查**（60-seed 同 seed 集）：最大单关回退 S10 -11、S4 -9、S18 -8（均 < 12 = 20-seed 门禁 4 wins 的 60-seed 换算 margin），改进 S3 +20/S23 +14/S1 +11/S9 +11/S21 +11；净 +89 wins。
+- **M13 参数被搜索调离**：outnumberedFieldEnemies 3→4、outnumberedFieldDistCells 15→26、outnumberedEnemyCount 3→5（P4.2 关闭）——replan=1 + 更宽 threatRange 下防御更动态，附近撤退/过密撤退反成负担；60-seed 组合验证净正。
+
+**Implications:**
+- **方法论闭环**：screening fitness 代理必须等于官方口径（全 35 关）；搜索最优解必须过「剥离 game-feel 参数」+「60-seed 全量 + 逐关 margin」+「性能微基准」三重闸门才可发布。
+- pool/instant 双默认机制确立：新增 pool 行为参数 = 写 DEFAULT + 还原表 + 门禁真值重生成（classic 靠还原表保字节）。
+- 发布路径（DEFAULT 默认参数，浏览器真实行为）= 60-seed 验证路径，无口径偏差。

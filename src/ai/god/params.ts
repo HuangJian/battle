@@ -1004,32 +1004,41 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   suboptimalPathProb: 0,
 
   defenseRowOffset: 1,
-  defenseColSpread: 5,
-  threatRangeCells: 10,
+  // §115 (M4 round-2, 2026-08-04): full-corpus CMA-ES search shipped values —
+  // hard/chaos (pool model) +5.0pp / +8.2pp at 60 seeds vs the §113 shipped
+  // baseline (49.0% / 48.3% → 54.0% / 56.5%). See CLASSIC_MODEL_PARAMS below
+  // for the instant/classic restore table (91% gate byte-identical).
+  defenseColSpread: 3,
+  threatRangeCells: 23,
   maxPlayerDistFromBase: 26,
-  // P4: race-to-base emergency defense (see interface docs). Range 11 keeps
-  // the check regional; margin 0 = defend only when the enemy would win
-  // the race outright.
-  baseRaceRangeCells: 11,
-  baseRaceMarginCells: 0,
+  // P4: race-to-base emergency defense (see interface docs). Range 18 /
+  // margin 2 — M4 search widened the race window (earlier, more committed
+  // defense before the enemy reaches the base).
+  baseRaceRangeCells: 18,
+  baseRaceMarginCells: 2,
   // P4.2: retreat when 3+ enemies converge within 9 cells — the player
   // trades 1-for-1 at best in open crossfire; falling back to the defense
   // row funnels enemies into single-file corridors instead.
-  outnumberedEnemyCount: 3,
-  outnumberedRadiusCells: 9,
-  t8MaxInterceptDistCells: 8,
-  baseWallScanRadius: 3,
-  replanInterval: 50,
-  powerupMaxDivertDistance: 16,
-  endgameEnemyThreshold: 6,
+  // §115: M4 search disabled P4.2 (outnumberedEnemyCount 3→5 = never fires,
+  // max 4 enemies alive) — the replan=1 + wider threat-range combo made the
+  // nearby-retreat counterproductive; the field-wide M13 retreat still guards
+  // the base. Kept as a knob (classic keeps 3/9 via CLASSIC_MODEL_PARAMS).
+  outnumberedEnemyCount: 5,
+  outnumberedRadiusCells: 7,
+  t8MaxInterceptDistCells: 2,
+  baseWallScanRadius: 5,
+  replanInterval: 1,
+  powerupMaxDivertDistance: 18,
+  endgameEnemyThreshold: 10,
   huntAllyCount: 1,
 
   // P0: Anti-camp / T2a deadlock fix (plan/God-AI-Next-Round).
-  // campTimeoutTicks=90 (1.5s) — if the player hasn't gotten a kill in 1.5s
-  // of camping, something is wrong (enemy dodging, wall in the way, etc.).
-  // antiCampSuppressTicks=60 (1s) — enough to move ~2 cells at player speed,
-  // changing the tactical situation before T2a can re-trigger.
-  campTimeoutTicks: 90,
+  // campTimeoutTicks=20 (M4 search: far less patient — replan=1 keeps the
+  // player moving, so camping patience is worth less) — if the player hasn't
+  // gotten a kill in the timeout, something is wrong (enemy dodging, wall in
+  // the way, etc.). antiCampSuppressTicks=60 (1s) — enough to move ~2 cells
+  // at player speed, changing the tactical situation before T2a can re-trigger.
+  campTimeoutTicks: 20,
   antiCampSuppressTicks: 60,
   // P0.3: navStuckTicks=180 (3s) — if the player hasn't progressed (stayed
   // at the same cell) for 3 seconds of navigating, force a roam to the map
@@ -1259,6 +1268,37 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 60-seed：hard +2.3pp / chaos +0.6pp（无 chaos 负向；基地失守与死亡
   // 双难度均下降）。ON4@10 实测有害（-5.3pp 过于被动）——3 只即撤 + 15 格。
   outnumberedFieldRetreat: 1,
+  // §115: M4 search widened M13's field retreat (enemies 3→4, dist 15→26) —
+  // with replan=1 + wider threatRange the player defends more dynamically and
+  // the retreat fires only in truly full-pressure states. 60-seed cross-check
+  // (HARD_BEST set): hard +4.2pp / chaos +8.6pp vs shipped — net positive
+  // even with the retreat weakened.
+  outnumberedFieldEnemies: 4,
+  outnumberedFieldDistCells: 26,
+}
+
+/**
+ * §115 (M4 round-2): instant/classic restore table. The M4 search was
+ * optimized on the POOL combat model (hard/chaos — HP buffers, 磨血死亡).
+ * classic ('instant': flat per-bullet damage, 1 hit ≈ death for most kinds)
+ * has no 磨血死亡 and the search-tuned aggression is MEASURED HARMFUL there
+ * (classic 91.0% → 88.6% at 35×20 if the M4 defaults leak in). GodAIInput.reset()
+ * applies this restore when world.rules.combatModel === 'instant', keeping
+ * the classic regression gate byte-identical (DECISIONS §115).
+ */
+export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
+  defenseColSpread: 5,
+  threatRangeCells: 10,
+  baseRaceRangeCells: 11,
+  baseRaceMarginCells: 0,
+  outnumberedEnemyCount: 3,
+  outnumberedRadiusCells: 9,
+  t8MaxInterceptDistCells: 8,
+  baseWallScanRadius: 3,
+  replanInterval: 50,
+  powerupMaxDivertDistance: 16,
+  endgameEnemyThreshold: 6,
+  campTimeoutTicks: 90,
   outnumberedFieldEnemies: 3,
   outnumberedFieldDistCells: 15,
 }

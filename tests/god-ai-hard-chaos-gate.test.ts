@@ -26,8 +26,9 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 // 3 enemies / 15 cells, pool-model only — classic byte-identical): 20-seed
 // hard +2.7pp / chaos +2.6pp, 60-seed hard +2.3pp / chaos +0.6pp — the FIRST
 // mechanism without a chaos downside (base losses + deaths down in BOTH
-// difficulties). Current truth (20-seed, playerStartLevel=1): hard 51.4% /
-// chaos 51.3% → aggregate floor 333/333 (DECISIONS §113).
+// difficulties). Current truth (20-seed, playerStartLevel=1): hard 54.4% /
+// chaos 58.1% → aggregate floor 354/380 (DECISIONS §115, M4 round-2 shipped
+// DEFAULT — pool-model search tuning, classic restored byte-identical).
 // (DECISIONS §111).
 //
 // These are 20-seed SCREENING floors (same convention as the classic gate's
@@ -42,91 +43,93 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 const MARGIN_WINS = 4
 
-// Per-stage wins measured at 35×20 on the §113 baseline (2026-08-04,
+// Per-stage wins measured at 35×20 on the §115 baseline (2026-08-04,
 // playerStartLevel=1, startLives for hard/chaos, star shield on all
-// difficulties, M13 field-wide retreat ON for pool difficulties). §110
-// reverted §109's 2★ back to 1★ by user decision. Values are WIN COUNTS out
-// of GATE_SEEDS (20). hard = 2 lives (honest).
+// difficulties, M13 field-wide retreat ON, M4 round-2 search defaults —
+// replan=1, threatRange 23, campTimeout 20, etc. — for pool difficulties).
+// §110 reverted §109's 2★ back to 1★ by user decision. Values are WIN
+// COUNTS out of GATE_SEEDS (20). hard = 2 lives (honest).
 const HARD_TRUTH_WINS: number[] = [
-  11, // S0  Outpost
-  9, // S1  Waterways
-  4, // S2  Steel Fortress
-  5, // S3  Crossfire
-  13, // S4  Maze
-  10, // S5  Brickworks
-  14, // S6  Iron Curtain
-  13, // S7  Riverbed
-  8, // S8  Twin Towers
-  7, // S9  Gauntlet
-  14, // S10  Fortress
-  8, // S11  Lattice
-  7, // S12  Bunker Hill
-  14, // S13  Steel Web
-  8, // S14  Citadel
-  11, // S15  Crossroads
-  10, // S16  Twin Spires
+  8, // S0  Outpost
+  13, // S1  Waterways
+  10, // S2  Steel Fortress
+  13, // S3  Crossfire
+  11, // S4  Maze
+  13, // S5  Brickworks
+  12, // S6  Iron Curtain
+  4, // S7  Riverbed
+  13, // S8  Twin Towers
+  15, // S9  Gauntlet
+  12, // S10  Fortress
+  9, // S11  Lattice
+  10, // S12  Bunker Hill
+  12, // S13  Steel Web
+  10, // S14  Citadel
+  10, // S15  Crossroads
+  12, // S16  Twin Spires
   14, // S17  Gridlock
-  9, // S18  Frozen Field
-  7, // S19  Bastion
-  14, // S20  Checkers
-  10, // S21  Oasis
+  12, // S18  Frozen Field
+  6, // S19  Bastion
+  13, // S20  Checkers
+  12, // S21  Oasis
   20, // S22  Ramparts
-  4, // S23  Labyrinth
-  10, // S24  Quarry
-  4, // S25  Ice Palace
-  9, // S26  Brick Maze
-  9, // S27  Thicket
-  15, // S28  Spider
+  10, // S23  Labyrinth
+  11, // S24  Quarry
+  10, // S25  Ice Palace
+  5, // S26  Brick Maze
+  8, // S27  Thicket
+  9, // S28  Spider
   14, // S29  Concentric
-  12, // S30  Eagle Nest
-  10, // S31  Star Fort
-  13, // S32  Diamond
-  4, // S33  Battlement
-  16, // S34  Final Redoubt
+  9, // S30  Eagle Nest
+  15, // S31  Star Fort
+  11, // S32  Diamond
+  1, // S33  Battlement
+  14, // S34  Final Redoubt
 ]
 
 const CHAOS_TRUTH_WINS: number[] = [
   14, // S0  Outpost
-  9, // S1  Waterways
-  7, // S2  Steel Fortress
-  5, // S3  Crossfire
-  13, // S4  Maze
+  17, // S1  Waterways
+  8, // S2  Steel Fortress
+  11, // S3  Crossfire
+  8, // S4  Maze
   8, // S5  Brickworks
-  16, // S6  Iron Curtain
-  10, // S7  Riverbed
-  11, // S8  Twin Towers
-  10, // S9  Gauntlet
-  16, // S10  Fortress
-  11, // S11  Lattice
-  9, // S12  Bunker Hill
-  15, // S13  Steel Web
+  12, // S6  Iron Curtain
+  9, // S7  Riverbed
+  16, // S8  Twin Towers
+  16, // S9  Gauntlet
+  12, // S10  Fortress
+  8, // S11  Lattice
+  12, // S12  Bunker Hill
+  16, // S13  Steel Web
   8, // S14  Citadel
-  9, // S15  Crossroads
-  10, // S16  Twin Spires
-  17, // S17  Gridlock
-  7, // S18  Frozen Field
-  3, // S19  Bastion
-  12, // S20  Checkers
-  11, // S21  Oasis
+  16, // S15  Crossroads
+  12, // S16  Twin Spires
+  18, // S17  Gridlock
+  10, // S18  Frozen Field
+  11, // S19  Bastion
+  9, // S20  Checkers
+  7, // S21  Oasis
   18, // S22  Ramparts
-  3, // S23  Labyrinth
-  13, // S24  Quarry
-  1, // S25  Ice Palace
-  11, // S26  Brick Maze
-  4, // S27  Thicket
-  15, // S28  Spider
+  4, // S23  Labyrinth
+  16, // S24  Quarry
+  11, // S25  Ice Palace
+  7, // S26  Brick Maze
+  11, // S27  Thicket
+  13, // S28  Spider
   16, // S29  Concentric
-  7, // S30  Eagle Nest
-  11, // S31  Star Fort
-  14, // S32  Diamond
-  2, // S33  Battlement
-  13, // S34  Final Redoubt
+  8, // S30  Eagle Nest
+  14, // S31  Star Fort
+  16, // S32  Diamond
+  1, // S33  Battlement
+  14, // S34  Final Redoubt
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §113 (2026-08-04): M13 field-wide retreat shipped → hard 51.4% / chaos 51.3%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((51.4 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 333/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((51.3 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 333/700
+// §115 (2026-08-04): M4 round-2 search defaults shipped (pool-only, classic
+// restored) → hard 54.4% / chaos 58.1%.
+const HARD_AGGREGATE_FLOOR = Math.floor(((54.4 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 354/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((58.1 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 380/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).
