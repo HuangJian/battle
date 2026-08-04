@@ -18,7 +18,8 @@ import type { DifficultyConfig } from '../types'
 export const DIFFICULTIES: Record<string, DifficultyConfig> = {
   relax: {
     name: 'Relax',
-    startLives: 5,
+    // §130 (2026-08-05): 全难度命数统一为 3（原 5 命）。
+    startLives: 3,
     playerStartLevel: 1,
   },
   classic: {
@@ -28,7 +29,10 @@ export const DIFFICULTIES: Record<string, DifficultyConfig> = {
   },
   hard: {
     name: 'Hard',
-    startLives: 2,
+    // §130 (2026-08-05): 全难度命数统一为 3（原 2 命）。hard 2 命是 §105
+    // 口径修复后确认的真实难度（此前被 3 命伪口径高估 ~6pp）；统一 3 命后
+    // hard 与 chaos/relax 的差距只剩星位与敌人 AI 层级分布。
+    startLives: 3,
     // §104 (M6, 2026-08-03): 出生即一星。死亡归因重跑 + 死亡机制探针发现玩家
     // 93% 存活时间都是 0★（单发慢弹）——这是 hard/chaos 打不好的根本瓶颈，
     // 不是 dodge 分支（82-83% 死亡占比经 M4/M5 验证无法用行为改动解决）。

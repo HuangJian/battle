@@ -26,9 +26,11 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 // 3 enemies / 15 cells, pool-model only — classic byte-identical): 20-seed
 // hard +2.7pp / chaos +2.6pp, 60-seed hard +2.3pp / chaos +0.6pp — the FIRST
 // mechanism without a chaos downside (base losses + deaths down in BOTH
-// difficulties). Current truth (20-seed, playerStartLevel=1): hard 54.4% /
-// chaos 58.1% → aggregate floor 354/380 (DECISIONS §115, M4 round-2 shipped
-// DEFAULT — pool-model search tuning, classic restored byte-identical).
+// difficulties). Current truth (20-seed, playerStartLevel=1, ALL difficulties
+// startLives=3 — §130 全难度命数统一, hard 2→3): hard 61.6% / chaos 58.3%
+// → aggregate floor 405/382 (DECISIONS §115, M4 round-2 shipped
+// DEFAULT — pool-model search tuning, classic restored byte-identical;
+// §130 2026-08-05 全难度 3 命后 hard 门禁真值重测).
 // (DECISIONS §111).
 //
 // These are 20-seed SCREENING floors (same convention as the classic gate's
@@ -43,66 +45,69 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 const MARGIN_WINS = 4
 
-// Per-stage wins measured at 35×20 on the §115 baseline (2026-08-04,
-// playerStartLevel=1, startLives for hard/chaos, star shield on all
-// difficulties, M13 field-wide retreat ON, M4 round-2 search defaults —
-// replan=1, threatRange 23, campTimeout 20, etc. — for pool difficulties).
-// §110 reverted §109's 2★ back to 1★ by user decision. Values are WIN
-// COUNTS out of GATE_SEEDS (20). hard = 2 lives (honest).
+// Per-stage wins measured at 35×20 on the §130 baseline (2026-08-05,
+// playerStartLevel=1, ALL difficulties startLives=3 — §130 全难度命数统一,
+// hard 2→3), star shield on all difficulties, M13 field-wide retreat ON, M4
+// round-2 search defaults — replan=1, threatRange 23, campTimeout 20, etc.
+// — for pool difficulties. §110 reverted §109's 2★ back to 1★ by user
+// decision. Values are WIN COUNTS out of GATE_SEEDS (20). hard = 3 lives (§130).
 const HARD_TRUTH_WINS: number[] = [
-  8, // S0  Outpost
-  13, // S1  Waterways
-  10, // S2  Steel Fortress
+  11, // S0  Outpost
+  14, // S1  Waterways
+  12, // S2  Steel Fortress
   13, // S3  Crossfire
-  11, // S4  Maze
-  13, // S5  Brickworks
-  12, // S6  Iron Curtain
-  4, // S7  Riverbed
-  13, // S8  Twin Towers
+  12, // S4  Maze
+  14, // S5  Brickworks
+  14, // S6  Iron Curtain
+  8, // S7  Riverbed
+  15, // S8  Twin Towers
   15, // S9  Gauntlet
-  12, // S10  Fortress
-  9, // S11  Lattice
-  10, // S12  Bunker Hill
-  12, // S13  Steel Web
+  14, // S10  Fortress
+  10, // S11  Lattice
+  14, // S12  Bunker Hill
+  15, // S13  Steel Web
   10, // S14  Citadel
   10, // S15  Crossroads
-  12, // S16  Twin Spires
+  14, // S16  Twin Spires
   14, // S17  Gridlock
-  12, // S18  Frozen Field
-  6, // S19  Bastion
+  14, // S18  Frozen Field
+  7, // S19  Bastion
   13, // S20  Checkers
   12, // S21  Oasis
   20, // S22  Ramparts
-  10, // S23  Labyrinth
-  11, // S24  Quarry
+  9, // S23  Labyrinth
+  14, // S24  Quarry
   10, // S25  Ice Palace
-  5, // S26  Brick Maze
+  9, // S26  Brick Maze
   8, // S27  Thicket
-  9, // S28  Spider
-  14, // S29  Concentric
-  9, // S30  Eagle Nest
-  15, // S31  Star Fort
-  11, // S32  Diamond
+  10, // S28  Spider
+  16, // S29  Concentric
+  11, // S30  Eagle Nest
+  16, // S31  Star Fort
+  16, // S32  Diamond
   1, // S33  Battlement
-  14, // S34  Final Redoubt
+  16, // S34  Final Redoubt
 ]
 
+// §130 同次测量（gate-context，2026-08-05）：chaos 命数未变，但跨进程
+// genId 上下文噪声致 7 关各 ±1（总量 408/700 vs §115 的 407/700）——以本次
+// 门禁自身口径为准。
 const CHAOS_TRUTH_WINS: number[] = [
-  14, // S0  Outpost
-  17, // S1  Waterways
+  13, // S0  Outpost
+  18, // S1  Waterways
   8, // S2  Steel Fortress
-  11, // S3  Crossfire
+  12, // S3  Crossfire
   8, // S4  Maze
-  8, // S5  Brickworks
+  9, // S5  Brickworks
   12, // S6  Iron Curtain
   9, // S7  Riverbed
-  16, // S8  Twin Towers
+  15, // S8  Twin Towers
   16, // S9  Gauntlet
   12, // S10  Fortress
   8, // S11  Lattice
   12, // S12  Bunker Hill
   16, // S13  Steel Web
-  8, // S14  Citadel
+  9, // S14  Citadel
   16, // S15  Crossroads
   12, // S16  Twin Spires
   18, // S17  Gridlock
@@ -113,7 +118,7 @@ const CHAOS_TRUTH_WINS: number[] = [
   18, // S22  Ramparts
   4, // S23  Labyrinth
   16, // S24  Quarry
-  11, // S25  Ice Palace
+  10, // S25  Ice Palace
   7, // S26  Brick Maze
   11, // S27  Thicket
   13, // S28  Spider
@@ -126,10 +131,9 @@ const CHAOS_TRUTH_WINS: number[] = [
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §115 (2026-08-04): M4 round-2 search defaults shipped (pool-only, classic
-// restored) → hard 54.4% / chaos 58.1%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((54.4 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 354/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((58.1 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 380/700
+// §130 (2026-08-05): 全难度命数统一 3 后重测 → hard 61.6% / chaos 58.3%.
+const HARD_AGGREGATE_FLOOR = Math.floor(((61.6 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 405/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((58.3 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 382/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).

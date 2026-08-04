@@ -1369,3 +1369,32 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **Implications:**
 - 测量纪律（§127 教训延续）：wall A/B 必须先热身并双向跑（order=ab/ba）——首轮 JIT/页面缓存 ~700-1000ms 会被误记到被测开关头上（无热身首测时双臂差异完全被顺序支配）。
 - pickup 可达性已达纯 memo 上限；再压需算法级变更（空间索引等），违反 simple-beats-clever（MANIFEST §10）。
+
+## 130. 全难度命数统一为 3 + GOD AI 基线重测（SHIPPED，2026-08-05）
+
+**Decision:** `src/config/difficulty.ts` 四难度 `startLives` 全部统一为 **3**：relax 5→3、hard 2→3
+（classic/chaos 已为 3）。随后按 gate-context 官方口径（35 关 × 20 seeds，18000 ticks）重测
+hard/chaos 门禁真值，更新 `tests/god-ai-hard-chaos-gate.test.ts` 的逐关 truth + aggregate floor，
+并刷新 `docs/god-ai-tuning.progress.md` 基线表。
+
+**Rationale:**
+- 用户指令（plan/tasks.chat.md）：所有难度 player 初始 3 命。
+- §105 曾将 hard 真实难度定为 2 命（此前被 3 命伪口径高估 ~6pp），但命数差异使 hard/chaos
+  的差距掺杂了玩家资源因素；统一 3 命后，四难度差距只剩星位（relax/hard/chaos 1★ vs classic
+  0★）与敌人 AI 层级分布（DIFFICULTY_TIER_DISTRIBUTION）——难度=更聪明的敌人，而非更少资源。
+- 测量纪律：门禁真值以**门禁自身上下文**为准——`genId` 跨进程模块计数器引入上下文噪声
+  （chaos 实测 7 关各 ±1 wins、总量 407→408），独立进程的 eval-suite 与门禁进程实测逐字节一致，
+  但不同测量日的记录允许 ±1 级漂移（§127/§129 的字节级确定性声明不受影响）。
+
+**Results（2026-08-05）:**
+- **hard**（2→3 命）：35×20 **54.4%→61.6%**（431/700，+7.2pp，35 关无回退）；60-seed **60.6%**。
+  aggregate floor 354→**405**（truth −3.7pp 惯例）。
+- **chaos**（命数未变）：35×20 **58.1%→58.3%**（408/700，7 关 ±1 上下文噪声）；60-seed 56.5%。
+  aggregate floor 380→**382**。
+- classic（配置未动）：门禁不变。`eval-refs.json` 为 classic 口径（30 seeds），不随本变更漂移，未重生成。
+
+**Implications:**
+- hard 距 v2 目标（80%）仍有 ~18pp；命数与 §99 的 chaos 结论一致——调命数本身不是达标路径
+  （M0 实测 chaos 1→3 命几乎无提升），后续达标仍需行为杠杆（M13 方向）。
+- 门禁 floor 禁止静默下调；本次 hard floor 上调 354→405 属「收益随真值上调」，符合 §I.5 规则 6。
+- 浏览器侧 hard/chaos/relax 初始命数均随 difficulty 配置生效（World.ts 运行时读取），无其他硬编码。
