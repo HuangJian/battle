@@ -22,7 +22,8 @@
     "play-generated": "bun tools/level/play-generated.ts",
     "lint": "oxlint",
     "format": "oxfmt",
-    "check": "bun test && tsc --noEmit --incremental && oxlint && oxfmt"
+    "check": "tsc --noEmit --incremental && bun test",
+    "setup": "git config core.hooksPath tools/githook"
   },
   "devDependencies": {
     "@napi-rs/canvas": "^1.0.3",

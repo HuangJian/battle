@@ -1,0 +1,70 @@
+#!/bin/sh
+# Pre-commit hook: enforce typecheck, tests, formatting, and linting before a commit lands.
+#
+# Activated by:  git config core.hooksPath .githooks   (see `bun run setup`)
+#
+# Runs under Git's bundled `sh` on every platform (Linux shell, Windows Git Bash, and
+# Windows PowerShell), so it is shell-agnostic. The only external dependency is `bun`,
+# which we locate robustly below so the hook works no matter which shell triggered the commit.
+
+# Abort on the first failing command.
+set -e
+
+# --- Locate `bun` even if it is not yet on PATH ---------------------------------
+# Coding agents may commit from a Linux shell, Windows Git Bash, or Windows PowerShell,
+# each with a slightly different PATH. Augment PATH with the common bun install dirs so
+# the hook resolves `bun` regardless of the calling environment.
+add_to_path() {
+  [ -z "$1" ] && return 0
+  [ -d "$1" ] || return 0
+  case ":$PATH:" in
+    *":$1:"*) ;;
+    *) PATH="$1:$PATH" ;;
+  esac
+}
+
+if ! command -v bun >/dev/null 2>&1; then
+  # npm global bin (where `npm i -g bun` installs)
+  if command -v npm >/dev/null 2>&1; then
+    NPM_GLOBAL=$(npm bin -g 2>/dev/null) || NPM_GLOBAL=$(npm prefix -g 2>/dev/null)
+    add_to_path "$NPM_GLOBAL"
+    add_to_path "$NPM_GLOBAL/bin"
+  fi
+  # bun's own installer location (all platforms)
+  add_to_path "$HOME/.bun/bin"
+  # Windows npm global lives under %APPDATA%\Roaming\npm
+  if [ -n "$APPDATA" ]; then
+    APPDIR=$(printf '%s' "$APPDATA" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+    APPDIR=$(printf '%s' "$APPDIR" | sed -E 's|^([a-z]):/|/\1/|')
+    add_to_path "$APPDIR/Roaming/npm"
+  fi
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "✗ 'bun' was not found on PATH and could not be located in common install dirs."
+  echo "  Install bun (https://bun.sh) or add it to PATH, then retry the commit."
+  exit 1
+fi
+
+BUN=$(command -v bun)
+
+echo "▶ Running pre-commit checks (bun: $BUN)..."
+
+echo " ▸ typecheck (tsc --noEmit)"
+"$BUN" run typecheck
+
+echo " ▸ tests (bun test)"
+"$BUN" run test
+
+echo " ▸ format check (oxfmt --check)"
+# oxfmt --check verifies formatting and exits non-zero if anything is unformatted.
+# It does NOT rewrite files (unlike `bun run format`), so the committed snapshot stays intact.
+if ! "$BUN" x oxfmt --check; then
+  echo "✗ Formatting issues found. Run 'bun run format' to fix them, then re-stage and commit."
+  exit 1
+fi
+
+echo " ▸ lint (oxlint)"
+"$BUN" x oxlint
+
+echo "✓ All pre-commit checks passed."
