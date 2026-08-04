@@ -521,6 +521,22 @@ export function shouldFireInDirImpl(
   // level ≥ 3 falls through to the enemy check (can pierce).
   if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
 
+  // §121: self-fire base guard — never fire a bullet whose CENTER line
+  // (the actual 6px path, NOT the scan's ±8px offset lines) can reach the
+  // base. The scan can be screened by an enemy off the bullet's path (the
+  // §120 enemy-screen self-kill: scan.enemy=true, baseWall=false because the
+  // enemy body covers both offset lines, but the 6px bullet passes beside
+  // it into the base). Mode 2 (lenient) keeps the shot when an enemy body
+  // truly overlaps the corridor (the bullet hits the enemy first).
+  if (self.params.selfFireBaseGuard > 0) {
+    if (shotReachesBaseImpl(self, pcx, pcy, dir)) {
+      if (self.params.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir)) {
+        self._selfFireGuardBlocks++
+        return false
+      }
+    }
+  }
+
   // Enemy in line of fire — fire.
   if (result.enemy) {
     return self.rng.next() >= self.params.aimError
@@ -642,6 +658,155 @@ export function shouldFireBreakThroughImpl(
   // breaking walls, so only fire when the wall ahead is breakable (not a base
   // wall / base-ring steel). Enemy-as-obstacle still fires (baseWall=false).
   return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3)
+}
+
+/**
+ * §121: Is (col,row) one of the 8 permanent base protection-ring cells that
+ * STOP a bullet before it can damage the base? The ring is a real barrier in
+ * bulletHitsTerrain (unlike ordinary brick which bullets plow through). The
+ * bottom edge of the ring is outside the field (rows 26), so only the top /
+ * left / right edges are valid: row 23 across cols 11-14, and cols 11 / 14
+ * at rows 24-25.
+ *
+ * MUST stay byte-identical to SimulationCombat.isBaseProtectionCell (verified
+ * 2026-08-04) — a drift here is a false NEGATIVE: the guard would think a
+ * brick stops the bullet when the simulation plows it into the base.
+ */
+function isBaseRingCell(col: number, row: number): boolean {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
+  if (col === bc - 1 && (row === br || row === br + 1)) return true
+  return col === bc + 2 && (row === br || row === br + 1)
+}
+
+/**
+ * §121: Would a bullet fired from (pcx,pcy) along `dir` REACH the base eagle?
+ *
+ * Walks the bullet's actual CENTER line (its real 6px path) — unlike
+ * scanAheadImpl's two ±8px offset lines, which can be screened by an enemy
+ * up to ~25px off the center line. That screening is the §120 self-kill
+ * mechanism: the scan sees `scan.enemy` (closer than the eagle) so the §74
+ * guard allows fire, but the 6px bullet misses the off-line enemy and
+ * continues into the base.
+ *
+ * The walk mirrors bulletHitsTerrain's terrain semantics exactly:
+ *   - ring brick/steel (isBaseRingCell) STOPS the bullet → safe (no base hit)
+ *   - non-ring steel stops unless the player has steel-pierce (level ≥ 3,
+ *     bullet power 2 — same gate as steelFireBlockedImpl)
+ *   - non-ring brick is PLOWED through (destroyed), not a stop
+ *   - 'base' terrain (or the 2×2 base area) reached → the bullet WOULD
+ *     damage the base → true
+ *
+ * Tanks are deliberately NOT blockers: an enemy on the line can dodge away
+ * before the bullet arrives (the exact §120 mechanism). Terrain is the only
+ * reliable stop.
+ *
+ * Gate: 0 = OFF (byte-identical); the caller decides from
+ * `self.params.selfFireBaseGuard`. Pure World read — no RNG, no mutation.
+ */
+export function shotReachesBaseImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+): boolean {
+  if (!self.hasBase) return false
+  const w = self.world
+  const p = self.controlledTank(w)
+  const pierce = (p?.level ?? 0) >= 3
+  const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+  const vdx = DIR_DX[dirIdx]
+  const vdy = DIR_DY[dirIdx]
+  const grid = w.tileMap.grid
+  // Base 2×2 rect + the bullet's 6px hitbox (±BULLET/2 = ±3) — a bullet whose
+  // center line runs up to 3px OUTSIDE the eagle span still grazes it (hard
+  // S16 s82: center x=224, box [221,227] overlaps the eagle [192,224) by 3px
+  // while the center column 14 never walks a 'base' cell).
+  const baseL = BASE_POS.col * CELL - 3
+  const baseR = (BASE_POS.col + 2) * CELL + 3
+  const baseT = BASE_POS.row * CELL - 3
+  const baseB = (BASE_POS.row + 2) * CELL + 3
+
+  // Hot-path quick reject (§14): the 6px box overlaps the base rect ONLY if
+  // the center lies inside the expanded rect. A shot whose perpendicular
+  // coordinate is outside that band can never reach the eagle — bail before
+  // walking the 26-cell line. DEFAULT=2 runs this on every fire-direction
+  // check in pool games; most shots aren't aimed at the base columns.
+  const vertical = dir === 'up' || dir === 'down'
+  if (vertical ? pcx <= baseL || pcx >= baseR : pcy <= baseT || pcy >= baseB) return false
+
+  for (let d = CELL; d <= FIELD; d += CELL) {
+    const fx = pcx + vdx * d
+    const fy = pcy + vdy * d
+    if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+    const col = Math.floor(fx / CELL)
+    const row = Math.floor(fy / CELL)
+    if (col < 0 || col >= GRID || row < 0 || row >= GRID) break
+    const terrain = grid[row][col]
+    // Ring brick/steel stops the bullet before the eagle → safe to fire. A
+    // destroyed (empty) ring cell is a gap — fall through to the rect check
+    // (the bullet at this position can already be grazing the eagle edge).
+    if (isBaseRingCell(col, row) && (terrain === 'brick' || terrain === 'steel')) {
+      return false
+    }
+    // Bullet-box overlap with the base rect (catches the 3px edge-graze that
+    // the center-cell walk misses: hard S16 s82 — center x=224, box [221,227]
+    // overlaps the eagle [192,224) by 3px while column 14 never has 'base').
+    if (fx > baseL && fx < baseR && fy > baseT && fy < baseB) return true
+    if (terrain === 'base') return true
+    if (terrain === 'steel') {
+      if (pierce) continue // level ≥ 3 pierces non-ring steel
+      return false
+    }
+    if (terrain === 'brick') continue // plowed through (destroyed)
+    // empty / water / forest / ice — bullets pass (bulletHitsTerrain skips)
+  }
+  return false
+}
+
+/**
+ * §121 (mode 2, lenient): does any alive enemy tank body overlap the bullet's
+ * 6px corridor BETWEEN the player and the base? When one does, the bullet
+ * provably hits the enemy before the base (point-blank overlap kill) — mode 2
+ * keeps that shot instead of suppressing it. Enemies are matched by the
+ * corridor band (±(BULLET/2 + TANK/2) = ±19px) on the fire axis, in front of
+ * the player, and no farther than the base's far edge. Pure World read.
+ */
+export function enemyInShotCorridorImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+): boolean {
+  const w = self.world
+  const baseCx = BASE_POS.col * CELL + CELL
+  const baseCy = BASE_POS.row * CELL + CELL
+  const vertical = dir === 'up' || dir === 'down'
+  const band = 19 // BULLET/2 (3) + TANK/2 (16) — body overlaps the 6px corridor
+  const tanks = w.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    if (vertical) {
+      if (Math.abs(tcx - pcx) >= band) continue
+      // In front of the player, before the base's far edge (in the dir of travel)
+      if (dir === 'down') {
+        if (!(tcy > pcy && tcy < baseCy + CELL)) continue
+      } else if (!(tcy < pcy && tcy > baseCy - CELL)) continue
+    } else {
+      if (Math.abs(tcy - pcy) >= band) continue
+      if (dir === 'right') {
+        if (!(tcx > pcx && tcx < baseCx + CELL)) continue
+      } else if (!(tcx < pcx && tcx > baseCx - CELL)) continue
+    }
+    // The distance band IS the exact body-vs-6px-column overlap condition
+    // (|tankCenter - pcx| < 3 + 16 ⇔ 32px body intersects the 6px column).
+    return true
+  }
+  return false
 }
 
 /**

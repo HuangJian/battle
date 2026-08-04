@@ -14,7 +14,13 @@ import type { Cell } from '../../utils/pathfind'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS } from '../../constants'
 import { ALL_DIRS } from '../../utils/helpers'
-import { scanAheadImpl, shouldFireBreakThroughImpl, aimSurvivesTurnImpl } from './FireControl'
+import {
+  scanAheadImpl,
+  shouldFireBreakThroughImpl,
+  aimSurvivesTurnImpl,
+  shotReachesBaseImpl,
+  enemyInShotCorridorImpl,
+} from './FireControl'
 import { dodgeCounterFireDirImpl, findBulletThreatToBaseImpl } from './ThreatAssessor'
 import {
   controlledLives,
@@ -409,11 +415,23 @@ const AGGRO: Candidate = {
         // Inline scanAheadImpl directly (perf §66): the thin scanAhead
         // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
         const aggScan = scanAheadImpl(self, pcx, pcy, aimDir)
+        // §121: aggressive stop-and-aim self-fire base guard (default OFF,
+        // selfFireBaseGuard=0 → byte-identical). The scan's ±8px offset lines
+        // can be screened by an enemy off the bullet's 6px center path — the
+        // §120 enemy-screen self-kill. Suppress the fire when the bullet's
+        // actual center line reaches the base (mode 1 strict; mode 2 lenient
+        // keeps it when an enemy body truly overlaps the corridor).
+        const aggFireBlocked =
+          self.params.selfFireBaseGuard > 0 &&
+          shotReachesBaseImpl(self, pcx, pcy, aimDir) &&
+          (self.params.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, aimDir))
+        if (aggFireBlocked) self._selfFireGuardBlocks++
         // §74: Don't fire when a base-protection wall is on the other offset
         // line, or is closer than (or at the same distance as) the enemy — the
         // 6px bullet spans both offset columns and would hit the wall first.
         if (
           aggScan.enemy &&
+          !aggFireBlocked &&
           !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
           !(aggScan.baseSteel && (p.level ?? 0) >= 3)
         ) {
@@ -573,11 +591,30 @@ const ENGAGE: Candidate = {
       // Inline scanAheadImpl (perf §66, see aggressive branch above).
       const scan = scanAheadImpl(self, pcx, pcy, aimDir)
 
+      // §121: T2a self-fire base guard (default OFF, selfFireBaseGuard=0 →
+      // byte-identical). Root cause of the §120 32-run self-kill corpus
+      // (t2a 81%): the scan's dual ±8px offset lines catch an enemy up to
+      // ~25px off the bullet's 6px center path and report scan.enemy CLOSER
+      // than the base eagle — the §74 guard below then allows fire, but the
+      // bullet misses the off-line enemy and continues into the base (hard
+      // S6 s43: killer shot x=200, enemy body x∈[206,238], bullet [197,203]
+      // passed beside it into the eagle). Walk the bullet's real center
+      // line: if it reaches the base, don't stop-and-aim here — fall
+      // through to navigate (which repositions off the base line).
+      // Mode 2 (lenient): keep the shot when an enemy body truly overlaps
+      // the 6px corridor (point-blank overlap kill — bullet hits enemy first).
+      const selfFireBlocked =
+        self.params.selfFireBaseGuard > 0 &&
+        shotReachesBaseImpl(self, pcx, pcy, aimDir) &&
+        (self.params.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, aimDir))
+      if (selfFireBlocked) self._selfFireGuardBlocks++
+
       // §74: Don't enter T2a when a base-protection wall is closer than
       // (or at the same distance as) the enemy on the other offset line.
       // Fall through to navigate when blocked by a closer base wall.
       if (
         scan.enemy &&
+        !selfFireBlocked &&
         !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
         !(scan.baseSteel && (p.level ?? 0) >= 3)
       ) {

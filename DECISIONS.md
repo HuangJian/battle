@@ -1215,3 +1215,62 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - 自杀换命路线三路证伪收官。基地防守的正确抓手仍是**位置/火力类改进**（M13 全场压力撤退、§88 据守咽喉、清除残留的 27 局 player 自毁基地——基地护墙开火守卫，性价比最高）。
 - 新参数作为可调 A/B 旋钮保留（`--base-hp-frac` / `--defend-dist`），若未来敌人模型/时间窗改动（如子弹减速）使换命窗口可行，可复用。
 - 单测 46 项（新增 6 项严格守卫：满血拒绝/低血触发/近基地拒绝/远基地触发/mode3 对照/默认惰性）全绿；`bun run check` 全绿。
+
+## 119. 固化策略调试方法论：run-forensics 分层取证（2026-08-04）
+
+**Decision:** 把本次自杀秒回调试沉淀为可复用取证工具链：跑 20/60/120-seed 仿真时，除胜率外必须能产出分层细节数据，用于理解详情/找规律/定位瓶颈。新增：
+- `tools/sim/simulation-runner.ts` 增加 `forensics: true` 选项（默认关 → 逐字节不变），每次运行返回 `RunForensics`：
+  1. 终局快照 `terminal`：player 命数/HP（可承受打击数，vs 100 基准）/距基地/星级/存活、base HP（可承受打击数）/护墙完好数、**每个存活敌人**（type/HP/距 player/距 base/AI tier）、**每发在飞敌弹**（位置/方向/距 player/距 base/ETA/命中数经济学 hitsToDie）；
+  2. 失败前 10 ticks 行动+生效规则日志 `lastActions`（每 tick：branch 候选/_moveDir/_fire/位置/HP/命数/基地 HP）；
+  3. 全程事件史 `events`：player 送命（tick+位置+击杀者 kind）、杀敌（tick+位置+被杀 kind）、拾取道具（tick+位置+类型）；
+  4. 最终库存 `inventory`（按道具类型的拾取计数）。
+- `tools/sim/sim-worker.ts` 透传 `forensics` 标志 + 通用 `failureCause`/`failureKillerKind`（自毁基地判定）。
+- 新 CLI `tools/diag/run-forensics.ts`（`--seeds/--difficulty/--stages/--max-ticks/--set k=v` 参数覆盖，可 A/B 取证）：聚合报告 [0] 结果构成（base vs lives 比例 + 自毁）/ [1] 基地被毁上下文 / [2] 没命上下文 / [3] 历史（送命/杀敌/拾取的时刻百分位 + 格子热点 + 库存 + 终局星级）/ [4] 失败学（击杀者 mix、最差关、失败局最后 10 ticks 的规则分布）；`--json` 输出每失败局完整 forensics（`--trace-wins` 含胜局）。
+
+**Rationale:**
+- 本次调试（§116-§118）暴露的痛点：只看胜率无法区分「从未触发」「触发了但有害」「机制性无效」——§116 mode 1 靠触发率、§117 靠 per-seed-diff + decision-probe 逐 tick 才能定位「满血基地假阳性」。把这三类证据（终局上下文/历史事件/失败窗口动作）固定进每次 sweep 的默认工具箱，下次不再从零搭取证。
+- 只读观察（无 RNG 消耗、不改 World），默认关 ⇒ 既有 42k sims 的 A/B 基准逐字节不变；`--set` 复用 §115 还原表外的参数面，无需新基建。
+
+**Implications:**
+- 用法：`bun tools/diag/run-forensics.ts --seeds 120 --difficulty hard,chaos --json tmp/fx.json`（失败局 JSON 可直接喂 per-seed-diff/decision-probe 定位分歧 tick）。
+- 口径约定：hitsToDie 基准伤害 100（与 §116 取证一致）；敌弹 ETA/对齐口径与 countIncomingThreats 一致；距离为曼哈顿格（基地中心 (208,400)）。
+- 后续 A/B 发布默认附一份 forensics 摘要（结果构成 + 两类失败上下文 + 最后 10 ticks 规则分布），作为 §88 门禁的补充证据。
+
+## 120. 自毁基地 32 局取证 + 采集脚本迭代（off-by-one / bullet-dir / --from-json）（2026-08-04）
+
+**Decision:** 用 §119 的 run-forensics 采集 hard/chaos 120 seeds 全部自毁基地局（hard 14 / chaos 18 = 32 局，0.33%/0.43%），并按调试过程迭代采集脚本三轮：
+1. **shot 事件 off-by-one 修复**：bullet_fired 事件在 `input.endFrame()` 之后才被消费，此前读到的 branch/dir 是**下一 tick** 的状态（S6 s43 的致命下射被记成左射）。修复：在 `sim.tick()` 后立即快照本 tick 决策态（fxTick），事件处理用快照。
+2. **朝向改取子弹真实弹道**：tank 转弯当帧的 `tank.dir` 会偏离子弹轴向（S33 s81 致命左射记成朝上）——shot 事件的 dir/towardBase 改用 `e.bullet.dir`（地面真值）。修复后**致命一枪指向基地区比例 29/32 → 32/32（100%）**。
+3. **--from-json 子集重跑**（本次用户方法论要求）：迭代调试重跑失败局时，**只跑前期已识别失败的 (difficulty, stage, seed) 组合**，不再全量 stage×seeds（本次验证：32 局 2.1s vs 全量 8400 局 ~4min；确定性 ⇒ 复现同一失败清单）。
+
+**自毁取证结论（32 局）：** 全部为**朝基地区内直射**（wall intact 0-6/8，护墙已破缺口）；开火路径 branch：**t2a 26（81%）**（正是 §74 范围注故意不放门控的停射站点）、navigate 4、aggressive 1、powerup 1；开火时 player 距基地 4-17 格（中位 ~6-9）；朝向 down 18 / right 9 / left 5。
+
+**Rationale:**
+- 只重跑失败组合：全量重跑 8400 局 ~4 分钟，而 120-seed 的失败局通常 <2000 局；脚本迭代（取证口径修复）不应付出全量成本。`--from-json` + `--kinds`/`--selfkill` 过滤即此流程的固化（同一机制可用于任何「重取失败局数据」场景）。
+- 事件 off-by-one/bullet-dir 属于采集口径 bug：错口径会导向错误根因（曾把 4/32 误判为「非瞄准射击」）。
+
+**Implications:**
+- 自毁根因明确：**t2a/aggressive 停射在护墙已破时沿缺口朝基地区开火**——修复方向 = 给停射站点加「弹道穿越基地区」守卫（§74 范围注的剩余缺口），而非 §116-§118 的换命路线。
+- 流程固化：`bun tools/diag/run-forensics.ts --from-json <旧JSON> --kinds base_destroyed --selfkill --json out.json`（失败组合子集重跑）；完整取证 JSON：`tmp/fx-120-final.json`（32 局自毁明细 `tmp/fx-selfkill-v2.json`）。
+- 该子集重跑流程已固化为**迭代调试标准流程**：AGENTS.md §4 Step 7（failure subset only）——任何取证/采集脚本迭代后重跑失败局只准用 `--from-json` 子集，不再全量 stage×seeds（语料本身变更时才允许全量）。
+## 121. t2a/aggressive 停射自毁守卫 selfFireBaseGuard SHIPPED（2026-08-04）
+
+**Decision:** §120 取证根因（t2a 81% 直射基地区、护墙已破缺口）的修复：新增 `selfFireBaseGuard`（0=OFF / 1=strict / 2=lenient），默认 **2**（lenient，120-seed A/B 胜出），classic 经 CLASSIC_MODEL_PARAMS 还原 0（§115 纪律，字节持平）。
+
+**机制：**
+- `shotReachesBaseImpl`（FireControl.ts）：沿子弹**真实中心线**（6px 弹道，非 scan 的 ±8px 偏移线）做地形行走——环砖/环钢 STOP（安全）、非环钢 level<3 停、非环砖犁穿、base 格或 2×2 基地区矩形重叠（含 3px 边缘擦碰，hard S16 s82）→ true。坦克**故意不算遮挡**（敌人可闪避，正是 §120 机制）。
+- 守卫挂在三处：ENGAGE(T2a) 停射、AGGRO 冻结窗停射、`shouldFireInDirImpl`（aggressive navigate fall-through 开火入口）。strict(1) 一律抑制；lenient(2) 仅当无敌人身体重叠 6px 走廊（±19px 带）时抑制——保住贴脸重叠击杀。
+
+**A/B（35 关 × 120 seeds × hard+chaos × 3 arms）：**
+- A(0) 基线 50.6%/50.3% → B(strict1) **hard −29 / chaos −24 flips**（82K guardBlocks，过度抑制合法击杀）→ C(lenient2) **hard +12 / chaos +8 flips，Δbase_destroyed −7/−12**（guardBlocks 仅 16K）。strict 在全量口径下是净负资产：堵掉的自毁少于丢失的击杀。
+- 子集验证（32 局自毁语料）：strict 0 残局（10 局转胜）；lenient 14 残局但全量口径净正——子集只看自毁，不能代表全量。
+
+**Rationale:**
+- 守卫只解决「弹道穿越基地区」一个几何缺口，不动 §74 的双偏移线防御逻辑——三闸门（好玩/简单/守正）全过。
+- 坦克非遮挡是有意的：若把坦克当遮挡，lenient 变 strict，重复测量到的 −24~−29 回归即此。
+- classic 不启用：instant 1-HP 战斗无缓冲余量，从未 A/B 过，§115 纪律要求字节持平。
+
+**Implications:**
+- 新观测 `_selfFireGuardBlocks`（AI 内部计数，不序列化）经 sim-worker → ab-fire-guard.ts 作触发率代理。
+- 新工具 `tools/diag/ab-fire-guard.ts`（arm A/B/C 显式覆盖，不依赖 DEFAULT）；测试 27 项（helpers + T2a/AGGRO 端到端 + shipped-default 不变量）。
+- 剩余缺口：lenient 残局自毁（enemy dodge-between-fire-and-impact）属机制性残余，未全消除；若后续要归零需在「开火后子弹飞行期」再校验，成本高于收益，暂不做。

@@ -111,7 +111,12 @@ src/
 tests/                    # bun:test specs (mirrors src/ structure by concern)
 plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
 docs/                     # presentation-audit.md (and future audits)
-tools/gen-sprites.mjs     # regenerates the SVG sprite library
+tools/
+  gen-sprites.mjs          # regenerates the SVG sprite library
+  sim/                     # headless batch sims: simulation-runner, sim-worker/pool
+  diag/                    # forensics + A/B tooling: run-forensics, per-seed-diff,
+                           #   decision-probe, ab-*, base-loss-* (§119/§120)
+  eval/  perf/  level/  replay/  optimize/
 ```
 
 Key conventions:
@@ -159,6 +164,23 @@ Append a decision to `DECISIONS.md` for anything non-obvious, and append a line 
 ### Step 6 — Hand off
 
 Leave the tree green: `bun run check` must pass. Present the result per the agent loop's result-presentation rules.
+
+### Step 7 — Iterative debug re-runs: failure subset only
+
+> Origin: DECISIONS §120 (自毁基地 32 局取证). Tooling: `tools/diag/run-forensics.ts` + `tools/sim/` (§119).
+
+When a forensics/collector script change invalidates previously collected data (off-by-one fix, new field, new 口径), **do NOT re-run the full stage×seed sweep**. Simulations are deterministic (§2.3), so re-running the same `(difficulty, stage, seed)` combos reproduces the same failures — re-run **only the previously identified failure subset** and re-collect with the updated forensics:
+
+```
+bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
+    --kinds base_destroyed,lives_exhausted,timeout \
+    --selfkill --json tmp/fx-subset.json
+```
+
+- `--from-json <corpus>` derives the re-run set from the old corpus's failed runs (optionally filtered by `--kinds` failure causes and/or `--selfkill` = player self-inflicted base kills only). The report header labels the subset as such — never compare a subset corpus's absolute numbers against a full sweep.
+- Cost: full sweep 35 stages × 120 seeds × 2 difficulties ≈ 8,400 runs (~4 min); the failure subset is typically <2,000 runs (seconds). §120 validated this on the 32 self-kill runs: 2.2s vs ~4 min, byte-identical failure list.
+- **Full sweep is required only when the corpus itself changed** — stages, seeds, difficulty set, or `--set` params. If the corpus is unchanged, a subset re-run is the honest, sufficient validation.
+- First sweep of a new experiment always collects with `--json` (per-run forensics persisted) so later iterations have a subset to draw from.
 
 ---
 

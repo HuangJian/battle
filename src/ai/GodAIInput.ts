@@ -230,6 +230,15 @@ export class GodAIInput implements InputLike {
   _suicideStanding = false
 
   /**
+   * §121: total ticks the self-fire base guard suppressed a t2a/aggressive
+   * stop-and-aim fire or a shouldFireInDir fire whose bullet's center line
+   * would have reached the base. Pure observation (like _counterFireTicks /
+   * branchCounts) — never feeds back into gameplay. Read by ab-fire-guard.ts
+   * as the A/B trigger-rate proxy (0 = the arm never diverged = vacuous).
+   */
+  _selfFireGuardBlocks = 0
+
+  /**
    * §117: mode-2 (STAND) standing tick counter — how many consecutive ticks
    * the player has been standing still waiting to die. Capped by
    * `suicideReturnStandMaxTicks`; when exceeded, the trade aborts and normal

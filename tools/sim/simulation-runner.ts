@@ -6,6 +6,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { InputRecorder } from '../../src/replay/InputRecorder'
+import type { Direction } from '../../src/constants'
 import type { StageData, GameEvent, TankKind, IntelligenceLevel } from '../../src/types'
 
 // ============================================================
@@ -151,6 +152,11 @@ export interface SimResult {
   telemetry?: RunTelemetry
   /** Suicide-trade commit ticks (only when `commitCounts: true`). */
   suicideReturnCommits?: number
+  /** §121 self-fire base-guard block ticks (only when `commitCounts: true`).
+   *  A/B trigger-rate proxy: 0 = the arm never suppressed a base-line shot. */
+  selfFireGuardBlocks?: number
+  /** Per-run forensics (only when `forensics: true`). */
+  forensics?: RunForensics
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../../src/snapshot/types').WorldSnapshot
@@ -168,6 +174,124 @@ export interface FrameMetrics {
   enemyPositions: Array<{ x: number; y: number }>
   /** Count of enemy bullets on a collision course with the player. */
   incomingThreats: number
+}
+
+// ============================================================
+// Run forensics (DECISIONS §119) — per-run structured autopsy data
+// ============================================================
+
+/**
+ * One tick of the player's action log: the move/fire the God AI issued and
+ * the decision-chain rule (candidate branch) that took effect, plus the world
+ * state that tick. Read-only observation of the World + the AI's cached
+ * decision state (`input._lastBranch` etc.) — never feeds back.
+ */
+export interface ForensicsAction {
+  tick: number
+  /** The decision-chain branch that took effect (生效规则): e.g. 't2a', 'dodge', 'navigate'. */
+  branch: string
+  moveDir: Direction | null
+  fire: boolean
+  playerX: number
+  playerY: number
+  playerHp: number
+  playerLives: number
+  playerDistToBase: number
+  baseHp: number
+}
+
+/** A live enemy (or its in-flight bullet) at the terminal tick. */
+export interface ForensicsTank {
+  kind: TankKind
+  hp: number
+  maxHp: number
+  /** AI tier (aiState.level) — only set for enemies, 'none' if unknown. */
+  level: string
+  x: number
+  y: number
+  /** Manhattan distance (cells) to the player center; -1 if no player. */
+  distToPlayer: number
+  /** Manhattan distance (cells) to the base center. */
+  distToBase: number
+}
+
+export interface ForensicsBullet {
+  x: number
+  y: number
+  dir: Direction
+  damage: number
+  distToPlayer: number
+  distToBase: number
+  /** Ticks to reach the player if aligned + approaching, else -1. */
+  etaToPlayer: number
+  /** Hits this bullet would need to kill the player (ceil(hp / damage)). */
+  hitsToDiePlayer: number
+  /** Hits this bullet would need to kill the base (ceil(baseHp / damage)). */
+  hitsToDieBase: number
+}
+
+/** Full state at the terminal tick (gameover / stage-clear / timeout). */
+export interface ForensicsSnapshot {
+  tick: number
+  playerAlive: boolean
+  playerLives: number
+  playerHp: number
+  /** ceil(playerHp / 100) — hits the player can still take vs basic firepower. */
+  playerHitsToDie: number
+  playerDistToBase: number
+  playerLevel: number
+  baseAlive: boolean
+  baseHp: number
+  baseMaxHp: number
+  /** ceil(baseHp / 100) — hits the base can still take vs basic firepower. */
+  baseHitsToDie: number
+  /** Base protection-ring cells still solid (brick/steel). */
+  baseWallIntact: number
+  /** Live, fully-spawned enemies, each with type/HP/distances. */
+  enemies: ForensicsTank[]
+  /** Every in-flight enemy bullet, with position/direction/distances. */
+  enemyBullets: ForensicsBullet[]
+}
+
+/** One historical player-side event (death / kill / power-up pickup / shot). */
+export interface ForensicsEventLog {
+  tick: number
+  type: 'death' | 'kill' | 'pickup' | 'shot'
+  /** Event position (px, tank/bullet center). */
+  x: number
+  y: number
+  /** Killer kind (death) / killed kind (kill) / power-up type (pickup)
+   *  / decision-chain branch that issued the shot (shot). */
+  detail: string
+  /** Player facing at the shot tick (shot only). */
+  dir?: Direction
+  /** True when the shot's forward ray crosses the base 2×2 rectangle — the
+   *  self-inflicted-base-kill candidate flag (shot only). */
+  towardBase?: boolean
+}
+
+/**
+ * Per-run forensics payload (DECISIONS §119). Collected only when the run
+ * opted in via `RunOptions.forensics`; when off, the run is byte-identical.
+ */
+export interface RunForensics {
+  outcome: SimOutcome
+  failureCause?: 'base_destroyed' | 'lives_exhausted' | 'timeout'
+  /** World state at the terminal tick. */
+  terminal: ForensicsSnapshot
+  /** The last ≤10 ticks of player actions + the rules that took effect. */
+  lastActions: ForensicsAction[]
+  /** Death / kill / pickup history (tick + position). Single-player oriented:
+   *  in coop, P2 pickups also emit `powerup_collected` (by: 'player') and would
+   *  be attributed to P1 — do not rely on this for coop sweeps. */
+  events: ForensicsEventLog[]
+  /** Lifetime power-up pickup totals per type — consumables (bomb/freeze/
+   *  fence) are consumed on use, only super power-ups (guard/decoy/rewind/
+   *  mine/sacrifice) actually accumulate; this is a pickup census, not the
+   *  literal remaining stock. */
+  inventory: Record<string, number>
+  kills: number
+  playerDeaths: number
 }
 
 // ============================================================
@@ -211,6 +335,17 @@ export interface RunOptions {
    * work, byte-identical run).
    */
   commitCounts?: boolean
+  /**
+   * Collect per-run forensics (DECISIONS §119): terminal snapshot (player /
+   * base / per-enemy / per-bullet), last-10-ticks action+rule log, and the
+   * death/kill/pickup event history. Read-only observation — the run outcome
+   * is byte-identical whether on or off. Default false.
+   *
+   * NOTE: opt-in tooling — the action trace allocates one object per tick, so
+   * never enable this inside the optimizer's fitness loop (use the
+   * run-forensics CLI instead, which is a separate sweep).
+   */
+  forensics?: boolean
 }
 
 // ============================================================
@@ -365,13 +500,60 @@ export function runSimulation(opts: RunOptions): SimResult {
   // Enemy tank id → AI tier, refreshed each tick (the killer is usually still
   // alive when the player dies, so it cannot be learned from death events).
   const tankTierById = wantTelemetry ? new Map<number, IntelligenceLevel>() : null
+  // ---- §119 run-forensics accumulators (only touched when opts.forensics) ----
+  const wantForensics = opts.forensics === true
+  const ACTION_TRACE_LEN = 10
+  const actionTrace: ForensicsAction[] = []
+  const fxEvents: ForensicsEventLog[] = []
+  const fxInventory = new Map<string, number>()
+  let fxKills = 0
+  let fxPlayerDeaths = 0
+  let fxTerminal: ForensicsSnapshot | null = null
 
   const t0 = performance.now()
 
   while (tick < maxTicks) {
     sim.tick()
+    // §120: snapshot THIS tick's AI decision state BEFORE endFrame clears it.
+    // Event consumption happens after endFrame, and bullet_fired / death
+    // events must be tagged with the state of the tick that PRODUCED them —
+    // reading input._lastBranch / player.dir at consume time reads the stale
+    // post-endFrame state (off-by-one: S6 s43's fatal down-shot was recorded
+    // as the next tick's left-facing). Pure read, used only by forensics.
+    const fxTick = wantForensics
+      ? {
+          branch: input._lastBranch,
+          dir: world.player?.dir,
+          px: world.player ? world.player.x + world.player.w / 2 : -1,
+          py: world.player ? world.player.y + world.player.h / 2 : -1,
+        }
+      : null
     // Record this tick's input BEFORE endFrame clears the cached state.
     if (recorder) recorder.recordFrame(input, coopInput)
+    // §119: append this tick's action + the decision rule that took effect
+    // (same sampling point as the recorder — before endFrame clears the
+    // cached decision state). Rolling window of the last 10 ticks.
+    if (wantForensics) {
+      const pf = world.player
+      const pfX = pf ? pf.x + pf.w / 2 : -1
+      const pfY = pf ? pf.y + pf.h / 2 : -1
+      const bcx = BASE_POS.col * CELL + CELL
+      const bcy = BASE_POS.row * CELL + CELL
+      actionTrace.push({
+        tick,
+        branch: input._lastBranch,
+        moveDir: input._moveDir,
+        fire: input._fire,
+        playerX: Math.round(pfX),
+        playerY: Math.round(pfY),
+        playerHp: pf?.hp ?? -1,
+        playerLives: world.lives,
+        playerDistToBase:
+          pfX >= 0 ? Math.round((Math.abs(pfX - bcx) + Math.abs(pfY - bcy)) / CELL) : -1,
+        baseHp: world.baseHp,
+      })
+      if (actionTrace.length > ACTION_TRACE_LEN) actionTrace.shift()
+    }
     // Game.ts calls input.endFrame() after each tick; the headless runner
     // must do the same so GodAIInput's _thought flag resets and the AI
     // re-evaluates every tick (not just the first one).
@@ -437,6 +619,74 @@ export function runSimulation(opts: RunOptions): SimResult {
           if (e.powerUp === 'star') starsCollected++
         }
       }
+      if (wantForensics) {
+        // §119 history log: player deaths (tick+pos+killer kind), kills
+        // (tick+pos+killed kind), power-up pickups (tick+pos+type).
+        if (e.type === 'tank_destroyed') {
+          const cx = Math.round(e.tank.x + e.tank.w / 2)
+          const cy = Math.round(e.tank.y + e.tank.h / 2)
+          if (e.tank.isPlayer) {
+            fxPlayerDeaths++
+            let killerKind = 'unknown'
+            if (e.byId !== undefined) {
+              for (const k of world.tanks) if (k.id === e.byId) killerKind = k.kind
+            }
+            fxEvents.push({ tick, type: 'death', x: cx, y: cy, detail: killerKind })
+          }
+          if (e.by === 'player') {
+            fxKills++
+            fxEvents.push({ tick, type: 'kill', x: cx, y: cy, detail: e.tank.kind })
+          }
+        } else if (e.type === 'powerup_collected') {
+          const pf = world.player
+          fxInventory.set(e.powerUp, (fxInventory.get(e.powerUp) ?? 0) + 1)
+          fxEvents.push({
+            tick,
+            type: 'pickup',
+            x: pf ? Math.round(pf.x + pf.w / 2) : -1,
+            y: pf ? Math.round(pf.y + pf.h / 2) : -1,
+            detail: e.powerUp,
+          })
+        } else if (e.type === 'bullet_fired' && e.bullet.isPlayer) {
+          // §120: every player shot, tagged with the decision-chain branch that
+          // issued it (fxTick — the pre-endFrame snapshot), the player position
+          // at fire, and whether the shot's ray crosses the base 2×2 rectangle.
+          // The ray uses the BULLET's own dir (ground-truth trajectory), NOT
+          // the tank's facing — a turn on the same tick leaves tank.dir off
+          // the bullet's axis (S33 s81: fatal left shot recorded as facing up).
+          //
+          // LATENCY CAVEAT: the branch tag is fxTick — THIS tick's post-tick
+          // decision state — but the fire itself was decided from the PREVIOUS
+          // tick's input (one tick of input latency). In fast branch
+          // transitions the tag can be one tick off; fine for aggregate branch
+          // mixes, do not use it to pin an exact fire tick.
+          const px = fxTick!.px
+          const py = fxTick!.py
+          const dir = e.bullet.dir
+          // Base rect: cols 12-13 / rows 24-25. The bullet corridor is the
+          // bullet's forward ray (≈ ±16px = tank half-width band).
+          const baseL = 12 * CELL
+          const baseR = 14 * CELL
+          const baseT = 24 * CELL
+          const baseB = 26 * CELL
+          let towardBase = false
+          if (dir && px >= 0 && py >= 0) {
+            if (dir === 'down') towardBase = py < baseT && px > baseL - 16 && px < baseR + 16
+            else if (dir === 'up') towardBase = py > baseB && px > baseL - 16 && px < baseR + 16
+            else if (dir === 'right') towardBase = px < baseL && py > baseT - 16 && py < baseB + 16
+            else if (dir === 'left') towardBase = px > baseR && py > baseT - 16 && py < baseB + 16
+          }
+          fxEvents.push({
+            tick,
+            type: 'shot',
+            x: Math.round(px),
+            y: Math.round(py),
+            detail: fxTick!.branch,
+            dir,
+            towardBase,
+          })
+        }
+      }
     }
 
     // Death attribution: refresh the enemy id → AI-tier map (read-only scan,
@@ -489,10 +739,12 @@ export function runSimulation(opts: RunOptions): SimResult {
     // Check for terminal states.
     if (world.state === 'stageclear') {
       outcome = 'stage_clear'
+      if (wantForensics) fxTerminal = snapshotForensics(world, tick)
       break
     }
     if (world.state === 'gameover') {
       outcome = 'gameover'
+      if (wantForensics) fxTerminal = snapshotForensics(world, tick)
       // Determine failure cause: base destroyed or lives exhausted.
       const baseDestroyed = world.tileMap.isBaseDestroyed()
       failure = {
@@ -526,6 +778,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     // If the game transitioned to 'victory' (ran out of stages).
     if (world.state === 'victory') {
       outcome = 'stage_clear'
+      if (wantForensics) fxTerminal = snapshotForensics(world, tick)
       break
     }
 
@@ -538,6 +791,7 @@ export function runSimulation(opts: RunOptions): SimResult {
   // If we hit max_ticks without a terminal state, record timeout.
   if (outcome === 'max_ticks' && !failure) {
     failure = { cause: 'timeout', tick, firstKillTick }
+    if (wantForensics) fxTerminal = snapshotForensics(world, tick)
   }
 
   const wallMs = performance.now() - t0
@@ -569,6 +823,20 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   if (opts.commitCounts === true) {
     result.suicideReturnCommits = input.branchCounts.suicideReturn
+    result.selfFireGuardBlocks = input._selfFireGuardBlocks
+  }
+
+  if (wantForensics) {
+    result.forensics = {
+      outcome,
+      failureCause: failure?.cause,
+      terminal: fxTerminal ?? snapshotForensics(world, tick),
+      lastActions: actionTrace,
+      events: fxEvents,
+      inventory: Object.fromEntries(fxInventory),
+      kills: fxKills,
+      playerDeaths: fxPlayerDeaths,
+    }
   }
 
   if (wantTelemetry) {
@@ -603,6 +871,92 @@ export function runSimulation(opts: RunOptions): SimResult {
   }
 
   return result
+}
+
+/**
+ * §119: capture the full structured state at the terminal tick — player,
+ * base, every live enemy (type/HP/distances) and every in-flight enemy
+ * bullet (position/direction/distances/hit economics). Pure World read.
+ */
+function snapshotForensics(world: World, tick: number): ForensicsSnapshot {
+  const p = world.player
+  const pcx = p ? p.x + p.w / 2 : -1
+  const pcy = p ? p.y + p.h / 2 : -1
+  const bcx = BASE_POS.col * CELL + CELL
+  const bcy = BASE_POS.row * CELL + CELL
+  const distCells = (x: number, y: number): number =>
+    Math.round((Math.abs(x - bcx) + Math.abs(y - bcy)) / CELL)
+
+  const enemies: ForensicsTank[] = []
+  const tanks = world.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
+    if (t.isPlayer || !t.alive || t.spawnTimer > 0) continue
+    const cx = t.x + t.w / 2
+    const cy = t.y + t.h / 2
+    enemies.push({
+      kind: t.kind,
+      hp: t.hp,
+      maxHp: t.maxHp,
+      level: t.aiState?.level ?? 'none',
+      x: Math.round(cx),
+      y: Math.round(cy),
+      distToPlayer: pcx >= 0 ? Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL) : -1,
+      distToBase: distCells(cx, cy),
+    })
+  }
+
+  const enemyBullets: ForensicsBullet[] = []
+  const bullets = world.bullets
+  for (let bi = 0; bi < bullets.length; bi++) {
+    const b = bullets[bi]
+    if (!b.alive || b.isPlayer) continue
+    const bx = b.x + b.w / 2
+    const by = b.y + b.h / 2
+    // ETA to the player: aligned (same row/col, within the tank-width band)
+    // AND approaching — same 口径 as countIncomingThreats.
+    const vertical = b.dir === 'up' || b.dir === 'down'
+    const aligned =
+      pcx >= 0 && (vertical ? Math.abs(bx - pcx) < CELL * 0.75 : Math.abs(by - pcy) < CELL * 0.75)
+    const approaching =
+      pcx >= 0 &&
+      ((b.dir === 'down' && by < pcy) ||
+        (b.dir === 'up' && by > pcy) ||
+        (b.dir === 'right' && bx < pcx) ||
+        (b.dir === 'left' && bx > pcx))
+    const eta =
+      aligned && approaching
+        ? (vertical ? Math.abs(by - pcy) : Math.abs(bx - pcx)) / Math.max(1, b.speed)
+        : -1
+    enemyBullets.push({
+      x: Math.round(bx),
+      y: Math.round(by),
+      dir: b.dir,
+      damage: b.damage,
+      distToPlayer: pcx >= 0 ? Math.round((Math.abs(bx - pcx) + Math.abs(by - pcy)) / CELL) : -1,
+      distToBase: distCells(bx, by),
+      etaToPlayer: Math.round(eta * 10) / 10,
+      hitsToDiePlayer: p && p.hp > 0 ? Math.ceil(p.hp / Math.max(1, b.damage)) : 0,
+      hitsToDieBase: world.baseHp > 0 ? Math.ceil(world.baseHp / Math.max(1, b.damage)) : 0,
+    })
+  }
+
+  return {
+    tick,
+    playerAlive: !!p?.alive,
+    playerLives: world.lives,
+    playerHp: p?.hp ?? 0,
+    playerHitsToDie: p && p.hp > 0 ? Math.ceil(p.hp / 100) : 0,
+    playerDistToBase: pcx >= 0 ? distCells(pcx, pcy) : -1,
+    playerLevel: world.playerLevel,
+    baseAlive: !world.tileMap.isBaseDestroyed(),
+    baseHp: world.baseHp,
+    baseMaxHp: world.baseMaxHp,
+    baseHitsToDie: world.baseHp > 0 ? Math.ceil(world.baseHp / 100) : 0,
+    baseWallIntact: countBaseWall(world),
+    enemies,
+    enemyBullets,
+  }
 }
 
 /** Sample per-frame metrics from the World. */

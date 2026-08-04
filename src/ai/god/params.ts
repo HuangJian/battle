@@ -1053,6 +1053,26 @@ export interface GodAIParams {
    * position for a gamble. 0 = disabled (byte-identical to §117).
    */
   suicideReturnDefendDistCells: number
+
+  // ---- §121: t2a/aggressive 停射自毁守卫 (self-fire base guard, §120 forensics) ----
+  /**
+   * 0 = OFF (byte-identical to pre-§121). 1 = STRICT: suppress the
+   * t2a/aggressive stop-and-aim fire when the bullet's CENTER line (the
+   * actual 6px path — NOT the scan's ±8px offset lines) can reach the base
+   * eagle; the terrain walk ignores tanks (they can dodge off the line).
+   * 2 = LENIENT: same walk, but only suppress when NO enemy tank body
+   * overlaps the bullet corridor before the base (keeps true point-blank
+   * overlap kills where the bullet provably hits the enemy first).
+   *
+   * Root cause (§120, 32/32 self-kill forensics): the scan's two ±8px
+   * offset lines catch an enemy up to ~25px off the bullet's 6px center
+   * path and report scan.enemy with the enemy CLOSER than the base eagle —
+   * the §74 dual-offset guard then allows fire ("the enemy is in the way").
+   * The 6px bullet misses the off-line enemy and continues into the base
+   * (hard S6 s43: killer shot at x=200, enemy body at x∈[206,238] — 6px
+   * bullet [197,203] passed beside it into the eagle).
+   */
+  selfFireBaseGuard: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1373,6 +1393,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §118 strict-doom guard (modes 2/3): 0 = OFF — A/B tested before enabling.
   suicideReturnBaseHpFrac: 0, // base must be at/below this × baseMaxHp
   suicideReturnDefendDistCells: 0, // player must be farther than this from base
+  // §121 t2a/aggressive 停射自毁守卫 — SHIPPED default 2 (lenient). A/B
+  // (35 关 × 120 seeds × hard+chaos, 3 arms): strict(mode 1) regresses
+  // (hard −29 / chaos −24 flips — over-suppresses legitimate kill shots),
+  // lenient(mode 2) wins on both (hard +12 / chaos +8 flips, Δbase_destroyed
+  // −7/−12, guardBlocks 16K vs 82K). Classic restored to 0 via
+  // CLASSIC_MODEL_PARAMS (instant 1-HP combat has zero margin — untested,
+  // keep byte-identical per §115).
+  selfFireBaseGuard: 2,
 }
 
 /**
@@ -1399,6 +1427,10 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   campTimeoutTicks: 90,
   outnumberedFieldEnemies: 3,
   outnumberedFieldDistCells: 15,
+  // §121: the lenient self-fire base guard is a pool-model (hard/chaos) fix.
+  // classic is instant 1-HP combat with zero margin for suppressed kill shots
+  // and was never A/B'd here — restore 0 (byte-identical classic gate).
+  selfFireBaseGuard: 0,
 }
 
 /**

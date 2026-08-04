@@ -9,7 +9,7 @@
  * Errors inside a run are caught and reported as `ok: false`, mirroring
  * the serial evaluateParams() catch branch exactly.
  */
-import { runSimulation, type RunTelemetry } from './simulation-runner'
+import { runSimulation, type RunTelemetry, type RunForensics } from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 
@@ -30,6 +30,9 @@ export interface SimTask {
   telemetry?: boolean
   /** Return `suicideReturnCommits` (§116/§117 A/B trigger-rate probe). */
   commitCounts?: boolean
+  /** Return per-run forensics (DECISIONS §119): terminal snapshot, action
+   *  trace, death/kill/pickup history. Read-only — outcome unaffected. */
+  forensics?: boolean
 }
 
 export interface SimTaskResult {
@@ -45,6 +48,14 @@ export interface SimTaskResult {
   telemetry?: RunTelemetry
   /** Suicide-trade commit ticks (only when the task requested commitCounts). */
   suicideReturnCommits?: number
+  /** §121 self-fire base-guard block ticks (only when commitCounts requested). */
+  selfFireGuardBlocks?: number
+  /** Per-run forensics (only when the task requested forensics). */
+  forensics?: RunForensics
+  /** Failure cause ('base_destroyed' | 'lives_exhausted' | 'timeout'). */
+  failureCause?: string
+  /** Kind of the tank whose bullet destroyed the base (self-inflicted = 'player'). */
+  failureKillerKind?: string
 }
 
 declare var self: Worker
@@ -62,6 +73,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       sampleInterval: 60, // same as the serial path (metrics are discarded)
       telemetry: task.telemetry === true,
       commitCounts: task.commitCounts === true,
+      forensics: task.forensics === true,
     })
     msg = {
       id: task.id,
@@ -78,6 +90,14 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
     }
     if (task.commitCounts === true) {
       msg.suicideReturnCommits = result.suicideReturnCommits
+      msg.selfFireGuardBlocks = result.selfFireGuardBlocks
+    }
+    if (task.forensics === true) {
+      msg.forensics = result.forensics
+      // Failure attribution rides along with the forensics opt-in (keeps the
+      // result-shape contract flag-gated like telemetry/commitCounts).
+      msg.failureCause = result.failure?.cause
+      msg.failureKillerKind = result.failure?.killerKind
     }
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }
