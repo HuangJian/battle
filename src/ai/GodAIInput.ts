@@ -117,6 +117,27 @@ import type { ChokepointPlan } from './god/Chokepoint'
 // GodAIInput (orchestrator)
 // ============================================================
 
+/**
+ * (perf §129) One direct-mapped slot of the pickup-reachability memo used by
+ * powerUpCellReachable (StrategyPlanner). Key: (playerCell, target) +
+ * tileMap.revision at fill time. valid=false slots are inert; the revision
+ * key makes any stale slot miss the SAME tick terrain changes (strict pure
+ * memo — see the StrategyPlanner doc comment for the correctness argument).
+ */
+export interface PickupReachSlot {
+  valid: boolean
+  pcCol: number
+  pcRow: number
+  col: number
+  row: number
+  rev: number
+  reachable: boolean
+}
+
+function emptyPickupReachSlot(): PickupReachSlot {
+  return { valid: false, pcCol: 0, pcRow: 0, col: 0, row: 0, rev: -1, reachable: false }
+}
+
 export class GodAIInput implements InputLike {
   // Shared state — public so the extracted ./god/* sub-modules can read/write
   // it via the `self: GodAIInput` they receive. This is the §0.5 split;
@@ -439,6 +460,34 @@ export class GodAIInput implements InputLike {
   _replanMax = 60
 
   /**
+   * (perf §129) Cross-tick pickup-reachability memo — 8 direct-mapped slots
+   * keyed on (playerCell, target) + tileMap.revision, mirroring the §127
+   * replan-cache discipline. powerUpCollectCell re-evaluates the same items
+   * every think (urgent + bonus-window paths, per tick in hard/chaos), and
+   * the player crosses a cell boundary only every ~8-23 ticks, so repeat
+   * queries dominate. findPath draws no RNG — identical keys always yield
+   * identical booleans, byte-identical to uncached. reset() clears per stage.
+   * Gate: params.pickupReachCache (0 = byte-identical pre-§129).
+   *
+   * 60-tick defence-in-depth timer (review note): bounds staleness if
+   * findPath ever gains a new input beyond the memo key — same discipline
+   * as §127's _replanTimer. A pure memo always recomputes the identical
+   * value, so the timer only affects recompute frequency, never results.
+   */
+  _pickupReachSlots: PickupReachSlot[] = [
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+    emptyPickupReachSlot(),
+  ]
+  _pickupReachTimer = 0
+  _pickupReachMax = 60
+
+  /**
    * §88: throttled chokepoint plan (threat points + selected 咽喉要地 cell).
    * Recomputed every chokepointReplanTicks (default 30) or when missing — the
    * same cross-tick cache discipline as _navCacheValid (threat points only
@@ -540,6 +589,11 @@ export class GodAIInput implements InputLike {
     this._replanCacheValid = false
     this._replanTimer = 0
     this._replanRev = -1
+    // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
+    for (let i = 0; i < this._pickupReachSlots.length; i++) {
+      this._pickupReachSlots[i].valid = false
+    }
+    this._pickupReachTimer = 0
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()

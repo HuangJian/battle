@@ -1352,3 +1352,20 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **Results（首次基线，2026-08-05 同机）:** GRAND TOTAL wall=22577ms / ticks=4586281 / wins=689/1050 / perTick=0.0049ms；分难度 classic 3537ms(16%) / hard 9590ms(42%) / chaos 9450ms(42%)。分难度签名：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`——各与单难度 baseline/§127 A/B 逐字节一致（hard+chaos 占 84% wall，印证 God-AI 重负载占比）。
 
 **Implications:** 后续性能优化的 A/B 判据建议按难度分别对比签名与 wall；classic 与 hard/chaos 的差异（replanInterval 50 vs 1）是分析优化落点的重要维度。
+
+## 129. pickup 可达性 A*：dig-only + 跨 tick 纯 memo（SHIPPED，2026-08-05）
+
+**Decision:** `powerUpCellReachable`（StrategyPlanner，powerUpCollectCell 的可达性查询）两处字节级优化，Gate `params.pickupReachCache`（默认 1，0 = pre-§129 corridor+dig 无缓存字节等价 A/B 臂）：
+1. **dig-only**：删除 corridor A* 调用——`breakBrick` 的搜索空间严格包含 corridor 空间（brick 通行成本 5，steel/water/base 仍阻挡），corridor 有路径 ⟺ dig 有路径，布尔结果恒等。corridor-fail 场景（全可达组件探索）恰是最贵路径，dig-only 直接短路它。
+2. **跨 tick memo**：8 槽直映缓存（target 坐标哈希），键 `(playerCell, target)` + `tileMap.revision`（§127 新增的地形修订号复用）→ 严格纯 memo。player 每 ~8-23 tick 才换格，urgent/bonus-window 拾取路径每 think 重查同一批道具，重复查询主导。
+
+**Rationale:**
+- §2.10/§127 Implications 预留方向：pickup 是 replan 缓存后最大可砍项（chaos 28.4% / classic 40.4% 的 findPath 调用）。
+- 与 §127 同构：findPath 是纯函数无 RNG → 同款键缓存字节级一致；revision 已覆盖全部地形写路径（§127 验证）。
+- 插桩计数（测后回退）：chaos/stage0 pickup 20603→2708（−87%），总 findPath 72533→54638（−24.7%）；classic/stage0 pickup 6206→613（−90%），总 15366→9773（−36.4%）。
+- 确定性：350 单元扫描 0/350 分歧（outcome/ticks/killCount）；per-seed-diff 4/4 敏感种子 IDENTICAL（S15 seed1007 / S32 seed1021 / S6 seed41 / S26 seed12）；eval-suite hard/chaos 各 4200/4200 tied；三难度基线签名逐字节不变（classic 1169769/317、hard 1639097/177、chaos 1777415/195）。
+- Wall（同机 A/B，带热身轮 + order=ab/ba 双向）：**chaos −27.7% / −8.3%**（ab 序 B 臂 13401ms 疑似系统负载离群；perTick 两轮均 favor A）；classic ±14% 噪声带内（单场 ~3ms，收益被机器负载淹没）。chaos 收益超过 §127 profile 预估（dig A* 单次成本高于 corridor，corridor-fail 是全网格探索）。
+
+**Implications:**
+- 测量纪律（§127 教训延续）：wall A/B 必须先热身并双向跑（order=ab/ba）——首轮 JIT/页面缓存 ~700-1000ms 会被误记到被测开关头上（无热身首测时双臂差异完全被顺序支配）。
+- pickup 可达性已达纯 memo 上限；再压需算法级变更（空间索引等），违反 simple-beats-clever（MANIFEST §10）。

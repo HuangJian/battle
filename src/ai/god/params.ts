@@ -78,6 +78,19 @@ export interface GodAIParams {
    * BYTE-IDENTICAL — no §68-style signature relaxation needed.
    */
   replanCache: number
+  /**
+   * §129 (perf): 1 = pickup-reachability memo ON (default). 0 = OFF
+   * (byte-identical to pre-§129 — powerUpCellReachable runs corridor A*
+   * then dig A*, uncached, on every query).
+   *
+   * §129 turns the pickup reachability check into a strict pure memo of
+   * (playerCell, target, terrain): 1) the corridor A* call is dropped
+   * (breakBrick's search space strictly contains the corridor space, so the
+   * boolean answer is identical — halves the per-query A* count), and 2) the
+   * dig A* result is memoized under the §127-style (playerCell, target) +
+   * tileMap.revision key. findPath draws no RNG, so this is byte-identical.
+   */
+  pickupReachCache: number
   /** S5: max distance (cells) to divert for a power-up. */
   powerupMaxDivertDistance: number
   /**
@@ -1146,6 +1159,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseWallScanRadius: 5,
   replanInterval: 1,
   replanCache: 1,
+  pickupReachCache: 1,
   powerupMaxDivertDistance: 18,
   endgameEnemyThreshold: 10,
   huntAllyCount: 1,

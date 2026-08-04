@@ -311,14 +311,65 @@ function powerUpCollectCell(self: GodAIInput, col: number, row: number): Cell | 
   return bestCol >= 0 ? { col: bestCol, row: bestRow } : null
 }
 
-/** A* reachability from the player's cell to one specific tank-position cell. */
+/** A* reachability from the player's cell to one specific tank-position cell.
+ *
+ * (perf §129) Two byte-identical mechanisms (both a pure memo of World
+ * state — findPath draws no RNG and reads only tileMap/from/to/constraints):
+ *   1. DIG-ONLY. The old corridor-first call is redundant: `breakBrick`'s
+ *      search space strictly contains the corridor space (brick becomes
+ *      passable at cost 5; steel/water/base still block), so a corridor path
+ *      exists ⟺ a dig path exists — the boolean answer never differs. The
+ *      corridor-fail case (full reachable-component exploration) was the
+ *      expensive one; dig-only short-circuits it.
+ *   2. CROSS-TICK MEMO on (playerCell, target) + tileMap.revision, the same
+ *      strict-pure-memo discipline as the §127 replan cache. The player
+ *      crosses a cell boundary only every ~8-23 ticks, and pickup queries
+ *      re-evaluate the same items every think (urgent + bonus-window paths),
+ *      so repeats dominate. 8 direct-mapped slots; terrain mutations bump
+ *      revision and make stale slots miss the same tick.
+ * Gate: params.pickupReachCache (0 = byte-identical pre-§129 corridor+dig,
+ * uncached — the A/B arm B).
+ */
 function powerUpCellReachable(self: GodAIInput, col: number, row: number): boolean {
   const pc = self.playerCell()
-  const target: Cell = { col, row }
-  const corridor = findPath(self.world.tileMap, pc, target)
-  if (corridor && corridor.length > 0) return true
-  const dig = findPath(self.world.tileMap, pc, target, { breakBrick: true })
-  return !!dig && dig.length > 0
+  if (self.params.pickupReachCache <= 0) {
+    const target: Cell = { col, row }
+    const corridor = findPath(self.world.tileMap, pc, target)
+    if (corridor && corridor.length > 0) return true
+    const dig = findPath(self.world.tileMap, pc, target, { breakBrick: true })
+    return !!dig && dig.length > 0
+  }
+  const rev = self.world.tileMap.revision
+  const slots = self._pickupReachSlots
+  // 60-tick defence-in-depth timer (same discipline as §127's _replanTimer):
+  // a pure memo recomputes the identical value, so this only bounds staleness
+  // if findPath ever gains an input outside the key — never changes results.
+  self._pickupReachTimer--
+  if (self._pickupReachTimer <= 0) {
+    for (let i = 0; i < slots.length; i++) slots[i].valid = false
+    self._pickupReachTimer = self._pickupReachMax
+  }
+  const s = slots[(col * 13 + row * 7) & 7]
+  if (
+    s.valid &&
+    s.pcCol === pc.col &&
+    s.pcRow === pc.row &&
+    s.col === col &&
+    s.row === row &&
+    s.rev === rev
+  ) {
+    return s.reachable
+  }
+  const dig = findPath(self.world.tileMap, pc, { col, row }, { breakBrick: true })
+  const reachable = !!dig && dig.length > 0
+  s.valid = true
+  s.pcCol = pc.col
+  s.pcRow = pc.row
+  s.col = col
+  s.row = row
+  s.rev = rev
+  s.reachable = reachable
+  return reachable
 }
 
 /**
