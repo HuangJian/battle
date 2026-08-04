@@ -29,7 +29,7 @@ import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { CELL, BASE_POS } from '../../src/constants'
+import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { STAGES } from '../../src/config/stages'
 
@@ -80,9 +80,19 @@ if (isNaN(stageIdx) || isNaN(seed) || isNaN(probeTick)) {
 const stage = STAGES[stageIdx]
 const world = new World()
 world.rng.reseed(seed)
-world.difficultyKey = 'classic'
-world.difficulty = DIFFICULTIES['classic']
-world.rules = RULES['classic'] ?? DEFAULT_RULES
+let difficulty = 'classic'
+for (let ai = 0; ai < process.argv.length; ai++) {
+  if (process.argv[ai] !== '--difficulty') continue
+  const d = process.argv[ai + 1]
+  if (d && DIFFICULTIES[d]) difficulty = d
+}
+world.difficultyKey = difficulty
+world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+world.rules = RULES[difficulty] ?? DEFAULT_RULES
+// §105 sync: mirror startGame()'s P1 init (hard/chaos ship playerStartLevel=1 /
+// startLives=2 — without this the probe simulates level 0 / 3 lives).
+world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+world.lives = world.difficulty?.startLives ?? START_LIVES
 const godAIParams = buildParams()
 const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
 const input = new GodAIInput(world, godAIParams, godRng)
@@ -117,6 +127,10 @@ const state = (world as unknown as { state: string }).state
 const branchCounts = { ...input.branchCounts }
 const fireThisTick = input._fire
 const moveDirThisTick = input._moveDir
+// §116/§117: suicide-trade state (captured BEFORE the probe's own think below).
+const suicideStanding = input._suicideStanding
+const suicideStandTicks = input._suicideStandTicks
+const suicideStandSuppress = input._suicideStandSuppress
 
 console.log(`===== S${stageIdx} ${stage.name} · seed ${seed} · tick ${probeTick} · ${state} =====`)
 console.log(
@@ -134,6 +148,9 @@ console.log(`base: (${BASE_POS.col},${BASE_POS.row}) · HP ${world.baseHp}/${wor
 console.log('\n--- decision (this tick) ---')
 console.log(`_fire (this tick):   ${fireThisTick ? 'true' : 'false'}`)
 console.log(`_moveDir (this tick): ${moveDirThisTick ?? 'null'}`)
+console.log(
+  `suicideStanding:     ${suicideStanding}  standTicks ${suicideStandTicks}  suppress ${suicideStandSuppress}`,
+)
 console.log(`selectTarget:        ${target ? `(${target.col},${target.row})` : 'null'}`)
 console.log(`isBaseUnderThreat:   ${input.isBaseUnderThreat()}`)
 console.log(`isThreatState(§88):  ${input.isThreatState()}`)

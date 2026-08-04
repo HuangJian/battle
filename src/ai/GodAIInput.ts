@@ -218,6 +218,36 @@ export class GodAIInput implements InputLike {
    */
   _counterFireTicks = 0
 
+  /**
+   * §116: mid-suicide standing state. When the suicide candidate commits, the
+   * player stands still to take the lethal bullet. It keeps standing ONLY while
+   * a lethal bullet is still approaching within the window; once the bullet is
+   * cancelled (or the player dies+respawns behind its shield), it clears and the
+   * player resumes normal play. Prevents the pathological per-tick re-commit that
+   * froze the player standing forever (found via hard S30: 14.2 commits/run).
+   * AI-internal (not serialized) — same semantics as _campTicks / _campCell.
+   */
+  _suicideStanding = false
+
+  /**
+   * §117: mode-2 (STAND) standing tick counter — how many consecutive ticks
+   * the player has been standing still waiting to die. Capped by
+   * `suicideReturnStandMaxTicks`; when exceeded, the trade aborts and normal
+   * play resumes (a healthy stationary player may simply never get shot).
+   * AI-internal (not serialized) — same semantics as _campTicks.
+   */
+  _suicideStandTicks = 0
+
+  /**
+   * §117: post-timeout re-commit suppress countdown (mode 2). After a STAND
+   * trade aborts via the timeout, the candidate must NOT instantly re-commit
+   * on the next tick — all preconditions (enemy at threat point + base bullet)
+   * may still hold, which would re-freeze the player standing forever. The
+   * suppress keeps normal play for `suicideReturnStandMaxTicks` before the
+   * trade may try again. Same pattern as _antiCampSuppress / _aggCampSuppress.
+   */
+  _suicideStandSuppress = 0
+
   /** Debug: branch counters for profiling. */
   branchCounts = {
     dodge: 0,
@@ -230,6 +260,8 @@ export class GodAIInput implements InputLike {
     chokepoint: 0,
     // M3: survive 候选（主动换位）提交计数（纯观察）。
     survive: 0,
+    // §116: 自杀秒回候选提交计数（纯观察）。
+    suicideReturn: 0,
   }
 
   /**
@@ -433,6 +465,10 @@ export class GodAIInput implements InputLike {
     this._otherTanks = []
     // M3 diag: reset the counter-fire trigger counter per stage.
     this._counterFireTicks = 0
+    // §116/§117: reset the suicide-trade state per stage.
+    this._suicideStanding = false
+    this._suicideStandTicks = 0
+    this._suicideStandSuppress = 0
     // §88: invalidate the throttled chokepoint plan on stage reset.
     this._chokepointPlan = null
     // M3: reset the EnemyModel per stage (same cross-tick-cache discipline as

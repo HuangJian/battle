@@ -53,6 +53,11 @@ export type ActionId =
   // 默认权重 0 = 不激活（byte-identical）；M4 调优经 actionWeights.survive
   // 激活（通常置于 dodge 之下、interceptBase 之上）。
   | 'survive'
+  // 自杀秒回 (suicide quick-return, user request 2026-08-04, §116): when all
+  // 5 preconditions are met, the player embraces death to respawn at the
+  // spawn point closer to a base-threatening enemy. Weight 1100 > dodge 1000
+  // so it suppresses dodging when suiciding is the better base-saving trade.
+  | 'suicideReturn'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -80,6 +85,7 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   pickupLow: 400,
   hunt: 200,
   survive: 0,
+  suicideReturn: 1100,
 }
 
 /**

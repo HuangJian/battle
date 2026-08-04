@@ -28,6 +28,8 @@ export interface SimTask {
    * and aggregation order are unchanged.
    */
   telemetry?: boolean
+  /** Return `suicideReturnCommits` (§116/§117 A/B trigger-rate probe). */
+  commitCounts?: boolean
 }
 
 export interface SimTaskResult {
@@ -41,6 +43,8 @@ export interface SimTaskResult {
   lives?: number
   firstKillTick?: number
   telemetry?: RunTelemetry
+  /** Suicide-trade commit ticks (only when the task requested commitCounts). */
+  suicideReturnCommits?: number
 }
 
 declare var self: Worker
@@ -57,6 +61,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       maxTicks: task.maxTicks,
       sampleInterval: 60, // same as the serial path (metrics are discarded)
       telemetry: task.telemetry === true,
+      commitCounts: task.commitCounts === true,
     })
     msg = {
       id: task.id,
@@ -70,6 +75,9 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       msg.lives = result.finalState.lives
       msg.firstKillTick = result.firstKillTick
       msg.telemetry = result.telemetry
+    }
+    if (task.commitCounts === true) {
+      msg.suicideReturnCommits = result.suicideReturnCommits
     }
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }

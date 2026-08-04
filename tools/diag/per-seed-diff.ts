@@ -25,7 +25,7 @@ import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { CELL } from '../../src/constants'
+import { CELL, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { STAGES } from '../../src/config/stages'
 import { readFileSync } from 'fs'
@@ -53,11 +53,23 @@ function dump(stageIdx: number, seed: number): void {
   const stage = STAGES[stageIdx]
   // Fresh copy — --set mutates params below, never touch the shared default.
   const godAIParams = { ...DEFAULT_GOD_AI_PARAMS }
+  let difficulty = 'classic'
+  let maxTicks = 18000
   // Generic param override (dump mode only): --set <key>=<value>, repeatable.
   // Any numeric GodAIParams key — future diagnostics need no tool changes.
   // Param-specific hardcoded flags (--steelOcclusion / --noCounterFire /
   // --brickGate) are deliberately unsupported; see progress doc §0.C rule 2.
   for (let ai = 0; ai < process.argv.length; ai++) {
+    if (process.argv[ai] === '--difficulty') {
+      const d = process.argv[ai + 1]
+      if (d && DIFFICULTIES[d]) difficulty = d
+      continue
+    }
+    if (process.argv[ai] === '--max-ticks') {
+      const n = Number(process.argv[ai + 1])
+      if (Number.isInteger(n) && n > 0) maxTicks = n
+      continue
+    }
     if (process.argv[ai] !== '--set') continue
     const kv = process.argv[ai + 1]
     if (!kv || !kv.includes('=')) {
@@ -75,9 +87,14 @@ function dump(stageIdx: number, seed: number): void {
   }
   const world = new World()
   world.rng.reseed(seed)
-  world.difficultyKey = 'classic'
-  world.difficulty = DIFFICULTIES['classic']
-  world.rules = RULES['classic'] ?? DEFAULT_RULES
+  world.difficultyKey = difficulty
+  world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
+  world.rules = RULES[difficulty] ?? DEFAULT_RULES
+  // §105 sync: mirror startGame()'s P1 init (hard/chaos ship
+  // playerStartLevel=1 / startLives=2 — without this the dump simulates
+  // level 0 / 3 lives and cannot reproduce hard/chaos runs).
+  world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+  world.lives = world.difficulty?.startLives ?? START_LIVES
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const input = new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
@@ -87,7 +104,6 @@ function dump(stageIdx: number, seed: number): void {
   world.loadStageData(stage, 0)
   input.reset()
 
-  const maxTicks = 18000
   for (let tick = 0; tick < maxTicks; tick++) {
     sim.tick()
     input.endFrame()

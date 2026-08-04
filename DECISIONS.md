@@ -1149,3 +1149,69 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - **方法论闭环**：screening fitness 代理必须等于官方口径（全 35 关）；搜索最优解必须过「剥离 game-feel 参数」+「60-seed 全量 + 逐关 margin」+「性能微基准」三重闸门才可发布。
 - pool/instant 双默认机制确立：新增 pool 行为参数 = 写 DEFAULT + 还原表 + 门禁真值重生成（classic 靠还原表保字节）。
 - 发布路径（DEFAULT 默认参数，浏览器真实行为）= 60-seed 验证路径，无口径偏差。
+## 116. 自杀秒回（suicide quick-return）：实现 + 诚实阴性（2026-08-04）
+
+**Decision:** 新增 God AI 决策候选 `suicideReturn`（DecisionCore `ActionId` 权重 1100，高于 dodge 1000），默认 **OFF**（`suicideReturnMode=0`，字节持平）。当 5 个前置条件同时满足时，player 站立饮弹、无闪避、立即在出生点重生以处理基地威胁。新文件 `src/ai/god/SuicideReturn.ts`；新参 `suicideReturnMode / BulletTimeTicks(60) / EnemyDistTicks(300) / MinLives(2) / SpawnDistCells(6)`。
+
+**5 前置条件（对应任务）：** ①敌人处威胁点（可直击基地）；②出生点能处理该敌（0-1 转直击 或 出生点比 player 当前位更近）；③player 库存命数充足；④player 全速亦需 >5s 才够到该敌；⑤1s 内被致命弹命中（扫描所有敌方子弹，非仅最近 ctx.threat）。
+
+**验证（60-seed A/B，hard 全 35 关逐档）：**
+- 无 base 威胁守卫版本（仅按任务 5 条）：hard 子集 **net -1 flips**（S23 seed14 回归）——player 在基地其实不会沦陷时盲目自杀换命属浪费。per-seed tick-diff 定位：OFF 臂（不自杀）dodge+存活并胜出，ON 臂自杀丢命后仍保不住基地。
+- **根因**：God AI 自身防御（基地护墙 + T8 拦截）已能处理基地威胁，故「主动换命换位置」绝大多数时候是负资产。
+- **修复**：加 base「活跃子弹威胁」守卫（`findBulletThreatToBaseImpl` 非空才触发）+ `_suicideStanding` 站立状态机（防 S30 每 tick 冻结，284→5 次/run）。修复后 hard 全 35 关 25-seed A/B **净 +0 flips（0 to-win / 0 to-lose，全程 tied）**——安全无回归，但触发率降至 0.3%，不提升过关率。
+
+**Rationale:**
+- 任务期望「全面提升过关率」未达成：现有防御已兜底基地危局，强制自杀无法净增益；守卫版本保安全（不劣化基线）。
+- 保留开关默认 OFF = 保持 91.2/53.0/56.6 基线字节不变（AGENTS §2.3 确定性承诺）。
+- 接受诚实阴性：这符合本项目「诚实阴性优先发布」惯例（§39/§96/§112 等）。
+
+**Implications:**
+- 策略完整实现、单测 30 项覆盖（辅助函数 + 候选端到端 9 场景）、typecheck/lint/format 绿。
+- 待真正提升基地危机处理，应优先改进 base 防守行为本身（如已 SHIPPED 的 M13 站位），而非强制自杀换命。
+- 诊断工具保留：`tools/diag/ab-diff.ts`（跨难度 A/B）、`tools/diag/diag-suicide*.ts`（频率/条件瓶颈/事件日志）。
+## 117. 自杀秒回条件①变体（mode 2 STAND / mode 3 CHARGE）：诚实阴性（2026-08-04）
+
+**Decision:** 按取证建议重启 §116——把触发条件从条件⑤（濒死）改挂到条件①（敌人进入威胁点），新增两个变体：`suicideReturnMode=2`（STAND：站立等弹，超时 `suicideReturnStandMaxTicks=300` 兜底 + 超时后 `_suicideStandSuppress` 防重提交）与 `=3`（CHARGE：不闪避、直线冲锋威胁敌）。均**保留**基地活跃子弹守卫（S23 修复）。默认仍 OFF（mode=0，字节持平）。新增参数仅 `suicideReturnStandMaxTicks`。
+
+**实现要点：**
+- 健康 player 无法靠「站立饮弹」快死（pool 229HP 需 2-3 发），故 mode 2 用超时兜底、mode 3 主动赴死——两者都避免 §116 S30 站立冻结病理（单元测试抓到 mode 2 超时后立即重提交的二次冻结，用 suppress 修复）。
+- 执行中交易用弱检查 `anyThreatPointEnemyImpl`（仅条件①）而非全量前置——冲锋/站立中途不会因 player 已拉近距离而中止。
+
+**验证（A/B：35 关 × 120 seeds × {hard, chaos}，36000 ticks，官方口径 no-stageIndex，3 臂并行，~8 min/15 workers）：**
+- 触发率：mode 2/3 均 **378/4200 runs（hard 9.0%）**、**539/4200（chaos 12.8%）**——比 §116 mode 1 的 0.3% 高约 **30-40 倍**，交易确实发生（非「从未触发」的假阴性）；平均每次交易仅 ~36-39 ticks（0.6s），多数以死亡/威胁解除快速收场。
+- 翻转：**B hard net +1（7胜/6负）、B chaos net +0（11/11）、C hard net -2（3/5）、C chaos net +3（12/9）**——8400 runs 上净翻转 ±3，全部在二项噪声带内（±3 ≈ 0.1σ，可忽略）。
+- 基地防守：base_destroyed Δ vs A = **-1 / +0 / +2 / -3**（4200 runs 的 0.05-0.07pp）——无结构性改善。
+
+**Rationale:**
+- 即使触发率放大 30-40 倍、让交易真实发生，过关率与基地失守率依旧纹丝不动——确认 §116 阴性是**机制性**的，不是「触发太少」：击毁弹出膛→命中基地中位 14-15 ticks（0.24s），交易（饮弹→死亡→重生→护盾→转向→开火）物理上追不上；且健康 player 换命是净成本而非免费交易。
+- 按 §88 方法论：净翻转在噪声带内 = 不发布。维持默认 OFF。
+
+**Implications:**
+- 自杀换命路线（⑤或①触发）至此双路证伪；基地防守的正确方向仍是站位/覆盖类改进（M13 站位、§88 据守、收掉 27 局 player 自毁）。
+- 工具沉淀：`tools/diag/ab-suicide-v2.ts`（三臂并行 A/B，含触发率 + 结果分类修复）、sim-worker/runner 新增 `commitCounts` 可选遥测（默认关，字节持平）。
+- 实现与 10 项新单测（mode 2/3 触发、超时、防重提交、威胁解除清除、shielded 清除、mode1 对照）均绿。
+
+**追加取证（FLIP-TO-LOSE 种子 per-seed-diff + decision-probe，2026-08-04）：** chaos S10 seed 17/46（B、C 均输）与 hard S35 seed 8（B、C 均输），6 个翻转全部是 base_destroyed。三个种子、六个臂对的首次分歧 tick 全部锚定在自杀交易的 commit tick，机制可归纳为三条、同根：
+1. **冻结劫持（STAND）**——hard S35 s8 t2361 / chaos S10 s17 t2083：基地**满血 120/120** 时第一发基地弹 + 威胁点敌人即触发；commit 把 `_moveDir=null`+`_fire=false`，player 在远离基地处原地冻结。冻结期间基地被打（S35：120→84/39 ticks），player 失去位置（滞留 1-5 行、hp 243→29），基地 t3103 沦陷；A 臂（不触发）继续回防清关（t8370）。
+2. **开火抑制级联（两 mode 通用）**——chaos S10 s46 t2375/2874、s17 t4995：每个 commit tick 都压掉一枪（`_fire=false`），整局累计 30-89 个 commit tick（A 臂 t2a 计数 287/307 vs B/C 272/292），每次延迟一 tick 的击杀顺序级联（diff 可见 e3/e4、pb0/pb1 的单 tick 漂移），把必赢局拖成基地失守。
+3. **冲锋劫持（CHARGE）**——hard S35 s8 t2361：不冻结而是朝（错误的）威胁敌横切，同样抛弃回防路径。
+
+**根因（与 §116 S23 同源、放大 30-40 倍）：** 条件①+单弹守卫在「基地仍可防守」（满血 + 防守计划在跑）时即触发——**一发在飞基地弹不是基地沦陷的证据**（120 HP 缓冲 + A 臂自身的回防/据守能化解同一威胁）。§116 mode 1 安全只因条件⑤让命近乎免费且触发率 0.3%；mode 2/3 去掉成本保护却没加任何「基地必死」证据，于是以健康一条命 + 抛弃正在生效的防守去赌博 ~40 次，净效果为零（A/B 翻转散乱、净 ±0-3 正是两条机制对冲的写照）。
+
+## 118. §117 守卫升级（baseHp 阈值 + 防守位失守）A/B — 仍为诚实阴性，机制性证伪（2026-08-04）
+
+**Decision:** 按根因修复方向（守卫只验证了「有一发弹在飞」，未验证基地真会沦陷），为 mode 2/3 增加两个严格死局守卫参数（默认 0，字节持平）：`suicideReturnBaseHpFrac`（基地 HP ≤ 该比例 × baseMaxHp 才触发）与 `suicideReturnDefendDistCells`（player 距基地超过该格数=防守位失守才触发）。A/B 工具新增 `--strict` 臂 D（mode2+strict）/ E（mode3+strict），参数可调（默认 0.5 / 8 格）。
+
+**验证（120 seeds × 35 关 × {hard, chaos}，5 臂 42000 sims，36000 ticks）：**
+- 触发率降约 38%：hard 378→236 runs、chaos 539→350 runs——满血基地 + 有防守的假阳性被过滤（§117 hard S35 s8 的 FLIP-TO-LOSE 已消失）。
+- 但净翻转**未转正**：hard D +1（1胜/0负）/ E +0（0/0）；chaos D −1（0/1）/ E −2（0/2）。跨难度净 = D 0、E −2。B/C 复现上一轮数字逐位一致（确定性）。
+- 关键证据：chaos S15 seed 114 在所有四臂（B/C/D/E）都 base_destroyed——严格臂在该 seed 也 commit（6 ticks），即在「基地濒死 + player 远」的最理想时点执行交易，基地仍在交易延迟内沦陷。chaos S2 seed 73：D（站立）8 commits 存活，E（冲锋）8 commits 反而新增一个 B/C 没有的 base_destroyed 翻转。
+
+**Rationale:**
+- 「加死局证据」假设被否：即便只在基地真会沦陷时交易（低 HP + 无法回防），**0.24s 击毁弹窗 vs 0.5-1s 饮弹-重生延迟**的机制鸿沟不变——交易执行的恰恰是最需要防守的窗口，基地在交易延迟内照常沦陷。第三条独立证据链（⑤触发 §116、①触发 §117、①+死局证据 §118）全部归于同一条物理结论：换命回城在时间上不可能救基地。
+- 保留默认 OFF（mode=0 字节持平）；mode 1/2/3 及其默认参数行为逐字节未变（守卫 param>0 才激活）。
+
+**Implications:**
+- 自杀换命路线三路证伪收官。基地防守的正确抓手仍是**位置/火力类改进**（M13 全场压力撤退、§88 据守咽喉、清除残留的 27 局 player 自毁基地——基地护墙开火守卫，性价比最高）。
+- 新参数作为可调 A/B 旋钮保留（`--base-hp-frac` / `--defend-dist`），若未来敌人模型/时间窗改动（如子弹减速）使换命窗口可行，可复用。
+- 单测 46 项（新增 6 项严格守卫：满血拒绝/低血触发/近基地拒绝/远基地触发/mode3 对照/默认惰性）全绿；`bun run check` 全绿。

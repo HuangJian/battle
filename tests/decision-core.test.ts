@@ -23,6 +23,7 @@ describe('M1 decision-chain invariants', () => {
 
   it('the actions match the documented M1 chain + M3 survive', () => {
     expect(CANDIDATES.map((c) => c.id)).toEqual([
+      'suicideReturn',
       'dodge',
       'interceptBase',
       'pickupHigh',
@@ -34,6 +35,9 @@ describe('M1 decision-chain invariants', () => {
       'survive',
     ])
     expect(ACTION_WEIGHTS).toEqual({
+      // §116: suicideReturn 1100 > dodge 1000 — suppresses dodging when
+      // suiciding is the better base-saving trade. Default OFF (mode=0).
+      suicideReturn: 1100,
       dodge: 1000,
       interceptBase: 900,
       pickupHigh: 800,

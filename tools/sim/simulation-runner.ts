@@ -149,6 +149,8 @@ export interface SimResult {
   failure?: FailureTaxonomy
   /** v6 evaluation telemetry (only when `telemetry: true`). */
   telemetry?: RunTelemetry
+  /** Suicide-trade commit ticks (only when `commitCounts: true`). */
+  suicideReturnCommits?: number
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../../src/snapshot/types').WorldSnapshot
@@ -202,6 +204,13 @@ export interface RunOptions {
    * Default false — when off, the run path is byte-identical to before.
    */
   telemetry?: boolean
+  /**
+   * Return `input.branchCounts.suicideReturn` — the total suicide-trade
+   * commit ticks for the run (§116/§117 A/B trigger-rate probe). Read-only
+   * observation, no RNG, no gameplay effect. Default false (off → no extra
+   * work, byte-identical run).
+   */
+  commitCounts?: boolean
 }
 
 // ============================================================
@@ -556,6 +565,10 @@ export function runSimulation(opts: RunOptions): SimResult {
     difficulty,
     firstKillTick,
     failure,
+  }
+
+  if (opts.commitCounts === true) {
+    result.suicideReturnCommits = input.branchCounts.suicideReturn
   }
 
   if (wantTelemetry) {

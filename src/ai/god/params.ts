@@ -968,6 +968,91 @@ export interface GodAIParams {
 
   /** M13: min player dist-to-base (cells) for the retreat. */
   outnumberedFieldDistCells: number
+
+  // ---- 自杀秒回 (suicide quick-return, user request 2026-08-04, §116/§117) ----
+  /**
+   * 0 = OFF (byte-identical to pre-§116). 1 = §116 original — trigger on
+   * condition ⑤ (a LETHAL bullet hits within suicideReturnBulletTimeTicks;
+   * the player is about to die anyway, so the life-trade is nearly free).
+   * 2 = §117 condition-① variant, STAND — trigger when an enemy is at a
+   *   threat point while a bullet is actively flying at the base; the player
+   *   stands still and waits to be killed, with a suicideReturnStandMaxTicks
+   *   timeout (resumes if no death comes). 3 = §117 condition-① variant,
+   *   CHARGE — same trigger, but the player actively drives at the threat
+   *   enemy (no dodging) to die fast and respawn near the base, or to kill
+   *   the enemy first; whichever happens first ends the trade.
+   *
+   * The shared preconditions (checked in the SUICIDE_RETURN candidate,
+   * think.ts; condition ⑤ only for mode 1):
+   *   1. An enemy is at a threat point (can directly shoot the base).
+   *   2. The player's spawn point can hit that enemy (immediately or 1 turn).
+   *   3. The player has spare lives (lives ≥ suicideReturnMinLives).
+   *   4. The player is too far from that enemy (> suicideReturnEnemyDistTicks
+   *      at full speed — the player can't save the base by running back).
+   *   5. (mode 1 only) A lethal bullet will hit the player within
+   *      suicideReturnBulletTimeTicks (dodging is futile or the player is
+   *      about to die anyway — trade the life for a better position).
+   *   GATE (all modes): a bullet is actively flying at the base
+   *   (findBulletThreatToBaseImpl) — the S23 seed-14 regression fix.
+   */
+  suicideReturnMode: number
+  /** Max ticks for the lethal bullet to reach the player (default 60 = 1s). */
+  suicideReturnBulletTimeTicks: number
+  /** Min ticks the player would need at full speed to reach the threat enemy
+   * (default 300 = 5s). If the player can reach it faster, no suicide. */
+  suicideReturnEnemyDistTicks: number
+  /** Min lives required (default 2 = at least 1 spare life beyond the current).
+   * When the player dies, lives-- then respawn only if lives > 0, so lives
+   * must be ≥ 2 before death to guarantee a respawn. */
+  suicideReturnMinLives: number
+  /**
+   * Spawn-point usefulness margin for the suicide return (condition 2). The
+   * spawn must be able to deal with a threat enemy in time — either a clear
+   * 0-1-turn shot (spawnCanHitEnemyImpl) OR within this many Manhattan cells
+   * of the enemy (respawn puts the player close enough to reach it fast with
+   * its 3s shield). Strict 0-1-turn geometry is rare on real stages (base
+   * walls/topology), so the distance fallback makes the strategy fire where
+   * it genuinely helps. Larger = more permissive (respawn more often); 0 = the
+   * distance fallback is disabled (only the strict 0-1-turn shot counts).
+   */
+  suicideReturnSpawnDistCells: number
+  /**
+   * Mode-2 (STAND) standing timeout in ticks (default 300 = 5s). The player
+   * stands still waiting to be killed for at most this many ticks; if no
+   * death comes (nobody shoots the stationary player), it resumes normal
+   * play instead of freezing forever (the §116 S30 standing-freeze
+   * pathology, moved to the healthy-player case). Only used when
+   * suicideReturnMode === 2.
+   */
+  suicideReturnStandMaxTicks: number
+
+  // ---- §118: strict-doom guard for modes 2/3 (baseHp + defense-lost) ----
+  /**
+   * §118: base-HP doom threshold for modes 2/3, as a FRACTION of baseMaxHp.
+   *
+   * Root cause of the §117 flip losses: the condition-① trade committed while
+   * the base was at FULL HP with the normal defense (T8 intercept / 据守 /
+   * return) still running — one in-flight bullet is NOT proof the base will
+   * fall (hard S35 seed-8: base 120/120, the OFF arm returned and cleared;
+   * the ON arm abandoned the defense and lost). When > 0, modes 2/3 require
+   * baseHp ≤ this fraction × baseMaxHp — the base is genuinely a hit or two
+   * from falling, so trading a life for a respawn near it is a true last
+   * resort. 0 = disabled (byte-identical to §117).
+   *
+   * Pool-model oriented (hard/chaos). On classic (baseMaxHp = 1) any positive
+   * fraction < 1 is unsatisfiable, which safely disables the trade there.
+   */
+  suicideReturnBaseHpFrac: number
+  /**
+   * §118: defense-position-lost distance for modes 2/3 (Manhattan cells).
+   *
+   * When > 0, the trade only commits when the player is farther than this
+   * from the base — i.e. the player CANNOT return in time to intercept the
+   * in-flight base bullet (measured: killer-bullet travel to base is 14-15
+   * ticks ≈ 0.24s). A close player must NOT abandon a working defense
+   * position for a gamble. 0 = disabled (byte-identical to §117).
+   */
+  suicideReturnDefendDistCells: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1275,6 +1360,19 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // even with the retreat weakened.
   outnumberedFieldEnemies: 4,
   outnumberedFieldDistCells: 26,
+  // 自杀秒回 (suicide quick-return, §116/§117): default OFF — A/B tested
+  // (per-seed tick-diff + §117 forensics) before enabling, per the §88
+  // methodology. When ON, the player trades a life for a better position to
+  // save the base.
+  suicideReturnMode: 0,
+  suicideReturnBulletTimeTicks: 60, // 1s
+  suicideReturnEnemyDistTicks: 300, // 5s
+  suicideReturnMinLives: 2, // at least 1 spare life
+  suicideReturnSpawnDistCells: 6, // spawn within 6 cells of the threat enemy
+  suicideReturnStandMaxTicks: 300, // 5s — mode-2 standing timeout
+  // §118 strict-doom guard (modes 2/3): 0 = OFF — A/B tested before enabling.
+  suicideReturnBaseHpFrac: 0, // base must be at/below this × baseMaxHp
+  suicideReturnDefendDistCells: 0, // player must be farther than this from base
 }
 
 /**
