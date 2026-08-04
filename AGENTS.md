@@ -221,6 +221,18 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 > not silently skip tests. For exhaustive runs use `bun test` or `bun run check`
 > (both always run the full suite). `tools/runner.ts` holds the shared
 > `spawnCapture`/`gitChangedFiles`/result-printing helpers used by that runner.
+>
+> **Heavy gate/integration tests are excluded by default.** The fast runner skips
+> tests that run hundreds–thousands of full-game simulations (the God-AI gates
+> `god-ai-hard-chaos-gate`, `god-ai-regression-gate`, and `calibration`) because
+> they take minutes and defeat the token/time-saving purpose. On a clean tree
+> `bun run test` therefore runs the ~fast suite in a few seconds rather than ~1
+> minute. Pass `--heavy` (`bun run test --heavy`) or use the bare `bun test` to
+> include them. Keep the `HEAVY_TESTS` list in `tools/test-silent.ts` in sync with
+> measured wall-time — add any test file whose standalone run exceeds a few seconds.
+> Note: because these gates are standalone files (not basename-matched to source
+> changes), they are essentially only exercised by `bun test` / `--heavy`; if a God
+> AI change is landing, run `bun test` before committing to validate the floors.
 
 ### NEVER start the dev server to validate changes
 

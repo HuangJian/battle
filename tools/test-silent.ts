@@ -15,7 +15,13 @@
  * Usage:
  *   bun tools/test-silent.ts                 # auto-scope to local changes
  *   bun tools/test-silent.ts --strict        # exit clean (no tests) if nothing maps
+ *   bun tools/test-silent.ts --heavy         # also run heavy gate/integration sims
  *   bun tools/test-silent.ts -- fileA.test.ts fileB.test.ts   # explicit files
+ *
+ * Heavy gate/acceptance tests (those that run hundreds–thousands of full-game
+ * simulations, e.g. the God-AI 1400-game gates) are EXCLUDED by default — they
+ * take minutes and defeat the runner's token/time-saving purpose. Run them
+ * deliberately via `bun test` or `bun run test --heavy`.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
@@ -35,6 +41,25 @@ interface Failure {
 
 const TEST_RE = /\.test\.(ts|tsx|js|jsx)$/
 const SKIP_RE = /^(tmp|node_modules|dist|\.git)([\\/]|$)/
+
+/**
+ * Heavy "gate"/acceptance tests that run full-game simulations (hundreds–thousands
+ * of sims) and take minutes. Excluded from the fast scoped runner by default;
+ * run them deliberately with `bun test` or `bun run test --heavy`. Keep this list
+ * in sync with the measured wall-time of the suite (see per-file profiling).
+ */
+const HEAVY_TESTS = new Set<string>([
+  'god-ai-hard-chaos-gate', // ~50s: 2 difficulties × 35 stages × 20 seeds × 18000 ticks
+  'god-ai-regression-gate', // ~6s: classic 700-sim gate
+  'calibration', // ~2.5s: CMA-ES calibration sweep
+])
+
+function isHeavyFile(path: string): boolean {
+  // baseName keeps the `.test`/`.spec` infix (needed for src→test mapping), so
+  // strip it here to match the HEAVY_TESTS basenames.
+  const base = baseName(path).replace(/\.(test|spec)$/, '')
+  return HEAVY_TESTS.has(base)
+}
 
 /** Enumerate every test file in the repo (repo-relative, forward slashes). */
 function allTestFiles(cwd: string): string[] {
@@ -178,6 +203,8 @@ export interface SilentTestOptions {
   files?: string[]
   /** If true, run nothing (and report clean) when no tests map to changes. */
   strict?: boolean
+  /** If true, include heavy gate/integration sim tests that are skipped by default. */
+  heavy?: boolean
   timeoutMs?: number
 }
 
@@ -216,6 +243,20 @@ export async function runSilentTest(
         ? `fallback:all (${changed.length} changed file(s) mapped to no tests)`
         : 'all (clean tree)'
     }
+  }
+
+  // By default, exclude heavy gate/integration acceptance sims (e.g. the God-AI
+  // 1400-game gates) — they take minutes and defeat the runner's token/time-saving
+  // purpose. They still run via `bun test` or when `--heavy` is passed. Heavy
+  // tests are never filtered when the caller passed explicit files (user intent).
+  let skippedHeavy = 0
+  if (!opts.heavy && !(opts.files && opts.files.length)) {
+    const before = files.length
+    files = files.filter((f) => !isHeavyFile(f))
+    skippedHeavy = before - files.length
+  }
+  if (skippedHeavy > 0) {
+    mode += `, skipped ${skippedHeavy} heavy gate/integration test(s) (use --heavy)`
   }
 
   // Drop files that no longer exist (e.g. a deleted test file still in git diff).
@@ -260,9 +301,18 @@ const isMain: boolean = (import.meta as { main?: boolean }).main === true
 if (isMain) {
   const argv = process.argv.slice(2)
   const strict = argv.includes('--strict')
-  const sep = argv.indexOf('--')
-  const explicit = sep >= 0 ? argv.slice(sep + 1) : []
-  const result = await runSilentTest({ cwd: CWD, label: 'local tests', files: explicit, strict })
+  const heavy = argv.includes('--heavy')
+  // Collect non-flag positional args as explicit files. `--` is only a separator;
+  // `bun run` strips it when invoked as `bun run test -- file`, so we must not
+  // rely on it being present.
+  const explicit = argv.filter((a) => a !== '--' && a !== '--strict' && a !== '--heavy')
+  const result = await runSilentTest({
+    cwd: CWD,
+    label: 'local tests',
+    files: explicit,
+    strict,
+    heavy,
+  })
   if (result.ok) {
     console.log(`✓ ${result.summary}`)
     process.exit(0)

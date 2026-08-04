@@ -57,8 +57,9 @@ echo " ▸ tests (bun run test — scoped to local changes)"
 # Uses `bun run test`, which is aliased to the scoped silent runner
 # (tools/test-silent.ts). It runs only the tests related to the staged/working
 # changes (and prints only failure logs) for a fast commit gate. Falls back to
-# the full suite when nothing maps, unless the repo root has a `tools/test-silent.ts`
-# invocation of `--strict`.
+# the fast suite when nothing maps (excluding heavy gate/integration sims such as
+# the God-AI gates and calibration — those still run via `bun test` / `--heavy`).
+# Re-run `bun test` before committing a God-AI change to validate the gate floors.
 "$BUN" run test
 
 echo " ▸ format check (oxfmt --check)"
