@@ -685,7 +685,14 @@ export class TacticalIntelligence {
     // No destructible wall on either side — genuinely boxed; leave as-is.
   }
 
-  /** Terrain-only step check along `dir` (ignores transient tank blocks). */
+  /** Terrain-only step check along `dir` (ignores transient tank blocks).
+   *
+   * (perf §126, REJECTED) Hand-inlining World.isInBounds + rectHitsTerrain
+   * here (the rect is always a CELL-aligned 64×32, so the Math.floor calls
+   * and the OOB branch are provably redundant) measured NEUTRAL-to-slower
+   * across 3 runs. `rectHitsTerrain` is called from four hot sites and stays
+   * fully JIT-warm; a private copy of its loop is not faster and only splits
+   * the type feedback. Same lesson as §123 — leave it as a plain call. */
   private canStepLat(world: World, tank: Tank, dir: Direction): boolean {
     const v = DIR_VECTORS[dir]
     const gx = snap(tank.x, CELL)

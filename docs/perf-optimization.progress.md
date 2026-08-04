@@ -7,16 +7,16 @@
 
 ## 0. 当前基线
 
-**标准测量场景**: `classic / 全 35 关 / 各 10 games / warmup=2`
+**标准测量场景**（§128，2026-08-05 起）: **三难度各 1/3** — `classic / hard / chaos` × 全 35 关 × 各 10 games / warmup=2（每难度各 350 场，共 1050 场）
 
-**复现命令**: `bun tools/perf/bench-all-stages.ts`
+**复现命令**: `bun tools/perf/bench-all-stages.ts`（默认三难度；`--diff=classic|hard|chaos` 限单难度，恢复 pre-§128 行为）
 
-> 该 profile 跨越 35 个不同地形/敌人分布的关卡，覆盖 classic 难度下 None 层 AI、GodAI 主循环、碰撞、寻路、火控的全部代码路径，比单关场景更能反映真实调参负载。
+> 该 profile 跨越 35 个不同地形/敌人分布的关卡 × 三个难度，覆盖 classic（replanInterval=50、None 层 AI 占比高）与 hard/chaos（replanInterval=1、GodAI 重负载、pool 战斗 HP 缓冲）的全部代码路径。§127 证明 classic-only 基线会隐藏 God-AI 主导路径上的收益（chaos −27~32% 在 classic ±2% 噪声下不可见），因此三难度各 1/3 是更诚实的基线。
 >
 > **关键指标**：
-> - `wall(ms)` — 总 wall time（主指标，越小越好）
+> - `wall(ms)` — 总 wall time（主指标，越小越好；含分难度小计 + 占比）
 > - `perTick(ms)` — 平均每 tick 耗时（用于跨场景对比）
-> - `ticks / win / go / timeout` — 确定性签名，优化前后必须一致（或胜率一致）
+> - `ticks / win / go / timeout` — 确定性签名，优化前后必须一致（或胜率一致）；签名按难度分别记录
 
 **历史基线汇总**:
 
@@ -25,9 +25,11 @@
 | Round 7 (f2a91fa) | 2731ms | 0.0022ms | dirty-flag 前基线 |
 | Round 8 (60696d7) | 2568-2610ms | 0.0021ms | dirty-flag + switch-weight |
 | Round 9 | 2364ms | 0.0019ms | nav-cache + mines-flag（warmup=2，签名放宽至胜率） |
-| **当前** | **2531ms** | **0.0020ms** | warmup=2 固化，与 Round 9 同量级（系统负载差异） |
+| **当前（2026-08-05 同机 A/B）** | **HEAD 3211/3289ms → WIP 2988/3219/3133ms** | **0.0027-0.0028ms** | Round 10（§122-§126）落地后；字节级确定性 |
+| **Round 11（§127 replan 缓存）** | **chaos 缓存开 −27.0% / −31.6%**；classic ±2% 噪声 | chaos 0.0054-0.0055 vs 0.0075-0.0079 | replanCache 默认 1；classic 签名 `ticks=1169769 win=317/350` 字节一致 |
+| **Round 12（§128 三难度基线）** | 三难度合计 ~22.6s；classic 3.5s(16%) / hard 9.6s(42%) / chaos 9.5s(42%) | 合计 0.0049 | 标准场景 = classic/hard/chaos 各 1/3；分难度签名见 §2.12 |
 
-**确定性签名**: `ticks=1291545 win=297/350`（Round 9+ 胜率一致，非字节一致；RNG 调用顺序变化导致 ticks 偏移，胜率稳定）
+**确定性签名**（§128 起按难度记录）: classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`（各与单难度 baseline/§127 A/B 一致）。Round 9 时代签名 `ticks=1291545 win=297/350` 已随 §104–§121 godai 特性（M6 一星、M13 站位、§121 自毁守卫等）陈旧。
 
 ---
 
@@ -253,6 +255,73 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 | Round 8 (60696d7) | 2568ms | -6.0% |
 | Round 9 | 2364ms | **-13.4%** |
 
+### 2.9 Round 10：Within-tick memo 族 + Chokepoint 对齐枚举（~4% wall，字节级确定性）
+
+**日期**: 2026-08-05
+**同机 A/B**: HEAD（无 WIP）3211/3289ms → WIP（§122-§126）2988/3219/3133ms（均值 ~3113ms，~4%；热噪声 ±5-10%，方向为正）。**确定性签名字节一致**：`ticks=1169769 wins=317/350` 两侧完全相同。
+
+| 优化 | 文件 | 说明 |
+|------|------|------|
+| **computeThreatPoints 对齐枚举** | `ai/god/Chokepoint.ts`（§122） | `canShootBaseFrom` 只对 col===12 / row∈{24,25} 返回 true——只枚举对齐格，676 次调用中 ~600 次早退归零；push 顺序逐字节一致 |
+| **scanAheadImpl per-tick memo** | `ai/god/FireControl.ts` + `ai/GodAIInput.ts`（§123） | 4 个 per-direction 缓冲兼作 memo（`_scanCacheMask` 按原点+方向位）；同 tick 内重复扫描（shouldFireInDir/候选/ThreatAssessor 同原点同方向）直接命中。endFrame 每 tick 清。scanAheadImpl self-time ~9% → ~0.5-1.7% |
+| **selectTarget within-tick memo** | `ai/god/StrategyPlanner.ts` + `ai/GodAIInput.ts`（§125） | HUNT 同 tick 2-3 次冗余查询去重；`_selTargetBuf` 稳定结果格消除 _tankCellBuf 别名风险 |
+
+**字节等价的关键前提**（§123 注释内核对）：
+- think() 每 tick（runner 每 tick 调 endFrame）或每帧至多一次（浏览器 `_thought` 守卫）执行；期间 World 不被修改（One Author §2.1）。
+- memo 生命周期严格在单 tick 内——**零陈旧**，与 §68 否决的 cross-tick 缓存（0.5s 陈旧崩 S6）粒度不同。
+- 均不耗 RNG、不改变调用次数。
+
+**否决并留注释（诚实阴性）**: rectHitsTerrain 比较链重排/terrain 短路（+4.5% 更慢，§124）、canStepLat 手内联（中性偏慢，§126）——与 §14.4 同教训：不要对抗 V8 的比较链折叠与 JIT 类型反馈。
+
+**新方向测量（未采纳）**: pickup 可达性 A*（findPowerUpTargetImpl/Urgent 每 tick 对范围内道具跑 1-2 次 findPath）关停探针（pickupPriorityMode=0，90 games chaos/stage0）perTick 0.00584→0.00610ms 反而上升——不捡星→游戏变长→敌人 AI 成本增加，非优化方向。
+
+### 2.10 findPath 调用分布研究（2026-08-05，插桩计数，测后回退）
+
+**动机**: chaos profile 中 findPath 为 #1 热点（17%）。为判断「跨 tick 缓存 / 节流」哪个方向值得 A/B，临时给 findPath 加调用点 tag 计数（`nav`/`replan`/`choke`/`pickup`，测后完全回退），跑双场景：
+
+| 调用来源 | chaos/stage0 90 games | classic/35 350 games | 说明 |
+|----------|----------------------|----------------------|------|
+| **replan**（followPath→replanImpl 走廊） | **198,064（78.9%）** | **53,809（41.7%）** | 每 tick 全量 A*，`replanInterval: 1` |
+| **replan-dig**（同上 dig 回退） | 24,897（9.9%） | **40,495（31.3%）** | classic 砖墙多，dig 占比高 |
+| pickup（powerUpCellReachable） | 20,871（8.3%） | 25,594（19.8%） | 每 tick 每范围内道具 1-2 次 |
+| choke（enemyThreatPath） | 3,211（1.3%） | 3,174（2.5%） | 30-tick 节流，每敌×最近4威胁点 |
+| nav（navigateTowards） | 3,918（1.6%） | 6,051（4.7%） | §68 已跨 tick 缓存，仅 miss 计数 |
+| **合计** | **250,961（0.52 次/tick）** | **129,179** | |
+
+**根因**: `followPathImpl` 每 tick 调 `replanImpl`（`replanInterval` 默认 **1**），而 replanImpl 的 A* **无缓存**——§68 的跨 tick 缓存只加在了 `navigateTowardsImpl`（think 的次级分支：道具追击/T8 拦截/aggressive），主导航分支（think.ts 223/504/910）的 followPath→replan 路径被遗漏。**replan+replan-dig 占 findPath 的 73-89%。**
+
+**关键优势（与 §68 的 navigateTowards 缓存不同）**: `replanImpl` 全链 **不耗 RNG**（selectTarget 已被 §125 within-tick memo 去重且无 RNG；findPath 无 RNG）——缓存后**确定性签名字节不变**，无需像 §68 那样放宽到胜率一致。缓存键 `(playerCell, target)`：player cell 每 ~23 tick 才变、target 随 selectTarget 变化，命中率 ~95%；60-tick 安全计时器兜底地形变化（§68 同款纪律）。路径引用别名安全：followPath 仅在 player 换格时 shift 路径，换格即换缓存键（miss → 重建），缓存内数组永不被消费路径污染；fence 钢墙堵死缓存的路径时，followPath 的 stuck 分支已 `path=[]; replanTimer=0`，需同步失效 replan 缓存作为安全阀。
+
+**评估结论（A/B 建议）**:
+- ✅ **replanImpl 跨 tick 缓存：值得 A/B（最高优先级）**——预计消灭 findPath 的 73-89% 调用 → sim wall 估算 -10% 上下；字节级确定性使 A/B 判据就是 35×120×2 胜率不降 + per-seed tick-diff 一致。§68 先例已证明该缓存形态安全（同键 + 安全计时器）。
+- ⚠️ **pickup 可达性缓存（8-20%）**: 收益次之，但属 §68 风险类（跨 tick 陈旧，道具决策虽低危）——若 replan 缓存落地后仍有余力再评估。
+- ❌ **chokepoint 节流（1-2%）**: 已 30-tick 节流，量级可忽略，不做。
+- ❌ **bucket queue（Round 8 否决）**: findPath 单次成本，风险/收益比仍不划算。
+
+### 2.11 Round 11：followPath→replanImpl 跨 tick 缓存（§127，SHIPPED）
+
+**日期**: 2026-08-05
+**依据**: §2.10 分布研究——replan+replan-dig 占 findPath 的 73-89%，`replanInterval: 1` 使主导航分支每 tick 全量 A*，而 §68 缓存只覆盖了 navigateTowardsImpl 次级分支。
+
+**实施**: `replanImpl` 缓存键 `(playerCell, target)` + `tileMap.revision`（新增单调地形修订号，覆盖 loadStage/set/destroy/destroyAllBaseCells/快照恢复所有写路径）+ 60-tick 防御计时器 + followPath stuck 自愈阀 + reset 清理。Gate `params.replanCache`（默认 1，0 = pre-§127 字节等价）。**关键**：缓存与 `self.path` 必须分离——命中返回 `_replanCache.slice()`、写入存 `self.path.slice()` 独立副本。
+
+**别名 bug（初版）**: 引用赋值 `self.path = _replanCache` 使 followPath 换格时的 `shift()` 原地消费缓存数组（S15 seed1007 tick 1536 把 len=2 缓存吃成 len=0），随后每 tick 命中空缓存死循环。初版 A/B 冒烟 score 700/700 tied 但 bench 揭穿：ticks=1172649 vs 1169769、13/350 单元分歧（含 outcome 翻转）。**eval-suite paired 比较是 score 粒度，抓不住 tick 级分歧——per-seed tick-diff 才是诚实判据**。
+
+**结果（同机 A/B）**:
+- 确定性：修复后 classic `ticks=1169769 win=317/350` 与关闭版逐字节一致；350 单元扫描 **0/350 分歧**；per-seed-diff S15 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
+- **chaos wall −27.0% / −31.6%**（两轮）；classic ±2% 噪声（CLASSIC_MODEL_PARAMS 把 classic replanInterval 恢复为 50 → 命中率低，收益在主战场 hard/chaos）。
+
+**后续缓存类优化纪律**（§127 Implications）: ① tick 级 A/B 而非 score 级；② 缓存返回对象与消费路径（shift/变异）解引用分离；③ 失效信号覆盖所有写路径（含快照直写 grid）。
+
+### 2.12 Round 12：标准基线改为 classic/hard/chaos 各 1/3（§128，工具链变更）
+
+**日期**: 2026-08-05
+**变更**: `bench-all-stages.ts` 默认跑 **classic / hard / chaos 三难度各全 35 关 × 10 games**（每难度 1/3 负载，共 1050 场），输出分难度小计 + GRAND TOTAL（wall/ticks/wins/perTick + 难度占比）。`--diff=` 限单难度，恢复 pre-§128 行为。
+
+**动机**: §127 A/B 揭穿 classic-only 基线的问题——replan 缓存在 chaos（replanInterval=1）实测 −27~32%，classic（replanInterval=50 via CLASSIC_MODEL_PARAMS）只有 ±2% 噪声。classic-only 标准场景会系统性低估 God-AI 主导路径（hard/chaos）的优化收益与回归风险；三难度各 1/3 使基线覆盖全部战斗模型（instant vs pool）与 AI 负载形态。
+
+**首次基线（2026-08-05 同机）**: 合计 wall=22577ms / ticks=4586281 / wins=689/1050 / perTick=0.0049ms；分难度 classic 3537ms(16%) / hard 9590ms(42%) / chaos 9450ms(42%)——hard+chaos 占 84%，印证 God-AI 重负载占比。**分难度签名**：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`（各与单难度 baseline 逐字节一致）。
+
 ---
 
 ## 3. 性能反模式（AGENTS.md §14）
@@ -281,7 +350,7 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 | 工具 | 用途 |
 |------|------|
-| `tools/perf/bench-all-stages.ts` | 35 关性能基线（默认 classic/10 games/warmup=2） |
+| `tools/perf/bench-all-stages.ts` | 35 关性能基线（默认三难度 classic/hard/chaos 各 1/3；`--diff=` 限单难度） |
 | `tools/perf/profile-and-analyze.ts` | CPU profile 生成 + 分析 |
 | `tools/perf/sim-bench.ts` | 无头仿真基准 |
 
@@ -312,7 +381,8 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 ## 8. 最终状态
 
-- `bun run check` 全绿（test + typecheck + lint + format）
-- 644 tests pass，0 fail
-- 确定性签名：`ticks=190184 win=59 go=1 timeout=0` @60 games classic/stage0（Round 5 字节一致基线）
-- 剩余瓶颈：`think` 13%、`rectHitsTerrain` 8%、`updateNoneTank` 8% —— 均为已精简的核心仿真函数，进一步优化需算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）
+- `bun run check` 全绿（test + typecheck + lint + format）；982 tests / 79 files，0 fail（2026-08-05）
+- 确定性签名（§128 三难度基线，各与单难度 baseline 一致）：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`
+- Round 11（§127）replan 缓存：**chaos wall −27~32%**（replanInterval=1 主战场），classic ±2% 噪声；replanCache 默认 ON
+- Round 12（§128）：标准基线改为 **classic/hard/chaos 各 1/3**（每难度全 35 关 × 10 games）
+- 剩余瓶颈（2026-08-05 chaos/stage0 profile，575 samples）：`findPath` 17%（replan 已缓存 §127；剩余为 chokepoint 威胁路径 + pickup 可达性 + 缓存 miss；bucket queue 已否决 §68/§88，pickup 关停探针阴性）、enemy perception 模块 15%（`scanAhead` 6.4% / `perceive` 4.7%——已扁平化，再压需算法级变更）、`updateMovement` 4.7%、`rectHitsTerrain` 5.1%（比较链重排否决 §124）——进一步优化需算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）

@@ -128,9 +128,14 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
       world.tileMap.grid[r][c] = snap.tileGrid[r][c]
     }
   }
-  // Rebuild cached base state and mark terrain dirty for renderer
+  // Rebuild cached base state and mark terrain dirty for renderer.
+  // The grid above is written directly (bypassing set/destroy), so the
+  // terrain revision counter must be bumped here too — otherwise the §127
+  // replan cache (keyed on tileMap.revision) would serve a path computed
+  // against the pre-restore terrain.
   world.tileMap.rebuildBaseCache()
   world.tileMap.dirty = true
+  world.tileMap.revision++
 
   // Entities — clone from snapshot so the snapshot stays pristine
   world.player = snap.player ? cloneTank(snap.player) : null

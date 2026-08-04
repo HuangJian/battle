@@ -476,14 +476,50 @@ export function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell
 }
 
 export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | null {
-  // (perf §68 Round 9) NOTE: cross-tick caching was evaluated and REJECTED.
+  // (perf §68 Round 9) NOTE: CROSS-tick caching was evaluated and REJECTED.
   // A 30-tick (0.5s) cache caused S6 Iron Curtain win rate to drop from
   // 72% to 40% — the stage has heavy steel walls forcing frequent target
   // switches, and 0.5s staleness leaves the player stuck behind walls too
-  // long. The per-tick cost (~3% self-time) is the price of responsiveness.
-  // Kept the wrapper signature so callers don't change; the body is just
-  // a direct call to the uncached implementation.
-  return selectTargetUncached(self, playerCell)
+  // long. Responsiveness must stay at tick granularity.
+  //
+  // (perf §125) A WITHIN-tick memo is a different animal and IS safe. HUNT
+  // computes `navTarget = selectTarget(pc)` and then routes through
+  // followPath → replan → selectTarget(playerCell) (or directMove →
+  // selectTarget), so the same query runs 2-3× per tick with an identical
+  // playerCell. Direct callers (tests / tools/diag) must keep playerCell
+  // unchanged between calls or call `endFrame()`/`reset()` to invalidate. `selectTargetUncached` reads only World state and params —
+  // it draws no RNG — and nothing mutates the World during think(), so the
+  // repeats are provably redundant. Zero staleness: the memo dies every tick
+  // in endFrame(), which is exactly the granularity §68 demanded.
+  //
+  // The result is copied into a dedicated buffer rather than passed through,
+  // because the uncached path may return the shared `_tankCellBuf` (which the
+  // next tankCell() call clobbers) or a freshly allocated defense cell. One
+  // stable buffer removes that aliasing hazard and the allocation.
+  //
+  // Telemetry note: `branchCounts.chokepoint` now counts once per tick
+  // instead of once per redundant query. That counter is pure observation
+  // (tools/diag), never gameplay.
+  if (
+    self._selTargetValid &&
+    self._selTargetKeyCol === playerCell.col &&
+    self._selTargetKeyRow === playerCell.row
+  ) {
+    return self._selTargetNull ? null : self._selTargetBuf
+  }
+
+  const res = selectTargetUncached(self, playerCell)
+  self._selTargetValid = true
+  self._selTargetKeyCol = playerCell.col
+  self._selTargetKeyRow = playerCell.row
+  if (res === null) {
+    self._selTargetNull = true
+    return null
+  }
+  self._selTargetNull = false
+  self._selTargetBuf.col = res.col
+  self._selTargetBuf.row = res.row
+  return self._selTargetBuf
 }
 
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {

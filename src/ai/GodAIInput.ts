@@ -1,6 +1,6 @@
 import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
-import type { Tank, Bullet, TankKind } from '../types'
+import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from '../utils/pathfind'
 import type { RNG } from '../utils/RNG'
@@ -11,7 +11,9 @@ import {
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
+  makeScanResult,
 } from './god/FireControl'
+import type { ScanResult } from './god/FireControl'
 import { thinkImpl, CANDIDATES } from './god/think'
 import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
 import {
@@ -281,34 +283,25 @@ export class GodAIInput implements InputLike {
    */
   _lastBranch: string = 'navigate'
 
-  /** Reusable scan result for scanAheadImpl — avoids allocating a result object on every call. */
-  _scanResult: {
-    enemy: boolean
-    wall: boolean
-    steel: boolean
-    baseWall: boolean
-    baseWallDist: number
-    baseSteel: boolean
-    steelCol: number
-    steelRow: number
-    enemyDist: number
-    enemyKind: TankKind
-    enemyHp: number
-    enemyMaxHp: number
-  } = {
-    enemy: false,
-    wall: false,
-    steel: false,
-    baseWall: false,
-    baseWallDist: Infinity,
-    baseSteel: false,
-    steelCol: -1,
-    steelRow: -1,
-    enemyDist: Infinity,
-    enemyKind: 'basic',
-    enemyHp: 1,
-    enemyMaxHp: 1,
-  }
+  /**
+   * Reusable scan results for scanAheadImpl — one buffer per direction index
+   * (0=up, 1=down, 2=left, 3=right). Avoids allocating a result object per call.
+   *
+   * (perf §123) They also back a per-tick memo: `_scanCacheMask` marks which
+   * direction slots are already computed for the scan origin recorded in
+   * `_scanCacheX/_scanCacheY`. A different origin clears the mask; endFrame()
+   * clears it every tick. See scanAheadImpl's doc comment for why this is
+   * byte-identical.
+   */
+  _scanResults: ScanResult[] = [
+    makeScanResult(),
+    makeScanResult(),
+    makeScanResult(),
+    makeScanResult(),
+  ]
+  _scanCacheX = NaN
+  _scanCacheY = NaN
+  _scanCacheMask = 0
 
   /** Reusable buffer for scanAheadImpl's per-offset aligned-tank pre-filter.
    * Reset (via alignedCount=0) at the start of each offset — no allocation. */
@@ -369,6 +362,14 @@ export class GodAIInput implements InputLike {
    * in _canMoveResult when passable. Invalidated in endFrame(). */
   _canMoveComputed = 0
   _canMoveResult = 0
+  /** (perf §125) Per-tick selectTarget memo — see selectTargetImpl for why a
+   * within-tick memo is safe where the §68 cross-tick cache was not.
+   * `_selTargetBuf` is the single stable result cell handed to every caller. */
+  _selTargetValid = false
+  _selTargetKeyCol = 0
+  _selTargetKeyRow = 0
+  _selTargetNull = false
+  _selTargetBuf: Cell = { col: 0, row: 0 }
 
   /**
    * (perf §68 Round 9) Cross-tick navigateTowards cache.
@@ -399,6 +400,43 @@ export class GodAIInput implements InputLike {
   _navCache: Direction | null = null
   _navReplanTimer = 0
   _navReplanMax = 60
+
+  /**
+   * (perf §127) Cross-tick replan cache — same discipline as the §68
+   * navigateTowards cache, applied to the followPath→replanImpl MAIN
+   * navigation path that §68 missed (replanInterval defaults to 1, so
+   * replanImpl ran full A* EVERY tick — measured 73-89% of all findPath
+   * calls, docs/perf-optimization.progress.md §2.10).
+   *
+   * Unlike navigateTowards's cache, replanImpl draws NO RNG (no
+   * suboptimalPathProb gate), so skipping identical recomputation is
+   * BYTE-IDENTICAL — the determinism signature does not move (no
+   * §68-style relaxation needed). The cached array is only consumed by
+   * followPath's shift on player-cell change, which changes the cache key
+   * → miss → fresh path, so the cache never serves a pre-consumed path.
+   *
+   * Invalidation: same-key hits expire after _replanMax ticks (safety
+   * timer) or when `world.tileMap.revision` differs from `_replanRev` — the
+   * terrain revision counter bumps on EVERY terrain mutation, so a brick
+   * destroyed by a bullet invalidates the cache the SAME tick, making the
+   * cache a strict pure memo of (playerCell, target, terrain) — byte-
+   * identical to per-tick replanning (A/B smoke initially showed 72/700
+   * divergent cells from the 60-tick staleness window; §127-revision fix
+   * closed it, 700/700 identical). followPathImpl clears
+   * _replanCacheValid when it declares a stuck (the cached path is what
+   * failed — force a fresh A* next tick). reset() clears it per stage.
+   * Gate: params.replanCache (0 = byte-identical pre-§127).
+   */
+  _replanCacheValid = false
+  _replanPcCol = 0
+  _replanPcRow = 0
+  _replanTgtCol = 0
+  _replanTgtRow = 0
+  /** terrain revision at cache fill time (§127) — see doc above. */
+  _replanRev = -1
+  _replanCache: Direction[] | null = null
+  _replanTimer = 0
+  _replanMax = 60
 
   /**
    * §88: throttled chokepoint plan (threat points + selected 咽喉要地 cell).
@@ -450,6 +488,14 @@ export class GodAIInput implements InputLike {
     this._moveDir = null
     this._fire = false
     this._thought = false
+    // §123/§125 (perf): clear the within-tick memo flags on stage reset —
+    // reset() can run between a think and its endFrame (browser stage
+    // transition path), and a stale bit would serve a result computed
+    // against the OLD world (player spawn origin is identical every stage).
+    this._scanCacheMask = 0
+    this._scanCacheX = NaN
+    this._scanCacheY = NaN
+    this._selTargetValid = false
     this.path = []
     this.replanTimer = 0
     this.reactionCounter = 0
@@ -490,6 +536,10 @@ export class GodAIInput implements InputLike {
     // stage reset — the next tick must recompute A* from scratch.
     this._navCacheValid = false
     this._navReplanTimer = 0
+    // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
+    this._replanCacheValid = false
+    this._replanTimer = 0
+    this._replanRev = -1
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
@@ -547,6 +597,8 @@ export class GodAIInput implements InputLike {
     this._baseUnderThreatCache = null
     this._playerCellValid = false
     this._canMoveComputed = 0
+    this._scanCacheMask = 0 // §123
+    this._selTargetValid = false // §125
   }
 
   // ================================================================
@@ -637,20 +689,7 @@ export class GodAIInput implements InputLike {
   // M0.5 (2026-08-03): D1 hasFastThreatNearBase + SmartThreatModel wrappers
   // (threatScore / smartIsBaseUnderThreat) retired — archived in experimental.ts.
 
-  scanAhead(
-    pcx: number,
-    pcy: number,
-    dir: Direction,
-  ): {
-    enemy: boolean
-    wall: boolean
-    steel: boolean
-    baseWall: boolean
-    enemyDist: number
-    enemyKind: TankKind
-    enemyHp: number
-    enemyMaxHp: number
-  } {
+  scanAhead(pcx: number, pcy: number, dir: Direction): ScanResult {
     return scanAheadImpl(this, pcx, pcy, dir)
   }
   isBaseProtectionBrick(col: number, row: number): boolean {

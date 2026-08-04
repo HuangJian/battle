@@ -217,6 +217,10 @@ export function followPathImpl(self: GodAIInput): Direction | null {
     // Fully stuck — re-plan next tick.
     self.path = []
     self.replanTimer = 0
+    // (perf §127) Invalidate the replan cache: the cached path is what got
+    // stuck (e.g. a fence power-up steeled it), so force a fresh A* next tick
+    // instead of re-serving the same dead path until the 60-tick timer.
+    self._replanCacheValid = false
   }
 
   // No path found — return null so the caller (think) can fall back to
@@ -245,6 +249,49 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     return
   }
 
+  // (perf §127) Cross-tick cache hit: same player + target cells, same
+  // terrain revision, not expired. replanInterval defaults to 1, so without
+  // this replanImpl ran full A* every tick — measured 73-89% of all findPath
+  // calls (§2.10). replanImpl draws NO RNG, so skipping identical
+  // recomputation is byte-identical (unlike the §68 navigateTowards cache,
+  // which skipped an rng.next() and relaxed the signature to win-rate). The
+  // path is only consumed (followPath shift) when the player enters a new
+  // cell — which changes the cache key → miss → fresh path — so the cached
+  // array is never served pre-consumed.
+  //
+  // The terrain revision check (tileMap.revision) is what makes this a
+  // STRICT pure memo: any brick destroyed by a bullet bumps the revision the
+  // same tick, so the cache invalidates exactly when the terrain does — no
+  // staleness window for the 60-tick safety timer to bridge (the timer is now
+  // only a defence-in-depth bound). followPath's stuck branch clears
+  // _replanCacheValid as a self-healing valve.
+  //
+  // ALIASING (found by the 13/350-cell divergence sweep): the cached array is
+  // the SAME array followPathImpl consumes via `self.path.shift()` on cell
+  // change. A reference assignment (`self.path = self._replanCache`) made the
+  // shift mutate the cache in place — the cache slowly drained to [] and the
+  // player re-served the empty path every tick until the key changed.
+  // MUST return a COPY so followPath's shift consumes the working copy, not
+  // the cached array (B arm recomputes a fresh array every replan, so it
+  // never had this hazard). Slice cost is negligible: replan runs at most
+  // once per replanInterval (50) or on empty-path ticks.
+  if (self.params.replanCache > 0) {
+    self._replanTimer--
+    if (
+      self._replanCacheValid &&
+      self._replanPcCol === playerCell.col &&
+      self._replanPcRow === playerCell.row &&
+      self._replanTgtCol === target.col &&
+      self._replanTgtRow === target.row &&
+      self._replanRev === w.tileMap.revision &&
+      self._replanTimer > 0
+    ) {
+      self.path = self._replanCache ? self._replanCache.slice() : []
+      return
+    }
+  }
+
+  // Cache miss — recompute.
   // Try regular A* (corridors only) first.
   let path = findPath(w.tileMap, playerCell, target)
 
@@ -257,6 +304,21 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     self.path = path
   } else {
     self.path = []
+  }
+
+  if (self.params.replanCache > 0) {
+    self._replanCacheValid = true
+    self._replanPcCol = playerCell.col
+    self._replanPcRow = playerCell.row
+    self._replanTgtCol = target.col
+    self._replanTgtRow = target.row
+    self._replanRev = w.tileMap.revision
+    // Store an independent copy (see the hit branch note): followPath's
+    // shift() consumes self.path, which must not alias the cached array.
+    // findPath returns a fresh array every call, so self.path is already a
+    // private copy at this point; slice() decouples the cache from it.
+    self._replanCache = self.path.slice()
+    self._replanTimer = self._replanMax
   }
 }
 

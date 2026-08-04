@@ -65,11 +65,26 @@ export function blocksBullet(t: string): boolean {
 export function computeThreatPointsImpl(self: GodAIInput): Cell[] {
   const tm = self.world.tileMap
   const out: Cell[] = []
+  // Perf (§122): canShootBaseFrom() returns false for every cell that is not
+  // base-column-aligned (col === BASE_POS.col) or base-row-aligned
+  // (row === BASE_POS.row | row + 1). Scanning the full 26×26 grid burned ~600
+  // of 676 calls on the alignment early-out alone. Enumerate only the aligned
+  // cells, preserving the original row-major push order byte-for-byte:
+  //   - aligned rows  → full column sweep (unchanged inner loop)
+  //   - other rows    → only col === BASE_POS.col can qualify
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
   for (let row = 0; row < GRID; row++) {
-    for (let col = 0; col < GRID; col++) {
-      if (!canShootBaseFrom(self, col, row)) continue
-      if (!cellPassable(tm, col, row)) continue
-      out.push({ col, row })
+    if (row === br || row === br + 1) {
+      for (let col = 0; col < GRID; col++) {
+        if (!canShootBaseFrom(self, col, row)) continue
+        if (!cellPassable(tm, col, row)) continue
+        out.push({ col, row })
+      }
+    } else {
+      if (!canShootBaseFrom(self, bc, row)) continue
+      if (!cellPassable(tm, bc, row)) continue
+      out.push({ col: bc, row })
     }
   }
   return out

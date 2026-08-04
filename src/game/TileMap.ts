@@ -11,6 +11,18 @@ export class TileMap {
   /** grid[row][col] — terrain type per sub-block */
   grid: TerrainType[][]
 
+  /**
+   * Monotonic terrain revision counter (perf §127). Bumped on EVERY terrain
+   * mutation (loadStage / set / destroy / destroyAllBaseCells) and on
+   * snapshot restore (restoreWorld writes the grid directly, bypassing
+   * set/destroy). Lets simulation-side cross-tick caches that depend on the
+   * terrain (the §127 replan cache) invalidate EXACTLY when the terrain
+   * changes, instead of bounding staleness with a safety timer — turning a
+   * bounded-stale cache into a strict pure memo (byte-identical).
+   * Renderer-only consumers should keep using `dirty`/`dirtyCells`.
+   */
+  revision = 0
+
   /** Set to true when terrain changes; renderer checks this to invalidate its cache. */
   dirty = true
 
@@ -56,6 +68,7 @@ export class TileMap {
     this.rebuildBaseCache()
     this.dirty = true
     this.dirtyCells.length = 0
+    this.revision++ // §127: full terrain reset
   }
 
   private charToTerrain(ch: string): TerrainType {
@@ -93,6 +106,7 @@ export class TileMap {
       } else {
         this.dirtyCells.push(row * GRID + col)
       }
+      this.revision++ // §127: terrain changed
     }
   }
 
@@ -102,6 +116,7 @@ export class TileMap {
       const type = this.grid[row][col]
       if (type === 'empty') return // nothing to destroy — no change
       this.grid[row][col] = 'empty'
+      this.revision++ // §127: terrain changed
       if (type === 'base') {
         // Check if any cached base cells remain intact (O(4) instead of O(676))
         this.baseAlive = false
@@ -128,6 +143,7 @@ export class TileMap {
     }
     this.baseAlive = false
     this.dirty = true
+    this.revision++ // §127: terrain changed
   }
 
   /**

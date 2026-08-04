@@ -66,6 +66,18 @@ export interface GodAIParams {
   baseWallScanRadius: number
   /** Re-plan interval (ticks). */
   replanInterval: number
+  /**
+   * §127 (perf): 1 = cross-tick replan cache ON (default). 0 = OFF
+   * (byte-identical to pre-§127 — replanImpl re-runs full A* every tick).
+   *
+   * replanInterval defaults to 1, so followPath→replanImpl ran A* EVERY tick
+   * — measured 73-89% of all findPath calls (docs/perf-optimization.progress.md
+   * §2.10). The cache reuses the (playerCell, target) key + 60-tick safety
+   * timer discipline of the §68 navigateTowards cache, applied to the MAIN
+   * navigation path §68 missed. replanImpl draws NO RNG, so the cache is
+   * BYTE-IDENTICAL — no §68-style signature relaxation needed.
+   */
+  replanCache: number
   /** S5: max distance (cells) to divert for a power-up. */
   powerupMaxDivertDistance: number
   /**
@@ -1133,6 +1145,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   t8MaxInterceptDistCells: 2,
   baseWallScanRadius: 5,
   replanInterval: 1,
+  replanCache: 1,
   powerupMaxDivertDistance: 18,
   endgameEnemyThreshold: 10,
   huntAllyCount: 1,

@@ -109,14 +109,60 @@ const DIR_DY: readonly number[] = [-1, 1, 0, 0]
 // the X axis (±CELL/2), for horizontal scans on Y. Same magnitude both axes.
 const PERP_OFFSETS: readonly number[] = [-CELL / 2, CELL / 2]
 
+/** The shape `scanAheadImpl` fills in. Callers read it synchronously. */
+export interface ScanResult {
+  enemy: boolean
+  wall: boolean
+  steel: boolean
+  baseWall: boolean
+  baseWallDist: number
+  baseSteel: boolean
+  steelCol: number
+  steelRow: number
+  enemyDist: number
+  enemyKind: TankKind
+  enemyHp: number
+  enemyMaxHp: number
+}
+
+/** Factory for the reusable per-direction scan buffers held on GodAIInput. */
+export function makeScanResult(): ScanResult {
+  return {
+    enemy: false,
+    wall: false,
+    steel: false,
+    baseWall: false,
+    baseWallDist: Infinity,
+    baseSteel: false,
+    steelCol: -1,
+    steelRow: -1,
+    enemyDist: Infinity,
+    enemyKind: 'basic',
+    enemyHp: 1,
+    enemyMaxHp: 1,
+  }
+}
+
 /**
  * Scan ahead in a direction for enemies, walls, and base protection.
  * Returns what's in the line of fire, distinguishing steel from brick
  * (T11) and detecting base-protection bricks (T6).
  *
- * Writes into `self._scanResult` (a reusable object) to avoid allocating
- * a result object on every call. Callers use the result immediately and
- * never store the reference, so this is safe.
+ * Writes into `self._scanResults[dirIdx]` (a reusable object per direction)
+ * to avoid allocating a result object on every call. Callers use the result
+ * immediately and never store the reference, so this is safe.
+ *
+ * (perf §123) Those four buffers double as a **per-tick memo**. `think()` runs
+ * exactly once per tick (guarded by `_thought`) and nothing mutates the World
+ * during it — movement/combat are applied later in Simulation — so for a fixed
+ * scan origin `(pcx, pcy)` this function is pure in `dir`. Direct callers
+ * (tests / tools/diag) must keep the same key unchanged between calls or call
+ * `endFrame()`/`reset()` to invalidate. `_scanCacheMask`
+ * records which direction slots are already filled for the origin stored in
+ * `_scanCacheX/_scanCacheY`; a different origin clears the mask, and
+ * `endFrame()` clears it every tick. Repeat calls (shouldFireInDir, the
+ * aggro/engage/hunt candidates and ThreatAssessor all scan the same aim/move
+ * direction from the player centre) return the identical object — byte-identical.
  *
  * (perf §63): DIR_VECTORS lookup, tileMap.get, isBaseProtectionBrick, aabb
  * are all inlined. The aligned-tank pre-filter guarantees the perpendicular
@@ -130,23 +176,23 @@ export function scanAheadImpl(
   pcx: number,
   pcy: number,
   dir: Direction,
-): {
-  enemy: boolean
-  wall: boolean
-  steel: boolean
-  baseWall: boolean
-  baseWallDist: number
-  baseSteel: boolean
-  steelCol: number
-  steelRow: number
-  enemyDist: number
-  enemyKind: TankKind
-  enemyHp: number
-  enemyMaxHp: number
-} {
+): ScanResult {
   const w = self.world
   // Fast dir → index (avoid DIR_VECTORS string-keyed dict lookup).
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+
+  // §123 per-tick memo — see the doc comment above. NaN sentinels on the first
+  // call always miss (NaN !== NaN).
+  const bit = 1 << dirIdx
+  if (self._scanCacheX === pcx && self._scanCacheY === pcy) {
+    if ((self._scanCacheMask & bit) !== 0) return self._scanResults[dirIdx]
+  } else {
+    self._scanCacheX = pcx
+    self._scanCacheY = pcy
+    self._scanCacheMask = 0
+  }
+  self._scanCacheMask |= bit
+
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
   const vertical = vdx === 0 // up or down
@@ -160,7 +206,7 @@ export function scanAheadImpl(
   const baseRow = BASE_POS.row // 24
   const wallScanR = self.params.baseWallScanRadius
 
-  const r = self._scanResult
+  const r = self._scanResults[dirIdx]
   r.enemy = false
   r.wall = false
   r.steel = false
@@ -222,6 +268,9 @@ export function scanAheadImpl(
         terrain = grid[row][col]
       }
 
+      // (perf §124, REJECTED) Wrapping these compares in a `terrain !== 'empty'`
+      // guard to short-circuit open cells measured SLOWER — see the note in
+      // World.rectHitsTerrain. Leave the flat compare chain alone.
       if (terrain === 'steel') {
         // Store steel cell coords for post-loop baseSteel check (§70).
         // Only two assignments — keeps the hot loop untouched (V8 JIT stable).
@@ -471,9 +520,10 @@ export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction
   const ny = horizontal ? snap(p.y, CELL) : p.y
   // Already grid-aligned on the perpendicular axis — the snap is a no-op.
   if (nx === p.x && ny === p.y) return true
-  // NOTE: scanAheadImpl writes into the shared `self._scanResult`. Callers
-  // must invoke this guard BEFORE computing their own scan result, never
-  // after, or their result gets clobbered.
+  // NOTE (perf §123): scanAheadImpl writes into the shared per-direction
+  // buffers `self._scanResults[dirIdx]` (memoized per origin+dir within a
+  // tick). Callers must invoke this guard BEFORE computing their own scan
+  // result, never after, or their result gets clobbered.
   return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir).enemy
 }
 
