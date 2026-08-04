@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "oxlint && tsc && vite build",
     "preview": "vite preview",
-    "test": "bun test",
+    "test": "bun tools/test-silent.ts",
     "typecheck": "tsc --noEmit --incremental",
     "bench": "bun tools/sim/bench-sim.ts",
     "perf:sim": "bun tools/perf/sim-bench.ts",

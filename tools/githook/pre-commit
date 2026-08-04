@@ -53,7 +53,12 @@ echo "▶ Running pre-commit checks (bun: $BUN)..."
 echo " ▸ typecheck (tsc --noEmit)"
 "$BUN" run typecheck
 
-echo " ▸ tests (bun test)"
+echo " ▸ tests (bun run test — scoped to local changes)"
+# Uses `bun run test`, which is aliased to the scoped silent runner
+# (tools/test-silent.ts). It runs only the tests related to the staged/working
+# changes (and prints only failure logs) for a fast commit gate. Falls back to
+# the full suite when nothing maps, unless the repo root has a `tools/test-silent.ts`
+# invocation of `--strict`.
 "$BUN" run test
 
 echo " ▸ format check (oxfmt --check)"

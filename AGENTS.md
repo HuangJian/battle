@@ -198,19 +198,34 @@ bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
 ```
 bun run dev          # vite dev server on :3000
 bun run build        # oxlint && tsc && vite build  (the gate before merge)
-bun run test         # bun test
+bun run test         # SCOPED: runs only tests tied to local git changes, prints only failures
+bun test             # full suite, all tests (bare built-in command)
 bun run typecheck    # tsc --noEmit --incremental
 bun run lint         # oxlint
 bun run format       # oxfmt
-bun run check        # full gate: test + typecheck + lint + format
+bun run check        # full gate: tsc --noEmit --incremental && bun test (full suite)
+bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 ```
 
 `bun run check` is the definition of "green". Run it before declaring a task done.
 
+> **Scoped vs full test runs.** `bun run test` invokes `tools/test-silent.ts`, a
+> token-saving runner: it finds your changed/untracked files via git, maps each to
+> the relevant `tests/*.test.ts` files by basename (incl. `base`/`base-*`/`*-base`
+> patterns this repo uses), runs **only** those, and prints **only the failing-test
+> logs** — a passing scoped run prints a single summary line. With `--strict` it
+> skips entirely when nothing maps. The bare `bun test` command always runs the
+> entire suite. The pre-commit hook (`tools/githook/pre-commit`, enabled via
+> `bun run setup`) also uses the scoped `bun run test` for a fast gate; it falls
+> back to the full suite when a change does not map to any test file, so it will
+> not silently skip tests. For exhaustive runs use `bun test` or `bun run check`
+> (both always run the full suite). `tools/runner.ts` holds the shared
+> `spawnCapture`/`gitChangedFiles`/result-printing helpers used by that runner.
+
 ### NEVER start the dev server to validate changes
 
 - The dev server (`bun run dev`) is for the **human to playtest** — an agent must **never** start it (or otherwise spin up a browser) to validate its own changes.
-- Validation is the automated gates only: `bun run check` (test + typecheck + lint + format). For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server.
+- Validation is the automated gates only. `bun run check` runs `tsc --noEmit --incremental && bun test` (typecheck + full test suite); `bun run build` adds `oxlint` first. For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server. (The pre-commit hook additionally runs `oxfmt --check` + `oxlint`.)
 - If a visual check is wanted, the human will open it themselves. Do not leave a dev server running as "proof" of work, and do not present a localhost URL as a validation step.
 
 ### NEVER add an untracked `*.md` file to git tracking
