@@ -12,7 +12,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Cell } from '../../utils/pathfind'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL, DIR_VECTORS } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS, GRID } from '../../constants'
 import { ALL_DIRS } from '../../utils/helpers'
 import {
   scanAheadImpl,
@@ -1183,6 +1183,164 @@ const SURVIVE: Candidate = {
   },
 }
 
+/**
+ * §139 / 方向 A（进攻侧）: 火力死区解除 (firing-lane re-engage).
+ *
+ * Battlement 击杀效率分析（2026-08-05）: 命中率 23.7% 正常，瓶颈是射击量——
+ * 玩家 51% 时间静止、34% 全 tick 钉在 (11,24) 火力死区（四方向无敌人 LOS），
+ * 射击量 24.9 发/局只有 S32 的 37%（67.7），击杀 5.9/20 局基地即失守。
+ *
+ * 本候选：玩家处于死区（四方向 scan 全无敌人）且所有敌人较远（>=
+ * firingLaneMinEnemyDist，无法直接追到）时，不再原地待机——在半径
+ * firingLaneRadius 内找可站、能看到 ≥1 个敌人（同排/列 + 无遮挡）的瞭望格，
+ * 导航过去重新接战（到了之后由 engage/aggressive 接管开火）。与 §137/§138
+ * （去守位格「站着防守」）本质区别：这是「解卡 + 保持移动找射界」，不驻守。
+ *
+ * 门控：firingLaneMode=0 短路（byte-identical）；freeze/aggressive 跳过；
+ * 已有敌人 LOS 跳过（engage/aggressive 接管）；敌人近在咫尺跳过（hunt
+ * 直接追更快）。瞭望格搜索带 tick 节流（firingLaneReplanTicks）。纯函数：
+ * 无 RNG、不改 World；分支计数仅观察。
+ */
+function findFiringLaneCellImpl(self: GodAIInput, pc: Cell): Cell | null {
+  const w = self.world
+  const tm = w.tileMap
+  const prm = self.params
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  // Enemy cells + base distance (bounded allocation — throttled rare path,
+  // same discipline as the §88 chokepoint replan, not per-tick).
+  const ecols: number[] = []
+  const erows: number[] = []
+  const ebd: number[] = []
+  for (let li = 0; li < list.length; li++) {
+    const t = list[li]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    ecols.push(tc.col)
+    erows.push(tc.row)
+    ebd.push(Math.abs(tc.col - BASE_POS.col) + Math.abs(tc.row - BASE_POS.row))
+  }
+  const r = prm.firingLaneRadius
+  let best: Cell | null = null
+  let bestScore = -Infinity
+  for (let rr = pc.row - r; rr <= pc.row + r; rr++) {
+    for (let cc = pc.col - r; cc <= pc.col + r; cc++) {
+      if (cc < 0 || cc >= GRID || rr < 0 || rr >= GRID) continue
+      const t = tm.get(cc, rr)
+      if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') continue
+      // Count enemies visible from (cc,rr): same row/col with clear bullet line.
+      let vis = 0
+      let score = 0
+      for (let ei = 0; ei < ecols.length; ei++) {
+        if (cc === ecols[ei]) {
+          const step = erows[ei] < rr ? -1 : 1
+          let clear = true
+          for (let y = rr + step; y !== erows[ei]; y += step) {
+            const ty = tm.get(cc, y)
+            if (ty === 'brick' || ty === 'steel' || ty === 'base') {
+              clear = false
+              break
+            }
+          }
+          if (clear) {
+            vis++
+            // Base-adjacent enemies are urgent (intercept bias under pressure).
+            score += ebd[ei] <= prm.threatRangeCells ? 2 : 1
+          }
+        } else if (rr === erows[ei]) {
+          let clear = true
+          for (let x = Math.min(cc, ecols[ei]) + 1; x < Math.max(cc, ecols[ei]); x++) {
+            const tx = tm.get(x, rr)
+            if (tx === 'brick' || tx === 'steel' || tx === 'base') {
+              clear = false
+              break
+            }
+          }
+          if (clear) {
+            vis++
+            score += ebd[ei] <= prm.threatRangeCells ? 2 : 1
+          }
+        }
+      }
+      if (vis === 0) continue
+      const dist = Math.abs(cc - pc.col) + Math.abs(rr - pc.row)
+      const s = score * 10 - dist
+      if (s > bestScore) {
+        bestScore = s
+        best = { col: cc, row: rr }
+      }
+    }
+  }
+  return best
+}
+
+const FIRING_LANE: Candidate = {
+  id: 'firingLane',
+  weight: ACTION_WEIGHTS.firingLane,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy } = ctx
+    const prm = self.params
+    if (prm.firingLaneMode <= 0 || self.aggressive) return false
+    // Live enemies present?
+    const list = self._enemies.length > 0 ? self._enemies : w.tanks
+    let enemyCount = 0
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
+      if (t.alive && t.spawnTimer <= 0) enemyCount++
+    }
+    if (enemyCount === 0) return false
+    // Dead-zone: no enemy LOS in any direction (memoized scans — 4 calls,
+    // one per-tick memo origin).
+    let hasLoS = false
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      if (scanAheadImpl(self, pcx, pcy, ALL_DIRS[di]).enemy) {
+        hasLoS = true
+        break
+      }
+    }
+    if (hasLoS) return false
+    // All enemies beyond min-dist — a close enemy is faster chased directly.
+    const pc = self.playerCell()
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
+      if (!t.alive || t.spawnTimer > 0) continue
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row)
+      if (d <= prm.firingLaneMinEnemyDist) return false
+    }
+    // Throttled lookout-cell search (cache survives the replan window).
+    const now = w.frame
+    const arrived =
+      self._firingLaneCell !== null &&
+      self._firingLaneCell.col === pc.col &&
+      self._firingLaneCell.row === pc.row
+    if (
+      self._firingLaneCell === null ||
+      now - self._firingLaneTick >= prm.firingLaneReplanTicks ||
+      arrived
+    ) {
+      self._firingLaneCell = findFiringLaneCellImpl(self, pc)
+      self._firingLaneTick = now
+    }
+    const target = self._firingLaneCell
+    if (!target) return false
+    if (target.col === pc.col && target.row === pc.row) return false // arrived; next replan re-picks
+    self._moveDir = self.navigateTowards(target)
+    if (!self._moveDir) {
+      // A* failed — unstick toward any passable direction (P2.2-style).
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        if (self.canMoveDir(p, ALL_DIRS[di])) {
+          self._moveDir = ALL_DIRS[di]
+          break
+        }
+      }
+    }
+    if (!self._moveDir) return false
+    self.branchCounts.firingLane++
+    self._lastBranch = 'firingLane'
+    return true
+  },
+}
+
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Exported for the M1 invariant test (tests/decision-core.test.ts): a reorder
  * without a matching ACTION_WEIGHTS update is a behavior change. */
@@ -1196,6 +1354,7 @@ export const CANDIDATES: Candidate[] = [
   DEFENSE_INTERCEPT,
   ENGAGE,
   PICKUP_LOW,
+  FIRING_LANE,
   HUNT,
   SURVIVE,
 ]

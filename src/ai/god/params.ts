@@ -85,6 +85,47 @@ export interface GodAIParams {
   /** §134: max player→enemy distance (cells) for the intercept shot. */
   defenseInterceptRangeCells: number
   /**
+   * §137 / 基地守位格 (base guard anchor): 0 = OFF (byte-identical — the
+   * defense position stays at (BASE_POS.col, baseRow − defenseRowOffset),
+   * which sits on the base protection ring on ALL 35 stages and is therefore
+   * never reachable by navigate). 1 = ON: when the default defense position
+   * is not standable, compute a guard cell in the base box (cols bc−2..bc+3
+   * × rows br−3..br+1) scoring ring-defense coverage + lane coverage + cover
+   * − distance, and hold it as the defense anchor. Battlement picks (12,22)
+   * — the row-22 antechamber mouth above the ring — intercepting enemies
+   * before they breach the ring (data-driven, no stage-name overrides §81).
+   */
+  baseGuardAnchorMode: number
+  /**
+   * §137 v2: max player→anchor distance (cells) for the anchor HOLD to
+   * apply. When the base is under threat, no enemy has a clear shot at it
+   * yet, and the player is within this many cells of the guard anchor, hold
+   * the anchor instead of chasing — the §134 lane-intercept shoots enemies
+   * crossing the approach band before they reach the ring. 0 = never hold
+   * (only the v1 defense-position replacement applies). Only read when
+   * baseGuardAnchorMode > 0.
+   */
+  baseGuardAnchorHoldRange: number
+  /**
+   * §139 / 方向 A（进攻侧）: 火力死区解除 (firing-lane re-engage). 0 = OFF
+   * (byte-identical). 1 = ON: when the player has NO enemy LOS in any of the
+   * 4 directions (dead zone — standing with nothing to shoot) and all live
+   * enemies are beyond firingLaneMinEnemyDist (too far to chase directly),
+   * the FIRING_LANE candidate searches the radius-firingLaneRadius box for
+   * the best standable cell that can SEE an enemy (same row/col, clear LOS)
+   * and navigates there instead of idling. Re-engage, not hold — the
+   * opposite of §137/§138 (which parked the player at a guard cell).
+   * Battlement: 34% of all ticks parked in the (11,24) firing dead zone is
+   * the #1 output bottleneck (shots/run 24.9 vs 67.7 on winning stages).
+   */
+  firingLaneMode: number
+  /** §139: lookout-search radius (cells) around the player. */
+  firingLaneRadius: number
+  /** §139: enemies closer than this (cells) are chased directly, not diverted. */
+  firingLaneMinEnemyDist: number
+  /** §139: ticks between lookout-cell re-searches (throttle). */
+  firingLaneReplanTicks: number
+  /**
    * §135 / 方向 D 预测版: cells of approach lead-time to ALSO intercept. 0 =
    * OFF (byte-identical to §134 SHIPPED — only enemies already ON the lane,
    * enemyCanShootBase, trigger). >0: an enemy that shares the base's column
@@ -1266,6 +1307,19 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   defenseInterceptMode: 1,
   defenseInterceptMaxDist: 12,
   defenseInterceptRangeCells: 15,
+  // §137 / 基地守位格: 默认防守位 (12,23) 在全部 35 关都是环砖、navigate 永远到不了
+  // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
+  // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
+  baseGuardAnchorMode: 0,
+  // §137 v2: 受威胁且无 clear-shot 敌人时、玩家距守位格 ≤ 此值 → 驻守守位格
+  // （让 §134 在前厅口拦截）。仅 mode>0 时读。A/B 候选：holdRange 0/6/10。
+  baseGuardAnchorHoldRange: 6,
+  // §139 / 方向 A（进攻侧）: 火力死区解除。默认 0 = OFF（byte-identical）。
+  // A/B 候选：mode=1（Battlement 死区 34% 占用 → 去有射界的瞭望格重新接战）。
+  firingLaneMode: 0,
+  firingLaneRadius: 5,
+  firingLaneMinEnemyDist: 4,
+  firingLaneReplanTicks: 15,
   // §135 / 方向 D 预测版: 提前拦截格数。默认 0 = OFF（byte-identical 到 §134
   // SHIPPED——只拦已上车道者）。A/B 候选：predict=1/2/3。
   defenseInterceptPredictCells: 0,

@@ -1541,6 +1541,30 @@ enemyCanShootBase 静态判定升级为「预测敌人将进入基地车道」�
 Battlement 为 hard 的 Boss 关（chaos 上它 0/20，是难度锚点）。旋钮默认 0 保留。classic
 不受影响（继承默认 0）。
 
+## 138. 基地守位格 v2：受威胁时驻守守位格（诚实阴性，不发布，2026-08-05）
+
+**Decision:** 新增 `baseGuardAnchorHoldRange` 旋钮（默认 6，仅 mode>0 时读；mode 默认 0 = OFF 字节持平）。v2 = 在 selectTargetUncached 的 base 受威胁分支末尾加驻守块：当无任何 enemy 对基地有 clear shot（`enemyCanShootBase` 全 false）、且玩家距守位格 ≤ holdRange 时，返回守位格驻守（让 §134 拦截在前厅口开火），而非直接追最有威胁敌人；有 clear shot 敌人时仍强制追击。
+
+**Rationale:**
+- v1（§137）诊断：锚点只接「无敌人/紧急/撤退」少数分支，主力「base 受威胁→追 bestEnemy」不用锚点——机制未生效。v2 把驻守接进主力分支，让玩家真正去守 row-22 前厅口。
+- 20-seed A/B（基线 §134 SHIPPED 442/700）：h0（holdRange=0，≈v1 校验）438（−4，与 v1 一致 ✓）；**h6（v2 设计值）432（−10）最差**；h10 439（−3）。Battlement 全臂 3→2/3/2（噪声，无改善）。
+- 伤害分布：Brickworks −4、Iron Curtain −4、Twin Spires −4、Frozen Field −5、Oasis −5、Thicket −3——驻守守位格在开阔/多翼关把玩家定死在前厅带，被双向射击（前厅带双侧暴露）+ 拖慢击杀。
+- 与 M13 ON4@10（§113「太被动，hard −5.3pp」）、§133（早回防系统性有害）、§137 v1 同一结论族：**「站着防守」在 hard 上净负，玩家的最佳防守是进攻（更快击杀）+ §134 移动中的车道拦截**。
+
+**Implications:** 守位格方向（§137 v1 + §138 v2）收官，均为阴性。Battlement hard 3/20 为七轮攻坚（§131-§138）后的收敛值——所有防守侧杠杆已穷尽：拦子弹（§131）、追快车（§132）、早回防（§133）、车道拦截（§134 SHIPPED 唯一正项）、预测（§135）、破砖（§136）、守位格 v1/v2（§137/§138）。剩余杠杆只剩进攻侧（击杀效率）或星经济（已被用户否决 §110）。建议接受 Battlement 为 hard Boss 关（chaos 0/20 是难度锚点）。旋钮默认 0 保留。classic 不受影响。
+
+## 137. 基地守位格（Base Guard Anchor）—— 诚实阴性，不发布（2026-08-05）
+
+**Decision:** 新增 `baseGuardAnchorMode` 旋钮（默认 0 = OFF，byte-identical）。ON 时：默认防守位 `(BASE_POS.col, baseRow − defenseRowOffset)` 不可站时（全 35 关都是环砖——navigate 永远到不了，AI 无有效防守锚点），在 base 盒（cols bc−2..bc+3 × rows br−3..br+1）计算守位格：评分 = 环防御覆盖×60 + 通道覆盖×4 + 掩护×15 − 距 base×6。Battlement 选出 (12,22)（row-22 前厅口：头顶 (12,21) 砖掩护、脚下是环、覆盖 col 12 下行车道）。数据驱动、reset 时一次计算、无 RNG，符合 §81 禁关卡名特判。
+
+**Rationale:**
+- 触发背景：Battlement 专项取证（20-seed 全剧 + 地形扫描）——①「col 12 通道」前提修正：col 12 在 rows 10-21 全程砖墙，真正漏斗是 row 22 前厅带（cols 9-15 全开）；②17 局基地被毁：右翼环破 10（敌人站 (15-20,23-25) 射穿 (14,24)/(14,25)）、顶部环破 2（(12,21)/(13,22)）、左翼 1+混合 4；③环先破后击杀（wallIntact=6 即 8 格环已破 2 格），静态 canShootBaseFrom 破环前永远 false → §134/§88 无目标；④玩家 34% 时间钉在左翼废墟 (11,24)，10/17 局失守时在 10-28 格外。
+- 20-seed A/B（基线 §134 SHIPPED 442/700）：净 −4（438，+10/−11 关互抵，噪声级），Battlement 3→2（1-seed 噪声）。
+- 机制诊断（决定性）：mode=1 全剧探针——玩家站位分布与基线逐格相同（仍 34% 在 (11,24)），守位格 (12,22) 从未被访问。`getDefaultDefensePosition` 只在「无敌人/紧急回防/撤退」少数分支被调，Battlement 上玩家几乎全程战斗；主力「拦截在防守行」分支（target = 敌人列 × row 23）不用锚点，且 row 23 同样是环砖（部分不可达）。锚点挂载点不对 = 机制未生效，非机制无效。
+- 与 §135/§136 同列：20-seed 非正 → 不晋级 60-seed，诚实阴性记录，旋钮默认 0 保留（同 §132/§133 先例）。classic 不受影响（默认 0）。
+
+**Implications:** Battlement 定位机制的下一杠杆 = v2：把守位格接进主力「拦截在防守行」分支（defenseRow → 守位格行），让玩家真正去守前厅口；但即使生效，(12,22) 不覆盖右翼（#1 击杀路径），Battlement 的完整解可能需要「翼侧守位格」或接受其为 hard Boss 关（chaos 0/20 难度锚点）。
+
 ## 136. 方向 D 破砖版：预测命中时打场景砖开路（诚实阴性，不发布，2026-08-05）
 
 **Decision:** 在 §135 预测判定的基础上加破砖分支 + 旋钮 `defenseInterceptDigBricks`
@@ -1566,3 +1590,15 @@ play 中几乎不存在：① Battlement 上「有砖」时是 base 保护环（
 hard 3/20（15%）为当前最优——五轮攻坚（§131-§136）的边际收益已收敛。建议接受其为
 hard 的 Boss 关（chaos 0/20 是难度锚点），或从「防守」转向「进攻侧」杠杆（如击杀效率、
 星经济——后者已被用户否决过）。旋钮默认 0 保留。classic 不受影响。
+
+## 139. 方向 A：火力死区解除（firing-lane re-engage）—— 灾难性阴性，不发布（2026-08-05）
+
+**Decision:** 新增 `firingLaneMode`（默认 0 = OFF，byte-identical）+ `firingLaneRadius`(5)/`firingLaneMinEnemyDist`(4)/`firingLaneReplanTicks`(15)。新候选 FIRING_LANE（weight 300，插在 pickupLow 与 hunt 之间）：当玩家四方向 scan 全无敌人 LOS、且所有敌人距玩家 > minDist 时，在半径内搜索「能看到 ≥1 个敌人」的瞭望格并导航过去重新接战（替代 hunt 盲走），带 tick 节流。纯移动候选（到达后由 engage/aggressive 开火），无 RNG，分支计数仅观察。
+
+**Rationale:**
+- 触发背景（Battlement 击杀效率分析 2026-08-05）：命中率 23.7% 正常，瓶颈是射击量——玩家 51% 时间静止、34% 全 tick 钉在 (11,24) 死区，射击 24.9 发/局只有 S32 的 37%（67.7），击杀 5.9/20 局基地即失守。设计假设：死区=「站着打不到」，解卡 = 去有射界的瞭望格。
+- 20-seed A/B（基线 442/700）：**m1 292（−150）/ r7 320（−122）/ d2 279（−163）——灾难性全线崩塌**，Battlement 3→2 仍负。重灾区 Iron Curtain −12、Spider −10、Gauntlet −10、Ice Palace −11、Diamond −10。
+- 机制诊断（决定性）：**「四方向无 LOS」在迷宫关卡是常态而非死区**——玩家本来就该穿墙寻路去接战；门控把几乎所有正常寻路都误判成死区，不断把玩家拉离当前目标去「绕路看敌人」，击杀节奏彻底崩溃（多数关胜率腰斩）。瞭望格评分「可见数×10−距离」进一步放大绕路。
+- 与 §131-§138 合流：九个防守/位置类机制（拦子弹/追快车/早回防/车道拦截 SHIPPED/预测/破砖/守位格 v1/v2/火力死区）中唯一正项仍是 §134 移动中拦截。位置类杠杆全部证伪，进攻侧首轮（§139）也证伪。
+
+**Implications:** 若继续死区方向，正确门控应是「无 LOS **且** 静止未推进」（非无 LOS 即触发）——但九轮攻坚定律 + 灾难幅度说明该家族边际已尽。Battlement hard 3/20 收敛为 Boss 关定位（chaos 0/20 难度锚点）。旋钮默认 0 保留。classic 不受影响（默认 0）。

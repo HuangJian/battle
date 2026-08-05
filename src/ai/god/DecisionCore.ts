@@ -63,6 +63,11 @@ export type ActionId =
   // and aligned with the player → stop-and-aim intercept WITHOUT leaving the
   // defense position. Weight 550 > engage 500. Default 0 = OFF (byte-identical).
   | 'defenseIntercept'
+  // §139 / 方向 A（进攻侧，2026-08-05）: 火力死区解除。玩家处于死区（四方向
+  // 全无敌人 LOS）且敌人较远时，寻找附近有射界的瞭望格导航过去重新接战，
+  // 而非原地待机（Battlement 34% 全 tick 钉在 (11,24) 死区是输出瓶颈主因）。
+  // Weight 300 > hunt 200、< pickupLow 400。默认 0 = OFF（byte-identical）。
+  | 'firingLane'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -88,6 +93,9 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   pickupMid: 600,
   engage: 500,
   pickupLow: 400,
+  // §139 / 方向 A: 火力死区解除 — 覆盖 hunt(200) 的盲走，让死区玩家去有射界
+  // 的瞭望格重新接战。默认 0（mode 门控），不激活时字节持平。
+  firingLane: 300,
   hunt: 200,
   survive: 0,
   suicideReturn: 1100,

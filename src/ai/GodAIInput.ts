@@ -47,6 +47,7 @@ import {
   findUrgentPowerUpTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
+  computeBaseGuardAnchorImpl,
   selectTargetImpl,
 } from './god/StrategyPlanner'
 import {
@@ -296,6 +297,8 @@ export class GodAIInput implements InputLike {
     defenseIntercept: 0,
     // §116: 自杀秒回候选提交计数（纯观察）。
     suicideReturn: 0,
+    // §139: 火力死区解除候选提交计数（纯观察）。
+    firingLane: 0,
   }
 
   /**
@@ -497,6 +500,19 @@ export class GodAIInput implements InputLike {
    * deterministic, replay-safe. Reset in reset() per stage.
    */
   _chokepointPlan: ChokepointPlan | null = null
+  /**
+   * §137 / 基地守位格: lazily computed standable defense anchor (per stage).
+   * null = not computed yet / no standable guard cell found. Computed once in
+   * getBaseGuardAnchor() — pure terrain function, no RNG, recomputed on reset.
+   */
+  _baseGuardAnchor: Cell | null = null
+  /**
+   * §139 / 方向 A: cached firing-lane lookout cell + the frame it was found.
+   * Throttled re-search (firingLaneReplanTicks); pure observation of World
+   * state + params, no RNG. Only written when firingLaneMode > 0.
+   */
+  _firingLaneCell: Cell | null = null
+  _firingLaneTick = 0
 
   /**
    * M3 (plan/God-AI-Redesign-v2 §4.2b): 敌情感知模型状态。Per-tick EMA of
@@ -577,6 +593,9 @@ export class GodAIInput implements InputLike {
     this._suicideStandSuppress = 0
     // §88: invalidate the throttled chokepoint plan on stage reset.
     this._chokepointPlan = null
+    this._baseGuardAnchor = null
+    this._firingLaneCell = null
+    this._firingLaneTick = 0
     // M3: reset the EnemyModel per stage (same cross-tick-cache discipline as
     // _navCache / _campTicks — the model must not carry knowledge across
     // stages, and the per-tank trackers reference dead tank ids otherwise).
@@ -834,6 +853,13 @@ export class GodAIInput implements InputLike {
   }
   getDefaultDefensePosition(): Cell {
     return getDefaultDefensePositionImpl(this)
+  }
+  /** §137: the computed base guard anchor (standable defense hold), or null. */
+  getBaseGuardAnchor(): Cell | null {
+    if (this._baseGuardAnchor === null && this.params.baseGuardAnchorMode > 0) {
+      this._baseGuardAnchor = computeBaseGuardAnchorImpl(this)
+    }
+    return this._baseGuardAnchor
   }
   selectTarget(playerCell: Cell): Cell | null {
     return selectTargetImpl(this, playerCell)

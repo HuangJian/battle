@@ -435,6 +435,124 @@ export function calculateRouteDangerImpl(
 }
 
 /**
+ * §137 / 基地守位格 (base guard anchor): compute the best STANDABLE defense
+ * anchor near the base.
+ *
+ * The default defense position (BASE_POS.col, baseRow − defenseRowOffset) sits
+ * on the base protection ring — a brick on ALL 35 stages — so navigate can
+ * never reach it and the AI has no defensive hold point (Battlement exposes
+ * this: enemies breach the ring while the player roams or parks in the left
+ * rubble gap). When enabled, pick the best standable cell in the base box
+ * (cols bc−2..bc+3 × rows br−3..br+1) by:
+ *   ringCover — how many of the 8 base-ring cells can be DEFENDED from here
+ *     (the player shoots the ring's approach BEFORE it is breached; a ring
+ *     cell is defended when it shares the candidate's row/col with clear LOS),
+ *   laneCover — open bullet range along the candidate's row+column (intercept
+ *     value for enemies crossing the approach band),
+ *   cover    — solid neighbours (brick/steel/base) shielding the candidate,
+ *   distance — Manhattan to the base (faster response; small penalty).
+ *
+ * Pure terrain function of World state — no RNG, no per-tick cost (cached on
+ * GodAIInput, recomputed on stage reset). Data-driven — DECISIONS §81 forbids
+ * stage-name overrides; this is stage-characteristic-driven and therefore
+ * applies wherever the default defense position is unreachable.
+ */
+export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
+  const w = self.world
+  const tm = w.tileMap
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  // The 8 base-ring cells (border of the 4×4 box around the 2×2 base).
+  const ring: Array<[number, number]> = []
+  for (let r = br - 1; r <= br + 1; r++) {
+    for (let c = bc - 1; c <= bc + 2; c++) {
+      const isBase = c >= bc && c <= bc + 1 && r >= br && r <= br + 1
+      if (!isBase && r >= 0 && r < GRID && c >= 0 && c < GRID) ring.push([c, r])
+    }
+  }
+  const standable = (c: number, r: number): boolean => {
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
+    const t = tm.get(c, r)
+    return t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
+  }
+  const bulletOpen = (c: number, r: number): boolean => {
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
+    const t = tm.get(c, r)
+    return t !== 'brick' && t !== 'steel' && t !== 'base'
+  }
+  const DIRS: Array<[number, number]> = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1],
+  ]
+  let best: Cell | null = null
+  let bestScore = -1
+  for (let r = br - 3; r <= br + 1; r++) {
+    for (let c = bc - 2; c <= bc + 3; c++) {
+      if (!standable(c, r)) continue
+      // ringCover: ring cells sharing row/col with clear LOS from (c,r).
+      let ringCover = 0
+      for (let ri = 0; ri < ring.length; ri++) {
+        const [rc, rr] = ring[ri]
+        let clear = false
+        if (rc === c) {
+          clear = true
+          const step = rr < r ? -1 : 1
+          for (let y = r + step; y !== rr; y += step) {
+            const t = tm.get(c, y)
+            if (t === 'brick' || t === 'steel' || t === 'base') {
+              clear = false
+              break
+            }
+          }
+        } else if (rr === r) {
+          clear = true
+          for (let x = Math.min(c, rc) + 1; x < Math.max(c, rc); x++) {
+            const t = tm.get(x, r)
+            if (t === 'brick' || t === 'steel' || t === 'base') {
+              clear = false
+              break
+            }
+          }
+        }
+        if (clear) ringCover++
+      }
+      // laneCover: open bullet range along row + col (up to 6 cells each way).
+      let laneCover = 0
+      for (let di = 0; di < DIRS.length; di++) {
+        let x = c + DIRS[di][0]
+        let y = r + DIRS[di][1]
+        let steps = 0
+        while (steps < 6 && bulletOpen(x, y)) {
+          steps++
+          x += DIRS[di][0]
+          y += DIRS[di][1]
+        }
+        laneCover += steps
+      }
+      // cover: solid orthogonal neighbours.
+      let cover = 0
+      for (let di = 0; di < DIRS.length; di++) {
+        const x = c + DIRS[di][0]
+        const y = r + DIRS[di][1]
+        if (x >= 0 && x < GRID && y >= 0 && y < GRID) {
+          const t = tm.get(x, y)
+          if (t === 'brick' || t === 'steel' || t === 'base') cover++
+        }
+      }
+      const dist = Math.abs(c - bc) + Math.abs(r - br)
+      const score = ringCover * 60 + laneCover * 4 + cover * 15 - dist * 6
+      if (score > bestScore) {
+        bestScore = score
+        best = { col: c, row: r }
+      }
+    }
+  }
+  return best
+}
+
+/**
  * Default defense position: centered above the base at the defense row.
  * This is the fallback when no enemies are present.
  * Gap B: when the stage has no base, returns the player's current cell
@@ -442,7 +560,18 @@ export function calculateRouteDangerImpl(
  */
 export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
   if (!self.hasBase) return self.playerCell()
-  return { col: BASE_POS.col, row: BASE_POS.row - self.params.defenseRowOffset }
+  const def = { col: BASE_POS.col, row: BASE_POS.row - self.params.defenseRowOffset }
+  // §137: the default sits on the base ring (brick on all 35 stages) — when
+  // the guard-anchor mechanism is ON, hold the computed guard cell instead.
+  if (self.params.baseGuardAnchorMode > 0) {
+    const t = self.world.tileMap.get(def.col, def.row)
+    const standable = t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
+    if (!standable) {
+      const anchor = self.getBaseGuardAnchor()
+      if (anchor) return anchor
+    }
+  }
+  return def
 }
 
 /**
@@ -819,6 +948,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // bullet and must be prioritized. Others use kindThreatWeight scoring.
   let bestEnemy: Tank | null = null
   let bestScore = -Infinity
+  // §137 v2: any enemy with a clear shot at the base right now? If so the
+  // player MUST chase (the anchor hold cannot cover every lane); otherwise
+  // holding the guard anchor is safe and intercepts the approach band.
+  let anyClearShot = false
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)
@@ -827,6 +960,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // even beyond threatRangeCells — it can destroy the base NOW from any
     // distance. Other enemies are filtered by threatRangeCells as before.
     const hasClearShot = self.params.defenseClearShotBonus > 0 && enemyCanShootBase(self, t)
+    if (hasClearShot) anyClearShot = true
     if (distToBase > self.params.threatRangeCells && !hasClearShot) continue
 
     // M0.5 退役: smartThreatModel 的 defense-priority kind weights 已移除
@@ -884,6 +1018,25 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       }
     }
     return self.tankCell(nearest)
+  }
+
+  // §137 v2: hold the guard anchor (funnel mouth) while the base is under
+  // threat but no enemy can shoot it YET. From the anchor the §134
+  // lane-intercept + t2a fire at enemies crossing the approach band BEFORE
+  // they reach the ring (Battlement: the row-22 antechamber). Chase directly
+  // when an enemy already has a clear shot (must kill it NOW, the anchor may
+  // not cover its lane) or the player is too far from the anchor to make
+  // holding worthwhile (marching across the map while the base is threatened
+  // loses more than it gains). Only active when baseGuardAnchorMode > 0
+  // (getBaseGuardAnchor returns null otherwise — byte-identical).
+  const guardAnchor = self.getBaseGuardAnchor()
+  if (
+    guardAnchor &&
+    !anyClearShot &&
+    Math.abs(guardAnchor.col - playerCell.col) + Math.abs(guardAnchor.row - playerCell.row) <=
+      self.params.baseGuardAnchorHoldRange
+  ) {
+    return guardAnchor
   }
 
   // Go directly toward the best enemy. With the bulletCap-aware onCooldown

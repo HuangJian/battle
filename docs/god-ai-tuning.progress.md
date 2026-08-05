@@ -61,6 +61,9 @@
 | §133（2026-08-05） | 方向 C：brick-heavy 关防守距离再校准（race↑/maxDist↓/M13↓） | 20-seed mild −7 / balance −20 / tight −29 全负；6 目标关全负（S3 Crossfire 13→2/4/0 毁灭性）；「早回防」在 brick-heavy 关系统性有害（M13 ON4@10 教训放大版），不发布 |
 | §135（2026-08-05） | 方向 D 预测版：提前拦截基地车道逼近者 | 20-seed p1/p2 +0（逐字节相同，intercept 提交 645=645）、p3 −3；预测判定命中 168 次但全被 base 保护环砖墙的 scan 确认挡掉——无新开火窗口，不发布 |
 | §136（2026-08-05） | 方向 D 破砖版：预测命中时打场景砖开路 | 20-seed dig1/p1/p2 +0（逐字节相同，4 关探针 commits 645/791/371/136 全等）、p3 −3；破砖分支零触发——有砖时是保护环（禁打）、没砖时 scan.enemy 已覆盖，不发布 |
+| §137（2026-08-05） | 基地守位格：默认防守位 (12,23) 全 35 关都是环砖不可达，计算可站的守位格（Battlement 选 (12,22) 前厅口）作防守锚点 | 20-seed 净 −4（438 vs 442，+10/−11 关互抵）、Battlement 3→2（1-seed 噪声）；探针：站位分布与基线逐格相同、(12,22) 从未被访问——锚点只接「无敌人/紧急/撤退」分支，主力「拦截在防守行」分支不用它，机制几乎未生效，不发布 |
+| §138（2026-08-05） | 守位格 v2：base 受威胁且无 clear-shot 敌人时驻守守位格（holdRange 0/6/10） | 20-seed h0 438（−4，≈v1 校验 ✓）/ **h6 432（−10）最差** / h10 439（−3）；Battlement 全臂 3→2/3/2 不动；驻守前厅带被双向射击 + 拖慢击杀（Brickworks/Iron Curtain/Frozen Field/Oasis −4~−5），「站着防守」再证伪（M13 ON4@10 / §133 家族），不发布 |
+| §139（2026-08-05） | 方向 A：火力死区解除——无 LOS 时寻有射界的瞭望格重新接战（firingLaneMode，候选 weight 300 于 hunt 前） | 20-seed **m1 292（−150）/ r7 320（−122）/ d2 279（−163）灾难性崩塌**；Battlement 3→2 仍负。「四方向无 LOS」在迷宫关是常态而非死区——门控把正常寻路全误判为死区、不断拉离目标绕路，击杀节奏崩溃（Iron Curtain −12 / Spider −10 / Ice Palace −11），不发布 |
 
 **保留实验旋钮**（默认 0 / OFF，字节持平）：`dodgeCounterFire`、`dodgeClearanceScore`、`pathThreatAvoidance`、
 `survivalModeLives`、`survivalRiskWeight`、`dodgeHorizonScore`、`dodgeHorizonMinMarginTicks`、
@@ -69,7 +72,10 @@
 `fastBaseApproachWeight`/`fastBaseApproachRangeCells`（§132 方向 B）、
 `brickHeavyDefenseWallRatio`/`brickHeavyBaseRaceRangeCells`/`brickHeavyMaxPlayerDistFromBase`/
 `brickHeavyFieldDistCells`（§133 方向 C）、`defenseInterceptPredictCells`（§135 方向 D 预测版）、
-`defenseInterceptDigBricks`（§136 方向 D 破砖版）。
+`defenseInterceptDigBricks`（§136 方向 D 破砖版）、
+`baseGuardAnchorMode`（§137 基地守位格）、
+`baseGuardAnchorHoldRange`（§138 守位格 v2 驻守范围）、
+`firingLaneMode`/`firingLaneRadius`/`firingLaneMinEnemyDist`/`firingLaneReplanTicks`（§139 方向 A 火力死区）。
 
 ---
 

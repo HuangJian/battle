@@ -33,6 +33,8 @@ describe('M1 decision-chain invariants', () => {
       'defenseIntercept',
       'engage',
       'pickupLow',
+      // §139 / 方向 A: 火力死区解除 — 插在 hunt 之前（weight 300 > 200）。
+      'firingLane',
       'hunt',
       'survive',
     ])
@@ -49,6 +51,8 @@ describe('M1 decision-chain invariants', () => {
       defenseIntercept: 550,
       engage: 500,
       pickupLow: 400,
+      // §139 / 方向 A: 火力死区解除 — hunt(200) 之上，pickupLow(400) 之下。
+      firingLane: 300,
       hunt: 200,
       // M3: survive 默认 0 — 不激活（byte-identical）；M4 经 actionWeights 提升。
       survive: 0,
