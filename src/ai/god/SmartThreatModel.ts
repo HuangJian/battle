@@ -66,6 +66,76 @@ export function enemyCanShootBase(self: GodAIInput, t: Tank): boolean {
 }
 
 /**
+ * D2 / 拆环威胁 (ring-breach threat, plan/Battlement-Hard-Exploration §D2):
+ * does a tank at (col,row) have a clear shot at an INTACT base-ring brick?
+ *
+ * The base's only defense is the 8-brick ring — SimulationCombat destroys
+ * ring bricks (isBaseProtectionCell) before the eagle takes damage. An
+ * enemy aligned with a ring cell, with no other brick/steel in between, is
+ * BREACHING: its next bullet destroys the ring and opens the base lane. But
+ * the static §59 predicate (canShootBaseFrom) stays false until the ring
+ * falls, so the breacher is invisible to the defense scorer until the fatal
+ * bullet is already in flight (Battlement hard forensics: every loss had
+ * ≥2 ring bricks destroyed first; the mean flight time is 25 ticks). This
+ * predicate fires EARLY, while the ring still stands.
+ *
+ * "Clear shot at ring cell (rc,rr)" = same row or column, every cell
+ * strictly between is passable, and the ring cell itself is still 'brick'
+ * (the first blocking tile the bullet hits — the breach is productive).
+ * Once that ring cell falls, the same enemy on the same line flips to
+ * canShootBaseFrom, so the two predicates are mutually exclusive on any
+ * given line. Static terrain read — no RNG, no cache mutation.
+ */
+export function canBreachRingFrom(self: GodAIInput, col: number, row: number): boolean {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  const tm = self.world.tileMap
+  // Ring cells (mirror SimulationCombat.isBaseProtectionCell verbatim):
+  //   row br−1 over cols bc−1..bc+2, plus cols bc−1 and bc+2 at rows br..br+1.
+  const clearShotAt = (rc: number, rr: number): boolean => {
+    if (col === rc) {
+      const step = row < rr ? 1 : -1
+      for (let r = row + step; r !== rr; r += step) {
+        if (r < 0 || r >= GRID) return false
+        const t = tm.get(col, r)
+        if (t === 'brick' || t === 'steel') return false
+        // The base itself ends the line — a bullet reaching the eagle is a
+        // DIRECT base shot (§59 canShootBaseFrom territory), not a ring
+        // breach; never scan past the base into the far ring.
+        if (t === 'base') return false
+      }
+    } else if (row === rr) {
+      const step = col < rc ? 1 : -1
+      for (let c = col + step; c !== rc; c += step) {
+        if (c < 0 || c >= GRID) return false
+        const t = tm.get(c, row)
+        if (t === 'brick' || t === 'steel') return false
+        if (t === 'base') return false
+      }
+    } else {
+      return false
+    }
+    // The ring cell itself must still be brick — the breach is productive
+    // (already destroyed ⇒ the enemy is a §59 clear-shot or not a threat).
+    return tm.get(rc, rr) === 'brick'
+  }
+  for (let dc = -1; dc <= 2; dc++) {
+    if (clearShotAt(bc + dc, br - 1)) return true
+  }
+  for (let dr = 0; dr <= 1; dr++) {
+    if (clearShotAt(bc - 1, br + dr)) return true
+    if (clearShotAt(bc + 2, br + dr)) return true
+  }
+  return false
+}
+
+/** D2: does enemy t currently have a clear shot at an intact ring brick? */
+export function enemyCanBreachRing(self: GodAIInput, t: Tank): boolean {
+  const tc = self.tankCell(t)
+  return canBreachRingFrom(self, tc.col, tc.row)
+}
+
+/**
  * §135 / 方向 D 预测版: is the enemy ABOUT to enter the base's firing lane?
  *
  * §134 (SHIPPED) intercepts enemies already ON a lane (enemyCanShootBase —

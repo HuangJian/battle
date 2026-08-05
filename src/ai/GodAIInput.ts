@@ -45,6 +45,7 @@ import {
 import {
   findPowerUpTargetImpl,
   findUrgentPowerUpTargetImpl,
+  findDireItemTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   computeBaseGuardAnchorImpl,
@@ -847,6 +848,11 @@ export class GodAIInput implements InputLike {
     tier: 'all' | 'high' | 'midlow' = 'all',
   ): Cell | null {
     return findUrgentPowerUpTargetImpl(this, pcx, pcy, tier)
+  }
+  /** E1 / 道具经济: dire-state item pickup (swarm or ring-damaged → nearby
+   * bomb/freeze/fence/emp worth a divert). 0 = OFF (byte-identical). */
+  findDireItemTarget(pcx: number, pcy: number): Cell | null {
+    return findDireItemTargetImpl(this, pcx, pcy)
   }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)

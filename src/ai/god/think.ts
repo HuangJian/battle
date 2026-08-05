@@ -379,17 +379,34 @@ const PICKUP_HIGH: Candidate = {
     // here; MID-tier (star/tank/shield) yields to base defense and is checked
     // after the aggressive section (see PICKUP_MID). When chokepointMode==0,
     // the original all-tiers-together order is kept (byte-identical to pre-§88).
-    if (!self.aggressive && self.params.pickupPriorityMode > 0) {
-      const urgentTarget =
-        self.params.chokepointMode > 0
-          ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
-          : self.findUrgentPowerUpTarget(pcx, pcy)
-      if (urgentTarget) {
-        self._moveDir = self.navigateTowards(urgentTarget)
+    if (!self.aggressive) {
+      // E1 / 道具经济 (plan 反证判据): dire-state item pickup — when the base
+      // is swarmed (enemies within direItemApproachCells + >= direItemMinEnemies)
+      // or the ring is damaged (<= direItemRingLow), a nearby bomb/freeze/fence/
+      // emp is worth a divert even with enemies nearby (the §87 gates block
+      // under exactly this 4-enemy pressure). Runs before the normal §87 HIGH
+      // tier, keeping the PICKUP_HIGH chain slot (weight 800 — above
+      // engage/defenseIntercept, below dodge/interceptBase). 0 = OFF.
+      const direTarget = self.params.direItemMode > 0 ? self.findDireItemTarget(pcx, pcy) : null
+      if (direTarget) {
+        self._moveDir = self.navigateTowards(direTarget)
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
         self.branchCounts.powerup++
         self._lastBranch = 'powerup'
         return true
+      }
+      if (self.params.pickupPriorityMode > 0) {
+        const urgentTarget =
+          self.params.chokepointMode > 0
+            ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
+            : self.findUrgentPowerUpTarget(pcx, pcy)
+        if (urgentTarget) {
+          self._moveDir = self.navigateTowards(urgentTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.powerup++
+          self._lastBranch = 'powerup'
+          return true
+        }
       }
     }
     return false
@@ -1300,6 +1317,15 @@ const FIRING_LANE: Candidate = {
     if (hasLoS) return false
     // All enemies beyond min-dist — a close enemy is faster chased directly.
     const pc = self.playerCell()
+    // D5 (plan §D5): the deadzone redirect is confined to the BASE BOX
+    // (rows >= firingLaneBoxRow). §139 failed because the trigger ran across
+    // the whole maze — no LOS with distant enemies is the normal maze state,
+    // so the player churned between lookout cells instead of pressing.
+    // Inside the base box the same state is a genuine deadzone: the player
+    // MUST be able to shoot the base rush (Battlement: parked fireless at
+    // (11,24) while the right wing breaches the ring). 0 = OFF (byte-identical
+    // to §139 mode=0).
+    if (prm.firingLaneBoxRow > 0 && pc.row < prm.firingLaneBoxRow) return false
     for (let li = 0; li < list.length; li++) {
       const t = list[li]
       if (!t.alive || t.spawnTimer > 0) continue

@@ -126,6 +126,17 @@ export interface GodAIParams {
   /** §139: ticks between lookout-cell re-searches (throttle). */
   firingLaneReplanTicks: number
   /**
+   * D5 (plan §D5): confine the §139 firing-deadzone redirect to the BASE
+   * BOX — the candidate only fires when the player's row >= firingLaneBoxRow
+   * (target 20). §139 failed (mode 0 archived) because the trigger ran
+   * across the whole maze: no LOS with distant enemies is the NORMAL maze
+   * state, so the player churned between lookout cells instead of pressing.
+   * Inside the base box the same state is a genuine deadzone (Battlement:
+   * parked fireless at (11,24) while the right wing breaches the ring).
+   * 0 = OFF (byte-identical to §139 mode=0).
+   */
+  firingLaneBoxRow: number
+  /**
    * §135 / 方向 D 预测版: cells of approach lead-time to ALSO intercept. 0 =
    * OFF (byte-identical to §134 SHIPPED — only enemies already ON the lane,
    * enemyCanShootBase, trigger). >0: an enemy that shares the base's column
@@ -159,6 +170,20 @@ export interface GodAIParams {
   defenseInterceptDigBricks: number
   /** S7: cells around the base to scan for wall integrity. */
   baseWallScanRadius: number
+  /**
+   * §D4 (2026-08-05): base-protection flag semantics. 0 = legacy loose
+   * rectangle (baseWallScanRadius × ≤2 band) flags ANY brick near the base —
+   * including ordinary bricks that are NOT bullet-stopping ring cells
+   * (Battlement (10,19): dc=2/dr=5). On a dual-offset scan, one line hitting
+   * such a far brick suppresses break-through fire at the REAL ordinary brick
+   * in front → the player never digs → spawn-pocket lock (Battlement hard
+   * ~5% win rate). 1 = SHIPPED fix: flag only the actual ring cells
+   * (identical predicate to SimulationCombat.isBaseProtectionCell — row 23
+   * cols 11-14, cols 11/14 at rows 24-25). classic restored to 0 via
+   * CLASSIC_MODEL_PARAMS (radius 3 there — the false positive cannot occur;
+   * classic gate byte-identical).
+   */
+  baseWallExactRing: number
   /** Re-plan interval (ticks). */
   replanInterval: number
   /**
@@ -305,6 +330,22 @@ export interface GodAIParams {
    * weight is 30-120). Gated independently for A/B testing.
    */
   defenseClearShotBonus: number
+
+  /**
+   * D2 / 拆环威胁 (ring-breach threat score, plan/Battlement-Hard-Exploration
+   * §D2): score bonus in defense-mode target selection for enemies that have
+   * a clear shot at an INTACT base-ring brick (canBreachRingFrom — aligned
+   * with a ring cell, no brick/steel between, ring still brick). The static
+   * §59 predicate (defenseClearShotBonus) stays false until the ring falls,
+   * so the breacher is invisible to the scorer until the fatal bullet is in
+   * flight; this term fires EARLY while the ring stands, and grows as the
+   * ring weakens (×1 at full ring → ×1.875 at 1 brick left) — the breach is
+   * more urgent the closer it is to becoming a direct base shot. 0 = OFF
+   * (byte-identical to pre-D2). Scoring-only: navigation goes to the
+   * breacher's static cell (a breacher does not move while firing); no
+   * shooting logic changes (§135/§136 already covered blocked-lane fire).
+   */
+  defenseBreachBonus: number
 
   /**
    * §132 / 方向 B (fast × base-proximity threat weight): score bonus in
@@ -922,6 +963,43 @@ export interface GodAIParams {
    */
   pickupPriorityMinEnemyDist: number
   /**
+   * D5 (plan §D5): un-starve the star economy — when > 0, star/tank urgent
+   * pickups whose ITEM cell row >= pickupStarBoxRow (the base box, target 20)
+   * bypass the §87 nearby-enemy gate AND the route-danger gate. With 4
+   * enemies on field an enemy is almost always within pickupPriorityMinEnemyDist
+   * (5) or between player and item, so the gates blocked star/tank pickups
+   * forever (Battlement star 0.07/run → stuck at 1★). A star/tank inside the
+   * base box is a permanent-DPS upgrade worth the risk. 0 = OFF (byte-identical).
+   */
+  pickupStarBoxRow: number
+  /**
+   * E1 / 道具经济 (plan/Battlement-Hard-Exploration 反证判据, 清环前带+补环):
+   * 危急道具拾取 (dire-item pickup). 0 = OFF (byte-identical). 1 = ON: when
+   * the base is under a DIRE state — enemies swarming within
+   * direItemApproachCells of the base (liveEnemies >= direItemMinEnemies) OR
+   * the base ring is damaged (ring intact <= direItemRingLow) — a bomb/freeze/
+   * fence/emp item within direItemRangeCells is worth a divert even with
+   * enemies nearby: bomb clears the staging field, freeze buys a kill window,
+   * fence/steel reinforces the breached ring (补环). The §87 nearby-enemy +
+   * route-danger gates (which block under exactly this 4-enemy pressure, §143
+   * D5(b)) are bypassed; reachability + spawn-band gates still apply.
+   * Rationale (probe-verified 2026-08-05): 7-seed forensics — 2/7 losses
+   * (the high-kill ones) had uncollected HIGH items within 10 cells of the
+   * player in the final 400 ticks; the other 5/7 are kill-starved (zero
+   * drops upstream) and out of scope for this knob. The divert trade is the
+   * plan's last untried lever; the item's active effect resolves the dire
+   * state directly, unlike star (passive, D5(b) flat).
+   */
+  direItemMode: number
+  /** E1: min live enemies for the swarm trigger (target 3). */
+  direItemMinEnemies: number
+  /** E1: enemy→base Manhattan range (cells) for the swarm trigger (target 6). */
+  direItemApproachCells: number
+  /** E1: ring intact count (of 8) at/below which the fence trigger fires (target 4). */
+  direItemRingLow: number
+  /** E1: max player→item distance (cells) for the dire divert (target 10). */
+  direItemRangeCells: number
+  /**
    * §87: enemy spawn-zone gate. When > 0, urgent pickups whose ITEM cell row
    * is <= this value are skipped — classic enemies spawn at row 0 (ENEMY_SPAWNS
    * {0,0}/{12,0}/{6,0}), so rows 0..max are the spawn band where the player
@@ -1320,6 +1398,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   firingLaneRadius: 5,
   firingLaneMinEnemyDist: 4,
   firingLaneReplanTicks: 15,
+  // D5 (plan §D5): base-box confinement for the §139 deadzone redirect
+  // (0 = OFF, byte-identical to §139 mode=0). A/B candidate: 20 (rows 20-25).
+  firingLaneBoxRow: 0,
   // §135 / 方向 D 预测版: 提前拦截格数。默认 0 = OFF（byte-identical 到 §134
   // SHIPPED——只拦已上车道者）。A/B 候选：predict=1/2/3。
   defenseInterceptPredictCells: 0,
@@ -1327,6 +1408,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // （byte-identical 到 §134——预测只在 scan.enemy 确认时才提交）。
   defenseInterceptDigBricks: 0,
   baseWallScanRadius: 5,
+  // §D4 (2026-08-05): base-protection flag = exact ring cells (SHIPPED bug
+  // fix). The legacy radius-5 rectangle flagged ordinary bricks near the base
+  // as "base walls", poisoning dual-offset scans → break-through fire
+  // suppressed at the real brick in front → spawn-pocket lock (Battlement
+  // hard ~5%). classic: restored to 0 via CLASSIC_MODEL_PARAMS.
+  baseWallExactRing: 1,
   replanInterval: 1,
   replanCache: 1,
   pickupReachCache: 1,
@@ -1373,6 +1460,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // Default 500 — prioritizes enemies with a clear line of fire to the base.
   // 0 = OFF (byte-identical to pre-§59).
   defenseClearShotBonus: 500,
+
+  // D2 / 拆环威胁: ring-breach score bonus in defense-mode target selection
+  // (canBreachRingFrom — enemy aligned with an intact ring brick). Default
+  // 0 = OFF (byte-identical to pre-D2). A/B sweep candidate: 300 (between
+  // the proximity noise band and clearShotBonus 500).
+  defenseBreachBonus: 0,
 
   // §132 / 方向 B: speed × base-proximity threat weight in defense target
   // selection. Default 0 = OFF (byte-identical — the scoring term short-
@@ -1521,6 +1614,16 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   pickupPriorityMaxDanger: 0,
   pickupPriorityMinEnemyDist: 5,
   pickupPrioritySpawnRowMax: 3,
+  // D5 (plan §D5): star/tank base-box gate relaxation (0 = OFF, byte-identical
+  // to §87). A/B candidate: 20 (rows 20+).
+  pickupStarBoxRow: 0,
+  // E1 / 道具经济: 危急道具拾取 (0 = OFF, byte-identical). A/B candidate: 1
+  // with minEnemies 3 / approach 6 / ringLow 4 / range 10.
+  direItemMode: 0,
+  direItemMinEnemies: 3,
+  direItemApproachCells: 6,
+  direItemRingLow: 4,
+  direItemRangeCells: 10,
 
   // ── §88: 据守咽喉要地 (chokepoint holding) ────────────────────────
   // SHIPPED ON (2026-08-03, DECISIONS §93/§94): 120-seed A/B on S6/S16/S32
@@ -1635,6 +1738,10 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   outnumberedRadiusCells: 9,
   t8MaxInterceptDistCells: 8,
   baseWallScanRadius: 3,
+  // §D4: exact-ring base-wall flag is a pool-model (radius-5) fix; classic
+  // uses radius 3 where the false positive cannot occur — restore 0
+  // (byte-identical classic gate).
+  baseWallExactRing: 0,
   replanInterval: 50,
   powerupMaxDivertDistance: 16,
   endgameEnemyThreshold: 6,

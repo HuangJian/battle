@@ -238,15 +238,20 @@ describe('scanAheadImpl — baseWall and enemy on dual offset lines', () => {
 })
 
 describe('shouldFireInDirImpl — baseWall must block fire even when enemy is on dual-offset line', () => {
-  const pcx = 10 * CELL + CELL / 2 // 168
-  const pcy = 22 * CELL + CELL / 2 // 360
+  // Player center at col 11, row 20. Scan DOWN.
+  // Offset 0 (sx = pcx−8 = 176, col 11): hits the REAL ring brick at
+  // (11,23) — an exact base-protection cell (dc=1/dr=1) → baseWall=true.
+  // Offset 1 (sx = pcx+8 = 192, col 12): finds the enemy at (10,23),
+  // whose 32px body (cols 10-11) overlaps both offset lines.
+  const pcx = 11 * CELL + CELL / 2 // 184
+  const pcy = 20 * CELL + CELL / 2 // 328
 
   it('does NOT fire when baseWall and enemy are both true (dual-offset)', () => {
     const { world, input } = setupWorld()
-    // Base protection brick at (10, 23) — offset 0.
-    world.tileMap.grid[23][10] = 'brick'
-    // Enemy at (11, 23) — offset 1.
-    placeEnemy(world, 11, 23)
+    // REAL ring brick at (11, 23) — offset 0 (col 11).
+    world.tileMap.grid[23][11] = 'brick'
+    // Enemy at (10, 23) — body spans cols 10-11, overlapping both offsets.
+    placeEnemy(world, 10, 23)
 
     input.reset()
     input.hasBase = world.tileMap.hasBase()
@@ -261,8 +266,8 @@ describe('shouldFireInDirImpl — baseWall must block fire even when enemy is on
 
   it('break-through condition: base protection must take priority over enemy', () => {
     const { world, input } = setupWorld()
-    world.tileMap.grid[23][10] = 'brick'
-    placeEnemy(world, 11, 23)
+    world.tileMap.grid[23][11] = 'brick'
+    placeEnemy(world, 10, 23)
 
     input.reset()
     input.hasBase = world.tileMap.hasBase()
@@ -283,5 +288,26 @@ describe('shouldFireInDirImpl — baseWall must block fire even when enemy is on
     // The OLD (buggy) condition would have fired:
     // bs.enemy || (!bs.baseWall && !(bs.baseSteel && lvl >= 3))
     // = true || (false && ...) = true → DESTROYS OWN BASE
+  })
+
+  it('D4 §140 exact-ring: a NON-ring brick near the base is NOT baseWall', () => {
+    // Pool default (baseWallExactRing=1): an ordinary scene brick at (10,23)
+    // (dc=2/dr=1 — inside the old loose radius rectangle but NOT one of the
+    // 8 ring cells) must NOT be flagged baseWall. The bullet fired at it
+    // stops at the brick (col 10) and never reaches the base (cols 12-13),
+    // so the fire is harmless — this is the flip side of the Battlement
+    // pocket fix (§140): the loose rectangle suppressed break-through fire
+    // at real scene bricks (Battlement (9,21) vs the far (10,19) offset).
+    const { world, input } = setupWorld()
+    world.tileMap.grid[23][10] = 'brick'
+    input.reset()
+    input.hasBase = world.tileMap.hasBase()
+    input.params = { ...DEFAULT_GOD_AI_PARAMS, aimError: 0 }
+    const bs = scanAheadImpl(input, 10 * CELL + CELL / 2, 22 * CELL + CELL / 2, 'down')
+    expect(bs.baseWall).toBe(false)
+    expect(bs.wall).toBe(true)
+    // Firing at it is allowed (harmless scene brick).
+    const fired = shouldFireInDirImpl(input, 10 * CELL + CELL / 2, 22 * CELL + CELL / 2, 'down')
+    expect(fired).toBe(true)
   })
 })

@@ -1602,3 +1602,133 @@ hard 的 Boss 关（chaos 0/20 是难度锚点），或从「防守」转向「�
 - 与 §131-§138 合流：九个防守/位置类机制（拦子弹/追快车/早回防/车道拦截 SHIPPED/预测/破砖/守位格 v1/v2/火力死区）中唯一正项仍是 §134 移动中拦截。位置类杠杆全部证伪，进攻侧首轮（§139）也证伪。
 
 **Implications:** 若继续死区方向，正确门控应是「无 LOS **且** 静止未推进」（非无 LOS 即触发）——但九轮攻坚定律 + 灾难幅度说明该家族边际已尽。Battlement hard 3/20 收敛为 Boss 关定位（chaos 0/20 难度锚点）。旋钮默认 0 保留。classic 不受影响（默认 0）。
+
+## 140. 方向 D4：baseWall 精确环判定（破砖开火假阳性修复，SHIPPED，2026-08-05）
+
+**Decision:** 新增 `baseWallExactRing`（DEFAULT **1** = SHIPPED；classic 经 CLASSIC_MODEL_PARAMS
+restore 0）。scanAheadImpl 的基地保护砖判定从「baseWallScanRadius×≤2 带」松散矩形改为**精确
+环格谓词**——与 `SimulationCombat.isBaseProtectionCell` 逐字一致（row 23 cols 11-14 + cols
+11/14 rows 24-25 共 8 格）。这是机制级 bug 修复，不是调参旋钮。
+
+**机制（probe-verified，Battlement hard seed 1）:** 玩家困在出生口袋 (9,22) 朝上面对 (9,21)
+普通可破砖（canMoveOrBreak 验证可破），但 scanAheadImpl 双 offset 线合并：col10 线穿透
+(10,21)/(10,20) 空格后撞 (10,19)（dc=2/dr=5，落入半径 5 松散矩形，而它**不是环格**）→ 合并
+`baseWall=true` → `shouldFireBreakThrough` 拒绝 → **fire=0 持续 3000+ tick** → 口袋天花板永远
+打不碎 → 零开火站岗 → base_destroyed。corridor A* 确认口袋是坦克尺寸死胡同（(10,22) 足迹含
+(11,23) 砖），唯一出路是破砖——而破砖开火被假 baseWall 掐死；navStuck（2968 tick）无济于事。
+
+**Results（2026-08-05）:**
+- 复现测试 `tests/battlement-pocket-dig.test.ts`（seed1/2）：修复前 pocket 占用 100% fail → 修复后绿。
+- Battlement hard **120-seed：6/120 (5.0%) → 11/120 (9.2%)**（+4.2pp，Fisher p≈0.21 弱正，机制证据充分）。
+- 机制证据：击杀 2→**6.6/run**、star 0.07→**0.19/run**、道具 1.44→1.93/run、败时距基地分布改善。
+- 门禁全绿：classic **637/700 (91.0%)** ≥ 612（restore 0 → 逐字节不变）；hard 440/700 (62.9%) ≥ 415；
+  chaos 417/700 (59.6%) ≥ 394（对比 §134 真值 442/420：−2/−3 局，噪声内）。
+
+**Rationale:**
+- 为什么是 bug 而非旋钮：松散矩形的假阳性（非环砖被当基地保护砖）直接掐死**破砖开火**决策——
+  属于决策 bug 级缺陷。精确环格与 Simulation 的子弹拦截语义（isBaseProtectionCell）对齐，
+  T6「不打基地保护砖」的原始意图（只保护真实环格）被正确满足；且 T2a/AGGRO 已有的
+  `baseWallDist <= enemyDist` 距离感知在精确判定下语义更干净。
+- 为什么 classic restore 0：classic 用 radius 3，该假阳性不可能出现（(10,19) dr=5 > 3）；classic
+  未 A/B，按 §115/§121/§134 先例 restore 0 保持门禁 byte-identical。
+- 为什么不动 Navigator.isBaseProtectionBrick（radius 5 语义保留）：导航侧 (9,21)（dc=3/dr=3）
+  本就不在半径判定内，导航未受影响；最小改动，避免扩大 blast radius。
+
+**Implications:** Battlement hard 从「§139 收敛值 3/20 Boss 关」抬至 11/120 (9.2%)——§139
+「位置类杠杆边际已尽」被部分推翻：机制级 bug 修复（§140）仍能显著抬升。剩余 90.8% 败因仍是
+base_destroyed：玩家已能离开口袋战斗（击杀翻 3 倍），但右翼拆环拦截/站位（D2 拆环威胁评分、
+D1 防守落点）仍缺失——D2/D1/D5 继续按 plan/Battlement-Hard-Exploration.md 推进。
+
+## 141. D2 拆环威胁评分 —— 诚实阴性（旋钮默认 0，byte-identical）
+
+**Decision:** 实现并测量 `defenseBreachBonus`（Battlement 探索 D2）：新增静态谓词
+`canBreachRingFrom`（敌人与 8 个环格之一对齐、中间无砖/钢、且该环格仍是砖——其下一发子弹
+就拆环），接入 `selectTargetUncached` 基地威胁评分为加分项，评分随环完整度下降而上升
+（×1 满环 → ×1.875 仅 1 砖）。默认 0 = OFF。A/B：hard 60-seed **基线 6/60 (10.0%) vs
+breach=300 7/60 (11.7%)，+1.7pp 二项噪声内**，killer 构成不变 → **不发货，旋钮保留 0**。
+
+**Rationale:**
+- 结构分析（与实测一致）：基地威胁分支的既有评分项（`-distToBase*10` + 行紧迫 +100/行 +
+  kind 权重）已把拆环者排在所有非拆环者之上——威胁态内的敌人只要在环旁（row 23-25 / col
+  11-14 带）就天然高分；拆环加分无法重排任何决策。§135/§136 的"评分/射击类杠杆"家族再次证伪
+  （§131-§139 同族连续阴性）。
+- 为什么保留代码：谓词是 D1/D5 的可复用原语（拆环带识别）；旋钮 0 短路 = byte-identical，
+  与 §135/§136/§132 先例一致。测试 `tests/battlement-ring-breach.test.ts` 锁定环格谓词、
+  与 §59 clear-shot 的互斥性（拆环完成 → 同敌翻转为直射）、威胁态选靶（拆环者 > 中场敌）。
+- 谓词 bug 修正：扫描遇 `'base'` 格即停——(15,24) 在 (14,24) 被毁后子弹实际命中鹰 (13,24)，
+  属 §59 直射而非拆环；原实现会穿透基地误报 (11,24) 拆环（测试暴露）。
+
+**Implications:** Battlement 探索第 4 个阴性方向（D3 无效、D2 噪声、§135/§136 已证伪）——
+评分类杠杆在威胁态内边际已尽，剩余杠杆转向 D1（防守落点解盲——威胁态外的站位）+ D5
+（火力解锁 + 星经济）。
+
+## 142. D1 防守落点解盲 —— 诚实阴性（baseGuardAnchorMode 保持 0）
+
+**Decision:** 实现并测量 D1：① `computeBaseGuardAnchorImpl` 目标函数加**攻击带 LOS 项**
+（approachCover×60——敌人集结带 cols bc+2..bc+5 ∪ bc−3..bc−1 × rows br−1..br+1 中与候选
+同排/列且有清晰弹道的格数）；② §137 v2 锚点停留加 `!anyBreacher` 门（拆环者活跃时去追而非
+停留，用 D2 的 canBreachRingFrom 谓词）；③ 锚点接入**正常目标选择**（!baseUnderThreat 且
+敌人进入 rows≥20 近基带、玩家距锚 ≤6 格时回锚）。全部复用 `baseGuardAnchorMode` 旋钮
+（默认 0）。验证：Battlement 锚点从 §137 的 (12,22)（对右翼无 LOS）迁移到 **(15,24)**。
+A/B：hard 60-seed **5/60 (8.3%) vs 基线 6/60 (10.0%)，−1.7pp**；击杀 5.72/run（基线 6.6 ↓）、
+star 0.12/run（基线 0.19 ↓）、败时距基地 11.6（基线 10.4，玩家离基地更远）→ **不发货**。
+
+**Rationale:**
+- 机制证据：锚点停留既没增加拦截击杀（t2a 在败局末段反而下降）也没把玩家留在基地附近——
+  玩家在锚点与追敌之间切换，实质是把「追敌」换成了「走位到锚点」，净收益为负。§137（v1/v2）
+  阴性在 D4 修复后重测仍阴性——锚点族机制在纯砖迷宫上结构性低效（迷宫任意格 LOS 覆盖有限，
+  驻守收益小）。
+- 为什么保留代码：全部门控在 baseGuardAnchorMode>0 下才激活（默认 0 = byte-identical），
+  锚点目标函数是改进（若未来启用，锚点质量更优）；与 §135/§136/§137 先例一致。
+
+**Implications:** 站位/锚点类杠杆（§137 + D1）完全证伪。D1 的结构性发现：纯砖迷宫里
+「有射界的防守位」收益低——因为从任何单格能覆盖的弹道都太少。
+
+## 143. D5 基地火力解锁 + 星经济 —— 诚实阴性（firingLaneBoxRow / pickupStarBoxRow 保持 0）
+
+**Decision:** 实现并测量 D5：① **死区重定向限定基地盒**——§139 FIRING_LANE 候选叠加
+`pc.row >= firingLaneBoxRow`（目标 20）门控；② **星经济豁免**——`pickupStarBoxRow` 开启时，
+基地盒内（row ≥ 20）star/tank 道具绕过 §87 近敌门与路线危险门（两门在 4 敌常驻下永远挡路，
+D4 前 star 0.07/run 即此病因）。A/B（臂 = firingLaneMode=1 + firingLaneBoxRow=20 +
+pickupStarBoxRow=20）：hard 60-seed **6/60 (10.0%) = 基线持平**；chaos 6/60。→ **不发货**。
+
+**Rationale:**
+- (a) 机制证据：firingLane 在败局末 10 tick 占 **48%**（261/541）——即便限定基地盒，纯砖
+  迷宫「四方向无 LOS」仍是常态（非死区而是迷宫常态），玩家在瞭望格间**空转导航**、不射击
+  （t2a 仅 10%），§139 的失败模式原样复现。D5(a) 证实：LOS 重定位机制在迷宫上结构性无效——
+  与 D1（有射界锚点）的结论互相印证。
+- (b) 机制证据：star 0.18/run vs 基线 0.19 持平（tank 0.13→0.22 微升）——星掉落多在盒外或
+  收集链仍有其他阻塞，星经济杠杆不动。副产物：arm 出现 1/54 例 navigate 自伤（既有模式，
+  与 D5 无因果）。
+
+**Implications:** Battlement 探索全部方向收束：D3（参数探针）证伪、D4（baseWallExactRing
+bug 修复）SHIPPED（5.0%→9.2%）、D2/D1/D5 全部阴性。加上 §131-§139 家族，评分类/站位类/
+重定位类杠杆在纯砖迷宫上边际已尽。总反证判据未满足（击杀 6.6/run < 10+），道具经济（bomb/
+freeze/fence 清环前带）是唯一未试的板子——但 D5(b) 已暗示道具收集链本身不是杠杆。
+
+## 144. E1 道具经济（危急道具拾取）—— 诚实阴性（direItemMode 保持 0，反证判据收束）
+
+**Decision:** 实现并测量计划的最后一块板子 E1（bomb/freeze 清环前带、fence 补环）：新增
+`findDireItemTargetImpl` + `direItemMode` 旋钮——基地危急态（敌人 swarm 在
+`direItemApproachCells` 6 格内且 ≥`direItemMinEnemies` 3，**或**环砖 ≤`direItemRingLow` 4）
+时，10 格内（`direItemRangeCells`）的 bomb/freeze/fence/emp 无视 §87 近敌门/路线危险门优先
+拾取（环低偏向 fence 补环、swarm 偏向 bomb/freeze 清场）。接入 PICKUP_HIGH 候选（weight 800，
+dodge/interceptBase 之下）。A/B：hard 60-seed **5/60 (8.3%) vs 基线 6/60 (10.0%)，−1.7pp**；
+chaos 5/60 → **不发货**。测试 `tests/battlement-dire-item.test.ts`（触发条件/门控绕过/范围）锁定。
+
+**Rationale:**
+- 前置取证（7-seed 探针）已预示方向有腿但窄：7 局败局中 **5 局零击杀零掉落**（经济上游被
+  击杀瓶颈饿死，道具方向救不了这 5 局），仅 2 局（高击杀局）败局末 400 tick 有 ≤10 格未拾
+  取的 HIGH 道具。A/B 实测证实另一面：危急态弃守去拾取，**路程代价 > 收益**——击杀
+  5.95/run（↓0.65）、败时距基地 13.5（基线 10.4，玩家被拽离防线）、bomb/freeze 拾取不增反降
+  （0.20/0.22 → 0.17/0.13）。这正是 §87 近敌门当初设计的失败模式（Lattice s2：弃道具捡拾
+  后停顿阵亡）在危急态的复现。
+- 结构性结论：道具经济是击杀的下游——零击杀局无道具可拾，高击杀局的拾取时机救不了基地。
+  计划的「总反证判据」前提（击杀 10+/run）从未达成，且最后一块板子实测阴性 → **Battlement
+  hard 探索彻底收束**：唯 SHIPPED 的是 D4（机制级 bug 修复），hard 胜率 5.0% → ~9-10% 为
+  当前天花板（120-seed 9.2% / 60-seed 10.0%）。
+
+**Implications:** 剩余提升路径不在 AI 决策层（评分/站位/重定位/道具四族全证伪），而在
+关卡设计侧（Battlement 右翼集结带 / 出生口袋）或规则侧（敌人 AI 层级、fast 占比）——属
+MANIFEST「Three Gates」之外的关卡难度域，后续如需推进应走 level-design 而不是 God AI 旋钮。
+

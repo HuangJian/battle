@@ -5,7 +5,7 @@ import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
-import { enemyCanShootBase } from './SmartThreatModel'
+import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 import { blocksBullet } from './Chokepoint'
 
 // ============================================================
@@ -188,6 +188,10 @@ export function findUrgentPowerUpTargetImpl(
   // and the item; an enemy 5 cells away (or an active firefight) was still
   // abandoned while the player walked to the item, then the player stalled
   // or stopped firing and died. Same radius as the S5 P3.2 gate (5 cells).
+  // D5 (plan §D5): demoted from an early return to a per-item flag — star/
+  // tank items inside the base box (row >= pickupStarBoxRow) are exempt in
+  // the loop below. 0 = pre-D5 (every item blocked → null, byte-identical).
+  let nearbyEnemy = false
   if (p.pickupPriorityMinEnemyDist > 0) {
     const playerCol = Math.floor(pcx / CELL)
     const playerRow = Math.floor(pcy / CELL)
@@ -199,7 +203,8 @@ export function findUrgentPowerUpTargetImpl(
       const eCol = Math.floor(t.x / CELL)
       const eRow = Math.floor(t.y / CELL)
       if (Math.abs(eCol - playerCol) + Math.abs(eRow - playerRow) <= p.pickupPriorityMinEnemyDist) {
-        return null
+        nearbyEnemy = true
+        break
       }
     }
   }
@@ -215,6 +220,16 @@ export function findUrgentPowerUpTargetImpl(
     if (!pu.alive) continue
     const cx = pu.x + pu.w / 2
     const cy = pu.y + pu.h / 2
+    // D5 (plan §D5): star/tank in the base box bypass the §87 nearby-enemy
+    // gate AND the route-danger gate — with 4 enemies on field both gates
+    // block forever, starving the player at 1★ (Battlement star 0.07/run).
+    // A base-box star/tank is a permanent-DPS upgrade worth the risk.
+    // 0 = pre-D5 byte-identical.
+    const starInBox =
+      p.pickupStarBoxRow > 0 &&
+      (pu.type === 'star' || pu.type === 'tank') &&
+      Math.floor(pu.y / CELL) >= p.pickupStarBoxRow
+    if (nearbyEnemy && !starInBox) continue
     // §88 tier gate: only consider items of the requested tier (default 'all'
     // = pre-§88 behavior, byte-identical).
     if (tier !== 'all' && urgentTier(pu.type) !== tier) continue
@@ -231,8 +246,11 @@ export function findUrgentPowerUpTargetImpl(
       continue
     }
 
-    // Path safety gate: no enemy between the player and the item.
-    if (self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger) continue
+    // Path safety gate: no enemy between the player and the item (D5: the
+    // base-box star/tank exemption above also lifts this gate — both §87
+    // gates starve under 4-enemy field pressure).
+    if (self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger && !starInBox)
+      continue
 
     // Reachability gate: the tank must be able to drive to a cell that
     // overlaps the item (same A* as the bonus window). Without this the
@@ -268,6 +286,93 @@ function urgentPickupRange(type: PowerUpType, p: GodAIParams): number {
       // star / tank / shield (+ modern extras rewind/repair/decoy/mine/…)
       return p.pickupPriorityMidRange
   }
+}
+
+/**
+ * E1 / 道具经济 (plan/Battlement-Hard-Exploration 反证判据): 危急道具拾取 —
+ * when the base is in a DIRE state (enemies swarming within
+ * direItemApproachCells OR the base ring damaged at/below direItemRingLow), a
+ * nearby bomb/freeze/fence/emp is worth a divert even with enemies nearby.
+ * The item's ACTIVE effect resolves the dire state directly (bomb clears the
+ * staging field, freeze buys a kill window, fence reinforces the breached
+ * ring), unlike star (passive — D5(b) measured flat). Bypasses the §87
+ * nearby-enemy + route-danger gates (which block under exactly this 4-enemy
+ * field pressure); reachability + spawn-band gates still apply.
+ *
+ * Probe-verified scope (2026-08-05, 7 seeds): only the high-kill losses
+ * (2/7) had uncollected HIGH items within 10 cells of the player in the
+ * final window — the other 5/7 are kill-starved upstream (zero drops), so
+ * this knob is bounded by ~2/7 of losses. Pure World-state reads (findPath
+ * draws no RNG) — gated by direItemMode (0 = OFF, byte-identical).
+ */
+export function findDireItemTargetImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+  const p = self.params
+  if (p.direItemMode <= 0) return null
+  const w = self.world
+  const powerUps = w.powerUps
+  if (powerUps.length === 0) return null
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+
+  // ---- Dire triggers ----
+  // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  let liveEnemies = 0
+  let anyApproaching = false
+  for (let li = 0; li < list.length; li++) {
+    const t = list[li]
+    if (!t.alive || t.spawnTimer > 0) continue
+    liveEnemies++
+    if (!anyApproaching) {
+      const tc = self.tankCell(t)
+      if (Math.abs(tc.col - bc) + Math.abs(tc.row - br) <= p.direItemApproachCells) {
+        anyApproaching = true
+      }
+    }
+  }
+  // Trigger A (清环前带): swarm converging on the base.
+  const swarm = liveEnemies >= p.direItemMinEnemies && anyApproaching
+  // Trigger B (补环): the base ring is damaged — fence reinforcement urgent.
+  let ringIntact = 8
+  if (p.direItemRingLow > 0) {
+    ringIntact = 0
+    const tm = w.tileMap
+    for (let dc = -1; dc <= 2; dc++) if (tm.get(bc + dc, br - 1) === 'brick') ringIntact++
+    for (let dr = 0; dr <= 1; dr++) {
+      if (tm.get(bc - 1, br + dr) === 'brick') ringIntact++
+      if (tm.get(bc + 2, br + dr) === 'brick') ringIntact++
+    }
+  }
+  const ringLow = ringIntact <= p.direItemRingLow
+  if (!swarm && !ringLow) return null
+
+  let best: Cell | null = null
+  let bestScore = -Infinity
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    const t = pu.type
+    if (t !== 'bomb' && t !== 'freeze' && t !== 'fence' && t !== 'emp') continue
+    const cellRow = Math.floor(pu.y / CELL)
+    // Spawn-band gate (same as §87 — a fresh-enemy trap).
+    if (p.pickupPrioritySpawnRowMax > 0 && cellRow <= p.pickupPrioritySpawnRowMax) continue
+    const dist = Math.round(
+      (Math.abs(pu.x + pu.w / 2 - pcx) + Math.abs(pu.y + pu.h / 2 - pcy)) / CELL,
+    )
+    if (dist > p.direItemRangeCells) continue
+    // Reachability (same A* as the navigator — powerUpCollectCell).
+    const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), cellRow)
+    if (!collect) continue
+    // Value: ring-low prefers fence (补环); swarm prefers bomb/freeze/emp.
+    let score = 1000 - dist * 10
+    if (ringLow && t === 'fence') score += 500
+    if (swarm && (t === 'bomb' || t === 'freeze' || t === 'emp')) score += 500
+    if (score > bestScore) {
+      bestScore = score
+      best = collect
+    }
+  }
+  return best
 }
 
 /**
@@ -444,13 +549,22 @@ export function calculateRouteDangerImpl(
  * this: enemies breach the ring while the player roams or parks in the left
  * rubble gap). When enabled, pick the best standable cell in the base box
  * (cols bc−2..bc+3 × rows br−3..br+1) by:
- *   ringCover — how many of the 8 base-ring cells can be DEFENDED from here
- *     (the player shoots the ring's approach BEFORE it is breached; a ring
- *     cell is defended when it shares the candidate's row/col with clear LOS),
- *   laneCover — open bullet range along the candidate's row+column (intercept
- *     value for enemies crossing the approach band),
- *   cover    — solid neighbours (brick/steel/base) shielding the candidate,
- *   distance — Manhattan to the base (faster response; small penalty).
+ *   ringCover     — how many of the 8 base-ring cells can be DEFENDED from
+ *     here (the player shoots the ring's approach BEFORE it is breached; a
+ *     ring cell is defended when it shares the candidate's row/col with clear
+ *     LOS),
+ *   approachCover — D1 (plan §D1): how many cells of the enemy STAGING band
+ *     beyond the ring (cols bc+2..bc+5 ∪ bc−3..bc−1 × rows br−1..br+1, the
+ *     right/left wings where the base rush launches) the candidate can SHOOT
+ *     (same row/col, clear LOS). §137's pick (Battlement: (12,22)) stared at
+ *     the ring and could not shoot the right-wing breachers at all — this
+ *     term makes an antechamber/right-wing cell ((14-15,22-23)/(15,24)) win,
+ *     so the player holds a cell WITH a firing lane onto the attack band,
+ *   laneCover     — open bullet range along the candidate's row+column
+ *     (intercept value for enemies crossing the approach band),
+ *   cover         — solid neighbours (brick/steel/base) shielding the
+ *     candidate,
+ *   distance      — Manhattan to the base (faster response; small penalty).
  *
  * Pure terrain function of World state — no RNG, no per-tick cost (cached on
  * GodAIInput, recomputed on stage reset). Data-driven — DECISIONS §81 forbids
@@ -475,6 +589,22 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
     const t = tm.get(c, r)
     return t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
   }
+  // D1 (plan §D1): the enemy staging band beyond the ring — standable cells
+  // the base rush launches from (right wing cols bc+2..bc+5, left wing cols
+  // bc-3..bc-1, attack rows br-1..br+1).
+  const band: Array<[number, number]> = []
+  for (let br2 = br - 1; br2 <= br + 1; br2++) {
+    for (let bc2 = bc + 2; bc2 <= bc + 5; bc2++) {
+      if (bc2 >= 0 && bc2 < GRID && br2 >= 0 && br2 < GRID && standable(bc2, br2)) {
+        band.push([bc2, br2])
+      }
+    }
+    for (let bc2 = bc - 3; bc2 <= bc - 1; bc2++) {
+      if (bc2 >= 0 && bc2 < GRID && br2 >= 0 && br2 < GRID && standable(bc2, br2)) {
+        band.push([bc2, br2])
+      }
+    }
+  }
   const bulletOpen = (c: number, r: number): boolean => {
     if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
     const t = tm.get(c, r)
@@ -491,32 +621,39 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
   for (let r = br - 3; r <= br + 1; r++) {
     for (let c = bc - 2; c <= bc + 3; c++) {
       if (!standable(c, r)) continue
+      // Clear bullet line from the candidate (c,r) to (tc,tr): same row or
+      // column with no brick/steel/base between (water lets bullets pass).
+      const lineClearTo = (tc: number, tr: number): boolean => {
+        if (tc === c) {
+          const step = tr < r ? -1 : 1
+          for (let y = r + step; y !== tr; y += step) {
+            const t = tm.get(c, y)
+            if (t === 'brick' || t === 'steel' || t === 'base') return false
+          }
+          return true
+        }
+        if (tr === r) {
+          for (let x = Math.min(c, tc) + 1; x < Math.max(c, tc); x++) {
+            const t = tm.get(x, r)
+            if (t === 'brick' || t === 'steel' || t === 'base') return false
+          }
+          return true
+        }
+        return false
+      }
       // ringCover: ring cells sharing row/col with clear LOS from (c,r).
       let ringCover = 0
       for (let ri = 0; ri < ring.length; ri++) {
-        const [rc, rr] = ring[ri]
-        let clear = false
-        if (rc === c) {
-          clear = true
-          const step = rr < r ? -1 : 1
-          for (let y = r + step; y !== rr; y += step) {
-            const t = tm.get(c, y)
-            if (t === 'brick' || t === 'steel' || t === 'base') {
-              clear = false
-              break
-            }
-          }
-        } else if (rr === r) {
-          clear = true
-          for (let x = Math.min(c, rc) + 1; x < Math.max(c, rc); x++) {
-            const t = tm.get(x, r)
-            if (t === 'brick' || t === 'steel' || t === 'base') {
-              clear = false
-              break
-            }
-          }
-        }
-        if (clear) ringCover++
+        if (lineClearTo(ring[ri][0], ring[ri][1])) ringCover++
+      }
+      // D1: approach-band LOS coverage — staging cells the candidate can
+      // SHOOT (equal weight to ringCover). This is the term that makes a
+      // right-wing/antechamber cell ((14-15,22-23)/(15,24)) win over the
+      // §137 pick (12,22), which stares at the ring and cannot shoot the
+      // breachers on the band.
+      let approachCover = 0
+      for (let bi = 0; bi < band.length; bi++) {
+        if (lineClearTo(band[bi][0], band[bi][1])) approachCover++
       }
       // laneCover: open bullet range along row + col (up to 6 cells each way).
       let laneCover = 0
@@ -542,7 +679,7 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
         }
       }
       const dist = Math.abs(c - bc) + Math.abs(r - br)
-      const score = ringCover * 60 + laneCover * 4 + cover * 15 - dist * 6
+      const score = ringCover * 60 + approachCover * 60 + laneCover * 4 + cover * 15 - dist * 6
       if (score > bestScore) {
         bestScore = score
         best = { col: c, row: r }
@@ -750,6 +887,11 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // the static ±3-col box AND the P4 race-to-base check (flanking runners
   // that would beat the player back to the base).
   const baseUnderThreat = self.isBaseUnderThreat()
+  // D1 (plan §D1): the §137 guard-anchor knob also drives the D1 objective
+  // (approach-band LOS term in computeBaseGuardAnchorImpl) and the D1 hooks
+  // below — flag once, reuse in both the base-threat hold and the normal
+  // selection hold.
+  const anchorModeOn = self.params.baseGuardAnchorMode > 0
 
   // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
   // queue. Both conditions must hold — requiring only one sent the player
@@ -895,6 +1037,36 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     }
   }
 
+  // ---- D1 (plan §D1): approach-band anchor hold in NORMAL selection ----
+  // §137 v2 only held the anchor inside the base-threat branch. When an
+  // enemy has entered the base approach band (rows >= 20 near the base
+  // column) but the base is NOT yet under threat, hold the anchor instead
+  // of chasing the nearest enemy away from the base — the D1 objective now
+  // places the anchor WITH clear LOS to the staging band, so holding shoots
+  // the rush before it reaches the ring. Only when the player is already
+  // close (no march time — same gate as §137 v2) and enough enemies are on
+  // field (2+ — a lone straggler is better hunted down than waited for).
+  const anchorHold = self.getBaseGuardAnchor()
+  if (anchorModeOn && anchorHold && !baseUnderThreat && !self.aggressive) {
+    let approaching = false
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
+      const tc = self.tankCell(t)
+      if (tc.row >= 20 && Math.abs(tc.col - baseCol) <= 6) {
+        approaching = true
+        break
+      }
+    }
+    if (
+      enemies.length >= 2 &&
+      approaching &&
+      Math.abs(anchorHold.col - playerCell.col) + Math.abs(anchorHold.row - playerCell.row) <=
+        self.params.baseGuardAnchorHoldRange
+    ) {
+      return anchorHold
+    }
+  }
+
   // ---- S6: Aggressive hunt mode ----
   // When few enemies remain, go directly for the nearest enemy.
   // This replaces the old endgame check (which was too restrictive:
@@ -952,6 +1124,29 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // player MUST chase (the anchor hold cannot cover every lane); otherwise
   // holding the guard anchor is safe and intercepts the approach band.
   let anyClearShot = false
+  // D2 / 拆环威胁: count intact ring bricks ONCE per call (only when the knob
+  // is on). The breach bonus grows as the ring weakens — ×1 at full ring →
+  // ×1.875 at one brick left — so the scorer reacts EARLY (breacher shooting
+  // the intact ring) and the urgency rises as the breach completes.
+  const breachOn = self.params.defenseBreachBonus > 0
+  // D1: the ring-breach predicate also gates the anchor hold — do NOT hold
+  // the anchor while a breach is active (the anchor may stare at the wrong
+  // lane; chase the breacher instead). Runs only when D2 or D1 is on
+  // (default both 0 → zero cost, byte-identical).
+  const breachCheckOn = breachOn || anchorModeOn
+  let anyBreacher = false
+  let ringIntact = 8
+  if (breachOn) {
+    ringIntact = 0
+    const tm = w.tileMap
+    for (let dc = -1; dc <= 2; dc++) {
+      if (tm.get(baseCol + dc, baseRow - 1) === 'brick') ringIntact++
+    }
+    for (let dr = 0; dr <= 1; dr++) {
+      if (tm.get(baseCol - 1, baseRow + dr) === 'brick') ringIntact++
+      if (tm.get(baseCol + 2, baseRow + dr) === 'brick') ringIntact++
+    }
+  }
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)
@@ -973,6 +1168,15 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // is the highest-priority target: it can destroy the base NOW. Controlled
     // by defenseClearShotBonus (default 500, 0 = OFF = byte-identical to pre-§59).
     const clearShotBonus = hasClearShot ? self.params.defenseClearShotBonus : 0
+    // D2 / 拆环威胁: enemy whose next bullet destroys an intact ring brick —
+    // §59's static clear-shot is false until the ring falls (too late, the
+    // fatal bullet is already flying). Fires EARLY, scoring-only; the term
+    // grows as the ring weakens ((8 − ringIntact) destroyed bricks × 0.125).
+    // Can't co-fire with clearShotBonus (mutually exclusive by construction).
+    const isBreacher = breachCheckOn && !hasClearShot && enemyCanBreachRing(self, t)
+    if (isBreacher && anchorModeOn) anyBreacher = true
+    const breachBonus =
+      breachOn && isBreacher ? self.params.defenseBreachBonus * (1 + (8 - ringIntact) * 0.125) : 0
     // §132 / 方向 B (fast × base-proximity): a fast tank closing on the base
     // is a bigger threat than a basic tank the same distance out (it reaches
     // the base in ~5/6 the time and keeps firing as it moves). The static
@@ -995,6 +1199,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       urgencyBonus +
       proximityBonus +
       clearShotBonus +
+      breachBonus +
       speedApproachBonus
     if (score > bestScore) {
       bestScore = score
@@ -1033,6 +1238,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   if (
     guardAnchor &&
     !anyClearShot &&
+    !anyBreacher &&
     Math.abs(guardAnchor.col - playerCell.col) + Math.abs(guardAnchor.row - playerCell.row) <=
       self.params.baseGuardAnchorHoldRange
   ) {

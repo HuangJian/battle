@@ -205,6 +205,8 @@ export function scanAheadImpl(
   const baseCol = BASE_POS.col // 12
   const baseRow = BASE_POS.row // 24
   const wallScanR = self.params.baseWallScanRadius
+  // §D4: exact-ring base-wall flag — see the param doc (Battlement pocket fix).
+  const exactRing = self.params.baseWallExactRing > 0
 
   const r = self._scanResults[dirIdx]
   r.enemy = false
@@ -284,14 +286,33 @@ export function scanAheadImpl(
         // Inline isBaseProtectionBrick: only when stage has a base, and
         // the brick is within the configured radius AND the cross-shaped
         // band (within 2 on at least one axis) of the base.
+        // §D4: baseWallExactRing=1 uses the EXACT ring-cell predicate
+        // (identical to SimulationCombat.isBaseProtectionCell) instead of the
+        // loose rectangle — the rectangle flags ordinary bricks up to
+        // baseWallScanRadius cells from the base (Battlement (10,19):
+        // dc=2/dr=5, not a ring cell), and on a dual-offset scan that far
+        // flag suppresses break-through fire at the REAL ordinary brick in
+        // front → spawn-pocket lock (player never digs, zero fire).
         if (hasBase) {
-          const dc = col - baseCol
-          const dr = row - baseRow
-          const ad = dc < 0 ? -dc : dc
-          const ar = dr < 0 ? -dr : dr
-          if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
-            r.baseWall = true
-            r.baseWallDist = stepCount
+          if (exactRing) {
+            // Ring cells: row 23 across cols 11-14; cols 11/14 at rows 24-25.
+            if (
+              (row === baseRow - 1 && col >= baseCol - 1 && col <= baseCol + 2) ||
+              (col === baseCol - 1 && (row === baseRow || row === baseRow + 1)) ||
+              (col === baseCol + 2 && (row === baseRow || row === baseRow + 1))
+            ) {
+              r.baseWall = true
+              r.baseWallDist = stepCount
+            }
+          } else {
+            const dc = col - baseCol
+            const dr = row - baseRow
+            const ad = dc < 0 ? -dc : dc
+            const ar = dr < 0 ? -dr : dr
+            if (ad <= wallScanR && ar <= wallScanR && (ad <= 2 || ar <= 2)) {
+              r.baseWall = true
+              r.baseWallDist = stepCount
+            }
           }
         }
         r.wall = true
