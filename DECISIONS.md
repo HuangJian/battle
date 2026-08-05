@@ -1836,3 +1836,25 @@ C（fieldRetreatPickupGate）与 A（maxPlayerDistFromBase 26→20）均**诚实
 **Implications:** §146 C 定稿为 HIGH-only 门控（默认 0，byte-identical）。「拾取劫持防线」概念上
 已完整：HIGH 被门控、MID/LOW 经实测不应门控——防线本身无需再扩展。C/A 的旋钮与谓词保留（默认 0），
 留作后续分组适配候选。
+
+## 149. defensePosStandable 全面启用（minDist 解除）全关验证 —— 边际 ≈ 0，不发货（收窄版 §146 保持最优）
+
+**Decision:** 按 §146 的「发货需全关验证后统一启用」承诺，解除 `defensePosStandableMinDist` 门控
+（=0，近基 idle 也启用 standable 回退）做全关 120-seed hard+chaos 扫描（fresh 语料 fx-bfull-arm，
+8400 runs）。结论：**全面启用相对收窄版（minDist=8）边际 ≈ 0**（hard +0.1pp / chaos +0.2pp），且引入
+hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
+
+**Rationale:**
+- 全面版 vs 基线（fx-all-hc）：hard +0.4pp / chaos +1.5pp，但 hard 回归面真实——S15 −6pp / S24 −5pp /
+  S25 −4pp / S26 −3pp（与朴素版回归点逐关一致：S15/S24/S25）。
+- 全面版 vs 收窄版（fx-b2-arm，唯一变量 = 近基回退启用）：hard 聚合 +0.1pp——S8 +5pp（62→67）被
+  S24 −5pp（52→47，冰面关近基行为被改）抵消；chaos +0.2pp。S8 收益是「近基也去可站集合点」的
+  边际，但 S24 冰面关近基 idle 被改到是真实代价——**收益转移而非净提升**。
+- 结论与朴素版一致：minDist 门控存在的理由被 120-seed 权威口径再次确认——近基 idle 场景（玩家已
+  在基地防守带）保持旧 directMove 行为是正确选择；只有远位（dist > 8）回防才需要可站集合点。
+- 收窄版（§146 SHIPPED，minDist=8）仍是已验证的最优配置：S8 +8/+6pp、S7 +6/+1pp、无回归。
+
+**Implications:** defensePosStandable 定稿 = 默认 0（旋钮关闭）+ minDist=8 门控。若要全面启用该旋钮
+（默认翻 1），正确做法是保持 minDist=8 收窄版语义，而非解除门控——解除门控经实测无净价值。
+standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋钮共用同一语义，未来若统一启用
+应复用收窄版验证口径。
