@@ -64,3 +64,49 @@ export function enemyCanShootBase(self: GodAIInput, t: Tank): boolean {
   const tc = self.tankCell(t)
   return canShootBaseFrom(self, tc.col, tc.row)
 }
+
+/**
+ * §135 / 方向 D 预测版: is the enemy ABOUT to enter the base's firing lane?
+ *
+ * §134 (SHIPPED) intercepts enemies already ON a lane (enemyCanShootBase —
+ * aligned with the base AND clear LOS). That misses the final approach: on
+ * Battlement the fast reaches the base ring and fires before the static
+ * predicate ever becomes true from the defense position. This predicate
+ * extends the trigger to the last `predictCells` of the approach: the enemy
+ * shares the base's column (or the base's row rows 24-25), is FACING the
+ * base (t.dir points at it), and is within `predictCells` of the lane.
+ *
+ * Deliberately does NOT check clear LOS (unlike canShootBaseFrom) — the
+ * approach lane is often blocked by the base-protection brick ring the
+ * enemy is about to shoot through; the §134 intercept already handles the
+ * LOS-confirmed lane state, and the DEFENSE_INTERCEPT candidate re-verifies
+ * with scanAheadImpl before firing (a brick between player and enemy makes
+ * scan.enemy false and the candidate declines — same as §134).
+ *
+ * Pure function of World state (tank cell + dir + params) — no RNG.
+ */
+export function enemyApproachingBaseLaneImpl(
+  self: GodAIInput,
+  t: Tank,
+  predictCells: number,
+): boolean {
+  if (predictCells <= 0) return false
+  const tc = self.tankCell(t)
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  // Same column as the base — the vertical lane. Approaching from above
+  // (typical: enemy spawns at the top and drives down) or below.
+  if (tc.col === bc) {
+    if (tc.row < br && t.dir === 'down' && br - tc.row <= predictCells) return true
+    if (tc.row > br + 1 && t.dir === 'up' && tc.row - (br + 1) <= predictCells) return true
+    return false
+  }
+  // Same row as the base (rows 24-25 — the 2-cell-tall base) — the
+  // horizontal lane. Approaching from the left or right.
+  if (tc.row === br || tc.row === br + 1) {
+    if (tc.col < bc && t.dir === 'right' && bc - tc.col <= predictCells) return true
+    if (tc.col > bc && t.dir === 'left' && tc.col - bc <= predictCells) return true
+    return false
+  }
+  return false
+}

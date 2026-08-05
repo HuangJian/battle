@@ -59,6 +59,8 @@
 | §131（2026-08-05） | T8 拦截射程 pool 2→8/12 | 20-seed −10/−13；60-seed paired −0.7pp（p=0.10）净负；机制激活但放弃击杀节奏，不发布 |
 | §132（2026-08-05） | 方向 B：威胁评分按 kind 速度×基地逼近加权 | 20-seed w500 −8 / w1000 −20 / w800 −1 全非正；Battlement 全臂不变（1/20→1/20/1/1）；fast 4.5cps > 1★玩家 4.19cps 追不上，威胁块内重排目标无杠杆，不发布 |
 | §133（2026-08-05） | 方向 C：brick-heavy 关防守距离再校准（race↑/maxDist↓/M13↓） | 20-seed mild −7 / balance −20 / tight −29 全负；6 目标关全负（S3 Crossfire 13→2/4/0 毁灭性）；「早回防」在 brick-heavy 关系统性有害（M13 ON4@10 教训放大版），不发布 |
+| §135（2026-08-05） | 方向 D 预测版：提前拦截基地车道逼近者 | 20-seed p1/p2 +0（逐字节相同，intercept 提交 645=645）、p3 −3；预测判定命中 168 次但全被 base 保护环砖墙的 scan 确认挡掉——无新开火窗口，不发布 |
+| §136（2026-08-05） | 方向 D 破砖版：预测命中时打场景砖开路 | 20-seed dig1/p1/p2 +0（逐字节相同，4 关探针 commits 645/791/371/136 全等）、p3 −3；破砖分支零触发——有砖时是保护环（禁打）、没砖时 scan.enemy 已覆盖，不发布 |
 
 **保留实验旋钮**（默认 0 / OFF，字节持平）：`dodgeCounterFire`、`dodgeClearanceScore`、`pathThreatAvoidance`、
 `survivalModeLives`、`survivalRiskWeight`、`dodgeHorizonScore`、`dodgeHorizonMinMarginTicks`、
@@ -66,7 +68,8 @@
 `coordinationRiskWeight`/`enemyAccuracyRaisesSurvival`）、`actionWeights.survive`、
 `fastBaseApproachWeight`/`fastBaseApproachRangeCells`（§132 方向 B）、
 `brickHeavyDefenseWallRatio`/`brickHeavyBaseRaceRangeCells`/`brickHeavyMaxPlayerDistFromBase`/
-`brickHeavyFieldDistCells`（§133 方向 C）。
+`brickHeavyFieldDistCells`（§133 方向 C）、`defenseInterceptPredictCells`（§135 方向 D 预测版）、
+`defenseInterceptDigBricks`（§136 方向 D 破砖版）。
 
 ---
 

@@ -20,6 +20,7 @@ import {
   aimSurvivesTurnImpl,
   shotReachesBaseImpl,
   enemyInShotCorridorImpl,
+  shouldFireInDirImpl,
 } from './FireControl'
 import { dodgeCounterFireDirImpl, findBulletThreatToBaseImpl } from './ThreatAssessor'
 import {
@@ -30,7 +31,7 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
-import { enemyCanShootBase } from './SmartThreatModel'
+import { enemyCanShootBase, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
@@ -597,8 +598,16 @@ const DEFENSE_INTERCEPT: Candidate = {
     for (let li = 0; li < list.length; li++) {
       const t = list[li]
       if (!t.alive || t.spawnTimer > 0) continue
-      // Enemy is ON the base's firing lanes RIGHT NOW (aligned + clear LOS).
-      if (!enemyCanShootBase(self, t)) continue
+      // §134: enemy is ON the base's firing lanes RIGHT NOW (aligned + clear
+      // LOS — it can destroy the base with its next bullet). §135 (predict):
+      // OR it is about to enter a lane — shares the base's column/row, FACES
+      // the base, within defenseInterceptPredictCells (0 = OFF, byte-identical
+      // to §134 SHIPPED). Intercept BEFORE it reaches the ring and fires.
+      // §135: predict flag is reused by the §136 dig branch below.
+      const approaching =
+        prm.defenseInterceptPredictCells > 0 &&
+        enemyApproachingBaseLaneImpl(self, t, prm.defenseInterceptPredictCells)
+      if (!enemyCanShootBase(self, t) && !approaching) continue
       const tc = self.tankCell(t)
       const dCol = tc.col - pc.col
       const dRow = tc.row - pc.row
@@ -622,6 +631,25 @@ const DEFENSE_INTERCEPT: Candidate = {
       if (scan.enemy && scan.enemyDist <= distCells * CELL + CELL) {
         self._moveDir = p.dir === dir ? null : dir
         self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+        self.branchCounts.defenseIntercept++
+        self._lastBranch = 'defenseIntercept'
+        return true
+      }
+      // §136 / 方向 D 破砖版: 预测命中（enemyApproachingBaseLaneImpl）但
+      // 弹道被砖挡 → 打砖开路，为即将进车道的敌人建立射界。复用
+      // shouldFireInDirImpl（默认 allowWallFire=true）——其内部对
+      // baseWall（基地保护环）与钢墙（level<3）一律禁止，子弹只打场景砖。
+      // 第一发破砖，敌人走进射界时后续子弹直接命中。天然自终止：砖打光后
+      // scan.wall=false → 本分支不再成立（fall through 到正常拦截/走位）。
+      if (
+        approaching &&
+        prm.defenseInterceptDigBricks > 0 &&
+        scan.wall &&
+        !scan.baseWall &&
+        !scan.steel
+      ) {
+        self._moveDir = p.dir === dir ? null : dir
+        self._fire = !onCooldown && shouldFireInDirImpl(self, pcx, pcy, dir)
         self.branchCounts.defenseIntercept++
         self._lastBranch = 'defenseIntercept'
         return true

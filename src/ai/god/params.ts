@@ -84,6 +84,38 @@ export interface GodAIParams {
   defenseInterceptMaxDist: number
   /** §134: max player→enemy distance (cells) for the intercept shot. */
   defenseInterceptRangeCells: number
+  /**
+   * §135 / 方向 D 预测版: cells of approach lead-time to ALSO intercept. 0 =
+   * OFF (byte-identical to §134 SHIPPED — only enemies already ON the lane,
+   * enemyCanShootBase, trigger). >0: an enemy that shares the base's column
+   * (or the base's row) and is FACING the base within this many cells of the
+   * lane is treated as an imminent base threat too — the DEFENSE_INTERCEPT
+   * candidate stops and fires at it from the defense position BEFORE it
+   * reaches the ring and fires (Battlement: the fast arrives at the ring and
+   * fires before the static §134 predicate ever becomes true — §135 closes
+   * that final-approach gap). The candidate still re-verifies LOS via
+   * scanAheadImpl before committing (brick between player and enemy blocks
+   * the shot, same as §134).
+   */
+  defenseInterceptPredictCells: number
+  /**
+   * §136 / 方向 D 破砖版: when the §135 predict predicate fires but the shot
+   * is blocked by a SCENE brick (not the base-protection ring, not steel),
+   * the player fires at the brick to open the lane (first shot clears the
+   * brick, the enemy walking in eats the next). 0 = OFF (byte-identical to
+   * §134 SHIPPED — predict commits only when scan.enemy confirms a clear
+   * shot). 1 = ON.
+   *
+   * §135 probe: the predict predicate hit 168× on Battlement but ZERO
+   * became commits — every one was blocked by the scan LOS check. Most were
+   * the base ring (correctly untouchable — never dig baseWall), but on
+   * stages where scene bricks sit between the defense position and the
+   * enemy's approach lane, digging opens a real firing window the enemy
+   * must cross. Uses shouldFireInDirImpl (default allowWallFire=true) which
+   * inherently forbids baseWall/steel — the bullet only ever clears scene
+   * brick.
+   */
+  defenseInterceptDigBricks: number
   /** S7: cells around the base to scan for wall integrity. */
   baseWallScanRadius: number
   /** Re-plan interval (ticks). */
@@ -1234,6 +1266,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   defenseInterceptMode: 1,
   defenseInterceptMaxDist: 12,
   defenseInterceptRangeCells: 15,
+  // §135 / 方向 D 预测版: 提前拦截格数。默认 0 = OFF（byte-identical 到 §134
+  // SHIPPED——只拦已上车道者）。A/B 候选：predict=1/2/3。
+  defenseInterceptPredictCells: 0,
+  // §136 / 方向 D 破砖版: 预测命中但被场景砖挡时打砖开路。默认 0 = OFF
+  // （byte-identical 到 §134——预测只在 scan.enemy 确认时才提交）。
+  defenseInterceptDigBricks: 0,
   baseWallScanRadius: 5,
   replanInterval: 1,
   replanCache: 1,

@@ -1514,3 +1514,55 @@ base 列上方与它同列的概率最高，一枪命中即解除威胁——零
 **Implications:** Battlement hard 1/20→3/20 但仍是最弱关（目标 >50%）。下一杠杆：把
 enemyCanShootBase 静态判定升级为「预测敌人将进入基地车道」（提前 1-2 格拦截）；或接受
 其为 Boss 关。三门禁 + split-parity 全绿。
+
+## 135. 方向 D 预测版：提前拦截基地车道逼近者（诚实阴性，不发布，2026-08-05）
+
+**Decision:** 新增 `enemyApproachingBaseLaneImpl` 预测判定 + 旋钮
+`defenseInterceptPredictCells`（默认 0 = OFF），A/B 三档全无收益，维持 0。不发布 = 不改默认值。
+
+**机制:** 在 §134 候选的 `enemyCanShootBase` 静态判定上 OR 一个预测判定：敌人与 base
+同列（或同 base 行）且**朝向 base**（t.dir）且距车道 ≤ predictCells 格 → 视为即将进入车道，
+提前拦截。
+
+**Results（官方口径 35×20，基线 = §134 SHIPPED 默认 442/700）:**
+- predict=1 → 442/700（+0）；predict=2 → 442/700（+0）；predict=3 → 439/700（−3）。
+- Battlement 全臂 3/20 纹丝不动。
+- direct-drive 探针（Battlement 20 局）：predict=0 vs 2 的 defenseIntercept 提交计数
+  **645 = 645 逐字节一致**（win 3=3）；预测判定命中 168 次但零次转化为提交。
+
+**Rationale（为何零收益）:** 预测命中的敌人（即将进入车道）与玩家之间隔着 base 保护环
+砖墙（Battlement 的 bbbb/bEEb 环）——候选的 scanAheadImpl 确认（scan.enemy）被砖挡住，
+候选 decline，玩家 fall through 到 navigate。等敌人破砖真正进入开阔车道时，§134 静态
+判定已接管——**预测版没有创造任何新的可开火窗口**。拦截的硬约束不是「敌人是否在车道」，
+而是「玩家与敌人之间是否无遮挡」；提前判定把前者放宽了，后者纹丝不动。
+
+**Implications:** 若要继续拉 Battlement，真正的新窗口是「预测版 + 破砖射击」（朝车道口
+打砖开路，第一发破砖第二发打敌人——弹药投入换车道控制，属行为改动需单独 A/B）；或接受
+Battlement 为 hard 的 Boss 关（chaos 上它 0/20，是难度锚点）。旋钮默认 0 保留。classic
+不受影响（继承默认 0）。
+
+## 136. 方向 D 破砖版：预测命中时打场景砖开路（诚实阴性，不发布，2026-08-05）
+
+**Decision:** 在 §135 预测判定的基础上加破砖分支 + 旋钮 `defenseInterceptDigBricks`
+（默认 0 = OFF），A/B 三档全无收益，维持 0。不发布 = 不改默认值。
+
+**机制:** §135 预测命中但弹道被砖挡时：若该砖是**场景砖**（scan.wall && !scan.baseWall
+&& !scan.steel——复用 shouldFireInDirImpl 的 allowWallFire 语义，base 保护环与钢墙天然
+禁止），玩家朝砖开火开路（第一发破砖，敌人走进射界时第二发命中），天然自终止。
+
+**Results（官方口径 35×20，基线 = §134 SHIPPED 442/700）:**
+- dig1/p1 → 442/700（+0）；dig1/p2 → 442/700（+0）；dig1/p3 → 439/700（−3）。
+- Battlement 全臂 3/20 纹丝不动。
+- direct-drive 探针（4 关 × 20 局）：baseline vs dig1/p2 的 defenseIntercept 提交计数
+  逐字一致（Battlement 645=645、Citadel 791=791、Brick Maze 371=371、Crossfire 136=136），
+  win 全同——**破砖分支零触发**。
+
+**Rationale（为何零触发）:** 约束链「预测命中 + 玩家-敌人同行/列 + 场景砖挡路」在真实
+play 中几乎不存在：① Battlement 上「有砖」时是 base 保护环（baseWall，禁止打），
+「没砖」时 scan.enemy 直接命中（§134 已覆盖）——破砖分支永远轮不到；② 其他关同构，
+场景砖恰好挡在「防守位-基地车道」线上的几何罕见。
+
+**Implications:** 方向 D 家族（§134 拦截 SHIPPED / §135 预测 / §136 破砖）收官。Battlement
+hard 3/20（15%）为当前最优——五轮攻坚（§131-§136）的边际收益已收敛。建议接受其为
+hard 的 Boss 关（chaos 0/20 是难度锚点），或从「防守」转向「进攻侧」杠杆（如击杀效率、
+星经济——后者已被用户否决过）。旋钮默认 0 保留。classic 不受影响。
