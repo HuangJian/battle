@@ -209,7 +209,7 @@
 | 方案 | 风险 | 预期收益 | 实际结果 |
 |------|------|----------|----------|
 | A. navigateTowards cell 门控 | 低 | -3~4% | ✅ 采纳 |
-| B. selectTarget 0.5s 缓存 | 中 | -2% | ❌ S6 Iron Curtain 胜率 72%→40%，回退 |
+| B. selectTarget 0.5s 缓存 | 中 | -2% | ❌ S7 Iron Curtain 胜率 72%→40%，回退 |
 | C. updateMines 脏标记 | 低 | -1% | ✅ 采纳 |
 | D. findPath bucket queue | 高 | -1~2% | 未做（收益低于 A，风险高） |
 
@@ -234,9 +234,9 @@ navigateTowards 缓存命中时跳过 `rng.next()` 调用（原代码每 tick �
 
 **selectTarget 缓存方案回退**
 
-Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测导致 S6 Iron Curtain 胜率从 72% 暴跌至 40%。
+Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测导致 S7 Iron Curtain 胜率从 72% 暴跌至 40%。
 
-**根因**: S6 有大量 steel 墙，player 必须频繁切换目标寻找突破口。0.5s 缓存让 player 在被钢铁墙阻挡时仍盯着同一目标太久，无法及时切换到正在接近基地的敌人，导致基地失守。
+**根因**: S7 有大量 steel 墙，player 必须频繁切换目标寻找突破口。0.5s 缓存让 player 在被钢铁墙阻挡时仍盯着同一目标太久，无法及时切换到正在接近基地的敌人，导致基地失守。
 
 **教训**: selectTarget 的响应性是关键——目标选择延迟会级联影响 navigateTowards 的 A* 计算，最终影响 player 的实际移动决策。与 navigateTowards 不同（其输入是 cell 坐标，秒级变化），selectTarget 的输入是 enemy 数组，enemy 的 HP/alive 状态变化会影响威胁评分，0.5s 延迟太大。
 
@@ -269,7 +269,7 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **字节等价的关键前提**（§123 注释内核对）：
 - think() 每 tick（runner 每 tick 调 endFrame）或每帧至多一次（浏览器 `_thought` 守卫）执行；期间 World 不被修改（One Author §2.1）。
-- memo 生命周期严格在单 tick 内——**零陈旧**，与 §68 否决的 cross-tick 缓存（0.5s 陈旧崩 S6）粒度不同。
+- memo 生命周期严格在单 tick 内——**零陈旧**，与 §68 否决的 cross-tick 缓存（0.5s 陈旧崩 S7）粒度不同。
 - 均不耗 RNG、不改变调用次数。
 
 **否决并留注释（诚实阴性）**: rectHitsTerrain 比较链重排/terrain 短路（+4.5% 更慢，§124）、canStepLat 手内联（中性偏慢，§126）——与 §14.4 同教训：不要对抗 V8 的比较链折叠与 JIT 类型反馈。
@@ -306,10 +306,10 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **实施**: `replanImpl` 缓存键 `(playerCell, target)` + `tileMap.revision`（新增单调地形修订号，覆盖 loadStage/set/destroy/destroyAllBaseCells/快照恢复所有写路径）+ 60-tick 防御计时器 + followPath stuck 自愈阀 + reset 清理。Gate `params.replanCache`（默认 1，0 = pre-§127 字节等价）。**关键**：缓存与 `self.path` 必须分离——命中返回 `_replanCache.slice()`、写入存 `self.path.slice()` 独立副本。
 
-**别名 bug（初版）**: 引用赋值 `self.path = _replanCache` 使 followPath 换格时的 `shift()` 原地消费缓存数组（S15 seed1007 tick 1536 把 len=2 缓存吃成 len=0），随后每 tick 命中空缓存死循环。初版 A/B 冒烟 score 700/700 tied 但 bench 揭穿：ticks=1172649 vs 1169769、13/350 单元分歧（含 outcome 翻转）。**eval-suite paired 比较是 score 粒度，抓不住 tick 级分歧——per-seed tick-diff 才是诚实判据**。
+**别名 bug（初版）**: 引用赋值 `self.path = _replanCache` 使 followPath 换格时的 `shift()` 原地消费缓存数组（S16 seed1007 tick 1536 把 len=2 缓存吃成 len=0），随后每 tick 命中空缓存死循环。初版 A/B 冒烟 score 700/700 tied 但 bench 揭穿：ticks=1172649 vs 1169769、13/350 单元分歧（含 outcome 翻转）。**eval-suite paired 比较是 score 粒度，抓不住 tick 级分歧——per-seed tick-diff 才是诚实判据**。
 
 **结果（同机 A/B）**:
-- 确定性：修复后 classic `ticks=1169769 win=317/350` 与关闭版逐字节一致；350 单元扫描 **0/350 分歧**；per-seed-diff S15 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
+- 确定性：修复后 classic `ticks=1169769 win=317/350` 与关闭版逐字节一致；350 单元扫描 **0/350 分歧**；per-seed-diff S16 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
 - **chaos wall −27.0% / −31.6%**（两轮）；classic ±2% 噪声（CLASSIC_MODEL_PARAMS 把 classic replanInterval 恢复为 50 → 命中率低，收益在主战场 hard/chaos）。
 
 **后续缓存类优化纪律**（§127 Implications）: ① tick 级 A/B 而非 score 级；② 缓存返回对象与消费路径（shift/变异）解引用分离；③ 失效信号覆盖所有写路径（含快照直写 grid）。

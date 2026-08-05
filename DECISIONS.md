@@ -141,9 +141,9 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 | Infrastructure (CMA-ES, decision tracing, simulation pool) | `docs/god-ai-tuning.progress.md` §3.1 |
 | P0–P3 deadlock fixes (anti-camp, wider dodge, A* dig-through-brick) | `docs/god-ai-tuning.progress.md` §3.2 |
 | P4 all-35 floor-aware tuning (81.9%→87.7%, 0/35 below floor) | `docs/god-ai-tuning.progress.md` §3.3 |
-| Round 5 S32 close-combat (t2aMaxRange=2, 72.5%→85.0%) | `docs/god-ai-tuning.progress.md` §3.4 |
+| Round 5 S33 close-combat (t2aMaxRange=2, 72.5%→85.0%) | `docs/god-ai-tuning.progress.md` §3.4 |
 | Phase A SmartThreatModel (rejected, 8+ variants all negative) | `docs/god-ai-tuning.progress.md` §3.5 |
-| §47 base protection ring collision fix (real S32 breakthrough) | `docs/god-ai-tuning.progress.md` §4 |
+| §47 base protection ring collision fix (real S33 breakthrough) | `docs/god-ai-tuning.progress.md` §4 |
 | §48 terrain-occlusion evasion (rejected, terrain-blind is load-bearing) | `docs/god-ai-tuning.progress.md` §4 |
 | §49/§52 muzzle-to-muzzle (v1 rejected, v2 counter-fire neutral) | `docs/god-ai-tuning.progress.md` §9 |
 | §67 stop tuning at 88.5% (flat optimum confirmed) | `docs/god-ai-tuning.progress.md` §4 |
@@ -160,42 +160,42 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED)
 
-**Decision:** The original §48 terrain-occlusion evasion was rejected (-10pp S32, brick+steel both occluded). The revisit ships a **steel-only** occlusion **gated to steel-maze stages** (`evasionSteelOcclusionBrickRatio: 0.1`, auto-enabled in `computeStageAdaptedParams` when `brickWallRatio < 0.10`):
+**Decision:** The original §48 terrain-occlusion evasion was rejected (-10pp S33, brick+steel both occluded). The revisit ships a **steel-only** occlusion **gated to steel-maze stages** (`evasionSteelOcclusionBrickRatio: 0.1`, auto-enabled in `computeStageAdaptedParams` when `brickWallRatio < 0.10`):
 
 1. `findMostDangerousBulletImpl` skips enemy bullets whose path to the player is blocked by STEEL — but only when the player is NOT pinned (≤2 open directions). Brick is never occluded (dodging brick-blocked bullets is load-bearing anticipatory dodge — the original §48 lesson).
-2. The terrain gate is the key discriminator: brickWallRatio, NOT steel ratio, predicts the mechanism's value. S26 Brick Maze has MORE steel (26%) than S32 Diamond (18%) yet regresses while S32 gains.
-3. A re-ranking guard (`nearestBlocked < bestDist → null`) was prototyped and **removed** — its motivating case (S26) is gated OFF, and it cost ~0.8pp on S32 (+3.3 → +2.5 @120 on same seeds).
+2. The terrain gate is the key discriminator: brickWallRatio, NOT steel ratio, predicts the mechanism's value. S27 Brick Maze has MORE steel (26%) than S33 Diamond (18%) yet regresses while S33 gains.
+3. A re-ranking guard (`nearestBlocked < bestDist → null`) was prototyped and **removed** — its motivating case (S27) is gated OFF, and it cost ~0.8pp on S33 (+3.3 → +2.5 @120 on same seeds).
 4. Trap avoidance (user idea 2 — don't walk into surround positions) was implemented (`trapAvoidance` in Navigator) but stays OFF: full-corpus A/B near-neutral (net +2 @60), no big regressions, but no clear win either — rejected per the "neutral structural change" discipline.
 
 **Rationale:**
 - Steel is a permanent barrier for enemy bullets (STEEL_PIERCE_PLAYER_LEVEL is player-only), so a steel-blocked dodge is genuinely wasteful in open guard bands / steel corridors.
-- But on brick-heavy stages, ANY dodge (even of a steel-blocked bullet) is load-bearing repositioning through breakable cover; suppressing it re-ranks the scan to a farther bullet (S26 seed-7: player dodged down one tick early and lost).
-- Terrain data (2026-08-01 probe): S32 0.063 / S6 0.04 gain; S14 0.915 / S26 0.254 lose.
+- But on brick-heavy stages, ANY dodge (even of a steel-blocked bullet) is load-bearing repositioning through breakable cover; suppressing it re-ranks the scan to a farther bullet (S27 seed-7: player dodged down one tick early and lost).
+- Terrain data (2026-08-01 probe): S33 0.063 / S7 0.04 gain; S15 0.915 / S27 0.254 lose.
 
 **Results (2026-08-01):**
-- 35×60 full A/B with brickGate 0.10: **net +1 flip, ZERO per-stage regressions** (S14/S26 byte-identical, all other 33 stages 0pp). S32 +3pp @60, +3.3pp @120 (68.3→71.7); S6 +0.8pp @120 (80.0→80.8, the -2pp @60 was seed noise).
-- Regression gate passes with the shipped default (644/700, 92.0% vs 581 floor) — S6/S32 now play occlusion-ON in the gate.
-- S32 base_destroyed 11→18 but lives_exhausted 27→16: the trade is base-risk for survival — net positive.
+- 35×60 full A/B with brickGate 0.10: **net +1 flip, ZERO per-stage regressions** (S15/S27 byte-identical, all other 33 stages 0pp). S33 +3pp @60, +3.3pp @120 (68.3→71.7); S7 +0.8pp @120 (80.0→80.8, the -2pp @60 was seed noise).
+- Regression gate passes with the shipped default (644/700, 92.0% vs 581 floor) — S7/S33 now play occlusion-ON in the gate.
+- S33 base_destroyed 11→18 but lives_exhausted 27→16: the trade is base-risk for survival — net positive.
 
-**Implications:** Default `evasionSteelOcclusionBrickRatio = 0.1` is ON (S6/S32 only). `evasionSteelOcclusion = 0` stays the explicit master switch; the gate auto-enables on qualifying stages. Tooling: `tools/diag/ab-test-steel-occlusion.ts --brickGate R`（本地不入库，§0.C）, `per-seed-diff --set evasionSteelOcclusionBrickRatio=R`（通用 --set 标志；与旧 --brickGate R 等价，由地形门控按关自动启用）.
+**Implications:** Default `evasionSteelOcclusionBrickRatio = 0.1` is ON (S7/S33 only). `evasionSteelOcclusion = 0` stays the explicit master switch; the gate auto-enables on qualifying stages. Tooling: `tools/diag/ab-test-steel-occlusion.ts --brickGate R`（本地不入库，§0.C）, `per-seed-diff --set evasionSteelOcclusionBrickRatio=R`（通用 --set 标志；与旧 --brickGate R 等价，由地形门控按关自动启用）.
 
 ## 72. §49-Revisit: 炮口相向对枪抵消 Parameterized + Re-Validated (SHIPPED, default unchanged)
 
 **Decision:** The retained §49-family behavior (§52 v2 对枪抵消 — facing-enemy counter-fire + keep-alignment, inline in T2a) was parameterized as `counterFire` (default **1** = current shipped behavior, byte-identical) + `counterFireMaxRange` (default 5 = the original hardcoded 5-cell range), then re-validated on the current tree (post-§47/§58/§48-revisit) with the same per-seed methodology as §48-revisit:
 
 1. `counterFire: 0` → plain pre-§52 T2a (turn to face + fire, no facing-enemy special-casing) — the A/B OFF arm.
-2. Default stays **ON** (1): the A/B shows counter-fire is a clean positive on the current tree, so flipping it OFF would lose S26/S20 wins. `SKILLED_HUMAN_PARAMS` inherits it automatically (derived from `DEFAULT_GOD_AI_PARAMS`).
-3. Per-seed byte-identity (the §70 JIT-sensitivity check): the parameterization's ternary + `counterFireMaxRange * CELL` hot-path shape change is byte-identical to the committed hardcoded baseline — S26 seed-41 and S20 seed-60 dumps (committed vs param-default) both **IDENTICAL**.
+2. Default stays **ON** (1): the A/B shows counter-fire is a clean positive on the current tree, so flipping it OFF would lose S27/S21 wins. `SKILLED_HUMAN_PARAMS` inherits it automatically (derived from `DEFAULT_GOD_AI_PARAMS`).
+3. Per-seed byte-identity (the §70 JIT-sensitivity check): the parameterization's ternary + `counterFireMaxRange * CELL` hot-path shape change is byte-identical to the committed hardcoded baseline — S27 seed-41 and S21 seed-60 dumps (committed vs param-default) both **IDENTICAL**.
 4. `AIM_RANGE_CELLS` = 15 (FireControl constant) vs `counterFireMaxRange` = 5: the param is the binding gate, not shadowed by the primitive's own scan range.
 
 **Rationale:**
 - §49 v1 (post-fire dodge, top-level branch) was rejected (-2.6pp); §52 v2 (T2a-inline counter-fire) was retained with +5 wins @35×120 on the pre-§47 tree. Re-processing §49 per the user's directive required re-validating the retained form on the CURRENT tree.
-- Result: **zero negative results** — 35×60 full A/B net **+3 flips with 0 ON→OFF losses** (S26 +3.3pp @60 / +2.5pp @120 seeds 41/44/61; S20 +1.7pp @60 / +0.8pp @120 seed 60; all other 33 stages 0pp). No terrain gate needed — unlike §48, counter-fire's value does not divide by terrain class.
+- Result: **zero negative results** — 35×60 full A/B net **+3 flips with 0 ON→OFF losses** (S27 +3.3pp @60 / +2.5pp @120 seeds 41/44/61; S21 +1.7pp @60 / +0.8pp @120 seed 60; all other 33 stages 0pp). No terrain gate needed — unlike §48, counter-fire's value does not divide by terrain class.
 - The §52 v2 mechanism (fire to cancel an in-line enemy bullet — bullet elimination is safer than trading hits) holds on the current tree; 120-seed confirmations on both gain stages rule out seed noise.
 
 **Results (2026-08-01):**
 - 35×60: net +3 flips, 0 per-stage regressions, 33 stages 0pp. Mean 88.9% → 89.0%.
-- S26 @120: +2.5pp (seeds 41/44/61). S20 @120: +0.8pp (seed 60).
+- S27 @120: +2.5pp (seeds 41/44/61). S21 @120: +0.8pp (seed 60).
 - Regression gate passes with production default (644/700, 92.0% vs 581 floor) — the parameterized default plays identically to the hardcoded shipped behavior.
 - New unit tests (`tests/counter-fire.test.ts`, 10 tests) lock the detection primitives + shipped default.
 
@@ -206,11 +206,11 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 **Decision:** The user directive re-processed §68-v2 (crossfire awareness, default OFF since its original -1.1pp) with the per-seed tick-diff method. The re-tune confirmed the negative result at mechanism level and **shipped nothing** — all four fix variants were net-negative, and the experiment code was reverted (src/ byte-identical; crossfire stays OFF per "基础设施保留默认 OFF" policy):
 
 1. **A/B reproduction on the current tree**: 35×60 OFF 89.0% vs ON 88.1% (-0.9pp, 138→156 paired flips, net -18) — matches the original -1.1pp.
-2. **Per-seed mechanism (cf-trace, GodAIInput subclass)**: bad flips (S26/S6/S14) fire on threats 12.6-23.1 ticks out (premature perpendicular commitment off the A* path into death); good flips (S28/S27) fire at 8.3-8.4 ticks (imminent escape). The reactive dodge handles 12-23t threats fine — the crossfire diversion is redundant early and deadly when it commits the wrong way.
-3. **Variant 1 — lead-time cap** (`crossfireThreatTicks=10`, only flag bullets arriving within 10t of NOW): net -25. Helped mazes (S26 -12→-7, S6 -10→-7, S31 -8→-2, S30 -7→-5) but destroyed open-stage gains (S28 +7→-3, S32 +5→-2, S1 +5→+2). Chain-breakage: S28-15's escape needed a SECOND 31.7t-lead diversion at tick 3700 that the cap suppressed → the whole win chain collapsed.
-4. **Variant 2 — destination openness gate** (`crossfireMinExits=3`, only divert into cells with ≥3 passable exits): net -14. The bad maze lanes are locally OPEN (≥3 exits) — S26-5/S6-3/S14-8 ran byte-identical to raw ON, so the exit-count heuristic cannot separate them.
+2. **Per-seed mechanism (cf-trace, GodAIInput subclass)**: bad flips (S27/S7/S15) fire on threats 12.6-23.1 ticks out (premature perpendicular commitment off the A* path into death); good flips (S29/S28) fire at 8.3-8.4 ticks (imminent escape). The reactive dodge handles 12-23t threats fine — the crossfire diversion is redundant early and deadly when it commits the wrong way.
+3. **Variant 1 — lead-time cap** (`crossfireThreatTicks=10`, only flag bullets arriving within 10t of NOW): net -25. Helped mazes (S27 -12→-7, S7 -10→-7, S32 -8→-2, S31 -7→-5) but destroyed open-stage gains (S29 +7→-3, S33 +5→-2, S2 +5→+2). Chain-breakage: S29-15's escape needed a SECOND 31.7t-lead diversion at tick 3700 that the cap suppressed → the whole win chain collapsed.
+4. **Variant 2 — destination openness gate** (`crossfireMinExits=3`, only divert into cells with ≥3 passable exits): net -14. The bad maze lanes are locally OPEN (≥3 exits) — S27-5/S7-3/S15-8 ran byte-identical to raw ON, so the exit-count heuristic cannot separate them.
 5. **Variant 3 — combined**: net -25 (inherits the cap's open-stage damage).
-6. **Stage-metric correlation (all 35 stages)**: density / avgPass / open-cell% / brick% / steel% — NO metric separates good stages (S28/S27/S32/S8/S1/S10) from bad (S26/S6/S14/S31/S30/S2/S5); every metric overlaps (e.g. S2 23% density bad vs S8 23% good; S33 2.93 avgPass good vs S30 2.94 bad). Extends the §69-A finding: the entanglement is dynamic (enemy/bullet/cascade context), not static terrain.
+6. **Stage-metric correlation (all 35 stages)**: density / avgPass / open-cell% / brick% / steel% — NO metric separates good stages (S29/S28/S33/S9/S2/S11) from bad (S27/S7/S15/S32/S31/S3/S6); every metric overlaps (e.g. S3 23% density bad vs S9 23% good; S34 2.93 avgPass good vs S31 2.94 bad). Extends the §69-A finding: the entanglement is dynamic (enemy/bullet/cascade context), not static terrain.
 
 **Rationale:** The diversion gains and losses share the same trigger — no lead-time, destination-quality, or terrain discriminator exists. This is the definitive confirmation of the §68/§69 conclusion ("any perturbation of dodge → T8 → T2a → navigate is net-negative") with mechanism-level evidence. Per §0.C rule 2, only generalizable changes are kept: the generic `per-seed-diff --set key=value` override (used for all diagnostics) stays; the experiment params/gates were reverted.
 
@@ -239,25 +239,25 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix)
 
-**Decision:** The §70 base-ring fire guard protected `shouldFireInDirImpl` and the two break-through fire paths, but the T2a (stop-and-aim) and aggressive-mode fire paths bypassed `shouldFireInDirImpl` entirely — firing directly when `scan.enemy` was true, without checking `scan.baseWall`. Because `scanAheadImpl` uses two independent offset scan lines, one offset can find a base-protection brick (`baseWall=true`) while the other finds an enemy (`enemy=true`). The T2a path fired whenever `scan.enemy` was true, destroying the player's own base. This caused 4 `killer=player` base-destruction failures in S32 Diamond (120 seeds: 26, 34, 78, 82).
+**Decision:** The §70 base-ring fire guard protected `shouldFireInDirImpl` and the two break-through fire paths, but the T2a (stop-and-aim) and aggressive-mode fire paths bypassed `shouldFireInDirImpl` entirely — firing directly when `scan.enemy` was true, without checking `scan.baseWall`. Because `scanAheadImpl` uses two independent offset scan lines, one offset can find a base-protection brick (`baseWall=true`) while the other finds an enemy (`enemy=true`). The T2a path fired whenever `scan.enemy` was true, destroying the player's own base. This caused 4 `killer=player` base-destruction failures in S33 Diamond (120 seeds: 26, 34, 78, 82).
 
 The fix has three parts:
 
 1. **`scanAheadImpl` (FireControl.ts)**: New `baseWallDist` field — stores the step count when a base-protection brick or 'base' (eagle) terrain is found. Initialized to `Infinity`. Set alongside `baseWall=true` for both 'brick' and 'base' terrain cases.
 
-2. **T2a and aggressive-mode entry guards (GodAIInput.ts)**: Changed `if (scan.enemy)` to `if (scan.enemy && !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) && !(scan.baseSteel && (p.level ?? 0) >= 3))`. This prevents firing only when the base wall is **closer than or at the same distance as** the enemy — the 6px bullet spans both offset columns and WILL hit a closer base wall before reaching the enemy. If the enemy is closer, the bullet hits the enemy first, so firing is safe. This distance-aware check avoids the over-conservative regression of a blanket `!scan.baseWall` check (which prevented valid shots at enemies behind the base wall and caused +12 lives_exhausted on S32).
+2. **T2a and aggressive-mode entry guards (GodAIInput.ts)**: Changed `if (scan.enemy)` to `if (scan.enemy && !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) && !(scan.baseSteel && (p.level ?? 0) >= 3))`. This prevents firing only when the base wall is **closer than or at the same distance as** the enemy — the 6px bullet spans both offset columns and WILL hit a closer base wall before reaching the enemy. If the enemy is closer, the bullet hits the enemy first, so firing is safe. This distance-aware check avoids the over-conservative regression of a blanket `!scan.baseWall` check (which prevented valid shots at enemies behind the base wall and caused +12 lives_exhausted on S33).
 
 3. **Break-through fire paths (GodAIInput.ts)**: The two break-through paths (aggressive T2b and navigate) had `bs.enemy || (!bs.baseWall && ...)` — the `bs.enemy ||` short-circuited and bypassed the base protection. Fixed in `shouldFireBreakThroughImpl` (shared by both sites) to `!bs.baseWall && !(bs.baseSteel && lvl >= 3)` (conservative, no distance comparison — break-through is for breaking walls, so never break a base wall). The §74 steel-fire gate is layered on top in the same function, so a break-through never fires at unpierceable steel either.
 
 **Rationale:**
 - The `baseWallDist <= enemyDist` comparison is correct because `bulletHitsTerrain` runs BEFORE `bulletHitsTank` per tick. If the base wall is at distance 3 and the enemy at distance 5, the bullet reaches the base wall first (step 3) and is stopped — the enemy at step 5 is never reached. If the enemy is at distance 3 and the base wall at distance 5, the bullet hits the enemy first (step 3) — the base wall is never reached.
-- A blanket `!scan.baseWall` check (conservative) was tested first: it eliminated all 4 suicides but caused -1 net win on S32 (86→85 @120) due to +12 lives_exhausted from suppressed valid shots. The distance-aware check recovers those shots: S32 86→87 @120, mean 91.9%→92.1%.
+- A blanket `!scan.baseWall` check (conservative) was tested first: it eliminated all 4 suicides but caused -1 net win on S33 (86→85 @120) due to +12 lives_exhausted from suppressed valid shots. The distance-aware check recovers those shots: S33 86→87 @120, mean 91.9%→92.1%.
 - 1 residual `killer=player` suicide remains (seed 34) — likely an edge case where the enemy and base wall distances are very close but the scan ordering or movement timing allows the bullet to reach the base wall. This is a 75% reduction (4→1) in player suicides, with a net +0.2pp mean improvement.
 
 **Results (2026-08-01):**
-- S32 Diamond @120: 86→87 wins (+1), base_destroyed 18→8 (-10), killer=player 4→1 (-3), lives_exhausted 16→25 (+9).
-- 35×20 validation: mean 92.1% (was 91.9% pre-fix). S18 +10pp, S25 +5pp, S28 +10pp.
-- Regression gate: 645/700 (92.1%) — all 35 stages meet floors. S32 15/20 (75%), floor 11.
+- S33 Diamond @120: 86→87 wins (+1), base_destroyed 18→8 (-10), killer=player 4→1 (-3), lives_exhausted 16→25 (+9).
+- 35×20 validation: mean 92.1% (was 91.9% pre-fix). S19 +10pp, S26 +5pp, S29 +10pp.
+- Regression gate: 645/700 (92.1%) — all 35 stages meet floors. S33 15/20 (75%), floor 11.
 - Unit tests: 11/11 pass (`tests/fire-control-steel-block.test.ts`), including new `baseWallDist` and dual-offset baseWall+enemy tests.
 - `bun run check` green (test + typecheck + lint + format).
 
@@ -291,7 +291,7 @@ Standard command: `bun tools/perf/bench-all-stages.ts`.
 | AutoFireInput wiring | `plan/Lie-Back-Win-Mode.md` |
 | One-Author correction (requestCoopToggle routing) | `plan/Lie-Back-Win-Mode.md` |
 | Parity baseline drift attribution | `plan/Lie-Back-Win-Mode.md` |
-| Stage override table updates (S26, S32, S6, S18, S25, S32 close-combat) | `docs/god-ai-tuning.progress.md` §6 |
+| Stage override table updates (S27, S33, S7, S19, S26, S33 close-combat) | `docs/god-ai-tuning.progress.md` §6 |
 | God AI evaluation standard v7 (wide-band gap + harmonic mean fitness) | `docs/god-ai-tuning.progress.md` §9 |
 | RNG split for replay fidelity | `docs/god-ai-tuning.progress.md` §9 |
 | Fire-through-steel fix | `docs/god-ai-tuning.progress.md` §9 |
@@ -333,12 +333,12 @@ Full baseline + per-milestone deltas in `docs/render-optimization.progress.md`. 
 
 **Rationale:**
 - Root cause of the suicide: the old T2b break-through path used `!canMoveDir` to trigger fire, bypassing T6's base-protection check. In coop mode (player2 born on the opposite side of the base), this caused the God AI to shoot through the base ring and destroy its own base.
-- Root cause of the initial S32 regression (OOB false positive): placing the baseSteel band check **inside** the hot scan loop's steel branch caused it to run on ALL `'steel'` terrain including OOB cells at the field edge (which default to `'steel'`). On S32, the bottom edge at `row=GRID` (dr=|26-24|=2) was falsely flagged as `baseSteel`, causing the T6 non-base-steel guard to skip and the AI to waste bullets at the field edge.
+- Root cause of the initial S33 regression (OOB false positive): placing the baseSteel band check **inside** the hot scan loop's steel branch caused it to run on ALL `'steel'` terrain including OOB cells at the field edge (which default to `'steel'`). On S33, the bottom edge at `row=GRID` (dr=|26-24|=2) was falsely flagged as `baseSteel`, causing the T6 non-base-steel guard to skip and the AI to waste bullets at the field edge.
 - Root cause of the residual 1-seed regression (V8 JIT sensitivity): even with an OOB bounds check, the extra variable declarations and comparisons inside the steel branch changed V8's JIT optimization of `scanAheadImpl`, causing subtle behavioral differences in the `shouldFireInDir` code path. Fix: move ALL baseSteel computation to a **post-loop** block (runs once per scan call, not per cell), keeping the hot steel branch to just two coordinate assignments.
 - The fix is mandatory under MANIFEST §13 (Three Gates): (1) not destroying your own base is more enjoyable; (2) a minimal scanAhead guard is simple; (3) Battle City tanks never shoot their own base.
 
 **Results:**
-- S32 Diamond: 15/20 (pre-fix) → 10/20 (OOB bug) → 14/20 (OOB bounds check, -1 from V8 JIT) → **15/20** (post-loop baseSteel, zero regression).
+- S33 Diamond: 15/20 (pre-fix) → 10/20 (OOB bug) → 14/20 (OOB bounds check, -1 from V8 JIT) → **15/20** (post-loop baseSteel, zero regression).
 - Aggregate: 643/700 (91.9%) — identical to pre-fix baseline. Zero net regression.
 - Coop base suicide: eliminated (confirmed via `repro-base-suicide.ts`).
 - **No floor adjustment needed**: the regression gate passes with original truth values.
@@ -670,7 +670,7 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 **Results (2026-08-01, classic 35 关真值 A/B):**
 - **过关率：持平（byte-identical）。** 35×60：修复前 90.05%（1891/2100）＝ 修复后 90.05%（逐关逐 seed 完全一致）；35×20：修复前 92.57% ＝ 修复后 92.57%（干净重跑逐位一致）。
 - **确定性已证**：同一代码同一进程类型重复跑 bulk sweep，输出逐字节一致（`probe` 两跑 IDENTICAL）。
-- **方法论教训（预 seed 重叠验证）**：20-seed（1–20）⊂ 60-seed（1–60）。诊断初期 35×20「+3 进步 / S2/S30/S33 回退」是**污染产物** —— 在我 stash 往复期间，基线那次 bulk run 的 `src/ai/god/ThreatAssessor.ts` 处于修复进行中的残留态（该跑 S2=20 与孤立 per-seed S2=19 矛盾即铁证）。干净重跑后 fixed == baseline。**任何代码改动 A/B 必须在干净 git 态下、且用 per-seed 对比校验，不能只看一次 bulk 总胜率。**
+- **方法论教训（预 seed 重叠验证）**：20-seed（1–20）⊂ 60-seed（1–60）。诊断初期 35×20「+3 进步 / S3/S31/S34 回退」是**污染产物** —— 在我 stash 往复期间，基线那次 bulk run 的 `src/ai/god/ThreatAssessor.ts` 处于修复进行中的残留态（该跑 S3=20 与孤立 per-seed S3=19 矛盾即铁证）。干净重跑后 fixed == baseline。**任何代码改动 A/B 必须在干净 git 态下、且用 per-seed 对比校验，不能只看一次 bulk 总胜率。**
 - 为何"回退分支大量触发（35×20 约 1815 次）却净持平"：sim-runner 用独立 `godRng = (seed ^ 0x9e3779b9)`（浏览器 spectate 用不同接线，replay 场景由浏览器产生），其 seed 分布把致命受困走廊场景稀释到不翻转任何最终结果；修复正确但在此评估框架上不改变 aggregate。
 
 **Tests:** `tests/dodge-corridor-flee.test.ts`（5 tests）——垂直走廊被夹不逃 `down`、回头选 `up`（朝炮弹）；水平走廊不逃 `right`、选 `left`；有垂直候选时仍 `left`（无回归）；端到端 `findMostDangerousBullet` 检测 + dodge 朝炮弹。先红后绿：修复前 `dodge=down`（Fail），修复后 `dodge=up`（Pass）。
@@ -791,12 +791,12 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 **Rationale:**
 - Bug 1 (0:21 replay): player IS in the dodge branch, IS detecting the threat, but dodgeDirection oscillates up↔down every tick → player stationary → bullet hits. Root cause: 1px movement changes canMoveDir/isSafeDir results → direction flips → player moves back → conditions flip again → infinite cycle.
 - Bug 2 (0:42 replay): player oscillates at y=95↔96, alignment boundary |bcy-pcy| = 31/32. `< TANK` detects at 31 but not 32 → threat flickers → player alternates dodge/navigate → fast bullet (8.3px/tick) hits stationary player.
-- **Rejected: global `<= TANK`** — widened the threshold for ALL bullets. Caused S32 Diamond -37pp (72.5%→35%) by detecting bullets in adjacent steel corridors at exactly 32px (corridor spacing = 2 cells = 32px). The hysteresis approach only widens for the ALREADY-dodged bullet, not new threats.
+- **Rejected: global `<= TANK`** — widened the threshold for ALL bullets. Caused S33 Diamond -37pp (72.5%→35%) by detecting bullets in adjacent steel corridors at exactly 32px (corridor spacing = 2 cells = 32px). The hysteresis approach only widens for the ALREADY-dodged bullet, not new threats.
 - MANIFEST §13 Three Gates: (1) fixing "dodge but stand still" is more enjoyable; (2) persistence + hysteresis are simple, targeted mechanisms; (3) proper evasion respects the original's combat feel.
 
 **Results (2026-08-02, classic 35 stages × 20 seeds, 18000 ticks):**
-- Global `<= TANK`: 577/700 = 82.4% — REJECTED (S32 35%, S33 65%).
-- Hysteresis (TANK+2 for recent threat only): **631/700 = 90.1%** — all 35 stages above floor. 0 stages below floor. S32 Diamond 80%, S33 Battlement 80%.
+- Global `<= TANK`: 577/700 = 82.4% — REJECTED (S33 35%, S34 65%).
+- Hysteresis (TANK+2 for recent threat only): **631/700 = 90.1%** — all 35 stages above floor. 0 stages below floor. S33 Diamond 80%, S34 Battlement 80%.
 
 **Tests:** `tests/dodge-oscillation.test.ts` — 8 tests: persistence same-direction, persistence threat-change, persistence blocked-fallback, hysteresis new-threat-standard, hysteresis new-threat-TANK-not-detected, hysteresis recent-threat-TANK-detected, 0:42 scenario simulation, hysteresis beyond-TANK+2-not-detected.
 
@@ -811,12 +811,12 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 
 | Approach | Net Delta | Worst Stage | Shipped |
 |---|---|---|---|
-| Persistence + Hysteresis (both ON) | -1.7pp | S6 Iron Curtain -10pp | ❌ OFF |
-| Hysteresis only (TANK+2 for recent threat) | -1.1pp | S14 Citadel -8.3pp | ❌ OFF |
-| Oscillation counter-fire (threshold=3) | **-0.8pp** | S11/S16/S25/S26/S28 -3.3pp | ✅ ON |
+| Persistence + Hysteresis (both ON) | -1.7pp | S7 Iron Curtain -10pp | ❌ OFF |
+| Hysteresis only (TANK+2 for recent threat) | -1.1pp | S15 Citadel -8.3pp | ❌ OFF |
+| Oscillation counter-fire (threshold=3) | **-0.8pp** | S12/S17/S26/S27/S29 -3.3pp | ✅ ON |
 | Oscillation counter-fire (threshold=2) | -0.9pp | similar | ❌ |
 | Oscillation counter-fire (threshold=3, dist gate TANK*4) | -1.4pp | worse — dist gate prevents early counter-fire | ❌ |
-| canMoveDirFloorSnap (Math.floor in canMoveDirRaw) | -2.6pp | S6 Iron Curtain -21.7pp | ❌ |
+| canMoveDirFloorSnap (Math.floor in canMoveDirRaw) | -2.6pp | S7 Iron Curtain -21.7pp | ❌ |
 
 **Root cause of all regressions:** The `snap()` function uses `Math.round(v / CELL) * CELL`, which has a discontinuity at cell midpoints (y=56 → snap=64, y=55 → snap=48). This 16px jump flips `canMoveDir` results, causing the dodge direction to oscillate. All fix approaches that change the dodge behavior (persistence, hysteresis, counter-fire) cause cascading effects through the deterministic simulation, leading to net regressions.
 
@@ -827,12 +827,12 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 - The alternative (shipping nothing) doesn't fix the reported bugs.
 
 **Rejected approaches:**
-- `canMoveDirFloorSnap` (Math.floor): breaks ALL navigation predictions, not just dodging. S6 -21.7pp.
-- Global `<= TANK`: detects bullets in adjacent steel corridors at exactly 32px. S32 -37pp.
+- `canMoveDirFloorSnap` (Math.floor): breaks ALL navigation predictions, not just dodging. S7 -21.7pp.
+- Global `<= TANK`: detects bullets in adjacent steel corridors at exactly 32px. S33 -37pp.
 - Hysteresis alone: causes player to dodge more (stay in dodge branch longer). -1.1pp.
 - Persistence alone: overrides legitimate direction switches. -0.6pp additional.
 
-**Per-seed tick-diff diagnosis (S6 Iron Curtain seed 5):** Divergence at tick 3025. Player A (persistence OFF) recomputed dodge to 'up'; Player B (persistence ON) persisted 'down'. The 2px difference cascaded into B failing. Root cause: persistence overrides legitimate direction switches, not just oscillation.
+**Per-seed tick-diff diagnosis (S7 Iron Curtain seed 5):** Divergence at tick 3025. Player A (persistence OFF) recomputed dodge to 'up'; Player B (persistence ON) persisted 'down'. The 2px difference cascaded into B failing. Root cause: persistence overrides legitimate direction switches, not just oscillation.
 
 **Params added for A/B testing:**
 - `dodgeHysteresis: 0` — TANK+2 threshold for recently-dodged threat.
@@ -864,9 +864,9 @@ P2 avg-lives buggy −7.63 (death-spiral) vs fixed +2.90.
 The oscillation counter-fire (§90, `dodgeOscillationCounterFire: 1`) was designed to detect per-tick direction flips and face the bullet to cancel it. With the turn cooldown active, the per-tick oscillation cannot happen — the simulation refuses to turn faster than 50ms, so the AI's dodge direction is stable for ~3 ticks at a time. The counter-fire rarely activates (27/35 stages are byte-identical B=C). The +0.1pp net is within noise (1 seed).
 
 **Per-stage impact of turn cooldown (B - A):**
-- **Biggest regressions:** S6 Iron Curtain -16.7pp, S20 Checkers -10pp, S25 Ice Palace -10pp, S30 Eagle Nest -10pp, S4 Maze -6.7pp, S32 Diamond -6.7pp. Steel maze and ice stages are hurt most — the AI relies on rapid turns to navigate tight corridors and dodge in confined spaces.
-- **Improvements:** S10 Fortress +5pp, S15 Crossroads +5pp, S26 Brick Maze +5pp, S33 Battlement +5pp. Open stages benefit — the cooldown prevents jittery micro-adjustments that caused oscillation deaths.
-- **Counter-fire helped most:** S11 Lattice +5pp (C vs B) — even with the cooldown, some oscillation occurs at the 3-tick boundary, and the counter-fire catches it.
+- **Biggest regressions:** S7 Iron Curtain -16.7pp, S21 Checkers -10pp, S26 Ice Palace -10pp, S31 Eagle Nest -10pp, S5 Maze -6.7pp, S33 Diamond -6.7pp. Steel maze and ice stages are hurt most — the AI relies on rapid turns to navigate tight corridors and dodge in confined spaces.
+- **Improvements:** S11 Fortress +5pp, S16 Crossroads +5pp, S27 Brick Maze +5pp, S34 Battlement +5pp. Open stages benefit — the cooldown prevents jittery micro-adjustments that caused oscillation deaths.
+- **Counter-fire helped most:** S12 Lattice +5pp (C vs B) — even with the cooldown, some oscillation occurs at the 3-tick boundary, and the counter-fire catches it.
 
 **Rationale:**
 - MANIFEST §13 Three Gates: (1) preventing per-tick turning is more enjoyable (tanks feel like physical objects, not vibrating particles); (2) one rule field is simpler than AI-layer patches; (3) the original FC game had inherent turn latency (animation frames), so this respects the spirit.
@@ -889,7 +889,7 @@ New `think()` branch placed AFTER dodge (survive) and T8 (in-flight bullet aimed
 2. **`pickupPriorityMinEnemyDist=5`** — no fully-spawned enemy within 5 cells of the player (same radius as S5 P3.2). Added after Lattice s2 / Battlement s3 per-seed diffs: an enemy 5 cells away (or an active firefight) was abandoned while the player walked to the item, then the player stalled/stopped firing and died.
 3. **`pickupPrioritySpawnRowMax=3`** — items in the classic enemy spawn band (rows ≤ 3; spawns at row 0) are never urgent errands. Added after Lattice s2/s32 diffs: diving for a "safe" pickup in the top band put the player inside the spawn corridor (s32 walked up to a fence at (1,0) while an enemy spawned at (0,0) beside it).
 
-All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verified via per-seed tick-diff, S6 s5 / S32 s11 IDENTICAL).
+All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verified via per-seed tick-diff, S7 s5 / S33 s11 IDENTICAL).
 
 **Tuning loop (35×60 classic, paired CRN, eval-suite --compare):**
 
@@ -907,7 +907,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - Battlement s3: stopped firing mid-engagement (3 enemies) to divert up → lost the fight. → nearby-enemy gate.
 - Star Fort s10: fence pickup (2 cells) + downstream cascade chaos — not surgically fixable; resolved by the gates + 60-seed averaging (Star Fort ends +1).
 
-**Gate truths regenerated** (35×60, mean 90.9%): `TRUTH_WIN_PCT` in `tests/god-ai-regression-gate.test.ts`, aggregate floor raised 581→610 per "随收益上调" discipline. **S28 Spider floor kept at pre-§87 level** — the gate's full-suite context is order-dependent (module-level `genId()` counter, World.ts documented caveat; pre-existing, proven by stashing src: standalone 631 vs full-suite 625 WITHOUT §87) and Spider swings 13-20/20 between contexts; the 60-seed eval shows Spider 91.7% with §87 (+1).
+**Gate truths regenerated** (35×60, mean 90.9%): `TRUTH_WIN_PCT` in `tests/god-ai-regression-gate.test.ts`, aggregate floor raised 581→610 per "随收益上调" discipline. **S29 Spider floor kept at pre-§87 level** — the gate's full-suite context is order-dependent (module-level `genId()` counter, World.ts documented caveat; pre-existing, proven by stashing src: standalone 631 vs full-suite 625 WITHOUT §87) and Spider swings 13-20/20 between contexts; the 60-seed eval shows Spider 91.7% with §87 (+1).
 
 **Implications:** SHIPPED ON. New tests `tests/pickup-priority.test.ts` (15 tests) lock the category gates, all three safety gates, tie-breaks, think() integration, the freeze-window exclusion, and shipped defaults. 120-seed confirmation of Diamond/Frozen Field is a recommended follow-up.
 
@@ -923,19 +923,19 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Tuning loop (35×60 classic, paired CRN, per-seed tick-diff method §0.B):** the feature went through 3 A/B rounds; each round's regressions were traced to a distinct mechanism and fixed:
 
-1. **MID-pickup branch placement (S19 seed 14):** placing the §88 MID branch AFTER T2a demoted a 4-cell shield to "keep killing" — moved before T2a (S19 -0.042 → -0.021).
-2. **Chase distance gate (S15 seed 24 / S32 seed 22):** chase dragged the player across the map after an enemy 10 cells from any threat point → `chokepointChaseMaxDist=3` (enemy-to-threat-point).
-3. **MID pickup must not defer to 回防 (S32 seed 17):** gating MID on `isBaseUnderThreat()` made the player abandon a 3-cell star to "defend" — removed the gate; §87's own safety gates (nearby-enemy 5 格, route danger, reachability) already make close pickups safe.
-4. **Hold-arm idling (S19 seed 23):** player marched to the (30-tick cached) chokepoint, found enemies had turned away, idled → hold requires a live imminent threat (`threatChaseTarget` non-null) + `chokepointHoldMaxDist=6` march cap.
-5. **Facing gate on threat-state/chase (S26 seed 12):** an armor at (12,12) facing RIGHT (away from the base below) tripped the margin check and dragged the player 14 cells to "intercept" a non-threat → `facingTowardBase` gate applied to `isThreatState` and `threatChaseTarget` (rule 3). S26 -0.019 → 0.000.
-6. **Rule-1 outranks hold via chokepoint coverage (S32 seed 23):** with enemies>2 the hold arm marched to chokepoint (15,18) while a fast at (24,22) headed for the base through a lane the chokepoint could NOT shoot → when the chokepoint can't cover the imminent enemy's approach (same row/col + clear LOS to the enemy or its nearest threat point), chase wins over hold.
-7. **Speed-scaled chase player-distance cap (S32 seed 10 / 48):** a 27-cell chase of a POWER tank is a lost race (player can't arrive in time) while a 25-cell chase of a slow ARMOR is winnable → `chokepointChaseMaxPlayerDist=10` scaled ×3 armor / ×2 basic / ×1.5 power / ×1 fast.
+1. **MID-pickup branch placement (S20 seed 14):** placing the §88 MID branch AFTER T2a demoted a 4-cell shield to "keep killing" — moved before T2a (S20 -0.042 → -0.021).
+2. **Chase distance gate (S16 seed 24 / S33 seed 22):** chase dragged the player across the map after an enemy 10 cells from any threat point → `chokepointChaseMaxDist=3` (enemy-to-threat-point).
+3. **MID pickup must not defer to 回防 (S33 seed 17):** gating MID on `isBaseUnderThreat()` made the player abandon a 3-cell star to "defend" — removed the gate; §87's own safety gates (nearby-enemy 5 格, route danger, reachability) already make close pickups safe.
+4. **Hold-arm idling (S20 seed 23):** player marched to the (30-tick cached) chokepoint, found enemies had turned away, idled → hold requires a live imminent threat (`threatChaseTarget` non-null) + `chokepointHoldMaxDist=6` march cap.
+5. **Facing gate on threat-state/chase (S27 seed 12):** an armor at (12,12) facing RIGHT (away from the base below) tripped the margin check and dragged the player 14 cells to "intercept" a non-threat → `facingTowardBase` gate applied to `isThreatState` and `threatChaseTarget` (rule 3). S27 -0.019 → 0.000.
+6. **Rule-1 outranks hold via chokepoint coverage (S33 seed 23):** with enemies>2 the hold arm marched to chokepoint (15,18) while a fast at (24,22) headed for the base through a lane the chokepoint could NOT shoot → when the chokepoint can't cover the imminent enemy's approach (same row/col + clear LOS to the enemy or its nearest threat point), chase wins over hold.
+7. **Speed-scaled chase player-distance cap (S33 seed 10 / 48):** a 27-cell chase of a POWER tank is a lost race (player can't arrive in time) while a 25-cell chase of a slow ARMOR is winnable → `chokepointChaseMaxPlayerDist=10` scaled ×3 armor / ×2 basic / ×1.5 power / ×1 fast.
 
-**Final 35×60 A/B (candidate set, mode ON):** suite 0.7551 → 0.7561 (+0.0010), win rate 91%→91% (unchanged), mean Δscore +0.0010 ± 0.0010 (p=0.30, no significant difference), B better/worse/tied 9/6/2085. Per-stage: S16 +0.022, S6 +0.007, S18 +0.004 (score), S26 0.000 (fixed), S32 within noise (single seed-29 regression — a spec-correct rule-1 interception of an enemy ON a threat point that loses tempo — offset by a seed-48 gain). No stage moved significantly negative.
+**Final 35×60 A/B (candidate set, mode ON):** suite 0.7551 → 0.7561 (+0.0010), win rate 91%→91% (unchanged), mean Δscore +0.0010 ± 0.0010 (p=0.30, no significant difference), B better/worse/tied 9/6/2085. Per-stage: S17 +0.022, S7 +0.007, S19 +0.004 (score), S27 0.000 (fixed), S33 within noise (single seed-29 regression — a spec-correct rule-1 interception of an enemy ON a threat point that loses tempo — offset by a seed-48 gain). No stage moved significantly negative.
 
-**Per-seed verification:** all previously-fixed flip seeds (S15 s24, S19 s14/s23, S26 s12, S32 s5/s17/s22/s23/s10, S20 s1, S31 s1) are IDENTICAL to OFF when the mechanism is gated correctly; OFF (mode=0) is byte-identical by construction.
+**Per-seed verification:** all previously-fixed flip seeds (S16 s24, S20 s14/s23, S27 s12, S33 s5/s17/s22/s23/s10, S21 s1, S32 s1) are IDENTICAL to OFF when the mechanism is gated correctly; OFF (mode=0) is byte-identical by construction.
 
-**Implications:** CANDIDATE — default OFF (shipped game unchanged), candidate set ready in `DEFAULT_GOD_AI_PARAMS`. New tests `tests/chokepoint.test.ts` (24 tests) lock: threat-point computation (LOS, steel occlusion), chokepoint selection + cover tie-break, facing gate, threat state + facing gate, chase (imminence + player-distance + speed-scaling), hold vs chase + coverage gate, rule-4 think() integration, and OFF inertness. Flip `chokepointMode=1` and regenerate the regression-gate truths to ship. A 120-seed confirmation of S32/S16/S6 is the recommended follow-up.
+**Implications:** CANDIDATE — default OFF (shipped game unchanged), candidate set ready in `DEFAULT_GOD_AI_PARAMS`. New tests `tests/chokepoint.test.ts` (24 tests) lock: threat-point computation (LOS, steel occlusion), chokepoint selection + cover tie-break, facing gate, threat state + facing gate, chase (imminence + player-distance + speed-scaling), hold vs chase + coverage gate, rule-4 think() integration, and OFF inertness. Flip `chokepointMode=1` and regenerate the regression-gate truths to ship. A 120-seed confirmation of S33/S17/S7 is the recommended follow-up.
 
 ---
 
@@ -945,16 +945,16 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Decision:** `chokepointMode` 默认值 **0 → 1**（`src/ai/god/params.ts`）。§93 的全部调优参数（margin 1、holdThreshold 2、minRow 13、steel 10/brick 1、facingGate 1、pathsPerEnemy 4、maxThreatDist 14、replan 30、chaseMaxDist 3、holdMaxDist 6、chaseMaxPlayerDist 10 速度缩放）随默认 ON 一并生效，不再需要 A/B JSON 单独翻开关。
 
-**120-seed 确认（S6/S16/S32，paired CRN，360 对）：** suite 0.6712 → **0.6880**（mean Δscore **+0.0091 ± 0.0057**，p=0.106 未达 0.05 显著，但方向一致为正），过关率 **83% → 85%**，B better/worse/tied **13/8/339**（无系统性负向）。分关：**S16 +0.018（93%→95%）、S32 +0.011（78%→79%）、S6 0.000（持平）**——三关全部 ≥ 持平，符合用户验收标准「全面提升或持平」，无任何关卡下降。
+**120-seed 确认（S7/S17/S33，paired CRN，360 对）：** suite 0.6712 → **0.6880**（mean Δscore **+0.0091 ± 0.0057**，p=0.106 未达 0.05 显著，但方向一致为正），过关率 **83% → 85%**，B better/worse/tied **13/8/339**（无系统性负向）。分关：**S17 +0.018（93%→95%）、S33 +0.011（78%→79%）、S7 0.000（持平）**——三关全部 ≥ 持平，符合用户验收标准「全面提升或持平」，无任何关卡下降。
 
-**发货后 35×60 全量回归（shipped default）：** mean **90.9%**（与 §87 的 1908/2100 持平，新真值 3183/35 = 90.9%），**S6 73.3→75.0（+1.7pp）、S16 95.0→96.7（+1.7pp）、S28 86.7→91.7（+5.0pp）**，**其余 32 关零变化，无任何关卡低于其 §87 真值**。
+**发货后 35×60 全量回归（shipped default）：** mean **90.9%**（与 §87 的 1908/2100 持平，新真值 3183/35 = 90.9%），**S7 73.3→75.0（+1.7pp）、S17 95.0→96.7（+1.7pp）、S29 86.7→91.7（+5.0pp）**，**其余 32 关零变化，无任何关卡低于其 §87 真值**。
 
-**门禁真值重生成（`tests/god-ai-regression-gate.test.ts`）：** TRUTH_WIN_PCT 更新 S6/S16 两行（S28 保持 86.7 保守值——门禁上下文下 Spider 在 13-20/20 摆动，floor 14 会因上下文噪声失败，与 §87 相同的处理）。聚合均值 90.9% 不变 → AGGREGATE_FLOOR 610/700 不变。门禁实测：**639/700（91.3%），35 关全过 floor，S28 Spider 20/20（100%）**。
+**门禁真值重生成（`tests/god-ai-regression-gate.test.ts`）：** TRUTH_WIN_PCT 更新 S7/S17 两行（S29 保持 86.7 保守值——门禁上下文下 Spider 在 13-20/20 摆动，floor 14 会因上下文噪声失败，与 §87 相同的处理）。聚合均值 90.9% 不变 → AGGREGATE_FLOOR 610/700 不变。门禁实测：**639/700（91.3%），35 关全过 floor，S29 Spider 20/20（100%）**。
 
-**Behavior-lock 验证：** `tests/godai-split-parity.test.ts`（S0 8 种子，relaxed 后只锁 outcome）全部 outcome 不变（stage_clear ×7 + gameover ×1），无需重锁；`tests/chokepoint.test.ts` 的默认值断言改为 `chokepointMode=1`，OFF-inert 测试改为显式 `offParams()`（默认 ON 后 OFF 惰性仍保证 byte-identical 回退路径）。
+**Behavior-lock 验证：** `tests/godai-split-parity.test.ts`（S1 8 种子，relaxed 后只锁 outcome）全部 outcome 不变（stage_clear ×7 + gameover ×1），无需重锁；`tests/chokepoint.test.ts` 的默认值断言改为 `chokepointMode=1`，OFF-inert 测试改为显式 `offParams()`（默认 ON 后 OFF 惰性仍保证 byte-identical 回退路径）。
 
 **Rationale（MANIFEST §13 三门）：**
-- 更有趣：敌人压境时据守咽喉要地而非无脑追杀，减少「追杀过远回防不及」的败因（§88 的 S16 +2pp / S28 +5pp 佐证）。
+- 更有趣：敌人压境时据守咽喉要地而非无脑追杀，减少「追杀过远回防不及」的败因（§88 的 S17 +2pp / S29 +5pp 佐证）。
 - 架构简单：全走 `chokepointMode` 门控，ON/OFF 一刀切，无新增系统。
 - 尊重原作：据守关键通道、保护基地是 Battle City 的防守本质。
 
@@ -983,7 +983,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **per-seed tick-diff 定位的两个根源机制：**
 
-1. **漂移致死（已修复）**：160ms 冷却期间坦克沿旧方向滑行 ~10 ticks——S26 s1 想转 `down` 却一直冲 `left` 过弯撞死、S12 s6 想转 `left` 却一直 `up` 卡墙。修复为冷却期间原地等待后，此类死亡消除。
+1. **漂移致死（已修复）**：160ms 冷却期间坦克沿旧方向滑行 ~10 ticks——S27 s1 想转 `down` 却一直冲 `left` 过弯撞死、S13 s6 想转 `left` 却一直 `up` 卡墙。修复为冷却期间原地等待后，此类死亡消除。
 2. **AI 每 tick 决策模型假设瞬时转弯（残留 −24 flips @160ms）**：160ms 下每次转弯等 ~10 ticks，dodge / T2a 瞄准 / 转身开火节奏全部被拖慢。尝试的 AI 层「转向承诺锁」（提交方向后跨冷却窗口保持）帮助振荡型迷宫关（Checkers +9、Brick Maze +6）但更伤开阔关（Quarry −6、Star Fort −6）——开阔关每 tick 重新瞄准是合法行为，净负已回退。
 
 **为何 100ms 是全局最优：** 50ms+halt 反而比 50ms 基线更差（−17 flips）——原地等待打断了原 50ms 时 3-tick 漂移已被 AI 隐式利用的滑行补偿；160ms 超出 AI 决策模型承受阈值；100ms 恰好落在「AI 可容忍的转向延迟」与「振荡抑制收益」的交汇点，净 +5 flips（Frozen Field −2 / Battlement −2 与 Eagle Nest +4 / Thicket +3 等互抵后为正）。
@@ -1051,11 +1051,11 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 ## 107. M9 dodgeHorizonScore 多弹道生存视界承诺闪避：机制成立但 60-seed 阴性，不发布（2026-08-03）
 
-**Summary:** 探针证伪「多弹道评分替代二元 isSafeDir」原假设（交叉火力方向误选 ~0%）；真杠杆 = **承诺不足**（起点可闪避 + 从未清带 = hard 31.8% / chaos 35.0%）。`dodgeHorizonScore` 机制上修复 S0 seed2（OFF tick2158 死 vs ON 零死亡）——**证明 dodge 分支行为改动有杠杆，是修法问题**——但 60-seed chaos **-3.5pp**（承诺闪避牺牲防守/杀敌效率，基地被拆）。**方法论升级：双目标评估（生存 + 效率）**。详见 progress.md §II.7。
+**Summary:** 探针证伪「多弹道评分替代二元 isSafeDir」原假设（交叉火力方向误选 ~0%）；真杠杆 = **承诺不足**（起点可闪避 + 从未清带 = hard 31.8% / chaos 35.0%）。`dodgeHorizonScore` 机制上修复 S1 seed2（OFF tick2158 死 vs ON 零死亡）——**证明 dodge 分支行为改动有杠杆，是修法问题**——但 60-seed chaos **-3.5pp**（承诺闪避牺牲防守/杀敌效率，基地被拆）。**方法论升级：双目标评估（生存 + 效率）**。详见 progress.md §II.7。
 
 ## 108. M10 dodgeHorizon 门控变体（时间余量 + 距离）：chaos 确凿阴性，不发布（2026-08-03）
 
-**Summary:** 时间余量门控正确把 M9 的 chaos 损失 -3.5pp 减到 -2.4pp（承诺质量问题被识别）但无法转正；MARGIN6 60-seed hard +1.6pp / chaos -2.4pp——**hard/chaos 方向相反是常态，参数全局无法发布**。真实成本是 dist +25px（dodge fireRate 恒 1-2%，非火力是位置）。可复用信号：S13 走廊关双难度大正。dodge 分支第三次同构证伪。详见 progress.md §II.7/§II.11。
+**Summary:** 时间余量门控正确把 M9 的 chaos 损失 -3.5pp 减到 -2.4pp（承诺质量问题被识别）但无法转正；MARGIN6 60-seed hard +1.6pp / chaos -2.4pp——**hard/chaos 方向相反是常态，参数全局无法发布**。真实成本是 dist +25px（dodge fireRate 恒 1-2%，非火力是位置）。可复用信号：S14 走廊关双难度大正。dodge 分支第三次同构证伪。详见 progress.md §II.7/§II.11。
 
 ## 109. M11 星经济下一档：playerStartLevel 1→2（SHIPPED 后用户否决） _(superseded by §110: 用户否决，回退 1★，2026-08-03)_
 
@@ -1142,9 +1142,9 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **Rationale（§114 round-1 过拟合教训的反面教材）：**
 - **搜索本身跑全 35 关**（round-1 是 6 关子集 → 60-seed 全量双难度劣化 -0.9/-3.0pp）。round-2 每代 fitness 即全量口径 → 60-seed 交叉验证保持强信号（hard 53.2/chaos 56.9；CHAOS_BEST 50.3/56.8 略逊 → 选 HARD_BEST 统一发布）。
 - **game-feel 剥离验证**（用户约束：不改变 game feel）：aimError 0.03→0.12 与 suboptimalPathProb 0→0.14 是搜索噪声——剥离后 54.0/56.5（增益保持甚至略高），且这两个是 `SKILLED_HUMAN_PARAMS` 派生参数（human 代理 = max(0.15, god+0.15)），保留默认即 human 不受影响。**发布集 = HARD_BEST − aimError − suboptimalPathProb**。
-- **性能安全检查**：`replanInterval 50→1`（每 tick A* 重规划）是 hard 增益引擎（剥离后 hard 48.8% 塌回基线），实测 S23 迷宫关 +52% 模拟耗时（29.3→44.7ms/局 ≈ +0.003ms/tick，远在 6ms sim 预算内）——可接受。
-- **classic 回退根因**：classic instant 无磨血死亡，搜索调优的激进进攻（replan=1/更宽 threatRange/更短 camp）在 instant 下净负 -2.4pp（91.0→88.6）。还原表只在参数仍为 M4 默认时还原（显式 A/B 覆盖优先），stage 适配照常叠在还原之上（S0 open-defense baseRace 11→14 属 §60 正常适配）。
-- **逐关回退检查**（60-seed 同 seed 集）：最大单关回退 S10 -11、S4 -9、S18 -8（均 < 12 = 20-seed 门禁 4 wins 的 60-seed 换算 margin），改进 S3 +20/S23 +14/S1 +11/S9 +11/S21 +11；净 +89 wins。
+- **性能安全检查**：`replanInterval 50→1`（每 tick A* 重规划）是 hard 增益引擎（剥离后 hard 48.8% 塌回基线），实测 S24 迷宫关 +52% 模拟耗时（29.3→44.7ms/局 ≈ +0.003ms/tick，远在 6ms sim 预算内）——可接受。
+- **classic 回退根因**：classic instant 无磨血死亡，搜索调优的激进进攻（replan=1/更宽 threatRange/更短 camp）在 instant 下净负 -2.4pp（91.0→88.6）。还原表只在参数仍为 M4 默认时还原（显式 A/B 覆盖优先），stage 适配照常叠在还原之上（S1 open-defense baseRace 11→14 属 §60 正常适配）。
+- **逐关回退检查**（60-seed 同 seed 集）：最大单关回退 S11 -11、S5 -9、S19 -8（均 < 12 = 20-seed 门禁 4 wins 的 60-seed 换算 margin），改进 S4 +20/S24 +14/S2 +11/S10 +11/S22 +11；净 +89 wins。
 - **M13 参数被搜索调离**：outnumberedFieldEnemies 3→4、outnumberedFieldDistCells 15→26、outnumberedEnemyCount 3→5（P4.2 关闭）——replan=1 + 更宽 threatRange 下防御更动态，附近撤退/过密撤退反成负担；60-seed 组合验证净正。
 
 **Implications:**
@@ -1158,9 +1158,9 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **5 前置条件（对应任务）：** ①敌人处威胁点（可直击基地）；②出生点能处理该敌（0-1 转直击 或 出生点比 player 当前位更近）；③player 库存命数充足；④player 全速亦需 >5s 才够到该敌；⑤1s 内被致命弹命中（扫描所有敌方子弹，非仅最近 ctx.threat）。
 
 **验证（60-seed A/B，hard 全 35 关逐档）：**
-- 无 base 威胁守卫版本（仅按任务 5 条）：hard 子集 **net -1 flips**（S23 seed14 回归）——player 在基地其实不会沦陷时盲目自杀换命属浪费。per-seed tick-diff 定位：OFF 臂（不自杀）dodge+存活并胜出，ON 臂自杀丢命后仍保不住基地。
+- 无 base 威胁守卫版本（仅按任务 5 条）：hard 子集 **net -1 flips**（S24 seed14 回归）——player 在基地其实不会沦陷时盲目自杀换命属浪费。per-seed tick-diff 定位：OFF 臂（不自杀）dodge+存活并胜出，ON 臂自杀丢命后仍保不住基地。
 - **根因**：God AI 自身防御（基地护墙 + T8 拦截）已能处理基地威胁，故「主动换命换位置」绝大多数时候是负资产。
-- **修复**：加 base「活跃子弹威胁」守卫（`findBulletThreatToBaseImpl` 非空才触发）+ `_suicideStanding` 站立状态机（防 S30 每 tick 冻结，284→5 次/run）。修复后 hard 全 35 关 25-seed A/B **净 +0 flips（0 to-win / 0 to-lose，全程 tied）**——安全无回归，但触发率降至 0.3%，不提升过关率。
+- **修复**：加 base「活跃子弹威胁」守卫（`findBulletThreatToBaseImpl` 非空才触发）+ `_suicideStanding` 站立状态机（防 S31 每 tick 冻结，284→5 次/run）。修复后 hard 全 35 关 25-seed A/B **净 +0 flips（0 to-win / 0 to-lose，全程 tied）**——安全无回归，但触发率降至 0.3%，不提升过关率。
 
 **Rationale:**
 - 任务期望「全面提升过关率」未达成：现有防御已兜底基地危局，强制自杀无法净增益；守卫版本保安全（不劣化基线）。
@@ -1173,10 +1173,10 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - 诊断工具保留：`tools/diag/ab-diff.ts`（跨难度 A/B）、`tools/diag/diag-suicide*.ts`（频率/条件瓶颈/事件日志）。
 ## 117. 自杀秒回条件①变体（mode 2 STAND / mode 3 CHARGE）：诚实阴性（2026-08-04）
 
-**Decision:** 按取证建议重启 §116——把触发条件从条件⑤（濒死）改挂到条件①（敌人进入威胁点），新增两个变体：`suicideReturnMode=2`（STAND：站立等弹，超时 `suicideReturnStandMaxTicks=300` 兜底 + 超时后 `_suicideStandSuppress` 防重提交）与 `=3`（CHARGE：不闪避、直线冲锋威胁敌）。均**保留**基地活跃子弹守卫（S23 修复）。默认仍 OFF（mode=0，字节持平）。新增参数仅 `suicideReturnStandMaxTicks`。
+**Decision:** 按取证建议重启 §116——把触发条件从条件⑤（濒死）改挂到条件①（敌人进入威胁点），新增两个变体：`suicideReturnMode=2`（STAND：站立等弹，超时 `suicideReturnStandMaxTicks=300` 兜底 + 超时后 `_suicideStandSuppress` 防重提交）与 `=3`（CHARGE：不闪避、直线冲锋威胁敌）。均**保留**基地活跃子弹守卫（S24 修复）。默认仍 OFF（mode=0，字节持平）。新增参数仅 `suicideReturnStandMaxTicks`。
 
 **实现要点：**
-- 健康 player 无法靠「站立饮弹」快死（pool 229HP 需 2-3 发），故 mode 2 用超时兜底、mode 3 主动赴死——两者都避免 §116 S30 站立冻结病理（单元测试抓到 mode 2 超时后立即重提交的二次冻结，用 suppress 修复）。
+- 健康 player 无法靠「站立饮弹」快死（pool 229HP 需 2-3 发），故 mode 2 用超时兜底、mode 3 主动赴死——两者都避免 §116 S31 站立冻结病理（单元测试抓到 mode 2 超时后立即重提交的二次冻结，用 suppress 修复）。
 - 执行中交易用弱检查 `anyThreatPointEnemyImpl`（仅条件①）而非全量前置——冲锋/站立中途不会因 player 已拉近距离而中止。
 
 **验证（A/B：35 关 × 120 seeds × {hard, chaos}，36000 ticks，官方口径 no-stageIndex，3 臂并行，~8 min/15 workers）：**
@@ -1198,7 +1198,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 2. **开火抑制级联（两 mode 通用）**——chaos S10 s46 t2375/2874、s17 t4995：每个 commit tick 都压掉一枪（`_fire=false`），整局累计 30-89 个 commit tick（A 臂 t2a 计数 287/307 vs B/C 272/292），每次延迟一 tick 的击杀顺序级联（diff 可见 e3/e4、pb0/pb1 的单 tick 漂移），把必赢局拖成基地失守。
 3. **冲锋劫持（CHARGE）**——hard S35 s8 t2361：不冻结而是朝（错误的）威胁敌横切，同样抛弃回防路径。
 
-**根因（与 §116 S23 同源、放大 30-40 倍）：** 条件①+单弹守卫在「基地仍可防守」（满血 + 防守计划在跑）时即触发——**一发在飞基地弹不是基地沦陷的证据**（120 HP 缓冲 + A 臂自身的回防/据守能化解同一威胁）。§116 mode 1 安全只因条件⑤让命近乎免费且触发率 0.3%；mode 2/3 去掉成本保护却没加任何「基地必死」证据，于是以健康一条命 + 抛弃正在生效的防守去赌博 ~40 次，净效果为零（A/B 翻转散乱、净 ±0-3 正是两条机制对冲的写照）。
+**根因（与 §116 S24 同源、放大 30-40 倍）：** 条件①+单弹守卫在「基地仍可防守」（满血 + 防守计划在跑）时即触发——**一发在飞基地弹不是基地沦陷的证据**（120 HP 缓冲 + A 臂自身的回防/据守能化解同一威胁）。§116 mode 1 安全只因条件⑤让命近乎免费且触发率 0.3%；mode 2/3 去掉成本保护却没加任何「基地必死」证据，于是以健康一条命 + 抛弃正在生效的防守去赌博 ~40 次，净效果为零（A/B 翻转散乱、净 ±0-3 正是两条机制对冲的写照）。
 
 ## 118. §117 守卫升级（baseHp 阈值 + 防守位失守）A/B — 仍为诚实阴性，机制性证伪（2026-08-04）
 
@@ -1293,7 +1293,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 
 **Rationale:**
 - think() 每 tick（headless runner 每 tick 调 `input.endFrame()`）或每帧至多一次（浏览器 `_thought` 守卫，同帧多次 tick 复用同一次 think 的决策）执行，期间 World 不被修改（One Author §2.1）——同原点同方向的重复扫描（shouldFireInDir 内联、aggro/engage/hunt 候选、ThreatAssessor.findMostDangerousBullet 均从 player 中心扫同一方向）结果逐字节相同。
-- **零陈旧**：memo 生命周期严格在单 tick 内，不跨 tick——这正是 §68 否决的 cross-tick 缓存（0.5s 陈旧致 S6 胜率 72%→40%）缺失的粒度保证。
+- **零陈旧**：memo 生命周期严格在单 tick 内，不跨 tick——这正是 §68 否决的 cross-tick 缓存（0.5s 陈旧致 S7 胜率 72%→40%）缺失的粒度保证。
 - 不耗 RNG、不改变调用次数（只跳过重复计算），确定性签名逐字节不变：**实测 `ticks=1169769 wins=317/350` 与 HEAD 基线完全一致**（同机 A/B，bench-all-stages classic/35/10 games/warmup=2）。
 
 **Results:** scanAheadImpl self-time 从 Round 7-8 的 ~9%（chaos/stage0 profile）降至 ~0.5%（classic profile）/ 1.7%（chaos profile，含未命中原点成本）。Round 10 整体 wall：HEAD 3211/3289ms → WIP 2988/3219/3133ms（均值 ~3113ms，~4%；样本含热噪声 ±5-10%，方向为正）。
@@ -1311,7 +1311,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **Decision:** `selectTargetImpl` 加 **within-tick memo**：`_selTargetValid` + 键 `(col, row)` + `_selTargetBuf` 稳定结果格 + `_selTargetNull`。HUNT 分支同 tick 内 2-3 次以相同 playerCell 调用 selectTarget（`navTarget = selectTarget(pc)` 后经 followPath→replan 或 directMove 再调），中间 World 不变，重复查询冗余。
 
 **Rationale:**
-- §68 否决的是 **cross-tick** 缓存（0.5s 陈旧崩 S6）；within-tick memo **零陈旧**（endFrame 每 tick 清），是 §68 响应性要求粒度下的安全形态。`selectTargetUncached` 只读 World 状态与 params、不耗 RNG。
+- §68 否决的是 **cross-tick** 缓存（0.5s 陈旧崩 S7）；within-tick memo **零陈旧**（endFrame 每 tick 清），是 §68 响应性要求粒度下的安全形态。`selectTargetUncached` 只读 World 状态与 params、不耗 RNG。
 - 原 uncached 路径可能返回共享 `_tankCellBuf`（下一次 tankCell() 调用即覆写）或新分配的 defense cell——统一稳定缓冲同时消除别名风险与每 tick 对象分配。
 - Telemetry note: `branchCounts.chokepoint` 从「每次冗余查询计数」改为「每 tick 一次」——纯观测计数（tools/diag），不影响游戏。
 
@@ -1332,10 +1332,10 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 **Rationale:**
 - §2.10 调用分布测量（临时插桩，已回退）：replan 占 findPath 78.9%（chaos/stage0）+ 9.9% dig = **88.8%**；classic/35 为 41.7%+31.3% = 73%。根因：`replanInterval` 默认 1，followPath→replanImpl 每 tick 全量 A*，而 §68 缓存只加在了 navigateTowardsImpl（次级分支）——主导航分支被遗漏。
 - `replanImpl` 全链不耗 RNG（findPath 确定性 A*，selectTarget 只读 World 状态），key 完整覆盖输入 ⇒ 严格纯 memo ⇒ **字节级确定**。地形修订号使缓存在地形变化的同一 tick 失效，无 staleness 窗口；60-tick 计时器降为防御性兜底。
-- 首个实现（无 revision、60-tick 兜底）A/B 冒烟 score 700/700 tied，但 **bench 揭穿**：ticks=1172649 vs 基线 1169769、wins 316 vs 317，13/350 单元分歧（含 S32 seed1021 outcome 翻转）。eval-suite 的 paired 比较是 score 粒度，抓不住 tick 级分歧——**per-seed tick-diff 才是诚实判据**。
+- 首个实现（无 revision、60-tick 兜底）A/B 冒烟 score 700/700 tied，但 **bench 揭穿**：ticks=1172649 vs 基线 1169769、wins 316 vs 317，13/350 单元分歧（含 S33 seed1021 outcome 翻转）。eval-suite 的 paired 比较是 score 粒度，抓不住 tick 级分歧——**per-seed tick-diff 才是诚实判据**。
 
 **Results（同机 A/B，经典/35 10 games/warmup=2 与 chaos/35）：**
-- 确定性：修复后 classic bench `ticks=1169769 wins=317/350` 与关闭版逐字节一致；全量 350 单元扫描 **0/350 分歧**；per-seed-diff S15 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
+- 确定性：修复后 classic bench `ticks=1169769 wins=317/350` 与关闭版逐字节一致；全量 350 单元扫描 **0/350 分歧**；per-seed-diff S16 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
 - 收益：**chaos wall −27.0% / −31.6%**（缓存开 vs 关，两轮）；classic ±2% 噪声（CLASSIC_MODEL_PARAMS 把 classic 的 replanInterval 恢复为 50，replan 每 50 tick 一次，命中率低——收益在主战场 hard/chaos）。
 
 **Implications:** 后续缓存类优化（pickup 可达性等）必须：① 先做 tick 级 A/B 而非 score 级；② 缓存返回对象与消费路径解引用（shift/变异）分离；③ 失效信号（revision）覆盖所有写路径（含快照直写 grid）。
@@ -1363,7 +1363,7 @@ All params are 0-able for A/B; OFF (mode=0) is byte-identical to pre-§87 (verif
 - §2.10/§127 Implications 预留方向：pickup 是 replan 缓存后最大可砍项（chaos 28.4% / classic 40.4% 的 findPath 调用）。
 - 与 §127 同构：findPath 是纯函数无 RNG → 同款键缓存字节级一致；revision 已覆盖全部地形写路径（§127 验证）。
 - 插桩计数（测后回退）：chaos/stage0 pickup 20603→2708（−87%），总 findPath 72533→54638（−24.7%）；classic/stage0 pickup 6206→613（−90%），总 15366→9773（−36.4%）。
-- 确定性：350 单元扫描 0/350 分歧（outcome/ticks/killCount）；per-seed-diff 4/4 敏感种子 IDENTICAL（S15 seed1007 / S32 seed1021 / S6 seed41 / S26 seed12）；eval-suite hard/chaos 各 4200/4200 tied；三难度基线签名逐字节不变（classic 1169769/317、hard 1639097/177、chaos 1777415/195）。
+- 确定性：350 单元扫描 0/350 分歧（outcome/ticks/killCount）；per-seed-diff 4/4 敏感种子 IDENTICAL（S16 seed1007 / S33 seed1021 / S7 seed41 / S27 seed12）；eval-suite hard/chaos 各 4200/4200 tied；三难度基线签名逐字节不变（classic 1169769/317、hard 1639097/177、chaos 1777415/195）。
 - Wall（同机 A/B，带热身轮 + order=ab/ba 双向）：**chaos −27.7% / −8.3%**（ab 序 B 臂 13401ms 疑似系统负载离群；perTick 两轮均 favor A）；classic ±14% 噪声带内（单场 ~3ms，收益被机器负载淹没）。chaos 收益超过 §127 profile 预估（dig A* 单次成本高于 corridor，corridor-fail 是全网格探索）。
 
 **Implications:**
@@ -1444,12 +1444,12 @@ armor 0.85），逼近因子在基地环上为 1、线性衰减到 range 处为 
 - w500/r10 → 423/700（−8）；w1000/r12 → 411/700（−20）；w800/r8 → 430/700（−1）。
 - Battlement 全臂纹丝不动：1/20 → 1/20/1/1；direct-drive 30 seeds 1/30 → 1/30 逐字一致。
 - 机制确认激活：direct-drive 探针显示 Battlement 基地威胁模式激活 26.6% 的 tick
-  （≈ Ramparts 25.6%），其中 ~45% 的时刻有 fast 在基地 10 格内；全局行为确实变化（S26 +5）。
+  （≈ Ramparts 25.6%），其中 ~45% 的时刻有 fast 在基地 10 格内；全局行为确实变化（S27 +5）。
 
 **Rationale（为何负）:** ① 作用域错位——项只在「基地已受威胁」块内重排「追谁」，不改变
 「何时回防」；Battlement 基地中位死亡 tick ≈ 3244，威胁模式激活时快车已在基地环开火，
 为时已晚。② fast（4.5 cps）比 1★ 玩家（4.19 cps）还快——追快车数学上徒劳，把目标从
-可击杀威胁换到追不上的快车 = 净负（w500 下 S2 −3、S23 −4；w1000 下 S12 −5、S31 −4）。
+可击杀威胁换到追不上的快车 = 净负（w500 下 S3 −3、S24 −4；w1000 下 S13 −5、S32 −4）。
 这是 §131/T8 的同一教训：**基地防守瓶颈不能靠「威胁块内重排目标」解决**，方向 A/B 都是
 「敌人已到位后」的补救，杠杆在「敌人到达前」。
 
@@ -1463,7 +1463,7 @@ armor 0.85），逼近因子在基地环上为 1、线性衰减到 range 处为 
 A/B 三臂全负，默认保持阈值 0（OFF，byte-identical）。不发布 = 不改默认值。
 
 **实现:** `computeStageAdaptedParams` 在 §60 open-defense 之后加一块：当
-brickWallRatio ≥ 0.9（恰好 6 关：S0/S3/S14/S30/S33/S34，纯砖无钢墙）时覆盖三个距离——
+brickWallRatio ≥ 0.9（恰好 6 关：S1/S4/S15/S31/S34/S35，纯砖无钢墙）时覆盖三个距离——
 baseRaceRangeCells↑（更早 race 触发）、maxPlayerDistFromBase↓（受威胁更早回防）、
 outnumberedFieldDistCells↓（M13 更早回防）。注：§60 在这 6 关把 race 从 18 压到 14，
 方向与直觉相反，§133 的初衷是把它们改回 20-24。
@@ -1472,8 +1472,8 @@ outnumberedFieldDistCells↓（M13 更早回防）。注：§60 在这 6 关把 
 - mild（race20/maxDist20/field16）→ 424/700（−7）；brick-heavy 6 关 62→55/120（−7）。
 - balance（22/18/12）→ 411/700（−20）；6 关 42/120（−20）。
 - tight（24/14/8）→ 402/700（−29）；6 关 33/120（−29）。
-- 重灾区正是目标关：S3 Crossfire 13→2/4/0（−11~−13 毁灭性）、S34 Final Redoubt 16→15/11/4、
-  S14 Citadel 10→9/5/6。仅 S0 +4（mild）、S30 +1（mild）微升。Battlement 1→2/0/0 噪声级。
+- 重灾区正是目标关：S4 Crossfire 13→2/4/0（−11~−13 毁灭性）、S35 Final Redoubt 16→15/11/4、
+  S15 Citadel 10→9/5/6。仅 S1 +4（mild）、S31 +1（mild）微升。Battlement 1→2/0/0 噪声级。
 
 **Rationale（为何负）:** race 范围 20-24 使「玩家必须比敌人显著近才能继续打」几乎常驻触发，
 maxDist 14-20 使基地一受威胁玩家就离开中场战斗回防——玩家整局往返奔跑，击杀节奏清零，
@@ -1499,7 +1499,7 @@ SHIPPED：`defenseInterceptMode=1`、`defenseInterceptMaxDist=12`、`defenseInte
 - 20-seed 筛选三臂全正：m8/r15 +8、m12/r15 +11、m8/r20 +8（vs 基线 431/700）；弱关全线上涨
   （Ice Palace 10→15、Thicket 8→11、Bastion 7→8、Battlement 1→3）。
 - 60-seed paired（m12/r15）：hard mean Δscore **+0.0076 ± 0.0056**（p=0.17，suite 0.4410→
-  0.4474；S32 Diamond +15pp、S34 +10pp、Battlement 0.175→0.200）；chaos **+0.0144 ± 0.0055
+  0.4474；S33 Diamond +15pp、S35 +10pp、Battlement 0.175→0.200）；chaos **+0.0144 ± 0.0055
   （p=0.0087 显著，suite 0.4069→0.4284，Oasis +8.4pp p=0.042）**。双难度方向一致净正，无任何
   难度回退 → 符合 M13 发布先例。
 - 门禁真值重测（gate-context 35×20）：hard 431→**442/700（63.1%）**、chaos 408→**420/700（60.0%）**；
@@ -1509,7 +1509,7 @@ SHIPPED：`defenseInterceptMode=1`、`defenseInterceptMaxDist=12`、`defenseInte
 用击杀节奏换防守，净负（§131-§133）。方向 D 是第一个**留在防守位开火**的机制：敌人与
 base 对齐的瞬间（破砖进入 row 23-25 / base 列走廊）正是它最脆弱也最危险的时刻，玩家在
 base 列上方与它同列的概率最高，一枪命中即解除威胁——零机动成本，且天然不破坏击杀节奏
-（拦截本身就是击杀）。S32 Diamond 意外大赚（钢墙关玩家在防守位的机会窗口长）。
+（拦截本身就是击杀）。S33 Diamond 意外大赚（钢墙关玩家在防守位的机会窗口长）。
 
 **Implications:** Battlement hard 1/20→3/20 但仍是最弱关（目标 >50%）。下一杠杆：把
 enemyCanShootBase 静态判定升级为「预测敌人将进入基地车道」（提前 1-2 格拦截）；或接受
@@ -1596,7 +1596,7 @@ hard 的 Boss 关（chaos 0/20 是难度锚点），或从「防守」转向「�
 **Decision:** 新增 `firingLaneMode`（默认 0 = OFF，byte-identical）+ `firingLaneRadius`(5)/`firingLaneMinEnemyDist`(4)/`firingLaneReplanTicks`(15)。新候选 FIRING_LANE（weight 300，插在 pickupLow 与 hunt 之间）：当玩家四方向 scan 全无敌人 LOS、且所有敌人距玩家 > minDist 时，在半径内搜索「能看到 ≥1 个敌人」的瞭望格并导航过去重新接战（替代 hunt 盲走），带 tick 节流。纯移动候选（到达后由 engage/aggressive 开火），无 RNG，分支计数仅观察。
 
 **Rationale:**
-- 触发背景（Battlement 击杀效率分析 2026-08-05）：命中率 23.7% 正常，瓶颈是射击量——玩家 51% 时间静止、34% 全 tick 钉在 (11,24) 死区，射击 24.9 发/局只有 S32 的 37%（67.7），击杀 5.9/20 局基地即失守。设计假设：死区=「站着打不到」，解卡 = 去有射界的瞭望格。
+- 触发背景（Battlement 击杀效率分析 2026-08-05）：命中率 23.7% 正常，瓶颈是射击量——玩家 51% 时间静止、34% 全 tick 钉在 (11,24) 死区，射击 24.9 发/局只有 S33 的 37%（67.7），击杀 5.9/20 局基地即失守。设计假设：死区=「站着打不到」，解卡 = 去有射界的瞭望格。
 - 20-seed A/B（基线 442/700）：**m1 292（−150）/ r7 320（−122）/ d2 279（−163）——灾难性全线崩塌**，Battlement 3→2 仍负。重灾区 Iron Curtain −12、Spider −10、Gauntlet −10、Ice Palace −11、Diamond −10。
 - 机制诊断（决定性）：**「四方向无 LOS」在迷宫关卡是常态而非死区**——玩家本来就该穿墙寻路去接战；门控把几乎所有正常寻路都误判成死区，不断把玩家拉离当前目标去「绕路看敌人」，击杀节奏彻底崩溃（多数关胜率腰斩）。瞭望格评分「可见数×10−距离」进一步放大绕路。
 - 与 §131-§138 合流：九个防守/位置类机制（拦子弹/追快车/早回防/车道拦截 SHIPPED/预测/破砖/守位格 v1/v2/火力死区）中唯一正项仍是 §134 移动中拦截。位置类杠杆全部证伪，进攻侧首轮（§139）也证伪。
@@ -1858,3 +1858,24 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 （默认翻 1），正确做法是保持 minDist=8 收窄版语义，而非解除门控——解除门控经实测无净价值。
 standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋钮共用同一语义，未来若统一启用
 应复用收窄版验证口径。
+
+## 150. 关卡序号统一为 1-based（工具 CLI + 文档 S# 全量修正，2026-08-05）
+
+**Decision:** 全仓库统一关卡序号为 **1-based**：`S1`=Outpost … `S33`=Diamond、`S34`=Battlement、`S35`=Final Redoubt（即 `STAGES[n-1]`）。所有接受关卡选择的 CLI 工具（`--stages`/`--stage`/位置参数）改为 1-based 解析，所有 `S#` 输出标签、文档（DECISIONS/docs/plan）与测试注释同步 1-based。
+
+**Rationale:**
+- 原状割裂：取证工具（run-forensics/ab-fire-guard/ab-suicide-v2/base-loss-forensics，§119-§121 起）已用 1-based，其余工具与文档用 0-based——`--stages 33` 与文档「S33」指向不同关卡（33→Diamond vs S33=Battlement）。
+- 1-based 与用户直觉（第 33 关 = S33）及 `StageData.id`（本已 1-based）一致。
+- 转换规则（固化于 tmp/convert-stage-numbers.ts，dry-run 审计 425 处）：名称锚定（「S8 Riverbed」依相邻关名判定 0/1-based）、S0 必为 0-based（→S1）/ S35 必为 1-based（保留）、§117 附录-§121 与 §145+ 段落本已 1-based（保留）、`S5 branch`/`S5 P3.2`/`S5 机会拾取` 为 think 管线标签（不转）。
+- 刻意未动：内部 `stageIndex` 变量、序列化/元数据 JSON 字段（replay 元数据、WorldSerializer，保持 0-based 内部索引）、replay 文件名（`buildReplayFilename` 本就 +1，与 1-based 一致）、`STAGES[]` 下标。唯一例外：level-sim 控制台报告 JSON 的 `stage.index` 是**展示字段**（无程序消费者，仅人读），按 1-based 输出（与 `StageData.id` 及显示约定一致）。
+
+**Implications:**
+- 工具（~24 个）：flip-scan/ab-diff/diag-suicide*/diag-weak-stages/death-attribution/decision-probe/per-seed-diff/diag-ice-deaths/diag-suicide-cond/events/batch-sim/regression-check/freeze-thrash-audit/gen-thumbnails/ab-test-counter-fire/ab-test-steel-occlusion/profile-and-analyze/level-sim/probe-params/bench-all-stages/validate-p4/eval-suite/optimize-godai/sweep-winrate 改为 1-based 解析与标签；gate-truth.ts 生成的数组注释同步 S1..S35；默认关卡参数同步（如 level-sim `--stage 1`、diag-weak-stages `--stages 7,15,19,33`）。
+- 文档：DECISIONS.md（~300 处）、docs/god-ai-tuning.progress.md、docs/perf-optimization.progress.md、plan/God-AI-Next-Round.md、plan/Automated-Level-Design-and-Simulation.md 全量 1-based。**plan/tasks.chat.md 不在转换范围**（untracked 草稿，用户决定跳过，保持原样）。
+- 测试注释：chokepoint/counter-fire/dodge-m3/dodge-oscillation/threat-assessor/fire-control-steel-block/m4-release-restore/replay-file + 两门禁数组注释同步（replay-file 测试数据修正为 Diamond=index 32=S33）。
+- 验证：`bun run check` 1039/0 绿、typecheck/lint 干净；冒烟：`diag-weak-stages --stages 7` → S7 Iron Curtain、`decision-probe 27 12 1` → S27 Brick Maze。
+
+**执行记录（2026-08-05 追加）：** 首次 `--apply` 正确完成后，脚本幂等保护曾用「无 S0 残留」判定已转换——但本条规则文本自身含字面 `S0`（「S0 必为 0-based」），导致二次 `--apply` 未拦下，六个文档被 +1 二次位移。已修复：
+- 幂等保护改为 **marker 文件制**（`tmp/.stage-numbers.converted`）：每次 `--apply` 成功写 marker，之后无 `--force` 再跑 `--apply` 直接 ABORT。
+- 五个 tracked 文档已 `git checkout` 还原到 0-based HEAD 后重新 `--apply` 一次（425 处，与首次审计一致），恢复为正确 1-based。
+- 教训：内容特征（如「无 S0」）不可作幂等判定，因为规则文档自身会引用旧编号；状态信号必须独立于被转换内容。

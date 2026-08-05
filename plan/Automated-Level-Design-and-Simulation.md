@@ -255,7 +255,7 @@ export function floodFill(
 
 | 任务 | 产出 | 验收标准 |
 |------|------|----------|
-| 1.1 创建 `tools/optimize/level-sim.ts` | 无头仿真 CLI | `bun tools/optimize/level-sim.ts --stage 0 --difficulty hard --seed 123` 可跑通并输出 JSON |
+| 1.1 创建 `tools/optimize/level-sim.ts` | 无头仿真 CLI | `bun tools/optimize/level-sim.ts --stage 1 --difficulty hard --seed 123` 可跑通并输出 JSON |
 | 1.2 实现 `GodAIInput` | `src/ai/GodAIInput.ts` | 实现 `InputLike` 接口，使用 `pathfind.ts` 寻路，能驱动玩家移动/开火 |
 | 1.3 实现 `SimulationRunner` | `tools/sim/simulation-runner.ts` | `run(seed, stage, difficulty)` → `SimResult` |
 | 1.4 实现 `Evaluator` | `tools/eval/evaluator.ts` | `evaluate(result, baseline)` → `EvaluationReport` |
@@ -348,7 +348,7 @@ export function floodFill(
 
 ### 6.1 Phase 1 完成标准
 
-- [ ] `bun tools/optimize/level-sim.ts --stage 0 --difficulty hard --seed 1` 输出完整 JSON 报告
+- [ ] `bun tools/optimize/level-sim.ts --stage 1 --difficulty hard --seed 1` 输出完整 JSON 报告
 - [ ] `GodAIInput` 能在无渲染下驱动玩家完成基本移动/射击
 - [ ] `SimulationRunner` 正确处理 `stage_clear`/`gameover`/`maxTicks` 三种终局
 - [ ] `Evaluator` 硬性指标判定正确，软性指标计算与定义一致
