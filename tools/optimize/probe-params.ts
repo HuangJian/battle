@@ -8,7 +8,7 @@
  * before spending a full CMA-ES round on it.
  *
  * Usage:
- *   bun tools/optimize/probe-params.ts --stage 18 --seeds 20 \
+ *   bun tools/optimize/probe-params.ts --stage 19 --seeds 20 \
  *     --base .workbuddy/optimization-p4-r6/optimization-summary.json \
  *     --variants "aimError=0;outnumberedEnemyCount=2;maxPlayerDistFromBase=12,defenseRowOffset=3"
  *
@@ -25,7 +25,7 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : fallback
 }
 
-const stageIdx = parseInt(arg('stage', '18')!, 10)
+const stageIdx = parseInt(arg('stage', '19')!, 10) - 1 // CLI is 1-based (1..35)
 const seedCount = parseInt(arg('seeds', '20')!, 10)
 const seedStart = parseInt(arg('seedStart', '1')!, 10)
 const baseFile = arg('base', '')
@@ -50,7 +50,7 @@ for (const spec of variantsSpec.split(';')) {
 }
 
 const stage = STAGES[stageIdx]
-console.log(`S${stageIdx} ${stage.name} x ${seedCount} seeds, classic, ${maxTicks}t`)
+console.log(`S${stageIdx + 1} ${stage.name} x ${seedCount} seeds, classic, ${maxTicks}t`)
 for (const v of variants) {
   let wins = 0
   let baseDeaths = 0

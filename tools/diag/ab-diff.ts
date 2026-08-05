@@ -25,7 +25,13 @@ function arg(name: string): string | undefined {
 const difficulty = arg('difficulty') ?? 'hard'
 const seeds = parseSeeds(arg('seeds'))
 const stageSpec = arg('stages') ?? 'all'
-const stageIdxs = stageSpec === 'all' ? STAGES.map((_, i) => i) : stageSpec.split(',').map(Number)
+const stageIdxs =
+  stageSpec === 'all'
+    ? STAGES.map((_, i) => i)
+    : stageSpec
+        .split(',')
+        .map((n) => Number(n) - 1) // CLI is 1-based (1..35); internal index is 0-based
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
 
 function parseSeeds(spec: string | undefined): number[] {
   if (!spec) return Array.from({ length: 60 }, (_, i) => i + 1)
@@ -90,7 +96,7 @@ for (const si of stageIdxs) {
   totalToLose += agg.toLose.length
   const name = STAGES[si].name
   console.log(
-    `S${si} ${name.padEnd(16)} A ${agg.winA}/${seeds.length} → B ${agg.winB}/${seeds.length}  ` +
+    `S${si + 1} ${name.padEnd(16)} A ${agg.winA}/${seeds.length} → B ${agg.winB}/${seeds.length}  ` +
       `win:${agg.toWin.length} lose:${agg.toLose.length} tied:${agg.tied}`,
   )
   if (agg.toWin.length > 0) console.log(`    FLIP-TO-WIN  seeds: ${agg.toWin.join(', ')}`)

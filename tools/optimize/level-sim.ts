@@ -5,13 +5,13 @@
  * Runs one or more God-AI-driven simulations of a stage and outputs a JSON report.
  *
  * Usage:
- *   bun tools/optimize/level-sim.ts --stage 0 --difficulty hard --seed 123
- *   bun tools/optimize/level-sim.ts --stage 0 --difficulty chaos --seed 42 --max-ticks 18000
- *   bun tools/optimize/level-sim.ts --stage 0 --size 10 --save-replays
- *   bun tools/optimize/level-sim.ts --stage 0 --size 5 --save-replays --replay-failures-only
+ *   bun tools/optimize/level-sim.ts --stage 1 --difficulty hard --seed 123
+ *   bun tools/optimize/level-sim.ts --stage 1 --difficulty chaos --seed 42 --max-ticks 18000
+ *   bun tools/optimize/level-sim.ts --stage 1 --size 10 --save-replays
+ *   bun tools/optimize/level-sim.ts --stage 1 --size 5 --save-replays --replay-failures-only
  *
  * Options:
- *   --stage <index>          Stage index in STAGES (default: 0)
+ *   --stage <number>         Stage number in STAGES, 1-based (default: 1)
  *   --difficulty <key>       Difficulty key: classic|relax|hard|chaos (default: hard)
  *   --seed <number>          RNG seed (default: random)
  *   --size <n>               Number of serial simulations to run (default: 1)
@@ -34,7 +34,7 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : fallback
 }
 
-const stageIdx = parseInt(arg('stage', '0')!, 10)
+const stageIdx = parseInt(arg('stage', '1')!, 10) - 1 // CLI is 1-based (1..35)
 const difficulty = arg('difficulty', 'hard')!
 const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
 const doEval = process.argv.includes('--eval')
@@ -54,7 +54,7 @@ const size = parseInt(arg('size', '1')!, 10)
 // ---- Load stage ----
 const stage = STAGES[stageIdx]
 if (!stage) {
-  console.error(`Stage ${stageIdx} not found (0..${STAGES.length - 1})`)
+  console.error(`Stage ${stageIdx + 1} not found (1..${STAGES.length})`)
   process.exit(1)
 }
 
@@ -95,7 +95,7 @@ for (let i = 0; i < size; i++) {
 
   // ---- Output per game ----
   const output = {
-    stage: { id: stage.id, name: stage.name, index: stageIdx },
+    stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
     difficulty,
     coop,
     seed: gameSeed,
@@ -175,7 +175,7 @@ for (let i = 0; i < size; i++) {
 if (size > 1) {
   const winRate = Math.round((winCount / totalGames) * 1000) / 10
   const summary = {
-    stage: { id: stage.id, name: stage.name, index: stageIdx },
+    stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
     difficulty,
     coop,
     seed,

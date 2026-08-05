@@ -26,8 +26,8 @@
  * regression-check.ts.
  *
  * Usage:
- *   bun tools/sim/freeze-thrash-audit.ts --stages 0-34 --seeds 1-10 [--mode coop|single]
- *   bun tools/sim/freeze-thrash-audit.ts --stages 0-34 --seeds 1-10 --set aimTurnSnapGuard=0
+ *   bun tools/sim/freeze-thrash-audit.ts --stages 1-35 --seeds 1-10 [--mode coop|single]
+ *   bun tools/sim/freeze-thrash-audit.ts --stages 1-35 --seeds 1-10 --set aimTurnSnapGuard=0
  *
  * Param override: --set <key>=<value> (repeatable) overrides any numeric
  * GodAIParams key on top of the defaults — same convention as
@@ -186,7 +186,9 @@ if (import.meta.main) {
   const difficulty = arg('difficulty', 'classic')
   const mode = arg('mode', 'coop')
   const seeds = parseRange(arg('seeds', '1-10'))
-  const stages = parseRange(arg('stages', '0-34')).filter((i) => STAGES[i])
+  const stages = parseRange(arg('stages', '1-35'))
+    .map((n) => n - 1) // CLI is 1-based (1..35); internal index is 0-based
+    .filter((i) => i >= 0 && i < STAGES.length)
   const coop = mode === 'coop'
 
   // --set <key>=<value>, repeatable (same convention as per-seed-diff.ts).

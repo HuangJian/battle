@@ -21,7 +21,8 @@ import {
 import { enemyCanShootBase } from '../../src/ai/god/SmartThreatModel'
 
 const difficulty = process.argv[2] ?? 'classic'
-const stageIdx = parseInt(process.argv[3] ?? '32', 10)
+// CLI stage is 1-based (1..35); internal index is 0-based.
+const stageIdx = parseInt(process.argv[3] ?? '33', 10) - 1
 const seed = parseInt(process.argv[4] ?? '1', 10)
 
 const world = new World()
@@ -115,7 +116,7 @@ while (tick < 18000) {
   if (world.state === 'stageclear' || world.state === 'gameover') break
 }
 
-console.log(`Stage S${stageIdx} ${STAGES[stageIdx].name} seed ${seed} (${difficulty})`)
+console.log(`Stage S${stageIdx + 1} ${STAGES[stageIdx].name} seed ${seed} (${difficulty})`)
 console.log(`total ticks ${tick}, playerAlive ${c.playerAlive}`)
 console.log(`  livesOK         ${c.livesOK}`)
 console.log(`  shieldedOK      ${c.shieldedOK}`)

@@ -12,7 +12,7 @@
  *
  * Usage:
  *   bun tools/level/gen-thumbnails.ts --input generated-stages.json --output-dir thumbnails/
- *   bun tools/level/gen-thumbnails.ts --stages 0-4 --output-dir thumbnails/
+ *   bun tools/level/gen-thumbnails.ts --stages 1-5 --output-dir thumbnails/
  *   bun tools/level/gen-thumbnails.ts --generated --count 5 --output-dir thumbnails/
  */
 
@@ -152,10 +152,14 @@ if (import.meta.main) {
       stages = STAGES
     } else if (stageSpec.includes('-')) {
       const [start, end] = stageSpec.split('-').map(Number)
-      stages = STAGES.slice(start, end + 1)
+      stages = STAGES.slice(start - 1, end) // CLI is 1-based (1..35); internal index is 0-based
     } else {
-      const idx = parseInt(stageSpec, 10)
+      const idx = parseInt(stageSpec, 10) - 1
       stages = [STAGES[idx]]
+    }
+    if (stages.length === 0 || !stages[0]) {
+      console.error(`--stages: no valid stage indexes (1..${STAGES.length})`)
+      process.exit(1)
     }
     process.stderr.write(`[gen-thumbnails] Using ${stages.length} classic stages\n`)
   } else {

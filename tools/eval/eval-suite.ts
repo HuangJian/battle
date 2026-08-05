@@ -10,7 +10,7 @@
  * Usage
  *   bun tools/eval/eval-suite.ts                       full 35-stage scorecard
  *   bun tools/eval/eval-suite.ts --seeds 60            more seeds (see §6: ≥60 to conclude)
- *   bun tools/eval/eval-suite.ts --stages 6,18,32      subset
+ *   bun tools/eval/eval-suite.ts --stages 7,19,33      subset
  *   bun tools/eval/eval-suite.ts --params best.json    score a tuned parameter set
  *   bun tools/eval/eval-suite.ts --dims                per-dimension breakdown
  *   bun tools/eval/eval-suite.ts --weights             nominal vs effective weight audit
@@ -228,7 +228,7 @@ function printScorecard(sc: ScoredCorpus, stageIdxs: number[]): void {
   console.log('─'.repeat(86))
   for (let i = 0; i < sc.stages.length; i++) {
     const s = sc.stages[i]
-    const label = `S${stageIdxs[i]} ${s.stageName}`
+    const label = `S${stageIdxs[i] + 1} ${s.stageName}`
     console.log(
       label.slice(0, 25).padEnd(26) +
         s.score.toFixed(3).padStart(8) +
@@ -832,7 +832,7 @@ async function main(): Promise<void> {
   const stageIdxs = stageArg
     ? stageArg
         .split(',')
-        .map((s) => Number(s.trim()))
+        .map((s) => Number(s.trim()) - 1) // CLI is 1-based (1..35); internal index is 0-based
         .filter((i) => i >= 0 && i < STAGES.length)
     : STAGES.map((_, i) => i)
   const serial = flag('serial')

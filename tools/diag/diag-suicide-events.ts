@@ -14,7 +14,8 @@ import { RNG } from '../../src/utils/RNG'
 import { START_LIVES, BASE_POS, CELL } from '../../src/constants'
 
 const difficulty = process.argv[2] ?? 'hard'
-const stageIdx = parseInt(process.argv[3] ?? '23', 10)
+// CLI stage is 1-based (1..35); internal index is 0-based.
+const stageIdx = parseInt(process.argv[3] ?? '24', 10) - 1
 const seed = parseInt(process.argv[4] ?? '14', 10)
 const on = (process.argv[5] ?? 'on') === 'on'
 
@@ -73,7 +74,7 @@ const p = world.player
 const px = p ? Math.round(p.x / CELL) : -1
 const py = p ? Math.round(p.y / CELL) : -1
 console.log(
-  `S${stageIdx} ${STAGES[stageIdx].name} seed ${seed} (${difficulty}, suicide=${on ? 'ON' : 'OFF'}) ` +
+  `S${stageIdx + 1} ${STAGES[stageIdx].name} seed ${seed} (${difficulty}, suicide=${on ? 'ON' : 'OFF'}) ` +
     `outcome=${world.state} T=${tick} kills=${world.killCount} lives=${world.lives} player=(${px},${py}) ` +
     `baseAlive=${!world.tileMap.isBaseDestroyed()} suicides=${suicides} branchSus=${input.branchCounts.suicideReturn}`,
 )

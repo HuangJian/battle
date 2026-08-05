@@ -6,7 +6,7 @@
  * for aggregation and analysis (plan/Automated-Level-Design §Phase 3a.1).
  *
  * Usage:
- *   bun tools/sim/batch-sim.ts --stages 0-4 --difficulty hard --seeds 1-5 --eval
+ *   bun tools/sim/batch-sim.ts --stages 1-5 --difficulty hard --seeds 1-5 --eval
  *   bun tools/sim/batch-sim.ts --generated --count 10 --difficulty hard --seeds 1-3 --eval
  *   bun tools/sim/batch-sim.ts --stages all --difficulty chaos --seeds 1-10 --eval --pretty
  */
@@ -265,18 +265,22 @@ if (import.meta.main) {
     stages = generateStages(genCount, difficulty, genTheme, 1)
     stageNames = stages.map((s) => s.name)
   } else {
-    const stageSpec = arg('stages', '0')!
+    const stageSpec = arg('stages', '1')!
     if (stageSpec === 'all') {
       stages = STAGES
       stageNames = STAGES.map((s) => s.name)
     } else if (stageSpec.includes('-')) {
       const [start, end] = stageSpec.split('-').map(Number)
-      stages = STAGES.slice(start, end + 1)
+      stages = STAGES.slice(start - 1, end) // CLI is 1-based (1..35); internal index is 0-based
       stageNames = stages.map((s) => s.name)
     } else {
-      const idx = parseInt(stageSpec, 10)
+      const idx = parseInt(stageSpec, 10) - 1
       stages = [STAGES[idx]]
       stageNames = [STAGES[idx].name]
+    }
+    if (stages.length === 0 || !stages[0]) {
+      console.error(`--stages: no valid stage indexes (1..${STAGES.length})`)
+      process.exit(1)
     }
   }
 

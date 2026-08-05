@@ -20,4 +20,5 @@ replays/
 
 # God AI 调优一次性诊断产物（progress doc §0.C：A/B 脚本不入库，临时数据 commit 前删除）
 tmp/
+reports/
 ab-test-*.ts

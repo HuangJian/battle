@@ -12,7 +12,7 @@
  *
  * 用法：
  *   bun tools/diag/death-attribution.ts --difficulty hard --seeds 20
- *   bun tools/diag/death-attribution.ts --difficulty chaos --stages 20-34 --json tmp/deaths.json
+ *   bun tools/diag/death-attribution.ts --difficulty chaos --stages 21-35 --json tmp/deaths.json
  */
 import { writeFileSync } from 'node:fs'
 import { STAGES } from '../../src/config/stages'
@@ -32,10 +32,11 @@ function parseStages(spec: string | undefined): number[] {
   for (const part of spec.split(',')) {
     const m = /^(\d+)-(\d+)$/.exec(part.trim())
     if (m) {
-      for (let i = Number(m[1]); i <= Number(m[2]); i++) out.push(i)
+      // CLI is 1-based (1..35); internal index is 0-based.
+      for (let i = Number(m[1]); i <= Number(m[2]); i++) out.push(i - 1)
     } else {
       const n = Number(part.trim())
-      if (Number.isInteger(n) && n >= 0 && n < STAGES.length) out.push(n)
+      if (Number.isInteger(n) && n >= 1 && n <= STAGES.length) out.push(n - 1)
     }
   }
   return out

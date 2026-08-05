@@ -22,7 +22,7 @@
  *   - branch counters (dodge/t8/aggressive/t2a/powerup/navigate/dead/chokepoint)
  *
  * Usage:
- *   bun tools/diag/decision-probe.ts <stageIdx> <seed> <tick> [--set k=v ...]
+ *   bun tools/diag/decision-probe.ts <stage 1-35> <seed> <tick> [--set k=v ...]
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -43,7 +43,7 @@ Prints the full decision context at tick <tick> (0-based, inclusive):
 world state + selectTarget + threat/chase/chokepoint + branch counters.
 
 Example:
-  bun tools/diag/decision-probe.ts 26 12 2853 --set chokepointMode=1 --set threatPointMargin=2
+  bun tools/diag/decision-probe.ts 27 12 2853 --set chokepointMode=1 --set threatPointMargin=2
 `
 
 function buildParams(): GodAIParams {
@@ -69,10 +69,17 @@ function buildParams(): GodAIParams {
   return params as unknown as GodAIParams
 }
 
-const stageIdx = parseInt(process.argv[2] ?? '')
+// CLI stage is 1-based (1..35); internal index is 0-based.
+const stageIdx = parseInt(process.argv[2] ?? '') - 1
 const seed = parseInt(process.argv[3] ?? '')
 const probeTick = parseInt(process.argv[4] ?? '')
-if (isNaN(stageIdx) || isNaN(seed) || isNaN(probeTick)) {
+if (
+  isNaN(stageIdx) ||
+  isNaN(seed) ||
+  isNaN(probeTick) ||
+  stageIdx < 0 ||
+  stageIdx >= STAGES.length
+) {
   console.error(USAGE)
   process.exit(1)
 }
@@ -132,7 +139,9 @@ const suicideStanding = input._suicideStanding
 const suicideStandTicks = input._suicideStandTicks
 const suicideStandSuppress = input._suicideStandSuppress
 
-console.log(`===== S${stageIdx} ${stage.name} · seed ${seed} · tick ${probeTick} · ${state} =====`)
+console.log(
+  `===== S${stageIdx + 1} ${stage.name} · seed ${seed} · tick ${probeTick} · ${state} =====`,
+)
 console.log(
   `player: cell (${pc.col},${pc.row}) px (${px},${py}) dir ${p?.dir ?? '?'} hp ${p?.hp}/${p?.maxHp} level ${p?.level ?? 0}`,
 )

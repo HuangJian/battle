@@ -19,12 +19,12 @@
  *     actually matter.
  *
  * The three-step loop this encodes (progress doc §0.B):
- *   1. bun tools/diag/flip-scan.ts --stages 18,32 --seeds 1-60 --set chokepointMode=1
+ *   1. bun tools/diag/flip-scan.ts --stages 19,33 --seeds 1-60 --set chokepointMode=1
  *   2. for each FLIP-TO-LOSE seed: per-seed-diff dump/diff → root cause
  *   3. fix, re-run flip-scan → confirm flips resolved / only gains remain
  *
  * Usage:
- *   bun tools/diag/flip-scan.ts --stages 6,16,32 --seeds 1-60
+ *   bun tools/diag/flip-scan.ts --stages 7,17,33 --seeds 1-60
  *                                [--set k=v ...]          candidate arm overrides
  *                                [--params-a a.json]      A arm from a params file
  *                                [--params-b b.json]      B arm from a params file
@@ -43,7 +43,7 @@ const USAGE = `
 flip-scan.ts — A/B flip-seed scanner (parallel worker pool).
 
 Usage:
-  bun tools/diag/flip-scan.ts [--stages 6,16,32] [--seeds 1-60] [--set k=v ...]
+  bun tools/diag/flip-scan.ts [--stages 7,17,33] [--seeds 1-60] [--set k=v ...]
                               [--params-a a.json] [--params-b b.json] [--workers N]
 
 Arms:
@@ -104,10 +104,10 @@ function parseCli(): Cli {
   const stageIdxs = stageArg
     ? stageArg
         .split(',')
-        .map((s) => Number(s.trim()))
+        .map((s) => Number(s.trim()) - 1) // CLI is 1-based (1..35); internal index is 0-based
         .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
     : STAGES.map((_, i) => i)
-  if (stageIdxs.length === 0) throw new Error('--stages: no valid stage indexes (0..34)')
+  if (stageIdxs.length === 0) throw new Error('--stages: no valid stage indexes (1..35)')
 
   const seeds = parseSeeds(arg('--seeds'))
 
@@ -236,7 +236,7 @@ async function main(): Promise<void> {
     totalToLose += agg.toLose.length
     const name = STAGES[stageIdx].name
     console.log(
-      `S${stageIdx} ${name.padEnd(16)} A ${agg.winA}/${cli.seeds.length} → B ${agg.winB}/${cli.seeds.length}  ` +
+      `S${stageIdx + 1} ${name.padEnd(16)} A ${agg.winA}/${cli.seeds.length} → B ${agg.winB}/${cli.seeds.length}  ` +
         `win:${agg.toWin.length} lose:${agg.toLose.length} tied:${agg.tied}`,
     )
     if (agg.toWin.length > 0) console.log(`    FLIP-TO-WIN  seeds: ${agg.toWin.join(', ')}`)

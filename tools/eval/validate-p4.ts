@@ -103,11 +103,11 @@ async function main(): Promise<void> {
   const belowMean = perStage.filter((s) => s.winRate < MEAN_TARGET)
 
   // Print table.
-  console.log(`\nidx  stage             win%   kills  GO  TO  base%`)
+  console.log(`\nS#   stage             win%   kills  GO  TO  base%`)
   for (const s of perStage) {
     const flag = s.winRate < FLOOR ? '  <-- FLOOR' : s.winRate < MEAN_TARGET ? '  <-- mean' : ''
     console.log(
-      `${String(s.idx).padStart(2)}   ${s.name.padEnd(16)} ${(s.winRate * 100).toFixed(1).padStart(5)}  ${s.avgKills.toFixed(1).padStart(5)}  ${String(s.gameovers).padStart(2)}  ${String(s.timeouts).padStart(2)}  ${(s.baseAlive * 100).toFixed(0).padStart(4)}${flag}`,
+      `${String(s.idx + 1).padStart(2)}   ${s.name.padEnd(16)} ${(s.winRate * 100).toFixed(1).padStart(5)}  ${s.avgKills.toFixed(1).padStart(5)}  ${String(s.gameovers).padStart(2)}  ${String(s.timeouts).padStart(2)}  ${(s.baseAlive * 100).toFixed(0).padStart(4)}${flag}`,
     )
   }
 
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   )
   if (belowFloor.length > 0) {
     console.log(
-      `  below floor: ${belowFloor.map((s) => `S${s.idx}(${(s.winRate * 100).toFixed(0)}%)`).join(', ')}`,
+      `  below floor: ${belowFloor.map((s) => `S${s.idx + 1}(${(s.winRate * 100).toFixed(0)}%)`).join(', ')}`,
     )
   }
   console.log(`Stages below mean ${MEAN_TARGET * 100}%: ${belowMean.length} / ${STAGES.length}`)

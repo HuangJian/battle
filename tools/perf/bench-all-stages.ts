@@ -89,7 +89,7 @@ for (const diff of DIFFS) {
   )
   for (const r of rows) {
     console.log(
-      `S${r.idx.toString().padStart(2, '0')}    ${r.name.padEnd(20)}  ${r.wall.toFixed(0).padStart(7)}ms  ${r.ticks.toString().padStart(7)}  ${(r.wins + '/' + N).padStart(5)}`,
+      `S${(r.idx + 1).toString().padStart(2, '0')}    ${r.name.padEnd(20)}  ${r.wall.toFixed(0).padStart(7)}ms  ${r.ticks.toString().padStart(7)}  ${(r.wins + '/' + N).padStart(5)}`,
     )
   }
   console.log(

@@ -1012,9 +1012,9 @@ if (import.meta.main) {
     return i >= 0 ? process.argv[i + 1] : fallback
   }
 
-  const stageIdxs = arg('stages', arg('stage', '0'))!
+  const stageIdxs = arg('stages', arg('stage', '1'))!
     .split(',')
-    .map((s) => parseInt(s.trim(), 10))
+    .map((s) => parseInt(s.trim(), 10) - 1) // CLI is 1-based (1..35); internal index is 0-based
   const difficulty = arg('difficulty', 'classic')!
   const seedCount = parseInt(arg('seeds', '8')!, 10)
   const generations = parseInt(arg('generations', '40')!, 10)
@@ -1044,7 +1044,7 @@ if (import.meta.main) {
 
   process.stderr.write(`\nGod AI CMA-ES Optimizer (P4 — floor-aware, all-35 classic)\n`)
   process.stderr.write(
-    `Stages: ${stages.map((s, i) => `S${stageIdxs[i]}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
+    `Stages: ${stages.map((s, i) => `S${stageIdxs[i] + 1}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
   )
   process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks} | Floor: ${floor}\n`)
 
@@ -1157,7 +1157,7 @@ if (import.meta.main) {
   logLines.push(``)
   logLines.push(`**Date**: ${summary.timestamp}`)
   logLines.push(
-    `**Stages**: ${stages.map((s, i) => `S${stageIdxs[i]}(${s.name})`).join(', ')} | **Difficulty**: ${difficulty} | **Seeds**: ${seeds.join(',')}`,
+    `**Stages**: ${stages.map((s, i) => `S${stageIdxs[i] + 1}(${s.name})`).join(', ')} | **Difficulty**: ${difficulty} | **Seeds**: ${seeds.join(',')}`,
   )
   logLines.push(
     `**Generations**: ${generations} | **Population**: ${result.history[0]?.bestFitness ?? 'N/A'}`,

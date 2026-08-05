@@ -7,7 +7,7 @@
  * lives_exhausted), kills at failure, failure tick, and enemy types alive.
  *
  * Usage:
- *   bun tools/diag/diag-weak-stages.ts --stages 6,14,18,32 --seeds 20 --params <summary.json>
+ *   bun tools/diag/diag-weak-stages.ts --stages 7,15,19,33 --seeds 20 --params <summary.json>
  */
 import { STAGES } from '../../src/config/stages'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
@@ -19,9 +19,9 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : fallback
 }
 
-const stageIdxs = arg('stages', '6,14,18,32')!
+const stageIdxs = arg('stages', '7,15,19,33')!
   .split(',')
-  .map((s) => parseInt(s, 10))
+  .map((s) => parseInt(s, 10) - 1) // CLI is 1-based (1..35); internal index is 0-based
 const seedCount = parseInt(arg('seeds', '20')!, 10)
 const paramsFile = arg('params', '')
 const maxTicks = 18000
@@ -69,7 +69,7 @@ for (const si of stageIdxs) {
   const livesOut = failures.filter((f) => f.cause === 'lives_exhausted')
   const timeouts = failures.filter((f) => f.cause === 'timeout')
   console.log(
-    `\nS${si} ${stage.name}: win ${wins}/${seedCount}` +
+    `\nS${si + 1} ${stage.name}: win ${wins}/${seedCount}` +
       ` | base_destroyed=${baseLost.length} lives_exhausted=${livesOut.length} timeout=${timeouts.length}`,
   )
   for (const f of failures) {

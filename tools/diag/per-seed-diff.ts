@@ -1,7 +1,7 @@
 // per-seed-diff.ts — Reusable per-seed tick-diff diagnostic for God AI regressions.
 //
 // USAGE (3-step workflow):
-//   1. bun tools/diag/per-seed-diff.ts dump <stageIdx> <seed> > /tmp/before.txt
+//   1. bun tools/diag/per-seed-diff.ts dump <stage 1-35> <seed> > /tmp/before.txt
 //   2. git stash   (or git checkout the files you changed)
 //   3. bun tools/diag/per-seed-diff.ts dump <stageIdx> <seed> > /tmp/after.txt
 //   4. git stash pop  (restore your changes)
@@ -44,12 +44,13 @@ Diagnostic flags (dump mode only):
                         e.g. --set evasionSteelOcclusion=1 / --set counterFire=0
 
 Workflow:
-  1. bun tools/diag/per-seed-diff.ts dump 32 5 > /tmp/before.txt
-  2. bun tools/diag/per-seed-diff.ts dump 32 5 --set evasionSteelOcclusion=1 > /tmp/after.txt
+  1. bun tools/diag/per-seed-diff.ts dump 33 5 > /tmp/before.txt
+  2. bun tools/diag/per-seed-diff.ts dump 33 5 --set evasionSteelOcclusion=1 > /tmp/after.txt
   3. bun tools/diag/per-seed-diff.ts diff /tmp/before.txt /tmp/after.txt
 `
 
 function dump(stageIdx: number, seed: number): void {
+  // CLI stage is 1-based (1..35); internal index is 0-based.
   const stage = STAGES[stageIdx]
   // Fresh copy — --set mutates params below, never touch the shared default.
   const godAIParams = { ...DEFAULT_GOD_AI_PARAMS }
@@ -213,9 +214,9 @@ function diff(fileA: string, fileB: string): void {
 // CLI
 const mode = process.argv[2]
 if (mode === 'dump') {
-  const stageIdx = parseInt(process.argv[3] ?? '')
+  const stageIdx = parseInt(process.argv[3] ?? '') - 1
   const seed = parseInt(process.argv[4] ?? '')
-  if (isNaN(stageIdx) || isNaN(seed)) {
+  if (isNaN(stageIdx) || isNaN(seed) || stageIdx < 0 || stageIdx >= STAGES.length) {
     console.error(USAGE)
     process.exit(1)
   }

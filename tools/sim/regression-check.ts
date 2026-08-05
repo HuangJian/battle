@@ -9,8 +9,8 @@
  * (where the bug lived).
  *
  * Usage:
- *   bun tools/sim/regression-check.ts --stages 0-25 --seeds 1-3 --difficulty classic
- *   bun tools/sim/regression-check.ts --stages 0-15 --seeds 1-5 --difficulty classic --output /tmp/r.json
+ *   bun tools/sim/regression-check.ts --stages 1-26 --seeds 1-3 --difficulty classic
+ *   bun tools/sim/regression-check.ts --stages 1-16 --seeds 1-5 --difficulty classic --output /tmp/r.json
  */
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from './simulation-runner'
@@ -117,7 +117,9 @@ if (import.meta.main) {
   }
   const difficulty = arg('difficulty', 'classic')
   const seeds = parseRange(arg('seeds', '1-3'), 1_000_000)
-  const stageIdxs = parseRange(arg('stages', '0-25'), STAGES.length)
+  const stageIdxs = parseRange(arg('stages', '1-26'), STAGES.length)
+    .map((n) => n - 1) // CLI is 1-based (1..35); internal index is 0-based
+    .filter((i) => i >= 0 && i < STAGES.length)
   const stages = stageIdxs.map((i) => STAGES[i]).filter(Boolean)
   const outputFile = arg('output', '')
 

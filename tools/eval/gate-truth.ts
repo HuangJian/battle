@@ -82,7 +82,7 @@ for (let idx = 0; idx < STAGES.length; idx++) {
       `gate-truth: stage ${idx} name mismatch — dump '${s.stageName}' vs config '${name}'`,
     )
   }
-  const line = `  ${pct.padStart(5)}, // S${idx}  ${name}`
+  const line = `  ${pct.padStart(5)}, // S${idx + 1}  ${name}`
   console.log(line)
 }
 console.log(']')

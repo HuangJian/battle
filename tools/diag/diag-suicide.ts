@@ -18,7 +18,13 @@ const difficulty = process.argv[2] ?? 'classic'
 const seedCount = parseInt(process.argv[3] ?? '60', 10)
 const stageSpec = process.argv[4] ?? 'all'
 
-const stageIdxs = stageSpec === 'all' ? STAGES.map((_, i) => i) : stageSpec.split(',').map(Number)
+const stageIdxs =
+  stageSpec === 'all'
+    ? STAGES.map((_, i) => i)
+    : stageSpec
+        .split(',')
+        .map((n) => Number(n) - 1) // CLI is 1-based (1..35); internal index is 0-based
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
 
 let totalFire = 0
 let totalFireRuns = 0
@@ -61,7 +67,7 @@ for (const si of stageIdxs) {
   totalWins += wins
   const name = STAGES[si].name
   console.log(
-    `S${si} ${name.padEnd(16)} win ${wins}/${seedCount}  suicide-fires ${fires} (${fires > 0 ? (fires / seedCount).toFixed(2) : 0}/run)`,
+    `S${si + 1} ${name.padEnd(16)} win ${wins}/${seedCount}  suicide-fires ${fires} (${fires > 0 ? (fires / seedCount).toFixed(2) : 0}/run)`,
   )
 }
 

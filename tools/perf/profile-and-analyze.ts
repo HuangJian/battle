@@ -10,7 +10,7 @@
  *   bun tools/perf/profile-and-analyze.ts
  *       # Default: run profile then analyze
  *
- *   bun tools/perf/profile-and-analyze.ts --games=50 --diff=chaos --stage=0
+ *   bun tools/perf/profile-and-analyze.ts --games=50 --diff=chaos --stage=1
  *       # Profile with custom params, then analyze
  *
  *   bun tools/perf/profile-and-analyze.ts --analyze-only /tmp/sim-godai.cpuprofile
@@ -43,7 +43,8 @@ function argNum(name: string, fallback: number): number {
 const ANALYZE_ONLY = argStr('analyze-only', '')
 const GAMES = argNum('games', 30)
 const DIFF = argStr('diff', 'chaos')
-const STAGE_IDX = argNum('stage', 0)
+// CLI --stage is 1-based (1..35); STAGE_IDX below is the 0-based internal index.
+const STAGE_IDX = argNum('stage', 1) - 1
 const WARMUP = argNum('warmup', 3)
 const TOP_N = argNum('topN', 30)
 const OUTPUT_PATH = argStr('output', 'tools/perf/results/profile.cpuprofile')
@@ -54,12 +55,12 @@ const OUTPUT_PATH = argStr('output', 'tools/perf/results/profile.cpuprofile')
 function runProfiling(): string {
   const stage = STAGES[STAGE_IDX]
   if (!stage) {
-    console.error(`No stage at index ${STAGE_IDX}`)
+    console.error(`No stage ${STAGE_IDX + 1} (valid 1..${STAGES.length})`)
     process.exit(1)
   }
 
   console.log(
-    `=== Profiling: ${GAMES} games, diff=${DIFF}, stage=${STAGE_IDX}, warmup=${WARMUP} ===`,
+    `=== Profiling: ${GAMES} games, diff=${DIFF}, stage=${STAGE_IDX + 1}, warmup=${WARMUP} ===`,
   )
 
   // Warmup: run a few games first (separate seed range) so the JIT is hot and
@@ -99,7 +100,7 @@ function runProfiling(): string {
   const wall = performance.now() - t0
   const msPerTick = wall / totalTicks
   console.log(
-    `games=${GAMES} diff=${DIFF} stage=${STAGE_IDX} | ticks=${totalTicks} wall=${wall.toFixed(0)}ms ` +
+    `games=${GAMES} diff=${DIFF} stage=${STAGE_IDX + 1} | ticks=${totalTicks} wall=${wall.toFixed(0)}ms ` +
       `(${(wall / GAMES).toFixed(1)}ms/game) | perTick=${msPerTick.toFixed(3)}ms ` +
       `| win=${wins} go=${gameovers} timeout=${timeouts}`,
   )
