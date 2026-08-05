@@ -12,7 +12,7 @@ import type { Bullet } from '../src/types'
  * ThreatAssessor unit tests — bullet evasion is DELIBERATELY terrain-blind.
  *
  * DECISIONS.md §48 (negative result): adding a terrain-occlusion check to
- * `findMostDangerousBulletImpl` was measured at S32 −10pp @120 seeds
+ * `findMostDangerousBulletImpl` was measured at S33 −10pp @120 seeds
  * (85.0% → 75.0%, lives_exhausted 12 → 22) and 35×60 mean −1.0pp. The
  * "false evasion" (dodging a bullet currently blocked by a brick) turns out
  * to be load-bearing anticipatory dodging: in close combat the blocking
@@ -23,7 +23,7 @@ import type { Bullet } from '../src/types'
  *
  * These tests LOCK the terrain-blind behavior so a future "fix" of this
  * apparent bug cannot land silently. If you intend to change it, re-run
- * S32 @120 seeds + 35×60 A/B first (see DECISIONS.md §48).
+ * S33 @120 seeds + 35×60 A/B first (see DECISIONS.md §48).
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
@@ -190,7 +190,7 @@ describe('ThreatAssessor — deliberate terrain-blind evasion (DECISIONS §48)',
 
       // Pin the player at (8,10): steel walls above (rows 8-9, cols 8-9) and
       // to the left (rows 10-11, cols 6-7) → only right/down remain open
-      // (≤ 2 open directions = pinned). The S32 seed-11 lesson: when pinned,
+      // (≤ 2 open directions = pinned). The S33 seed-11 lesson: when pinned,
       // the dodge IS the escape — never suppress it, even for a steel-blocked
       // bullet.
       for (let r = 8; r <= 9; r++) {

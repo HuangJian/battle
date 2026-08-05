@@ -17,7 +17,7 @@ import type { Bullet } from '../src/types'
  *
  * Both features were measured and then REVERTED to OFF (DECISIONS §98):
  * official-shape 35×20 showed no chaos gain for `dodgeCounterFire` (with a
- * deterministic S25 Ice Palace regression 5/20→1/20), and `dodgeClearanceScore`
+ * deterministic S26 Ice Palace regression 5/20→1/20), and `dodgeClearanceScore`
  * was -0.6pp on hard. They remain as reserved experimental knobs; these tests
  * lock the function-level behavior so a future M3.5 tuning round can reuse them.
  */
@@ -136,7 +136,7 @@ describe('§M3 dodgeCounterFireDirImpl', () => {
 describe('§M3 params pollution guard (DECISIONS §98)', () => {
   it('constructing with the DEFAULT singleton and mutating input.params does NOT pollute the singleton', () => {
     // Regression guard for the class of bug that flipped the hard/chaos gate
-    // (S25 1/20 → 0/20 in the full suite): `new GodAIInput(world)` stores a
+    // (S26 1/20 → 0/20 in the full suite): `new GodAIInput(world)` stores a
     // CLONE now, so `input.params.x = y` (an A/B pattern used across tests)
     // must never touch DEFAULT_GOD_AI_PARAMS — cross-file module state IS
     // shared inside `bun test`.
@@ -229,7 +229,7 @@ describe('§M3-revisit isTerrainPinnedImpl (round 3 — terrain-only pinning, DE
     expect(isTerrainPinnedImpl(input, p, threat)).toBe(false)
   })
 
-  it('mid-maneuver offset (S25 case) → NOT pinned: open ground stays dodging', () => {
+  it('mid-maneuver offset (S26 case) → NOT pinned: open ground stays dodging', () => {
     const { world, input } = setupWorld()
     positionPlayer(world, 138, 10 * CELL)
     input.hasBase = world.tileMap.hasBase()
@@ -449,7 +449,7 @@ describe('§M9 dodgeHorizonScore commitment scoring (DECISIONS §107)', () => {
   // hard 31.8% / chaos 35.0% of dodge-branch deaths are escapable at the
   // start of the window, yet the player oscillates inside the bullet's hit
   // band forever (the binary next-cell isSafeDir + base-closer tie-break
-  // never commits to clearing the band; S0 seed2 oscillated 30+ ticks within
+  // never commits to clearing the band; S1 seed2 oscillated 30+ ticks within
   // a 32px band while the bullet closed from 36 ticks away). dodgeHorizonScore
   // scores each perpendicular candidate by its survival horizon (Infinity
   // when the terrain-limited free path clears the band before t_arrive) and
@@ -517,7 +517,7 @@ describe('§M9 dodgeHorizonScore commitment scoring (DECISIONS §107)', () => {
 
 describe('§M10 dodgeHorizon gates (DECISIONS §108)', () => {
   // The ungated M9 horizon commitment traded away base-defense/kill
-  // efficiency (S10 seed6: 0 deaths but base destroyed while the player fled
+  // efficiency (S11 seed6: 0 deaths but base destroyed while the player fled
   // 142px away). M10 gates the commitment: only commit when the escape margin
   // is clearly winnable (dodgeHorizonMinMarginTicks) AND the player is not far
   // from the base (dodgeHorizonMaxDistCells); otherwise fall back to the

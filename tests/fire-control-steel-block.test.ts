@@ -190,7 +190,7 @@ describe('shouldFireInDirImpl — steel must block fire even when enemy is visib
  * (enemy=true). The `bs.enemy ||` short-circuits the OR, bypassing the base
  * protection and destroying the player's own base.
  *
- * In S32 Diamond (120 seeds), this caused 4 base_destroyed failures with
+ * In S33 Diamond (120 seeds), this caused 4 base_destroyed failures with
  * killer=player (seeds 26, 34, 78, 82).
  *
  * Fix: Remove `bs.enemy ||` from the condition so base protection always

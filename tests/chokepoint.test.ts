@@ -141,7 +141,7 @@ describe('§88 params — shipped default (mode ON since DECISIONS §94)', () =>
   it('defaults: chokepointMode ON with the A/B-tuned candidate values locked', () => {
     expect(DEFAULT_GOD_AI_PARAMS.chokepointMode).toBe(1)
     // A/B round 3: margin 2 → 1 (margin=2 pulled the player off kills too
-    // often on S32 Diamond).
+    // often on S33 Diamond).
     expect(DEFAULT_GOD_AI_PARAMS.threatPointMargin).toBe(1) // 威胁点外 1 格
     expect(DEFAULT_GOD_AI_PARAMS.chokepointHoldThreshold).toBe(2) // 敌人数目 > 2
     expect(DEFAULT_GOD_AI_PARAMS.chokepointMinRow).toBe(13) // 地图下半区
@@ -156,7 +156,7 @@ describe('§88 params — shipped default (mode ON since DECISIONS §94)', () =>
     expect(DEFAULT_GOD_AI_PARAMS.chokepointHoldMaxDist).toBe(6)
     // A/B round 3: chase player-distance cap 10 格 (speed-scaled: armor ×3,
     // basic ×2, power ×1.5, fast ×1) — a 27-cell chase is a lost race
-    // (S32 seed 10) while a 25-cell armor chase is winnable (S32 seed 48).
+    // (S33 seed 10) while a 25-cell armor chase is winnable (S33 seed 48).
     expect(DEFAULT_GOD_AI_PARAMS.chokepointChaseMaxPlayerDist).toBe(10)
   })
 })
@@ -277,7 +277,7 @@ describe('§88 rule 1 — 基地受威胁状态', () => {
   })
 
   it('rule 3 facing gate: enemy NEAR a threat point but facing AWAY from the base → no threat state', () => {
-    // A/B round 3 (S26 seed 12): an armor at (12,12) facing RIGHT — the base
+    // A/B round 3 (S27 seed 12): an armor at (12,12) facing RIGHT — the base
     // is BELOW at (12,24) — tripped the margin check, dragged the player 14
     // cells to "intercept" a non-threat, and B lost while A won by ignoring
     // it. The facing gate anchors on the base: a tank only fires along its
@@ -304,12 +304,12 @@ describe('§88 rule 1 — 基地受威胁状态', () => {
   })
 
   it('chase player-distance cap: fast enemy 20 cells away is a lost race → no chase (fall through to normal hunt)', () => {
-    // A/B round 3 (S32 seed 10): chase sent the player from (8,3) on a
+    // A/B round 3 (S33 seed 10): chase sent the player from (8,3) on a
     // 27-cell march to intercept a power at (0,22) — the enemy reached the
     // threat point first and the march derailed the game. The cap is
     // speed-scaled (fast ×1 = 10, power ×1.5 = 15, basic ×2 = 20, armor ×3
     // = 30): a distant FAST enemy is never intercepted, while a slow armor
-    // 25 cells out is still winnable (S32 seed 48).
+    // 25 cells out is still winnable (S33 seed 48).
     const { world, ai } = setup(onParams(), 6, 20)
     // Fast at (12,24)-adjacent… place a fast tank 20 cells from the player
     // near a threat point: (0,10) faces DOWN toward the base row threat
@@ -323,7 +323,7 @@ describe('§88 rule 1 — 基地受威胁状态', () => {
     expect(ai.selectTarget(pc)).toEqual({ col: 0, row: 10 })
   })
 
-  it('chase player-distance cap is speed-scaled: an armor 25 cells out IS still chased (S32 seed 48)', () => {
+  it('chase player-distance cap is speed-scaled: an armor 25 cells out IS still chased (S33 seed 48)', () => {
     const { world, ai } = setup(onParams(), 12, 7)
     // Armor at (2,22) facing right (toward the base) — 25 cells from the
     // player at (12,7). Armor cap = 10 × 3 = 30 → chase fires. (createTank
@@ -366,7 +366,7 @@ describe('§88 rule 2 — 据守 vs 追杀', () => {
   })
 
   it('rule 1 outranks hold: imminent enemy NOT coverable from the chokepoint → chase it directly', () => {
-    // A/B round 3 (S32 seed 23): the hold arm marched the player to
+    // A/B round 3 (S33 seed 23): the hold arm marched the player to
     // chokepoint (15,18) while a fast tank at (24,22) headed for the base
     // through a lane the chokepoint could NOT shoot — the fast broke
     // through. When the chokepoint can't cover the imminent enemy's
@@ -469,7 +469,7 @@ describe('§88 think() integration + rule-4 priority chain', () => {
   })
 
   it('MID pickup (star 4格) does NOT defer to 回防 — §87 safe-pickup invariant kept', () => {
-    // A/B round 3 finding (S32 seed 17): gating MID pickup on
+    // A/B round 3 finding (S33 seed 17): gating MID pickup on
     // isBaseUnderThreat made the player ABANDON a 3-cell star to "defend" —
     // the old base box fired while the star was safe to grab, and the player
     // lost. The §87 urgent-pickup gates (nearby-enemy 5 格, route-danger,

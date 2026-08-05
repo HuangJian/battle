@@ -18,7 +18,7 @@ import type { Bullet, Tank } from '../src/types'
  * already in the line of fire (对枪抵消), or (b) keeps alignment and fires.
  * This measured +5 wins @35×120 on the pre-§47 tree, and re-validated on
  * the current tree (2026-08-01): 35×60 net +3 flips with ZERO ON→OFF
- * losses (S26 +2.5pp@120, S20 +0.8pp@120).
+ * losses (S27 +2.5pp@120, S21 +0.8pp@120).
  *
  * These tests LOCK the detection primitives + the shipped default so a
  * future change cannot silently alter them. Parametrized via

@@ -56,41 +56,41 @@ const MARGIN_WINS = 4
 // reverted §109's 2★ back to 1★ by user decision. Values are WIN COUNTS out
 // of GATE_SEEDS (20). hard = 3 lives (§130).
 const HARD_TRUTH_WINS: number[] = [
-  10, // S0  Outpost
-  15, // S1  Waterways
-  10, // S2  Steel Fortress
-  13, // S3  Crossfire
-  11, // S4  Maze
-  13, // S5  Brickworks
-  12, // S6  Iron Curtain
-  9, // S7  Riverbed
-  14, // S8  Twin Towers
-  17, // S9  Gauntlet
-  16, // S10  Fortress
-  8, // S11  Lattice
-  13, // S12  Bunker Hill
-  15, // S13  Steel Web
-  11, // S14  Citadel
-  11, // S15  Crossroads
-  14, // S16  Twin Spires
-  14, // S17  Gridlock
-  14, // S18  Frozen Field
-  7, // S19  Bastion
-  14, // S20  Checkers
-  14, // S21  Oasis
-  20, // S22  Ramparts
-  10, // S23  Labyrinth
-  16, // S24  Quarry
-  14, // S25  Ice Palace
-  8, // S26  Brick Maze
-  11, // S27  Thicket
-  11, // S28  Spider
-  18, // S29  Concentric
-  11, // S30  Eagle Nest
-  14, // S31  Star Fort
-  15, // S32  Diamond
-  3, // S33  Battlement
-  16, // S34  Final Redoubt
+  10, // S1  Outpost
+  15, // S2  Waterways
+  10, // S3  Steel Fortress
+  13, // S4  Crossfire
+  11, // S5  Maze
+  13, // S6  Brickworks
+  12, // S7  Iron Curtain
+  9, // S8  Riverbed
+  14, // S9  Twin Towers
+  17, // S10 Gauntlet
+  16, // S11 Fortress
+  8, // S12 Lattice
+  13, // S13 Bunker Hill
+  15, // S14 Steel Web
+  11, // S15 Citadel
+  11, // S16 Crossroads
+  14, // S17 Twin Spires
+  14, // S18 Gridlock
+  14, // S19 Frozen Field
+  7, // S20 Bastion
+  14, // S21 Checkers
+  14, // S22 Oasis
+  20, // S23 Ramparts
+  10, // S24 Labyrinth
+  16, // S25 Quarry
+  14, // S26 Ice Palace
+  8, // S27 Brick Maze
+  11, // S28 Thicket
+  11, // S29 Spider
+  18, // S30 Concentric
+  11, // S31 Eagle Nest
+  14, // S32 Star Fort
+  15, // S33 Diamond
+  3, // S34 Battlement
+  16, // S35 Final Redoubt
 ]
 
 // §130 同次测量（gate-context，2026-08-05）：chaos 命数未变，但跨进程
@@ -99,41 +99,41 @@ const HARD_TRUTH_WINS: number[] = [
 // §134 同次测量（gate-context，2026-08-05）：defenseIntercept SHIPPED 后 chaos
 // 显著提升（60-seed p=0.0087，+2.15pp）——总量 408/700 → 420/700。
 const CHAOS_TRUTH_WINS: number[] = [
-  15, // S0  Outpost
-  18, // S1  Waterways
-  7, // S2  Steel Fortress
-  11, // S3  Crossfire
-  9, // S4  Maze
-  11, // S5  Brickworks
-  11, // S6  Iron Curtain
-  10, // S7  Riverbed
-  14, // S8  Twin Towers
-  16, // S9  Gauntlet
-  15, // S10  Fortress
-  9, // S11  Lattice
-  13, // S12  Bunker Hill
-  16, // S13  Steel Web
-  8, // S14  Citadel
-  16, // S15  Crossroads
-  15, // S16  Twin Spires
-  17, // S17  Gridlock
-  12, // S18  Frozen Field
-  11, // S19  Bastion
-  9, // S20  Checkers
-  12, // S21  Oasis
-  17, // S22  Ramparts
-  6, // S23  Labyrinth
-  16, // S24  Quarry
-  11, // S25  Ice Palace
-  9, // S26  Brick Maze
-  12, // S27  Thicket
-  12, // S28  Spider
-  16, // S29  Concentric
-  9, // S30  Eagle Nest
-  10, // S31  Star Fort
-  13, // S32  Diamond
-  0, // S33  Battlement
-  14, // S34  Final Redoubt
+  15, // S1  Outpost
+  18, // S2  Waterways
+  7, // S3  Steel Fortress
+  11, // S4  Crossfire
+  9, // S5  Maze
+  11, // S6  Brickworks
+  11, // S7  Iron Curtain
+  10, // S8  Riverbed
+  14, // S9  Twin Towers
+  16, // S10 Gauntlet
+  15, // S11 Fortress
+  9, // S12 Lattice
+  13, // S13 Bunker Hill
+  16, // S14 Steel Web
+  8, // S15 Citadel
+  16, // S16 Crossroads
+  15, // S17 Twin Spires
+  17, // S18 Gridlock
+  12, // S19 Frozen Field
+  11, // S20 Bastion
+  9, // S21 Checkers
+  12, // S22 Oasis
+  17, // S23 Ramparts
+  6, // S24 Labyrinth
+  16, // S25 Quarry
+  11, // S26 Ice Palace
+  9, // S27 Brick Maze
+  12, // S28 Thicket
+  12, // S29 Spider
+  16, // S30 Concentric
+  9, // S31 Eagle Nest
+  10, // S32 Star Fort
+  13, // S33 Diamond
+  0, // S34 Battlement
+  14, // S35 Final Redoubt
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
@@ -161,7 +161,7 @@ function runDifficulty(
       // Pass a fresh params clone per run: the gate measures the SHIPPED
       // defaults and must be immune to any singleton pollution from other
       // test files (cross-file module state is shared in bun test — a test
-      // mutating DEFAULT_GOD_AI_PARAMS flipped S25 1/20 -> 0/20, DECISIONS §98).
+      // mutating DEFAULT_GOD_AI_PARAMS flipped S26 1/20 -> 0/20, DECISIONS §98).
       const r = runSimulation({
         seed,
         stage: STAGES[idx],
@@ -176,9 +176,9 @@ function runDifficulty(
     const f = floor(idx)
     const pct = ((wins / GATE_SEEDS.length) * 100).toFixed(0)
     console.log(
-      `[gate:${label}] S${idx} ${STAGES[idx].name}: ${wins}/${GATE_SEEDS.length} (${pct}%) floor=${f}${wins < f ? '  <-- BELOW FLOOR' : ''}`,
+      `[gate:${label}] S${idx + 1} ${STAGES[idx].name}: ${wins}/${GATE_SEEDS.length} (${pct}%) floor=${f}${wins < f ? '  <-- BELOW FLOOR' : ''}`,
     )
-    if (wins < f) failures.push(`S${idx} ${STAGES[idx].name}: ${wins} < ${f}`)
+    if (wins < f) failures.push(`S${idx + 1} ${STAGES[idx].name}: ${wins} < ${f}`)
   }
   const meanPct = ((totalWins / (35 * GATE_SEEDS.length)) * 100).toFixed(1)
   console.log(`[gate:${label}] aggregate: ${totalWins}/700 (${meanPct}%) floor=${aggregateFloor}`)

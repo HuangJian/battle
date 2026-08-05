@@ -18,7 +18,7 @@ import type { Bullet } from '../src/types'
  * A/B -1.1pp / -1.7pp, never shipped, archived in experimental.ts).
  *
  * Historical context (DECISIONS §86): a global `<= TANK` widening was
- * rejected because it caused -37pp on S32 Diamond — bullets in adjacent steel
+ * rejected because it caused -37pp on S33 Diamond — bullets in adjacent steel
  * corridors sit at exactly 32px, so widening the threshold made the player
  * dodge bullets that could never reach it. These tests guard that exact
  * boundary: < TANK detected, == TANK not detected.
@@ -90,7 +90,7 @@ describe('dodge threat alignment threshold (baseline §86 regression guard)', ()
 
     // Bullet center EXACTLY TANK (32px) from player center. The standard
     // `< TANK` threshold must NOT detect it — 32 is not < 32. This pins the
-    // S32 Diamond lesson: a global `<= TANK` widening caused -37pp by
+    // S33 Diamond lesson: a global `<= TANK` widening caused -37pp by
     // detecting bullets in adjacent steel corridors at exactly 32px.
     const bulletY = PCY - TANK - BULLET / 2
     const bullet = makeBullet(15 * CELL, bulletY, 'left')

@@ -35,7 +35,7 @@ describe('m4-release-restore', () => {
     input.reset()
     expect(world.rules.combatModel).toBe('instant')
     // Restored to the pre-M4 shipped values. NOTE: stage adaptation runs ON
-    // TOP of the restore (same as pre-M4), so we assert only keys that S0's
+    // TOP of the restore (same as pre-M4), so we assert only keys that S1's
     // terrain does NOT adapt: baseRaceRangeCells widens to 14 on this open
     // stage (§60), replanInterval adapts on brick-dense stages, etc.
     expect(input.params.replanInterval).toBe(50)

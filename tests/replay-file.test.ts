@@ -150,10 +150,10 @@ describe('Replay file format round-trip', () => {
     expect((result as any).replay.seed).toBe(12345)
   })
 
-  it('reconciles initialSnapshot.stageIndex with metadata.stage (S32 bug)', () => {
+  it('reconciles initialSnapshot.stageIndex with metadata.stage (S33 bug)', () => {
     // Regression: sim-generated replays recorded the stage via
     // loadStageData(stage, 0), so the snapshot carried stageIndex 0 even
-    // though metadata.stage was correct (e.g. 31 = S32). On playback the
+    // though metadata.stage was correct (e.g. 32 = S33). On playback the
     // world was restored with stageIndex 0 and the HUD showed "STAGE 01".
     const snapshot = makeMinimalSnapshot() // stageIndex: 0
     const frames = packFrames(SAMPLE_FRAMES)
@@ -163,7 +163,7 @@ describe('Replay file format round-trip', () => {
       sim: {
         seed: 2483393699,
         difficulty: 'classic',
-        stageIndex: 31,
+        stageIndex: 32,
         stageName: 'Diamond',
         outcome: 'stage_clear',
         status: 'clear',
@@ -173,7 +173,7 @@ describe('Replay file format round-trip', () => {
       frames,
       totalTicks: 3,
       metadata: {
-        stage: 31,
+        stage: 32,
         stageName: 'Diamond',
         difficulty: 'classic',
         lives: 3,
@@ -190,8 +190,8 @@ describe('Replay file format round-trip', () => {
     const { replay } = result as { replay: any }
 
     // The snapshot's stale stageIndex must be corrected to match metadata.
-    expect(replay.initialSnapshot.stageIndex).toBe(31)
-    expect(replay.metadata.stage).toBe(31)
+    expect(replay.initialSnapshot.stageIndex).toBe(32)
+    expect(replay.metadata.stage).toBe(32)
   })
 })
 
