@@ -1398,3 +1398,119 @@ hard/chaos 门禁真值，更新 `tests/god-ai-hard-chaos-gate.test.ts` 的逐�
   （M0 实测 chaos 1→3 命几乎无提升），后续达标仍需行为杠杆（M13 方向）。
 - 门禁 floor 禁止静默下调；本次 hard floor 上调 354→405 属「收益随真值上调」，符合 §I.5 规则 6。
 - 浏览器侧 hard/chaos/relax 初始命数均随 difficulty 配置生效（World.ts 运行时读取），无其他硬编码。
+
+## 131. T8 拦截射程 pool 2→8/12：60-seed 诚实阴性（不发布，2026-08-05）
+
+**Decision:** `t8MaxInterceptDistCells`（pool 默认 2，classic 8）放宽到 8/12 的 A/B 被否决，维持 2。
+不发布 = 不改默认值。
+
+**背景:** hard 35×120 扫描发现失败 91% 是 base_destroyed（31/35 关），Battlement 1.7% 过关、117/120
+基地被毁，凶手 59% fast 坦克——方向 A 假设「拦下飞向基地的子弹」能保基地。
+
+**Results（官方口径，无 stageIndex）:**
+- 20-seed 筛选：t8=8 → 421/700（−10）、t8=12 → 418/700（−13）vs 基线 431/700。
+- 60-seed paired（baseline vs 8，CRN 2100 对）：mean Δscore **−0.0069 ± 0.0042**（t=−1.65, p=0.0995），
+  B 好/坏/平 220/254/1626，suite 0.4410→0.4352，win 61%→60%；无单关显著（均 p≥0.05）。
+- 机制确认：direct-drive 探针显示 t8=2 时 T8 分支几乎不触发（0-6 ticks/20 局，Battlement 124），
+  t8=12 时触发量 6-60×（225-750 ticks/20 局）——机制真实激活但净负。
+
+**Rationale（为何负）:** T8 权重 900，只低于 dodge(1000)——放宽后玩家反复离开当前战斗
+去追拦截点，放弃击杀节奏（Labyrinth 9→6、Oasis 12→9、Crossfire 13→12）。且敌人是
+多弹连射，拦下一发挡不住下一发；玩家 42% 时刻离基地 9+ 格，轨迹拦截点近基地，远处根本
+够不着。这是 P3 漫游约束 / §68 diversion / M8 survivalRetreat 的同一教训：**「离开战斗去
+防守」的机制用杀敌效率换防守，净值为负**。
+
+**Implications:** 基地防守瓶颈应从「敌人到达基地前」解决，而不是「子弹已离膛后」：
+方向 B（快车逼近基地的威胁权重）与方向 C（无钢墙关防守参数再校准）优先。T8 维持
+2 格作为「玩家恰好在基地旁」的兜底。classic 不受影响（CLASSIC_MODEL_PARAMS t8=8，
+恢复逻辑按值判断，本次未改任何默认值）。
+
+## 132. 方向 B：selectTarget 威胁评分按 kind 速度 × 距基地距离加权（诚实阴性，不发布，2026-08-05）
+
+**Decision:** 新增旋钮 `fastBaseApproachWeight` / `fastBaseApproachRangeCells` 并 A/B，三臂全非正，
+默认保持 0（OFF，byte-identical）。不发布 = 不改默认值。
+
+**背景:** Battlement 深度取证（§131）——凶手 59% fast 坦克、玩家 42% 时刻离基地 9+ 格。
+方向 B 假设：基地威胁评分里按「kind 速度 × 距基地远近」加权，让玩家优先回头打逼近基地的
+快车（threatRange=23 下静态 kindThreatWeight fast=2 vs basic=1 无法表达「快车 6 格比
+basic 3 格更急」）。
+
+**实现:** 基地受威胁块的评分加一项
+  term = weight × speedRatio(kind) × clamp01((range − distToBase) / range)
+speedRatio = BASE_SPEED_CPS[kind] / BALANCED_ENEMY_CPS（fast 1.2、basic 1.0、power 0.95、
+armor 0.85），逼近因子在基地环上为 1、线性衰减到 range 处为 0。weight=0 短路为 0。
+
+**Results（官方口径 35×20，paired CRN）:**
+- w500/r10 → 423/700（−8）；w1000/r12 → 411/700（−20）；w800/r8 → 430/700（−1）。
+- Battlement 全臂纹丝不动：1/20 → 1/20/1/1；direct-drive 30 seeds 1/30 → 1/30 逐字一致。
+- 机制确认激活：direct-drive 探针显示 Battlement 基地威胁模式激活 26.6% 的 tick
+  （≈ Ramparts 25.6%），其中 ~45% 的时刻有 fast 在基地 10 格内；全局行为确实变化（S26 +5）。
+
+**Rationale（为何负）:** ① 作用域错位——项只在「基地已受威胁」块内重排「追谁」，不改变
+「何时回防」；Battlement 基地中位死亡 tick ≈ 3244，威胁模式激活时快车已在基地环开火，
+为时已晚。② fast（4.5 cps）比 1★ 玩家（4.19 cps）还快——追快车数学上徒劳，把目标从
+可击杀威胁换到追不上的快车 = 净负（w500 下 S2 −3、S23 −4；w1000 下 S12 −5、S31 −4）。
+这是 §131/T8 的同一教训：**基地防守瓶颈不能靠「威胁块内重排目标」解决**，方向 A/B 都是
+「敌人已到位后」的补救，杠杆在「敌人到达前」。
+
+**Implications:** 方向 C（无钢墙关 baseRace/maxPlayerDist/M13 距离再校准——让玩家在快车
+到环前更早回防）是下一步。旋钮保留默认 0（同 `dodgeHorizonMaxDistCells` 先例）。classic
+不受影响（继承默认 0）。
+
+## 133. 方向 C：brick-heavy 关防守距离再校准——诚实阴性（不发布，2026-08-05）
+
+**Decision:** 新增 §133 适配块（`brickHeavyDefenseWallRatio`=0.9 阈值 + 3 个适配距离值），
+A/B 三臂全负，默认保持阈值 0（OFF，byte-identical）。不发布 = 不改默认值。
+
+**实现:** `computeStageAdaptedParams` 在 §60 open-defense 之后加一块：当
+brickWallRatio ≥ 0.9（恰好 6 关：S0/S3/S14/S30/S33/S34，纯砖无钢墙）时覆盖三个距离——
+baseRaceRangeCells↑（更早 race 触发）、maxPlayerDistFromBase↓（受威胁更早回防）、
+outnumberedFieldDistCells↓（M13 更早回防）。注：§60 在这 6 关把 race 从 18 压到 14，
+方向与直觉相反，§133 的初衷是把它们改回 20-24。
+
+**Results（官方口径 35×20）:**
+- mild（race20/maxDist20/field16）→ 424/700（−7）；brick-heavy 6 关 62→55/120（−7）。
+- balance（22/18/12）→ 411/700（−20）；6 关 42/120（−20）。
+- tight（24/14/8）→ 402/700（−29）；6 关 33/120（−29）。
+- 重灾区正是目标关：S3 Crossfire 13→2/4/0（−11~−13 毁灭性）、S34 Final Redoubt 16→15/11/4、
+  S14 Citadel 10→9/5/6。仅 S0 +4（mild）、S30 +1（mild）微升。Battlement 1→2/0/0 噪声级。
+
+**Rationale（为何负）:** race 范围 20-24 使「玩家必须比敌人显著近才能继续打」几乎常驻触发，
+maxDist 14-20 使基地一受威胁玩家就离开中场战斗回防——玩家整局往返奔跑，击杀节奏清零，
+敌人聚集后基地照样失守（只是从「被打爆」变「被围困」）。这是 §113 M13「ON4@10 太被动，
+hard −5.3pp」的放大版。**brick-heavy 关的失败不是「回防太晚」——收紧回防系统性有害。**
+
+**Implications:** 与 §131（拦子弹）、§132（追快车）合流，Battlement 三方向全部证伪：基地被毁
+是症状，根因是 1★ 火力/机动追不上 4.5cps 快车。剩余杠杆：方向 D（在防守位拦截基地车道，
+不出防位追）、或接受 Battlement 为 hard 的 Boss 关。旋钮保留默认 0。classic 不受影响。
+
+## 134. 方向 D：防守位停射拦截基地车道敌人（SHIPPED，2026-08-05）
+
+**Decision:** 新增候选 `defenseIntercept`（weight 550，插于 pickupMid 与 engage 之间）并
+SHIPPED：`defenseInterceptMode=1`、`defenseInterceptMaxDist=12`、`defenseInterceptRangeCells=15`
+（pool 默认）。classic 经 CLASSIC_MODEL_PARAMS restore 0（未 A/B，instant 1-HP 无 HP 缓冲）。
+
+**机制:** 玩家距基地 ≤ 12 格（防守位附近）时，若某存活敌人已与基地对齐且无遮挡
+（enemyCanShootBase——下一发就能毁基地）、且与玩家同排/同列（拦截弹道可命中），则
+停射拦截（turn to face + fire，复用 T2a 的 self-fire base guard——绝不穿基地开火）。
+与 §132（威胁重排追快车）的本质区别：**不离开防守位**。
+
+**Results:**
+- 20-seed 筛选三臂全正：m8/r15 +8、m12/r15 +11、m8/r20 +8（vs 基线 431/700）；弱关全线上涨
+  （Ice Palace 10→15、Thicket 8→11、Bastion 7→8、Battlement 1→3）。
+- 60-seed paired（m12/r15）：hard mean Δscore **+0.0076 ± 0.0056**（p=0.17，suite 0.4410→
+  0.4474；S32 Diamond +15pp、S34 +10pp、Battlement 0.175→0.200）；chaos **+0.0144 ± 0.0055
+  （p=0.0087 显著，suite 0.4069→0.4284，Oasis +8.4pp p=0.042）**。双难度方向一致净正，无任何
+  难度回退 → 符合 M13 发布先例。
+- 门禁真值重测（gate-context 35×20）：hard 431→**442/700（63.1%）**、chaos 408→**420/700（60.0%）**；
+  Battlement hard 1→3（首次离开地板）。classic 门禁 637/700 字节不变。
+
+**Rationale（为何这次成立）:** 前三个方向全部「离开当前战斗」（拦子弹、追快车、回防）→
+用击杀节奏换防守，净负（§131-§133）。方向 D 是第一个**留在防守位开火**的机制：敌人与
+base 对齐的瞬间（破砖进入 row 23-25 / base 列走廊）正是它最脆弱也最危险的时刻，玩家在
+base 列上方与它同列的概率最高，一枪命中即解除威胁——零机动成本，且天然不破坏击杀节奏
+（拦截本身就是击杀）。S32 Diamond 意外大赚（钢墙关玩家在防守位的机会窗口长）。
+
+**Implications:** Battlement hard 1/20→3/20 但仍是最弱关（目标 >50%）。下一杠杆：把
+enemyCanShootBase 静态判定升级为「预测敌人将进入基地车道」（提前 1-2 格拦截）；或接受
+其为 Boss 关。三门禁 + split-parity 全绿。

@@ -58,6 +58,11 @@ export type ActionId =
   // spawn point closer to a base-threatening enemy. Weight 1100 > dodge 1000
   // so it suppresses dodging when suiciding is the better base-saving trade.
   | 'suicideReturn'
+  // §134 / 方向 D (user request 2026-08-05): 防守位停射拦截基地车道敌人。
+  // Player near the base, an enemy already aligned with the base (canShootBase)
+  // and aligned with the player → stop-and-aim intercept WITHOUT leaving the
+  // defense position. Weight 550 > engage 500. Default 0 = OFF (byte-identical).
+  | 'defenseIntercept'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -86,6 +91,7 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   hunt: 200,
   survive: 0,
   suicideReturn: 1100,
+  defenseIntercept: 550,
 }
 
 /**

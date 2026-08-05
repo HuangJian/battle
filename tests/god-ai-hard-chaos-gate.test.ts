@@ -27,10 +27,12 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 // hard +2.7pp / chaos +2.6pp, 60-seed hard +2.3pp / chaos +0.6pp — the FIRST
 // mechanism without a chaos downside (base losses + deaths down in BOTH
 // difficulties). Current truth (20-seed, playerStartLevel=1, ALL difficulties
-// startLives=3 — §130 全难度命数统一, hard 2→3): hard 61.6% / chaos 58.3%
-// → aggregate floor 405/382 (DECISIONS §115, M4 round-2 shipped
+// startLives=3 — §130 全难度命数统一, hard 2→3): hard 63.1% / chaos 60.0%
+// → aggregate floor 415/394 (DECISIONS §115, M4 round-2 shipped
 // DEFAULT — pool-model search tuning, classic restored byte-identical;
-// §130 2026-08-05 全难度 3 命后 hard 门禁真值重测).
+// §130 2026-08-05 全难度 3 命后 hard 门禁真值重测; §134 2026-08-05 方向 D
+// defenseIntercept 防守位停射拦截 SHIPPED — 60-seed hard +0.76pp / chaos
+// +2.15pp 显著 p=0.0087, 门禁真值再重测).
 // (DECISIONS §111).
 //
 // These are 20-seed SCREENING floors (same convention as the classic gate's
@@ -45,95 +47,99 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 const MARGIN_WINS = 4
 
-// Per-stage wins measured at 35×20 on the §130 baseline (2026-08-05,
+// Per-stage wins measured at 35×20 on the §134 baseline (2026-08-05,
 // playerStartLevel=1, ALL difficulties startLives=3 — §130 全难度命数统一,
 // hard 2→3), star shield on all difficulties, M13 field-wide retreat ON, M4
 // round-2 search defaults — replan=1, threatRange 23, campTimeout 20, etc.
-// — for pool difficulties. §110 reverted §109's 2★ back to 1★ by user
-// decision. Values are WIN COUNTS out of GATE_SEEDS (20). hard = 3 lives (§130).
+// — for pool difficulties, plus §134 defenseInterceptMode=1 SHIPPED (防守位
+// 停射拦截基地车道敌人 — 60-seed hard +0.76pp / chaos +2.15pp 显著). §110
+// reverted §109's 2★ back to 1★ by user decision. Values are WIN COUNTS out
+// of GATE_SEEDS (20). hard = 3 lives (§130).
 const HARD_TRUTH_WINS: number[] = [
-  11, // S0  Outpost
-  14, // S1  Waterways
-  12, // S2  Steel Fortress
+  10, // S0  Outpost
+  15, // S1  Waterways
+  10, // S2  Steel Fortress
   13, // S3  Crossfire
-  12, // S4  Maze
-  14, // S5  Brickworks
-  14, // S6  Iron Curtain
-  8, // S7  Riverbed
-  15, // S8  Twin Towers
-  15, // S9  Gauntlet
-  14, // S10  Fortress
-  10, // S11  Lattice
-  14, // S12  Bunker Hill
+  11, // S4  Maze
+  13, // S5  Brickworks
+  12, // S6  Iron Curtain
+  9, // S7  Riverbed
+  14, // S8  Twin Towers
+  17, // S9  Gauntlet
+  16, // S10  Fortress
+  8, // S11  Lattice
+  13, // S12  Bunker Hill
   15, // S13  Steel Web
-  10, // S14  Citadel
-  10, // S15  Crossroads
+  11, // S14  Citadel
+  11, // S15  Crossroads
   14, // S16  Twin Spires
   14, // S17  Gridlock
   14, // S18  Frozen Field
   7, // S19  Bastion
-  13, // S20  Checkers
-  12, // S21  Oasis
+  14, // S20  Checkers
+  14, // S21  Oasis
   20, // S22  Ramparts
-  9, // S23  Labyrinth
-  14, // S24  Quarry
-  10, // S25  Ice Palace
-  9, // S26  Brick Maze
-  8, // S27  Thicket
-  10, // S28  Spider
-  16, // S29  Concentric
+  10, // S23  Labyrinth
+  16, // S24  Quarry
+  14, // S25  Ice Palace
+  8, // S26  Brick Maze
+  11, // S27  Thicket
+  11, // S28  Spider
+  18, // S29  Concentric
   11, // S30  Eagle Nest
-  16, // S31  Star Fort
-  16, // S32  Diamond
-  1, // S33  Battlement
+  14, // S31  Star Fort
+  15, // S32  Diamond
+  3, // S33  Battlement
   16, // S34  Final Redoubt
 ]
 
 // §130 同次测量（gate-context，2026-08-05）：chaos 命数未变，但跨进程
 // genId 上下文噪声致 7 关各 ±1（总量 408/700 vs §115 的 407/700）——以本次
 // 门禁自身口径为准。
+// §134 同次测量（gate-context，2026-08-05）：defenseIntercept SHIPPED 后 chaos
+// 显著提升（60-seed p=0.0087，+2.15pp）——总量 408/700 → 420/700。
 const CHAOS_TRUTH_WINS: number[] = [
-  13, // S0  Outpost
+  15, // S0  Outpost
   18, // S1  Waterways
-  8, // S2  Steel Fortress
-  12, // S3  Crossfire
-  8, // S4  Maze
-  9, // S5  Brickworks
-  12, // S6  Iron Curtain
-  9, // S7  Riverbed
-  15, // S8  Twin Towers
+  7, // S2  Steel Fortress
+  11, // S3  Crossfire
+  9, // S4  Maze
+  11, // S5  Brickworks
+  11, // S6  Iron Curtain
+  10, // S7  Riverbed
+  14, // S8  Twin Towers
   16, // S9  Gauntlet
-  12, // S10  Fortress
-  8, // S11  Lattice
-  12, // S12  Bunker Hill
+  15, // S10  Fortress
+  9, // S11  Lattice
+  13, // S12  Bunker Hill
   16, // S13  Steel Web
-  9, // S14  Citadel
+  8, // S14  Citadel
   16, // S15  Crossroads
-  12, // S16  Twin Spires
-  18, // S17  Gridlock
-  10, // S18  Frozen Field
+  15, // S16  Twin Spires
+  17, // S17  Gridlock
+  12, // S18  Frozen Field
   11, // S19  Bastion
   9, // S20  Checkers
-  7, // S21  Oasis
-  18, // S22  Ramparts
-  4, // S23  Labyrinth
+  12, // S21  Oasis
+  17, // S22  Ramparts
+  6, // S23  Labyrinth
   16, // S24  Quarry
-  10, // S25  Ice Palace
-  7, // S26  Brick Maze
-  11, // S27  Thicket
-  13, // S28  Spider
+  11, // S25  Ice Palace
+  9, // S26  Brick Maze
+  12, // S27  Thicket
+  12, // S28  Spider
   16, // S29  Concentric
-  8, // S30  Eagle Nest
-  14, // S31  Star Fort
-  16, // S32  Diamond
-  1, // S33  Battlement
+  9, // S30  Eagle Nest
+  10, // S31  Star Fort
+  13, // S32  Diamond
+  0, // S33  Battlement
   14, // S34  Final Redoubt
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §130 (2026-08-05): 全难度命数统一 3 后重测 → hard 61.6% / chaos 58.3%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((61.6 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 405/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((58.3 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 382/700
+// §134 (2026-08-05): defenseIntercept SHIPPED 后重测 → hard 63.1% / chaos 60.0%.
+const HARD_AGGREGATE_FLOOR = Math.floor(((63.1 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 415/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((60.0 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 394/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).

@@ -18,14 +18,17 @@
 | 难度 | 20-seed 门禁真值 | 60-seed 参考 | 命数/星级 | 目标 | 状态 |
 |---|---|---|---|---|---|
 | classic | **91.0%**（637/700，floor 581） | ~91% | 3 命 / 0★ | >98%（v2 目标） | 门禁全绿，距目标 7pp |
-| hard | **61.6%**（431/700，floor 405） | 60.6%（§130 60-seed） | **3 命** / 1★ | >80%（v2 目标） | 门禁全绿（§130 命数统一后重测，+7.2pp） |
-| chaos | **58.3%**（408/700，floor 382） | 56.5%（§130 60-seed） | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿，**已超目标** |
+| hard | **63.1%**（442/700，floor 415） | 62%（§134 60-seed） | **3 命** / 1★ | >80%（v2 目标） | 门禁全绿（§134 防守位拦截 SHIPPED，+1.5pp） |
+| chaos | **60.0%**（420/700，floor 394） | 59%（§134 60-seed） | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿，**已超目标 10pp** |
 
 - classic 门禁真值自 M0 起保持 637/700 字节持平（所有 M 行为默认 OFF / 逐字节不变）。
 - §130（2026-08-05）：**全难度命数统一为 3**（relax 5→3、hard 2→3；classic/chaos 已为 3）。
   hard/chaos 门禁真值按 gate-context 重测：hard 54.4%→**61.6%**（全 35 关无回退）、chaos 58.1%→**58.3%**
   （命数未变，7 关 ±1 跨进程 genId 上下文噪声）。此前 hard/chaos 真值在 §105 模拟口径修复后重生成
   （hard 曾被 3 命伪口径高估 ~6pp）；§130 后命数差异不再参与难度区分。
+- §134（2026-08-05）：**方向 D 防守位停射拦截 SHIPPED**（defenseInterceptMode=1，pool-only，
+  classic restore 0）。hard/chaos 门禁真值按 gate-context 重测：hard 61.6%→**63.1%**（Battlement
+  1→3 首次离开地板）、chaos 58.3%→**60.0%**（60-seed 显著 p=0.0087，+2.15pp）。
 - 质量门禁：三门禁 + split-parity 12/12 全绿；**891 tests**、0 lint、`bun run build` ✓。
 
 ## 0.B v2 纪元发布清单
@@ -40,6 +43,7 @@
 | **M6（§104）** | **出生即一星**（hard/chaos playerStartLevel 0→1） | 60-seed hard +9.0pp / chaos +7.9pp，唯一 >3σ 行为外杠杆 |
 | §105（M7） | 模拟口径三重修复（playerLevel / lives / telemetry isPlayer） | hard 真实 2 命口径 48.0%、chaos 48.9% |
 | **§130（2026-08-05）** | **全难度命数统一 3**（relax 5→3、hard 2→3，用户指令） | hard 35×20 54.4%→**61.6%**、60-seed 60.6%；chaos 持平（±1 噪声）；门禁真值重生成 405/382 |
+| **§134（2026-08-05）** | **方向 D：防守位停射拦截基地车道敌人**（defenseInterceptMode=1，pool-only） | 20-seed 三臂 +8/+11/+8；60-seed hard +0.76pp（S32 +15pp / Battlement +2.5pp）、chaos **+2.15pp（p=0.0087 显著）**；门禁真值重生成 415/394 |
 
 **诚实阴性（不发布，实验旋钮保留）**
 | 里程碑 | 内容 | 结论 |
@@ -52,11 +56,17 @@
 | M9（§107） | dodgeHorizonScore 生存视界承诺闪避 | 机制成立（S0 seed2 反转）但 60-seed chaos -3.5pp；双目标教训 |
 | M10（§108） | horizon 时间余量门控（MARGIN6） | hard +1.6pp / chaos -2.4pp，参数全局无法发布 |
 | M11（§109→§110） | 星经济二星（playerStartLevel 1→2） | 60-seed +7.5~9.4pp 强信号，**用户否决回退**（"欺负敌人"） |
+| §131（2026-08-05） | T8 拦截射程 pool 2→8/12 | 20-seed −10/−13；60-seed paired −0.7pp（p=0.10）净负；机制激活但放弃击杀节奏，不发布 |
+| §132（2026-08-05） | 方向 B：威胁评分按 kind 速度×基地逼近加权 | 20-seed w500 −8 / w1000 −20 / w800 −1 全非正；Battlement 全臂不变（1/20→1/20/1/1）；fast 4.5cps > 1★玩家 4.19cps 追不上，威胁块内重排目标无杠杆，不发布 |
+| §133（2026-08-05） | 方向 C：brick-heavy 关防守距离再校准（race↑/maxDist↓/M13↓） | 20-seed mild −7 / balance −20 / tight −29 全负；6 目标关全负（S3 Crossfire 13→2/4/0 毁灭性）；「早回防」在 brick-heavy 关系统性有害（M13 ON4@10 教训放大版），不发布 |
 
 **保留实验旋钮**（默认 0 / OFF，字节持平）：`dodgeCounterFire`、`dodgeClearanceScore`、`pathThreatAvoidance`、
 `survivalModeLives`、`survivalRiskWeight`、`dodgeHorizonScore`、`dodgeHorizonMinMarginTicks`、
 `dodgeHorizonMaxDistCells`、EnemyModel 族（`enemyModelMode`/`tierWeightScale`/`dodgeRateShrinksT2a`/
-`coordinationRiskWeight`/`enemyAccuracyRaisesSurvival`）、`actionWeights.survive`。
+`coordinationRiskWeight`/`enemyAccuracyRaisesSurvival`）、`actionWeights.survive`、
+`fastBaseApproachWeight`/`fastBaseApproachRangeCells`（§132 方向 B）、
+`brickHeavyDefenseWallRatio`/`brickHeavyBaseRaceRangeCells`/`brickHeavyMaxPlayerDistFromBase`/
+`brickHeavyFieldDistCells`（§133 方向 C）。
 
 ---
 

@@ -30,6 +30,7 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
+import { enemyCanShootBase } from './SmartThreatModel'
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
@@ -552,6 +553,77 @@ const PICKUP_MID: Candidate = {
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
         self.branchCounts.powerup++
         self._lastBranch = 'powerup'
+        return true
+      }
+    }
+    return false
+  },
+}
+
+/**
+ * defenseIntercept(550) — §134/方向 D: 防守位停射拦截基地车道敌人。
+ *
+ * 与 §132（selectTarget 威胁重排，追快车）的本质区别：本候选**不离开防守位**。
+ * 玩家在基地附近（distToBase ≤ defenseInterceptMaxDist）时，若某存活敌人
+ * 已经与基地对齐且无遮挡（enemyCanShootBase——下一发子弹就能毁基地），同时
+ * 该敌人与玩家同排/同列（玩家能从防守位直接命中），则停射拦截它——turn to
+ * face + fire，像 T2a 但目标不是 aimDir 选中的最近敌人，而是基地车道上的敌人。
+ *
+ * 背景（hard 35×120 取证，§131-§133）：Battlement 基地被毁 117/120、凶手 59%
+ * fast。三个方向先后证伪——T8 拦子弹（已离膛）、威胁重排（fast 4.5cps 追不上
+ * 1★ 玩家 4.19cps）、距离收紧（早回防=把中场让给敌人）。存活下来的思路是
+ * 「在车道口把敌人打掉」：敌人与 base 对齐的瞬间（它破砖进入 row 23-25 或 base
+ * 列的走廊）正是它最脆弱也最危险的时刻，玩家在防守位（base 列上方）与它同列
+ * 的概率最高，一枪命中即解除威胁。
+ *
+ * 门控（全部默认 OFF → byte-identical）：defenseInterceptMode=0 短路；
+ * aggressive（freeze 窗口由 aggro 处理）；无基地关；玩家太远（不出防位追）。
+ * 复用 ENGAGE 的 self-fire base guard（shotReachesBaseImpl）——绝不朝基地方向
+ * 开火穿过基地打敌人。
+ */
+const DEFENSE_INTERCEPT: Candidate = {
+  id: 'defenseIntercept',
+  weight: ACTION_WEIGHTS.defenseIntercept,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown } = ctx
+    const prm = self.params
+    if (prm.defenseInterceptMode <= 0 || !self.hasBase || self.aggressive) return false
+    const pc = self.playerCell()
+    const playerDistToBase = Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row)
+    if (playerDistToBase > prm.defenseInterceptMaxDist) return false
+
+    // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
+    const list = self._enemies.length > 0 ? self._enemies : w.tanks
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
+      if (!t.alive || t.spawnTimer > 0) continue
+      // Enemy is ON the base's firing lanes RIGHT NOW (aligned + clear LOS).
+      if (!enemyCanShootBase(self, t)) continue
+      const tc = self.tankCell(t)
+      const dCol = tc.col - pc.col
+      const dRow = tc.row - pc.row
+      // Player must share the enemy's row or column (interceptable shot).
+      if (dCol !== 0 && dRow !== 0) continue
+      const distCells = Math.abs(dCol) + Math.abs(dRow)
+      if (distCells === 0 || distCells > prm.defenseInterceptRangeCells) continue
+      const dir: Direction = dCol !== 0 ? (dCol > 0 ? 'right' : 'left') : dRow > 0 ? 'down' : 'up'
+      // Self-fire base guard (same as ENGAGE/aggressive §121): never shoot
+      // THROUGH the base at an enemy on the far side.
+      if (
+        prm.selfFireBaseGuard > 0 &&
+        shotReachesBaseImpl(self, pcx, pcy, dir) &&
+        (prm.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir))
+      ) {
+        continue
+      }
+      // Confirm a live enemy is actually on the line within range — the
+      // scan may hit a nearer enemy, which is equally worth shooting.
+      const scan = scanAheadImpl(self, pcx, pcy, dir)
+      if (scan.enemy && scan.enemyDist <= distCells * CELL + CELL) {
+        self._moveDir = p.dir === dir ? null : dir
+        self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+        self.branchCounts.defenseIntercept++
+        self._lastBranch = 'defenseIntercept'
         return true
       }
     }
@@ -1093,6 +1165,7 @@ export const CANDIDATES: Candidate[] = [
   PICKUP_HIGH,
   AGGRO,
   PICKUP_MID,
+  DEFENSE_INTERCEPT,
   ENGAGE,
   PICKUP_LOW,
   HUNT,

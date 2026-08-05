@@ -292,6 +292,8 @@ export class GodAIInput implements InputLike {
     chokepoint: 0,
     // M3: survive 候选（主动换位）提交计数（纯观察）。
     survive: 0,
+    // §134: 防守位停射拦截候选提交计数（纯观察）。
+    defenseIntercept: 0,
     // §116: 自杀秒回候选提交计数（纯观察）。
     suicideReturn: 0,
   }

@@ -62,6 +62,28 @@ export interface GodAIParams {
   outnumberedRadiusCells: number
   /** T8: max distance (cells) to travel to intercept a base-bound bullet. */
   t8MaxInterceptDistCells: number
+  /**
+   * §134 / 方向 D (defense-position lane intercept): 0 = OFF (byte-identical).
+   * 1 = ON: when the player is within `defenseInterceptMaxDist` of the base
+   * (i.e. at/near the defense position) and a live enemy is ALREADY aligned
+   * with the base — `enemyCanShootBase`, it can destroy the base with its
+   * next bullet — AND aligned with the player (same row/col, clear LOS), the
+   * player stops and fires at that enemy WITHOUT leaving the defense
+   * position (outranked by dodge/interceptBase/aggro; weight 550 > engage 500
+   * so it pre-empts the aimDir-based T2a which may be aiming elsewhere).
+   *
+   * Why (hard 35×120 forensics, §131-§133): three prior directions failed on
+   * Battlement (base lost, 59% fast killers) — T8 intercept (bullet already
+   * in flight), target re-rank (fast 4.5cps outruns the 1★ player), defense
+   * distance tightening (returning early = chasing kills for the enemy). The
+   * survivor is to shoot the enemy ON the base's firing lane from the defense
+   * position — the base's own defenders stop the rush before it fires.
+   */
+  defenseInterceptMode: number
+  /** §134: max player dist-to-base (cells) for the lane-intercept to apply. */
+  defenseInterceptMaxDist: number
+  /** §134: max player→enemy distance (cells) for the intercept shot. */
+  defenseInterceptRangeCells: number
   /** S7: cells around the base to scan for wall integrity. */
   baseWallScanRadius: number
   /** Re-plan interval (ticks). */
@@ -211,6 +233,24 @@ export interface GodAIParams {
    */
   defenseClearShotBonus: number
 
+  /**
+   * §132 / 方向 B (fast × base-proximity threat weight): score bonus in
+   * defense-mode target selection for FAST enemies approaching the base.
+   * A fast tank 6 cells from the base is a bigger threat than a basic tank
+   * 3 cells out — the fast reaches the base in half the time, and the static
+   * defenseKindWeight (fast=2) + linear -distToBase*10 cannot express that
+   * (both score identically). When > 0, the base-threat score adds
+   *   weight × speedRatio(kind) × clamp01((range − distToBase) / range)
+   * where speedRatio = kind's BASE_SPEED_CPS / BALANCED_ENEMY_CPS
+   * (fast 1.2, basic 1.0, power 0.95, armor 0.85) and the approach factor
+   * ramps 1 at the base ring → 0 at fastBaseApproachRangeCells. Battlement
+   * forensics (§132): 59% of base deaths are fast-tank kills, with the
+   * player 4+ cells away 74% of the time. 0 = OFF (byte-identical).
+   */
+  fastBaseApproachWeight: number
+  /** §132: distance (cells) at which the speed×proximity term fully fades. */
+  fastBaseApproachRangeCells: number
+
   // ---- §60: Open-defense adaptation (baseRaceRangeCells by terrain) ----
   /**
    * §60: brick/(brick+steel) ratio at or above which the stage is eligible
@@ -227,6 +267,37 @@ export interface GodAIParams {
   openDefenseBrickWallRatio: number
   /** §60: baseRaceRangeCells for open-defense stages (default 14). */
   openDefenseBaseRaceRangeCells: number
+
+  // ---- §133 / 方向 C: brick-heavy defense tightening (brickW ≥ threshold) ----
+  /**
+   * §133 / 方向 C (DECISIONS §133): brick/(brick+steel) ratio AT OR ABOVE
+   * which the stage gets TIGHTER defense distances — the player returns to
+   * the base EARLIER instead of deep-hunting while fast tanks rush the
+   * base through pure-brick lanes. 0 = never adapt (byte-identical).
+   *
+   * Why (hard 35×120 forensics, §131/§132): brick-heavy stages have NO
+   * indestructible steel — enemies (59% fast on Battlement) reach the base
+   * ring through breakable brick, and the base dies early (Battlement
+   * median tick ≈ 3244) with the player 9+ cells away 42% of the time. The
+   * §115 M4 search widened all three defense distances GLOBALLY
+   * (maxPlayerDistFromBase 26 / outnumberedFieldDistCells 26 / race 18),
+   * and §60's open-defense even TIGHTENS race to 14 on these very stages —
+   * the combination leaves the player deep-hunting when the base is
+   * undefendable. §133 re-tightens ONLY the brick-heavy set: earlier race
+   * trigger (bigger range), earlier forced return under threat (smaller
+   * maxPlayerDistFromBase), earlier M13 field-pressure retreat (smaller
+   * outnumberedFieldDistCells).
+   *
+   * Default 0.9 — matches the pure-brick set S0/S3/S14/S30/S33/S34 while
+   * leaving S2 (0.833) and S16 (0.892) on the global values.
+   */
+  brickHeavyDefenseWallRatio: number
+  /** §133: baseRaceRangeCells for brick-heavy stages (bigger = earlier race trigger). */
+  brickHeavyBaseRaceRangeCells: number
+  /** §133: maxPlayerDistFromBase for brick-heavy stages (smaller = earlier return). */
+  brickHeavyMaxPlayerDistFromBase: number
+  /** §133: outnumberedFieldDistCells for brick-heavy stages (smaller = earlier M13 retreat). */
+  brickHeavyFieldDistCells: number
 
   // ---- §61: Terrain-adaptive T2a range for high-HP enemies ----
   /**
@@ -1156,6 +1227,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   outnumberedEnemyCount: 5,
   outnumberedRadiusCells: 7,
   t8MaxInterceptDistCells: 2,
+  // §134 / 方向 D: 防守位停射拦截 — SHIPPED（2026-08-05, DECISIONS §134）。
+  // A/B 官方口径：20-seed +8/+11/+8；60-seed hard +0.76pp（p=0.17，S32 +15pp /
+  // S34 +10pp / Battlement +2.5pp）、chaos +2.15pp（p=0.0087 显著）→ 双难度净正。
+  // classic（instant 1-HP）未 A/B — 经 CLASSIC_MODEL_PARAMS restore 0。
+  defenseInterceptMode: 1,
+  defenseInterceptMaxDist: 12,
+  defenseInterceptRangeCells: 15,
   baseWallScanRadius: 5,
   replanInterval: 1,
   replanCache: 1,
@@ -1204,12 +1282,29 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 0 = OFF (byte-identical to pre-§59).
   defenseClearShotBonus: 500,
 
+  // §132 / 方向 B: speed × base-proximity threat weight in defense target
+  // selection. Default 0 = OFF (byte-identical — the scoring term short-
+  // circuits). A/B sweep candidates: weight 500/1000 × range 10/12.
+  fastBaseApproachWeight: 0,
+  fastBaseApproachRangeCells: 10,
+
   // §60: Open-defense adaptation. On non-steel-maze stages, widen
   // baseRaceRangeCells from 11 to 14 for earlier threat detection. Steel
   // mazes (brick/(brick+steel) < 0.10) keep the default 11 — early retreat
   // hurts there because enemies bypass the defense position via corridors.
   openDefenseBrickWallRatio: 0.1,
   openDefenseBaseRaceRangeCells: 14,
+
+  // §133 / 方向 C: brick-heavy defense tightening. Default 0 = OFF
+  // (byte-identical — the adaptation block never runs). Candidate values
+  // for the 20-seed sweep (all injected together via --params):
+  //   mild   race=20 maxDist=20 fieldDist=16
+  //   balance race=22 maxDist=18 fieldDist=12
+  //   tight  race=24 maxDist=14 fieldDist=8
+  brickHeavyDefenseWallRatio: 0,
+  brickHeavyBaseRaceRangeCells: 22,
+  brickHeavyMaxPlayerDistFromBase: 18,
+  brickHeavyFieldDistCells: 12,
 
   // §61: Terrain-adaptive T2a range. On open-sightline stages (low forest or
   // high water), engage armor from range 4 instead of 2 — faster kills, less
@@ -1458,6 +1553,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // classic is instant 1-HP combat with zero margin for suppressed kill shots
   // and was never A/B'd here — restore 0 (byte-identical classic gate).
   selfFireBaseGuard: 0,
+  // §134: 防守位停射拦截是 pool-model（hard/chaos）修复 — classic instant
+  // 1-HP 未 A/B，restore 0（byte-identical classic gate）。
+  defenseInterceptMode: 0,
 }
 
 /**
@@ -1583,6 +1681,23 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
     // early retreat trades base defense for lives exhausted).
     if (p.openDefenseBrickWallRatio > 0 && !armorHeavy && !isSteelMaze) {
       overrides.baseRaceRangeCells = p.openDefenseBaseRaceRangeCells
+      adapted = true
+    }
+
+    // §133 / 方向 C: brick-heavy defense tightening. Runs AFTER §60 so it
+    // re-tightens the race range §60 just widened (open-defense's 14 is
+    // SMALLER than the §115 global 18 — on pure-brick stages that means
+    // later, not earlier, defense). On brickW ≥ brickHeavyDefenseWallRatio
+    // stages there is no indestructible steel: fast tanks rush the base
+    // ring through breakable brick and the base dies early while the
+    // player deep-hunts (§131/§132 forensics). Override the three defense
+    // distances — earlier race trigger (bigger range), earlier forced
+    // return under threat (smaller maxPlayerDistFromBase), earlier M13
+    // field-pressure retreat (smaller outnumberedFieldDistCells). 0 = OFF.
+    if (p.brickHeavyDefenseWallRatio > 0 && brickWallRatio >= p.brickHeavyDefenseWallRatio) {
+      overrides.baseRaceRangeCells = p.brickHeavyBaseRaceRangeCells
+      overrides.maxPlayerDistFromBase = p.brickHeavyMaxPlayerDistFromBase
+      overrides.outnumberedFieldDistCells = p.brickHeavyFieldDistCells
       adapted = true
     }
 

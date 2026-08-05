@@ -29,6 +29,8 @@ describe('M1 decision-chain invariants', () => {
       'pickupHigh',
       'aggro',
       'pickupMid',
+      // §134 / 方向 D: 防守位停射拦截 — 插在 engage 之前（weight 550 > 500）。
+      'defenseIntercept',
       'engage',
       'pickupLow',
       'hunt',
@@ -43,6 +45,8 @@ describe('M1 decision-chain invariants', () => {
       pickupHigh: 800,
       aggro: 700,
       pickupMid: 600,
+      // §134 / 方向 D: 防守位停射拦截 — engage(500) 之上，aggro(700) 之下。
+      defenseIntercept: 550,
       engage: 500,
       pickupLow: 400,
       hunt: 200,

@@ -2,6 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import { findPath, type Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
+import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase } from './SmartThreatModel'
@@ -838,12 +839,29 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // is the highest-priority target: it can destroy the base NOW. Controlled
     // by defenseClearShotBonus (default 500, 0 = OFF = byte-identical to pre-§59).
     const clearShotBonus = hasClearShot ? self.params.defenseClearShotBonus : 0
+    // §132 / 方向 B (fast × base-proximity): a fast tank closing on the base
+    // is a bigger threat than a basic tank the same distance out (it reaches
+    // the base in ~5/6 the time and keeps firing as it moves). The static
+    // defenseKindWeight (fast=2 vs basic=1) + linear -distToBase*10 cannot
+    // express that — both score identically at equal distance. Add
+    //   weight × speedRatio(kind) × clamp01((range − distToBase) / range)
+    // where speedRatio = BASE_SPEED_CPS[kind] / BALANCED_ENEMY_CPS (fast
+    // 1.2, basic 1.0, power 0.95, armor 0.85) and the approach factor ramps
+    // 1 at the base ring → 0 at fastBaseApproachRangeCells. weight = 0
+    // (default) short-circuits to 0 — byte-identical to pre-§132.
+    const speedApproachBonus =
+      self.params.fastBaseApproachWeight > 0 && distToBase < self.params.fastBaseApproachRangeCells
+        ? self.params.fastBaseApproachWeight *
+          (BASE_SPEED_CPS[t.kind] / BALANCED_ENEMY_CPS) *
+          (1 - distToBase / self.params.fastBaseApproachRangeCells)
+        : 0
     const score =
       -distToBase * 10 +
       (defenseKindWeight + bonusWeight) * 30 +
       urgencyBonus +
       proximityBonus +
-      clearShotBonus
+      clearShotBonus +
+      speedApproachBonus
     if (score > bestScore) {
       bestScore = score
       bestEnemy = t
