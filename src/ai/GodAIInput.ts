@@ -12,6 +12,7 @@ import {
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
   makeScanResult,
+  bulletPathSteelBlockedImpl,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
 import { thinkImpl, CANDIDATES } from './god/think'
@@ -45,6 +46,7 @@ import {
 import {
   findPowerUpTargetImpl,
   findUrgentPowerUpTargetImpl,
+  findUrgentPowerUpTargetWithCommitImpl,
   findDireItemTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
@@ -210,6 +212,38 @@ export class GodAIInput implements InputLike {
   _aggCampKillsAtStart = 0
   /** §84: countdown to suppress aggressive stop-and-aim after a stall escape. */
   _aggCampSuppress = 0
+
+  /**
+   * §152-W2: aggressive-branch MOVEMENT stuck guard state (distinct from the
+   * §84 stop-and-aim camp guard — this one covers the navigate fallback).
+   * Zone anchor (±1 cell, like the T2a camp zone) + ticks + kill baseline:
+   * the freeze-window oscillation between two adjacent cells (A* path
+   * first-step blocked by a frozen enemy's body / water, followPath fallback
+   * ping-pongs back) accumulates here and trips aggNavStuckTicks, committing
+   * a navigate-to-center escape (hard S12 seed 934391936 W2). AI-internal,
+   * not serialized — same semantics as _campCell/_campTicks.
+   */
+  _aggNavStuckCell: Cell | null = null
+  _aggNavStuckTicks = 0
+  _aggNavKillsAtStart = 0
+  /** countdown forcing the navigate-to-center escape after a movement stall. */
+  _aggNavSuppress = 0
+
+  /**
+   * §152-W3: urgent-pickup commit state. Once PICKUP_HIGH/MID commits to an
+   * item, the pursuit persists for pickupCommitTicks while the item stays
+   * alive — the transient dist>range exclusion (the player moving toward the
+   * item) must not cancel it (hard S12 seed 934391936 W3 oscillation).
+   * Stores the ITEM cell (existence re-verify) + the COLLECT cell (nav
+   * target — differs when the item sits on blocking terrain). AI-internal,
+   * not serialized.
+   */
+  _pickupCommitActive = false
+  _pickupCommitTicks = 0
+  _pickupCommitCol = 0
+  _pickupCommitRow = 0
+  _pickupCommitItemCol = 0
+  _pickupCommitItemRow = 0
 
   /**
    * §86: Dodge direction persistence — the last dodge direction used for a
@@ -577,6 +611,17 @@ export class GodAIInput implements InputLike {
     this._aggCampTicks = 0
     this._aggCampKillsAtStart = 0
     this._aggCampSuppress = 0
+    // §152-W2/W3: reset the aggressive-nav stuck guard + pickup commit state.
+    this._aggNavStuckCell = null
+    this._aggNavStuckTicks = 0
+    this._aggNavKillsAtStart = 0
+    this._aggNavSuppress = 0
+    this._pickupCommitActive = false
+    this._pickupCommitTicks = 0
+    this._pickupCommitCol = 0
+    this._pickupCommitRow = 0
+    this._pickupCommitItemCol = 0
+    this._pickupCommitItemRow = 0
     // §86: reset dodge direction persistence.
     this._lastDodgeDir = null
     this._lastDodgeThreatId = -1
@@ -774,6 +819,11 @@ export class GodAIInput implements InputLike {
   shouldFireInDir(pcx: number, pcy: number, dir: Direction, allowWallFire = true): boolean {
     return shouldFireInDirImpl(this, pcx, pcy, dir, allowWallFire)
   }
+  /** §152-W1: does the bullet's ACTUAL 6px path hit non-ring steel within
+   * maxDist? Mirrors SimulationCombat.bulletHitsTerrain — see FireControl. */
+  bulletPathSteelBlocked(pcx: number, pcy: number, dir: Direction, maxDist: number): boolean {
+    return bulletPathSteelBlockedImpl(this, pcx, pcy, dir, maxDist)
+  }
 
   // --- ThreatAssessor ---
   findMostDangerousBullet(pcx: number, pcy: number): Bullet | null {
@@ -848,6 +898,15 @@ export class GodAIInput implements InputLike {
     tier: 'all' | 'high' | 'midlow' = 'all',
   ): Cell | null {
     return findUrgentPowerUpTargetImpl(this, pcx, pcy, tier)
+  }
+  /** §152-W3: urgent power-up target with commit persistence (see
+   * StrategyPlanner) — used by PICKUP_HIGH/PICKUP_MID. */
+  findUrgentPowerUpTargetWithCommit(
+    pcx: number,
+    pcy: number,
+    tier: 'all' | 'high' | 'midlow' = 'all',
+  ): Cell | null {
+    return findUrgentPowerUpTargetWithCommitImpl(this, pcx, pcy, tier)
   }
   /** E1 / 道具经济: dire-state item pickup (swarm or ring-damaged → nearby
    * bomb/freeze/fence/emp worth a divert). 0 = OFF (byte-identical). */

@@ -271,6 +271,97 @@ export function findUrgentPowerUpTargetImpl(
   return hasBest ? { col: bestCol, row: bestRow } : null
 }
 
+/** §152-W3: is an alive power-up at (col,row)? Pure World read (no RNG). */
+function powerUpAliveAt(self: GodAIInput, col: number, row: number): boolean {
+  const powerUps = self.world.powerUps
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    if (Math.floor(pu.x / CELL) === col && Math.floor(pu.y / CELL) === row) return true
+  }
+  return false
+}
+
+/**
+ * §152-W3: the ITEM cell of the alive power-up whose collect cell equals
+ * `target` (the cell findUrgentPowerUpTargetImpl returned), or null. The
+ * collect cell can differ from the item cell when the item sits on blocking
+ * terrain — the commit must re-verify the ITEM (existence) while navigating
+ * to the COLLECT cell. Uses the same memoized reachability as the lookup,
+ * so repeated per-tick re-verification is cheap.
+ */
+function itemCellForCollect(self: GodAIInput, target: Cell): Cell | null {
+  const powerUps = self.world.powerUps
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    const ic = Math.floor(pu.x / CELL)
+    const ir = Math.floor(pu.y / CELL)
+    const collect = powerUpCollectCell(self, ic, ir)
+    if (!collect) continue
+    if (collect.col === target.col && collect.row === target.row) {
+      return { col: ic, row: ir }
+    }
+  }
+  return null
+}
+
+/**
+ * §152-W3: urgent power-up target WITH commit persistence.
+ *
+ * Same as findUrgentPowerUpTargetImpl, but once a pursuit commits to an item,
+ * it keeps returning that item's collect cell until the item is collected /
+ * despawned or the pickupCommitTicks window expires — the transient
+ * "dist > range" exclusion (the player MOVING toward the item pushed its
+ * manhattan distance past the category range) must not cancel an active
+ * pursuit, or the player oscillates between the item and the nav target
+ * forever (hard S12 Lattice seed 934391936 W3: ~800 ticks at
+ * (21,18)↔(22,18), zero kills, while enemies swarmed the base).
+ *
+ * The commit only continues when the committed item is still alive — a
+ * collected/despawned item ends the pursuit immediately. Higher-weight
+ * candidates (dodge/interceptBase) naturally preempt the pickup on threat
+ * ticks; the commit state survives those preemptions and resumes after.
+ * 0 = OFF (pickupCommitTicks <= 0 → byte-identical to the plain lookup).
+ */
+export function findUrgentPowerUpTargetWithCommitImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  tier: 'all' | 'high' | 'midlow' = 'all',
+): Cell | null {
+  const p = self.params
+  if (p.pickupCommitTicks <= 0) return findUrgentPowerUpTargetImpl(self, pcx, pcy, tier)
+
+  // ---- Active commit: continue while the item lives within the window ----
+  if (self._pickupCommitActive) {
+    self._pickupCommitTicks++
+    const itemAlive = powerUpAliveAt(self, self._pickupCommitItemCol, self._pickupCommitItemRow)
+    if (!itemAlive || self._pickupCommitTicks > p.pickupCommitTicks) {
+      self._pickupCommitActive = false
+      self._pickupCommitTicks = 0
+    } else {
+      return { col: self._pickupCommitCol, row: self._pickupCommitRow }
+    }
+  }
+
+  // ---- No active commit — fresh lookup, then arm the commit ----
+  const target = findUrgentPowerUpTargetImpl(self, pcx, pcy, tier)
+  if (target) {
+    const itemCell = itemCellForCollect(self, target)
+    if (itemCell) {
+      self._pickupCommitActive = true
+      self._pickupCommitTicks = 0
+      self._pickupCommitCol = target.col
+      self._pickupCommitRow = target.row
+      self._pickupCommitItemCol = itemCell.col
+      self._pickupCommitItemRow = itemCell.row
+    }
+    return target
+  }
+  return null
+}
+
 /** §87: distance gate (cells) for a power-up type. 0 = never urgent. */
 function urgentPickupRange(type: PowerUpType, p: GodAIParams): number {
   switch (type) {

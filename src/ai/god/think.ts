@@ -21,6 +21,7 @@ import {
   shotReachesBaseImpl,
   enemyInShotCorridorImpl,
   shouldFireInDirImpl,
+  bulletPathSteelBlockedImpl,
 } from './FireControl'
 import { dodgeCounterFireDirImpl, findBulletThreatToBaseImpl } from './ThreatAssessor'
 import {
@@ -41,6 +42,9 @@ import { isFieldRetreatConditionImpl } from './StrategyPlanner'
 // wins. Each evaluate() returns true exactly when the original branch would
 // have `return`ed from the top-level chain.
 // ===========================================================================
+
+/** §152-W2: map-center escape target for the aggressive movement-stuck guard. */
+const MAP_CENTER: Cell = { col: 12, row: 12 }
 
 /** suicideReturn(1100) — 自杀秒回: embrace death to respawn at the spawn point
  * closer to a base-threatening enemy the player was too far to reach.
@@ -432,10 +436,14 @@ const PICKUP_HIGH: Candidate = {
         return true
       }
       if (self.params.pickupPriorityMode > 0) {
+        // §152-W3: findUrgentPowerUpTargetWithCommit persists an active
+        // pursuit across the transient dist>range flip (the W3 oscillation:
+        // the item at the range boundary was abandoned the tick the player
+        // stepped toward it). 0 = plain lookup (byte-identical).
         const urgentTarget =
           self.params.chokepointMode > 0
-            ? self.findUrgentPowerUpTarget(pcx, pcy, 'high')
-            : self.findUrgentPowerUpTarget(pcx, pcy)
+            ? self.findUrgentPowerUpTargetWithCommit(pcx, pcy, 'high')
+            : self.findUrgentPowerUpTargetWithCommit(pcx, pcy)
         if (urgentTarget) {
           self._moveDir = self.navigateTowards(urgentTarget)
           self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
@@ -484,9 +492,18 @@ const AGGRO: Candidate = {
         // §74: Don't fire when a base-protection wall is on the other offset
         // line, or is closer than (or at the same distance as) the enemy — the
         // 6px bullet spans both offset columns and would hit the wall first.
+        // §152-W1: also don't fire when the bullet's ACTUAL 6px path hits
+        // non-ring steel before the enemy (the scan's offset lines can see the
+        // enemy while the center-line bullet clips a steel column edge — hard
+        // S12 seed 934391936 W1). Precise center-line walk, NOT the scan-steel
+        // gate (which over-suppresses the §74 dual-offset case).
+        const steelPathBlocked152 =
+          self.params.t2aSteelPathBlock > 0 &&
+          bulletPathSteelBlockedImpl(self, pcx, pcy, aimDir, aggScan.enemyDist * CELL)
         if (
           aggScan.enemy &&
           !aggFireBlocked &&
+          !steelPathBlocked152 &&
           !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
           !(aggScan.baseSteel && (p.level ?? 0) >= 3)
         ) {
@@ -555,6 +572,62 @@ const AGGRO: Candidate = {
         self._lastBranch = 'aggressive'
         return true
       }
+      // §152-W2: aggressive MOVEMENT stuck guard — the freeze window burns
+      // entirely if the A* path ping-pongs between two adjacent cells (path
+      // first step blocked by a frozen enemy's body / water → followPath's
+      // fallback moves back to the previous cell → the replan replays the
+      // same dead path). Zone-based (±1 cell, same as the T2a camp zone): a
+      // kill resets the counter. After aggNavStuckTicks without progress, a
+      // navigate-to-center escape runs for the antiCampSuppressTicks window
+      // (A* routes around the blocking tank/water — in a dead-end corridor
+      // the only open direction leads OUT).
+      if (self.params.aggNavStuckTicks > 0) {
+        let escape152 = self._aggNavSuppress > 0
+        if (!escape152) {
+          const pc152 = self.playerCell()
+          if (
+            self._aggNavStuckCell &&
+            Math.abs(self._aggNavStuckCell.col - pc152.col) <= 1 &&
+            Math.abs(self._aggNavStuckCell.row - pc152.row) <= 1
+          ) {
+            self._aggNavStuckTicks++
+            if (w.killCount !== self._aggNavKillsAtStart) {
+              self._aggNavStuckTicks = 1
+              self._aggNavKillsAtStart = w.killCount
+            }
+          } else {
+            self._aggNavStuckCell = { col: pc152.col, row: pc152.row }
+            self._aggNavStuckTicks = 1
+            self._aggNavKillsAtStart = w.killCount
+          }
+          if (
+            self._aggNavStuckTicks > self.params.aggNavStuckTicks &&
+            w.killCount === self._aggNavKillsAtStart
+          ) {
+            self._aggNavStuckCell = null
+            self._aggNavStuckTicks = 0
+            self._aggNavSuppress = self.params.antiCampSuppressTicks
+            escape152 = true
+          }
+        }
+        if (escape152) {
+          if (self._aggNavSuppress > 0) self._aggNavSuppress--
+          self._moveDir = self.navigateTowards(MAP_CENTER)
+          if (!self._moveDir) {
+            for (let di = 0; di < ALL_DIRS.length; di++) {
+              const d = ALL_DIRS[di]
+              if (self.canMoveDir(p, d)) {
+                self._moveDir = d
+                break
+              }
+            }
+          }
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.aggressive++
+          self._lastBranch = 'aggressive'
+          return true
+        }
+      }
       // Navigate to nearest enemy.
       self._moveDir = self.followPath()
       if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
@@ -604,7 +677,10 @@ const PICKUP_MID: Candidate = {
     // extending the gate to MID/LOW was A/B-measured net negative on chaos
     // (§147, see retreatGateBlocksPickup scope note).
     if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
-      const midTarget = self.findUrgentPowerUpTarget(pcx, pcy, 'midlow')
+      // §152-W3: commit-persistent lookup (see PICKUP_HIGH) — the W3
+      // oscillation was driven by this branch (the decoy at (21,14) sat
+      // exactly at the mid-range boundary).
+      const midTarget = self.findUrgentPowerUpTargetWithCommit(pcx, pcy, 'midlow')
       if (midTarget) {
         self._moveDir = self.navigateTowards(midTarget)
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
@@ -768,9 +844,17 @@ const ENGAGE: Candidate = {
       // §74: Don't enter T2a when a base-protection wall is closer than
       // (or at the same distance as) the enemy on the other offset line.
       // Fall through to navigate when blocked by a closer base wall.
+      // §152-W1: same as the aggressive branch — suppress the stop-and-aim
+      // when the bullet's actual 6px path hits non-ring steel before the
+      // enemy (the scan's offset lines can see the enemy while the center
+      // line clips a steel column edge — hard S12 seed 934391936 W1).
+      const steelPathBlocked152 =
+        self.params.t2aSteelPathBlock > 0 &&
+        bulletPathSteelBlockedImpl(self, pcx, pcy, aimDir, scan.enemyDist * CELL)
       if (
         scan.enemy &&
         !selfFireBlocked &&
+        !steelPathBlocked152 &&
         !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
         !(scan.baseSteel && (p.level ?? 0) >= 3)
       ) {

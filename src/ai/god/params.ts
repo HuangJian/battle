@@ -1355,6 +1355,59 @@ export interface GodAIParams {
    * bullet [197,203] passed beside it into the eagle).
    */
   selfFireBaseGuard: number
+
+  // ---- §152: S12 replay fixes (2026-08-05) ----
+  /**
+   * §152-W1: steel-path stop-and-aim gate. 0 = OFF (byte-identical).
+   * 1 = ON (default): the T2a/aggressive stop-and-aim fire is suppressed when
+   * the bullet's ACTUAL 6px path (not the scan's ±8px offset lines) hits
+   * non-ring steel BEFORE the aligned enemy. Root cause (hard S12 Lattice
+   * seed 934391936, 0:59-1:01): the player stopped at (17,18) with its center
+   * x=288 exactly on the col-17/18 boundary and fired up at a fast enemy at
+   * (17,3) — the bullet box [285,291] clips the steel column 18 [288,304) at
+   * rows 8-9 and dies there, never reaching the enemy, while the scan saw the
+   * enemy on one offset line (scan.enemy=true). The scan-steel gate is
+   * deliberately NOT used (it over-suppresses the dual-offset case where the
+   * enemy is genuinely reachable — §74 A/B: 20 kills → 7 kills); the precise
+   * 6px-center-line walk only blocks when the sim would actually stop the
+   * bullet. Inert at level ≥ 3 (steel-pierce).
+   */
+  t2aSteelPathBlock: number
+  /**
+   * §152-W2: aggressive-branch movement-stuck guard (ticks). 0 = OFF
+   * (byte-identical). >0: during a freeze window (aggressive mode) with no
+   * aimable enemy and no power-up, the navigate path tracks how long the
+   * player stays within a ±1-cell zone with no kills (zone-based — the
+   * exact-cell check misses the classic two-cell ping-pong). After
+   * aggNavStuckTicks the player commits a navigate-to-center escape for the
+   * antiCampSuppressTicks window (A* routes around the blocking frozen tank /
+   * water — the only open direction leads out of the dead-end corridor).
+   * Root cause (hard S12 Lattice seed 934391936, 1:04-1:16): A* ignores
+   * tanks, so a frozen enemy's 0.8px body overlap in the next cell made the
+   * path first-step blocked every replan; followPath's fallback ping-ponged
+   * up/down at (8,16)↔(8,17) for the whole freeze window (720+ ticks, zero
+   * kills).
+   */
+  aggNavStuckTicks: number
+  /**
+   * §152-W3: urgent-pickup commit persistence (ticks). 0 = OFF — the SHIPPED
+   * default (byte-identical to pre-§152). >0: once PICKUP_HIGH/PICKUP_MID
+   * commits to an item, the pursuit continues for up to pickupCommitTicks
+   * while the item is still alive — the transient "dist > range" exclusion
+   * (the player MOVING toward the item pushed its manhattan distance past the
+   * category range) must not cancel an active pursuit. Root cause (hard S12
+   * Lattice seed 934391936, 1:38-1:56): the decoy at (21,14) sat exactly at
+   * the mid-range boundary (4 cells = pickupPriorityMidRange); from (21,18)
+   * dist=4 (commit → move right), from (22,18) dist=5 (skip → navigate left)
+   * — the player ping-ponged at (21,18)↔(22,18) for ~800 ticks with zero
+   * kills while enemies swarmed the base. NOT SHIPPED: the 35×60 hard A/B +
+   * per-seed isolation showed the commit hijacks base defense on the 4 S34
+   * Battlement flip seeds (all die with baseHp=0) and turns the S12
+   * seed-934391936 win back into a loss — each fix alone wins, ALL ON loses.
+   * The W3 window is already fixed by W1+W2's trajectory change (the player
+   * navigates instead of bouncing). Experimental knob only.
+   */
+  pickupCommitTicks: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1765,6 +1818,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // CLASSIC_MODEL_PARAMS (instant 1-HP combat has zero margin — untested,
   // keep byte-identical per §115).
   selfFireBaseGuard: 2,
+  // §152: S12 replay fixes — SHIPPED defaults. 0 = OFF (A/B baseline).
+  // W3 (pickupCommitTicks) is NOT shipped: the 35×60 hard A/B + per-seed
+  // isolation showed the commit persistence is net-negative — on the 4
+  // Battlement (S34) flip seeds it hijacks base defense (all 4 runs die with
+  // baseHp=0), and on S12 seed 934391936 it turns the W1+W2 win back into a
+  // loss (each fix alone wins; ALL ON loses). The W3 oscillation window is
+  // already fixed by W1+W2's trajectory change (the player navigates the
+  // window instead of bouncing). Kept as an experimental knob, 0 = OFF
+  // (byte-identical).
+  t2aSteelPathBlock: 1,
+  aggNavStuckTicks: 120,
+  pickupCommitTicks: 0,
 }
 
 /**
@@ -1807,6 +1872,11 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   iceGlideControl: 0,
   // §146 B: 集合点可达性未在 classic 上 A/B — restore 0（byte-identical）。
   defensePosStandable: 0,
+  // §152: 三项 S12 修复均为 pool-model（hard/chaos）调优，classic instant 未 A/B
+  // —— restore 0（byte-identical classic gate）。
+  t2aSteelPathBlock: 0,
+  aggNavStuckTicks: 0,
+  pickupCommitTicks: 0,
 }
 
 /**

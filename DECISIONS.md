@@ -1879,3 +1879,36 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - 幂等保护改为 **marker 文件制**（`tmp/.stage-numbers.converted`）：每次 `--apply` 成功写 marker，之后无 `--force` 再跑 `--apply` 直接 ABORT。
 - 五个 tracked 文档已 `git checkout` 还原到 0-based HEAD 后重新 `--apply` 一次（425 处，与首次审计一致），恢复为正确 1-based。
 - 教训：内容特征（如「无 S0」）不可作幂等判定，因为规则文档自身会引用旧编号；状态信号必须独立于被转换内容。
+
+## 152. hard S12 Lattice 回放四联 bug 修复（§152-W1..W4）+ 全关 A/B 验证（SHIPPED）
+
+**Decision:** 从浏览器回放 `hard-s12-base-l2-t138-seed934391936.replay`（S12 Lattice hard，gameover@8272 基地被毁）定位四个 God AI 行为 bug，全部修复并加单元测试，随后在 hard 全 35 关 × 60 seeds 配对 A/B 验证。**发货配置：W1（`t2aSteelPathBlock=1`）与 W2（`aggNavStuckTicks=120`）ON；W3（`pickupCommitTicks`）默认 0（实验旋钮，实测净负，不发货）；W4（decoy 出生点）为纯 bug 修复无条件发货。**
+
+### W1 — 停瞄被半格钢铁路径阻挡仍开火（0:59-1:01，t3540-3660）
+- **症状：** player 停在 (17,18)（中心 x=288 恰在 col-17/18 分界线上）向 (17,3) fast enemy 停瞄开火；扫描 ±8px 偏移线看到敌人，但子弹真实 6px 盒 [285,291] 在 rows 8-9 夹住 steel col 18 [288,304) 并死在行 9——火力被浪费且持续空射。
+- **根因：** T2a/aggressive 停瞄门只查 baseWall/baseSteel（§74/§75），从未验证子弹真实中心线是否被非环钢铁阻挡。
+- **修复：** 新 param `t2aSteelPathBlock`（默认 1）+ `bulletPathSteelBlockedImpl`（FireControl.ts）——沿子弹真实 6px 路径逐 CELL 步进，检查盒重叠的每个格；非环 steel 且 level<3 → 阻挡（level≥3 可穿钢放行）；环 steel/brick 跳过（由 baseWall/baseSteel 门接管）；OOB→'steel'（子弹死于场边）。**刻意不用 scan-steel 门**（§74 A/B 证明它会过度压制 dual-offset 可达场景 20→7 kills）；精确 6px 行走只在模拟真正会挡住子弹时拦截。
+- **§74 测试口径修正（诚实记录）：** 原 `tests/steel-fire-gate.test.ts` 的 dual-offset fixture（player x=128）经真实模拟探测（`bulletHitsTerrain` 语义）被证明是**钢铁角夹死**场景——子弹盒 [141,147] 夹 col-8 steel 角于 (8,6) 而死，敌人并不可达（STEEL-DEATH @y=111.4）。测试 fixture 移到真正可达的 x=134（盒 [147,153] 全程在 col 9，穿过钢铁击杀敌人——KILL 探测确认），并新增两条 W1 行为锁定：x=128 边界位 gate ON 不射击、gate OFF 恢复旧行为。
+
+### W2 — aggressive 分支移动振荡（1:04-1:16，t3840-4560）
+- **症状：** player 在 (8,16)↔(8,17) 上下往复 720+ ticks 零击杀（冻结敌人 body 堵住 A* 首选步）。
+- **根因：** A* 忽略坦克，冻结敌人的 0.8px body 重叠使路径首步每次重规划都被堵；followPath 回退在死胡同里乒乓。
+- **修复：** 新 param `aggNavStuckTicks`（默认 120）+ zone 化 stuck 检测（±1 格、窗口内零击杀）→ 一次性 navigate-to-center 逃逸（`_aggNavSuppress` 抑制窗内不再回 aggressive）。
+
+### W3 — 紧急拾取振荡（1:38-1:56，t5880-6960）— 实现但**不发货**
+- **症状：** (21,14) decoy 恰在 mid-range 边界（4 = pickupPriorityMidRange）：从 (21,18) dist=4 提交、从 (22,18) dist=5 放弃，~800 ticks 乒乓。
+- **实现：** `pickupCommitTicks` 提交持久化（`findUrgentPowerUpTargetWithCommitImpl`），抑制瞬态 dist 越界翻转。
+- **否决（35×60 A/B + per-seed 隔离）：** 提交持久化会劫持基地防守——S34 Battlement 4 个翻转种子（8/23/56/58）全部 baseHp=0 阵亡；S12 本种子「各修单开全赢、全开反输」（W1+W2 单开 clear@9398、W3 单开 clear@8554、全开 gameover@7249）。**W3 窗口已被 W1+W2 的轨迹改变修复**（玩家改为绕行而非乒乓，46 格导航无振荡）。→ 默认 0，保留为实验旋钮。
+
+### W4 — 拾取后原地不动（2:05，t7502-8272）— 纯 bug 修复
+- **症状：** 拾取 decoy 后 player 被盒死在原地（tankHitsTank 把出生中坦克当障碍）。
+- **根因：** decoy 出生在玩家同一格（0/9 方向全堵）。
+- **修复：** `SimulationPlayer.decoySpawnCell`——在 3 格环内找空位（优先非正交格），绝不踩玩家格。
+
+**验证：**
+- 单元测试 `tests/s12-replay-fixes.test.ts`（15 条）：W1 的 blocked/offset-only/环钢/穿钢/OOB 五态 + 默认值；W2 的 stuck 触发与击杀重置；W3 的 commit 持久化/拾取即止/超时（含默认 0）；W4 的异格出生 + 玩家至少一方可动。
+- 修复后该种子 **clear@9398（baseHp=120）**（原回放 gameover@8272）。
+- **35×60 hard 配对 A/B**（A=W1/W2 OFF、B=发货默认）：suite 0.5143→0.5316（**+0.0205，p=0.0069**），胜率 72%→74%；**0 关显著变差**；Brick Maze +21.7pp、Frozen Field +11.8pp、Ramparts +1.6pp 显著变好。初版含 W3 的 A/B 有 Battlement −4.6pp（p=0.0365）回归，去 W3 后清零。
+- `bun run check` 全绿（1056 pass / 0 fail）。
+
+**Implications:** W1/W2 是新默认行为（classic 纪元参数保持 0——W1/W2 仅影响 modern pool 模型 T2a/aggressive 停瞄与冻结窗口移动）；`pickupCommitTicks` 作为实验旋钮保留（复用时需先解决 S34 base-defense 劫持）。decoy 出生点变更影响所有难度。

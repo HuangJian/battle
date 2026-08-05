@@ -39,6 +39,21 @@ import type { Tank } from '../src/types'
  * case there (steel on one scan line, enemy on the other) means the enemy is
  * genuinely reachable by the center-line bullet, and suppressing that fire
  * costs kills (arena A/B: 20 kills → 7 kills, gameover @1634 vs clear @4592).
+ *
+ * §152-W1 REFINEMENT (2026-08-06): the T2a/aggressive fire sites gained a
+ * SECOND, precise gate — `t2aSteelPathBlock` / `bulletPathSteelBlockedImpl` —
+ * that walks the bullet's ACTUAL 6px path (not the scan's ±8px offset lines)
+ * and suppresses the shot only when the bullet would provably die at non-ring
+ * steel before reaching the enemy. This is orthogonal to the coarse
+ * `steelFireGate`: the coarse scan-steel gate is still NOT applied to T2a
+ * (the dual-offset reachable case still fires — sim-probed: player x=134,
+ * bullet box [147,153] stays in col 9, clears the steel, kills the enemy),
+ * while the W1 gate catches the boundary-clip case the scan misses (player
+ * center exactly on a column boundary → the 6px box clips the steel corner
+ * and dies there — hard S12 seed 934391936). The two dual-offset fixtures
+ * below were MOVED to the genuinely-reachable x=134 position after the
+ * sim-probe proved the old x=128 fixture was a steel-death case (bullet box
+ * [141,147] clips col 8's steel corner at (8,6)), not a reachable shot.
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
@@ -181,8 +196,32 @@ describe('T2a stop-and-aim — deliberately NOT gated (per-seed A/B scope findin
   function steelDualOffsetWorld(): { world: World; input: GodAIInput } {
     const { world, input } = setupWorld()
     positionPlayer(world, 8, 10, 'up')
+    // §152-W1: move the player OFF the col-8/9 boundary. At x=128 the center
+    // is x=144 → the 6px bullet box [141,147] clips col 8's steel corner and
+    // dies at (8,6) — sim-probed STEEL-DEATH. At x=134 the center is x=150 →
+    // box [147,153] stays in col 9, clears the steel, kills the enemy
+    // (sim-probed KILL). The scan still sees steel on offset-0 (line x=142,
+    // col 8) and the enemy on offset-1 (line x=158, col 9) — the dual-offset
+    // geometry is preserved, but now the enemy is genuinely reachable.
+    // (Note: the bullet spawns at tank.x + 13 = 147 → box [147,153]; the
+    // sim-probe also verified x=132 → box [145,151] kills — either sub-cell
+    // position works.)
+    world.player!.x = 134
     placeEnemy(world, 8, 3)
     // Steel on offset-0 line only (col 8); enemy visible on offset-1 (col 9).
+    world.tileMap.grid[6][8] = 'steel'
+    return { world, input }
+  }
+
+  // §152-W1: the boundary-clip case the OLD fixture (x=128) accidentally
+  // represented. The scan sees the enemy (offset line x=144, col 9) but the
+  // actual bullet box [141,147] clips the col-8 steel corner at (8,6) and
+  // dies there — T2a must NOT fire (the W1 suppression), and with the gate
+  // OFF it falls back to the old fire-through behavior (byte-identical).
+  function steelBoundaryWorld(): { world: World; input: GodAIInput } {
+    const { world, input } = setupWorld()
+    positionPlayer(world, 8, 10, 'up') // x=128, center x=144 — on the boundary
+    placeEnemy(world, 8, 3)
     world.tileMap.grid[6][8] = 'steel'
     return { world, input }
   }
@@ -200,6 +239,35 @@ describe('T2a stop-and-aim — deliberately NOT gated (per-seed A/B scope findin
     const { input } = steelDualOffsetWorld()
     input.reset()
     input.params = { ...DEFAULT_GOD_AI_PARAMS, steelFireGate: 0, aimError: 0 }
+
+    input.getMoveDirection()
+    expect(input.isFiring()).toBe(true)
+  })
+
+  it('W1 gate ON: T2a does NOT fire when the 6px bullet clips the steel corner (boundary x=128)', () => {
+    const { input } = steelBoundaryWorld()
+    input.reset()
+    input.params = { ...DEFAULT_GOD_AI_PARAMS, steelFireGate: 1, aimError: 0 }
+
+    // The scan sees the enemy (offset line x=144) but the actual bullet box
+    // [141,147] clips the col-8 steel corner at (8,6) → the sim provably
+    // stops the bullet before it reaches the enemy → suppressed. Per the
+    // user's expected behavior ("绕开钢铁阻挡后再开火"), the blocked shot
+    // must fall through to navigation rather than camp firing.
+    const moveDir = input.getMoveDirection()
+    expect(input.isFiring()).toBe(false)
+    expect(moveDir).not.toBeNull()
+  })
+
+  it('W1 gate OFF: boundary x=128 fires again (byte-identical pre-§152 behavior)', () => {
+    const { input } = steelBoundaryWorld()
+    input.reset()
+    input.params = {
+      ...DEFAULT_GOD_AI_PARAMS,
+      steelFireGate: 1,
+      aimError: 0,
+      t2aSteelPathBlock: 0,
+    }
 
     input.getMoveDirection()
     expect(input.isFiring()).toBe(true)

@@ -182,8 +182,20 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
      */
     protected activateDecoy(p: Tank): void {
       const w = this.world
+      // §152-W4: never spawn the decoy ON TOP of the player. tankHitsTank
+      // treats spawning tanks (spawnTimer > 0) as blockers, so a same-cell
+      // decoy boxes the player in for its whole 500-tick spawn + until it
+      // can drive clear — hard S12 seed 934391936: the player picked the
+      // decoy up at t7502 and stayed frozen at (6,14) for the final 770
+      // ticks until the base fell. Find the nearest clear tank cell within a
+      // 3-cell ring instead (preferring cells that do NOT sit in the
+      // player's 4 orthogonal neighbours — a corridor-adjacent decoy would
+      // block the player's only egress). Deterministic: no RNG, fixed scan
+      // order. If every candidate is blocked, skip (jam is worse than no-op).
+      const pos = this.decoySpawnCell(p)
+      if (!pos) return
       // Spawn as basic tank (minimal stats) then override for decoy role
-      const tank = w.createTank('basic', p.x, p.y, p.dir)
+      const tank = w.createTank('basic', pos.x, pos.y, p.dir)
       tank.allegiance = 'ally'
       tank.isPlayer = false
       tank.isDecoy = true
@@ -199,6 +211,51 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
       // Lifespan expiry (absolute frame)
       tank.guardExpireFrame = w.frame + DECOY_LIFESPAN_FRAMES
       w.allies.push(tank)
+    }
+
+    /**
+     * §152-W4: nearest clear tank cell within a 3-cell ring of the player for
+     * the decoy spawn, or null when every candidate is blocked (terrain / any
+     * live tank, allies included). Deterministic — no RNG, fixed scan order.
+     * Prefers candidates outside the player's 4 orthogonal neighbours so a
+     * corridor decoy cannot seal the player's only exit.
+     */
+    private decoySpawnCell(p: Tank): { x: number; y: number } | null {
+      const w = this.world
+      const pcCol = Math.round(p.x / CELL)
+      const pcRow = Math.round(p.y / CELL)
+      const tanks = w.allTanks
+      let best: { x: number; y: number; d: number } | null = null
+      let bestNonOrth: { x: number; y: number; d: number } | null = null
+      for (let r = pcRow - 3; r <= pcRow + 3; r++) {
+        for (let c = pcCol - 3; c <= pcCol + 3; c++) {
+          if (c === pcCol && r === pcRow) continue
+          const x = c * CELL
+          const y = r * CELL
+          if (!w.isInBounds(x, y, TANK, TANK)) continue
+          if (w.rectHitsTerrain(x, y, TANK, TANK)) continue
+          let blocked = false
+          for (let ti = 0; ti < tanks.length; ti++) {
+            const t = tanks[ti]
+            if (t.alive && aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) {
+              blocked = true
+              break
+            }
+          }
+          if (blocked) continue
+          const orth =
+            (c === pcCol && (r === pcRow - 1 || r === pcRow + 1)) ||
+            (r === pcRow && (c === pcCol - 1 || c === pcCol + 1))
+          const d = Math.abs(c - pcCol) + Math.abs(r - pcRow)
+          if (orth) {
+            if (!bestNonOrth || d < bestNonOrth.d) bestNonOrth = { x, y, d }
+          } else {
+            if (!best || d < best.d) best = { x, y, d }
+          }
+        }
+      }
+      const chosen = best ?? bestNonOrth
+      return chosen ? { x: chosen.x, y: chosen.y } : null
     }
 
     // ================================================================

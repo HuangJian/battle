@@ -837,6 +837,72 @@ export function shotReachesBaseImpl(
 }
 
 /**
+ * §152-W1: would a bullet fired from (pcx,pcy) along `dir` hit NON-RING steel
+ * before travelling `maxDist` px?
+ *
+ * Walks the bullet's ACTUAL 6px path (BULLET=6 → ±3px half-width) in CELL
+ * steps, checking every grid cell the box overlaps — the SAME cell set
+ * `SimulationCombat.bulletHitsTerrain` tests per tick, so a true result means
+ * the sim would provably stop the bullet before it reaches the enemy (no
+ * false positives — the §74 lesson). Unlike `scanAheadImpl`'s two ±8px offset
+ * lines (which can see steel that the 6px bullet never touches), this is the
+ * exact center-line predicate.
+ *
+ * The W1 mechanism (hard S12 Lattice seed 934391936, 0:59-1:01): the player
+ * stopped at (17,18) with center x=288 exactly on the col-17/18 boundary and
+ * stop-and-aimed up at a fast enemy at (17,3). The scan saw the enemy on the
+ * left offset line, but the bullet box [285,291] clips the steel column 18
+ * [288,304) at rows 8-9 — the bullet died at row 9, never reaching the enemy.
+ * The T2a/aggressive stop-and-aim gates only checked baseWall/baseSteel, so
+ * the fire was wasted (and the player camped).
+ *
+ * Semantics (mirrors bulletHitsTerrain exactly): non-ring steel stops the
+ * bullet unless the player can pierce (level ≥ 3 → bullet power 2); ring
+ * steel/brick is skipped (the existing baseWall/baseSteel gates handle the
+ * base ring); non-ring brick is plowed through; OOB cells are 'steel'
+ * (TileMap.get fallback — the bullet dies at the field edge).
+ *
+ * Gate: caller checks `self.params.t2aSteelPathBlock` (0 = OFF,
+ * byte-identical). Pure World read — no RNG, no mutation.
+ */
+export function bulletPathSteelBlockedImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  maxDist: number,
+): boolean {
+  const w = self.world
+  const p = self.controlledTank(w)
+  const pierce = (p?.level ?? 0) >= 3
+  const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+  const vdx = DIR_DX[dirIdx]
+  const vdy = DIR_DY[dirIdx]
+  const grid = w.tileMap.grid
+  const half = 3 // BULLET / 2
+  for (let d = CELL; d <= maxDist; d += CELL) {
+    const fx = pcx + vdx * d
+    const fy = pcy + vdy * d
+    if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) return true // dies at the edge
+    const c0 = Math.floor((fx - half) / CELL)
+    const c1 = Math.floor((fx + half) / CELL)
+    const r0 = Math.floor((fy - half) / CELL)
+    const r1 = Math.floor((fy + half) / CELL)
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (c < 0 || c >= GRID || r < 0 || r >= GRID) return true // OOB → 'steel'
+        const terrain = grid[r][c]
+        if (terrain !== 'steel') continue
+        if (isBaseRingCell(c, r)) continue // base ring: handled by baseWall/baseSteel gates
+        if (pierce) continue // level ≥ 3 pierces non-ring steel
+        return true // the bullet would stop here — before the enemy
+      }
+    }
+  }
+  return false
+}
+
+/**
  * §121 (mode 2, lenient): does any alive enemy tank body overlap the bullet's
  * 6px corridor BETWEEN the player and the base? When one does, the bullet
  * provably hits the enemy before the base (point-blank overlap kill) — mode 2
