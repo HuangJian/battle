@@ -475,3 +475,38 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
 // M0.5 (2026-08-03): trapAvoidance (Navigator) + crossfirePathCost A* threat
 // costs (computeThreatCostsImpl) retired. Archived verbatim in experimental.ts
 // for the v2 survive candidate / EnemyModel features (design §4.4).
+
+/**
+ * §145 iceGlideAdjust — 冰上滑行控制（纯函数，供 HUNT 的 navigate 段调用）。
+ *
+ * 冰面物理（SimulationCombat.updateMovement）：反向输入 = 以 ICE_ACCEL_TRACTION
+ * (0.35) 向反方向加速——不是纯制动，而是**真倒车**。倒过头后 Math.round 玩家格
+ * 在格边界抖动 → A* 路径缓存（按玩家格键控）翻转 → 方向振荡（S24 seed 23
+ * 实测 t4506-4511：md 上下翻转 6 tick，浪费控制且可能冲入敌人）。
+ *
+ * 正确冰上操控 = 需要反向时先松键（null），让滑行以 ICE_DECEL_TRACTION (0.05)
+ * 自然衰减，不倒退、不过冲；下一 tick 路径从滑停位置重新规划。垂直转弯不动：
+ * axis-lock 会让旧轴自然衰减，转弯本身有效。低于 minSpeed（刚起步/将停）不干预。
+ *
+ * 纯函数：不读 RNG、不读 World 可变状态 —— 可直接单测，且旋钮默认 0 时 HUNT
+ * 不调用 → byte-identical。
+ */
+export function iceGlideAdjust(
+  moveDir: Direction | null,
+  onIce: boolean,
+  vx: number,
+  vy: number,
+  minSpeed: number,
+): Direction | null {
+  if (!moveDir || !onIce) return moveDir
+  const glideSpeed = Math.abs(vx) + Math.abs(vy)
+  if (glideSpeed < minSpeed) return moveDir
+  // axis-lock（SimulationCombat）每 tick 只保留主导轴，|vx| === |vy| 的"对角"
+  // 是瞬时态；tie-break 归 x 轴意味着此时 y 轴反向不会被判为 reverse（视为垂直
+  // 转弯放行）——无害，勿"修复"。
+  const axisX = Math.abs(vx) >= Math.abs(vy)
+  const reverse = axisX
+    ? (moveDir === 'right' && vx < 0) || (moveDir === 'left' && vx > 0)
+    : (moveDir === 'down' && vy < 0) || (moveDir === 'up' && vy > 0)
+  return reverse ? null : moveDir
+}

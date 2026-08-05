@@ -248,6 +248,29 @@ export interface GodAIParams {
    * pursuit loops where the player chases a faster enemy indefinitely.
    */
   navStuckTicks: number
+  /**
+   * §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12,
+   * 24-offset) 在全部 35 关都是环砖格，A* 到砖格目标返回空路径 → 回防路由失效
+   * （S8 实测 corridor=0 breakBrick=0）。开启时：默认点不可站则在小盒内扫最近
+   * 可站格。0 默认 OFF → byte-identical。
+   */
+  defensePosStandable: number
+  /** 远位触发阈值：仅当玩家距基地超过该格数时启用集合点回退（近基 byte-identical）。 */
+  defensePosStandableMinDist: number
+  /**
+   * §145 iceGlideControl: 冰上滑行控制 — 转弯/反向前先松键（null）让滑行
+   * 自然衰减。冰面物理：反向输入 = 以 ICE_ACCEL_TRACTION 向反方向加速（真
+   * 倒车）→ 倒过头 → Math.round 玩家格边界抖动 → A* 路径缓存翻转 → 方向振荡
+   * （S24 seed 23 t4506-4511 实测 md 上下翻转 6 tick）。正确冰上操控 = 反向
+   * 前先松键，滑行以 ICE_DECEL_TRACTION 衰减，不倒退不过冲。0 默认 OFF →
+   * byte-identical（HUNT 不调用 iceGlideAdjust）。
+   * 注意：仅在 HUNT navigate 段生效（其余移动型候选 pickup/firingLane/aggro/
+   * defenseIntercept 不受影响）；且无法区分"路径转弯制动"与"冰上战术后退"——
+   * 后者同样被压制（A/B 净负的部分原因，§145）。
+   */
+  iceGlideControl: number
+  /** 冰上视为"正在滑行"的最小速度（px/tick）。低于该值不干预（刚起步/将停）。 */
+  iceGlideMinSpeed: number
 
   // ---- M0.5 退役（2026-08-03, DECISIONS §96）----
   // guardBandMode/Row/HalfWidth + damagedArmorBonus（D1/D2 否决）与
@@ -1216,6 +1239,18 @@ export interface GodAIParams {
   /** M13: min player dist-to-base (cells) for the retreat. */
   outnumberedFieldDistCells: number
 
+  /**
+   * §146 C: when the M13 field-pressure retreat condition holds (far from
+   * base + full enemy field, base NOT under threat), suppress the HIGH-tier
+   * urgent pickup so HUNT's M13 retreat fires instead of being hijacked by
+   * the pickup branch (weight 800 > hunt 200). S8: the player stayed in the
+   * dead-end pocket chasing items while the base fell. The predicate is
+   * shared with selectTarget (isFieldRetreatConditionImpl) — the item may
+   * still be picked on the way back. Pool-model only (M13 is pool-only).
+   * 0 = OFF (byte-identical).
+   */
+  fieldRetreatPickupGate: number
+
   // ---- 自杀秒回 (suicide quick-return, user request 2026-08-04, §116/§117) ----
   /**
    * 0 = OFF (byte-identical to pre-§116). 1 = §116 original — trigger on
@@ -1433,6 +1468,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // at the same cell) for 3 seconds of navigating, force a roam to the map
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
+  // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
+  // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
+  defensePosStandable: 0,
+  defensePosStandableMinDist: 8,
+  // §145: 冰上滑行控制 — default 0 (OFF, byte-identical)。iceGlideMinSpeed
+  // 0.3 < ICE_ACCEL_TRACTION(0.35)：滑行中判定不压制正常起步/急停。
+  iceGlideControl: 0,
+  iceGlideMinSpeed: 0.3,
 
   // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor、smartThreatModel
   // 族已移入 experimental.ts 归档（见该文件参数规格表）。
@@ -1697,6 +1740,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // even with the retreat weakened.
   outnumberedFieldEnemies: 4,
   outnumberedFieldDistCells: 26,
+  // §146 C: M13 pickup gate — 0 = OFF (byte-identical). Pool-model only
+  // (the predicate itself checks combatModel === 'pool', so classic stays
+  // byte-identical with or without a CLASSIC restore entry).
+  fieldRetreatPickupGate: 0,
   // 自杀秒回 (suicide quick-return, §116/§117): default OFF — A/B tested
   // (per-seed tick-diff + §117 forensics) before enabling, per the §88
   // methodology. When ON, the player trades a life for a better position to
@@ -1755,6 +1802,11 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §134: 防守位停射拦截是 pool-model（hard/chaos）修复 — classic instant
   // 1-HP 未 A/B，restore 0（byte-identical classic gate）。
   defenseInterceptMode: 0,
+  // §145: 冰上滑行控制未在 classic 上 A/B — restore 0（byte-identical
+  // classic gate，classic 同样有 S25 Ice Palace 冰关，后续可单独评估）。
+  iceGlideControl: 0,
+  // §146 B: 集合点可达性未在 classic 上 A/B — restore 0（byte-identical）。
+  defensePosStandable: 0,
 }
 
 /**

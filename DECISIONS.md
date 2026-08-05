@@ -1732,3 +1732,107 @@ chaos 5/60 → **不发货**。测试 `tests/battlement-dire-item.test.ts`（触
 关卡设计侧（Battlement 右翼集结带 / 出生口袋）或规则侧（敌人 AI 层级、fast 占比）——属
 MANIFEST「Three Gates」之外的关卡难度域，后续如需推进应走 level-design 而不是 God AI 旋钮。
 
+
+## 145. S24 冰面机制深潜 + iceGlideControl —— 诚实阴性（旋钮保持 0，S24 = 难度地板关）
+
+**Decision:** 实现并测量 S24（Labyrinth 迷阵，全关最差：hard 43.3% / chaos 36.7%）的冰面滑行控制旋钮
+`iceGlideControl`（+`iceGlideMinSpeed` 0.3）：HUNT navigate 段在冰上滑行中（|v|≥阈值）若目标方向与
+滑行轴反向，先松键（null）让滑行以 ICE_DECEL_TRACTION 自然衰减，替代当前「反向倒车」制动。纯函数
+`iceGlideAdjust`（Navigator.ts）+ 8 个单测锁定。A/B（60-seed）：S24 hard 26→21（−8.3pp）、chaos 22→24
+（+3.3pp）、S26 hard 29→28（−1.7pp）、chaos 26→25（−1.7pp）——**净负，不发货**。机制验证更直接：
+seed 23 开旋钮后基地提前 1152 tick 被毁（t4521→t3369）。全量门禁 1007/1007 绿。
+
+**Rationale:**
+- 三轮取证先行（fresh 语料 35×120 hard+chaos + 逐 tick 探针，探针与语料败局 tick 完全一致）：
+  ① 胜/败局 120-tick 站位分布**零差异**（seed 1/3/7 胜局同样 db 3-31 振荡）→ 站位预位族结构性证伪；
+  ② 冰面是败局语境（死亡 45-58% 在冰、败局末段 65-69% 在冰）但非独立杠杆——胜局死得更多（0.76 vs
+  0.52）→ 减少死亡不转化胜率；③ 胜/败分水岭 = 击杀 17.1 vs 10.5 + 拾取 6.0 vs 3.3（freeze 猎杀窗口
+  aggressive 17% vs 0%），但拾取缺口是击杀下游（navigate 时场周 10 格内道具仅 0-14%，胜/败一致）——
+  E1（§144）结论在 S24 复现。
+- iceGlideControl 失败的机制解释：冰上反向是 AI 唯一的**快速制动**（0.35 加速度倒车 2-3 tick 停住），
+  t4506-4511 的「振荡」其实只浪费 ~6 tick；改松键 coast（0.05 衰减）会让坦克滑过目标点 ~0.7 格——
+  战斗中滑入弹道/滑过防守位，代价大于省下的 tick；且旋钮无法区分「路径转弯制动」与「冰上战术后退」
+  ——真实撤退（如远离逼近的敌人）同样被压制，雪上加霜。臂击杀 11.98（败局区间）、星级 1.13（↓）未
+  转化为交战输出。仅覆盖 HUNT navigate 段，其余移动候选不受影响（§145 实现边界）。
+- **一般性结论（比单关修复更有价值）**：防守预位杠杆族已在两种极端几何（Battlement 纯砖迷宫 + S24
+  开阔冰面）双重证伪——败局共性不在「玩家不在场」，而在「击杀输出不足时基地被 swarm 时序淹没」。
+  后续关卡改进判据：优先查击杀/交战质量，不再追站位。
+
+**Implications:** S24 判为难度地板关（击杀输出由敌方路由/时序决定，无可控 AI 旋钮），hard 43% / chaos
+37% 高于门禁 floor（6/2），无回归风险。iceGlideControl 保持 0（pool + classic 双 restore 0，byte-identical
+by construction）。测试 `tests/ice-glide-control.test.ts` 锁定纯函数语义与默认值。
+
+## 146. S8 Riverbed 取证深潜 + defensePosStandable —— SHIPPED（集合点可达性修复，hard 45%→52%）
+
+**Decision:** S8 远位弃守型败局（hard 45% / chaos 44%，败时距基 23.7 格）三层根因定位后，实现并发货
+`defensePosStandable`（+`defensePosStandableMinDist`=8）：默认防守位 (12, 24−offset=1) = **(12,23) 在全部
+35 关上都是环砖格**（§137 注释已承认），corridor 与 breakBrick A* 到砖格目标均返回空路径 → 紧急防御/
+§113 场退/§88 回防的路由全部失效，玩家只能 directMove 盲目破砖（S8 实测 pocket→(12,23) corridor=0
+breakBrick=0）。旋钮开时：仅**远位**（Manhattan dist > 8）触发，在基地周边小盒（rows br-6..br+1, cols
+bc-3..bc+4）扫最近可站格（排除 brick/steel/water/base）作集合点。默认 0 → byte-identical。
+
+**Rationale:**
+- 取证：fresh 语料（35×120 hard+chaos）显示 S8 败局不是「远位弃守」而是**中带死胡同口袋陷阱**——玩家沿
+  左侧边线上行跨 col 4-5 渡口进 col 1-2 死胡同（(1,7)-(1,11) 三格），因 powerup（pickupHigh 800 > hunt 200）
+  与击杀滞留，3 格振荡绕开 navStuck（同格 180 tick）检测；败局末段 43% 时间在口袋 vs 胜局 7%（与 S24 站位
+  零差异不同，这次站位差异就是病因）。探针逐 tick 一致（seed 43/1/63 同弧线，基地威胁态 'U' 时 path 空）。
+- 三层根因：① 阈值空档（maxPlayerDistFromBase=26 vs 口袋典型 dist 25）；② 集合点 (12,23) 砖格不可达（本
+  旋钮修复）；③ pickupHigh 权重压掉 M13 回防（候选 C 杠杆，留待后续）。
+- A/B：朴素版（无 minDist 门控）全关扫描出现 S15 −6pp / S24 −5pp / S25 −4pp 回归——近基 idle 行为被改到；
+  收窄版（minDist=8 远位门控）**回归全部消失**：S8 hard 45→52%（+8pp 120-seed）、chaos 44→49%（+6pp），
+  S7 额外 +6/+1pp，聚合 hard +0.3pp / chaos +1.3pp，其余关卡全部 |Δ|≤2pp 噪声内。冰面/砖迷宫关（S24/S26/
+  S34）零变化。全量门禁 1010/1010 绿。
+- 与 §140 baseWallExactRing（Battlement）同型：**机制级可达性/判定 bug 修复**是当前唯一被证实的正杠杆，
+  评分/站位/重定位类（§141-§143/§145）全部阴性——「回防路由目标不可达」是 35 关共通的潜伏缺陷，本旋钮
+  只是默认关闭的收窄版修复；standability 回退全面启用（解除 §137 门控）留作后续全关验证。
+
+**Implications:** 兜底集合点现在永远可站可达，所有 rally-to-defense 机制（紧急防御/§113/§88）的地基修复。
+旋钮默认 0 不改变现有行为；发货需要用户确认将默认值翻转为 1（或后续全关验证后统一启用）。候选 C
+（拾取门：M13 条件下 HIGH 道具不劫持回防）与候选 A（阈值 26→20）未测，留作 §147。
+
+## 147. S8 三杠杆 B/C/A 逐一 A/B —— B SHIPPED（§146 已记），C/A 诚实阴性（§146 C 范围限制 + A 全局崩盘）
+
+**Decision:** S8 三层根因（阈值空档 / 集合点不可达 / pickup 劫持回防）对应三杠杆逐一 A/B 收束：
+C（fieldRetreatPickupGate）与 A（maxPlayerDistFromBase 26→20）均**诚实阴性，不发货**；B
+（defensePosStandable，§146）已 SHIPPED。C 的实现与谓词保留（`isFieldRetreatConditionImpl` 成为 M13
+判定单一来源，selectTarget 与 PICKUP_HIGH 共用），A 无实现（纯参数探针）。
+
+**Rationale:**
+- C（拾取门）：PICKUP_HIGH（800）在 M13 回防（hunt 200）之前评估，S8 玩家被 HIGH 道具劫持困在口袋。
+  实现：共享谓词 isFieldRetreatConditionImpl（6 条件与 M13 块逐字一致）+ PICKUP_HIGH 门控（谓词成立
+  则 return false 让 hunt 接管）+ 10 单测。A/B：**C 在 B 之上无增量**——S8 hard 62→59（−3pp 噪声）、
+  chaos 59→58（−1pp）、S7 +1pp、聚合 −0.0/−0.1pp。机制解释（测试固化）：**S8 砖比 0.884 < 0.9
+  brick-heavy 门槛 → 不触发 §133 适配 → outnumberedFieldDistCells 保持 26 → 口袋 dist 25 不满足谓词
+  → C 在 S8 默认参数下根本不触发**（根因①阈值空档把 C 垫在下面）。范围限制：门控仅覆盖 HIGH tier，
+  MID/LOW 理论上仍可劫持（实测 S8 劫持为 HIGH 道具，已覆盖观测到的失败模式）。
+- A（阈值）：maxPlayerDistFromBase 26→20 全关扫描**灾难性**——hard 聚合 2603→1159（−34.4pp），35 关
+  全负（S35 −65pp / S10 −63pp / S7 −48pp，连目标关 S8 都 −19pp）。原因：全局收紧让所有关卡在基地
+  威胁时过早回防，击杀输出崩盘。「阈值空档」是 S8 砖比 0.884 恰差 0.9 门槛的局部症状，全局改动必然
+  误伤 34 个无关关卡（§60/§133 的分组适配已验证此规律：分组收紧可行、全局收紧不可行）。
+- 三杠杆净效果：**仅 B 为稳健正杠杆**（S8 +8/+6pp、S7 额外 +6/+1pp、无回归）；C 在 B 之上无增量
+  （但保留——未来若 A 类分组收紧落地，C 是拾取劫持的最终解）；A 全局不可行（只可作分组参数）。
+
+**Implications:** S8 深潜收束：hard 45%→52%（B）+ chaos 44%→49%。「回防路由目标不可达」是 35 关共通
+潜伏缺陷，B 只是收窄版修复（minDist 远位门控，近基 byte-identical）；standability 回退全面启用留作
+后续全关验证。C/A 的旋钮与谓词保留在代码中（默认 0，byte-identical），记录为后续分组适配的候选。
+
+## 148. fieldRetreatPickupGate 扩展到 MID/LOW —— 实测证伪后回退（HIGH-only 定稿，§147 范围锁定）
+
+**Decision:** 审查建议的「补全拾取劫持防线」（把 §146 C 门控从 HIGH tier 扩展到 MID/LOW）经 120-seed
+权威口径 A/B 实测**证伪并回退**：门控保持 HIGH-only，MID/LOW 恢复 byte-identical，新增 scope-lock 测试
+（「MID tier is NOT gated」）+ 注释补全双难度证据。
+
+**Rationale:**
+- 实现：抽共享辅助函数 `retreatGateBlocksPickup`（think.ts，仅 PICKUP_HIGH 调用），PICKUP_MID/LOW
+  只加注释不加门控。A/B（C-EXT all-tiers vs B+C HIGH-only，同一 120-seed 语料，唯一变量 = MID/LOW
+  覆盖）：chaos 聚合 **−1.3pp**（S12 −9pp / S4 −9pp / S15 −7pp / S34 −7pp 真实回归）+ hard 逐关
+  −11pp 级下探（S10 −11pp / S7 −7pp / S11 −6pp / S14 −6pp，hard 聚合 ~flat 只因收益抵消）。
+- 机制解释：MID（star/tank/shield）是**永久 DPS 经济核心**，LOW 的 S5 机会拾取在高压下价值高于
+  「回防几步」——M13 条件下抑制它们损失 > 回防收益（chaos 敌人更强，星级升级更关键）。HIGH
+  （bomb/freeze/fence）是 S8 实测的劫持类别（瞬时解围道具），回防期可放弃。
+- 方法论：审查建议 → 实现 → A/B → 实测证伪 → 回退并锁定范围——与 §141-§145/§147 的诚实阴性
+  纪律一致；新增 scope-lock 测试防止未来维护者误扩展。
+
+**Implications:** §146 C 定稿为 HIGH-only 门控（默认 0，byte-identical）。「拾取劫持防线」概念上
+已完整：HIGH 被门控、MID/LOW 经实测不应门控——防线本身无需再扩展。C/A 的旋钮与谓词保留（默认 0），
+留作后续分组适配候选。

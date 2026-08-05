@@ -698,6 +698,43 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
 export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
   if (!self.hasBase) return self.playerCell()
   const def = { col: BASE_POS.col, row: BASE_POS.row - self.params.defenseRowOffset }
+  // §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12, 24-offset)
+  // 在全部 35 关上都是环砖格（§137 注释承认），A*（corridor 与 breakBrick）到
+  // 砖格目标均返回空路径 → 紧急回防/§113/§88 的回防路由全部失效，玩家只能靠
+  // directMove 盲目破砖（S8 实测：pocket→(12,23) corridor=0 breakBrick=0）。
+  // 旋钮开启时：若默认点不可站，在基地周边小盒（rows br-6..br+1, cols
+  // bc-3..bc+4）内扫最近可站格作为集合点——保证回防目标永远可达。
+  // 0 默认 OFF → byte-identical。
+  if (self.params.defensePosStandable > 0) {
+    // 仅远位（> defensePosStandableMinDist）触发：近基 idle 时保持旧行为
+    // （directMove 盲走到环砖前），爆炸半径最小化；S8 口袋回防（dist 25-32）
+    // 正是远位场景。playerCell 是 per-tick 缓存，无 RNG —— 安全。
+    const pc = self.playerCell()
+    const far =
+      Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row) >
+      self.params.defensePosStandableMinDist
+    if (!far) return def
+    const t = self.world.tileMap.get(def.col, def.row)
+    if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
+      const bc = BASE_POS.col
+      const br = BASE_POS.row
+      let best: Cell | null = null
+      let bestDist = Infinity
+      for (let r = br - 6; r <= br + 1; r++) {
+        for (let c = bc - 3; c <= bc + 4; c++) {
+          if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
+          const t2 = self.world.tileMap.get(c, r)
+          if (t2 === 'brick' || t2 === 'steel' || t2 === 'water' || t2 === 'base') continue
+          const d = Math.abs(c - bc) + Math.abs(r - br)
+          if (d < bestDist) {
+            bestDist = d
+            best = { col: c, row: r }
+          }
+        }
+      }
+      if (best) return best
+    }
+  }
   // §137: the default sits on the base ring (brick on all 35 stages) — when
   // the guard-anchor mechanism is ON, hold the computed guard cell instead.
   if (self.params.baseGuardAnchorMode > 0) {
@@ -791,6 +828,33 @@ export function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell
   }
   if (clear(enemy.col, enemy.row)) return true
   return tpCol >= 0 && clear(tpCol, tpRow)
+}
+
+/**
+ * §146 C: M13 field-pressure retreat predicate — the SINGLE source of truth
+ * for "should the player stop what it's doing and return to the defense
+ * position". Extracted from the M13 block below so PICKUP_HIGH (§146 C knob
+ * fieldRetreatPickupGate) can suppress the power-up divert under exactly the
+ * same conditions: a HIGH-tier item was hijacking the retreat (S8: pickup
+ * branch 800 > hunt 200, so M13 never got to run while a power-up sat within
+ * divert range). Pure read of params + cached per-tick state — no RNG, no
+ * mutation. `enemiesAlive` is the field-wide live count (Cluster C
+ * snapshot), not the nearby count.
+ */
+export function isFieldRetreatConditionImpl(
+  self: GodAIInput,
+  baseUnderThreat: boolean,
+  playerDistToBase: number,
+  enemiesAlive: number,
+): boolean {
+  return (
+    self.params.outnumberedFieldRetreat > 0 &&
+    self.world.rules.combatModel === 'pool' &&
+    !baseUnderThreat &&
+    !self.aggressive &&
+    playerDistToBase > self.params.outnumberedFieldDistCells &&
+    enemiesAlive >= self.params.outnumberedFieldEnemies
+  )
 }
 
 export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | null {
@@ -959,14 +1023,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // retreats instead of hunting. The 60-seed A/B empirically validated this
   // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
   // regression by reordering the blocks.
-  if (
-    self.params.outnumberedFieldRetreat > 0 &&
-    w.rules.combatModel === 'pool' &&
-    !baseUnderThreat &&
-    !self.aggressive &&
-    playerDistToBase > self.params.outnumberedFieldDistCells &&
-    enemies.length >= self.params.outnumberedFieldEnemies
-  ) {
+  if (isFieldRetreatConditionImpl(self, baseUnderThreat, playerDistToBase, enemies.length)) {
     return self.getDefaultDefensePosition()
   }
 

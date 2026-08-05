@@ -32,6 +32,8 @@ import {
 import { runChain, ACTION_WEIGHTS, type Candidate } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import { enemyCanShootBase, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
+import { iceGlideAdjust } from './Navigator'
+import { isFieldRetreatConditionImpl } from './StrategyPlanner'
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
@@ -366,6 +368,35 @@ const INTERCEPT_BASE: Candidate = {
   },
 }
 
+/**
+ * §146 C: fieldRetreatPickupGate — HIGH-tier pickup gate. When the M13
+ * field-pressure retreat condition holds (far from base + full enemy field,
+ * base NOT under threat), the HIGH-tier urgent pickup (bomb/freeze/fence)
+ * must NOT hijack the retreat: the pickup branch (800) evaluates before hunt
+ * (200), so M13's return to the defense position never runs while an item
+ * sits within divert range (S8: the player stayed in the dead-end pocket 43%
+ * of loss-ending time while the base fell). Same predicate as
+ * selectTargetUncached's M13 block (isFieldRetreatConditionImpl — single
+ * source of truth). The item may still be picked on the way back (S5) or
+ * after the retreat.
+ *
+ * SCOPE (A/B-measured 2026-08-05, §147): HIGH tier ONLY. Extending the gate
+ * to MID (star/tank/shield) + LOW (S5 opportunistic) was measured NET NEGATIVE
+ * — chaos aggregate −1.3pp (S12 −9pp / S4 −9pp / S15 −7pp / S34 −7pp) AND
+ * hard per-stage dips to −11pp (S10 −11pp / S7 −7pp / S11 −6pp / S14 −6pp,
+ * hard aggregate ~flat only because gains offset losses). MID items are the
+ * permanent-DPS economy core and LOW pickups out-value the retreat under
+ * pressure; suppressing them loses more than the retreat gains. HIGH tier
+ * (bomb/freeze/fence) is the S8-measured hijack class and stays gated.
+ * 0 = OFF (byte-identical).
+ */
+function retreatGateBlocksPickup(self: GodAIInput): boolean {
+  if (self.params.fieldRetreatPickupGate <= 0) return false
+  const pcC = self.playerCell()
+  const distC = Math.abs(pcC.col - BASE_POS.col) + Math.abs(pcC.row - BASE_POS.row)
+  return isFieldRetreatConditionImpl(self, self.isBaseUnderThreat(), distC, self._enemies.length)
+}
+
 /** pickupHigh(800) — §87/§88 HIGH-tier urgent pickup (bomb/freeze/fence ≤8格). */
 const PICKUP_HIGH: Candidate = {
   id: 'pickupHigh',
@@ -380,6 +411,11 @@ const PICKUP_HIGH: Candidate = {
     // after the aggressive section (see PICKUP_MID). When chokepointMode==0,
     // the original all-tiers-together order is kept (byte-identical to pre-§88).
     if (!self.aggressive) {
+      // §146 C (extended): M13-condition gate — no pickup tier may hijack
+      // the retreat. 0 = OFF (byte-identical).
+      if (retreatGateBlocksPickup(self)) {
+        return false
+      }
       // E1 / 道具经济 (plan 反证判据): dire-state item pickup — when the base
       // is swarmed (enemies within direItemApproachCells + >= direItemMinEnemies)
       // or the ring is damaged (<= direItemRingLow), a nearby bomb/freeze/fence/
@@ -564,6 +600,9 @@ const PICKUP_MID: Candidate = {
     // tier (bomb/freeze/fence) was already checked before the aggressive
     // section. Only runs when chokepointMode > 0; otherwise the single §87
     // branch above handled all tiers (byte-identical).
+    // §146 C: MID tier is deliberately NOT gated by fieldRetreatPickupGate —
+    // extending the gate to MID/LOW was A/B-measured net negative on chaos
+    // (§147, see retreatGateBlocksPickup scope note).
     if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
       const midTarget = self.findUrgentPowerUpTarget(pcx, pcy, 'midlow')
       if (midTarget) {
@@ -866,6 +905,9 @@ const PICKUP_LOW: Candidate = {
   weight: ACTION_WEIGHTS.pickupLow,
   evaluate(self, ctx) {
     const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    // §146 C: LOW tier is deliberately NOT gated by fieldRetreatPickupGate —
+    // extending the gate to MID/LOW was A/B-measured net negative on chaos
+    // (§147, see retreatGateBlocksPickup scope note).
     // Check for power-ups when no enemy is in line of fire. Previously this
     // only ran in aggressive mode (freeze/shield), wasting bomb/star pickups.
     // Now the AI opportunistically grabs power-ups when it's safe to divert.
@@ -1071,6 +1113,18 @@ const HUNT: Candidate = {
           self._moveDir = safeDir
         }
       }
+    }
+    // §145: 冰上滑行控制 — 转弯/反向前先松键（null），滑行以 0.05 自然衰减，
+    // 不倒退不过冲（冰上反向 = 真倒车 → 倒过头 → 格边界抖动 → 方向振荡，
+    // S24 seed 23 t4506-4511 实测）。旋钮默认 0 → byte-identical。
+    if (self.params.iceGlideControl > 0) {
+      self._moveDir = iceGlideAdjust(
+        self._moveDir,
+        w.isTankOnIce(p),
+        p.vx,
+        p.vy,
+        self.params.iceGlideMinSpeed,
+      )
     }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.
