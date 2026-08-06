@@ -214,6 +214,18 @@ export function followPathImpl(self: GodAIInput): Direction | null {
       }
     }
 
+    // §162: path fully blocked — try BREAKABLE directions (same rationale
+    // as directMoveImpl: sealed spawn pockets never get broken otherwise).
+    if (self.params.navBreakStuck > 0) {
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (d === opposite(nextDir)) continue
+        if (self.canMoveOrBreak(p, d)) {
+          return d
+        }
+      }
+    }
+
     // Fully stuck — re-plan next tick.
     self.path = []
     self.replanTimer = 0
@@ -372,6 +384,22 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
     const d = ALL_DIRS[di]
     if (primaryOpposite !== null && d === primaryOpposite) continue
     if (self.canMoveDir(p, d)) return d
+  }
+
+  // §162: still stuck — try BREAKABLE directions (canMoveOrBreak). The
+  // Battlement spawn pocket is sealed by wide-box protection bricks: from
+  // the cul-de-sac the preferred dirs (up/right toward the enemy) are all
+  // unbreakable, and the passable fallback only ever returns the reverse
+  // (back into the pocket), so the player oscillates at spawn for 17-30s
+  // instead of breaking the thin side wall the user expects. Passable first
+  // (the loop above), breakable second — behavior identical when
+  // navBreakStuck=0 or when a passable direction exists.
+  if (self.params.navBreakStuck > 0) {
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
+      if (primaryOpposite !== null && d === primaryOpposite) continue
+      if (self.canMoveOrBreak(p, d)) return d
+    }
   }
 
   return null

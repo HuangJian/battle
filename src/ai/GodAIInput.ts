@@ -337,6 +337,12 @@ export class GodAIInput implements InputLike {
     suicideReturn: 0,
     // §139: 火力死区解除候选提交计数（纯观察）。
     firingLane: 0,
+    // §161: 开路策略候选提交计数（纯观察）。
+    carvePath: 0,
+    // §163: 中路防守候选提交计数（纯观察）。
+    midLaneDefense: 0,
+    // §164: 中路列旁主动驻守候选提交计数（纯观察）。
+    midLaneHold: 0,
   }
 
   /**
@@ -553,6 +559,60 @@ export class GodAIInput implements InputLike {
   _firingLaneTick = 0
 
   /**
+   * §161 / 开路策略 (carve path): cross-tick pure-memo caches (same
+   * discipline as the §127 replan cache — keyed on World inputs, terrain
+   * revision bumps invalidation). All reset per stage.
+   */
+  /** Carve target post (standable base-guard anchor), computed once per stage. */
+  _carvePost: Cell | null = null
+  _carvePostComputed = false
+  /** Per-revision carve cost array (ring + base-column bricks = 1e9). */
+  _carveCosts: Float64Array | null = null
+  _carveCostsRev = -1
+  /** Cached carve path query (from cell, to cell, revision). */
+  _carvePathCache: Direction[] | null = null
+  _carvePathCacheValid = false
+  _carvePathCorridor = false
+  _carvePathFromCol = -1
+  _carvePathFromRow = -1
+  _carvePathToCol = -1
+  _carvePathToRow = -1
+  /**
+   * §162: carve-dig session (nav-stuck escape). Once started, the HUNT
+   * candidate follows the exact-ring-safe dig path toward the escape target
+   * until the pocket is exited (path becomes corridor / empty) or the
+   * session times out (carveDigMaxTicks). Pure World-driven state — no RNG.
+   */
+  _carveDigActive = false
+  _carveDigTicks = 0
+  _carveDigTarget: Cell | null = null
+  /**
+   * §162: pixel-level stuck detector — counts ticks since the player last
+   * moved > `carveDigNetEscape` px AWAY from an anchor point (net
+   * displacement, not per-tick). A free player accumulates ~0.7px/tick and
+   * breaks the anchor within ~20 ticks; a wall-blocked player oscillating in
+   * a sealed pocket stays within a few px and trips after
+   * carveDigBlockTicks. Tracks in endFrame() so it runs EVERY tick
+   * regardless of which candidate wins; the cell-level `_navStuckTicks`
+   * counter never fires for pocket oscillation (HUNT isn't evaluated every
+   * tick, and the coordinate bounces across cell lines without escaping).
+   * Pure World read.
+   */
+  _digBlockTicks = 0
+  _digAnchorX = 0
+  _digAnchorY = 0
+  _carvePathRev = -1
+  _carvePathTimer = 0
+  /**
+   * §164: per-revision cached mid-lane parry hold cell (findParryHoldCellImpl)
+   * + whether the base column is open to the base (laneColumnOpenToBaseImpl
+   * — cached together, both pure terrain functions of tileMap.revision).
+   * Same strict-pure-memo discipline as _carveCosts._rev.
+   */
+  _parryHoldRev = -1
+  _parryHoldCell: Cell | null = null
+
+  /**
    * M3 (plan/God-AI-Redesign-v2 §4.2b): 敌情感知模型状态。Per-tick EMA of
    * observable enemy behavior (fire accuracy / base approach / alignment /
    * turn discipline) → `estimatedLevel` [0,1] + survival pressure inputs.
@@ -645,6 +705,24 @@ export class GodAIInput implements InputLike {
     this._baseGuardAnchor = null
     this._firingLaneCell = null
     this._firingLaneTick = 0
+    // §161: invalidate the carve-path caches on stage reset (new terrain).
+    this._carvePost = null
+    this._carvePostComputed = false
+    this._carveCosts = null
+    this._carveCostsRev = -1
+    this._carvePathCache = null
+    this._carvePathCacheValid = false
+    this._carvePathTimer = 0
+    // §164: invalidate the mid-lane parry-hold cache on stage reset.
+    this._parryHoldRev = -1
+    this._parryHoldCell = null
+    // §162: reset the carve-dig session (new stage = new pocket).
+    this._carveDigActive = false
+    this._carveDigTicks = 0
+    this._carveDigTarget = null
+    this._digBlockTicks = 0
+    this._digAnchorX = 0
+    this._digAnchorY = 0
     // M3: reset the EnemyModel per stage (same cross-tick-cache discipline as
     // _navCache / _campTicks — the model must not carry knowledge across
     // stages, and the per-tank trackers reference dead tank ids otherwise).
@@ -723,6 +801,38 @@ export class GodAIInput implements InputLike {
     this._canMoveComputed = 0
     this._scanCacheMask = 0 // §123
     this._selTargetValid = false // §125
+    // §162: pixel-level stuck detector — runs every tick (regardless of
+    // which candidate wins think() next tick). Net-displacement from an
+    // anchor: a free player (> carveDigNetEscape px from anchor) re-anchors
+    // and resets the counter; a wall-blocked pocket oscillater stays near
+    // the anchor and trips after carveDigBlockTicks. SHIPPED default
+    // (navBreakStuck=1); 0 ⇒ the dig never engages ⇒ byte-identical.
+    if (this.params.navBreakStuck > 0) {
+      const p = this.world.player
+      // Skip while spawning (spawnTimer > 0 locks movement — a spawn wait is
+      // NOT a pocket lock; counting it would trigger a premature dig every
+      // stage start, abandoning the base defense for a fresh pocket dig).
+      if (p && p.alive && !(p.spawnTimer > 0)) {
+        const dx = p.x - this._digAnchorX
+        const dy = p.y - this._digAnchorY
+        if (Math.abs(dx) + Math.abs(dy) > this.params.carveDigNetEscape) {
+          // Real movement — re-anchor.
+          this._digAnchorX = p.x
+          this._digAnchorY = p.y
+          this._digBlockTicks = 0
+        } else {
+          this._digBlockTicks++
+        }
+      } else {
+        // Re-anchor on spawn / death so the counter starts fresh when play
+        // resumes (otherwise the pre-spawn idle would carry over).
+        this._digBlockTicks = 0
+        if (p && p.alive) {
+          this._digAnchorX = p.x
+          this._digAnchorY = p.y
+        }
+      }
+    }
   }
 
   // ================================================================

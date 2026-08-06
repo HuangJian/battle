@@ -12,7 +12,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Cell } from '../../utils/pathfind'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL, DIR_VECTORS, GRID } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS, GRID, BULLET, TANK } from '../../constants'
 import { ALL_DIRS } from '../../utils/helpers'
 import {
   scanAheadImpl,
@@ -37,11 +37,25 @@ import {
   findSuicideTargetImpl,
   anyThreatPointEnemyImpl,
 } from './SuicideReturn'
-import { runChain, ACTION_WEIGHTS, type Candidate } from './DecisionCore'
+import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import { enemyCanShootBase, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
 import { iceGlideAdjust } from './Navigator'
 import { isFieldRetreatConditionImpl } from './StrategyPlanner'
+import {
+  carvePostImpl,
+  carveThreatEnemyImpl,
+  carvePathInfoCached,
+  carveFireAheadImpl,
+  findCarveEscapeImpl,
+  findLaneDefensePointImpl,
+  laneThreatImpl,
+  laneShellInColumnImpl,
+  laneShellAboveImpl,
+  laneColumnOpenToBaseImpl,
+  findParryHoldCellImpl,
+  enemyNearLaneImpl,
+} from './PathCarve'
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
@@ -854,6 +868,144 @@ const DEFENSE_INTERCEPT: Candidate = {
   },
 }
 
+/**
+ * midLaneDefense(545) — §163 / 中路防守 (user request 2026-08-06, replay
+ * hard-s34-base-l2-t69-seed2050197249 Problem 2).
+ *
+ * 背景：基地所在列（BASE_POS.col..+1 正上方）多数地图没有钢铁防护，敌人只要
+ * 进入该列就能沿列向下流弹凿穿砖墙直逼老鹰（回放：baseCol 20→0，28 秒凿穿），
+ * 而玩家往往在边路/出生点游荡击杀。
+ *
+ * 行为（全参数门控，midLaneDefense=0 默认 OFF → byte-identical）：
+ *   1. 锚定：玩家到基地列上方的可站防守点（findLaneDefensePointImpl，开路
+ *      A* 挖过去——出生点被封时同 §162 carve-dig 挖通）。
+ *   2. 持枪（midLaneHoldRange 内）：面向列上方停射——scan 到敌人/敌弹就开火
+ *      对消（shouldFireInDir 含 T5 拦截），不再追击边路。
+ *   3. 牵绳（midLaneMaxDist）：近基才锚定，超距即回撤，随时准备回防；
+ *   4. 中路无威胁且玩家已在 leash 内 → return false（放行 hunt/engage）。
+ *
+ * 权重 545：defenseIntercept(550) 之下（已上车道的敌人由拦截一枪解除）、
+ * closePickup(540) 之上（防守不被顺手拾取打断）。
+ */
+const MID_LANE_DEFENSE: Candidate = {
+  id: 'midLaneDefense',
+  weight: ACTION_WEIGHTS.midLaneDefense,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    const prm = self.params
+    if (prm.midLaneDefense <= 0 || !self.hasBase || self.aggressive) return false
+    const pc = self.playerCell()
+    // The ONLY trigger is a real enemy bullet in the base column heading
+    // down (bullet-bullet collision cancels it 对消). Enemy presence/facing
+    // signals were A/B-measured catastrophic (14-35% of ticks on most maps
+    // → player statue, 29/35 worse): enemies merely PASSING the base column
+    // is not a threat. Bullets are the actual carve moment — rare, precise.
+    if (!laneThreatImpl(self)) return false
+
+    // ---- 换持枪判定 (Tuning round 3): the hold does NOT require being at
+    // the lane defense point. 对消 (bullet-bullet cancellation) needs the
+    // player's UPWARD bullet to physically overlap the shell's line: both
+    // bullets are 6px wide, so |bx − pcx| < 6 or they never meet. Standing
+    // still in the 32px column matches a random shell only ~37% of the time
+    // — so the player must WALK the column, searching for a shell line to
+    // lock. When a cancellable shell is in the column (laneThreatImpl), the
+    // player: (a) if aligned (|bx−pcx| < 6) → hold & fire UP to cancel;
+    // (b) if a shell line is LEFT/RIGHT of the player within the column →
+    // step sideways to acquire it, firing meanwhile; (c) else navigate to
+    // the lane point and hold. This is the actual Battlement-independent
+    // mechanism — the old point-only hold could never fire on maps where
+    // the point sits inside a sealed fortress (Battlement (12,21)).
+    // --- 换持枪判定 round 3: acquire the shell's bullet line. ---
+    const shellOff = laneShellAboveImpl(self, pcx, pcy)
+    if (shellOff !== null) {
+      const absOff = Math.abs(shellOff)
+      if (absOff < BULLET) {
+        // Aligned with a coming shell — hold in place, face up, fire to
+        // cancel. The shell is the target; fire whenever the gun is ready.
+        const laneDir: Direction = 'up'
+        self._moveDir = p.dir === laneDir ? null : laneDir
+        self._fire = !onCooldown
+        self.branchCounts.midLaneDefense++
+        self._lastBranch = 'midLaneDefense'
+        return true
+      }
+      if (absOff <= TANK) {
+        // A shell line is one side-step away — acquire it: step toward the
+        // offset. NOTE: _fire stays FALSE here — the engine fires along
+        // tank.dir (= the step direction), so an up-lane suppression shot is
+        // impossible while stepping sideways; firing would waste the bullet
+        // cap on a horizontal shot. Pure reposition; the aligned-hold branch
+        // above does the actual 对消. Keeps the player hunting the shell
+        // line instead of standing at the point where a random shell matches
+        // only ~37% of the time.
+        const stepDir: Direction = shellOff > 0 ? 'right' : 'left'
+        self._moveDir = stepDir
+        self._fire = false
+        self.branchCounts.midLaneDefense++
+        self._lastBranch = 'midLaneDefense'
+        return true
+      }
+      // Shell line too far sideways to acquire by stepping — fall through to
+      // the lane point, which is at least inside the column.
+    }
+
+    const point = findLaneDefensePointImpl(self, pc)
+    if (!point) return false
+    const distToPoint = Math.abs(point.col - pc.col) + Math.abs(point.row - pc.row)
+    const inHold = distToPoint <= prm.midLaneHoldRange
+
+    // Leash: only engage when the player is NEAR the lane point. Pulling
+    // from across the map is a cross-map tug-of-war with HUNT (§163 A/B:
+    // Battlement pocket escape → lane point inside the sealed pocket is an
+    // 8-step dig the player just escaped — dragging it back lost 20→16
+    // kills). The user spec: 不能偏离中路防守点太远 (<3 cells).
+    if (distToPoint > prm.midLaneMaxDist) return false
+
+    // 2. In hold range → stand and fire up the lane. Fire when a shell is
+    //    ANYWHERE in the base column (laneShellInColumnImpl — the 128px T5
+    //    intercept range can't see shells 16 cells up the column), or when
+    //    a normal enemy/target is in the line (shouldFireInDir).
+    if (inHold) {
+      const laneDir: Direction = 'up'
+      self._moveDir = p.dir === laneDir ? null : laneDir
+      self._fire =
+        !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, laneDir))
+      self.branchCounts.midLaneDefense++
+      self._lastBranch = 'midLaneDefense'
+      return true
+    }
+
+    // 1/3. Out of hold range but within the leash → navigate to the point.
+    //      Require the point be corridor-reachable or a SHORT dig (≤3
+    //      cells) — a long dig through the sealed pocket is self-defeating
+    //      (the player already escaped it); let HUNT fight the field and the
+    //      §162 carve-dig handle pocket exits.
+    const info = carvePathInfoCached(self, pc, point)
+    const dig = info.path
+    if (dig && dig.length > 0) {
+      if (!info.corridor && dig.length > prm.midLaneMaxDigCells) return false
+      const d = dig[0]
+      self._moveDir = d
+      if (self.canMoveDir(p, d)) {
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, d)
+      } else if (carveFireAheadImpl(self, pcx, pcy, d)) {
+        self._fire = !onCooldown
+      } else {
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, d)
+      }
+      self.branchCounts.midLaneDefense++
+      self._lastBranch = 'midLaneDefense'
+      return true
+    }
+    // No carve path (rare — point unreachable) — plain navigation.
+    self._moveDir = self.navigateTowards(point)
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+    self.branchCounts.midLaneDefense++
+    self._lastBranch = 'midLaneDefense'
+    return true
+  },
+}
+
 /** engage(500) — T2a: stop-and-aim when an enemy is in the line of fire. */
 const ENGAGE: Candidate = {
   id: 'engage',
@@ -1109,6 +1261,78 @@ const HUNT: Candidate = {
     // in the navigate branch for too long (pursuit loop with a faster enemy),
     // override the target to the map center.
     const pc = self.playerCell()
+    // §162: carve-dig START — the player is pixel-blocked (endFrame stuck
+    // detector: moved < carveDigBlockThreshold px for carveDigBlockTicks
+    // ticks, i.e. wall-blocked / sealed-pocket oscillation). The cell-level
+    // navStuck counter can NOT detect this: playerCell() is the tank CENTER
+    // and a pocket bounce of 128↔136px flips it 8↔9, resetting the counter
+    // every few ticks. Runs whenever HUNT evaluates; only starts when a
+    // NON-corridor carve-safe dig path to an escape target exists.
+    const digStartStuck =
+      self.params.navBreakStuck > 0 &&
+      !self._carveDigActive &&
+      self._digBlockTicks >= self.params.carveDigBlockTicks
+    if (digStartStuck) {
+      const escape = findCarveEscapeImpl(self, pc)
+      if (escape) {
+        const info = carvePathInfoCached(self, pc, escape)
+        if (info.path && info.path.length > 0 && !info.corridor) {
+          self._carveDigActive = true
+          self._carveDigTicks = 0
+          self._carveDigTarget = escape
+          self._moveDir = info.path[0]
+          self._fire = !onCooldown && carveFireAheadImpl(self, pcx, pcy, info.path[0])
+          self.branchCounts.navigate++
+          self._lastBranch = 'navigate'
+          return true
+        }
+      }
+    }
+    // §162: active carve-dig session — persist across navStuck resets (a
+    // fresh cell clears _navStuckTicks, which would otherwise kill a
+    // multi-cell dig). Follow the exact-ring-safe carve path toward the
+    // escape target until the pocket is exited (corridor opens / path
+    // empties) or the session times out.
+    if (self._carveDigActive && self.params.navBreakStuck > 0) {
+      self._carveDigTicks++
+      const target = self._carveDigTarget
+      const info = target ? carvePathInfoCached(self, pc, target) : null
+      const dig = info && info.path
+      const done =
+        !dig ||
+        dig.length === 0 ||
+        (info !== null && info.corridor) ||
+        self._carveDigTicks > self.params.carveDigMaxTicks
+      if (done) {
+        // Dig complete (smooth route now open) / unreachable / timed out —
+        // fall through to normal HUNT.
+        self._carveDigActive = false
+        self._carveDigTicks = 0
+        self._carveDigTarget = null
+      } else {
+        const d = dig[0]
+        self._moveDir = d
+        if (self.canMoveDir(p, d)) {
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, d)
+        } else if (carveFireAheadImpl(self, pcx, pcy, d)) {
+          // Wall ahead is carve-safe (exact ring R5/R6 re-verified) — fire
+          // to break it. Bypasses shouldFireBreakThrough's wide-box gate.
+          self._fire = !onCooldown
+        } else {
+          // Path step became unbreakable (terrain changed) — abandon the
+          // dig and fall through to normal HUNT.
+          self._carveDigActive = false
+          self._carveDigTicks = 0
+          self._carveDigTarget = null
+          self._moveDir = null
+        }
+        if (self._carveDigActive) {
+          self.branchCounts.navigate++
+          self._lastBranch = 'navigate'
+          return true
+        }
+      }
+    }
     if (
       self._navStuckCell &&
       self._navStuckCell.col === pc.col &&
@@ -1189,6 +1413,17 @@ const HUNT: Candidate = {
           // All preferred directions blocked — try any open direction.
           for (const d of ALL_DIRS) {
             if (self.canMoveDir(p, d)) {
+              self._moveDir = d
+              break
+            }
+          }
+        }
+        // §162: still fully walled in — try BREAKABLE directions (sealed spawn
+        // pockets never get broken by the passable-only fallback; the break-
+        // through fire below clears the wall once _moveDir faces it).
+        if (!self._moveDir && self.params.navBreakStuck > 0) {
+          for (const d of ALL_DIRS) {
+            if (self.canMoveOrBreak(p, d)) {
               self._moveDir = d
               break
             }
@@ -1615,6 +1850,154 @@ const FIRING_LANE: Candidate = {
   },
 }
 
+/**
+ * §161 carve fire: when the next path step is blocked by a plain brick (the
+ * dig path's current frontier), fire to break it — NEVER at steel (R5, even
+ * when the player could pierce) and never at ring bricks (scanAhead's
+ * baseWall flag, which under the hard default baseWallExactRing=1 is the
+ * exact ring). Moving freely → fire at enemies in the facing direction
+ * only (suppression, allowWallFire=false — side walls are not carved).
+ */
+function carveFire(self: GodAIInput, ctx: DecisionContext, dir: Direction | null): void {
+  const { p, pcx, pcy, onCooldown } = ctx
+  if (dir && !self.canMoveDir(p, dir)) {
+    const bs = scanAheadImpl(self, pcx, pcy, dir)
+    if (bs.wall && !bs.baseWall && !bs.baseSteel && !bs.steel) {
+      self._fire = !onCooldown
+      return
+    }
+  }
+  self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dir ?? p.dir, false)
+}
+
+/**
+ * carvePath(250) — §161 / 开路策略 (carve path, user request 2026-08-06).
+ *
+ * R1/R2: when the spawn point is trapped in a brick maze and the standable
+ * defense post (base guard anchor) is NOT smoothly reachable, shoot through
+ * LOWER-HALF brick walls to carve a through-route to the post. R4: if a
+ * smooth route exists, no carving. R5: never break steel (even when the
+ * player could pierce it). R6: never break base-ring bricks; break at most
+ * carveMaxBaseColumn bricks in the base's own columns when no alternative
+ * exists. R3: once at the post with nothing fightable, carve toward the
+ * enemy most likely to threaten the base. Data-driven — no stage names.
+ * Runs only when carvePathMode > 0 (default OFF, byte-identical).
+ */
+const CARVE_PATH: Candidate = {
+  id: 'carvePath',
+  weight: ACTION_WEIGHTS.carvePath,
+  evaluate(self, ctx) {
+    const { w } = ctx
+    const prm = self.params
+    if (prm.carvePathMode <= 0 || self.aggressive || !self.hasBase) return false
+    const pc = self.playerCell()
+    // Lower-half gate (R1: 下半区开路).
+    if (pc.row < prm.carveLowerRow) return false
+    // Base under threat → the defense candidates / hunt's defense return
+    // handle it; the carve is a calm-state reposition.
+    if (self.isBaseUnderThreat()) return false
+
+    const post = carvePostImpl(self)
+    if (!post) return false
+    const distToPost = Math.abs(pc.col - post.col) + Math.abs(pc.row - post.row)
+
+    // ---- Mode B (R3): at the post, nothing fightable → dig toward the
+    // most base-threatening enemy. ----
+    if (distToPost <= prm.carveAtPostCells) {
+      // Don't steal a close chase from hunt — a nearby enemy is faster
+      // dealt with directly.
+      const list = self._enemies.length > 0 ? self._enemies : w.tanks
+      let closeEnemy = false
+      for (let li = 0; li < list.length; li++) {
+        const t = list[li]
+        if (!t.alive || t.spawnTimer > 0) continue
+        const tc = self.tankCell(t)
+        if (Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row) <= prm.carveChaseCells) {
+          closeEnemy = true
+          break
+        }
+      }
+      if (closeEnemy) return false
+      const threat = carveThreatEnemyImpl(self)
+      if (!threat) return false
+      const info = carvePathInfoCached(self, pc, threat)
+      if (!info.path || info.path.length === 0) return false
+      const dir = info.path[0]
+      self._moveDir = dir
+      carveFire(self, ctx, dir)
+      self.branchCounts.carvePath++
+      self._lastBranch = 'carvePath'
+      return true
+    }
+
+    // ---- Mode A (R1/R2/R4): no smooth route to the post → carve. ----
+    const info = carvePathInfoCached(self, pc, post)
+    if (!info.path || info.path.length === 0) return false
+    if (info.corridor) return false // R4: 通畅路线 → 不打砖开路
+    const dir = info.path[0]
+    self._moveDir = dir
+    carveFire(self, ctx, dir)
+    self.branchCounts.carvePath++
+    self._lastBranch = 'carvePath'
+    return true
+  },
+}
+
+/**
+ * §164 中路列旁主动驻守 (proactive mid-lane flank hold) — 用户需求
+ * 2026-08-06：§162 出袋后玩家优先走中路走廊（而非左侧），在列旁持枪对消。
+ * 基地列无钢防时，顶部广场是基地凿穿弹的必经之路：本候选在玩家处于地图
+ * 上半区（row ≤ midLaneHoldMaxRow）且中路繁忙（列内有敌弹，或敌人临近基地
+ * 列）时，导航到/驻守基地列旁的对消格（pcx 在列 x 范围 ±BULLET 内、可站、
+ * 走廊可达——findParryHoldCellImpl），面朝上开火对消。中路无威胁时
+ * return false 放行 hunt/engage（击杀边路游荡敌人）；已在对消格且无威胁时
+ * 同样放行（不钉子户）。
+ *
+ * 权重 220：carvePath(250) 之下、hunt(200) 之上 — 覆盖 hunt 的盲走，低于
+ * 一切战斗/道具/瞭望格/开路候选；DODGE/ENGAGE/DEFENSE_INTERCEPT 全部高于
+ * 它，危险时正常接战。默认 midLaneHold=0 OFF（byte-identical）。
+ */
+const MID_LANE_HOLD: Candidate = {
+  id: 'midLaneHold',
+  weight: ACTION_WEIGHTS.midLaneHold,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    const prm = self.params
+    if (prm.midLaneHold <= 0 || !self.hasBase || self.aggressive) return false
+    const pc = self.playerCell()
+    // 上半区才锚定 — 永不在底部迷宫把玩家拽去中路（§162 出袋/§163 归档教训）。
+    if (pc.row > prm.midLaneHoldMaxRow) return false
+    // 列内有钢/水 → 敌弹到不了基地，对消无意义（S13 式钢防关直接跳过）。
+    if (!laneColumnOpenToBaseImpl(self)) return false
+    const hold = findParryHoldCellImpl(self, pc)
+    if (!hold) return false
+    const dist = Math.abs(hold.col - pc.col) + Math.abs(hold.row - pc.row)
+    // 中路繁忙：列内有向下敌弹（§163 laneShellInColumnImpl — 真实凿穿信号），
+    // 或敌人临近基地列（凿墙者即将到达）。两者皆无 = 中路无威胁 → 放行。
+    const busy = laneShellInColumnImpl(self) || enemyNearLaneImpl(self, prm.midLaneHoldEnemyDist)
+    if (dist === 0) {
+      // 已在对消格上：无威胁则放行 hunt（击杀边路），有威胁则驻守向上对消。
+      // 注意只允许 dist===0 — dist≤range(1) 时玩家还在邻格，强制面朝上会
+      // 冻结在 (11,6) 永远进不了 (12,6)（§164 探针实测 stageclear→gameover）。
+      if (!busy) return false
+      const dir: Direction = 'up'
+      self._moveDir = p.dir === dir ? null : dir
+      self._fire =
+        !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, dir))
+      self.branchCounts.midLaneHold++
+      self._lastBranch = 'midLaneHold'
+      return true
+    }
+    if (!busy) return false
+    // 前往对消格（findParryHoldCellImpl 已保证走廊可达 — 顶部广场不打砖）。
+    self._moveDir = self.navigateTowards(hold)
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+    self.branchCounts.midLaneHold++
+    self._lastBranch = 'midLaneHold'
+    return true
+  },
+}
+
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Exported for the M1 invariant test (tests/decision-core.test.ts): a reorder
  * without a matching ACTION_WEIGHTS update is a behavior change. */
@@ -1626,11 +2009,17 @@ export const CANDIDATES: Candidate[] = [
   AGGRO,
   PICKUP_MID,
   DEFENSE_INTERCEPT,
+  // §163: 中路防守 — defenseIntercept(550) 之下、closePickup(540) 之上。
+  MID_LANE_DEFENSE,
   // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
   CLOSE_PICKUP,
   ENGAGE,
   PICKUP_LOW,
   FIRING_LANE,
+  // §161: 开路策略 — firingLane(300) 之下、hunt(200) 之上。
+  CARVE_PATH,
+  // §164: 中路列旁主动驻守 — carvePath(250) 之下、hunt(200) 之上。
+  MID_LANE_HOLD,
   HUNT,
   SURVIVE,
 ]

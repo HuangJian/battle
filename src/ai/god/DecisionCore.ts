@@ -72,6 +72,21 @@ export type ActionId =
   // Weight 540 > engage(500)、< defenseIntercept(550)。低于防守拦截，确保
   // 敌人接近基地车道时防守优先。默认通过 closePickupRange>0 激活。
   | 'closePickup'
+  // §161 / 开路策略 (carve path): 出生点困在砖墙迷宫时，在下半区射击砖墙
+  // 开出一条通途到驻守点（R1/R2）；驻守点无仗可打时开路到最可能威胁基地的
+  // 敌人（R3）。Weight 250 > hunt(200)、< firingLane(300) — 覆盖 hunt 的
+  // 盲走，但低于一切战斗/道具/瞭望格候选。默认 carvePathMode=0 OFF。
+  | 'carvePath'
+  // §163 / 中路防守 (mid-lane defense, user request 2026-08-06): 基地所在列
+  // 无钢防时，玩家锚定基地列上方的防守点（开路挖过去），中路有威胁时停射
+  // 向上对消炮弹/击杀凿墙敌人；中路无威胁时也保持距防守点 ≤ leash 格，随时
+  // 回防。Weight 545 < defenseIntercept(550)（拦截优先）、> closePickup(540)。
+  | 'midLaneDefense'
+  // §164 / 中路列旁主动驻守 (proactive mid-lane flank hold, user request
+  // 2026-08-06): 出袋后在顶部广场时优先驻守基地列旁的对消格（列无钢防且
+  // 中路繁忙时），而非长期驻守边路出生点。Weight 220 > hunt(200)、< carvePath(250)
+  // — 覆盖 hunt 的盲走，但低于一切战斗/道具/瞭望格/开路候选。默认 midLaneHold=0 OFF。
+  | 'midLaneHold'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -100,11 +115,18 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   // §139 / 方向 A: 火力死区解除 — 覆盖 hunt(200) 的盲走，让死区玩家去有射界
   // 的瞭望格重新接战。默认 0（mode 门控），不激活时字节持平。
   firingLane: 300,
+  // §161 / 开路策略: 低于 firingLane(300)、高于 hunt(200)。
+  carvePath: 250,
   closePickup: 540,
   hunt: 200,
   survive: 0,
   suicideReturn: 1100,
   defenseIntercept: 550,
+  // §163 / 中路防守: defenseIntercept(550) 之下、closePickup(540) 之上 —
+  // 拦截候选优先（已上车道的敌人由拦截一枪解除），中路锚定次之。
+  midLaneDefense: 545,
+  // §164 / 中路列旁主动驻守: carvePath(250) 之下、hunt(200) 之上。
+  midLaneHold: 220,
 }
 
 /**

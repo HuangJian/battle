@@ -2038,3 +2038,66 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **护航（moveDir === fwd）不变**：垂直无空间转护航时两轴重合，只打 fwd（原行为）。
 
 **Implications:** 仅改 `updateGuardYield` 的开火判定顺序——不改变避让几何、不改变自主阶段行为。确定性不变（aimError=0 → 分支判定纯由 World 状态决定，RNG 惰性）。单测 +3（`tests/guard-god-ai.test.ts` §160 组）：腾挪轴优先（侧翼与车道双敌人时子弹打侧翼且炮管=移动方向）、车道回退（侧翼无敌人时仍打车道且移动仍让开）、砖墙不压车道敌人（侧翼只有砖+车道有敌人时打车道）。
+
+## 161. §161 开路策略（carve path）——实现完整、hard 全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，Stage 33 Battlement 过关思路）
+
+**Decision:** 新增泛化的「开路策略」（无关卡名，数据驱动，`carvePathMode` 门控，默认 0 = OFF → byte-identical）：
+- **Mode A（R1/R2）**：玩家在下半区（`carveLowerRow=13`）且基地无威胁时，若到防守驻点（`computeBaseGuardAnchorImpl`/默认防守位）无**顺畅**路线（无 corridor 路径 → R4），则用破砖 A*（`findCarvePathImpl`）挖一条通途到驻点——优先 0 破坏（基地环/基地列砖记 1e9 代价绕行），必要时最多破 `carveMaxBaseColumn=1` 个基地列砖（R6）；
+- **Mode B（R3）**：已在驻点（`carveAtPostCells=2`）且 `carveChaseCells=5` 内无敌人时，向 `carveThreatDistCells=8` 内最可能威胁基地的敌人（`enemyCanShootBase`/`enemyCanBreachRing` 优先）挖路；
+- **硬约束（R5/R6）**：`pathCarveSafeImpl` 逐足迹校验——钢、基地环（精确 8 格环，`isCarveRingBrickImpl`）永远不打；基地列（BASE_POS.col..+1、环以上）最多 1 格。
+- 权重 250（firingLane 300 之下、hunt 200 之上）；缓存按（from, to, tileMap.revision）+ `carveReplanTicks=240` 定时器，纯 World 读、无 RNG → 默认 OFF 时逐字节不变。
+
+**Rationale（为什么实测净零、Battlement 反而微降）：**
+- **测量（只测 hard，按要求）**：全 35 关 60 种子配对 A/B：75% → 75%（p=0.987，0 关 >5pp，verdict「no significant difference — do not ship」）；Battlement（= STAGES[33]，CLI 1-based 为 S34，`--stages 34`；用户称「Stage 33」）120 种子配对 A/B：10% → 10%（p=0.80）。10 种子诊断 0/10 vs 2/10 与之一致（噪声内）。
+- **根因 1（几何不可行）**：Battlement 出生点口袋被要塞封锁——口袋到驻点的所有路线都穿过基地环/基地列足迹，R6 使挖路**不可行**，直到敌人自己破开要塞（首个可提交 tick ≈2250，此时基地已濒死）。用户规则集内部自洽但在这个具体关卡上无法兑现「挖出通途」。
+- **根因 2（执行停滞）**：破砖前进要求下一个 2×2 足迹**完全清空**，但中心线开火只破中心列——玩家会在一个格子停 1500+ tick 反复提交（seed 1：tick 2400-3900 钉在 (15,20)）而挖不通。
+- **根因 3（机会成本）**：seed 1 中 carvePath 占用 2331 tick，挤占击杀与冰冻窗口 aggressive 输出；OFF 臂守住口袋（col-10 走廊 LOS 射界）反而通关——挖出去是错误策略。
+- **结论**：策略实现完整、泛化、有 17 条单测锁定（含 Battlement 不变量：口袋→驻点无安全路线时正确拒绝），但 hard 实测不改变胜率 → 按仓库惯例（§145/§147/§148 诚实阴性归档）记录，旋钮保持默认 OFF；`carvePathMode=1` 留作后续调参（如放宽 R6、修复 2×2 足迹破砖执行）的 A/B 基线。
+
+**Implications:** 无默认行为变化（OFF byte-identical，God-AI 门禁不受影响）。新增文件 `src/ai/god/PathCarve.ts`（7 个纯函数）+ 5 个新参数 + CARVE_PATH 候选 + `branchCounts.carvePath`。评审修正：`pathCarveSafeImpl` 按连续 2×2 足迹去重计数——同一基地列砖出现在两个相邻足迹时只计一次，使 R6 的「每条路径最多 1 格」精确兑现（否则合法的单格破路会被误拒）。单测 18 条（`tests/battlement-carve-path.test.ts`）：R1/R2/R3/R4/R5/R6、环/列谓词、代价缓存、Battlement 不变量（非退化搜索 + 环砖阻断即拒绝）、基地列计数去重、Mode A/B 端到端、确定性。
+
+## 162. §162 nav 卡死破局（navBreakStuck carve-dig escape）——SHIPPED 默认 1，hard 全 35 关显著胜率提升 p=0.019（用户需求 2026-08-06，回放 hard-s34-base-l2-t69-seed2050197249 Problem 1：出生点被砖墙围堵，player 不开墙出击，0:00~0:20 在出生点附近振荡）
+
+**Decision:** 三层机制（全部 `navBreakStuck>0` 门控，SHIPPED 默认 1）：
+- **破砖回退**：`followPathImpl`/`directMoveImpl` 全向不可通行时，回退尝试**可破**方向（`canMoveOrBreak`）——密封出生点口袋的薄墙被打破而非反向振荡（回放：玩家 128↔136px 摆荡在 cell 8↔9 之间，passable-only 回退永远只会返回口袋内反向，17-30s 无法出击）。
+- **像素级卡死检测（endFrame，每 tick 运行）**：净位移 < `carveDigNetEscape=24`px 且连续 `carveDigBlockTicks=90` tick 即判墙堵。cell 级 `_navStuckTicks` 永远检测不到口袋振荡——tank 中心坐标在墙边摆动时跨 cell 线（128↔136px ↔ cell 8↔9），每几 tick 重置 cell 计数器；且 HUNT 并非每 tick 求值（高权重候选优先），卡死计数必须挂在每 tick 的 endFrame。
+- **carve-dig 会话**：卡死即 `findCarveEscapeImpl` 启动持久挖路会话（精确环安全 dig 路径），跟随直到口袋打开 / 超时 `carveDigMaxTicks=2700`；spawnTimer>0 不计卡死（spawn 等待≠口袋锁定，防止每关开局误挖放弃防守）。
+
+**Rationale（只测 hard，按要求）：**
+- **测量**：全 35 关 60 种子配对 A/B（base {} vs `navBreakStuck:1`）：suite 0.5392 → 0.5522（p=0.019，显著），胜率 75% → 77%；Battlement（S34）0.238 → 0.288（+5pp）。
+- **机制验证（seed 2050197249 用户回放）**：nb=0 → gameover（11 kills）；nb=1 → stageclear（20 kills）——同一 RNG 流下逐种子翻转。
+- **§161 关系**：§161 的 CARVE_PATH 候选（权重 250）是「有意识绕图挖路」，本机制是「卡死应急破局」——§162 先于 §161 触发（口袋在 §161 能提交前已被 §162 挖出），§161 保持默认 OFF 归档。
+- **守卫隔离**：`GUARD_GOD_AI_PARAMS` 显式钉 `navBreakStuck:0`（守卫 spread 默认参数，继承会把 §159/§160 yield 几何顶开——回放锁定行为不允许）。
+
+**Implications:** 默认行为变化（byte-identical 承诺仅对 `navBreakStuck:0` 保持）。新增 `_digBlockTicks/_digAnchorX/_digAnchorY/_carveDig*` 状态（全部 reset per stage）；`endFrame()` 每 tick 运行检测（纯 World 读，无 RNG → 确定性/回放安全）。单测 7 条（`tests/navbreak-carve-dig.test.ts`）：默认值=1、守卫钉 0、像素检测器三态（静止累积/移动重置/spawn 不计）、Battlement 集成（nb=1 stageclear vs nb=0 gameover 翻转）。
+
+## 163. §163 中路防守（midLaneDefense）——子弹触发版全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，回放 Problem 2：基地列无钢铁防护，player 坐视敌人凿穿中路砖墙）
+
+**Decision:** 泛化「中路防守」候选（`midLaneDefense` 门控，默认 0 = OFF）：触发信号为**基地列内真实敌弹**（`laneShellInColumnImpl`——敌弹在 BASE_POS.col..+1 列向下飞行且与基地间无钢/水阻挡，即「凿穿瞬间」，与子弹-子弹碰撞对消机制耦合）；锚定基地列上方可站防守点（`findLaneDefensePointImpl`），持枪位（`midLaneHoldRange=1`）朝列上方停射（列内任意位置有弹即开火对消，突破 T5 的 128px 射程局限），牵绳（`midLaneMaxDist=8`，近基才锚定）、短挖门控（`midLaneMaxDigCells=3`，避免重复挖刚逃出的密封口袋）。权重 545（defenseIntercept 550 之下、closePickup 540 之上）。
+
+**Rationale（实测净零 → 归档）：**
+- **测量（只测 hard，按要求）**：Battlement 120 种子配对 A/B（§162 基线 vs §162+§163）：0.2379 → 0.2451（p=0.54，+1pp 噪声内）；全 35 关 60 种子：suite 0.5522 → 0.5523（p=0.55，47/57/1996 better/worse/tied，verdict no significant difference）。
+- **迭代历史（3 版触发器的 A/B 教训）**：① 敌人**在场/朝向**列（14-35% tick，B 测 29/35 关更差，suite 0.55→0.40 崩塌）——列内路过敌人不是威胁；② 纯敌弹列内信号（0-12%，Battlement 26%）→ 全图 0% 关不再受影响，但 Battlement 仍净零；③ 加可达性门控（口袋内防守点 = 8 步挖 = 自损）后 Battlement 仍 +1pp 噪声。
+- **根因**：Battlement 基地列上方防守点（12,21）在要塞内——正是 §162 挖出的密封口袋，回头挖 = 自损；且 §162 出袋后既有 defenseIntercept/T8 已覆盖列威胁，§163 的增量被吃掉。
+
+**Implications:** 无默认行为变化（OFF byte-identical）。代码保留作 A/B 基线（`midLaneDefense=1` 留档）；`laneShellInColumnImpl`/`findLaneDefensePointImpl` 纯函数 + 2 新参数 + `branchCounts.midLaneDefense` 已就位。
+
+**调参轮次（2026-08-06 续调，用户要求放宽 maxDist / 换持枪判定）：** 三轮 A/B 全部诚实阴性——
+- **R1 maxDist 8→16**：Battlement 120 种子 p=0.67（0.2451→0.2493，噪声）；全 35 关 60 种子 p=0.73（0.5522→0.5508，120/123/1857，3 关 60 种子边缘移动 Brick Maze +5.6pp/Outpost +4.6pp/Waterways -4.4pp 在 120 种子全部打回噪声 p=0.176/0.067）。
+- **R2 列对齐持枪（换持枪判定 v1）**：`laneShellAboveImpl` 要求 |bx−pcx|<6（子弹 6px AABB 碰撞硬约束）→ 实测 commits=0（静态站列内对齐随机弹仅 ~37% 概率，永不触发）→ 无效。
+- **R3 侧步获取弹道线（换持枪判定 v2）+ maxDigCells 3→12**：玩家在列内时按弹 x 偏移侧步 ±TANK 获取弹道线，对齐后持枪上射对消；Battlement 从 0 提交到 18 次提交，但 120 种子 p=0.40（0.2379→0.2210 略降）——11 步挖回密封要塞=自损（与 §161/§162 挖出去正确的结论一致）。
+- **最终根因**：Battlement 基地列（col 12）无钢但全砖密封，玩家被 §162 挖到左侧中场后距列内弹 7 cells（侧步 ±32px 够不着），唯一途径是 11 步挖回要塞（自损）；S27 Brick Maze 等其它关入列威胁信号 0-1%（无钢无威胁或钢防护无需防守），无可兑现场景。§163 保持默认 OFF，round-3 代码（`laneShellAboveImpl` 返回 x 偏移 + 侧步获取分支 + `findLaneDefensePointImpl` 全列扫描）留作后续调参基线。
+## 164. §164 中路列旁主动驻守（midLaneHold）——诚实阴性归档（用户需求 2026-08-06：让 §162 出袋后的玩家优先走中路走廊而非左侧，在列旁持枪对消）
+
+**Decision:** 新增 MID_LANE_HOLD 候选（权重 220，carvePath 之下 hunt 之上；驻守判定硬编码 dist===0，不读 midLaneHoldRange）+ 3 个新参数（midLaneHold 默认 0 OFF、midLaneHoldMaxRow=14、midLaneHoldEnemyDist=12）+ 3 个纯函数（laneColumnOpenToBaseImpl / findParryHoldCellImpl / enemyNearLaneImpl）。机制：玩家在地图上半区（row≤14）且基地列无钢/水防（列开放）且中路繁忙（列内有向下敌弹或敌人距列 ≤12 格）时，导航到/驻守列旁对消格（pcx 在列 x 范围 ±6px 内、可站、走廊可达——Battlement 顶部广场 (12,4)），面朝上开火对消；中路无威胁时放行 hunt/engage。两轮 A/B 全部显著为负 → 归档默认 OFF（byte-identical），代码保留作 A/B 基线。
+
+**Rationale（证据链）：**
+- **机制诊断**：S34 获胜跑（base，stageclear 20 kills）的 breach12=12/12 —— 基地列 12 块砖**全部被凿穿但基地照样存活**。基地死于边路/环砖威胁，靠玩家整体击杀压力而非列内对消。"凿穿中路砖墙=威胁基地"的用户假设在 Battlement 上不成立。
+- **A/B 1（mlh 单独，Battlement 120 种子）**：0.2379→0.1590（p=0.0000，-7.9pp 显著更差）。驻守饿死击杀压力（目标种子 20 kills→16 kills→gameover）。
+- **A/B 2（mlh+§163 combo，Battlement 120 种子）**：0.2379→0.1681（p=0.0001）。combo 更糟（目标种子仅 4 kills）——§163 对消把玩家钉死在列内。
+- **A/B 3（mlh 全 35 关 60 种子）**：0.5522→0.4842（p=0.0000，-6.8pp），**3 关显著变差（Checkers -51.9pp / Steel Web -31.7pp / Battlement -12.4pp），0 关变好**。列开放的地图上驻守把玩家钉在中路，边路敌人蜂拥——通用失败模式。
+- **与 §163 关系**：§163（威胁响应）与 §164（主动占位）是用户同一想法的两个实现面，独立 A/B 均为净零/显著为负。物理前提（玩家能进列/列内对消有价值）在唯一需要的关卡上双重不成立：进不去（密封要塞）或没必要（凿穿不致死）。
+- **守卫隔离**：GUARD_GOD_AI_PARAMS 钉 midLaneHold:0（§159/§160 回放锁定，守卫不得游荡去广场）。
+- **实现细节**：对消格选择（扫描行 4..14、pcx 最接近列中心 (bc+1)*CELL=208、行/列最小）按 tileMap.revision 缓存（纯地形函数）；走廊可达性按调用检查（依赖玩家位置，carvePathInfoCached 复用免重算）；玩家已在对消格时 from===to 直接命中；HOLD 分支仅 dist===0 触发（dist≤1 会在邻格面朝上冻结，探针实测 stageclear→gameover）。
+
+**Implications:** 默认 0 无行为变化（byte-identical，God-AI 门禁不受影响）。单测 13 条（tests/midlane-hold.test.ts）留档机制；决策链测试更新（tests/decision-core.test.ts 加 midLaneHold:220）。未来若想复活中路防守，正确方向是"击杀凿墙者"（对敌人施加压力）而非"对消弹"（对弹施加压力）——后者已在三个角度全部证伪。

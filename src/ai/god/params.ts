@@ -248,6 +248,68 @@ export interface GodAIParams {
    * pursuit loops where the player chases a faster enemy indefinitely.
    */
   navStuckTicks: number
+  /** §162: nav-stuck break-out — try breakable directions when fully blocked. */
+  navBreakStuck: number
+  /**
+   * §162: carve-dig session timeout (ticks). When navBreakStuck > 0 and the
+   * player is nav-stuck, the AI starts a persistent carve-dig session toward
+   * an escape target (findCarveEscapeImpl) and follows the exact-ring-safe
+   * dig path until it exits the sealed pocket or this timeout expires.
+   */
+  carveDigMaxTicks: number
+  /**
+   * §162: net displacement (px) from the anchor that counts as "real
+   * movement" — resets the pixel-stuck counter. Player speed ≈ 0.7px/tick,
+   * so a free player re-anchors every ~20 ticks; a wall-blocked pocket
+   * oscillater stays within a few px and never re-anchors.
+   */
+  carveDigNetEscape: number
+  /** §162: min consecutive blocked ticks to trigger the carve-dig. */
+  carveDigBlockTicks: number
+  /**
+   * §163: mid-lane defense mode. 0 = OFF (byte-identical). When ON, the
+   * player anchors to the base-column lane defense point (standable cell
+   * above the base, carve-dug when sealed): the base lane has no steel
+   * guard on many maps, so an enemy in the base column can carve straight
+   * down to the eagle while the player hunts side lanes. See the
+   * MID_LANE_DEFENSE candidate for the full semantics.
+   */
+  midLaneDefense: number
+  /**
+   * §163: distance (cells) from the lane defense point within which the
+   * player HOLDS the lane (face up, fire to cancel bullets / kill the
+   * carver) instead of moving. Outside this, navigate back to the point.
+   */
+  midLaneHoldRange: number
+  /**
+   * §163: max distance (cells) from the lane defense point at which the
+   * candidate may engage at all. Beyond this the player is in the field
+   * fighting — pulling them cross-map to the lane point would be a
+   * tug-of-war with HUNT and starve the whole map of kills. The anchor
+   * only matters near the base.
+   */
+  midLaneMaxDist: number
+  /**
+   * §163: max carve-dig length (cells) allowed when navigating to the lane
+   * defense point. A long dig through a sealed pocket is self-defeating
+   * (the player just escaped it via §162) — only accept a SHORT dig, or
+   * a pure corridor route (user: 开路时尽量不要打破基地所在列的砖墙，如果
+   * 必须要打，最多打掉一个 cell 能通过即可).
+   */
+  midLaneMaxDigCells: number
+  /**
+   * §164: proactive mid-lane flank hold mode. 0 = OFF (byte-identical).
+   * Once the player is out of the spawn pocket and in the top half of the
+   * map, prefer holding a standable parry cell beside/inside the base
+   * column (Battlement's open plaza rows 4-14) instead of camping the side
+   * spawns — the base column often has no steel guard, so the mid-lane is
+   * where base-carving shells fly. See the MID_LANE_HOLD candidate.
+   */
+  midLaneHold: number
+  /** §164: only engage while the player's row <= this (top/mid half — never drag across the bottom maze). */
+  midLaneHoldMaxRow: number
+  /** §164: enemy within this many cells of the lane keeps the hold active when no shell is in the column. */
+  midLaneHoldEnemyDist: number
   /**
    * §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12,
    * 24-offset) 在全部 35 关都是环砖格，A* 到砖格目标返回空路径 → 回防路由失效
@@ -369,6 +431,43 @@ export interface GodAIParams {
    * shooting logic changes (§135/§136 already covered blocked-lane fire).
    */
   defenseBreachBonus: number
+
+  // ---- §161 / 开路策略 (carve path, user request 2026-08-06, Stage 33 Battlement) ----
+  /**
+   * §161 / 开路策略: when the spawn point is trapped in a brick maze and
+   * cannot smoothly reach the standable defense post near the base, the
+   * player shoots through LOWER-HALF brick walls to carve a through-route
+   * to the post (R1/R2), generalizing to every map (no stage names). Two
+   * phases:
+   *   Mode A (dig to post): player row >= carveLowerRow, base not under
+   *     threat, NO corridor path from the player to the post (R4: a smooth
+   *     route ⇒ no carving) but a carve-safe dig path exists → follow it,
+   *     breaking plain brick.
+   *   Mode B (dig to threat): player already AT the post (dist <=
+   *     carveAtPostCells) with no enemy within carveChaseCells and no
+   *     fightable enemy (ENGAGE declined) → dig toward the enemy most
+   *     likely to threaten the base (breacher / direct-shooter first, else
+   *     nearest-to-base within carveThreatDistCells).
+   * Hard constraints on every carve path: never route through steel (R5 —
+   * even when the player could pierce it) and never break base-ring bricks;
+   * break AT MOST carveMaxBaseColumn bricks in the base's own columns
+   * (cols BASE_POS..+1 above the ring) when no alternative route exists
+   * (R6 — prefer a 0-break route; allow 1 only if forced; reject 2+).
+   * 0 = OFF (byte-identical to pre-§161).
+   */
+  carvePathMode: number
+  /** §161: player-row gate — the carve is the lower-half spawn→post journey. */
+  carveLowerRow: number
+  /** §161 Mode B: player considered "at the post" within this many cells. */
+  carveAtPostCells: number
+  /** §161 Mode B: no enemy within this many cells of the player (don't steal close chases). */
+  carveChaseCells: number
+  /** §161 Mode B: the threat enemy must be within this many cells of the base. */
+  carveThreatDistCells: number
+  /** §161 R6: max base-column bricks a carve path may break (prefer 0). */
+  carveMaxBaseColumn: number
+  /** §161: carve path safety replan timer (ticks). */
+  carveReplanTicks: number
 
   /**
    * §132 / 方向 B (fast × base-proximity threat weight): score bonus in
@@ -1682,6 +1781,46 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 0 = OFF (byte-identical to pre-D2). A/B sweep candidate: 300 (between
   // the proximity noise band and clearShotBonus 500).
   defenseBreachBonus: 0,
+  // §161 / 开路策略 (carve path): default OFF — byte-identical to pre-§161.
+  // A/B-measured on hard (Stage 33 Battlement + all 35); flip per result.
+  carvePathMode: 0,
+  carveLowerRow: 13,
+  carveAtPostCells: 2,
+  carveChaseCells: 5,
+  carveThreatDistCells: 8,
+  carveMaxBaseColumn: 1,
+  carveReplanTicks: 240,
+  // §162 / nav 卡死破墙逃生 (nav-stuck break-out, user request 2026-08-06,
+  // replay hard-s34 seed 2050197249): when every preferred direction is
+  // blocked (directMove / followPath fallback, nav-stuck escape), also try
+  // BREAKABLE directions (canMoveOrBreak) instead of only passable ones —
+  // the Battlement spawn pocket is sealed by wide-box protection bricks the
+  // player otherwise never breaks, oscillating at spawn for 17-30s. 0 = OFF.
+  // §162: nav-stuck break-out SHIPPED (hard 60-seed A/B p=0.019, Battlement
+  // +0.05, suite 75%→77%). Pixel-stuck carve-dig escape: when the player is
+  // wall-blocked in a sealed spawn pocket (net displacement < carveDigNetEscape
+  // px for carveDigBlockTicks), HUNT starts a persistent exact-ring-safe
+  // carve-dig toward an escape target; followPath/directMove also fall back to
+  // BREAKABLE directions when fully blocked. 1 = ON (default).
+  navBreakStuck: 1,
+  // §162: carve-dig session cap — 45s max before giving up (Battlement
+  // pocket exits in ~10-25s; 2700 ticks is generous but bounded).
+  carveDigMaxTicks: 2700,
+  // §162: pixel-stuck detector — 24px (1.5 cells) net escape; 90 ticks
+  // (1.5s) of not moving that far = wall-blocked.
+  carveDigNetEscape: 24,
+  carveDigBlockTicks: 90,
+  // §163: 中路防守默认 OFF（byte-identical）。hold=1 cell、maxDist=8
+  // （近基才锚定，防止与 hunt 跨图拉锯）、maxDig=3 cells（只接受短挖，
+  // 避免重复挖刚逃出的密封口袋）。
+  midLaneDefense: 0,
+  midLaneHoldRange: 1,
+  midLaneMaxDist: 8,
+  midLaneMaxDigCells: 3,
+  // §164: proactive mid-lane flank hold. 0 = OFF (byte-identical).
+  midLaneHold: 0,
+  midLaneHoldMaxRow: 14,
+  midLaneHoldEnemyDist: 12,
 
   // §132 / 方向 B: speed × base-proximity threat weight in defense target
   // selection. Default 0 = OFF (byte-identical — the scoring term short-
@@ -2080,6 +2219,13 @@ export const SKILLED_HUMAN_PARAMS: GodAIParams = {
  */
 export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   ...DEFAULT_GOD_AI_PARAMS,
+  // §162: guards must NOT inherit the player's nav-stuck carve-dig — guard
+  // yield/stand behavior (§159/§160) is replay-locked and a guard digging
+  // through walls could unseat the player's own §159 yield lane. Keep 0.
+  navBreakStuck: 0,
+  // §164: guards must NOT hold the mid-lane (their §159/§160 yield geometry is
+  // replay-locked; wandering to the plaza would unseat the player's lane).
+  midLaneHold: 0,
   aimError: 0,
   suboptimalPathProb: 0,
   pickupPriorityMode: 0,
