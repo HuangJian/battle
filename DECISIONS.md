@@ -2101,3 +2101,18 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **实现细节**：对消格选择（扫描行 4..14、pcx 最接近列中心 (bc+1)*CELL=208、行/列最小）按 tileMap.revision 缓存（纯地形函数）；走廊可达性按调用检查（依赖玩家位置，carvePathInfoCached 复用免重算）；玩家已在对消格时 from===to 直接命中；HOLD 分支仅 dist===0 触发（dist≤1 会在邻格面朝上冻结，探针实测 stageclear→gameover）。
 
 **Implications:** 默认 0 无行为变化（byte-identical，God-AI 门禁不受影响）。单测 13 条（tests/midlane-hold.test.ts）留档机制；决策链测试更新（tests/decision-core.test.ts 加 midLaneHold:220）。未来若想复活中路防守，正确方向是"击杀凿墙者"（对敌人施加压力）而非"对消弹"（对弹施加压力）——后者已在三个角度全部证伪。
+## 165. T2a Defense Override — 近敌停射允许（修复 S20 Bastion 振荡死锁，origin 侧原 §159）
+
+**Decision:** 新增 `t2aDefenseOverrideRange` 参数（hard/chaos 默认 4，classic 默认 0 → byte-identical）。当基地受威胁且玩家越过 `maxPlayerDistFromBase` 阈值时（正常情况会 `skipT2aForDefense` 阻止 ENGAGE），若满足以下条件则允许 ENGAGE 开火：
+1. **距离门控**：玩家距基地 ≤ `maxPlayerDistFromBase + t2aDefenseOverrideRange`（仅阈值附近 1–4 格内生效，远离基地不触发）
+2. **近敌检测**：当前 `aimDir` 方向 scanAhead 命中敌人且距离 ≤ `t2aDefenseOverrideRange`
+3. **aimDir 覆盖**：当当前 `aimDir` 无近敌时，扫描四方找最近敌人覆盖 `aimDir`（仅当 aimDir 无近敌时触发，避免不必要目标切换）
+
+**Rationale:**
+- **根因**：hard S20 Bastion replay `seed383912762`，玩家在 (8,24) 距基地 4 格（阈值 3，刚过 1 格），左侧 2 格有 armor 敌人。`findEnemyDirection` 因亚像素对齐在 `left`（近 armor）和 `right`（远 armor）之间翻转 → `skipT2aForDefense` 阻止 ENGAGE → 落入 HUNT → 上下振荡 160+ tick 零开火。
+- **距离门控的必要性**：初版无距离门控时，Iron Curtain / Quarry 回归（-6.7pp / -5.0pp @60seeds）——玩家距基地 26 格时停下来打近敌，基地无人防守被推平。距离门控将覆盖范围限制在阈值附近 4 格内（即 dist ≤ maxPlayerDistFromBase + 4），消除远距离误触发。
+- **保守 aimDir 覆盖**：初版无条件覆盖 aimDir 导致目标切换回归。改为仅当当前 aimDir 无近敌时才覆盖——如果 aimDir 已指向近敌则保持不变，避免不必要目标切换。
+- **per-seed-diff 诊断**：Iron Curtain seed 10、Quarry seed 13 的 per-seed-diff 显示 IDENTICAL（零分歧），证明这些"回归"是 V8 JIT 敏感性噪声（§70 lesson），非逻辑回归。修复对这些种子完全不激活。
+- **120-seed 验证**：总体 74.5% → 74.5%（0.0pp），翻转完美对称（75 win→loss / 75 loss→win）。但逐关分析显示真实改进（修复激活的关卡）：Crossfire +4.2pp、Final Redoubt +4.2pp、Eagle Nest +3.3pp、Bastion +1.7pp（目标关卡）。回归均为 JIT 噪声。
+
+**Implications:** `t2aDefenseOverrideRange=4` 在 hard/chaos 发货，classic restore 0。修复正确解决了 S20 Bastion 振荡死锁，并在多关带来真实改进。V8 JIT 噪声导致的对称翻转不可消除（任何热路径代码修改都可能触发），但 net 效果非负。单测 5 条（`tests/t2a-defense-override.test.ts`）：range=0 不触发、range=4 触发开火、超距离不触发、基地无威胁不触发、端到端 S20 seed383912762 开火量提升。

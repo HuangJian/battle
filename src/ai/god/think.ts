@@ -1027,12 +1027,35 @@ const ENGAGE: Candidate = {
     // P1: Skip T2a when the base is under threat and the player is too far
     // from the base. Camping far from the base while enemies approach it
     // was the #1 cause of base_destroyed gameovers.
-    const skipT2aForDefense =
+    // §159: Override — don't skip when a CLOSE enemy is in the line of fire.
+    // A close kill takes 1–2 shots (a few ticks) and directly helps defense.
+    // Root cause: hard S20 Bastion, player 1 cell past the threshold with an
+    // armor enemy 2 cells left → 160+ tick up/down oscillation, zero fire.
+    let skipT2aForDefense =
       self.hasBase &&
       self.isBaseUnderThreat() &&
       Math.abs(self.playerCell().col - BASE_POS.col) +
         Math.abs(self.playerCell().row - BASE_POS.row) >
         self.params.maxPlayerDistFromBase
+
+    if (skipT2aForDefense && aimDir && self.params.t2aDefenseOverrideRange > 0) {
+      // Distance guard: only override when the player is slightly past the
+      // threshold (within t2aDefenseOverrideRange cells past it). Far from
+      // the base, even a quick kill takes too long — the base falls while
+      // the player is engaged. This guard eliminates the Iron Curtain /
+      // Quarry regressions (player 26+ cells from base stopped to engage).
+      const overrideDist =
+        Math.abs(self.playerCell().col - BASE_POS.col) +
+        Math.abs(self.playerCell().row - BASE_POS.row)
+      if (overrideDist <= self.params.maxPlayerDistFromBase + self.params.t2aDefenseOverrideRange) {
+        // Reuses the per-tick scan memo (scanAheadImpl caches by origin+dir),
+        // so the later scan in the engage body below is free.
+        const defScan = scanAheadImpl(self, pcx, pcy, aimDir)
+        if (defScan.enemy && defScan.enemyDist <= self.params.t2aDefenseOverrideRange) {
+          skipT2aForDefense = false
+        }
+      }
+    }
 
     if (aimDir && self._antiCampSuppress <= 0 && !skipT2aForDefense) {
       // Inline scanAheadImpl (perf §66, see aggressive branch above).
@@ -2118,7 +2141,51 @@ export function thinkImpl(self: GodAIInput): void {
   self.aggressive = frozen
 
   // ---- Scan for enemy targets (global vision, T9 priority) ----
-  const aimDir = self.findEnemyDirection(pcx, pcy)
+  let aimDir = self.findEnemyDirection(pcx, pcy)
+
+  // §159: when the base is under threat and the player is past the defense
+  // distance threshold, override aimDir to point at the CLOSEST enemy within
+  // t2aDefenseOverrideRange cells (any direction) — but ONLY when the current
+  // aimDir doesn't already have a close enemy. This ensures the engage branch
+  // can fire at a close enemy even when findEnemyDirection picked a different
+  // (higher-threat but farther) enemy, while avoiding unnecessary target
+  // switching when the player is already aiming at a close enemy.
+  // Root cause: hard S20 Bastion, aimDir flipped between 'left' (close armor)
+  // and 'right' (far armor) due to sub-pixel alignment, preventing a stable
+  // engage.
+  if (self.params.t2aDefenseOverrideRange > 0 && self.hasBase && !frozen && !shielded) {
+    // Only override when the player is past the defense threshold AND the
+    // base is under threat (same condition as skipT2aForDefense).
+    const pc159 = self.playerCell()
+    const dist159 = Math.abs(pc159.col - BASE_POS.col) + Math.abs(pc159.row - BASE_POS.row)
+    if (
+      dist159 > self.params.maxPlayerDistFromBase &&
+      dist159 <= self.params.maxPlayerDistFromBase + self.params.t2aDefenseOverrideRange &&
+      self.isBaseUnderThreat()
+    ) {
+      // Check if the current aimDir already has a close enemy — if so, keep
+      // it (avoid unnecessary target switching that caused regressions on
+      // Iron Curtain / Quarry).
+      let aimHasClose = false
+      if (aimDir) {
+        const aimScan = scanAheadImpl(self, pcx, pcy, aimDir)
+        aimHasClose = aimScan.enemy && aimScan.enemyDist <= self.params.t2aDefenseOverrideRange
+      }
+      if (!aimHasClose) {
+        let bestDir: Direction | null = null
+        let bestDist = self.params.t2aDefenseOverrideRange + 1
+        for (let di = 0; di < ALL_DIRS.length; di++) {
+          const d = ALL_DIRS[di]
+          const s = scanAheadImpl(self, pcx, pcy, d)
+          if (s.enemy && s.enemyDist < bestDist) {
+            bestDist = s.enemyDist
+            bestDir = d
+          }
+        }
+        if (bestDir) aimDir = bestDir
+      }
+    }
+  }
 
   // ---- Threat assessment (dodge incoming bullets) ----
   // Dodge FIRST: survive before defending the base.
