@@ -1528,6 +1528,32 @@ export interface GodAIParams {
    * was destroyed.
    */
   baseClearShotThreat: number
+
+  // ---- §159: T2a defense override for close enemies ----
+  /**
+   * §159: 0 = OFF (byte-identical). >0 = when the base is under threat and
+   * the player is past `maxPlayerDistFromBase`, the ENGAGE candidate's
+   * `skipT2aForDefense` gate is STILL bypassed if an enemy is within this
+   * many cells (scan distance) in the `aimDir` direction.
+   *
+   * Root cause (hard S20 Bastion seed 383912762, 0:39~0:42): the player at
+   * cell (17,2) was 1 cell past `maxPlayerDistFromBase` (dist 27 > 26) while
+   * an armor enemy sat 2 cells to the left with a clear bullet lane.
+   * `skipT2aForDefense` blocked ENGAGE, the player fell through to HUNT,
+   * and the navigation target alternated between the base defense position
+   * and the enemy — a sub-cell up/down oscillation that burned 160+ ticks
+   * (the enemy slowly walked away unharmed). At row 3 (dist 26 ≤ 26) the
+   * gate cleared, but the scan's ±CELL/2 offset lines missed the enemy by
+   * <1px due to sub-cell alignment — so ENGAGE never fired from either
+   * position.
+   *
+   * The fix: a close enemy in the line of fire is an immediate opportunity.
+   * Killing it takes 1–2 shots (a few ticks) and directly helps defense
+   * (one fewer enemy threatening the base). The override only applies at
+   * CLOSE range (≤ this many cells), so the player still retreats to defense
+   * when the aligned enemy is far away.
+   */
+  t2aDefenseOverrideRange: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1980,6 +2006,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // Default 1: an enemy with a clear line of sight to the base IS a threat,
   // regardless of distance. The next bullet could destroy the base.
   baseClearShotThreat: 1,
+
+  // §159: T2a defense override — allow ENGAGE when a close enemy is in the
+  // line of fire, even past maxPlayerDistFromBase. 4 cells = quick kill range
+  // (bullet arrives in ~15 ticks; one-shot for 1-HP kinds, 2-3 shots for armor).
+  t2aDefenseOverrideRange: 4,
 }
 
 /**
@@ -2027,6 +2058,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   t2aSteelPathBlock: 0,
   aggNavStuckTicks: 0,
   pickupCommitTicks: 0,
+  // §159: T2a defense override is a pool-model (hard/chaos) fix — classic
+  // instant 未 A/B，restore 0（byte-identical classic gate）。
+  t2aDefenseOverrideRange: 0,
 }
 
 /**
