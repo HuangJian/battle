@@ -752,6 +752,17 @@ export interface GodAIParams {
   closeCombatDangerRange: number
 
   /**
+   * §153-W2: fire-rate-aware close combat. When ON (with the §85
+   * `closeCombatDangerCheck` also ON), the §85 stand-and-fire response becomes
+   * fire-rate aware: an aligned close enemy that fires FASTER than the player
+   * means a stand-and-duel is a losing trade → dodge perpendicular to a safe
+   * position instead. When the player fires faster (or no enemy is aligned),
+   * the §85 stand-and-fire (duel) is kept. Default 0 = OFF (byte-identical to
+   * §85). Verify with a hard 35-stage sweep before promoting.
+   */
+  closeCombatDuel: number
+
+  /**
    * M5 (plan/God-AI-Redesign-v2, DECISIONS §103): 站位提前规避 — path-threat
    * avoidance in the navigate/hunt branch.
    *
@@ -777,6 +788,54 @@ export interface GodAIParams {
    * 0 = OFF (byte-identical to M0). 1 = ON.
    */
   pathThreatAvoidance: number
+
+  /**
+   * §153-W1: "wait for the bullet to clear" — predictive next-move collision
+   * guard (px expansion of the predicted body; 0 = exact prediction).
+   *
+   * > 0: in the HUNT/navigate branch, after `_moveDir` is chosen, compute the
+   * player's body at its NEXT position (one step along `_moveDir`, off-axis
+   * grid-snapped exactly like the axis-lock in SimulationCombat) and, if any
+   * enemy bullet's box overlaps it, set `_moveDir` to null for the tick (the
+   * player holds still) — re-evaluated next tick, so the bullet clears in 1-3
+   * ticks and the lane is safe. Fixes "the player drives/snaps INTO a bullet
+   * passing in an adjacent lane or near-miss" (hard S12 Lattice seed
+   * 3214953618, tick 1599): the center-based threat detector
+   * (`findMostDangerousBullet`) misses such a bullet (center already past /
+   * adjacent column), so only the predictive hold is load-bearing. Distinct
+   * from `pathThreatAvoidance` (future-cell, time-windowed, swaps direction):
+   * this is a next-tick body-footprint hold.
+   *
+   * §154 round 2 (final, 2026-08-06): the original expanded-box version (any
+   * bullet within `marginPx` of the body) was NET-NEGATIVE on hard — 18 losing
+   * seeds per-seed diffed to first-divergence holds on bullets PERPENDICULAR
+   * to the intended move (freezing in crossfire = §48 stationary death) or
+   * bullets the move could never reach (S12-1: the turn cooldown would have
+   * let it pass anyway). The final design: predictive next-body check (one
+   * step along `moveDir`, off-axis grid-snapped like the SimulationCombat
+   * axis-lock) + exclusive AABB (same semantics as the sim's own collision —
+   * a 0px edge touch never holds, S1 s48 @4723 artifact) + `marginPx = 1`
+   * (1px expansion catches bullets within a tick of grazing the body; margin
+   * 0 loses the S12 s5/s44/s57 protections) + a turn-cooldown gate at the
+   * call site (when `p.dir !== moveDir` and the sim's turn cooldown is
+   * active, the player is involuntarily halted anyway — the hold is free, so
+   * skip it; fixes the S9-5 family of wasteful freezes). Measured (hard,
+   * 35×60 full sweep): net +15 (39W/24L); focus stages (S1/6/9/12/13/33)
+   * net +7 (10W/3L, S12 34→38/60). Residual 3 to-lose are the documented
+   * freeze-vs-hit context trade (S6 s21: same-axis genuine protection that
+   * still loses; S9 s5: the player took the 100hp snap-hit and won anyway;
+   * S1 s48: perpendicular 1px corner graze). An axis filter (perpendicular
+   * bullets never hold) was measured and REJECTED: it removed protective
+   * perpendicular 1px grazes in corridor stages (S12 s5/s57, S9 s3) — net
+   * dropped to +3. findSafeMoveDir substitution (safe-alternative direction)
+   * was also rejected (net +3, derailed navigation).
+   *
+   * **Ship (2026-08-06):** `bulletLaneWait` = 1 is the SHIPPED global default
+   * (user decision — chaos is out of scope for this change; the hard/classic
+   * full-sweep measurement is net +15 / +2, chaos −7 and not gate-touching at
+   * 60-seed granularity).
+   */
+  bulletLaneWait: number
 
   // M0.5 退役（2026-08-03）: dodgeHysteresis 已移入 experimental.ts 归档
   // （A/B -1.1pp，未发布）。
@@ -1655,8 +1714,16 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // cancelling legitimate navigation. At range 2, the check only fires when
   // the enemy is truly adjacent (32px), where fleeing is almost certainly death.
   closeCombatDangerRange: 2,
+  // §153-W2: fire-rate-aware close combat. 0 = OFF (byte-identical to §85).
+  // A/B candidate: 1. Promote to default only after a clean hard 35-stage
+  // sweep (see DECISIONS §153).
+  closeCombatDuel: 0,
   // M5: 站位提前规避 — 0 = OFF (byte-identical to M0). 1 = ON (A/B knob).
   pathThreatAvoidance: 0,
+  // §153-W1: wait-for-bullet body-proximity margin. 0 = OFF (byte-identical
+  // baseline). A/B candidate: 6-8. Promote to default only after a clean hard
+  // 35-stage sweep (see DECISIONS §153).
+  bulletLaneWait: 1,
   // ── §86 oscillation-experiment params (A/B-only knobs) ──────────────
   // Evaluated for the §86 dodge-oscillation fix. Only `dodgeOscillationCounterFire`
   // ships ON. The other three are A/B-only and are NEVER part of the shipped

@@ -23,7 +23,14 @@ import {
   shouldFireInDirImpl,
   bulletPathSteelBlockedImpl,
 } from './FireControl'
-import { dodgeCounterFireDirImpl, findBulletThreatToBaseImpl } from './ThreatAssessor'
+import {
+  dodgeCounterFireDirImpl,
+  findBulletThreatToBaseImpl,
+  bulletLaneClearImpl,
+  playerFasterThanImpl,
+  findCloseEnemyImpl,
+  safePerpDodgeImpl,
+} from './ThreatAssessor'
 import {
   controlledLives,
   hasLethalBulletWithinWindowImpl,
@@ -1170,6 +1177,30 @@ const HUNT: Candidate = {
         self.params.closeCombatDangerRange,
       )
       if (dangerDir) {
+        // §153-W2: fire-rate-aware close combat — when the aligned close enemy
+        // fires FASTER than the player, a stand-and-duel is a losing trade;
+        // dodge perpendicular to a safe position instead. Faster player → keep
+        // the §85 stand-and-fire duel.
+        if (self.params.closeCombatDuel > 0) {
+          const enemyTank = findCloseEnemyImpl(
+            self,
+            pcx,
+            pcy,
+            dangerDir,
+            self.params.closeCombatDangerRange,
+          )
+          const playerFaster = enemyTank ? playerFasterThanImpl(p, enemyTank) : true
+          if (!playerFaster) {
+            const dodgeDir = safePerpDodgeImpl(self, pcx, pcy, dangerDir)
+            if (dodgeDir) {
+              self._moveDir = dodgeDir
+              self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dodgeDir)
+              self.branchCounts.navigate++
+              self._lastBranch = 'navigate'
+              return true
+            }
+          }
+        }
         // Cancel the move — face the enemy and fire.
         self._moveDir = p.dir === dangerDir ? null : dangerDir
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dangerDir)
@@ -1209,6 +1240,29 @@ const HUNT: Candidate = {
         p.vy,
         self.params.iceGlideMinSpeed,
       )
+    }
+    // §153-W1: wait-for-bullet — if the player's NEXT move would collide with
+    // an enemy bullet (the predictive next-body check in bulletLaneClearImpl,
+    // which includes the off-axis grid snap that drove the body into the
+    // bullet's lane at hard S12 seed 3214953618 tick 1599), HOLD this tick
+    // instead of driving/snapping into its path. §154: the original expanded-
+    // body version held for perpendicular / passed bullets too and was net-
+    // negative on hard (18 losing seeds) — the predictive check is exact.
+    // §154 round 2: skip the hold while the turn is cooldown-deferred — the
+    // player cannot snap into the lane this tick anyway (SimulationCombat
+    // halts it), so the freeze is free; the check re-evaluates next tick and
+    // releases exactly when the cooldown expires (S9-5's 5-tick freeze at
+    // 480-484 was mostly this involuntary halt — the S12-1 over-wait family).
+    // Bullets are ~4-6 px/tick, so any real hold clears in 1-3 ticks.
+    if (self.params.bulletLaneWait > 0 && self._moveDir) {
+      const turnCd = w.rules?.turnCooldownMs ?? 0
+      const turnDeferred =
+        turnCd > 0 &&
+        p.dir !== self._moveDir &&
+        w.frame * (1000 / 60) - (p.lastTurnMs ?? -9999) < turnCd
+      if (!turnDeferred && !bulletLaneClearImpl(self, p, self._moveDir)) {
+        self._moveDir = null
+      }
     }
     // Fire control: when blocked by a breakable wall (verified by
     // canMoveOrBreak in directMove), fire immediately to break through.

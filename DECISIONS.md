@@ -1912,3 +1912,48 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - `bun run check` 全绿（1056 pass / 0 fail）。
 
 **Implications:** W1/W2 是新默认行为（classic 纪元参数保持 0——W1/W2 仅影响 modern pool 模型 T2a/aggressive 停瞄与冻结窗口移动）；`pickupCommitTicks` 作为实验旋钮保留（复用时需先解决 S34 base-defense 劫持）。decoy 出生点变更影响所有难度。
+## 153. hard S12 Lattice seed 3214953618 回放两行为（bullet-crash + close-combat trade）诊断与修复（实现 + 单测锁定；A/B 发现两者全局非正 → 实验旋钮不发货）
+
+**Decision:** 接手用户回放 `hard-s12-base-l3-t106-seed3214953618.replay`（S12 Lattice hard，seed 3214953618），定位上报的两个 God AI player 行为，各自修复并补单测，再在 hard 全 35 关 × 60 seeds flip-scan A/B 验证。**两者均为默认 OFF（0）的实验旋钮 `bulletLaneWait`（W1）与 `closeCombatDuel`（W2）：单元测试锁定机制正确、且对上报事件有效，但 60-seed 全关实测——W1 净负、W2 中性——与 §48/§103 家族结论一致（dodge/近身微调在 hard 全关净非正），故不提升为默认。**
+
+### W1 — player 主动撞上一颗下穿子弹（0:26，t1599）
+- **症状：** hard S12 回放 0:26（t1599）：player 在左走廊 (1,9) 侧移/turn-snap 时左缘从 x=24 瞬时弹到 x=16，撞进 col-0 一颗正在 `down` 下穿的敌弹（盒 x≈[13,19]，y 恰好经过 body），hp 315→187，且 `threat` 当时为 null。
+- **根因：** `findMostDangerousBulletImpl` 用**中心对齐 + `approaching`（中心未越过）**判定威胁。该弹：竖直中心已越过 player 中心 y（故 `approaching=false`）、且位于**相邻列**（中心 x 偏移 24px < TANK 但盒不真正重叠）——中心检测结构性漏报。真正触发是 player 侧移/转弯把 body 送进该弹车道。
+- **修复：** 新 param `bulletLaneWait`（px，0=OFF）：HUNT/navigate 选好 moveDir 后，若任一敌弹盒当前与 **expanded body**（±margin）重叠 → `_moveDir=null` 原地等退（子弹 ~4-6px/tick，1-3 tick 自清）。`bulletLaneClearImpl`（ThreatAssessor.ts）。对 t1599 几何单测锁定：margin8 阻挡、margin2 不过度等、player 弹忽略、margin0 恒清晰（byte-identical）。
+- **验证：** 单种子 verify——margin 8/10 **消除 t1599 命中**（margin0 时命中）。但 **60-seed flip-scan 净负**：S33 Diamond +3（help）、S12 +2、S1 ±0，而 S9 Twin Towers −4、S9-12 聚合 −8——crossfire 关频繁等弹成为站桩靶（§48 同款「假规避=站桩致死」）。→ 默认 0。
+
+### W2 — 近距离缠斗侧开互换伤害（0:45）
+- **现状核实：** seed 3214953618 在当前 HEAD 下 0:45（t2650-2860）**不再复现** close-combat——player 在左走廊 (0,9)↔(0,10) 无意义往复（本节另有归纳），无近敌可缠斗；故 W2 是「按用户规格新增 fire-rate-aware 近战策略」而非对 0:45 事件的复现修复。
+- **修复：** 新 param `closeCombatDuel`（0=OFF）：§85 closeCombatExposure 触发时按 user 规格分派——`playerFasterThanImpl`（nextFireInterval 小的开火快）：player 更快 → 保持对齐对枪（原 §85 站定开火）；player 更慢 → `safePerpDodgeImpl` 横闪安全位。配套 `findCloseEnemyImpl`。单测锁定 fire-rate 比较、敌人查找、安全横闪。
+- **验证：** 60-seed flip-scan **中性**（S33 0/0、S9 2/2 各抵）——该分支在 hard 触发率低（§85 仅在「背对近敌逃逸」触发）。→ 默认 0。
+
+**工具：** `tools/diag/flip-scan.ts` 新增强化 `--difficulty classic|hard|chaos`（通用 A/B，全关/种子 + `--set`），复用 §0.C rule 2。
+
+**关联根因（非本两行为，但压制 hard 过关率）：** 当前 HEAD 该种子在 ~t1480-2900 出现 player 在左走廊 (0,9)↔(0,10) 长周返回↔追击目标的导航目标翻转（selectTarget 在 hunt 敌与 base 守卫 (12,23) 间快速抖动）→ 空耗 ~23s 且永远不过关（先前 §152-W2 by seed 934391936 是同族但不同机制）。这是 StrategyPlanner 的独立 stuck/目标抖动 bug，需单独立项（如目标 commit/hysteresis + 走廊逃逸）才能实质提升 hard；W1/W2 旋钮本身无法扭转它。
+
+**验证汇总：** `tests/bullet-lane-wait.test.ts` 10 条全绿；类型依赖（threat-assessor/dodge-m3/m12/corridor-flee/steel-fire-gate/s12-replay-fixes）94 条全绿；`bun run typecheck` 干净。`bun run check`（全量，含 heavy 门禁）需在决定发货前跑。
+
+## 154. bulletLaneWait W1 重设计（§153 后记）：18 个净负种子根因定位 + predictive next-body 最终版（实测 35×60 hard 净 +15；仍为实验旋钮默认 0）
+
+**Decision:** §153 的 W1（expanded-box ±margin 判定）在 hard 全关 60-seed sweep 净负，本轮逐种子定位全部 18 个 to-lose 根因，并完成 4 轮设计迭代，最终版为 **predictive next-body + 排他 AABB + marginPx=1 + turn-cooldown 门控**（`bulletLaneClearImpl`，ThreatAssessor.ts；think.ts 接线）。实测 hard 35 关 × 60 seeds **净 +15（39W/24L）**；焦点组（S1/6/9/12/13/33）净 +7（10W/3L，S12 34→38/60）。**维持默认 0**（0 = byte-identical；发货需先经全量 sweep 复核并接受 3 个已文档化残余翻转）。
+
+**Rationale:**
+- **18 个净负种子根因（全部 per-seed 定位）：** 每个 to-lose 的首分歧 = B 侧 `moveDir=-`（hold）而 A 照常移动，结局 A clear → B gameover。分类：S9 全部 8 个 + S13 全部 6 个 + S12 s36/s52/s56 探针 = **垂直于移动方向的弹**（crossfire 关站桩 = §48 假规避致死）；S12 s1 = **同轴但 turn-cooldown 本会放行**的弹（过等 ~7 tick）；S9 s24@705 = **hold 吞掉本应「转身开火」的枪**（hold 位于 fire 决策之前）。→ 旧判定（任何弹在 margin 内即等）结构性误报。
+- **t1599 复现证明问题真实：** HEAD 下 t1598 玩家 (23.6,144) dir=left moveDir=up、b#201 down (13,160.4)；predictive next-body（moveDir 一步 + off-axis snap(CELL)，与 SimulationCombat axis-lock 同款）[16,48]×[142,174] 与弹盒真实重叠 → 最终版正确拦截（单测锁定）。
+- **设计迭代（全部 720-sim sweep 实测）：** ① 原 expanded-box m8（§153）: net +3；② predictive + margin 1 + cooldown 门: **net +7**；③ + findSafeMoveDir 安全替向: net +3（S13/S6 新损，替向破坏导航）→ 否决；④ + 同轴过滤（垂直弹永不 hold）: net +3（S12 s5/s57、S9 s3 等**保护性垂直擦身**被误删）→ 否决。垂直擦身在走廊关是保护的（S12）、在开阔关是站桩（S1 s48）——是 freeze-vs-hit 上下文权衡，非几何可判别。
+- **排他 AABB 修正：** 沿用 sim 自身碰撞语义（helpers.ts aabb：0px 边贴不算碰撞）。S1 s48@4723 弹顶 77 == 预测 body 底 77 的 exact-edge 误报即此消除。
+- **cooldown 门控：** 当 `p.dir !== moveDir` 且 sim turn cooldown 生效时（SimulationCombat 82-103 会回退 dir + 自停），玩家反正被强制停顿——hold 免费 → 跳过（S9-s5 的 480-483 冻结窗口即此族；残余 1 tick 冻结是 sim 自身 turnDeferred，非 W1 所为）。
+- **marginPx=1 实测最优：** margin 0 失去 S12 s5/s44/s57 保护（净 +4），margin 8 重新引入垂直近擦误报；1px 恰好捕捉「1 tick 内擦身」的同轴弹。
+- **残余 3 to-lose（已文档化，非 bug）：** S6 s21 = 同轴真实保护但冻结仍输；S9 s5 = 玩家照吃了 snap 命中（hp 315→215）仍赢，B 冻结反而输（freeze 成本 > 100hp 命中）；S1 s48 = 垂直 1px 角擦（唯一几何性误报残余，实测净影响为 1 个 seed）。
+
+**Implications:** W1 从「弹盒 vs 扩大盒」改为「predictive next-body 足迹」，语义与 sim 碰撞/轴锁一致，单测 11 条覆盖 5 类几何（t1598 拦截、垂直 clear、同轴不可达 clear、同轴可达 hold、边缘防御）。发货路径：把 `DEFAULT_GOD_AI_PARAMS.bulletLaneWait` 改为 1 → 全量 35×60 hard sweep 复核（本轮净 +15 为该路径预验证）→ 接受 S6 s21/S9 s5/S1 s48 三 seed 文档化翻转。探针脚本 `tmp/probe-w1-hold.ts` 与 dump 文件为临时件（提交前删除）。
+## 155. bulletLaneWait W1 全局发货（§154 最终版，用户决策：忽略 chaos）
+
+**Decision:** 将 `DEFAULT_GOD_AI_PARAMS.bulletLaneWait` 从 0 改为 **1**（§154 predictive next-body 最终版全局生效）。用户明确指示只关注 hard（chaos 暂不计）。发货快照：`reports/winrate/history/2026-08-06_093217__§155 发送 bulletLaneWait=1 (W1 predictive hold, 全局默认).json`。
+
+**Rationale:**
+- **hard 全量验证（同语料 4200 局，seeds 1-120 × 35 关）**：74.4% → **75.1%（+0.7pp）**；60-seed 语料 flip-scan 全关净 +15（39W/24L）。硬门禁 `god-ai-hard-chaos-gate` aggregate 637→**639/700**（floor 612）。
+- **classic（+0.1pp，91.2→91.3%）、chaos（−0.3pp，70.7→70.4%）** 如实记录；chaos −7/2100 为 freeze-vs-hit 权衡在 chaos 更多弹幕下的已知倾向，未触碰 chaos 门禁 floor（394/700，实际 ~493），后续如需纠正可在 think.ts 按难度关闭 hold。
+- **验证链**：`bun run check` 全绿（1047 pass / 0 fail，含 heavy 门禁）；单测 11 条/17 expect；`bun run build` 通过。
+
+**Implications:** W1 成为发货默认（0 = 关闭回到 byte-identical 基线，仅作 A/B 用）。§154 的 3 个 hard 残余 to-lose（S6 s21 / S9 s5 / S1 s48）随默认发货，为已文档化权衡。chaos −0.3pp 如需修复，方向是「hold 仅在 hard/classic 生效」或按弹幕密度限频，待用户决定。

@@ -1028,6 +1028,169 @@ export function hasEnemyBulletInLineImpl(
 }
 
 /**
+ * §153-W1: "wait for the bullet to clear" — predictive next-move collision guard.
+ *
+ * Root cause (hard S12 Lattice seed 3214953618, ~0:26, tick 1599): the player
+ * was oscillating at x≈23.6 (col 1) while an enemy bullet ran straight DOWN
+ * column 0 (box x≈[13,19], y passing the player's body). `findMostDangerousBullet`
+ * did NOT flag it as a threat — the bullet's center had already crossed the
+ * player's center in y (so `approaching` was false) and its box was in an
+ * ADJACENT column (so it was "aligned" by the loose <TANK center test but not
+ * actually striking). When the player then turned vertical, the turn-snap
+ * pushed its left edge from x=24 to x=16 — INTO the bullet's lane — and it was
+ * clipped (hp 315→187) while `threat` was still null.
+ *
+ * This helper answers the user's expected behavior literally: "wait for the
+ * bullet to move away and become harmless before moving." It returns FALSE
+ * (not clear → the navigate/hunt branch should HOLD, moving is unsafe) when
+ * following `moveDir` for one tick would put the player's body ON an enemy
+ * bullet — i.e. any enemy bullet's CURRENT box overlaps the player's body at
+ * its NEXT position (one step along `moveDir`, with the off-axis coordinate
+ * grid-snapped exactly like the axis-lock in SimulationCombat — the snap is
+ * what drives the body into the adjacent lane in the t1599 case). Uses the
+ * sim's own exclusive AABB (`aabb`) so a 0px edge touch never holds.
+ *
+ * §154 (net-negative diagnosis, DECISIONS §153 follow-up): the original
+ * expanded-box version (any bullet within a px margin of the body) held the
+ * player for 18 losing hard seeds — 17 were bullets on an axis PERPENDICULAR
+ * to the intended move (a reactive-dodge concern, not a navigate hold: freezing
+ * in crossfire is the §48 "fake dodge = stationary death" pattern), and S12-1
+ * was a same-axis bullet the turn cooldown would have let pass anyway. The
+ * predictive next-position check has none of those false positives: a bullet
+ * that does not overlap the post-move body never holds. An axis filter was
+ * measured and REJECTED (§154): perpendicular 1px grazes are protective in
+ * corridor stages (S12 s5/s44/s57 flips-to-win) even though one similar graze
+ * loses S1 s48 — the residual flips are the freeze-vs-hit context trade, not a
+ * geometric artifact. `marginPx` stays at 1 (measured optimum: a 1px expansion
+ * catches bullets within a tick of grazing the body; margin 0 loses the S12
+ * protections, larger margins re-catch perpendicular near-misses).
+ *
+ * Return true = safe to move; false = an enemy bullet would collide with the
+ * player's next-tick body (hold this tick). The call site gates on
+ * `bulletLaneWait > 0`.
+ */
+export function bulletLaneClearImpl(
+  self: GodAIInput,
+  p: Tank,
+  moveDir: Direction,
+  marginPx = 1,
+): boolean {
+  if (!p.alive || !moveDir) return true
+  const w = self.world
+  const speed = p.speed || 2
+  const vertical = moveDir === 'up' || moveDir === 'down'
+  // Next-tick body: advance along moveDir, snap the off-axis coordinate to the
+  // 16px grid (the axis-lock in SimulationCombat does exactly this on the
+  // first move tick after a turn — the t1599 crash was this snap).
+  const nx = vertical ? snap(p.x, CELL) : p.x + (moveDir === 'right' ? speed : -speed)
+  const ny = vertical ? p.y + (moveDir === 'down' ? speed : -speed) : snap(p.y, CELL)
+  const px = nx - marginPx
+  const py = ny - marginPx
+  const pw = (p.w || TANK) + 2 * marginPx
+  const ph = (p.h || TANK) + 2 * marginPx
+  const bullets = w.bullets
+  for (let i = 0; i < bullets.length; i++) {
+    const b = bullets[i]
+    if (!b.alive || b.isPlayer) continue
+    // Same exclusive AABB semantics as the sim's bullet-tank collision
+    // (SimulationCombat line ~546, `aabb`): a 0px edge touch is NOT a
+    // collision — the original inclusive test held on exact edge touches
+    // (S1 s48 @4723: bullet top == predicted body bottom) and froze the
+    // player for a non-collision.
+    if (!aabb(b.x, b.y, b.w, b.h, px, py, pw, ph)) continue
+    // Enemy bullet box overlaps the player's predicted next body → unsafe.
+    return false
+  }
+  return true
+}
+
+/**
+ * §153-W2: fire-rate comparison for close combat.
+ *
+ * "当与敌人近距离缠斗、无足够时间躲开敌人可能发出的子弹时：若玩家开火频率高于
+ * 目标敌人 → 走到与它对齐的行/列对枪（duel）；若低于目标敌人 → 躲到安全位置。"
+ *
+ * Fire rate ∝ 1/cooldown-inverval: lower configured interval = higher rate.
+ * Uses `nextFireInterval` (the configured cadence) falling back to the current
+ * `fireCooldown` when unavailable. Returns true when the PLAYER fires faster
+ * than `enemy` (a stand-and-duel is a winning trade).
+ */
+export function playerFasterThanImpl(p: Tank, enemy: Tank): boolean {
+  const pCd =
+    (p as unknown as { nextFireInterval?: number }).nextFireInterval ??
+    (p as unknown as { fireCooldown?: number }).fireCooldown ??
+    Infinity
+  const eCd =
+    (enemy as unknown as { nextFireInterval?: number }).nextFireInterval ??
+    (enemy as unknown as { fireCooldown?: number }).fireCooldown ??
+    Infinity
+  // Lower cooldown interval = faster firing. Player faster ⇔ player interval
+  // is strictly smaller than the enemy's.
+  return pCd < eCd
+}
+
+/**
+ * §153-W2: find the closest aligned enemy tank in `dangerDir` within `rangeCells`
+ * with no wall between (scanAhead sees the enemy). Used to read its fire rate.
+ */
+export function findCloseEnemyImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dangerDir: Direction,
+  rangeCells: number,
+): Tank | null {
+  const w = self.world
+  const tanks = w.tanks
+  const rangePx = rangeCells * CELL
+  const vertical = dangerDir === 'up' || dangerDir === 'down'
+  let best: Tank | null = null
+  let bestDist = Infinity
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const aligned = vertical ? Math.abs(tcx - pcx) < TANK : Math.abs(tcy - pcy) < TANK
+    if (!aligned) continue
+    // Must be in the dangerDir half-plane.
+    if (dangerDir === 'up' && tcy >= pcy) continue
+    if (dangerDir === 'down' && tcy <= pcy) continue
+    if (dangerDir === 'left' && tcx >= pcx) continue
+    if (dangerDir === 'right' && tcx <= pcx) continue
+    const dist = vertical ? Math.abs(tcy - pcy) : Math.abs(tcx - pcx)
+    if (dist > rangePx) continue
+    // No wall between player and enemy (scanAhead finds the enemy first).
+    const scan = scanAheadImpl(self, pcx, pcy, dangerDir)
+    if (!scan.enemy) continue
+    if (dist < bestDist) {
+      bestDist = dist
+      best = t
+    }
+  }
+  return best
+}
+
+/**
+ * §153-W2: pick a safe perpendicular dodge direction (relative to `dangerDir`).
+ * Only cell-1 passability + bullet safety counts — none safe returns null.
+ */
+export function safePerpDodgeImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dangerDir: Direction,
+): Direction | null {
+  const p = self.controlledTank(self.world)!
+  const verticalDanger = dangerDir === 'up' || dangerDir === 'down'
+  const perpA: Direction = verticalDanger ? 'left' : 'up'
+  const perpB: Direction = verticalDanger ? 'right' : 'down'
+  if (self.canMoveDir(p, perpA) && self.isSafeDir(pcx, pcy, perpA, -1)) return perpA
+  if (self.canMoveDir(p, perpB) && self.isSafeDir(pcx, pcy, perpB, -1)) return perpB
+  return null
+}
+
+/**
  * §85: Close-range enemy exposure check — is the player about to turn its
  * back on a close enemy that could fire and kill it before it can dodge?
  *

@@ -36,6 +36,7 @@
 import { readFileSync } from 'node:fs'
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../src/config/difficulty'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 
@@ -45,6 +46,7 @@ flip-scan.ts — A/B flip-seed scanner (parallel worker pool).
 Usage:
   bun tools/diag/flip-scan.ts [--stages 7,17,33] [--seeds 1-60] [--set k=v ...]
                               [--params-a a.json] [--params-b b.json] [--workers N]
+                              [--difficulty classic|hard|chaos]
 
 Arms:
   A = DEFAULT_GOD_AI_PARAMS        (or --params-a a.json, {params|bestParams} or flat)
@@ -65,6 +67,7 @@ interface Cli {
   paramsA: GodAIParams
   paramsB: GodAIParams
   workers: number
+  difficulty: string
 }
 
 function arg(name: string): string | undefined {
@@ -137,7 +140,12 @@ function parseCli(): Cli {
   const workersArg = arg('--workers')
   const workers = workersArg ? Number(workersArg) : undefined
 
-  return { stageIdxs, seeds, setOverrides, paramsA, paramsB, workers: workers ?? -1 }
+  const difficulty = arg('--difficulty') ?? 'classic'
+  if (!DIFFICULTIES[difficulty]) {
+    throw new Error(`--difficulty: unknown difficulty '${difficulty}'`)
+  }
+
+  return { stageIdxs, seeds, setOverrides, paramsA, paramsB, workers: workers ?? -1, difficulty }
 }
 
 // ---------------------------------------------------------------- main
@@ -163,7 +171,7 @@ async function main(): Promise<void> {
           id: tasks.length,
           seed,
           stage: STAGES[stageIdx],
-          difficulty: 'classic',
+          difficulty: cli.difficulty,
           params: arm === 'A' ? cli.paramsA : cli.paramsB,
           maxTicks: 18000,
         })
