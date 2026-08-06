@@ -68,6 +68,10 @@ export type ActionId =
   // 而非原地待机（Battlement 34% 全 tick 钉在 (11,24) 死区是输出瓶颈主因）。
   // Weight 300 > hunt 200、< pickupLow 400。默认 0 = OFF（byte-identical）。
   | 'firingLane'
+  // §158: 非冰冻期近距离道具拾取 — 无炮弹危险时捡取近处道具，随手开火。
+  // Weight 540 > engage(500)、< defenseIntercept(550)。低于防守拦截，确保
+  // 敌人接近基地车道时防守优先。默认通过 closePickupRange>0 激活。
+  | 'closePickup'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -96,6 +100,7 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   // §139 / 方向 A: 火力死区解除 — 覆盖 hunt(200) 的盲走，让死区玩家去有射界
   // 的瞭望格重新接战。默认 0（mode 门控），不激活时字节持平。
   firingLane: 300,
+  closePickup: 540,
   hunt: 200,
   survive: 0,
   suicideReturn: 1100,

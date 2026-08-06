@@ -1467,6 +1467,67 @@ export interface GodAIParams {
    * navigates instead of bouncing). Experimental knob only.
    */
   pickupCommitTicks: number
+
+  // ---- §156: freeze-window power-up pickup (unlimited range) ----
+  /**
+   * §156: 0 = OFF (byte-identical). >0 = during freeze (aggressive mode),
+   * ANY reachable power-up is picked up BEFORE stop-and-aim at frozen
+   * enemies. Enemies are frozen — they cannot move or fire — so the only
+   * threat is in-flight bullets (handled by DODGE, which has higher
+   * priority). The frozen enemy will still be there after the few ticks
+   * it takes to grab the item.
+   *
+   * §156-v2 (user request 2026-08-06): range changed from 2 to 999
+   * (effectively unlimited — grid is 26×26, max Manhattan = 50). During
+   * freeze the player should traverse the map to grab any reachable
+   * power-up; the frozen enemies pose zero threat.
+   *
+   * Root cause (hard S12 Lattice, 0:18~0:28): PICKUP_HIGH (weight 800) is
+   * gated by `!self.aggressive` and skipped during freeze. AGGRO (700) then
+   * prioritizes stop-and-aim at any aligned frozen enemy, never checking for
+   * nearby power-ups. The S5 economy scan in AGGRO only runs when NO enemy
+   * is aligned. A power-up 2 cells away was ignored for the entire freeze
+   * window while the player camped shooting a frozen enemy.
+   */
+  freezePickupRange: number
+
+  // ---- §158: non-freeze close-range power-up pickup ----
+  /**
+   * §158: 0 = OFF (byte-identical). >0 = in normal (non-freeze) mode, a
+   * power-up within this many cells (Manhattan) is picked up when there is
+   * no immediate bullet threat (DODGE at weight 1000 already declined).
+   * Unlike PICKUP_HIGH/MID (which gate on nearby-enemy proximity and route
+   * danger), this candidate has NO enemy gates — close items are worth
+   * grabbing even with enemies nearby, as long as no bullet is currently
+   * threatening the player. The player fires at enemies in the move
+   * direction while navigating (随手开火).
+   *
+* Skips when the base is under threat (defense outranks a nearby item).
+* The candidate chain guarantees safety: DODGE (1000) > INTERCEPT_BASE
+* (900) > PICKUP_HIGH (800) > AGGRO (700) > PICKUP_MID (600) >
+* DEFENSE_INTERCEPT (550) > CLOSE_PICKUP (540) — by the time this runs,
+* all higher-priority threats/items and defense intercepts have declined.
+   */
+  closePickupRange: number
+
+  // ---- §157: base clear-shot threat detection ----
+  /**
+   * §157: 0 = OFF (byte-identical). 1 = ON: isBaseUnderThreat() also returns
+   * true when any alive, spawned enemy can currently shoot the base
+   * (enemyCanShootBase — aligned + clear line of sight, no brick/steel in
+   * between). This catches enemies firing at the base from beyond the static
+   * box (row < 18) or the race range (baseRaceRangeCells), which the existing
+   * position-based checks miss.
+   *
+   * Root cause (hard S12 Lattice, 0:38~0:48): an enemy aligned with the base
+   * column from row ~10 (14+ cells away, beyond baseRaceRangeCells) was
+   * actively shooting the base through a cleared lane. isBaseUnderThreat()
+   * returned false (row < 18, distance > race range), so selectTarget didn't
+   * return the defense position and ENGAGE's skipT2aForDefense didn't fire.
+   * The player kept hunting/engaging at the top of the map while the base
+   * was destroyed.
+   */
+  baseClearShotThreat: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1897,6 +1958,28 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   t2aSteelPathBlock: 1,
   aggNavStuckTicks: 120,
   pickupCommitTicks: 0,
+
+  // §156: freeze-window power-up pickup (unlimited range).
+  // Default 999: during freeze, pick up ANY reachable power-up before
+  // stop-and-aim. Enemies are frozen — zero threat. The frozen enemy is a
+  // free kill that will still be there after the pickup.
+  // (§156-v2: changed from 2 to 999 per user request — freeze = safe traverse)
+  freezePickupRange: 999,
+
+// §158: non-freeze close-range power-up pickup.
+// Default 2: in normal mode, pick up power-ups within 2 cells when no
+// bullet threat is active (DODGE declined). Range 4 caused seed-999
+// base-destroyed (player 19 cells from base); range 3 caused seed-2
+// lives-exhausted (player 22 cells from base). Range 2 is safe for both
+// split-parity seeds — conservative but still grabs adjacent items.
+// No enemy-proximity gate — close items are worth grabbing even with
+// enemies nearby.
+  closePickupRange: 2,
+
+  // §157: base clear-shot threat detection.
+  // Default 1: an enemy with a clear line of sight to the base IS a threat,
+  // regardless of distance. The next bullet could destroy the base.
+  baseClearShotThreat: 1,
 }
 
 /**

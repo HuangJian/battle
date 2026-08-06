@@ -48,6 +48,8 @@ import {
   findUrgentPowerUpTargetImpl,
   findUrgentPowerUpTargetWithCommitImpl,
   findDireItemTargetImpl,
+  findFreezePickupTargetImpl,
+  findClosePickupTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   computeBaseGuardAnchorImpl,
@@ -69,6 +71,7 @@ import {
   threatChaseTargetImpl,
 } from './god/Chokepoint'
 import type { ChokepointPlan } from './god/Chokepoint'
+import { enemyCanShootBase } from './god/SmartThreatModel'
 
 /**
  * GodAIInput — a "theoretically optimal player" simulator that implements
@@ -803,6 +806,22 @@ export class GodAIInput implements InputLike {
         result = true
       }
     }
+    // §157: an enemy with a CLEAR SHOT at the base (enemyCanShootBase —
+    // aligned + no brick/steel in between) is a threat regardless of
+    // distance. The static box (row >= 18) and race check (range ≤ 18)
+    // miss enemies firing at the base from far away through cleared lanes.
+    // The next bullet could destroy the base, so defense must activate.
+    // Gated by baseClearShotThreat (0 = OFF, byte-identical).
+    if (!result && this.params.baseClearShotThreat > 0) {
+      for (let li2 = 0; li2 < list.length; li2++) {
+        const t2 = list[li2]
+        if (!t2.alive || t2.spawnTimer > 0) continue
+        if (enemyCanShootBase(this, t2)) {
+          result = true
+          break
+        }
+      }
+    }
     this._baseUnderThreatCache = result
     return result
   }
@@ -912,6 +931,14 @@ export class GodAIInput implements InputLike {
    * bomb/freeze/fence/emp worth a divert). 0 = OFF (byte-identical). */
   findDireItemTarget(pcx: number, pcy: number): Cell | null {
     return findDireItemTargetImpl(this, pcx, pcy)
+  }
+  /** §156: freeze-window power-up pickup (unlimited range). */
+  findFreezePickupTarget(pcx: number, pcy: number): Cell | null {
+    return findFreezePickupTargetImpl(this, pcx, pcy)
+  }
+  /** §158: non-freeze close-range power-up pickup. */
+  findClosePickupTarget(pcx: number, pcy: number): Cell | null {
+    return findClosePickupTargetImpl(this, pcx, pcy)
   }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)

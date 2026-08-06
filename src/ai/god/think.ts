@@ -471,6 +471,23 @@ const AGGRO: Candidate = {
   evaluate(self, ctx) {
     const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
     if (self.aggressive) {
+      // §156: freeze-window close-range power-up pickup — BEFORE stop-and-aim.
+      // During freeze, enemies can't move or fire. A power-up within
+      // freezePickupRange cells should be grabbed first; the frozen enemy
+      // will still be there 2-3 ticks later. DODGE (weight 1000 > 700) already
+      // handled any in-flight bullet threat before we reach here.
+      // Only during freeze (not shield): shield makes aggressive=true too, but
+      // enemies are NOT frozen during shield.
+      if (w.freezeTimer > 0 && self.params.freezePickupRange > 0) {
+        const freezeTarget = self.findFreezePickupTarget(pcx, pcy)
+        if (freezeTarget) {
+          self._moveDir = self.navigateTowards(freezeTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.powerup++
+          self._lastBranch = 'powerup'
+          return true
+        }
+      }
       // Skip defense, go straight for the nearest enemy or power-up.
       //
       // §80: `aimSurvivesTurnImpl` MUST be evaluated BEFORE `scanAheadImpl`
@@ -667,6 +684,45 @@ const AGGRO: Candidate = {
     }
     if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
     return false
+  },
+}
+
+/** closePickup(540) — §158: non-freeze close-range power-up pickup.
+ *
+ * When NOT in freeze/shield mode, if a power-up is within `closePickupRange`
+ * (default 4) cells and there is no immediate bullet threat (DODGE at weight
+ * 1000 already declined — if it hadn't, this candidate would never run),
+ * navigate to pick it up while firing at enemies in the move direction
+ * (随手开火).
+ *
+ * Weight 540 < DEFENSE_INTERCEPT(550): defense intercept runs first when an
+ * enemy is aligned with or approaching the base lane. This prevents the
+ * seed-999 regression where the player diverted to a nearby power-up while
+ * an enemy was breaking through to the base lane, arriving too late to
+ * intercept. The isBaseUnderThreat guard still catches aligned enemies.
+ *
+ * Unlike PICKUP_HIGH/MID (which gate on nearby-enemy proximity and route
+ * danger), this candidate has NO enemy gates — close items are worth
+ * grabbing even with enemies nearby, as long as no bullet is currently
+ * threatening the player AND no defense intercept is needed.
+ *
+ * Gated by closePickupRange (0 = OFF, byte-identical). */
+const CLOSE_PICKUP: Candidate = {
+  id: 'closePickup',
+  weight: ACTION_WEIGHTS.closePickup,
+  evaluate(self, ctx) {
+    const { p, pcx, pcy, onCooldown } = ctx
+    if (self.aggressive) return false
+    if (self.params.closePickupRange <= 0) return false
+    // Skip when base is under threat — defense outranks a nearby item.
+    if (self.hasBase && self.isBaseUnderThreat()) return false
+    const target = self.findClosePickupTarget(pcx, pcy)
+    if (!target) return false
+    self._moveDir = self.navigateTowards(target)
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+    self.branchCounts.powerup++
+    self._lastBranch = 'powerup'
+    return true
   },
 }
 
@@ -1570,6 +1626,8 @@ export const CANDIDATES: Candidate[] = [
   AGGRO,
   PICKUP_MID,
   DEFENSE_INTERCEPT,
+  // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
+  CLOSE_PICKUP,
   ENGAGE,
   PICKUP_LOW,
   FIRING_LANE,

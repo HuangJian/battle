@@ -316,17 +316,20 @@ describe('§87 think() integration', () => {
   })
 
   it('FREEZE: the §87 branch is inert during the freeze window (aggressive owns pickups)', () => {
-    // Deliberate design (DECISIONS §92): during freeze the aggressive branch
-    // already grabs power-ups when no enemy is aligned, and an aligned frozen
-    // enemy is a free kill the §87 branch must NOT interrupt. The gate is
-    // `!self.aggressive` in think() — prove it with the same close-safe-bomb
-    // geometry that diverts in normal mode (first test above: powerup == 1).
+    // Deliberate design (DECISIONS §92): during freeze the PICKUP_HIGH (§87)
+    // branch is gated by `!self.aggressive` and never runs. §156 added a
+    // freeze-pickup sub-branch INSIDE the AGGRO candidate — it grabs the
+    // power-up before stop-and-aim, incrementing branchCounts.powerup.
+    // So the §87 candidate is still inert (its gate held), but the AGGRO
+    // candidate's §156 sub-branch does the pickup.
     const { world, ai } = setup(onParams())
     world.freezeTimer = 60000 // aggressive mode active
     world.addPowerUp(makePowerUp(900, 'bomb', 4, 24)) // 4 cells, safe path
 
     const dir = ai.getMoveDirection()
-    expect(ai.branchCounts.powerup).toBe(0) // §87 branch never ran
-    expect(dir).not.toBeNull() // aggressive still navigates (to the bomb / enemy)
+    // §156: AGGRO's freeze-pickup sub-branch handles the item → powerup == 1.
+    // The §87 PICKUP_HIGH candidate itself never ran (gated by !aggressive).
+    expect(ai.branchCounts.powerup).toBe(1)
+    expect(dir).not.toBeNull() // aggressive navigates toward the power-up
   })
 })
