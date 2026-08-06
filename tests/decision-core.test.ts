@@ -31,6 +31,8 @@ describe('M1 decision-chain invariants', () => {
       'pickupMid',
       // §134 / 方向 D: 防守位停射拦截 — 插在 engage 之前（weight 550 > 500）。
       'defenseIntercept',
+      // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
+      'closePickup',
       'engage',
       'pickupLow',
       // §139 / 方向 A: 火力死区解除 — 插在 hunt 之前（weight 300 > 200）。
@@ -49,6 +51,8 @@ describe('M1 decision-chain invariants', () => {
       pickupMid: 600,
       // §134 / 方向 D: 防守位停射拦截 — engage(500) 之上，aggro(700) 之下。
       defenseIntercept: 550,
+      // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
+      closePickup: 540,
       engage: 500,
       pickupLow: 400,
       // §139 / 方向 A: 火力死区解除 — hunt(200) 之上，pickupLow(400) 之下。

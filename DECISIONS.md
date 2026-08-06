@@ -1957,3 +1957,48 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **验证链**：`bun run check` 全绿（1047 pass / 0 fail，含 heavy 门禁）；单测 11 条/17 expect；`bun run build` 通过。
 
 **Implications:** W1 成为发货默认（0 = 关闭回到 byte-identical 基线，仅作 A/B 用）。§154 的 3 个 hard 残余 to-lose（S6 s21 / S9 s5 / S1 s48）随默认发货，为已文档化权衡。chaos −0.3pp 如需修复，方向是「hold 仅在 hard/classic 生效」或按弹幕密度限频，待用户决定。
+
+---
+
+## 156. Freeze-Window Power-Up Pickup（冰冻期道具拾取，无限距离）
+
+**Decision:** 在 AGGRO 候选（weight 700）的开头、stop-and-aim 之前，插入一段冰冻期道具拾取逻辑。新增参数 `freezePickupRange`（默认 999 = 无限距离，0 = OFF → byte-identical）。实现位于 `findFreezePickupTargetImpl`（`StrategyPlanner.ts`），由 `think.ts` AGGRO 分支调用。
+
+**v2 变更（2026-08-06 用户指示）**：`freezePickupRange` 从 2 改为 **999**（无限距离）。冰冻期间敌人完全冻结（不能移动/射击），唯一威胁是飞行中的子弹（DODGE weight 1000 > 700 已处理），因此冰冻期可以安全地穿越全图拾取任何可达道具。移动过程中如果移动方向有敌人，随手开火（`shouldFireInDir`）。
+
+**Rationale:**
+- **根因**（hard S12 Lattice，0:18~0:28）：冰冻期间 `PICKUP_HIGH`（weight 800）被 `!self.aggressive` 门控跳过。AGGRO（700）随后优先对任何对齐的冻结敌人执行 stop-and-aim，从不检查附近道具。一个 2 格外的道具在整个冰冻窗口被忽略，玩家一直站着射击冻结的敌人。
+- **修复逻辑**：冰冻期间敌人不能移动或射击，唯一威胁是飞行中的子弹，DODGE（weight 1000 > 700）已经处理。因此冰冻期任何可达道具应在 stop-and-aim 之前拾取——冻结的敌人之后还在那里。
+- **与 `findUrgentPowerUpTargetImpl` 的区别**：跳过 nearby-enemy gate 和 route-danger gate（敌人已冻结——无法伤害玩家）。仍检查可达性（A* 路径），避免追逐不可达的道具。
+- **仅在冰冻期触发**（`w.freezeTimer > 0`），护盾期不触发（`self.aggressive = frozen`，但护盾期间敌人未冻结）。
+
+**Implications:** `freezePickupRange=999` 全局发货。重构为共享函数 `findNearestReachablePowerUp`（与 §158 共用）。单测 9 条（`tests/freeze-pickup.test.ts`）：函数级 6 条 + 端到端 4 条，覆盖 range 内/外、byte-identical（=0）、无限距离、多道具择近、冰冻期 vs 护盾期。
+
+---
+
+## 157. Base Clear-Shot Threat Detection（基地车道对齐远距离威胁检测）
+
+**Decision:** 在 `isBaseUnderThreat()` 中新增 `enemyCanShootBase` 检查：任何存活且已生成的敌人如果与基地对齐且视线无遮挡（brick/steel/base 均不挡），无论距离多远，都视为威胁。新增参数 `baseClearShotThreat`（默认 1，0 = OFF → byte-identical）。
+
+**Rationale:**
+- **根因**（hard S12 Lattice，0:38~0:48）：一个与基地列对齐的敌人在远处通过已清理的车道射击基地。`isBaseUnderThreat()` 返回 false（row < 18，distance > race range），`selectTarget` 未返回防守位置，玩家一直在地图上方追猎，基地被毁。
+- **修复**：`enemyCanShootBase`（`SmartThreatModel.ts`）检查敌人是否与基地同列或同行、且子弹路径上无 brick/steel/base 遮挡。该检查比 §88 chokepoint 的 `facingGate` 更宽泛——§88 要求敌人面朝基地，而 §157 认为对齐的敌人随时可以转向开火，因此无论朝向都触发。
+- **与 §88 chokepoint 的关系**：两者 OR 叠加，永不减少检测。`chokepointMode=0` 时 §88 不生效，§157 独立工作。测试中通过 `chokepointMode=0` 隔离验证 §157 的行为。
+
+**Implications:** `baseClearShotThreat=1` 全局发货。单测 9 条（`tests/base-clear-shot-threat.test.ts`）：覆盖远距离检测、byte-identical（=0）、砖墙遮挡、非对齐、死敌/生成中敌人、水平对齐、不面朝基地、selectTarget 回防、与 chokepointMode=1 共存。
+
+---
+
+## 158. Non-Freeze Close-Range Power-Up Pickup（非冰冻期近距离道具拾取）
+
+**Decision:** 新增 `CLOSE_PICKUP` 候选（weight 540，位于 DEFENSE_INTERCEPT 550 与 ENGAGE 500 之间），在非冰冻/护盾模式下，当无炮弹危险时拾取 `closePickupRange`（默认 2）格内的道具。新增参数 `closePickupRange`（默认 2，0 = OFF → byte-identical）。实现位于 `findClosePickupTargetImpl`（`StrategyPlanner.ts`），与 `findFreezePickupTargetImpl` 共享 `findNearestReachablePowerUp` 逻辑。
+
+**Rationale:**
+- **用户需求**：非冰冻期，如果道具距离近并且走过去路上没有炮弹危险，也要拾取，也要随手开火打敌人。
+- **权重调整（650→540）**：初始权重 650（高于 DEFENSE_INTERCEPT 550）导致 seed-999 回归——玩家在敌人接近基地车道时去捡道具，回来防守已来不及。降至 540（低于 DEFENSE_INTERCEPT 550）后，防守拦截优先执行；玩家不在防守位时 CLOSE_PICKUP 仍可拾取近处道具。
+- **距离调整（4→2）**：range=4 导致 seed-999 base_destroyed（玩家距基地 19 格）；range=3 导致 seed-2 lives_exhausted（玩家距基地 22 格）。非单调回归源于确定性仿真的蝴蝶效应——某个 tick 的拾取决策级联成完全不同的游戏轨迹。range=2 对两个 split-parity 种子都安全。
+- **安全保证**：候选链顺序为 DODGE(1000) > INTERCEPT_BASE(900) > PICKUP_HIGH(800) > AGGRO(700) > PICKUP_MID(600) > DEFENSE_INTERCEPT(550) > CLOSE_PICKUP(540)。当 CLOSE_PICKUP 运行时，所有更高优先级的威胁/道具/防守拦截都已拒绝。
+- **与 PICKUP_HIGH/MID 的区别**：无 nearby-enemy gate 和 route-danger gate——近距离道具即使附近有敌人也值得拾取，只要当前没有炮弹威胁。玩家在移动方向开火（`shouldFireInDir`），实现「随手开火」。
+- **基地受威胁时跳过**：`self.hasBase && self.isBaseUnderThreat()` 时防御优先于拾取道具。
+
+**Implications:** `closePickupRange=2` 全局发货。range=2 保守——在 split-parity 8 个种子上与 range=0 行为一致（CLOSE_PICKUP 从未激活）。更激进的 range 需要在 hard/chaos 难度下做 A/B 验证后再调。单测 11 条（`tests/close-pickup.test.ts`）：函数级 5 条 + 端到端 6 条。

@@ -362,6 +362,93 @@ export function findUrgentPowerUpTargetWithCommitImpl(
   return null
 }
 
+/**
+ * §156/§158: shared logic — find the nearest reachable power-up within
+ * `range` cells (Manhattan). Skips enemy/danger gates — the caller is
+ * responsible for ensuring safety (freeze = enemies can't move; close =
+ * DODGE already handled bullet threats). Checks A* reachability so the
+ * player doesn't chase unreachable items (steel/water-enclosed pockets).
+ */
+function findNearestReachablePowerUp(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  range: number,
+): Cell | null {
+  const w = self.world
+  const powerUps = w.powerUps
+  if (powerUps.length === 0) return null
+
+  let bestCol = 0
+  let bestRow = 0
+  let bestDist = Infinity
+  let bestPriority = Infinity
+  let hasBest = false
+
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    const cx = pu.x + pu.w / 2
+    const cy = pu.y + pu.h / 2
+    const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+    if (dist > range) continue
+
+    // Reachability gate: same A* as the normal pickup — don't chase
+    // steel/water-enclosed pockets.
+    const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), Math.floor(pu.y / CELL))
+    if (!collect) continue
+
+    const priority = POWERUP_PRIORITY[pu.type] ?? 5
+    if (dist < bestDist || (dist === bestDist && priority < bestPriority)) {
+      bestDist = dist
+      bestPriority = priority
+      bestCol = collect.col
+      bestRow = collect.row
+      hasBest = true
+    }
+  }
+
+  return hasBest ? { col: bestCol, row: bestRow } : null
+}
+
+/**
+ * §156: freeze-window power-up pickup (unlimited range). During freeze,
+ * enemies are frozen and cannot move or fire. The only threat is in-flight
+ * bullets, which DODGE (weight 1000 > AGGRO 700) already handles. So ANY
+ * reachable power-up should be picked up BEFORE stop-and-aim at a frozen
+ * enemy — the frozen enemy will still be there later.
+ *
+ * §156-v2: range changed from 2 to 999 (effectively unlimited). During
+ * freeze the player should traverse the map to grab any reachable item.
+ *
+ * Gated by freezePickupRange (0 = OFF, byte-identical). The caller (AGGRO
+ * candidate) only invokes this when self.aggressive && w.freezeTimer > 0.
+ */
+export function findFreezePickupTargetImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+  const range = self.params.freezePickupRange
+  if (range <= 0) return null
+  return findNearestReachablePowerUp(self, pcx, pcy, range)
+}
+
+/**
+ * §158: non-freeze close-range power-up pickup. When NOT in freeze/shield
+ * mode, a power-up within `closePickupRange` (default 4) cells is worth
+ * grabbing if there is no immediate bullet threat (DODGE at weight 1000
+ * already declined — if it hadn't, this candidate would never run).
+ *
+ * Unlike findUrgentPowerUpTargetImpl, this skips the nearby-enemy gate and
+ * the route-danger gate — close items are worth grabbing even with enemies
+ * nearby, as long as no bullet is currently threatening the player. The
+ * player fires at enemies in the move direction while navigating (随手开火).
+ *
+ * Gated by closePickupRange (0 = OFF, byte-identical).
+ */
+export function findClosePickupTargetImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+  const range = self.params.closePickupRange
+  if (range <= 0) return null
+  return findNearestReachablePowerUp(self, pcx, pcy, range)
+}
+
 /** §87: distance gate (cells) for a power-up type. 0 = never urgent. */
 function urgentPickupRange(type: PowerUpType, p: GodAIParams): number {
   switch (type) {
