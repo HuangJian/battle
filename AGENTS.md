@@ -237,7 +237,7 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 ### NEVER start the dev server to validate changes
 
 - The dev server (`bun run dev`) is for the **human to playtest** — an agent must **never** start it (or otherwise spin up a browser) to validate its own changes.
-- Validation is the automated gates only. `bun run check` runs `tsc --noEmit --incremental && bun test` (typecheck + full test suite); `bun run build` adds `oxlint` first. For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server. (The pre-commit hook additionally runs `oxfmt --check` + `oxlint`.)
+- Validation is the automated gates only. `bun run check` runs `tsc --noEmit --incremental && bun test` (typecheck + full test suite); `bun run build` adds `oxlint` first. For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server. (The pre-commit hook additionally runs `oxfmt` in place — it reformats files directly and re-stages them, rather than failing on `--check` — plus `oxlint`.)
 - If a visual check is wanted, the human will open it themselves. Do not leave a dev server running as "proof" of work, and do not present a localhost URL as a validation step.
 
 ### NEVER add an untracked `*.md` file to git tracking

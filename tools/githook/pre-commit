@@ -62,13 +62,12 @@ echo " ▸ tests (bun run test — scoped to local changes)"
 # Re-run `bun test` before committing a God-AI change to validate the gate floors.
 "$BUN" run test
 
-echo " ▸ format check (oxfmt --check)"
-# oxfmt --check verifies formatting and exits non-zero if anything is unformatted.
-# It does NOT rewrite files (unlike `bun run format`), so the committed snapshot stays intact.
-if ! "$BUN" x oxfmt --check; then
-  echo "✗ Formatting issues found. Run 'bun run format' to fix them, then re-stage and commit."
-  exit 1
-fi
+echo " ▸ format (oxfmt, in place)"
+# oxfmt rewrites files in place. Re-stage the touched files so the commit contains
+# the formatted versions. `git add -u` only updates already-tracked files, so it
+# never sweeps untracked files (e.g. untracked *.md) into the index.
+"$BUN" x oxfmt
+git add -u
 
 echo " ▸ lint (oxlint)"
 "$BUN" x oxlint
