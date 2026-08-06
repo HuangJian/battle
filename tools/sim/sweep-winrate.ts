@@ -11,10 +11,14 @@
  * Uses the Bun worker pool (tools/sim/sim-pool) for parallelism. Each run is a
  * pure function of (seed, stage, difficulty) so parallel == serial (byte-identical).
  *
+ * History comparison: every snapshot under `--history` (see snapshot-winrate.ts)
+ * is embedded into the HTML report, where any subset can be selected to render
+ * overall + per-stage win-rate deltas against the current run.
+ *
  * Usage:
  *   bun tools/sim/sweep-winrate.ts --difficulties classic,hard,chaos --seeds 1-60 --out tmp/winrate
  *
- * Default: --difficulties classic,hard,chaos  --seeds 1-60
+ * Default: --difficulties classic,hard,chaos  --seeds 1-60  --history reports/winrate/history
  */
 import { STAGES } from '../../src/config/stages'
 import { SimWorkerPool } from './sim-pool'
@@ -22,6 +26,7 @@ import type { SimTask, SimTaskResult } from './sim-worker'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { MAX_TICKS } from './simulation-runner'
 import { writeFileSync, mkdirSync } from 'node:fs'
+import { DEFAULT_HISTORY_DIR, loadSnapshots, type WinrateSnapshot } from './winrate-history'
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -40,6 +45,8 @@ const difficulties = arg('difficulties', 'classic,hard,chaos')!
   .map((s) => s.trim())
 const seeds = parseSeeds(arg('seeds', '1-60')!)
 const outDir = arg('out', 'reports/winrate')!
+const historyDir = arg('history', DEFAULT_HISTORY_DIR)!
+const useHistory = !process.argv.includes('--no-history')
 const params: GodAIParams = DEFAULT_GOD_AI_PARAMS
 const stageCount = STAGES.length
 
@@ -211,10 +218,16 @@ async function main() {
   }
   writeFileSync(`${outDir}/results.json`, JSON.stringify(raw, null, 2))
 
+  // ===== Load history snapshots for delta comparison =====
+  const history = useHistory ? loadSnapshots(historyDir) : []
+  if (useHistory) {
+    process.stderr.write(`[sweep] history: ${history.length} snapshot(s) from ${historyDir}\n`)
+  }
+
   // ===== Build markdown + HTML reports =====
-  const md = buildMarkdown(aggs, unionWorst)
+  const md = buildMarkdown(aggs, unionWorst, history)
   writeFileSync(`${outDir}/report.md`, md)
-  const html = buildHtml(aggs, unionWorst, raw.scope)
+  const html = buildHtml(aggs, unionWorst, raw.scope, history)
   writeFileSync(`${outDir}/report.html`, html)
 
   process.stderr.write(`[sweep] wrote ${outDir}/report.md, report.html, results.json\n`)
@@ -235,7 +248,94 @@ function a_for(aggs: DiffAgg[], name: string): DiffAgg {
   return a
 }
 
-function buildMarkdown(aggs: DiffAgg[], unionWorst: number[]): string {
+/** ISO → local wall clock (`YYYY-MM-DD HH:MM:SS`).
+ *  Snapshot ids are stamped in local time, so displayed times must be local too —
+ *  otherwise `2026-08-05_190636` would render as `2026-08-05 11:06:36` (UTC) and look wrong. */
+function fmtTime(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const p = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  )
+}
+
+/* ===== Compact run shape shared by the current sweep and every history snapshot.
+   Kept tiny because it is embedded verbatim into the HTML for client-side diffing. */
+interface CompactStage {
+  w: number // win rate %
+  k: number // avg kills
+  b: number // base-destroyed rate %
+}
+interface CompactDiff extends CompactStage {
+  stages: CompactStage[]
+}
+interface CompactRun {
+  id: string
+  label: string
+  /** When the sweep ran (drives timeline ordering). */
+  ranAt: string
+  /** `ranAt` pre-formatted to the generating machine's local time — display only. */
+  at: string
+  git: string
+  seeds: number
+  stageCount: number
+  diffs: Record<string, CompactDiff>
+}
+
+function compactCurrent(aggs: DiffAgg[]): CompactRun {
+  const diffs: Record<string, CompactDiff> = {}
+  for (const a of aggs) {
+    diffs[a.name] = {
+      w: pct(a.wins, a.total),
+      k: mean(a.killsSum, a.total),
+      b: pct(a.baseDestroyed, a.total),
+      stages: a.stages.map((s) => ({
+        w: pct(s.wins, s.total),
+        k: mean(s.killsSum, s.total),
+        b: pct(s.baseDestroyed, s.total),
+      })),
+    }
+  }
+  const ranAt = new Date().toISOString()
+  return {
+    id: '__current__',
+    label: '当前运行',
+    ranAt,
+    at: fmtTime(ranAt),
+    git: '',
+    seeds: seeds.length,
+    stageCount,
+    diffs,
+  }
+}
+
+function compactSnapshot(s: WinrateSnapshot): CompactRun {
+  const diffs: Record<string, CompactDiff> = {}
+  for (const d of s.perDifficulty) {
+    const stagesSrc = s.perStage.find((p) => p.name === d.name)?.stages ?? []
+    diffs[d.name] = {
+      w: d.winRate,
+      k: d.avgKills,
+      b: d.baseDestroyedRate,
+      stages: stagesSrc.map((x) => ({ w: x.winRate, k: x.avgKills, b: x.baseDestroyedRate })),
+    }
+  }
+  const ranAt = s.generatedAt || s.savedAt
+  return {
+    id: s.id,
+    label: s.label,
+    ranAt,
+    at: fmtTime(ranAt),
+    git: s.git ? `${s.git.commit}${s.git.dirty ? '+dirty' : ''}` : '',
+    seeds: s.scope?.seedsCount ?? 0,
+    stageCount: s.scope?.stageCount ?? 0,
+    diffs,
+  }
+}
+
+function buildMarkdown(aggs: DiffAgg[], unionWorst: number[], history: WinrateSnapshot[]): string {
   const lines: string[] = []
   lines.push('# God AI 胜率扫描报告 (classic / hard / chaos)')
   lines.push('')
@@ -244,6 +344,7 @@ function buildMarkdown(aggs: DiffAgg[], unionWorst: number[]): string {
   )
   lines.push(`> 当前代码默认 God AI 参数（DEFAULT_GOD_AI_PARAMS），无人工操作。`)
   lines.push('')
+  lines.push(...historyMarkdown(aggs, history))
   lines.push('## 总体概览')
   lines.push('')
   lines.push('| 难度 | 胜率 | 平均击杀 | 基地被毁比例 | 败局中基地被毁 | 超时 |')
@@ -317,13 +418,113 @@ function buildMarkdown(aggs: DiffAgg[], unionWorst: number[]): string {
   return lines.join('\n')
 }
 
+/** Markdown history block: full timeline + biggest per-stage movers vs the newest snapshot. */
+function historyMarkdown(aggs: DiffAgg[], history: WinrateSnapshot[]): string[] {
+  if (history.length === 0) return []
+  const cur = compactCurrent(aggs)
+  const runs = history.map(compactSnapshot)
+  const baseline = runs[runs.length - 1]
+  const names = aggs.map((a) => a.name)
+  const sign = (v: number) => (v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1))
+
+  const out: string[] = []
+  out.push('## 历史对比')
+  out.push('')
+  out.push(`> 基准快照：**${baseline.label}** (${baseline.id})`)
+  out.push('')
+  out.push(`| 快照 | 运行时间 | git | ${names.map((n) => `${n} 胜率`).join(' | ')} |`)
+  out.push(`|---|---|---|${names.map(() => '---').join('|')}|`)
+  for (const r of [...runs].reverse()) {
+    const cells = names.map((n) => (r.diffs[n] ? `${r.diffs[n].w.toFixed(1)}%` : '—')).join(' | ')
+    out.push(`| ${r.label} | ${r.at} | ${r.git || '—'} | ${cells} |`)
+  }
+  const curCells = names
+    .map((n) => {
+      const c = cur.diffs[n]
+      const b = baseline.diffs[n]
+      return b ? `${c.w.toFixed(1)}% (${sign(c.w - b.w)})` : `${c.w.toFixed(1)}%`
+    })
+    .join(' | ')
+  out.push(`| **当前运行** | ${cur.at} | — | ${curCells} |`)
+  out.push('')
+
+  out.push(`### 逐关变化 Top（当前 vs ${baseline.label}）`)
+  out.push('')
+  out.push('| 难度 | 关 # | 关名 | 基准胜率 | 当前胜率 | Δ |')
+  out.push('|---|---|---|---|---|---|')
+  for (const n of names) {
+    const c = cur.diffs[n]
+    const b = baseline.diffs[n]
+    if (!b || b.stages.length === 0) continue
+    const movers = c.stages
+      .map((s, i) => ({
+        i,
+        delta: s.w - (b.stages[i]?.w ?? s.w),
+        now: s.w,
+        was: b.stages[i]?.w ?? 0,
+      }))
+      .filter((m) => Math.abs(m.delta) >= 0.05)
+      .sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta))
+      .slice(0, 8)
+    if (movers.length === 0) {
+      out.push(`| ${n} | — | (无变化) | — | — | 0.0 |`)
+      continue
+    }
+    for (const m of movers) {
+      out.push(
+        `| ${n} | ${m.i + 1} | ${STAGES[m.i].name} | ${m.was.toFixed(1)}% | ${m.now.toFixed(1)}% | ${sign(m.delta)} |`,
+      )
+    }
+  }
+  out.push('')
+  return out
+}
+
+function escHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 function buildHtml(
   aggs: DiffAgg[],
   unionWorst: number[],
   scope: { seedsCount: number; maxTicks: number },
+  history: WinrateSnapshot[],
 ): string {
   const totalRuns = aggs.reduce((n, a) => n + a.total, 0)
   const maxWin = Math.max(...aggs.map((a) => pct(a.wins, a.total)))
+
+  // ----- history payload embedded for client-side diffing -----
+  const histRuns = history.map(compactSnapshot)
+  const historyPayload = JSON.stringify({
+    current: compactCurrent(aggs),
+    snapshots: histRuns,
+    diffNames: aggs.map((a) => a.name),
+    stageNames: STAGES.map((s) => s.name),
+  })
+  const histList =
+    histRuns.length === 0
+      ? `<p class="hint">尚无历史快照。先运行上面的「记录历史快照」命令，之后每次重跑 sweep 都会在此显示胜率变化。</p>`
+      : `<div class="snaps">${[...histRuns]
+          .reverse()
+          .map((r, k) => {
+            const scopeNote =
+              r.stageCount && r.stageCount !== stageCount
+                ? `<span class="warn" title="关卡数与当前不一致，逐关对比可能错位">关数 ${r.stageCount}</span>`
+                : ''
+            return `<label class="snap"><input type="checkbox" class="snapChk" value="${escHtml(r.id)}"${k === 0 ? ' checked' : ''}>
+            <span class="snapMain">${escHtml(r.label)}</span>
+            <span class="snapMeta">${escHtml(r.at)} ｜ ${escHtml(r.git || 'no-git')} ｜ ${r.seeds} 种子 ${scopeNote}</span></label>`
+          })
+          .join('')}</div>
+      <div class="row">
+        <button onclick="selAll(true)">全选</button>
+        <button onclick="selAll(false)">清空</button>
+        <span class="hint" style="margin-left:8px">勾选任意多个快照进行对比；Δ 以「当前运行」为参照。</span>
+      </div>`
 
   const summaryRows = aggs
     .map((a) => {
@@ -395,27 +596,81 @@ li{margin:2px 0}
 .legend{display:flex;gap:18px;margin:10px 0}
 .tag{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
 .dot{width:10px;height:10px;border-radius:50%}
+.snaps{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin:8px 0}
+.snap{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer}
+.snap:hover{background:#f4f7fb}
+.snapMain{font-weight:600}
+.snapMeta{color:var(--muted);font-size:12px}
+.warn{color:#b45309;background:#fef3c7;border-radius:4px;padding:0 5px;margin-left:6px;font-size:11px}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
+.up{color:#15803d;font-weight:600}
+.down{color:#b91c1c;font-weight:600}
+.flat{color:var(--muted)}
+select{font:13px sans-serif;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.cmds{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.cmdcard{flex:1;min-width:240px;display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.cmdname{font-weight:600;font-size:13px;cursor:help}
+.cmdbox{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#0f172a;color:#e2e8f0;padding:8px 10px;border-radius:6px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
+.cmdbox code{white-space:nowrap}
+.cmdcard button{align-self:flex-start}
+.baseline-cell{font-variant-numeric:tabular-nums;white-space:nowrap}
+.up,.down{padding:0 2px;border-radius:3px}
+.floating-nav{position:fixed;top:14px;right:14px;z-index:50;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.nav-toggle{font:13px sans-serif;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.nav-body{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 6px;display:flex;flex-direction:column;gap:2px;box-shadow:0 2px 8px rgba(0,0,0,.12);min-width:128px}
+.nav-body a{color:var(--ink);text-decoration:none;padding:5px 10px;border-radius:6px;font-size:13px;white-space:nowrap}
+.nav-body a:hover{background:#f0f4ff}
+.floating-nav.collapsed .nav-body{display:none}
+:target{scroll-margin-top:16px}
 </style></head><body>
 <h1>God AI 胜率扫描报告</h1>
 <p class="sub">范围：${stageCount} 关 × ${scope.seedsCount} 种子 × ${aggs.length} 难度 = ${totalRuns} 局 ｜ 默认 God AI 参数，无人工操作 ｜ 生成于 ${new Date().toLocaleString()}</p>
 
-<div class="card">
-  <h2>重新生成报告</h2>
-  <p>在仓库根目录运行以下命令（默认输出到 <code>reports/winrate/</code>，已被 gitignore）：</p>
-  <pre class="cmd" id="cmd">bun tools/sim/sweep-winrate.ts --difficulties classic,hard,chaos --seeds 1-60</pre>
-  <button onclick="copyCmd(this,'cmd')">复制命令</button>
-  <p class="hint">可自定义：<code>--difficulties classic,hard,chaos,relax</code> ｜ <code>--seeds 1-60</code> ｜ <code>--out reports/winrate</code></p>
+<div class="floating-nav" id="floatingNav">
+  <button class="nav-toggle" onclick="toggleNav()">☰ 导航</button>
+  <nav class="nav-body">
+    <a href="#sec-cmd">命令区</a>
+    <a href="#sec-hist">历史对比</a>
+    <a href="#sec-overview">总体概览</a>
+    <a href="#sec-cmp">劣关对比</a>
+    <a href="#sec-detail">全关明细</a>
+  </nav>
 </div>
 
-<div class="card">
-  <h2>生成失败录像（劣关取证）</h2>
-  <p>对指定关卡批量跑 God AI，只保存未通关的录像（用于复盘劣关 / 爆基地原因）：</p>
-  <pre class="cmd" id="cmd2">bun tools/optimize/level-sim.ts --stage 33 --difficulty hard --max-ticks 300000 --size 20 --save-replays --replay-failures-only --no-output</pre>
-  <button onclick="copyCmd(this,'cmd2')">复制命令</button>
-  <p class="hint">替换 <code>--stage 33</code> / <code>--difficulty hard</code> 指向具体劣关；<code>--size 20</code> 为并行样本数。</p>
+<div class="cmds" id="sec-cmd">
+  <div class="cmdcard">
+    <div class="cmdname" title="默认输出到 reports/winrate/（已 gitignore）。可加 --difficulties / --seeds / --out / --no-history">重新生成报告</div>
+    <div class="cmdbox"><code id="cmd">bun tools/sim/sweep-winrate.ts --difficulties classic,hard,chaos --seeds 1-60</code></div>
+    <button onclick="copyCmd(this,'cmd')">复制</button>
+  </div>
+  <div class="cmdcard">
+    <div class="cmdname" title="对指定关批量跑 God AI，只保存未通关录像。替换 --stage / --difficulty；--size 为并行样本数">生成失败录像</div>
+    <div class="cmdbox"><code id="cmd2">bun tools/optimize/level-sim.ts --stage 33 --difficulty hard --max-ticks 300000 --size 20 --save-replays --replay-failures-only --no-output</code></div>
+    <button onclick="copyCmd(this,'cmd2')">复制</button>
+  </div>
+  <div class="cmdcard">
+    <div class="cmdname" title="把本次数据存档到 reports/winrate/history/。--label 说明来源 ｜ --list 查看 ｜ --from 归档旧数据">记录历史快照</div>
+    <div class="cmdbox"><code id="cmd3">bun tools/sim/snapshot-winrate.ts --label "改动说明"</code></div>
+    <button onclick="copyCmd(this,'cmd3')">复制</button>
+  </div>
 </div>
 
-<div class="card">
+<div class="card" id="sec-hist">
+  <h2>历史对比（胜率变化）</h2>
+  ${histList}
+  <div id="histBody" style="display:${histRuns.length ? 'block' : 'none'}">
+    <h3 style="font-size:14px;margin:14px 0 6px">总体趋势</h3>
+    <table id="trendTable"><thead></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:14px">
+      <label>逐关对比基准：</label>
+      <select id="baseSel" onchange="renderStageDelta()"></select>
+      <label><input type="checkbox" id="onlyChanged" onchange="renderStageDelta()" checked> 只看有变化的关</label>
+    </div>
+    <table id="stageDeltaTable"><thead></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<div class="card" id="sec-overview">
   <h2>总体概览</h2>
   <table><thead><tr><th>难度</th><th>胜率</th><th>平均击杀</th><th>基地被毁比例</th><th>败局中基地被毁</th><th>超时</th></tr></thead>
   <tbody>${summaryRows}</tbody></table>
@@ -435,13 +690,13 @@ li{margin:2px 0}
   </div>
 </div>
 
-<div class="card">
+<div class="card" id="sec-cmp">
   <h2>劣关横向对比（三难度并排）</h2>
   <table><thead><tr>${cmpHeadFlat}</tr></thead>
   <tbody>${cmpRows}</tbody></table>
 </div>
 
-<div class="card">
+<div class="card" id="sec-detail">
   <h2>全 35 关胜率明细（附录）</h2>
   <table><thead><tr><th>关 #</th><th>关名</th>${aggs.map((a) => `<th>${a.name} 胜率</th>`).join('')}</tr></thead>
   <tbody>${fullRows}</tbody></table>
@@ -454,23 +709,29 @@ function copyCmd(btn,id){
     setTimeout(function(){btn.textContent=o;},1200);
   });
 }
+function toggleNav(){
+  var n=document.getElementById('floatingNav');
+  if(n)n.classList.toggle('collapsed');
+}
 (function(){
   function makeSortable(table){
     var thead=table.querySelector('thead');if(!thead)return;
-    var headRow=thead.rows[thead.rows.length-1];
-    var ths=Array.prototype.slice.call(headRow.cells);
-    ths.forEach(function(th){
+    var hrs=thead.querySelectorAll('tr');if(!hrs.length)return;
+    var headRow=hrs[hrs.length-1];
+    var ths=Array.prototype.slice.call(headRow.querySelectorAll('th'));
+    if(!ths.length)return;
+    ths.forEach(function(th,col){
       th.addEventListener('click',function(){
-        var col=th.cellIndex;
-        var tbody=table.tBodies[0];if(!tbody)return;
-        var rows=Array.prototype.slice.call(tbody.rows);
+        var tbody=table.querySelector('tbody');if(!tbody)return;
+        var rows=Array.prototype.slice.call(tbody.querySelectorAll('tr'));
         var asc=th.dataset.asc!=='1';
         ths.forEach(function(o){o.classList.remove('sort-asc','sort-desc');o.dataset.asc='';});
         th.classList.add(asc?'sort-asc':'sort-desc');
         th.dataset.asc=asc?'1':'0';
+        var cell=function(r){var c=r.querySelectorAll('td');return c[col]?c[col].textContent.trim():'';};
         rows.sort(function(a,b){
-          var va=a.cells[col].textContent.trim();
-          var vb=b.cells[col].textContent.trim();
+          var va=cell(a);
+          var vb=cell(b);
           var na=parseFloat(va.replace(/[%,]/g,''));
           var nb=parseFloat(vb.replace(/[%,]/g,''));
           var c;
@@ -481,8 +742,107 @@ function copyCmd(btn,id){
       });
     });
   }
+  window.makeSortable = makeSortable;
   document.querySelectorAll('table').forEach(makeSortable);
 })();
+
+/* ===== history comparison ===== */
+var HIST = ${historyPayload};
+
+function esc(s){var d=document.createElement('span');d.textContent=String(s==null?'':s);return d.innerHTML;}
+function delta(now, was){
+  if(was==null||isNaN(was))return '<span class="flat">—</span>';
+  var d=now-was;
+  if(Math.abs(d)<0.05)return '<span class="flat">0.0</span>';
+  return '<span class="'+(d>0?'up':'down')+'">'+(d>0?'+':'')+d.toFixed(1)+'</span>';
+}
+function findRun(id){
+  if(id==='__current__')return HIST.current;
+  for(var i=0;i<HIST.snapshots.length;i++){if(HIST.snapshots[i].id===id)return HIST.snapshots[i];}
+  return null;
+}
+function selectedRuns(){
+  var out=[];
+  document.querySelectorAll('.snapChk').forEach(function(c){
+    if(c.checked){var r=findRun(c.value);if(r)out.push(r);}
+  });
+  out.sort(function(a,b){return a.ranAt<b.ranAt?1:a.ranAt>b.ranAt?-1:0;});
+  return out;
+}
+function selAll(on){
+  document.querySelectorAll('.snapChk').forEach(function(c){c.checked=on;});
+  renderHistory();
+}
+function renderTrend(runs){
+  var t=document.getElementById('trendTable');
+  var names=HIST.diffNames;
+  var head='<tr><th>快照</th><th>运行时间</th><th>git</th><th>种子</th>';
+  names.forEach(function(n){head+='<th>'+esc(n)+' 胜率</th><th>'+esc(n)+' Δ</th><th>'+esc(n)+' 击杀</th><th>'+esc(n)+' 基地毁</th>';});
+  head+='</tr>';
+  t.querySelector('thead').innerHTML=head;
+  var cur=HIST.current;
+  var body='<tr><td><b>当前运行</b></td><td>'+esc(cur.at)+'</td><td>—</td><td>'+cur.seeds+'</td>';
+  names.forEach(function(n){
+    var c=cur.diffs[n];
+    body+= c?('<td><b>'+c.w.toFixed(1)+'%</b></td><td class="flat">基准</td><td>'+c.k.toFixed(2)+'</td><td>'+c.b.toFixed(1)+'%</td>'):'<td>—</td><td>—</td><td>—</td><td>—</td>';
+  });
+  body+='</tr>';
+  runs.forEach(function(r){
+    body+='<tr><td>'+esc(r.label)+'</td><td>'+esc(r.at)+'</td><td>'+esc(r.git||'—')+'</td><td>'+r.seeds+'</td>';
+    names.forEach(function(n){
+      var s=r.diffs[n], c=cur.diffs[n];
+      if(!s){body+='<td>—</td><td>—</td><td>—</td><td>—</td>';return;}
+      body+='<td>'+s.w.toFixed(1)+'%</td><td>'+(c?delta(c.w,s.w):'—')+'</td><td>'+s.k.toFixed(2)+'</td><td>'+s.b.toFixed(1)+'%</td>';
+    });
+    body+='</tr>';
+  });
+  t.querySelector('tbody').innerHTML=body;
+}
+function renderStageDelta(){
+  var t=document.getElementById('stageDeltaTable');
+  var sel=document.getElementById('baseSel');
+  var base=sel&&sel.value?findRun(sel.value):null;
+  var names=HIST.diffNames, cur=HIST.current;
+  if(!base){t.querySelector('thead').innerHTML='';t.querySelector('tbody').innerHTML='<tr><td colspan="3">未选择基准快照</td></tr>';return;}
+  var head='<tr><th>关 #</th><th>关名</th>'+names.map(function(n){return '<th>'+esc(n)+'</th>';}).join('')+'</tr>';
+  t.querySelector('thead').innerHTML=head;
+  var onlyChanged=document.getElementById('onlyChanged').checked;
+  var rows='';
+  for(var i=0;i<HIST.stageNames.length;i++){
+    var cells='',changed=false;
+    for(var j=0;j<names.length;j++){
+      var n=names[j];
+      var cs=cur.diffs[n]&&cur.diffs[n].stages[i];
+      var bs=base.diffs[n]&&base.diffs[n].stages[i];
+      if(!cs){cells+='<td>—</td>';continue;}
+      if(bs&&Math.abs(cs.w-bs.w)>=0.05)changed=true;
+      var baseTxt=bs?bs.w.toFixed(1)+'%':'—';
+      var dv=bs?delta(cs.w,bs.w):'';
+      if(bs&&Math.abs(cs.w-bs.w)<0.05)dv=''; // 无变化时不显示 0.0 噪音
+      cells+='<td class="baseline-cell">'+(bs?esc(baseTxt)+dv:'—')+'</td>';
+    }
+    if(onlyChanged&&!changed)continue;
+    rows+='<tr><td>'+(i+1)+'</td><td>'+esc(HIST.stageNames[i])+'</td>'+cells+'</tr>';
+  }
+  t.querySelector('tbody').innerHTML=rows||'<tr><td colspan="'+(2+names.length)+'">与该快照逐关胜率完全一致</td></tr>';
+  if(window.makeSortable)window.makeSortable(t);
+}
+function renderHistory(){
+  var runs=selectedRuns();
+  renderTrend(runs);
+  var sel=document.getElementById('baseSel');
+  var prev=sel.value;
+  sel.innerHTML=runs.map(function(r){return '<option value="'+esc(r.id)+'">'+esc(r.label)+'</option>';}).join('');
+  if(runs.length===0){sel.innerHTML='<option value="">（未选择）</option>';sel.value='';}
+  else if(prev&&runs.some(function(r){return r.id===prev;})){sel.value=prev;}
+  else{sel.value=runs[0].id;}
+  renderStageDelta();
+  if(window.makeSortable)window.makeSortable(document.getElementById('trendTable'));
+}
+if(HIST.snapshots.length){
+  document.querySelectorAll('.snapChk').forEach(function(c){c.addEventListener('change',renderHistory);});
+  renderHistory();
+}
 </script>
 </body></html>`
 }
