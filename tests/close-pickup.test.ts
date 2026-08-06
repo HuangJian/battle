@@ -30,9 +30,10 @@ import type { Tank, PowerUp } from '../src/types'
  *   7. CLOSE_PICKUP fires while moving toward the power-up (随手开火).
  */
 
-function setupWorld(
-  params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {},
-): { world: World; input: GodAIInput } {
+function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
+  world: World
+  input: GodAIInput
+} {
   const world = new World()
   world.rng = new RNG(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })

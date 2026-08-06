@@ -27,9 +27,10 @@ import type { Tank } from '../src/types'
  * fire at any moment.
  */
 
-function setupWorld(
-  params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {},
-): { world: World; input: GodAIInput } {
+function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
+  world: World
+  input: GodAIInput
+} {
   const world = new World()
   world.rng = new RNG(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })

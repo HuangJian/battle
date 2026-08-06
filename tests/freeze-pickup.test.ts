@@ -34,9 +34,10 @@ import type { Tank, PowerUp } from '../src/types'
  *   6. The AGGRO branch does NOT pick up via freeze path during shield.
  */
 
-function setupWorld(
-  params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {},
-): { world: World; input: GodAIInput } {
+function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
+  world: World
+  input: GodAIInput
+} {
   const world = new World()
   world.rng = new RNG(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })

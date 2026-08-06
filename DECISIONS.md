@@ -2002,3 +2002,39 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **基地受威胁时跳过**：`self.hasBase && self.isBaseUnderThreat()` 时防御优先于拾取道具。
 
 **Implications:** `closePickupRange=2` 全局发货。range=2 保守——在 split-parity 8 个种子上与 range=0 行为一致（CLOSE_PICKUP 从未激活）。更激进的 range 需要在 hard/chaos 难度下做 A/B 验证后再调。单测 11 条（`tests/close-pickup.test.ts`）：函数级 5 条 + 端到端 6 条。
+
+## 159. 天降神兵守卫改用 GOD AI + §避让防堵车（用户需求 2026-08-06）
+
+**Decision:** 「天兵」召唤的基地守卫（§31 Phase 2）不再使用旧的简单 "Commander-defend" 策略，改为每个守卫一个完整的 `GodAIInput` 大脑（与 God AI 玩家完全相同的决策管线），并在其上叠加 §避让 override：当守卫挡住「正在移动」的 player 前方一格（forward cell）时，无条件避让——
+1. 优先垂直让开（`YIELD_PERPS` 候选，两侧都通时取腾挪空间更大的一侧）；
+2. 垂直方向都没有空间时，无条件转为与 player 同方向并前进（走廊护航）；
+3. 一直避让到不再堵车才恢复自主行动；
+4. 避让期间持续向前方（player 车道方向）开火压制敌人，但以大脑的 `shouldFireInDir` 为门（T6/T11/§121：绝不打基地环、不打不可穿透的钢）。
+
+守卫参数用新的 `GUARD_GOD_AI_PARAMS`（`params.ts`）：`aimError=0`、`suboptimalPathProb=0`（完美操作 + 确定性），以及全部拾取分支归零（`pickupPriorityMode/closePickupRange/freezePickupRange/direItemMode/powerupMaxDivertDistance = 0`——守卫是 ally，永远捡不到道具，追道具纯属浪费）。大脑按守卫 id 存于 `SimulationEnemies.guardAIById`，`controlledTank` 按 id 从 `w.allies` 解析当前坦克对象（快照恢复替换对象但保留 id，大脑存活）。
+
+**Rationale:**
+- **为什么是完整 GOD AI 而非敌方的 tactical pipeline**：敌方管线目标是攻击基地/玩家，套在 ally 上会把自己家基地打掉（旧实现注释里的隐患）；GOD AI 本身就是以玩家视角防守基地的最优解（T8 拦截基地弹道、§137 守位格、T2a 站桩对枪），且 T6/T11/§121 保证 ally 子弹绝不破坏基地环。
+- **为什么归零 imperfection 参数**：`aimError/suboptimalPathProb` 是为模仿人类而设；守卫应完美操作。更关键的是确定性——回放播放时 `world.seed` 不还原（PlaybackController 只 restoreWorld）、`genId()` 跨 World 不可复现，若决策依赖 RNG 种子则回放会发散。两个参数归零后每个 `rng.next()` 结果恒定，守卫决策成为 World 状态的纯函数，原跑/回放/快照恢复逐字节一致。注意：§58 砖密集关卡适配会把 `suboptimalPathProb` 重新设回 0.05，因此 `guardAIFor` 在 `reset()` 之后再强制归零一次。
+- **为什么避让只在 player 移动时触发**：静止的玩家不构成堵车；若静止也避让，守卫会在一个站桩（如 T2a 瞄准）的玩家身后反复横跳。
+- **为什么避让开火方向是 player 车道而非守卫自身朝向**：「压制可能敌人」= 压制玩家正在推进的车道上的敌人；护航时两者重合，垂直让开时子弹从守卫车顶飞出（机械上等价于炮塔射击，可接受）。开火仍以 `shouldFireInDir` 门控——完全空车道不开火（不浪费弹药），有敌人/可拆砖才打，且绝不打基地环/钢。
+- **转弯冷却**：模拟层 §86c 会在避让首次垂直转向时推迟约 turnCooldownMs（~160ms）——守卫短暂护航/站立后完成转向，可接受，已在代码注释中记录。
+
+**Implications:** 旧 `lineClearForAlly` 已删除（被 GOD AI 的扫描完全取代）。守卫 AI 只在本机回合出现（headless sim 中 GodAIInput.wasItemPressed 恒 false → 守卫从不生成），God AI 门禁（hard-chaos-gate 等）不受影响。单测 6 条（`tests/guard-god-ai.test.ts`）：GOD AI 转向开火、垂直避让+车道压制、双墙护航、静止不避让、脱离车道恢复自主、同种子确定性。
+
+---
+
+## 160. 避让中扫射压制——避让开火优先沿腾挪轴（用户需求 2026-08-06）
+
+**Decision:** §159 的避让开火原为「只沿 player 车道方向（fwd）开火」——守卫垂直让开时子弹从车顶竖直飞出、与身体滑行方向不一致，且对守卫正在横穿的走廊侧翼毫无压制。§160 将避让期火控改为「扫射轴优先、敌人优先」（`updateGuardYield`）：
+1. 先沿 **腾挪轴（moveDir，即守卫实际移动的垂直方向）** 判定开火，但只在轴上确有**敌人**时才优先——炮管与移动方向一致（消除「开火方向偏离目标」），且随身体滑行，逐发子弹从不同位置射出，横扫守卫正在横穿的走廊带（避让中优先扫射压制）；
+2. 腾挪轴无敌人时回退到 §159 原行为：沿 player 车道（fwd）开火压制（避让过程保持向前方开火压制），车道门仍为 `shouldFireInDir`（敌或可拆砖皆可）；
+3. 两条路径都以大脑 `scanAhead`（敌判定）+ `shouldFireInDir`（T6/T11/§121 安全门：绝不打基地环、不打不可穿透钢）门控；引擎冷却模型限速——每 tick 至多一枪，无论哪条分支胜出。
+
+**Rationale:**
+- **为什么腾挪轴优先**：避让的本质是守卫横穿一条走廊让开车道；横穿期间侧翼正是敌人可能压上的方向，而 §159 的竖直车道射击在守卫滑出车道后逐渐失去意义。沿腾挪轴射击让炮管与朝向一致，且位移本身把火力铺成一排横扫。
+- **为什么腾挪轴要求真敌人（评审发现）**：`shouldFireInDir` 的 allowWallFire 会把可拆砖也算作目标——若砖墙优先级高于车道内的活敌人，守卫会侧身打砖而放任敌人沿车道逼近基地，正是用户要消除的「开火方向偏离目标」。故腾挪轴以 `scanAhead().enemy` 为前提（`scanAhead` 每 tick 由 `endFrame` 失效、与 `shouldFireInDir` 共享 memo，无重复扫描）；砖墙只在车道无目标时由原 §159 门考虑。
+- **为什么保留车道回退**：fwd 车道是玩家推进的路线，车道内仍有敌人时（尤其敌方逼近基地时）仍应压制——§159 原始规格不可丢失。
+- **护航（moveDir === fwd）不变**：垂直无空间转护航时两轴重合，只打 fwd（原行为）。
+
+**Implications:** 仅改 `updateGuardYield` 的开火判定顺序——不改变避让几何、不改变自主阶段行为。确定性不变（aimError=0 → 分支判定纯由 World 状态决定，RNG 惰性）。单测 +3（`tests/guard-god-ai.test.ts` §160 组）：腾挪轴优先（侧翼与车道双敌人时子弹打侧翼且炮管=移动方向）、车道回退（侧翼无敌人时仍打车道且移动仍让开）、砖墙不压车道敌人（侧翼只有砖+车道有敌人时打车道）。

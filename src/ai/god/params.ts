@@ -1502,11 +1502,11 @@ export interface GodAIParams {
    * threatening the player. The player fires at enemies in the move
    * direction while navigating (随手开火).
    *
-* Skips when the base is under threat (defense outranks a nearby item).
-* The candidate chain guarantees safety: DODGE (1000) > INTERCEPT_BASE
-* (900) > PICKUP_HIGH (800) > AGGRO (700) > PICKUP_MID (600) >
-* DEFENSE_INTERCEPT (550) > CLOSE_PICKUP (540) — by the time this runs,
-* all higher-priority threats/items and defense intercepts have declined.
+   * Skips when the base is under threat (defense outranks a nearby item).
+   * The candidate chain guarantees safety: DODGE (1000) > INTERCEPT_BASE
+   * (900) > PICKUP_HIGH (800) > AGGRO (700) > PICKUP_MID (600) >
+   * DEFENSE_INTERCEPT (550) > CLOSE_PICKUP (540) — by the time this runs,
+   * all higher-priority threats/items and defense intercepts have declined.
    */
   closePickupRange: number
 
@@ -1966,14 +1966,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (§156-v2: changed from 2 to 999 per user request — freeze = safe traverse)
   freezePickupRange: 999,
 
-// §158: non-freeze close-range power-up pickup.
-// Default 2: in normal mode, pick up power-ups within 2 cells when no
-// bullet threat is active (DODGE declined). Range 4 caused seed-999
-// base-destroyed (player 19 cells from base); range 3 caused seed-2
-// lives-exhausted (player 22 cells from base). Range 2 is safe for both
-// split-parity seeds — conservative but still grabs adjacent items.
-// No enemy-proximity gate — close items are worth grabbing even with
-// enemies nearby.
+  // §158: non-freeze close-range power-up pickup.
+  // Default 2: in normal mode, pick up power-ups within 2 cells when no
+  // bullet threat is active (DODGE declined). Range 4 caused seed-999
+  // base-destroyed (player 19 cells from base); range 3 caused seed-2
+  // lives-exhausted (player 22 cells from base). Range 2 is safe for both
+  // split-parity seeds — conservative but still grabs adjacent items.
+  // No enemy-proximity gate — close items are worth grabbing even with
+  // enemies nearby.
   closePickupRange: 2,
 
   // §157: base clear-shot threat detection.
@@ -2041,6 +2041,52 @@ export const SKILLED_HUMAN_PARAMS: GodAIParams = {
   reactionDelay: Math.max(2, DEFAULT_GOD_AI_PARAMS.reactionDelay * 2),
   aimError: Math.max(0.15, DEFAULT_GOD_AI_PARAMS.aimError + 0.15),
   suboptimalPathProb: Math.max(0.15, DEFAULT_GOD_AI_PARAMS.suboptimalPathProb * 1.5),
+}
+
+/**
+ * §159 / 天降神兵守卫 (base guard, DECISIONS §31 Phase 2): the God AI profile
+ * for allied guards — the same decision pipeline as the God AI player, with
+ * two deliberate deltas:
+ *
+ * 1. **Imperfection sims zeroed** (`aimError` / `suboptimalPathProb`). Those
+ *    two params exist to imitate a HUMAN player. A computer-controlled base
+ *    guard plays perfect, and — critically — with both at 0 every
+ *    `rng.next()` result is CONSTANT, so the guard's decisions are pure
+ *    functions of World state. This is what makes the guard AI byte-identical
+ *    across the original run and replay playback: `world.seed` differs
+ *    between recording and playback (PlaybackController restores the
+ *    snapshot, not the seed) and `genId()` is not reproducible across
+ *    Worlds, so a seed-dependent guard brain could not be faithful to the
+ *    recorded run. (A mid-run REWIND restores the World but not the brain's
+ *    history-dependent counters — the same accepted semantics as the player
+ *    GodAIInput — and the constant draw results guarantee a rewind can never
+ *    introduce RNG-seed divergence.) Note: `computeStageAdaptedParams` may
+ *    still re-enable `suboptimalPathProb` on brick-dense stages (§58) —
+ *    SimulationEnemies re-zeros both after `reset()` (see there).
+ *
+ * 2. **Power-up targeting disabled**. Guards are allies — SimulationPowerUps
+ *    only grants pickups to `w.player`/`w.player2` — so every pickup branch
+ *    (PICKUP_HIGH/MID/LOW, CLOSE_PICKUP, DIRE, freeze-window, aggressive
+ *    pickup) would be wasted navigation for a base defender. Each gate is
+ *    zeroed explicitly (`powerupMaxDivertDistance: 0` also disables the S5
+ *    base economy; a dist-0 item the guard happens to stand on is inert —
+ *    navigateTowards(own cell) returns null).
+ *
+ * Everything else is inherited: the guard dodges enemy bullets, intercepts
+ * base-bound fire (T8), holds a defense position (§137), stop-and-aim
+ * engages (T2a), and — crucially for an ally — never fires at base
+ * protection bricks or unpierceable steel (T6/T11/§121, enforced inside
+ * shouldFireInDir, which the §159 yield also uses as its fire gate).
+ */
+export const GUARD_GOD_AI_PARAMS: GodAIParams = {
+  ...DEFAULT_GOD_AI_PARAMS,
+  aimError: 0,
+  suboptimalPathProb: 0,
+  pickupPriorityMode: 0,
+  closePickupRange: 0,
+  freezePickupRange: 0,
+  direItemMode: 0,
+  powerupMaxDivertDistance: 0,
 }
 
 // ============================================================

@@ -424,7 +424,11 @@ function findNearestReachablePowerUp(
  * Gated by freezePickupRange (0 = OFF, byte-identical). The caller (AGGRO
  * candidate) only invokes this when self.aggressive && w.freezeTimer > 0.
  */
-export function findFreezePickupTargetImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+export function findFreezePickupTargetImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+): Cell | null {
   const range = self.params.freezePickupRange
   if (range <= 0) return null
   return findNearestReachablePowerUp(self, pcx, pcy, range)
