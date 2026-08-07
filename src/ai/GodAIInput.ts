@@ -170,6 +170,10 @@ export class GodAIInput implements InputLike {
   _moveDir: Direction | null = null
   /** Cached fire decision for this tick. */
   _fire = false
+  /** §167 / B4: super-item press flags for this tick (set by think() via
+   * superItemPressesImpl, consumed by wasItemPressed(), cleared endFrame()). */
+  _pressGuard = false
+  _pressFrenzy = false
   /** Whether think() ran this tick (avoids double-computation). */
   _thought = false
 
@@ -273,6 +277,47 @@ export class GodAIInput implements InputLike {
   _navStuckCell: Cell | null = null
   /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
   _navStuckTicks = 0
+  /**
+   * §168: nav-stuck escape suppression window — while > 0, HUNT keeps the
+   * center escape instead of normal targeting (the trigger alone is not
+   * enough: once the counter resets on leaving the zone, the oscillating
+   * target selection pulls the player straight back into it).
+   */
+  _navStuckSuppress = 0
+
+  /**
+   * §169: base-threat sticky hold — while > 0, isBaseUnderThreat() reports
+   * true even if the underlying detection cleared (flicker gap). Refreshed
+   * to params.threatStickyTicks every tick the underlying signal is true;
+   * decremented in endFrame(). Default param 0 ⇒ never set ⇒ byte-identical.
+   */
+  _threatStickyHold = 0
+
+  /**
+   * §170: hunt commit state — the enemy id currently committed to in the
+   * normal hunt branch and the frame the commit expires. While the window
+   * is open and the committed tank is alive, selectTarget keeps chasing it
+   * instead of re-picking the momentarily nearest enemy. Written only in
+   * the !baseUnderThreat nearest-selection branch; reset() clears. Default
+   * param 0 ⇒ never written ⇒ byte-identical.
+   */
+  _huntCommitId = -1
+  _huntCommitUntil = 0
+
+  /**
+   * §171: path-cost memo for pathTargetMode (normal-hunt target scoring).
+   * Fixed 8-slot table (≤4 enemies alive + churn), keyed by (playerCell,
+   * enemyId, enemyCell, tileMap.revision); `_pathCostEId` = −1 marks an
+   * empty slot and `_pathCostNext` rotates eviction. `findPath` draws no
+   * RNG, so the memo is byte-identical; default param 0 ⇒ never touched.
+   * reset() invalidates all slots per stage.
+   */
+  _pathCostPKey = new Int32Array(8)
+  _pathCostEKey = new Int32Array(8)
+  _pathCostRev = new Int32Array(8)
+  _pathCostEId = new Int32Array(8).fill(-1)
+  _pathCostVal = new Float64Array(8)
+  _pathCostNext = 0
 
   /**
    * M3 diag: total counter-fire ticks (think.ts dodge branch, DECISIONS §101).
@@ -653,6 +698,8 @@ export class GodAIInput implements InputLike {
     this._moveDir = null
     this._fire = false
     this._thought = false
+    this._pressGuard = false // §167
+    this._pressFrenzy = false // §167
     // §123/§125 (perf): clear the within-tick memo flags on stage reset —
     // reset() can run between a think and its endFrame (browser stage
     // transition path), and a stale bit would serve a result computed
@@ -691,6 +738,12 @@ export class GodAIInput implements InputLike {
     this._dodgeFlipCount = 0
     this._navStuckCell = null
     this._navStuckTicks = 0
+    this._navStuckSuppress = 0
+    this._threatStickyHold = 0 // §169
+    this._huntCommitId = -1 // §170
+    this._huntCommitUntil = 0 // §170
+    this._pathCostEId.fill(-1) // §171
+    this._pathCostNext = 0 // §171
     this.aggressive = false
     this._enemies = []
     this._otherTanks = []
@@ -789,18 +842,31 @@ export class GodAIInput implements InputLike {
     return this._fire
   }
 
-  wasItemPressed(_kind: 'guard' | 'frenzy'): boolean {
-    return false
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
+    // §167 / B4: super-item strategic activation. OFF (default) keeps the
+    // pre-§167 behavior (never pressed — byte-identical). Rewind is never
+    // AI-pressed: it needs the RecoveryController (Game.ts) which headless
+    // sims don't run (rewindPending would sit unconsumed).
+    if (this.params.superItemMode <= 0 || kind === 'rewind') return false
+    // think() sets this tick's flags; updatePlayerTank queries items BEFORE
+    // reading movement, so force the decision here (idempotent via _thought).
+    if (!this._thought) this.think()
+    return kind === 'guard' ? this._pressGuard : this._pressFrenzy
   }
 
   endFrame(): void {
     this._thought = false
+    this._pressGuard = false // §167
+    this._pressFrenzy = false // §167
     // Invalidate per-tick lazy caches.
     this._baseUnderThreatCache = null
     this._playerCellValid = false
     this._canMoveComputed = 0
     this._scanCacheMask = 0 // §123
     this._selTargetValid = false // §125
+    // §169: threat-signal sticky hold countdown (runs every tick; 0 = OFF ⇒
+    // the branch never executes — byte-identical).
+    if (this._threatStickyHold > 0) this._threatStickyHold--
     // §162: pixel-level stuck detector — runs every tick (regardless of
     // which candidate wins think() next tick). Net-displacement from an
     // anchor: a free player (> carveDigNetEscape px from anchor) re-anchors
@@ -930,6 +996,36 @@ export class GodAIInput implements InputLike {
           result = true
           break
         }
+      }
+    }
+    // §173: factual damage recall — once the base has actually TAKEN A HIT
+    // (baseHp < baseMaxHp), the threat is no longer a prediction: the ring
+    // bricks are breached and direct fire is landing. The predictive checks
+    // above flicker (§169: 9.8 flips/10s before the first hit); damage never
+    // flickers back. OR'd with the existing detection (never reduces it).
+    // baseDamageRecall = 0 → OFF (byte-identical); >0 → the trigger engages
+    // only while the player is farther than this many cells from the base
+    // (arm 1 = unconditional was net −24: the permanent threat cascade hurt
+    // open stages; the probe asymmetry is player-distance, so gate on it).
+    if (!result && this.params.baseDamageRecall > 0) {
+      if (
+        this.world.baseHp < this.world.baseMaxHp &&
+        playerDistToBase > this.params.baseDamageRecall
+      ) {
+        result = true
+      }
+    }
+    // §169: sticky hold — the threat signal flickers as enemies cross the
+    // race-range/alignment boundaries (defeat probe: 9.8 flips/10s before
+    // the base's first hit). Once true, keep it true for threatStickyTicks
+    // so the defense cascade (selectTarget, skipT2aForDefense, item gates,
+    // F5 guard summon, carve gate) stays engaged through the gaps. Only
+    // extends, never shortens; 0 = OFF = byte-identical.
+    if (this.params.threatStickyTicks > 0) {
+      if (result) {
+        this._threatStickyHold = this.params.threatStickyTicks
+      } else if (this._threatStickyHold > 0) {
+        result = true
       }
     }
     this._baseUnderThreatCache = result

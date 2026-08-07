@@ -903,28 +903,28 @@ export function findPathThreatImpl(
       const bulletArrivalTick = dist / b.speed
 
       if (bulletArrivalTick >= playerEnterTick && bulletArrivalTick <= playerDepartureTick) {
-          // §165 fix 2: terrain occlusion — skip bullets whose path to the
-          // crossing cell is blocked by steel. Steel is the ONLY terrain
-          // that permanently blocks bullets — brick is destructible (bullets
-          // break through and continue). On maze stages, many bullets are
-          // behind steel walls and can never reach the player's path.
-          // NOTE: brick is NOT checked — a bullet behind a brick wall will
-          // destroy it and continue toward the player (real threat).
-          const bv = DIR_VECTORS[b.dir]
-          let terrainBlocked = false
-          for (let d = CELL; d < dist; d += CELL) {
-            const fx = bcx + bv.dx * d
-            const fy = bcy + bv.dy * d
-            if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
-            const tcol = Math.floor(fx / CELL)
-            const trow = Math.floor(fy / CELL)
-            const t = grid[trow][tcol]
-            if (t === 'steel') {
-              terrainBlocked = true
-              break
-            }
+        // §165 fix 2: terrain occlusion — skip bullets whose path to the
+        // crossing cell is blocked by steel. Steel is the ONLY terrain
+        // that permanently blocks bullets — brick is destructible (bullets
+        // break through and continue). On maze stages, many bullets are
+        // behind steel walls and can never reach the player's path.
+        // NOTE: brick is NOT checked — a bullet behind a brick wall will
+        // destroy it and continue toward the player (real threat).
+        const bv = DIR_VECTORS[b.dir]
+        let terrainBlocked = false
+        for (let d = CELL; d < dist; d += CELL) {
+          const fx = bcx + bv.dx * d
+          const fy = bcy + bv.dy * d
+          if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+          const tcol = Math.floor(fx / CELL)
+          const trow = Math.floor(fy / CELL)
+          const t = grid[trow][tcol]
+          if (t === 'steel') {
+            terrainBlocked = true
+            break
           }
-          if (terrainBlocked) continue
+        }
+        if (terrainBlocked) continue
 
         if (bulletArrivalTick < bestThreatTick) {
           bestThreatTick = bulletArrivalTick
@@ -979,7 +979,9 @@ export function findSafeMoveDirImpl(
       const bcx = b.x + b.w / 2
       const bcy = b.y + b.h / 2
       const vertical = b.dir === 'up' || b.dir === 'down'
-      const aligned = vertical ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
+      const aligned = vertical
+        ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS
+        : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
       if (!aligned) continue
       const approaching =
         (b.dir === 'down' && bcy < ccy) ||

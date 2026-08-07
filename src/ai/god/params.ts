@@ -248,6 +248,23 @@ export interface GodAIParams {
    * pursuit loops where the player chases a faster enemy indefinitely.
    */
   navStuckTicks: number
+  /**
+   * §168: zone-based nav-stuck detection. 0 = OFF (exact-cell comparison,
+   * byte-identical). 1 = the `_navStuckTicks` same-cell check becomes a
+   * ±1-cell zone check (same as §152 aggNavStuckTicks): sub-pixel jitter
+   * that flips `playerCell()`'s center between two adjacent cells no
+   * longer resets the counter every few ticks (S34 Battlement s8: pinned
+   * ~1200 ticks, nst never exceeded 6, the 180-tick escape never fired).
+   */
+  navStuckZone: number
+  /**
+   * §168: nav-stuck escape suppression window (HUNT evaluations). 0 = OFF.
+   * When navStuckZone triggers the escape, keep escaping for this many
+   * HUNT evaluations — a single trigger is not enough (leaving the zone
+   * resets the counter and the oscillating target selection pulls the
+   * player straight back). Only consulted when navStuckZone > 0.
+   */
+  navStuckSuppressTicks: number
   /** §162: nav-stuck break-out — try breakable directions when fully blocked. */
   navBreakStuck: number
   /**
@@ -1609,6 +1626,68 @@ export interface GodAIParams {
    */
   closePickupRange: number
 
+  // ---- §166 / B1: star rush — 星经济冲刺 (star-economy sprint) ----
+  /**
+   * §166 / B1: 0 = OFF (byte-identical). 1 = ON: while the controlled tank's
+   * star level is below `starRushMaxLevel`, STAR power-ups get an extended
+   * urgent range (`starRushRangeCells` instead of pickupPriorityMidRange=4)
+   * and — with `starRushLiftGates` — bypass the §87 nearby-enemy + route-
+   * danger gates (same exemption shape as D5's base-box star exception, but
+   * field-wide).
+   *
+   * Data (hard 35×120 forensics, 2026-08-07): 91% of losses are base
+   * deaths at ~62s with only 9.4/20 kills; 75% of those runs never picked a
+   * star and 84% died at 1★. Runs that DID grab a star had +3.8 kills and
+   * lived +15s. Causal backing: M6 (0★→1★, +9pp) and M11 (1★→2★, +9.4pp —
+   * the start-level variant was rejected by the user as unfair to humans,
+   * but MID-RUN star pickup is pure AI skill). Each star ≈ fire-rate +
+   * bullet-speed up; the first star (1★→2★) is the one that matters, hence
+   * the level gate (rush stops at starRushMaxLevel).
+   */
+  starRushMode: number
+  /** §166 / B1: rush stars only while level < this (2 = rush the first star). */
+  starRushMaxLevel: number
+  /** §166 / B1: extended urgent range (cells) for stars while rushing. */
+  starRushRangeCells: number
+  /**
+   * §166 / B1: 1 = lift the §87 nearby-enemy + route-danger gates for rush
+   * stars — under 4-enemy field pressure both gates block forever (the D5
+   * finding), starving the player at 1★. 0 = gates apply (range-only rush).
+   */
+  starRushLiftGates: number
+
+  // ---- §167 / B4: super-item strategic activation (超级道具战略激活) ----
+  /**
+   * §167 / B4: 0 = OFF (byte-identical — God AI never presses F5/F6, the
+   * pre-§167 "super items are human-only" behavior). 1 = ON: think() sets
+   * per-tick item-press flags (see superItemGuardThreat / superItemFrenzyAim)
+   * that wasItemPressed() reports, letting the Simulation activate stocked
+   * super items (guard summon / frenzy barrage) on the AI's behalf.
+   *
+   * Data (hard 35×120 forensics, 2026-08-07): ~8% of losing runs finish with
+   * an UNUSED guard stock, ~8.5% with an unused frenzy stock (pickup census =
+   * stock, since the AI never consumed any). The guard is a full GOD-AI-brain
+   * base defender (§159) — exactly the tool for the 91% base_destroyed loss
+   * cause.
+   */
+  superItemMode: number
+  /**
+   * §167 / B4: guard release gate (F5). >0 = press guard when the base is
+   * under threat (isBaseUnderThreat — the same reactive signal the defense
+   * branches use) and no allied guard is currently alive. Reactive trigger
+   * only — never pins the player (§163/§164 lesson), zero interference with
+   * the kill rhythm.
+   */
+  superItemGuardThreat: number
+  /**
+   * §167 / B4: frenzy release gate (F6). >0 = press frenzy when the player's
+   * CURRENT facing (p.dir) has an enemy in its shot corridor
+   * (enemyInShotCorridor), no incoming-bullet threat is active (frenzy locks
+   * movement — releasing into a threat is a free death), and no frenzy
+   * barrage is already running.
+   */
+  superItemFrenzyAim: number
+
   // ---- §157: base clear-shot threat detection ----
   /**
    * §157: 0 = OFF (byte-identical). 1 = ON: isBaseUnderThreat() also returns
@@ -1627,6 +1706,103 @@ export interface GodAIParams {
    * was destroyed.
    */
   baseClearShotThreat: number
+
+  // ---- §169: base-threat signal stickiness ----
+  /**
+   * §169: 0 = OFF (byte-identical). >0 = once isBaseUnderThreat() goes true,
+   * it stays true for at least this many ticks even if the underlying
+   * detection clears (enemy steps out of the race range / aligned column for
+   * a moment). The hold refreshes every tick the underlying signal is true;
+   * it only EXTENDS, never shortens.
+   *
+   * Root cause (defeat decision-chain probe, 363 base_destroyed losses):
+   * the threat signal FLICKERS — in the 10s before the base's first hit the
+   * signal is true only 69.6% of ticks, flipping ~9.8× per 10s. Every false
+   * gap drops selectTarget into the nearest-enemy hunt branch, yanking the
+   * player off the base approach; the defense branch runs 87.6% of the
+   * window yet the player closes distance on only 3% of ticks. Stickiness
+   * closes the gaps so the defense cascade stays engaged.
+   */
+  threatStickyTicks: number
+
+  // ---- §170: hunt commit (追击承诺) ----
+  /**
+   * §170: 0 = OFF (byte-identical). >0 = after the NORMAL hunt branch
+   * (!baseUnderThreat nearest-enemy selection) picks a target, commit to
+   * that enemy for this many ticks: while the window is open and the
+   * committed enemy is still alive, keep chasing it even if another enemy
+   * becomes briefly nearer. On expiry the free nearest-selection resumes (and
+   * re-commits if the same enemy is still the pick).
+   *
+   * Root cause (tail-stage probe + S34 deep dive, DECISIONS §170): losses
+   * spend 73.8% of ticks in navigate (wins 59.1%) with a longer mean
+   * distance to the nearest enemy (8.0 vs 7.2 cells) — the per-tick
+   * nearest-enemy reselection re-routes the mid-approach player whenever
+   * the nearest identity flips, sinking the approach cost repeatedly. S34
+   * losses close to within 5 cells of an enemy on only 9.0% of ticks
+   * (wins 31.8%) while parked enemies live p75 65.6s. The commit keeps the
+   * approach on one enemy until the kill. Defense cascade / canHunt /
+   * aggressive branches are untouched; no commit is written under threat.
+   */
+  huntCommitTicks: number
+
+  // ---- §171: path-aware target selection (路径长度感知目标选择) ----
+  /**
+   * §171: 0 = OFF (byte-identical, Manhattan-nearest). 1 = the NORMAL hunt
+   * branch (!baseUnderThreat) scores each enemy by TRUE travel cost instead
+   * of Manhattan distance: corridor path length when `findPath` connects,
+   * dig path length + penalty otherwise (digging costs brick-clearing time
+   * far beyond step count), Manhattan + large penalty when neither exists.
+   * The bonus −2 adjustment still applies. Selection stays per-tick — only
+   * the RULER changes.
+   *
+   * Root cause (divergence probe, tmp/probe-pathdiv.ts, DECISIONS §171):
+   * the Manhattan-chosen target's true path overhead averages 20.8 cells in
+   * losses vs 3.3 in wins (6.3×); on diverged frames losses pay +4.2 extra
+   * path cells vs wins +2.3. Maze-stage losses (S15/S11/S10 gaps 117–230)
+   * are pulled at "Manhattan-near but wall-separated" enemies, burning the
+   * approach budget (navigate share 73.8% vs 59.1%) and starving kills.
+   */
+  pathTargetMode: number
+
+  // ---- §172: bonus enemy hunt bias (bonus 敌人追猎偏置) ----
+  /**
+   * §172: Manhattan-distance bias applied to bonus enemies in the NORMAL
+   * hunt branch (!baseUnderThreat) nearest-enemy loop. Default 2 = the
+   * historical hardcoded constant (byte-identical). Drop-economy lever:
+   * only bonus enemies drop power-ups; 75% of losses never see a star and
+   * item spawns run 531 vs 948 (loss vs win). At 10–30 cell distance scales
+   * a 2-cell bias barely ever flips the pick, so candidate arms 4 / 6 test
+   * whether a stronger bonus preference converts into more drops → more
+   * stars → kill throughput. Per-tick reselection is untouched (§170).
+   */
+  bonusHuntBias: number
+
+  // ---- §173: base damage recall (基地损伤召回) ----
+  /**
+   * §173: 0 = OFF (byte-identical). >0 = the distance gate (cells): once
+   * the base has actually TAKEN A HIT (baseHp < baseMaxHp) AND the player
+   * is farther than this many cells away, isBaseUnderThreat() returns true.
+   * Unlike the predictive threat checks (box / race / clear-shot — guesses
+   * about what an enemy MIGHT do), base damage is a FACT: the ring bricks
+   * are breached and direct fire is landing. While engaged, every downstream
+   * defense consumer (selectTarget recall, skipT2a, item gates, F5 guard
+   * summon, carve gate) stays on; the distance gate releases the cascade as
+   * soon as the player comes home.
+   *
+   * Root cause (hp-leash probe, tmp/probe-hpleash.ts, DECISIONS §173): in
+   * S34 losses the base takes its first hit with the player at median 25
+   * cells away and only a 5.1s median survival window left; in wins the
+   * player is already home (median 10 cells). The predictive signal flickers
+   * through that window (§169: 9.8 flips/10s), so the recall at
+   * StrategyPlanner L1254 never holds. Damage is the flicker-free trigger.
+   *
+   * Arm history: 1 (unconditional) was net −24 (z=−1.40) — the permanent
+   * cascade dragged open stages (S8 −8, S12 −7, S11 −6) while the target
+   * stages improved (S34 +3, S31 +5, S5 +4). The probe asymmetry is
+   * player-distance, so the knob is the gate itself.
+   */
+  baseDamageRecall: number
 
   // ---- §159: T2a defense override for close enemies ----
   /**
@@ -1784,6 +1960,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // at the same cell) for 3 seconds of navigating, force a roam to the map
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
+  // §168: zone-based nav-stuck detection — default 0 (OFF, byte-identical);
+  // the shipped P0.3 escape is defeated by center-cell jitter without it.
+  navStuckZone: 0,
+  // §168: escape suppression window — default 0 (OFF, byte-identical).
+  navStuckSuppressTicks: 0,
   // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
   // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
   defensePosStandable: 0,
@@ -2175,10 +2356,47 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // enemies nearby.
   closePickupRange: 2,
 
+  // §166 / B1: star rush (星经济冲刺). Default 0 = OFF (byte-identical).
+  // A/B arms: mode=1 × range 8/12 × liftGates 0/1 on the hard 35×20 screen.
+  starRushMode: 0,
+  starRushMaxLevel: 2,
+  starRushRangeCells: 8,
+  starRushLiftGates: 1,
+
+  // §167 / B4: super-item strategic activation — SHIPPED guard-only
+  // (2026-08-07, DECISIONS §167). 60-seed paired A/B: hard 75.9→76.5%
+  // (L→W 25 / W→L 12, z=2.14 significant); chaos neutral (net +4, z=0.57,
+  // no regression). frenzy (F6) is a NET NEGATIVE arm (20-seed net −5:
+  // the barrage locks movement into incoming fire) — keep the knob but
+  // default 0. classic restored to 0 via CLASSIC_MODEL_PARAMS (§115).
+  superItemMode: 1,
+  superItemGuardThreat: 1,
+  superItemFrenzyAim: 0,
+
   // §157: base clear-shot threat detection.
   // Default 1: an enemy with a clear line of sight to the base IS a threat,
   // regardless of distance. The next bullet could destroy the base.
   baseClearShotThreat: 1,
+
+  // §169: base-threat signal stickiness — default 0 (OFF, byte-identical).
+  // Candidate value 120 (2s ≈ one flicker period); needs A/B before shipping.
+  threatStickyTicks: 0,
+
+  // §170: hunt commit — default 0 (OFF, byte-identical). Candidate value
+  // 120 (2s); needs A/B before shipping.
+  huntCommitTicks: 0,
+
+  // §171: path-aware target selection — default 0 (OFF, byte-identical).
+  // Candidate value 1; needs A/B before shipping.
+  pathTargetMode: 0,
+
+  // §172: bonus enemy hunt bias — default 2 (= historical hardcoded constant,
+  // byte-identical). Candidate values 4 / 6; needs A/B before shipping.
+  bonusHuntBias: 2,
+
+  // §173: base damage recall — default 0 (OFF, byte-identical). Arm 1
+  // (unconditional) net −24; candidate arm 12 (distance gate); needs A/B.
+  baseDamageRecall: 0,
 
   // §159: T2a defense override — allow ENGAGE when a close enemy is in the
   // line of fire, even past maxPlayerDistFromBase. 4 cells = quick kill range
@@ -2242,6 +2460,24 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   t2aOutnumberedRetreat: 0,
   t2aOutnumberedRange: 5,
   t2aOutnumberedCount: 2,
+  // §167 / B4: super-item guard activation is a pool-model (hard/chaos)
+  // A/B — classic instant 未 A/B，restore 0（byte-identical classic gate）。
+  superItemMode: 0,
+  // §168: nav-stuck zone detection is a pool-model (hard/chaos) fix —
+  // classic instant 未 A/B，restore 0（byte-identical classic gate）。
+  navStuckZone: 0,
+  navStuckSuppressTicks: 0,
+  // §169: threat signal stickiness is a pool-model (hard/chaos) fix —
+  // classic instant 未 A/B，restore 0（byte-identical classic gate）。
+  threatStickyTicks: 0,
+  // §170: hunt commit — pool-model fix, classic 未 A/B，restore 0。
+  huntCommitTicks: 0,
+  // §171: path-aware target selection — pool-model fix, classic 未 A/B，restore 0。
+  pathTargetMode: 0,
+  // §172: bonus hunt bias — restore the historical constant 2（classic 未 A/B）。
+  bonusHuntBias: 2,
+  // §173: base damage recall — pool-model fix, classic 未 A/B，restore 0。
+  baseDamageRecall: 0,
 }
 
 /**
@@ -2299,9 +2535,28 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   // yield/stand behavior (§159/§160) is replay-locked and a guard digging
   // through walls could unseat the player's own §159 yield lane. Keep 0.
   navBreakStuck: 0,
+  // §168: guards keep exact-cell nav-stuck detection — their yield geometry
+  // is replay-locked (same reason navBreakStuck is zeroed above).
+  navStuckZone: 0,
+  navStuckSuppressTicks: 0,
+  // §169: guards keep the raw (non-sticky) threat signal — their defense
+  // behavior is replay-locked (same reason navBreakStuck is zeroed above).
+  threatStickyTicks: 0,
+  // §170: guards never hunt-commit — their targeting is replay-locked.
+  huntCommitTicks: 0,
+  // §171: guards keep Manhattan-nearest targeting — replay-locked.
+  pathTargetMode: 0,
+  // §172: guards keep the historical −2 bonus bias — replay-locked.
+  bonusHuntBias: 2,
+  // §173: guards keep the raw (non-damage) threat signal — replay-locked.
+  baseDamageRecall: 0,
   // §164: guards must NOT hold the mid-lane (their §159/§160 yield geometry is
   // replay-locked; wandering to the plaza would unseat the player's lane).
   midLaneHold: 0,
+  // §167: guards never activate super items — they own no inventory (pickups
+  // resolve for w.player/w.player2 only) and a guard pressing F5/F6 would be
+  // dead code at best, a determinism hazard at worst.
+  superItemMode: 0,
   aimError: 0,
   suboptimalPathProb: 0,
   pickupPriorityMode: 0,
@@ -2309,6 +2564,10 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   freezePickupRange: 0,
   direItemMode: 0,
   powerupMaxDivertDistance: 0,
+  // §166 / B1: guards don't collect pickups (SimulationPowerUps grants them
+  // to players only) — keep the star rush off for the same reason the other
+  // pickup branches are zeroed above.
+  starRushMode: 0,
   // §165: guards don't do T2a outnumbered retreat (replay-locked yield).
   t2aOutnumberedRetreat: 0,
 }

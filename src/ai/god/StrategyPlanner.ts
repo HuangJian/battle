@@ -209,6 +209,18 @@ export function findUrgentPowerUpTargetImpl(
     }
   }
 
+  // §166 / B1: star rush — below starRushMaxLevel the first star is a
+  // permanent-DPS upgrade worth a field-wide errand (M6/M11: each star ~
+  // +9pp; hard 35x120 forensics: 75% of base-death losses never picked a
+  // star). Computed once per scan; the level cannot change mid-scan
+  // (pickups resolve in the Simulation, not here).
+  let starRush = false
+  if (p.starRushMode > 0) {
+    const ct = self.controlledTank(w)
+    starRush = (ct?.level ?? 0) < p.starRushMaxLevel
+  }
+  const liftGates = starRush && p.starRushLiftGates > 0
+
   let bestCol = 0
   let bestRow = 0
   let bestDist = Infinity
@@ -229,12 +241,16 @@ export function findUrgentPowerUpTargetImpl(
       p.pickupStarBoxRow > 0 &&
       (pu.type === 'star' || pu.type === 'tank') &&
       Math.floor(pu.y / CELL) >= p.pickupStarBoxRow
-    if (nearbyEnemy && !starInBox) continue
+    // §166 / B1: rush stars share the D5 exemption shape (field-wide).
+    const rushStar = starRush && pu.type === 'star'
+    if (nearbyEnemy && !starInBox && !(rushStar && liftGates)) continue
     // §88 tier gate: only consider items of the requested tier (default 'all'
     // = pre-§88 behavior, byte-identical).
     if (tier !== 'all' && urgentTier(pu.type) !== tier) continue
     const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
-    const range = urgentPickupRange(pu.type, p)
+    let range = urgentPickupRange(pu.type, p)
+    // §166 / B1: extended urgent range for rush stars (4 -> starRushRangeCells).
+    if (rushStar && p.starRushRangeCells > range) range = p.starRushRangeCells
     // Distance gate by category — the core of the tuning sweep.
     if (range <= 0 || dist > range) continue
 
@@ -249,7 +265,11 @@ export function findUrgentPowerUpTargetImpl(
     // Path safety gate: no enemy between the player and the item (D5: the
     // base-box star/tank exemption above also lifts this gate — both §87
     // gates starve under 4-enemy field pressure).
-    if (self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger && !starInBox)
+    if (
+      self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger &&
+      !starInBox &&
+      !(rushStar && liftGates)
+    )
       continue
 
     // Reachability gate: the tank must be able to drive to a cell that
@@ -1086,6 +1106,79 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
   return self._selTargetBuf
 }
 
+// §171: travel-cost model for pathTargetMode. A dig-only route means the
+// player must fire through brick first — real cost far exceeds step count,
+// so it is priced above any plausible corridor length (grid diameter ≤ 48).
+// The penalty matches the probe's dig cost (1000): the override fires only
+// when the Manhattan pick's real cost explodes, not for short 1-2 brick
+// digs that are legitimately worth taking. A fully unreachable enemy keeps
+// Manhattan ordering under a large penalty so it is only picked when
+// nothing better exists.
+const PATH_TARGET_DIG_PENALTY = 1000
+const PATH_TARGET_UNREACHABLE_PENALTY = 2000
+
+// §171: reusable Cell buffers for huntPathCost's findPath calls — avoids
+// per-query allocation (AGENTS §14.1). findPath is synchronous and never
+// reentrant within think(), same discipline as pathfind.ts's own buffers.
+const _huntFrom: Cell = { col: 0, row: 0 }
+const _huntTo: Cell = { col: 0, row: 0 }
+
+/**
+ * §171: true travel cost playerCell → enemy cell for pathTargetMode,
+ * memoized on (playerCell, enemyId, enemyCell, tileMap.revision) in the
+ * fixed 8-slot table on GodAIInput. findPath draws no RNG, so the memo is
+ * byte-identical. Returns the corridor length when a pure corridor
+ * connects, dig length + penalty when only brick-breaking works, and
+ * Manhattan + large penalty otherwise.
+ */
+function huntPathCost(
+  self: GodAIInput,
+  playerCell: Cell,
+  enemyId: number,
+  ecCol: number,
+  ecRow: number,
+): number {
+  const pKey = playerCell.row * GRID + playerCell.col
+  const eKey = ecRow * GRID + ecCol
+  const rev = self.world.tileMap.revision
+  const eId = self._pathCostEId
+  for (let s = 0; s < 8; s++) {
+    if (
+      eId[s] === enemyId &&
+      self._pathCostPKey[s] === pKey &&
+      self._pathCostEKey[s] === eKey &&
+      self._pathCostRev[s] === rev
+    ) {
+      return self._pathCostVal[s]
+    }
+  }
+  _huntFrom.col = playerCell.col
+  _huntFrom.row = playerCell.row
+  _huntTo.col = ecCol
+  _huntTo.row = ecRow
+  const tm = self.world.tileMap
+  let cost: number
+  const corridor = findPath(tm, _huntFrom, _huntTo)
+  if (corridor) {
+    cost = corridor.length
+  } else {
+    const dig = findPath(tm, _huntFrom, _huntTo, { breakBrick: true })
+    cost = dig
+      ? PATH_TARGET_DIG_PENALTY + dig.length
+      : PATH_TARGET_UNREACHABLE_PENALTY +
+        Math.abs(ecCol - playerCell.col) +
+        Math.abs(ecRow - playerCell.row)
+  }
+  const slot = self._pathCostNext
+  self._pathCostNext = (slot + 1) & 7
+  eId[slot] = enemyId
+  self._pathCostPKey[slot] = pKey
+  self._pathCostEKey[slot] = eKey
+  self._pathCostRev[slot] = rev
+  self._pathCostVal[slot] = cost
+  return cost
+}
+
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
   // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
@@ -1338,17 +1431,58 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // The baseUnderThreat check runs every tick, so the AI immediately
   // switches to defense mode when an enemy approaches the base.
   if (!baseUnderThreat) {
+    // §170 hunt commit: while the commit window is open and the committed
+    // enemy is still alive, keep chasing it — the per-tick nearest-pick
+    // re-routes the mid-approach player whenever the nearest identity
+    // flips, sinking the approach cost (DECISIONS §170). Defense cascade
+    // runs above, so a commit never delays threat response; expiry simply
+    // falls through to the free nearest-selection below (which re-commits
+    // if the same enemy is still the pick).
+    if (
+      self.params.huntCommitTicks > 0 &&
+      self._huntCommitId >= 0 &&
+      w.frame < self._huntCommitUntil
+    ) {
+      for (let ti = 0; ti < enemies.length; ti++) {
+        if (enemies[ti].id === self._huntCommitId) return self.tankCell(enemies[ti])
+      }
+    }
     let best = enemies[0]
     let bestDist = Infinity
-    for (let ti = 0; ti < enemies.length; ti++) {
-      const t = enemies[ti]
-      const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      const adjustedDist = d - (t.bonus ? 2 : 0)
-      if (adjustedDist < bestDist) {
-        bestDist = adjustedDist
-        best = t
+    if (self.params.pathTargetMode > 0) {
+      // §171: score enemies by TRUE travel cost instead of Manhattan —
+      // maze stages put wall-separated enemies "near" in Manhattan while the
+      // real approach cost is several times larger (DECISIONS §171). The
+      // bonusHuntBias adjustment (§172) still applies; per-tick reselection
+      // is kept.
+      for (let ti = 0; ti < enemies.length; ti++) {
+        const t = enemies[ti]
+        const tc = self.tankCell(t)
+        const adjustedDist =
+          huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
+          (t.bonus ? self.params.bonusHuntBias : 0)
+        if (adjustedDist < bestDist) {
+          bestDist = adjustedDist
+          best = t
+        }
       }
+    } else {
+      for (let ti = 0; ti < enemies.length; ti++) {
+        const t = enemies[ti]
+        const tc = self.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        // §172: bonus preference is the bonusHuntBias knob (default 2 =
+        // the historical constant, byte-identical).
+        const adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+        if (adjustedDist < bestDist) {
+          bestDist = adjustedDist
+          best = t
+        }
+      }
+    }
+    if (self.params.huntCommitTicks > 0) {
+      self._huntCommitId = best.id
+      self._huntCommitUntil = w.frame + self.params.huntCommitTicks
     }
     return self.tankCell(best)
   }

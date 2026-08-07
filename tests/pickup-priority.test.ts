@@ -333,3 +333,87 @@ describe('§87 think() integration', () => {
     expect(dir).not.toBeNull() // aggressive navigates toward the power-up
   })
 })
+
+// ================================================================
+// §166 / B1 — star rush (星经济冲刺).
+//
+// While the controlled tank is below starRushMaxLevel, STAR pickups get an
+// extended urgent range and (with liftGates) bypass the §87 nearby-enemy +
+// route-danger gates. Off by default (byte-identical).
+// ================================================================
+
+function rushParams(overrides: Partial<GodAIParams> = {}): GodAIParams {
+  return {
+    ...onParams(),
+    starRushMode: 1,
+    starRushMaxLevel: 2,
+    starRushRangeCells: 8,
+    starRushLiftGates: 1,
+    ...overrides,
+  }
+}
+
+describe('§166 star rush — targeting', () => {
+  it('default OFF: starRushMode is 0 in the shipped defaults (byte-identical)', () => {
+    expect(DEFAULT_GOD_AI_PARAMS.starRushMode).toBe(0)
+  })
+
+  it('OFF: an 8-cell star behind an enemy is NOT targeted (MID range 4 + gates)', () => {
+    const { world, ai } = setup(onParams())
+    world.player!.level = 1
+    placeEnemy(world, 4, 24) // on the route AND within 5 cells of the player
+    world.addPowerUp(makePowerUp(900, 'star', 8, 24)) // dist 8 > MID range 4
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toBeNull()
+  })
+
+  it('ON: rush extends the star range and lifts both §87 gates (level 1 < maxLevel 2)', () => {
+    const { world, ai } = setup(rushParams())
+    world.player!.level = 1
+    placeEnemy(world, 4, 24) // blocks route-danger + nearby gates
+    world.addPowerUp(makePowerUp(900, 'star', 8, 24)) // dist 8 ≤ rush range 8
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toEqual({ col: 8, row: 24 })
+  })
+
+  it('ON but level ≥ starRushMaxLevel: rush stops at 2★ (no greed for the 3rd star)', () => {
+    const { world, ai } = setup(rushParams())
+    world.player!.level = 2
+    placeEnemy(world, 4, 24)
+    world.addPowerUp(makePowerUp(900, 'star', 8, 24))
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toBeNull()
+  })
+
+  it('liftGates=0: the extended range still applies on a SAFE path', () => {
+    const { world, ai } = setup(rushParams({ starRushLiftGates: 0 }))
+    world.player!.level = 1
+    // No enemy at all — path safe, but dist 8 > MID range 4.
+    world.addPowerUp(makePowerUp(900, 'star', 8, 24))
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toEqual({ col: 8, row: 24 })
+  })
+
+  it('liftGates=0: an on-route enemy still blocks the rush star', () => {
+    const { world, ai } = setup(rushParams({ starRushLiftGates: 0 }))
+    world.player!.level = 1
+    placeEnemy(world, 4, 24)
+    world.addPowerUp(makePowerUp(900, 'star', 8, 24))
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toBeNull()
+  })
+
+  it('the spawn-band exclusion still applies to rush stars', () => {
+    const { world, ai } = setup(rushParams())
+    world.player!.level = 1
+    // Park the player near the spawn band so the star is within rush range.
+    world.player!.x = 0
+    world.player!.y = 16 // cell (0,1)
+    const pcx = 16
+    const pcy = 16 + TANK / 2
+    world.addPowerUp(makePowerUp(900, 'star', 6, 2)) // dist 7 ≤ 8, row 2 ≤ spawnRowMax 3
+    expect(ai.findUrgentPowerUpTarget(pcx, pcy)).toBeNull()
+  })
+
+  it('rush only affects stars: an 8-cell shield is still gated by MID range', () => {
+    const { world, ai } = setup(rushParams())
+    world.player!.level = 1
+    world.addPowerUp(makePowerUp(900, 'shield', 8, 24))
+    expect(ai.findUrgentPowerUpTarget(PCX, P_CY)).toBeNull()
+  })
+})

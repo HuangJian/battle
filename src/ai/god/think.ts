@@ -43,6 +43,7 @@ import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import { enemyCanShootBase, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
 import { iceGlideAdjust } from './Navigator'
 import { isFieldRetreatConditionImpl } from './StrategyPlanner'
+import { superItemPressesImpl } from './SuperItems'
 import {
   carvePostImpl,
   carveThreatEnemyImpl,
@@ -1369,10 +1370,19 @@ const HUNT: Candidate = {
         }
       }
     }
+    // §168: navStuckZone — exact-cell comparison is defeated by sub-pixel
+    // jitter: playerCell() is the tank CENTER and a 1px bounce across a
+    // cell boundary flips it (e.g. S34 s8: y 87.02↔88.10 → center (4,5)↔
+    // (4,6) every ~6 ticks), resetting the counter before it can ever
+    // reach navStuckTicks. The ±1 zone check is the §152 aggNavStuckTicks
+    // pattern — jitter stays inside the zone, real movement leaves it.
+    const zone168 = self.params.navStuckZone > 0
     if (
       self._navStuckCell &&
-      self._navStuckCell.col === pc.col &&
-      self._navStuckCell.row === pc.row
+      (zone168
+        ? Math.abs(self._navStuckCell.col - pc.col) <= 1 &&
+          Math.abs(self._navStuckCell.row - pc.row) <= 1
+        : self._navStuckCell.col === pc.col && self._navStuckCell.row === pc.row)
     ) {
       self._navStuckTicks++
     } else {
@@ -1386,7 +1396,26 @@ const HUNT: Candidate = {
       self._campKillsAtStart = w.killCount
     }
 
-    const navStuck = self._navStuckTicks > self.params.navStuckTicks
+    let navStuck = self._navStuckTicks > self.params.navStuckTicks
+    // §168: escape suppression window — triggering the escape once is not
+    // enough: leaving the zone resets the counter, and the still-oscillating
+    // target selection pulls the player straight back into the same spot
+    // (S34 s8: escaped 3 cells up at t748, back in the pin by t800). After
+    // a trigger, keep escaping for navStuckSuppressTicks HUNT evaluations
+    // (the §152 window pattern) so the player actually clears the region.
+    if (
+      navStuck &&
+      self.params.navStuckZone > 0 &&
+      self.params.navStuckSuppressTicks > 0 &&
+      self._navStuckSuppress <= 0
+    ) {
+      self._navStuckSuppress = self.params.navStuckSuppressTicks
+      self._navStuckCell = null
+      self._navStuckTicks = 0
+    } else if (self._navStuckSuppress > 0) {
+      self._navStuckSuppress--
+      navStuck = true
+    }
 
     let navTarget: Cell | null
     // P3.1: When nav-stuck triggers, only go to center if the player is
@@ -1514,7 +1543,11 @@ const HUNT: Candidate = {
         // dodging specific bullets. Keep 1v1 fire-rate comparison only.
         if (self.params.closeCombatDuel > 0) {
           const enemyTank = findCloseEnemyImpl(
-            self, pcx, pcy, dangerDir, self.params.closeCombatDangerRange,
+            self,
+            pcx,
+            pcy,
+            dangerDir,
+            self.params.closeCombatDangerRange,
           )
           const playerFaster = enemyTank ? playerFasterThanImpl(p, enemyTank) : true
           if (!playerFaster) {
@@ -2222,4 +2255,10 @@ export function thinkImpl(self: GodAIInput): void {
   // M2: the chain runs in effective-weight order (pre-built per reset in
   // GodAIInput._orderedCandidates; default = the M1 chain order).
   if (!runChain(self, ctx, self._orderedCandidates)) HUNT.evaluate(self, ctx)
+
+  // §167 / B4: super-item press flags ride the same tick's decision context
+  // (reactive gates only — never feed back into the chain above). The dead
+  // branch returns early; endFrame() cleared the flags last tick, so they
+  // stay false while dead.
+  superItemPressesImpl(self, ctx)
 }

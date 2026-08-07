@@ -42,9 +42,10 @@ function ringArena(): StageData {
   return { id: 9996, name: 'Mid Lane Arena', tiles, enemies: ['basic'] }
 }
 
-function makeWorld(
-  overrides: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {},
-): { world: World; ai: GodAIInput } {
+function makeWorld(overrides: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
+  world: World
+  ai: GodAIInput
+} {
   const world = new World()
   world.rng = new RNG(42)
   world.difficultyKey = 'hard'
@@ -79,12 +80,7 @@ function positionPlayer(world: World, col: number, row: number): void {
 }
 
 /** Spawn a basic enemy tank at a specific cell. */
-function spawnEnemy(
-  world: World,
-  col: number,
-  row: number,
-  dir: Direction = 'down',
-): Tank {
+function spawnEnemy(world: World, col: number, row: number, dir: Direction = 'down'): Tank {
   const t = world.createTank('basic', col * CELL, row * CELL, dir)
   t.spawnTimer = 0
   world.tanks.push(t)

@@ -2184,3 +2184,190 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 **结论**：主动防守在 God AI 架构中**根本性有害**——敌人出现≠威胁，玩家必须主动杀敌。反应式 midLaneDefense（仅子弹触发）是唯一安全的触发方式。**保持 OFF**。
 
 **Implications:** 三项深度调优均证明现有 God AI 已充分调优。`findPathThreatImpl` 的对齐修复（32px→19px）和钢铁遮挡保留在代码中（为未来使用），但 `pathThreatAvoidance=0`。`countAlignedEnemiesImpl`（含墙遮挡）保留在代码中，`t2aOutnumberedRetreat=0`。`midLaneHold=0`。最终发货配置：`midLaneDefense=1` + `closeCombatDuel=1` + 水阻弹 bug 修复。
+
+
+## 166. B1 starRush 星经济冲刺 — 诚实阴性归档（旋钮默认 0，2026-08-07）
+
+**Decision:** 新增 4 参数（`starRushMode` 默认 0 OFF、`starRushMaxLevel=2`、`starRushRangeCells=8`、`starRushLiftGates=1`）。开启且 level < maxLevel 时，星的紧急拾取范围从 4 格扩到 starRushRangeCells，并（liftGates=1）解除 §87 nearby-enemy / route-danger 门。实现于 `findUrgentPowerUpTargetImpl`（StrategyPlanner.ts）。
+
+**验证（hard）：**
+- 35×20 四臂筛选：OFF 76.6% / A(r8,lift0) 76.7% / B(r8,lift1) 77.3% / C(r12,lift1) 77.1% — 方向为正但噪声内。
+- 60-seed 决定性确认：OFF 75.9% / B 76.3%（+9 胜）/ C 76.2%（+7 胜）；配对翻转检验 B: L→W 24 / W→L 15，z=1.44；C: z=0.98 — 均 < 1.96，**不显著**。
+- 机制探针：败局 final-2star 14.6%→17.6%（B 臂，机制真实生效），但星拾取量 0.30→0.31/run 几乎没动。
+
+**Rationale:** 星供给是瓶颈——drop table 中星仅占全部道具 10.8%（practical tier 40% 内 4 种均分），拾取行为改善的天花板被供给锁死。行为侧再激进也捡不到不存在的星。不发布。
+
+**Implications:** 旋钮留档默认 0（byte-identical）。若未来星供给提升（drop table 改动），starRush 可复活。单测 8 条（tests/pickup-priority.test.ts §166 块）。
+
+## 167. B4 超级道具战略激活（superItemMode）— SHIPPED guard-only（2026-08-07）
+
+**Decision:** God AI 此前从不激活库存型超级道具（`GodAIInput.wasItemPressed` 恒 false，SimulationPlayer 注释 "Super items are human-only"）。hard 35×120 取证：败局终态 ~8% 持有闲置 guard、8.5% frenzy、8% rewind、7.8% sacrifice（pickup census = 库存，因从未消耗）。本条让 God AI 战略激活 guard 与 frenzy：
+- `superItemMode`（默认 0 = OFF byte-identical；1 = ON）。
+- `superItemGuardThreat`（默认 1）：`isBaseUnderThreat()` 且无存活 ally 守卫时按 F5（天降神兵召唤守卫守基地）。
+- `superItemFrenzyAim`（默认 1）：当前朝向（p.dir）的前方扫描命中敌人（`scanAheadImpl`，中途有墙算无命中）且无来袭弹威胁（threat==null）且非狂暴进行中时按 F6。初版用 `enemyInShotCorridorImpl`，单测暴露它是 §121 玩家与基地之间的专用走廊（基地以北远处的敌人匹配不到），改用全向前方扫描。
+- sacrifice 是被动触发（丢命时 AoE），无需按键；rewind 依赖 RecoveryController（Game.ts），无头 sim 无人消费 `rewindPending`，不接。
+
+**Rationale:**
+- 这是完全未动用的合法游戏内杠杆：道具已被捡起（占用 drop），却 100% 浪费。守卫是完整 GOD AI 大脑的守基地盟友（§159），恰对 91% 败因（base_destroyed）。
+- 触发条件刻意反应式（threat 触发），吸取 §163/§164「主动防守钉死玩家」证伪教训——激活道具不改变玩家移动决策链，零干扰击杀节奏。
+- frenzy 仅在朝向有敌且无来袭弹时释放，避免锁定移动被白打。
+
+**A/B 验证结果（2026-08-07 补录）：**
+- **35×20 四臂筛选**（OFF / guard-only / frenzy-only / both）：guard 77.3%（net +5，z=1.51）；frenzy 75.9%（net −5，负向）；both 76.9%（net +2，被 frenzy 拖累）。
+- **60-seed 配对确认（guard-only，`superItemMode=1,superItemFrenzyAim=0`）：hard 75.9% → 76.5%，翻转 L→W=25 / W→L=12，z=2.14 ≥1.96 显著。**逐关 11 升 3 降（S4+3、S9/S19/S20/S30 +2；S13/S18 −2），无集中劣化。
+- chaos 60-seed：70.7% → 70.9%，net +4（z=0.57）中性无回退。
+- **frenzy 阴性归因：**狂暴锁定移动整个弹幕窗口，释放瞬间的 threat==null 门拦不住后续来袭弹——实测净负，旋钮留档默认 0。
+- **发布口径：**`superItemMode=1` + `superItemGuardThreat=1` + `superItemFrenzyAim=0`（guard-only）；classic 经 CLASSIC_MODEL_PARAMS 还原 0（§115 纪律）；GUARD_GOD_AI_PARAMS 保持 0（守卫无库存）。门禁：hard/chaos gate 绿（chaos 513/700 vs floor 394）、classic regression gate 绿（字节不变）、calibration 绿。
+- **陷阱记录：**PowerShell 下 `--set a=1,b=0` 逗号被吞（第二参数丢失，三臂语料完全相同即铁证）——`--set` 值含逗号必须加引号。另：本节初版曾把 GBK 字节写进 UTF-8 文件导致混合编码（SearchReplace 无法再写入），已用脚本修复为纯 UTF-8。
+
+**Implications:** 无头 sim 中 guard 首次可生成（此前仅本机人类回合）。下一个杠杆方向见 progress.md。
+
+## 168. navStuck 计数器抖动重置 bug（navStuckZone）— 实验阴性，旋钮留档默认 0（2026-08-07）
+
+**问题（铁证 S34 Battlement seed 8，tmp/trace-s34-8b.log）：** 玩家 t540 起在 (5,6) 被钉死 ~1200 tick（0 击杀、0 有效位移、基地 t1764 亡）。两层防卡死机制全部失效：
+1. **cell 级 `_navStuckTicks`（P0.3，阈值 180）**：玩家像素 y 在 87.02↔88.10 亚像素抖动（每 ~6 tick），`playerCell()` 中心格在 (4,5)↔(4,6) 间翻转，`_navStuckCell.col === pc.col && row ===` **精确相等**比较每 6 tick 把计数器重置回 1——nst 永远 ≤6，180 阈值永远不触发。与 §162 注释描述的 pocket 振荡机制同源，但 §162 只管 carve-dig 启动。
+2. **像素级 `_digBlockTicks`（§162）**：累计到 1241（阈值 90 早已越过，抖动 1px < 24px net-escape 不重置锚点），但 carve-dig 启动门要求 `!info.corridor`——此局面存在走廊路径（玩家并非密封口袋，是被决策振荡钉死），dig 拒绝启动。
+
+**Decision:** 新增两旋钮（均默认 0 = byte-identical）：`navStuckZone`（ON 时 `_navStuckTicks` 的同格比较改为 §152 aggNavStuckTicks 同款的 ±1 zone 比较，亚像素中心格抖动不再重置计数器）+ `navStuckSuppressTicks`（逃逸触发后持续逃逸窗，§152 窗口模式；单独触发不够——逃出 zone 计数器重置后振荡的目标选择立刻把玩家拉回原处，s8 实测 t748 逃出 3 格、t800 回到钉死位）。kill 重置逻辑不变；计数器达阈值后沿用既有 P0.3 逃逸（navigateTowards 中心 + 多级 fallback），不新增逃逸路径。classic 经 CLASSIC_MODEL_PARAMS 还原 0；GUARD_GOD_AI_PARAMS 强制 0（yield replay-locked）。
+
+**A/B 验证结果：**
+- 35×20 三臂筛选：OFF 77.3% / zone-only 78.1%（net +6）/ zone+窗口 75.9%（net −10）——窗口臂确认负向丢弃（同 s8 单 seed 观察：逃逸窗把玩家拖离敌人走廊，击杀机会反而变少）。
+- **60-seed 配对确认（zone-only）：76.5% → 76.8%，翻转 L→W=146 / W→L=141，net +5，z=0.30 — 不显著。**S34 本关 delta −1；逐关无集中改善（churn 极高，机制大量介入但正负相抵）。
+
+**阴性归因：** 振荡钉死确实存在且被修复（单 seed trace：1200-tick 钉死→逃逸正常触发，dwell 测试 4 条全绿），但钉死是**果**不是**因**：逃出后玩家只是换个地方继续低效（逃逸方向无击杀目标、T2a 原地驻守看基地亡）。60-seed churn 146/141 说明机制把大量局推入了新的随机轨道，胜负各半。同 §166 B1 教训：行为层修复的天花板被上游瓶颈（击杀效率/目标选择质量）锁死。
+
+**Rationale:**
+- 修的是既有 SHIPPED 机制（P0.3 navStuck）的探测器 bug，不是新增策略——zone 比较在 §152 已实战验证（SHIPPED）。
+- 拒绝的方案：① 用 `_digBlockTicks` 直接触发逃逸——像素级检测无法区分「被钉死」与「有意驻守」（T2a camps），故触发点留在 HUNT 内；② 放宽 carve-dig 的 `!info.corridor` 门——走廊存在时挖墙是错误行为，问题本质是决策振荡不是密封。
+
+**Implications:** 旋钮留档默认 0（byte-identical），机制代码与 4 条测试保留（tests/godai-navstuck-zone.test.ts：OFF 复现钉死 + ON 上界 + zone-only 缩短铁证）。真正杠杆在目标选择质量/击杀效率，见 progress.md。诊断工具留档：tmp/probe-oscillation.ts（振荡量化）、tmp/trace-s34.ts（逐 tick 追踪，支持 argv 参数覆写）。
+
+## 169. 基地威胁信号闪烁（threatStickyTicks）— 立项（2026-08-07）
+
+**问题（败局决策链剖析，363 局 base_destroyed，tmp/probe-base-response.ts）：**
+- 威胁检测不缺位：首击前威胁信号中位提前 25.3s（p25 16s），防御分支窗口内占 87.6%。
+- 但**信号闪烁**：首击前 10s 威胁在位率仅 **69.6%**，平均 **9.8 次翻转/10s**（267/363 局 ≥4 次翻转）——敌人进出 race 范围/对齐列时信号高频 true→false。
+- 后果：信号为 false 的瞬间 selectTarget 落入「追最近敌人」分支（L1360），把玩家从基地方向拉走；窗口内玩家距基地 13.3→最近 8.8→死亡时又回 11.6 格（往返震荡），closer-tick 仅 3%。防御分支虽在位，却在间隙里被反复打断，敌人穿隙开火。基地防御窗中位仅 5s（首击时 HP 72≈1.2 发），反应式救不回，只能预防。
+
+**Decision:** 新增旋钮 `threatStickyTicks`（默认 0 = byte-identical）：`isBaseUnderThreat()` 一旦为 true，至少保持 true `threatStickyTicks` tick（底层检测再次为 true 时刷新计时）。实现为 GodAIInput 上的 `_threatStickyHold` 计数器：isBaseUnderThreat 计算完底层 result 后叠加 hold（只延长不缩短）；endFrame 递减；reset() 清零。所有下游消费者（selectTarget 防御级联、skipT2aForDefense、道具门、F5 guard 召唤、carve 门）自动继承一致信号。classic 经 CLASSIC_MODEL_PARAMS 还原 0；GUARD_GOD_AI_PARAMS 强制 0。
+
+**Rationale:**
+- 这不是 D 系列「主动守位」（§163/§164/§165-3 已证伪：敌人出现≠威胁、钉死玩家）——信号本身仍是反应式的（底层检测触发），粘滞只消除闪烁间隙；防御分支激活时玩家照常追威胁敌/拦截，不是驻守雕像。
+- 预警充足（中位 25s）而窗口利用失败（3% closer）——问题在信号连续性不在检测灵敏度，粘滞是最小干预面（一个计数器）的修法。
+- 风险：延长 threat=true 会多触发 F5 guard 召唤与 skipT2a——交给 A/B 裁决（初值候选 120 tick = 2s，覆盖 ~1 次闪烁周期）。
+
+**验证计划：** 红绿单测 → 35×20 筛选（threatStickyTicks=120）→ ≥60-seed 配对 → 门禁。
+
+**A/B 验证结果（2026-08-07 补录）— 阴性结案：**
+- 35×20 筛选：OFF 77.3%（541/700）/ sticky=120 76.0%（532/700，净 −9，z=−0.73，S21/S22 各 −6 集中劣化）/ sticky=60 净 +1（z=0.08，151 次翻转 churn 高但中性）。
+- 阴性归因：防御分支已在位 87.6% 仍救不回——闪烁间隙不是瓶颈，瓶颈是防御模式激活后的**击杀转化**本身；延长 threat=true 反而让迷宫关（S21/S22）多花时间防御少杀敌。同 §168 教训再次确认：信号/行为层修复的天花板被击杀吞吐锁死。
+- 旋钮留档默认 0（byte-identical），机制代码 + 5 条单测保留（tests/godai-threat-sticky.test.ts）。诊断工具留档：tmp/probe-base-response.ts（决策链剖析：威胁提前量/在位率/闪烁/移动性/目标归属）。
+
+
+## 170. 追击承诺（huntCommitTicks）— 立项（2026-08-07）
+
+**问题（尾部败局剖析 + S34 深剖，tmp/probe-tail-chain.ts / probe-s34-deep.ts / probe-target-switch.ts）：**
+- 尾部 9 关 67 败局：首击时玩家距基地中位 11.9 格（55% >10 格），43% 基地在首击后 ≤5s 崩溃——防御反应几何迟到，唯一出路是提高击杀吞吐、在攻击者就位前清场。
+- 目标切换率胜败同构（4.43 vs 4.03 次/10s），§168 式「抖动」不是主因；但败局 navigate 占比 0.738 vs 胜 0.591，败局平均距最近敌 8.0 vs 7.2 格——时间花在接近路上。
+- **S34（Battlement，胜率 11%）铁证：敌人存活时长 p75 65.6s（迷宫驻敌近一分钟不被清），败局近身接敌（≤5 格）时间仅占 9.0% vs 胜局 31.8%（3.5×）。**败局玩家与敌人长期隔墙对齐（LOS 对齐 56%）却无法收口成击杀，基地被驻敌慢慢磨穿（防御窗仅 2s）。
+- 结论（与 §168/§169 阴性归因一致）：瓶颈是击杀吞吐。selectTarget 每 tick 重选最近敌，接近途中最近敌身份易主时玩家改道，接近成本反复沉没。
+
+**Decision:** 新增旋钮 `huntCommitTicks`（默认 0 = byte-identical）：普通追猎分支（!baseUnderThreat 最近敌选择）选中目标后承诺 `huntCommitTicks` tick——窗口内承诺目标仍存活时持续追它，即使另一敌人短暂更近；窗口到期后重新自由评选（若同一目标仍最近则自动续约）。承诺仅在普通追猎分支生效：防御级联（threat 分支）、canHunt 终局、freeze 强攻均不受影响；threat 期间不写入承诺。状态落在 GodAIInput（`_huntCommitId`/`_huntCommitUntil`），reset() 清零。classic 经 CLASSIC_MODEL_PARAMS 还原 0；GUARD_GOD_AI_PARAMS 强制 0（replay-locked）。
+
+**Rationale:**
+- 最小干预面：只改最近敌选择一处，不动候选权重/防御级联——吸取 §168/§169「机制大量介入但 churn 正负相抵」教训，承诺窗短（候选 120 tick = 2s）限制误追上限。
+- 拒绝的方案：① last-seen 记忆追点（目标切换率胜败同构，无抖动可修）；② 全局追击距离上限（与 maxPlayerDistFromBase/M13 撤退重叠）。
+- 风险：承诺追远敌 2s 内基地遇袭——threat 分支每 tick 优先级高于 hunt，检测灵敏（race 18 格），风险由 A/B 裁决。
+
+**验证计划：** 红绿单测 → 35×20 筛选（huntCommitTicks=120）→ ≥60-seed 配对 → 门禁。
+
+**A/B 验证结果（2026-08-07 补录）— 阴性结案：**
+- 35×20 筛选：OFF 77.3%（541/700）/ huntCommitTicks=120 **71.9%（503/700，净 −38，z=−2.97，显著负）**/ huntCommitTicks=30 77.4%（542/700，净 +1，中性）。
+- 阴性归因：每-tick 最近敌重选其实是**适应性优势**而非缺陷——敌人以波次持续涌入，新 spawn 的敌人常比旧目标更危险（更近基地/更有威胁），2s 承诺窗把玩家锁在已过时的目标上，错过新波次的第一时间击杀（120 臂 base_destroyed 143→173）。30 臂中性说明窗口短到不产生行为差异时也无收益。
+- 教训（与 §168/§169 合并为三条连证）：**反应式逐-tick 决策链本身不是瓶颈**——目标切换、信号连续性、追击承诺三个「决策平滑化」方向全部阴性。败局的 navigate 超支是击杀吞吐螺旋的果，不是决策质量的因。
+- 旋钮留档默认 0（byte-identical），机制代码 + 5 条单测保留（tests/godai-hunt-commit.test.ts）。
+
+
+## 171. 路径长度感知目标选择（pathTargetMode）— 立项（2026-08-07）
+
+**问题（分歧探针，tmp/probe-pathdiv.ts，60 败 + 60 胜每 0.5s 采样帧）：**
+- 普通追猎分支（!baseUnderThreat）用**曼哈顿最近敌**选目标。迷宫关曼哈顿距离严重偏离真实路径成本：败局中被曼哈顿选中目标的平均路径超支 **20.82 格**（胜局仅 3.33，6.3×）；分歧帧（曼哈顿最近 ≠ 路径最近）败局额外路径成本 4.18 vs 胜局 2.33。分歧率本身胜败接近（8.9% vs 7.7%）——差异不在频率，在**分歧的代价**。
+- S15/S11/S10 avgGap 高达 117–230 格：被选目标只能靠 dig（打穿砖墙）到达，玩家被「曼哈顿近但隔墙」的敌人反复吸走。与 S34 近身接敌仅 9%（胜局 31.8%）、败局 navigate 占比 73.8% 一致：击杀吞吐损耗在接近路上。
+- 与 §168–170「决策平滑化」（三连阴性）不同：本方向不改重选频率，修的是**选择度量本身**（曼哈顿 → 真实路径成本），是对 §170 阴性归因「每-tick 重选是适应性优势」的正交补全——重选保持逐 tick，只是每次评选用对的尺子。
+
+**Decision:** 新增旋钮 `pathTargetMode`（默认 0 = byte-identical）：=1 时普通追猎分支的敌人评分从曼哈顿距离改为真实路径成本——corridor 路径存在取 `findPath` 长度；否则取 dig 路径长度 + 固定惩罚（dig 需打砖，实际耗时远超步数）；两者皆无退化为曼哈顿距离 + 大惩罚（保底仍可排序）。bonus −2 调整保留。缓存：GodAIInput 上固定 8-slot memo，键 = (playerCell, enemyId, enemyCell, tileMap.revision)；findPath 不消耗 RNG（纯函数），缓存 byte-identical；reset() 清空。classic 经 CLASSIC_MODEL_PARAMS 还原 0；GUARD_GOD_AI_PARAMS 强制 0（replay-locked）。
+
+**Rationale:**
+- 最小干预面：只改普通追猎分支一处评分；防御级联（threat 加权，非距离驱动）/ canHunt 终局 / §88 chokepoint / aggressive 全不动。
+- 成本可控：场上敌人 ≤4；缓存命中为主，仅 playerCell/enemyCell/terrain revision 变化时重算；findPath 已复用模块级缓冲（AGENTS §14 无分配）。
+- 拒绝的替代：BFS 连通分量排除不可达敌（= dig 成本 ∞ 的特例，被路径成本模型包含）；防御分支同用（防御评分是威胁加权不是距离驱动，混用会稀释 clearShot 优先）。
+- 风险：评选尺度变化可能让玩家绕开曼哈顿最近敌去追路径近但方位远的敌人，改变击杀节奏——交 A/B 裁决。
+
+**验证计划：** 红绿单测 → 35×20 筛选（pathTargetMode=1）→ ≥60-seed 配对 → 门禁。
+
+**A/B 验证结果（2026-08-07 补录）— 阴性结案：**
+- 35×120 筛选（hard 4200 runs/臂）：OFF 76.2%（3200/4200）/ pathTargetMode=1 全评分 **77.0%（3236/4200，净 +36，z=0.45，不显著）**。bonus×4 臂净 −15、最小介入臂（仅 dig-only 时替换）净 +1（介入点被威胁级联吃掉）、dig 惩罚 1000 臂与 100 完全相同（净 +36）——惩罚量级不是杠杆。
+- 关键结构：**关卡级 churn 方向分明**——迷宫/多墙关改善（S20 −10、S31 −10、S3 −8、S7 −7、S28 −7 败局），开阔关退化（S12 +10、S22 +10、S29 +9、S24 +6）。正负抵消 → 全局中性。
+- 阴性归因：开阔关曼哈顿≈路径成本，全评分仍会因 corridor 绕行微差重排目标，改变击杀节奏反而劣化；而真需要修的 dig-only 场景要么被防御级联先截走（最小介入臂证明），要么修对了也被开阔关退化抵消。目标选择度量与 §168-170 一样，**天花板被击杀吞吐与攻防节奏锁死**——换尺子不造新吞吐。
+- 教训（四连阴性 §168/169/170/171 合并）：selectTarget 层面的决策质量修复（平滑化、承诺、度量修正）全部碰顶。下一杠杆必须离开目标选择层：击杀转化本身（防御模式激活后的输出效率）或掉落经济（75% 败局无星 → 火力差距 → 击杀螺旋的源头）。
+- 旋钮留档默认 0（byte-identical），机制代码 + 7 条单测保留（tests/godai-path-target.test.ts）。诊断工具留档：tmp/probe-pathdiv.ts（曼哈顿 vs 路径距离分歧率/代价探针）。
+
+
+## 172. bonus 敌人追猎权重（bonusHuntBias）— 立项（2026-08-07）
+
+**问题（掉落螺旋量化，probe-tail-chain + 道具普查 + §171 四连阴性后的杠杆重估）：**
+- selectTarget 决策质量层已确认碰顶（§168/169/170/171 四连阴性）：目标切换、信号连续性、追击承诺、选择度量全部无效。下一杠杆必须造**新吞吐**而非修决策。
+- 击杀螺旋的源头是掉落经济：败局击杀 9.4/20、**75% 败局全程无星**（星局 +3.8 击杀 +15s 存活）、败局道具生成 531 vs 胜局 948。道具只从 **bonus 敌人**（闪烁红敌）掉落——bonus 击杀率决定经济。
+- 当前 bonus 优先是**硬编码 −2 曼哈顿距离偏置**（StrategyPlanner 三处最近敌循环），在 10–30 格的距离尺度上只有 2 格权重——几乎不影响选择，bonus 敌人常因稍远被放弃。
+
+**Decision:** 新增旋钮 `bonusHuntBias`（默认 **2** = 与现硬编码完全一致，byte-identical）：普通追猎分支（!baseUnderThreat）的 bonus 敌人距离偏置从常量 2 改为该参数。候选臂 4 / 6。classic 经 CLASSIC_MODEL_PARAMS 还原 2（保持经典行为字节）；GUARD_GOD_AI_PARAMS 强制 2（replay-locked）。
+
+**Rationale:**
+- 与四连阴性的本质区别：不改「怎么选」（逐-tick 最近重选保持），只改「多想要 bonus」——干预面是经济输入而非决策结构。
+- 拒绝的替代：道具生成率直接干预（游戏规则改动，违反经典精神）；星拾取优先（findPowerUpTarget 已有优先级，拾取率 78.7% 不缺位，缺的是**生成**）。
+- 风险：追远端 bonus 敌人放空近端威胁——threat 级联逐-tick 优先，风险由 A/B 裁决（§170 教训：别锁承诺，保持逐-tick 自由评选）。
+
+**验证计划：** 红绿单测 → 35×120 筛选（4 / 6 两臂 vs OFF 基线 s171-ab-off.json）→ ≥60-seed 配对 → 门禁。
+
+
+**A/B 验证结果（2026-08-07 补录）— 阴性结案：**
+- 35×120 双臂筛选（hard 4200 runs/臂，vs OFF 基线 76.2% = 3200/4200，配对口径）：
+  - bias=4：75.4%（3167/4200），翻转 L→W 409 / W→L 442，**净 −33，z=−1.13**（不显著，方向负）。
+  - bias=6：74.9%（3145/4200），翻转 478 / 533，**净 −55，z=−1.73**（不显著，方向更负）。
+- **剂量-反应单调为负**（bias 越大越差）且翻转量巨大（~850/4200 = 20% 对局被重排）——干预确实大幅改变了击杀序列，但净效应有害，不是噪声。
+- 关卡级 churn 无清晰结构：退化面更广（b6 臂 16 负 vs 13 正），最弱关 S34 两臂均恶化（−2/−4），防御型关 S12/S20/S22 一致退化。
+- 阴性归因：追远端 bonus 敌人把玩家从当前接敌节奏与基地防御扇区拉走，放空的代价（base_destroyed 仍是 ~91% 败因）超过道具收益——与 §170 教训同构：**逐-tick 自由评选是对的，任何把玩家从当下位置拉向更远目标的偏置都会劣化全局节奏**。掉落经济缺口（531 vs 948）无法在目标选择层修复。
+- 教训（五连阴性 §168–§172 合并）：selectTarget 层的所有可动旋钮（平滑化/承诺/度量/bonus 权重）全部碰顶或有害。目标选择层正式封盘；杠杆必须转向攻防结构层（扇区感知防御预置、防御模式击杀转化）。
+- 旋钮留档默认 2（= 历史硬编码常量，byte-identical），机制代码 + 6 条单测保留（tests/godai-bonus-hunt.test.ts）。对比工具留档：tmp/cmp172.cjs（配对翻转 + 关卡 churn），语料 tmp/s172-ab-{b4,b6}.json。
+
+
+## 173. 基地损伤召回（baseDamageRecall）— 立项（2026-08-07）
+
+**问题（五连阴性后的杠杆重估，目标：hard 全关 >50%、平均 >90%）：**
+- 逐关缺口量化（OFF 基线 35×120，tmp/stagegap.cjs）：**S34 Battlement 14%（17/120）是唯一 <50% 关**（需 +43 胜）；S20 58%、S8/S26 57% 次之；其余 27 关 63–89%。到 90% 需 +580 胜。
+- S34 败局解剖（103 局，tmp/s34loss.cjs）：base_destroyed 102、**玩家 0 死亡**（纯基地崩塌型）、基地中位 50s 亡、亡时玩家距基地均值 18.2 格、环砖剩 4.4/8、killer fast 50%。射击转化 6.6 发/击杀（其他弱关 4.5–5）、t2a 射击 11.6/run、19/103 局零击杀——迷宫对不齐敌人。
+- 候选方向 ①「扇区感知防御预置」：**被历史实验直接证伪**——§137/§138（守位锚点 v1/v2 净负）+ §142（D1 解盲 −1.7pp）已结论「站着防守在 hard 净负」，站位/锚点类杠杆封盘，不重测。
+- 候选方向 ②「baseHp 残血召回」：探针 tmp/probe-hpleash.ts 前两轮因 runner 口径错误（gameState 门控、stageIndex=33）产出无效数据（曾误判阴性）。第三轮修正口径后（world.state 门控 + stageIndex=0 官方口径，**胜负重演 mismatches: 0**）**推翻旧结论**：
+  - 低血量区（≤30）：胜局 1/17 进入 vs 败局 63/103 进入（进入时玩家距基地中位 25 格）——但 ≤30 到死亡窗口中位仅 46 tick（0.8s），召回太迟。
+  - **上游触发点=基地首次受伤（环砖破、第一发直射命中）**：胜局 10/17 受伤 vs 败局 103/103 受伤；受伤时玩家距基地中位 **10 vs 25 格**；受伤到终局/死亡窗口 **29.2s vs 5.1s**。
+  - 败局可召回人群（受伤 + 玩家>8格 + 窗口>5s）：**37/103（36%）**——若全部转化，S34 从 17 胜升至至多 54 胜。
+
+**关键机制洞察：** §169 剖析已证防御分支在位率 87.6% 但 closer-tick 仅 3%，L1254 的召回规则依赖 `isBaseUnderThreat()`——威胁信号在败局存在检测间隙/闪烁（§169：9.8 次翻转/10s）。**基地已受伤是一个不依赖预测的事实事件**：一旦 baseHp < baseMaxHp，说明敌人已经打穿环砖并命中基地，威胁不再是推测。此时玩家若在远处，应立即回防——这是 D 系列「预测性驻守」（§163/§164/§165 证伪：敌人出现≠威胁）与「事实性召回」的本质区别。
+
+**Decision:** 新增旋钮 `baseDamageRecall`（默认 0 = byte-identical，1 = ON）：在 `isBaseUnderThreat()` 中新增事实性分支——`world.baseHp < world.baseMaxHp` 即返回 true。复用全部既有防御级联（L1254 召回、selectTarget 防御目标、skipT2a、F5 guard 召唤、carve 门），不新写行为代码。classic 经 CLASSIC_MODEL_PARAMS 还原 0；GUARD_GOD_AI_PARAMS replay-locked 0。
+
+**Rationale:**
+- 触发信号是不对称事实：胜局受伤时玩家本就在家门口（中位 10 格，召回几乎不介入），败局受伤时玩家在 25 格外（召回正是缺的行为）。
+- 受伤后基地剩血有限（环砖已破，后续每发直射扣血），继续远猎的期望收益低于回防——与五连阴性的「偏置拉向更远目标」方向相反：本旋钮只在基地已中弹时把玩家拉回最近责任区。
+- 风险：受伤后威胁常驻 true，防御级联（skipT2a/道具门/guard 召唤）全程 engaged，可能牺牲进攻效率——交给 35×120 A/B 裁决。胜局 10/17 受伤局是关键观察点。
+
+**验证计划:** 单测（损伤触发/未损伤 byte-identical/玩家近距无额外影响/三 profile 默认 0）→ `bun run check` → 35×120 hard A/B，z≥1.96 才显著。
+
+**Results（阴性结案，2026-08-07）：** 探针口径修正记录：前两轮探针因 runner 门控错误（`world.gameState` 恒 undefined，须用 `world.state`）与 stageIndex=33（官方口径为 0，stageIndex 会喂 killScore 并实质改变胜负）产出无效数据、曾误判「0/120 局跌入低血量区」；修正后胜负重演 mismatches=0，低血量/首伤不对称确认（上表）。两臂 35×120 筛选（基线 tmp/s171-ab-off.json 3200/4200）：
+- arm 1（无条件损伤即威胁）：3176/4200，翻转 L→W 135 / W→L 159，净 −24，z=−1.40。
+- arm g12（玩家距基地 >12 格才介入，玩家回家即释放）：3165/4200，翻转 111/146，净 −35，z=−2.18（**显著负**）。
+- churn 结构两臂一致：基地压力型关卡受益（S31 +5/+4、S5 +4/+7、S30 +2/+4、S34 +3/+1），开阔/火力型关卡全线被拖（S8 −8/−7、S11 −6/−6、S12 −7、S6 −3/−6、S16 −6）。
+
+**机制解读：** 全局看「基地受伤」不是稀有终局信号而是高频常态事件（胜局 10/17 也受伤）——损伤后把防御级联（召回/skipT2a/道具门/guard 召唤）常态化 engaged，等于把玩家从击杀经济里拉走，与 §163/§164/§165 驻守族的失败同源（防御过度投入）。S34 探针显示的局部不对称（受伤时玩家远 25 格）被全局 churn 吞没：召回救回的局 < 防御模式拖死的局。距离门没有救回来（g12 反而更差）——问题不在介入面大小，而在「受伤=威胁」这个信号本身太密。
+
+**Implications:** 旋钮留档默认 0（byte-identical），方向封盘。至此 §168–173 六连阴性覆盖了：导航卡死、威胁粘滞、追猎承诺、目标度量、bonus 偏置、损伤召回——反应式威胁/目标层的全部可参数化面均已碰顶。剩余未封盘杠杆仅剩：① 防御模式击杀转化（closer-tick 3% 的 per-tick trace 级走位/射界剖析）；② 逐关深潜型结构修复（历史唯一正结果族：§146 S8、§152 S12、§167 guard 超物）。工具留档：tmp/probe-hpleash.ts（baseHp 轨迹探针，含 runner 口径修正注释）、tmp/cmp173.cjs、tmp/s173-ab-on.json、tmp/s173-ab-g12.json、tests/base-damage-recall.test.ts（7 测试）。
