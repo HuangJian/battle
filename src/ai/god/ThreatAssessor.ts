@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Bullet, Tank } from '../../types'
 import type { Direction } from '../../constants'
-import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
+import { CELL, TANK, BULLET, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from '../../utils/pathfind'
 import { ALL_DIRS, opposite, snap, aabb } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
@@ -841,6 +841,13 @@ export function dodgeCounterFireDirImpl(
  */
 const PATH_THREAT_LOOKAHEAD = 3
 
+/** §165: the actual hitbox overlap threshold — (TANK + BULLET) / 2 = 19px.
+ * A bullet can only hit the player if their center distance is < this.
+ * The old `< TANK` (32px) flagged bullets up to 2 cells away — the primary
+ * source of false positives on maze stages where bullets fly in adjacent
+ * corridors that never actually cross the player's body. */
+const PATH_THREAT_HIT_RADIUS = (TANK + BULLET) / 2
+
 export function findPathThreatImpl(
   self: GodAIInput,
   pcx: number,
@@ -851,6 +858,7 @@ export function findPathThreatImpl(
   const w = self.world
   const v = DIR_VECTORS[moveDir]
   const ps = playerSpeed > 0.1 ? playerSpeed : 1.0
+  const grid = w.tileMap.grid
 
   let bestBullet: Bullet | null = null
   let bestThreatTick = Infinity
@@ -861,15 +869,9 @@ export function findPathThreatImpl(
     const ccy = pcy + v.dy * i * CELL
 
     const playerArrivalTick = (i * CELL) / ps
-    // Collision window: both player and bullet hitboxes must overlap the cell
-    // at the same time. Player hitbox (TANK=32px) + bullet hitbox (BULLET=6px)
-    // → centers must be within (TANK+BULLET)/2 = 19px at the same tick.
-    // At bullet speed ~4px/tick, that's ~5 ticks. At player speed ~1px/tick,
-    // that's ~19 ticks. We use ±10 ticks as a balance: catches genuine
-    // same-time collisions without flagging bullets that arrive much earlier
-    // (already passed) or much later (player has moved on).
-    // This is MUCH tighter than ±TANK/ps (±30 ticks), which caused
-    // false positives on maze stages (S6/S12/S14/S22/S26 regressions).
+    // §165: the ±10 tick window is tighter than the actual overlap window
+    // (±15 ticks at ps=1.1, bs=4), so it never causes false positives from
+    // timing — only from spatial alignment and terrain occlusion.
     const threatWindow = 10
     const playerDepartureTick = playerArrivalTick + threatWindow
     const playerEnterTick = playerArrivalTick - threatWindow
@@ -882,7 +884,12 @@ export function findPathThreatImpl(
       const bcy = b.y + b.h / 2
       const vertical = b.dir === 'up' || b.dir === 'down'
 
-      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      // §165 fix 1: tighten alignment from TANK (32px) to the actual hitbox
+      // overlap threshold (19px). Bullets in adjacent corridors that never
+      // cross the player's body are no longer flagged.
+      const aligned = vertical
+        ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS
+        : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
       if (!aligned) continue
 
       const approaching =
@@ -896,6 +903,29 @@ export function findPathThreatImpl(
       const bulletArrivalTick = dist / b.speed
 
       if (bulletArrivalTick >= playerEnterTick && bulletArrivalTick <= playerDepartureTick) {
+          // §165 fix 2: terrain occlusion — skip bullets whose path to the
+          // crossing cell is blocked by steel. Steel is the ONLY terrain
+          // that permanently blocks bullets — brick is destructible (bullets
+          // break through and continue). On maze stages, many bullets are
+          // behind steel walls and can never reach the player's path.
+          // NOTE: brick is NOT checked — a bullet behind a brick wall will
+          // destroy it and continue toward the player (real threat).
+          const bv = DIR_VECTORS[b.dir]
+          let terrainBlocked = false
+          for (let d = CELL; d < dist; d += CELL) {
+            const fx = bcx + bv.dx * d
+            const fy = bcy + bv.dy * d
+            if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+            const tcol = Math.floor(fx / CELL)
+            const trow = Math.floor(fy / CELL)
+            const t = grid[trow][tcol]
+            if (t === 'steel') {
+              terrainBlocked = true
+              break
+            }
+          }
+          if (terrainBlocked) continue
+
         if (bulletArrivalTick < bestThreatTick) {
           bestThreatTick = bulletArrivalTick
           bestBullet = b
@@ -949,7 +979,7 @@ export function findSafeMoveDirImpl(
       const bcx = b.x + b.w / 2
       const bcy = b.y + b.h / 2
       const vertical = b.dir === 'up' || b.dir === 'down'
-      const aligned = vertical ? Math.abs(bcx - ccx) < TANK : Math.abs(bcy - ccy) < TANK
+      const aligned = vertical ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
       if (!aligned) continue
       const approaching =
         (b.dir === 'down' && bcy < ccy) ||
@@ -1278,4 +1308,53 @@ export function closeCombatExposureImpl(
     return enemyDir
   }
   return null
+}
+
+/**
+ * §165: count aligned enemies in a given direction within `rangeCells`.
+ *
+ * "Aligned" = same row (for left/right) or same column (for up/down), within
+ * TANK px center distance, with no wall between (scanAhead finds the enemy).
+ * Used by the ENGAGE candidate to detect when the player is outgunned: 2+
+ * aligned enemies in the scan direction means a stationary T2a duel is a
+ * losing trade (the second enemy fires while the player is locked aiming at
+ * the first). The player should keep moving to find a 1v1 angle instead.
+ *
+ * Pure World read — no RNG, no mutation. Returns the count.
+ */
+export function countAlignedEnemiesImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  rangeCells: number,
+): number {
+  const w = self.world
+  const tanks = w.tanks
+  const rangePx = rangeCells * CELL
+  const vertical = dir === 'up' || dir === 'down'
+  // Wall occlusion: only count if the FIRST thing in the scan direction is an
+  // enemy (no wall/steel between player and enemies). scanAheadImpl caches by
+  // origin+dir, so this is a single call. If a wall is closer than all enemies,
+  // none of them can fire at the player — return 0.
+  const scan = scanAheadImpl(self, pcx, pcy, dir)
+  if (!scan.enemy) return 0
+  let count = 0
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const aligned = vertical ? Math.abs(tcx - pcx) < TANK : Math.abs(tcy - pcy) < TANK
+    if (!aligned) continue
+    // Must be in the dir half-plane.
+    if (dir === 'up' && tcy >= pcy) continue
+    if (dir === 'down' && tcy <= pcy) continue
+    if (dir === 'left' && tcx >= pcx) continue
+    if (dir === 'right' && tcx <= pcx) continue
+    const dist = vertical ? Math.abs(tcy - pcy) : Math.abs(tcx - pcx)
+    if (dist > rangePx) continue
+    count++
+  }
+  return count
 }

@@ -30,6 +30,7 @@ import {
   playerFasterThanImpl,
   findCloseEnemyImpl,
   safePerpDodgeImpl,
+  countAlignedEnemiesImpl,
 } from './ThreatAssessor'
 import {
   controlledLives,
@@ -1114,6 +1115,18 @@ const ENGAGE: Candidate = {
           }
         }
         if (scan.enemyDist <= effectiveRange) {
+          // §165: T2a outnumbered retreat — when 2+ aligned enemies are within
+          // t2aOutnumberedRange cells in the scan direction, a stationary T2a
+          // duel is a losing trade (the 2nd enemy fires while the player is
+          // locked aiming at the 1st). Fall through to navigate (which moves
+          // to a safer angle or triggers P4.2 outnumbered retreat). 0 = OFF
+          // (byte-identical). Only applies in pool model (classic instant
+          // 1-HP has no grinding — a single shot kills, no trade gradient).
+          const outgunned =
+            self.params.t2aOutnumberedRetreat > 0 &&
+            w.rules.combatModel === 'pool' &&
+            countAlignedEnemiesImpl(self, pcx, pcy, aimDir, self.params.t2aOutnumberedRange) >=
+              self.params.t2aOutnumberedCount
           // Track camping duration in a ZONE (±1 cell), not exact cell.
           // P2.1fix: the old exact-cell check was defeated by sub-cell
           // oscillation — the player bounces between two adjacent cells
@@ -1147,7 +1160,7 @@ const ENGAGE: Candidate = {
           const campedTooLong =
             self._campTicks > self.params.campTimeoutTicks && w.killCount === self._campKillsAtStart
 
-          if (!campedTooLong) {
+          if (!campedTooLong && !outgunned) {
             // ---- §49: 炮口相向分场景策略 ----
             // When an enemy faces the player, adapt per enemy type: ice skips,
             // 1HP enemies fight normally (counter-fire still applies — it is a
@@ -1491,17 +1504,17 @@ const HUNT: Candidate = {
         self.params.closeCombatDangerRange,
       )
       if (dangerDir) {
-        // §153-W2: fire-rate-aware close combat — when the aligned close enemy
-        // fires FASTER than the player, a stand-and-duel is a losing trade;
-        // dodge perpendicular to a safe position instead. Faster player → keep
-        // the §85 stand-and-fire duel.
+        // §153-W2/§165: fire-rate-aware close combat. When the aligned close
+        // enemy fires FASTER than the player, a stand-and-duel is a losing
+        // trade; dodge perpendicular to a safe position instead.
+        // §165 round 2: the multi-enemy count (2+ aligned = outgunned) was
+        // A/B tested and found HARMFUL (-2.0pp) — the player MUST engage and
+        // kill enemies to win; retreating from 2v1 gives enemies free rein
+        // to approach the base. The DODGE candidate (weight 1000) handles
+        // dodging specific bullets. Keep 1v1 fire-rate comparison only.
         if (self.params.closeCombatDuel > 0) {
           const enemyTank = findCloseEnemyImpl(
-            self,
-            pcx,
-            pcy,
-            dangerDir,
-            self.params.closeCombatDangerRange,
+            self, pcx, pcy, dangerDir, self.params.closeCombatDangerRange,
           )
           const playerFaster = enemyTank ? playerFasterThanImpl(p, enemyTank) : true
           if (!playerFaster) {
@@ -1523,22 +1536,16 @@ const HUNT: Candidate = {
         return true
       }
     }
-    // M5 (plan/God-AI-Redesign-v2 §3.2, DECISIONS §103): 站位提前规避 —
-    // when the path ahead (up to 3 cells) is crossed by an in-flight enemy
-    // bullet that the reactive dodge branch cannot see yet (the bullet is
-    // NOT aligned with the player's CURRENT cell), swap the immediate next
-    // step to a safe alternative via findSafeMoveDir instead of walking
-    // into the crossfire. Distinction from the retired §68-v2 diversion
-    // (DECISIONS §73): this swaps only cell-1 and re-evaluates every tick
-    // — no A* path commitment, no premature perpendicular diversion at
-    // 12-23 tick lead times. 0 at default ⇒ byte-identical to M0.
+    // M5/§165: 站位提前规避 — check the immediate next cell (1 cell ahead)
+    // for a bullet that will arrive at the same time as the player. If a
+    // threat is found, swap to a safe perpendicular direction. 1-cell
+    // lookahead is precise (the bullet and player are both at the same
+    // cell next tick); 3-cell lookahead was noisy (too many false positives).
     if (self.params.pathThreatAvoidance > 0 && self._moveDir) {
       const pathBullet = self.findPathThreat(pcx, pcy, self._moveDir, p.speed)
       if (pathBullet) {
         const safeDir = self.findSafeMoveDir(pcx, pcy, self._moveDir, p.speed)
         if (safeDir) {
-          // Step aside — the reactive dodge (next tick if the bullet
-          // becomes aligned) will handle the rest.
           self._moveDir = safeDir
         }
       }

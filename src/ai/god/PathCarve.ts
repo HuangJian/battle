@@ -474,12 +474,16 @@ export function laneShellAboveImpl(self: GodAIInput, pcx: number, pcy: number): 
     const by = b.y + b.h / 2
     if (by >= pcy) continue // shell at/below the player — cannot cancel by firing up
     if (by >= baseMaxY) continue
-    // Bricks don't stop bullets; only steel/water between shell and base would.
+    // Bricks don't stop bullets; only steel between shell and base would.
+    // Water does NOT block bullets (TileMap.blocksBullet = brick/steel/base
+    // only). §165 fix: the old `steel || water` check prevented
+    // midLaneDefense from ever triggering on maps with water in the base
+    // column (S8 Riverbed rows 6-7/16-17), leaving the base undefended.
     const bcol = Math.floor(bx / CELL)
     let blocked = false
     for (let r = Math.floor(by / CELL) + 1; r <= br + 1; r++) {
       const t = w.tileMap.get(bcol, r)
-      if (t === 'steel' || t === 'water') {
+      if (t === 'steel') {
         blocked = true
         break
       }
@@ -557,13 +561,14 @@ export function laneShellInColumnImpl(self: GodAIInput): boolean {
     if (bx < colMinX || bx >= colMaxX) continue
     const by = b.y + b.h / 2
     if (by >= baseMaxY) continue // already past the base
-    // Bricks don't stop bullets (multi-brick breakthrough); only steel/water
+    // Bricks don't stop bullets (multi-brick breakthrough); only steel
     // in the column between the bullet and the base would neutralize it.
+    // Water does NOT block bullets (§165 fix — same as laneShellAboveImpl).
     const bcol = Math.floor(bx / CELL)
     let blocked = false
     for (let r = Math.floor(by / CELL) + 1; r <= br + 1; r++) {
       const t = w.tileMap.get(bcol, r)
-      if (t === 'steel' || t === 'water') {
+      if (t === 'steel') {
         blocked = true
         break
       }

@@ -1653,6 +1653,24 @@ export interface GodAIParams {
    * when the aligned enemy is far away.
    */
   t2aDefenseOverrideRange: number
+
+  /**
+   * §165 (user request 2026-08-07): T2a outnumbered retreat — when 2+ aligned
+   * enemies are within `t2aOutnumberedRange` cells in the same direction, the
+   * player is outgunned and must NOT stop-and-aim (a 2v1 stationary duel is a
+   * losing trade). Instead, fall through to navigate (which moves to a safer
+   * angle or triggers the P4.2 outnumbered retreat). This prevents the
+   * “player 在左路与两个敌人对枪被火力压制而死亡” death pattern.
+   *
+   * 0 = OFF (byte-identical to pre-§165). 1 = ON (count aligned enemies in
+   * the scan direction within `t2aOutnumberedRange` cells; retreat when >=
+   * `t2aOutnumberedCount`).
+   */
+  t2aOutnumberedRetreat: number
+  /** §165: max range (cells) for the aligned-enemy count. */
+  t2aOutnumberedRange: number
+  /** §165: minimum aligned-enemy count to trigger the retreat. */
+  t2aOutnumberedCount: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -1839,11 +1857,22 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §163: 中路防守默认 OFF（byte-identical）。hold=1 cell、maxDist=8
   // （近基才锚定，防止与 hunt 跨图拉锯）、maxDig=3 cells（只接受短挖，
   // 避免重复挖刚逃出的密封口袋）。
-  midLaneDefense: 0,
+  // §165 (user request 2026-08-07): SHIPPED ON — the base column has no
+  // steel guard on many maps (S8 Riverbed, etc.), so enemies in the base
+  // column can carve straight down to the eagle with流弹. The trigger is
+  // precise (laneThreatImpl = actual enemy bullet in the base column heading
+  // down with no steel/water between it and the base), so it does NOT fire on
+  // mere enemy presence (§163 A/B: 29/35 stages worse with enemy-presence
+  // triggers). 0 = OFF (byte-identical to pre-§165).
+  midLaneDefense: 1,
   midLaneHoldRange: 1,
   midLaneMaxDist: 8,
   midLaneMaxDigCells: 3,
   // §164: proactive mid-lane flank hold. 0 = OFF (byte-identical).
+  // §165 round 2: A/B tested — CATASTROPHIC (-4.1pp). The enemy-near-lane
+  // trigger fires 14-35% of ticks on most maps → player statue at the base
+  // column, neglects enemy engagement. The reactive midLaneDefense (bullet-
+  // only trigger) is the correct approach. Keep OFF.
   midLaneHold: 0,
   midLaneHoldMaxRow: 14,
   midLaneHoldEnemyDist: 12,
@@ -1943,8 +1972,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §153-W2: fire-rate-aware close combat. 0 = OFF (byte-identical to §85).
   // A/B candidate: 1. Promote to default only after a clean hard 35-stage
   // sweep (see DECISIONS §153).
-  closeCombatDuel: 0,
+  closeCombatDuel: 1,
   // M5: 站位提前规避 — 0 = OFF (byte-identical to M0). 1 = ON (A/B knob).
+  // §165 round 2: OFF — detection fixes (tightened alignment 32px→19px +
+  // steel-only occlusion + 1-cell lookahead) reduced false positives from
+  // -1.5pp to -0.7pp, but the direction swap itself is fundamentally harmful
+  // (disrupts navigation, sends into dead-ends). bulletLaneWait=1 handles
+  // immediate collisions; DODGE handles approaching bullets. 0 = OFF.
   pathThreatAvoidance: 0,
   // §153-W1: wait-for-bullet body-proximity margin. 0 = OFF (byte-identical
   // baseline). A/B candidate: 6-8. Promote to default only after a clean hard
@@ -2150,6 +2184,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // line of fire, even past maxPlayerDistFromBase. 4 cells = quick kill range
   // (bullet arrives in ~15 ticks; one-shot for 1-HP kinds, 2-3 shots for armor).
   t2aDefenseOverrideRange: 4,
+  t2aOutnumberedRetreat: 0,
+  t2aOutnumberedRange: 8,
+  t2aOutnumberedCount: 2,
 }
 
 /**
@@ -2200,6 +2237,11 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §159: T2a defense override is a pool-model (hard/chaos) fix — classic
   // instant 未 A/B，restore 0（byte-identical classic gate）。
   t2aDefenseOverrideRange: 0,
+  // §165: T2a outnumbered retreat is a pool-model (hard/chaos) fix — classic
+  // instant 未 A/B，restore 0（byte-identical classic gate）。
+  t2aOutnumberedRetreat: 0,
+  t2aOutnumberedRange: 5,
+  t2aOutnumberedCount: 2,
 }
 
 /**
@@ -2267,6 +2309,8 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   freezePickupRange: 0,
   direItemMode: 0,
   powerupMaxDivertDistance: 0,
+  // §165: guards don't do T2a outnumbered retreat (replay-locked yield).
+  t2aOutnumberedRetreat: 0,
 }
 
 // ============================================================

@@ -2116,3 +2116,71 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **120-seed 验证**：总体 74.5% → 74.5%（0.0pp），翻转完美对称（75 win→loss / 75 loss→win）。但逐关分析显示真实改进（修复激活的关卡）：Crossfire +4.2pp、Final Redoubt +4.2pp、Eagle Nest +3.3pp、Bastion +1.7pp（目标关卡）。回归均为 JIT 噪声。
 
 **Implications:** `t2aDefenseOverrideRange=4` 在 hard/chaos 发货，classic restore 0。修复正确解决了 S20 Bastion 振荡死锁，并在多关带来真实改进。V8 JIT 噪声导致的对称翻转不可消除（任何热路径代码修改都可能触发），但 net 效果非负。单测 5 条（`tests/t2a-defense-override.test.ts`）：range=0 不触发、range=4 触发开火、超距离不触发、基地无威胁不触发、端到端 S20 seed383912762 开火量提升。
+
+## §165. 中路防守启用 + 水阻弹 bug 修复 + 近战对枪火力评估
+
+**Decision:** 三项修复针对 replay `hard-s08-base-l1-t27-seed2585395049` 观察到的三个行为异常：
+
+1. **midLaneDefense=1** (SHIPPED ON)：启用 §163 中路防守候选。基地列无钢铁防护时，敌人子弹可沿列向下凿穿砖墙直逼老鹰，但此前该候选默认 OFF。
+2. **水阻弹 bug 修复**：`laneShellInColumnImpl` / `laneShellAboveImpl` 误将 `water` 视为阻弹地形（检查 `steel || water`），但 `TileMap.blocksBullet` 明确只有 `brick/steel/base` 阻弹。水不阻弹（Battle City 原版行为）——此 bug 导致 S8 Riverbed 等有水的基地列永远无法触发中路防守。
+3. **closeCombatDuel=1** (SHIPPED ON)：启用 §153-W2 近战火力评估——当对齐近敌射速快于玩家时，横移闪避而非站定对枪（必败交易）。
+
+**Rationale:**
+- **问题一（中路防守）**：回放显示 S8 Riverbed 中路无钢防，敌人持续向下发射流弹凿穿砖墙威胁基地，但 player 一直在左路缠斗。根因是 `midLaneDefense=0` + 水阻弹 bug 双重阻止了中路防守触发。修复后 `laneShellInColumnImpl` 正确检测到 S8 基地列中的子弹（水不阻弹），候选可正常激活。
+- **问题二（移动前不评估炮弹威胁）**：用户期望 player 移动前评估前方炮弹分布。`pathThreatAvoidance`（M5）设计了 3 格前瞻检测，但 A/B 验证显示在迷宫关产生大量假阳性（S6/S12/S14/S22/S24/S26 回退 -1.5pp），与此前 §68-v2 的结论一致。**决定保持 OFF**，依赖已发货的 `bulletLaneWait=1`（即时下一 tick 碰撞检测）。
+- **问题三（对枪不评估火力强度）**：用户期望 player 在 2v1 对枪时提前规避。`closeCombatDuel=1` 在 HUNT 候选中检测近敌射速，敌方更快则横移闪避。另新增 `t2aOutnumberedRetreat` 机制（检测 2+ 对齐敌人时 ENGAGE 候选放弃），但 A/B 显示单独启用净 -0.7pp，**保持 OFF**。
+- **隔离验证**：midLaneDefense 单独 = 76.1%（+0.1pp，持平）；closeCombatDuel+t2aOutnumbered 单独 = 75.3%（-0.7pp）；pathThreatAvoidance 单独 = 74.5%（-1.5pp）；midLaneDefense+closeCombatDuel 组合 = **76.4%**（+0.4pp，净正）。
+- S8 Riverbed 在 mid-only 保持 55%（持平），closeCombatDuel 导致 S8 -5pp（50%），但整体净正由其他关改进补偿。S34 Battlement +5pp（8.3→13.3%）为显著改进。
+
+**Implications:** `midLaneDefense=1` + `closeCombatDuel=1` 发货（pool model），classic restore 0。`pathThreatAvoidance` 保持 OFF（与 §68-v2/§73 结论一致）。`t2aOutnumberedRetreat` 机制代码保留（`countAlignedEnemiesImpl`）但默认 OFF，供未来调优。水阻弹 bug 修复是关键根因——它影响了所有有水的基地列关卡。单测 15 条（`tests/god-ai-midlane-firepower.test.ts`）。
+
+## §165-round2. 深度调优：pathThreatAvoidance 假阳性 + closeCombatDuel 多敌计数 + midLaneHold 主动防守
+
+**Decision:** 三项深度调优均经 A/B 验证后**保持 OFF**——数据证明现有 God AI 已充分调优，提出的修复方案均有净负副作用。
+
+**Rationale:**
+
+### 1. pathThreatAvoidance 假阳性根因分析与修复尝试
+
+**根因（3 层假阳性）：**
+- **对齐过松**：`< TANK` (32px) 而非实际碰撞阈值 `< (TANK+BULLET)/2` (19px) → 标记 2 格内的子弹为威胁
+- **无地形遮挡检查**：钢铁墙后的子弹被标记（实际无法到达）
+- **方向交换有害**：检测到威胁后交换方向 → 导航中断（进死胡同/远离目标/进入其他敌人火力）
+
+**修复尝试与结果：**
+| 修复 | 胜率 | Δ |
+|---|---|---|
+| 基线（OFF） | 76.0% | — |
+| 原始 ON（3 格前瞻 + 32px 对齐 + 交换） | 74.5% | -1.5pp |
+| 收紧对齐 32px→19px | 75.4% | -0.6pp |
+| +钢铁遮挡（仅 steel） | 75.4% | -0.6pp |
+| +1 格前瞻 | 75.3% | -0.7pp |
+| +Hold 而非交换 | 74.7% | -1.3pp |
+| +收紧 safeDir 对齐 | 75.3% | -0.7pp |
+
+**结论**：检测修复将假阳性从 -1.5pp 降至 -0.7pp，但**方向交换本身是根本性有害**——无论检测多精确，交换方向都会中断导航。`bulletLaneWait=1`（已发货）处理即时碰撞；DODGE（权重 1000）处理逼近子弹。**保持 OFF**。
+
+### 2. closeCombatDuel 多敌计数
+
+**用户需求**："不能只数近端敌人，同一行/列的所有能向 player 开火的敌人都要数"
+
+**A/B 结果：**
+| 配置 | 胜率 | Δ |
+|---|---|---|
+| mid+duel（1v1 射速比较） | 76.4% | +0.4pp |
+| +多敌计数 range=15 | 74.7% | -1.3pp |
+| +多敌计数 range=8 + 墙遮挡 | 74.0% | -2.0pp |
+| +t2aOutnumberedRetreat range=15 | 74.7% | -1.3pp |
+| +t2aOutnumberedRetreat range=8 | 74.0% | -2.0pp |
+
+**结论**：多敌计数**有害**——玩家必须杀敌才能赢，从 2v1 撤退让敌人自由推进基地。1v1 射速比较是正确的粒度（敌方更快才闪避，等速/我方更快则站定对枪）。`countAlignedEnemiesImpl` 代码保留（含 `scanAheadImpl` 墙遮挡）但 `t2aOutnumberedRetreat` 默认 OFF。
+
+### 3. midLaneHold 主动防守
+
+**120 种子分析**：4 个无钢铁基地列关卡中，S8/S21/S34 的败局中 90%+ 是基地被毁。midLaneDefense（反应式，仅子弹触发）可能太迟。
+
+**A/B 结果**：`midLaneHold=1` → **71.8% (-4.1pp 灾难性回归)**。`enemyNearLaneImpl` 触发 14-35% ticks → 玩家变"雕像"守在基地列，忽略杀敌 → 敌人淹没基地。与 §163 原始 A/B 结论一致（29/35 关变差）。
+
+**结论**：主动防守在 God AI 架构中**根本性有害**——敌人出现≠威胁，玩家必须主动杀敌。反应式 midLaneDefense（仅子弹触发）是唯一安全的触发方式。**保持 OFF**。
+
+**Implications:** 三项深度调优均证明现有 God AI 已充分调优。`findPathThreatImpl` 的对齐修复（32px→19px）和钢铁遮挡保留在代码中（为未来使用），但 `pathThreatAvoidance=0`。`countAlignedEnemiesImpl`（含墙遮挡）保留在代码中，`t2aOutnumberedRetreat=0`。`midLaneHold=0`。最终发货配置：`midLaneDefense=1` + `closeCombatDuel=1` + 水阻弹 bug 修复。
