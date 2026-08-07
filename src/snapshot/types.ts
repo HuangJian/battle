@@ -160,6 +160,8 @@ export interface WorldSnapshot {
   coop?: boolean
   /** 督战 (supervise) mode: God AI as player1, no human input. */
   spectate?: boolean
+  /** 督战双玩家 (dual spectate): both P1 and P2 controlled by God AI. */
+  spectateDual?: boolean
   /** Player2 tank snapshot (null when coop is off, absent in old snapshots). */
   player2?: Tank | null
   /** God AI lives at snapshot time. */

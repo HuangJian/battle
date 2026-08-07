@@ -45,6 +45,7 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
         playTimeMs: w.playTimeMs,
         coop: w.coop,
         spectate: w.spectate,
+        spectateDual: w.spectateDual,
       }
       const replay = this.replays.create(
         type,

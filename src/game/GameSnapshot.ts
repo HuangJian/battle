@@ -52,7 +52,7 @@ export function GameSnapshotMixin<TBase extends GameConstructor<GameCore>>(Base:
         onToggleFullscreen: () => this.presentation.toggleFullscreen(),
         onTogglePerformance: () => this.setPerformanceMode(!this.settings.performanceMode),
         onToggleCoop: () => this.requestCoopToggle(),
-        onToggleSpectate: () => this.requestSpectateToggle(),
+        onCycleSpectate: () => this.cycleSpectate(),
         onOpenControls: () => {
           const s = this.world.state
           // The panel is a static modal; it opens over any static screen (menu /

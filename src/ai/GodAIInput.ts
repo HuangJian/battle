@@ -902,6 +902,41 @@ export class GodAIInput implements InputLike {
   }
 
   // ================================================================
+  // Co-op awareness (双玩家协作) — read-only World queries
+  // ================================================================
+
+  /**
+   * Returns the OTHER player's tank when in coop/dual-God mode, or null.
+   * P1's partner is w.player2; P2's partner is w.player.
+   * Pure World read — no hidden state (AGENTS §2.2).
+   */
+  coopPartner(): Tank | null {
+    const w = this.world
+    const me = this.controlledTank(w)
+    if (me === w.player) return w.player2
+    if (me === w.player2) return w.player
+    return null
+  }
+
+  /**
+   * True when the co-op partner exists and is alive. Covers BOTH the
+   * Lie-Back-Win (human P1 + God AI P2) and 督战双玩家 (dual God AI) modes —
+   * in either case a second, living tank is on the field.
+   */
+  hasLivingPartner(): boolean {
+    const partner = this.coopPartner()
+    return !!(partner && partner.alive && partner.spawnTimer <= 0)
+  }
+
+  /**
+   * Returns true when THIS AI controls player2 (right-side spawn).
+   * Derived from controlledTank — no new state.
+   */
+  isPlayer2(): boolean {
+    return this.controlledTank(this.world) === this.world.player2
+  }
+
+  // ================================================================
   // Core decision loop (think)
   // ================================================================
 

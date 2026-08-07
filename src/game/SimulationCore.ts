@@ -3,6 +3,7 @@ import type { Tank, PowerUpType } from '../types'
 import type { InputLike } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
 import { TICK_MS, RESPAWN_SHIELD_MS } from '../constants'
+import { computePlayer2SpawnCol } from '../utils/helpers'
 
 /** Constructor type for the Simulation mixin chain (base = SimulationCore). */
 export type SimulationConstructor<T = SimulationCore> = new (...args: any[]) => T
@@ -39,6 +40,13 @@ export class SimulationCore {
    * Same deferred-application contract as pendingCoopToggle.
    */
   private pendingSpectateToggle: boolean | null = null
+  /**
+   * 督战双玩家 (dual supervise): pending dual flag, applied together with
+   * `pendingSpectateToggle` on the next playing tick. Without this, the
+   * `spectateDual` World flag — reset by `startGame`/`loadStageData` — would
+   * not survive a real game start, silently degrading dual mode to single.
+   */
+  private pendingSpectateDual: boolean | null = null
   /** Tactical Intelligence Framework — owns all enemy decision-making. */
   protected ai: TacticalIntelligence
 
@@ -75,6 +83,11 @@ export class SimulationCore {
     this.pendingSpectateToggle = on
   }
 
+  /** 督战双玩家 (dual supervise): request a deferred dual flag (see above). */
+  requestSpectateDualToggle(on: boolean): void {
+    this.pendingSpectateDual = on
+  }
+
   /**
    * 督战 (supervise) mode: cancel any pending spectate toggle. Called when
    * returning to menu — a stale pending toggle would otherwise fire on the
@@ -82,6 +95,7 @@ export class SimulationCore {
    */
   clearPendingSpectateToggle(): void {
     this.pendingSpectateToggle = null
+    this.pendingSpectateDual = null
   }
 
   /** Run one simulation tick (1/60s) */
@@ -115,7 +129,7 @@ export class SimulationCore {
         w.lives2 = d?.startLives ?? 3
         w.playerLevel2 = d?.playerStartLevel ?? 0
         const p1Col = w.playerSpawnPoint?.col ?? 8
-        w.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+        w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
         w.spawnPlayer2()
         w.player2!.shieldTimer = RESPAWN_SHIELD_MS
       } else if (!enable && w.coop) {
@@ -126,10 +140,31 @@ export class SimulationCore {
       }
     }
 
-    // 督战 (supervise) mode: apply deferred spectate toggle at tick start.
-    if (this.pendingSpectateToggle !== null) {
-      w.spectate = this.pendingSpectateToggle
+    // 督战 (supervise) mode + 督战双玩家: apply deferred toggles at tick start.
+    if (this.pendingSpectateToggle !== null || this.pendingSpectateDual !== null) {
+      const enableSpectate = this.pendingSpectateToggle ?? w.spectate
+      const dual = this.pendingSpectateDual ?? w.spectateDual
       this.pendingSpectateToggle = null
+      this.pendingSpectateDual = null
+      w.spectate = enableSpectate
+      w.spectateDual = dual
+      if (dual) {
+        // 督战双玩家: ensure player2 exists — startGame/loadStage wipe it.
+        if (!w.player2) {
+          const d = w.difficulty
+          w.lives2 = d?.startLives ?? 3
+          w.playerLevel2 = d?.playerStartLevel ?? 0
+          const p1Col = w.playerSpawnPoint?.col ?? 8
+          w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
+          w.spawnPlayer2()
+          w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+        }
+      } else if (w.player2 && !w.coop) {
+        // Dual switched off (or spectate off) and co-op doesn't own P2 → remove it.
+        w.player2 = null
+        w.lives2 = 0
+        w.playerLevel2 = 0
+      }
     }
 
     // Run statistics — total play time advances only while playing.

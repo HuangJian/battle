@@ -47,6 +47,10 @@ const seeds = parseSeeds(arg('seeds', '1-60')!)
 const outDir = arg('out', 'reports/winrate')!
 const historyDir = arg('history', DEFAULT_HISTORY_DIR)!
 const useHistory = !process.argv.includes('--no-history')
+const coop = process.argv.includes('--coop')
+const spectateDual = process.argv.includes('--dual')
+const modeTag = coop ? ' [coop]' : spectateDual ? ' [dual supervise]' : ''
+const modeSuffix = coop ? ' — 双人(躺赢)' : spectateDual ? ' — 督战双玩家' : ''
 const params: GodAIParams = DEFAULT_GOD_AI_PARAMS
 const stageCount = STAGES.length
 
@@ -85,6 +89,8 @@ async function sweepDifficulty(diff: string): Promise<DiffAgg> {
         difficulty: diff,
         params,
         maxTicks: MAX_TICKS,
+        coop,
+        spectateDual,
       })
       meta.push({ stageIndex: si, seed })
     }
@@ -150,7 +156,7 @@ function mean(n: number, d: number): number {
 
 async function main() {
   process.stderr.write(
-    `[sweep] ${difficulties.length} difficulties × ${stageCount} stages × ${seeds.length} seeds = ${difficulties.length * stageCount * seeds.length} runs\n`,
+    `[sweep] ${difficulties.length} difficulties × ${stageCount} stages × ${seeds.length} seeds = ${difficulties.length * stageCount * seeds.length} runs${modeTag}\n`,
   )
   const aggs: DiffAgg[] = []
   for (const d of difficulties) {
@@ -337,7 +343,7 @@ function compactSnapshot(s: WinrateSnapshot): CompactRun {
 
 function buildMarkdown(aggs: DiffAgg[], unionWorst: number[], history: WinrateSnapshot[]): string {
   const lines: string[] = []
-  lines.push('# God AI 胜率扫描报告 (classic / hard / chaos)')
+  lines.push(`# God AI 胜率扫描报告 (classic / hard / chaos)${modeSuffix}`)
   lines.push('')
   lines.push(
     `> 范围：35 关 × 60 种子 × ${aggs.length} 难度 = ${aggs.reduce((n, a) => n + a.total, 0)} 局。`,
@@ -623,7 +629,7 @@ select{font:13px sans-serif;padding:5px 8px;border:1px solid var(--line);border-
 .floating-nav.collapsed .nav-body{display:none}
 :target{scroll-margin-top:16px}
 </style></head><body>
-<h1>God AI 胜率扫描报告</h1>
+<h1>God AI 胜率扫描报告${modeSuffix}</h1>
 <p class="sub">范围：${stageCount} 关 × ${scope.seedsCount} 种子 × ${aggs.length} 难度 = ${totalRuns} 局 ｜ 默认 God AI 参数，无人工操作 ｜ 生成于 ${new Date().toLocaleString()}</p>
 
 <div class="floating-nav" id="floatingNav">

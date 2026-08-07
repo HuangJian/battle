@@ -33,6 +33,11 @@ export interface SimTask {
   /** Return per-run forensics (DECISIONS §119): terminal snapshot, action
    *  trace, death/kill/pickup history. Read-only — outcome unaffected. */
   forensics?: boolean
+  /** Dual-God-AI mode: both players controlled by God AI (coop). Default off. */
+  coop?: boolean
+  /** 督战双玩家: supervise mode with a second God AI driving player2 (distinct
+   *  from `coop`, the Lie-Back-Win / human-P1 mode). Default off. */
+  spectateDual?: boolean
 }
 
 export interface SimTaskResult {
@@ -74,6 +79,8 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       telemetry: task.telemetry === true,
       commitCounts: task.commitCounts === true,
       forensics: task.forensics === true,
+      coop: task.coop === true,
+      spectateDual: task.spectateDual === true,
     })
     msg = {
       id: task.id,

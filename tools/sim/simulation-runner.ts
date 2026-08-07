@@ -5,6 +5,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
+import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import type { Direction } from '../../src/constants'
 import type { StageData, GameEvent, TankKind, IntelligenceLevel } from '../../src/types'
@@ -323,6 +324,10 @@ export interface RunOptions {
   record?: boolean
   /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
   coop?: boolean
+  /** 督战双玩家: supervise mode with a SECOND God AI driving player2 (mirrors
+   *  GameCore.requestSpectateToggle(true)). Distinct from `coop`, which is the
+   *  Lie-Back-Win (human P1 + God AI P2) mode. */
+  spectateDual?: boolean
   /**
    * Collect v6 evaluation telemetry (plan/God-AI-Evaluation-Redesign.md §3).
    * Default false — when off, the run path is byte-identical to before.
@@ -442,6 +447,7 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
   const coop = opts.coop ?? false
+  const spectateDual = opts.spectateDual ?? false
   let coopInput: GodAIInput | null = null
 
   // Load the stage (this also spawns the player and sets state to 'playing').
@@ -453,19 +459,38 @@ export function runSimulation(opts: RunOptions): SimResult {
   input.reset()
 
   // Lie-Back-Win-Mode: set up coop (God AI as player2, human idle).
-  if (coop) {
+  if (coop && !spectateDual) {
     world.coop = true
     const d = world.difficulty
     world.lives2 = d?.startLives ?? 3
     world.playerLevel2 = d?.playerStartLevel ?? 0
     const p1Col = world.playerSpawnPoint?.col ?? 8
-    world.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+    world.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
     world.spawnPlayer2()
     // God AI controls player2 with an independent RNG.
     const coopRng = new RNG((seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
     coopInput = new GodAIInput(world, godAIParams, coopRng, (w) => w.player2)
     coopInput.reset()
     sim.input2 = coopInput
+  }
+
+  // 督战双玩家 (dual supervise): mirror GameCore.requestSpectateToggle(true).
+  // God AI already drives P1 (the `input` above); here we also spawn player2
+  // and attach a SECOND God AI so both tanks are machine-controlled.
+  if (spectateDual) {
+    world.spectate = true
+    world.spectateDual = true
+    const d = world.difficulty
+    world.lives2 = d?.startLives ?? 3
+    world.playerLevel2 = d?.playerStartLevel ?? 0
+    const p1Col = world.playerSpawnPoint?.col ?? 8
+    world.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
+    world.spawnPlayer2()
+    // Second God AI drives player2 with an independent RNG.
+    const dualRng = new RNG((seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+    const god2 = new GodAIInput(world, godAIParams, dualRng, (w) => w.player2)
+    god2.reset()
+    sim.input2 = god2
   }
 
   // Set up recording if requested (plan/God-AI-Replay-Visualization §4.1)
@@ -529,7 +554,10 @@ export function runSimulation(opts: RunOptions): SimResult {
         }
       : null
     // Record this tick's input BEFORE endFrame clears the cached state.
-    if (recorder) recorder.recordFrame(input, coopInput)
+    // In dual supervise the second God AI (god2) is the P2 input; coopInput is
+    // null there, so fall back to whichever P2 input is actually wired.
+    const p2Input = coopInput ?? (spectateDual ? sim.input2 : null)
+    if (recorder) recorder.recordFrame(input, p2Input)
     // §119: append this tick's action + the decision rule that took effect
     // (same sampling point as the recorder — before endFrame clears the
     // cached decision state). Rolling window of the last 10 ticks.
@@ -558,7 +586,12 @@ export function runSimulation(opts: RunOptions): SimResult {
     // must do the same so GodAIInput's _thought flag resets and the AI
     // re-evaluates every tick (not just the first one).
     input.endFrame()
-    coopInput?.endFrame()
+    // End the frame on the P2 God AI — in coop this is `coopInput`, in
+    // 督战双玩家 (dual) it is `god2` (wired as sim.input2). endFrame() resets
+    // _thought so the AI re-evaluates every tick; omitting it (only calling
+    // coopInput?.endFrame()) left the dual P2 AI frozen after tick 0, collapsing
+    // dual win-rate far below single-player. sim.input2 is null in single mode.
+    sim.input2?.endFrame()
     tick++
 
     // Collect events.

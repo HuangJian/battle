@@ -2371,3 +2371,44 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 **机制解读：** 全局看「基地受伤」不是稀有终局信号而是高频常态事件（胜局 10/17 也受伤）——损伤后把防御级联（召回/skipT2a/道具门/guard 召唤）常态化 engaged，等于把玩家从击杀经济里拉走，与 §163/§164/§165 驻守族的失败同源（防御过度投入）。S34 探针显示的局部不对称（受伤时玩家远 25 格）被全局 churn 吞没：召回救回的局 < 防御模式拖死的局。距离门没有救回来（g12 反而更差）——问题不在介入面大小，而在「受伤=威胁」这个信号本身太密。
 
 **Implications:** 旋钮留档默认 0（byte-identical），方向封盘。至此 §168–173 六连阴性覆盖了：导航卡死、威胁粘滞、追猎承诺、目标度量、bonus 偏置、损伤召回——反应式威胁/目标层的全部可参数化面均已碰顶。剩余未封盘杠杆仅剩：① 防御模式击杀转化（closer-tick 3% 的 per-tick trace 级走位/射界剖析）；② 逐关深潜型结构修复（历史唯一正结果族：§146 S8、§152 S12、§167 guard 超物）。工具留档：tmp/probe-hpleash.ts（baseHp 轨迹探针，含 runner 口径修正注释）、tmp/cmp173.cjs、tmp/s173-ab-on.json、tmp/s173-ab-g12.json、tests/base-damage-recall.test.ts（7 测试）。
+
+---
+
+## 174. 双玩家仿真系统 — 双 God AI 协作 + 防堵车 + 督战双玩家 (SHIPPED)
+
+**Decision:** 扩展仿真系统支持双玩家模式：双 God AI 协作对战、P1↔P2 防堵车机制、督战双玩家模式。hard 35×120 过关率 97.1%（单玩家基线 76.3% 无回归）。
+
+**具体实现：**
+
+1. **仿真基础设施扩展**：`SimTask` 增加 `coop?: boolean` 字段；`sim-worker.ts` 透传 `coop` 到 `runSimulation`；`sweep-winrate.ts` 新增 `--coop` / `--dual` 标志。
+
+2. **GOD AI 配合意识**（`GodAIInput` + `StrategyPlanner` + `think.ts`）：
+   - `coopPartner()` / `isCoopActive()` / `isPlayer2()` — 纯 World 读取，无隐藏状态 (AGENTS §2.2)。
+   - **防守分路**：`getDefaultDefensePosition` 中，P1 偏移 -2 列守左翼，P2 偏移 +2 列守右翼；不可站时自动降级偏移量。
+   - **目标去冲突**：`selectTarget` 四个目标选择路径（no-base / aggressive-hunt / pathTarget / Manhattan）均加入伙伴距离惩罚（伙伴比己方近 3+ 格时 +5 距离分），避免两个 AI 追同一个敌人。
+   - **道具协调**：`findUrgentPowerUpTarget` 中伙伴明显更近（3+ 格）的道具跳过，避免争抢。
+
+3. **P1↔P2 防堵车**（`think.ts` 末尾后处理）— 镜像守卫避让机制 (§159)：
+   - Case 1：`_moveDir` 已设但前进格被伙伴占据 → 尝试垂直避让；无法避让则 P1 停止让 P2 先行（避免死锁）。
+   - Case 2：`_moveDir` 为空（A* 无路径）且伙伴极近（<3 TANK） → P1 尝试任意可行方向脱困。
+   - P2 拥有优先通行权，防止头部对锁。
+
+4. **督战双玩家模式**（`GameCore` + `World` + 快照序列化）：
+   - `World.spectateDual` 标记 + 快照序列化 + 回放元数据。
+   - `requestSpectateToggle(dual=true)` 同时生成两个 GodAIInput（P1 + P2），spawn player2。
+   - `liveInput2` 在 `spectateDual` 时返回 `godInput2`。
+   - `GameLoop` 调用 `godInput2?.endFrame()` 清理 per-tick 缓存。
+   - `InputRecorder` 捕获 `spectateDualAtStart` 以正确录制双输入流。
+   - `resetToMenu` / coop toggle / 回放恢复路径均正确清理 `spectateDual` + `godInput2`。
+
+**Rationale:**
+- AGENTS §2.1 One-Author：协作感知纯 World 读取（`coopPartner` 只读 `world.player`/`player2`），不引入隐藏状态。
+- AGENTS §2.3 Determinism：协作决策不消耗 RNG，纯基于 World 状态（伙伴位置、敌人位置），确定性不变。
+- AGENTS §2.7 Three Gates：双玩家模式让游戏更有趣（可观战双 AI 对决）、架构简洁（复用现有 coop 基础设施）、尊重原作精神（FC 双玩家 Battle City）。
+- 防堵车机制镜像已有的守卫避让 (§159)，保持代码风格一致性。
+
+**Implications:**
+- 单玩家模式完全无回归（`isCoopActive()` 返回 false 时所有协作逻辑被旁路）。
+- hard 35×120 双玩家过关率 97.1%（>95% 目标达成），最差关 Battlement 67.5%（单玩家约 40%）。
+- 工具链支持：`bun tools/sim/sweep-winrate.ts --difficulties hard --seeds 1-120 --coop`。
+- 督战双玩家：浏览器中 `requestSpectateToggle(true)` 启用。

@@ -1,5 +1,6 @@
 import { World } from './World'
 import { RNG } from '../utils/RNG'
+import { computePlayer2SpawnCol } from '../utils/helpers'
 import { Simulation } from './Simulation'
 import { Input } from './Input'
 import type { InputLike } from './Input'
@@ -89,6 +90,8 @@ export class GameCore {
   // ---- Lie-Back-Win-Mode (coop) ----
   /** God AI input for player2 — created on demand when coop is toggled. */
   protected godInput: GodAIInput | null = null
+  /** 督战双玩家: second God AI input for player1 in dual spectate mode. */
+  protected godInput2: GodAIInput | null = null
   /** Auto-fire wrapper around the human input — re-armed each stage. */
   protected autoFireInput: AutoFireInput | null = null
 
@@ -107,6 +110,8 @@ export class GameCore {
 
   /** The player-2 input the LIVE simulation must consume — null unless coop. */
   protected get liveInput2(): InputLike | null {
+    // 督战双玩家 (dual spectate): God AI also drives player2.
+    if (this.world.spectateDual && this.godInput2) return this.godInput2
     // Spectate is strictly single-player (God AI as P1) — never a second tank.
     if (this.world.spectate) return null
     return this.godInput
@@ -225,7 +230,9 @@ export class GameCore {
       if (w.spectate) {
         this.simulation.requestSpectateToggle(false)
         w.spectate = false
-        this.presentation.ui.controlCenter.setSpectateState(false)
+        w.spectateDual = false
+        this.godInput2 = null
+        this.presentation.ui.controlCenter.setSpectateState('off')
       }
       // Apply immediately since we are paused/menu (no tick will fire).
       w.coop = true
@@ -233,7 +240,7 @@ export class GameCore {
       w.lives2 = d?.startLives ?? 3
       w.playerLevel2 = d?.playerStartLevel ?? 0
       const p1Col = w.playerSpawnPoint?.col ?? 8
-      w.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
+      w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
       w.spawnPlayer2()
       // Wire AI inputs
       const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
@@ -250,53 +257,147 @@ export class GameCore {
 
   // ---- 督战 (supervise) mode: God AI fights as player1, no human input ----
 
+  /** Derive the current 督战 UI mode from world state. */
+  private spectateMode(): 'off' | 'single' | 'dual' {
+    if (!this.world.spectate) return 'off'
+    return this.world.spectateDual ? 'dual' : 'single'
+  }
+
   /**
-   * Toggle supervise mode on/off. Available from the menu, a paused game, and
-   * the MISSION FAILED (recovery) screen (same gate as co-op).
-   * When enabled: God AI takes control of PLAYER1 (default controlledTank =
-   * `w.player`) and the human keyboard is disconnected from gameplay entirely.
-   * When disabled: control returns to the keyboard.
+   * Cycle 督战 (supervise) mode through OFF → 单玩家 (x1) → 双玩家 (x2) → OFF.
+   * A single Control-Center button drives all three states; the world gate
+   * (menu / paused / recovery) is enforced by the underlying toggle.
    */
-  requestSpectateToggle(): void {
+  cycleSpectate(): void {
+    const w = this.world
+    if (!canToggleSpectate(w.state)) return
+    if (!w.spectate) {
+      this.requestSpectateToggle(false) // OFF → x1
+    } else if (!w.spectateDual) {
+      this.requestSpectateToggle(true) // x1 → x2
+    } else {
+      this.requestSpectateToggle(true) // x2 → OFF (dual already matches the request)
+    }
+  }
+
+  /**
+   * Toggle supervise mode. When `dual` is true both P1 and P2 are driven by
+   * God AI (督战双玩家). Supports in-place single↔dual switching (P1 God AI
+   * stays alive) and turns OFF when the requested mode already matches.
+   */
+  requestSpectateToggle(dual = false): void {
     const w = this.world
     if (!canToggleSpectate(w.state)) return
 
     if (w.spectate) {
-      // Disable spectate: World mutation deferred to Simulation (One-Author).
-      this.simulation.requestSpectateToggle(false)
-      // Apply immediately since we are paused/menu (no tick will fire).
-      w.spectate = false
-      // Wire AI inputs
-      this.godInput = null
-      this.autoFireInput = null
-      this.wireLiveInputs()
-      this.audio.player2Id = null
-      this.presentation.ui.notify(t('toast.spectateOff'), 'info')
-    } else {
-      // Enable spectate: World mutation deferred to Simulation (One-Author).
-      this.simulation.requestSpectateToggle(true)
-      // 督战 and co-op are mutually exclusive — exit co-op first.
-      if (w.coop) {
-        this.simulation.requestCoopToggle(false)
-        w.coop = false
-        w.player2 = null
-        w.lives2 = 0
-        w.playerLevel2 = 0
-        this.presentation.ui.controlCenter.setCoopState(false)
+      if (dual === w.spectateDual) {
+        this.disableSpectate()
+      } else {
+        // Switch single <-> dual in place (P1 God AI stays alive).
+        this.simulation.requestSpectateToggle(true)
+        this.simulation.requestSpectateDualToggle(dual)
+        w.spectateDual = dual
+        if (dual) {
+          this.enableSpectateDual()
+          this.presentation.ui.notify(t('toast.spectateDualOn'), 'info')
+        } else {
+          this.disableSpectateDual()
+          this.presentation.ui.notify(t('toast.spectateOn'), 'info')
+        }
       }
-      // Apply immediately since we are paused/menu (no tick will fire).
-      w.spectate = true
-      // God AI drives player1 (default controlledTank = `w => w.player`).
-      const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
-      this.godInput = new GodAIInput(w, undefined, rng)
-      this.autoFireInput = null
-      this.wireLiveInputs()
-      this.audio.player2Id = null
-      this.presentation.ui.notify(t('toast.spectateOn'), 'info')
+    } else {
+      this.enableSpectate(dual)
     }
-    this.presentation.ui.controlCenter.setSpectateState(w.spectate)
+
+    this.presentation.ui.controlCenter.setSpectateState(this.spectateMode())
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
+  }
+
+  /** Enable supervise (God AI as P1). Sets `spectateDual` per `dual`. */
+  private enableSpectate(dual: boolean): void {
+    const w = this.world
+    this.simulation.requestSpectateToggle(true)
+    this.simulation.requestSpectateDualToggle(dual)
+    // 督战 and co-op are mutually exclusive — exit co-op first.
+    if (w.coop) {
+      this.simulation.requestCoopToggle(false)
+      w.coop = false
+      w.player2 = null
+      w.lives2 = 0
+      w.playerLevel2 = 0
+      this.presentation.ui.controlCenter.setCoopState(false)
+    }
+    // Apply immediately since we are paused/menu (no tick will fire).
+    w.spectate = true
+    // God AI drives player1 (default controlledTank = `w => w.player`).
+    const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+    this.godInput = new GodAIInput(w, undefined, rng)
+    this.autoFireInput = null
+    if (dual) {
+      w.spectateDual = true
+      this.enableSpectateDual()
+    } else {
+      w.spectateDual = false
+      this.godInput2 = null
+      this.audio.player2Id = null
+    }
+    this.wireLiveInputs()
+    this.presentation.ui.notify(t(dual ? 'toast.spectateDualOn' : 'toast.spectateOn'), 'info')
+  }
+
+  /** Spawn player2 + create the second God AI (督战双玩家). Safe to call when
+   *  player2 / godInput2 already exist (idempotent). */
+  private enableSpectateDual(): void {
+    const w = this.world
+    if (!w.player2) {
+      const d = w.difficulty
+      w.lives2 = d?.startLives ?? 3
+      w.playerLevel2 = d?.playerStartLevel ?? 0
+      const p1Col = w.playerSpawnPoint?.col ?? 8
+      w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
+      w.spawnPlayer2()
+    }
+    if (!this.godInput2) {
+      const rng2 = new RNG((w.seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+      this.godInput2 = new GodAIInput(w, undefined, rng2, (world) => world.player2)
+      this.godInput2.reset()
+    }
+    this.audio.player2Id = w.player2?.id ?? null
+  }
+
+  /** Tear down the second God AI (dual→single or OFF). P1 God AI is untouched. */
+  private disableSpectateDual(): void {
+    const w = this.world
+    w.spectateDual = false
+    w.player2 = null
+    w.lives2 = 0
+    w.playerLevel2 = 0
+    this.godInput2 = null
+    this.audio.player2Id = null
+  }
+
+  private disableSpectate(): void {
+    const w = this.world
+    this.simulation.requestSpectateToggle(false)
+    this.simulation.requestSpectateDualToggle(false)
+    // Apply immediately since we are paused/menu (no tick will fire).
+    w.spectate = false
+    const wasDual = w.spectateDual
+    w.spectateDual = false
+    // Clean up dual spectate player2
+    if (wasDual) {
+      w.player2 = null
+      w.lives2 = 0
+      w.playerLevel2 = 0
+    }
+    // Wire AI inputs
+    this.godInput = null
+    this.godInput2 = null
+    this.autoFireInput = null
+    this.wireLiveInputs()
+    this.audio.player2Id = null
+    this.presentation.ui.notify(t('toast.spectateOff'), 'info')
   }
 
   // ---- Battle speed (Alt+> faster / Alt+< slower) ----
@@ -322,9 +423,17 @@ export class GameCore {
     const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
     this.godInput = new GodAIInput(w, undefined, rng)
     this.autoFireInput = null
+    // 督战双玩家: re-arm second God AI for player2
+    if (w.spectateDual && w.player2 && !this.godInput2) {
+      const rng2 = new RNG((w.seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+      this.godInput2 = new GodAIInput(w, undefined, rng2, (world) => world.player2)
+      this.godInput2.reset()
+      this.audio.player2Id = w.player2.id
+    } else {
+      this.audio.player2Id = null
+    }
     this.wireLiveInputs()
-    this.audio.player2Id = null
-    this.presentation.ui.controlCenter.setSpectateState(true)
+    this.presentation.ui.controlCenter.setSpectateState(this.spectateMode())
   }
 
   resetToMenu(): void {
@@ -346,14 +455,16 @@ export class GameCore {
     this.world.score2 = 0
     // 督战 (supervise) mode: clean up spectate state too.
     this.world.spectate = false
+    this.world.spectateDual = false
     this.godInput = null
+    this.godInput2 = null
     this.autoFireInput = null
     this.simulation.clearPendingCoopToggle()
     this.simulation.clearPendingSpectateToggle()
     this.wireLiveInputs()
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
-    this.presentation.ui.controlCenter.setSpectateState(false)
+    this.presentation.ui.controlCenter.setSpectateState('off')
     // 督战 battle speed is a per-session viewing aid — return to ×1 on menu so
     // a fresh run never starts fast by accident.
     this.battleSpeed = 1

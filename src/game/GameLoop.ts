@@ -416,20 +416,16 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
             // (e.g. loaded a spectate snapshot from the browser while spectate
             // was off) — re-create the God AI for player1 (default
             // controlledTank = `w.player`). No auto-fire: nobody is human here.
-            const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
-            this.godInput = new GodAIInput(this.world, undefined, rng)
-            this.autoFireInput = null
-            this.wireLiveInputs()
-            this.audio.player2Id = null
-            this.presentation.ui.controlCenter.setSpectateState(true)
+            this.rearmSpectateGodInput()
           } else if (!this.world.coop && !this.world.spectate) {
             // Snapshot restored without coop/spectate — ensure inputs are cleared.
             this.godInput = null
+            this.godInput2 = null
             this.autoFireInput = null
             this.wireLiveInputs()
             this.audio.player2Id = null
             this.presentation.ui.controlCenter.setCoopState(false)
-            this.presentation.ui.controlCenter.setSpectateState(false)
+            this.presentation.ui.controlCenter.setSpectateState('off')
           }
         }
 
@@ -525,6 +521,8 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
       this.input.endFrame()
       // Lie-Back-Win-Mode: invalidate God AI per-tick caches.
       this.godInput?.endFrame()
+      // 督战双玩家: invalidate second God AI per-tick caches.
+      this.godInput2?.endFrame()
 
       // --- Performance sampler (regression guard, allocation-free) ---
       this._frameCount++

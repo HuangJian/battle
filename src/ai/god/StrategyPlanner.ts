@@ -254,6 +254,15 @@ export function findUrgentPowerUpTargetImpl(
     // Distance gate by category — the core of the tuning sweep.
     if (range <= 0 || dist > range) continue
 
+    // 双玩家协作: 伙伴明显更近的道具跳过, 让伙伴拾取 (避免争抢)
+    if (self.hasLivingPartner()) {
+      const partner = self.coopPartner()!
+      const pcx2 = partner.x + partner.w / 2
+      const pcy2 = partner.y + partner.h / 2
+      const partnerDist = Math.round((Math.abs(cx - pcx2) + Math.abs(cy - pcy2)) / CELL)
+      if (partnerDist < dist - 3) continue
+    }
+
     // Enemy spawn-zone gate (per-seed tick-diff finding, Lattice s2/s32):
     // items in the enemy spawn band (classic spawns at row 0) are traps —
     // the player dives in and meets fresh spawns. Never treat the band as
@@ -900,6 +909,32 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
 export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
   if (!self.hasBase) return self.playerCell()
   const def = { col: BASE_POS.col, row: BASE_POS.row - self.params.defenseRowOffset }
+  // 双玩家协作防守分路: P1 守左翼, P2 守右翼。当伙伴存活时,
+  // 各自偏移防守列以覆盖基地两侧, 避免两个 AI 挤在同一位置。
+  // 纯 World 读取 (coopPartner 只读 world.player/player2) — 无隐藏状态。
+  if (self.hasLivingPartner()) {
+    const shift = self.isPlayer2() ? 2 : -2
+    def.col = BASE_POS.col + shift
+    // 确保偏移后的防守位在网格内且可站立; 否则回退到中心位
+    const bc = BASE_POS.col
+    if (def.col < 0 || def.col >= GRID) {
+      def.col = bc
+    } else {
+      const t = self.world.tileMap.get(def.col, def.row)
+      if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
+        // 偏移位不可站 — 尝试偏移量减半
+        def.col = bc + (shift > 0 ? 1 : -1)
+        if (def.col >= 0 && def.col < GRID) {
+          const t2 = self.world.tileMap.get(def.col, def.row)
+          if (t2 === 'brick' || t2 === 'steel' || t2 === 'water' || t2 === 'base') {
+            def.col = bc
+          }
+        } else {
+          def.col = bc
+        }
+      }
+    }
+  }
   // §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12, 24-offset)
   // 在全部 35 关上都是环砖格（§137 注释承认），A*（corridor 与 breakBrick）到
   // 砖格目标均返回空路径 → 紧急回防/§113/§88 的回防路由全部失效，玩家只能靠
@@ -1191,6 +1226,12 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const baseRow = BASE_POS.row
   const defenseRow = baseRow - self.params.defenseRowOffset
 
+  // 双玩家协作: 获取伙伴信息用于目标去冲突。当伙伴存活时,
+  // 各自优先攻击自己一侧的敌人, 避免两个 AI 追同一个目标。
+  // 纯 World 读取 — 无隐藏状态 (AGENTS §2.2)。
+  const coopActive = self.hasLivingPartner()
+  const partnerCell = coopActive ? self.tankCell(self.coopPartner()!) : null
+
   // Cluster C: reuse the per-tick enemy snapshot (built in think()) instead
   // of allocating a filtered array on every call (AGENTS §14.1).
   // Falls back to a fresh scan only if think() hasn't populated it yet.
@@ -1211,7 +1252,12 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      const adjustedDist = d - (t.bonus ? 2 : 0)
+      let adjustedDist = d - (t.bonus ? 2 : 0)
+      // 协作: 伙伴更近的敌人降优先级
+      if (coopActive && partnerCell) {
+        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        if (pd < d - 3) adjustedDist += 5
+      }
       if (adjustedDist < bestDist) {
         bestDist = adjustedDist
         best = t
@@ -1411,7 +1457,12 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       // Prefer bonus enemies (they drop power-ups) when distances are close.
-      const adjustedDist = d - (t.bonus ? 2 : 0)
+      let adjustedDist = d - (t.bonus ? 2 : 0)
+      // 协作: 伙伴更近的敌人降优先级
+      if (coopActive && partnerCell) {
+        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        if (pd < d - 3) adjustedDist += 5
+      }
       if (adjustedDist < bestDist) {
         bestDist = adjustedDist
         best = t
@@ -1458,9 +1509,15 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       for (let ti = 0; ti < enemies.length; ti++) {
         const t = enemies[ti]
         const tc = self.tankCell(t)
-        const adjustedDist =
+        let adjustedDist =
           huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
           (t.bonus ? self.params.bonusHuntBias : 0)
+        // 协作: 伙伴更近的敌人降优先级
+        if (coopActive && partnerCell) {
+          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          if (pd < Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) - 3)
+            adjustedDist += 5
+        }
         if (adjustedDist < bestDist) {
           bestDist = adjustedDist
           best = t
@@ -1473,7 +1530,12 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
         const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
         // §172: bonus preference is the bonusHuntBias knob (default 2 =
         // the historical constant, byte-identical).
-        const adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+        let adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+        // 协作: 伙伴更近的敌人降优先级
+        if (coopActive && partnerCell) {
+          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          if (pd < d - 3) adjustedDist += 5
+        }
         if (adjustedDist < bestDist) {
           bestDist = adjustedDist
           best = t

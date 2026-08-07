@@ -39,8 +39,8 @@ export interface ControlCenterCallbacks {
   onTogglePerformance: () => void
   /** Toggle Lie-Back-Win-Mode (coop with God AI). */
   onToggleCoop: () => void
-  /** Toggle 督战 (supervise) mode (God AI as player1, no human input). */
-  onToggleSpectate: () => void
+  /** Cycle 督战 (supervise) mode: OFF → 单玩家 (x1) → 双玩家 (x2) → OFF. */
+  onCycleSpectate: () => void
   /** Snapshot counts for the status line. */
   getCounts: () => { total: number; manual: number; manualLimit: number }
   /** Replay counts for the status line. */
@@ -197,7 +197,7 @@ export class ControlCenter {
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
     wire('[data-cc="coop"]', () => this.callbacks?.onToggleCoop())
-    wire('[data-cc="spectate"]', () => this.callbacks?.onToggleSpectate())
+    wire('[data-cc="spectate"]', () => this.callbacks?.onCycleSpectate())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
     this.perfState = this.el.querySelector('[data-cc="perf-state"]')
@@ -321,14 +321,16 @@ export class ControlCenter {
     }
   }
 
-  /** Reflect 督战 (supervise) state in the GAMEPLAY panel button. */
-  setSpectateState(on: boolean): void {
+  /** Reflect 督战 (supervise) state in the GAMEPLAY panel button.
+   *  `mode` is one of 'off' (督战 OFF), 'single' (督战 x1 ON), 'dual' (督战 x2 ON). */
+  setSpectateState(mode: 'off' | 'single' | 'dual'): void {
+    const on = mode !== 'off'
     if (this.spectateBtn) {
       this.spectateBtn.classList.toggle('selected', on)
       this.spectateBtn.setAttribute('aria-pressed', String(on))
     }
     if (this.spectateState) {
-      this.spectateState.textContent = on ? 'ON' : 'OFF'
+      this.spectateState.textContent = mode === 'dual' ? 'x2' : mode === 'single' ? 'x1' : 'OFF'
       this.spectateState.classList.toggle('on', on)
     }
   }

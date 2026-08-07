@@ -107,7 +107,11 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
       // --- Per-player death handling (Lie-Back-Win-Mode §3.2) ---
       // Process each player independently, then check life-sharing.
       const p1Dead = w.player && !w.player.alive
-      const p2Dead = w.coop && w.player2 && !w.player2.alive
+      // 督战双玩家 (spectateDual) is a second, machine-controlled player with
+      // its own lives — exactly like Lie-Back-Win coop. Gate P2 death handling
+      // on EITHER flag, not just `coop`, or dual mode silently drops P2's lives
+      // (dies once, never respawns, never counts toward game over).
+      const p2Dead = (w.coop || w.spectateDual) && w.player2 && !w.player2.alive
 
       if (p1Dead) {
         this.triggerSacrificeAoE(w.player!)
@@ -135,7 +139,9 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
       }
 
       // --- Life sharing (§3.2): if one player is out and the other has > 2 lives ---
-      if (w.coop) {
+      // Applies to BOTH coop and 督战双玩家 (spectateDual): in either, a second
+      // player with its own lives exists, and game over requires both to be out.
+      if (w.coop || w.spectateDual) {
         // Player out, God has lives to share
         if (w.lives <= 0 && !w.player?.alive && w.lives2 > 2) {
           w.lives2--

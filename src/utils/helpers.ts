@@ -25,6 +25,17 @@ export function aabb(
   return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
 }
 
+/**
+ * Player-2 spawn column: mirror of player-1 across the field center (col 12).
+ * Nudges one cell left when P1 is already at col 12, which would otherwise
+ * place P2 on the same column and overlap P1's spawn. Used by co-op and
+ * dual-supervise setups so the two tanks never share a cell.
+ */
+export function computePlayer2SpawnCol(p1Col: number): number {
+  const col = 24 - p1Col
+  return col === p1Col ? p1Col - 1 : col
+}
+
 /** Get opposite direction */
 export function opposite(dir: Direction): Direction {
   switch (dir) {

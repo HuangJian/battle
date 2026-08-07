@@ -104,7 +104,10 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
   const sy = tank.y + tank.h / 2
   // Lie-Back-Win-Mode §3.8 P3: detect both players in line of fire.
   const player = world.player
-  const player2 = world.coop ? world.player2 : null
+  // 督战双玩家 (spectateDual) is a second, machine-controlled player — it must
+  // be perceived exactly like the Lie-Back-Win coop partner, or the P2 God AI
+  // is blind to its own tank (scanAhead) and mis-targets (perceive picks P1).
+  const player2 = world.coop || world.spectateDual ? world.player2 : null
   for (let d = CELL; d <= maxDist; d += CELL) {
     const cx = sx + v.dx * d
     const cy = sy + v.dy * d
@@ -185,7 +188,10 @@ export function perceive(
   const sy = tank.y + tank.h / 2
   // Lie-Back-Win-Mode §3.8 P3: pick the closest player as the perception target.
   let player = world.player
-  if (world.coop && world.player2) {
+  // 督战双玩家 (spectateDual) is a second, machine-controlled player — it must
+  // be perceived like the coop partner, or the P2 God AI anchors its awareness
+  // to P1 instead of its own tank (grossly mis-targets, e.g. defends P1's side).
+  if ((world.coop || world.spectateDual) && world.player2) {
     const p1Dist = player
       ? Math.abs(player.x + player.w / 2 - sx) + Math.abs(player.y + player.h / 2 - sy)
       : Infinity

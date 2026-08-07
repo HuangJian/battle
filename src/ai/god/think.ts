@@ -2261,4 +2261,52 @@ export function thinkImpl(self: GodAIInput): void {
   // branch returns early; endFrame() cleared the flags last tick, so they
   // stay false while dead.
   superItemPressesImpl(self, ctx)
+
+  // ================================================================
+  // 双玩家防堵车 (P1↔P2 yield) — 镜像守卫避让机制 (§159)。
+  //
+  // 当前进方向会被伙伴阻挡时, 尝试垂直避让; 无法避让则 P1 停止让 P2 先行
+  // (避免死锁)。当 A* 无路径且伙伴极近时, P1 尝试任意可行方向脱困。
+  // 纯 World 读取 — 无隐藏状态 (AGENTS §2.2)。
+  // ================================================================
+  if (self.hasLivingPartner()) {
+    const partner = self.coopPartner()!
+    if (self._moveDir !== null) {
+      // Case 1: _moveDir is set — check if partner is in the forward cell
+      const v = DIR_VECTORS[self._moveDir]
+      const fx = p.x + v.dx * CELL
+      const fy = p.y + v.dy * CELL
+      if (
+        fx < partner.x + partner.w &&
+        fx + TANK > partner.x &&
+        fy < partner.y + partner.h &&
+        fy + TANK > partner.y
+      ) {
+        // Partner blocks forward — try perpendicular alternatives
+        const perpA: Direction = self._moveDir === 'up' || self._moveDir === 'down' ? 'left' : 'up'
+        const perpB: Direction =
+          self._moveDir === 'up' || self._moveDir === 'down' ? 'right' : 'down'
+        if (self.canMoveDir(p, perpA)) {
+          self._moveDir = perpA
+        } else if (self.canMoveDir(p, perpB)) {
+          self._moveDir = perpB
+        } else if (!self.isPlayer2()) {
+          // P1 yields (stops); P2 keeps priority — prevents head-on deadlock
+          self._moveDir = null
+        }
+      }
+    } else if (!self.isPlayer2()) {
+      // Case 2: _moveDir is null (A* failed) and partner is very close —
+      // P1 tries any passable direction to break the deadlock
+      const dist = Math.abs(p.x - partner.x) + Math.abs(p.y - partner.y)
+      if (dist < TANK * 3) {
+        for (let di = 0; di < ALL_DIRS.length; di++) {
+          if (self.canMoveDir(p, ALL_DIRS[di])) {
+            self._moveDir = ALL_DIRS[di]
+            break
+          }
+        }
+      }
+    }
+  }
 }
