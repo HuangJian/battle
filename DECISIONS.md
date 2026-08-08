@@ -2619,3 +2619,28 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - 单玩家 1236 tests 全通过，typecheck/lint 零错误。
 - §180 的 P2 directMove + P1 directMove 现在对称：两个 God AI 在 central-breach 关卡都用 directMove 突破砖墙到达各自防守位。
 
+
+## 182. 重放暂停后切换应用再回来点播放，画面不动（visibilitychange 污染 world.state）
+
+**Decision:** 两处修复：
+
+1. `main.ts` visibilitychange 监听器增加 `!game.playback` 守卫——重放期间不调用 `simulation.togglePause()`。
+2. `PlaybackController.update()` 增加防御性守卫——若 `world.state === 'paused'`（被外部代码污染），在 tick 前恢复为 `'playing'`。
+
+**Rationale:**
+- **根因**：`main.ts` 的 `visibilitychange` 监听器在标签页隐藏时调用 `simulation.togglePause()`（条件：`world.state === 'playing'`）。重放期间 `PlaybackController.start()` 设置 `world.state = 'playing'`，但 `PlaybackController` 通过自己的 `phase` 字段独立管理暂停。标签页隐藏时，监听器看到 `world.state === 'playing'` 就翻转它为 `'paused'`，而 `PlaybackController.phase` 不受影响。
+  - `simulation.tick()` 只在 `'playing'`/`'stageclear'`/`'gameover'` 上分派——`'paused'` 时是空操作（仅 `w.frame++`）。
+  - `PlaybackController.update()` 仍然推进 input cursor（进度条走），但 `tick()` 不执行 `updatePlaying()`（画面不动）。
+  - 用户操作序列：暂停重放 → 切换应用 → 切回 → 点播放 → 进度条走但画面冻结。
+- **修复 1（根因）**：`main.ts` 加 `!game.playback` 守卫。重放期间不自动暂停 simulation——`GameLoop.onVisibility` 已经通过取消 rAF 停止了所有渲染/计算，重放回来后 rAF 恢复，`PlaybackController` 从中断处继续。不需要额外暂停。
+- **修复 2（防御）**：`PlaybackController.update()` 在 tick 前检查 `world.state === 'paused'` 并恢复为 `'playing'`。即使将来有其他代码路径意外污染 `world.state`，重放也不会卡死。
+- **拒绝方案**：
+  - 在 `simulation.togglePause()` 内检查 `playback`——Simulation 不应知道 PlaybackController（违反架构分层）。
+  - 仅修 `main.ts` 不加防御——能测但不够健壮；如果有其他路径也会污染 `world.state`，同样的问题会复现。
+
+**Implications:**
+- 3 个回归测试（`tests/replay-visibility.test.ts`）覆盖三种场景：重放暂停后污染、重放播放中污染、用户完整操作序列。
+- 全部 1239 tests 通过，typecheck/lint 零错误。
+- 实时游戏行为不变：`!game.playback` 守卫仅在重放期间生效，正常游戏的 visibilitychange 自动暂停不受影响。
+
+

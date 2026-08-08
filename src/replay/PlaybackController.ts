@@ -181,6 +181,19 @@ export class PlaybackController {
     if (this.phase === 'paused' || this.phase === 'ended') return
     if (!this.simulation || !this.input) return
 
+    // Defensive: world.state may have been corrupted to 'paused' by an
+    // external handler. The visibilitychange listener in main.ts calls
+    // simulation.togglePause() when the tab is hidden — it checks
+    // world.state === 'playing' but (before the fix) not whether a replay
+    // is active. This flips world.state to 'paused', and simulation.tick()
+    // becomes a silent no-op (it only dispatches on 'playing' /
+    // 'stageclear' / 'gameover'). The input cursor still advances, so the
+    // progress bar moves while the world is frozen (画面不动). Restore the
+    // invariant so ticks dispatch correctly.
+    if (this.simulation.world.state === 'paused') {
+      this.simulation.world.state = 'playing'
+    }
+
     this.accumulator += dt * this.speed
     let steps = 0
     while (this.accumulator >= TICK_MS && !this.input.isFinished && steps < MAX_STEPS_PER_FRAME) {
