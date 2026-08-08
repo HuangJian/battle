@@ -21,6 +21,7 @@ import {
   DEFAULT_GOD_AI_PARAMS,
   computeStageAdaptedParams,
   CLASSIC_MODEL_PARAMS,
+  detectCentralBreachRisk,
 } from './god/params'
 import type { GodAIParams } from './god/params'
 export {
@@ -48,11 +49,13 @@ import {
   findUrgentPowerUpTargetImpl,
   findUrgentPowerUpTargetWithCommitImpl,
   findDireItemTargetImpl,
+  findDualFencePickupImpl,
   findFreezePickupTargetImpl,
   findClosePickupTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   computeBaseGuardAnchorImpl,
+  findDualCentralHoldImpl,
   selectTargetImpl,
 } from './god/StrategyPlanner'
 import {
@@ -198,6 +201,14 @@ export class GodAIInput implements InputLike {
    * degrades to pure hunting (chase nearest enemy).
    */
   hasBase = true
+
+  /**
+   * Dual central breach strategy (plan/dual-central-breach-strategy.md):
+   * Cached in reset() from detectCentralBreachRisk(world). When true AND
+   * world.spectateDual, the dual role assignment + defense enhancement knobs
+   * are active. Pure terrain function — same as hasBase, not serialized.
+   */
+  _centralBreachRisk = false
 
   /** Last cell the player was at when consuming a path step (prevents oscillation). */
   _lastPathCell: Cell | null = null
@@ -798,6 +809,9 @@ export class GodAIInput implements InputLike {
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
+    // Dual central breach strategy: cache the detector result per stage.
+    // Pure terrain function — same semantics as hasBase (not serialized).
+    this._centralBreachRisk = detectCentralBreachRisk(this.world)
     // §58: compute stage-level adaptive params from the base params — the
     // unified data-driven adaptation based on stage characteristics (armor
     // ratio, brick/steel/forest/water density). No per-stage special-casing.
@@ -1173,6 +1187,10 @@ export class GodAIInput implements InputLike {
   findDireItemTarget(pcx: number, pcy: number): Cell | null {
     return findDireItemTargetImpl(this, pcx, pcy)
   }
+  /** §6.3-A: P2 dual central breach fence pickup (bypasses all gates). */
+  findDualFencePickup(pcx: number, pcy: number): Cell | null {
+    return findDualFencePickupImpl(this, pcx, pcy)
+  }
   /** §156: freeze-window power-up pickup (unlimited range). */
   findFreezePickupTarget(pcx: number, pcy: number): Cell | null {
     return findFreezePickupTargetImpl(this, pcx, pcy)
@@ -1190,7 +1208,20 @@ export class GodAIInput implements InputLike {
   /** §137: the computed base guard anchor (standable defense hold), or null. */
   getBaseGuardAnchor(): Cell | null {
     if (this._baseGuardAnchor === null && this.params.baseGuardAnchorMode > 0) {
-      this._baseGuardAnchor = computeBaseGuardAnchorImpl(this)
+      // §178 (autopsy seed2): dual central breach — P1 holds a CENTRAL position
+      // (intercept the col-12 spawn lane) instead of the flank anchor. Gated by
+      // spectateDual && centralBreachRisk && !isPlayer2 — single-player and P2
+      // keep the computed base-guard anchor (byte-identical).
+      if (
+        this.world.spectateDual &&
+        this._centralBreachRisk &&
+        !this.isPlayer2() &&
+        this.params.dualCentralBreachP1Anchor > 0
+      ) {
+        this._baseGuardAnchor = findDualCentralHoldImpl(this)
+      } else {
+        this._baseGuardAnchor = computeBaseGuardAnchorImpl(this)
+      }
     }
     return this._baseGuardAnchor
   }

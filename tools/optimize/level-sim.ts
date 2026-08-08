@@ -9,11 +9,15 @@
  *   bun tools/optimize/level-sim.ts --stage 1 --difficulty chaos --seed 42 --max-ticks 18000
  *   bun tools/optimize/level-sim.ts --stage 1 --size 10 --save-replays
  *   bun tools/optimize/level-sim.ts --stage 1 --size 5 --save-replays --replay-failures-only
+ *   bun tools/optimize/level-sim.ts --stage 1 --difficulty hard --coop
+ *   bun tools/optimize/level-sim.ts --stage 1 --difficulty hard --dual --save-replays
  *
  * Options:
  *   --stage <number>         Stage number in STAGES, 1-based (default: 1)
  *   --difficulty <key>       Difficulty key: classic|relax|hard|chaos (default: hard)
- *   --seed <number>          RNG seed (default: random)
+ *   --seed <number>          Starting RNG seed; incremented by 1 per run (default: 1)
+ *   --random                 Use a fresh random seed for each run (overrides the
+ *                            sequential default; --seed is ignored when --random)
  *   --size <n>               Number of serial simulations to run (default: 1)
  *   --max-ticks <n>          Max simulation ticks (default: 36000 = 10 min)
  *   --eval                   Also run the evaluator and include the report
@@ -22,6 +26,10 @@
  *   --save-replays           Save replay files to replays/ directory
  *   --replay-failures-only   Only save replays for failed games (requires --save-replays)
  *   --coop                   Enable coop mode (God AI controls player2, human idle)
+ *   --dual                   Enable dual-player supervise mode (God AI controls both P1 and
+ *                            P2; the on-screen "督战" x2 path). Mutually exclusive with --coop;
+ *                            if both are passed, --dual wins. Replay file embeds both P1 and
+ *                            P2 input streams (flagged hasP2) so it replays identically.
  */
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from '../sim/simulation-runner'
@@ -42,11 +50,13 @@ const pretty = process.argv.includes('--pretty')
 const saveReplays = process.argv.includes('--save-replays')
 const replayFailuresOnly = process.argv.includes('--replay-failures-only')
 const doOutput = !process.argv.includes('--no-output')
-const coop = process.argv.includes('--coop')
+const dual = process.argv.includes('--dual')
+const coop = process.argv.includes('--coop') && !dual
 
-// --seed: random if not provided
+// --seed: default starts at 1 and increments per run; --random overrides to random seeds
+const randomSeeds = process.argv.includes('--random')
 const seedArg = arg('seed')
-const seed = seedArg !== undefined ? parseInt(seedArg, 10) : (Math.random() * 0xffffffff) >>> 0
+const seed = seedArg !== undefined ? parseInt(seedArg, 10) : 1
 
 // --size: number of serial runs
 const size = parseInt(arg('size', '1')!, 10)
@@ -73,7 +83,11 @@ let winCount = 0
 let totalGames = 0
 
 for (let i = 0; i < size; i++) {
-  const gameSeed = size === 1 ? seed : (seed + i) >>> 0
+  const gameSeed = randomSeeds
+    ? (Math.random() * 0xffffffff) >>> 0
+    : size === 1
+      ? seed
+      : (seed + i) >>> 0
   totalGames++
 
   const result = runSimulation({
@@ -85,6 +99,7 @@ for (let i = 0; i < size; i++) {
     sampleInterval: 6, // sample every 100ms for compact output
     record: saveReplays,
     coop,
+    spectateDual: dual,
   })
 
   const isWin = result.outcome === 'stage_clear'
@@ -98,6 +113,7 @@ for (let i = 0; i < size; i++) {
     stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
     difficulty,
     coop,
+    dual,
     seed: gameSeed,
     result: {
       outcome: result.outcome,
@@ -178,7 +194,8 @@ if (size > 1) {
     stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
     difficulty,
     coop,
-    seed,
+    dual,
+    seed: randomSeeds ? 'random' : seed,
     size,
     winCount,
     totalGames,

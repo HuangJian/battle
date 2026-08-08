@@ -22,6 +22,15 @@ export interface SimTask {
   params: GodAIParams
   maxTicks: number
   /**
+   * 0-based stage index (scoring scale). Omitted ⇒ 0, which is what every
+   * existing pool caller already used, so their runs stay byte-identical.
+   * Supplying the real index matters for A/B parity with `level-sim`: kill
+   * score scales with the index and `rules.dropOnScoreMilestone` turns
+   * accumulated score into power-up drops, so index 0 and index 33 are
+   * genuinely different runs on the same seed.
+   */
+  stageIndex?: number
+  /**
    * Collect v6 evaluation telemetry and return the extra scoring fields
    * (plan/God-AI-Evaluation-Redesign.md). Default off: the v5 fitness path
    * ships exactly the same four fields it always did, so its payload size
@@ -74,6 +83,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       stage: task.stage,
       difficulty: task.difficulty,
       godAIParams: task.params,
+      stageIndex: task.stageIndex,
       maxTicks: task.maxTicks,
       sampleInterval: 60, // same as the serial path (metrics are discarded)
       telemetry: task.telemetry === true,

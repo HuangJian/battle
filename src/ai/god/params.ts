@@ -1,7 +1,7 @@
 // Moved verbatim from GodAIInput.ts during the giant-file split — params/
 // config surface (GodAIParams + DEFAULT/SKILLED_HUMAN + stage adaptation).
 import type { World } from '../../game/World'
-import { GRID } from '../../constants'
+import { GRID, ENEMY_SPAWNS } from '../../constants'
 import type { ActionId } from './DecisionCore'
 
 // ============================================================
@@ -449,6 +449,178 @@ export interface GodAIParams {
    */
   defenseBreachBonus: number
 
+  // ---- Dual central breach strategy (plan/dual-central-breach-strategy.md) ----
+  /**
+   * When `world.spectateDual === true && centralBreachRisk === true`,
+   * computeStageAdaptedParams overrides `defenseBreachBonus` with this value.
+   * Default 400 (A/B candidate). The override is ONLY applied in dual mode on
+   * central-breach stages — single-player keeps defenseBreachBonus=0 (byte-
+   * identical). 0 = dual central breach D2 disabled.
+   */
+  dualCentralBreachDefenseBreachBonus: number
+  /**
+   * Same gating — overrides `baseGuardAnchorMode` in dual central breach.
+   * Default 1 (enable §137 guard anchor at the antechamber mouth, e.g. (12,22)).
+   */
+  dualCentralBreachAnchorMode: number
+  /**
+   * Same gating — overrides `threatStickyTicks` in dual central breach.
+   * Default 30 (0.5s sticky hold to bridge threat-signal flicker gaps).
+   */
+  dualCentralBreachStickyTicks: number
+  /**
+   * Same gating — overrides `baseDamageRecall` in dual central breach.
+   * Default 1 (arm 1: unconditional recall once base is damaged — the dual
+   * central breach stages need both players to react instantly to ring
+   * damage, and the player-distance gate that made arm 1 net-negative in
+   * single-player doesn't apply when P1 is already anchored at center).
+   */
+  dualCentralBreachDamageRecall: number
+  /**
+   * Same gating — overrides `maxPlayerDistFromBase` in dual central breach.
+   * Default 8 (P1 returns to the guard anchor as soon as the base is
+   * threatened and P1 is > 8 cells away — the default 26 is far too loose
+   * for a center-guard role, P1 would be half the map away when the breach
+   * starts). 8 = just outside the anchor hold range (6) so P1 returns,
+   * arrives, and then holds the anchor.
+   */
+  dualCentralBreachMaxPlayerDistFromBase: number
+
+  /**
+   * Dual central breach (plan/dual-central-breach-strategy.md §6.3-A):
+   * When > 0, P2 in dual central breach mode bypasses the nearby-enemy
+   * gate for fence/shovel pickup. Fence = steel walls for the base,
+   * structurally solving the breach. P1 handles center defense, so P2
+   * is free to grab fence even with enemies nearby. 0 = OFF (byte-
+   * identical). Only activates when spectateDual && centralBreachRisk.
+   */
+  dualCentralBreachP2FencePickup: number
+
+  /**
+   * Dual central breach (plan/dual-central-breach-strategy.md §6.3-C):
+   * When > 0, P1 in dual central breach mode fires at brick walls while
+   * navigating toward the guard anchor (dig-while-moving). Without this,
+   * P1 waits for the navStuck/canMoveOrBreak detector to fire, losing
+   * ~1s at start and oscillating in brick corridors. 0 = OFF (byte-
+   * identical). Only activates when spectateDual && centralBreachRisk.
+   */
+  dualCentralBreachP1DigFire: number
+
+  /**
+   * §177 (plan/dual-central-breach-strategy.md §6.5 follow-up):
+   * When > 0, P2 in dual central breach mode navigates with `directMove`
+   * (chase straight at the target, breaking thin brick on the way) instead
+   * of the A* `followPath` used by the HUNT candidate's long-range branch.
+   * A* routes AROUND walls through corridors, so P2 never ends up sharing a
+   * row/column with an enemy on open ground and `shouldFireInDir` never gets
+   * a clear shot — measured P2 fire rate was 0% for a whole run. directMove
+   * closes the row gap first (Navigator's vertical-first preference), which
+   * is exactly the alignment the fire logic needs. followPath stays as the
+   * fallback when directMove finds nothing. 0 = OFF (byte-identical).
+   * Only activates when spectateDual && centralBreachRisk && isPlayer2.
+   */
+  dualCentralBreachP2DirectMove: number
+
+  /**
+   * §177: When > 0, P2 in dual central breach mode targets the NEAREST enemy
+   * spawn point whenever no enemy is close enough to engage, instead of
+   * holding a static flank cell. Enemies descend from the spawn columns, so
+   * sweeping toward a spawn point keeps P2 on the lanes they travel — the
+   * cheapest way to manufacture the row/column alignment the fire logic
+   * needs. Once an enemy comes within `dualCentralBreachP2PatrolEnemyDist`
+   * the patrol yields to the normal nearest-enemy hunt. 0 = OFF
+   * (byte-identical). Only activates when spectateDual && centralBreachRisk
+   * && isPlayer2 && the base is not under threat.
+   */
+  dualCentralBreachP2Patrol: number
+
+  /**
+   * §177: Manhattan cell distance at which a live enemy cancels the P2 spawn
+   * patrol and hands the target back to the normal nearest-enemy hunt.
+   * Only read when `dualCentralBreachP2Patrol > 0`.
+   */
+  dualCentralBreachP2PatrolEnemyDist: number
+
+  /**
+   * §177: the ROW P2 patrols on the chosen enemy-spawn column. 0 = the
+   * literal spawn point (top of the board). Higher rows keep P2 on the same
+   * descent lane while staying near the base — every measured Battlement
+   * dual loss is `base_destroyed`, so a patrol that walks P2 to row 0 trades
+   * lane coverage for an undefended base. Only read when
+   * `dualCentralBreachP2Patrol > 0`.
+   */
+  dualCentralBreachP2PatrolRow: number
+
+  /**
+   * §177: When > 0, the gated P2 targets the RUNNER-UP threat in the
+   * base-under-threat defense branch instead of the top-scoring one.
+   * The defense score is a pure function of (enemy, base) — the player's own
+   * position is not an input — so P1 and P2 otherwise rank threats
+   * identically and both drive at the same tank while the rest of the wave
+   * keeps digging the ring. Splitting by player index covers two lanes
+   * instead of one and is deterministic (no "who is closer" oscillation).
+   * 0 = OFF (byte-identical). Only activates when spectateDual &&
+   * centralBreachRisk && isPlayer2 && a living partner exists.
+   */
+  dualCentralBreachP2DefenseSecond: number
+
+  /**
+   * §177: how the gated P2 treats the §137 guard-anchor hold inside the
+   * base-under-threat branch. The anchor is base-relative, so both tanks
+   * hold the same cell and §159 yield leaves one shuffling instead of
+   * covering a lane.
+   *   0 = OFF (shared anchor, byte-identical)
+   *   1 = P2 holds its own shifted defense post instead
+   *   2 = P2 skips the hold and drives at its (runner-up) threat
+   * Default 2: with defenseSecond (runner-up threat) it gives the best
+   * measured Battlement dual win-rate (see §177). Only activates when
+   * spectateDual && centralBreachRisk && isPlayer2 && a living partner exists.
+   */
+  dualCentralBreachP2AnchorSplit: number
+  /**
+   * §178 (autopsy hard-s34-base-l3-t25-seed2): dual central breach — let the
+   * carve-dig nav-stuck escape punch THROUGH the central wall (base-column
+   * bricks cols BASE_POS/col..+1 above the ring). Without this the two tanks
+   * are pinned at the top perimeter, oscillating, and never reach their guard
+   * anchors while the base is breached from the bottom. In a central-breach
+   * stage there is NO steel in the central band (detectCentralBreachRisk),
+   * so punching the brick wall cannot open a lane to the eagle (the ring is
+   * still intact below). Gated by spectateDual && centralBreachRisk — SP never
+   * enters the override, so it stays byte-identical.
+   *   0 = OFF (carve still caps base-column breaks at carveMaxBaseColumn).
+   */
+  dualCentralBreachCarveMaxBaseColumn: number
+  /** §178: carve cost assigned to base-column bricks in the central-breach
+   * override (default 1e9 keeps them effectively unbreakable; lowering to a
+   * normal brick-break cost lets the carve A* route through the central wall
+   * instead of around the top perimeter). */
+  dualCentralBreachCarveBaseColumnCost: number
+  /**
+   * §178 (autopsy seed2): dual central breach — P1 holds a CENTRAL position
+   * (dig up and intercept the col-12 spawn lane) instead of the right-wing
+   * guard anchor. Matches the user expectation "开墙抵达中路驻守点". P2 keeps
+   * the flank/hunting split (§177). Gated by spectateDual && centralBreachRisk
+   * && !isPlayer2 — single-player and P2 unchanged (byte-identical).
+   *   0 = OFF (P1 uses the normal flank anchor)
+   */
+  dualCentralBreachP1Anchor: number
+  /** §178: the central hold cell (col,row) for P1 when dualCentralBreachP1Anchor>0.
+   * Computed via findDualCentralHoldImpl when either is <0; the knobs are a
+   * per-stage override. Defaults target the open top-center of a central-breach
+   * stage (intercept the col-12 spawn lane). */
+  dualCentralBreachP1AnchorCol: number
+  dualCentralBreachP1AnchorRow: number
+  /**
+   * §178: when > 0, the dual-central-breach P1 is a PURE defender — its
+   * power-up candidates (high/mid/low/close + aggressive freeze-pickup) are
+   * suppressed so it never abandons the central hold to chase items (P2 is
+   * the free tank that handles pickups). This is the "sticky hold" that keeps
+   * P1 sniping the col-12 spawn lane. 0 = OFF (byte-identical — P1 may divert
+   * to power-ups like normal). Gated by spectateDual && centralBreachRisk &&
+   * !isPlayer2.
+   */
+  dualCentralBreachP1HoldSticky: number
+
   // ---- §161 / 开路策略 (carve path, user request 2026-08-06, Stage 33 Battlement) ----
   /**
    * §161 / 开路策略: when the spawn point is trapped in a brick maze and
@@ -483,6 +655,12 @@ export interface GodAIParams {
   carveThreatDistCells: number
   /** §161 R6: max base-column bricks a carve path may break (prefer 0). */
   carveMaxBaseColumn: number
+  /** §161: cost assigned to base-column bricks in the carve A* (ring bricks stay
+   * 1e9 and are never carveable). Default 1e9 ⇒ base-column walls are effectively
+   * unbreakable by carve. §178 overrides this to a normal break cost in dual
+   * central-breach so the nav-stuck carve-dig escape punches through the central
+   * wall. SP keeps 1e9 (byte-identical). */
+  carveBaseColumnCost: number
   /** §161: carve path safety replan timer (ticks). */
   carveReplanTicks: number
 
@@ -1804,6 +1982,29 @@ export interface GodAIParams {
    */
   baseDamageRecall: number
 
+  // ---- §179: emergency base defense (autopsy seed6) ----
+  /**
+   * §179 (autopsy hard-s34-base-l3-t92-seed6): 0 = OFF (byte-identical).
+   * >0 = when baseHp / baseMaxHp ≤ this fraction, ALL tanks are forced to
+   * return to the defense position regardless of their current target.
+   * The autopsy showed both tanks oscillating in the top-right corner for
+   * 18 seconds while the base dropped from 48→12→0 HP — no emergency
+   * override existed. Default 0.25 (base at 25% — one or two hits from
+   * death). Also overrides the navStuck escape target from map center to
+   * the defense position while active.
+   */
+  emergencyBaseHpFrac: number
+
+  /**
+   * §179 (autopsy seed6 失误 D): 0 = OFF (byte-identical). >0 = during
+   * freeze (aggressive mode), selectTarget picks the enemy nearest to the
+   * BASE instead of nearest to the player. The autopsy showed a 20-second
+   * freeze window completely wasted — both tanks navigated to enemies in
+   * the top-right while an enemy sat at (7,24), 5 cells from the base, for
+   * the entire freeze. Default 1 (ON).
+   */
+  freezeBasePriority: number
+
   // ---- §159: T2a defense override for close enemies ----
   /**
    * §159: 0 = OFF (byte-identical). >0 = when the base is under threat and
@@ -2006,6 +2207,51 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 0 = OFF (byte-identical to pre-D2). A/B sweep candidate: 300 (between
   // the proximity noise band and clearShotBonus 500).
   defenseBreachBonus: 0,
+  // Dual central breach strategy (plan/dual-central-breach-strategy.md):
+  // override values applied by computeStageAdaptedParams ONLY when
+  // world.spectateDual === true && centralBreachRisk === true. Single-player
+  // never touches the existing knobs (defenseBreachBonus=0 etc.) → byte-identical.
+  dualCentralBreachDefenseBreachBonus: 600,
+  dualCentralBreachAnchorMode: 1,
+  dualCentralBreachStickyTicks: 30,
+  dualCentralBreachDamageRecall: 1,
+  dualCentralBreachMaxPlayerDistFromBase: 8,
+  // §6.3: P2 fence pickup bypass + P1 dig-while-moving (dual central breach only).
+  dualCentralBreachP2FencePickup: 1,
+  dualCentralBreachP1DigFire: 1,
+  // §177: P2 navigation — directMove instead of A* + enemy-spawn-point patrol
+  // (dual central breach only; the gate short-circuits for single-player).
+  // A/B (120-seed sweep, §177) showed directMove/patrol REGRESS win-rate (both
+  // tanks still chase the same top threat, so 3 enemies keep digging the ring).
+  // The effective fix is defenseSecond: P2 takes the runner-up threat so the two
+  // tanks de-conflict and cover more lanes. directMove/patrol are left as opt-in
+  // knobs (default 0) for future tuning; they are gated and never active in SP.
+  dualCentralBreachP2DirectMove: 0,
+  dualCentralBreachP2Patrol: 0,
+  dualCentralBreachP2PatrolEnemyDist: 6,
+  dualCentralBreachP2PatrolRow: 0,
+  dualCentralBreachP2DefenseSecond: 1,
+  dualCentralBreachP2AnchorSplit: 2,
+  // §178 (autopsy seed2): let carve punch through the central wall so both tanks
+  // reach their guard anchors instead of being pinned at the top perimeter.
+  // 99 base-column breaks / cost 5 (normal brick) ⇒ carve-dig escape routes
+  // straight through the central brick wall (no steel in a central-breach stage,
+  // so the intact ring still protects the eagle). §179 adds a P1 dig-fire
+  // direction guard in think.ts that prevents P1 from firing DOWN at walls —
+  // the primary protection against carving through the base's central shield.
+  // Gated → SP byte-identical.
+  dualCentralBreachCarveMaxBaseColumn: 99,
+  dualCentralBreachCarveBaseColumnCost: 5,
+  // §178: P1 central hold anchor (intercept col-12 spawn lane). (12,12) = mid-
+  // board center: covers the col-12 spawn lane with LOS both up (snipe spawn)
+  // and down (cover base approach) without being pinned at the top edge. -1 ⇒
+  // auto via findDualCentralHoldImpl. Gated → SP byte-identical.
+  dualCentralBreachP1Anchor: 1,
+  dualCentralBreachP1AnchorCol: 12,
+  dualCentralBreachP1AnchorRow: 12,
+  // §178: sticky central hold — suppress P1 power-up diversion in dual central
+  // breach. 1 = ON (pure defender). Gated → SP byte-identical.
+  dualCentralBreachP1HoldSticky: 1,
   // §161 / 开路策略 (carve path): default OFF — byte-identical to pre-§161.
   // A/B-measured on hard (Stage 33 Battlement + all 35); flip per result.
   carvePathMode: 0,
@@ -2014,6 +2260,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   carveChaseCells: 5,
   carveThreatDistCells: 8,
   carveMaxBaseColumn: 1,
+  carveBaseColumnCost: 1e9,
   carveReplanTicks: 240,
   // §162 / nav 卡死破墙逃生 (nav-stuck break-out, user request 2026-08-06,
   // replay hard-s34 seed 2050197249): when every preferred direction is
@@ -2398,6 +2645,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (unconditional) net −24; candidate arm 12 (distance gate); needs A/B.
   baseDamageRecall: 0,
 
+  // §179: emergency base defense — default 0.25 (base at 25% HP triggers
+  // forced return). 0 = OFF (byte-identical).
+  emergencyBaseHpFrac: 0.25,
+  // §179: freeze-period base-priority targeting — default 1 (ON).
+  freezeBasePriority: 1,
+
   // §159: T2a defense override — allow ENGAGE when a close enemy is in the
   // line of fire, even past maxPlayerDistFromBase. 4 cells = quick kill range
   // (bullet arrives in ~15 ticks; one-shot for 1-HP kinds, 2-3 shots for armor).
@@ -2478,6 +2731,10 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   bonusHuntBias: 2,
   // §173: base damage recall — pool-model fix, classic 未 A/B，restore 0。
   baseDamageRecall: 0,
+  // §179: emergency base defense + freeze base priority — pool-model
+  // (hard/chaos) fixes, classic instant 1-HP 未 A/B，restore 0（byte-identical）。
+  emergencyBaseHpFrac: 0,
+  freezeBasePriority: 0,
 }
 
 /**
@@ -2610,6 +2867,49 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
  * (spawnQueue + tileMap), so the same stage always yields the same adapted
  * params. Called once per reset() — never per-tick.
  */
+/**
+ * Dual central breach detector (plan/dual-central-breach-strategy.md §A):
+ * Scan the central band (cols 11–13, rows 0–22) for steel. If steel count = 0
+ * AND an enemy spawn point exists at col 12±1 (the center column — the default
+ * ENEMY_SPAWNS always includes col 12), the stage has a "central breach risk":
+ * enemies spawning at col 12 can drive straight down through breakable brick
+ * to the base with no indestructible barrier.
+ *
+ * Pure function of World state (tileMap only) — deterministic, no RNG.
+ * Called once per reset() — not a hot path.
+ */
+export function detectCentralBreachRisk(world: World): boolean {
+  const tm = world.tileMap
+  // Condition 1: no steel in the central band (cols 11–13, rows 0–22).
+  for (let row = 0; row <= 22; row++) {
+    for (let col = 11; col <= 13; col++) {
+      if (tm.get(col, row) === 'steel') return false
+    }
+  }
+  // Condition 2: an enemy spawn point at col 12±1 (center column).
+  // The default ENEMY_SPAWNS always includes {col: 12, row: 0}, so this is
+  // virtually always true — but check explicitly for correctness if spawns
+  // ever change.
+  let centerSpawn = false
+  for (let i = 0; i < ENEMY_SPAWNS.length; i++) {
+    if (Math.abs(ENEMY_SPAWNS[i].col - 12) <= 1) {
+      centerSpawn = true
+      break
+    }
+  }
+  if (!centerSpawn) return false
+  // Condition 3: col 12 must have an OPEN approach from the top (rows 0–9
+  // must be mostly empty) — enemies spawning at (12,0) can drive straight
+  // down through open terrain to the brick wall below. Stages where col 12
+  // is brick from row 2 (e.g. S14 Steel Web) slow the approach and don't
+  // need the central breach strategy. Threshold: ≥4 empty cells in rows 0–9.
+  let openCells = 0
+  for (let row = 0; row <= 9; row++) {
+    if (tm.get(12, row) === 'empty') openCells++
+  }
+  return openCells >= 4
+}
+
 export function computeStageAdaptedParams(base: GodAIParams, world: World): GodAIParams {
   const p = base
   let adapted = false
@@ -2789,6 +3089,25 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       overrides.evasionSteelOcclusion = 1
       adapted = true
     }
+  }
+
+  // ---- 3. Dual central breach strategy (plan/dual-central-breach-strategy.md) ----
+  // When spectateDual AND the stage has centralBreachRisk (no steel in the
+  // central band + center enemy spawn), override the defense enhancement knobs
+  // that are normally OFF (0) in single-player. The gating is strict:
+  // world.spectateDual === true is the FIRST check — single-player NEVER enters
+  // this block, so the overrides are never applied, and the existing knobs
+  // stay at their default 0 → byte-identical to pre-change behavior.
+  if (world.spectateDual && detectCentralBreachRisk(world)) {
+    overrides.defenseBreachBonus = p.dualCentralBreachDefenseBreachBonus
+    overrides.baseGuardAnchorMode = p.dualCentralBreachAnchorMode
+    overrides.threatStickyTicks = p.dualCentralBreachStickyTicks
+    overrides.baseDamageRecall = p.dualCentralBreachDamageRecall
+    // §178: let the carve-dig nav-stuck escape punch through the central wall so
+    // the two tanks REACH their guard anchors (otherwise pinned at the top).
+    overrides.carveMaxBaseColumn = p.dualCentralBreachCarveMaxBaseColumn
+    overrides.carveBaseColumnCost = p.dualCentralBreachCarveBaseColumnCost
+    adapted = true
   }
 
   // Always return a fresh object, even when unadapted: callers must never be

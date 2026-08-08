@@ -67,11 +67,13 @@ export function isBaseColumnBrickImpl(self: GodAIInput, col: number, row: number
 }
 
 /**
- * §161: per-cell cost array for the carve dig A*. Ring and base-column
- * bricks cost 1e9 so the pathfinder routes around them whenever ANY
- * alternative exists (the "尽量不打" preference). Steel is already
- * impassable in A* (R5 by construction). Cached per tileMap.revision —
- * a strict pure memo (same discipline as the §127 replan cache): a brick
+ * §161: per-cell cost array for the carve dig A*. Ring bricks cost 1e9
+ * (never carveable — R5/R6 hard constraint). Base-column bricks cost
+ * `carveBaseColumnCost` (default 1e9 ⇒ effectively unbreakable, the
+ * "尽量不打" preference) — §178 lowers it in dual central-breach so the
+ * nav-stuck carve-dig escape punches through the central wall. Steel is
+ * already impassable in A* (R5 by construction). Cached per tileMap.revision
+ * — a strict pure memo (same discipline as the §127 replan cache): a brick
  * destroyed bumps the revision the same tick, so the cache never goes
  * stale.
  */
@@ -80,12 +82,15 @@ export function buildCarveCosts(self: GodAIInput): Float64Array {
   if (self._carveCosts && self._carveCostsRev === rev) return self._carveCosts
   const costs = new Float64Array(GRID * GRID)
   const grid = self.world.tileMap.grid
+  const baseCost = self.params.carveBaseColumnCost
   for (let r = 0; r < GRID; r++) {
     const grow = grid[r]
     for (let c = 0; c < GRID; c++) {
       if (grow[c] !== 'brick') continue
-      if (isCarveRingBrickImpl(self, c, r) || isBaseColumnBrickImpl(self, c, r)) {
+      if (isCarveRingBrickImpl(self, c, r)) {
         costs[r * GRID + c] = 1e9
+      } else if (isBaseColumnBrickImpl(self, c, r)) {
+        costs[r * GRID + c] = baseCost
       }
     }
   }

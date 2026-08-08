@@ -66,6 +66,26 @@ import {
 // have `return`ed from the top-level chain.
 // ===========================================================================
 
+/**
+ * §178 (autopsy hard-s34-base-l3-t25-seed2): dual central-breach P1 central-
+ * hold gate. When true, this tank is P1 in a dual central-breach stage and
+ * should behave as a PURE defender — hold the central anchor (§178), snipe the
+ * col-12 spawn lane, and fire at enemies, but NEVER divert to grab power-ups
+ * (P2 is the free tank that handles items: fence/bomb/star/shield). This is
+ * the "sticky hold" that keeps P1 from wandering to top-row power-ups and
+ * abandoning the base while it is dug out from below. Gated by spectateDual &&
+ * centralBreachRisk && !isPlayer2 && dualCentralBreachP1HoldSticky>0 — single-
+ * player and P2 stay byte-identical.
+ */
+function isDualCentralBreachHoldP1(self: GodAIInput): boolean {
+  return (
+    self.world.spectateDual &&
+    self._centralBreachRisk &&
+    !self.isPlayer2() &&
+    self.params.dualCentralBreachP1HoldSticky > 0
+  )
+}
+
 /** §152-W2: map-center escape target for the aggressive movement-stuck guard. */
 const MAP_CENTER: Cell = { col: 12, row: 12 }
 
@@ -430,6 +450,10 @@ const PICKUP_HIGH: Candidate = {
   weight: ACTION_WEIGHTS.pickupHigh,
   evaluate(self, ctx) {
     const { p, pcx, pcy, onCooldown } = ctx
+    // §178: dual central-breach P1 — pure defender, never diverts to power-ups
+    // (P2 handles items). Sticky-hold so P1 keeps sniping the col-12 spawn
+    // lane instead of wandering to top-row items while the base is dug out.
+    if (isDualCentralBreachHoldP1(self)) return false
     // NORMAL mode only: during freeze the aggressive branch already grabs
     // power-ups when no enemy is aligned, and an aligned frozen enemy is a
     // free kill we must not interrupt. Gated by pickupPriorityMode.
@@ -438,6 +462,28 @@ const PICKUP_HIGH: Candidate = {
     // after the aggressive section (see PICKUP_MID). When chokepointMode==0,
     // the original all-tiers-together order is kept (byte-identical to pre-§88).
     if (!self.aggressive) {
+      // §6.3-A: Dual central breach — P2 prioritizes fence pickup above ALL
+      // other candidates. Fence = steel walls for the base, structurally
+      // solving the central breach. P1 holds the center anchor; P2 is the
+      // free tank. Bypasses retreat gate, nearby-enemy gate, and divert-
+      // distance cap. Gated by spectateDual && centralBreachRisk &&
+      // isPlayer2 && dualCentralBreachP2FencePickup — single-player and
+      // P1 are byte-identical.
+      if (
+        self.world.spectateDual &&
+        self._centralBreachRisk &&
+        self.isPlayer2() &&
+        self.params.dualCentralBreachP2FencePickup > 0
+      ) {
+        const fenceTarget = self.findDualFencePickup(pcx, pcy)
+        if (fenceTarget) {
+          self._moveDir = self.navigateTowards(fenceTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.powerup++
+          self._lastBranch = 'powerup'
+          return true
+        }
+      }
       // §146 C (extended): M13-condition gate — no pickup tier may hijack
       // the retreat. 0 = OFF (byte-identical).
       if (retreatGateBlocksPickup(self)) {
@@ -494,7 +540,13 @@ const AGGRO: Candidate = {
       // handled any in-flight bullet threat before we reach here.
       // Only during freeze (not shield): shield makes aggressive=true too, but
       // enemies are NOT frozen during shield.
-      if (w.freezeTimer > 0 && self.params.freezePickupRange > 0) {
+      // §178: dual central-breach P1 — even in freeze, never divert to items;
+      // it holds the center and fires (P2 handles freeze pickups).
+      if (
+        w.freezeTimer > 0 &&
+        self.params.freezePickupRange > 0 &&
+        !isDualCentralBreachHoldP1(self)
+      ) {
         const freezeTarget = self.findFreezePickupTarget(pcx, pcy)
         if (freezeTarget) {
           self._moveDir = self.navigateTowards(freezeTarget)
@@ -728,6 +780,8 @@ const CLOSE_PICKUP: Candidate = {
   weight: ACTION_WEIGHTS.closePickup,
   evaluate(self, ctx) {
     const { p, pcx, pcy, onCooldown } = ctx
+    // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
+    if (isDualCentralBreachHoldP1(self)) return false
     if (self.aggressive) return false
     if (self.params.closePickupRange <= 0) return false
     // Skip when base is under threat — defense outranks a nearby item.
@@ -748,6 +802,8 @@ const PICKUP_MID: Candidate = {
   weight: ACTION_WEIGHTS.pickupMid,
   evaluate(self, ctx) {
     const { p, pcx, pcy, onCooldown } = ctx
+    // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
+    if (isDualCentralBreachHoldP1(self)) return false
     // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
     // tier (bomb/freeze/fence) was already checked before the aggressive
     // section. Only runs when chokepointMode > 0; otherwise the single §87
@@ -1040,6 +1096,20 @@ const ENGAGE: Candidate = {
         Math.abs(self.playerCell().row - BASE_POS.row) >
         self.params.maxPlayerDistFromBase
 
+    // §6.3-D: Dual central breach — P2 is the free tank (flanker/pickup).
+    // Don't force P2 to skip T2a when base is threatened — P1 holds the
+    // anchor and handles base defense. P2 should be free to engage close
+    // enemies it encounters while roaming. Gated by spectateDual &&
+    // centralBreachRisk && isPlayer2 — P1 and single-player byte-identical.
+    if (
+      skipT2aForDefense &&
+      self.world.spectateDual &&
+      self._centralBreachRisk &&
+      self.isPlayer2()
+    ) {
+      skipT2aForDefense = false
+    }
+
     if (skipT2aForDefense && aimDir && self.params.t2aDefenseOverrideRange > 0) {
       // Distance guard: only override when the player is slightly past the
       // threshold (within t2aDefenseOverrideRange cells past it). Far from
@@ -1241,6 +1311,8 @@ const PICKUP_LOW: Candidate = {
   weight: ACTION_WEIGHTS.pickupLow,
   evaluate(self, ctx) {
     const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+    // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
+    if (isDualCentralBreachHoldP1(self)) return false
     // §146 C: LOW tier is deliberately NOT gated by fieldRetreatPickupGate —
     // extending the gate to MID/LOW was A/B-measured net negative on chaos
     // (§147, see retreatGateBlocksPickup scope note).
@@ -1437,7 +1509,22 @@ const HUNT: Candidate = {
       Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row) >
         self.params.baseRaceRangeCells
     if (navStuck && !stuckAtCenter) {
-      navTarget = { col: 12, row: 12 }
+      // §179 (autopsy seed6 失误 B/C): when baseHp is critically low, the
+      // navStuck escape must go to the DEFENSE POSITION, not map center.
+      // The autopsy showed both tanks stuck at (18,6)/(21,6) for 18 seconds
+      // while the base dropped 48→12→0 — the center escape pulled them to
+      // (12,12) but target jitter sent them right back to the top-right.
+      // Escaping to base defense breaks the oscillation cycle.
+      if (
+        self.params.emergencyBaseHpFrac > 0 &&
+        self.hasBase &&
+        w.spectateDual &&
+        w.baseHp <= self.params.emergencyBaseHpFrac * w.baseMaxHp
+      ) {
+        navTarget = self.getDefaultDefensePosition()
+      } else {
+        navTarget = { col: 12, row: 12 }
+      }
     } else if (survivalRetreat && self.hasBase) {
       navTarget = self.getDefaultDefensePosition()
     } else {
@@ -1511,6 +1598,27 @@ const HUNT: Candidate = {
     } else if (navDist <= 5) {
       // Close range — directMove (responsive, tracks moving enemies).
       self._moveDir = self.directMove(pc)
+    } else if (
+      // §177: Dual central breach — P2 navigates with directMove at ALL
+      // ranges. A* routes AROUND walls through corridors, so P2 never ends
+      // up on an enemy's row/column on open ground and the fire logic never
+      // gets a clear shot (measured: P2 fire rate 0% for a full run, 0
+      // kills). directMove closes the row gap first and breaks thin brick,
+      // which is exactly the alignment shouldFireInDir needs. Gated by
+      // spectateDual && centralBreachRisk && isPlayer2 &&
+      // dualCentralBreachP2DirectMove — single-player and P1 keep the A*
+      // long-range branch (byte-identical).
+      self.world.spectateDual &&
+      self._centralBreachRisk &&
+      self.isPlayer2() &&
+      self.params.dualCentralBreachP2DirectMove > 0
+    ) {
+      self._moveDir = self.directMove(pc)
+      if (!self._moveDir) {
+        // directMove found nothing (fully walled in / already on target) —
+        // fall back to A*, the mirror of the default long-range order.
+        self._moveDir = self.followPath()
+      }
     } else {
       // Long range — A* pathfinding (finds corridors in mazes).
       self._moveDir = self.followPath()
@@ -1623,7 +1731,12 @@ const HUNT: Candidate = {
     // Don't check shouldFireInDir here — it might fire at enemy bullets
     // (T5) instead of the wall, leaving the player stuck. When moving
     // freely, fire only at enemies (not walls) to save the bullet cap.
-    if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
+    // §179 (autopsy seed6 失误 A): when P1 is in the dual central breach hold
+    // and the move direction is DOWN, skip break-through fire — P1 must not
+    // carve through the base's central shield. Fall through to shouldFireInDir
+    // (else branch), which still fires at enemies in the line of fire.
+    const p1HoldNoDownFire = isDualCentralBreachHoldP1(self) && self._moveDir === 'down'
+    if (self._moveDir && !self.canMoveDir(p, self._moveDir) && !p1HoldNoDownFire) {
       // §70/§74: break-through fire — never fire through base brick/steel
       // (§70) or at steel the player can't pierce (§74). Both guards live
       // in shouldFireBreakThroughImpl, which also drops the old `bs.enemy ||
@@ -1635,7 +1748,27 @@ const HUNT: Candidate = {
         self._fire = !onCooldown
       }
     } else {
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir, false)
+      // §6.3-C: Dual central breach — P1 dig-while-moving. P1 fires at
+      // brick walls while navigating toward the guard anchor, breaking
+      // through corridors without waiting for the navStuck detector.
+      // allowWallFire=true → shouldFireInDir fires at breakable walls
+      // (T6/T11 guards still prevent firing at base brick/steel). Gated
+      // by spectateDual && centralBreachRisk && !isPlayer2 — P2 and
+      // single-player keep allowWallFire=false (byte-identical).
+      const p1DigFire =
+        self.world.spectateDual &&
+        self._centralBreachRisk &&
+        !self.isPlayer2() &&
+        self.params.dualCentralBreachP1DigFire > 0
+      // §179 (autopsy seed6 失误 A): P1 at the anchor (12,12) must NOT fire
+      // DOWN at base-column bricks — that carved a 14-brick tunnel through
+      // the base's central shield (rows 13-19, cols 12+13). P1's job is to
+      // snipe UP the spawn lane, not dig toward the base. shouldFireInDir
+      // still fires at enemies in the line of fire (enemy check runs before
+      // the wall-fire check), so this only suppresses wall-fire, not combat.
+      const fireDir = self._moveDir ?? p.dir
+      const p1DigFireDir = p1DigFire && fireDir !== 'down'
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, fireDir, p1DigFireDir)
     }
     self.branchCounts.navigate++
     self._lastBranch = 'navigate'

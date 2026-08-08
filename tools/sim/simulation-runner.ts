@@ -455,6 +455,14 @@ export function runSimulation(opts: RunOptions): SimResult {
   // recorded snapshot / replay) reflects the actual stage being simulated.
   world.loadStageData(stage, opts.stageIndex ?? 0)
 
+  // Dual central breach: set mode flags BEFORE input.reset() so P1's
+  // computeStageAdaptedParams sees spectateDual=true and applies the
+  // dual central breach knob overrides (plan/dual-central-breach-strategy.md).
+  if (spectateDual) {
+    world.spectate = true
+    world.spectateDual = true
+  }
+
   // Reset the input to pick up the new World state.
   input.reset()
 
@@ -477,9 +485,9 @@ export function runSimulation(opts: RunOptions): SimResult {
   // 督战双玩家 (dual supervise): mirror GameCore.requestSpectateToggle(true).
   // God AI already drives P1 (the `input` above); here we also spawn player2
   // and attach a SECOND God AI so both tanks are machine-controlled.
+  // Mode flags (world.spectate / world.spectateDual) were set BEFORE
+  // input.reset() above so P1's stage adaptation sees them.
   if (spectateDual) {
-    world.spectate = true
-    world.spectateDual = true
     const d = world.difficulty
     world.lives2 = d?.startLives ?? 3
     world.playerLevel2 = d?.playerStartLevel ?? 0

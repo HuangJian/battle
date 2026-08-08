@@ -2412,3 +2412,136 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - hard 35×120 双玩家过关率 97.1%（>95% 目标达成），最差关 Battlement 67.5%（单玩家约 40%）。
 - 工具链支持：`bun tools/sim/sweep-winrate.ts --difficulties hard --seeds 1-120 --coop`。
 - 督战双玩家：浏览器中 `requestSpectateToggle(true)` 启用。
+
+## 175. Dual 中路无钢关配合策略 — 立项（2026-08-08）
+
+**Decision:** 为 dual 模式下的"中路无钢、敌人从中路顶部出生持续凿穿砖墙"关卡（典型：S34 Battlement）实现专用配合策略。所有增强**仅对 `spectateDual && centralBreachRisk` 生效**，单玩家逐字节不变。
+
+核心改动：
+1. **中路无钢检测器** (`detectCentralBreachRisk` in `params.ts`)：扫中央带 cols 11–13 / rows 0–22 的 steel 数 = 0 + 敌出生点含中列 (col 12±1) + col 12 rows 0–9 有 ≥4 格 empty（开放通道，排除 S14 Steel Web 等砖墙从 row 2 开始的关）。当前仅 S34 通过。
+2. **Dual 角色分工**（`StrategyPlanner.ts`）：
+   - P1 = 中路守口：`selectTargetImpl` 的 normal-hunt 分支中，P1 的默认目标改为 guard anchor（`!baseUnderThreat` 时始终返回 anchor），不再跨图追猎。`getDefaultDefensePositionImpl` 中 P1 shift=0（中心），P2 shift=-2（左翼）。
+   - P2 = 侧翼+拾取：正常狩猎，防守位偏移至左翼 (col 10)，避免 §159 yield。
+3. **开启增强旋钮**（`computeStageAdaptedParams` 中 `spectateDual && centralBreachRisk` 门控覆盖）：
+   - `defenseBreachBonus`: 0→600（凿环者评分加成，A/B 定档：400=65%, 500=70.8%, 600=74.2%, 800=74.2% 饱和）
+   - `baseGuardAnchorMode`: 0→1（启用 §137 守位锚点 + `getDefaultDefensePosition` 使用 anchor 替代不可站的环砖 (12,23)）
+   - `threatStickyTicks`: 0→30（0.5s 粘性，60=70.8% 略差）
+   - `baseDamageRecall`: 0→1（基地受损即触发威胁，P1 在 anchor dist 2 > 1 恒真）
+4. **仿真器修复** (`simulation-runner.ts`)：`world.spectateDual` 必须在 `input.reset()` 之前设置，否则 P1 的 `computeStageAdaptedParams` 看不到 dual 模式 → 增强旋钮不生效。
+5. `think.ts` §159 T2a override 保持不变（P2 保留 §159 覆盖——防守位偏移已防 yield，§159 帮助 P2 瞄准近敌）。
+
+**Rationale:**
+- S34 dual 基线 5%（~20s 基地失守，仅 3 杀）。根因：P1/P2 都往 (12,23) 挤 → §159 yield → 没人卡 col 12 凿墙者；D2/anchor/sticky/damageRecall 旋钮默认 0 → 防御级联不激活。
+- 方案遵循三道门：更 enjoyable（dual 模式从 5%→70%+）、架构简单（config 驱动 + 3 处 gate，无新系统）、尊重原作（Battle City 双人配合防守）。
+- S14 Steel Web 被排除（col 12 rows 0-9 仅 2 格 empty < 4 → centralBreachRisk=false），因为 S14 的砖墙从 row 2 开始，敌人无法快速从中路突进，P1 全驻守反而降低狩猎效率（85%→70%）。
+- `defenseBreachBonus=600` 超过 `defenseClearShotBonus=500`：在 central breach 场景下，凿环者比已对齐基地的敌人更危险（凿环者是未来威胁的源头，clear-shot 敌人可能被拦截）。
+
+**Implications:**
+- 单玩家确认逐字节不变（5 种子 outcome 完全一致，sweep-winrate classic/hard/chaos 三难度与基线逐字节一致）。
+- S34 dual 120-seed 胜率 70.8%（从 5% 基线）。未达 95% 目标——P1 在 anchor 仍无法独立阻止 4 敌同时凿环（8 砖 / 4 敌 × 0.7s ≈ 1.4s 破环）。P2 狩猎减轻压力但无法完全补偿。后续 A/B 可调：P2 也参与中路防守、anchor 位置优化、fire-rate 适配。
+- S14 dual 20-seed 胜率 100%（从 85% 基线提升，因为 centralBreachRisk=false → 不激活策略 → 基线行为 + 仿真器修复带来的 P1 正确看到 dual 模式）。
+- `dualCentralBreachMaxPlayerDistFromBase` 旋钮已加入 interface/defaults（默认 8）但未在 override 中使用——保留供后续 A/B。
+
+## 176. Dual Central Breach §6 实测缺陷修复 — P2 角色落地 + P1 dig-fire
+
+**Decision:** 针对 plan/dual-central-breach-strategy.md §6 实测复盘发现的三个缺陷，实施以下修复（全部仅 `spectateDual && centralBreachRisk` 下生效，单玩家逐字节不变）：
+
+1. **P2 fence 拾取** (§6.3-A)：在 PICKUP_HIGH 候选顶部新增 P2 专用 fence 拾取路径，绕过所有门控（nearby-enemy / retreat-gate / divert-distance）。新增 `findDualFencePickupImpl`（StrategyPlanner.ts）+ `dualCentralBreachP2FencePickup` 旋钮（params.ts，默认 1）。P1 守锚点、P2 捡 fence（=给基地砌钢墙），结构性解决中路被凿穿。
+2. **P1 dig-while-moving** (§6.3-C)：HUNT 候选 fire 逻辑中，P1 在 dual central breach 下 `allowWallFire=true`（`shouldFireInDir` 第 4 参数从 `false` 改为 `p1DigFire`）。P1 推进时开火破砖，不再等 navStuck 检测器。新增 `dualCentralBreachP1DigFire` 旋钮（默认 1）。P2 保持 `false`（A/B 实测 P2 开 wall-fire 反而 -12pp，浪费弹量上限）。
+3. **§159 T2a P2 bypass** (§6.3-D)：ENGAGE 候选中，P2 在 dual central breach 下跳过 `skipT2aForDefense`（不被强制回防）。P1 守锚点，P2 自由狩猎——允许 P2 停下射击近敌而不被基地威胁召回。A/B 实测 +4pp。
+
+**Rationale:**
+- §6 实测 replay (seed 251482356) 暴露 P2 整局 nav≠(0,0) 占比 0%、fire=false 100%——P2 "侧翼+拾取"角色未实现。
+- P2 dig-fire (allowWallFire=true) A/B 120-seed：55.8% vs P1-only 68.3% → P2 开 wall-fire 反而 -12pp（浪费弹量上限，遇敌时无法射击）。P1-only dig-fire 保持。
+- §159 T2a bypass A/B 120-seed：有 68.3% vs 无 64.2% → +4pp（P2 能停下来射击近敌）。
+- 单玩家 3-seed sweep：classic 91.2% / hard 76.5% / chaos 70.9%，与基线一致——gating 正确。
+
+**Implications:**
+- S34 dual 120-seed 胜率 68.3%（§175 基线 70.8% → -2.5pp 在噪声范围内，3-seed sweep 噪声 ±5pp）。
+- P2 fire rate 仍为 0%——根因是 P2 的 A* 路径绕墙走，从不与敌同行/同列。allowWallFire=true 无法解决（P2 在开阔地带无墙可打）。后续需改 P2 导航策略（directMove 替代 followPath）或 P2 主动巡逻敌出生点。
+- Fence 在该 seed 从未出现——fence 拾取代码已就位但需更多 seed 验证。
+- 单玩家零回归确认（gating 严格：`spectateDual && centralBreachRisk` 双条件，单玩家短路返回）。
+
+## 177. Dual Central Breach P2 导航落地 — directMove/patrol 实测回退，de-conflict 生效
+
+**Decision:** 实施 plan/dual-central-breach-strategy.md §6.3-D 的 P2 导航两件套 **作为 opt-in 旋钮**（默认 0，全部仅 `spectateDual && centralBreachRisk && isPlayer2()` 下生效，单玩家逐字节不变）：
+1. **A) directMove 替代 A\***（`dualCentralBreachP2DirectMove`）：think.ts HUNT 候选长程分支优先 `directMove(pc)`，失败回退 `followPath()`。默认 **0**（A/B 实测回退）。
+2. **B) 敌出生点巡逻**（`dualCentralBreachP2Patrol` + `PatrolEnemyDist`/`PatrolRow`）：`findDualPatrolTargetImpl`（StrategyPlanner.ts，模块级 `_dualPatrolCell` 缓冲，AGENTS §14.1）在无可射敌时扫敌 spawn 列。`=2` 改为驻守 P2 自身防位。默认 **0**（A/B 实测回退）。
+3. **实测生效的修复**（设为默认 1/2）：
+   - `dualCentralBreachP2DefenseSecond=1`：base-under-threat 评分只含敌/基地、与玩家位置无关 → P1/P2 排名相同、追同一辆 → 其余 3 敌持续凿环。该 knob 让 gated P2 取**亚军威胁**，两坦覆盖两条最危险 lane。
+   - `dualCentralBreachP2AnchorSplit=2`：§137 守锚点 base-relative，两坦同格、§159 yield 浪费。该 knob 让 P2 **跳过共享受锚**、直扑亚军威胁（=1 为改守自身防位，A/B 更差）。
+
+**Rationale（A/B，120-seed 固定种子 251482356 对比，同种子可复现）：**
+- 探针 seed 251482356 暴露 P2 已对齐（±1 格 48.8%）但仍与 P1 追同一 top 威胁——根因是威胁评分 position-independent，非对齐问题，故 A/B 直接改导航（directMove/patrol）**全部回退**：base 61.7%→directMove 60.0%、patrol 60.0%、两者 59.2%；patrolRow 扫描 row0/8/14/18 全部 ≤59.2%。
+- defenseSecond 单独 = **69.2%**（base 61.7% → +7.5pp，自爆 base 死亡 7→3）；anchorSplit:1=60.8%、:2=**72.5%**；组合 defenseSecond+anchorSplit:2 = 70.0%（base 60.0%，+10pp）。
+- 结论：P2 真正缺的是**威胁覆盖去重**，不是对齐。de-conflict（亚军威胁 + 跳过共享锚）是有效杠杆。
+
+**Implications:**
+- **S34 Battlement dual**：固定种子 251482356 base 60.0% → 70.0%（+10pp）；随机种子 acceptance 命令（`--size 120` 无 `--seed`，每次随机基种）实测 69.2%–72.5%，**高于 §176 基线 68.3%**（验收通过，向 95% 推进但未达）。
+- **S14 Steel Web dual**：20-seed 100%（固定+随机），无回归。
+- **单玩家零回归**：gate 双条件确保 directMove/patrol/defenseSecond/anchorSplit 分支在单玩家从不进入；S34 单玩 20-seed 固定种子两次运行均 5%，逐字节确定。
+- **Replay 断言 seed 251482356（final 配置）**：outcome=stageclear，P2 fire 1.4%（36 发）、**kills=6**（P1=6）、move 90.9%（非静止）、branch navigate 70.3%——P2 真实交火且击杀 >0。
+- 远未达 95% 目标：de-conflict 缓解但 4 敌同时凿环仍超出双坦拦截能力；后续可 A/B `defenseSecond` 权重、P2 主动破环、anchor 位置。
+- 代码：`think.ts:1558` directMove 分支、`StrategyPlanner.ts:745` findDualPatrolTargetImpl + `:1626` patrol 调用 + `:1716` defenseSecond 亚军 + `:1855` anchorSplit；`params.ts:2150` 默认块；工具 `sim-worker.ts` 已补 `stageIndex` 传递（修复 A/B baseline mismatch）。
+
+## 178. Dual Central Breach autopsy (hard-s34 seed2) — carve 穿墙 + 中驻守 + sticky hold
+
+**Symptom:** replay `hard-s34-base-l3-t25-seed2.replay`（督战双玩家）三异常：P1 出生点振荡、P2 滞留右上、P1 滞留顶部（逐帧 autopsy 报告与其复现脚本为本地一次性产物，未入库）。root cause：dual central-breach 下两坦防守锚点在基地砖环两侧，须穿中路砖墙；但 carve-dig 逃生被硬卡（中列砖 1e9 + `carveMaxBaseColumn=1`），两坦被钉顶部、下不到防守位，敌人从底部凿穿基地。committed 基线（pre-§178，438d240）S34 dual 隔离 per-seed 仅 **1/12**（仅 seed9 过）。
+
+**Fix（全部 `spectateDual && centralBreachRisk` gated，单玩家逐字节不变）：**
+1. **A) carve 穿中墙**：override 块置 `carveMaxBaseColumn = dualCentralBreachCarveMaxBaseColumn(99)`、`carveBaseColumnCost = dualCentralBreachCarveBaseColumnCost(5)`。`PathCarve.buildCarveCosts` 中 base-column 砖代价由固定 `1e9` 改为 `self.params.carveBaseColumnCost` 驱动 → nav-stuck carve-dig 逃生直穿中墙而非绕顶部。
+2. **B) P1 dig-while-moving**：沿用 §6.3-C `dualCentralBreachP1DigFire=1`（HUNT fire `allowWallFire`）。
+3. **C) 中驻守锚点**：`dualCentralBreachP1Anchor=1` + `dualCentralBreachP1AnchorCol/Row`；`findDualCentralHoldImpl`（StrategyPlanner）返回驻守格（默认 `(12,12)`，plan 原始建议）；`getBaseGuardAnchor` / `getDefaultDefensePosition` / `selectTargetUncached` 在 dual central-breach P1 返回该锚点（P2 保持 flank/hunt 去重 §177）。
+4. **sticky hold（关键使能，否则 C 无效）**：`dualCentralBreachP1HoldSticky=1` + think.ts 四个 powerup 候选（PICKUP_HIGH/MID/LOW/CLOSE_PICKUP）与 AGGRO freeze-pickup 块对 dual central-breach P1 返回 false → P1 纯防守，不再为 star/tank/shield 弃锚点去顶部捡道具（P2 负责道具）。无此 gate 时 P1 后期弃 `(12,2)` 去顶部捡道具、基地被底部凿穿（A+C 仍 gameover@4252）。
+
+**锚点行选择（隔离 per-seed 验证，杜绝 size-N 批量污染，见下）：**
+- 初版 `(12,2)` 顶中：seed2 win / seed5 lose@2581 / seed11 lose → **10/12**。
+- 改 `(12,12)` 中板：seed2 win / seed5 win / seed11 win → **11/12**（仅 seed6 lose）。
+- `(12,22)` 同 `(12,12)` 仅胜 seed6 反输。选 **`(12,12)`**：比 `(12,2)` 严格更优（(12,2) 失 seed5+11，仅失 seed6）。seed5/seed6 互为张力（对立锚点），无单一固定锚点能全胜——但二者 baseline 皆输，故非回归，仅 improved 阶段的取舍。
+
+**Verification（隔离单进程 runSimulation，非 level-sim --size N 批量，见下 Harness bug）：**
+- **seed2：`stage_clear`（baseAlive=true，kills=20）✓ 满足用户验收。**
+- S34 dual 隔离 per-seed seeds 1–12：**11/12**（仅 seed6 gameover）。
+- baseline（committed 438d240）同法：**1/12**（仅 seed9）——本修复 1/12 → 11/12 大幅改善。
+- 单玩家逐字节不变：SP seed2 仍 `gameover@2117`（与 baseline 一致），gate 全部 `spectateDual` 短路。
+
+**Harness bug（重要，预存在，污染所有 size>1 sweep）：** `level-sim --size N` 批量逐种子结果不可信——同 seed 在 size>1 跑与隔离单跑 outcome 不同（baseline seed5 隔离 `stage_clear@2762`，size-5 sweep 内 `gameover@5828`，同 ticks 不同 outcome）。`runSimulation` 本身在单进程连跑同种子结果一致（同进程三连跑 outcome 相同），但 `level-sim` 批量路径（import `../eval/evaluator` + `../sim/replay-writer` 的模块图）引入跨跑共享态、污染后续跑。**A/B 与验收一律用隔离单进程：`level-sim --seed X --size 1`（入库路径），或自写一个直接调 `runSimulation` 的一次性脚本（切勿 import `../eval/evaluator` / `../sim/replay-writer`）；勿信 size>1 批量总胜率。** 建议后续排查 evaluator 模块图加载态或改为每种子子进程隔离（影响整个 God-AI 调参结论）。
+
+## 179. Dual Central Breach autopsy (hard-s34 seed6) — P1 凿盾 + 危基不回防 + 冰冻浪费
+
+**Symptom:** §178 修复后 S34 dual 12 个种子仅 seed6 仍 `gameover@5549`（base_destroyed, kills=17, lives=3）。逐帧法医重建（autopsy 报告与复现脚本为本地一次性产物，未入库）定位 4 个根因：
+
+| # | 失误 | 根因 |
+|---|---|---|
+| A | P1 向下开火凿穿基地中央护盾（rows 13-19, cols 12+13, 14 块砖） | `dualCentralBreachP1DigFire=1` 使 P1 在 navigate 分支向墙壁开火；`shouldFireInDir` 的 `allowWallFire=true` 允许打 base-column 砖（非 ring 砖，T6 不拦）；`shotReachesBaseImpl` 被 ring 砖（row 23）阻挡返回 false → 自毁守卫不触发 |
+| B/C | 双车右上角振荡 18s，基地 48→12→0 无紧急回防 | navStuck 逃逸目标为 (12,12) 地图中心而非防位；`selectTarget` 无 baseHp 低阈值硬覆盖 |
+| D | 20s 冰冻窗口完全浪费（fire=false，敌人 (7,24) 距基地 5 格无人理） | `selectTarget` aggressive 模式取距玩家最近敌，非距基地最近；冰冻期无强制开火 |
+
+**Fix（全部 `spectateDual` gated，单玩家逐字节不变）：**
+
+1. **A) P1 dig-fire 方向守卫**（think.ts NAVIGATE 分支）：
+   - break-through fire：`p1HoldNoDownFire = isDualCentralBreachHoldP1(self) && _moveDir === 'down'` → 跳过 break-through fire，落入 `shouldFireInDir` else 分支（enemy 检查先于 wall-fire，仍可对敌开火）
+   - P1 dig-fire：`p1DigFireDir = p1DigFire && fireDir !== 'down'` → DOWN 方向 `allowWallFire=false`
+   - 效果：P1 在锚点 (12,12) 不再向下凿砖；仍可向上/侧面开火、对敌开火
+
+2. **B/C) 危基紧急回防**（`emergencyBaseHpFrac=0.25`，StrategyPlanner.selectTargetUncached + think.ts navStuck）：
+   - `selectTarget`：`baseHp ≤ 0.25 × baseMaxHp` → 返回 `getDefaultDefensePosition()`（覆盖所有目标选择，包括 aggressive 模式）
+   - navStuck 逃逸：同一条件下逃逸目标改为防位而非地图中心
+   - gated by `spectateDual`（SP A/B 显示 general 阈值在 SP 上 seed11/13 回退 −2pp）
+
+3. **D) 冰冻期基地优先**（`freezeBasePriority=1`，StrategyPlanner.selectTargetUncached aggressive 分支）：
+   - `freezeBaseFirst = freezeBasePriority > 0 && hasBase && spectateDual`
+   - aggressive 模式取距基地最近的敌（非距玩家最近）→ 冰冻期优先清贴脸敌人
+   - gated by `spectateDual`（同上 SP 回退原因）
+
+**Verification（隔离单进程 runSimulation）：**
+- **seed6：`stage_clear@4198`（baseAlive=true, kills=20）✓ 满足用户验收。**
+- seeds 1-12 全部 `stage_clear`（12/12，§178 基线 11/12 → 12/12）。
+- **120-seed sweep：103/120 = 85.8%**（§178 基线 ~70%，+15.8pp）。
+- 单玩家逐字节不变：SP seed2 `gameover@2117`、SP seed6 `gameover@5316`（均与 §178 基线一致）。
+- 测试套件 1212 pass / 0 fail。
+- classic 逐字节不变：`emergencyBaseHpFrac=0, freezeBasePriority=0`（CLASSIC_MODEL_PARAMS）。
+
+**Implications:**
+- `dualCentralBreachCarveMaxBaseColumn` 保持 99（降至 6 会破坏 carve-dig 逃逸路径，P1 无法到达锚点 → 更差）。方向守卫是主要保护，cap 是 defense-in-depth。
+- 17 个失败 seed 的 kill 分布（3-19 kills）显示两类失败：早期压制（kills<8, t<3100）和晚期漏刀（kills≥16, t>5500）。前者需更早的 anchor 到位，后者需更强的 endgame 清场——后续可 A/B `emergencyBaseHpFrac` 阈值和 `freezeBasePriority` 的 SP 泛化。

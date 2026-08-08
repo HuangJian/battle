@@ -27,10 +27,10 @@ export class InputRecorder {
   private frames2: number[] = []
   private active = false
   private initialSnapshot: WorldSnapshot | null = null
-/** Lie-Back-Win-Mode Q10: captured at recording start, never changes mid-session. */
-private coopAtStart = false
-/** 督战双玩家: captured at recording start for hasP2 determination. */
-private spectateDualAtStart = false
+  /** Lie-Back-Win-Mode Q10: captured at recording start, never changes mid-session. */
+  private coopAtStart = false
+  /** 督战双玩家: captured at recording start for hasP2 determination. */
+  private spectateDualAtStart = false
 
   /** Begin a new recording session. */
   startNew(world: World): void {
@@ -39,7 +39,7 @@ private spectateDualAtStart = false
     this.active = true
     this.initialSnapshot = cloneWorld(world)
     this.coopAtStart = world.coop
-this.spectateDualAtStart = world.spectateDual
+    this.spectateDualAtStart = world.spectateDual
   }
 
   /**

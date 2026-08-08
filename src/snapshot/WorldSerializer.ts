@@ -175,10 +175,10 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.playerLevel = snap.playerLevel
   // Lie-Back-Win-Mode: restore coop state (backward compat: default to off)
   world.coop = snap.coop ?? false
-// 督战 (supervise) mode: restore spectate state (backward compat: off)
-world.spectate = snap.spectate ?? false
-// 督战双玩家: restore dual spectate state (backward compat: off)
-world.spectateDual = snap.spectateDual ?? false
+  // 督战 (supervise) mode: restore spectate state (backward compat: off)
+  world.spectate = snap.spectate ?? false
+  // 督战双玩家: restore dual spectate state (backward compat: off)
+  world.spectateDual = snap.spectateDual ?? false
   world.player2 = snap.player2 ? cloneTank(snap.player2) : null
   world.lives2 = snap.lives2 ?? 0
   world.playerLevel2 = snap.playerLevel2 ?? 0

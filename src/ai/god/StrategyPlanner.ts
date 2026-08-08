@@ -690,6 +690,108 @@ function powerUpCellReachable(self: GodAIInput, col: number, row: number): boole
 }
 
 /**
+ * Dual central breach (plan/dual-central-breach-strategy.md §6.3-A):
+ * Find the nearest fence powerup for P2 — bypasses all gates (nearby-enemy,
+ * route-danger, divert-distance). Fence = steel walls for the base,
+ * structurally solving the central breach. P1 handles center defense, so
+ * P2 is free to grab fence regardless of enemy pressure.
+ * Returns the fence powerup cell, or null if no fence exists.
+ * Pure World read — no RNG, no mutation.
+ */
+export function findDualFencePickupImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+  const w = self.world
+  const powerUps = w.powerUps
+  if (powerUps.length === 0) return null
+  let bestCol = 0
+  let bestRow = 0
+  let bestDist = Infinity
+  let hasBest = false
+  const playerCol = Math.floor(pcx / CELL)
+  const playerRow = Math.floor(pcy / CELL)
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (pu.type !== 'fence') continue
+    const puCol = Math.floor(pu.x / CELL)
+    const puRow = Math.floor(pu.y / CELL)
+    const d = Math.abs(puCol - playerCol) + Math.abs(puRow - playerRow)
+    if (d < bestDist) {
+      bestDist = d
+      bestCol = puCol
+      bestRow = puRow
+      hasBest = true
+    }
+  }
+  return hasBest ? { col: bestCol, row: bestRow } : null
+}
+
+/**
+ * §177 (plan/dual-central-breach-strategy.md §6.5 follow-up): P2's enemy-
+ * spawn-point patrol target.
+ *
+ * P2's problem on a central-breach stage is not target *priority*, it is that
+ * it holds a static flank cell and therefore almost never shares a row or
+ * column with an enemy — so `shouldFireInDir` never has a shot and P2 scores
+ * zero kills. Enemies all descend from the spawn columns, so walking toward
+ * the nearest spawn point puts P2 on the lane traffic uses.
+ *
+ * Returns null (⇒ caller falls through to the normal nearest-enemy hunt) when
+ * an enemy is already within `dualCentralBreachP2PatrolEnemyDist`, or when P2
+ * is standing on the spawn point — in both cases hunting/firing beats walking.
+ *
+ * Pure World read — no RNG, no mutation. Uses a module-scope buffer (AGENTS
+ * §14.1); the only caller copies the value into `_selTargetBuf` immediately.
+ */
+const _dualPatrolCell: Cell = { col: 0, row: 0 }
+export function findDualPatrolTargetImpl(
+  self: GodAIInput,
+  playerCell: Cell,
+  enemies: Tank[],
+): Cell | null {
+  // Mode 2: hold P2's own guard post (the §175 shift −2 flank cell) instead
+  // of sweeping — the P2 mirror of P1's unconditional anchor hold. No
+  // enemy-distance gate: the whole point is that P2 stops leaving the base.
+  if (self.params.dualCentralBreachP2Patrol === 2) {
+    const post = self.getDefaultDefensePosition()
+    if (post.col === playerCell.col && post.row === playerCell.row) return null
+    _dualPatrolCell.col = post.col
+    _dualPatrolCell.row = post.row
+    return _dualPatrolCell
+  }
+  const pts = self.world.enemySpawnPoints
+  if (pts.length === 0) return null
+  const engageDist = self.params.dualCentralBreachP2PatrolEnemyDist
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    if (Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) <= engageDist) {
+      return null
+    }
+  }
+  // The patrol row is a knob, not the spawn row: sweeping all the way to
+  // row 0 pulls P2 off the board while four enemies converge on the base
+  // (every measured Battlement loss is base_destroyed, never a timeout), so
+  // the useful position is the spawn COLUMN at a row that still covers the
+  // approach. `dualCentralBreachP2PatrolRow` = 0 reproduces the literal
+  // spawn-point sweep.
+  const patrolRow = Math.min(GRID - 1, Math.max(0, self.params.dualCentralBreachP2PatrolRow))
+  let bestCol = 0
+  let bestDist = Infinity
+  for (let pi = 0; pi < pts.length; pi++) {
+    const col = Math.floor(pts[pi].x / CELL)
+    const d = Math.abs(col - playerCell.col) + Math.abs(patrolRow - playerCell.row)
+    if (d < bestDist) {
+      bestDist = d
+      bestCol = col
+    }
+  }
+  if (bestDist === 0) return null
+  _dualPatrolCell.col = bestCol
+  _dualPatrolCell.row = patrolRow
+  return _dualPatrolCell
+}
+
+/**
  * NEW Requirement 3: Calculate how dangerous a route is.
  * Returns a danger level from 0 (safe) to N (many enemies on the path).
  *
@@ -901,6 +1003,74 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
 }
 
 /**
+ * §178 (autopsy hard-s34-base-l3-t25-seed2): dual central-breach P1 central
+ * hold — a standable cell near the top-center that can shoot UP the col-12
+ * spawn lane, intercepting the central-breacher as it drives down (the user
+ * expectation "开墙抵达中路驻守点"). The cell is chosen to maximize clear
+ * vertical LOS up col 12 (so it can snipe the spawn) and centrality, so P1
+ * digs up out of its spawn pocket and holds the center. Pure World read — no
+ * RNG. Returns null when no suitable cell exists (caller falls back to the
+ * flank anchor).
+ */
+export function findDualCentralHoldImpl(self: GodAIInput): Cell | null {
+  const w = self.world
+  const tm = w.tileMap
+  const standable = (c: number, r: number): boolean => {
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
+    const t = tm.get(c, r)
+    return t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
+  }
+  const prm = self.params
+  // Per-stage override takes precedence when both knobs are valid.
+  if (prm.dualCentralBreachP1AnchorCol >= 0 && prm.dualCentralBreachP1AnchorRow >= 0) {
+    const c = prm.dualCentralBreachP1AnchorCol
+    const r = prm.dualCentralBreachP1AnchorRow
+    if (standable(c, r)) return { col: c, row: r }
+  }
+  // Otherwise pick the standable cell in the upper-center band with the longest
+  // clear upward LOS in col 12 (snipe the spawn lane), tie-broken toward row 3
+  // and column 12.
+  let best: Cell | null = null
+  let bestScore = -Infinity
+  for (let r = 1; r <= 12; r++) {
+    for (let c = 10; c <= 14; c++) {
+      if (!standable(c, r)) continue
+      // Clear upward LOS in col 12 from this row to the top (the spawn lane).
+      let los = 0
+      let ok = true
+      for (let y = r; y >= 0; y--) {
+        if (c === 12) {
+          if (tm.get(12, y) !== 'empty') {
+            ok = false
+            break
+          }
+        } else {
+          // Off-col-12 hold: must have a clear horizontal shot INTO col 12,
+          // then clear vertical col 12 above the junction.
+          if (y === r) {
+            if (tm.get(12, r) !== 'empty') {
+              ok = false
+              break
+            }
+          } else if (tm.get(12, y) !== 'empty') {
+            ok = false
+            break
+          }
+        }
+        los++
+      }
+      if (!ok) continue
+      const score = los * 10 - Math.abs(c - 12) * 2 - Math.abs(r - 3)
+      if (score > bestScore) {
+        bestScore = score
+        best = { col: c, row: r }
+      }
+    }
+  }
+  return best
+}
+
+/**
  * Default defense position: centered above the base at the defense row.
  * This is the fallback when no enemies are present.
  * Gap B: when the stage has no base, returns the player's current cell
@@ -908,12 +1078,54 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
  */
 export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
   if (!self.hasBase) return self.playerCell()
+  // When guard anchor mode is on, use the standable anchor as the base
+  // defense position. The default (12, 23) is always a ring brick — A*
+  // can't route there, so P1 gets stuck on directMove when returning to
+  // defense. The anchor (e.g. (12, 22) on Battlement) is standable and
+  // covers the approach band. Only active when baseGuardAnchorMode > 0
+  // (default 0 = OFF = byte-identical).
   const def = { col: BASE_POS.col, row: BASE_POS.row - self.params.defenseRowOffset }
+  if (self.params.baseGuardAnchorMode > 0) {
+    const anchor = self.getBaseGuardAnchor()
+    if (anchor) {
+      def.col = anchor.col
+      def.row = anchor.row
+    }
+  }
   // 双玩家协作防守分路: P1 守左翼, P2 守右翼。当伙伴存活时,
   // 各自偏移防守列以覆盖基地两侧, 避免两个 AI 挤在同一位置。
   // 纯 World 读取 (coopPartner 只读 world.player/player2) — 无隐藏状态。
   if (self.hasLivingPartner()) {
-    const shift = self.isPlayer2() ? 2 : -2
+    // §178 (autopsy seed2): dual central breach — P1 holds a CENTRAL position
+    // (dig up and intercept the col-12 spawn lane) instead of the right-wing
+    // anchor. Matches the user expectation "开墙抵达中路驻守点". P2 keeps the
+    // flank/hunting split (§177). Gated by spectateDual && centralBreachRisk
+    // && !isPlayer2 — single-player and P2 unchanged (byte-identical).
+    if (
+      self.world.spectateDual &&
+      self._centralBreachRisk &&
+      !self.isPlayer2() &&
+      self.params.dualCentralBreachP1Anchor > 0
+    ) {
+      const hold = findDualCentralHoldImpl(self)
+      if (hold) {
+        def.col = hold.col
+        def.row = hold.row
+        return def
+      }
+    }
+    // Dual central breach strategy (plan/dual-central-breach-strategy.md §B):
+    // P1 holds the center guard position (shift 0) to intercept col-12
+    // breachers; P2 takes the left flank (shift -2) to cover col 0/6 spawns
+    // and avoid §159 yield at center. Gated by spectateDual &&
+    // centralBreachRisk — single-player keeps the existing P1-left/P2-right
+    // split (byte-identical).
+    let shift: number
+    if (self.world.spectateDual && self._centralBreachRisk) {
+      shift = self.isPlayer2() ? -2 : 0
+    } else {
+      shift = self.isPlayer2() ? 2 : -2
+    }
     def.col = BASE_POS.col + shift
     // 确保偏移后的防守位在网格内且可站立; 否则回退到中心位
     const bc = BASE_POS.col
@@ -1239,6 +1451,25 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
   if (enemies.length === 0) return self.getDefaultDefensePosition()
 
+  // ---- §179: emergency base defense (autopsy seed6 失误 B/C) ----
+  // When baseHp is at/below the emergency fraction, ALL tanks return to
+  // the defense position regardless of their current target. The autopsy
+  // showed both tanks oscillating in the top-right corner for 18 seconds
+  // while the base dropped 48→12→0 — no emergency override existed.
+  // Gated by emergencyBaseHpFrac (0 = OFF, byte-identical) AND spectateDual
+  // (SP byte-identical — the SP regression on seeds 11/13 showed the
+  // general threshold is too aggressive for single-tank defense). Runs
+  // after the no-enemies check (no enemies ⇒ defense position anyway) and
+  // before the no-base fast path (no base ⇒ no emergency to respond to).
+  if (
+    self.params.emergencyBaseHpFrac > 0 &&
+    self.hasBase &&
+    w.spectateDual &&
+    w.baseHp <= self.params.emergencyBaseHpFrac * w.baseMaxHp
+  ) {
+    return self.getDefaultDefensePosition()
+  }
+
   // ---- Gap B: no-base fast path (plan/God-AI-Curriculum §3) ----
   // When the stage has no base, the AI is a pure hunter: always chase the
   // nearest enemy. No defense positioning, no base-threat checks, no
@@ -1349,13 +1580,23 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   }
 
   // Aggressive mode (freeze): enemies can't move — chase nearest directly.
+  // §179 (autopsy seed6 失误 D): when freezeBasePriority > 0, pick the enemy
+  // nearest to the BASE instead of nearest to the player. The autopsy showed
+  // a 20-second freeze window completely wasted — both tanks hunted enemies
+  // in the top-right while an enemy sat at (7,24), 5 cells from the base.
+  // Frozen enemies can't move, so distance-to-player only matters for travel
+  // time; distance-to-base determines threat priority. Gated by
+  // freezeBasePriority (0 = OFF, byte-identical).
   if (self.aggressive) {
+    const freezeBaseFirst = self.params.freezeBasePriority > 0 && self.hasBase && w.spectateDual
     let best = enemies[0]
     let bestDist = Infinity
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      const d = freezeBaseFirst
+        ? Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+        : Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
       if (d < bestDist) {
         bestDist = d
         best = t
@@ -1482,6 +1723,30 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // The baseUnderThreat check runs every tick, so the AI immediately
   // switches to defense mode when an enemy approaches the base.
   if (!baseUnderThreat) {
+    // Dual central breach (plan/dual-central-breach-strategy.md §B): P1
+    // guards the anchor full-time — its job is to intercept col-12 breachers,
+    // not hunt across the map. P2 handles flanks/hunting. P1 still fires at
+    // enemies in range via T2a/engage (the candidate chain handles firing
+    // independent of the navigation target). Gated by spectateDual &&
+    // centralBreachRisk && !isPlayer2 — single-player and P2 unaffected.
+    if (self.world.spectateDual && self._centralBreachRisk && !self.isPlayer2()) {
+      const anchor = self.getBaseGuardAnchor()
+      if (anchor) return anchor
+    }
+    // §177: the P2 half of the same split — sweep the enemy spawn points
+    // instead of drifting toward a static flank cell. Yields to the normal
+    // nearest-enemy hunt as soon as an enemy is close enough to engage (see
+    // findDualPatrolTargetImpl). Gated by spectateDual && centralBreachRisk
+    // && isPlayer2 — single-player and P1 unaffected (byte-identical).
+    if (
+      self.world.spectateDual &&
+      self._centralBreachRisk &&
+      self.isPlayer2() &&
+      self.params.dualCentralBreachP2Patrol > 0
+    ) {
+      const patrol = findDualPatrolTargetImpl(self, playerCell, enemies)
+      if (patrol) return patrol
+    }
     // §170 hunt commit: while the commit window is open and the committed
     // enemy is still alive, keep chasing it — the per-tick nearest-pick
     // re-routes the mid-approach player whenever the nearest identity
@@ -1555,6 +1820,22 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // bullet and must be prioritized. Others use kindThreatWeight scoring.
   let bestEnemy: Tank | null = null
   let bestScore = -Infinity
+  // §177: dual central breach P2 defense de-confliction. The defense score
+  // below is a function of the ENEMY and the BASE only — the player's own
+  // position never enters it — so P1 and P2 compute an identical ranking and
+  // both drive at the same tank while the other three keep digging the ring.
+  // (The coop de-confliction above only covers the hunt branches.) When the
+  // knob is on, the gated P2 takes the RUNNER-UP instead, so the two tanks
+  // cover the two most dangerous lanes. Deterministic and symmetric-free:
+  // the split is by player index, not by who happens to be closer.
+  const p2DefenseSecond =
+    self.params.dualCentralBreachP2DefenseSecond > 0 &&
+    w.spectateDual &&
+    self._centralBreachRisk &&
+    self.isPlayer2() &&
+    coopActive
+  let secondEnemy: Tank | null = null
+  let secondScore = -Infinity
   // §137 v2: any enemy with a clear shot at the base right now? If so the
   // player MUST chase (the anchor hold cannot cover every lane); otherwise
   // holding the guard anchor is safe and intercepts the approach band.
@@ -1637,10 +1918,22 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       breachBonus +
       speedApproachBonus
     if (score > bestScore) {
+      if (p2DefenseSecond) {
+        secondScore = bestScore
+        secondEnemy = bestEnemy
+      }
       bestScore = score
       bestEnemy = t
+    } else if (p2DefenseSecond && score > secondScore) {
+      secondScore = score
+      secondEnemy = t
     }
   }
+
+  // §177: hand P2 the runner-up threat (P1 keeps the top one). Only when a
+  // runner-up exists — with a single threat on the field both tanks should
+  // still converge on it.
+  if (p2DefenseSecond && secondEnemy) bestEnemy = secondEnemy
 
   if (!bestEnemy) {
     // No enemy within threat range — go after the nearest enemy anyway.
@@ -1669,7 +1962,29 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // holding worthwhile (marching across the map while the base is threatened
   // loses more than it gains). Only active when baseGuardAnchorMode > 0
   // (getBaseGuardAnchor returns null otherwise — byte-identical).
-  const guardAnchor = self.getBaseGuardAnchor()
+  // §177: the guard anchor is base-relative, so P1 and P2 hold the SAME cell
+  // and §159 yield makes one of them shuffle uselessly. Split it: arm 1 sends
+  // the gated P2 to its own shifted defense post, arm 2 makes P2 skip the
+  // hold entirely and drive at its runner-up threat. 0 = OFF (shared anchor,
+  // byte-identical).
+  const p2AnchorSplit =
+    self.params.dualCentralBreachP2AnchorSplit > 0 &&
+    w.spectateDual &&
+    self._centralBreachRisk &&
+    self.isPlayer2() &&
+    coopActive
+  const guardAnchor = p2AnchorSplit ? null : self.getBaseGuardAnchor()
+  if (p2AnchorSplit && self.params.dualCentralBreachP2AnchorSplit === 1) {
+    const post = self.getDefaultDefensePosition()
+    if (
+      !anyClearShot &&
+      !anyBreacher &&
+      Math.abs(post.col - playerCell.col) + Math.abs(post.row - playerCell.row) <=
+        self.params.baseGuardAnchorHoldRange
+    ) {
+      return post
+    }
+  }
   if (
     guardAnchor &&
     !anyClearShot &&
