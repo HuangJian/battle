@@ -1638,6 +1638,25 @@ const HUNT: Candidate = {
         // fall back to A*, the mirror of the default long-range order.
         self._moveDir = self.followPath()
       }
+    } else if (
+      // §181 (autopsy seed115): Dual central breach — P1 navigates with
+      // directMove at ALL ranges, same rationale as P2 (§177). A* routes
+      // around base-protection bricks, but the route changes as the player
+      // moves, causing left↔right oscillation at spawn (P1 ping-pongs
+      // 128↔136px for the entire game while enemies destroy the base).
+      // directMove goes straight up toward the anchor, breaking thin
+      // brick on the way. Gated by spectateDual && centralBreachRisk &&
+      // !isPlayer2 && dualCentralBreachP1DirectMove — single-player and
+      // P2 keep the A* long-range branch (byte-identical).
+      self.world.spectateDual &&
+      self._centralBreachRisk &&
+      !self.isPlayer2() &&
+      self.params.dualCentralBreachP1DirectMove > 0
+    ) {
+      self._moveDir = self.directMove(pc)
+      if (!self._moveDir) {
+        self._moveDir = self.followPath()
+      }
     } else {
       // Long range — A* pathfinding (finds corridors in mazes).
       self._moveDir = self.followPath()

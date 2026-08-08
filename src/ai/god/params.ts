@@ -611,6 +611,18 @@ export interface GodAIParams {
   dualCentralBreachP1AnchorCol: number
   dualCentralBreachP1AnchorRow: number
   /**
+   * §181 (autopsy seed115): when > 0, P1 in dual central breach mode navigates
+   * with `directMove` (chase straight at the anchor, breaking thin brick on
+   * the way) instead of the A* `followPath`. A* routes around base-protection
+   * bricks, but the route changes as the player moves, causing left↔right
+   * oscillation at spawn (P1 ping-pongs 128↔136px for the entire game while
+   * enemies destroy the base). directMove closes the row gap first (up),
+   * which is exactly the alignment the fire logic needs. Gated by
+   * spectateDual && centralBreachRisk && !isPlayer2 — single-player and P2
+   * keep the A* long-range branch (byte-identical).
+   */
+  dualCentralBreachP1DirectMove: number
+  /**
    * §178: when > 0, the dual-central-breach P1 is a PURE defender — its
    * power-up candidates (high/mid/low/close + aggressive freeze-pickup) are
    * suppressed so it never abandons the central hold to chase items (P2 is
@@ -2256,6 +2268,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §178: sticky central hold — suppress P1 power-up diversion in dual central
   // breach. 1 = ON (pure defender). Gated → SP byte-identical.
   dualCentralBreachP1HoldSticky: 1,
+  // §181: P1 directMove (same rationale as P2's dualCentralBreachP2DirectMove).
+  // Fixes P1 spawn oscillation: A* ping-pong left↔right at 128↔136px while
+  // enemies destroy the base. directMove goes straight up toward the anchor.
+  dualCentralBreachP1DirectMove: 1,
   // §161 / 开路策略 (carve path): default OFF — byte-identical to pre-§161.
   // A/B-measured on hard (Stage 33 Battlement + all 35); flip per result.
   carvePathMode: 0,

@@ -2596,3 +2596,26 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - 失败 seed 分布仍显示两类：早期压制（kills<8, t<3100）和晚期漏刀（kills≥16, t>5500）。fence 修复主要消减了"晚期漏刀"类（fence 钢墙阻止最后几发致命打击）
 - 后续可 A/B：proximity override 阈值（5→3 使 P2 更早接管 top 威胁）、P2 directMove + patrol 组合、fence 拾取的 partner 距离 margin（当前 2）
 
+
+## 181. Dual Central Breach autopsy (hard-s34 seed115) — P1 spawn 振荡：A* 路由穿透基地保护砖
+
+**Decision:** 新增 `dualCentralBreachP1DirectMove` 参数（默认 1），让 P1 在 dual central breach 模式下使用 `directMove` 代替 A* `followPath` 进行全距离导航，与 P2 的 `dualCentralBreachP2DirectMove`（§180）对称。Gated by `spectateDual && centralBreachRisk && !isPlayer2` — 单玩家和 P2 路径逐字节不变。
+
+**Rationale:**
+- **根因**：诊断报告 `plan/dual-s34-seed115-base-loss-handoff.md` 描述了 4 个症状（P2 振荡、P2 朝墙空射、P2 弃守 BR 敌、P1 锚点漂移），但逐 tick 取证发现它们全部是**同一根因的不同表现**：A* `followPath()` 路由穿过"基地保护砖"（`isBaseProtectionBrick` with `baseWallScanRadius=5` 标记了出生点周围 5 格内的所有砖墙），但 `canMoveOrBreak` 拒绝打破这些砖（return false）。结果：
+  - P1 在 (128,384) 卡死：`followPath` 返回 'right'（A* 路由穿过 (11,24) 基地保护砖），但 `canMoveOrBreak('right')` = false → P1 既不能移动也不能开火（break-through fire 被 base wall guard 禁止），卡在出生点 1693 ticks（整局 28 秒）
+  - P2 在 (240,384) 振荡：`directMove` 返回 'left'（上方也是基地保护砖），P2 向左移动一格后 `followPath` 返回 'right'（A* 路由变化），导致 left↔right 振荡
+  - 基地在 t1693 被敌人击穿，P1/P2 全程未移动、未开火
+- **修复**：P1 使用 `directMove` 代替 A*（与 P2 对称）。`directMove` 按 dy/dx 优先级试方向（先 up 后 right/left），通过 `canMoveOrBreak` 逐方向检查——基地保护砖方向被跳过，找到可通过或可打破的方向。P1 从出生点直接向上推进（破砖），到达锚点 (12,9)。
+- **拒绝方案**：
+  - 降低 `baseWallScanRadius`（5→2）——会影响单玩家行为（基地附近砖墙不再受保护），违反 gating 纪律
+  - 在 A* 中排除基地保护砖——会改变所有关卡的寻路行为，回归风险大
+  - 在 HUNT candidate 中加 `canMoveOrBreak` 守卫——只解决了 followPath 返回不可破方向的情况，不解决 A* 路由振荡（followPath 返回可通过但方向交替翻转）
+
+**Implications:**
+- S34 dual hard 120-seed 胜率 70.8% → 71.7%（+0.9pp）。seed115 从 gameover@t1693 修复为 stage_clear@t4720。
+- seed34（§180）仍 stage_clear，无回归。
+- 35 关 × 3 seed dual 快扫 103/105 (98.1%)，仅 S3/S12 各 1 败（与修复前一致的已有失败，非新回归）。
+- 单玩家 1236 tests 全通过，typecheck/lint 零错误。
+- §180 的 P2 directMove + P1 directMove 现在对称：两个 God AI 在 central-breach 关卡都用 directMove 突破砖墙到达各自防守位。
+
