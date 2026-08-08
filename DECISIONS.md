@@ -2545,3 +2545,54 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 **Implications:**
 - `dualCentralBreachCarveMaxBaseColumn` 保持 99（降至 6 会破坏 carve-dig 逃逸路径，P1 无法到达锚点 → 更差）。方向守卫是主要保护，cap 是 defense-in-depth。
 - 17 个失败 seed 的 kill 分布（3-19 kills）显示两类失败：早期压制（kills<8, t<3100）和晚期漏刀（kills≥16, t>5500）。前者需更早的 anchor 到位，后者需更强的 endgame 清场——后续可 A/B `emergencyBaseHpFrac` 阈值和 `freezeBasePriority` 的 SP 泛化。
+
+## 180. Dual Central Breach autopsy (hard-s34 seed34) — 右路盲区 + fence 独占 + defenseSecond 近端覆盖
+
+**Symptom:** replay `hard-s34-base-l2-t33-seed34.replay`（督战双玩家）`gameover@t2002 / base_destroyed / kills=7 / lives=2`。§179 基线 S34 dual 120-seed 85.8%（103/120），seed34 在 17 个失败 seed 中。逐 tick 取证（handoff `plan/dual-s34-seed34-base-loss-handoff.md`）定位 4 个缺陷：
+
+| # | 失误 | 根因 |
+|---|---|---|
+| A | P2 开局振荡 ~10s 未出击 | `dualCentralBreachP2DirectMove=0` → A* 路径在出生区 left↔right 振荡 |
+| B | P1 中路死守不开右墙 | `dualCentralBreachP1Anchor` 锚点 (12,12) 刚性，右路敌凿墙不协防 |
+| C | P2 无视右下角威胁基地的敌人 | `p2DefenseSecond` 总给 P2 亚军威胁；E26 在右下角 4 发打穿基地时 P2 被派往远端 |
+| D | fence 刷新在 P1 附近却不捡 | `PICKUP_HIGH` fence 优先级 `isPlayer2()` 独占 + P1 sticky-hold 阻断 |
+
+**Fix（全部 `spectateDual && centralBreachRisk` gated，单玩家逐字节不变）：**
+
+1. **D) fence 拾取放宽到最近坦克**（think.ts `PICKUP_HIGH`）— **主要修复（+1.7pp）**：
+   - 将 fence 拾取块从 `isPlayer2()` 独占改为"距 fence 最近的本方坦克优先"（partner 距离 > myDist-2 时让行）
+   - 移到 `isDualCentralBreachHoldP1` gate **之前**，使 P1 pure-defender 也能捡 fence（fence = 钢墙 = 结构性防 base 毁灭，比锚点守卫更关键）
+   - 单玩家 gate 短路，逐字节不变
+
+2. **A) P2 directMove 启用**（params.ts `dualCentralBreachP2DirectMove: 0→1`）：
+   - 使 P2 用 directMove（直冲目标）替代 A* followPath，消除出生区 left↔right 振荡
+   - §177 A/B 回退 -1.7pp 是在 defenseSecond 默认前测的；当前配置下 120-seed **中性**（不升不降）
+   - gate: `spectateDual && centralBreachRisk && isPlayer2`
+
+3. **C) defenseSecond 近端覆盖**（StrategyPlanner.ts `selectTargetUncached`）：
+   - `p2DefenseSecond` 交换亚军威胁时，若 P2 到 top 威胁的距离比 P1 近 >5 格，P2 取 top 威胁（不让行）
+   - 修复右下角盲区：E26 在 (24,21) 距 P2(22,20) 仅 3 格、距 P1(12,9) 24 格时，P2 取 top 威胁而非亚军
+   - 120-seed **中性**（不升不降）；gate: `p2DefenseSecond && coopActive`
+
+4. **B) P1 右翼动态支援 — 已回退**：
+   - 初版：中路无敌 + 右路有敌时 P1 暂离锚点截击右路敌。A/B 120-seed: 87.5%→79.2% **-8.3pp 回归**
+   - 根因：P1 离开中心后 col-12 敌无人拦截 → 中路被凿穿。P1 的中心守卫角色不可放弃
+   - **结论：放弃此方向**。P1 中心锚点是 S34 dual 策略的基石，任何使 P1 离开的改动都动摇根基
+
+**Verification（隔离单进程 runSimulation，非 level-sim --size N 批量）：**
+- **seed34：`stage_clear@t4751`（baseAlive=true, kills=20, lives=3, powerups=12）✓**（基线 `gameover@t2002 / base_destroyed / kills=7`）
+- **120-seed sweep：105/120 = 87.5%**（§179 基线 103/120 = 85.8%，+1.7pp，+2 seeds）
+- **单玩家逐字节不变**：10 seeds（1/5/10/17/25/34/50/75/100/120）outcome/ticks/kills/baseAlive 全一致
+- **其他关 dual 逐字节不变**：S1/S10/S20/S25/S31 seed34 全一致（centralBreachRisk 仅 S34 为 true）
+- 测试套件 1210 pass / 0 fail，typecheck 0 error，lint 0 warning
+
+**Rationale:**
+- fence 修复是**结构性**的：fence = 钢墙环绕基地，使基地从"可被 4 发打穿"变为"不可破坏"。当 fence 刷新在 P1 左下方 ~7 格、P2 在远端时，P1 拾取 fence 直接阻止基地毁灭。这是 seed34 从 gameover→stage_clear 的决定性修复
+- directMove 与 proximity override 虽 120-seed 中性，但修复了具体缺陷（P2 振荡、P2 弃守右下），作为 defense-in-depth 保留
+- P1 右翼支援的失败教训：P1 的中心锚点 (12,12) 是 S34 dual 策略的核心——它拦截 col-12 敌出生道、防中路凿穿。任何使 P1 离开的条件都会在中路空虚时被 col-12 敌利用。正确方向是让 P1 **在锚点上**覆盖更多角度（dig-fire 已覆盖上/左/右），而非离开锚点
+
+**Implications:**
+- S34 dual hard 120-seed 87.5%（从 §179 的 85.8% 提升）。17 个失败 seed 减至 15 个
+- 失败 seed 分布仍显示两类：早期压制（kills<8, t<3100）和晚期漏刀（kills≥16, t>5500）。fence 修复主要消减了"晚期漏刀"类（fence 钢墙阻止最后几发致命打击）
+- 后续可 A/B：proximity override 阈值（5→3 使 P2 更早接管 top 威胁）、P2 directMove + patrol 组合、fence 拾取的 partner 距离 margin（当前 2）
+

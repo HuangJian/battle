@@ -2226,7 +2226,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // The effective fix is defenseSecond: P2 takes the runner-up threat so the two
   // tanks de-conflict and cover more lanes. directMove/patrol are left as opt-in
   // knobs (default 0) for future tuning; they are gated and never active in SP.
-  dualCentralBreachP2DirectMove: 0,
+  // §180: directMove=1 enabled — fixes P2 spawn oscillation (A* ping-pong
+  // left↔right for ~10s at game start). Neutral on 120-seed with the current
+  // config (defenseSecond=1, anchorSplit=2). The §177 A/B regression (-1.7pp)
+  // was measured before defenseSecond was the default.
+  dualCentralBreachP2DirectMove: 1,
   dualCentralBreachP2Patrol: 0,
   dualCentralBreachP2PatrolEnemyDist: 6,
   dualCentralBreachP2PatrolRow: 0,

@@ -1729,6 +1729,14 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // enemies in range via T2a/engage (the candidate chain handles firing
     // independent of the navigation target). Gated by spectateDual &&
     // centralBreachRisk && !isPlayer2 — single-player and P2 unaffected.
+    //
+    // §180 (autopsy seed34): when NO enemy is in the center lane (cols 11–13)
+    // but enemies are gathering on the RIGHT side (cols ≥ 15, rows ≥ 10)
+    // — typically breaking through the right-flank walls toward the base —
+    // P1 temporarily leaves the anchor to intercept the nearest right-side
+    // enemy. This prevents the right-flank blind spot where E2/E26 carve
+    // through the right walls unopposed while P1 stares at an empty center.
+    // P1 returns to the anchor as soon as a center enemy reappears.
     if (self.world.spectateDual && self._centralBreachRisk && !self.isPlayer2()) {
       const anchor = self.getBaseGuardAnchor()
       if (anchor) return anchor
@@ -1933,7 +1941,31 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // §177: hand P2 the runner-up threat (P1 keeps the top one). Only when a
   // runner-up exists — with a single threat on the field both tanks should
   // still converge on it.
-  if (p2DefenseSecond && secondEnemy) bestEnemy = secondEnemy
+  //
+  // §180 (autopsy seed34): proximity override. The defense score is a
+  // function of (enemy, base) only — the player's position never enters it
+  // — so P1 and P2 compute identical rankings. With defenseSecond, P2 is
+  // always sent after the runner-up. But when P2 is MUCH closer to the top
+  // threat than P1 (e.g., P2 is in the right-bottom quadrant and the base
+  // killer is right there, while P1 is at the center anchor), P2 should
+  // take the top threat instead. Without this override, P2 was sent after
+  // a runner-up on the far side of the map while a `fast` tank at (24,21)
+  // was 4-shotting the base unopposed.
+  if (p2DefenseSecond && secondEnemy && bestEnemy) {
+    const topCell = self.tankCell(bestEnemy)
+    const myDistToTop =
+      Math.abs(topCell.col - playerCell.col) + Math.abs(topCell.row - playerCell.row)
+    const partner = self.coopPartner()
+    let takeTop = false
+    if (partner && partner.alive && partner.spawnTimer <= 0) {
+      const pCell = self.tankCell(partner)
+      const partnerDistToTop =
+        Math.abs(topCell.col - pCell.col) + Math.abs(topCell.row - pCell.row)
+      // P2 takes the top threat when it's > 5 cells closer than P1
+      if (myDistToTop < partnerDistToTop - 5) takeTop = true
+    }
+    if (!takeTop) bestEnemy = secondEnemy
+  }
 
   if (!bestEnemy) {
     // No enemy within threat range — go after the nearest enemy anyway.
