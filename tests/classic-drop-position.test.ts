@@ -141,11 +141,11 @@ describe('Drop position randomization (near/mid/far)', () => {
     expect(rules.dropPositionWeights.far).toBe(0.2)
   })
 
-  it('ranges are configured as 1/2/3 cells (near/mid/far)', () => {
+  it('ranges are configured as 2/4/6 cells (near/mid/far)', () => {
     const rules = RULES.classic
-    expect(rules.dropPositionRanges.near).toBe(1)
-    expect(rules.dropPositionRanges.mid).toBe(2)
-    expect(rules.dropPositionRanges.far).toBe(3)
+    expect(rules.dropPositionRanges.near).toBe(2)
+    expect(rules.dropPositionRanges.mid).toBe(4)
+    expect(rules.dropPositionRanges.far).toBe(6)
   })
 
   it('DEFAULT_RULES also has drop position config', () => {
@@ -154,8 +154,8 @@ describe('Drop position randomization (near/mid/far)', () => {
     expect(world.rules.dropPositionWeights.near).toBe(0.5)
     expect(world.rules.dropPositionWeights.mid).toBe(0.3)
     expect(world.rules.dropPositionWeights.far).toBe(0.2)
-    expect(world.rules.dropPositionRanges.near).toBe(1)
-    expect(world.rules.dropPositionRanges.mid).toBe(2)
-    expect(world.rules.dropPositionRanges.far).toBe(3)
+    expect(world.rules.dropPositionRanges.near).toBe(2)
+    expect(world.rules.dropPositionRanges.mid).toBe(4)
+    expect(world.rules.dropPositionRanges.far).toBe(6)
   })
 })

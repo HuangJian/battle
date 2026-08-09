@@ -366,7 +366,12 @@ export class World {
     this.lives = this.difficulty.startLives
     this.lives2 = 0
     this.playerLevel = this.difficulty.playerStartLevel
-    this.playerLevel2 = 0
+    // Symmetry with playerLevel: P2 (God AI / 督战双玩家) must start at the SAME
+    // star level as P1, otherwise it spawns with no star aura while P1 shows
+    // playerStartLevel stars. Mid-game enable paths (SimulationCore coop /
+    // spectateDual toggles) already set playerLevel2 = playerStartLevel before
+    // spawning P2, so this just makes the initial run-start consistent with them.
+    this.playerLevel2 = this.difficulty.playerStartLevel
     this.killCount = 0
     this.playTimeMs = 0
     this.coop = false
@@ -542,23 +547,31 @@ export class World {
   spawnPlayer2(): void {
     const col = this.player2SpawnPoint.col
     const row = this.player2SpawnPoint.row
-    this.player2 = this.createTank('player', col * CELL, row * CELL, 'up')
+    // playerSlot = 2 → createTank derives stats from PLAYER2's own star level
+    // (playerLevel2), not P1's. The `level` field is set here for symmetry with
+    // spawnPlayer; createTank already used playerLevel2 for maxHp/hp/speed/etc.
+    this.player2 = this.createTank('player', col * CELL, row * CELL, 'up', 2)
     this.player2.level = this.playerLevel2
     this.player2.shieldTimer = 3000
     this.player2.isPlayer = true
   }
 
-  createTank(kind: TankKind, x: number, y: number, dir: Direction): Tank {
+  /**
+   * @param playerSlot Which player tank is being created (1 = P1, 2 = P2/God AI).
+   *   Only meaningful when `kind === 'player'`: it selects which star level
+   *   drives the spawned stats (playerLevel for P1, playerLevel2 for P2). Enemy
+   *   and ally tanks ignore it.
+   */
+  createTank(kind: TankKind, x: number, y: number, dir: Direction, playerSlot = 1): Tank {
     // Combat Capability System: stats come from the tank's profile, not
     // hardcoded numbers. Player profiles scale with star level; enemies use
     // their fixed archetype profile (modified only when promoted to elite).
-    const profile = resolveProfile(kind, kind === 'player' ? this.playerLevel : 0)
-    const stats = profileToStats(
-      profile,
-      kind,
-      kind === 'player' ? this.playerLevel : 0,
-      this.rules,
-    )
+    const isPlayer = kind === 'player'
+    // P2 (God AI / Lie-Back-Win-Mode) must use its OWN star level so its
+    // combat power (HP/speed/fire) tracks the stars IT collects, not P1's.
+    const playerLevel = isPlayer ? (playerSlot === 2 ? this.playerLevel2 : this.playerLevel) : 0
+    const profile = resolveProfile(kind, playerLevel)
+    const stats = profileToStats(profile, kind, playerLevel, this.rules)
     // Enemy combat stats (including HP/armor) are fixed per archetype and never
     // scaled by difficulty — difficulty only changes the tier distribution that
     // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
@@ -570,9 +583,9 @@ export class World {
     // persistent star level is correct, not just on star pickup (Simulation).
     let bulletSpeed = stats.bulletSpeed
     if (
-      kind === 'player' &&
+      isPlayer &&
       this.rules.starModel === 'functional' &&
-      hasStarPerk(this.rules, this.playerLevel, 'fastBullet')
+      hasStarPerk(this.rules, playerLevel, 'fastBullet')
     ) {
       bulletSpeed *= this.rules.fastBulletMult
     }
@@ -640,7 +653,7 @@ export class World {
       // the first real turn is always allowed.
       prevMoveDir: dir,
       lastTurnMs: -9999,
-      level: kind === 'player' ? this.playerLevel : 0,
+      level: isPlayer ? playerLevel : 0,
       shieldTimer: kind === 'player' ? 3000 : 0,
       isPlayer: kind === 'player',
       allegiance: kind === 'player' ? 'player' : 'enemy',

@@ -230,7 +230,7 @@ export const DEFAULT_RULES: GameplayRules = {
   bonusEnemyEveryNSpawns: 4, // every 4th spawned enemy is a bonus carrier
 
   dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
-  dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
+  dropPositionRanges: { near: 2, mid: 4, far: 6 }, // cells offset
 
   speedJitter: true, // current ±5% jitter ON
 
@@ -304,7 +304,7 @@ export const RULES: Record<string, GameplayRules> = {
     bonusEnemyEveryNSpawns: 0, // classic uses fixedDropKillIndices for carriers
 
     dropPositionWeights: { near: 0.5, mid: 0.3, far: 0.2 }, // 50/30/20%
-    dropPositionRanges: { near: 1, mid: 2, far: 3 }, // cells offset
+    dropPositionRanges: { near: 2, mid: 4, far: 6 }, // cells offset
 
     speedJitter: false, // no ±5% jitter (issue #7: BOTH tank + bullet)
 

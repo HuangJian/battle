@@ -13,6 +13,9 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 //
 // Floors are derived from the §105 baselines (35 stages × 20 seeds, 18000
 // ticks, telemetry off — byte-identical to the classic gate's run shape).
+// §2026-08-09: re-baselined at 35×60 (drop-range re-tune 1/2/3 -> 2/4/6 + spawn
+// avoidance already shipped). The §134 20-seed truth had drifted (e.g. S16
+// recorded 16, current main ~13) — see per-array comments below.
 // §104 (M6) shipped playerStartLevel 0→1; §105 (M7, 2026-08-03) fixed the
 // simulation runner (playerLevel + lives + telemetry-isPlayer — DECISIONS
 // §105). §109 (M11, 2026-08-03) shipped playerStartLevel 1→2 (60-seed hard
@@ -55,91 +58,101 @@ const MARGIN_WINS = 4
 // 停射拦截基地车道敌人 — 60-seed hard +0.76pp / chaos +2.15pp 显著). §110
 // reverted §109's 2★ back to 1★ by user decision. Values are WIN COUNTS out
 // of GATE_SEEDS (20). hard = 3 lives (§130).
+// §2026-08-09 re-baseline (35×60, drop-range re-tune 1/2/3 -> 2/4/6 +
+// spawn-point avoidance already shipped in buildDrop; no coop/dual in this
+// gate). Measured hard mean 70.6% / chaos mean 67.6%. The prior §134 20-seed
+// truth was stale: e.g. S16 Crossroads recorded 16 but current main measures
+// ~13/20 — a pre-existing truth drift unrelated to this change. Values below
+// are the 60-seed winrate converted to a 20-seed-equivalent count
+// (round(pct*20)) so they drop straight into the gate's 20-seed floor math.
 const HARD_TRUTH_WINS: number[] = [
-  10, // S1  Outpost
-  15, // S2  Waterways
-  10, // S3  Steel Fortress
+  16, // S1  Outpost
+  16, // S2  Waterways
+  11, // S3  Steel Fortress
   13, // S4  Crossfire
-  11, // S5  Maze
-  13, // S6  Brickworks
-  12, // S7  Iron Curtain
-  9, // S8  Riverbed
-  14, // S9  Twin Towers
-  17, // S10 Gauntlet
-  16, // S11 Fortress
-  8, // S12 Lattice
-  13, // S13 Bunker Hill
+  12, // S5  Maze
+  12, // S6  Brickworks
+  16, // S7  Iron Curtain
+  8, // S8  Riverbed
+  16, // S9  Twin Towers
+  14, // S10 Gauntlet
+  15, // S11 Fortress
+  15, // S12 Lattice
+  16, // S13 Bunker Hill
   15, // S14 Steel Web
-  11, // S15 Citadel
-  11, // S16 Crossroads
-  14, // S17 Twin Spires
-  14, // S18 Gridlock
-  14, // S19 Frozen Field
-  7, // S20 Bastion
-  14, // S21 Checkers
-  14, // S22 Oasis
+  13, // S15 Citadel
+  13, // S16 Crossroads
+  16, // S17 Twin Spires
+  19, // S18 Gridlock
+  16, // S19 Frozen Field
+  12, // S20 Bastion
+  13, // S21 Checkers
+  12, // S22 Oasis
   20, // S23 Ramparts
   10, // S24 Labyrinth
-  16, // S25 Quarry
-  14, // S26 Ice Palace
-  8, // S27 Brick Maze
-  11, // S28 Thicket
-  11, // S29 Spider
+  19, // S25 Quarry
+  11, // S26 Ice Palace
+  15, // S27 Brick Maze
+  10, // S28 Thicket
+  16, // S29 Spider
   18, // S30 Concentric
-  11, // S31 Eagle Nest
-  14, // S32 Star Fort
-  15, // S33 Diamond
+  14, // S31 Eagle Nest
+  15, // S32 Star Fort
+  19, // S33 Diamond
   3, // S34 Battlement
   16, // S35 Final Redoubt
 ]
 
-// §130 同次测量（gate-context，2026-08-05）：chaos 命数未变，但跨进程
-// genId 上下文噪声致 7 关各 ±1（总量 408/700 vs §115 的 407/700）——以本次
-// 门禁自身口径为准。
-// §134 同次测量（gate-context，2026-08-05）：defenseIntercept SHIPPED 后 chaos
-// 显著提升（60-seed p=0.0087，+2.15pp）——总量 408/700 → 420/700。
+// §2026-08-09 re-baseline (35×60, drop-range re-tune 1/2/3 -> 2/4/6 +
+// spawn-point avoidance already shipped in buildDrop; no coop/dual in this
+// gate). Measured chaos mean 67.6% (§134 recorded 60.0%). The prior §134 20-seed
+// truth was stale: e.g. S16 Crossroads recorded 16 but current main measures
+// ~13/20 — a pre-existing truth drift unrelated to this change. Values below
+// are the 60-seed winrate converted to a 20-seed-equivalent count
+// (round(pct*20)) so they drop straight into the gate's 20-seed floor math.
 const CHAOS_TRUTH_WINS: number[] = [
   15, // S1  Outpost
-  18, // S2  Waterways
-  7, // S3  Steel Fortress
-  11, // S4  Crossfire
+  17, // S2  Waterways
+  10, // S3  Steel Fortress
+  14, // S4  Crossfire
   9, // S5  Maze
-  11, // S6  Brickworks
-  11, // S7  Iron Curtain
+  12, // S6  Brickworks
+  13, // S7  Iron Curtain
   10, // S8  Riverbed
-  14, // S9  Twin Towers
-  16, // S10 Gauntlet
-  15, // S11 Fortress
-  9, // S12 Lattice
-  13, // S13 Bunker Hill
-  16, // S14 Steel Web
-  8, // S15 Citadel
-  16, // S16 Crossroads
+  17, // S9  Twin Towers
+  15, // S10 Gauntlet
+  17, // S11 Fortress
+  12, // S12 Lattice
+  12, // S13 Bunker Hill
+  15, // S14 Steel Web
+  12, // S15 Citadel
+  13, // S16 Crossroads
   15, // S17 Twin Spires
-  17, // S18 Gridlock
-  12, // S19 Frozen Field
-  11, // S20 Bastion
-  9, // S21 Checkers
-  12, // S22 Oasis
-  17, // S23 Ramparts
-  6, // S24 Labyrinth
+  19, // S18 Gridlock
+  13, // S19 Frozen Field
+  10, // S20 Bastion
+  16, // S21 Checkers
+  15, // S22 Oasis
+  20, // S23 Ramparts
+  7, // S24 Labyrinth
   16, // S25 Quarry
-  11, // S26 Ice Palace
-  9, // S27 Brick Maze
+  9, // S26 Ice Palace
+  15, // S27 Brick Maze
   12, // S28 Thicket
-  12, // S29 Spider
-  16, // S30 Concentric
-  9, // S31 Eagle Nest
-  10, // S32 Star Fort
-  13, // S33 Diamond
-  0, // S34 Battlement
-  14, // S35 Final Redoubt
+  14, // S29 Spider
+  18, // S30 Concentric
+  13, // S31 Eagle Nest
+  15, // S32 Star Fort
+  16, // S33 Diamond
+  1, // S34 Battlement
+  18, // S35 Final Redoubt
 ]
 
 // Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700).
-// §134 (2026-08-05): defenseIntercept SHIPPED 后重测 → hard 63.1% / chaos 60.0%.
-const HARD_AGGREGATE_FLOOR = Math.floor(((63.1 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 415/700
-const CHAOS_AGGREGATE_FLOOR = Math.floor(((60.0 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 394/700
+// §2026-08-09 re-baseline (35×60): hard 70.6% / chaos 67.6% (drop-range re-tune
+// 1/2/3 -> 2/4/6 + spawn-point avoidance; no coop/dual in this gate).
+const HARD_AGGREGATE_FLOOR = Math.floor(((70.6 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 468/700
+const CHAOS_AGGREGATE_FLOOR = Math.floor(((67.6 - 3.7) / 100) * 35 * GATE_SEEDS.length) // 447/700
 
 function stageFloor(truth: number[]): (idx: number) => number {
   // truth holds per-stage WIN COUNTS out of GATE_SEEDS (not percentages).

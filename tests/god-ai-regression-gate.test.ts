@@ -60,47 +60,50 @@ const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 // Mean 91.19% — the best of the 50/100/160 sweep (50ms drift 91.0% baseline,
 // 100ms+halt 91.2% net +5, 160ms+halt 89.8% net −24). S29 keeps its
 // conservative gate-context floor (same order-dependent noise as §94).
+// Re-baselined 2026-08-09 for the INTENTIONAL drop-position re-tune:
+// dropPositionRanges 1/2/3 → 2/4/6 (user directive) + buildDrop now avoids
+// enemy spawn points. Both shift power-up landing positions further from the
+// slain enemy, so the God AI occasionally misses star pickups. Measured at
+// 35×60 (classic, 18000 ticks) on the current defaults (200ms turn cooldown).
+// Mean 89.24%. NOTE: S17 Twin Spires dropped 98.3% → 78.3% (the stage leans
+// hardest on prompt star pickups); S12/S19 also softened. This is the
+// accepted cost of the user-requested drop change, not a reverted regression.
 const TRUTH_WIN_PCT: number[] = [
   98.3, // S1  Outpost
-  98.3, // S2  Waterways
+  96.7, // S2  Waterways
   96.7, // S3  Steel Fortress
-  95.0, // S4  Crossfire
-  100.0, // S5  Maze (§95 +8.3pp)
-  88.3, // S6  Brickworks
-  83.3, // S7  Iron Curtain (§95 +8.3pp)
-  86.7, // S8  Riverbed
-  96.7, // S9  Twin Towers
-  100.0, // S10 Gauntlet (§95 +1.7pp)
-  88.3, // S11 Fortress
-  88.3, // S12 Lattice
-  90.0, // S13 Bunker Hill — re-baselined 2026-08-09 for the 200ms turn-cooldown
-  //   default (was 98.3 @100ms, floor 16). At 200ms the AI's per-tick turn /
-  //   aim cadence degrades (§95) and S13 holds ~14/20 → floor lowered to 14.
+  96.7, // S4  Crossfire
+  96.7, // S5  Maze
+  83.3, // S6  Brickworks
+  76.7, // S7  Iron Curtain
+  93.3, // S8  Riverbed
+  100, // S9  Twin Towers
+  98.3, // S10 Gauntlet
+  81.7, // S11 Fortress
+  73.3, // S12 Lattice
+  83.3, // S13 Bunker Hill
   98.3, // S14 Steel Web
-  88.3, // S15 Citadel (§95 +6.6pp)
-  90.0, // S16 Crossroads
-  98.3, // S17 Twin Spires
-  95.0, // S18 Gridlock
-  80.0, // S19 Frozen Field
-  90.0, // S20 Bastion
-  90.0, // S21 Checkers (§95 +10pp)
-  93.3, // S22 Oasis
-  95.0, // S23 Ramparts
-  90.0, // S24 Labyrinth
-  85.0, // S25 Quarry
-  83.3, // S26 Ice Palace
-  81.7, // S27 Brick Maze
-  91.7, // S28 Thicket
-  91.7, // S29 Spider — gate-context floor kept at pre-§87 level: the full-suite
-  //   context is order-dependent (module-level genId counter, World.ts) and
-  //   Spider swings 13-20/20 between contexts; §95 eval shows 91.7% @60 (+5),
-  //   but a floor of 14 fails on pre-existing context noise, not on §95.
-  90.0, // S30 Concentric
-  90.0, // S31 Eagle Nest (§95 +13.3pp)
-  86.7, // S32 Star Fort
-  80.0, // S33 Diamond (§95 +5pp)
-  96.7, // S34 Battlement (§95 +5pp)
-  88.3, // S35 Final Redoubt
+  81.7, // S15 Citadel
+  98.3, // S16 Crossroads
+  78.3, // S17 Twin Spires — softened 98.3 → 78.3 under the 2/4/6 drop re-tune
+  91.7, // S18 Gridlock
+  78.3, // S19 Frozen Field
+  83.3, // S20 Bastion
+  83.3, // S21 Checkers
+  95, // S22 Oasis
+  93.3, // S23 Ramparts
+  95, // S24 Labyrinth
+  90, // S25 Quarry
+  81.7, // S26 Ice Palace
+  83.3, // S27 Brick Maze
+  90, // S28 Thicket
+  95, // S29 Spider
+  98.3, // S30 Concentric
+  86.7, // S31 Eagle Nest
+  91.7, // S32 Star Fort
+  73.3, // S33 Diamond
+  90, // S34 Battlement
+  91.7, // S35 Final Redoubt
 ]
 
 const MARGIN_WINS = 4

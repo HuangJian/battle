@@ -65,6 +65,20 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
     // ================================================================
 
     /**
+     * True if a TANK-sized rect at (x,y) overlaps any enemy spawn point.
+     * Drops must avoid spawn cells so a power-up never materialises on top of
+     * an enemy entry point — otherwise it looks like it spawns inside an enemy
+     * and becomes instantly unreachable / confusing.
+     */
+    private rectHitsSpawnPoint(x: number, y: number): boolean {
+      const sps = this.world.enemySpawnPoints
+      for (let i = 0; i < sps.length; i++) {
+        if (aabb(x, y, TANK, TANK, sps[i].x, sps[i].y, TANK, TANK)) return true
+      }
+      return false
+    }
+
+    /**
      * Build a drop descriptor (type + terrain-safe position). The `world.rng`
      * pick happens HERE so a buffered drop is fully resolved and deterministic —
      * flushing later only materialises it (no extra RNG consumption).
@@ -127,21 +141,37 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
         const clampedX = Math.max(0, Math.min(FIELD - TANK, anchorX + dir.dx * dist * CELL))
         const clampedY = Math.max(0, Math.min(FIELD - TANK, anchorY + dir.dy * dist * CELL))
 
-        if (!w.rectHitsTerrain(clampedX, clampedY, TANK, TANK)) {
+        if (
+          !w.rectHitsTerrain(clampedX, clampedY, TANK, TANK) &&
+          !this.rectHitsSpawnPoint(clampedX, clampedY)
+        ) {
           x = clampedX
           y = clampedY
           placed = true
         }
       }
 
-      // Fallback: random clear tile (unchanged from original).
+      // Fallback: random clear tile that is also clear of enemy spawn points.
+      // Keep the last valid position so we never materialise a drop on terrain
+      // or a spawn cell even if some random candidates were blocked.
       if (!placed) {
         let tries = 0
+        let lastValid: { x: number; y: number } | null = null
         do {
           x = w.rng.int(12) * 2 * CELL
           y = w.rng.int(12) * 2 * CELL
           tries++
-        } while (tries < 20 && w.rectHitsTerrain(x, y, TANK, TANK))
+          const blocked =
+            w.rectHitsTerrain(x, y, TANK, TANK) || this.rectHitsSpawnPoint(x, y)
+          if (!blocked) lastValid = { x, y }
+        } while (
+          tries < 20 &&
+          (w.rectHitsTerrain(x, y, TANK, TANK) || this.rectHitsSpawnPoint(x, y))
+        )
+        if (lastValid) {
+          x = lastValid.x
+          y = lastValid.y
+        }
       }
 
       return { type, x, y }
