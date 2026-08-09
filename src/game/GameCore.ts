@@ -309,6 +309,14 @@ export class GameCore {
       this.enableSpectate(dual)
     }
 
+    // Re-wire the live inputs after every spectate transition. The in-place
+    // single↔dual switch above creates/disables `godInput2` but does NOT call
+    // wireLiveInputs() on its own (unlike enableSpectate/disableSpectate).
+    // Without this, simulation.input2 stays null in 督战双玩家 and player2 is
+    // never driven — it sits idle live AND the InputRecorder captures an all-idle
+    // P2 stream, so the replay desyncs. Idempotent for the other branches.
+    this.wireLiveInputs()
+
     this.presentation.ui.controlCenter.setSpectateState(this.spectateMode())
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()

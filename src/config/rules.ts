@@ -251,16 +251,13 @@ export const DEFAULT_RULES: GameplayRules = {
   turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
   brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
-  // §86c: Turn cooldown — 100ms minimum turn period (~6 ticks at 60fps).
-  // §95 A/B (35×60 classic): 100ms + halt-during-cooldown is the best of the
-  // 50/100/160 sweep — net +5 flips (91.2%) vs the 50ms drift baseline
-  // (91.0%), suite 0.7561→0.7741. 160ms + halt regresses to 89.8% (the AI's
-  // per-tick decision model assumes instant turns; at ~9.6 ticks the dodge /
-  // T2a aim / turn-and-fire cadence degrades). 50ms + halt regresses to
-  // 88.9% (the halt stops the tank in the bullet's path — at 3 ticks the old
-  // drift was better for dodging). 100ms is the sweet spot: no maze overshoot
-  // (the halt), minimal dodge-loss (only 6 ticks).
-  turnCooldownMs: 100,
+  // §86c: Turn cooldown — minimum turn period enforced for ALL tanks (player +
+  // enemy) in SimulationCombat.updateMovement(). User request (2026-08-09):
+  // uniform 200ms (~12 ticks at 60fps). NOTE: this deliberately exceeds the
+  // §95 sweet spot of 100ms; §95 found 160ms+ degrades AI dodge / T2a aim /
+  // turn-and-fire cadence (per-tick decision model assumes near-instant turns).
+  // 200ms trades AI crispness for a heavier, more deliberate turn feel.
+  turnCooldownMs: 200,
 }
 
 /**
@@ -352,9 +349,9 @@ export const RULES: Record<string, GameplayRules> = {
     turnOnCollisionOnly: true,
     brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
-    // §86c: Turn cooldown — 100ms minimum turn period (~6 ticks at 60fps).
-    // §95 A/B best of 50/100/160 (see DEFAULT_RULES note).
-    turnCooldownMs: 100,
+    // §86c: Turn cooldown — uniform 200ms for ALL tanks (see DEFAULT_RULES note;
+    // deliberately exceeds the §95 sweet spot of 100ms per user request).
+    turnCooldownMs: 200,
   },
   relax: DEFAULT_RULES,
   hard: DEFAULT_RULES,

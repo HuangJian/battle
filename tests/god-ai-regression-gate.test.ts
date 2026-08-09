@@ -73,7 +73,9 @@ const TRUTH_WIN_PCT: number[] = [
   100.0, // S10 Gauntlet (§95 +1.7pp)
   88.3, // S11 Fortress
   88.3, // S12 Lattice
-  98.3, // S13 Bunker Hill (§95 +8.3pp)
+  90.0, // S13 Bunker Hill — re-baselined 2026-08-09 for the 200ms turn-cooldown
+  //   default (was 98.3 @100ms, floor 16). At 200ms the AI's per-tick turn /
+  //   aim cadence degrades (§95) and S13 holds ~14/20 → floor lowered to 14.
   98.3, // S14 Steel Web
   88.3, // S15 Citadel (§95 +6.6pp)
   90.0, // S16 Crossroads
