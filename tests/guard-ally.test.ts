@@ -297,3 +297,76 @@ describe('天降神兵 — 同归于尽 ignores allied guards (DECISIONS.md §31
     expect(world.sacrificeStock).toBe(0) // stock still consumed
   })
 })
+
+describe('freeze powerup must NOT freeze allied guards (§184)', () => {
+  it('a guard (ally) keeps moving when freezeTimer > 0', () => {
+    const { world, sim } = buildSeededWorld(77)
+    const p = world.player!
+    p.x = 200
+    p.y = 200
+    p.spawnTimer = 0
+    world.tanks = []
+
+    // Plant a guard with a God AI brain — it wants to move.
+    const g = plantTank(world, 'basic', 100, 100)
+    g.allegiance = 'ally'
+    g.isPlayer = false
+    g.spawnTimer = 0
+    g.alive = true
+    g.guardExpireFrame = world.frame + 600
+    g.moving = true
+    g.dir = 'up'
+    world.allies.push(g)
+
+    // Activate freeze (should freeze ENEMIES, not allies)
+    world.freezeTimer = 5000
+
+    // Record guard position before tick
+    const yBefore = g.y
+
+    // Run updateGuards + updateMovement (the movement pipeline)
+    const updateGuards = (sim as unknown as { updateGuards: () => void }).updateGuards.bind(sim)
+    updateGuards()
+    sim.tick() // advances movement
+
+    // The guard should have moved (not frozen by freezeTimer)
+    expect(g.alive).toBe(true)
+    // Guard was moving up — y should have decreased (or at least the velocity
+    // was not zeroed). If frozen, y would be unchanged.
+    // Note: the guard might not move if blocked by terrain, but the key is
+    // that vx/vy were NOT zeroed by the freeze check.
+    // We verify by checking the guard's velocity was not zeroed.
+    // After sim.tick(), if freeze affected the guard, g.y === yBefore.
+    // If freeze did NOT affect the guard, the guard's brain set g.moving=true
+    // and the movement system applied velocity.
+    // In this empty-field setup, the guard should have moved up.
+    expect(g.y).toBeLessThan(yBefore)
+  })
+
+  it('an enemy tank stops moving when freezeTimer > 0', () => {
+    // Verify the freeze still works on enemies (regression guard)
+    const { world, sim } = buildSeededWorld(78)
+    const p = world.player!
+    p.x = 200
+    p.y = 200
+    p.spawnTimer = 0
+    world.tanks = []
+
+    const enemy = plantTank(world, 'basic', 100, 100)
+    enemy.allegiance = 'enemy'
+    enemy.isPlayer = false
+    enemy.spawnTimer = 0
+    enemy.alive = true
+    enemy.moving = true
+    enemy.dir = 'up'
+    world.tanks.push(enemy)
+
+    world.freezeTimer = 5000
+    const yBefore = enemy.y
+
+    sim.tick()
+
+    // Enemy should be frozen — y unchanged
+    expect(enemy.y).toBe(yBefore)
+  })
+})

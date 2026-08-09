@@ -569,10 +569,27 @@ const AGGRO: Candidate = {
         const freezeTarget = self.findFreezePickupTarget(pcx, pcy)
         if (freezeTarget) {
           self._moveDir = self.navigateTowards(freezeTarget)
-          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-          self.branchCounts.powerup++
-          self._lastBranch = 'powerup'
-          return true
+          // §184: When the player has been physically stuck for >= 1.5s
+          // during freeze pickup, fall through to AGGRO's stop-and-aim /
+          // navigate sub-branches to kill the blocking enemy first.
+          // The freeze pickup will resume next tick once the enemy is dead
+          // or the path opens. Without this, the player navigates toward
+          // the powerup but can't actually move (blocked by frozen enemy),
+          // and fires uselessly for the entire freeze window (S31@seed14:
+          // 19.6s stuck, 0 fire ticks). The _digBlockTicks gate ensures
+          // this only triggers on TRUE immobility, not brief pauses.
+          if (
+            self._enemies.length > 0 &&
+            self.params.navBreakStuck > 0 &&
+            self._digBlockTicks >= self.params.carveDigBlockTicks
+          ) {
+            // Don't commit — let stop-and-aim / navigate handle the enemy
+          } else {
+            self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+            self.branchCounts.powerup++
+            self._lastBranch = 'powerup'
+            return true
+          }
         }
       }
       // Skip defense, go straight for the nearest enemy or power-up.
@@ -1437,6 +1454,9 @@ const HUNT: Candidate = {
         self._carveDigActive = false
         self._carveDigTicks = 0
         self._carveDigTarget = null
+        // §182: Reset pixel-stuck counter to prevent immediate carve-dig
+        // re-start, giving the §182 face-enemy fallback a 90-tick window.
+        self._digBlockTicks = 0
       } else {
         const d = dig[0]
         self._moveDir = d
@@ -1453,6 +1473,9 @@ const HUNT: Candidate = {
           self._carveDigTicks = 0
           self._carveDigTarget = null
           self._moveDir = null
+          // §182: Reset pixel-stuck counter to prevent immediate carve-dig
+          // re-start, giving the §182 face-enemy fallback a 90-tick window.
+          self._digBlockTicks = 0
         }
         if (self._carveDigActive) {
           self.branchCounts.navigate++
@@ -1663,6 +1686,48 @@ const HUNT: Candidate = {
       if (!self._moveDir) {
         // A* failed or path exhausted — fall back to direct movement.
         self._moveDir = self.directMove(pc)
+      }
+    }
+    // §182: When the player has been physically immobile for >= carveDigBlockTicks
+    // (1.5s default) AND either (a) all movement options failed (_moveDir is
+    // null) or (b) the movement direction is blocked by an enemy (not terrain),
+    // turn to face the nearest enemy and fire at it. Without this, the player
+    // faces a fixed direction and fires uselessly while adjacent enemies remain
+    // untouched (S2@seed120: 150s stuck at defense position (9,25), gameover).
+    // The _digBlockTicks gate ensures this only triggers on TRUE immobility,
+    // not brief navigation pauses.
+    if (
+      self._enemies.length > 0 &&
+      self.params.navBreakStuck > 0 &&
+      self._digBlockTicks >= self.params.carveDigBlockTicks &&
+      (
+        !self._moveDir ||
+        (!self.canMoveDir(p, self._moveDir) && !self.canMoveOrBreak(p, self._moveDir))
+      )
+    ) {
+      let bestDir: Direction | null = null
+      let bestDist = Infinity
+      for (let ei = 0; ei < self._enemies.length; ei++) {
+        const t = self._enemies[ei]
+        const tc = self.tankCell(t)
+        const dx = tc.col - pc.col
+        const dy = tc.row - pc.row
+        const d = Math.abs(dx) + Math.abs(dy)
+        if (d < bestDist) {
+          bestDist = d
+          if (Math.abs(dy) >= Math.abs(dx)) {
+            bestDir = dy > 0 ? 'down' : 'up'
+          } else {
+            bestDir = dx > 0 ? 'right' : 'left'
+          }
+        }
+      }
+      if (bestDir) {
+        self._moveDir = bestDir
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, bestDir, false)
+        self.branchCounts.navigate++
+        self._lastBranch = 'navigate'
+        return true
       }
     }
     // §85: Close-range enemy exposure check — don't turn your back on a

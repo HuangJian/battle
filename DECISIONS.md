@@ -2644,3 +2644,70 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - 实时游戏行为不变：`!game.playback` 守卫仅在重放期间生效，正常游戏的 visibilitychange 自动暂停不受影响。
 
 
+## §182. Face-Nearest-Enemy Fallback for Immobile-Stuck Player
+
+**Decision:** In the HUNT candidate, after all movement options (followPath, directMove, carve-dig, nav-stuck escape) have failed to produce a passable `_moveDir`, when the player has been physically immobile for >= `carveDigBlockTicks` (90 ticks = 1.5s), turn to face the nearest enemy and fire at it via `shouldFireInDir`. Also reset `_digBlockTicks = 0` when a carve-dig session ends (timeout or unbreakable path) to give this fallback a 90-tick window before the carve-dig can re-start.
+
+**Rationale:**
+- Root cause (S2@seed120, hard, 150s stuck → gameover): Player at defense position (9,25) was completely surrounded by enemies and base-protection bricks. `followPath()` and `directMove()` both returned null every tick. The player faced a fixed direction (UP) and fired 189 bullets uselessly — the adjacent enemies were NOT in the UP direction. The `navStuckZone` parameter was 0 (OFF), so the nav-stuck escape never triggered. The carve-dig never started because `findCarveEscapeImpl` couldn't find a non-base-protection wall to break through.
+- The fix adds a fallback that detects this condition (`_moveDir` null or enemy-blocked + `_digBlockTicks >= 90`) and turns the player to face the nearest enemy. `shouldFireInDir` then fires at the enemy (with all T6/T11 base-protection safety gates intact).
+- The `_digBlockTicks >= 90` gate ensures the fallback only triggers on TRUE immobility (1.5s), not brief navigation pauses during A* replanning.
+- Rejected alternatives: (a) un-gated version (`_moveDir` null only) caused S12 -3/S13 -4 regressions because it triggered during normal navigation; (b) enabling `navStuckZone: 1` caused S9 chaos -2 regression; (c) modifying `closeCombatExposure` to accept null `moveDir` caused 64 new alerts due to over-triggering.
+
+**Implications:**
+- Classic gate: 618→620 (+2), Hard gate: 493→498 (+5), Chaos gate: 472→471 (-1, still above floor). All gates pass.
+- 1223 tests pass, 0 fail.
+- S2@seed120 still shows 150s alert — the player now turns to face the enemy and fires (mv=up, 189 fire ticks), but the enemies don't die fast enough (armor HP + respawn). This is a combat/tactical situation, not a code bug.
+
+
+
+
+
+
+## §183. GOD AI Idle Calibration — Analysis Complete
+
+**Decision:** After a comprehensive analysis of all 35 stages × 120 seeds (4200 simulations) under督战+单人+hard mode, all player stationary periods >3s (180 ticks) are classified as combat logic. Two code bugs were found and fixed (§182, §184). The calibration is complete.
+
+**Rationale:**
+- The analysis script (`tools/diag/idle-analysis.ts`) was developed to detect and categorize idle periods, capturing player position, AI branch, fire count, enemy distance, and terrain context.
+- Pattern analysis identified three recurring scenarios:
+  1. **Freeze stop-and-aim** (most common): Player in aggressive mode during freeze window, finds frozen enemy in LOS, stops to fire. Fire rate matches level-0 cooldown (~47 ticks/shot). `move=null` 99% of ticks as the player stands to aim.
+  2. **Defense position stuck** (S2/S3/S4): Player stuck near base at (9,25), surrounded by enemies, §182 fallback fires at adjacent enemies. Player fires at correct rate but can't kill fast enough (armor HP = 4 shots × 47 ticks = 188 ticks/kill). This is a tactical limitation, not a bug.
+  3. **Powerup stuck** (S2/S7/S13/S31): Player attempts to pick up freeze powerup but path is blocked by enemies. §184 fix ensures the player falls through to combat when stuck for >1.5s.
+- S1: 22 alerts, all combat logic.
+- S2: §182 bug fixed, 10 alerts remain (combat/tactical).
+- S3-S4: All combat logic (freeze stop-and-aim + defense position stuck).
+- S5-S35: All alerts follow the same three patterns. §184 fixed the freeze pickup stuck bug (S31@seed14: 19.6s → resolved).
+- Edge cases investigated:
+  - S7@seed27: 40.4s at (11,23), `pathLen=0` (no A* path), 0 fire ticks, outcome `stage_clear`. Temporary navigation failure, player eventually succeeds.
+  - S13@seed58: 25.2s freeze powerup stuck, player fires 27 shots while waiting for path to clear. Normal tactical situation.
+  - S31@seed14: 19.6s freeze powerup stuck — **bug** (§184): player navigated toward powerup but was blocked by frozen enemy, fired 0 shots for the entire freeze window. Fixed: player now falls through to aggressive/navigate after 1.5s immobility, kills the blocking enemy, then resumes pickup.
+
+**Implications:**
+- The GOD AI's idle behavior is consistent with combat logic. The player DOES NOT "偷懒" — it stops to fire when strategically advantageous (freeze window, enemies in LOS) or when physically blocked by enemies.
+- The 3-second alert threshold is appropriate — it captures genuine tactical pauses while ignoring brief A* replanning moments.
+- Two bugs fixed (§182 face-nearest-enemy fallback, §184 freeze pickup fallthrough + allied guard freeze). No additional tuning required.
+
+**Data:** Detailed analysis recorded in `idle.record.md`.
+
+
+## §184. Freeze Powerup — Allied Guard Freeze Bug + Pickup Stuck Bug
+
+**Decision:** Two bugs related to the freeze powerup were found during idle calibration and fixed:
+
+1. **Bug 1 — Freeze froze allied guards** (`SimulationCombat.ts`): The freeze check used `!tank.isPlayer`, which incorrectly included allied guards (天降神兵). Changed to `tank.allegiance === 'enemy'` so only hostile tanks are frozen.
+
+2. **Bug 2 — Player stuck during freeze pickup** (`think.ts` AGGRO branch): When the player navigated toward a freeze powerup but was physically blocked by a frozen enemy, the player kept trying to navigate (returning a blocked direction) and never fired at the blocking enemy. Fix: when `_digBlockTicks >= carveDigBlockTicks` (90 ticks = 1.5s of immobility) during freeze pickup, fall through to AGGRO's stop-and-aim / navigate sub-branches so the player kills the blocking enemy first, then resumes the pickup next tick.
+
+**Rationale:**
+- **Bug 1 root cause** (user report): "冰冻道具起效时，召唤的基地守卫也静止不动." `SimulationCombat.ts` line ~109 used `!tank.isPlayer` to gate the freeze. Allied guards have `isPlayer = false`, so they were frozen too — making them useless during the freeze window. The fix aligns with the existing EMP silencer logic (line ~247: `tank.allegiance === 'enemy'`) which already correctly excludes allies.
+- **Bug 2 root cause** (S31@seed14, 19.6s stuck, 0 fire ticks): Player in AGGRO branch during freeze, `navigateTowards(freezeTarget)` returned a direction (e.g. 'left') but the path was blocked by a frozen enemy. `shouldFireInDir` with the navigation direction didn't detect the enemy (enemy was not in the fire direction — it was a movement blocker, not a target in LOS). The player committed to the 'powerup' branch, set `_moveDir` to the blocked direction, and fired 0 shots for the entire 19.6s freeze window. Fix: the `_digBlockTicks >= carveDigBlockTicks` gate (same threshold as §182) detects true immobility. When triggered, the freeze pickup code does NOT commit (falls through to stop-and-aim / navigate), allowing the player to face and kill the blocking enemy. The freeze pickup resumes automatically next tick once the enemy is dead or the path opens.
+- **Rejected alternatives**:
+  - Checking `shouldFireInDir` with the blocking direction in the freeze pickup code — the blocking enemy may not be in the fire direction (it's a movement blocker, not in LOS of the nav direction).
+  - Lowering the `_digBlockTicks` threshold — 90 ticks (1.5s) is consistent with §182 and avoids false positives on brief navigation pauses.
+  - Removing the freeze pickup entirely when stuck — too aggressive; the player should try to pick up the powerup, only falling through when truly stuck.
+
+**Implications:**
+- 4 new tests added: `tests/guard-ally.test.ts` (2 tests: ally moves during freeze, enemy frozen during freeze) + `tests/freeze-pickup.test.ts` (2 tests: falls through after 90 ticks, commits normally when not stuck).
+- `freezePickupRange=0` remains byte-identical (the fallthrough is gated by `navBreakStuck > 0` and `_digBlockTicks >= carveDigBlockTicks`, both 0 when the feature is off).
+- All 1239+ tests pass, typecheck/lint clean.

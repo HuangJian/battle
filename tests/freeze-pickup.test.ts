@@ -228,3 +228,48 @@ describe('§156: AGGRO branch freeze pickup (end-to-end)', () => {
     expect(input._lastBranch).not.toBe('aggressive')
   })
 })
+
+describe('§184: freeze pickup falls through when stuck', () => {
+  it('freeze pickup falls through to aggressive after 90 ticks of immobility', () => {
+    const { world, input } = setupWorld()
+    positionPlayer(world, 10, 10)
+    // Enemy in line of fire (same column, above)
+    placeEnemy(world, 10, 5)
+    // Power-up within range
+    makePowerUp(world, 12, 10, 'shield')
+
+    // Activate freeze
+    world.freezeTimer = 600
+
+    // First tick — freeze pickup should commit (not stuck yet)
+    input._thought = false
+    input.getMoveDirection()
+    expect(input._lastBranch).toBe('powerup')
+
+    // Simulate 90+ ticks of immobility by setting _digBlockTicks
+    // (normally incremented by endFrame when player doesn't move)
+    input._digBlockTicks = 91
+    input._thought = false
+    input.getMoveDirection()
+
+    // After 90 ticks stuck, freeze pickup should fall through to aggressive
+    // (stop-and-aim at the enemy), NOT stay in powerup
+    expect(input._lastBranch).not.toBe('powerup')
+  })
+
+  it('freeze pickup commits normally when not stuck (byte-identical)', () => {
+    const { world, input } = setupWorld()
+    positionPlayer(world, 10, 10)
+    placeEnemy(world, 10, 5)
+    makePowerUp(world, 12, 10, 'shield')
+
+    world.freezeTimer = 600
+    // _digBlockTicks = 0 (not stuck)
+    input._thought = false
+    input.getMoveDirection()
+
+    // Should commit freeze pickup normally
+    expect(input._lastBranch).toBe('powerup')
+    expect(input._moveDir).not.toBeNull()
+  })
+})

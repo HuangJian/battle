@@ -103,7 +103,10 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
         }
 
         // Enemy freeze — a frozen tank can't act, so bleed off any momentum and skip.
-        if (!tank.isPlayer && w.freezeTimer > 0) {
+        // §184: only freeze ENEMY tanks, not allied guards (allegiance === 'ally').
+        // The old `!tank.isPlayer` check froze guards too, making them useless
+        // during the freeze window.
+        if (tank.allegiance === 'enemy' && w.freezeTimer > 0) {
           tank.vx = 0
           tank.vy = 0
           continue
