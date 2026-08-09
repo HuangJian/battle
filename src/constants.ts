@@ -36,8 +36,19 @@ export const TICK_MS = 1000 / 60
  *  0 would mean uncapped; the game uses this value only in perf mode. */
 export const PERF_MODE_RENDER_FPS = 30
 
-/** Max enemies alive at once */
+/** Max enemies alive at once (single-player / non-coop). */
 export const MAX_ENEMIES_ALIVE = 4
+
+/**
+ * Co-op (躺赢 / 督战x2) concurrent-enemy floor. The spawner tops up to this
+ * cap every spawn interval, so a higher co-op cap naturally enforces a
+ * "minimum N on field" rule: with this set to 5, co-op always keeps 5 regular
+ * enemies alive (until the per-stage queue is exhausted — see plan/tasks.chat.md
+ * §26/§27). Balance enemies spawned by 天降神兵 (isExtra) are outside this cap,
+ * so a guard summon adds 1–2 on top. Equal to MAX here, but kept as a separate
+ * named constant so the floor can be raised independently of the solo cap.
+ */
+export const COOP_MAX_ENEMIES_ALIVE = 5
 
 /** Total enemies per stage */
 export const ENEMIES_PER_STAGE = 20
