@@ -68,6 +68,11 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     return null
   }
 
+  // §187: Get the blocked cell (player tank) for guard/P2 A*.
+  const blkCell = self.getNavBlockedCell()
+  const blkCol = blkCell ? blkCell.col : -99
+  const blkRow = blkCell ? blkCell.row : -99
+
   // (perf §68) Cache hit: same player + target cells, not expired.
   // We do NOT draw rng.next() here — the original always called it for the
   // suboptimalPathProb gate, but suboptimalPathProb defaults to 0 (result
@@ -81,6 +86,8 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     self._navPlayerRow === playerCell.row &&
     self._navTargetCol === target.col &&
     self._navTargetRow === target.row &&
+    self._navBlockedCol === blkCol &&
+    self._navBlockedRow === blkRow &&
     self._navReplanTimer > 0
   ) {
     return self._navCache
@@ -88,13 +95,14 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
 
   // Cache miss — recompute.
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target)
+  const constraints = blkCell ? { blockedCell: blkCell } : undefined
+  let path = findPath(w.tileMap, playerCell, target, constraints)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   // This finds paths through brick walls — the player follows them and
   // fires at bricks to clear the way (handled by followPath + think()).
   if (!path || path.length === 0) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true })
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, ...(blkCell ? { blockedCell: blkCell } : {}) })
   }
 
   let result: Direction | null = null
@@ -151,6 +159,8 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   self._navPlayerRow = playerCell.row
   self._navTargetCol = target.col
   self._navTargetRow = target.row
+  self._navBlockedCol = blkCol
+  self._navBlockedRow = blkRow
   self._navCache = result
   self._navReplanTimer = self._navReplanMax
   return result
@@ -287,6 +297,11 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   // the cached array (B arm recomputes a fresh array every replan, so it
   // never had this hazard). Slice cost is negligible: replan runs at most
   // once per replanInterval (50) or on empty-path ticks.
+  // §187: Get the blocked cell (player tank) for guard/P2 A*.
+  const blkCell = self.getNavBlockedCell()
+  const blkCol = blkCell ? blkCell.col : -99
+  const blkRow = blkCell ? blkCell.row : -99
+
   if (self.params.replanCache > 0) {
     self._replanTimer--
     if (
@@ -296,6 +311,8 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
       self._replanTgtCol === target.col &&
       self._replanTgtRow === target.row &&
       self._replanRev === w.tileMap.revision &&
+      self._replanBlockedCol === blkCol &&
+      self._replanBlockedRow === blkRow &&
       self._replanTimer > 0
     ) {
       self.path = self._replanCache ? self._replanCache.slice() : []
@@ -305,11 +322,12 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
 
   // Cache miss — recompute.
   // Try regular A* (corridors only) first.
-  let path = findPath(w.tileMap, playerCell, target)
+  const constraints = blkCell ? { blockedCell: blkCell } : undefined
+  let path = findPath(w.tileMap, playerCell, target, constraints)
 
   // P3.1: If no corridor path, try dig-through-brick path.
   if (!path) {
-    path = findPath(w.tileMap, playerCell, target, { breakBrick: true })
+    path = findPath(w.tileMap, playerCell, target, { breakBrick: true, ...(blkCell ? { blockedCell: blkCell } : {}) })
   }
 
   if (path) {
@@ -325,6 +343,8 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     self._replanTgtCol = target.col
     self._replanTgtRow = target.row
     self._replanRev = w.tileMap.revision
+    self._replanBlockedCol = blkCol
+    self._replanBlockedRow = blkRow
     // Store an independent copy (see the hit branch note): followPath's
     // shift() consumes self.path, which must not alias the cached array.
     // findPath returns a fresh array every call, so self.path is already a

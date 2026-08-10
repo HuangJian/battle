@@ -74,6 +74,8 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
     // overlapping passable neighbour when the item sits on blocking terrain.
     let collectCol = Math.floor(pu.x / CELL)
     let collectRow = Math.floor(pu.y / CELL)
+    // §187: skip powerups overlapping with a live enemy — kill enemy first.
+    if (powerupHasEnemyOverlap(self, collectCol, collectRow)) continue
     if (bonusWindow) {
       // §84-revisit (DECISIONS §85): skip items the tank can never reach
       // (steel/water-enclosed pockets). Chasing an unreachable item every
@@ -312,6 +314,25 @@ function powerUpAliveAt(self: GodAIInput, col: number, row: number): boolean {
 }
 
 /**
+ * §187: Does a live enemy tank overlap the powerup at (col,row)?
+ * Both tanks and powerups occupy a 2×2 sub-block footprint, so the overlap
+ * check is |ec - col| <= 1 && |er - row| <= 1. When true, the player should
+ * kill the enemy first (via hunt/aggro) before navigating to the powerup.
+ * Pure World read (no RNG).
+ */
+function powerupHasEnemyOverlap(self: GodAIInput, col: number, row: number): boolean {
+  if (self.params.powerupEnemyOverlapSkip <= 0) return false
+  const tanks = self.world.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
+    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    const tc = self.tankCell(t)
+    if (Math.abs(tc.col - col) <= 1 && Math.abs(tc.row - row) <= 1) return true
+  }
+  return false
+}
+
+/**
  * §152-W3: the ITEM cell of the alive power-up whose collect cell equals
  * `target` (the cell findUrgentPowerUpTargetImpl returned), or null. The
  * collect cell can differ from the item cell when the item sits on blocking
@@ -426,6 +447,9 @@ function findNearestReachablePowerUp(
     // steel/water-enclosed pockets.
     const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), Math.floor(pu.y / CELL))
     if (!collect) continue
+
+    // §187: skip powerups overlapping with a live enemy — kill enemy first.
+    if (powerupHasEnemyOverlap(self, collect.col, collect.row)) continue
 
     const priority = POWERUP_PRIORITY[pu.type] ?? 5
     if (dist < bestDist || (dist === bestDist && priority < bestPriority)) {
@@ -1447,8 +1471,21 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // Cluster C: reuse the per-tick enemy snapshot (built in think()) instead
   // of allocating a filtered array on every call (AGENTS §14.1).
   // Falls back to a fresh scan only if think() hasn't populated it yet.
-  const enemies =
+  let enemies =
     self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
+
+  // §187: target blacklist — skip the blacklisted enemy (temporarily
+  // removed from the target pool due to unreachability).
+  self._lastSelectTargetId = -1
+  if (self.params.targetBlacklistStuckTicks > 0 && self._blacklistEnemyId >= 0) {
+    if (w.frame >= self._blacklistExpiryFrame) {
+      self._blacklistEnemyId = -1 // expired
+    } else if (enemies.length > 1) {
+      // Only filter if there are other enemies to target
+      enemies = enemies.filter((t) => t.id !== self._blacklistEnemyId)
+    }
+  }
+
   if (enemies.length === 0) return self.getDefaultDefensePosition()
 
   // ---- §179: emergency base defense (autopsy seed6 失误 B/C) ----
@@ -1602,6 +1639,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
         best = t
       }
     }
+    self._lastSelectTargetId = best.id
     return self.tankCell(best)
   }
 
@@ -1709,6 +1747,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
         best = t
       }
     }
+    self._lastSelectTargetId = best.id
     return self.tankCell(best)
   }
 
@@ -1819,6 +1858,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       self._huntCommitId = best.id
       self._huntCommitUntil = w.frame + self.params.huntCommitTicks
     }
+    self._lastSelectTargetId = best.id
     return self.tankCell(best)
   }
 

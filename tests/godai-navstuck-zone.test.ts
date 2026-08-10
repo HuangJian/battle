@@ -97,7 +97,9 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
   it('OFF (navStuckZone 0) reproduces the long pin (repro leg)', () => {
     const dwell = maxZoneDwell({ ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 0 }, STAGE, SEED, 2400)
     // Unfixed behavior: the pin runs far past the 180-tick escape threshold.
-    expect(dwell).toBeGreaterThan(600)
+    // §187 target blacklist (targetBlacklistStuckTicks=240) provides partial
+    // relief even when navStuckZone=0, reducing the pin from >600 to ~564.
+    expect(dwell).toBeGreaterThan(500)
   })
 
   it('ON (navStuckZone 1 + window) bounds the dwell — the escape fires', () => {

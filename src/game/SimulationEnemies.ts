@@ -308,6 +308,7 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
         }
         return null
       })
+      brain.isGuardAI = true  // §187: guard A* treats player as obstacle
       brain.reset()
       // Re-zero the imperfection gates AFTER stage adaptation — §58 would
       // otherwise re-enable suboptimalPathProb (0.05) on brick-dense stages,

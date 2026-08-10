@@ -526,6 +526,13 @@ export class GodAIInput implements InputLike {
   _navCache: Direction | null = null
   _navReplanTimer = 0
   _navReplanMax = 60
+  // §187: blocked cell cache key for navigateTowards — invalidates when
+  // the player (obstacle) moves to a new cell.
+  _navBlockedCol = -99
+  _navBlockedRow = -99
+  // §187: blocked cell cache key for replan — same discipline as nav cache.
+  _replanBlockedCol = -99
+  _replanBlockedRow = -99
 
   /**
    * (perf §127) Cross-tick replan cache — same discipline as the §68
@@ -797,10 +804,19 @@ export class GodAIInput implements InputLike {
     // stage reset — the next tick must recompute A* from scratch.
     this._navCacheValid = false
     this._navReplanTimer = 0
+    this._navBlockedCol = -99
+    this._navBlockedRow = -99
     // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
     this._replanCacheValid = false
     this._replanTimer = 0
     this._replanRev = -1
+    this._replanBlockedCol = -99
+    this._replanBlockedRow = -99
+    // §187: reset target blacklist on stage reset.
+    this._blacklistEnemyId = -1
+    this._blacklistExpiryFrame = 0
+    this._lastSelectTargetId = -1
+    this._targetStuckTicks = 0
     // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
     for (let i = 0; i < this._pickupReachSlots.length; i++) {
       this._pickupReachSlots[i].valid = false
@@ -900,10 +916,24 @@ export class GodAIInput implements InputLike {
           this._digAnchorX = p.x
           this._digAnchorY = p.y
           this._digBlockTicks = 0
-        } else {
-          this._digBlockTicks++
-        }
       } else {
+        this._digBlockTicks++
+      }
+      // §187: target blacklist trigger — when the player has been
+      // pixel-stuck for >= targetBlacklistStuckTicks while targeting
+      // enemy A, blacklist A for targetBlacklistDuration ticks so
+      // selectTarget picks a different enemy.
+      if (
+        this.params.targetBlacklistStuckTicks > 0 &&
+        this._digBlockTicks >= this.params.targetBlacklistStuckTicks &&
+        this._lastSelectTargetId >= 0 &&
+        this._blacklistEnemyId < 0
+      ) {
+        this._blacklistEnemyId = this._lastSelectTargetId
+        this._blacklistExpiryFrame = this.world.frame + this.params.targetBlacklistDuration
+        this._selTargetValid = false // force re-select next tick
+      }
+    } else {
         // Re-anchor on spawn / death so the counter starts fresh when play
         // resumes (otherwise the pre-spawn idle would carry over).
         this._digBlockTicks = 0
@@ -949,6 +979,44 @@ export class GodAIInput implements InputLike {
   isPlayer2(): boolean {
     return this.controlledTank(this.world) === this.world.player2
   }
+
+  /**
+   * §187: Set to true for guard AI brains (created by SimulationEnemies).
+   * When true (or when isPlayer2()), the A* pathfinding treats the primary
+   * player (w.player) as an impassable obstacle — preventing the guard/player
+   * mutual-block deadlock (S7@seed54: 23.9s stuck).
+   */
+  isGuardAI = false
+
+  /**
+   * §187: Returns the cell of the primary player (P1) to block in A*
+   * pathfinding, or null if this brain should NOT block anyone.
+   *
+   * - Guard → blocks P1 (w.player)
+   * - P2 → blocks P1 (w.player)
+   * - P1 → blocks nobody (null)
+   *
+   * Gated by `navAvoidPlayer` param (0 = OFF = null, byte-identical).
+   */
+  getNavBlockedCell(): Cell | null {
+    if (this.params.navAvoidPlayer <= 0) return null
+    if (!this.isGuardAI && !this.isPlayer2()) return null
+    const p = this.world.player
+    if (!p) return null
+    return this.tankCell(p)
+  }
+
+  /**
+   * §187: Target blacklist — the enemy id currently blacklisted (or -1).
+   * When the player is stuck for >= targetBlacklistStuckTicks while targeting
+   * enemy A, A is blacklisted for targetBlacklistDuration ticks.
+   */
+  _blacklistEnemyId = -1
+  _blacklistExpiryFrame = 0
+  /** §187: The enemy id selected by the last selectTarget call (for blacklist trigger). */
+  _lastSelectTargetId = -1
+  /** §187: How long the player has been pixel-stuck while targeting the current enemy. */
+  _targetStuckTicks = 0
 
   // ================================================================
   // Core decision loop (think)

@@ -3,15 +3,15 @@
  * idle-analysis.ts — Player stationary period analyzer for GOD AI calibration.
  *
  * 督战+单人+hard: runs headless God-AI simulations and detects periods where
- * the player tank remains stationary (position unchanged) for >3 seconds
- * (180 ticks at 60 FPS). Each alert is recorded with full context for
- * root-cause analysis:
- *   - stage / seed / start tick / end tick / duration
- *   - player position / cell / direction
- *   - AI decision branches active during the idle period
- *   - firing count (was the player shooting while stationary?)
- *   - enemy count / distance to base
- *   - whether player was dead/respawning at any point
+ * the player tank remains effectively stationary for >2 seconds (120 ticks at
+ * 60 FPS). "Effectively stationary" means the player's displacement from the
+ * idle-start position never exceeds 1 cell (16px) in either axis — this
+ * catches standing still, turning-in-place, and oscillating within 1 cell.
+ *
+ * Combat exemption: if the player was firing AND hit enemies or destroyed
+ * brick walls during the stationary period, it is considered a correct
+ * decision (not a bug). Only non-combat-exempt stationary periods are
+ * reported as alerts.
  *
  * Determinism: same seed + same stage + same difficulty ⇒ identical alerts.
  * The idle tracker is a read-only observer — it never feeds back into the
@@ -21,6 +21,7 @@
  *   bun tools/diag/idle-analysis.ts --seeds 120 --difficulty hard
  *   bun tools/diag/idle-analysis.ts --seeds 120 --stages 1-10 --json tmp/idle.json
  *   bun tools/diag/idle-analysis.ts --from-json tmp/idle.json  # re-run only alerts
+ *   bun tools/diag/idle-analysis.ts --all  # show combat-exempt alerts too
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -37,16 +38,18 @@ import type { StageData } from '../../src/types'
 // Constants
 // ============================================================
 
-/** 3 seconds at 60 FPS = 180 ticks. */
-const IDLE_THRESHOLD_TICKS = 180
+/** 2 seconds at 60 FPS = 120 ticks. */
+const IDLE_THRESHOLD_TICKS = 120
 /** Max ticks per simulation (10 minutes at 60fps). */
 const MAX_TICKS = 36000
+/** Displacement threshold: player must not move more than 1 cell (16px) from idle start. */
+const CELL_THRESHOLD = CELL // 16px
 
 // ============================================================
 // Types
 // ============================================================
 
-/** One stationary alert — a period where the player didn't move for >3s. */
+/** One stationary alert — a period where the player didn't move for >2s. */
 export interface IdleAlert {
   stageIndex: number
   stageName: string
@@ -82,6 +85,12 @@ export interface IdleAlert {
   endBranch: string
   /** Simulation outcome. */
   outcome: string
+  /** Combat exemption: player was firing AND hitting enemies or destroying terrain. */
+  combatExempt: boolean
+  /** Enemies killed by the player during the idle period. */
+  killsDuringIdle: number
+  /** Whether terrain was destroyed during the idle period. */
+  terrainChangedDuringIdle: boolean
 }
 
 /** Per-run result with idle alerts. */
@@ -102,6 +111,12 @@ export interface IdleRunResult {
  * Run a single headless simulation with idle tracking.
  * Mirrors `runSimulation` setup exactly, but adds per-tick player position
  * tracking to detect stationary periods > IDLE_THRESHOLD_TICKS.
+ *
+ * "Stationary" = player's displacement from the idle-start position never
+ * exceeds 1 cell (CELL_THRESHOLD = 16px) in either X or Y axis. This catches:
+ *   - Standing completely still
+ *   - Turning in place without moving
+ *   - Oscillating back and forth within 1 cell
  */
 export function runSimulationWithIdleTracking(
   seed: number,
@@ -119,6 +134,8 @@ export function runSimulationWithIdleTracking(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
+  // 督战 (supervise) mode: God AI drives player1, no human input.
+  world.spectate = true
 
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const input = new GodAIInput(world, params, godRng)
@@ -133,12 +150,14 @@ export function runSimulationWithIdleTracking(
   // ---- Idle tracking state ----
   const alerts: IdleAlert[] = []
   let idleStart = -1 // tick when current idle period started (-1 = not idle)
-  let idlePrevX = -1 // player X at the start of the idle period
-  let idlePrevY = -1 // player Y at the start of the idle period
+  let idleStartX = 0 // player X at the START of the idle period
+  let idleStartY = 0 // player Y at the START of the idle period
   // Accumulators for the current idle period:
   let idleBranchSet = new Set<string>()
   let idleFireTicks = 0
   let idleMoveDirAlwaysNull = true
+  let idleKillsAtStart = 0 // world.killCount at idle start
+  let idleRevisionAtStart = 0 // tileMap.revision at idle start
 
   const bcx = BASE_POS.col * CELL + CELL
   const bcy = BASE_POS.row * CELL + CELL
@@ -162,73 +181,107 @@ export function runSimulationWithIdleTracking(
     tick++
 
     // ---- Idle detection ----
+    // "Effectively stationary" = player's displacement from idle-start
+    // position does not exceed 1 cell (CELL_THRESHOLD = 16px) in either axis.
+    // This catches standing still, turning in place, and oscillating within
+    // 1 cell — all scenarios where the player isn't making meaningful progress.
     if (playerAlive) {
       if (idleStart < 0) {
         // Start tracking a potential idle period.
-        idleStart = tick - 1 // the tick that just completed
-        idlePrevX = px
-        idlePrevY = py
+        idleStart = tick - 1
+        idleStartX = px
+        idleStartY = py
         idleBranchSet = new Set<string>([branch])
         idleFireTicks = fire ? 1 : 0
         idleMoveDirAlwaysNull = moveDir === null
-      } else if (px === idlePrevX && py === idlePrevY) {
-        // Still stationary — extend the idle period.
+        idleKillsAtStart = world.killCount
+        idleRevisionAtStart = world.tileMap.revision
+      } else if (
+        Math.abs(px - idleStartX) <= CELL_THRESHOLD &&
+        Math.abs(py - idleStartY) <= CELL_THRESHOLD
+      ) {
+        // Still within 1 cell of start — extend the idle period.
         idleBranchSet.add(branch)
         if (fire) idleFireTicks++
         if (moveDir !== null) idleMoveDirAlwaysNull = false
       } else {
-        // Player moved — check if the just-ended idle period was long enough.
-        if (tick - 1 - idleStart >= IDLE_THRESHOLD_TICKS) {
-          alerts.push(
-            makeAlert(
-              stageIndex,
-              STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
-              seed,
-              idleStart,
-              tick - 2, // last stationary tick
-              idlePrevX,
-              idlePrevY,
-              p!,
-              idleBranchSet,
-              idleFireTicks,
-              idleMoveDirAlwaysNull,
-              world,
-              bcx,
-              bcy,
-              branch,
-            ),
-          )
+        // Player moved more than 1 cell — check if the just-ended idle period
+        // was long enough and not combat-exempt.
+        const duration = tick - 1 - idleStart
+        if (duration >= IDLE_THRESHOLD_TICKS) {
+          const killsDuringIdle = world.killCount - idleKillsAtStart
+          const terrainChanged = world.tileMap.revision !== idleRevisionAtStart
+          const combatExempt =
+            idleFireTicks > 0 && (killsDuringIdle > 0 || terrainChanged)
+          if (!combatExempt) {
+            alerts.push(
+              makeAlert(
+                stageIndex,
+                STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
+                seed,
+                idleStart,
+                tick - 2, // last stationary tick
+                idleStartX,
+                idleStartY,
+                p!,
+                idleBranchSet,
+                idleFireTicks,
+                idleMoveDirAlwaysNull,
+                world,
+                bcx,
+                bcy,
+                branch,
+                combatExempt,
+                killsDuringIdle,
+                terrainChanged,
+              ),
+            )
+          }
         }
         // Reset — start a new potential idle period at this tick.
         idleStart = tick - 1
-        idlePrevX = px
-        idlePrevY = py
+        idleStartX = px
+        idleStartY = py
         idleBranchSet = new Set<string>([branch])
         idleFireTicks = fire ? 1 : 0
         idleMoveDirAlwaysNull = moveDir === null
+        idleKillsAtStart = world.killCount
+        idleRevisionAtStart = world.tileMap.revision
       }
     } else {
       // Player dead or spawning — flush any ongoing idle period.
-      if (idleStart >= 0 && tick - 1 - idleStart >= IDLE_THRESHOLD_TICKS) {
-        alerts.push(
-          makeAlert(
-            stageIndex,
-            STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
-            seed,
-            idleStart,
-            tick - 2,
-            idlePrevX,
-            idlePrevY,
-            p,
-            idleBranchSet,
-            idleFireTicks,
-            idleMoveDirAlwaysNull,
-            world,
-            bcx,
-            bcy,
-            branch,
-          ),
-        )
+      if (idleStart >= 0) {
+        const duration = tick - 1 - idleStart
+        if (duration >= IDLE_THRESHOLD_TICKS) {
+          const killsDuringIdle = world.killCount - idleKillsAtStart
+          const terrainChanged = world.tileMap.revision !== idleRevisionAtStart
+          const combatExempt =
+            idleFireTicks > 0 && (killsDuringIdle > 0 || terrainChanged)
+          if (!combatExempt) {
+            alerts.push(
+              makeAlert(
+                stageIndex,
+                STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
+                seed,
+                idleStart,
+                tick - 2,
+                idleStartX,
+                idleStartY,
+                p,
+                idleBranchSet,
+                idleFireTicks,
+                idleMoveDirAlwaysNull,
+                world,
+                bcx,
+                bcy,
+                branch,
+                combatExempt,
+                killsDuringIdle,
+                terrainChanged,
+              ),
+            )
+          }
+        }
       }
       idleStart = -1
     }
@@ -245,27 +298,39 @@ export function runSimulationWithIdleTracking(
   }
 
   // Flush any ongoing idle period at simulation end.
-  if (idleStart >= 0 && tick - 1 - idleStart >= IDLE_THRESHOLD_TICKS) {
-    const p = world.player
-    alerts.push(
-      makeAlert(
-        stageIndex,
-        STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
-        seed,
-        idleStart,
-        tick - 2,
-        idlePrevX,
-        idlePrevY,
-        p,
-        idleBranchSet,
-        idleFireTicks,
-        idleMoveDirAlwaysNull,
-        world,
-        bcx,
-        bcy,
-        input._lastBranch,
-      ),
-    )
+  if (idleStart >= 0) {
+    const duration = tick - 1 - idleStart
+    if (duration >= IDLE_THRESHOLD_TICKS) {
+      const killsDuringIdle = world.killCount - idleKillsAtStart
+      const terrainChanged = world.tileMap.revision !== idleRevisionAtStart
+      const combatExempt =
+        idleFireTicks > 0 && (killsDuringIdle > 0 || terrainChanged)
+      if (!combatExempt) {
+        const p = world.player
+        alerts.push(
+          makeAlert(
+            stageIndex,
+            STAGES[stageIndex]?.name ?? `Stage ${stageIndex + 1}`,
+            seed,
+            idleStart,
+            tick - 2,
+            idleStartX,
+            idleStartY,
+            p,
+            idleBranchSet,
+            idleFireTicks,
+            idleMoveDirAlwaysNull,
+            world,
+            bcx,
+            bcy,
+            input._lastBranch,
+            combatExempt,
+            killsDuringIdle,
+            terrainChanged,
+          ),
+        )
+      }
+    }
   }
 
   return {
@@ -295,6 +360,9 @@ function makeAlert(
   bcx: number,
   bcy: number,
   endBranch: string,
+  combatExempt: boolean,
+  killsDuringIdle: number,
+  terrainChangedDuringIdle: boolean,
 ): IdleAlert {
   const durationTicks = endTick - startTick + 1
   const col = Math.floor(playerX / CELL)
@@ -330,6 +398,9 @@ function makeAlert(
     distToBaseMid: distToBase,
     endBranch,
     outcome: '',
+    combatExempt,
+    killsDuringIdle,
+    terrainChangedDuringIdle,
   }
 }
 
@@ -405,7 +476,7 @@ async function main() {
     `[idle-analysis] ${total} runs | difficulty=${difficulty} | threshold=${IDLE_THRESHOLD_TICKS} ticks (${(
       IDLE_THRESHOLD_TICKS /
       60
-    ).toFixed(1)}s)`,
+    ).toFixed(1)}s) | spectate=single`,
   )
 
   const t0 = performance.now()
@@ -426,10 +497,12 @@ async function main() {
         const tag = `S${a.stageIndex + 1}@seed${a.seed}`
         const dur = (a.durationMs / 1000).toFixed(1)
         const fire = a.fireTicks > 0 ? ` 🔥${a.fireTicks}` : ''
+        const kills = a.killsDuringIdle > 0 ? ` 💀${a.killsDuringIdle}` : ''
+        const terrain = a.terrainChangedDuringIdle ? ' 🧱' : ''
         const br = a.branches.join(',')
         console.log(
           `  ⚠ ${tag} tick ${a.startTick}-${a.endTick} (${dur}s) ` +
-            `pos=(${a.playerCol},${a.playerRow}) ${br}${fire} ` +
+            `pos=(${a.playerCol},${a.playerRow}) ${br}${fire}${kills}${terrain} ` +
             `enemies=${a.enemyCountMid} distBase=${a.distToBaseMid}`,
         )
       }

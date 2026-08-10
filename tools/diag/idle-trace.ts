@@ -2,9 +2,14 @@
 /**
  * idle-trace.ts — Detailed per-tick trace for a specific stage@seed idle alert.
  *
+ * Uses the same "within 1 cell" displacement logic as idle-analysis.ts:
+ * an idle period continues as long as the player's displacement from the
+ * idle-start position does not exceed 1 cell (16px) in either axis.
+ *
  * Usage:
  *   bun tools/diag/idle-trace.ts --stage 1 --seed 1 --difficulty hard \
  *       --from 5880 --to 6120
+ *   bun tools/diag/idle-trace.ts --stage 1 --seed 1 --summary --from 5880 --to 6120
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -14,6 +19,9 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
+
+const IDLE_THRESHOLD_TICKS = 120 // 2s at 60fps
+const CELL_THRESHOLD = CELL // 16px — 1 cell displacement threshold
 
 function arg(name: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -34,6 +42,8 @@ world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
 world.rules = RULES[difficulty] ?? DEFAULT_RULES
 world.playerLevel = world.difficulty?.playerStartLevel ?? 0
 world.lives = world.difficulty?.startLives ?? START_LIVES
+// 督战 (supervise) mode: God AI drives player1, no human input.
+world.spectate = true
 
 const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
 const input = new GodAIInput(world, DEFAULT_GOD_AI_PARAMS, godRng)
@@ -48,14 +58,19 @@ const bcy = BASE_POS.row * CELL + CELL
 let tick = 0
 let outcome = 'max_ticks'
 
+// Idle tracking: displacement-from-start logic (matches idle-analysis.ts)
 let idleStart = -1
-let prevPx = -1
-let prevPy = -1
+let idleStartX = 0
+let idleStartY = 0
+let idleFireTicks = 0
+let idleKillsAtStart = 0
+let idleRevisionAtStart = 0
 
 const branchCounts = new Map<string, number>()
 let totalFireTicks = 0
 let totalMoveNullTicks = 0
 let totalTraceTicks = 0
+let alertCount = 0
 
 while (tick < 36000) {
   sim.tick()
@@ -71,6 +86,8 @@ while (tick < 36000) {
   const aggCampTicks = input._aggCampTicks
   const aggNavStuckTicks = input._aggNavStuckTicks
   const aggNavSuppress = input._aggNavSuppress
+  const navStuckTicks = input._navStuckTicks
+  const navStuckSuppress = input._navStuckSuppress
   const isAggressive = input.aggressive
   const pathLen = input.path.length
   const replanTimer = input.replanTimer
@@ -80,15 +97,49 @@ while (tick < 36000) {
     .map((pu) => `(${Math.floor((pu.x + pu.w / 2) / CELL)},${Math.floor((pu.y + pu.h / 2) / CELL)})`)
     .join(',')
 
+  // ---- Idle detection (displacement-from-start, matches idle-analysis.ts) ----
   if (playerAlive) {
-    if (idleStart < 0 || px !== prevPx || py !== prevPy) {
+    if (idleStart < 0) {
       idleStart = tick
+      idleStartX = px
+      idleStartY = py
+      idleFireTicks = fire ? 1 : 0
+      idleKillsAtStart = world.killCount
+      idleRevisionAtStart = world.tileMap.revision
+    } else if (
+      Math.abs(px - idleStartX) <= CELL_THRESHOLD &&
+      Math.abs(py - idleStartY) <= CELL_THRESHOLD
+    ) {
+      // Still within 1 cell — extend idle
+      if (fire) idleFireTicks++
+    } else {
+      // Moved more than 1 cell — check if idle period was an alert
+      const duration = tick - idleStart
+      if (duration >= IDLE_THRESHOLD_TICKS) {
+        const killsDuringIdle = world.killCount - idleKillsAtStart
+        const terrainChanged = world.tileMap.revision !== idleRevisionAtStart
+        const combatExempt = idleFireTicks > 0 && (killsDuringIdle > 0 || terrainChanged)
+        if (!combatExempt) {
+          alertCount++
+          const dur = (duration * (1000 / 60) / 1000).toFixed(1)
+          console.log(
+            `\n  ⚠ IDLE ALERT #${alertCount} tick ${idleStart}-${tick - 1} (${dur}s) ` +
+              `pos=(${Math.floor(idleStartX / CELL)},${Math.floor(idleStartY / CELL)}) ` +
+              `fire=${idleFireTicks} kills=${killsDuringIdle} terrain=${terrainChanged}`,
+          )
+        }
+      }
+      // Start new idle period
+      idleStart = tick
+      idleStartX = px
+      idleStartY = py
+      idleFireTicks = fire ? 1 : 0
+      idleKillsAtStart = world.killCount
+      idleRevisionAtStart = world.tileMap.revision
     }
   } else {
     idleStart = -1
   }
-  prevPx = px
-  prevPy = py
 
   if (tick >= fromTick && tick <= toTick && playerAlive) {
     const col = Math.floor(px / CELL)
@@ -109,6 +160,10 @@ while (tick < 36000) {
     }
 
     const distToBase = Math.round((Math.abs(px - bcx) + Math.abs(py - bcy)) / CELL)
+    const idleDuration = idleStart >= 0 ? tick - idleStart : 0
+    const dx = idleStart >= 0 ? px - idleStartX : 0
+    const dy = idleStart >= 0 ? py - idleStartY : 0
+    const displacement = Math.max(Math.abs(dx), Math.abs(dy))
 
     if (summary) {
       branchCounts.set(branch, (branchCounts.get(branch) ?? 0) + 1)
@@ -121,22 +176,25 @@ while (tick < 36000) {
           `  tick ${tick} pos=(${col},${row}) dir=${p!.dir} branch=${branch} ` +
             `move=${moveDir ?? 'null'} fire=${fire} enemies=${enemyCount} ` +
             `nearest=${nearestEnemyDist} base=${distToBase} ` +
+            `idle=${idleDuration}t disp=${displacement}px ` +
             `aggSup=${aggSuppress} aggCamp=${aggCampTicks} ` +
-            `navStuck=${aggNavStuckTicks} navSup=${aggNavSuppress} ` +
+            `aggNavStuck=${aggNavStuckTicks} aggNavSup=${aggNavSuppress} ` +
+            `navStuck=${navStuckTicks} navSup=${navStuckSuppress} ` +
             `pathLen=${pathLen} replan=${replanTimer} ` +
             `freeze=${Math.round(freezeTimer)} pu=[${puStr}]`,
         )
       }
     } else {
       const terrainStr = `U=${terrainUp} D=${terrainDown} L=${terrainLeft} R=${terrainRight}`
-      const idleDuration = tick - idleStart
+      const idleMark = idleDuration >= IDLE_THRESHOLD_TICKS ? ' ⚠IDLE' : ''
       console.log(
         `t${tick} (${col},${row}) dir=${p!.dir} moving=${p!.moving} ` +
           `br=${branch} mv=${moveDir ?? 'null'} fire=${fire} ` +
           `enemies=${enemyCount} near=${nearestEnemyDist} base=${distToBase} ` +
-          `idle=${idleDuration}t ${terrainStr} ` +
+          `idle=${idleDuration}t disp=${displacement}px${idleMark} ${terrainStr} ` +
           `agg=${isAggressive} aggSup=${aggSuppress} aggCamp=${aggCampTicks} ` +
-          `navStuck=${aggNavStuckTicks} navSup=${aggNavSuppress} ` +
+          `aggNavStuck=${aggNavStuckTicks} aggNavSup=${aggNavSuppress} ` +
+          `navStuck=${navStuckTicks} navSup=${navStuckSuppress} ` +
           `pathLen=${pathLen} replan=${replanTimer} ` +
           `freeze=${Math.round(freezeTimer)} pu=[${puStr}]`,
       )
@@ -156,9 +214,29 @@ while (tick < 36000) {
   }
 }
 
+// Flush final idle period
+if (idleStart >= 0) {
+  const duration = tick - idleStart
+  if (duration >= IDLE_THRESHOLD_TICKS) {
+    const killsDuringIdle = world.killCount - idleKillsAtStart
+    const terrainChanged = world.tileMap.revision !== idleRevisionAtStart
+    const combatExempt = idleFireTicks > 0 && (killsDuringIdle > 0 || terrainChanged)
+    if (!combatExempt) {
+      alertCount++
+      const dur = (duration * (1000 / 60) / 1000).toFixed(1)
+      console.log(
+        `\n  ⚠ IDLE ALERT #${alertCount} tick ${idleStart}-${tick - 1} (${dur}s) ` +
+          `pos=(${Math.floor(idleStartX / CELL)},${Math.floor(idleStartY / CELL)}) ` +
+          `fire=${idleFireTicks} kills=${killsDuringIdle} terrain=${terrainChanged}`,
+      )
+    }
+  }
+}
+
 if (summary) {
   console.log(`\n--- Summary tick ${fromTick}-${toTick} (${totalTraceTicks} ticks) ---`)
   console.log(`Outcome: ${outcome} at tick ${tick}`)
+  console.log(`Idle alerts: ${alertCount}`)
   console.log(`\nBranch distribution:`)
   const sorted = [...branchCounts.entries()].sort((a, b) => b[1] - a[1])
   for (const [br, count] of sorted) {
