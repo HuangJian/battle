@@ -1700,10 +1700,8 @@ const HUNT: Candidate = {
       self._enemies.length > 0 &&
       self.params.navBreakStuck > 0 &&
       self._digBlockTicks >= self.params.carveDigBlockTicks &&
-      (
-        !self._moveDir ||
-        (!self.canMoveDir(p, self._moveDir) && !self.canMoveOrBreak(p, self._moveDir))
-      )
+      (!self._moveDir ||
+        (!self.canMoveDir(p, self._moveDir) && !self.canMoveOrBreak(p, self._moveDir)))
     ) {
       let bestDir: Direction | null = null
       let bestDist = Infinity

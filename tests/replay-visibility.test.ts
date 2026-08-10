@@ -66,11 +66,7 @@ function recordReplay(stageIdx: number, seed: number, maxTicks: number) {
     recorder.recordFrame(sim.input, sim.input2)
     tick++
     world.consumeEvents()
-    if (
-      world.state === 'stageclear' ||
-      world.state === 'gameover' ||
-      world.state === 'victory'
-    )
+    if (world.state === 'stageclear' || world.state === 'gameover' || world.state === 'victory')
       break
   }
   return { result: recorder.finalize()!, stageIdx, seed }

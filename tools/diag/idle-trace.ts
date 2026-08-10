@@ -77,7 +77,9 @@ while (tick < 36000) {
   const freezeTimer = world.freezeTimer
   const puStr = world.powerUps
     .filter((pu) => pu.alive)
-    .map((pu) => `(${Math.floor((pu.x + pu.w / 2) / CELL)},${Math.floor((pu.y + pu.h / 2) / CELL)})`)
+    .map(
+      (pu) => `(${Math.floor((pu.x + pu.w / 2) / CELL)},${Math.floor((pu.y + pu.h / 2) / CELL)})`,
+    )
     .join(',')
 
   if (playerAlive) {

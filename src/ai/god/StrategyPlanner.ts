@@ -1959,8 +1959,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     let takeTop = false
     if (partner && partner.alive && partner.spawnTimer <= 0) {
       const pCell = self.tankCell(partner)
-      const partnerDistToTop =
-        Math.abs(topCell.col - pCell.col) + Math.abs(topCell.row - pCell.row)
+      const partnerDistToTop = Math.abs(topCell.col - pCell.col) + Math.abs(topCell.row - pCell.row)
       // P2 takes the top threat when it's > 5 cells closer than P1
       if (myDistToTop < partnerDistToTop - 5) takeTop = true
     }

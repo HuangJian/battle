@@ -161,8 +161,7 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
           x = w.rng.int(12) * 2 * CELL
           y = w.rng.int(12) * 2 * CELL
           tries++
-          const blocked =
-            w.rectHitsTerrain(x, y, TANK, TANK) || this.rectHitsSpawnPoint(x, y)
+          const blocked = w.rectHitsTerrain(x, y, TANK, TANK) || this.rectHitsSpawnPoint(x, y)
           if (!blocked) lastValid = { x, y }
         } while (
           tries < 20 &&

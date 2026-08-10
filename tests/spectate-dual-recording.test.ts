@@ -140,9 +140,7 @@ function recordDualStream(
 }
 
 function countNonIdle(frames: InputFrame[]): number {
-  return frames.filter(
-    (f) => f.direction !== null || f.firing || f.guard || f.frenzy,
-  ).length
+  return frames.filter((f) => f.direction !== null || f.firing || f.guard || f.frenzy).length
 }
 
 describe('督战双玩家 recording — P2 input is captured (GameCore wiring)', () => {

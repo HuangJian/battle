@@ -2175,9 +2175,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   navStuckTicks: 180,
   // §168: zone-based nav-stuck detection — default 0 (OFF, byte-identical);
   // the shipped P0.3 escape is defeated by center-cell jitter without it.
-navStuckZone: 0,
-// §168: escape suppression window — default 0 (OFF, byte-identical).
-navStuckSuppressTicks: 0,
+  navStuckZone: 0,
+  // §168: escape suppression window — default 0 (OFF, byte-identical).
+  navStuckSuppressTicks: 0,
   // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
   // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
   defensePosStandable: 0,

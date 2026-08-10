@@ -306,9 +306,7 @@ function makeAlert(
     const t = tanks[i]
     if (!t.isPlayer && t.alive && t.spawnTimer <= 0) enemyCount++
   }
-  const distToBase = Math.round(
-    (Math.abs(playerX - bcx) + Math.abs(playerY - bcy)) / CELL,
-  )
+  const distToBase = Math.round((Math.abs(playerX - bcx) + Math.abs(playerY - bcy)) / CELL)
 
   return {
     stageIndex,
@@ -403,8 +401,7 @@ async function main() {
   const total = runSet.length
   console.log(
     `[idle-analysis] ${total} runs | difficulty=${difficulty} | threshold=${IDLE_THRESHOLD_TICKS} ticks (${(
-      IDLE_THRESHOLD_TICKS /
-      60
+      IDLE_THRESHOLD_TICKS / 60
     ).toFixed(1)}s)`,
   )
 
@@ -438,9 +435,7 @@ async function main() {
     done++
     if (done % 500 === 0 || done === total) {
       const elapsed = ((performance.now() - t0) / 1000).toFixed(1)
-      console.log(
-        `[progress] ${done}/${total} runs | ${totalAlerts} alerts | ${elapsed}s`,
-      )
+      console.log(`[progress] ${done}/${total} runs | ${totalAlerts} alerts | ${elapsed}s`)
     }
   }
 
@@ -448,9 +443,7 @@ async function main() {
   console.log(`\n[idle-analysis] Complete in ${elapsed}s`)
   console.log(`  Total runs: ${total}`)
   console.log(`  Total alerts: ${totalAlerts}`)
-  console.log(
-    `  Runs with alerts: ${results.filter((r) => r.alerts.length > 0).length}`,
-  )
+  console.log(`  Runs with alerts: ${results.filter((r) => r.alerts.length > 0).length}`)
 
   // Print summary by stage.
   const byStage = new Map<number, number>()

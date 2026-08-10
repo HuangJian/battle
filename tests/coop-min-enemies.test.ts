@@ -74,7 +74,8 @@ describe('co-op minimum concurrent enemies (tasks.chat.md §27)', () => {
     // Force a guard summon (consumes stock → spawns 1 ally guard + 1 isExtra enemy).
     world.guardStock = 1
     if (world.player) world.player.spawnTimer = 0
-    const activate = (sim as unknown as { activateGuard: (p: import('../src/types').Tank) => void }).activateGuard
+    const activate = (sim as unknown as { activateGuard: (p: import('../src/types').Tank) => void })
+      .activateGuard
     if (world.player) activate.call(sim, world.player)
     // isExtra excluded from enemyCount → the floor is untouched at 5.
     expect(world.enemyCount).toBe(COOP_MAX_ENEMIES_ALIVE)
