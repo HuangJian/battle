@@ -58,7 +58,12 @@ function isHeavyFile(path: string): boolean {
   // baseName keeps the `.test`/`.spec` infix (needed for src→test mapping), so
   // strip it here to match the HEAVY_TESTS basenames.
   const base = baseName(path).replace(/\.(test|spec)$/, '')
-  return HEAVY_TESTS.has(base)
+  if (HEAVY_TESTS.has(base)) return true
+  // The hard/chaos gate is split into parallel part files (god-ai-hard-chaos-gate.partN.{hard,chaos}.test.ts)
+  // plus its aggregate reducer. Each part runs a full-suite simulation batch, so treat the whole
+  // family as heavy and keep it out of the fast scoped run by default.
+  if (base.startsWith('god-ai-hard-chaos-gate.')) return true
+  return false
 }
 
 /** Enumerate every test file in the repo (repo-relative, forward slashes). */

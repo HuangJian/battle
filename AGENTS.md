@@ -199,11 +199,11 @@ bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
 bun run dev          # vite dev server on :3000
 bun run build        # oxlint && tsc && vite build  (the gate before merge)
 bun run test         # SCOPED: runs only tests tied to local git changes, prints only failures
-bun test             # full suite, all tests (bare built-in command)
+bun test --parallel --timeout=50000   # full suite, all tests — ALWAYS pass these flags
 bun run typecheck    # tsc --noEmit --incremental
 bun run lint         # oxlint
 bun run format       # oxfmt
-bun run check        # full gate: tsc --noEmit --incremental && bun test (full suite)
+bun run check        # full gate: tsc --noEmit --incremental && bun test --parallel --timeout=50000
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 ```
 
@@ -227,12 +227,32 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 > `god-ai-hard-chaos-gate`, `god-ai-regression-gate`, and `calibration`) because
 > they take minutes and defeat the token/time-saving purpose. On a clean tree
 > `bun run test` therefore runs the ~fast suite in a few seconds rather than ~1
-> minute. Pass `--heavy` (`bun run test --heavy`) or use the bare `bun test` to
-> include them. Keep the `HEAVY_TESTS` list in `tools/test-silent.ts` in sync with
-> measured wall-time — add any test file whose standalone run exceeds a few seconds.
-> Note: because these gates are standalone files (not basename-matched to source
-> changes), they are essentially only exercised by `bun test` / `--heavy`; if a God
-> AI change is landing, run `bun test` before committing to validate the floors.
+> minute. To exercise them, pass `--heavy` (`bun run test --heavy`) or run the full
+> suite with `bun test --parallel --timeout=50000`. Keep the `HEAVY_TESTS` list
+> in `tools/test-silent.ts` in sync with measured wall-time — add any test file
+> whose standalone run exceeds a few seconds. Note: because these gates are
+> standalone files (not basename-matched to source changes), they are essentially
+> only exercised by the full suite; if a God-AI change is landing, run
+> `bun test --parallel --timeout=50000` before committing to validate the floors.
+>
+> **`bun test` MUST be run with `--parallel --timeout=50000`.** These are not
+> optional:
+> - **`--parallel` is mandatory.** `bun test` does **not** parallelize files by
+>   default — without it the heavy God-AI gates (the `god-ai-hard-chaos-gate`
+> family is split into 14 part files that only speed things up *because* of
+> `--parallel`) run serially and the full suite blows past ~90s. The split
+> regression-gate design (see `tests/gate-core.ts`) relies on per-file workers
+> spreading the 1400 simulation runs across cores. `bun run check` already
+> includes this flag.
+> - **`--timeout=50000` is mandatory.** The God-AI gates run hundreds–thousands
+> of full-game simulations per file; bun's default per-test timeout (5s) kills
+> them. The part files raise their per-`it` timeout to 900000ms, but the runner
+> default must also be lifted so the harness itself doesn't abort.
+> - Note: `test.concurrent` does **not** help here — it only does cooperative
+>   (single-thread) scheduling and will NOT parallelize synchronous CPU-bound
+>   simulation work across cores. Real parallelism requires `--parallel`.
+> Running the bare `bun test` (no flags) is a regression and will be slow and/or
+> timeout.
 
 ### NEVER start the dev server to validate changes
 

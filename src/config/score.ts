@@ -1,6 +1,12 @@
 import type { IntelligenceLevel, TankKind } from '../types'
 import type { GameplayRules } from './rules'
 import { DEFAULT_RULES } from './rules'
+import { ITEM_SCORE, SCORE_DROP_INTERVAL } from './score-constants'
+
+// Re-exported for backward compatibility (some importers read these from
+// ./score). The real definitions live in ./score-constants to avoid the
+// score<->rules circular-dependency TDZ.
+export { ITEM_SCORE, SCORE_DROP_INTERVAL }
 
 /**
  * Centralized scoring formulas (user spec 2026-07-27).
@@ -21,17 +27,6 @@ export const STAGE_INDEX_OFFSET = 1
 
 /** Base points for destroying any enemy, regardless of kind. */
 export const KILL_BASE_SCORE = 100
-
-/** Points granted per power-up collected. */
-export const ITEM_SCORE = 100
-
-/**
- * Score milestone that guarantees a power-up drop. Every time the player's
- * accumulated score crosses a multiple of this value (5000), one power-up is
- * dropped. A single large score gain can cross several milestones at once and
- * therefore drop several power-ups.
- */
-export const SCORE_DROP_INTERVAL = 5000
 
 /** Difficulty multiplier on kill score. */
 export const DIFFICULTY_SCORE_FACTOR: Record<string, number> = {

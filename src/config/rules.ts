@@ -1,6 +1,6 @@
 import type { TankKind, PowerUpType } from '../types'
 import type { Direction } from '../constants'
-import { SCORE_DROP_INTERVAL, ITEM_SCORE } from './score'
+import { SCORE_DROP_INTERVAL, ITEM_SCORE } from './score-constants'
 import { SUPER_POWERUP_DROP_CHANCE } from './powerups'
 import {
   BASE_SPEED_CPS,

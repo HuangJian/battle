@@ -22,7 +22,7 @@
     "play-generated": "bun tools/level/play-generated.ts",
     "lint": "oxlint",
     "format": "oxfmt",
-    "check": "tsc --noEmit --incremental && bun test",
+    "check": "tsc --noEmit --incremental && bun test --parallel --timeout=50000",
     "setup": "git config core.hooksPath tools/githook"
   },
   "devDependencies": {
