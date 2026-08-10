@@ -483,11 +483,31 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
       // Place a protective steel ring around the base (top + left + right sides;
       // the bottom edge is off-grid). The ring lasts FENCE_DURATION_FRAMES, then
       // reverts to brick in updateFence().
+      //
+      // §188: Skip any ring cell that overlaps a tank body. Converting a cell
+      // to steel while a tank is on top of it permanently traps the tank —
+      // rectHitsTerrain detects the overlap on every subsequent move attempt,
+      // so the tank can never leave (S9@seed119: 532.7s stuck, game timeout).
+      // allTanks includes player, player2, allies, and enemies.
+      const allTanks = w.allTanks
       let placed = 0
       for (const pos of baseRingPositions()) {
         if (placed >= FENCE_STEEL_COUNT) break
         const existing = w.tileMap.get(pos.col, pos.row)
         if (existing === 'empty' || existing === 'brick') {
+          // Check no tank overlaps this cell.
+          const cx = pos.col * CELL
+          const cy = pos.row * CELL
+          let blocked = false
+          for (let ti = 0; ti < allTanks.length; ti++) {
+            const t = allTanks[ti]
+            if (!t.alive) continue
+            if (aabb(cx, cy, CELL, CELL, t.x, t.y, t.w, t.h)) {
+              blocked = true
+              break
+            }
+          }
+          if (blocked) continue
           w.tileMap.set(pos.col, pos.row, 'steel')
           placed++
         }

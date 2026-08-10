@@ -284,6 +284,16 @@ export interface GodAIParams {
   /** §162: min consecutive blocked ticks to trigger the carve-dig. */
   carveDigBlockTicks: number
   /**
+   * §186: min pixel-stuck ticks (_digBlockTicks) to skip powerup
+   * navigation in all pickup branches. When the player has been
+   * pixel-stuck for this many ticks, the A* path to the powerup is
+   * likely blocked/unreachable — skip the powerup and let HUNT's
+   * nav-stuck escape run. 0 = OFF (byte-identical). Default 300 (5s)
+   * — conservative: only fires after 5s of true immobility, well
+   * below the 15s idle-alert threshold but above normal maze nav.
+   */
+  powerupStuckTicks: number
+  /**
    * §163: mid-lane defense mode. 0 = OFF (byte-identical). When ON, the
    * player anchors to the base-column lane defense point (standable cell
    * above the base, carve-dug when sealed): the base lane has no steel
@@ -2060,6 +2070,41 @@ export interface GodAIParams {
   t2aOutnumberedRange: number
   /** §165: minimum aligned-enemy count to trigger the retreat. */
   t2aOutnumberedCount: number
+
+  // ---- §187: Guard/P2 A* player-obstacle + target blacklist + powerup overlap ----
+
+  /**
+   * §187: 0 = OFF (byte-identical). 1 = guard and P2 A* pathfinding treats
+   * the player (P1) as an impassable, indestructible obstacle. P1 does NOT
+   * treat P2 or guard as obstacle. Prevents the guard/player mutual-block
+   * deadlock (S7@seed54: 23.9s stuck).
+   */
+  navAvoidPlayer: number
+
+  /**
+   * §187: 0 = OFF (byte-identical). >0 = when the player has been
+   * pixel-stuck (`_digBlockTicks`) for >= this many ticks while targeting
+   * enemy A, A is temporarily removed from the target pool. The player
+   * picks a different target, and A returns to the pool after
+   * `targetBlacklistDuration` ticks. Default 240 (4s) — raised from initial
+   * 120 (2s) which caused S35 chaos regression (18→12/20).
+   */
+  targetBlacklistStuckTicks: number
+
+  /**
+   * §187: how many ticks a blacklisted enemy stays out of the target pool.
+   * Default 180 (3s).
+   */
+  targetBlacklistDuration: number
+
+  /**
+   * §187: 0 = OFF (byte-identical). 1 = when a powerup's cell overlaps with
+   * a live enemy, skip that powerup — the player kills the enemy first
+   * (via hunt/aggro), then picks up the powerup. Prevents the player from
+   * getting stuck trying to reach a powerup blocked by an enemy
+   * (S2@seed83: 17.6s stuck).
+   */
+  powerupEnemyOverlapSkip: number
 }
 
 /** Default God AI parameters — optimized via CMA-ES P4 round 7 (2026-07-29).
@@ -2173,11 +2218,19 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // at the same cell) for 3 seconds of navigating, force a roam to the map
   // center. This breaks pursuit loops with faster enemies.
   navStuckTicks: 180,
-  // §168: zone-based nav-stuck detection — default 0 (OFF, byte-identical);
-  // the shipped P0.3 escape is defeated by center-cell jitter without it.
-  navStuckZone: 0,
-  // §168: escape suppression window — default 0 (OFF, byte-identical).
-  navStuckSuppressTicks: 0,
+  // §168: zone-based nav-stuck detection — ON by default (hard/chaos).
+  // The P0.3 escape (navStuckTicks=180) is defeated by center-cell jitter
+  // without it: playerCell() bounces between two adjacent cells every few
+  // ticks, resetting _navStuckTicks before it can reach 180. The ±1 zone
+  // check keeps the counter alive through jitter. Classic keeps OFF via
+  // CLASSIC_MODEL_PARAMS (byte-identical classic gate).
+  navStuckZone: 1,
+  // §168: escape suppression window — keep escaping for 60 HUNT evaluations
+  // (1s) after a nav-stuck trigger so the player actually clears the region.
+  navStuckSuppressTicks: 60,
+  // §186: powerup stuck threshold — 5s of pixel-stuck before skipping
+  // powerup navigation. Conservative: maze nav rarely exceeds 3s stuck.
+  powerupStuckTicks: 300,
   // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
   // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
   defensePosStandable: 0,
@@ -2678,6 +2731,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   t2aOutnumberedRetreat: 0,
   t2aOutnumberedRange: 8,
   t2aOutnumberedCount: 2,
+
+  // §187: Guard/P2 A* player-obstacle + target blacklist + powerup overlap
+  navAvoidPlayer: 1,
+  targetBlacklistStuckTicks: 240,
+  targetBlacklistDuration: 180,
+  powerupEnemyOverlapSkip: 1,
 }
 
 /**
@@ -2740,6 +2799,8 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // classic instant 未 A/B，restore 0（byte-identical classic gate）。
   navStuckZone: 0,
   navStuckSuppressTicks: 0,
+  // §186: powerup stuck detection is a pool-model fix — classic OFF.
+  powerupStuckTicks: 0,
   // §169: threat signal stickiness is a pool-model (hard/chaos) fix —
   // classic instant 未 A/B，restore 0（byte-identical classic gate）。
   threatStickyTicks: 0,
@@ -2755,6 +2816,13 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // (hard/chaos) fixes, classic instant 1-HP 未 A/B，restore 0（byte-identical）。
   emergencyBaseHpFrac: 0,
   freezeBasePriority: 0,
+  // §187: guard/P2 A* player-obstacle + target blacklist + powerup overlap —
+  // pool-model (hard/chaos) fixes, classic instant 未 A/B，restore 0
+  // （byte-identical classic gate）。
+  navAvoidPlayer: 0,
+  targetBlacklistStuckTicks: 0,
+  targetBlacklistDuration: 0,
+  powerupEnemyOverlapSkip: 0,
 }
 
 /**
@@ -2816,6 +2884,8 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   // is replay-locked (same reason navBreakStuck is zeroed above).
   navStuckZone: 0,
   navStuckSuppressTicks: 0,
+  // §186: guards don't use powerup stuck detection.
+  powerupStuckTicks: 0,
   // §169: guards keep the raw (non-sticky) threat signal — their defense
   // behavior is replay-locked (same reason navBreakStuck is zeroed above).
   threatStickyTicks: 0,

@@ -51,6 +51,15 @@ export interface PathConstraints {
    * safety, avoiding the "divert into a dead-end" problem.
    */
   threatCosts?: Float64Array
+
+  /**
+   * §187: When set, the 2×2-block tank footprint at this cell is treated as
+   * impassable AND indestructible (blocks even in breakBrick mode). Used by
+   * the guard and P2 brains to route A* around the player tank — prevents
+   * the guard/player mutual-block deadlock (S7@seed54: 23.9s stuck).
+   * The overlap check is |nc - col| <= 1 && |nr - row| <= 1 (2×2 footprint).
+   */
+  blockedCell?: Cell | null
 }
 
 // ---- internal helpers -------------------------------------------------------
@@ -154,6 +163,11 @@ export function findPath(
   const breakBrick = constraints?.breakBrick ?? false
   // §69: optional per-cell threat costs. When provided, added to step cost.
   const threatCosts = constraints?.threatCosts
+  // §187: optional blocked cell (player tank) — impassable even with breakBrick.
+  const blkCell = constraints?.blockedCell ?? null
+  const blkCol = blkCell ? blkCell.col : -99
+  const blkRow = blkCell ? blkCell.row : -99
+  const hasBlk = blkCell !== null
 
   // Quick reject: start or goal impassable.
   if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
@@ -259,6 +273,8 @@ export function findPath(
           }
         }
         if (blocked) continue
+        // §187: blocked cell (player) — impassable even in corridor mode.
+        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
         const nk = nr * GRID + nc
         if (closed[nk]) continue
         // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
@@ -311,6 +327,8 @@ export function findPath(
         const nc = cc + STEP_DC[s]
         const nr = cr + STEP_DR[s]
         if (!isPassable(tileMap, nc, nr, ignoreWater, true)) continue
+        // §187: blocked cell (player) — impassable even in breakBrick mode.
+        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
         const nk = nr * GRID + nc
         if (closed[nk]) continue
         // Inline stepCost: 5 if any sub-block is brick, else 1.

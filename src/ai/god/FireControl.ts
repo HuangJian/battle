@@ -574,7 +574,20 @@ export function shouldFireInDirImpl(
   // §79: controlled tank, not `w.player` — the T11 steel-pierce gate reads
   // `p.level`, which is per-tank (P1 and P2 upgrade independently).
   const p = self.controlledTank(w)!
-
+  // §187: When the player is about to turn (dir !== p.dir), the turn snap
+  // will shift the perpendicular coordinate to the grid. The scan must use
+  // the POST-snap position, not the current position, or the fire decision
+  // is based on a line of fire the tank won't actually be on (S3@seed65:
+  // player turns vertical→horizontal, y snaps, rightward fire misses).
+  if (dir !== p.dir) {
+    const horizontal = dir === 'left' || dir === 'right'
+    const nx = horizontal ? p.x : snap(p.x, CELL)
+    const ny = horizontal ? snap(p.y, CELL) : p.y
+    if (nx !== p.x || ny !== p.y) {
+      pcx = nx + TANK / 2
+      pcy = ny + TANK / 2
+    }
+  }
   // Inline scanAheadImpl (perf §66): the thin self.scanAhead wrapper adds
   // ~14ms (2.8%) of function-call overhead. shouldFireInDir is called up to
   // ~3× per think; each call goes through the wrapper. Calling scanAheadImpl

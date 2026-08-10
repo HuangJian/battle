@@ -533,11 +533,17 @@ const PICKUP_HIGH: Candidate = {
             ? self.findUrgentPowerUpTargetWithCommit(pcx, pcy, 'high')
             : self.findUrgentPowerUpTargetWithCommit(pcx, pcy)
         if (urgentTarget) {
-          self._moveDir = self.navigateTowards(urgentTarget)
-          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-          self.branchCounts.powerup++
-          self._lastBranch = 'powerup'
-          return true
+          // §186: Skip when pixel-stuck — the powerup is unreachable.
+          const puStuck =
+            self.params.powerupStuckTicks > 0 &&
+            self._digBlockTicks >= self.params.powerupStuckTicks
+          if (!puStuck) {
+            self._moveDir = self.navigateTowards(urgentTarget)
+            self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+            self.branchCounts.powerup++
+            self._lastBranch = 'powerup'
+            return true
+          }
         }
       }
     }
@@ -569,26 +575,35 @@ const AGGRO: Candidate = {
         const freezeTarget = self.findFreezePickupTarget(pcx, pcy)
         if (freezeTarget) {
           self._moveDir = self.navigateTowards(freezeTarget)
-          // §184: When the player has been physically stuck for >= 1.5s
-          // during freeze pickup, fall through to AGGRO's stop-and-aim /
-          // navigate sub-branches to kill the blocking enemy first.
-          // The freeze pickup will resume next tick once the enemy is dead
-          // or the path opens. Without this, the player navigates toward
-          // the powerup but can't actually move (blocked by frozen enemy),
-          // and fires uselessly for the entire freeze window (S31@seed14:
-          // 19.6s stuck, 0 fire ticks). The _digBlockTicks gate ensures
-          // this only triggers on TRUE immobility, not brief pauses.
-          if (
-            self._enemies.length > 0 &&
-            self.params.navBreakStuck > 0 &&
-            self._digBlockTicks >= self.params.carveDigBlockTicks
-          ) {
-            // Don't commit — let stop-and-aim / navigate handle the enemy
-          } else {
-            self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-            self.branchCounts.powerup++
-            self._lastBranch = 'powerup'
-            return true
+          // §185: When navigateTowards returns null (no path to the pickup),
+          // fall through to aggressive branch instead of returning true with
+          // move=null — the player would be stuck indefinitely in the powerup
+          // branch with no escape (HUNT/nav-stuck never runs). Root cause:
+          // S20@seed27 stuck 22.8s in powerup branch, move=null, pathLen=3,
+          // gameover. The §184 _digBlockTicks gate only fires after 1.5s, but
+          // between triggers the branch re-enters and returns true.
+          if (self._moveDir) {
+            // §184: When the player has been physically stuck for >= 1.5s
+            // during freeze pickup, fall through to AGGRO's stop-and-aim /
+            // navigate sub-branches to kill the blocking enemy first.
+            // The freeze pickup will resume next tick once the enemy is dead
+            // or the path opens. Without this, the player navigates toward
+            // the powerup but can't actually move (blocked by frozen enemy),
+            // and fires uselessly for the entire freeze window (S31@seed14:
+            // 19.6s stuck, 0 fire ticks). The _digBlockTicks gate ensures
+            // this only triggers on TRUE immobility, not brief pauses.
+            if (
+              self._enemies.length > 0 &&
+              self.params.navBreakStuck > 0 &&
+              self._digBlockTicks >= self.params.carveDigBlockTicks
+            ) {
+              // Don't commit — let stop-and-aim / navigate handle the enemy
+            } else {
+              self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir)
+              self.branchCounts.powerup++
+              self._lastBranch = 'powerup'
+              return true
+            }
           }
         }
       }
@@ -601,7 +616,20 @@ const AGGRO: Candidate = {
       // grid-snap would shove the tank off the firing line) we fall through to
       // the navigate path, which has real stall detection — this is what
       // breaks the period-2 freeze-window deadlock.
-      if (aimDir && self._aggCampSuppress <= 0 && aimSurvivesTurnImpl(self, p, aimDir)) {
+      // §186: When pixel-stuck for >= powerupStuckTicks, skip T2a stop-and-
+      // aim — the player has been firing without moving or killing for too
+      // long. Fall through to nav-stuck escape, which increments every tick
+      // (instead of only during camp-suppress) and triggers faster.
+      // Root cause: S19@seed37 18.6s, S31@seed71 18.0s, S33@seed83 17.5s —
+      // player camps in T2a firing at far enemies (15 cells) with 0 kills.
+      const t2aSkipStuck =
+        self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
+      if (
+        aimDir &&
+        self._aggCampSuppress <= 0 &&
+        !t2aSkipStuck &&
+        aimSurvivesTurnImpl(self, p, aimDir)
+      ) {
         // T2a: stop-and-aim — check if enemy is visible (no steel blocking).
         // Inline scanAheadImpl directly (perf §66): the thin scanAhead
         // wrapper adds ~14ms (2.8%) of function-call overhead across 30 games.
@@ -695,10 +723,20 @@ const AGGRO: Candidate = {
       // No enemy in row/col — check for power-up (S5).
       const puTarget = self.findPowerUpTarget(pcx, pcy)
       if (puTarget) {
-        self._moveDir = self.navigateTowards(puTarget)
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self._lastBranch = 'aggressive'
-        return true
+        // §186: Skip powerup when pixel-stuck — the A* path to the
+        // powerup is blocked/unreachable, and returning true here blocks
+        // the nav-stuck escape below (line 721).
+        // Root cause: S20@seed27 22.9s stuck cycling camp→suppress→
+        // powerup-stuck→camp; S35@seed52 19.1s stuck in powerup during
+        // freeze; S33@seed35 16.1s; S25@seed6 18.1s; S9@seed69 18.9s.
+        const puStuck =
+          self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
+        if (!puStuck) {
+          self._moveDir = self.navigateTowards(puTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self._lastBranch = 'aggressive'
+          return true
+        }
       }
       // §152-W2: aggressive MOVEMENT stuck guard — the freeze window burns
       // entirely if the A* path ping-pongs between two adjacent cells (path
@@ -824,6 +862,9 @@ const CLOSE_PICKUP: Candidate = {
     if (self.hasBase && self.isBaseUnderThreat()) return false
     const target = self.findClosePickupTarget(pcx, pcy)
     if (!target) return false
+    // §186: Skip when pixel-stuck — the powerup is unreachable.
+    if (self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks)
+      return false
     self._moveDir = self.navigateTowards(target)
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     self.branchCounts.powerup++
@@ -853,11 +894,16 @@ const PICKUP_MID: Candidate = {
       // exactly at the mid-range boundary).
       const midTarget = self.findUrgentPowerUpTargetWithCommit(pcx, pcy, 'midlow')
       if (midTarget) {
-        self._moveDir = self.navigateTowards(midTarget)
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.powerup++
-        self._lastBranch = 'powerup'
-        return true
+        // §186: Skip when pixel-stuck — the powerup is unreachable.
+        const puStuck =
+          self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
+        if (!puStuck) {
+          self._moveDir = self.navigateTowards(midTarget)
+          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+          self.branchCounts.powerup++
+          self._lastBranch = 'powerup'
+          return true
+        }
       }
     }
     return false
@@ -1377,11 +1423,17 @@ const PICKUP_LOW: Candidate = {
       if (!nearbyEnemy) {
         const puTarget = self.findPowerUpTarget(pcx, pcy)
         if (puTarget) {
-          self._moveDir = self.navigateTowards(puTarget)
-          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-          self.branchCounts.powerup++
-          self._lastBranch = 'powerup'
-          return true
+          // §186: Skip when pixel-stuck — the powerup is unreachable.
+          const puStuck =
+            self.params.powerupStuckTicks > 0 &&
+            self._digBlockTicks >= self.params.powerupStuckTicks
+          if (!puStuck) {
+            self._moveDir = self.navigateTowards(puTarget)
+            self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+            self.branchCounts.powerup++
+            self._lastBranch = 'powerup'
+            return true
+          }
         }
       }
     }
@@ -1529,6 +1581,14 @@ const HUNT: Candidate = {
     } else if (self._navStuckSuppress > 0) {
       self._navStuckSuppress--
       navStuck = true
+    }
+
+    // §161: When CARVE_PATH is enabled and the player is in the carve zone
+    // (lower half), defer to CARVE_PATH — the center escape would pull the
+    // player out of the pocket before CARVE_PATH can engage.
+    if (navStuck && self.params.carvePathMode > 0 && pc.row >= self.params.carveLowerRow) {
+      navStuck = false
+      self._navStuckSuppress = 0
     }
 
     let navTarget: Cell | null

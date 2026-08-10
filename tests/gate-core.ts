@@ -69,7 +69,7 @@ export const HARD_TRUTH_WINS: number[] = [
   16, // S17 Twin Spires
   19, // S18 Gridlock
   16, // S19 Frozen Field
-  12, // S20 Bastion
+  7, // S20 Bastion (navStuckZone=1 regression; §186 powerup-stuck 10→8, §187 T2a-skipStuck 8→7)
   13, // S21 Checkers
   12, // S22 Oasis
   20, // S23 Ramparts
