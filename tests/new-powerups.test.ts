@@ -136,7 +136,7 @@ describe('EMP·Silence (电磁静默) — enemies cannot fire, allies can', () =
 })
 
 describe('Decoy (诱饵) — spawns a non-firing ally that draws fire', () => {
-  it('applyPowerUp spawns an ally flagged isDecoy with 1 HP', () => {
+  it('applyPowerUp spawns an ally flagged isDecoy with normal enemy HP', () => {
     const { world, sim } = buildWorld(6)
     const before = world.allies.length
     apply(sim, 'decoy')
@@ -145,7 +145,10 @@ describe('Decoy (诱饵) — spawns a non-firing ally that draws fire', () => {
     expect(decoy.isDecoy).toBe(true)
     expect(decoy.allegiance).toBe('ally')
     expect(decoy.isPlayer).toBe(false)
-    expect(decoy.hp).toBe(1)
+    // Decoy HP = the normal (basic) enemy HP value, NOT a hardcoded 1.
+    const refBasic = world.createTank('basic', 0, 0, 'up')
+    expect(decoy.hp).toBe(refBasic.maxHp)
+    expect(decoy.maxHp).toBe(refBasic.maxHp)
     expect(decoy.guardExpireFrame).toBe(world.frame + DECOY_LIFESPAN_FRAMES)
   })
 

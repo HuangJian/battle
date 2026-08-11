@@ -78,6 +78,9 @@ export function canStep(
     for (let i = 0; i < list.length; i++) {
       const o = list[i]
       if (o === tank || !o.alive || o.spawnTimer > 0) continue
+      // Decoys (诱饵) never block movement (不卡位置) — enemies path through
+      // them freely; only their bullets may strike (bulletHitsTank).
+      if (o.isDecoy) continue
       if (aabb(sx, sy, sw, sh, o.x, o.y, o.w, o.h)) return false
     }
   }

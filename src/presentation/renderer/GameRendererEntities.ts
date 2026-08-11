@@ -33,8 +33,8 @@ export function GameRendererEntitiesMixin<TBase extends Ctor<GameRendererCore>>(
         }
 
         if (tank.allegiance === 'ally') {
-          // 天降神兵 allied guard — distinct purple unit (no enemy crown/insignia).
-          artist.drawAllyTank(tank.x, tank.y, tank.w, tank.dir, animFrame)
+          // 天降神兵 allied guard (purple) or decoy (silver-white player look).
+          artist.drawAllyTank(tank.x, tank.y, tank.w, tank.dir, animFrame, tank.isDecoy)
         } else if (tank.isPlayer) {
           // Lie-Back-Win-Mode: use player2 sprite for God AI tank.
           if (tank === world.player2) {

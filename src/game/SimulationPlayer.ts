@@ -194,18 +194,18 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
       // order. If every candidate is blocked, skip (jam is worse than no-op).
       const pos = this.decoySpawnCell(p)
       if (!pos) return
-      // Spawn as basic tank (minimal stats) then override for decoy role
+      // Spawn as a basic enemy (normal enemy stats) then promote to the decoy
+      // role. HP/maxHp are left at what createTank('basic') set them — i.e. the
+      // normal (basic) enemy HP value (user req: 诱饵 HP 取普通敌人 HP 值).
       const tank = w.createTank('basic', pos.x, pos.y, p.dir)
       tank.allegiance = 'ally'
       tank.isPlayer = false
       tank.isDecoy = true
-      tank.kind = 'player' // visual: looks like the player
       tank.spawnTimer = 500
-      // Decoy has 1 HP and moves toward enemies (never fires)
-      tank.hp = 1
-      tank.maxHp = 1
       if (tank.aiState) {
-        tank.aiState.strategicGoal = 'advance' // move toward enemies
+        // Decoys never move (updateGuards skips them), but keep a sane goal so
+        // any stray AI bookkeeping stays consistent.
+        tank.aiState.strategicGoal = 'advance'
         tank.aiState.tacticalGoal = 'advance'
       }
       // Lifespan expiry (absolute frame)

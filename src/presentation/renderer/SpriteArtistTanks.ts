@@ -334,8 +334,18 @@ export function SpriteArtistTanksMixin<TBase extends Ctor<SpriteArtistCore>>(Bas
      * rank insignia or commander crown — their friendly status is conveyed by the
      * purple body + shield emblem + ally aura.
      */
-    drawAllyTank(x: number, y: number, size: number, dir: Direction, animFrame: number): void {
-      const key = 'tank.ally'
+    drawAllyTank(
+      x: number,
+      y: number,
+      size: number,
+      dir: Direction,
+      animFrame: number,
+      isDecoy = false,
+    ): void {
+      // Decoys (诱饵) render as a silver-white PLAYER look (with a dashed
+      // "ghost" ring) so they read as a fake/illusion player — distinct from
+      // both the yellow real player and the purple 天降神兵 guard.
+      const key = isDecoy ? 'tank.decoy' : 'tank.ally'
 
       // Non-rotating ground shadow (same as every other tank)
       this.drawTankShadow(x, y, size)
@@ -360,9 +370,14 @@ export function SpriteArtistTanksMixin<TBase extends Ctor<SpriteArtistCore>>(Bas
         dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
       if (!this.skipSvg && this.drawSvgCentered(key, x, y, size, rot, 1.28)) return
 
-      // Procedural fallback — purple ally tank (hardcoded; the real path is the
-      // pre-rasterized purple sprite above, so theming the fallback isn't needed).
-      this.drawTank(x, y, size, dir, '#8A4FD8', '#A06BE8', animFrame, 0)
+      // Procedural fallback — purple ally tank normally; a silver-white player
+      // look for decoys (hardcoded; the real path is the pre-rasterized sprite
+      // above, so theming the fallback isn't needed).
+      if (isDecoy) {
+        this.drawTank(x, y, size, dir, '#DDE3EA', '#9AA4AF', animFrame, 0)
+      } else {
+        this.drawTank(x, y, size, dir, '#8A4FD8', '#A06BE8', animFrame, 0)
+      }
     }
 
     /**

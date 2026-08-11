@@ -216,6 +216,10 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
       for (let i = 0; i < allTanks.length; i++) {
         const other = allTanks[i]
         if (other === self || !other.alive) continue
+        // Decoys (诱饵) never block movement (不卡位置) — they are stationary
+        // lures that players and enemies pass freely through. Enemy bullets
+        // still strike them (bulletHitsTank), so they remain valid targets.
+        if (other.isDecoy) continue
         // NOTE: spawning tanks (spawnTimer > 0) DO block movement. Previously
         // they were skipped here, which let a moving tank drive *into* a tank
         // that was still in its spawn animation. The two would overlap, and once

@@ -6,6 +6,7 @@ import { aabb } from '../utils/helpers'
 import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
 import { GUARD_GOD_AI_PARAMS } from '../ai/god/params'
+import { scanAhead } from '../ai/perception'
 import type { Tank, TankKind } from '../types'
 import type { SimulationConstructor, SimulationCore } from './SimulationCore'
 
@@ -15,6 +16,13 @@ const GUARD_LIFESPAN_FRAMES = 120 * 60
 const GUARD_KINDS: TankKind[] = ['basic', 'fast', 'power', 'armor']
 /** Accompanying "balance" enemies use a lighter pool. */
 const EXTRA_ENEMY_KINDS: TankKind[] = ['basic', 'fast', 'power']
+/**
+ * Decoy engagement range (new-powerups-plan §4.4, user req): an enemy within
+ * this many cells of a live decoy turns to face it and fires whenever the shot
+ * is clear. The decoy is a stationary lure, so this is the whole point — pull
+ * enemy fire off the real players.
+ */
+const DECOY_ENGAGE_CELLS = 4
 
 /**
  * §159 避让: perpendicular candidate pairs for the yield step, indexed by
@@ -254,6 +262,16 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
           g.alive = false
           w._needsCleanup = true
           this.createExplosion(g.x + g.w / 2, g.y + g.h / 2, 'big')
+          continue
+        }
+
+        // Decoys (诱饵) are stationary lures: they never move and never fire,
+        // and they must not block anyone's path (不卡位置). Skip the God AI
+        // drive entirely — just keep them drawn/aimed-up and let the lifespan
+        // timer retire them. Enemy fire is drawn to them via updateDecoyEngagement.
+        if (g.isDecoy) {
+          g.moving = false
+          g.dir = 'up'
           continue
         }
 
@@ -516,6 +534,83 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
       // Framework. It reads the World (Perception) and writes tank intent
       // (direction / firing) back — never hidden state, never Math.random().
       this.ai.update(this.world, (tank) => this.tryFire(tank))
+      // Decoy engagement override (new-powerups-plan §4.4, user req): when an
+      // enemy is within DECOY_ENGAGE_CELLS of a live decoy, it PRIORITIZES the
+      // decoy — turns to face it and fires whenever the shot is clear. Runs
+      // after the tactical AI so it can override the aim for close decoys.
+      this.updateDecoyEngagement()
+    }
+
+    /**
+     * Decoy engagement (new-powerups-plan §4.4, user req): when an enemy comes
+     * within {@link DECOY_ENGAGE_CELLS} of a live decoy, it turns to face the
+     * decoy and fires the instant the shot is clear. Deterministic (no RNG);
+     * `tryFire`'s cooldown prevents a double shot with the tactical AI's own
+     * fire this tick. No-op when no decoy is present, so single-player (and any
+     * run without a decoy) is byte-identical to before.
+     */
+    private updateDecoyEngagement(): void {
+      const w = this.world
+      const allies = w.allies
+      // Quick reject when no live, vulnerable decoy exists.
+      let hasDecoy = false
+      for (let a = 0; a < allies.length; a++) {
+        const d = allies[a]
+        if (d.alive && d.isDecoy && d.spawnTimer <= 0) {
+          hasDecoy = true
+          break
+        }
+      }
+      if (!hasDecoy) return
+
+      const range = DECOY_ENGAGE_CELLS * CELL
+      const tanks = w.tanks
+      for (let i = 0; i < tanks.length; i++) {
+        const t = tanks[i]
+        if (!t.alive || t.spawnTimer > 0 || !t.aiState) continue
+        if (t.allegiance !== 'enemy') continue
+
+        // Nearest live decoy within range.
+        const tcx = t.x + t.w / 2
+        const tcy = t.y + t.h / 2
+        let bd = Infinity
+        let best: Tank | null = null
+        for (let a = 0; a < allies.length; a++) {
+          const d = allies[a]
+          if (!d.alive || !d.isDecoy || d.spawnTimer > 0) continue
+          const dd = Math.hypot(d.x + d.w / 2 - tcx, d.y + d.h / 2 - tcy)
+          if (dd <= range && dd < bd) {
+            bd = dd
+            best = d
+          }
+        }
+        if (!best) continue
+
+        const dx = best.x + best.w / 2 - tcx
+        const dy = best.y + best.h / 2 - tcy
+        const horiz: Direction = dx >= 0 ? 'right' : 'left'
+        const vert: Direction = dy >= 0 ? 'down' : 'up'
+        // Prefer the dominant axis; fall back to the cross axis when the decoy
+        // is nearly aligned on it (so a slightly-offset lure is still engaged).
+        let chosen: Direction | null = null
+        if (Math.abs(dx) >= Math.abs(dy)) {
+          if (scanAhead(w, t, horiz, CELL * 6) === 'decoy') chosen = horiz
+          else if (Math.abs(dy) <= CELL * 0.75 && scanAhead(w, t, vert, CELL * 6) === 'decoy')
+            chosen = vert
+        } else {
+          if (scanAhead(w, t, vert, CELL * 6) === 'decoy') chosen = vert
+          else if (Math.abs(dx) <= CELL * 0.75 && scanAhead(w, t, horiz, CELL * 6) === 'decoy')
+            chosen = horiz
+        }
+        if (chosen) {
+          t.dir = chosen
+          this.tryFire(t) // cooldown-gated; never double-fires
+        } else {
+          // Not yet aligned for a clear shot — still turn toward the decoy so
+          // the next ticks line up the shot (and the enemy is drawn in).
+          t.dir = Math.abs(dx) >= Math.abs(dy) ? horiz : vert
+        }
+      }
     }
 
     /**

@@ -8,6 +8,7 @@ import enemy_fast from './enemy_fast.svg?url'
 import enemy_power from './enemy_power.svg?url'
 import enemy_armor from './enemy_armor.svg?url'
 import tank_ally from './tank.ally.svg?url'
+import tank_decoy from './tank.decoy.svg?url'
 import base from './base.svg?url'
 import base_ruins from './base_ruins.svg?url'
 import bullet from './bullet.svg?url'
@@ -25,6 +26,7 @@ import item_frenzy from './item_frenzy.svg?url'
 import item_sacrifice from './item_sacrifice.svg?url'
 import item_guard from './item_guard.svg?url'
 import item_repair from './item_repair.svg?url'
+import item_decoy from './item_decoy.svg?url'
 import explosion from './explosion.svg?url'
 import fx_shield from './fx_shield.svg?url'
 import fx_starbuf1 from './fx_starbuf1.svg?url'
@@ -48,6 +50,7 @@ export const SPRITE_URLS: Record<string, string> = {
   'tank.power': enemy_power,
   'tank.armor': enemy_armor,
   'tank.ally': tank_ally,
+  'tank.decoy': tank_decoy,
   // Terrain
   'terrain.base': base,
   'terrain.base_ruins': base_ruins,
@@ -67,6 +70,7 @@ export const SPRITE_URLS: Record<string, string> = {
   'item.sacrifice': item_sacrifice,
   'item.guard': item_guard,
   'item.repair': item_repair,
+  'item.decoy': item_decoy,
   // Effects
   'fx.explosion': explosion,
   'fx.shield': fx_shield,
