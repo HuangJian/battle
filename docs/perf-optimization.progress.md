@@ -401,12 +401,12 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **遗留方向**: 「无限制挖墙搜索 0/5401 成功」说明受限搜索失败时它几乎必然白跑（受限搜索最小化受罚格用量，它失败则无限制版更不可能 carve-safe——两者不完全等价仅因 A\* 按格计价而 `pathCarveSafeImpl` 按 2×2 足迹判定）。删掉它可再省一批全图搜索，但那是**行为变更**（尾部场景可能翻盘），需单独立项走 A/B 与 gate。
 
-### 2.17 优化线程收尾（2026-08-10，STOP）
+### 2.17 优化线程收尾（2026-08-10，STOP — dig-search 项已被 §2.18 推翻）
 
 **决策**：用户确认行为保真优化线程到此为止。Round 11/13/15/16 已落地全部清晰可优化项（replan 缓存 / pickup memo / findPath 内核三连 / carve 二级 memo）。剩余成本项均不属行为保真可优化范围：
 - God-AI 决策 `evaluate` 链（chaos 42.7% 含）属 `think` 决策脑，用户要求不碰（避免重校真值表）；
 - 敌方 `perceive`/`analyze`（chaos ~33% 含）§2.14 已判诚实阴性（无可去重重复调用，再压需算法级变更，违反 simple-beats-clever）；
-- 无限制挖墙搜索（§2.16 遗留：5401 次全图 A* 0 成功）为**行为变更**，用户决定不立项。
+- 无限制挖墙搜索（§2.16 遗留：5401 次全图 A* 0 成功）为**行为变更**——用户 8-11 重新立项探索（见 §2.18），该 STOP 对此项失效。
 
 **当前三难度基线（2026-08-10 单测，热机状态，仅作状态记录，非干净热基准）**：
 
@@ -419,7 +419,37 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 > 此数高于 §2.12 旧基线（22.6s）因：① God-AI 强度提升使对局更长（同 350 场/难度下胜率 689→791）；② 测量于连续 cpu-prof + gate 后的热机状态，含降频。行为契约 god-ai-gate 620/508/473 仍严格通过，无回退。后续若需干净基准，应在冷机下重测。
 
-**结论**：行为保真优化已达当前架构下的收益上限（findPath 自耗从 17–20% 压到 5.7%），停止线程。
+**结论**：行为保真优化已达当前架构下的收益上限（findPath 自耗从 17–20% 压到 5.7%），停止线程。但「无限制挖墙搜索」一项由用户 8-11 重新开启专项（§2.18），该 STOP 对此项失效。
+
+### 2.18 Round 17：删除无限制挖墙搜索（§132，SHIPPED）
+
+**背景**：§2.16 遗留——`findCarvePathImpl` 在 `restricted` 失败后无条件再跑一次「无限制挖墙 A*」（`findPath(tm, from, to, { breakBrick: true })`，无 threatCosts）。这是第二次全图 A*，chaos 下单 `findCarvePathImpl` 调用平均约 1.8 次 A*。用户 8-11 指令：「探索无限制挖墙搜索，保证胜率无回归前提下极限优化」。
+
+**插桩取证（2100 场 gate sim，单进程计数 `globalThis.__CARVE_DIG`）**：
+
+| 难度 | 胜率 | dig 回退尝试 | dig 回退成功(carve-safe) |
+|------|------|------|------|
+| classic | 620/700 | 2164 | 0 |
+| hard | 508/700 | 7290 | 0 |
+| chaos | 473/700 | 8229 | **3**（均 `from{20,20}→to{12,21}`，均 restricted-unsafe） |
+
+合计 **3/17683** 成功——即 99.98% 的第二次全图 A* 纯白跑。classic-only 旧测「0/5401」漏掉了 chaos 的 3 例尾部场景。
+
+**行为影响**：3 次成功全部是 restricted-unsafe 情形（restricted 路径因 2×2 足迹超 `carveMaxBaseColumn` 被拒，无限制版换条更省的砖路通过 `pathCarveSafeImpl`）。删除它 = 这 3 个查询从「有路径」变 `null`——属**行为变更**，非行为保真。
+
+**接受依据（gate = 胜率契约）**：gate 逐关 floor = truth−4 胜/关；3 次成功至多影响 3 局、无单关连失 >1 胜 → 任何单关 floor 都不破；chaos 聚合 473→最坏 470 ≥ 447 floor。实证：删除后重跑 gate **620/508/473 逐字节不变**——3 个变更查询在 gate 分布内未改变任何一胜。故按 gate 契约接受为「无胜率回归」。
+
+**交替 A/B（同模块，OLD=dig ON / NEW=dig OFF，各 6 轮×400 sims，相邻臂消除热机漂移）**：
+
+- classic: OLD 111.4 → NEW 114.1 sims/s → **+2.4%**
+- chaos: OLD 34.1 → NEW 36.0 sims/s → **+5.2%**（chaos dig 回退最多，收益最大）
+- 综合 hard 居中，端到端约 **+3~4%**
+
+**改动**：`findCarvePathImpl` 删除 dig 回退分支 + 头部注释步骤 3；`buildCarveCosts` 已按 `tileMap.revision` 缓存（§161），无 per-call 分配，非进一步优化点；`pathCarveSafeImpl` 为 O(path) 轻量步行，非热点。
+
+**验证**：god-ai-gate **620/508/473 逐字节不变**（worker pool 19.1s）；全量 test/typecheck/lint 通过（提交前 hook）。
+
+**结论**：行为保真线程见底后，dig 回退是首个被批准的**行为变更**优化（用户 8-11 明确授权），且 gate 守住。至此 carve/dig 链全量 A* 已压到单次 restricted 搜索。剩余成本 = `think` 决策脑（用户要求不碰）+ `perceive`（诚实阴性）。
 
 ---
 

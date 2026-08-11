@@ -206,20 +206,29 @@ export function pathCarveSafeImpl(self: GodAIInput, from: Cell, path: Direction[
 /** §161: the carve path from `from` to `to`, preferring the least damage:
  *   1. corridor A* (no digging at all) — a smooth route;
  *   2. restricted dig A* (ring + base-column bricks = 1e9 cost) — zero
- *      base-column damage whenever any alternative route exists;
- *   3. unrestricted dig A* + pathCarveSafeImpl — at most
- *      carveMaxBaseColumn base-column bricks, never ring/steel.
+ *      base-column damage whenever any alternative route exists, then
+ *      pathCarveSafeImpl caps base-column bricks at carveMaxBaseColumn.
  * Returns null when no carve-safe route exists. Pure World read.
+ * (perf §132) The former step-3 unrestricted dig fallback was removed — see
+ * findCarvePathImpl. It was a second full-map A* attempted on every
+ * restricted-unsafe / restricted-null outcome but returned a carve-safe path
+ * only 3/17683 times across all 2100 gate sims (all chaos, all
+ * restricted-unsafe). The god-ai-gate (620/508/473) still passes with margin.
  */
 export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direction[] | null {
   const tm = self.world.tileMap
   if (from.col === to.col && from.row === to.row) return null
   // The restricted A* penalizes ring/base-column cells (1e9) but that cost is
   // FINITE — when no alternative route exists A* still returns a path through
-  // them. The footprint check (pathCarveSafeImpl) is therefore the real gate
-  // for BOTH the restricted and the unrestricted result: a tank cell adjacent
-  // to the base column overlaps column bricks in its 2×2 footprint that A*
-  // never sees (it prices cells, not footprints).
+  // them. The footprint check (pathCarveSafeImpl) is therefore the real gate:
+  // a tank cell adjacent to the base column overlaps column bricks in its 2×2
+  // footprint that A* never sees (it prices cells, not footprints).
+  // (perf §132) The unrestricted dig fallback — a SECOND full-map A* with no
+  // threatCosts, attempted on every restricted-unsafe / restricted-null outcome
+  // — was removed. Instrumented across all 2100 gate sims it returned a
+  // carve-safe path only 3/17683 times (all chaos, all restricted-unsafe). The
+  // god-ai-gate (620/508/473) still passes with margin, so dropping it is
+  // accepted as non-regressing per the gate contract.
   const restricted = findPath(tm, from, to, {
     breakBrick: true,
     threatCosts: buildCarveCosts(self),
@@ -227,10 +236,7 @@ export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direc
   if (restricted && restricted.length > 0 && pathCarveSafeImpl(self, from, restricted)) {
     return restricted
   }
-  const dig = findPath(tm, from, to, { breakBrick: true })
-  if (!dig || dig.length === 0) return null
-  if (!pathCarveSafeImpl(self, from, dig)) return null
-  return dig
+  return null
 }
 
 /**
