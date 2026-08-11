@@ -9,7 +9,7 @@
  * Errors inside a run are caught and reported as `ok: false`, mirroring
  * the serial evaluateParams() catch branch exactly.
  */
-import { runSimulation, type RunTelemetry, type RunForensics } from './simulation-runner'
+import { runSimulation, type RunTelemetry, type RunForensics, type SimResult } from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 
@@ -47,6 +47,9 @@ export interface SimTask {
   /** 督战双玩家: supervise mode with a second God AI driving player2 (distinct
    *  from `coop`, the Lie-Back-Win / human-P1 mode). Default off. */
   spectateDual?: boolean
+  /** Record the run and return the full SimResult (incl. replay) in the task
+   *  result, so the caller can persist failure replays. Default off. */
+  recordReplay?: boolean
 }
 
 export interface SimTaskResult {
@@ -70,6 +73,9 @@ export interface SimTaskResult {
   failureCause?: string
   /** Kind of the tank whose bullet destroyed the base (self-inflicted = 'player'). */
   failureKillerKind?: string
+  /** Full SimResult (incl. replay frames) — only when the task set `recordReplay`.
+   *  Lets the caller persist a .replay for losing runs without re-running them. */
+  replayResult?: SimResult
 }
 
 declare var self: Worker
@@ -91,6 +97,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       forensics: task.forensics === true,
       coop: task.coop === true,
       spectateDual: task.spectateDual === true,
+      record: task.recordReplay === true,
     })
     msg = {
       id: task.id,
@@ -100,6 +107,10 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       killCount: result.finalState.killCount,
       baseAlive: result.finalState.baseAlive,
     }
+    // When the caller asked to persist replays, hand back the full result
+    // (it already carries the recorded frames). Outcome/aggregation fields are
+    // unchanged, so non-recording callers are unaffected.
+    if (task.recordReplay === true) msg.replayResult = result
     if (task.telemetry === true) {
       msg.lives = result.finalState.lives
       msg.firstKillTick = result.firstKillTick

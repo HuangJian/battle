@@ -17,8 +17,10 @@
  *
  * Usage:
  *   bun tools/sim/sweep-winrate.ts --difficulties classic,hard,chaos --seeds 1-60 --out tmp/winrate
+ *   bun tools/sim/sweep-winrate.ts --save-failures --replay-dir replays/winrate
  *
  * Default: --difficulties classic,hard,chaos  --seeds 1-60  --history reports/winrate/history
+ *          --save-failures is OFF (losing-run replays are not written unless opted in)
  */
 import { STAGES } from '../../src/config/stages'
 import { SimWorkerPool } from './sim-pool'
@@ -27,6 +29,7 @@ import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput
 import { MAX_TICKS } from './simulation-runner'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { DEFAULT_HISTORY_DIR, loadSnapshots, type WinrateSnapshot } from './winrate-history'
+import { writeReplayFile } from './replay-writer'
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -47,6 +50,10 @@ const seeds = parseSeeds(arg('seeds', '1-60')!)
 const outDir = arg('out', 'reports/winrate')!
 const historyDir = arg('history', DEFAULT_HISTORY_DIR)!
 const useHistory = !process.argv.includes('--no-history')
+// Persist losing runs' replays to replays/winrate (default off — opt-in only,
+// since recording every run adds transfer/serialization overhead in the pool).
+const saveFailures = process.argv.includes('--save-failures')
+const replayDir = arg('replay-dir', 'replays/winrate')!
 const coop = process.argv.includes('--coop')
 const spectateDual = process.argv.includes('--dual')
 const modeTag = coop ? ' [coop]' : spectateDual ? ' [dual supervise]' : ''
@@ -55,6 +62,7 @@ const params: GodAIParams = DEFAULT_GOD_AI_PARAMS
 const stageCount = STAGES.length
 
 mkdirSync(outDir, { recursive: true })
+if (saveFailures) mkdirSync(replayDir, { recursive: true })
 
 interface StageAgg {
   wins: number
@@ -91,6 +99,7 @@ async function sweepDifficulty(diff: string): Promise<DiffAgg> {
         maxTicks: MAX_TICKS,
         coop,
         spectateDual,
+        recordReplay: saveFailures,
       })
       meta.push({ stageIndex: si, seed })
     }
@@ -100,6 +109,25 @@ async function sweepDifficulty(diff: string): Promise<DiffAgg> {
   const results: SimTaskResult[] = await pool.runBatch(tasks)
   pool.terminate()
   const wallMs = performance.now() - t0
+
+  // Persist losing runs' replays (only when --save-failures). Wins and sim
+  // errors are skipped; each failure result already carries its recorded frames.
+  const savePromises: Promise<string | null>[] = []
+  if (saveFailures) {
+    for (const r of results) {
+      if (!r.ok || !r.replayResult || r.outcome === 'stage_clear') continue
+      const m = meta[r.id]
+      savePromises.push(
+        writeReplayFile({
+          result: r.replayResult,
+          dir: replayDir,
+          stageIndex: m.stageIndex,
+          stageName: STAGES[m.stageIndex].name,
+          godAIParams: params as unknown as Record<string, unknown>,
+        }),
+      )
+    }
+  }
 
   const stages: StageAgg[] = Array.from({ length: stageCount }, () => ({
     wins: 0,
@@ -141,8 +169,13 @@ async function sweepDifficulty(diff: string): Promise<DiffAgg> {
       sa.baseDestroyed++
     }
   }
+  let savedFailures = 0
+  if (savePromises.length > 0) {
+    const paths = await Promise.all(savePromises)
+    savedFailures = paths.filter((p): p is string => p !== null).length
+  }
   process.stderr.write(
-    `  [${diff}] ${total} runs in ${(wallMs / 1000).toFixed(1)}s — winRate ${((wins / total) * 100).toFixed(1)}%\n`,
+    `  [${diff}] ${total} runs in ${(wallMs / 1000).toFixed(1)}s — winRate ${((wins / total) * 100).toFixed(1)}%${savedFailures ? ` ｜ saved ${savedFailures} failure replay(s) → ${replayDir}` : ''}\n`,
   )
   return { name: diff, stages, wins, killsSum, baseDestroyed, gameovers, timeouts, total, wallMs }
 }
