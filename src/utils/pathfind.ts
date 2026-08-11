@@ -127,6 +127,30 @@ const STEP_DC: readonly number[] = [0, 0, -1, 1]
 const STEP_DR: readonly number[] = [-1, 1, 0, 0]
 const STEP_DIR: readonly Direction[] = ['up', 'down', 'left', 'right']
 
+/**
+ * (perf §130) Leading-edge sub-blocks per step direction.
+ *
+ * A tank occupies a 2×2 footprint. Stepping one sub-block from a cell whose
+ * footprint is ALREADY known passable, the candidate footprint overlaps the
+ * current one in exactly two sub-blocks — those cannot block. Only the two
+ * sub-blocks on the leading edge are new, so the 2×2 scan collapses to two
+ * reads with identical results.
+ *
+ * Offsets are relative to the candidate top-left (nc, nr), indexed by step:
+ *   0 up    → new row nr    : (0,0) (1,0)
+ *   1 down  → new row nr+1  : (0,1) (1,1)
+ *   2 left  → new col nc    : (0,0) (0,1)
+ *   3 right → new col nc+1  : (1,0) (1,1)
+ *
+ * The precondition (current footprint passable) holds for every popped cell:
+ * the start is validated by the quick-reject, and every other cell was
+ * footprint-checked before it was pushed.
+ */
+const EDGE_DC0: readonly number[] = [0, 0, 0, 1]
+const EDGE_DR0: readonly number[] = [0, 1, 0, 0]
+const EDGE_DC1: readonly number[] = [1, 1, 0, 1]
+const EDGE_DR1: readonly number[] = [0, 1, 1, 1]
+
 // ---- public API --------------------------------------------------------------
 
 // Module-level reusable A* buffers (perf): findPath is called from the God AI
@@ -138,11 +162,52 @@ const STEP_DIR: readonly Direction[] = ['up', 'down', 'left', 'right']
 // — only the allocations changed.
 const PF_N = GRID * GRID
 const _pfGScore = new Float64Array(PF_N)
-const _pfFScore = new Float64Array(PF_N)
 const _pfCameFrom = new Int32Array(PF_N)
 const _pfCameDir = new Uint8Array(PF_N)
-const _pfInOpen = new Uint8Array(PF_N)
-const _pfClosed = new Uint8Array(PF_N)
+
+/**
+ * (perf §129) Per-call generation stamps, replacing four full-array resets.
+ *
+ * The previous version reset four buffers at the top of EVERY findPath call
+ * (`gScore.fill(Infinity)`, `firstSeq.fill(-1)`, `closed.fill(0)`,
+ * `inOpen.fill(0)`) — ≈9.4 KB of memset per call, paid in full even when the
+ * search only expands a handful of nodes. `_pfState` folds both "seen" and
+ * "closed" for the CURRENT call into one Int32 lane:
+ *
+ *   _pfState[k] <   g2  → untouched this call (gScore/firstSeq hold stale data)
+ *   _pfState[k] === g2  → seen: gScore/firstSeq/cameFrom valid, still open
+ *   _pfState[k] === g2+1 → closed
+ *
+ * where `g2 = 2 * _pfGen` and `_pfGen` increments once per call. Any value
+ * written by an older call is at most `2*(gen-1)+1 = g2-1`, so the single
+ * `< g2` compare is an exact "unvisited" test and no reset is needed.
+ *
+ * Semantically identical to the fills: `gScore === Infinity` ⟺ never relaxed
+ * ⟺ `state < g2`, and the first relaxation of a node is exactly the `state <
+ * g2` branch — so `firstSeq` is still assigned once, in the same order, and
+ * the heap tie-break (and therefore the returned path) is unchanged.
+ *
+ * Also removed here: `_pfFScore` and `_pfInOpen`, both write-only (fScore was
+ * only ever read back on the line that wrote it; inOpen was never read at all).
+ */
+const _pfState = new Int32Array(PF_N)
+let _pfGen = 0
+/** Wrap threshold — `2 * gen + 1` must stay inside Int32. */
+const PF_GEN_MAX = 0x3ffffffe
+
+/**
+ * key → col / row lookup tables (perf). GRID (26) is not a power of two, so
+ * `key % GRID` compiles to an integer division on every A* pop. Two 676-byte
+ * tables turn that into two typed-array loads.
+ */
+const _pfKeyCol = new Uint8Array(PF_N)
+const _pfKeyRow = new Uint8Array(PF_N)
+for (let r = 0; r < GRID; r++) {
+  for (let c = 0; c < GRID; c++) {
+    _pfKeyCol[r * GRID + c] = c
+    _pfKeyRow[r * GRID + c] = r
+  }
+}
 // Binary min-heap (lazy deletion) for the A* open set. Keyed by (fScore,
 // firstSeq) so the extraction order is identical to the old linear-scan
 // (lowest f, earliest-first-push tie-break) → byte-for-byte same path — but
@@ -254,22 +319,22 @@ export function findPath(
   // returned Direction[] sequence is byte-for-byte the same as before. Only the
   // extraction cost changed — search result is preserved.
   //
-  // Reusable module-level buffers are reset here. Only the 3 arrays whose
-  // "unvisited" default is non-zero need resetting (gScore→Infinity,
-  // closed→0, inOpen→0). fScore/cameFrom/cameDir are only read for cells
-  // discovered this call (they're written before read), so stale values from
-  // a previous call are never observed.
+  // Reusable module-level buffers — NOT reset here. The `_pfState` generation
+  // stamp (see its declaration) makes every stale lane self-identifying, so
+  // the four per-call `fill()`s are gone. gScore/firstSeq/cameFrom/cameDir are
+  // only read for cells whose state stamp matches this call, i.e. always
+  // written before read.
   const gScore = _pfGScore
-  gScore.fill(Infinity)
-  const fScore = _pfFScore
   const cameFrom = _pfCameFrom
   const cameDir = _pfCameDir
-  const inOpen = _pfInOpen
-  inOpen.fill(0)
-  const closed = _pfClosed
-  closed.fill(0)
   const firstSeq = _pfFirstSeq
-  firstSeq.fill(-1)
+  const state = _pfState
+  if (++_pfGen >= PF_GEN_MAX) {
+    state.fill(0)
+    _pfGen = 1
+  }
+  const g2 = _pfGen * 2 // "seen this call"
+  const g2c = g2 + 1 // "closed this call"
   _pfHeapSize = 0
   let seqCounter = 0
 
@@ -281,10 +346,9 @@ export function findPath(
   const grid = tileMap.grid
 
   gScore[startKey] = 0
-  fScore[startKey] = Math.abs(from.col - toCol) + Math.abs(from.row - toRow)
   firstSeq[startKey] = seqCounter++
-  inOpen[startKey] = 1
-  pfPush(fScore[startKey], firstSeq[startKey], startKey)
+  state[startKey] = g2
+  pfPush(Math.abs(from.col - toCol) + Math.abs(from.row - toRow), firstSeq[startKey], startKey)
 
   // Two specialized hot loops: the common case (breakBrick=false) inlines a
   // constant stepCost=1 and skips the brick-footprint scan, saving 4
@@ -293,7 +357,7 @@ export function findPath(
     for (;;) {
       const currentKey = pfPop()
       if (currentKey < 0) break
-      if (closed[currentKey]) continue // lazy deletion: skip stale entries
+      if (state[currentKey] === g2c) continue // lazy deletion: skip stale entries
       if (currentKey === goalKey) {
         // Reconstruct path by walking cameFrom back to the start.
         const path: Direction[] = []
@@ -306,52 +370,44 @@ export function findPath(
         return path
       }
 
-      closed[currentKey] = 1
-      const cc = currentKey % GRID
-      const cr = (currentKey - cc) / GRID
+      state[currentKey] = g2c
+      const cc = _pfKeyCol[currentKey]
+      const cr = _pfKeyRow[currentKey]
+      const gCur = gScore[currentKey]
 
       for (let s = 0; s < 4; s++) {
         const nc = cc + STEP_DC[s]
         const nr = cr + STEP_DR[s]
-        // Inline isPassable (breakBrick=false branch): bounds + 2×2 footprint
-        // scan against grid directly. Avoids the function call and the
-        // breakBrick parameter check on every neighbor.
+        // Inline isPassable (breakBrick=false branch): bounds + leading-edge
+        // footprint check (§130 — only the two sub-blocks not shared with the
+        // already-passable current footprint can block). Avoids the function
+        // call, the breakBrick parameter check, and half the terrain reads.
         if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
-        let blocked = false
-        for (let dr = 0; dr <= 1 && !blocked; dr++) {
-          const grow = grid[nr + dr]
-          for (let dc = 0; dc <= 1; dc++) {
-            const type = grow[nc + dc]
-            if (type === 'brick' || type === 'steel' || type === 'base') {
-              blocked = true
-              break
-            }
-            if (type === 'water') {
-              if (!ignoreWater) {
-                blocked = true
-                break
-              }
-            }
-          }
-        }
-        if (blocked) continue
+        const t0 = grid[nr + EDGE_DR0[s]][nc + EDGE_DC0[s]]
+        if (t0 === 'brick' || t0 === 'steel' || t0 === 'base') continue
+        if (t0 === 'water' && !ignoreWater) continue
+        const t1 = grid[nr + EDGE_DR1[s]][nc + EDGE_DC1[s]]
+        if (t1 === 'brick' || t1 === 'steel' || t1 === 'base') continue
+        if (t1 === 'water' && !ignoreWater) continue
         // §187: blocked cell (player) — impassable even in corridor mode.
         if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
         const nk = nr * GRID + nc
-        if (closed[nk]) continue
+        const st = state[nk]
+        if (st === g2c) continue // already closed
         // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
-        const tentativeG = gScore[currentKey] + 1 + (threatCosts ? threatCosts[nk] : 0)
-        if (tentativeG < gScore[nk]) {
+        const tentativeG = gCur + 1 + (threatCosts ? threatCosts[nk] : 0)
+        // `fresh` == the old `gScore[nk] === Infinity` case: a cell never
+        // relaxed this call always accepts the first relaxation.
+        const fresh = st < g2
+        if (fresh || tentativeG < gScore[nk]) {
+          if (fresh) {
+            state[nk] = g2
+            firstSeq[nk] = seqCounter++
+          }
           cameFrom[nk] = currentKey
           cameDir[nk] = s
           gScore[nk] = tentativeG
-          const nf = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
-          fScore[nk] = nf
-          if (firstSeq[nk] === -1) {
-            firstSeq[nk] = seqCounter++
-            inOpen[nk] = 1
-          }
-          pfPush(nf, firstSeq[nk], nk)
+          pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
         }
       }
     }
@@ -360,7 +416,7 @@ export function findPath(
     for (;;) {
       const currentKey = pfPop()
       if (currentKey < 0) break
-      if (closed[currentKey]) continue
+      if (state[currentKey] === g2c) continue
       if (currentKey === goalKey) {
         const path: Direction[] = []
         let ck = currentKey
@@ -372,43 +428,61 @@ export function findPath(
         return path
       }
 
-      closed[currentKey] = 1
-      const cc = currentKey % GRID
-      const cr = (currentKey - cc) / GRID
+      state[currentKey] = g2c
+      const cc = _pfKeyCol[currentKey]
+      const cr = _pfKeyRow[currentKey]
+      const gCur = gScore[currentKey]
 
       for (let s = 0; s < 4; s++) {
         const nc = cc + STEP_DC[s]
         const nr = cr + STEP_DR[s]
-        if (!isPassable(tileMap, nc, nr, ignoreWater, true)) continue
-        // §187: blocked cell (player) — impassable even in breakBrick mode.
-        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
-        const nk = nr * GRID + nc
-        if (closed[nk]) continue
-        // Inline stepCost: 5 if any sub-block is brick, else 1.
-        // §69: add threat cost.
-        let cost = 1
+        // (perf §130) A single 2×2 pass yields BOTH passability and step cost.
+        // The old code called isPassable (4 terrain reads) and then re-scanned
+        // the very same 4 sub-blocks for brick — 8 reads for one neighbor.
+        // The §130 leading-edge trick does not apply here because the cost
+        // depends on all four sub-blocks, not just the new ones.
+        if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
+        let blocked = false
+        let cost = 1 // stepCost: 5 if any sub-block is brick, else 1
         for (let dr = 0; dr <= 1; dr++) {
           const grow = grid[nr + dr]
           for (let dc = 0; dc <= 1; dc++) {
-            if (grow[nc + dc] === 'brick') {
-              cost = 5
+            const type = grow[nc + dc]
+            if (type === 'brick') {
+              cost = 5 // passable in breakBrick mode, just expensive
+              continue
+            }
+            if (type === 'steel' || type === 'base') {
+              blocked = true
+              break
+            }
+            if (type === 'water' && !ignoreWater) {
+              blocked = true
               break
             }
           }
-          if (cost === 5) break
+          if (blocked) break
         }
-        const tentativeG = gScore[currentKey] + cost + (threatCosts ? threatCosts[nk] : 0)
-        if (tentativeG < gScore[nk]) {
+        if (blocked) continue
+        // §187: blocked cell (player) — impassable even in breakBrick mode.
+        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
+        const nk = nr * GRID + nc
+        const st = state[nk]
+        if (st === g2c) continue // already closed
+        // §69: add threat cost.
+        const tentativeG = gCur + cost + (threatCosts ? threatCosts[nk] : 0)
+        // `fresh` == the old `gScore[nk] === Infinity` case (see the
+        // breakBrick=false branch).
+        const fresh = st < g2
+        if (fresh || tentativeG < gScore[nk]) {
+          if (fresh) {
+            state[nk] = g2
+            firstSeq[nk] = seqCounter++
+          }
           cameFrom[nk] = currentKey
           cameDir[nk] = s
           gScore[nk] = tentativeG
-          const nf = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
-          fScore[nk] = nf
-          if (firstSeq[nk] === -1) {
-            firstSeq[nk] = seqCounter++
-            inOpen[nk] = 1
-          }
-          pfPush(nf, firstSeq[nk], nk)
+          pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
         }
       }
     }
