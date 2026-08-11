@@ -8,6 +8,9 @@ import { cloneWorld, restoreWorld } from '../snapshot/WorldSerializer'
 import { STAGES, localizedStageName } from '../config/stages'
 import { isReplayBrowserBlocked } from './uiFlowGates'
 import { t } from '../i18n'
+import { GodAIInput } from '../ai/GodAIInput'
+import { AutoFireInput } from './AutoFireInput'
+import { RNG } from '../utils/RNG'
 import type { GameConstructor, GameCore } from './GameCore'
 
 /**
@@ -173,6 +176,9 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
           /* no-op: keyframes are pre-computed at playback start */
         },
       })
+      // Surface the Take Over entry on the HUD (consistent with 督战 / spectate)
+      // instead of the old button inside the replay controller bar.
+      this.presentation.ui.onReplayTakeover = () => this.takeOverFromReplay()
       // Pre-compute thumbnail keyframes for instant hover preview
       this.buildThumbnailKeyframes()
       return true
@@ -272,11 +278,67 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
       this.rearmSpectateGodInput()
       // Hide the persistent REPLAY badge from the HUD
       this.presentation.ui.setReplayMode(false)
+      // Drop the HUD Take Over callback — replay mode is over.
+      this.presentation.ui.onReplayTakeover = null
       // Remove canvas listeners
       this.presentation.ui.canvas.removeEventListener('click', this.onReplayCanvasClick)
       this.presentation.ui.canvas.removeEventListener('mousemove', this.onReplayCanvasMouseMove)
       this.accumulator = 0
       this.lastTime = performance.now()
+    }
+
+    /**
+     * §190: Take over player1 from a paused replay — switch from replay mode
+     * to live play. The world stays at the current replay frame; the human
+     * keyboard takes over player1. If the replay was a coop replay, the God
+     * AI is re-armed for player2. If it was a spectate replay, spectate mode
+     * is disabled so the human controls P1.
+     */
+    takeOverFromReplay(): void {
+      if (!this.playback || !this.playback.isPaused) return
+      // Save coop / dual-spectate state before we modify spectate flags.
+      const wasCoop = this.world.coop
+      const wasDual = this.world.spectateDual
+      // Disable spectate if active — the human controls P1 now, not the God AI.
+      if (this.world.spectate) {
+        this.world.spectate = false
+        this.world.spectateDual = false
+        this.godInput = null
+        this.godInput2 = null
+        this.autoFireInput = null
+        this.audio.player2Id = null
+        this.presentation.ui.controlCenter.setSpectateState('off')
+      }
+      // Stop playback — swaps replay inputs back to live inputs.
+      // rearmSpectateGodInput() inside stopPlayback is a no-op since spectate is false.
+      this.stopPlayback()
+      // Replay was coop OR dual-spectate: the human takes over P1 and player2
+      // keeps fighting as a live God AI partner (躺赢 / coop mode). For a coop
+      // replay `coop` is already true; for a dual-spectate replay we flip it on
+      // so the recorded P2 becomes a live God AI instead of a frozen tank.
+      if ((wasCoop || wasDual) && this.world.player2) {
+        this.world.coop = true
+        const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
+        this.godInput = new GodAIInput(this.world, undefined, rng, (world) => world.player2)
+        this.godInput.reset()
+        this.autoFireInput = new AutoFireInput(this.input)
+        this.audio.player2Id = this.world.player2.id
+        this.presentation.ui.controlCenter.setCoopState(true)
+      }
+      this.wireLiveInputs()
+      // Ensure the world is in playing state.
+      this.world.state = 'playing'
+      // Reset presentation state for live play.
+      this.presentation.reset()
+      this.presentation.markNeedsRender()
+      // Re-arm the loop.
+      this.accumulator = 0
+      this.lastTime = performance.now()
+      this.prevWorldState = this.world.state
+      this.scheduleFrame()
+      // Start a fresh recording from this point.
+      this.recorder.startNew(this.world)
+      this.presentation.ui.notify(t('toast.takeoverSuccess'), 'info')
     }
 
     /**

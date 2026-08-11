@@ -3188,7 +3188,9 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
   // world.spectateDual === true is the FIRST check — single-player NEVER enters
   // this block, so the overrides are never applied, and the existing knobs
   // stay at their default 0 → byte-identical to pre-change behavior.
-  if (world.spectateDual && detectCentralBreachRisk(world)) {
+  // §190: Also active in coop (躺赢模式) — the God AI controlling P2 needs
+  // the same dual central breach params overrides as in 督战双玩家.
+  if ((world.spectateDual || world.coop) && detectCentralBreachRisk(world)) {
     overrides.defenseBreachBonus = p.dualCentralBreachDefenseBreachBonus
     overrides.baseGuardAnchorMode = p.dualCentralBreachAnchorMode
     overrides.threatStickyTicks = p.dualCentralBreachStickyTicks

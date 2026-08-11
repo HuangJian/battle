@@ -300,10 +300,30 @@ body {
   box-shadow: 0 0 6px var(--theme-accent-primary);
 }
 .hud-pause-hint {
-  font-size: 9px;
-  letter-spacing: 0.5px;
-  white-space: nowrap;
-  color: var(--theme-text-muted);
+font-size: 9px;
+letter-spacing: 0.5px;
+white-space: nowrap;
+color: var(--theme-text-muted);
+}
+.hud-takeover-btn {
+margin-top: 3px;
+padding: 3px 10px;
+font-family: var(--font-mono);
+font-size: 11px;
+font-weight: 700;
+letter-spacing: 0.5px;
+color: var(--theme-text-primary);
+background: color-mix(in srgb, var(--theme-accent-secondary) 30%, transparent);
+border: 1px solid var(--theme-accent-secondary);
+border-radius: 4px;
+cursor: pointer;
+transition: background 0.15s;
+}
+.hud-takeover-btn:hover {
+background: color-mix(in srgb, var(--theme-accent-secondary) 50%, transparent);
+}
+.hud-takeover-btn:active {
+transform: scale(0.96);
 }
 
 /* ---- Active buff countdowns (shield / freeze) ----

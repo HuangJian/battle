@@ -457,13 +457,12 @@ const PICKUP_HIGH: Candidate = {
     // less important than structural base defense. Runs BEFORE the P1
     // sticky-hold gate so P1 can pick up fence even in pure-defender mode.
     // The nearest tank to the fence wins (partner-dead / partner-far →
-    // this tank takes it unconditionally). Gated by spectateDual &&
-    // centralBreachRisk && dualCentralBreachP2FencePickup — single-player
-    // is byte-identical (gate short-circuits).
+    // this tank takes it unconditionally). Gated by dualStrategyActive
+    // (spectateDual || coop) && centralBreachRisk && dualCentralBreachP2FencePickup
+    // — single-player is byte-identical (gate short-circuits).
     if (
       !self.aggressive &&
-      self.world.spectateDual &&
-      self._centralBreachRisk &&
+      self.dualStrategyActive &&
       self.params.dualCentralBreachP2FencePickup > 0
     ) {
       const fenceTarget = self.findDualFencePickup(pcx, pcy)
@@ -1181,12 +1180,12 @@ const ENGAGE: Candidate = {
     // §6.3-D: Dual central breach — P2 is the free tank (flanker/pickup).
     // Don't force P2 to skip T2a when base is threatened — P1 holds the
     // anchor and handles base defense. P2 should be free to engage close
-    // enemies it encounters while roaming. Gated by spectateDual &&
-    // centralBreachRisk && isPlayer2 — P1 and single-player byte-identical.
+    // enemies it encounters while roaming. Gated by dualStrategyActive
+    // (spectateDual || coop) && centralBreachRisk && isPlayer2 — P1 and
+    // single-player byte-identical.
     if (
       skipT2aForDefense &&
-      self.world.spectateDual &&
-      self._centralBreachRisk &&
+      self.dualStrategyActive &&
       self.isPlayer2()
     ) {
       skipT2aForDefense = false
@@ -1707,11 +1706,10 @@ const HUNT: Candidate = {
       // gets a clear shot (measured: P2 fire rate 0% for a full run, 0
       // kills). directMove closes the row gap first and breaks thin brick,
       // which is exactly the alignment shouldFireInDir needs. Gated by
-      // spectateDual && centralBreachRisk && isPlayer2 &&
+      // dualStrategyActive (spectateDual || coop) && centralBreachRisk && isPlayer2 &&
       // dualCentralBreachP2DirectMove — single-player and P1 keep the A*
       // long-range branch (byte-identical).
-      self.world.spectateDual &&
-      self._centralBreachRisk &&
+      self.dualStrategyActive &&
       self.isPlayer2() &&
       self.params.dualCentralBreachP2DirectMove > 0
     ) {

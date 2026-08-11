@@ -6,7 +6,7 @@ import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
 import { RecoveryController } from '../src/snapshot/RecoveryController'
-import { EMP_DURATION_MS, MINE_ARM_MS, CELL, GRID } from '../src/constants'
+import { EMP_DURATION_MS, MINE_ARM_MS, CELL, GRID, REPAIR_HEAL_AMOUNT, BOAT_DURATION_MS } from '../src/constants'
 import { DECOY_LIFESPAN_FRAMES } from '../src/constants'
 import { perceive, analyze } from '../src/ai/perception'
 import { INTELLIGENCE_LEVELS } from '../src/ai/config'
@@ -37,14 +37,16 @@ const apply = (sim: Simulation, t: string) =>
 const call = (sim: Simulation, method: string, ...args: unknown[]) =>
   (sim as unknown as { [k: string]: (...a: unknown[]) => unknown })[method].bind(sim)(...args)
 
-describe('Repair (维修) — restores PLAYER HP, not the base', () => {
-  it('fully restores a damaged player tank to maxHp', () => {
+describe('Repair (维修) — restores PLAYER HP by a fixed amount', () => {
+  it('heals by REPAIR_HEAL_AMOUNT (= one basic enemy bullet damage, not full)', () => {
     const { world, sim } = buildWorld(1)
     const p = world.player!
     p.hp = 1 // simulate damage
+    const hpBefore = p.hp
     expect(p.hp).toBeLessThan(p.maxHp)
     apply(sim, 'repair')
-    expect(p.hp).toBe(p.maxHp)
+    // §189: heals by a fixed amount (100 HP = basic enemy bullet damage), not full
+    expect(p.hp).toBe(Math.min(hpBefore + REPAIR_HEAL_AMOUNT, p.maxHp))
   })
 
   it('does not change base HP (the eagle has its own health)', () => {
@@ -52,6 +54,38 @@ describe('Repair (维修) — restores PLAYER HP, not the base', () => {
     const baseBefore = world.baseHp
     apply(sim, 'repair')
     expect(world.baseHp).toBe(baseBefore)
+  })
+
+  it('heals the COLLECTOR (coop P2), not player1 (§3.1)', () => {
+    const { world, sim } = buildWorld(7)
+    const p1 = world.player!
+    // A coop-style player2 tank grabs the repair item.
+    const p2 = world.createTank('basic', 100, 100, 'right')
+    world.player2 = p2
+    // Damage both; only the collector (P2) should be healed.
+    p1.hp = 1
+    p2.hp = 1
+    const p1Before = p1.hp
+    const p2Before = p2.hp
+    // applyPowerUp is private; pass the collector explicitly.
+    ;(sim as unknown as { applyPowerUp: (t: string, c?: unknown) => void }).applyPowerUp(
+      'repair',
+      p2,
+    )
+    expect(p2.hp).toBe(Math.min(p2Before + REPAIR_HEAL_AMOUNT, p2.maxHp))
+    expect(p1.hp).toBe(p1Before) // player1 must stay untouched
+  })
+
+  it('boat (水陆两栖) also applies to the COLLECTOR (coop P2), not player1', () => {
+    const { world, sim } = buildWorld(8)
+    const p1 = world.player!
+    const p2 = world.createTank('basic', 100, 100, 'right')
+    world.player2 = p2
+    p1.boatTimer = 0
+    p2.boatTimer = 0
+    ;(sim as unknown as { applyPowerUp: (t: string, c?: unknown) => void }).applyPowerUp('boat', p2)
+    expect(p2.boatTimer).toBe(BOAT_DURATION_MS)
+    expect(p1.boatTimer ?? 0).toBe(0) // player1 must stay untouched
   })
 })
 

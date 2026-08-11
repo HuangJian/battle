@@ -62,6 +62,12 @@ export class UIManager {
   private hudReplayDifficulty: HTMLElement
   /** 督战 (supervise) HUD badge — visible while God AI fights as player1. */
   private hudSpectate: HTMLElement
+  /** Take Over button — visible when paused in spectate mode. */
+  private hudTakeoverBtn: HTMLElement
+  /** Callback for the Take Over button (set by Game). */
+  onSpectateTakeover: (() => void) | null = null
+  /** Callback for the Take Over button while a replay is active (set by GameReplay). */
+  onReplayTakeover: (() => void) | null = null
   /** 督战 battle-speed chip (×1.5 / ×2 / ×4) — hidden at ×1. */
   private hudSpeed: HTMLElement
   private hudSpeedValue: HTMLElement
@@ -250,6 +256,7 @@ export class UIManager {
         <div class="hud-pause" data-hud="pause">
           <span class="hud-pause-title"><span class="hud-pause-dot"></span><span data-i18n="pause.title">PAUSED</span></span>
           <span class="hud-pause-hint" data-i18n="hud.pauseHint">P Resume</span>
+          <button class="hud-takeover-btn" data-hud="takeover" type="button" hidden data-i18n="hud.takeover">🎮 Take Over</button>
         </div>
       </div>
       <div class="hud-group hud-right">
@@ -404,6 +411,7 @@ export class UIManager {
     this.hudReplay = this.hudBar.querySelector('[data-hud="replay"]')!
     this.hudReplayDifficulty = this.hudBar.querySelector('[data-hud="replay-difficulty"]')!
     this.hudSpectate = this.hudBar.querySelector('[data-hud="spectate"]')!
+    this.hudTakeoverBtn = this.hudBar.querySelector('[data-hud="takeover"]')!
     this.hudSpeed = this.hudBar.querySelector('[data-hud="speed"]')!
     this.hudSpeedValue = this.hudBar.querySelector('[data-hud="speed-value"]')!
 
@@ -411,6 +419,16 @@ export class UIManager {
     this.replayController = new ReplayController()
     this.replayController.hide()
     this.root.appendChild(this.replayController.el)
+    // Take Over button — routes to the replay callback while a replay is
+    // active, otherwise to the spectate callback. Both live on the HUD so the
+    // entry point is consistent across 督战 (spectate) and replay modes.
+    this.hudTakeoverBtn.addEventListener('click', () => {
+      if (this.replayController.isActive) {
+        this.onReplayTakeover?.()
+      } else {
+        this.onSpectateTakeover?.()
+      }
+    })
     this.hudGuard = this.hudBar.querySelector('[data-hud="guard"]')!
     this.hudFrenzy = this.hudBar.querySelector('[data-hud="frenzy"]')!
     this.hudSacrifice = this.hudBar.querySelector('[data-hud="sacrifice"]')!
@@ -768,9 +786,9 @@ export class UIManager {
       this.hudBar.classList.add('visible')
     }
 
-    // Pause indicator lives in the STAGE area of the HUD bar (not a floating
-    // overlay) so the battle field stays fully visible for screenshots.
-    this.hudBar.classList.toggle('paused', screen === 'paused')
+    // Pause indicator (HUD .paused badge + Take Over button) is toggled in
+    // update() so it also covers replay pause, where world.state stays
+    // 'playing' and the pause is owned by the ReplayController.
 
     // Footer hints (P Pause · Alt+R Reset · Alt+S Save) — only during gameplay,
     // not on menu / victory / recovery screens.
@@ -954,6 +972,14 @@ export class UIManager {
       screen = 'playing'
     }
     this.showScreen(screen)
+
+    // Take Over entry point lives on the HUD for BOTH 督战 (spectate) and
+    // replay, so the two modes share one consistent control. A spectate pause
+    // flips world.state to 'paused'; a replay pause is owned by the
+    // ReplayController (world.state stays 'playing'), so check both.
+    const replayPaused = this.replayController.isActive && this.replayController.isPaused
+    this.hudBar.classList.toggle('paused', screen === 'paused' || replayPaused)
+    this.hudTakeoverBtn.hidden = !((world.spectate && screen === 'paused') || replayPaused)
   }
 
   /** Show or hide the persistent REPLAY indicator in the HUD center area. */

@@ -9,21 +9,16 @@ import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES } from '../src/config/rules'
 
 /**
- * §188: Fence power-up must not trap tanks inside steel.
+ * §188→§189: Fence power-up pushes tanks outside the ring before placing steel.
  *
  * Root cause (S9@seed119, 532.7s stuck): when the fence power-up converts
- * base-ring cells to steel, it does not check whether a tank overlaps the
- * target cell. During gameplay, base-ring bricks can be destroyed (by bullets),
- * creating empty cells. A player tank can then move onto those cells. When the
- * fence power-up later converts those empty cells to steel, the tank is
- * permanently trapped — rectHitsTerrain detects the steel overlap on every
- * subsequent move attempt. The nav-stuck escape fires every 240 ticks but
- * cannot help (the tank is physically walled in at the pixel level). The game
- * times out (532s of 600s max).
- *
- * Fix: applyFencePowerUp skips any ring cell that overlaps a tank body.
+ * base-ring cells to steel, it must not trap tanks inside.
+ * Pre-fix (§188): skip ring cells that overlap a tank.
+ * §189 fix: force-move the tank to the nearest clear position outside
+ * the ring, then place steel. This ensures a complete steel ring
+ * while avoiding the trap.
  */
-describe('§188 fence power-up must not trap tanks', () => {
+describe('§189 fence power-up pushes tanks outside the ring', () => {
   function setup(): { world: World; sim: Simulation } {
     const world = new World()
     world.rng = new RNG(42)
@@ -40,7 +35,7 @@ describe('§188 fence power-up must not trap tanks', () => {
     return { world, sim }
   }
 
-  it('does not convert a ring cell to steel when a tank overlaps it', () => {
+  it('pushes a tank outside the ring and places steel on the ring cell', () => {
     const { world, sim } = setup()
     const p = world.player!
     // Simulate bricks at col 14 being destroyed during gameplay.
@@ -50,8 +45,10 @@ describe('§188 fence power-up must not trap tanks', () => {
     // Place player at the right edge of the base ring (col 14, row 24).
     // Tank top-left at (14*16, 24*16) = (224, 384). Body spans cols 14-15,
     // rows 24-25 — overlaps ring cell (14, 24) and (14, 25).
-    p.x = BASE_POS.col * CELL + 2 * CELL // 14 * 16 = 224
-    p.y = BASE_POS.row * CELL // 24 * 16 = 384
+    const originalX = BASE_POS.col * CELL + 2 * CELL // 224
+    const originalY = BASE_POS.row * CELL // 384
+    p.x = originalX
+    p.y = originalY
     p.dir = 'right'
 
     // Verify the ring cells are empty (destroyed earlier).
@@ -61,16 +58,20 @@ describe('§188 fence power-up must not trap tanks', () => {
     // Apply fence power-up.
     ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
 
-    // The ring cells overlapping the tank should NOT be converted to steel.
-    expect(world.tileMap.get(14, 24)).not.toBe('steel')
-    expect(world.tileMap.get(14, 25)).not.toBe('steel')
+    // The tank should have been pushed outside the ring (position changed).
+    const moved = p.x !== originalX || p.y !== originalY
+    expect(moved).toBe(true)
 
-    // Other ring cells (not overlapping the tank) SHOULD be steel.
+    // The ring cells should now be steel (tank was pushed out).
+    expect(world.tileMap.get(14, 24)).toBe('steel')
+    expect(world.tileMap.get(14, 25)).toBe('steel')
+
+    // Other ring cells (not overlapping the tank) SHOULD also be steel.
     expect(world.tileMap.get(11, 23)).toBe('steel') // top-left, no overlap
     expect(world.tileMap.get(12, 23)).toBe('steel') // top-mid, no overlap
   })
 
-  it('player can still move after fence when adjacent to base ring', () => {
+  it('player can still move after being pushed outside the ring', () => {
     const { world, sim } = setup()
     const p = world.player!
     // Destroy bricks at col 14 (simulating battle damage).
@@ -85,14 +86,17 @@ describe('§188 fence power-up must not trap tanks', () => {
     // Apply fence.
     ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
 
-    // Player should be able to move right (into col 15-16, which is empty).
-    // rectHitsTerrain at the new position should not detect steel overlap.
-    const newX = p.x + 1 // try to move 1px right
-    const canMove = !world.rectHitsTerrain(newX, p.y, TANK, TANK, false)
-    expect(canMove).toBe(true)
+    // Player should be able to move from the pushed position.
+    // Try multiple directions to ensure the tank is not boxed in.
+    const canMoveRight = !world.rectHitsTerrain(p.x + 1, p.y, TANK, TANK, false)
+    const canMoveUp = !world.rectHitsTerrain(p.x, p.y - 1, TANK, TANK, false)
+    const canMoveLeft = !world.rectHitsTerrain(p.x - 1, p.y, TANK, TANK, false)
+    const canMoveDown = !world.rectHitsTerrain(p.x, p.y + 1, TANK, TANK, false)
+    // At least one direction should be passable.
+    expect(canMoveRight || canMoveUp || canMoveLeft || canMoveDown).toBe(true)
   })
 
-  it('player is not trapped: can move away from base ring after fence', () => {
+  it('player is not trapped: can move freely after fence push', () => {
     const { world, sim } = setup()
     const p = world.player!
     // Destroy bricks at col 14 (simulating battle damage).
@@ -107,18 +111,34 @@ describe('§188 fence power-up must not trap tanks', () => {
     // Apply fence.
     ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
 
-    // Simulate movement: move player right by ~17px (1 cell at 0.7px/tick × 24).
-    // If the fence had trapped the player, this would be blocked by steel.
-    for (let i = 0; i < 24; i++) {
-      const newX = p.x + 0.7
-      if (!world.rectHitsTerrain(newX, p.y, TANK, TANK, false)) {
-        p.x = newX
-      } else {
-        // If blocked, the test fails — player is trapped.
-        expect(false).toBe(true)
+    // Simulate movement in each direction — the tank should be able to move
+    // at least one direction for 24 ticks (0.7px/tick × 24 ≈ 17px).
+    let moved = false
+    const dirs: Array<{ dx: number; dy: number }> = [
+      { dx: 1, dy: 0 },
+      { dx: 0, dy: -1 },
+      { dx: -1, dy: 0 },
+      { dx: 0, dy: 1 },
+    ]
+    for (const dir of dirs) {
+      const startX = p.x
+      const startY = p.y
+      for (let i = 0; i < 24; i++) {
+        const newX = p.x + dir.dx * 0.7
+        const newY = p.y + dir.dy * 0.7
+        if (!world.rectHitsTerrain(newX, newY, TANK, TANK, false)) {
+          p.x = newX
+          p.y = newY
+        }
       }
+      if (Math.abs(p.x - startX) > 1 || Math.abs(p.y - startY) > 1) {
+        moved = true
+        break
+      }
+      // Reset and try next direction.
+      p.x = startX
+      p.y = startY
     }
-    // Player should have moved significantly to the right.
-    expect(p.x).toBeGreaterThan(BASE_POS.col * CELL + 2 * CELL)
+    expect(moved).toBe(true)
   })
 })

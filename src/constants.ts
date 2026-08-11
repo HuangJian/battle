@@ -105,8 +105,10 @@ export const MINE_ARM_MS = 500
 /** Mine power-up: explosion radius (cells) */
 export const MINE_RADIUS_CELLS = 3
 
-/** Repair power-up: fraction of base max HP restored per pickup */
-export const REPAIR_HEAL_RATIO = 0.2
+/** Repair power-up: HP restored per pickup = one basic enemy bullet damage
+ *  (firepower 50 × DAMAGE_SCALE 2 = 100). §189: single pickup supplements HP
+ *  by the 普通敌人一发炮弹伤害值, not a full restore. */
+export const REPAIR_HEAL_AMOUNT = 100
 
 /** Decoy power-up: lifespan (frames @ 60fps = 30s) */
 export const DECOY_LIFESPAN_FRAMES = 30 * 60
