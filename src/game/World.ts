@@ -18,7 +18,7 @@ import type {
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
 import { RNG } from '../utils/RNG'
-import { computePlayer2SpawnCol } from '../utils/helpers'
+import { computePlayer2SpawnCol, aabb, clamp } from '../utils/helpers'
 import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
@@ -40,6 +40,7 @@ import {
   COMMANDER_INTERVAL_MS,
   PLAYER_SPAWN,
   ENEMY_SPAWNS,
+  FIELD,
 } from '../constants'
 
 let nextId = 1
@@ -534,7 +535,11 @@ export class World {
     // 影响 1 (plan §3.5): respect per-stage player spawn override.
     const col = this.playerSpawnPoint.col
     const row = this.playerSpawnPoint.row
-    this.player = this.createTank('player', col * CELL, row * CELL, 'up')
+    // Never birth the player on top of an enemy/teammate — an overlapping spawn
+    // jams BOTH units (neither can drive off the shared footprint). If the spawn
+    // cell is occupied, relocate unconditionally to the nearest free cell.
+    const cell = this.findFreeSpawnCell(col * CELL, row * CELL)
+    this.player = this.createTank('player', cell.x, cell.y, 'up')
     this.player.level = this.playerLevel
     this.player.shieldTimer = 3000
     this.player.isPlayer = true
@@ -547,10 +552,12 @@ export class World {
   spawnPlayer2(): void {
     const col = this.player2SpawnPoint.col
     const row = this.player2SpawnPoint.row
+    // Symmetric spawn-collision guard to spawnPlayer() — see its note.
+    const cell = this.findFreeSpawnCell(col * CELL, row * CELL)
     // playerSlot = 2 → createTank derives stats from PLAYER2's own star level
     // (playerLevel2), not P1's. The `level` field is set here for symmetry with
     // spawnPlayer; createTank already used playerLevel2 for maxHp/hp/speed/etc.
-    this.player2 = this.createTank('player', col * CELL, row * CELL, 'up', 2)
+    this.player2 = this.createTank('player', cell.x, cell.y, 'up', 2)
     this.player2.level = this.playerLevel2
     this.player2.shieldTimer = 3000
     this.player2.isPlayer = true
@@ -893,6 +900,57 @@ export class World {
   /** Check if a rect is fully inside the playfield */
   isInBounds(x: number, y: number, w: number, h: number): boolean {
     return x >= 0 && y >= 0 && x + w <= GRID * CELL && y + h <= GRID * CELL
+  }
+
+  /**
+   * Resolve a free cell to birth a tank near (x, y).
+   *
+   * A combat unit must NEVER be born on top of terrain or another tank —
+   * overlapping spawns jam BOTH units (neither can drive off the shared
+   * footprint), which is the "互相卡住" deadlock. So when the requested cell is
+   * occupied we UNCONDITIONALLY relocate to the nearest free 32-aligned cell.
+   *
+   * - If the exact requested cell is already free it is returned unchanged, so
+   *   existing spawn paths that hand-pick a verified-free cell see no behaviour
+   *   change (enemy / ally / decoy / guard spawners keep working as before).
+   * - Otherwise we scan the 32-aligned grid and return the nearest free cell.
+   * - Deterministic: fixed scan order, NO RNG draw ⇒ identical world state on
+   *   replay. If the field is somehow entirely full we best-effort return the
+   *   requested (clamped) cell rather than throwing.
+   */
+  findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
+    const step = TANK // tanks are 2×2 tiles ⇒ spawn on the 32px grid
+    const maxX = FIELD - TANK
+    const maxY = FIELD - TANK
+    const rx = clamp(x, 0, maxX)
+    const ry = clamp(y, 0, maxY)
+    if (this.isSpawnCellFree(rx, ry)) return { x: rx, y: ry }
+    let best: { x: number; y: number } | null = null
+    let bestD = Infinity
+    for (let gy = 0; gy <= maxY; gy += step) {
+      for (let gx = 0; gx <= maxX; gx += step) {
+        if (!this.isSpawnCellFree(gx, gy)) continue
+        const dx = gx - rx
+        const dy = gy - ry
+        const d = dx * dx + dy * dy
+        if (d < bestD) {
+          bestD = d
+          best = { x: gx, y: gy }
+        }
+      }
+    }
+    return best ?? { x: rx, y: ry }
+  }
+
+  /** A 32×32 footprint at (x, y) is spawnable iff it clears terrain AND every live tank. */
+  private isSpawnCellFree(x: number, y: number): boolean {
+    if (this.rectHitsTerrain(x, y, TANK, TANK)) return false
+    const tanks = this.allTanks
+    for (let i = 0; i < tanks.length; i++) {
+      const t = tanks[i]
+      if (t.alive && aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) return false
+    }
+    return true
   }
 
   /**
