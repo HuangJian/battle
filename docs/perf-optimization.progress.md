@@ -517,5 +517,6 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 - Round 13（§129）pickup 可达性 memo：**chaos wall −27.7% / −8.3%**（dig-only + 跨 tick 纯 memo，pickupReachCache 默认 ON）
 - Round 15（§130）findPath 内核三连：内核快 12.1%，profile 中 findPath 自耗 20.9%→15.3%，交替 A/B 端到端 +1.8%；god-ai-gate 620/508/473 不变
 - Round 16（§131）carve 二级 memo：交替 A/B 端到端 **+14.2%**（94.0→107.3 sims/s，分布不重叠），全量 1223 tests 全绿；god-ai-gate 620/508/473 不变
-- **当前剩余瓶颈（2026-08-10 chaos/stage1 profile）**：God-AI 决策 `evaluate` 链 **42.7% 含**（属 `think` 决策脑，用户要求不碰）、敌方 `perceive`/`analyze` **~33% 含**（§2.14 诚实阴性）、`updateMovement` 8.7%（game/SimulationCombat，物理扁平数学）、`findPath` 已降至 **5.7%**。行为保真可优化项已见底；进一步优化需触及 `think` 决策逻辑或算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）或用户设定的保行为边界。
-- **线程状态（2026-08-10）**：行为保真优化 STOP。无限制挖墙搜索（§2.16 遗留）为行为变更，用户决定不立项。
+- Round 17（§132）删除无限制挖墙搜索：交替 A/B 端到端 **classic +2.4% / chaos +5.2%**（≈+3~4% 综合）；god-ai-gate **620/508/473 逐字节不变**（3 个 chaos 行为变更查询在 gate 分布内未改任何一胜，按 gate 契约接受为无胜率回归）。carve/dig 链全量 A* 已压到单次 restricted 搜索。
+- **当前剩余瓶颈（2026-08-10 chaos/stage1 profile，Round 15/16/17 后）**：God-AI 决策 `evaluate` 链 **42.7% 含**（属 `think` 决策脑，用户要求不碰）、敌方 `perceive`/`analyze` **~33% 含**（§2.14 诚实阴性）、`updateMovement` 8.7%（game/SimulationCombat，物理扁平数学）、`findPath` 已降至 **5.7%**、carve/dig 链再无冗余全图 A*。行为保真 + 已授权行为变更优化均已见底；进一步需触及 `think` 决策逻辑或算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）或用户设定的保行为边界。
+- **线程状态（2026-08-11）**：行为保真优化已于 8-10 STOP，但「无限制挖墙搜索」项经用户 8-11 重新立项（§2.18 / Round 17），已 SHIPPED 并通过 gate。其余 STOP 结论不变。
