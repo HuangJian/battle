@@ -451,6 +451,44 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **结论**：行为保真线程见底后，dig 回退是首个被批准的**行为变更**优化（用户 8-11 明确授权），且 gate 守住。至此 carve/dig 链全量 A* 已压到单次 restricted 搜索。剩余成本 = `think` 决策脑（用户要求不碰）+ `perceive`（诚实阴性）。
 
+### 2.19 全矩阵 Profile（35 关 × 60 seed × 3 难度，2026-08-11）
+
+用户要求不再只跑 stage 1，改跑完整矩阵。3 份独立 cpu-prof（各覆盖 35×60 全矩阵，并行运行）：chaos 96s / hard 98s / classic 29s，合计 **6300 sims**。与 stage-1 单点结论**显著不同**——stage-1 只跑了第 1 关，严重低估了敌方 AI 感知的规模。
+
+**跨难度聚合 Top 10（自耗时，三难度等权，各 2100 sims）**：
+
+| # | 函数 @ 模块 | 聚合% | chaos | hard | classic |
+|---|---|---|---|---|---|
+| 1 | `evaluate` @ ai/god/think.ts | 7.4% | 7.0 | 6.8 | 10.4 |
+| 2 | `findPath` @ utils/pathfind.ts | 6.9% | 7.0 | 7.5 | 4.2 |
+| 3 | `perceive` @ ai/perception.ts | 6.6% | 7.1 | 7.9 | ~0.3 |
+| 4 | `updateMovement` @ game/SimulationCombat.ts | 6.4% | 6.4 | 6.0 | 7.9 |
+| 5 | `scanAhead` @ ai/perception.ts | 5.3% | 6.0 | 5.4 | ~0.3 |
+| 6 | `rectHitsTerrain` @ game/World.ts | 3.8% | 3.5 | 3.4 | 6.4 |
+| 7 | `analyze` @ ai/perception.ts | 3.5% | 3.9 | 3.9 | ~0.3 |
+| 8 | `thinkImpl` @ ai/god/think.ts | 3.5% | 3.4 | 3.7 | 3.1 |
+| 9 | `scanAheadImpl` @ ai/god/FireControl.ts | 3.5% | 3.1 | 3.0 | 6.5 |
+| 10 | `runChain` @ ai/god/DecisionCore.ts | 2.9% | 2.6 | 2.7 | 4.6 |
+
+`ai/perception.ts` 整模块在 **chaos 17.3% / hard 18.2%**（perceive+scanAhead+analyze 三连），是单模块最大头；classic 仅 ~3%（经典关敌人少/简单）。
+
+**含时宏块（call-tree inclusive）**：
+
+| 宏块 | chaos | hard | classic |
+|---|---|---|---|
+| God-AI `think` 决策树（含 `evaluate`） | 48.8% | 47.8% | 57.6% |
+| 敌方 AI `updateEnemyAI` 链 | 27.3% | 29.1% | 16.6% |
+| 物理/碰撞（updateMovement 等） | ~10% | ~9.5% | ~10% |
+
+**关键反差**：chaos/hard 最大成本是**敌方 AI 感知**（perception 模块 17-18%）；classic 最大成本是 God-AI `evaluate`（10.4% 自耗，含时 57%）。
+
+**极限优化候选（按潜力）**：
+1. `ai/perception.ts` 敌方感知（chaos/hard 17-18%）——全矩阵最大鲸鱼。§2.14 曾判"诚实阴性"，但基于 stage-1 单点，规模被低估一个数量级。需用全矩阵重新插桩验证跨坦克复用度（同 tick 战场快照可能让 scanAhead 跨坦克复用）。砍 20% ≈ +3.5% 全局，比 findPath 收益大。
+2. `scanAheadImpl`（开火威胁扫描，classic 6.5%）——tick 级去重候选，classic 尤热。
+3. `isBaseUnderThreat`（classic 4.5%）——God-AI 基地威胁检查，调用频次高，疑似冗余。
+4. `findPath`（6.9% 聚合）——已 Round 15 见底。
+5. `evaluate`/`think`（God-AI 决策脑）——用户要求不碰。
+
 ---
 
 ## 3. 性能反模式（AGENTS.md §14）
