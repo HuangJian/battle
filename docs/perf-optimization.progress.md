@@ -323,6 +323,8 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **首次基线（2026-08-05 同机）**: 合计 wall=22577ms / ticks=4586281 / wins=689/1050 / perTick=0.0049ms；分难度 classic 3537ms(16%) / hard 9590ms(42%) / chaos 9450ms(42%)——hard+chaos 占 84%，印证 God-AI 重负载占比。**分难度签名**：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`（各与单难度 baseline 逐字节一致）。
 
+> **基线过期提醒（2026-08-10）**：上表 ~22.6s / 689 胜率为 2026-08-05 旧机测量，其后 God-AI 强度已提升，且本机连续高负载后存在降频，**不可再直接横向对比**。当前行为契约以 `tests/god-ai-gate.test.ts` 的 **620/508/473** 为准（截至 2026-08-10 仍严格通过）。新鲜三难度基线见 §2.17。
+
 ### 2.13 Round 13：pickup 可达性 dig-only + 跨 tick memo（§129，SHIPPED）
 
 **日期**: 2026-08-05
@@ -399,6 +401,26 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **遗留方向**: 「无限制挖墙搜索 0/5401 成功」说明受限搜索失败时它几乎必然白跑（受限搜索最小化受罚格用量，它失败则无限制版更不可能 carve-safe——两者不完全等价仅因 A\* 按格计价而 `pathCarveSafeImpl` 按 2×2 足迹判定）。删掉它可再省一批全图搜索，但那是**行为变更**（尾部场景可能翻盘），需单独立项走 A/B 与 gate。
 
+### 2.17 优化线程收尾（2026-08-10，STOP）
+
+**决策**：用户确认行为保真优化线程到此为止。Round 11/13/15/16 已落地全部清晰可优化项（replan 缓存 / pickup memo / findPath 内核三连 / carve 二级 memo）。剩余成本项均不属行为保真可优化范围：
+- God-AI 决策 `evaluate` 链（chaos 42.7% 含）属 `think` 决策脑，用户要求不碰（避免重校真值表）；
+- 敌方 `perceive`/`analyze`（chaos ~33% 含）§2.14 已判诚实阴性（无可去重重复调用，再压需算法级变更，违反 simple-beats-clever）；
+- 无限制挖墙搜索（§2.16 遗留：5401 次全图 A* 0 成功）为**行为变更**，用户决定不立项。
+
+**当前三难度基线（2026-08-10 单测，热机状态，仅作状态记录，非干净热基准）**：
+
+| 难度 | wall | 占比 |
+|------|------|------|
+| classic | 3728ms | 10% |
+| hard | 20975ms | 55% |
+| chaos | 13428ms | 35% |
+| **GRAND** | **38132ms** | ticks=4847091 wins=791/1050 perTick=0.0079ms |
+
+> 此数高于 §2.12 旧基线（22.6s）因：① God-AI 强度提升使对局更长（同 350 场/难度下胜率 689→791）；② 测量于连续 cpu-prof + gate 后的热机状态，含降频。行为契约 god-ai-gate 620/508/473 仍严格通过，无回退。后续若需干净基准，应在冷机下重测。
+
+**结论**：行为保真优化已达当前架构下的收益上限（findPath 自耗从 17–20% 压到 5.7%），停止线程。
+
 ---
 
 ## 3. 性能反模式（AGENTS.md §14）
@@ -458,9 +480,12 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 ## 8. 最终状态
 
-- `bun run check` 全绿（test + typecheck + lint + format）；982 tests / 79 files，0 fail（2026-08-05）
-- 确定性签名（§128 三难度基线，各与单难度 baseline 一致）：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`
+- `bun run check` 全绿（test + typecheck + lint + format）；截至 Round 16 全量 **1223 tests / 0 fail**（2026-08-10）
+- **行为契约（权威）**：`tests/god-ai-gate.test.ts` → classic **620/700**、hard **508/700**、chaos **473/700**，逐关不变（2026-08-10 重测通过）。§2.12 的 §128 三难度确定性签名（classic 1169769/317 等）为 2026-08-05 旧测，因 God-AI 强度提升已不可直接对比，见 §2.17。
 - Round 11（§127）replan 缓存：**chaos wall −27~32%**（replanInterval=1 主战场），classic ±2% 噪声；replanCache 默认 ON
-- Round 12（§128）：标准基线改为 **classic/hard/chaos 各 1/3**（每难度全 35 关 × 10 games）
-- Round 13（§129）pickup 可达性 memo：**chaos wall −27.7% / −8.3%**（dig-only + 跨 tick 纯 memo，pickupReachCache 默认 ON）；三难度签名逐字节不变
-- 剩余瓶颈（2026-08-05 chaos/stage0 profile）：`ai/perception.ts` 18.6% 最大热点（perceive 9.1% + scanAhead 6.0%——§2.14 插桩研究：无可去重重复调用，已扁平化+惰性化，再压需算法级变更）、`updateMovement` 7.7%（game/SimulationCombat）、`findPath` 6.6%（replan §127 + pickup §129 已缓存；剩余为 chokepoint 威胁路径 + 缓存 miss；bucket queue 已否决 §68/§88）、`rectHitsTerrain` 3.6%（比较链重排否决 §124）——进一步优化需算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）
+- Round 12（§128）：标准基线改为 **classic/hard/chaos 各 1/3**（每难度全 35 关 × 10 games）；该基线数字已过期（§2.17）
+- Round 13（§129）pickup 可达性 memo：**chaos wall −27.7% / −8.3%**（dig-only + 跨 tick 纯 memo，pickupReachCache 默认 ON）
+- Round 15（§130）findPath 内核三连：内核快 12.1%，profile 中 findPath 自耗 20.9%→15.3%，交替 A/B 端到端 +1.8%；god-ai-gate 620/508/473 不变
+- Round 16（§131）carve 二级 memo：交替 A/B 端到端 **+14.2%**（94.0→107.3 sims/s，分布不重叠），全量 1223 tests 全绿；god-ai-gate 620/508/473 不变
+- **当前剩余瓶颈（2026-08-10 chaos/stage1 profile）**：God-AI 决策 `evaluate` 链 **42.7% 含**（属 `think` 决策脑，用户要求不碰）、敌方 `perceive`/`analyze` **~33% 含**（§2.14 诚实阴性）、`updateMovement` 8.7%（game/SimulationCombat，物理扁平数学）、`findPath` 已降至 **5.7%**。行为保真可优化项已见底；进一步优化需触及 `think` 决策逻辑或算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）或用户设定的保行为边界。
+- **线程状态（2026-08-10）**：行为保真优化 STOP。无限制挖墙搜索（§2.16 遗留）为行为变更，用户决定不立项。
