@@ -49,8 +49,7 @@ const SKIP_RE = /^(tmp|node_modules|dist|\.git)([\\/]|$)/
  * in sync with the measured wall-time of the suite (see per-file profiling).
  */
 const HEAVY_TESTS = new Set<string>([
-  'god-ai-hard-chaos-gate', // ~50s: 2 difficulties × 35 stages × 20 seeds × 18000 ticks
-  'god-ai-regression-gate', // ~6s: classic 700-sim gate
+  'god-ai-gate', // ~26s: unified worker-pool gate, 3 difficulties × 35 stages × 20 seeds
   'calibration', // ~2.5s: CMA-ES calibration sweep
 ])
 
@@ -59,10 +58,6 @@ function isHeavyFile(path: string): boolean {
   // strip it here to match the HEAVY_TESTS basenames.
   const base = baseName(path).replace(/\.(test|spec)$/, '')
   if (HEAVY_TESTS.has(base)) return true
-  // The hard/chaos gate is split into parallel part files (god-ai-hard-chaos-gate.partN.{hard,chaos}.test.ts)
-  // plus its aggregate reducer. Each part runs a full-suite simulation batch, so treat the whole
-  // family as heavy and keep it out of the fast scoped run by default.
-  if (base.startsWith('god-ai-hard-chaos-gate.')) return true
   return false
 }
 
