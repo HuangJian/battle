@@ -1079,8 +1079,6 @@ export class GodAIInput implements InputLike {
    */
   isBaseUnderThreat(): boolean {
     if (!this.hasBase) return false
-    // Per-tick cache: called up to 3× per tick (think skipT2a, think powerup
-    // gate, selectTarget). Pure function of World state — byte-identical.
     if (this._baseUnderThreatCache !== null) return this._baseUnderThreatCache
     const bc = BASE_POS.col
     const br = BASE_POS.row

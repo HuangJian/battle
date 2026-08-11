@@ -489,6 +489,31 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 4. `findPath`（6.9% 聚合）——已 Round 15 见底。
 5. `evaluate`/`think`（God-AI 决策脑）——用户要求不碰。
 
+### 2.20 瓶颈优化尝试 + 全矩阵插桩（2026-08-11）
+
+用户要求「在保证胜率不下降的严格前提下，依次尝试优化上述 top-10 瓶颈」。按项目约定**先测量再动手**：在 `perceive` / `scanAheadImpl` / `isBaseUnderThreat` 三处插桩，跑完整矩阵（classic+chaos 各 35×60=2100 sims，单进程聚合计数器），得到子成本拆分。插桩已回退，gate 重跑 **620/508/473 逐字节不变**。
+
+**插桩实测（全矩阵 35×60×2 难度）**：
+
+| 函数 | diff | 调用 | 关键子成本 | 缓存命中 |
+|---|---|---|---|---|
+| `perceive` | classic | **0** | — | — |
+| `perceive` | chaos | 32.35M | bulletIters 55.7M · listIters 161.3M(≈5 坦/调用) · canStepTankIters 14.1M(rarely needOpenDirs) | — |
+| `scanAheadImpl` | classic | 7.78M | — | **5.3%** |
+| `scanAheadImpl` | chaos | 11.74M | — | **6.2%** |
+| `isBaseUnderThreat` | classic | 19.9M | — | **70.0%** |
+| `isBaseUnderThreat` | chaos | 33.3M | — | **69.0%** |
+
+**逐项结论（均行为保真无解，诚实阴性）**：
+
+1. **`perceive`（chaos/hard 专属；classic 0 调用）**：每调用 161.3M/32.35M ≈ **5 坦均长**的列表遍历——整矩阵累计 161M 次 ≈ chaos wall 0.8%，循环本身极小。真实成本在 **32M 次 `Perception` 对象分配 + 函数调用开销 + `analyze`→`scanAhead` 网格步行**（位置相关，不可跨坦复用）。 teammates 聚合循环**已是与 congestion/nearestDecoy 合并的单循环**，把 teammateCount/SumX/Y 提升为 per-tick 全局预计算**并不能消除该循环**（congestion/decoy 仍需 per-调用遍历）→ 净行为保真收益 ≈ 0。要砍需改 `perceive` 返回契约（复用 buffer）或降调用频次（行为变更）。
+2. **`scanAheadImpl`**：per-tick memo（§123）命中率仅 **5-6%**——因为 `think()` 每 tick 约只调它 ~1 次（classic 7.78M / (2100 × ~3500 tick) ≈ 1 次/tick），同 tick 内无同 (origin,dir) 重复可去重。成本是**固有网格步行扫描**，不可在 per-tick 层消除。§123 memo 近乎死重但无害，保留。
+3. **`isBaseUnderThreat`**：已 70% per-tick 缓存，余下成本是 **19.9M 次函数调用开销**（classic）。降调用需重构 `think()` 各分支改为传值（行为风险），非便宜的胜。
+4. **`updateMovement` / `rectHitsTerrain`**（物理/碰撞 6.4%/3.8%）：扁平数学 + 碰撞查询，再压需 SIMD/空间索引（算法级变更），违反 simple-beats-clever。
+5. **`evaluate` / `thinkImpl` / `runChain`**（God-AI 决策脑 7.4%/3.5%/2.9%）：属用户要求不碰的真值表决策逻辑；纯微优化（去分配/早退）收益小、风险高。
+
+**结论**：top-10 瓶颈在**行为保真层已到收益上限**——要么已是 per-tick memo/allocation-free 极限（scanAheadImpl/isBaseUnderThreat），要么成本是固有分配/调用/扁平数学（perceive/物理），要么属禁碰的决策脑。进一步收益**只能来自受控行为变更**（降调用频次，如 `perceive` 节流 / `isBaseUnderThreat` 调用合并），须经 god-ai-gate（620/508/473）守门。未经用户授权不单方面跨行为变更线。
+
 ---
 
 ## 3. 性能反模式（AGENTS.md §14）
