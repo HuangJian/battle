@@ -143,7 +143,79 @@ const _pfCameFrom = new Int32Array(PF_N)
 const _pfCameDir = new Uint8Array(PF_N)
 const _pfInOpen = new Uint8Array(PF_N)
 const _pfClosed = new Uint8Array(PF_N)
-const _pfOpenList: number[] = []
+// Binary min-heap (lazy deletion) for the A* open set. Keyed by (fScore,
+// firstSeq) so the extraction order is identical to the old linear-scan
+// (lowest f, earliest-first-push tie-break) → byte-for-byte same path — but
+// extract-min is O(log n) instead of O(n). Stale entries (from relaxations that
+// re-push a node) are skipped on pop via closed[]; firstSeq is assigned ONCE per
+// node (on first push) so a later re-push keeps the original tie-break order.
+//
+// Storage is three parallel preallocated typed arrays (struct-of-arrays) rather
+// than a growable number[] of triples: no `push`/`length=` traffic on a JS array
+// and no boxing. Capacity is provably sufficient — a node is only (re-)pushed
+// when its gScore strictly improves, which can happen at most once per incoming
+// edge (4-connected grid), so total pushes ≤ 4·PF_N + 1 (start node).
+const PF_HEAP_CAP = PF_N * 4 + 8
+const _pfHeapF = new Float64Array(PF_HEAP_CAP)
+const _pfHeapS = new Int32Array(PF_HEAP_CAP)
+const _pfHeapK = new Int32Array(PF_HEAP_CAP)
+let _pfHeapSize = 0
+const _pfFirstSeq = new Int32Array(PF_N)
+
+function pfLess(a: number, b: number): boolean {
+  const fa = _pfHeapF[a]
+  const fb = _pfHeapF[b]
+  if (fa !== fb) return fa < fb
+  return _pfHeapS[a] < _pfHeapS[b]
+}
+function pfSwap(a: number, b: number): void {
+  const f = _pfHeapF[a]
+  const s = _pfHeapS[a]
+  const k = _pfHeapK[a]
+  _pfHeapF[a] = _pfHeapF[b]
+  _pfHeapS[a] = _pfHeapS[b]
+  _pfHeapK[a] = _pfHeapK[b]
+  _pfHeapF[b] = f
+  _pfHeapS[b] = s
+  _pfHeapK[b] = k
+}
+function pfPush(f: number, seq: number, key: number): void {
+  let i = _pfHeapSize++
+  _pfHeapF[i] = f
+  _pfHeapS[i] = seq
+  _pfHeapK[i] = key
+  while (i > 0) {
+    const p = (i - 1) >> 1
+    if (pfLess(i, p)) {
+      pfSwap(i, p)
+      i = p
+    } else break
+  }
+}
+/** Extract-min. Returns the cell key, or -1 when the heap is empty. */
+function pfPop(): number {
+  const n = _pfHeapSize
+  if (n === 0) return -1
+  const rkey = _pfHeapK[0]
+  const li = n - 1
+  _pfHeapSize = li
+  if (li === 0) return rkey
+  _pfHeapF[0] = _pfHeapF[li]
+  _pfHeapS[0] = _pfHeapS[li]
+  _pfHeapK[0] = _pfHeapK[li]
+  let i = 0
+  for (;;) {
+    const l = 2 * i + 1
+    if (l >= li) break
+    const r = l + 1
+    let smallest = pfLess(l, i) ? l : i
+    if (r < li && pfLess(r, smallest)) smallest = r
+    if (smallest === i) break
+    pfSwap(i, smallest)
+    i = smallest
+  }
+  return rkey
+}
 
 /**
  * A* pathfinding: returns the sequence of `Direction`s to move a 2×2-block
@@ -176,11 +248,11 @@ export function findPath(
 
   // A* over a 26×26 grid (≤ 676 nodes). State lives in flat typed arrays
   // indexed by integer cell key (row*GRID+col) — no Map/Set/string churn in
-  // the hot loop. The open set is scanned linearly in **insertion order**
-  // (entries are never reordered, only flagged closed), so the lowest-f
-  // tie-break is identical to the original Set-iterated implementation and
-  // the returned Direction[] sequence is byte-for-byte the same. Only the
-  // allocations changed — search result is preserved.
+  // the hot loop. The open set is a binary min-heap (lazy deletion) keyed by
+  // (fScore, firstSeq): extract-min is O(log n), and the (lowest-f,
+  // earliest-first-push) tie-break is identical to the old linear-scan, so the
+  // returned Direction[] sequence is byte-for-byte the same as before. Only the
+  // extraction cost changed — search result is preserved.
   //
   // Reusable module-level buffers are reset here. Only the 3 arrays whose
   // "unvisited" default is non-zero need resetting (gScore→Infinity,
@@ -196,8 +268,10 @@ export function findPath(
   inOpen.fill(0)
   const closed = _pfClosed
   closed.fill(0)
-  const openList = _pfOpenList
-  openList.length = 0
+  const firstSeq = _pfFirstSeq
+  firstSeq.fill(-1)
+  _pfHeapSize = 0
+  let seqCounter = 0
 
   const startKey = from.row * GRID + from.col
   const goalKey = to.row * GRID + to.col
@@ -208,29 +282,18 @@ export function findPath(
 
   gScore[startKey] = 0
   fScore[startKey] = Math.abs(from.col - toCol) + Math.abs(from.row - toRow)
+  firstSeq[startKey] = seqCounter++
   inOpen[startKey] = 1
-  openList.push(startKey)
+  pfPush(fScore[startKey], firstSeq[startKey], startKey)
 
   // Two specialized hot loops: the common case (breakBrick=false) inlines a
   // constant stepCost=1 and skips the brick-footprint scan, saving 4
   // tileMap.get calls per neighbor. breakBrick=true keeps the scan.
   if (!breakBrick) {
-    while (openList.length > 0) {
-      // Lowest fScore; on ties keep the earliest-inserted entry — matches the
-      // original Set iteration order so the chosen path is unchanged.
-      let currentKey = -1
-      let currentF = Infinity
-      for (let i = 0; i < openList.length; i++) {
-        const k = openList[i]
-        if (closed[k]) continue
-        const f = fScore[k]
-        if (f < currentF) {
-          currentF = f
-          currentKey = k
-        }
-      }
-      if (currentKey === -1) break // open set exhausted, no path
-
+    for (;;) {
+      const currentKey = pfPop()
+      if (currentKey < 0) break
+      if (closed[currentKey]) continue // lazy deletion: skip stale entries
       if (currentKey === goalKey) {
         // Reconstruct path by walking cameFrom back to the start.
         const path: Direction[] = []
@@ -244,7 +307,6 @@ export function findPath(
       }
 
       closed[currentKey] = 1
-      inOpen[currentKey] = 0
       const cc = currentKey % GRID
       const cr = (currentKey - cc) / GRID
 
@@ -283,30 +345,22 @@ export function findPath(
           cameFrom[nk] = currentKey
           cameDir[nk] = s
           gScore[nk] = tentativeG
-          fScore[nk] = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
-          if (!inOpen[nk]) {
+          const nf = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
+          fScore[nk] = nf
+          if (firstSeq[nk] === -1) {
+            firstSeq[nk] = seqCounter++
             inOpen[nk] = 1
-            openList.push(nk)
           }
+          pfPush(nf, firstSeq[nk], nk)
         }
       }
     }
   } else {
     // breakBrick=true branch — keeps the brick-footprint stepCost scan.
-    while (openList.length > 0) {
-      let currentKey = -1
-      let currentF = Infinity
-      for (let i = 0; i < openList.length; i++) {
-        const k = openList[i]
-        if (closed[k]) continue
-        const f = fScore[k]
-        if (f < currentF) {
-          currentF = f
-          currentKey = k
-        }
-      }
-      if (currentKey === -1) break
-
+    for (;;) {
+      const currentKey = pfPop()
+      if (currentKey < 0) break
+      if (closed[currentKey]) continue
       if (currentKey === goalKey) {
         const path: Direction[] = []
         let ck = currentKey
@@ -319,7 +373,6 @@ export function findPath(
       }
 
       closed[currentKey] = 1
-      inOpen[currentKey] = 0
       const cc = currentKey % GRID
       const cr = (currentKey - cc) / GRID
 
@@ -349,11 +402,13 @@ export function findPath(
           cameFrom[nk] = currentKey
           cameDir[nk] = s
           gScore[nk] = tentativeG
-          fScore[nk] = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
-          if (!inOpen[nk]) {
+          const nf = tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow)
+          fScore[nk] = nf
+          if (firstSeq[nk] === -1) {
+            firstSeq[nk] = seqCounter++
             inOpen[nk] = 1
-            openList.push(nk)
           }
+          pfPush(nf, firstSeq[nk], nk)
         }
       }
     }
