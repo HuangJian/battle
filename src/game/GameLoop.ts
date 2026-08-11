@@ -331,6 +331,10 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
               this.recorder.startNew(this.world)
               // Lie-Back-Win-Mode §3.4: re-arm auto-fire each stage.
               if (this.autoFireInput) this.autoFireInput.reset()
+              // §190: reset God AI per-stage caches (centralBreachRisk, stage-
+              // adapted params) for coop P2 and spectate P1/P2.
+              this.godInput?.reset()
+              this.godInput2?.reset()
             }
 
             // Detect stage clear → save victory replay
@@ -406,6 +410,7 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           if (this.world.coop && !this.godInput && this.world.player2) {
             const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
             this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
+            this.godInput.reset()
             // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
             this.autoFireInput = new AutoFireInput(this.input)
             this.wireLiveInputs()

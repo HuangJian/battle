@@ -1008,6 +1008,19 @@ export class GodAIInput implements InputLike {
   }
 
   /**
+   * §190: True when the dual central breach strategy should be active for this
+   * AI. In 督战双玩家 (spectateDual): active for BOTH P1 and P2. In 躺赢模式
+   * (coop): active only for the God AI controlling P2 (P1 is human-controlled,
+   * so P1-specific gates still check spectateDual and remain OFF in coop).
+   * This enables P2 to use the same dual strategies (spawn patrol, defense
+   * de-confliction, directMove, fence pickup, etc.) in coop mode as in dual
+   * spectate mode — the user request "GOD AI 使用 dual 模式下 player2 策略".
+   */
+  get dualStrategyActive(): boolean {
+    return (this.world.spectateDual || this.world.coop) && this._centralBreachRisk
+  }
+
+  /**
    * §187: Set to true for guard AI brains (created by SimulationEnemies).
    * When true (or when isPlayer2()), the A* pathfinding treats the primary
    * player (w.player) as an impassable obstacle — preventing the guard/player

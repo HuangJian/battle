@@ -24,6 +24,7 @@ import item_boat from './item_boat.svg?url'
 import item_frenzy from './item_frenzy.svg?url'
 import item_sacrifice from './item_sacrifice.svg?url'
 import item_guard from './item_guard.svg?url'
+import item_repair from './item_repair.svg?url'
 import explosion from './explosion.svg?url'
 import fx_shield from './fx_shield.svg?url'
 import fx_starbuf1 from './fx_starbuf1.svg?url'
@@ -65,6 +66,7 @@ export const SPRITE_URLS: Record<string, string> = {
   'item.frenzy': item_frenzy,
   'item.sacrifice': item_sacrifice,
   'item.guard': item_guard,
+  'item.repair': item_repair,
   // Effects
   'fx.explosion': explosion,
   'fx.shield': fx_shield,

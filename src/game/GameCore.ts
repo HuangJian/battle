@@ -162,6 +162,9 @@ export class GameCore {
         }
       },
     })
+    // §190: Wire the spectate takeover button — the user clicks "Take Over"
+    // while paused in spectate mode to take control of player1.
+    this.presentation.ui.onSpectateTakeover = () => this.takeOverFromSpectate()
 
     // Reflect the persisted Performance Mode in the UI (DPR is already applied
     // via the PresentationLayer constructor; here we set the render-FPS cap
@@ -245,6 +248,7 @@ export class GameCore {
       // Wire AI inputs
       const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
+      this.godInput.reset()
       this.autoFireInput = new AutoFireInput(this.input)
       this.wireLiveInputs()
       this.presentation.ui.notify(t('toast.coopOn'), 'info')
@@ -341,6 +345,7 @@ export class GameCore {
     // God AI drives player1 (default controlledTank = `w => w.player`).
     const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
     this.godInput = new GodAIInput(w, undefined, rng)
+    this.godInput.reset()
     this.autoFireInput = null
     if (dual) {
       w.spectateDual = true
@@ -408,6 +413,53 @@ export class GameCore {
     this.presentation.ui.notify(t('toast.spectateOff'), 'info')
   }
 
+  /**
+   * §190: Take over player1 from spectate mode while paused. Disables
+   * spectate, wires the human keyboard as player1 input, and unpauses.
+   * The God AI is cleaned up; if it was dual spectate, player2 is removed.
+   */
+  takeOverFromSpectate(): void {
+    const w = this.world
+    if (!w.spectate) return
+    if (w.state !== 'paused') return
+    const wasDual = w.spectateDual
+
+    // Disable spectate — human controls P1 now.
+    this.simulation.requestSpectateToggle(false)
+    this.simulation.requestSpectateDualToggle(false)
+    w.spectate = false
+    w.spectateDual = false
+
+    // Capture the dual-spectate P2 God AI before tearing it down — it becomes
+    // the 躺赢 (coop) partner when taking over from 2x督战.
+    const p2Ai = wasDual ? this.godInput2 : null
+    this.godInput = null
+    this.godInput2 = null
+    this.autoFireInput = null
+
+    if (wasDual && p2Ai && w.player2) {
+      // 2x督战 → 躺赢模式 (coop): human drives P1, the God AI keeps driving P2.
+      // Keep the already-spawned player2 (lives2 / playerLevel2 survive).
+      // Setting `coop = true` also stops the deferred spectate-off apply
+      // (SimulationCore.updatePlaying) from stripping player2 on the next tick.
+      w.coop = true
+      this.godInput = p2Ai // coop partner is `godInput`, bound to player2
+      this.autoFireInput = new AutoFireInput(this.input)
+      this.presentation.ui.controlCenter.setCoopState(true)
+      this.presentation.ui.notify(t('toast.coopOn'), 'info')
+    }
+
+    this.wireLiveInputs()
+    this.audio.player2Id = w.player2?.id ?? null
+    this.presentation.ui.controlCenter.setSpectateState('off')
+    // Unpause the game.
+    this.simulation.togglePause()
+    this.presentation.ui.showScreen('playing')
+    this.presentation.ui.notify(t('toast.takeoverSuccess'), 'info')
+    this.presentation.markNeedsRender()
+    this.scheduleFrame()
+  }
+
   // ---- Battle speed (Alt+> faster / Alt+< slower) ----
 
   /** Step the live battle speed one notch up (+1) or down (−1). */
@@ -430,6 +482,7 @@ export class GameCore {
     if (!w.spectate || this.godInput || !w.player) return
     const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
     this.godInput = new GodAIInput(w, undefined, rng)
+    this.godInput.reset()
     this.autoFireInput = null
     // 督战双玩家: re-arm second God AI for player2
     if (w.spectateDual && w.player2 && !this.godInput2) {

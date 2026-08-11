@@ -1141,11 +1141,11 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
     // Dual central breach strategy (plan/dual-central-breach-strategy.md §B):
     // P1 holds the center guard position (shift 0) to intercept col-12
     // breachers; P2 takes the left flank (shift -2) to cover col 0/6 spawns
-    // and avoid §159 yield at center. Gated by spectateDual &&
-    // centralBreachRisk — single-player keeps the existing P1-left/P2-right
-    // split (byte-identical).
+    // and avoid §159 yield at center. Gated by dualStrategyActive
+    // (spectateDual || coop) && centralBreachRisk — single-player keeps the
+    // existing P1-left/P2-right split (byte-identical).
     let shift: number
-    if (self.world.spectateDual && self._centralBreachRisk) {
+    if (self.dualStrategyActive) {
       shift = self.isPlayer2() ? -2 : 0
     } else {
       shift = self.isPlayer2() ? 2 : -2
@@ -1501,7 +1501,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   if (
     self.params.emergencyBaseHpFrac > 0 &&
     self.hasBase &&
-    w.spectateDual &&
+    (w.spectateDual || w.coop) &&
     w.baseHp <= self.params.emergencyBaseHpFrac * w.baseMaxHp
   ) {
     return self.getDefaultDefensePosition()
@@ -1783,11 +1783,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // §177: the P2 half of the same split — sweep the enemy spawn points
     // instead of drifting toward a static flank cell. Yields to the normal
     // nearest-enemy hunt as soon as an enemy is close enough to engage (see
-    // findDualPatrolTargetImpl). Gated by spectateDual && centralBreachRisk
-    // && isPlayer2 — single-player and P1 unaffected (byte-identical).
+    // findDualPatrolTargetImpl). Gated by dualStrategyActive (spectateDual || coop)
+    // && centralBreachRisk && isPlayer2 — single-player and P1 unaffected (byte-identical).
     if (
-      self.world.spectateDual &&
-      self._centralBreachRisk &&
+      self.dualStrategyActive &&
       self.isPlayer2() &&
       self.params.dualCentralBreachP2Patrol > 0
     ) {
@@ -1878,8 +1877,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // the split is by player index, not by who happens to be closer.
   const p2DefenseSecond =
     self.params.dualCentralBreachP2DefenseSecond > 0 &&
-    w.spectateDual &&
-    self._centralBreachRisk &&
+    self.dualStrategyActive &&
     self.isPlayer2() &&
     coopActive
   let secondEnemy: Tank | null = null
@@ -2040,8 +2038,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // byte-identical).
   const p2AnchorSplit =
     self.params.dualCentralBreachP2AnchorSplit > 0 &&
-    w.spectateDual &&
-    self._centralBreachRisk &&
+    self.dualStrategyActive &&
     self.isPlayer2() &&
     coopActive
   const guardAnchor = p2AnchorSplit ? null : self.getBaseGuardAnchor()

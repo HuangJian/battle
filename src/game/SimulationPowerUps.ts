@@ -10,6 +10,7 @@ import {
   EMP_DURATION_MS,
   GRID,
   BASE_POS,
+  REPAIR_HEAL_AMOUNT,
 } from '../constants'
 import { SUPER_POWERUP_TYPES, POWERUP_TIERS, POWERUP_TIER_WEIGHTS } from '../config/powerups'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
@@ -431,14 +432,14 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
           break
 
         case 'boat':
-          // Grant amphibious movement: can traverse water and ice without penalty
-          this.applyBoatPowerUp()
+          // Grant amphibious movement to the COLLECTOR (拾取坦克): traverses water/ice.
+          this.applyBoatPowerUp(collector)
           break
 
         // ---- New power-ups (new-powerups-plan) ----
         case 'repair':
-          // Fully restore the PLAYER tank's HP (new-powerups-plan §4.1).
-          this.applyRepairPowerUp()
+          // Heal the COLLECTOR (拾取坦克) by a fixed amount — not a full restore (§189).
+          this.applyRepairPowerUp(collector)
           break
 
         case 'emp':
@@ -484,30 +485,40 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
       // the bottom edge is off-grid). The ring lasts FENCE_DURATION_FRAMES, then
       // reverts to brick in updateFence().
       //
-      // §188: Skip any ring cell that overlaps a tank body. Converting a cell
-      // to steel while a tank is on top of it permanently traps the tank —
-      // rectHitsTerrain detects the overlap on every subsequent move attempt,
-      // so the tank can never leave (S9@seed119: 532.7s stuck, game timeout).
-      // allTanks includes player, player2, allies, and enemies.
+      // §188→§189: Instead of skipping ring cells that overlap a tank (which
+      // leaves gaps in the steel ring), FORCE-MOVE the tank to the nearest
+      // clear position outside the ring before placing steel. This avoids
+      // trapping the tank (S9@seed119: 532.7s stuck, game timeout) while
+      // ensuring a complete ring. If no clear position is found, the cell
+      // is still skipped as a safety net. allTanks includes player, player2,
+      // allies, and enemies.
       const allTanks = w.allTanks
       let placed = 0
       for (const pos of baseRingPositions()) {
         if (placed >= FENCE_STEEL_COUNT) break
         const existing = w.tileMap.get(pos.col, pos.row)
         if (existing === 'empty' || existing === 'brick') {
-          // Check no tank overlaps this cell.
           const cx = pos.col * CELL
           const cy = pos.row * CELL
-          let blocked = false
+          // Push any tanks overlapping this cell outside the ring.
           for (let ti = 0; ti < allTanks.length; ti++) {
             const t = allTanks[ti]
             if (!t.alive) continue
             if (aabb(cx, cy, CELL, CELL, t.x, t.y, t.w, t.h)) {
-              blocked = true
+              this.pushTankOutsideRing(t, pos)
+            }
+          }
+          // Re-check: is the cell now clear of tanks?
+          let stillBlocked = false
+          for (let ti = 0; ti < allTanks.length; ti++) {
+            const t = allTanks[ti]
+            if (!t.alive) continue
+            if (aabb(cx, cy, CELL, CELL, t.x, t.y, t.w, t.h)) {
+              stillBlocked = true
               break
             }
           }
-          if (blocked) continue
+          if (stillBlocked) continue
           w.tileMap.set(pos.col, pos.row, 'steel')
           placed++
         }
@@ -517,6 +528,87 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
       // (same stacking rule as shield/freeze/boat). The steel ring is re-laid
       // idempotently over empty/brick cells, so re-applying is safe.
       w.fenceExpireFrame = (w.fenceExpireFrame ?? w.frame) + FENCE_DURATION_FRAMES
+    }
+
+    /**
+     * §189: Push a tank to the nearest clear position outside the base ring.
+     * Tries the primary direction (away from base center based on which ring
+     * edge the cell is on) first, then falls back to the other cardinal
+     * directions. Each direction is tried at increasing distances (TANK,
+     * TANK+CELL, … up to TANK×4) until a collision-free position is found.
+     * If no clear position exists in any direction, the tank is left in place
+     * and the caller skips the steel for that cell.
+     */
+    private pushTankOutsideRing(
+      tank: Tank,
+      ringCell: { col: number; row: number },
+    ): void {
+      const bc = BASE_POS.col
+      const br = BASE_POS.row
+      // Primary push direction based on which ring edge the cell is on.
+      const primary: { dx: number; dy: number } =
+        ringCell.row === br - 1
+          ? { dx: 0, dy: -1 } // top edge → push up
+          : ringCell.col === bc - 1
+            ? { dx: -1, dy: 0 } // left edge → push left
+            : ringCell.col === bc + 2
+              ? { dx: 1, dy: 0 } // right edge → push right
+              : { dx: 0, dy: -1 } // fallback → push up
+      // Direction order: primary first, then the rest (deduped).
+      const allDirs: Array<{ dx: number; dy: number }> = [primary]
+      for (const d of [
+        { dx: 0, dy: -1 },
+        { dx: -1, dy: 0 },
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: 1 },
+      ]) {
+        if (d.dx !== primary.dx || d.dy !== primary.dy) allDirs.push(d)
+      }
+      for (const dir of allDirs) {
+        for (let dist = TANK; dist <= TANK * 4; dist += CELL) {
+          const nx = tank.x + dir.dx * dist
+          const ny = tank.y + dir.dy * dist
+          if (this.isTankPositionClear(nx, ny, tank)) {
+            tank.x = nx
+            tank.y = ny
+            return
+          }
+        }
+      }
+      // No clear position found — leave tank in place (cell will be skipped).
+    }
+
+    /**
+     * §189: Check if a TANK-sized rect at (x,y) is free of terrain and other
+     * tanks. Used by pushTankOutsideRing to find a safe teleport target.
+     */
+    private isTankPositionClear(x: number, y: number, excludeTank: Tank): boolean {
+      const w = this.world
+      // Bounds check
+      if (x < 0 || x + TANK > FIELD || y < 0 || y + TANK > FIELD) return false
+      // Terrain check — must be empty or ice (passable, non-blocking)
+      const col1 = Math.floor(x / CELL)
+      const col2 = Math.floor((x + TANK - 1) / CELL)
+      const row1 = Math.floor(y / CELL)
+      const row2 = Math.floor((y + TANK - 1) / CELL)
+      for (let r = row1; r <= row2; r++) {
+        for (let c = col1; c <= col2; c++) {
+          const t = w.tileMap.get(c, r)
+          if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
+            return false
+          }
+        }
+      }
+      // Tank collision check
+      const allTanks = w.allTanks
+      for (let ti = 0; ti < allTanks.length; ti++) {
+        const other = allTanks[ti]
+        if (!other.alive || other === excludeTank) continue
+        if (aabb(x, y, TANK, TANK, other.x, other.y, other.w, other.h)) {
+          return false
+        }
+      }
+      return true
     }
 
     /**
@@ -536,27 +628,30 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
       w.fenceExpireFrame = undefined
     }
 
-    private applyBoatPowerUp(): void {
+    private applyBoatPowerUp(collector?: Tank): void {
       const w = this.world
-      const p = w.player
+      const p = collector ?? w.player
       if (!p) return
 
       // Timed buff: accumulate duration (same rule as shield/freeze). Picking up
-      // another boat while one is active extends amphibious movement.
+      // another boat while one is active extends amphibious movement. Applies to
+      // the COLLECTOR (拾取坦克) — in coop that is player2, not always player1.
       p.boatTimer = (p.boatTimer ?? 0) + BOAT_DURATION_MS
     }
 
     /**
-     * Apply Repair power-up (new-powerups-plan §4.1): fully restore the PLAYER
-     * tank's HP. Unlike 星星 (star) — which deliberately does NOT refill HP —
-     * Repair is the dedicated healing item that fills the gap left by star's
-     * omission. (The eagle/base has its own HP and is unaffected.)
+     * Apply Repair power-up: restore the COLLECTOR tank's HP by a fixed amount
+     * (= one basic enemy bullet damage: firepower 50 × DAMAGE_SCALE 2 = 100).
+     * §189: single pickup supplements HP by the 普通敌人一发炮弹伤害值, not a
+     * full restore. Unlike 星星 (star) — which does NOT refill HP — Repair is
+     * the dedicated healing item. Heals the 拾取坦克 (collector); in coop that
+     * is player2, not always player1. (The eagle/base has its own HP and is unaffected.)
      */
-    private applyRepairPowerUp(): void {
+    private applyRepairPowerUp(collector?: Tank): void {
       const w = this.world
-      const p = w.player
+      const p = collector ?? w.player
       if (!p) return
-      p.hp = p.maxHp
+      p.hp = Math.min(p.hp + REPAIR_HEAL_AMOUNT, p.maxHp)
     }
   }
 }

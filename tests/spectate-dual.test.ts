@@ -181,6 +181,37 @@ describe('spectateDual — Simulation deferred apply', () => {
     expect(w.spectateDual).toBe(false)
     expect(w.player2).toBeNull()
   })
+
+  // §BUG: 2x督战 接管后 P2 消失 —— 接管应从 dual spectate 切到 躺赢 (coop) 模式，
+  // 保留 player2。修复靠 `w.coop = true` 让 deferred spectate-off apply 不剥离 P2。
+  it('dual-spectate → coop takeover keeps player2 (regression guard)', () => {
+    const w = makeWorld()
+    w.loadStageData(STAGES[0], 0)
+    const sim = new Simulation(w, new IdleInput())
+    // Enter 2x督战 (God AI drives P1 + P2).
+    sim.requestSpectateToggle(true)
+    sim.requestSpectateDualToggle(true)
+    sim.tick()
+    expect(w.spectateDual).toBe(true)
+    expect(w.player2).not.toBeNull()
+
+    // Mimic takeOverFromSpectate for the dual case: flip to coop, then
+    // queue a deferred spectate-off (what the sim applies on resume).
+    w.coop = true
+    sim.requestSpectateToggle(false)
+    sim.requestSpectateDualToggle(false)
+    const lives2Before = w.lives2
+    const player2Before = w.player2
+
+    sim.tick()
+
+    // Spectate fully off, coop on, and crucially player2 SURVIVES the take-over.
+    expect(w.spectate).toBe(false)
+    expect(w.spectateDual).toBe(false)
+    expect(w.coop).toBe(true)
+    expect(w.player2).toBe(player2Before)
+    expect(w.lives2).toBe(lives2Before)
+  })
 })
 
 // ---- (4) GodAIInput dual wiring ----

@@ -330,6 +330,7 @@ export const ITEM_KEY_MAP: Record<string, string> = {
   frenzy: 'item.frenzy',
   sacrifice: 'item.sacrifice',
   guard: 'item.guard',
+  repair: 'item.repair',
 }
 
 /**
