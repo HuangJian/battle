@@ -686,6 +686,41 @@ export interface GodAIParams {
   /** §161: carve path safety replan timer (ticks). */
   carveReplanTicks: number
 
+  // ---- §189 / 开局联通清墙 (base connectivity clear, user request 2026-08-11) ----
+  /**
+   * §189 / 开局联通清墙: at game start, the player observes the lower-half
+   * layout and checks whether the three key strategic points — base-left,
+   * base-right, and the central defense post — are connected by smooth
+   * corridor paths. If brick walls partition these points, the player
+   * proactively fires to clear a through-route BEFORE enemies arrive,
+   * so that when a threat appears on either side the player can quickly
+   * reposition without pathfinding failure.
+   *
+   * The candidate runs in the lower half (row >= baseConnectClearLowerRow),
+   * only when the base is NOT under threat (calm opening phase), and only
+   * when a wing anchor is NOT corridor-connected to the defense post. The
+   * player follows the carve dig path toward the disconnected wing, firing
+   * at brick walls to open a corridor.
+   *
+   * Same hard constraints as §161 carve (R5/R6): never break steel, never
+   * break base-ring bricks, break at most carveMaxBaseColumn base-column
+   * bricks. Reuses carvePathInfoCached for path-finding.
+   * 0 = OFF (byte-identical to pre-§189).
+   */
+  baseConnectClearMode: number
+  /** §189: player-row gate — only clear walls in the lower half. */
+  baseConnectClearLowerRow: number
+  /**
+   * §189: only fire while the player has killed fewer than this many enemies
+   * (opening phase). Once the player starts fighting, the candidate yields to
+   * combat candidates. Prevents wall-clearing from interfering with mid/late
+   * game behavior on stages where the lower half is walled but the player
+   * needs to fight, not carve.
+   */
+  baseConnectClearMaxKills: number
+  /** §189: max ticks the travel mode can stay active (bounds opening phase). */
+  baseConnectClearMaxTicks: number
+
   /**
    * §132 / 方向 B (fast × base-proximity threat weight): score bonus in
    * defense-mode target selection for FAST enemies approaching the base.
@@ -2335,6 +2370,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   carveMaxBaseColumn: 1,
   carveBaseColumnCost: 1e9,
   carveReplanTicks: 240,
+  // §189 / 开局联通清墙: enabled — proactively clear lower-half brick walls
+  // to connect base-left, base-right, and the defense post at game start.
+  baseConnectClearMode: 1,
+  baseConnectClearLowerRow: 13,
+  baseConnectClearMaxKills: 1,
+  baseConnectClearMaxTicks: 480,
   // §162 / nav 卡死破墙逃生 (nav-stuck break-out, user request 2026-08-06,
   // replay hard-s34 seed 2050197249): when every preferred direction is
   // blocked (directMove / followPath fallback, nav-stuck escape), also try
@@ -2779,6 +2820,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   iceGlideControl: 0,
   // §146 B: 集合点可达性未在 classic 上 A/B — restore 0（byte-identical）。
   defensePosStandable: 0,
+  // §189: 开局联通清墙是 hard/chaos pool-model 修复 — classic S34 regressed
+  // 10/20 < floor 16，restore 0（byte-identical classic gate）。
+  baseConnectClearMode: 0,
   // §152: 三项 S12 修复均为 pool-model（hard/chaos）调优，classic instant 未 A/B
   // —— restore 0（byte-identical classic gate）。
   t2aSteelPathBlock: 0,

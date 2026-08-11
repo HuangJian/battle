@@ -787,3 +787,206 @@ export function enemyNearLaneImpl(self: GodAIInput, dist: number): boolean {
   }
   return false
 }
+
+// ============================================================
+// §189 / 开局联通清墙 (base connectivity clear, user request 2026-08-11).
+//
+// At game start, the player observes the lower-half layout and checks whether
+// the three key strategic points — base-left, base-right, and the central
+// defense post — are connected by SMOOTH corridor paths. If brick walls
+// partition these points, the player proactively fires to clear a through-
+// route BEFORE enemies arrive, so that when a threat appears on either side
+// the player can quickly reposition without pathfinding failure.
+//
+// All functions are pure reads of World state + params (no RNG, no
+// mutation) — gated by params.baseConnectClearMode (0 = OFF, byte-identical).
+// ============================================================
+
+/**
+ * §189: find a standable cell in the lower-half wing nearest to the base.
+ * `side` = -1 for left wing (cols 0..bc-2), +1 for right wing (cols bc+3..GRID-1).
+ * Scans rows br-4..br (the lower-half band where the player needs mobility),
+ * nearest to the base first. A "standable" cell has no brick/steel/water/base
+ * in its 2×2 tank footprint. Returns null when no standable cell exists.
+ * Pure World read — no RNG.
+ */
+export function findWingAnchorImpl(self: GodAIInput, side: -1 | 1): Cell | null {
+  const w = self.world
+  const tm = w.tileMap
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  const grid = tm.grid
+  // Column range: left wing 0..bc-3, right wing bc+4..GRID-2 (tank footprint
+  // needs col+1 < GRID). Scan nearest to the base first.
+  const colStart = side < 0 ? bc - 3 : bc + 4
+  const colEnd = side < 0 ? 0 : GRID - 2
+  const colStep = side < 0 ? -1 : 1
+  // Row range: br-4..br (lower-half band). Scan nearest to base first.
+  for (let dr = 0; dr <= 4; dr++) {
+    const r = br - dr
+    if (r < 0 || r + 1 >= GRID) continue
+    for (let c = colStart; ; c += colStep) {
+      if (c < 0 || c + 1 >= GRID) break
+      if ((side < 0 && c < colEnd) || (side > 0 && c > colEnd)) break
+      // Check 2×2 footprint standability.
+      let blocked = false
+      for (let fr = 0; fr <= 1 && !blocked; fr++) {
+        const row = grid[r + fr]
+        for (let fc = 0; fc <= 1 && !blocked; fc++) {
+          const t = row[c + fc]
+          if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') blocked = true
+        }
+      }
+      if (!blocked) return { col: c, row: r }
+    }
+  }
+  return null
+}
+
+/**
+ * §189: the carve target for base-connectivity clearing. Checks whether the
+ * central defense post is corridor-connected to the left and right wing
+ * anchors. If either connection requires digging through brick, returns the
+ * disconnected wing anchor as the carve target — the player should navigate
+ * toward it, firing to clear walls along the way.
+ *
+ * Priority: the wing that is NOT corridor-connected wins. If both are
+ * disconnected, the nearer to the player (by manhattan distance) wins — the
+ * player clears that side first, then the other on a later tick once the
+ * first corridor is open.
+ *
+ * Returns null when both wings are corridor-connected to the post (no
+ * carving needed), or when the post / wing anchors don't exist. Pure World
+ * read — no RNG.
+ */
+export function findConnectCarveTargetImpl(self: GodAIInput, pc: Cell): Cell | null {
+  if (!self.hasBase) return null
+  const post = carvePostImpl(self)
+  if (!post) return null
+  const left = findWingAnchorImpl(self, -1)
+  const right = findWingAnchorImpl(self, 1)
+  if (!left && !right) return null
+
+  // Check corridor connectivity from post to each wing.
+  let leftConnected = true
+  let rightConnected = true
+  if (left) {
+    const info = digPathInfoCached(self, post, left)
+    leftConnected = info.corridor && info.path !== null && info.path.length > 0
+  }
+  if (right) {
+    const info = digPathInfoCached(self, post, right)
+    rightConnected = info.corridor && info.path !== null && info.path.length > 0
+  }
+
+  // Both connected → no carving needed.
+  if (leftConnected && rightConnected) return null
+
+  // Pick the disconnected wing to carve toward. If both disconnected, pick
+  // the nearer to the player (clear that side first).
+  if (left && !leftConnected && (!right || rightConnected)) return left
+  if (right && !rightConnected && (!left || leftConnected)) return right
+  // Both disconnected — nearer wing wins.
+  if (left && right) {
+    const distL = Math.abs(pc.col - left.col) + Math.abs(pc.row - left.row)
+    const distR = Math.abs(pc.col - right.col) + Math.abs(pc.row - right.row)
+    return distL <= distR ? left : right
+  }
+  return left ?? right
+}
+
+/**
+ * §189: per-cell cost array for the dig-path A*. Only ring bricks cost 1e9
+ * (impassable — the fire control refuses to break them, so routing through
+ * them would create a dead-end). Base-column bricks and regular bricks stay
+ * at 0 (passable in breakBrick mode with the normal step cost). Cached per
+ * tileMap.revision — same discipline as buildCarveCosts.
+ */
+export function buildDigCosts(self: GodAIInput): Float64Array {
+  const rev = self.world.tileMap.revision
+  if (self._digCosts && self._digCostsRev === rev) return self._digCosts
+  const costs = new Float64Array(GRID * GRID)
+  const grid = self.world.tileMap.grid
+  // For each cell, check if any cell in its 2×2 tank footprint is a ring
+  // brick. If so, the cell is effectively impassable — the player can't
+  // break ring bricks, so standing on a cell whose footprint includes one
+  // is a dead-end. This forces A* to route AROUND the ring, not through
+  // cells adjacent to it.
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) {
+      if (c + 1 >= GRID || r + 1 >= GRID) continue
+      let ringInFootprint = false
+      for (let dr = 0; dr <= 1 && !ringInFootprint; dr++) {
+        const grow = grid[r + dr]
+        for (let dc = 0; dc <= 1 && !ringInFootprint; dc++) {
+          if (grow[c + dc] === 'brick' && isCarveRingBrickImpl(self, c + dc, r + dr)) {
+            ringInFootprint = true
+          }
+        }
+      }
+      if (ringInFootprint) {
+        costs[r * GRID + c] = 1e9
+      }
+    }
+  }
+  self._digCosts = costs
+  self._digCostsRev = rev
+  return costs
+}
+
+/**
+ * §189: cached dig-path query for base connectivity clear. Unlike
+ * carvePathInfoCached (which uses pathCarveSafeImpl that rejects paths
+ * whose 2×2 footprint touches ring bricks), this uses findPath with
+ * breakBrick directly — the player CAN stand adjacent to ring bricks
+ * without breaking them. Ring bricks are made impassable via threatCosts
+ * (buildDigCosts) so the A* routes AROUND the ring, not through it.
+ * The fire control (carveFire) already prevents firing at ring/base walls.
+ * Cached per (from, to, tileMap.revision) with a safety timer.
+ * Pure World read — no RNG.
+ */
+export function digPathInfoCached(self: GodAIInput, from: Cell, to: Cell): CarvePathInfo {
+  const rev = self.world.tileMap.revision
+  self._digPathTimer--
+  if (
+    self._digPathCacheValid &&
+    self._digPathFromCol === from.col &&
+    self._digPathFromRow === from.row &&
+    self._digPathToCol === to.col &&
+    self._digPathToRow === to.row &&
+    self._digPathRev === rev &&
+    self._digPathTimer > 0
+  ) {
+    return { path: self._digPathCache, corridor: self._digPathCorridor }
+  }
+
+  let path: Direction[] | null = null
+  let corridor = false
+  if (!(from.col === to.col && from.row === to.row)) {
+    // 1. Corridor first — a smooth route needs no digging.
+    const c = findPath(self.world.tileMap, from, to)
+    if (c && c.length > 0) {
+      path = c
+      corridor = true
+    } else {
+      // 2. Dig path — breakBrick with ring bricks made impassable via
+      // threatCosts. The fire control (carveFire) prevents firing at
+      // ring/base walls; the cost array ensures A* routes AROUND the ring.
+      path = findPath(self.world.tileMap, from, to, {
+        breakBrick: true,
+        threatCosts: buildDigCosts(self),
+      })
+    }
+  }
+
+  self._digPathCache = path
+  self._digPathCorridor = corridor
+  self._digPathCacheValid = true
+  self._digPathFromCol = from.col
+  self._digPathFromRow = from.row
+  self._digPathToCol = to.col
+  self._digPathToRow = to.row
+  self._digPathRev = rev
+  self._digPathTimer = self.params.carveReplanTicks
+  return { path, corridor }
+}

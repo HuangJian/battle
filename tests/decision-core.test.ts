@@ -39,6 +39,8 @@ describe('M1 decision-chain invariants', () => {
       'pickupLow',
       // §139 / 方向 A: 火力死区解除 — 插在 hunt 之前（weight 300 > 200）。
       'firingLane',
+      // §189 / 开局联通清墙 — firingLane(300) 之下、carvePath(250) 之上。
+      'baseConnectClear',
       // §161 / 开路策略 — firingLane(300) 之下、hunt(200) 之上。
       'carvePath',
       // §164 / 中路列旁主动驻守 — carvePath(250) 之下、hunt(200) 之上。
@@ -65,6 +67,8 @@ describe('M1 decision-chain invariants', () => {
       pickupLow: 400,
       // §139 / 方向 A: 火力死区解除 — hunt(200) 之上，pickupLow(400) 之下。
       firingLane: 300,
+      // §189 / 开局联通清墙 — carvePath(250) 之上、firingLane(300) 之下。
+      baseConnectClear: 270,
       // §161 / 开路策略 — firingLane(300) 之下、hunt(200) 之上。
       carvePath: 250,
       // §164 / 中路列旁主动驻守 — carvePath(250) 之下、hunt(200) 之上。

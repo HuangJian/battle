@@ -87,6 +87,11 @@ export type ActionId =
   // 中路繁忙时），而非长期驻守边路出生点。Weight 220 > hunt(200)、< carvePath(250)
   // — 覆盖 hunt 的盲走，但低于一切战斗/道具/瞭望格/开路候选。默认 midLaneHold=0 OFF。
   | 'midLaneHold'
+  // §189 / 开局联通清墙 (base connectivity clear, user request 2026-08-11):
+  // 开局时观察下半区布局，若基地两侧与中路据守点之间被砖墙阻隔，立即清墙开路。
+  // Weight 270 > carvePath(250)、< firingLane(300) — 高于普通开路，但低于一切
+  // 战斗/道具/瞭望格候选。默认 baseConnectClearMode=0 OFF。
+  | 'baseConnectClear'
 
 /**
  * M1 default weights — strictly mirror the original think() top-level chain
@@ -117,6 +122,8 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   firingLane: 300,
   // §161 / 开路策略: 低于 firingLane(300)、高于 hunt(200)。
   carvePath: 250,
+  // §189 / 开局联通清墙: carvePath(250) 之上、firingLane(300) 之下。
+  baseConnectClear: 270,
   closePickup: 540,
   hunt: 200,
   survive: 0,

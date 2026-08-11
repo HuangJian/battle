@@ -92,10 +92,10 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
   // paired A/B was net+5 but z=0.30 (flip churn 146/141) — the knob stays
   // default 0 (byte-identical). These tests keep the repro evidence and
   // guard the mechanism for a future revival (see DECISIONS §168).
-  const ON = { ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1, navStuckSuppressTicks: 60 }
+  const ON = { ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1, navStuckSuppressTicks: 60, baseConnectClearMode: 0 }
 
   it('OFF (navStuckZone 0) reproduces the long pin (repro leg)', () => {
-    const dwell = maxZoneDwell({ ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 0 }, STAGE, SEED, 2400)
+    const dwell = maxZoneDwell({ ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 0, baseConnectClearMode: 0 }, STAGE, SEED, 2400)
     // Unfixed behavior: the pin runs far past the 180-tick escape threshold.
     // §187 target blacklist (targetBlacklistStuckTicks=240) provides partial
     // relief even when navStuckZone=0, reducing the pin from >600 to ~564.
@@ -124,7 +124,7 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // Zone detection alone breaks the 1200-tick pin (traced: escape fires at
     // t748) even though the A/B showed no win-rate significance — the
     // mechanism works, the win-rate lever lies elsewhere.
-    const dwell = maxZoneDwell({ ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1 }, STAGE, SEED, 2400)
+    const dwell = maxZoneDwell({ ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1, baseConnectClearMode: 0 }, STAGE, SEED, 2400)
     expect(dwell).toBeLessThan(1000)
   })
 })

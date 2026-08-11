@@ -68,7 +68,7 @@ function makeWorld(carveMode: number): { world: World; ai: GodAIInput } {
   p.shieldTimer = 0
   const ai = new GodAIInput(
     world,
-    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode },
+    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode, baseConnectClearMode: 0 },
     new RNG(0x1234),
   )
   ai.reset()
@@ -110,7 +110,7 @@ function makeBattlement(carveMode: number): { world: World; ai: GodAIInput } {
   p.shieldTimer = 0
   const ai = new GodAIInput(
     world,
-    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode },
+    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode, baseConnectClearMode: 0 },
     new RNG(0x1234),
   )
   ai.reset()
@@ -343,6 +343,7 @@ describe('§161 — Battlement hard integration (Mode A digs out and reaches the
     const input = new GodAIInput(world, {
       ...DEFAULT_GOD_AI_PARAMS,
       carvePathMode: 1,
+      baseConnectClearMode: 0,
       navBreakStuck: 0,
     })
     const sim = new Simulation(world, input)

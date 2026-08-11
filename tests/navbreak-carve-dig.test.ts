@@ -114,7 +114,7 @@ describe('§162 — Battlement hard integration (seed 2050197249, the user repla
       // §165: isolate navBreakStuck — the new midLaneDefense/closeCombatDuel
       // params change V8 JIT paths on this seed; this test validates §162
       // (carve-dig escape) in isolation, not the §165 interaction.
-      { ...DEFAULT_GOD_AI_PARAMS, navBreakStuck: navBreak, midLaneDefense: 0, closeCombatDuel: 0 },
+      { ...DEFAULT_GOD_AI_PARAMS, navBreakStuck: navBreak, midLaneDefense: 0, closeCombatDuel: 0, baseConnectClearMode: 0 },
       godRng,
     )
     const sim = new Simulation(world, input)

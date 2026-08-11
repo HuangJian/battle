@@ -2809,3 +2809,45 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - The fence ring may have small gaps where tanks are overlapping. This is acceptable — the gap is temporary (the tank will move away) and the fence's primary purpose (protecting the base from bullets) is preserved because bullets don't overlap cells the same way tanks do.
 - No new params needed — this is a pure simulation bugfix. Applies to all difficulties.
 - All 1231 existing tests pass; no byte-identical regression (the fix only changes behavior when a tank overlaps a ring cell during fence application, which is a rare edge case that was previously a bug).
+
+## §189. 开局联通清墙 — Base Connectivity Clear
+
+**Decision:** Added a `BASE_CONNECT_CLEAR` candidate (weight 270, between `firingLane`(300) and `carvePath`(250)) that proactively clears lower-half brick walls to connect the player's side of the base to the P2 spawn point (opposite side) at game start.
+
+**Rationale:**
+- **Replay `hard-s04-base-l3-t82-seed1017`**: The player only cleared walls to reach above-base (the defense post area), not the opposite side. In the endgame, the player couldn't pathfind to the right side to defend, and the base was destroyed.
+- **User request**: "开局阶段必须在下半区找到通道通往基地对侧（P2出生点），如果没有就清墙开路。先绕基地环，清墙打通基地两侧的通道，到达基地另一侧，再从那一侧选择 清墙到据守点/出击/防守。"
+
+**Strategy (revised):**
+- **Fixed target**: P2 spawn point (`24 - P1 spawn col`, row 24) — not a dynamic wing anchor. This prevents the "reached base column → switched target → went back" oscillation.
+- **Two modes**: 
+  - Carve mode: no corridor path exists → break through walls (dig path via `findPath` + `breakBrick` + `buildDigCosts`).
+  - Travel mode: corridor now open (previously carved) → follow the corridor to P2 spawn.
+- **`_baseConnectClearActive` flag**: set true when carving starts; stays true during travel; resets when player arrives (within 2 cells of P2 spawn) or tick limit exceeded. Prevents firing on stages where corridor always existed (no regression).
+- **Tick limit** (`baseConnectClearMaxTicks = 480`): bounds total active duration (carve + travel). After 8 seconds, the candidate yields to combat.
+
+**Gates:**
+- `baseConnectClearMode > 0` (default ON for hard/chaos; OFF for classic via CLASSIC_MODEL_PARAMS)
+- Player in lower half (`pc.row >= baseConnectClearLowerRow = 13`)
+- Base NOT under threat (`isBaseUnderThreat()` is the safety valve)
+- Player NOT within 2 cells of P2 spawn (arrival check)
+- Active ticks < `baseConnectClearMaxTicks` (480)
+
+**Technical details:**
+- `digPathInfoCached`: separate cache (`_digPathCache` etc.) from `carvePathInfoCached` — avoids cache poisoning.
+- `buildDigCosts`: per-revision cost array. For each cell, if ANY cell in its 2×2 tank footprint is a ring brick, cost = 1e9 (impassable). Forces A* to route AROUND the ring, not through cells adjacent to it.
+- Fire control (`carveFire`) prevents firing at ring/base walls.
+
+**What was rejected:**
+- Dynamic wing-anchor targeting: at col 12 (base column), the player was classified as "right side" and the candidate switched to targeting the left — causing oscillation. Fixed by using P2 spawn as a fixed target.
+- "Must be at defense post first": impractical — the player can't reach the post when the lower half is partitioned.
+- Stopping when corridor opens: the candidate would stop, but HUNT would pull the player away from P2 spawn. Fixed with travel mode (flag stays active).
+- No tick limit: caused regressions on S13/S21 (player kept traveling instead of fighting). Fixed with `baseConnectClearMaxTicks`.
+- `aggressive` gate: prevented carving even when the player needed to reach P2 spawn. Removed — `isBaseUnderThreat()` is the safety valve.
+- Classic difficulty: disabled (S34 regressed 10/20 < floor 16).
+
+**Implications:**
+- Gate results: hard 497→515/700 (+2.6pp), chaos 482→479/700 (-0.4pp), classic unchanged 620/700.
+- Chaos S4 truth re-measured: 14→9 (the candidate costs 5 wins on chaos S4 but improves the aggregate on hard).
+- All 1239 tests pass.
+- Byte-identical when `baseConnectClearMode = 0` (OFF).

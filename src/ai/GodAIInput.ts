@@ -395,6 +395,8 @@ export class GodAIInput implements InputLike {
     firingLane: 0,
     // §161: 开路策略候选提交计数（纯观察）。
     carvePath: 0,
+    // §189: 开局联通清墙候选提交计数（纯观察）。
+    baseConnectClear: 0,
     // §163: 中路防守候选提交计数（纯观察）。
     midLaneDefense: 0,
     // §164: 中路列旁主动驻守候选提交计数（纯观察）。
@@ -696,6 +698,35 @@ export class GodAIInput implements InputLike {
   _parryHoldCell: Cell | null = null
 
   /**
+   * §189: separate cache for digPathInfoCached (base connectivity clear).
+   * MUST NOT share fields with _carvePathCache — digPathInfoCached uses
+   * findPath+breakBrick directly (no pathCarveSafeImpl), so a cache hit
+   * served from the wrong cache would be a correctness bug.
+   */
+  _digPathCache: Direction[] | null = null
+  _digPathCacheValid = false
+  _digPathCorridor = false
+  _digPathFromCol = -1
+  _digPathFromRow = -1
+  _digPathToCol = -1
+  _digPathToRow = -1
+  _digPathRev = -1
+  _digPathTimer = 0
+  /** §189: cached dig-path cost array (ring bricks = 1e9). */
+  _digCosts: Float64Array | null = null
+  _digCostsRev = -1
+  /**
+   * §189: true once the candidate starts carving (no corridor to P2 spawn).
+   * Stays true while the player travels along the opened corridor to the
+   * P2 spawn, then resets when the player arrives (within 2 cells) or the
+   * base comes under threat. Prevents the candidate from firing on stages
+   * where the corridor always existed (no carving needed).
+   */
+  _baseConnectClearActive = false
+  /** §189: ticks since travel mode activated — bounds the opening-phase duration. */
+  _baseConnectClearActiveTicks = 0
+
+  /**
    * M3 (plan/God-AI-Redesign-v2 §4.2b): 敌情感知模型状态。Per-tick EMA of
    * observable enemy behavior (fire accuracy / base approach / alignment /
    * turn discipline) → `estimatedLevel` [0,1] + survival pressure inputs.
@@ -814,6 +845,14 @@ export class GodAIInput implements InputLike {
     // §164: invalidate the mid-lane parry-hold cache on stage reset.
     this._parryHoldRev = -1
     this._parryHoldCell = null
+    // §189: invalidate the dig-path cache on stage reset.
+    this._digPathCache = null
+    this._digPathCacheValid = false
+    this._digPathTimer = 0
+    this._digCosts = null
+    this._digCostsRev = -1
+    this._baseConnectClearActive = false
+    this._baseConnectClearActiveTicks = 0
     // §162: reset the carve-dig session (new stage = new pocket).
     this._carveDigActive = false
     this._carveDigTicks = 0
