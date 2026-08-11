@@ -233,6 +233,13 @@ export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direc
   return dig
 }
 
+/**
+ * (perf §131) Row stride for the second-level memo key: the two cell keys are
+ * packed as `fromKey * STRIDE + toKey`, both in [0, GRID*GRID), so the packed
+ * key is a plain int32 and the Map stays on its fast integer path.
+ */
+const CARVE_MEMO_STRIDE = GRID * GRID
+
 /** §161: cached carve-path query result. */
 export interface CarvePathInfo {
   /** The path, or null when no carve-safe route exists. */
@@ -247,6 +254,20 @@ export interface CarvePathInfo {
  * strict-pure-memo discipline as the §127 replan cache. Terrain mutations
  * bump revision and invalidate the same tick; the timer only bounds
  * staleness if findPath ever gains an input outside the key.
+ *
+ * (perf §131) Backed by a SECOND-level memo (`self._carveMemo`) holding every
+ * (from,to) answer computed under the current revision + param set. The
+ * 1-entry cache above remembers exactly one pair, so a caller that sweeps
+ * many targets from the same cell — findLaneDefensePointImpl walks up to 48 —
+ * misses it on literally every candidate (measured: 0.0% hit rate on that
+ * path) and pays a fresh corridor A* plus one or two dig A* searches for each
+ * one, every tick. The memo turns 91% of those into a map lookup.
+ *
+ * The 1-entry cache's own behavior is untouched: it is still consulted first,
+ * and the memo-hit path performs exactly the same field writes and timer reset
+ * a recomputation would, so every later hit/miss decision is unchanged. The
+ * memo is a strict pure memo — the answer is a function of (tileMap, from, to,
+ * carveBaseColumnCost, carveMaxBaseColumn), and all five are in its key.
  */
 export function carvePathInfoCached(self: GodAIInput, from: Cell, to: Cell): CarvePathInfo {
   const rev = self.world.tileMap.revision
@@ -263,17 +284,54 @@ export function carvePathInfoCached(self: GodAIInput, from: Cell, to: Cell): Car
     return { path: self._carvePathCache, corridor: self._carvePathCorridor }
   }
 
+  // ---- second-level memo (perf §131) ----
+  // buildCarveCosts prices base-column bricks with carveBaseColumnCost and
+  // pathCarveSafeImpl caps them at carveMaxBaseColumn; §178 overrides both in
+  // dual central breach, so both join the revision in the validity key. Any
+  // mismatch — or the carveReplanTicks staleness bound running out — drops the
+  // whole map, so a stale answer can never be served.
+  const baseCost = self.params.carveBaseColumnCost
+  const maxBase = self.params.carveMaxBaseColumn
+  let memo = self._carveMemo
+  self._carveMemoTtl--
+  if (
+    memo === null ||
+    self._carveMemoRev !== rev ||
+    self._carveMemoBaseCost !== baseCost ||
+    self._carveMemoMaxBase !== maxBase ||
+    self._carveMemoTtl <= 0
+  ) {
+    if (memo === null) {
+      memo = new Map()
+      self._carveMemo = memo
+    } else {
+      memo.clear()
+    }
+    self._carveMemoRev = rev
+    self._carveMemoBaseCost = baseCost
+    self._carveMemoMaxBase = maxBase
+    self._carveMemoTtl = self.params.carveReplanTicks
+  }
+  const memoKey = (from.row * GRID + from.col) * CARVE_MEMO_STRIDE + (to.row * GRID + to.col)
+  const memoHit = memo.get(memoKey)
+
   let path: Direction[] | null = null
   let corridor = false
-  if (!(from.col === to.col && from.row === to.row)) {
-    // 1. Corridor first — a smooth route needs no digging.
-    const c = findPath(self.world.tileMap, from, to)
-    if (c && c.length > 0) {
-      path = c
-      corridor = true
-    } else {
-      path = findCarvePathImpl(self, from, to)
+  if (memoHit !== undefined) {
+    path = memoHit.path
+    corridor = memoHit.corridor
+  } else {
+    if (!(from.col === to.col && from.row === to.row)) {
+      // 1. Corridor first — a smooth route needs no digging.
+      const c = findPath(self.world.tileMap, from, to)
+      if (c && c.length > 0) {
+        path = c
+        corridor = true
+      } else {
+        path = findCarvePathImpl(self, from, to)
+      }
     }
+    memo.set(memoKey, { path, corridor })
   }
   self._carvePathCache = path
   self._carvePathCorridor = corridor

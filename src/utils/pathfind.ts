@@ -166,7 +166,7 @@ const _pfCameFrom = new Int32Array(PF_N)
 const _pfCameDir = new Uint8Array(PF_N)
 
 /**
- * (perf §129) Per-call generation stamps, replacing four full-array resets.
+ * (perf §130) Per-call generation stamps, replacing four full-array resets.
  *
  * The previous version reset four buffers at the top of EVERY findPath call
  * (`gScore.fill(Infinity)`, `firstSeq.fill(-1)`, `closed.fill(0)`,

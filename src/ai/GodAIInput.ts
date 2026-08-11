@@ -667,6 +667,26 @@ export class GodAIInput implements InputLike {
   _carvePathRev = -1
   _carvePathTimer = 0
   /**
+   * (perf §131) Second-level carve-path memo — `(fromKey, toKey) -> answer`
+   * under one terrain revision + param set. `_carvePathCache` above holds
+   * exactly ONE pair, so a scan over many candidate targets from the same
+   * cell (findLaneDefensePointImpl walks up to 48) misses it on every single
+   * candidate — measured 0.0% hit rate on that path — and re-runs the full
+   * corridor + dig A* for each one, tick after tick. This map remembers them
+   * all; the measured working set is ~28 live entries.
+   *
+   * Strict pure memo, same discipline as `_carveCosts`: the stored answer is
+   * a function of (tileMap, from, to, carveBaseColumnCost, carveMaxBaseColumn)
+   * and nothing else. A revision or param change clears the whole map, and
+   * `carveReplanTicks` bounds staleness exactly as it does for the 1-entry
+   * cache. Reset per stage.
+   */
+  _carveMemo: Map<number, { path: Direction[] | null; corridor: boolean }> | null = null
+  _carveMemoRev = -1
+  _carveMemoBaseCost = -1
+  _carveMemoMaxBase = -1
+  _carveMemoTtl = 0
+  /**
    * §164: per-revision cached mid-lane parry hold cell (findParryHoldCellImpl)
    * + whether the base column is open to the base (laneColumnOpenToBaseImpl
    * — cached together, both pure terrain functions of tileMap.revision).
@@ -784,6 +804,13 @@ export class GodAIInput implements InputLike {
     this._carvePathCache = null
     this._carvePathCacheValid = false
     this._carvePathTimer = 0
+    // (perf §131) The second-level memo is keyed on terrain — a new stage
+    // invalidates every entry.
+    if (this._carveMemo !== null) this._carveMemo.clear()
+    this._carveMemoRev = -1
+    this._carveMemoBaseCost = -1
+    this._carveMemoMaxBase = -1
+    this._carveMemoTtl = 0
     // §164: invalidate the mid-lane parry-hold cache on stage reset.
     this._parryHoldRev = -1
     this._parryHoldCell = null

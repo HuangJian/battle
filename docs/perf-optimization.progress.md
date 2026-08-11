@@ -357,6 +357,48 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 
 **结论（诚实阴性，不发货）**: 无同 tick 可去重调用——perception 已是每坦克每 tick 一次的统一观察，18.6% 是固有成本（扁平数学 + Perception 字面量 + 24% tick 的 4×canStep + scanAhead 固有步数）。残余微优化（scanAhead 预验证边界后直读 grid、hoist allies）预计 <1% 总 wall，淹没在 ±5-10% 热噪声，按 §124/§126 纪律不做。跨 tick 缓存被否决（'player'/'decoy' 命中依赖玩家位置每 tick 变化，非纯 memo）。**再压此模块需算法级变更**（如跨坦克共享 hostile-bullet 预计算——但威胁循环仅 1.7 子弹/tank-tick，收益有限），违反 simple-beats-clever（MANIFEST §10）。
 
+### 2.15 Round 15：findPath 内核三连（§130，SHIPPED）
+
+**日期**: 2026-08-10
+**依据**: §129 后 classic profile（`tmp/profile-sim.ts` 800 sims 单核）——`findPath` self-time **20.9%**，为单函数最大自耗时项。
+
+**实施**（三个字节等价改动，同一内核）:
+1. **二进制最小堆 open set**（先行 commit `be8fbb0`）：线性扫描 extract-min → 无分配二叉堆，键 `(fScore, firstSeq)` 与原线性扫描的 (最小 f, 最早入堆) 决胜顺序完全一致 → 返回路径逐字节相同，只有取最小的复杂度从 O(n) 变 O(log n)。三条并行 typed array（struct-of-arrays）避免 JS 数组 push/装箱；容量 `4·N+8` 可证充足（仅在 gScore 严格改善时重入堆，每条入边至多一次）。
+2. **世代戳（generation stamp）取代四次 fill()**：原来每次调用都重置 `gScore/firstSeq/closed/inOpen` ≈ 9.4 KB memset，哪怕只扩展 3 个节点也照付。`_pfState` 用一条 Int32 通道折叠「本次已见」(`g2 = 2·gen`) 与「本次已闭」(`g2+1`)；旧调用写入的值至多 `g2−1`，故单次 `state[k] < g2` 比较就是精确的「gScore === Infinity」判定。首次松弛的顺序不变 → `firstSeq` 赋值顺序不变 → 堆决胜不变 → 路径不变。顺带删掉两个只写不读的缓冲区（`_pfFScore` 只在写它那一行被读回、`_pfInOpen` 从未被读）。
+3. **前缘足迹扫描**：2×2 坦克从一个已知可通行的格子迈一步，候选足迹与当前足迹重叠恰好 2 个子块——那两块不可能挡路。corridor 模式只查前缘 2 块（4 次地形读 → 2 次）；breakBrick 模式则把原本「isPassable 4 读 + 砖块代价重扫 4 读」的 8 次读合并成**一次** 2×2 扫描同时产出可通行性与步代价。另加 key→col/row 查表（GRID=26 非 2 的幂，`key % GRID` 每次 pop 都编译成整数除法）。
+
+**结果**: 微基准（4000 条真实关卡查询、12 轮交错）**内核快 12.1%**，等价性断言 IDENTICAL；profile `findPath` self-time **20.9% → 15.3%**；交替 A/B 端到端 95.3 → 96.7 sims/s（**+1.8%**，内核占比有限）。BFS 交叉验证 corridor 1687/0、breakBrick 4116/0 分歧；god-ai-gate **620/508/473** 逐关不变。
+
+**编号更正**: 代码注释一度写作「perf §129」，与 Round 13 的 pickup 可达性缓存撞号，已统一改为 §130。
+
+### 2.16 Round 16：carve 路径二级 memo（§131，SHIPPED）
+
+**日期**: 2026-08-10
+**依据**: §130 后调用树（`tmp/prof-tree.ts`）——`evaluate → findLaneDefensePointImpl` 1247ms/8161ms（**15.3%**），其中 1241ms 全部下沉到 `carvePathInfoCached`，再到 `findCarvePathImpl` 1209ms → `findPath`(挖墙) 1189ms。**四条几乎等长的柱 = 纯转发链，成本 100% 在底层挖墙 A\***。
+
+**插桩测量**（200 sims classic，测后完全回退）:
+
+| 指标 | 值 | 结论 |
+|------|-----|------|
+| `findLaneDefensePointImpl` 调用 | 1568（avg 扫 3.58 候选） | 每候选一次独立 (from,to) 查询 |
+| **车道防守子集的单槽缓存命中率** | **0.0%**（0/5612） | 单槽缓存对该扫描完全失效 |
+| 同子集多槽 memo 可命中 | **91.0%**（5105/5612） | 逐 tick 重复问同一批候选 |
+| memo 活跃条目峰值 | **28** | 工作集极小，Map 开销可忽略 |
+| `findCarvePathImpl` 返回 null | **81.0%**（5401/6669） | 其中 4044 是「挖到了但不 carve-safe」 |
+| 无限制挖墙搜索成功 | **0**（0/5401） | 受限搜索失败时，无限制搜索从未救回过 |
+
+**根因**: `_carvePathCache` 只记**一对** (from,to)。`findLaneDefensePointImpl` 沿基地列自下而上扫候选（rows br−1..0 × cols bc..bc+1），每个候选的 `to` 都不同 → 必然打穿单槽缓存 → 每候选重跑一次 corridor A\* 加一到两次全图挖墙 A\*，而且逐 tick 重复。挖墙模式下砖块可通行、且 `carveBaseColumnCost = 1e9` 让启发式失效，A\* 近乎要遍历整张图才肯付那 1e9——这正是最贵的一类搜索。
+
+**实施**: 在单槽缓存**之后**加一层 `Map<packedKey, {path, corridor}>` 二级 memo（`GodAIInput._carveMemo`）。
+- 键：`fromKey * 676 + toKey`（打包成 int32，Map 走整数快路径）。
+- 有效性：`tileMap.revision` + `carveBaseColumnCost` + `carveMaxBaseColumn`（§178 会在 dual central breach 里覆写后两者），任一不符即整表清空；另有 `carveReplanTicks` 陈旧上界，与单槽缓存同口径。
+- **单槽缓存行为零改动**：仍然先查它；memo 命中路径照样执行重算路径会做的全部字段写入与计时器重置，因此之后每一次命中/未命中的判定都逐位不变。唯一被跳过的只有纯函数重算本身。
+- 共享 `Direction[]` 安全：所有调用点只读 `.length` / `[0]`，无一改写（Navigator 的 replan 缓存正是因此才 `.slice()`）。
+
+**结果（交替 A/B，5 轮×2 臂，800 sims/轮）**: OLD 97.5/95.4/94.0/94.0/93.6（中位 **94.0**）vs NEW 107.3/111.5/107.9/105.0/107.2（中位 **107.3**）→ **端到端 +14.2%**，两组分布完全不重叠。god-ai-gate **620/508/473** 逐关不变；全量 1223 tests 全绿。
+
+**遗留方向**: 「无限制挖墙搜索 0/5401 成功」说明受限搜索失败时它几乎必然白跑（受限搜索最小化受罚格用量，它失败则无限制版更不可能 carve-safe——两者不完全等价仅因 A\* 按格计价而 `pathCarveSafeImpl` 按 2×2 足迹判定）。删掉它可再省一批全图搜索，但那是**行为变更**（尾部场景可能翻盘），需单独立项走 A/B 与 gate。
+
 ---
 
 ## 3. 性能反模式（AGENTS.md §14）
