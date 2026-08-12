@@ -215,6 +215,24 @@ export const NONE_FIRE_JITTER_MS = 1400
  */
 export const VERT_TUNNEL_THRESHOLD_MS = 450
 
+/**
+ * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
+ * open direction available, this is the probability it will take that orthogonal
+ * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
+ * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
+ * At 60 FPS, 1% ≈ one escape attempt every ~1.7 seconds on average — rare enough
+ * to not look erratic, frequent enough to unstick within a few seconds.
+ */
+/**
+ * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
+ * open direction available, this is the probability it will take that orthogonal
+ * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
+ * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
+ * At 60 FPS, ~0.56% ≈ one escape attempt every ~3 seconds on average — rare enough
+ * to not look erratic, frequent enough to unstick within a few seconds.
+ */
+export const CORRIDOR_ESCAPE_CHANCE = 0.005601
+
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
 // which keeps bullets strictly faster than tanks (see that file for the

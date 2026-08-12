@@ -15,6 +15,7 @@ import {
   NONE_TURN_JITTER_MS,
   NONE_FIRE_JITTER_MS,
   VERT_TUNNEL_THRESHOLD_MS,
+  CORRIDOR_ESCAPE_CHANCE,
 } from '../constants'
 import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
@@ -170,6 +171,24 @@ export class TacticalIntelligence {
         brain.currentDir = opposite(brain.currentDir)
       } else {
         brain.currentDir = pickClassicDirFast(openBuf, openCount, world, rules)
+        // Corridor-escape: small chance to pick a perpendicular (lateral)
+        // open direction instead of the greedy toward-base choice. Prevents
+        // infinite oscillation in 1-wide corridors bounded by steel/water
+        // where maybeTunnelOut cannot help (non-destructible walls).
+        if (openCount > 1 && world.rng.next() < CORRIDOR_ESCAPE_CHANCE) {
+          const chosen = brain.currentDir
+          let latCount = 0
+          // Reuse tail of openBuf for lateral candidates (openCount ≤ 4).
+          for (let li = 0; li < openCount; li++) {
+            const d = openBuf[li]
+            if (d !== chosen && d !== opposite(chosen)) {
+              openBuf[openCount + latCount++] = d
+            }
+          }
+          if (latCount > 0) {
+            brain.currentDir = openBuf[openCount + world.rng.int(latCount)]
+          }
+        }
       }
       brain.thinkTimer = NONE_TURN_MIN_MS + world.rng.next() * NONE_TURN_JITTER_MS
     }
@@ -510,6 +529,26 @@ export class TacticalIntelligence {
       score: this.dirScore(world, tank, d, desired, tx, ty),
     }))
     scored.sort((a, b) => b.score - a.score)
+
+    // Corridor-escape: if the greedy best choice leads into a dead-end
+    // (≤1 open exit from that cell) and a perpendicular open direction
+    // exists, take it with small probability. Prevents infinite bounce in
+    // 1-wide steel/water corridors where maybeTunnelOut cannot help.
+    if (scored.length > 1 && world.rng.next() < CORRIDOR_ESCAPE_CHANCE) {
+      const best = scored[0].d
+      const bestOpen = this.openCountAt(
+        world,
+        tank.x + DIR_VECTORS[best].dx * CELL,
+        tank.y + DIR_VECTORS[best].dy * CELL,
+      )
+      if (bestOpen <= 1) {
+        // Best choice leads to dead-end — look for lateral escape.
+        const lateral = scored.filter((s) => s.d !== best && s.d !== opposite(best))
+        if (lateral.length > 0) {
+          return lateral[world.rng.int(lateral.length)].d
+        }
+      }
+    }
 
     // Imperfection: occasionally commit to a suboptimal route.
     if (world.rng.next() < cfg.routeNoise && scored.length > 1) {
