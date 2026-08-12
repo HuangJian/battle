@@ -335,8 +335,20 @@ Keep numbering sequential. If your decision revises an earlier one, mark the old
 God-AI tuning has entered **Phase III: Hard-focused behavior tuning**. When judging a God-AI change, apply:
 
 - **Drive on `hard` difficulty.** Mine and fix *unreasonable behavior patterns* there (smaller noise than classic, closer to the "reasonable behavior" boundary than chaos).
-- **Win rate is the *primary* metric, not the *overwhelming* one.** Evaluate alongside kills / lives-remaining / fire-hit-rate / hits-taken / clear-time (sim telemetry + `eval-suite.ts --compare`). Prioritize "high win-rate but anomalous metrics" combos as the fix targets.
+- **Win rate is the *primary* metric, not the *overwhelming* one.** Evaluate alongside the `godai-score` v7 dimensions below — kills (`progress`) / lives-remaining (`lives`) / fire-hit-rate (`accuracy`) / clear-time (`clearSpeed`) and the rest. Prioritize "high win-rate but anomalous dimension" combos as the fix targets. **hits-taken is intentionally excluded** (no telemetry field, per decision).
 - **classic / chaos pass rates are reference only** — keep no *large* regression; do not optimize for them. chaos will get stronger enemy AI later, so its expected pass-rate drop is *not* a regression.
+- **Scoring standard (`tools/eval/godai-score.ts`, v7 band):** 11 dimensions, two weight bands (sum = 1.0 each).
+  - *clears band (pass):* `lives` 0.34 · `clearSpeed` 0.22 · `baseIntegrity` 0.16 · `baseSafety` 0.10 · `loot` 0.08 · `growth` 0.06 · `accuracy` 0.04
+  - *losses band (fail):* `progress`(kills) 0.477 · `lives` 0.256 · `baseIntegrity` 0.17 · `baseSafety` 0.044 · `tempo` 0.026 · `openingTempo` 0.018 · `loot` 0.009
+  - Win-rate is enforced **structurally, not by weight**: any clear (score ≥ 0.70) > any loss (score ≤ 0.40) — a 0.30 gap. In the clears band `progress`/`tempo`/`openingTempo` weight **0** (a clear is a clear); in the losses band `clearSpeed`/`accuracy`/`growth` weight 0 (clears-only metrics).
+  - Other dimensions (not in the two bands above): `mobility` (visited-cell anti-oscillation).
+  - **Phase III baseline (eval-suite v6, 35×60 seeds; hard = primary, classic/chaos = reference):**
+    | 难度 | SUITE (lcb±se) | 平均胜率 | fitness v6 |
+    |---|---|---|---|
+    | **hard (主)** | **0.5132** (0.5068±0.0064) | **73%** | 506.8 |
+    | classic (参) | 0.7259 (0.7211±0.0047) | 90% | 721.1 |
+    | chaos (参) | 0.4926 (0.4859±0.0067) | 69% | 485.9 |
+  - On **hard**, watch these dimension readings as the behavior signal: `clearSpeed` 0.146 (slow/拖沓) and `baseIntegrity` in losses 0.102 (most failures = lost base). A high win-rate paired with these *degrading* is exactly the pattern Phase III targets. Full per-dimension table: `docs/god-ai-tuning.progress.md` §0.C.5.
 - **Discipline unchanged:** per-seed tick-diff (see `docs/god-ai-tuning.progress.md` §I.5.1) still locates the first diverging tick; decisive conclusions still need ≥60 seeds; the three regression lines (no SP leak / no frozen-failure-seed as hard gate / byte-identical determinism) still hold. Full framework: `docs/god-ai-tuning.progress.md` §0.C.
 
 ### 6.4 Execute
