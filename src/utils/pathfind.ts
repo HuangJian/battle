@@ -330,6 +330,17 @@ let _pfGen = 0
 const PF_GEN_MAX = 0x3ffffffe
 
 /**
+ * Reentrancy guard: findPath uses module-level buffers that are NOT safe for
+ * concurrent/reentrant access. If findPath is called while another findPath
+ * is still on the stack (e.g. from a callback inside the A* loop), the shared
+ * buffers would be silently corrupted. This flag turns that into an immediate
+ * crash instead of a silent data-corruption bug.
+ *
+ * Set to `true` on entry, released in a `finally` block on every exit path.
+ */
+let _pfInUse = false
+
+/**
  * key → col / row lookup tables (perf). GRID (26) is not a power of two, so
  * `key % GRID` compiles to an integer division on every A* pop. Two 676-byte
  * tables turn that into two typed-array loads.
@@ -430,6 +441,9 @@ export function findPath(
   to: Cell,
   constraints?: PathConstraints,
 ): Direction[] | null {
+  if (_pfInUse) throw new Error('findPath reentered — module buffers are not reentrant')
+  _pfInUse = true
+  try {
   const ignoreWater = constraints?.ignoreWater ?? false
   const breakBrick = constraints?.breakBrick ?? false
   // §69: optional per-cell threat costs. When provided, added to step cost.
@@ -705,6 +719,9 @@ export function findPath(
   }
 
   return null // no path found
+  } finally {
+    _pfInUse = false
+  }
 }
 
 /**

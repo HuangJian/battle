@@ -2505,7 +2505,7 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - baseline（committed 438d240）同法：**1/12**（仅 seed9）——本修复 1/12 → 11/12 大幅改善。
 - 单玩家逐字节不变：SP seed2 仍 `gameover@2117`（与 baseline 一致），gate 全部 `spectateDual` 短路。
 
-**Harness bug（重要，预存在，污染所有 size>1 sweep）：** `level-sim --size N` 批量逐种子结果不可信——同 seed 在 size>1 跑与隔离单跑 outcome 不同（baseline seed5 隔离 `stage_clear@2762`，size-5 sweep 内 `gameover@5828`，同 ticks 不同 outcome）。`runSimulation` 本身在单进程连跑同种子结果一致（同进程三连跑 outcome 相同），但 `level-sim` 批量路径（import `../eval/evaluator` + `../sim/replay-writer` 的模块图）引入跨跑共享态、污染后续跑。**A/B 与验收一律用隔离单进程：`level-sim --seed X --size 1`（入库路径），或自写一个直接调 `runSimulation` 的一次性脚本（切勿 import `../eval/evaluator` / `../sim/replay-writer`）；勿信 size>1 批量总胜率。** 建议后续排查 evaluator 模块图加载态或改为每种子子进程隔离（影响整个 God-AI 调参结论）。
+**Harness bug（已于 plan/batch-sim-shared-state-hardening.md 在 HEAD 验证为已解决/过时）：** §178 写作时（~2026-08-07）确实存在 `level-sim --size N` 批量跨跑污染——同 seed 在 size>1 跑与隔离单跑 outcome 不同。根因是**共享单例回写**（`DEFAULT_GOD_AI_PARAMS`），已被 `src/ai/god/params.ts` 的「返回全新对象」守卫（commit `6cfdec4`）关闭主向量。§178 把锅扣在 evaluator/replay-writer 模块图系**误判**——三者全是纯函数，无模块级可变状态。**HEAD 已验证：** `--size N` 批量路径确定性已确认（S1/S14/S26/S34 × 单/双 × 5 seed = 40 组对比零分歧）。**防回归保险：** `level-sim --size N` 现已改为子进程隔离（每 seed 一个 `bun level-sim.ts --seed S --size 1` 子进程，plan T2），对任何未来共享态泄漏结构免疫。隔离单跑 `--seed X --size 1` 仍可作为对照 baseline。
 
 ## 179. Dual Central Breach autopsy (hard-s34 seed6) — P1 凿盾 + 危基不回防 + 冰冻浪费
 
@@ -2891,3 +2891,21 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - PathCarve calls are byte-identical (they don't pass the new constraints).
 - Unit tests in `tests/pathfind.test.ts` verify §3.1 (brick=1), §3.2 (baseRingCosts preference), §3.3 (fireClearStopTicks + firecontrol tracking), and byte-identical behavior when new params are off.
 - `battlement-carve-path.test.ts` explicitly sets `navBaseRingMult=0, navBrickStopCost=0` to isolate the §161 carve behavior from the new cost model.
+
+## 191. 批量仿真共享态硬化 — findPath 重入守卫 + level-sim 子进程隔离
+
+**Decision:** 两项硬化措施（plan/batch-sim-shared-state-hardening.md）：
+
+1. **T1 — `findPath` 重入守卫**（`src/utils/pathfind.ts`）：在模块级加 `_pfInUse` 布尔标志，`findPath()` 入口检测重入（throw `findPath reentered`），`try/finally` 保证所有退出路径释放。`findPath` 使用模块级 typed-array 缓冲区（`_pfGScore`/`_pfState`/堆数组等），设计上永不重入，但无运行时保证。此守卫将未来误用（重入→静默污染）变成立即崩溃，不改任何已有路径结果。
+
+2. **T2 — `level-sim --size N` 子进程隔离**（`tools/optimize/level-sim.ts`）：批量模式不再用 in-process 串行循环，改为每 seed 派生一个 `bun level-sim.ts --seed S --size 1 ...` 子进程（并发上限 8）。父进程解析每个子进程 stdout JSON，按原有格式聚合 `results[]` + `winRate` 汇总。`--size 1` 保持原有 in-process 路径不变。
+
+**Rationale:**
+- DECISIONS §178 记录的「`--size N` 跨跑污染」在 HEAD 已不复现——根因是 `DEFAULT_GOD_AI_PARAMS` 共享单例回写，已被 `params.ts` 的「返回全新对象」守卫（commit `6cfdec4`）关闭。§178 把锅扣在 evaluator/replay-writer 模块图系误判（三者全是纯函数）。
+- T2 是 DECISIONS §178 自己建议的终极保险：每种子在全新模块图里跑，对**任何**未来共享态泄漏免疫。代价是每 seed ~几十 ms spawn 开销（相对 36000-tick 仿真可忽略）。
+- T1 是防御性措施：`findPath` 的代戳机制（`_pfGen`）在正常使用下确定性已验证，但若将来被重入（如从某个回调内再次调用），会静默损坏后续搜索。try/finally 保证一次异常不会永久锁住后续所有调用。
+
+**Implications:**
+- 验证通过：`--size 3`（S1 hard）与隔离 `--size 1` 逐 seed outcome+ticks 完全一致；`--size 2 --dual --eval`（S34 hard）同样一致。
+- `--size 1` 路径逐字节不变（in-process 单跑，无子进程开销）。
+- 子进程的 stderr 直接传递到父进程（`[replay] wrote ...` 等消息不变）；非零退出码报错而非静默丢失。

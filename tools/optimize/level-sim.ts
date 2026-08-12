@@ -18,7 +18,10 @@
  *   --seed <number>          Starting RNG seed; incremented by 1 per run (default: 1)
  *   --random                 Use a fresh random seed for each run (overrides the
  *                            sequential default; --seed is ignored when --random)
- *   --size <n>               Number of serial simulations to run (default: 1)
+ *   --size <n>               Number of simulations to run (default: 1).
+ *                            When N > 1, each seed runs in an isolated child process
+ *                            (subprocess isolation, plan/batch-sim-shared-state-hardening.md T2)
+ *                            to guarantee no cross-run shared-state contamination.
  *   --max-ticks <n>          Max simulation ticks (default: 36000 = 10 min)
  *   --eval                   Also run the evaluator and include the report
  *   --pretty                 Pretty-print JSON output
@@ -58,7 +61,7 @@ const randomSeeds = process.argv.includes('--random')
 const seedArg = arg('seed')
 const seed = seedArg !== undefined ? parseInt(seedArg, 10) : 1
 
-// --size: number of serial runs
+// --size: number of runs
 const size = parseInt(arg('size', '1')!, 10)
 
 // ---- Load stage ----
@@ -77,19 +80,107 @@ function countEvents(events: import('../../src/types').GameEvent[]): Record<stri
   return counts
 }
 
-// ---- Run simulations ----
-const results: object[] = []
-let winCount = 0
-let totalGames = 0
+// ============================================================
+// size > 1: subprocess isolation (plan/batch-sim-shared-state-hardening.md T2)
+// ============================================================
+//
+// Each seed runs in a fresh child process (`bun level-sim.ts --seed S --size 1 ...`),
+// guaranteeing a clean module graph per run. This makes batch sweeps immune to
+// any future cross-run shared-state contamination — the ultimate insurance
+// policy (DECISIONS §178 "Harness bug" root cause was shared singleton leakage
+// in the in-process loop; this design makes it structurally impossible).
+//
+// Concurrency is capped at 8 to avoid spawning hundreds of processes at once.
 
-for (let i = 0; i < size; i++) {
-  const gameSeed = randomSeeds
-    ? (Math.random() * 0xffffffff) >>> 0
-    : size === 1
-      ? seed
-      : (seed + i) >>> 0
-  totalGames++
+if (size > 1) {
+  // Build the base args forwarded to each child process.
+  // Excluded: --pretty, --no-output (children must emit JSON for parent to parse),
+  //           --random (parent generates the seeds), --size (forced to 1),
+  //           --seed (set per child).
+  const childArgs: string[] = [
+    'bun',
+    'tools/optimize/level-sim.ts',
+    '--stage',
+    String(stageIdx + 1),
+    '--difficulty',
+    difficulty,
+    '--size',
+    '1',
+    '--max-ticks',
+    String(maxTicks),
+  ]
+  if (doEval) childArgs.push('--eval')
+  if (saveReplays) childArgs.push('--save-replays')
+  if (replayFailuresOnly) childArgs.push('--replay-failures-only')
+  if (coop) childArgs.push('--coop')
+  if (dual) childArgs.push('--dual')
 
+  // Generate the seed list (parent decides seeds; children always get --seed S).
+  const seeds: number[] = []
+  for (let i = 0; i < size; i++) {
+    seeds.push(randomSeeds ? (Math.random() * 0xffffffff) >>> 0 : (seed + i) >>> 0)
+  }
+
+  const MAX_CONCURRENT = 8
+  const childOutputs: object[] = Array.from({ length: size })
+  let childWinCount = 0
+
+  // Simple async pool: spawn up to MAX_CONCURRENT children at a time.
+  let nextIdx = 0
+  async function runChild(): Promise<void> {
+    while (true) {
+      const i = nextIdx++
+      if (i >= size) break
+      const childSeed = seeds[i]
+      const args = [...childArgs, '--seed', String(childSeed)]
+      const proc = Bun.spawn({
+        cmd: args,
+        stdout: 'pipe',
+        stderr: 'inherit', // replay-write notices etc. pass through
+      })
+      const stdoutText = await new Response(proc.stdout).text()
+      const exitCode = await proc.exited
+      if (exitCode !== 0) {
+        console.error(`[batch] seed ${childSeed} child exited ${exitCode}`)
+        process.exit(1)
+      }
+      const parsed = JSON.parse(stdoutText)
+      childOutputs[i] = parsed
+      if (parsed.result?.outcome === 'stage_clear') childWinCount++
+    }
+  }
+
+  const workerCount = Math.min(MAX_CONCURRENT, size)
+  await Promise.all(Array.from({ length: workerCount }, () => runChild()))
+
+  // ---- Aggregate summary (same output contract as before) ----
+  const winRate = Math.round((childWinCount / size) * 1000) / 10
+  const summary = {
+    stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
+    difficulty,
+    coop,
+    dual,
+    seed: randomSeeds ? 'random' : seed,
+    size,
+    winCount: childWinCount,
+    totalGames: size,
+    winRate: `${winRate}%`,
+    results: childOutputs,
+  }
+
+  if (doOutput) {
+    if (pretty) {
+      console.log(JSON.stringify(summary, null, 2))
+    } else {
+      console.log(JSON.stringify(summary))
+    }
+  }
+} else {
+  // ============================================================
+  // size === 1: in-process single run (existing path)
+  // ============================================================
+
+  const gameSeed = seed
   const result = runSimulation({
     seed: gameSeed,
     stage,
@@ -101,9 +192,6 @@ for (let i = 0; i < size; i++) {
     coop,
     spectateDual: dual,
   })
-
-  const isWin = result.outcome === 'stage_clear'
-  if (isWin) winCount++
 
   // ---- Optionally evaluate ----
   const report = doEval ? evaluate(result, stage, DEFAULT_BASELINE) : undefined
@@ -158,22 +246,17 @@ for (let i = 0; i < size; i++) {
       : undefined,
   }
 
-  if (size === 1) {
-    // Single game: output directly
-    if (doOutput) {
-      if (pretty) {
-        console.log(JSON.stringify(output, null, 2))
-      } else {
-        console.log(JSON.stringify(output))
-      }
+  if (doOutput) {
+    if (pretty) {
+      console.log(JSON.stringify(output, null, 2))
+    } else {
+      console.log(JSON.stringify(output))
     }
-  } else {
-    // Multi-game: collect for summary
-    results.push(output)
   }
 
   // ---- Write replay file if requested ----
   if (saveReplays && result.replay) {
+    const isWin = result.outcome === 'stage_clear'
     const shouldWrite = !replayFailuresOnly || !isWin
     if (shouldWrite) {
       const path = await writeReplayFile({
@@ -183,31 +266,6 @@ for (let i = 0; i < size; i++) {
         stageName: stage.name,
       })
       if (path) console.error(`[replay] wrote ${path}`)
-    }
-  }
-}
-
-// ---- Multi-game summary ----
-if (size > 1) {
-  const winRate = Math.round((winCount / totalGames) * 1000) / 10
-  const summary = {
-    stage: { id: stage.id, name: stage.name, index: stageIdx + 1 },
-    difficulty,
-    coop,
-    dual,
-    seed: randomSeeds ? 'random' : seed,
-    size,
-    winCount,
-    totalGames,
-    winRate: `${winRate}%`,
-    results,
-  }
-
-  if (doOutput) {
-    if (pretty) {
-      console.log(JSON.stringify(summary, null, 2))
-    } else {
-      console.log(JSON.stringify(summary))
     }
   }
 }
