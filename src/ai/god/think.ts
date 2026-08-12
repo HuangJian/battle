@@ -2363,7 +2363,27 @@ const CARVE_PATH: Candidate = {
 
     // ---- Mode A (R1/R2/R4): no smooth route to the post → carve. ----
     const info = carvePathInfoCached(self, pc, post)
-    if (!info.path || info.path.length === 0) return false
+    if (!info.path || info.path.length === 0) {
+      // The post is not carve-reachable from here — most often because the
+      // spawn sits on the far side of the base ring from the defense post, so
+      // every route to it would cross the ring (forbidden by R5/R6). R1/R2
+      // still want the player to dig OUT of the sealed pocket: fall back to
+      // carving toward the nearest carve-safe escape. This keeps §161 useful
+      // on ring-fortified stages without ever breaking ring / base-column
+      // bricks (the escape search is itself ring-safe — see findCarveEscapeImpl).
+      const escape = findCarveEscapeImpl(self, pc)
+      if (!escape) return false
+      const einfo = carvePathInfoCached(self, pc, escape)
+      // A smooth route to the escape means the player isn't boxed → let
+      // navigate handle it (R4: no dig when a corridor exists).
+      if (!einfo.path || einfo.path.length === 0 || einfo.corridor) return false
+      const dir = einfo.path[0]
+      self._moveDir = dir
+      carveFire(self, ctx, dir)
+      self.branchCounts.carvePath++
+      self._lastBranch = 'carvePath'
+      return true
+    }
     if (info.corridor) return false // R4: 通畅路线 → 不打砖开路
     const dir = info.path[0]
     self._moveDir = dir

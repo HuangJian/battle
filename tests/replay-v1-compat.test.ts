@@ -174,7 +174,16 @@ describe('ReplayManager.canPlay — v1 is playable', () => {
 
 describe('the .replay artifacts in replays/ are importable', () => {
   const dir = join(import.meta.dir, '..', 'replays')
-  const files = readdirSync(dir).filter((f) => f.endsWith('.replay'))
+  // `replays/` is gitignored, so a clean checkout ships with no stored
+  // artifacts. Reads must not throw when the directory is absent — treat a
+  // missing dir as "no files" so the block skips gracefully (see skipIf
+  // below) instead of raising an unhandled error that fails the whole run.
+  let files: string[] = []
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith('.replay'))
+  } catch {
+    files = []
+  }
 
   // `replays/` is gitignored, so a clean checkout ships with no stored
   // artifacts. This block is a regression guard for *existing* replays — when
