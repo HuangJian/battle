@@ -1184,11 +1184,7 @@ const ENGAGE: Candidate = {
     // enemies it encounters while roaming. Gated by dualStrategyActive
     // (spectateDual || coop) && centralBreachRisk && isPlayer2 — P1 and
     // single-player byte-identical.
-    if (
-      skipT2aForDefense &&
-      self.dualStrategyActive &&
-      self.isPlayer2()
-    ) {
+    if (skipT2aForDefense && self.dualStrategyActive && self.isPlayer2()) {
       skipT2aForDefense = false
     }
 

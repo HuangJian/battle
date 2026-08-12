@@ -526,7 +526,14 @@ export class SpriteArtistCore {
   ): void {
     throw new Error('stub: SpriteArtistTanksMixin')
   }
-  drawAllyTank(_x: number, _y: number, _size: number, _dir: Direction, _animFrame: number, _isDecoy = false): void {
+  drawAllyTank(
+    _x: number,
+    _y: number,
+    _size: number,
+    _dir: Direction,
+    _animFrame: number,
+    _isDecoy = false,
+  ): void {
     throw new Error('stub: SpriteArtistTanksMixin')
   }
   drawAllyAura(_x: number, _y: number, _size: number, _frame: number): void {

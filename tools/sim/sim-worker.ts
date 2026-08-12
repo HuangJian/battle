@@ -9,7 +9,12 @@
  * Errors inside a run are caught and reported as `ok: false`, mirroring
  * the serial evaluateParams() catch branch exactly.
  */
-import { runSimulation, type RunTelemetry, type RunForensics, type SimResult } from './simulation-runner'
+import {
+  runSimulation,
+  type RunTelemetry,
+  type RunForensics,
+  type SimResult,
+} from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 

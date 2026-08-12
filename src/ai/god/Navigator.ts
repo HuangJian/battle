@@ -75,7 +75,10 @@ export function buildBaseRingCosts(self: GodAIInput): Float64Array {
 function buildFireStopConstraints(
   self: GodAIInput,
   p: Tank,
-): Pick<import('../../utils/pathfind').PathConstraints, 'brickStopCost' | 'startDir' | 'fireCooldownTicks' | 'fireIntervalTicks' | 'marchTicksPerCell'> {
+): Pick<
+  import('../../utils/pathfind').PathConstraints,
+  'brickStopCost' | 'startDir' | 'fireCooldownTicks' | 'fireIntervalTicks' | 'marchTicksPerCell'
+> {
   const startDir = p.dir
   if (self.params.navFireStopModel === 'firecontrol') {
     // §3.3(c): compute real fire state from tank.lastFire + tank.nextFireInterval.
@@ -194,12 +197,8 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     path = findPath(w.tileMap, playerCell, target, {
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
-      ...(self.params.navBaseRingMult > 0
-        ? { baseRingCosts: buildBaseRingCosts(self) }
-        : {}),
-      ...(self.params.navBrickStopCost > 0
-        ? buildFireStopConstraints(self, p)
-        : {}),
+      ...(self.params.navBaseRingMult > 0 ? { baseRingCosts: buildBaseRingCosts(self) } : {}),
+      ...(self.params.navBrickStopCost > 0 ? buildFireStopConstraints(self, p) : {}),
     })
   }
 
@@ -430,12 +429,8 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     path = findPath(w.tileMap, playerCell, target, {
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
-      ...(self.params.navBaseRingMult > 0
-        ? { baseRingCosts: buildBaseRingCosts(self) }
-        : {}),
-      ...(self.params.navBrickStopCost > 0
-        ? buildFireStopConstraints(self, p)
-        : {}),
+      ...(self.params.navBaseRingMult > 0 ? { baseRingCosts: buildBaseRingCosts(self) } : {}),
+      ...(self.params.navBrickStopCost > 0 ? buildFireStopConstraints(self, p) : {}),
     })
   }
 

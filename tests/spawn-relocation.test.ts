@@ -112,7 +112,9 @@ describe('Spawn relocation — never born on top of another tank', () => {
     // position differs rather than a single coordinate).
     expect(world.player!.x === camper.x && world.player!.y === camper.y).toBe(false)
     // No overlap with the camper (the core "don't get stuck" invariant).
-    expect(aabb(world.player!.x, world.player!.y, TANK, TANK, camper.x, camper.y, camper.w, camper.h)).toBe(false)
+    expect(
+      aabb(world.player!.x, world.player!.y, TANK, TANK, camper.x, camper.y, camper.w, camper.h),
+    ).toBe(false)
     expect(world.rectHitsTerrain(world.player!.x, world.player!.y, TANK, TANK)).toBe(false)
     for (const t of world.allTanks) {
       if (t === world.player || !t.alive) continue

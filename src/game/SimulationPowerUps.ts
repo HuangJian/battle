@@ -80,6 +80,51 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
     }
 
     /**
+     * Deterministic safety net for {@link buildDrop}'s random fallback: when
+     * 20 random 32-aligned candidates all fail the terrain / spawn-point
+     * check (very plausible on dense water / steel layouts), scan the entire
+     * 32-aligned grid and return the cell nearest to (originX, originY) that
+     * clears the same predicate the random fallback uses. No RNG is drawn, so
+     * determinism is preserved on top of the existing random draws.
+     *
+     * Without this, buildDrop used to keep the last (blocked) coordinates and
+     * a power-up would materialise on top of water / brick / steel / a spawn
+     * cell — the "道具出现在水域上" bug.
+     *
+     * Scan is O(N²) with N=13 (13×13 = 169 32-aligned cells). Only invoked in
+     * the rare exhaustion case, so cost is negligible.
+     */
+    private findFreeDropCell(originX: number, originY: number): { x: number; y: number } {
+      const w = this.world
+      const step = TANK
+      const maxX = FIELD - TANK
+      const maxY = FIELD - TANK
+      const rx = Math.max(0, Math.min(maxX, originX))
+      const ry = Math.max(0, Math.min(maxY, originY))
+      let best: { x: number; y: number } | null = null
+      let bestD = Infinity
+      for (let gy = 0; gy <= maxY; gy += step) {
+        for (let gx = 0; gx <= maxX; gx += step) {
+          if (w.rectHitsTerrain(gx, gy, TANK, TANK) || this.rectHitsSpawnPoint(gx, gy)) {
+            continue
+          }
+          const dx = gx - rx
+          const dy = gy - ry
+          const d = dx * dx + dy * dy
+          if (d < bestD) {
+            bestD = d
+            best = { x: gx, y: gy }
+          }
+        }
+      }
+      // Pathological: no free cell on the field at all. Fall back to the
+      // origin cell (clamped) so the drop still materialises somewhere
+      // instead of crashing — this matches findFreeSpawnCell's behaviour and
+      // is no worse than the pre-fix result of landing on a blocked cell.
+      return best ?? { x: rx, y: ry }
+    }
+
+    /**
      * Build a drop descriptor (type + terrain-safe position). The `world.rng`
      * pick happens HERE so a buffered drop is fully resolved and deterministic —
      * flushing later only materialises it (no extra RNG consumption).
@@ -154,7 +199,14 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
 
       // Fallback: random clear tile that is also clear of enemy spawn points.
       // Keep the last valid position so we never materialise a drop on terrain
-      // or a spawn cell even if some random candidates were blocked.
+      // or a spawn cell even if some random candidates were blocked. If all 20
+      // random tries are blocked (a dense water / steel layout CAN swallow
+      // every candidate), fall through to a deterministic nearest-free-cell
+      // scan so the drop still lands on walkable ground. Without that safety
+      // net we used to retain the last (blocked) coordinates and materialise
+      // a power-up on top of water / brick / steel — the "道具出现在水域上"
+      // bug. The scan draws no RNG, so determinism is preserved on top of the
+      // 20 random draws already consumed.
       if (!placed) {
         let tries = 0
         let lastValid: { x: number; y: number } | null = null
@@ -171,6 +223,11 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
         if (lastValid) {
           x = lastValid.x
           y = lastValid.y
+        } else {
+          const origin = at ?? { x: FIELD / 2 - TANK / 2, y: FIELD / 2 - TANK / 2 }
+          const safe = this.findFreeDropCell(origin.x, origin.y)
+          x = safe.x
+          y = safe.y
         }
       }
 
@@ -539,10 +596,7 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
      * If no clear position exists in any direction, the tank is left in place
      * and the caller skips the steel for that cell.
      */
-    private pushTankOutsideRing(
-      tank: Tank,
-      ringCell: { col: number; row: number },
-    ): void {
+    private pushTankOutsideRing(tank: Tank, ringCell: { col: number; row: number }): void {
       const bc = BASE_POS.col
       const br = BASE_POS.row
       // Primary push direction based on which ring edge the cell is on.

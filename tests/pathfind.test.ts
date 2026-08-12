@@ -264,10 +264,15 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // From (2,10) to (2,18) — must break through the brick wall at rows 13-14.
     // With brick=1 (new model), the straight path (down 8 cells) costs 8.
     // Pass baseRingCosts (all-zero) to activate the new cost model (brick=1).
-    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
-      breakBrick: true,
-      baseRingCosts: new Float64Array(GRID * GRID),
-    })
+    const path = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 2, row: 18 },
+      {
+        breakBrick: true,
+        baseRingCosts: new Float64Array(GRID * GRID),
+      },
+    )
     expect(path).not.toBeNull()
     // The path should go straight down (no detour needed — brick=1=empty).
     expect(path!.length).toBe(8)
@@ -290,10 +295,15 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // vs detour left to col 0 (2 left + 6 down + 2 right = 10).
     // With brick=1 (new model), straight path = 6 < 10 = detour. A* picks straight.
     // Pass baseRingCosts (all-zero) to activate the new cost model (brick=1).
-    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 16 }, {
-      breakBrick: true,
-      baseRingCosts: new Float64Array(GRID * GRID),
-    })
+    const path = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 2, row: 16 },
+      {
+        breakBrick: true,
+        baseRingCosts: new Float64Array(GRID * GRID),
+      },
+    )
     expect(path).not.toBeNull()
     // Straight path through brick is shorter (6) than the detour (10).
     expect(path!.length).toBe(6)
@@ -316,9 +326,14 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // From (12,10) to (12,18): straight down through brick at col 12 = 8 steps.
     // Detour through gap at col 8: left 4 + down 4 + right 4 + down 4 = 16 steps.
     // Without baseRingCosts: straight = 8 < detour = 16. A* picks straight.
-    const pathNoCost = findPath(tm, { col: 12, row: 10 }, { col: 12, row: 18 }, {
-      breakBrick: true,
-    })
+    const pathNoCost = findPath(
+      tm,
+      { col: 12, row: 10 },
+      { col: 12, row: 18 },
+      {
+        breakBrick: true,
+      },
+    )
     expect(pathNoCost).not.toBeNull()
     expect(pathNoCost!.length).toBe(8) // straight down through brick
 
@@ -326,10 +341,15 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // straight = 7 + (1 + 100) = 108 vs detour = 16. A* prefers the detour.
     const costs = new Float64Array(GRID * GRID)
     costs[13 * GRID + 12] = 100 // footprint at (col=12, row=13)
-    const pathWithCost = findPath(tm, { col: 12, row: 10 }, { col: 12, row: 18 }, {
-      breakBrick: true,
-      baseRingCosts: costs,
-    })
+    const pathWithCost = findPath(
+      tm,
+      { col: 12, row: 10 },
+      { col: 12, row: 18 },
+      {
+        breakBrick: true,
+        baseRingCosts: costs,
+      },
+    )
     expect(pathWithCost).not.toBeNull()
     // The path should detour through the gap (longer but cheaper).
     expect(pathWithCost!.length).toBeGreaterThan(8)
@@ -351,19 +371,29 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
 
     // Without brickStopCost (new model active via baseRingCosts, brick=1):
     // straight through 12 bricks = 12 cells. Detour = 22. Straight wins (12 < 22).
-    const pathNoStop = findPath(tm, { col: 2, row: 10 }, { col: 14, row: 10 }, {
-      breakBrick: true,
-      baseRingCosts: new Float64Array(GRID * GRID),
-    })
+    const pathNoStop = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 14, row: 10 },
+      {
+        breakBrick: true,
+        baseRingCosts: new Float64Array(GRID * GRID),
+      },
+    )
     expect(pathNoStop).not.toBeNull()
     expect(pathNoStop!.length).toBe(12) // straight through brick
 
     // With brickStopCost=10: straight path costs 12 × (1+10) = 132.
     // Detour costs 22 × 1 = 22. A* should prefer the detour.
-    const pathWithStop = findPath(tm, { col: 2, row: 10 }, { col: 14, row: 10 }, {
-      breakBrick: true,
-      brickStopCost: 10,
-    })
+    const pathWithStop = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 14, row: 10 },
+      {
+        breakBrick: true,
+        brickStopCost: 10,
+      },
+    )
     expect(pathWithStop).not.toBeNull()
     // The path should detour around the brick wall.
     expect(pathWithStop!.length).toBeGreaterThan(12)
@@ -386,11 +416,16 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // The turn at (8,10) is a direction change at a brick cell.
     // With brickStopCost + startDir='right', the turn adds 1 extra cost.
     // This test just verifies the path is found — the turn cost is internal.
-    const path = findPath(tm, { col: 2, row: 10 }, { col: 8, row: 16 }, {
-      breakBrick: true,
-      brickStopCost: 2,
-      startDir: 'right',
-    })
+    const path = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 8, row: 16 },
+      {
+        breakBrick: true,
+        brickStopCost: 2,
+        startDir: 'right',
+      },
+    )
     expect(path).not.toBeNull()
     // Path should go right then down (through the L-shaped brick wall).
     expect(path!.length).toBeGreaterThan(0)
@@ -401,13 +436,23 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     // Without any nav-cost constraints, the old brick=5 behavior is used
     // (byte-identical to pre-change). This is the same as brickStopCost=0
     // with no baseRingCosts — neither activates the new cost model.
-    const path1 = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
-      breakBrick: true,
-    })
-    const path2 = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
-      breakBrick: true,
-      brickStopCost: 0,
-    })
+    const path1 = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 2, row: 18 },
+      {
+        breakBrick: true,
+      },
+    )
+    const path2 = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 2, row: 18 },
+      {
+        breakBrick: true,
+        brickStopCost: 0,
+      },
+    )
     expect(path1).not.toBeNull()
     expect(path2).not.toBeNull()
     expect(path2).toEqual(path1)
@@ -417,11 +462,16 @@ describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
     const tm = brickWallMap()
     // breakBrick=false: brick is impassable, no path through the wall.
     // The nav-cost params should not affect this.
-    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
-      breakBrick: false,
-      brickStopCost: 10,
-      baseRingCosts: new Float64Array(GRID * GRID).fill(100),
-    })
+    const path = findPath(
+      tm,
+      { col: 2, row: 10 },
+      { col: 2, row: 18 },
+      {
+        breakBrick: false,
+        brickStopCost: 10,
+        baseRingCosts: new Float64Array(GRID * GRID).fill(100),
+      },
+    )
     expect(path).toBeNull() // no corridor path through the full-width brick wall
   })
 })

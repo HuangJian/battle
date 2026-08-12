@@ -2427,23 +2427,23 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // carve-dig toward an escape target; followPath/directMove also fall back to
   // BREAKABLE directions when fully blocked. 1 = ON (default).
   navBreakStuck: 1,
-// §nav-cost 3.2: base ring brick multiplier. 1.5 = base ring bricks cost
-// 1.5× normal (1+0.5 extra). Tuned via gate scan {1.5,1.75,2.0,2.5}. The old
-// PoC's 1e6 caused S7/S12/S13 base losses (defender forced to绕行); 1.5 is
-// a温和 penalty that discourages breaking base walls without preventing it.
-navBaseRingMult: 1.5,
-// §nav-cost 3.3: gates the fire stop cost model. >0 = ON. When
-// navFireStopModel='firecontrol', the actual stop cost is computed
-// dynamically from tank.lastFire/nextFireInterval/dir/speed via
-// fireClearStopTicks() — this value is only the gate, not the cost.
-// The flat model (navFireStopModel='flat') uses this as a constant per-brick
-// cost. 2 was the tuned flat-model value; kept as the gate for firecontrol.
-navBrickStopCost: 2,
-// §nav-cost 3.3(c): firecontrol model — compute real stop ticks from
-// tank fire state (cooldown, direction alignment) via fireClearStopTicks(),
-// the shared pure function mirroring shouldFireInDir + think.ts cooldown.
-// A* tracks arriveTick + cooldownExpiry along the path via parallel buffers.
-navFireStopModel: 'firecontrol',
+  // §nav-cost 3.2: base ring brick multiplier. 1.5 = base ring bricks cost
+  // 1.5× normal (1+0.5 extra). Tuned via gate scan {1.5,1.75,2.0,2.5}. The old
+  // PoC's 1e6 caused S7/S12/S13 base losses (defender forced to绕行); 1.5 is
+  // a温和 penalty that discourages breaking base walls without preventing it.
+  navBaseRingMult: 1.5,
+  // §nav-cost 3.3: gates the fire stop cost model. >0 = ON. When
+  // navFireStopModel='firecontrol', the actual stop cost is computed
+  // dynamically from tank.lastFire/nextFireInterval/dir/speed via
+  // fireClearStopTicks() — this value is only the gate, not the cost.
+  // The flat model (navFireStopModel='flat') uses this as a constant per-brick
+  // cost. 2 was the tuned flat-model value; kept as the gate for firecontrol.
+  navBrickStopCost: 2,
+  // §nav-cost 3.3(c): firecontrol model — compute real stop ticks from
+  // tank fire state (cooldown, direction alignment) via fireClearStopTicks(),
+  // the shared pure function mirroring shouldFireInDir + think.ts cooldown.
+  // A* tracks arriveTick + cooldownExpiry along the path via parallel buffers.
+  navFireStopModel: 'firecontrol',
   // §162: carve-dig session cap — 45s max before giving up (Battlement
   // pocket exits in ~10-25s; 2700 ticks is generous but bounded).
   carveDigMaxTicks: 2700,

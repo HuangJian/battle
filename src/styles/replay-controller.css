@@ -242,8 +242,8 @@
 }
 
 .rc-export:hover {
-background: rgba(244, 196, 48, 0.3);
-color: #f4c430;
+  background: rgba(244, 196, 48, 0.3);
+  color: #f4c430;
 }
 
 /* End-of-replay overlay — centered card above the battlefield */

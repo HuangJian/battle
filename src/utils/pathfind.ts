@@ -444,281 +444,279 @@ export function findPath(
   if (_pfInUse) throw new Error('findPath reentered — module buffers are not reentrant')
   _pfInUse = true
   try {
-  const ignoreWater = constraints?.ignoreWater ?? false
-  const breakBrick = constraints?.breakBrick ?? false
-  // §69: optional per-cell threat costs. When provided, added to step cost.
-  const threatCosts = constraints?.threatCosts
-  // §nav-cost 3.2: optional per-cell base ring extra cost (brick edges only).
-  const baseRingCosts = constraints?.baseRingCosts
-  // §nav-cost 3.3: fire stop cost for brick edges.
-  const brickStopCost = constraints?.brickStopCost ?? 0
-  // §nav-cost 3.3: tank's current facing direction (for start-cell turn cost).
-  const startDir = constraints?.startDir
-  const startDirIdx = startDir
-    ? startDir === 'up'
-      ? 0
-      : startDir === 'down'
-        ? 1
-        : startDir === 'left'
-          ? 2
-          : 3
-    : -1
-  // §187: optional blocked cell (player tank) — impassable even with breakBrick.
-  const blkCell = constraints?.blockedCell ?? null
-  const blkCol = blkCell ? blkCell.col : -99
-  const blkRow = blkCell ? blkCell.row : -99
-  const hasBlk = blkCell !== null
+    const ignoreWater = constraints?.ignoreWater ?? false
+    const breakBrick = constraints?.breakBrick ?? false
+    // §69: optional per-cell threat costs. When provided, added to step cost.
+    const threatCosts = constraints?.threatCosts
+    // §nav-cost 3.2: optional per-cell base ring extra cost (brick edges only).
+    const baseRingCosts = constraints?.baseRingCosts
+    // §nav-cost 3.3: fire stop cost for brick edges.
+    const brickStopCost = constraints?.brickStopCost ?? 0
+    // §nav-cost 3.3: tank's current facing direction (for start-cell turn cost).
+    const startDir = constraints?.startDir
+    const startDirIdx = startDir
+      ? startDir === 'up'
+        ? 0
+        : startDir === 'down'
+          ? 1
+          : startDir === 'left'
+            ? 2
+            : 3
+      : -1
+    // §187: optional blocked cell (player tank) — impassable even with breakBrick.
+    const blkCell = constraints?.blockedCell ?? null
+    const blkCol = blkCell ? blkCell.col : -99
+    const blkRow = blkCell ? blkCell.row : -99
+    const hasBlk = blkCell !== null
 
-  // §nav-cost 3.3(c): firecontrol model params. When all three are > 0, the
-  // A* loop tracks fire cooldown along the path and computes real stop ticks
-  // per brick edge, replacing the flat brickStopCost constant.
-  const fireCooldownTicks = constraints?.fireCooldownTicks ?? 0
-  const fireIntervalTicks = constraints?.fireIntervalTicks ?? 0
-  const marchTicksPerCell = constraints?.marchTicksPerCell ?? 0
-  const useFireControl = fireIntervalTicks > 0 && marchTicksPerCell > 0
+    // §nav-cost 3.3(c): firecontrol model params. When all three are > 0, the
+    // A* loop tracks fire cooldown along the path and computes real stop ticks
+    // per brick edge, replacing the flat brickStopCost constant.
+    const fireCooldownTicks = constraints?.fireCooldownTicks ?? 0
+    const fireIntervalTicks = constraints?.fireIntervalTicks ?? 0
+    const marchTicksPerCell = constraints?.marchTicksPerCell ?? 0
+    const useFireControl = fireIntervalTicks > 0 && marchTicksPerCell > 0
 
-  // Quick reject: start or goal impassable.
-  if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
-  if (!isPassable(tileMap, to.col, to.row, ignoreWater, breakBrick)) return null
-  if (from.col === to.col && from.row === to.row) return []
+    // Quick reject: start or goal impassable.
+    if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
+    if (!isPassable(tileMap, to.col, to.row, ignoreWater, breakBrick)) return null
+    if (from.col === to.col && from.row === to.row) return []
 
-  // A* over a 26×26 grid (≤ 676 nodes). State lives in flat typed arrays
-  // indexed by integer cell key (row*GRID+col) — no Map/Set/string churn in
-  // the hot loop. The open set is a binary min-heap (lazy deletion) keyed by
-  // (fScore, firstSeq): extract-min is O(log n), and the (lowest-f,
-  // earliest-first-push) tie-break is identical to the old linear-scan, so the
-  // returned Direction[] sequence is byte-for-byte the same as before. Only the
-  // extraction cost changed — search result is preserved.
-  //
-  // Reusable module-level buffers — NOT reset here. The `_pfState` generation
-  // stamp (see its declaration) makes every stale lane self-identifying, so
-  // the four per-call `fill()`s are gone. gScore/firstSeq/cameFrom/cameDir are
-  // only read for cells whose state stamp matches this call, i.e. always
-  // written before read.
-  const gScore = _pfGScore
-  const cameFrom = _pfCameFrom
-  const cameDir = _pfCameDir
-  const firstSeq = _pfFirstSeq
-  const state = _pfState
-  if (++_pfGen >= PF_GEN_MAX) {
-    state.fill(0)
-    _pfGen = 1
-  }
-  const g2 = _pfGen * 2 // "seen this call"
-  const g2c = g2 + 1 // "closed this call"
-  _pfHeapSize = 0
-  let seqCounter = 0
-
-  const startKey = from.row * GRID + from.col
-  const goalKey = to.row * GRID + to.col
-  // Hoist goal coords (used in heuristic every neighbor expansion).
-  const toCol = to.col
-  const toRow = to.row
-  const grid = tileMap.grid
-
-  gScore[startKey] = 0
-  firstSeq[startKey] = seqCounter++
-  state[startKey] = g2
-  // §nav-cost 3.3(c): initialize firecontrol state at the start cell.
-  // arriveTick = 0 (tank is at the start now), cooldownExpiry = initial
-  // remaining cooldown (0 = ready to fire).
-  if (useFireControl) {
-    _pfArriveTick[startKey] = 0
-    _pfCooldownExpiry[startKey] = fireCooldownTicks
-  }
-  pfPush(Math.abs(from.col - toCol) + Math.abs(from.row - toRow), firstSeq[startKey], startKey)
-
-  // Two specialized hot loops: the common case (breakBrick=false) inlines a
-  // constant stepCost=1 and skips the brick-footprint scan, saving 4
-  // tileMap.get calls per neighbor. breakBrick=true keeps the scan.
-  if (!breakBrick) {
-    for (;;) {
-      const currentKey = pfPop()
-      if (currentKey < 0) break
-      if (state[currentKey] === g2c) continue // lazy deletion: skip stale entries
-      if (currentKey === goalKey) {
-        // Reconstruct path by walking cameFrom back to the start.
-        const path: Direction[] = []
-        let ck = currentKey
-        while (ck !== startKey) {
-          path.push(STEP_DIR[cameDir[ck]])
-          ck = cameFrom[ck]
-        }
-        path.reverse()
-        return path
-      }
-
-      state[currentKey] = g2c
-      const cc = _pfKeyCol[currentKey]
-      const cr = _pfKeyRow[currentKey]
-      const gCur = gScore[currentKey]
-
-      for (let s = 0; s < 4; s++) {
-        const nc = cc + STEP_DC[s]
-        const nr = cr + STEP_DR[s]
-        // Inline isPassable (breakBrick=false branch): bounds + leading-edge
-        // footprint check (§130 — only the two sub-blocks not shared with the
-        // already-passable current footprint can block). Avoids the function
-        // call, the breakBrick parameter check, and half the terrain reads.
-        if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
-        const t0 = grid[nr + EDGE_DR0[s]][nc + EDGE_DC0[s]]
-        if (t0 === 'brick' || t0 === 'steel' || t0 === 'base') continue
-        if (t0 === 'water' && !ignoreWater) continue
-        const t1 = grid[nr + EDGE_DR1[s]][nc + EDGE_DC1[s]]
-        if (t1 === 'brick' || t1 === 'steel' || t1 === 'base') continue
-        if (t1 === 'water' && !ignoreWater) continue
-        // §187: blocked cell (player) — impassable even in corridor mode.
-        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
-        const nk = nr * GRID + nc
-        const st = state[nk]
-        if (st === g2c) continue // already closed
-        // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
-        const tentativeG = gCur + 1 + (threatCosts ? threatCosts[nk] : 0)
-        // `fresh` == the old `gScore[nk] === Infinity` case: a cell never
-        // relaxed this call always accepts the first relaxation.
-        const fresh = st < g2
-        if (fresh || tentativeG < gScore[nk]) {
-          if (fresh) {
-            state[nk] = g2
-            firstSeq[nk] = seqCounter++
-          }
-          cameFrom[nk] = currentKey
-          cameDir[nk] = s
-          gScore[nk] = tentativeG
-          pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
-        }
-      }
+    // A* over a 26×26 grid (≤ 676 nodes). State lives in flat typed arrays
+    // indexed by integer cell key (row*GRID+col) — no Map/Set/string churn in
+    // the hot loop. The open set is a binary min-heap (lazy deletion) keyed by
+    // (fScore, firstSeq): extract-min is O(log n), and the (lowest-f,
+    // earliest-first-push) tie-break is identical to the old linear-scan, so the
+    // returned Direction[] sequence is byte-for-byte the same as before. Only the
+    // extraction cost changed — search result is preserved.
+    //
+    // Reusable module-level buffers — NOT reset here. The `_pfState` generation
+    // stamp (see its declaration) makes every stale lane self-identifying, so
+    // the four per-call `fill()`s are gone. gScore/firstSeq/cameFrom/cameDir are
+    // only read for cells whose state stamp matches this call, i.e. always
+    // written before read.
+    const gScore = _pfGScore
+    const cameFrom = _pfCameFrom
+    const cameDir = _pfCameDir
+    const firstSeq = _pfFirstSeq
+    const state = _pfState
+    if (++_pfGen >= PF_GEN_MAX) {
+      state.fill(0)
+      _pfGen = 1
     }
-  } else {
-    // breakBrick=true branch — keeps the brick-footprint stepCost scan.
-    for (;;) {
-      const currentKey = pfPop()
-      if (currentKey < 0) break
-      if (state[currentKey] === g2c) continue
-      if (currentKey === goalKey) {
-        const path: Direction[] = []
-        let ck = currentKey
-        while (ck !== startKey) {
-          path.push(STEP_DIR[cameDir[ck]])
-          ck = cameFrom[ck]
+    const g2 = _pfGen * 2 // "seen this call"
+    const g2c = g2 + 1 // "closed this call"
+    _pfHeapSize = 0
+    let seqCounter = 0
+
+    const startKey = from.row * GRID + from.col
+    const goalKey = to.row * GRID + to.col
+    // Hoist goal coords (used in heuristic every neighbor expansion).
+    const toCol = to.col
+    const toRow = to.row
+    const grid = tileMap.grid
+
+    gScore[startKey] = 0
+    firstSeq[startKey] = seqCounter++
+    state[startKey] = g2
+    // §nav-cost 3.3(c): initialize firecontrol state at the start cell.
+    // arriveTick = 0 (tank is at the start now), cooldownExpiry = initial
+    // remaining cooldown (0 = ready to fire).
+    if (useFireControl) {
+      _pfArriveTick[startKey] = 0
+      _pfCooldownExpiry[startKey] = fireCooldownTicks
+    }
+    pfPush(Math.abs(from.col - toCol) + Math.abs(from.row - toRow), firstSeq[startKey], startKey)
+
+    // Two specialized hot loops: the common case (breakBrick=false) inlines a
+    // constant stepCost=1 and skips the brick-footprint scan, saving 4
+    // tileMap.get calls per neighbor. breakBrick=true keeps the scan.
+    if (!breakBrick) {
+      for (;;) {
+        const currentKey = pfPop()
+        if (currentKey < 0) break
+        if (state[currentKey] === g2c) continue // lazy deletion: skip stale entries
+        if (currentKey === goalKey) {
+          // Reconstruct path by walking cameFrom back to the start.
+          const path: Direction[] = []
+          let ck = currentKey
+          while (ck !== startKey) {
+            path.push(STEP_DIR[cameDir[ck]])
+            ck = cameFrom[ck]
+          }
+          path.reverse()
+          return path
         }
-        path.reverse()
-        return path
+
+        state[currentKey] = g2c
+        const cc = _pfKeyCol[currentKey]
+        const cr = _pfKeyRow[currentKey]
+        const gCur = gScore[currentKey]
+
+        for (let s = 0; s < 4; s++) {
+          const nc = cc + STEP_DC[s]
+          const nr = cr + STEP_DR[s]
+          // Inline isPassable (breakBrick=false branch): bounds + leading-edge
+          // footprint check (§130 — only the two sub-blocks not shared with the
+          // already-passable current footprint can block). Avoids the function
+          // call, the breakBrick parameter check, and half the terrain reads.
+          if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
+          const t0 = grid[nr + EDGE_DR0[s]][nc + EDGE_DC0[s]]
+          if (t0 === 'brick' || t0 === 'steel' || t0 === 'base') continue
+          if (t0 === 'water' && !ignoreWater) continue
+          const t1 = grid[nr + EDGE_DR1[s]][nc + EDGE_DC1[s]]
+          if (t1 === 'brick' || t1 === 'steel' || t1 === 'base') continue
+          if (t1 === 'water' && !ignoreWater) continue
+          // §187: blocked cell (player) — impassable even in corridor mode.
+          if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
+          const nk = nr * GRID + nc
+          const st = state[nk]
+          if (st === g2c) continue // already closed
+          // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
+          const tentativeG = gCur + 1 + (threatCosts ? threatCosts[nk] : 0)
+          // `fresh` == the old `gScore[nk] === Infinity` case: a cell never
+          // relaxed this call always accepts the first relaxation.
+          const fresh = st < g2
+          if (fresh || tentativeG < gScore[nk]) {
+            if (fresh) {
+              state[nk] = g2
+              firstSeq[nk] = seqCounter++
+            }
+            cameFrom[nk] = currentKey
+            cameDir[nk] = s
+            gScore[nk] = tentativeG
+            pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
+          }
+        }
       }
-
-      state[currentKey] = g2c
-      const cc = _pfKeyCol[currentKey]
-      const cr = _pfKeyRow[currentKey]
-      const gCur = gScore[currentKey]
-
-      for (let s = 0; s < 4; s++) {
-        const nc = cc + STEP_DC[s]
-        const nr = cr + STEP_DR[s]
-        // (perf §130) A single 2×2 pass yields BOTH passability and step cost.
-        // The §130 leading-edge trick does not apply here because the cost
-        // depends on all four sub-blocks, not just the new ones.
-        if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
-        let blocked = false
-        let hasBrick = false
-        for (let dr = 0; dr <= 1; dr++) {
-          const grow = grid[nr + dr]
-          for (let dc = 0; dc <= 1; dc++) {
-            const type = grow[nc + dc]
-            if (type === 'brick') {
-              hasBrick = true // §3.1: passable, cost = 1 (same as empty)
-              continue
-            }
-            if (type === 'steel' || type === 'base') {
-              blocked = true
-              break
-            }
-            if (type === 'water' && !ignoreWater) {
-              blocked = true
-              break
-            }
+    } else {
+      // breakBrick=true branch — keeps the brick-footprint stepCost scan.
+      for (;;) {
+        const currentKey = pfPop()
+        if (currentKey < 0) break
+        if (state[currentKey] === g2c) continue
+        if (currentKey === goalKey) {
+          const path: Direction[] = []
+          let ck = currentKey
+          while (ck !== startKey) {
+            path.push(STEP_DIR[cameDir[ck]])
+            ck = cameFrom[ck]
           }
-          if (blocked) break
+          path.reverse()
+          return path
         }
-        if (blocked) continue
-        // §187: blocked cell (player) — impassable even in breakBrick mode.
-        if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
-        const nk = nr * GRID + nc
-        const st = state[nk]
-        if (st === g2c) continue // already closed
-        // §nav-cost: compute step cost.
-        // When the new cost model is active (baseRingCosts or brickStopCost
-        // provided), use 3.1 (brick=1=empty) + 3.2 (base ring extra) + 3.3
-        // (fire stop + turn cost). When NOT active (PathCarve calls, classic
-        // mode), use the old brick=5 behavior — byte-identical to pre-change.
-        const useNewCostModel = brickStopCost > 0 || !!baseRingCosts || useFireControl
-        let cost = 1
-        // §nav-cost 3.3(c): firecontrol stop ticks (computed for brick edges
-        // when useFireControl is active). Also updated for non-brick edges to
-        // track arrival time + cooldown state along the path.
-        let fcStop = 0
-        if (hasBrick) {
-          if (useNewCostModel) {
-            // 3.1: brick = 1 (same as empty — already set above)
-            // 3.2: base ring multiplier
-            if (baseRingCosts) cost += baseRingCosts[nk]
-            // 3.3: fire stop cost
-            if (useFireControl) {
-              // §3.3(c): compute real stop ticks from the tank's fire state.
-              // arriveTick at the brick cell (march only, no stop yet):
-              //   current arrive + one cell of march.
-              const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell
-              const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
-              fcStop = fireClearStopTicks(
-                incomingDir, _pfCooldownExpiry[currentKey], arriveNk, s,
-              )
-              cost += fcStop
-            } else if (brickStopCost > 0) {
-              // Flat model: constant worst-case cost + turn cost
-              cost += brickStopCost
-              const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
-              if (incomingDir >= 0 && incomingDir !== s) cost += 1
+
+        state[currentKey] = g2c
+        const cc = _pfKeyCol[currentKey]
+        const cr = _pfKeyRow[currentKey]
+        const gCur = gScore[currentKey]
+
+        for (let s = 0; s < 4; s++) {
+          const nc = cc + STEP_DC[s]
+          const nr = cr + STEP_DR[s]
+          // (perf §130) A single 2×2 pass yields BOTH passability and step cost.
+          // The §130 leading-edge trick does not apply here because the cost
+          // depends on all four sub-blocks, not just the new ones.
+          if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
+          let blocked = false
+          let hasBrick = false
+          for (let dr = 0; dr <= 1; dr++) {
+            const grow = grid[nr + dr]
+            for (let dc = 0; dc <= 1; dc++) {
+              const type = grow[nc + dc]
+              if (type === 'brick') {
+                hasBrick = true // §3.1: passable, cost = 1 (same as empty)
+                continue
+              }
+              if (type === 'steel' || type === 'base') {
+                blocked = true
+                break
+              }
+              if (type === 'water' && !ignoreWater) {
+                blocked = true
+                break
+              }
             }
-          } else {
-            // Old behavior: brick = 5 (byte-identical to pre-change)
-            cost = 5
+            if (blocked) break
           }
-        }
-        // §69: add threat cost.
-        const tentativeG = gCur + cost + (threatCosts ? threatCosts[nk] : 0)
-        // `fresh` == the old `gScore[nk] === Infinity` case (see the
-        // breakBrick=false branch).
-        const fresh = st < g2
-        if (fresh || tentativeG < gScore[nk]) {
-          if (fresh) {
-            state[nk] = g2
-            firstSeq[nk] = seqCounter++
-          }
-          // §nav-cost 3.3(c): update firecontrol tracking arrays.
-          // arriveTick[nk] = current arrive + march + stop (for brick edges).
-          // cooldownExpiry[nk]:
-          //   - brick edge: fireTick + fireIntervalTicks (cooldown resets).
-          //   - non-brick edge: carry forward (cooldown keeps burning).
-          if (useFireControl) {
-            const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell + fcStop
-            _pfArriveTick[nk] = arriveNk
-            if (hasBrick && fcStop >= 0) {
-              // The tank fires at arriveNk (the moment it can), then cooldown
-              // resets to fireIntervalTicks from that point.
-              _pfCooldownExpiry[nk] = arriveNk + fireIntervalTicks
+          if (blocked) continue
+          // §187: blocked cell (player) — impassable even in breakBrick mode.
+          if (hasBlk && Math.abs(nc - blkCol) <= 1 && Math.abs(nr - blkRow) <= 1) continue
+          const nk = nr * GRID + nc
+          const st = state[nk]
+          if (st === g2c) continue // already closed
+          // §nav-cost: compute step cost.
+          // When the new cost model is active (baseRingCosts or brickStopCost
+          // provided), use 3.1 (brick=1=empty) + 3.2 (base ring extra) + 3.3
+          // (fire stop + turn cost). When NOT active (PathCarve calls, classic
+          // mode), use the old brick=5 behavior — byte-identical to pre-change.
+          const useNewCostModel = brickStopCost > 0 || !!baseRingCosts || useFireControl
+          let cost = 1
+          // §nav-cost 3.3(c): firecontrol stop ticks (computed for brick edges
+          // when useFireControl is active). Also updated for non-brick edges to
+          // track arrival time + cooldown state along the path.
+          let fcStop = 0
+          if (hasBrick) {
+            if (useNewCostModel) {
+              // 3.1: brick = 1 (same as empty — already set above)
+              // 3.2: base ring multiplier
+              if (baseRingCosts) cost += baseRingCosts[nk]
+              // 3.3: fire stop cost
+              if (useFireControl) {
+                // §3.3(c): compute real stop ticks from the tank's fire state.
+                // arriveTick at the brick cell (march only, no stop yet):
+                //   current arrive + one cell of march.
+                const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell
+                const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
+                fcStop = fireClearStopTicks(incomingDir, _pfCooldownExpiry[currentKey], arriveNk, s)
+                cost += fcStop
+              } else if (brickStopCost > 0) {
+                // Flat model: constant worst-case cost + turn cost
+                cost += brickStopCost
+                const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
+                if (incomingDir >= 0 && incomingDir !== s) cost += 1
+              }
             } else {
-              _pfCooldownExpiry[nk] = _pfCooldownExpiry[currentKey]
+              // Old behavior: brick = 5 (byte-identical to pre-change)
+              cost = 5
             }
           }
-          cameFrom[nk] = currentKey
-          cameDir[nk] = s
-          gScore[nk] = tentativeG
-          pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
+          // §69: add threat cost.
+          const tentativeG = gCur + cost + (threatCosts ? threatCosts[nk] : 0)
+          // `fresh` == the old `gScore[nk] === Infinity` case (see the
+          // breakBrick=false branch).
+          const fresh = st < g2
+          if (fresh || tentativeG < gScore[nk]) {
+            if (fresh) {
+              state[nk] = g2
+              firstSeq[nk] = seqCounter++
+            }
+            // §nav-cost 3.3(c): update firecontrol tracking arrays.
+            // arriveTick[nk] = current arrive + march + stop (for brick edges).
+            // cooldownExpiry[nk]:
+            //   - brick edge: fireTick + fireIntervalTicks (cooldown resets).
+            //   - non-brick edge: carry forward (cooldown keeps burning).
+            if (useFireControl) {
+              const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell + fcStop
+              _pfArriveTick[nk] = arriveNk
+              if (hasBrick && fcStop >= 0) {
+                // The tank fires at arriveNk (the moment it can), then cooldown
+                // resets to fireIntervalTicks from that point.
+                _pfCooldownExpiry[nk] = arriveNk + fireIntervalTicks
+              } else {
+                _pfCooldownExpiry[nk] = _pfCooldownExpiry[currentKey]
+              }
+            }
+            cameFrom[nk] = currentKey
+            cameDir[nk] = s
+            gScore[nk] = tentativeG
+            pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
+          }
         }
       }
     }
-  }
 
-  return null // no path found
+    return null // no path found
   } finally {
     _pfInUse = false
   }

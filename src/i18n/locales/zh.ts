@@ -53,7 +53,7 @@ export const zh: Catalog = {
   'pause.title': '已暂停',
   'pause.hint': '按 P 继续',
   'hud.pauseHint': 'P 继续',
-'hud.takeover': '🎮 接管',
+  'hud.takeover': '🎮 接管',
 
   // ---- Game over ----
   'gameover.title': '游戏结束',
@@ -138,7 +138,7 @@ export const zh: Catalog = {
   'toast.spectateOff': '督战：关闭',
   'toast.spectateOn': '督战：单玩家开启 —— 神级 AI 作为一号玩家出战！',
   'toast.spectateDualOn': '督战：双玩家开启 —— 神级 AI 同时操控一号与二号玩家！',
-'toast.takeoverSuccess': '接管成功 —— 你现在操控一号玩家！',
+  'toast.takeoverSuccess': '接管成功 —— 你现在操控一号玩家！',
   'toast.battleSpeed': '战斗速率：×{speed}',
   'toast.keyBindingsPaused': '按键设置在游戏暂停时可用',
   'toast.rewindActivated': '时光宝盒：时间回溯！',

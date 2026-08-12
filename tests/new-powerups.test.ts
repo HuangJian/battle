@@ -6,7 +6,14 @@ import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
 import { RecoveryController } from '../src/snapshot/RecoveryController'
-import { EMP_DURATION_MS, MINE_ARM_MS, CELL, GRID, REPAIR_HEAL_AMOUNT, BOAT_DURATION_MS } from '../src/constants'
+import {
+  EMP_DURATION_MS,
+  MINE_ARM_MS,
+  CELL,
+  GRID,
+  REPAIR_HEAL_AMOUNT,
+  BOAT_DURATION_MS,
+} from '../src/constants'
 import { DECOY_LIFESPAN_FRAMES } from '../src/constants'
 import { perceive, analyze } from '../src/ai/perception'
 import { INTELLIGENCE_LEVELS } from '../src/ai/config'

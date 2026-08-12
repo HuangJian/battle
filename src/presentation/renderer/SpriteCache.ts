@@ -211,7 +211,15 @@ export class SpriteCache {
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
-    const itemKeys = ['item.star', 'item.bomb', 'item.shield', 'item.freeze', 'item.tank', 'item.repair', 'item.decoy']
+    const itemKeys = [
+      'item.star',
+      'item.bomb',
+      'item.shield',
+      'item.freeze',
+      'item.tank',
+      'item.repair',
+      'item.decoy',
+    ]
     for (const key of itemKeys) {
       const img = lib.get(key)
       if (!img) continue

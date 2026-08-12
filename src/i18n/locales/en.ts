@@ -57,7 +57,7 @@ export const en: Catalog = {
   'pause.title': 'PAUSED',
   'pause.hint': 'Press P to resume',
   'hud.pauseHint': 'P Resume',
-'hud.takeover': '🎮 Take Over',
+  'hud.takeover': '🎮 Take Over',
 
   // ---- Game over ----
   'gameover.title': 'GAME OVER',
@@ -142,7 +142,7 @@ export const en: Catalog = {
   'toast.spectateOff': 'Supervise: OFF',
   'toast.spectateOn': 'Supervise: single ON — God AI fights as Player 1!',
   'toast.spectateDualOn': 'Supervise: DUAL ON — God AI drives both Player 1 and Player 2!',
-'toast.takeoverSuccess': 'Takeover successful — you control Player 1!',
+  'toast.takeoverSuccess': 'Takeover successful — you control Player 1!',
   'toast.battleSpeed': 'Battle speed: ×{speed}',
   'toast.keyBindingsPaused': 'Key bindings are available when the game is paused',
   'toast.rewindActivated': 'Time Box: time rewind!',

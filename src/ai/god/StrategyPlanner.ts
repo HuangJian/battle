@@ -1785,11 +1785,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // nearest-enemy hunt as soon as an enemy is close enough to engage (see
     // findDualPatrolTargetImpl). Gated by dualStrategyActive (spectateDual || coop)
     // && centralBreachRisk && isPlayer2 — single-player and P1 unaffected (byte-identical).
-    if (
-      self.dualStrategyActive &&
-      self.isPlayer2() &&
-      self.params.dualCentralBreachP2Patrol > 0
-    ) {
+    if (self.dualStrategyActive && self.isPlayer2() && self.params.dualCentralBreachP2Patrol > 0) {
       const patrol = findDualPatrolTargetImpl(self, playerCell, enemies)
       if (patrol) return patrol
     }

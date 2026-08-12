@@ -130,9 +130,9 @@ export function vectorToParams(vec: number[]): GodAIParams {
     // Round integers.
     if (spec.isInteger) val = Math.round(val)
     // GodAIParams has non-numeric fields (navFireStopModel: string), so cast
-  // through unknown. SEARCH_SPACE only contains numeric params, so val is
-  // always a number here.
-  ;(params as unknown as Record<string, number>)[spec.name] = val
+    // through unknown. SEARCH_SPACE only contains numeric params, so val is
+    // always a number here.
+    ;(params as unknown as Record<string, number>)[spec.name] = val
   }
   return params
 }
