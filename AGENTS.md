@@ -330,6 +330,15 @@ Full-entry format (for `DECISIONS.md` foundational decisions):
 
 Keep numbering sequential. If your decision revises an earlier one, mark the old one `_(superseded by §N)_` rather than deleting it — history matters.
 
+### 6.3b God-AI tuning evaluation framework (Phase III, 2026-08-12)
+
+God-AI tuning has entered **Phase III: Hard-focused behavior tuning**. When judging a God-AI change, apply:
+
+- **Drive on `hard` difficulty.** Mine and fix *unreasonable behavior patterns* there (smaller noise than classic, closer to the "reasonable behavior" boundary than chaos).
+- **Win rate is the *primary* metric, not the *overwhelming* one.** Evaluate alongside kills / lives-remaining / fire-hit-rate / hits-taken / clear-time (sim telemetry + `eval-suite.ts --compare`). Prioritize "high win-rate but anomalous metrics" combos as the fix targets.
+- **classic / chaos pass rates are reference only** — keep no *large* regression; do not optimize for them. chaos will get stronger enemy AI later, so its expected pass-rate drop is *not* a regression.
+- **Discipline unchanged:** per-seed tick-diff (see `docs/god-ai-tuning.progress.md` §I.5.1) still locates the first diverging tick; decisive conclusions still need ≥60 seeds; the three regression lines (no SP leak / no frozen-failure-seed as hard gate / byte-identical determinism) still hold. Full framework: `docs/god-ai-tuning.progress.md` §0.C.
+
 ### 6.4 Execute
 
 Now implement the recorded decision. If mid-implementation you discover the decision was wrong, update the `DECISIONS.md` entry (with a dated note) and proceed. Do not silently deviate.
