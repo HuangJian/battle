@@ -2503,7 +2503,7 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **seed2：`stage_clear`（baseAlive=true，kills=20）✓ 满足用户验收。**
 - S34 dual 隔离 per-seed seeds 1–12：**11/12**（仅 seed6 gameover）。
 - baseline（committed 438d240）同法：**1/12**（仅 seed9）——本修复 1/12 → 11/12 大幅改善。
-- 单玩家逐字节不变：SP seed2 仍 `gameover@2117`（与 baseline 一致），gate 全部 `spectateDual` 短路。
+- 单玩家隔离检查（历史记录）：彼时 SP seed2 仍为 `gameover@2117`（与 baseline 一致），说明 dual 分支被 `spectateDual` 短路、未泄漏 SP。⚠️ 修正（2026-08-12）：`gameover@2117` 仅作**门控/确定性 smoke 检查**，非永久验收门槛；SP 回归须用多 seed 的 clear-rate 度量且允许变好，不可冻结失败种子。
 
 **Harness bug（已于 plan/batch-sim-shared-state-hardening.md 在 HEAD 验证为已解决/过时）：** §178 写作时（~2026-08-07）确实存在 `level-sim --size N` 批量跨跑污染——同 seed 在 size>1 跑与隔离单跑 outcome 不同。根因是**共享单例回写**（`DEFAULT_GOD_AI_PARAMS`），已被 `src/ai/god/params.ts` 的「返回全新对象」守卫（commit `6cfdec4`）关闭主向量。§178 把锅扣在 evaluator/replay-writer 模块图系**误判**——三者全是纯函数，无模块级可变状态。**HEAD 已验证：** `--size N` 批量路径确定性已确认（S1/S14/S26/S34 × 单/双 × 5 seed = 40 组对比零分歧）。**防回归保险：** `level-sim --size N` 现已改为子进程隔离（每 seed 一个 `bun level-sim.ts --seed S --size 1` 子进程，plan T2），对任何未来共享态泄漏结构免疫。隔离单跑 `--seed X --size 1` 仍可作为对照 baseline。
 
@@ -2538,7 +2538,7 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - **seed6：`stage_clear@4198`（baseAlive=true, kills=20）✓ 满足用户验收。**
 - seeds 1-12 全部 `stage_clear`（12/12，§178 基线 11/12 → 12/12）。
 - **120-seed sweep：103/120 = 85.8%**（§178 基线 ~70%，+15.8pp）。
-- 单玩家逐字节不变：SP seed2 `gameover@2117`、SP seed6 `gameover@5316`（均与 §178 基线一致）。
+- 单玩家隔离检查（历史记录）：彼时 SP seed2 `gameover@2117`、SP seed6 `gameover@5316`（均与 §178 基线一致），说明 dual 分支未泄漏 SP。⚠️ 同上修正：此为门控/确定性 smoke 检查，非永久验收门槛。
 - 测试套件 1212 pass / 0 fail。
 - classic 逐字节不变：`emergencyBaseHpFrac=0, freezeBasePriority=0`（CLASSIC_MODEL_PARAMS）。
 
