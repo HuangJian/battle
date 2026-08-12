@@ -1,14 +1,17 @@
 # God AI 调校进展总览（系统化整理）
 
 > 汇编自：git commit history、历史日志、各阶段计划/验证文档、`.workbuddy/memory/`（每日工作日志）。
-> 整理日期：**2026-08-03**（v2 重设计纪元 M0–M11 收官后体系化重写，含 2026-07-30 首版内容）。
+> 整理日期：**2026-08-12**（v2 重设计纪元 M0–M11 收官后体系化重写，含 2026-07-30 首版内容；本次新增 §131–§191 双玩家 Central Breach / 导航 carve-dig 等详细决策，并刷新三难度基线）。
 > 此文档为**只读汇总**。DECISIONS.md 为决策索引（编号保留、正文压缩，全文在本档 / git 历史）。
 > 两个纪元：**Classic 纪元**（§33–§95，2026-07-27 → 08-01，单一 classic 难度调校）与
-> **v2 重设计纪元**（M0–M11，2026-08-03，三难度体系化重设计，见 Part II）。
+> **v2 重设计纪元**（M0–M11，2026-08-03，三难度体系化重设计，见 Part II）+ **§96–§191 详细决策补录**（2026-08-04 → 08-12，含双玩家 Central Breach 取证，见文末「叙事未覆盖条目的精简补录」）。
+
+> ★ **核心诊断方法论：per-seed tick-diff**（详见 §I.5.1；脚本 `tools/diag/per-seed-diff.ts`）
+> 总胜率只告诉你"回归了多少"，per-seed tick-diff 能定位"哪个 seed、哪个 tick、哪个决策"首次分歧。流程：`dump` 逐 tick 紧凑签名（位置 / 方向 / 开火 / 敌数 / 子弹数 / 状态）→ `git stash` 回退改动再 `dump` → `diff` 找第一个分歧 tick。是一切 God AI 调参回归定位的基石；与 `eval-suite.ts --compare`（全量 A/B）+ `flip-scan.ts`（参数翻转扫描）组成诊断工具箱（工具表见 §I.5.1）。
 
 ---
 
-# Part 0. 当前状态速览（2026-08-03，hard/chaos 行 2026-08-05 §130 刷新）
+# Part 0. 当前状态速览（2026-08-12，含 2026-08-12 三难度基线重测，见 §0.A）
 
 ## 0.A 三难度基线（官方口径）
 
@@ -17,9 +20,9 @@
 
 | 难度 | 20-seed 门禁真值 | 60-seed 参考 | 命数/星级 | 目标 | 状态 |
 |---|---|---|---|---|---|
-| classic | **91.0%**（637/700，floor 581） | ~91% | 3 命 / 0★ | >98%（v2 目标） | 门禁全绿，距目标 7pp |
-| hard | **63.1%**（442/700，floor 415） | 62%（§134 60-seed） | **3 命** / 1★ | >80%（v2 目标） | 门禁全绿（§134 防守位拦截 SHIPPED，+1.5pp） |
-| chaos | **60.0%**（420/700，floor 394） | 59%（§134 60-seed） | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿，**已超目标 10pp** |
+| classic | **88.6%**（620/700，floor 581） | 89.6% | 3 命 / 0★ | >98%（v2 目标） | 门禁全绿（620≥581）；较 §134 91% 微降 ~1.4pp，距目标 ~9pp |
+| hard | **72.0%**（504/700，floor 415） | 72.7% | **3 命** / 1★ | >80%（v2 目标） | 门禁全绿（504≥415）；较 §134 63.1% **+8.9pp**，距 80% 目标 ~8pp |
+| chaos | **67.9%**（475/700，floor 394） | 68.8% | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿（475≥394）；较 §134 60.0% **+7.9pp**，已超目标 ~18pp |
 
 - classic 门禁真值自 M0 起保持 637/700 字节持平（所有 M 行为默认 OFF / 逐字节不变）。
 - §130（2026-08-05）：**全难度命数统一为 3**（relax 5→3、hard 2→3；classic/chaos 已为 3）。
@@ -30,6 +33,7 @@
   classic restore 0）。hard/chaos 门禁真值按 gate-context 重测：hard 61.6%→**63.1%**（Battlement
   1→3 首次离开地板）、chaos 58.3%→**60.0%**（60-seed 显著 p=0.0087，+2.15pp）。
 - 质量门禁：三门禁 + split-parity 12/12 全绿；**891 tests**、0 lint、`bun run build` ✓。
+- 2026-08-12 重测（eval-suite v6 官方口径，三难度各 20/60 seed）：classic 88.6%/89.6%、hard 72.0%/72.7%、chaos 67.9%/68.8%。hard/chaos 较 §134 显著 **+8~9pp**（§131–§191 防守位/导航 carve-dig/双玩家 Central Breach 等收益落地）；classic 较 §134 91% 微降 ~1.4pp（20-seed 门禁 620/700 仍 ≥ floor 581，门禁全绿——classic 为 byte-identical 路径，降幅疑为 20-seed 采样噪声，60-seed 89.6% 更稳）。
 
 ## 0.B v2 纪元发布清单
 
@@ -239,7 +243,7 @@ AI 转向承诺锁尝试净负回退。110/125/140ms 细粒度确认 100ms 是�
 5. **负结果照常提交并全记录**（DECISIONS §44-SmartThreat 是范本）：基础设施可复用，诊断数据扭转方向。
 6. **回归门禁随收益上调 floor**，禁止静默降低。
 7. **警惕负反馈循环**：一切"约束移动保基地"的方案（P3 漫游约束、Round 5 守卫带、Phase A skipT2a、M8 survivalRetreat）都因同一机制失败——约束→杀敌少→漏敌多→更多失败。
-8. **per-seed tick-diff 诊断法**（§0.B，见下）+ **V8 JIT 敏感**：热循环改动必须 per-seed 对比验证。
+8. **per-seed tick-diff 诊断法**（见 §I.5.1）+ **V8 JIT 敏感**：热循环改动必须 per-seed 对比验证。
 
 ### I.5.1 方法论创新：per-seed tick-diff 诊断法
 
@@ -623,57 +627,569 @@ tmp/s171-ab-{off,on,b4,min,v3}.json（四臂语料，35×120）。
 工具留档：tmp/cmp172.cjs（配对翻转 + 关卡 churn 对比）、
 tmp/s172-ab-{b4,b6}.json（双臂语料，35×120）、
 tests/godai-bonus-hunt.test.ts（机制 6 测试，旋钮默认 2 byte-identical）。
-
-## §173 基地损伤召回（baseDamageRecall）— 阴性结案（2026-08-07）
-
-**杠杆重估（五连阴性后）**：逐关缺口量化（OFF 35×120，tmp/stagegap.cjs）——
-S34 Battlement 14%（17/120）唯一 <50%（需 +43 胜）；S20 58%、S8/S26 57%；
-到 90% 需 +580 胜。候选方向①「扇区感知防御预置」被 §137/§138/§142 历史
-直接证伪（驻守族全灭），不重测。
-
-**hp-leash 探针（tmp/probe-hpleash.ts，S34 120 局确定性重演）**：
-- 口径事故与修正：前两轮探针因 runner 门控错误（`world.gameState` 恒
-  undefined，须用 `world.state`）+ stageIndex=33（官方口径为 0——stageIndex
-  喂 killScore 并实质改变胜负）产出无效数据，曾误判「0/120 局跌入低血量
-  区」。修正后胜负重演 mismatches=0。
-- 修正后数据推翻旧阴性：低血量区（≤30）胜局 1/17 vs 败局 63/103 进入，
-  但进入→死亡窗口中位仅 0.8s（太迟）；**上游触发点=基地首次受伤**：
-  胜 10/17 vs 败 103/103；受伤时玩家距基地中位 10 vs 25 格；受伤→终局/
-  死亡窗口 29.2s vs 5.1s；败局可召回人群（受伤+玩家>8格+窗口>5s）37/103。
-
-**实现**：`isBaseUnderThreat()` 新增事实性分支——baseHp < baseMaxHp 且
-（arm g12：玩家距基地 >12 格）即返回 true，复用全部既有防御级联，不新写
-行为代码。旋钮 baseDamageRecall 默认 0（byte-identical），classic/guard
-均 0；tests/base-damage-recall.test.ts 7 测试全绿；check 门禁绿
-（1197 pass，唯一失败=replays/ 空目录既有例外）。
-
-**两臂 35×120 筛选（基线 3200/4200）**：
-| 臂 | 胜率 | 翻转 L→W/W→L | 净 | z |
-|---|---|---|---|---|
-| arm 1（无条件） | 75.6% | 135/159 | −24 | −1.40 |
-| arm g12（距离门 12） | 75.4% | 111/146 | −35 | −2.18（显著负） |
-
-churn 结构两臂一致：基地压力型关受益（S31 +5/+4、S5 +4/+7、S30 +2/+4、
-S34 +3/+1），开阔/火力型关全线被拖（S8 −8/−7、S11 −6/−6、S12 −7、
-S6 −3/−6、S16 −6）。
-
-**机制结论**：全局看「基地受伤」不是稀有终局信号而是高频常态事件（胜局
-也频繁受伤）——损伤后把防御级联常态化 engaged，等于把玩家从击杀经济里
-拉走，与 §163/§164/§165 驻守族失败同源（防御过度投入）。S34 的局部不对称
-被全局 churn 吞没；距离门没有救回来（g12 反而更差）——问题不在介入面大小，
-而在「受伤=威胁」信号本身太密。旋钮留档默认 0，方向封盘。
-
-**六连阴性盘点（§168–173）**：导航卡死（navStuckZone）、威胁粘滞
-（threatStickyTicks）、追猎承诺（huntCommitTicks）、目标度量
-（pathTargetMode）、bonus 偏置（bonusHuntBias 4/6）、损伤召回
-（baseDamageRecall 1/12）——反应式威胁/目标层的全部可参数化面均已碰顶。
-
-## 剩余未封盘杠杆
-
-1. **防御模式击杀转化**：防御分支激活后 closer-tick 仅 3%，拦截点/射界
-   效率需 per-tick trace 级剖析（投入大，未启动）。
-2. **逐关深潜型结构修复**：历史唯一正结果族（§146 S8 口袋、§152 S12、
-   §167 guard 超物）；下一候选：S20 Bastion（58%，12 败局）深潜。
-
-工具留档：tmp/probe-hpleash.ts（baseHp 轨迹探针）、tmp/cmp173.cjs（配对
-翻转）、tmp/s173-ab-{on,g12}.json（双臂语料）、tests/base-damage-recall.test.ts。
+
+
+## §173 基地损伤召回（baseDamageRecall）— 阴性结案（2026-08-07）
+
+
+
+**杠杆重估（五连阴性后）**：逐关缺口量化（OFF 35×120，tmp/stagegap.cjs）——
+
+S34 Battlement 14%（17/120）唯一 <50%（需 +43 胜）；S20 58%、S8/S26 57%；
+
+到 90% 需 +580 胜。候选方向①「扇区感知防御预置」被 §137/§138/§142 历史
+
+直接证伪（驻守族全灭），不重测。
+
+
+
+**hp-leash 探针（tmp/probe-hpleash.ts，S34 120 局确定性重演）**：
+
+- 口径事故与修正：前两轮探针因 runner 门控错误（`world.gameState` 恒
+
+  undefined，须用 `world.state`）+ stageIndex=33（官方口径为 0——stageIndex
+
+  喂 killScore 并实质改变胜负）产出无效数据，曾误判「0/120 局跌入低血量
+
+  区」。修正后胜负重演 mismatches=0。
+
+- 修正后数据推翻旧阴性：低血量区（≤30）胜局 1/17 vs 败局 63/103 进入，
+
+  但进入→死亡窗口中位仅 0.8s（太迟）；**上游触发点=基地首次受伤**：
+
+  胜 10/17 vs 败 103/103；受伤时玩家距基地中位 10 vs 25 格；受伤→终局/
+
+  死亡窗口 29.2s vs 5.1s；败局可召回人群（受伤+玩家>8格+窗口>5s）37/103。
+
+
+
+**实现**：`isBaseUnderThreat()` 新增事实性分支——baseHp < baseMaxHp 且
+
+（arm g12：玩家距基地 >12 格）即返回 true，复用全部既有防御级联，不新写
+
+行为代码。旋钮 baseDamageRecall 默认 0（byte-identical），classic/guard
+
+均 0；tests/base-damage-recall.test.ts 7 测试全绿；check 门禁绿
+
+（1197 pass，唯一失败=replays/ 空目录既有例外）。
+
+
+
+**两臂 35×120 筛选（基线 3200/4200）**：
+
+| 臂 | 胜率 | 翻转 L→W/W→L | 净 | z |
+
+|---|---|---|---|---|
+
+| arm 1（无条件） | 75.6% | 135/159 | −24 | −1.40 |
+
+| arm g12（距离门 12） | 75.4% | 111/146 | −35 | −2.18（显著负） |
+
+
+---
+
+## 叙事未覆盖条目的精简补录（2026-08-12，来自 DECISIONS.md 迁入块）
+
+> 以下 § 在原叙事 Part I/II 中无对应摘要，按 Decision/Rationale 首行精简保留，完整取证见 git 历史。
+
+## 剩余未封盘杠杆
+
+1. **防御模式击杀转化**：防御分支激活后 closer-tick 仅 3%，拦截点/射界
+   效率需 per-tick trace 级剖析（投入大，未启动）。
+2. **逐关深潜型结构修复**：历史唯一正结果族（§146 S8 口袋、§152 S12、
+
+## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED)
+
+**Decision:** The original §48 terrain-occlusion evasion was rejected (-10pp S33, brick+steel both occluded). The revisit ships a **steel-only** occlusion **gated to steel-maze stages** (`evasionSteelOcclusionBrickRatio: 0.1`, auto-enabled in `computeStageAdaptedParams` when `brickWallRatio < 0.10`):
+1. `findMostDangerousBulletImpl` skips enemy bullets whose path to the player is blocked by STEEL — but only when the player is NOT pinned (≤2 open directions). Brick is never occluded (dodging brick-blocked bullets is load-bearing anticipatory dodge — the original §48 lesson).
+2. The terrain gate is the key discriminator: brickWallRatio, NOT steel ratio, predicts the mechanism's value. S27 Brick Maze has MORE steel (26%) than S33 Diamond (18%) yet regresses while S33 gains.
+3. A re-ranking guard (`nearestBlocked < bestDist → null`) was prototyped and **removed** — its motivating case (S27) is gated OFF, and it cost ~0.8pp on S33 (+3.3 → +2.5 @120 on same seeds).
+
+> 状态： (SHIPPED)
+
+## 72. §49-Revisit: 炮口相向对枪抵消 Parameterized + Re-Validated (SHIPPED, default unchanged)
+
+**Decision:** The retained §49-family behavior (§52 v2 对枪抵消 — facing-enemy counter-fire + keep-alignment, inline in T2a) was parameterized as `counterFire` (default **1** = current shipped behavior, byte-identical) + `counterFireMaxRange` (default 5 = the original hardcoded 5-cell range), then re-validated on the current tree (post-§47/§58/§48-revisit) with the same per-seed methodology as §48-revisit:
+1. `counterFire: 0` → plain pre-§52 T2a (turn to face + fire, no facing-enemy special-casing) — the A/B OFF arm.
+2. Default stays **ON** (1): the A/B shows counter-fire is a clean positive on the current tree, so flipping it OFF would lose S27/S21 wins. `SKILLED_HUMAN_PARAMS` inherits it automatically (derived from `DEFAULT_GOD_AI_PARAMS`).
+3. Per-seed byte-identity (the §70 JIT-sensitivity check): the parameterization's ternary + `counterFireMaxRange * CELL` hot-path shape change is byte-identical to the committed hardcoded baseline — S27 seed-41 and S21 seed-60 dumps (committed vs param-default) both **IDENTICAL**.
+
+> 状态： (SHIPPED)
+
+## 73. §68-Revisit: Crossfire Awareness v2 Re-Tuned with per-seed tick-diff (REJECTED, stays OFF)
+
+**Decision:** The user directive re-processed §68-v2 (crossfire awareness, default OFF since its original -1.1pp) with the per-seed tick-diff method. The re-tune confirmed the negative result at mechanism level and **shipped nothing** — all four fix variants were net-negative, and the experiment code was reverted (src/ byte-identical; crossfire stays OFF per "基础设施保留默认 OFF" policy):
+1. **A/B reproduction on the current tree**: 35×60 OFF 89.0% vs ON 88.1% (-0.9pp, 138→156 paired flips, net -18) — matches the original -1.1pp.
+2. **Per-seed mechanism (cf-trace, GodAIInput subclass)**: bad flips (S27/S7/S15) fire on threats 12.6-23.1 ticks out (premature perpendicular commitment off the A* path into death); good flips (S29/S28) fire at 8.3-8.4 ticks (imminent escape). The reactive dodge handles 12-23t threats fine — the crossfire diversion is redundant early and deadly when it commits the wrong way.
+3. **Variant 1 — lead-time cap** (`crossfireThreatTicks=10`, only flag bullets arriving within 10t of NOW): net -25. Helped mazes (S27 -12→-7, S7 -10→-7, S32 -8→-2, S31 -7→-5) but destroyed open-stage gains (S29 +7→-3, S33 +5→-2, S2 +5→+2). Chain-breakage: S29-15's escape needed a SECOND 31.7t-lead diversion at tick 3700 that the cap suppressed → the whole win chain collapsed.
+
+> 状态： (REJECTED)
+
+## 74. Steel-Fire Gate: Never Fire at Unpierceable Steel to Break Through (SHIPPED)
+
+**Decision:** New param `steelFireGate` (default **1** = ON; 0 = OFF = byte-identical pre-§74). When ON, the two navigate **break-through** fire sites in `think()` (aggressive navigate + T2b navigate) — which fire WITHOUT calling `shouldFireInDirImpl` — apply the same T11 steel gate that `shouldFireInDirImpl` already enforces: steel blocks fire while `p.level < STEEL_PIERCE_PLAYER_LEVEL` (3). Implemented as `steelFireBlockedImpl` (the T11 predicate) + `shouldFireBreakThroughImpl` (steel gate + §70 base-ring guard) in `FireControl.ts`, used at both sites.
+**Rationale:**
+- User report (2026-08-01): "player 不具备破钢能力时，不要射击钢铁障碍物来试图开路" — the AI fired at indestructible steel to open a path, wasted the bullet cap, then camped at the wall for the full camp timeout, cutting combat efficiency.
+- Root cause: T11 lives in `shouldFireInDirImpl`, but the break-through sites bypass it entirely, firing at whatever blocks the move direction — including steel.
+
+> 状态： (SHIPPED)
+
+## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix)
+
+**Decision:** The §70 base-ring fire guard protected `shouldFireInDirImpl` and the two break-through fire paths, but the T2a (stop-and-aim) and aggressive-mode fire paths bypassed `shouldFireInDirImpl` entirely — firing directly when `scan.enemy` was true, without checking `scan.baseWall`. Because `scanAheadImpl` uses two independent offset scan lines, one offset can find a base-protection brick (`baseWall=true`) while the other finds an enemy (`enemy=true`). The T2a path fired whenever `scan.enemy` was true, destroying the player's own base. This caused 4 `killer=player` base-destruction failures in S33 Diamond (120 seeds: 26, 34, 78, 82).
+The fix has three parts:
+1. **`scanAheadImpl` (FireControl.ts)**: New `baseWallDist` field — stores the step count when a base-protection brick or 'base' (eagle) terrain is found. Initialized to `Infinity`. Set alongside `baseWall=true` for both 'brick' and 'base' terrain cases.
+2. **T2a and aggressive-mode entry guards (GodAIInput.ts)**: Changed `if (scan.enemy)` to `if (scan.enemy && !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) && !(scan.baseSteel && (p.level ?? 0) >= 3))`. This prevents firing only when the base wall is **closer than or at the same distance as** the enemy — the 6px bullet spans both offset columns and WILL hit a closer base wall before reaching the enemy. If the enemy is closer, the bullet hits the enemy first, so firing is safe. This distance-aware check avoids the over-conservative regression of a blanket `!scan.baseWall` check (which prevented valid shots at enemies behind the base wall and caused +12 lives_exhausted on S33).
+
+## Lie-Back-Win-Mode (Coop God AI)
+
+| Decision | Detail |
+|----------|--------|
+| Q1–Q10 sign-off + hidden-state compliance | `plan/Lie-Back-Win-Mode.md` |
+
+## 75. Replay Recording Must Tap the Decorated Input (Lie-Back-Win-Mode desync) (SHIPPED)
+
+**Decision:** The recorder always taps `simulation.input` / `simulation.input2` —
+the exact objects the preceding `tick()` consumed — never the raw `Input` /
+`godInput` fields. This is decoration-agnostic: any future input decorator is
+recorded correctly by construction.
+
+> 状态： (SHIPPED)
+
+## 76. The Packed Blob Is the Only Authority on Frame Schema (SHIPPED)
+
+**Decision:** the packed blob's **leading byte** is the single authority on
+layout. Everything else is descriptive and must agree with it.
+- `SUPPORTED_FRAME_SCHEMA_VERSIONS` + `isSupportedFrameSchema()` (`config.ts`) —
+readers accept every schema this build can decode, not just the newest.
+
+> 状态： (SHIPPED)
+
+## 77. Playback seek must advance the input (drag-the-bar desync) (SHIPPED)
+
+**Decision:** the fast-forward loop must replay frames `0..targetFrame-1` exactly
+like `update()` does — `simulation.tick()` then `this.input.advance()` — so the
+world lands on the true timeline at the seek target and resume is seamless.
+- `seekTo()`: dropped the pre-seek `input.seekTo(targetFrame)` (the fresh
+
+> 状态： (SHIPPED)
+
+## 78. Seek catch-up must drain (discard) world events — no audio burst (SHIPPED)
+
+**Decision:** a silent catch-up must drain events every tick — mirrors what the
+render loop does, we just don't play them. The world state is already updated by
+`tick()`, so discarding the observation events is safe and keeps both audio AND
+presentation backlogs empty after seek (no stale particle/flash burst either).
+
+> 状态： (SHIPPED)
+
+## 82. 督战模式（Supervise）— God AI 作为 player1 全程无人类输入 + 战斗速率快捷键 (SHIPPED)
+
+**Decision:** 新增「督战模式」：与躺赢模式（coop）同源但反其道而行——God AI 控制 **player1**（`GodAIInput` 默认 `controlledTank = w.player`），人类键盘完全脱离游戏输入（`simulation.input = godInput`，`input2 = null`）。`world.spectate` 标记（World 字段 + 快照序列化 + 回放 metadata）。督战与躺赢互斥（`requestSpectateToggle` 开启时先退出 coop，反之亦然）。督战局不存最高分（延续 Q4：无人类参与的成绩不入榜）。
+**Rationale:**
+- MANIFEST §2.1 One-Author：与 coop 完全同构——`requestSpectateToggle` 走 `simulation.requestSpectateToggle` 延迟到 `updatePlaying()` 首 tick 应用；Game 在 menu/paused 时立即应用（与 `pendingCoopToggle` 同款）。
+- AGENTS §2.2 No Hidden State：`spectate` 是 World 字段，快照/回放可复原；恢复（recovery restore）时若快照带 spectate 而 `godInput` 已清，重建 God AI（镜像 coop 的 §3.8 路径）。
+
+> 状态： (SHIPPED)
+
+## 89. §89: Close-range enemy exposure check — don't flee from point-blank enemies (SHIPPED)
+
+**Decision:** New params `closeCombatDangerCheck` (default **1** = ON; 0 = OFF) and `closeCombatDangerRange` (default **2** = point-blank, 32px). When ON, after the navigate branch determines `_moveDir`, `closeCombatExposureImpl` checks: is there an enemy within `range` cells, aligned (same row/col, within TANK px), with no wall between (scanAhead finds enemy), AND the player's moveDir is the OPPOSITE of the enemy's direction (fleeing)? If so, cancel the move — face the enemy and fire instead.
+**Critical design choices (discovered via A/B testing):**
+1. **Perpendicular moves are safe** — the initial implementation caught ALL non-toward moves (including perpendicular dodges), causing -1.7pp regression. Fixed: only `moveDir === opposite(enemyDir)` (fleeing) triggers the check. Perpendicular moves are dodges and are always safe.
+2. **Range 2, not 4** — at range 4, the check fired too often, cancelling legitimate navigation (retreating to defend, repositioning). A/B at 35×20: range 4 = 91.0% (-1.6pp), range 2 = 93.0% (+0.4pp), range 1 = 92.9% (+0.3pp). Range 2 is the sweet spot — the enemy is truly adjacent (32px), where fleeing is almost certainly death.
+
+> 状态： (SHIPPED)
+
+## 90. Dodge Direction Persistence + Threat Hysteresis (Bug Fix)
+
+**Decision:** Two fixes for player evasion failures found in `classic-s12-died-l0-t43-seed1322088985.replay`:
+1. **Dodge direction persistence** (`dodgeDirectionImpl`): when the same threat bullet persists across ticks, return the last dodge direction if it's still `canMoveDir` + `isSafeDir`. Prevents the 1px oscillation where `canMoveDir` or `isSafeDir` flips at the sub-cell boundary, causing the dodge direction to reverse every tick (e.g., up→down→up→down, making the player effectively stationary at y=55↔56 while the bullet approaches and hits).
+2. **Threat hysteresis** (`findMostDangerousBulletImpl`): for the recently-dodged threat bullet (`b.id === _lastDodgeThreatId`), widen the alignment threshold from `< TANK` (32) to `< TANK + 2` (34). Prevents the threat from flickering between detected/not-detected at the exact boundary (|bcy-pcy| = 31 vs 32), which caused the player to alternate between dodge and navigate branches every tick. New threats still use the standard `< TANK` threshold.
+**Rationale:**
+
+## 90b. §90 A/B Test Results — Oscillation Counter-Fire Shipped (Negative Results Recorded)
+
+**Decision:** After 35×60 A/B testing, only the **oscillation counter-fire** (threshold=3) ships ON by default. Hysteresis, persistence, and floorSnap are all OFF — each caused net regressions.
+**A/B Results (35 stages × 60 seeds, classic, 18000 ticks, all params=0 for baseline):**
+| Approach | Net Delta | Worst Stage | Shipped |
+|---|---|---|---|
+
+## 91. Turn Cooldown (§90c) — Simulation-Layer Oscillation Prevention
+
+**Decision:** Added `turnCooldownMs` (default 50ms ≈ 3 ticks at 60fps) to `GameplayRules` — enforced in `SimulationCombat.updateMovement()`. After a tank turns (dir changes), it must wait `turnCooldownMs` before turning again. During the cooldown, `tank.dir` is reverted to `tank.prevMoveDir`. This blocks per-tick direction oscillation at the simulation layer (the source), rather than patching it in the AI layer (§90).
+**Implementation:**
+- `rules.ts`: `turnCooldownMs: 50` in both `DEFAULT_RULES` and `RULES.classic`.
+- `types.ts`: `Tank.prevMoveDir?: Direction` and `Tank.lastTurnFrame?: number` fields.
+
+## 92. §87: Urgent Power-Up Pickup Priority — Close + Safe-Path Pickups Outrank Defense/Kill (SHIPPED)
+
+**Decision:** User directive (2026-08-02): "炸弹/冰冻/护栏 8 格内、星星/加命/护盾 4 格内、船 2 格内且路径安全时，拾取优先级 > 回防/杀敌；然后全 35 关仿真验证，下降严重的用 per-seed tick-diff 分析处理。"
+New `think()` branch placed AFTER dodge (survive) and T8 (in-flight bullet aimed at the base — an immediate loss) but BEFORE aggressive/T2a/S5: a power-up within its category range AND with a safe path diverts the player immediately, overriding stop-and-aim kills and base-defense repositioning. Normal mode only (during freeze, the aggressive branch already grabs pickups when no enemy is aligned, and an aligned frozen enemy is a free kill not to interrupt).
+**Params (SHIPPED defaults):** `pickupPriorityMode=1`, `pickupPriorityHighRange=8` (bomb/freeze/fence + modern emp/guard), `pickupPriorityMidRange=4` (star/tank/shield + remaining modern items), `pickupPriorityLowRange=2` (boat), plus three safety gates discovered by the tuning loop:
+1. **`pickupPriorityMaxDanger=0`** — route danger (enemies strictly BETWEEN player and item, `calculateRouteDanger`) must be 0.
+
+> 状态： (SHIPPED)
+
+## 116. 自杀秒回（suicide quick-return）：实现 + 诚实阴性（2026-08-04）
+
+**Decision:** 新增 God AI 决策候选 `suicideReturn`（DecisionCore `ActionId` 权重 1100，高于 dodge 1000），默认 **OFF**（`suicideReturnMode=0`，字节持平）。当 5 个前置条件同时满足时，player 站立饮弹、无闪避、立即在出生点重生以处理基地威胁。新文件 `src/ai/god/SuicideReturn.ts`；新参 `suicideReturnMode / BulletTimeTicks(60) / EnemyDistTicks(300) / MinLives(2) / SpawnDistCells(6)`。
+**5 前置条件（对应任务）：** ①敌人处威胁点（可直击基地）；②出生点能处理该敌（0-1 转直击 或 出生点比 player 当前位更近）；③player 库存命数充足；④player 全速亦需 >5s 才够到该敌；⑤1s 内被致命弹命中（扫描所有敌方子弹，非仅最近 ctx.threat）。
+**验证（60-seed A/B，hard 全 35 关逐档）：**
+- 无 base 威胁守卫版本（仅按任务 5 条）：hard 子集 **net -1 flips**（S24 seed14 回归）——player 在基地其实不会沦陷时盲目自杀换命属浪费。per-seed tick-diff 定位：OFF 臂（不自杀）dodge+存活并胜出，ON 臂自杀丢命后仍保不住基地。
+
+## 117. 自杀秒回条件①变体（mode 2 STAND / mode 3 CHARGE）：诚实阴性（2026-08-04）
+
+**Decision:** 按取证建议重启 §116——把触发条件从条件⑤（濒死）改挂到条件①（敌人进入威胁点），新增两个变体：`suicideReturnMode=2`（STAND：站立等弹，超时 `suicideReturnStandMaxTicks=300` 兜底 + 超时后 `_suicideStandSuppress` 防重提交）与 `=3`（CHARGE：不闪避、直线冲锋威胁敌）。均**保留**基地活跃子弹守卫（S24 修复）。默认仍 OFF（mode=0，字节持平）。新增参数仅 `suicideReturnStandMaxTicks`。
+**实现要点：**
+- 健康 player 无法靠「站立饮弹」快死（pool 229HP 需 2-3 发），故 mode 2 用超时兜底、mode 3 主动赴死——两者都避免 §116 S31 站立冻结病理（单元测试抓到 mode 2 超时后立即重提交的二次冻结，用 suppress 修复）。
+- 执行中交易用弱检查 `anyThreatPointEnemyImpl`（仅条件①）而非全量前置——冲锋/站立中途不会因 player 已拉近距离而中止。
+
+## 118. §117 守卫升级（baseHp 阈值 + 防守位失守）A/B — 仍为诚实阴性，机制性证伪（2026-08-04）
+
+**Decision:** 按根因修复方向（守卫只验证了「有一发弹在飞」，未验证基地真会沦陷），为 mode 2/3 增加两个严格死局守卫参数（默认 0，字节持平）：`suicideReturnBaseHpFrac`（基地 HP ≤ 该比例 × baseMaxHp 才触发）与 `suicideReturnDefendDistCells`（player 距基地超过该格数=防守位失守才触发）。A/B 工具新增 `--strict` 臂 D（mode2+strict）/ E（mode3+strict），参数可调（默认 0.5 / 8 格）。
+**验证（120 seeds × 35 关 × {hard, chaos}，5 臂 42000 sims，36000 ticks）：**
+- 触发率降约 38%：hard 378→236 runs、chaos 539→350 runs——满血基地 + 有防守的假阳性被过滤（§117 hard S35 s8 的 FLIP-TO-LOSE 已消失）。
+- 但净翻转**未转正**：hard D +1（1胜/0负）/ E +0（0/0）；chaos D −1（0/1）/ E −2（0/2）。跨难度净 = D 0、E −2。B/C 复现上一轮数字逐位一致（确定性）。
+
+## 119. 固化策略调试方法论：run-forensics 分层取证（2026-08-04）
+
+**Decision:** 把本次自杀秒回调试沉淀为可复用取证工具链：跑 20/60/120-seed 仿真时，除胜率外必须能产出分层细节数据，用于理解详情/找规律/定位瓶颈。新增：
+- `tools/sim/simulation-runner.ts` 增加 `forensics: true` 选项（默认关 → 逐字节不变），每次运行返回 `RunForensics`：
+1. 终局快照 `terminal`：player 命数/HP（可承受打击数，vs 100 基准）/距基地/星级/存活、base HP（可承受打击数）/护墙完好数、**每个存活敌人**（type/HP/距 player/距 base/AI tier）、**每发在飞敌弹**（位置/方向/距 player/距 base/ETA/命中数经济学 hitsToDie）；
+2. 失败前 10 ticks 行动+生效规则日志 `lastActions`（每 tick：branch 候选/_moveDir/_fire/位置/HP/命数/基地 HP）；
+
+## 120. 自毁基地 32 局取证 + 采集脚本迭代（off-by-one / bullet-dir / --from-json）（2026-08-04）
+
+**Decision:** 用 §119 的 run-forensics 采集 hard/chaos 120 seeds 全部自毁基地局（hard 14 / chaos 18 = 32 局，0.33%/0.43%），并按调试过程迭代采集脚本三轮：
+1. **shot 事件 off-by-one 修复**：bullet_fired 事件在 `input.endFrame()` 之后才被消费，此前读到的 branch/dir 是**下一 tick** 的状态（S6 s43 的致命下射被记成左射）。修复：在 `sim.tick()` 后立即快照本 tick 决策态（fxTick），事件处理用快照。
+2. **朝向改取子弹真实弹道**：tank 转弯当帧的 `tank.dir` 会偏离子弹轴向（S33 s81 致命左射记成朝上）——shot 事件的 dir/towardBase 改用 `e.bullet.dir`（地面真值）。修复后**致命一枪指向基地区比例 29/32 → 32/32（100%）**。
+3. **--from-json 子集重跑**（本次用户方法论要求）：迭代调试重跑失败局时，**只跑前期已识别失败的 (difficulty, stage, seed) 组合**，不再全量 stage×seeds（本次验证：32 局 2.1s vs 全量 8400 局 ~4min；确定性 ⇒ 复现同一失败清单）。
+
+## 121. t2a/aggressive 停射自毁守卫 selfFireBaseGuard SHIPPED（2026-08-04）
+
+**Decision:** §120 取证根因（t2a 81% 直射基地区、护墙已破缺口）的修复：新增 `selfFireBaseGuard`（0=OFF / 1=strict / 2=lenient），默认 **2**（lenient，120-seed A/B 胜出），classic 经 CLASSIC_MODEL_PARAMS 还原 0（§115 纪律，字节持平）。
+**机制：**
+- `shotReachesBaseImpl`（FireControl.ts）：沿子弹**真实中心线**（6px 弹道，非 scan 的 ±8px 偏移线）做地形行走——环砖/环钢 STOP（安全）、非环钢 level<3 停、非环砖犁穿、base 格或 2×2 基地区矩形重叠（含 3px 边缘擦碰，hard S16 s82）→ true。坦克**故意不算遮挡**（敌人可闪避，正是 §120 机制）。
+- 守卫挂在三处：ENGAGE(T2a) 停射、AGGRO 冻结窗停射、`shouldFireInDirImpl`（aggressive navigate fall-through 开火入口）。strict(1) 一律抑制；lenient(2) 仅当无敌人身体重叠 6px 走廊（±19px 带）时抑制——保住贴脸重叠击杀。
+
+## 140. 方向 D4：baseWall 精确环判定（破砖开火假阳性修复，SHIPPED，2026-08-05）
+
+**Decision:** 新增 `baseWallExactRing`（DEFAULT **1** = SHIPPED；classic 经 CLASSIC_MODEL_PARAMS
+restore 0）。scanAheadImpl 的基地保护砖判定从「baseWallScanRadius×≤2 带」松散矩形改为**精确
+环格谓词**——与 `SimulationCombat.isBaseProtectionCell` 逐字一致（row 23 cols 11-14 + cols
+11/14 rows 24-25 共 8 格）。这是机制级 bug 修复，不是调参旋钮。
+
+## 141. D2 拆环威胁评分 —— 诚实阴性（旋钮默认 0，byte-identical）
+
+**Decision:** 实现并测量 `defenseBreachBonus`（Battlement 探索 D2）：新增静态谓词
+`canBreachRingFrom`（敌人与 8 个环格之一对齐、中间无砖/钢、且该环格仍是砖——其下一发子弹
+就拆环），接入 `selectTargetUncached` 基地威胁评分为加分项，评分随环完整度下降而上升
+（×1 满环 → ×1.875 仅 1 砖）。默认 0 = OFF。A/B：hard 60-seed **基线 6/60 (10.0%) vs
+
+## 143. D5 基地火力解锁 + 星经济 —— 诚实阴性（firingLaneBoxRow / pickupStarBoxRow 保持 0）
+
+**Decision:** 实现并测量 D5：① **死区重定向限定基地盒**——§139 FIRING_LANE 候选叠加
+`pc.row >= firingLaneBoxRow`（目标 20）门控；② **星经济豁免**——`pickupStarBoxRow` 开启时，
+基地盒内（row ≥ 20）star/tank 道具绕过 §87 近敌门与路线危险门（两门在 4 敌常驻下永远挡路，
+D4 前 star 0.07/run 即此病因）。A/B（臂 = firingLaneMode=1 + firingLaneBoxRow=20 +
+
+## 144. E1 道具经济（危急道具拾取）—— 诚实阴性（direItemMode 保持 0，反证判据收束）
+
+**Decision:** 实现并测量计划的最后一块板子 E1（bomb/freeze 清环前带、fence 补环）：新增
+`findDireItemTargetImpl` + `direItemMode` 旋钮——基地危急态（敌人 swarm 在
+`direItemApproachCells` 6 格内且 ≥`direItemMinEnemies` 3，**或**环砖 ≤`direItemRingLow` 4）
+时，10 格内（`direItemRangeCells`）的 bomb/freeze/fence/emp 无视 §87 近敌门/路线危险门优先
+
+## 145. S24 冰面机制深潜 + iceGlideControl —— 诚实阴性（旋钮保持 0，S24 = 难度地板关）
+
+**Decision:** 实现并测量 S24（Labyrinth 迷阵，全关最差：hard 43.3% / chaos 36.7%）的冰面滑行控制旋钮
+`iceGlideControl`（+`iceGlideMinSpeed` 0.3）：HUNT navigate 段在冰上滑行中（|v|≥阈值）若目标方向与
+滑行轴反向，先松键（null）让滑行以 ICE_DECEL_TRACTION 自然衰减，替代当前「反向倒车」制动。纯函数
+`iceGlideAdjust`（Navigator.ts）+ 8 个单测锁定。A/B（60-seed）：S24 hard 26→21（−8.3pp）、chaos 22→24
+
+## 146. S8 Riverbed 取证深潜 + defensePosStandable —— SHIPPED（集合点可达性修复，hard 45%→52%）
+
+**Decision:** S8 远位弃守型败局（hard 45% / chaos 44%，败时距基 23.7 格）三层根因定位后，实现并发货
+`defensePosStandable`（+`defensePosStandableMinDist`=8）：默认防守位 (12, 24−offset=1) = **(12,23) 在全部
+35 关上都是环砖格**（§137 注释已承认），corridor 与 breakBrick A* 到砖格目标均返回空路径 → 紧急防御/
+§113 场退/§88 回防的路由全部失效，玩家只能 directMove 盲目破砖（S8 实测 pocket→(12,23) corridor=0
+
+## 147. S8 三杠杆 B/C/A 逐一 A/B —— B SHIPPED（§146 已记），C/A 诚实阴性（§146 C 范围限制 + A 全局崩盘）
+
+**Decision:** S8 三层根因（阈值空档 / 集合点不可达 / pickup 劫持回防）对应三杠杆逐一 A/B 收束：
+C（fieldRetreatPickupGate）与 A（maxPlayerDistFromBase 26→20）均**诚实阴性，不发货**；B
+（defensePosStandable，§146）已 SHIPPED。C 的实现与谓词保留（`isFieldRetreatConditionImpl` 成为 M13
+判定单一来源，selectTarget 与 PICKUP_HIGH 共用），A 无实现（纯参数探针）。
+
+## 148. fieldRetreatPickupGate 扩展到 MID/LOW —— 实测证伪后回退（HIGH-only 定稿，§147 范围锁定）
+
+**Decision:** 审查建议的「补全拾取劫持防线」（把 §146 C 门控从 HIGH tier 扩展到 MID/LOW）经 120-seed
+权威口径 A/B 实测**证伪并回退**：门控保持 HIGH-only，MID/LOW 恢复 byte-identical，新增 scope-lock 测试
+（「MID tier is NOT gated」）+ 注释补全双难度证据。
+**Rationale:**
+
+## 149. defensePosStandable 全面启用（minDist 解除）全关验证 —— 边际 ≈ 0，不发货（收窄版 §146 保持最优）
+
+**Decision:** 按 §146 的「发货需全关验证后统一启用」承诺，解除 `defensePosStandableMinDist` 门控
+（=0，近基 idle 也启用 standable 回退）做全关 120-seed hard+chaos 扫描（fresh 语料 fx-bfull-arm，
+8400 runs）。结论：**全面启用相对收窄版（minDist=8）边际 ≈ 0**（hard +0.1pp / chaos +0.2pp），且引入
+hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
+
+## 150. 关卡序号统一为 1-based（工具 CLI + 文档 S# 全量修正，2026-08-05）
+
+**Decision:** 全仓库统一关卡序号为 **1-based**：`S1`=Outpost … `S33`=Diamond、`S34`=Battlement、`S35`=Final Redoubt（即 `STAGES[n-1]`）。所有接受关卡选择的 CLI 工具（`--stages`/`--stage`/位置参数）改为 1-based 解析，所有 `S#` 输出标签、文档（DECISIONS/docs/plan）与测试注释同步 1-based。
+**Rationale:**
+- 原状割裂：取证工具（run-forensics/ab-fire-guard/ab-suicide-v2/base-loss-forensics，§119-§121 起）已用 1-based，其余工具与文档用 0-based——`--stages 33` 与文档「S33」指向不同关卡（33→Diamond vs S33=Battlement）。
+- 1-based 与用户直觉（第 33 关 = S33）及 `StageData.id`（本已 1-based）一致。
+
+## 152. hard S12 Lattice 回放四联 bug 修复（§152-W1..W4）+ 全关 A/B 验证（SHIPPED）
+
+**Decision:** 从浏览器回放 `hard-s12-base-l2-t138-seed934391936.replay`（S12 Lattice hard，gameover@8272 基地被毁）定位四个 God AI 行为 bug，全部修复并加单元测试，随后在 hard 全 35 关 × 60 seeds 配对 A/B 验证。**发货配置：W1（`t2aSteelPathBlock=1`）与 W2（`aggNavStuckTicks=120`）ON；W3（`pickupCommitTicks`）默认 0（实验旋钮，实测净负，不发货）；W4（decoy 出生点）为纯 bug 修复无条件发货。**
+### W1 — 停瞄被半格钢铁路径阻挡仍开火（0:59-1:01，t3540-3660）
+- **症状：** player 停在 (17,18)（中心 x=288 恰在 col-17/18 分界线上）向 (17,3) fast enemy 停瞄开火；扫描 ±8px 偏移线看到敌人，但子弹真实 6px 盒 [285,291] 在 rows 8-9 夹住 steel col 18 [288,304) 并死在行 9——火力被浪费且持续空射。
+- **根因：** T2a/aggressive 停瞄门只查 baseWall/baseSteel（§74/§75），从未验证子弹真实中心线是否被非环钢铁阻挡。
+
+## 153. hard S12 Lattice seed 3214953618 回放两行为（bullet-crash + close-combat trade）诊断与修复（实现 + 单测锁定；A/B 发现两者全局非正 → 实验旋钮不发货）
+
+**Decision:** 接手用户回放 `hard-s12-base-l3-t106-seed3214953618.replay`（S12 Lattice hard，seed 3214953618），定位上报的两个 God AI player 行为，各自修复并补单测，再在 hard 全 35 关 × 60 seeds flip-scan A/B 验证。**两者均为默认 OFF（0）的实验旋钮 `bulletLaneWait`（W1）与 `closeCombatDuel`（W2）：单元测试锁定机制正确、且对上报事件有效，但 60-seed 全关实测——W1 净负、W2 中性——与 §48/§103 家族结论一致（dodge/近身微调在 hard 全关净非正），故不提升为默认。**
+### W1 — player 主动撞上一颗下穿子弹（0:26，t1599）
+- **症状：** hard S12 回放 0:26（t1599）：player 在左走廊 (1,9) 侧移/turn-snap 时左缘从 x=24 瞬时弹到 x=16，撞进 col-0 一颗正在 `down` 下穿的敌弹（盒 x≈[13,19]，y 恰好经过 body），hp 315→187，且 `threat` 当时为 null。
+- **根因：** `findMostDangerousBulletImpl` 用**中心对齐 + `approaching`（中心未越过）**判定威胁。该弹：竖直中心已越过 player 中心 y（故 `approaching=false`）、且位于**相邻列**（中心 x 偏移 24px < TANK 但盒不真正重叠）——中心检测结构性漏报。真正触发是 player 侧移/转弯把 body 送进该弹车道。
+
+## 154. bulletLaneWait W1 重设计（§153 后记）：18 个净负种子根因定位 + predictive next-body 最终版（实测 35×60 hard 净 +15；仍为实验旋钮默认 0）
+
+**Decision:** §153 的 W1（expanded-box ±margin 判定）在 hard 全关 60-seed sweep 净负，本轮逐种子定位全部 18 个 to-lose 根因，并完成 4 轮设计迭代，最终版为 **predictive next-body + 排他 AABB + marginPx=1 + turn-cooldown 门控**（`bulletLaneClearImpl`，ThreatAssessor.ts；think.ts 接线）。实测 hard 35 关 × 60 seeds **净 +15（39W/24L）**；焦点组（S1/6/9/12/13/33）净 +7（10W/3L，S12 34→38/60）。**维持默认 0**（0 = byte-identical；发货需先经全量 sweep 复核并接受 3 个已文档化残余翻转）。
+**Rationale:**
+- **18 个净负种子根因（全部 per-seed 定位）：** 每个 to-lose 的首分歧 = B 侧 `moveDir=-`（hold）而 A 照常移动，结局 A clear → B gameover。分类：S9 全部 8 个 + S13 全部 6 个 + S12 s36/s52/s56 探针 = **垂直于移动方向的弹**（crossfire 关站桩 = §48 假规避致死）；S12 s1 = **同轴但 turn-cooldown 本会放行**的弹（过等 ~7 tick）；S9 s24@705 = **hold 吞掉本应「转身开火」的枪**（hold 位于 fire 决策之前）。→ 旧判定（任何弹在 margin 内即等）结构性误报。
+- **t1599 复现证明问题真实：** HEAD 下 t1598 玩家 (23.6,144) dir=left moveDir=up、b#201 down (13,160.4)；predictive next-body（moveDir 一步 + off-axis snap(CELL)，与 SimulationCombat axis-lock 同款）[16,48]×[142,174] 与弹盒真实重叠 → 最终版正确拦截（单测锁定）。
+
+## 155. bulletLaneWait W1 全局发货（§154 最终版，用户决策：忽略 chaos）
+
+**Decision:** 将 `DEFAULT_GOD_AI_PARAMS.bulletLaneWait` 从 0 改为 **1**（§154 predictive next-body 最终版全局生效）。用户明确指示只关注 hard（chaos 暂不计）。发货快照：`reports/winrate/history/2026-08-06_093217__§155 发送 bulletLaneWait=1 (W1 predictive hold, 全局默认).json`。
+**Rationale:**
+- **hard 全量验证（同语料 4200 局，seeds 1-120 × 35 关）**：74.4% → **75.1%（+0.7pp）**；60-seed 语料 flip-scan 全关净 +15（39W/24L）。硬门禁 `god-ai-hard-chaos-gate` aggregate 637→**639/700**（floor 612）。
+- **classic（+0.1pp，91.2→91.3%）、chaos（−0.3pp，70.7→70.4%）** 如实记录；chaos −7/2100 为 freeze-vs-hit 权衡在 chaos 更多弹幕下的已知倾向，未触碰 chaos 门禁 floor（394/700，实际 ~493），后续如需纠正可在 think.ts 按难度关闭 hold。
+
+## 156. Freeze-Window Power-Up Pickup（冰冻期道具拾取，无限距离）
+
+**Decision:** 在 AGGRO 候选（weight 700）的开头、stop-and-aim 之前，插入一段冰冻期道具拾取逻辑。新增参数 `freezePickupRange`（默认 999 = 无限距离，0 = OFF → byte-identical）。实现位于 `findFreezePickupTargetImpl`（`StrategyPlanner.ts`），由 `think.ts` AGGRO 分支调用。
+**v2 变更（2026-08-06 用户指示）**：`freezePickupRange` 从 2 改为 **999**（无限距离）。冰冻期间敌人完全冻结（不能移动/射击），唯一威胁是飞行中的子弹（DODGE weight 1000 > 700 已处理），因此冰冻期可以安全地穿越全图拾取任何可达道具。移动过程中如果移动方向有敌人，随手开火（`shouldFireInDir`）。
+**Rationale:**
+- **根因**（hard S12 Lattice，0:18~0:28）：冰冻期间 `PICKUP_HIGH`（weight 800）被 `!self.aggressive` 门控跳过。AGGRO（700）随后优先对任何对齐的冻结敌人执行 stop-and-aim，从不检查附近道具。一个 2 格外的道具在整个冰冻窗口被忽略，玩家一直站着射击冻结的敌人。
+
+## 157. Base Clear-Shot Threat Detection（基地车道对齐远距离威胁检测）
+
+**Decision:** 在 `isBaseUnderThreat()` 中新增 `enemyCanShootBase` 检查：任何存活且已生成的敌人如果与基地对齐且视线无遮挡（brick/steel/base 均不挡），无论距离多远，都视为威胁。新增参数 `baseClearShotThreat`（默认 1，0 = OFF → byte-identical）。
+**Rationale:**
+- **根因**（hard S12 Lattice，0:38~0:48）：一个与基地列对齐的敌人在远处通过已清理的车道射击基地。`isBaseUnderThreat()` 返回 false（row < 18，distance > race range），`selectTarget` 未返回防守位置，玩家一直在地图上方追猎，基地被毁。
+- **修复**：`enemyCanShootBase`（`SmartThreatModel.ts`）检查敌人是否与基地同列或同行、且子弹路径上无 brick/steel/base 遮挡。该检查比 §88 chokepoint 的 `facingGate` 更宽泛——§88 要求敌人面朝基地，而 §157 认为对齐的敌人随时可以转向开火，因此无论朝向都触发。
+
+## 158. Non-Freeze Close-Range Power-Up Pickup（非冰冻期近距离道具拾取）
+
+**Decision:** 新增 `CLOSE_PICKUP` 候选（weight 540，位于 DEFENSE_INTERCEPT 550 与 ENGAGE 500 之间），在非冰冻/护盾模式下，当无炮弹危险时拾取 `closePickupRange`（默认 2）格内的道具。新增参数 `closePickupRange`（默认 2，0 = OFF → byte-identical）。实现位于 `findClosePickupTargetImpl`（`StrategyPlanner.ts`），与 `findFreezePickupTargetImpl` 共享 `findNearestReachablePowerUp` 逻辑。
+**Rationale:**
+- **用户需求**：非冰冻期，如果道具距离近并且走过去路上没有炮弹危险，也要拾取，也要随手开火打敌人。
+- **权重调整（650→540）**：初始权重 650（高于 DEFENSE_INTERCEPT 550）导致 seed-999 回归——玩家在敌人接近基地车道时去捡道具，回来防守已来不及。降至 540（低于 DEFENSE_INTERCEPT 550）后，防守拦截优先执行；玩家不在防守位时 CLOSE_PICKUP 仍可拾取近处道具。
+
+## 159. 天降神兵守卫改用 GOD AI + §避让防堵车（用户需求 2026-08-06）
+
+**Decision:** 「天兵」召唤的基地守卫（§31 Phase 2）不再使用旧的简单 "Commander-defend" 策略，改为每个守卫一个完整的 `GodAIInput` 大脑（与 God AI 玩家完全相同的决策管线），并在其上叠加 §避让 override：当守卫挡住「正在移动」的 player 前方一格（forward cell）时，无条件避让——
+1. 优先垂直让开（`YIELD_PERPS` 候选，两侧都通时取腾挪空间更大的一侧）；
+2. 垂直方向都没有空间时，无条件转为与 player 同方向并前进（走廊护航）；
+3. 一直避让到不再堵车才恢复自主行动；
+
+## 160. 避让中扫射压制——避让开火优先沿腾挪轴（用户需求 2026-08-06）
+
+**Decision:** §159 的避让开火原为「只沿 player 车道方向（fwd）开火」——守卫垂直让开时子弹从车顶竖直飞出、与身体滑行方向不一致，且对守卫正在横穿的走廊侧翼毫无压制。§160 将避让期火控改为「扫射轴优先、敌人优先」（`updateGuardYield`）：
+1. 先沿 **腾挪轴（moveDir，即守卫实际移动的垂直方向）** 判定开火，但只在轴上确有**敌人**时才优先——炮管与移动方向一致（消除「开火方向偏离目标」），且随身体滑行，逐发子弹从不同位置射出，横扫守卫正在横穿的走廊带（避让中优先扫射压制）；
+2. 腾挪轴无敌人时回退到 §159 原行为：沿 player 车道（fwd）开火压制（避让过程保持向前方开火压制），车道门仍为 `shouldFireInDir`（敌或可拆砖皆可）；
+3. 两条路径都以大脑 `scanAhead`（敌判定）+ `shouldFireInDir`（T6/T11/§121 安全门：绝不打基地环、不打不可穿透钢）门控；引擎冷却模型限速——每 tick 至多一枪，无论哪条分支胜出。
+
+## 161. §161 开路策略（carve path）——实现完整、hard 全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，Stage 33 Battlement 过关思路）
+
+**Decision:** 新增泛化的「开路策略」（无关卡名，数据驱动，`carvePathMode` 门控，默认 0 = OFF → byte-identical）：
+- **Mode A（R1/R2）**：玩家在下半区（`carveLowerRow=13`）且基地无威胁时，若到防守驻点（`computeBaseGuardAnchorImpl`/默认防守位）无**顺畅**路线（无 corridor 路径 → R4），则用破砖 A*（`findCarvePathImpl`）挖一条通途到驻点——优先 0 破坏（基地环/基地列砖记 1e9 代价绕行），必要时最多破 `carveMaxBaseColumn=1` 个基地列砖（R6）；
+- **Mode B（R3）**：已在驻点（`carveAtPostCells=2`）且 `carveChaseCells=5` 内无敌人时，向 `carveThreatDistCells=8` 内最可能威胁基地的敌人（`enemyCanShootBase`/`enemyCanBreachRing` 优先）挖路；
+- **硬约束（R5/R6）**：`pathCarveSafeImpl` 逐足迹校验——钢、基地环（精确 8 格环，`isCarveRingBrickImpl`）永远不打；基地列（BASE_POS.col..+1、环以上）最多 1 格。
+
+## 162. §162 nav 卡死破局（navBreakStuck carve-dig escape）——SHIPPED 默认 1，hard 全 35 关显著胜率提升 p=0.019（用户需求 2026-08-06，回放 hard-s34-base-l2-t69-seed2050197249 Problem 1：出生点被砖墙围堵，player 不开墙出击，0:00~0:20 在出生点附近振荡）
+
+**Decision:** 三层机制（全部 `navBreakStuck>0` 门控，SHIPPED 默认 1）：
+- **破砖回退**：`followPathImpl`/`directMoveImpl` 全向不可通行时，回退尝试**可破**方向（`canMoveOrBreak`）——密封出生点口袋的薄墙被打破而非反向振荡（回放：玩家 128↔136px 摆荡在 cell 8↔9 之间，passable-only 回退永远只会返回口袋内反向，17-30s 无法出击）。
+- **像素级卡死检测（endFrame，每 tick 运行）**：净位移 < `carveDigNetEscape=24`px 且连续 `carveDigBlockTicks=90` tick 即判墙堵。cell 级 `_navStuckTicks` 永远检测不到口袋振荡——tank 中心坐标在墙边摆动时跨 cell 线（128↔136px ↔ cell 8↔9），每几 tick 重置 cell 计数器；且 HUNT 并非每 tick 求值（高权重候选优先），卡死计数必须挂在每 tick 的 endFrame。
+- **carve-dig 会话**：卡死即 `findCarveEscapeImpl` 启动持久挖路会话（精确环安全 dig 路径），跟随直到口袋打开 / 超时 `carveDigMaxTicks=2700`；spawnTimer>0 不计卡死（spawn 等待≠口袋锁定，防止每关开局误挖放弃防守）。
+
+## 163. §163 中路防守（midLaneDefense）——子弹触发版全 35 关与 Battlement 均实测净零 → 诚实阴性归档，旋钮默认 OFF（用户需求 2026-08-06，回放 Problem 2：基地列无钢铁防护，player 坐视敌人凿穿中路砖墙）
+
+**Decision:** 泛化「中路防守」候选（`midLaneDefense` 门控，默认 0 = OFF）：触发信号为**基地列内真实敌弹**（`laneShellInColumnImpl`——敌弹在 BASE_POS.col..+1 列向下飞行且与基地间无钢/水阻挡，即「凿穿瞬间」，与子弹-子弹碰撞对消机制耦合）；锚定基地列上方可站防守点（`findLaneDefensePointImpl`），持枪位（`midLaneHoldRange=1`）朝列上方停射（列内任意位置有弹即开火对消，突破 T5 的 128px 射程局限），牵绳（`midLaneMaxDist=8`，近基才锚定）、短挖门控（`midLaneMaxDigCells=3`，避免重复挖刚逃出的密封口袋）。权重 545（defenseIntercept 550 之下、closePickup 540 之上）。
+**Rationale（实测净零 → 归档）：**
+- **测量（只测 hard，按要求）**：Battlement 120 种子配对 A/B（§162 基线 vs §162+§163）：0.2379 → 0.2451（p=0.54，+1pp 噪声内）；全 35 关 60 种子：suite 0.5522 → 0.5523（p=0.55，47/57/1996 better/worse/tied，verdict no significant difference）。
+- **迭代历史（3 版触发器的 A/B 教训）**：① 敌人**在场/朝向**列（14-35% tick，B 测 29/35 关更差，suite 0.55→0.40 崩塌）——列内路过敌人不是威胁；② 纯敌弹列内信号（0-12%，Battlement 26%）→ 全图 0% 关不再受影响，但 Battlement 仍净零；③ 加可达性门控（口袋内防守点 = 8 步挖 = 自损）后 Battlement 仍 +1pp 噪声。
+
+## 164. §164 中路列旁主动驻守（midLaneHold）——诚实阴性归档（用户需求 2026-08-06：让 §162 出袋后的玩家优先走中路走廊而非左侧，在列旁持枪对消）
+
+**Decision:** 新增 MID_LANE_HOLD 候选（权重 220，carvePath 之下 hunt 之上；驻守判定硬编码 dist===0，不读 midLaneHoldRange）+ 3 个新参数（midLaneHold 默认 0 OFF、midLaneHoldMaxRow=14、midLaneHoldEnemyDist=12）+ 3 个纯函数（laneColumnOpenToBaseImpl / findParryHoldCellImpl / enemyNearLaneImpl）。机制：玩家在地图上半区（row≤14）且基地列无钢/水防（列开放）且中路繁忙（列内有向下敌弹或敌人距列 ≤12 格）时，导航到/驻守列旁对消格（pcx 在列 x 范围 ±6px 内、可站、走廊可达——Battlement 顶部广场 (12,4)），面朝上开火对消；中路无威胁时放行 hunt/engage。两轮 A/B 全部显著为负 → 归档默认 OFF（byte-identical），代码保留作 A/B 基线。
+**Rationale（证据链）：**
+- **机制诊断**：S34 获胜跑（base，stageclear 20 kills）的 breach12=12/12 —— 基地列 12 块砖**全部被凿穿但基地照样存活**。基地死于边路/环砖威胁，靠玩家整体击杀压力而非列内对消。"凿穿中路砖墙=威胁基地"的用户假设在 Battlement 上不成立。
+- **A/B 1（mlh 单独，Battlement 120 种子）**：0.2379→0.1590（p=0.0000，-7.9pp 显著更差）。驻守饿死击杀压力（目标种子 20 kills→16 kills→gameover）。
+
+## 165. T2a Defense Override — 近敌停射允许（修复 S20 Bastion 振荡死锁，origin 侧原 §159）
+
+**Decision:** 新增 `t2aDefenseOverrideRange` 参数（hard/chaos 默认 4，classic 默认 0 → byte-identical）。当基地受威胁且玩家越过 `maxPlayerDistFromBase` 阈值时（正常情况会 `skipT2aForDefense` 阻止 ENGAGE），若满足以下条件则允许 ENGAGE 开火：
+1. **距离门控**：玩家距基地 ≤ `maxPlayerDistFromBase + t2aDefenseOverrideRange`（仅阈值附近 1–4 格内生效，远离基地不触发）
+2. **近敌检测**：当前 `aimDir` 方向 scanAhead 命中敌人且距离 ≤ `t2aDefenseOverrideRange`
+3. **aimDir 覆盖**：当当前 `aimDir` 无近敌时，扫描四方找最近敌人覆盖 `aimDir`（仅当 aimDir 无近敌时触发，避免不必要目标切换）
+
+## §165. 中路防守启用 + 水阻弹 bug 修复 + 近战对枪火力评估
+
+**Decision:** 三项修复针对 replay `hard-s08-base-l1-t27-seed2585395049` 观察到的三个行为异常：
+1. **midLaneDefense=1** (SHIPPED ON)：启用 §163 中路防守候选。基地列无钢铁防护时，敌人子弹可沿列向下凿穿砖墙直逼老鹰，但此前该候选默认 OFF。
+2. **水阻弹 bug 修复**：`laneShellInColumnImpl` / `laneShellAboveImpl` 误将 `water` 视为阻弹地形（检查 `steel || water`），但 `TileMap.blocksBullet` 明确只有 `brick/steel/base` 阻弹。水不阻弹（Battle City 原版行为）——此 bug 导致 S8 Riverbed 等有水的基地列永远无法触发中路防守。
+3. **closeCombatDuel=1** (SHIPPED ON)：启用 §153-W2 近战火力评估——当对齐近敌射速快于玩家时，横移闪避而非站定对枪（必败交易）。
+
+## §165-round2. 深度调优：pathThreatAvoidance 假阳性 + closeCombatDuel 多敌计数 + midLaneHold 主动防守
+
+**Decision:** 三项深度调优均经 A/B 验证后**保持 OFF**——数据证明现有 God AI 已充分调优，提出的修复方案均有净负副作用。
+**Rationale:**
+### 1. pathThreatAvoidance 假阳性根因分析与修复尝试
+**根因（3 层假阳性）：**
+
+## 166. B1 starRush 星经济冲刺 — 诚实阴性归档（旋钮默认 0，2026-08-07）
+
+**Decision:** 新增 4 参数（`starRushMode` 默认 0 OFF、`starRushMaxLevel=2`、`starRushRangeCells=8`、`starRushLiftGates=1`）。开启且 level < maxLevel 时，星的紧急拾取范围从 4 格扩到 starRushRangeCells，并（liftGates=1）解除 §87 nearby-enemy / route-danger 门。实现于 `findUrgentPowerUpTargetImpl`（StrategyPlanner.ts）。
+**验证（hard）：**
+- 35×20 四臂筛选：OFF 76.6% / A(r8,lift0) 76.7% / B(r8,lift1) 77.3% / C(r12,lift1) 77.1% — 方向为正但噪声内。
+- 60-seed 决定性确认：OFF 75.9% / B 76.3%（+9 胜）/ C 76.2%（+7 胜）；配对翻转检验 B: L→W 24 / W→L 15，z=1.44；C: z=0.98 — 均 < 1.96，**不显著**。
+
+## 174. 双玩家仿真系统 — 双 God AI 协作 + 防堵车 + 督战双玩家 (SHIPPED)
+
+**Decision:** 扩展仿真系统支持双玩家模式：双 God AI 协作对战、P1↔P2 防堵车机制、督战双玩家模式。hard 35×120 过关率 97.1%（单玩家基线 76.3% 无回归）。
+**具体实现：**
+1. **仿真基础设施扩展**：`SimTask` 增加 `coop?: boolean` 字段；`sim-worker.ts` 透传 `coop` 到 `runSimulation`；`sweep-winrate.ts` 新增 `--coop` / `--dual` 标志。
+2. **GOD AI 配合意识**（`GodAIInput` + `StrategyPlanner` + `think.ts`）：
+
+> 状态： (SHIPPED)
+
+## 175. Dual 中路无钢关配合策略 — 立项（2026-08-08）
+
+**Decision:** 为 dual 模式下的"中路无钢、敌人从中路顶部出生持续凿穿砖墙"关卡（典型：S34 Battlement）实现专用配合策略。所有增强**仅对 `spectateDual && centralBreachRisk` 生效**，单玩家逐字节不变。
+核心改动：
+1. **中路无钢检测器** (`detectCentralBreachRisk` in `params.ts`)：扫中央带 cols 11–13 / rows 0–22 的 steel 数 = 0 + 敌出生点含中列 (col 12±1) + col 12 rows 0–9 有 ≥4 格 empty（开放通道，排除 S14 Steel Web 等砖墙从 row 2 开始的关）。当前仅 S34 通过。
+2. **Dual 角色分工**（`StrategyPlanner.ts`）：
+
+## 176. Dual Central Breach §6 实测缺陷修复 — P2 角色落地 + P1 dig-fire
+
+**Decision:** 针对 plan/dual-central-breach-strategy.md §6 实测复盘发现的三个缺陷，实施以下修复（全部仅 `spectateDual && centralBreachRisk` 下生效，单玩家逐字节不变）：
+1. **P2 fence 拾取** (§6.3-A)：在 PICKUP_HIGH 候选顶部新增 P2 专用 fence 拾取路径，绕过所有门控（nearby-enemy / retreat-gate / divert-distance）。新增 `findDualFencePickupImpl`（StrategyPlanner.ts）+ `dualCentralBreachP2FencePickup` 旋钮（params.ts，默认 1）。P1 守锚点、P2 捡 fence（=给基地砌钢墙），结构性解决中路被凿穿。
+2. **P1 dig-while-moving** (§6.3-C)：HUNT 候选 fire 逻辑中，P1 在 dual central breach 下 `allowWallFire=true`（`shouldFireInDir` 第 4 参数从 `false` 改为 `p1DigFire`）。P1 推进时开火破砖，不再等 navStuck 检测器。新增 `dualCentralBreachP1DigFire` 旋钮（默认 1）。P2 保持 `false`（A/B 实测 P2 开 wall-fire 反而 -12pp，浪费弹量上限）。
+3. **§159 T2a P2 bypass** (§6.3-D)：ENGAGE 候选中，P2 在 dual central breach 下跳过 `skipT2aForDefense`（不被强制回防）。P1 守锚点，P2 自由狩猎——允许 P2 停下射击近敌而不被基地威胁召回。A/B 实测 +4pp。
+
+## 177. Dual Central Breach P2 导航落地 — directMove/patrol 实测回退，de-conflict 生效
+
+**Decision:** 实施 plan/dual-central-breach-strategy.md §6.3-D 的 P2 导航两件套 **作为 opt-in 旋钮**（默认 0，全部仅 `spectateDual && centralBreachRisk && isPlayer2()` 下生效，单玩家逐字节不变）：
+1. **A) directMove 替代 A\***（`dualCentralBreachP2DirectMove`）：think.ts HUNT 候选长程分支优先 `directMove(pc)`，失败回退 `followPath()`。默认 **0**（A/B 实测回退）。
+2. **B) 敌出生点巡逻**（`dualCentralBreachP2Patrol` + `PatrolEnemyDist`/`PatrolRow`）：`findDualPatrolTargetImpl`（StrategyPlanner.ts，模块级 `_dualPatrolCell` 缓冲，AGENTS §14.1）在无可射敌时扫敌 spawn 列。`=2` 改为驻守 P2 自身防位。默认 **0**（A/B 实测回退）。
+3. **实测生效的修复**（设为默认 1/2）：
+
+## 178. Dual Central Breach autopsy (hard-s34 seed2) — carve 穿墙 + 中驻守 + sticky hold
+
+**Symptom:** replay `hard-s34-base-l3-t25-seed2.replay`（督战双玩家）三异常：P1 出生点振荡、P2 滞留右上、P1 滞留顶部（逐帧 autopsy 报告与其复现脚本为本地一次性产物，未入库）。root cause：dual central-breach 下两坦防守锚点在基地砖环两侧，须穿中路砖墙；但 carve-dig 逃生被硬卡（中列砖 1e9 + `carveMaxBaseColumn=1`），两坦被钉顶部、下不到防守位，敌人从底部凿穿基地。committed 基线（pre-§178，438d240）S34 dual 隔离 per-seed 仅 **1/12**（仅 seed9 过）。
+**Fix（全部 `spectateDual && centralBreachRisk` gated，单玩家逐字节不变）：**
+1. **A) carve 穿中墙**：override 块置 `carveMaxBaseColumn = dualCentralBreachCarveMaxBaseColumn(99)`、`carveBaseColumnCost = dualCentralBreachCarveBaseColumnCost(5)`。`PathCarve.buildCarveCosts` 中 base-column 砖代价由固定 `1e9` 改为 `self.params.carveBaseColumnCost` 驱动 → nav-stuck carve-dig 逃生直穿中墙而非绕顶部。
+
+## 179. Dual Central Breach autopsy (hard-s34 seed6) — P1 凿盾 + 危基不回防 + 冰冻浪费
+
+**Symptom:** §178 修复后 S34 dual 12 个种子仅 seed6 仍 `gameover@5549`（base_destroyed, kills=17, lives=3）。逐帧法医重建（autopsy 报告与复现脚本为本地一次性产物，未入库）定位 4 个根因：
+| # | 失误 | 根因 |
+|---|---|---|
+
+## 180. Dual Central Breach autopsy (hard-s34 seed34) — 右路盲区 + fence 独占 + defenseSecond 近端覆盖
+
+**Symptom:** replay `hard-s34-base-l2-t33-seed34.replay`（督战双玩家）`gameover@t2002 / base_destroyed / kills=7 / lives=2`。§179 基线 S34 dual 120-seed 85.8%（103/120），seed34 在 17 个失败 seed 中。逐 tick 取证（handoff `plan/dual-s34-seed34-base-loss-handoff.md`）定位 4 个缺陷：
+| # | 失误 | 根因 |
+|---|---|---|
+
+## 181. Dual Central Breach autopsy (hard-s34 seed115) — P1 spawn 振荡：A* 路由穿透基地保护砖
+
+**Decision:** 新增 `dualCentralBreachP1DirectMove` 参数（默认 1），让 P1 在 dual central breach 模式下使用 `directMove` 代替 A* `followPath` 进行全距离导航，与 P2 的 `dualCentralBreachP2DirectMove`（§180）对称。Gated by `spectateDual && centralBreachRisk && !isPlayer2` — 单玩家和 P2 路径逐字节不变。
+**Rationale:**
+- **根因**：诊断报告 `plan/dual-s34-seed115-base-loss-handoff.md` 描述了 4 个症状（P2 振荡、P2 朝墙空射、P2 弃守 BR 敌、P1 锚点漂移），但逐 tick 取证发现它们全部是**同一根因的不同表现**：A* `followPath()` 路由穿过"基地保护砖"（`isBaseProtectionBrick` with `baseWallScanRadius=5` 标记了出生点周围 5 格内的所有砖墙），但 `canMoveOrBreak` 拒绝打破这些砖（return false）。结果：
+- P1 在 (128,384) 卡死：`followPath` 返回 'right'（A* 路由穿过 (11,24) 基地保护砖），但 `canMoveOrBreak('right')` = false → P1 既不能移动也不能开火（break-through fire 被 base wall guard 禁止），卡在出生点 1693 ticks（整局 28 秒）
+
+## 182. 重放暂停后切换应用再回来点播放，画面不动（visibilitychange 污染 world.state）
+
+**Decision:** 两处修复：
+1. `main.ts` visibilitychange 监听器增加 `!game.playback` 守卫——重放期间不调用 `simulation.togglePause()`。
+2. `PlaybackController.update()` 增加防御性守卫——若 `world.state === 'paused'`（被外部代码污染），在 tick 前恢复为 `'playing'`。
+**Rationale:**
+
+## §182. Face-Nearest-Enemy Fallback for Immobile-Stuck Player
+
+**Decision:** In the HUNT candidate, after all movement options (followPath, directMove, carve-dig, nav-stuck escape) have failed to produce a passable `_moveDir`, when the player has been physically immobile for >= `carveDigBlockTicks` (90 ticks = 1.5s), turn to face the nearest enemy and fire at it via `shouldFireInDir`. Also reset `_digBlockTicks = 0` when a carve-dig session ends (timeout or unbreakable path) to give this fallback a 90-tick window before the carve-dig can re-start.
+**Rationale:**
+- Root cause (S2@seed120, hard, 150s stuck → gameover): Player at defense position (9,25) was completely surrounded by enemies and base-protection bricks. `followPath()` and `directMove()` both returned null every tick. The player faced a fixed direction (UP) and fired 189 bullets uselessly — the adjacent enemies were NOT in the UP direction. The `navStuckZone` parameter was 0 (OFF), so the nav-stuck escape never triggered. The carve-dig never started because `findCarveEscapeImpl` couldn't find a non-base-protection wall to break through.
+- The fix adds a fallback that detects this condition (`_moveDir` null or enemy-blocked + `_digBlockTicks >= 90`) and turns the player to face the nearest enemy. `shouldFireInDir` then fires at the enemy (with all T6/T11 base-protection safety gates intact).
+
+## §183. GOD AI Idle Calibration — Analysis Complete
+
+**Decision:** After a comprehensive analysis of all 35 stages × 120 seeds (4200 simulations) under督战+单人+hard mode, all player stationary periods >3s (180 ticks) are classified as combat logic. Two code bugs were found and fixed (§182, §184). The calibration is complete.
+**Rationale:**
+- The analysis script (`tools/diag/idle-analysis.ts`) was developed to detect and categorize idle periods, capturing player position, AI branch, fire count, enemy distance, and terrain context.
+- Pattern analysis identified three recurring scenarios:
+
+## §184. Freeze Powerup — Allied Guard Freeze Bug + Pickup Stuck Bug
+
+**Decision:** Two bugs related to the freeze powerup were found during idle calibration and fixed:
+1. **Bug 1 — Freeze froze allied guards** (`SimulationCombat.ts`): The freeze check used `!tank.isPlayer`, which incorrectly included allied guards (天降神兵). Changed to `tank.allegiance === 'enemy'` so only hostile tanks are frozen.
+2. **Bug 2 — Player stuck during freeze pickup** (`think.ts` AGGRO branch): When the player navigated toward a freeze powerup but was physically blocked by a frozen enemy, the player kept trying to navigate (returning a blocked direction) and never fired at the blocking enemy. Fix: when `_digBlockTicks >= carveDigBlockTicks` (90 ticks = 1.5s of immobility) during freeze pickup, fall through to AGGRO's stop-and-aim / navigate sub-branches so the player kills the blocking enemy first, then resumes the pickup next tick.
+**Rationale:**
+
+## §185. navStuckZone=1 — Sub-Pixel Jitter Defeats Nav-Stuck Counter
+
+**Decision:** Enable `navStuckZone: 1` and `navStuckSuppressTicks: 60` in `DEFAULT_GOD_AI_PARAMS` (hard/chaos). Classic keeps `navStuckZone: 0` via `CLASSIC_MODEL_PARAMS` (byte-identical classic gate). Also add a CARVE_PATH deferral guard in the nav-stuck escape: when `carvePathMode > 0` and the player is in the carve zone (`pc.row >= carveLowerRow`), the nav-stuck center-escape is suppressed so CARVE_PATH can handle the escape.
+**Rationale:**
+- **Root cause**: The P0.3 nav-stuck escape (`navStuckTicks=180`, 3s) uses `playerCell()` for its same-cell check. `playerCell()` is the tank CENTER, and a 1px bounce across a cell boundary flips it (e.g. S26 seed51: center bounces (5,4)↔(6,4) every ~10 ticks). With `navStuckZone=0` (exact-cell comparison), the counter resets every few ticks and never reaches 180 — the escape NEVER fires. S26 seed51: player stuck for **581.6 seconds** (entire game, 0 kills, 0 fire, gameover).
+- **§168 fix was developed but never shipped**: The zone-based check (±1 cell, same as §152 `aggNavStuckTicks`) was implemented in think.ts but `navStuckZone` was left at 0 in DEFAULT_GOD_AI_PARAMS. Classic explicitly restored 0, but hard/chaos never enabled it.
+
+## §186. powerupStuckTicks — Powerup Navigation Stuck Detection
+
+**Decision:** Add a `powerupStuckTicks` parameter (default 300 ticks = 5s, OFF in classic) to all powerup branches (PICKUP_HIGH, CLOSE_PICKUP, PICKUP_MID, PICKUP_LOW and AGGRO's powerup check). When the player has been pixel-stuck for >= `powerupStuckTicks` (via `_digBlockTicks` counter), skip powerup navigation and let the HUNT branch's nav-stuck escape run. Also add `t2aSkipStuck` check in T2a: when pixel-stuck, skip stop-and-aim entirely (even if aimDir is valid) and fall through to the nav-stuck escape.
+**Rationale:**
+- **Root cause (powerup stuck)**: The GOD AI 35×120 idle calibration found 12 alerts >=15s where the player was stuck navigating toward a powerup but not making progress. The powerup branch returns true with a navigation direction, but the player can't actually move (blocked by walls/enemies), and the branch blocks lower-priority branches (HUNT/nav-stuck escape) from ever running. Examples:
+- S33@seed47 (18.6s): 100% powerup branch, player at (11,9), navigating to powerup but stuck. `pathLen=8-26`, no firing, terrain changed (brick destruction) but player didn't move.
+
+## §187. Guard/P2 A* Player-Obstacle + Target Blacklist + Fire Post-Turn + Powerup-Enemy Overlap
+
+**Decision:** Four independent fixes targeting idle alerts S7@seed54, S3@seed65, S18@seed113, S27@seed107, S2@seed83:
+1. **Guard/P2 A* player-obstacle** (`navAvoidPlayer`): Guard and P2 A* pathfinding treats P1 as an impassable, indestructible obstacle. P1 does NOT treat P2 or guard as obstacle. Adds `blockedCell` to `PathConstraints` — `findPath` skips candidate cells whose 2×2 footprint overlaps the blocked cell. The guard brain gets `isGuardAI=true`; `getNavBlockedCell()` returns P1's cell when `isGuardAI || isPlayer2()`.
+2. **Target blacklist** (`targetBlacklistStuckTicks` / `targetBlacklistDuration`): When the player has been stuck (pixel-stuck via `_digBlockTicks`) for ≥240 ticks (4s) while targeting enemy A, A is temporarily removed from the target pool for 180 ticks (3s). Implemented as a single-slot blacklist `_blacklistEnemyId` + `_blacklistExpiryFrame` on `GodAIInput`. `selectTargetUncached` skips the blacklisted enemy. Note: the initial value was 120 (2s) but caused S35 chaos regression (18→12/20); raised to 240 (4s) which restored S35 to 19/20 while still resolving idle alerts (all stuck periods <5s).
+3. **Fire post-turn position** (S3@seed65): `shouldFireInDirImpl` now uses the post-turn-snap position when `dir !== p.dir`. Mirrors `aimSurvivesTurnImpl`: horizontal turn snaps y, vertical turn snaps x. This prevents misses when the player turns from vertical to horizontal and the position shifts.
+
+## §188. Fence Power-Up Must Not Trap Tanks Inside Steel
+
+**Decision:** `applyFencePowerUp` now skips any base-ring cell that overlaps a tank body (checked via `aabb` against `w.allTanks`). Previously, the fence converted any `empty` or `brick` ring cell to steel without checking for tank overlap.
+**Rationale:**
+- **S9@seed119 (532.7s stuck, game timeout)**: During gameplay, base-ring bricks at col 14 were destroyed by bullets (cells became `empty`). The player tank moved onto those cells (valid — empty terrain is passable). When the fence power-up later converted those `empty` cells to `steel`, the tank was permanently trapped: `rectHitsTerrain` detects the steel overlap on every subsequent move attempt, so the tank can never leave. The nav-stuck escape fires every 240 ticks but cannot help — the tank is physically walled in at the pixel level. The game timed out (532s of 600s max).
+- Root cause confirmed via pixel-level trace: player at (224, 384) = cell (15, 25), body spans cols 14-15, rows 24-25. Steel appeared at col 14 at tick 4042 while player was already there.
+
+## §189. 开局联通清墙 — Base Connectivity Clear
+
+**Decision:** Added a `BASE_CONNECT_CLEAR` candidate (weight 270, between `firingLane`(300) and `carvePath`(250)) that proactively clears lower-half brick walls to connect the player's side of the base to the P2 spawn point (opposite side) at game start.
+**Rationale:**
+- **Replay `hard-s04-base-l3-t82-seed1017`**: The player only cleared walls to reach above-base (the defense post area), not the opposite side. In the endgame, the player couldn't pathfind to the right side to defend, and the base was destroyed.
+- **User request**: "开局阶段必须在下半区找到通道通往基地对侧（P2出生点），如果没有就清墙开路。先绕基地环，清墙打通基地两侧的通道，到达基地另一侧，再从那一侧选择 清墙到据守点/出击/防守。"
+
+## §190. A* 寻路代价模型升级 — 砖墙=空地 + 基地环倍率 + 开火停车代价
+
+**Decision:** Upgraded the God AI `breakBrick` A* cost model from the old flat "brick=5, empty=1" to a time-efficiency-based model with three components, per `plan/god-ai-nav-cost-req.md`:
+1. **§3.1 — Brick cost = 1 (same as empty):** In `breakBrick` mode, a destroyable brick costs the same as empty terrain (1). The old `cost=5` penalized paths that were actually efficient (the tank fires while moving, clearing bricks without stopping). The brick-vs-empty distinction is now expressed by §3.3's fire-stop cost, not the base step cost.
+2. **§3.2 — Base ring multiplier (`navBaseRingMult=1.5`):** Base-protection bricks (per `isBaseProtectionBrick`) get an extra cost of `(mult-1)` added on top of the base cost of 1, making them cost `1.5` total. This gently discourages the AI from breaking its own base walls without making them impassable. The old PoC's `1e6` caused S7/S12/S13 base losses (the sole defender was forced to detour around the base); 1.5x is safe.
+3. **§3.3(c) — Firecontrol-linked stop cost (`navFireStopModel='firecontrol'`):** Every brick edge gets an additional stop cost computed dynamically from the tank's real fire state via `fireClearStopTicks()` — the shared pure function that mirrors `shouldFireInDir`'s geometric alignment + `think.ts`'s cooldown logic. The A* loop tracks arrival tick (`_pfArriveTick`) and cooldown expiry (`_pfCooldownExpiry`) along the path via parallel `Float64Array` buffers, computing real stop ticks per brick edge. This makes A* prefer straight-line brick paths (fire-while-marching, no stop) over zigzag paths (turn forces 1-tick stop + potential cooldown wait), and prefer paths where the cooldown expires before arrival (no wait) over paths where it doesn't. `navBrickStopCost=2` gates the model ON (>0); the actual cost is dynamic.
+
+## 191. 批量仿真共享态硬化 — findPath 重入守卫 + level-sim 子进程隔离
+
+**Decision:** 两项硬化措施（plan/batch-sim-shared-state-hardening.md）：
+1. **T1 — `findPath` 重入守卫**（`src/utils/pathfind.ts`）：在模块级加 `_pfInUse` 布尔标志，`findPath()` 入口检测重入（throw `findPath reentered`），`try/finally` 保证所有退出路径释放。`findPath` 使用模块级 typed-array 缓冲区（`_pfGScore`/`_pfState`/堆数组等），设计上永不重入，但无运行时保证。此守卫将未来误用（重入→静默污染）变成立即崩溃，不改任何已有路径结果。
+2. **T2 — `level-sim --size N` 子进程隔离**（`tools/optimize/level-sim.ts`）：批量模式不再用 in-process 串行循环，改为每 seed 派生一个 `bun level-sim.ts --seed S --size 1 ...` 子进程（并发上限 8）。父进程解析每个子进程 stdout JSON，按原有格式聚合 `results[]` + `winRate` 汇总。`--size 1` 保持原有 in-process 路径不变。
+**Rationale:**

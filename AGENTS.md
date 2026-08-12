@@ -4,7 +4,7 @@
 >
 > Read this file first. Read it fully. It is the contract between you and the project.
 >
-> The creed lives in `MANIFEST.md`. The decisions live in `DECISIONS.md`. The plans live in `plan/`. This file tells you how to *execute* all three without breaking what makes the game worth building.
+> The creed lives in `MANIFEST.md`. The decisions live in `DECISIONS.md` (the **index**: §1–§10 foundational decisions in full + compressed pointers). The verbose God AI / performance / render tuning logs live in `docs/*.progress.md`. The plans live in `plan/`. This file tells you how to *execute* all three without breaking what makes the game worth building.
 
 ---
 
@@ -21,7 +21,7 @@ Every change is judged against that moment. If a change does not serve it, the c
 In this order, every session:
 
 1. **`MANIFEST.md`** — the creed. Non-negotiable. Section 13 ("The Three Gates") is the final arbiter for every ambiguity.
-2. **`DECISIONS.md`** — the accumulated design decisions. You are extending this list, not contradicting it.
+2. **`DECISIONS.md`** — the decision **index**: §1–§10 foundational decisions (full text) + compressed pointers to the verbose tuning logs. You extend it, not contradict it. Full God AI / performance / render tuning detail lives in `docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`, `docs/render-optimization.progress.md`.
 3. **`plan/mvp.md`** — what the product is and the milestone structure.
 4. **`plan/Snapshot-Management-Framework.md`** and **`plan/presentation-upgrade.md`** — the active feature plans. Their "Definition of Done" sections are acceptance criteria.
 5. **`docs/presentation-audit.md`** — the current rendering state assessment.
@@ -309,7 +309,12 @@ Resolve the doubt by consulting, in priority order:
 
 ### 6.3 Record the decision
 
-**Before** executing, append a numbered entry to `DECISIONS.md` using the existing format:
+**Before** executing, record the decision. Where it goes depends on the topic:
+
+- **Foundational / architecture / gameplay-mechanic decisions** (the §1–§10 lineage) → append a full entry to `DECISIONS.md` using the format below.
+- **God AI / performance / render *tuning* experiments** → the verbose detail (A/B tables, forensics, per-seed breakdowns) goes to the matching log: `docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`, or `docs/render-optimization.progress.md`. In `DECISIONS.md`, add only a **compressed index row** — the `## N. Title (STATUS)` header plus one pointer line `> 全文 → docs/<file>.progress.md`. This keeps `DECISIONS.md` a scannable index, not a 300 KB wall.
+
+Full-entry format (for `DECISIONS.md` foundational decisions):
 
 ```markdown
 ## N. <Short Title>
@@ -323,7 +328,7 @@ Resolve the doubt by consulting, in priority order:
 **Implications:** <Optional — what this enables or forecloses.>
 ```
 
-Keep numbering sequential (the file is at ~18). If your decision revises an earlier one, mark the old one `_(superseded by §N)_` rather than deleting it — history matters.
+Keep numbering sequential. If your decision revises an earlier one, mark the old one `_(superseded by §N)_` rather than deleting it — history matters.
 
 ### 6.4 Execute
 

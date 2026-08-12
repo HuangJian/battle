@@ -583,3 +583,115 @@ Round 9 中段尝试给 `selectTargetImpl` 加 30-tick（0.5s）缓存。实测�
 - Round 17（§132）删除无限制挖墙搜索：交替 A/B 端到端 **classic +2.4% / chaos +5.2%**（≈+3~4% 综合）；god-ai-gate **620/508/473 逐字节不变**（3 个 chaos 行为变更查询在 gate 分布内未改任何一胜，按 gate 契约接受为无胜率回归）。carve/dig 链全量 A* 已压到单次 restricted 搜索。
 - **当前剩余瓶颈（2026-08-10 chaos/stage1 profile，Round 15/16/17 后）**：God-AI 决策 `evaluate` 链 **42.7% 含**（属 `think` 决策脑，用户要求不碰）、敌方 `perceive`/`analyze` **~33% 含**（§2.14 诚实阴性）、`updateMovement` 8.7%（game/SimulationCombat，物理扁平数学）、`findPath` 已降至 **5.7%**、carve/dig 链再无冗余全图 A*。行为保真 + 已授权行为变更优化均已见底；进一步需触及 `think` 决策逻辑或算法级变更（空间索引等），违反 "simple beats clever"（MANIFEST §10）或用户设定的保行为边界。
 - **线程状态（2026-08-11）**：行为保真优化已于 8-10 STOP，但「无限制挖墙搜索」项经用户 8-11 重新立项（§2.18 / Round 17），已 SHIPPED 并通过 gate。其余 STOP 结论不变。
+
+## Performance Optimization
+
+Full history in `docs/perf-optimization.progress.md`.
+
+| Phase | Improvement | Detail |
+|-------|-------------|--------|
+| Render layer (alloc-free, incremental terrain, on-demand render, 0-loop idle) | `docs/perf-optimization.progress.md` §1 |
+| Sim hot-path alloc elimination | ~25% perTick | `docs/perf-optimization.progress.md` §2.1 |
+| Classic-mode caching & pre-filtering | ~27% wall | `docs/perf-optimization.progress.md` §2.2 |
+| Perception interface flattening | ~44% wall | `docs/perf-optimization.progress.md` §2.3 |
+| rectHitsTerrain inline + iterator elimination | ~15% wall | `docs/perf-optimization.progress.md` §2.4 |
+| Dirty-flag + switch-weight | ~5-6% wall | `docs/perf-optimization.progress.md` §2.5 |
+| Nav-cache + mines-flag | ~7.9% wall | `docs/perf-optimization.progress.md` §2.6 |
+| Within-tick memo 族（scanAhead/selectTarget）+ chokepoint 对齐枚举 | ~4% wall，字节级确定性 | `docs/perf-optimization.progress.md` §2.9（DECISIONS §122–§126） |
+
+**Current baseline (2026-08-05, 同机 A/B)**: HEAD `wall≈3250ms perTick≈0.0028ms` → WIP `wall≈3113ms perTick≈0.0027ms`（classic/35 stages/10 games/warmup=2；字节一致 `ticks=1169769 wins=317/350`）。
+> 注：旧基线 `2531ms/0.0020ms` 早于 §104–§121 godai 特性（M6/M13/§121 等）落地，胜率 297→317 已证明其陈旧；同机 A/B 以 HEAD 为基准。
+Standard command: `bun tools/perf/bench-all-stages.ts`.
+
+## 122. 仿真性能 Round 10：computeThreatPoints 对齐枚举（SHIPPED，2026-08-05）
+
+**Decision:** `computeThreatPointsImpl`（Chokepoint.ts）不再全扫 26×26 网格。`canShootBaseFrom` 只对 `col === BASE_POS.col`（12）或 `row ∈ {24, 25}` 的格子返回 true（SmartThreatModel 的列/行对齐早退），故只枚举对齐格：对齐行（24/25）保持全列扫描，其余行仅测 `col === bc`。push 顺序与原始行主序逐字节一致。
+
+**Rationale:**
+- 原实现 676 次 `canShootBaseFrom` 调用中 ~600 次浪费在对齐早退；chokepoint 计划每 `chokepointReplanTicks`（30）tick 重算一次，这是该节流路径中最贵的组件之一。
+- 已逐行核对 `canShootBaseFrom` 语义：`col === bc+1`（13）在非对齐行必然 false（列检查只认 12、行检查只认 24/25），只枚举 `col === bc` 不会漏任何合格格——字节等价性有据。
+
+**Implications:** 确定性签名字节不变（Round 10 汇总见 §123 Results）。
+
+## 123. 仿真性能 Round 10：scanAheadImpl per-tick memo（SHIPPED，2026-08-05）
+
+**Decision:** `scanAheadImpl` 的四个 per-direction 结果缓冲 `_scanResults[0..3]` 兼作 **per-tick memo**：`_scanCacheMask` 按扫描原点 `(pcx, pcy)` 记录已计算的方向位，同原点同方向命中直接返回同一对象；原点变化清掩码；`endFrame()` 每 tick 清掩码。`ScanResult` 接口 + `makeScanResult()` 工厂从 GodAIInput 字段提升到 FireControl 模块。
+
+**Rationale:**
+- think() 每 tick（headless runner 每 tick 调 `input.endFrame()`）或每帧至多一次（浏览器 `_thought` 守卫，同帧多次 tick 复用同一次 think 的决策）执行，期间 World 不被修改（One Author §2.1）——同原点同方向的重复扫描（shouldFireInDir 内联、aggro/engage/hunt 候选、ThreatAssessor.findMostDangerousBullet 均从 player 中心扫同一方向）结果逐字节相同。
+- **零陈旧**：memo 生命周期严格在单 tick 内，不跨 tick——这正是 §68 否决的 cross-tick 缓存（0.5s 陈旧致 S7 胜率 72%→40%）缺失的粒度保证。
+- 不耗 RNG、不改变调用次数（只跳过重复计算），确定性签名逐字节不变：**实测 `ticks=1169769 wins=317/350` 与 HEAD 基线完全一致**（同机 A/B，bench-all-stages classic/35/10 games/warmup=2）。
+
+**Results:** scanAheadImpl self-time 从 Round 7-8 的 ~9%（chaos/stage0 profile）降至 ~0.5%（classic profile）/ 1.7%（chaos profile，含未命中原点成本）。Round 10 整体 wall：HEAD 3211/3289ms → WIP 2988/3219/3133ms（均值 ~3113ms，~4%；样本含热噪声 ±5-10%，方向为正）。
+
+## 124. 仿真性能 Round 10（REJECTED）：rectHitsTerrain 比较链重排 / terrain 短路
+
+**Decision:** 两个实测更慢的「优化」被否决，代码留注释防复发：
+1. `World.rectHitsTerrain` 把比较链重排为先测 `'empty'` 短路——实测 **+4.5% 更慢**（2499→2610ms，3 runs，classic/35）。
+2. `FireControl.scanAheadImpl` 用 `terrain !== 'empty'` 守卫包裹比较链——同样更慢。
+
+**Rationale:** 与 §14.4 同一教训：地形字符串被 V8 驻留，`=== 'brick'` 是指针比较，V8 把 flat 比较链折叠成紧凑分支；插入短路分支比省下的比较更贵。不要对抗 V8 的比较链折叠。
+
+## 125. 仿真性能 Round 10：selectTarget within-tick memo（SHIPPED，2026-08-05）
+
+**Decision:** `selectTargetImpl` 加 **within-tick memo**：`_selTargetValid` + 键 `(col, row)` + `_selTargetBuf` 稳定结果格 + `_selTargetNull`。HUNT 分支同 tick 内 2-3 次以相同 playerCell 调用 selectTarget（`navTarget = selectTarget(pc)` 后经 followPath→replan 或 directMove 再调），中间 World 不变，重复查询冗余。
+
+**Rationale:**
+- §68 否决的是 **cross-tick** 缓存（0.5s 陈旧崩 S7）；within-tick memo **零陈旧**（endFrame 每 tick 清），是 §68 响应性要求粒度下的安全形态。`selectTargetUncached` 只读 World 状态与 params、不耗 RNG。
+- 原 uncached 路径可能返回共享 `_tankCellBuf`（下一次 tankCell() 调用即覆写）或新分配的 defense cell——统一稳定缓冲同时消除别名风险与每 tick 对象分配。
+- Telemetry note: `branchCounts.chokepoint` 从「每次冗余查询计数」改为「每 tick 一次」——纯观测计数（tools/diag），不影响游戏。
+
+## 126. 仿真性能 Round 10（REJECTED）：canStepLat 手内联 rectHitsTerrain
+
+**Decision:** `TacticalIntelligence.canStepLat` 手写内联 `World.isInBounds` + `rectHitsTerrain`（rect 恒为 CELL 对齐 64×32，`Math.floor` 与 OOB 分支证明冗余）——**3 次测量中性偏慢**，否决并留注释。
+
+**Rationale:** `rectHitsTerrain` 被 4 个热站点调用且保持全 JIT 热；私有副本不更快，只分裂类型反馈（与 §123 同一教训——保持普通调用）。
+
+**Implications:** Round 10 收官：剩余热点（findPath 17%、enemy perception 15%、updateMovement 5%）均为已优化到位的核心函数或已被否决的方案（bucket queue §68/§88、cross-tick 缓存 §68、比较链重排 §124）；pickup 可达性 A* 关停实验（tmp 探针，pickupPriorityMode=0）显示 perTick 反而上升——不构成优化方向。进一步优化需算法级变更，违反 simple-beats-clever（MANIFEST §10）。
+
+## 127. 仿真性能 Round 11：followPath→replanImpl 跨 tick 缓存（SHIPPED，2026-08-05，含引用别名修复）
+
+**Decision:** `replanImpl`（Navigator.ts）加 **cross-tick 缓存**，消灭 findPath 调用分布中的主导项：
+- 键 `(playerCell, target)` + `world.tileMap.revision`（地形修订号，TileMap 新增单调计数器，loadStage/set/destroy/destroyAllBaseCells/快照恢复均 bump）+ `_replanTimer` 60-tick 安全计时器；followPath 的 stuck 分支清 `_replanCacheValid` 作自愈阀；reset() 清理。Gate：`params.replanCache`（默认 1；0 = 字节级等于 pre-§127）。
+- **别名修复（关键）**：缓存命中/写入必须与 `self.path` 分离——命中返回 `_replanCache.slice()` 副本，写入存 `self.path.slice()` 独立副本。初版直接引用赋值 `self.path = _replanCache`，followPath 换格时的 `self.path.shift()` 原地消费了缓存数组本身（1536 的 shift 把 len=2 缓存吃成 len=0），之后每 tick 命中空缓存死循环直到键变。
+
+**Rationale:**
+- §2.10 调用分布测量（临时插桩，已回退）：replan 占 findPath 78.9%（chaos/stage0）+ 9.9% dig = **88.8%**；classic/35 为 41.7%+31.3% = 73%。根因：`replanInterval` 默认 1，followPath→replanImpl 每 tick 全量 A*，而 §68 缓存只加在了 navigateTowardsImpl（次级分支）——主导航分支被遗漏。
+- `replanImpl` 全链不耗 RNG（findPath 确定性 A*，selectTarget 只读 World 状态），key 完整覆盖输入 ⇒ 严格纯 memo ⇒ **字节级确定**。地形修订号使缓存在地形变化的同一 tick 失效，无 staleness 窗口；60-tick 计时器降为防御性兜底。
+- 首个实现（无 revision、60-tick 兜底）A/B 冒烟 score 700/700 tied，但 **bench 揭穿**：ticks=1172649 vs 基线 1169769、wins 316 vs 317，13/350 单元分歧（含 S33 seed1021 outcome 翻转）。eval-suite 的 paired 比较是 score 粒度，抓不住 tick 级分歧——**per-seed tick-diff 才是诚实判据**。
+
+**Results（同机 A/B，经典/35 10 games/warmup=2 与 chaos/35）：**
+- 确定性：修复后 classic bench `ticks=1169769 wins=317/350` 与关闭版逐字节一致；全量 350 单元扫描 **0/350 分歧**；per-seed-diff S16 seed1007 IDENTICAL；eval-suite hard/chaos 各 4200/4200 tied。
+- 收益：**chaos wall −27.0% / −31.6%**（缓存开 vs 关，两轮）；classic ±2% 噪声（CLASSIC_MODEL_PARAMS 把 classic 的 replanInterval 恢复为 50，replan 每 50 tick 一次，命中率低——收益在主战场 hard/chaos）。
+
+**Implications:** 后续缓存类优化（pickup 可达性等）必须：① 先做 tick 级 A/B 而非 score 级；② 缓存返回对象与消费路径解引用（shift/变异）分离；③ 失效信号（revision）覆盖所有写路径（含快照直写 grid）。
+
+## 128. 性能基线标准场景改为 classic/hard/chaos 各 1/3（SHIPPED，2026-08-05）
+
+**Decision:** `bench-all-stages.ts`（标准性能基线）默认从「classic / 全 35 关 / 10 games」改为 **三难度各 1/3**：`classic / hard / chaos` × 全 35 关 × 各 10 games / warmup=2（每难度 350 场，共 1050 场）。保留 `--diff=classic|hard|chaos` 限单难度（恢复 pre-§128 行为）。输出分难度小计（wall/ticks/wins/perTick）+ GRAND TOTAL + 难度占比。
+
+**Rationale:**
+- §127 A/B 揭穿 classic-only 基线的盲区：replan 缓存在 chaos（replanInterval=1）实测 **−27~32%**，而 classic（CLASSIC_MODEL_PARAMS 把 replanInterval 恢复为 50）只有 ±2% 噪声——classic-only 标准场景会系统性低估/隐藏 God-AI 主导路径（hard/chaos、pool 战斗 HP 缓冲）上的优化收益与回归风险。
+- 三难度各 1/3 使基线覆盖全部战斗模型（instant vs pool）与 AI 负载形态（classic None 层占比高 vs hard/chaos GodAI 重负载），是更诚实的基线。用户确认按「每难度全 35 关 × 10 games」分配（总时长约 3 倍 ~20-30s，每难度样本量最大、最稳）。
+- 签名按难度分别记录（classic/hard/chaos 各 `ticks/win`），优化前后逐难度比较——单难度签名不受其他难度噪声影响。
+
+**Results（首次基线，2026-08-05 同机）:** GRAND TOTAL wall=22577ms / ticks=4586281 / wins=689/1050 / perTick=0.0049ms；分难度 classic 3537ms(16%) / hard 9590ms(42%) / chaos 9450ms(42%)。分难度签名：classic `ticks=1169769 win=317/350`、hard `ticks=1639097 win=177/350`、chaos `ticks=1777415 win=195/350`——各与单难度 baseline/§127 A/B 逐字节一致（hard+chaos 占 84% wall，印证 God-AI 重负载占比）。
+
+**Implications:** 后续性能优化的 A/B 判据建议按难度分别对比签名与 wall；classic 与 hard/chaos 的差异（replanInterval 50 vs 1）是分析优化落点的重要维度。
+
+## 129. pickup 可达性 A*：dig-only + 跨 tick 纯 memo（SHIPPED，2026-08-05）
+
+**Decision:** `powerUpCellReachable`（StrategyPlanner，powerUpCollectCell 的可达性查询）两处字节级优化，Gate `params.pickupReachCache`（默认 1，0 = pre-§129 corridor+dig 无缓存字节等价 A/B 臂）：
+1. **dig-only**：删除 corridor A* 调用——`breakBrick` 的搜索空间严格包含 corridor 空间（brick 通行成本 5，steel/water/base 仍阻挡），corridor 有路径 ⟺ dig 有路径，布尔结果恒等。corridor-fail 场景（全可达组件探索）恰是最贵路径，dig-only 直接短路它。
+2. **跨 tick memo**：8 槽直映缓存（target 坐标哈希），键 `(playerCell, target)` + `tileMap.revision`（§127 新增的地形修订号复用）→ 严格纯 memo。player 每 ~8-23 tick 才换格，urgent/bonus-window 拾取路径每 think 重查同一批道具，重复查询主导。
+
+**Rationale:**
+- §2.10/§127 Implications 预留方向：pickup 是 replan 缓存后最大可砍项（chaos 28.4% / classic 40.4% 的 findPath 调用）。
+- 与 §127 同构：findPath 是纯函数无 RNG → 同款键缓存字节级一致；revision 已覆盖全部地形写路径（§127 验证）。
+- 插桩计数（测后回退）：chaos/stage0 pickup 20603→2708（−87%），总 findPath 72533→54638（−24.7%）；classic/stage0 pickup 6206→613（−90%），总 15366→9773（−36.4%）。
+- 确定性：350 单元扫描 0/350 分歧（outcome/ticks/killCount）；per-seed-diff 4/4 敏感种子 IDENTICAL（S16 seed1007 / S33 seed1021 / S7 seed41 / S27 seed12）；eval-suite hard/chaos 各 4200/4200 tied；三难度基线签名逐字节不变（classic 1169769/317、hard 1639097/177、chaos 1777415/195）。
+- Wall（同机 A/B，带热身轮 + order=ab/ba 双向）：**chaos −27.7% / −8.3%**（ab 序 B 臂 13401ms 疑似系统负载离群；perTick 两轮均 favor A）；classic ±14% 噪声带内（单场 ~3ms，收益被机器负载淹没）。chaos 收益超过 §127 profile 预估（dig A* 单次成本高于 corridor，corridor-fail 是全网格探索）。
+
+**Implications:**
+- 测量纪律（§127 教训延续）：wall A/B 必须先热身并双向跑（order=ab/ba）——首轮 JIT/页面缓存 ~700-1000ms 会被误记到被测开关头上（无热身首测时双臂差异完全被顺序支配）。
+- pickup 可达性已达纯 memo 上限；再压需算法级变更（空间索引等），违反 simple-beats-clever（MANIFEST §10）。
