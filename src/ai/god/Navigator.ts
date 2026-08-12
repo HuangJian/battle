@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
-import { CELL, TANK, GRID, DIR_VECTORS, type Direction } from '../../constants'
+import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
 import { findPath } from '../../utils/pathfind'
 import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 
@@ -11,6 +11,93 @@ import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
 // Each `impl` takes `self: GodAIInput` so it can read shared state and
 // call sibling methods via the public wrappers on GodAIInput.
 // ============================================================
+
+/**
+ * §nav-cost 3.2: Pre-compute the per-cell base-ring extra cost array for
+ * A* breakBrick pathfinding. For each 2×2 tank footprint position, if any
+ * sub-block is a brick AND a base-protection brick (isBaseProtectionBrick),
+ * the cell gets extra cost = (navBaseRingMult - 1). Otherwise 0.
+ *
+ * Cached per tileMap.revision on self._baseRingCosts — same strict-pure-memo
+ * discipline as buildCarveCosts / buildDigCosts (PathCarve.ts). Terrain
+ * mutation bumps the revision the same tick, so the cache never goes stale.
+ *
+ * When navBaseRingMult <= 0 (OFF / classic), returns an all-zero array
+ * (byte-identical — no extra cost in the A* hot loop).
+ *
+ * Pure World read — no RNG, no mutation. O(GRID² × 4) per rebuild, only on
+ * terrain revision change.
+ */
+export function buildBaseRingCosts(self: GodAIInput): Float64Array {
+  const rev = self.world.tileMap.revision
+  if (self._baseRingCosts && self._baseRingCostsRev === rev) return self._baseRingCosts
+  const costs = new Float64Array(GRID * GRID)
+  const mult = self.params.navBaseRingMult
+  if (mult > 0 && self.hasBase) {
+    const grid = self.world.tileMap.grid
+    // Extra cost = (mult - 1): total brick cost = 1 + (mult - 1) = mult.
+    const extra = mult - 1
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        if (c + 1 >= GRID || r + 1 >= GRID) continue
+        let baseRingInFootprint = false
+        for (let dr = 0; dr <= 1 && !baseRingInFootprint; dr++) {
+          const grow = grid[r + dr]
+          for (let dc = 0; dc <= 1 && !baseRingInFootprint; dc++) {
+            if (grow[c + dc] === 'brick' && self.isBaseProtectionBrick(c + dc, r + dr)) {
+              baseRingInFootprint = true
+            }
+          }
+        }
+        if (baseRingInFootprint) {
+          costs[r * GRID + c] = extra
+        }
+      }
+    }
+  }
+  self._baseRingCosts = costs
+  self._baseRingCostsRev = rev
+  return costs
+}
+
+/**
+ * §nav-cost 3.3(c): Build the fire-stop PathConstraints fields from the
+ * tank's real fire state. When `navFireStopModel === 'firecontrol'`, this
+ * injects `fireCooldownTicks`, `fireIntervalTicks`, `marchTicksPerCell`, and
+ * `startDir` — activating the dynamic firecontrol cost model in A*.
+ *
+ * When `navFireStopModel === 'flat'`, this injects only `brickStopCost` and
+ * `startDir` — the §190 flat constant model (byte-identical to pre-3.3(c)).
+ *
+ * Pure World read — no RNG, no mutation. Called once per breakBrick findPath
+ * call (not per A* expansion).
+ */
+function buildFireStopConstraints(
+  self: GodAIInput,
+  p: Tank,
+): Pick<import('../../utils/pathfind').PathConstraints, 'brickStopCost' | 'startDir' | 'fireCooldownTicks' | 'fireIntervalTicks' | 'marchTicksPerCell'> {
+  const startDir = p.dir
+  if (self.params.navFireStopModel === 'firecontrol') {
+    // §3.3(c): compute real fire state from tank.lastFire + tank.nextFireInterval.
+    const now = self.world.frame * TICK_MS
+    const fireTimerMs = Math.max(0, p.nextFireInterval - (now - p.lastFire))
+    const fireCooldownTicks = fireTimerMs / TICK_MS
+    const fireIntervalTicks = p.nextFireInterval / TICK_MS
+    const marchTicksPerCell = p.speed > 0 ? CELL / p.speed : 23
+    return {
+      brickStopCost: self.params.navBrickStopCost,
+      startDir,
+      fireCooldownTicks,
+      fireIntervalTicks,
+      marchTicksPerCell,
+    }
+  }
+  // Flat model: constant brickStopCost + startDir for turn cost
+  return {
+    brickStopCost: self.params.navBrickStopCost,
+    startDir,
+  }
+}
 
 /** Get the player's grid-aligned cell (matches canMoveDir's snap).
  * Per-tick cached: the player doesn't move during think() (movement is
@@ -101,10 +188,18 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   // P3.1: If no corridor path, try dig-through-brick path.
   // This finds paths through brick walls — the player follows them and
   // fires at bricks to clear the way (handled by followPath + think()).
+  // §nav-cost: inject base ring multiplier (3.2) and fire stop cost (3.3)
+  // into the breakBrick A* cost model.
   if (!path || path.length === 0) {
     path = findPath(w.tileMap, playerCell, target, {
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
+      ...(self.params.navBaseRingMult > 0
+        ? { baseRingCosts: buildBaseRingCosts(self) }
+        : {}),
+      ...(self.params.navBrickStopCost > 0
+        ? buildFireStopConstraints(self, p)
+        : {}),
     })
   }
 
@@ -329,10 +424,18 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   let path = findPath(w.tileMap, playerCell, target, constraints)
 
   // P3.1: If no corridor path, try dig-through-brick path.
+  // §nav-cost: inject base ring multiplier (3.2) and fire stop cost (3.3).
   if (!path) {
+    const p = self.controlledTank(w)!
     path = findPath(w.tileMap, playerCell, target, {
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
+      ...(self.params.navBaseRingMult > 0
+        ? { baseRingCosts: buildBaseRingCosts(self) }
+        : {}),
+      ...(self.params.navBrickStopCost > 0
+        ? buildFireStopConstraints(self, p)
+        : {}),
     })
   }
 

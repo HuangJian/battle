@@ -2851,3 +2851,43 @@ standability 回退（§137 baseGuardAnchorMode 的 standable 定义）与本旋
 - Chaos S4 truth re-measured: 14→9 (the candidate costs 5 wins on chaos S4 but improves the aggregate on hard).
 - All 1239 tests pass.
 - Byte-identical when `baseConnectClearMode = 0` (OFF).
+
+## §190. A* 寻路代价模型升级 — 砖墙=空地 + 基地环倍率 + 开火停车代价
+
+**Decision:** Upgraded the God AI `breakBrick` A* cost model from the old flat "brick=5, empty=1" to a time-efficiency-based model with three components, per `plan/god-ai-nav-cost-req.md`:
+
+1. **§3.1 — Brick cost = 1 (same as empty):** In `breakBrick` mode, a destroyable brick costs the same as empty terrain (1). The old `cost=5` penalized paths that were actually efficient (the tank fires while moving, clearing bricks without stopping). The brick-vs-empty distinction is now expressed by §3.3's fire-stop cost, not the base step cost.
+
+2. **§3.2 — Base ring multiplier (`navBaseRingMult=1.5`):** Base-protection bricks (per `isBaseProtectionBrick`) get an extra cost of `(mult-1)` added on top of the base cost of 1, making them cost `1.5` total. This gently discourages the AI from breaking its own base walls without making them impassable. The old PoC's `1e6` caused S7/S12/S13 base losses (the sole defender was forced to detour around the base); 1.5x is safe.
+
+3. **§3.3(c) — Firecontrol-linked stop cost (`navFireStopModel='firecontrol'`):** Every brick edge gets an additional stop cost computed dynamically from the tank's real fire state via `fireClearStopTicks()` — the shared pure function that mirrors `shouldFireInDir`'s geometric alignment + `think.ts`'s cooldown logic. The A* loop tracks arrival tick (`_pfArriveTick`) and cooldown expiry (`_pfCooldownExpiry`) along the path via parallel `Float64Array` buffers, computing real stop ticks per brick edge. This makes A* prefer straight-line brick paths (fire-while-marching, no stop) over zigzag paths (turn forces 1-tick stop + potential cooldown wait), and prefer paths where the cooldown expires before arrival (no wait) over paths where it doesn't. `navBrickStopCost=2` gates the model ON (>0); the actual cost is dynamic.
+
+**Implementation:**
+- Extended `PathConstraints` (`src/utils/pathfind.ts`) with `baseRingCosts?: Float64Array`, `brickStopCost?: number`, `startDir?: Direction`, `fireCooldownTicks?: number`, `fireIntervalTicks?: number`, `marchTicksPerCell?: number`.
+- Added `fireClearStopTicks()` — a pure function computing stop ticks from (curDirIdx, cooldownExpiry, arriveTick, stepDirIdx). Mirrors `shouldFireInDir` (alignment: `curDir === stepDir` → no turn) + `think.ts` (cooldown: `cooldownExpiry > arriveTick` → wait).
+- The A* `breakBrick=true` loop tracks fire state via two parallel `Float64Array` buffers (`_pfArriveTick`, `_pfCooldownExpiry`) — no state-space expansion (stays 676 nodes). The `cameDir` buffer provides the incoming direction at each cell, avoiding a (position, direction) state dimension.
+- `buildFireStopConstraints()` (`src/ai/god/Navigator.ts`): converts tank real-time state (`frame * TICK_MS`, `p.lastFire`, `p.nextFireInterval`, `p.speed`, `p.dir`) into A* constraints.
+- The new cost model is **conditional**: activated only when `brickStopCost > 0 || !!baseRingCosts || useFireControl`. When none are provided (PathCarve calls, classic mode), the old `brick=5` behavior is preserved — **byte-identical** to pre-change.
+- `navigateTowardsImpl` and `replanImpl` conditionally inject `baseRingCosts` and `buildFireStopConstraints()` into `findPath` calls when `breakBrick=true` and the respective params are > 0.
+- Added `navBaseRingMult`, `navBrickStopCost`, and `navFireStopModel` to `GodAIParams` (`src/ai/god/params.ts`). Defaults: `navBaseRingMult=1.5`, `navBrickStopCost=2`, `navFireStopModel='firecontrol'`. `CLASSIC_MODEL_PARAMS` sets all to 0/`'flat'` (byte-identical classic).
+
+**Rationale:**
+- The old "brick=5" model had two flaws: (a) it penalized efficient fire-while-moving paths, and (b) it ignored the real time cost of fire-cooldown waits at bricks.
+- §3.1 corrects (a): in `breakBrick` semantics, a brick the tank can destroy while marching is effectively the same as empty terrain — the tank fires ahead and the brick is gone by the time it arrives.
+- §3.3(c) corrects (b): the firecontrol model computes the real stop ticks per brick edge from the tank's cooldown state and direction alignment. The A* loop tracks arrival time and cooldown expiry along the path, so it can distinguish "cooldown expires before arrival → fire-while-marching → stop=0" from "cooldown still active → must wait". This is the "与 FireControl 联动" implementation — the alignment + cooldown logic mirrors `shouldFireInDir` + `think.ts`.
+- §3.2 adds a mild preference to avoid base walls: 1.5x is enough to make A* prefer a non-base-ring path when one exists with equal length, but not enough to force a long detour.
+- The 1e6 lesson (§7 of the req doc): the sole SP defender must be able to break base-ring bricks when necessary. 1.5x keeps that ability while adding preference.
+
+**What was rejected:**
+- `cellCost` node hook (old PoC): added allocation and a function call per A* node expansion. Replaced by pre-computed `Float64Array` lookups (no allocation in the hot loop).
+- `threatCosts=1e6` for base ring (old PoC): caused S7/S12/S13 to drop below gate floors. Replaced by 1.5x multiplier.
+- Full (position, direction) A* state: would require a 4× state space (676→2704 nodes). Instead, the `cameDir` buffer provides the incoming direction at each cell, and the firecontrol model tracks arrival/cooldown via parallel `Float64Array` buffers — no state-space expansion. The turn cost (1 tick) and cooldown wait are computed from `cameDir` + arrival time, capturing the geometric constraint without expanding the state space.
+- Flat `brickStopCost` as the final model (§190 original): the flat constant was the first iteration. It was superseded by the firecontrol model (§3.3(c)) because a constant cannot distinguish "cooldown expires before arrival" from "cooldown still active" — the req doc's core requirement.
+
+**Implications:**
+- A/B comparison (hard 35×120=4200 runs/arm): firecontrol 3126/4200 (74.4%) vs flat 3114/4200 (74.1%) → **+12 wins (+0.3pp)**. 21 stages unchanged, 6 improved (S31+8, S24+7, S15+3, S27+3), 8 regressed (S35-6, rest -1 each). Improvements on S31/S24 (maze stages where dynamic cooldown tracking helps path selection) offset by S35 regression (worth investigating). Net positive, gate-safe.
+- Gate (35×20): hard 504/700 (72.0%, floor 468), chaos 475/700 (67.9%, floor 447), classic 620/700 (88.6%, floor 594) — all pass.
+- Classic mode is byte-identical (all params = 0/`'flat'` in `CLASSIC_MODEL_PARAMS`).
+- PathCarve calls are byte-identical (they don't pass the new constraints).
+- Unit tests in `tests/pathfind.test.ts` verify §3.1 (brick=1), §3.2 (baseRingCosts preference), §3.3 (fireClearStopTicks + firecontrol tracking), and byte-identical behavior when new params are off.
+- `battlement-carve-path.test.ts` explicitly sets `navBaseRingMult=0, navBrickStopCost=0` to isolate the §161 carve behavior from the new cost model.

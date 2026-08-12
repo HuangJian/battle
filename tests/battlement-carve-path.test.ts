@@ -345,6 +345,12 @@ describe('§161 — Battlement hard integration (Mode A digs out and reaches the
       carvePathMode: 1,
       baseConnectClearMode: 0,
       navBreakStuck: 0,
+      // §nav-cost: pin OFF to isolate §161 carve behavior from the new
+      // A* brick cost model (this test validates carve-path engagement,
+      // not nav-cost tuning).
+      navBaseRingMult: 0,
+      navBrickStopCost: 0,
+      navFireStopModel: 'flat',
     })
     const sim = new Simulation(world, input)
     world.loadStageData(STAGES[33], 0)

@@ -268,6 +268,44 @@ export interface GodAIParams {
   /** §162: nav-stuck break-out — try breakable directions when fully blocked. */
   navBreakStuck: number
   /**
+   * §nav-cost 3.2: Base-protection brick multiplier for A* breakBrick
+   * pathfinding. 0 = OFF (byte-identical — no extra cost for base ring
+   * bricks). When > 0, base ring bricks cost (navBaseRingMult) instead of
+   * 1, discouraging the AI from breaking its own base walls.
+   *
+   * The old PoC used 1e6 (impassable), which caused S7/S12/S13 base losses
+   * because the sole defender was forced to绕行 instead of guarding near
+   * the base. 1.5–2.0 is the safe range (plan §3.2).
+   */
+  navBaseRingMult: number
+  /**
+   * §nav-cost 3.3: Fire stop cost added to every brick edge in breakBrick
+   * A* (flat model). Represents a constant worst-case time cost of clearing
+   * a brick. 0 = OFF (brick = 1 = empty, per §3.1). When `navFireStopModel`
+   * is 'firecontrol', this value gates the firecontrol model ON (> 0) or
+   * OFF (0), but the actual stop cost is computed dynamically from the
+   * tank's real fire state (cooldown, direction alignment) — not this
+   * constant. A turn cost of 1 is also added when the path changes direction
+   * at a brick cell (the tank can't fire during a turn).
+   */
+  navBrickStopCost: number
+  /**
+   * §nav-cost 3.3(c): Selects the fire stop cost model for A* breakBrick
+   * pathfinding.
+   * - 'flat': constant `navBrickStopCost` per brick edge + 1 turn cost.
+   *   This is the §190 approximation — simple but doesn't reflect real fire
+   *   state.
+   * - 'firecontrol': dynamic stop ticks computed from the tank's real fire
+   *   state (tank.lastFire, tank.nextFireInterval, tank.dir, tank.speed).
+   *   The A* loop tracks cooldown along the path via `fireClearStopTicks` —
+   *   the shared pure function that mirrors `shouldFireInDir`'s geometric
+   *   alignment + `think.ts`'s cooldown logic. This is the §3.3(c) "与
+   *   FireControl 联动" implementation.
+   *
+   * Gated by `navBrickStopCost > 0` (0 = OFF = old brick=5 behavior).
+   */
+  navFireStopModel: 'flat' | 'firecontrol'
+  /**
    * §162: carve-dig session timeout (ticks). When navBreakStuck > 0 and the
    * player is nav-stuck, the AI starts a persistent carve-dig session toward
    * an escape target (findCarveEscapeImpl) and follows the exact-ring-safe
@@ -2389,6 +2427,23 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // carve-dig toward an escape target; followPath/directMove also fall back to
   // BREAKABLE directions when fully blocked. 1 = ON (default).
   navBreakStuck: 1,
+// §nav-cost 3.2: base ring brick multiplier. 1.5 = base ring bricks cost
+// 1.5× normal (1+0.5 extra). Tuned via gate scan {1.5,1.75,2.0,2.5}. The old
+// PoC's 1e6 caused S7/S12/S13 base losses (defender forced to绕行); 1.5 is
+// a温和 penalty that discourages breaking base walls without preventing it.
+navBaseRingMult: 1.5,
+// §nav-cost 3.3: gates the fire stop cost model. >0 = ON. When
+// navFireStopModel='firecontrol', the actual stop cost is computed
+// dynamically from tank.lastFire/nextFireInterval/dir/speed via
+// fireClearStopTicks() — this value is only the gate, not the cost.
+// The flat model (navFireStopModel='flat') uses this as a constant per-brick
+// cost. 2 was the tuned flat-model value; kept as the gate for firecontrol.
+navBrickStopCost: 2,
+// §nav-cost 3.3(c): firecontrol model — compute real stop ticks from
+// tank fire state (cooldown, direction alignment) via fireClearStopTicks(),
+// the shared pure function mirroring shouldFireInDir + think.ts cooldown.
+// A* tracks arriveTick + cooldownExpiry along the path via parallel buffers.
+navFireStopModel: 'firecontrol',
   // §162: carve-dig session cap — 45s max before giving up (Battlement
   // pocket exits in ~10-25s; 2700 ticks is generous but bounded).
   carveDigMaxTicks: 2700,
@@ -2867,6 +2922,12 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   targetBlacklistStuckTicks: 0,
   targetBlacklistDuration: 0,
   powerupEnemyOverlapSkip: 0,
+  // §nav-cost: A* brick cost model is a pool-model (hard/chaos) tuning —
+  // classic instant 1-HP 未 A/B，restore 0/0（byte-identical classic gate）。
+  navBaseRingMult: 0,
+  navBrickStopCost: 0,
+  // §nav-cost 3.3(c): firecontrol model gated by navBrickStopCost=0 → OFF.
+  navFireStopModel: 'flat',
 }
 
 /**

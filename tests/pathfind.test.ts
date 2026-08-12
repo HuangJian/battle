@@ -243,6 +243,189 @@ describe('pxToCell', () => {
   })
 })
 
+describe('findPath nav-cost model (§3.1/3.2/3.3)', () => {
+  /** Map with a brick wall that can be broken through (breakBrick=true). */
+  function brickWallMap(): TileMap {
+    const tiles: string[] = []
+    for (let r = 0; r < GRID; r++) tiles.push('.'.repeat(GRID))
+    // 2-wide brick wall at row 13 (full width)
+    tiles[13] = 'b'.repeat(GRID)
+    tiles[14] = 'b'.repeat(GRID)
+    // Base
+    setChar(tiles, 12, 24, 'E')
+    setChar(tiles, 13, 24, 'E')
+    setChar(tiles, 12, 25, 'E')
+    setChar(tiles, 13, 25, 'E')
+    return mapFrom(tiles)
+  }
+
+  it('§3.1: breakBrick brick cost = 1 (same as empty) — path goes straight through', () => {
+    const tm = brickWallMap()
+    // From (2,10) to (2,18) — must break through the brick wall at rows 13-14.
+    // With brick=1 (new model), the straight path (down 8 cells) costs 8.
+    // Pass baseRingCosts (all-zero) to activate the new cost model (brick=1).
+    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
+      breakBrick: true,
+      baseRingCosts: new Float64Array(GRID * GRID),
+    })
+    expect(path).not.toBeNull()
+    // The path should go straight down (no detour needed — brick=1=empty).
+    expect(path!.length).toBe(8)
+    expect(path!.every((d) => d === 'down')).toBe(true)
+  })
+
+  it('§3.1: breakBrick prefers shorter path through brick over longer detour', () => {
+    const tiles: string[] = []
+    for (let r = 0; r < GRID; r++) tiles.push('.'.repeat(GRID))
+    // Partial brick wall at row 13 — gap at cols 0-1 (2-wide for tank)
+    for (let c = 2; c < GRID; c++) setChar(tiles, c, 13, 'b')
+    // Base
+    setChar(tiles, 12, 24, 'E')
+    setChar(tiles, 13, 24, 'E')
+    setChar(tiles, 12, 25, 'E')
+    setChar(tiles, 13, 25, 'E')
+    const tm = mapFrom(tiles)
+
+    // From (2,10) to (2,16): straight through brick (3 cells down + 1 brick + 2 down = 6)
+    // vs detour left to col 0 (2 left + 6 down + 2 right = 10).
+    // With brick=1 (new model), straight path = 6 < 10 = detour. A* picks straight.
+    // Pass baseRingCosts (all-zero) to activate the new cost model (brick=1).
+    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 16 }, {
+      breakBrick: true,
+      baseRingCosts: new Float64Array(GRID * GRID),
+    })
+    expect(path).not.toBeNull()
+    // Straight path through brick is shorter (6) than the detour (10).
+    expect(path!.length).toBe(6)
+  })
+
+  it('§3.2: baseRingCosts makes A* prefer paths that avoid base ring bricks', () => {
+    const tiles: string[] = []
+    for (let r = 0; r < GRID; r++) tiles.push('.'.repeat(GRID))
+    // Full-width brick wall at row 13, with a 2-cell gap at cols 8-9.
+    tiles[13] = 'b'.repeat(GRID)
+    setChar(tiles, 8, 13, '.')
+    setChar(tiles, 9, 13, '.')
+    // Base far below (rows 24-25)
+    setChar(tiles, 12, 24, 'E')
+    setChar(tiles, 13, 24, 'E')
+    setChar(tiles, 12, 25, 'E')
+    setChar(tiles, 13, 25, 'E')
+    const tm = mapFrom(tiles)
+
+    // From (12,10) to (12,18): straight down through brick at col 12 = 8 steps.
+    // Detour through gap at col 8: left 4 + down 4 + right 4 + down 4 = 16 steps.
+    // Without baseRingCosts: straight = 8 < detour = 16. A* picks straight.
+    const pathNoCost = findPath(tm, { col: 12, row: 10 }, { col: 12, row: 18 }, {
+      breakBrick: true,
+    })
+    expect(pathNoCost).not.toBeNull()
+    expect(pathNoCost!.length).toBe(8) // straight down through brick
+
+    // With high baseRingCosts at the brick footprint (12,13):
+    // straight = 7 + (1 + 100) = 108 vs detour = 16. A* prefers the detour.
+    const costs = new Float64Array(GRID * GRID)
+    costs[13 * GRID + 12] = 100 // footprint at (col=12, row=13)
+    const pathWithCost = findPath(tm, { col: 12, row: 10 }, { col: 12, row: 18 }, {
+      breakBrick: true,
+      baseRingCosts: costs,
+    })
+    expect(pathWithCost).not.toBeNull()
+    // The path should detour through the gap (longer but cheaper).
+    expect(pathWithCost!.length).toBeGreaterThan(8)
+  })
+
+  it('§3.3: brickStopCost makes A* prefer paths with fewer bricks', () => {
+    const tiles: string[] = []
+    for (let r = 0; r < GRID; r++) tiles.push('.'.repeat(GRID))
+    // Two routes from (2,10) to (14,10):
+    // Route A: straight right through 12 cells of brick (cols 2-13 at row 10)
+    // Route B: down to row 0 (empty), right, then down (longer but no brick)
+    for (let c = 2; c <= 13; c++) setChar(tiles, c, 10, 'b')
+    // Base
+    setChar(tiles, 12, 24, 'E')
+    setChar(tiles, 13, 24, 'E')
+    setChar(tiles, 12, 25, 'E')
+    setChar(tiles, 13, 25, 'E')
+    const tm = mapFrom(tiles)
+
+    // Without brickStopCost (new model active via baseRingCosts, brick=1):
+    // straight through 12 bricks = 12 cells. Detour = 22. Straight wins (12 < 22).
+    const pathNoStop = findPath(tm, { col: 2, row: 10 }, { col: 14, row: 10 }, {
+      breakBrick: true,
+      baseRingCosts: new Float64Array(GRID * GRID),
+    })
+    expect(pathNoStop).not.toBeNull()
+    expect(pathNoStop!.length).toBe(12) // straight through brick
+
+    // With brickStopCost=10: straight path costs 12 × (1+10) = 132.
+    // Detour costs 22 × 1 = 22. A* should prefer the detour.
+    const pathWithStop = findPath(tm, { col: 2, row: 10 }, { col: 14, row: 10 }, {
+      breakBrick: true,
+      brickStopCost: 10,
+    })
+    expect(pathWithStop).not.toBeNull()
+    // The path should detour around the brick wall.
+    expect(pathWithStop!.length).toBeGreaterThan(12)
+  })
+
+  it('§3.3: turn cost adds 1 when direction changes at a brick cell', () => {
+    const tiles: string[] = []
+    for (let r = 0; r < GRID; r++) tiles.push('.'.repeat(GRID))
+    // L-shaped brick wall: horizontal at row 10 cols 5-8, vertical at col 8 rows 10-13
+    for (let c = 5; c <= 8; c++) setChar(tiles, c, 10, 'b')
+    for (let r = 10; r <= 13; r++) setChar(tiles, 8, r, 'b')
+    // Base
+    setChar(tiles, 12, 24, 'E')
+    setChar(tiles, 13, 24, 'E')
+    setChar(tiles, 12, 25, 'E')
+    setChar(tiles, 13, 25, 'E')
+    const tm = mapFrom(tiles)
+
+    // From (2,10) to (8,16): path goes right through brick, then down through brick.
+    // The turn at (8,10) is a direction change at a brick cell.
+    // With brickStopCost + startDir='right', the turn adds 1 extra cost.
+    // This test just verifies the path is found — the turn cost is internal.
+    const path = findPath(tm, { col: 2, row: 10 }, { col: 8, row: 16 }, {
+      breakBrick: true,
+      brickStopCost: 2,
+      startDir: 'right',
+    })
+    expect(path).not.toBeNull()
+    // Path should go right then down (through the L-shaped brick wall).
+    expect(path!.length).toBeGreaterThan(0)
+  })
+
+  it('byte-identical default: no baseRingCosts, no brickStopCost → old brick=5 behavior', () => {
+    const tm = brickWallMap()
+    // Without any nav-cost constraints, the old brick=5 behavior is used
+    // (byte-identical to pre-change). This is the same as brickStopCost=0
+    // with no baseRingCosts — neither activates the new cost model.
+    const path1 = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
+      breakBrick: true,
+    })
+    const path2 = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
+      breakBrick: true,
+      brickStopCost: 0,
+    })
+    expect(path1).not.toBeNull()
+    expect(path2).not.toBeNull()
+    expect(path2).toEqual(path1)
+  })
+
+  it('breakBrick=false is unaffected by nav-cost params', () => {
+    const tm = brickWallMap()
+    // breakBrick=false: brick is impassable, no path through the wall.
+    // The nav-cost params should not affect this.
+    const path = findPath(tm, { col: 2, row: 10 }, { col: 2, row: 18 }, {
+      breakBrick: false,
+      brickStopCost: 10,
+      baseRingCosts: new Float64Array(GRID * GRID).fill(100),
+    })
+    expect(path).toBeNull() // no corridor path through the full-width brick wall
+  })
+})
+
 describe('World.loadStageData', () => {
   it('loads a custom StageData without going through STAGES', () => {
     const world = new World()

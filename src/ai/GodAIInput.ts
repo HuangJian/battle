@@ -716,6 +716,15 @@ export class GodAIInput implements InputLike {
   _digCosts: Float64Array | null = null
   _digCostsRev = -1
   /**
+   * §nav-cost 3.2: per-revision cached base-ring extra cost array for
+   * A* breakBrick pathfinding. Values are (navBaseRingMult - 1) for cells
+   * whose 2×2 footprint includes a base-protection brick, 0 otherwise.
+   * Cached per tileMap.revision — same strict-pure-memo discipline as
+   * _carveCosts / _digCosts. null = not computed yet (rebuilt on first use).
+   */
+  _baseRingCosts: Float64Array | null = null
+  _baseRingCostsRev = -1
+  /**
    * §189: true once the candidate starts carving (no corridor to P2 spawn).
    * Stays true while the player travels along the opened corridor to the
    * P2 spawn, then resets when the player arrives (within 2 cells) or the
@@ -851,6 +860,9 @@ export class GodAIInput implements InputLike {
     this._digPathTimer = 0
     this._digCosts = null
     this._digCostsRev = -1
+    // §nav-cost: invalidate the base-ring cost cache on stage reset.
+    this._baseRingCosts = null
+    this._baseRingCostsRev = -1
     this._baseConnectClearActive = false
     this._baseConnectClearActiveTicks = 0
     // §162: reset the carve-dig session (new stage = new pocket).

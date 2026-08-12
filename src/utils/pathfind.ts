@@ -60,6 +60,77 @@ export interface PathConstraints {
    * The overlap check is |nc - col| <= 1 && |nr - row| <= 1 (2×2 footprint).
    */
   blockedCell?: Cell | null
+
+  /**
+   * §nav-cost 3.2: Per-cell EXTRA cost for base-protection brick cells,
+   * indexed by row*GRID+col (same as threatCosts). When provided, the value
+   * is ADDED to the step cost ONLY when the step goes through a brick cell
+   * (hasBrick=true). This makes A* slightly prefer routes that avoid
+   * breaking the base's defensive walls, without making them impassable.
+   *
+   * The array is pre-computed by Navigator.buildBaseRingCosts, cached per
+   * tileMap.revision (a strict pure memo — terrain mutation bumps the
+   * revision the same tick). Values are 0 for non-base-ring cells and
+   * (navBaseRingMult - 1) for cells whose 2×2 footprint includes at least
+   * one base-protection brick.
+   *
+   * Unlike threatCosts (which applies to ALL edges), baseRingCosts applies
+   * ONLY to brick edges — an empty cell in the base ring area has no extra
+   * cost (there's nothing to break).
+   */
+  baseRingCosts?: Float64Array
+
+  /**
+   * §nav-cost 3.3: Fire stop cost added to every brick edge in breakBrick
+   * mode. When `fireIntervalTicks` and `marchTicksPerCell` are NOT provided
+   * (flat model), this is a constant worst-case estimate added to every brick
+   * edge. When they ARE provided (firecontrol model), this value is ignored —
+   * the real stop ticks are computed dynamically from the tank's fire state.
+   *
+   * 0 = no extra cost (brick = 1 = empty, per §3.1 — byte-identical to
+   * the 3.1-only behavior). Typical tuned values: 1-3.
+   */
+  brickStopCost?: number
+
+  /**
+   * §nav-cost 3.3: The tank's current facing direction, used to compute the
+   * turn cost at the START cell. When the first step direction differs from
+   * the tank's facing, the tank loses 1 tick turning (during which it cannot
+   * fire). If not provided, no turn cost is applied at the start cell.
+   */
+  startDir?: Direction
+
+  /**
+   * §nav-cost 3.3(c): Remaining fire cooldown at path start, in TICKS.
+   * 0 = ready to fire immediately. When > 0, the tank must wait this many
+   * ticks before it can fire. Computed from:
+   *   `max(0, (tank.nextFireInterval - (now - tank.lastFire)) / TICK_MS)`
+   *
+   * When `fireIntervalTicks` and `marchTicksPerCell` are also provided, the
+   * firecontrol model is activated: the A* loop tracks the cooldown state
+   * along the path and computes real stop ticks per brick edge, replacing the
+   * flat `brickStopCost` constant. This is the §3.3(c) "与 FireControl 联动"
+   * implementation — the geometric alignment (curDir === stepDir) and cooldown
+   * logic mirror `shouldFireInDir` + `tank.lastFire` / `tank.nextFireInterval`.
+   */
+  fireCooldownTicks?: number
+
+  /**
+   * §nav-cost 3.3(c): Full fire cooldown interval in TICKS
+   * (`tank.nextFireInterval / TICK_MS`). After each brick-clearing fire, the
+   * cooldown resets to this value. This is what makes consecutive brick walls
+   * expensive: if the march time between two bricks is less than this interval,
+   * the second brick forces a wait.
+   */
+  fireIntervalTicks?: number
+
+  /**
+   * §nav-cost 3.3(c): March time per cell in TICKS (`CELL / tank.speed`).
+   * Player ≈ 23 ticks/cell. Used to compute arrival time at each brick cell
+   * along the path, which determines whether the cooldown will have expired
+   * before the tank reaches the brick.
+   */
+  marchTicksPerCell?: number
 }
 
 // ---- internal helpers -------------------------------------------------------
@@ -151,6 +222,51 @@ const EDGE_DR0: readonly number[] = [0, 1, 0, 0]
 const EDGE_DC1: readonly number[] = [1, 1, 0, 1]
 const EDGE_DR1: readonly number[] = [0, 1, 1, 1]
 
+// ---- §nav-cost 3.3(c): fireClearStopTicks -------------------------------------
+
+/**
+ * §3.3(c): Compute the fire-stop ticks for clearing a brick wall, based on
+ * the tank's real fire state. This is the shared pure function between A*
+ * pathfinding (pathfind.ts) and FireControl (conceptually — both use the
+ * same alignment + cooldown logic).
+ *
+ * The geometric alignment (`curDirIdx === stepDirIdx`) mirrors
+ * `shouldFireInDir`'s internal check: `shouldFireInDir` fires only when
+ * the tank faces the target direction (or is about to turn to face it).
+ * Here, `curDirIdx` is the tank's incoming direction at the current cell,
+ * and `stepDirIdx` is the direction of the brick edge. If they differ, the
+ * tank must turn (1 tick, no fire during turn).
+ *
+ * The cooldown logic mirrors `think.ts`'s `onCooldown = now - p.lastFire <
+ * p.nextFireInterval`: `cooldownExpiry` is the tick at which the cooldown
+ * expires (analogous to `p.lastFire + p.nextFireInterval` in absolute ticks).
+ * If `cooldownExpiry > arriveTick`, the tank must wait.
+ *
+ * Pure function — no World reads, no RNG, no allocation.
+ *
+ * @param curDirIdx       Tank's facing at current cell (-1 = unknown).
+ * @param cooldownExpiry  Absolute tick at which fire cooldown expires.
+ * @param arriveTick      Absolute tick at which tank arrives at brick (march only).
+ * @param stepDirIdx      Direction of the brick edge (0=up,1=down,2=left,3=right).
+ * @returns Stop ticks: 0 if fire-while-marching suffices, > 0 if the tank
+ *          must stop (turn + cooldown wait).
+ */
+export function fireClearStopTicks(
+  curDirIdx: number,
+  cooldownExpiry: number,
+  arriveTick: number,
+  stepDirIdx: number,
+): number {
+  const turnCost = curDirIdx >= 0 && curDirIdx !== stepDirIdx ? 1 : 0
+  // If cooldownExpiry <= arriveTick, the cooldown expires before or at
+  // arrival → the tank fires during march → stop = turnCost only.
+  // If cooldownExpiry > arriveTick, the tank must wait → stop = wait time.
+  // The max(turnCost, ...) handles both: when the wait < turnCost (cooldown
+  // expires during the turn), the turn cost dominates.
+  const wait = cooldownExpiry - arriveTick
+  return wait > turnCost ? wait : turnCost
+}
+
 // ---- public API --------------------------------------------------------------
 
 // Module-level reusable A* buffers (perf): findPath is called from the God AI
@@ -164,6 +280,24 @@ const PF_N = GRID * GRID
 const _pfGScore = new Float64Array(PF_N)
 const _pfCameFrom = new Int32Array(PF_N)
 const _pfCameDir = new Uint8Array(PF_N)
+/**
+ * §nav-cost 3.3(c): Per-cell arrival tick (in real ticks from path start).
+ * Tracks the actual time the tank arrives at each cell, accounting for march
+ * time + fire stop waits. Used to compute whether the fire cooldown will have
+ * expired before the tank reaches the next brick cell.
+ *
+ * Only written when the firecontrol model is active (fireIntervalTicks > 0
+ * && marchTicksPerCell > 0). When inactive, stale values are never read
+ * (guarded by `useFireControl` check in the hot loop).
+ */
+const _pfArriveTick = new Float64Array(PF_N)
+/**
+ * §nav-cost 3.3(c): Per-cell cooldown expiry tick (absolute ticks from path
+ * start). At the start cell, this is the initial remaining cooldown. After a
+ * brick-clearing fire, it resets to `fireTick + fireIntervalTicks`. For
+ * non-brick edges, it carries forward unchanged (cooldown keeps burning).
+ */
+const _pfCooldownExpiry = new Float64Array(PF_N)
 
 /**
  * (perf §130) Per-call generation stamps, replacing four full-array resets.
@@ -300,11 +434,34 @@ export function findPath(
   const breakBrick = constraints?.breakBrick ?? false
   // §69: optional per-cell threat costs. When provided, added to step cost.
   const threatCosts = constraints?.threatCosts
+  // §nav-cost 3.2: optional per-cell base ring extra cost (brick edges only).
+  const baseRingCosts = constraints?.baseRingCosts
+  // §nav-cost 3.3: fire stop cost for brick edges.
+  const brickStopCost = constraints?.brickStopCost ?? 0
+  // §nav-cost 3.3: tank's current facing direction (for start-cell turn cost).
+  const startDir = constraints?.startDir
+  const startDirIdx = startDir
+    ? startDir === 'up'
+      ? 0
+      : startDir === 'down'
+        ? 1
+        : startDir === 'left'
+          ? 2
+          : 3
+    : -1
   // §187: optional blocked cell (player tank) — impassable even with breakBrick.
   const blkCell = constraints?.blockedCell ?? null
   const blkCol = blkCell ? blkCell.col : -99
   const blkRow = blkCell ? blkCell.row : -99
   const hasBlk = blkCell !== null
+
+  // §nav-cost 3.3(c): firecontrol model params. When all three are > 0, the
+  // A* loop tracks fire cooldown along the path and computes real stop ticks
+  // per brick edge, replacing the flat brickStopCost constant.
+  const fireCooldownTicks = constraints?.fireCooldownTicks ?? 0
+  const fireIntervalTicks = constraints?.fireIntervalTicks ?? 0
+  const marchTicksPerCell = constraints?.marchTicksPerCell ?? 0
+  const useFireControl = fireIntervalTicks > 0 && marchTicksPerCell > 0
 
   // Quick reject: start or goal impassable.
   if (!isPassable(tileMap, from.col, from.row, ignoreWater, breakBrick)) return null
@@ -348,6 +505,13 @@ export function findPath(
   gScore[startKey] = 0
   firstSeq[startKey] = seqCounter++
   state[startKey] = g2
+  // §nav-cost 3.3(c): initialize firecontrol state at the start cell.
+  // arriveTick = 0 (tank is at the start now), cooldownExpiry = initial
+  // remaining cooldown (0 = ready to fire).
+  if (useFireControl) {
+    _pfArriveTick[startKey] = 0
+    _pfCooldownExpiry[startKey] = fireCooldownTicks
+  }
   pfPush(Math.abs(from.col - toCol) + Math.abs(from.row - toRow), firstSeq[startKey], startKey)
 
   // Two specialized hot loops: the common case (breakBrick=false) inlines a
@@ -437,19 +601,17 @@ export function findPath(
         const nc = cc + STEP_DC[s]
         const nr = cr + STEP_DR[s]
         // (perf §130) A single 2×2 pass yields BOTH passability and step cost.
-        // The old code called isPassable (4 terrain reads) and then re-scanned
-        // the very same 4 sub-blocks for brick — 8 reads for one neighbor.
         // The §130 leading-edge trick does not apply here because the cost
         // depends on all four sub-blocks, not just the new ones.
         if (nc < 0 || nc + 1 >= GRID || nr < 0 || nr + 1 >= GRID) continue
         let blocked = false
-        let cost = 1 // stepCost: 5 if any sub-block is brick, else 1
+        let hasBrick = false
         for (let dr = 0; dr <= 1; dr++) {
           const grow = grid[nr + dr]
           for (let dc = 0; dc <= 1; dc++) {
             const type = grow[nc + dc]
             if (type === 'brick') {
-              cost = 5 // passable in breakBrick mode, just expensive
+              hasBrick = true // §3.1: passable, cost = 1 (same as empty)
               continue
             }
             if (type === 'steel' || type === 'base') {
@@ -469,6 +631,44 @@ export function findPath(
         const nk = nr * GRID + nc
         const st = state[nk]
         if (st === g2c) continue // already closed
+        // §nav-cost: compute step cost.
+        // When the new cost model is active (baseRingCosts or brickStopCost
+        // provided), use 3.1 (brick=1=empty) + 3.2 (base ring extra) + 3.3
+        // (fire stop + turn cost). When NOT active (PathCarve calls, classic
+        // mode), use the old brick=5 behavior — byte-identical to pre-change.
+        const useNewCostModel = brickStopCost > 0 || !!baseRingCosts || useFireControl
+        let cost = 1
+        // §nav-cost 3.3(c): firecontrol stop ticks (computed for brick edges
+        // when useFireControl is active). Also updated for non-brick edges to
+        // track arrival time + cooldown state along the path.
+        let fcStop = 0
+        if (hasBrick) {
+          if (useNewCostModel) {
+            // 3.1: brick = 1 (same as empty — already set above)
+            // 3.2: base ring multiplier
+            if (baseRingCosts) cost += baseRingCosts[nk]
+            // 3.3: fire stop cost
+            if (useFireControl) {
+              // §3.3(c): compute real stop ticks from the tank's fire state.
+              // arriveTick at the brick cell (march only, no stop yet):
+              //   current arrive + one cell of march.
+              const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell
+              const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
+              fcStop = fireClearStopTicks(
+                incomingDir, _pfCooldownExpiry[currentKey], arriveNk, s,
+              )
+              cost += fcStop
+            } else if (brickStopCost > 0) {
+              // Flat model: constant worst-case cost + turn cost
+              cost += brickStopCost
+              const incomingDir = currentKey === startKey ? startDirIdx : cameDir[currentKey]
+              if (incomingDir >= 0 && incomingDir !== s) cost += 1
+            }
+          } else {
+            // Old behavior: brick = 5 (byte-identical to pre-change)
+            cost = 5
+          }
+        }
         // §69: add threat cost.
         const tentativeG = gCur + cost + (threatCosts ? threatCosts[nk] : 0)
         // `fresh` == the old `gScore[nk] === Infinity` case (see the
@@ -478,6 +678,22 @@ export function findPath(
           if (fresh) {
             state[nk] = g2
             firstSeq[nk] = seqCounter++
+          }
+          // §nav-cost 3.3(c): update firecontrol tracking arrays.
+          // arriveTick[nk] = current arrive + march + stop (for brick edges).
+          // cooldownExpiry[nk]:
+          //   - brick edge: fireTick + fireIntervalTicks (cooldown resets).
+          //   - non-brick edge: carry forward (cooldown keeps burning).
+          if (useFireControl) {
+            const arriveNk = _pfArriveTick[currentKey] + marchTicksPerCell + fcStop
+            _pfArriveTick[nk] = arriveNk
+            if (hasBrick && fcStop >= 0) {
+              // The tank fires at arriveNk (the moment it can), then cooldown
+              // resets to fireIntervalTicks from that point.
+              _pfCooldownExpiry[nk] = arriveNk + fireIntervalTicks
+            } else {
+              _pfCooldownExpiry[nk] = _pfCooldownExpiry[currentKey]
+            }
           }
           cameFrom[nk] = currentKey
           cameDir[nk] = s
