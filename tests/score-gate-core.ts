@@ -29,11 +29,12 @@ export const AGG_MARGIN_SCORE = 0.03
 export const STAGE_COUNT = STAGES.length // 35
 
 // ---- Per-stage godai-score v7 truth (mean over SCORE_SEEDS) ----
-// Captured from the merged main+origin/idle AI (2026-08-13 re-baseline after
-// the idle-merge). Re-capture by running `bun tools/.../...` — see
-// godai-score-gate.test.ts header. Values are the per-stage mean v7 composite
-// across SCORE_SEEDS=20 sims (telemetry on). classic is byte-identical to the
-// prior baseline; hard/chaos re-baselined to the shipped §192–§193-E AI.
+// Re-baselined 2026-08-13 after disabling §190 (pixelStuckDirectMoveTicks: 0
+// by default) — a paired A/B on --difficulty hard proved §190 is net-negative
+// (suite 0.5308 ON → 0.5363 OFF, p=0.0185). classic is byte-identical (it
+// always restored this param to 0); hard/chaos re-captured with §190 OFF.
+// Values are the per-stage mean v7 composite across SCORE_SEEDS=20 sims
+// (telemetry on). Re-capture via `tmp/capture-truth.ts`.
 export const TRUTH_SCORES: Record<string, number[]> = {
   classic: [
     0.9725, 0.8871, 0.9416, 0.9714, 0.964, 0.846, 0.8019, 0.9574, 0.9617, 0.9315,
@@ -42,22 +43,22 @@ export const TRUTH_SCORES: Record<string, number[]> = {
     0.8863, 0.9513, 0.7673, 0.958, 0.8052,
   ],
   hard: [
-    0.8439, 0.8424, 0.7447, 0.6986, 0.7342,
-    0.7926, 0.8212, 0.5052, 0.8164, 0.8531,
-    0.9212, 0.6695, 0.7967, 0.5878, 0.7952,
-    0.7371, 0.9386, 0.8185, 0.7683, 0.6242,
-    0.6937, 0.6017, 0.9503, 0.5818, 0.8318,
-    0.7988, 0.9085, 0.6698, 0.8839, 0.9046,
-    0.7905, 0.7684, 0.871, 0.3843, 0.7964,
+    0.8439, 0.8425, 0.7447, 0.6957, 0.7342,
+    0.7926, 0.8538, 0.5049, 0.8148, 0.8531,
+    0.9212, 0.7013, 0.8264, 0.5878, 0.7952,
+    0.7371, 0.9409, 0.8185, 0.7683, 0.659,
+    0.6937, 0.6017, 0.9512, 0.5818, 0.8626,
+    0.7993, 0.9085, 0.6698, 0.8839, 0.9046,
+    0.831, 0.7684, 0.8689, 0.3843, 0.7955,
   ],
   chaos: [
-    0.798, 0.8389, 0.775, 0.733, 0.6791,
-    0.5714, 0.5892, 0.5523, 0.8864, 0.8863,
-    0.9126, 0.5529, 0.9138, 0.8423, 0.8321,
-    0.7676, 0.6567, 0.9664, 0.6466, 0.6853,
-    0.7649, 0.5886, 0.9195, 0.4995, 0.8022,
-    0.4144, 0.8673, 0.5915, 0.78, 0.953,
-    0.6067, 0.6173, 0.863, 0.4011, 0.8405,
+    0.8013, 0.8405, 0.775, 0.733, 0.6791,
+    0.5714, 0.5892, 0.5523, 0.8866, 0.8863,
+    0.9126, 0.5539, 0.9138, 0.806, 0.8321,
+    0.7676, 0.6914, 0.9664, 0.6081, 0.6889,
+    0.7649, 0.5886, 0.9576, 0.4995, 0.769,
+    0.4505, 0.8672, 0.5915, 0.8125, 0.953,
+    0.639, 0.6173, 0.8599, 0.4011, 0.8366,
   ],
 }
 

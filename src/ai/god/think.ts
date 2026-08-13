@@ -1795,17 +1795,20 @@ const HUNT: Candidate = {
     }
 
     // §190: pixel-stuck fallback — when the player has been pixel-stuck for
-    // >= pixelStuckDirectMoveTicks (8s default) and no carve-dig is active,
-    // bypass A* pathfinding and use directMove. With replanInterval=1
-    // (default on hard), A* recomputes every tick and target movement
-    // invalidates the replan cache — the first step oscillates between
-    // directions, and the turn cooldown creates a back-and-forth with zero
-    // net progress. directMove picks a stable direction based on the target's
-    // relative position, breaking the oscillation cycle.
+    // >= pixelStuckDirectMoveTicks and no carve-dig is active, bypass A*
+    // pathfinding and use directMove. With replanInterval=1 (default on hard),
+    // A* recomputes every tick and target movement invalidates the replan
+    // cache — the first step oscillates between directions, and the turn
+    // cooldown creates a back-and-forth with zero net progress. directMove
+    // picks a stable direction based on the target's relative position,
+    // breaking the oscillation cycle.
     // Root cause: S35@seed10 (30.6s stuck at (1,25)), S2@seed13 (28s),
-    // S17@seed12 (30.9s), S31@seed9 (11.6s) — all resolved by this fix.
-    // Threshold (480 ticks = 8s) is above the nav-stuck escape (180 ticks =
-    // 3s) so that mechanism fires first, but below the 10s alert threshold.
+    // S17@seed12 (30.9s), S31@seed9 (11.6s).
+    // GATED OFF BY DEFAULT (pixelStuckDirectMoveTicks: 0) since 2026-08-13:
+    // paired A/B on --difficulty hard proved it is net-negative (suite
+    // 0.5308 ON → 0.5363 OFF, p=0.0185) and failed to help its own target
+    // seeds. Set the param > 0 to re-enable; threshold should sit above the
+    // nav-stuck escape (180 ticks = 3s) and below the 10s alert threshold.
     if (
       self.params.pixelStuckDirectMoveTicks > 0 &&
       !self._carveDigActive &&

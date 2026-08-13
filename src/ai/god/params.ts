@@ -2501,11 +2501,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (1.5s) of not moving that far = wall-blocked.
   carveDigNetEscape: 24,
   carveDigBlockTicks: 90,
-  // §190: pixel-stuck directMove fallback — 480 ticks (8s). Above the
-  // nav-stuck escape (180 ticks = 3s) so that mechanism fires first, and
-  // below the 10s idle-alert threshold. 300 (5s) caused chaos S5/S8
-  // regressions; 480 keeps the fix effective while staying conservative.
-  pixelStuckDirectMoveTicks: 480,
+  // §190: pixel-stuck directMove fallback — DEFAULT OFF (0). The feature was
+  // merged from origin/idle but a paired A/B on --difficulty hard showed it is
+  // NET-NEGATIVE: suite score 0.5308 (ON) → 0.5363 (OFF), paired Δ +0.0053,
+  // p=0.0185 (significant). It failed to help its own target seeds (S31 Eagle
+  // Nest 80%→85% better with it OFF) while dragging the weak tail. Disabled by
+  // default 2026-08-13; kept as a gated, tunable path (set >0 to re-enable,
+  // but note 300 caused chaos S5/S8 regressions and 480 still regressed hard).
+  pixelStuckDirectMoveTicks: 0,
   // §163: 中路防守默认 OFF（byte-identical）。hold=1 cell、maxDist=8
   // （近基才锚定，防止与 hunt 跨图拉锯）、maxDig=3 cells（只接受短挖，
   // 避免重复挖刚逃出的密封口袋）。

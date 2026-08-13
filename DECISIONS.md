@@ -626,7 +626,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 194. 像素卡死 directMove 兜底 (§190)
 
-**Decision:** 当玩家像素卡死（`_digBlockTicks >= pixelStuckDirectMoveTicks`，默认 480 ticks = 8s）且无活跃 carve-dig 时，HUNT 分支绕过 A* 寻路，改用 `directMove` 选向。新增参数 `pixelStuckDirectMoveTicks`（默认 480，classic=0 保持 byte-identical）。
+**Decision:** 当玩家像素卡死（`_digBlockTicks >= pixelStuckDirectMoveTicks`，默认 **0（已关闭，2026-08-13）**）且无活跃 carve-dig 时，HUNT 分支绕过 A* 寻路，改用 `directMove` 选向。新增参数 `pixelStuckDirectMoveTicks`（**默认 0 = byte-identical（关闭）**，classic 也=0 保持 byte-identical；曾短暂设为 480 但已回退）。
 
 **Rationale:**
 - 根因：`replanInterval=1`（hard 默认）导致 A* 每 tick 重规划。敌方移动使 replan 缓存失效（target cell 变化），A* 重算后第一歩方向在 left↔right 间振荡。turn cooldown (50ms) 将这种振荡转化为"来回走但净位移为零"的卡死模式。
@@ -640,3 +640,5 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - 门禁全绿：hard 0.742 (floor 0.713), chaos 0.716 (floor 0.684), classic 0.875 (floor 0.845)。
 - SUITE score 0.5140 (基线 0.5132，在噪声范围内)。
 - 剩余 14 个告警的根因不同（`canMoveDir` 的 snap 精度问题、密封口袋、dead-end 走廊），需要不同的修复策略。
+
+**Status (2026-08-13) — DISABLED by default.** Paired A/B on `--difficulty hard` (§190 ON=merged default 480 vs OFF=0, 20 seeds, CRN) proved it is net-negative: suite 0.5308 → **0.5363** (paired Δ +0.0053, **p=0.0185**, B better/worse 12/10). It failed to help its own target seeds — S31 Eagle Nest was actually 80%→85% better with it OFF. The 480 value still regressed hard; the earlier 300 value had regressed chaos S5/S8. Default reverted to 0 so hard/chaos are byte-identical to pre-§190. Gate truth (hard/chaos) re-baselined to §190-OFF. Code path retained, gated by `pixelStuckDirectMoveTicks > 0` for a future, properly-tuned re-introduction.
