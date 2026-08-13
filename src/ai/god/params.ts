@@ -1836,6 +1836,15 @@ export interface GodAIParams {
    */
   centerLineFireGate: number
   /**
+   * §193-D: 预测前移门（predictive lead gate）。扫描看到的是目标的当前
+   * 位置；子弹飞行 dist/bulletSpeed ticks 后，横向穿行的 fast 已滑出
+   * ±(TANK+BULLET)/2 命中窗 → 必miss 白费冷却（时间版的 §193-A 墙吃弹）。
+   * >0: 当目标以垂直方向横穿弹道线、且子弹到达时其身体已滑出命中窗，
+   * 抑制本次开火，把时机窗口交给 P2.4 predictEnemyCrossing。
+   * 0 = OFF（byte-identical）。
+   */
+  predictiveFireGate: number
+  /**
    * §152-W2: aggressive-branch movement-stuck guard (ticks). 0 = OFF
    * (byte-identical). >0: during a freeze window (aggressive mode) with no
    * aimable enemy and no power-up, the navigate path tracks how long the
@@ -2789,6 +2798,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // chaos 0 — march-dig 大多是 6px 中线实心砖的无效挖路，抑制反而盘活
   // 冷却弹窗。classic instant 未 A/B — 经 CLASSIC_MODEL_PARAMS restore 0。
   centerLineFireGate: 1,
+  // §193-D: 预测前移门 — SHIPPED（2026-08-13, DECISIONS §193-D）。
+  // 60-seed A/B：hard 全关净 +7（16/9，无崩盘关，最差 S10 -2）、classic +1、
+  // chaos +1（S34 +1）。子弹飞行期内目标滑出命中窗时抑制必miss开火
+  // （P2.4 接管时机窗口）。S34 触发面小（fast 1.2px/tick 慢，2-3 格内弹道
+  // 先到）——门主要作用在 waist/ring 区远距横走目标。
+  predictiveFireGate: 1,
   aggNavStuckTicks: 120,
   pickupCommitTicks: 0,
 
@@ -2925,6 +2940,8 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   t2aSteelPathBlock: 0,
   // §193-A: 中线火力门 —— classic instant 未 A/B，restore 0（byte-identical）。
   centerLineFireGate: 0,
+  // §193-D: 预测前移门 —— classic instant 未 A/B，restore 0（byte-identical）。
+  predictiveFireGate: 0,
   aggNavStuckTicks: 0,
   pickupCommitTicks: 0,
   // §159: T2a defense override is a pool-model (hard/chaos) fix — classic

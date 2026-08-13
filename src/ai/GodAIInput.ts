@@ -364,6 +364,14 @@ export class GodAIInput implements InputLike {
   _centerLineFireBlocks = 0
 
   /**
+   * §193-D: total ticks the predictive lead gate suppressed a shouldFireInDir
+   * enemy-aim fire whose perpendicular-moving target will have slid off the
+   * hit window by the time the bullet arrives. Pure observation — never
+   * feeds back into gameplay.
+   */
+  _predictiveFireBlocks = 0
+
+  /**
    * §117: mode-2 (STAND) standing tick counter — how many consecutive ticks
    * the player has been standing still waiting to die. Capped by
    * `suicideReturnStandMaxTicks`; when exceeded, the trade aborts and normal

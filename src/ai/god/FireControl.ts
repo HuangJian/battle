@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
-import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
+import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
 import { snap } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { estimatedEnemyLevel } from './EnemyModel'
@@ -498,6 +498,101 @@ function predictEnemyCrossingImpl(
 }
 
 /**
+ * §193-D: predictive lead gate — will a perpendicular-moving enemy slide off
+ * the player's line of fire before the bullet arrives?
+ *
+ * The scan's enemy is at the CURRENT position; the bullet needs
+ * `dist / bulletSpeed` ticks to arrive. An enemy moving perpendicular to the
+ * facing dir (crossing the line) travels `speed × ticks` px sideways in that
+ * time. If that displacement puts the enemy's body outside the hit window
+ * (bullet path ± (TANK+BULLET)/2 px) by arrival, the shot is a guaranteed
+ * miss that burns the cooldown window (mirrors the §193-A wall-eat: the
+ * bullet is committed but can't connect).
+ *
+ * Mirrors predictEnemyCrossingImpl's geometry (perpendicular mover, in front,
+ * within range) but answers the OPPOSITE question: predictEnemyCrossing fires
+ * when the enemy WILL arrive on the line; this suppresses when the enemy
+ * ALREADY on the line will have LEFT it. Only enemies that are actually
+ * moving perpendicular (t.moving && t.dir perpendicular) can slide — a
+ * stationary or parallel-moving target is always hit.
+ *
+ * Returns the arrival displacement in px beyond the window edge, or -1 when
+ * the enemy stays in the hit window at arrival (safe to fire). Pure World
+ * read — no RNG, no mutation.
+ */
+function enemySlidesOffLineByArrivalImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  maxDist: number,
+): number {
+  const w = self.world
+  const p = self.controlledTank(w)
+  const bulletSpeed = p?.bulletSpeed ?? 0
+  if (bulletSpeed <= 0) return -1
+
+  const vertical = dir === 'up' || dir === 'down'
+  // Hit window half-width: bullet path ± (tank half + bullet half).
+  const windowHalf = (TANK + BULLET) / 2
+  const arrivalTicks = maxDist / bulletSpeed
+
+  const tanksArr = w.tanks
+  for (let ti = 0; ti < tanksArr.length; ti++) {
+    const t = tanksArr[ti]
+    if (!t.alive || t.spawnTimer > 0) continue
+    if (!t.moving) continue
+    const tVertical = t.dir === 'up' || t.dir === 'down'
+    // Must be crossing the line perpendicular to the facing dir.
+    if (vertical === tVertical) continue
+
+    const tcx = t.x + t.w / 2
+    const tcy = t.y + t.h / 2
+    const dx = tcx - pcx
+    const dy = tcy - pcy
+
+    // In front of the player.
+    const inFront = vertical
+      ? (dir === 'up' && dy < 0) || (dir === 'down' && dy > 0)
+      : (dir === 'left' && dx < 0) || (dir === 'right' && dx > 0)
+    if (!inFront) continue
+
+    // Within the bullet's reach of the scanned distance.
+    const parallelDist = vertical ? Math.abs(dy) : Math.abs(dx)
+    if (parallelDist > maxDist) continue
+
+    // Perpendicular offset from the line (signed): which side + how far.
+    const perpOffset = vertical ? dx : dy
+    // If already more than a window away, the scan couldn't have seen it here
+    // (it was seen on the ±CELL/2 offset lines, so |perpOffset| ≤ ~24px).
+    if (Math.abs(perpOffset) > TANK) continue
+
+    // Signed perpendicular speed: positive = sliding AWAY from the line.
+    let awaySpeed = 0
+    if (vertical) {
+      if (t.dir === 'right' && perpOffset >= 0) awaySpeed = t.speed
+      else if (t.dir === 'left' && perpOffset <= 0) awaySpeed = t.speed
+      else continue // moving toward the line — will be ON it at arrival
+    } else {
+      if (t.dir === 'down' && perpOffset >= 0) awaySpeed = t.speed
+      else if (t.dir === 'up' && perpOffset <= 0) awaySpeed = t.speed
+      else continue
+    }
+    if (awaySpeed <= 0) continue
+
+    // Distance from the enemy's NEAREST body edge to the window edge:
+    // it slides out once its trailing edge passes the bullet path + windowHalf.
+    const clearance = windowHalf + TANK / 2 - Math.abs(perpOffset)
+    const slidesAtTicks = clearance / awaySpeed
+    // Bullet arrives later than the enemy leaves the window → guaranteed miss.
+    if (arrivalTicks > slidesAtTicks) {
+      return arrivalTicks - slidesAtTicks // displacement beyond the edge
+    }
+  }
+  return -1
+}
+
+/**
  * §80: Turn-snap aim guard — will this aim still see the enemy AFTER the
  * turn physically moves the tank?
  *
@@ -638,6 +733,25 @@ export function shouldFireInDirImpl(
     if (result.wall && self.params.centerLineFireGate > 0) {
       if (centerPathBlockedImpl(self, pcx, pcy, dir, result.enemyDist * CELL) >= 0) {
         self._centerLineFireBlocks++
+        return false
+      }
+    }
+    // §193-D: predictive lead gate. The scan sees the enemy's CURRENT
+    // position on the offset lines; a fast enemy crossing perpendicular to
+    // the player's facing slides sideways while the bullet is in flight
+    // (bullet takes enemyDist*CELL / bulletSpeed px per tick; a fast
+    // enemy moves ~2px/tick, so at 3-4 cells the target can leave the
+    // (TANK+BULLET)/2 hit window before arrival — the shot misses and
+    // wastes the cooldown, exactly the §193-A wall-eat problem but
+    // time-based instead of terrain-based). Suppress when the arrival
+    // position is outside the hit window; the P2.4 predictive crossing
+    // check (which fires for enemies that WILL arrive on the line) then
+    // owns the timing window. Note this only fires when the scan enemy is
+    // MOVING perpendicular — a stationary target's arrival window never
+    // closes.
+    if (result.enemy && self.params.predictiveFireGate > 0) {
+      if (enemySlidesOffLineByArrivalImpl(self, pcx, pcy, dir, result.enemyDist * CELL) >= 0) {
+        self._predictiveFireBlocks++
         return false
       }
     }
