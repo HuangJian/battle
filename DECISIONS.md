@@ -550,3 +550,20 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 191. 批量仿真共享态硬化 — findPath 重入守卫 + level-sim 子进程隔离
 > 全文 → docs/god-ai-tuning.progress.md
+
+## 192. 像素卡死 directMove 兜底 (§190)
+
+**Decision:** 当玩家像素卡死（`_digBlockTicks >= pixelStuckDirectMoveTicks`，默认 480 ticks = 8s）且无活跃 carve-dig 时，HUNT 分支绕过 A* 寻路，改用 `directMove` 选向。新增参数 `pixelStuckDirectMoveTicks`（默认 480，classic=0 保持 byte-identical）。
+
+**Rationale:**
+- 根因：`replanInterval=1`（hard 默认）导致 A* 每 tick 重规划。敌方移动使 replan 缓存失效（target cell 变化），A* 重算后第一歩方向在 left↔right 间振荡。turn cooldown (50ms) 将这种振荡转化为"来回走但净位移为零"的卡死模式。
+- 症状：S35@seed10 玩家在 (1,25) 卡死 30.6s，S2@seed13 卡死 28s，S17@seed12 卡死 30.9s — 全程 `fire=false`，`branch=navigate`，`pathLen` 在 30-32 间反复变化。
+- 修复：`directMove` 基于目标相对位置选向（优先垂直），不依赖 A* 路径，方向稳定。阈值 480 ticks (8s) 高于 nav-stuck escape (180 ticks = 3s)，让该机制先生效；低于 10s 告警阈值。
+- 300 ticks (5s) 在 chaos S5/S8 引入回归（score 下降 0.07）；480 ticks 消除了回归。
+- Classic 设为 0（`replanInterval=50`，路径稳定，无此问题）。
+
+**Implications:**
+- 消除 5/17 个 10s+ 静止告警（S2×2, S17, S31, S35）。
+- 门禁全绿：hard 0.742 (floor 0.713), chaos 0.716 (floor 0.684), classic 0.875 (floor 0.845)。
+- SUITE score 0.5140 (基线 0.5132，在噪声范围内)。
+- 剩余 14 个告警的根因不同（`canMoveDir` 的 snap 精度问题、密封口袋、dead-end 走廊），需要不同的修复策略。

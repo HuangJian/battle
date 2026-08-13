@@ -322,6 +322,17 @@ export interface GodAIParams {
   /** §162: min consecutive blocked ticks to trigger the carve-dig. */
   carveDigBlockTicks: number
   /**
+   * §190: min pixel-stuck ticks (_digBlockTicks) to bypass A* pathfinding
+   * and use directMove. When the player has been pixel-stuck for this many
+   * ticks AND no carve-dig is active, directMove takes over — it picks a
+   * stable direction based on the target's relative position, breaking the
+   * A* first-step oscillation caused by replanInterval=1 + target movement.
+   * 0 = OFF (byte-identical). Default 300 (5s) — above the nav-stuck escape
+   * (180 ticks = 3s) so that mechanism fires first, but well below the 10s
+   * idle-alert threshold.
+   */
+  pixelStuckDirectMoveTicks: number
+  /**
    * §186: min pixel-stuck ticks (_digBlockTicks) to skip powerup
    * navigation in all pickup branches. When the player has been
    * pixel-stuck for this many ticks, the A* path to the powerup is
@@ -2451,6 +2462,11 @@ navFireStopModel: 'firecontrol',
   // (1.5s) of not moving that far = wall-blocked.
   carveDigNetEscape: 24,
   carveDigBlockTicks: 90,
+  // §190: pixel-stuck directMove fallback — 480 ticks (8s). Above the
+  // nav-stuck escape (180 ticks = 3s) so that mechanism fires first, and
+  // below the 10s idle-alert threshold. 300 (5s) caused chaos S5/S8
+  // regressions; 480 keeps the fix effective while staying conservative.
+  pixelStuckDirectMoveTicks: 480,
   // §163: 中路防守默认 OFF（byte-identical）。hold=1 cell、maxDist=8
   // （近基才锚定，防止与 hunt 跨图拉锯）、maxDig=3 cells（只接受短挖，
   // 避免重复挖刚逃出的密封口袋）。
@@ -2858,6 +2874,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // (byte-identical classic gate).
   baseWallExactRing: 0,
   replanInterval: 50,
+  // §190: classic has replanInterval=50 (stable path) — no A* oscillation.
+  // Restore 0 (byte-identical classic gate).
+  pixelStuckDirectMoveTicks: 0,
   powerupMaxDivertDistance: 16,
   endgameEnemyThreshold: 6,
   campTimeoutTicks: 90,
