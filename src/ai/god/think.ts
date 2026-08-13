@@ -614,10 +614,15 @@ return false
         // 纯属多余（seed 25 实证：idle 防守位被拖走导致败局）。
         const colGap = tc.col > ccol ? tc.col - ccol : ccol - tc.col
         if (colGap <= 1) return false
+        // 门槛 5（§193-B 复测取证）：近距持位跳过 —— 玩家与目标列、行差均
+        // ≤ 3 时站台换列无增益且抢位（seed 8: (3,2) 拽右拖掉上行拦截；seed
+        // 53: (3,3)）。tick-diff 首分歧两局均在此形态：站台步微扰
+        // → 蝴蝶放大 → 蹲守降击杀节奏、敌人累积磨死基地。
+        const rowGap = tc.row > crow ? tc.row - crow : crow - tc.row
+        if (colGap <= 3 && rowGap <= 3) return false
         // 目标横向移动（left/right）且与玩家同行 → 目标将横穿玩家所在行，
         // 守株待兔即可（seed 53 实证：fast 横穿玩家行时换列迎击错过窗口）。
         const targetDir = best ? best.dir : ''
-        const rowGap = tc.row > crow ? tc.row - crow : crow - tc.row
         if ((targetDir === 'left' || targetDir === 'right') && rowGap <= 1) return false
         // 站台列 = 目标列 ±1（就近优先，距离限 2）：差 2 时玩家恰好能
         // 跨一列拦截（seed 17 实证：玩家 (13,21) 对目标 (11,20) 下行走
