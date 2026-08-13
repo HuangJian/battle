@@ -120,6 +120,51 @@
 - 决定性结论仍须 **≥60 seeds**（20-seed ±11pp 二项噪声只筛方向，见 §I.1 测量纪律）。
 - 所有改动仍以"不泄漏到 SP / 不冻结某失败种子当硬门槛 / 确定性 byte-identical 架构保证"三条回归线把关（见 working memory 验收须知）。
 
+### 0.C.5 Phase III 基线（godai-score 多维，2026-08-12）
+
+> 测量：eval-suite v6 官方口径（`runSimulation` 直驱，35 关 × 60 seeds），godai-score v7 band（loss 0.40 / clear 0.70）。
+> **hard = 主评估难度**；classic / chaos = 参考（仅防大幅倒退）。详见 §0.C。
+> 维度含义：progress=击杀数(kills/enemies)、lives=存命数、clearSpeed=过关时间、accuracy=开火命中率(kills/shot)、baseIntegrity/baseSafety=基地、tempo=kpm、loot/growth/openingTempo/mobility 见 §0.C 维度表。
+
+**头条指标**
+
+| 难度 | SUITE 分 (lcb ±se) | 平均胜率 | fitness v6 |
+|---|---|---|---|
+| **hard（主）** | **0.5132**（0.5068 ±0.0064） | **73%** | 506.8 |
+| classic（参） | 0.7259（0.7211 ±0.0047） | 90% | 721.1 |
+| chaos（参） | 0.4926（0.4859 ±0.0067） | 69% | 485.9 |
+
+**hard 维度均值（主评估，all / clears / losses）**
+
+| 维度 | all | clears | losses |
+|---|---|---|---|
+| progress（击杀数） | 0.872 | 1.000 | 0.531 |
+| lives（存命数） | 0.799 | 0.817 | 0.749 |
+| baseIntegrity | 0.674 | 0.888 | 0.102 |
+| clearSpeed（过关时间） | 0.146 | 0.146 | n/a |
+| tempo（kpm） | 0.549 | 0.597 | 0.421 |
+| accuracy（开火命中率） | 0.827 | 0.879 | 0.687 |
+| loot | 0.833 | 0.869 | 0.732 |
+| growth | 0.446 | 0.464 | 0.399 |
+| baseSafety | 0.914 | 0.927 | 0.879 |
+| openingTempo | 0.092 | 0.097 | 0.079 |
+| mobility | 0.927 | 0.968 | 0.820 |
+
+**classic / chaos 参考维度均值（关键项：all / clears）**
+
+| 维度 | classic all / clears | chaos all / clears |
+|---|---|---|
+| progress | 0.960 / 1.000 | 0.856 / 1.000 |
+| lives | 0.777 / 0.832 | 0.818 / 0.838 |
+| clearSpeed | 0.817 / 0.817 | 0.163 / 0.163 |
+| accuracy | 0.930 / 0.937 | 0.818 / 0.874 |
+| baseIntegrity | 0.937 / 0.974 | 0.639 / 0.890 |
+
+**读法（Phase III 多指标共同评估）**
+- hard 主评估：**胜率 73% 为首要指标**；同看 clearSpeed=0.146（过关偏慢，P95 附近——拖沓信号）、baseIntegrity losses=0.102（败局几乎都丢基地）、accuracy=0.827（开火命中尚可）、lives=0.799（收尾较稳）。
+- 这是**行为基线**，后续所有 hard 改动须保证这些维度不出现「高胜率但某指标恶化」的组合（如 clearSpeed 进一步下滑、baseIntegrity losses 更低）。
+- classic / chaos 仅作参考：其 SUITE 分 / 胜率不应出现**大幅度**倒退即达标（chaos 未来增强敌人 AI 致下降属正常，见 §0.C.3）。
+
 ---
 
 # Part I. Classic 纪元（§33–§95，2026-07-27 → 08-01）

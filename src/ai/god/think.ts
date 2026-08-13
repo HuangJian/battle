@@ -1794,6 +1794,48 @@ const HUNT: Candidate = {
       self._navStuckSuppress = 0
     }
 
+    // §190: pixel-stuck fallback — when the player has been pixel-stuck for
+    // >= pixelStuckDirectMoveTicks (8s default) and no carve-dig is active,
+    // bypass A* pathfinding and use directMove. With replanInterval=1
+    // (default on hard), A* recomputes every tick and target movement
+    // invalidates the replan cache — the first step oscillates between
+    // directions, and the turn cooldown creates a back-and-forth with zero
+    // net progress. directMove picks a stable direction based on the target's
+    // relative position, breaking the oscillation cycle.
+    // Root cause: S35@seed10 (30.6s stuck at (1,25)), S2@seed13 (28s),
+    // S17@seed12 (30.9s), S31@seed9 (11.6s) — all resolved by this fix.
+    // Threshold (480 ticks = 8s) is above the nav-stuck escape (180 ticks =
+    // 3s) so that mechanism fires first, but below the 10s alert threshold.
+    if (
+      self.params.pixelStuckDirectMoveTicks > 0 &&
+      !self._carveDigActive &&
+      self._digBlockTicks >= self.params.pixelStuckDirectMoveTicks
+    ) {
+      self._moveDir = self.directMove(pc)
+      if (!self._moveDir) {
+        // directMove failed — try any passable direction to get moving.
+        for (let di = 0; di < ALL_DIRS.length; di++) {
+          if (self.canMoveDir(p, ALL_DIRS[di])) {
+            self._moveDir = ALL_DIRS[di]
+            break
+          }
+        }
+      }
+      // Break-through fire if the chosen direction is blocked by terrain.
+      if (self._moveDir && !self.canMoveDir(p, self._moveDir)) {
+        const bs = scanAheadImpl(self, pcx, pcy, self._moveDir)
+        const lvl = p.level ?? 0
+        if (shouldFireBreakThroughImpl(bs, lvl, self.params.steelFireGate)) {
+          self._fire = !onCooldown
+        }
+      } else {
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
+      }
+      self.branchCounts.navigate++
+      self._lastBranch = 'navigate'
+      return true
+    }
+
     let navTarget: Cell | null
     // P3.1: When nav-stuck triggers, only go to center if the player is
     // NOT already at/near center (target == current cell → deadlock, the S9

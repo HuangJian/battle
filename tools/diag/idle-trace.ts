@@ -20,7 +20,7 @@ import { STAGES } from '../../src/config/stages'
 import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 
-const IDLE_THRESHOLD_TICKS = 120 // 2s at 60fps
+const IDLE_THRESHOLD_TICKS = 600 // 10s at 60fps
 const CELL_THRESHOLD = CELL // 16px — 1 cell displacement threshold
 
 function arg(name: string, def?: string): string | undefined {

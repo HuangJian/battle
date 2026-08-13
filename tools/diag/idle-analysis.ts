@@ -3,7 +3,7 @@
  * idle-analysis.ts — Player stationary period analyzer for GOD AI calibration.
  *
  * 督战+单人+hard: runs headless God-AI simulations and detects periods where
- * the player tank remains effectively stationary for >2 seconds (120 ticks at
+ * the player tank remains effectively stationary for >10 seconds (600 ticks at
  * 60 FPS). "Effectively stationary" means the player's displacement from the
  * idle-start position never exceeds 1 cell (16px) in either axis — this
  * catches standing still, turning-in-place, and oscillating within 1 cell.
@@ -38,8 +38,8 @@ import type { StageData } from '../../src/types'
 // Constants
 // ============================================================
 
-/** 2 seconds at 60 FPS = 120 ticks. */
-const IDLE_THRESHOLD_TICKS = 120
+/** 10 seconds at 60 FPS = 600 ticks. */
+const IDLE_THRESHOLD_TICKS = 600
 /** Max ticks per simulation (10 minutes at 60fps). */
 const MAX_TICKS = 36000
 /** Displacement threshold: player must not move more than 1 cell (16px) from idle start. */

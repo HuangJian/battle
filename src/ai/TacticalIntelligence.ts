@@ -171,24 +171,6 @@ export class TacticalIntelligence {
         brain.currentDir = opposite(brain.currentDir)
       } else {
         brain.currentDir = pickClassicDirFast(openBuf, openCount, world, rules)
-        // Corridor-escape: small chance to pick a perpendicular (lateral)
-        // open direction instead of the greedy toward-base choice. Prevents
-        // infinite oscillation in 1-wide corridors bounded by steel/water
-        // where maybeTunnelOut cannot help (non-destructible walls).
-        if (openCount > 1 && world.rng.next() < CORRIDOR_ESCAPE_CHANCE) {
-          const chosen = brain.currentDir
-          let latCount = 0
-          // Reuse tail of openBuf for lateral candidates (openCount ≤ 4).
-          for (let li = 0; li < openCount; li++) {
-            const d = openBuf[li]
-            if (d !== chosen && d !== opposite(chosen)) {
-              openBuf[openCount + latCount++] = d
-            }
-          }
-          if (latCount > 0) {
-            brain.currentDir = openBuf[openCount + world.rng.int(latCount)]
-          }
-        }
       }
       brain.thinkTimer = NONE_TURN_MIN_MS + world.rng.next() * NONE_TURN_JITTER_MS
     }

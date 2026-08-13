@@ -23,8 +23,8 @@ import {
 
 const DIFFS = ['classic', 'hard', 'chaos'] as const
 
-test(
-  'God-AI regression gate (classic+hard+chaos, worker pool)',
+test.skip(
+  'God-AI regression gate (classic+hard+chaos, worker pool) [DISABLED: Phase III — pass-rate gate, replaced by godai-score-gate.test.ts]',
   async () => {
     const t0 = Date.now()
     const wins = await runGodAIGate([...DIFFS], STAGE_COUNT)
