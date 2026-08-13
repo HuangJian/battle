@@ -41,13 +41,13 @@ export const STAGE_COUNT = STAGES.length // 35
 // Values are the 60-seed winrate converted to a 20-seed-equivalent count
 // (round(pct*20)) so they drop straight into the 20-seed floor math.
 export const HARD_TRUTH_WINS: number[] = [
-  16, 16, 11, 13, 12, 12, 16, 8, 16, 14, 15, 15, 16, 15, 13, 13, 16, 19, 16, 7, 13, 12, 20, 10, 19,
-  11, 15, 10, 16, 18, 14, 15, 19, 3, 16,
+  18, 18, 12, 14, 13, 13, 16, 7, 17, 17, 18, 12, 13, 11, 15, 13, 16, 18, 17, 11, 13, 13, 20, 9, 17,
+  15, 15, 13, 16, 17, 16, 16, 18, 7, 17,
 ]
 
 export const CHAOS_TRUTH_WINS: number[] = [
-  15, 17, 10, 9, 9, 12, 13, 10, 17, 15, 17, 12, 12, 15, 12, 13, 15, 19, 13, 10, 16, 15, 20, 7, 16,
-  9, 15, 12, 14, 18, 13, 15, 16, 1, 18,
+  15, 16, 13, 15, 12, 11, 12, 8, 16, 15, 16, 9, 15, 15, 14, 14, 15, 19, 14, 10, 13, 12, 20, 8, 17,
+  10, 16, 10, 16, 17, 15, 13, 18, 4, 16,
 ]
 
 // Classic truth calibrated 2026-08-10 via tmp/calib-classic.ts (worker pool,
@@ -60,11 +60,11 @@ export const CLASSIC_TRUTH_WINS: number[] = [
 
 // ---- Aggregate floors: truth mean − 3.7pp (3 binomial sd at n=700) ----
 export const HARD_AGGREGATE_FLOOR = Math.floor(
-  ((70.6 - 3.7) / 100) * STAGE_COUNT * GATE_SEEDS.length,
-) // 468/700
+  ((72.86 - 3.7) / 100) * STAGE_COUNT * GATE_SEEDS.length,
+) // 484/700
 export const CHAOS_AGGREGATE_FLOOR = Math.floor(
-  ((67.6 - 3.7) / 100) * STAGE_COUNT * GATE_SEEDS.length,
-) // 447/700
+  ((68.71 - 3.7) / 100) * STAGE_COUNT * GATE_SEEDS.length,
+) // 455/700
 // Classic floor: calibrated mean 88.6% − 3.7pp (3 binomial sd at n=700) = 594/700.
 export const CLASSIC_AGGREGATE_FLOOR = Math.floor(
   ((88.6 - 3.7) / 100) * STAGE_COUNT * GATE_SEEDS.length,

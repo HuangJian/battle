@@ -10,6 +10,8 @@
 // by construction (M1 theorem, doc §3.3). Weights strictly mirror the chain
 // order, so behavior under default params is byte-identical to pre-M1.
 import type { GodAIInput } from '../GodAIInput'
+import type { Tank } from '../../types'
+import type { World } from '../../game/World'
 import type { Cell } from '../../utils/pathfind'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, GRID, BULLET, TANK } from '../../constants'
@@ -40,7 +42,7 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
-import { enemyCanShootBase, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
+import { enemyCanShootBase, enemyCanBreachRing, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
 import { iceGlideAdjust } from './Navigator'
 import { isFieldRetreatConditionImpl } from './StrategyPlanner'
 import { superItemPressesImpl } from './SuperItems'
@@ -443,6 +445,155 @@ function retreatGateBlocksPickup(self: GodAIInput): boolean {
   const pcC = self.playerCell()
   const distC = Math.abs(pcC.col - BASE_POS.col) + Math.abs(pcC.row - BASE_POS.row)
   return isFieldRetreatConditionImpl(self, self.isBaseUnderThreat(), distC, self._enemies.length)
+}
+
+// ================================================================
+// §X Base lane sentry — 基地车道哨兵
+// ================================================================
+
+/** §X 原语: 8 个基地保护环格是否已有被击穿的洞（任一非砖/钢）。
+ * 几何与 SimulationCombat.isBaseProtectionCell 一致（row 23 × cols 11-14，
+ *  cols 11/14 × rows 24-25）。钢环（classic 某些关）= 永不击穿 → 哨兵自关。 */
+function baseRingBreachedImpl(w: World): boolean {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  const g = w.tileMap.grid
+  const hole = (c: number, r: number) => g[r][c] !== 'brick' && g[r][c] !== 'steel'
+  return (
+    hole(bc - 1, br - 1) ||
+    hole(bc, br - 1) ||
+    hole(bc + 1, br - 1) ||
+    hole(bc + 2, br - 1) ||
+    hole(bc - 1, br) ||
+    hole(bc - 1, br + 1) ||
+    hole(bc + 2, br) ||
+    hole(bc + 2, br + 1)
+  )
+}
+
+/** §X 原语: 格对齐走廊检查 — (c,r)→(tc,tr) 必须同排或同列，两格之间逐格扫描。
+ * 返回 0 = 走廊全通；>0 = 距 (c,r) 第 n 格（1 起）被非空地形挡住
+ * （'base' 亦计 — 永不穿基地射击）。非对齐返回 -1。 */
+function laneCorridorBlocked(w: World, c: number, r: number, tc: number, tr: number): number {
+  const g = w.tileMap.grid
+  if (c === tc) {
+    const step = r < tr ? 1 : -1
+    for (let rr = r + step; rr !== tr; rr += step) {
+      if (g[rr][c] !== 'empty') return rr < r ? r - rr : rr - r
+    }
+    return 0
+  }
+  if (r === tr) {
+    const step = c < tc ? 1 : -1
+    for (let cc = c + step; cc !== tc; cc += step) {
+      if (g[r][cc] !== 'empty') return cc < c ? c - cc : cc - c
+    }
+    return 0
+  }
+  return -1
+}
+
+/**
+ * §X baseLaneSentry(850) — 基地车道哨兵: 基地危局下「走到车道、持位击杀」。
+ *
+ * 来源（Battlement hard seed 14 弹道级还原）：拆环 fast 在 (16,25)↔(15,25)
+ * 口袋横走、hp 24（一枪线），玩家在 (16,21) 与其同列 40 ticks — 但唯一一枪
+ * 从 (16,23) 砖格内发射被墙吃掉（双偏线像素扫描看见敌人边缘、真实子弹中线
+ * 打墙），800ms 冷却后才恢复开火而敌人已转身逃离；随即 midLaneDefense(545)
+ * 把玩家拖去中路横向火力送死（43hp 死于 t2255，重生空隙基地连受 3 发）。
+ * 46/60 败局（base_destroyed 100%）同一 archetype 复现。
+ *
+ * 与 §134 defenseIntercept(550) 的本质区别：
+ *   1. 拦截不动位 — 本候选不对齐时**主动导航到对齐站位**（pickSentryStandImpl）。
+ *   2. 双偏线像点扫描的“可见”幻觉 — 本候选以**格对齐走廊**（laneCorridorBlocked，
+ *      真实子弹中线）判定射界；单层砖挡则打砖开路（diggable，下一轮窗口生效）。
+ *   3. 850 权重压掉 pickupHigh(800)/aggro(700)/midLane(545)/closePickup(540)/
+ *      engage(500) — 威胁成立时整体锁定直到车道敌人被处理（dodge 1000 /
+ *      interceptBase 900 仍在上方：生存与子弹拦截优先）。
+ *
+ * 门控：baseLaneSentryMode=0 短路（byte-identical）；无基地关；aggro 期让路。
+ * 泛化：环格几何、csb/cbr 谓词、车道走廊全部只依赖 BASE_POS —— 任何带基地
+ * 的地图通用；钢环/无拆环风险时哨兵永不激活（自关）。
+ */
+const BASE_LANE_SENTRY: Candidate = {
+  id: 'baseLaneSentry',
+  weight: ACTION_WEIGHTS.baseLaneSentry,
+  evaluate(self, ctx) {
+    const { w, p, pcx, pcy, onCooldown } = ctx
+    const prm = self.params
+    if (prm.baseLaneSentryMode <= 0 || !self.hasBase || self.aggressive) return false
+    // 危局态触发: 环砖已被拆（通道洞开，口袋司机变为致命威胁）。
+    const ringBreached = baseRingBreachedImpl(w)
+    // 选目标: csb（下一发毁基地，地图任何位置都是第一优先）> cbr（下一发拆环，
+    // 谓词自身即近基地带）> 口袋司机（环已破且敌人在 rows 23-25 / cols base±6 带）。
+    const list = self._enemies.length > 0 ? self._enemies : w.tanks
+    let best: Tank | null = null
+    let bestScore = Infinity
+    for (let li = 0; li < list.length; li++) {
+      const t = list[li]
+      if (!t.alive || t.spawnTimer > 0) continue
+      const toc = self.tankCell(t)
+      const dc = Math.abs(toc.col - BASE_POS.col)
+      const dr = Math.abs(toc.row - BASE_POS.row)
+      const csb = enemyCanShootBase(self, t)
+      const cbr = !csb && enemyCanBreachRing(self, t)
+      const inBand = toc.row >= BASE_POS.row - 1 && dc <= 6
+      if (!csb && !cbr && !(ringBreached && inBand)) continue
+      const score = csb ? dc + dr : cbr ? 100 + dc + dr : 200 + dc + dr
+      if (score < bestScore) {
+        bestScore = score
+        best = t
+      }
+    }
+    if (!best) return false
+    const tc = self.tankCell(best)
+    const pc = self.playerCell()
+    const ccol = pc.col
+    const crow = pc.row
+    const aligned = ccol === tc.col || crow === tc.row
+    const blocked = laneCorridorBlocked(w, ccol, crow, tc.col, tc.row)
+    const manhattan = Math.abs(ccol - tc.col) + Math.abs(crow - tc.row)
+    const bestCsb = enemyCanShootBase(self, best)
+    if (aligned && (blocked === 0 || (blocked === 1 && !bestCsb))) {
+      // 对齐且中线畅通（或仅一层砖挡且敌人不是即刻杀手 — 原位打砖开路，
+      // 下一轮车道窗口击杀；csb 敌人则绝不浪费弹药，交给导航换位）。
+      const dir: Direction =
+        ccol === tc.col ? (tc.row > crow ? 'down' : 'up') : tc.col > ccol ? 'right' : 'left'
+      // 自射基地守卫（与 §134/ENGAGE 同源 — 绝不穿基地开火）。
+      if (
+        prm.selfFireBaseGuard > 0 &&
+        shotReachesBaseImpl(self, pcx, pcy, dir) &&
+        (prm.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir))
+      ) {
+        return false
+      }
+      if (blocked === 0) {
+        // 中线畅通 — 持位射击: 立定向目标翻转 + 开火。仅在**能发射的 tick**
+        // 接管（onCooldown 不 claim — 冷却期交给 midLane/navigate 正常流动，
+        // 站位由流动保持或改善；冷却一过若仍对齐则哨兵再次接管开火）。
+        if (manhattan > prm.baseLaneSentryRange) return false
+        if (onCooldown) return false
+        self._moveDir = p.dir === dir ? null : dir
+        self._fire = !onCooldown && self.rng.next() >= self.params.aimError
+        self.branchCounts.baseLaneSentry++
+        self._lastBranch = 'baseLaneSentry'
+        return true
+      }
+      // 单层砖挡（相邻格）且非即刻杀手 — 原位打砖开路。本 tick 打砖不可行
+      // （shouldFireInDir 拒绝 — 如钢墙/自射守卫）则立刻让位，绝不空持死锁：
+      // 正常流动（midLane/navigate）会移动玩家，几何改善后哨兵再接管。
+      if (blocked === 1 && !bestCsb && shouldFireInDirImpl(self, pcx, pcy, dir)) {
+        if (manhattan > prm.baseLaneSentryRange) return false
+        self._moveDir = p.dir === dir ? null : dir
+        self._fire = !onCooldown
+        self.branchCounts.baseLaneSentry++
+        self._lastBranch = 'baseLaneSentry'
+        return true
+      }
+return false
+    }
+    return false
+  },
 }
 
 /** pickupHigh(800) — §87/§88 HIGH-tier urgent pickup (bomb/freeze/fence ≤8格). */
@@ -2456,6 +2607,8 @@ export const CANDIDATES: Candidate[] = [
   SUICIDE_RETURN,
   DODGE,
   INTERCEPT_BASE,
+  // §X: 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
+  BASE_LANE_SENTRY,
   PICKUP_HIGH,
   AGGRO,
   PICKUP_MID,

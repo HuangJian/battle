@@ -26,6 +26,8 @@ describe('M1 decision-chain invariants', () => {
       'suicideReturn',
       'dodge',
       'interceptBase',
+      // §X / 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
+      'baseLaneSentry',
       'pickupHigh',
       'aggro',
       'pickupMid',
@@ -54,6 +56,8 @@ describe('M1 decision-chain invariants', () => {
       suicideReturn: 1100,
       dodge: 1000,
       interceptBase: 900,
+      // §X / 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
+      baseLaneSentry: 850,
       pickupHigh: 800,
       aggro: 700,
       pickupMid: 600,

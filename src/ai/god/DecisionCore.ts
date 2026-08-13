@@ -42,6 +42,7 @@ import type { Direction } from '../../constants'
 export type ActionId =
   | 'dodge'
   | 'interceptBase'
+  | 'baseLaneSentry'
   | 'pickupHigh'
   | 'aggro'
   | 'pickupMid'
@@ -112,6 +113,9 @@ export type ActionId =
 export const ACTION_WEIGHTS: Record<ActionId, number> = {
   dodge: 1000,
   interceptBase: 900,
+  // §X 基地车道哨兵: interceptBase(900) 之下、pickupHigh(800) 之上 — 威胁成立
+  // （环砖被拆 / 拆环者 / 车道敌人）时压掉道具拾取与中路锚定，专注车道击杀。
+  baseLaneSentry: 850,
   pickupHigh: 800,
   aggro: 700,
   pickupMid: 600,

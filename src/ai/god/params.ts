@@ -84,6 +84,10 @@ export interface GodAIParams {
   defenseInterceptMaxDist: number
   /** §134: max player→enemy distance (cells) for the intercept shot. */
   defenseInterceptRangeCells: number
+  /** §X 基地车道哨兵: 0 = OFF（byte-identical）; 1 = ON（doc 见默认值处）。 */
+  baseLaneSentryMode: number
+  /** §X: 哨兵站位搜索半径与开火距离上限（曼哈顿格数）。 */
+  baseLaneSentryRange: number
   /**
    * §137 / 基地守位格 (base guard anchor): 0 = OFF (byte-identical — the
    * defense position stays at (BASE_POS.col, baseRow − defenseRowOffset),
@@ -2243,6 +2247,20 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   defenseInterceptMode: 1,
   defenseInterceptMaxDist: 12,
   defenseInterceptRangeCells: 15,
+  // §X / 基地车道哨兵: 0 = OFF（byte-identical）。1 = ON: 基地危局态
+  // （环砖被拆 / 存在拆环者或能直射基地的车道敌人）下，玩家不再被
+  // midLaneDefense(545)/closePickup(540)/pickupHigh(800) 摆布 — 锁定车道
+  // 司机 → 走到与其同排/同列的站位（格对齐走廊判定，挡板为单层砖则打砖
+  // 开路）→ 持位射击。权重 850 = interceptBase(900) 之下、pickupHigh(800)
+  // 之上，威胁成立时压制远距拾取与中路锚定直到车道敌人被处理。
+  // 来源（Battlement hard seed 14 弹道级还原）：拆环 fast 在 (16,25)↔(15,25)
+  // 口袋横走被打到 24hp（一枪线），玩家在 (16,21) 与其同列 40 ticks — 但
+  // 唯一一枪从 (16,23) 砖格内穿过被墙吃掉（双偏线扫描看见敌人、真实子弹
+  // 中线打墙），下一抢要等 800ms 冷却而敌人已转身逃离；随后 midLaneDefense
+  // 把玩家拖去中路横向火力送死。同一缺陷在 46/60 败局中复现。
+  baseLaneSentryMode: 1,
+  // §146 C: 哨兵站位搜索半径（曼哈顿格数）与开火距离上限。
+  baseLaneSentryRange: 6,
   // §137 / 基地守位格: 默认防守位 (12,23) 在全部 35 关都是环砖、navigate 永远到不了
   // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
   // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
@@ -2870,6 +2888,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §134: 防守位停射拦截是 pool-model（hard/chaos）修复 — classic instant
   // 1-HP 未 A/B，restore 0（byte-identical classic gate）。
   defenseInterceptMode: 0,
+  // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
+  // restore 0（byte-identical classic gate）。
+  baseLaneSentryMode: 0,
   // §145: 冰上滑行控制未在 classic 上 A/B — restore 0（byte-identical
   // classic gate，classic 同样有 S25 Ice Palace 冰关，后续可单独评估）。
   iceGlideControl: 0,

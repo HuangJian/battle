@@ -401,6 +401,8 @@ export class GodAIInput implements InputLike {
     midLaneDefense: 0,
     // §164: 中路列旁主动驻守候选提交计数（纯观察）。
     midLaneHold: 0,
+    // §X: 基地车道哨兵候选提交计数（纯观察）。
+    baseLaneSentry: 0,
   }
 
   /**

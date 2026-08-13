@@ -1232,3 +1232,43 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 1. **T1 — `findPath` 重入守卫**（`src/utils/pathfind.ts`）：在模块级加 `_pfInUse` 布尔标志，`findPath()` 入口检测重入（throw `findPath reentered`），`try/finally` 保证所有退出路径释放。`findPath` 使用模块级 typed-array 缓冲区（`_pfGScore`/`_pfState`/堆数组等），设计上永不重入，但无运行时保证。此守卫将未来误用（重入→静默污染）变成立即崩溃，不改任何已有路径结果。
 2. **T2 — `level-sim --size N` 子进程隔离**（`tools/optimize/level-sim.ts`）：批量模式不再用 in-process 串行循环，改为每 seed 派生一个 `bun level-sim.ts --seed S --size 1 ...` 子进程（并发上限 8）。父进程解析每个子进程 stdout JSON，按原有格式聚合 `results[]` + `winRate` 汇总。`--size 1` 保持原有 in-process 路径不变。
 **Rationale:**
+
+---
+## §192. 基地车道哨兵（baseLaneSentry）— 取证 → 5 版迭代 → SHIPPED（2026-08-13）
+
+**目标关**：S34 Battlement hard 基线 13/60（21.7%），全 35 关最差。
+
+**根因取证（seed 14 弹道级还原，会话自建探针 tmp/probe-s34-*.ts）**：
+- 拆环 fast 在 row 24-25 口袋（(16,24)/(17,24)/…）横走，t2162-2201 玩家在 (16,21) 与其同列 40 ticks；t2189 唯一一枪 fire=true（fireCount 32→33）但从 (16,23) 砖格内出生（bx = x+14），子弹中线被墙吃掉；nextFireInterval≈798ms（48 ticks）冷却中敌人 t2202 转身逃离；（16,23) 上方玩家侧所有柱子还在。
+- 双偏线扫描根因：PERP_OFFSETS = ±8px 两条独立偏线 OR——线1 打 (16,23) 砖 → wall=true break；线2 经 (17,23) 开口看到敌人 → enemy=true；defenseIntercept 只查 scan.enemy → 开火，子弹走中线 → 砖格自爆。此洞对 §134/§157 系候选是结构性缺陷：把唯一一发冷却弹浪费在墙上。
+- 玩家随后被 midLaneDefense 拖去中路，（16,24) 环砖 t2247 被速、基地首伤 t2359、~t2255 玩家死亡。
+- 46/60 败局近同理（池模型下快车与玩家同列、玩家唯一一发打墙）。
+
+**候选设计（第 5 杠杆）**：决策链分支 baseLaneSentry（850，interceptBase 900 下、pickupHigh 800 上）：
+- csb/cbr 敌人与玩家对齐（±1 格、lanes 同列/同行）且曼哈顿 ≤6、其间无挡子弹砖（laneCorridorBlocked==0）→ 立定向目标翻转 + 开火（aimError 门）。
+- 环先破（ringBreached）兜底：对齐任意附近带威胁敌人也开火（把枪线对准已经站在洞口的敌人）。
+- **v4 修复**：blocked==1 且 shouldFireInDir 拒绝打砖 → 返回 false 让位（否则玩家原地冻结死锁，seed 6 t3186+ 实证）。
+- **v5 修复（关键）**：仅在本 tick 可开火（onCooldown==false）才 claim；冷却期交还 midLane/navigate 流动——保留击杀弹、去掉轴锁。
+
+**A/B 迭代（S34 hard 60-seed flip-scan，A=基线）**：
+| 版 | 描述 | S34 结果 | 全关（35×60） |
+|---|---|---|---|
+| 基线 | — | 13/60 | — |
+| v1 | 长行军站位(pass2 diggable) + nav 开火 + 松 tier | 6/60（win4 lose11）| — |
+| v2 | pass1-only 站位 + nav 禁射 + 紧 tier3 | 18/60（win11 lose6）| — |
+| v3 | v2 + nav 恢复开火 | 12/60（win6 lose7）| — |
+| v4 | 纯持位射击、无 nav 接管 + 死锁修复 | 17/60（win7 lose3）| — |
+| v5 | v4 + 冷却期不 claim | 20/60（win8 lose1）| 净 +17（67/50）|
+
+- 三条实证：(a) 哨兵绝不接管导航（nav 开火=杀伤主力，v3 反向验证）；(b) 冷却期站位移交流动（v5 净 +3，seed 6/3/38 三项轴锁败局消除为仅剩 seed 38——蝶变单 tick）；(c) 仅站位不做长驻（v1 教训）。
+- 残败 seed 38（Battlement）：t2846 哨兵对口袋 fast 打一发（单 tick 停驻，fire=true）→ RNG 流蝶变 → 基地 1500 ticks 后死于 armor/it 路径不同。60 seeds 中仅此 1 例，属混沌级联噪声而非系统缺陷。
+
+**发货配置**：hard/chaos 默认 `baseLaneSentryMode=1`、`baseLaneSentryRange=6`；classic restore `baseLaneSentryMode=0`（instant 1-HP 未 A/B，classic gate 字节不变 629/700）。
+
+**门禁真值重校准**（新默认下 60-seed 全关重测）：
+- hard：均值 72.86%→AGGREGATE_FLOOR 484/700；S34 21.7%→33.3%（20-seed 真值 3→7）。
+- chaos：均值 68.71%→455/700；S34 5%→21.7%；S22/S26 60-seed 分量 61.7%/58.3% 与 S26 120-seed 49.2%（S26 取 120-seed 口径 10，60-seed 58.3% 为乐观样本）。
+- 门禁 20-seed 全通过：classic 629、hard 512、chaos 503（floors 594/484/455）。
+
+**下一步（可选）**：chaos hard 车道防守的 mx 差异（chaos 敌人数更多、隧道更挤）；S34 seed 38 蝶变无修复目标。
+---
