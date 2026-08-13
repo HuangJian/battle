@@ -2782,8 +2782,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // window instead of bouncing). Kept as an experimental knob, 0 = OFF
   // (byte-identical).
   t2aSteelPathBlock: 1,
-  // §193-A: 中线火力门 —— hard/chaos 池模型实验旋钮，0 = OFF（byte-identical）。
-  centerLineFireGate: 0,
+  // §193-C: 中线火力门 —— SHIPPED（2026-08-13, DECISIONS §193-C）。
+  // A/B 官方口径（60-seed，三工具交叉验证）：hard 全关净 +41（147/106）、
+  // S34 净 +2（9/7）；chaos 全关净 +6（127/121）、S34 净 −5。full 版（无
+  // march-dig 豁免）为何更优：豁免版（仅抑制非行进方向）只剩 hard +2 /
+  // chaos 0 — march-dig 大多是 6px 中线实心砖的无效挖路，抑制反而盘活
+  // 冷却弹窗。classic instant 未 A/B — 经 CLASSIC_MODEL_PARAMS restore 0。
+  centerLineFireGate: 1,
   aggNavStuckTicks: 120,
   pickupCommitTicks: 0,
 

@@ -357,6 +357,13 @@ export class GodAIInput implements InputLike {
   _selfFireGuardBlocks = 0
 
   /**
+   * §193-A: total ticks the center-line fire gate suppressed a shouldFireInDir
+   * enemy-aim fire whose 6px bullet would have died on terrain before the
+   * enemy. Pure observation — never feeds back into gameplay.
+   */
+  _centerLineFireBlocks = 0
+
+  /**
    * §117: mode-2 (STAND) standing tick counter — how many consecutive ticks
    * the player has been standing still waiting to die. Capped by
    * `suicideReturnStandMaxTicks`; when exceeded, the trade aborts and normal

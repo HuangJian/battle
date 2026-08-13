@@ -623,6 +623,24 @@ export function shouldFireInDirImpl(
 
   // Enemy in line of fire — fire.
   if (result.enemy) {
+    // §193-A/C: center-line fire gate. The dual ±8px offset scan can report
+    // enemy=true (seen on one offset line) with wall=true (brick on the other
+    // line). The real 6px bullet travels the CENTER line — if the center
+    // path is blocked before the enemy's cell, the shot dies on the wall
+    // (seed-14 Battlement t2189: the only shot of a 40-tick window eaten by
+    // the (16,23) brick), wasting the cooldown. Walk the exact bullet path.
+    //
+    // §193-C: SHIPPED with FULL suppression — early iterations exempted the
+    // "march-dig" (fire in the current movement direction, S34 seed 5 digging
+    // the corridor it marches through), but the 60-seed A/B showed the
+    // exemption is net-negative (hard +2 vs +41 with full suppression): the
+    // march-dig's 6px center line is usually a solid brick, not a route.
+    if (result.wall && self.params.centerLineFireGate > 0) {
+      if (centerPathBlockedImpl(self, pcx, pcy, dir, result.enemyDist * CELL) >= 0) {
+        self._centerLineFireBlocks++
+        return false
+      }
+    }
     return self.rng.next() >= self.params.aimError
   }
 
@@ -957,6 +975,66 @@ export function enemyInShotCorridorImpl(
     return true
   }
   return false
+}
+
+/**
+ * §193-A/C: at what distance (px) would a bullet fired from (pcx,pcy) along
+ * `dir` first be stopped by terrain? Returns 0 (muzzle), a positive distance,
+ * or -1 if the path to `maxDist` is clear.
+ *
+ * Walks the bullet's ACTUAL 6px path (BULLET=6 → ±3px half-width) in CELL
+ * steps — the same cell set `SimulationCombat.bulletHitsTerrain` tests per
+ * tick. Unlike `scanAheadImpl`'s two ±8px offset lines (which can see an
+ * enemy on one line while the other line hits a wall), this is the exact
+ * center-line predicate.
+ *
+ * Semantics (mirrors bulletHitsTerrain exactly): non-ring brick destroys the
+ * cell but STOPS the bullet (hit=true → bullet dies); non-ring steel stops it
+ * unless the player can pierce (level ≥ 3); ring brick/steel and 'base'
+ * stop it; OOB cells are 'steel' (TileMap.get fallback — the bullet dies at
+ * the field edge). Water/forest/ice/empty pass through.
+ *
+ * Gate: caller checks `self.params.centerLineFireGate` (0 = OFF,
+ * byte-identical). Pure World read — no RNG, no mutation.
+ */
+export function centerPathBlockedImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  maxDist: number,
+): number {
+  const w = self.world
+  const p = self.controlledTank(w)
+  const pierce = (p?.level ?? 0) >= 3
+  const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
+  const vdx = DIR_DX[dirIdx]
+  const vdy = DIR_DY[dirIdx]
+  const grid = w.tileMap.grid
+  const half = 3 // BULLET / 2
+  // Start at d=0: the muzzle box — a bullet spawned inside a wall (the tank
+  // edge overlapping a brick cell) dies on its first terrain check.
+  for (let d = 0; d <= maxDist; d += CELL) {
+    const fx = pcx + vdx * d
+    const fy = pcy + vdy * d
+    if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) return d // dies at the edge
+    const c0 = Math.floor((fx - half) / CELL)
+    const c1 = Math.floor((fx + half) / CELL)
+    const r0 = Math.floor((fy - half) / CELL)
+    const r1 = Math.floor((fy + half) / CELL)
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        if (c < 0 || c >= GRID || r < 0 || r >= GRID) return d // OOB → 'steel'
+        const terrain = grid[r][c]
+        if (terrain === 'empty' || terrain === 'water' || terrain === 'forest' || terrain === 'ice') {
+          continue
+        }
+        if (terrain === 'steel' && pierce) continue // level ≥ 3 pierces non-ring steel
+        return d // brick / base / ring / non-pierced steel — the bullet stops
+      }
+    }
+  }
+  return -1
 }
 
 /**
