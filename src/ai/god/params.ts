@@ -88,6 +88,8 @@ export interface GodAIParams {
   baseLaneSentryMode: number
   /** §X: 哨兵站位搜索半径与开火距离上限（曼哈顿格数）。 */
   baseLaneSentryRange: number
+  /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
+  baseLaneSentryStation: number
   /**
    * §137 / 基地守位格 (base guard anchor): 0 = OFF (byte-identical — the
    * defense position stays at (BASE_POS.col, baseRow − defenseRowOffset),
@@ -1826,6 +1828,14 @@ export interface GodAIParams {
    */
   t2aSteelPathBlock: number
   /**
+   * §193-A: 中线火力门（center-line fire gate）。1 = ON：敌人-aim 开火前，
+   * 若双偏线扫描同时报了 enemy 与 wall（墙在一条偏线、敌在另一条），用真实
+   * 弹道中线（6px box）从炮口走到敌人格；中线被砖/钢/环/基地提前挡住时
+   * 不开火（子弹必死在墙上，白费冷却）——seed-14 (16,23) 砖格吃弹根因。
+   * 0 = OFF（byte-identical）。
+   */
+  centerLineFireGate: number
+  /**
    * §152-W2: aggressive-branch movement-stuck guard (ticks). 0 = OFF
    * (byte-identical). >0: during a freeze window (aggressive mode) with no
    * aimable enemy and no power-up, the navigate path tracks how long the
@@ -2261,6 +2271,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSentryMode: 1,
   // §146 C: 哨兵站位搜索半径（曼哈顿格数）与开火距离上限。
   baseLaneSentryRange: 6,
+  // §193-B: 卫位导航实验旋钮，0 = OFF（v5 字节不变）。
+  baseLaneSentryStation: 0,
   // §137 / 基地守位格: 默认防守位 (12,23) 在全部 35 关都是环砖、navigate 永远到不了
   // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
   // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
@@ -2770,6 +2782,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // window instead of bouncing). Kept as an experimental knob, 0 = OFF
   // (byte-identical).
   t2aSteelPathBlock: 1,
+  // §193-A: 中线火力门 —— hard/chaos 池模型实验旋钮，0 = OFF（byte-identical）。
+  centerLineFireGate: 0,
   aggNavStuckTicks: 120,
   pickupCommitTicks: 0,
 
@@ -2891,6 +2905,8 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
+  // §193-B: 卫位导航 —— classic instant 未 A/B，restore 0（byte-identical）。
+  baseLaneSentryStation: 0,
   // §145: 冰上滑行控制未在 classic 上 A/B — restore 0（byte-identical
   // classic gate，classic 同样有 S25 Ice Palace 冰关，后续可单独评估）。
   iceGlideControl: 0,
@@ -2902,6 +2918,8 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §152: 三项 S12 修复均为 pool-model（hard/chaos）调优，classic instant 未 A/B
   // —— restore 0（byte-identical classic gate）。
   t2aSteelPathBlock: 0,
+  // §193-A: 中线火力门 —— classic instant 未 A/B，restore 0（byte-identical）。
+  centerLineFireGate: 0,
   aggNavStuckTicks: 0,
   pickupCommitTicks: 0,
   // §159: T2a defense override is a pool-model (hard/chaos) fix — classic
