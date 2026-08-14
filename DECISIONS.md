@@ -642,3 +642,15 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 - 剩余 14 个告警的根因不同（`canMoveDir` 的 snap 精度问题、密封口袋、dead-end 走廊），需要不同的修复策略。
 
 **Status (2026-08-13) — DISABLED by default.** Paired A/B on `--difficulty hard` (§190 ON=merged default 480 vs OFF=0, 20 seeds, CRN) proved it is net-negative: suite 0.5308 → **0.5363** (paired Δ +0.0053, **p=0.0185**, B better/worse 12/10). It failed to help its own target seeds — S31 Eagle Nest was actually 80%→85% better with it OFF. The 480 value still regressed hard; the earlier 300 value had regressed chaos S5/S8. Default reverted to 0 so hard/chaos are byte-identical to pre-§190. Gate truth (hard/chaos) re-baselined to §190-OFF. Code path retained, gated by `pixelStuckDirectMoveTicks > 0` for a future, properly-tuned re-introduction.
+
+## 195. 中路钻探粘性驻守 midLaneStickyTicks=90 — S8 Riverbed 钻探败链修复 SHIPPED (2026-08-14)
+
+**Decision:** 新参数 `midLaneStickyTicks`（§164 机制：`laneThreatImpl` 触发时置 `_midLaneStickyHold`，endFrame 递减，`MID_LANE_DEFENSE` 在 hold>0 时跨钻墙间隙保持驻守）。**hard/chaos 默认 90**（classic restore 0 via CLASSIC_MODEL_PARAMS）。60-seed 配对 A/B：hard SUITE 0.5333→0.5380，S8 Riverbed 37%→45%（seeds 1-30 配对 16/30 vs 11/30，L→W×5、W→L×0）；classic/chaos 无回归。门禁全绿（classic 0.875/hard 0.770/chaos 0.733）。
+
+**Rationale:**
+- 根因（S8 hard 取证）：中央口袋敌人反复向下凿穿 col 12-13，每发子弹 10-60 ticks 后死于砖墙，间隙 70-130 ticks → §165 midLaneDefense 触发闪烁，玩家走向锚点途中被释放，环砖凿穿后下一发 71 ticks 无障碍弹道 vs 玩家 1px/tick 必输。
+- 只加时间粘性、不改弹道触发（§163 敌情触发教训：29/35 关更差）。距离 leash（midLaneMaxDist=8）保留 — 远距败局属另一杠杆（§173 已 closed）。
+- 粘性时长双刃剑：90 为扫掠峰值（60→38%、90→45%、120→38%、150→38%、180→33%、240→30%）— 必须 > 间隙桥接，但 ≥120 开始锚定反噬（玩家失去场内压制/捡星节奏）。
+
+**Implications:** 硬关 5/35 关 L→W 转换集中于 S8 式钻探关（1/10/15/18/26）。`midLaneStickyTicks=0` 仍字节恒等关闭。
+> 全文 → docs/god-ai-tuning.progress.md §195

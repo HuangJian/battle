@@ -42,7 +42,11 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
-import { enemyCanShootBase, enemyCanBreachRing, enemyApproachingBaseLaneImpl } from './SmartThreatModel'
+import {
+  enemyCanShootBase,
+  enemyCanBreachRing,
+  enemyApproachingBaseLaneImpl,
+} from './SmartThreatModel'
 import { iceGlideAdjust } from './Navigator'
 import { isFieldRetreatConditionImpl } from './StrategyPlanner'
 import { superItemPressesImpl } from './SuperItems'
@@ -594,7 +598,7 @@ const BASE_LANE_SENTRY: Candidate = {
         self._lastBranch = 'baseLaneSentry'
         return true
       }
-return false
+      return false
     }
     // §192 v6: 卫位导航（station-approach）— 非对齐或中线被挡时（含 dig 不可行、
     // csb 敌人不给挖等让位情形），走向相邻「清晰射击列」站位：站台 = 敌人列
@@ -1247,7 +1251,19 @@ const MID_LANE_DEFENSE: Candidate = {
     // signals were A/B-measured catastrophic (14-35% of ticks on most maps
     // → player statue, 29/35 worse): enemies merely PASSING the base column
     // is not a threat. Bullets are the actual carve moment — rare, precise.
-    if (!laneThreatImpl(self)) return false
+    //
+    // §164: midLaneStickyTicks — a drill bullet dies on a brick after
+    // 10-60 ticks, leaving 70-130 tick gaps where laneThreatImpl is false
+    // and the player releases mid-walk, never reaching the lane point (S8
+    // drill chain: ring bricks fall at t1305, the next bullet has a clear
+    // 71-tick lane, player 6+ cells away loses the race). Once a lane shell
+    // is seen, keep the candidate engaged for midLaneStickyTicks so the
+    // player commits to the walk and holds through the whole drill.
+    if (!laneThreatImpl(self)) {
+      if (prm.midLaneStickyTicks <= 0 || self._midLaneStickyHold <= 0) return false
+    } else if (prm.midLaneStickyTicks > 0) {
+      self._midLaneStickyHold = prm.midLaneStickyTicks
+    }
 
     // ---- 换持枪判定 (Tuning round 3): the hold does NOT require being at
     // the lane defense point. 对消 (bullet-bullet cancellation) needs the

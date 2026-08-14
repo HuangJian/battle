@@ -358,6 +358,24 @@ export interface GodAIParams {
    */
   midLaneDefense: number
   /**
+   * §164: 中路钻探粘性驻守 — once a lane drill bullet is seen in the base
+   * column (laneThreatImpl true), keep MID_LANE_DEFENSE engaged for this
+   * many ticks even after the bullet dies on a brick. 0 = OFF
+   * (byte-identical).
+   *
+   * Root cause (S8 Riverbed hard forensics): an enemy parked in the base
+   * column above the base fires down repeatedly; each bullet chews 1-2
+   * bricks and dies, so laneThreatImpl flickers ON only ~10-60 ticks per
+   * shot with 70-130 tick gaps. The player starts walking to the lane
+   * point during a bullet, then releases in the gap and wanders away —
+   * never arriving. When the ring bricks finally fall, the next bullet
+   * has a clear 71-tick lane to the base while the player is 6+ cells
+   * away (bullet 4px/tick vs player 1px/tick) — base dies. The sticky
+   * bridges the gaps so the player commits to the walk and holds at the
+   * lane point through the whole drill.
+   */
+  midLaneStickyTicks: number
+  /**
    * §163: distance (cells) from the lane defense point within which the
    * player HOLDS the lane (face up, fire to cancel bullets / kill the
    * carver) instead of moving. Outside this, navigate back to the point.
@@ -2523,6 +2541,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   midLaneHoldRange: 1,
   midLaneMaxDist: 8,
   midLaneMaxDigCells: 3,
+  // §164: mid-lane drill sticky — SHIPPED hard/chaos = 90 (2026-08-14,
+  // DECISIONS §195; classic restore 0 via CLASSIC_MODEL_PARAMS). 60-seed
+  // paired A/B: hard SUITE 0.5333→0.5380, S8 Riverbed 37%→45% (5 L→W, 0
+  // W→L on seeds 1-30); classic/chaos no regression. Sweep 60/90/120/150/
+  // 180/240 peaked at 90 — must bridge the 70-130 tick drill gaps without
+  // over-anchoring the player (≥120 starts trading away map control).
+  midLaneStickyTicks: 90,
   // §164: proactive mid-lane flank hold. 0 = OFF (byte-identical).
   // §165 round 2: A/B tested — CATASTROPHIC (-4.1pp). The enemy-near-lane
   // trigger fires 14-35% of ticks on most maps → player statue at the base
@@ -2949,6 +2974,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   baseLaneSentryMode: 0,
   // §193-B: 卫位导航 —— classic instant 未 A/B，restore 0（byte-identical）。
   baseLaneSentryStation: 0,
+  // §195: 中路钻探粘性驻守是 hard/chaos 基地防御修复 — classic instant
+  // 未 A/B（classic S8 本就 100%），restore 0（byte-identical classic gate）。
+  midLaneStickyTicks: 0,
   // §145: 冰上滑行控制未在 classic 上 A/B — restore 0（byte-identical
   // classic gate，classic 同样有 S25 Ice Palace 冰关，后续可单独评估）。
   iceGlideControl: 0,

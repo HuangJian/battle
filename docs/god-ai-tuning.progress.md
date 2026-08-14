@@ -1317,3 +1317,35 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 
 **下一步（可选）**：chaos hard 车道防守的 mx 差异（chaos 敌人数更多、隧道更挤）；S34 seed 38 蝶变无修复目标。
 ---
+## §195. 中路钻探粘性驻守（midLaneStickyTicks）— S8 Riverbed 钻探败链修复（2026-08-14）
+
+**根因（S8 hard 取证，60-seed 败局 37/38 = base_destroyed）**：
+- 中央出生敌人停在顶部口袋（col 12-13 rows 0-5，水带 rows 6-7 挡坦克出不去），从 ~(13,4-5) 反复向下射 col 12-13。
+- 每发子弹凿穿 1-2 格砖后死亡（bulletHitsTerrain 命中砖即 alive=false），所以 `laneThreatImpl` 每发只触发 ~10-60 ticks，间隔 70-130 ticks 释放。
+- `MID_LANE_DEFENSE`（§165 SHIPPED）在间隙释放 → 玩家「走向锚点↔回去打猎」振荡，从未到位。环砖 t1305 被凿穿，下一发 #215(t1362) 有 71 ticks 无障碍弹道直达基地，玩家 6+ 格外（4px/tick vs 1px/tick）必输。
+- 铁证：seed 10 t1189-1304 弹道窗口持续 claim（玩家 (4,22)→(9,21)），t1306 释放→回撤 (7,20)，t1362 致命弹，t1433 首伤，t2541 gameover。t1400 decision-probe：isBaseUnderThreat=false（§157 只看敌人对齐）、midLaneDefense 累计 148 次。
+
+**修复**：新参数 `midLaneStickyTicks`（默认 **0** = byte-identical OFF）。`laneThreatImpl` true 时置 `_midLaneStickyHold = N`（GodAIInput 字段，endFrame 递减，镜像 §169 `_threatStickyHold`）；`MID_LANE_DEFENSE.evaluate` 中 `!laneThreatImpl → return false` 改为 `!laneThreatImpl && _midLaneStickyHold <= 0 → return false`。效果：钻墙间隙内玩家持续走向锚点 (12,22) 并持枪驻守，`laneShellAboveImpl` 换持枪对齐 + 弹-弹对消凿穿弹。
+
+**A/B（60-seed 硬关全关，paired same-run）**：
+
+| 参数 | S8 win | 全关 SUITE | fitness | 备注 |
+|---|---|---|---|---|
+| 0（基线） | 37% | 0.5333 | 527.0 | 74% |
+| 60 | 38% | — | — | 不足（间隙 > 粘性） |
+| **90** | **45%** | **0.5380** | **531.8** | **峰值** |
+| 120 | 38% | — | — | 过长锚定反噬 |
+| 150 | 38% | — | — | |
+| 180 | 33% | — | — | W→L 反噬（seed 4/8/19/30） |
+| 240 | 30% | — | — | 锚定太久，丢失场内压制 |
+
+- classic 参：0.7252（参考 0.7259，无回归）；chaos 参：0.4926（=参考，无回归）。
+- S8 配对 per-seed（sticky=90，seeds 1-30）：**16/30 vs 11/30**，L→W 转换 5 个（seeds 1/10/15/18/26），W→L = 0。机制验证：转换的恰是钻探败局，且锚定窗口 < 敌方间隙才不会过度占用玩家。
+- 门禁全绿：godai-score gate classic 0.875 / hard 0.770 / chaos 0.733（floors 0.845/0.740/0.703）。
+
+**教训**：
+1. 粘性时长是双刃剑：必须 > 钻墙间隙（~70-130 ticks）才能桥接，但 > 120 ticks 开始锚定反噬（玩家失去场内压制/捡星节奏）。
+2. 弹道触发（§163 教训）保持有效：只加时间粘性，不加敌情触发。
+3. 远距败局（首伤时玩家 dist 12-27）未被覆盖（leash midLaneMaxDist=8 拒绝），属另一杠杆（§173 baseDamageRecall 已五连阴 closed）。
+
+**发货配置**：hard 默认 `midLaneStickyTicks=90`；classic/chaos 保持 0（未 A/B 到正收益；classic S8 本就 100%，chaos 参考无回归）。

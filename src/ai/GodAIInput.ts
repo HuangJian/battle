@@ -305,6 +305,15 @@ export class GodAIInput implements InputLike {
   _threatStickyHold = 0
 
   /**
+   * §164: mid-lane drill sticky hold — while > 0, MID_LANE_DEFENSE stays
+   * engaged even when no enemy bullet is currently in the base column
+   * (drill gap between shots). Refreshed to params.midLaneStickyTicks
+   * every tick a lane shell is seen; decremented in endFrame(). Default
+   * param 0 ⇒ never set ⇒ byte-identical.
+   */
+  _midLaneStickyHold = 0
+
+  /**
    * §170: hunt commit state — the enemy id currently committed to in the
    * normal hunt branch and the frame the commit expires. While the window
    * is open and the committed tank is alive, selectTarget keeps chasing it
@@ -835,6 +844,7 @@ export class GodAIInput implements InputLike {
     this._navStuckTicks = 0
     this._navStuckSuppress = 0
     this._threatStickyHold = 0 // §169
+    this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
     this._pathCostEId.fill(-1) // §171
@@ -992,6 +1002,9 @@ export class GodAIInput implements InputLike {
     // §169: threat-signal sticky hold countdown (runs every tick; 0 = OFF ⇒
     // the branch never executes — byte-identical).
     if (this._threatStickyHold > 0) this._threatStickyHold--
+    // §164: mid-lane drill sticky countdown (runs every tick; 0 = OFF ⇒
+    // the branch never executes — byte-identical).
+    if (this._midLaneStickyHold > 0) this._midLaneStickyHold--
     // §162: pixel-level stuck detector — runs every tick (regardless of
     // which candidate wins think() next tick). Net-displacement from an
     // anchor: a free player (> carveDigNetEscape px from anchor) re-anchors
