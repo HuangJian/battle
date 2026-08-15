@@ -1349,3 +1349,80 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 3. 远距败局（首伤时玩家 dist 12-27）未被覆盖（leash midLaneMaxDist=8 拒绝），属另一杠杆（§173 baseDamageRecall 已五连阴 closed）。
 
 **发货配置**：hard 默认 `midLaneStickyTicks=90`；classic/chaos 保持 0（未 A/B 到正收益；classic S8 本就 100%，chaos 参考无回归）。
+---
+## §196. 钻探预警列完整性触发器（drill alarm）— 方向 1 证伪（2026-08-14）
+
+**假设**：sticky=90 只桥接钻墙弹间短间隙（70-130 ticks）；长间隙（300-1700 ticks）里玩家游荡 22-28 格外，钻探恢复速度 > 玩家回防速度。若在 base column（cols 12-13, rows 0-23）检测到砖墙破坏事件（稀有精确，§163 弹道同性质），即可在长间隙内持续 claim MID_LANE_DEFENSE，让玩家守住锚点。
+
+**实现**（已回滚，未进入任何提交）：
+- params：`drillAlarmWindowTicks`(0) / `drillAlarmMinBricks`(2) / `drillAlarmLeash`(16) / `drillAlarmHoldTicks`(1500)，默认 0 = OFF byte-identical。
+- GodAIInput：`_drillColBricks/_drillLastDestructTick/_drillDestructCount/_drillAlarmHold`，endFrame 每 tick O(48) 次 tilemap 读数砖（cols 12-13 rows 0-23），窗口内 ≥2 格破坏 → 置 hold；每次破坏刷新；endFrame 递减。
+- think.ts MID_LANE_DEFENSE：hold>0 时跨间隙持续 claim，leash 放宽至 drillAlarmLeash。
+
+**A/B（S8 hard, seeds 1-30, paired vs sticky=90 基线）**：
+
+| hold | W→L | L→W | 结论 |
+|---|---|---|---|
+| 1500 | 12 | 2（seeds 7/14） | 灾难 |
+| 300 | 6 | 1（seed 11） | 净负 |
+
+**证伪机制（seed 1 hold=1500 铁证）**：t901 钻墙破坏 → 玩家被锚定 (12,21) 面朝上 866 ticks 不动（branch=midLaneDefense, alarmHold 694→522），期间**横向侧射**（row 25, dir=right）从 (11,24)/(11,25) 环砖被凿后的缺口打进基地 — t1595 hp 120→70、t1762 →20、t1767 →0，玩家全程站在锚点无动于衷。**statue 盲区**：锚点面朝上只能对消竖列弹，对 row 24-25 的横向弹完全失明；而正常打猎状态下玩家会主动处理环周敌人。
+
+**结论**：
+1. 任何「钻探进行中 → 长时间钉在锚点」的机制都是 §163 statue 变体 — 玩家被钉住时环周威胁（侧射、拆环司机）全部失控。远距群 8 局被近基侧射群淹没（12 W→L）。
+2. 长间隙问题的真实解不是钉锚点，而是「别游荡太远」或「拆环司机本身要被处理」— 后者正是 §192 baseLaneSentry（850 权重，拆环威胁时应接管）的职责，但当前玩家距敌 >6 格且未对齐时 sentry 不接管（station 导航 baseLaneSentryStation=0 未 A/B，§193-B）。
+3. 方向 1 关闭。后续优先方向：方向 2（近基错位群 probe — seed 21 侧射铁证已取：t1343 (11,24)、t1376 (11,25) 被凿，t1417 横向弹杀基地）+ baseLaneSentryStation=1 A/B。
+## §197. 带内拆环导航 + 远距开火（baseLaneSentryInBandNav/FarRange）— 方向 2 证伪（2026-08-15）
+
+**假设**：S8 侧射拆环败局（seeds 23/24/29，hard 27/60=45% 全关最低之一）：拆环司机沿 row 23-25 凿穿环侧砖 (11,24)/(11,25) 后横向弹直射基地（seed 23 纯侧射：t1285/t1319 死，顶部环零事件；seed 29 混合：钻探 enemy 沿 col 12 往返凿穿顶部环 (12,23)/(13,23) + 侧射并存）。§192 baseLaneSentry(850) 选中威胁（csb 在环砖落地瞬间翻转 true）却无行动分支 → 方向 2 = 给 sentry 补三个动作：带内导航（chase 到敌列）+ 对齐持位（冷却期不被 midLane 拽离）+ 远距开火（含砖线穿射）。
+
+**实现**（已回滚，未进入任何提交）：
+- params：`baseLaneSentryInBandNav`(0) / `baseLaneSentryFarRange`(0)，默认 0 = OFF byte-identical。
+- think.ts BASE_LANE_SENTRY：farCandidate 门控（manhattan>range && farRange>0 && manhattan≤farRange && (csb||cbr)）接入 aligned 分支；砖线开火路径（blocked>0 时 shouldFireInDirImpl 放行 — 子弹击毁砖格继续飞行，seed 29 铁证：blocked=4 时一发穿 (12,17) 直达 (12,0-4)）；inBandHoldNav 持位助手（3 个 aligned 块退出点，moveDir=null 拒绝释放）；带内导航分支（ringBreached && tc.row≥23 && crow≥21 && 走廊全通 → moveDir 朝敌列，fire=false）。
+
+**取证铁证（§7 先失败测试 + bullet-id diff 探针）**：
+- seed 23（纯侧射）：玩家被 nav 送到 (7,21) 对齐 (7,24) 司机后，t973 冷却期 `onCooldown return false` **退出整个 evaluate**，nav 分支永不执行 → defenseIntercept 拽离列位，司机 6 秒凿穿基地 t1285。→ 持位需求由此而来。
+- seed 29（混合向量）：钻探 (12,0-4) 往返 + corridor 砖 (12,17)（blocked=4，aligned 门 blocked≤1 拒绝）+ 顶部环 t1233 凿穿后 11 秒无人处理（sentry aligned-fire manhattan 19 > range 6 拒绝）+ 杀手弹道定版 t1911/1946 侧射 / t1983 钻弹。
+- 修复后：seed 23 nav+far → stageclear t6070；seed 29 → t5139；测试 3/3 绿。
+
+**A/B（决定性，35 关 × 60 seeds × 2 arms, hard, paired, sim-pool ~80s/轮）**：
+
+| 参数 | S8 60seeds | 全 35 关 |
+|---|---|---|
+| baseline (sticky=90) | 27/60 | — |
+| nav=1 | 32/60（L→W 5, W→L 0） | **净负**：s24 34→22、s32 49→37、s7 48→36、s5 38→32、s6 45→38、s26 43→35…（约 -35 net） |
+| nav=1 far=22 | 33/60（L→W 8, W→L 2） | **净负更大**：s24 34→20、s32 49→38、s7 48→36…（约 -65 net） |
+
+**证伪机制（s24 s1 铁证）**：带内持位把玩家钉在 (11,21) 25+ ticks（sentry claims 0→48），基线同期继续场内流动/下行；首发散点 t1963 仅 1px，RNG 分流后玩家错过拦截，base t2738 死（基线 t4061 clear）。**持位 = §196 statue 变体的短时版本**：任何「onCooldown 期钉玩家」的 claim 都中断场内流动（打猎/捡星/下行拦截），多数关卡净负；S8 局部收益（+5..6）被全关损失淹没。v2 变体（去掉全部持位，仅保留远距开火 + 带内 chase）实测 seed 23/29 不绿 — 持位是 S8 修复的必要件，也是全关危害件，无法拆分。
+
+**结论**：
+1. 三件套（nav/hold/far）在 S8 有效但全关净负 — 与 §196 同款教训：**钉/持位行为跨关卡是负杠杆**；S8 的 27/60 败局由「玩家被拽离正确列位」+「顶部环/环侧被凿穿」构成，持位治标、破坏他关治本成本过高。
+2. 对齐持位的真实需求是「冷却期别被 midLane/defenseIntercept 拽离列位」— 更廉价的杠杆是调 midLane 的 claim 条件/权重（而非新增更高优先级行为），或 §193-B baseLaneSentryStation=1 A/B（sentry 主动导航到射击位，无钉住语义）。
+3. 方向 2 关闭（与方向 1 同处置：回滚 + 记录）。S8 败局保留为已知开放项。
+## §198. 卫位导航发货（baseLaneSentryStation=1）+ 两门槛 + buffer 契约修复（2026-08-15）
+
+**背景**：§193-B 的 station=1 在旧基线 A/B（S34 +1 / 全关 +6 / classic 0 / chaos +2）后「待发货」，但从未在当前基线（§195 sticky=90）确认。方向 2（§197）证伪后，station=1 是唯一正收益候选。
+
+**实现**（相对 §193-B 的三处改动）：
+1. **默认值 1**：DEFAULT_GOD_AI_PARAMS.baseLaneSentryStation 0→1（classic restore 0 不变 — classic sentry mode=0 自关）。
+2. **门槛 (5)**（chaos S34 seed 7 t2052 铁证）：带内（row ≥ 23，base 带）已有敌人时站台让位 — 玩家正在带内击杀（selectTarget=(6,24) 24hp fast）时不得被拽去带外目标。
+3. **门槛 (6)**（chaos S34 seed 7 t2136 铁证）：玩家在目标下方（crow > tc.row）且面向上行、row 差 ≤ 3 → 站台步多余 — 玩家两格即达目标行，横向挪位拖 14 ticks 造成 RNG 蝴蝶翻局。
+4. **buffer 契约修复**：门槛 (5) 循环里 `self.tankCell(t)` 覆盖外层 `tc` 引用的共享 `_tankCellBuf`（Navigator.ts 契约「调用后必须立即消费」）— 循环后所有 tc 读的是污染值（t=34633 实测 tc=(11,21)→(11,2)）。修复：先快照 bestCol/bestRow。此 bug 是本次引入（§193-B 原代码无循环无污染）。
+
+**A/B（修复后，正确 base0 vs cand1，35 关 × 60 seeds × 2 arms, hard/chaos, paired）**：
+
+| 难度 | baseW | candW | L→W | W→L | net |
+|---|---|---|---|---|---|
+| hard | 1591/2100 | 1593/2100 | 6 | 4 | **+2** |
+| chaos | 1520/2100 | 1527/2100 | 13 | 6 | **+7** |
+| classic | 1881/2100 | 1881/2100 | 0 | 0 | 0（byte-identical） |
+
+- S34：hard +1（s12）、chaos -1（s58 W→L — 60-seed 口径 1 局噪声，gate 子集 1-20 不含）。
+- 修复前（污染版）hard +3/chaos +10 — 污染版高估了收益；修复后 +2/+7 为真实值。
+
+**gate（发货态 = station=1）**：classic 0.875（floor 0.845）、hard 0.779（floor 0.740）、chaos 0.733（floor 0.703）全过，无 per-stage failure（chaos S34 恢复 0.351 线上）。bun run check 1229 pass。
+
+**结论**：
+1. station=1 在 hard/chaos 双难度净正、classic 字节不变 — 满足发货标准（§193-B 定义的「全关净正 + classic 无回归」）。
+2. 本轮铁证三连：tankCell 共享 buffer 契约是 think.ts 内易踩的坑（本 repo 已有 laneCorridorBlocked 同格退化先例 §193-B）；station 的每次横向挪位都是 RNG 蝴蝶风险源 — 门槛只允许「确无更紧急行动」时站台。
+3. chaos S34 seed 58 的 W→L 保留为已知小噪声（1/60 口径）。

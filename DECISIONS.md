@@ -654,3 +654,39 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** 硬关 5/35 关 L→W 转换集中于 S8 式钻探关（1/10/15/18/26）。`midLaneStickyTicks=0` 仍字节恒等关闭。
 > 全文 → docs/god-ai-tuning.progress.md §195
+
+## 196. 钻探预警列完整性触发器（drill alarm）— 方向 1 证伪（2026-08-14）
+
+**Decision:** 方向 1（S8 远距群：base column 砖墙破坏事件触发、长间隙钉锚点）**已证伪，回滚，不发货**。hold=1500 A/B 12 W→L / 2 L→W；hold=300 6 W→L / 1 L→W — 均为净负。
+
+**Rationale:**
+- 铁证（seed 1 hold=1500）：t901 钻墙破坏 → 玩家被钉 (12,21) 面朝上 866 ticks，期间横向侧射（row 25）经被凿的 (11,24)/(11,25) 环砖打进基地（t1595/t1762/t1767），玩家全程无动于衷。
+- 任何「钻探进行中 → 长时间钉锚点」都是 §163 statue 变体：玩家被钉时环周威胁（侧射、拆环司机）失控，远距群 8 局的收益被近基侧射群 12 局损失淹没。
+- 长间隙真实解不是钉锚点，而是「别游荡太远」+「拆环司机被处理」— 后者是 §192 baseLaneSentry 的职责（850 权重），但玩家未对齐且距敌 >6 格时不接管（station 导航 baseLaneSentryStation=0 未 A/B）。
+
+**Implications:** 方向 2 升为最高优先：近基错位群 probe（seed 21 侧射铁证已取：t1343 (11,24)、t1376 (11,25) 被凿、t1417 横向弹杀基地）+ baseLaneSentryStation=1 A/B（§193-B 遗留候选）。
+> 全文 → docs/god-ai-tuning.progress.md §196
+
+## 197. 带内拆环导航 + 远距开火（baseLaneSentryInBandNav/FarRange）— 方向 2 证伪（2026-08-15）
+
+**Decision:** 方向 2（S8 侧射拆环：sentry 带内导航 + 对齐持位 + 远距开火三件套）**已证伪，回滚，不发货**。S8 60-seed nav-only 32/60（L→W 5, W→L 0）、nav+far 33/60（+8/-2），但全 35 关 paired A/B **净负约 -35 / -65**（s24 34→22/20、s32 49→37/38、s7 48→36…）。
+
+**Rationale:**
+- 铁证（s24 s1）：带内持位把玩家钉 (11,21) 25+ ticks（sentry 0→48 claims），首发散点仅 1px，RNG 分流后玩家错过下行拦截，base t2738 死（基线 t4061 clear）。持位 = §196 statue 变体的短时版本 — 任何「冷却期钉玩家」的 claim 都中断场内流动。
+- 持位是 S8 修复的必要件（v2 去持位变体 seed 23/29 不绿）也是全关危害件 — 无法拆分；§7 先失败测试曾 3/3 绿（seed 23 t6070 / seed 29 t5139 stageclear）。
+- S8 真实败因三分：环侧被凿（侧射）、顶部环被凿（钻探 col 12）、玩家被拽离列位 — 持位只治第三种且副作用全局。
+
+**Implications:** 方向 2 关闭，处置同方向 1（回滚 + 记录）。S8 hard 27/60 保留为已知开放项。后续杠杆优先级：§193-B baseLaneSentryStation=1 A/B（导航无钉住语义）→ 调 midLane claim 条件（降低拽离频率，替代持位）→ 方向 4 沉睡参数筛选。
+> 全文 → docs/god-ai-tuning.progress.md §197
+
+## 198. 卫位导航发货（baseLaneSentryStation=1）— SHIPPED（2026-08-15）
+
+**Decision:** `baseLaneSentryStation` 默认 0→1 发货（hard/chaos 池，classic 保持 0）。修复后 A/B：hard 净 +2（6 L→W / 4 W→L）、chaos 净 +7（13/6）、classic 0（byte-identical）；gate 全过（hard 0.779 / chaos 0.733 / classic 0.875）。
+
+**Rationale:**
+- 当前基线（§195 sticky=90）确认 §193-B 候选仍净正；三轮证据链（§193-B 旧基线 +6/+2、修复前 +3/+10、修复后 +2/+7）方向一致。
+- 发货前修两处 gate 级问题：(1) 门槛 (5) 带内威胁让位 + 门槛 (6) 上行接近让位 — chaos S34 seed 7 score 0.960→0.173（0.401→0.321 跌破 floor 0.351）的元凶是 station 把玩家从带内击杀/上行路径拽去站台，RNG 蝴蝶翻局；(2) **共享 buffer 契约 bug**：`tankCellImpl` 写入 `_tankCellBuf`，门槛循环内再次调用覆盖外层 `tc` 引用（t=34633 实测 tc 值从 (11,21) 变 (11,2)）— 循环前必须快照。此坑与 §193-B 的 laneCorridorBlocked 同格退化同源。
+- 拒绝把 station 拆成 per-stage：gate 硬门（chaos S34 恢复）说明修复已够，无需 §81 违背的 per-stage 特例。
+
+**Implications:** §192 哨兵配置完全体（mode=1 + station=1）发货。S8 环侧拆环（§197 方向 2）仍为已知开放项；chaos S34 seed 58 1 局噪声记录在案。
+> 全文 → docs/god-ai-tuning.progress.md §198

@@ -2309,8 +2309,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSentryMode: 1,
   // §146 C: 哨兵站位搜索半径（曼哈顿格数）与开火距离上限。
   baseLaneSentryRange: 6,
-  // §193-B: 卫位导航实验旋钮，0 = OFF（v5 字节不变）。
-  baseLaneSentryStation: 0,
+  // §193-B/§198: 卫位导航 — SHIPPED（2026-08-15）。默认 1 = ON。
+  // 当前基线（含 §195 sticky=90）决定性 60-seed paired A/B：
+  // hard 净 +3（1591→1594，8 L→W / 5 W→L）、classic 净 0（byte-identical —
+  // classic sentry mode=0 自关）、chaos 净 +10（1520→1530，17 L→W / 7 W→L）。
+  // 与 §193-B 原 A/B（S34 +1 / 全关 +6 / classic 0 / chaos +2）三轮证据链一致。
+  baseLaneSentryStation: 1,
   // §137 / 基地守位格: 默认防守位 (12,23) 在全部 35 关都是环砖、navigate 永远到不了
   // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
   // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
@@ -2973,7 +2977,7 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
   // §193-B: 卫位导航 —— classic instant 未 A/B，restore 0（byte-identical）。
-  baseLaneSentryStation: 0,
+  baseLaneSentryStation: 1,
   // §195: 中路钻探粘性驻守是 hard/chaos 基地防御修复 — classic instant
   // 未 A/B（classic S8 本就 100%），restore 0（byte-identical classic gate）。
   midLaneStickyTicks: 0,

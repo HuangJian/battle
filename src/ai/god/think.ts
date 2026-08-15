@@ -611,17 +611,41 @@ const BASE_LANE_SENTRY: Candidate = {
       // 时基地受威胁，须下行堵口而非横向挪位（seed 51 实证：fast 已到
       // (7,23) 时站台步把下行回防劫持成左移，基地被打爆）。
       if (tdc <= 6 && tc.row >= BASE_POS.row - 4 && tc.row < BASE_POS.row - 1) {
+        // §198 门槛 (5)（chaos S34 seed 7 铁证 t2052）：带内（row ≥ 23）
+        // 已有敌人时站台让位 — 玩家应留在带内处理防线威胁（selectTarget
+        // 正在击杀 (6,24) 低血 fast），横向挪去带外目标会放弃基地防线。
+        // 玩家带内击杀进行中不得被站台导航劫持。
+        // 注意：tankCellImpl 写入共享 _tankCellBuf — 循环内每次调用都会
+        // 覆盖外层 tc 的引用内容，必须先快照（Navigator.ts 契约）。
+        const bestCol = tc.col
+        const bestRow = tc.row
+        let inBandThreat = false
+        for (let li = 0; li < list.length; li++) {
+          const t = list[li]
+          if (!t.alive || t.spawnTimer > 0 || t === best) continue
+          const toc = self.tankCell(t)
+          if (toc.row >= BASE_POS.row - 1 && Math.abs(toc.col - BASE_POS.col) <= 6) {
+            inBandThreat = true
+            break
+          }
+        }
+        if (inBandThreat) return false
+        // §198 门槛 (6)（chaos S34 seed 7 铁证 t2136）：玩家在目标下方
+        // （crow > tc.row）且面向上行、row 差 ≤ 3 → 站台步多余 — 玩家
+        // 两格即达目标行，横向挪位反而拖慢（该局殊途同归却因 14-tick
+        // 延迟 RNG 蝴蝶翻局 stageclear→gameover）。
+        if (crow > bestRow && crow - bestRow <= 3 && p.dir === 'up') return false
         // 玩家须已在带内（row ≥ 21）：带外下行回防中的玩家不得被拽横移
         // （seed 32 实证：玩家 (11,18) 下行被拽去 col 12，回防延迟致败）。
         if (crow < BASE_POS.row - 3) return false
         // 玩家列与目标列差 ≤ 1 → 玩家已在拦截列/目标即将入列，站台步
         // 纯属多余（seed 25 实证：idle 防守位被拖走导致败局）。
-        const colGap = tc.col > ccol ? tc.col - ccol : ccol - tc.col
+        const colGap = bestCol > ccol ? bestCol - ccol : ccol - bestCol
         if (colGap <= 1) return false
         // 目标横向移动（left/right）且与玩家同行 → 目标将横穿玩家所在行，
         // 守株待兔即可（seed 53 实证：fast 横穿玩家行时换列迎击错过窗口）。
         const targetDir = best ? best.dir : ''
-        const rowGap = tc.row > crow ? tc.row - crow : crow - tc.row
+        const rowGap = bestRow > crow ? bestRow - crow : crow - bestRow
         if ((targetDir === 'left' || targetDir === 'right') && rowGap <= 1) return false
         // 站台列 = 目标列 ±1（就近优先，距离限 2）：差 2 时玩家恰好能
         // 跨一列拦截（seed 17 实证：玩家 (13,21) 对目标 (11,20) 下行走
@@ -629,8 +653,8 @@ const BASE_LANE_SENTRY: Candidate = {
         // 53 实证：fast 横移中远距换列纯属赶路）。不追踪敌列 ± 差≤1
         // 跳过共同防横向振荡（seed 32 实证）。
         const cands: number[] = []
-        const d1 = tc.col - 1
-        const d2 = tc.col + 1
+        const d1 = bestCol - 1
+        const d2 = bestCol + 1
         const dd1 = d1 > ccol ? d1 - ccol : ccol - d1
         const dd2 = d2 > ccol ? d2 - ccol : ccol - d2
         if (dd1 <= dd2) {
@@ -643,7 +667,7 @@ const BASE_LANE_SENTRY: Candidate = {
           if (sc < 0 || sc >= GRID || sc === ccol) continue
           if (sc > ccol ? sc - ccol > 2 : ccol - sc > 2) continue
           if (w.tileMap.get(sc, crow) !== 'empty') continue
-          if (laneCorridorBlocked(w, sc, crow, sc, tc.row) !== 0) continue
+          if (laneCorridorBlocked(w, sc, crow, sc, bestRow) !== 0) continue
           self._moveDir = sc > ccol ? 'right' : 'left'
           self._fire = false
           self.branchCounts.baseLaneSentry++
