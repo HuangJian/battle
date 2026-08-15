@@ -378,6 +378,34 @@ function freePathDistPxImpl(self: GodAIInput, p: Tank, dir: Direction): number {
 }
 
 /**
+ * §201: escape depth — how many full CELL steps in `dir` stay passable
+ * (terrain + bounds only; tanks move, so they are not counted as walls).
+ * Pure World read, no RNG. Mirrors canMoveDirRaw's geometry (snap grid,
+ * TANK box, rectHitsTerrain).
+ */
+export function escapeDepthImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  maxCells: number,
+): number {
+  const v = DIR_VECTORS[dir]
+  const w = self.world
+  const lx = pcx - TANK / 2
+  const ly = pcy - TANK / 2
+  let depth = 0
+  for (let i = 1; i <= maxCells; i++) {
+    const nx = lx + v.dx * i * CELL
+    const ny = ly + v.dy * i * CELL
+    if (!w.isInBounds(nx, ny, TANK, TANK)) break
+    if (w.rectHitsTerrain(nx, ny, TANK, TANK)) break
+    depth++
+  }
+  return depth
+}
+
+/**
  * Choose a dodge direction perpendicular to the incoming bullet.
  * M3: verify the candidate direction is safe (not into another bullet's path).
  */
@@ -524,6 +552,46 @@ export function dodgeDirectionImpl(
     }
     // Neither perpendicular passable → fall through to the pinned logic.
   } else {
+    // §201: escape-depth-aware dodge — dead-end perpendiculars. When BOTH
+    // perpendicular sides are shallow pockets (< dodgeEscapeDepth cells of
+    // travel), the binary step-into-pocket dodge oscillates between them
+    // while the enemy keeps firing (S14 hard s60: 93-tick up/down jitter,
+    // hp 315→0 in a water-belt pocket). Probe the bullet-axis directions
+    // for a genuinely longer escape and take it (safe-gated like every
+    // dodge; §83's no-flee-in-bullet-axis rule applies to fleeing ALONG a
+    // corridor the bullet traverses — the axis probe only fires when the
+    // perpendicular pockets are dead ends and the axis move is clear).
+    if (self.params.dodgeEscapeDepth > 0) {
+      const depthA = escapeDepthImpl(self, pcx, pcy, candA, 10)
+      const depthB = escapeDepthImpl(self, pcx, pcy, candB, 10)
+      const minDepth = self.params.dodgeEscapeDepth
+      if (depthA < minDepth && depthB < minDepth) {
+        const axisA: Direction = vertical ? 'up' : 'left'
+        const axisB: Direction = vertical ? 'down' : 'right'
+        const depthAxisA = escapeDepthImpl(self, pcx, pcy, axisA, 10)
+        const depthAxisB = escapeDepthImpl(self, pcx, pcy, axisB, 10)
+        const takeAxis = (dir: Direction): boolean =>
+          dir === bullet.dir
+            ? false // §83: never flee in the bullet's travel direction
+            : self.canMoveDir(p, dir) && self.isSafeDir(pcx, pcy, dir, bullet.id)
+        const axisAName = axisA
+        const axisBName = axisB
+        if (depthAxisA >= minDepth && takeAxis(axisAName)) {
+          if (depthAxisB >= minDepth && takeAxis(axisBName)) {
+            // Both axes long — prefer the base-closer side (defense bias).
+            const baseCx = BASE_POS.col * CELL + CELL
+            const baseCy = BASE_POS.row * CELL + CELL
+            const va = DIR_VECTORS[axisAName]
+            const vb = DIR_VECTORS[axisBName]
+            const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
+            const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+            return distA <= distB ? axisAName : axisBName
+          }
+          return axisAName
+        }
+        if (depthAxisB >= minDepth && takeAxis(axisBName)) return axisBName
+      }
+    }
     // Try each candidate; prefer the one that's passable AND safe (M3).
     // Use local booleans instead of allocating an `open` array.
     if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true

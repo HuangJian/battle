@@ -1426,3 +1426,84 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 1. station=1 在 hard/chaos 双难度净正、classic 字节不变 — 满足发货标准（§193-B 定义的「全关净正 + classic 无回归」）。
 2. 本轮铁证三连：tankCell 共享 buffer 契约是 think.ts 内易踩的坑（本 repo 已有 laneCorridorBlocked 同格退化先例 §193-B）；station 的每次横向挪位都是 RNG 蝴蝶风险源 — 门槛只允许「确无更紧急行动」时站台。
 3. chaos S34 seed 58 的 W→L 保留为已知小噪声（1/60 口径）。
+## §199. S34 站桩取证（方向 3 证伪）+ ab-param 口径 bug 修复（2026-08-15）
+
+**背景**：方向 3（S34 Battlement 全关最弱关取证）完成 60-seed forensics + 站桩修复三轮 A/B 全负，方向关闭；同时发现并修复 `tools/diag/ab-param.ts` 的 stageIndex 口径 bug。
+
+**S34 取证（hard 60-seed，stageIndex=0 官方口径，tmp/fx-s34-hard.json）**：
+- 43 败局 = 40 base_destroyed（93%）+ 3 lives_exhausted；killer mix power 15 / armor 13 / fast 12。
+- 死亡瞬间最后分支：navigate 18（其中 17 局 baseHp=0 — 玩家 dist 10-26 游走时 base 被端）> midLaneDefense 11 > dodge 6 > 站桩类 7（defenseIntercept|STATIONARY 4 + t2a|STATIONARY 3）> powerup 1。
+- 玩家死亡热点：漏斗口 (13,22)×7 / (13,20)×5 / (12,22)×4；击杀热点：(13,1)×23 / (7,1)×11（顶部 spawn 区）。
+- S34 布局：全砖漏斗无钢；base 上方保护薄（(11,6)=4 brick BOTTOM + (11,5)=18 BR + (11,7)=17 BL）；(11,24)/(11,25) 双砖在玩家下方。
+
+**s1 死链（t5956 armor，tick-level probe 逐 tick 复现）**：
+1. t5935-5943：玩家 (11,22)→(10,22) navigate 追 armor（threatChase）。
+2. t5944：t2a claim（aimDir=down — 主方向量化，armor@(10,25) dx≈-8px 在 32px 对齐容差内）→ 开 1 发 — 中心线 (11,24) 砖 → **破砖**。
+3. t5945-5948：cooldown 模型（hard=DEFAULT_RULES，fireInterval≈74 ticks）→ onCooldown 站桩（mv=null, fire=false, inFlight=1）。
+4. t5949-5956：inFlight=0（砖碎）但**仍站桩**（fire 被 cooldown 锁）— armor 破 (11,25) 1 层后对 base 开火 → baseHp 5→0。
+- **机制根因**：aimDir 主方向量化（对角敌人永远取 dy 主导方向）+ 冷却期站桩零产出 + 破砖竞赛（玩家 2 层砖 + 4 发 armor ≈ 10s vs armor 1 层砖直达 base）。
+- 工具链确认：decision-probe / per-seed-diff / forensics / eval 均 stageIndex=0 → 轨迹一致；自写 probe 必须直接读 `input._moveDir/_fire/_lastBranch`（`getMoveDirection()` 在 tick 后调用会重复 think 消耗 RNG 分叉）。
+
+**设计 A/B（cooldownBlockDrop 家族，S34 30-seed hard，全净负 → 回滚）**：
+| 变体 | 规则 | net | 细节 |
+|---|---|---|---|
+| 1（fall-through） | 冷却期 + 中心线砖/钢挡 → 放弃站桩交 navigate | -2 | s6 L→W，但 s7/s8/s15 W→L |
+| 1（换线横移） | 探测 ±TANK 列通线横移一步；双挡才 navigate | -4 | s5/s7/s8/s15 W→L |
+| 2（窄化） | 仅 armor + blockDist ≥ 2×CELL 组合 | -1 | s15 W→L |
+
+**证伪机制**：任何「离开站桩」都打断对 base 行的压制/火力 — navigate 走位期无线可打时零火力（drop=1 下 s1 玩家全程 navigate 0 fire 散步）；换线横移在漏斗地形两边都堵（两侧都是多层砖）→ 与 §133（早回防）/§138（守位格）/§197（带内持位）家族同款结论：**S34 防守位行为不可修，修复应在漏斗口上方的进攻性拦截/击杀节奏**。代码回滚，默认 0 byte-identical。
+
+**口径 bug（§199 第二部分，工具修复）**：
+- `ab-param.ts` 传真实 stageIndex（si）→ `killScore = 1000 × Math.pow(1.05, si+1)`（S34 时 ≈5.2×）→ hard/chaos 下 `dropOnScoreMilestone=5000`（DEFAULT_RULES）道具掉落频率分叉 → 与 eval/gate/forensics 的 stageIndex=0 是**两条不同轨迹**。classic 不受影响（`dropOnScoreMilestone=0`）。
+- **历史影响**：§193-B（station A/B）、§198（修复后 +2/+7）、方向 4（沉睡参数筛选）均在分叉口径下测得 — 方向性结论仍有效，但数字不可与官方口径直接比较。gate 用 0 口径验证 station=1 发货 — 发货正确性不受影响。
+- 修复：`stageIndex: si → 0` + 注释（官方口径契约）。
+
+**遗留**：navigate 16 局（远处游走时 base 被端）是 S34 最大败因类 — 但对应修复（早回防 §133 / 守位 §138 / 持位 §197）已全部证伪，暂无候选。S34 暂挂，方向 5（S24/S20/S12/S14 弱关群）排队。
+
+## §200. dodgeEscapeDepth 逃逸深度闪避（方向 5 D1）— 全关证伪（2026-08-15）
+
+**背景**：方向 5（弱关群 S24/S20/S12/S14）取证完成 → S14（Bastion 水带关）最特殊：23 败全 lives_exhausted（100% 玩家死亡，base 满血）。逐 tick probe 定位死亡根因 → 设计逃逸深度闪避 → 局部正、全关负 → 回滚。
+
+**方向 5 取证（hard 60-seed × 4 关，stageIndex=0，tmp/fx-weak-hard.json，240 runs）**：
+| 关 | 败局 | 败因 | 关键 killer | 死亡热点 |
+|---|---|---|---|---|
+| S24 (idx 23) | 29 | 28 base_destroyed | basic 15 (52%) | base 附近 11,23 / 16,23 / 9,25；navigate 14 |
+| S20 (idx 19) | 27 | 23 base_destroyed | power 11 + armor 7 | base 附近 9-10,22-25 |
+| S12 (idx 11) | 25 | 23 base_destroyed | power 12 + fast 7 | 顶部 (7,5)×3；navigate 15 |
+| **S14 (idx 13)** | **23** | **23 lives_exhausted (100%)** | — | 水带上横带 (3-9,12-14) |
+
+全局 LAST-10-TICK 分支：navigate 478 (46%) > dodge 333 (32%) > t2a 134 (13%) > defenseIntercept 47 (5%)。
+
+**S14 seed 60 死亡铁证（probe 逐 tick）**：
+- S14 地图：r14-15 水带 `wwwwww` 横断全场；中央砖堡 r2-13；base (12,24) 钢 s 保护；r12: c0-3 森林 c4-7 空 c8-9 砖。
+- t2150-2243：玩家 (5,12)↔(5,13) **up/down 抖动 93+ ticks** — 向上撞砖 (5,10)、向下撞水 (5,14)（两侧垂直都是 1 格死胡同）；左右开阔 + (2-3,12) 森林掩护却从不横移逃脱。
+- 威胁源：fast@(1-3,10-11) + armor@(1-3,13) 持续压枪；hp 315→229→101→0。dodge 分支纯闪避（fire=false），baseHp=120 满 — 玩家在 dist 19-21 远处打猎中死亡。
+- **机制根因**：`dodgeDirectionImpl`（ThreatAssessor.ts:384+）的 isSafeDir/canMoveDir 只看**下一步** — 候选格可走且安全就进；进后下 tick 该侧被地形堵（水/砖）→ 唯一候选是弹回 → 无限往返。§86 dodgeOscillationCounterFire / M9/M10 dodgeHorizonScore 全默认 OFF（历史全负）。
+
+**D1 设计**：`escapeDepthImpl`（逐 CELL 地形+边界扫描逃逸格数，镜像 canMoveDirRaw 几何 — 注意 TANK box 用左上角，pcx/pcy 是中心 → 必须减 TANK/2）+ dodgeEscapeDepth 参数（默认 0 byte-identical）。触发：双侧垂直逃逸深度 < 阈值 → 探测子弹轴向（垂直弹→left/right）长逃逸：深度 ≥ 阈值 + canMoveDir + isSafeDir 门控 + §83 不沿子弹行进方向；双侧都长 → 选 base 近侧。
+
+**A/B（stageIndex=0 官方口径）**：
+- S14 30-seed 阈值扫描：depth=2 → net -1（s15/s24 L→W，s16/s21/s26 W→L — W→L 全 lives_exhausted，逃逸延后死亡但没解决生存）；4 → +2；6 → +2；**8 → +4**（L→W 6/W→L 2）；10 → +1（回落）。
+- S14 60-seed depth=8：**net +5**（37→42；L→W 11：s1/s3/s7/s8/s19/s24/s28/s31/s33/s42/s43/s58，W→L 6：s16/s28/s41/s50/s52/s59）— 局部信号确认。s60 死亡 t2243 → stageclear t5522（0 死亡）。
+- **全关 hard 60-seed 配对（决定性，4200 runs，89s，tmp/ab-full-d8.json）：net=-30**（L→W 172 / W→L 202；baseW 1582/2100 → candW 1552/2100）。
+  - **W→L 败因分类（201 flip）：172 局 base 受损/被端（86%），仅 29 局玩家死亡 → 弃守**。
+  - 重灾关：s6 -8（45→37，14 W→L！）/ s20 -5 / s15 -5 / s4、s24 -4 / s10、s13、s17、s21、s35 -3 / s25、s12 -3~4。
+  - 正关：s14 +5 / s29 +5 / s5 +5 / s2 +4 / s18 +3 / s28 +3 / s32 +2 / s9 +2。
+- **结论：第七个逃跑类参数证伪** — M9 horizon / M10 margin / §86 counter-fire / trapAvoidance / crossfirePathCost / cooldownBlockDrop（§199）全部同型：局部救玩家 → 全局弃守 → base 被端。**「离开位置」的修复路径已穷尽（7 连负），不再探索。** 代码保留默认 0（byte-identical，check 1252 全绿）。
+
+**遗留**：S14 抖动是真问题，但修法必须「不弃守」（逃逸后立即回防 / base 威胁门控）— 鉴于七连负不继续。方向 5 四关共性 = 打猎期生存（navigate 46% + dodge 32%）+ base 附近被围 — 无现成参数可修 → **方向 5 暂挂**（与 S34 同命运）。下一候选：方向 6 clearSpeed（0.146 慢/拖沓）或进攻性拦截节奏（需新机制）。
+
+## §201. 方向 6（clearSpeed 0.151 慢/拖沓）— 分析性证伪（2026-08-15）
+
+**背景**：Phase III 维度表（§0.C.5）hard clearSpeed 0.146 偏低被解读为「慢/拖沓」— 方向 6 试图找玩家 AI 的节奏浪费。
+
+**取证（60-seed hard + 控制实验）**：
+1. **维度分布**：hard clearSpeed 0.151（518 clears）vs classic 0.817（60-seed 官方口径）— 5 倍差距。每关 clear tick p50：多数关超 classic refs 的 P95（如 Outpost hard p50 6382 vs classic slow 4238）。
+2. **fire 1.4% = 冷却物理上限**：cooldown 模型 fire interval 1300/1.05 ≈ 1238ms ≈ 74 ticks → 理论上限 1.35%。实测 1.4%（1 星 1.05× 上限 1.42% — 完全吻合）。玩家满速射击，无窗口浪费。
+3. **清关局 0 死亡**（Outpost 18/20 清关局 death=0；Twin Spires 19/20 death=0）— 无重生损耗。
+4. **readyNoFire 33.6% 逐项排查**：navigate 31262 ticks（走路中无同线敌人 — 接敌几何，directMove 已垂直优先最大化同线概率）；t2a 站桩 = 冷却等待（就绪 24 ticks 即开火）；aggressive 就绪必开火（aimError=0）；powerup/dodge 不开火合理。
+5. **敌人 tier 对照（30-seed，同 1 星同 rules，仅 tier 分布不同）**：Outpost hard 6123 vs relax 6086（±0.6%）、Twin Spires 7087 vs 7225（±2%）→ **敌人 AI 聪明程度对清关时间几乎无影响**。
+
+**根因**：cooldown fireModel（hard/relax/chaos — 74 ticks/发）vs bulletCap（classic — 子弹落地连发 ≈ 10-15 ticks/发）→ **射速差 5-7 倍 = clearSpeed 差的全部来源**。这是 modern 难度的设计节奏（非 AI 可调）；eval-refs 用 classic 校准评 hard 造成维度结构性偏低。
+
+**结论**：无 AI 拖沓可修 — 方向 6 关闭（无代码改动）。相关已穷尽：§170 huntCommit / §171 pathTargetMode（方向 4 无信号）、§200 dodgeEscapeDepth（全关 -30）。若需维度公平，应重校准 hard refs（评估层，非行为层）。

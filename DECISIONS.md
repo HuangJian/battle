@@ -690,3 +690,44 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** §192 哨兵配置完全体（mode=1 + station=1）发货。S8 环侧拆环（§197 方向 2）仍为已知开放项；chaos S34 seed 58 1 局噪声记录在案。
 > 全文 → docs/god-ai-tuning.progress.md §198
+
+## 199. S34 站桩取证 + 工具口径 bug（方向 3 证伪 + ab-param 修复）（2026-08-15）
+
+**Decision:** (1) S34 Battlement 站桩修复方向证伪 — `cooldownBlockDrop` 三种变体（fall-through / 换线横移 / armor+2层砖窄化）S34 30-seed 全净负（net -2 / -4 / -1），代码回滚，默认 0 byte-identical。(2) 修复 `tools/diag/ab-param.ts` 口径 bug：`stageIndex` 由真实索引改为 0（官方口径）。
+
+**Rationale:**
+- S34 取证（hard 60-seed，stageIndex=0 口径）：43 败局 = 40 base_destroyed；死亡瞬间最后分支 navigate 18（17 局 baseHp=0 — 远处游走时 base 被端）> midLaneDefense 11 > dodge 6 > 站桩类 7（defenseIntercept 4 + t2a 3）> powerup 1。s1 死链：armor@(10,25) 几乎对齐但中心线 (11,24)(11,25) 2 层砖挡 → t2a 开 1 发破砖 → cooldown 模型 74-tick 冷却站桩 → armor 破 1 层打爆 base。**根因是 aimDir 主方向量化 + 冷却站桩 + 破砖竞赛**，任何「离开站桩」的替代（navigate/换线）均被 A/B 证伪 — 与 §133（早回防）/§138（守位格）家族结论一致：S34 防守位行为不可修。
+- **口径 bug（重要）**：ab-param 传真实 stageIndex → killScore=1000×1.05^idx（S34 时 ≈5.2×）→ `dropOnScoreMilestone=5000` 道具掉落频率在 hard/chaos 下大幅分叉 → 与 eval/gate/forensics 的 stageIndex=0 口径是**两条不同轨迹**。§193-B/§198/方向 4 的历史 A/B 数字均在分叉口径下测得（发货正确性不受影响 — gate 用 0 口径验证过 station=1）。`stageIndex=0` 对 classic 无影响（`dropOnScoreMilestone=0`）。修复为传 0，未来 A/B 与 gate 严格同口径。
+
+**Implications:** S34 弱关（28%）暂挂 — 修复应在漏斗口上方进攻性拦截/击杀节奏（无现成参数）。历史 A/B 数字（§193-B +6/+2、§198 +2/+7、方向 4 全无信号）均为分叉口径 — 结论方向性仍有效但数字不可与官方口径直接比较；后续 A/B 一律 stageIndex=0。
+> 全文 → docs/god-ai-tuning.progress.md §199
+
+## 200. dodgeEscapeDepth 逃逸深度闪避证伪（方向 5 D1）（2026-08-15）
+
+**Decision:** `dodgeEscapeDepth`（双侧垂直候选逃逸深度 < 阈值时改选子弹轴向长逃逸）**全关净负，不发货**，默认 0 保留代码。
+
+**Rationale:**
+- 方向 5 取证（tmp/fx-weak-hard.json，240 runs）：S14（Bastion 水带关）23 败全 lives_exhausted（100% 玩家死亡）；seed 60 铁证 — 玩家在 (5,12)↔(5,13) 垂直抖动 93 ticks（向上撞砖 (5,10)、向下撞水 (5,14)，两侧都是 1 格死胡同），fast/armor 持续压制 hp 315→0。根因：dodgeDirection 的 isSafeDir/canMoveDir 只看**一步** — 候选格可走就进，下 tick 侧向堵塞 → 弹回，无限往返。
+- 设计：垂直逃逸深度 < `dodgeEscapeDepth`（cells）→ 探测子弹轴向（left/right）长逃逸（深度 ≥ 阈值 + isSafeDir 门控 + §83 不沿子弹行进方向逃）。
+- A/B（stageIndex=0 官方口径）：S14 30-seed 阈值扫描 depth=2→-1 / 4→+2 / 6→+2 / **8→+4** / 10→+1；depth=8 的 S14 60-seed **+5**（37→42，L→W 11 / W→L 6）— 局部正信号成立。
+- **全关 hard 60-seed 配对（2100 局 ×2，决定性测试）：net=-30**（L→W 172 / W→L 202）。W→L 201 局中 **172 局（86%）base 受损/被端**，仅 29 局玩家死亡 → **弃守假设证实**：逃逸把玩家带离防守位，base 被端。重灾关 s6（-8）/s20（-5）/s15（-5）/s4、s24（-4）/s10、s13、s17、s21（-3）等；正关仅 s14（+5）/s29（+5）/s5（+5）/s2、s18（+4）等。
+- **第七个逃跑类参数证伪**（M9 horizon / M10 margin / §86 counter-fire / trapAvoidance / crossfirePathCost / cooldownBlockDrop / 本参）— 模式完全一致：局部救玩家，全局弃守。**「玩家离开位置」在任何版本里几乎从不值得。**
+
+**Implications:** S14 生存类候选穷尽 — 抖动是真问题但修法必须「不弃守」（如逃逸距离上限+立即回防、或 base 威胁门控），鉴于七连负，不继续探索。方向 5 剩余三关（S24/S20/S12，killer 以 basic/power 为主，死亡热点 base 附近 + navigate 期）同属「打猎期生存」类，无现成参数 → **方向 5 暂挂**，与 S34 相同命运。下一候选方向：击杀节奏/清关效率（方向 6 clearSpeed 0.146）或 base 防御的进攻性拦截（无现成参数）。
+> 全文 → docs/god-ai-tuning.progress.md §200
+
+## 201. 方向 6（clearSpeed 0.151 慢/拖沓）— 分析性证伪：无 AI 拖沓可修（2026-08-15）
+
+**Decision:** clearSpeed 维度低是 **fireModel 射速设计差异**的物理结果，不是玩家 AI 行为问题 — 无参数可修，方向 6 关闭。
+
+**Rationale:**
+- 维度真相：hard clearSpeed 0.151 vs classic 0.817（60-seed 官方口径）— 5 倍差距。
+- **射击已达物理上限**：cooldown 模型下玩家 fire interval = 1300ms/1.05 ≈ 1238ms ≈ **74 ticks/发**。实测清关局 fire 占比 1.4% ≈ 理论上限 1/74 = 1.35%（含星加成已超理论）。玩家**无浪费射击窗口**（aggressive 就绪必开火 `!onCooldown && rng.next() >= aimError`，aimError=0；navigate 移动中应开火已含 shouldFireInDir；t2a 站桩 = 冷却物理）。
+- **清关局零死亡**：Outpost 18/20 清关局 death=0 — 无重生损耗。shield 731 ticks/run = 出生盾物理。
+- **敌人 tier 对照实验（30-seed，同 1 星同 rules）**：Outpost hard tier 6123 vs relax tier 6086（±0.6%）；Twin Spires 7087 vs 7225（±2%）— **敌人 AI 聪明程度对清关时间无影响**。
+- 逐项排查 readyNoFire（冷却就绪不开火）33.6%：navigate 31262（走路中无同线敌人 — 几何，接敌路径由 directMove 垂直优先已优化）；powerup/dodge（拿道具/闪避中不开火 — 合理）；aggressive 1575 中 82% 在冷却。
+- **根因**：hard/relax/chaos 用 cooldown fireModel（74 ticks/发）+ pool 模型；classic 用 bulletCap（子弹落地立即再发 ≈ 10-15 ticks/发）+ instant。**射速差 5-7 倍 = clearSpeed 5 倍差的全部来源** — 这是难度设计（cooldown 是 modern 统一节奏），非 AI 可调。
+- 相关已试候选（均无信号/已证伪）：§170 huntCommit、§171 pathTargetMode（方向 4 35×20 筛选）、§200 dodgeEscapeDepth（全关 -30）。
+
+**Implications:** 「慢/拖沓」是 Phase III 维度信号的误读 — 该维度在 cooldown 难度上结构性偏低，不应作为行为调优目标。God-AI 清关效率（tempo 0.558）的真实杠杆 = 接敌路径效率（§170/§171 已穷尽）与击杀精准（accuracy 0.838 已高）。**建议**：如追求维度公平，应重新校准 hard 的 eval-refs（现用 classic refs 评分）而非调 AI — 属评估层修复，另议。
+> 全文 → docs/god-ai-tuning.progress.md §201

@@ -1343,6 +1343,24 @@ export interface GodAIParams {
   dodgeHorizonScore: number
 
   /**
+   * §201: escape-depth-aware dodge — perpendicular dead-end escape. On
+   * cooldown-model maps with water/wall bands (S14 Bastion r14-15 water
+   * belt), the binary dodge picks a perpendicular candidate by ONE-step
+   * passability+safety: the player steps into a 1-cell pocket, the next
+   * tick that side is blocked (water/brick), so it flips back — an
+   * up/down death oscillation inside the hit band (S14 hard s60:
+   * (5,12)↔(5,13) for 93 ticks, hp 315→0). When BOTH perpendicular
+   * escape depths are < this threshold (cells), probe the bullet-axis
+   * directions (left/right for a vertical bullet) for a LONGER escape
+   * (depth ≥ threshold + safe) and move there instead. §83 (never flee
+   * in the bullet's own travel direction) is respected: the axis probe
+   * only fires when the perpendicular pockets are dead ends, and it is
+   * safe-gated by isSafeDir like every dodge. 0 = OFF (byte-identical).
+   * >= 1 = trigger when both perpendicular depths are below this value.
+   */
+  dodgeEscapeDepth: number
+
+  /**
    * M10: min escape-margin gate for the horizon commitment (tick). Only
    * commit to a dodge direction when its survival margin exceeds this
    * threshold — i.e. the escape is CLEARLY winnable, not a marginal knife-edge.
@@ -2694,6 +2712,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // default; the A/B runs in the M9 milestone. See interface docs for the
   // measured failure mode (commitment failure 32-35% of dodge deaths).
   dodgeHorizonScore: 0,
+  dodgeEscapeDepth: 0,
   // M10: time-margin + distance-to-base gates for the horizon commitment
   // (both 0 = no gate = pure M9 semantics; A/B knobs, DECISIONS §108 pending).
   dodgeHorizonMinMarginTicks: 0,

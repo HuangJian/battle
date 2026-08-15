@@ -63,7 +63,12 @@ for (const [label, params] of [
 ] as const) {
   for (const si of stageIdxs) {
     for (const seed of seeds) {
-      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: si, difficulty, params, maxTicks: 36000 })
+      // 官方口径: stageIndex=0 (eval/gate/forensics parity). Real stage
+      // indices scale killScore ×1.05^idx → dropOnScoreMilestone=5000 power-up
+      // drops fire at different rates, forking hard/chaos trajectories away
+      // from the eval baseline (DECISIONS §199). ab-param measured §193-B/§198
+      // under the forked 口径; gate then validated station=1 under 0.
+      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000 })
       labels.push(`${label}|${si}|${seed}`)
     }
   }
