@@ -15,6 +15,7 @@ import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
+import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -34,13 +35,13 @@ function parseSeeds(spec: string | undefined): number[] {
 const difficulty = arg('difficulty') ?? 'hard'
 const seeds = parseSeeds(arg('seeds'))
 const stageSpec = arg('stages') ?? 'all'
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n) - 1)
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
+let stageIdxs: number[]
+try {
+  stageIdxs = parseStageSpec(stageSpec, STAGES.length)
+} catch (e) {
+  console.error(e instanceof StageSpecError ? e.message : `invalid --stages: ${stageSpec}`)
+  process.exit(1)
+}
 const jsonOut = arg('json')
 
 const paramSpec = arg('param')
@@ -75,6 +76,16 @@ for (const [label, params] of [
 }
 
 const started = Date.now()
+console.error(
+  runHeader({
+    difficulty,
+    stageCount: stageIdxs.length,
+    seedCount: seeds.length,
+    stageIndex: 0,
+    maxTicks: 36000,
+    params: BASELINE,
+  }),
+)
 const results = await pool.runBatch(tasks)
 pool.terminate()
 const resByKey = new Map<string, (typeof results)[number]>()

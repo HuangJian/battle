@@ -25,6 +25,7 @@ import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import type { ThreatLedgerRun } from '../sim/simulation-runner'
+import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 import {
   classifyFailure,
   aggregateClassifications,
@@ -58,15 +59,11 @@ const difficulties = (arg('difficulty') ?? 'hard')
   .filter(Boolean)
 const seeds = parseSeeds(arg('seeds'))
 const stageSpec = arg('stages') ?? 'all'
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n.trim()) - 1)
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
-if (stageIdxs.length === 0) {
-  console.error('threat-ledger: --stages: no valid stage indexes (1..35)')
+let stageIdxs: number[]
+try {
+  stageIdxs = parseStageSpec(stageSpec, STAGES.length)
+} catch (e) {
+  console.error(e instanceof StageSpecError ? e.message : `threat-ledger: invalid --stages: ${stageSpec}`)
   process.exit(1)
 }
 const maxTicks = Number(arg('max-ticks') ?? '36000')
@@ -153,6 +150,16 @@ function compactLedger(r: ThreatLedgerRun): unknown {
 
 async function main(): Promise<void> {
   const pool = new SimWorkerPool()
+  console.error(
+    runHeader({
+      difficulty: difficulties.join(','),
+      stageCount: stageIdxs.length,
+      seedCount: seeds.length,
+      stageIndex: 0,
+      maxTicks,
+      params: DEFAULT_GOD_AI_PARAMS,
+    }),
+  )
   const tasks: SimTask[] = []
   const meta: Array<{ difficulty: string; stageIdx: number; seed: number }> = []
 

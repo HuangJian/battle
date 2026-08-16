@@ -604,7 +604,7 @@ const BASE_LANE_SENTRY: Candidate = {
             world: w,
             player: p,
             threat: best,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, ccol === tc.col),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, ccol === tc.col),
           }).valid
         ) {
@@ -1244,7 +1244,7 @@ const DEFENSE_INTERCEPT: Candidate = {
             world: w,
             player: p,
             threat: t,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
           }).valid
         ) {
@@ -1277,7 +1277,7 @@ const DEFENSE_INTERCEPT: Candidate = {
             world: w,
             player: p,
             threat: t,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
           }).valid
         ) {
@@ -1317,7 +1317,7 @@ const MID_LANE_DEFENSE: Candidate = {
   id: 'midLaneDefense',
   weight: ACTION_WEIGHTS.midLaneDefense,
   evaluate(self, ctx) {
-    const { p, pcx, pcy, onCooldown } = ctx
+    const { w, p, pcx, pcy, onCooldown } = ctx
     const prm = self.params
     if (prm.midLaneDefense <= 0 || !self.hasBase || self.aggressive) return false
     const pc = self.playerCell()
@@ -1360,6 +1360,26 @@ const MID_LANE_DEFENSE: Candidate = {
       if (absOff < BULLET) {
         // Aligned with a coming shell — hold in place, face up, fire to
         // cancel. The shell is the target; fire whenever the gun is ready.
+        // 行动有效性契约 (open-test §5.2 — all three defense branches gated
+        // identically): a standing, already-facing, on-cooldown, no-output
+        // hold is only valid with waiting value — an interceptable shell on
+        // the up-ray / own bullet resolving / a standing shot beating the
+        // threat deadline. Otherwise yield (fall through produces output).
+        // mode=0 短路 → byte-identical。
+        if (
+          prm.actionContractMode > 0 &&
+          p.dir === 'up' &&
+          onCooldown &&
+          !contractStandingHold({
+            world: w,
+            player: p,
+            threat: null,
+            enemyBulletOnRay: enemyBulletOnRay(w, p, 'up'),
+            ownBulletOnRay: ownBulletOnRay(w, p, true),
+          }).valid
+        ) {
+          return false
+        }
         const laneDir: Direction = 'up'
         self._moveDir = p.dir === laneDir ? null : laneDir
         self._fire = !onCooldown
@@ -1405,6 +1425,24 @@ const MID_LANE_DEFENSE: Candidate = {
     //    a normal enemy/target is in the line (shouldFireInDir).
     if (inHold) {
       const laneDir: Direction = 'up'
+      // 行动有效性契约 (open-test §5.2) — 同上: 站立 + 已朝向 + 冷却中且无输出
+      // 的哨位提交必须先有等待价值，否则让位。有开火输出时契约不否决。
+      if (
+        prm.actionContractMode > 0 &&
+        p.dir === laneDir &&
+        onCooldown &&
+        !laneShellInColumnImpl(self) &&
+        !self.shouldFireInDir(pcx, pcy, laneDir) &&
+        !contractStandingHold({
+          world: w,
+          player: p,
+          threat: null,
+          enemyBulletOnRay: enemyBulletOnRay(w, p, 'up'),
+          ownBulletOnRay: ownBulletOnRay(w, p, true),
+        }).valid
+      ) {
+        return false
+      }
       self._moveDir = p.dir === laneDir ? null : laneDir
       self._fire =
         !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, laneDir))

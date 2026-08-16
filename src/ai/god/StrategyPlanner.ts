@@ -7,31 +7,42 @@ import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
-import { targetValue, enemyDeadline } from './ThreatBudget'
+import { targetValue, enemyDeadline, killAssessment } from './ThreatBudget'
 import { coveragePlanImpl } from './CoveragePlanner'
 import type { ActionId } from './DecisionCore'
 import { blocksBullet } from './Chokepoint'
 
-// ---- Phase 2 §6.3: short-term action intent (plan §6.3) ----
+// ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
 // A hunt/engage target is locked only for a lease; revalidation releases on
 // target death/unreachability, lease expiry, player stall (no move + no fire
-// for the window), deadline tightening past the committed slack, a clearly
-// worse new threat, or target flight beyond expectedProgress. This is NOT a
-// longer huntCommitTicks — expiry, progress and threat constraints all bind.
-// The defense cascade runs above selectTarget, so an intent never delays
-// threat response. intentMode 0 = never read/written (byte-identical).
+// for the window), slack collapse past the committed slack, a clearly worse
+// new threat, or the committed action no longer beating the safe deadline.
+// This is NOT a longer huntCommitTicks — expiry, progress and threat
+// constraints all bind. The defense cascade runs above selectTarget, so an
+// intent never delays threat response. intentMode 0 = never read/written
+// (byte-identical).
 export interface ActionIntent {
   kind: ActionId
   targetId: number
   expiresTick: number
-  minSlack: number
+  /**
+   * TRUE slack at commit time (protocol §5.3): the enemy's SAFE damage
+   * deadline minus the player's kill ETA for that target. Never a raw
+   * deadline value wearing a slack name.
+   */
+  committedSlack: number
   expectedProgress: number
   lastMoveFrame: number
   lastPlayerCol: number
   lastPlayerRow: number
 }
-/** New-threat release: another enemy's deadline is this many ticks worse. */
-const INTENT_THREAT_DELTA = 15
+/**
+ * New-threat release: another enemy's deadline must be this many ticks
+ * tighter to count as "clearly more urgent" (§5.3). One cell of enemy
+ * approach ≈ 15.5 ticks — a mere 1-cell-closer harmless enemy must NOT
+ * release the intent, so the bar sits at ~2 cells of urgency.
+ */
+const INTENT_THREAT_DELTA = 30
 /** Slack release: committed deadline tightened past minSlack − relax. */
 const INTENT_SLACK_RELAX = 10
 /** Flight release: distance grew past expectedProgress + this (cells). */
@@ -81,14 +92,19 @@ function intentRead(
   const tc = self.tankCell(t)
   const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
   if (d > it.expectedProgress + INTENT_PROGRESS_DEGRADE && p.fireCooldown <= 0) return null
-  // Threat revalidation (throttled): the committed deadline tightened past
-  // the committed slack, or any enemy is clearly more urgent now.
+  // Threat revalidation (throttled): the CURRENT slack (safe deadline minus
+  // current kill ETA, legal-turn waits included) must not have collapsed
+  // past the committed slack, and no other enemy's deadline may be clearly
+  // more urgent than the committed target's.
   if (w.frame % INTENT_REVALIDATE_EVERY === 0) {
-    const committed = enemyDeadline(w, t).damageDeadline
-    if (committed < it.minSlack - INTENT_SLACK_RELAX) return null
+    const committedDeadline = enemyDeadline(w, t).enemyDamageDeadline
+    const currentSlack = committedDeadline - killAssessment(w, p, t).playerKillEta
+    if (currentSlack < 0) return null // the committed action now misses the deadline
+    if (currentSlack < it.committedSlack - INTENT_SLACK_RELAX) return null
     for (let i = 0; i < enemies.length; i++) {
       if (enemies[i].id === it.targetId) continue
-      if (enemyDeadline(w, enemies[i]).damageDeadline < committed - INTENT_THREAT_DELTA) return null
+      if (enemyDeadline(w, enemies[i]).enemyDamageDeadline < committedDeadline - INTENT_THREAT_DELTA)
+        return null
     }
   }
   return tc
@@ -97,11 +113,12 @@ function intentRead(
 /** Commit the freshly picked target as a short-term intent. */
 function intentWrite(self: GodAIInput, w: World, playerCell: Cell, best: Tank) {
   const tc = self.tankCell(best)
+  const ka = killAssessment(w, w.player!, best)
   self._intent = {
     kind: 'hunt',
     targetId: best.id,
     expiresTick: w.frame + self.params.intentLeaseTicks,
-    minSlack: enemyDeadline(w, best).damageDeadline,
+    committedSlack: ka.killSlack,
     expectedProgress: Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row),
     lastMoveFrame: w.frame,
     lastPlayerCol: playerCell.col,

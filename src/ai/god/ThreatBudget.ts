@@ -9,11 +9,13 @@
  *   - Conservative, explainable bounds — the plan deliberately forbids
  *     simulating enemy RNG or treating A* routes as ground truth.
  *
- * Terminology (plan §5):
+ * Terminology (plan §5, open-test protocol §4):
  *   actionEta      = nextLegalTurnEta + movementEta + aimAlignmentEta
  *                    + fireCooldownEta + requiredShotsEta
+ *                    (each cost billed exactly once — §4.1)
  *   killSlack(e)   = enemyDamageDeadline(e) - playerKillEta(e)
- *   interceptSlack(I) = enemyArrivalEta(I) - playerArrivalAndAimEta(I)
+ *   interceptSlack(I) = (enemyArrivalLowerBound(I) - safetyMargin)
+ *                    - playerArrivalAndAimEta(I)
  *
  * Only positive slack may justify deviating from the current target — the
  * caller (Phase 2 ActionContract) decides; this module only computes.
@@ -46,23 +48,53 @@ export const RING_CELLS: ReadonlyArray<{ col: number; row: number }> = (() => {
 })()
 
 export interface ActionEta {
+  /**
+   * Wait until a turn is LEGAL (0 when no turn is needed at all — neither for
+   * aim nor for a path axis change). Contains: nothing else. Counted exactly
+   * ONCE in `total` (open-test protocol §4.1: never billed twice).
+   */
   nextLegalTurnEta: number
+  /** Manhattan movement along both axes. Contains: NO turn costs. */
   movementEta: number
+  /**
+   * ONE full turn window (cooldown duration + 1 tick) when either the aim
+   * alignment or the path's perpendicular axis change requires a turn. The
+   * aim turn and the axis-change turn are the SAME physical turn — charged
+   * once, never once each.
+   */
   aimAlignmentEta: number
+  /** Wait until firing is legal (re-arm). */
   fireCooldownEta: number
+  /** Re-arms for shots 2..N plus the final bullet's flight time. */
   requiredShotsEta: number
+  /** The five fields above, each counted exactly once. */
   total: number
 }
 
 export interface EnemyDeadline {
-  /** ETA to reach the ring (0 when already breaching). Conservative lower bound. */
-  enemyToRingEta: number
-  /** ETA to the first shot that can hit the base or a productive ring brick. */
-  enemyToShootEta: number
-  /** Window from first productive shot until the base is destroyed. */
+  /**
+   * OPTIMISTIC LOWER BOUND — earliest the enemy could physically reach the
+   * ring: straight-line Manhattan at its current speed. Ignores turn
+   * cooldowns, obstacles and detours, so it is valid for RELATIVE ORDERING
+   * only — never as evidence that it is safe to leave the base (§4.2).
+   */
+  enemyArrivalLowerBound: number
+  /**
+   * LOWER BOUND — earliest tick a base-damaging enemy bullet could LAND
+   * (fire readiness + brick-breach cycles when applicable + bullet flight).
+   */
+  enemyDamageEarliest: number
+  /**
+   * SAFE deadline for ALLOWING player deviation: `enemyDamageEarliest` minus
+   * the enemy-ETA safety margin (one legal turn window — the geometric model
+   * charges the enemy zero turn costs, so the margin restores honesty).
+   * Only positive slack against THIS field may justify leaving the base or
+   * holding without output. May be negative — that means the intervention
+   * window has already closed.
+   */
+  enemyDamageDeadline: number
+  /** Window from the first damaging shot until the base pool is exhausted. */
   enemyDamageWindow: number
-  /** enemyToShootEta + enemyDamageWindow — hard deadline for the player. */
-  damageDeadline: number
   /** Composite 0..1+ urgency (base HP, ring integrity, shots required). */
   enemyUrgency: number
 }
@@ -105,7 +137,7 @@ export function ticksUntilFire(world: World, t: Tank): number {
 }
 
 /** Ticks one legal turn consumes (the cooldown window itself). */
-function turnCostTicks(world: World): number {
+export function turnCostTicks(world: World): number {
   return msToTicks(world.rules?.turnCooldownMs ?? 0) + 1
 }
 
@@ -114,10 +146,20 @@ const ticksPerCell = (t: Tank): number => (t.speed > 0 ? CELL / t.speed : 1e9)
 
 /**
  * Plan §5.1 — actionEta for reaching (targetCol, targetRow) and firing at
- * aimDir: nextLegalTurnEta + movementEta + aimAlignmentEta + fireCooldownEta
- * + requiredShotsEta. Movement uses a conservative geometric Manhattan path
- * (no A*): axis distance plus one legal-turn cost for the required
- * perpendicular change. `shots` is the total shots needed (≥1).
+ * aimDir. Open-test protocol §4.1: the five cost fields are MUTUALLY
+ * EXCLUSIVE — `total` is their plain sum, and no cost appears in two fields:
+ *
+ *   total = movement + legalTurnWait + aimAlignment + fireCooldown
+ *           + shotCadenceAndFlight
+ *
+ * - `nextLegalTurnEta` (the wait) is billed ONCE, in `total` — it is NOT
+ *   repeated inside `aimAlignmentEta`.
+ * - The aim-alignment turn and the path's perpendicular axis-change are the
+ *   same physical turn: ONE turn window (`aimAlignmentEta`) covers both.
+ *   When the tank already faces `aimDir` and the path is single-axis, no
+ *   turn cost is charged at all.
+ * - Movement is a conservative geometric Manhattan path (no A*).
+ * - `shots` is the total shots needed (≥1).
  */
 export function playerActionEta(
   world: World,
@@ -131,20 +173,19 @@ export function playerActionEta(
   const pc = { col: Math.floor((p.x + p.w / 2) / CELL), row: Math.floor((p.y + p.h / 2) / CELL) }
   const cellsX = Math.abs(pc.col - targetCol)
   const cellsY = Math.abs(pc.row - targetRow)
-  const needsTurn = p.dir !== aimDir
-  const nextLegalTurnEta = needsTurn ? ticksUntilLegalTurn(world, p) : 0
-  // A perpendicular path change costs one full turn (cooldown window) on top
-  // of the axis distance; moving along a single axis costs nothing extra.
-  const pathTurns = cellsX > 0 && cellsY > 0 ? 1 : 0
-  const turnTicks = needsTurn || pathTurns > 0 ? turnCostTicks(world) : 0
+  const needsAimTurn = p.dir !== aimDir
+  const needsPathTurn = cellsX > 0 && cellsY > 0
+  const needsAnyTurn = needsAimTurn || needsPathTurn
+  const nextLegalTurnEta = needsAnyTurn ? ticksUntilLegalTurn(world, p) : 0
+  const aimAlignmentEta = needsAnyTurn ? turnCostTicks(world) : 0
   const movementEta = (cellsX + cellsY) * tpc
-  const aimAlignmentEta = needsTurn ? nextLegalTurnEta + turnTicks : 0
   const fireCooldownEta = ticksUntilFire(world, p)
   // Shots after the first re-arm per base cadence; the final bullet must fly.
   const flightEta = manhattan(pc.col, pc.row, targetCol, targetRow) * ticksPerCellFire(p)
   const cadenceTicks = p.fireCooldown > 0 ? msToTicks(p.fireCooldown) : msToTicks(p.nextFireInterval)
   const requiredShotsEta = Math.max(0, shots - 1) * cadenceTicks + flightEta
-  const total = nextLegalTurnEta + movementEta + aimAlignmentEta + fireCooldownEta + requiredShotsEta
+  const total =
+    nextLegalTurnEta + movementEta + aimAlignmentEta + fireCooldownEta + requiredShotsEta
   return { nextLegalTurnEta, movementEta, aimAlignmentEta, fireCooldownEta, requiredShotsEta, total }
 }
 
@@ -246,26 +287,48 @@ export function canBreachRingLine(world: World, col: number, row: number): boole
   return false
 }
 
-/** Enemy cell (center-based), mirroring tankCellImpl. */
-export function tankCell(t: Tank): { col: number; row: number } {
+/**
+ * CENTER cell of a tank (protocol §4.3): floor of the tank's 32px center.
+ * For a 32px tank on 16px cells this is ALWAYS the corner cell + 1 on both
+ * axes — never compare it directly with CoveragePlanner's corner space.
+ * (The AI-side Navigator uses Math.round(x/CELL) on the top-left corner —
+ * a THIRD convention; conversions are pinned by tests, not assumed.)
+ */
+export function tankCenterCell(t: Tank): { col: number; row: number } {
   return { col: Math.floor((t.x + t.w / 2) / CELL), row: Math.floor((t.y + t.h / 2) / CELL) }
 }
 
 /**
- * Plan §5.2 — enemy deadline. Conservative, explainable bounds; no enemy RNG.
- * - Already shooting the base (csb) → shootEta 0.
- * - Already breaching the ring (cbr) → shootEta = time to clear the brick(s)
- *   on its line (geometric: bricks between enemy and base on the aligned
- *   axis, at the enemy's cadence) — the breach flips to csb when the last
- *   blocking brick falls.
- * - Otherwise → geometric walk to the nearest ring cell, then the ring
- *   breach is assumed immediate-but-conservative (the enemy walks in and
- *   shoots; ring bricks before it are charged one cadence each).
- * - Damage window: shots needed (baseHp / firepower) at the enemy cadence,
- *   each shot requiring one flight from the ring line to the base.
+ * Safety margin subtracted from the optimistic geometric ETAs before they may
+ * be used as PERMISSION to act (protocol §4.2). The geometric model charges
+ * the enemy zero turn costs and assumes a straight Manhattan walk, so one
+ * full legal-turn window (the fairness rule, read not modified) restores a
+ * measure of honesty: 200ms rules → 12 ticks, a future 500ms rule → 30.
+ */
+export function enemyEtaSafetyMargin(world: World): number {
+  return msToTicks(world.rules?.turnCooldownMs ?? 200)
+}
+
+/**
+ * Plan §5.2 — enemy deadline, with every field's bound-ness stated
+ * explicitly (protocol §4.2 — a Manhattan number is EITHER a relative-order
+ * lower bound OR a safe permission deadline, never both by relabeling):
+ *
+ * - Already shooting the base (csb) → first damage = fire readiness + flight.
+ * - Already breaching the ring (cbr) → first damage = fire readiness + one
+ *   cadence+flight per blocking brick (bricksBetween INCLUDES the ring
+ *   bricks on the line) + the final flight. The breach cost lives HERE and
+ *   only here — the damage window does NOT re-charge it.
+ * - Otherwise → optimistic straight-line walk to the ring + a 2-cycle ring
+ *   breach when the ring still stands (no charge once it is gone) + flight
+ *   (the walk leg ignores turn costs; the safety margin on
+ *   enemyDamageDeadline compensates).
+ *
+ * No enemy RNG is simulated. `enemyDamageDeadline` may be ≤ 0 — that means
+ * the safe intervention window has closed.
  */
 export function enemyDeadline(world: World, e: Tank): EnemyDeadline {
-  const ec = tankCell(e)
+  const ec = tankCenterCell(e)
   const fp = firePower(world, e.kind === 'player' ? 'basic' : e.kind)
   const cadence = e.nextFireInterval > 0 ? msToTicks(e.nextFireInterval) : 0
   const flight = e.bulletSpeed > 0 ? (CELL * 2) / e.bulletSpeed : 0 // ring line → base ≈ 2 cells
@@ -279,24 +342,27 @@ export function enemyDeadline(world: World, e: Tank): EnemyDeadline {
 
   const csb = canShootBaseLine(world, ec.col, ec.row)
   const cbr = csb ? false : canBreachRingLine(world, ec.col, ec.row)
-
-  let enemyToShootEta: number
-  if (csb) {
-    enemyToShootEta = 0
-  } else if (cbr) {
-    // Bricks between the enemy and the base line on its aligned axis.
-    const blocks = bricksBetween(world, ec.col, ec.row)
-    enemyToShootEta = blocks * (cadence + flight)
-  } else {
-    enemyToShootEta = nearestRingDist * tpc + 2 * (cadence + flight)
-  }
-
+  const fireReady = ticksUntilFire(world, e)
   const ringIntact = RING_CELLS.some((c) => {
     const t = world.tileMap.get(c.col, c.row)
     return t === 'brick' || t === 'steel'
   })
+
+  let enemyDamageEarliest: number
+  if (csb) {
+    enemyDamageEarliest = fireReady + flight
+  } else if (cbr) {
+    // Breach cost (bricks on the line, ring bricks included) charged once.
+    const blocks = bricksBetween(world, ec.col, ec.row)
+    enemyDamageEarliest = fireReady + blocks * (cadence + flight) + flight
+  } else {
+    // Ring gone → nothing left to breach: walk + flight only.
+    const breachCycles = ringIntact ? 2 : 0
+    enemyDamageEarliest = nearestRingDist * tpc + breachCycles * (cadence + flight) + flight
+  }
+
   const baseShots = Math.max(1, Math.ceil(world.baseHp / Math.max(1, fp)))
-  const enemyDamageWindow = baseShots * (cadence + flight) + (ringIntact && !csb ? 2 * (cadence + flight) : 0)
+  const enemyDamageWindow = baseShots * (cadence + flight)
 
   const enemyUrgency =
     (1 - world.baseHp / Math.max(1, world.baseMaxHp)) * 0.5 +
@@ -304,10 +370,10 @@ export function enemyDeadline(world: World, e: Tank): EnemyDeadline {
     Math.min(1, baseShots / 4) * 0.3
 
   return {
-    enemyToRingEta: nearestRingDist * tpc,
-    enemyToShootEta,
+    enemyArrivalLowerBound: nearestRingDist * tpc,
+    enemyDamageEarliest,
+    enemyDamageDeadline: enemyDamageEarliest - enemyEtaSafetyMargin(world),
     enemyDamageWindow,
-    damageDeadline: enemyToShootEta + enemyDamageWindow,
     enemyUrgency,
   }
 }
@@ -333,20 +399,27 @@ function bricksBetween(world: World, col: number, row: number): number {
 
 /**
  * Plan §5.3 — player kill/intercept slack for one enemy.
+ *
+ * killSlack is measured against `enemyDamageDeadline` (the SAFE deadline =
+ * earliest damage minus safety margin), so a positive killSlack is a
+ * permission with margin already baked in. interceptSlack compares the
+ * player's arrival against the enemy's ARRIVAL LOWER BOUND minus the same
+ * margin — the geometric bound alone never justifies leaving a lane.
  */
 export function killAssessment(world: World, p: Tank, e: Tank): KillAssessment {
-  const ec = tankCell(e)
-  const pc = tankCell(p)
+  const ec = tankCenterCell(e)
+  const pc = tankCenterCell(p)
   const aimDir = aimDirTo(ec.col, ec.row, pc.col, pc.row) ?? p.dir
   const shots = playerShotsToKill(world, e)
   const eta = playerActionEta(world, p, ec.col, ec.row, aimDir, shots)
   const dl = enemyDeadline(world, e)
+  const margin = enemyEtaSafetyMargin(world)
 
-  // Second threat: any OTHER enemy with a shoot deadline before our kill lands.
+  // Second threat: any OTHER enemy with a safe deadline before our kill lands.
   let missesSecondThreat = false
   for (const t of world.tanks) {
     if (t.id === e.id || !t.alive || t.spawnTimer > 0) continue
-    if (enemyDeadline(world, t).damageDeadline < eta.total) {
+    if (enemyDeadline(world, t).enemyDamageDeadline < eta.total) {
       missesSecondThreat = true
       break
     }
@@ -356,8 +429,8 @@ export function killAssessment(world: World, p: Tank, e: Tank): KillAssessment {
     playerArrivalAndAimEta: eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta,
     firstFireEta: eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta + eta.fireCooldownEta,
     playerKillEta: eta.total,
-    killSlack: dl.damageDeadline - eta.total,
-    interceptSlack: dl.enemyToRingEta - (eta.movementEta + eta.aimAlignmentEta),
+    killSlack: dl.enemyDamageDeadline - eta.total,
+    interceptSlack: dl.enemyArrivalLowerBound - margin - (eta.movementEta + eta.aimAlignmentEta),
     missesSecondThreat,
   }
 }
@@ -370,8 +443,9 @@ export function killAssessment(world: World, p: Tank, e: Tank): KillAssessment {
  * expectedBaseDamagePrevented: the base damage e will deal between now and
  * the moment the player's killing shot lands, if e is left alone — fp × the
  * number of shots e lands inside that horizon (shots before its first
- * productive shot don't count; enemyToShootEta is subtracted), capped at
- * baseHp. horizon = arrival + aim + fire cooldown + re-arms + final flight.
+ * damaging shot could land don't count; enemyDamageEarliest is subtracted),
+ * capped at baseHp. horizon = eta.total (arrival + aim + fire cooldown +
+ * re-arms + final flight, each cost exactly once).
  *
  * The value therefore rises as e approaches a shoot position (smaller
  * enemyToShootEta), rises when the player is slow (more interim damage
@@ -387,14 +461,14 @@ export function targetValue(world: World, p: Tank, e: Tank): number {
   const cadence = e.nextFireInterval > 0 ? msToTicks(e.nextFireInterval) : 0
   const flight = e.bulletSpeed > 0 ? (CELL * 2) / e.bulletSpeed : 0
   const cycle = Math.max(1, cadence + flight)
-  const ec = tankCell(e)
-  const pc = tankCell(p)
+  const ec = tankCenterCell(e)
+  const pc = tankCenterCell(p)
   const aimDir = aimDirTo(ec.col, ec.row, pc.col, pc.row) ?? p.dir
   const shots = playerShotsToKill(world, e)
   const eta = playerActionEta(world, p, ec.col, ec.row, aimDir, shots)
-  const reach = eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta
-  const horizon = Math.max(1, reach + eta.total)
-  const interimShots = Math.max(0, Math.floor((horizon - dl.enemyToShootEta) / cycle))
+  // §4.1: eta.total already contains the reach leg — do NOT add it twice.
+  const horizon = Math.max(1, eta.total)
+  const interimShots = Math.max(0, Math.floor((horizon - dl.enemyDamageEarliest) / cycle))
   const damagePrevented = Math.min(world.baseHp, fp * interimShots)
   return damagePrevented / horizon
 }
@@ -424,12 +498,12 @@ export function standingKillAssessment(
   p: Tank,
   e: Tank,
 ): { killEta: number; killSlack: number; deadline: number } {
-  const ec = tankCell(e)
-  const pc = tankCell(p)
+  const ec = tankCenterCell(e)
+  const pc = tankCenterCell(p)
   const flight = manhattan(pc.col, pc.row, ec.col, ec.row) * ticksPerCellFire(p)
   const shots = playerShotsToKill(world, e)
   const cadence = p.fireCooldown > 0 ? msToTicks(p.fireCooldown) : msToTicks(p.nextFireInterval)
   const killEta = ticksUntilFire(world, p) + Math.max(0, shots - 1) * cadence + flight
-  const deadline = enemyDeadline(world, e).damageDeadline
+  const deadline = enemyDeadline(world, e).enemyDamageDeadline
   return { killEta, killSlack: deadline - killEta, deadline }
 }
