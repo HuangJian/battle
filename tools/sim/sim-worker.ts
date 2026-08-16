@@ -59,6 +59,8 @@ export interface SimTask {
   /** Record the run and return the full SimResult (incl. replay) in the task
    *  result, so the caller can persist failure replays. Default off. */
   recordReplay?: boolean
+  /** M4 star census observer (spawn/pickup/min-dist per star). Read-only. */
+  powerupCensus?: boolean
 }
 
 export interface SimTaskResult {
@@ -80,6 +82,8 @@ export interface SimTaskResult {
   forensics?: RunForensics
   /** Event-driven threat ledger (only when the task requested threatLedger). */
   ledger?: ThreatLedgerRun
+  /** M4 star census (only when the task requested powerupCensus). */
+  powerupCensus?: SimResult['powerupCensus']
   /** Failure cause ('base_destroyed' | 'lives_exhausted' | 'timeout'). */
   failureCause?: string
   /** Kind of the tank whose bullet destroyed the base (self-inflicted = 'player'). */
@@ -107,6 +111,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       commitCounts: task.commitCounts === true,
       forensics: task.forensics === true,
       threatLedger: task.threatLedger === true,
+      powerupCensus: task.powerupCensus === true,
       coop: task.coop === true,
       spectateDual: task.spectateDual === true,
       record: task.recordReplay === true,
@@ -140,6 +145,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       msg.failureKillerKind = result.failure?.killerKind
     }
     if (task.threatLedger === true) msg.ledger = result.ledger
+    if (task.powerupCensus === true) msg.powerupCensus = result.powerupCensus
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }
   }

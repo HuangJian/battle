@@ -1912,3 +1912,42 @@ A/B v3（§210 floor）net −31，其中 W→L 翻转 120 个、L→W 89 个。
 ### 状态
 
 §211 收口：csb/cbr 修复回滚，代码回到 §210 状态；15 覆盖测试全绿，check 0 fail（1328 tests）。DECISIONS.md §211 已记录。
+
+---
+
+## §212 M4 安全吃星 — 诊断先行收口（2026-08-16）
+
+### 背景
+
+breakthrough plan §8 (Phase 4) / §10 (M4)：低星级是 hard 长期战力瓶颈假设；纪律 = 先诊断，不直接提高 pickup 权重。M2/M3 已证伪，M4 前置于诊断。
+
+### 诊断方法（tools/diag/m4-diagnose.ts，SIM_POOL_WORKERS=16 并行 ~75s+53s）
+
+1. 全量 hard 35×60 = 2100 局（DEFAULT 参数，forensics on）：逐局 outcome / finalLevel / starsCollected / kills / deaths。
+2. 失败局（518）子集重跑，加新增 `powerupCensus` 观察器：逐 star 记录 spawnTick / picked / minDist(px 曼哈顿) / despawnTick。
+
+### 数据
+
+| 维度 | 胜局 (1582) | 败局 (518) |
+|---|---|---|
+| avgFinalLevel | 1.43 | 1.19 |
+| avgStarsPicked | 0.61 | 0.31 |
+| avgKills | 17.94 | 9.95 |
+| avgDeaths | 0.84 | 1.00 |
+
+- 星级分布（胜局）：1★ 1033 · 2★ 440 · 3★ 93 · 4★ 14 · 5★ 2；（败局）：1★ 431 · 2★ 74 · 3★ 12。
+- 弱关通关局星级：S34 avgLevel 1.53（全场第 4 高）、S8 1.48、S20 1.42——弱关失败与星级无关。
+- 失败局 star 供给：355/518（69%）无 star 掉落；掉落 194 个，已捡 127（65%）。
+- 遗漏分布（67 未捡 star，minDist 格数）：<2 格 0 · 2-4 格 4 · 4-6 格 23 · 6-8 格 15 · >8 格 25。早段（<50% 局长）且 6 格内仅 6 例（S13-34 / S16-19 / S16-27 / S20-34 / S24-16 / S29-50）。
+- 错过的 star 大多在 75-100% 局长段掉落（27/67）——此时败局已定（基地将失守/玩家将死），捡星无济于事。
+
+### 结论
+
+1. 因果链是「输 → 击杀少 → 掉落机会少 → 星少」，不是「星少 → 输」。弱关通关局星级不低直接反证。
+2. 「该捡没捡」的 safe-opportunity 干预样本 ≈ 4-6 例/2100 局——不足以支撑 pickup 权重/范围调整的 A/B 显著性。提高权重只会重演 §87 跨地图绕路问题，无对应收益。
+3. M4 以诊断收口，不进入参数扫描；Phase 4 判定：吃星不是 hard 突破主杠杆（与 §207 的 S34 结论一致：需要的是清怪节奏，不是道具策略）。
+4. 新增 `powerupCensus`（simulation-runner.ts + sim-worker.ts，flag-gated 默认关，纯观察零反馈）——道具类机制诊断的标准组件。
+
+### 状态
+
+§212 收口：check 全绿（1328 tests）。DECISIONS.md §212 已记录。m4-diagnose.ts + powerupCensus 保留为诊断工具。

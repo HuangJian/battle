@@ -161,6 +161,19 @@ export interface SimResult {
   forensics?: RunForensics
   /** Event-driven threat ledger (only when `threatLedger: true`). */
   ledger?: ThreatLedgerRun
+  /** M4 star census (only when `powerupCensus: true`). */
+  powerupCensus?: {
+    spawned: number
+    picked: number
+    /** Per-star lifecycle: spawn tick, min player dist (px), despawn tick
+     *  (-1 = still alive at run end), picked. */
+    stars: Array<{
+      spawnTick: number
+      picked: boolean
+      minDist: number
+      despawnTick: number
+    }>
+  }
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../../src/snapshot/types').WorldSnapshot
@@ -432,6 +445,15 @@ export interface RunOptions {
    * per-sample enemy scan allocates, so never enable inside the optimizer.
    */
   threatLedger?: boolean
+  /**
+   * Collect a star power-up census (M4 safe-powerup diagnosis): for each
+   * 'star' power-up that spawns during the run, record spawn tick, whether
+   * the player picked it up, the player's minimum distance (px) to it while
+   * it was alive, and its despawn tick. Read-only observation — outcome
+   * byte-identical whether on or off. Default false; per-tick distance scan
+   * allocates, so never enable inside the optimizer.
+   */
+  powerupCensus?: boolean
 }
 
 // ============================================================
@@ -624,6 +646,14 @@ export function runSimulation(opts: RunOptions): SimResult {
   const wantLedger = opts.threatLedger === true
   const ledgerSamples: ThreatLedgerSample[] = []
   let ledgerPrevSig = ''
+  // ---- M4 star census (only touched when opts.powerupCensus) ----
+  const wantCensus = opts.powerupCensus === true
+  const censusStars = new Map<
+    number,
+    { spawnTick: number; picked: boolean; minDist: number; despawnTick: number }
+  >()
+  let censusStarSpawned = 0
+  let censusStarPicked = 0
 
   const t0 = performance.now()
 
@@ -698,6 +728,45 @@ export function runSimulation(opts: RunOptions): SimResult {
     // Collect events.
     let collectedThisTick = 0
     const events = world.consumeEvents()
+    // M4 star census: track every star power-up's lifecycle. Read-only —
+    // observes world.powerUps (post-simulation state), no RNG, no feedback.
+    if (wantCensus) {
+      const pus = world.powerUps
+      const seen = new Set<number>()
+      for (let pi = 0; pi < pus.length; pi++) {
+        const pu = pus[pi]
+        if (!pu.alive || pu.type !== 'star') continue
+        seen.add(pu.id)
+        let rec = censusStars.get(pu.id)
+        if (!rec) {
+          rec = { spawnTick: tick, picked: false, minDist: Infinity, despawnTick: -1 }
+          censusStars.set(pu.id, rec)
+          censusStarSpawned++
+        }
+        const p = world.player
+        if (p && p.alive) {
+          const d = Math.abs(p.x - pu.x) + Math.abs(p.y - pu.y)
+          if (d < rec.minDist) rec.minDist = d
+        }
+      }
+      for (const [id, rec] of censusStars) {
+        if (rec.despawnTick === -1 && !seen.has(id)) {
+          rec.despawnTick = tick
+          if (!rec.picked) {
+            // The star left the field this tick: did the player collect it
+            // (powerup_collected event) or did it time out? Same-tick multi-
+            // star edge cases are acceptable for a diagnostic census.
+            for (const e of events) {
+              if (e.type === 'powerup_collected' && e.powerUp === 'star') {
+                rec.picked = true
+                censusStarPicked++
+                break
+              }
+            }
+          }
+        }
+      }
+    }
     for (const e of events) {
       allEvents.push(e)
       // Track first kill for failure taxonomy.
@@ -980,6 +1049,19 @@ export function runSimulation(opts: RunOptions): SimResult {
       tick,
       baseMaxHp: world.baseMaxHp,
       samples: ledgerSamples,
+    }
+  }
+
+  if (wantCensus) {
+    result.powerupCensus = {
+      spawned: censusStarSpawned,
+      picked: censusStarPicked,
+      stars: [...censusStars.values()].map((r) => ({
+        spawnTick: r.spawnTick,
+        picked: r.picked,
+        minDist: r.minDist === Infinity ? -1 : r.minDist,
+        despawnTick: r.despawnTick,
+      })),
     }
   }
 

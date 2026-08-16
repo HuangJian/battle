@@ -881,3 +881,17 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** coverageMode=0 维持默认。机制保留为实验（S34 场景有局部正信号）；任何未来启用尝试必须 A/B hard 35×60 全绿。§211 取证方法（per-seed-diff dump + decision-probe 分支对比 + 敌人 roster 签名）沉淀为负翻转诊断的标准流程。
 > 全文 → docs/god-ai-tuning.progress.md §211
+
+## 212. M4 安全吃星 — 诊断先行，收益空间不足（不提高 pickup 权重）
+
+**Decision:** 按 plan/God-AI-Hard-Breakthrough-Implementation.md §8 纪律（"先做诊断，不要直接提高 pickup 权重"），对 M4 安全吃星执行全量诊断（hard 35×60 + 518 失败局 star census）。结论：**星级与胜负的相关是"输 → 击杀少 → 星少"的结果链，不是"星少 → 输"的因果；失败局中不存在可观的 safe-opportunity 遗漏空间**。不提高 pickup 权重、不扩 starRush 范围；机制维持现状（pickupPriority 族 SHIPPED 默认、starRushMode=0）。
+
+**Rationale:**
+- **星级与胜负**：胜局 avgFinalLevel=1.43 / avgStarsPicked=0.61 vs 败局 1.19 / 0.31。但弱关反证：S34（28% 最弱）通关局 avgLevel=1.53（全场第 4 高）、S8 avgLevel=1.48——**弱关失败不是缺星**。
+- **失败局 star 供给**：518 失败局中 **355 局（69%）整局无 star 掉落**（击杀少 → 掉落机会少：败局 avgKills 9.95 vs 胜局 17.94）；掉落的 194 个 star 中玩家已捡 127（65%）。
+- **遗漏分析**：67 个未捡 star 中，玩家曾进入 4 格内未捡仅 4 例、6 格内未捡 27 例且其中仅 6 例发生在早段（<50% 局长）；其余 star 掉在玩家活动区外（minDist>6 格 40 例）。"该捡没捡"的干预样本量不足以支撑 A/B 显著性。
+- **M4 前置条件**：breakthrough plan §10 写明 "M4 只有 M2/M3 通过后才执行"；M2/M3 均证伪（§205/§206/§207-§211）——本诊断进一步显示 M4 直接干预同样没有杠杆。
+- 新增 `powerupCensus`（simulation-runner + sim-worker，flag-gated 纯观察）：逐 star 记录 spawnTick/picked/minDist/despawnTick，行为字节等价（默认关，check 全绿）。
+
+**Implications:** M4 以诊断收口（§212），不进入参数扫描。Phase 4 结论：吃星不是 hard 突破的主杠杆；瓶颈仍在击杀节奏（§207 S34 结论一致）与基地防守（§198 已 SHIPPED）。诊断工具 `tools/diag/m4-diagnose.ts` + `powerupCensus` 沉淀为道具类机制的标准诊断流程（掉落供给 → 拾取率 → 遗漏分布 → 时间竞争）。
+> 全文 → docs/god-ai-tuning.progress.md §212
