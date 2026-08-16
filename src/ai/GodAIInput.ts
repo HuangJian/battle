@@ -15,6 +15,7 @@ import {
   bulletPathSteelBlockedImpl,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
+import type { ActionIntent } from './god/StrategyPlanner'
 import { thinkImpl, CANDIDATES } from './god/think'
 import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
 import {
@@ -323,6 +324,29 @@ export class GodAIInput implements InputLike {
    */
   _huntCommitId = -1
   _huntCommitUntil = 0
+
+  /**
+   * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
+   * locked for a lease with expiry/progress/threat revalidation, or null.
+   * Written/read only when params.intentMode > 0; reset() clears. Default
+   * param 0 ⇒ never touched ⇒ byte-identical.
+   */
+  _intent: ActionIntent | null = null
+
+  /**
+   * Phase 3: dynamic attack coverage point (plan §7) — the held cell, its
+   * lease expiry, the committed threat id set (fixed 4 slots, ≤4 alive) and
+   * the tightest deadline at commit, plus the low-frequency recompute stamp.
+   * Read/written only when params.coverageMode > 0; reset() clears. Default
+   * param 0 ⇒ never touched ⇒ byte-identical.
+   */
+  _coverageCell: { col: number; row: number } | null = null
+  _coverageUntil = 0
+  _coverageMinDeadline = 0
+  _coverageThreatIds = new Int32Array(4)
+  _coverageThreatCount = 0
+  _coveragePlanFrame = -1
+  _coverageIdSignature = 0
 
   /**
    * §171: path-cost memo for pathTargetMode (normal-hunt target scoring).
@@ -847,6 +871,14 @@ export class GodAIInput implements InputLike {
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
+    this._intent = null // Phase 2 §6.3
+    this._coverageCell = null // Phase 3
+    this._coverageUntil = 0
+    this._coverageMinDeadline = 0
+    this._coverageThreatIds.fill(0)
+    this._coverageThreatCount = 0
+    this._coveragePlanFrame = -1
+    this._coverageIdSignature = 0
     this._pathCostEId.fill(-1) // §171
     this._pathCostNext = 0 // §171
     this.aggressive = false

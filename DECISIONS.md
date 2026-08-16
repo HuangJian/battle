@@ -731,3 +731,153 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** 「慢/拖沓」是 Phase III 维度信号的误读 — 该维度在 cooldown 难度上结构性偏低，不应作为行为调优目标。God-AI 清关效率（tempo 0.558）的真实杠杆 = 接敌路径效率（§170/§171 已穷尽）与击杀精准（accuracy 0.838 已高）。**建议**：如追求维度公平，应重新校准 hard 的 eval-refs（现用 classic refs 评分）而非调 AI — 属评估层修复，另议。
 > 全文 → docs/god-ai-tuning.progress.md §201
+
+## 202. M0 威胁台账取证上线（threat-ledger + failure-classifier）— 硬关 2100 局基线（2026-08-15）
+
+**Decision:** 上线 plan/God-AI-Hard-Breakthrough-Implementation.md 的 M0 取证工具链，零行为变更：
+- `simulation-runner` 威胁台账（`threatLedger` 开关，只读采样，签名变更触发，pre-endFrame）— 记录 baseHp/环/分支/玩家格/威胁 ETA/slack/无产出原因/每敌 csb/cbr。
+- `failure-classifier`（7 族：late_detection / no_output_commit / multi_threat_overload / turn_locked / travel_late / wrong_target / player_survival + unknown）。
+- `threat-ledger` CLI（35 关 × 60 seeds × hard，2100 局，JSON 语料 + 逐 tick 报告 + 族分布 + 最差关）。
+- `tests/threat-ledger.test.ts`：ledger 开/关字节一致（parity）+ 每族合成台账分类单测。
+
+**Rationale:**
+- 基线复现 plan §1.1 完全吻合：清关 1582/2100（75.3%）；失败 448 base_destroyed / 69 lives_exhausted / 1 timeout vs plan 447/70/1 — ±1 局差异源于 maxTicks 口径（本工具 36000 vs 旧基线 18000），非行为回归。
+- 失败族分布：**no_output_commit 311（60.0%）** > multi_threat_overload 99（19.1%）> player_survival 69（13.3%）> travel_late 24（4.6%）> turn_locked 14（2.7%）> unknown 1（0.2%）。base 失败中 no_output 69.4% + multi_threat 22.1%。
+- M0 门达成：每族有可复现证据 — 逐 tick 抽查 10 局（含 S34:1、S1:5/13/26/50/58、S8:2、S7:54）分类与台账流完全一致（如 travel_late 铁证：玩家 (8,8) 打猎中，ETA 458 > 威胁 ETA 40，base 行被啃 120→0）。
+- 顺带修复：台账 ring 口径 bug — 最初按 4×4 边框 12 格数环，与游戏真环（SimulationCombat.isBaseProtectionCell 8 格）不符，已镜像修齐；JSON 语料压缩（466MB → 85MB，弃每敌 ETA + 紧凑键）。
+- parity 测试证明台账零副作用（同 seed 同局字节一致，5 组 stage×seed 验证）。
+
+**Implications:** M0 门通过 → M1 `ThreatBudget`（纯模型，默认 OFF）可开工。头号失败族 no_output_commit（站桩无输出）与 travel_late 共享同一信号：**slack 常态为负**（威胁 ETA < 玩家拦截 ETA）— 玩家移动速度 < 敌人推进速度是设计常数，M1 的威胁预算必须显式处理「赶不上」而不是仅靠 slack 符号。multi_threat_overload（≥2 同时 csb）是第二族 — M2 动作契约的优先级仲裁目标。
+> 全文 → docs/god-ai-tuning.progress.md §202
+
+## 203. M1 ThreatBudget 纯模型上线（Phase 1 §5，默认未接线）（2026-08-15）
+
+**Decision:** 新增 `src/ai/god/ThreatBudget.ts` — 只读、确定性、零 RNG 的威胁预算层（plan Phase 1 §5.1-5.3 全部落地），**未接线到任何决策路径**（Phase 2 才接线）。`GodAIInput.ts`/`think.ts` 零改动。
+
+**Rationale:**
+- actionEta = nextLegalTurnEta + movementEta + aimAlignmentEta + fireCooldownEta + requiredShotsEta（§5.1）；`turnCooldownMs` 从 `world.rules` 读取、永不被 AI 改写 — 200/500ms 都只改变 ETA 不改变公平规则（测试锁死单调性）。
+- 敌人期限（§5.2）：enemyToRingEta / enemyToShootEta（csb→0；cbr→按同轴砖块数×节奏+飞行；否则走到环+固定开销）/ enemyDamageWindow（baseHp ÷ 敌 firepower 的射击次数×节奏）/ enemyUrgency（baseHp + 环完整度 + 射击次数三加权）。
+- 玩家期限（§5.3）：killSlack = damageDeadline − playerKillEta；interceptSlack = enemyToRingEta − 到达且瞄准 ETA；missesSecondThreat（其他敌期限早于击杀落地）。
+- 镜像纪律：环格集 + 清线谓词是 SimulationCombat.isBaseProtectionCell / SmartThreatModel 几何的逐字镜像，35 关 parity 测试锁死与 AI 谓词一致（§6.2 接线时不会出现「模型说安全、AI 说不安全」的分裂）。
+- 数据源全部来自 config（firepower/damage/maxHp 走 resolveProfile、节奏走 tank 冻结的 nextFireInterval/base fireCooldown）— 不硬编码数值。
+- 测试（§5.4 最小集全过）：turnCd 200 vs 500 单调、需要转向/更多射击/更远目标 → ETA 不减、baseHp 更低/环砖更少 → urgency 不降 deadline 不长、同 World 同调用字节一致、不消费 world.rng、World 只读。
+
+**Implications:** M0 证据（§202）与 M1 模型闭环：no_output_commit/travel_late 共享的「slack 常态为负」现在有了可解释的逐分量计算（killSlack / interceptSlack / missesSecondThreat），Phase 2 ActionContract 可用「slack 为正且有产出」作为防守/进攻分支的闸门。下一阶段：Phase 2 接线（§6.1 防守分支 slack 门控，默认 OFF + A/B）。
+> 全文 → docs/god-ai-tuning.progress.md §203
+
+## 204. M2 ActionContract 防守站桩门控（Phase 2 §6.1，默认 OFF + A/B）（2026-08-15）
+
+**Decision:** 新增 `src/ai/god/ActionContract.ts` — 对防守分支（defenseIntercept 直射/dig、baseLaneSentry dig）的「站桩 + 冷却中」提交做统一行动有效性门控，`actionContractMode` 参数默认 0（OFF，字节一致），1 时启用。站桩仅当下列之一成立才保留：敌人子弹在射击射线（拦截在即）/ 己方子弹在威胁线上（击杀已落地中）/ 站桩击杀 killSlack > 0（射击比威胁期限快）。
+
+**Rationale:**
+- plan §6.1 原样执行：不得因「检测到敌人」就提交 `moveDir=null, fire=false` 的静止分支；同时遵守 §199 教训 — 不能盲目 fall-through（所以只挡站桩+冷却，不挡正开火/正移动）。
+- 选中位点（think.ts）：defenseIntercept 直射 commit、defenseIntercept dig commit（`continue`）、baseLaneSentry dig commit（`return false`）。midLaneDefense 站桩有 laneThreatImpl||sticky 壳门（按定义有效）不碰；baseLaneSentry 对齐+清线 commit 已有 `if (onCooldown) return false` 天然无站桩。
+- 门控只消耗只读 World + ThreatBudget 模型，`mode>0` 拒绝路径跳过 aimError 的 `rng.next()` — 与默认 OFF 的字节一致性兼容（mode 0 短路径零改动）。
+- 模型事实（数据源）：基础子弹伤害 = resolveProfile(kind,0).firepower（basic 50/fast 36/power 64/armor 43，baseHp 120 → 2-4 发）；杀敌池伤害 = round(firepower×1.05×2)，敌 maxHp = round(armor×5)；节奏 = 冻结 nextFireInterval / base fireCooldown。
+
+**A/B 证据（hard 35×60，stageIndex=0 官方口径，`bun tools/diag/ab-param.ts --param actionContractMode=1`）：**
+- baseW 1582 → candW 1590，**L→W 34 / W→L 26，净 +8**（±~10 局噪声内，方向正确但未达决定性）。
+- 机制命中目标族：34 个翻胜中 **26 个是 no_output_commit（占该族 311 局的 8.4%）** + multi_threat 4 + turn_locked 2 + player_survival 1。
+- 剩余失败 484/518 局失败 tick 变化 ±200 以内（中性）；no_output 族尾部 11 局 +600（拖后失败）vs 9 局 -600 — 无系统性加速/延迟。
+- 最差关 S34（17/60）零翻转 — 其站桩机制不在「站桩+冷却」形态（多为移动中/非冷却态），留给 Phase 3 覆盖点。
+- 翻负 26 局无单关集中（最差 S24/S25 各 -2）。
+
+**Implications:** 机制验证通过、信号为正但不足以改变默认 — 按 plan §9/§10 纪律保持 `actionContractMode=0` 默认 OFF，最终 ship 决定留给 Phase 5 全参数 CMA-ES。§6.1 的「冷却期也 fall-through」风险被 §199 教训约束，本版本刻意窄（只 3 个位点）。下一阶段：Phase 2 §6.2 进攻分支 targetValue 排序键（engage/hunt 目标价值随期限/距离/射击成本动态化），同样默认 OFF + A/B。
+> 全文 → docs/god-ai-tuning.progress.md §204
+
+## 205. §6.2 targetValue 排序键 — A/B 证伪，保持默认 OFF
+
+**Decision:** `targetValueMode=1`（engage/hunt 目标选择改用 targetValue = 预期基础伤害预防 / 行动时限）在 hard 35×60 A/B 中 **净 −125（baseW 1582 → candW 1457，−6.0pp）**，被证伪。按 plan §9/§10 纪律保持 `targetValueMode=0` 默认 OFF；代码与测试保留（模式 0 字节等价，测试固化语义），记录失败机制供后续阶段参考。
+
+**Rationale:**
+- A/B 数据（`tmp/ab-target-value.json`，与 `tmp/threat-baseline-2100.json` 同口径）：
+  - L→W 301（恢复的 base 失败：no_output_commit 179 / multi_threat_overload 59 / player_survival 43 / travel_late 12 / turn_locked 5）vs W→L 426（新增失败）→ 净 −125。全 35 关中 31 关负翻转（最差 S18 −14 / S33 −13 / S19 −11 / S24 −11 / S16 −10），S34 崩塌 17/60 → 4/60。
+  - 35% 的局（727/2100）行为翻转 — 该键在真实关卡上远非惰性，时刻重排目标。
+- 失败机制（结构分析）：
+  1. **伤害上限反直觉**：damagePrevented = min(baseHp, fp×interim)，对 horizon−e2s ≥ 3 周期的敌人恒等于 120 → 价值 ≈ 120/horizon，几乎等价于「按杀敌耗时取最近」；而 interim 1-2 的将死敌人只得 50-100/horizon → **被降权**，玩家不补刀（clear 局平均 ticks 全线上升：S12 6543→7875、S22 6569→7634…）。
+  2. **e2s > horizon 的敌人 v=0 被剔除** → 玩家被吸引向 cbr 带（ring 砖可及列），反复横跳而非打完整局（S34 崩塌即此）。
+  3. horizon 分子分母共用 1/(reach+eta.total) 无归一化，跨分支（canHunt/normal）语义不一。
+
+**Implications:** §6.2 的字面公式作为主排序键被实证否决；「将死目标降权」教训对 Phase 2 §6.3 ActionIntent（意图提交稳定性 + 威胁事件重验）有直接约束 — 补刀/收割应是价值函数的保底项而非惩罚项。下一阶段：Phase 2 §6.3 ActionIntent（默认 OFF + A/B）。
+> 全文 → docs/god-ai-tuning.progress.md §205
+
+## 206. §6.3 短期 intent（lease+重验）— A/B 中性偏负，保持默认 OFF
+
+**Decision:** `intentMode=1`（hunt/engage 目标以 ActionIntent 锁定：intentLeaseTicks=12 租约 + 到期/死亡/停滞/期限收紧/新威胁/逃逸 6 重释放 + 10-tick 重验）在 hard 35×60 A/B 中 **净 −14（baseW 1582 → candW 1568，−0.7pp），噪声内**；S34 17→12（−5）偏负。按 plan §9/§10 纪律保持 `intentMode=0` 默认 OFF。
+
+**Rationale:**
+- A/B（`tmp/ab-intent.json`，同 §205 口径）：L→W 206 / W→L 220；20% 局（426/2100）翻转 — 释放→重选→重承诺循环在真实对局中大量发生，租约锁只在小窗口内生效。
+- 机制诚实评价：§6.3 的 6 重释放条件全部落地且测试固化（8 测试：字节等价/租约内持住/过期重选/目标死亡/新威胁释放/逃逸释放/确定性）；但「释放后落回最近目标并重新承诺」使大多数释放行为学上不可观测（重选=同一目标），仅当场况变化时产生差异 — 这正是 §205 教训的镜像：分支级机制不构成 hard 突破的杠杆。
+- 与 §170 huntCommitTicks 的关系：intentMode>0 时自动取代 plain commit（默认均 0，互不干扰）；intent 的差异点（期限/进展/威胁约束）已实现。
+- 组合实验（intent+targetValue）留给 Phase 5 CMA-ES，不单轮探索。
+
+**Implications:** Phase 2（§6.1 行动契约 +8 / §6.2 目标价值 −125 / §6.3 intent −14）三机制全部保持 OFF — 分支级微调不是 hard 突破的主杠杆。下一阶段：Phase 3 动态攻击覆盖点（§7：S34/S8 类「回基地驻守反而失去全场压制」，coverageValue 评分 + 6-15 tick lease + 多威胁护栏）。
+> 全文 → docs/god-ai-tuning.progress.md §206
+
+## 207. Phase 3 §7 动态攻击覆盖点 — A/B 证伪（S34 崩塌），保持默认 OFF
+
+**Decision:** `coverageMode=1`（无基地威胁但有重大威胁时，coverageValue 评分几何候选点——喉道/列道/射击交点，12-tick lease + 低频重规划 + 3 重护栏）在 hard 35×60 A/B 中 **净 −35（baseW 1582 → candW 1547，−1.7pp），且目标关 S34 崩塌 17/60 → 7/60（−10pp）**。按 plan §7.4/§9 M3 决策门（S34/S8/S24/S20 至少两关改善且无新 ≥5pp 回退）**判定失败，保持 `coverageMode=0` 默认 OFF**；实现与 9 测试保留。
+
+**Rationale:**
+- A/B（`tmp/ab-coverage.json`，同口径）：L→W 154 / W→L 189，15.2% 局翻转。S34 −10（17→7）、S12 −5、S30 −5、S08 −4、S25 −4、S14 −5；仅 S15 +7 / S21 +5 / S04 +3 / S11 +3 / S27 +3 小正 — 无一关达到决策门。
+- 失败机制（结构分析）：
+  1. **ring 未破时防守是纯浪费时间**：cbr 威胁（deadline ≈ 360 < 450 视界）尚需 1-2 发破砖才摸得到基地 — coverage 分支把玩家钉在喉道点，等于放弃清怪节奏（W→L 的 clear 局变慢 + 后期波次叠加即 S34 崩塌的机制）。
+  2. **护栏几何条件在真实关卡几乎不触发**：(a) 需 3+ 敌且第二威胁 deadline < killEta（池模型杀敌 killEta ≈ 88 ticks，cbr 威胁 deadline ≥ 180 — 结构上不成立，测试需冻结玩家 6000ms 节奏才可触发）；(c) 需 baseDist > 12 且 returnEta > deadline（race 谓词已强制玩家 ≤ ~6 格，同样结构上罕见）。护栏纪律成立，但正因此「覆盖点只在安全时刻接管」，恰好把最需要压制力的场景排除。
+  3. 与 §205/§206 同源教训：分支级接管目标选择不改主循环形态（hunt 节奏），hard 突破仍需结构性杠杆。
+
+**Implications:** Phase 3 首机制证伪 — 「驻守喉道」对 S34 不成立（S34 需要的是清怪节奏本身更快，不是防御姿态）。§7 的候选几何/评分仍可复用于 Phase 5 CMA-ES 参数（若未来有全参数搜索空间），但不再单独开轮。下一里程碑：plan §8 M4 安全吃星（playerSurvival 族已有改善史）或 Phase 5 全参数 CMA-ES 决策。
+> 全文 → docs/god-ai-tuning.progress.md §207
+
+## 208. §207 覆盖点实现缺陷审计 — 5 缺陷已修复，机制仍保持 OFF
+
+**Decision:** 复查 §207 A/B 失败时发现 CoveragePlanner 实现存在 5 个缺陷（候选点方向、坦克阻挡、伤害上限、基地邻域、玩家距离护栏），全部修复并用 3 个新测试锁定（先写失败测试复现，再修）。修复后全量 A/B：**net −35 → −7，S34 17→7 → 17→11**——缺陷真实存在且修复有效，但机制仍净负，按 §207 结论保持 `coverageMode=0` 默认 OFF。
+
+**Rationale:**
+- **A. per-threat 候选点方向反了**（`t.row − 1` → `t.row + 1`）：原代码把"敌人与 ring 之间"的格子放在敌人**远离基地**一侧，玩家被引离基地（S34 取证：基地被毁时玩家 26 格外的局 8+ 局）。
+- **B. clearLane 不检查坦克**：同列双敌时 `prevent()` 对视线被挡的威胁照样计满伤害；候选点可落在坦克占位格上（玩家无法站立）。
+- **C. prevent 求和可超 baseHp**（单枪上限缺失）→ 多威胁价值虚高、过度承诺。
+- **D. 候选点无基地邻域约束**：20+ 格外"蹲守点"也能赢基线 → 玩家被调去远处，基地失守。
+- **E. guardrail (c) 需 `returnEta > deadline` 才挡**：20 格 returnEta≈255 < deadline 360 时不挡 → 远距玩家照样被改道。修复为 baseDist > 12 直接拒绝。
+- 修复后 S34 dist>12@loss 比例与 base 相同（~37-41%）——远距失败是 S34 固有模式（4 敌围殴），非 coverage 独有。
+
+**Implications:** 机制层面的 A/B 判定（§207：覆盖点对 S34 是负杠杆）不受修复影响；实现缺陷的修复保留（未来 Phase 5 若把 coverage 参数纳入 CMA-ES，语义已正确）。mode 0 字节等价保持（修复全部在 coverageMode>0 路径）。
+> 全文 → docs/god-ai-tuning.progress.md §208
+
+## 209. 覆盖点实现审计第二轮 — 坐标系根因 + (b)/BUG-2 修复，正确实现仍净负（OFF 维持）
+
+**Decision:** 第二轮审计发现 §208 修复未触及根因：CoveragePlanner 混用两套坐标系——候选点/playerCell/BASE_POS/tileMap 是 corner 空间（round(x/CELL)），威胁坐标却用 ThreatBudget.tankCell 的 center 空间（floor((x+w/2)/CELL)），错位半格；坦克是 2×2 footprint，对齐判定必须是子弹带与 footprint 带相交（|Δcol| ≤ 1 或 |Δrow| ≤ 1）。修复：全模块统一 corner 空间 + footprint 带相交 laneAligned + clearLane 扫带并跳过目标坦克 footprint + guardrail (b) 改为 lane 带分离判定（原版 ray 到 BASE_POS 被 ring 砖挡，(b) 在 ring 完好时从不触发）+ 快路径威胁清空必须释放（BUG-2：cur.length===0 时旧代码 return held 死守空点）+ horizon 450→425（实测 cbr 带 300-421、walk 带 ≥435，450 落在 walk 带上抖动）。修复后 A/B hard 35×60：**net −27（§208 是 −7）**，S34 11→13/60——正确实现使 coverage 更常触发、充分暴露机制净负。
+
+**Rationale:**
+- 坐标系是根因：单威胁 null（玩家明明对齐却 prevent=0）、DEFECT-B 假阳性、§208 测试"因错误原因通过"（(11,17) 是 walk 带 512 非威胁）都源于此。bullet 物理：子弹从坦克前缘中心出发（bx=x+16−BULLET/2），带宽 BULLET 跨 2 个子块 → 玩家站 corner (c,r) 的子弹带是列 c..c+1，威胁 footprint 是 (tc..tc+1, tr..tr+1)。
+- (b) 原实现 `clearLane(威胁→BASE_POS.row)` 在 ring 完好时被 ring 砖永远挡 → independent 恒 false → S34 场景（两列同时逼近）玩家只守一列——这就是 (b) 存在的意义，却从未生效。
+- BUG-2：快路径 `cur.length===0 → return held`，威胁全部走远后玩家死守空点（同帧重入即可复现）。
+- A/B 三版对比：§207（缺陷实现）−35、§208（半修复，coverage 几乎不触发）−7、§209（正确实现，充分触发）−27。**正确实现的负值比"几乎不触发"更差** = 机制本身负杠杆的实证，非实现缺陷。
+
+**Implications:** 机制判定不变且更强：覆盖点在 hard 全量上净负 → `coverageMode=0` 维持 OFF。§209 修复保留（语义正确，Phase 5 若纳入 CMA-ES 无坐标系陷阱）。测试 14 全绿，新增 DEFECT-F（双 cbr lane ring 完好 → (b) 拒绝）与 BUG-2（同帧重入释放）为真实覆盖。
+> 全文 → docs/god-ai-tuning.progress.md §209
+
+## 210. 覆盖点格坐标 round → floor（消除格中点决策振荡）
+
+**Decision:** CoveragePlanner 全部格坐标（cornerCell、laneAligned、tankBlocksCell、clearLane skip 端点、push 占位）从 `Math.round(x/CELL)` 改为 `Math.floor(x/CELL)`；`coveragePlanImpl` 入口重算 pc（调用方传的 playerCell() 是 round 语义，内部统一 floor）。`msToTicks` 的 round 是时间→tick 换算，不属于位置判定，保留。
+
+**Rationale:**
+- round 的跳变点在格中点（x = 16k+8）：坦克左上角还在格 c 内时（x ∈ [16c, 16c+16)）round 可能已报 c+1——footprint 判定错位一格（几何错误）；且导航 jitter/碰撞回弹在 16k+8 附近 ±1px 抖动时，判定每 tick 翻转 → laneAligned/clearLane/占位/候选集振荡 → 决策 churn。
+- floor 的跳变点恰在真正跨格处（x = 16c），与"左上角所在格"的物理语义同步：格内微动永不翻转判定。注释原文"sub-block containing the tank's top-left corner"的定义本就要求 floor——round 是实现与定义不符。
+- 实测（seed 2, hard, stage 0）：威胁 x 在 183.5↔184.5（corner 11 中点）抖动时，round 版计划在 (12,21)↔null 间翻转；floor 版恒定 (12,21)。
+
+**Implications:** A/B hard 35×60：round 版 net −27（S34 13/60）→ floor 版 net −31（S34 13/60）。stage 级散布对称（better 25 vs worse 29，最大单关 ±7）——噪声级，无系统性回归；机制净负判定（§209）不变。新增 §210 防回归测试：威胁格中点抖动 4 帧断言计划恒定（round 版必失败，已验证）。
+> 全文 → docs/god-ai-tuning.progress.md §210
+
+## 211. 覆盖点负翻转 per-seed 取证 — 蝴蝶效应根因，csb/cbr 过滤修复证伪（OFF 维持）
+
+**Decision:** 用 per-seed tick-diff 诊断 coverageMode=1 的 120 个 W→L 翻转。结论：翻转根因是 **coverage 在玩家已处于有效拦截轨迹时改道造成的相位蝴蝶**（非机制级缺陷）；"威胁集只保留 csb/cbr"的修复尝试 A/B 证伪（22/4200 runs 变化，净 −3，S34 一例负向），已回滚。coverageMode 维持默认 0（OFF）。
+
+**Rationale:**
+- 120 个 W→L 分布：stage idx 5 与 30 各 13（最多）、19 (9)、8/33 (7)；L→W 89 个。对 3 个代表种子逐 tick 取证：
+  - **S6-11（真 W→L）**：首个玩家行为分歧 tick 2380——base 版玩家 (8,22) 北上 col 8 拦截 basic@(10,12)（selectTarget (10,12)，mv up）；coverage 版被拉去 (10,22) 守点。2550 两版轨迹几乎汇合（相位差 ≈0.3 格），但 tick 2595 A 版在 (10,12) 停 17 tick 击杀、B 版停 2 tick；2666 A 版 (12,10.07) 转 down、B 版 (11.34,10) 继续 right；2669 敌人 roster 首次分叉（basic (14,10) vs (13,10)）；2751 两版世界已不同（base 有 basic@(14,15) 逼近、isBaseUnderThreat true；cand 无此敌，baseLaneSentry 劫持转向）。base 版 1500 后基地不再掉血、stageclear 5842；cand 版 3282 掉 70→34、4519 掉 34→0 gameover。玩家 HP 事件两版完全相同（283/670/1332）——**差异全在敌人链，纯蝴蝶**。
+  - **S20-5 / S31-1**：初判为同类改道，进一步取证发现 S20-5 双 W、S31-1 是 L→W（cand 反而赢）——coverage 介入同样产生相位差，但方向随机。
+- 修复尝试："deadline < 425 且 csb/cbr 才入威胁集"。想法：walk 带敌人（deadline 纯几何、无视地形，如 S31-1 armor@(10,0) d346）不该触发守点。实测：A/B v4 net −33（vs v3 −31），仅 22/4200 runs 结果变化、净 −3，S34 唯一变化负向（cand|33|38: W→L）。**原因：deadline < 425 的威胁绝大多数已是 cbr/csb（S6-11 的 basic@(10,12) 在 2383 已变 cbr）——过滤几乎不改变行为**。回滚。
+- 结论：四轮 A/B（−7 / −27 / −31 / −33）全部净负且每次"正确性修复"后仍是噪声级负值——机制本身与 hunt 的路线选择差异被确定性 RNG 放大成胜负翻转，不存在可修的系统性缺陷。S34（idx 33）是唯一稳定正信号关（13/60 vs base 7/60）。
+
+**Implications:** coverageMode=0 维持默认。机制保留为实验（S34 场景有局部正信号）；任何未来启用尝试必须 A/B hard 35×60 全绿。§211 取证方法（per-seed-diff dump + decision-probe 分支对比 + 敌人 roster 签名）沉淀为负翻转诊断的标准流程。
+> 全文 → docs/god-ai-tuning.progress.md §211

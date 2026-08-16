@@ -103,6 +103,69 @@ export interface GodAIParams {
    */
   baseGuardAnchorMode: number
   /**
+   * Phase 2 / plan/God-AI-Hard-Breakthrough-Implementation.md §6.1 — 行动有效性
+   * 契约: 0 = OFF（byte-identical）。1 = ON: defenseIntercept / baseLaneSentry
+   * 的「站立 + 冷却中」提交（_moveDir=null, _fire=false — M0 台账 60% 失败族的
+   * 无产出站桩）必须先通过 ActionContract.contractStandingHold — 敌弹在射线
+   * （拦截在即）/ 自己子弹在飞（击杀在落地）/ 站桩击杀 killSlack>0（本次开火
+   * 在基地期限前击杀）任一成立才允许提交；否则放弃本分支（fall through 到
+   * engage/hunt/navigate 产生输出）。绝不否决有移动或有开火的提交 — §199 弃守
+   * 教训不重演。
+   */
+  actionContractMode: number
+  /**
+   * Phase 2 / plan/God-AI-Hard-Breakthrough-Implementation.md §6.2 — 进攻分支
+   * 动态目标价值排序键: 0 = OFF（byte-identical）。1 = ON: selectTarget 的 hunt
+   * 分支（canHunt / 正常最近敌）不再按曼哈顿距离排序，改按
+   *   targetValue(e) = expectedBaseDamagePrevented(e) / (reachEta + killEta)
+   * 取最大 — expectedBaseDamagePrevented = 击杀落地前该敌会对基地造成的伤害
+   * （fp × floor((horizon − enemyToShootEta) / (cadence+flight))，cap baseHp），
+   * horizon = 到达+瞄准+冷却+再装填+末弹飞行。价值随敌人期限（越接近 csb 越
+   * 高）、玩家距离（越近 horizon 越小）与射击成本（再装填次数）动态变化 —
+   * 不是静态 bonusHuntBias。与 pathTargetMode（§171 真实路径成本）正交可叠加。
+   */
+  targetValueMode: number
+  /**
+   * Phase 2 §6.3 (plan/God-AI-Hard-Breakthrough-Implementation.md §6.3):
+   * short-term action intent for hunt/engage target selection. When > 0, the
+   * chosen hunt target is locked as an intent with a lease
+   * (intentLeaseTicks) and revalidation: released when the target dies or
+   * becomes unreachable, the lease expires, the player stalls (no move, no
+   * fire for intentProgressWindowTicks), the target's base-damage deadline
+   * tightens past the committed slack, a new enemy appears with a clearly
+   * worse deadline, or the target flees beyond expectedProgress. This is NOT
+   * a longer huntCommitTicks — the intent has an expiry, progress and
+   * threat constraints (plan §6.3). The defense cascade runs above
+   * selectTarget, so an intent never delays threat response. Mode 0 = plain
+   * per-tick selection (byte-identical). A/B 前不发货.
+   */
+  intentMode: number
+  /** ActionIntent lease in ticks (plan band 6~15). Only read when intentMode > 0. */
+  intentLeaseTicks: number
+  /** Stall-release window: player unmoved and not firing for this many ticks releases the intent. */
+  intentProgressWindowTicks: number
+  /**
+   * Phase 3 (plan/God-AI-Hard-Breakthrough-Implementation.md §7): dynamic
+   * attack coverage point. When the base is NOT under threat but a major
+   * threat (damage deadline inside the horizon) exists, holding a coverage
+   * point (throat / lane / firing intersection) with positive intercept
+   * slack beats roaming hunt — the S34/S8 fix for "回基地驻守反而失去全场
+   * 压制". Candidates are geometric only (no stage IDs), capped at 8;
+   * scoring per §7.2 (Σ damage prevented − travel − turn − exposure), move
+   * only when the best point beats the baseline by a margin AND ≥1 threat
+   * has positive slack; §7.3 guardrails hard-block (3+ enemies with a
+   * tighter second threat / independent rays not both covered / player too
+   * far with return ETA > base slack). The point is a lease
+   * (coverageLeaseTicks), released on threat death, flank threat, slack ≤ 0
+   * or expiry; falls back to the normal hunt. Mode 0 = OFF (byte-identical).
+   * A/B 前不发货.
+   */
+  coverageMode: number
+  /** Coverage point lease in ticks (plan band 6~15). Only read when coverageMode > 0. */
+  coverageLeaseTicks: number
+  /** Low-frequency cache grid: full candidate re-score at most this often. */
+  coverageReplanTicks: number
+  /**
    * §137 v2: max player→anchor distance (cells) for the anchor HOLD to
    * apply. When the base is under threat, no enemy has a clear shot at it
    * yet, and the player is within this many cells of the guard anchor, hold
@@ -2337,6 +2400,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
   // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
   baseGuardAnchorMode: 0,
+  // Phase 2 §6.1 行动有效性契约: 默认 0 = OFF（byte-identical）。A/B 前不发货。
+  actionContractMode: 0,
+  // Phase 2 §6.2 目标价值排序键: 默认 0 = OFF（byte-identical）。A/B 前不发货。
+  targetValueMode: 0,
+  // Phase 2 §6.3 短期 intent: 默认 0 = OFF（byte-identical）。A/B 前不发货。
+  intentMode: 0,
+  intentLeaseTicks: 12,
+  intentProgressWindowTicks: 10,
+  // Phase 3 动态攻击覆盖点: 默认 0 = OFF（byte-identical）。A/B 前不发货。
+  coverageMode: 0,
+  coverageLeaseTicks: 12,
+  coverageReplanTicks: 12,
   // §137 v2: 受威胁且无 clear-shot 敌人时、玩家距守位格 ≤ 此值 → 驻守守位格
   // （让 §134 在前厅口拦截）。仅 mode>0 时读。A/B 候选：holdRange 0/6/10。
   baseGuardAnchorHoldRange: 6,
@@ -2995,6 +3070,19 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
+  // Phase 2 §6.1: 行动有效性契约未在任何难度 A/B — restore 0（byte-identical
+  // classic gate；且 classic 防御分支本就 restore 0，无站桩提交可管）。
+  actionContractMode: 0,
+  // Phase 2 §6.2: 目标价值排序键未在任何难度 A/B — restore 0（byte-identical
+  // classic gate）。
+  targetValueMode: 0,
+  // Phase 2 §6.3: 短期 intent 未在任何难度 A/B — restore 0（byte-identical
+  // classic gate；微旋钮 intentLeaseTicks/intentProgressWindowTicks 在
+  // intentMode=0 下不可读，保持默认值）。
+  intentMode: 0,
+  // Phase 3: 动态攻击覆盖点未在任何难度 A/B — restore 0（byte-identical
+  // classic gate；微旋钮在 coverageMode=0 下不可读，保持默认值）。
+  coverageMode: 0,
   // §193-B: 卫位导航 —— classic instant 未 A/B，restore 0（byte-identical）。
   baseLaneSentryStation: 1,
   // §195: 中路钻探粘性驻守是 hard/chaos 基地防御修复 — classic instant

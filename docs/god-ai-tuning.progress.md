@@ -1507,3 +1507,408 @@ hard 回归面——**不发货，minDist=8 收窄版保持为最终配置**。
 **根因**：cooldown fireModel（hard/relax/chaos — 74 ticks/发）vs bulletCap（classic — 子弹落地连发 ≈ 10-15 ticks/发）→ **射速差 5-7 倍 = clearSpeed 差的全部来源**。这是 modern 难度的设计节奏（非 AI 可调）；eval-refs 用 classic 校准评 hard 造成维度结构性偏低。
 
 **结论**：无 AI 拖沓可修 — 方向 6 关闭（无代码改动）。相关已穷尽：§170 huntCommit / §171 pathTargetMode（方向 4 无信号）、§200 dodgeEscapeDepth（全关 -30）。若需维度公平，应重校准 hard refs（评估层，非行为层）。
+
+## §202. M0 威胁台账取证（threat-ledger + failure-classifier）— 硬关 2100 局基线（2026-08-15）
+
+**背景**：plan/God-AI-Hard-Breakthrough-Implementation.md M0 — 为「威胁预算」重构取证。目标：把失败归因到可复现的逐 tick 证据，零行为变更。
+
+### 工具链（全部新增，默认关闭/只读）
+
+1. **威胁台账**（`tools/sim/simulation-runner.ts`，`threatLedger: true`）：
+   - 事件驱动采样：签名（baseHp / 环格数 / 分支 / 玩家格 / 玩家生命 / 存活敌数 / baseThreatNow / slack 符号 / noOpReason / 每敌 csb/cbr 标志）变更即推一条 sample，pre-`endFrame()`（保证 `_lastBranch` 为本 tick 分支）；终局强制最后一条。
+   - M0 几何 ETA 模型（占位，M1 将替换为 ThreatBudget）：`enemyToRingEta` = 曼哈顿距最近环格 / 敌速（csb/cbr 时 0）；`shootEta` = csb ? 0 : 移动 + 弹飞；`playerKillEta` = 距玩家曼哈顿 / 玩家速；`nearestThreatEta` = min shootEta；`threatSlack` = nearestThreatEta − 玩家最佳拦截 ETA（无威胁 -999 / 不可估 -1）。
+   - `onCooldown` 镜像 think.ts M6 门（bulletCap → 弹数上限；否则 frame − lastFire < nextFireInterval）。
+   - `noOpReason` = 站立且未开火时的 `_lastBranch`。
+2. **失败分类器**（`tools/diag/failure-classifier.ts`，纯函数）：lives_exhausted→player_survival；timeout→unknown；base_destroyed 按序判：late_detection（首个 base 受损早于首个 csb/cbr）→ no_output_commit（危险窗内 ≥3 连续无产出，NO_OUTPUT_MIN_SAMPLES=3，附 secondary travel_late）→ multi_threat_overload（≥2 同时 csb/cbr）→ turn_locked（与 csb 敌同线 + 冷却 + 站立）→ travel_late（slack<0）→ wrong_target（进攻分支且有移动）→ unknown。全部输出可读证据串。
+3. **CLI**（`tools/diag/threat-ledger.ts`）：`--seeds 60 --difficulty hard --json tmp/threat-baseline-2100.json`；`--report N` / `--report-runs "S34:1"` / `--from-json` 子集重跑。JSON 语料只存失败局 ledger（压缩形：弃每敌 ETA、短键，466MB→85MB）。
+4. **测试**（`tests/threat-ledger.test.ts`，14 项）：parity（ledger 开/关 5 组 stage×seed 字节一致 — 台账零副作用）+ 每族合成 ledger 分类单测（含 no_output 连续计数、late_detection 先后序、孤立 no-op 不误报）。
+
+### 基线（35 关 × 60 seeds × hard，2100 局，59s）
+
+| 指标 | 本工具 | plan §1.1 |
+|---|---|---|
+| 清关 | 1582 (75.3%) | 1582 (75.3%) |
+| base_destroyed | 448 (86.4%) | 447 (86.3%) |
+| lives_exhausted | 69 (13.3%) | 70 (13.5%) |
+| timeout | 1 (0.2%) | 1 (隐含) |
+
+±1 局差异 = maxTicks 口径（36000 vs 旧基线 18000），非行为回归；两轮重跑字节一致。
+
+**失败族分布（n=518）**：no_output_commit 311 (60.0%，secondary 全 travel_late) > multi_threat_overload 99 (19.1%) > player_survival 69 (13.3%，15 例 secondary multi_threat) > travel_late 24 (4.6%) > turn_locked 14 (2.7%) > unknown 1 (0.2%)。base 失败内：no_output 69.4% + multi_threat 22.1%。
+
+**最差关（base 损失）**：S34 Battlement 40/60（no_output 27）> S8 Riverbed 32/60（17+13）> S24 28/60（23）> S3 25/60（19）> S12/S20 23/60 > S28 21/60（20 no_output，独木桥关 100% 站桩类）> S5 19/60（16）。
+
+### 逐 tick 抽查（M0 门 — 每族可复现证据，10 局全过）
+
+- **S1:58 travel_late 铁证**：玩家 (8,8) 顶部打猎，basic@(24,24) base 行推进；threatEta 40 → 0，玩家拦截 ETA 458（slack −418），base 120→70→20→0。玩家远在 16 格外，移动速度物理上赶不上 — 「赶不上」是设计常数，slack 全负常态。
+- **S1:5 multi_threat_overload**：t1793 两 basic 同时 csb（@14,24 + @20,24），玩家 navigate 横移中，base 120→70→20→0，最后 1 tick 才进 defenseIntercept。
+- **S34:1 / S1:13 no_output_commit**：defenseIntercept/t2a 站桩 ≥3 sample（约百 tick）无输出，环被啃 8→0 / base 被端；cd（冷却）标志在场 — 站桩 = 冷却等待而非死锁（站桩期间 base 仍在挨打）。
+- **S1:50 turn_locked**：t918 玩家 (5,24) 与 csb 敌同线站桩 t2a 冷却中 — 但同线站桩恰是拦截位，本族证据强度弱于 no_output（后续可加「已开火失败」细分，M1 再议）。
+- **S1:26 / S7:54**：player_survival（lives 耗尽、base 满血）/ unknown（timeout）。
+
+### 修复与踩坑
+
+- **台账环格口径 bug**：初版 BASE_RING_CELLS 按 4×4 边框算 12 格，与游戏真环不符（SimulationCombat.isBaseProtectionCell = 8 格：row br−1 × cols bc−1..bc+2 + cols bc±1... 两侧各 2）。已镜像修齐 — 环格数、ETA、签名全部对齐真环。
+- **JSON OOM**：2100 局全量 ledger 466MB（Bun.write RangeError）→ 只存失败局 + 压缩形（短键、元组、弃每敌 ETA）→ 85MB。
+- **报告表头错位**：9 值 11 标签 — 对齐。
+- **no_output 窗口**：初版只认 csb/cbr 敌（hasThreatEnemy）；改为「危险窗」= 首次 active（csb/cbr 或 AI 自身 baseThreatNow）— 站桩在「AI 已知威胁」下才有罪，单测锁死。
+
+### M0 门评估：通过
+
+每族 ≥2 例可复现证据；parity 证明工具零副作用；基线复现 plan §1.1。→ M1 ThreatBudget（纯模型默认 OFF）开工。
+
+## §203. M1 ThreatBudget 纯模型（Phase 1 §5，未接线）
+
+**背景**：M0（§202）证明硬关失败的 60% 是 no_output_commit（站桩无输出）+ travel_late 共享的 slack 信号。Phase 1 交付一个只读、确定性的 slack 计算层，把「下一次合法转向」纳入行动 ETA。
+
+### 设计（`src/ai/god/ThreatBudget.ts`，纯函数，零参数零状态）
+
+- **actionEta**（§5.1）= nextLegalTurnEta（world.rules.turnCooldownMs，镜像 think.ts 判定：now − lastTurnMs < cd）+ movementEta（曼哈顿格×CELL/玩家速 + 垂直路径一档转向成本）+ aimAlignmentEta（转向执行 + 冷却窗）+ fireCooldownEta（冻结 nextFireInterval）+ requiredShotsEta（后续射击按基础 fireCooldown 再装填 + 末弹飞行）。
+- **敌人期限**（§5.2，保守几何，不模拟敌方 RNG）：csb → shootEta 0；cbr → 同轴砖块数 ×（节奏+飞行）；否则 → 走到最近环格 + 固定攻环开销。damageWindow = ceil(baseHp / firepower) ×（节奏+飞行），环未破再加攻环开销。urgency = 0.5×baseHp 损耗 + 0.2×环损失 + 0.3×射击次数归一。
+- **玩家期限**（§5.3）：killSlack = damageDeadline − playerKillEta；interceptSlack = enemyToRingEta − 到达且瞄准 ETA；missesSecondThreat = 任一其他敌 deadline < 击杀落地。
+- **镜像纪律**：RING_CELLS 与 canShootBaseLine/canBreachRingLine 逐字镜像 SimulationCombat/SmartThreatModel — 35 关 × 10 点位 parity 测试与 AI 谓词完全一致（防 Phase 2 接线时双源分裂）。
+- 数据全来自 config：resolveProfile（firepower/damage/maxHp，base 受损按 firepower 点数、杀敌按 pool damage）、节奏用 tank 冻结 nextFireInterval。
+
+### §5.4 测试（tests/godai-threat-budget.test.ts，17 项全过）
+
+- turnCooldownMs 200 vs 500 → ETA 单调增（500 > 200，永不绕过）；无规则 → 0。
+- 需要转向 ≥ 已对齐；更多射击 > 更少；更远目标 movementEta 更大。
+- csb 敌 shootEta=0；baseHp 120→10 → urgency 升、deadline 降；环全破 → urgency 升。
+- killSlack 同敌同位随 baseHp 降而减；敌更近（清场后同一轴线 16,20 vs 24,20）→ deadline 不增。
+- 同 World 同调用 → 结果字节一致 + World 不变 + RNG 状态不变。
+
+### 踩坑
+
+- **World 默认 classic**：`new World()` + loadStageData 不设 difficultyKey → baseMaxHp=1 → urgency 公式爆炸（−4.4）。测试必须 `w.difficultyKey='hard'` 前置。
+- 比较不同位置敌人的 killSlack 不保证单调（deadline 与 killEta 同向移动）— §5.4 的单调性是「同敌同位、局势变差」语义，测试按此重构。
+- 敌人节奏读冻结的 nextFireInterval（含 jitter，快照安全），后续再装填用基础 fireCooldown（确定性）— 与游戏门一致。
+
+### 状态
+
+Phase 1 完成（树绿：1283 tests / 0 fail，build ok）。未接线 — Phase 2 ActionContract（§6.1 防守分支 slack 门控，默认 OFF + A/B）为下一里程碑。
+
+## §204. M2 ActionContract 防守站桩门控（Phase 2 §6.1，默认 OFF + A/B）
+
+**背景**：M0（§202）头号失败族 no_output_commit（60%），其中相当一部分是防守分支在冷却期提交「站桩无输出」。plan §6.1 要求防守分支只有四种有效等待价值之一才允许提交静止分支。§199 已证明盲目 fall-through 会失守射击位，因此本版只拦截「站桩 + onCooldown」形态，不碰移动/开火中的分支。
+
+### 实现（`src/ai/god/ActionContract.ts` + think.ts 三处位点）
+
+- `contractStandingHold({world, player, threat, enemyBulletOnRay, ownBulletOnRay})` → `{valid, reason}`：
+  - **enemyBulletOnRay**：敌弹中心在玩家射击线 ±(6+6)/2 内、朝 base 方向且未过 base 行 → 拦截在即（保留站桩）。
+  - **ownBulletOnRay**：己方（玩家 1）子弹在该线 → 击杀已落地中（保留站桩）。
+  - **killSlack > 0**：站桩击杀（ticksUntilFire + (shots−1)×cadence + 飞行，零移动）早于 damageDeadline → 射击比威胁快（保留站桩）。
+  - 三者皆否 → 无效站桩，拒绝提交。
+- think.ts 接线（全部 `prm.actionContractMode > 0 && onCooldown && 站桩` 门）：defenseIntercept 直射 commit → `continue`；defenseIntercept dig commit → `continue`；baseLaneSentry dig commit → `return false`。
+- 参数：`actionContractMode: number` 默认 0；CLASSIC_MODEL_PARAMS 显式恢复 0（classic 字节一致）。
+- 纯函数纪律：ray 扫描只读 `world.bullets`/player 几何；不消费 world.rng（拒绝路径跳过 aimError 调用 — 与 mode 0 字节一致兼容）。
+
+### 测试（tests/godai-action-contract.test.ts，12 项全过）
+
+- contractStandingHold 判定：无威胁 → invalid；敌清线 → csb 语义；killSlack>0 → valid「standing shot beats deadline」；killSlack<0（power 敌在 base 行、玩家 24 格远、刚开火冷却中）→ invalid；敌弹/己弹在射线 → valid。
+- enemyBulletOnRay：同列朝 base → true；朝外 → false；不同列 → false。
+- ownBulletOnRay：己弹 → true（伙伴弹同列也 true — 射线检查只关心线）；纯函数字节一致 + 不消费 RNG。
+- 模式门控 parity：mode 0 === 未传参数（S34 seed 1 字节一致 5956/5956）；mode 1 在 S34 seed 11 改变行为（4476→5409，仍 gameover 但拖后）。
+- 关键构造事实（踩坑）：真子弹从坦克中心发射（x = col×16 + 13，中心 = 坦克中心 144）— 初始测试用 col×16+6 是假几何导致 ray 扫描为负；killSlack<0 场景需 power 敌 + 玩家 24 格远 + 刚开火（basic 3 发 175 < deadline 200 仍为正 — 先写断言再算数会翻车）。
+
+### A/B（hard 35 关 × 60 seeds，ab-param.ts，json tmp/ab-action-contract.json）
+
+| 指标 | base | cand(actionContractMode=1) |
+|---|---|---|
+| 清关 | 1582/2100 (75.3%) | 1590/2100 (75.7%) |
+| L→W | — | 34（no_output_commit 26 · multi_threat 4 · turn_locked 2 · player_survival 1 · unknown 1） |
+| W→L | — | 26（无单关集中，最差 S24/S25 各 -2） |
+| 净 | — | **+8（±10 噪声内）** |
+
+- 机制命中目标族：26/311 no_output_commit（8.4%）翻胜 — 门控只挡「站桩+冷却」却回收了该族 8% 的失败，方向正确。
+- 剩余失败 484/518 的失败 tick 变化 ±200 内中性；no_output 尾部 11 局延迟 >600 vs 9 局提前 — 无系统性拖后。
+- S34（最差关 17/60）零翻转 — 其 no_output 形态非「站桩+冷却」（站桩多为移动/非冷却态），S34 需要 Phase 3 覆盖点而非本门控。
+- 复现数字核对：ab-param 控制台 L→W=34/W→L=26 与 JSON 复核一致（注意 ab json 是紧凑键 `o/t/hp/l`，key 分隔符是 `|` 不是 `:` — 用错分隔符会得到假 35/34）。
+
+### 状态
+
+Phase 2 §6.1 机制版完成（树绿：check 全过 + build ok；12 新测试）。**保持默认 OFF** — 净 +8 在噪声内，按 plan §9/§10 纪律不提前 ship；机制与位点已验证，最终配置留给 Phase 5 CMA-ES。下一里程碑：Phase 2 §6.2 进攻分支 targetValue 排序键（engage/hunt 目标价值 = expectedBaseDamagePrevented / (playerReachEta + playerKillEta) 动态化）。
+
+---
+
+## §205. Phase 2 §6.2 targetValue 排序键 — A/B 证伪（2026-08-15）
+
+### 目标
+
+plan §6.2：engage/hunt 目标选择从「距离排序」升级为「目标价值」排序：
+`targetValue(e) = expectedBaseDamagePrevented(e) / (playerReachEta(e) + playerKillEta(e))`，
+其中 expectedBaseDamagePrevented = fp × max(0, floor((horizon − enemyToShootEta)/(cadence+flight))) 封顶 baseHp，horizon = reach + eta.total。
+
+### 实现
+
+- `params.ts`：`targetValueMode: number`（DEFAULT 0，CLASSIC_MODEL_PARAMS 恢复 0，接口注释引 §6.2 公式）。
+- `ThreatBudget.ts`：`export function targetValue(world, p, e)` — 纯函数，公式如上，复用 enemyDeadline/playerActionEta/aimDirTo/playerShotsToKill/tankCell。
+- `StrategyPlanner.ts`：`TARGET_VALUE_TIE_EPS = 0.05`（近并列回退标准距离序含 bonus/coop）；`selectTargetUncached` 两个门控重复循环（canHunt 分支 bonus −2/coop +5；normal 分支 pathTargetMode 双风味），模式 0 原循环不动 → 字节等价。
+- `tests/godai-target-value.test.ts` 10 测试：6 个 targetValue 单元测试 + 模式 0 字节等价 + 模式 1 行为变化 + 2 个 wiring 集成测试。
+
+### 测试期间的几何发现（已写入测试注释，后续沿用）
+
+- `createTank(x,y)` 以 x+16 为中心 → 中心对齐 (col,row) 需 x=(col−1)×CELL。
+- ThreatBudget.tankCell 用中心空间；GodAIInput 用角点空间（floor(x/16)）→ 断言 selectTarget 输出必须经 `ai.tankCell(enemy)`。
+- cbr 语义：ring 砖本身计入 bricksBetween → 正上方敌 e2s = 60.02（1 周期），非 0；非对齐列敌（如 (13,19)）因 bricksBetween 水平分支只查 row 24/25 得 0 块 → **e2s = 0**（模型怪癖，测试须先探测）。
+- isBaseUnderThreat 谓词：静态盒（|col−12|≤3 && row≥18）+ P4 竞赛（敌距 ≤18 且 玩家距+2 ≥ 敌距）+ §88 choke 点；wiring 测试须注册敌到 `w.tanks`（createTank 不注册），玩家贴近基地压掉竞赛分支。
+
+### A/B 结果（hard，35×60，`tmp/ab-target-value.json`）
+
+| 指标 | base | cand |
+|---|---|---|
+| 总胜局 | 1582/2100 (75.3%) | 1457/2100 (69.4%) |
+| L→W | — | 301（no_output_commit 179 / multi_threat 59 / player_survival 43 / travel_late 12 / turn_locked 5 / unclass 3） |
+| W→L | — | 426（新增失败） |
+| 净 | — | **−125（−6.0pp）** |
+
+- 全 35 关：31 关负翻转；最差 S18 −14 / S33 −13 / S19 −11 / S24 −11 / S16 −10；**S34 崩塌 17/60 → 4/60**（S34 为 no_output 重灾关 — 目标价值重排放弃其既有流程）。
+- 35% 的局（727/2100）行为翻转 — 该键在真实关卡远非惰性。
+- 即使赢的局也显著变慢（S12 6543→7875、S22 6569→7634、S20 5986→6874…）。
+
+### 失败机制（结构分析，三条）
+
+1. **伤害上限反直觉**：damagePrevented = min(baseHp, fp×interim)。对 horizon−e2s ≥ 3 周期（≈172 ticks）的任何敌恒封顶 120 → v ≈ 120/horizon ≈「按 killEta 取最近」；而 interim 1-2 的将死敌只得 50-100/horizon → **被系统性降权，玩家不补刀** — clear 局全线变慢即此。
+2. **e2s > horizon → v=0 → 被剔除**：玩家被吸向 cbr 带（ring 砖可及列）反复横跳，放弃场控（S34 崩塌、W→L 426 局的主因）。
+3. 分母 reach+eta.total 与分子 horizon 同源耦合，无归一化；canHunt/normal 两分支语义不一。
+
+### 结论
+
+§6.2 字面公式作为主排序键被实证否决。保持 `targetValueMode=0` 默认 OFF（plan §9/§10 纪律）；代码/测试保留固化语义。**对 §6.3 ActionIntent 的约束：收割/补刀必须是价值函数的保底项而非惩罚项；意图提交的稳定性（§170 huntCommit 已覆盖一半）+ 威胁事件重验是下一轮主线。**
+
+### 状态
+
+§6.2 完成（树绿：check 全过 7 连跑；10 新测试）。下一里程碑：Phase 2 §6.3 ActionIntent — 分支提交不保存永久目标，只存短期 intent（有效期 + 到期重验 + 新威胁事件释放），默认 OFF + A/B。
+
+---
+
+## §206. Phase 2 §6.3 短期 intent — A/B 中性偏负，保持 OFF（2026-08-15）
+
+### 目标
+
+plan §6.3：分支提交不保存永久目标，只存短期 intent（kind/targetId/expiresTick/minSlack/expectedProgress），6-15 ticks 重验，6 重释放条件。「这不是 huntCommitTicks 的简单加长版」。
+
+### 实现
+
+- `params.ts`：`intentMode`（默认 0，classic restore 0）+ `intentLeaseTicks`（12）+ `intentProgressWindowTicks`（10，仅 intentMode>0 时读）。
+- `StrategyPlanner.ts`：`export interface ActionIntent` + `intentRead`/`intentWrite`；读点两处（canHunt 块顶 + normal 路径 §170 commit 之前 — 均在全部防守/覆盖分支之后，intent 永不阻塞威胁响应）；写点四处（canHunt value/distance、normal value/pathTargetMode/normal）。intentMode>0 时取代 §170 commit（其读块加 `intentMode <= 0` 门）。
+- 释放条件（intentRead）：① 租约到期（frame ≥ expiresTick）② 目标死亡/不可达（不在 enemies）③ 停滞（窗口内未移动且 fireCooldown ≤ 0）④ 期限收紧（当前 damageDeadline < minSlack − 10）⑤ 新威胁（任一敌 deadline < committed − 15）⑥ 逃逸（距离 > expectedProgress + 2）。重验节流：⑤④ 只在 frame % 10 === 0（确定性）。
+- `tests/godai-intent.test.ts` 8 测试全绿。
+
+### 测试期间的两个关键发现
+
+1. **World 默认 `seed = Date.now()`** — createTank 从 world.rng 抽速度抖动（±5%），未 pin seed 的测试在跨运行间 deadline 漂移 ±10-20 ticks → 断言脆弱（'holds' 测试间歇性失败）。修复：`pinSeed(w)`（seed 2：A/C deadline 差 11.2 < 15 释放边界，稳定 HOLD）。**既有测试不受影响的唯一原因是相对断言（同世界内等价/字节等价）与对速度项不敏感的绝对断言（60.02 是 cbr 纯 cadence 项）——新测试应从此显式 pin seed。**
+2. 释放→重选→重承诺循环：新威胁/期限释放后落回最近目标并重新承诺 — 大多数释放行为学不可观测（重选=同一目标）；仅当场况已变（新敌更近/目标死亡/逃逸）产生差异。
+
+### A/B 结果（hard，35×60，`tmp/ab-intent.json`）
+
+| 指标 | base | cand |
+|---|---|---|
+| 总胜局 | 1582/2100 | 1568/2100（−0.7pp） |
+| L→W / W→L | — | 206 / 220 |
+| 净 | — | **−14（噪声内）** |
+
+- S34 17/60 → 12/60（−5，L→W 4 / W→L 9）— 已最差的关更差。
+- 20% 局（426/2100）翻转 — 释放/重承诺在真实对局中高频发生。
+
+### 结论
+
+§6.3 机制版完整落地（6 释放条件全实现 + 测试固化），A/B 判定中性偏负 → 保持 `intentMode=0` 默认 OFF。Phase 2 三机制汇总：§6.1 +8（噪声）· §6.2 −125（证伪）· §6.3 −14（噪声）→ **分支级微调不是 hard 突破的主杠杆**。组合探索归 Phase 5 CMA-ES。下一里程碑：Phase 3 动态攻击覆盖点（§7，S34/S8 类「驻守失去全场压制」：coverageValue 评分 + 6-15 tick lease + 多威胁护栏 + 失败回退 hunt/engage）。
+
+### 状态
+
+§6.3 完成（树绿：check 全过；8 新测试；5 连跑稳定）。Phase 2 全部收口，三机制保持默认 OFF。下一里程碑：Phase 3 动态攻击覆盖点。
+
+## §207. Phase 3 动态攻击覆盖点（§7 CoveragePlanner）— A/B 证伪，S34 崩塌
+
+### 实现
+
+- `src/ai/god/CoveragePlanner.ts`（新）：`coveragePlanImpl(self, w, p, pc, enemies)` — 无基地威胁但有重大威胁（enemyToShootEta < 180 = COVERAGE_SHOOT_HORIZON，即 cbr/csb 带；walk 带 ≥ 400 天然排除）时接管目标。
+  - 候选（几何，cap 8）：P 基线 + 喉道 (bc±1, br−2)/(bc, br−3) + 每威胁 (t.col, br−2)/(t.col, t.row−1) + 行/列射击交点。
+  - 评分：`coverageValue = Σ prevent(e,i) − travel×COVERAGE_TRAVEL_COST(0.25) − exposure`；prevent 要求点与威胁同行/列且 clearLane（未对齐不预防 — 这是基线（基线不覆盖）输给喉道的机制；护栏 (b) 复用 clearLane 双列轨独立可防检查）。
+  - 护栏（§7.3 硬块）：(a) threats ≥ 3 且 threats[1].deadline < killEta（killEta = (shots−1)×cadence + flight）；(c) baseDist > 12 且 returnEta > threats[0].deadline。
+  - 12-tick lease + 低频重规划（coverageReplanTicks=12，签名 = 威胁 id 集合，不变则直接返回持有点）+ 释放（flank 到期/目标死亡）。
+- `params.ts`：`coverageMode`(0)/`coverageLeaseTicks`(12)/`coverageReplanTicks`(12)。
+- `StrategyPlanner.ts`：normal 路径在全部防守/覆盖分支之后、§6.3 intent 读之前插入 coverage 分支；`GodAIInput._coverage*` 状态 + reset()。
+
+### 测试（tests/godai-coverage.test.ts，9 全绿）
+
+- 关键场景验证：cbr 威胁 + 无基地威胁时持住 (12,22) 喉道（col 12）；mode 0 落回最近 hunt；(a) 需冻结玩家节奏 6000ms 才可触发（池模型 killEta ≈ 88 < 威胁 deadline ≥ 180 — 结构上罕见，测试通过改 p.nextFireInterval 人工构造）；(c) 需 p.speed ×0.9 直接调用 coveragePlanImpl 触发（race 谓词已把玩家限制在 ≤ ~6 格，returnEta 超不过 csb 180 下限）；lease 持住/释放/确定性/RNG 纯净。
+- 排障记录：horizon 360 撞上 seed-2 抖动 deadline 360.12 → 改 450（cbr 带 ≤ 360、walk 带 ≥ ~590 之间）；`baseClearShotThreat` 是默认 ON 的已 ship 特性（开放场地任何对齐敌都算威胁）— 测试 harness 显式置 0；isBaseUnderThreat 的 race 谓词 (playerDist+2 ≥ enemyDist) 对测试几何极敏感 — 玩家须放 (14,20) 类近基地位。
+
+### A/B 结果（hard，35×60，`tmp/ab-coverage.json`）
+
+| 指标 | base | cand |
+|---|---|---|
+| 总胜局 | 1582/2100 | 1547/2100（−1.7pp） |
+| L→W / W→L | — | 154 / 189 |
+| 净 | — | **−35** |
+
+- **S34（Phase 3 目标关）17/60 → 7/60（−10pp）**；S12 −5 / S30 −5 / S14 −5 / S08 −4 / S25 −4；S15 +7 / S21 +5 / S04 +3 / S11 +3。
+- 15.2% 局翻转 — 分支在真实关卡上高频接管。
+
+### 结论
+
+M3 决策门失败（S34 崩塌，无一关达门）。失败机制：ring 未破时「预防 cbr 威胁」= 把玩家钉在喉道放弃清怪节奏（clear 变慢 + 波次叠加）；护栏 (a)/(c) 结构上罕见 → 覆盖点只在「安全时刻」接管，恰好排除最需要压制的场景。保持 `coverageMode=0` 默认 OFF；实现/测试保留供 Phase 5 CMA-ES 参考。Phase 3 结论：**S34 需要的是清怪节奏结构性加快，不是防御姿态**。下一里程碑：plan §8 M4 安全吃星或 Phase 5 决策。
+
+### 状态
+
+§207 收口（树绿：check 0 fail + lint 净；9 新测试）。Phase 1-3 全部 A/B 完成且保持默认 OFF。下一里程碑：M4 或 Phase 5。
+
+## §208. §207 实现缺陷审计与修复（覆盖点）
+
+### 起因
+
+复查 §207 的 S34 A/B（17→7 崩塌）时，forensics 显示大量失败局"基地被毁时玩家距基地 20+ 格"（seed 3/8/17/28/32/33/41/59 等 dist 20-26）——覆盖点把玩家**调离**基地而非守住基地。逐行审计 CoveragePlanner 发现 5 个实现缺陷。
+
+### 缺陷清单（先写失败测试复现，再修复）
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| A | per-threat 候选 `push(t.col, t.row − 1)` 把"敌人与 ring 之间"放在敌人远离基地一侧（ring 在下方） | `t.row < br−1 ? t.row+1 : t.row−1`（朝基地方向） |
+| B | `clearLane` 只查地形不查坦克：同列双敌时被挡威胁照样计满 prevent；候选点可落在坦克占位格 | clearLane 增加 alive 坦克扫描；push 排除坦克占位格 |
+| C | `prevent` 求和可超 `baseHp`（单枪不可能防 > 120） | `if (v > w.baseHp) v = w.baseHp` |
+| D | 候选点无基地邻域约束，20+ 格外点也能赢基线 | push 时 `dist > COVERAGE_MAX_PLAYER_BASE_DIST(12)` 直接拒绝 |
+| E | guardrail (c) `returnEta > deadline` 条件太松（20 格 returnEta≈255 < 360 不挡） | 改为 `baseDist > 12` 直接拒绝（玩家远距=清怪态，交给 hunt/defense） |
+
+测试：`tests/godai-coverage.test.ts` +3（DEFECT-A/B/D，直接驱动 coveragePlanImpl 绕开 race 谓词——player 9 格+2 ≥ 敌 7 格会触发 baseUnderThreat 走 defense，selectTarget 层不可测）。
+
+### 修复后 A/B（hard 35×60，`tmp/ab-coverage-fixed.json`）
+
+| 指标 | base | 修复前 | 修复后 |
+|---|---|---|---|
+| 总胜局 | 1582 | 1547（−35） | **1575（−7）** |
+| S34 | 17/60 | 7/60 | **11/60** |
+| L→W / W→L | — | 154/189 | 125/132 |
+
+S34 三方 forensics（dist>12@loss）：base 16/43 (37%)、修复前 19/53 (36%)、修复后 20/49 (41%)——远距失败是 S34 固有模式（4 敌围殴），非 coverage 独有。
+
+### 结论
+
+缺陷真实存在、修复有效（net −35→−7，S34 7→11），但机制仍净负 → §207 判定不变：`coverageMode=0` 保持 OFF。修复保留（Phase 5 若纳入 CMA-ES 语义已正确）；mode 0 字节等价保持（全部修复在 coverageMode>0 路径，byte-identical 测试通过）。
+
+### 状态
+
+§208 收口（树绿：check 0 fail；12 覆盖测试全绿）。机制状态不变：Phase 1-3 全部 OFF。
+
+## §209. 覆盖点第二轮审计：坐标系根因 + (b)/BUG-2 修复（正确实现仍净负）
+
+### 起因
+
+§208 之后复查实现：playerCell 返回 corner 空间 (13,19)（round），威胁用 ThreatBudget.tankCell center 空间 (12,17)——半格错位贯穿 prevent/clearLane/push/(b)。§208 的 DEFECT 测试多为假阳性（(11,17) 是 walk 带 deadline 512 ≥ horizon，非威胁；guardrail (b) 的 ray 到 BASE_POS 被 ring 砖挡 → independent 恒 false → (b) 从未触发）。
+
+### 物理模型（bullet 源码确认）
+
+子弹从坦克前缘中心出发：bx = tank.x + w/2 − BULLET/2 + v.dx*(w/2)（BULLET=6）。玩家站 corner (c,r)（x=c*CELL），向上子弹 bx = c*16+13 → 列带 c..c+1。威胁 corner (tc,tr) footprint 占列 tc..tc+1、行 tr..tr+1。命中条件 = 两带相交：|c−tc| ≤ 1 或 |r−tr| ≤ 1（laneAligned）。clearLane 扫带（相交列/行），端点 snap 到威胁 footprint 最近边缘，跳过目标坦克自身（其 footprint 与脚下地形不是障碍）。
+
+### 修复清单
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 坐标 | 威胁 center 空间 vs 候选/玩家 corner 空间，错位半格 | 全模块统一 corner（round(x/CELL)）；footprint 带相交 laneAligned |
+| (b) | `clearLane(威胁→BASE_POS.row)` 被 ring 砖挡 → ring 完好时 (b) 永不触发 | independent = lane 带分离（\|Δcol\|>1 或 \|Δrow\|>1）；covers = laneAligned(best, t.e) |
+| BUG-2 | 快路径 `cur.length===0 → return held`：威胁走远后死守空点 | cur 空 → 释放 |
+| horizon | 450 落在 walk 带（实测 ≥435）抖动边界 | 425（cbr 带 ≤421 全含，walk 带全排） |
+| 占位 | push 用 center tankCell 单格检查 | footprint 带相交（c∈[tc−1,tc+1] 且 r∈[tr−1,tr+1]） |
+
+### A/B 三版对比（hard 35×60, stageIdx=0 口径）
+
+| 版本 | baseW | candW | net | S34 (idx 33) |
+|---|---|---|---|---|
+| §207 缺陷实现 | 1582 | 1547 | −35 | 7/60 |
+| §208 半修复（coverage 几乎不触发） | 1582 | 1575 | −7 | 11/60 |
+| §209 正确实现 | 1582 | 1555 | **−27** | 13/60 |
+
+20 个 stage v2 回退（0,1,2,5,7,9,10,11,13,15,16,17,18,19,21,22,32,34），4 个明显改善（23 +7, 14 +4, 29 +2, 28 +3, 30/31/33 +2）。S34 13 < base 17 仍负。
+
+### 结论
+
+正确实现的净负（−27）比"几乎不触发"（−7）更差 = 覆盖点机制本身在 hard 全量上是负杠杆（把玩家钉在守点位置牺牲清怪节奏，S34 场景 4 敌围殴时尤甚）。`coverageMode=0` 维持 OFF。§209 修复保留——语义已正确，无坐标系陷阱，Phase 5 若纳入 CMA-ES 直接可用。
+
+### 状态
+
+§209 收口：14 覆盖测试全绿（新增 DEFECT-F 双 cbr lane 拒绝、BUG-2 同帧重入释放），check 0 fail（1327 tests）。机制状态：Phase 1-3 全部 OFF。
+
+## §210. round → floor：格中点跳变造成的决策振荡（正确性修复，非调参）
+
+### 问题
+
+§209 定义 corner 空间为"sub-block containing the tank's top-left corner"，实现却是 `Math.round(x/CELL)`。round 的跳变点在格中点（16k+8），而"左上角所在格"的物理边界在 x = 16k：
+
+- 几何错误：坦克左上角还在格 c 内（x ∈ [16c, 16c+16)），round 在 x ≥ 16c+8 时已报 c+1 → footprint 读错一格。
+- 决策振荡：坦克在格中点附近 ±1px 抖动（导航 bounce、碰撞 settle）→ corner cell 每 tick 翻转 → laneAligned/clearLane/tankBlocksCell/push 占位全部跟着翻 → 计划 churn。
+
+### 实测翻转（seed 2, hard, stage 0，威胁 x 跨 corner 11 中点 184 抖动）
+
+| 威胁 x | round corner | floor corner | 计划 |
+|---|---|---|---|
+| 183.5 | 11 | 11 | (12,21) |
+| 184.5 | 12 | 11 | null |
+
+round 版计划在 (12,21)↔null 间翻；floor 版恒定 (12,21)。
+
+### 修复
+
+- cornerCell / laneAligned / tankBlocksCell / clearLane skip 端点 / collectCandidates push：全部 `Math.round` → `Math.floor`。
+- `coveragePlanImpl` 入口重算 pc（floor）：调用方传的 `playerCell()` 是 round 语义（GodAIInput 全局约定，影响面大不改），模块内部必须自洽。
+- `msToTicks` 的 round 保留（时间→tick 换算，非位置判定）。
+- 新增测试：威胁 x 在 183.5/184.5 间抖动 4 帧，断言 coverage 计划恒定。验证：round 版该测试失败（捕获缺陷），floor 版通过。注意玩家侧抖动测试无效（入口 pc 重算已吸收）——必须抖威胁。
+
+### A/B 对比（hard 35×60, stageIdx=0 口径）
+
+| 版本 | baseW | candW | net | S34 (idx 33) |
+|---|---|---|---|---|
+| §209 round | 1582 | 1555 | −27 | 13/60 |
+| §210 floor | 1582 | 1551 | −31 | 13/60 |
+
+stage 级散布对称（better 25 / worse 29，最大单关 ±7）→ 噪声级，无系统性回归。机制净负判定不变（coverageMode=0 维持 OFF）。修复的正确性价值独立于胜率：消除振荡 = 决策稳定，这是 Phase 5 纳入 CMA-ES 前的地基。
+
+### 状态
+
+§210 收口：15 覆盖测试全绿，check 0 fail（1328 tests）。
+
+---
+
+## §211 覆盖点负翻转 per-seed 取证（2026-08-16）
+
+### 背景
+
+A/B v3（§210 floor）net −31，其中 W→L 翻转 120 个、L→W 89 个。用户指令：用 per-seed tick-diff 诊断负翻转原因，努力修复。
+
+### 取证（S6-11, stage idx 5, seed 11 — 真 W→L）
+
+翻转链（逐 tick 比对两版 dump）：
+
+| tick | 事件 |
+|---|---|
+| 2380 | 首个玩家行为分歧：base (8,22) mv up selectTarget (10,12)（直接追杀）；cand 被 coverage 拉去 (10,22)（威胁 basic@(10,12) cbr, deadline 248）|
+| 2430-2550 | 两版轨迹几乎汇合（2550 同杀一敌，相位差 ≈0.3 格）|
+| 2595-2612 | A 版玩家在 (10,12) 停 17 tick（击杀窗口），B 版仅停 2 tick |
+| 2666 | A 版 (12,10.07) 转 down；B 版 (11.34,10) 继续 right |
+| 2669 | 敌人 roster 首次分叉：basic (14,10) vs (13,10)，hp 均 124 |
+| 2751 | 两版世界已不同：base 有 basic@(14,15) 逼近（isBaseUnderThreat true，玩家南下防守）；cand 无此敌，baseLaneSentry 劫持玩家转 right 去 (14,14) |
+| 3282/4519 | cand 基地 70→34→0 gameover；base 1500 后基地不再掉血、5842 stageclear |
+
+玩家 HP 掉血事件两版完全相同（283/670/1332）→ 差异全在敌人链 = 纯蝴蝶（确定性 RNG 放大微小相位差）。
+
+### 补充取证
+
+- S20-5 (idx 19, seed 5)：双 W（非翻转）；S31-1 (idx 30, seed 1)：L→W（cand 反而赢）。coverage 介入同样改道，胜负方向随机 → 相位差本身无好坏，是 RNG 放大。
+- S6-11 tick 2383：威胁 basic@(11,13) 已是 **cbr**（csb false cbr true）——"walk 带才触发"的猜想不成立，威胁集里大部分本就是 cbr/csb。
+
+### 修复尝试：威胁集只保留 csb/cbr（§211 实验）
+
+- 想法：walk 带敌人（deadline 纯几何、无视地形）不该触发 coverage 守点（S31-1 armor@(10,0) d346 是典型）。
+- 实现：collectThreats 加 `canShootBaseLine || canBreachRingLine` 过滤（CENTER 空间 tankCell 判定）。
+- A/B v4：net −33（vs v3 −31），仅 22/4200 runs 结果变化、净 −3（+2/−5），S34 唯一变化负向（cand|33|38: W→L）。
+- **证伪**：过滤几乎不改变行为（deadline<425 的威胁绝大多数已 cbr/csb）；不能消除 S6-11 翻转（介入时威胁已 cbr）。回滚。
+
+### 结论
+
+1. 负翻转根因 = coverage 在玩家已处于有效拦截轨迹时改道 → 微小相位差 → 敌人链蝴蝶放大 → 基地失守。非机制级缺陷，不存在"修复"。
+2. 四轮 A/B 全部净负（−7/−27/−31/−33），每次正确性修复后仍在噪声级负值徘徊 → 机制净负判定（§209）保持，coverageMode=0 维持 OFF。
+3. S34（idx 33）是唯一稳定正信号关（13/60 vs base 7/60）——保留为未来启用的实验场景。
+4. §211 取证流程沉淀为标准方法：per-seed-diff dump（口径 = DEFAULT+coverageMode=1 仅此项）→ 首个分歧 tick → decision-probe 两版分支对比 → 敌人 roster 签名（kind:floor(x/16),floor(y/16):hp 排序）→ 玩家 HP 事件对照（排除玩家血量因素）。
+
+### 状态
+
+§211 收口：csb/cbr 修复回滚，代码回到 §210 状态；15 覆盖测试全绿，check 0 fail（1328 tests）。DECISIONS.md §211 已记录。

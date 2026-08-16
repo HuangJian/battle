@@ -1,12 +1,113 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
+import type { World } from '../../game/World'
 import { findPath, type Cell } from '../../utils/pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
+import { targetValue, enemyDeadline } from './ThreatBudget'
+import { coveragePlanImpl } from './CoveragePlanner'
+import type { ActionId } from './DecisionCore'
 import { blocksBullet } from './Chokepoint'
+
+// ---- Phase 2 §6.3: short-term action intent (plan §6.3) ----
+// A hunt/engage target is locked only for a lease; revalidation releases on
+// target death/unreachability, lease expiry, player stall (no move + no fire
+// for the window), deadline tightening past the committed slack, a clearly
+// worse new threat, or target flight beyond expectedProgress. This is NOT a
+// longer huntCommitTicks — expiry, progress and threat constraints all bind.
+// The defense cascade runs above selectTarget, so an intent never delays
+// threat response. intentMode 0 = never read/written (byte-identical).
+export interface ActionIntent {
+  kind: ActionId
+  targetId: number
+  expiresTick: number
+  minSlack: number
+  expectedProgress: number
+  lastMoveFrame: number
+  lastPlayerCol: number
+  lastPlayerRow: number
+}
+/** New-threat release: another enemy's deadline is this many ticks worse. */
+const INTENT_THREAT_DELTA = 15
+/** Slack release: committed deadline tightened past minSlack − relax. */
+const INTENT_SLACK_RELAX = 10
+/** Flight release: distance grew past expectedProgress + this (cells). */
+const INTENT_PROGRESS_DEGRADE = 2
+/** Revalidation cadence for the expensive deadline scan (plan band 6~15). */
+const INTENT_REVALIDATE_EVERY = 10
+
+/**
+ * Validate the active intent and return the committed target cell, or null
+ * when any release condition holds (caller falls through to a fresh pick,
+ * which re-commits via intentWrite). Cheap conditions (lease, alive, stall,
+ * flight) run every call; the deadline scans run on the INTENT_REVALIDATE_EVERY
+ * frame grid (deterministic — frame-based, no RNG).
+ */
+function intentRead(
+  self: GodAIInput,
+  w: World,
+  p: Tank,
+  playerCell: Cell,
+  enemies: Tank[],
+): Cell | null {
+  const it = self._intent
+  if (!it) return null
+  if (w.frame >= it.expiresTick) return null // lease expired
+  let ti = -1
+  for (let i = 0; i < enemies.length; i++) {
+    if (enemies[i].id === it.targetId) {
+      ti = i
+      break
+    }
+  }
+  if (ti < 0) return null // target dead or unreachable
+  const t = enemies[ti]
+  // Track movement for the stall check (also refreshes after player respawn).
+  if (it.lastPlayerCol !== playerCell.col || it.lastPlayerRow !== playerCell.row) {
+    it.lastMoveFrame = w.frame
+    it.lastPlayerCol = playerCell.col
+    it.lastPlayerRow = playerCell.row
+  }
+  // Stall: unmoved and not recently firing for the window → release. Firing
+  // means the player is still engaging (hold-fire) — fireCooldown > 0 marks a
+  // recent shot (cadence ≥ 99, so the window cannot outlive the marker).
+  if (w.frame - it.lastMoveFrame >= self.params.intentProgressWindowTicks && p.fireCooldown <= 0) {
+    return null
+  }
+  // Flight: target farther than at commit (+ degrade) → the approach sunk.
+  const tc = self.tankCell(t)
+  const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+  if (d > it.expectedProgress + INTENT_PROGRESS_DEGRADE && p.fireCooldown <= 0) return null
+  // Threat revalidation (throttled): the committed deadline tightened past
+  // the committed slack, or any enemy is clearly more urgent now.
+  if (w.frame % INTENT_REVALIDATE_EVERY === 0) {
+    const committed = enemyDeadline(w, t).damageDeadline
+    if (committed < it.minSlack - INTENT_SLACK_RELAX) return null
+    for (let i = 0; i < enemies.length; i++) {
+      if (enemies[i].id === it.targetId) continue
+      if (enemyDeadline(w, enemies[i]).damageDeadline < committed - INTENT_THREAT_DELTA) return null
+    }
+  }
+  return tc
+}
+
+/** Commit the freshly picked target as a short-term intent. */
+function intentWrite(self: GodAIInput, w: World, playerCell: Cell, best: Tank) {
+  const tc = self.tankCell(best)
+  self._intent = {
+    kind: 'hunt',
+    targetId: best.id,
+    expiresTick: w.frame + self.params.intentLeaseTicks,
+    minSlack: enemyDeadline(w, best).damageDeadline,
+    expectedProgress: Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row),
+    lastMoveFrame: w.frame,
+    lastPlayerCol: playerCell.col,
+    lastPlayerRow: playerCell.row,
+  }
+}
 
 // ============================================================
 // StrategyPlanner — target selection (S6 attack-defense), power-up
@@ -1387,6 +1488,11 @@ export function selectTargetImpl(self: GodAIInput, playerCell: Cell): Cell | nul
 // nothing better exists.
 const PATH_TARGET_DIG_PENALTY = 1000
 const PATH_TARGET_UNREACHABLE_PENALTY = 2000
+// Phase 2 §6.2: targetValue near-tie window — values within this gap are
+// equal, and the standard distance ordering (bonus/coop included) breaks
+// the tie. Typical values are ~0.1-1.0, so 0.05 is a small but meaningful
+// window: close-enough targets keep their historical preferences.
+const TARGET_VALUE_TIE_EPS = 0.05
 
 // §171: reusable Cell buffers for huntPathCost's findPath calls — avoids
 // per-query allocation (AGENTS §14.1). findPath is synchronous and never
@@ -1729,6 +1835,42 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // This replaces the old endgame check (which was too restrictive:
   // enemiesRemaining <= 1 && enemies.length <= 1).
   if (canHunt) {
+    // Phase 2 §6.3: intent read — all defense/override branches above have
+    // returned already, so a valid intent never delays threat response.
+    if (self.params.intentMode > 0) {
+      const it = intentRead(self, w, p, playerCell, enemies)
+      if (it) return it
+    }
+    // Phase 2 §6.2: targetValueMode — dynamic target value instead of pure
+    // distance (targetValue in ThreatBudget: expected base damage prevented
+    // over the player's reach+kill horizon). Near-ties (value within
+    // TARGET_VALUE_TIE_EPS) fall back to the standard distance ordering, so
+    // bonus/coop preferences keep working as tiebreaks. Mode 0 = the loop
+    // below verbatim (byte-identical).
+    if (self.params.targetValueMode > 0) {
+      let best = enemies[0]
+      let bestV = -Infinity
+      let bestD = Infinity
+      for (let ti = 0; ti < enemies.length; ti++) {
+        const t = enemies[ti]
+        const tc = self.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        let adjustedDist = d - (t.bonus ? 2 : 0)
+        if (coopActive && partnerCell) {
+          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          if (pd < d - 3) adjustedDist += 5
+        }
+        const v = targetValue(self.world, p, t)
+        if (v > bestV + TARGET_VALUE_TIE_EPS || (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)) {
+          bestV = v
+          bestD = adjustedDist
+          best = t
+        }
+      }
+      self._lastSelectTargetId = best.id
+      if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
+      return self.tankCell(best)
+    }
     let best = enemies[0]
     let bestDist = Infinity
     for (let ti = 0; ti < enemies.length; ti++) {
@@ -1748,6 +1890,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       }
     }
     self._lastSelectTargetId = best.id
+    if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
     return self.tankCell(best)
   }
 
@@ -1789,14 +1932,30 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
       const patrol = findDualPatrolTargetImpl(self, playerCell, enemies)
       if (patrol) return patrol
     }
+    // Phase 3 (plan §7): dynamic attack coverage point. After every defense
+    // and override branch — a coverage hold never delays threat response.
+    // Falls through to the normal hunt when no better point exists (规划失败
+    // 时回到原有 hunt/engage 行为).
+    if (self.params.coverageMode > 0) {
+      const cov = coveragePlanImpl(self, w, p, playerCell, enemies)
+      if (cov) return cov
+    }
+    // Phase 2 §6.3: intent read (same position as the §170 commit — after
+    // every defense/override branch, so a valid intent never delays threat
+    // response). intentMode wins over the plain §170 commit when both are on.
+    if (self.params.intentMode > 0) {
+      const it = intentRead(self, w, p, playerCell, enemies)
+      if (it) return it
+    }
     // §170 hunt commit: while the commit window is open and the committed
     // enemy is still alive, keep chasing it — the per-tick nearest-pick
     // re-routes the mid-approach player whenever the nearest identity
     // flips, sinking the approach cost (DECISIONS §170). Defense cascade
     // runs above, so a commit never delays threat response; expiry simply
     // falls through to the free nearest-selection below (which re-commits
-    // if the same enemy is still the pick).
+    // if the same enemy is still the pick). Disabled when intentMode > 0.
     if (
+      self.params.intentMode <= 0 &&
       self.params.huntCommitTicks > 0 &&
       self._huntCommitId >= 0 &&
       w.frame < self._huntCommitUntil
@@ -1807,6 +1966,46 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     }
     let best = enemies[0]
     let bestDist = Infinity
+    if (self.params.targetValueMode > 0) {
+      // Phase 2 §6.2 (same contract as the canHunt variant above; also keeps
+      // the §171 pathTargetMode flavor in the tiebreak when enabled).
+      let bestV = -Infinity
+      let bestD = Infinity
+      for (let ti = 0; ti < enemies.length; ti++) {
+        const t = enemies[ti]
+        const tc = self.tankCell(t)
+        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+        let adjustedDist: number
+        if (self.params.pathTargetMode > 0) {
+          adjustedDist =
+            huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
+            (t.bonus ? self.params.bonusHuntBias : 0)
+          if (coopActive && partnerCell) {
+            const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+            if (pd < d - 3) adjustedDist += 5
+          }
+        } else {
+          adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+          if (coopActive && partnerCell) {
+            const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+            if (pd < d - 3) adjustedDist += 5
+          }
+        }
+        const v = targetValue(self.world, p, t)
+        if (v > bestV + TARGET_VALUE_TIE_EPS || (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)) {
+          bestV = v
+          bestD = adjustedDist
+          best = t
+        }
+      }
+      if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
+      else if (self.params.huntCommitTicks > 0) {
+        self._huntCommitId = best.id
+        self._huntCommitUntil = w.frame + self.params.huntCommitTicks
+      }
+      self._lastSelectTargetId = best.id
+      return self.tankCell(best)
+    }
     if (self.params.pathTargetMode > 0) {
       // §171: score enemies by TRUE travel cost instead of Manhattan —
       // maze stages put wall-separated enemies "near" in Manhattan while the
@@ -1849,7 +2048,8 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
         }
       }
     }
-    if (self.params.huntCommitTicks > 0) {
+    if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
+    else if (self.params.huntCommitTicks > 0) {
       self._huntCommitId = best.id
       self._huntCommitUntil = w.frame + self.params.huntCommitTicks
     }

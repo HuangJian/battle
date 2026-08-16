@@ -13,6 +13,7 @@ import {
   runSimulation,
   type RunTelemetry,
   type RunForensics,
+  type ThreatLedgerRun,
   type SimResult,
 } from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
@@ -47,6 +48,9 @@ export interface SimTask {
   /** Return per-run forensics (DECISIONS §119): terminal snapshot, action
    *  trace, death/kill/pickup history. Read-only — outcome unaffected. */
   forensics?: boolean
+  /** Return the event-driven threat ledger (God-AI breakthrough plan §4.1).
+   *  Read-only — outcome unaffected. Default off. */
+  threatLedger?: boolean
   /** Dual-God-AI mode: both players controlled by God AI (coop). Default off. */
   coop?: boolean
   /** 督战双玩家: supervise mode with a second God AI driving player2 (distinct
@@ -74,6 +78,8 @@ export interface SimTaskResult {
   selfFireGuardBlocks?: number
   /** Per-run forensics (only when the task requested forensics). */
   forensics?: RunForensics
+  /** Event-driven threat ledger (only when the task requested threatLedger). */
+  ledger?: ThreatLedgerRun
   /** Failure cause ('base_destroyed' | 'lives_exhausted' | 'timeout'). */
   failureCause?: string
   /** Kind of the tank whose bullet destroyed the base (self-inflicted = 'player'). */
@@ -100,6 +106,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       telemetry: task.telemetry === true,
       commitCounts: task.commitCounts === true,
       forensics: task.forensics === true,
+      threatLedger: task.threatLedger === true,
       coop: task.coop === true,
       spectateDual: task.spectateDual === true,
       record: task.recordReplay === true,
@@ -132,6 +139,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       msg.failureCause = result.failure?.cause
       msg.failureKillerKind = result.failure?.killerKind
     }
+    if (task.threatLedger === true) msg.ledger = result.ledger
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }
   }

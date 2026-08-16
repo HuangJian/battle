@@ -41,6 +41,7 @@ import {
   anyThreatPointEnemyImpl,
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
+import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from './ActionContract'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import {
   enemyCanShootBase,
@@ -592,6 +593,23 @@ const BASE_LANE_SENTRY: Candidate = {
       // 正常流动（midLane/navigate）会移动玩家，几何改善后哨兵再接管。
       if (blocked === 1 && !bestCsb && shouldFireInDirImpl(self, pcx, pcy, dir)) {
         if (manhattan > prm.baseLaneSentryRange) return false
+        // Phase 2 §6.1 行动有效性契约: 站立 + 冷却中的无产出站桩先过契约
+        // （敌弹在射线 / 自己子弹在飞 / 站桩击杀 killSlack>0），否则让位。
+        // mode=0 短路 → byte-identical。
+        if (
+          prm.actionContractMode > 0 &&
+          p.dir === dir &&
+          onCooldown &&
+          !contractStandingHold({
+            world: w,
+            player: p,
+            threat: best,
+            enemyBulletOnRay: enemyBulletOnRay(w, p, ccol === tc.col),
+            ownBulletOnRay: ownBulletOnRay(w, p, ccol === tc.col),
+          }).valid
+        ) {
+          return false
+        }
         self._moveDir = p.dir === dir ? null : dir
         self._fire = !onCooldown
         self.branchCounts.baseLaneSentry++
@@ -1213,6 +1231,25 @@ const DEFENSE_INTERCEPT: Candidate = {
       // scan may hit a nearer enemy, which is equally worth shooting.
       const scan = scanAheadImpl(self, pcx, pcy, dir)
       if (scan.enemy && scan.enemyDist <= distCells * CELL + CELL) {
+        // Phase 2 §6.1 行动有效性契约: 站立（已面向）+ 冷却中的提交 = 无产出
+        // 站桩（M0 台账 no_output_commit 60% 失败族）。mode>0 时先过契约 —
+        // 敌弹在射线 / 自己子弹在飞 / 站桩击杀 killSlack>0 才允许原地等待，
+        // 否则放弃本分支（fall through 到 engage/hunt/navigate 产生输出）。
+        // 绝不否决有移动/有开火的提交（§199 弃守教训）。mode=0 短路 → byte-identical。
+        if (
+          prm.actionContractMode > 0 &&
+          p.dir === dir &&
+          onCooldown &&
+          !contractStandingHold({
+            world: w,
+            player: p,
+            threat: t,
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
+          }).valid
+        ) {
+          continue
+        }
         self._moveDir = p.dir === dir ? null : dir
         self._fire = !onCooldown && self.rng.next() >= self.params.aimError
         self.branchCounts.defenseIntercept++
@@ -1232,6 +1269,20 @@ const DEFENSE_INTERCEPT: Candidate = {
         !scan.baseWall &&
         !scan.steel
       ) {
+        if (
+          prm.actionContractMode > 0 &&
+          p.dir === dir &&
+          onCooldown &&
+          !contractStandingHold({
+            world: w,
+            player: p,
+            threat: t,
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
+          }).valid
+        ) {
+          continue
+        }
         self._moveDir = p.dir === dir ? null : dir
         self._fire = !onCooldown && shouldFireInDirImpl(self, pcx, pcy, dir)
         self.branchCounts.defenseIntercept++

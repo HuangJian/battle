@@ -7,8 +7,9 @@ import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/
 import { RNG } from '../../src/utils/RNG'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { InputRecorder } from '../../src/replay/InputRecorder'
+import { enemyCanShootBase, enemyCanBreachRing } from '../../src/ai/god/SmartThreatModel'
 import type { Direction } from '../../src/constants'
-import type { StageData, GameEvent, TankKind, IntelligenceLevel } from '../../src/types'
+import type { StageData, GameEvent, TankKind, IntelligenceLevel, Tank } from '../../src/types'
 
 // ============================================================
 // Types
@@ -158,6 +159,8 @@ export interface SimResult {
   selfFireGuardBlocks?: number
   /** Per-run forensics (only when `forensics: true`). */
   forensics?: RunForensics
+  /** Event-driven threat ledger (only when `threatLedger: true`). */
+  ledger?: ThreatLedgerRun
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../../src/snapshot/types').WorldSnapshot
@@ -252,6 +255,76 @@ export interface ForensicsSnapshot {
   enemies: ForensicsTank[]
   /** Every in-flight enemy bullet, with position/direction/distances. */
   enemyBullets: ForensicsBullet[]
+}
+
+// ============================================================
+// Threat ledger (plan/God-AI-Hard-Breakthrough-Implementation.md §4.1)
+// ============================================================
+
+/** One live enemy's diagnostic snapshot inside a ledger sample. */
+export interface ThreatLedgerEnemy {
+  id: number
+  kind: TankKind
+  hp: number
+  cell: { col: number; row: number }
+  dir: Direction
+  /** Enemy currently has a CLEAR shot at the base (canShootBaseFrom). */
+  canShootBase: boolean
+  /** Enemy currently has a clear shot at an intact ring brick (canBreachRingFrom). */
+  canBreachRing: boolean
+  /** Conservative movement ETA (ticks) to reach the base ring; 0 when already
+   *  aligned on a shoot line (csb/cbr). Geometric lower bound — no turn cost,
+   *  no path A* (M0; the M1 ThreatBudget replaces this with legal-turn-aware
+   *  ETAs). */
+  enemyToRingEta: number
+  /** Conservative player ETA (ticks) to reach a kill position for this enemy
+   *  (Manhattan cell distance / player speed). M0 geometric estimate. */
+  playerKillEta: number
+  /** Conservative ticks until this enemy's bullet would damage the base/ring
+   *  if it fired now (flight time along its aligned line; 0 when csb — the
+   *  danger is immediate). */
+  shootEta: number
+}
+
+/** One event-driven ledger sample (plan §4.1). Collected only when the run
+ *  opts in via `RunOptions.threatLedger`; when off the run is byte-identical.
+ *  Everything here is a read-only observation of the World + the AI's cached
+ *  decision state — never feeds back, never consumes world.rng. */
+export interface ThreatLedgerSample {
+  tick: number
+  baseHp: number
+  intactRing: number
+  playerCell: { col: number; row: number }
+  playerDir: Direction
+  playerLives: number
+  /** The decision-chain branch that took effect this tick. */
+  branch: string
+  /** Player fire cooldown mirror (same semantics as thinkImpl's gate). */
+  onCooldown: boolean
+  liveEnemies: number
+  /** The AI's own base-threat predicate (isBaseUnderThreat) — the "detection"
+   *  signal: what the player could know. */
+  baseThreatNow: boolean
+  /** Min over live enemies of shootEta — the danger deadline (ticks). */
+  nearestThreatEta: number
+  /** Player ETA to the best intercept (min playerKillEta over threat enemies). */
+  playerEtaToBestIntercept: number
+  /** nearestThreatEta − playerEtaToBestIntercept (positive = can make it). */
+  threatSlack: number
+  /** Branch name when this tick's commit produced NO movement and NO fire —
+   *  a standing no-output commit. null otherwise. */
+  noOpReason: string | null
+  /** Per-enemy diagnostics (live, fully-spawned enemies only). */
+  enemies: ThreatLedgerEnemy[]
+}
+
+/** Per-run ledger payload (only when `threatLedger: true`). */
+export interface ThreatLedgerRun {
+  outcome: SimOutcome
+  failureCause?: 'base_destroyed' | 'lives_exhausted' | 'timeout'
+  tick: number
+  baseMaxHp: number
+  samples: ThreatLedgerSample[]
 }
 
 /** One historical player-side event (death / kill / power-up pickup / shot). */
@@ -351,6 +424,14 @@ export interface RunOptions {
    * run-forensics CLI instead, which is a separate sweep).
    */
   forensics?: boolean
+  /**
+   * Collect the event-driven threat ledger (plan/God-AI-Hard-Breakthrough §4.1):
+   * samples pushed when the base HP / ring / threat predicate / branch /
+   * player cell / slack sign changes. Read-only observation — the run outcome
+   * is byte-identical whether on or off. Default false. Opt-in tooling: the
+   * per-sample enemy scan allocates, so never enable inside the optimizer.
+   */
+  threatLedger?: boolean
 }
 
 // ============================================================
@@ -363,24 +444,21 @@ const TELEMETRY_SAMPLE_TICKS = 6
 const BASE_PRESSURE_RADIUS = 12
 
 /**
- * The 8 cells that form the classic base protection ring: the border of the
- * 4×4 box centred on the 2×2 base, clipped to the grid. Computed once — the
- * base position is a fixed constant (`BASE_POS`).
+ * The 8 cells that form the classic base protection ring, mirroring
+ * SimulationCombat.isBaseProtectionCell verbatim:
+ *   row br−1 over cols bc−1..bc+2, plus cols bc−1 and bc+2 at rows br..br+1.
+ * Computed once — the base position is a fixed constant (`BASE_POS`).
  */
 const BASE_RING_CELLS: Array<{ col: number; row: number }> = (() => {
   const cells: Array<{ col: number; row: number }> = []
-  for (let row = BASE_POS.row - 1; row <= BASE_POS.row + 2; row++) {
-    for (let col = BASE_POS.col - 1; col <= BASE_POS.col + 2; col++) {
-      if (col < 0 || col >= GRID || row < 0 || row >= GRID) continue
-      // Skip the 2×2 base itself — only the surrounding wall counts.
-      const isBaseCell =
-        col >= BASE_POS.col &&
-        col <= BASE_POS.col + 1 &&
-        row >= BASE_POS.row &&
-        row <= BASE_POS.row + 1
-      if (isBaseCell) continue
-      cells.push({ col, row })
-    }
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  for (let col = bc - 1; col <= bc + 2; col++) {
+    cells.push({ col, row: br - 1 })
+  }
+  for (let row = br; row <= br + 1; row++) {
+    cells.push({ col: bc - 1, row })
+    cells.push({ col: bc + 2, row })
   }
   return cells
 })()
@@ -542,6 +620,10 @@ export function runSimulation(opts: RunOptions): SimResult {
   let fxKills = 0
   let fxPlayerDeaths = 0
   let fxTerminal: ForensicsSnapshot | null = null
+  // ---- Threat-ledger accumulators (only touched when opts.threatLedger) ----
+  const wantLedger = opts.threatLedger === true
+  const ledgerSamples: ThreatLedgerSample[] = []
+  let ledgerPrevSig = ''
 
   const t0 = performance.now()
 
@@ -561,6 +643,17 @@ export function runSimulation(opts: RunOptions): SimResult {
           py: world.player ? world.player.y + world.player.h / 2 : -1,
         }
       : null
+    // Threat ledger: event-driven sampling — push a sample when the base HP /
+    // ring integrity / threat predicate / branch / player cell / slack sign
+    // changed (pre-endFrame: _lastBranch is THIS tick's decision). Read-only.
+    if (wantLedger) {
+      const s = computeLedgerSample(world, input, tick)
+      const sig = ledgerSignature(s)
+      if (sig !== ledgerPrevSig) {
+        ledgerSamples.push(s)
+        ledgerPrevSig = sig
+      }
+    }
     // Record this tick's input BEFORE endFrame clears the cached state.
     // In dual supervise the second God AI (god2) is the P2 input; coopInput is
     // null there, so fall back to whichever P2 input is actually wired.
@@ -880,6 +973,16 @@ export function runSimulation(opts: RunOptions): SimResult {
     }
   }
 
+  if (wantLedger) {
+    result.ledger = {
+      outcome,
+      failureCause: failure?.cause,
+      tick,
+      baseMaxHp: world.baseMaxHp,
+      samples: ledgerSamples,
+    }
+  }
+
   if (wantTelemetry) {
     result.telemetry = {
       enemyTotal: stage.enemyCount ?? ENEMIES_PER_STAGE,
@@ -1067,4 +1170,162 @@ function countIncomingThreats(world: World): number {
     if (approaching) count++
   }
   return count
+}
+
+// ============================================================
+// Threat-ledger sampling (plan/God-AI-Hard-Breakthrough-Implementation §4.1)
+//
+// M0 geometric ETA model — deliberately conservative and explainable, NOT a
+// simulation of enemy RNG or turn costs. The M1 ThreatBudget pure module
+// (src/ai/god/ThreatBudget.ts) replaces these estimates with the legal-turn-
+// aware model; the sample shape stays stable so M0 corpora remain valid.
+// ============================================================
+
+/** Manhattan cell distance between two cells. */
+function manhattanCells(a: { col: number; row: number }, b: { col: number; row: number }): number {
+  return Math.abs(a.col - b.col) + Math.abs(a.row - b.row)
+}
+
+/** Nearest ring cell to (col,row) — Manhattan metric over BASE_RING_CELLS. */
+function nearestRingCell(col: number, row: number): { col: number; row: number } {
+  let best = BASE_RING_CELLS[0]
+  let bestD = Infinity
+  for (let i = 0; i < BASE_RING_CELLS.length; i++) {
+    const c = BASE_RING_CELLS[i]
+    const d = Math.abs(c.col - col) + Math.abs(c.row - row)
+    if (d < bestD) {
+      bestD = d
+      best = c
+    }
+  }
+  return best
+}
+
+/**
+ * Build one ledger sample from the current World + the AI's cached decision
+ * state. Pure observation: writes nothing, consumes no RNG, and snapshots
+ * every value immediately (the tankCell shared-buffer contract — never hold
+ * a reference across another tankCell call).
+ */
+function computeLedgerSample(world: World, input: GodAIInput, tick: number): ThreatLedgerSample {
+  const p = world.player
+  const pc = p ? playerCellOf(p) : { col: -1, row: -1 }
+  const playerSpeed = p && p.speed > 0 ? p.speed : 1
+
+  // Player fire-cooldown mirror (same semantics as thinkImpl's M6 gate).
+  let onCooldown = false
+  if (p) {
+    if (world.rules.fireModel === 'bulletCap') {
+      const cap =
+        (world.rules.maxBullets['player'] ?? 1) +
+        ((p.level ?? 0) >= world.rules.playerDoubleShotLevel ? 1 : 0)
+      let inFlight = 0
+      const bullets = world.bullets
+      for (let bi = 0; bi < bullets.length; bi++) {
+        const b = bullets[bi]
+        if (b.alive && b.ownerId === p.id && ++inFlight >= cap) break
+      }
+      onCooldown = inFlight >= cap
+    } else {
+      onCooldown = world.frame * (1000 / 60) - p.lastFire < p.nextFireInterval
+    }
+  }
+
+  // Per-enemy diagnostics. tankCell writes the shared buffer — snapshot into
+  // our own objects immediately.
+  const enemies: ThreatLedgerEnemy[] = []
+  let liveEnemies = 0
+  let nearestThreatEta = Infinity
+  let bestInterceptEta = Infinity
+  const tanks = world.tanks
+  for (let ti = 0; ti < tanks.length; ti++) {
+    const t = tanks[ti]
+    if (t.isPlayer || !t.alive || t.spawnTimer > 0) continue
+    liveEnemies++
+    const c = input.tankCell(t)
+    const cell = { col: c.col, row: c.row }
+    const csb = enemyCanShootBase(input, t)
+    const cbr = !csb && enemyCanBreachRing(input, t)
+    const ring = nearestRingCell(cell.col, cell.row)
+    // M0 conservative ETAs (ticks).
+    const moveEta = csb || cbr ? 0 : (manhattanCells(cell, ring) * CELL) / Math.max(1, t.speed)
+    const flightEta = (manhattanCells(cell, ring) * CELL) / Math.max(1, t.bulletSpeed)
+    const shootEta = csb ? 0 : moveEta + flightEta
+    const killEta = (manhattanCells(cell, pc) * CELL) / playerSpeed
+    if (csb || cbr) {
+      if (shootEta < nearestThreatEta) nearestThreatEta = shootEta
+      if (killEta < bestInterceptEta) bestInterceptEta = killEta
+    }
+    enemies.push({
+      id: t.id,
+      kind: t.kind,
+      hp: t.hp,
+      cell,
+      dir: t.dir,
+      canShootBase: csb,
+      canBreachRing: cbr,
+      enemyToRingEta: Math.round(moveEta * 10) / 10,
+      playerKillEta: Math.round(killEta * 10) / 10,
+      shootEta: Math.round(shootEta * 10) / 10,
+    })
+  }
+
+  const nearestEta = Number.isFinite(nearestThreatEta) ? Math.round(nearestThreatEta * 10) / 10 : -1
+  const interceptEta =
+    Number.isFinite(bestInterceptEta) ? Math.round(bestInterceptEta * 10) / 10 : -1
+  const slack =
+    Number.isFinite(nearestThreatEta) && Number.isFinite(bestInterceptEta)
+      ? Math.round((nearestThreatEta - bestInterceptEta) * 10) / 10
+      : -999
+
+  return {
+    tick,
+    baseHp: world.baseHp,
+    intactRing: countBaseWall(world),
+    playerCell: { col: pc.col, row: pc.row },
+    playerDir: p?.dir ?? 'up',
+    playerLives: world.lives,
+    branch: input._lastBranch,
+    onCooldown,
+    liveEnemies,
+    baseThreatNow: input.isBaseUnderThreat(),
+    nearestThreatEta: nearestEta,
+    playerEtaToBestIntercept: interceptEta,
+    threatSlack: slack,
+    noOpReason: input._moveDir === null && !input._fire ? input._lastBranch : null,
+    enemies,
+  }
+}
+
+/**
+ * Event-detection signature: two samples with the same signature are
+ * observationally identical for the ledger's triggers (base HP, ring intact,
+ * threat predicate, branch, player cell, slack sign, no-op status). The
+ * player-dist-to-base is folded in because the P4 race predicate consumes it.
+ */
+function ledgerSignature(s: ThreatLedgerSample): string {
+  const threatFlags = s.enemies
+    .map((e) => `${e.id}:${e.canShootBase ? 1 : 0}${e.canBreachRing ? 1 : 0}`)
+    .join(',')
+  return [
+    s.baseHp,
+    s.intactRing,
+    s.branch,
+    s.playerCell.col,
+    s.playerCell.row,
+    s.playerLives,
+    s.liveEnemies,
+    s.baseThreatNow ? 1 : 0,
+    s.threatSlack >= 0 ? 1 : 0,
+    s.noOpReason ?? '',
+    threatFlags,
+  ].join('|')
+}
+
+/**
+ * Player tank cell — the ledger runs outside GodAIInput's private access, so
+ * it re-derives the cell from world.player (identical to playerCellImpl).
+ */
+function playerCellOf(p: Tank): { col: number; row: number } {
+  return { col: Math.floor((p.x + p.w / 2) / CELL), row: Math.floor((p.y + p.h / 2) / CELL) }
 }

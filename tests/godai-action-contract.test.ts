@@ -1,0 +1,226 @@
+import { describe, it, expect } from 'bun:test'
+import { World } from '../src/game/World'
+import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
+import { STAGES } from '../src/config/stages'
+import { CELL } from '../src/constants'
+import type { Bullet } from '../src/types'
+import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../src/ai/god/ActionContract'
+import { runSimulation } from '../tools/sim/simulation-runner'
+
+/**
+ * Phase 2 §6.1 (plan/God-AI-Hard-Breakthrough-Implementation.md):
+ * 冷却期有效等待 / 无产出提交 contract tests.
+ *
+ * A defense branch may commit a standing no-fire hold (moveDir=null,
+ * fire=false while on cooldown) only when the hold has valid waiting value:
+ * enemy bullet on the held ray / own bullet resolving on the line / standing
+ * shot beats the enemy's damage deadline (killSlack > 0). mode=0 → the gate
+ * never runs (byte-identical).
+ */
+
+function buildWorld(stageIdx: number): World {
+  const w = new World()
+  w.difficultyKey = 'hard'
+  w.loadStageData(STAGES[stageIdx], stageIdx)
+  w.playerLevel = 1
+  return w
+}
+
+/** Clear the base approach zone (rows 22-25, cols 10-25) for deterministic geometry. */
+function clearBaseZone(w: World) {
+  for (let r = 22; r <= 25; r++) for (let c = 10; c <= 25; c++) w.tileMap.destroy(c, r)
+}
+
+function placePlayer(w: World, col: number, row: number, dir: 'up' | 'down' | 'left' | 'right') {
+  const p = w.player!
+  p.x = col * CELL
+  p.y = row * CELL
+  p.dir = dir
+  p.lastTurnMs = -9999
+  p.lastFire = -9999
+  return p
+}
+
+function addEnemy(w: World, col: number, row: number, kind: string = 'basic') {
+  const e = w.createTank(kind as never, col * CELL, row * CELL, 'down')
+  e.spawnTimer = 0
+  e.alive = true
+  return e
+}
+
+function addBullet(w: World, x: number, y: number, dir: 'up' | 'down' | 'left' | 'right', enemy = true, ownerId = 0) {
+  const b: Bullet = {
+    id: w.bulletSeq++,
+    x,
+    y,
+    w: 6,
+    h: 6,
+    dir,
+    alive: true,
+    ownerId,
+    ownerKind: enemy ? 'basic' : 'player',
+    isPlayer: !enemy,
+    allegiance: enemy ? 'enemy' : 'player',
+    speed: 2,
+    power: 1,
+    damage: 1,
+  }
+  w.addBullet(b)
+  return b
+}
+
+function baseCtx(over: Partial<Parameters<typeof contractStandingHold>[0]> = {}) {
+  const w = buildWorld(0)
+  clearBaseZone(w)
+  const p = placePlayer(w, 8, 8, 'down')
+  const threat = addEnemy(w, 8, 10, 'basic')
+  return {
+    world: w,
+    player: p,
+    threat,
+    enemyBulletOnRay: false,
+    ownBulletOnRay: false,
+    ...over,
+  } as Parameters<typeof contractStandingHold>[0]
+}
+
+describe('contractStandingHold (§6.1 valid waiting value)', () => {
+  it('no threat → invalid (standing has no value)', () => {
+    const v = contractStandingHold(baseCtx({ threat: null }))
+    expect(v.valid).toBe(false)
+    expect(v.reason).toContain('no threat')
+  })
+
+  it('killSlack > 0 → valid: the held shot lands before the deadline', () => {
+    // Player (8,8) aligned with (8,10); enemy far from the base → deadline
+    // large (walk + breach + window), killEta small (2-cell flight).
+    const v = contractStandingHold(baseCtx({}))
+    expect(v.valid).toBe(true)
+    expect(v.reason).toContain('killSlack')
+  })
+
+  it('killSlack < 0 → invalid: csb enemy, player far on the line, on cooldown', () => {
+    // Power enemy on the base row (csb after zone clear) at (8,24); player
+    // at (8,0) — 24 cells of flight, just fired (full re-arm pending). The
+    // standing shot cannot beat ~2 power cadences of damage window.
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 0, 'down')
+    p.lastFire = 0 // fired at t0 → on cooldown
+    w.frame = 1
+    const threat = addEnemy(w, 8, 24, 'power')
+    const v = contractStandingHold({ world: w, player: p, threat, enemyBulletOnRay: false, ownBulletOnRay: false })
+    expect(v.valid).toBe(false)
+    expect(v.reason).toContain('killSlack')
+  })
+
+  it('enemy bullet on the held ray → valid even when the shot is hopeless', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 4, 'down')
+    const threat = addEnemy(w, 8, 24, 'basic')
+    const v = contractStandingHold({
+      world: w,
+      player: p,
+      threat,
+      enemyBulletOnRay: true,
+      ownBulletOnRay: false,
+    })
+    expect(v.valid).toBe(true)
+    expect(v.reason).toContain('interception')
+  })
+
+  it('own bullet resolving on the threat line → valid', () => {
+    const v = contractStandingHold(baseCtx({ ownBulletOnRay: true }))
+    expect(v.valid).toBe(true)
+    expect(v.reason).toContain('own bullet')
+  })
+
+  it('pure: consumes no World RNG', () => {
+    const c = baseCtx({})
+    const before = c.world.rng.getState()
+    contractStandingHold(c)
+    expect(c.world.rng.getState()).toBe(before)
+  })
+})
+
+describe('enemyBulletOnRay / ownBulletOnRay (pure ray scans)', () => {
+  it('enemy bullet on the player column heading toward the base → true', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 8, 'down')
+    // Enemy bullet at (8*16+6, 8*16) heading down (toward base rows 24-25).
+    addBullet(w, 8 * CELL + 13, 8 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, true)).toBe(true)
+  })
+
+  it('bullet heading AWAY from the base → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 8, 'down')
+    addBullet(w, 8 * CELL + 13, 8 * CELL, 'up', true)
+    expect(enemyBulletOnRay(w, p, true)).toBe(false)
+  })
+
+  it('bullet on a different column → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 8, 'down')
+    addBullet(w, 12 * CELL + 13, 8 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, true)).toBe(false)
+  })
+
+  it('own bullet on the ray → true; partner bullet → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 8, 'down')
+    addBullet(w, 8 * CELL + 13, 6 * CELL, 'down', false, p.id)
+    expect(ownBulletOnRay(w, p, true)).toBe(true)
+    addBullet(w, 8 * CELL + 13, 4 * CELL, 'down', false, p.id + 999)
+    expect(ownBulletOnRay(w, p, true)).toBe(true) // the ray check only
+  })
+})
+
+describe('mode gating (byte-identical default, active only when > 0)', () => {
+  it('actionContractMode 0 and undefined params → identical runs', () => {
+    const a = runSimulation({
+      seed: 11,
+      stage: STAGES[33],
+      difficulty: 'hard',
+      stageIndex: 0,
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 0 },
+      maxTicks: 8000,
+    })
+    const b = runSimulation({
+      seed: 11,
+      stage: STAGES[33],
+      difficulty: 'hard',
+      stageIndex: 0,
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS },
+      maxTicks: 8000,
+    })
+    expect(a.outcome).toBe(b.outcome)
+    expect(a.ticks).toBe(b.ticks)
+    expect(a.finalState).toEqual(b.finalState)
+  })
+
+  it('mode 1 actually changes behavior on the M0 no-output stage (S34 seed 11)', () => {
+    const off = runSimulation({
+      seed: 11,
+      stage: STAGES[33],
+      difficulty: 'hard',
+      stageIndex: 0,
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 0 },
+      maxTicks: 8000,
+    })
+    const on = runSimulation({
+      seed: 11,
+      stage: STAGES[33],
+      difficulty: 'hard',
+      stageIndex: 0,
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 1 },
+      maxTicks: 8000,
+    })
+    expect(on.ticks).not.toBe(off.ticks)
+  })
+})
