@@ -61,37 +61,35 @@ interface ParamSpec {
   stepFrac: number
 }
 
-// Init values match current DEFAULT_GOD_AI_PARAMS so CMA-ES starts from the
-// best known operating point and explores outward.
-// Init values synced with DEFAULT_GOD_AI_PARAMS (2026-07-28 v3 results).
-// Ranges widened where the optimizer previously hit bounds.
+// §213 (Phase 5): init values synced with CURRENT DEFAULT_GOD_AI_PARAMS
+// (2026-08-16). Removed aimError / suboptimalPathProb — game-feel params
+// explicitly excluded by breakthrough plan §9.2. Ranges preserved from the
+// v2 epoch (widened where the optimizer previously hit bounds).
 export const SEARCH_SPACE: ParamSpec[] = [
   { name: 'reactionDelay', min: 0, max: 6, isInteger: true, init: 0, stepFrac: 0.25 },
-  { name: 'aimError', min: 0, max: 0.15, isInteger: false, init: 0.0024, stepFrac: 0.3 },
-  { name: 'suboptimalPathProb', min: 0, max: 0.2, isInteger: false, init: 0.062, stepFrac: 0.3 },
   { name: 'defenseRowOffset', min: 1, max: 5, isInteger: true, init: 1, stepFrac: 0.25 },
-  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 5, stepFrac: 0.25 },
-  { name: 'threatRangeCells', min: 8, max: 26, isInteger: true, init: 26, stepFrac: 0.2 },
-  { name: 'maxPlayerDistFromBase', min: 4, max: 26, isInteger: true, init: 10, stepFrac: 0.25 },
-  { name: 't8MaxInterceptDistCells', min: 2, max: 13, isInteger: true, init: 3, stepFrac: 0.3 },
-  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 1, stepFrac: 0.3 },
-  { name: 'replanInterval', min: 1, max: 50, isInteger: true, init: 3, stepFrac: 0.25 },
-  { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 9, stepFrac: 0.25 },
-  { name: 'endgameEnemyThreshold', min: 1, max: 10, isInteger: true, init: 1, stepFrac: 0.3 },
-  { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 4, stepFrac: 0.3 },
+  { name: 'defenseColSpread', min: 3, max: 13, isInteger: true, init: 3, stepFrac: 0.25 },
+  { name: 'threatRangeCells', min: 8, max: 26, isInteger: true, init: 23, stepFrac: 0.2 },
+  { name: 'maxPlayerDistFromBase', min: 4, max: 26, isInteger: true, init: 26, stepFrac: 0.25 },
+  { name: 't8MaxInterceptDistCells', min: 2, max: 13, isInteger: true, init: 2, stepFrac: 0.3 },
+  { name: 'baseWallScanRadius', min: 1, max: 5, isInteger: true, init: 5, stepFrac: 0.3 },
+  { name: 'replanInterval', min: 1, max: 50, isInteger: true, init: 1, stepFrac: 0.25 },
+  { name: 'powerupMaxDivertDistance', min: 3, max: 20, isInteger: true, init: 18, stepFrac: 0.25 },
+  { name: 'endgameEnemyThreshold', min: 1, max: 10, isInteger: true, init: 10, stepFrac: 0.3 },
+  { name: 'huntAllyCount', min: 1, max: 6, isInteger: true, init: 1, stepFrac: 0.3 },
   // P4: race-to-base emergency defense (behavioral fix for S6/S32 flanking
   // runners). Range 0 disables the check entirely — the optimizer can turn
   // it off for stages where it hurts.
-  { name: 'baseRaceRangeCells', min: 0, max: 18, isInteger: true, init: 12, stepFrac: 0.25 },
+  { name: 'baseRaceRangeCells', min: 0, max: 18, isInteger: true, init: 18, stepFrac: 0.25 },
   { name: 'baseRaceMarginCells', min: 0, max: 6, isInteger: true, init: 2, stepFrac: 0.3 },
   // P4.2: outnumbered retreat (S18 crossfire family). Count 5 disables
   // (max 4 enemies alive on field) — the optimizer can turn it off.
-  { name: 'outnumberedEnemyCount', min: 2, max: 5, isInteger: true, init: 3, stepFrac: 0.3 },
-  { name: 'outnumberedRadiusCells', min: 4, max: 14, isInteger: true, init: 8, stepFrac: 0.25 },
+  { name: 'outnumberedEnemyCount', min: 2, max: 5, isInteger: true, init: 5, stepFrac: 0.3 },
+  { name: 'outnumberedRadiusCells', min: 4, max: 14, isInteger: true, init: 7, stepFrac: 0.25 },
   // §66: campTimeoutTicks — base camp timeout for non-armor, non-steel-maze
   // stages. Armor-heavy stages override to 50, S6 overrides to 20 (§66).
   // CMA-ES optimizes the base value for the majority of stages.
-  { name: 'campTimeoutTicks', min: 20, max: 120, isInteger: true, init: 90, stepFrac: 0.25 },
+  { name: 'campTimeoutTicks', min: 20, max: 120, isInteger: true, init: 20, stepFrac: 0.25 },
   // t2aHighHpMaxRange — close-combat range for multi-HP (armor) enemies.
   // Default 2 (point-blank). Open-sightline stages override to 4, armor-
   // forest-dense stages to 3. CMA-ES optimizes the base value.
@@ -101,8 +99,8 @@ export const SEARCH_SPACE: ParamSpec[] = [
   // defensive), max 5 (never fires — max 4 alive, effectively disables M13).
   // outnumberedFieldDistCells: min 4 (retreat as soon as the player leaves
   // the base area), max 26 (only retreat at the far edge).
-  { name: 'outnumberedFieldEnemies', min: 1, max: 5, isInteger: true, init: 3, stepFrac: 0.25 },
-  { name: 'outnumberedFieldDistCells', min: 4, max: 26, isInteger: true, init: 15, stepFrac: 0.25 },
+  { name: 'outnumberedFieldEnemies', min: 1, max: 5, isInteger: true, init: 4, stepFrac: 0.25 },
+  { name: 'outnumberedFieldDistCells', min: 4, max: 26, isInteger: true, init: 26, stepFrac: 0.25 },
 ]
 
 const DIM = SEARCH_SPACE.length

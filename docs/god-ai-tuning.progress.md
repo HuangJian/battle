@@ -1951,3 +1951,48 @@ breakthrough plan §8 (Phase 4) / §10 (M4)：低星级是 hard 长期战力瓶�
 ### 状态
 
 §212 收口：check 全绿（1328 tests）。DECISIONS.md §212 已记录。m4-diagnose.ts + powerupCensus 保留为诊断工具。
+
+---
+
+# §213 / §214 Phase 5 CMA-ES — 启动、执行与收口（2026-08-16）
+
+## §213 启动决策
+
+- **用户指示启动**。plan §9.1 的正式前置（Phase 0-2 证明新结构改善某类失败）**未满足**（§205/§206/§207-§211/§212 全部证伪或诊断收口）——记录偏差并按 §9.3 协议保守执行。
+- **搜索空间重定义**（§9.2）：从 v2 纪元 SEARCH_SPACE（21 参数，其中 19 个 init 与当前 DEFAULT 失同步 + 含 game-feel 参数）改为 **19 参数**：
+  - 剔除 `aimError`、`suboptimalPathProb`（§9.2 明确排除的 game-feel 参数）。
+  - init 全部同步当前 DEFAULT（工具此前从错误起点出发）。
+  - 排除 turnCooldownMs；M1-M4 新机制参数（threat slack/防守 lease/释放 ticks/覆盖点/拾星绕行）不纳入（全部默认 OFF，§9.2 要求"只包含确实使用的参数"）。
+  - 保留：reactionDelay / defenseRowOffset / defenseColSpread / threatRangeCells / maxPlayerDistFromBase / t8MaxInterceptDistCells / baseWallScanRadius / replanInterval / powerupMaxDivertDistance / endgameEnemyThreshold / huntAllyCount / baseRaceRange* / outnumbered* / campTimeoutTicks / t2aHighHpMaxRange。
+
+## §214 执行与收口
+
+### 批次 1（方向筛选 + 60 seeds 确认）
+
+- `SIM_POOL_WORKERS=16 bun tools/optimize/optimize-godai.ts --stages 1-35 --difficulty hard --seeds 20 --generations 8 --fitness v7`（DIM=19，λ=13）。
+- 筛选结果：fitness 632.7 → 675.9（+43.2）、胜率 77%→80%（+3pp）、floor penalty 3200→1600、base survival 80%→82%。
+- 候选移动 8 个参数：defenseRowOffset 1→3 · defenseColSpread 3→4 · threatRangeCells 23→22 · powerupMaxDivertDistance 18→14 · baseRaceMarginCells 2→6 · outnumberedEnemyCount 5→4 · outnumberedRadiusCells 7→4 · outnumberedFieldEnemies 4→5。
+- **60 seeds CRN 配对（新工具 `tools/diag/ab-multi-param.ts`，35 关 × 60 seeds × 2 臂 = 4200 runs，87.4s）**：net **+17/2100（+0.8pp）**，L→W 303 vs W→L 286——**纯噪声**。S34 17→16。
+
+### 批次 2（warm-start 续跑 + 60 seeds 确认）
+
+- `--init .workbuddy/optimization-phase5/optimization-summary.json --sigma 0.6 --opt-seed 2 --generations 10`。
+- 筛选结果：fitness 632.7 → 669.7（+37.0）、胜率 77%→80%（+3pp）、base survival 80%→83%。**与批次 1 收敛同一方向**：defenseRowOffset 1→3 · baseRaceMarginCells 2→6 · threatRangeCells 23→18 · powerupMaxDivertDistance 18→16 · outnumbered 族继续下调。
+- **60 seeds 确认**：net **+9/2100（+0.4pp）**——噪声。S34 17→15。
+
+### 批次 3（核心参数聚焦）
+
+- 仅两个两批都强动的参数：defenseRowOffset=3, baseRaceMarginCells=6。
+- **60 seeds**：net **−16/2100（−0.8pp）**——净负。
+
+### 停止条件触发（§9.3.5）
+
+> 局部扫描 3～5 个候选批次仍只有 ±1～2pp 噪声，即确认参数面没有足够 ROI。
+
+三批全部 ±1pp 噪声（+0.8 / +0.4 / −0.8pp）。**Phase 5 收口：DEFAULT_GOD_AI_PARAMS 不变，不发货任何候选。**
+
+### 关键洞察
+
+1. **筛选系统性高估**：20 seeds 下 floor penalty（minStageWin 20-45% 摆动）与胜率噪声（±2pp）主导 fitness——+37/+43 的"收益"在 60 seeds 全部蒸发。两个独立 CMA-ES 运行收敛的同一方向在 60 seeds 无信号（批次 3 净负），说明该方向是噪声产物而非真实梯度。
+2. **与历史同构**：classic 纪元 §67（多轮探针 ±1pp 内，正式停止调参）、v2 纪元 M11 结论一致。**参数面已穷尽**；剩余提升需要结构性机制（行为/架构），而 M2-M4 结构性机制全部证伪——**hard 基准（SUITE 0.5132 / 胜率 73%）是参数面与行为面的局部最优**。
+3. 沉淀：`tools/diag/ab-multi-param.ts`（多参数 CRN 配对 A/B，ab-param.ts 泛化）。产物保留在 `.workbuddy/optimization-phase5/`（batch 1）、`optimization-phase5-b2/`（batch 2）、`tmp/phase5-ab60{,-b2,-b3}.json`（60-seed 明细，供将来 holdout/取证）。

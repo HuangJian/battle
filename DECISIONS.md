@@ -895,3 +895,29 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Implications:** M4 以诊断收口（§212），不进入参数扫描。Phase 4 结论：吃星不是 hard 突破的主杠杆；瓶颈仍在击杀节奏（§207 S34 结论一致）与基地防守（§198 已 SHIPPED）。诊断工具 `tools/diag/m4-diagnose.ts` + `powerupCensus` 沉淀为道具类机制的标准诊断流程（掉落供给 → 拾取率 → 遗漏分布 → 时间竞争）。
 > 全文 → docs/god-ai-tuning.progress.md §212
+
+## 213. Phase 5 CMA-ES — 启动决策与搜索空间重定义（§9.1 条件未满足，用户指示启动，按协议执行）
+
+**Decision:** 按用户指示启动 Phase 5 CMA-ES（hard 主目标）。记录 plan §9.1 条件偏差：Phase 0-2（§6.1/§6.2/§6.3）与 M3/M4 均证伪/收口，无"新结构改善某类失败"的证明——完整 CMA-ES 的 plan 前置未满足。因此本纪元按 §9.3 协议**保守执行**：20 seeds 方向筛选 → 60 seeds CRN 配对 → holdout；遵守 §9.4 采纳标准（不满足即保留 DEFAULT）+ §9.3.5 停止条件（3-5 批候选仍 ±1-2pp 噪声即确认参数面无 ROI 并收口）。
+
+**Rationale:**
+- 搜索空间重定义（§9.2）：剔除 `aimError`、`suboptimalPathProb`（game-feel，plan 明确排除）；保留 19 个当前行为结构实际使用的参数（reactionDelay / defenseRowOffset / defenseColSpread / threatRangeCells / maxPlayerDistFromBase / t8MaxInterceptDistCells / baseWallScanRadius / replanInterval / powerupMaxDivertDistance / endgameEnemyThreshold / huntAllyCount / baseRaceRange* / outnumbered* / campTimeoutTicks / t2aHighHpMaxRange）。**init 全部同步当前 DEFAULT**（旧空间 21 个 init 中 19 个与 DEFAULT 失同步——v2 纪元遗留，CMA-ES 从错误起点出发）。
+- M1-M4 新机制参数（threat slack 余量、防守 lease、释放 ticks、覆盖点最小收益、安全拾星绕行成本）不纳入：§9.2 要求"只包含当前行为结构中确实使用的参数"，上述机制全部默认 OFF；`powerupMaxDivertDistance` 是 §87 SHIPPED 的拾星绕行实现，保留。
+- 排除 `turnCooldownMs`（§9.2 明确排除，不变）。
+
+**Implications:** 若 3-5 批候选仍噪声（§9.3.5），Phase 5 以"参数面无 ROI"收口，DEFAULT 不变——与 classic 纪元 §67 调参冻结、v2 纪元 M11 的结论一致。任何候选必须通过 §9.4 全部六项才 ship（base_destroyed 率下降、最弱关无 ≥5pp 回归、classic 无显著回归等）。
+> 全文 → docs/god-ai-tuning.progress.md §213
+
+## 214. Phase 5 CMA-ES — 参数面无 ROI，三批候选全部噪声，维持 DEFAULT（停止条件 §9.3.5 触发）
+
+**Decision:** Phase 5 收口。两轮 CMA-ES 方向筛选（20 seeds，batch 1 与 warm-start batch 2 均收敛到同一方向：defenseRowOffset 1→3、baseRaceMarginCells 2→6、threatRangeCells 下调、powerupMaxDivertDistance 下调、outnumbered 族下调）在 60 seeds CRN 配对下**全部落到 ±1pp 噪声内**：batch 1 net +17/2100（+0.8pp，303 L→W vs 286 W→L）、batch 2 net +9/2100（+0.4pp）、batch 3（仅两个核心参数）net −16/2100（−0.8pp）。§9.3.5 停止条件（3-5 批候选仍 ±1-2pp 噪声）触发：**参数面没有足够 ROI，DEFAULT_GOD_AI_PARAMS 不变，不发货任何候选**。
+
+**Rationale:**
+- **筛选与确认的落差**：两轮 20-seed 筛选都显示 +37/+43 fitness、+3pp 胜率、floor penalty 大幅下降——但 60-seed 确认全部消失。根因：20 seeds 下 floor penalty（minStageWin 在 20-45% 间剧烈摆动）和胜率噪声（±2pp）主导了 fitness，筛选指标系统性高估真实收益。
+- **§9.4 采纳标准逐项未满足**：无候选 hard 胜率显著提升；batch 1 最弱关 S34 17→16、batch 2 17→15（未达 ≥5pp 回归门槛但方向负面）；改善关数 ≈ 回归关数（L→W ≈ W→L）。无候选可 ship。
+- **三批一致性证明**：收敛方向在 60 seeds 下无信号（batch 3 净负），说明该方向是 20-seed 噪声的产物，不是真实参数面梯度。
+- **与历史结论同构**：classic 纪元 §67（多轮 CMA-ES 探针 ±1pp 噪声内，正式停止调参）、v2 纪元 M11 结论一致——**参数面在 hard 下同样已穷尽**。God AI 的剩余提升需要结构性机制（behavior/architecture），不是阈值微调；而 M2-M4 结构性机制均证伪（§205/§206/§207-§211/§212）。
+- 新增 `tools/diag/ab-multi-param.ts`：多参数候选 CRN 配对 A/B（ab-param.ts 的泛化，Phase 5 验证工具）。
+
+**Implications:** Phase 5 正式关闭。搜索空间重定义（§213）与三批 A/B 数据保留在 `.workbuddy/optimization-phase5*`；后续若引入新行为结构（如 §211 遗留的 S34 coverage 局部正信号、§198 之后的防守机制），可从此搜索空间 warm-start 重启。God-AI 主战场的结论链完整：**M1-M4 结构性机制 + 参数微调均无 ROI，当前 hard 基准（SUITE 0.5132 / 胜率 73%）即参数面与行为面的局部最优**。
+> 全文 → docs/god-ai-tuning.progress.md §214
