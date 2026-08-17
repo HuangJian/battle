@@ -1332,3 +1332,16 @@ margin 按 ~2-SE 加宽（`MARGIN_SCORE` 0.05→0.07、`AGG_MARGIN_SCORE` 0.03�
 gate 口径: 10 seeds × 35 关 × 3 难度，truth 以 seeds 1-10 为准（`tmp/capture-truth.ts`
 重算路径保留）。未来若需 <20s: 再减至 8（贴边）或 6（达标但每关灵敏度降）种子，或
 在更强调优/多核机器上跑。`GATE_CORES` 默认 4 保持（实测最优）。
+
+## 234. 门禁种子 20→10 后补 — test-silent HEAVY_TESTS 修复 + 强制 --parallel (STATUS: SHIPPED)
+
+**Decision:** `bun run test` 落地两条修复：
+1. `HEAVY_TESTS` 里过期的 `god-ai-gate`（已 test.skip 的旧文件）替换为当前活跃门禁 `godai-score-gate`（10 种子 ~19.5s）。
+2. `test-silent.ts` 的 `spawnCapture('bun', ['test', ...])` 补上 AGENTS.md §4 强制的 `--parallel --timeout=50000` 标志。
+
+**Rationale:**
+- 清洁树 `bun run test` 之前跑 30s 且 **12 fail**——根因是 runner 用单进程 batch（无 `--parallel`）导致跨文件模块态泄漏（order-dependent，`m4-release-restore` 收到 `instant` 而非 `pool`），且 HEAVY_TESTS 指向的是已跳过的旧 gate，活跃 19.5s gate 未被排除。
+- 修复后 `bun run test` 清洁树 7.3s、0 fail；`bun run check` 26-27s、1385 pass 全绿。
+- 该 12-fail 在 HEAD~1（未含 §230-§233 改动）同样存在——是既有缺陷，非本次 perf 攻坚引入；但 §233 把 gate 从 20→10 种子后仍未触达 <20s 目标，补齐 runner 侧排除/标志是自然收尾。
+
+**Implications:** 显式文件模式与失败重跑（`-t` 单测隔离）均验证不受影响；pre-commit hook 使用的 `bun run test` 也随之变绿变快。

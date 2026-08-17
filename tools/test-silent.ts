@@ -49,7 +49,7 @@ const SKIP_RE = /^(tmp|node_modules|dist|\.git)([\\/]|$)/
  * in sync with the measured wall-time of the suite (see per-file profiling).
  */
 const HEAVY_TESTS = new Set<string>([
-  'god-ai-gate', // ~26s: unified worker-pool gate, 3 difficulties × 35 stages × 20 seeds
+  'godai-score-gate', // ~19.5s: worker-pool score gate, 3 difficulties × 35 stages × 10 seeds (§233)
   'calibration', // ~2.5s: CMA-ES calibration sweep
 ])
 
@@ -266,8 +266,10 @@ export async function runSilentTest(
     return { ok: true, summary: 'no tests to run', detail: `${label}: no test files resolved\n` }
   }
 
-  // 2. Run the selected tests once.
-  const first = await spawnCapture('bun', ['test', ...files], cwd, timeoutMs)
+  // 2. Run the selected tests once. `--parallel --timeout=50000` are mandatory
+  // (AGENTS.md §4): without `--parallel` all files share one process and
+  // cross-file module state leaks surface as order-dependent failures.
+  const first = await spawnCapture('bun', ['test', '--parallel', '--timeout=50000', ...files], cwd, timeoutMs)
   const summary = extractSummary(first.output)
   const failures = parseFailures(first.output)
 
