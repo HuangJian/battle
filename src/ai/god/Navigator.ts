@@ -479,31 +479,41 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
   // to fire at enemies in the same row once aligned. The old horizontal-
   // first approach made the player zigzag across the map without ever
   // getting into the same row as an enemy.
-  const dirs: Direction[] = []
+  // Build direction preference: prioritize vertical movement (up/down)
+  // first to close the row gap with the enemy. This gives more chances
+  // to fire at enemies in the same row once aligned. The old horizontal-
+  // first approach made the player zigzag across the map without ever
+  // getting into the same row as an enemy.
+  //
+  // §233 (perf): the 2-4 element dirs array was allocated per call — and
+  // directMove runs EVERY tick from think's navigate branch (close-range
+  // chase). Replaced with two locals (AGENTS §14.1) — pure allocation
+  // elimination, byte-identical first-available selection.
+  let prefA: Direction | null = null
+  let prefB: Direction | null = null
   if (Math.abs(dy) > CELL / 2) {
-    if (dy > 0) dirs.push('down')
-    else if (dy < 0) dirs.push('up')
-    if (dx > 0) dirs.push('right')
-    else if (dx < 0) dirs.push('left')
+    if (dy > 0) prefA = 'down'
+    else if (dy < 0) prefA = 'up'
+    if (dx > 0) prefB = 'right'
+    else if (dx < 0) prefB = 'left'
   } else {
-    if (dx > 0) dirs.push('right')
-    else if (dx < 0) dirs.push('left')
-    if (dy > 0) dirs.push('down')
-    else if (dy < 0) dirs.push('up')
+    if (dx > 0) prefA = 'right'
+    else if (dx < 0) prefA = 'left'
+    if (dy > 0) prefB = 'down'
+    else if (dy < 0) prefB = 'up'
   }
 
   // Return the first preferred direction that we can either move through
   // or break through (brick wall). This enables wall-breaking: the tank
   // faces the wall, shouldFireInDir fires at it, and the wall breaks.
-  // Indexed loop (AGENTS §14.1): directMove runs every tick from think's
-  // navigate branch (close-range chase).
-  for (let dirI = 0; dirI < dirs.length; dirI++) {
-    if (self.canMoveOrBreak(p, dirs[dirI])) return dirs[dirI]
-  }
+  // (AGENTS §14.1: directMove runs every tick from think's navigate branch.)
+  if (prefA !== null && self.canMoveOrBreak(p, prefA)) return prefA
+  if (prefB !== null && self.canMoveOrBreak(p, prefB)) return prefB
 
   // All preferred directions blocked by unbreakable terrain or tanks —
   // try any passable direction (excluding reverse of primary).
-  const primaryOpposite = dirs.length > 0 ? opposite(dirs[0]) : null
+  const primaryOpposite =
+    prefA !== null ? opposite(prefA) : prefB !== null ? opposite(prefB) : null
   for (let di = 0; di < ALL_DIRS.length; di++) {
     const d = ALL_DIRS[di]
     if (primaryOpposite !== null && d === primaryOpposite) continue

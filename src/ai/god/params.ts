@@ -298,6 +298,16 @@ export interface GodAIParams {
   /** Re-plan interval (ticks). */
   replanInterval: number
   /**
+   * §231 (perf): decision-chain throttle. 1 = think() runs every tick
+   * (byte-identical baseline). >1 = the full candidate chain runs every Nth
+   * tick and the previous _moveDir/_fire is HELD on off-ticks. A/B on hard
+   * 35×60 REFUTED the naive throttle: thinkInterval=2 costs −2.8pp win rate
+   * (−0.022 mean score, 691/2100 outcome diffs) — the 1-tick decision
+   * latency is NOT free (dodge/fire windows). Kept as an experiment knob
+   * only; default 1 (see DECISIONS §231).
+   */
+  thinkInterval: number
+  /**
    * §127 (perf): 1 = cross-tick replan cache ON (default). 0 = OFF
    * (byte-identical to pre-§127 — replanImpl re-runs full A* every tick).
    *
@@ -2400,6 +2410,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
   aimError: 0.03030591179971963,
   suboptimalPathProb: 0,
+  // §233: decision-chain throttle. A/B on hard 35×60: thinkInterval=2 costs
+  // −2.8pp win rate (−0.022 mean score, 691/2100 outcome diffs) vs 1 — the
+  // 1-tick decision latency is NOT free (dodge/fire windows). NOT shipped;
+  // default 1 = byte-identical baseline. Kept as an experiment knob.
+  thinkInterval: 1,
 
   defenseRowOffset: 1,
   // §115 (M4 round-2, 2026-08-04): full-corpus CMA-ES search shipped values —
@@ -3129,6 +3144,9 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   // (byte-identical classic gate).
   baseWallExactRing: 0,
   replanInterval: 50,
+  // §233: decision-chain throttle is a pool-model (hard/chaos) perf fix —
+  // classic instant 1-HP 未 A/B，restore 1（byte-identical classic gate）。
+  thinkInterval: 1,
   // §190: classic has replanInterval=50 (stable path) — no A* oscillation.
   // Restore 0 (byte-identical classic gate).
   pixelStuckDirectMoveTicks: 0,

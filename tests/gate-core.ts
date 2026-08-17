@@ -99,6 +99,10 @@ export function runStage(difficulty: string, idx: number): number {
       difficulty,
       maxTicks: 18000,
       sampleInterval: 18000,
+      // The gate only counts `outcome === 'stage_clear'` — the metrics array
+      // and retained event log are pure waste (skipping them is read-only).
+      collectMetrics: false,
+      collectEvents: false,
       godAIParams: { ...DEFAULT_GOD_AI_PARAMS },
     })
     if (r.outcome === 'stage_clear') wins++

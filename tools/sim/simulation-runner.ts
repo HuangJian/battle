@@ -406,6 +406,23 @@ export interface RunOptions {
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
   sampleInterval?: number
+  /**
+   * Collect the per-frame `metrics` array (one FrameMetrics object per sample,
+   * each allocating an enemyPositions array — the default `sampleInterval: 1`
+   * therefore allocates every tick). Default true. Set false when the caller
+   * never reads `result.metrics` (e.g. the worker-pool score gate): the
+   * sampling is pure read-only observation, so the run outcome and telemetry
+   * are byte-identical either way (verified — score-gate scores identical).
+   */
+  collectMetrics?: boolean
+  /**
+   * Retain the full event log in `result.events`. Default true. Set false when
+   * the caller only consumes aggregate counters (telemetry / failure / score):
+   * the per-tick event processing still runs, only the retention-array push is
+   * skipped, so the run outcome is byte-identical (the failure killerKind is
+   * still captured via the in-loop base_destroyed tracker).
+   */
+  collectEvents?: boolean
   /** Record input frames for replay playback (plan/God-AI-Replay-Visualization §4.1). */
   record?: boolean
   /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
@@ -508,6 +525,8 @@ export function runSimulation(opts: RunOptions): SimResult {
   const { seed, stage, difficulty } = opts
   const maxTicks = opts.maxTicks ?? MAX_TICKS
   const sampleInterval = opts.sampleInterval ?? 1
+  const collectMetrics = opts.collectMetrics !== false
+  const collectEvents = opts.collectEvents !== false
   // Stage-level adaptation happens inside GodAIInput.reset() via
   // computeStageAdaptedParams() — a unified, data-driven filter on stage
   // characteristics (armor ratio, brick/steel/forest/water density).
@@ -614,12 +633,24 @@ export function runSimulation(opts: RunOptions): SimResult {
   let outcome: SimOutcome = 'max_ticks'
   let firstKillTick: number | undefined
   let failure: FailureTaxonomy | undefined
+  // In-loop base_destroyed tracker: when `collectEvents` is off the event log
+  // is not retained, so failure.killerKind cannot do its backward scan — the
+  // last base_destroyed event's owner is captured here instead (same value).
+  let lastBaseDestroyedBy: TankKind | undefined
 
   // ---- v6 telemetry accumulators (only touched when opts.telemetry) ----
   const wantTelemetry = opts.telemetry === true
   const baseWallTotal = wantTelemetry ? countBaseWall(world) : 0
   const seenPowerUpIds = wantTelemetry ? new Set<number>() : null
-  let prevLivePowerUpIds = wantTelemetry ? new Set<number>() : null
+  // Ping-pong live-id buffers (AGENTS §14.1): the power-up census allocates a
+  // fresh Set EVERY tick in the original code (a per-tick heap churn that the
+  // score gate multiplies by ~9M ticks). Two preallocated sets alternate: the
+  // current tick clears the one NOT referenced as `prevLivePowerUpIds` and
+  // becomes the next tick's prev. Membership semantics are identical — values
+  // are byte-identical to the allocating version.
+  const liveIdSetA = wantTelemetry ? new Set<number>() : null
+  const liveIdSetB = wantTelemetry ? new Set<number>() : null
+  let prevLivePowerUpIds: Set<number> | null = wantTelemetry ? liveIdSetB : null
   const visitedCells = wantTelemetry ? new Set<number>() : null
   let playerDeaths = 0
   let playerShots = 0
@@ -768,7 +799,8 @@ export function runSimulation(opts: RunOptions): SimResult {
       }
     }
     for (const e of events) {
-      allEvents.push(e)
+      if (collectEvents) allEvents.push(e)
+      if (e.type === 'base_destroyed') lastBaseDestroyedBy = e.by
       // Track first kill for failure taxonomy.
       if (firstKillTick === undefined && e.type === 'tank_destroyed' && e.by === 'player') {
         firstKillTick = tick
@@ -915,7 +947,8 @@ export function runSimulation(opts: RunOptions): SimResult {
       // timeout-despawn colliding in one tick can still undercount by one —
       // rare, and only ever biases `powerUpsSpawned` downward, which makes the
       // loot-capture dimension conservative rather than inflated.)
-      const liveIds = new Set<number>()
+      const liveIds = prevLivePowerUpIds === liveIdSetA ? liveIdSetB! : liveIdSetA!
+      liveIds.clear()
       for (const pu of world.powerUps) {
         liveIds.add(pu.id)
         if (!seenPowerUpIds!.has(pu.id)) {
@@ -960,12 +993,16 @@ export function runSimulation(opts: RunOptions): SimResult {
       // using the last bullet_fired event would misattribute an unrelated
       // shot fired before the killing bullet arrived.
       if (baseDestroyed) {
-        for (let i = allEvents.length - 1; i >= 0; i--) {
-          const e = allEvents[i]
-          if (e.type === 'base_destroyed') {
-            failure.killerKind = e.by
-            break
+        if (collectEvents) {
+          for (let i = allEvents.length - 1; i >= 0; i--) {
+            const e = allEvents[i]
+            if (e.type === 'base_destroyed') {
+              failure.killerKind = e.by
+              break
+            }
           }
+        } else {
+          failure.killerKind = lastBaseDestroyedBy
         }
       }
       // Record player distance to base at death moment.
@@ -986,7 +1023,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     }
 
     // Sample metrics.
-    if (tick % sampleInterval === 0) {
+    if (collectMetrics && tick % sampleInterval === 0) {
       metrics.push(sampleFrame(world, tick))
     }
   }

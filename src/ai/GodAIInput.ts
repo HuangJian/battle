@@ -445,8 +445,14 @@ export class GodAIInput implements InputLike {
    */
   _suicideStandSuppress = 0
 
+  /** §233: decision-chain throttle counter (thinkInterval > 1). */
+  _thinkCounter = 0
+
   /** Debug: branch counters for profiling. */
   branchCounts = {
+    // §233: ticks where the decision chain was held over (off-ticks of the
+    // thinkInterval throttle). Pure observation.
+    hold: 0,
     dodge: 0,
     t8: 0,
     aggressive: 0,

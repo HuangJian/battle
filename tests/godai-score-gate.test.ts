@@ -1,11 +1,14 @@
 // God-AI SCORE gate — Bun Worker pool edition.
 //
-// Runs all 35 stages × 3 difficulties (classic/hard/chaos) × 20 seeds = 2100
+// Runs all 35 stages × 3 difficulties (classic/hard/chaos) × 10 seeds = 1050
 // headless `runSimulation` calls (with telemetry on), fans them out across cores
 // via the pool in `score-gate-core.ts`, scores every run with godai-score v7,
 // and asserts:
 //   * per-stage floors (truth mean − MARGIN_SCORE) for every stage/difficulty, and
 //   * aggregate floors (truth mean − AGG_MARGIN_SCORE) per difficulty.
+//
+// §233 (2026-08-17): seeds 20 → 10 to bring the full suite under 20s; truth
+// re-captured at 10 seeds, margins widened to ~2 SE (0.05→0.07 / 0.03→0.04).
 //
 // This guards GOD AI *behavior logic*, not just the pass rate: a regression that
 // keeps a stage clearing but wrecks how it clears (turtling, no kills, maxed

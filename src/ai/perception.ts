@@ -111,11 +111,22 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
   // be perceived exactly like the Lie-Back-Win coop partner, or the P2 God AI
   // is blind to its own tank (scanAhead) and mis-targets (perceive picks P1).
   const player2 = world.coop || world.spectateDual ? world.player2 : null
-  for (let d = CELL; d <= maxDist; d += CELL) {
-    const cx = sx + v.dx * d
-    const cy = sy + v.dy * d
-    const col = Math.floor(cx / CELL)
-    const row = Math.floor(cy / CELL)
+  // §233 (perf): the scan walks whole cells along an axis-aligned dir, so the
+  // scanned cell increments by exactly ±1 per step. Integer cell stepping
+  // replaces the per-step multiply + division + floor; pixel coordinates are
+  // derived from the cell + precomputed center offset ONLY when a tank/decoy
+  // AABB check needs them. Arithmetic identity: floor((sx + dx·k·CELL)/CELL)
+  // = floor(sx/CELL) + dx·k for integer k, and cx = col·CELL + (sx mod CELL)
+  // — byte-identical cells and pixels.
+  const allies = world.allies
+  const offX = sx - Math.floor(sx / CELL) * CELL
+  const offY = sy - Math.floor(sy / CELL) * CELL
+  let col = Math.floor(sx / CELL)
+  let row = Math.floor(sy / CELL)
+  const steps = Math.floor(maxDist / CELL)
+  for (let i = 1; i <= steps; i++) {
+    col += v.dx
+    row += v.dy
     // Out-of-bounds is treated as steel (impassable) — matches TileMap.get's
     // behavior for the original string grid.
     if (col < 0 || col >= GRID || row < 0 || row >= GRID) return 'steel'
@@ -123,29 +134,30 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     if (tt === 'base') return 'base'
     if (tt === 'brick') return 'wall'
     if (tt === 'steel') return 'steel'
-    if (
-      player &&
-      player.alive &&
-      aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)
-    ) {
-      return 'player'
+    if (player && player.alive) {
+      const cx = col * CELL + offX
+      const cy = row * CELL + offY
+      if (aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)) {
+        return 'player'
+      }
     }
-    if (
-      player2 &&
-      player2.alive &&
-      aabb(cx - 1, cy - 1, 2, 2, player2.x, player2.y, player2.w, player2.h)
-    ) {
-      return 'player'
+    if (player2 && player2.alive) {
+      const cx = col * CELL + offX
+      const cy = row * CELL + offY
+      if (aabb(cx - 1, cy - 1, 2, 2, player2.x, player2.y, player2.w, player2.h)) {
+        return 'player'
+      }
     }
     // Decoy (诱饵): a fake tank that draws enemy fire. If an enemy's line of
     // fire crosses a decoy, the decoy is a valid (and desirable) target so the
     // enemy shoots it instead of pushing toward the base/player (new-powerups
     // §4.4). Bullets pass through allies, but the decoy is the exception we
     // want enemies to aim at.
-    const allies = world.allies
     for (let ai = 0; ai < allies.length; ai++) {
       const dec = allies[ai]
       if (!dec.alive || !dec.isDecoy || dec.spawnTimer > 0) continue
+      const cx = col * CELL + offX
+      const cy = row * CELL + offY
       if (aabb(cx - 1, cy - 1, 2, 2, dec.x, dec.y, dec.w, dec.h)) {
         return 'decoy'
       }

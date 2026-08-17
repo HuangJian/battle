@@ -1243,3 +1243,92 @@ chaos S13 0.9138→0.8439（floor 随 truth 平移, 继续防未来退化）。�
 **Implications:** 默认行为变化: 玩家 travel 段会转向击杀带内威胁敌人（M5）。
 S30/S13 的 floor 降为 0.81/0.81 量级, 未来若 detour 在迷宫关再退化将重新被
 gate 拦截。`?fireLineDetour=1` 入口仍可用（无参数 = 默认 1, 同值）。
+
+---
+
+## 230. 门禁 runner 瘦身 — collectMetrics/collectEvents + telemetry Set ping-pong (STATUS: SHIPPED)
+
+**Decision:** `runSimulation` 新增两个 opt-in 开关（默认 true = 行为不变）:
+`collectMetrics: false` / `collectEvents: false`，score-gate（`tests/score-gate-core.ts`）
+与 pass-rate gate（`tests/gate-core.ts`）均关闭——scorer（`scoreRun`）只读
+`outcome/ticks/finalState/firstKillTick/telemetry`，`metrics`（默认 `sampleInterval: 1`
+每 tick 分配 FrameMetrics + enemyPositions 数组）与 `events` 留存对门禁是纯浪费。
+另有 telemetry power-up census 每 tick `new Set()`（§14.1 反模式）改为双缓冲 ping-pong
+（`liveIdSetA/B` 交替 clear，成员语义逐位不变）。
+
+**Rationale:**
+- 读-only 观察：跳过采样/留存不消耗 RNG、不触碰 World → 结局与 telemetry 逐位不变。
+  验证：60 sims score-sum 51.62（metrics 开/关完全相同）；full-suite 分数不变。
+- `events` 关闭时 `failure.killerKind` 由向后扫描改走循环内 `lastBaseDestroyedBy`
+  追踪（同值）。classic 行为契约（godai-score-gate truth）逐字节不变。
+- 门禁 CPU-bound（2100 sims 占全套 ~85%），任何 runner 开销都直接放大。
+
+**Implications:** 其它消费 `metrics`/`events` 的工具（`tools/eval/evaluator.ts`、
+`tools/optimize/level-sim.ts`、diag/forensics）默认路径不受影响。门禁口径与
+`tmp/capture-truth.ts` 相同（telemetry on）→ truth 无需重标定。
+
+## 231. thinkInterval 决策链节流 A/B — 否决 (STATUS: 完成)
+
+**Decision:** `GodAIParams.thinkInterval`（默认 1 = byte-identical）作为实验旋钮保留；
+`thinkInterval=2`（决策链每 2 tick 跑一次，off-tick 保持上次 `_moveDir/_fire`）经
+hard 35×60 A/B **否决**。保留参数与 `_thinkCounter`/`branchCounts.hold`（纯观察）。
+
+**Rationale:**
+- A/B（paired，60 seeds，telemetry on，v7 scoring）: thinkInterval=1 → win **75.6%**
+  / mean-score 0.7693；=2 → win **72.8%** / 0.7469（**−2.8pp**，−0.022 score，
+  691/2100 outcome 翻转）。SE≈1.34pp → ~2 SE 的真实回归，非噪声。
+- 机制：1 tick（16.7ms）决策延迟看似远低于反应视界（子弹横场 100+ ticks、冷却
+  ~13 ticks、followPath cell 门控 ~23 ticks/cell），但实测 dodge/火力窗口仍被
+  打穿；且 off-tick 跳过消耗 godRng 的 aim roll → RNG 流移位级联改变决策
+  （691/2100 翻转与 §68 签名移位同型）。classic 未测（instant 1-HP 零余量，
+  §115 纪律），即便 hard 通过也不对 classic 默认开。
+- 节流类方向到此收束：naive 节流 −2.8pp；条件节流（仅静默 tick 保持）理论收益
+  ~5-6% sim CPU，不足以改变机器吞吐墙结论，违反 simple-beats-clever（§10）。
+
+**Implications:** 决策链 CPU（chaos ~30%）在行为保真约束下不可节流。`thinkInterval`
+旋钮保留供未来实验（默认 1 逐字节等价）。
+
+## 232. 决策链小数组分配消除 + scanAhead 整数步进 (STATUS: SHIPPED, 字节等价)
+
+**Decision:** 三处 per-call 小数组分配改局部变量（§14.1）: `Navigator.directMoveImpl`
+的 `dirs[]`（每 tick 调用）、`think.ts` BASE_LANE_SENTRY 的 `cands[]`（每 tick
+evaluate）、HUNT navStuck 回退的 `pref[]`。`perception.ts scanAhead` 改整数 cell
+步进（`floor((sx + dx·k·CELL)/CELL) = floor(sx/CELL) + dx·k`，像素坐标按需由
+cell + 中心偏移导出），`world.allies` 提出循环。
+
+**Rationale:** 全部为纯计算/分配消除——选择顺序、比较次序、AABB 像素语义逐位不变。
+验证：45 sims（3 难度 × 3 关 × 5 seeds）stash 前后签名（outcome:ticks:score）
+**IDENTICAL**；godai-score-gate truth 逐字节通过。
+- 收益：全套 41.4s → 37.5s（连同 §230/§231 的 runner 改动）。
+- 拒绝：`getDefaultDefensePositionImpl` 的 `def` 对象（每 think 1 次分配，且多返回
+  路径 + 调用方可能持有引用，共享 buffer 别名风险 > 收益）。
+
+**Implications:** src/game + ai 的 per-tick 分配已按 §14 纪律扫净（决策链余量均为
+节流/稀有路径）。后续优化需算法级或行为级杠杆。
+
+## 233. bun test 全套 <20s 攻坚结论 — 机器吞吐墙 + 种子数决策 (STATUS: 完成, 10 种子落地)
+
+**Decision:** `bun test --parallel --timeout=50000` 基线 54.5s → **~25.9s**。
+score gate 种子 **20→10**（1050 sims，用户拍板），truth 重标定（seeds 1-10）、
+margin 按 ~2-SE 加宽（`MARGIN_SCORE` 0.05→0.07、`AGG_MARGIN_SCORE` 0.03→0.04）。
+<20s 未达成（机器墙 + 10 种子统计功效的折中），用户接受。
+
+**Rationale:**
+- 机器吞吐墙（决定性测量）: Ryzen 5800H 8C16T 对该负载有效并行度仅 ~2.5×（1 worker
+  40.9ms/sim = 主线程同速；4 workers 65ms/sim；2/4/6/8 workers 无改善；进程级拆分
+  3×2 workers 仅 34.7→31.8s）——内存带宽/功耗墙，非并行结构问题。gate（1050 sims）
+  实测 19.7-20.2s 已是机器地板 ~16s 的 ~88%。
+- 每关 margin 加宽依据: n=10 时每关均值 SE ≈ σ/√10（σ≈0.15 → SE≈0.047）→
+  0.07 ≈ 1.5 SE（原 0.05 @ n=20 ≈ 1.5 SE，等功效）；聚合 floor（350 样本）稳健。
+- 20→10 实测全套 ~25.9s 而非预估 ~21s: 机器有效并行度低于预估（2.5× vs ~4×），
+  且 gate 效率随每 worker 样本数下降（262 vs 525 sims/worker）。8 种子预估 ~21-22s
+  仍贴边不达标（机器方差 ±2s），6 种子（~17-18s）牺牲每关灵敏度过大——用户选择
+  10 种子保住统计功效。
+- 其它路径均穷尽: think 节流 A/B 否决（§231）；perceive/决策脑算法级改动违反
+  §2.17 STOP 且无净收益；`--parallel=N` 4/6/8/16 全套 24.9-26.9s（噪声带）；
+  worker 数 2-6 无益；worker boot 仅 20ms（无可省）。
+
+**Implications:** 全套 `bun run check` ~25.9s（基线 54.5s，**−52%**），1385 tests 全绿。
+gate 口径: 10 seeds × 35 关 × 3 难度，truth 以 seeds 1-10 为准（`tmp/capture-truth.ts`
+重算路径保留）。未来若需 <20s: 再减至 8（贴边）或 6（达标但每关灵敏度降）种子，或
+在更强调优/多核机器上跑。`GATE_CORES` 默认 4 保持（实测最优）。

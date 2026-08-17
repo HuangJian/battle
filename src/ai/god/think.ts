@@ -766,27 +766,34 @@ const BASE_LANE_SENTRY: Candidate = {
         // 近，换到 col 12 拦截即击杀）；差 ≥ 4 时距离限自然放弃（seed
         // 53 实证：fast 横移中远距换列纯属赶路）。不追踪敌列 ± 差≤1
         // 跳过共同防横向振荡（seed 32 实证）。
-        const cands: number[] = []
+        // §233 (perf): the 2-element cands array was allocated per evaluate
+        // call (baseLaneSentry runs every tick). Two locals, same order
+        // (near-first), byte-identical selection (AGENTS §14.1).
         const d1 = bestCol - 1
         const d2 = bestCol + 1
         const dd1 = d1 > ccol ? d1 - ccol : ccol - d1
         const dd2 = d2 > ccol ? d2 - ccol : ccol - d2
-        if (dd1 <= dd2) {
-          cands.push(d1, d2)
-        } else {
-          cands.push(d2, d1)
+        const sc1 = dd1 <= dd2 ? d1 : d2
+        const sc2 = dd1 <= dd2 ? d2 : d1
+        if (sc1 >= 0 && sc1 < GRID && sc1 !== ccol) {
+          const gap1 = sc1 > ccol ? sc1 - ccol : ccol - sc1
+          if (gap1 <= 2 && w.tileMap.get(sc1, crow) === 'empty' && laneCorridorBlocked(w, sc1, crow, sc1, bestRow) === 0) {
+            self._moveDir = sc1 > ccol ? 'right' : 'left'
+            self._fire = false
+            self.branchCounts.baseLaneSentry++
+            self._lastBranch = 'baseLaneSentry'
+            return true
+          }
         }
-        for (let ci = 0; ci < cands.length; ci++) {
-          const sc = cands[ci]
-          if (sc < 0 || sc >= GRID || sc === ccol) continue
-          if (sc > ccol ? sc - ccol > 2 : ccol - sc > 2) continue
-          if (w.tileMap.get(sc, crow) !== 'empty') continue
-          if (laneCorridorBlocked(w, sc, crow, sc, bestRow) !== 0) continue
-          self._moveDir = sc > ccol ? 'right' : 'left'
-          self._fire = false
-          self.branchCounts.baseLaneSentry++
-          self._lastBranch = 'baseLaneSentry'
-          return true
+        if (sc2 >= 0 && sc2 < GRID && sc2 !== ccol) {
+          const gap2 = sc2 > ccol ? sc2 - ccol : ccol - sc2
+          if (gap2 <= 2 && w.tileMap.get(sc2, crow) === 'empty' && laneCorridorBlocked(w, sc2, crow, sc2, bestRow) === 0) {
+            self._moveDir = sc2 > ccol ? 'right' : 'left'
+            self._fire = false
+            self.branchCounts.baseLaneSentry++
+            self._lastBranch = 'baseLaneSentry'
+            return true
+          }
         }
       }
     }
@@ -2179,21 +2186,24 @@ const HUNT: Candidate = {
         // then any passable direction.
         const dx = navTarget!.col - pc.col
         const dy = navTarget!.row - pc.row
-        const pref: Direction[] = []
+        // §233 (perf): the 2-element pref array was allocated per call (rare
+        // navStuck path) — two locals, same order, byte-identical (AGENTS §14.1).
+        let prefA: Direction | null
+        let prefB: Direction | null
         if (Math.abs(dy) > Math.abs(dx)) {
-          pref.push(dy > 0 ? 'down' : 'up')
-          pref.push(dx > 0 ? 'right' : 'left')
+          prefA = dy > 0 ? 'down' : 'up'
+          prefB = dx > 0 ? 'right' : 'left'
         } else {
-          pref.push(dx > 0 ? 'right' : 'left')
-          pref.push(dy > 0 ? 'down' : 'up')
+          prefA = dx > 0 ? 'right' : 'left'
+          prefB = dy > 0 ? 'down' : 'up'
         }
         let moved = false
-        for (const d of pref) {
-          if (self.canMoveDir(p, d)) {
-            self._moveDir = d
-            moved = true
-            break
-          }
+        if (prefA !== null && self.canMoveDir(p, prefA)) {
+          self._moveDir = prefA
+          moved = true
+        } else if (prefB !== null && self.canMoveDir(p, prefB)) {
+          self._moveDir = prefB
+          moved = true
         }
         if (!moved) {
           // All preferred directions blocked — try any open direction.
@@ -3035,6 +3045,26 @@ export function thinkImpl(self: GodAIInput): void {
     self.branchCounts.dead++
     self._lastBranch = 'dead'
     return
+  }
+
+  // §233 (perf): decision-chain throttle. thinkInterval > 1 runs the full
+  // candidate chain every Nth tick and HOLDS the previous _moveDir/_fire on
+  // off-ticks — pure decision latency, no World mutation, no RNG consumed on
+  // off-ticks. 1 tick = 16.7ms is far below every reaction horizon (bullets
+  // cross in 100+ ticks; fire cooldown ~13 ticks; followPath consumption is
+  // cell-gated ~23 ticks/cell). A/B validated on hard (DECISIONS §233); the
+  // gate truth was re-baselined for the shipped hard/chaos value of 2.
+  if (self.params.thinkInterval > 1) {
+    self._thinkCounter++
+    if (self._thinkCounter % self.params.thinkInterval !== 0) {
+      // Hold the last committed decision. The player keeps moving/firing in
+      // the previous branch's direction — movement is cell-gated and bullets
+      // are long-horizon, so the 1-tick hold is imperceptible. Pure
+      // observation counters only.
+      self.branchCounts.hold++
+      self._lastBranch = 'hold'
+      return
+    }
   }
 
   // ---- Cluster C: per-tick snapshots (built once, reused across modules) ----

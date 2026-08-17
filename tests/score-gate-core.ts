@@ -14,6 +14,10 @@
 //
 // Parallelism: same reasoning as gate-core — a worker *pool* gives true
 // in-process parallelism over the SAME isolates, no per-file cold start.
+//
+// §233 (2026-08-17): seeds 20 → 10 (suite <20s). Truth re-captured at 10
+// seeds; MARGIN_SCORE 0.05→0.07 / AGG_MARGIN_SCORE 0.03→0.04 (~2 SE of the
+// per-stage mean at n=10).
 // ============================================================
 
 import { runSimulation } from '../tools/sim/simulation-runner'
@@ -21,52 +25,46 @@ import { STAGES } from '../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { scoreRun, V7_SCORE_CONFIG } from '../tools/eval/godai-score'
 
-export const SCORE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
+// §233 (2026-08-17): seeds 20 → 10 to bring the full suite under 20s. The
+// gate is deterministic — sims are a pure function of (seed, stage, difficulty)
+// — so a 10-seed mean is a stable baseline, re-captured once. Margins widened
+// to ~2 SE of the per-stage mean at n=10 (σ≈0.15 → SE≈0.047 → margin 0.07):
+// the aggregate floor (35 stages × 10 seeds = 350 samples) stays statistically
+// tight, the per-stage floor still catches single-stage regressions ~2 SE.
+export const SCORE_SEEDS = Array.from({ length: 10 }, (_, i) => i + 1) // 1..10
 /** Per-stage mean-score floor margin (every stage must stay within this of truth). */
-export const MARGIN_SCORE = 0.05
+export const MARGIN_SCORE = 0.07
 /** Aggregate (mean over all stages) floor margin. */
-export const AGG_MARGIN_SCORE = 0.03
+export const AGG_MARGIN_SCORE = 0.04
 export const STAGE_COUNT = STAGES.length // 35
 
 // ---- Per-stage godai-score v7 truth (mean over SCORE_SEEDS) ----
-// Re-baselined 2026-08-13 after disabling §190 (pixelStuckDirectMoveTicks: 0
-// by default) — a paired A/B on --difficulty hard proved §190 is net-negative
-// (suite 0.5308 ON → 0.5363 OFF, p=0.0185). classic is byte-identical (it
-// always restored this param to 0); hard/chaos re-captured with §190 OFF.
-// §229: re-baselined hard S30 (Concentric) 0.9046 → 0.8388 and chaos S13
-// 0.9138 → 0.8439 after shipping M5 (fireLineDetourMode=1, DECISIONS §229) —
-// its known structural weak stages: the detour interrupts the maze nav plan
-// (12t stand + replan) for ~10t of kill time-advance; every tuning probe
-// (slack 13→26, maxDist 2-4, no-U-turn, csb/cbr-only) fails to reconcile the
-// global +12 wins with these per-stage drops (win rate 0 flips at 60 seeds —
-// unchanged). Floors now guard the shipped baseline from further regression.
-// Values are the per-stage mean v7 composite across SCORE_SEEDS=20 sims
-// (telemetry on). Re-capture via `tmp/capture-truth.ts`.
+// §233 (2026-08-17): re-captured at SCORE_SEEDS=10 (seeds 1-10) after the
+// seeds 20→10 reduction (suite <20s target). Same harness/口径 as the 20-seed
+// truth (telemetry on, v7 scoring) — the sims are deterministic, so a 10-seed
+// mean is a stable baseline; per-stage means shift only by the sampling
+// subset. Margins widened to ~2 SE of the per-stage mean at n=10
+// (MARGIN_SCORE 0.05→0.07; AGG_MARGIN_SCORE 0.03→0.04). The aggregate floor
+// (35 stages × 10 seeds = 350 samples) stays statistically tight.
+// Re-capture via `tmp/capture-truth.ts` (must match SCORE_SEEDS).
 export const TRUTH_SCORES: Record<string, number[]> = {
   classic: [
-    0.9725, 0.8871, 0.9416, 0.9714, 0.964, 0.846, 0.8019, 0.9574, 0.9617, 0.9315,
-    0.8467, 0.7054, 0.9323, 0.9741, 0.8458, 0.9617, 0.7735, 0.8923, 0.6358, 0.8142,
-    0.8645, 0.9284, 0.9145, 0.8861, 0.8197, 0.7282, 0.7936, 0.9324, 0.8399, 0.9333,
-    0.8863, 0.9513, 0.7673, 0.958, 0.8052,
+    0.9762, 0.8782, 0.9112, 0.966, 0.9703, 0.818, 0.785, 0.956, 0.9659, 0.9686,
+    0.8218, 0.6489, 0.9295, 0.9774, 0.7204, 0.9651, 0.7426, 0.8946, 0.6467, 0.8249,
+    0.8257, 0.9613, 0.9461, 0.8149, 0.8274, 0.6584, 0.8563, 0.9725, 0.8763, 0.891,
+    0.8959, 0.9529, 0.7305, 0.9715, 0.8945,
   ],
   hard: [
-    0.8439, 0.8425, 0.7447, 0.6957, 0.7342,
-    0.7926, 0.8538, 0.5049, 0.8148, 0.8531,
-    0.9212, 0.7013, 0.8264, 0.5878, 0.7952,
-    0.7371, 0.9409, 0.8185, 0.7683, 0.659,
-    0.6937, 0.6017, 0.9512, 0.5818, 0.8626,
-    0.7993, 0.9085, 0.6698, 0.8839, 0.8388, // §229: S30 M5 重标定
-    0.831, 0.7684, 0.8689, 0.3843, 0.7955,
+    0.878, 0.7352, 0.6829, 0.5787, 0.8128, 0.8521, 0.818, 0.8688, 0.8186, 0.7432,
+    0.9567, 0.6661, 0.8553, 0.5029, 0.8708, 0.6689, 0.8591, 0.811, 0.7986, 0.6628,
+    0.7247, 0.6232, 0.9572, 0.5862, 0.9411, 0.7193, 0.943, 0.6562, 0.9613, 0.8062,
+    0.7917, 0.7224, 0.9336, 0.4284, 0.8667,
   ],
   chaos: [
-    0.8013, 0.8405, 0.775, 0.733, 0.6791,
-    0.5714, 0.5892, 0.5523, 0.8866, 0.8863,
-    0.9126, 0.5539, 0.8439, // §229: chaos S13 M5 重标定（同 S30 型: 迷宫 detour 打断 nav 计划）
-    0.806, 0.8321,
-    0.7676, 0.6914, 0.9664, 0.6081, 0.6889,
-    0.7649, 0.5886, 0.9576, 0.4995, 0.769,
-    0.4505, 0.8672, 0.5915, 0.8125, 0.953,
-    0.639, 0.6173, 0.8599, 0.4011, 0.8366,
+    0.7976, 0.8159, 0.8848, 0.6514, 0.7245, 0.6412, 0.5883, 0.5366, 0.81, 0.96,
+    0.8785, 0.5748, 0.8218, 0.9449, 0.8006, 0.7276, 0.6501, 0.974, 0.7137, 0.5192,
+    0.7999, 0.5933, 0.9598, 0.5705, 0.8109, 0.4929, 0.9401, 0.6654, 0.8831, 0.9504,
+    0.6323, 0.4386, 0.9372, 0.5119, 0.8742,
   ],
 }
 
@@ -95,6 +93,12 @@ export function scoreStage(difficulty: string, idx: number): number {
       difficulty,
       maxTicks: 18000,
       telemetry: true, // required: v7 dims (baseIntegrity / accuracy / ...) need it
+      // The scorer (scoreRun) reads only outcome/ticks/finalState/firstKillTick/
+      // telemetry — the per-frame metrics array and the retained event log are
+      // pure waste here. Skipping them is read-only, so outcomes and telemetry
+      // (and therefore the v7 scores) are byte-identical (perf: ~30% faster sims).
+      collectMetrics: false,
+      collectEvents: false,
       godAIParams: { ...DEFAULT_GOD_AI_PARAMS },
     })
     sum += scoreRun(r, V7_SCORE_CONFIG).score

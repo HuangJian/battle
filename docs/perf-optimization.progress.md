@@ -695,3 +695,27 @@ Standard command: `bun tools/perf/bench-all-stages.ts`.
 **Implications:**
 - 测量纪律（§127 教训延续）：wall A/B 必须先热身并双向跑（order=ab/ba）——首轮 JIT/页面缓存 ~700-1000ms 会被误记到被测开关头上（无热身首测时双臂差异完全被顺序支配）。
 - pickup 可达性已达纯 memo 上限；再压需算法级变更（空间索引等），违反 simple-beats-clever（MANIFEST §10）。
+
+---
+
+### 2.21 bun test 全套 <20s 攻坚（2026-08-17，§230-§233）
+
+**目标**: `bun test --parallel --timeout=50000` < 20s。基线 54.5s → **37.5s**（−31%）。
+
+| 轮次 | 改动 | 结果 | 行为 |
+|------|------|------|------|
+| §230 | gate runner 瘦身: `collectMetrics/collectEvents: false`（scorer 不读它们）+ telemetry census `new Set()` → 双缓冲 ping-pong | 全套 54.5 → 41.4s | 字节等价（score 逐位不变） |
+| §231 | thinkInterval=2 决策链节流 A/B | **否决**: hard 35×60 win 75.6→72.8%（−2.8pp）、score −0.022、691/2100 翻转 | 保留旋钮，默认 1 |
+| §232 | 决策链 3 处小数组 → 局部变量 + scanAhead 整数 cell 步进 | 全套 41.4 → 37.5s | stash 前后 45-sim 签名 IDENTICAL |
+
+**机器吞吐墙（决定性测量）**: Ryzen 5800H 8C16T 对该负载有效并行度仅 **~2.5-2.7×**——
+1 worker 40.9ms/sim（= 主线程同速）；4 workers 65ms/sim；2/4/6/8 workers 全门禁
+34.7/34.3/35.2/-s 无改善；进程级拆分（3 proc × 2 workers）仅 34.7→31.8s。per-sim
+~41ms（hard/chaos ~55-60ms）由决策脑 ~30% + 敌方感知 ~16% + 仿真核心 ~15% +
+findPath 残差 ~9% 构成；行为保真优化已扫净（§232 后 src/ai + game 无剩余 per-tick
+小分配），行为级杠杆（节流）A/B 否决。
+
+**结论（§233，已完成）**: 用户拍板 20→10 种子（保住统计功效）。truth 重标定（seeds
+1-10），margin 加宽（0.05→0.07 / 0.03→0.04）。全套 **~25.9s**（基线 54.5s，**−52%**），
+1385 tests 全绿；<20s 未达成（10 种子 gate 19.7s 已是机器地板 ~16s 的 88%）。
+8 种子预估 ~21-22s 仍贴边；6 种子 ~17-18s 达标但牺牲每关灵敏度——用户选择 10。
