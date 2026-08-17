@@ -45,6 +45,7 @@ import {
 import type { RunTelemetry } from '../sim/simulation-runner'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
+import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 
 // ============================================================
 // Search Space Definition
@@ -1013,9 +1014,17 @@ if (import.meta.main) {
     return i >= 0 ? process.argv[i + 1] : fallback
   }
 
-  const stageIdxs = arg('stages', arg('stage', '1'))!
-    .split(',')
-    .map((s) => parseInt(s.trim(), 10) - 1) // CLI is 1-based (1..35); internal index is 0-based
+  // M0 §3.1 (open-test protocol): shared parser — `all`, ranges, comma
+  // lists and singles all mean the same thing; junk/reverse/out-of-range
+  // throws instead of parseInt-degrading to S1 (the §213 口径 bug).
+  const stagesRaw = arg('stages', arg('stage', '1'))!
+  let stageIdxs: number[]
+  try {
+    stageIdxs = parseStageSpec(stagesRaw, STAGES.length)
+  } catch (e) {
+    console.error(e instanceof StageSpecError ? e.message : `invalid --stages: ${stagesRaw}`)
+    process.exit(1)
+  }
   const difficulty = arg('difficulty', 'classic')!
   const seedCount = parseInt(arg('seeds', '8')!, 10)
   const generations = parseInt(arg('generations', '40')!, 10)
@@ -1036,16 +1045,23 @@ if (import.meta.main) {
   }
 
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
-  const stages = stageIdxs.map((idx) => STAGES[idx]).filter(Boolean)
-
-  if (stages.length === 0) {
-    console.error(`No valid stages found: ${stageIdxs.join(',')}`)
-    process.exit(1)
-  }
+  const stages = stageIdxs.map((idx) => STAGES[idx])
 
   process.stderr.write(`\nGod AI CMA-ES Optimizer (P4 — floor-aware, all-35 classic)\n`)
   process.stderr.write(
     `Stages: ${stages.map((s, i) => `S${stageIdxs[i] + 1}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
+  )
+  // M0 §3.2: official caliber line — stageIndex=0 keeps eval/drop/RNG parity
+  // with the gates; printed so a report can never silently mix calibers.
+  process.stderr.write(
+    runHeader({
+      difficulty,
+      stageCount: stages.length,
+      seedCount: seeds.length,
+      stageIndex: 0,
+      maxTicks,
+      params: initParams,
+    }) + '\n',
   )
   process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks} | Floor: ${floor}\n`)
 

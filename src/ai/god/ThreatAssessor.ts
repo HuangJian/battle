@@ -7,6 +7,16 @@ import { ALL_DIRS, opposite, snap, aabb } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { scanAheadImpl } from './FireControl'
 
+/** §223 centroid-escape: bullets within this L1 radius (px) of the player
+ *  count toward the cluster. 6 cells — the immediate hit vicinity. */
+const CENTROID_RADIUS_PX = 6 * CELL
+/** §223 centroid-escape base gate: the new cell may NOT be further from the
+ *  base than the current cell (S10s6-style runaway protection — a single
+ *  dodge step is 16px, so any >0 slack would make the gate dead code; a
+ *  multi-tick sustained escape therefore always reduces base distance or
+ *  degrades to the legacy binary path). */
+const CENTROID_BASE_SLACK_CELLS = 0
+
 // ============================================================
 // ThreatAssessor — bullet-threat assessment + dodging (T8, M3)
 // Moved verbatim from GodAIInput.ts during the §0.5 split.
@@ -552,6 +562,66 @@ export function dodgeDirectionImpl(
     }
     // Neither perpendicular passable → fall through to the pinned logic.
   } else {
+    // §223: multi-bullet centroid escape (dodgeCentroidMode). The
+    // counterfactual-dodge hard-away arm survived 75.3% of dodge-death
+    // windows vs 0% factual — running away from the CENTROID of the bullet
+    // cluster beats dodging the single nearest bullet. Active only when ≥2
+    // enemy bullets threaten the immediate vicinity; single-bullet and
+    // no-bullet situations fall through to the legacy path (byte-identical).
+    if (self.params.dodgeCentroidMode > 0) {
+      self._centroidChecks++
+      let cSumX = 0
+      let cSumY = 0
+      let cN = 0
+      const bullets = w.bullets
+      for (let bi = 0; bi < bullets.length; bi++) {
+        const b = bullets[bi]
+        if (!b.alive || b.isPlayer) continue
+        const bcx = b.x + b.w / 2
+        const bcy = b.y + b.h / 2
+        if (Math.abs(bcx - pcx) + Math.abs(bcy - pcy) <= CENTROID_RADIUS_PX) {
+          cSumX += bcx
+          cSumY += bcy
+          cN++
+        }
+      }
+      if (cN >= 2) {
+        self._centroidTriggers++
+        const cx = cSumX / cN
+        const cy = cSumY / cN
+        let bestDir: Direction | null = null
+        let bestScore = -Infinity
+        for (let di = 0; di < ALL_DIRS.length; di++) {
+          const d = ALL_DIRS[di]
+          // §83 stays in force: never flee in the bullet's own travel
+          // direction, and the centroid escape never advances INTO the
+          // dodged bullet's lane (that is the oscillation counter-fire's
+          // job; the perpendicular escape semantics are preserved).
+          if (d === bullet.dir || d === opposite(bullet.dir)) continue
+          if (!self.canMoveDir(p, d)) continue
+          if (!self.isSafeDir(pcx, pcy, d, bullet.id)) continue
+          const v = DIR_VECTORS[d]
+          const nx = pcx + v.dx * CELL
+          const ny = pcy + v.dy * CELL
+          if (self.hasBase) {
+            const baseCx = BASE_POS.col * CELL + CELL
+            const baseCy = BASE_POS.row * CELL + CELL
+            const distNow = Math.abs(pcx - baseCx) + Math.abs(pcy - baseCy)
+            const distNext = Math.abs(nx - baseCx) + Math.abs(ny - baseCy)
+            if (distNext > distNow + CENTROID_BASE_SLACK_CELLS * CELL) continue
+          }
+          const away = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)
+          if (away > bestScore) {
+            bestScore = away
+            bestDir = d
+          }
+        }
+        if (bestDir) {
+          self._centroidEscapes++
+          return bestDir
+        }
+      }
+    }
     // §201: escape-depth-aware dodge — dead-end perpendiculars. When BOTH
     // perpendicular sides are shallow pockets (< dodgeEscapeDepth cells of
     // travel), the binary step-into-pocket dodge oscillates between them

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { STAGES } from '../src/config/stages'
-import { CELL } from '../src/constants'
+import { CELL, BASE_POS } from '../src/constants'
 import type { Bullet } from '../src/types'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../src/ai/god/ActionContract'
 import { runSimulation } from '../tools/sim/simulation-runner'
@@ -144,33 +144,120 @@ describe('contractStandingHold (§6.1 valid waiting value)', () => {
   })
 })
 
-describe('enemyBulletOnRay / ownBulletOnRay (pure ray scans)', () => {
-  it('enemy bullet on the player column heading toward the base → true', () => {
+describe('enemyBulletOnRay / ownBulletOnRay (interception segment, protocol §5.1)', () => {
+  // placePlayer(col,row) puts the 32px tank's CENTER at (col+1,row+1) — the
+  // bullet helpers aim x = col*CELL + 13 so the 6px bullet centers on the
+  // player's column. All bullets below are enemy bullets (speed 2 px/tick,
+  // player bullet is faster — chase shots can catch).
+
+  it('head-on: bullet above an up-facing player, heading down → true', () => {
     const w = buildWorld(0)
     clearBaseZone(w)
-    const p = placePlayer(w, 8, 8, 'down')
-    // Enemy bullet at (8*16+6, 8*16) heading down (toward base rows 24-25).
-    addBullet(w, 8 * CELL + 13, 8 * CELL, 'down', true)
-    expect(enemyBulletOnRay(w, p, true)).toBe(true)
+    const p = placePlayer(w, 8, 20, 'up')
+    addBullet(w, 8 * CELL + 13, 14 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, 'up')).toBe(true)
+  })
+
+  it('§5.1 counterexample: bullet BEHIND the player → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    // Up-facing player; bullet already BELOW it (between player and base,
+    // wrong side of the muzzle) — the up-ray can never meet it.
+    const p = placePlayer(w, 8, 20, 'up')
+    addBullet(w, 8 * CELL + 13, 22 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, 'up')).toBe(false)
+  })
+
+  it('§5.1 positive: bullet between player and base, in front of a down-facing muzzle → true', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 18, 'down')
+    addBullet(w, 8 * CELL + 13, 20 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, 'down')).toBe(true)
+  })
+
+  it('§5.1 counterexample: bullet already past the base (horizontal) → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    // Player on the base row facing right; a right-moving shell is EAST of
+    // the base zone (crossed it already) — receding, nothing to intercept.
+    const p = placePlayer(w, 4, 24, 'right')
+    addBullet(w, 15 * CELL, 24 * CELL + 13, 'right', true)
+    expect(enemyBulletOnRay(w, p, 'right')).toBe(false)
+  })
+
+  it('§5.1 counterexample: bullet at/past the base near edge (vertical) → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 8, 18, 'down')
+    addBullet(w, 8 * CELL + 13, BASE_POS.row * CELL, 'down', true) // y = baseTop
+    expect(enemyBulletOnRay(w, p, 'down')).toBe(false)
   })
 
   it('bullet heading AWAY from the base → false', () => {
     const w = buildWorld(0)
     clearBaseZone(w)
-    const p = placePlayer(w, 8, 8, 'down')
-    addBullet(w, 8 * CELL + 13, 8 * CELL, 'up', true)
-    expect(enemyBulletOnRay(w, p, true)).toBe(false)
+    const p = placePlayer(w, 8, 20, 'up')
+    addBullet(w, 8 * CELL + 13, 14 * CELL, 'up', true)
+    expect(enemyBulletOnRay(w, p, 'up')).toBe(false)
   })
 
   it('bullet on a different column → false', () => {
     const w = buildWorld(0)
     clearBaseZone(w)
-    const p = placePlayer(w, 8, 8, 'down')
-    addBullet(w, 12 * CELL + 13, 8 * CELL, 'down', true)
-    expect(enemyBulletOnRay(w, p, true)).toBe(false)
+    const p = placePlayer(w, 8, 20, 'up')
+    addBullet(w, 12 * CELL + 13, 14 * CELL, 'down', true)
+    expect(enemyBulletOnRay(w, p, 'up')).toBe(false)
   })
 
-  it('own bullet on the ray → true; partner bullet → false', () => {
+  it('horizontal symmetry: in-front chase toward the base → true', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    // Player west of the shell, both heading east toward the base column.
+    const p = placePlayer(w, 4, 25, 'right')
+    addBullet(w, 7 * CELL, 25 * CELL + 13, 'right', true)
+    expect(enemyBulletOnRay(w, p, 'right')).toBe(true)
+  })
+
+  it('horizontal symmetry: same shell behind the muzzle → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 4, 25, 'left')
+    addBullet(w, 7 * CELL, 25 * CELL + 13, 'right', true)
+    expect(enemyBulletOnRay(w, p, 'left')).toBe(false)
+  })
+
+  it('review P1: player east of the base firing left, shell crossing from the base-west → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    // The shell is on the FAR side of the base from the player — the player's
+    // shot dies on the base (baseRight=224) before it can reach the crossing
+    // point (~164). Old code returned true (interception impossible).
+    const p = placePlayer(w, 16, 20, 'left')
+    addBullet(w, 6 * CELL + 13, 20 * CELL + 13, 'right', true)
+    expect(enemyBulletOnRay(w, p, 'left')).toBe(false)
+  })
+
+  it('review P1 mirror: player west of the base firing right, shell crossing from the base-east → false', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    const p = placePlayer(w, 4, 20, 'right')
+    addBullet(w, 19 * CELL + 13, 20 * CELL + 13, 'left', true)
+    expect(enemyBulletOnRay(w, p, 'right')).toBe(false)
+  })
+
+  it('review P1: same-side chase toward the base stays interceptable → true', () => {
+    const w = buildWorld(0)
+    clearBaseZone(w)
+    // Player east of the base; shell between player and base moving west —
+    // same side, catch resolves at ~236, still outside the base. The P1 gates
+    // must not over-reject the legal case.
+    const p = placePlayer(w, 16, 20, 'left')
+    addBullet(w, 15 * CELL + 13, 20 * CELL + 13, 'left', true)
+    expect(enemyBulletOnRay(w, p, 'left')).toBe(true)
+  })
+
+  it('own bullet on the ray → true (direction-agnostic, resolving-shot check)', () => {
     const w = buildWorld(0)
     clearBaseZone(w)
     const p = placePlayer(w, 8, 8, 'down')

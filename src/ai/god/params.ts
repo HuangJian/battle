@@ -90,6 +90,15 @@ export interface GodAIParams {
   baseLaneSentryRange: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
+  /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家
+   * 与敌人不同列时，横移到敌人同列（colGap ≤ 3，保持当前行）堵口；到位后由
+   * 上方对齐开火段接管。补站台导航（仅服务带外 row 20-22）的带内空白
+   * （§225 实证：62.5% 败局窗口内 sentry 0 tick）。0 = OFF（byte-identical）。 */
+  baseLaneSentryInBandNav: number
+  /** §225-B: 危局拾取抑制 — ring 已被击穿时 MID tier（star/tank/shield）拾取
+   * 让位（救不了基地）；HIGH tier（bomb/freeze/fence）豁免（危局有效道具，
+   * §180 fence=基地结构防守）。0 = OFF（byte-identical）。 */
+  baseAlertPickupSuppress: number
   /**
    * §137 / 基地守位格 (base guard anchor): 0 = OFF (byte-identical — the
    * defense position stays at (BASE_POS.col, baseRow − defenseRowOffset),
@@ -165,6 +174,39 @@ export interface GodAIParams {
   coverageLeaseTicks: number
   /** Low-frequency cache grid: full candidate re-score at most this often. */
   coverageReplanTicks: number
+  /**
+   * M4 (plan/God-AI-Hard-Open-Test-Protocol.md §7, 2026-08-16): 统一行动候选.
+   * When the base has a DIRECT threat (csb/cbr), compare four fixed
+   * candidates — kill-current / intercept-base / clear-lane /
+   * return-defense — on the M1 metric set (killSlack / interceptSlack /
+   * firstOutputTick / secondThreatRisk) and commit the first one passing
+   * every §7.2 gate (safe-deadline slack > 0, real output not a statue, no
+   * second threat closing, fire rays never cross an intact ring cell —
+   * S30s27). Gates closed → the existing branch cascade runs unchanged
+   * (M3: the window usually closes BEFORE the stall, so the layer only
+   * preempts genuinely winnable states). Weight 860, below interceptBase.
+   * Mode 0 = OFF (byte-identical). A/B 前不发货.
+   */
+  candidateMode: number
+  /**
+   * §217 (open-test round 2): travel-phase fire-line detour — 决策点前移.
+   * During HUNT/navigate travel, when an aligned, ray-clear, off-cooldown
+   * target (csb/cbr/base-approach band) sits one turn away with killSlack >
+   * 13, turn + fire this tick instead of continuing the nav plan (probe:
+   * 33% of baseline losses have this opportunity, 75% before first base
+   * damage; S3s46 walked past a +209-slack target firing 0 shots in 187t).
+   * One turn window (13t) of movement is the detour cost — killSlack > 13
+   * guarantees the kill still beats the enemy deadline. Pure geometry, no
+   * RNG perturbation. Mode 0 = OFF (byte-identical). A/B 前不发货.
+   */
+  fireLineDetourMode: number
+  /**
+   * §217 M5 detour minimum killSlack (ticks). One turn window (13t) of
+   * movement is the detour cost — killSlack > 13 guarantees the kill still
+   * beats the enemy deadline. (S30 tuning probes: slack 13/18/22/26 showed
+   * no headroom — the S30 quality drop is structural, DECISIONS §229.)
+   */
+  fireLineDetourMinSlack: number
   /**
    * §137 v2: max player→anchor distance (cells) for the anchor HOLD to
    * apply. When the base is under threat, no enemy has a clear shot at it
@@ -1385,6 +1427,19 @@ export interface GodAIParams {
    */
   dodgeClearanceScore: number
   /**
+   * §223: multi-bullet centroid escape. When > 0, the default dodge path
+   * (no horizon/clearance arm active) switches to centroid escape once ≥2
+   * enemy bullets are within CENTROID_RADIUS_PX of the player: among the
+   * four directions that are passable (canMoveDir) and safe (isSafeDir —
+   * not entering another bullet's lane), pick the one whose new cell lies
+   * FURTHEST from the bullet centroid. Base gate: on base stages the new
+   * cell may not exceed the current base distance by more than 2 cells
+   * (prevents S10s6-style runaway escapes). Single bullet / no bullets →
+   * legacy binary path (byte-identical). 0 = OFF (byte-identical).
+   * 1 = ON (A/B knob).
+   */
+  dodgeCentroidMode: number
+  /**
    * M9 (plan/God-AI-Redesign-v2): survival-horizon dodge commitment scoring.
    * When > 0, `dodgeDirectionImpl` scores each passable perpendicular candidate
    * by its SURVIVAL HORIZON — the earliest tick any enemy bullet could hit the
@@ -2396,6 +2451,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // classic sentry mode=0 自关）、chaos 净 +10（1520→1530，17 L→W / 7 W→L）。
   // 与 §193-B 原 A/B（S34 +1 / 全关 +6 / classic 0 / chaos +2）三轮证据链一致。
   baseLaneSentryStation: 1,
+  // §225-A: 带内应急进 lane — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
+  baseLaneSentryInBandNav: 0,
+  // §225-B: 危局拾取抑制 — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
+  baseAlertPickupSuppress: 0,
   // §137 / 基地守位格: 默认防守位 (12,23) 在全部 35 关都是环砖、navigate 永远到不了
   // ——AI 没有有效防守锚点（Battlement 漏斗几何把这个洞暴露了）。默认 0 = OFF
   // （byte-identical）。A/B 候选：mode=1（Battlement 应选 (12,22) 前厅口）。
@@ -2412,6 +2471,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   coverageMode: 0,
   coverageLeaseTicks: 12,
   coverageReplanTicks: 12,
+  // M4 统一行动候选: 默认 0 = OFF（byte-identical）。A/B 前不发货。
+  candidateMode: 0,
+  // §217/§221/§228: M5 travel-phase fire-line detour — SHIPPED（2026-08-17,
+  // DECISIONS §229, 用户拍板默认打开）。hard 35×60 三批验证: +12 wins /
+  // base_destroyed 447→433（−14）/ lives 中性 / classic 0 / chaos +8 →
+  // §218 gated 四项条款全满足。人工 playtest（?fireLineDetour=1 入口, §228）
+  // 后默认 1 = ON。已知代价: S30 (Concentric) 赢局质量 −7% (score 0.905→0.84,
+  // clearSpeed/baseIntegrity, 胜率 60-seed 0 翻转不变) — DECISIONS §229 权衡记录。
+  fireLineDetourMode: 1,
+  // §217 原值 (DETOUR_TURN_WINDOW_TICKS 同义)。§229 探针: S30 上 slack 13→26
+  // 无实质提升 (0.839→0.843), 不设更高默认 — 无证据的改动违背纪律。
+  fireLineDetourMinSlack: 13,
   // §137 v2: 受威胁且无 clear-shot 敌人时、玩家距守位格 ≤ 此值 → 驻守守位格
   // （让 §134 在前厅口拦截）。仅 mode>0 时读。A/B 候选：holdRange 0/6/10。
   baseGuardAnchorHoldRange: 6,
@@ -2788,6 +2859,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // measured failure mode (commitment failure 32-35% of dodge deaths).
   dodgeHorizonScore: 0,
   dodgeEscapeDepth: 0,
+  // §223: multi-bullet centroid escape (counterfactual-dodge hard-away arm —
+  // 75.3% survival vs 0% factual in the death-window probe). When ≥2 enemy
+  // bullets threaten within 6 cells, the default dodge path picks the
+  // passable+safe direction maximizing distance AWAY from the bullet
+  // centroid (vs the legacy binary next-cell pick). 0 = OFF (byte-identical).
+  dodgeCentroidMode: 0,
   // M10: time-margin + distance-to-base gates for the horizon commitment
   // (both 0 = no gate = pure M9 semantics; A/B knobs, DECISIONS §108 pending).
   dodgeHorizonMinMarginTicks: 0,

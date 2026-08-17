@@ -63,9 +63,10 @@ describe('targetValue (ThreatBudget §6.2)', () => {
     laneClear(w)
     const p = placePlayer(w, 8, 8, 'down')
     const csb = addEnemy(w, BASE_POS.col, 20, 'basic')
+    csb.lastFire = -9999 // gun ready — imminent, not one cadence away
     const far = addEnemy(w, 2, 2, 'basic')
-    expect(enemyDeadline(w, csb).enemyToShootEta).toBe(0)
-    expect(enemyDeadline(w, far).enemyToShootEta).toBeGreaterThan(100)
+    expect(enemyDeadline(w, csb).enemyDamageEarliest).toBeLessThan(30)
+    expect(enemyDeadline(w, far).enemyDamageEarliest).toBeGreaterThan(100)
     const vCsb = targetValue(w, p, csb)
     const vFar = targetValue(w, p, far)
     expect(vCsb).toBeGreaterThan(0)
@@ -78,14 +79,16 @@ describe('targetValue (ThreatBudget §6.2)', () => {
     const p = placePlayer(w, 8, 20, 'down')
     const near = addEnemy(w, BASE_POS.col, 22, 'basic')
     const far = addEnemy(w, BASE_POS.col, 14, 'basic')
-    expect(enemyDeadline(w, near).enemyToShootEta).toBe(0)
-    expect(enemyDeadline(w, far).enemyToShootEta).toBe(0)
+    near.lastFire = -9999
+    far.lastFire = -9999
+    expect(enemyDeadline(w, near).enemyDamageEarliest).toBeLessThan(30)
+    expect(enemyDeadline(w, far).enemyDamageEarliest).toBeLessThan(30)
     expect(targetValue(w, p, near)).toBeGreaterThan(targetValue(w, p, far))
   })
 
   it('value rises as the enemy nears a shoot position (deadline sensitivity)', () => {
     // Real stage-0 terrain (no clearing): (12,20) is cbr — one ring brick
-    // (12,23) between it and the base, enemyToShootEta = 1 cadence ≈ 57.
+    // (12,23) between it and the base, enemyDamageEarliest = 1 cadence ≈ 57.
     // (12,12) must WALK to the ring (~157). The closer-to-shooting enemy
     // must carry the higher value.
     const w = buildWorld(0)
@@ -94,7 +97,7 @@ describe('targetValue (ThreatBudget §6.2)', () => {
     const walking = addEnemy(w, BASE_POS.col, 12, 'basic')
     const dlBreach = enemyDeadline(w, atBreach)
     const dlWalking = enemyDeadline(w, walking)
-    expect(dlBreach.enemyToShootEta).toBeLessThan(dlWalking.enemyToShootEta)
+    expect(dlBreach.enemyDamageEarliest).toBeLessThan(dlWalking.enemyDamageEarliest)
     expect(targetValue(w, p, atBreach)).toBeGreaterThan(targetValue(w, p, walking))
   })
 
@@ -105,7 +108,7 @@ describe('targetValue (ThreatBudget §6.2)', () => {
     w.baseHp = 500
     const p = placePlayer(w, 8, 20, 'down')
     const e = addEnemy(w, BASE_POS.col, 20, 'basic')
-    expect(enemyDeadline(w, e).enemyToShootEta).toBeGreaterThan(0)
+    expect(enemyDeadline(w, e).enemyDamageEarliest).toBeGreaterThan(0)
     const vReady = targetValue(w, p, e)
     p.lastFire = 0
     w.frame = 1
@@ -141,7 +144,7 @@ describe('targetValue (ThreatBudget §6.2)', () => {
  * Synthetic wiring scenario: rows 18-22 of the col-12 lane are cleared but
  * the ring brick (12,23) and base cells stay intact. An enemy centered at
  * (12,17) then has a clear line to the ring brick — cbr with one ring brick
- * between (enemyToShootEta ≈ 60, one cadence to break) — yet is OUTSIDE
+ * between (enemyDamageEarliest ≈ 60, one cadence to break) — yet is OUTSIDE
  * every threat predicate: row 17 < 18 (no static box), not csb (ring brick
  * blocks), race check off with the player close (player dist 7 + margin 2
  * < breach dist 10), chokepointMode disabled. The player at (15,20) is
@@ -186,14 +189,17 @@ describe('targetValueMode wiring (StrategyPlanner.selectTarget)', () => {
   it('selectTarget picks the higher-value target, not merely the nearest', () => {
     const w = buildCbrWorld()
     const breach = addEnemy(w, BASE_POS.col, 17, 'basic') // imminent breach
+    breach.lastFire = -9999 // ready — earliest ≈ 1 cadence + flights
     const nearSafe = addEnemy(w, 15, 17, 'basic') // closer, harmless
     placePlayer(w, 15, 22, 'down')
     const ai = buildGodAI(w, 1)
     const pc = ai.playerCell()
     // cbr: one ring brick (12,23) between the breach enemy and the base —
     // e2s = 1 cadence (~60), versus ~142 for the walking nearSafe.
-    expect(enemyDeadline(w, breach).enemyToShootEta).toBeCloseTo(60.02, 0)
-    expect(enemyDeadline(w, nearSafe).enemyToShootEta).toBeGreaterThan(100)
+    // cbr: one cadence to break + flight(s) — strictly earlier than walking.
+    expect(enemyDeadline(w, breach).enemyDamageEarliest).toBeGreaterThan(50)
+    expect(enemyDeadline(w, breach).enemyDamageEarliest).toBeLessThan(75)
+    expect(enemyDeadline(w, nearSafe).enemyDamageEarliest).toBeGreaterThan(100)
     expect(targetValue(w, w.player!, breach)).toBeGreaterThan(0)
     expect(targetValue(w, w.player!, breach)).toBeGreaterThan(targetValue(w, w.player!, nearSafe))
     const t = ai.selectTarget(pc)

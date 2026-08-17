@@ -110,7 +110,7 @@ describe('coverageMode wiring (Phase 3 §7)', () => {
     const ai = buildAI(w, 1)
     const pc = ai.playerCell()
     expect(ai.isBaseUnderThreat()).toBe(false)
-    expect(enemyDeadline(w, b).damageDeadline).toBeLessThan(450)
+    expect(enemyDeadline(w, b).enemyDamageDeadline).toBeLessThan(450)
     const t = ai.selectTarget(pc)
     expect(t).not.toBeNull()
     // Coverage holds a throat/lane cell on the threat's column (12), NOT the
@@ -162,7 +162,7 @@ describe('coverageMode wiring (Phase 3 §7)', () => {
     const p = placePlayer(w, 25, 25, 'down') // far corner
     const ai = buildAI(w, 1)
     const pc = ai.playerCell()
-    const d = enemyDeadline(w, e).damageDeadline
+    const d = enemyDeadline(w, e).enemyDamageDeadline
     // The race guard is a separate predicate; here we drive coveragePlanImpl
     // directly with a slowed player so (c) must bind on its own merits.
     p.speed *= 0.9
@@ -191,7 +191,10 @@ describe('coverageMode wiring (Phase 3 §7)', () => {
     const w = buildWorld()
     for (let r = 18; r <= 22; r++) w.tileMap.destroy(12, r)
     const b = addEnemy(w, 12, 17)
-    addEnemy(w, 20, 12) // non-threat (walk deadline ≥ horizon)
+    // Non-threat under the HONEST deadline (first-damage − margin): far
+    // walker ≥ horizon 425. (20,12) qualified under the old destruction-time
+    // deadline only because the damage window inflated it.
+    addEnemy(w, 2, 2)
     placePlayer(w, 14, 20, 'right')
     const ai = buildAI(w, 1)
     const pc = ai.playerCell()
@@ -330,11 +333,12 @@ describe('coverage round-2 audit (post §208/§209)', () => {
     const pc = ai.playerCell()
     const t1 = coveragePlanImpl(ai, w, w.player!, pc, [b])
     expect(t1).not.toBeNull()
-    // Walk the threat far beyond the horizon; same-frame re-entry hits the
+    // Walk the threat far beyond the horizon (corner-corner distance makes
+    // the honest first-damage deadline ≥ 425); same-frame re-entry hits the
     // fast path (lease open, replan-grid tick) with an EMPTY threat set —
     // must release, not keep holding the stale point.
-    b.x = (20 - 1) * CELL
-    b.y = (12 - 1) * CELL
+    b.x = (2 - 1) * CELL
+    b.y = (2 - 1) * CELL
     const t2 = coveragePlanImpl(ai, w, w.player!, pc, [b])
     expect(t2).toBeNull()
     expect(ai._coverageCell).toBeNull()

@@ -42,6 +42,7 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from './ActionContract'
+import { evaluateUnifiedCandidates, clearLaneFireDir, fireRayBlocked, travelFireDetourDir } from './ActionCandidates'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import {
   enemyCanShootBase,
@@ -524,6 +525,101 @@ function laneCorridorBlocked(w: World, c: number, r: number, tc: number, tr: num
  * 泛化：环格几何、csb/cbr 谓词、车道走廊全部只依赖 BASE_POS —— 任何带基地
  * 的地图通用；钢环/无拆环风险时哨兵永不激活（自关）。
  */
+/**
+ * M4 / 统一行动候选 (open-test protocol §7, 2026-08-16)。
+ *
+ * 基地受直接威胁(csb/cbr)时,不再让旧防守级联在"窗口已关"状态下提交,
+ * 而是按 §7.1 度量比较四个固定候选(kill-current / intercept-base /
+ * clear-lane / return-defense),§7.2 门控全过才提交:
+ *   a. 安全 deadline slack > 0(站桩提交用 standing 击杀 slack — M3 S28s26:
+ *      全行程 killAssessment 对"就差一枪"的场景系统性悲观);
+ *   b. 有真实产出,站桩仅在 standing shot 赢 deadline 时合法;
+ *   c. 第二威胁不可在完成前进入不可逆窗口;
+ *   d. 射线不得穿过自家完好环砖(M3 S30s27 反例: 朝威胁开火打掉自家环
+ *      反而引弹上身),clear-lane 永不打环砖。
+ * 门控全不过 → return false,旧级联照旧(M3 主导机理就是窗口早已关闭,
+ * 此时本层让路)。RNG 纪律: 仅提交时消耗 aimError roll,与其它候选一致。
+ */
+const UNIFIED_CANDIDATES: Candidate = {
+  id: 'unifiedCandidates',
+  weight: ACTION_WEIGHTS.unifiedCandidates,
+  evaluate(self, ctx) {
+    const prm = self.params
+    if (prm.candidateMode <= 0 || !self.hasBase || self.aggressive) return false
+    const { w, p, pcx, pcy, onCooldown } = ctx
+    const list = self._enemies.length > 0 ? self._enemies : w.tanks
+    // kill-current target: the last selectTarget pick while still alive,
+    // else the nearest enemy (the mode-0 hunt rule proxy). No selectTarget
+    // call from here — it would write intent state as a side effect.
+    let hunt: Tank | null = null
+    let nearest: Tank | null = null
+    let nearestD = Infinity
+    const pcxCell = self.playerCell()
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]
+      if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+      if (t.id === self._lastSelectTargetId) hunt = t
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - pcxCell.col) + Math.abs(tc.row - pcxCell.row)
+      if (d < nearestD) {
+        nearestD = d
+        nearest = t
+      }
+    }
+    const anchorCol = BASE_POS.col
+    const anchorRow = Math.max(2, BASE_POS.row - 1 - prm.defenseRowOffset)
+    const v = evaluateUnifiedCandidates(w, p, list, hunt ?? nearest, anchorCol, anchorRow, self._candVerdict)
+    if (!v.kind) return false
+    const roll = (): boolean => self.rng.next() >= prm.aimError
+    if (v.kind === 'returnDefense') {
+      self._moveDir = self.navigateTowards({ col: anchorCol, row: anchorRow })
+      self._fire = false
+      self.branchCounts.unifiedCandidates++
+      self._lastBranch = 'candidateReturn'
+      return true
+    }
+    // All fight candidates address one threat tank (verdict.threatId).
+    let target: Tank | null = null
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].id === v.threatId) {
+        target = list[i]
+        break
+      }
+    }
+    if (!target || !target.alive) return false
+    const tc = self.tankCell(target)
+    const aligned = tc.col === pcxCell.col || tc.row === pcxCell.row
+    const facing
+      = p.dir === (aligned ? (tc.col === pcxCell.col ? (tc.row > pcxCell.row ? 'down' : 'up') : tc.col > pcxCell.col ? 'right' : 'left') : p.dir)
+    if (v.kind === 'clearLane') {
+      const dir = clearLaneFireDir(w, p, target)
+      if (!dir) return false
+      self._moveDir = p.dir === dir ? null : dir
+      self._fire = p.dir === dir && !onCooldown && shouldFireInDirImpl(self, pcx, pcy, dir)
+      self.branchCounts.unifiedCandidates++
+      self._lastBranch = 'candidateClear'
+      return true
+    }
+    // killCurrent / interceptBase: standing hold only when the VERDICT came
+    // from the standing assessment (standingShot — the M1 standing shot that
+    // wins the deadline). Never re-derive standing from firstOutputTick ===
+    // 0: an aligned approach has zero arrival cost yet may carry a blocked
+    // ray. Approach commits always move; fire en route only when the CURRENT
+    // ray is ring/base-clear (S30s27 — the commit-time verdict predates the
+    // player's alignment).
+    if (v.standingShot) {
+      self._moveDir = null
+      self._fire = v.fireClear && !onCooldown && roll()
+    } else {
+      self._moveDir = self.navigateTowards(tc)
+      self._fire = aligned && facing && !fireRayBlocked(w, p, target) && !onCooldown && roll()
+    }
+    self.branchCounts.unifiedCandidates++
+    self._lastBranch = v.kind === 'killCurrent' ? 'candidateKill' : 'candidateIntercept'
+    return true
+  },
+}
+
 const BASE_LANE_SENTRY: Candidate = {
   id: 'baseLaneSentry',
   weight: ACTION_WEIGHTS.baseLaneSentry,
@@ -604,7 +700,7 @@ const BASE_LANE_SENTRY: Candidate = {
             world: w,
             player: p,
             threat: best,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, ccol === tc.col),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, ccol === tc.col),
           }).valid
         ) {
@@ -692,6 +788,26 @@ const BASE_LANE_SENTRY: Candidate = {
           self._lastBranch = 'baseLaneSentry'
           return true
         }
+      }
+    }
+    // §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+
+    // 玩家与敌人不同列 → 横移到敌人列（colGap ≤ 3，保持当前行）堵口。站台
+    // 导航只服务带外敌人（row 20-22），此处补带内空白（§225 实证：62.5%
+    // 败局窗口内 sentry 0 tick — 玩家 lane 外时哨兵无路径, navigate 盲跑）。
+    // 到位后由上方对齐开火段接管（同列 + 中线畅通 + manhattan ≤ range）。
+    // 带内击杀进行中（aligned 已 return true）不会到此；§198 门控精神保持。
+    if (prm.baseLaneSentryInBandNav > 0 && tc.row >= BASE_POS.row - 1 && crow >= BASE_POS.row - 3) {
+      const colGap = tc.col > ccol ? tc.col - ccol : ccol - tc.col
+      // colGap=1 跳过（§198 seed25 先例：玩家已在拦截列附近，横移纯属多余）。
+      if (colGap >= 2 && colGap <= 3) {
+        const sc = tc.col
+        if (w.tileMap.get(sc, crow) !== 'empty') return false
+        if (laneCorridorBlocked(w, sc, crow, sc, tc.row) !== 0) return false
+        self._moveDir = sc > ccol ? 'right' : 'left'
+        self._fire = false
+        self.branchCounts.baseLaneSentry++
+        self._lastBranch = 'baseLaneSentry'
+        return true
       }
     }
     return false
@@ -1106,13 +1222,17 @@ const CLOSE_PICKUP: Candidate = {
   id: 'closePickup',
   weight: ACTION_WEIGHTS.closePickup,
   evaluate(self, ctx) {
-    const { p, pcx, pcy, onCooldown } = ctx
+    const { w, p, pcx, pcy, onCooldown } = ctx
     // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
     if (isDualCentralBreachHoldP1(self)) return false
     if (self.aggressive) return false
     if (self.params.closePickupRange <= 0) return false
     // Skip when base is under threat — defense outranks a nearby item.
     if (self.hasBase && self.isBaseUnderThreat()) return false
+    // §225-B: 危局拾取抑制 — ring 已被击穿时非 HIGH 拾取让位（防"基地掉血还
+    // 在捡 star"）；HIGH tier 豁免在 PICKUP_HIGH（bomb/freeze/fence 有效）。
+    if (self.params.baseAlertPickupSuppress > 0 && self.hasBase && baseRingBreachedImpl(w))
+      return false
     const target = self.findClosePickupTarget(pcx, pcy)
     if (!target) return false
     // §186: Skip when pixel-stuck — the powerup is unreachable.
@@ -1131,7 +1251,7 @@ const PICKUP_MID: Candidate = {
   id: 'pickupMid',
   weight: ACTION_WEIGHTS.pickupMid,
   evaluate(self, ctx) {
-    const { p, pcx, pcy, onCooldown } = ctx
+    const { w, p, pcx, pcy, onCooldown } = ctx
     // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
     if (isDualCentralBreachHoldP1(self)) return false
     // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
@@ -1142,6 +1262,12 @@ const PICKUP_MID: Candidate = {
     // extending the gate to MID/LOW was A/B-measured net negative on chaos
     // (§147, see retreatGateBlocksPickup scope note).
     if (self.params.chokepointMode > 0 && !self.aggressive && self.params.pickupPriorityMode > 0) {
+      // §225-B: 危局拾取抑制 — ring 已被击穿时 MID tier（star/tank/shield）
+      // 让位：救不了基地，去向防守（sentry/intercept）。HIGH tier 豁免
+      // （bomb/freeze/fence = 危局有效道具）。
+      if (self.params.baseAlertPickupSuppress > 0 && self.hasBase && baseRingBreachedImpl(w)) {
+        return false
+      }
       // §152-W3: commit-persistent lookup (see PICKUP_HIGH) — the W3
       // oscillation was driven by this branch (the decoy at (21,14) sat
       // exactly at the mid-range boundary).
@@ -1244,7 +1370,7 @@ const DEFENSE_INTERCEPT: Candidate = {
             world: w,
             player: p,
             threat: t,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
           }).valid
         ) {
@@ -1277,7 +1403,7 @@ const DEFENSE_INTERCEPT: Candidate = {
             world: w,
             player: p,
             threat: t,
-            enemyBulletOnRay: enemyBulletOnRay(w, p, dCol === 0),
+            enemyBulletOnRay: enemyBulletOnRay(w, p, dir),
             ownBulletOnRay: ownBulletOnRay(w, p, dCol === 0),
           }).valid
         ) {
@@ -1317,7 +1443,7 @@ const MID_LANE_DEFENSE: Candidate = {
   id: 'midLaneDefense',
   weight: ACTION_WEIGHTS.midLaneDefense,
   evaluate(self, ctx) {
-    const { p, pcx, pcy, onCooldown } = ctx
+    const { w, p, pcx, pcy, onCooldown } = ctx
     const prm = self.params
     if (prm.midLaneDefense <= 0 || !self.hasBase || self.aggressive) return false
     const pc = self.playerCell()
@@ -1360,6 +1486,26 @@ const MID_LANE_DEFENSE: Candidate = {
       if (absOff < BULLET) {
         // Aligned with a coming shell — hold in place, face up, fire to
         // cancel. The shell is the target; fire whenever the gun is ready.
+        // 行动有效性契约 (open-test §5.2 — all three defense branches gated
+        // identically): a standing, already-facing, on-cooldown, no-output
+        // hold is only valid with waiting value — an interceptable shell on
+        // the up-ray / own bullet resolving / a standing shot beating the
+        // threat deadline. Otherwise yield (fall through produces output).
+        // mode=0 短路 → byte-identical。
+        if (
+          prm.actionContractMode > 0 &&
+          p.dir === 'up' &&
+          onCooldown &&
+          !contractStandingHold({
+            world: w,
+            player: p,
+            threat: null,
+            enemyBulletOnRay: enemyBulletOnRay(w, p, 'up'),
+            ownBulletOnRay: ownBulletOnRay(w, p, true),
+          }).valid
+        ) {
+          return false
+        }
         const laneDir: Direction = 'up'
         self._moveDir = p.dir === laneDir ? null : laneDir
         self._fire = !onCooldown
@@ -1405,6 +1551,24 @@ const MID_LANE_DEFENSE: Candidate = {
     //    a normal enemy/target is in the line (shouldFireInDir).
     if (inHold) {
       const laneDir: Direction = 'up'
+      // 行动有效性契约 (open-test §5.2) — 同上: 站立 + 已朝向 + 冷却中且无输出
+      // 的哨位提交必须先有等待价值，否则让位。有开火输出时契约不否决。
+      if (
+        prm.actionContractMode > 0 &&
+        p.dir === laneDir &&
+        onCooldown &&
+        !laneShellInColumnImpl(self) &&
+        !self.shouldFireInDir(pcx, pcy, laneDir) &&
+        !contractStandingHold({
+          world: w,
+          player: p,
+          threat: null,
+          enemyBulletOnRay: enemyBulletOnRay(w, p, 'up'),
+          ownBulletOnRay: ownBulletOnRay(w, p, true),
+        }).valid
+      ) {
+        return false
+      }
       self._moveDir = p.dir === laneDir ? null : laneDir
       self._fire =
         !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, laneDir))
@@ -1583,7 +1747,7 @@ const ENGAGE: Candidate = {
           // deadlocks (player stuck at one spot for 17000+ ticks). The
           // zone fix accumulates camp time across nearby cells, so the
           // escape triggers even if the player wiggles between two cells.
-          const pc = self.playerCell()
+    const pc = self.playerCell()
           if (
             self._campCell &&
             Math.abs(self._campCell.col - pc.col) <= 1 &&
@@ -1700,6 +1864,10 @@ const PICKUP_LOW: Candidate = {
     // chasing power-ups while enemies are nearby was a major cause of
     // defense-collapse gameovers on S6/S26/S32.
     if ((!aimDir || onCooldown) && !(self.hasBase && self.isBaseUnderThreat())) {
+      // §225-B: 危局拾取抑制 — ring 破时 LOW tier 机会拾取同样让位（HIGH tier
+      // 目标已在 pickupHigh(800) 先行处理, 到这里只剩非 HIGH 道具）。
+      if (self.params.baseAlertPickupSuppress > 0 && self.hasBase && baseRingBreachedImpl(w))
+        return false
       // P3.2: Don't divert to power-ups when enemies are close.
       const pc2 = self.playerCell()
       let nearbyEnemy = false
@@ -1752,6 +1920,31 @@ const HUNT: Candidate = {
     // in the navigate branch for too long (pursuit loop with a faster enemy),
     // override the target to the map center.
     const pc = self.playerCell()
+    // §217 (open-test round 2): travel-phase fire-line detour — an aligned,
+    // ray-clear, off-cooldown killable target (csb/cbr/base band) one turn
+    // away beats continuing the nav plan: turn + fire this tick (cost: one
+    // turn window, killSlack > 13 guarantees the kill wins the deadline).
+    // Inside HUNT → dodge/interceptBase/aggro/pickup all evaluate above and
+    // preempt it; pure geometry (no RNG perturbation), S30s27-safe (corridor
+    // + fireRayBlocked). Mode 0 = OFF (byte-identical).
+    if (self.params.fireLineDetourMode > 0 && !onCooldown) {
+      const detourList = self._enemies.length > 0 ? self._enemies : w.tanks
+      const detourDir = travelFireDetourDir(w, p, pc, detourList, self._lastSelectTargetId, (t) => {
+        if (enemyCanShootBase(self, t) || enemyCanBreachRing(self, t)) return true
+        // Scalar center-cell math (§14.1 — no per-tick object allocation in
+        // the M5 callback; same center-floor semantics as tankCenterCell).
+        const tcCol = Math.floor((t.x + t.w / 2) / CELL)
+        const tcRow = Math.floor((t.y + t.h / 2) / CELL)
+        return tcRow >= BASE_POS.row - 4 && Math.abs(tcCol - BASE_POS.col) <= 6
+      }, self.params.fireLineDetourMinSlack)
+      if (detourDir) {
+        self._moveDir = detourDir
+        self._fire = self.rng.next() >= self.params.aimError
+        self.branchCounts.navigate++
+        self._lastBranch = 'navigate'
+        return true
+      }
+    }
     // §162: carve-dig START — the player is pixel-blocked (endFrame stuck
     // detector: moved < carveDigBlockThreshold px for carveDigBlockTicks
     // ticks, i.e. wall-blocked / sealed-pocket oscillation). The cell-level
@@ -2799,6 +2992,10 @@ export const CANDIDATES: Candidate[] = [
   SUICIDE_RETURN,
   DODGE,
   INTERCEPT_BASE,
+  // M4 / 统一行动候选 — interceptBase(900) 之下、baseLaneSentry(850) 之上:
+  // 基地受直接威胁时四候选(kill-current/intercept-base/clear-lane/
+  // return-defense)按协议 §7.2 门控择一;门控不过则旧级联照旧。
+  UNIFIED_CANDIDATES,
   // §X: 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
   BASE_LANE_SENTRY,
   PICKUP_HIGH,

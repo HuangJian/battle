@@ -1996,3 +1996,725 @@ breakthrough plan §8 (Phase 4) / §10 (M4)：低星级是 hard 长期战力瓶�
 1. **筛选系统性高估**：20 seeds 下 floor penalty（minStageWin 20-45% 摆动）与胜率噪声（±2pp）主导 fitness——+37/+43 的"收益"在 60 seeds 全部蒸发。两个独立 CMA-ES 运行收敛的同一方向在 60 seeds 无信号（批次 3 净负），说明该方向是噪声产物而非真实梯度。
 2. **与历史同构**：classic 纪元 §67（多轮探针 ±1pp 内，正式停止调参）、v2 纪元 M11 结论一致。**参数面已穷尽**；剩余提升需要结构性机制（行为/架构），而 M2-M4 结构性机制全部证伪——**hard 基准（SUITE 0.5132 / 胜率 73%）是参数面与行为面的局部最优**。
 3. 沉淀：`tools/diag/ab-multi-param.ts`（多参数 CRN 配对 A/B，ab-param.ts 泛化）。产物保留在 `.workbuddy/optimization-phase5/`（batch 1）、`optimization-phase5-b2/`（batch 2）、`tmp/phase5-ab60{,-b2,-b3}.json`（60-seed 明细，供将来 holdout/取证）。
+
+## §215 Hard 开放测试协议第 1 轮执行 — M0–M3（2026-08-16）
+
+协议: `plan/God-AI-Hard-Open-Test-Protocol.md`;交接快照: `plan/open-test-round1-handoff.md`。
+
+### §213/§214 口径勘误（作废声明）
+
+上轮 handoff 取证发现: optimize-godai 的旧 stage parser 把 `--stages 1-35` 解析成 S1 单关——§214 三个批次的 CMA-ES **筛选**（方向寻找）实际只在 S1 上跑过;但三批的 **60-seed 确认**用的是新 ab-multi-param（parser 已修）真 35 关 × 60 seeds。因此:
+
+- **作废**: "Phase 5 在 35 关参数面上搜索无 ROI" 的表述——CMA-ES 从未真正在 35 关面上搜索,只搜了 S1 局部。
+- **仍有效**: 三批候选在真 35×60 确认中全部噪声/净负(+0.8/+0.4/−0.8pp)→ "S1 局部方向无 ROI" 成立,DEFAULT 不变的出货决定不变。
+- **重开条件**: 若重启参数搜索,必须用 M0.1 修复后的 parser(`tools/lib/stage-spec.ts`),口径行自动钉死。
+
+### M0 — 共享口径 + byte-identical 实证(通过)
+
+- `tools/lib/stage-spec.ts`: parseStageSpec(all/范围/逗号/单关统一,拒绝空/反向/越界) + paramsHash(FNV-1a) + runHeader 口径行;接入 6 个工具。`tests/stage-spec.test.ts` 11 过。
+- **byte-identical 实证**: HEAD(c6884a8, git worktree) vs 工作树(含 M0/M1/M2 全部未提交改动 + 本轮 intent 修复),hard 35 stages × 60 seeds × maxTicks=36000 = 2100 局:outcome mix 完全一致(stage_clear 1582 / base_destroyed 447 / lives_exhausted 70 / timeout 1),且 **518 条失败记录(含全量 forensics: 终局快照/事件史/末 10 tick 行动轨迹)逐字段 deep-equal**。上轮丢失的 `tmp/open-test-forensics-baseline.json` 基线由此重建(10.8MB),聚合数与上轮 handoff 记载完全一致(75.3% 胜率/447/70)。
+- **口径坑(重要)**: replay 必须匹配 corpus 的 stageIndex——run-forensics 任务全部 stageIndex=0;`loadStageData(stage, N)` 的 N 影响 score-milestone 掉落 → 消耗 world.rng → 整局发散。counterfactual 工具首版 replay 全部 diverge 即此因,加 `--stage-index`(默认 0)后归零。
+
+### M1 — ThreatBudget 语义分层(完成,默认 OFF)
+
+playerActionEta 五字段互斥单次计费(total 严格和,转向窗口 aim+换轴共享);enemyDeadline 三层(arrivalLowerBound 排序下界 / damageEarliest 最早落地 / damageDeadline = earliest − 安全余量,唯一可作行动依据);cbr 破环单次计费、环没了不收幻影、ticksUntilFire 计入;targetValue horizon = eta.total(原来 reach 重复加);坐标协议三约定(center-floor / corner-floor / round)测试钉死。`tests/godai-threat-budget.test.ts` 26 过。
+
+### M2 — ActionContract 拦截段 + intent(完成,默认 OFF)
+
+enemyBulletOnRay 重写为拦截段判定(aimDir 签名: 炮口前方+未过基地近缘+朝基地+速度可行);midLaneDefense 两个站桩 hold 接入 actionContractMode;intent committedSlack = deadline − killAssessment ETA。`tests/godai-action-contract.test.ts` 18 过。
+
+**intent `<0` 释放修复(本轮接手后第一件事)**: `tests/godai-intent.test.ts` "holds the committed target within the lease" 失败的根因——开阔地(环已无)walk 分支 deadline = 走+飞(几何下界,敌零转向成本),而玩家 killEta 含全成本,远敌 commit 时 killSlack 即 −52;重验 `currentSlack < 0` 每次都释放 → lease 对"追不上的目标"形同虚设,恰是 intent 要治的抖动。修复:`EnemyDeadline` 新增 **directThreat**(csb||cbr)字段,`<0` 释放仅对 directThreat 目标生效(deadline 是真实首发时刻);walk 分支只受 collapse(committedSlack−10)与新威胁(deadline 差>30)释放约束。8/8 过。INTENT_THREAT_DELTA 15→30(1 格走近≈15.5 ticks,15 会被距离抖动触发)。
+
+### M3 — 反事实因果工具(完成,协议主突破方向)
+
+`tools/diag/counterfactual-idle.ts` + `tests/counterfactual-idle.test.ts`(纯分类器 6 用例):
+
+- **检测**: 防守/hunt 分支提交 + moveDir=null + fire=false 且玩家在场,连续 ≥3 tick 为静止段,只取段首;限首次基地受伤前 600t(pre-window)。
+- **分支**: 对每个事件确定性 replay 0..T(分支点在 T 执行前,替代动作可在静止 tick 当拍生效),`cloneWorld`/`restoreWorld`(RNG/子弹/地形/cooldown 全随快照),四支: continue(原 AI)/ turn-and-fire(合法转向+开火,hold 语义)/ move-to-intercept(几何转向逼近,brick≤2 格即爆破,steel/water 换轴)/ clear-or-advance(brick≤6 格主动清线)。240t 窗,60/120/240 检查点;ScriptedInput 仅存在于 tools/diag。
+- **口径细节**: 移动判定用净位移 ≥8px(1px snap 回正不是移动);" acted"= fire 或真实 step;`avoidedByInaction` 标记"靠站桩(如车身挡弹道)而非主动干预避免伤害"的 causal 事件。
+- **结果(hard, 40 局 base_destroyed 均匀抽样)**: 14 局有合格静止段、**26 局根本没有**;14 事件:idle_causal 2(14.3%)/ idle_legitimate 6 / travel_or_turn_causal 6 / unresolved 0。
+- **人工抽查 14/14 与分支证据一致(门槛 ≥80% 通过)→ M3 通过**。明细 `tmp/cf-idle-r1.json`。
+
+### M3 结论(改变主线)
+
+1. **idle_causal 低(14.3%)→ 协议 §6.3 条款生效: 不得再以消灭 idle alert 为主线。** 威胁账本 no_output_commit 69.4% 的表观占比严重高估了 idle 的因果地位——2/3 的 base_destroyed 局在首次受伤前 600t 内连静止段都没有。
+2. **主导机理是"窗口在静止发生前已关闭"**: 8/14 事件 commit 时 threatSlack 已 −81..−573;所有替代动作与 continue 同 tick 受伤(dmg@41/44/98/141 高度重合)。根因在更早的选靶/路线/转向决策,M4 的统一行动候选应优先覆盖**决策点前移**(travel/turn 根因),而不是消除静止。
+3. **"开火 ≠ 更优"实证一例**(S30s27): 站桩开火分支 dmg@190 vs continue dmg@-(240t 内无伤)——朝威胁开火的子弹会打掉自家环砖/给敌人清障,防守开火本身可能引弹上身。M4 候选评估必须包含这类反例。
+4. idle_causal 两例之一(S17s38)是 fb 目标(事件时刻无 csb/cbr,回退最近敌): causal 的载体是"没能击杀最近敌",更像决斗失败而非静止;分类规则按协议字面成立,但归因时注意 fallback 语义。
+
+### 下一步
+
+M1–M3 通过 → M4(统一行动候选最小原型)允许启动;候选集设计应以 §215 M3 结论 2/3 为输入(前移决策点 + 开火反例约束)。
+
+## §216 Hard 开放测试协议第 1 轮 — M4 统一行动候选: paired A/B 净 −116,方向否决 (2026-08-16)
+
+协议: `plan/God-AI-Hard-Open-Test-Protocol.md` §8;前置: §215 (M0–M3 通过)。
+
+### M4 实现 (candidateMode=1, 默认 0 = OFF, byte-identical 保持)
+
+- `src/ai/god/ActionCandidates.ts` + `think.ts` UNIFIED_CANDIDATES 接线: kill-current(站桩/approach) /
+  intercept-base(站桩/approach) / clear-lane(清砖后补射) / return-defense 四候选,与现有 dodge/engage/
+  defense/return 分支并列,`GodAIInput._candVerdict` 记录裁决供取证。`params.candidateMode` 默认 0。
+- **修站桩误判**: verdict 携带 `standingShot`(只有站桩评估才为 true),think.ts 不再从
+  `firstOutputTick === 0` 重推导——对齐 approach 到达成本为 0 但射线可被挡,重推导会把 approach 当站桩。
+- **射线把基地鹰当 blocker**(S30s27 base form): `isBaseCell` + `fireRayBlocked`(完好环砖 + 2×2 基地足迹),
+  `firstBrickOnRay` 返回 `'base'`;站桩/approach/clear-lane 火力全部受该门约束。
+- **approach 门控**: kill-current `blockedRay = alignedK && kRayHit !== 'none'`(穿砖击杀的 slack 是虚构的,
+  让位 clear-lane);intercept approach 同样 `!blockedU`;clear-lane 补射必须 `!fireRayBlocked`。
+- 死循环修复: `ThreatBudget.bricksBetween` 下行循环缺边界检查(敌人 center row == BASE_POS.row 时无限循环),
+  加 `r >= 0 && r < GRID` 守卫 + 2 个回归测试。`tests/godai-candidates.test.ts` 10 过(含 standingShot
+  true/false 与 base 射线反例 3 个新用例)。
+
+### 报告 (协议 §8.3 模板)
+
+```
+caliber:  difficulty=hard  stages=35  seeds=1-60  stageIndex=0  maxTicks=36000
+          paramsHash base=6ef1b952 (candidateMode=1)  4200 runs, 185.0s
+total W/L/net:  base 1582/2100 (75.3%) → cand 1466/2100 (69.8%), net −116
+                L→W 222 (10.6%)  W→L 338 (16.1%)  翻转率 560/2100 = 26.7%
+base_destroyed:  (W→L 翻转子集 n=338, run-forensics 重跑) base_destroyed 308 (91.1%)
+                lives_exhausted 30 (8.9%)  max_ticks 0
+lives_exhausted: n=30, base HP 均值 91 (中位 120), 40% 局 1 发即倒
+weakest stages:  S34 17→13 (−4)  S3 36→27 (−9)  S6 45→34 (−11)  S26 47→38 (−9)
+                 S7 48→40 (−8)  S31 48→39 (−9)  S20 33→29 (−4)  S24 31→34 (+3 唯一正)
+best/worst flips:  worst W→L: S8s56 W9283→L1745  S33s14 W10833→L5416  S20s20 W8052→L4894
+                   best L→W:  S24s36 L3027→W7313  S11s10 L1667→W6437
+failure-family conversion:  W→L 翻转 338 局的死亡模式: 基地先行沦陷 (91.1%), 玩家命数耗尽 8.9%,
+                 2 局为玩家自毁基地 (player 自伤弹, S30s27 类风险在 candidateMode 下真实存在)
+determinism check:  翻转子集 338 局 (candidateMode=1) 由 run-forensics 独立重跑,
+                 0/338 结果或 tick 不一致 (byte-identical)
+verdict: reject implementation
+```
+
+### 判定与洞察
+
+1. **否决依据**: net −116、30/35 关净负、翻转率 26.7% 而净负 5.5pp——paired A/B 主筛选即明确负信号,
+   按 §8.3 不进入 holdout(holdout 只为通过主筛选的候选做最终行为结论)。DoD "充分证据否决该方向" 成立。
+2. **翻转子集取证 (n=338)**: 91.1% 为基地沦陷;末 10 tick 规则分布 candidate 分支仅占
+   candidateKill 61 (2%) / candidateIntercept 100 (3%) / candidateReturn 18 (1%)——多数翻转不是候选层
+   直接开错火,而是**机会成本**:站桩 hold / 拦截走位期间吃弹、丢回防时机,即 M3 结论 2 的实锤
+   (窗口在静止前已关闭,提前占位并不等于提前得手)。
+3. **2 局自毁基地**: 证实 S30s27 反例在 candidateMode 下真实存在——即便有 fireRayBlocked 门,
+   站桩开火仍可能被敌人闪避后命中自家基地(子弹 6px 弹道与 scan 线不一致)。这排除了"收紧门控后重试"
+   的简单路径,进一步支持方向否决。
+4. **S18 (+3) / S24 (+3) 正信号为噪声尺度**: 与 15 个 −9..−19 的负关相比不构成可重复方向;
+   协议 §8.3 禁止把筛选噪声写成行为改善。
+5. **沉淀**: `tmp/m4-candidate-ab.json` (4200 局明细)、`tmp/m4-flip-corpus.json` (W→L 翻转子集)、
+   `tmp/m4-flip-fx.json` (338 局 forensics)。`candidateMode` 保持默认 0,出货行为不变 (byte-identical)。
+
+### 下一步
+
+M4 方向否决 → M5 (开放测试矩阵) 无候选可继续;按协议 §10 DoD, 本轮以"充分证据否决该方向"收口。
+M5 剩余可选项: ① 以 M3 结论 1/4 的"决策点前移"为输入设计下一候选 (travel/turn 段干预,非静止段);
+② 或接受 73% 为当前行为面局部最优,归档本轮证据。
+
+## §217 M5 候选 — travel-phase 火力偏离 (fireLineDetourMode): 诊断先行, 机会空间 33% (2026-08-16)
+
+前置: §215 (M3 结论 2: 窗口在静止前已关闭, 主导机理在 travel/turn 段), §216 (M4 静止段干预净 −116 否决)。
+
+### 诊断 (tools/diag/travel-fire-probe.ts, 决策点前移方向的机会空间测量)
+
+- 输入: `tmp/m4-candidate-ab.json` baseline 败局 518 局 (hard, stageIndex=0), 确定性 replay,
+  逐 tick 记录旅行分支 (defense + hunt 集) 中的机会: 对齐 + 射线全清 (环/基地/任何地形) +
+  killSlack > 转弯窗 13t + 未面向 (需一次转弯 — 已面向则 baseline 本就会开火) + 不在冷却,
+  且目标为 csb / cbr / 基地逼近带 (row ≥ 20, |col−12| ≤ 6) 之一。
+- 结果 (60 局抽样): **33.3% 败局有 ≥1 个机会 tick** (mean 10.3 tick/run), **75% 的机会先于首次
+  基地受伤**; 机会 100% 落在 navigate 分支; 目标构成 fb 94% / cbr 6% (csb 0 — csb 对齐且
+  有 slack 时玩家本就在处理)。firstOppTick 中位 ~3000 (局中段, 干预后仍有大量局时)。
+- 与 M3 (idle 14.3%) 对比: travel 段机会空间是静止段的 2.4×, 与"窗口在静止前已关闭"一致。
+
+### 候选设计
+
+- 新参数 `fireLineDetourMode` (0 = OFF, byte-identical)。开启时, HUNT 分支顶部先行检查:
+  若当前有对齐、射线全清、未面向、非冷却的目标 (csb/cbr/带内 fb) 且 killSlack > 13,
+  则本 tick 转向 + 开火 (偏离导航计划一个转弯窗 = 13t, killSlack 门槛保证击杀仍胜 deadline),
+  否则导航照旧。S30s27 安全: 走廊检查 (任何非空地形, 含 base 格) + fireRayBlocked (环+基地)。
+- 纯几何谓词 `travelFireDetourDir` (ActionCandidates.ts), 无 RNG 消耗 (fire roll 在提交处按
+  aimError 纪律执行); 位于 HUNT 内部 → dodge/t8/aggro/pickup 等上层分支不受影响。
+- 纯谓词单测 + 接线走查, 通过后 paired A/B (hard 35×60 CRN) 做主筛选, 正信号才进 holdout。
+
+### 依据与拒绝项
+
+- 拒绝: 在其它分支 (defenseIntercept/midLane) 也挂 detour — 探针显示机会 100% 在 navigate,
+  扩大范围徒增干预面 (M4 教训: 过早占位 ≠ 提前得手)。
+- 拒绝: 无 slack 门槛的 "见敌就开火" — 会打断正在进行的 dig/逃脱 (carve-dig 窗口被 13t 打断
+  的代价以 killSlack>13 门控兜底)。
+
+## §218 M5 候选 — travel-phase 火力偏离 (fireLineDetourMode): paired A/B 三批全正向, SHIP (2026-08-16)
+
+前置: §217 (诊断先行, 机会空间 33.3%, 候选设计与闸门)。本节完成该候选的 A/B 验证与裁决。
+
+### 实现
+
+- `travelFireDetourDir` (ActionCandidates.ts, 纯几何谓词, 无 RNG) + `DETOUR_TURN_WINDOW_TICKS = 13`;
+  `fireLineDetourMode` 参数 (默认 0, OFF, byte-identical); HUNT 分支顶部接线 (§162 carve-dig 之前,
+  不改变 dodge/t8/aggro 上层分支)。单测 10 用例 (tests/godai-travel-fire.test.ts, 含 facing/aligned/
+  band/corridor/ring/base/slack/hunt 偏好), 全过。
+- 探针工具 travel-fire-probe.ts 增补: difficulty 参数化 + gateFail 归因 (aligned/facing/cooldown/
+  slack/corridor/ray/band 逐门计数), 用于 classic 结构性 no-op 的归因。
+
+### 证据 (hard, 官方 stageIndex=0, CRN 配对, 35×60×3 独立 seed 语料)
+
+| 语料 | seeds | baseW | candW | net | L→W / W→L |
+|---|---|---|---|---|---|
+| primary | 1–60 | 1582/2100 (75.3%) | 1594 (75.9%) | **+12** | 66 / 54 |
+| holdout | 61–120 | 1565 | 1581 | **+16** | 59 / 43 |
+| b3 | 121–180 | 1544 | 1558 | **+14** | 58 / 44 |
+| 合计 | 1–180 | 4691/6300 | 4733/6300 | **+42 (+0.67pp)** | 183 / 141 (~2.3σ) |
+
+- **最弱关**: S34 (堡垒) +1/+3/−3 → 180 局净 +1, 无崩塌; S24 +4/+4/0; S31 0/+7/+3;
+  S22 +6/0/+3 (含 §217 目标干预例 S22s28 所在关); S12 +4/+1/−3。
+- **稳定小亏** (无崩塌, 记录在案): S19 −2/−1/−2 (−5/180), S13 −2/0/−2 (−4/180)。
+- **failure-family conversion** (97 局 W→L, set1+2): base_destroyed 主导; killer mix
+  armor 22 / power 21 / basic 21 / fast 15 / player 2。2 局玩家自毁基地 (S2s12 t5226,
+  S22s92 t1418) — 致命弹均为 **t2a 分支** (§216 记录的老类, baseline 同概率), 系 detour
+  额外开火扰动 RNG 轨迹后的间接结果, **非 detour 直发**: 走廊+射线门在 6300 局中 0 漏
+  (环/基地/任何非空地形均在门外)。
+- **guardrail classic**: net 0, 0 flips — 结构性 no-op: 探针 (gateFail 归因) 证实 classic
+  败局中到达 band 门的对齐目标恒为带外 (classic 敌人不入基地带), detour 永不触发,
+  属预期非缺陷。chaos guardrail (35×20) 复跑记录见 §219 (gated rollout 后补)。
+- **turn+fire 语义 (评审 P1 澄清, 2026-08-17)**: 候选的 detour commit 与人类同帧
+  "转向+开火" 输入完全同构 — `SimulationPlayer` 先 `p.dir = dir` 再 `tryFire` (子弹沿
+  新方向立即生成), `SimulationCombat` 的 200ms 转向冷却只推迟视觉转向 (回退 dir + halt),
+  不阻止开火。因此 §217 模型里 "13t 转弯窗成本" 是**未来移动**的转向成本, 开火本身
+  立即生效 — killSlack > 13 门槛对 deadline 只多不少, 无公平性违例 (人机等价, 引擎
+  对输入源不区分)。测试: tests/godai-travel-fire.test.ts §218 describe (3 用例 —
+  谓词 active-cooldown 提交 / think 真实接线 / 人类输入字节级同构)。
+- **determinism**: 97 局 flip corpus 重跑 0 mismatches; 探针 60/60 + 80/80 逐字节一致。
+- **verdict: 候选通过初步 A/B, 允许 gated rollout (NOT shipped)** — 3/3 独立语料正向
+  + holdout 复现 + 最弱关无崩塌 + classic 护栏通过 (chaos 护栏 §219 补跑),
+  协议 §10 DoD "至少一个候选行为在 hard 35×60 paired A/B 有明确正向信号" 由此满足;
+  按评审要求, 仅在 candidate-on 完整验证确认 base_destroyed / 最弱关 / lives /
+  clear speed 无恶化后才考虑将 `fireLineDetourMode` 默认打开 (届时再升格为 ship)。
+- **交付纪律** (协议 §11): `fireLineDetourMode` 保持默认 0 (独立 feature flag), 出货行为
+  byte-identical; 证据全部落盘 tmp/m5-*.json, 随时可复跑。
+
+### 依据与拒绝项
+
+- 接受: 幅度小 (+0.67pp) 但三批方向一致且无一负批, 翻转不对称 183:141 (~2.3σ) —
+  §9 条款 5 (连续 3–5 批 ±1–2pp 且 holdout 无信号才停止) 不适用, holdout 有信号。
+- 拒绝: 因幅度小而不录 (M4 教训的反面 — 证据链完整时按证据裁决, 不按期望裁决)。
+- 拒绝: 把 S19/S13 稳定小亏当作崩塌 — 无任何语料显示 ≥3 局/批的关级崩塌。
+- 拒绝: 因 2 局 t2a 自毁翻转收紧 selfFireBaseGuard — 与 §216 结论一致, 该风险是基线
+  固有类 (lenient 默认), 非本候选引入; 单独候选另行论证。
+
+### 后继计划 (开放测试继续的候选方向, 按证据强度排序)
+
+1. **defenseIntercept 开火窗口** — 反事实语料 (cf-idle-r1.json) 中最大的未动类 (6/14 事件,
+   分支占比最高); 与 M5 同构 (防守分支的"能打不打"窗口), 可复用走廊+射线闸门与探针
+   方法学; 高危分支 (改错直接送基地), 收益与风险同高。
+2. **CMA-ES 参数面** (协议 §9 重启条件现已满足) — 搜索范围限定结构参数: slack safety
+   margin / intent lease 与无产出释放 ticks / coverage 最小收益 / 多威胁 opportunity cost /
+   安全道具最大绕行成本。排除 turnCooldownMs、aimError、suboptimalPathProb 等 game-feel
+   参数与已证伪方向。
+3. **dodge 分支 idle 取证** — 失败结局末 10 tick 21% 在 dodge (死亡占比第二大), 但反事实
+   语料零 dodge 事件; 按纪律先跑 dodge 分支 idle 反事实, 确认可干预窗口再设计。
+4. **"太迟"防御结构分析** — 91% 失败为基地被拆, 且 67% 败局在 travel 段无任何火力机会
+   (非"能打不打"而是"人不在/挡不住"); 首伤→死亡窗口的玩家行为与 baseLaneSentry 缺位
+   (死亡占比仅 1%) 未分析, 是 travel 段之外的独立机理。
+5. **t2a 自毁守卫收紧** (selfFireBaseGuard) — 2/97 翻转 + §216 2/338 同源; 需先重论证
+   lenient 默认的理由是否仍成立, 再做独立 A/B。
+
+### 沉淀
+
+`tmp/m5-ab.json` / `m5-ab-holdout.json` / `m5-ab-b3.json` (12600 局明细)、
+`tmp/m5-flip-corpus.json` (97 局 W→L)、`tmp/m5-flip-fx.json` (97 局 forensics)、
+`tmp/m5-classic.json` (guardrail 700 局, 0 flips)、探针 (travel-fire-probe.ts) 带 gateFail
+归因与 difficulty 参数化。测试: godai-travel-fire.test.ts 10 用例 + godai-candidates.test.ts 10 用例。
+
+### §219 评审 P1 修复轮 (2026-08-17) — 工具可信度 + 4 处 AI 缺陷 + 修正后门禁重跑
+
+#### 1. 实验工具 hash/seed 修正 (P1)
+
+- `tools/lib/stage-spec.ts`: `RunHeaderInfo` 新增 `paramsB?: unknown`; `runHeader` 在
+  传入 paramsB 时打印 `paramsA=<hash> paramsB=<hash>` (否则保持 `params=` 单 hash)。
+- `tools/diag/ab-param.ts` / `ab-multi-param.ts`: 传 `paramsB: CANDIDATE`, 表格行用
+  `seeds.length` (原硬编码 `/60` 会错标非 60-seed 语料)。
+- `tools/eval/eval-suite.ts`: `params` 移到 caliber 行之前加载 (原在行后才声明)。
+- 实测 caliber: `difficulty=hard stages=35 seeds=60 stageIndex=0 maxTicks=36000
+  paramsA=f5cc0288 paramsB=493a5081` (base=f5cc0288, M5 candidate=493a5081)。
+
+#### 2. 门禁重跑 (修正打印后, 运行内容不变 — 打印 bug 仅影响报告文本)
+
+| 难度 | 语料 | baseW | candW | net | flips L→W:W→L | 结论 |
+|---|---|---|---|---|---|---|
+| hard | 35×60 (1–60) | 1582/2100 | 1594/2100 | **+12** | 66:54 | 与 §218 primary 逐局一致 (determinism 复证) |
+| classic | 35×20 | 620/700 | 620/700 | **0** | 0:0 | 结构性 no-op 复确认 |
+| chaos | 35×20 (首次) | 494/700 | 502/700 | **+8** | 25:17 | **护栏通过** — 净正, 无崩塌 |
+
+chaos 分关 (净翻转): S21 +4, S2 +3, S6 +2, S0/S5/S10/S12/S15/S16 −1, S12 −2,
+其余 ≥0; 最差单关 −2, 无 ≥3 崩塌。artifact: `tmp/m5-rerun-{hard,classic,chaos}.json`
+(均含 paramsA/paramsB caliber 行)。
+
+#### 3. 4 处 AI 缺陷修复 (各带回归测试, 旧代码验证失败)
+
+1. **enemyBulletOnRay** (`ActionContract.ts`): 新增同侧门 + 交汇点门 —
+   `baseInFront` (玩家与基地同侧) 与 `playerEdge` (交汇点在玩家—基地区间内),
+   两道 `sigma*(pos−playerEdge) >= 0` 的 `continue`。repro: 玩家在基地右方朝左、
+   敌弹从基地左方横穿 — 原判可拦截 (错), 现 false; 同侧追尾保持 true。
+   3 用例, tests/godai-action-contract.test.ts 21 pass; 旧代码 2 repro 失败。
+2. **counterfactual-idle** (`tools/diag/counterfactual-idle.ts`): `rngStateEnd` 读点
+   移到分支循环之后 (break 路径同样在 break 后读)。
+3. **M4 standing second-threat 门** (`ActionCandidates.ts`): standing kill-current
+   `killValid` 含 `!killSecondThreat`, standing intercept `interceptValid` 含
+   `!kaU.missesSecondThreat`; 4 处选择点 `secondThreatRisk` 由硬编码 false 改为
+   派生值。拒绝测试: 第二威胁更紧急时 evaluate 不得 commit killCurrent 且 reason
+   含 secondThreat; tests/godai-candidates.test.ts 11 pass; 旧代码下失败。
+4. **M5 turn+fire 语义 (记录非修复)**: 引擎同帧先 `p.dir` 再 `tryFire` — 子弹沿新
+   方向立即生成; 200ms 冷却只推迟视觉转向 (SimulationCombat 回退 dir + halt)。
+   人类同帧输入完全同构 (updatePlayerTank 对输入源不区分) → AI 无额外能力;
+   "13t 转弯窗" 是未来移动成本。3 用例: 谓词 active-cooldown 仍提交 / think 真实
+   接线 (navigate 分支, 弹 dir='right', p.dir 回退 'down', moving=false) / 人类
+   输入字节级同构 (含击杀验证, instant 模型下同帧弹命中)。13 pass。
+
+#### 4. 措辞修正
+
+- §218 verdict: "ship candidate" → "候选通过初步 A/B, 允许 gated rollout" —
+  仅在 candidate-on 完整验证 (base_destroyed/最弱关/lives/clear speed) 无恶化后
+  才考虑默认打开 (届时升格 ship)。
+- §218 chaos "无行为差异可测" 断言删除, 由 §219 真实 35×20 artifact 替换。
+- DECISIONS.md:963 行尾空格清除。
+
+#### 后继
+
+按 §218 Implications 顺序: ① defenseIntercept 开火窗口 (反事实 6/14 最大未动类)
+→ ② CMA-ES (工具链已可信) → ③ dodge idle 取证 → ④ "太迟"防御结构 → ⑤ t2a 自毁守卫。
+
+### §220 defenseIntercept 开火窗口 — actionContractMode 独立 A/B: 三线微负, 方向否决 (2026-08-17)
+
+#### 1. 动机与候选形态
+
+- §218 Implications ①: 反事实语料 (`tmp/cf-idle-r1.json`) 中 defenseIntercept 分支
+  占 6/14 事件 (最大分支类)。6 事件的干预窗口分析:
+  - S17s38 / S28s26 (idle_causal): turnFire/intercept 分支 240t 窗口内零基地伤害 vs
+    cont 首伤@216/@48 — 干预有效 (2/6)。
+  - S19s16: 全分支同 tick 首伤@41 — 干预太晚 (窗口在静止发生前已关闭)。
+  - S22s28: 边际 (首伤@74→@87, 终局同)。
+  - S24s9 / S34s51 (idle_legitimate): 全分支无伤 — 无需干预。
+- 候选 = 现成 `actionContractMode` (M2 设计, 5 个防守站桩点已接线: baseLaneSentry 打砖
+  think.ts:697 / defenseIntercept 拦截 :1337 / defenseIntercept 破砖 :1370 /
+  midLaneDefense 对弹 :1467 / midLaneDefense hold :1528)。语义: 冷却中已面向的无产出
+  站桩必须先有等待价值 (敌弹在射线 / 自己弹在飞 / killSlack>0, `contractStandingHold`),
+  否则放弃分支 fall through。**从未独立验证** (M4 整包 A/B 时被一并否决)。
+
+#### 2. 独立 A/B (caliber: paramsA=f5cc0288 paramsB=20907853)
+
+| 难度 | 语料 | baseW | candW | net | flips L→W:W→L | 结论 |
+|---|---|---|---|---|---|---|
+| hard | 35×60 (1–60) | 1582/2100 | 1575/2100 | **−7** | 120:127 | 微负, 高翻转 |
+| chaos | 35×20 | 494/700 | 492/700 | **−2** | 45:47 | 一致微负 |
+| classic | 35×20 | 620/700 | 620/700 | **0** | 0:0 | 结构性 no-op |
+
+- artifact: `tmp/cw-ab.json` (hard), chaos 行同批跑出。无单关崩塌 (最差 S23 −5/60),
+  但翻转分散于 30/35 关 — 全局行为扰动而非窗口精确修复。
+
+#### 3. W→L 翻转取证 (127 局, 候选参数 forensics)
+
+- 127 局失败族: **base_destroyed 117 (92%) / lives_exhausted 10** — 基线失败族
+  base_destroyed 约 73–80%, 显著恶化。放弃站桩让玩家在防守窗口移开, 代价是送基地,
+  印证 §218 高危标注 ("改错直接送基地")。
+
+#### 4. 裁决: reject implementation (actionContractMode 维持默认 0)
+
+- 三线一致无正收益; W→L 失败族 92% 基地被毁, 机理负面。
+- 与既有证据链吻合: §215 M3 结论 1 (idle_causal 仅 14.3%, 不得以消灭 idle 为主线 —
+  本 A/B 是对该结论的独立复证: 高翻转 ≈ 无关噪声, 不产净益) + §216 M4 整包 −116
+  (含同语义) + §218 高危标注。
+- **不修改代码** (参数已默认 0, byte-identical 保持); 不删除参数 (M2 时代已有测试,
+  保留无害, 未来若 defenseIntercept 重做窗口语义可复用判据)。
+
+#### 后继
+
+- §218 Implications 顺序继续: **② CMA-ES (工具链已可信, 候选搜索自动化)** →
+  ③ dodge idle 取证 → ④ "太迟"防御结构 → ⑤ t2a 自毁守卫。
+- ① 正式关闭 (方向否决)。defenseIntercept 的窗口问题不再以"放弃站桩"形态追;
+  若重启, 应改从 "开火窗口" 本义 (冷却恢复前最后 13t 的 killSlack 判定) 入手, 而非
+  "放弃站桩" — 后者已被两条独立证据否决 (M4 + 本 §)。
+
+### §221 评审 P2 修复 + M5 candidate-on 完整验证 (2026-08-17)
+
+#### 1. 同格死循环修复 (ActionCandidates.ts)
+
+- `fireRayBlocked` / `firstBrickOnRay`: 玩家与目标中心格完全相同 (瞬时重叠/测试构造)
+  时旧循环 `step = tc.row > pc.row ? 1 : -1` 得 −1, 从同格出发向负方向无限递减,
+  永不满足 `r !== tc.row` → 死循环。修复: 同格提前返回 (false / 'none' —
+  零长度射线无中间格)。
+- 回归测试 (tests/godai-candidates.test.ts "same-center-cell"): 同格时 fireRayBlocked
+  false / clearLaneFireDir null / evaluate 不挂起。旧代码验证: 移除 guard 后测试挂起
+  (死循环实证)。
+
+#### 2. 候选热路径 scratch 化 (§14.1/§14.2)
+
+- 评审指出: evaluateUnifiedCandidates 开启时每 tick 创建 `brickOut`/`kRayOut` 数组并
+  调用返回对象的 ThreatBudget 计算 — 违反协议热路径分配约束。
+- 改造 (保持 API 兼容, 不传 out 时行为不变):
+  - ThreatBudget: `tankCenterCell`/`playerActionEta`/`enemyDeadline`/`killAssessment`/
+    `standingKillAssessment` 加可选 caller-owned `out` 参数; `killAssessment` 的
+    second-threat 循环前拷贝 `damageDeadline`/`arrivalLB` (循环复用内部 _DL 缓冲会
+    覆盖引用); 新增导出接口 `StandingAssessment`。
+  - ActionCandidates: 模块级 scratch 常量 (cell ×6 / EnemyDeadline ×2 / KillAssessment ×2 /
+    StandingAssessment / ActionEta / brick 数组 ×2), 全部调用点传 scratch; 顶部注释
+    更新为"零 per-tick 分配"。
+- 行为等价实证: M5 candidate (fireLineDetourMode=1) hard 35×10 重跑 vs §219 artifact
+  `tmp/m5-rerun-hard.json` 逐局比对 — **350 局 0 差异**。
+- 顺手修 ab-param.ts 记录 bug: `lives` 需 task `telemetry: true` 才回传 (worker 返回
+  顶层 `lives`, 非 `finalState.lives`), 原记录恒 0。
+
+#### 3. M5 candidate-on 完整验证 (hard 35×60, 36000 ticks, §218 gated 条款)
+
+| 指标 | baseline | candidate | 变化 | 判定 |
+|---|---|---|---|---|
+| wins | 1582/2100 | 1594/2100 | +12 | 正向 |
+| base_destroyed | 447 | 433 | **−14** | 改善 |
+| lives_exhausted | 70 | 72 | +2 | 微劣化 |
+| avg lives/win | 2.79 | 2.80 | +0.1% | 中性 |
+| avg ticks/win (clear speed) | 5893 | 5888 | −0.1% | 中性 |
+| 最弱关 S34 wins | 17 | 18 | +1 | 无崩塌 |
+| S34 avg lives | 2.88 | 2.67 | −0.21/局 (18 局小样本) | 关注, 非 M4 式否决 |
+| S34 avg ticks | 6561 | 6702 | +2% | 小样本 |
+
+- §218 gated 条款四项 (base_destroyed / 最弱关 / lives / clear speed) 全部无恶化 →
+  条款满足。S34 单关 lives 微降属 18 局小样本波动 (幅度为 §216 M4 否决理由的 ~1/13,
+  且全关 lives +0.1% 中性)。
+- **默认打开与否留待决策**: 验证通过仅解锁"考虑升格 ship"的权限 (§218 条款字面),
+  默认打开改变所有玩家体验 — 需 human 拍板; 未拍板前 fireLineDetourMode 默认 0 不变。
+
+#### 4. handoff 文档单一可信版本
+
+- plan/open-test-round1-handoff.md 重写: 顶部过时状态 (1330/1fail) 移除, 当前树状态 /
+  已完成 (M0–§221) / 待办 / 接手者必读 (含 §219 继承坑) 为单一来源; 历史轮次压缩保留。
+
+#### 后继
+
+- 待 human 拍板: M5 默认打开 (ship) 或保持 gated。
+- §218 Implications 顺序: ② CMA-ES → ③ dodge idle 取证 → ④ "太迟"防御结构 →
+  ⑤ t2a 自毁守卫。
+
+#### 5. 评审 P2 收尾 (2026-08-17 二次评审)
+
+- **think.ts M5 回调热路径分配**: isWorthKillNow 闭包内 `tankCenterCell(t)` 每次
+  分配 cell 对象 — 改标量计算 (center-floor 语义不变, §14.1)。
+- **ab-multi-param.ts lives 记录**: task 缺 `telemetry: true` → lives 恒 0, 与
+  ab-param 同病, 已补。
+- **等价性脚本修正**: tmp/m5-equiv.ts 原用 `params` 字段 (RunOptions 实际字段为
+  `godAIParams`) → base/cand 均跑默认参数, 验证无效; 已修正并用 godAIParams 重跑:
+  outcome/ticks/lives 一致。此前 350 局逐局比对走的是 ab-param → SimTask.params
+  (正确链路), 不受影响。
+- **handoff 漂移修复**: 待办 "M5 candidate-on 完整验证" 已完成 (§221) — 已改列为
+  "默认打开决策 (人工开放测试)"; 测试统计更正为 1367 pass / 23 skip / 0 fail (1390 总)。
+- 结论不变: M5 保持默认 0, 进入 candidate-on 人工开放测试; 确认体验更好后再拍板默认打开。
+
+## §222 CMA-ES 重启 — 真 35 关口径 (2026-08-17, 收口: 参数面无 ROI 成立)
+
+### 背景
+
+§215 勘误: §214 三批筛选因旧 stage parser 把 `--stages 1-35` 解析成 S1 单关,
+"参数面穷尽"结论基于单关过拟合口径。M0.1 已统一 parseStageSpec (tools/lib/
+stage-spec.ts) → 重启筛选, 验证结论在真 35 关下是否成立。
+
+### 执行 (DECISIONS §222)
+
+- 筛选: `SIM_POOL_WORKERS=16 optimize-godai --stages 1-35 --difficulty hard
+  --seeds 20 --generations 8 --fitness v7` (DIM=19, λ=12, maxTicks=18000, caliber
+  params=f5cc0288 打印正确)。
+- gen 轨迹: 639.5 / 643.9 / 641.4 / 640.5 / **675.9** / 643.5 / 659.4 / 666.4。
+  best = gen 4 (fitness 675.9, win 79.6%, minW 0.40, floor 1600 vs default
+  632.7 / 76.9% / 0.30 / 4399)。
+- **8 参数移动与 §214 批次 1 完全相同** (defenseRowOffset 3 · defenseColSpread 4 ·
+  threatRangeCells 22 · powerupMaxDivertDistance 14 · baseRaceMarginCells 6 ·
+  outnumberedEnemyCount 4 · outnumberedRadiusCells 4 · outnumberedFieldEnemies 5):
+  两个独立运行 (S1 单关 vs 真 35 关) 收敛同一候选 → 方向真实存在, 非单关过拟合
+  幻觉, 也非 parser bug 产物。
+
+### 60-seed CRN 确认 (ab-multi-param, 真 35 关 × 60 seeds × 2 臂, telemetry lives)
+
+- **net +17/2100 (+0.8pp)** — 与 §214 批次 1 确认逐字节一致 (L→W 303 / W→L 286),
+  确定性复验通过。
+- avg lives/win: 3.54 → 3.47 (−0.07); S34 (最弱关) 17 → 16 (−1)。
+- **分关对冲结构 (首次可视化)**: 改善 S12 +10 / S24 +9 / S22 +6 / S30 +6 /
+  S3+S5+S18+S27+S29 +5…… (≈ +73); 恶化 S9 −12 / S11 −11 / S26 −6 / S6 −5 /
+  S21 −4…… (≈ −56)。防守姿态 (defenseRowOffset 3 + defenseColSpread 4 +
+  baseRaceMarginCells 6 + outnumbered 族) 在迷宫/防守压力关改善, 在开阔地形关
+  节奏损失对冲。
+
+### 判定 (§9.3.5 停止条件触发)
+
+4 批候选 (§214 ×3 + 本轮 ×1) 全部 ±1-2pp 噪声 → **hard 标量参数面确认无 ROI
+(真 35 关口径)**。§214 "参数面穷尽"结论成立, 但机制从"单关过拟合噪声"修正为
+"防守参数在 hard 上是零和再分配 (迷宫关 ↔ 开阔关对冲)" — 这解释了防守类参数
+永远 ±1pp 的结构性原因。DEFAULT_GOD_AI_PARAMS 不变, 不发货。
+
+### 沉淀
+
+- `.workbuddy/optimization-phase5-r2/` (summary + all-candidates),
+  `tmp/phase5-r2-ab60.json` (60-seed 明细), `tmp/cmaes-r2.log`。
+- 方向性洞察: 若未来要做防守强化, 需按关型 (迷宫/开阔) 分治, 全局单一阈值
+  必然是零和 — 与 M4/§220 否决教训同构。
+
+### 后继
+
+§218 Implications: **③ dodge idle 取证** → ④ "太迟"防御结构 → ⑤ t2a 自毁守卫。
+
+### §223 ③ dodge idle 取证 — 移动闪避死亡族: 干预窗口存在 (2026-08-17)
+
+前置 (§218 后继 ③): 失败结局末 10 tick 21% 在 dodge 分支, 反事实语料零 dodge
+事件 — 需确认 dodge 死亡是否有可干预窗口。
+
+#### 取证 1: dodge 不是 idle (0% 静止)
+
+dodge-audit.ts 对 518 失败局 (base_destroyed 447 + lives_exhausted 70 + timeout 1)
+终局前 ≤10 tick (5180 ticks) 分支审计:
+
+| 分支 | ticks | 占比 | fire | move | idle(moveDir null) |
+|---|---|---|---|---|---|
+| navigate | 2780 | 53.7% | 19 | 2754 | 26 |
+| **dodge** | 1059 | 20.4% | 9 | **1059** | **0 (0.0%)** |
+| t2a | 611 | 11.8% | 21 | 169 | **442 (72%)** |
+| midLaneDefense | 307 | 5.9% | 7 | 256 | 51 |
+| defenseIntercept | 273 | 5.3% | 2 | 31 | 242 |
+
+- **dodge 永远是移动闪避, 从不静止** — §215 idle 证伪对 dodge 分支完全成立且更强。
+  "dodge idle" 字面不存在, 无 idle 可修。
+- 顺带发现: **t2a 分支末段 72% idle** (站桩近距对枪) — 另一个可疑面, 记录留待。
+- 玩家死亡 tick 分支 (315 死亡局): navigate 44.1% / **dodge 30.8% (97 局)** / t2a 10.2%。
+  97 局 dodge 死亡中 ~60% 死亡前整 10 tick 都在闪避循环 (闪避中死, 非不动而死)。
+
+#### 取证 2: 反事实 — 86% 死亡局存在可干预窗口
+
+counterfactual-dodge.ts (沉淀于 tools/diag/, 参照 counterfactual-idle 的
+cloneWorld@T + ScriptedInput 分支): 对 315 死亡局在死亡 tick T−60 克隆世界,
+4 分支跑 60 ticks: factual (应复现死亡) / turn-and-fire (站定反击) /
+advance (推进击杀) / hard-away (远离弹群质心)。
+
+| 分支 | 全 315 局 | dodge 死亡 97 局 |
+|---|---|---|
+| factual 复现死亡 | 315/315 (100%) | 97/97 (100%) — determinism ✓ |
+| turn-and-fire 存活 | 204/315 (64.8%) | 61/97 (62.9%) |
+| advance 存活 | 218/315 (69.2%) | 65/97 (67.0%) |
+| **hard-away 存活** | **242/315 (76.8%)** | **73/97 (75.3%)** |
+| 任一分支存活 | 272/315 (86.3%) | **83/97 (85.6%)** |
+| 全死 (不可救) | 43/315 (13.7%) | 14/97 (14.4%) |
+
+#### 结论 (③ 收口)
+
+1. **dodge idle 证伪终审**: 0% 静止, 与 §215 M3 (idle_causal 14.3%) 一致 — idle
+   修复对 dodge 无意义。
+2. **dodge 死亡可干预**: 85.6% 在死亡前 60 ticks 有分支存活 → 候选空间存在,
+   方向 = 闪避路径/闪避+反击, 不是 idle 修复。
+3. **最强方向信号: hard-away (弹群质心远离) 75.3% vs 当前单弹闪避 (factual)
+   0%** — dodgeDirectionImpl 的"对最近单弹闪避"与"远离弹群质心"有 ~12pp 存活差。
+   注意 M3/M9/M10/M12 的 hard+/chaos− 签名警告: dodge 家族增强须 hard 主口径 +
+   chaos 护栏, 防重蹈 S26 确定性回归。
+4. 不可救 14.4%: 贴脸/包围死亡, 死亡前 60 ticks 任何本地改道均无效 — 归入
+   travel 段更早决策问题 (④ "太迟"防御结构分析的对象)。
+
+#### 沉淀
+
+- `tools/diag/dodge-audit.ts` (末窗口分支审计) + `tools/diag/counterfactual-dodge.ts`
+  (死亡窗口反事实) + `tmp/dodge-cf.json` (315 局明细) + `tmp/dodge-audit.ts` 输出。
+
+### §224 候选 A: dodgeCentroidMode — 质心远离闪避 (2026-08-17, 否决: 约束下 0 行为差异)
+
+§223 反事实 hard-away 分支 75.3% 存活 → 设计候选 A: 多弹 (≥2, 96px 内) 时
+dodge 方向改为"远离弹群质心" (dodgeCentroidMode, 默认 0 OFF)。实现: 默认路径
+内新块, 四方向候选 (排除 threat 轴向, §83) + canMoveDir + isSafeDir + 基地门
+(新格不得比当前格更远离基地, slack=0); 单弹/无弹 byte-identical。测试 6 用例
+(tests/dodge-centroid.test.ts, 含 base gate 与 unsafe-lane 拒绝) 全过。
+
+#### 证据
+
+- hard 35×60 (ab-param, telemetry lives): **net 0, L→W 0 / W→L 0 — 零翻转**。
+- 触发率 (diag 计数器 _centroidChecks/_centroidTriggers/_centroidEscapes):
+  60 局 12 关 × 5 seeds: dodge-ticks 13891, centroid-checks 13891 (每次 dodge),
+  triggers 1226 (8.83%), escapes 63/76 (82.9% 触发时有候选)。
+- **方向差异 0.00%** (S14/S21/S24/S31/S34 25 局 8645 dodge ticks 逐 tick 对比
+  legacy vs centroid 的 _moveDir)。
+
+#### 机制解剖 (为何 0 差异)
+
+1. 弹群质心几乎总在玩家**上方** (敌人从上方射击) → away = 下方 = 朝基地 →
+   基地门通过, 且与 legacy 的 base-closer 选择天然一致。
+2. 弹从下方来 (质心在下) → away = 上方 = 远离基地 → slack=0 基地门拒绝 →
+   fall through legacy。
+3. 结论: **基地门 (防 M9/S10s6 式逃逸) 恰好把质心远离的所有差异化能力掐死**。
+   无门版 = 持续逃离基地 = M9 horizon 模式的既否决方向 (chaos −3.5pp, 生存↑
+   但基地/击杀效率↓)。hard 失败模式里 dodge 死 = "基地侧弹群无法逃" (逃=丢
+   基地, 不逃=死); §223 反事实 75% 存活是 60-tick 短窗口伪影 — 真实长局中
+   逃离方向必丢基地。
+
+#### 裁决
+
+net 0 + 0 翻转 + 0 方向差异 → **无信号, 不 ship**。dodgeCentroidMode 保持默认 0
+(实验旋钮, 与 M9/M10/M12 同族 — dodge 增强族在 hard 上第四度确认无发布级杠杆:
+M3 对枪 / M9 horizon / M10 门控 / 本次质心远离)。计数器 (diag 只读) 保留。
+
+#### 沉淀
+
+- `tests/dodge-centroid.test.ts` (6 用例), `tmp/centroid-probe/diff/diff2/diff3.ts`,
+  `tmp/dc-ab60.json` (2100 局明细)。
+
+### §225 后继 ④: "太迟"防御结构审计 (2026-08-17, 收口 — 3 因子 + 机制空白)
+
+§218 遗留: 91% 失败 = 基地被拆; 67% 败局 travel 段无火力机会; baseLaneSentry
+缺位未分析。新工具 `tools/diag/toolate-audit.ts` (从 forensics 语料分层抽样
+40 局 base_destroyed, threatLedger 重放, 提取首伤 tick / 窗口 / 玩家行为画像;
+产物 `tmp/toolate-audit.json`)。
+
+#### 数据 (40 局, 分层覆盖快/中/慢毁)
+
+- 首伤 tick: 中位 3146 (min 726, max 5927) — 防线前 ~52s 完整, 首伤≈崩溃信号。
+- **窗口 (首伤→毁): 中位仅 271 ticks (4.5s)** — 敌人 6 发 (120 HP) 拆完。
+- 玩家死亡后才被拆: 17.5% (7/40)。
+- **absent (>8 cells >50% 窗口): 0/40; stationary 无输出: 0/40** — 推翻"人不在"
+  假设: 玩家始终在动、在回防。
+- 窗口分支: navigate 59.4% / t2a 22.0% / powerup 6.7% / dodge 5.9% /
+  defenseIntercept 3.7% / **baseLaneSentry 1.0%** / midLaneDefense 0.9%。
+- **sentry 仅 37.5% 局触发, 中位 2 ticks** — 防线崩溃窗口内哨兵几乎全程缺位;
+  62.5% 局窗口内 0 tick (玩家 navigate + powerup + t2a)。
+
+#### 机制解剖 (3 因子)
+
+1. **窗口结构性短**: 弹速 4px/tick × 3-8 cells 短程 → 拦截窗口窄;"人到弹道
+   延长线"是稀缺事件, 来不及。
+2. **sentry 机制空白 (主发现)**: sentry 路径只有两条 — ① 已对齐+中线畅通+
+   非冷却 → 持位开火 (冷却 800ms 期间让位, navigate 接管 → 玩家漂出 lane →
+   哨兵永久失效, 中位 2 ticks 实证); ② 站台导航只服务**带外**敌人 (row
+   20-22)。**ring 已破、敌人在带内 (row ≥ 23)、玩家在 lane 外 → 无任何哨兵
+   路径** → return false → navigate 盲跑。这正是"太迟": 机制本可指引玩家进
+   lane 击杀, 却让位给无方向感的 navigate。
+3. **危局期行为未切换**: 基地掉血后 powerup 仍占 6.7% (214 ticks) — 拾取
+   候选 (800) 在 sentry (850) 之下, 但 sentry 不触发 → 拾取继续; t2a 22%
+   表明玩家在追逐/缠斗而非回防。
+
+#### 候选方向 (供拍板)
+
+- A. **sentry 带内应急进 lane 导航** (补空白): ringBreached + 带内敌人 + 玩家
+  lane 外 → 最短路径导航到对齐站位 (非站台语义, 服务带内) — 直接攻击 2 号
+  因子, 但改动最重 (需防与站台/§198 门控冲突)。
+- B. **危局拾取抑制**: ringBreached (或 baseThreatNow) 时 pickupHigh 让位 —
+  最轻, 有先例 (sentry 850 > pickupHigh 800 的本意), 但只砍 6.7% tick。
+- C. **sentry 冷却期保位**: 冷却中不 claim 但方向保持 lane 对齐 — 与 §6.1
+  行动有效性契约 (站桩无产出先过契约) 冲突, 有先例阻力。
+
+> 推荐 A (机制空白补全, 直接对应 37.5% 触发率与 1% 窗口占比), B 可作为 A 的
+> 附加; C 不做 (契约冲突)。
+
+### §226 后继 ④ 候选 A/B 双否决 (2026-08-17, 收口 — hard 防守微调杠杆耗尽)
+
+§225 三因子 → 两个候选，均 hard 35×60 主口径 A/B 否决：
+
+#### A baseLaneSentryInBandNav（带内应急进 lane，补机制空白）
+
+- v1（colGap 1-3）：**net −35**（127 L→W / 162 W→L），分散无集中模式（S12 −7、
+  S3/S5/S6 −4 等；S14 0 翻转、S23 全胜 0 翻转）。
+- v2（colGap 2-3，§198 seed25 先例去掉 colGap=1）：**net −53**（115/168）——更差；
+  colGap=1 部分净 +18，colGap 2-3 净 −71。
+- 机制：带内横移劫持玩家的代价 > 收益——横移期间不射击（_fire=false）+ 打乱
+  站位；§225 的"62.5% 局 sentry 0 tick"不是缺进 lane 路径，而是"对齐+非冷却"
+  开火瞬间条件苛刻，横移不增加该瞬间。§198 门控先例（站台多次补丁防劫持）
+  再次验证。
+
+#### B baseAlertPickupSuppress（危局拾取抑制：MID/LOW 让位, HIGH 豁免）
+
+- **net −42**（145 L→W / 187 W→L）。
+- 机制：star/tank 是**永久 DPS 升级**（M6/M11：每 star ≈ +9pp），危局期抑制
+  拾取破坏 star 经济 → 输出降 → 败局增；且"不拾取"≠"去防守"（sentry 不触发
+  时玩家依旧 navigate）——抑制只产生空洞，不产生防守。
+
+#### 裁决
+
+双候选否决，参数保持默认 0（测试沉淀 9 用例 tests/base-alert.test.ts，覆盖
+默认 OFF / B 抑制与 HIGH 豁免 / A 横移与距离限与 colGap=1 不劫持）。
+
+**④ 收口结论**：hard 的"太迟"失败面是**结构性**的（弹速 4px/tick × 短窗口 271
+ticks 中位 × 环破后敌人贴脸连发），防守微调（sentry 进 lane / 拾取抑制）在
+60-seed 口径下全部净负。与 dodge 增强族（M3/M9/M10/§224 质心远离）同理：
+**hard 上行为微调杠杆已耗尽**。候选 C（冷却保位）与 §6.1 行动契约冲突不做。
+剩余可探索：⑤ t2a 自毁守卫重论证（§218 最后一项，新嫌疑面：t2a 末段 72%
+idle）；或开放测试 M5 fireLineDetourMode。
+
+#### 沉淀
+
+- 产物: tmp/inband-ab60.json / tmp/inband-ab60b.json / tmp/suppress-ab60.json
+  （各 2100 局明细）。
+
+### §227 后继 ⑤ t2a 自毁守卫重论证 (2026-08-17, 收口 — 伪嫌疑)
+
+§223 遗留: t2a 分支末段 72% idle（442/611）疑为自毁守卫（玩家在枪口前站桩）。
+新工具 `tools/diag/t2a-audit.ts`（40 局 base_destroyed 分层抽样 + threatLedger
+末 300 ticks 解剖; 产物 tmp/t2a-audit.json）。
+
+#### 数据
+
+- t2a commits (末 300 ticks): 284, idle 43.3%（全生命周期基线 42.2% — **idle
+  率非末段特有**）。
+- **idle 100% onCooldown** — 站桩 = 800ms 冷却等待, 无异常行为。
+- **94.3% idle 时基地威胁 imminent（nearestThreatEta ≤ 20 ticks）**; 死亡前
+  60 ticks 内 t2a idle: 17/40 局。
+- **imminent idle 时玩家平均距基地 11.5 cells（184px）, >3 cells 占 94.8%**
+  （tmp/t2a-audit2.ts）。
+
+#### 机制解读（3 层证据 → 伪嫌疑）
+
+1. **idle 构成 = 冷却**（100% onCooldown）: 800ms 冷却 vs 1 tick 开火 → 冷却
+   占 t2a 生命周期 ~98%; 43% idle 是"t2a 段内冷却占比", 非站桩缺陷。
+2. **94% imminent = 基地已在倒下过程**: nearestThreatEta 是敌人"再开一发"的
+   落地下限; 玩家 11.5 cells 外 + 弹速 4px/tick → 20 ticks 内物理无法回防
+   （拦截需要玩家在弹道上）— 结构性, §226 已收口。
+3. **dodge 未接棒是正常的**: idle 时无"玩家威胁弹"（弹打基地不打玩家）→
+   dodge（1000）无需触发; 站桩不阻止任何躲避。
+
+#### 结论
+
+t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 基地被掏"是
+§225/§226 已证的窗口结构问题（t2a 22% 窗口占比是结果不是原因）。唯一可微调
+面（skipT2aForDefense 阈值 26 cells 收紧）是 §159 已探索失败的方向（1 cell
+超限 → oscillation 零火力）, 且 §226 泛化证据（防守微调 60-seed 全净负）否定
+同类杠杆。**⑤ 收口, 不产候选**。
+
+#### 沉淀
+
+- tools/diag/t2a-audit.ts（复用 §225 抽样框架）+ tmp/t2a-audit.json;
+  tmp/t2a-audit2.ts（距离取证）。
+
+## §229 M5 fireLineDetourMode SHIPPED — 默认 1; S30/S13 弱关重标定 (2026-08-17)
+
+### 决策与门禁
+
+- `fireLineDetourMode: 1`（DEFAULT, 全难度; classic 无覆盖继承）。用户拍板
+  "默认开启 + commit"; gate 拦截后用户拍板 "Ship + 重标定"（DECISIONS §229）。
+- **gate truth 重标定**: hard S30 0.9046→0.8388, chaos S13 0.9138→0.8439
+  （`tests/score-gate-core.ts`, floor 随 truth 平移; 注释含成因与探针矩阵）。
+- 新增 `fireLineDetourMinSlack: 13` 二级参数（= DETOUR_TURN_WINDOW_TICKS 语义,
+  探针无上调证据, 保持 §217 原值）。
+
+### S30 退化取证（20-seed score-gate 口径, hard, telemetry on）
+
+| 配置 | S30 mean score | 全局 35×60 |
+|---|---|---|
+| M5=0（基线, 当前代码复测 0.9075 ≈ truth 0.9046） | 0.9075 | — |
+| M5=1 带内原版（§217） | **0.8388** | **+12 wins**（3 批） |
+| slack 18 / 22 / 26 | 0.8407 / 0.8426 / 0.8426 | 未测（+0.004 微效） |
+| + maxDist 2 / 3 / 4 cells | 0.8388 逐位相同 | 无效 |
+| + 不回头判据（opposite） | 0.8407 | 无效（S30 无反向 detour） |
+| csb/cbr 收窄（去掉纯带内游走） | **0.8716**（过 floor） | **0 wins**（94% 机会是带内） |
+
+- 维度拆解（s30-m5-diff）: clearSpeed 0.722→0.798（−0.077 最大项）, baseIntegrity
+  0.673→0.733（−0.061）, lives 0.767→0.800, accuracy 0.895→0.907; baseSafety
+  +0.003（微升）。**60-seed 0 翻转**（ab-param: 51/60 双方同）— 胜率不变,
+  纯赢局质量降。
+- 机制结论: detour 打断迷宫 navigate 计划 — 12t 站定 + 重导航（偏移后回走廊）
+  ≈ 24-36t 代价, 换 ~10t 击杀提前; 近距（≤2 cells, maxDist 探针）目标击杀也
+  无增量（kills 187→184）— 结构性, 判据空间穷尽。
+- csb/cbr 收窄教训: §217 探针"机会 94% 带内游走" → 收窄到真威胁 = 关掉 M5
+  （全局 0 wins）; 带内超集是 M5 收益的载体, 也是迷宫关退化的载体 — 单参数
+  无法分离。
+
+### 验收
+
+- `bun run check`: **1408 tests 0 fail**（含 godai-score-gate 三个难度全过）。
+- `bun run build`: 通过（oxlint + tsc + vite build）。
+- 无效探针全部回滚（travelFireDetourDir 回到 §217 原样: minSlack 参数化,
+  maxDist/不回头/csb-cbr 均移除）; `fireLineDetourMinSlack` 保留为调参入口。
+- `tests/godai-params-override.test.ts` 三处断言更新为默认 1（§228 钩子语义
+  不变, 恢复默认 = 1 而非 0）。

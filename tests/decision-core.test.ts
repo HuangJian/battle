@@ -26,6 +26,8 @@ describe('M1 decision-chain invariants', () => {
       'suicideReturn',
       'dodge',
       'interceptBase',
+      // M4 / 统一行动候选 — interceptBase(900) 之下、baseLaneSentry(850) 之上。
+      'unifiedCandidates',
       // §X / 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
       'baseLaneSentry',
       'pickupHigh',
@@ -56,6 +58,8 @@ describe('M1 decision-chain invariants', () => {
       suicideReturn: 1100,
       dodge: 1000,
       interceptBase: 900,
+      // M4 / 统一行动候选 — interceptBase(900) 之下、baseLaneSentry(850) 之上。
+      unifiedCandidates: 860,
       // §X / 基地车道哨兵 — interceptBase(900) 之下、pickupHigh(800) 之上。
       baseLaneSentry: 850,
       pickupHigh: 800,

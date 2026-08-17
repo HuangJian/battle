@@ -111,11 +111,11 @@ function collectThreats(w: World, enemies: Tank[]): CoverageThreat[] {
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i]
     const d = enemyDeadline(w, e)
-    if (d.damageDeadline >= COVERAGE_THREAT_HORIZON) continue
+    if (d.enemyDamageDeadline >= COVERAGE_THREAT_HORIZON) continue
     const ec = cornerCell(e)
     out.push({
       e,
-      deadline: d.damageDeadline,
+      deadline: d.enemyDamageDeadline,
       col: ec.col,
       row: ec.row,
       cadence: e.nextFireInterval > 0 ? msToTicks(e.nextFireInterval) : 0,

@@ -80,6 +80,12 @@ const DEFENSE_BRANCHES = new Set([
   'navigate',
   't8',
   'interceptBase',
+  // M4 unified action candidates (§7) — all four are threat-response
+  // commits, never wrong_target.
+  'candidateKill',
+  'candidateIntercept',
+  'candidateClear',
+  'candidateReturn',
 ])
 
 /** Minimum consecutive no-output samples for a no_output_commit verdict. */

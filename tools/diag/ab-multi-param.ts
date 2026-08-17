@@ -12,6 +12,7 @@ import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
+import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -31,13 +32,13 @@ function parseSeeds(spec: string | undefined): number[] {
 const difficulty = arg('difficulty') ?? 'hard'
 const seeds = parseSeeds(arg('seeds'))
 const stageSpec = arg('stages') ?? 'all'
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n) - 1)
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
+let stageIdxs: number[]
+try {
+  stageIdxs = parseStageSpec(stageSpec, STAGES.length)
+} catch (e) {
+  console.error(e instanceof StageSpecError ? e.message : `invalid --stages: ${stageSpec}`)
+  process.exit(1)
+}
 const jsonOut = arg('json')
 
 const paramsSpec = arg('params')
@@ -63,13 +64,24 @@ for (const [label, params] of [
 ] as const) {
   for (const si of stageIdxs) {
     for (const seed of seeds) {
-      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000 })
+      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000, telemetry: true })
       labels.push(`${label}|${si}|${seed}`)
     }
   }
 }
 
 const started = Date.now()
+console.error(
+  runHeader({
+    difficulty,
+    stageCount: stageIdxs.length,
+    seedCount: seeds.length,
+    stageIndex: 0,
+    maxTicks: 36000,
+    params: BASELINE,
+    paramsB: CANDIDATE,
+  }),
+)
 const results = await pool.runBatch(tasks)
 pool.terminate()
 const resByKey = new Map<string, (typeof results)[number]>()
@@ -120,6 +132,6 @@ for (const si of stageIdxs) {
       detail.push(`s${seed}:W${br?.ticks}->L${cr?.ticks}`)
     }
   }
-  console.log(`s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/60 ${String(c).padStart(4)}/60  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`)
+  console.log(`s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`)
 }
 console.log(`TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`)

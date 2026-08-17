@@ -16,6 +16,7 @@ import {
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
 import type { ActionIntent } from './god/StrategyPlanner'
+import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
 import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
 import {
@@ -147,6 +148,20 @@ export interface PickupReachSlot {
 
 function emptyPickupReachSlot(): PickupReachSlot {
   return { valid: false, pcCol: 0, pcRow: 0, col: 0, row: 0, rev: -1, reachable: false }
+}
+
+/** §228 open-test hook: boot-time param overrides (main.ts reads
+ *  ?fireLineDetour=1 → { fireLineDetourMode: 1 }). Set once at boot, never
+ *  mutated after — a launch configuration, not gameplay state (§2.2: no
+ *  per-tick reads, never snapshot-relevant). null = stock defaults. */
+let paramsOverride: Partial<GodAIParams> | null = null
+
+export function setGodAIParamsOverride(o: Partial<GodAIParams> | null): void {
+  paramsOverride = o
+}
+
+export function godAIParamsOverride(): Partial<GodAIParams> | null {
+  return paramsOverride
 }
 
 export class GodAIInput implements InputLike {
@@ -284,6 +299,13 @@ export class GodAIInput implements InputLike {
    * direction switches) — it only activates during actual oscillation.
    */
   _dodgeFlipCount: number = 0
+
+  /** §223 diag: dodgeDirectionImpl invocations that reached the centroid
+   *  block (mode ON), and how many found ≥2 bullets in the radius. Pure
+   *  read-only observation — no RNG, no gameplay effect. */
+  _centroidChecks: number = 0
+  _centroidTriggers: number = 0
+  _centroidEscapes: number = 0
 
   /** P0.3: the cell where the player is currently stuck in navigate. */
   _navStuckCell: Cell | null = null
@@ -451,6 +473,9 @@ export class GodAIInput implements InputLike {
     midLaneHold: 0,
     // §X: 基地车道哨兵候选提交计数（纯观察）。
     baseLaneSentry: 0,
+    // M4: 统一行动候选提交计数（纯观察; 细分分支名 candidateKill/
+    // candidateIntercept/candidateClear/candidateReturn 记录在 _lastBranch）。
+    unifiedCandidates: 0,
   }
 
   /**
@@ -799,7 +824,9 @@ export class GodAIInput implements InputLike {
 
   constructor(
     world: World,
-    params: GodAIParams = DEFAULT_GOD_AI_PARAMS,
+    params: GodAIParams = paramsOverride
+      ? { ...DEFAULT_GOD_AI_PARAMS, ...paramsOverride }
+      : DEFAULT_GOD_AI_PARAMS,
     rng?: RNG,
     controlledTank?: (w: World) => Tank | null,
   ) {
@@ -1170,6 +1197,9 @@ export class GodAIInput implements InputLike {
   _lastSelectTargetId = -1
   /** §187: How long the player has been pixel-stuck while targeting the current enemy. */
   _targetStuckTicks = 0
+  /** M4 (protocol §7): scratch verdict for the unified-candidates layer —
+   * reused every tick so the gated path allocates nothing per call. */
+  _candVerdict = makeCandidateVerdict()
 
   // ================================================================
   // Core decision loop (think)

@@ -1,6 +1,16 @@
 import './styles/main.css'
 import './styles/replay-controller.css'
 import { Game } from './game/Game'
+import { setGodAIParamsOverride } from './ai/GodAIInput'
+
+// §228 M5 open-test: ?fireLineDetour=1 打开 travel-phase fire-line detour
+// (fireLineDetourMode, 默认 0 OFF)。人工 playtest 对比用 — 启动配置, 非
+// gameplay 状态; 不进快照, 不随 tick 变化。
+const bootQuery = new URLSearchParams(location.search)
+if (bootQuery.get('fireLineDetour') === '1') {
+  setGodAIParamsOverride({ fireLineDetourMode: 1 })
+  console.info('[open-test] fireLineDetourMode=1 (M5)')
+}
 
 const app = document.getElementById('app')
 if (!app) throw new Error('#app element not found')

@@ -29,6 +29,7 @@ import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask, SimTaskResult } from '../sim/sim-worker'
 import { runSimulation } from '../sim/simulation-runner'
+import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 import {
   scoreRun,
   aggregateStage,
@@ -829,19 +830,40 @@ async function main(): Promise<void> {
   const difficulty = arg('difficulty', 'classic')!
   const maxTicks = Number(arg('max-ticks', String(DEFAULT_MAX_TICKS)))
   const stageArg = arg('stages')
-  const stageIdxs = stageArg
-    ? stageArg
-        .split(',')
-        .map((s) => Number(s.trim()) - 1) // CLI is 1-based (1..35); internal index is 0-based
-        .filter((i) => i >= 0 && i < STAGES.length)
-    : STAGES.map((_, i) => i)
+  let stageIdxs: number[]
+  if (stageArg) {
+    try {
+      stageIdxs = parseStageSpec(stageArg, STAGES.length)
+    } catch (e) {
+      console.error(e instanceof StageSpecError ? e.message : `eval-suite: invalid --stages: ${stageArg}`)
+      process.exit(1)
+    }
+  } else {
+    stageIdxs = STAGES.map((_, i) => i)
+  }
   const serial = flag('serial')
   const pool = serial ? null : new SimWorkerPool()
+
+  // Load candidate params BEFORE the caliber line — the header must trace the
+  // params actually run, not the defaults (review P1: printed default hash
+  // while running --params candidates).
+  const params = arg('params') ? loadParams(arg('params')!) : DEFAULT_GOD_AI_PARAMS
 
   const totalRuns = stageIdxs.length * seeds.length
   process.stderr.write(
     `eval-suite v6 · ${stageIdxs.length} stages × ${seeds.length} seeds = ${totalRuns} runs` +
       `${pool ? ` · ${pool.size} workers` : ' · serial'}\n`,
+  )
+  // M0 §3.2 official caliber line (stageIndex=0 keeps gate/eval parity).
+  process.stderr.write(
+    runHeader({
+      difficulty,
+      stageCount: stageIdxs.length,
+      seedCount: seeds.length,
+      stageIndex: 0,
+      maxTicks,
+      params,
+    }) + '\n',
   )
   if (seeds.length < 60) {
     process.stderr.write(
@@ -970,7 +992,7 @@ async function main(): Promise<void> {
     }
 
     // ---- single-corpus paths ----
-    const params = arg('params') ? loadParams(arg('params')!) : DEFAULT_GOD_AI_PARAMS
+    // params already loaded above (before the caliber line).
     const t0 = Date.now()
     const cells = await runCorpus(params, stageIdxs, seeds, difficulty, maxTicks, pool)
     process.stderr.write(`ran ${totalRuns} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`)

@@ -33,6 +33,13 @@ export const STAGE_COUNT = STAGES.length // 35
 // by default) — a paired A/B on --difficulty hard proved §190 is net-negative
 // (suite 0.5308 ON → 0.5363 OFF, p=0.0185). classic is byte-identical (it
 // always restored this param to 0); hard/chaos re-captured with §190 OFF.
+// §229: re-baselined hard S30 (Concentric) 0.9046 → 0.8388 and chaos S13
+// 0.9138 → 0.8439 after shipping M5 (fireLineDetourMode=1, DECISIONS §229) —
+// its known structural weak stages: the detour interrupts the maze nav plan
+// (12t stand + replan) for ~10t of kill time-advance; every tuning probe
+// (slack 13→26, maxDist 2-4, no-U-turn, csb/cbr-only) fails to reconcile the
+// global +12 wins with these per-stage drops (win rate 0 flips at 60 seeds —
+// unchanged). Floors now guard the shipped baseline from further regression.
 // Values are the per-stage mean v7 composite across SCORE_SEEDS=20 sims
 // (telemetry on). Re-capture via `tmp/capture-truth.ts`.
 export const TRUTH_SCORES: Record<string, number[]> = {
@@ -48,13 +55,14 @@ export const TRUTH_SCORES: Record<string, number[]> = {
     0.9212, 0.7013, 0.8264, 0.5878, 0.7952,
     0.7371, 0.9409, 0.8185, 0.7683, 0.659,
     0.6937, 0.6017, 0.9512, 0.5818, 0.8626,
-    0.7993, 0.9085, 0.6698, 0.8839, 0.9046,
+    0.7993, 0.9085, 0.6698, 0.8839, 0.8388, // §229: S30 M5 重标定
     0.831, 0.7684, 0.8689, 0.3843, 0.7955,
   ],
   chaos: [
     0.8013, 0.8405, 0.775, 0.733, 0.6791,
     0.5714, 0.5892, 0.5523, 0.8866, 0.8863,
-    0.9126, 0.5539, 0.9138, 0.806, 0.8321,
+    0.9126, 0.5539, 0.8439, // §229: chaos S13 M5 重标定（同 S30 型: 迷宫 detour 打断 nav 计划）
+    0.806, 0.8321,
     0.7676, 0.6914, 0.9664, 0.6081, 0.6889,
     0.7649, 0.5886, 0.9576, 0.4995, 0.769,
     0.4505, 0.8672, 0.5915, 0.8125, 0.953,
