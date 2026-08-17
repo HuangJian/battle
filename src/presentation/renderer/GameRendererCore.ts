@@ -161,7 +161,13 @@ export class GameRendererCore {
     this.forestCache = fc.canvas
     this.forestCacheCtx = fc.ctx
 
-    const vc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    // Vignette cache at 1× logical resolution: the vignette is a smooth radial
+    // gradient (center fully transparent → edge vignetteColor), so upscaling it
+    // to the field at blit time is visually lossless (measured: alpha-only
+    // 1/255 deltas, 0% in the transparent center). Rendering it at DPR cuts the
+    // per-frame full-field alpha blit area 4× — the single most expensive
+    // operation on software rasterizers. (§R6)
+    const vc = createOffscreenCanvas(FIELD, FIELD)
     this.vignetteCanvas = vc.canvas
     this.vignetteCtx = vc.ctx
   }
@@ -193,7 +199,7 @@ export class GameRendererCore {
     this.forestCache = fc.canvas
     this.forestCacheCtx = fc.ctx
 
-    const vc = createOffscreenCanvas(FIELD * dpr, FIELD * dpr, dpr)
+    const vc = createOffscreenCanvas(FIELD, FIELD)
     this.vignetteCanvas = vc.canvas
     this.vignetteCtx = vc.ctx
 

@@ -364,3 +364,92 @@ pixref 已于 2026-07-31 重新捕获（含 R3+/R5-A/R5-B/R4-glow 全部优化�
 
 - 任一优化（含教科书式"基线必正确"项被推翻）的取舍结论均记于此，并同步 `DECISIONS.md`。
 - 像素 diff ≠ 0 的有损优化须附视觉对比与论证。
+
+### R6 vignette 缓存 1× 化（2026-08-17）
+
+**背景**：R5-A 已把 bg 烘焙进 terrainCache，但 vignette 仍是每帧 DPR 分辨率（832×832 @DPR2）的全屏
+alpha blit——软件光栅化器上最贵的单操作（R0 关键发现：API churn 占 DPR=2 成本一半）。progress 此前
+已论证"子区域 ring blit 更慢（extractSubset 2-3×）"，全图 blit 是最优路径；本次从**源分辨率**下手。
+
+**改动**（`GameRendererCore.ts` 两处，各 6 行）：vignette 缓存从 `createOffscreenCanvas(FIELD*dpr, FIELD*dpr, dpr)`
+改为 `createOffscreenCanvas(FIELD, FIELD)`（1× 逻辑，无 scale）。blit 目标不变（`FIELD×FIELD`，主 ctx 带
+DPR transform → 物理仍 832×832）。源面积 4× 缩减。
+
+**为什么安全**：vignette 是平滑 radial gradient（中心全透明 → 边缘 vignetteColor），上采样无纹理细节
+可模糊，视觉无损。与 R3+ aura / R4-glow 同属"位图预渲染"族。
+
+**基准**（frames=300 warmup=30 repeat=2 dpr=2，与 R5-B/P2 同参数）：
+
+| 场景 | draw/f (前→后) | saveRest/f | perFrame(ms) (前→后) |
+|---|---|---|---|
+| idle   | 21 → 21 (±0) | 0 → 0 | 1.33 → 1.01 (−24%) |
+| combat | 46 → 46 (±0) | 0 → 0 | 1.59 → 1.29 (−19%) |
+| burst  | 109 → 109 (±0) | 0 → 0 | 2.01 → 1.76 (−12%) |
+| pan    | 47 → 47 (±0) | 0 → 0 | 1.72 → 1.47 (−15%) |
+
+> draw/f 计数完全不变（确定性信号零回退）。perFrame 改善显著且全场景一致——vignette blit 是每帧
+> 固定成本，削减直接进帧预算。
+
+**有损项论证**（像素 diff ≠ 0，plan §6 流程，DECISIONS §235）：
+- 微型基准：差异全部集中在 alpha 通道，maxDelta = 1（1/255），RGB 通道差异 = 0，中心透明区差异 = 0%。
+- 视觉不可辨（alpha 1/255 ≈ 0.4% 不透明度差）。属"数学上有损、视觉无损"级，与 R4-glow 同级或更小。
+- pixref 已重捕获（`pixdiff.ts --write`），回归基线更新。
+
+**验证**：`bun run check` 全绿（1385 pass / 0 fail）；pixdiff 4/4 场景 11/11 checkpoints 对新基线
+pixel-identical；改动前 stash 对照证明差异源唯一（HEAD 基线捕获后 stash 验证 0 mismatch）。
+
+### P1-C 粒子 per-type 分桶 — 精确测量后正式否决（2026-08-17）
+
+R2 仅实现 `count===0` 早退 + `drewDebris` 标志，未做 per-type 紧凑索引数组。本次按 plan §7 决策
+流程做精确收益边界测量：
+
+- **成本**：burst 场景（60 粒子 × 5 类型各 12）`renderParticles` median 0.140ms（帧 8.3%），
+  其中原生 draw 调用占 ~93%（每活跃粒子 1 次 fillRect/arc/stroke 是固有成本，分桶无法削减）。
+- **收益上限**：全渲染体 A/B（真实 Skia 调用，2000 重复）5-pass 42.5µs vs per-type 35.0µs →
+  7.5µs/帧（0.45% 帧预算）。未计维护成本（emit 入桶 / update 压缩 / 死亡出桶）。
+- **老机器投影**：~40-75µs/帧（< 0.5%）。
+- **判定**：Gate 1 ✗（不可感知）· Gate 2 ✗（复杂度净负）→ **放弃**。P1-C 转正式否决项，
+  与 R2 结论一致，本次以实测取代估算。详见 DECISIONS §236。
+
+### R7 坦克 tight-viewport blit — 实测否决（2026-08-17）
+
+**背景**：R6 后最大理论可削减项——坦克 sprite 烘焙在 SPRITE_CANVAS_SIZE (58²) 画布容纳旋转
+对角线，但内容仅 ~30×30（4 方向 bbox 实测 29-32px，面积浪费 73%）。
+
+**验证链**：
+1. 内容 bbox 确认：所有坦克种类所有方向内容 ~30²，58² blit 面积 73% 透明。
+2. 纯 5-arg 面积 A/B（合成）：58² → 30² blit 省 84% —— 但这是**不同源画布**。
+3. 真实管线 9-arg 窗口实现（纯 viewport 裁剪，**像素级等价已验证 IDENTICAL**）：idle 无改善、
+   combat +7%、burst −6%、pan −7% —— **9-arg 调用固定开销 ≈ 5-arg 全图 blit**（同面积实测仅差 1%），
+   blit 在 58² 尺度是调用开销主导而非像素面积主导。
+4. pan 场景引入有损项（0.022% 像素 diff，maxDelta=12，相机亚像素位移下 9-arg/5-arg 插值不同）。
+
+**结论**：否决（收益非正 + pan 有损 + 复杂度显著，三项全不通过）。完整实现已回退。
+真正可省的是减少 blit 次数（R5-B composite 已做）或缩小源画布（重烘焙 30²，位移 ≤2px，
+收益也被调用开销主导）。详见 DECISIONS §237。
+
+### R8 粒子烘焙位图 blit — 实测 4× 慢，彻底证伪（2026-08-17）
+
+**背景**：评估粒子原生 draw 调用能否削减（用户要求继续评估）。per-pass 合成基准显示
+arc 类 pass（smoke 50.9µs / ring 48.2µs / flash 38.1µs @12 粒子）是粒子成本大头，
+候选手法是 R3-aura 同款：预烘焙圆/环位图 → drawImage blit（省 beginPath+arc 路径光栅化）。
+
+**决定性微基准**（416×416 @DPR2 主 ctx，12 粒子/帧 × 2000 次，含 globalAlpha 写入）：
+| 方案 | µs/帧 | µs/粒子 | vs arc |
+|---|---|---|---|
+| arc+fill（现状 smoke/flash） | 43.15 | 3.6 | — |
+| 烘焙 32px sprite blit 1:1 | 171.87 | 14.3 | **4× 慢** |
+| blit 缩放（3-arg dw/dh） | 163.97 | 13.7 | 3.8× 慢 |
+| arc+stroke（现状 ring） | 42.23 | 3.5 | — |
+
+**根因**：`@napi-rs/canvas` 的 drawImage 固定调用开销巨大（32px ≈ 14µs/call），
+与 R7（58² ≈ 33µs/call）一致 —— **小图 blit 是该后端最贵原语**。
+R3-aura 的 blit 划算假设只对大图（58² 级）成立；粒子是 10-30px 小图，blit 绝对亏损。
+
+**结论**：否决，方向关闭。现状已是近最优：
+- spark = fillRect（最便宜原语）✓
+- smoke/flash = arc+fill（3.6µs/粒子，唯一理论节省 arc→fillRect 需圆形改方形，视觉错误）
+- debris = setTransform+rotate+fillRect（rotation 逐粒子不可省）✓
+- globalAlpha 逐粒子 fade 不可批量 ✓
+
+粒子侧优化空间关闭（§236 分桶 + §238 位图合璧）。详见 DECISIONS §238。

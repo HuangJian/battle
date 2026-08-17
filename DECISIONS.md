@@ -1345,3 +1345,91 @@ gate 口径: 10 seeds × 35 关 × 3 难度，truth 以 seeds 1-10 为准（`tmp
 - 该 12-fail 在 HEAD~1（未含 §230-§233 改动）同样存在——是既有缺陷，非本次 perf 攻坚引入；但 §233 把 gate 从 20→10 种子后仍未触达 <20s 目标，补齐 runner 侧排除/标志是自然收尾。
 
 **Implications:** 显式文件模式与失败重跑（`-t` 单测隔离）均验证不受影响；pre-commit hook 使用的 `bun run test` 也随之变绿变快。
+
+## 235. R6 vignette 缓存 1× 化 — 全屏 alpha blit 面积 4× 缩减 (STATUS: SHIPPED, 有损项已论证)
+
+**Decision:** `GameRendererCore` 的 vignette 离屏缓存从 `FIELD*dpr × FIELD*dpr`（DPR 分辨率）改为
+`FIELD × FIELD`（1× 逻辑分辨率），blit 时仍画到 `FIELD×FIELD` 目标（主 ctx 已带 DPR transform，
+物理像素仍为 832×832）——即源 416 上采样到目标 832。
+
+**Rationale:**
+- vignette 是平滑 radial gradient（中心 `rgba(0,0,0,0)` 全透明 → 边缘 `vignetteColor`），上采样
+  无纹理细节可模糊，视觉无损。
+- 全屏 alpha blit 是软件光栅化器上最贵的单操作（R0 关键发现：API churn 占 DPR=2 成本一半；
+  progress 文档明示 vignette 在 Skia ~1.4ms/frame 估算）。源面积 4× 缩减直接砍 blit 像素工作。
+- 实测（frames=300 warmup=30 repeat=2 dpr=2）：idle 1.3260→1.0060 (−24%)、combat 1.5862→1.2911
+  (−19%)、burst 2.0068→1.7642 (−12%)、pan 1.7223→1.4678 (−15%)。draw/f 计数完全不变
+  （21/46/109/47——确定性信号零回退）。
+- 与 R3+ aura / R4-glow 预渲染同属"位图预渲染 + 量化"族，但本次是有损项中**差异最小**的一类。
+
+**有损项论证（像素 diff ≠ 0，按 plan §6 流程）：**
+- 微型基准（`vignetteScaleBench` 探针）：1× 上采样 vs DPR 直绘，差异**全部集中在 alpha 通道**，
+  maxDelta = 1（1/255），中心透明区（<0.35R）差异 = 0%，仅渐变边缘带 9-15% 像素的 alpha 1/255 波动。
+- RGB 通道差异 = 0（纯 alpha-only）。
+- 结论：视觉不可辨（alpha 1/255 ≈ 0.4% 不透明度差，远低于人类可辨阈值 ~1/50）。属"数学上有损、
+  视觉无损"级别，与 R4-glow 的 pulse 量化（alpha 6.25% 步进，最大 delta ≈ 1.1/255）同级或更小。
+- pixref 已按既有流程重捕获（`tools/perf/pixdiff.ts --write`），后续回归以此为新基线。
+
+**Implications:** 未来若浏览器端实测 vignette 上采样在目标硬件产生可见伪影（预期不会——渐变
+无高频内容），可回退为 DPR 分辨率或按 R 半径分环绘制。Performance Mode（lowQuality）仍整体跳过
+vignette，不受影响。
+
+## 236. P1-C 粒子 per-type 分桶 — 精确测量后放弃 (STATUS: 否决, 实测数据入档)
+
+**Decision:** 不做 `ParticleSystem` per-type 紧凑索引数组（5N→N 迭代）。R2 仅实现 `count===0`
+早退后的剩余项，经精确测量确认收益不证成复杂度。
+
+**Rationale（实测数据，burst 场景 60 粒子峰值）：**
+- `renderParticles` wall-time（非 counting ctx）median = 0.140ms，占帧 8.3%。其中原生 draw 调用
+  （fillRect/arc/stroke/setTransform）占绝对大头——每个活跃粒子必须画一次，分桶无法削减。
+- 全渲染体 A/B（2000 重复）：5-pass 42.5µs/frame vs per-type 35.0µs/frame → **上限 7.5µs/帧
+  （0.45% 帧预算）**，且未计入 emit 入桶 / update 压缩 / 死亡出桶的维护成本。
+- 老机器投影（JS 5-10× 放大）：~40-75µs/帧，仍 < 0.5% 帧预算。
+- 大多数帧 0 成本：非爆炸期 `count===0` 早退（R2 已实现），分桶收益只在峰值帧存在。
+
+**判定：** Gate 1 不可感知（0.45%）；Gate 2 净负（新增三处桶维护 + 紧凑数组，复杂度显著上升）。
+与 R2 既有结论一致，本次以精确测量取代估算。
+
+**Implications:** P1-C 从 plan 未完成项转正式否决项。若未来目标硬件实测粒子 JS 开销成为瓶颈
+（预期不会——原生调用占 93%），可重审。
+
+## 237. R7 坦克 tight-viewport blit — 实测否决 (STATUS: 否决, 9-arg 调用开销抵消面积节省)
+
+**Decision:** 不做坦克 body blit 的 tight-viewport 化（58² → 内容 ~30² 窗口）。R6 后最大的
+"理论可削减项"（坦克 sprite 烘焙在 58² 画布，内容只占 ~30²，blit 面积浪费 73%）经完整实现
++ 实测证明收益不成立。
+
+**Rationale（实测数据）：**
+- 前置验证：内容 bbox 确实只有 ~30×30（4 方向全部验证），58² blit 面积 73% 是透明浪费。
+- 纯 5-arg 面积 A/B（合成测试）：58² → 30² blit 省 84%（196.8→31.7µs/frame）——但这是
+  不同源画布（30² 真实画布），非 9-arg 窗口。
+- **关键反证**：真实管线用 9-arg drawImage 源子矩形（纯 viewport 裁剪，像素级等价已验证
+  IDENTICAL）后，idle 无改善（1.03 vs 1.02）、combat 反而 +7%、burst −6%、pan −7%——
+  面积节省被 9-arg 调用固定开销抵消。合成测试 9-arg vs 5-arg 同面积仅差 1% 证实：58² 尺度下
+  blit 是**调用开销主导，非像素面积主导**。
+- pan 场景引入有损项（0.022% 像素通道 diff，maxDelta=12——相机亚像素位移下 9-arg 与 5-arg
+  插值系数不同）。
+
+**判定：** Gate 2 ✗（SpriteCache 双缓存 + bbox 计算 + 6 处调用点改造，复杂度显著）；收益 ✗
+（实测非正）；pan 有损项 ✗。三项全不通过。
+
+**Implications:** 真正能省的是**减少 blit 次数**（R5-B composite 已做）或**缩小源画布**
+（重烘焙 30²，但会位移坦克 ≤2px + 需重捕获 pixref——收益预期也被调用开销主导，不证成）。
+坦克 body blit 关闭此方向。
+
+## 238. 粒子烘焙位图 blit — 实测 4× 慢，彻底证伪 (STATUS: 否决)
+
+**Decision:** 不采用任何基于 `drawImage` 的粒子渲染方案。粒子原生绘制调用已到地板，不再优化。
+
+**Rationale:**
+- 微基准（416×416 @DPR2 主 ctx，12 粒子/帧 × 2000 次，与 renderParticles 同模式）：
+  - arc+fill（现状 smoke/flash）：43.15µs/frame（3.6µs/粒子）
+  - **烘焙 32px sprite blit 1:1：171.87µs/frame（14.3µs/粒子）——4× 慢**
+  - blit 缩放（3-arg）：163.97µs/frame（13.7µs/粒子）
+  - arc+stroke（现状 ring）：42.23µs/frame
+- `@napi-rs/canvas` 的 drawImage 固定调用开销巨大（32px ≈ 14µs/call，58² ≈ 33µs/call 与 §237 一致）——**小图 blit 是该后端最贵原语，arc/fillRect 才是最便宜的**。
+- 这反转了 R3-aura 的手法假设：aura 是 58² 大图（blit 相对划算），粒子是 10-30px 小图（blit 绝对亏损）。
+- 现有实现已是近最优：spark=fillRect（最便宜原语）、smoke/flash=arc+fill、debris=setTransform+rotate+fillRect（rotation 逐粒子不可省）、globalAlpha 逐粒子 fade 不可批量。
+- 唯一理论节省（arc→fillRect）需要圆形改方形，视觉错误。
+
+**Implications:** 粒子渲染优化方向关闭。所有后续粒子相关改动只允许走 arc/fillRect 路径，禁止 drawImage。§236（分桶）与 §238（位图）合璧：粒子侧无优化空间。
