@@ -204,6 +204,7 @@ describe('Evaluator', () => {
       metrics: [],
       seed: 1,
       difficulty: 'hard',
+      paramsHash: '',
     }
     const report = evaluate(fakeResult, STAGES[0], DEFAULT_BASELINE)
     expect(report.hardPass).toBe(true)
@@ -240,6 +241,7 @@ describe('Evaluator', () => {
       metrics: [],
       seed: 1,
       difficulty: 'classic',
+      paramsHash: '',
     }
     const report = evaluate(fakeResult, emptyStage, DEFAULT_BASELINE)
     // Terrain utilization should be very low (only 4 base cells out of 676).
@@ -285,6 +287,7 @@ describe('Evaluator', () => {
       metrics: [],
       seed: 1,
       difficulty: 'classic',
+      paramsHash: '',
     }
     const report = evaluate(fakeResult, stage, DEFAULT_BASELINE)
     // The spawn at (0,0) is now sealed off → dead zone.

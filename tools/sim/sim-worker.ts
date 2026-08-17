@@ -88,6 +88,8 @@ export interface SimTaskResult {
   failureCause?: string
   /** Kind of the tank whose bullet destroyed the base (self-inflicted = 'player'). */
   failureKillerKind?: string
+  /** paramsHash of the params the run actually used (live probe identity tag). */
+  paramsHash?: string
   /** Full SimResult (incl. replay frames) — only when the task set `recordReplay`.
    *  Lets the caller persist a .replay for losing runs without re-running them. */
   replayResult?: SimResult
@@ -123,6 +125,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       ticks: result.ticks,
       killCount: result.finalState.killCount,
       baseAlive: result.finalState.baseAlive,
+      paramsHash: result.paramsHash,
     }
     // When the caller asked to persist replays, hand back the full result
     // (it already carries the recorded frames). Outcome/aggregation fields are

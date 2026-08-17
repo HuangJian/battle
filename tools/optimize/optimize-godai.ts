@@ -27,6 +27,11 @@ import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import { traceSimulation, analyzeTrace } from '../diag/decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
+import {
+  ALL_ON_EXPERIMENT_PARAMS,
+  ALL_ON_M5_OFF_CONTROL_PARAMS,
+  ALL_ON_MINUS_FLM_PARAMS,
+} from '../../src/ai/god/all-on-experiment'
 import type { StageData } from '../../src/types'
 import { RNG } from '../../src/utils/RNG'
 import {
@@ -45,7 +50,7 @@ import {
 import type { RunTelemetry } from '../sim/simulation-runner'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
-import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
+import { parseStageSpec, StageSpecError, runHeader, paramsHash } from '../lib/stage-spec'
 
 // ============================================================
 // Search Space Definition
@@ -119,8 +124,15 @@ function paramsToVector(params: GodAIParams): number[] {
 }
 
 /** Convert a flat number array back to a GodAIParams object, with clipping and rounding. */
+/**
+ * Base params the optimizer builds candidates from. DEFAULT_GOD_AI_PARAMS for
+ * the default profile; the experiment profile (all-on / all-on-m5-off) for
+ * --profile runs — set once in main() before optimize() is called.
+ */
+let BASE_PARAMS: GodAIParams = DEFAULT_GOD_AI_PARAMS
+
 export function vectorToParams(vec: number[]): GodAIParams {
-  const params = { ...DEFAULT_GOD_AI_PARAMS }
+  const params = { ...BASE_PARAMS }
   for (let i = 0; i < DIM; i++) {
     const spec = SEARCH_SPACE[i]
     let val = vec[i]
@@ -977,14 +989,14 @@ function runComparisonTraces(
     )
   }
 
-  // Run traces with default params for comparison.
-  process.stderr.write(`\nRecording decision traces with default params...\n`)
+  // Run traces with base params for comparison.
+  process.stderr.write(`\nRecording decision traces with base params...\n`)
   for (const seed of evalConfig.seeds) {
     const trace = traceSimulation({
       seed,
       stage: evalConfig.stage,
       difficulty: evalConfig.difficulty,
-      params: DEFAULT_GOD_AI_PARAMS,
+      params: BASE_PARAMS,
       maxTicks: evalConfig.maxTicks,
       sampleInterval: 6,
     })
@@ -1026,6 +1038,22 @@ if (import.meta.main) {
     process.exit(1)
   }
   const difficulty = arg('difficulty', 'classic')!
+  const profileName = arg('profile', 'default')!
+  const profile =
+    profileName === 'all-on'
+      ? { name: 'all-on', params: ALL_ON_EXPERIMENT_PARAMS }
+      : profileName === 'all-on-m5-off'
+        ? { name: 'all-on-m5-off', params: ALL_ON_M5_OFF_CONTROL_PARAMS }
+        : profileName === 'all-on-minus-flm'
+          ? { name: 'all-on-minus-flm', params: ALL_ON_MINUS_FLM_PARAMS }
+          : profileName === 'default'
+            ? { name: 'default', params: DEFAULT_GOD_AI_PARAMS }
+            : null
+  if (!profile) {
+    console.error(`unknown --profile: ${profileName} (expected default|all-on|all-on-m5-off|all-on-minus-flm)`)
+    process.exit(1)
+  }
+  BASE_PARAMS = profile.params
   const seedCount = parseInt(arg('seeds', '8')!, 10)
   const generations = parseInt(arg('generations', '40')!, 10)
   const maxTicks = parseInt(arg('max-ticks', '18000')!, 10)
@@ -1037,10 +1065,10 @@ if (import.meta.main) {
   // from a previous round's bestParams instead of DEFAULT_GOD_AI_PARAMS.
   const initFile = arg('init', '')
   const initialSigma = parseFloat(arg('sigma', '1.0')!)
-  let initParams: GodAIParams = DEFAULT_GOD_AI_PARAMS
+  let initParams: GodAIParams = BASE_PARAMS
   if (initFile) {
     const raw = JSON.parse(readFileSync(initFile, 'utf8'))
-    initParams = { ...DEFAULT_GOD_AI_PARAMS, ...(raw.bestParams ?? raw) }
+    initParams = { ...BASE_PARAMS, ...(raw.bestParams ?? raw) }
     process.stderr.write(`Warm start from ${initFile} (sigma=${initialSigma})\n`)
   }
 
@@ -1048,6 +1076,7 @@ if (import.meta.main) {
   const stages = stageIdxs.map((idx) => STAGES[idx])
 
   process.stderr.write(`\nGod AI CMA-ES Optimizer (P4 — floor-aware, all-35 classic)\n`)
+  process.stderr.write(`Profile: ${profile.name} (params=${paramsHash(profile.params)})\n`)
   process.stderr.write(
     `Stages: ${stages.map((s, i) => `S${stageIdxs[i] + 1}(${s.name})`).join(', ')} | Difficulty: ${difficulty} | Seeds: ${seeds.join(',')}\n`,
   )
@@ -1060,7 +1089,7 @@ if (import.meta.main) {
       seedCount: seeds.length,
       stageIndex: 0,
       maxTicks,
-      params: initParams,
+      params: profile.params,
     }) + '\n',
   )
   process.stderr.write(`Generations: ${generations} | Max ticks: ${maxTicks} | Floor: ${floor}\n`)
@@ -1094,6 +1123,34 @@ if (import.meta.main) {
       : `Serial evaluation (--serial)\n`,
   )
 
+  // Live probe (§3): prove the profile params actually reached Simulation
+  // through the worker pool — run one task with the profile and assert the
+  // params hash the run recorded matches the profile's.
+  if (pool && profile.name !== 'default') {
+    const probeResults = await pool.runBatch([
+      {
+        id: 0,
+        seed: 1,
+        stage: stages[0],
+        difficulty,
+        params: profile.params,
+        stageIndex: 0,
+        maxTicks,
+      },
+    ])
+    const pr = probeResults[0]
+    const want = paramsHash(profile.params)
+    if (!pr.ok || pr.paramsHash !== want) {
+      console.error(
+        `live probe FAILED: profile=${profile.name} expected ${want}, got ${pr.paramsHash ?? 'none'} — params did not reach Simulation`,
+      )
+      process.exit(1)
+    }
+    process.stderr.write(
+      `live probe: profile=${profile.name} hash=${want} OK (params reached Simulation)\n`,
+    )
+  }
+
   // Run optimization.
   const result = await optimize(evalConfig, generations, verbose, pool, initParams, initialSigma)
   pool?.terminate()
@@ -1121,8 +1178,8 @@ if (import.meta.main) {
     bestParams: result.bestParams,
     bestFitness: result.bestFitness,
     bestEvalResult: result.bestEvalResult,
-    defaultParams: DEFAULT_GOD_AI_PARAMS,
-    defaultEvalResult: evaluateParams(DEFAULT_GOD_AI_PARAMS, evalConfig),
+    defaultParams: BASE_PARAMS,
+    defaultEvalResult: evaluateParams(BASE_PARAMS, evalConfig),
     history: result.history.map((h) => ({
       gen: h.generation,
       bestFit: Math.round(h.bestFitness * 10) / 10,
@@ -1182,7 +1239,7 @@ if (import.meta.main) {
   logLines.push(``)
   logLines.push(`## Results Summary`)
   logLines.push(``)
-  logLines.push(`| Metric | Default Params | Optimized Params | Δ |`)
+  logLines.push(`| Metric | Base Params | Optimized Params | Δ |`)
   logLines.push(`|--------|---------------|-----------------|---|`)
 
   const def = summary.defaultEvalResult
@@ -1205,10 +1262,10 @@ if (import.meta.main) {
   logLines.push(``)
   logLines.push(`## Parameter Changes`)
   logLines.push(``)
-  logLines.push(`| Parameter | Default | Optimized | Δ |`)
-  logLines.push(`|-----------|---------|-----------|---|`)
+  logLines.push(`| Parameter | Base | Optimized | Δ |`)
+  logLines.push(`|-----------|------|-----------|---|`)
   for (const spec of SEARCH_SPACE) {
-    const dv = DEFAULT_GOD_AI_PARAMS[spec.name]
+    const dv = BASE_PARAMS[spec.name]
     const ov = result.bestParams[spec.name]
     const delta = typeof dv === 'number' && typeof ov === 'number' ? ov - dv : '?'
     logLines.push(`| ${spec.name} | ${dv} | ${ov} | ${delta} |`)

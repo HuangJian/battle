@@ -2718,3 +2718,148 @@ t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 
   maxDist/不回头/csb-cbr 均移除）; `fireLineDetourMinSlack` 保留为调参入口。
 - `tests/godai-params-override.test.ts` 三处断言更新为默认 1（§228 钩子语义
   不变, 恢复默认 = 1 而非 0）。
+
+## §239 全关策略 all-on 实验 — M0/M1 收口：all-on 灾难性否决 + LOO 定位 firingLaneMode (2026-08-17)
+
+> 实验计划：GOD-AI-all-strategies-CMA-ES.md（§217 之后 M5=1 基线上的「全开关闭策略」
+> 协同假设检验）。结论：**all-on 灾难性否决（−33.0pp wins），M1 门禁拦截，未进入大规模
+> CMA-ES（M2/M3 不执行）**；LOO 定位冲突策略 firingLaneMode（主导）+
+> dodgeHorizonScore / candidateMode / dodgeCounterFire（次级），全部单独 A/B 亦净负。
+
+### 工具交付（本次新增）
+
+- `src/ai/god/all-on-experiment.ts`：`ALL_ON_EXPERIMENT_PARAMS`（default + manifest 21 项
+  开关翻转，依赖参数最小激活：survivalRiskWeight=1 纯门控、hpDangerHits=2 按 §111 口径、
+  hpDangerCommitMargin 保持 0 如实记录 inert；离散钉值 defenseInterceptPredictCells=2 /
+  suicideReturnMode=1）+ `ALL_ON_M5_OFF_CONTROL_PARAMS`（all-on−M5）。
+- `tools/optimize/optimize-godai.ts --profile default|all-on|all-on-m5-off`：`vectorToParams`
+  base 替换为 profile；SEARCH_SPACE init 同源。**live probe**：worker pool 跑 1 局断言
+  `paramsHash` 等于 profile 哈希，失败即 exit 1。
+- `SimResult.paramsHash` + `SimTaskResult.paramsHash`（FNV-1a，tools/lib/stage-spec.ts）—
+  probe 身份标签，全部 worker 路径透传。
+- `tools/diag/run-profile.ts`：M0 artifact 跑批（官方口径 stageIndex=0 / maxTicks=36000 /
+  telemetry on，逐关 W/base_destroyed/lives_exhausted/timeout + --json 逐 run artifact）。
+- `tools/diag/loo-allon.ts`：21 开关 leave-one-out 筛选（--seeds 1-10）+ `--only` 60-seed 确认。
+- `tools/diag/ab-param.ts --params <json>`：全 profile paired A/B（baseline 保持 DEFAULT）。
+
+### M0 三 artifact（hard 35×60，官方口径，params hash 6768f1f0 = all-on）
+
+| profile | W/2100 | win% | base_destroyed | lives_exhausted | timeout | avgKills |
+|---|---|---|---|---|---|---|
+| current shipped default | 1594 | 75.9% | 433 | 72 | 1 | 17.9 |
+| all-on（未优化） | 901 | 42.9% | 1186 | 11 | 2 | 13.7 |
+| all-on − M5（control） | 904 | 43.0% | 1181 | 13 | 2 | 13.7 |
+
+- 10-seed 冒烟同向（267 / 149 / 146），60-seed 复现稳定（±0.1pp）。
+- **M5 在 all-on 语境贡献 ≈ 0**（901 vs 904）：§229 的 +12 wins 不在此语境复现——无关
+  紧要，因为 all-on 整体已否决。
+- 失败形态翻转：lives_exhausted 72→11（玩家很少耗命），base_destroyed 433→1186
+  （+753）——all-on 策略把玩家拖离基地/消耗击杀效率（avgKills 17.9→13.7），基地失守。
+
+### M1 门禁：all-on 灾难性负向 → 不进入 CMA-ES，转 LOO
+
+- **−693 wins / −33.0pp**，base_destroyed +753。计划 §4 M1 门：「若 all-on 灾难性负向，
+  不进入大规模 CMA-ES，先做 leave-one-out 找冲突策略」→ 触发。
+
+### LOO 筛选（hard 35×10，21 开关 × 350 = 7700 runs，1 次 pool batch）
+
+| 关闭开关 | Δwins vs all-on | 说明 |
+|---|---|---|
+| **firingLaneMode** | **+68** | 主导冲突（base_destroyed 198→131） |
+| candidateMode | +15 | 次级 |
+| dodgeHorizonScore | +13 | 次级 |
+| dodgeCounterFire | +11 | 次级 |
+| baseGuardAnchorMode | +6 | 轻微 |
+| baseDamageRecall / baseAlertPickupSuppress / actionContractMode / baseLaneSentryInBandNav | +1..+4 | 轻微 |
+| defenseInterceptPredictCells / DigBricks / dodgeCentroidMode / dodgeClearanceScore / playerHpAwareness / survivalModeLives / suicideReturnMode | 0 | 该 10-seed 语料内 inert（playerHpAwareness/survival 符合 manifest 预期：依赖参数 0 时接近 no-op） |
+| coverageMode | −2 | 噪声 |
+| pathThreatAvoidance / targetValueMode / intentMode / pathTargetMode | −5..−8 | 在 all-on 语境反而净正（±8 = ±2.3pp 噪声带内，无后继） |
+
+### LOO 60-seed 确认（top 4，hard 35×60）
+
+| 关闭开关 | W/2100 | Δ vs all-on | base_destroyed |
+|---|---|---|---|
+| all-on（ref） | 901 | — | 1186 |
+| **off:firingLaneMode** | **1317** | **+416（+19.8pp）** | 770（−416） |
+| off:dodgeHorizonScore | 974 | +73 | 1066 |
+| off:candidateMode | 938 | +37 | 1151 |
+| off:dodgeCounterFire | 921 | +20 | 1165 |
+
+### 单独 A/B（default + 单开关，hard 35×10）— 冲突均内在净负，非协同伪影
+
+| 开关 | candW/350 vs 267 | net | W→L / L→W |
+|---|---|---|---|
+| firingLaneMode=1 | 162 | **−105（−30.0pp）** | 132 / 27 |
+| candidateMode=1 | 243 | −24（−6.9pp） | 57 / 33 |
+| dodgeHorizonScore=1 | 248 | −19（−5.4pp） | 64 / 45 |
+
+### 结论与沉淀
+
+- **协同复活假设证伪**：独立否决的策略组合开启后不协同，反而叠加灾难（§204–211 的
+  coverageMode 四轮净负在本实验 all-on 中继续净负，LOO −2 噪声；dominant 冲突是此前
+  从未全语料 A/B 过的 firingLaneMode）。
+- **firingLaneMode 全语料首次测量 = 灾难**（单独 −30pp，W→L 132 vs L→W 27）：§139 死区
+  修复仅在 Battlement 局部测过，全语料口径下是当前最强的负面杠杆——归档为证伪方向。
+- dodge 增强族（centroid/counterFire/horizon/clearance）延续 §224 结论：hard 无杠杆。
+- **DEFAULT_GOD_AI_PARAMS 不变**，无任何开关升格；`--profile all-on` 仅作实验入口保留，
+  一键回退 = 不传 profile。M2/M3（CMA-ES / holdout / 消融）因 M1 门禁不执行。
+- 四开关（targetValueMode/intentMode/pathThreatAvoidance/pathTargetMode）在 all-on 语境
+  的 LOO 净正信号在 10-seed 噪声带内，不作后继依据。
+
+### 验收
+
+- `bun run check`：tsc + 1408 tests 0 fail（含全部 godai 门禁）；oxlint 0。
+- 确定性：LOO 10-seed 与 60-seed 每 seed 增量一致（firingLaneMode +0.194 vs +0.198
+  wins/run）；profile hash 6768f1f0 全批一致（live probe 断言）。
+- Artifacts：`tmp/m0-default.json` / `tmp/m0-allon.json` / `tmp/m0-allon-m5off.json` /
+  `tmp/loo-s10.json` / `tmp/loo-confirm-60.json`。
+
+## §240 all-on−firingLaneMode CMA-ES 两轮收口 (2026-08-17)
+
+> 用户指令（§239 后）：「把头号元凶关掉，其它所有策略全参与，跑一跑 CMA-ES，看看运气怎么样。」
+> 执行：新增 `ALL_ON_MINUS_FLM_PARAMS` profile（all-on − firingLaneMode），两轮独立 CMA-ES。
+
+### 配置（两轮一致，除 opt-seed / warm-start）
+
+- difficulty=hard · 35 stages × 20 seeds（搜索集 1..20）· maxTicks=36000 · telemetry on
+- 19 维数值搜索空间，IPOP-CMA-ES：12 pop × 12 gens，σ=1.0，floor=0.6
+- 15 workers；live probe hash f5ac3ad7 全批一致（params 真实到达 Simulation）
+- 第 1 轮：opt-seed 1，从 profile 基线起搜 → best fitness 532.5
+- 第 2 轮：opt-seed 2，warm-start 从第 1 轮 best（sigma=1）→ best fitness 548.1
+
+### 结果（hard 35×60 官方口径确认）
+
+| 版本 | wins @ seeds 1-60 | 胜率 | 对比 all-on−FLM 基线 |
+|---|---|---|---|
+| all-on−FLM 基线（未调参） | 1317/2100 | 62.7% | — |
+| 第 1 轮 best | 1363/2100 | 64.9% | +46 wins (+2.2pp) |
+| 第 2 轮 best | 1376/2100 | 65.5% | +59 wins (+2.8pp) |
+| 第 2 轮 best **holdout 61-120** | 1313/2100 | 62.5% | **≈ 基线（过拟合归零）** |
+| shipped default（对照） | 1594/2100 | 75.9% | —（差距 −10.4pp） |
+
+- 第 2 轮 best 的失败形态：base_destroyed 704、lives_exhausted 18、timeout 2、
+  avgTicks 5319、avgKills 16.7 —— base_destroyed 仍 1.6× default（433）。
+- 第 2 轮 best 的搜索集（20 seeds）胜率 0.70（gen 1 起即触顶），但 60-seed 回落 0.655、
+  holdout 0.625 —— 调参 gains 是搜索集特异的。
+
+### 关键移动（第 2 轮 best vs all-on−FLM 基线，19 维中 11 维移动）
+
+- threatRangeCells 16（基线 23）、baseRaceRangeCells 18→16、baseRaceMarginCells 5→4、
+  defenseInterceptRangeCells 15→18、baseLaneSentryRange 6→5、aimError 0.03、
+  reactionDelay 3、defenseRowOffset 1、defenseColSpread 3、outnumbered 4/7、t8Max 7…
+- 方向解读：威胁感知半径收窄 + 基地护圈略收 —— 数值上把「激进防守」调回中庸，但
+  无法抵消 dodgeHorizonScore/candidateMode/dodgeCounterFire 的结构性负收益。
+
+### 停止判定（计划 §6）
+
+两轮独立 opt-seed 的 best（64.9% / 65.5%）均未超过 shipped default（75.9%），
+且 holdout 显示过拟合 —— 停止条件触发，**不再跑第 3 轮**。「开启被否策略」方向
+正式双否决收口（§239 开关门禁 + §240 数值调参）。DEFAULT_GOD_AI_PARAMS 未动。
+
+### 验收
+
+- `bun run check`：tsc + 全量测试绿；oxlint 0。
+- 确定性：两轮搜索种子固定可复现；60-seed / holdout 每 run 均带 paramsHash f5ac3ad7。
+- Artifacts：`tmp/cma-flm-smoke-best.json` / `tmp/cma-flm-smoke-best-60.json` /
+  `tmp/cma-flm-search2-best.json` / `tmp/cma-flm-search2-best-60.json` /
+  `tmp/cma-flm-search2-best-holdout.json` / `tmp/cma-flm-search2/optimization-summary.json`。

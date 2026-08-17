@@ -16,6 +16,7 @@ import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
+import { readFileSync } from 'fs'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -45,15 +46,26 @@ try {
 const jsonOut = arg('json')
 
 const paramSpec = arg('param')
-if (!paramSpec) {
-  console.error('usage: ab-param.ts --param key=value [--difficulty hard] [--stages 8|all] [--seeds 1-60] [--json out.json]')
+const paramsFile = arg('params')
+if (!paramSpec && !paramsFile) {
+  console.error(
+    'usage: ab-param.ts --param key=value | --params <profile.json> [--difficulty hard] [--stages 8|all] [--seeds 1-60] [--json out.json]',
+  )
   process.exit(1)
 }
-const [pKey, pVal] = paramSpec.split('=')
-const pNum = Number(pVal)
 
 const BASELINE = { ...DEFAULT_GOD_AI_PARAMS }
-const CANDIDATE = { ...DEFAULT_GOD_AI_PARAMS, [pKey]: pNum }
+let CANDIDATE: typeof DEFAULT_GOD_AI_PARAMS
+if (paramsFile) {
+  // Full-profile A/B (GOD-AI-all-strategies-CMA-ES.md M1): candidate = a
+  // params JSON (bare object or {bestParams}/{params} wrapper). Baseline
+  // stays DEFAULT_GOD_AI_PARAMS; the profile hash is printed in the header.
+  const raw = JSON.parse(readFileSync(paramsFile, 'utf8'))
+  CANDIDATE = { ...DEFAULT_GOD_AI_PARAMS, ...(raw.bestParams ?? raw.params ?? raw) }
+} else {
+  const [pKey, pVal] = paramSpec!.split('=')
+  CANDIDATE = { ...DEFAULT_GOD_AI_PARAMS, [pKey]: Number(pVal) }
+}
 
 const pool = new SimWorkerPool()
 const tasks: SimTask[] = []
@@ -69,7 +81,16 @@ for (const [label, params] of [
       // drops fire at different rates, forking hard/chaos trajectories away
       // from the eval baseline (DECISIONS §199). ab-param measured §193-B/§198
       // under the forked 口径; gate then validated station=1 under 0.
-      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000, telemetry: true })
+      tasks.push({
+        id: tasks.length,
+        seed,
+        stage: STAGES[si],
+        stageIndex: 0,
+        difficulty,
+        params,
+        maxTicks: 36000,
+        telemetry: true,
+      })
       labels.push(`${label}|${si}|${seed}`)
     }
   }
@@ -106,7 +127,10 @@ let totalBase = 0
 let totalCand = 0
 let lw = 0
 let wl = 0
-console.log(`=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  param ${pKey}=${pNum}`)
+console.log(
+  `=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  ` +
+    (paramsFile ? `profile ${paramsFile}` : `param ${paramSpec}`),
+)
 console.log('stage baseW candW  L->W W->L  flips')
 for (const si of stageIdxs) {
   let b = 0
@@ -138,6 +162,10 @@ for (const si of stageIdxs) {
       detail.push(`s${seed}:W${br?.ticks}->L${cr?.ticks}`)
     }
   }
-  console.log(`s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`)
+  console.log(
+    `s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`,
+  )
 }
-console.log(`TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`)
+console.log(
+  `TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`,
+)

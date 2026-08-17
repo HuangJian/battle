@@ -1433,3 +1433,60 @@ vignette，不受影响。
 - 唯一理论节省（arc→fillRect）需要圆形改方形，视觉错误。
 
 **Implications:** 粒子渲染优化方向关闭。所有后续粒子相关改动只允许走 arc/fillRect 路径，禁止 drawImage。§236（分桶）与 §238（位图）合璧：粒子侧无优化空间。
+
+## 239. 全关策略 all-on 实验 — M0/M1 收口：all-on 灾难性否决 + LOO 定位 firingLaneMode (STATUS: 完成)
+
+**Decision:** 「全关闭策略开启 + CMA-ES 重跑」实验（GOD-AI-all-strategies-CMA-ES.md）
+在 **M1 门禁处收口否决**：all-on（default + manifest 21 项开关）hard 35×60 官方口径
+**−693 wins / −33.0pp**（75.9% → 42.9%），base_destroyed 433→1186（+753）→ 按计划
+§4 M1 门「灾难性负向不进入大规模 CMA-ES」，**M2/M3 不执行**。leave-one-out 定位冲突：
+**firingLaneMode 主导**（all-on 中关掉 +416/2100 @60-seed，+19.8pp），dodgeHorizonScore
+（+73）/ candidateMode（+37）/ dodgeCounterFire（+20）次级。单独 A/B 全部内在净负：
+firingLaneMode **−30.0pp**（全语料首次测量，§139 仅 Battlement 局部测过）、candidateMode
+−6.9pp、dodgeHorizonScore −5.4pp。**DEFAULT_GOD_AI_PARAMS 不变，无任何开关升格。**
+
+**Rationale:**
+- **协同复活假设证伪**：独立否决的策略（coverageMode §204–211、Phase 2 三机制 §207 等）
+  组合开启后不协同，反而叠加灾难；LOO 中 coverageMode 继续净负（−2 噪声）。dominant
+  冲突是此前从未全语料 A/B 的 firingLaneMode——§139 死区修复的局部 A/B 掩盖了其
+  全语料灾难（W→L 132 vs L→W 27）。
+- M0 三 artifact 完整落档（default 75.9% / all-on 42.9% / all-on−M5 43.0%）：M5 在
+  all-on 语境贡献 ≈0（901 vs 904），且失败形态翻转（lives_exhausted 72→11、
+  base_destroyed +753）——all-on 拖离基地 + 击杀效率下降（17.9→13.7 kills）。
+- LOO 10-seed 筛选与 60-seed 确认逐 seed 增量一致（firingLaneMode +0.194 vs +0.198
+  wins/run），确定性纪律（§2.3）保持。
+- 四开关（targetValueMode/intentMode/pathThreatAvoidance/pathTargetMode）在 all-on 语境
+  LOO 净正（+5..+8）但落在 10-seed 噪声带内（±2.3pp），不作后继依据。
+- dodge 增强族（centroid/counterFire/horizon/clearance）延续 §224：hard 无杠杆。
+
+**Implications:** all-on 方向关闭；`--profile all-on|all-on-m5-off` 仅作实验入口保留
+（不传 = 一键回退 default）。新增工具：`run-profile.ts`（M0 artifact 跑批）、
+`loo-allon.ts`（leave-one-out 筛选/确认）、`optimize-godai.ts --profile` + live probe
+（`SimResult.paramsHash` 身份标签）。后继候选不在「开启被否策略」方向，转向状态表示/
+多步计划机制（计划 §6 停止条件方向）。
+> 全文 → docs/god-ai-tuning.progress.md §239
+
+## 240. all-on−firingLaneMode CMA-ES 两轮收口 — 数值调参止于 −10.4pp，方向关闭 (STATUS: 完成)
+
+**Decision:** 按用户指令（§239 后：关掉头号元凶 firingLaneMode，其余全开跑 CMA-ES），
+新增 `ALL_ON_MINUS_FLM_PARAMS` profile（= all-on − firingLaneMode，hash f5ac3ad7），
+在 hard 35×60 官方口径上跑 **两轮独立 CMA-ES**（opt-seed 1 / 2，20 seeds，12 gens，
+15 workers，maxTicks=36000，warm-start 第 2 轮从第 1 轮 best）。结果：
+- 基线 all-on−FLM = **1317/2100 (62.7%)**
+- 第 1 轮 best @60 = **1363/2100 (64.9%)**（+46 wins，+2.2pp）
+- 第 2 轮 best @60 = **1376/2100 (65.5%)**（+59 wins，+2.8pp）
+- 第 2 轮 holdout（seeds 61–120）= **1313/2100 (62.5%)** —— 回落到基线水平，调参**过拟合**
+- 对照：shipped default = 1594/2100 (75.9%)，差距仍 **−10.4pp**
+
+**Rationale:**
+- 关掉 FLM 后 all-on 从 42.9% 回升至 62.7%（+19.8pp，与 §239 LOO 结论一致）；但
+  dodgeHorizonScore / candidateMode / dodgeCounterFire 等其余内在净负开关仍在，结构性
+  伤害无法用数值调参填平 —— 调参 gains（+2.2~2.8pp）落在 holdout 上归零。
+- 两轮独立 opt-seed 都止步 0.65 胜率带（fitness 532.5 / 548.1），未触及 default 75.9%；
+  计划 §6 停止条件「两轮 --opt-seed 均不超 default → 停止」触发，**不再跑第 3 轮**。
+- 失败形态未修复：base_destroyed 704（vs default 433），avgKills 16.7（vs default 17.9）。
+
+**Implications:** 「开启被否策略」方向正式关闭（§239 门禁 + §240 数值双否决）。
+`--profile all-on-minus-flm` 与 CMA-ES 工具链保留作复测入口；后继转向状态表示 /
+多步规划机制（计划 §6 停止条件方向）。
+> 全文 → docs/god-ai-tuning.progress.md §240

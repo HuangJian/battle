@@ -6,6 +6,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
+import { paramsHash } from '../lib/stage-spec'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { enemyCanShootBase, enemyCanBreachRing } from '../../src/ai/god/SmartThreatModel'
 import type { Direction } from '../../src/constants'
@@ -150,6 +151,10 @@ export interface SimResult {
   firstKillTick?: number
   /** Failure attribution (plan/God-AI-Tuning §2). undefined on stage_clear. */
   failure?: FailureTaxonomy
+  /** paramsHash of the God AI params actually used (FNV-1a over the stable
+   *  encoding, tools/lib/stage-spec.ts). Live-probe identity tag: proves a
+   *  profile/override reached the Simulation and wasn't silently defaulted. */
+  paramsHash: string
   /** v6 evaluation telemetry (only when `telemetry: true`). */
   telemetry?: RunTelemetry
   /** Suicide-trade commit ticks (only when `commitCounts: true`). */
@@ -1035,6 +1040,7 @@ export function runSimulation(opts: RunOptions): SimResult {
   }
 
   const wallMs = performance.now() - t0
+  const runParamsHash = paramsHash(opts.godAIParams ?? DEFAULT_GOD_AI_PARAMS)
 
   const result: SimResult = {
     outcome,
@@ -1059,6 +1065,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     difficulty,
     firstKillTick,
     failure,
+    paramsHash: runParamsHash,
   }
 
   if (opts.commitCounts === true) {
@@ -1390,8 +1397,9 @@ function computeLedgerSample(world: World, input: GodAIInput, tick: number): Thr
   }
 
   const nearestEta = Number.isFinite(nearestThreatEta) ? Math.round(nearestThreatEta * 10) / 10 : -1
-  const interceptEta =
-    Number.isFinite(bestInterceptEta) ? Math.round(bestInterceptEta * 10) / 10 : -1
+  const interceptEta = Number.isFinite(bestInterceptEta)
+    ? Math.round(bestInterceptEta * 10) / 10
+    : -1
   const slack =
     Number.isFinite(nearestThreatEta) && Number.isFinite(bestInterceptEta)
       ? Math.round((nearestThreatEta - bestInterceptEta) * 10) / 10
