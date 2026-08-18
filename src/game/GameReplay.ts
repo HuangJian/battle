@@ -4,6 +4,7 @@ import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { serializeReplayFile, buildReplayFilename } from '../replay/file'
+import { REPLAY_HASH_INTERVAL } from '../replay/config'
 import { cloneWorld, restoreWorld } from '../snapshot/WorldSerializer'
 import { STAGES, localizedStageName } from '../config/stages'
 import { isReplayBrowserBlocked } from './uiFlowGates'
@@ -58,6 +59,8 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
         metadata,
         w.seed,
         result.frames2,
+        result.tickHashes,
+        REPLAY_HASH_INTERVAL,
       )
       this.replays.enqueueThumbnail(replay.id)
     }
@@ -489,6 +492,9 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
         onExport: (id) => {
           this.exportReplay(this.replays.get(id))
         },
+        onExportAll: () => {
+          this.exportAllReplays()
+        },
       })
     }
 
@@ -510,6 +516,8 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
         frames: replay.frames,
         totalTicks: replay.totalTicks,
         metadata: replay.metadata,
+        tickHashes: replay.tickHashes,
+        hashInterval: replay.hashInterval,
       })
       const filename = buildReplayFilename({
         difficulty: replay.metadata.difficulty,
@@ -525,8 +533,47 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
       a.href = url
       a.download = filename
       a.click()
-      URL.revokeObjectURL(url)
+      // Deferred revoke: Safari aborts large downloads if the object URL is
+      // revoked synchronously after the click.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
       ui.notify(t('toast.replayExported', { filename }))
+    }
+
+    /**
+     * Export every stored replay as ONE NDJSON download (one serialized
+     * .replay envelope per line). Bulk path for demonstration-corpus
+     * collection: N individual downloads would need N click-throughs.
+     */
+    protected exportAllReplays(): void {
+      const ui = this.presentation.ui
+      const replays = this.replays.getAll()
+      if (replays.length === 0) {
+        ui.notify(t('toast.noReplayExport'), 'warn')
+        return
+      }
+      const lines = replays.map((replay) =>
+        serializeReplayFile({
+          source: 'browser',
+          seed: replay.seed,
+          initialSnapshot: replay.initialSnapshot,
+          frames: replay.frames,
+          totalTicks: replay.totalTicks,
+          metadata: replay.metadata,
+          tickHashes: replay.tickHashes,
+          hashInterval: replay.hashInterval,
+        }),
+      )
+      const date = new Date().toISOString().slice(0, 10)
+      const filename = `bc-replays-all-${date}-${replays.length}.ndjson`
+      const blob = new Blob([lines.join('\n')], { type: 'application/x-ndjson' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      // Deferred revoke (same reason as exportReplay — Safari large downloads).
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      ui.notify(t('toast.replaysExportedAll', { count: replays.length, filename }))
     }
 
     /** Open a local .replay file for playback (not imported to database). */

@@ -1,6 +1,6 @@
 import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
-import { FRAME_SCHEMA_VERSION, isSupportedFrameSchema } from './config'
+import { FRAME_SCHEMA_VERSION, REPLAY_HASH_INTERVAL, isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf, packFrames, unpackFrames } from './pack'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
 import { generateUUID } from './uuid'
@@ -41,6 +41,9 @@ interface ReplayEnvelope {
   totalTicks: number
   metadata: ReplayMetadata
   seed: number
+  /** Desync-locator chain — world hash per hashInterval ticks. Absent in legacy files. */
+  tickHashes?: string[]
+  hashInterval?: number
 }
 
 interface FileEnvelope {
@@ -119,6 +122,10 @@ export interface SerializeInput {
   frames: Uint8Array
   totalTicks: number
   metadata: ReplayMetadata
+  /** Desync-locator chain — written only when present (new recordings). */
+  tickHashes?: string[]
+  /** Ticks between hash checkpoints. */
+  hashInterval?: number
 }
 
 /**
@@ -144,6 +151,13 @@ export function serializeReplayFile(input: SerializeInput): string {
       metadata: input.metadata,
       seed: input.seed,
     },
+  }
+
+  // Tick-hash chain (plan/Replay-TickHash-Chain.md) — written only for
+  // recordings that carry it; legacy files stay byte-identical.
+  if (input.tickHashes && input.tickHashes.length > 0) {
+    envelope.replay.tickHashes = input.tickHashes
+    envelope.replay.hashInterval = input.hashInterval ?? REPLAY_HASH_INTERVAL
   }
 
   if (input.source === 'sim' && input.sim) {
@@ -238,6 +252,16 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   const type: ReplayType = ((env.sim as SimEnvelope | undefined)?.status as ReplayType) ?? 'clear'
   const durationMs = (replay.totalTicks as number) * (1000 / 60)
 
+  // Tick-hash chain — tolerant of legacy files (absent → undefined) and of
+  // malformed values (non-string entries dropped).
+  const tickHashes = Array.isArray(replay.tickHashes)
+    ? (replay.tickHashes as unknown[]).filter((h): h is string => typeof h === 'string')
+    : undefined
+  const hashInterval =
+    typeof replay.hashInterval === 'number' && (replay.hashInterval as number) > 0
+      ? (replay.hashInterval as number)
+      : undefined
+
   const built: Replay = {
     id: generateUUID(),
     type,
@@ -264,6 +288,8 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     thumbnail: null,
     isFavorite: false,
     favoriteAt: null,
+    tickHashes,
+    hashInterval,
   }
 
   // Reconcile the snapshot's stage index with the authoritative metadata.

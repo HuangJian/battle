@@ -82,6 +82,8 @@ export class ReplayManager {
     metadata: ReplayMetadata,
     seed = 0,
     frames2: Uint8Array | null = null,
+    tickHashes?: string[],
+    hashInterval?: number,
   ): Replay {
     const policy = REPLAY_RETENTION_POLICIES[type]
 
@@ -114,6 +116,8 @@ export class ReplayManager {
       thumbnail: null,
       isFavorite: false,
       favoriteAt: null,
+      tickHashes,
+      hashInterval,
     }
 
     this.replays.push(replay)

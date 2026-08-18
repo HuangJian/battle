@@ -13,16 +13,21 @@ import type { ReplayType } from './types'
  *
  * | Type     | Limit | Overwrite |
  * | -------- | ----: | --------- |
- * | clear    |    20 | circular  |
- * | base     |    20 | circular  |
- * | died     |    20 | circular  |
- * | timeout  |    20 | circular  |
+ * | clear    |   250 | circular  |
+ * | base     |   250 | circular  |
+ * | died     |   250 | circular  |
+ * | timeout  |   250 | circular  |
+ *
+ * 250 (not the original 20): human-demonstration corpora for NN behavior
+ * cloning run 100+ games in one sitting — a 20-deep circular buffer silently
+ * evicted the earliest recordings. IndexedDB holds ~100KB per replay, so
+ * 250×4 types ≈ 100MB worst case, well within budget.
  */
 export const REPLAY_RETENTION_POLICIES: Record<ReplayType, RetentionPolicy> = {
-  clear: { limit: 20, overwrite: 'circular' },
-  base: { limit: 20, overwrite: 'circular' },
-  died: { limit: 20, overwrite: 'circular' },
-  timeout: { limit: 20, overwrite: 'circular' },
+  clear: { limit: 250, overwrite: 'circular' },
+  base: { limit: 250, overwrite: 'circular' },
+  died: { limit: 250, overwrite: 'circular' },
+  timeout: { limit: 250, overwrite: 'circular' },
 }
 
 /** Maximum number of favorited replays. Enforced in toggleFavorite(). */
@@ -62,3 +67,11 @@ export const SUPPORTED_FRAME_SCHEMA_VERSIONS: readonly number[] = [
 export function isSupportedFrameSchema(version: unknown): boolean {
   return typeof version === 'number' && SUPPORTED_FRAME_SCHEMA_VERSIONS.includes(version)
 }
+
+/**
+ * Ticks between world-hash checkpoints (plan/Replay-TickHash-Chain.md §1.2).
+ * The recorder samples the post-tick world state every N frames; the verifier
+ * compares at the same cadence. Written into the .replay file so readers
+ * never misalign checkpoints if this constant ever changes.
+ */
+export const REPLAY_HASH_INTERVAL = 100

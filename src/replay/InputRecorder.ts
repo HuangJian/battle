@@ -3,7 +3,8 @@ import type { World } from '../game/World'
 import type { WorldSnapshot } from '../snapshot/types'
 import { cloneWorld } from '../snapshot/WorldSerializer'
 import { packFrame } from './pack'
-import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from './config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1, REPLAY_HASH_INTERVAL } from './config'
+import { worldTickHash } from './tickHash'
 
 // ================================================================
 // InputRecorder — passively captures player input per tick
@@ -11,6 +12,14 @@ import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from './config'
 //
 // One recordFrame() call per simulation tick. The recorder reads
 // from the InputLike interface without mutating the World.
+//
+// Tick-hash chain (plan/Replay-TickHash-Chain.md §1.2): the recorder
+// holds a READ-ONLY reference to the World from startNew(). Inside
+// recordFrame() (called right after sim.tick() in GameLoop) it samples
+// worldTickHash() whenever the number of recorded frames is a multiple
+// of REPLAY_HASH_INTERVAL. Phase expression: frames.length % INTERVAL
+// === 0, i.e. after the (frames.length)-th completed sim.tick(). The
+// verifier samples at the same tick count — see tickHash.ts header.
 // ================================================================
 
 export interface RecorderResult {
@@ -20,13 +29,21 @@ export interface RecorderResult {
   /** Lie-Back-Win-Mode: packed God AI frames (v2 only). Null when no coop. */
   frames2: Uint8Array | null
   tickCount: number
+  /**
+   * World hash at each checkpoint tick (every REPLAY_HASH_INTERVAL frames).
+   * Written into the .replay file as the desync-locator chain.
+   */
+  tickHashes: string[]
 }
 
 export class InputRecorder {
   private frames: number[] = []
   private frames2: number[] = []
+  private tickHashes: string[] = []
   private active = false
   private initialSnapshot: WorldSnapshot | null = null
+  /** Read-only world reference for tick-hash sampling (tickHash.ts). */
+  private world: World | null = null
   /** Lie-Back-Win-Mode Q10: captured at recording start, never changes mid-session. */
   private coopAtStart = false
   /** 督战双玩家: captured at recording start for hasP2 determination. */
@@ -36,8 +53,10 @@ export class InputRecorder {
   startNew(world: World): void {
     this.frames = []
     this.frames2 = []
+    this.tickHashes = []
     this.active = true
     this.initialSnapshot = cloneWorld(world)
+    this.world = world
     this.coopAtStart = world.coop
     this.spectateDualAtStart = world.spectateDual
   }
@@ -72,6 +91,13 @@ export class InputRecorder {
     } else {
       // Pad with idle frame to keep streams aligned
       this.frames2.push(packFrame({ direction: null, firing: false, guard: false, frenzy: false }))
+    }
+
+    // Tick-hash checkpoint — phase contract in tickHash.ts header: sample the
+    // post-tick world state every REPLAY_HASH_INTERVAL frames, using the SAME
+    // expression as the verifier (`count % interval === 0`).
+    if (this.world && this.frames.length % REPLAY_HASH_INTERVAL === 0) {
+      this.tickHashes.push(worldTickHash(this.world))
     }
   }
 
@@ -125,15 +151,18 @@ export class InputRecorder {
 
     this.active = false
     this.initialSnapshot = null
+    this.world = null
 
-    return { snapshot, frames, frames2, tickCount }
+    return { snapshot, frames, frames2, tickCount, tickHashes: this.tickHashes }
   }
 
   reset(): void {
     this.frames = []
     this.frames2 = []
+    this.tickHashes = []
     this.active = false
     this.initialSnapshot = null
+    this.world = null
   }
 
   get isActive(): boolean {

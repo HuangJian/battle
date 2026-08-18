@@ -104,6 +104,19 @@ export interface Replay {
 
   /** Runtime-only flag: imported .replay files are transient (Q3). */
   transient?: boolean
+
+  /**
+   * Desync-locator chain (plan/Replay-TickHash-Chain.md): one world hash per
+   * hashInterval ticks, sampled after the corresponding sim.tick(). The
+   * verifier compares its own hashes against this list to localize any
+   * divergence to a tick window. Absent in legacy files (verified as
+   * `hashVerified === null`).
+   */
+  tickHashes?: string[]
+  /** Ticks between hash checkpoints — written so readers never misalign
+   *  checkpoints if REPLAY_HASH_INTERVAL ever changes. Defaults to the
+   *  verifier's own REPLAY_HASH_INTERVAL when absent. */
+  hashInterval?: number
 }
 
 /** Filter for browsing/searching replays. */

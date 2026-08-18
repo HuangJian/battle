@@ -1490,3 +1490,35 @@ firingLaneMode **−30.0pp**（全语料首次测量，§139 仅 Battlement 局�
 `--profile all-on-minus-flm` 与 CMA-ES 工具链保留作复测入口；后继转向状态表示 /
 多步规划机制（计划 §6 停止条件方向）。
 > 全文 → docs/god-ai-tuning.progress.md §240
+
+## 241. Replay Tick-Hash Chain 实现定案 — 每 100 tick 世界哈希锚点 (STATUS: 完成)
+
+**Decision:** 按 `plan/Replay-TickHash-Chain.md` 实现回放 desync 定位链：录制侧
+`InputRecorder` 自 `startNew()` 持有 World 只读引用，`recordFrame()` 内当
+`frames.length % REPLAY_HASH_INTERVAL === 0`（`REPLAY_HASH_INTERVAL = 100`，config.ts）
+采样 `worldTickHash()`（新文件 `src/replay/tickHash.ts`）；哈希链随 .replay envelope
+序列化（`replay.tickHashes` + `replay.hashInterval`，旧文件缺失时兼容）；校验器
+`verify-replay.ts` 以同一相位表达式在 sim.tick() 后、终态 break 前比对，失配即
+`hashVerified=false` + `firstHashMismatch{checkpoint, recorded, computed, tickWindow}`。
+verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.4 决策表
+（唯一 OK：true×true / null×true）。验收：T1–T7 单测（tests/replay-tickhash.test.ts，
+8 pass）+ T3② 语料基线 `tmp/demos-baseline.txt` 既有列逐字节不变、新增 hash=n/a 列。
+
+**Rationale:**
+- 哈希世界态而非输入帧：免疫录制时输入采样竞态（recordFrame 在 sim.tick() 之后采样，
+  键位恰在两者间变化会录到未被消费的帧——哈希测世界后果，不受此竞态影响）。
+- 相位基准统一为「tickCount = 已完成 sim.tick() 次数 = frames.length（push 后）」，
+  两侧同一表达式防 off-by-one（tickHash.ts 头注释 + T1 相位钉测试）。
+- 实体 id 首见重映射（id/ownerId/powerUp.id）：genId() 是进程级计数器，录制/校验两侧
+  绝对 id 必不同；不重映射则每局必失配（P8）。
+- 字段选「tick 敏感优先」：±1 帧相位偏移先在计时器（spawnTimer/冷却/shield）上露头，
+  字段集过简会把 firstHashMismatch 推迟到更晚窗口（P1）。
+- 测试难度选 'hard'（cooldown 开火模型）：classic 的 bulletCap 会让 t=250 的 fire 位
+  翻转被弹道中的旧弹挡住而无效果（probe 实测 playerBullets@250=1），T2a 会假失败。
+- 基线 diff 实测：唯一差异是基线文件自身的 UTF-8 BOM（PowerShell 重定向产物）+ 新增
+  hash 列；裁决/分数/动作分布全部逐字节一致。
+
+**Implications:** 新录制 .replay 文件均携带哈希链（5.9KB 级单文件增量可忽略）；旧文件
+校验走「null×终态」回退，逐字节输出不变。后继：coop（frames2）链、阶段切换跨链校验、
+`--explain-hash` 差异字段级反查工具可在此基础上扩展。
+> 全文 → plan/Replay-TickHash-Chain.md + plan/tickhash.review.md（4 轮评审闭环）
