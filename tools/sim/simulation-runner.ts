@@ -1,6 +1,7 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
+import { NNInput } from '../../src/nn/policy-input'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
@@ -407,6 +408,10 @@ export interface RunOptions {
   stageIndex?: number
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
+  /** Player policy for the headless run: 'god' (default) or 'nn'. */
+  policy?: 'god' | 'nn'
+  /** Weights directory for the 'nn' policy (auto-discovers latest). */
+  nnWeightsDir?: string
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -566,7 +571,10 @@ export function runSimulation(opts: RunOptions): SimResult {
   // This decouples God AI decisions from the world RNG stream, enabling
   // faithful replay playback where the God AI is absent.
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
-  const input = new GodAIInput(world, godAIParams, godRng)
+  const input: GodAIInput =
+    opts.policy === 'nn'
+      ? (new NNInput(world, { weightsDir: opts.nnWeightsDir }) as unknown as GodAIInput)
+      : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
