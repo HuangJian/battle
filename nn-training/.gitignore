@@ -1,0 +1,21 @@
+# ---- training artifacts (never committed) ----
+shards/
+checkpoints/
+runs/
+wandb/
+*.npy
+*.npz
+*.json.bak
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+*.swp

@@ -1,0 +1,76 @@
+"""
+Weight export/import — JSON manifest + base64 Float32 (plan §5).
+
+Format (also consumed by the TS runtime `src/nn/load-weights.ts`):
+    {
+      "format": "nn-weights-json",
+      "version": 1,
+      "schema_major": <OBS_SCHEMA_MAJOR>,
+      "arch": { ... NNPolicy.arch() ... },
+      "params": {
+        "<param_name>": { "shape": [..], "data": "<base64 of little-endian f32>" }
+      }
+    }
+
+The TS side decodes `data` with atob -> Uint8Array -> Float32Array and feeds
+the SAME conv/linear ops (see src/nn/infer.ts) so inference reproduces the
+Python forward pass (plan §NN-M1 determinism ②).
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+from typing import Any, Dict
+
+import torch
+
+from schema import OBS_SCHEMA_MAJOR
+
+
+def _tensor_to_b64(t: torch.Tensor) -> str:
+    arr = t.detach().cpu().contiguous().numpy().astype("<f4")
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def _b64_to_tensor(b64: str, shape: list[int]) -> torch.Tensor:
+    raw = base64.b64decode(b64)
+    arr = torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(shape)
+    return arr.clone()
+
+
+def save_weights_json(model: torch.nn.Module, path: str, extra_meta: Dict[str, Any] | None = None) -> None:
+    """Write the model weights in the JSON+base64 format (plan §5)."""
+    params: Dict[str, Any] = {}
+    for name, p in model.state_dict().items():
+        params[name] = {"shape": list(p.shape), "data": _tensor_to_b64(p)}
+    meta = {
+        "format": "nn-weights-json",
+        "version": 1,
+        "schema_major": OBS_SCHEMA_MAJOR,
+        "arch": getattr(model, "arch", lambda: {})(),
+        "num_params": sum(int(p.numel()) for p in model.parameters()),
+        "params": params,
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+
+def load_weights_json(path: str) -> tuple[Dict[str, Any], Dict[str, torch.Tensor]]:
+    """Load a JSON+base64 weights file -> (meta, {name: tensor})."""
+    with open(path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    params = {k: _b64_to_tensor(v["data"], v["shape"]) for k, v in meta["params"].items()}
+    return meta, params
+
+
+def load_state_into(model: torch.nn.Module, path: str) -> None:
+    """Load exported weights into a matching NNPolicy instance."""
+    _meta, params = load_weights_json(path)
+    missing, unexpected = model.load_state_dict(params, strict=False)
+    if missing or unexpected:
+        print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")
+    model.eval()

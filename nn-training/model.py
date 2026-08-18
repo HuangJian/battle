@@ -1,0 +1,127 @@
+"""
+NN policy network — fully-convolutional backbone + 3 factored heads.
+
+Design constraints (plan §NN-M1):
+  * Fully convolutional, NO size-dependent fully-connected layers — the board
+    is fixed 26x26 but the architecture must not bake in pixel dimensions
+    beyond the conv stack (future adaptability insurance).
+  * Only ReLU activations + a self-implemented softmax at inference time, so
+    the TS runtime (`src/nn/infer.ts`) can reproduce the forward pass
+    byte-for-byte from the exported weights (plan §NN-M1 determinism ②).
+  * Parameter budget <= ~200K. With conv_ch=(32,48,64) this lands ~77K —
+    deliberately small to match the 40-120K BC sample count (underfit-safe).
+
+Heads:
+  move  : 5  (none/up/down/left/right)   — predicted desired direction (hold)
+  fire  : 2  (hold-state 0/1)            — label = firing bit at decision tick
+  item  : 3  (none/guard/frenzy)        — guard/frenzy pulse (rewind deferred)
+"""
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+
+from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM, ITEM_DIM
+
+DEFAULT_CONV_CH = (32, 48, 64)
+DEFAULT_HEAD_HIDDEN = 64
+
+
+class NNPolicy(nn.Module):
+    def __init__(
+        self,
+        in_ch: int = OBS_CHANNELS,
+        board: int = BOARD,
+        scalar_dim: int = SCALAR_DIM,
+        conv_ch: tuple[int, ...] = DEFAULT_CONV_CH,
+        head_hidden: int = DEFAULT_HEAD_HIDDEN,
+    ):
+        super().__init__()
+        self.in_ch = in_ch
+        self.board = board
+        self.scalar_dim = scalar_dim
+        self.conv_ch = tuple(conv_ch)
+        self.head_hidden = head_hidden
+
+        # ---- Conv backbone (no batchnorm, no dropout — inference-reproducible) ----
+        layers: list[nn.Module] = []
+        c = in_ch
+        for i, oc in enumerate(conv_ch):
+            layers.append(nn.Conv2d(c, oc, kernel_size=3, padding=1, bias=True))
+            layers.append(nn.ReLU(inplace=True))
+            c = oc
+        self.conv = nn.Sequential(*layers)
+        # Global average pool collapses the spatial dims deterministically.
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(c, head_hidden, bias=True)
+        self.fc_relu = nn.ReLU(inplace=True)
+
+        self.move_head = nn.Linear(head_hidden, MOVE_DIM, bias=True)
+        self.fire_head = nn.Linear(head_hidden, FIRE_DIM, bias=True)
+        self.item_head = nn.Linear(head_hidden, ITEM_DIM, bias=True)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def arch(self) -> dict:
+        return {
+            "in_ch": self.in_ch,
+            "board": self.board,
+            "scalar_dim": self.scalar_dim,
+            "conv_ch": list(self.conv_ch),
+            "head_hidden": self.head_hidden,
+        }
+
+    def forward(
+        self, obs: torch.Tensor, scalars: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        obs     : (B, 14, 26, 26) uint8
+        scalars : (B, 24) float32  (currently accepted for API symmetry; the
+                  v1 backbone is conv-only on the spatial obs — scalars are a
+                  reserved input, concatenated to the pooled vector when the
+                  head is extended. Kept zero-cost for now.)
+        Returns (move_logits, fire_logits, item_logits), each (B, K).
+        """
+        x = obs.float()
+        x = self.conv(x)                 # (B, C, 26, 26)
+        x = self.gap(x)                  # (B, C, 1, 1)
+        x = x.flatten(1)                # (B, C)
+        h = self.fc_relu(self.fc(x))    # (B, head_hidden)
+        return self.move_head(h), self.fire_head(h), self.item_head(h)
+
+    @torch.no_grad()
+    def predict(self, obs: torch.Tensor, scalars: torch.Tensor | None = None):
+        """Inference helper: returns softmax-prob dicts (mirrors TS infer)."""
+        self.eval()
+        if scalars is None:
+            scalars = torch.zeros(obs.shape[0], self.scalar_dim)
+        m, f, i = self.forward(obs, scalars)
+        return (
+            torch.softmax(m, dim=-1),
+            torch.softmax(f, dim=-1),
+            torch.softmax(i, dim=-1),
+        )
+
+
+def param_count(model: nn.Module) -> int:
+    return sum(int(p.numel()) for p in model.parameters())
+
+
+if __name__ == "__main__":
+    m = NNPolicy()
+    n = param_count(m)
+    print(f"NNPolicy params: {n} (~{n/1000:.1f}K)  budget<=200K: {n <= 200_000}")
+    dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
+    dummy_sc = torch.zeros(2, SCALAR_DIM)
+    mv, fr, it = m(dummy_obs, dummy_sc)
+    print("move", tuple(mv.shape), "fire", tuple(fr.shape), "item", tuple(it.shape))

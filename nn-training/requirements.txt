@@ -1,0 +1,21 @@
+# NN training — CPU only (8-core / 32GB, NO GPU).
+#
+# Install:
+#   python -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   pip install -r requirements.txt
+#
+# The torch CPU wheel is pulled from the PyTorch CPU index below (NOT the
+# default PyPI CUDA build, which is ~5x larger and pointless without a GPU).
+# Pinned versions are known-good CPU builds; confirm with `pip freeze` after a
+# successful install and re-pin if the resolver picks newer ones.
+#
+# IMPORTANT (2026-08-18): the managed Python here is 3.13.x. torch < 2.6.0 has
+# NO cp313 wheel on the CPU index / Tsinghua mirror, so torch==2.5.1 can never
+# install on this interpreter. 2.7.1 is the lowest 3.13-compatible pin; bump it
+# (not down) if you move to a newer Python. Our training code uses only stable
+# APIs (nn.Conv2d/Linear/ReLU, AdamW, CosineAnnealingLR) so 2.6–2.13 all work.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.7.1
+numpy==2.1.3
