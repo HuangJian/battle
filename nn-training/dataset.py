@@ -15,6 +15,7 @@ it produces a contradictory (input, target) pair.
 from __future__ import annotations
 
 import numpy as np
+import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
 from schema import (
@@ -32,7 +33,7 @@ _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->ri
 def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):
     """Return (obs', scalars', move_label') for a left-right reflection."""
     obs = obs.copy()
-    obs = obs[:, :, ::-1]  # flip width
+    obs = obs[:, :, ::-1].copy()  # flip width (copy -> positive strides for torch collate)
     for ch in DIRECTION_CHANNELS:
         col = obs[ch].astype(np.int32)
         mask = col > 0

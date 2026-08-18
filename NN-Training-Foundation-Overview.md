@@ -36,12 +36,12 @@
 
 ## 契约验证结果（真实语料，2026-08-18 全量重导）
 
-- 对 **7 个 NDJSON 文件、43 局回放**跑 `export-observations`（含 s13-s14，6 文件→7 文件，37→43 局）：
-  - **40 局保留**（3 局被 desync 门剔除 = 录制时基地被毁）。
-  - 输出 `tmp/nn-export/`：**40 分片，25,621 样本**（较旧 22,632 +2,989）。
+- 对 **14 个 NDJSON 文件、69 局回放**跑 `export-observations`：
+  - **66 局保留**（3 局被 desync 门剔除 = 录制时基地被毁）。
+  - 输出 `tmp/nn-export/`：**66 分片，43,566 样本**（69 局 → 66 保留 / 3 剔除）。
   - 每局样本 421–1,094 ∈ [0.4K, 1.2K] 门内（与计划 M0b 门④一致）。
 - `validate_export.py` → **PASS**：
-  - 40 分片 / 25,621 样本 / mask 违例 **0** / scalar 越界 **0** / obs 非空 25621/25621
+  - 66 分片 / 43,566 样本 / mask 违例 **0** / scalar 越界 **0** / obs 非空 43566/43566
   - condition 分布：`turn=3437 fire=1025 item=8 subsample=21151`
     （item 事件极稀疏，仅 8 例 —— 与计划 N3 风险一致，item-head 需兜底）
 - `bun run check`：1424 pass / 23 skip / 0 fail。
@@ -52,7 +52,7 @@
 
 | 审核缺口 | 门禁 | 措施 | 结果 |
 |----------|------|------|------|
-| ① 语料过时（37→43 局，缺 s13-s14） | — | 全量重导 7 文件 / 43 局 | ✅ 25,621 样本 |
+| ① 语料过时（37→43 局，缺 s13-s14） | — | 全量重导 14 文件 / 69 局 | ✅ 43,566 样本 |
 | ② 无确定性字节比对模式 | gate ② | 新增 `--verify-determinism`：同回放导出两次逐字节比对 | ✅ 5/5 可导出局字节一致 |
 | ⑤ item 静默丢失未交叉核对 | gate ⑤ | 新增 `verify-item-events.ts`：导出 item 数 ≤ 回放 guard/frenzy 位变化数 | ✅ 8/8 映射，phantom=0 |
 | ⑥ 性能基准缺失未记录 | gate ⑥ | 编码计时写入 `_export_report.json` + env | ✅ 22.343 µs/tick（<0.3ms 预算 13×） |
@@ -69,9 +69,9 @@
 - 装好后立即执行：
   ```
   python smoke_test.py
-  python train_bc.py --data-dir D:/github/battle2/tmp/nn-export --out weights.json --epochs 40
+  python train_bc.py --data-dir D:/github/battle2/tmp/nn-export --epochs 40   # 权重默认写入 nn-training/weights/
   ```
-  确认损失在真实语料（25,621 样本）上下降。
+  确认损失在真实语料（43,566 样本）上下降。
 
 ## 环境坑（已沉淀）
 - **venv 必须走 PowerShell + 原生 `C:\` 路径** 创建：Bash(msys) 下 `python -m venv` 静默 no-op

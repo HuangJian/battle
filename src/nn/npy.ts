@@ -40,7 +40,11 @@ export function writeNpy(
   shape: number[],
   dtype: NpyDtype,
 ): void {
-  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': False, 'shape': (${shape.join(', ')}), }`
+  // A 1-D shape like [N] must serialize as "(N,)" — Python parses "(N)" as a
+  // bare integer, not a tuple, and numpy.load rejects it. Multi-dim is fine
+  // either way, so always add the trailing comma for the single-dim case.
+  const shapeStr = shape.length === 1 ? `(${shape[0]},)` : `(${shape.join(', ')})`
+  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': False, 'shape': ${shapeStr}, }`
   const headerBytes = Buffer.from(header, 'latin1')
   // Data offset = 6 (magic) + 2 (version) + 2 (len) + len(header) + pad
   // must be a multiple of 64 (numpy alignment).

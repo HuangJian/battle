@@ -7,6 +7,11 @@ wandb/
 *.npz
 *.json.bak
 
+# ---- trained weights: versioned archives + active pointer (inside weights/, backed up to netdisk) ----
+# WEIGHTS.md (the committed registry) lives in weights/ and is intentionally NOT ignored.
+weights/weights.json
+weights/weights.*.json
+
 # ---- python ----
 __pycache__/
 *.pyc

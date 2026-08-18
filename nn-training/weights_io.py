@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from typing import Any, Dict
 
 import torch
@@ -74,3 +75,36 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
     if missing or unexpected:
         print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")
     model.eval()
+
+
+# --- auto-discovery of the latest weights (plan: no manual rename on restore) ---
+_VERSIONED_RE = re.compile(r"^weights\.(\d{8}-\d{6})_ep\d+_val[\d.]+?\.json$")
+
+
+def _stamp_from_name(name: str) -> str | None:
+    m = _VERSIONED_RE.match(name)
+    return m.group(1) if m else None
+
+
+def latest_weights_path(directory: str) -> str | None:
+    """Return the path to the newest versioned weights file in `directory`.
+
+    Selection rule (plan: restoring from netdisk needs no manual rename):
+      * Prefer the versioned archive `weights.<YYYYMMDD-HHMMSS>_ep<N>_val<V>.json`
+        with the greatest embedded timestamp.
+      * Fall back to the active pointer `weights.json` if no versioned file exists.
+    Returns None if the directory contains no weights at all.
+    """
+    if not os.path.isdir(directory):
+        return None
+    versioned: list[tuple[str, str]] = []
+    for fn in os.listdir(directory):
+        ts = _stamp_from_name(fn)
+        if ts is not None:
+            versioned.append((ts, fn))
+    if versioned:
+        versioned.sort(key=lambda x: x[0])
+        newest = versioned[-1][1]
+        return os.path.join(directory, newest)
+    fallback = os.path.join(directory, "weights.json")
+    return fallback if os.path.exists(fallback) else None

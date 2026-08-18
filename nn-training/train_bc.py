@@ -16,9 +16,14 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import datetime
+import math
 import os
+import shutil
+import subprocess
 import sys
 import time
+from collections import Counter
 
 import torch
 import torch.nn.functional as F
@@ -45,12 +50,104 @@ def _masked_acc(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     return (correct / denom).mean().item()
 
 
+_WEIGHTS_MD_HEADER = """\
+# NN Weights History
+
+Trained weights are **gitignored** (never committed) and backed up manually to netdisk.
+This file is the **committed registry** of every training run. Keep it in sync with the
+actual `weights.*.json` files on disk.
+
+## Naming convention
+
+* **Versioned archive**: `weights.<YYYYMMDD-HHMMSS>_ep<N>_val<V>.json`
+  * `<YYYYMMDD-HHMMSS>` — training finish timestamp (local)
+  * `<N>` — number of epochs trained
+  * `<V>` — best validation loss, 4 decimals (e.g. `1.2431`)
+  * Example: `weights.20260818-170055_ep40_val1.2431.json`
+* **Active pointer**: `weights.json` — an exact copy of the latest versioned archive.
+  It is what the TS runtime (`src/nn/infer.ts`, not yet implemented) loads. Gitignored.
+* Both files live in `nn-training/`.
+
+## Backup strategy
+
+1. After each training run, the versioned archive + `weights.json` are produced locally.
+2. **Manually** copy the new `weights.*.json` to netdisk (external backup).
+3. Commit only `WEIGHTS.md` (this file) — it records which version is current.
+4. On a fresh clone, weights are absent; restore the needed `weights.*.json` from netdisk
+   and (optionally) copy it to `weights.json` for local inference.
+
+## History
+
+| trained_at | file | epochs | samples (train/val) | val_loss | move/fire/item acc | git | notes |
+|---|---|---|---|---|---|---|---|
+"""
+
+
+def _git_sha() -> str:
+    """Best-effort short git sha of the repo at training time (for the registry)."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "n/a"
+
+
+def _append_weights_md(out_dir: str, versioned_path: str, trained_at: str,
+                       args, sizes: dict, best_val: float, history: dict) -> None:
+    """Append a row to the committed weights registry (WEIGHTS.md).
+
+    Creates the file with a header (naming convention + backup strategy) on first run.
+    """
+    md_path = os.path.join(out_dir, "WEIGHTS.md")
+    row = (
+        f"| {trained_at} | `{os.path.basename(versioned_path)}` | {args.epochs} "
+        f"| {sizes['train']}/{sizes['val']} | {best_val:.4f} "
+        f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{history['item_acc'][-1]} "
+        f"| {_git_sha()} | {args.notes} |\n"
+    )
+    if not os.path.exists(md_path):
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(_WEIGHTS_MD_HEADER)
+    with open(md_path, "a", encoding="utf-8") as f:
+        f.write(row)
+
+
+def _majority_baseline(dl) -> dict:
+    """CE if we always predict the most frequent class per head.
+
+    Provides a floor to interpret the trained val_loss against (audit gap #2):
+    is 1.2431 near the majority-class ceiling, or is there real signal learned?
+    """
+    c_m, c_f, c_i = Counter(), Counter(), Counter()
+    for batch in dl:
+        _, _, mv, fr, it, _, _, _ = [b for b in batch]
+        for t, c in ((mv, c_m), (fr, c_f), (it, c_i)):
+            for v in t.tolist():
+                c[v] += 1
+    out = {}
+    for name, c in (("move", c_m), ("fire", c_f), ("item", c_i)):
+        total = sum(c.values())
+        if total == 0:
+            out[name] = float("nan")
+            continue
+        maj = c.most_common(1)[0][1]
+        out[name] = -math.log(maj / total)  # CE of constant majority prediction
+    return out
+
+
 def train(args) -> dict:
     torch.manual_seed(args.seed)
     train_dl, val_dl, sizes = make_loaders(
         args.data_dir, args.batch, args.val_split, args.mirror_p, args.seed, args.num_workers
     )
     print(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
+
+    # Majority-class baseline: a floor to interpret val_loss against (audit gap #2).
+    mb = _majority_baseline(train_dl)
+    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f} item={mb['item']:.4f}")
 
     model = NNPolicy()
     n_params = param_count(model)
@@ -108,28 +205,37 @@ def train(args) -> dict:
             best_val = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
-    # Restore best and export.
+    # Restore best and export (versioned archive + active pointer + history md).
     model.load_state_dict(best_state)
+    trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     meta = {
-        "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "trained_at": trained_at,
         "schema_major": OBS_SCHEMA_MAJOR,
         "args": vars(args),
         "sizes": sizes,
         "best_val_loss": round(float(best_val), 4),
         "history": history,
     }
-    save_weights_json(model, args.out, extra_meta=meta)
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    versioned = os.path.join(out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json")
+    save_weights_json(model, versioned, extra_meta=meta)
+    shutil.copy(versioned, args.out)  # active pointer for the TS runtime
+    _append_weights_md(out_dir, versioned, trained_at, args, sizes, float(best_val), history)
     if args.checkpoint:
         torch.save({"state_dict": model.state_dict(), "arch": model.arch(), "meta": meta},
                    args.checkpoint)
-    print(f"[train] done in {time.time()-t0:.1f}s -> weights: {args.out} (schema_major={OBS_SCHEMA_MAJOR})")
-    return {"out": args.out, "best_val_loss": best_val, "params": n_params, "history": history}
+    print(f"[train] done in {time.time()-t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}")
+    return {"out": versioned, "active": args.out, "best_val_loss": best_val, "params": n_params, "history": history}
 
 
 def main():
     ap = argparse.ArgumentParser(description="BC trainer for NN Player AI")
     ap.add_argument("--data-dir", required=True, help="directory of exported npy shards")
-    ap.add_argument("--out", required=True, help="output weights JSON path")
+    ap.add_argument("--out",
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "weights.json"),
+                    help="active weights JSON path (a versioned weights.<stamp>.json archive + WEIGHTS.md are written alongside in the same dir)")
+    ap.add_argument("--notes", default="", help="free-text note recorded in WEIGHTS.md for this run")
     ap.add_argument("--checkpoint", default=None, help="optional .pt checkpoint path")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)

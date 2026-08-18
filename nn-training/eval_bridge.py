@@ -14,6 +14,10 @@ Two modes:
 Usage:
   python eval_bridge.py --weights hard-v0/weights.json --data-dir <held-out>
   python eval_bridge.py --weights hard-v0/weights.json --emit-bun-cmd
+
+  # auto-select the latest weights.*.json in nn-training/ (no manual rename):
+  python eval_bridge.py --data-dir <held-out>
+  python eval_bridge.py --emit-bun-cmd --weights-dir .
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import NNPolicy  # noqa: E402
-from weights_io import load_state_into  # noqa: E402
+from weights_io import load_state_into, latest_weights_path  # noqa: E402
 from npyio import load_dataset  # noqa: E402
 from schema import MOVE_DIM, FIRE_DIM, ITEM_DIM  # noqa: E402
 
@@ -83,23 +87,35 @@ def emit_bun_cmd(weights_path: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", required=True)
+    ap.add_argument("--weights", default=None,
+                    help="explicit weights JSON path; if omitted, the latest weights.*.json in --weights-dir is auto-selected")
+    ap.add_argument("--weights-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"),
+                    help="directory to auto-discover the latest weights when --weights is omitted")
     ap.add_argument("--data-dir", default=None, help="held-out npy shards for quick eval")
     ap.add_argument("--emit-bun-cmd", action="store_true", help="print the full sim-eval command")
     args = ap.parse_args()
 
+    # Auto-discover the latest weights unless an explicit path is given.
+    weights_path = args.weights
+    if weights_path is None:
+        weights_path = latest_weights_path(args.weights_dir)
+        if weights_path is None:
+            print(f"ERROR: no weights found in {args.weights_dir} (pass --weights <path> to specify)")
+            sys.exit(2)
+    print(f"[eval] using weights: {weights_path}")
+
     if args.emit_bun_cmd:
-        print(emit_bun_cmd(args.weights))
+        print(emit_bun_cmd(weights_path))
         return
 
     if not args.data_dir:
         print("ERROR: provide --data-dir for quick eval, or --emit-bun-cmd for the sim command")
         sys.exit(2)
 
-    res = quick_eval(args.weights, args.data_dir)
+    res = quick_eval(weights_path, args.data_dir)
     print(json.dumps(res, indent=2))
     print("\nFull sim eval command:")
-    print("  " + emit_bun_cmd(args.weights))
+    print("  " + emit_bun_cmd(weights_path))
 
 
 if __name__ == "__main__":

@@ -44,13 +44,15 @@
    bun tools/replay/export-observations.ts nn-demo/*.ndjson --out /path/to/shards
    ```
    产出 `obs/scalars/actions/masks/conditions` 的 raw `.npy` shard + `manifest.json`。
-3. **训练**（在本目录）：
+3. **训练**（在本目录，权重默认写入 `weights/` 子目录）：
    ```bash
-   python train_bc.py --data-dir /path/to/shards --out weights.json --epochs 40 --batch 64
+   python train_bc.py --data-dir /path/to/shards --epochs 40 --batch 64
+   # 等价于：--out weights/weights.json（版本化归档 + WEIGHTS.md 一并写入 weights/）
    ```
-4. **评估桥接**：
+4. **评估桥接**（省略 `--weights` 时自动发现 `weights/` 下最新权重）：
    ```bash
-   python eval_bridge.py --data-dir /path/to/shards --weights weights.json
+   python eval_bridge.py --data-dir /path/to/shards          # 自动选最新
+   python eval_bridge.py --data-dir /path/to/shards --weights weights/weights.2026....json  # 显式指定旧版
    ```
 5. **自测**：
    ```bash

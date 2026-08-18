@@ -61,4 +61,27 @@ describe('npy.ts writer', () => {
     const dataStart = 10 + hlen
     expect(buf.length - dataStart).toBe(data.length * 4)
   })
+
+  it('serializes a 1-D shape with a trailing comma so numpy.load accepts it', () => {
+    // numpy.load requires a single-element shape to be "(N,)" — "(N)" parses as
+    // a bare int and is rejected ("shape is not valid"). This guards the
+    // conditions.npy (shape [N]) case.
+    const shape = [834]
+    const data = new Uint8Array(834)
+    const p = join(tmpdir(), `npy-test-1d-${Date.now()}.npy`)
+    writeNpy(p, data, shape, 'u1')
+    const buf = readFileSync(p)
+    const hlen = headerLenOf(buf)
+    const headerDict = buf.slice(10, 10 + hlen).toString('latin1')
+    expect(headerDict).toContain("'shape': (834,)")
+    // and the equivalent multi-dim form is unchanged
+    const shape2 = [834, 14, 26, 26]
+    const data2 = new Uint8Array(834 * 14 * 26 * 26)
+    const p2 = join(tmpdir(), `npy-test-nd-${Date.now()}.npy`)
+    writeNpy(p2, data2, shape2, 'u1')
+    const buf2 = readFileSync(p2)
+    const hlen2 = headerLenOf(buf2)
+    const headerDict2 = buf2.slice(10, 10 + hlen2).toString('latin1')
+    expect(headerDict2).toContain("'shape': (834, 14, 26, 26)")
+  })
 })
