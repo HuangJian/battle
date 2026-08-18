@@ -31,7 +31,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import make_loaders  # noqa: E402
 from model import NNPolicy, param_count  # noqa: E402
-from weights_io import save_weights_json  # noqa: E402
+from weights_io import save_weights_json, load_state_into  # noqa: E402
 from schema import OBS_SCHEMA_MAJOR  # noqa: E402
 
 
@@ -150,6 +150,9 @@ def train(args) -> dict:
     print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f} item={mb['item']:.4f}")
 
     model = NNPolicy()
+    if getattr(args, "resume", None):
+        print(f"[train] resuming from {args.resume}")
+        load_state_into(model, args.resume)
     n_params = param_count(model)
     print(f"[train] NNPolicy params={n_params} (~{n_params/1000:.1f}K) budget<=200K: {n_params <= 200_000}")
     if n_params > 200_000:
@@ -220,13 +223,46 @@ def train(args) -> dict:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     versioned = os.path.join(out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json")
     save_weights_json(model, versioned, extra_meta=meta)
-    shutil.copy(versioned, args.out)  # active pointer for the TS runtime
+    _safe_copy(versioned, args.out)  # active pointer for the TS runtime (read-only tolerant)
     _append_weights_md(out_dir, versioned, trained_at, args, sizes, float(best_val), history)
     if args.checkpoint:
         torch.save({"state_dict": model.state_dict(), "arch": model.arch(), "meta": meta},
                    args.checkpoint)
     print(f"[train] done in {time.time()-t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}")
     return {"out": versioned, "active": args.out, "best_val_loss": best_val, "params": n_params, "history": history}
+
+
+def _safe_copy(src: str, dst: str) -> None:
+    """Copy ``src`` -> ``dst`` tolerating a read-only destination (common on
+    Windows / netdisk-synced files). Clears the read-only bit up front and uses
+    an atomic temp-file replace, so we never hit the ``PermissionError`` we saw
+    when overwriting ``weights.json`` in place.
+
+    On Windows a held destination (e.g. a reader keeping weights.json open)
+    makes os.replace raise WinError 5. We retry with a 30 s budget; if all
+    attempts fail the versioned archive is already saved, so we warn and return
+    instead of crashing — the round's training is not lost.
+    """
+    try:
+        if os.path.exists(dst):
+            os.chmod(dst, 0o666)
+    except OSError:
+        pass
+    tmp = dst + ".tmp"
+    shutil.copy(src, tmp)
+    for attempt in range(30):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if attempt == 29:
+                print(
+                    f"[warn] _safe_copy: cannot update {dst} after 30 s; "
+                    f"archive {src} is safe",
+                    file=sys.stderr,
+                )
+                return
+            time.sleep(1.0)
 
 
 def main():
@@ -236,6 +272,7 @@ def main():
                     default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "weights.json"),
                     help="active weights JSON path (a versioned weights.<stamp>.json archive + WEIGHTS.md are written alongside in the same dir)")
     ap.add_argument("--notes", default="", help="free-text note recorded in WEIGHTS.md for this run")
+    ap.add_argument("--resume", default=None, help="resume training from a weights JSON (continue, not retrain)")
     ap.add_argument("--checkpoint", default=None, help="optional .pt checkpoint path")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)
