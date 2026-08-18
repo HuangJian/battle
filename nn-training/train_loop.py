@@ -83,16 +83,20 @@ def _fmt_dur(sec: float) -> str:
     return f"{h}h{m:02d}m"
 
 
+def _ts() -> str:
+    """Current time as [HH:MM:SS]."""
+    return time.strftime("%H:%M:%S")
+
+
 def _emit(line: str, log) -> None:
     """Print to stdout (flush) AND append to the log file (flush).
 
-    Centralizes the existing dual-write pattern so every status line is
-    guaranteed visible both live and in train_loop.log — the operator should
-    never have to poll processes/memory to know training is alive."""
+    Every log line is prefixed with a timestamp [HH:MM:SS] so the operator
+    can trace training progress and diagnose stalls without external tools."""
     print(line, flush=True)
     if log:
         try:
-            log.write(line + "\n")
+            log.write(f"[{_ts()}] {line}\n")
             log.flush()
         except Exception:
             pass
@@ -131,7 +135,10 @@ class _TrainTee:
                 pass
         if self._log:
             try:
-                self._log.write(s)
+                # Prefix each line from train_bc with a timestamp.
+                ts = _ts()
+                for line in s.splitlines(True):
+                    self._log.write(f"[{ts}] {line}")
                 self._log.flush()
             except Exception:
                 pass
