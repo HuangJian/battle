@@ -7,7 +7,7 @@ import { ReplayManager } from '../src/replay/ReplayManager'
 import { PlaybackController } from '../src/replay/PlaybackController'
 import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import { packFrame, unpackFrame, packFrames, unpackFrames } from '../src/replay/pack'
-import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from '../src/replay/config'
+import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1, REPLAY_RETENTION_POLICIES } from '../src/replay/config'
 import type { Direction } from '../src/constants'
 import type { InputLike } from '../src/game/Input'
 import type { InputFrame } from '../src/replay/types'
@@ -277,9 +277,11 @@ describe('ReplayManager', () => {
       if (fav) mgr.toggleFavorite(r.id)
       return r
     }
-    // Policy limit is 20 for clear; create 25, keep the newest 20.
-    for (let i = 0; i < 25; i++) make(false)
-    expect(mgr.count('clear')).toBe(20)
+    // Policy limit comes from config (250 for clear since the demo-corpus
+    // bump); create limit+5, keep the newest limit.
+    const limit = REPLAY_RETENTION_POLICIES.clear.limit
+    for (let i = 0; i < limit + 5; i++) make(false)
+    expect(mgr.count('clear')).toBe(limit)
     // A favorited replay is never evicted even past the limit.
     const fav = make(true)
     for (let i = 0; i < 10; i++) make(false)

@@ -31,6 +31,8 @@ export interface ReplayBrowserCallbacks {
   onImport?: (replay: Replay) => void
   /** Export a replay as .replay file download. */
   onExport?: (id: ReplayID) => void
+  /** Export every stored replay as one NDJSON bundle download. */
+  onExportAll?: () => void
 }
 
 /** Localized label for a replay type / filter tab. */
@@ -83,6 +85,7 @@ export class ReplayBrowser {
           <div class="snap-filters" data-replay="filters"></div>
           <div class="snap-header-right">
             <span class="snap-storage" data-replay="storage"></span>
+            <button class="controls-btn snap-export-all" data-replay="export-all" type="button">⇩ <span data-i18n="browser.replay.exportAll">Export All</span></button>
             <button class="controls-btn snap-import" data-replay="import" type="button" data-i18n="browser.replay.import">Import</button>
             <button class="controls-btn snap-close" data-replay="close" type="button">✕ <span data-i18n="browser.replay.close">Close</span> <kbd>Esc</kbd></button>
           </div>
@@ -98,6 +101,10 @@ export class ReplayBrowser {
     // Import button — triggers file picker for .replay files
     const importBtn = this.screen.querySelector('[data-replay="import"]') as HTMLElement
     importBtn.addEventListener('click', () => this.triggerImport())
+
+    // Export All button — one NDJSON bundle with every stored replay.
+    const exportAllBtn = this.screen.querySelector('[data-replay="export-all"]') as HTMLElement
+    exportAllBtn.addEventListener('click', () => this.callbacks?.onExportAll?.())
 
     // Drag-and-drop overlay
     this.setupDragDrop()

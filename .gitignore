@@ -11,6 +11,7 @@ tools/perf/results/
 *.tsbuildinfo
 
 *.chat.md
+*.review.md
 
 generated-stages.json
 
@@ -22,3 +23,5 @@ replays/
 tmp/
 reports/
 ab-test-*.ts
+
+nn-demo/
