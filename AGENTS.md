@@ -260,6 +260,13 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 - Validation is the automated gates only. `bun run check` runs `tsc --noEmit --incremental && bun test` (typecheck + full test suite); `bun run build` adds `oxlint` first. For presentation/UI work that unit tests can't assert, rely on `tsc --noEmit`, `oxlint`, and a successful `vite build` — not a running server. (The pre-commit hook additionally runs `oxfmt` in place — it reformats files directly and re-stages them, rather than failing on `--check` — plus `oxlint`.)
 - If a visual check is wanted, the human will open it themselves. Do not leave a dev server running as "proof" of work, and do not present a localhost URL as a validation step.
 
+### NEVER launch NN training by running `python` directly
+
+- Training **must** be started via `nn-training/start-training.sh` (or `bash nn-training/start-training.sh` from the repo root). This script handles venv setup, single-instance locking, and signal cleanup.
+- **Do not** run `python train_loop.py`, `python train_bc.py`, or any raw `python`/`python3` command to start training. Doing so bypasses the launch script's pre-flight checks and can spawn duplicate training processes that compete for the same lock file and weights.
+- If training is already running, the launch script detects it and exits cleanly. If the lock is stale (crashed process), it is auto-cleaned. To force-restart after a crash, use `--force`: `./start-training.sh --force`.
+- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py`. The shell script never writes to it — this eliminates the shell-PID / Python-PID mismatch that caused double-spawn on Windows.
+
 ### NEVER add an untracked `*.md` file to git tracking
 
 - Markdown that is **already in git tracking** (e.g. `AGENTS.md`, `DECISIONS.md`, `MANIFEST.md`, `README.md`, any `*.md` already committed) is fair game: an agent may edit, stage, and commit it like any other source file.

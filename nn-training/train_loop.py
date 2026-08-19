@@ -198,42 +198,83 @@ def heartbeat(stop: threading.Event, interval: int, state: dict, log) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Cross-platform check: is a process with this PID still running?"""
+    """Cross-platform check: is a process with this PID still running?
+
+    Catches ``Exception`` rather than specific types because Windows
+    ``os.kill(pid, 0)`` can raise ``SystemError``, ``OSError``, or other
+    unexpected exceptions depending on the PID / Python build / MSYS
+    translation layer.  Any failure → treat as "not alive" so stale
+    locks are always cleaned up."""
     try:
         os.kill(pid, 0)  # signal 0 = no signal sent, just permission check
         return True
-    except ProcessLookupError:
+    except Exception:
         return False
-    except PermissionError:
-        return True  # exists but no permission — still alive
+
+
+def _write_lock(lock_path: str) -> None:
+    """Write our lock info: ``PID|EXE|START_TS``."""
+    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        payload = f"{os.getpid()}|{sys.executable}|{int(time.time())}"
+        os.write(fd, payload.encode())
+    finally:
+        os.close(fd)
+
+
+def _read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
+    """Read lock file → (pid, exe_path, start_ts).  Any parse error → Nones."""
+    try:
+        with open(lock_path, "r") as f:
+            raw = f.read().strip()
     except OSError:
-        return False
+        return None, None, None
+    parts = raw.split("|")
+    if len(parts) >= 3:
+        try:
+            return int(parts[0]), parts[1], int(parts[2])
+        except (ValueError, IndexError):
+            pass
+    # Legacy format: bare PID integer.
+    try:
+        return int(raw), None, None
+    except ValueError:
+        return None, None, None
 
 
-def acquire_lock(lock_path: str) -> bool:
+def acquire_lock(lock_path: str, *, force: bool = False) -> bool:
     """PID-file based single-instance lock with stale lock auto-cleanup.
 
-    Written PID → next start reads it → checks if alive → cleans up if dead.
-    No advisory locks, no msvcrt, no fd inheritance issues.
+    Lock file format: ``PID|EXE_PATH|START_TIMESTAMP`` (pipe-delimited).
+    Legacy bare-PID files are also accepted for backward compat.
+
+    When *force* is True, any existing lock is broken regardless of
+    whether the holder is alive (operator-initiated restart).
     """
+    # --- Force mode: destroy any existing lock first. ---
+    if force:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
     # Try atomic create.
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
+        _write_lock(lock_path)
         return True
     except FileExistsError:
         pass
 
-    # File exists — read the PID and check liveness.
-    try:
-        with open(lock_path, "r") as f:
-            old_pid = int(f.read().strip())
-    except (ValueError, OSError):
-        old_pid = None
+    # File exists — check liveness.
+    old_pid, old_exe, _ts = _read_lock(lock_path)
 
     if old_pid is not None and _pid_alive(old_pid):
-        return False  # someone is genuinely running
+        exe_note = f" ({old_exe})" if old_exe else ""
+        print(
+            f"[loop] another train_loop is running (PID {old_pid}{exe_note}); exiting.",
+            flush=True,
+        )
+        return False
 
     # Stale lock — old process is dead. Clean up and retry.
     try:
@@ -242,20 +283,17 @@ def acquire_lock(lock_path: str) -> bool:
         pass
 
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
+        _write_lock(lock_path)
         return True
     except FileExistsError:
         return False  # lost a race with another starter
 
 
 def cleanup_lock(lock_path: str) -> None:
-    """Remove our lock file on exit (best-effort)."""
+    """Remove our lock file on exit (best-effort, only if we own it)."""
     try:
-        with open(lock_path, "r") as f:
-            pid = int(f.read().strip())
-        if pid == os.getpid():
+        our_pid, _, _ = _read_lock(lock_path)
+        if our_pid == os.getpid():
             os.remove(lock_path)
     except (ValueError, OSError):
         pass
@@ -277,6 +315,8 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=0,
                      help="DataLoader workers (parallel prefetch). NOTE: >0 uses Windows 'spawn' "
                           "which hangs this training (workers fail to start); keep 0 on Windows.")
+    ap.add_argument("--force", action="store_true",
+                     help="Break any existing lock and start (for manual restart after a crash).")
     args = ap.parse_args()
 
     os.makedirs(args.weights_dir, exist_ok=True)
@@ -285,15 +325,7 @@ def main() -> None:
     # Anchor the lock to the SCRIPT directory (HERE), NOT to cwd-relative
     # args.weights_dir — the launcher may dispatch from different working dirs.
     lock_path = os.path.join(HERE, ".train_loop.lock")
-    if not acquire_lock(lock_path):
-        # Read who holds it for the diagnostic message.
-        try:
-            with open(lock_path, "r") as f:
-                holder = f.read().strip()
-        except OSError:
-            holder = "?"
-        print(f"[loop] another train_loop is running (PID {holder}); exiting.",
-              flush=True)
+    if not acquire_lock(lock_path, force=args.force):
         sys.exit(0)
     atexit.register(cleanup_lock, lock_path)
     # Also clean up on SIGTERM / SIGINT (Ctrl-C) so the lock is released
