@@ -267,6 +267,14 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 - If training is already running, the launch script detects it and exits cleanly. If the lock is stale (crashed process), it is auto-cleaned. To force-restart after a crash, use `--force`: `./start-training.sh --force`.
 - The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py`. The shell script never writes to it — this eliminates the shell-PID / Python-PID mismatch that caused double-spawn on Windows.
 
+### NN training progress must be recorded in `docs/nn.progress.md`
+
+- Every architecture change, eval result, and lesson learned from NN training goes into `docs/nn.progress.md`.
+- New entries are appended at the top (reverse chronological) under numbered sections (§1, §2, ...).
+- Each section records: what changed, eval results (val_loss + sim win rate), root cause analysis, and concrete lessons.
+- This is the single source of truth for NN training history — not scattered in chat or commit messages.
+- When making architectural changes (model.py, infer.ts, obs-encoder.ts), check this file first for prior decisions.
+
 ### NEVER add an untracked `*.md` file to git tracking
 
 - Markdown that is **already in git tracking** (e.g. `AGENTS.md`, `DECISIONS.md`, `MANIFEST.md`, `README.md`, any `*.md` already committed) is fair game: an agent may edit, stage, and commit it like any other source file.

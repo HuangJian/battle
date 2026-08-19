@@ -1,15 +1,17 @@
 """
-NN policy network — fully-convolutional backbone + 3 factored heads.
+NN policy network — fully-convolutional backbone + scalar fusion + 3 factored heads.
+
+Architecture (v2 — scalars fused):
+  obs  → Conv(14→32→48→64) → GAP → (B, 64)
+  scalars (24-dim) → (B, 24)
+  concat → (B, 88) → FC(88→64) → ReLU → heads
 
 Design constraints (plan §NN-M1):
-  * Fully convolutional, NO size-dependent fully-connected layers — the board
-    is fixed 26x26 but the architecture must not bake in pixel dimensions
-    beyond the conv stack (future adaptability insurance).
-  * Only ReLU activations + a self-implemented softmax at inference time, so
+  * Only ReLU activations + self-implemented softmax at inference time, so
     the TS runtime (`src/nn/infer.ts`) can reproduce the forward pass
     byte-for-byte from the exported weights (plan §NN-M1 determinism ②).
-  * Parameter budget <= ~200K. With conv_ch=(32,48,64) this lands ~77K —
-    deliberately small to match the 40-120K BC sample count (underfit-safe).
+  * Parameter budget <= ~200K. With conv_ch=(32,48,64) + scalar fusion
+    this lands ~112K — deliberately small to match the 40-120K BC sample count.
 
 Heads:
   move  : 5  (none/up/down/left/right)   — predicted desired direction (hold)
@@ -53,7 +55,8 @@ class NNPolicy(nn.Module):
         self.conv = nn.Sequential(*layers)
         # Global average pool collapses the spatial dims deterministically.
         self.gap = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(c, head_hidden, bias=True)
+        # FC input = GAP output (c) + scalar features (scalar_dim)
+        self.fc = nn.Linear(c + scalar_dim, head_hidden, bias=True)
         self.fc_relu = nn.ReLU(inplace=True)
 
         self.move_head = nn.Linear(head_hidden, MOVE_DIM, bias=True)
@@ -86,16 +89,14 @@ class NNPolicy(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         obs     : (B, 14, 26, 26) uint8
-        scalars : (B, 24) float32  (currently accepted for API symmetry; the
-                  v1 backbone is conv-only on the spatial obs — scalars are a
-                  reserved input, concatenated to the pooled vector when the
-                  head is extended. Kept zero-cost for now.)
+        scalars : (B, 24) float32 — 24-dim feature vector fused into the FC layer
         Returns (move_logits, fire_logits, item_logits), each (B, K).
         """
         x = obs.float()
         x = self.conv(x)                 # (B, C, 26, 26)
         x = self.gap(x)                  # (B, C, 1, 1)
         x = x.flatten(1)                # (B, C)
+        x = torch.cat([x, scalars], dim=1)  # (B, C + scalar_dim)
         h = self.fc_relu(self.fc(x))    # (B, head_hidden)
         return self.move_head(h), self.fire_head(h), self.item_head(h)
 

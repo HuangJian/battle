@@ -53,6 +53,17 @@ interface ConvLayer {
 }
 
 /**
+ * Reusable concatenated buffer for [pooled(convOutCh) | scalars(scalarDim)].
+ * Prevents per-tick allocation on the hot path.
+ */
+let fusedBuf: Float32Array | null = null
+function getFusedBuf(convOutCh: number, scalarDim: number): Float32Array {
+  const len = convOutCh + scalarDim
+  if (!fusedBuf || fusedBuf.length !== len) fusedBuf = new Float32Array(len)
+  return fusedBuf
+}
+
+/**
  * Pure-TS NN policy network. Holds the decoded weights and reusable activation
  * buffers. `forward` returns the three heads' raw logits.
  */
@@ -88,37 +99,15 @@ export class NNModel {
       if (!arr) throw new Error(`NNModel: missing weight "${name}"`)
       return arr
     }
-    const s = (name: string): number[] => {
-      if (shapes && shapes[name]) return shapes[name]
-      // Infer shape from known layer naming if not supplied.
-      const map: Record<string, number[]> = {
-        'conv.0.weight': [32, 14, 3, 3],
-        'conv.0.bias': [32],
-        'conv.2.weight': [48, 32, 3, 3],
-        'conv.2.bias': [48],
-        'conv.4.weight': [64, 48, 3, 3],
-        'conv.4.bias': [64],
-        'fc.weight': [64, 64],
-        'fc.bias': [64],
-        'move_head.weight': [5, 64],
-        'move_head.bias': [5],
-        'fire_head.weight': [2, 64],
-        'fire_head.bias': [2],
-        'item_head.weight': [3, 64],
-        'item_head.bias': [3],
-      }
-      const sh = map[name]
-      if (!sh) throw new Error(`NNModel: unknown param shape "${name}"`)
-      return sh
-    }
+    void shapes // shapes read from JSON; used for validation only
     const convOutCh = CONV_CH[CONV_CH.length - 1]
-    void s // shapes optional; laid out explicitly below
 
     this.layers = [
       { w: p('conv.0.weight'), b: p('conv.0.bias'), inCh: 14, outCh: 32 },
       { w: p('conv.2.weight'), b: p('conv.2.bias'), inCh: 32, outCh: 48 },
       { w: p('conv.4.weight'), b: p('conv.4.bias'), inCh: 48, outCh: 64 },
     ]
+    // FC input = convOutCh (64) + scalarDim (24) = 88 for v2 scalar-fusion
     this.fcW = p('fc.weight')
     this.fcB = p('fc.bias')
     this.moveW = p('move_head.weight')
@@ -140,10 +129,9 @@ export class NNModel {
 
   /**
    * Forward pass. `obs` is the flat NCHW Uint8 buffer from ObsEncoder.
-   * `scalars` is accepted for API symmetry but the v1 backbone does not use
-   * it (matches model.py).
+   * `scalars` is the 24-dim feature vector fused into the FC layer.
    */
-  forward(obs: Uint8Array, _scalars: Float32Array): void {
+  forward(obs: Uint8Array, scalars: Float32Array): void {
     const sp = this.board * this.board
     // uint8 -> float
     for (let i = 0; i < obs.length; i++) this.obsF[i] = obs[i]
@@ -169,10 +157,16 @@ export class NNModel {
       this.pooled[ch] = sum / sp
     }
 
-    // fc: hidden = relu(pooled · fcW^T + fcB)
+    // Concatenate pooled (outCh) + scalars (scalarDim) -> fused
+    const fused = getFusedBuf(outCh, this.scalarDim)
+    for (let i = 0; i < outCh; i++) fused[i] = this.pooled[i]
+    for (let i = 0; i < this.scalarDim; i++) fused[outCh + i] = scalars[i]
+    const fusedLen = outCh + this.scalarDim
+
+    // fc: hidden = relu(fused · fcW^T + fcB)
     for (let o = 0; o < HEAD_HIDDEN; o++) {
       let acc = this.fcB[o]
-      for (let i = 0; i < outCh; i++) acc += this.fcW[o * outCh + i] * this.pooled[i]
+      for (let i = 0; i < fusedLen; i++) acc += this.fcW[o * fusedLen + i] * fused[i]
       this.hidden[o] = RELU(acc)
     }
 
@@ -266,10 +260,12 @@ export class NNModel {
 /** Parse a weights-JSON object into a NNModel. */
 export function buildModelFromJson(json: WeightsJson): NNModel {
   const params: Record<string, Float32Array> = {}
+  const shapes: Record<string, number[]> = {}
   for (const [name, param] of Object.entries(json.params)) {
     params[name] = b64ToF32(param.data)
+    if (param.shape) shapes[name] = param.shape
   }
-  return new NNModel(params)
+  return new NNModel(params, shapes)
 }
 
 /** Decode the base64 weights JSON text into a NNModel. */

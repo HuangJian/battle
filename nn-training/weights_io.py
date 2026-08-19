@@ -69,11 +69,35 @@ def load_weights_json(path: str) -> tuple[Dict[str, Any], Dict[str, torch.Tensor
 
 
 def load_state_into(model: torch.nn.Module, path: str) -> None:
-    """Load exported weights into a matching NNPolicy instance."""
+    """Load exported weights into a matching NNPolicy instance.
+
+    Tolerates architecture changes (e.g. FC layer shape mismatch): when
+    ``load_state_dict`` raises on a shape mismatch, filter out the offending
+    keys and load what we can — the remaining params keep their random init.
+    This lets training continue from a new architecture without a manual
+    weights file rename.
+    """
     _meta, params = load_weights_json(path)
-    missing, unexpected = model.load_state_dict(params, strict=False)
-    if missing or unexpected:
-        print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")
+    try:
+        missing, unexpected = model.load_state_dict(params, strict=False)
+    except RuntimeError as e:
+        # Shape mismatch (e.g. FC layer changed): filter out mismatched keys
+        # and load everything else.
+        state = model.state_dict()
+        compatible = {}
+        skipped = []
+        for k, v in params.items():
+            if k in state and state[k].shape == v.shape:
+                compatible[k] = v
+            else:
+                skipped.append(k)
+        if skipped:
+            print(f"[weights] load_state_into: skipped (shape mismatch) {skipped}")
+        model.load_state_dict(compatible, strict=False)
+        print(f"[weights] load_state_into: loaded {len(compatible)}/{len(params)} params from {path}")
+    else:
+        if missing or unexpected:
+            print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")
     model.eval()
 
 
