@@ -49,9 +49,12 @@ os.environ.setdefault("MKL_NUM_THREADS", str(_TT))
 
 import argparse
 import atexit
+import glob
 import os
 import re
+import shutil
 import signal
+import subprocess
 import threading
 import time
 
@@ -299,6 +302,85 @@ def cleanup_lock(lock_path: str) -> None:
         pass
 
 
+# Repo root is one level above HERE (nn-training/).
+REPO_ROOT = os.path.dirname(HERE)
+NN_DEMO_DIR = os.path.join(REPO_ROOT, "nn-demo")
+EXPORT_SCRIPT = os.path.join(REPO_ROOT, "tools", "replay", "export-observations.ts")
+
+
+def auto_export_corpus(data_dir: str, log=None) -> int:
+    """Scan nn-demo/*.ndjson, export any new replays to *data_dir*.
+
+    Returns the number of NDJSON files that were (re-)exported.
+    Skips if nn-demo/ does not exist or contains no NDJSON files.
+    Uses ``--skip-verify`` because human-recorded replays were already
+    verified on first export; re-verification is redundant and slow.
+
+    The export script is idempotent: re-exporting the same NDJSON file
+    overwrites its shards with identical data.
+    """
+    ndjson_files = sorted(glob.glob(os.path.join(NN_DEMO_DIR, "*.ndjson")))
+    if not ndjson_files:
+        _emit("[export] no NDJSON files in nn-demo/ — skipping corpus export", log)
+        return 0
+
+    if not os.path.exists(EXPORT_SCRIPT):
+        _emit("[export] WARNING: export-observations.ts not found — skipping", log)
+        return 0
+
+    n = len(ndjson_files)
+    _emit(f"[export] exporting {n} NDJSON file(s) from nn-demo/ ...", log)
+    t0 = time.time()
+
+    # Find bun executable.  Pythonw.exe (no console) does not inherit the
+    # Git Bash PATH, so shutil.which() may fail.  Fall back to common
+    # Windows install locations.
+    bun_exe = shutil.which("bun")
+    if bun_exe is None:
+        # npm global install: %APPDATA%/npm/node_modules/bun/bin/bun.exe
+        appdata = os.environ.get("APPDATA", "")
+        candidate = os.path.join(appdata, "npm", "node_modules", "bun", "bin", "bun.exe")
+        if os.path.isfile(candidate):
+            bun_exe = candidate
+    if bun_exe is None:
+        _emit("[export] WARNING: 'bun' not found — skipping corpus export", log)
+        return 0
+
+    cmd = [
+        bun_exe, "tools/replay/export-observations.ts",
+        "--skip-verify",
+        "--out", data_dir,
+        *ndjson_files,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 min budget — 101 replays take ~9s
+        )
+        dt = time.time() - t0
+        # Print last few lines of output (summary)
+        lines = (result.stdout + result.stderr).strip().splitlines()
+        for line in lines[-5:]:
+            _emit(f"[export] {line}", log)
+        if result.returncode != 0:
+            _emit(f"[export] WARNING: export exited with code {result.returncode}", log)
+        else:
+            _emit(f"[export] done in {dt:.1f}s", log)
+        return n
+    except FileNotFoundError:
+        _emit("[export] WARNING: 'bun' not found on PATH — skipping", log)
+        return 0
+    except subprocess.TimeoutExpired:
+        _emit(f"[export] WARNING: export timed out after 300s — skipping", log)
+        return 0
+    except Exception as e:
+        _emit(f"[export] WARNING: {e!r} — skipping", log)
+        return 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Continuous multi-round BC training")
     ap.add_argument("--data-dir", default=DEFAULT_DATA)
@@ -317,6 +399,8 @@ def main() -> None:
                           "which hangs this training (workers fail to start); keep 0 on Windows.")
     ap.add_argument("--force", action="store_true",
                      help="Break any existing lock and start (for manual restart after a crash).")
+    ap.add_argument("--no-auto-export", action="store_true",
+                     help="Disable auto-export of new NN replay corpus before each round.")
     args = ap.parse_args()
 
     os.makedirs(args.weights_dir, exist_ok=True)
@@ -365,6 +449,12 @@ def main() -> None:
             state["round"] += 1
             if args.rounds and state["round"] > args.rounds:
                 break
+
+            # Auto-export: scan nn-demo/ for new NDJSON replays and export
+            # them to npy shards before training.  Takes ~9s for 101 replays.
+            if not getattr(args, 'no_auto_export', False):
+                auto_export_corpus(args.data_dir, log)
+
             prev = latest_weights(args.weights_dir)
             resume_arg = ["--resume", prev] if prev and os.path.exists(prev) else []
             note = f"round {state['round']}" + (f" resume {os.path.basename(prev)}" if resume_arg else " from-scratch")
