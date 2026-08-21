@@ -5,6 +5,44 @@
 
 ---
 
+## §2.2 启动器 Windows 本机验证：ps1 双 bug 修复（BOM + 参数风格兼容，2026-08-21）
+
+用 AGENTS.md 规定的幂等自检验证本机 torch 可用性：
+
+- bash 版 `bash nn-training/start-training.sh --check` ✅ 直接通过，
+  torch **2.7.1+cpu** @ `.venv/Scripts/python.exe`（OMP threads=12）。
+- PowerShell 版 `powershell ... start-training.ps1 -Check` ❌ 解析失败，两个独立 bug：
+
+1. **UTF-8 无 BOM → PS 5.1 按 GBK 解码**。本机无 pwsh 7，Windows PowerShell 5.1
+   对无 BOM 的 .ps1 一律按系统 ANSI 代码页（中文系统=cp936）解码，UTF-8 中文注释
+   字节被误读后破坏字符串引号配对，整个文件 ParserError。
+   **修复**：文件头加 UTF-8 BOM（`EF BB BF`，微软官方推荐做法，对 pwsh 无副作用）。
+2. **switch 只匹配 `'--check'`，`-Check` 落入透传**。`powershell -File` 调用时参数
+   按字面量进入 `$args`（不做原生参数绑定），`-Check` 无法命中 POSIX 风格分支，
+   被当未知参数转发给 train_loop.py → `unrecognized arguments: -Check`。
+   **修复**：CLI 解析改 `switch -Regex` + `'^--?name$'`，同时兼容 `-Check` 与
+   `--check`（PS switch 默认不区分大小写）；训练脚本参数均为 `--xxx` 长选项，
+   不会被误吞。
+
+**验证**：`-Check` / `--check` / `-Echo -Script train_bc.py --arch student` 全部
+exit=0 且正确消费/透传参数；`bun run check` 全绿（1429 pass / 0 fail）。
+
+**教训**：(a) 含非 ASCII 的 .ps1 必须带 BOM 才能跨 PS 5.1/pwsh 正确解析；
+(b) `-File` 调用无参数绑定，脚本内 CLI 解析必须自行兼容两种前缀风格；
+(c) Git Bash 终端显示 powershell.exe 的 GBK stdout 会乱码——那是终端显示问题，
+以退出码和 ASCII 行（venv/torch version）为准。
+
+**后续（同日）：VBS 启动器移除。** 删除 `launch-training.vbs` / `launch_rl.vbs`，
+`--detach` 改为原生 `Start-Process -WindowStyle Hidden`（ShellExecute 派生完全
+脱离控制台的进程，等价旧 VBS 行为，且规避 VBScript 被微软弃用的趋势）；bash 版
+detach 分支委托给 ps1（detach 行为单一定义，避免两处维护）。顺手修复
+`smoke_test.py` 的 arg-proxy 缺属性 bug（缺 `arch`/`notes`/`resume`，
+train_bc.train 2026-08-20 前后新增字段未同步），修复后端到端 PASS。
+验证：Start-Process 隐藏派生真实执行 smoke_test 并回传退出码；`-Check`/`--echo`
+干跑 exit=0；`bun run check` 全绿。
+
+---
+
 ## §2.1 移动死锁修复 + 0% 根因收敛（续 §2，2026-08-20）
 
 ### 关键修正：policy-input.ts 的 move-freeze 死锁（§2 评估 0% 的真正主因）
@@ -48,13 +86,15 @@ ready=true 时 `fireLogits[0] >> [1]`，fire 命中仅 3/477）。这与 §2 的
 |------|------|------|
 | 移动死锁修复 | `src/nn/policy-input.ts`（`lastDir` 持有语义） | ✅ 已落地，评估验证 |
 | DAgger 采集器（清理版） | `tools/sim/export-dagger-labels.ts` | ✅ smoke 2 局/330 样本通过 |
-| 正式 DAgger 采集 | `tmp/dagger/`（stages 0-4 × seeds 0-9，50 局） | 🔄 后台运行 (task mWkKzh) |
+| 正式 DAgger 采集 | `tmp/dagger/`（stages 0-4 × seeds 0-9，50 局） | ✅ 完成：19783 样本 / 163124 ticks，50 shards，obs `(N,14,26,26)` 与 godai 同构（godai 368M / dagger 182M） |
 | 混合重训 | `tmp/godai/` + `tmp/dagger/` → `train_bc.py --arch student` | ⏳ 需 torch 机（本机无 torch） |
 
 ### 下一步
 
-1. 等 `tmp/dagger/` 采集完成 → 混合 godai + dagger → `train_bc.py --arch student`
-   续训（resume 当前学生权重），目标把 fire 头在学生自部署状态上拉起。
+1. ✅ `tmp/dagger/` 已采集完成（19783 样本，50 shards）。下一步：混合
+   godai(368M) + dagger(182M) → `train_bc.py --arch student` 续训（--resume 当前
+   学生权重），目标把 fire 头在学生自部署状态上拉起。`--data-dir` 当前为单目录，
+   需先合并两目录或把该参数改为 `nargs='+'`。
 2. 重训后跑 `m1-eval --policy nn` 量化保留率；若仍不足，追加 DAgger 回合
    （学生新权重 + 更多 seeds/stages）。
 3. RL 教师落地后，同一管线直接复用（仅换 label 源）。

@@ -35,6 +35,14 @@
   .venv\Scripts\Activate.ps1
   pip install -r requirements.txt
   ```
+  > **推荐**：`torch` 只装在 `.venv`，系统裸 `python` 没有 torch。所有训练请
+  > 通过 `start-training.sh` 启动（它会自动建/复用 `.venv` 并装依赖）：
+  > ```bash
+  > bash nn-training/start-training.sh --check                 # 自检 torch 是否就绪并打印解释器
+  > bash nn-training/start-training.sh --script smoke_test.py  # 跑任意 nn-training/*.py
+  > bash nn-training/start-training.sh --script train_bc.py --data-dir tmp/mix --arch student ...
+  > ```
+
 
 ## 复现流程（corpus → npy → BC）
 

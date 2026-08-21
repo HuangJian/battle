@@ -262,10 +262,15 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 
 ### NEVER launch NN training by running `python` directly
 
-- Training **must** be started via `nn-training/start-training.sh` (or `bash nn-training/start-training.sh` from the repo root). This script handles venv setup, single-instance locking, and signal cleanup.
-- **Do not** run `python train_loop.py`, `python train_bc.py`, or any raw `python`/`python3` command to start training. Doing so bypasses the launch script's pre-flight checks and can spawn duplicate training processes that compete for the same lock file and weights.
+- Training **must** be started via the launch scripts: `nn-training/start-training.sh` for bash/Git-Bash (or `bash nn-training/start-training.sh` from the repo root), or `nn-training/start-training.ps1` for PowerShell (`powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1`). Both are fully equivalent and handle venv setup, single-instance locking, and signal cleanup.
+- **Do not** run `python train_loop.py`, `python train_bc.py`, or any raw `python`/`python3` command to start training. Doing so bypasses the launch scripts' pre-flight checks and can spawn duplicate training processes that compete for the same lock file and weights.
 - If training is already running, the launch script detects it and exits cleanly. If the lock is stale (crashed process), it is auto-cleaned. To force-restart after a crash, use `--force`: `./start-training.sh --force`.
-- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py`. The shell script never writes to it — this eliminates the shell-PID / Python-PID mismatch that caused double-spawn on Windows.
+- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py`. The shell scripts never write to it — this eliminates the shell-PID / Python-PID mismatch that caused double-spawn on Windows.
+- **torch 装在本机也不等于系统 python 能用它**：torch 只装在 `nn-training/.venv`（逐平台 venv），系统裸 `python` / `python3` **没有** torch（会报 `ModuleNotFoundError: torch`）。判定本机 torch 是否可用，**不要**跑 `python -c "import torch"`，用启动器幂等自检（bash 与 PowerShell 两个入口等价，任选其一）：
+  - bash：`bash nn-training/start-training.sh --check` —— 校验 venv+torch 就绪并打印唯一 torch 解释器绝对路径，返回 0 即证明本机可用。
+  - PowerShell：`powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Check` —— 同上。
+  - 打印将执行的准确命令（含 venv 解释器），不实际运行、可直接复制：bash `... --echo --script <name>.py [args]`；PowerShell `... -Echo -Script <name>.py [args]`。
+- 启动器不只是 `train_loop.py`：`--script <name>.py [args]`（PowerShell 用 `-Script`）可经过同一 venv 跑任意 `nn-training/*.py`（`train_bc.py --arch student`、`train_rl.py`、`smoke_test.py`、`eval_bridge.py` 等），从而让所有 torch 训练都走同一入口，避免 agent 绕过入口裸跑系统 python 撞"找不到 torch"。
 
 ### NN training progress must be recorded in `docs/nn.progress.md`
 

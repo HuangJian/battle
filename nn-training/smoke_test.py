@@ -93,6 +93,7 @@ def __arg_proxy(data_dir: str, out: str):
     a.data_dir = data_dir
     a.out = out
     a.checkpoint = None
+    a.arch = "bc"
     a.epochs = 12
     a.batch = 128
     a.lr = 3e-3
@@ -100,6 +101,8 @@ def __arg_proxy(data_dir: str, out: str):
     a.mirror_p = 0.5
     a.seed = 7
     a.num_workers = 0
+    a.notes = "smoke"
+    a.resume = None
     return a
 
 
