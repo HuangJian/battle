@@ -1,20 +1,27 @@
 /**
- * export-rl-rollout.ts — RL on-policy rollout collector (承接 P1.5 蒸馏 → RL).
+ * export-rl-rollout.ts — RL on-policy rollout collector (R3: v7-aligned reward).
  *
  * 复用 ObsEncoder + StudentModel(+value head) 驱动 headless 仿真，按决策 tick
  * (K=10) 跑随机策略采样 → 写出 trajectory shards 供 Python PPO 消费。
  *
- * 与 export-dagger-labels.ts 的区别：
- *   - 动作由「模型采样」(stochastic, 记录 logprob) 而非「教师标号」决定；
- *   - 额外记录 value(来自 value head)、reward(由 World 状态差分计算)、done；
- *   - 自定义 ScriptedInput 实现 InputLike，把采样动作施加到 World（持有门控
- *     与 BC 同节拍），None 动作语义沿用 policy-input 的「hold lastDir」。
+ * 奖励（R3，2026-08-21）：与评估口径 `tools/eval/godai-score.ts` v7 严格对齐——
+ *   Φ(s)   = SCALE × V7_LOSS_BAND_MAX × Q_partial(s)
+ *            （Q_partial：当前计数器下的 losses 带加权质量，权重重分配规则与
+ *             godai-score.weightedQuality 一致；无生存免费收益——苟活不产出）
+ *   r_t    = Φ(t) − Φ(t−1)                       （窗口势差，稠密信用分配）
+ *   终局项 = SCALE × scoreRun(final).score − (Φ_end − Φ_0)
+ *   ⇒ 每局总回报 ≡ SCALE × v7 score（恒等式），胜局经带切换自然放大
+ *     （V7: clear ≥ 0.70 vs loss ≤ 0.40）。
  *
- * 输出 shards（每局一个，npy + manifest），字段：
- *   obs (N,14,26,26) u1 | scalars (N,24) f4 | a_move/a_fire/a_item (N,) u1
- *   lp_move/lp_fire/lp_item (N,) f4 | value (N,) f4 | reward (N,) f4
- *   done (N,) u1 | mask (N,10) u1
- * 每个 transition 对应一个决策 tick 的 (s_t, a_t, logp_t, V_t, r_{t+1}, done_{t+1})。
+ * Telemetry 采集语义与 `simulation-runner.ts` 逐字段一致（采样节拍 6 tick、
+ * BASE_PRESSURE_RADIUS=12、powerup census 的 same-tick 对账、事件判据
+ * tank_destroyed/bullet_fired/powerup_collected），因此每局的维度指标与
+ * godai-score 对同一局打分完全可互换。
+ *
+ * 输出 shards（每局一个目录，npy + manifest）：
+ *   obs (N,14,26,26) u1 | scalars (N,24) f4 | a_x / lp_x / value/reward (N,) | done | mask (N,10)
+ * manifest 记录 outcome/ticks + score/quality + 全部 11 维 dims{value,raw}
+ * ——训练侧与事后分析可直接用同一套数字。
  *
  * Usage:
  *   bun tools/sim/export-rl-rollout.ts --weights tmp/rl-weights/weights.json \
@@ -25,7 +32,7 @@ import { Simulation } from '../../src/game/Simulation'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
-import { START_LIVES } from '../../src/constants'
+import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import {
   ObsEncoder,
@@ -35,6 +42,13 @@ import {
 import { buildModelFromText } from '../../src/nn/infer'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
+import {
+  scoreRun,
+  V7_SCORE_CONFIG,
+  DEFAULT_LOSS_WEIGHTS,
+  type DimensionKey,
+} from '../eval/godai-score'
+import type { RunTelemetry } from './simulation-runner'
 
 const MAX_TICKS = 36000
 const K = 10
@@ -43,13 +57,11 @@ const FIRE_DIM = 2
 const ITEM_DIM = 3
 const MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
 
-// ---- reward weights (CLI 可覆盖) ----
-let W_WIN = 5.0
-let W_KILL = 0.2
-let W_BASE = 1.0
-let W_SURV = 0.01
-let W_LOSE_BASE = -2.0
-let W_LOSE = -1.0
+// ---- R3 reward constants ----
+const REWARD_SCALE = 10 // 奖励尺度：每局总回报 ≡ REWARD_SCALE × v7 score
+// 与 simulation-runner 相同的 telemetry 节拍/半径（对齐的前提）
+const TELEMETRY_SAMPLE_TICKS = 6
+const BASE_PRESSURE_RADIUS = 12
 
 const MOVE_DECODE: Direction[] = ['up', 'down', 'left', 'right']
 
@@ -108,20 +120,91 @@ interface RolloutModel {
   readonly valueOut: Float32Array
 }
 
-interface Metrics {
-  enemies: number
-  baseHp: number
-  baseMax: number
-  state: string
+// ---- per-game telemetry（语义逐字段对齐 simulation-runner）----
+interface Telemetry {
+  enemyTotal: number
+  startLives: number
+  playerDeaths: number
+  playerShots: number
+  powerUpsSpawned: number
+  powerUpsCollected: number
+  starsCollected: number
+  baseWallTotal: number
+  baseWallIntact: number
+  basePressureSum: number
+  basePressureSamples: number
+  cellsVisited: Set<number>
+  firstKillTick: number | undefined
 }
 
-function snapshot(w: World): Metrics {
-  return {
-    enemies: w.enemiesRemaining,
-    baseHp: w.baseHp,
-    baseMax: w.baseMaxHp,
-    state: w.state,
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0
+  return x < 0 ? 0 : Math.min(x, 1)
+}
+
+function ramp(x: number, lo: number, hi: number): number {
+  if (hi === lo) return x >= hi ? 1 : 0
+  return clamp01((x - lo) / (hi - lo))
+}
+
+function countBaseWall(world: World): number {
+  // 与 runner 的 countBaseWall 同一环格定义（8 格保护圈，brick/steel 算完整）。
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  let n = 0
+  for (let col = bc - 1; col <= bc + 2; col++) {
+    if (isSolid(world, col, br - 1)) n++
   }
+  for (let row = br; row <= br + 1; row++) {
+    if (isSolid(world, bc - 1, row)) n++
+    if (isSolid(world, bc + 2, row)) n++
+  }
+  return n
+}
+
+function isSolid(world: World, col: number, row: number): boolean {
+  const t = world.tileMap.get(col, row)
+  return t === 'brick' || t === 'steel'
+}
+
+function sampleBasePressure(world: World): number {
+  if (!world.tileMap.hasBase()) return 0
+  let worst = 0
+  for (const t of world.tanks) {
+    if (!t.alive || t.spawnTimer > 0) continue
+    const col = Math.floor((t.x + t.w / 2) / CELL)
+    const row = Math.floor((t.y + t.h / 2) / CELL)
+    const dist = Math.abs(col - BASE_POS.col) + Math.abs(row - BASE_POS.row)
+    const p = 1 - dist / BASE_PRESSURE_RADIUS
+    if (p > worst) worst = p
+  }
+  return worst > 0 ? Math.min(1, worst) : 0
+}
+
+/** 当前计数器下的 losses 带部分质量（权重重分配规则镜像 weightedQuality）。 */
+function lossPartialQ(t: Telemetry, kills: number, lives: number, ticks: number, baseAlive: boolean): number {
+  const w = DEFAULT_LOSS_WEIGHTS
+  let acc = 0
+  let wsum = 0
+  const add = (key: DimensionKey, v: number | null): void => {
+    const weight = w[key]
+    if (v === null || weight === undefined || weight <= 0) return
+    acc += weight * v
+    wsum += weight
+  }
+  const minutes = ticks / 3600
+  add('progress', t.enemyTotal > 0 ? clamp01(kills / t.enemyTotal) : null)
+  add('lives', t.startLives > 0 ? clamp01(lives / t.startLives) : null)
+  add(
+    'baseIntegrity',
+    !baseAlive ? 0 : t.baseWallTotal > 0 ? 0.55 + 0.45 * clamp01(t.baseWallIntact / t.baseWallTotal) : null,
+  )
+  add('tempo', (w.tempo ?? 0) > 0 ? clamp01(minutes > 0 ? kills / minutes / (w.tempo as number) : 0) : null)
+  add('accuracy', t.playerShots > 0 && (w.accuracy ?? 0) > 0 ? clamp01(kills / t.playerShots / (w.accuracy ?? 0.3)) : null)
+  add('loot', t.powerUpsSpawned > 0 ? clamp01(t.powerUpsCollected / t.powerUpsSpawned) : null)
+  add('baseSafety', t.basePressureSamples > 0 ? clamp01(1 - t.basePressureSum / t.basePressureSamples) : null)
+  add('openingTempo', t.firstKillTick === undefined ? 0 : 1 - ramp(t.firstKillTick, 0, 1800))
+  return wsum > 0 ? acc / wsum : 0
 }
 
 // 轻量可复现 PRNG（mulberry32），避免依赖外部 RNG API 差异。
@@ -164,35 +247,6 @@ function sampleCat(
   return { idx: n - 1, logp: Math.log(ps[n - 1] + 1e-8) }
 }
 
-function rewardStep(prev: Metrics, cur: Metrics): number {
-  let r = W_SURV
-  r += W_KILL * Math.max(0, prev.enemies - cur.enemies)
-  const bPrev = prev.baseMax > 0 ? prev.baseHp / prev.baseMax : 1
-  const bCur = cur.baseMax > 0 ? cur.baseHp / cur.baseMax : 1
-  r += W_BASE * (bCur - bPrev)
-  return r
-}
-
-function terminalBonus(w: World): number {
-  if (w.state === 'stageclear' || w.state === 'victory') return W_WIN
-  if (w.state === 'gameover') return w.tileMap.isBaseDestroyed() ? W_LOSE_BASE : W_LOSE
-  return 0
-}
-
-interface Pending {
-  obs: Uint8Array
-  sc: Float32Array
-  aMove: number
-  aFire: number
-  aItem: number
-  lpMove: number
-  lpFire: number
-  lpItem: number
-  value: number
-  mask: number[]
-  prevMetrics: Metrics
-}
-
 interface ShardData {
   obs: Uint8Array[]
   scalars: Float32Array[]
@@ -232,6 +286,9 @@ interface RunResult {
   outcome: string
   ticks: number
   win: boolean
+  score: number
+  quality: number
+  dims: Record<string, { value: number | null; raw: number }>
 }
 
 function runOne(
@@ -259,13 +316,53 @@ function runOne(
   const encoder = new ObsEncoder()
   const shard = newShard()
   const rng = mulberry32((seed ^ 0x85ebca6b) >>> 0)
-  let pending: Pending | null = null
+
+  const tel: Telemetry = {
+    enemyTotal: (stage as any)?.enemyCount ?? ENEMIES_PER_STAGE,
+    startLives: world.difficulty?.startLives ?? START_LIVES,
+    playerDeaths: 0,
+    playerShots: 0,
+    powerUpsSpawned: 0,
+    powerUpsCollected: 0,
+    starsCollected: 0,
+    baseWallTotal: countBaseWall(world),
+    baseWallIntact: countBaseWall(world),
+    basePressureSum: 0,
+    basePressureSamples: 0,
+    cellsVisited: new Set<number>(),
+    firstKillTick: undefined,
+  }
+  const seenPuIds = new Set<number>()
+  let prevLivePuIds = new Set<number>()
+
+  let pending: {
+    obs: Uint8Array
+    sc: Float32Array
+    aMove: number
+    aFire: number
+    aItem: number
+    lpMove: number
+    lpFire: number
+    lpItem: number
+    value: number
+    mask: number[]
+  } | null = null
+  let phiPrev = 0 // 势基准：Φ_0 全额计入首窗，终局对账保证 Σr ≡ SCALE×score
+  let paidTotal = 0 // Σ 已支付势差
   let t = 0
   let outcome = 'timeout'
 
-  const finalizePending = (cur: Metrics, term: boolean): void => {
+  const countersPhi = (): number => {
+    tel.baseWallIntact = countBaseWall(world)
+    return (
+      REWARD_SCALE *
+      V7_SCORE_CONFIG.lossBandMax *
+      lossPartialQ(tel, world.killCount, world.lives, t, !world.tileMap.isBaseDestroyed())
+    )
+  }
+
+  const flushPending = (reward: number, term: boolean): void => {
     if (!pending) return
-    let r = rewardStep(pending.prevMetrics, cur) + terminalBonus(world)
     shard.obs.push(pending.obs)
     shard.scalars.push(pending.sc)
     shard.aMove.push(pending.aMove)
@@ -275,7 +372,7 @@ function runOne(
     shard.lpFire.push(pending.lpFire)
     shard.lpItem.push(pending.lpItem)
     shard.value.push(pending.value)
-    shard.reward.push(r)
+    shard.reward.push(reward)
     shard.done.push(term ? 1 : 0)
     for (let j = 0; j < MASK_DIM; j++) shard.mask.push(pending.mask[j])
     shard.n++
@@ -291,8 +388,17 @@ function runOne(
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
       const it = sampleCat(model.itemLogits, masks.item, rng)
       const value = model.valueOut[0]
-      const cur = snapshot(world)
-      if (pending) finalizePending(cur, world.state === 'stageclear' || world.state === 'victory' || world.state === 'gameover')
+
+      // 窗口势差结算：上一窗口的 Φ 变化记入其 reward。
+      // 注意：首个决策点无 pending 可收，只建立势基准，不入账。
+      const phiNow = countersPhi()
+      if (pending) {
+        const dq = phiNow - phiPrev
+        paidTotal += dq
+        flushPending(dq, false)
+      }
+      phiPrev = phiNow
+
       pending = {
         obs: encoder.obs.slice(),
         sc: encoder.scalars.slice(),
@@ -304,16 +410,53 @@ function runOne(
         lpItem: it.logp,
         value,
         mask: [...masks.move, ...masks.fire, ...masks.item],
-        prevMetrics: cur,
       }
       scripted.setAction(mv.idx, fr.idx, it.idx)
     }
     sim.tick()
     scripted.endFrame()
     t++
+
+    // ---- telemetry（语义对齐 simulation-runner）----
+    let collectedThisTick = 0
+    for (const e of world.consumeEvents()) {
+      if (e.type === 'tank_destroyed') {
+        if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
+        if ((e as any).tank?.isPlayer) tel.playerDeaths++
+      } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
+        tel.playerShots++
+      } else if (e.type === 'powerup_collected') {
+        collectedThisTick++
+        tel.powerUpsCollected++
+        if ((e as any).powerUp === 'star') tel.starsCollected++
+      }
+    }
+    // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
+    {
+      const live = new Set<number>()
+      for (const pu of world.powerUps) {
+        live.add(pu.id)
+        if (!seenPuIds.has(pu.id)) {
+          seenPuIds.add(pu.id)
+          tel.powerUpsSpawned++
+        }
+      }
+      let vanished = 0
+      for (const id of prevLivePuIds) if (!live.has(id)) vanished++
+      tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
+      prevLivePuIds = live
+    }
+    if (t % TELEMETRY_SAMPLE_TICKS === 0) {
+      tel.basePressureSum += sampleBasePressure(world)
+      tel.basePressureSamples++
+      if (world.player?.alive) {
+        const col = Math.floor((world.player.x + world.player.w / 2) / CELL)
+        const row = Math.floor((world.player.y + world.player.h / 2) / CELL)
+        visitedCellsAdd(tel.cellsVisited, col, row)
+      }
+    }
+
     if (world.state === 'stageclear' || world.state === 'victory' || world.state === 'gameover') {
-      const cur = snapshot(world)
-      finalizePending(cur, true)
       outcome =
         world.state === 'gameover'
           ? world.tileMap.isBaseDestroyed()
@@ -324,8 +467,53 @@ function runOne(
     }
   }
 
+  // ---- 终局统一处理（stageclear/gameover break 与 timeout 出口共用）----
+  // flush 最后一个 pending（含部分窗口势差，done=1），修复 §3.6(b) 样本丢失。
+  const phiEnd = countersPhi()
+  if (pending) {
+    const dqEnd = phiEnd - phiPrev
+    paidTotal += dqEnd
+    flushPending(dqEnd, true)
+  }
+
+  // ---- 精确 v7 打分 + 对账：Σr ≡ SCALE × score（恒等式）----
+  const scorable = {
+    outcome,
+    ticks: t,
+    finalState: { killCount: world.killCount, lives: world.lives, baseAlive: !world.tileMap.isBaseDestroyed() },
+    firstKillTick: tel.firstKillTick,
+    telemetry: {
+      enemyTotal: tel.enemyTotal,
+      startLives: tel.startLives,
+      playerDeaths: tel.playerDeaths,
+      playerShots: tel.playerShots,
+      powerUpsSpawned: tel.powerUpsSpawned,
+      powerUpsCollected: tel.powerUpsCollected,
+      starsCollected: tel.starsCollected,
+      finalPlayerLevel: world.playerLevel,
+      baseWallIntact: tel.baseWallIntact,
+      baseWallTotal: tel.baseWallTotal,
+      basePressureMean: tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
+      basePressureSamples: tel.basePressureSamples,
+      cellsVisited: tel.cellsVisited.size,
+      deaths: [],
+    } satisfies Omit<RunTelemetry, 'deaths'> & { deaths: never[] },
+  } as any
+  const scored = scoreRun(scorable, V7_SCORE_CONFIG)
+  if (shard.n > 0) {
+    shard.reward[shard.n - 1] += REWARD_SCALE * scored.score - paidTotal
+  }
+
   const win = outcome === 'stage_clear'
-  return { shard, outcome, ticks: t, win }
+  const dims: Record<string, { value: number | null; raw: number }> = {}
+  for (const k of Object.keys(scored.dims) as DimensionKey[]) {
+    dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
+  }
+  return { shard, outcome, ticks: t, win, score: scored.score, quality: scored.quality, dims }
+}
+
+function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
+  set.add(row * GRID + col)
 }
 
 function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
@@ -398,12 +586,6 @@ function main(): void {
     else if (args[i] === '--seeds') seedsStr = args[++i]
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
     else if (args[i] === '--weights') weightsPath = args[++i]
-    else if (args[i] === '--w-win') W_WIN = parseFloat(args[++i])
-    else if (args[i] === '--w-kill') W_KILL = parseFloat(args[++i])
-    else if (args[i] === '--w-base') W_BASE = parseFloat(args[++i])
-    else if (args[i] === '--w-surv') W_SURV = parseFloat(args[++i])
-    else if (args[i] === '--w-lose-base') W_LOSE_BASE = parseFloat(args[++i])
-    else if (args[i] === '--w-lose') W_LOSE = parseFloat(args[++i])
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -411,6 +593,8 @@ function main(): void {
   const weightsText = readFileSync(weightsPath, 'utf8')
 
   const outcomes: Record<string, number> = {}
+  const scores: number[] = []
+  const dimAcc: Record<string, number[]> = {}
   let totalSamples = 0
   let totalTicks = 0
   let wins = 0
@@ -423,34 +607,52 @@ function main(): void {
       continue
     }
     for (const seed of seeds) {
-      const { shard, outcome, ticks, win } = runOne(si, stage, seed, difficulty, maxTicks, weightsText)
-      outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
-      if (win) wins++
+      const res = runOne(si, stage, seed, difficulty, maxTicks, weightsText)
+      outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
+      if (res.win) wins++
+      scores.push(res.score)
+      for (const [k, v] of Object.entries(res.dims)) {
+        if (v.value !== null) (dimAcc[k] ??= []).push(v.value)
+      }
       const shardName = `rl_s${si}_seed${seed}`
       const manifest = {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
+        rewardScheme: 'v7-aligned',
         difficulty,
         stage: si,
         seed,
-        outcome,
-        ticks,
-        nSamples: shard.n,
+        outcome: res.outcome,
+        ticks: res.ticks,
+        nSamples: res.shard.n,
         k: K,
-        rewardWeights: { W_WIN, W_KILL, W_BASE, W_SURV, W_LOSE_BASE, W_LOSE },
+        score: res.score,
+        quality: res.quality,
+        dims: res.dims,
       }
-      if (shard.n > 0) writeRlShard(`${outDir}/${shardName}`, shard, manifest)
-      totalSamples += shard.n
-      totalTicks += ticks
-      perGame.push(`[OK] s${si} seed${seed} samples=${shard.n} outcome=${outcome} ticks=${ticks} win=${win}`)
+      if (res.shard.n > 0) writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+      totalSamples += res.shard.n
+      totalTicks += res.ticks
+      perGame.push(
+        `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,
+      )
     }
   }
 
   const total = seeds.length * stages.length
   const winRate = total > 0 ? wins / total : 0
+  const stat = (xs: number[]): { mean: number; std: number; min: number; max: number } | null => {
+    if (xs.length === 0) return null
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length
+    const std = xs.length > 1 ? Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1)) : 0
+    return { mean, std, min: Math.min(...xs), max: Math.max(...xs) }
+  }
+  const dimMeans: Record<string, number> = {}
+  for (const [k, xs] of Object.entries(dimAcc)) dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
+    rewardScheme: 'v7-aligned',
     difficulty,
     stages,
     seeds,
@@ -459,10 +661,17 @@ function main(): void {
     outcomes,
     totalSamples,
     totalTicks,
+    scoreStats: stat(scores),
+    dimMeans,
+    // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
+    scoreList: scores.map((x) => +x.toFixed(5)),
+    dimLists: Object.fromEntries(Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))])),
   }
   console.log(perGame.join('\n'))
-  console.log(`\n=== RL on-policy rollout (P1.5→RL) ===`)
+  console.log(`\n=== RL on-policy rollout (R3 v7-aligned) ===`)
   console.log(`games=${total} winRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`)
+  console.log(`score=${JSON.stringify(summary.scoreStats)}`)
+  console.log(`dims=${JSON.stringify(dimMeans)}`)
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks}`)
   console.log(`shards under: ${outDir}  (consume with ppo.py)`)
   writeFileSync(`${outDir}/_rl_report.json`, JSON.stringify(summary, null, 2))

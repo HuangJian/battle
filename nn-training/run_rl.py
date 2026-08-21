@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import torch
@@ -32,6 +33,14 @@ import ppo as ppo_mod
 from weights_io import load_state_into, save_weights_json
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+KL_WARN = 0.08        # calibrated to our setup: healthy steady state is 0.045-0.054
+ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
+
+
+def log(msg: str) -> None:
+    """Timestamped stdout line — the training log must be analyzable over time."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def parse_range(s: str) -> list[int]:
@@ -58,8 +67,9 @@ def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
     if not resume:
         save_weights_json(model, rl_path)
     print(
-        f"[run_rl] {'resume' if resume else 'init'} weights "
-        f"<- {src} "
+        f"[{time.strftime('%H:%M:%S')}] [run_rl] "
+        + ("resume" if resume else "init")
+        + f" weights <- {src} "
         f"(params={sum(int(p.numel()) for p in model.parameters())})"
         + ("" if resume else f" -> {rl_path}")
     )
@@ -112,36 +122,58 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         tail = (traj_dir / f"w{failed[0]}" / "rollout.log").read_text(encoding="utf-8")[-2000:]
         raise SystemExit(f"[run_rl] rollout worker(s) {failed} failed:\n{tail}")
 
-    combined = {"games": 0, "winRate": 0.0, "outcomes": {}, "totalSamples": 0, "totalTicks": 0}
+    reports = [r for _rc, r in results if r is not None]
+    combined = {"games": 0, "winRate": 0.0, "outcomes": {}, "totalSamples": 0, "totalTicks": 0,
+                "scoreList": [], "dimLists": {}}
     wins = 0
-    for _rc, r in results:
+    for r in reports:
         combined["games"] += r["games"]
         combined["totalSamples"] += r["totalSamples"]
         combined["totalTicks"] += r["totalTicks"]
-        for o, c in r["outcomes"].items():
+        for o, c in r.get("outcomes", {}).items():
             combined["outcomes"][o] = combined["outcomes"].get(o, 0) + c
-        wins += r["outcomes"].get("stage_clear", 0)
+            if o == "stage_clear":
+                wins += c
+        combined["scoreList"].extend(r.get("scoreList", []))
+        for k, vs in r.get("dimLists", {}).items():
+            combined["dimLists"].setdefault(k, []).extend(vs)
     combined["winRate"] = round(wins / combined["games"], 4) if combined["games"] else 0.0
+    sl = combined["scoreList"]
+    if sl:
+        n = len(sl)
+        mean = sum(sl) / n
+        var = sum((x - mean) ** 2 for x in sl) / max(1, n - 1)
+        combined["scoreStats"] = {"mean": round(mean, 4), "std": round(var ** 0.5, 4),
+                                  "min": round(min(sl), 4), "max": round(max(sl), 4)}
+    combined["dimMeans"] = {k: round(sum(v) / len(v), 4)
+                            for k, v in combined["dimLists"].items() if v}
     return combined
 
 
-def build_pairs(args, it: int, rng) -> list[tuple[int, int]]:
-    """Game pairs for iteration `it`. Rotate mode: a deterministic window of
-    --rotate-stages stages (full coverage every ceil(35/N) iterations) x fresh
-    random seeds drawn from a (seed, iter)-derived Generator — reproducible via
-    --seed, yet never replaying a previous iteration's configurations."""
+def build_pairs(args, it: int, rng, perm_state: dict) -> list[tuple[int, int]]:
+    """Game pairs for iteration `it`. Rotate mode: shuffled batches — a fresh
+    random permutation of all --total-stages stages is drawn once per epoch and
+    sliced into ceil(total/N) consecutive batches, so full coverage holds every
+    epoch while batch composition/order varies (immune to restart-position bias).
+    Seeds are fresh random draws; reproducible via --seed within one launch."""
     if args.rotate_stages <= 0:
         return [(si, sd) for si in parse_range(args.stages) for sd in parse_range(args.seeds)]
-    start = ((it - 1) * args.rotate_stages) % args.total_stages
-    window = [(start + j) % args.total_stages for j in range(args.rotate_stages)]
-    draw = rng.integers(1, 2 ** 30, size=args.rotate_stages * args.seeds_per_stage)
+    k = args.rotate_stages
+    per_epoch = -(-args.total_stages // k)
+    pos = (it - 1) % per_epoch
+    if pos == 0 or "perm" not in perm_state:
+        perm_state["perm"] = list(rng.permutation(args.total_stages))
+        print(f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: new epoch — permutation "
+              f"{perm_state['perm']} split into {per_epoch} batches")
+    window = [int(s) for s in perm_state["perm"][pos * k:(pos + 1) * k]]
+    draw = rng.integers(1, 2 ** 30, size=len(window) * args.seeds_per_stage)
     pairs = [
-        (stage, int(draw[k * args.seeds_per_stage + j]))
-        for k, stage in enumerate(window)
+        (stage, int(draw[i * args.seeds_per_stage + j]))
+        for i, stage in enumerate(window)
         for j in range(args.seeds_per_stage)
     ]
-    print(f"[run_rl] rotate: stages {window[0]}-{window[-1]} "
-          f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
+    print(f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: batch {pos + 1}/{per_epoch} "
+          f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
     return pairs
 
 
@@ -152,7 +184,8 @@ def main() -> None:
     ap.add_argument("--out", default="tmp/rl-weights/weights.json",
                     help="RL weights path (written every iteration; also the resume source)")
     ap.add_argument("--traj", default="tmp/rl-traj", help="trajectory root dir")
-    ap.add_argument("--iters", type=int, default=15)
+    ap.add_argument("--iters", type=int, default=15,
+                    help="iterations to run; 0 = infinite (stop via --max-hours or Ctrl-C)")
     ap.add_argument("--stages", default="0-3", help="explicit stage range (ignored in rotate mode)")
     ap.add_argument("--seeds", default="0-3", help="explicit seed range (ignored in rotate mode)")
     ap.add_argument("--rotate-stages", type=int, default=0,
@@ -173,12 +206,19 @@ def main() -> None:
                          "(faster PPO, smaller per-iteration KL drift)")
     ap.add_argument("--lr", type=float, default=ppo_mod.LR)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--max-hours", type=float, default=0.0,
+                    help="wall-clock budget in hours; checked between iterations; 0 = unlimited")
+    ap.add_argument("--keep-iters", type=int, default=3,
+                    help="keep only the last N trajectory dirs (disk bound); 0 = keep all")
     args = ap.parse_args()
 
     import numpy as np
 
     np.random.seed(args.seed)
-    rotate_rng = np.random.default_rng(args.seed * 1009 + 1)  # advanced per iteration below
+    # 启动时刻抖动：每次 relaunch 得到不同的关卡置换序列，避免重启重放同一课程
+    rotate_seed = (args.seed * 1009 + 1 + int(time.time())) % (2 ** 32)
+    rotate_rng = np.random.default_rng(rotate_seed)  # advanced per iteration below
+    perm_state: dict = {}
 
     bun = shutil.which("bun")
     if bun is None:
@@ -191,37 +231,111 @@ def main() -> None:
 
     traj_root = Path(args.traj)
     traj_root.mkdir(parents=True, exist_ok=True)
+    jsonl_path = traj_root / "training_log.jsonl"
 
-    print(f"[run_rl] iters={args.iters} "
-          + (f"rotate={args.rotate_stages}stages x{args.seeds_per_stage}seeds "
-             f"of {args.total_stages}" if args.rotate_stages > 0
-             else f"stages={args.stages} seeds={args.seeds}")
-          + f" maxTicks={args.max_ticks} epochs={args.epochs} mb={args.mb} lr={args.lr} "
-          f"workers={args.workers}")
+    with open(jsonl_path, "a", encoding="utf-8") as jsonl_f:
+        jsonl_f.write(json.dumps({
+            "event": "run_start", "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "args": {k: v for k, v in vars(args).items()},
+            "rotateSeed": rotate_seed,
+        }) + "\n")
 
-    for it in range(1, args.iters + 1):
+    log(f"[run_rl] iters={'infinite' if args.iters <= 0 else args.iters}"
+        + (f" (max-hours={args.max_hours})" if args.max_hours > 0 else "")
+        + " "
+        + (f"rotate=shuffled {args.rotate_stages}-stage batches x{args.seeds_per_stage}seeds "
+           f"of {args.total_stages} (full coverage every "
+           f"{-(-args.total_stages // args.rotate_stages)} iters)" if args.rotate_stages > 0
+           else f"stages={args.stages} seeds={args.seeds}")
+        + f" maxTicks={args.max_ticks} epochs={args.epochs} mb={args.mb} lr={args.lr} "
+        f"workers={args.workers} keepIters={args.keep_iters}")
+    log(f"training_log: {jsonl_path}")
+
+    deadline = time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
+    total = "∞" if args.iters <= 0 else str(args.iters)
+    prev_entropy = None
+    consec_fail = 0
+    it = 0
+    while args.iters <= 0 or it < args.iters:
+        it += 1
+        if deadline is not None and time.time() >= deadline:
+            log(f"[run_rl] max-hours={args.max_hours} reached — stopping before it{it}")
+            break
         traj_dir = traj_root / f"it{it}"
-        if traj_dir.exists():
-            shutil.rmtree(traj_dir)
-        traj_dir.mkdir(parents=True)
+        try:
+            if traj_dir.exists():
+                shutil.rmtree(traj_dir)
+            traj_dir.mkdir(parents=True)
 
-        print(f"[run_rl] === iteration {it}/{args.iters} ===")
-        pairs = build_pairs(args, it, rotate_rng)
-        report = run_rollout(bun, args.out, traj_dir, pairs, args)
-        print(f"[run_rl] rollout it{it}: games={report['games']} winRate={report['winRate']} "
-              f"outcomes={json.dumps(report['outcomes'])} "
-              f"samples={report['totalSamples']} ticks={report['totalTicks']}")
+            log(f"[run_rl] === iteration {it}/{total} ===")
+            pairs = build_pairs(args, it, rotate_rng, perm_state)
+            report = run_rollout(bun, args.out, traj_dir, pairs, args)
+            log(f"[run_rl] rollout it{it}: games={report['games']} winRate={report['winRate']} "
+                f"outcomes={json.dumps(report['outcomes'])} "
+                f"samples={report['totalSamples']} ticks={report['totalTicks']}")
+            if "scoreStats" in report:
+                ss = report["scoreStats"]
+                log(f"[run_rl] score it{it}: mean={ss['mean']:.4f} std={ss['std']:.4f} "
+                    f"min={ss['min']:.4f} max={ss['max']:.4f}")
+            if "dimMeans" in report:
+                log(f"[run_rl] dims it{it}: {json.dumps(report['dimMeans'])}")
 
-        episodes = ppo_mod.load_episodes(str(traj_dir))
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
-        chunks = ppo_mod.chunk_episodes(episodes, args.mb)
-        agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, device)
-        save_weights_json(model, args.out)
-        print(f"[run_rl] ppo it{it}: steps={total_steps} chunks={len(chunks)} "
-              f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
-              f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} -> {args.out}")
+            episodes = ppo_mod.load_episodes(str(traj_dir))
+            total_steps = sum(e["obs"].shape[0] for e in episodes)
+            chunks = ppo_mod.chunk_episodes(episodes, args.mb)
+            agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, device)
+            save_weights_json(model, args.out)
+            log(f"[run_rl] ppo it{it}: steps={total_steps} chunks={len(chunks)} "
+                f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
+                f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} -> {args.out}")
 
-    print(f"[run_rl] ALL DONE -> {args.out}")
+            with open(jsonl_path, "a", encoding="utf-8") as jsonl_f:
+                jsonl_f.write(json.dumps({
+                    "event": "iteration", "iter": it,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "winRate": report["winRate"], "outcomes": report["outcomes"],
+                    "score_mean": report.get("scoreStats", {}).get("mean"),
+                    "score_std": report.get("scoreStats", {}).get("std"),
+                    "dim_means": report.get("dimMeans", {}),
+                    "samples": report["totalSamples"], "ticks": report["totalTicks"],
+                    "steps": total_steps, "chunks": len(chunks),
+                    "policy": agg["policy"], "value": agg["value"],
+                    "entropy": agg["entropy"], "kl": agg["kl"],
+                    "mean_ret": agg["mean_ret"], "lr": args.lr,
+                    "mb": args.mb, "epochs": args.epochs,
+                }) + "\n")
+
+            if agg["kl"] > KL_WARN:
+                log(f"[run_rl] WARNING kl={agg['kl']:.3f} > {KL_WARN} — policy drifting fast; "
+                    f"consider lower lr/epochs")
+            if prev_entropy is not None and prev_entropy - agg["entropy"] > ENT_COLLAPSE_DROP:
+                log(f"[run_rl] WARNING entropy dropped {prev_entropy - agg['entropy']:.3f} in one "
+                    f"iteration (now {agg['entropy']:.3f}) — possible premature convergence")
+            prev_entropy = agg["entropy"]
+
+            if args.keep_iters > 0:
+                for old in traj_root.glob("it*"):
+                    try:
+                        n_old = int(old.name[2:])
+                    except ValueError:
+                        continue
+                    if n_old <= it - args.keep_iters:
+                        shutil.rmtree(old, ignore_errors=True)
+            consec_fail = 0
+        except SystemExit as e:
+            consec_fail += 1
+            log(f"[run_rl] it{it} FAILED (SystemExit: {e}); consecutive={consec_fail}/5")
+            if consec_fail >= 5:
+                raise
+            time.sleep(30)
+        except Exception as e:
+            consec_fail += 1
+            log(f"[run_rl] it{it} FAILED ({type(e).__name__}: {e}); consecutive={consec_fail}/5")
+            if consec_fail >= 5:
+                raise
+            time.sleep(30)
+
+    print(f"[{time.strftime('%H:%M:%S')}] [run_rl] ALL DONE -> {args.out}")
 
 
 if __name__ == "__main__":

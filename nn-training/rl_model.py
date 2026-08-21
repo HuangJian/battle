@@ -1,6 +1,11 @@
 """
 RL Actor-Critic network — ResNet backbone + scalar fusion + dual heads.
 
+STATUS (2026-08-21): NOT used by the live RL pipeline (run_rl.py → ppo.py →
+PPOStudent). Kept as the teacher-model reference for the P1 phase
+(teacher RL → distill to BN-free student, see plan/RL-Net-Selection.md §4).
+Do not wire into the student pipeline without updating that plan.
+
 Architecture:
   obs(14×26×26) → ConvIn(14→64) → 11×ResBlock(64) → ConvOut(64→128) → GAP
   scalars(24) → FC(24→64)

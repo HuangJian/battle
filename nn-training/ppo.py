@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import time
 from typing import Any, Dict
 
 import numpy as np
@@ -52,6 +53,11 @@ LR = 3e-4
 MAX_GRAD_NORM = 1.0
 MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
 
+
+
+def log(msg: str) -> None:
+    """Timestamped log line (matches run_rl.log format)."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def build_ppo(weights_path: str | None) -> PPOStudent:
     h = d = head_hidden = None
@@ -131,7 +137,7 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
     shards = discover_rl_shards(data_root)
     if not shards:
         raise SystemExit(f"[ppo] no RL shards found under {data_root}")
-    print(f"[ppo] loaded {len(shards)} trajectory shards from {data_root}")
+    log(f"[ppo] loaded {len(shards)} trajectory shards from {data_root}")
 
     episodes: list[dict] = []
     for sd in shards:
@@ -290,8 +296,8 @@ def main():
 
         load_state_into(model, args.init_from)
         save_weights_json(model, args.out)
-        print(f"[ppo] init RL weights (BC policy + random value) -> {args.out}")
-        print(f"[ppo] params={sum(int(p.numel()) for p in model.parameters())}")
+        log(f"[ppo] init RL weights (BC policy + random value) -> {args.out}")
+        log(f"[ppo] params={sum(int(p.numel()) for p in model.parameters())}")
         return
 
     # ---- update mode ----
@@ -304,17 +310,17 @@ def main():
 
     episodes = load_episodes(args.data, args.gamma, args.lam)
     total_steps = sum(e["obs"].shape[0] for e in episodes)
-    print(f"[ppo] total transition steps={total_steps}")
+    log(f"[ppo] total transition steps={total_steps}")
 
     chunks = chunk_episodes(episodes, args.mb)
-    print(f"[ppo] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
+    log(f"[ppo] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     agg = ppo_update(model, opt, chunks, args.epochs, device)
 
     model.to("cpu")
     save_weights_json(model, args.out)
-    print(
+    log(
         f"[ppo] update done epochs={args.epochs} "
         f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
         f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} "

@@ -75,6 +75,85 @@ roundtrip: 用更新后权重再 rollout → TS 加载含训练后 value head �
 (c) 奖励权重初值（W_WIN=5/W_KILL=0.2/W_BASE=1.0/W_SURV=0.01）按 §3.3 待首轮 reward
 曲线监控后定稿。
 
+### 3.13 R3 实施：奖励与 godai-score v7 全面对齐 + 维度遥测（2026-08-21）
+
+**动机（击杀趋势诊断，`tmp/kills_trend.py`）**：旧奖励下击杀数 11 轮无增长
+（2.4–3.9 波动；标量法与奖励分解法交叉验证一致）。根因：存活流收益
+(W_SURV=0.01×~340 步 ≈ 3.4/局) ≫ 击杀收益 (W_KILL=0.2×3 杀 = 0.6/局)，
+策略理性选择苟活。候选 R1/R2/R3/C1 中用户拍板 R3。
+
+**R3 设计**（export-rl-rollout.ts 整体重写）：
+- 势函数 Φ(s) = SCALE(10) × lossBandMax(0.4) × Q_partial(s)；Q_partial 按
+  DEFAULT_LOSS_WEIGHTS 复刻 weightedQuality 的 null-剔除重分配。
+- 支付：决策窗势差 r_t = Φ(t)−Φ(t−1)，终局对账 `extra = SCALE×score − paidTotal`
+  ⇒ **每局 Σr ≡ SCALE×score 精确恒等**（胜局经带切换自然放大 0.70 vs 0.40）。
+- 苟活零收益（v7 无 survival 维）——结构性修复 reward hacking。
+- Telemetry 逐字段对齐 simulation-runner（SAMPLE_TICKS=6/RADIUS=12/RING 8 格/
+  事件计数/powerup census same-tick 对账），dims{value,raw} 全量进 manifest 与
+  _rl_report → run_rl 聚合 → training_log.jsonl（score_mean/std + dim_means）。
+
+**实现坑**（均已修）：块注释内 `a_*/lp_*` 提前闭合注释；首决策点 pending=null
+时 paidTotal 已入账但 flushPending 空转 → 恒等式差 Φ_0（冒烟抓到，−1.80 精确
+吻合）；timeout 局 done=0 样本丢失改为统一终局 flush。
+
+**验证**：timeout 6 局 + base_destroyed 6 局恒等式 max|diff|≈1e-7；正式训练
+it8 全部 50 shards 恒等成立（2.2e-07）。分数随行为合理分化（10 杀局 0.194 vs
+速死局 0.117）。
+
+**R3 首轮观察（it1–it8）**：行为画像剧变——局均 ticks 7000+→3300–4100、timeout
+近消失、出门交战捡道具；但 score 平坦 0.10–0.12、击杀未涨。KL 0.036–0.064 偏高
+但未触警；entropy 震荡无坍缩。判定：激励结构生效、梯度尚未爬上——待 14h 长跑。
+
+**长跑基建（run_rl.py）**：`--iters 0` 无限 + `--max-hours` 墙钟预算；
+`--keep-iters 3` 轨迹磁盘上限（~170MB/iter，不清盘 14h 写满磁盘）；连续失败
+5 次重试（30s 退隔）防瞬时故障中止。rotate 模式改**随机分批**（每 epoch 全
+35 关随机置换切 7 批）——修固定窗口在续训迭代号归零导致的 stages 0-4 过采样；
+再升级为 **35 关×2 种子=70 局/iter**（中断免疫 + 每轮全分布指标，代价迭代
+8.4→13–16min）。rotate 种子掺启动时刻防课程重放（记入 run_start.rotateSeed）。
+顺手修 wins 计数从未自增的潜伏 bug（历史 winRate 恒 0 掩盖）。
+
+### 3.12 决策：不做 rollout/PPO 流水线，瓶颈转向 PPO 自身（2026-08-21）
+
+用户问「下一轮 rollout 能否与上一轮 PPO 并行」。实测相位（it7–it9）：rollout
+~2.5min / PPO ~5.8min（**PPO 占 70%，瓶颈已换位**）。
+
+**结论：严格 on-policy 下不能。** 依赖链 `rollout(i+1) ← W_i ← PPO(i)` 是算法语义：
+数据必须来自被优化策略本身，提前采集 = off-policy 数据，importance ratio 系统性偏移。
+推演过的变体：
+- **A. 有界陈旧性**：允许落后一个更新的权重（KL≈0.05 下近似成立），省 ~30%，
+  但训练语义改变、与严格基线不可比 → **否决（本轮）**
+- **G. 分波流水线**：权重整窗冻结、两波游戏交错 SGD，on-policy 性质保留，
+  但收益仅 ~15%（相位不等长限制重叠窗口）→ 复杂度/收益不成比例，**否决**
+- **H. epochs 3→2**：PPO 内部直接砍 ~2min/轮（KL 0.045 说明更新有富余）→
+  **留作下轮规模决策时的首选提速杠杆**，当前验证跑不动
+
+另清理 `tmp/rl-traj/it10–14` 陈旧目录（旧运行残留；判定用 `find -newermt`，
+字符串比较 `%T+` 的 `+` 字符会破坏排序——第一版检查因此全误判 LIVE）。
+
+---
+
+### 3.11 评审处置：rl-mimo.review.md 确认项全部落地（2026-08-21）
+
+外部评审（`rl-mimo.review.md`）逐条核实后处置。**采纳并落地**：
+- **Q1 死代码**：删除 `rl_env.py`（np.random mock 桩）/ `rl_ppo.py`（未接线的 PPO 类）/
+  `train_rl.py`（无入口调用）；`rl_model.py` 保留加 STATUS 注释（P1 教师模型参考）；
+  `eval_bridge.py` 经核实**非死代码**（BC 管线工具，AGENTS/README/启动器引用），保留。
+- **Q4 监控**：`run_rl.py` 每轮追加 `training_log.jsonl`（run_start 元行 + per-iter
+  winRate/outcomes/samples/policy/value/entropy/kl/lr/mb/epochs）+ KL 预警（阈值 0.08，
+  按实测稳态 0.045–0.054 校准；评审建议的 0.02 会永久误报）+ entropy 单轮骤降 >0.1 预警。
+- **时间戳**：run_rl.py / ppo.py 全部日志行加 `[HH:MM:SS]` 前缀（此前无法事后分析节奏）。
+- **计划偏差回填**：`plan/RL-Bun-Bridge.md` 顶部加状态横幅指向实际 npy shard 架构。
+
+**证伪的评审主张**（留档防复发）：Q5 参数数字全过期且 epochs=8 与 KL 实测矛盾；
+Q6 break 路径 flush 已存在；Q8 torch/bun「竞争」不存在（两阶段严格串行）；
+3.1 语法错误不存在（py_compile 通过）；3.4 rotate_rng 实为可复现。
+
+**顺延项**：(a) Q2 的 `export-rl-rollout.ts` 权重注释——活体训练每局重新 spawn 该文件，
+本轮跑完前禁改；(b) Q3/S4 reward 归一化、Q7 value warmup、S2 v7 对齐——等首轮完整曲线，
+当前 advantage 归一化已兜底、曲线健康；(c) S1 复用 train_loop 日志框架——P2。
+
+---
+
 ### 3.10 PPO 提速排查：安全杠杆无效，mb 翻倍是正解（2026-08-21）
 
 用户要求 PPO 提速。独立进程基准（90→16 chunks，4 配置 × 2 轮）结论：
