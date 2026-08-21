@@ -1521,4 +1521,81 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 **Implications:** 新录制 .replay 文件均携带哈希链（5.9KB 级单文件增量可忽略）；旧文件
 校验走「null×终态」回退，逐字节输出不变。后继：coop（frames2）链、阶段切换跨链校验、
 `--explain-hash` 差异字段级反查工具可在此基础上扩展。
+
+## 242. 否决 RL-WASM-Bridge（B3），改走 A'（bun 持久进程桥）(STATUS: 已决议)
+
+**Decision:** 不执行 `plan/RL-WASM-Bridge.md` 的 WASM-into-Python 方案（B3）。RL 训练环境
+改用 **A'：复用现有 `tools/sim/sim-worker.ts` 持久 bun worker 池，Python↔bun 走 stdio JSON
+一步一 step 接口**，零引擎改动，确定性直接继承现有测试。WASM 仅在 A' 实测成为瓶颈时再议。
+
+**Rationale:**
+- **subprocess 被做成稻草人，WASM 解决非瓶颈。** 仓库已有持久 bun 进程池（God-AI 全扫
+  8,400 局 4 分钟 = ~15 万 ticks/s）。RL 采样瓶颈是 torch 前向（52K–999K 参数），非 env；
+  真实引擎单核 ~2 万 ticks/s、obs 编码 ~30μs，env 速度远非约束，「≥50 sps」不构成选型依据。
+- **移植范围低估 ~10×。** 移植真实引擎需 `src/ai`(20,785) + `src/game`(7,734) +
+  `src/nn`(1,026) + `src/config`(2,491) ≈ **32K 行**，计划只列 2 个文件。且 obs 编码器
+  （`obs-encoder.ts:39` → `god/ThreatBudget` → `config/combat`）把 god AI 派生链拉进移植范围；
+  `SimulationCore.ts:9` 的 `new (...args: any[]) => T` 构造类型 + 6 层 mixin 链 **AS 不支持**
+  → 是跨语言移植非 "minor adaptations"，改完不再是"同一份源码"，零漂移优势自毁，每次引擎
+  改动须重跑 WASM 对比。
+- **Emscripten 回退自相矛盾。** "100% 兼容" 的 B 路径 = WASM 内跑 QuickJS，比 V8 慢 5-10×，
+  击穿 50 sps；而 60% 失败概率（自估）的 AS 主路径失败后总工期翻倍，timeline 无此预算。
+- **env 契约 + 零拷贝坑。** `env_is_done` 漏 stageclear / outcome 四态 / timeout；reward 增量
+  需 prev 跟踪未设计；`:113` 直接返回 `np.frombuffer().reshape` 致 PPO rollout 跨数千步持有
+  时被 WASM 内存覆盖 → 训练数据静默污染。
+- **整个 RL 栈从未跑过真实游戏。** `rl_env.py` 的 `_start_simulation`/`_execute_step` 返回
+  `np.random` 假数据（:183-227），计划时间表建立在虚数据上。
+
+**Implications:** B3 标记为否决（保留文件作反面案例，不删除）。A' 落地须先补齐真实 rl_env 契约
+（outcome 四态 + prev 值跟踪 + timeout），并**同步修模型架构**（增大容量 / 扩大感受野）——
+后者是 `docs/nn.progress.md` §1 指明的真正瓶颈，与选型无关。NN 训练方向由 BC 转 RL 本身正确
+（val_loss 是差的游戏性能代理，分布偏移 + 7×7 感受野是天花板）。
+> 评审全文 → plan/RL-WASM-Bridge.review.md
+> 执行计划 → plan/RL-Bun-Bridge.md（A'：bun 持久进程桥，~2 天桥接 + 确定性验证；v2 已落实评审全部 P0/P1/P2 修订）
 > 全文 → plan/Replay-TickHash-Chain.md + plan/tickhash.review.md（4 轮评审闭环）
+
+**附录（2026-08-20 评审驱动修订）：动作空间取舍 + 权重定稿**
+- **砍掉 rewind（item=3）→ 动作空间 30（move5×fire2×item3）。** 依据：`SimulationPlayer.ts:172`
+  仅置 `w.rewindPending=true`，恢复逻辑在浏览器 `Game.ts`+`RecoveryController`，headless 桥里 rewind
+  是死动作（吞 rewindStock 零效果）。砍掉后与 `rl_model.py:25 ITEM_DIM=3` + `train_rl.py:85` 解码
+  `move+fire*5+item*10`（最大 29）**完全对齐，零模型改动**（原 40 动作 + ITEM_DIM=4 的模型改动需求自动消解）。
+- **RewardShaper 忠实移植 v7×10 权重（修正 rl_env.py 原符号 bug）：** KILL 4.77、DEATH 2.56、
+  BASE_WALL 1.70、GROWTH 0.60、FIRST_KILL 0.18、CLEAR 100、BASE_DESTROYED -100、LIVES_EXHAUSTED -50；
+  原 rl_env `lives_delta<0 → *REWARD_DEATH(负)` 得正奖励（死命反而得正奖励），TS 版修正为
+  **正权重配负 delta**（死命/掉墙 → 负奖励）。BASE_PRESSURE(-0.44) 在原 `_compute_reward` 未使用，省略；
+  TIMEOUT -1.0 为计划新增（v7 未定义）。权重首轮训练后定稿（沿用 B3 §8 约定）。
+- **P0 阻断 bug 全部修：** `world.gameOver`→`world.state==='gameover'`；`world.totalKills`→`world.killCount`；
+  `step()` 补 `input.endFrame()`；`done` 返回同构消息非 `null`；`reset` 回传初始观测；`train_rl.py`
+  `reset()` 调用点（evaluate:69 / main:185）补参，`rl_ppo.py` 内部 `self.reset()` 不调 env 无需改。
+  P3 确定性验收改为桥自洽双跑（同种子+同脚本→逐位一致），跨引擎 A/B 待 `simulation-runner` 支持脚本输入后再议。
+- **修订全文 → plan/RL-Bun-Bridge.md（含 §10 评审驱动修订清单，无遗留阻断项）。**
+
+**附录（2026-08-20 二次审查 v3 修订）：RL 网络选型算力账校准**
+- **BC 基准修正（model.py 头部注释过时）**：实测 BC `model.py` = conv_ch(32,48,64) → **52.0K 参数 / 30.8M MAdds**（7×7 RF 不变）；原计划误用 112K/65M（错引头部注释 + 误用 (32,64,128) 通道）。
+- **吞吐基准一致性修正（审查最重要发现）**：原 §2.3 两行差 30–100× MAC/s 基准（教师行隐含 150–300M、学生行隐含 9–28G，后者是 WASM-SIMD 量级）。统一朴素 TS ~150–300M MAC/s（佐证：当前 BC 30.8M 已在浏览器每 10 tick 运行，反推 infer.ts ≳200M）。修正后：**纯 TS 下无任何模型满足 K=1**；无注意力学生 37M 桌面 K=10 仅边缘可行（123–247ms，需 Worker 卸载）。
+- **甜点降级**：CoordConv-ConvMixer-Lite **无注意力 37M/69K** 为首选；+注意力 95.5M（注意力 58.5M，原 92M 漏计 ~3.5M）降为兜底档；补空洞 3×3(dilation=13, +0.39M) 中间档。
+- **K=1 否决**：纯 TS 单步 ≥123ms ≫ 16.6ms 且对 hold 语义动作无游戏价值 → 锁 K=10。
+- **Worker 部署为硬要求**：`think()` 同步阻塞（policy-input.ts:146）→ 推理移 Web Worker + 双缓冲，否则掉帧。
+- **O3 表述修正**：学生 69K > BC 52K，故「学生小于 BC」不成立；O3 优势是 vs 教师 950K（1/13）。
+- **蒸馏假设标注**：教师高胜率 + 90% 保留率均为**假设非实证**（BC 教训 val_loss↓8.4% 胜率不变 → 分布拟合≠轨迹胜率）；改推 **DAgger 在线蒸馏**直击分布迁移根因；保留率须 P1–P3 实证。
+- **编码器成本口径**：ObsEncoder.encode 每决策 tick 运行（逐敌 killAssessment/enemyDeadline，God-AI 级），真实 ~数万 ops 占前向 <1%（审查称「同量级」夸大），但所有模型共有、须计入绝对能耗与 K=1 预算，建议稀疏更新。
+- **全文 v3 → plan/RL-Net-Selection.md；RL-Bun-Bridge.md §6.1 同步修正。**
+
+**附录（2026-08-20 三次审查 v4 修订）：论证闭合——删除虚构佐证 + 绝对锚 + 下探/量化补位**
+- **删除 §2.3 虚构佐证（审查 P0-1，已亲验）**：「BC 已在浏览器每 10 tick 运行反推 infer.ts ≳200M MAC/s」为假——`NNInput`/`infer` 仅 `src/nn/` 内部引用（weights/policy-input/obs-encoder），浏览器零接线；`policy-input.ts:22-23` 引 `fs`/`path` 不可打包；BC 前向只跑 Bun 无头（JSC，无墙钟）。全部可行性结论改为悬于**未实测常数 0.15–2 G MAC/s**，P0 基准前架构仅「膝点候选」未锁定。
+- **验收改绝对锚（审查 P0-2）**：原「学生≥教师 90%」相对阈值与项目硬约束「hard>90%」联立 ⇒ 教师≥100% 不可能。改**学生 hard 胜率绝对锚（起评≥85%/定稿≥90%）**，保留率降诊断指标。
+- **补下探 + 量化两维（审查 P1-3/P1-4）**：P5 ablation 增 **h=48 下探档（~46K/25M）** 探 O3 下界；增 **int8 量化**（46–69K 参数→46–69KB 下载，4× 杠杆，权重 int8+累加 f32 确定性，与 byte-for-byte 不冲突，须以 int8 为 canonical 参考并做保留率回归）。
+- **God-AI 先行教师 P1.5（审查 P0-2 去风险）**：仓库现成 God-AI（hard ~0.73–0.77，DECISIONS 门禁 baseline / AGENTS §6.3b Phase III）`GodAIInput` 即 `InputLike`，确定性标号与学生学习空间一致（30 离散）→ RL 教师落地前即可端到端验证「学生架构+DAgger+保留率测量」整条管线。
+- **措辞修正（审查 P1-1 / P2）**：Pareto 单点→**膝点候选/ε-constraint**（O1 未实测前沿是集合）；§6.2 注意力「676 tokens 极便宜」删改（仅参数便宜，MAdds 不便宜）；**attention MAdds 补投影项 → 含注意力总计 ~107M**（原 95.5M 漏计 QKV/O 投影 11.1M，已修订）；**学生 RF 33→35×35**（stem 3 + 8×4）；教师参数全文档统一 950K（实测 949,835）；**BN 措辞软化**（折叠数学等价但改浮点序，真阻断工程理由是 603M MAdds）；**≤120ms 与 O2 自相矛盾**→改锚定「单核占用≤30%≈推理≤50ms」或实测 jank；**K=10↔20 列为 O2 旋钮**（默认 K=10，移动端可上探 K=20）。
+- **全文 v4 → plan/RL-Net-Selection.md。**
+
+**附录（2026-08-20 四审 v5 修订）：候选集补全——下探档 + 直接RL 对照 + 移动端范围**
+- **补最低档 h=32/d=4 + 空洞 depthwise（审查 P1-1，已亲验算术）**：实算 **~20K 参数 / 7.85M MAdds / RF=45×45**（stem 14→32 + 4×dw5×5 + 空洞 3×3 dil=13 groups=32）。若蒸馏保留率兑现，它是严格更优 O3 点；「69K 甜点」降级为「已试甜点、非消融甜点」，结论待 P5 容量消融闭合。
+- **空洞补齐层必须显式 depthwise（审查 P1-4 算术硬伤，已亲验）**：空洞 3×3 64ch **depthwise(groups=64) = 0.39M MAdds**，但**全卷积 64→64 = 24.9M MAdds**——若不显式标 `groups=64`，「+0.39M」表述误导实现者做出超预算全卷积。v5 在 §4.3 架构图、§4.3 档位、§6.2(c) 三处均显式标注 depthwise。
+- **补「小模型直接 RL」对照臂（审查 P1-2）**：BC 0% 是 7×7 RF 问题，非「小模型欠拟合」证据。69K 全 RF 模型直接 PPO 训若达同等 O1，则同参数同能耗、零保留率风险、严格 Pareto 点 → P5 设对照臂；若成立则蒸馏从「主线路」降级为「可选增强」。蒸馏「必需性」现为待排除假设。
+- **移动端范围声明（审查 P1-3）**：「web 端」默认＝桌面 web。纯 TS 路径下 37M(h=64) 仅桌面边缘（且 depthwise 真实偏低端），**移动端超预算、属 out-of-scope**，除非用最低档 h=32+空洞(~8M) + int8 + K=20 且 P0 基准门控。若项目要求移动端达标须显式立项。
+- **depthwise 5×5 算术强度警示（审查 P0-3）**：学生骨干是 depthwise 串联（memory-bound），真实 MAC/s 可能**低于**标准 3×3 密集卷积基准 → 桌面边缘比标称更薄，低端机取 50–150M 而非 150M 下限；P0 基准必须用**真实 depthwise 学生权重**跑，不能 BC 外推。
+- **绝对 O1 门槛锚定 M1 硬 ≥60% 先例（审查结构化）**：§4.6 主验收改为**起评 ≥60%（M1 硬门先例）/ 阶段 ≥85% / 定稿 ≥90%（项目硬约束）**，拒绝用「相对教师 90%」虚高过关；「胜率更佳」获绝对含义。
+- **h=48 内部口径修正**：GAP+FC 原误复用 h=64 的 88→128（应为 72→128=9,344），v5 修正后 ~46K/~25M（量级不变）。
+- **全文 v5 → plan/RL-Net-Selection.md。**
+- **v5.1（P0 实测，2026-08-20）**：`tools/bench-nn-infer.ts` 跑现有 BC 权重（52K/30.8M）`NNModel.forward`，**Bun 1.3.14 (JSC) 桌面两次可复现 = 27.3ms@1.13G / 27.7ms@1.11G → 实测常数 ≈1.1 G MAC/s**。结论升级：① §2.3 删「假设基准」改实测+depthwise 折扣(~0.6×≈0.66G)；② 学生 h=64 @~56ms **桌面舒适**（3× 余量）由「边缘」升级「舒适」；③ K=1 否决 / 教师不部署 / 移动端需下探档 维持；④ 文档「未实测」标注降级为「BC 已实测 / 学生 dw 待训后实测」。学生 depthwise 精确延迟待 P0 学生权重产出后 `bench-nn-infer.ts` 实测定稿（届时 infer.ts 需先扩 depthwise/5×5/残差支持）。

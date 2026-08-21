@@ -17,7 +17,7 @@ import type { Direction } from '../constants'
 import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
 import { ObsEncoder, computeMasks } from './obs-encoder'
-import { NNModel, buildModelFromText } from './infer'
+import { buildModelFromText, type ModelLike } from './infer'
 import { resolveLatestWeights } from './weights'
 import { join } from 'path'
 import { readFileSync, existsSync } from 'fs'
@@ -35,10 +35,10 @@ export interface NNInputOptions {
 }
 
 // ---- module-level model cache (one load per process / per worker thread) ----
-let cachedModel: NNModel | null = null
+let cachedModel: ModelLike | null = null
 let cachedModelPath: string | null = null
 
-function loadModel(opts: NNInputOptions): NNModel {
+function loadModel(opts: NNInputOptions): ModelLike {
   let path = opts.weightsPath
   if (!path) {
     const dir = opts.weightsDir ?? join(process.cwd(), 'nn-training', 'weights')
@@ -64,12 +64,19 @@ function loadModel(opts: NNInputOptions): NNModel {
  */
 export class NNInput implements InputLike {
   private world: World
-  private model: NNModel
+  private model: ModelLike
   private encoder = new ObsEncoder()
   private K: number
 
   // committed (held) action for the current inter-decision window
   private moveDir: Direction | null = null
+  // Last *commanded* direction. Held-action BC semantic: a `none` prediction
+  // (move index 0) means "keep the current heading", NOT "stop". God-AI's
+  // none-label comes from its held direction, so returning null here would
+  // freeze the tank (SimulationPlayer sets moving=false on null) and lock the
+  // world in a static state the model never recovers from -> 0% win. We hold
+  // the last commanded direction instead, which keeps the state active.
+  private lastDir: Direction = 'up'
   private firing = false
   private guardPulse = false
   private frenzyPulse = false
@@ -114,6 +121,7 @@ export class NNInput implements InputLike {
     this.thought = false
     this.forceThink = true
     this.moveDir = null
+    this.lastDir = 'up'
     this.firing = false
     this.guardPulse = false
     this.frenzyPulse = false
@@ -154,7 +162,15 @@ export class NNInput implements InputLike {
     for (let i = 1; i < 5; i++) if (mv[i] > bestMoveV) { bestMoveV = mv[i]; bestMove = i }
     // v1 move mask is all-valid; fall back to none if the chosen slot is masked.
     if (masks.move[bestMove] !== 1) bestMove = 0
-    this.moveDir = bestMove === 0 ? null : DIR_DECODE[bestMove - 1]
+    // Held-action semantic: index 0 (none) = keep current heading (see lastDir
+    // field). Only a *real* direction updates lastDir; none holds it. This keeps
+    // the tank moving and the world state active, avoiding the freeze deadlock.
+    if (bestMove === 0) {
+      this.moveDir = this.lastDir
+    } else {
+      this.lastDir = DIR_DECODE[bestMove - 1]
+      this.moveDir = this.lastDir
+    }
 
     // --- fire head (argmax over 2: 0 release, 1 hold) ---
     const fr = this.model.fireLogits

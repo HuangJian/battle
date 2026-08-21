@@ -31,6 +31,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import make_loaders  # noqa: E402
 from model import NNPolicy, param_count  # noqa: E402
+from student_model import StudentNet  # noqa: E402
 from weights_io import save_weights_json, load_state_into  # noqa: E402
 from schema import OBS_SCHEMA_MAJOR  # noqa: E402
 
@@ -149,7 +150,7 @@ def train(args) -> dict:
     mb = _majority_baseline(train_dl)
     print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f} item={mb['item']:.4f}")
 
-    model = NNPolicy()
+    model = StudentNet() if args.arch == "student" else NNPolicy()
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
@@ -266,8 +267,11 @@ def _safe_copy(src: str, dst: str) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BC trainer for NN Player AI")
+    ap = argparse.ArgumentParser(description="BC/distillation trainer for NN Player AI")
     ap.add_argument("--data-dir", required=True, help="directory of exported npy shards")
+    ap.add_argument("--arch", choices=["bc", "student"], default="bc",
+                    help="model architecture: 'bc' = NNPolicy (default), 'student' = "
+                         "CoordConv-ConvMixer-Lite (plan/RL-Net-Selection.md §4.3; P1.5 distillation)")
     ap.add_argument("--out",
                     default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "weights.json"),
                     help="active weights JSON path (a versioned weights.<stamp>.json archive + WEIGHTS.md are written alongside in the same dir)")

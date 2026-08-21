@@ -5,6 +5,126 @@
 
 ---
 
+## §2.1 移动死锁修复 + 0% 根因收敛（续 §2，2026-08-20）
+
+### 关键修正：policy-input.ts 的 move-freeze 死锁（§2 评估 0% 的真正主因）
+
+§2 报告「学生 BC 12ep → avgKills=0 / avgTicks=3933」与「+DAgger 6ep 仍 0%」。
+重新诊断发现一个被忽视的**部署语义死锁**（非权重/精度/方向问题）：
+
+- `policy-input.ts` 原把 move 头 argmax=0（`none`）映射为 `moveDir = null`；
+- `SimulationPlayer` 在 `getMoveDirection()` 返回 null 时设 `moving=false`，
+  坦克在出生点原地静止。但 `none` 在教师(God-AI)语义里 = **「保持当前航向」**，不是「停」；
+- 世界状态冻结 → 模型每 tick 仍见静止状态 → 持续预测 `none` → 永久锁死，
+  0 击杀、基地最终被毁（avgTicks≈3933 即 base_destroyed 时间线）。
+
+**修复**：`none` 改为「持有上次指令方向」(`lastDir`)，坦克保持移动、世界状态
+活跃。修复后单局 trace 从 `distinctCells=1 / kills=0` 变为 `distinctCells=200 / kills=1`。
+
+### 修复后正式评估（stages 1-5 × seeds 1-10 = 50 局，hard，--policy nn，权重不变）
+
+```
+WIN RATE 0.0% (gate 60%) -> FAIL
+totalKills=13  avgKills=0.26  avgTicks=3331
+SCORE V7 suite=0.0691 lcb=0.0656 meanWinRate=0
+```
+avgKills 从 **0（冻结）→ 0.26（移动）**，avgTicks 3331 表明坦克现在会移动并
+零星开火，但仍在 ~55s 内阵亡。**结论**：冻结死锁已修复（移动恢复），但残余
+0% 来自**分布漂移**——学生在「自己的部署状态」上几乎不开火（部署 trace：
+ready=true 时 `fireLogits[0] >> [1]`，fire 命中仅 3/477）。这与 §2 的
+「BC 分布漂移」根因一致，但本次是更纯粹的**学生自部署漂移**（教师只在教师
+状态上标过 fire）。
+
+### 对 §2 DAgger 回合的影响（重要）
+
+§2 的 DAgger 冒烟（9 局 3725 样本）是在 **freeze bug 存在时**采集的——学生
+冻结在出生点，所有采集状态都聚集在 spawn 邻域，是一份**退化分布**，故续训
+毫无帮助（move acc 0.35→0.386 也只是拟合 spawn 邻域）。修复后学生真正移动、
+访问真实状态空间，DAgger 采集才首次有效。
+
+### 本次交付
+
+| 交付 | 文件 | 状态 |
+|------|------|------|
+| 移动死锁修复 | `src/nn/policy-input.ts`（`lastDir` 持有语义） | ✅ 已落地，评估验证 |
+| DAgger 采集器（清理版） | `tools/sim/export-dagger-labels.ts` | ✅ smoke 2 局/330 样本通过 |
+| 正式 DAgger 采集 | `tmp/dagger/`（stages 0-4 × seeds 0-9，50 局） | 🔄 后台运行 (task mWkKzh) |
+| 混合重训 | `tmp/godai/` + `tmp/dagger/` → `train_bc.py --arch student` | ⏳ 需 torch 机（本机无 torch） |
+
+### 下一步
+
+1. 等 `tmp/dagger/` 采集完成 → 混合 godai + dagger → `train_bc.py --arch student`
+   续训（resume 当前学生权重），目标把 fire 头在学生自部署状态上拉起。
+2. 重训后跑 `m1-eval --policy nn` 量化保留率；若仍不足，追加 DAgger 回合
+   （学生新权重 + 更多 seeds/stages）。
+3. RL 教师落地后，同一管线直接复用（仅换 label 源）。
+
+---
+
+## §2 P1.5: God-AI 教师端到端蒸馏管线（学生架构）验证 (2026-08-20)
+
+> 计划：`plan/RL-Net-Selection.md` §4.3–4.4（v4/v5）。目标：在 RL 教师落地前，用现成
+> God-AI 当教师，端到端验证「CoordConv-ConvMixer-Lite 学生（68,554 参数）+ 离线蒸馏 +
+> DAgger 在线蒸馏 + TS 推理 + 保留率测量」整条管线。
+
+### What was built
+
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| 学生模型 | `nn-training/student_model.py` | ConvMixer-Lite h=64/d=8，BN-free，68,554 参数 / ~37M MAdds；forward 内追加 2 个 coord 通道（uint8 0..255，不除 255）；语料保持 14ch 不 bump schema |
+| 学生训练 | `nn-training/train_bc.py` | 新增 `--arch student`（默认 `bc` 路径不动）；复用 masked CE / AdamW / Cosine / best-val 导出 |
+| TS 学生推理 | `src/nn/infer.ts` | `StudentModel`（conv3x3/conv5x5dw groups=h/conv1x1/GAP/linear，零分配缓冲）+ `ModelLike` 接口 + `buildModelFromJson/Text` 按 `arch.kind` 分发 |
+| 输入适配 | `src/nn/policy-input.ts` | 改用 `ModelLike`（cachedModel/loadModel/NNInput.model）；`think()` 决策谓词 `t==0 || t%K==0 || itemAppeared` |
+| God-AI 采样器 | `tools/sim/export-godai-labels.ts` | 离线蒸馏语料导出器：`--stages/--seeds/--difficulty/--out/--max-ticks/--verify-determinism`；writeShard 与 BC 格式一致；确定性双跑字节比较 |
+| DAgger 采样器 | `tools/sim/export-dagger-labels.ts` | 学生（NNInput）驱动真实引擎 + 独立 RNG 的 God-AI labeler 每 tick 跟读世界；在 `t==0 || t%K==0 || itemAppeared` 采 (state, God-AI label)；labeler 每 tick think 保持内部状态一致 |
+| 评估 | `tools/sim/m1-eval.ts`（既有） | `--policy nn --weights-dir <dir>`；God-AI 基线 `--policy god` 同种子对比 |
+
+### Verification results
+
+- **确定性导出**：`--verify-determinism` 双跑 3 局 5 npy 文件字节一致（`[DET OK]` ×3）。
+- **TS↔Python 前向一致**：同权重 + 同 obs/scalars（corpus shard 第 0 样本），TS `StudentModel`
+  对 Python `StudentNet` 三头 logits maxAbsDiff ≈ 4e-5（float32 累加顺序噪声），argmax 全 MATCH。
+- **权重格式**：42 键（stem/8×blocks{dw,pw}/fc/三头 ×{weight,bias}），与 `StudentModel` 完全匹配。
+- **端到端冒烟**：9 局 God-AI 语料（8,252 样本）→ 12 epochs → 5×5 hard 评估。
+- **DAgger 冒烟**：学生 9 局（3,725 样本）→ 合并续训 6 epochs → 5×5 hard 评估。
+
+### Eval 对比（hard，5 stages × 5 seeds，同种子）
+
+| 策略 | 胜率 | 说明 |
+|------|------|------|
+| God-AI（教师，基线） | **72%** (18/25) | suite=0.5985 lcb=0.5291 |
+| 学生（BC 12ep，8.2K 样本） | 0% (0/25) | avgKills=0，avgTicks=3933 |
+| 学生（+DAgger 6ep，11.9K 样本） | 0% (0/25) | move acc 0.35→0.386 |
+
+0% 属**语料量/轮次不足**（不是管线 bug）：学生在打游戏（平均 96 发子弹/局）但 move 头太弱不会瞄准；
+God-AI 教师 72% 门内。val_loss 1.73–1.87，move acc ~0.39（5 类 hard-label，teacher 自身随机）。
+
+### 性能实测（本机，torch CPU 8 线程）
+
+- 训练吞吐：学生 ~3.4ms/sample/step（depthwise 5×5 + pw 1×1 在 torch CPU NCHW 上极慢，1.7s/step@b256；
+  channels_last 后 0.88s/step@b256；batch512 无增益；16 线程反降）。实测 ~2.5min/epoch @ 8.2K 样本。
+- **全量 35×10 语料（~158K 样本）× 25 epochs ≈ 3.5–4h CPU** —— 这是唯一能抬出非零保留率的下一步。
+- DAgger 导出：labeler 每 tick think 使导出 ~18× 慢于纯 God-AI 导出（9 局 162s）。
+
+### 关键教训
+
+1. **学生架构的 depthwise 卷积是 CPU 训练瓶颈**：torch 对 groups=h 的 5×5 dw 无高效实现；
+   `channels_last` 仅 2× 加速。69K 参数换来 10× 的每样本 FLOPs（vs BC 52K）——训练成本必须
+   计入保留率实验预算（web 推理端 TS 零分配 ~ms 级，部署不受影响）。
+2. **BC 语料 label 的 teacher 自身随机性**：God-AI 在相同状态有随机性，hard-label CE 天花板低
+   （move ~0.4）。DAgger 标签同样受此影响。
+3. **确定性契约成立**：TS 端逐字节复现 Python 前向（float32 顺序噪声内），coord 通道公式、
+   uint8 0..255 尺度、GAP、scalar concat 全部对齐。
+4. **保留率基线（尚未达成）**：需全量语料训练后重测；届时报告 `学生胜率 / God-AI 胜率`。
+
+### 下一步
+
+1. 全量导出 `--stages 1-35 --seeds 1-10` God-AI 语料 → 学生训练（可后台跑，~4h CPU）。
+2. 评估 + 算保留率；若不足，追加 DAgger 回合（学生当前权重 + 更多 seeds）。
+3. RL 教师落地后，同一管线直接复用（`student_model.py` 不变，仅换 label 源）。
+
+---
+
 ## §1 v2: Scalar Fusion Architecture (2026-08-19)
 
 ### What changed
