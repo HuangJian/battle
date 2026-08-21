@@ -168,7 +168,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
                     help="concurrent bun rollout workers (games partitioned by seed)")
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=256)
+    ap.add_argument("--mb", type=int, default=512,
+                    help="minibatch size — 512 halves gradient steps vs 256 "
+                         "(faster PPO, smaller per-iteration KL drift)")
     ap.add_argument("--lr", type=float, default=ppo_mod.LR)
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()

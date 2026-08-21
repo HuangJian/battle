@@ -184,21 +184,26 @@ def ppo_update(model, opt, chunks, epochs, device):
     model.train()
     clip = CLIP_EPS
     stats = []
+    # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
+    # values, ~epochs× less conversion overhead.
+    tensored = [
+        {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
+    ]
     for _ in range(epochs):
-        perm = np.random.permutation(len(chunks))
+        perm = np.random.permutation(len(tensored))
         for i in perm:
-            e = chunks[int(i)]
-            obs = torch.from_numpy(e["obs"]).to(device)
-            sc = torch.from_numpy(e["scalars"]).to(device)
-            a_move = torch.from_numpy(e["a_move"]).to(device)
-            a_fire = torch.from_numpy(e["a_fire"]).to(device)
-            a_item = torch.from_numpy(e["a_item"]).to(device)
-            lp_move = torch.from_numpy(e["lp_move"]).to(device)
-            lp_fire = torch.from_numpy(e["lp_fire"]).to(device)
-            lp_item = torch.from_numpy(e["lp_item"]).to(device)
-            adv = torch.from_numpy(e["adv"]).to(device)
-            ret = torch.from_numpy(e["ret"]).to(device)
-            mask = torch.from_numpy(e["mask"]).to(device)  # (T, 10)
+            e = tensored[int(i)]
+            obs = e["obs"]
+            sc = e["scalars"]
+            a_move = e["a_move"]
+            a_fire = e["a_fire"]
+            a_item = e["a_item"]
+            lp_move = e["lp_move"]
+            lp_fire = e["lp_fire"]
+            lp_item = e["lp_item"]
+            adv = e["adv"]
+            ret = e["ret"]
+            mask = e["mask"]  # (T, 10)
 
             mv, fr, it, val = model(obs, sc)
             move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
@@ -252,15 +257,29 @@ def main():
     ap.add_argument("--data", type=str, default=None, help="trajectory shard root (update mode)")
     ap.add_argument("--out", type=str, required=True, help="output weights path")
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=256, help="minibatch size (transitions per update step)")
+    ap.add_argument("--mb", type=int, default=512,
+                    help="minibatch size (transitions per update step)")
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--gamma", type=float, default=GAMMA)
     ap.add_argument("--lam", type=float, default=LAM)
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7, help="numpy seed for minibatch shuffling")
+    ap.add_argument("--threads", type=int, default=8,
+                    help="torch intra-op threads; 0 keeps the launcher default "
+                         "(OMP_NUM_THREADS). 8 = physical cores on the dev box — "
+                         "avoids HT contention + OMP sync overhead on this small model.")
     args = ap.parse_args()
 
     np.random.seed(args.seed)
+    if args.threads > 0:
+        torch.set_num_threads(args.threads)
+    try:
+        # Denormal floats can slow small-model CPU convs by large factors;
+        # flushing them is numerically negligible (~0 values) and often much
+        # faster. Not supported on every platform -> best effort.
+        torch.set_flush_denormal(True)
+    except (RuntimeError, AttributeError):
+        pass
     device = torch.device(args.device)
 
     # ---- init mode ----
