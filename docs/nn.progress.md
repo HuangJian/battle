@@ -5,6 +5,139 @@
 
 ---
 
+## §3 RL 阶段设计（承接 P1.5 蒸馏，2026-08-21）
+
+> 决策：DAgger 对 RL 的价值已基本兑现（验证推理链路 + warm-start + 观测充分性证明），
+> 继续压 DAgger 边际收益低。下一步主线 = **收尾 round2（锁定最佳 warm-start）→ 转 RL**。
+> 用户已拍板走「推荐」路线。
+
+### 3.1 观测审计结论（关键，免扩展）
+重读 `src/nn/obs-encoder.ts`（14 通道 + 24 标量）。**obs 已自带基地防御 + 胜利进度信号，RL 无需扩展通道**：
+- 空间：ch5=基地(eagle+护墙)、ch7–10=敌种+智能层、ch11=子弹(含方向)、ch13=waveHeat(未来 600 tick 预测刷怪)。
+- 标量：s[1]=minBaseDeadline/600（**敌人对基地受损时限**，显式基地威胁计时）、s[6]=护墙完整度、
+  s[22–23]=最近基地相对位/向、s[13]=剩余敌人比例（进度代理）、s[0]=最近击杀 slack。
+→ **残余 0% 属目标优化缺口（BC 不优化胜率），非观测缺口**。RL 优化真实 reward 即可直接吃现有 obs，不被卡。
+
+### 3.2 架构复用（最小改动）
+- 主干：`StudentModel` 的 stem + 8×ConvMixer blocks + fc 作共享特征提取器，**从 DAgger 检查点 warm-start**
+  （写死 `tmp/student-weights-dagger2/weights.json`）。
+- 策略头：保留 3 个 factored categorical 头（move5/fire2/item3），与 BC 一致 → 动作=(move,fire,item)，
+  决策 tick K=10 持有门控不变。
+- 价值头：新增 `value_head`（fc 特征→标量），随机初始化、RL 训。PPO 用 shared-trunk + 分离 policy/value。
+- 动作空间：离散 factored，PPO categorical 直接适用。首轮不扩 item 头（rewind/emp/decoy/mine 暂不纳入 RL 动作）。
+
+### 3.3 奖励设计（权重待拍板）
+r = w_win·win + w_kill·kills + w_base·baseIntegrityΔ + w_surv·survivalTicks − w_dead·baseDestroyed
+- win：通关 +1（稀疏终局）；baseIntegrityΔ：每 tick 基地护墙/鹰完整度变化（塑形，引向防御）；
+  kills：击杀数（复用 world 击杀计数）；baseDestroyed：终局大惩罚（引向保基地）；
+  survivalTicks：弱塑形，防过早送。需小范围网格/经验初值，避免 reward hacking（只保基地不进攻）。
+
+### 3.4 Rollout 回路（TS 导出 + Python 训练，沿用范式）
+- TS 端 `tools/sim/export-rl-rollout.ts`：复用 `ObsEncoder`+`StudentModel`(+value head)+headless sim 驱动
+  （骨架取 `export-dagger-labels.ts`），按决策 tick 跑策略→采 (obs,scalars,action,logprob,value,reward,done)
+  写 trajectory shards（npy，兼容 `load_dataset` 递归扫描）。
+- Python 端 `nn-training/ppo.py`：消费 shards，clipped PPO（shared trunk warm-start + value head），
+  复用 `train_bc.py` 的 venv/torch 入口（`start-training.ps1`）。
+- 在线性：RL 多轮 rollout→训练→再 rollout（on-policy）。首轮用离线固定轨迹 mini-batch PPO 起步验证链路，
+  再上异步 on-policy。
+
+### 3.5 任务拆分
+观测审计(#12, ✅) / 奖励设计(#11) / round2 收尾→锁定 warm-start(#13) / TS rollout(#15) / PPO(#14) / 首轮量化(#16)。
+#13 先跑完锁定最佳 warm-start，再 #11→#15→#14→#16 串行。
+
+### 3.6 接手验证：RL 链路端到端冒烟全通（2026-08-21 接手）
+
+前手交付 `ppo.py` / `export-rl-rollout.ts` / `run_rl.sh` + value head（`student_model.py`
+PPOStudent、`infer.ts` 可选 value_head 槽）。接手后逐契约复核（World 字段 /
+computeMasks 1=valid / writeNpy 签名 / rules 模块 / buildModelFromJson 全参数透传 /
+PPOStudent 继承 arch()→kind:'student' 路由正确）并跑通完整闭环：
+
+```
+init   : ppo.py --init-from tmp/student-weights-dagger → value_head 随机初始化，
+         missing=[value_head.*] 符合预期；68683 params；JSON 写入 [1,128]+[1] ✅
+rollout: export-rl-rollout.ts s0/seed0/600ticks → 59 样本（60 决策点 − 超时丢弃
+         末 pending，设计内）；12 个 npy + manifest ✅
+update : ppo.py --resume --data --epochs 2 → policy/value/entropy/kl 正常输出 ✅
+roundtrip: 用更新后权重再 rollout → TS 加载含训练后 value head 的权重 ✅
+门     : tsc --noEmit 绿；bun run check 全绿（1429 pass / 0 fail）
+```
+
+**接手修复的 2 个 PPO bug**（冒烟暴露，前手未跑到 update 步）：
+1. `ppo_update()` 签名/实现错位：函数体按 dict 取 `batches["obs"]`，调用方传的是
+   episode **list** → TypeError。改为按 list 迭代。
+2. 维度 bug：episode 张量已是 `(T,14,26,26)`，函数内再 `unsqueeze(0)` 成 5-D 崩溃。
+   重构为 **chunk_episodes(mb=256) 固定 minibatch**：GAE 先按局算好，chunk 只作更新
+   粒度——同时解决整局 1200 样本单次前向的激活内存问题，并增加梯度步数。
+另：补 `--seed`（默认 7，minibatch 洗牌可复现）；移除未使用的 old_val。
+
+**遗留提示**：(a) run_rl.sh 无 `set -e`，单轮失败会静默续跑，正式训练前建议加；
+(b) 超时局的末个 pending 被丢弃且 done=0 → GAE 对末步 bootstrap V=0，轻微偏差可接受；
+(c) 奖励权重初值（W_WIN=5/W_KILL=0.2/W_BASE=1.0/W_SURV=0.01）按 §3.3 待首轮 reward
+曲线监控后定稿。
+
+### 3.9 正式训练启动 + rollout 并行化（2026-08-21）
+
+**并行改造两步**：(1) 初版按种子分区 `seeds[k::W]`——seeds=4 时 worker 被钳到 4，
+8 物理核只吃满一半；(2) 改为 **按 (stage,seed) 游戏对粒度调度**：ThreadPoolExecutor
+把 16 局摊进 W 个并发槽，每局一个 bun 进程（单局启动 ~300ms 可忽略），shard 落
+`w{i}/` 子目录、`discover_rl_shards` 递归消费无需改动。实测 16 局 rollout 从串行
+~5min 降到 **~1.5–2.5min**（尾效应限制：快局先退、长局收尾）。
+
+**正式训练**（`--epochs 3 --workers 12`，自 BC 全新初始化，权重每轮原子落盘）：
+KL 稳定在 0.047–0.054（EPOCHS=3 生效，对比试跑 EPOCHS=4 的 0.094）；entropy
+1.298→1.213 缓降（策略开始收敛）；policy loss 0.373→0.096；outcome 出现
+lives_exhausted 占比上升（2→4/16 局）的早期存活信号；win rate 仍 0%（hard 冷启动
+预期内）。节奏 ~3.5–4 min/轮，15 轮预计 ~1h 内完成。
+
+---
+
+### 3.8 启动脚本收敛：run_rl.sh 下沉为 run_rl.py（2026-08-21）
+
+用户要求减少启动脚本。**不把循环塞进 sh+ps1 各一份**（双实现漂移），而是把
+on-policy 循环下沉为 Python：重写 `run_rl.py`（原为旧脚手架 train_rl.py 的包装）
+为主循环——bun rollout 走 subprocess、PPO 更新进程内复用 `ppo.py` 的
+`load_episodes/chunk_episodes/ppo_update`（模型常驻内存，省去每轮 torch 重启），
+权重每轮原子写回（`save_weights_json` 改 temp+os.replace，长跑崩溃不留半截文件）。
+删除 `run_rl.sh` 与旧启动脚本 `start_rl.bat`；启动器收敛为规范一对：
+
+```
+bash nn-training/start-training.sh --script run_rl.py --iters 15 [--epochs 3 ...]
+powershell ... start-training.ps1 -Script run_rl.py --iters 15   # 参数透传
+```
+
+新路径小规模验证 EXIT=0（且幂等 resume 生效：从上轮 RL 权重续跑而非重初始化）。
+`ppo.py` 单步 CLI（--init-from/--resume）保留不变。
+**待清理候选**（旧脚手架，已被新管线取代，删除前待拍板）：`train_rl.py`、
+`rl_env.py`、`rl_ppo.py`、`rl_model.py`。
+
+---
+
+### 3.7 小规模试跑 it1：链路全通（2026-08-21）
+
+`ITERS=1 STAGES=0-1 SEEDS=0-1 bash nn-training/run_rl.sh`（hard，MAXT=12000，EPOCHS=4）：
+
+```
+init    : BC warm-start + 随机 value head，68683 params ✅
+rollout : 4 局 / 1152 样本 / 11498 ticks；outcome 全部 base_destroyed
+          （s0sd0 4405t / s0sd1 1284t / s1sd0 2651t / s1sd1 3158t）
+          —— hard 冷启动 0% 胜率符合 §3.5 预期 ✅
+PPO     : epochs=4 policy=0.5790 value=0.7676 entropy=1.2888 kl=0.09391
+          mean_ret=-0.195 ✅
+权重验证: value_head.* 新增；40/42 策略张量发生变化（非原样写回）✅
+```
+
+**试跑暴露并修复**：run_rl.sh 未 `mkdir -p $TRAJ` → 日志重定向失败导致 rollout/PPO
+整步被静默跳过（正是 §3.6-(a) 预警的形态）。已修：`set -eu` + 循环前建目录。
+
+**正式跑前的调参读数**：
+- **kl=0.094 偏高**（经验安全区 ~0.01–0.05）：EPOCHS=4 × mb=256 下单轮策略偏移较大，
+  有侵蚀 BC warm-start 的风险。建议正式跑降为 EPOCHS=3 或 LR=2e-4，并在 ppo.py 加
+  KL 早停（approx_kl 连续超阈则 break epoch 循环）——未实施，待拍板。
+- value=0.77 属正常（价值头从零学起，需数轮收敛）。
+- entropy=1.29 > 冒烟期 1.06：随机化探索正常，观察后续迭代是否按预期下降。
+
+---
+
 ## §2.2 启动器 Windows 本机验证：ps1 双 bug 修复（BOM + 参数风格兼容，2026-08-21）
 
 用 AGENTS.md 规定的幂等自检验证本机 torch 可用性：
@@ -87,17 +220,34 @@ ready=true 时 `fireLogits[0] >> [1]`，fire 命中仅 3/477）。这与 §2 的
 | 移动死锁修复 | `src/nn/policy-input.ts`（`lastDir` 持有语义） | ✅ 已落地，评估验证 |
 | DAgger 采集器（清理版） | `tools/sim/export-dagger-labels.ts` | ✅ smoke 2 局/330 样本通过 |
 | 正式 DAgger 采集 | `tmp/dagger/`（stages 0-4 × seeds 0-9，50 局） | ✅ 完成：19783 样本 / 163124 ticks，50 shards，obs `(N,14,26,26)` 与 godai 同构（godai 368M / dagger 182M） |
-| 混合重训 | `tmp/godai/` + `tmp/dagger/` → `train_bc.py --arch student` | ⏳ 需 torch 机（本机无 torch） |
+| 混合重训 | `start-training.ps1 -Script train_bc.py --data-dir tmp/mix --arch student --resume tmp/student-weights-full/weights.json --out tmp/student-weights-dagger/weights.json --epochs 30` | ✅ 完成（task 8898no，11663.6s≈3.24h，torch 2.7.1+cpu）。30ep: train_loss 1.90→1.1242, val_loss 1.33→1.2064, move_acc 0.449→0.616, fire_acc 0.860→0.887, item 1.000。`tmp/mix`=100 shards/549M，samples=59995。权重：`tmp/student-weights-dagger/weights.json`(active) + `weights.20260821-123437_ep30_val1.2064.json` |
+| DAgger 续训后保留率评估 | `m1-eval --policy nn --weights-dir tmp/student-weights-dagger`（st 1-5×sd 1-10, hard） | ✅ 完成（task LXzEAh）：WIN 0%（gate 60% FAIL）；suite 0.0691→0.1027(+49%)，totalKills 13→104(8×)，avgKills 0.26→2.08，Crossfire 冻结→1。DAgger 证实修复射击漂移；残余 0% 为策略深度差距，非 bug |
 
 ### 下一步
 
-1. ✅ `tmp/dagger/` 已采集完成（19783 样本，50 shards）。下一步：混合
-   godai(368M) + dagger(182M) → `train_bc.py --arch student` 续训（--resume 当前
-   学生权重），目标把 fire 头在学生自部署状态上拉起。`--data-dir` 当前为单目录，
-   需先合并两目录或把该参数改为 `nargs='+'`。
-2. 重训后跑 `m1-eval --policy nn` 量化保留率；若仍不足，追加 DAgger 回合
-   （学生新权重 + 更多 seeds/stages）。
-3. RL 教师落地后，同一管线直接复用（仅换 label 源）。
+1. ✅ `tmp/dagger/` 已采集完成（19783 样本，50 shards）；已合并为 `tmp/mix/`（100 shards / 549M）。
+   续训已用启动器拉起。`start-training.sh` 在 Windows 上实测把 `/d/...` 双重化成
+   `D:\d\...` 导致 exec 秒失败（task 56DGy3），改走 `start-training.ps1`（原生 Windows
+   路径，无 MSYS 转换）成功：`powershell ... start-training.ps1 -Script train_bc.py
+   --data-dir tmp/mix --arch student --resume tmp/student-weights-full/weights.json
+   --out tmp/student-weights-dagger/weights.json --epochs 30`（task 8898no，后台运行中）。
+   **`.sh` 路径双重化 bug 已修复**：新增 `to_win_path` + `MSYS_NO_PATHCONV=1`，`--echo`/`-h`
+   实测输出干净 `D:\github\...\python.exe -u D:\github\...\train_bc.py`，不再出现 `D:\d\`。
+   目标：把 fire 头在学生自部署状态上拉起。
+2. ✅ 重训后保留率评估完成（task LXzEAh）：`m1-eval --policy nn --weights-dir
+   tmp/student-weights-dagger`，50 局（st 1-5 × sd 1-10, hard）。
+   **结果**：WIN 0%（gate 60% FAIL）；但 suite 0.0691→0.1027(**+49%**)，
+   totalKills 13→104(**8×**)，avgKills 0.26→2.08，avgTicks 3331→3572，
+   Crossfire 从冻结(0)→1。DAgger **证实修复射击分布漂移**，学生从"几乎不开火"
+   变为"会作战"。残余 0% 是**策略深度差距**（基地防御/清场效率/路径），
+   非部署 bug——God-AI 同条件 suite≈0.5753(75%胜)。
+   → 已选：**迭代 DAgger 第二轮**（用户 skip 决策、按 continue 推进推荐项）。
+3. 🔄 DAgger 第二轮采集运行中：`export-dagger-labels.ts --out tmp/dagger2
+   --weights-dir tmp/student-weights-dagger`（st 0-4×sd 0-9，学生=第一轮权重，
+   状态分布更真实）。完成后 mix=`tmp/godai`+`tmp/dagger2`（丢弃旧 dagger 弱状态），
+   resume=`tmp/student-weights-dagger/weights.json`，output=`tmp/student-weights-dagger2`，
+   再跑 `m1-eval` 量化。
+4. RL 教师落地后，同一管线直接复用（仅换 label 源）。
 
 ---
 

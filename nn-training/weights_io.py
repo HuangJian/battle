@@ -55,9 +55,15 @@ def save_weights_json(model: torch.nn.Module, path: str, extra_meta: Dict[str, A
     }
     if extra_meta:
         meta.update(extra_meta)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    tmp_path = abs_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+    # Atomic on the same volume: a crash mid-write never leaves a truncated
+    # weights file behind (matters for long unattended RL loops that overwrite
+    # the same path every iteration).
+    os.replace(tmp_path, abs_path)
 
 
 def load_weights_json(path: str) -> tuple[Dict[str, Any], Dict[str, torch.Tensor]]:

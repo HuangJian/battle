@@ -115,9 +115,8 @@ class StudentNet(nn.Module):
             "head_hidden": self.head_hidden,
         }
 
-    def forward(
-        self, obs: torch.Tensor, scalars: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def features(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
+        """Shared trunk → hidden (B, head_hidden). Reused by PPO value head."""
         coords = coord_channels(self.board, obs.device).float().unsqueeze(0)
         x = torch.cat([obs.float(), coords.expand(obs.shape[0], -1, -1, -1)], dim=1)  # (B, 16, 26, 26)
         x = F.relu(self.stem(x))
@@ -125,8 +124,33 @@ class StudentNet(nn.Module):
             x = b(x)
         x = x.mean(dim=(2, 3))  # GAP → (B, h)
         x = torch.cat([x, scalars], dim=1)  # (B, h + 24)
-        h = F.relu(self.fc(x))
+        return F.relu(self.fc(x))
+
+    def forward(
+        self, obs: torch.Tensor, scalars: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.features(obs, scalars)
         return self.move_head(h), self.fire_head(h), self.item_head(h)
+
+
+class PPOStudent(StudentNet):
+    """
+    RL-ready variant: StudentNet trunk + 3 factored policy heads + a value head.
+    Value head is trained by PPO (init random; BC checkpoints lack it).
+    Exports the SAME weight keys as StudentNet plus `value_head.{weight,bias}`,
+    so the TS runtime (`src/nn/infer.ts` StudentModel) can load it via the
+    value_head optional slot and serve V(s) for on-policy rollout.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.value_head = nn.Linear(self.head_hidden, 1)
+
+    def forward(
+        self, obs: torch.Tensor, scalars: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.features(obs, scalars)
+        return self.move_head(h), self.fire_head(h), self.item_head(h), self.value_head(h)
 
     @torch.no_grad()
     def predict(self, obs: torch.Tensor, scalars: torch.Tensor | None = None):

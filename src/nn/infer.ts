@@ -301,6 +301,8 @@ export class StudentModel implements ModelLike {
   private fireB: Float32Array
   private itemW: Float32Array
   private itemB: Float32Array
+  private valueW: Float32Array
+  private valueB: Float32Array
 
   // ---- reusable buffers (no per-tick allocation) ----
   private in16: Float32Array // [16 * board * board] (14 obs + 2 coords)
@@ -313,6 +315,7 @@ export class StudentModel implements ModelLike {
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
   readonly itemLogits: Float32Array
+  readonly valueOut: Float32Array
 
   constructor(params: Record<string, Float32Array>, arch: { h?: number; d?: number }) {
     const p = (name: string): Float32Array => {
@@ -346,6 +349,17 @@ export class StudentModel implements ModelLike {
     this.fireB = p('fire_head.bias')
     this.itemW = p('item_head.weight')
     this.itemB = p('item_head.bias')
+    // Value head is OPTIONAL: RL weights include value_head.*; BC-only
+    // checkpoints don't, in which case we zero-init (harmless for the
+    // pure-policy deployment path).
+    const vh = params['value_head.weight']
+    if (vh) {
+      this.valueW = vh
+      this.valueB = params['value_head.bias'] ?? new Float32Array(1)
+    } else {
+      this.valueW = new Float32Array(this.headHidden)
+      this.valueB = new Float32Array(1)
+    }
 
     this.in16 = new Float32Array(16 * sp)
     // Coord channels: ch14[r*B+c] = round(c/(B-1)*255), ch15[r*B+c] = round(r/(B-1)*255).
@@ -365,6 +379,7 @@ export class StudentModel implements ModelLike {
     this.moveLogits = new Float32Array(MOVE_DIM)
     this.fireLogits = new Float32Array(FIRE_DIM)
     this.itemLogits = new Float32Array(ITEM_DIM)
+    this.valueOut = new Float32Array(1)
   }
 
   forward(obs: Uint8Array, scalars: Float32Array): void {
@@ -410,6 +425,7 @@ export class StudentModel implements ModelLike {
     this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
     this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
     this.linear(this.hidden, this.itemW, this.itemB, this.itemLogits, ITEM_DIM, this.headHidden)
+    this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
   }
 
   private reluInPlace(buf: Float32Array): void {
