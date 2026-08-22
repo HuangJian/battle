@@ -26,7 +26,7 @@ import { GRID, BASE_POS, PLAYER_SPAWN, ENEMY_SPAWNS } from '../../src/constants'
 import type { StageData, TankKind } from '../../src/types'
 import { TileMap } from '../../src/game/TileMap'
 import { RNG } from '../../src/utils/RNG'
-import { floodFill, type Cell } from '../../src/utils/pathfind'
+import { floodFill, type Cell } from '../../src/utils/grid-search'
 
 // ============================================================
 // Types

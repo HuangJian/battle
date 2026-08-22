@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
-import type { Cell } from '../../utils/pathfind'
-import { findPath } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
+import { findPath } from './pathfind'
 import { canShootBaseFrom } from './SmartThreatModel'
 import { BASE_POS, DIR_VECTORS, GRID } from '../../constants'
 

@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { TileMap } from '../../src/game/TileMap'
 import { STAGES } from '../../src/config/stages'
 import { GRID } from '../../src/constants'
-import { findPath as newFindPath, type Cell } from '../../src/utils/pathfind'
+import { findPath as newFindPath } from '../../src/ai/god/pathfind'
+import type { Cell } from '../../src/utils/grid-search'
 
 // 1. Extract the ORIGINAL findPath from git (committed version) into
 //    src/utils/ so its relative imports (`../game/TileMap`) resolve, then

@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import type { World } from '../../game/World'
-import { findPath, type Cell } from '../../utils/pathfind'
+import { findPath, type Cell } from './pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'

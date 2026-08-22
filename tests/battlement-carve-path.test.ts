@@ -8,8 +8,8 @@ import { DIFFICULTIES } from '../src/config/difficulty'
 import { STAGES } from '../src/config/stages'
 import { GRID, CELL } from '../src/constants'
 import type { Direction } from '../src/constants'
-import { findPath } from '../src/utils/pathfind'
-import type { Cell } from '../src/utils/pathfind'
+import { findPath } from '../src/ai/god/pathfind'
+import type { Cell } from '../src/utils/grid-search'
 import {
   isCarveRingBrickImpl,
   isBaseColumnBrickImpl,

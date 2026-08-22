@@ -2,7 +2,7 @@ import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
-import type { Cell } from '../utils/pathfind'
+import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
 import { BASE_POS } from '../constants'
 import {

@@ -2,7 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { World } from '../../game/World'
 import { BASE_POS, CELL, GRID, TICK_MS } from '../../constants'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import { enemyDeadline, aimDirTo, playerShotsToKill, firePower } from './ThreatBudget'
 import { blocksBullet } from './Chokepoint'
 

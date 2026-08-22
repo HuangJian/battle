@@ -1,8 +1,8 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
-import { findPath } from '../../utils/pathfind'
+import { findPath } from './pathfind'
 import { opposite, ALL_DIRS } from '../../utils/direction'
 import { snap, aabb } from '../../utils/helpers'
 
@@ -77,7 +77,7 @@ function buildFireStopConstraints(
   self: GodAIInput,
   p: Tank,
 ): Pick<
-  import('../../utils/pathfind').PathConstraints,
+  import('./pathfind').PathConstraints,
   'brickStopCost' | 'startDir' | 'fireCooldownTicks' | 'fireIntervalTicks' | 'marchTicksPerCell'
 > {
   const startDir = p.dir

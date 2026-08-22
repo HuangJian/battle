@@ -27,7 +27,7 @@
 
 import type { Tank, TankKind, Bullet } from '../../types'
 import type { World } from '../../game/World'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import { BASE_POS, DIR_VECTORS, GRID, CELL, TANK, FIELD, type Direction } from '../../constants'
 import { TileMap } from '../../game/TileMap'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'

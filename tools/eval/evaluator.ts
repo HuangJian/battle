@@ -2,7 +2,7 @@ import type { SimResult, FrameMetrics } from '../sim/simulation-runner'
 import { GRID } from '../../src/constants'
 import type { StageData } from '../../src/types'
 import { TileMap } from '../../src/game/TileMap'
-import { floodFill } from '../../src/utils/pathfind'
+import { floodFill } from '../../src/utils/grid-search'
 
 // ============================================================
 // Types

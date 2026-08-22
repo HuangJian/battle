@@ -1626,3 +1626,22 @@ SimWorkerPool、ForensicPool 继承泛型池；gate-core / score-gate-core 换 r
 
 **Implications:** 新批量工具一律复用本模块；禁止再手写 worker 循环。物理核检测
 (physicalCores) 一并归位 lib/。
+
+## 250. §2.7 pathfind.ts 解耦：utils → ai/god + grid-search (STATUS: 已实施)
+
+**Decision:** `src/utils/pathfind.ts`（792 行）拆分：(a) 离线连通性助手（Cell/isPassable/
+isReachable/floodFill/pxToCell）→ `src/utils/grid-search.ts`（tools 关卡生成器与评估器的
+通用工具）；(b) God-AI A* 导航引擎（PathConstraints/fireClearStopTicks/A* 缓冲+findPath）
+整体迁 `src/ai/god/pathfind.ts`。原文件变兼容再导出 shim（保护文件 think.ts 仍从旧路径引
+Cell）。非保护消费方（8 个 AI 文件、3 tools、2 tests）改直连。
+
+**Rationale:**
+- plan §2.7：AI 领域逻辑不应住在 utils——agent 浏览 utils 找"通用工具"时会撞上 700 行
+  带火控模型/破砖语义的 A*。
+- 实际考察修正计划表述：PathConstraints 本就是"代价函数参数注入"设计（§2.7 的目标形态），
+  fireClearStopTicks 无外部引用——真正的错位是文件位置，而非 API 形态。
+- 切片脚本按行号搬移保证字节不变；A* 内循环顺序未动（确定性）；全套门禁含 God-AI 门禁通过。
+- probe-findpath-parity 从 git 历史读原文做对齐检查，不受影响。
+
+**Implications:** 新导航代码进 ai/god/pathfind；新离线几何工具进 grid-search；
+utils/pathfind 仅作兼容层存在。

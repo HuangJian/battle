@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { TileMap } from '../src/game/TileMap'
-import { findPath, isReachable, floodFill, pxToCell } from '../src/utils/pathfind'
+import { isReachable, floodFill, pxToCell } from '../src/utils/grid-search'
+import { findPath } from '../src/ai/god/pathfind'
 import { World } from '../src/game/World'
 import { STAGES } from '../src/config/stages'
 import { GRID, CELL, ENEMY_SPAWNS } from '../src/constants'

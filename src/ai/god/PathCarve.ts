@@ -1,8 +1,8 @@
 import type { GodAIInput } from '../GodAIInput'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import type { Direction } from '../../constants'
 import { BASE_POS, GRID, CELL, DIR_VECTORS, BULLET } from '../../constants'
-import { findPath } from '../../utils/pathfind'
+import { findPath } from './pathfind'
 import { computeBaseGuardAnchorImpl, getDefaultDefensePositionImpl } from './StrategyPlanner'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 
