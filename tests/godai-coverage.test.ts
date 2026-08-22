@@ -61,7 +61,12 @@ function buildAI(w: World, mode: number): GodAIInput {
   // baseClearShotThreat/chokepointMode are shipped features that make any
   // clear-lane enemy a threat — disabled here so the coverage branch sees
   // the raw box/race predicates only.
-  return new GodAIInput(w, { ...DEFAULT_GOD_AI_PARAMS, coverageMode: mode, chokepointMode: 0, baseClearShotThreat: 0 })
+  return new GodAIInput(w, {
+    ...DEFAULT_GOD_AI_PARAMS,
+    coverageMode: mode,
+    chokepointMode: 0,
+    baseClearShotThreat: 0,
+  })
 }
 
 /** Invalidate within-tick memos and rebuild the enemy snapshot. */

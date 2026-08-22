@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'bun:test'
-import { runSimulation, type ThreatLedgerRun, type ThreatLedgerSample } from '../tools/sim/simulation-runner'
+import {
+  runSimulation,
+  type ThreatLedgerRun,
+  type ThreatLedgerSample,
+} from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 import {
   classifyFailure,
@@ -225,10 +229,7 @@ describe('failure classifier (M0 §4.2)', () => {
   it('every classification carries explainable evidence', () => {
     const ledgers = [
       ringLedger([baseSample({ baseHp: 120 })], 'lives_exhausted'),
-      ringLedger([
-        baseSample({ tick: 1, baseHp: 120 }),
-        baseSample({ tick: 2, baseHp: 20 }),
-      ]),
+      ringLedger([baseSample({ tick: 1, baseHp: 120 }), baseSample({ tick: 2, baseHp: 20 })]),
     ]
     for (const l of ledgers) {
       const cls = classifyFailure(l, l.failureCause)

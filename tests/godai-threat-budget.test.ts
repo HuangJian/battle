@@ -194,7 +194,9 @@ describe('enemyDeadline (§5.2 monotonicity, §4.2 bound semantics)', () => {
     const e1 = addEnemy(full, 20, 20, 'basic')
     const e2 = addEnemy(low, 20, 20, 'basic')
     low.baseHp = 10
-    expect(enemyDeadline(low, e2).enemyUrgency).toBeGreaterThan(enemyDeadline(full, e1).enemyUrgency)
+    expect(enemyDeadline(low, e2).enemyUrgency).toBeGreaterThan(
+      enemyDeadline(full, e1).enemyUrgency,
+    )
     expect(enemyDeadline(low, e2).enemyDamageWindow).toBeLessThan(
       enemyDeadline(full, e1).enemyDamageWindow,
     )
@@ -211,7 +213,9 @@ describe('enemyDeadline (§5.2 monotonicity, §4.2 bound semantics)', () => {
     const e1 = addEnemy(intact, 20, 20, 'basic')
     const e2 = addEnemy(broken, 20, 20, 'basic')
     for (const { col, row } of RING_CELLS) broken.tileMap.destroy(col, row)
-    expect(enemyDeadline(broken, e2).enemyUrgency).toBeGreaterThan(enemyDeadline(intact, e1).enemyUrgency)
+    expect(enemyDeadline(broken, e2).enemyUrgency).toBeGreaterThan(
+      enemyDeadline(intact, e1).enemyUrgency,
+    )
     expect(enemyDeadline(broken, e2).enemyDamageEarliest).toBeLessThan(
       enemyDeadline(intact, e1).enemyDamageEarliest,
     )
@@ -413,7 +417,10 @@ describe('playerActionEta single-billing (open-test protocol §4.1)', () => {
     expect(bend.aimAlignmentEta).toBeCloseTo(window, 5)
     expect(straight.aimAlignmentEta).toBe(0)
     expect(bend.total - straight.total).toBeCloseTo(
-      bend.movementEta - straight.movementEta + window + (bend.requiredShotsEta - straight.requiredShotsEta),
+      bend.movementEta -
+        straight.movementEta +
+        window +
+        (bend.requiredShotsEta - straight.requiredShotsEta),
       5,
     )
   })

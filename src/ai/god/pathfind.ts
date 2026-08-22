@@ -125,7 +125,6 @@ export interface PathConstraints {
   marchTicksPerCell?: number
 }
 
-
 /** The four cardinal directions as flat arrays (perf): tuple destructuring
  * `const [dc, dr] = STEPS[s]` allocates an iterator per expansion in the A*
  * inner loop. Two parallel arrays let the loop read `DIR_DX[s]` and
@@ -161,7 +160,6 @@ const EDGE_DC0: readonly number[] = [0, 0, 0, 1]
 const EDGE_DR0: readonly number[] = [0, 1, 0, 0]
 const EDGE_DC1: readonly number[] = [1, 1, 0, 1]
 const EDGE_DR1: readonly number[] = [0, 1, 1, 1]
-
 
 // ---- §nav-cost 3.3(c): fireClearStopTicks -------------------------------------
 

@@ -44,7 +44,12 @@ function placePlayer(w: World, col: number, row: number, dir: 'up' | 'down' | 'l
   return p
 }
 
-function addEnemy(w: World, col: number, row: number, kind: 'basic' | 'fast' | 'power' | 'armor' = 'basic'): Tank {
+function addEnemy(
+  w: World,
+  col: number,
+  row: number,
+  kind: 'basic' | 'fast' | 'power' | 'armor' = 'basic',
+): Tank {
   const e = w.createTank(kind, (col - 1) * CELL, (row - 1) * CELL, 'up')
   e.spawnTimer = 0
   e.alive = true

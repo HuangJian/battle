@@ -113,16 +113,16 @@ describe('§225-A baseLaneSentryInBandNav (in-band lane plug)', () => {
     expect(input._moveDir).toBe('right')
   })
 
-  it("ON: colGap 1 does not hijack (already near the lane)", () => {
+  it('ON: colGap 1 does not hijack (already near the lane)', () => {
     const { world, input } = setupWorld()
     input.params.baseLaneSentryInBandNav = 1
     placePlayer(world, 11, 21)
     placeEnemy(world, 12, 23)
     input.getMoveDirection()
-    expect(input._lastBranch).not.toBe("baseLaneSentry")
+    expect(input._lastBranch).not.toBe('baseLaneSentry')
   })
 
-  it("ON: colGap 4 exceeds the distance limit — falls through", () => {
+  it('ON: colGap 4 exceeds the distance limit — falls through', () => {
     const { world, input } = setupWorld()
     input.params.baseLaneSentryInBandNav = 1
     placePlayer(world, 8, 21)

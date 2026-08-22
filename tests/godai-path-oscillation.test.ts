@@ -32,11 +32,7 @@ interface IdleResult {
  * from an anchor stays within 1 cell (CELL=16px) in both axes, with no
  * kills or terrain destruction (non-combat idle). Mirrors the
  * idle-analysis.ts detection logic. */
-function maxNonCombatIdle(
-  stageIdx: number,
-  seed: number,
-  maxTicks: number,
-): IdleResult {
+function maxNonCombatIdle(stageIdx: number, seed: number, maxTicks: number): IdleResult {
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = 'hard'
@@ -93,10 +89,7 @@ function maxNonCombatIdle(
         fireTicks = fire ? 1 : 0
         killsAtStart = world.killCount
         revAtStart = world.tileMap.revision
-      } else if (
-        Math.abs(px - anchorX) <= CELL &&
-        Math.abs(py - anchorY) <= CELL
-      ) {
+      } else if (Math.abs(px - anchorX) <= CELL && Math.abs(py - anchorY) <= CELL) {
         if (fire) fireTicks++
       } else {
         flush(tick)

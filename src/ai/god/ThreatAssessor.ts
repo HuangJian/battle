@@ -654,8 +654,10 @@ export function dodgeDirectionImpl(
             const baseCy = BASE_POS.row * CELL + CELL
             const va = DIR_VECTORS[axisAName]
             const vb = DIR_VECTORS[axisBName]
-            const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
-            const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+            const distA =
+              Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
+            const distB =
+              Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
             return distA <= distB ? axisAName : axisBName
           }
           return axisAName

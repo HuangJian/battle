@@ -42,7 +42,12 @@ import {
 } from './SuicideReturn'
 import { runChain, ACTION_WEIGHTS, type Candidate, type DecisionContext } from './DecisionCore'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from './ActionContract'
-import { evaluateUnifiedCandidates, clearLaneFireDir, fireRayBlocked, travelFireDetourDir } from './ActionCandidates'
+import {
+  evaluateUnifiedCandidates,
+  clearLaneFireDir,
+  fireRayBlocked,
+  travelFireDetourDir,
+} from './ActionCandidates'
 import { survivalPressure, updateEnemyModel } from './EnemyModel'
 import {
   enemyCanShootBase,
@@ -568,7 +573,15 @@ const UNIFIED_CANDIDATES: Candidate = {
     }
     const anchorCol = BASE_POS.col
     const anchorRow = Math.max(2, BASE_POS.row - 1 - prm.defenseRowOffset)
-    const v = evaluateUnifiedCandidates(w, p, list, hunt ?? nearest, anchorCol, anchorRow, self._candVerdict)
+    const v = evaluateUnifiedCandidates(
+      w,
+      p,
+      list,
+      hunt ?? nearest,
+      anchorCol,
+      anchorRow,
+      self._candVerdict,
+    )
     if (!v.kind) return false
     const roll = (): boolean => self.rng.next() >= prm.aimError
     if (v.kind === 'returnDefense') {
@@ -589,8 +602,17 @@ const UNIFIED_CANDIDATES: Candidate = {
     if (!target || !target.alive) return false
     const tc = self.tankCell(target)
     const aligned = tc.col === pcxCell.col || tc.row === pcxCell.row
-    const facing
-      = p.dir === (aligned ? (tc.col === pcxCell.col ? (tc.row > pcxCell.row ? 'down' : 'up') : tc.col > pcxCell.col ? 'right' : 'left') : p.dir)
+    const facing =
+      p.dir ===
+      (aligned
+        ? tc.col === pcxCell.col
+          ? tc.row > pcxCell.row
+            ? 'down'
+            : 'up'
+          : tc.col > pcxCell.col
+            ? 'right'
+            : 'left'
+        : p.dir)
     if (v.kind === 'clearLane') {
       const dir = clearLaneFireDir(w, p, target)
       if (!dir) return false
@@ -777,7 +799,11 @@ const BASE_LANE_SENTRY: Candidate = {
         const sc2 = dd1 <= dd2 ? d2 : d1
         if (sc1 >= 0 && sc1 < GRID && sc1 !== ccol) {
           const gap1 = sc1 > ccol ? sc1 - ccol : ccol - sc1
-          if (gap1 <= 2 && w.tileMap.get(sc1, crow) === 'empty' && laneCorridorBlocked(w, sc1, crow, sc1, bestRow) === 0) {
+          if (
+            gap1 <= 2 &&
+            w.tileMap.get(sc1, crow) === 'empty' &&
+            laneCorridorBlocked(w, sc1, crow, sc1, bestRow) === 0
+          ) {
             self._moveDir = sc1 > ccol ? 'right' : 'left'
             self._fire = false
             self.branchCounts.baseLaneSentry++
@@ -787,7 +813,11 @@ const BASE_LANE_SENTRY: Candidate = {
         }
         if (sc2 >= 0 && sc2 < GRID && sc2 !== ccol) {
           const gap2 = sc2 > ccol ? sc2 - ccol : ccol - sc2
-          if (gap2 <= 2 && w.tileMap.get(sc2, crow) === 'empty' && laneCorridorBlocked(w, sc2, crow, sc2, bestRow) === 0) {
+          if (
+            gap2 <= 2 &&
+            w.tileMap.get(sc2, crow) === 'empty' &&
+            laneCorridorBlocked(w, sc2, crow, sc2, bestRow) === 0
+          ) {
             self._moveDir = sc2 > ccol ? 'right' : 'left'
             self._fire = false
             self.branchCounts.baseLaneSentry++
@@ -1754,7 +1784,7 @@ const ENGAGE: Candidate = {
           // deadlocks (player stuck at one spot for 17000+ ticks). The
           // zone fix accumulates camp time across nearby cells, so the
           // escape triggers even if the player wiggles between two cells.
-    const pc = self.playerCell()
+          const pc = self.playerCell()
           if (
             self._campCell &&
             Math.abs(self._campCell.col - pc.col) <= 1 &&
@@ -1936,14 +1966,22 @@ const HUNT: Candidate = {
     // + fireRayBlocked). Mode 0 = OFF (byte-identical).
     if (self.params.fireLineDetourMode > 0 && !onCooldown) {
       const detourList = self._enemies.length > 0 ? self._enemies : w.tanks
-      const detourDir = travelFireDetourDir(w, p, pc, detourList, self._lastSelectTargetId, (t) => {
-        if (enemyCanShootBase(self, t) || enemyCanBreachRing(self, t)) return true
-        // Scalar center-cell math (§14.1 — no per-tick object allocation in
-        // the M5 callback; same center-floor semantics as tankCenterCell).
-        const tcCol = Math.floor((t.x + t.w / 2) / CELL)
-        const tcRow = Math.floor((t.y + t.h / 2) / CELL)
-        return tcRow >= BASE_POS.row - 4 && Math.abs(tcCol - BASE_POS.col) <= 6
-      }, self.params.fireLineDetourMinSlack)
+      const detourDir = travelFireDetourDir(
+        w,
+        p,
+        pc,
+        detourList,
+        self._lastSelectTargetId,
+        (t) => {
+          if (enemyCanShootBase(self, t) || enemyCanBreachRing(self, t)) return true
+          // Scalar center-cell math (§14.1 — no per-tick object allocation in
+          // the M5 callback; same center-floor semantics as tankCenterCell).
+          const tcCol = Math.floor((t.x + t.w / 2) / CELL)
+          const tcRow = Math.floor((t.y + t.h / 2) / CELL)
+          return tcRow >= BASE_POS.row - 4 && Math.abs(tcCol - BASE_POS.col) <= 6
+        },
+        self.params.fireLineDetourMinSlack,
+      )
       if (detourDir) {
         self._moveDir = detourDir
         self._fire = self.rng.next() >= self.params.aimError

@@ -104,7 +104,8 @@ describe('batch-sim', () => {
     })
   })
 
-  describe.skip('summarize', () => { // DISABLED: Phase III — passRate assertions (pass-rate tied)
+  describe.skip('summarize', () => {
+    // DISABLED: Phase III — passRate assertions (pass-rate tied)
     it('computes correct summary statistics', () => {
       const results = batchRun(makeBatchOpts())
       const summary = summarize(results)
@@ -164,7 +165,8 @@ describe('report', () => {
     expect(report.perStage).toHaveLength(2) // 2 stages
   })
 
-  it.skip('perStage reports have correct fields', () => { // DISABLED: Phase III — asserts passRate field (pass-rate tied)
+  it.skip('perStage reports have correct fields', () => {
+    // DISABLED: Phase III — asserts passRate field (pass-rate tied)
     const results = batchRun(makeBatchOpts())
     const report = generateReport(results)
     for (const ps of report.perStage) {

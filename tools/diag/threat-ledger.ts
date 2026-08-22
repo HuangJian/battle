@@ -63,7 +63,9 @@ let stageIdxs: number[]
 try {
   stageIdxs = parseStageSpec(stageSpec, STAGES.length)
 } catch (e) {
-  console.error(e instanceof StageSpecError ? e.message : `threat-ledger: invalid --stages: ${stageSpec}`)
+  console.error(
+    e instanceof StageSpecError ? e.message : `threat-ledger: invalid --stages: ${stageSpec}`,
+  )
   process.exit(1)
 }
 const maxTicks = Number(arg('max-ticks') ?? '36000')
@@ -208,7 +210,9 @@ async function main(): Promise<void> {
   const t0 = Date.now()
   const results = await pool.runBatch(tasks)
   pool.terminate()
-  process.stderr.write(`threat-ledger: ran ${results.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`)
+  process.stderr.write(
+    `threat-ledger: ran ${results.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
+  )
 
   const runs: LedgerRun[] = []
   let errors = 0
@@ -247,7 +251,9 @@ async function main(): Promise<void> {
         list.push(r)
         byFamily.set(r.classification.primary, list)
       }
-      for (const [family, list] of [...byFamily.entries()].sort((a, b) => b[1].length - a[1].length)) {
+      for (const [family, list] of [...byFamily.entries()].sort(
+        (a, b) => b[1].length - a[1].length,
+      )) {
         void family
         const picked = list.slice(0, reportPerFamily)
         for (const r of picked) {
@@ -260,7 +266,10 @@ async function main(): Promise<void> {
           for (const s of r.ledger.samples) {
             const threats = s.enemies
               .filter((e) => e.canShootBase || e.canBreachRing)
-              .map((e) => `${e.kind}#${e.id}(${e.canShootBase ? 'B' : 'R'})@${e.cell.col},${e.cell.row}`)
+              .map(
+                (e) =>
+                  `${e.kind}#${e.id}(${e.canShootBase ? 'B' : 'R'})@${e.cell.col},${e.cell.row}`,
+              )
               .join(' ')
             out.push(
               `  ${String(s.tick).padStart(6)}  ${String(s.baseHp).padStart(3)}   ${String(s.intactRing).padStart(3)}   ${String(s.liveEnemies).padStart(2)}  ${String(s.nearestThreatEta).padStart(5)}  ${String(s.threatSlack).padStart(6)}  ${s.onCooldown ? ' cd' : '   '} ${s.noOpReason ? ` ${s.noOpReason}` : '    '}  (${s.playerCell.col},${s.playerCell.row}) -> ${s.branch}${threats ? `  THREATS: ${threats}` : ''}`,
@@ -292,7 +301,9 @@ async function main(): Promise<void> {
       for (const s of r.ledger.samples) {
         const threats = s.enemies
           .filter((e) => e.canShootBase || e.canBreachRing)
-          .map((e) => `${e.kind}#${e.id}(${e.canShootBase ? 'B' : 'R'})@${e.cell.col},${e.cell.row}`)
+          .map(
+            (e) => `${e.kind}#${e.id}(${e.canShootBase ? 'B' : 'R'})@${e.cell.col},${e.cell.row}`,
+          )
           .join(' ')
         out.push(
           `  ${String(s.tick).padStart(6)}  ${String(s.baseHp).padStart(3)}   ${String(s.intactRing).padStart(3)}   ${String(s.liveEnemies).padStart(2)}  ${String(s.nearestThreatEta).padStart(5)}  ${String(s.threatSlack).padStart(6)}  ${s.onCooldown ? ' cd' : '   '} ${s.noOpReason ? ` ${s.noOpReason}` : '    '}  (${s.playerCell.col},${s.playerCell.row}) -> ${s.branch}${threats ? `  THREATS: ${threats}` : ''}`,
@@ -302,7 +313,9 @@ async function main(): Promise<void> {
   }
 
   out.push(`\n${'='.repeat(78)}`)
-  out.push(`${runs.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s${errors ? ` (${errors} errors)` : ''}`)
+  out.push(
+    `${runs.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s${errors ? ` (${errors} errors)` : ''}`,
+  )
   console.log(out.join('\n'))
 
   if (jsonPath) {
@@ -353,7 +366,10 @@ function reportDifficulty(out: string[], difficulty: string, runs: LedgerRun[]):
 
   if (failures.length) {
     const fam = aggregateClassifications(
-      failures.map((r) => ({ key: `${r.difficulty}S${r.stageIdx + 1}#${r.seed}`, classification: r.classification })),
+      failures.map((r) => ({
+        key: `${r.difficulty}S${r.stageIdx + 1}#${r.seed}`,
+        classification: r.classification,
+      })),
     )
     out.push(`\n[*] FAILURE FAMILIES (primary class, n=${failures.length}):`)
     for (const [cls, n] of [...fam.entries()].sort((a, b) => b[1] - a[1])) {
@@ -365,16 +381,23 @@ function reportDifficulty(out: string[], difficulty: string, runs: LedgerRun[]):
       out.push(
         `    ${cls.padEnd(22)} ${String(n).padStart(4)}  (${((n / failures.length) * 100).toFixed(1)}%)` +
           `  stages: ${stages.slice(0, 10).join(',')}${stages.length > 10 ? '…' : ''}` +
-          (sec.size ? `  secondary: ${[...sec.entries()].map(([s, c]) => `${s}×${c}`).join(' ')}` : ''),
+          (sec.size
+            ? `  secondary: ${[...sec.entries()].map(([s, c]) => `${s}×${c}`).join(' ')}`
+            : ''),
       )
     }
     // base_destroyed sub-split (the plan's target family).
     const baseFam = aggregateClassifications(
-      baseLosses.map((r) => ({ key: `${r.difficulty}S${r.stageIdx + 1}#${r.seed}`, classification: r.classification })),
+      baseLosses.map((r) => ({
+        key: `${r.difficulty}S${r.stageIdx + 1}#${r.seed}`,
+        classification: r.classification,
+      })),
     )
     out.push(`\n[*] BASE_DESTROYED ONLY (n=${baseLosses.length}):`)
     for (const [cls, n] of [...baseFam.entries()].sort((a, b) => b[1] - a[1])) {
-      out.push(`    ${cls.padEnd(22)} ${String(n).padStart(4)}  (${((n / baseLosses.length) * 100).toFixed(1)}%)`)
+      out.push(
+        `    ${cls.padEnd(22)} ${String(n).padStart(4)}  (${((n / baseLosses.length) * 100).toFixed(1)}%)`,
+      )
     }
   }
 

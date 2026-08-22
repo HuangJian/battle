@@ -64,12 +64,7 @@ export function placeEnemy(
  * cleared. Cell coords → top-left pixel mapping is `col*CELL` (the dominant
  * test convention).
  */
-export function positionPlayer(
-  world: World,
-  col: number,
-  row: number,
-  dir?: Direction,
-): void {
+export function positionPlayer(world: World, col: number, row: number, dir?: Direction): void {
   const p = world.player!
   p.x = col * CELL
   p.y = row * CELL

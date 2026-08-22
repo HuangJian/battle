@@ -106,7 +106,14 @@ export interface BranchRecord {
   /** Metrics at each checkpoint offset: base HP, threat dead, cumulative
    * fires, net displacement (px — immune to the 1px snap wobble), player
    * dead. */
-  checkpoints: Array<{ at: number; baseHp: number; targetDead: boolean; fires: number; displacement: number; playerDead: boolean }>
+  checkpoints: Array<{
+    at: number
+    baseHp: number
+    targetDead: boolean
+    fires: number
+    displacement: number
+    playerDead: boolean
+  }>
   firstBaseDamageOffset: number // -1 = none in window
   firstFireOffset: number
   /** First offset with ≥8px net displacement (a real step; 1px snap
@@ -140,7 +147,12 @@ interface EventRecord {
    * no ≥8px displacement in the window — the avoid came from standing
    * (e.g. body-blocking the lane), not from an active intervention. */
   avoidedByInaction: boolean
-  branches: { cont: BranchRecord; turnFire: BranchRecord; intercept: BranchRecord; clearAdvance: BranchRecord }
+  branches: {
+    cont: BranchRecord
+    turnFire: BranchRecord
+    intercept: BranchRecord
+    clearAdvance: BranchRecord
+  }
 }
 
 // Deterministic init mirroring runSimulation() (tools/sim/simulation-runner.ts)
@@ -151,7 +163,11 @@ interface EventRecord {
 // licenses replay-to-T branching.
 const replayStageIndex = Number(arg('stage-index') ?? '0')
 
-function setupRun(stageIdx: number, seed: number, difficulty: string): { world: World; sim: Simulation; input: GodAIInput } {
+function setupRun(
+  stageIdx: number,
+  seed: number,
+  difficulty: string,
+): { world: World; sim: Simulation; input: GodAIInput } {
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = difficulty
@@ -374,7 +390,10 @@ function aheadTerrain(
 
 /** Face `dir` (issue it as movement while not facing it), then hold and
  * fire. Used both for aiming at threats and at bricks to clear. */
-function faceAndFire(p: import('../../src/types').Tank, dir: Direction): { move: Direction | null; fire: boolean } {
+function faceAndFire(
+  p: import('../../src/types').Tank,
+  dir: Direction,
+): { move: Direction | null; fire: boolean } {
   if (p.dir !== dir) return { move: dir, fire: false }
   return { move: null, fire: true }
 }
@@ -431,7 +450,10 @@ function planAdvance(
  * direction (Input semantics), so while NOT yet facing the threat issue the
  * facing direction (the fairness rule enforces turn legality and cooldown);
  * once facing the threat, hold position and fire. */
-function planTurnAndFireHold(world: World, threatId: number): { move: Direction | null; fire: boolean } {
+function planTurnAndFireHold(
+  world: World,
+  threatId: number,
+): { move: Direction | null; fire: boolean } {
   const p = world.player
   const t = threatById(world, threatId)
   if (!p || !t || !t.alive) return { move: null, fire: false }
@@ -452,7 +474,10 @@ function planIntercept(world: World, threatId: number): { move: Direction | null
 
 /** Clear-or-advance: proactively clear the line — blast any brick up to 6
  * cells ahead on the dominant axis before advancing. */
-function planClearOrAdvance(world: World, threatId: number): { move: Direction | null; fire: boolean } {
+function planClearOrAdvance(
+  world: World,
+  threatId: number,
+): { move: Direction | null; fire: boolean } {
   const p = world.player
   const t = threatById(world, threatId)
   if (!p || !t || !t.alive) return { move: null, fire: false }
@@ -483,7 +508,10 @@ function runBranch(
     input.endFrame()
     const events = world.consumeEvents()
     for (const e of events) {
-      if (e.type === 'bullet_fired' && (e as { bullet?: { isPlayer?: boolean } }).bullet?.isPlayer) {
+      if (
+        e.type === 'bullet_fired' &&
+        (e as { bullet?: { isPlayer?: boolean } }).bullet?.isPlayer
+      ) {
         fires++
         if (firstFireOffset < 0) firstFireOffset = off
       }
@@ -536,10 +564,7 @@ function runBranch(
 }
 
 /** Protocol §6.3 classification over the four branch records. */
-export function classifyIdleEvent(
-  cont: BranchRecord,
-  alts: BranchRecord[],
-): IdleClass {
+export function classifyIdleEvent(cont: BranchRecord, alts: BranchRecord[]): IdleClass {
   const contLost = cont.firstBaseDamageOffset >= 0
   const altAvoids = alts.some((a) => a.firstBaseDamageOffset < 0)
   const altActed = alts.some((a) => a.firstFireOffset >= 0 || a.firstMoveOffset >= 0)
@@ -571,7 +596,9 @@ async function main() {
   const corpusRaw = await Bun.file(fromJson as string).json()
   const pd = corpusRaw.perDifficulty?.hard
   if (!pd?.failures) {
-    console.error(`counterfactual-idle: ${fromJson} has no perDifficulty.hard.failures — is this a run-forensics corpus?`)
+    console.error(
+      `counterfactual-idle: ${fromJson} has no perDifficulty.hard.failures — is this a run-forensics corpus?`,
+    )
     process.exit(1)
   }
   const maxTicks = corpusRaw.maxTicks ?? 36000
@@ -608,7 +635,10 @@ async function main() {
 
   for (const f of chosen) {
     const key = `S${f.stageIdx + 1}s${f.seed}`
-    const det = detectSegments(f.stageIdx, f.seed, 'hard', maxTicks, { ticks: f.ticks, outcome: f.outcome })
+    const det = detectSegments(f.stageIdx, f.seed, 'hard', maxTicks, {
+      ticks: f.ticks,
+      outcome: f.outcome,
+    })
     if (!det.outcomeOk) {
       diverged++
       console.error(`  ${key}: REPLAY DIVERGED from corpus (determinism violation) — skipped`)
@@ -680,7 +710,8 @@ async function main() {
       counts[cls]++
       const acted = (r: BranchRecord) => r.firstFireOffset >= 0 || r.firstMoveOffset >= 0
       const avoiders = [tfR, icR, caR].filter((r) => r.firstBaseDamageOffset < 0)
-      const avoidedByInaction = cls === 'idle_causal' && avoiders.length > 0 && avoiders.every((r) => !acted(r))
+      const avoidedByInaction =
+        cls === 'idle_causal' && avoiders.length > 0 && avoiders.every((r) => !acted(r))
       events.push({
         key,
         stageIdx: f.stageIdx,
@@ -714,7 +745,9 @@ async function main() {
           `[cont ${b(contR)} | t&f ${b(tfR)} | int ${b(icR)} | c/a ${b(caR)}]`,
       )
       if (dumpKey === key) {
-        console.log(`  --- dump ${key}: per-tick trace around t=${seg.start} (branch/move/fire/cd/baseHp/px,py)`)
+        console.log(
+          `  --- dump ${key}: per-tick trace around t=${seg.start} (branch/move/fire/cd/baseHp/px,py)`,
+        )
         const from = Math.max(0, seg.start - 60)
         const to = Math.min(det.trace.length, seg.start + 90)
         for (let i = from; i < to; i++) {
@@ -748,7 +781,14 @@ async function main() {
       JSON.stringify({
         generatedAt: new Date().toISOString(),
         fromCorpus: fromJson as string,
-        filters: { kinds: [...kinds], limit, eventsPerRun, preWindow, windowTicks, checkpoints: CHECKPOINTS },
+        filters: {
+          kinds: [...kinds],
+          limit,
+          eventsPerRun,
+          preWindow,
+          windowTicks,
+          checkpoints: CHECKPOINTS,
+        },
         total,
         counts,
         idleCausalShare: causalShare,

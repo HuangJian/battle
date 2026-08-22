@@ -10,7 +10,9 @@
  * Input: a run-forensics --json sweep (baseline params, same caliber).
  */
 export {}
-const j = JSON.parse(await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text())
+const j = JSON.parse(
+  await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text(),
+)
 const failures = j.perDifficulty.hard.failures as Array<{
   stageIdx: number
   seed: number
@@ -35,7 +37,13 @@ let dodgeIdleTicks = 0 // dodge + moveDir null
 let dodgeFireTicks = 0
 let totalTicks = 0
 
-const deathRuns: Array<{ key: string; tick: number; lastBranch: string; lastBranchCount: number; actions: number }> = []
+const deathRuns: Array<{
+  key: string
+  tick: number
+  lastBranch: string
+  lastBranchCount: number
+  actions: number
+}> = []
 const branchAtDeath = new Map<string, number>()
 
 for (const f of failures) {
@@ -84,12 +92,22 @@ for (const [b, n] of sorted) {
   )
 }
 console.log(`\n=== dodge 细分 ===`)
-console.log(`dodge ticks: ${dodgeTicks} (${((dodgeTicks / totalTicks) * 100).toFixed(1)}% of terminal ticks)`)
-console.log(`  idle (moveDir null): ${dodgeIdleTicks} (${((dodgeIdleTicks / dodgeTicks) * 100).toFixed(1)}% of dodge)`)
-console.log(`  fire: ${dodgeFireTicks} (${((dodgeFireTicks / dodgeTicks) * 100).toFixed(1)}% of dodge)`)
+console.log(
+  `dodge ticks: ${dodgeTicks} (${((dodgeTicks / totalTicks) * 100).toFixed(1)}% of terminal ticks)`,
+)
+console.log(
+  `  idle (moveDir null): ${dodgeIdleTicks} (${((dodgeIdleTicks / dodgeTicks) * 100).toFixed(1)}% of dodge)`,
+)
+console.log(
+  `  fire: ${dodgeFireTicks} (${((dodgeFireTicks / dodgeTicks) * 100).toFixed(1)}% of dodge)`,
+)
 
 console.log(`\n=== 玩家死亡局的死亡 tick 分支 (${deathRuns.length} 局) ===`)
 for (const [b, n] of [...branchAtDeath.entries()].sort((a, b) => b[1] - a[1]))
-  console.log(`${b.padEnd(18)} ${String(n).padStart(5)} (${((n / deathRuns.length) * 100).toFixed(1)}%)`)
+  console.log(
+    `${b.padEnd(18)} ${String(n).padStart(5)} (${((n / deathRuns.length) * 100).toFixed(1)}%)`,
+  )
 const dodgeDeaths = deathRuns.filter((d) => d.lastBranch === 'dodge')
-console.log(`dodge 死亡 ${dodgeDeaths.length} 局: ${dodgeDeaths.map((d) => `${d.key}@${d.tick}[${d.lastBranchCount}/${d.actions}]`).join(' ')}`)
+console.log(
+  `dodge 死亡 ${dodgeDeaths.length} 局: ${dodgeDeaths.map((d) => `${d.key}@${d.tick}[${d.lastBranchCount}/${d.actions}]`).join(' ')}`,
+)

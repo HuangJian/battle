@@ -73,7 +73,6 @@ export function isPassable(
   return true
 }
 
-
 const STEP_DX = DIR_DX
 const STEP_DY = DIR_DY
 

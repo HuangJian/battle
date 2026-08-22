@@ -175,13 +175,7 @@ export const BIG_EXPLOSION_MS = 500
  * existing imports keep working. New code should import from
  * `utils/direction` directly.
  */
-export {
-  DIR_VECTORS,
-  DIR_DX,
-  DIR_DY,
-  dirIdx,
-  type Direction,
-} from './utils/direction'
+export { DIR_VECTORS, DIR_DX, DIR_DY, dirIdx, type Direction } from './utils/direction'
 
 // ================================================================
 // Ice momentum (slide / glide) model — see Simulation.updateMovement.

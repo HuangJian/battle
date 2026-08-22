@@ -33,11 +33,7 @@ export interface KillCreditOptions {
  *
  * @returns the scored points (`gained`), for callers that need them.
  */
-export function recordEnemyKill(
-  w: World,
-  victim: Tank,
-  opts: KillCreditOptions = {},
-): number {
+export function recordEnemyKill(w: World, victim: Tank, opts: KillCreditOptions = {}): number {
   const gained = killScore(
     w.difficultyKey,
     victim.aiState?.level,

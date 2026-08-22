@@ -13,7 +13,9 @@
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from '../sim/simulation-runner'
 
-const j = JSON.parse(await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text())
+const j = JSON.parse(
+  await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text(),
+)
 const failures = j.perDifficulty.hard.failures as Array<{
   stageIdx: number
   seed: number
@@ -103,22 +105,35 @@ const sum = (f: (o: RunStat) => number) => out.reduce((a, o) => a + f(o), 0)
 const endT2a = sum((o) => o.endT2a)
 const endIdle = sum((o) => o.endT2aIdle)
 console.log(`\n=== t2a suicide-guard audit (${W} base_destroyed runs, final 300 ticks) ===`)
-console.log(`t2a commits (end): ${endT2a} | idle (no-output): ${endIdle} (${((endIdle / Math.max(1, endT2a)) * 100).toFixed(1)}%)`)
-console.log(`  of idle: onCooldown ${sum((o) => o.endIdleCooldown)} (${((sum((o) => o.endIdleCooldown) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`)
-console.log(`  of idle: enemy bullet inbound eta<=40: ${sum((o) => o.endIdleThreat)} (${((sum((o) => o.endIdleThreat) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`)
-console.log(`  of idle: imminent eta<=20: ${sum((o) => o.endIdleDeadline)} (${((sum((o) => o.endIdleDeadline) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`)
+console.log(
+  `t2a commits (end): ${endT2a} | idle (no-output): ${endIdle} (${((endIdle / Math.max(1, endT2a)) * 100).toFixed(1)}%)`,
+)
+console.log(
+  `  of idle: onCooldown ${sum((o) => o.endIdleCooldown)} (${((sum((o) => o.endIdleCooldown) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`,
+)
+console.log(
+  `  of idle: enemy bullet inbound eta<=40: ${sum((o) => o.endIdleThreat)} (${((sum((o) => o.endIdleThreat) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`,
+)
+console.log(
+  `  of idle: imminent eta<=20: ${sum((o) => o.endIdleDeadline)} (${((sum((o) => o.endIdleDeadline) / Math.max(1, endIdle)) * 100).toFixed(1)}%)`,
+)
 console.log(`  of idle: last 60 ticks before destruction: ${sum((o) => o.t2aIdleBeforeDeath)}`)
 const noOp: Record<string, number> = {}
-for (const o of out) for (const [k, v] of Object.entries(o.noOpByReason)) noOp[k] = (noOp[k] ?? 0) + v
+for (const o of out)
+  for (const [k, v] of Object.entries(o.noOpByReason)) noOp[k] = (noOp[k] ?? 0) + v
 console.log('\nnoOpReason breakdown (end-300 window):')
 for (const [k, v] of Object.entries(noOp).sort((a, b) => b[1] - a[1]))
   console.log(`  ${k.padEnd(30)} ${v} (${((v / Math.max(1, endIdle)) * 100).toFixed(1)}%)`)
 const wholeT2a = sum((o) => o.wholeT2a)
 const wholeIdle = sum((o) => o.wholeT2aIdle)
-console.log(`\nwhole-run baseline: t2a ${wholeT2a} | idle ${wholeIdle} (${((wholeIdle / Math.max(1, wholeT2a)) * 100).toFixed(1)}%)`)
+console.log(
+  `\nwhole-run baseline: t2a ${wholeT2a} | idle ${wholeIdle} (${((wholeIdle / Math.max(1, wholeT2a)) * 100).toFixed(1)}%)`,
+)
 const idleDead = out.filter((o) => o.t2aIdleBeforeDeath > 0)
 console.log(`runs with t2a idle in final 60 ticks: ${idleDead.length}/${W}`)
 console.log('\nper-run (first 12):')
 for (const o of out.slice(0, 12))
-  console.log(`  ${o.key} end-t2a=${o.endT2a} idle=${o.endT2aIdle} cd=${o.endIdleCooldown} threat=${o.endIdleThreat} d60=${o.t2aIdleBeforeDeath}`)
+  console.log(
+    `  ${o.key} end-t2a=${o.endT2a} idle=${o.endT2aIdle} cd=${o.endIdleCooldown} threat=${o.endIdleThreat} d60=${o.t2aIdleBeforeDeath}`,
+  )
 await Bun.write('tmp/t2a-audit.json', JSON.stringify(out, null, 2))

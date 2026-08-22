@@ -1390,8 +1390,9 @@ function computeLedgerSample(world: World, input: GodAIInput, tick: number): Thr
   }
 
   const nearestEta = Number.isFinite(nearestThreatEta) ? Math.round(nearestThreatEta * 10) / 10 : -1
-  const interceptEta =
-    Number.isFinite(bestInterceptEta) ? Math.round(bestInterceptEta * 10) / 10 : -1
+  const interceptEta = Number.isFinite(bestInterceptEta)
+    ? Math.round(bestInterceptEta * 10) / 10
+    : -1
   const slack =
     Number.isFinite(nearestThreatEta) && Number.isFinite(bestInterceptEta)
       ? Math.round((nearestThreatEta - bestInterceptEta) * 10) / 10

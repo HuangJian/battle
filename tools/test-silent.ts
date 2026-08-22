@@ -269,7 +269,12 @@ export async function runSilentTest(
   // 2. Run the selected tests once. `--parallel --timeout=50000` are mandatory
   // (AGENTS.md §4): without `--parallel` all files share one process and
   // cross-file module state leaks surface as order-dependent failures.
-  const first = await spawnCapture('bun', ['test', '--parallel', '--timeout=50000', ...files], cwd, timeoutMs)
+  const first = await spawnCapture(
+    'bun',
+    ['test', '--parallel', '--timeout=50000', ...files],
+    cwd,
+    timeoutMs,
+  )
   const summary = extractSummary(first.output)
   const failures = parseFailures(first.output)
 

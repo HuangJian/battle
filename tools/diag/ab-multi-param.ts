@@ -43,7 +43,9 @@ const jsonOut = arg('json')
 
 const paramsSpec = arg('params')
 if (!paramsSpec) {
-  console.error('usage: ab-multi-param.ts --params k1=v1,k2=v2 [--difficulty hard] [--stages all] [--seeds 1-60] [--json out.json]')
+  console.error(
+    'usage: ab-multi-param.ts --params k1=v1,k2=v2 [--difficulty hard] [--stages all] [--seeds 1-60] [--json out.json]',
+  )
   process.exit(1)
 }
 const overrides: Record<string, number> = {}
@@ -64,7 +66,16 @@ for (const [label, params] of [
 ] as const) {
   for (const si of stageIdxs) {
     for (const seed of seeds) {
-      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000, telemetry: true })
+      tasks.push({
+        id: tasks.length,
+        seed,
+        stage: STAGES[si],
+        stageIndex: 0,
+        difficulty,
+        params,
+        maxTicks: 36000,
+        telemetry: true,
+      })
       labels.push(`${label}|${si}|${seed}`)
     }
   }
@@ -90,7 +101,8 @@ console.error(`elapsed ${((Date.now() - started) / 1000).toFixed(1)}s for ${task
 
 if (jsonOut) {
   const out: Record<string, { o: string; t: number; hp: number; lives: number }> = {}
-  for (const [k, r] of resByKey) out[k] = { o: r.outcome, t: r.ticks, hp: r.baseAlive ? 120 : 0, lives: r.lives ?? 0 }
+  for (const [k, r] of resByKey)
+    out[k] = { o: r.outcome, t: r.ticks, hp: r.baseAlive ? 120 : 0, lives: r.lives ?? 0 }
   await Bun.write(jsonOut, JSON.stringify(out, null, 1))
   console.error(`wrote ${jsonOut}`)
 }
@@ -100,7 +112,9 @@ let totalBase = 0
 let totalCand = 0
 let lw = 0
 let wl = 0
-console.log(`=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  params ${paramsSpec}`)
+console.log(
+  `=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  params ${paramsSpec}`,
+)
 console.log('stage baseW candW  L->W W->L  flips')
 for (const si of stageIdxs) {
   let b = 0
@@ -132,6 +146,10 @@ for (const si of stageIdxs) {
       detail.push(`s${seed}:W${br?.ticks}->L${cr?.ticks}`)
     }
   }
-  console.log(`s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`)
+  console.log(
+    `s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`,
+  )
 }
-console.log(`TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`)
+console.log(
+  `TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`,
+)

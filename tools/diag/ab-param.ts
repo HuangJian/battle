@@ -46,7 +46,9 @@ const jsonOut = arg('json')
 
 const paramSpec = arg('param')
 if (!paramSpec) {
-  console.error('usage: ab-param.ts --param key=value [--difficulty hard] [--stages 8|all] [--seeds 1-60] [--json out.json]')
+  console.error(
+    'usage: ab-param.ts --param key=value [--difficulty hard] [--stages 8|all] [--seeds 1-60] [--json out.json]',
+  )
   process.exit(1)
 }
 const [pKey, pVal] = paramSpec.split('=')
@@ -69,7 +71,16 @@ for (const [label, params] of [
       // drops fire at different rates, forking hard/chaos trajectories away
       // from the eval baseline (DECISIONS §199). ab-param measured §193-B/§198
       // under the forked 口径; gate then validated station=1 under 0.
-      tasks.push({ id: tasks.length, seed, stage: STAGES[si], stageIndex: 0, difficulty, params, maxTicks: 36000, telemetry: true })
+      tasks.push({
+        id: tasks.length,
+        seed,
+        stage: STAGES[si],
+        stageIndex: 0,
+        difficulty,
+        params,
+        maxTicks: 36000,
+        telemetry: true,
+      })
       labels.push(`${label}|${si}|${seed}`)
     }
   }
@@ -106,7 +117,9 @@ let totalBase = 0
 let totalCand = 0
 let lw = 0
 let wl = 0
-console.log(`=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  param ${pKey}=${pNum}`)
+console.log(
+  `=== ${difficulty} ${stageIdxs.length} stages × ${seeds.length} seeds  param ${pKey}=${pNum}`,
+)
 console.log('stage baseW candW  L->W W->L  flips')
 for (const si of stageIdxs) {
   let b = 0
@@ -138,6 +151,10 @@ for (const si of stageIdxs) {
       detail.push(`s${seed}:W${br?.ticks}->L${cr?.ticks}`)
     }
   }
-  console.log(`s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`)
+  console.log(
+    `s${String(si + 1).padStart(2)} ${String(b).padStart(4)}/${seeds.length} ${String(c).padStart(4)}/${seeds.length}  ${String(lwS).padStart(3)}    ${String(wlS).padStart(3)}    ${detail.join(' ')}`,
+  )
 }
-console.log(`TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`)
+console.log(
+  `TOTAL baseW=${totalBase}/${stageIdxs.length * seeds.length} candW=${totalCand}/${stageIdxs.length * seeds.length}  L->W=${lw} W->L=${wl} net=${totalCand - totalBase}`,
+)

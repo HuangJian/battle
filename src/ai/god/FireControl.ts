@@ -1140,7 +1140,12 @@ export function centerPathBlockedImpl(
       for (let c = c0; c <= c1; c++) {
         if (c < 0 || c >= GRID || r < 0 || r >= GRID) return d // OOB → 'steel'
         const terrain = grid[r][c]
-        if (terrain === 'empty' || terrain === 'water' || terrain === 'forest' || terrain === 'ice') {
+        if (
+          terrain === 'empty' ||
+          terrain === 'water' ||
+          terrain === 'forest' ||
+          terrain === 'ice'
+        ) {
           continue
         }
         if (terrain === 'steel' && pierce) continue // level ≥ 3 pierces non-ring steel

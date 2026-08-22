@@ -117,7 +117,8 @@ describe('god-ai-gates', () => {
     })
   })
 
-  describe.skip('classic stage 0 regression', () => { // DISABLED: Phase III — pass-rate (stage_clear) escalation gate
+  describe.skip('classic stage 0 regression', () => {
+    // DISABLED: Phase III — pass-rate (stage_clear) escalation gate
     // The once-fatal blind spot: classic stage 0 was 0/10 pass with 0 kills.
     // This test guards against regressing back to 0 kills.
     //

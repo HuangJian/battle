@@ -14,7 +14,9 @@
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from '../sim/simulation-runner'
 
-const j = JSON.parse(await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text())
+const j = JSON.parse(
+  await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text(),
+)
 const failures = j.perDifficulty.hard.failures as Array<{
   stageIdx: number
   seed: number
@@ -31,7 +33,8 @@ const sample: Array<{ stageIdx: number; seed: number; ticks: number }> = []
 for (let i = 0; i < N; i++) {
   const idx = Math.floor((i / N) * (bdSorted.length - 1))
   const f = bdSorted[idx]
-  if (!sample.some((s) => s.stageIdx === f.stageIdx && s.seed === f.seed)) sample.push({ stageIdx: f.stageIdx, seed: f.seed, ticks: f.ticks })
+  if (!sample.some((s) => s.stageIdx === f.stageIdx && s.seed === f.seed))
+    sample.push({ stageIdx: f.stageIdx, seed: f.seed, ticks: f.ticks })
 }
 
 const BASE_COL = 13 // col 12-13, center col
@@ -130,16 +133,26 @@ const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b)
   return s[Math.floor(s.length / 2)]
 }
-console.log(`first-damage tick: median ${median(out.map((o) => o.firstDamage))} (min ${Math.min(...out.map((o) => o.firstDamage))}, max ${Math.max(...out.map((o) => o.firstDamage))})`)
+console.log(
+  `first-damage tick: median ${median(out.map((o) => o.firstDamage))} (min ${Math.min(...out.map((o) => o.firstDamage))}, max ${Math.max(...out.map((o) => o.firstDamage))})`,
+)
 console.log(`window (first damage → destruction): median ${median(out.map((o) => o.window))} ticks`)
 const deathBefore = out.filter((o) => o.deathBeforeDestroy)
-console.log(`player died BEFORE destruction: ${deathBefore.length}/${W} (${((deathBefore.length / W) * 100).toFixed(1)}%)`)
+console.log(
+  `player died BEFORE destruction: ${deathBefore.length}/${W} (${((deathBefore.length / W) * 100).toFixed(1)}%)`,
+)
 const absent = out.filter((o) => o.absentTicks > o.window * 0.5)
-console.log(`player ABSENT (>8 cells) for >50% of the window: ${absent.length}/${W} (${((absent.length / W) * 100).toFixed(1)}%)`)
+console.log(
+  `player ABSENT (>8 cells) for >50% of the window: ${absent.length}/${W} (${((absent.length / W) * 100).toFixed(1)}%)`,
+)
 const stat = out.filter((o) => o.stationaryTicks > o.window * 0.5)
-console.log(`stationary no-output for >50% of the window: ${stat.length}/${W} (${((stat.length / W) * 100).toFixed(1)}%)`)
+console.log(
+  `stationary no-output for >50% of the window: ${stat.length}/${W} (${((stat.length / W) * 100).toFixed(1)}%)`,
+)
 const sentried = out.filter((o) => o.sentryTicks > 0)
-console.log(`baseLaneSentry engaged: ${sentried.length}/${W} (${((sentried.length / W) * 100).toFixed(1)}%) | median sentry ticks ${median(sentried.map((o) => o.sentryTicks))}`)
+console.log(
+  `baseLaneSentry engaged: ${sentried.length}/${W} (${((sentried.length / W) * 100).toFixed(1)}%) | median sentry ticks ${median(sentried.map((o) => o.sentryTicks))}`,
+)
 const near = out.filter((o) => o.nearTicks > 0)
 console.log(`player near base (<=2 cells) at some point in window: ${near.length}/${W}`)
 // branch mix over the window (aggregate)
@@ -147,10 +160,18 @@ const agg: Record<string, number> = {}
 for (const o of out) for (const [b, n] of Object.entries(o.branchCounts)) agg[b] = (agg[b] ?? 0) + n
 console.log(`\nwindow branch mix (all ${W} runs):`)
 for (const [b, n] of Object.entries(agg).sort((a, b) => b[1] - a[1]))
-  console.log(`  ${b.padEnd(18)} ${n} (${((n / Object.values(agg).reduce((x, y) => x + y, 0)) * 100).toFixed(1)}%)`)
+  console.log(
+    `  ${b.padEnd(18)} ${n} (${((n / Object.values(agg).reduce((x, y) => x + y, 0)) * 100).toFixed(1)}%)`,
+  )
 console.log('\nper-run detail (first 15):')
 for (const o of out.slice(0, 15)) {
-  const top = Object.entries(o.branchCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([b, n]) => `${b}:${n}`).join(' ')
-  console.log(`  ${o.key} f@${o.firstDamage} win=${o.window} dead=${o.playerDeadAt >= 0} abs=${o.absentTicks} stat=${o.stationaryTicks} sentry=${o.sentryTicks} [${top}]`)
+  const top = Object.entries(o.branchCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([b, n]) => `${b}:${n}`)
+    .join(' ')
+  console.log(
+    `  ${o.key} f@${o.firstDamage} win=${o.window} dead=${o.playerDeadAt >= 0} abs=${o.absentTicks} stat=${o.stationaryTicks} sentry=${o.sentryTicks} [${top}]`,
+  )
 }
 await Bun.write('tmp/toolate-audit.json', JSON.stringify(out, null, 2))

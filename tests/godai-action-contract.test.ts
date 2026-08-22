@@ -4,7 +4,11 @@ import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { STAGES } from '../src/config/stages'
 import { CELL, BASE_POS } from '../src/constants'
 import type { Bullet } from '../src/types'
-import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../src/ai/god/ActionContract'
+import {
+  contractStandingHold,
+  enemyBulletOnRay,
+  ownBulletOnRay,
+} from '../src/ai/god/ActionContract'
 import { runSimulation } from '../tools/sim/simulation-runner'
 
 /**
@@ -48,7 +52,14 @@ function addEnemy(w: World, col: number, row: number, kind: string = 'basic') {
   return e
 }
 
-function addBullet(w: World, x: number, y: number, dir: 'up' | 'down' | 'left' | 'right', enemy = true, ownerId = 0) {
+function addBullet(
+  w: World,
+  x: number,
+  y: number,
+  dir: 'up' | 'down' | 'left' | 'right',
+  enemy = true,
+  ownerId = 0,
+) {
   const b: Bullet = {
     id: w.bulletSeq++,
     x,
@@ -109,7 +120,13 @@ describe('contractStandingHold (§6.1 valid waiting value)', () => {
     p.lastFire = 0 // fired at t0 → on cooldown
     w.frame = 1
     const threat = addEnemy(w, 8, 24, 'power')
-    const v = contractStandingHold({ world: w, player: p, threat, enemyBulletOnRay: false, ownBulletOnRay: false })
+    const v = contractStandingHold({
+      world: w,
+      player: p,
+      threat,
+      enemyBulletOnRay: false,
+      ownBulletOnRay: false,
+    })
     expect(v.valid).toBe(false)
     expect(v.reason).toContain('killSlack')
   })

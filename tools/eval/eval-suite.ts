@@ -835,7 +835,9 @@ async function main(): Promise<void> {
     try {
       stageIdxs = parseStageSpec(stageArg, STAGES.length)
     } catch (e) {
-      console.error(e instanceof StageSpecError ? e.message : `eval-suite: invalid --stages: ${stageArg}`)
+      console.error(
+        e instanceof StageSpecError ? e.message : `eval-suite: invalid --stages: ${stageArg}`,
+      )
       process.exit(1)
     }
   } else {
