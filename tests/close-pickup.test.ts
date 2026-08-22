@@ -5,8 +5,9 @@ import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findClosePickupTargetImpl } from '../src/ai/god/StrategyPlanner'
 import { RNG } from '../src/utils/RNG'
-import { CELL, GRID, BASE_POS, TANK } from '../src/constants'
+import { CELL, BASE_POS, TANK } from '../src/constants'
 import type { Tank, PowerUp } from '../src/types'
+import { clearArena } from './helpers'
 
 /**
  * §158: non-freeze close-range power-up pickup — unit tests.
@@ -39,12 +40,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.hasBase = world.tileMap.hasBase()
   input.reset()

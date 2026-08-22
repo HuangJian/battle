@@ -6,7 +6,8 @@ import { RNG } from '../src/utils/RNG'
 import { RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { GRID, TANK } from '../src/constants'
-import type { PowerUp, StageData, Tank } from '../src/types'
+import type { PowerUp, StageData } from '../src/types'
+import { placeEnemy } from './helpers'
 
 // ================================================================
 // §87 — Urgent power-up pickup priority (user request 2026-08-02).
@@ -112,14 +113,6 @@ function makePowerUp(id: number, type: PowerUp['type'], col: number, row: number
     blinkTimer: 0,
     lifeTimer: 0,
   }
-}
-
-/** Enemy at the given grid cell (basic, fully spawned). */
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const e = world.createTank('basic', col * 16, row * 16, 'down')
-  e.spawnTimer = 0
-  world.tanks.push(e)
-  return e
 }
 
 /** Player center: tank top-left (0,384), w/h 32 → center (16, 400). */

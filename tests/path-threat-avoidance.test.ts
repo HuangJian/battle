@@ -5,8 +5,9 @@ import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findPathThreatImpl, findSafeMoveDirImpl } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
+import { clearArena } from './helpers'
 
 /**
  * M5 (plan/God-AI-Redesign-v2 §3.2, DECISIONS §103): 站位提前规避 — path-threat
@@ -29,12 +30,7 @@ function setupWorld(): { world: World; input: GodAIInput } {
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   return { world, input }
 }

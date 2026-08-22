@@ -4,8 +4,9 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { GRID, TANK } from '../src/constants'
-import type { PowerUp, Tank } from '../src/types'
+import { TANK } from '../src/constants'
+import type { PowerUp } from '../src/types'
+import { clearArena, placeEnemy } from './helpers'
 
 /**
  * §225 "too late" defense structure (toolate-audit: 40 base_destroyed runs —
@@ -30,12 +31,7 @@ function setupWorld(): { world: World; input: GodAIInput } {
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   return { world, input }
 }
@@ -52,13 +48,6 @@ function makePowerUp(id: number, type: PowerUp['type'], col: number, row: number
     blinkTimer: 0,
     lifeTimer: 0,
   }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const e = world.createTank('basic', col * 16, row * 16, 'down')
-  e.spawnTimer = 0
-  world.tanks.push(e)
-  return e
 }
 
 function placePlayer(world: World, col: number, row: number): void {

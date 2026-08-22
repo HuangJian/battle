@@ -11,7 +11,8 @@ import {
   controlledLives,
   findSuicideTargetImpl,
 } from '../src/ai/god/SuicideReturn'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { clearArena, placeEnemy } from './helpers'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 
 /**
@@ -37,12 +38,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, suicideReturnMode: 1, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.reset()
   return { world, input }
@@ -65,14 +61,6 @@ function makeBullet(x: number, y: number, dir: Bullet['dir'], damage = 100, spee
     power: 1,
     damage,
   }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
 }
 
 function positionPlayer(world: World, x: number, y: number): void {

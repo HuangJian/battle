@@ -8,7 +8,8 @@ import {
   findCloseEnemyImpl,
   safePerpDodgeImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, TANK, GRID } from '../src/constants'
+import { clearArena } from './helpers'
+import { CELL, BULLET, TANK } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 import type { Direction } from '../src/constants'
 
@@ -29,12 +30,7 @@ function makeWorld(): { world: World; input: GodAIInput } {
   world.rng = new RNG(42)
   const input = new GodAIInput(world)
   world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   return { world, input }
 }
 

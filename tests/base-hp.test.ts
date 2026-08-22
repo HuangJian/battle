@@ -4,11 +4,12 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { genId } from '../src/game/World'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { TankKind } from '../src/types'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../src/config/base'
 import { resolveProfile } from '../src/config/combat'
+import { clearArena } from './helpers'
 
 /**
  * Base (eagle) HP tests — 2026-07-27 (revised: one fixed pool, damage =
@@ -42,12 +43,7 @@ function seededWorld(seed: number, difficulty = 'relax'): { world: World; sim: S
 
 /** Clear all terrain and place a single base at the bottom-center (open arena). */
 function openArena(world: World): void {
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   world.tileMap.rebuildBaseCache()
   // Stop stray spawns from intercepting the test bullet.
   world.spawnQueue = []

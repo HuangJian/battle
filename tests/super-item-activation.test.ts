@@ -9,7 +9,8 @@ import { RNG } from '../src/utils/RNG'
 import { RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { GRID, TANK } from '../src/constants'
-import type { StageData, Tank } from '../src/types'
+import type { StageData } from '../src/types'
+import { placeEnemy } from './helpers'
 
 // ================================================================
 // §167 / B4 — super-item strategic activation.
@@ -75,14 +76,6 @@ function setup(
   const ai = new GodAIInput(world, params, new RNG(seed ^ 0x1234))
   ai.reset()
   return { world, ai }
-}
-
-/** Enemy at the given grid cell (basic, fully spawned). */
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const e = world.createTank('basic', col * 16, row * 16, 'down')
-  e.spawnTimer = 0
-  world.tanks.push(e)
-  return e
 }
 
 /** Minimal DecisionContext for direct superItemPressesImpl calls. */

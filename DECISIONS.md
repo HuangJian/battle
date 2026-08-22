@@ -1501,3 +1501,22 @@ constants.ts 与 helpers.ts 保留兼容再导出；pathfind.ts 私有的 STEP_D
 
 **Implications:** 新代码从 utils/direction 导入方向符号；constants/helpers 的再导出仅为
 兼容层，待保护文件解禁后可移除。
+
+## 243. §3.4 共享测试 fixtures → tests/helpers.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1)
+
+**Decision:** 新增 `tests/helpers.ts`：`createTestWorld`（种子化 RNG）、`clearArena`
+（清场 + 恢复基地 2×2，30 处复制的规范形态）、`placeEnemy(world,col,row,kind?,dir?)`、
+`positionPlayer(world,col,row,dir?)`。用严格 codemod 迁移**逐字节语义等价**的本地副本：
+28 个测试文件净删 ~200 行。语义变体（像素参数、(col-1) 映射、dir/hp 参数、ringArena
+关卡生成器、makeBullet/makeTank 各自为政的字段差异）**有意保留本地实现**。
+
+**Rationale:**
+- plan §3.4：41× clear-arena、22+ placeEnemy、19+ positionPlayer 的复制粘贴。
+- 测试几何是断言的一部分：`col*16 - 8` 与 `col*CELL` 是不同的中心语义，强行统一会静默
+  改变测试含义。只迁移可证明等价的形态；变体是合法的领域特定 setup。
+- codemod 带调用点 arity 门禁与 `alive = true` 冗余行豁免（createTank 已保证）；确定性
+  全套门禁通过 = 迁移零行为变化的实证。
+- makeBullet 变体（damage/speed/ownerKind 参数）互不兼容，收益低于风险，未迁移。
+
+**Implications:** 新测试一律从 tests/helpers.ts 取 fixture；helpers 语义已冻结——修改前先
+grep 调用点。变体族如需统一须逐个验证几何关系。

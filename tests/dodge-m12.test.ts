@@ -5,9 +5,10 @@ import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { dodgeDirectionImpl } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
+import { clearArena } from './helpers'
 
 /**
  * M12 (DECISIONS §112): player HP buffer awareness — unit tests.
@@ -44,12 +45,7 @@ function setupWorld(difficulty: 'classic' | 'hard'): { world: World; input: GodA
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   // Brick wall at col 7, rows 9-11: caps freeDist('right') at 16px without
   // blocking canMoveDir('right') (destination rect = cols 5-6).
   for (const r of [9, 10, 11]) world.tileMap.grid[r][7] = 'brick'

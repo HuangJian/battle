@@ -3,8 +3,9 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
-import { CELL, GRID } from '../src/constants'
+import { CELL } from '../src/constants'
 import type { TankKind, Tank } from '../src/types'
+import { clearArena } from './helpers'
 
 /**
  * Classic AI jam fix — enemies must re-roll direction when blocked by other
@@ -26,12 +27,7 @@ function seededWorld(seed: number): { world: World; sim: Simulation } {
 
 /** Clear all terrain and place a single base at the bottom-center. */
 function openArena(world: World): void {
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   world.tileMap.rebuildBaseCache()
   world.state = 'playing'
 }
