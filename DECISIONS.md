@@ -1816,3 +1816,21 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 
 **Implications:** diag 目录 35→30 个活动脚本；归档区不计入新会话的扫描面；
 复活归档脚本前须先对齐当前 World/Simulation API。
+
+## 260. §3.5 tests 目录重组 — 否决（代价/价值失衡） (STATUS: 否决)
+
+**Decision:** 不执行 tests/ 子目录化与 god-ai-*→godai-* 重命名，维持 132 文件扁平结构。
+
+**Rationale:**
+- 机制核查：tools/test-silent.ts 的 walk() 本就递归子目录、basename 映射不依赖路径，
+  子目录化不会破坏 scoped runner——技术可行性不是否决理由。
+- 否决理由是代价：(1) 全部测试的 `../src/...` 相对导入需逐文件重写（~500+ 处）；
+  (2) god-ai-* 重命名牵连 tools/test-silent.ts HEAVY_TESTS 精确名单、gate-core 的
+  part-file 清单、AGENTS.md 行内文档与历史 DECISIONS 的测试名引用；(3) 巨量 git mv
+  噪音污染 blame/archaeology；(4) 玩家价值为零，摩擦收益（目录浏览）被 grep/basename
+  定位习惯完全覆盖。
+- 计划原文即标注 "low priority / Caution ... Evaluate before executing"，本条为该
+  评估的结论记录。
+
+**Implications:** 新测试继续平铺于 tests/；命名沿用现有约定（域前缀一致即可）。
+若未来测试数 >300 再重新评估。
