@@ -1,5 +1,4 @@
 import type { World } from '../../game/World'
-import type { TileMap } from '../../game/TileMap'
 import { FIELD, GRID } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
 import type { SpriteLibrary } from './SpriteLibrary'
@@ -8,7 +7,7 @@ import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
-import type { ThemeColors, TerrainType, Tank } from '../../types'
+import type { ThemeColors, Tank } from '../../types'
 import { createOffscreenCanvas } from '../../utils/canvas'
 import { TerrainRenderSlice } from './GameRendererTerrain'
 import { EntityRenderSlice } from './GameRendererEntities'
@@ -16,6 +15,15 @@ import { EffectsRenderSlice } from './GameRendererEffects'
 
 /**
  * GameRenderer — renders the game world to a canvas.
+ *
+ * Structure (§1.1 composition): this class is the composition root and the
+ * only entry point callers see. Rendering bodies live in three slice objects
+ * constructed in the constructor — {@link TerrainRenderSlice} (terrain/water/
+ * forest/vignette caches), {@link EntityRenderSlice} (tanks/bullets/power-ups),
+ * {@link EffectsRenderSlice} (explosions/particles/popups/flash). `render()`
+ * below is the frame orchestrator: it drives the slices in draw order. The
+ * slices hold a back-reference to this Core (`r`) for shared fields (ctx,
+ * caches, camera transform); they never call each other directly.
  *
  * Advanced performance techniques:
  * 1. Terrain cache: static tiles (brick/steel/ice/base) pre-rendered to
@@ -332,43 +340,43 @@ export class GameRendererCore {
     //   eat a large fraction of the frame budget.
     //   Camera shifted (shake/pan): fill the overscroll border with bg first so
     //   no stale pixels leak at the edges, then blit the cache over the interior.
-    this.updateTerrainCache(world)
+    this.terrainSlice.updateTerrainCache(world)
     if (cam.x !== 0 || cam.y !== 0) {
-      this.fillBackground(world)
+      this.terrainSlice.fillBackground(world)
     }
-    this.blitTerrain()
+    this.terrainSlice.blitTerrain()
 
     // 3. Water tiles (drawn directly — cheap, few tiles, animated)
     if (this.waterSpriteDirty) {
       this.artist.spriteCache?.rebuildWater(world.theme)
       this.waterSpriteDirty = false
     }
-    this.renderWater(world)
+    this.terrainSlice.renderWater(world)
 
     // 4. Tanks
-    this.renderTanks(world, tanks ?? world.allTanks)
+    this.entitySlice.renderTanks(world, tanks ?? world.allTanks)
 
     // 5. Bullets (rebuild the theme-colored bullet bitmap if the theme changed)
     if (this.bulletSpriteDirty) {
       this.artist.spriteCache?.rebuildBullet(world.theme)
       this.bulletSpriteDirty = false
     }
-    this.renderBullets(world)
+    this.entitySlice.renderBullets(world)
 
     // 6. Power-ups
-    this.renderPowerUps(world)
+    this.entitySlice.renderPowerUps(world)
 
     // 7. Forest (cached, drawn on top of tanks for hiding)
-    this.blitForest()
+    this.terrainSlice.blitForest()
 
     // 8. Explosions
-    this.renderExplosions(world)
+    this.effectsSlice.renderExplosions(world)
 
     // 9. Particles (batched by type)
-    this.renderParticles()
+    this.effectsSlice.renderParticles()
 
     // 10. Score popups
-    this.renderPopups(world)
+    this.effectsSlice.renderPopups(world)
 
     // Reset transform for screen-space effects
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -388,81 +396,8 @@ export class GameRendererCore {
     // estimated 7–14ms on a 20-year-old machine without GPU). The vignette is
     // purely decorative — its absence does not affect gameplay readability.
     if (!this.lowQuality) {
-      this.drawVignette(world)
+      this.effectsSlice.drawVignette(world)
     }
   }
 
-  // ================================================================
-  // Subsystem stubs — overridden by the GameRenderer*Mixin classes
-  // (terrain/water, entities, effects). Throwing stubs keep the render()
-  // orchestrator type-safe before composition.
-  // ================================================================
-
-  protected blitTerrain(): void {
-    this.terrainSlice.blitTerrain()
-  }
-  protected blitForest(): void {
-    this.terrainSlice.blitForest()
-  }
-  protected recomputeHasForest(_tm: TileMap): void {
-    this.terrainSlice.recomputeHasForest(_tm)
-  }
-  protected fillBackground(_world: World): void {
-    this.terrainSlice.fillBackground(_world)
-  }
-  protected paintCacheBg(
-    _ctx: CanvasRenderingContext2D,
-    _x: number,
-    _y: number,
-    _w: number,
-    _h: number,
-    _theme: ThemeColors,
-  ): void {
-    this.terrainSlice.paintCacheBg(_ctx, _x, _y, _w, _h, _theme)
-  }
-  protected updateTerrainCache(_world: World): void {
-    this.terrainSlice.updateTerrainCache(_world)
-  }
-  protected neighborMask(_tm: TileMap, _c: number, _r: number, _type: TerrainType): void {
-    this.terrainSlice.neighborMask(_tm, _c, _r, _type)
-  }
-  protected redrawTerrainCell(_c: number, _r: number, _type: TerrainType, _tm: TileMap): void {
-    this.terrainSlice.redrawTerrainCell(_c, _r, _type, _tm)
-  }
-  protected redrawForestCell(_c: number, _r: number): void {
-    this.terrainSlice.redrawForestCell(_c, _r)
-  }
-  protected rebuildTerrainCache(_world: World): void {
-    this.terrainSlice.rebuildTerrainCache(_world)
-  }
-  protected rebuildForestCache(_world: World): void {
-    this.terrainSlice.rebuildForestCache(_world)
-  }
-  protected scanWaterCells(_world: World): void {
-    this.terrainSlice.scanWaterCells(_world)
-  }
-  protected renderWater(_world: World): void {
-    this.terrainSlice.renderWater(_world)
-  }
-  protected renderTanks(_world: World, _tanks: Tank[]): void {
-    this.entitySlice.renderTanks(_world, _tanks)
-  }
-  protected renderBullets(_world: World): void {
-    this.entitySlice.renderBullets(_world)
-  }
-  protected renderPowerUps(_world: World): void {
-    this.entitySlice.renderPowerUps(_world)
-  }
-  protected renderExplosions(_world: World): void {
-    this.effectsSlice.renderExplosions(_world)
-  }
-  protected renderParticles(): void {
-    this.effectsSlice.renderParticles()
-  }
-  protected renderPopups(_world: World): void {
-    this.effectsSlice.renderPopups(_world)
-  }
-  protected drawVignette(_world: World): void {
-    this.effectsSlice.drawVignette(_world)
-  }
 }

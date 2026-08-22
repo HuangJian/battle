@@ -20,7 +20,9 @@ export type { AuraConfig } from './SpriteArtistCore'
  * §1.1 composition: the former three-mixin chain (Terrain/Tanks/Effects +
  * throwing stubs) became explicit slice objects constructed INSIDE
  * {@link SpriteArtistCore}'s constructor (TerrainSpriteSlice /
- * TankSpriteSlice / EffectSpriteSlice). The stub methods on Core are now real
- * delegators to those slices. Pure relocation — runtime behavior identical.
+ * TankSpriteSlice / EffectSpriteSlice). Core's draw* methods remain as the
+ * public facade — slices route cross-slice draws through them — with bodies
+ * living in the slices (plan/refactor.zcode.md §2.1). Pure relocation —
+ * runtime behavior identical.
  */
 export class SpriteArtist extends SpriteArtistCore {}

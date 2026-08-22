@@ -451,154 +451,158 @@ export class SpriteArtistCore {
   }
 
   // ================================================================
-  // Subsystem stubs — overridden by the SpriteArtist*Mixin classes
-  // (Terrain / Tanks / Effects). Throwing stubs keep the public draw*
-  // API type-safe before composition.
+  // Public draw* API — thin delegators into the three slices below.
+  //
+  // This is deliberate, NOT dead forwarding: the slices call each other's
+  // draws through this facade (`this.r.drawCommanderAura(...)` from
+  // TankSpriteSlice etc.), and it keeps every external caller — renderer
+  // slices, tests, tools — on one stable surface regardless of which slice
+  // owns the body today. Parameter names are the real drawing coordinates.
   // ================================================================
 
-  // ---- Terrain (SpriteArtistTerrainMixin) ----
-  drawBrick(_x: number, _y: number, _size: number): void {
-    this.spriteTerrainSlice.drawBrick(_x, _y, _size)
+  // ---- Terrain (bodies: spriteTerrainSlice) ----
+  drawBrick(x: number, y: number, size: number): void {
+    this.spriteTerrainSlice.drawBrick(x, y, size)
   }
   drawSteel(
-    _x: number,
-    _y: number,
-    _size: number,
-    _n = false,
-    _e = false,
-    _s = false,
-    _w = false,
+    x: number,
+    y: number,
+    size: number,
+    n = false,
+    e = false,
+    s = false,
+    w = false,
   ): void {
-    this.spriteTerrainSlice.drawSteel(_x, _y, _size, _n, _e, _s, _w)
+    this.spriteTerrainSlice.drawSteel(x, y, size, n, e, s, w)
   }
-  drawWater(_x: number, _y: number, _size: number, _frame: number): void {
-    this.spriteTerrainSlice.drawWater(_x, _y, _size, _frame)
+  drawWater(x: number, y: number, size: number, frame: number): void {
+    this.spriteTerrainSlice.drawWater(x, y, size, frame)
   }
-  drawForest(_x: number, _y: number, _size: number): void {
-    this.spriteTerrainSlice.drawForest(_x, _y, _size)
+  drawForest(x: number, y: number, size: number): void {
+    this.spriteTerrainSlice.drawForest(x, y, size)
   }
   drawIce(
-    _x: number,
-    _y: number,
-    _size: number,
-    _n = false,
-    _e = false,
-    _s = false,
-    _w = false,
+    x: number,
+    y: number,
+    size: number,
+    n = false,
+    e = false,
+    s = false,
+    w = false,
   ): void {
-    this.spriteTerrainSlice.drawIce(_x, _y, _size, _n, _e, _s, _w)
+    this.spriteTerrainSlice.drawIce(x, y, size, n, e, s, w)
   }
-  drawBase(_x: number, _y: number, _size: number, _destroyed: boolean, _damage = 0): void {
-    this.spriteTerrainSlice.drawBase(_x, _y, _size, _destroyed, _damage)
+  drawBase(x: number, y: number, size: number, destroyed: boolean, damage = 0): void {
+    this.spriteTerrainSlice.drawBase(x, y, size, destroyed, damage)
   }
-  // ---- Tanks (SpriteArtistTanksMixin) ----
+  // ---- Tanks (bodies: tankSpriteSlice) ----
   drawTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _bodyColor: string,
-    _turretColor: string,
-    _animFrame: number,
-    _level = 0,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    bodyColor: string,
+    turretColor: string,
+    animFrame: number,
+    level = 0,
   ): void {
-    this.tankSpriteSlice.drawTank(_x, _y, _size, _dir, _bodyColor, _turretColor, _animFrame, _level)
+    this.tankSpriteSlice.drawTank(x, y, size, dir, bodyColor, turretColor, animFrame, level)
   }
   drawPlayerTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _level: number,
-    _animFrame: number,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    level: number,
+    animFrame: number,
   ): void {
-    this.tankSpriteSlice.drawPlayerTank(_x, _y, _size, _dir, _level, _animFrame)
+    this.tankSpriteSlice.drawPlayerTank(x, y, size, dir, level, animFrame)
   }
   drawPlayer2Tank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _level: number,
-    _animFrame: number,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    level: number,
+    animFrame: number,
   ): void {
-    this.tankSpriteSlice.drawPlayer2Tank(_x, _y, _size, _dir, _level, _animFrame)
+    this.tankSpriteSlice.drawPlayer2Tank(x, y, size, dir, level, animFrame)
   }
   drawEnemyTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _kind: string,
-    _animFrame: number,
-    _flash: boolean,
-    _hp: number,
-    _hitStage = 0,
-    _isCommander = false,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    kind: string,
+    animFrame: number,
+    flash: boolean,
+    hp: number,
+    hitStage = 0,
+    isCommander = false,
   ): void {
     this.tankSpriteSlice.drawEnemyTank(
-      _x,
-      _y,
-      _size,
-      _dir,
-      _kind,
-      _animFrame,
-      _flash,
-      _hp,
-      _hitStage,
-      _isCommander,
+      x,
+      y,
+      size,
+      dir,
+      kind,
+      animFrame,
+      flash,
+      hp,
+      hitStage,
+      isCommander,
     )
   }
   drawAllyTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _animFrame: number,
-    _isDecoy = false,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    animFrame: number,
+    isDecoy = false,
   ): void {
-    this.tankSpriteSlice.drawAllyTank(_x, _y, _size, _dir, _animFrame, _isDecoy)
+    this.tankSpriteSlice.drawAllyTank(x, y, size, dir, animFrame, isDecoy)
   }
-  drawAllyAura(_x: number, _y: number, _size: number, _frame: number): void {
-    this.tankSpriteSlice.drawAllyAura(_x, _y, _size, _frame)
+  drawAllyAura(x: number, y: number, size: number, frame: number): void {
+    this.tankSpriteSlice.drawAllyAura(x, y, size, frame)
   }
-  drawInsignia(_x: number, _y: number, _size: number, _level: string, _isCommander = false): void {
-    this.tankSpriteSlice.drawInsignia(_x, _y, _size, _level, _isCommander)
+  drawInsignia(x: number, y: number, size: number, level: string, isCommander = false): void {
+    this.tankSpriteSlice.drawInsignia(x, y, size, level, isCommander)
   }
-  // ---- Effects (SpriteArtistEffectsMixin) ----
-  drawBullet(_x: number, _y: number, _size: number, _dir: Direction): void {
-    this.spriteEffectSlice.drawBullet(_x, _y, _size, _dir)
+  // ---- Effects (bodies: spriteEffectSlice) ----
+  drawBullet(x: number, y: number, size: number, dir: Direction): void {
+    this.spriteEffectSlice.drawBullet(x, y, size, dir)
   }
   drawPowerUp(
-    _x: number,
-    _y: number,
-    _size: number,
-    _type: string,
-    _frame: number,
-    _lifeTimer?: number,
-    _maxLife?: number,
+    x: number,
+    y: number,
+    size: number,
+    type: string,
+    frame: number,
+    lifeTimer?: number,
+    maxLife?: number,
   ): void {
-    this.spriteEffectSlice.drawPowerUp(_x, _y, _size, _type, _frame, _lifeTimer, _maxLife)
+    this.spriteEffectSlice.drawPowerUp(x, y, size, type, frame, lifeTimer, maxLife)
   }
-  drawSpawn(_x: number, _y: number, _size: number, _frame: number): void {
-    this.spriteEffectSlice.drawSpawn(_x, _y, _size, _frame)
+  drawSpawn(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawSpawn(x, y, size, frame)
   }
-  drawShield(_x: number, _y: number, _size: number, _frame: number): void {
-    this.spriteEffectSlice.drawShield(_x, _y, _size, _frame)
+  drawShield(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawShield(x, y, size, frame)
   }
   drawExplosion(
-    _x: number,
-    _y: number,
-    _size: number,
-    _progress: number,
-    _kind: 'small' | 'big',
+    x: number,
+    y: number,
+    size: number,
+    progress: number,
+    kind: 'small' | 'big',
   ): void {
-    this.spriteEffectSlice.drawExplosion(_x, _y, _size, _progress, _kind)
+    this.spriteEffectSlice.drawExplosion(x, y, size, progress, kind)
   }
-  drawHpLevelAura(_x: number, _y: number, _size: number, _hpLevel: number, _frame: number): void {
-    this.spriteEffectSlice.drawHpLevelAura(_x, _y, _size, _hpLevel, _frame)
+  drawHpLevelAura(x: number, y: number, size: number, hpLevel: number, frame: number): void {
+    this.spriteEffectSlice.drawHpLevelAura(x, y, size, hpLevel, frame)
   }
-  drawCommanderAura(_x: number, _y: number, _size: number, _frame: number): void {
-    this.spriteEffectSlice.drawCommanderAura(_x, _y, _size, _frame)
+  drawCommanderAura(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawCommanderAura(x, y, size, frame)
   }
 }
