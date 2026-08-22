@@ -176,7 +176,7 @@ describe('Base HP — classic is one-shot', () => {
     // Even the weakest gun (firePower 36) exceeds HP 1 on the first hit.
     shootOnce(world, sim, 'basic')
     expect(world.tileMap.isBaseDestroyed()).toBe(true)
-    expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(true)
+    expect(world.events.items.some((e) => e.type === 'base_destroyed')).toBe(true)
   })
 
   it('a protection brick blocks a bullet before it can hit the base in the same tick', () => {
@@ -206,7 +206,7 @@ describe('Base HP — classic is one-shot', () => {
     expect(world.tileMap.get(11, 24)).toBe('empty')
     expect(world.tileMap.isBaseDestroyed()).toBe(false)
     expect(world.baseHp).toBe(CLASSIC_BASE_MAX_HP)
-    expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(false)
+    expect(world.events.items.some((e) => e.type === 'base_destroyed')).toBe(false)
   })
 
   it('base_destroyed records the owner kind of the bullet that hit it', () => {
@@ -232,7 +232,7 @@ describe('Base HP — classic is one-shot', () => {
 
     sim.tick()
 
-    const event = world.events.find((e) => e.type === 'base_destroyed')
+    const event = world.events.items.find((e) => e.type === 'base_destroyed')
     expect(event).toEqual({ type: 'base_destroyed', by: 'fast' })
   })
 

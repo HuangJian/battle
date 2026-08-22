@@ -465,18 +465,18 @@ describe('Recovery Controller — mission failed flow', () => {
     rc.start(world)
     expect(rc.select('loadLatest', world).kind).toBe('transition')
     expect(rc.phase).toBe('fading')
-    expect(world.recoveryFading).toBe(true)
+    expect(world.ui.recoveryFading).toBe(true)
     expect(world.state as string).toBe('recovery')
 
     rc.update(world, 600) // > fade duration → restore happens
     expect(rc.phase).toBe('countdown')
     expect(world.score).toBe(savedScore) // snapshot restored
-    expect(world.recoveryCountdown).toBe(3)
+    expect(world.ui.recoveryCountdown).toBe(3)
 
     rc.update(world, 800)
-    expect(world.recoveryCountdown).toBe(2)
+    expect(world.ui.recoveryCountdown).toBe(2)
     rc.update(world, 800)
-    expect(world.recoveryCountdown).toBe(1)
+    expect(world.ui.recoveryCountdown).toBe(1)
     rc.update(world, 800)
     expect(world.state as string).toBe('playing')
     expect(rc.phase).toBe('idle')

@@ -11,8 +11,6 @@ import type {
   TankKind,
   DifficultyConfig,
   ThemeColors,
-  AIState,
-  GoalType,
   StageData,
 } from '../types'
 import type { Direction } from '../constants'
@@ -24,26 +22,24 @@ import { computePlayer2SpawnCol, aabb } from '../utils/helpers'
 import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
-import { resolveProfile, profileToStats } from '../config/combat'
-import { RULES, DEFAULT_RULES, hasStarPerk } from '../config/rules'
+import { RULES, DEFAULT_RULES } from '../config/rules'
 import type { GameplayRules } from '../config/rules'
-import { rollSpeedJitter } from '../config/speed'
-import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR, STRATEGIC_INTERVAL_MS, COMMANDER_INTERVAL_MS } from '../ai/config'
+import { COMMANDER_FLOOR } from '../ai/config'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
+import { EventBus } from './EventBus'
+import { createUIState, type UIState } from './UIState'
+import { createTank } from './TankFactory'
 import {
   GRID,
   CELL,
   TANK,
   ENEMIES_PER_STAGE,
   START_LIVES,
-
-
   PLAYER_SPAWN,
   ENEMY_SPAWNS,
   RESPAWN_SHIELD_MS,
-  TURN_SENTINEL_MS,
 } from '../constants'
 
 let nextId = 1
@@ -149,21 +145,22 @@ export class World {
    *  module global). Set in `startGame` from `RULES[difficultyKey]`. Survives
    *  snapshot rewind because `restoreWorld` never touches it (plan §1). */
   rules: GameplayRules
-  menuCursor: number
-  selectedStage: number
+  /**
+   * Menu & recovery-overlay UI navigation state (§1.3 Phase A). Grouped so
+   * gameplay state and menu navigation state stay visibly separated; written
+   * by Game-layer controllers, read by presentation. Never serialized.
+   */
+  ui: UIState
   rng: RNG
   /** Initial RNG seed (Date.now() at construction). Surfaces as the replay
    *  filename seed so browser recordings are reproducible / round-trippable. */
   seed: number
 
-  // Events (consumed by renderer/audio/stats)
-  events: GameEvent[]
-
-  /**
-   * Spare event buffer for double-buffering. consumeEvents() swaps the active
-   * and spare buffers so the per-frame event array is never reallocated.
-   */
-  private eventsSpare: GameEvent[] = []
+  // Events (consumed by renderer/audio/stats) — double-buffered bus (§1.3
+  // Phase E); pushEvent/consumeEvents below are the World's stable façade.
+  // Field-initialized so it exists before any constructor-body call
+  // (previewStage clears it).
+  events: EventBus = new EventBus()
 
   // Reusable buffer for allTanks getter — avoids allocating a new array each call
   private _allTanksBuf: Tank[] = []
@@ -276,10 +273,7 @@ export class World {
   /** Active mines placed by the player. Snapshot-safe. */
   mines: Mine[]
 
-  // Recovery UI state (read by UIManager, written by RecoveryController)
-  recoveryCursor: number // selected recovery menu option index
-  recoveryCountdown: number // 0 = none, 3/2/1 = counting down
-  recoveryFading: boolean // true while fading to black before restore
+  // (Recovery overlay UI cursor/countdown/fade live in `ui` — §1.3 Phase A.)
 
   constructor() {
     this.tileMap = new TileMap()
@@ -324,13 +318,11 @@ export class World {
     this.rules = DEFAULT_RULES
     this.theme = THEMES[DEFAULT_THEME]
     this.themeKey = DEFAULT_THEME
-    this.menuCursor = 0
-    this.selectedStage = 0
+    this.ui = createUIState()
     // Show the selected stage's layout behind the start menu from the outset.
-    this.previewStage(this.selectedStage)
+    this.previewStage(this.ui.selectedStage)
     this.seed = Date.now()
     this.rng = new RNG(this.seed)
-    this.events = []
     this.frame = 0
     this.bulletSeq = 0
     this.spawnSeqCounter = 0
@@ -343,9 +335,6 @@ export class World {
     this.spectate = false
     this.spectateDual = false
     this.player2SpawnPoint = { col: 16, row: 24 }
-    this.recoveryCursor = 0
-    this.recoveryCountdown = 0
-    this.recoveryFading = false
     // Super power-up inventory & frenzy (DECISIONS.md §31)
     this.guardStock = 0
     this.frenzyStock = 0
@@ -517,7 +506,7 @@ export class World {
     this.explosions = []
     this.popups = []
     this.pendingDrops = []
-    this.events = []
+    this.events.clear()
     this.stageIndex = index
     this.fenceExpireFrame = undefined
   }
@@ -599,112 +588,14 @@ export class World {
   }
 
   /**
+   * Build a tank entity. Construction lives in TankFactory (§1.3 Phase B);
+   * this delegate keeps the historical `world.createTank(...)` call sites
+   * (Simulation systems, tests, tools) stable.
+   *
    * @param playerSlot Which player tank is being created (1 = P1, 2 = P2/God AI).
-   *   Only meaningful when `kind === 'player'`: it selects which star level
-   *   drives the spawned stats (playerLevel for P1, playerLevel2 for P2). Enemy
-   *   and ally tanks ignore it.
    */
   createTank(kind: TankKind, x: number, y: number, dir: Direction, playerSlot = 1): Tank {
-    // Combat Capability System: stats come from the tank's profile, not
-    // hardcoded numbers. Player profiles scale with star level; enemies use
-    // their fixed archetype profile (modified only when promoted to elite).
-    const isPlayer = kind === 'player'
-    // P2 (God AI / Lie-Back-Win-Mode) must use its OWN star level so its
-    // combat power (HP/speed/fire) tracks the stars IT collects, not P1's.
-    const playerLevel = isPlayer ? (playerSlot === 2 ? this.playerLevel2 : this.playerLevel) : 0
-    const profile = resolveProfile(kind, playerLevel)
-    const stats = profileToStats(profile, kind, playerLevel, this.rules)
-    // Enemy combat stats (including HP/armor) are fixed per archetype and never
-    // scaled by difficulty — difficulty only changes the tier distribution that
-    // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
-    // enemy HP here would "enhance enemy power", which is explicitly forbidden.
-    const hp = stats.maxHp
-
-    // Functional star ladder: the player's `fastBullet` perk (classic) is a
-    // multiplier on the base bullet speed. Apply it at spawn so a stage-
-    // persistent star level is correct, not just on star pickup (Simulation).
-    let bulletSpeed = stats.bulletSpeed
-    if (
-      isPlayer &&
-      this.rules.starModel === 'functional' &&
-      hasStarPerk(this.rules, playerLevel, 'fastBullet')
-    ) {
-      bulletSpeed *= this.rules.fastBulletMult
-    }
-
-    // Enemy brains are initialized here (on the World — no hidden state).
-    // The Tactical Intelligence Framework reads/writes these fields every tick.
-    // `level` is a PLACEHOLDER ('rookie'); the real tier is rolled at spawn
-    // time in `Simulation.updateSpawning` (plan §5) which overwrites
-    // `aiState.level` / `isCommander` there. `spawnSeq` is stamped from
-    // the World's monotonic counter so command authority is derivable.
-    let aiState: AIState | undefined
-    if (kind !== 'player') {
-      const base = this.tileMap.getBasePos()
-      const placeholder = INTELLIGENCE_LEVELS['rookie']
-      aiState = {
-        level: 'rookie',
-        isCommander: false,
-        spawnSeq: this.spawnSeqCounter++,
-        thinkTimer: 200 + this.rng.next() * 600,
-        fireTimer: 400 + this.rng.next() * 600,
-        currentDir: dir,
-        tacticalGoal: 'advance' as GoalType,
-        targetX: base ? base.x + CELL : x + TANK / 2,
-        targetY: base ? base.y + CELL : y + TANK / 2,
-        strategicTimer: STRATEGIC_INTERVAL_MS * (0.8 + this.rng.next() * 0.4),
-        strategicGoal: 'attackBase' as GoalType,
-        reactionTimer: placeholder.reactionTime,
-        dodgeLock: 0,
-        vertOnlyTicks: 0,
-        commanderTimer: COMMANDER_INTERVAL_MS,
-        directive: 'none',
-        directiveAge: 1e9,
-        directiveSeq: 0,
-        directiveCompliant: false,
-      }
-    }
-
-    return {
-      id: genId(),
-      x,
-      y,
-      w: TANK,
-      h: TANK,
-      dir,
-      alive: true,
-      kind,
-      // Per-instance speed jitter (±5%): identical archetypes don't move in
-      // lockstep, but it's drawn from world.rng so it stays deterministic.
-      speed: stats.speed * (this.rules.speedJitter ? rollSpeedJitter(this.rng) : 1),
-      hp,
-      maxHp: hp,
-      bulletPower: stats.bulletPower,
-      damage: stats.damage,
-      bulletSpeed,
-      fireCooldown: stats.fireCooldown,
-      nextFireInterval: stats.fireCooldown,
-      fireCount: 0,
-      lastFire: 0,
-      moving: false,
-      vx: 0,
-      vy: 0,
-      spawnTimer: 1000,
-      // §86c: Initialize turn cooldown tracking. prevMoveDir = dir so the
-      // first frame doesn't register as a turn. lastTurnMs = -9999 so
-      // the first real turn is always allowed.
-      prevMoveDir: dir,
-      lastTurnMs: TURN_SENTINEL_MS,
-      level: isPlayer ? playerLevel : 0,
-      shieldTimer: kind === 'player' ? RESPAWN_SHIELD_MS : 0,
-      isPlayer: kind === 'player',
-      allegiance: kind === 'player' ? 'player' : 'enemy',
-      profile,
-      flashTimer: 0,
-      hitCount: 0,
-      aiState,
-      bonus: false,
-    }
+    return createTank(this, kind, x, y, dir, playerSlot)
   }
 
   // ---- Entity Management ----
@@ -850,13 +741,7 @@ export class World {
   }
 
   consumeEvents(): GameEvent[] {
-    // Double-buffer: return the current accumulation buffer and start fresh in
-    // the spare (now-cleared) buffer. No per-frame array allocation.
-    const out = this.events
-    this.events = this.eventsSpare
-    this.eventsSpare = out
-    this.events.length = 0
-    return out
+    return this.events.consume()
   }
 
   // ---- Persistence ----
@@ -940,18 +825,18 @@ export class World {
    * occupied we UNCONDITIONALLY relocate to the nearest free 32-aligned cell.
    *
    * - If the exact requested cell is already free it is returned unchanged, so
-    *   existing spawn paths that hand-pick a verified-free cell see no behaviour
-    *   change (enemy / ally / decoy / guard spawners keep working as before).
-    * - Otherwise we scan the 32-aligned grid and return the nearest free cell.
-    * - Deterministic: fixed scan order, NO RNG draw ⇒ identical world state on
-    *   replay. If the field is somehow entirely full we best-effort return the
-    *   requested (clamped) cell rather than throwing.
-    */
-   findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
-     // Scan skeleton shared with findFreeDropCell via GridQuery (§2.3);
-     // spawns require terrain-clear AND no tank overlap.
-     return findNearestFreeCell(x, y, (gx, gy) => this.isSpawnCellFree(gx, gy))
-   }
+   *   existing spawn paths that hand-pick a verified-free cell see no behaviour
+   *   change (enemy / ally / decoy / guard spawners keep working as before).
+   * - Otherwise we scan the 32-aligned grid and return the nearest free cell.
+   * - Deterministic: fixed scan order, NO RNG draw ⇒ identical world state on
+   *   replay. If the field is somehow entirely full we best-effort return the
+   *   requested (clamped) cell rather than throwing.
+   */
+  findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
+    // Scan skeleton shared with findFreeDropCell via GridQuery (§2.3);
+    // spawns require terrain-clear AND no tank overlap.
+    return findNearestFreeCell(x, y, (gx, gy) => this.isSpawnCellFree(gx, gy))
+  }
 
   /** A 32×32 footprint at (x, y) is spawnable iff it clears terrain AND every live tank. */
   private isSpawnCellFree(x: number, y: number): boolean {

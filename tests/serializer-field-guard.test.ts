@@ -44,27 +44,21 @@ const EXCLUDED: Record<string, string> = {
   // PresentationLayer (AGENTS §2.5 presentation-is-disposable).
   explosions: 'transient visual state; restoreWorld clears to []',
   popups: 'transient visual state; restoreWorld clears to []',
-  events: 'event bus double-buffer; consumed per frame, never persisted',
+  events: 'composed EventBus double-buffer; consumed per frame, never persisted',
 
-  // Menu / recovery UI navigation state — outside gameplay snapshot scope
-  // (plan/refactor.agy.md §1.3 Phase A target for extraction).
-  menuCursor: 'menu UI state, not gameplay',
-  selectedStage: 'menu UI state, not gameplay',
-  recoveryCursor: 'recovery overlay UI state',
-  recoveryCountdown: 'recovery overlay UI state',
-  recoveryFading: 'recovery overlay UI state',
+  // Menu / recovery UI navigation state (§1.3 Phase A: grouped struct) —
+  // outside gameplay snapshot scope.
+  ui: 'menu/recovery UI navigation struct; not gameplay',
   state: "lifecycle flag; restoreWorld forces 'playing'",
 
   // Internal caches / perf flags — recomputed from serialized data.
   _allTanksBuf: 'getter cache rebuilt on demand',
   _hasActiveMines: 'derived from mines array contents',
   _needsCleanup: 'per-tick entity-compaction signal',
-  eventsSpare: 'event bus double-buffer back store',
 
   // Session-scoped signal & identity.
   rewindPending: 'one-tick signal consumed by Game.ts within the same session',
-  seed:
-    'session identity for RNG stream derivation; preserved by object identity across restoreWorld',
+  seed: 'session identity for RNG stream derivation; preserved by object identity across restoreWorld',
 }
 
 describe('WorldSerializer field coverage (§1.5 Option C guard)', () => {
@@ -73,9 +67,7 @@ describe('WorldSerializer field coverage (§1.5 Option C guard)', () => {
     const snap = cloneWorld(world) as unknown as Record<string, unknown>
     const clonedKeys = new Set(Object.keys(snap).map((k) => KEY_MAP[k] ?? k))
 
-    const missing = Object.keys(world).filter(
-      (k) => !clonedKeys.has(k) && !(k in EXCLUDED),
-    )
+    const missing = Object.keys(world).filter((k) => !clonedKeys.has(k) && !(k in EXCLUDED))
     expect(missing).toEqual([])
   })
 

@@ -534,10 +534,10 @@ export class PresentationLayer {
     // Structural / UI-driving changes.
     if (world.state !== this._lastState) return this.forceRender(world)
     if (world.themeKey !== this._lastThemeKey) return this.forceRender(world)
-    if (world.menuCursor !== this._lastMenuCursor) return this.forceRender(world)
-    if (world.selectedStage !== this._lastSelectedStage) return this.forceRender(world)
-    if (world.recoveryCursor !== this._lastRecoveryCursor) return this.forceRender(world)
-    if (world.recoveryCountdown !== this._lastRecoveryCountdown) return this.forceRender(world)
+    if (world.ui.menuCursor !== this._lastMenuCursor) return this.forceRender(world)
+    if (world.ui.selectedStage !== this._lastSelectedStage) return this.forceRender(world)
+    if (world.ui.recoveryCursor !== this._lastRecoveryCursor) return this.forceRender(world)
+    if (world.ui.recoveryCountdown !== this._lastRecoveryCountdown) return this.forceRender(world)
     const tm = world.tileMap
     if (tm.dirty || tm.dirtyCells.length > 0) return this.forceRender(world)
     // Static scene signature.
@@ -573,10 +573,10 @@ export class PresentationLayer {
     this._lastSceneSig = sig ?? this.computeSceneSig(world)
     this._lastState = world.state
     this._lastThemeKey = world.themeKey
-    this._lastMenuCursor = world.menuCursor
-    this._lastSelectedStage = world.selectedStage
-    this._lastRecoveryCursor = world.recoveryCursor
-    this._lastRecoveryCountdown = world.recoveryCountdown
+    this._lastMenuCursor = world.ui.menuCursor
+    this._lastSelectedStage = world.ui.selectedStage
+    this._lastRecoveryCursor = world.ui.recoveryCursor
+    this._lastRecoveryCountdown = world.ui.recoveryCountdown
   }
 
   /**

@@ -501,8 +501,8 @@ export class Game {
     this.world.explosions = []
     this.world.popups = []
     this.world.spawnQueue = []
-    this.world.recoveryCountdown = 0
-    this.world.recoveryFading = false
+    this.world.ui.recoveryCountdown = 0
+    this.world.ui.recoveryFading = false
     // Lie-Back-Win-Mode: clean up coop state on return to menu.
     this.world.coop = false
     this.world.disablePlayer2()
@@ -530,7 +530,7 @@ export class Game {
     this.presentation.ui.replayBrowser.close()
     this.prevStageIndex = -1
     // Re-open the menu on its default row and render the matching battlefield.
-    this.world.menuCursor = 0
+    this.world.ui.menuCursor = 0
     this.applyMenuPreview()
     this.presentation.reset()
     this.audio.playMenuSelect()

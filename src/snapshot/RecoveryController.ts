@@ -64,9 +64,9 @@ export class RecoveryController {
     this.phase = 'menu'
     this.resetTransition()
     world.state = 'recovery'
-    world.recoveryCursor = 0
-    world.recoveryCountdown = 0
-    world.recoveryFading = false
+    world.ui.recoveryCursor = 0
+    world.ui.recoveryCountdown = 0
+    world.ui.recoveryFading = false
   }
 
   /**
@@ -91,8 +91,8 @@ export class RecoveryController {
         // Accept defeat — hand back to the classic game-over screen.
         this.phase = 'idle'
         world.state = 'gameover'
-        world.recoveryFading = false
-        world.recoveryCountdown = 0
+        world.ui.recoveryFading = false
+        world.ui.recoveryCountdown = 0
         return { kind: 'continue' }
       }
       case 'loadLatest': {
@@ -182,8 +182,8 @@ export class RecoveryController {
           this.phase = 'countdown'
           this.countdownTimer = 0
           this.countdownValue = COUNTDOWN_STEPS
-          world.recoveryFading = false
-          world.recoveryCountdown = this.countdownValue
+          world.ui.recoveryFading = false
+          world.ui.recoveryCountdown = this.countdownValue
         }
         break
       }
@@ -193,11 +193,11 @@ export class RecoveryController {
           this.countdownTimer = 0
           this.countdownValue--
           if (this.countdownValue <= 0) {
-            world.recoveryCountdown = 0
+            world.ui.recoveryCountdown = 0
             world.state = 'playing'
             this.phase = 'idle'
           } else {
-            world.recoveryCountdown = this.countdownValue
+            world.ui.recoveryCountdown = this.countdownValue
           }
         }
         break
@@ -228,8 +228,8 @@ export class RecoveryController {
     this.phase = 'fading'
     this.fadeTimer = 0
     world.state = 'recovery'
-    world.recoveryFading = true
-    world.recoveryCountdown = 0
+    world.ui.recoveryFading = true
+    world.ui.recoveryCountdown = 0
   }
 
   private resetTransition(): void {

@@ -48,7 +48,7 @@ export class LoopController {
     // Open the menu on its default row and render the matching battlefield:
     // the RESUME target's saved content (if a manual snapshot exists) or the
     // selected stage's starting layout otherwise.
-    this.g.world.menuCursor = 0
+    this.g.world.ui.menuCursor = 0
     this.g.applyMenuPreview()
     // Preload the SVG asset library so sprites are ready for the first frame.
     await spriteLibrary.load()
@@ -414,15 +414,15 @@ export class LoopController {
       }
 
       // Countdown beeps — play a tone each time the number changes
-      if (this.g.world.recoveryCountdown !== this.g.prevCountdown) {
-        if (this.g.world.recoveryCountdown > 0) {
+      if (this.g.world.ui.recoveryCountdown !== this.g.prevCountdown) {
+        if (this.g.world.ui.recoveryCountdown > 0) {
           this.g.audio.playCountdownBeep()
         } else if (this.g.prevCountdown > 0) {
           // Countdown just finished → resume
           this.g.audio.playCountdownGo()
         }
       }
-      this.g.prevCountdown = this.g.world.recoveryCountdown
+      this.g.prevCountdown = this.g.world.ui.recoveryCountdown
       this.g.prevRecoveryPhase = this.g.recovery.phase
     } else {
       this.g.prevRecoveryPhase = 'idle'

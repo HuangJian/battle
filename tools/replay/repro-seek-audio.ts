@@ -48,7 +48,7 @@ function pendingAfterSeek(text: string, frac: number): number {
   const playback = new PlaybackController(replay)
   playback.start(world, sim)
   playback.seekTo(world, (playback as any).simulation as Simulation, frac)
-  return world.events.length
+  return world.events.items.length
 }
 
 /** Buggy path: replicate the OLD catch-up (no drain) to show magnitude. */
@@ -66,7 +66,7 @@ function buggyBacklog(text: string, frac: number): number {
     sim.tick()
     input.advance()
   }
-  return world.events.length
+  return world.events.items.length
 }
 
 if (import.meta.main) {

@@ -1115,11 +1115,11 @@ export class UIManager {
     // Highlight selected menu row (cursor) — only when changed.
     // Row indices shift down by one when the RESUME row is present.
     // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
-    if (world.menuCursor !== this.lastMenuCursor) {
-      this.lastMenuCursor = world.menuCursor
+    if (world.ui.menuCursor !== this.lastMenuCursor) {
+      this.lastMenuCursor = world.ui.menuCursor
       const off = this.hasResume ? 1 : 0
       // Close stage dropdown when cursor moves away from STAGE row
-      if (world.menuCursor !== off + 3) {
+      if (world.ui.menuCursor !== off + 3) {
         this.closeStageDropdown()
       }
       for (const row of this.menuRows) {
@@ -1139,28 +1139,28 @@ export class UIManager {
                       : row.dataset.menu === 'controls'
                         ? off + 5
                         : -1
-        row.classList.toggle('selected', idx === world.menuCursor)
+        row.classList.toggle('selected', idx === world.ui.menuCursor)
       }
       // Show ENTER hint only on RESUME and NEW GAME rows when selected
       if (this.menuResumeHint) {
-        this.menuResumeHint.classList.toggle('visible', this.hasResume && world.menuCursor === 0)
+        this.menuResumeHint.classList.toggle('visible', this.hasResume && world.ui.menuCursor === 0)
       }
       if (this.menuStartHint) {
-        this.menuStartHint.classList.toggle('visible', world.menuCursor === off + 4)
+        this.menuStartHint.classList.toggle('visible', world.ui.menuCursor === off + 4)
       }
       if (this.menuControlsHint) {
-        this.menuControlsHint.classList.toggle('visible', world.menuCursor === off + 5)
+        this.menuControlsHint.classList.toggle('visible', world.ui.menuCursor === off + 5)
       }
     }
 
     // Stage selector display — only when changed
-    if (world.selectedStage !== this.lastSelectedStage) {
-      this.lastSelectedStage = world.selectedStage
+    if (world.ui.selectedStage !== this.lastSelectedStage) {
+      this.lastSelectedStage = world.ui.selectedStage
       if (this.menuStageValue) {
-        this.menuStageValue.textContent = `${String(world.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
+        this.menuStageValue.textContent = `${String(world.ui.selectedStage + 1).padStart(2, '0')} / ${String(STAGES.length).padStart(2, '0')}`
       }
       if (this.menuStageName) {
-        this.menuStageName.textContent = localizedStageName(world.selectedStage) ?? ''
+        this.menuStageName.textContent = localizedStageName(world.ui.selectedStage) ?? ''
       }
     }
 
@@ -1244,15 +1244,15 @@ export class UIManager {
     if (world.state !== 'recovery') return
 
     // Toggle fading / countdown classes
-    this.recoveryScreen.classList.toggle('fading', world.recoveryFading)
+    this.recoveryScreen.classList.toggle('fading', world.ui.recoveryFading)
 
-    const isCountdown = world.recoveryCountdown > 0
+    const isCountdown = world.ui.recoveryCountdown > 0
     this.recoveryScreen.classList.toggle('countdown', isCountdown)
 
     // Show countdown number
     if (isCountdown) {
       if (this.recoveryCountdownNum) {
-        this.recoveryCountdownNum.textContent = String(world.recoveryCountdown)
+        this.recoveryCountdownNum.textContent = String(world.ui.recoveryCountdown)
       }
       return
     }
@@ -1260,7 +1260,7 @@ export class UIManager {
     // Update option selection and availability
     for (let i = 0; i < this.recoveryOptions.length; i++) {
       const opt = this.recoveryOptions[i]
-      opt.classList.toggle('selected', i === world.recoveryCursor)
+      opt.classList.toggle('selected', i === world.ui.recoveryCursor)
       // Availability comes from the RecoveryController (via Game) — a
       // disabled option is greyed out but still selectable (soft-denied
       // on confirm), matching the classic menu feel.

@@ -152,7 +152,7 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   // Clear transient visual data — Presentation will rebuild
   world.explosions = []
   world.popups = []
-  world.events = []
+  world.events.clear()
 
   // Stage info
   world.stageIndex = snap.stageIndex

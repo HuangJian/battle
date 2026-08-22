@@ -620,7 +620,7 @@ describe('None branch — deterministic classic behaviour (§3)', () => {
       let sawNone = false
       for (let i = 0; i < 600; i++) {
         sim.tick()
-        bulletFired += world.events.filter((e) => e.type === 'bullet_fired').length
+        bulletFired += world.events.items.filter((e) => e.type === 'bullet_fired').length
         for (const t of world.tanks) {
           if (!t.alive) continue
           if (t.aiState?.level !== 'none') continue

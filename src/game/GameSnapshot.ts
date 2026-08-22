@@ -155,17 +155,18 @@ export class SnapshotController {
 
     // Navigate up/down
     if (this.g.input.isUpPressed()) {
-      w.recoveryCursor = (w.recoveryCursor - 1 + RECOVERY_OPTION_COUNT) % RECOVERY_OPTION_COUNT
+      w.ui.recoveryCursor =
+        (w.ui.recoveryCursor - 1 + RECOVERY_OPTION_COUNT) % RECOVERY_OPTION_COUNT
       this.g.audio.playMenuSelect()
     }
     if (this.g.input.isDownPressed()) {
-      w.recoveryCursor = (w.recoveryCursor + 1) % RECOVERY_OPTION_COUNT
+      w.ui.recoveryCursor = (w.ui.recoveryCursor + 1) % RECOVERY_OPTION_COUNT
       this.g.audio.playMenuSelect()
     }
 
     // Confirm selection
     if (this.g.input.isConfirmPressed()) {
-      const option = RECOVERY_OPTIONS[w.recoveryCursor]
+      const option = RECOVERY_OPTIONS[w.ui.recoveryCursor]
       const result = this.g.recovery.select(option, w)
       switch (result.kind) {
         case 'transition':

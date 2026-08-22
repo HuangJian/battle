@@ -68,8 +68,8 @@ export class MenuController {
     // Canvas preview only switches for RESUME (0), STAGE (off+3), NEW GAME (off+4).
     const off = this.g.resumeSnapshot ? 1 : 0
     if (this.g.input.isUpPressed()) {
-      w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
-      if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
+      w.ui.menuCursor = (w.ui.menuCursor - 1 + rowCount) % rowCount
+      if (w.ui.menuCursor === 0 || w.ui.menuCursor === off + 3 || w.ui.menuCursor === off + 4) {
         this.applyMenuPreview()
       }
       this.g.audio.init()
@@ -77,8 +77,8 @@ export class MenuController {
       this.g.audio.playMenuSelect()
     }
     if (this.g.input.isDownPressed()) {
-      w.menuCursor = (w.menuCursor + 1) % rowCount
-      if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
+      w.ui.menuCursor = (w.ui.menuCursor + 1) % rowCount
+      if (w.ui.menuCursor === 0 || w.ui.menuCursor === off + 3 || w.ui.menuCursor === off + 4) {
         this.applyMenuPreview()
       }
       this.g.audio.init()
@@ -91,18 +91,18 @@ export class MenuController {
     if (left || right) {
       const dir = left ? -1 : 1
       let changed = false
-      if (w.menuCursor === off) {
+      if (w.ui.menuCursor === off) {
         this.g.difficultyIndex =
           (this.g.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
         w.difficultyKey = DIFFICULTY_KEYS[this.g.difficultyIndex]
         w.difficulty = DIFFICULTIES[w.difficultyKey]
         changed = true
-      } else if (w.menuCursor === off + 1) {
+      } else if (w.ui.menuCursor === off + 1) {
         this.g.themeIndex = (this.g.themeIndex + dir) % THEME_KEYS.length
         w.themeKey = THEME_KEYS[this.g.themeIndex]
         w.theme = THEMES[w.themeKey]
         changed = true
-      } else if (w.menuCursor === off + 2) {
+      } else if (w.ui.menuCursor === off + 2) {
         // LANGUAGE row — cycle to the next available locale.
         i18n.cycleLocale()
         this.g.presentation.ui.notify(
@@ -110,8 +110,8 @@ export class MenuController {
           'info',
         )
         changed = true
-      } else if (w.menuCursor === off + 3) {
-        w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
+      } else if (w.ui.menuCursor === off + 3) {
+        w.ui.selectedStage = (w.ui.selectedStage + dir + STAGES.length) % STAGES.length
         changed = true
       }
       if (changed) {
@@ -128,7 +128,7 @@ export class MenuController {
       this.g.themeIndex = (this.g.themeIndex + 1) % THEME_KEYS.length
       w.themeKey = THEME_KEYS[this.g.themeIndex]
       w.theme = THEMES[w.themeKey]
-      w.menuCursor = off + 1
+      w.ui.menuCursor = off + 1
       this.applyMenuPreview()
       this.g.audio.init()
       this.g.audio.resume()
@@ -140,11 +140,11 @@ export class MenuController {
     // CONTROLS (off + 5) opens the key-bindings panel.
     const controlsIdx = off + 5
     if (this.g.input.isConfirmPressed()) {
-      if (this.g.resumeSnapshot && w.menuCursor === 0) {
+      if (this.g.resumeSnapshot && w.ui.menuCursor === 0) {
         this.menuResume()
-      } else if (w.menuCursor === off + 4) {
+      } else if (w.ui.menuCursor === off + 4) {
         this.menuStart()
-      } else if (w.menuCursor === controlsIdx) {
+      } else if (w.ui.menuCursor === controlsIdx) {
         this.g.presentation.ui.openControls()
         this.g.audio.init()
         this.g.audio.resume()
@@ -200,7 +200,7 @@ export class MenuController {
     this.g.difficultyIndex = idx
     this.g.world.difficultyKey = DIFFICULTY_KEYS[idx]
     this.g.world.difficulty = DIFFICULTIES[this.g.world.difficultyKey]
-    this.g.world.menuCursor = this.g.resumeSnapshot ? 1 : 0
+    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 1 : 0
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()
@@ -216,7 +216,7 @@ export class MenuController {
     this.g.themeIndex = idx
     this.g.world.themeKey = THEME_KEYS[idx]
     this.g.world.theme = THEMES[this.g.world.themeKey]
-    this.g.world.menuCursor = this.g.resumeSnapshot ? 2 : 1
+    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 2 : 1
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()
@@ -227,8 +227,9 @@ export class MenuController {
   /** Mouse: step the stage selector (dir = -1 prev / +1 next). */
   menuCycleStage(dir: -1 | 1): void {
     if (this.g.world.state !== 'menu') return
-    this.g.world.selectedStage = (this.g.world.selectedStage + dir + STAGES.length) % STAGES.length
-    this.g.world.menuCursor = this.g.resumeSnapshot ? 4 : 3
+    this.g.world.ui.selectedStage =
+      (this.g.world.ui.selectedStage + dir + STAGES.length) % STAGES.length
+    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 4 : 3
     // Swap the battle-field preview to the newly selected stage's layout.
     this.applyMenuPreview()
     this.g.audio.init()
@@ -241,8 +242,8 @@ export class MenuController {
   menuSelectStage(index: number): void {
     if (this.g.world.state !== 'menu') return
     if (index < 0 || index >= STAGES.length) return
-    this.g.world.selectedStage = index
-    this.g.world.menuCursor = this.g.resumeSnapshot ? 4 : 3
+    this.g.world.ui.selectedStage = index
+    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 4 : 3
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()
@@ -349,7 +350,7 @@ export class MenuController {
     this.g.world.startGame(
       this.g.world.difficultyKey,
       this.g.world.themeKey,
-      this.g.world.selectedStage,
+      this.g.world.ui.selectedStage,
     )
     // NOTE: recording is NOT started here — the stage-change detector in
     // loop() starts the session on the first played tick (same as the
@@ -414,10 +415,10 @@ export class MenuController {
 
   applyMenuPreview(): void {
     const w = this.g.world
-    if (this.g.resumeSnapshot && w.menuCursor === 0) {
+    if (this.g.resumeSnapshot && w.ui.menuCursor === 0) {
       w.previewSnapshot(this.g.resumeSnapshot.world)
     } else {
-      w.previewStage(w.selectedStage)
+      w.previewStage(w.ui.selectedStage)
     }
     // Guarantee the canvas repaints to reflect the swapped battlefield,
     // regardless of the on-demand signature check.
