@@ -127,9 +127,9 @@ describe('classic drop schedule — fixed indices 4/11/18 (plan Phase 4)', () =>
     world.tileMap.rebuildBaseCache()
     expect(world.tileMap.hasWater()).toBe(true)
 
-    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+    const roll = sim.systems.powerUps.rollPowerUpType.bind(sim.systems.powerUps)
     for (let i = 0; i < 1000; i++) {
-      const t = roll.call(sim)
+      const t = roll()
       expect(SUPER_POWERUP_TYPES as readonly string[]).not.toContain(t)
       expect(t).not.toBe('boat')
     }
@@ -138,9 +138,9 @@ describe('classic drop schedule — fixed indices 4/11/18 (plan Phase 4)', () =>
   it('all classic drops come from the FC pool (star/bomb/shield/freeze/tank/fence)', () => {
     const { world, sim } = buildSeededWorld(7)
     const allowed = world.rules.allowedPowerups
-    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+    const roll = sim.systems.powerUps.rollPowerUpType.bind(sim.systems.powerUps)
     for (let i = 0; i < 500; i++) {
-      expect(allowed as readonly string[]).toContain(roll.call(sim))
+      expect(allowed as readonly string[]).toContain(roll())
     }
   })
 })

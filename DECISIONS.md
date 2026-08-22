@@ -1693,3 +1693,25 @@ ThemeColors/ThemeDefinition **有意保留**在根 types.ts。
 - 再导出保持零消费方改动；新 presentation 代码应从 ./types 导入。
 
 **Implications:** 根 types.ts 现只含 sim/config/UI 契约；presentation 视觉类型有独立家。
+
+## 254. §1.1 Mixin→组合：Simulation（21 stubs 归零） (STATUS: 已实施, plan Phase 3)
+
+**Decision:** 六条 mixin 链（SimulationSpawn/Player/Enemies/Combat/PowerUps/Effects）转换为
+六个显式子系统类，经共享注册表 `SimulationSystems`（src/game/systems.ts）互联；
+`Simulation` 本体持有注册表 + 延迟 coop/spectate 切换 + tick/updatePlaying 编排 +
+togglePause。SimulationCore 与 21 个 throw stub 删除。测试白盒入口改为
+`sim.systems.<subsystem>.<method>`（新增公共 getter `systems`）。
+
+**Rationale:**
+- plan §1.1：stub 只为类型检查存在、跨 mixin 调用对静态分析不可见、改一个 mixin 有运行时
+  throw 风险——组合后依赖显式（d.effects.createExplosion），新系统=新类+注册表一行+编排器
+  一行。
+- 环依赖（Player↔PowerUps、Enemies↔Effects）用"构造后填充的注册表"解决：方法只在运行期解引用。
+- 行为不变实证：语句原位搬移（codemod 按行切片+映射重写），全套 1411 tests 含 God-AI 确定性
+  门禁（数千 headless sims）字节级通过；TacticalIntelligence 实例移入注册表（enemies 使用）。
+- 测试侧 codemod 重写 44 处 `(sim as unknown as {...}).m` cast 为 systems 访问；少数多行
+  变体手工修复；applyPowerUp/rollPowerUpType/bulletHitsTank/guardAIById/activateFrenzy 等
+  白盒方法转公开。
+
+**Implications:** Simulation 公共 API 不变（tick/requestX/togglePause/input/input2/systems）；
+给 World 加系统逻辑时新建 System 类而非 mixin。Game 链（26 stubs）同法待办。

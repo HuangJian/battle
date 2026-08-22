@@ -10,6 +10,7 @@ import {
   BOAT_DURATION_MS,
 } from '../src/constants'
 import type { Direction } from '../src/constants'
+import type { PowerUpType } from '../src/types'
 import {
   SUPER_POWERUP_TYPES,
   SUPER_POWERUP_DROP_CHANCE,
@@ -64,14 +65,14 @@ describe('Super power-up — 10% super-item roll (DECISIONS.md §31)', () => {
     const { world, sim } = buildSeededWorld(11, 'hard')
     // Force the super branch every call.
     world.rng.next = () => 0.01
-    const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
+    const t = sim.systems.powerUps.rollPowerUpType()
     expect(SUPER_POWERUP_TYPES as readonly string[]).toContain(t)
   })
 
   it('rollPowerUpType returns a NORMAL type when rng >= 10% chance', () => {
     const { world, sim } = buildSeededWorld(11, 'hard')
     world.rng.next = () => 0.5
-    const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
+    const t = sim.systems.powerUps.rollPowerUpType()
     expect(NORMAL_POWERUP_TYPES as readonly string[]).toContain(t)
   })
 
@@ -80,7 +81,7 @@ describe('Super power-up — 10% super-item roll (DECISIONS.md §31)', () => {
     let superCount = 0
     const N = 4000
     for (let i = 0; i < N; i++) {
-      const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
+      const t = sim.systems.powerUps.rollPowerUpType()
       if ((SUPER_POWERUP_TYPES as readonly string[]).includes(t)) superCount++
     }
     const frac = superCount / N
@@ -93,7 +94,7 @@ describe('Super power-up — 10% super-item roll (DECISIONS.md §31)', () => {
 describe('Super power-up — pickup accumulates into inventory (DECISIONS.md §31)', () => {
   it('applyPowerUp stores guard/frenzy/sacrifice into stocks, not instant effects', () => {
     const { world, sim } = buildSeededWorld(7)
-    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
     const g0 = world.guardStock
     const f0 = world.frenzyStock
     const s0 = world.sacrificeStock
@@ -131,9 +132,7 @@ describe('Super power-up — 同归于尽 (sacrifice) AoE (DECISIONS.md §31)', 
     const p = world.player!
     p.x = 200
     p.y = 200 // center ≈ (216, 216)
-    const trigger = (
-      sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }
-    ).triggerSacrificeAoE.bind(sim)
+    const trigger = sim.systems.enemies.triggerSacrificeAoE.bind(sim.systems.enemies)
 
     // Enemy at the blast center → should die.
     const near = plantEnemy(world, p.x, p.y)
@@ -163,9 +162,7 @@ describe('Super power-up — 同归于尽 (sacrifice) AoE (DECISIONS.md §31)', 
     const p = world.player!
     p.x = 200
     p.y = 200
-    const trigger = (
-      sim as unknown as { triggerSacrificeAoE: (pl: unknown) => void }
-    ).triggerSacrificeAoE.bind(sim)
+    const trigger = sim.systems.enemies.triggerSacrificeAoE.bind(sim.systems.enemies)
 
     // Mid enemy at ~88px from center: inside 6 cells (96px) but outside 5 (80px).
     const mid = plantEnemy(world, p.x + 88, p.y)
@@ -198,9 +195,7 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
     p.spawnTimer = 0
     world.frenzyStock = 1
 
-    const activate = (
-      sim as unknown as { activateFrenzy: (pl: unknown) => void }
-    ).activateFrenzy.bind(sim)
+    const activate = sim.systems.player.activateFrenzy.bind(sim.systems.player)
     activate(p)
 
     expect(world.frenzyStock).toBe(0)
@@ -216,9 +211,7 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
       return orig(b as never)
     }) as typeof world.addBullet
 
-    const updatePlayerTank = (
-      sim as unknown as { updatePlayerTank: (t: any, i: any) => void }
-    ).updatePlayerTank.bind(sim)
+    const updatePlayerTank = sim.systems.player.updatePlayerTank.bind(sim.systems.player)
     let guard = 0
     while ((p.frenzyShotsLeft ?? 0) > 0 && guard < 500) {
       world.frame++
@@ -254,12 +247,8 @@ describe('Super power-up — 狂暴宣泄 (frenzy) barrage (DECISIONS.md §31)',
       reset: () => {},
     }
     const sim2 = new Simulation(world, mockInput)
-    const activate = (
-      sim2 as unknown as { activateFrenzy: (pl: unknown) => void }
-    ).activateFrenzy.bind(sim2)
-    const updatePlayerTank2 = (
-      sim2 as unknown as { updatePlayerTank: (t: any, i: any) => void }
-    ).updatePlayerTank.bind(sim2)
+    const activate = sim2.systems.player.activateFrenzy.bind(sim2.systems.player)
+    const updatePlayerTank2 = sim2.systems.player.updatePlayerTank.bind(sim2.systems.player)
 
     activate(p)
     world.frame++
@@ -293,22 +282,22 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
     const { world, sim } = buildSeededWorld(123, 'hard')
     clearWater(world)
     expect(world.tileMap.hasWater()).toBe(false)
-    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+    const roll = sim.systems.powerUps.rollPowerUpType.bind(sim.systems.powerUps)
     for (let i = 0; i < 500; i++) {
-      expect(roll.call(sim)).not.toBe('boat')
+      expect(roll()).not.toBe('boat')
     }
   })
 
   it('boat is only reachable when the stage has water', () => {
     const { world, sim } = buildSeededWorld(123, 'hard')
-    const roll = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType
+    const roll = sim.systems.powerUps.rollPowerUpType.bind(sim.systems.powerUps)
 
     // With water: boat lives in the normal tier — it must be a reachable roll.
     addWater(world)
     expect(world.tileMap.hasWater()).toBe(true)
     let sawBoat = false
     for (let i = 0; i < 4000; i++) {
-      if (roll.call(sim) === 'boat') {
+      if (roll() === 'boat') {
         sawBoat = true
         break
       }
@@ -319,7 +308,7 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
     clearWater(world)
     expect(world.tileMap.hasWater()).toBe(false)
     for (let i = 0; i < 500; i++) {
-      expect(roll.call(sim)).not.toBe('boat')
+      expect(roll()).not.toBe('boat')
     }
   })
 
@@ -327,7 +316,7 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
     const { world, sim } = buildSeededWorld(123)
     clearWater(world)
     world.pendingDrops = [{ type: 'boat', x: 128, y: 128 }]
-    ;(sim as unknown as { flushPendingDrops: () => void }).flushPendingDrops()
+    sim.systems.powerUps.flushPendingDrops()
     expect(world.powerUps.length).toBe(0)
   })
 
@@ -335,7 +324,7 @@ describe('Power-up — boat only drops on water stages (DECISIONS.md §31 follow
     const { world, sim } = buildSeededWorld(123)
     addWater(world)
     world.pendingDrops = [{ type: 'boat', x: 128, y: 128 }]
-    ;(sim as unknown as { flushPendingDrops: () => void }).flushPendingDrops()
+    sim.systems.powerUps.flushPendingDrops()
     expect(world.powerUps.length).toBe(1)
     expect(world.powerUps[0].type).toBe('boat')
   })
@@ -360,7 +349,7 @@ describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DEC
 
   it('places a steel ring around the base and arms a 20s (1200-frame) timer', () => {
     const { world, sim } = buildSeededWorld(5)
-    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
     for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
 
     apply('fence')
@@ -373,8 +362,8 @@ describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DEC
 
   it('reverts the steel ring to brick when the timer expires', () => {
     const { world, sim } = buildSeededWorld(5)
-    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
-    const updateFence = (sim as unknown as { updateFence: () => void }).updateFence.bind(sim)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    const updateFence = sim.systems.powerUps.updateFence.bind(sim.systems.powerUps)
     for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
 
     apply('fence')
@@ -392,8 +381,8 @@ describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DEC
 
   it('does NOT revert before the timer elapses', () => {
     const { world, sim } = buildSeededWorld(5)
-    const apply = (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)
-    const updateFence = (sim as unknown as { updateFence: () => void }).updateFence.bind(sim)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    const updateFence = sim.systems.powerUps.updateFence.bind(sim.systems.powerUps)
     for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'empty')
 
     apply('fence')
@@ -414,8 +403,8 @@ describe('Timed power-ups stack their duration when re-picked (DECISIONS.md §33
    * time — not reset to a fresh duration. Verifies the canonical example
    * (freeze: 3s left + 20s → 23s) and the same rule for shield/boat/fence.
    */
-  const apply = (sim: Simulation, t: string) =>
-    (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)(t)
+  const apply = (sim: Simulation, t: PowerUpType) =>
+    sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)(t)
 
   it('freeze accumulates: 3s remaining + 20s → 23s', () => {
     const { world, sim } = buildSeededWorld(7)

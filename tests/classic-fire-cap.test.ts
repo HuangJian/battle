@@ -36,8 +36,7 @@ function readyToFire(t: Tank): void {
   t.lastFire = -1e9
 }
 
-type FireSim = { tryFire: (t: Tank) => void }
-const fire = (sim: Simulation, t: Tank) => (sim as unknown as FireSim).tryFire(t)
+const fire = (sim: Simulation, t: Tank) => sim.systems.combat.tryFire(t)
 
 describe('classic fire cap — player (plan Phase 2)', () => {
   it('0★ player: max 1 live bullet; slot frees when the bullet dies', () => {

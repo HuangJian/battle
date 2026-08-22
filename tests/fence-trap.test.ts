@@ -56,7 +56,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     expect(world.tileMap.get(14, 25)).toBe('empty')
 
     // Apply fence power-up.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // The tank should have been pushed outside the ring (position changed).
     const moved = p.x !== originalX || p.y !== originalY
@@ -84,7 +84,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     p.dir = 'right'
 
     // Apply fence.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // Player should be able to move from the pushed position.
     // Try multiple directions to ensure the tank is not boxed in.
@@ -109,7 +109,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     p.dir = 'right'
 
     // Apply fence.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // Simulate movement in each direction — the tank should be able to move
     // at least one direction for 24 ticks (0.7px/tick × 24 ≈ 17px).

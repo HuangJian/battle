@@ -4,7 +4,7 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
-import type { Tank, TankKind } from '../src/types'
+import type { TankKind } from '../src/types'
 import { TANK_PROFILES, applyEliteModifier, profileToStats } from '../src/config/combat'
 import { FIRE_FREQUENCY_MULTIPLIER, baseFireIntervalMs } from '../src/config/fire-rate'
 
@@ -155,7 +155,7 @@ function runDuel(kind: Exclude<TankKind, 'player'>, ticks: number): DuelResult {
     }
   ).onKeyDown({ code: input.keys.fire, preventDefault: () => {} })
 
-  const fire = (sim as unknown as { tryFire: (t: Tank) => void }).tryFire.bind(sim)
+  const fire = sim.systems.combat.tryFire.bind(sim.systems.combat)
 
   let playerDeaths = 0
   let enemyDied = false
@@ -263,7 +263,7 @@ describe('Fire-rate standard — head-on duel vs every enemy type (no buffs)', (
     ;(
       input as unknown as { onKeyDown: (e: { code: string; preventDefault: () => void }) => void }
     ).onKeyDown({ code: input.keys.fire, preventDefault: () => {} })
-    const fire = (sim as unknown as { tryFire: (t: Tank) => void }).tryFire.bind(sim)
+    const fire = sim.systems.combat.tryFire.bind(sim.systems.combat)
 
     let playerShots = 0
     let enemyShots = 0

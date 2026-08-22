@@ -6,7 +6,6 @@ import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { Direction } from '../src/constants'
 import type { Tank } from '../src/types'
-import type { GodAIInput } from '../src/ai/GodAIInput'
 
 /**
  * 天降神兵 guard AI upgrade (DECISIONS.md §159):
@@ -70,7 +69,7 @@ function clearCells(world: World, c0: number, r0: number, c1: number, r1: number
 }
 
 const updateGuards = (sim: Simulation): (() => void) =>
-  (sim as unknown as { updateGuards: () => void }).updateGuards.bind(sim)
+  sim.systems.enemies.updateGuards.bind(sim.systems.enemies)
 
 /** Bullets owned by one tank. */
 function bulletsOf(world: World, ownerId: number) {
@@ -333,7 +332,7 @@ describe('天降神兵 — guard God AI determinism (DECISIONS.md §159)', () =>
 
     updateGuards(sim)()
 
-    const brains = (sim as unknown as { guardAIById: Map<number, GodAIInput> }).guardAIById
+    const brains = sim.systems.enemies.guardAIById
     const brain = brains.get(g.id)
     expect(brain).toBeDefined()
     // Power-up branches disabled — an ally can never collect items.

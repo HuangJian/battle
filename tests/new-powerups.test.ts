@@ -3,6 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
+import type { PowerUpType } from '../src/types'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
 import { RecoveryController } from '../src/snapshot/RecoveryController'
@@ -39,10 +40,20 @@ function buildWorld(seed: number, difficulty = 'hard'): { world: World; sim: Sim
   return { world, sim }
 }
 
-const apply = (sim: Simulation, t: string) =>
-  (sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp.bind(sim)(t)
-const call = (sim: Simulation, method: string, ...args: unknown[]) =>
-  (sim as unknown as { [k: string]: (...a: unknown[]) => unknown })[method].bind(sim)(...args)
+const apply = (sim: Simulation, t: PowerUpType) =>
+  sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)(t)
+/** Dynamic dispatch into subsystems (composition replaces sim.method). */
+const call = (sim: Simulation, method: string, ...args: unknown[]): unknown => {
+  const reg = sim.systems as unknown as Record<
+    string,
+    Record<string, ((...a: unknown[]) => unknown) | undefined>
+  >
+  for (const key of ['spawn', 'player', 'enemies', 'combat', 'powerUps', 'effects'] as const) {
+    const fn = reg[key]?.[method]
+    if (typeof fn === 'function') return fn.apply(reg[key], args)
+  }
+  throw new Error(`unknown simulation method: ${method}`)
+}
 
 describe('Repair (维修) — restores PLAYER HP by a fixed amount', () => {
   it('heals by REPAIR_HEAL_AMOUNT (= one basic enemy bullet damage, not full)', () => {
@@ -75,10 +86,7 @@ describe('Repair (维修) — restores PLAYER HP by a fixed amount', () => {
     const p1Before = p1.hp
     const p2Before = p2.hp
     // applyPowerUp is private; pass the collector explicitly.
-    ;(sim as unknown as { applyPowerUp: (t: string, c?: unknown) => void }).applyPowerUp(
-      'repair',
-      p2,
-    )
+    sim.systems.powerUps.applyPowerUp('repair', p2)
     expect(p2.hp).toBe(Math.min(p2Before + REPAIR_HEAL_AMOUNT, p2.maxHp))
     expect(p1.hp).toBe(p1Before) // player1 must stay untouched
   })
@@ -90,7 +98,7 @@ describe('Repair (维修) — restores PLAYER HP by a fixed amount', () => {
     world.player2 = p2
     p1.boatTimer = 0
     p2.boatTimer = 0
-    ;(sim as unknown as { applyPowerUp: (t: string, c?: unknown) => void }).applyPowerUp('boat', p2)
+    sim.systems.powerUps.applyPowerUp('boat', p2)
     expect(p2.boatTimer).toBe(BOAT_DURATION_MS)
     expect(p1.boatTimer ?? 0).toBe(0) // player1 must stay untouched
   })
@@ -318,7 +326,7 @@ describe('Weighted 3-tier drop (user decision: 10% / 40% / 50%)', () => {
     let pr = 0
     let no = 0
     for (let i = 0; i < N; i++) {
-      const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
+      const t = sim.systems.powerUps.rollPowerUpType()
       if ((POWERUP_TIERS.super as readonly string[]).includes(t)) s++
       else if ((POWERUP_TIERS.practical as readonly string[]).includes(t)) pr++
       else no++
@@ -342,7 +350,7 @@ describe('Classic mode excludes all new power-ups (user decision ①)', () => {
     const { sim } = buildWorld(99, 'classic')
     const newItems = ['repair', 'emp', 'decoy', 'mine', 'rewind', 'boat']
     for (let i = 0; i < 2000; i++) {
-      const t = (sim as unknown as { rollPowerUpType: () => string }).rollPowerUpType()
+      const t = sim.systems.powerUps.rollPowerUpType()
       expect(newItems).not.toContain(t)
     }
   })

@@ -131,8 +131,8 @@ describe('Simulation determinism (AGENTS.md §2.3)', () => {
       // spawnPowerUp is private — invoke it directly to isolate the RNG
       // behaviour from the bonus-enemy-kill precondition. Two calls give
       // us two power-ups to compare across runs.
-      ;(sim as unknown as { spawnPowerUp: () => void }).spawnPowerUp()
-      ;(sim as unknown as { spawnPowerUp: () => void }).spawnPowerUp()
+      sim.systems.powerUps.spawnPowerUp()
+      sim.systems.powerUps.spawnPowerUp()
       return world.powerUps.map((p) => `${p.type}@${p.x},${p.y}`)
     }
 
@@ -477,7 +477,7 @@ describe('Star progression — classic cap vs unbounded (spec: 星星增益无�
     world.startGame('classic', 'modern', 0)
     world.playerLevel = 3
     world.player!.level = 3
-    ;(sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp('star')
+    sim.systems.powerUps.applyPowerUp('star')
     expect(world.playerLevel).toBe(3) // capped, did NOT increment
   })
 
@@ -486,7 +486,7 @@ describe('Star progression — classic cap vs unbounded (spec: 星星增益无�
     world.startGame('hard', 'modern', 0)
     world.playerLevel = 3
     world.player!.level = 3
-    const apply = (sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp.bind(sim)
+    const apply = (t: 'star') => sim.systems.powerUps.applyPowerUp(t)
     apply('star')
     expect(world.playerLevel).toBe(4) // first unbounded star
     apply('star')
