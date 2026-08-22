@@ -1677,3 +1677,19 @@ plan/refactor.agy.md §3.1 称其约 500 行为"死重"（dead-weight）——�
 
 **Implications:** 若未来要让全主题走 SVG，须先为 Classic/Neon 生成主题化 sprite 变体并
 扩展 SpriteCache 键空间——那是新特性工作，不是清理。§3.1 关闭。
+
+## 253. §2.6 types.ts 重组织 — presentation-only 类型迁出 (STATUS: 部分实施)
+
+**Decision:** 四个纯 presentation 消费的类型（VisualComponent/Particle/EmitterConfig/
+CameraState）定义迁至 `src/presentation/types.ts`，src/types.ts 兼容再导出。
+ThemeColors/ThemeDefinition **有意保留**在根 types.ts。
+
+**Rationale:**
+- plan §2.6：624 行厨房水槽类型文件。实际考察消费方后收窄范围：只有上述四个类型的全部
+  使用点都在 presentation 层（AnimationSystem/Camera/ParticleSystem/PresentationLayer）。
+- ThemeColors 是 config 层契约（config/theme.ts 定义 THEMES 数据）——迁去 presentation 会
+  制造 config→presentation 的反向依赖，违反分层。Tank 拆分（PlayerState/EnemyAIState 组合）
+  plan 自评"影响序列化，谨慎评估"——收益不抵快照契约风险，不做。
+- 再导出保持零消费方改动；新 presentation 代码应从 ./types 导入。
+
+**Implications:** 根 types.ts 现只含 sim/config/UI 契约；presentation 视觉类型有独立家。

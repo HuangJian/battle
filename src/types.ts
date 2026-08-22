@@ -545,75 +545,18 @@ export interface KeyBindings {
 // ============================================================
 // Presentation Layer Types
 // ============================================================
+//
+// (§2.6) The presentation-only types below moved to
+// `src/presentation/types.ts`; re-exported here for compatibility.
+// ThemeDefinition/ThemeColors stay in THIS file — they are config-layer
+// contracts (config/theme.ts), not presentation state.
 
-/** Visual component — tracks the visual state of a simulation entity */
-export interface VisualComponent {
-  entityId: number
-  sprite: string // e.g. "tank.player", "bullet", "explosion.big"
-  animation: string // e.g. "idle", "move", "spawn", "destroy"
-  direction: Direction
-  elapsed: number // ms since animation started
-  alpha: number
-  scale: number
-  flash: boolean
-  level: number
-  /**
-   * Frame stamp used for mark-and-sweep cleanup of stale visual components
-   * (avoids allocating a Set every render frame). Set to world.frame each
-   * time the component is seen as alive; components whose stamp is stale are
-   * removed by AnimationSystem.cleanup().
-   */
-  lastSeenFrame?: number
-}
-
-/** Particle — a single visual particle */
-export interface Particle {
-  x: number
-  y: number
-  vx: number
-  vy: number
-  life: number
-  maxLife: number
-  size: number
-  color: string
-  type: 'spark' | 'debris' | 'smoke' | 'ring' | 'flash'
-  gravity: number
-  drag: number
-  rotation: number
-  rotSpeed: number
-  active: boolean
-}
-
-/** Particle emitter configuration */
-export interface EmitterConfig {
-  x: number
-  y: number
-  count: number
-  speedMin: number
-  speedMax: number
-  lifeMin: number
-  lifeMax: number
-  sizeMin: number
-  sizeMax: number
-  colors: string[]
-  type: Particle['type']
-  gravity: number
-  drag: number
-  angleMin: number // radians
-  angleMax: number
-  spread: number // positional spread radius
-}
-
-/** Camera state */
-export interface CameraState {
-  x: number
-  y: number
-  shake: number
-  shakeDecay: number
-  offsetX: number
-  offsetY: number
-  scale: number
-}
+export type {
+  VisualComponent,
+  Particle,
+  EmitterConfig,
+  CameraState,
+} from './presentation/types'
 
 /** Theme definition with metadata */
 export interface ThemeDefinition {
