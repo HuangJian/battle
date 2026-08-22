@@ -60,3 +60,29 @@ export function persistSettings(settings: GameSettings): void {
     /* ignore */
   }
 }
+
+// ================================================================
+// High-score persistence (plan/refactor.agy.md §1.3 Phase C — browser
+// I/O does not belong on the World; the `highScore` FIELD stays there
+// because it is serialized gameplay state).
+// ================================================================
+
+export const HIGH_SCORE_KEY = 'bc_highscore'
+
+/** Read the persisted high score (0 when storage is unavailable/corrupt). */
+export function loadHighScore(): number {
+  try {
+    return parseInt(localStorage.getItem(HIGH_SCORE_KEY) || '0', 10) || 0
+  } catch {
+    return 0
+  }
+}
+
+/** Persist a high score to localStorage (silently ignoring failures). */
+export function persistHighScore(score: number): void {
+  try {
+    localStorage.setItem(HIGH_SCORE_KEY, String(score))
+  } catch {
+    /* ignore */
+  }
+}

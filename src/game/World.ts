@@ -19,6 +19,7 @@ import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
 import { RNG } from '../utils/RNG'
 import { findNearestFreeCell } from './GridQuery'
+import { loadHighScore as loadPersistedHighScore, persistHighScore } from './settings'
 import { computePlayer2SpawnCol, aabb } from '../utils/helpers'
 import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
@@ -859,23 +860,17 @@ export class World {
   }
 
   // ---- Persistence ----
+  // (§1.3 Phase C: the localStorage I/O lives in settings.ts; the World only
+  // owns the `highScore` field because it is serialized gameplay state.)
 
   private loadHighScore(): number {
-    try {
-      return parseInt(localStorage.getItem('bc_highscore') || '0', 10) || 0
-    } catch {
-      return 0
-    }
+    return loadPersistedHighScore()
   }
 
   saveHighScore(): void {
     if (this.score > this.highScore) {
       this.highScore = this.score
-      try {
-        localStorage.setItem('bc_highscore', String(this.highScore))
-      } catch {
-        /* ignore */
-      }
+      persistHighScore(this.highScore)
     }
   }
 

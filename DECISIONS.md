@@ -1645,3 +1645,17 @@ Cell）。非保护消费方（8 个 AI 文件、3 tools、2 tests）改直连�
 
 **Implications:** 新导航代码进 ai/god/pathfind；新离线几何工具进 grid-search；
 utils/pathfind 仅作兼容层存在。
+
+## 251. §1.3 Phase C — highScore 持久化 I/O 迁 settings.ts (STATUS: 已实施)
+
+**Decision:** `localStorage` 读写（loadHighScore/persistHighScore + HIGH_SCORE_KEY）从 World
+迁至 `src/game/settings.ts`（与 SETTINGS_KEY 同居）。World 的 `highScore` **字段保留**——它是
+序列化游戏状态（快照携带、UIManager 读取）；World.saveHighScore() 公共签名不变，内部改调
+settings 模块。
+
+**Rationale:**
+- plan §1.3 Phase C：浏览器 I/O 不属于 God Object；但整个字段外移会破坏快照契约与 UI 读点。
+- 行为逐字节不变：同样的 key、同样的 try/catch 静默失败、同样的"仅超越才写"逻辑。
+- headless 测试环境无 localStorage → try/catch 原样兜底，全套门禁通过。
+
+**Implications:** 新持久化键一律进 settings.ts；World 不再直接触碰 localStorage。
