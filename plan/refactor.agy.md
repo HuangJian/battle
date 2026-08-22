@@ -2,12 +2,14 @@
 
 > **Status (2026-08-23): EXECUTION COMPLETE.** All items resolved. Done:
 > §1.1 (§254–256), §1.2, §1.3 A/B/C/E (§7e3b44d), §1.4 (§32cae0f), §1.5,
-> §1.6, §2.1–§2.3, §2.5 (§5a9cd13), §2.6 (§257/0d3d95d), §2.7–§2.9, §3.2–
-> §3.4, §3.6, §3.7 (§259), §3.3 (§258). Rejected with recorded rationale:
-> §3.1 fallback removal (§252 — theme branches are live code) and §3.5 test
-> reorganization (§260 — churn vs zero player value). See DECISIONS.md
-> §250+ for per-item entries; determinism verified byte-identical against a
-> pre-refactor batch-sim signature after every Simulation-touching change.
+> §1.6 (+P2-spawn const, 0c5837b), §2.1–§2.5 (§5a9cd13), §2.4 UIManager
+> split → HudView/MenuScreen/ControlsPanel/OverlayManager (§261/0c5837b),
+> §2.6 (§257/0d3d95d), §2.7–§2.9, §3.2–§3.4, §3.6, §3.7 (§259), §3.3
+> (§258). Rejected with recorded rationale: §3.1 fallback removal (§252 —
+> theme branches are live code) and §3.5 test reorganization (§260 — churn
+> vs zero player value). See DECISIONS.md §250+ for per-item entries;
+> determinism verified byte-identical against a pre-refactor batch-sim
+> signature after every Simulation-touching change.
 >
 > The audit below is the historical baseline (line counts are pre-refactor).
 
