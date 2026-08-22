@@ -18,7 +18,8 @@ import type {
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
 import { RNG } from '../utils/RNG'
-import { computePlayer2SpawnCol, aabb, clamp } from '../utils/helpers'
+import { findNearestFreeCell } from './GridQuery'
+import { computePlayer2SpawnCol, aabb } from '../utils/helpers'
 import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
@@ -40,7 +41,6 @@ import {
   COMMANDER_INTERVAL_MS,
   PLAYER_SPAWN,
   ENEMY_SPAWNS,
-  FIELD,
   RESPAWN_SHIELD_MS,
   TURN_SENTINEL_MS,
 } from '../constants'
@@ -945,36 +945,18 @@ export class World {
    * occupied we UNCONDITIONALLY relocate to the nearest free 32-aligned cell.
    *
    * - If the exact requested cell is already free it is returned unchanged, so
-   *   existing spawn paths that hand-pick a verified-free cell see no behaviour
-   *   change (enemy / ally / decoy / guard spawners keep working as before).
-   * - Otherwise we scan the 32-aligned grid and return the nearest free cell.
-   * - Deterministic: fixed scan order, NO RNG draw ⇒ identical world state on
-   *   replay. If the field is somehow entirely full we best-effort return the
-   *   requested (clamped) cell rather than throwing.
-   */
-  findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
-    const step = TANK // tanks are 2×2 tiles ⇒ spawn on the 32px grid
-    const maxX = FIELD - TANK
-    const maxY = FIELD - TANK
-    const rx = clamp(x, 0, maxX)
-    const ry = clamp(y, 0, maxY)
-    if (this.isSpawnCellFree(rx, ry)) return { x: rx, y: ry }
-    let best: { x: number; y: number } | null = null
-    let bestD = Infinity
-    for (let gy = 0; gy <= maxY; gy += step) {
-      for (let gx = 0; gx <= maxX; gx += step) {
-        if (!this.isSpawnCellFree(gx, gy)) continue
-        const dx = gx - rx
-        const dy = gy - ry
-        const d = dx * dx + dy * dy
-        if (d < bestD) {
-          bestD = d
-          best = { x: gx, y: gy }
-        }
-      }
-    }
-    return best ?? { x: rx, y: ry }
-  }
+    *   existing spawn paths that hand-pick a verified-free cell see no behaviour
+    *   change (enemy / ally / decoy / guard spawners keep working as before).
+    * - Otherwise we scan the 32-aligned grid and return the nearest free cell.
+    * - Deterministic: fixed scan order, NO RNG draw ⇒ identical world state on
+    *   replay. If the field is somehow entirely full we best-effort return the
+    *   requested (clamped) cell rather than throwing.
+    */
+   findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
+     // Scan skeleton shared with findFreeDropCell via GridQuery (§2.3);
+     // spawns require terrain-clear AND no tank overlap.
+     return findNearestFreeCell(x, y, (gx, gy) => this.isSpawnCellFree(gx, gy))
+   }
 
   /** A 32×32 footprint at (x, y) is spawnable iff it clears terrain AND every live tank. */
   private isSpawnCellFree(x: number, y: number): boolean {

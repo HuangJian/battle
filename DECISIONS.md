@@ -1575,3 +1575,21 @@ resetToMenu 及其余。
   路由有了明确落点。
 
 **Implications:** P2 生命周期只有两个入口；新代码禁止手写 player2=null/lives2=0 三连。
+
+## 247. §2.3 自由格搜索统一 → GridQuery.findNearestFreeCell (STATUS: 已实施)
+
+**Decision:** 新建 `src/game/GridQuery.ts`：`findNearestFreeCell(originX, originY, free)` 统一
+World.findFreeSpawnCell 与 SimulationPowerUps.findFreeDropCell 共享的"32px 网格最近自由格
+全场扫描"骨架，freedom 谓词由调用方注入（spawn=地形+坦克不重叠；drop=地形+避开出生点，
+允许坦克）。isTankPositionClear 的内联地形四连检查替换为语义相同的 rectHitsTerrain
+（brick/steel/water/base 同集合）。decoySpawnCell **有意保留**本地实现。
+
+**Rationale:**
+- plan §2.3：四处独立"找空位"，其中两处骨架逐行相同仅谓词不同——谓词注入是忠实抽象。
+- 提前返回 `free(rx,ry)→origin` 对两个调用方均行为等价（drop 路径原为 d=0 严格小于胜出，
+  结果相同），故共享版保留早退。
+- decoySpawnCell 是环形 ±3 受限扫描 + 非正交偏好层 + 可空回退——契约不同不是复制，强行
+  统一需回调堆叠，违反 Three Gates "保持简单"。
+- findNearestFreeCell 不收 World 参数：谓词闭包自持引用，签名更诚实。
+
+**Implications:** 新增"全场最近空位"需求一律走 GridQuery；受限扫描/偏好扫描属不同契约。

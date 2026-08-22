@@ -18,6 +18,7 @@ import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/co
 import { rollSpeedJitter } from '../config/speed'
 import { hasStarPerk } from '../config/rules'
 import { recordEnemyKill } from './KillPipeline'
+import { findNearestFreeCell } from './GridQuery'
 import { genId } from './World'
 import { aabb } from '../utils/helpers'
 import type { PowerUpType, Tank } from '../types'
@@ -97,32 +98,13 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
      */
     private findFreeDropCell(originX: number, originY: number): { x: number; y: number } {
       const w = this.world
-      const step = TANK
-      const maxX = FIELD - TANK
-      const maxY = FIELD - TANK
-      const rx = Math.max(0, Math.min(maxX, originX))
-      const ry = Math.max(0, Math.min(maxY, originY))
-      let best: { x: number; y: number } | null = null
-      let bestD = Infinity
-      for (let gy = 0; gy <= maxY; gy += step) {
-        for (let gx = 0; gx <= maxX; gx += step) {
-          if (w.rectHitsTerrain(gx, gy, TANK, TANK) || this.rectHitsSpawnPoint(gx, gy)) {
-            continue
-          }
-          const dx = gx - rx
-          const dy = gy - ry
-          const d = dx * dx + dy * dy
-          if (d < bestD) {
-            bestD = d
-            best = { x: gx, y: gy }
-          }
-        }
-      }
-      // Pathological: no free cell on the field at all. Fall back to the
-      // origin cell (clamped) so the drop still materialises somewhere
-      // instead of crashing — this matches findFreeSpawnCell's behaviour and
-      // is no worse than the pre-fix result of landing on a blocked cell.
-      return best ?? { x: rx, y: ry }
+      // Scan skeleton shared with World.findFreeSpawnCell via GridQuery (§2.3).
+      // Drops require terrain-clear AND off the spawn points — tanks allowed.
+      return findNearestFreeCell(
+        originX,
+        originY,
+        (gx, gy) => !w.rectHitsTerrain(gx, gy, TANK, TANK) && !this.rectHitsSpawnPoint(gx, gy),
+      )
     }
 
     /**
@@ -625,19 +607,9 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
       const w = this.world
       // Bounds check
       if (x < 0 || x + TANK > FIELD || y < 0 || y + TANK > FIELD) return false
-      // Terrain check — must be empty or ice (passable, non-blocking)
-      const col1 = Math.floor(x / CELL)
-      const col2 = Math.floor((x + TANK - 1) / CELL)
-      const row1 = Math.floor(y / CELL)
-      const row2 = Math.floor((y + TANK - 1) / CELL)
-      for (let r = row1; r <= row2; r++) {
-        for (let c = col1; c <= col2; c++) {
-          const t = w.tileMap.get(c, r)
-          if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
-            return false
-          }
-        }
-      }
+      // Terrain check — rectHitsTerrain blocks brick/steel/water/base
+      // (identical set to the former inline loop; §2.3 dedup)
+      if (w.rectHitsTerrain(x, y, TANK, TANK)) return false
       // Tank collision check
       const allTanks = w.allTanks
       for (let ti = 0; ti < allTanks.length; ti++) {
