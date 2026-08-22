@@ -16,48 +16,16 @@
  *   bun tools/diag/base-loss-forensics.ts --seeds 20 --stages 3,9,17 --json out.json
  */
 import { STAGES } from '../../src/config/stages'
-import { defaultWorkerCount } from '../sim/sim-pool'
+import { WorkerPool, defaultWorkerCount } from '../lib/worker-pool'
 import type { BaseLossRecord, RunResult } from './base-loss-run'
 import type { ForensicTask, ForensicTaskResult } from './base-loss-worker'
 
 const WORKER_URL = new URL('./base-loss-worker.ts', import.meta.url).href
 
-class ForensicPool {
-  private workers: Worker[] = []
-  readonly size: number
+/** Forensic sweep pool — thin wrapper over the shared generic pool (§3.6). */
+class ForensicPool extends WorkerPool<ForensicTask, ForensicTaskResult> {
   constructor(size: number = defaultWorkerCount()) {
-    this.size = Math.max(1, size)
-    for (let i = 0; i < this.size; i++) this.workers.push(new Worker(WORKER_URL))
-  }
-  runBatch(
-    tasks: ForensicTask[],
-    onProgress?: (done: number) => void,
-  ): Promise<ForensicTaskResult[]> {
-    if (tasks.length === 0) return Promise.resolve([])
-    return new Promise((resolve, reject) => {
-      const results: ForensicTaskResult[] = Array.from({ length: tasks.length })
-      let next = 0
-      let done = 0
-      const dispatch = (w: Worker): void => {
-        if (next >= tasks.length) return
-        w.postMessage(tasks[next++])
-      }
-      for (const w of this.workers) {
-        w.onmessage = (ev: MessageEvent<ForensicTaskResult>) => {
-          results[ev.data.id] = ev.data
-          done++
-          onProgress?.(done)
-          if (done === tasks.length) resolve(results)
-          else dispatch(w)
-        }
-        w.onerror = (err) => reject(new Error(`base-loss-worker failed: ${err.message ?? err}`))
-      }
-      for (const w of this.workers) dispatch(w)
-    })
-  }
-  terminate(): void {
-    for (const w of this.workers) w.terminate()
-    this.workers = []
+    super(WORKER_URL, size, 'base-loss-worker')
   }
 }
 

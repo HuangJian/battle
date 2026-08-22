@@ -1608,3 +1608,21 @@ TacticalIntelligence/World/corridor-escape 测试改从 ai/config 导入。
 - 数值逐字节不动（含 CORRIDOR_ESCAPE_CHANCE 的 0.005601），全套确定性门禁通过。
 
 **Implications:** 新时间常量必须带单位后缀；AI 行为调参只动 src/ai/config.ts。
+
+## 249. §3.6 四套 Worker Pool 统一 → tools/lib/worker-pool.ts (STATUS: 已实施)
+
+**Decision:** 新建 `tools/lib/worker-pool.ts`：`WorkerPool<TTask, TResult>`（常驻池，任务逐个
+派发，结果按 id 重排——与串行 for 循环同序，浮点聚合稳定）+ `runChunkedWorkers`（每块一个
+一次性 worker，块内聚合 `{results}`，返回展平数组）。四个消费方改薄包装/一行调用：
+SimWorkerPool、ForensicPool 继承泛型池；gate-core / score-gate-core 换 runChunkedWorkers。
+
+**Rationale:**
+- plan §3.6：四份相同的 dispatch/error/termination 循环，修 bug 需四处同步。
+- gate-core 的实测注释保留为规范：Bun Worker 属性赋值 onmessage/onerror 在部分版本不触发，
+  addEventListener 是已验证安全路径——共享实现统一采用。
+- SimWorkerPool/defaultWorkerCount 导出名不变 → 十余个 diag 脚本零改动。
+- 烟测验证常驻池路径（tools 不在 bun test 覆盖内）：4 任务按 id 有序返回；重型 God-AI
+  门禁经 runChunkedWorkers 全绿。
+
+**Implications:** 新批量工具一律复用本模块；禁止再手写 worker 循环。物理核检测
+(physicalCores) 一并归位 lib/。

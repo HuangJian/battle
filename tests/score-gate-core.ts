@@ -24,6 +24,7 @@ import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { scoreRun, V7_SCORE_CONFIG } from '../tools/eval/godai-score'
+import { runChunkedWorkers } from '../tools/lib/worker-pool'
 
 // §233 (2026-08-17): seeds 20 → 10 to bring the full suite under 20s. The
 // gate is deterministic — sims are a pure function of (seed, stage, difficulty)
@@ -149,28 +150,14 @@ export async function runGodAIScoreGate(
   const cores = coreCount()
   const chunks = splitRoundRobin(jobs, cores)
 
-  const settled = await Promise.all(
-    chunks.map(
-      (chunk) =>
-        new Promise<ScoreResult[]>((resolve, reject) => {
-          const w = new Worker(new URL('./score-gate-worker.ts', import.meta.url))
-          w.addEventListener('message', (ev: MessageEvent) => {
-            resolve((ev.data as { results: ScoreResult[] }).results)
-            w.terminate()
-          })
-          w.addEventListener('error', (err: unknown) => {
-            w.terminate()
-            reject(err)
-          })
-          w.postMessage({ jobs: chunk })
-        }),
-    ),
+  // Chunk-per-worker fan-out via the shared pool helper (§3.6).
+  const settled = await runChunkedWorkers<{ jobs: ScoreJob[] }, ScoreResult>(
+    new URL('./score-gate-worker.ts', import.meta.url).href,
+    chunks.map((jobs) => ({ jobs })),
   )
 
   const scores = new Map<string, number>()
-  for (const results of settled) {
-    for (const r of results) scores.set(`${r.difficulty}:${r.idx}`, r.score)
-  }
+  for (const r of settled) scores.set(`${r.difficulty}:${r.idx}`, r.score)
   return scores
 }
 

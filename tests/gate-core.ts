@@ -29,6 +29,7 @@
 import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
+import { runChunkedWorkers } from '../tools/lib/worker-pool'
 
 export const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 export const MARGIN_WINS = 4
@@ -157,31 +158,15 @@ export async function runGodAIGate(
   const cores = coreCount()
   const chunks = splitRoundRobin(jobs, cores)
 
-  const settled = await Promise.all(
-    chunks.map(
-      (chunk) =>
-        new Promise<GateResult[]>((resolve, reject) => {
-          const w = new Worker(new URL('./gate-worker.ts', import.meta.url))
-          // NOTE: Bun's Worker `onmessage`/`onerror` *property* assignment does
-          // not fire — use addEventListener (validated). `self.onmessage` inside
-          // the worker is fine.
-          w.addEventListener('message', (ev: MessageEvent) => {
-            resolve((ev.data as { results: GateResult[] }).results)
-            w.terminate()
-          })
-          w.addEventListener('error', (err: unknown) => {
-            w.terminate()
-            reject(err)
-          })
-          w.postMessage({ jobs: chunk })
-        }),
-    ),
+  // Chunk-per-worker fan-out via the shared pool helper (§3.6). The gate
+  // worker aggregates its chunk and returns `{ results }` once.
+  const settled = await runChunkedWorkers<{ jobs: GateJob[] }, GateResult>(
+    new URL('./gate-worker.ts', import.meta.url).href,
+    chunks.map((jobs) => ({ jobs })),
   )
 
   const wins = new Map<string, number>()
-  for (const results of settled) {
-    for (const r of results) wins.set(`${r.difficulty}:${r.idx}`, r.wins)
-  }
+  for (const r of settled) wins.set(`${r.difficulty}:${r.idx}`, r.wins)
   return wins
 }
 
