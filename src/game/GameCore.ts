@@ -1,6 +1,5 @@
 import { World } from './World'
 import { RNG } from '../utils/RNG'
-import { computePlayer2SpawnCol } from '../utils/helpers'
 import { Simulation } from './Simulation'
 import { Input } from './Input'
 import type { InputLike } from './Input'
@@ -217,9 +216,7 @@ export class GameCore {
       this.simulation.requestCoopToggle(false)
       // Apply immediately since we are paused/menu (no tick will fire).
       w.coop = false
-      w.player2 = null
-      w.lives2 = 0
-      w.playerLevel2 = 0
+      w.disablePlayer2()
       // Wire AI inputs
       this.godInput = null
       this.autoFireInput = null
@@ -239,12 +236,7 @@ export class GameCore {
       }
       // Apply immediately since we are paused/menu (no tick will fire).
       w.coop = true
-      const d = w.difficulty
-      w.lives2 = d?.startLives ?? 3
-      w.playerLevel2 = d?.playerStartLevel ?? 0
-      const p1Col = w.playerSpawnPoint?.col ?? 8
-      w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
-      w.spawnPlayer2()
+      w.enablePlayer2()
       // Wire AI inputs
       const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
@@ -335,9 +327,7 @@ export class GameCore {
     if (w.coop) {
       this.simulation.requestCoopToggle(false)
       w.coop = false
-      w.player2 = null
-      w.lives2 = 0
-      w.playerLevel2 = 0
+      w.disablePlayer2()
       this.presentation.ui.controlCenter.setCoopState(false)
     }
     // Apply immediately since we are paused/menu (no tick will fire).
@@ -364,12 +354,7 @@ export class GameCore {
   private enableSpectateDual(): void {
     const w = this.world
     if (!w.player2) {
-      const d = w.difficulty
-      w.lives2 = d?.startLives ?? 3
-      w.playerLevel2 = d?.playerStartLevel ?? 0
-      const p1Col = w.playerSpawnPoint?.col ?? 8
-      w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
-      w.spawnPlayer2()
+      w.enablePlayer2()
     }
     if (!this.godInput2) {
       const rng2 = new RNG((w.seed ^ SEED_HASH ^ P2_SEED_OFFSET) >>> 0)
@@ -383,9 +368,7 @@ export class GameCore {
   private disableSpectateDual(): void {
     const w = this.world
     w.spectateDual = false
-    w.player2 = null
-    w.lives2 = 0
-    w.playerLevel2 = 0
+    w.disablePlayer2()
     this.godInput2 = null
     this.audio.player2Id = null
   }
@@ -400,9 +383,7 @@ export class GameCore {
     w.spectateDual = false
     // Clean up dual spectate player2
     if (wasDual) {
-      w.player2 = null
-      w.lives2 = 0
-      w.playerLevel2 = 0
+      w.disablePlayer2()
     }
     // Wire AI inputs
     this.godInput = null
@@ -510,9 +491,7 @@ export class GameCore {
     this.world.recoveryFading = false
     // Lie-Back-Win-Mode: clean up coop state on return to menu.
     this.world.coop = false
-    this.world.player2 = null
-    this.world.lives2 = 0
-    this.world.playerLevel2 = 0
+    this.world.disablePlayer2()
     this.world.score2 = 0
     // 督战 (supervise) mode: clean up spectate state too.
     this.world.spectate = false

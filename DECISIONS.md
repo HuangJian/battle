@@ -1557,3 +1557,21 @@ triggerSacrificeAoE / applyPowerUp('bomb')）改为一行调用。
 
 **Implications:** 新增击杀来源必须走 recordEnemyKill；直接写 w.score/enemiesRemaining 的
 新代码视为 bug。
+
+## 246. §2.2 P1/P2 生命周期集中化 → World.enablePlayer2/disablePlayer2 (STATUS: 已实施)
+
+**Decision:** `World` 新增 `enablePlayer2({ respawnShield? })`（难度推导 lives2/星级、镜像
+出生点、生成坦克）与 `disablePlayer2()`（清 tank/lives2/playerLevel2）。替换全部 11 处
+复制站点：SimulationCore 2 处（coop 切换 + 督战双玩家）、GameCore 5 处（requestCoopToggle
+开/关、enableSpectate coop 退出、disableSpectateDual、disableSpectate wasDual）、
+resetToMenu 及其余。
+
+**Rationale:**
+- plan §2.2：P2 设置/拆除六处复制，改一处漏五处是状态腐化的温床。
+- respawnShield 参数保留既有行为差异：sim tick 内启用给护盾，菜单时启用不给——逐字节
+  保持原语义，不做"顺手修正"。
+- disablePlayer2 不动 score2：中途退出 coop 不清分是既有行为；resetToMenu 单独清。
+- GameCore 直接改 World 仍是 §1.4 违规，但改动收口到 World 方法后，§1.4 的完整 One-Author
+  路由有了明确落点。
+
+**Implications:** P2 生命周期只有两个入口；新代码禁止手写 player2=null/lives2=0 三连。

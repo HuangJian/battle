@@ -566,6 +566,38 @@ export class World {
   }
 
   /**
+   * Bring Player 2 online (Lie-Back-Win coop / 督战双玩家): roll its lives and
+   * star level from the current difficulty, mirror the spawn point across the
+   * field center, and spawn its tank. The single setup path for P2 — previously
+   * copy-pasted at four toggle sites (plan/refactor.agy.md §2.2).
+   *
+   * @param opts.respawnShield Grant the spawn shield (RESPAWN_SHIELD_MS).
+   *   Mid-game entries (sim tick deferral) grant it; menu-time entries (paused,
+   *   no ticks firing) historically did not — preserved exactly.
+   */
+  enablePlayer2(opts: { respawnShield?: boolean } = {}): void {
+    const d = this.difficulty
+    this.lives2 = d?.startLives ?? 3
+    this.playerLevel2 = d?.playerStartLevel ?? 0
+    const p1Col = this.playerSpawnPoint?.col ?? 8
+    this.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
+    this.spawnPlayer2()
+    if (opts.respawnShield) this.player2!.shieldTimer = RESPAWN_SHIELD_MS
+  }
+
+  /**
+   * Take Player 2 offline: clear its tank, lives, and star level. Score is
+   * deliberately untouched (per-run score survives a coop exit mid-stage;
+   * only resetToMenu wipes it). Single teardown path for P2 — previously
+   * copy-pasted at seven sites (plan/refactor.agy.md §2.2).
+   */
+  disablePlayer2(): void {
+    this.player2 = null
+    this.lives2 = 0
+    this.playerLevel2 = 0
+  }
+
+  /**
    * @param playerSlot Which player tank is being created (1 = P1, 2 = P2/God AI).
    *   Only meaningful when `kind === 'player'`: it selects which star level
    *   drives the spawned stats (playerLevel for P1, playerLevel2 for P2). Enemy

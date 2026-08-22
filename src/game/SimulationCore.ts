@@ -2,8 +2,7 @@ import type { World } from './World'
 import type { Tank, PowerUpType } from '../types'
 import type { InputLike } from './Input'
 import { TacticalIntelligence } from '../ai/TacticalIntelligence'
-import { TICK_MS, RESPAWN_SHIELD_MS } from '../constants'
-import { computePlayer2SpawnCol } from '../utils/helpers'
+import { TICK_MS } from '../constants'
 
 /** Constructor type for the Simulation mixin chain (base = SimulationCore). */
 export type SimulationConstructor<T = SimulationCore> = new (...args: any[]) => T
@@ -125,18 +124,10 @@ export class SimulationCore {
       this.pendingCoopToggle = null
       if (enable && !w.coop) {
         w.coop = true
-        const d = w.difficulty
-        w.lives2 = d?.startLives ?? 3
-        w.playerLevel2 = d?.playerStartLevel ?? 0
-        const p1Col = w.playerSpawnPoint?.col ?? 8
-        w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
-        w.spawnPlayer2()
-        w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+        w.enablePlayer2({ respawnShield: true })
       } else if (!enable && w.coop) {
         w.coop = false
-        w.player2 = null
-        w.lives2 = 0
-        w.playerLevel2 = 0
+        w.disablePlayer2()
       }
     }
 
@@ -151,19 +142,11 @@ export class SimulationCore {
       if (dual) {
         // 督战双玩家: ensure player2 exists — startGame/loadStage wipe it.
         if (!w.player2) {
-          const d = w.difficulty
-          w.lives2 = d?.startLives ?? 3
-          w.playerLevel2 = d?.playerStartLevel ?? 0
-          const p1Col = w.playerSpawnPoint?.col ?? 8
-          w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
-          w.spawnPlayer2()
-          w.player2!.shieldTimer = RESPAWN_SHIELD_MS
+          w.enablePlayer2({ respawnShield: true })
         }
       } else if (w.player2 && !w.coop) {
         // Dual switched off (or spectate off) and co-op doesn't own P2 → remove it.
-        w.player2 = null
-        w.lives2 = 0
-        w.playerLevel2 = 0
+        w.disablePlayer2()
       }
     }
 
