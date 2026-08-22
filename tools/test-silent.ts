@@ -221,6 +221,7 @@ export async function runSilentTest(
   // 1. Decide which test files to run.
   let files: string[]
   let mode: string
+  let advisory = ''
   if (opts.files && opts.files.length) {
     files = opts.files
     mode = 'explicit'
@@ -228,6 +229,14 @@ export async function runSilentTest(
     const allTests = allTestFiles(cwd)
     const changed = gitChangedFiles(cwd)
     const mapped = mapToTests(changed, allTests)
+    // §1.4 guard: a HEAVY_TESTS entry that matches no existing test file means
+    // the exclusion list went stale (heavy test renamed/deleted) — the heavy
+    // file would silently start running in every fast scoped pass.
+    const heavyKnown = new Set(allTests.map((t) => baseName(t).replace(/\.(test|spec)$/, '')))
+    const staleHeavy = [...HEAVY_TESTS].filter((h) => !heavyKnown.has(h))
+    if (staleHeavy.length > 0) {
+      advisory += ` ⚠ HEAVY_TESTS stale (no matching test file): ${staleHeavy.join(', ')}`
+    }
     if (mapped.length) {
       files = mapped
       mode = `changed (${changed.length} changed → ${mapped.length} test file(s))`
@@ -240,7 +249,7 @@ export async function runSilentTest(
     } else {
       files = allTests
       mode = changed.length
-        ? `fallback:all (${changed.length} changed file(s) mapped to no tests)`
+        ? `⚠ fallback:all (${changed.length} changed file(s) mapped to no tests — full suite)`
         : 'all (clean tree)'
     }
   }
@@ -279,7 +288,7 @@ export async function runSilentTest(
   const failures = parseFailures(first.output)
 
   if (first.code === 0 && failures.length === 0) {
-    return { ok: true, summary: `${summary} [${mode}]`, detail: '' }
+    return { ok: true, summary: `${summary} [${mode}]${advisory}`, detail: '' }
   }
 
   // 3. On failure, re-run each failing test individually to isolate its detail.
