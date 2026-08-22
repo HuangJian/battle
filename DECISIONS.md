@@ -1451,3 +1451,19 @@ vignette，不受影响。
 - 全套测试（含 God-AI 确定性门禁）通过 = 字节级零行为变化的实证。
 
 **Implications:** 后续新增计时/种子派生逻辑必须引用这些常量；`1000 / 60` 字面量回归视为 bug。
+
+## 240. §1.5 Option C — WorldSerializer 字段覆盖测试守卫 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
+
+**Decision:** 新增 `tests/serializer-field-guard.test.ts`：断言 (a) World 每个实例字段要么出现在
+`cloneWorld` 输出、要么登记在带理由的 `EXCLUDED` 豁免表中；(b) 快照每个字段能映射回活的
+World 字段（防改名后陈旧序列化）。已验证守卫有效性——临时给 World 加字段测试即红。
+
+**Rationale:**
+- 手工 45+ 字段枚举的失败模式是静默的（游戏正常跑，快照悄悄丢字段），测试无法靠运气覆盖。
+- EXCLUDED 表把每个"故意不序列化"的决定显式化（transient 视觉态、UI 态、重推导字段、
+  perf 缓存、rewindPending 单 tick 信号等 19 项），agent 加新字段时被迫二选一：进序列化器
+  或写明豁免理由。
+- 零运行时成本（Option C 的优势）；tileGrid→tileMap、rngState→rng 两个改名映射内置于 KEY_MAP。
+
+**Implications:** 给 World/Tank 加字段时该测试是强制关卡；Tank 字段由 cloneTank 的展开运算符
+天然覆盖，不在本守卫范围。
