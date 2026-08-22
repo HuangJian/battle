@@ -4,7 +4,8 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { TacticalIntelligence } from '../src/ai/TacticalIntelligence'
-import { CELL, GRID, CORRIDOR_ESCAPE_CHANCE } from '../src/constants'
+import { CELL, GRID } from '../src/constants'
+import { CORRIDOR_ESCAPE_CHANCE } from '../src/ai/config'
 import type { Tank } from '../src/types'
 
 /**

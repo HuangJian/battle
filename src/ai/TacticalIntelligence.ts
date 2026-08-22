@@ -2,11 +2,8 @@ import type { World } from '../game/World'
 import type { Tank, AIState, GoalType, CommanderDirective } from '../types'
 import { TICK_MS, type Direction } from '../constants'
 import type { GameplayRules } from '../config/rules'
+import { CELL, TANK, FIELD, DIR_VECTORS } from '../constants'
 import {
-  CELL,
-  TANK,
-  FIELD,
-  DIR_VECTORS,
   TACTICAL_INTERVAL_MS,
   STRATEGIC_INTERVAL_MS,
   COMMANDER_INTERVAL_MS,
@@ -16,7 +13,7 @@ import {
   NONE_FIRE_JITTER_MS,
   VERT_TUNNEL_THRESHOLD_MS,
   CORRIDOR_ESCAPE_CHANCE,
-} from '../constants'
+} from './config'
 import { opposite, ALL_DIRS } from '../utils/direction'
 import { snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'

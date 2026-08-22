@@ -27,7 +27,7 @@ import { resolveProfile, profileToStats } from '../config/combat'
 import { RULES, DEFAULT_RULES, hasStarPerk } from '../config/rules'
 import type { GameplayRules } from '../config/rules'
 import { rollSpeedJitter } from '../config/speed'
-import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
+import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR, STRATEGIC_INTERVAL_MS, COMMANDER_INTERVAL_MS } from '../ai/config'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
@@ -37,8 +37,8 @@ import {
   TANK,
   ENEMIES_PER_STAGE,
   START_LIVES,
-  STRATEGIC_INTERVAL_MS,
-  COMMANDER_INTERVAL_MS,
+
+
   PLAYER_SPAWN,
   ENEMY_SPAWNS,
   RESPAWN_SHIELD_MS,

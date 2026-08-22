@@ -1593,3 +1593,18 @@ World.findFreeSpawnCell 与 SimulationPowerUps.findFreeDropCell 共享的"32px �
 - findNearestFreeCell 不收 World 参数：谓词闭包自持引用，签名更诚实。
 
 **Implications:** 新增"全场最近空位"需求一律走 GridQuery；受限扫描/偏好扫描属不同契约。
+
+## 248. §2.9 + §3.8 时间单位命名约定 + AI 常量归位 (STATUS: 已实施)
+
+**Decision:** (a) constants.ts 顶部新增 `*_MS / *_FRAMES / *_TICKS` 命名约定注释块——后缀即
+契约，单位必须在调用点一目了然。(b) 九个 AI 专属常量（TACTICAL/STRATEGIC/COMMANDER_INTERVAL_MS、
+DODGE_LOCK_MS、NONE_TURN_MIN/JITTER_MS、NONE_FIRE_JITTER_MS、VERT_TUNNEL_THRESHOLD_MS、
+CORRIDOR_ESCAPE_CHANCE）从 constants.ts 迁至 `src/ai/config.ts`；消费方
+TacticalIntelligence/World/corridor-escape 测试改从 ai/config 导入。
+
+**Rationale:**
+- plan §2.9：毫秒与帧数混排无约定可循；plan §3.8：AI 调参值住在共享常量文件里误导检索。
+- ai/config.ts 本就是 AI 数据的家（INTELLIGENCE_LEVELS 等），World 已依赖它——迁移零新边。
+- 数值逐字节不动（含 CORRIDOR_ESCAPE_CHANCE 的 0.005601），全套确定性门禁通过。
+
+**Implications:** 新时间常量必须带单位后缀；AI 行为调参只动 src/ai/config.ts。

@@ -187,6 +187,56 @@ export const COMMANDER_FLOOR: Record<string, number> = {
 /** Hard readability/fairness limit: at most 2 Commander-tier tanks alive. */
 export const COMMANDER_ALIVE_CAP = 2
 
+// ============================================================
+// Tactical Intelligence Framework (AI) timing
+// (moved from constants.ts — plan/refactor.agy.md §3.8: AI-specific
+// values belong in the AI's config module, not the shared game file)
+// ============================================================
+
+/** Default interval between tactical (5s) re-evaluations. */
+export const TACTICAL_INTERVAL_MS = 5000
+
+/** Default interval between strategic (20s) re-evaluations. */
+export const STRATEGIC_INTERVAL_MS = 20000
+
+/** Commander broadcast cadence (20s). */
+export const COMMANDER_INTERVAL_MS = 20000
+
+/** How long (ms) a committed dodge direction is held before re-evaluating. */
+export const DODGE_LOCK_MS = 350
+
+// ================================================================
+// None-tier (classic) behavior branch timing
+// ================================================================
+
+/** Min ms before a None-tier tank re-rolls its wander direction. */
+export const NONE_TURN_MIN_MS = 700
+/** Uniform jitter (ms) added on top of NONE_TURN_MIN_MS. */
+export const NONE_TURN_JITTER_MS = 900
+/** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
+export const NONE_FIRE_JITTER_MS = 1400
+
+/**
+ * Dead-end recovery: if an enemy is confined to a vertical-only (or
+ * horizontal-only) channel — open directions contain no lateral axis — for
+ * this long without escaping, it faces a destructible brick wall on the side
+ * and fires to tunnel out. Prevents the "stuck spinning up/down in a 1-wide
+ * shaft" trap (e.g. Stage 8's middle spawn, bounded by brick/steel/water).
+ * A pure steel/water box has nothing to break, so it still oscillates — but
+ * authentic stages box spawns only with destructible brick, which we clear.
+ */
+export const VERT_TUNNEL_THRESHOLD_MS = 450
+
+/**
+ * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
+ * open direction available, this is the probability it will take that orthogonal
+ * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
+ * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
+ * At 60 FPS, ~0.56% ≈ one escape attempt every ~3 seconds on average — rare enough
+ * to not look erratic, frequent enough to unstick within a few seconds.
+ */
+export const CORRIDOR_ESCAPE_CHANCE = 0.005601
+
 /**
  * Map one uniform draw in [0,1) to a tier via a cumulative walk over the
  * distribution in `TIER_ROLL_ORDER`. Pure — the caller supplies the draw

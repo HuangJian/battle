@@ -1,6 +1,14 @@
 // ============================================================
 // Game Constants
 // ============================================================
+//
+// ── Naming convention for time-bearing constants (plan/refactor.agy.md §2.9)
+// ─────────────────────────────────────────────────────────────
+//   *_MS     milliseconds (wall-clock or sim-clock durations/timestamps)
+//   *_FRAMES simulation frames @60Hz (e.g. DECOY_LIFESPAN_FRAMES = 30 * 60)
+//   *_TICKS  simulation ticks (1 tick = TICK_MS; prefer *_MS at API borders)
+// The suffix is part of the contract: a value's unit must be obvious at the
+// call site without reading its definition.
 
 /** Size of one sub-block in pixels (smallest terrain unit) */
 export const CELL = 16
@@ -192,62 +200,6 @@ export {
 export const ICE_ACCEL_TRACTION = 0.35
 /** Fraction of the velocity gap closed per tick while decelerating on ice. */
 export const ICE_DECEL_TRACTION = 0.05
-
-// ============================================================
-// Tactical Intelligence Framework (AI) timing
-// ============================================================
-
-/** Default interval between tactical (5s) re-evaluations. */
-export const TACTICAL_INTERVAL_MS = 5000
-
-/** Default interval between strategic (20s) re-evaluations. */
-export const STRATEGIC_INTERVAL_MS = 20000
-
-/** Commander broadcast cadence (20s). */
-export const COMMANDER_INTERVAL_MS = 20000
-
-/** How long (ms) a committed dodge direction is held before re-evaluating. */
-export const DODGE_LOCK_MS = 350
-
-// ================================================================
-// None-tier (classic) behavior branch timing
-// ================================================================
-
-/** Min ms before a None-tier tank re-rolls its wander direction. */
-export const NONE_TURN_MIN_MS = 700
-/** Uniform jitter (ms) added on top of NONE_TURN_MIN_MS. */
-export const NONE_TURN_JITTER_MS = 900
-/** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
-export const NONE_FIRE_JITTER_MS = 1400
-
-/**
- * Dead-end recovery: if an enemy is confined to a vertical-only (or
- * horizontal-only) channel — open directions contain no lateral axis — for
- * this long without escaping, it faces a destructible brick wall on the side
- * and fires to tunnel out. Prevents the "stuck spinning up/down in a 1-wide
- * shaft" trap (e.g. Stage 8's middle spawn, bounded by brick/steel/water).
- * A pure steel/water box has nothing to break, so it still oscillates — but
- * authentic stages box spawns only with destructible brick, which we clear.
- */
-export const VERT_TUNNEL_THRESHOLD_MS = 450
-
-/**
- * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
- * open direction available, this is the probability it will take that orthogonal
- * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
- * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
- * At 60 FPS, 1% ≈ one escape attempt every ~1.7 seconds on average — rare enough
- * to not look erratic, frequent enough to unstick within a few seconds.
- */
-/**
- * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
- * open direction available, this is the probability it will take that orthogonal
- * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
- * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
- * At 60 FPS, ~0.56% ≈ one escape attempt every ~3 seconds on average — rare enough
- * to not look erratic, frequent enough to unstick within a few seconds.
- */
-export const CORRIDOR_ESCAPE_CHANCE = 0.005601
 
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,
