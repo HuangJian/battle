@@ -1,5 +1,6 @@
 import type { Replay, ReplayID, ReplayType } from '../../replay/types'
 import { t } from '../../i18n'
+import { formatBytes, formatCreated } from './helpers'
 import { localizedStageName } from '../../config/stages'
 
 // ================================================================
@@ -48,18 +49,6 @@ function formatPlayTime(ms: number): string {
   const m = Math.floor(total / 60)
   const s = total % 60
   return m > 0 ? `${String(m).padStart(2, '0')}m` : `${s}s`
-}
-
-function formatCreated(epochMs: number): string {
-  const d = new Date(epochMs)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export class ReplayBrowser {

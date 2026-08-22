@@ -1780,3 +1780,20 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 
 **Implications:** 新增 AI 数据结构 → ai/types.ts；新增配置数据契约 → config/types.ts；
 根 types.ts 只进核心实体与事件。plan/refactor.agy.md §2.6 关闭（Tank 部分以否决关闭）。
+
+## 258. §3.3 Browser 去重 — 最小提取（formatCreated/formatBytes） (STATUS: 已实施, 范围修正)
+
+**Decision:** 新建 `src/presentation/ui/helpers.ts`，仅收编两处**逐字节相同**的助手：
+`formatCreated`（MM-DD HH:mm 时间戳）与 `formatBytes`（B/KB/MB）。其余计划声称的重复
+经核实不成立或不宜合并，明确不做。
+
+**Rationale:**
+- `formatPlayTime` 两处语义不同：Snapshot 只显示整分钟（`05m`），Replay 按时长自适应
+  （`05m` / `42s`）。合并即改变可见行为——不是重复是分歧。
+- 拖拽导入仅 ReplayBrowser 实现，SnapshotBrowser 无此功能，无可去重。
+- 过滤页签/条目卡片结构相似但绑定不同数据模型（SnapshotType vs ReplayType+favorite），
+  抽 BrowserBase 的耦合代价大于 ~40 行节省（三门：复杂度不划算）。
+- 计划的审计数字基于行数估算；本次按"逐字节相同才提取"的标准执行。
+
+**Implications:** 浏览器类新增共享格式化助手 → ui/helpers.ts；两浏览器的显示契约
+保持各自独立。
