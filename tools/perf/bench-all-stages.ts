@@ -20,13 +20,14 @@
  */
 import { runSimulation } from '../sim/simulation-runner'
 import { STAGES } from '../../src/config/stages'
+import { EVAL_DIFFICULTY_KEYS } from '../../src/config/difficulty'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 
 const N = Number(process.argv.find((a) => a.startsWith('--games'))?.split('=')[1] ?? 10)
 const WARMUP = Number(process.argv.find((a) => a.startsWith('--warmup'))?.split('=')[1] ?? 2)
 const DIFF_ARG = process.argv.find((a) => a.startsWith('--diff'))?.split('=')[1]
 // §128: default = all three difficulties, each 1/3 of the baseline load.
-const DIFFS: string[] = DIFF_ARG ? [DIFF_ARG] : ['classic', 'hard', 'chaos']
+const DIFFS: string[] = DIFF_ARG ? [DIFF_ARG] : [...EVAL_DIFFICULTY_KEYS]
 
 // Warmup once per difficulty (shared JIT state) — stage-0, distinct negative seeds.
 for (const diff of DIFFS) {

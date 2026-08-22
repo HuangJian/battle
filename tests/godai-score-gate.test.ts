@@ -24,7 +24,9 @@ import {
   MARGIN_SCORE,
 } from './score-gate-core'
 
-const DIFFS = ['classic', 'hard', 'chaos'] as const
+import { EVAL_DIFFICULTY_KEYS } from '../src/config/difficulty'
+
+const DIFFS = EVAL_DIFFICULTY_KEYS
 
 test(
   'God-AI score gate (classic+hard+chaos, godai-score v7, worker pool)',

@@ -19,9 +19,10 @@
  *
  * Pure module: no RNG, no seed/params mutation, no filesystem access.
  */
+import { STAGES } from '../../src/config/stages'
 
-/** Total number of stages (single source: the STAGES config length). */
-export const STAGE_COUNT = 35
+/** Total number of stages — derived from the STAGES config (single source). */
+export const STAGE_COUNT = STAGES.length
 
 export class StageSpecError extends Error {
   constructor(spec: string, reason: string) {

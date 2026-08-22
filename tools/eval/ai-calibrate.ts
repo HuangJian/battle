@@ -17,6 +17,7 @@
  */
 
 import { STAGES } from '../../src/config/stages'
+import { EVAL_DIFFICULTY_KEYS } from '../../src/config/difficulty'
 import { runSimulation } from '../sim/simulation-runner'
 import {
   DEFAULT_GOD_AI_PARAMS,
@@ -196,7 +197,7 @@ if (import.meta.main) {
   const seedCount = parseInt(arg('seeds', '10')!, 10)
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const diffSpec = arg('difficulty', 'hard')!
-  const difficulties = diffSpec === 'all' ? ['classic', 'hard', 'chaos'] : [diffSpec]
+  const difficulties = diffSpec === 'all' ? [...EVAL_DIFFICULTY_KEYS] : [diffSpec]
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const pretty = process.argv.includes('--pretty')
   const outputFile = arg('output', 'ai-baseline.json')!

@@ -29,7 +29,7 @@
 import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { runChunkedWorkers } from '../tools/lib/worker-pool'
+import { runChunkedWorkers, gateCoreCount, splitRoundRobin } from '../tools/lib/worker-pool'
 
 export const GATE_SEEDS = Array.from({ length: 20 }, (_, i) => i + 1) // 1..20
 export const MARGIN_WINS = 4
@@ -126,23 +126,6 @@ export interface GateResult {
   wins: number
 }
 
-function splitRoundRobin(jobs: GateJob[], n: number): GateJob[][] {
-  const chunks: GateJob[][] = Array.from({ length: n }, () => [])
-  jobs.forEach((job, i) => chunks[i % n].push(job))
-  return chunks
-}
-
-function coreCount(): number {
-  const env = Number(process.env.GATE_CORES)
-  if (Number.isFinite(env) && env > 0) return Math.floor(env)
-  // Default tuned for THIS host. `navigator.hardwareConcurrency` reports 16
-  // logical CPUs, but the pool is FASTEST at ~4 workers — beyond that, extra
-  // workers contend and slow down (measured: 1→10.5s, 4→6.1s, 8→7.5s, 16→10.3s
-  // for 700 classic sims; full 2100-sim gate: 4→27.9s vs 16→36s). Over-
-  // subscribing wastes time, so we cap the default well below the reported count.
-  return 4
-}
-
 /**
  * Fan out every (difficulty × stage) job across a Bun Worker pool and return a
  * Map keyed `"<difficulty>:<idx>"` → win count. Pure aggregation: the win math
@@ -156,7 +139,7 @@ export async function runGodAIGate(
   for (const d of difficulties)
     for (let i = 0; i < stageCount; i++) jobs.push({ difficulty: d, idx: i })
 
-  const cores = coreCount()
+  const cores = gateCoreCount()
   const chunks = splitRoundRobin(jobs, cores)
 
   // Chunk-per-worker fan-out via the shared pool helper (§3.6). The gate

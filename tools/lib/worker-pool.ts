@@ -48,6 +48,30 @@ export function defaultWorkerCount(): number {
 }
 
 /**
+ * Gate-harness worker count (tests/gate-core.ts + score-gate-core.ts — the
+ * single shared copy; was duplicated in both). Override: GATE_CORES.
+ * Default tuned for THIS host: `navigator.hardwareConcurrency` reports 16
+ * logical CPUs, but the gate pool is FASTEST at ~4 workers — beyond that,
+ * extra workers contend and slow down (measured: 1→10.5s, 4→6.1s, 8→7.5s,
+ * 16→10.3s for 700 classic sims; full 2100-sim gate: 4→27.9s vs 16→36s).
+ */
+export function gateCoreCount(): number {
+  const env = Number(process.env.GATE_CORES)
+  if (Number.isFinite(env) && env > 0) return Math.floor(env)
+  return 4
+}
+
+/**
+ * Round-robin job split into n chunks (gate harness fan-out). Shared copy of
+ * the identical helper that used to live in both gate cores.
+ */
+export function splitRoundRobin<T>(jobs: T[], n: number): T[][] {
+  const chunks: T[][] = Array.from({ length: n }, () => [])
+  jobs.forEach((job, i) => chunks[i % n].push(job))
+  return chunks
+}
+
+/**
  * Persistent pool of `size` workers running `TTask` → `TResult` jobs.
  * Results carry an `id` field indexing into the submitted task order.
  */

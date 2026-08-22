@@ -26,6 +26,7 @@ import { STAGES } from '../../src/config/stages'
 import { SimWorkerPool } from './sim-pool'
 import type { SimTask, SimTaskResult } from './sim-worker'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
+import { EVAL_DIFFICULTY_KEYS } from '../../src/config/difficulty'
 import { MAX_TICKS } from './simulation-runner'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { DEFAULT_HISTORY_DIR, loadSnapshots, type WinrateSnapshot } from './winrate-history'
@@ -43,7 +44,7 @@ function parseSeeds(spec: string): number[] {
   return [parseInt(spec, 10)]
 }
 
-const difficulties = arg('difficulties', 'classic,hard,chaos')!
+const difficulties = arg('difficulties') ?? EVAL_DIFFICULTY_KEYS.join(',')
   .split(',')
   .map((s) => s.trim())
 const seeds = parseSeeds(arg('seeds', '1-60')!)

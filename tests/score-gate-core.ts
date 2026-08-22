@@ -24,7 +24,7 @@ import { runSimulation } from '../tools/sim/simulation-runner'
 import { STAGES } from '../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { scoreRun, V7_SCORE_CONFIG } from '../tools/eval/godai-score'
-import { runChunkedWorkers } from '../tools/lib/worker-pool'
+import { runChunkedWorkers, gateCoreCount, splitRoundRobin } from '../tools/lib/worker-pool'
 
 // §233 (2026-08-17): seeds 20 → 10 to bring the full suite under 20s. The
 // gate is deterministic — sims are a pure function of (seed, stage, difficulty)
@@ -120,19 +120,6 @@ export interface ScoreResult {
   score: number
 }
 
-function splitRoundRobin(jobs: ScoreJob[], n: number): ScoreJob[][] {
-  const chunks: ScoreJob[][] = Array.from({ length: n }, () => [])
-  jobs.forEach((job, i) => chunks[i % n].push(job))
-  return chunks
-}
-
-function coreCount(): number {
-  const env = Number(process.env.GATE_CORES)
-  if (Number.isFinite(env) && env > 0) return Math.floor(env)
-  // Default tuned for THIS host (mirrors gate-core: ~4 workers is fastest).
-  return 4
-}
-
 /**
  * Fan out every (difficulty × stage) job across a Bun Worker pool and return a
  * Map keyed `"<difficulty>:<idx>"` → mean v7 score. Pure aggregation; the score
@@ -146,7 +133,7 @@ export async function runGodAIScoreGate(
   for (const d of difficulties)
     for (let i = 0; i < stageCount; i++) jobs.push({ difficulty: d, idx: i })
 
-  const cores = coreCount()
+  const cores = gateCoreCount()
   const chunks = splitRoundRobin(jobs, cores)
 
   // Chunk-per-worker fan-out via the shared pool helper (§3.6).
