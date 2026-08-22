@@ -1538,3 +1538,22 @@ grep 调用点。变体族如需统一须逐个验证几何关系。
 
 **Implications:** 新增循环阶段 = 新增一个 step 方法并在 loop 调度器中登记；各 step 可独立
 阅读/测试。禁止对 loop 内调用顺序做任何重排。
+
+## 245. §2.1 击杀管线抽取 → KillPipeline.ts (STATUS: 已实施, plan/refactor.agy.md Phase 2)
+
+**Decision:** 新建 `src/game/KillPipeline.ts`：`recordEnemyKill(w, victim, opts)` 统一
+"击杀计分→入账→计数→弹分数字幕"四步（`toScore2` 支持 Lie-Back-Win P2 分流，
+`countsTowardStage` 支持 isExtra 余额兵不计入场配额）；`destroyBrickAoE(w,cx,cy,r)`
+统一两处逐字节相同的砖墙 AoE 循环。四处调用点（bulletHitsTank / updateMines /
+triggerSacrificeAoE / applyPowerUp('bomb')）改为一行调用。
+
+**Rationale:**
+- plan §2.1：同一管线复制五份，改计分规则需改五处。
+- 差异点参数化而非复制：combat 的 God 分流与 isExtra 豁免是 opts 字段；爆炸/事件/掉落
+  语义各站点不同，留在调用点（函数只做共同核心，不做上帝函数）。
+- 仅由 Simulation mixin 调用 → One-Author 不变。击杀是稀有事件，opts 对象分配无热路径
+  顾虑（AGENTS §14 针对每 tick 路径）。
+- combat 站点 `gained` 返回值被后续里程碑掉落逻辑复用（w.score - gained），保留返回值。
+
+**Implications:** 新增击杀来源必须走 recordEnemyKill；直接写 w.score/enemiesRemaining 的
+新代码视为 bug。

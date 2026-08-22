@@ -10,7 +10,6 @@ import {
   EMP_DURATION_MS,
   GRID,
   TICK_MS,
-  POPUP_DURATION_MS,
   BASE_POS,
   REPAIR_HEAL_AMOUNT,
 } from '../constants'
@@ -18,7 +17,7 @@ import { SUPER_POWERUP_TYPES, POWERUP_TIERS, POWERUP_TIER_WEIGHTS } from '../con
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { rollSpeedJitter } from '../config/speed'
 import { hasStarPerk } from '../config/rules'
-import { killScore } from '../config/score'
+import { recordEnemyKill } from './KillPipeline'
 import { genId } from './World'
 import { aabb } from '../utils/helpers'
 import type { PowerUpType, Tank } from '../types'
@@ -447,23 +446,7 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
             tank.alive = false
             w._needsCleanup = true
             this.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-            const gained = killScore(
-              w.difficultyKey,
-              tank.aiState?.level,
-              w.stageIndex,
-              w.rules,
-              tank.kind,
-            )
-            w.score += gained
-            w.enemiesRemaining--
-            w.killCount++
-            w.addPopup({
-              id: genId(),
-              x: tank.x,
-              y: tank.y,
-              text: String(gained),
-              timer: POPUP_DURATION_MS,
-            })
+            recordEnemyKill(w, tank)
           }
           break
 

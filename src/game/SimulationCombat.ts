@@ -11,14 +11,13 @@ import {
   STAR_SHIELD_GRACE_MS,
   TICK_MS,
   TURN_SENTINEL_MS,
-  POPUP_DURATION_MS,
   BASE_POS,
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
 import { rollSpeedJitter, spawnBulletSpeedPxPerTick } from '../config/speed'
 import { hasStarPerk } from '../config/rules'
 import { nextFireIntervalMs } from '../config/fire-rate'
-import { killScore } from '../config/score'
+import { recordEnemyKill } from './KillPipeline'
 import { genId } from './World'
 import { snap, aabb } from '../utils/helpers'
 import type { Bullet, Tank } from '../types'
@@ -596,32 +595,15 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
             // guard simply stops fighting (§31 Phase 2).
             w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
           } else {
-            const gained = killScore(
-              w.difficultyKey,
-              tank.aiState?.level,
-              w.stageIndex,
-              w.rules,
-              tank.kind,
-            )
             // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
             const isGodKill = w.coop && bullet.ownerId === w.player2?.id
-            if (isGodKill) {
-              w.score2 += gained
-            } else {
-              w.score += gained
-            }
-            w.killCount++
             // Accompanying "balance" enemies (isExtra) are outside the per-stage
             // 20-enemy count, so they never decrement enemiesRemaining / block
             // stage clear — but they still count as a normal kill for score
             // (§31 Phase 2).
-            if (!tank.isExtra) w.enemiesRemaining--
-            w.addPopup({
-              id: genId(),
-              x: tank.x,
-              y: tank.y,
-              text: String(gained),
-              timer: POPUP_DURATION_MS,
+            const gained = recordEnemyKill(w, tank, {
+              toScore2: isGodKill,
+              countsTowardStage: !tank.isExtra,
             })
             w.pushEvent({ type: 'tank_destroyed', tank, by: 'player', byId: bullet.ownerId })
 

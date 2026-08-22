@@ -1,7 +1,6 @@
-import { CELL, TANK, GRID, DIR_VECTORS, Direction, SEED_HASH, POPUP_DURATION_MS } from '../constants'
+import { CELL, TANK, DIR_VECTORS, Direction, SEED_HASH } from '../constants'
 import { SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
-import { killScore } from '../config/score'
-import { genId } from './World'
+import { recordEnemyKill, destroyBrickAoE } from './KillPipeline'
 import { aabb } from '../utils/helpers'
 import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
@@ -495,27 +494,13 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
           t.alive = false
           w._needsCleanup = true
           this.createExplosion(t.x + t.w / 2, t.y + t.h / 2, 'big')
-          const gained = killScore(w.difficultyKey, t.aiState?.level, w.stageIndex, w.rules, t.kind)
-          w.score += gained
-          w.enemiesRemaining--
-          w.killCount++
-          w.addPopup({ id: genId(), x: t.x, y: t.y, text: String(gained), timer: POPUP_DURATION_MS })
+          recordEnemyKill(w, t)
           w.pushEvent({ type: 'tank_destroyed', tank: t, by: 'player' })
         }
       }
 
       // Destroy brick walls within radius (16×16 cells).
-      const c0 = Math.max(0, Math.floor((cx - radiusPx) / CELL))
-      const c1 = Math.min(GRID - 1, Math.floor((cx + radiusPx) / CELL))
-      const r0 = Math.max(0, Math.floor((cy - radiusPx) / CELL))
-      const r1 = Math.min(GRID - 1, Math.floor((cy + radiusPx) / CELL))
-      for (let r = r0; r <= r1; r++) {
-        for (let c = c0; c <= c1; c++) {
-          if (w.tileMap.get(c, r) === 'brick') {
-            w.tileMap.destroy(c, r)
-          }
-        }
-      }
+      destroyBrickAoE(w, cx, cy, radiusPx)
 
       this.createExplosion(cx, cy, 'big')
       w.sacrificeStock = 0
