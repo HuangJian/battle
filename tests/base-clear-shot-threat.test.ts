@@ -1,12 +1,9 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { Simulation } from '../src/game/Simulation'
-import { Input } from '../src/game/Input'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { RNG } from '../src/utils/RNG'
+import { GodAIInput } from '../src/ai/GodAIInput'
 import { CELL, BASE_POS } from '../src/constants'
 import type { Tank } from '../src/types'
-import { clearArena } from './helpers'
+import { setupGodGame } from './helpers'
 
 /**
  * §157: base clear-shot threat detection — unit tests.
@@ -28,21 +25,8 @@ import { clearArena } from './helpers'
  * fire at any moment.
  */
 
-function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
-  world: World
-  input: GodAIInput
-} {
-  const world = new World()
-  world.rng = new RNG(42)
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
-  const sim = new Simulation(world, new Input())
-  world.startGame('hard', 'modern', 0)
-  clearArena(world)
-  void sim
-  input.hasBase = world.tileMap.hasBase()
-  input.reset()
-  return { world, input }
-}
+// setupWorld (§1.1) → shared setupGodGame from ./helpers; the local copy was
+// byte-identical to godai-threat-sticky.test.ts's.
 
 function placeEnemy(world: World, col: number, row: number, dir: Tank['dir'] = 'down'): Tank {
   const enemy = world.createTank('basic', col * CELL, row * CELL, dir)
@@ -73,7 +57,7 @@ function refreshEnemies(input: GodAIInput, world: World): void {
 
 describe('§157: base clear-shot threat detection', () => {
   it('detects an enemy with a clear shot at the base from far away', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     // Enemy at base column (col 12), row 5 — aligned, clear line to base
     // Distance to base: |12-12| + |5-24| = 19 > baseRaceRangeCells (18)
@@ -84,7 +68,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('baseClearShotThreat=0 is byte-identical (far enemy not detected)', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0, baseClearShotThreat: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0, baseClearShotThreat: 0 } })
     positionPlayer(world, 2, 2)
     placeEnemy(world, 12, 5)
     refreshEnemies(input, world)
@@ -95,7 +79,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('does NOT trigger when a brick wall blocks the line of sight', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     placeEnemy(world, 12, 5)
     // Place a brick wall between the enemy and the base
@@ -106,7 +90,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('does NOT trigger when enemy is not aligned with the base', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     // Enemy at col 5, row 10 — not aligned with base (col 12, row 24)
     placeEnemy(world, 5, 10)
@@ -116,7 +100,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('does NOT trigger for a dead enemy', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     const enemy = placeEnemy(world, 12, 5)
     enemy.alive = false
@@ -126,7 +110,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('does NOT trigger for a spawning enemy', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     const enemy = placeEnemy(world, 12, 5)
     enemy.spawnTimer = 60
@@ -136,7 +120,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('triggers for an enemy aligned on the base ROW (horizontal shot)', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     // Enemy at row 24 (base row), col 2 — aligned horizontally
     placeEnemy(world, 2, 24)
@@ -150,7 +134,7 @@ describe('§157: base clear-shot threat detection', () => {
     // requires the enemy to face the base (facingGate). The §156 check
     // fires regardless of facing — an aligned enemy can turn and fire
     // at any moment.
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     // Enemy at col 12, row 5, facing UP (away from base)
     placeEnemy(world, 12, 5, 'up')
@@ -160,7 +144,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('causes selectTarget to return the defense position when player is far', () => {
-    const { world, input } = setupWorld({ chokepointMode: 0 })
+    const { world, input } = setupGodGame({ params: { chokepointMode: 0 } })
     positionPlayer(world, 2, 2)
     placeEnemy(world, 12, 5)
     refreshEnemies(input, world)
@@ -175,7 +159,7 @@ describe('§157: base clear-shot threat detection', () => {
   })
 
   it('works alongside chokepointMode=1 (ORed, never reduces detection)', () => {
-    const { world, input } = setupWorld() // default: chokepointMode=1, baseClearShotThreat=1
+    const { world, input } = setupGodGame() // default: chokepointMode=1, baseClearShotThreat=1
     positionPlayer(world, 2, 2)
     // Enemy NOT facing the base — chokepoint check (facingGate) would skip it,
     // but baseClearShotThreat catches it.
