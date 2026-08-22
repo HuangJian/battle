@@ -1659,3 +1659,21 @@ settings 模块。
 - headless 测试环境无 localStorage → try/catch 原样兜底，全套门禁通过。
 
 **Implications:** 新持久化键一律进 settings.ts；World 不再直接触碰 localStorage。
+
+## 252. §3.1 双渲染器 fallback 移除 — 否决（前提不成立） (STATUS: 否决)
+
+**Decision:** 不移除 SpriteArtistTerrain/Tanks/Effects 中的程序化 Canvas2D 绘制路径。
+plan/refactor.agy.md §3.1 称其约 500 行为"死重"（dead-weight）——经核实前提错误。
+
+**Rationale:**
+- `GameRendererCore.ts:224`: `artist.skipSvg = themeKey !== 'modern'`——Classic 与 Neon
+  主题**故意**走程序化路径，用 ThemeColors 实时着色，而非 Modern-Retro 调色的 SVG
+  （SpriteArtistCore.ts:355-358 注释明确记载该设计意图）。
+- 这正是 MANIFEST themability 原则的执行："sprite 颜色随主题变化来自 ThemeColors 在绘制时
+  应用，不烘焙进 SVG"。SVG 管线只服务 modern 主题。
+- 删除后果：Classic/Neon 下坦克/地形直接消失。渲染无深度单测覆盖，此类回归测试抓不住。
+- plan 自身的前提条款"Once SVG asset coverage is verified as complete"已满足，但覆盖完成
+  ≠ fallback 死亡——它们是主题分支，不是遗留物。
+
+**Implications:** 若未来要让全主题走 SVG，须先为 Classic/Neon 生成主题化 sprite 变体并
+扩展 SpriteCache 键空间——那是新特性工作，不是清理。§3.1 关闭。
