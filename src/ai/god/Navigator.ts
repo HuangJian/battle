@@ -3,7 +3,8 @@ import type { Tank } from '../../types'
 import type { Cell } from '../../utils/pathfind'
 import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
 import { findPath } from '../../utils/pathfind'
-import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
+import { opposite, ALL_DIRS } from '../../utils/direction'
+import { snap, aabb } from '../../utils/helpers'
 
 // ============================================================
 // Navigator — movement, pathfinding, and wall-breaking (T1, S7, S10)

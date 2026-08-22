@@ -161,31 +161,19 @@ export const SMALL_EXPLOSION_MS = 200
 /** Big (tank-size) explosion animation lifetime (ms). */
 export const BIG_EXPLOSION_MS = 500
 
-/** Direction vectors */
-export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
-  up: { dx: 0, dy: -1 },
-  down: { dx: 0, dy: 1 },
-  left: { dx: -1, dy: 0 },
-  right: { dx: 1, dy: 0 },
-}
-
 /**
- * Flat parallel arrays for hot-path direction lookups (perf §64):
- * `DIR_VECTORS[dir]` is a string-keyed Record lookup that allocates a
- * {dx,dy} object reference and forces a dict hash probe. The flat arrays
- * let callers do `const i = dirIdx(dir); DIR_DX[i], DIR_DY[i]` — index
- * access only, no dict probe. dirIdx is a 4-way ternary.
- *
- * `dirIdx` is provided as a helper so all hot-path callers share the same
- * string→index conversion; cold-path code can keep using `DIR_VECTORS`.
+ * Direction data & helpers — canonical definitions live in
+ * `utils/direction.ts` (plan/refactor.agy.md §2.8); re-exported here so
+ * existing imports keep working. New code should import from
+ * `utils/direction` directly.
  */
-export const DIR_DX: readonly number[] = [0, 0, -1, 1] // up, down, left, right
-export const DIR_DY: readonly number[] = [-1, 1, 0, 0]
-export function dirIdx(dir: Direction): number {
-  return dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
-}
-
-export type Direction = 'up' | 'down' | 'left' | 'right'
+export {
+  DIR_VECTORS,
+  DIR_DX,
+  DIR_DY,
+  dirIdx,
+  type Direction,
+} from './utils/direction'
 
 // ================================================================
 // Ice momentum (slide / glide) model — see Simulation.updateMovement.

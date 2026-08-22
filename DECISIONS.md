@@ -1483,3 +1483,21 @@ World 字段（防改名后陈旧序列化）。已验证守卫有效性——�
 
 **Implications:** 新持久化域（如设置云备份）直接复用 IndexedDBStore；generateUUID 只允许从
 utils/uuid 导入。
+
+## 242. §2.8 方向助手整合 → utils/direction.ts (STATUS: 已实施, plan/refactor.agy.md Phase 1)
+
+**Decision:** 新建 `src/utils/direction.ts` 作为方向数据/助手的唯一定义源（`Direction` 类型、
+`DIR_VECTORS`、`DIR_DX/DY`、`dirIdx`、`ALL_DIRS`、`opposite/turnCW/turnCCW/moveDir`）。
+constants.ts 与 helpers.ts 保留兼容再导出；pathfind.ts 私有的 STEP_DC/STEP_DR/STEP_DIR
+逐字节重复表替换为共享 DIR_DX/DIR_DY/ALL_DIRS 别名；EDGE_* 表是坦克足迹专属，留在原地。
+
+**Rationale:**
+- plan §2.8：三处独立定义同一语义，改一处漏两处。
+- 不整体搬迁 `Direction` 导入路径（79 文件引用）：80 文件 churn 收益不成比例，违反
+  Three Gates "保持简单"；再导出 shim 达成"单一来源"目标且零消费方破坏。
+- helpers 的再导出因保护文件 ai/god/think.ts 引用 ALL_DIRS 而必须保留（AGENTS §5.1 禁区
+  不可触碰）；其余非保护消费方已改为直连 direction.ts。
+- pathfind 热循环语义不变：同名同值模块级常量，索引访问无分配。
+
+**Implications:** 新代码从 utils/direction 导入方向符号；constants/helpers 的再导出仅为
+兼容层，待保护文件解禁后可移除。

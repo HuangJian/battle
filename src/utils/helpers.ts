@@ -1,6 +1,3 @@
-import type { Direction } from '../constants'
-import { DIR_VECTORS } from '../constants'
-
 /** Clamp value to range */
 export function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v
@@ -36,61 +33,10 @@ export function computePlayer2SpawnCol(p1Col: number): number {
   return col === p1Col ? p1Col - 1 : col
 }
 
-/** Get opposite direction */
-export function opposite(dir: Direction): Direction {
-  switch (dir) {
-    case 'up':
-      return 'down'
-    case 'down':
-      return 'up'
-    case 'left':
-      return 'right'
-    case 'right':
-      return 'left'
-  }
-}
-
-/** Turn direction 90° clockwise */
-export function turnCW(dir: Direction): Direction {
-  switch (dir) {
-    case 'up':
-      return 'right'
-    case 'right':
-      return 'down'
-    case 'down':
-      return 'left'
-    case 'left':
-      return 'up'
-  }
-}
-
-/** Turn direction 90° counter-clockwise */
-export function turnCCW(dir: Direction): Direction {
-  switch (dir) {
-    case 'up':
-      return 'left'
-    case 'left':
-      return 'down'
-    case 'down':
-      return 'right'
-    case 'right':
-      return 'up'
-  }
-}
-
-/** Move a position by direction vector × distance */
-export function moveDir(
-  x: number,
-  y: number,
-  dir: Direction,
-  dist: number,
-): { x: number; y: number } {
-  const v = DIR_VECTORS[dir]
-  return { x: x + v.dx * dist, y: y + v.dy * dist }
-}
-
-/** All four directions in order */
-export const ALL_DIRS: Direction[] = ['up', 'down', 'left', 'right']
+// Direction helpers moved to utils/direction.ts (§2.8) — kept as
+// compatibility aliases because protected files (ai/god/think.ts,
+// AGENTS §5.1) still import from here. New code: use utils/direction.
+export { opposite, turnCW, turnCCW, moveDir, ALL_DIRS } from './direction'
 
 /** Random integer in [min, max] inclusive */
 export function randInt(min: number, max: number): number {

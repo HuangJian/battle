@@ -1,6 +1,7 @@
 import { TileMap } from '../game/TileMap'
 import type { Direction } from '../constants'
 import { GRID, CELL } from '../constants'
+import { DIR_DX, DIR_DY, ALL_DIRS } from './direction'
 
 /**
  * pathfind.ts — pure-function pathfinding utilities.
@@ -190,13 +191,15 @@ function isPassable(
 
 /** The four cardinal directions as flat arrays (perf): tuple destructuring
  * `const [dc, dr] = STEPS[s]` allocates an iterator per expansion in the A*
- * inner loop. Two parallel typed arrays let the loop read `STEP_DC[s]` and
- * `STEP_DR[s]` directly — no iterator, no tuple, no allocation. The
- * Direction label is recovered from the index via STEP_DIR (used only at
- * path reconstruction, not in the hot loop). */
-const STEP_DC: readonly number[] = [0, 0, -1, 1]
-const STEP_DR: readonly number[] = [-1, 1, 0, 0]
-const STEP_DIR: readonly Direction[] = ['up', 'down', 'left', 'right']
+ * inner loop. Two parallel arrays let the loop read `DIR_DX[s]` and
+ * `DIR_DY[s]` directly — no iterator, no tuple, no allocation. The
+ * Direction label is recovered from the index via ALL_DIRS (used only at
+ * path reconstruction, not in the hot loop).
+ * (§2.8) These are the shared DIR_DX/DIR_DY/ALL_DIRS from utils/direction —
+ * the former private STEP_DX/STEP_DY/STEP_DIR duplicates were byte-identical. */
+const STEP_DX = DIR_DX
+const STEP_DY = DIR_DY
+const STEP_DIR = ALL_DIRS
 
 /**
  * (perf §130) Leading-edge sub-blocks per step direction.
@@ -554,8 +557,8 @@ export function findPath(
         const gCur = gScore[currentKey]
 
         for (let s = 0; s < 4; s++) {
-          const nc = cc + STEP_DC[s]
-          const nr = cr + STEP_DR[s]
+          const nc = cc + STEP_DX[s]
+          const nr = cr + STEP_DY[s]
           // Inline isPassable (breakBrick=false branch): bounds + leading-edge
           // footprint check (§130 — only the two sub-blocks not shared with the
           // already-passable current footprint can block). Avoids the function
@@ -612,8 +615,8 @@ export function findPath(
         const gCur = gScore[currentKey]
 
         for (let s = 0; s < 4; s++) {
-          const nc = cc + STEP_DC[s]
-          const nr = cr + STEP_DR[s]
+          const nc = cc + STEP_DX[s]
+          const nr = cr + STEP_DY[s]
           // (perf §130) A single 2×2 pass yields BOTH passability and step cost.
           // The §130 leading-edge trick does not apply here because the cost
           // depends on all four sub-blocks, not just the new ones.
@@ -738,8 +741,8 @@ export function isReachable(tileMap: TileMap, from: Cell, to: Cell): boolean {
   while (queue.length > 0) {
     const cur = queue.shift()!
     for (let s = 0; s < 4; s++) {
-      const nc = cur.col + STEP_DC[s]
-      const nr = cur.row + STEP_DR[s]
+      const nc = cur.col + STEP_DX[s]
+      const nr = cur.row + STEP_DY[s]
       const nk = key(nc, nr)
       if (visited.has(nk)) continue
       if (!isPassable(tileMap, nc, nr, false)) continue
@@ -766,8 +769,8 @@ export function floodFill(tileMap: TileMap, from: Cell): Set<string> {
   while (queue.length > 0) {
     const cur = queue.shift()!
     for (let s = 0; s < 4; s++) {
-      const nc = cur.col + STEP_DC[s]
-      const nr = cur.row + STEP_DR[s]
+      const nc = cur.col + STEP_DX[s]
+      const nr = cur.row + STEP_DY[s]
       const nk = key(nc, nr)
       if (reachable.has(nk)) continue
       if (!isPassable(tileMap, nc, nr, false)) continue

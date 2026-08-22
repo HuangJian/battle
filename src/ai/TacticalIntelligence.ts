@@ -17,7 +17,8 @@ import {
   VERT_TUNNEL_THRESHOLD_MS,
   CORRIDOR_ESCAPE_CHANCE,
 } from '../constants'
-import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
+import { opposite, ALL_DIRS } from '../utils/direction'
+import { snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
