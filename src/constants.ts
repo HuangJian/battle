@@ -83,6 +83,14 @@ export const START_LIVES = 3
 /** Player respawn position (tile coords) */
 export const PLAYER_SPAWN = { col: 8, row: 24 } // 4×8 grid → center-bottom
 
+/**
+ * Default P2 (God AI / 躺赢) spawn point — the classic mirrored position
+ * col 16. Mid-game enable paths recompute it from P1's column via
+ * `computePlayer2SpawnCol` (utils/helpers); this constant is the fallback
+ * when no stage/player data drives the mirror.
+ */
+export const DEFAULT_P2_SPAWN = { col: 16, row: 24 }
+
 /** Base (eagle) position */
 export const BASE_POS = { col: 12, row: 24 }
 

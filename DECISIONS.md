@@ -1834,3 +1834,27 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 
 **Implications:** 新测试继续平铺于 tests/；命名沿用现有约定（域前缀一致即可）。
 若未来测试数 >300 再重新评估。
+
+## 261. §2.4 UIManager 拆分 — 四子控制器组合 (STATUS: 已实施)
+
+**Decision:** 1560 行的 UIManager 按 §256 切片模式拆为四个子控制器，UIManager 收缩为
+448 行编排器（组装 + update 编排 + showScreen + 主题/i18n 桥接 + toast）：
+- `HudView`（438 行）：HUD 条 + 逐帧 world 同步（分数动画/生命/星星/buff 倒计时/
+  超级道具计数/督战与回放徽章/Take Over 按钮）
+- `MenuScreen`（~420 行）：开始菜单布局、配置行选项、关卡下拉、RESUME 展示、
+  光标高亮同步
+- `ControlsPanel`（268 行）：键位绑定模态框（点击重绑/冲突检测/恢复默认）
+- `OverlayManager`（240 行）：暂停/游戏结束/过关/胜利/恢复五块覆盖层
+
+**Rationale:**
+- 公共 API 零变化：initMenuActions/initControls/showScreen/update/setReplayMode/
+  notify 等全部保留为委托，Game/GameLoop/GameMenu/PresentationLayer 等调用点零改动。
+- 方法体逐字搬移；跨切片桥接仅两处：Take Over 点击路由（HudView 构造时注入回调）
+  与超级道具键位标签（ControlsPanel.onSuperLabelsChanged → UIManager → HudView）。
+- formatCode 提取为 HudView 导出函数供两切片共用（原为 UIManager 私有方法，
+  ControlsPanel 与 HUD 标签刷新各需一份——共享消重复而非复制）。
+- 验证：tsc 零错误、vite build 成功、全量 1411 tests 通过。DOM 运行时行为按 AGENTS
+  规范以构建门禁验收。
+
+**Implications:** plan/refactor.agy.md §2.4 关闭，全计划条目清偿完毕。新增 UI 面 =
+对应切片内加成员；UIManager 不再直接持有 [data-hud]/菜单 DOM 引用。

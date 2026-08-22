@@ -38,6 +38,7 @@ import {
   ENEMIES_PER_STAGE,
   START_LIVES,
   PLAYER_SPAWN,
+  DEFAULT_P2_SPAWN,
   ENEMY_SPAWNS,
   RESPAWN_SHIELD_MS,
 } from '../constants'
@@ -334,7 +335,7 @@ export class World {
     this.coop = false
     this.spectate = false
     this.spectateDual = false
-    this.player2SpawnPoint = { col: 16, row: 24 }
+    this.player2SpawnPoint = { ...DEFAULT_P2_SPAWN }
     // Super power-up inventory & frenzy (DECISIONS.md §31)
     this.guardStock = 0
     this.frenzyStock = 0
