@@ -374,7 +374,7 @@ describe('§152-W4 — decoy spawns at a clear cell, never on the player', () =>
     })()
     const p = world.player!
     const before = world.allies.length
-    ;(sim as unknown as { applyPowerUp: (t: string) => void }).applyPowerUp('decoy')
+    sim.systems.powerUps.applyPowerUp('decoy')
     expect(world.allies.length).toBe(before + 1)
     const decoy = world.allies[world.allies.length - 1]
     const sameCell =

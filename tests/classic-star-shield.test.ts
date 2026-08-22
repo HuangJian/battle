@@ -29,7 +29,7 @@ describe('3★ star shield (FC tradition, all difficulties since §111)', () => 
     world.playerLevel = 0
     world.player!.level = 0
 
-    const apply = (sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp.bind(sim)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
     for (let i = 0; i < level; i++) apply('star')
 
     const p = world.player!

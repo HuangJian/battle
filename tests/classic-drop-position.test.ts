@@ -35,11 +35,7 @@ function callBuildDrop(
   sim: Simulation,
   at?: { x: number; y: number },
 ): { type: string; x: number; y: number } {
-  return (
-    sim as unknown as {
-      buildDrop: (at?: { x: number; y: number }) => { type: string; x: number; y: number }
-    }
-  ).buildDrop(at)
+  return sim.systems.powerUps.buildDrop(at)
 }
 
 /**
