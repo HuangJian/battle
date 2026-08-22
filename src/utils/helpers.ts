@@ -33,10 +33,9 @@ export function computePlayer2SpawnCol(p1Col: number): number {
   return col === p1Col ? p1Col - 1 : col
 }
 
-// Direction helpers moved to utils/direction.ts (§2.8) — kept as
-// compatibility aliases because protected files (ai/god/think.ts,
-// AGENTS §5.1) still import from here. New code: use utils/direction.
-export { opposite, turnCW, turnCCW, moveDir, ALL_DIRS } from './direction'
+// Direction helpers live in utils/direction.ts (§2.8). The compatibility
+// re-export that used to live here was removed when the God-AI protected-file
+// rule was abolished (§262) — import direction symbols from utils/direction.
 
 /** Random integer in [min, max] inclusive */
 export function randInt(min: number, max: number): number {

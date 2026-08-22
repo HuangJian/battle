@@ -1445,6 +1445,7 @@ vignette，不受影响。
 - plan/refactor.agy.md §1.6：散落的魔法值迫使 agent 逐处确认语义；命名后可检索、可审计。
 - 保护文件豁免：`src/ai/god/think.ts` / `ActionCandidates.ts`（AGENTS §5.1 God AI 禁区）内的
   同字面量保持原样；`ThreatBudget.ts` 不在禁区，已一并替换。
+  *（§262 修订：禁区已废除，豁免条款失效。）*
 - BONUS TIME 弹出（1800ms）语义独立于击杀 popup，保留字面量并加注释，不强行绑定常量。
 - `{ col: 8, row: 24 }` P2 默认出生点一项在计划中已过时（现由 PLAYER_SPAWN /
   player2SpawnPoint 集中管理），无需改动。
@@ -1497,6 +1498,7 @@ constants.ts 与 helpers.ts 保留兼容再导出；pathfind.ts 私有的 STEP_D
   Three Gates "保持简单"；再导出 shim 达成"单一来源"目标且零消费方破坏。
 - helpers 的再导出因保护文件 ai/god/think.ts 引用 ALL_DIRS 而必须保留（AGENTS §5.1 禁区
   不可触碰）；其余非保护消费方已改为直连 direction.ts。
+  *（§262 修订：禁区已废除，think.ts 已直连 direction.ts，helpers 再导出已移除。）*
 - pathfind 热循环语义不变：同名同值模块级常量，索引访问无分配。
 
 **Implications:** 新代码从 utils/direction 导入方向符号；constants/helpers 的再导出仅为
@@ -1858,3 +1860,25 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 
 **Implications:** plan/refactor.agy.md §2.4 关闭，全计划条目清偿完毕。新增 UI 面 =
 对应切片内加成员；UIManager 不再直接持有 [data-hud]/菜单 DOM 引用。
+
+## 262. 废除 God AI 禁区（AGENTS §5.1 幽灵规则消歧） (STATUS: 已实施, plan/refactor.zcode.md §0.1)
+
+**Decision:** 废除 `src/ai/god/think.ts` / `ActionCandidates.ts` 的"禁区"保护
+（§239 / §242 记载的 "AGENTS §5.1 God AI 禁区" 豁免条款全部失效）。两文件回归
+正常工程流程：§7 bug-fix 工作流、§14 热路径纪律、以及触碰后必须过 determinism
+签名门（§254 流程）。同时移除为禁区存活的兼容层：`utils/helpers.ts` 的方向
+re-export 与 `utils/pathfind.ts` shim（唯一消费方 think.ts 已改为直连
+`utils/direction` / `utils/grid-search`）。
+
+**Rationale:**
+- 规则已成幽灵：当前 AGENTS.md 无 §5.1、无任何禁区文本。遵循 DECISIONS 的 agent
+  认为两文件不可编辑（直接阻塞一切复杂度削减工作）；遵循 AGENTS 的 agent 会误删
+  compat shim 击穿导入路径。每次 session 都重新推导一遍二义。
+- 原保护目标（防止无护栏手改破坏 God-AI 调参成果）已由测试结构达成：godai-*
+  行为 gate 家族 + `bun test --parallel --timeout=50000` 全量门 + 批模拟
+  determinism byte-identical 签名流程。
+- 人工批准（2026-08-23）：在 plan/refactor.zcode.md §0.1 的"废除/重述"二选一中
+  用户选择废除。
+
+**Implications:** plan/refactor.zcode.md Phase 3（params 拆分、候选提取等）放行。
+行为调参本身仍走 §6.3b Phase III 评估框架，禁区废除只解除"不许编辑"的工程约束。

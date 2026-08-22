@@ -12,10 +12,10 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { World } from '../../game/World'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from '../../utils/grid-search'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, GRID, BULLET, TANK } from '../../constants'
-import { ALL_DIRS } from '../../utils/helpers'
+import { ALL_DIRS } from '../../utils/direction'
 import {
   scanAheadImpl,
   shouldFireBreakThroughImpl,

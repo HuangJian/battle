@@ -47,7 +47,9 @@ export const STAGE_COUNT = STAGES.length // 35
 // subset. Margins widened to ~2 SE of the per-stage mean at n=10
 // (MARGIN_SCORE 0.05→0.07; AGG_MARGIN_SCORE 0.03→0.04). The aggregate floor
 // (35 stages × 10 seeds = 350 samples) stays statistically tight.
-// Re-capture via `tmp/capture-truth.ts` (must match SCORE_SEEDS).
+// Re-capture by re-running SCORE_SEEDS sims per stage with this file's own
+// imports (runSimulation + scoreRun, telemetry on, v7 scoring) and replacing
+// the means below — the original one-off capture script was ephemeral.
 export const TRUTH_SCORES: Record<string, number[]> = {
   classic: [
     0.9762, 0.8782, 0.9112, 0.966, 0.9703, 0.818, 0.785, 0.956, 0.9659, 0.9686, 0.8218, 0.6489,

@@ -8,8 +8,6 @@
  * (':' on POSIX, ';' on Windows) so `bun` is found correctly.
  */
 import { spawn, execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const CWD = resolve(import.meta.dir, '..')
@@ -20,14 +18,6 @@ const PATH_SEP = process.platform === 'win32' ? ';' : ':'
 const ENV = {
   ...process.env,
   PATH: [LOCAL_BIN, process.env.PATH ?? ''].join(PATH_SEP),
-}
-
-export interface Result {
-  name: string
-  ok: boolean
-  ms: number
-  output: string
-  summary?: string
 }
 
 export async function spawnCapture(
@@ -63,35 +53,6 @@ export async function spawnCapture(
       res({ code: killed ? 124 : (code ?? 1), output: Buffer.concat(chunks).toString() })
     })
   })
-}
-
-export function printResult(r: Result): void {
-  const icon = r.ok ? '✓' : '✗'
-  const secs = (r.ms / 1000).toFixed(1)
-  const summary = r.summary ? `  ${r.summary}` : ''
-  console.log(`${icon} ${r.name} (${secs}s)${summary}`)
-  if (r.output && !r.ok) {
-    const truncated = tailBytes(r.output, 4000)
-    for (const line of truncated.split('\n')) {
-      console.log(`  ${line}`)
-    }
-    console.log('')
-  }
-}
-
-function tailBytes(s: string, n: number): string {
-  if (s.length <= n) return s
-  return `…\n${s.slice(-n)}`
-}
-
-export function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
-}
-
-export function sha256File(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
 /**

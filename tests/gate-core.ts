@@ -51,8 +51,9 @@ export const CHAOS_TRUTH_WINS: number[] = [
   10, 16, 10, 16, 17, 15, 13, 18, 4, 16,
 ]
 
-// Classic truth calibrated 2026-08-10 via tmp/calib-classic.ts (worker pool,
-// 35×20). Sims are deterministic per seed, so these exact counts are a stable
+// Classic truth calibrated 2026-08-10 via a one-off capture script (worker
+// pool, 35×20; script was ephemeral and has since been removed). Sims are
+// deterministic per seed, so these exact counts are a stable
 // baseline; the per-stage floor (truth − MARGIN_WINS) catches future regressions.
 export const CLASSIC_TRUTH_WINS: number[] = [
   20, 18, 19, 20, 20, 17, 16, 20, 20, 19, 17, 13, 20, 20, 17, 20, 15, 18, 12, 16, 17, 20, 19, 18,

@@ -92,30 +92,44 @@ src/
   constants.ts            # CELL=16, GRID=26, FIELD=416, TANK=32, TICK_MS, direction vectors
   types.ts                # All shared types: Tank, Bullet, WorldSnapshot, ThemeColors, ...
   main.ts                 # Entry: wires Game into #app
+  i18n/                   # zh/en localization
   game/                   # SIMULATION LAYER (only layer that mutates World)
     World.ts              #   complete runtime state + entity management
-    Simulation.ts         #   the only author of World; runs all systems per tick
+    Simulation.ts         #   composition root: six subsystems via SimulationSystems registry
+    Simulation*.ts        #   the six subsystems: Spawn/Player/Enemies/Combat/PowerUps/Effects
     TileMap.ts            #   26×26 sub-block grid + cached base state
     Input.ts              #   keyboard capture; never mutates World
-    Game.ts               #   top-level orchestrator + fixed-timestep loop
-    RecoverySystem.ts     #   snapshot manager + history recorder + recovery controller
+    Game.ts               #   top-level orchestrator; delegates to controllers below
+    GameLoop.ts           #   fixed-timestep loop + event wiring (LoopController)
+    GameMenu.ts  GameSnapshot.ts  GameReplay.ts   # menu/snapshot/replay controllers
+  ai/                     # AI LAYER (~half of src by line count)
+    GodAIInput.ts         #   player God AI facade (state + Impl delegates; normal code per §262)
+    god/                  #   think.ts (decision candidates), params.ts (218-param tables),
+                           #   FireControl, ThreatAssessor, StrategyPlanner, Navigator, PathCarve, ...
+    TacticalIntelligence.ts + perception.ts      # enemy AI, invoked by Simulation
+  snapshot/               # SnapshotManager, WorldSerializer (field-list clone/restore),
+                           #   RecoveryController, storage
+  replay/                 # InputRecorder, ReplayManager, PlaybackController, storage
   presentation/           # PRESENTATION LAYER (read-only on World)
     PresentationLayer.ts  #   orchestrator: camera + anim + particles + effects + renderer + ui
-    renderer/             #   GameRenderer, SpriteArtist, SpriteLibrary, SpriteCache
+    renderer/             #   GameRenderer/SpriteArtist Core + slices, SpriteLibrary, SpriteCache
     ui/UIManager.ts       #   HTML/CSS HUD + overlays (canvas is playfield-only, 416×416)
     Camera.ts  AnimationSystem.ts  ParticleSystem.ts  EffectsSystem.ts
   audio/AudioManager.ts   # Web Audio synthesis
-  config/                 # DATA: tanks, stages, stageData, difficulty, theme
+  config/                 # DATA: tanks, stages, stageData, difficulty, theme, rules, combat
   assets/sprites/         # SVG sprite library + index.ts URL registry
-  utils/                  # RNG (seeded mulberry32), helpers (snap, aabb, dirs)
+  utils/                  # RNG (seeded mulberry32), helpers (snap/aabb), direction, grid-search, idb-store
+  perf/                   # dev-only browser perf harness
 tests/                    # bun:test specs (mirrors src/ structure by concern)
 plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
 docs/                     # presentation-audit.md (and future audits)
 tools/
   gen-sprites.mjs          # regenerates the SVG sprite library
+  lib/                     # SHARED tool infra: worker-pool.ts (the only Worker() site),
+                           #   stage-spec.ts (strict stage parsing — §213 guard)
   sim/                     # headless batch sims: simulation-runner, sim-worker/pool
   diag/                    # forensics + A/B tooling: run-forensics, per-seed-diff,
-                           #   decision-probe, ab-*, base-loss-* (§119/§120)
+                           #   decision-probe, ab-*, base-loss-* (§119/§120); archive/ = quarantined one-offs
   eval/  perf/  level/  replay/  optimize/
 ```
 

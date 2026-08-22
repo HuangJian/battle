@@ -8,9 +8,10 @@
  *
  *   1. bun tools/eval/eval-suite.ts --seeds 60 --json tmp/shipped.json
  *   2. bun tools/eval/gate-truth.ts tmp/shipped.json
- *   3. paste the emitted table into tests/god-ai-regression-gate.test.ts
- *      (TRUTH_WIN_PCT), keeping any conservative exceptions (e.g. S28's
- *      gate-context noise floor — see the gate file's own notes).
+ *   3. paste the emitted table into tests/gate-core.ts
+ *      (<DIFF>_TRUTH_WINS, then TRUTH map), keeping any conservative
+ *      exceptions (e.g. S28's gate-context noise floor — see the gate
+ *      file's own notes).
  *
  * The table is emitted as paste-ready TS: one line per stage with the name
  * comment and the exact win rate eval-suite measured. Also prints the
@@ -32,8 +33,8 @@ Usage:
 The input is produced by:
   bun tools/eval/eval-suite.ts --seeds 60 --json tmp/shipped.json
 
-Emit the table into tests/god-ai-regression-gate.test.ts TRUTH_WIN_PCT,
-then re-run: bun test tests/god-ai-regression-gate.test.ts
+Emit the table into tests/gate-core.ts TRUTH arrays, then re-run:
+  bun test tests/godai-score-gate.test.ts (score gate) / the gate part files
 `
 
 const path = process.argv[2]
