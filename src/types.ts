@@ -1,4 +1,5 @@
 import type { Direction } from './constants'
+import type { AIState } from './ai/types'
 
 // ============================================================
 // Core Types
@@ -210,93 +211,15 @@ export interface Tank extends Entity {
 }
 
 /**
- * Intelligence tier names. Every AI tank above 'none' runs the same decision
- * pipeline; differences are entirely configuration-driven (see
- * `src/ai/config.ts`). 'none' is a separate minimal classic-behavior branch
- * (random wander + base bias + random fire — AI-Tier-System-Revision §3).
- * The tier is ROLLED AT SPAWN TIME from the difficulty's distribution table;
- * tank kind no longer implies a tier.
+ * (§2.6) Enemy-brain types live in `src/ai/types.ts`; re-exported here for
+ * compatibility. `AIState` is imported above for `Tank.aiState`.
  */
-export type IntelligenceLevel = 'none' | 'rookie' | 'soldier' | 'veteran' | 'commander'
-
-/**
- * Candidate tactical/strategic goals. Goals compete through dynamic scores
- * (see `src/ai/TacticalIntelligence.ts`) rather than a fixed priority list.
- */
-export type GoalType =
-  | 'attackBase'
-  | 'attackPlayer'
-  | 'destroyWall'
-  | 'retreat'
-  | 'regroup'
-  | 'advance'
-  | 'defendBase' // 天降神兵 allied guard posture (§31 Phase 2)
-  | 'attackAlly' // Decoy: attack ally/decoy targets (new-powerups-plan §4.4)
-
-/**
- * Lightweight cooperation directives broadcast by the (elected) commander.
- * Tanks remain autonomous — they may follow or ignore a directive according
- * to their own intelligence (teamwork flag).
- */
-export type CommanderDirective =
-  | 'none'
-  | 'pushLeft'
-  | 'pushRight'
-  | 'defendBase'
-  | 'attackTogether'
-  | 'spreadOut'
-
-/**
- * AIBrain — the complete, serializable decision state for one enemy tank.
- *
- * This is the Tactical Intelligence Framework's per-tank memory and lives on
- * the World (no hidden state outside it — AGENTS.md §2.2). It is a flat
- * structure of primitives only, so the snapshot `WorldSerializer` can
- * shallow-clone it safely when snapshotting the World.
- *
- * The fields `thinkTimer` / `fireTimer` / `currentDir` are kept from the
- * previous AI for backwards compatibility with the determinism tests.
- */
-export interface AIState {
-  // ---- Identity / intelligence ----
-  level: IntelligenceLevel
-  /** Born at Commander tier (render flag for crown/aura; NOT command authority —
-   *  the active commander is `world.activeCommanderId`). */
-  isCommander: boolean
-  /** Monotonic per-World birth order (from `world.spawnSeqCounter`). The alive
-   *  Commander with the highest spawnSeq holds command authority. */
-  spawnSeq: number
-
-  // ---- Tactical layer (reactive + short horizon) ----
-  thinkTimer: number // ms until the next tactical re-evaluation
-  fireTimer: number // ms until the next fire attempt
-  currentDir: Direction // direction the tank intends to move this tick
-  tacticalGoal: GoalType // current short-term objective
-  targetX: number // route target (px, tank-center aligned)
-  targetY: number
-
-  // ---- Strategic layer (long horizon) ----
-  strategicTimer: number // ms until the next strategic re-evaluation
-  strategicGoal: GoalType // stable long-term objective
-
-  // ---- Reaction / imperfection ----
-  reactionTimer: number // ms of remaining "delayed reaction" before dodging
-  dodgeLock: number // ms the current dodge direction is committed
-
-  // ---- Dead-end recovery ----
-  /** ms spent confined to a single-axis channel (no lateral open direction).
-   *  Drives the tunnel-out behavior in TacticalIntelligence. */
-  vertOnlyTicks: number
-
-  // ---- Commander ----
-  commanderTimer: number // ms until this commander's next broadcast
-  directive: CommanderDirective // last directive received (or 'none')
-  directiveAge: number // ms since the directive was received
-  /** Seq id (world.directiveSeqCounter) of the directive last rolled for. */
-  directiveSeq: number
-  /** Cached compliance roll for that directive (rolled once, on arrival). */
-  directiveCompliant: boolean
-}
+export type {
+  IntelligenceLevel,
+  GoalType,
+  CommanderDirective,
+  AIState,
+} from './ai/types'
 
 export interface Bullet extends Entity {
   ownerId: number
@@ -376,114 +299,16 @@ export type GameEvent =
 // ============================================================
 // Config Types
 // ============================================================
+//
+// (§2.6) The config-layer data contracts moved to `src/config/types.ts`;
+// re-exported here for compatibility.
 
-export interface DifficultyConfig {
-  name: string
-  /**
-   * Difficulty affects enemy AI ONLY through the spawn-time tier distribution
-   * (`DIFFICULTY_TIER_DISTRIBUTION` in src/ai/config.ts). Tier capability
-   * numbers are FIXED — difficulty never scales them, and it must NEVER scale
-   * enemy combat stats (armor / speed / bullet speed / HP), which is explicitly
-   * forbidden by DECISIONS.md. Lives and the player's starting star level are
-   * player-side resources, not enemy combat power.
-   *
-   * Scoped carve-out [D10]: a Commander-tier spawn receives the +15% elite
-   * combat boost (`applyEliteModifier`), and the Commander probability is
-   * difficulty-driven. Provisional — see plan/AI-Tier-System-Revision.md §5.3.
-   */
-  startLives: number
-  playerStartLevel: number
-}
-
-export interface StageData {
-  id: number
-  name: string
-  /** 26×26 grid (one char per 16px sub-block): '.', 'b', 's', 'w', 'f', 'i', 'E' */
-  tiles: string[]
-  /** Enemy queue: list of tank kinds */
-  enemies: TankKind[]
-  /**
-   * Optional override for the total enemy count this stage (plan/God-AI-Curriculum
-   * §3 Gap A). When omitted, falls back to `ENEMIES_PER_STAGE` (20). The enemy
-   * `enemies` array still determines the *kind* queue (cycled if shorter); this
-   * field controls how many enemies spawn in total. Data-over-code (AGENTS §2.4) —
-   * existing stages are unaffected (they don't set this field).
-   */
-  enemyCount?: number
-  /**
-   * Optional override for the player spawn position in sub-block coords (plan §3.5
-   * 影响 1). When omitted, falls back to `PLAYER_SPAWN`. Curriculum arenas use this
-   * to place the player inside the open area instead of the default bottom-left.
-   */
-  playerSpawn?: { col: number; row: number }
-  /**
-   * Optional override for enemy spawn positions in sub-block coords (plan §3.5
-   * 影响 1). When omitted, falls back to `ENEMY_SPAWNS`. Curriculum arenas use this
-   * to place enemies inside the open area.
-   */
-  enemySpawns?: { col: number; row: number }[]
-}
-
-export interface ThemeColors {
-  bg: string
-  /** Optional vertical gradient [top, bottom] used as the play-field background. */
-  bgGradient?: [string, string]
-  brick: string
-  brickDark: string
-  steel: string
-  steelDark: string
-  water: string
-  waterDark: string
-  forest: string
-  forestDark: string
-  ice: string
-  base: string
-  baseDark: string
-  // Tank colors
-  playerBody: string
-  playerTurret: string
-  playerBody2: string // level 2+
-  playerBody3: string // level 3
-  enemyBasic: string
-  enemyFast: string
-  enemyPower: string
-  enemyArmor: string
-  enemyArmorFlash: string
-  // UI — canvas
-  hudBg: string
-  hudText: string
-  hudAccent: string
-  // Effects
-  explosion1: string
-  explosion2: string
-  explosion3: string
-  bullet: string
-  bulletGlow: string
-  powerUp: string
-  powerUpGlow: string
-  powerUpFence: string
-  powerUpFenceGlow: string
-  powerUpBoat: string
-  powerUpBoatGlow: string
-  spawn: string
-  // UI — HTML overlay
-  panelBg: string
-  panelBorder: string
-  panelShadow: string
-  textPrimary: string
-  textSecondary: string
-  textMuted: string
-  accentPrimary: string
-  accentSecondary: string
-  buttonBg: string
-  buttonHover: string
-  buttonActive: string
-  overlayBg: string
-  danger: string
-  success: string
-  // Ambient
-  vignetteColor: string
-}
+export type {
+  DifficultyConfig,
+  StageData,
+  ThemeColors,
+  ThemeDefinition,
+} from './config/types'
 
 // ============================================================
 // Settings
@@ -546,22 +371,8 @@ export interface KeyBindings {
 // Presentation Layer Types
 // ============================================================
 //
-// (§2.6) The presentation-only types below moved to
-// `src/presentation/types.ts`; re-exported here for compatibility.
-// ThemeDefinition/ThemeColors stay in THIS file — they are config-layer
-// contracts (config/theme.ts), not presentation state.
+// (§2.6) The presentation-only types moved to `src/presentation/types.ts`;
+// re-exported here for compatibility. The config-layer contracts moved to
+// `src/config/types.ts` and are re-exported in the Config Types section above.
 
-export type {
-  VisualComponent,
-  Particle,
-  EmitterConfig,
-  CameraState,
-} from './presentation/types'
-
-/** Theme definition with metadata */
-export interface ThemeDefinition {
-  key: string
-  name: string
-  description: string
-  colors: ThemeColors
-}
+export type { VisualComponent, Particle, EmitterConfig, CameraState } from './presentation/types'

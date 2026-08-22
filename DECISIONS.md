@@ -1757,3 +1757,26 @@ EffectSpriteSlice（挂 SpriteArtistCore）。Core 在自身构造器中创建�
 
 **Implications:** plan/refactor.agy.md §1.1 全部完成。新增渲染子系统=新切片类+Core 委托器；
 metrics 表目标"Mixin stub methods: 0"达成。
+
+## 257. §2.6 types.ts 重组完成 + Tank 拆分否决 (STATUS: 已实施/部分否决)
+
+**Decision:** (a) 敌方大脑类型 `IntelligenceLevel` / `GoalType` / `CommanderDirective` /
+`AIState` 迁至 `src/ai/types.ts`（该文件原仅持有 Perception/Situation 等框架类型，现成为
+AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig` / `StageData` /
+`ThemeColors` / `ThemeDefinition` 新建 `src/config/types.ts` 归位（延续 §253"ThemeColors
+是 config 契约非 presentation 状态"的判断，只是换到更准确的层）；(c) 根 types.ts 保留
+兼容 re-export，全部调用点零改动。**Tank 拆分为 PlayerState/EnemyAIState/WeaponState
+经评估否决**。
+
+**Rationale:**
+- 迁移后根 types.ts 562→378 行，只剩核心实体（Tank/Bullet/PowerUp/…）、事件、设置契约
+  ——厨房水槽问题按计划三条整改线全部落地。
+- Tank 拆分否决理由：(1) 类型级拆分（intersection）纯化妆，不减少任何理解成本；
+  (2) 字段级嵌套则 WorldSerializer 平铺克隆、snapshot 框架测试、~100 处字面量构造点
+  全部要动——高回归面、零玩家价值，违背三门第 1/2 条；(3) 计划原文即标注
+  "affects serialization and snapshot — evaluate carefully"，评估结论为负。
+- GameSettings/KeyBindings 留守根文件：它们是被 game 与 presentation 双层消费的
+  应用级契约，拆出无摩擦收益。
+
+**Implications:** 新增 AI 数据结构 → ai/types.ts；新增配置数据契约 → config/types.ts；
+根 types.ts 只进核心实体与事件。plan/refactor.agy.md §2.6 关闭（Tank 部分以否决关闭）。
