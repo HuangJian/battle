@@ -78,6 +78,18 @@ export class ReplayController {
         'warn',
       )
     }
+    this.preparePlayback(replay)
+    this.bindReplayUi(replay)
+    // Pre-compute thumbnail keyframes for instant hover preview
+    this.buildThumbnailKeyframes()
+    return true
+  }
+
+  /**
+   * Atomically replace the live game with the replay's recorded world and
+   * re-arm the frame loop. Presentation is rebuilt from scratch (AGENTS §2.5).
+   */
+  private preparePlayback(replay: Replay): void {
     // Exit any existing playback first
     this.stopPlayback()
     // Discard any in-progress recording
@@ -110,9 +122,13 @@ export class ReplayController {
     this.g.accumulator = 0
     this.g.lastTime = performance.now()
     this.g.scheduleFrame()
+  }
+
+  /** Wire HUD badge, canvas input, and the video-player controller callbacks. */
+  private bindReplayUi(replay: Replay): void {
     // Show persistent REPLAY badge in HUD + video player controller
     this.g.presentation.ui.setReplayMode(true, false, replay.metadata.difficulty)
-    this.g.presentation.ui.setReplaySpeed(this.g.playback.currentSpeed)
+    this.g.presentation.ui.setReplaySpeed(this.g.playback!.currentSpeed)
     this.g.presentation.ui.notify(t('toast.replayEscExit'))
     // Wire canvas click/mousemove for playback interaction
     this.g.presentation.ui.canvas.addEventListener('click', this.onReplayCanvasClick)
@@ -181,9 +197,6 @@ export class ReplayController {
     // Surface the Take Over entry on the HUD (consistent with 督战 / spectate)
     // instead of the old button inside the replay controller bar.
     this.g.presentation.ui.onReplayTakeover = () => this.takeOverFromReplay()
-    // Pre-compute thumbnail keyframes for instant hover preview
-    this.buildThumbnailKeyframes()
-    return true
   }
 
   /**

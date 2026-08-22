@@ -23,6 +23,7 @@ import { stageClearScore } from '../config/score'
 import { genId } from './World'
 import type { Tank } from '../types'
 import type { SimulationSystems } from './systems'
+import type { World } from './World'
 
 /**
  * True when every enemy in the list is either an "extra" (balance spawn,
@@ -110,13 +111,23 @@ export class EffectsSystem {
       return
     }
 
-    // --- Per-player death handling (Lie-Back-Win-Mode §3.2) ---
-    // Process each player independently, then check life-sharing.
-    const p1Dead = w.player && !w.player.alive
+    this.handlePlayerDeaths(w)
+    if (this.resolveDefeat(w)) return
+    this.checkStageClear(w)
+  }
+
+  /**
+   * --- Per-player death handling (Lie-Back-Win-Mode §3.2) ---
+   * Process each player independently (sacrifice AoE, frenzy cancel, life
+   * decrement, respawn), then let {@link resolveDefeat} decide life-sharing
+   * and game over.
+   */
+  private handlePlayerDeaths(w: World): void {
     // 督战双玩家 (spectateDual) is a second, machine-controlled player with
     // its own lives — exactly like Lie-Back-Win coop. Gate P2 death handling
     // on EITHER flag, not just `coop`, or dual mode silently drops P2's lives
     // (dies once, never respawns, never counts toward game over).
+    const p1Dead = w.player && !w.player.alive
     const p2Dead = (w.coop || w.spectateDual) && w.player2 && !w.player2.alive
 
     if (p1Dead) {
@@ -143,10 +154,16 @@ export class EffectsSystem {
         w.player2!.shieldTimer = RESPAWN_SHIELD_MS
       }
     }
+  }
 
-    // --- Life sharing (§3.2): if one player is out and the other has > 2 lives ---
-    // Applies to BOTH coop and 督战双玩家 (spectateDual): in either, a second
-    // player with its own lives exists, and game over requires both to be out.
+  /**
+   * --- Life sharing (§3.2) + game-over resolution ---
+   * If one player is out and the other has > 2 lives, a life is shared.
+   * Applies to BOTH coop and 督战双玩家 (spectateDual): in either, a second
+   * player with its own lives exists, and game over requires both to be out.
+   * Returns true when the world entered 'gameover' this tick.
+   */
+  private resolveDefeat(w: World): boolean {
     if (w.coop || w.spectateDual) {
       // Player out, God has lives to share
       if (w.lives <= 0 && !w.player?.alive && w.lives2 > 2) {
@@ -170,7 +187,7 @@ export class EffectsSystem {
       if (bothDead) {
         w.state = 'gameover'
         w.gameOverTimer = GAME_OVER_TIMER_MS
-        return
+        return true
       }
     } else {
       // Single-player game over (original logic)
@@ -179,13 +196,19 @@ export class EffectsSystem {
         w.gameOverTimer = GAME_OVER_TIMER_MS
         // Lie-Back-Win Q4 + 督战: coop/spectate runs never save high scores.
         if (!w.coop && !w.spectate) w.saveHighScore()
-        return
+        return true
       }
     }
+    return false
+  }
 
-    // Stage clear — all (non-extra) enemies defeated. Accompanying "balance"
-    // enemies (isExtra) are outside the per-stage count and must NOT block
-    // stage clear (§31 Phase 2).
+  /**
+   * Stage clear — all (non-extra) enemies defeated. Accompanying "balance"
+   * enemies (isExtra) are outside the per-stage count and must NOT block
+   * stage clear (§31 Phase 2). Opens the bonus-collection window when
+   * power-ups remain on the field.
+   */
+  private checkStageClear(w: World): void {
     if (w.enemiesRemaining <= 0 && allNonExtraEnemiesDead(w.tanks)) {
       const hasAlivePowerUp = w.powerUps.some((p) => p.alive)
 

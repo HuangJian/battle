@@ -378,47 +378,7 @@ export class PowerUpSystem {
 
     switch (type) {
       case 'star':
-        // Player progression is universal: every star raises ALL capability
-        // dimensions together (plan §11). Re-derive the tank's concrete stats
-        // from the new profile. Current HP is intentionally NOT refilled — a
-        // star is power, not a repair.
-        // Classic mode caps the star *level* at maximumLevel; every other mode
-        // accumulates WITHOUT bound (the per-star gain decays past the
-        // balanced×150% threshold inside playerProfile). The cap is a
-        // classic-only, pickup-time constraint.
-        const atCap =
-          w.difficultyKey === 'classic' && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
-        if (!atCap) {
-          p.level = (p.level ?? 0) + 1
-          if (isP1) w.playerLevel = p.level
-          else w.playerLevel2 = p.level
-          const stats = profileToStats(
-            resolveProfile('player', p.level),
-            'player',
-            p.level,
-            w.rules,
-          )
-          p.speed = stats.speed * (w.rules.speedJitter ? rollSpeedJitter(this.d.world.rng) : 1)
-          p.bulletSpeed = stats.bulletSpeed
-          p.bulletPower = stats.bulletPower
-          p.fireCooldown = stats.fireCooldown
-          p.maxHp = stats.maxHp
-          p.profile = resolveProfile('player', p.level)
-          // Functional star ladder (classic only, plan Phase 3). Matches FC:
-          // 1★ fast bullet → 2★ double-shot (realized by the bullet cap in
-          // tryFire) → 3★ steel-pierce. Non-classic stays universal-growth.
-          if (w.rules.starModel === 'functional') {
-            // Perks are cumulative in FC (a 2★ tank keeps the fast bullet it
-            // earned at 1★), so query across every level ≤ current, not just
-            // the current level's introduced-perk list (see hasStarPerk).
-            if (hasStarPerk(w.rules, p.level ?? 0, 'fastBullet')) {
-              p.bulletSpeed = stats.bulletSpeed * w.rules.fastBulletMult
-            }
-            if (hasStarPerk(w.rules, p.level ?? 0, 'steelPierce')) {
-              p.bulletPower = 2
-            }
-          }
-        }
+        this.applyStarPowerUp(p, isP1)
         break
 
       case 'bomb':
@@ -500,6 +460,47 @@ export class PowerUpSystem {
         // 同归于尽 — accumulate; released passively when a life is lost.
         w.sacrificeStock++
         break
+    }
+  }
+
+  /**
+   * Star pickup: universal player progression — every star raises ALL
+   * capability dimensions together (plan §11). Re-derive the tank's concrete
+   * stats from the new profile. Current HP is intentionally NOT refilled — a
+   * star is power, not a repair.
+   *
+   * Classic mode caps the star *level* at maximumLevel; every other mode
+   * accumulates WITHOUT bound (the per-star gain decays past the
+   * balanced×150% threshold inside playerProfile). The cap is a
+   * classic-only, pickup-time constraint.
+   */
+  private applyStarPowerUp(p: Tank, isP1: boolean): void {
+    const w = this.d.world
+    const atCap = w.difficultyKey === 'classic' && (p.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel
+    if (atCap) return
+    p.level = (p.level ?? 0) + 1
+    if (isP1) w.playerLevel = p.level
+    else w.playerLevel2 = p.level
+    const stats = profileToStats(resolveProfile('player', p.level), 'player', p.level, w.rules)
+    p.speed = stats.speed * (w.rules.speedJitter ? rollSpeedJitter(this.d.world.rng) : 1)
+    p.bulletSpeed = stats.bulletSpeed
+    p.bulletPower = stats.bulletPower
+    p.fireCooldown = stats.fireCooldown
+    p.maxHp = stats.maxHp
+    p.profile = resolveProfile('player', p.level)
+    // Functional star ladder (classic only, plan Phase 3). Matches FC:
+    // 1★ fast bullet → 2★ double-shot (realized by the bullet cap in
+    // tryFire) → 3★ steel-pierce. Non-classic stays universal-growth.
+    if (w.rules.starModel === 'functional') {
+      // Perks are cumulative in FC (a 2★ tank keeps the fast bullet it
+      // earned at 1★), so query across every level ≤ current, not just
+      // the current level's introduced-perk list (see hasStarPerk).
+      if (hasStarPerk(w.rules, p.level ?? 0, 'fastBullet')) {
+        p.bulletSpeed = stats.bulletSpeed * w.rules.fastBulletMult
+      }
+      if (hasStarPerk(w.rules, p.level ?? 0, 'steelPierce')) {
+        p.bulletPower = 2
+      }
     }
   }
 

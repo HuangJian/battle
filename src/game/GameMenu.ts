@@ -29,108 +29,10 @@ export class MenuController {
     }
 
     if (w.state === 'menu') {
-      // The controls panel is a UI-modal that owns all key input while open;
-      // skip menu navigation so it doesn't fight the panel.
-      if (this.g.presentation.ui.isControlsOpen()) return
-
-      // Row count grows by one when a resumable manual snapshot is offered
-      // (the RESUME row sits at index 0, pushing the config rows down).
-      // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
-      const rowCount = this.g.resumeSnapshot ? 7 : 6
-      // Move cursor between rows (RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE)
-      // Canvas preview only switches for RESUME (0), STAGE (off+3), NEW GAME (off+4).
-      const off = this.g.resumeSnapshot ? 1 : 0
-      if (this.g.input.isUpPressed()) {
-        w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
-        if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
-          this.applyMenuPreview()
-        }
-        this.g.audio.init()
-        this.g.audio.resume()
-        this.g.audio.playMenuSelect()
-      }
-      if (this.g.input.isDownPressed()) {
-        w.menuCursor = (w.menuCursor + 1) % rowCount
-        if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
-          this.applyMenuPreview()
-        }
-        this.g.audio.init()
-        this.g.audio.resume()
-        this.g.audio.playMenuSelect()
-      }
-      // Change value of the selected row
-      const left = this.g.input.wasPressed('ArrowLeft') || this.g.input.wasPressed('KeyA')
-      const right = this.g.input.wasPressed('ArrowRight') || this.g.input.wasPressed('KeyD')
-      if (left || right) {
-        const dir = left ? -1 : 1
-        let changed = false
-        if (w.menuCursor === off) {
-          this.g.difficultyIndex =
-            (this.g.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
-          w.difficultyKey = DIFFICULTY_KEYS[this.g.difficultyIndex]
-          w.difficulty = DIFFICULTIES[w.difficultyKey]
-          changed = true
-        } else if (w.menuCursor === off + 1) {
-          this.g.themeIndex = (this.g.themeIndex + dir) % THEME_KEYS.length
-          w.themeKey = THEME_KEYS[this.g.themeIndex]
-          w.theme = THEMES[w.themeKey]
-          changed = true
-        } else if (w.menuCursor === off + 2) {
-          // LANGUAGE row — cycle to the next available locale.
-          i18n.cycleLocale()
-          this.g.presentation.ui.notify(
-            t('toast.languageSet', { name: i18n.name(i18n.locale) }),
-            'info',
-          )
-          changed = true
-        } else if (w.menuCursor === off + 3) {
-          w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
-          changed = true
-        }
-        if (changed) {
-          // Swap the battle-field preview to match the new selection immediately
-          // (e.g. moving to a different stage must repaint the canvas at once).
-          this.applyMenuPreview()
-          this.g.audio.init()
-          this.g.audio.resume()
-          this.g.audio.playMenuSelect()
-        }
-      }
-      // Theme shortcut (Alt+T by default — see KeyBindings)
-      if (this.g.input.isThemePressed()) {
-        this.g.themeIndex = (this.g.themeIndex + 1) % THEME_KEYS.length
-        w.themeKey = THEME_KEYS[this.g.themeIndex]
-        w.theme = THEMES[w.themeKey]
-        w.menuCursor = off + 1
-        this.applyMenuPreview()
-        this.g.audio.init()
-        this.g.audio.resume()
-        this.g.audio.playMenuSelect()
-      }
-      // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter:
-      // RESUME (index 0, only when a snapshot exists) resumes;
-      // NEW GAME (off + 4) starts a fresh game;
-      // CONTROLS (off + 5) opens the key-bindings panel.
-      const controlsIdx = off + 5
-      if (this.g.input.isConfirmPressed()) {
-        if (this.g.resumeSnapshot && w.menuCursor === 0) {
-          this.menuResume()
-        } else if (w.menuCursor === off + 4) {
-          this.menuStart()
-        } else if (w.menuCursor === controlsIdx) {
-          this.g.presentation.ui.openControls()
-          this.g.audio.init()
-          this.g.audio.resume()
-          this.g.audio.playMenuSelect()
-        }
-      }
+      this.handleMenuInput()
       return
     }
 
-    // Suppress the Esc-triggered pause when the browser exits fullscreen
-    // via its built-in Esc handler (plan §5.2). The browser fires both
-    // fullscreenchange AND keydown(Escape); without this guard, exiting
-    // fullscreen also pauses the game.
     // Suppress the Esc-triggered pause when the browser exits fullscreen
     // via its built-in Esc handler (plan §5.2). The browser fires both
     // fullscreenchange AND keydown(Escape); without this guard, exiting
@@ -139,37 +41,152 @@ export class MenuController {
     this.g._wasFullscreen = !!document.fullscreenElement
 
     if (w.state === 'playing' || w.state === 'paused') {
-      if (this.g.input.isPausePressed()) {
-        if (justExitedFullscreen) {
-          // Consume the Esc without toggling pause
-        } else {
-          this.g.simulation.togglePause()
-          this.g.audio.playPause()
-          // Entering pause → Pause snapshot (plan §3: created on pause,
-          // captures the exact moment for a safe later return).
-          if (w.state === 'paused') {
-            this.g.snapshots.create('pause', w)
-          }
-        }
-      }
-      // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
-      if (this.g.input.isSnapshotPressed()) {
-        this.g.manualSnapshot()
-      }
-      // Theme cycle — Alt+T (configurable). Pauses the game and advances to
-      // the next theme. Re-binding to a key other than Alt+T is supported.
-      if (this.g.input.isThemePressed()) {
-        this.themeCycle()
-      }
-      if (this.g.input.isResetPressed()) {
-        this.g.resetToMenu()
-      }
+      this.handleBattleInput(justExitedFullscreen)
     }
 
     if (w.state === 'gameover' || w.state === 'victory') {
-      if (this.g.input.isResetPressed() || this.g.input.isConfirmPressed()) {
-        this.g.resetToMenu()
+      this.handleEndScreenInput()
+    }
+  }
+
+  /**
+   * Keyboard navigation for the start menu: cursor movement, config-row value
+   * cycling, theme shortcut, and confirm actions (RESUME / NEW GAME /
+   * CONTROLS).
+   */
+  private handleMenuInput(): void {
+    const w = this.g.world
+    // The controls panel is a UI-modal that owns all key input while open;
+    // skip menu navigation so it doesn't fight the panel.
+    if (this.g.presentation.ui.isControlsOpen()) return
+
+    // Row count grows by one when a resumable manual snapshot is offered
+    // (the RESUME row sits at index 0, pushing the config rows down).
+    // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
+    const rowCount = this.g.resumeSnapshot ? 7 : 6
+    // Move cursor between rows (RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE)
+    // Canvas preview only switches for RESUME (0), STAGE (off+3), NEW GAME (off+4).
+    const off = this.g.resumeSnapshot ? 1 : 0
+    if (this.g.input.isUpPressed()) {
+      w.menuCursor = (w.menuCursor - 1 + rowCount) % rowCount
+      if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
+        this.applyMenuPreview()
       }
+      this.g.audio.init()
+      this.g.audio.resume()
+      this.g.audio.playMenuSelect()
+    }
+    if (this.g.input.isDownPressed()) {
+      w.menuCursor = (w.menuCursor + 1) % rowCount
+      if (w.menuCursor === 0 || w.menuCursor === off + 3 || w.menuCursor === off + 4) {
+        this.applyMenuPreview()
+      }
+      this.g.audio.init()
+      this.g.audio.resume()
+      this.g.audio.playMenuSelect()
+    }
+    // Change value of the selected row
+    const left = this.g.input.wasPressed('ArrowLeft') || this.g.input.wasPressed('KeyA')
+    const right = this.g.input.wasPressed('ArrowRight') || this.g.input.wasPressed('KeyD')
+    if (left || right) {
+      const dir = left ? -1 : 1
+      let changed = false
+      if (w.menuCursor === off) {
+        this.g.difficultyIndex =
+          (this.g.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
+        w.difficultyKey = DIFFICULTY_KEYS[this.g.difficultyIndex]
+        w.difficulty = DIFFICULTIES[w.difficultyKey]
+        changed = true
+      } else if (w.menuCursor === off + 1) {
+        this.g.themeIndex = (this.g.themeIndex + dir) % THEME_KEYS.length
+        w.themeKey = THEME_KEYS[this.g.themeIndex]
+        w.theme = THEMES[w.themeKey]
+        changed = true
+      } else if (w.menuCursor === off + 2) {
+        // LANGUAGE row — cycle to the next available locale.
+        i18n.cycleLocale()
+        this.g.presentation.ui.notify(
+          t('toast.languageSet', { name: i18n.name(i18n.locale) }),
+          'info',
+        )
+        changed = true
+      } else if (w.menuCursor === off + 3) {
+        w.selectedStage = (w.selectedStage + dir + STAGES.length) % STAGES.length
+        changed = true
+      }
+      if (changed) {
+        // Swap the battle-field preview to match the new selection immediately
+        // (e.g. moving to a different stage must repaint the canvas at once).
+        this.applyMenuPreview()
+        this.g.audio.init()
+        this.g.audio.resume()
+        this.g.audio.playMenuSelect()
+      }
+    }
+    // Theme shortcut (Alt+T by default — see KeyBindings)
+    if (this.g.input.isThemePressed()) {
+      this.g.themeIndex = (this.g.themeIndex + 1) % THEME_KEYS.length
+      w.themeKey = THEME_KEYS[this.g.themeIndex]
+      w.theme = THEMES[w.themeKey]
+      w.menuCursor = off + 1
+      this.applyMenuPreview()
+      this.g.audio.init()
+      this.g.audio.resume()
+      this.g.audio.playMenuSelect()
+    }
+    // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter:
+    // RESUME (index 0, only when a snapshot exists) resumes;
+    // NEW GAME (off + 4) starts a fresh game;
+    // CONTROLS (off + 5) opens the key-bindings panel.
+    const controlsIdx = off + 5
+    if (this.g.input.isConfirmPressed()) {
+      if (this.g.resumeSnapshot && w.menuCursor === 0) {
+        this.menuResume()
+      } else if (w.menuCursor === off + 4) {
+        this.menuStart()
+      } else if (w.menuCursor === controlsIdx) {
+        this.g.presentation.ui.openControls()
+        this.g.audio.init()
+        this.g.audio.resume()
+        this.g.audio.playMenuSelect()
+      }
+    }
+  }
+
+  /** In-game input (playing/paused): pause, manual snapshot, theme, reset. */
+  private handleBattleInput(justExitedFullscreen: boolean): void {
+    const w = this.g.world
+    if (this.g.input.isPausePressed()) {
+      if (justExitedFullscreen) {
+        // Consume the Esc without toggling pause
+      } else {
+        this.g.simulation.togglePause()
+        this.g.audio.playPause()
+        // Entering pause → Pause snapshot (plan §3: created on pause,
+        // captures the exact moment for a safe later return).
+        if (w.state === 'paused') {
+          this.g.snapshots.create('pause', w)
+        }
+      }
+    }
+    // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
+    if (this.g.input.isSnapshotPressed()) {
+      this.g.manualSnapshot()
+    }
+    // Theme cycle — Alt+T (configurable). Pauses the game and advances to
+    // the next theme. Re-binding to a key other than Alt+T is supported.
+    if (this.g.input.isThemePressed()) {
+      this.themeCycle()
+    }
+    if (this.g.input.isResetPressed()) {
+      this.g.resetToMenu()
+    }
+  }
+
+  /** Game-over / victory screen: any reset-or-confirm key returns to menu. */
+  private handleEndScreenInput(): void {
+    if (this.g.input.isResetPressed() || this.g.input.isConfirmPressed()) {
+      this.g.resetToMenu()
     }
   }
 

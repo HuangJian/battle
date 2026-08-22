@@ -27,7 +27,8 @@ import { nextFireIntervalMs } from '../config/fire-rate'
 import { recordEnemyKill } from './KillPipeline'
 import { genId } from './World'
 import { snap, aabb } from '../utils/helpers'
-import type { Bullet, Tank } from '../types'
+import type { Bullet, Tank, TerrainType } from '../types'
+import type { World } from './World'
 import type { SimulationSystems } from './systems'
 
 /**
@@ -79,33 +80,7 @@ export class CombatSystem {
       // so it keeps gliding to a stop; only a fully-stopped, idle tank is skipped.
       if (!tank.moving && tank.vx === 0 && tank.vy === 0) continue
 
-      // §86c: Turn cooldown — enforce minimum turn period. After a tank
-      // turns (dir changes), it must wait turnCooldownMs before turning
-      // again. This blocks per-tick direction oscillation at the source
-      // (the simulation refuses to turn faster than this), making the
-      // God AI's dodgeOscillationCounterFire unnecessary in practice.
-      const turnCd = this.d.world.rules?.turnCooldownMs ?? 0
-      if (turnCd > 0 && tank.dir !== tank.prevMoveDir) {
-        const now = w.frame * TICK_MS
-        if (now - (tank.lastTurnMs ?? TURN_SENTINEL_MS) < turnCd) {
-          // Cooldown active — the requested turn is deferred. Revert to
-          // the previous movement direction AND halt: at turnCooldownMs
-          // ≥160ms the tank would otherwise keep drifting along the old
-          // axis for ~10 ticks, overshooting maze corners / walking into
-          // walls / failing dodges (§95 per-seed tick-diff finding: the
-          // 160ms A/B's flip-to-lose seeds — S10 s1, S12 s6, S26 s1 — all
-          // diverge exactly at a deferred turn). Clearing `moving` makes
-          // the velocity integrate to 0 (instant stop on normal ground;
-          // on ice the residual velocity eases toward 0 via
-          // ICE_DECEL_TRACTION, preserving the glide).
-          tank.dir = tank.prevMoveDir ?? tank.dir
-          tank.moving = false
-        } else {
-          // Cooldown expired — accept the turn
-          tank.prevMoveDir = tank.dir
-          tank.lastTurnMs = now
-        }
-      }
+      this.applyTurnCooldown(tank, w)
 
       // Enemy freeze — a frozen tank can't act, so bleed off any momentum and skip.
       // §184: only freeze ENEMY tanks, not allied guards (allegiance === 'ally').
@@ -117,50 +92,7 @@ export class CombatSystem {
         continue
       }
 
-      // ---- Velocity / ice-momentum integration ----
-      // Desired velocity comes from the tank's movement intent (dir when moving).
-      // Inline DIR_VECTORS[tank.dir] with flat DIR_DX/DIR_DY arrays — avoids
-      // a string-keyed Record lookup per tank per tick (perf §64).
-      const di = tank.dir === 'up' ? 0 : tank.dir === 'down' ? 1 : tank.dir === 'left' ? 2 : 3
-      const dirDx = DIR_DX[di]
-      const dirDy = DIR_DY[di]
-      const wantX = tank.moving ? dirDx * tank.speed : 0
-      const wantY = tank.moving ? dirDy * tank.speed : 0
-
-      // Inline isTankOnIce: tank center cell, direct grid access.
-      // Equivalent to `w.tileMap.get(ic, ir) === 'ice'` for in-bounds tanks
-      // (which all tanks are — see invariant above).
-      const ic = Math.floor((tank.x + 16) / CELL)
-      const ir = Math.floor((tank.y + 16) / CELL)
-      const onIce = grid[ir][ic] === 'ice'
-      if (onIce) {
-        // Low traction: ease velocity toward the desired value. Accelerating
-        // (target non-zero) uses ICE_ACCEL_TRACTION; decelerating (target zero
-        // — input released, or the axis being abandoned on a perpendicular
-        // turn) uses ICE_DECEL_TRACTION so the tank coasts. That glide is the
-        // "slippery" ice feel.
-        const tx = wantX === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
-        const ty = wantY === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
-        tank.vx += (wantX - tank.vx) * tx
-        tank.vy += (wantY - tank.vy) * ty
-        // Kill sub-pixel jitter once a decelerating axis has all but stopped.
-        if (wantX === 0 && Math.abs(tank.vx) < 0.02) tank.vx = 0
-        if (wantY === 0 && Math.abs(tank.vy) < 0.02) tank.vy = 0
-      } else {
-        // Normal ground: instant traction = crisp, current control (unchanged).
-        tank.vx = wantX
-        tank.vy = wantY
-      }
-
-      // ---- Axis-lock: keep movement strictly one axis at a time so the
-      // off-axis coordinate stays grid-aligned (the collision system assumes
-      // axis-aligned tanks; a tank is exactly one 2×2 block wide). The
-      // dominant (larger |velocity|) axis wins; the other is zeroed. During a
-      // perpendicular turn on ice the OLD axis keeps gliding until it decays
-      // below the new one — i.e. you can't instantly change direction on ice.
-      const axis: 'x' | 'y' = Math.abs(tank.vx) >= Math.abs(tank.vy) ? 'x' : 'y'
-      if (axis === 'x') tank.vy = 0
-      else tank.vx = 0
+      const axis = this.integrateVelocity(tank, grid)
 
       // No actual motion this tick (both velocities rounded to 0) → done.
       if (tank.vx === 0 && tank.vy === 0) continue
@@ -170,51 +102,138 @@ export class CombatSystem {
       if (axis === 'x') tank.y = snap(tank.y, CELL)
       else tank.x = snap(tank.x, CELL)
 
-      // Try to move along the (single) velocity axis.
-      const newX = tank.x + tank.vx
-      const newY = tank.y + tank.vy
-
-      // Inline isInBounds(newX, newY, TANK, TANK): TANK=32, FIELD=GRID*CELL.
-      // `!isInBounds(...)` ⟺ `newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD`.
-      if (newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD) {
-        if (axis === 'x') {
-          tank.x = tank.vx < 0 ? 0 : FIELD - 32
-          tank.vx = 0
-        } else {
-          tank.y = tank.vy < 0 ? 0 : FIELD - 32
-          tank.vy = 0
-        }
-        if (tank.aiState) tank.aiState.thinkTimer = 0
-        continue
-      }
-
-      // Inline canTankTraverseWater: `!!(tank.boatTimer && tank.boatTimer > 0)`.
-      const canTraverseWater = !!(tank.boatTimer && tank.boatTimer > 0)
-      if (w.rectHitsTerrain(newX, newY, 32, 32, canTraverseWater)) {
-        // Snap to the cell boundary on the travel axis and stop there.
-        if (axis === 'x') {
-          tank.x = snap(tank.x, CELL)
-          tank.vx = 0
-        } else {
-          tank.y = snap(tank.y, CELL)
-          tank.vy = 0
-        }
-        if (tank.aiState) tank.aiState.thinkTimer = 0
-        continue
-      }
-
-      // Check tank-tank collision
-      if (this.tankHitsTank(tank, newX, newY, allTanks)) {
-        if (axis === 'x') tank.vx = 0
-        else tank.vy = 0
-        if (tank.aiState) tank.aiState.thinkTimer = 0
-        continue
-      }
-
-      // Move is valid
-      tank.x = newX
-      tank.y = newY
+      this.attemptMove(tank, w, axis, allTanks)
     }
+  }
+
+  /**
+   * §86c: Turn cooldown — enforce minimum turn period. After a tank turns
+   * (dir changes), it must wait turnCooldownMs before turning again. This
+   * blocks per-tick direction oscillation at the source (the simulation
+   * refuses to turn faster than this), making the God AI's
+   * dodgeOscillationCounterFire unnecessary in practice.
+   */
+  private applyTurnCooldown(tank: Tank, w: World): void {
+    const turnCd = w.rules?.turnCooldownMs ?? 0
+    if (turnCd <= 0 || tank.dir === tank.prevMoveDir) return
+    const now = w.frame * TICK_MS
+    if (now - (tank.lastTurnMs ?? TURN_SENTINEL_MS) < turnCd) {
+      // Cooldown active — the requested turn is deferred. Revert to
+      // the previous movement direction AND halt: at turnCooldownMs
+      // ≥160ms the tank would otherwise keep drifting along the old
+      // axis for ~10 ticks, overshooting maze corners / walking into
+      // walls / failing dodges (§95 per-seed tick-diff finding: the
+      // 160ms A/B's flip-to-lose seeds — S10 s1, S12 s6, S26 s1 — all
+      // diverge exactly at a deferred turn). Clearing `moving` makes
+      // the velocity integrate to 0 (instant stop on normal ground;
+      // on ice the residual velocity eases toward 0 via
+      // ICE_DECEL_TRACTION, preserving the glide).
+      tank.dir = tank.prevMoveDir ?? tank.dir
+      tank.moving = false
+    } else {
+      // Cooldown expired — accept the turn
+      tank.prevMoveDir = tank.dir
+      tank.lastTurnMs = now
+    }
+  }
+
+  /**
+   * Velocity / ice-momentum integration + axis-lock. Desired velocity comes
+   * from the tank's movement intent (dir when moving). Returns the dominant
+   * movement axis so the caller can snap the perpendicular coordinate.
+   */
+  private integrateVelocity(tank: Tank, grid: TerrainType[][]): 'x' | 'y' {
+    // Inline DIR_VECTORS[tank.dir] with flat DIR_DX/DIR_DY arrays — avoids
+    // a string-keyed Record lookup per tank per tick (perf §64).
+    const di = tank.dir === 'up' ? 0 : tank.dir === 'down' ? 1 : tank.dir === 'left' ? 2 : 3
+    const dirDx = DIR_DX[di]
+    const dirDy = DIR_DY[di]
+    const wantX = tank.moving ? dirDx * tank.speed : 0
+    const wantY = tank.moving ? dirDy * tank.speed : 0
+
+    // Inline isTankOnIce: tank center cell, direct grid access.
+    // Equivalent to `w.tileMap.get(ic, ir) === 'ice'` for in-bounds tanks
+    // (which all tanks are — see invariant above).
+    const ic = Math.floor((tank.x + 16) / CELL)
+    const ir = Math.floor((tank.y + 16) / CELL)
+    const onIce = grid[ir][ic] === 'ice'
+    if (onIce) {
+      // Low traction: ease velocity toward the desired value. Accelerating
+      // (target non-zero) uses ICE_ACCEL_TRACTION; decelerating (target zero
+      // — input released, or the axis being abandoned on a perpendicular
+      // turn) uses ICE_DECEL_TRACTION so the tank coasts. That glide is the
+      // "slippery" ice feel.
+      const tx = wantX === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
+      const ty = wantY === 0 ? ICE_DECEL_TRACTION : ICE_ACCEL_TRACTION
+      tank.vx += (wantX - tank.vx) * tx
+      tank.vy += (wantY - tank.vy) * ty
+      // Kill sub-pixel jitter once a decelerating axis has all but stopped.
+      if (wantX === 0 && Math.abs(tank.vx) < 0.02) tank.vx = 0
+      if (wantY === 0 && Math.abs(tank.vy) < 0.02) tank.vy = 0
+    } else {
+      // Normal ground: instant traction = crisp, current control (unchanged).
+      tank.vx = wantX
+      tank.vy = wantY
+    }
+
+    // ---- Axis-lock: keep movement strictly one axis at a time so the
+    // off-axis coordinate stays grid-aligned (the collision system assumes
+    // axis-aligned tanks; a tank is exactly one 2×2 block wide). The
+    // dominant (larger |velocity|) axis wins; the other is zeroed. During a
+    // perpendicular turn on ice the OLD axis keeps gliding until it decays
+    // below the new one — i.e. you can't instantly change direction on ice.
+    const axis: 'x' | 'y' = Math.abs(tank.vx) >= Math.abs(tank.vy) ? 'x' : 'y'
+    if (axis === 'x') tank.vy = 0
+    else tank.vx = 0
+    return axis
+  }
+
+  /** Try to move one tick along the locked axis; stop at walls/tanks. */
+  private attemptMove(tank: Tank, w: World, axis: 'x' | 'y', allTanks: Tank[]): void {
+    // Try to move along the (single) velocity axis.
+    const newX = tank.x + tank.vx
+    const newY = tank.y + tank.vy
+
+    // Inline isInBounds(newX, newY, TANK, TANK): TANK=32, FIELD=GRID*CELL.
+    // `!isInBounds(...)` ⟺ `newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD`.
+    if (newX < 0 || newY < 0 || newX + 32 > FIELD || newY + 32 > FIELD) {
+      if (axis === 'x') {
+        tank.x = tank.vx < 0 ? 0 : FIELD - 32
+        tank.vx = 0
+      } else {
+        tank.y = tank.vy < 0 ? 0 : FIELD - 32
+        tank.vy = 0
+      }
+      if (tank.aiState) tank.aiState.thinkTimer = 0
+      return
+    }
+
+    // Inline canTankTraverseWater: `!!(tank.boatTimer && tank.boatTimer > 0)`.
+    const canTraverseWater = !!(tank.boatTimer && tank.boatTimer > 0)
+    if (w.rectHitsTerrain(newX, newY, 32, 32, canTraverseWater)) {
+      // Snap to the cell boundary on the travel axis and stop there.
+      if (axis === 'x') {
+        tank.x = snap(tank.x, CELL)
+        tank.vx = 0
+      } else {
+        tank.y = snap(tank.y, CELL)
+        tank.vy = 0
+      }
+      if (tank.aiState) tank.aiState.thinkTimer = 0
+      return
+    }
+
+    // Check tank-tank collision
+    if (this.tankHitsTank(tank, newX, newY, allTanks)) {
+      if (axis === 'x') tank.vx = 0
+      else tank.vy = 0
+      if (tank.aiState) tank.aiState.thinkTimer = 0
+      return
+    }
+
+    // Move is valid
+    tank.x = newX
+    tank.y = newY
   }
 
   private tankHitsTank(self: Tank, newX: number, newY: number, allTanks: Tank[]): boolean {
@@ -259,55 +278,7 @@ export class CombatSystem {
     // fire, never to shoot back (new-powerups-plan §4.4).
     if (tank.isDecoy) return
 
-    // Fire-rate limiter — two mutually-exclusive models (config/rules.ts,
-    // plan/classic-faithful-feel.md Phase 2):
-    //
-    //  - 'cooldown' (modern relax/hard/chaos): a fixed per-type TIME gate.
-    //    `nextFireInterval` is frozen at the previous shot from the fire-rate
-    //    standard (config/fire-rate.ts: base interval × deterministic per-fire
-    //    jitter). Rate is independent of whether the previous bullet is still
-    //    in flight — purely a time cadence.
-    //
-    //  - 'bulletCap' (classic FC-1985): fire rate is governed ONLY by the
-    //    on-screen bullet cap. The player may fire again the instant the
-    //    previous shell resolves (strikes terrain/a tank or leaves the field)
-    //    — there is NO separate time cooldown. This is the faithful FC feel:
-    //    holding fire yields a steady cadence paced by bullet *travel*, not by
-    //    an artificial timer. A prior draft layered `baseFireIntervalMs()` on
-    //    top of the cap; that produced a spurious ~1.2 s wait after every shot
-    //    and is removed (user-reported bug, 2026-07-28).
-    if (w.rules.fireModel === 'cooldown') {
-      if (now - tank.lastFire < tank.nextFireInterval) return
-    }
-
-    // On-screen bullet cap (classic 'bulletCap' model, plan Phase 2). Count the
-    // tank's own live bullets; block the shot once the cap is reached. The
-    // cap is `maxBullets[kind]`, plus +1 for the player at/above
-    // `playerDoubleShotLevel` (2★ → double-shot, FC-style). A canceled bullet
-    // frees its slot on the next frame (no twin-spawn — issue #12).
-    if (w.rules.fireModel === 'bulletCap') {
-      // Minimum cooldown between shots: prevents instant refire when a bullet
-      // resolves at close range. Without this floor, a bullet that hits a tank
-      // 1 cell away resolves in 1 frame and the player fires again immediately
-      // — machine-gun feel. 300ms ≈ 18 frames at 60fps is responsive but
-      // prevents the exploit. (Data: rules.bulletCapMinCooldownMs.)
-      if (
-        w.rules.bulletCapMinCooldownMs > 0 &&
-        now - tank.lastFire < w.rules.bulletCapMinCooldownMs
-      ) {
-        return
-      }
-      const cap =
-        (w.rules.maxBullets[tank.kind] ?? 1) +
-        (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
-      let inFlight = 0
-      const liveBullets = w.bullets
-      for (let bi = 0; bi < liveBullets.length; bi++) {
-        const b = liveBullets[bi]
-        if (b.alive && b.ownerId === tank.id) inFlight++
-      }
-      if (inFlight >= cap) return
-    }
+    if (!this.passesFireGate(tank, now)) return
 
     const v = DIR_VECTORS[tank.dir]
 
@@ -357,6 +328,62 @@ export class CombatSystem {
     tank.fireCount += 1
     tank.nextFireInterval = nextFireIntervalMs(tank.kind, tank.level ?? 0, tank.fireCount, w.frame)
     w.pushEvent({ type: 'bullet_fired', bullet })
+  }
+
+  /**
+   * Fire-rate limiter — two mutually-exclusive models (config/rules.ts,
+   * plan/classic-faithful-feel.md Phase 2):
+   *
+   *  - 'cooldown' (modern relax/hard/chaos): a fixed per-type TIME gate.
+   *    `nextFireInterval` is frozen at the previous shot from the fire-rate
+   *    standard (config/fire-rate.ts: base interval × deterministic per-fire
+   *    jitter). Rate is independent of whether the previous bullet is still
+   *    in flight — purely a time cadence.
+   *
+   *  - 'bulletCap' (classic FC-1985): fire rate is governed ONLY by the
+   *    on-screen bullet cap. The player may fire again the instant the
+   *    previous shell resolves (strikes terrain/a tank or leaves the field)
+   *    — there is NO separate time cooldown. This is the faithful FC feel:
+   *    holding fire yields a steady cadence paced by bullet *travel*, not by
+   *    an artificial timer. A prior draft layered `baseFireIntervalMs()` on
+   *    top of the cap; that produced a spurious ~1.2 s wait after every shot
+   *    and is removed (user-reported bug, 2026-07-28).
+   */
+  private passesFireGate(tank: Tank, now: number): boolean {
+    const w = this.d.world
+    if (w.rules.fireModel === 'cooldown') {
+      if (now - tank.lastFire < tank.nextFireInterval) return false
+    }
+
+    // On-screen bullet cap (classic 'bulletCap' model, plan Phase 2). Count the
+    // tank's own live bullets; block the shot once the cap is reached. The
+    // cap is `maxBullets[kind]`, plus +1 for the player at/above
+    // `playerDoubleShotLevel` (2★ → double-shot, FC-style). A canceled bullet
+    // frees its slot on the next frame (no twin-spawn — issue #12).
+    if (w.rules.fireModel === 'bulletCap') {
+      // Minimum cooldown between shots: prevents instant refire when a bullet
+      // resolves at close range. Without this floor, a bullet that hits a tank
+      // 1 cell away resolves in 1 frame and the player fires again immediately
+      // — machine-gun feel. 300ms ≈ 18 frames at 60fps is responsive but
+      // prevents the exploit. (Data: rules.bulletCapMinCooldownMs.)
+      if (
+        w.rules.bulletCapMinCooldownMs > 0 &&
+        now - tank.lastFire < w.rules.bulletCapMinCooldownMs
+      ) {
+        return false
+      }
+      const cap =
+        (w.rules.maxBullets[tank.kind] ?? 1) +
+        (tank.kind === 'player' && (tank.level ?? 0) >= w.rules.playerDoubleShotLevel ? 1 : 0)
+      let inFlight = 0
+      const liveBullets = w.bullets
+      for (let bi = 0; bi < liveBullets.length; bi++) {
+        const b = liveBullets[bi]
+        if (b.alive && b.ownerId === tank.id) inFlight++
+      }
+      if (inFlight >= cap) return false
+    }
+    return true
   }
 
   // ================================================================
@@ -536,7 +563,6 @@ export class CombatSystem {
   }
 
   bulletHitsTank(bullet: Bullet, allTanks: Tank[]): boolean {
-    const w = this.d.world
     for (let i = 0; i < allTanks.length; i++) {
       const tank = allTanks[i]
       if (!tank.alive || tank.id === bullet.ownerId) continue
@@ -581,97 +607,112 @@ export class CombatSystem {
           this.spendStarShield(tank)
           return true
         }
-        tank.alive = false
-        w._needsCleanup = true
-        this.d.effects.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
-
-        if (tank.isPlayer) {
-          w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
-          w.pushEvent({ type: 'player_hit' })
-        } else if (tank.allegiance === 'ally') {
-          // Allied guard destroyed — no score, no kill credit, no drops. The
-          // guard simply stops fighting (§31 Phase 2).
-          w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
-        } else {
-          // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
-          const isGodKill = w.coop && bullet.ownerId === w.player2?.id
-          // Accompanying "balance" enemies (isExtra) are outside the per-stage
-          // 20-enemy count, so they never decrement enemiesRemaining / block
-          // stage clear — but they still count as a normal kill for score
-          // (§31 Phase 2).
-          const gained = recordEnemyKill(w, tank, {
-            toScore2: isGodKill,
-            countsTowardStage: !tank.isExtra,
-          })
-          w.pushEvent({ type: 'tank_destroyed', tank, by: 'player', byId: bullet.ownerId })
-
-          // --- Item drop rules (item-drop v1, DECISIONS.md §30) ---
-          // 1) Bonus enemies (level-design flagged) drop a power-up on death.
-          // 2) Elite (commander-tier) enemies always drop a power-up on death.
-          // 3) Every 10th enemy killed drops a power-up (kill-cadence reward).
-          // 4) Score milestone: every SCORE_DROP_INTERVAL (5000) points
-          //    accumulated drops a power-up. A single large score gain can
-          //    cross several milestones at once and thus drop several.
-          // A drop triggered by the FINAL enemy of a non-final stage is deferred
-          // (buffered on world.pendingDrops) so the stage-clear transition
-          // doesn't wipe it; it is released on the first enemy kill of the next
-          // stage — which may therefore drop several power-ups at once.
-          // Extra (balance) enemies are excluded — they don't progress drops.
-          if (!tank.isExtra) {
-            this.d.powerUps.flushPendingDrops() // release drops deferred from a prior stage
-            const r = w.rules
-            // Collect this kill's guaranteed drops, each anchored on the slain
-            // enemy's tile. The rule set depends on the active GameplayRules.
-            const drops: { x: number; y: number }[] = []
-            if (r.dropSchedule === 'fixed') {
-              // FC: the power-up carrier enemies (marked `bonus` at spawn from
-              // `fixedDropKillIndices`) drop when destroyed — faithful to the
-              // 1985 game where the flashing red enemy IS the drop, regardless
-              // of kill order. No kill-counter logic leaks in here.
-              if (tank.bonus) {
-                drops.push({ x: tank.x, y: tank.y })
-              }
-            } else {
-              const isElite = tank.aiState?.isCommander === true
-              const isTenthKill = r.dropOnEveryNKills > 0 && w.killCount % r.dropOnEveryNKills === 0
-              if (
-                tank.bonus ||
-                (r.dropOnEliteKill && isElite) ||
-                (r.dropOnEveryNKills > 0 && isTenthKill)
-              ) {
-                drops.push({ x: tank.x, y: tank.y })
-              }
-              // Score milestone: every `dropOnScoreMilestone` points crossed in
-              // this single kill can drop several power-ups at once.
-              if (r.dropOnScoreMilestone > 0) {
-                const beforeScore = w.score - gained
-                const milestones =
-                  Math.floor(w.score / r.dropOnScoreMilestone) -
-                  Math.floor(beforeScore / r.dropOnScoreMilestone)
-                for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
-              }
-            }
-
-            if (drops.length > 0) {
-              const isFinalEnemy = w.enemiesRemaining <= 0
-              const hasNextStage = w.stageIndex + 1 < w.totalStages
-              if (isFinalEnemy && hasNextStage) {
-                for (const d of drops) w.pendingDrops.push(this.d.powerUps.buildDrop(d)) // defer
-              } else {
-                for (const d of drops) this.d.powerUps.spawnPowerUp(d) // drop immediately
-              }
-            }
-          }
-        }
-      } else {
+        this.killTank(bullet, tank)
+      } else if (tank.kind === 'armor') {
         // Armor tank flash
-        if (tank.kind === 'armor') {
-          tank.flashTimer = 200
-        }
+        tank.flashTimer = 200
       }
       return true
     }
     return false
+  }
+
+  /**
+   * Finalize a lethal hit on a non-shielded tank: flag it dead, spawn the
+   * big explosion, and route the per-allegiance consequences — player/guard
+   * destruction events, or enemy kill credit + item-drop scheduling.
+   */
+  private killTank(bullet: Bullet, tank: Tank): void {
+    const w = this.d.world
+    tank.alive = false
+    w._needsCleanup = true
+    this.d.effects.createExplosion(tank.x + tank.w / 2, tank.y + tank.h / 2, 'big')
+
+    if (tank.isPlayer) {
+      w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
+      w.pushEvent({ type: 'player_hit' })
+    } else if (tank.allegiance === 'ally') {
+      // Allied guard destroyed — no score, no kill credit, no drops. The
+      // guard simply stops fighting (§31 Phase 2).
+      w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
+    } else {
+      // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
+      const isGodKill = w.coop && bullet.ownerId === w.player2?.id
+      // Accompanying "balance" enemies (isExtra) are outside the per-stage
+      // 20-enemy count, so they never decrement enemiesRemaining / block
+      // stage clear — but they still count as a normal kill for score
+      // (§31 Phase 2).
+      const gained = recordEnemyKill(w, tank, {
+        toScore2: isGodKill,
+        countsTowardStage: !tank.isExtra,
+      })
+      w.pushEvent({ type: 'tank_destroyed', tank, by: 'player', byId: bullet.ownerId })
+
+      // --- Item drop rules (item-drop v1, DECISIONS.md §30) ---
+      if (!tank.isExtra) this.scheduleItemDrops(tank, gained)
+    }
+  }
+
+  /**
+   * Roll this kill's guaranteed power-up drops (item-drop v1, DECISIONS.md §30):
+   * 1) Bonus enemies (level-design flagged) drop a power-up on death.
+   * 2) Elite (commander-tier) enemies always drop a power-up on death.
+   * 3) Every 10th enemy killed drops a power-up (kill-cadence reward).
+   * 4) Score milestone: every SCORE_DROP_INTERVAL (5000) points accumulated
+   *    drops a power-up. A single large score gain can cross several
+   *    milestones at once and thus drop several.
+   *
+   * A drop triggered by the FINAL enemy of a non-final stage is deferred
+   * (buffered on world.pendingDrops) so the stage-clear transition doesn't
+   * wipe it; it is released on the first enemy kill of the next stage — which
+   * may therefore drop several power-ups at once. Extra (balance) enemies are
+   * excluded upstream — they don't progress drops.
+   */
+  private scheduleItemDrops(tank: Tank, gained: number): void {
+    const w = this.d.world
+    this.d.powerUps.flushPendingDrops() // release drops deferred from a prior stage
+    const r = w.rules
+    // Collect this kill's guaranteed drops, each anchored on the slain
+    // enemy's tile. The rule set depends on the active GameplayRules.
+    const drops: { x: number; y: number }[] = []
+    if (r.dropSchedule === 'fixed') {
+      // FC: the power-up carrier enemies (marked `bonus` at spawn from
+      // `fixedDropKillIndices`) drop when destroyed — faithful to the
+      // 1985 game where the flashing red enemy IS the drop, regardless
+      // of kill order. No kill-counter logic leaks in here.
+      if (tank.bonus) {
+        drops.push({ x: tank.x, y: tank.y })
+      }
+    } else {
+      const isElite = tank.aiState?.isCommander === true
+      const isTenthKill = r.dropOnEveryNKills > 0 && w.killCount % r.dropOnEveryNKills === 0
+      if (
+        tank.bonus ||
+        (r.dropOnEliteKill && isElite) ||
+        (r.dropOnEveryNKills > 0 && isTenthKill)
+      ) {
+        drops.push({ x: tank.x, y: tank.y })
+      }
+      // Score milestone: every `dropOnScoreMilestone` points crossed in
+      // this single kill can drop several power-ups at once.
+      if (r.dropOnScoreMilestone > 0) {
+        const beforeScore = w.score - gained
+        const milestones =
+          Math.floor(w.score / r.dropOnScoreMilestone) -
+          Math.floor(beforeScore / r.dropOnScoreMilestone)
+        for (let i = 0; i < milestones; i++) drops.push({ x: tank.x, y: tank.y })
+      }
+    }
+
+    if (drops.length > 0) {
+      const isFinalEnemy = w.enemiesRemaining <= 0
+      const hasNextStage = w.stageIndex + 1 < w.totalStages
+      if (isFinalEnemy && hasNextStage) {
+        for (const d of drops) w.pendingDrops.push(this.d.powerUps.buildDrop(d)) // defer
+      } else {
+        for (const d of drops) this.d.powerUps.spawnPowerUp(d) // drop immediately
+      }
+    }
   }
 
   /**
