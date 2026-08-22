@@ -1797,3 +1797,22 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 
 **Implications:** 浏览器类新增共享格式化助手 → ui/helpers.ts；两浏览器的显示契约
 保持各自独立。
+
+## 259. §3.7 diag 脚本清理 — 归档 5 个零引用一次性脚本 (STATUS: 已实施, 范围修正)
+
+**Decision:** 新建 `tools/diag/archive/`，归档经全仓核实**零引用**的 5 个一次性取证脚本：
+`ab-score-dims` / `diag-godai` / `diag-ice-deaths` / `diag-suicide-cond` /
+`diag-suicide-events`（归档内 README 说明甄别标准）。其余 29 个全部保留。
+
+**Rationale:**
+- 引用核查口径：basename 在 src/tests/tools 的 import + 全部 *.md（AGENTS/DECISIONS/
+  docs/plan）中的出现。base-loss-run/worker 虽 md:0 但被 AGENTS 点名的
+  base-loss-forensics 导入——保留；m4-diagnose 被 DECISIONS §212 明确"保留为诊断
+  流程"——保留；t2a-audit/toolate-audit/dodge-audit 是 §218–§227 协议工具——保留。
+- 计划的另一条"裸循环脚本改用 simulation-runner"经核实大多不成立：这些脚本的价值恰在
+  循环体内的逐 tick 自定义取证钩子（trace/idle/AoE 剖析），runner 不暴露等价钩子，
+  强迁会破坏取证能力（三门第 1 条不成立）。
+- tools/ 在 tsconfig include 内，归档文件同步修正相对导入层级并保持编译通过。
+
+**Implications:** diag 目录 35→30 个活动脚本；归档区不计入新会话的扫描面；
+复活归档脚本前须先对齐当前 World/Simulation API。

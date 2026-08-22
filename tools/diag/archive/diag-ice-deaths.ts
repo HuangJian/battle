@@ -7,12 +7,12 @@
  *
  * Usage: bun tools/diag/diag-ice-deaths.ts <stage 1-35> <seedList> [--params <file>]
  */
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS, GodAIParams } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS, GodAIParams } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
 import { readFileSync } from 'fs'
 
 function arg(name: string, fallback?: string): string | undefined {

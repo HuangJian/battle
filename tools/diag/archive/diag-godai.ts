@@ -3,12 +3,12 @@
  * diag-godai.ts — Diagnostic tool for God AI behavior.
  * Runs a simulation and reports branch counts, player trajectory, and failure analysis.
  */
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { STAGES } from '../../src/config/stages'
-import { CELL, BASE_POS } from '../../src/constants'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { STAGES } from '../../../src/config/stages'
+import { CELL, BASE_POS } from '../../../src/constants'
 
 const seed = parseInt(process.argv[2] ?? '1', 10)
 const difficulty = process.argv[3] ?? 'classic'

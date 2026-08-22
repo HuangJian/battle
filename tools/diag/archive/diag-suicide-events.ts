@@ -4,14 +4,14 @@
  * context, to diagnose whether trades are wasteful (per-seed tick-diff).
  * Usage: bun tools/diag/diag-suicide-events.ts <difficulty> <stageIdx> <seed> <on|off>
  */
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { RNG } from '../../src/utils/RNG'
-import { START_LIVES, BASE_POS, CELL } from '../../src/constants'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { RNG } from '../../../src/utils/RNG'
+import { START_LIVES, BASE_POS, CELL } from '../../../src/constants'
 
 const difficulty = process.argv[2] ?? 'hard'
 // CLI stage is 1-based (1..35); internal index is 0-based.
