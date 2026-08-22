@@ -1520,3 +1520,21 @@ constants.ts 与 helpers.ts 保留兼容再导出；pathfind.ts 私有的 STEP_D
 
 **Implications:** 新测试一律从 tests/helpers.ts 取 fixture；helpers 语义已冻结——修改前先
 grep 调用点。变体族如需统一须逐个验证几何关系。
+
+## 244. §1.2 GameLoop.loop 分解为命名步骤方法 (STATUS: 已实施, plan/refactor.agy.md Phase 2)
+
+**Decision:** `GameLoop.loop`（322 行）分解为 13 个单一职责方法：`computeDelta` /
+`beginPerfProbe` / `handleFrameInput` / `stepSimulation`（含 stage 检测、终局拦截、防螺旋钳
+制、时光宝盒信号）/ `stepRecovery` + `rebuildAfterRestore` / `stepSnapshots` /
+`dispatchWorldEvents` / `stepRender` / `captureSnapshotThumbnails` / `syncUI` /
+`endFrameInputs` / `samplePerformance` / `updateStateTracking`。loop 本体缩至 ~20 行调度器。
+
+**Rationale:**
+- plan §1.2：任何循环行为改动都需通读 322 行交织关注点；插入新"阶段"需在巨石中找位置。
+- 执行顺序是确定性承重墙（AGENTS §2.3）：语句逐一原位搬移，零重排；全套测试含 God-AI
+  确定性门禁通过 = 语义不变实证。
+- perf 探针计时窗口逐字节保持：simMs/renderMs/uiMs 的起止点随所属步骤闭合在方法内，
+  probe 状态放实例字段 `_probe`（构造期一次分配，帧路径零分配，AGENTS §14.1）。
+
+**Implications:** 新增循环阶段 = 新增一个 step 方法并在 loop 调度器中登记；各 step 可独立
+阅读/测试。禁止对 loop 内调用顺序做任何重排。

@@ -251,44 +251,55 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
       this.scheduleFrame()
     }
 
-    private loop = (time: number): void => {
-      if (!this.running) return
-
+    /**
+     * Compute the frame delta, cap it, and deposit it into the fixed-timestep
+     * accumulator scaled by the 督战 battle speed. Ticks themselves are
+     * untouched, so determinism (AGENTS §2.3) is preserved — only cadence.
+     */
+    private computeDelta(time: number): number {
       const dt = Math.min(time - this.lastTime, 100) // cap at 100ms
       this.lastTime = time
-      // 督战 battle speed: scale the accumulator's ms deposition so ×2 runs two
-      // fixed-timestep ticks per wall-clock frame. The ticks themselves are
-      // untouched, so determinism (AGENTS §2.3) is preserved — only cadence.
       this.accumulator += dt * this.battleSpeed
+      return dt
+    }
 
-      // --- Performance Observatory probes (gated: zero cost when overlay off) ---
-      const perfOverlay = this.presentation.ui.perfOverlay
-      const renderer = this.presentation.renderer
-      const probe = perfOverlay.active
-      let frameT0 = 0
-      let simT0 = 0
-      let simDt = 0
-      let renderT0 = 0
-      let renderDt = 0
-      let uiT0 = 0
-      let uiDt = 0
-      if (probe) {
-        frameT0 = performance.now()
+    /**
+     * Arm the Performance Observatory probes for this frame (gated: zero cost
+     * when the overlay is off). Returns the reusable timing buffer.
+     */
+    private beginPerfProbe(): void {
+      const probe = this._probe
+      probe.active = this.presentation.ui.perfOverlay.active
+      if (probe.active) {
+        probe.frameT0 = performance.now()
         // Re-arm the dev draw-call counter (early-returns if already armed).
-        renderer.setDrawCallCounting(true)
+        this.presentation.renderer.setDrawCallCounting(true)
       }
+    }
 
-      // Handle menu/game state input
+    /**
+     * Route frame input: replay transport keys during playback, menu/state
+     * keys otherwise.
+     */
+    private handleFrameInput(): void {
       if (this.playback) {
         this.handlePlaybackInput()
       } else {
         this.handleStateInput()
       }
+    }
 
-      // Fixed timestep simulation
-      let steps = 0
-      let enteredGameOver = false
-      if (probe) simT0 = performance.now()
+    /**
+     * Fixed-timestep simulation — live ticks or replay playback.
+     *
+     * Live branch: steps the sim, records consumed input per tick, detects
+     * stage changes (Stage Start snapshot + fresh recording session), finalizes
+     * recordings on clear/defeat, intercepts game over for recovery, applies
+     * the anti-spiral clamp, and consumes the manual-rewind (时光宝盒) signal.
+     */
+    private stepSimulation(dt: number): void {
+      const probe = this._probe
+      if (probe.active) probe.simT0 = performance.now()
       if (this.playback) {
         // Playback mode: PlaybackController drives ticks directly
         this.playback.update(dt)
@@ -302,6 +313,8 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
         }
       } else {
         // Live gameplay: record input per tick, inside the while-loop
+        let steps = 0
+        let enteredGameOver = false
         while (this.accumulator >= TICK_MS && steps < MAX_LIVE_STEPS) {
           if (
             this.world.state === 'playing' ||
@@ -375,9 +388,15 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           }
         }
       }
-      if (probe) simDt = performance.now() - simT0
+      if (probe.active) probe.simMs = performance.now() - probe.simT0
+    }
 
-      // Recovery flow update (fade, countdown) — runs while state is 'recovery'
+    /**
+     * Recovery flow update (fade, countdown) while state is 'recovery', plus
+     * the presentation/recorder rebuild at the fading→countdown boundary and
+     * the countdown beeps. Outside recovery, keeps the phase trackers idle.
+     */
+    private stepRecovery(dt: number): void {
       if (this.world.state === 'recovery') {
         // Drain accumulator so the simulation doesn't burst-forward
         // when gameplay resumes after the countdown.
@@ -390,48 +409,7 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
         // At that transition we must rebuild all presentation state
         // (particles, camera, animations) — Presentation is disposable.
         if (this.recovery.phase === 'countdown' && this.prevRecoveryPhase === 'fading') {
-          this.presentation.reset()
-          this.audio.stopAll()
-          // The world was just atomically restored (or freshly restarted) —
-          // this is the exact deterministic boundary a replay must start from.
-          // Recording is restarted HERE, never at beginLoad() time: the restore
-          // is deferred until the fade completes, so an earlier startNew()
-          // would capture the pre-restore world (a corrupted replay). This
-          // also revives the recorder after a defeat finalized it (recovery →
-          // load/restart must produce a fresh recording session).
-          this.recorder.startNew(this.world)
-          // The restored stage is not a "stage change" — keep the detector
-          // quiet so it doesn't overwrite this session / snapshot a mid-stage
-          // world as 'stage-start'.
-          this.prevStageIndex = this.world.stageIndex
-          // Lie-Back-Win-Mode: if the restored snapshot has coop enabled but
-          // godInput was cleared (e.g. loaded a coop snapshot from browser while
-          // coop was off), re-create the God AI input for player2.
-          if (this.world.coop && !this.godInput && this.world.player2) {
-            const rng = new RNG((this.world.seed ^ SEED_HASH) >>> 0)
-            this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
-            this.godInput.reset()
-            // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
-            this.autoFireInput = new AutoFireInput(this.input)
-            this.wireLiveInputs()
-            this.audio.player2Id = this.world.player2?.id ?? null
-            this.presentation.ui.controlCenter.setCoopState(true)
-          } else if (this.world.spectate && !this.godInput && this.world.player) {
-            // 督战: restored snapshot has spectate but godInput was cleared
-            // (e.g. loaded a spectate snapshot from the browser while spectate
-            // was off) — re-create the God AI for player1 (default
-            // controlledTank = `w.player`). No auto-fire: nobody is human here.
-            this.rearmSpectateGodInput()
-          } else if (!this.world.coop && !this.world.spectate) {
-            // Snapshot restored without coop/spectate — ensure inputs are cleared.
-            this.godInput = null
-            this.godInput2 = null
-            this.autoFireInput = null
-            this.wireLiveInputs()
-            this.audio.player2Id = null
-            this.presentation.ui.controlCenter.setCoopState(false)
-            this.presentation.ui.controlCenter.setSpectateState('off')
-          }
+          this.rebuildAfterRestore()
         }
 
         // Countdown beeps — play a tone each time the number changes
@@ -449,67 +427,135 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
         this.prevRecoveryPhase = 'idle'
         this.prevCountdown = 0
       }
+    }
 
-      // Auto snapshots — every 30 s of live gameplay (plan §3, §10).
-      // Guarded by !this.playback: replays drive a synthetic world that
-      // should never trigger persistence side-effects.
+    /**
+     * Post-restore rebuild at the recovery fading→countdown boundary: reset
+     * Presentation, restart recording from the deterministic restore boundary,
+     * silence audio, and re-wire God AI / auto-fire inputs to the restored
+     * run profile (coop P2, spectate P1, or plain single-player).
+     */
+    private rebuildAfterRestore(): void {
+      this.presentation.reset()
+      this.audio.stopAll()
+      // The world was just atomically restored (or freshly restarted) —
+      // this is the exact deterministic boundary a replay must start from.
+      // Recording is restarted HERE, never at beginLoad() time: the restore
+      // is deferred until the fade completes, so an earlier startNew()
+      // would capture the pre-restore world (a corrupted replay). This
+      // also revives the recorder after a defeat finalized it (recovery →
+      // load/restart must produce a fresh recording session).
+      this.recorder.startNew(this.world)
+      // The restored stage is not a "stage change" — keep the detector
+      // quiet so it doesn't overwrite this session / snapshot a mid-stage
+      // world as 'stage-start'.
+      this.prevStageIndex = this.world.stageIndex
+      // Lie-Back-Win-Mode: if the restored snapshot has coop enabled but
+      // godInput was cleared (e.g. loaded a coop snapshot from browser while
+      // coop was off), re-create the God AI input for player2.
+      if (this.world.coop && !this.godInput && this.world.player2) {
+        const rng = new RNG((this.world.seed ^ SEED_HASH) >>> 0)
+        this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
+        this.godInput.reset()
+        // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
+        this.autoFireInput = new AutoFireInput(this.input)
+        this.wireLiveInputs()
+        this.audio.player2Id = this.world.player2?.id ?? null
+        this.presentation.ui.controlCenter.setCoopState(true)
+      } else if (this.world.spectate && !this.godInput && this.world.player) {
+        // 督战: restored snapshot has spectate but godInput was cleared
+        // (e.g. loaded a spectate snapshot from the browser while spectate
+        // was off) — re-create the God AI for player1 (default
+        // controlledTank = `w.player`). No auto-fire: nobody is human here.
+        this.rearmSpectateGodInput()
+      } else if (!this.world.coop && !this.world.spectate) {
+        // Snapshot restored without coop/spectate — ensure inputs are cleared.
+        this.godInput = null
+        this.godInput2 = null
+        this.autoFireInput = null
+        this.wireLiveInputs()
+        this.audio.player2Id = null
+        this.presentation.ui.controlCenter.setCoopState(false)
+        this.presentation.ui.controlCenter.setSpectateState('off')
+      }
+    }
+
+    /**
+     * Persistence upkeep: auto snapshots every 30 s of live gameplay (guarded
+     * by !playback — replays drive a synthetic world that must never trigger
+     * persistence side-effects) plus pre-render replay thumbnail capture (the
+     * canvas still shows the previous clean frame — no overlay, no flash).
+     */
+    private stepSnapshots(dt: number): void {
       if (this.world.state === 'playing' && !this.playback) {
         this.snapshots.updateAuto(this.world, dt)
       }
-
-      // Replay thumbnails — capture BEFORE events trigger visual effects
-      // (stage-clear flash, camera shake, particles). The canvas still shows
-      // the previous frame's clean render at this point, which is exactly
-      // what we want for the thumbnail — no overlay, no flash.
       if (this.replays.hasPendingThumbnails) {
         this.replays.capturePendingThumbnails(() => this.presentation.captureThumbnail())
       }
+    }
 
-      // Process events — pass to both audio and presentation
+    /**
+     * Consume the World event queue and route events to audio + presentation.
+     */
+    private dispatchWorldEvents(): void {
       const events = this.world.consumeEvents()
       this.audio.handleEvents(events)
       this.presentation.handleEvents(events)
+    }
 
-      // Render — on-demand energy saver. The full canvas repaint is skipped
-      // unless the visible scene changed (PresentationLayer.shouldRender) and the
-      // renderFpsCap throttle allows it (0 = uncapped). When Performance Mode is
-      // on, renderFpsCap = PERF_MODE_RENDER_FPS (30), halving GPU traffic again;
-      // when off, it is 0 and gameplay renders at full vsync rate. This keeps the
-      // GPU idle — instead of repainting 60×/sec — during menu, pause, game-over,
-      // and idle lulls, so the fan stays off. Input, simulation, and the HUD
-      // still run every frame.
+    /**
+     * On-demand render: repaint only when the visible scene changed
+     * (PresentationLayer.shouldRender) and the renderFpsCap throttle allows it
+     * (0 = uncapped). Keeps the GPU idle during menu/pause/game-over/idle lulls;
+     * input, simulation, and the HUD still run every frame.
+     *
+     * @returns whether a repaint actually happened (drives thumbnail capture).
+     */
+    private stepRender(time: number, dt: number): boolean {
+      const probe = this._probe
       const wantRender = this.presentation.shouldRender(this.world)
       const canRender =
         this.renderFpsCap <= 0 || time - this._lastRenderTime >= 1000 / this.renderFpsCap
       let rendered = false
-      if (probe) {
-        renderT0 = performance.now()
+      if (probe.active) {
+        probe.renderT0 = performance.now()
         // Reset the dev draw-call counter; it re-accumulates only if we actually
         // repaint this frame (on-demand idle frames stay at 0 — accurate).
-        renderer.debugDrawCalls = 0
+        this.presentation.renderer.debugDrawCalls = 0
       }
       if (wantRender && canRender) {
         this.presentation.render(this.world, dt)
         this._lastRenderTime = time
         rendered = true
       }
-      if (probe) renderDt = performance.now() - renderT0
+      if (probe.active) probe.renderMs = performance.now() - probe.renderT0
+      return rendered
+    }
 
-      // Thumbnail capture (plan §8) — only right after a repaint, so the
-      // preview always shows the snapshot's own frame, never a stale one.
-      if (this.snapshots.hasPendingThumbnails) {
-        if (rendered) {
-          this.snapshots.capturePendingThumbnails(() => this.presentation.captureThumbnail())
-        } else {
-          // Force a repaint next frame so the pending previews can be taken.
-          this.presentation.markNeedsRender()
-        }
+    /**
+     * Snapshot thumbnail capture — only right after a repaint, so the preview
+     * always shows the snapshot's own frame, never a stale one. If nothing
+     * repainted this frame, force a repaint next frame instead.
+     */
+    private captureSnapshotThumbnails(rendered: boolean): void {
+      if (!this.snapshots.hasPendingThumbnails) return
+      if (rendered) {
+        this.snapshots.capturePendingThumbnails(() => this.presentation.captureThumbnail())
+      } else {
+        this.presentation.markNeedsRender()
       }
-      // Update the HTML HUD every frame (cheap, internally guarded) so menu/pause
-      // overlays stay live even when the canvas repaint is skipped.
-      if (probe) uiT0 = performance.now()
+    }
+
+    /**
+     * HTML HUD sync every frame (cheap, internally guarded) so menu/pause
+     * overlays stay live even when the canvas repaint is skipped, plus replay
+     * progress bar/time during playback.
+     */
+    private syncUI(): void {
+      const probe = this._probe
+      if (probe.active) probe.uiT0 = performance.now()
       this.presentation.updateUI(this.world)
-      // Sync replay progress bar and time during playback
       if (this.playback) {
         this.presentation.ui.setReplayProgress(this.playback.progress)
         const replay = this.playback.replay
@@ -520,16 +566,25 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           )
         }
       }
-      if (probe) uiDt = performance.now() - uiT0
+      if (probe.active) probe.uiMs = performance.now() - probe.uiT0
+    }
 
-      // Clear per-frame input state
+    /**
+     * Clear per-frame input edges (keyboard + both God AI caches).
+     */
+    private endFrameInputs(): void {
       this.input.endFrame()
       // Lie-Back-Win-Mode: invalidate God AI per-tick caches.
       this.godInput?.endFrame()
       // 督战双玩家: invalidate second God AI per-tick caches.
       this.godInput2?.endFrame()
+    }
 
-      // --- Performance sampler (regression guard, allocation-free) ---
+    /**
+     * FPS sampler (regression guard, allocation-free) and the Performance
+     * Observatory per-frame sample publish (overlay only).
+     */
+    private samplePerformance(time: number): void {
       this._frameCount++
       if (time - this._fpsLastTime >= 1000) {
         this.fps = this._frameCount
@@ -546,30 +601,78 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           this._slowSeconds = 0
         }
       }
-
-      // --- Performance Observatory: publish the per-frame sample (overlay only) ---
-      if (probe) {
-        const frameDt = performance.now() - frameT0
-        perfOverlay.update(this.world, renderer, this.presentation.particles, {
-          fps: this.fps,
-          frameMs: frameDt,
-          simMs: simDt,
-          renderMs: renderDt,
-          uiMs: uiDt,
-          perfMode: this.settings.performanceMode,
-        })
+      const probe = this._probe
+      if (probe.active) {
+        const frameDt = performance.now() - probe.frameT0
+        this.presentation.ui.perfOverlay.update(
+          this.world,
+          this.presentation.renderer,
+          this.presentation.particles,
+          {
+            fps: this.fps,
+            frameMs: frameDt,
+            simMs: probe.simMs,
+            renderMs: probe.renderMs,
+            uiMs: probe.uiMs,
+            perfMode: this.settings.performanceMode,
+          },
+        )
       }
+    }
 
-      // Reclaim keyboard focus whenever we (re)enter active play. After a stage
-      // transition, an unpause, a recovery resume, or a fresh start the browser
-      // may have moved focus elsewhere (stage-clear overlay, the Alt menu, the
-      // address bar), which silently breaks Alt+S/R/T until the player clicks
-      // the canvas. Focusing the tabbable canvas restores the document focus so
-      // the window-level keydown keeps firing — no manual click required.
+    /**
+     * Reclaim keyboard focus whenever we (re)enter active play. After a stage
+     * transition, an unpause, a recovery resume, or a fresh start the browser
+     * may have moved focus elsewhere (stage-clear overlay, the Alt menu, the
+     * address bar), which silently breaks Alt+S/R/T until the player clicks
+     * the canvas. Focusing the tabbable canvas restores the document focus so
+     * the window-level keydown keeps firing — no manual click required.
+     */
+    private updateStateTracking(): void {
       if (this.world.state === 'playing' && this.prevWorldState !== 'playing') {
         this.refocusGame()
       }
       this.prevWorldState = this.world.state
+    }
+
+    /**
+     * Reusable per-frame timing buffers for the Performance Observatory.
+     * Diagnostics-only state (never gameplay) — allocated once per GameLoop
+     * instance and reused every frame so the hot path stays allocation-free
+     * (AGENTS §14.1).
+     */
+    private _probe = {
+      active: false,
+      frameT0: 0,
+      simT0: 0,
+      simMs: 0,
+      renderT0: 0,
+      renderMs: 0,
+      uiT0: 0,
+      uiMs: 0,
+    }
+
+    /**
+     * The vsync rAF driver. Each named step owns one concern; execution ORDER
+     * is load-bearing for determinism (AGENTS §2.3) — do not reorder.
+     */
+    private loop = (time: number): void => {
+      if (!this.running) return
+
+      const dt = this.computeDelta(time)
+      this.beginPerfProbe()
+
+      this.handleFrameInput()
+      this.stepSimulation(dt)
+      this.stepRecovery(dt)
+      this.stepSnapshots(dt)
+      this.dispatchWorldEvents()
+      const rendered = this.stepRender(time, dt)
+      this.captureSnapshotThumbnails(rendered)
+      this.syncUI()
+      this.endFrameInputs()
+      this.samplePerformance(time)
+      this.updateStateTracking()
 
       this.scheduleFrame()
     }
