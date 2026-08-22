@@ -8,8 +8,8 @@ import { createDefaultStorage } from '../snapshot/storage'
 import { RecoveryController } from '../snapshot/RecoveryController'
 import { PresentationLayer } from '../presentation/PresentationLayer'
 import { AudioManager } from '../audio/AudioManager'
-import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
-import { THEMES, THEME_KEYS } from '../config/theme'
+import { DIFFICULTY_KEYS } from '../config/difficulty'
+import { THEME_KEYS } from '../config/theme'
 import { PERF_MODE_RENDER_FPS, SEED_HASH, P2_SEED_OFFSET } from '../constants'
 import type { GameSettings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
@@ -205,10 +205,8 @@ export class Game {
     const savedThemeIdx = THEME_KEYS.indexOf(this.settings.theme)
     if (savedThemeIdx >= 0) this.themeIndex = savedThemeIdx
 
-    this.world.difficultyKey = DIFFICULTY_KEYS[this.difficultyIndex]
-    this.world.difficulty = DIFFICULTIES[this.world.difficultyKey]
-    this.world.themeKey = THEME_KEYS[this.themeIndex]
-    this.world.theme = THEMES[this.world.themeKey]
+    this.world.selectDifficulty(DIFFICULTY_KEYS[this.difficultyIndex])
+    this.world.selectTheme(THEME_KEYS[this.themeIndex])
   }
 
   // ---- Lie-Back-Win-Mode: coop toggle ----
@@ -493,23 +491,7 @@ export class Game {
   }
 
   resetToMenu(): void {
-    this.world.state = 'menu'
-    this.world.player = null
-    this.world.tanks = []
-    this.world.bullets = []
-    this.world.powerUps = []
-    this.world.explosions = []
-    this.world.popups = []
-    this.world.spawnQueue = []
-    this.world.ui.recoveryCountdown = 0
-    this.world.ui.recoveryFading = false
-    // Lie-Back-Win-Mode: clean up coop state on return to menu.
-    this.world.coop = false
-    this.world.disablePlayer2()
-    this.world.score2 = 0
-    // 督战 (supervise) mode: clean up spectate state too.
-    this.world.spectate = false
-    this.world.spectateDual = false
+    this.world.resetToMenu()
     this.godInput = null
     this.godInput2 = null
     this.autoFireInput = null

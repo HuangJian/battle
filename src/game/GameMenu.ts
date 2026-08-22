@@ -5,8 +5,8 @@
 // orchestrator back-reference (`this.g`). Cross-slice entry points are
 // delegated on Game itself.
 // ================================================================
-import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
-import { THEMES, THEME_KEYS } from '../config/theme'
+import { DIFFICULTY_KEYS } from '../config/difficulty'
+import { THEME_KEYS } from '../config/theme'
 import { STAGES } from '../config/stages'
 import { LOW_POWER_STATES, PERF_MODE_RENDER_FPS } from '../constants'
 import { i18n, t, AVAILABLE_LOCALES } from '../i18n'
@@ -94,13 +94,11 @@ export class MenuController {
       if (w.ui.menuCursor === off) {
         this.g.difficultyIndex =
           (this.g.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
-        w.difficultyKey = DIFFICULTY_KEYS[this.g.difficultyIndex]
-        w.difficulty = DIFFICULTIES[w.difficultyKey]
+        w.selectDifficulty(DIFFICULTY_KEYS[this.g.difficultyIndex])
         changed = true
       } else if (w.ui.menuCursor === off + 1) {
         this.g.themeIndex = (this.g.themeIndex + dir) % THEME_KEYS.length
-        w.themeKey = THEME_KEYS[this.g.themeIndex]
-        w.theme = THEMES[w.themeKey]
+        w.selectTheme(THEME_KEYS[this.g.themeIndex])
         changed = true
       } else if (w.ui.menuCursor === off + 2) {
         // LANGUAGE row — cycle to the next available locale.
@@ -126,8 +124,7 @@ export class MenuController {
     // Theme shortcut (Alt+T by default — see KeyBindings)
     if (this.g.input.isThemePressed()) {
       this.g.themeIndex = (this.g.themeIndex + 1) % THEME_KEYS.length
-      w.themeKey = THEME_KEYS[this.g.themeIndex]
-      w.theme = THEMES[w.themeKey]
+      w.selectTheme(THEME_KEYS[this.g.themeIndex])
       w.ui.menuCursor = off + 1
       this.applyMenuPreview()
       this.g.audio.init()
@@ -198,8 +195,7 @@ export class MenuController {
     const idx = DIFFICULTY_KEYS.indexOf(key)
     if (idx < 0) return
     this.g.difficultyIndex = idx
-    this.g.world.difficultyKey = DIFFICULTY_KEYS[idx]
-    this.g.world.difficulty = DIFFICULTIES[this.g.world.difficultyKey]
+    this.g.world.selectDifficulty(DIFFICULTY_KEYS[idx])
     this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 1 : 0
     this.applyMenuPreview()
     this.g.audio.init()
@@ -214,8 +210,7 @@ export class MenuController {
     const idx = THEME_KEYS.indexOf(key)
     if (idx < 0) return
     this.g.themeIndex = idx
-    this.g.world.themeKey = THEME_KEYS[idx]
-    this.g.world.theme = THEMES[this.g.world.themeKey]
+    this.g.world.selectTheme(THEME_KEYS[idx])
     this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 2 : 1
     this.applyMenuPreview()
     this.g.audio.init()
@@ -320,8 +315,7 @@ export class MenuController {
    */
   applyThemeAndRepaint(index: number, persist: boolean): void {
     this.g.themeIndex = index
-    this.g.world.themeKey = THEME_KEYS[index]
-    this.g.world.theme = THEMES[this.g.world.themeKey]
+    this.g.world.selectTheme(THEME_KEYS[index])
     this.g.presentation.markNeedsRender()
     this.g.audio.init()
     this.g.audio.resume()

@@ -348,6 +348,50 @@ export class World {
 
   // ---- Lifecycle ----
 
+  /**
+   * Menu-time difficulty selection (menu rows, dropdowns, saved-settings
+   * bootstrap). Single write path for `difficultyKey`/`difficulty` outside an
+   * actual game start — previously hand-rolled at five sites (One-Author, §1.4).
+   */
+  selectDifficulty(key: string): void {
+    this.difficultyKey = key
+    this.difficulty = DIFFICULTIES[key] ?? DIFFICULTIES['classic']
+  }
+
+  /** Menu-time theme selection — single write path for `themeKey`/`theme`. */
+  selectTheme(key: string): void {
+    this.themeKey = key
+    this.theme = THEMES[key] ?? THEMES[DEFAULT_THEME]
+  }
+
+  /**
+   * Tear the current game down and return to the start menu: clears all
+   * entities and mode flags, resets recovery overlay state, zeroes P2 score.
+   * The single sanctioned lifecycle transition back to 'menu' — Game's
+   * resetToMenu() handles only its own presentation/input concerns around
+   * this call. (Mirrors startGame/loadStage: lifecycle transitions are World
+   * methods; per-tick gameplay mutation stays Simulation-only.)
+   */
+  resetToMenu(): void {
+    this.state = 'menu'
+    this.player = null
+    this.tanks = []
+    this.bullets = []
+    this.powerUps = []
+    this.explosions = []
+    this.popups = []
+    this.spawnQueue = []
+    this.ui.recoveryCountdown = 0
+    this.ui.recoveryFading = false
+    // Lie-Back-Win-Mode: clean up coop state on return to menu.
+    this.coop = false
+    this.disablePlayer2()
+    this.score2 = 0
+    // 督战 (supervise) mode: clean up spectate state too.
+    this.spectate = false
+    this.spectateDual = false
+  }
+
   startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
     this.difficultyKey = difficultyKey
     this.rules = RULES[difficultyKey] ?? DEFAULT_RULES
