@@ -2,6 +2,9 @@ import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
 import type { SpriteLibrary } from './SpriteLibrary'
 import type { SpriteCache } from './SpriteCache'
+import { TerrainSpriteSlice } from './SpriteArtistTerrain'
+import { TankSpriteSlice } from './SpriteArtistTanks'
+import { EffectSpriteSlice } from './SpriteArtistEffects'
 
 /**
  * Draw a single water tile (procedural, theme-aware, phase-animated) into `ctx`
@@ -375,16 +378,25 @@ export class SpriteArtistCore {
    * ``${fontSize}:${text}`` — that template string was 1 allocation per
    * power-up per frame.
    */
-  protected digitWidthCache: Record<number, Record<string, number>> = {}
+  digitWidthCache: Record<number, Record<string, number>> = {}
 
   /**
    * Cached `ctx.font` strings per `fontSize` (P0 GC fix). Power-ups are always
    * CELL-sized, so `fontSize` is constant → the font string is computed once
    * and reused. Avoids a template-string allocation per power-up per frame.
    */
-  protected fontStringCache: Record<number, string> = {}
+  fontStringCache: Record<number, string> = {}
+
+  // ---- Subsystem slices (§1.1 composition; back-references only) ----
+  private readonly spriteTerrainSlice: TerrainSpriteSlice
+  private readonly tankSpriteSlice: TankSpriteSlice
+  private readonly spriteEffectSlice: EffectSpriteSlice
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
+    // Slices take a back-reference; bodies never run during construction.
+    this.spriteTerrainSlice = new TerrainSpriteSlice(this)
+    this.tankSpriteSlice = new TankSpriteSlice(this)
+    this.spriteEffectSlice = new EffectSpriteSlice(this)
     this.ctx = ctx
     this.theme = theme
   }
@@ -407,7 +419,7 @@ export class SpriteArtistCore {
    * Returns false when the sprite is not loaded, so callers can fall back
    * to the procedural drawing.
    */
-  protected drawSvgCentered(
+  drawSvgCentered(
     key: string,
     x: number,
     y: number,
@@ -446,7 +458,7 @@ export class SpriteArtistCore {
 
   // ---- Terrain (SpriteArtistTerrainMixin) ----
   drawBrick(_x: number, _y: number, _size: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawBrick(_x, _y, _size)
   }
   drawSteel(
     _x: number,
@@ -457,13 +469,13 @@ export class SpriteArtistCore {
     _s = false,
     _w = false,
   ): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawSteel(_x, _y, _size, _n, _e, _s, _w)
   }
   drawWater(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawWater(_x, _y, _size, _frame)
   }
   drawForest(_x: number, _y: number, _size: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawForest(_x, _y, _size)
   }
   drawIce(
     _x: number,
@@ -474,10 +486,10 @@ export class SpriteArtistCore {
     _s = false,
     _w = false,
   ): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawIce(_x, _y, _size, _n, _e, _s, _w)
   }
   drawBase(_x: number, _y: number, _size: number, _destroyed: boolean, _damage = 0): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+    this.spriteTerrainSlice.drawBase(_x, _y, _size, _destroyed, _damage)
   }
   // ---- Tanks (SpriteArtistTanksMixin) ----
   drawTank(
@@ -490,7 +502,7 @@ export class SpriteArtistCore {
     _animFrame: number,
     _level = 0,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawTank(_x, _y, _size, _dir, _bodyColor, _turretColor, _animFrame, _level)
   }
   drawPlayerTank(
     _x: number,
@@ -500,7 +512,7 @@ export class SpriteArtistCore {
     _level: number,
     _animFrame: number,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawPlayerTank(_x, _y, _size, _dir, _level, _animFrame)
   }
   drawPlayer2Tank(
     _x: number,
@@ -510,7 +522,7 @@ export class SpriteArtistCore {
     _level: number,
     _animFrame: number,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawPlayer2Tank(_x, _y, _size, _dir, _level, _animFrame)
   }
   drawEnemyTank(
     _x: number,
@@ -524,7 +536,18 @@ export class SpriteArtistCore {
     _hitStage = 0,
     _isCommander = false,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawEnemyTank(
+      _x,
+      _y,
+      _size,
+      _dir,
+      _kind,
+      _animFrame,
+      _flash,
+      _hp,
+      _hitStage,
+      _isCommander,
+    )
   }
   drawAllyTank(
     _x: number,
@@ -534,17 +557,17 @@ export class SpriteArtistCore {
     _animFrame: number,
     _isDecoy = false,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawAllyTank(_x, _y, _size, _dir, _animFrame, _isDecoy)
   }
   drawAllyAura(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawAllyAura(_x, _y, _size, _frame)
   }
   drawInsignia(_x: number, _y: number, _size: number, _level: string, _isCommander = false): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawInsignia(_x, _y, _size, _level, _isCommander)
   }
   // ---- Effects (SpriteArtistEffectsMixin) ----
   drawBullet(_x: number, _y: number, _size: number, _dir: Direction): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawBullet(_x, _y, _size, _dir)
   }
   drawPowerUp(
     _x: number,
@@ -555,13 +578,13 @@ export class SpriteArtistCore {
     _lifeTimer?: number,
     _maxLife?: number,
   ): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawPowerUp(_x, _y, _size, _type, _frame, _lifeTimer, _maxLife)
   }
   drawSpawn(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawSpawn(_x, _y, _size, _frame)
   }
   drawShield(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawShield(_x, _y, _size, _frame)
   }
   drawExplosion(
     _x: number,
@@ -570,12 +593,12 @@ export class SpriteArtistCore {
     _progress: number,
     _kind: 'small' | 'big',
   ): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawExplosion(_x, _y, _size, _progress, _kind)
   }
   drawHpLevelAura(_x: number, _y: number, _size: number, _hpLevel: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawHpLevelAura(_x, _y, _size, _hpLevel, _frame)
   }
   drawCommanderAura(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawCommanderAura(_x, _y, _size, _frame)
   }
 }

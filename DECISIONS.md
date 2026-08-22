@@ -1736,3 +1736,24 @@ back-reference（`g: Game`）+ 27 个一行委托器取代 throw stubs。GameCor
 
 **Implications:** 新增跨切片入口=在对应控制器加方法+在 Game 加委托器；main/harness 的
 公共 API（start/stop/world/fps/requestFrame）不变。
+
+## 256. §1.1 Mixin→组合：GameRenderer + SpriteArtist（41 stubs 归零） (STATUS: 已实施)
+
+**Decision:** 六条渲染 mixin 链转换为切片类：TerrainRenderSlice / EntityRenderSlice /
+EffectsRenderSlice（挂 GameRendererCore）、TerrainSpriteSlice / TankSpriteSlice /
+EffectSpriteSlice（挂 SpriteArtistCore）。Core 在自身构造器中创建切片（back-ref 仅存储），
+原 40 个 throw stub 变为真实委托器；GameRenderer/SpriteArtist 退化为继承薄壳 + 模块助手
+再导出。至此全仓 mixin 归零：Simulation(21) + Game(27) + Renderer/Artist(41) = 89 stubs → 0。
+
+**Rationale:**
+- 与 §254/§255 同法。切片经 r.<member> 访问宿主，宿主经委托器进入切片——双向显式。
+- Core 的 protected 成员转公开（切片横切访问）；mixin 级字段（如 Terrain 的 _nmask 缓冲）
+  随切片迁移保持私有归属。
+- codemod 三次迭代教训入档：(a) 正则跨方法匹配会产生垃圾签名——改为"逐 throw 行回溯方法头"
+  的行状态机；(b) 方法名含数字（drawPlayer2Tank）时 [a-zA-Z_]+ 不匹配——字符类需含 0-9；
+  (c) 重建委托器前必须截断已推送的原签名行。自建"无定义引用"检查器扫全部切片确认零漏改。
+- 验证：tsc/oxlint/oxfmt/vite build 全绿 + 1411 tests 全过；渲染运行时行为由 vite build +
+  结构类型锁定，视觉回归由人工 playtest 兜底（AGENTS 规范：渲染层以构建门禁验收）。
+
+**Implications:** plan/refactor.agy.md §1.1 全部完成。新增渲染子系统=新切片类+Core 委托器；
+metrics 表目标"Mixin stub methods: 0"达成。
