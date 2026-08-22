@@ -1,10 +1,12 @@
 // ================================================================
-// UUID generator — shared between ReplayManager and file parser.
+// UUID generator — shared by SnapshotManager, ReplayManager and the
+// replay file parser.
 //
 // crypto.randomUUID() requires a secure context (HTTPS). The Vite
 // dev server on localhost qualifies, but HTTP LAN access and some
 // embedded webviews do not. The Math.random fallback keeps import
-// working in all environments.
+// working in all environments. The fallback never feeds the
+// Simulation — world.rng governs all gameplay randomness (AGENTS §2.3).
 // ================================================================
 
 /** Generate a UUID (crypto.randomUUID when available, fallback otherwise). */

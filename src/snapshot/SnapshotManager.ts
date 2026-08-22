@@ -18,22 +18,7 @@ import {
 } from './config'
 import { STAGES } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
-
-/** Generate a UUID (crypto.randomUUID when available, fallback otherwise). */
-function generateUUID(): string {
-  const c = globalThis.crypto as Crypto | undefined
-  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
-  // RFC4122-ish fallback — meta layer only, never feeds the Simulation
-  // (world.rng governs all gameplay randomness; AGENTS §2.3).
-  let out = ''
-  const hex = '0123456789abcdef'
-  for (let i = 0; i < 36; i++) {
-    if (i === 8 || i === 13 || i === 18 || i === 23) out += '-'
-    else if (i === 14) out += '4'
-    else out += hex[Math.floor(Math.random() * 16)]
-  }
-  return out
-}
+import { generateUUID } from '../utils/uuid'
 
 export interface SnapshotManagerOptions {
   /** Retention policy table — defaults to RETENTION_POLICIES (config.ts). */

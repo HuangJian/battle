@@ -1467,3 +1467,19 @@ World 字段（防改名后陈旧序列化）。已验证守卫有效性——�
 
 **Implications:** 给 World/Tank 加字段时该测试是强制关卡；Tank 字段由 cloneTank 的展开运算符
 天然覆盖，不在本守卫范围。
+
+## 241. §3.2 快照/回放基础设施去重 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
+
+**Decision:** 抽出 `src/utils/idb-store.ts`（泛型 `IndexedDBStore<T>`，封装 open/tx/request
+样板）与 `src/utils/uuid.ts`（唯一 `generateUUID`）。`snapshot/storage.ts` 与
+`replay/storage.ts` 变成薄包装（各自保留独立 DB 名/存储名与领域接口）；删除
+`replay/uuid.ts`，`SnapshotManager` 内联副本一并移除。
+
+**Rationale:**
+- plan §3.2：两份 IndexedDB 包装逐行相同、两份 UUID 实现语义相同——改一处漏一处的经典温床。
+- 领域接口（SnapshotStorageBackend / ReplayStorageBackend）与 DB 命名不变 → 消费方零改动，
+  持久化布局不变。
+- uuid 的 Math.random 回退仅用于元层 ID，不进模拟层，符合 AGENTS §2.3。
+
+**Implications:** 新持久化域（如设置云备份）直接复用 IndexedDBStore；generateUUID 只允许从
+utils/uuid 导入。

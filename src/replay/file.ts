@@ -4,7 +4,7 @@ import { GAME_VERSION } from '../snapshot/config'
 import { FRAME_SCHEMA_VERSION, isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf, packFrames, unpackFrames } from './pack'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
-import { generateUUID } from './uuid'
+import { generateUUID } from '../utils/uuid'
 
 // ================================================================
 // Replay File Format — .replay envelope serialization

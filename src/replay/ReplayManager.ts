@@ -13,7 +13,7 @@ import { REPLAY_RETENTION_POLICIES, REPLAY_FAVORITE_LIMIT } from './config'
 import { GAME_VERSION } from '../snapshot/config'
 import { isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf } from './pack'
-import { generateUUID } from './uuid'
+import { generateUUID } from '../utils/uuid'
 
 export interface ReplayManagerOptions {
   backend?: ReplayStorageBackend | null

@@ -1,11 +1,13 @@
 import type { Replay, ReplayID, ReplayStorageBackend } from './types'
+import { IndexedDBStore } from '../utils/idb-store'
 
 // ================================================================
 // IndexedDB persistence backend for replays
 // (plan/replay.md §10.1, §10.2)
 //
 // Mirrors the snapshot storage pattern — separate database to avoid
-// interfering with snapshot storage.
+// interfering with snapshot storage. The open/tx/request plumbing
+// lives in utils/idb-store.ts (shared with the snapshot backend).
 // ================================================================
 
 const DB_NAME = 'bc-replays'
@@ -13,50 +15,18 @@ const DB_VERSION = 1
 const STORE = 'replays'
 
 export class IndexedDBReplayStorage implements ReplayStorageBackend {
-  private dbPromise: Promise<IDBDatabase> | null = null
+  private store = new IndexedDBStore<Replay>(DB_NAME, DB_VERSION, STORE)
 
-  private open(): Promise<IDBDatabase> {
-    if (this.dbPromise) return this.dbPromise
-    this.dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION)
-      req.onupgradeneeded = () => {
-        const db = req.result
-        if (!db.objectStoreNames.contains(STORE)) {
-          db.createObjectStore(STORE, { keyPath: 'id' })
-        }
-      }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
-    return this.dbPromise
+  save(replay: Replay): Promise<void> {
+    return this.store.put(replay)
   }
 
-  private async tx(mode: IDBTransactionMode): Promise<IDBObjectStore> {
-    const db = await this.open()
-    return db.transaction(STORE, mode).objectStore(STORE)
+  delete(id: ReplayID): Promise<void> {
+    return this.store.delete(id)
   }
 
-  private request<T>(req: IDBRequest<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
-    })
-  }
-
-  async save(replay: Replay): Promise<void> {
-    const store = await this.tx('readwrite')
-    await this.request(store.put(replay))
-  }
-
-  async delete(id: ReplayID): Promise<void> {
-    const store = await this.tx('readwrite')
-    await this.request(store.delete(id))
-  }
-
-  async loadAll(): Promise<Replay[]> {
-    const store = await this.tx('readonly')
-    const all = await this.request(store.getAll())
-    return all as Replay[]
+  loadAll(): Promise<Replay[]> {
+    return this.store.getAll()
   }
 }
 
