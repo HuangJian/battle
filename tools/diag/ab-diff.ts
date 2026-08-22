@@ -16,32 +16,11 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { RNG } from '../../src/utils/RNG'
 import { START_LIVES } from '../../src/constants'
-
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : undefined
-}
+import { arg, parseSeeds, parseStages } from '../lib/cli'
 
 const difficulty = arg('difficulty') ?? 'hard'
-const seeds = parseSeeds(arg('seeds'))
-const stageSpec = arg('stages') ?? 'all'
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n) - 1) // CLI is 1-based (1..35); internal index is 0-based
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
-
-function parseSeeds(spec: string | undefined): number[] {
-  if (!spec) return Array.from({ length: 60 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  return s.split(',').map(Number)
-}
+const seeds = parseSeeds(arg('seeds'), 60)
+const stageIdxs = parseStages(arg('stages'))
 
 function runOnce(stageIdx: number, seed: number, suicideOn: boolean): boolean {
   const world = new World()

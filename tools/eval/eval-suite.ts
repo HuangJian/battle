@@ -30,6 +30,7 @@ import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask, SimTaskResult } from '../sim/sim-worker'
 import { runSimulation } from '../sim/simulation-runner'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
+import { arg, flag } from '../lib/cli'
 import {
   scoreRun,
   aggregateStage,
@@ -59,13 +60,6 @@ const DEFAULT_MAX_TICKS = 18000
 // CLI plumbing
 // ============================================================
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback
-}
-function flag(name: string): boolean {
-  return process.argv.includes(`--${name}`)
-}
 
 /**
  * Accept any of the shapes our tooling writes: a bare GodAIParams object, an

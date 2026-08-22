@@ -26,6 +26,7 @@ import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import type { ThreatLedgerRun } from '../sim/simulation-runner'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
+import { arg, parseSeeds } from '../lib/cli'
 import {
   classifyFailure,
   aggregateClassifications,
@@ -34,30 +35,11 @@ import {
   type FailureClass,
 } from './failure-classifier'
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
-
-function parseSeeds(spec: string | undefined): number[] {
-  if (!spec) return Array.from({ length: 60 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    return Array.from({ length: n }, (_, i) => i + 1)
-  }
-  return s.split(',').map(Number)
-}
-
 const difficulties = (arg('difficulty') ?? 'hard')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
-const seeds = parseSeeds(arg('seeds'))
+const seeds = parseSeeds(arg('seeds'), 60)
 const stageSpec = arg('stages') ?? 'all'
 let stageIdxs: number[]
 try {

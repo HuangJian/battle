@@ -13,18 +13,19 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { RNG } from '../../src/utils/RNG'
 import { START_LIVES } from '../../src/constants'
+import { parseStages } from '../lib/cli'
 
 const difficulty = process.argv[2] ?? 'classic'
 const seedCount = parseInt(process.argv[3] ?? '60', 10)
 const stageSpec = process.argv[4] ?? 'all'
 
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n) - 1) // CLI is 1-based (1..35); internal index is 0-based
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
+let stageIdxs: number[]
+try {
+  stageIdxs = parseStages(stageSpec)
+} catch (e) {
+  console.error((e as Error).message)
+  process.exit(1)
+}
 
 let totalFire = 0
 let totalFireRuns = 0

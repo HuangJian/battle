@@ -45,26 +45,7 @@ import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import type { RunForensics } from '../sim/simulation-runner'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
-
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
-
-function parseSeeds(spec: string | undefined): number[] {
-  // "1-60" range, "60" count (seeds 1..N), or "1,3,5" list.
-  if (!spec) return Array.from({ length: 120 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    return Array.from({ length: n }, (_, i) => i + 1)
-  }
-  return s.split(',').map(Number)
-}
+import { arg, parseSeeds } from '../lib/cli'
 
 const difficulties = (arg('difficulty') ?? 'hard,chaos')
   .split(',')

@@ -17,6 +17,7 @@
  */
 import { STAGES } from '../../src/config/stages'
 import { WorkerPool, defaultWorkerCount } from '../lib/worker-pool'
+import { arg, parseStages } from '../lib/cli'
 import type { BaseLossRecord, RunResult } from './base-loss-run'
 import type { ForensicTask, ForensicTaskResult } from './base-loss-worker'
 
@@ -326,21 +327,17 @@ function reportDifficulty(
 // Main
 // ============================================================
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
-
 async function main(): Promise<void> {
   const seedCount = Number(arg('seeds', '120'))
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const difficulties = (arg('difficulty', 'hard,chaos') as string).split(',').map((s) => s.trim())
-  const stageIdxs = arg('stages')
-    ? arg('stages')!
-        .split(',')
-        .map((s) => Number(s.trim()) - 1)
-        .filter((i) => i >= 0 && i < STAGES.length)
-    : STAGES.map((_, i) => i)
+  let stageIdxs: number[]
+  try {
+    stageIdxs = parseStages(arg('stages'))
+  } catch (e) {
+    console.error((e as Error).message)
+    process.exit(1)
+  }
   const maxTicks = Number(arg('max-ticks', '36000'))
   const jsonPath = arg('json')
 

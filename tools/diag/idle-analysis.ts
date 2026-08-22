@@ -33,6 +33,7 @@ import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import type { Direction } from '../../src/constants'
 import type { StageData } from '../../src/types'
+import { arg, parseSeeds, parseStages } from '../lib/cli'
 
 // ============================================================
 // Constants
@@ -403,33 +404,6 @@ function makeAlert(
 // CLI
 // ============================================================
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
-
-function parseSeeds(spec: string | undefined): number[] {
-  if (!spec) return Array.from({ length: 120 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    return Array.from({ length: n }, (_, i) => i + 1)
-  }
-  return s.split(',').map(Number)
-}
-
-function parseStages(spec: string | undefined): number[] {
-  if (!spec || spec === 'all') return STAGES.map((_, i) => i)
-  if (/^\d+-\d+$/.test(spec)) {
-    const [lo, hi] = spec.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo - 1 + i)
-  }
-  return spec.split(',').map((n) => Number(n.trim()) - 1)
-}
 
 async function main() {
   const difficulty = arg('difficulty', 'hard')!
