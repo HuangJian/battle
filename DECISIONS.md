@@ -1715,3 +1715,24 @@ togglePause。SimulationCore 与 21 个 throw stub 删除。测试白盒入口�
 
 **Implications:** Simulation 公共 API 不变（tick/requestX/togglePause/input/input2/systems）；
 给 World 加系统逻辑时新建 System 类而非 mixin。Game 链（26 stubs）同法待办。
+
+## 255. §1.1 Mixin→组合：Game（27 stubs 归零） (STATUS: 已实施, plan Phase 3)
+
+**Decision:** 四条 Game mixin 链转换为控制器类：LoopController（rAF 循环+事件处理）、
+MenuController（菜单/暂停输入+主题动作）、SnapshotController（快照框架+恢复流）、
+ReplayController（录制/回放/浏览器/导出）。`Game` = 原 GameCore 字段与方法 + 控制器
+back-reference（`g: Game`）+ 27 个一行委托器取代 throw stubs。GameCore.ts 删除。
+
+**Rationale:**
+- 与 Simulation 同法（§254）；差异点：Game 的 mixin 是"同一控制器的功能切片"而非独立系统
+  ——共享几十个字段，故用 back-ref 而非依赖注册表；protected 成员转公开供 g.* 访问。
+- codemod 按文件 own-member 集合区分 this.x（本切片）与 this.g.x（跨切片）；发现并修复
+  前缀碰撞漏改一处（this.startRecovery 因 own 含 start 被保护）。自建"无定义引用"检查器
+  扫四个文件确认归零。
+- 验证：tsc + oxlint + vite build 通过；bun test 全套绿。注意 bun test 不构造 Game——
+  按 AGENTS 规范以构建门禁为 UI/编排层的验收（运行时行为由人工 playtest 兜底，结构由
+  类型系统锁定）。
+- 构造顺序安全：控制器仅存 back-ref，方法体不在构造期执行。
+
+**Implications:** 新增跨切片入口=在对应控制器加方法+在 Game 加委托器；main/harness 的
+公共 API（start/stop/world/fps/requestFrame）不变。
