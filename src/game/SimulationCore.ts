@@ -168,12 +168,12 @@ export class SimulationCore {
     }
 
     // Run statistics — total play time advances only while playing.
-    w.playTimeMs += 1000 / 60
+    w.playTimeMs += TICK_MS
 
     // Update timers
-    if (w.freezeTimer > 0) w.freezeTimer -= 1000 / 60
-    if (w.empTimer > 0) w.empTimer -= 1000 / 60
-    if (w.spawnTimer > 0) w.spawnTimer -= 1000 / 60
+    if (w.freezeTimer > 0) w.freezeTimer -= TICK_MS
+    if (w.empTimer > 0) w.empTimer -= TICK_MS
+    if (w.spawnTimer > 0) w.spawnTimer -= TICK_MS
     if (w.pickupWindowTimer > 0) w.pickupWindowTimer -= TICK_MS
 
     // Update mine arm timers (indexed loop — AGENTS §14.1)
@@ -184,7 +184,7 @@ export class SimulationCore {
       for (let mi = 0; mi < armMines.length; mi++) {
         const mine = armMines[mi]
         if (mine.alive && mine.armTimer > 0) {
-          mine.armTimer -= 1000 / 60
+          mine.armTimer -= TICK_MS
           if (mine.armTimer < 0) mine.armTimer = 0
         }
       }
@@ -192,11 +192,11 @@ export class SimulationCore {
 
     // Update player boat timers (both players)
     if (w.player && w.player.boatTimer && w.player.boatTimer > 0) {
-      w.player.boatTimer -= 1000 / 60
+      w.player.boatTimer -= TICK_MS
       if (w.player.boatTimer < 0) w.player.boatTimer = 0
     }
     if (w.player2 && w.player2.boatTimer && w.player2.boatTimer > 0) {
-      w.player2.boatTimer -= 1000 / 60
+      w.player2.boatTimer -= TICK_MS
       if (w.player2.boatTimer < 0) w.player2.boatTimer = 0
     }
 

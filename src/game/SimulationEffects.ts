@@ -3,10 +3,14 @@ import {
   TANK,
   BULLET,
   FIELD,
+  TICK_MS,
   RESPAWN_SHIELD_MS,
   POWERUP_PICKUP_WINDOW_MS,
   POWERUP_PICKUP_END_DELAY_MS,
   STAGE_CLEAR_DELAY_MS,
+  GAME_OVER_TIMER_MS,
+  SMALL_EXPLOSION_MS,
+  BIG_EXPLOSION_MS,
 } from '../constants'
 import { stageClearScore } from '../config/score'
 import { genId } from './World'
@@ -47,7 +51,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
     protected createExplosion(x: number, y: number, kind: 'small' | 'big'): void {
       const w = this.world
       const size = kind === 'big' ? TANK : BULLET * 2
-      const maxTimer = kind === 'big' ? 500 : 200
+      const maxTimer = kind === 'big' ? BIG_EXPLOSION_MS : SMALL_EXPLOSION_MS
       w.addExplosion({
         id: genId(),
         x,
@@ -68,7 +72,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
       // have no explosions expiring, so this is a precise signal rather than
       // always-on).
       const exps = w.explosions
-      const step = 1000 / 60
+      const step = TICK_MS
       for (let i = 0; i < exps.length; i++) {
         const t = exps[i].timer - step
         exps[i].timer = t
@@ -79,7 +83,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
     protected updatePopups(): void {
       const w = this.world
       const popups = w.popups
-      const step = 1000 / 60
+      const step = TICK_MS
       for (let i = 0; i < popups.length; i++) {
         const t = popups[i].timer - step
         popups[i].timer = t
@@ -97,7 +101,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
       // Base destroyed = game over
       if (w.tileMap.isBaseDestroyed()) {
         w.state = 'gameover'
-        w.gameOverTimer = 3000
+        w.gameOverTimer = GAME_OVER_TIMER_MS
         // Lie-Back-Win Q4 + 督战: coop/spectate runs never save high scores.
         if (!w.coop && !w.spectate) w.saveHighScore()
         this.createExplosion(FIELD / 2, FIELD - CELL * 2, 'big')
@@ -163,14 +167,14 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
         const bothDead = w.lives <= 0 && !w.player?.alive && w.lives2 <= 0 && !w.player2?.alive
         if (bothDead) {
           w.state = 'gameover'
-          w.gameOverTimer = 3000
+          w.gameOverTimer = GAME_OVER_TIMER_MS
           return
         }
       } else {
         // Single-player game over (original logic)
         if (w.lives <= 0) {
           w.state = 'gameover'
-          w.gameOverTimer = 3000
+          w.gameOverTimer = GAME_OVER_TIMER_MS
           // Lie-Back-Win Q4 + 督战: coop/spectate runs never save high scores.
           if (!w.coop && !w.spectate) w.saveHighScore()
           return
@@ -209,7 +213,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
             x: FIELD / 2 - TANK / 2,
             y: FIELD / 2 - TANK,
             text: 'BONUS TIME!',
-            timer: 1800,
+            timer: 1800, // bonus-window banner outlives kill popups on purpose
           })
           return
         }
@@ -233,7 +237,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
 
     protected updateStageClear(): void {
       const w = this.world
-      w.stageClearTimer -= 1000 / 60
+      w.stageClearTimer -= TICK_MS
       if (w.stageClearTimer <= 0) {
         w.loadStage(w.stageIndex + 1)
       }
@@ -243,7 +247,7 @@ export function SimulationEffectsMixin<TBase extends SimulationConstructor<Simul
 
     protected updateGameOver(): void {
       const w = this.world
-      w.gameOverTimer -= 1000 / 60
+      w.gameOverTimer -= TICK_MS
       this.updateExplosions()
       this.updatePopups()
     }

@@ -9,6 +9,9 @@ import {
   ICE_ACCEL_TRACTION,
   ICE_DECEL_TRACTION,
   STAR_SHIELD_GRACE_MS,
+  TICK_MS,
+  TURN_SENTINEL_MS,
+  POPUP_DURATION_MS,
   BASE_POS,
 } from '../constants'
 import { resolveProfile, profileToStats, PLAYER_PROGRESSION } from '../config/combat'
@@ -81,8 +84,8 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
         // God AI's dodgeOscillationCounterFire unnecessary in practice.
         const turnCd = this.world.rules?.turnCooldownMs ?? 0
         if (turnCd > 0 && tank.dir !== tank.prevMoveDir) {
-          const now = w.frame * (1000 / 60)
-          if (now - (tank.lastTurnMs ?? -9999) < turnCd) {
+          const now = w.frame  * TICK_MS
+          if (now - (tank.lastTurnMs ?? TURN_SENTINEL_MS) < turnCd) {
             // Cooldown active — the requested turn is deferred. Revert to
             // the previous movement direction AND halt: at turnCooldownMs
             // ≥160ms the tank would otherwise keep drifting along the old
@@ -243,7 +246,7 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
 
     protected tryFire(tank: Tank): void {
       const w = this.world
-      const now = w.frame * (1000 / 60)
+      const now = w.frame  * TICK_MS
 
       // EMP silencer: when empTimer > 0, ENEMY tanks cannot fire. Friendly
       // 天降神兵 guards must keep firing — they are allies, not hostiles, so the
@@ -618,7 +621,7 @@ export function SimulationCombatMixin<TBase extends SimulationConstructor<Simula
               x: tank.x,
               y: tank.y,
               text: String(gained),
-              timer: 1500,
+              timer: POPUP_DURATION_MS,
             })
             w.pushEvent({ type: 'tank_destroyed', tank, by: 'player', byId: bullet.ownerId })
 

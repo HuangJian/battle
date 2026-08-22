@@ -1,3 +1,4 @@
+import { TICK_MS } from '../constants'
 import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { FRAME_SCHEMA_VERSION, isSupportedFrameSchema } from './config'
@@ -236,7 +237,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   // Rebuild Replay object
   const metadata = (replay.metadata ?? {}) as Partial<ReplayMetadata>
   const type: ReplayType = ((env.sim as SimEnvelope | undefined)?.status as ReplayType) ?? 'clear'
-  const durationMs = (replay.totalTicks as number) * (1000 / 60)
+  const durationMs = (replay.totalTicks as number)  * TICK_MS
 
   const built: Replay = {
     id: generateUUID(),

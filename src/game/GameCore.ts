@@ -11,7 +11,7 @@ import { PresentationLayer } from '../presentation/PresentationLayer'
 import { AudioManager } from '../audio/AudioManager'
 import { DIFFICULTIES, DIFFICULTY_KEYS } from '../config/difficulty'
 import { THEMES, THEME_KEYS } from '../config/theme'
-import { PERF_MODE_RENDER_FPS } from '../constants'
+import { PERF_MODE_RENDER_FPS, SEED_HASH, P2_SEED_OFFSET } from '../constants'
 import type { GameSettings } from '../types'
 import type { GameSnapshot } from '../snapshot/types'
 import { InputRecorder } from '../replay/InputRecorder'
@@ -246,7 +246,7 @@ export class GameCore {
       w.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
       w.spawnPlayer2()
       // Wire AI inputs
-      const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+      const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
       this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
       this.godInput.reset()
       this.autoFireInput = new AutoFireInput(this.input)
@@ -343,7 +343,7 @@ export class GameCore {
     // Apply immediately since we are paused/menu (no tick will fire).
     w.spectate = true
     // God AI drives player1 (default controlledTank = `w => w.player`).
-    const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+    const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
     this.godInput = new GodAIInput(w, undefined, rng)
     this.godInput.reset()
     this.autoFireInput = null
@@ -372,7 +372,7 @@ export class GameCore {
       w.spawnPlayer2()
     }
     if (!this.godInput2) {
-      const rng2 = new RNG((w.seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+      const rng2 = new RNG((w.seed ^ SEED_HASH ^ P2_SEED_OFFSET) >>> 0)
       this.godInput2 = new GodAIInput(w, undefined, rng2, (world) => world.player2)
       this.godInput2.reset()
     }
@@ -480,13 +480,13 @@ export class GameCore {
   protected rearmSpectateGodInput(): void {
     const w = this.world
     if (!w.spectate || this.godInput || !w.player) return
-    const rng = new RNG((w.seed ^ 0x9e3779b9) >>> 0)
+    const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
     this.godInput = new GodAIInput(w, undefined, rng)
     this.godInput.reset()
     this.autoFireInput = null
     // 督战双玩家: re-arm second God AI for player2
     if (w.spectateDual && w.player2 && !this.godInput2) {
-      const rng2 = new RNG((w.seed ^ 0x9e3779b9 ^ 0xdeadbeef) >>> 0)
+      const rng2 = new RNG((w.seed ^ SEED_HASH ^ P2_SEED_OFFSET) >>> 0)
       this.godInput2 = new GodAIInput(w, undefined, rng2, (world) => world.player2)
       this.godInput2.reset()
       this.audio.player2Id = w.player2.id

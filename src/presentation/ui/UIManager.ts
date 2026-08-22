@@ -1,3 +1,4 @@
+import { TICK_MS } from '../../constants'
 import type { World } from '../../game/World'
 import type { ThemeColors, KeyBindings } from '../../types'
 import { DEFAULT_KEYS, eventToBinding, isModifierCode, parseBinding } from '../../game/Input'
@@ -1038,7 +1039,7 @@ export class UIManager {
     // Fence countdown: fenceExpireFrame is absolute; convert to ms remaining.
     const fenceMs =
       world.fenceExpireFrame !== undefined && world.fenceExpireFrame > world.frame
-        ? (world.fenceExpireFrame - world.frame) * (1000 / 60)
+        ? (world.fenceExpireFrame - world.frame) * TICK_MS
         : 0
     this.updateBuffChip(this.buffFence, this.buffFenceTime, fenceMs, 'fence')
   }

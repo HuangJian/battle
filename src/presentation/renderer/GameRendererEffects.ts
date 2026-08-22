@@ -1,5 +1,5 @@
 import type { World } from '../../game/World'
-import { FIELD, TANK } from '../../constants'
+import { FIELD, TANK, POPUP_DURATION_MS } from '../../constants'
 import type { GameRendererCore } from './GameRendererCore'
 
 type Ctor<T = object> = new (...args: any[]) => T
@@ -159,10 +159,11 @@ export function GameRendererEffectsMixin<TBase extends Ctor<GameRendererCore>>(B
       ctx.font = 'bold 11px "Courier New", monospace'
       ctx.textAlign = 'center'
       const popups = world.popups
+      const POPUP_FADE_MS = 500 // final third of POPUP_DURATION_MS fades out
       for (let i = 0; i < popups.length; i++) {
         const popup = popups[i]
-        const alpha = Math.min(1, popup.timer / 500)
-        const offsetY = (1 - popup.timer / 1500) * 20
+        const alpha = Math.min(1, popup.timer / POPUP_FADE_MS)
+        const offsetY = (1 - popup.timer / POPUP_DURATION_MS) * 20
         ctx.globalAlpha = alpha
         ctx.fillStyle = 'rgba(0,0,0,0.6)'
         ctx.fillText(popup.text, popup.x + TANK / 2 + 1, popup.y - 2 - offsetY + 1)

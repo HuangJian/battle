@@ -1,4 +1,4 @@
-import { LOW_POWER_STATES, MAX_LIVE_STEPS, TICK_MS } from '../constants'
+import { LOW_POWER_STATES, MAX_LIVE_STEPS, TICK_MS, SEED_HASH } from '../constants'
 import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
 import { RNG } from '../utils/RNG'
 import { GodAIInput } from '../ai/GodAIInput'
@@ -408,7 +408,7 @@ export function GameLoopMixin<TBase extends GameConstructor<GameCore>>(Base: TBa
           // godInput was cleared (e.g. loaded a coop snapshot from browser while
           // coop was off), re-create the God AI input for player2.
           if (this.world.coop && !this.godInput && this.world.player2) {
-            const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
+            const rng = new RNG((this.world.seed ^ SEED_HASH) >>> 0)
             this.godInput = new GodAIInput(this.world, undefined, rng, (w) => w.player2)
             this.godInput.reset()
             // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.

@@ -24,6 +24,22 @@ export const ALIGN = CELL // 16
 export const TICK_MS = 1000 / 60
 
 /**
+ * Golden-ratio hash used to derive per-purpose RNG seed streams from
+ * `world.seed` (replay RNG, AoE rolls, P2 streams): `(seed ^ SEED_HASH) >>> 0`.
+ * Changing this value invalidates every recorded replay/snapshot.
+ */
+export const SEED_HASH = 0x9e3779b9
+
+/** XOR offset that keeps Player-2 (God AI) RNG streams independent of P1's. */
+export const P2_SEED_OFFSET = 0xdeadbeef
+
+/**
+ * Sentinel timestamp for `lastTurnMs` / `lastFire`: "never happened". Being far
+ * in the past guarantees the first turn / first shot is always allowed.
+ */
+export const TURN_SENTINEL_MS = -9999
+
+/**
  * Render-rate cap (frames/sec). Decoupled from the simulation: the sim always
  * ticks at 60Hz for responsiveness/determinism, but the *canvas repaint* can be
  * throttled to cut GPU load and power draw.
@@ -132,6 +148,18 @@ export const POWERUP_PICKUP_END_DELAY_MS = 1000
 
 /** Stage-clear transition delay (ms) when there is nothing left to collect. */
 export const STAGE_CLEAR_DELAY_MS = 3000
+
+/** Score-popup lifetime (ms). */
+export const POPUP_DURATION_MS = 1500
+
+/** Game-over screen countdown (ms) before the menu takes over. */
+export const GAME_OVER_TIMER_MS = 3000
+
+/** Small (bullet-size) explosion animation lifetime (ms). */
+export const SMALL_EXPLOSION_MS = 200
+
+/** Big (tank-size) explosion animation lifetime (ms). */
+export const BIG_EXPLOSION_MS = 500
 
 /** Direction vectors */
 export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {

@@ -4,6 +4,7 @@ import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { serializeReplayFile, buildReplayFilename } from '../replay/file'
+import { SEED_HASH } from '../constants'
 import { cloneWorld, restoreWorld } from '../snapshot/WorldSerializer'
 import { STAGES, localizedStageName } from '../config/stages'
 import { isReplayBrowserBlocked } from './uiFlowGates'
@@ -318,7 +319,7 @@ export function GameReplayMixin<TBase extends GameConstructor<GameCore>>(Base: T
       // so the recorded P2 becomes a live God AI instead of a frozen tank.
       if ((wasCoop || wasDual) && this.world.player2) {
         this.world.coop = true
-        const rng = new RNG((this.world.seed ^ 0x9e3779b9) >>> 0)
+        const rng = new RNG((this.world.seed ^ SEED_HASH) >>> 0)
         this.godInput = new GodAIInput(this.world, undefined, rng, (world) => world.player2)
         this.godInput.reset()
         this.autoFireInput = new AutoFireInput(this.input)

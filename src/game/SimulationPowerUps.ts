@@ -9,6 +9,8 @@ import {
   BOAT_DURATION_MS,
   EMP_DURATION_MS,
   GRID,
+  TICK_MS,
+  POPUP_DURATION_MS,
   BASE_POS,
   REPAIR_HEAL_AMOUNT,
 } from '../constants'
@@ -349,7 +351,7 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
 
     protected updatePowerUps(): void {
       const w = this.world
-      const dt = 1000 / 60
+      const dt = TICK_MS
 
       const pus = w.powerUps
       for (let i = 0; i < pus.length; i++) {
@@ -460,7 +462,7 @@ export function SimulationPowerUpsMixin<TBase extends SimulationConstructor<Simu
               x: tank.x,
               y: tank.y,
               text: String(gained),
-              timer: 1500,
+              timer: POPUP_DURATION_MS,
             })
           }
           break

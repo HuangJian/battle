@@ -8,6 +8,8 @@ import {
   MINE_ARM_MS,
   MINE_RADIUS_CELLS,
   DECOY_LIFESPAN_FRAMES,
+  TICK_MS,
+  POPUP_DURATION_MS,
 } from '../constants'
 import { FRENZY_SHOTS } from '../config/powerups'
 import { killScore } from '../config/score'
@@ -90,7 +92,7 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
      */
     private updateFrenzy(p: Tank): void {
       const w = this.world
-      const now = w.frame * (1000 / 60)
+      const now = w.frame  * TICK_MS
       const dir = p.frenzyDir ?? 'up'
       const interval = p.frenzyInterval ?? 1
       let shotsLeft = p.frenzyShotsLeft ?? 0
@@ -104,7 +106,7 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
       }
       p.frenzyShotsLeft = shotsLeft
       p.frenzyLastFire = lastFire
-      const timer = (p.frenzyTimer ?? 0) - 1000 / 60
+      const timer = (p.frenzyTimer ?? 0) - TICK_MS
       p.frenzyTimer = timer
       if (timer <= 0 || shotsLeft <= 0) {
         p.frenzyTimer = 0
@@ -154,7 +156,7 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
       p.frenzyShotsLeft = FRENZY_SHOTS
       p.frenzyDir = p.dir
       // Fire the first shell immediately on the next tick.
-      p.frenzyLastFire = w.frame * (1000 / 60) - interval
+      p.frenzyLastFire = w.frame  * TICK_MS - interval
       p.frenzyTimer = FRENZY_SHOTS * interval
     }
 
@@ -368,7 +370,7 @@ export function SimulationPlayerMixin<TBase extends SimulationConstructor<Simula
               w.score += gained
               w.enemiesRemaining--
               w.killCount++
-              w.addPopup({ id: genId(), x: tank.x, y: tank.y, text: String(gained), timer: 1500 })
+              w.addPopup({ id: genId(), x: tank.x, y: tank.y, text: String(gained), timer: POPUP_DURATION_MS })
               w.pushEvent({ type: 'tank_destroyed', tank, by: 'player' })
             }
           }

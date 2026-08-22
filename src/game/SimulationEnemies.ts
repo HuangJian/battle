@@ -1,4 +1,4 @@
-import { CELL, TANK, GRID, DIR_VECTORS, Direction } from '../constants'
+import { CELL, TANK, GRID, DIR_VECTORS, Direction, SEED_HASH, POPUP_DURATION_MS } from '../constants'
 import { SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
 import { killScore } from '../config/score'
 import { genId } from './World'
@@ -316,7 +316,7 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
       // suboptimalPathProb at 0 (every rng.next() result is constant) — it
       // only matters if someone re-enables imperfection later. Drawn from
       // world.frame so different guards get different (harmless) sequences.
-      const rng = new RNG(((this.world.frame * 0x9e3779b9) >>> 0) ^ (id * 0x9e3779b9))
+      const rng = new RNG(((this.world.frame * SEED_HASH) >>> 0) ^ (id * SEED_HASH))
       brain = new GodAIInput(this.world, GUARD_GOD_AI_PARAMS, rng, (w) => {
         // Resolve the CURRENT tank by id so snapshot restore (which replaces
         // the guard object but preserves its id) keeps the same brain alive.
@@ -499,7 +499,7 @@ export function SimulationEnemiesMixin<TBase extends SimulationConstructor<Simul
           w.score += gained
           w.enemiesRemaining--
           w.killCount++
-          w.addPopup({ id: genId(), x: t.x, y: t.y, text: String(gained), timer: 1500 })
+          w.addPopup({ id: genId(), x: t.x, y: t.y, text: String(gained), timer: POPUP_DURATION_MS })
           w.pushEvent({ type: 'tank_destroyed', tank: t, by: 'player' })
         }
       }

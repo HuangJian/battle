@@ -1,4 +1,4 @@
-import { MAX_ENEMIES_ALIVE, COOP_MAX_ENEMIES_ALIVE, TANK } from '../constants'
+import { MAX_ENEMIES_ALIVE, COOP_MAX_ENEMIES_ALIVE, TANK, TICK_MS } from '../constants'
 import { applyEliteModifier, resolveProfile, profileToStats } from '../config/combat'
 import { rollTier, COMMANDER_ALIVE_CAP } from '../ai/config'
 import type { IntelligenceLevel } from '../types'
@@ -36,19 +36,19 @@ export function SimulationSpawnMixin<TBase extends SimulationConstructor<Simulat
       for (let i = 0; i < tanks.length; i++) {
         const tank = tanks[i]
         if (tank.spawnTimer > 0) {
-          tank.spawnTimer -= 1000 / 60
+          tank.spawnTimer -= TICK_MS
           if (tank.spawnTimer < 0) tank.spawnTimer = 0
         }
         if (tank.shieldTimer && tank.shieldTimer > 0) {
-          tank.shieldTimer -= 1000 / 60
+          tank.shieldTimer -= TICK_MS
           if (tank.shieldTimer < 0) tank.shieldTimer = 0
         }
         if (tank.boatTimer && tank.boatTimer > 0) {
-          tank.boatTimer -= 1000 / 60
+          tank.boatTimer -= TICK_MS
           if (tank.boatTimer < 0) tank.boatTimer = 0
         }
         if (tank.flashTimer !== undefined && tank.flashTimer > 0) {
-          tank.flashTimer -= 1000 / 60
+          tank.flashTimer -= TICK_MS
         }
       }
     }

@@ -27,12 +27,10 @@
  * (tests/godai-threat-budget.test.ts) pins them to the AI's predicates.
  */
 
-import { CELL, GRID, BASE_POS, type Direction } from '../../constants'
+import { CELL, GRID, BASE_POS, TICK_MS, TURN_SENTINEL_MS, type Direction } from '../../constants'
 import { resolveProfile } from '../../config/combat'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
-
-const TICK_MS = 1000 / 60
 
 /** The 8 cells of the base protection ring — mirror of isBaseProtectionCell. */
 export const RING_CELLS: ReadonlyArray<{ col: number; row: number }> = (() => {
@@ -157,7 +155,7 @@ export function ticksUntilLegalTurn(world: World, t: Tank): number {
   const turnCd = world.rules?.turnCooldownMs ?? 0
   if (turnCd <= 0) return 0
   const nowMs = world.frame * TICK_MS
-  const elapsed = nowMs - (t.lastTurnMs ?? -9999)
+  const elapsed = nowMs - (t.lastTurnMs ?? TURN_SENTINEL_MS)
   return elapsed >= turnCd ? 0 : msToTicks(turnCd - elapsed)
 }
 
@@ -166,7 +164,7 @@ export function ticksUntilFire(world: World, t: Tank): number {
   const iv = t.nextFireInterval
   if (!(iv > 0)) return 0
   const nowMs = world.frame * TICK_MS
-  const elapsed = nowMs - (t.lastFire ?? -9999)
+  const elapsed = nowMs - (t.lastFire ?? TURN_SENTINEL_MS)
   return elapsed >= iv ? 0 : msToTicks(iv - elapsed)
 }
 

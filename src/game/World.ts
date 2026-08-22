@@ -41,6 +41,8 @@ import {
   PLAYER_SPAWN,
   ENEMY_SPAWNS,
   FIELD,
+  RESPAWN_SHIELD_MS,
+  TURN_SENTINEL_MS,
 } from '../constants'
 
 let nextId = 1
@@ -541,7 +543,7 @@ export class World {
     const cell = this.findFreeSpawnCell(col * CELL, row * CELL)
     this.player = this.createTank('player', cell.x, cell.y, 'up')
     this.player.level = this.playerLevel
-    this.player.shieldTimer = 3000
+    this.player.shieldTimer = RESPAWN_SHIELD_MS
     this.player.isPlayer = true
   }
 
@@ -559,7 +561,7 @@ export class World {
     // spawnPlayer; createTank already used playerLevel2 for maxHp/hp/speed/etc.
     this.player2 = this.createTank('player', cell.x, cell.y, 'up', 2)
     this.player2.level = this.playerLevel2
-    this.player2.shieldTimer = 3000
+    this.player2.shieldTimer = RESPAWN_SHIELD_MS
     this.player2.isPlayer = true
   }
 
@@ -659,9 +661,9 @@ export class World {
       // first frame doesn't register as a turn. lastTurnMs = -9999 so
       // the first real turn is always allowed.
       prevMoveDir: dir,
-      lastTurnMs: -9999,
+      lastTurnMs: TURN_SENTINEL_MS,
       level: isPlayer ? playerLevel : 0,
-      shieldTimer: kind === 'player' ? 3000 : 0,
+      shieldTimer: kind === 'player' ? RESPAWN_SHIELD_MS : 0,
       isPlayer: kind === 'player',
       allegiance: kind === 'player' ? 'player' : 'enemy',
       profile,

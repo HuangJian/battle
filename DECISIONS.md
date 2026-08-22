@@ -1433,3 +1433,21 @@ vignette，不受影响。
 - 唯一理论节省（arc→fillRect）需要圆形改方形，视觉错误。
 
 **Implications:** 粒子渲染优化方向关闭。所有后续粒子相关改动只允许走 arc/fillRect 路径，禁止 drawImage。§236（分桶）与 §238（位图）合璧：粒子侧无优化空间。
+
+## 239. §1.6 魔法数字 → 命名常量 (STATUS: 已实施, plan/refactor.agy.md Phase 1)
+
+**Decision:** 在 `constants.ts` 新增 `SEED_HASH` (0x9e3779b9)、`P2_SEED_OFFSET` (0xdeadbeef)、
+`TURN_SENTINEL_MS` (-9999)、`POPUP_DURATION_MS` (1500)、`GAME_OVER_TIMER_MS` (3000)、
+`SMALL_EXPLOSION_MS` (200)、`BIG_EXPLOSION_MS` (500)；将 `src/game/` 全部 21 处 `1000 / 60`
+字面量替换为既有 `TICK_MS`。纯机械替换，数值逐一相等。
+
+**Rationale:**
+- plan/refactor.agy.md §1.6：散落的魔法值迫使 agent 逐处确认语义；命名后可检索、可审计。
+- 保护文件豁免：`src/ai/god/think.ts` / `ActionCandidates.ts`（AGENTS §5.1 God AI 禁区）内的
+  同字面量保持原样；`ThreatBudget.ts` 不在禁区，已一并替换。
+- BONUS TIME 弹出（1800ms）语义独立于击杀 popup，保留字面量并加注释，不强行绑定常量。
+- `{ col: 8, row: 24 }` P2 默认出生点一项在计划中已过时（现由 PLAYER_SPAWN /
+  player2SpawnPoint 集中管理），无需改动。
+- 全套测试（含 God-AI 确定性门禁）通过 = 字节级零行为变化的实证。
+
+**Implications:** 后续新增计时/种子派生逻辑必须引用这些常量；`1000 / 60` 字面量回归视为 bug。

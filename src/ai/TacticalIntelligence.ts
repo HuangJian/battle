@@ -1,6 +1,6 @@
 import type { World } from '../game/World'
 import type { Tank, AIState, GoalType, CommanderDirective } from '../types'
-import type { Direction } from '../constants'
+import { TICK_MS, type Direction } from '../constants'
 import type { GameplayRules } from '../config/rules'
 import {
   CELL,
@@ -60,7 +60,7 @@ const _noneOpenBuf: Direction[] = ['up', 'up', 'up', 'up']
  * orchestrator that reads/writes brain state on the World.
  */
 export class TacticalIntelligence {
-  private readonly dt = 1000 / 60 // ms per simulation tick
+  private readonly dt = TICK_MS // ms per simulation tick
 
   /** Entry point called by Simulation.updateEnemyAI. */
   update(world: World, fire: (tank: Tank) => void): void {
