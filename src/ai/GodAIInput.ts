@@ -13,7 +13,6 @@ import {
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
   makeScanResult,
-  bulletPathSteelBlockedImpl,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
 import type { ActionIntent } from './god/StrategyPlanner'
@@ -1417,11 +1416,6 @@ export class GodAIInput implements InputLike {
   }
   shouldFireInDir(pcx: number, pcy: number, dir: Direction, allowWallFire = true): boolean {
     return shouldFireInDirImpl(this, pcx, pcy, dir, allowWallFire)
-  }
-  /** §152-W1: does the bullet's ACTUAL 6px path hit non-ring steel within
-   * maxDist? Mirrors SimulationCombat.bulletHitsTerrain — see FireControl. */
-  bulletPathSteelBlocked(pcx: number, pcy: number, dir: Direction, maxDist: number): boolean {
-    return bulletPathSteelBlockedImpl(this, pcx, pcy, dir, maxDist)
   }
 
   // --- ThreatAssessor ---

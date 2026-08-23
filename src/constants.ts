@@ -25,9 +25,6 @@ export const TANK = CELL * 2 // 32
 /** Bullet pixel size */
 export const BULLET = 6
 
-/** Movement alignment grid (tanks snap to multiples of this when turning) */
-export const ALIGN = CELL // 16
-
 /** Fixed timestep for simulation (ms) */
 export const TICK_MS = 1000 / 60
 
@@ -100,9 +97,6 @@ export const ENEMY_SPAWNS = [
   { col: 12, row: 0 },
   { col: 6, row: 0 },
 ]
-
-/** Spawn protection duration (ms) */
-export const SPAWN_PROTECTION_MS = 2000
 
 /** Power-up duration (ms) — unified to 20s for all timed power-ups */
 export const POWERUP_DURATION_MS = 20000

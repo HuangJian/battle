@@ -1748,8 +1748,6 @@ export interface GodAIParams {
    * is farther than this, prefer chasing the imminent threat directly. 0 = unlimited.
    */
   chokepointHoldMaxDist: number
-  /** §88 A/B round 2: hold-arm imminence re-check cadence (unused, reserved). */
-  chokepointHoldCheckTicks: number
   /**
    * §88 A/B round 3: chase-arm max PLAYER distance. The chase arm intercepts
    * an enemy about to reach a threat point, but only pays off when the player

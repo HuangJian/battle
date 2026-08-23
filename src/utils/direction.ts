@@ -51,34 +51,6 @@ export function opposite(dir: Direction): Direction {
   }
 }
 
-/** Turn direction 90° clockwise */
-export function turnCW(dir: Direction): Direction {
-  switch (dir) {
-    case 'up':
-      return 'right'
-    case 'right':
-      return 'down'
-    case 'down':
-      return 'left'
-    case 'left':
-      return 'up'
-  }
-}
-
-/** Turn direction 90° counter-clockwise */
-export function turnCCW(dir: Direction): Direction {
-  switch (dir) {
-    case 'up':
-      return 'left'
-    case 'left':
-      return 'down'
-    case 'down':
-      return 'right'
-    case 'right':
-      return 'up'
-  }
-}
-
 /** Move a position by direction vector × distance */
 export function moveDir(
   x: number,

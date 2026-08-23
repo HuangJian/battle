@@ -53,7 +53,6 @@ function onParams(): GodAIParams {
     chokepointMaxThreatDist: 14,
     chokepointReplanTicks: 30,
     chokepointChaseMaxDist: 3,
-    chokepointHoldCheckTicks: 1,
     chokepointHoldMaxDist: 6,
     chokepointChaseMaxPlayerDist: 10,
   }

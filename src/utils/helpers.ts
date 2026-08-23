@@ -37,11 +37,6 @@ export function computePlayer2SpawnCol(p1Col: number): number {
 // re-export that used to live here was removed when the God-AI protected-file
 // rule was abolished (§262) — import direction symbols from utils/direction.
 
-/** Random integer in [min, max] inclusive */
-export function randInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min
-}
-
 /**
  * Manhattan distance between two axis-aligned points. Unit-agnostic — both
  * the cell-space scoring sites (god AI target selection) and the pixel-space

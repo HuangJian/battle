@@ -488,8 +488,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // with a deterministic S25 Ice Palace regression (5/20→1/20 — counter-fire
   // interrupted a working dodge mid-move). Round 3 (DECISIONS §101) replaces
   // the distance gate with the PINNED gate (isDodgePinnedImpl) — still OFF by
-  // default; the A/B runs in the M3 milestone. dodgeCounterFireRangeCells
-  // was removed (obsolete: the pinned gate is geometric, not distance-based).
+  // default; the A/B runs in the M3 milestone. The old distance-gate param
+  // dodgeCounterFireRangeCells was removed (§101: the pinned gate is
+  // geometric, not distance-based); the live emergency-range gate is a
+  // hardcoded 5 * CELL at candidates/Dodge.ts.
   // Align 6px = bullet half-width sum (cancellation needs a near-dead-on shot).
   dodgeCounterFire: 0,
   dodgeCounterFireAlignPx: 6,
@@ -571,7 +573,6 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 消失，缓存计划仍锁死玩家守株待兔（S19 seed 23：玩家在 (4,20) 空转 ~1200
   // tick 直到 base 从另一侧被破）。到达据守点后若威胁态已解除（threatState
   // false），fall-through 到正常目标选择。
-  chokepointHoldCheckTicks: 1,
   // A/B round 3: 据守点超过 6 格（chokepointHoldMaxDist）不值得走过去——
   // 敌人中途转向/被杀，玩家空转且路径残留污染导航（S26 seed 12）。
   chokepointHoldMaxDist: 6,

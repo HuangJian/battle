@@ -28,12 +28,6 @@ export const REPLAY_RETENTION_POLICIES: Record<ReplayType, RetentionPolicy> = {
 /** Maximum number of favorited replays. Enforced in toggleFavorite(). */
 export const REPLAY_FAVORITE_LIMIT = 100
 
-/** Thumbnail resolution (same as snapshots). */
-export const REPLAY_THUMBNAIL_WIDTH = 256
-export const REPLAY_THUMBNAIL_HEIGHT = 256
-/** JPEG quality for stored thumbnails (size / fidelity tradeoff). */
-export const REPLAY_THUMBNAIL_QUALITY = 0.72
-
 /**
  * Packed-frame schema version. Bump when the bit layout changes.
  * Stored as the first byte of every packed-frame blob.

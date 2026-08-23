@@ -921,7 +921,9 @@ export function isTerrainPinnedImpl(self: GodAIInput, p: Tank, bullet: Bullet): 
  *      first and the cancellation never happens.
  *
  * Called from think()'s dodge branch when `dodgeCounterFire > 0` and the
- * threat is within `dodgeCounterFireRangeCells` (too close to out-dodge).
+ * threat is within the emergency counter-fire range — a hardcoded
+ * `5 * CELL` gate at candidates/Dodge.ts (not a params field; the old
+ * dodgeCounterFireRangeCells param was removed in §101).
  */
 export function dodgeCounterFireDirImpl(
   self: GodAIInput,
