@@ -867,13 +867,47 @@ export class GodAIInput implements InputLike {
     if (controlledTank) this.controlledTank = controlledTank
   }
 
-  reset(): void {
-    this._moveDir = null
-    this._fire = false
-    this._thought = false
-    this._pressGuard = false // §167
-    this._pressFrenzy = false // §167
-    // §123/§125 (perf): clear the within-tick memo flags on stage reset —
+  // ================================================================
+  // Cache-invalidation registry (§3.3, plan/refactor.zcode.md)
+  // ================================================================
+  //
+  // Cross-tick caches used to be invalidated by hand-listing their fields at
+  // every site (reset(), endFrame()) — a new cache had to be remembered in
+  // each place, and missing one was a type-invisible stale-cache bug
+  // (documented incident: three nav caches invalidated separately on stage
+  // reset). The two methods below are now THE single registry:
+  //
+  //   - Adding a cache? Declare the field near its consumers and add ONE
+  //     invalidation line inside the matching group method. Every call site
+  //     that invokes the method picks it up automatically.
+  //   - Never hand-list cache fields at call sites; call the method.
+  //
+  // Lifetime groups mirror how the caches are keyed:
+  //   per-tick memos   → key on world state within one tick → cleared every
+  //                      endFrame() AND on stage reset;
+  //   stage-level nav  → keyed on terrain/revision → cleared ONLY on stage
+  //                      reset (reset() calls both methods).
+  // Targeted mid-think invalidations (e.g. `_navCacheValid = false` after a
+  // blocked nav) stay at their semantic sites — they express "THIS entry is
+  // stale", not "clear the group".
+  // (`_turnSnapScan` needs no entry: scanAheadImpl overwrites every field of
+  // its out buffer before reading it.)
+
+  /** Per-tick lazy memos — pure functions of the current World state.
+   * Called by endFrame() every tick and by reset() on stage transitions. */
+  private invalidatePerTickCaches(): void {
+    this._baseUnderThreatCache = null
+    this._playerCellValid = false
+    this._canMoveComputed = 0
+    this._scanCacheMask = 0 // §123
+    this._selTargetValid = false // §125
+  }
+
+  /** Stage-scoped navigation/path memo families — keyed on terrain content
+   * or revision counters, so they are invalidated ONLY when the stage (and
+   * with it the terrain) changes. */
+  private invalidateStageCaches(): void {
+    // §123/§125 (perf): clear the within-tick memo flags on stage reset too —
     // reset() can run between a think and its endFrame (browser stage
     // transition path), and a stale bit would serve a result computed
     // against the OLD world (player spawn origin is identical every stage).
@@ -881,6 +915,62 @@ export class GodAIInput implements InputLike {
     this._scanCacheX = NaN
     this._scanCacheY = NaN
     this._selTargetValid = false
+    // §161: invalidate the carve-path caches on stage reset (new terrain).
+    this._carvePost = null
+    this._carvePostComputed = false
+    this._carveCosts = null
+    this._carveCostsRev = -1
+    this._carvePathCache = null
+    this._carvePathCacheValid = false
+    this._carvePathTimer = 0
+    // (perf §131) The second-level memo is keyed on terrain — a new stage
+    // invalidates every entry.
+    if (this._carveMemo !== null) this._carveMemo.clear()
+    this._carveMemoRev = -1
+    this._carveMemoBaseCost = -1
+    this._carveMemoMaxBase = -1
+    this._carveMemoTtl = 0
+    // §164: invalidate the mid-lane parry-hold cache on stage reset.
+    this._parryHoldRev = -1
+    this._parryHoldCell = null
+    // §189: invalidate the dig-path cache on stage reset.
+    this._digPathCache = null
+    this._digPathCacheValid = false
+    this._digPathTimer = 0
+    this._digCosts = null
+    this._digCostsRev = -1
+    // §nav-cost: invalidate the base-ring cost cache on stage reset.
+    this._baseRingCosts = null
+    this._baseRingCostsRev = -1
+    // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
+    // stage reset — the next tick must recompute A* from scratch.
+    this._navCacheValid = false
+    this._navReplanTimer = 0
+    this._navBlockedCol = -99
+    this._navBlockedRow = -99
+    // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
+    this._replanCacheValid = false
+    this._replanTimer = 0
+    this._replanRev = -1
+    this._replanBlockedCol = -99
+    this._replanBlockedRow = -99
+    // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
+    for (let i = 0; i < this._pickupReachSlots.length; i++) {
+      this._pickupReachSlots[i].valid = false
+    }
+    this._pickupReachTimer = 0
+  }
+
+  reset(): void {
+    this._moveDir = null
+    this._fire = false
+    this._thought = false
+    this._pressGuard = false // §167
+    this._pressFrenzy = false // §167
+    // §3.3: stage-scoped cache invalidation — the full registry lives in
+    // invalidateStageCaches() above (scan memos + nav/carve/dig/ring/parry/
+    // memo/pickup families).
+    this.invalidateStageCaches()
     this.path = []
     this.replanTimer = 0
     this.reactionCounter = 0
@@ -940,33 +1030,6 @@ export class GodAIInput implements InputLike {
     this._baseGuardAnchor = null
     this._firingLaneCell = null
     this._firingLaneTick = 0
-    // §161: invalidate the carve-path caches on stage reset (new terrain).
-    this._carvePost = null
-    this._carvePostComputed = false
-    this._carveCosts = null
-    this._carveCostsRev = -1
-    this._carvePathCache = null
-    this._carvePathCacheValid = false
-    this._carvePathTimer = 0
-    // (perf §131) The second-level memo is keyed on terrain — a new stage
-    // invalidates every entry.
-    if (this._carveMemo !== null) this._carveMemo.clear()
-    this._carveMemoRev = -1
-    this._carveMemoBaseCost = -1
-    this._carveMemoMaxBase = -1
-    this._carveMemoTtl = 0
-    // §164: invalidate the mid-lane parry-hold cache on stage reset.
-    this._parryHoldRev = -1
-    this._parryHoldCell = null
-    // §189: invalidate the dig-path cache on stage reset.
-    this._digPathCache = null
-    this._digPathCacheValid = false
-    this._digPathTimer = 0
-    this._digCosts = null
-    this._digCostsRev = -1
-    // §nav-cost: invalidate the base-ring cost cache on stage reset.
-    this._baseRingCosts = null
-    this._baseRingCostsRev = -1
     this._baseConnectClearActive = false
     this._baseConnectClearActiveTicks = 0
     // §162: reset the carve-dig session (new stage = new pocket).
@@ -982,28 +1045,11 @@ export class GodAIInput implements InputLike {
     const modelActive = this.params.enemyModelMode > 0 && this.params.enemyModelWindowTicks > 0
     this._enemyModel = initEnemyModel(modelActive)
     this._enemyModelLastHp = this.world.player ? this.world.player.hp : 0
-    // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
-    // stage reset — the next tick must recompute A* from scratch.
-    this._navCacheValid = false
-    this._navReplanTimer = 0
-    this._navBlockedCol = -99
-    this._navBlockedRow = -99
-    // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
-    this._replanCacheValid = false
-    this._replanTimer = 0
-    this._replanRev = -1
-    this._replanBlockedCol = -99
-    this._replanBlockedRow = -99
     // §187: reset target blacklist on stage reset.
     this._blacklistEnemyId = -1
     this._blacklistExpiryFrame = 0
     this._lastSelectTargetId = -1
     this._targetStuckTicks = 0
-    // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
-    for (let i = 0; i < this._pickupReachSlots.length; i++) {
-      this._pickupReachSlots[i].valid = false
-    }
-    this._pickupReachTimer = 0
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
@@ -1070,12 +1116,9 @@ export class GodAIInput implements InputLike {
     this._thought = false
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
-    // Invalidate per-tick lazy caches.
-    this._baseUnderThreatCache = null
-    this._playerCellValid = false
-    this._canMoveComputed = 0
-    this._scanCacheMask = 0 // §123
-    this._selTargetValid = false // §125
+    // Invalidate per-tick lazy caches (§3.3 registry — full list in
+    // invalidatePerTickCaches()).
+    this.invalidatePerTickCaches()
     // §169: threat-signal sticky hold countdown (runs every tick; 0 = OFF ⇒
     // the branch never executes — byte-identical).
     if (this._threatStickyHold > 0) this._threatStickyHold--
