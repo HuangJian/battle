@@ -12,6 +12,8 @@ import { coveragePlanImpl } from './CoveragePlanner'
 import type { ActionId } from './DecisionCore'
 import { blocksBullet } from './Chokepoint'
 
+import { manhattan } from '../../utils/helpers'
+
 // ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
 // A hunt/engage target is locked only for a lease; revalidation releases on
 // target death/unreachability, lease expiry, player stall (no move + no fire
@@ -90,7 +92,7 @@ function intentRead(
   }
   // Flight: target farther than at commit (+ degrade) → the approach sunk.
   const tc = self.tankCell(t)
-  const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+  const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
   if (d > it.expectedProgress + INTENT_PROGRESS_DEGRADE && p.fireCooldown <= 0) return null
   // Threat revalidation (throttled): the CURRENT slack (safe deadline minus
   // current kill ETA, legal-turn waits included) must not have collapsed
@@ -130,7 +132,7 @@ function intentWrite(self: GodAIInput, w: World, playerCell: Cell, best: Tank) {
     targetId: best.id,
     expiresTick: w.frame + self.params.intentLeaseTicks,
     committedSlack: ka.killSlack,
-    expectedProgress: Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row),
+    expectedProgress: manhattan(tc.col, tc.row, playerCell.col, playerCell.row),
     lastMoveFrame: w.frame,
     lastPlayerCol: playerCell.col,
     lastPlayerRow: playerCell.row,
@@ -189,7 +191,7 @@ export function findPowerUpTargetImpl(self: GodAIInput, pcx: number, pcy: number
     if (!pu.alive) continue
     const cx = pu.x + pu.w / 2
     const cy = pu.y + pu.h / 2
-    const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+    const dist = Math.round(manhattan(cx, cy, pcx, pcy) / CELL)
 
     // S5d: if about to expire and too far, skip.
     const lifeRemaining = POWERUP_TIMEOUT_MS - pu.lifeTimer
@@ -333,7 +335,7 @@ export function findUrgentPowerUpTargetImpl(
       if (!t.alive || t.spawnTimer > 0) continue
       const eCol = Math.floor(t.x / CELL)
       const eRow = Math.floor(t.y / CELL)
-      if (Math.abs(eCol - playerCol) + Math.abs(eRow - playerRow) <= p.pickupPriorityMinEnemyDist) {
+      if (manhattan(eCol, eRow, playerCol, playerRow) <= p.pickupPriorityMinEnemyDist) {
         nearbyEnemy = true
         break
       }
@@ -378,7 +380,7 @@ export function findUrgentPowerUpTargetImpl(
     // §88 tier gate: only consider items of the requested tier (default 'all'
     // = pre-§88 behavior, byte-identical).
     if (tier !== 'all' && urgentTier(pu.type) !== tier) continue
-    const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+    const dist = Math.round(manhattan(cx, cy, pcx, pcy) / CELL)
     let range = urgentPickupRange(pu.type, p)
     // §166 / B1: extended urgent range for rush stars (4 -> starRushRangeCells).
     if (rushStar && p.starRushRangeCells > range) range = p.starRushRangeCells
@@ -390,7 +392,7 @@ export function findUrgentPowerUpTargetImpl(
       const partner = self.coopPartner()!
       const pcx2 = partner.x + partner.w / 2
       const pcy2 = partner.y + partner.h / 2
-      const partnerDist = Math.round((Math.abs(cx - pcx2) + Math.abs(cy - pcy2)) / CELL)
+      const partnerDist = Math.round(manhattan(cx, cy, pcx2, pcy2) / CELL)
       if (partnerDist < dist - 3) continue
     }
 
@@ -569,7 +571,7 @@ function findNearestReachablePowerUp(
     if (!pu.alive) continue
     const cx = pu.x + pu.w / 2
     const cy = pu.y + pu.h / 2
-    const dist = Math.round((Math.abs(cx - pcx) + Math.abs(cy - pcy)) / CELL)
+    const dist = Math.round(manhattan(cx, cy, pcx, pcy) / CELL)
     if (dist > range) continue
 
     // Reachability gate: same A* as the normal pickup — don't chase
@@ -689,7 +691,7 @@ export function findDireItemTargetImpl(self: GodAIInput, pcx: number, pcy: numbe
     liveEnemies++
     if (!anyApproaching) {
       const tc = self.tankCell(t)
-      if (Math.abs(tc.col - bc) + Math.abs(tc.row - br) <= p.direItemApproachCells) {
+      if (manhattan(tc.col, tc.row, bc, br) <= p.direItemApproachCells) {
         anyApproaching = true
       }
     }
@@ -720,9 +722,7 @@ export function findDireItemTargetImpl(self: GodAIInput, pcx: number, pcy: numbe
     const cellRow = Math.floor(pu.y / CELL)
     // Spawn-band gate (same as §87 — a fresh-enemy trap).
     if (p.pickupPrioritySpawnRowMax > 0 && cellRow <= p.pickupPrioritySpawnRowMax) continue
-    const dist = Math.round(
-      (Math.abs(pu.x + pu.w / 2 - pcx) + Math.abs(pu.y + pu.h / 2 - pcy)) / CELL,
-    )
+    const dist = Math.round(manhattan(pu.x + pu.w / 2, pu.y + pu.h / 2, pcx, pcy) / CELL)
     if (dist > p.direItemRangeCells) continue
     // Reachability (same A* as the navigator — powerUpCollectCell).
     const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), cellRow)
@@ -770,7 +770,7 @@ function powerUpCollectCell(self: GodAIInput, col: number, row: number): Cell | 
       const nr = row + dr
       if (nc === pc.col && nr === pc.row) return { col: nc, row: nr }
       if (!powerUpCellReachable(self, nc, nr)) continue
-      const d = Math.abs(nc - pc.col) + Math.abs(nr - pc.row)
+      const d = manhattan(nc, nr, pc.col, pc.row)
       if (d < bestDist) {
         bestDist = d
         bestCol = nc
@@ -866,7 +866,7 @@ export function findDualFencePickupImpl(self: GodAIInput, pcx: number, pcy: numb
     if (pu.type !== 'fence') continue
     const puCol = Math.floor(pu.x / CELL)
     const puRow = Math.floor(pu.y / CELL)
-    const d = Math.abs(puCol - playerCol) + Math.abs(puRow - playerRow)
+    const d = manhattan(puCol, puRow, playerCol, playerRow)
     if (d < bestDist) {
       bestDist = d
       bestCol = puCol
@@ -917,7 +917,7 @@ export function findDualPatrolTargetImpl(
     const t = enemies[ti]
     if (!t.alive || t.spawnTimer > 0) continue
     const tc = self.tankCell(t)
-    if (Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) <= engageDist) {
+    if (manhattan(tc.col, tc.row, playerCell.col, playerCell.row) <= engageDist) {
       return null
     }
   }
@@ -932,7 +932,7 @@ export function findDualPatrolTargetImpl(
   let bestDist = Infinity
   for (let pi = 0; pi < pts.length; pi++) {
     const col = Math.floor(pts[pi].x / CELL)
-    const d = Math.abs(col - playerCell.col) + Math.abs(patrolRow - playerCell.row)
+    const d = manhattan(col, patrolRow, playerCell.col, playerCell.row)
     if (d < bestDist) {
       bestDist = d
       bestCol = col
@@ -970,7 +970,7 @@ export function calculateRouteDangerImpl(
   const targetRow = Math.floor(toY / CELL)
   const playerCol = Math.floor(fromX / CELL)
   const playerRow = Math.floor(fromY / CELL)
-  const playerDistToTarget = Math.abs(targetCol - playerCol) + Math.abs(targetRow - playerRow)
+  const playerDistToTarget = manhattan(targetCol, targetRow, playerCol, playerRow)
 
   // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).
   const dangerScan = self._enemies.length > 0 ? self._enemies : w.tanks
@@ -981,7 +981,7 @@ export function calculateRouteDangerImpl(
     // Inline pxToCell(t.x, t.y) — scalar col/row, no Cell allocation.
     const enemyCol = Math.floor(t.x / CELL)
     const enemyRow = Math.floor(t.y / CELL)
-    const enemyDistToTarget = Math.abs(targetCol - enemyCol) + Math.abs(targetRow - enemyRow)
+    const enemyDistToTarget = manhattan(targetCol, targetRow, enemyCol, enemyRow)
 
     // If enemy is closer to target than player, and on the path, add danger
     if (enemyDistToTarget < playerDistToTarget) {
@@ -1144,7 +1144,7 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
           if (t === 'brick' || t === 'steel' || t === 'base') cover++
         }
       }
-      const dist = Math.abs(c - bc) + Math.abs(r - br)
+      const dist = manhattan(c, r, bc, br)
       const score = ringCover * 60 + approachCover * 60 + laneCover * 4 + cover * 15 - dist * 6
       if (score > bestScore) {
         bestScore = score
@@ -1313,8 +1313,7 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
     // 正是远位场景。playerCell 是 per-tick 缓存，无 RNG —— 安全。
     const pc = self.playerCell()
     const far =
-      Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row) >
-      self.params.defensePosStandableMinDist
+      manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row) > self.params.defensePosStandableMinDist
     if (!far) return def
     const t = self.world.tileMap.get(def.col, def.row)
     if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
@@ -1327,7 +1326,7 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
           if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
           const t2 = self.world.tileMap.get(c, r)
           if (t2 === 'brick' || t2 === 'steel' || t2 === 'water' || t2 === 'base') continue
-          const d = Math.abs(c - bc) + Math.abs(r - br)
+          const d = manhattan(c, r, bc, br)
           if (d < bestDist) {
             bestDist = d
             best = { col: c, row: r }
@@ -1392,7 +1391,7 @@ export function chokepointCoversEnemy(self: GodAIInput, choke: Cell, enemy: Cell
   if (plan) {
     for (let ti = 0; ti < plan.threatPoints.length; ti++) {
       const t = plan.threatPoints[ti]
-      const d = Math.abs(t.col - enemy.col) + Math.abs(t.row - enemy.row)
+      const d = manhattan(t.col, t.row, enemy.col, enemy.row)
       if (d < tpDist) {
         tpDist = d
         tpCol = t.col
@@ -1645,11 +1644,11 @@ function noBaseNearestTarget(
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)
-    const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+    const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     let adjustedDist = d - (t.bonus ? 2 : 0)
     // 协作: 伙伴更近的敌人降优先级
     if (coopActive && partnerCell) {
-      const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+      const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
       if (pd < d - 3) adjustedDist += 5
     }
     if (adjustedDist < bestDist) {
@@ -1683,8 +1682,8 @@ function freezeChaseTarget(
     const t = enemies[ti]
     const tc = self.tankCell(t)
     const d = freezeBaseFirst
-      ? Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
-      : Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      ? manhattan(tc.col, tc.row, baseCol, baseRow)
+      : manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     if (d < bestDist) {
       bestDist = d
       best = t
@@ -1717,7 +1716,7 @@ function chokepointHoldGate(self: GodAIInput, playerCell: Cell, enemyCount: numb
     return chase
   }
   if (enemyCount > self.params.chokepointHoldThreshold && choke) {
-    const holdDist = Math.abs(choke.col - playerCell.col) + Math.abs(choke.row - playerCell.row)
+    const holdDist = manhattan(choke.col, choke.row, playerCell.col, playerCell.row)
     if (
       chase &&
       (self.params.chokepointHoldMaxDist <= 0 || holdDist <= self.params.chokepointHoldMaxDist)
@@ -1758,7 +1757,7 @@ function anchorApproachHoldGate(
   if (
     enemies.length >= 2 &&
     approaching &&
-    Math.abs(anchorHold.col - playerCell.col) + Math.abs(anchorHold.row - playerCell.row) <=
+    manhattan(anchorHold.col, anchorHold.row, playerCell.col, playerCell.row) <=
       self.params.baseGuardAnchorHoldRange
   ) {
     return anchorHold
@@ -1800,10 +1799,10 @@ function huntModeTarget(
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
       let adjustedDist = d - (t.bonus ? 2 : 0)
       if (coopActive && partnerCell) {
-        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
         if (pd < d - 3) adjustedDist += 5
       }
       const v = targetValue(self.world, p, t)
@@ -1825,12 +1824,12 @@ function huntModeTarget(
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)
-    const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+    const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     // Prefer bonus enemies (they drop power-ups) when distances are close.
     let adjustedDist = d - (t.bonus ? 2 : 0)
     // 协作: 伙伴更近的敌人降优先级
     if (coopActive && partnerCell) {
-      const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+      const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
       if (pd < d - 3) adjustedDist += 5
     }
     if (adjustedDist < bestDist) {
@@ -1928,20 +1927,20 @@ function normalSelectionTarget(
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
       let adjustedDist: number
       if (self.params.pathTargetMode > 0) {
         adjustedDist =
           huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
           (t.bonus ? self.params.bonusHuntBias : 0)
         if (coopActive && partnerCell) {
-          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
           if (pd < d - 3) adjustedDist += 5
         }
       } else {
         adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
         if (coopActive && partnerCell) {
-          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
           if (pd < d - 3) adjustedDist += 5
         }
       }
@@ -1977,9 +1976,8 @@ function normalSelectionTarget(
         (t.bonus ? self.params.bonusHuntBias : 0)
       // 协作: 伙伴更近的敌人降优先级
       if (coopActive && partnerCell) {
-        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-        if (pd < Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) - 3)
-          adjustedDist += 5
+        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
+        if (pd < manhattan(tc.col, tc.row, playerCell.col, playerCell.row) - 3) adjustedDist += 5
       }
       if (adjustedDist < bestDist) {
         bestDist = adjustedDist
@@ -1990,13 +1988,13 @@ function normalSelectionTarget(
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
       // §172: bonus preference is the bonusHuntBias knob (default 2 =
       // the historical constant, byte-identical).
       let adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
       // 协作: 伙伴更近的敌人降优先级
       if (coopActive && partnerCell) {
-        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
         if (pd < d - 3) adjustedDist += 5
       }
       if (adjustedDist < bestDist) {
@@ -2080,7 +2078,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // to defense position. This applies regardless of canHunt — even in the
   // endgame, base defense takes priority over hunting when the player is
   // too far away to intercept in time.
-  const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
+  const playerDistToBase = manhattan(playerCell.col, playerCell.row, baseCol, baseRow)
   if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
     return self.getDefaultDefensePosition()
   }
@@ -2097,7 +2095,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
       if (d <= self.params.outnumberedRadiusCells) nearby++
     }
     if (nearby >= self.params.outnumberedEnemyCount && playerDistToBase > 6) {
@@ -2259,7 +2257,7 @@ function defenseThreatTarget(
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)
-    const distToBase = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+    const distToBase = manhattan(tc.col, tc.row, baseCol, baseRow)
     // §59: an enemy with a clear shot at the base is always considered,
     // even beyond threatRangeCells — it can destroy the base NOW from any
     // distance. Other enemies are filtered by threatRangeCells as before.
@@ -2338,13 +2336,12 @@ function defenseThreatTarget(
   // was 4-shotting the base unopposed.
   if (p2DefenseSecond && secondEnemy && bestEnemy) {
     const topCell = self.tankCell(bestEnemy)
-    const myDistToTop =
-      Math.abs(topCell.col - playerCell.col) + Math.abs(topCell.row - playerCell.row)
+    const myDistToTop = manhattan(topCell.col, topCell.row, playerCell.col, playerCell.row)
     const partner = self.coopPartner()
     let takeTop = false
     if (partner && partner.alive && partner.spawnTimer <= 0) {
       const pCell = self.tankCell(partner)
-      const partnerDistToTop = Math.abs(topCell.col - pCell.col) + Math.abs(topCell.row - pCell.row)
+      const partnerDistToTop = manhattan(topCell.col, topCell.row, pCell.col, pCell.row)
       // P2 takes the top threat when it's > 5 cells closer than P1
       if (myDistToTop < partnerDistToTop - 5) takeTop = true
     }
@@ -2360,7 +2357,7 @@ function defenseThreatTarget(
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+      const d = manhattan(tc.col, tc.row, baseCol, baseRow)
       if (d < nearestDist) {
         nearestDist = d
         nearest = t
@@ -2396,7 +2393,7 @@ function guardAnchorHoldGate(self: GodAIInput, playerCell: Cell, coopActive: boo
     if (
       !_defenseScanFlags.anyClearShot &&
       !_defenseScanFlags.anyBreacher &&
-      Math.abs(post.col - playerCell.col) + Math.abs(post.row - playerCell.row) <=
+      manhattan(post.col, post.row, playerCell.col, playerCell.row) <=
         self.params.baseGuardAnchorHoldRange
     ) {
       return post
@@ -2406,7 +2403,7 @@ function guardAnchorHoldGate(self: GodAIInput, playerCell: Cell, coopActive: boo
     guardAnchor &&
     !_defenseScanFlags.anyClearShot &&
     !_defenseScanFlags.anyBreacher &&
-    Math.abs(guardAnchor.col - playerCell.col) + Math.abs(guardAnchor.row - playerCell.row) <=
+    manhattan(guardAnchor.col, guardAnchor.row, playerCell.col, playerCell.row) <=
       self.params.baseGuardAnchorHoldRange
   ) {
     return guardAnchor

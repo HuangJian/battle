@@ -1,5 +1,6 @@
 import type { GodAIInput } from '../GodAIInput'
 import { BASE_POS, CELL, TANK, MAX_ENEMIES_ALIVE } from '../../constants'
+import { manhattan } from '../../utils/helpers'
 import type { Direction } from '../../constants'
 
 /**
@@ -129,7 +130,7 @@ export function updateEnemyModel(self: GodAIInput): void {
     // Distance (cell-level, pixel-rounded like tankCell).
     const tc = Math.floor(t.x / CELL)
     const tr = Math.floor(t.y / CELL)
-    const distToBase = Math.abs(tc - bc) + Math.abs(tr - br)
+    const distToBase = manhattan(tc, tr, bc, br)
 
     // Turns: dir changed since last tick.
     if (prev && prev.dir !== t.dir) turnCount++

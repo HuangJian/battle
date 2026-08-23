@@ -5,6 +5,8 @@ import { findPath } from './pathfind'
 import { canShootBaseFrom } from './SmartThreatModel'
 import { BASE_POS, DIR_VECTORS, GRID } from '../../constants'
 
+import { manhattan } from '../../utils/helpers'
+
 // ============================================================
 // Chokepoint — 据守咽喉要地 (user request 2026-08-02, §88).
 //
@@ -160,7 +162,7 @@ export function computeChokepointImpl(self: GodAIInput, threatPoints: Cell[]): C
     if (maxDist > 0) {
       let nearest = Infinity
       for (let ti = 0; ti < threatPoints.length; ti++) {
-        const d = Math.abs(threatPoints[ti].col - ec.col) + Math.abs(threatPoints[ti].row - ec.row)
+        const d = manhattan(threatPoints[ti].col, threatPoints[ti].row, ec.col, ec.row)
         if (d < nearest) nearest = d
       }
       if (nearest > maxDist) continue
@@ -170,7 +172,7 @@ export function computeChokepointImpl(self: GodAIInput, threatPoints: Cell[]): C
     const N = Math.max(1, p.chokepointPathsPerEnemy)
     for (let ti = 0; ti < threatPoints.length; ti++) {
       const tp = threatPoints[ti]
-      const d = Math.abs(tp.col - ec.col) + Math.abs(tp.row - ec.row)
+      const d = manhattan(tp.col, tp.row, ec.col, ec.row)
       if (best.length < N) {
         best.push({ tp, d })
         continue
@@ -277,7 +279,7 @@ export function computeChokepointImpl(self: GodAIInput, threatPoints: Cell[]): C
           else if (t === 'brick') cover += p.chokepointBrickWeight
         }
       }
-      const baseDist = Math.abs(col - bc) + Math.abs(row - br)
+      const baseDist = manhattan(col, row, bc, br)
       if (
         cov > bestCov ||
         (cov === bestCov && cover > bestCover) ||
@@ -346,7 +348,7 @@ export function isThreatStateImpl(self: GodAIInput, threatPoints: Cell[]): boole
     const ec = self.tankCell(e)
     for (let ti = 0; ti < threatPoints.length; ti++) {
       const tp = threatPoints[ti]
-      const d = Math.abs(tp.col - ec.col) + Math.abs(tp.row - ec.row)
+      const d = manhattan(tp.col, tp.row, ec.col, ec.row)
       if (d > margin) continue
       if (facingGate && !facingTowardBase(e, ec)) continue
       return true
@@ -389,7 +391,7 @@ export function threatChaseTargetImpl(self: GodAIInput, threatPoints: Cell[]): C
     let minD = Infinity
     for (let ti = 0; ti < threatPoints.length; ti++) {
       const tp = threatPoints[ti]
-      const d = Math.abs(tp.col - ec.col) + Math.abs(tp.row - ec.row)
+      const d = manhattan(tp.col, tp.row, ec.col, ec.row)
       if (d < minD) minD = d
     }
     if (minD > maxD) continue // not an imminent threat — no diversion
@@ -404,7 +406,7 @@ export function threatChaseTargetImpl(self: GodAIInput, threatPoints: Cell[]): C
     // base, while a fast tank must be chased from nearby. S32 seed 48: armor
     // at (2,22) chased from 25 cells → the march down the base column won;
     // a flat cap that blocked it reverted B to A's losing hunt.
-    const playerD = Math.abs(ec.col - pc.col) + Math.abs(ec.row - pc.row)
+    const playerD = manhattan(ec.col, ec.row, pc.col, pc.row)
     const speedScale =
       e.kind === 'armor' ? 3 : e.kind === 'basic' ? 2 : e.kind === 'power' ? 1.5 : 1
     if (maxPlayerD > 0 && playerD > maxPlayerD * speedScale) continue

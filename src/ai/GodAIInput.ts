@@ -5,6 +5,7 @@ import type { Direction } from '../constants'
 import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
 import { BASE_POS } from '../constants'
+import { manhattan } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
   findEnemyFacingPlayerImpl,
@@ -1137,9 +1138,9 @@ export class GodAIInput implements InputLike {
       // NOT a pocket lock; counting it would trigger a premature dig every
       // stage start, abandoning the base defense for a fresh pocket dig).
       if (p && p.alive && !(p.spawnTimer > 0)) {
-        const dx = p.x - this._digAnchorX
-        const dy = p.y - this._digAnchorY
-        if (Math.abs(dx) + Math.abs(dy) > this.params.carveDigNetEscape) {
+        if (
+          manhattan(p.x, p.y, this._digAnchorX, this._digAnchorY) > this.params.carveDigNetEscape
+        ) {
           // Real movement — re-anchor.
           this._digAnchorX = p.x
           this._digAnchorY = p.y
@@ -1303,7 +1304,7 @@ export class GodAIInput implements InputLike {
     // is dead/respawning, treat any near-base enemy as a threat.
     const p = this.controlledTank(this.world)
     const pc = p ? this.playerCell() : null
-    const playerDistToBase = pc ? Math.abs(pc.col - bc) + Math.abs(pc.row - br) : Infinity
+    const playerDistToBase = pc ? manhattan(pc.col, pc.row, bc, br) : Infinity
     // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
     // if think() hasn't populated it yet — should never happen in normal flow).
     const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
@@ -1321,7 +1322,7 @@ export class GodAIInput implements InputLike {
       // player back to the base (with safety margin). Catches flanking
       // runners along the map edges that the static box misses (S6 root
       // cause: base died with the player 20+ cells away behind steel).
-      const enemyDistToBase = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
+      const enemyDistToBase = manhattan(tc.col, tc.row, bc, br)
       if (
         enemyDistToBase <= this.params.baseRaceRangeCells &&
         playerDistToBase + this.params.baseRaceMarginCells >= enemyDistToBase

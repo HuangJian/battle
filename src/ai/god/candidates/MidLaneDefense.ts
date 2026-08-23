@@ -6,6 +6,8 @@ import { type Direction, BULLET, TANK } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
 import { type DecisionContext } from '../DecisionCore'
+
+import { manhattan } from '../../../utils/helpers'
 import {
   carveFireAheadImpl,
   carvePathInfoCached,
@@ -108,7 +110,7 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
 
   const point = findLaneDefensePointImpl(self, pc)
   if (!point) return false
-  const distToPoint = Math.abs(point.col - pc.col) + Math.abs(point.row - pc.row)
+  const distToPoint = manhattan(point.col, point.row, pc.col, pc.row)
   const inHold = distToPoint <= prm.midLaneHoldRange
 
   // Leash: only engage when the player is NEAR the lane point. Pulling

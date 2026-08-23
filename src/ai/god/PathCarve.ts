@@ -6,6 +6,8 @@ import { findPath } from './pathfind'
 import { computeBaseGuardAnchorImpl, getDefaultDefensePositionImpl } from './StrategyPlanner'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 
+import { manhattan } from '../../utils/helpers'
+
 // ============================================================
 // PathCarve — §161 / 开路策略 (carve path, user request 2026-08-06).
 //
@@ -121,7 +123,7 @@ export function carveThreatEnemyImpl(self: GodAIInput): Cell | null {
     const t = list[li]
     if (!t.alive || t.spawnTimer > 0) continue
     const tc = self.tankCell(t)
-    const dist = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
+    const dist = manhattan(tc.col, tc.row, bc, br)
     if (dist > prm.carveThreatDistCells) continue
     const breacher = enemyCanShootBase(self, t) || enemyCanBreachRing(self, t)
     if (breacher && !bestBreacher) {
@@ -888,8 +890,8 @@ export function findConnectCarveTargetImpl(self: GodAIInput, pc: Cell): Cell | n
   if (right && !rightConnected && (!left || leftConnected)) return right
   // Both disconnected — nearer wing wins.
   if (left && right) {
-    const distL = Math.abs(pc.col - left.col) + Math.abs(pc.row - left.row)
-    const distR = Math.abs(pc.col - right.col) + Math.abs(pc.row - right.row)
+    const distL = manhattan(pc.col, pc.row, left.col, left.row)
+    const distR = manhattan(pc.col, pc.row, right.col, right.row)
     return distL <= distR ? left : right
   }
   return left ?? right

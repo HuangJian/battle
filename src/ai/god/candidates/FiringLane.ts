@@ -8,6 +8,8 @@ import { type DecisionContext } from '../DecisionCore'
 import { scanAheadImpl } from '../FireControl'
 import { findFiringLaneCellImpl } from '../candidates/shared'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy } = ctx
   const prm = self.params
@@ -45,7 +47,7 @@ export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean 
     const t = list[li]
     if (!t.alive || t.spawnTimer > 0) continue
     const tc = self.tankCell(t)
-    const d = Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row)
+    const d = manhattan(tc.col, tc.row, pc.col, pc.row)
     if (d <= prm.firingLaneMinEnemyDist) return false
   }
   // Throttled lookout-cell search (cache survives the replan window).

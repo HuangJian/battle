@@ -14,12 +14,14 @@ import {
 } from '../FireControl'
 import { enemyApproachingBaseLaneImpl, enemyCanShootBase } from '../SmartThreatModel'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown } = ctx
   const prm = self.params
   if (prm.defenseInterceptMode <= 0 || !self.hasBase || self.aggressive) return false
   const pc = self.playerCell()
-  const playerDistToBase = Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row)
+  const playerDistToBase = manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row)
   if (playerDistToBase > prm.defenseInterceptMaxDist) return false
 
   // Cluster C: reuse the per-tick enemy snapshot (falls back to w.tanks).

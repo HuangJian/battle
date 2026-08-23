@@ -6,6 +6,8 @@ import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
   // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
@@ -34,7 +36,7 @@ export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
       const t = nearbyScan[ni]
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = self.tankCell(t)
-      if (Math.abs(tc.col - pc2.col) + Math.abs(tc.row - pc2.row) <= 5) {
+      if (manhattan(tc.col, tc.row, pc2.col, pc2.row) <= 5) {
         nearbyEnemy = true
         break
       }

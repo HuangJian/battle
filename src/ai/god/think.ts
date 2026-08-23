@@ -38,6 +38,8 @@ import { evalInterceptBase } from './candidates/InterceptBase'
 import { evalDodge } from './candidates/Dodge'
 import { evalSuicideReturn } from './candidates/SuicideReturn'
 
+import { manhattan } from '../../utils/helpers'
+
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
 // shell evaluates them strictly in weight order (chain order), first commit
@@ -520,7 +522,7 @@ export function thinkImpl(self: GodAIInput): void {
     // Only override when the player is past the defense threshold AND the
     // base is under threat (same condition as skipT2aForDefense).
     const pc159 = self.playerCell()
-    const dist159 = Math.abs(pc159.col - BASE_POS.col) + Math.abs(pc159.row - BASE_POS.row)
+    const dist159 = manhattan(pc159.col, pc159.row, BASE_POS.col, BASE_POS.row)
     if (
       dist159 > self.params.maxPlayerDistFromBase &&
       dist159 <= self.params.maxPlayerDistFromBase + self.params.t2aDefenseOverrideRange &&
@@ -621,7 +623,7 @@ export function thinkImpl(self: GodAIInput): void {
     } else if (!self.isPlayer2()) {
       // Case 2: _moveDir is null (A* failed) and partner is very close —
       // P1 tries any passable direction to break the deadlock
-      const dist = Math.abs(p.x - partner.x) + Math.abs(p.y - partner.y)
+      const dist = manhattan(p.x, p.y, partner.x, partner.y)
       if (dist < TANK * 3) {
         for (let di = 0; di < ALL_DIRS.length; di++) {
           if (self.canMoveDir(p, ALL_DIRS[di])) {

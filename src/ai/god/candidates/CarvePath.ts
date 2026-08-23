@@ -12,6 +12,8 @@ import {
 } from '../PathCarve'
 import { carveFire } from '../candidates/shared'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w } = ctx
   const prm = self.params
@@ -25,7 +27,7 @@ export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
 
   const post = carvePostImpl(self)
   if (!post) return false
-  const distToPost = Math.abs(pc.col - post.col) + Math.abs(pc.row - post.row)
+  const distToPost = manhattan(pc.col, pc.row, post.col, post.row)
 
   // ---- Mode B (R3): at the post, nothing fightable → dig toward the
   // most base-threatening enemy. ----
@@ -38,7 +40,7 @@ export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
       const t = list[li]
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = self.tankCell(t)
-      if (Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row) <= prm.carveChaseCells) {
+      if (manhattan(tc.col, tc.row, pc.col, pc.row) <= prm.carveChaseCells) {
         closeEnemy = true
         break
       }

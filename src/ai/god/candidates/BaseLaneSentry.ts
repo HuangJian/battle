@@ -10,6 +10,7 @@ import { type DecisionContext } from '../DecisionCore'
 import { enemyInShotCorridorImpl, shotReachesBaseImpl, shouldFireInDirImpl } from '../FireControl'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
 import { baseRingBreachedImpl, laneCorridorBlocked } from '../candidates/shared'
+import { manhattan } from '../../../utils/helpers'
 
 export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown } = ctx
@@ -45,7 +46,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
   const crow = pc.row
   const aligned = ccol === tc.col || crow === tc.row
   const blocked = laneCorridorBlocked(w, ccol, crow, tc.col, tc.row)
-  const manhattan = Math.abs(ccol - tc.col) + Math.abs(crow - tc.row)
+  const sentryDist = manhattan(ccol, crow, tc.col, tc.row)
   const bestCsb = enemyCanShootBase(self, best)
   if (aligned && (blocked === 0 || (blocked === 1 && !bestCsb))) {
     // 对齐且中线畅通（或仅一层砖挡且敌人不是即刻杀手 — 原位打砖开路，
@@ -64,7 +65,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
       // 中线畅通 — 持位射击: 立定向目标翻转 + 开火。仅在**能发射的 tick**
       // 接管（onCooldown 不 claim — 冷却期交给 midLane/navigate 正常流动，
       // 站位由流动保持或改善；冷却一过若仍对齐则哨兵再次接管开火）。
-      if (manhattan > prm.baseLaneSentryRange) return false
+      if (sentryDist > prm.baseLaneSentryRange) return false
       if (onCooldown) return false
       self._moveDir = p.dir === dir ? null : dir
       self._fire = !onCooldown && self.rng.next() >= self.params.aimError
@@ -76,7 +77,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
     // （shouldFireInDir 拒绝 — 如钢墙/自射守卫）则立刻让位，绝不空持死锁：
     // 正常流动（midLane/navigate）会移动玩家，几何改善后哨兵再接管。
     if (blocked === 1 && !bestCsb && shouldFireInDirImpl(self, pcx, pcy, dir)) {
-      if (manhattan > prm.baseLaneSentryRange) return false
+      if (sentryDist > prm.baseLaneSentryRange) return false
       // Phase 2 §6.1 行动有效性契约: 站立 + 冷却中的无产出站桩先过契约
       // （敌弹在射线 / 自己子弹在飞 / 站桩击杀 killSlack>0），否则让位。
       // mode=0 短路 → byte-identical。
@@ -107,7 +108,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
   // ±1 列、玩家当前行、竖直到敌人行无砖、站台格可站。到达后由上方对齐开火
   // 接管（口袋 fast 横穿站台列时击杀）。仅限基地带内近距（manhattan ≤
   // range+1，敌列距 base ≤ 6）——绝不跨图劫持；威胁消失/敌人离开即让位。
-  if (prm.baseLaneSentryStation > 0 && !bestCsb && manhattan <= prm.baseLaneSentryRange + 1) {
+  if (prm.baseLaneSentryStation > 0 && !bestCsb && sentryDist <= prm.baseLaneSentryRange + 1) {
     const tdc = Math.abs(tc.col - BASE_POS.col)
     // 仅拦截「带外」敌人（row 20-22，即将进带）：敌人已入带（row ≥ 23）
     // 时基地受威胁，须下行堵口而非横向挪位（seed 51 实证：fast 已到

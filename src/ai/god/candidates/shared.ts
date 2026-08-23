@@ -12,6 +12,8 @@ import { scanAheadImpl } from '../FireControl'
 import { isFieldRetreatConditionImpl } from '../StrategyPlanner'
 import type { DecisionContext } from '../DecisionCore'
 
+import { manhattan } from '../../../utils/helpers'
+
 /**
  * §178 (autopsy hard-s34-base-l3-t25-seed2): dual central-breach P1 central-
  * hold gate. When true, this tank is P1 in a dual central-breach stage and
@@ -58,7 +60,7 @@ export const MAP_CENTER: Cell = { col: 12, row: 12 }
 export function retreatGateBlocksPickup(self: GodAIInput): boolean {
   if (self.params.fieldRetreatPickupGate <= 0) return false
   const pcC = self.playerCell()
-  const distC = Math.abs(pcC.col - BASE_POS.col) + Math.abs(pcC.row - BASE_POS.row)
+  const distC = manhattan(pcC.col, pcC.row, BASE_POS.col, BASE_POS.row)
   return isFieldRetreatConditionImpl(self, self.isBaseUnderThreat(), distC, self._enemies.length)
 }
 /** §X 原语: 8 个基地保护环格是否已有被击穿的洞（任一非砖/钢）。
@@ -148,7 +150,7 @@ export function findFiringLaneCellImpl(self: GodAIInput, pc: Cell): Cell | null 
     const tc = self.tankCell(t)
     ecols.push(tc.col)
     erows.push(tc.row)
-    ebd.push(Math.abs(tc.col - BASE_POS.col) + Math.abs(tc.row - BASE_POS.row))
+    ebd.push(manhattan(tc.col, tc.row, BASE_POS.col, BASE_POS.row))
   }
   const r = prm.firingLaneRadius
   let best: Cell | null = null
@@ -193,7 +195,7 @@ export function findFiringLaneCellImpl(self: GodAIInput, pc: Cell): Cell | null 
         }
       }
       if (vis === 0) continue
-      const dist = Math.abs(cc - pc.col) + Math.abs(rr - pc.row)
+      const dist = manhattan(cc, rr, pc.col, pc.row)
       const s = score * 10 - dist
       if (s > bestScore) {
         bestScore = s

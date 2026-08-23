@@ -3,6 +3,7 @@ import type { Bullet, Tank } from '../../types'
 import { GRID, CELL } from '../../constants'
 import { PLAYER_PROGRESSION } from '../../config/combat'
 import { enemyCanShootBase } from './SmartThreatModel'
+import { manhattan } from '../../utils/helpers'
 
 // ============================================================
 // SuicideReturn — 自杀秒回 (suicide quick-return, user request 2026-08-04).
@@ -278,11 +279,10 @@ export function findSuicideTargetImpl(self: GodAIInput, pcx: number, pcy: number
     //   b. the spawn is within suicideReturnSpawnDistCells of the enemy, OR
     //   c. the spawn is strictly closer to the enemy than the player (a
     //      positional win — the respawned player reaches the threat sooner).
-    const spawnDist =
-      Math.abs(w.playerSpawnPoint.col - ecCol) + Math.abs(w.playerSpawnPoint.row - ecRow)
+    const spawnDist = manhattan(w.playerSpawnPoint.col, w.playerSpawnPoint.row, ecCol, ecRow)
     const playerCol = Math.round(pcx / CELL)
     const playerRow = Math.round(pcy / CELL)
-    const playerDist = Math.abs(playerCol - ecCol) + Math.abs(playerRow - ecRow)
+    const playerDist = manhattan(playerCol, playerRow, ecCol, ecRow)
     const spawnUseful =
       spawnCanHitEnemyImpl(self, ecCol, ecRow) ||
       (self.params.suicideReturnSpawnDistCells > 0 &&
@@ -292,7 +292,7 @@ export function findSuicideTargetImpl(self: GodAIInput, pcx: number, pcy: number
     // Condition 4: player is too far to reach this enemy in time.
     const ecx = e.x + e.w / 2
     const ecy = e.y + e.h / 2
-    const distPx = Math.abs(ecx - pcx) + Math.abs(ecy - pcy)
+    const distPx = manhattan(ecx, ecy, pcx, pcy)
     const timeTicks = playerSpeed > 0 ? distPx / playerSpeed : Infinity
     if (timeTicks <= enemyDistTicks) continue
     // Prefer the farthest enemy (the one the player is worst positioned for).

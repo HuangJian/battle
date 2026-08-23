@@ -8,6 +8,8 @@ import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalSurvive(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
   if (self.aggressive) return false
@@ -37,7 +39,7 @@ export function evalSurvive(self: GodAIInput, ctx: DecisionContext): boolean {
     const t = enemies[i]
     if (!t.alive || t.spawnTimer > 0) continue
     const ec = self.tankCell(t)
-    const d = Math.abs(ec.col - pc.col) + Math.abs(ec.row - pc.row)
+    const d = manhattan(ec.col, ec.row, pc.col, pc.row)
     if (d <= radius) {
       if (++nearby >= need) break
     }
@@ -65,7 +67,7 @@ export function evalSurvive(self: GodAIInput, ctx: DecisionContext): boolean {
       if (c2 < 0 || c2 >= GRID || r2 < 0 || r2 >= GRID) continue
       if (!w.isCellBlocked(c2, r2)) dExits++
     }
-    const baseDist = Math.abs(cx - baseCol) + Math.abs(cy - baseRow)
+    const baseDist = manhattan(cx, cy, baseCol, baseRow)
     if (dExits > bestExits || (dExits === bestExits && baseDist < bestBaseDist)) {
       bestDir = d
       bestExits = dExits

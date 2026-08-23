@@ -6,6 +6,7 @@ import { type Cell } from '../../../utils/grid-search'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { digPathInfoCached } from '../PathCarve'
+import { manhattan } from '../../../utils/helpers'
 import { carveFire } from '../candidates/shared'
 
 export function evalBaseConnectClear(self: GodAIInput, ctx: DecisionContext): boolean {
@@ -24,7 +25,7 @@ export function evalBaseConnectClear(self: GodAIInput, ctx: DecisionContext): bo
   const p2Row = self.world.player2SpawnPoint.row
   // Arrived: player is within 2 cells of the P2 spawn. Reset the flag
   // and let normal AI take over (出击/防守).
-  const distToP2 = Math.abs(pc.col - p2Col) + Math.abs(pc.row - p2Row)
+  const distToP2 = manhattan(pc.col, pc.row, p2Col, p2Row)
   if (distToP2 <= 2) {
     self._baseConnectClearActive = false
     return false

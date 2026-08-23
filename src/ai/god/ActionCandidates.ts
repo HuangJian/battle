@@ -52,6 +52,8 @@
 import { CELL, BASE_POS, GRID, type Direction } from '../../constants'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
+
+import { manhattan } from '../../utils/helpers'
 import {
   RING_CELLS,
   enemyDeadline,
@@ -309,7 +311,7 @@ export function evaluateUnifiedCandidates(
       urgent = e
     }
     const ec = tankCenterCell(e, _CELL_TMP)
-    const d = Math.abs(ec.col - pc.col) + Math.abs(ec.row - pc.row)
+    const d = manhattan(ec.col, ec.row, pc.col, pc.row)
     if (d < nearestD) {
       nearestD = d
       nearest = e
@@ -436,12 +438,11 @@ export function evaluateUnifiedCandidates(
     const turnBrick =
       p.dir !== dirToBrick ? ticksUntilLegalTurn(world, p) + turnCostTicks(world) : 0
     const flightBrick =
-      (Math.abs(_BRICK_OUT[0] - pc.col) + Math.abs(_BRICK_OUT[1] - pc.row)) *
+      manhattan(_BRICK_OUT[0], _BRICK_OUT[1], pc.col, pc.row) *
       (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
     const cadenceTicks = p.nextFireInterval > 0 ? p.nextFireInterval / (1000 / 60) : 0
     const flightU =
-      (Math.abs(uc.col - pc.col) + Math.abs(uc.row - pc.row)) *
-      (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
+      manhattan(uc.col, uc.row, pc.col, pc.row) * (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
     clearEta =
       turnBrick + Math.max(0, ticksUntilFire(world, p)) + flightBrick + cadenceTicks + flightU
     clearSlack = dlU.enemyDamageDeadline - clearEta
@@ -464,7 +465,7 @@ export function evaluateUnifiedCandidates(
   {
     const etaA = playerActionEta(world, p, anchorCol, anchorRow, 'down', 1, _ETA)
     const arrival = etaA.nextLegalTurnEta + etaA.movementEta + etaA.aimAlignmentEta
-    const anchorD = Math.abs(anchorCol - pc.col) + Math.abs(anchorRow - pc.row)
+    const anchorD = manhattan(anchorCol, anchorRow, pc.col, pc.row)
     if (anchorD <= 2) {
       returnReason = 'return-defense already at anchor'
     } else {
@@ -603,7 +604,7 @@ export function travelFireDetourDir(
     if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
     if (t.id === huntId) hunt = t
     const tc = tankCenterCell(t, _CELL_TMP)
-    const dd = Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row)
+    const dd = manhattan(tc.col, tc.row, pc.col, pc.row)
     if (dd < nearestD) {
       nearestD = dd
       nearest = t

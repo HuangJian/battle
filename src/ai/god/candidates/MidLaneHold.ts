@@ -5,6 +5,8 @@
 import { type Direction } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
+
+import { manhattan } from '../../../utils/helpers'
 import {
   enemyNearLaneImpl,
   findParryHoldCellImpl,
@@ -23,7 +25,7 @@ export function evalMidLaneHold(self: GodAIInput, ctx: DecisionContext): boolean
   if (!laneColumnOpenToBaseImpl(self)) return false
   const hold = findParryHoldCellImpl(self, pc)
   if (!hold) return false
-  const dist = Math.abs(hold.col - pc.col) + Math.abs(hold.row - pc.row)
+  const dist = manhattan(hold.col, hold.row, pc.col, pc.row)
   // 中路繁忙：列内有向下敌弹（§163 laneShellInColumnImpl — 真实凿穿信号），
   // 或敌人临近基地列（凿墙者即将到达）。两者皆无 = 中路无威胁 → 放行。
   const busy = laneShellInColumnImpl(self) || enemyNearLaneImpl(self, prm.midLaneHoldEnemyDist)

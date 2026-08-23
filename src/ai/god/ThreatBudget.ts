@@ -28,6 +28,7 @@
  */
 
 import { CELL, GRID, BASE_POS, TICK_MS, TURN_SENTINEL_MS, type Direction } from '../../constants'
+import { manhattan } from '../../utils/helpers'
 import { resolveProfile } from '../../config/combat'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
@@ -123,8 +124,6 @@ export interface KillAssessment {
 }
 
 const msToTicks = (ms: number): number => Math.max(0, ms / TICK_MS)
-const manhattan = (aCol: number, aRow: number, bCol: number, bRow: number): number =>
-  Math.abs(aCol - bCol) + Math.abs(aRow - bRow)
 
 // §14.2 hot-path scratch: every object-returning helper below accepts an
 // optional caller-owned `out` (reused across ticks — zero per-tick

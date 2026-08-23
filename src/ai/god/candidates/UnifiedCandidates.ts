@@ -9,6 +9,8 @@ import { clearLaneFireDir, evaluateUnifiedCandidates, fireRayBlocked } from '../
 import { type DecisionContext } from '../DecisionCore'
 import { shouldFireInDirImpl } from '../FireControl'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): boolean {
   const prm = self.params
   if (prm.candidateMode <= 0 || !self.hasBase || self.aggressive) return false
@@ -26,7 +28,7 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
     if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
     if (t.id === self._lastSelectTargetId) hunt = t
     const tc = self.tankCell(t)
-    const d = Math.abs(tc.col - pcxCell.col) + Math.abs(tc.row - pcxCell.row)
+    const d = manhattan(tc.col, tc.row, pcxCell.col, pcxCell.row)
     if (d < nearestD) {
       nearestD = d
       nearest = t

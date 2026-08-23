@@ -13,6 +13,8 @@ import {
 } from '../SuicideReturn'
 import { findBulletThreatToBaseImpl } from '../ThreatAssessor'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boolean {
   const mode = self.params.suicideReturnMode
   if (mode <= 0) return false
@@ -131,7 +133,7 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
   }
   if (mode >= 2 && self.params.suicideReturnDefendDistCells > 0) {
     const pcStrict = self.playerCell()
-    const distBase = Math.abs(pcStrict.col - BASE_POS.col) + Math.abs(pcStrict.row - BASE_POS.row)
+    const distBase = manhattan(pcStrict.col, pcStrict.row, BASE_POS.col, BASE_POS.row)
     if (distBase <= self.params.suicideReturnDefendDistCells) return false
   }
 

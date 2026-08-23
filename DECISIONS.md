@@ -1997,3 +1997,27 @@ Brick Maze idx27（brick-dense，classic+chaos 双臂）。legacy 8 行原样保
 **Implications:** 旧基线 sha（1764257587…）作废；当前基线 =
 `b81e240a8c2980bbf805215319be5aa2f483a312235bd35d758a6e522870ec32`
 （tmp/det-batch.baseline.txt）。后续 AI 触碰的标准流程不变：改前改后各跑一次比对。
+
+## 266. manhattan 单源化落地（遗留 #2） (STATUS: 已实施, 2026-08-23)
+
+**Decision:** 权威 `manhattan(ax, ay, bx, by)` 落 `src/utils/helpers.ts`；
+`ai/perception.ts` 改 re-export（TacticalIntelligence 导入路径零变动）；
+god 层 ~100 处内联 `Math.abs(dx) + Math.abs(dy)` 拼写收编为调用
+（含 `Math.round(manhattan(...)/CELL)` 包裹式、运动预测偏移点距、三元臂）；
+ThreatBudget 的模块级本地复制箭头函数删除；BaseLaneSentry 撞名局部变量
+`manhattan` 更名 `sentryDist`。**有意保留原样**的三类：①delta 形站点且
+|dx|/|dy| 被下游复用（Hunt 轴向测试、DefenseIntercept 方向选择）——转换会
+丢弃现成的寄存器值；②非点距和（Navigator glideSpeed=|vx|+|vy|）；③
+A* 内循环启发式保持直写（pathfind pfPush 参数位，读性优先）。
+
+**Rationale:**
+- §263/§3.6 原"维持原判"的解除条件是"determinism 门 + perf 基准同时通过"。
+  perf 实测：21 组合 determinism 语料，HEAD worktree vs 统一后各 n=5，
+  user CPU B=22.66±0.22s vs A=22.92±0.50s，Δ+1.2%，不显著（同构建环境噪声
+  即达 ±4%）；V8 对单态微函数的内联符合预期。前一会话声称的 A/B 产物未落盘，
+  本次以 n=5×2 worktree 对照法重测补证（stash 法有吞工作前科，弃用）。
+- determinism 门：全量 109,516 签名行 byte-identical（基线 b81e240a… 未变）。
+
+**Implications:** 新增距离计算一律 import `manhattan`；热路径写裸 abs 和仅限
+上述两类豁免形状（下游复用 delta / 非点距），否则视为欠账。helpers.ts 注释
+即 grep 锚点（遗留 #2 / DECISIONS §266）。

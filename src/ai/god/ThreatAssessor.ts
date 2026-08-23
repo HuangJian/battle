@@ -4,7 +4,7 @@ import type { Direction } from '../../constants'
 import { CELL, TANK, BULLET, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from './pathfind'
 import { ALL_DIRS, opposite } from '../../utils/direction'
-import { snap, aabb } from '../../utils/helpers'
+import { snap, aabb, manhattan } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { scanAheadImpl } from './FireControl'
 
@@ -201,7 +201,7 @@ export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
     }
 
     if (crossesBase) {
-      const dist = Math.abs(bcx - baseCx) + Math.abs(bcy - baseCy)
+      const dist = manhattan(bcx, bcy, baseCx, baseCy)
       if (dist < bestDist) {
         bestDist = dist
         best = b
@@ -246,7 +246,7 @@ export function baseBulletInterceptCellImpl(self: GodAIInput, bullet: Bullet): C
     // Check if the player can reach this cell.
     const cellCx = col * CELL + CELL / 2
     const cellCy = row * CELL + CELL / 2
-    const dist = Math.abs(cellCx - pcx) + Math.abs(cellCy - pcy)
+    const dist = manhattan(cellCx, cellCy, pcx, pcy)
     if (dist < bestDist) {
       bestDist = dist
       bestCell = { col, row }
@@ -518,7 +518,7 @@ export function dodgeDirectionImpl(
           const pc = self.playerCell()
           const baseCol = BASE_POS.col + 1
           const baseRow = BASE_POS.row + 1
-          const distCells = Math.abs(pc.col - baseCol) + Math.abs(pc.row - baseRow)
+          const distCells = manhattan(pc.col, pc.row, baseCol, baseRow)
           if (distCells > self.params.dodgeHorizonMaxDistCells) commit = false
         }
         if (commit) {
@@ -580,7 +580,7 @@ export function dodgeDirectionImpl(
         if (!b.alive || b.isPlayer) continue
         const bcx = b.x + b.w / 2
         const bcy = b.y + b.h / 2
-        if (Math.abs(bcx - pcx) + Math.abs(bcy - pcy) <= CENTROID_RADIUS_PX) {
+        if (manhattan(bcx, bcy, pcx, pcy) <= CENTROID_RADIUS_PX) {
           cSumX += bcx
           cSumY += bcy
           cN++
@@ -607,8 +607,8 @@ export function dodgeDirectionImpl(
           if (self.hasBase) {
             const baseCx = BASE_POS.col * CELL + CELL
             const baseCy = BASE_POS.row * CELL + CELL
-            const distNow = Math.abs(pcx - baseCx) + Math.abs(pcy - baseCy)
-            const distNext = Math.abs(nx - baseCx) + Math.abs(ny - baseCy)
+            const distNow = manhattan(pcx, pcy, baseCx, baseCy)
+            const distNext = manhattan(nx, ny, baseCx, baseCy)
             if (distNext > distNow + CENTROID_BASE_SLACK_CELLS * CELL) continue
           }
           const away = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)
@@ -654,10 +654,8 @@ export function dodgeDirectionImpl(
             const baseCy = BASE_POS.row * CELL + CELL
             const va = DIR_VECTORS[axisAName]
             const vb = DIR_VECTORS[axisBName]
-            const distA =
-              Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
-            const distB =
-              Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+            const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
+            const distB = manhattan(pcx + vb.dx * CELL, pcy + vb.dy * CELL, baseCx, baseCy)
             return distA <= distB ? axisAName : axisBName
           }
           return axisAName
@@ -708,7 +706,7 @@ export function dodgeDirectionImpl(
       }
       if (self.hasBase) {
         const vd = DIR_VECTORS[d]
-        const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
+        const dist = manhattan(pcx + vd.dx * CELL, pcy + vd.dy * CELL, baseCx, baseCy)
         if (dist < bestDist) bestDist = dist
       } else {
         bestDist = 0 // no base — first non-flee open direction
@@ -722,7 +720,7 @@ export function dodgeDirectionImpl(
         if (!self.canMoveDir(p, d)) continue
         if (self.hasBase) {
           const vd = DIR_VECTORS[d]
-          const dist = Math.abs(pcx + vd.dx * CELL - baseCx) + Math.abs(pcy + vd.dy * CELL - baseCy)
+          const dist = manhattan(pcx + vd.dx * CELL, pcy + vd.dy * CELL, baseCx, baseCy)
           if (dist === bestDist) return d
         } else {
           return d
@@ -744,8 +742,8 @@ export function dodgeDirectionImpl(
     const baseCy = BASE_POS.row * CELL + CELL
     const va = DIR_VECTORS[candA]
     const vb = DIR_VECTORS[candB]
-    const distA = Math.abs(pcx + va.dx * CELL - baseCx) + Math.abs(pcy + va.dy * CELL - baseCy)
-    const distB = Math.abs(pcx + vb.dx * CELL - baseCx) + Math.abs(pcy + vb.dy * CELL - baseCy)
+    const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
+    const distB = manhattan(pcx + vb.dx * CELL, pcy + vb.dy * CELL, baseCx, baseCy)
     if (safeA && safeB) return distA <= distB ? candA : candB
     return safeA ? candA : candB
   }

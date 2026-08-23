@@ -21,6 +21,8 @@ import {
 } from '../ThreatAssessor'
 import { MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
+import { manhattan } from '../../../utils/helpers'
+
 export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, shielded } = ctx
   // Far from target (>5 cells): A* pathfinding routes around walls via
@@ -249,7 +251,7 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   // P3.1: When nav-stuck triggers, only go to center if the player is
   // NOT already at/near center (target == current cell → deadlock, the S9
   // root cause). When already at center, chase the nearest enemy directly.
-  const distToCenter = Math.abs(pc.col - MAP_CENTER.col) + Math.abs(pc.row - MAP_CENTER.row)
+  const distToCenter = manhattan(pc.col, pc.row, MAP_CENTER.col, MAP_CENTER.row)
   const stuckAtCenter = distToCenter <= 2
   // M3 (survivalRiskWeight, P0-3 命数盲 fix): on the last lives (survival
   // pressure active), the HUNT candidate retreats to the defense position
@@ -262,8 +264,7 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   const survivalRetreat =
     self.params.survivalRiskWeight > 0 &&
     survivalPressure(self) > 0 &&
-    Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row) >
-      self.params.baseRaceRangeCells
+    manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row) > self.params.baseRaceRangeCells
   if (navStuck && !stuckAtCenter) {
     // §179 (autopsy seed6 失误 B/C): when baseHp is critically low, the
     // navStuck escape must go to the DEFENSE POSITION, not map center.
@@ -287,9 +288,7 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
     navTarget = self.selectTarget(pc)
   }
 
-  const navDist = navTarget
-    ? Math.abs(navTarget.col - pc.col) + Math.abs(navTarget.row - pc.row)
-    : Infinity
+  const navDist = navTarget ? manhattan(navTarget.col, navTarget.row, pc.col, pc.row) : Infinity
 
   if (navStuck && !stuckAtCenter) {
     // P2.2: Stuck too long — break the loop. Try A* to center first, then

@@ -14,6 +14,7 @@ import { GRID } from '../../constants'
 import { DIR_DX, DIR_DY, ALL_DIRS } from '../../utils/direction'
 import type { TileMap } from '../../game/TileMap'
 import { isPassable, type Cell } from '../../utils/grid-search'
+import { manhattan } from '../../utils/helpers'
 export type { Cell } from '../../utils/grid-search'
 
 export interface PathConstraints {
@@ -465,7 +466,7 @@ export function findPath(
       _pfArriveTick[startKey] = 0
       _pfCooldownExpiry[startKey] = fireCooldownTicks
     }
-    pfPush(Math.abs(from.col - toCol) + Math.abs(from.row - toRow), firstSeq[startKey], startKey)
+    pfPush(manhattan(from.col, from.row, toCol, toRow), firstSeq[startKey], startKey)
 
     // Two specialized hot loops: the common case (breakBrick=false) inlines a
     // constant stepCost=1 and skips the brick-footprint scan, saving 4
@@ -524,7 +525,7 @@ export function findPath(
             cameFrom[nk] = currentKey
             cameDir[nk] = s
             gScore[nk] = tentativeG
-            pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
+            pfPush(tentativeG + manhattan(nc, nr, toCol, toRow), firstSeq[nk], nk)
           }
         }
       }
@@ -649,7 +650,7 @@ export function findPath(
             cameFrom[nk] = currentKey
             cameDir[nk] = s
             gScore[nk] = tentativeG
-            pfPush(tentativeG + Math.abs(nc - toCol) + Math.abs(nr - toRow), firstSeq[nk], nk)
+            pfPush(tentativeG + manhattan(nc, nr, toCol, toRow), firstSeq[nk], nk)
           }
         }
       }
