@@ -1584,6 +1584,83 @@ function huntPathCost(
   return cost
 }
 
+
+/**
+ * §187 target blacklist — drop the blacklisted enemy from the candidate pool
+ * (temporarily removed due to unreachability), clearing the entry once it
+ * expires. Filtering only happens when other targets remain. Extracted from
+ * selectTargetUncached verbatim (select-target decomposition).
+ */
+function applyTargetBlacklist(self: GodAIInput, w: World, enemies: Tank[]): Tank[] {
+  if (self.params.targetBlacklistStuckTicks > 0 && self._blacklistEnemyId >= 0) {
+    if (w.frame >= self._blacklistExpiryFrame) {
+      self._blacklistEnemyId = -1 // expired
+    } else if (enemies.length > 1) {
+      // Only filter if there are other enemies to target
+      return enemies.filter((t) => t.id !== self._blacklistEnemyId)
+    }
+  }
+  return enemies
+}
+
+/**
+ * §179 emergency base defense gate (autopsy seed6 失误 B/C): when baseHp is
+ * at/below the emergency fraction, ALL tanks return to the defense position
+ * regardless of their current target — the autopsy showed both tanks
+ * oscillating top-right for 18 seconds while the base dropped 48→12→0.
+ *
+ * Gated by emergencyBaseHpFrac (0 = OFF, byte-identical) AND spectateDual/coop
+ * (the SP regression on seeds 11/13 showed the general threshold is too
+ * aggressive for single-tank defense). Runs after the no-enemies check and
+ * before the no-base fast path.
+ *
+ * Returns the defense position when the gate fires, null to fall through.
+ */
+function emergencyBaseDefenseGate(self: GodAIInput, w: World): Cell | null {
+  if (
+    self.params.emergencyBaseHpFrac > 0 &&
+    self.hasBase &&
+    (w.spectateDual || w.coop) &&
+    w.baseHp <= self.params.emergencyBaseHpFrac * w.baseMaxHp
+  ) {
+    return self.getDefaultDefensePosition()
+  }
+  return null
+}
+
+/**
+ * Gap B no-base fast path (plan/God-AI-Curriculum §3): with no base on the
+ * stage (curriculum 1-4, or the base already destroyed) the AI is a pure
+ * hunter — nearest enemy wins, adjusted by bonus preference and coop
+ * de-confliction. Verbatim extraction of the former inline loop.
+ */
+function noBaseNearestTarget(
+  self: GodAIInput,
+  playerCell: Cell,
+  enemies: Tank[],
+  coopActive: boolean,
+  partnerCell: Cell | null,
+): Cell {
+  let best = enemies[0]
+  let bestDist = Infinity
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
+    const tc = self.tankCell(t)
+    const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+    let adjustedDist = d - (t.bonus ? 2 : 0)
+    // 协作: 伙伴更近的敌人降优先级
+    if (coopActive && partnerCell) {
+      const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+      if (pd < d - 3) adjustedDist += 5
+    }
+    if (adjustedDist < bestDist) {
+      bestDist = adjustedDist
+      best = t
+    }
+  }
+  return self.tankCell(best)
+}
+
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
   // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
@@ -1608,65 +1685,18 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   let enemies =
     self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
 
-  // §187: target blacklist — skip the blacklisted enemy (temporarily
-  // removed from the target pool due to unreachability).
   self._lastSelectTargetId = -1
-  if (self.params.targetBlacklistStuckTicks > 0 && self._blacklistEnemyId >= 0) {
-    if (w.frame >= self._blacklistExpiryFrame) {
-      self._blacklistEnemyId = -1 // expired
-    } else if (enemies.length > 1) {
-      // Only filter if there are other enemies to target
-      enemies = enemies.filter((t) => t.id !== self._blacklistEnemyId)
-    }
-  }
+  enemies = applyTargetBlacklist(self, w, enemies)
 
   if (enemies.length === 0) return self.getDefaultDefensePosition()
 
-  // ---- §179: emergency base defense (autopsy seed6 失误 B/C) ----
-  // When baseHp is at/below the emergency fraction, ALL tanks return to
-  // the defense position regardless of their current target. The autopsy
-  // showed both tanks oscillating in the top-right corner for 18 seconds
-  // while the base dropped 48→12→0 — no emergency override existed.
-  // Gated by emergencyBaseHpFrac (0 = OFF, byte-identical) AND spectateDual
-  // (SP byte-identical — the SP regression on seeds 11/13 showed the
-  // general threshold is too aggressive for single-tank defense). Runs
-  // after the no-enemies check (no enemies ⇒ defense position anyway) and
-  // before the no-base fast path (no base ⇒ no emergency to respond to).
-  if (
-    self.params.emergencyBaseHpFrac > 0 &&
-    self.hasBase &&
-    (w.spectateDual || w.coop) &&
-    w.baseHp <= self.params.emergencyBaseHpFrac * w.baseMaxHp
-  ) {
-    return self.getDefaultDefensePosition()
-  }
+  // §179: emergency base defense gate — see emergencyBaseDefenseGate().
+  const emergency = emergencyBaseDefenseGate(self, w)
+  if (emergency) return emergency
 
-  // ---- Gap B: no-base fast path (plan/God-AI-Curriculum §3) ----
-  // When the stage has no base, the AI is a pure hunter: always chase the
-  // nearest enemy. No defense positioning, no base-threat checks, no
-  // distance-from-base constraint. This is the correct behavior for
-  // curriculum stages 1-4 (no-base) and also for real stages where the
-  // base has already been destroyed (the AI should still try to clear).
-  if (!self.hasBase) {
-    let best = enemies[0]
-    let bestDist = Infinity
-    for (let ti = 0; ti < enemies.length; ti++) {
-      const t = enemies[ti]
-      const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      let adjustedDist = d - (t.bonus ? 2 : 0)
-      // 协作: 伙伴更近的敌人降优先级
-      if (coopActive && partnerCell) {
-        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-        if (pd < d - 3) adjustedDist += 5
-      }
-      if (adjustedDist < bestDist) {
-        bestDist = adjustedDist
-        best = t
-      }
-    }
-    return self.tankCell(best)
-  }
+  // Gap B: no-base fast path (plan/God-AI-Curriculum §3) — pure hunter,
+  // see noBaseNearestTarget().
+  if (!self.hasBase) return noBaseNearestTarget(self, playerCell, enemies, coopActive, partnerCell)
 
   // ---- S6: Determine strategy mode ----
   // Emergency defense: delegated to isBaseUnderThreat() so target selection
