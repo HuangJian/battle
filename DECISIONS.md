@@ -1950,3 +1950,26 @@ commit（§编号即 commit 粒度），全部通过 `bun run check` + 批模拟
 `bun run check` + `tools/probe-det-baseline.sh` 前后 sha256 比对；新 diag 工具必须
 import tools/lib/cli；新测试 fixture 优先 tests/helpers.ts（读口径差异表再动手）；
 新增渲染通道必须同步 computeSceneSig（grep 锚点已布好）。
+
+## 264. selectTargetUncached 分解落地（§263 遗留 #3） (STATUS: 已实施, 2026-08-23)
+
+**Decision:** StrategyPlanner 的 714 行 `selectTargetUncached` 分解为
+159 行编排器 + 10 个具名私有函数（4 个独立 commit，每批过 check +
+determinism byte-identical）：applyTargetBlacklist / emergencyBaseDefenseGate /
+noBaseNearestTarget / freezeChaseTarget / chokepointHoldGate /
+anchorApproachHoldGate / huntModeTarget / normalSelectionTarget /
+defenseThreatTarget / guardAnchorHoldGate。
+
+**Rationale:**
+- 门级段落统一 `Cell | null` 返回形状，早退语义由调用点 `if (x) return x`
+  表达——决策级联第一次在阅读层完全可见（威胁评估 → 撤退门 → 追击 → 驻守 → 选择器）。
+- defenseThreatTarget→guardAnchorHoldGate 的 anyClearShot/anyBreacher 传递采用
+  模块级 `_defenseScanFlags` 复用缓冲（§14.2 惯例，同 `_scanResult` 先例），
+  不引入每 tick 对象分配。
+- 纯派生量（defenseRow/anchorModeOn）在被提取的函数内重算而非传参——参数表更小，
+  值恒等（纯 params/常量推导），零行为差异。
+- intentWrite/§170 commit/_lastSelectTargetId 等副作用原位保留在选择器函数体内，
+  不做"评分与应用分离"（M1 定理约束仍适用：二次求值会破坏 parity）。
+
+**Implications:** 后续对目标选择的调参/调试可按函数名直接定位；
+新增"撤退门/驻守门"类机制照 `*Gate` 形状接入编排器即可。
