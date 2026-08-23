@@ -20,6 +20,10 @@ venv/
 env/
 *.egg-info/
 
+# ---- distributed rollout（plan/distributed-rollout.md v3.3，含密钥严禁入库）----
+dist-nodes.json
+agent.auth
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db

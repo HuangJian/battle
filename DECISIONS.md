@@ -1599,3 +1599,17 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 - **h=48 内部口径修正**：GAP+FC 原误复用 h=64 的 88→128（应为 72→128=9,344），v5 修正后 ~46K/~25M（量级不变）。
 - **全文 v5 → plan/RL-Net-Selection.md。**
 - **v5.1（P0 实测，2026-08-20）**：`tools/bench-nn-infer.ts` 跑现有 BC 权重（52K/30.8M）`NNModel.forward`，**Bun 1.3.14 (JSC) 桌面两次可复现 = 27.3ms@1.13G / 27.7ms@1.11G → 实测常数 ≈1.1 G MAC/s**。结论升级：① §2.3 删「假设基准」改实测+depthwise 折扣(~0.6×≈0.66G)；② 学生 h=64 @~56ms **桌面舒适**（3× 余量）由「边缘」升级「舒适」；③ K=1 否决 / 教师不部署 / 移动端需下探档 维持；④ 文档「未实测」标注降级为「BC 已实测 / 学生 dw 待训后实测」。学生 depthwise 精确延迟待 P0 学生权重产出后 `bench-nn-infer.ts` 实测定稿（届时 infer.ts 需先扩 depthwise/5×5/残差支持）。
+
+## 243. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23)
+
+**Decision:** `run_rl.py` 三层断点续跑，崩溃/停启后自动从断点继续而非重跑：
+1. **it 续跑**：`--start-it`（缺省自动 = `training_log.jsonl` 最后完成迭代 + 1），重启续跑后续迭代，不重跑已完成轮。
+2. **rollout 任务续跑**：`completed_pairs(traj_dir, wver)` 扫描已完整落盘且 `manifest.wver==当前权重` 的 `(stage,seed)`（write_shard 先写 12 npy 后写 manifest ⇒ 有 manifest 即完整），`run_rollout_queue` 从任务集剔除 → 只跑未完成局；`resumed_manifests` 把已 done 局摘要并入聚合，报告 games/outcomes 仍覆盖完整一轮。
+3. **PPO epoch 续跑**：`ppo_update(..., ckpt_path=it{n}/ppo_ckpt)` 每 epoch 落 `model.pt+opt.pt+epochs_done+numpy RNG`；重启 `_ppo_load` 恢复 model/optimizer/RNG，从断点 epoch 按**同一乱序**（numpy MT19937 状态精确重建）继续未完成批次。
+
+**Rationale:**
+- **权重逐轮原子写回 + rollout 确定性可复现** 使「整轮可重跑」原本成立，但成本是每崩溃重跑整轮 rollout（分钟级/GB 级）。三层断点把恢复粒度降到「未完成任务」与「未完成 epoch」。
+- PPO 精确续跑的可行性来自：`ppo_update` 的 minibatch 乱序用**全局 numpy RNG**（`np.random.permutation`），且 `nn-training` 里它只被这一处消耗（`build_pairs` 用独立 `default_rng`、agents 用 `random.Random`）⇒ 存 numpy RNG 状态即可让续跑乱序与未中断完全一致。等价性由 `tmp/dist-resume-check.py` 验证：从 checkpoint 续跑后的权重与一次跑完**逐参数相等**。
+- 模型初始对齐：`mA`/`mB` 须同初始（真实场景从同一 `weights.json` 加载），否则随机初始化不同导致不可比——这是测试脚本首跑失败根因，非机制缺陷。
+- 崩溃窗口语义：若崩溃在「权重已写回但 jsonl 未写」之间（极小窗口），重启会用新权重重跑该轮——正确且 on-policy 一致（跑该轮用其应有权重），接受。
+- **Implications:** 训练可随时停启无损续跑；`--start-it` 显式覆盖 / 自动续跑。续跑的 rotate 课程置换每次 relaunch 抖动（rotateSeed 含时间戳），it 换代但 140 局仍全覆盖、每关新鲜种子，训练正确性不受影响（PPO 消费全集）。

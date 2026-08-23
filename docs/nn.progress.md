@@ -5,6 +5,32 @@
 
 ---
 
+## §4 RL 训练断点续跑机制（2026-08-23）
+
+> 决策（DECISIONS §243）：三层断点续跑，崩溃/停启后自动继续而非重跑。
+
+### 4.1 实现
+- **it 续跑**：`--start-it`（缺省自动 = jsonl 最后完成迭代 + 1）。
+- **rollout 任务续跑**：`completed_pairs(traj_dir, wver)` 剔除已完整落盘且 wver 匹配的局；
+  `resumed_manifests` 并入聚合保报告完整。
+- **PPO epoch 续跑**：`ppo_update(..., ckpt_path=it{n}/ppo_ckpt)` 每 epoch 存 model/opt/epochs_done/numpy RNG。
+
+### 4.2 验证
+- **PPO 续跑等价**（`tmp/dist-resume-check.py`）：从 checkpoint 续跑 vs 一次跑完，**最终权重逐参数相等**
+  ——证明 minibatch 乱序（numpy MT19937）+ optimizer 状态精确重建。首跑失败根因是测试脚本 mA/mB
+  随机初始化不同（nn init 走 torch RNG 不受 numpy seed 控），非机制缺陷；同初始后全等。
+- **it 断点端到端**：启动1 完成 it1；启动2 日志 `resume: continuing from iteration 2` 直跑 it2
+  （不重跑 it1），`it2/ppo_ckpt` 三件套落盘。
+- rollout 断点 pure 函数：无 stage/seed 不计入 done，有则计入（dist-resume-check 覆盖）。
+
+### 4.3 教训
+- `ppo_update` 的 minibatch 乱序是**唯一**的全局 numpy RNG 消耗点（build_pairs 用独立
+  `default_rng`、agents 用 `random.Random`），这是精确续跑的前提，勿在别处引入全局
+  `np.random` 消耗破坏确定性。
+- 崩溃在「权重写回后、jsonl 写前」的极小窗口会用新权重重跑整轮——on-policy 正确，接受。
+
+---
+
 ## §3 RL 阶段设计（承接 P1.5 蒸馏，2026-08-21）
 
 > 决策：DAgger 对 RL 的价值已基本兑现（验证推理链路 + warm-start + 观测充分性证明），

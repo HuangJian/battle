@@ -22,6 +22,7 @@ import { execSync } from 'node:child_process'
 const ROOT = resolve(import.meta.dir, '..', '..')
 const TRAJ_DIR = join(ROOT, 'tmp', 'rl-traj')
 const LOG_PATH = join(TRAJ_DIR, 'training_log.jsonl')
+const META_PATH = join(TRAJ_DIR, 'dist-agent-meta.jsonl')
 const STATE_PATH = join(TRAJ_DIR, 'inspection-state.json')
 const REPORT_PATH = join(TRAJ_DIR, 'inspection-report.html')
 const ENEMY_TOTAL = 20
@@ -109,6 +110,18 @@ interface NewWin {
   seed: number
   score: number
   kills: number
+}
+
+interface AgentRow {
+  node: string
+  attempts: number
+  ok: number
+  fail: number
+  wins: number
+  elapsedSum: number
+  elapsedN: number
+  lastIt: number
+  lastError: string
 }
 
 interface HtmlRow {
@@ -294,13 +307,57 @@ function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
 }
 
+/**
+ * 读调度器落盘的 dist-agent-meta.jsonl，按节点聚合采样元数据。
+ * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（run_rl.py _record_agent_meta）。
+ * 行字段：node / it / stage / seed / ok / win / elapsedSec(成功) | reason(失败) / ts。
+ */
+function readAgentMeta(): AgentRow[] {
+  if (!existsSync(META_PATH)) return []
+  const by = new Map<string, AgentRow>()
+  const ensure = (node: string): AgentRow => {
+    let a = by.get(node)
+    if (!a) {
+      a = { node, attempts: 0, ok: 0, fail: 0, wins: 0, elapsedSum: 0, elapsedN: 0, lastIt: 0, lastError: '' }
+      by.set(node, a)
+    }
+    return a
+  }
+  for (const line of readFileSync(META_PATH, 'utf8').split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    let r: Record<string, unknown>
+    try {
+      r = JSON.parse(t) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const node = String(r.node ?? '?')
+    const a = ensure(node)
+    a.attempts++
+    if (r.ok) {
+      a.ok++
+      if (r.win) a.wins++
+      if (typeof r.elapsedSec === 'number') {
+        a.elapsedSum += r.elapsedSec
+        a.elapsedN++
+      }
+    } else {
+      a.fail++
+      if (typeof r.reason === 'string') a.lastError = r.reason.slice(0, 40)
+    }
+    if (typeof r.it === 'number') a.lastIt = Math.max(a.lastIt, r.it)
+  }
+  return [...by.values()].sort((p, q) => q.ok - p.ok)
+}
+
 interface PassSection {
   covered: string
   endedAt: string
   rows: PassHtmlRow[]
 }
 
-function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], newWins: NewWin[], scannedLine: string, pass: PassSection): string {
+function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], newWins: NewWin[], scannedLine: string, pass: PassSection, agent: AgentRow[]): string {
   const dataJson = JSON.stringify(rows)
   const passJson = JSON.stringify(pass.rows)
   const bannerHtml = bannerLines.map((l) => `<div>${l}</div>`).join('\n')
@@ -357,6 +414,23 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
         +'<td>'+r.loot+'</td>'
       +'</tr>';
     } }`,
+    `  { id: 'a', rows: ${JSON.stringify(agent)}, def: 'ok', dir: -1, textKeys: ['node'],
+    row: function(r){
+      var rate = r.attempts>0 ? (100*r.ok/r.attempts).toFixed(1)+'%' : '-';
+      var avg = r.elapsedN>0 ? (r.elapsedSum/r.elapsedN).toFixed(1) : '-';
+      var wr = r.ok>0 ? r.wins/r.ok : 0;
+      return '<tr>'
+        +'<td class="txt">'+r.node+'</td>'
+        +'<td>'+r.ok+'</td>'
+        +'<td>'+r.fail+'</td>'
+        +'<td>'+rate+'</td>'
+        +'<td>'+avg+'</td>'
+        +'<td>'+r.wins+'</td>'
+        +'<td class="win-cell" style="'+heat(wr)+'\">'+(wr>0?(wr*100).toFixed(1)+'%':'-')+'</td>'
+        +'<td>'+(r.lastIt?('it'+r.lastIt):'-')+'</td>'
+        +'<td class="txt na">'+r.lastError+'</td>'
+      +'</tr>';
+    } }`,
   ].join(',\n')
 
   const passHeading = pass.rows.length > 0 ? `本段各关表现（${esc(pass.covered)}，截至 ${esc(pass.endedAt)}）` : '本段各关表现（暂无扫描段数据）'
@@ -395,6 +469,18 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
 <h1>RL 训练各关战绩巡检报告</h1>
 <div class="meta">生成时间：${fmtNow()} · ${esc(scannedLine)} · 点击表格任意表头排序（再次点击切换升/降序）。</div>
 <div class="suite">${bannerHtml}</div>
+
+<h2>采样机健康（节点采样元数据）</h2>
+<div class="wrap">
+<table id="a">
+  <thead><tr>
+    <th class="txt" data-key="node">节点</th><th data-key="ok">成功局</th><th data-key="fail">失败局</th>
+    <th data-key="rate">采样成功</th><th data-key="avgSec">局均耗时(s)</th><th data-key="wins">胜局</th>
+    <th data-key="winRate">胜率</th><th data-key="lastIt">最近迭代</th><th class="txt">最近错误</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+</div>
 
 <h2>最近迭代健康指标</h2>
 <div class="wrap">
@@ -501,7 +587,18 @@ TABLES.forEach(initTable);
 
 function main(): void {
   const { dryRun, upTo, passFrom } = parseArgs()
-  const state = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as InspectionState
+  const state = existsSync(STATE_PATH)
+    ? (JSON.parse(readFileSync(STATE_PATH, 'utf8')) as InspectionState)
+    : {
+        version: 1,
+        purpose: '首次初始化（run_rl 自动巡检前 state 不存在）',
+        runStartTime: '',
+        lastScannedIter: 0,
+        scannedIters: [],
+        coverageNote: '',
+        totals: { iterations: 0, games: 0, wins: 0, kills: 0 },
+        stageStats: {},
+      }
   const { runStarts, circuitBreaks, iters } = parseLog()
 
   const procs = pythonProcCount()
@@ -678,7 +775,7 @@ function main(): void {
     const passSection: PassSection = lp
       ? { covered: lp.covered, endedAt: lp.endedAt, rows: passRows }
       : { covered: '', endedAt: '', rows: [] }
-    writeFileSync(REPORT_PATH, buildHtml(rows, bannerLines, recentIters, newWins, `扫描范围 it${fromIter + 1}–it${scanUpTo}`, passSection))
+    writeFileSync(REPORT_PATH, buildHtml(rows, bannerLines, recentIters, newWins, `扫描范围 it${fromIter + 1}–it${scanUpTo}`, passSection, readAgentMeta()))
   }
 
   console.log('=== RL 小时巡检 ===')

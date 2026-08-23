@@ -28,6 +28,9 @@ nn-demo/
 
 .venv/
 
+# 分布式采样密钥（plan/distributed-rollout.md v3.3，严禁入库）
+tools/agent/agent.auth
+
 *.lock
 *.lock.*
 *.log

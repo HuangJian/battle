@@ -171,6 +171,44 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
 
 
 # ---------------- PPO update ----------------
+def _pack_np_state() -> list:
+    """numpy MT19937 全局状态 → JSON 可序列化（续跑需精确重建 epoch 乱序）。"""
+    s = np.random.get_state()
+    return [s[0], s[1].tolist(), s[2], s[3], s[4]]
+
+
+def _unpack_np_state(packed: list) -> None:
+    np.random.set_state((packed[0], np.asarray(packed[1], dtype=np.uint32),
+                         packed[2], packed[3], packed[4]))
+
+
+def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
+    """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
+    恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
+    os.makedirs(ckpt_path, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(ckpt_path, "model.pt"))
+    torch.save(opt.state_dict(), os.path.join(ckpt_path, "opt.pt"))
+    with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
+        json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)
+
+
+def _ppo_load(ckpt_path: str | None, model, opt) -> int:
+    """返回已完成 epoch 数（0=无 checkpoint / 无法加载）。加载 model/opt + 恢复 RNG。"""
+    if not ckpt_path:
+        return 0
+    sp = os.path.join(ckpt_path, "state.json")
+    mp = os.path.join(ckpt_path, "model.pt")
+    op = os.path.join(ckpt_path, "opt.pt")
+    if not all(os.path.exists(p) for p in (sp, mp, op)):
+        return 0
+    with open(sp, encoding="utf-8") as f:
+        st = json.load(f)
+    model.load_state_dict(torch.load(mp, map_location="cpu"))
+    opt.load_state_dict(torch.load(op, map_location="cpu"))
+    _unpack_np_state(st["rng"])
+    return int(st.get("epochs_done", 0))
+
+
 def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
     """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
 
@@ -185,8 +223,12 @@ def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
     return out
 
 
-def ppo_update(model, opt, chunks, epochs, device):
-    """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...)."""
+def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None):
+    """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
+
+    ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/numpy RNG），
+    并支持断点续跑（重启后从已完成 epoch 数继续，minibatch 乱序精确复现）。
+    """
     model.train()
     clip = CLIP_EPS
     stats = []
@@ -195,7 +237,11 @@ def ppo_update(model, opt, chunks, epochs, device):
     tensored = [
         {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
     ]
-    for _ in range(epochs):
+    start_epoch = _ppo_load(ckpt_path, model, opt)
+    if start_epoch:
+        log(f"[ppo] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
+            f"(continuing remaining {epochs - start_epoch})")
+    for ep in range(start_epoch, epochs):
         perm = np.random.permutation(len(tensored))
         for i in perm:
             e = tensored[int(i)]
@@ -250,6 +296,8 @@ def ppo_update(model, opt, chunks, epochs, device):
                     "mean_adv": float(adv.mean().item()),
                 }
             )
+        if ckpt_path:
+            _ppo_save(ckpt_path, model, opt, ep + 1)
     # aggregate
     n = len(stats)
     agg = {k: sum(s[k] for s in stats) / n for k in stats[0]}

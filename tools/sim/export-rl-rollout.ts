@@ -621,6 +621,8 @@ function main(): void {
   let seedsStr = '0-3'
   let maxTicks = MAX_TICKS
   let weightsPath = 'tmp/rl-weights/weights.json'
+  let wver = ''
+  let nodeLabel = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -628,6 +630,10 @@ function main(): void {
     else if (args[i] === '--seeds') seedsStr = args[++i]
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
     else if (args[i] === '--weights') weightsPath = args[++i]
+    // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
+    // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
+    else if (args[i] === '--wver') wver = args[++i]
+    else if (args[i] === '--node-label') nodeLabel = args[++i]
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -675,6 +681,7 @@ function main(): void {
         scoreUngated: res.scoreUngated,
         quality: res.quality,
         dims: res.dims,
+        ...(wver ? { wver, node: nodeLabel } : {}),
       }
       if (res.shard.n > 0) writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
       totalSamples += res.shard.n
@@ -713,6 +720,7 @@ function main(): void {
     // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
     scoreList: scores.map((x) => +x.toFixed(5)),
     dimLists: Object.fromEntries(Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))])),
+    ...(wver ? { wver, node: nodeLabel } : {}),
   }
   console.log(perGame.join('\n'))
   console.log(`\n=== RL on-policy rollout (R3 v7-aligned-f3) ===`)
