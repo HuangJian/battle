@@ -91,6 +91,29 @@ export function positionPlayer(world: World, col: number, row: number, dir?: Dir
 // - `openArena` (local in tactical-ai.test.ts): hardcodes the eagle at cols
 //   [12,13] (== BASE_POS) and calls rebuildBaseCache(); base-hp.test.ts also
 //   empties tanks/bullets/queue. Shared clearArena() only rewrites tiles.
+// - `emptyArena` / `clearArena` (local in godai-stall-exposure /
+//   godai-turn-snap-guard): wipe ALL tiles including the base eagle and
+//   rebuildBaseCache() → a NO-BASE arena. Shared clearArena() wipes then
+//   RESTORES the base 2×2 — win/lose conditions stay intact.
+// - `addEnemy` (godai-candidates / coverage / intent / target-value /
+//   travel-fire): **1-BASED** cell coords (`(col-1)*CELL`) facing 'up' —
+//   these mirror FC stage-grid coordinates, not helpers.placeEnemy's
+//   0-based top-left convention. godai-action-contract / godai-threat-budget
+//   share the 1-based flavor but skip the `world.tanks.push` (caller pushes).
+// - `placeEnemy` (local copies in base-clear-shot-threat / base-damage-recall /
+//   battlement-* / chokepoint / close-pickup / counter-fire / …): **PARAMETER
+//   ORDER TRAP** — local 3rd arg is `dir` ('down' default), shared
+//   helpers.placeEnemy's 3rd arg is `kind`. NOT byte-identical → not adopted
+//   (refactor.zcode.md §2.2 optional increment rejected: a blind swap would
+//   silently turn `placeEnemy(w,c,r,'up')` into kind='up'). Check the local
+//   signature before adding a 4-arg call to any of these files.
+// - `positionPlayer` / `placePlayer` (~18 local copies, three dialects):
+//     ① cell → top-left pixel `col*CELL` (= shared helpers.positionPlayer);
+//     ② cell → CENTERED pixel `col*16-8` (e.g. base-alert — cell index is
+//        the tank's center column per `floor((x+16)/16)`);
+//     ③ raw PIXEL args named `x,y` (dodge-centroid, dodge-m12, and the
+//        remaining x,y-signature copies — no cell math at all).
+//   Check the local body before assuming any of them matches dialect ①.
 // - `makeCoopWorld`: replay-coop-autofire / replay-seek build a full stage +
 //   AutoFireInput + GodAI(P2) sim wiring for replay determinism; lie-back-win-m2/m6
 //   hand-place a player2 tank at pixel (300,300). The shared version mirrors
@@ -117,7 +140,10 @@ export interface GodGame {
  * World + GodAIInput + Simulation wired and ready: startGame on a real stage,
  * arena cleared to empty + base eagle at BASE_POS, base caches rebuilt,
  * state='playing', input.hasBase synced, input.reset() applied.
- * Replaces the ~15 near-identical per-file setupWorld() copies.
+ * Adoption status (refactor.zcode.md §2.2): ~24 local `setupWorld()` copies
+ * remain across tests/ (mostly dialect carriers — see 口径差异表 above);
+ * 3 files use this shared version. Migration is opt-in, not forced (§260
+ * lesson: byte-level fixture semantics beat DRY when tests pin geometry).
  */
 export function setupGodGame(opts: GodGameOptions = {}): GodGame {
   const world = createTestWorld({ rngSeed: opts.seed ?? 42 })
