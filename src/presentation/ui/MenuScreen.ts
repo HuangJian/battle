@@ -58,6 +58,31 @@ export class MenuScreen {
   private hasResume = false
   private resumeTarget: { stage: number; stageName: string; score: number } | null = null
 
+  /**
+   * Menu rows in visual/cursor order — the single source for the template-row
+   * ↔ `world.ui.menuCursor` mapping (§2.5, replacing the old `off + N`
+   * arithmetic that encoded this contract three separate times). When no
+   * RESUME target exists the first row is hidden and every index shifts down
+   * by one. NOTE: Game.ts/GameMenu.ts own the cursor VALUE semantics and keep
+   * their own arithmetic — this mapping only consumes it for highlighting.
+   */
+  private static readonly ROW_ORDER = [
+    'resume',
+    'difficulty',
+    'theme',
+    'language',
+    'stage',
+    'start-row',
+    'controls',
+  ] as const
+
+  /** Cursor index of a row by its `data-menu` key (-1 = not a cursor row). */
+  private rowIndexFor(menuKey: string): number {
+    const i = MenuScreen.ROW_ORDER.indexOf(menuKey as (typeof MenuScreen.ROW_ORDER)[number])
+    if (i < 0) return -1
+    return !this.hasResume && i > 0 ? i - 1 : i
+  }
+
   // Change guards (avoid unnecessary DOM writes every frame)
   private lastMenuCursor = -1
   private lastDifficultyKey = ''
@@ -363,32 +388,16 @@ export class MenuScreen {
     this.updateLanguageHighlight()
 
     // Highlight selected menu row (cursor) — only when changed.
-    // Row indices shift down by one when the RESUME row is present.
-    // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
+    // Row indices come from ROW_ORDER below — the single source for the
+    // template-row ↔ world.ui.menuCursor contract.
     if (world.ui.menuCursor !== this.lastMenuCursor) {
       this.lastMenuCursor = world.ui.menuCursor
-      const off = this.hasResume ? 1 : 0
       // Close stage dropdown when cursor moves away from STAGE row
-      if (world.ui.menuCursor !== off + 3) {
+      if (world.ui.menuCursor !== this.rowIndexFor('stage')) {
         this.closeStageDropdown()
       }
       for (const row of this.rows) {
-        const idx =
-          row.dataset.menu === 'resume'
-            ? 0
-            : row.dataset.menu === 'difficulty'
-              ? off
-              : row.dataset.menu === 'theme'
-                ? off + 1
-                : row.dataset.menu === 'language'
-                  ? off + 2
-                  : row.dataset.menu === 'stage'
-                    ? off + 3
-                    : row.dataset.menu === 'start-row'
-                      ? off + 4
-                      : row.dataset.menu === 'controls'
-                        ? off + 5
-                        : -1
+        const idx = this.rowIndexFor(row.dataset.menu ?? '')
         row.classList.toggle('selected', idx === world.ui.menuCursor)
       }
       // Show ENTER hint only on RESUME and NEW GAME rows when selected
@@ -396,10 +405,16 @@ export class MenuScreen {
         this.resumeHint.classList.toggle('visible', this.hasResume && world.ui.menuCursor === 0)
       }
       if (this.startHint) {
-        this.startHint.classList.toggle('visible', world.ui.menuCursor === off + 4)
+        this.startHint.classList.toggle(
+          'visible',
+          world.ui.menuCursor === this.rowIndexFor('start-row'),
+        )
       }
       if (this.controlsHint) {
-        this.controlsHint.classList.toggle('visible', world.ui.menuCursor === off + 5)
+        this.controlsHint.classList.toggle(
+          'visible',
+          world.ui.menuCursor === this.rowIndexFor('controls'),
+        )
       }
     }
 

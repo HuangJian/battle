@@ -1,5 +1,18 @@
 import type { World } from '../game/World'
-import type { GameEvent, EmitterConfig, Tank } from '../types'
+import type { GameEvent, Tank } from '../types'
+// ── Registered invariant exception (§2.5) ──────────────────────────────────
+// Presentation is read-only on the World — with ONE registered exception:
+// the renderer CONSUMES TileMap.dirty / dirtyCells (clears them after using
+// them to invalidate its terrain cache). The full protocol — who sets, who
+// consumes, order constraints — is documented at the `dirty` declaration in
+// ../game/TileMap.ts. Do not add a second presentation-side mutation.
+import {
+  makeSparkEmitter,
+  makeDebrisEmitter,
+  makeSmokeEmitter,
+  makeFlashEmitter,
+  makeRingEmitter,
+} from '../config/effects-config'
 import { FIELD, TANK } from '../constants'
 import { THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, THUMBNAIL_QUALITY } from '../snapshot/config'
 import { Camera } from './Camera'
@@ -150,18 +163,21 @@ export class PresentationLayer {
     if (this.isFullscreenSupported()) {
       this.root.requestFullscreen().catch(() => {
         // Fullscreen rejected (no user gesture? iframe?) → CSS fallback
-        this.root.classList.toggle('is-maximized')
-        this.resizeCanvas()
-        this.markNeedsRender()
-        this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+        this.toggleCssFullscreenFallback()
       })
     } else {
       // iOS Safari / unsupported → CSS fallback
-      this.root.classList.toggle('is-maximized')
-      this.resizeCanvas()
-      this.markNeedsRender()
-      this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+      this.toggleCssFullscreenFallback()
     }
+  }
+
+  /** The CSS `.is-maximized` fullscreen fallback path, shared by the
+   *  unsupported-browser branch and the rejected-API branch. */
+  private toggleCssFullscreenFallback(): void {
+    this.root.classList.toggle('is-maximized')
+    this.resizeCanvas()
+    this.markNeedsRender()
+    this.ui.controlCenter.setFullscreenState(this.isFullscreen)
   }
 
   /** Whether we are currently in fullscreen (API or CSS fallback). */
@@ -263,22 +279,22 @@ export class PresentationLayer {
       this.effects.triggerFlash('#ffaa40', 0.15)
 
       // Flash particle
-      this.particles.emit(this.makeFlashEmitter(x, y))
+      this.particles.emit(makeFlashEmitter(x, y))
 
       // Expanding ring
-      this.particles.emit(this.makeRingEmitter(x, y))
+      this.particles.emit(makeRingEmitter(x, y))
 
       // Sparks
-      this.particles.emit(this.makeSparkEmitter(x, y, 12, 2, 5))
+      this.particles.emit(makeSparkEmitter(x, y, 12, 2, 5))
 
       // Debris
-      this.particles.emit(this.makeDebrisEmitter(x, y, 8))
+      this.particles.emit(makeDebrisEmitter(x, y, 8))
 
       // Smoke
-      this.particles.emit(this.makeSmokeEmitter(x, y, 5))
+      this.particles.emit(makeSmokeEmitter(x, y, 5))
     } else {
       // Small sparks
-      this.particles.emit(this.makeSparkEmitter(x, y, 5, 1, 3))
+      this.particles.emit(makeSparkEmitter(x, y, 5, 1, 3))
     }
   }
 
@@ -294,10 +310,10 @@ export class PresentationLayer {
       this.effects.triggerFlash('#ff4040', 0.4)
       this.effects.triggerHitPause(120)
       // Extra debris for player
-      this.particles.emit(this.makeDebrisEmitter(cx, cy, 12))
+      this.particles.emit(makeDebrisEmitter(cx, cy, 12))
     } else if (by === 'player') {
       // Debris from destroyed enemy
-      this.particles.emit(this.makeDebrisEmitter(cx, cy, 6))
+      this.particles.emit(makeDebrisEmitter(cx, cy, 6))
     }
   }
 
@@ -309,9 +325,9 @@ export class PresentationLayer {
     // Big particle burst at base location
     const cx = FIELD / 2
     const cy = FIELD - TANK
-    this.particles.emit(this.makeSparkEmitter(cx, cy, 20, 3, 7))
-    this.particles.emit(this.makeDebrisEmitter(cx, cy, 15))
-    this.particles.emit(this.makeSmokeEmitter(cx, cy, 8))
+    this.particles.emit(makeSparkEmitter(cx, cy, 20, 3, 7))
+    this.particles.emit(makeDebrisEmitter(cx, cy, 15))
+    this.particles.emit(makeSmokeEmitter(cx, cy, 8))
   }
 
   private onPowerUpCollected(_type: string): void {
@@ -339,119 +355,6 @@ export class PresentationLayer {
         angleMax: Math.PI * 2,
         spread: 3,
       })
-    }
-  }
-
-  // ---- Emitter configs ----
-
-  private makeSparkEmitter(
-    x: number,
-    y: number,
-    count: number,
-    speedMin: number,
-    speedMax: number,
-  ): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: speedMin * 0.5,
-      speedMax: speedMax * 0.5,
-      lifeMin: 200,
-      lifeMax: 500,
-      sizeMin: 1,
-      sizeMax: 3,
-      colors: ['#ffe040', '#ff8020', '#ff4020', '#ffffff'],
-      type: 'spark',
-      gravity: 0.05,
-      drag: 0.92,
-      angleMin: 0,
-      angleMax: Math.PI * 2,
-      spread: 4,
-    }
-  }
-
-  private makeDebrisEmitter(x: number, y: number, count: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: 1,
-      speedMax: 3,
-      lifeMin: 400,
-      lifeMax: 800,
-      sizeMin: 2,
-      sizeMax: 4,
-      colors: ['#808080', '#606060', '#a0a0a0', '#404040'],
-      type: 'debris',
-      gravity: 0.15,
-      drag: 0.95,
-      angleMin: 0,
-      angleMax: Math.PI * 2,
-      spread: 8,
-    }
-  }
-
-  private makeSmokeEmitter(x: number, y: number, count: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: 0.2,
-      speedMax: 0.8,
-      lifeMin: 600,
-      lifeMax: 1000,
-      sizeMin: 4,
-      sizeMax: 8,
-      colors: ['#606060', '#404040', '#808080'],
-      type: 'smoke',
-      gravity: -0.02,
-      drag: 0.96,
-      angleMin: -Math.PI / 2 - 0.5,
-      angleMax: -Math.PI / 2 + 0.5,
-      spread: 6,
-    }
-  }
-
-  private makeFlashEmitter(x: number, y: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count: 1,
-      speedMin: 0,
-      speedMax: 0,
-      lifeMin: 150,
-      lifeMax: 150,
-      sizeMin: 20,
-      sizeMax: 20,
-      colors: ['#ffffff'],
-      type: 'flash',
-      gravity: 0,
-      drag: 1,
-      angleMin: 0,
-      angleMax: 0,
-      spread: 0,
-    }
-  }
-
-  private makeRingEmitter(x: number, y: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count: 1,
-      speedMin: 0,
-      speedMax: 0,
-      lifeMin: 300,
-      lifeMax: 300,
-      sizeMin: 8,
-      sizeMax: 8,
-      colors: ['#ffe040'],
-      type: 'ring',
-      gravity: 0,
-      drag: 1,
-      angleMin: 0,
-      angleMax: 0,
-      spread: 0,
     }
   }
 

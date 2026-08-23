@@ -271,68 +271,59 @@ export class ControlCenter {
     if (this.langNameEl) this.langNameEl.textContent = i18n.name(i18n.locale)
   }
 
+  /**
+   * The one toggle-reflection body shared by all five set*State setters
+   * (§2.5): button gets `selected` + aria-pressed, label element gets the
+   * text and the `on` class.
+   */
+  private setToggleState(
+    btn: HTMLButtonElement | null,
+    state: HTMLElement | null,
+    label: string,
+    on: boolean,
+  ): void {
+    if (btn) {
+      btn.classList.toggle('selected', on)
+      btn.setAttribute('aria-pressed', String(on))
+    }
+    if (state) {
+      state.textContent = label
+      state.classList.toggle('on', on)
+    }
+  }
+
   /** Reflect the Performance Observatory overlay's on/off state in the
    *  DEVELOPER panel button (highlighted + ON/OFF label). Keeps the Control
    *  Center in sync whether the overlay was toggled here or via the Alt+D key. */
   setPerfState(on: boolean): void {
-    if (this.perfBtn) {
-      this.perfBtn.classList.toggle('selected', on)
-      this.perfBtn.setAttribute('aria-pressed', String(on))
-    }
-    if (this.perfState) {
-      this.perfState.textContent = on ? 'ON' : 'OFF'
-      this.perfState.classList.toggle('on', on)
-    }
+    this.setToggleState(this.perfBtn, this.perfState, on ? 'ON' : 'OFF', on)
   }
 
   /** Reflect fullscreen state in the DISPLAY panel button. */
   setFullscreenState(on: boolean): void {
-    if (this.fullscreenBtn) {
-      this.fullscreenBtn.classList.toggle('selected', on)
-      this.fullscreenBtn.setAttribute('aria-pressed', String(on))
-    }
-    if (this.fullscreenState) {
-      this.fullscreenState.textContent = on ? 'ON' : 'OFF'
-      this.fullscreenState.classList.toggle('on', on)
-    }
+    this.setToggleState(this.fullscreenBtn, this.fullscreenState, on ? 'ON' : 'OFF', on)
   }
 
   /** Reflect Performance Mode state in the DISPLAY panel button. */
   setPerfModeState(on: boolean): void {
-    if (this.perfModeBtn) {
-      this.perfModeBtn.classList.toggle('selected', on)
-      this.perfModeBtn.setAttribute('aria-pressed', String(on))
-    }
-    if (this.perfModeState) {
-      this.perfModeState.textContent = on ? 'ON' : 'OFF'
-      this.perfModeState.classList.toggle('on', on)
-    }
+    this.setToggleState(this.perfModeBtn, this.perfModeState, on ? 'ON' : 'OFF', on)
   }
 
   /** Reflect coop (Lie-Back-Win) state in the GAMEPLAY panel button. */
   setCoopState(on: boolean): void {
-    if (this.coopBtn) {
-      this.coopBtn.classList.toggle('selected', on)
-      this.coopBtn.setAttribute('aria-pressed', String(on))
-    }
-    if (this.coopState) {
-      this.coopState.textContent = on ? 'ON' : 'OFF'
-      this.coopState.classList.toggle('on', on)
-    }
+    this.setToggleState(this.coopBtn, this.coopState, on ? 'ON' : 'OFF', on)
   }
 
   /** Reflect 督战 (supervise) state in the GAMEPLAY panel button.
    *  `mode` is one of 'off' (督战 OFF), 'single' (督战 x1 ON), 'dual' (督战 x2 ON). */
   setSpectateState(mode: 'off' | 'single' | 'dual'): void {
     const on = mode !== 'off'
-    if (this.spectateBtn) {
-      this.spectateBtn.classList.toggle('selected', on)
-      this.spectateBtn.setAttribute('aria-pressed', String(on))
-    }
-    if (this.spectateState) {
-      this.spectateState.textContent = mode === 'dual' ? 'x2' : mode === 'single' ? 'x1' : 'OFF'
-      this.spectateState.classList.toggle('on', on)
-    }
+    this.setToggleState(
+      this.spectateBtn,
+      this.spectateState,
+      mode === 'dual' ? 'x2' : mode === 'single' ? 'x1' : 'OFF',
+      on,
+    )
   }
 
   /** Toggle the theme dropdown open/closed (and the button's aria state). */
