@@ -11,6 +11,8 @@ export {
   drawAllyAuraPaths,
   drawHpLevelAuraPaths,
   drawCommanderAuraPaths,
+  POWERUP_GLOW_FREQ,
+  paintPowerUpGlow,
 } from './SpriteArtistCore'
 export type { AuraConfig } from './SpriteArtistCore'
 

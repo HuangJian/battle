@@ -248,26 +248,17 @@ export class TerrainRenderSlice {
   }
 
   /**
-   * Redraw a single terrain cell in place (used for incremental updates).
-   * Reproduces exactly what the full rebuild would draw for that cell:
-   * flat clear for empty space, or the tile art for a solid tile.
+   * Draw one solid terrain tile's art into the terrain cache at cell (c, r).
+   *
+   * Single source for the twin switches that used to live in
+   * {@link redrawTerrainCell} and {@link rebuildTerrainCache} and had to be
+   * kept in sync by hand (plan/refactor.zcode.md §2.3). Base cells repaint
+   * the WHOLE 2×2 crystal from its block top-left — see the note inside.
    */
-  redrawTerrainCell(c: number, r: number, type: TerrainType, tm: TileMap): void {
-    const ctx = this.r.terrainCacheCtx
+  private paintTerrainCellArt(type: TerrainType, c: number, r: number, tm: TileMap): void {
+    const artist = this.r.artist
     const x = c * CELL
     const y = r * CELL
-    // Repaint bg for this cell (R5-A: bg is baked into the opaque cache, so a
-    // destroyed tile reveals the bg rather than transparency). Equivalent to
-    // the old `clearRect` for the visual result, because the cache is composited
-    // as an opaque blit — there is no "behind the cache" to show through.
-    this.paintCacheBg(ctx, x, y, CELL, CELL, this.r.artist.theme)
-
-    if (type === 'empty') {
-      // Empty space: clean flat ground (bg painted above).
-      return
-    }
-
-    const artist = this.r.artist
     switch (type) {
       case 'brick':
         artist.drawBrick(x, y, CELL)
@@ -303,6 +294,29 @@ export class TerrainRenderSlice {
     }
   }
 
+  /**
+   * Redraw a single terrain cell in place (used for incremental updates).
+   * Reproduces exactly what the full rebuild would draw for that cell:
+   * flat clear for empty space, or the tile art for a solid tile.
+   */
+  redrawTerrainCell(c: number, r: number, type: TerrainType, tm: TileMap): void {
+    const ctx = this.r.terrainCacheCtx
+    const x = c * CELL
+    const y = r * CELL
+    // Repaint bg for this cell (R5-A: bg is baked into the opaque cache, so a
+    // destroyed tile reveals the bg rather than transparency). Equivalent to
+    // the old `clearRect` for the visual result, because the cache is composited
+    // as an opaque blit — there is no "behind the cache" to show through.
+    this.paintCacheBg(ctx, x, y, CELL, CELL, this.r.artist.theme)
+
+    if (type === 'empty') {
+      // Empty space: clean flat ground (bg painted above).
+      return
+    }
+
+    this.paintTerrainCellArt(type, c, r, tm)
+  }
+
   /** Redraw a single forest cell in the forest cache (clear or draw). */
   redrawForestCell(c: number, r: number): void {
     const ctx = this.r.forestCacheCtx
@@ -333,33 +347,11 @@ export class TerrainRenderSlice {
       for (let c = 0; c < GRID; c++) {
         const type = tm.get(c, r)
         if (type === 'empty' || type === 'forest' || type === 'water') continue
+        // Non-top-left base cells are painted together with their crystal's
+        // top-left cell — skip them here so each base draws exactly once.
+        if (type === 'base' && !tm.isBaseTopLeft(c, r)) continue
 
-        const x = c * CELL
-        const y = r * CELL
-
-        switch (type) {
-          case 'brick':
-            artist.drawBrick(x, y, CELL)
-            break
-          case 'steel': {
-            this.neighborMask(tm, c, r, 'steel')
-            const m = this._nmask
-            artist.drawSteel(x, y, CELL, m[0], m[1], m[2], m[3])
-            break
-          }
-          case 'ice': {
-            this.neighborMask(tm, c, r, 'ice')
-            const m = this._nmask
-            artist.drawIce(x, y, CELL, m[0], m[1], m[2], m[3])
-            break
-          }
-          case 'base':
-            // Draw the whole 2×2 base as ONE crystal (only from its top-left cell).
-            if (tm.isBaseTopLeft(c, r)) {
-              artist.drawBase(c * CELL, r * CELL, CELL * 2, false, this.r.baseDamageFrac)
-            }
-            break
-        }
+        this.paintTerrainCellArt(type, c, r, tm)
       }
     }
 

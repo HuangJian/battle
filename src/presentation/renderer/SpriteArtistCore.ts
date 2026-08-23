@@ -51,6 +51,60 @@ export function drawWaterTile(
   }
 }
 
+/**
+ * Power-up glow pulse frequency — single source for `drawPowerUp`'s pulse
+ * (`sin(frame * POWERUP_GLOW_FREQ)`) and the pre-rendered glow buckets
+ * (`auraBucket(frame, POWERUP_GLOW_FREQ)`). Lives here so both SpriteCache
+ * and the effects slice import ONE constant instead of a literal that had to
+ * be kept in sync by hand (plan/refactor.zcode.md §2.3).
+ */
+export const POWERUP_GLOW_FREQ = 0.11
+
+/**
+ * Paint the power-up glow halo (golden radial gradient) centered at (cx, cy)
+ * for a CELL-sized power-up at pulse `p` ∈ [0, 1].
+ *
+ * Single source for BOTH consumers that used to hand-copy this math
+ * (plan/refactor.zcode.md §2.3):
+ *  - SpriteCache.rebuildPowerUpGlow — bakes it into 16 pulse-bucket bitmaps;
+ *  - EffectSpriteSlice.drawPowerUpGlowDirect — per-frame fallback when no
+ *    cache bitmap exists.
+ * Pixel-identical between the two paths by construction.
+ */
+export function paintPowerUpGlow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  p: number,
+): void {
+  const glowR = size * (0.66 + 0.06 * p)
+  const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
+  g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * p})`)
+  g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * p})`)
+  g.addColorStop(1, 'rgba(255, 200, 70, 0)')
+  const prevFill = ctx.fillStyle
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = prevFill
+}
+
+/**
+ * Explosion bitmap draw geometry shared by the cached-blit and SVG-fallback
+ * paths of drawExplosion: grown side length at progress `progress`.
+ * `grow` = extra expansion for big vs small blasts.
+ */
+export function explosionSizeAt(size: number, progress: number, kind: 'small' | 'big'): number {
+  return size * (0.6 + progress * (1.0 + (kind === 'big' ? 1.0 : 0.7)))
+}
+
+/** Explosion fade alpha at progress: opaque until 70%, then linear to 0. */
+export function explosionAlphaAt(progress: number): number {
+  return progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
+}
+
 // ================================================================
 // Aura pre-rendering (R3 — eliminates per-frame path rasterization)
 // ================================================================

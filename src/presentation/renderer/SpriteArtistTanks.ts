@@ -5,7 +5,7 @@
 // core instance back-reference (`this.r`).
 // ================================================================
 import type { Direction } from '../../constants'
-import { DIR_TO_INDEX } from './SpriteCache'
+import { DIR_TO_INDEX, dirRotation } from './SpriteCache'
 import { TANK_KEY_MAP, AURA_CONFIGS, auraBucket, drawAllyAuraPaths } from './SpriteArtistCore'
 import type { SpriteArtistCore } from './SpriteArtistCore'
 
@@ -53,8 +53,7 @@ export class TankSpriteSlice {
 
     ctx.save()
     ctx.translate(x + size / 2, y + size / 2)
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const rot = dirRotation(dir)
     ctx.rotate(rot)
     ctx.translate(-size / 2, -size / 2)
 
@@ -168,8 +167,7 @@ export class TankSpriteSlice {
     }
 
     // SVG fallback (also skipped when skipSvg is set)
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const rot = dirRotation(dir)
     if (!this.r.skipSvg && this.r.drawSvgCentered('tank.player1', x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(level ?? 0, 3))
       if (stage > 0) this.r.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, rot, 1.28)
@@ -216,8 +214,7 @@ export class TankSpriteSlice {
       }
     }
     // SVG fallback: use tank.player2 asset.
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const rot = dirRotation(dir)
     if (!this.r.skipSvg && this.r.drawSvgCentered('tank.player2', x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(level ?? 0, 3))
       if (stage > 0) this.r.drawSvgCentered(`fx.starbuf${stage}`, x, y, size, rot, 1.28)
@@ -286,8 +283,7 @@ export class TankSpriteSlice {
     }
 
     // SVG fallback (also skipped when skipSvg is set)
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const rot = dirRotation(dir)
     if (!this.r.skipSvg && this.r.drawSvgCentered(key, x, y, size, rot, 1.28)) {
       const stage = Math.max(0, Math.min(hitStage, 4))
       if (stage > 0) this.r.drawSvgCentered(`fx.hit${stage}`, x, y, size, rot, 1.28)
@@ -370,8 +366,7 @@ export class TankSpriteSlice {
     }
 
     // SVG fallback (also skipped when skipSvg is set)
-    const rot =
-      dir === 'up' ? 0 : dir === 'right' ? Math.PI / 2 : dir === 'down' ? Math.PI : -Math.PI / 2
+    const rot = dirRotation(dir)
     if (!this.r.skipSvg && this.r.drawSvgCentered(key, x, y, size, rot, 1.28)) return
 
     // Procedural fallback — purple ally tank normally; a silver-white player

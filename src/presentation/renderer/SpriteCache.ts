@@ -10,7 +10,13 @@ import {
   drawAllyAuraPaths,
   drawHpLevelAuraPaths,
   drawCommanderAuraPaths,
+  POWERUP_GLOW_FREQ,
+  paintPowerUpGlow,
 } from './SpriteArtist'
+
+// Single-source re-export: consumers historically imported the glow frequency
+// from here; it is now defined once in SpriteArtistCore (§2.3).
+export { POWERUP_GLOW_FREQ }
 
 /**
  * SpriteCache — pre-rasterizes SVG sprites to canvas bitmaps at init time.
@@ -36,13 +42,6 @@ const BULLET_RENDER_SIZE = BULLET * 1.5 // 9px
 const EXPLOSION_SIZE = 96
 
 /**
- * Power-up glow pulse frequency (matches SpriteArtist.drawPowerUp's
- * `Math.sin(frame * 0.11)`). Used by `auraBucket(frame, POWERUP_GLOW_FREQ)`
- * to quantize the pulse into 16 buckets for pre-rendered glow bitmaps.
- */
-export const POWERUP_GLOW_FREQ = 0.11
-
-/**
  * Canvas size for pre-rendered power-up glow bitmaps (logical px). Sized to
  * fit the max glow radius: `CELL * (0.66 + 0.06 * 1.0) * 2 = CELL * 1.44 ≈ 24`.
  */
@@ -63,14 +62,24 @@ const INSIGNIA_KEYS: Record<string, string> = {
   veteran: 'fx.insignia.veteran',
 }
 
-/** Rotation values for each direction (matches SpriteArtist) */
-const ROTATIONS = [0, Math.PI / 2, Math.PI, -Math.PI / 2] // up, right, down, left
+/** Rotation values for each direction (up, right, down, left). */
+const ROTATIONS = [0, Math.PI / 2, Math.PI, -Math.PI / 2]
 
 export const DIR_TO_INDEX: Record<string, number> = {
   up: 0,
   right: 1,
   down: 2,
   left: 3,
+}
+
+/**
+ * Rotation (radians) for a facing direction — the authoritative direction→
+ * rotation mapping. Single source for both pre-rasterization (ROTATIONS
+ * above) and every per-frame SVG fallback in SpriteArtistTanks, which used
+ * to re-derive it as a hand-copied ternary (plan/refactor.zcode.md §2.3).
+ */
+export function dirRotation(dir: string): number {
+  return ROTATIONS[DIR_TO_INDEX[dir] ?? 0]
 }
 
 export class SpriteCache {
@@ -321,16 +330,9 @@ export class SpriteCache {
     const half = cs / 2
     for (let b = 0; b < AURA_BUCKETS; b++) {
       const pulse = (b + 0.5) / AURA_BUCKETS
-      const glowR = CELL * (0.66 + 0.06 * pulse)
       const { canvas, ctx } = createOffscreenCanvas(cs * this.dpr, cs * this.dpr, this.dpr)
-      const g = ctx.createRadialGradient(half, half, CELL * 0.12, half, half, glowR)
-      g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
-      g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
-      g.addColorStop(1, 'rgba(255, 200, 70, 0)')
-      ctx.fillStyle = g
-      ctx.beginPath()
-      ctx.arc(half, half, glowR, 0, Math.PI * 2)
-      ctx.fill()
+      // Shared painter (§2.3) — identical math to the per-frame direct path.
+      paintPowerUpGlow(ctx, half, half, CELL, pulse)
       this.powerUpGlowSprites.push(canvas)
     }
   }

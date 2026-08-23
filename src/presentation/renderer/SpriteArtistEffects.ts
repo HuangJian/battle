@@ -5,7 +5,7 @@
 // core instance back-reference (`this.r`).
 // ================================================================
 import type { Direction } from '../../constants'
-import { POWERUP_GLOW_FREQ } from './SpriteCache'
+import { POWERUP_GLOW_FREQ, paintPowerUpGlow, explosionSizeAt, explosionAlphaAt } from './SpriteArtistCore'
 import {
   ITEM_KEY_MAP,
   HP_LEVEL_KEYS,
@@ -136,26 +136,14 @@ export class EffectSpriteSlice {
 
   /**
    * Direct (non-cached) power-up glow — fallback when SpriteCache is not
-   * available (procedural / no-cache themes). Pixel-identical to the
-   * pre-rendered bitmap path (R4-glow): same colors, same radii, same pulse
-   * formula (`sin(frame * 0.11) * 0.5 + 0.5`). Inner radius `size * 0.12`,
-   * outer `size * (0.66 + 0.06 * pulse)` — matches `rebuildPowerUpGlow` since
-   * power-ups are always CELL-sized (size === CELL).
+   * available (procedural / no-cache themes). Delegates to the shared
+   * painter (§2.3) with the frame pulse, so it is pixel-identical to the
+   * pre-rendered bitmap path by construction. Power-ups are always
+   * CELL-sized (size === CELL).
    */
   drawPowerUpGlowDirect(cx: number, cy: number, size: number, frame: number): void {
-    const ctx = this.r.ctx
-    const pulse = 0.5 + 0.5 * Math.sin(frame * 0.11)
-    const glowR = size * (0.66 + 0.06 * pulse)
-    const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
-    g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * pulse})`)
-    g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * pulse})`)
-    g.addColorStop(1, 'rgba(255, 200, 70, 0)')
-    const prevFill = ctx.fillStyle
-    ctx.fillStyle = g
-    ctx.beginPath()
-    ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.fillStyle = prevFill
+    const p = 0.5 + 0.5 * Math.sin(frame * POWERUP_GLOW_FREQ)
+    paintPowerUpGlow(this.r.ctx, cx, cy, size, p)
   }
 
   /** Draw countdown timer on power-up (top-right corner, visible from spawn) */
@@ -382,24 +370,14 @@ export class EffectSpriteSlice {
     const cache = this.r.spriteCache
     const expSprite = cache?.built ? cache.getExplosionSprite() : null
     if (expSprite) {
-      const grow = kind === 'big' ? 1.0 : 0.7
-      const s2 = size * (0.6 + progress * (1.0 + grow))
-      const alpha = progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
-      ctx.globalAlpha = alpha
-      ctx.drawImage(expSprite, x - s2 / 2, y - s2 / 2, s2, s2)
-      ctx.globalAlpha = 1
+      this.blitExplosion(expSprite, x, y, size, progress, kind)
       return
     }
 
     // SVG fallback
     const img = this.r.lib?.get('fx.explosion')
     if (img) {
-      const grow = kind === 'big' ? 1.0 : 0.7
-      const s2 = size * (0.6 + progress * (1.0 + grow))
-      const alpha = progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
-      ctx.globalAlpha = alpha
-      ctx.drawImage(img, x - s2 / 2, y - s2 / 2, s2, s2)
-      ctx.globalAlpha = 1
+      this.blitExplosion(img, x, y, size, progress, kind)
       return
     }
 
@@ -466,6 +444,23 @@ export class EffectSpriteSlice {
 
       ctx.globalAlpha = 1
     }
+  }
+
+  /** Blit an explosion source (cached bitmap or SVG image) with the shared
+   *  grow/fade math (§2.3) — both drawExplosion fast paths were hand-copies. */
+  private blitExplosion(
+    src: CanvasImageSource,
+    x: number,
+    y: number,
+    size: number,
+    progress: number,
+    kind: 'small' | 'big',
+  ): void {
+    const s2 = explosionSizeAt(size, progress, kind)
+    const ctx = this.r.ctx
+    ctx.globalAlpha = explosionAlphaAt(progress)
+    ctx.drawImage(src, x - s2 / 2, y - s2 / 2, s2, s2)
+    ctx.globalAlpha = 1
   }
 
   /**
