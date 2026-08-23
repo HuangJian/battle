@@ -1,14 +1,66 @@
 #!/bin/bash
-# Determinism-signature batch (plan/refactor.zcode.md B3 gate).
-# Per-tick world signatures over a fixed (difficulty, stage, seed) grid;
-# concatenated and hashed. Byte-identical before/after each AI refactor step.
+# Determinism-signature batch gate (DECISIONS §254 flow; corpus v2 — 遗留 #12).
+#
+# Dumps per-tick world signatures over a fixed (difficulty, stage, seed) grid,
+# concatenated into tmp/det-batch.txt and hashed. Compare the sha256 before vs
+# after each AI-touching refactor step: MUST be byte-identical unless the change
+# intentionally alters behavior (then re-run godai gates + re-capture truth).
+#
+# Runtime ~100s for the full grid (was ~35s at 7 rows) — run once per batch,
+# not per micro-edit.
+#
+# Corpus rationale (rows marked `idx=` take the RAW STAGES index that
+# per-seed-diff consumes; comments cite the incident each row guards):
+#   legacy grid — the original 7 rows, kept verbatim for continuity;
+#   Lattice(idx11)     §74/§152-W1 steel-path (seed 934391936) + classic contrast;
+#   Frozen Field(18)   powerupStuck autopsy seed37;
+#   Eagle Nest(30)     navBreakStuck seeds 14 / 71 (§186);
+#   Diamond(32)        T2a-camp seed83 (known structural hard case);
+#   Battlement(33)     base-l3-t25-seed2 autopsy (→ §178 dual breach);
+#   Star Fort(31)      chokepoint A/B round-3 seed23;
+#   Twin Towers(8)     stuck-at-center root cause;
+#   Steel Web(13)      central-breach-negative stage;
+#   Ice Palace(26)     ice-glide path;
+#   Brick Maze(27)     brick-dense adaptation (classic + chaos arms).
+#
+# Known blind spot: single-player only (per-seed-diff has no spectateDual/coop
+# wiring) — dual-central-breach/coop paths stay covered by the godai-* gates.
 set -e
 cd "$(dirname "$0")/.."
 OUT=tmp/det-batch.txt
 : > "$OUT"
-for combo in "classic 7 5" "classic 22 31" "hard 18 13" "hard 32 5" "hard 4 42" "chaos 6 11" "chaos 28 17" "hard 12 99"; do
+
+COMBOS=(
+  # ---- legacy grid (raw idx, kept from corpus v1) ----
+  "classic 7 5"
+  "classic 22 31"
+  "hard 18 13"
+  "hard 32 5"
+  "hard 4 42"
+  "chaos 6 11"
+  "chaos 28 17"
+  "hard 12 99"
+  # ---- incident grid (corpus v2) ----
+  "hard 11 934391936"   # Lattice · §152-W1 steel-path W1 seed
+  "classic 11 14"       # Lattice · instant-model contrast arm
+  "hard 18 37"          # Frozen Field · powerupStuck autopsy
+  "hard 30 14"          # Eagle Nest · navBreakStuck seed14
+  "hard 30 71"          # Eagle Nest · §186 seed71
+  "hard 32 83"          # Diamond · T2a camp seed83
+  "hard 33 2"           # Battlement · base autopsy seed2 (§178)
+  "chaos 31 23"         # Star Fort · chokepoint A/B r3 seed23
+  "hard 8 5"            # Twin Towers · stuck-at-center
+  "hard 13 12"          # Steel Web · central-breach negative case
+  "hard 26 12"          # Ice Palace · ice glide
+  "hard 27 8"           # Brick Maze · brick-dense adapt (pool model)
+  "chaos 27 3"          # Brick Maze · chaos arm
+)
+
+for combo in "${COMBOS[@]}"; do
   set -- $combo
-  echo "== $1 S$2 seed$3" >> "$OUT"
+  echo "== $1 idx$2 seed$3" >> "$OUT"
   bun tools/diag/per-seed-diff.ts dump "$2" "$3" --difficulty "$1" >> "$OUT"
 done
+
+echo "corpus: ${#COMBOS[@]} runs, $(wc -l < "$OUT") signature lines"
 shasum -a 256 "$OUT"
