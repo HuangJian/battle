@@ -283,10 +283,11 @@ export type GameEvent =
   | {
       type: 'tank_destroyed'
       tank: Tank
-      by: 'player' | 'enemy' | 'self'
+      by: 'player' | 'enemy'
       /** The tank id that fired the killing bullet (additive death-attribution
        *  metadata; undefined for non-bullet kills). Read-only observation —
-       *  never feeds back into gameplay. */
+       *  never feeds back into gameplay. Consumed by tools/sim forensics
+       *  (killer-kind attribution). */
       byId?: number
     }
   | { type: 'bullet_fired'; bullet: Bullet }
