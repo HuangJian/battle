@@ -128,14 +128,10 @@ export interface GameplayRules {
   scoreByKind: Partial<Record<TankKind, number>>
   /** Score for collecting a power-up. */
   itemScore: number
-  /** Score threshold that grants an extra life (0 = disabled). */
-  extraLifeScore: number
   /** Stage-clear score multiplier base (1.05^N modern, 1.0 FC). */
   scoreStageFactor: number
 
   // ── Enemy behavior (classic none-tier branch) ────────────────
-  /** 'phased' is a NON-faithful modern extra; classic stays 'wander'. */
-  enemyBehavior: 'wander' | 'phased'
   /** Direction-weight table for classic wander bias (updateNoneTank → pickClassicDir).
    *  Keys are cardinal directions; higher weight = more likely to be chosen.
    *  FC-1985: enemies wander with a VERY slight downward bias (the eagle sits
@@ -146,9 +142,6 @@ export interface GameplayRules {
    *  If false, enemies also re-roll periodically (modern convenience that
    *  prevents permanent jams). */
   turnOnCollisionOnly: boolean
-
-  // ── Terrain (stretch, not implemented) ───────────────────────
-  brickGranularity: 'cell' | 'quarter'
 
   // ── Drop position randomization ─────────────────────────────
   /** Probability weights for near/mid/far drop positions relative to the
@@ -243,13 +236,10 @@ export const DEFAULT_RULES: GameplayRules = {
   scoreModel: 'flat',
   scoreByKind: {},
   itemScore: ITEM_SCORE, // 100
-  extraLifeScore: 0, // current: no score→life (life only via 'tank')
   scoreStageFactor: 1.05, // current 1.05^stage
 
-  enemyBehavior: 'wander', // current 100%-none constant wander
   classicDirWeights: { down: 3, left: 1, right: 1, up: 0.35 }, // modern strong downward bias
   turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
-  brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
   // §86c: Turn cooldown — minimum turn period enforced for ALL tanks (player +
   // enemy) in SimulationCombat.updateMovement(). User request (2026-08-09):
@@ -329,10 +319,8 @@ export const RULES: Record<string, GameplayRules> = {
     scoreModel: 'byKind',
     scoreByKind: { basic: 100, fast: 200, power: 300, armor: 400 },
     itemScore: 500, // FC item = 500
-    extraLifeScore: 0, // no score→life; life only via 'tank'
     scoreStageFactor: 1.0, // FC score is flat (no stage scaling)
 
-    enemyBehavior: 'wander', // FAITHFUL: constant random wander, NO chase/push phases
     // FC-1985 direction weights: enemies wander with a VERY slight downward bias
     // (the eagle is at the bottom of the field), but lateral directions are nearly
     // equal. The original game has no strong directional preference — enemies
@@ -347,7 +335,6 @@ export const RULES: Record<string, GameplayRules> = {
     // direction. The modern timer re-roll (turnOnCollisionOnly: false) is
     // a convenience that prevents permanent jams in tight corridors.
     turnOnCollisionOnly: true,
-    brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
     // §86c: Turn cooldown — uniform 200ms for ALL tanks (see DEFAULT_RULES note;
     // deliberately exceeds the §95 sweet spot of 100ms per user request).
