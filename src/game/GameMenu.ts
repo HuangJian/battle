@@ -11,6 +11,7 @@ import { STAGES } from '../config/stages'
 import { LOW_POWER_STATES, PERF_MODE_RENDER_FPS } from '../constants'
 import { i18n, t, AVAILABLE_LOCALES } from '../i18n'
 import type { Locale } from '../i18n/types'
+import { menuRowCount, menuRowIndex, type MenuRowKey } from './UIState'
 import type { Game } from './Game'
 
 export class MenuController {
@@ -62,14 +63,19 @@ export class MenuController {
 
     // Row count grows by one when a resumable manual snapshot is offered
     // (the RESUME row sits at index 0, pushing the config rows down).
-    // Full order: RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE / NEW GAME / CONTROLS
-    const rowCount = this.g.resumeSnapshot ? 7 : 6
-    // Move cursor between rows (RESUME? / DIFFICULTY / THEME / LANGUAGE / STAGE)
-    // Canvas preview only switches for RESUME (0), STAGE (off+3), NEW GAME (off+4).
-    const off = this.g.resumeSnapshot ? 1 : 0
+    // Row ↔ index mapping: MENU_ROW_KEYS in ./UIState (single source —
+    // consumed here and by MenuScreen's highlighting).
+    const hasResume = !!this.g.resumeSnapshot
+    const rowCount = menuRowCount(hasResume)
+    const row = (key: MenuRowKey) => menuRowIndex(key, hasResume)
+    // Canvas preview only switches for RESUME / STAGE / NEW GAME rows.
     if (this.g.input.isUpPressed()) {
       w.ui.menuCursor = (w.ui.menuCursor - 1 + rowCount) % rowCount
-      if (w.ui.menuCursor === 0 || w.ui.menuCursor === off + 3 || w.ui.menuCursor === off + 4) {
+      if (
+        w.ui.menuCursor === row('resume') ||
+        w.ui.menuCursor === row('stage') ||
+        w.ui.menuCursor === row('start-row')
+      ) {
         this.applyMenuPreview()
       }
       this.g.audio.init()
@@ -78,7 +84,11 @@ export class MenuController {
     }
     if (this.g.input.isDownPressed()) {
       w.ui.menuCursor = (w.ui.menuCursor + 1) % rowCount
-      if (w.ui.menuCursor === 0 || w.ui.menuCursor === off + 3 || w.ui.menuCursor === off + 4) {
+      if (
+        w.ui.menuCursor === row('resume') ||
+        w.ui.menuCursor === row('stage') ||
+        w.ui.menuCursor === row('start-row')
+      ) {
         this.applyMenuPreview()
       }
       this.g.audio.init()
@@ -91,16 +101,16 @@ export class MenuController {
     if (left || right) {
       const dir = left ? -1 : 1
       let changed = false
-      if (w.ui.menuCursor === off) {
+      if (w.ui.menuCursor === row('difficulty')) {
         this.g.difficultyIndex =
           (this.g.difficultyIndex + dir + DIFFICULTY_KEYS.length) % DIFFICULTY_KEYS.length
         w.selectDifficulty(DIFFICULTY_KEYS[this.g.difficultyIndex])
         changed = true
-      } else if (w.ui.menuCursor === off + 1) {
+      } else if (w.ui.menuCursor === row('theme')) {
         this.g.themeIndex = (this.g.themeIndex + dir) % THEME_KEYS.length
         w.selectTheme(THEME_KEYS[this.g.themeIndex])
         changed = true
-      } else if (w.ui.menuCursor === off + 2) {
+      } else if (w.ui.menuCursor === row('language')) {
         // LANGUAGE row — cycle to the next available locale.
         i18n.cycleLocale()
         this.g.presentation.ui.notify(
@@ -108,7 +118,7 @@ export class MenuController {
           'info',
         )
         changed = true
-      } else if (w.ui.menuCursor === off + 3) {
+      } else if (w.ui.menuCursor === row('stage')) {
         w.ui.selectedStage = (w.ui.selectedStage + dir + STAGES.length) % STAGES.length
         changed = true
       }
@@ -125,21 +135,18 @@ export class MenuController {
     if (this.g.input.isThemePressed()) {
       this.g.themeIndex = (this.g.themeIndex + 1) % THEME_KEYS.length
       w.selectTheme(THEME_KEYS[this.g.themeIndex])
-      w.ui.menuCursor = off + 1
+      w.ui.menuCursor = row('theme')
       this.applyMenuPreview()
       this.g.audio.init()
       this.g.audio.resume()
       this.g.audio.playMenuSelect()
     }
-    // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter:
-    // RESUME (index 0, only when a snapshot exists) resumes;
-    // NEW GAME (off + 4) starts a fresh game;
-    // CONTROLS (off + 5) opens the key-bindings panel.
-    const controlsIdx = off + 5
+    // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter.
+    const controlsIdx = row('controls')
     if (this.g.input.isConfirmPressed()) {
       if (this.g.resumeSnapshot && w.ui.menuCursor === 0) {
         this.menuResume()
-      } else if (w.ui.menuCursor === off + 4) {
+      } else if (w.ui.menuCursor === row('start-row')) {
         this.menuStart()
       } else if (w.ui.menuCursor === controlsIdx) {
         this.g.presentation.ui.openControls()
@@ -196,7 +203,7 @@ export class MenuController {
     if (idx < 0) return
     this.g.difficultyIndex = idx
     this.g.world.selectDifficulty(DIFFICULTY_KEYS[idx])
-    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 1 : 0
+    this.g.world.ui.menuCursor = menuRowIndex('difficulty', !!this.g.resumeSnapshot)
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()
@@ -211,7 +218,7 @@ export class MenuController {
     if (idx < 0) return
     this.g.themeIndex = idx
     this.g.world.selectTheme(THEME_KEYS[idx])
-    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 2 : 1
+    this.g.world.ui.menuCursor = menuRowIndex('theme', !!this.g.resumeSnapshot)
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()
@@ -224,7 +231,7 @@ export class MenuController {
     if (this.g.world.state !== 'menu') return
     this.g.world.ui.selectedStage =
       (this.g.world.ui.selectedStage + dir + STAGES.length) % STAGES.length
-    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 4 : 3
+    this.g.world.ui.menuCursor = menuRowIndex('stage', !!this.g.resumeSnapshot)
     // Swap the battle-field preview to the newly selected stage's layout.
     this.applyMenuPreview()
     this.g.audio.init()
@@ -238,7 +245,7 @@ export class MenuController {
     if (this.g.world.state !== 'menu') return
     if (index < 0 || index >= STAGES.length) return
     this.g.world.ui.selectedStage = index
-    this.g.world.ui.menuCursor = this.g.resumeSnapshot ? 4 : 3
+    this.g.world.ui.menuCursor = menuRowIndex('stage', !!this.g.resumeSnapshot)
     this.applyMenuPreview()
     this.g.audio.init()
     this.g.audio.resume()

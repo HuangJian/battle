@@ -32,3 +32,34 @@ export function createUIState(): UIState {
     recoveryFading: false,
   }
 }
+
+// ── Menu row order — single source for the row ↔ menuCursor contract ──────
+// (遗留 #6 / plan/refactor.zcode.md §2.5 follow-up: this mapping used to be
+// encoded twice as `off + N` arithmetic in GameMenu.ts and once more in
+// MenuScreen.ts.) RESUME sits at index 0 only when a resumable manual
+// snapshot exists; without it the row is hidden and every index shifts down
+// by one. Game.ts/GameMenu own the cursor VALUE semantics and consume these
+// helpers; MenuScreen consumes them for highlighting.
+export const MENU_ROW_KEYS = [
+  'resume',
+  'difficulty',
+  'theme',
+  'language',
+  'stage',
+  'start-row',
+  'controls',
+] as const
+
+export type MenuRowKey = (typeof MENU_ROW_KEYS)[number]
+
+/** Cursor index of a menu row (-1 = not a cursor row). */
+export function menuRowIndex(key: MenuRowKey, hasResume: boolean): number {
+  const i = MENU_ROW_KEYS.indexOf(key)
+  if (i < 0) return -1
+  return !hasResume && i > 0 ? i - 1 : i
+}
+
+/** Number of navigable rows (the hidden RESUME row is not navigable). */
+export function menuRowCount(hasResume: boolean): number {
+  return hasResume ? MENU_ROW_KEYS.length : MENU_ROW_KEYS.length - 1
+}

@@ -3,6 +3,7 @@ import { DIFFICULTIES, DIFFICULTY_KEYS } from '../../config/difficulty'
 import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES, localizedStageName } from '../../config/stages'
 import { i18n, t } from '../../i18n'
+import { menuRowIndex, type MenuRowKey } from '../../game/UIState'
 
 /**
  * Menu action callbacks registered by Game so mouse clicks on the start
@@ -59,28 +60,14 @@ export class MenuScreen {
   private resumeTarget: { stage: number; stageName: string; score: number } | null = null
 
   /**
-   * Menu rows in visual/cursor order — the single source for the template-row
-   * ↔ `world.ui.menuCursor` mapping (§2.5, replacing the old `off + N`
-   * arithmetic that encoded this contract three separate times). When no
-   * RESUME target exists the first row is hidden and every index shifts down
-   * by one. NOTE: Game.ts/GameMenu.ts own the cursor VALUE semantics and keep
-   * their own arithmetic — this mapping only consumes it for highlighting.
+   * Cursor index of a row by its `data-menu` key (-1 = not a cursor row).
+   * Delegates to the shared MENU_ROW_KEYS mapping in src/game/UIState.ts —
+   * the single source consumed by BOTH this highlighter and GameMenu's
+   * cursor-value logic (遗留 #6: previously encoded here AND there as
+   * independent `off + N` arithmetic).
    */
-  private static readonly ROW_ORDER = [
-    'resume',
-    'difficulty',
-    'theme',
-    'language',
-    'stage',
-    'start-row',
-    'controls',
-  ] as const
-
-  /** Cursor index of a row by its `data-menu` key (-1 = not a cursor row). */
   private rowIndexFor(menuKey: string): number {
-    const i = MenuScreen.ROW_ORDER.indexOf(menuKey as (typeof MenuScreen.ROW_ORDER)[number])
-    if (i < 0) return -1
-    return !this.hasResume && i > 0 ? i - 1 : i
+    return menuRowIndex(menuKey as MenuRowKey, this.hasResume)
   }
 
   // Change guards (avoid unnecessary DOM writes every frame)
