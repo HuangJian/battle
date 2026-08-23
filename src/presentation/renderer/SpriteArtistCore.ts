@@ -1,10 +1,15 @@
 import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
+import { TANK_KEY_MAP, ITEM_KEY_MAP } from './SpriteKeyMaps'
 import type { SpriteLibrary } from './SpriteLibrary'
 import type { SpriteCache } from './SpriteCache'
 import { TerrainSpriteSlice } from './SpriteArtistTerrain'
 import { TankSpriteSlice } from './SpriteArtistTanks'
 import { EffectSpriteSlice } from './SpriteArtistEffects'
+
+// Registry-derived key maps (§2.2) — re-exported here so existing consumers
+// (slices, SpriteCache-adjacent code) keep their import path.
+export { TANK_KEY_MAP, ITEM_KEY_MAP }
 
 /**
  * Draw a single water tile (procedural, theme-aware, phase-animated) into `ctx`
@@ -311,30 +316,6 @@ export function drawCommanderAuraPaths(
   ctx.beginPath()
   ctx.arc(cx, cy, Math.max(bw, bh) * 0.4, 0, Math.PI * 2)
   ctx.fill()
-}
-
-/** Maps enemy tank kind → sprite key (module-level to avoid per-call allocation). */
-export const TANK_KEY_MAP: Record<string, string> = {
-  basic: 'tank.basic',
-  fast: 'tank.fast',
-  power: 'tank.power',
-  armor: 'tank.armor',
-}
-
-/** Maps power-up type → sprite key (module-level to avoid per-call allocation). */
-export const ITEM_KEY_MAP: Record<string, string> = {
-  star: 'item.star',
-  bomb: 'item.bomb',
-  shield: 'item.shield',
-  freeze: 'item.freeze',
-  tank: 'item.tank',
-  fence: 'item.fence',
-  boat: 'item.boat',
-  frenzy: 'item.frenzy',
-  sacrifice: 'item.sacrifice',
-  guard: 'item.guard',
-  repair: 'item.repair',
-  decoy: 'item.decoy',
 }
 
 /**

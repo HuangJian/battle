@@ -1,4 +1,5 @@
 import { TANK, BULLET, CELL } from '../../constants'
+import { spriteKeys } from '../../assets/sprites'
 import type { SpriteLibrary } from './SpriteLibrary'
 import { createOffscreenCanvas } from '../../utils/canvas'
 import type { ThemeColors } from '../../types'
@@ -135,16 +136,11 @@ export class SpriteCache {
     if (this._built) return
 
     // --- Tank sprites: pre-render all 4 directions ---
-    const tankKeys = [
-      'tank.player1',
-      'tank.basic',
-      'tank.fast',
-      'tank.power',
-      'tank.armor',
-      'tank.ally',
-      'tank.decoy',
-    ]
-    for (const key of tankKeys) {
+    // Derived from the SPRITE_URLS registry (§2.2): every `tank.*` key is
+    // pre-rotated. (This also fixed tank.player2, which used to be missing
+    // from the old hand-written list and silently took the per-frame SVG
+    // path every frame a P2 tank was on screen.)
+    for (const key of spriteKeys('tank.')) {
       const img = lib.get(key)
       if (!img) continue
       const canvases: CanvasImageSource[] = []
@@ -211,16 +207,11 @@ export class SpriteCache {
     }
 
     // --- Item sprites (non-rotated, at tank cell size) ---
-    const itemKeys = [
-      'item.star',
-      'item.bomb',
-      'item.shield',
-      'item.freeze',
-      'item.tank',
-      'item.repair',
-      'item.decoy',
-    ]
-    for (const key of itemKeys) {
+    // Derived from the SPRITE_URLS registry (§2.2): every `item.*` key is
+    // pre-rasterized. (This also fixed item.fence/boat/frenzy/sacrifice/guard,
+    // which were registered but missing from the old hand-written list and so
+    // silently took the per-frame SVG path whenever they were on screen.)
+    for (const key of spriteKeys('item.')) {
       const img = lib.get(key)
       if (!img) continue
       this.itemSprites.set(key, this.renderItemAtSize(img, TANK))
