@@ -1,5 +1,5 @@
 import { TANK, BULLET, CELL } from '../../constants'
-import { spriteKeys } from '../../assets/sprites'
+import { spriteKeys, SPRITE_URLS } from '../../assets/sprites'
 import type { SpriteLibrary } from './SpriteLibrary'
 import { createOffscreenCanvas } from '../../utils/canvas'
 import type { ThemeColors } from '../../types'
@@ -82,6 +82,23 @@ export function dirRotation(dir: string): number {
   return ROTATIONS[DIR_TO_INDEX[dir] ?? 0]
 }
 
+/**
+ * The static overlay key lists above (STARBUF_KEYS / HIT_KEYS / INSIGNIA_KEYS
+ * and the lone 'fx.shield' effect) carry POSITIONAL contracts — index =
+ * stage−1 — and the fx.hit0 exclusion, so they cannot be prefix-derived like
+ * the tank/item key sets (§2.2). That hand-maintenance is the residual drift
+ * risk: renaming a key in SPRITE_URLS would silently blank the overlays.
+ * Validated once per build() against the registry (遗留 #7) — fail fast at
+ * boot listing the drifted entries instead.
+ */
+function assertStaticFxKeysRegistered(): void {
+  const declared = ['fx.shield', ...STARBUF_KEYS, ...HIT_KEYS, ...Object.values(INSIGNIA_KEYS)]
+  const missing = declared.filter((k) => !(k in SPRITE_URLS))
+  if (missing.length > 0) {
+    throw new Error(`SpriteCache: fx keys missing from SPRITE_URLS registry: ${missing.join(', ')}`)
+  }
+}
+
 export class SpriteCache {
   private tankSprites = new Map<string, CanvasImageSource[]>()
   private effectSprites = new Map<string, CanvasImageSource>()
@@ -143,6 +160,7 @@ export class SpriteCache {
 
   build(lib: SpriteLibrary): void {
     if (this._built) return
+    assertStaticFxKeysRegistered()
 
     // --- Tank sprites: pre-render all 4 directions ---
     // Derived from the SPRITE_URLS registry (§2.2): every `tank.*` key is
