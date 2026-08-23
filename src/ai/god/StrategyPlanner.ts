@@ -1584,7 +1584,6 @@ function huntPathCost(
   return cost
 }
 
-
 /**
  * §187 target blacklist — drop the blacklisted enemy from the candidate pool
  * (temporarily removed due to unreachability), clearing the entry once it
@@ -1660,7 +1659,6 @@ function noBaseNearestTarget(
   }
   return self.tankCell(best)
 }
-
 
 /**
  * Aggressive-mode (freeze) chase: enemies can't move, so pick the nearest —
@@ -1768,7 +1766,6 @@ function anchorApproachHoldGate(
   return null
 }
 
-
 /**
  * S6 aggressive-hunt selector (canHunt gate evaluated by the caller): few
  * enemies on field AND few remaining in queue. Intent read → targetValue
@@ -1784,66 +1781,66 @@ function huntModeTarget(
   coopActive: boolean,
   partnerCell: Cell | null,
 ): Cell {
-    // Phase 2 §6.3: intent read — all defense/override branches above have
-    // returned already, so a valid intent never delays threat response.
-    if (self.params.intentMode > 0) {
-      const it = intentRead(self, w, p, playerCell, enemies)
-      if (it) return it
-    }
-    // Phase 2 §6.2: targetValueMode — dynamic target value instead of pure
-    // distance (targetValue in ThreatBudget: expected base damage prevented
-    // over the player's reach+kill horizon). Near-ties (value within
-    // TARGET_VALUE_TIE_EPS) fall back to the standard distance ordering, so
-    // bonus/coop preferences keep working as tiebreaks. Mode 0 = the loop
-    // below verbatim (byte-identical).
-    if (self.params.targetValueMode > 0) {
-      let best = enemies[0]
-      let bestV = -Infinity
-      let bestD = Infinity
-      for (let ti = 0; ti < enemies.length; ti++) {
-        const t = enemies[ti]
-        const tc = self.tankCell(t)
-        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-        let adjustedDist = d - (t.bonus ? 2 : 0)
-        if (coopActive && partnerCell) {
-          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-          if (pd < d - 3) adjustedDist += 5
-        }
-        const v = targetValue(self.world, p, t)
-        if (
-          v > bestV + TARGET_VALUE_TIE_EPS ||
-          (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
-        ) {
-          bestV = v
-          bestD = adjustedDist
-          best = t
-        }
-      }
-      self._lastSelectTargetId = best.id
-      if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
-      return self.tankCell(best)
-    }
+  // Phase 2 §6.3: intent read — all defense/override branches above have
+  // returned already, so a valid intent never delays threat response.
+  if (self.params.intentMode > 0) {
+    const it = intentRead(self, w, p, playerCell, enemies)
+    if (it) return it
+  }
+  // Phase 2 §6.2: targetValueMode — dynamic target value instead of pure
+  // distance (targetValue in ThreatBudget: expected base damage prevented
+  // over the player's reach+kill horizon). Near-ties (value within
+  // TARGET_VALUE_TIE_EPS) fall back to the standard distance ordering, so
+  // bonus/coop preferences keep working as tiebreaks. Mode 0 = the loop
+  // below verbatim (byte-identical).
+  if (self.params.targetValueMode > 0) {
     let best = enemies[0]
-    let bestDist = Infinity
+    let bestV = -Infinity
+    let bestD = Infinity
     for (let ti = 0; ti < enemies.length; ti++) {
       const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      // Prefer bonus enemies (they drop power-ups) when distances are close.
       let adjustedDist = d - (t.bonus ? 2 : 0)
-      // 协作: 伙伴更近的敌人降优先级
       if (coopActive && partnerCell) {
         const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
         if (pd < d - 3) adjustedDist += 5
       }
-      if (adjustedDist < bestDist) {
-        bestDist = adjustedDist
+      const v = targetValue(self.world, p, t)
+      if (
+        v > bestV + TARGET_VALUE_TIE_EPS ||
+        (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
+      ) {
+        bestV = v
+        bestD = adjustedDist
         best = t
       }
     }
     self._lastSelectTargetId = best.id
     if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
     return self.tankCell(best)
+  }
+  let best = enemies[0]
+  let bestDist = Infinity
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
+    const tc = self.tankCell(t)
+    const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+    // Prefer bonus enemies (they drop power-ups) when distances are close.
+    let adjustedDist = d - (t.bonus ? 2 : 0)
+    // 协作: 伙伴更近的敌人降优先级
+    if (coopActive && partnerCell) {
+      const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+      if (pd < d - 3) adjustedDist += 5
+    }
+    if (adjustedDist < bestDist) {
+      bestDist = adjustedDist
+      best = t
+    }
+  }
+  self._lastSelectTargetId = best.id
+  if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
+  return self.tankCell(best)
 }
 
 /**
@@ -1862,150 +1859,100 @@ function normalSelectionTarget(
   coopActive: boolean,
   partnerCell: Cell | null,
 ): Cell {
-    // Dual central breach (plan/dual-central-breach-strategy.md §B): P1
-    // guards the anchor full-time — its job is to intercept col-12 breachers,
-    // not hunt across the map. P2 handles flanks/hunting. P1 still fires at
-    // enemies in range via T2a/engage (the candidate chain handles firing
-    // independent of the navigation target). Gated by spectateDual &&
-    // centralBreachRisk && !isPlayer2 — single-player and P2 unaffected.
-    //
-    // §180 (autopsy seed34): when NO enemy is in the center lane (cols 11–13)
-    // but enemies are gathering on the RIGHT side (cols ≥ 15, rows ≥ 10)
-    // — typically breaking through the right-flank walls toward the base —
-    // P1 temporarily leaves the anchor to intercept the nearest right-side
-    // enemy. This prevents the right-flank blind spot where E2/E26 carve
-    // through the right walls unopposed while P1 stares at an empty center.
-    // P1 returns to the anchor as soon as a center enemy reappears.
-    if (self.world.spectateDual && self._centralBreachRisk && !self.isPlayer2()) {
-      const anchor = self.getBaseGuardAnchor()
-      if (anchor) return anchor
+  // Dual central breach (plan/dual-central-breach-strategy.md §B): P1
+  // guards the anchor full-time — its job is to intercept col-12 breachers,
+  // not hunt across the map. P2 handles flanks/hunting. P1 still fires at
+  // enemies in range via T2a/engage (the candidate chain handles firing
+  // independent of the navigation target). Gated by spectateDual &&
+  // centralBreachRisk && !isPlayer2 — single-player and P2 unaffected.
+  //
+  // §180 (autopsy seed34): when NO enemy is in the center lane (cols 11–13)
+  // but enemies are gathering on the RIGHT side (cols ≥ 15, rows ≥ 10)
+  // — typically breaking through the right-flank walls toward the base —
+  // P1 temporarily leaves the anchor to intercept the nearest right-side
+  // enemy. This prevents the right-flank blind spot where E2/E26 carve
+  // through the right walls unopposed while P1 stares at an empty center.
+  // P1 returns to the anchor as soon as a center enemy reappears.
+  if (self.world.spectateDual && self._centralBreachRisk && !self.isPlayer2()) {
+    const anchor = self.getBaseGuardAnchor()
+    if (anchor) return anchor
+  }
+  // §177: the P2 half of the same split — sweep the enemy spawn points
+  // instead of drifting toward a static flank cell. Yields to the normal
+  // nearest-enemy hunt as soon as an enemy is close enough to engage (see
+  // findDualPatrolTargetImpl). Gated by dualStrategyActive (spectateDual || coop)
+  // && centralBreachRisk && isPlayer2 — single-player and P1 unaffected (byte-identical).
+  if (self.dualStrategyActive && self.isPlayer2() && self.params.dualCentralBreachP2Patrol > 0) {
+    const patrol = findDualPatrolTargetImpl(self, playerCell, enemies)
+    if (patrol) return patrol
+  }
+  // Phase 3 (plan §7): dynamic attack coverage point. After every defense
+  // and override branch — a coverage hold never delays threat response.
+  // Falls through to the normal hunt when no better point exists (规划失败
+  // 时回到原有 hunt/engage 行为).
+  if (self.params.coverageMode > 0) {
+    const cov = coveragePlanImpl(self, w, p, playerCell, enemies)
+    if (cov) return cov
+  }
+  // Phase 2 §6.3: intent read (same position as the §170 commit — after
+  // every defense/override branch, so a valid intent never delays threat
+  // response). intentMode wins over the plain §170 commit when both are on.
+  if (self.params.intentMode > 0) {
+    const it = intentRead(self, w, p, playerCell, enemies)
+    if (it) return it
+  }
+  // §170 hunt commit: while the commit window is open and the committed
+  // enemy is still alive, keep chasing it — the per-tick nearest-pick
+  // re-routes the mid-approach player whenever the nearest identity
+  // flips, sinking the approach cost (DECISIONS §170). Defense cascade
+  // runs above, so a commit never delays threat response; expiry simply
+  // falls through to the free nearest-selection below (which re-commits
+  // if the same enemy is still the pick). Disabled when intentMode > 0.
+  if (
+    self.params.intentMode <= 0 &&
+    self.params.huntCommitTicks > 0 &&
+    self._huntCommitId >= 0 &&
+    w.frame < self._huntCommitUntil
+  ) {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      if (enemies[ti].id === self._huntCommitId) return self.tankCell(enemies[ti])
     }
-    // §177: the P2 half of the same split — sweep the enemy spawn points
-    // instead of drifting toward a static flank cell. Yields to the normal
-    // nearest-enemy hunt as soon as an enemy is close enough to engage (see
-    // findDualPatrolTargetImpl). Gated by dualStrategyActive (spectateDual || coop)
-    // && centralBreachRisk && isPlayer2 — single-player and P1 unaffected (byte-identical).
-    if (self.dualStrategyActive && self.isPlayer2() && self.params.dualCentralBreachP2Patrol > 0) {
-      const patrol = findDualPatrolTargetImpl(self, playerCell, enemies)
-      if (patrol) return patrol
-    }
-    // Phase 3 (plan §7): dynamic attack coverage point. After every defense
-    // and override branch — a coverage hold never delays threat response.
-    // Falls through to the normal hunt when no better point exists (规划失败
-    // 时回到原有 hunt/engage 行为).
-    if (self.params.coverageMode > 0) {
-      const cov = coveragePlanImpl(self, w, p, playerCell, enemies)
-      if (cov) return cov
-    }
-    // Phase 2 §6.3: intent read (same position as the §170 commit — after
-    // every defense/override branch, so a valid intent never delays threat
-    // response). intentMode wins over the plain §170 commit when both are on.
-    if (self.params.intentMode > 0) {
-      const it = intentRead(self, w, p, playerCell, enemies)
-      if (it) return it
-    }
-    // §170 hunt commit: while the commit window is open and the committed
-    // enemy is still alive, keep chasing it — the per-tick nearest-pick
-    // re-routes the mid-approach player whenever the nearest identity
-    // flips, sinking the approach cost (DECISIONS §170). Defense cascade
-    // runs above, so a commit never delays threat response; expiry simply
-    // falls through to the free nearest-selection below (which re-commits
-    // if the same enemy is still the pick). Disabled when intentMode > 0.
-    if (
-      self.params.intentMode <= 0 &&
-      self.params.huntCommitTicks > 0 &&
-      self._huntCommitId >= 0 &&
-      w.frame < self._huntCommitUntil
-    ) {
-      for (let ti = 0; ti < enemies.length; ti++) {
-        if (enemies[ti].id === self._huntCommitId) return self.tankCell(enemies[ti])
-      }
-    }
-    let best = enemies[0]
-    let bestDist = Infinity
-    if (self.params.targetValueMode > 0) {
-      // Phase 2 §6.2 (same contract as the canHunt variant above; also keeps
-      // the §171 pathTargetMode flavor in the tiebreak when enabled).
-      let bestV = -Infinity
-      let bestD = Infinity
-      for (let ti = 0; ti < enemies.length; ti++) {
-        const t = enemies[ti]
-        const tc = self.tankCell(t)
-        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-        let adjustedDist: number
-        if (self.params.pathTargetMode > 0) {
-          adjustedDist =
-            huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
-            (t.bonus ? self.params.bonusHuntBias : 0)
-          if (coopActive && partnerCell) {
-            const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-            if (pd < d - 3) adjustedDist += 5
-          }
-        } else {
-          adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
-          if (coopActive && partnerCell) {
-            const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-            if (pd < d - 3) adjustedDist += 5
-          }
-        }
-        const v = targetValue(self.world, p, t)
-        if (
-          v > bestV + TARGET_VALUE_TIE_EPS ||
-          (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
-        ) {
-          bestV = v
-          bestD = adjustedDist
-          best = t
-        }
-      }
-      if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
-      else if (self.params.huntCommitTicks > 0) {
-        self._huntCommitId = best.id
-        self._huntCommitUntil = w.frame + self.params.huntCommitTicks
-      }
-      self._lastSelectTargetId = best.id
-      return self.tankCell(best)
-    }
-    if (self.params.pathTargetMode > 0) {
-      // §171: score enemies by TRUE travel cost instead of Manhattan —
-      // maze stages put wall-separated enemies "near" in Manhattan while the
-      // real approach cost is several times larger (DECISIONS §171). The
-      // bonusHuntBias adjustment (§172) still applies; per-tick reselection
-      // is kept.
-      for (let ti = 0; ti < enemies.length; ti++) {
-        const t = enemies[ti]
-        const tc = self.tankCell(t)
-        let adjustedDist =
+  }
+  let best = enemies[0]
+  let bestDist = Infinity
+  if (self.params.targetValueMode > 0) {
+    // Phase 2 §6.2 (same contract as the canHunt variant above; also keeps
+    // the §171 pathTargetMode flavor in the tiebreak when enabled).
+    let bestV = -Infinity
+    let bestD = Infinity
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      let adjustedDist: number
+      if (self.params.pathTargetMode > 0) {
+        adjustedDist =
           huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
           (t.bonus ? self.params.bonusHuntBias : 0)
-        // 协作: 伙伴更近的敌人降优先级
-        if (coopActive && partnerCell) {
-          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
-          if (pd < Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) - 3)
-            adjustedDist += 5
-        }
-        if (adjustedDist < bestDist) {
-          bestDist = adjustedDist
-          best = t
-        }
-      }
-    } else {
-      for (let ti = 0; ti < enemies.length; ti++) {
-        const t = enemies[ti]
-        const tc = self.tankCell(t)
-        const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-        // §172: bonus preference is the bonusHuntBias knob (default 2 =
-        // the historical constant, byte-identical).
-        let adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
-        // 协作: 伙伴更近的敌人降优先级
         if (coopActive && partnerCell) {
           const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
           if (pd < d - 3) adjustedDist += 5
         }
-        if (adjustedDist < bestDist) {
-          bestDist = adjustedDist
-          best = t
+      } else {
+        adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+        if (coopActive && partnerCell) {
+          const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+          if (pd < d - 3) adjustedDist += 5
         }
+      }
+      const v = targetValue(self.world, p, t)
+      if (
+        v > bestV + TARGET_VALUE_TIE_EPS ||
+        (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
+      ) {
+        bestV = v
+        bestD = adjustedDist
+        best = t
       }
     }
     if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
@@ -2015,6 +1962,56 @@ function normalSelectionTarget(
     }
     self._lastSelectTargetId = best.id
     return self.tankCell(best)
+  }
+  if (self.params.pathTargetMode > 0) {
+    // §171: score enemies by TRUE travel cost instead of Manhattan —
+    // maze stages put wall-separated enemies "near" in Manhattan while the
+    // real approach cost is several times larger (DECISIONS §171). The
+    // bonusHuntBias adjustment (§172) still applies; per-tick reselection
+    // is kept.
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
+      const tc = self.tankCell(t)
+      let adjustedDist =
+        huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
+        (t.bonus ? self.params.bonusHuntBias : 0)
+      // 协作: 伙伴更近的敌人降优先级
+      if (coopActive && partnerCell) {
+        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        if (pd < Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row) - 3)
+          adjustedDist += 5
+      }
+      if (adjustedDist < bestDist) {
+        bestDist = adjustedDist
+        best = t
+      }
+    }
+  } else {
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      // §172: bonus preference is the bonusHuntBias knob (default 2 =
+      // the historical constant, byte-identical).
+      let adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
+      // 协作: 伙伴更近的敌人降优先级
+      if (coopActive && partnerCell) {
+        const pd = Math.abs(tc.col - partnerCell.col) + Math.abs(tc.row - partnerCell.row)
+        if (pd < d - 3) adjustedDist += 5
+      }
+      if (adjustedDist < bestDist) {
+        bestDist = adjustedDist
+        best = t
+      }
+    }
+  }
+  if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
+  else if (self.params.huntCommitTicks > 0) {
+    self._huntCommitId = best.id
+    self._huntCommitUntil = w.frame + self.params.huntCommitTicks
+  }
+  self._lastSelectTargetId = best.id
+  return self.tankCell(best)
 }
 
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
@@ -2027,7 +2024,6 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
 
   const baseCol = BASE_POS.col
   const baseRow = BASE_POS.row
-  const defenseRow = baseRow - self.params.defenseRowOffset
 
   // 双玩家协作: 获取伙伴信息用于目标去冲突。当伙伴存活时,
   // 各自优先攻击自己一侧的敌人, 避免两个 AI 追同一个目标。
@@ -2173,6 +2169,43 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     return normalSelectionTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
   }
 
+  // Base under threat: score the most dangerous enemy (§59 clear-shot,
+  // D2 ring-breach, §132 fast-approach, kind weights, urgency/proximity),
+  // then optionally hold the guard anchor before committing to the chase.
+  const bestCell = defenseThreatTarget(self, playerCell, enemies, coopActive, baseCol, baseRow)
+  const hold = guardAnchorHoldGate(self, playerCell, coopActive)
+  if (hold) return hold
+  return bestCell
+}
+/**
+ * Reusable out-buffer for defenseThreatTarget / guardAnchorHoldGate
+ * (§14.2 idiom): the two flags are computed by the defense scoring loop and
+ * consumed by the anchor-hold gate immediately after; never stored elsewhere.
+ */
+const _defenseScanFlags = { anyClearShot: false, anyBreacher: false }
+
+/**
+ * Base-under-threat selector: score every enemy in range by threat
+ * (-distToBase×10 + kind/bonus weights + urgency/proximity bonuses +
+ * §59 clear-shot bonus + D2 ring-breach bonus + §132 speed-approach bonus)
+ * and return the best one's cell — with the §177 P2 runner-up split and its
+ * §180 proximity override. When NO enemy is within threat range, fall back
+ * to the nearest-to-base enemy instead of idling at the defense position.
+ * Writes _defenseScanFlags for guardAnchorHoldGate.
+ */
+function defenseThreatTarget(
+  self: GodAIInput,
+  playerCell: Cell,
+  enemies: Tank[],
+  coopActive: boolean,
+  baseCol: number,
+  baseRow: number,
+): Cell {
+  const w = self.world
+  // Pure derivations formerly computed in the selectTargetUncached preamble
+  // (identical values — recomputed here to keep the helper self-contained).
+  const defenseRow = baseRow - self.params.defenseRowOffset
+  const anchorModeOn = self.params.baseGuardAnchorMode > 0
   // Base is under threat — find the most threatening enemy. Enemies with a
   // clear shot at the base (aligned + no walls in between) get a huge bonus
   // (defenseClearShotBonus, §59) — they can destroy the base with their next
@@ -2197,7 +2230,9 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // §137 v2: any enemy with a clear shot at the base right now? If so the
   // player MUST chase (the anchor hold cannot cover every lane); otherwise
   // holding the guard anchor is safe and intercepts the approach band.
-  let anyClearShot = false
+  // §137v2 flags go into the shared out-buffer — guardAnchorHoldGate reads
+  // them right after this function returns.
+  _defenseScanFlags.anyClearShot = false
   // D2 / 拆环威胁: count intact ring bricks ONCE per call (only when the knob
   // is on). The breach bonus grows as the ring weakens — ×1 at full ring →
   // ×1.875 at one brick left — so the scorer reacts EARLY (breacher shooting
@@ -2208,7 +2243,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // lane; chase the breacher instead). Runs only when D2 or D1 is on
   // (default both 0 → zero cost, byte-identical).
   const breachCheckOn = breachOn || anchorModeOn
-  let anyBreacher = false
+  _defenseScanFlags.anyBreacher = false
   let ringIntact = 8
   if (breachOn) {
     ringIntact = 0
@@ -2229,7 +2264,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // even beyond threatRangeCells — it can destroy the base NOW from any
     // distance. Other enemies are filtered by threatRangeCells as before.
     const hasClearShot = self.params.defenseClearShotBonus > 0 && enemyCanShootBase(self, t)
-    if (hasClearShot) anyClearShot = true
+    if (hasClearShot) _defenseScanFlags.anyClearShot = true
     if (distToBase > self.params.threatRangeCells && !hasClearShot) continue
 
     // M0.5 退役: smartThreatModel 的 defense-priority kind weights 已移除
@@ -2248,7 +2283,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     // grows as the ring weakens ((8 − ringIntact) destroyed bricks × 0.125).
     // Can't co-fire with clearShotBonus (mutually exclusive by construction).
     const isBreacher = breachCheckOn && !hasClearShot && enemyCanBreachRing(self, t)
-    if (isBreacher && anchorModeOn) anyBreacher = true
+    if (isBreacher && anchorModeOn) _defenseScanFlags.anyBreacher = true
     const breachBonus =
       breachOn && isBreacher ? self.params.defenseBreachBonus * (1 + (8 - ringIntact) * 0.125) : 0
     // §132 / 方向 B (fast × base-proximity): a fast tank closing on the base
@@ -2334,20 +2369,22 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     return self.tankCell(nearest)
   }
 
-  // §137 v2: hold the guard anchor (funnel mouth) while the base is under
-  // threat but no enemy can shoot it YET. From the anchor the §134
-  // lane-intercept + t2a fire at enemies crossing the approach band BEFORE
-  // they reach the ring (Battlement: the row-22 antechamber). Chase directly
-  // when an enemy already has a clear shot (must kill it NOW, the anchor may
-  // not cover its lane) or the player is too far from the anchor to make
-  // holding worthwhile (marching across the map while the base is threatened
-  // loses more than it gains). Only active when baseGuardAnchorMode > 0
-  // (getBaseGuardAnchor returns null otherwise — byte-identical).
-  // §177: the guard anchor is base-relative, so P1 and P2 hold the SAME cell
-  // and §159 yield makes one of them shuffle uselessly. Split it: arm 1 sends
-  // the gated P2 to its own shifted defense post, arm 2 makes P2 skip the
-  // hold entirely and drive at its runner-up threat. 0 = OFF (shared anchor,
-  // byte-identical).
+  // Go directly toward the best enemy. With the bulletCap-aware onCooldown
+  // fix, the player fires frequently and can kill enemies while pursuing.
+  // The interception-point strategy was abandoned because wandering enemies
+  // rarely cross the fixed interception column, leaving the player idle.
+  return self.tankCell(bestEnemy)
+}
+
+/**
+ * §137 v2 guard-anchor hold gate (base under threat): hold the funnel-mouth
+ * anchor while no enemy can shoot the base YET and no ring breach is active;
+ * chase immediately otherwise (an enemy with a clear shot must die NOW, and
+ * a breached ring means the anchor may stare at the wrong lane). Includes
+ * the §177 arm-1 P2 shifted-post hold. Returns null to fall through to the
+ * scored chase. Consumes _defenseScanFlags written by defenseThreatTarget.
+ */
+function guardAnchorHoldGate(self: GodAIInput, playerCell: Cell, coopActive: boolean): Cell | null {
   const p2AnchorSplit =
     self.params.dualCentralBreachP2AnchorSplit > 0 &&
     self.dualStrategyActive &&
@@ -2357,8 +2394,8 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   if (p2AnchorSplit && self.params.dualCentralBreachP2AnchorSplit === 1) {
     const post = self.getDefaultDefensePosition()
     if (
-      !anyClearShot &&
-      !anyBreacher &&
+      !_defenseScanFlags.anyClearShot &&
+      !_defenseScanFlags.anyBreacher &&
       Math.abs(post.col - playerCell.col) + Math.abs(post.row - playerCell.row) <=
         self.params.baseGuardAnchorHoldRange
     ) {
@@ -2367,17 +2404,12 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   }
   if (
     guardAnchor &&
-    !anyClearShot &&
-    !anyBreacher &&
+    !_defenseScanFlags.anyClearShot &&
+    !_defenseScanFlags.anyBreacher &&
     Math.abs(guardAnchor.col - playerCell.col) + Math.abs(guardAnchor.row - playerCell.row) <=
       self.params.baseGuardAnchorHoldRange
   ) {
     return guardAnchor
   }
-
-  // Go directly toward the best enemy. With the bulletCap-aware onCooldown
-  // fix, the player fires frequently and can kill enemies while pursuing.
-  // The interception-point strategy was abandoned because wandering enemies
-  // rarely cross the fixed interception column, leaving the player idle.
-  return self.tankCell(bestEnemy)
+  return null
 }
