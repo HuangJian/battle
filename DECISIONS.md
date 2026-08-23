@@ -2021,3 +2021,32 @@ A* 内循环启发式保持直写（pathfind pfPush 参数位，读性优先）�
 **Implications:** 新增距离计算一律 import `manhattan`；热路径写裸 abs 和仅限
 上述两类豁免形状（下游复用 delta / 非点距），否则视为欠账。helpers.ts 注释
 即 grep 锚点（遗留 #2 / DECISIONS §266）。
+
+## 267. 遗留 #1 self-hub 处置：结构性护栏替代整体切片 (STATUS: 已实施, 2026-08-23)
+
+**Decision:** `self: GodAIInput` 整体切片**维持不做**（§263/§3.6 原判），改以
+结构性护栏收口其残余风险——新增 `tests/godai-hub-fields.test.ts`：
+文本解析 GodAIInput 类体，强制「每个实例字段必须在
+constructor / invalidatePerTickCaches() / invalidateStageCaches() / reset()
+之一被赋值/变异，或在带分类与理由的 ALLOWLIST 中」。豁免分五类并逐条给指针：
+A 诊断计数（注释自证"never feeds back"）×8；B §14.2 复用缓冲 ×6；
+C 键控缓存伴生（payload 惰性，守护 flag 本身受注册表覆盖）×32；
+D 写一次接线/常量（含外部写入点 isGuardAI←SimulationEnemies §187）×5；
+E 单调节拍器 _thinkCounter ×1。测试双向查新鲜度（新字段缺登记 → 红；
+ALLOWLIST 残留改名死键 → 红），另锁两注册表在 endFrame/reset 的接线存在。
+金丝雀注入验证过牙齿（_hubGuardCanary → 精确报错）。
+
+**Rationale:**
+- 切片反对证据经本轮复核仍然成立且更精确：god 层 `self.*` 引用实测
+  205 个唯一成员 / ~1,670 处、33 文件（params×292 / world×121 / 方法调用
+  跨切严重）——切片必然漏切核心面，收益不抵 ~1,700 处机械搬移风险；
+- 审计所称"15 文件双向依赖"实为**纯类型级**（god 层 32 处 import 全部
+  type-only，运行时零环）——导航摩擦已被 §3.4 候选具名化大幅消化，
+  剩余真实风险是「新增字段忘写 reset」这一类，恰好可被 CI 结构性封堵；
+- 普查即发现 51 字段游离于生命周期清单外，逐一定性后均为既有文档记载的
+  豁免类——把口头惯例变成机器检查的契约，正是本计划"隐性耦合显式化"
+  的同款手法（对齐 §2.4/§3.2/§3.3 先例）。
+
+**Implications:** 新增 GodAIInput 字段的标准动作 = 在对应生命周期方法加
+一行清场，或 ALLOWLIST 加一条带理由的豁免；两者都会被此测试强制面对。
+解析器以 sanity floor 自保（字段数 <160 即红），格式化漂移不会静默放水。
