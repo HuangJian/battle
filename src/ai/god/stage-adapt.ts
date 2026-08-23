@@ -54,11 +54,22 @@ import type { GodAIParams } from './params.interface'
  * Pure function of World state (tileMap only) — deterministic, no RNG.
  * Called once per reset() — not a hot path.
  */
+// ── Dual-central-breach scan geometry (plan/dual-central-breach-strategy.md).
+// Named so the numbers read as the contract they are (§3.5): a stage has a
+// "central breach" when the CENTER_BAND (cols 12±1, from the field top down
+// to just above the base wall) contains no steel, the center spawn column is
+// used, and the column's top approach is open.
+const BREACH_BAND_COL_MIN = 11 // center col 12 − 1
+const BREACH_BAND_COL_MAX = 13 // center col 12 + 1
+const BREACH_BAND_ROW_MAX = 22 // base wall starts at row 24; keep 1 cell clear
+const BREACH_OPEN_ROW_MAX = 9 // "open approach" = top 10 rows of col 12
+const BREACH_OPEN_MIN_CELLS = 4
+
 export function detectCentralBreachRisk(world: World): boolean {
   const tm = world.tileMap
   // Condition 1: no steel in the central band (cols 11–13, rows 0–22).
-  for (let row = 0; row <= 22; row++) {
-    for (let col = 11; col <= 13; col++) {
+  for (let row = 0; row <= BREACH_BAND_ROW_MAX; row++) {
+    for (let col = BREACH_BAND_COL_MIN; col <= BREACH_BAND_COL_MAX; col++) {
       if (tm.get(col, row) === 'steel') return false
     }
   }
@@ -80,10 +91,10 @@ export function detectCentralBreachRisk(world: World): boolean {
   // is brick from row 2 (e.g. S14 Steel Web) slow the approach and don't
   // need the central breach strategy. Threshold: ≥4 empty cells in rows 0–9.
   let openCells = 0
-  for (let row = 0; row <= 9; row++) {
+  for (let row = 0; row <= BREACH_OPEN_ROW_MAX; row++) {
     if (tm.get(12, row) === 'empty') openCells++
   }
-  return openCells >= 4
+  return openCells >= BREACH_OPEN_MIN_CELLS
 }
 
 export function computeStageAdaptedParams(base: GodAIParams, world: World): GodAIParams {

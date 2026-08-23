@@ -482,6 +482,10 @@ function baseRingBreachedImpl(w: World): boolean {
   )
 }
 
+/** laneCorridorBlocked 的越界哨兵（端点出界 → 走廊不可用）。
+ * 取 999 = 永远大于任何合法的格距（GRID=26），调用方只判 >0。 */
+const LANE_OUT_OF_BOUNDS = 999
+
 /** §X 原语: 格对齐走廊检查 — (c,r)→(tc,tr) 必须同排或同列，两格之间逐格扫描。
  * 返回 0 = 走廊全通；>0 = 距 (c,r) 第 n 格（1 起）被非空地形挡住
  * （'base' 亦计 — 永不穿基地射击）。非对齐返回 -1。 */
@@ -489,7 +493,7 @@ function laneCorridorBlocked(w: World, c: number, r: number, tc: number, tr: num
   const g = w.tileMap.grid
   if (c === tc) {
     if (r === tr) return 0
-    if (r < 0 || r >= GRID || tr < 0 || tr >= GRID || c < 0 || c >= GRID) return 999
+    if (r < 0 || r >= GRID || tr < 0 || tr >= GRID || c < 0 || c >= GRID) return LANE_OUT_OF_BOUNDS
     const step = r < tr ? 1 : -1
     for (let rr = r + step; rr !== tr; rr += step) {
       if (g[rr][c] !== 'empty') return rr < r ? r - rr : rr - r
@@ -498,7 +502,7 @@ function laneCorridorBlocked(w: World, c: number, r: number, tc: number, tr: num
   }
   if (r === tr) {
     if (c === tc) return 0
-    if (r < 0 || r >= GRID || c < 0 || c >= GRID || tc < 0 || tc >= GRID) return 999
+    if (r < 0 || r >= GRID || c < 0 || c >= GRID || tc < 0 || tc >= GRID) return LANE_OUT_OF_BOUNDS
     const step = c < tc ? 1 : -1
     for (let cc = c + step; cc !== tc; cc += step) {
       if (g[r][cc] !== 'empty') return cc < c ? c - cc : cc - c
@@ -2172,7 +2176,7 @@ const HUNT: Candidate = {
     // P3.1: When nav-stuck triggers, only go to center if the player is
     // NOT already at/near center (target == current cell → deadlock, the S9
     // root cause). When already at center, chase the nearest enemy directly.
-    const distToCenter = Math.abs(pc.col - 12) + Math.abs(pc.row - 12)
+    const distToCenter = Math.abs(pc.col - MAP_CENTER.col) + Math.abs(pc.row - MAP_CENTER.row)
     const stuckAtCenter = distToCenter <= 2
     // M3 (survivalRiskWeight, P0-3 命数盲 fix): on the last lives (survival
     // pressure active), the HUNT candidate retreats to the defense position
@@ -2202,7 +2206,7 @@ const HUNT: Candidate = {
       ) {
         navTarget = self.getDefaultDefensePosition()
       } else {
-        navTarget = { col: 12, row: 12 }
+        navTarget = MAP_CENTER
       }
     } else if (survivalRetreat && self.hasBase) {
       navTarget = self.getDefaultDefensePosition()
@@ -2590,13 +2594,13 @@ const SURVIVE: Candidate = {
       const dv = DIR_VECTORS[d]
       const cx = pc.col + dv.dx
       const cy = pc.row + dv.dy
-      if (cx < 0 || cx >= 26 || cy < 0 || cy >= 26) continue
+      if (cx < 0 || cx >= GRID || cy < 0 || cy >= GRID) continue
       let dExits = 0
       for (let dj = 0; dj < ALL_DIRS.length; dj++) {
         const v2 = DIR_VECTORS[ALL_DIRS[dj]]
         const c2 = cx + v2.dx
         const r2 = cy + v2.dy
-        if (c2 < 0 || c2 >= 26 || r2 < 0 || r2 >= 26) continue
+        if (c2 < 0 || c2 >= GRID || r2 < 0 || r2 >= GRID) continue
         if (!w.isCellBlocked(c2, r2)) dExits++
       }
       const baseDist = Math.abs(cx - baseCol) + Math.abs(cy - baseRow)
