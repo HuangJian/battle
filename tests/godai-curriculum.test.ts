@@ -27,7 +27,7 @@ function noBaseArena(enemyCount = 1, size = 12): StageData {
   return makeArena({ size, enemyCount })
 }
 
-describe('god-ai-curriculum: hasBase guard (Gap B)', () => {
+describe('godai-curriculum: hasBase guard (Gap B)', () => {
   it('TileMap.hasBase() returns false for arena without base', () => {
     const stage = noBaseArena(1)
     const world = new World()
@@ -109,7 +109,7 @@ describe('god-ai-curriculum: hasBase guard (Gap B)', () => {
   })
 })
 
-describe('god-ai-curriculum: determinism', () => {
+describe('godai-curriculum: determinism', () => {
   it('same seed + same arena produces identical results', () => {
     const stage = noBaseArena(3, 14)
     const opts = {
@@ -127,7 +127,7 @@ describe('god-ai-curriculum: determinism', () => {
   })
 })
 
-describe.skip('god-ai-curriculum: stage ladder', () => {
+describe.skip('godai-curriculum: stage ladder', () => {
   // DISABLED: Phase III — pass-rate (clear) gate; kept hasBase/determinism below
   // All 5 curriculum stages are hard CI gates. Each stage isolates one
   // subsystem of the God AI and asserts a concrete expected outcome.

@@ -10,7 +10,7 @@ import { STAGES } from '../src/config/stages'
 // calibration.test 5s-cliff; full-scale validation is CLI-only.
 // ============================================================
 
-describe('god-ai-gates', () => {
+describe('godai-gates', () => {
   describe('failure taxonomy', () => {
     it('SimResult includes failure field on gameover', () => {
       const result = runSimulation({

@@ -215,7 +215,7 @@ export function pathCarveSafeImpl(self: GodAIInput, from: Cell, path: Direction[
  * findCarvePathImpl. It was a second full-map A* attempted on every
  * restricted-unsafe / restricted-null outcome but returned a carve-safe path
  * only 3/17683 times across all 2100 gate sims (all chaos, all
- * restricted-unsafe). The god-ai-gate (620/508/473) still passes with margin.
+ * restricted-unsafe). The godai-gate (620/508/473) still passes with margin.
  */
 export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direction[] | null {
   const tm = self.world.tileMap
@@ -229,7 +229,7 @@ export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direc
   // threatCosts, attempted on every restricted-unsafe / restricted-null outcome
   // — was removed. Instrumented across all 2100 gate sims it returned a
   // carve-safe path only 3/17683 times (all chaos, all restricted-unsafe). The
-  // god-ai-gate (620/508/473) still passes with margin, so dropping it is
+  // godai-gate (620/508/473) still passes with margin, so dropping it is
   // accepted as non-regressing per the gate contract.
   const restricted = findPath(tm, from, to, {
     breakBrick: true,

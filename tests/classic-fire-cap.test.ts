@@ -141,7 +141,7 @@ describe('classic fire cap — minimum cooldown floor', () => {
     // Override the rule to 0 — no cooldown floor.
     // IMPORTANT: clone the rules object. `world.rules` is a reference to the
     // shared `RULES['classic']` config; mutating it in place leaks the change
-    // into every later test (and silently breaks the god-ai-split-parity
+    // into every later test (and silently breaks the godai-split-parity
     // determinism guard, which reads the same global). See classic-drop-position.test.ts
     // for the same clone pattern.
     world.rules = { ...world.rules, bulletCapMinCooldownMs: 0 }
