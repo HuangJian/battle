@@ -24,7 +24,7 @@ In this order, every session:
 2. **`DECISIONS.md`** — the decision **index**: §1–§10 foundational decisions (full text) + compressed pointers to the verbose tuning logs. You extend it, not contradict it. Full God AI / performance / render tuning detail lives in `docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`, `docs/render-optimization.progress.md`.
 3. **`plan/mvp.md`** — what the product is and the milestone structure.
 4. **`plan/Snapshot-Management-Framework.md`** and **`plan/presentation-upgrade.md`** — the active feature plans. Their "Definition of Done" sections are acceptance criteria.
-5. **`docs/presentation-audit.md`** — the current rendering state assessment.
+5. **`docs/presentation-audit.md`** — **historical baseline**: the 2026-07-20 audit taken *before* the presentation upgrade; its "current state" sections are superseded (SVG pipeline, HTML/CSS UI, DPR scaling, particles/camera are all built). Read it for method/structure, not for current facts.
 6. **This file** — your operating contract.
 
 If a plan you are asked to execute contradicts the MANIFEST, the MANIFEST wins. Stop and record the conflict in `DECISIONS.md` before proceeding (see §6).
@@ -57,7 +57,7 @@ There is no gameplay state outside the `World` object (`src/game/World.ts`). Not
 
 ### 2.4 Data Over Code
 
-Tanks are config (`src/config/tanks.ts`). Stages are config (`src/config/stages.ts` ← `stageData.ts`). Difficulty is config (`src/config/difficulty.ts`). Themes are config (`src/config/theme.ts`).
+Tanks are config: combat power lives in `src/config/combat.ts` (CombatProfile rows — "add a tank = add a row"), score values in `src/config/score.ts` + `score-constants.ts`, colors in `src/config/theme.ts`, drops/power-ups in `src/config/powerups.ts`. Stages are config (`src/config/stages.ts` ← `stageData.ts`). Difficulty is config (`src/config/difficulty.ts`).
 
 > Adding a new tank = adding a row, not editing a system. Adding a stage = appending a grid. Adding a theme = swapping presentation data.
 
@@ -65,7 +65,7 @@ If your feature requires hardcoding a new entity behavior into a system, reconsi
 
 ### 2.5 Presentation Is Disposable
 
-Particles, camera shake, animation state, screen flashes — **none of it lives in the World.** None of it survives a reset. When the game rewinds (RecoverySystem) or returns to menu, `PresentationLayer.reset()` is called and visual state is rebuilt from the World.
+Particles, camera shake, animation state, screen flashes — **none of it lives in the World.** None of it survives a reset. When the game rewinds (RecoveryController) or returns to menu, `PresentationLayer.reset()` is called and visual state is rebuilt from the World.
 
 > Same World state. Better presentation. (MANIFEST §8)
 
@@ -90,13 +90,18 @@ Two out of three is not enough. If a feature adds complexity without noticeably 
 ```
 src/
   constants.ts            # CELL=16, GRID=26, FIELD=416, TANK=32, TICK_MS, direction vectors
-  types.ts                # All shared types: Tank, Bullet, WorldSnapshot, ThemeColors, ...
+  types.ts                # root re-export hub; Tank/Bullet/WorldSnapshot/... live in the
+                          #   four-way split: types.ts (root) / config/types.ts (ThemeColors etc.)
+                          #   / ai/types.ts / presentation/types.ts — all re-exported here
   main.ts                 # Entry: wires Game into #app
   i18n/                   # zh/en localization
   game/                   # SIMULATION LAYER (only layer that mutates World)
     World.ts              #   complete runtime state + entity management
     Simulation.ts         #   composition root: six subsystems via SimulationSystems registry
     Simulation*.ts        #   the six subsystems: Spawn/Player/Enemies/Combat/PowerUps/Effects
+    systems.ts            #   SimulationSystems registry (tick order contract)
+    EventBus.ts  KillPipeline.ts  TankFactory.ts  GridQuery.ts   # event buffer / kill resolution / entity construction / grid lookups
+    UIState.ts  settings.ts  AutoFireInput.ts  battleSpeed.ts  uiFlowGates.ts
     TileMap.ts            #   26×26 sub-block grid + cached base state
     Input.ts              #   keyboard capture; never mutates World
     Game.ts               #   top-level orchestrator; delegates to controllers below
@@ -104,29 +109,35 @@ src/
     GameMenu.ts  GameSnapshot.ts  GameReplay.ts   # menu/snapshot/replay controllers
   ai/                     # AI LAYER (~half of src by line count)
     GodAIInput.ts         #   player God AI facade (state + Impl delegates; normal code per §262)
-    god/                  #   think.ts (decision candidates), params.ts (218-param tables),
-                           #   FireControl, ThreatAssessor, StrategyPlanner, Navigator, PathCarve, ...
+    god/                  #   think.ts (orchestrator), candidates/ (~20 candidate evaluators),
+                          #   params.ts / params.interface.ts / params.tables.ts / stage-adapt.ts,
+                          #   FireControl, ThreatAssessor, StrategyPlanner, Navigator, PathCarve,
+                          #   pathfind.ts, DecisionCore, ThreatBudget, SmartThreatModel, ...
     TacticalIntelligence.ts + perception.ts      # enemy AI, invoked by Simulation
-  snapshot/               # SnapshotManager, WorldSerializer (field-list clone/restore),
-                           #   RecoveryController, storage
-  replay/                 # InputRecorder, ReplayManager, PlaybackController, storage
+  snapshot/               # SnapshotManager, WorldSerializer (spread clone/restore),
+                          #   RecoveryController, storage (IndexedDB)
+  replay/                 # InputRecorder, ReplayManager, PlaybackController, file/pack, storage
   presentation/           # PRESENTATION LAYER (read-only on World)
     PresentationLayer.ts  #   orchestrator: camera + anim + particles + effects + renderer + ui
     renderer/             #   GameRenderer/SpriteArtist Core + slices, SpriteLibrary, SpriteCache
-    ui/UIManager.ts       #   HTML/CSS HUD + overlays (canvas is playfield-only, 416×416)
+    ui/                   #   UIManager facade over HudView / MenuScreen / ControlsPanel /
+                          #   OverlayManager; plus ControlCenter, PerfOverlay, ReplayBrowser,
+                          #   SnapshotBrowser, ReplayController (canvas is playfield-only, 416×416)
     Camera.ts  AnimationSystem.ts  ParticleSystem.ts  EffectsSystem.ts
   audio/AudioManager.ts   # Web Audio synthesis
-  config/                 # DATA: tanks, stages, stageData, difficulty, theme, rules, combat
+  config/                 # DATA: combat (tank profiles), stages+stageData, difficulty, theme,
+                          #   score+score-constants, rules, powerups, fire-rate, hp-level, speed,
+                          #   base, effects-config, types
   assets/sprites/         # SVG sprite library + index.ts URL registry
   utils/                  # RNG (seeded mulberry32), helpers (snap/aabb), direction, grid-search, idb-store
   perf/                   # dev-only browser perf harness
 tests/                    # bun:test specs (mirrors src/ structure by concern)
 plan/                     # mvp.md, Snapshot-Management-Framework.md, presentation-upgrade.md, tasks.chat.md
-docs/                     # presentation-audit.md (and future audits)
+docs/                     # presentation-audit.md (2026-07-20 pre-upgrade baseline, historical)
 tools/
   gen-sprites.mjs          # regenerates the SVG sprite library
   lib/                     # SHARED tool infra: worker-pool.ts (the only Worker() site),
-                           #   stage-spec.ts (strict stage parsing — §213 guard)
+                           #   stage-spec.ts (strict stage parsing — §213 guard), cli.ts (argv parsing)
   sim/                     # headless batch sims: simulation-runner, sim-worker/pool
   diag/                    # forensics + A/B tooling: run-forensics, per-seed-diff,
                            #   decision-probe, ab-*, base-loss-* (§119/§120); archive/ = quarantined one-offs
@@ -157,7 +168,7 @@ If the task is vague ("polish the sprites", "make it feel better"), the MANIFEST
 
 ### Step 2 — Audit before you build
 
-If the task touches rendering, audio, or any system with an existing audit doc, read it first (`docs/presentation-audit.md` is the template). If no audit exists for the area you are changing and the change is non-trivial, write a short audit note in `docs/` describing current state + target state. This is not optional for refactor-grade work (presentation-upgrade.md §2 requires it).
+If the task touches rendering, audio, or any system with an existing audit doc, read it first (`docs/presentation-audit.md` is the structural template — note it is a *pre-upgrade historical baseline*, so its "current state" facts are superseded). If no audit exists for the area you are changing and the change is non-trivial, write a short audit note in `docs/` describing current state + target state. This is not optional for refactor-grade work (presentation-upgrade.md §2 requires it).
 
 ### Step 3 — Implement
 
@@ -210,7 +221,7 @@ bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
 ### Commands (canonical)
 
 ```
-bun run dev          # vite dev server on :3000
+bun run dev          # vite dev server on :8956
 bun run build        # oxlint && tsc && vite build  (the gate before merge)
 bun run test         # SCOPED: runs only tests tied to local git changes, prints only failures
 bun test --parallel --timeout=50000   # full suite, all tests — ALWAYS pass these flags
@@ -253,7 +264,7 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 > optional:
 > - **`--parallel` is mandatory.** `bun test` does **not** parallelize files by
 >   default — without it the heavy God-AI gates (each spawns its own Bun web
->   workers internally, but per-FILE parallelism across the whole 131-file suite
+>   workers internally, but per-FILE parallelism across the whole 127-file suite
 >   is what keeps the full run near ~20s) degrade and the full suite slows down
 >   markedly. `bun run check` already includes this flag.
 > - **`--timeout=50000` is mandatory.** The God-AI gates run hundreds–thousands
@@ -442,7 +453,7 @@ A task is done when **all** of these hold:
 - **Regenerate the library** with `node tools/gen-sprites.mjs` if you are adjusting the generator rather than hand-editing SVGs.
 - **Consume** via `SpriteLibrary` (preloads) → `SpriteCache` (pre-rasterizes to canvas bitmaps at DPR) → `SpriteArtist`/`GameRenderer` (draws). Do not bypass the cache by loading images inline in the render loop.
 - **Terrain tiles must be seamless** (working memory: 96×96 full-frame, texture period must divide 96 — no inset borders, no centered shrink, no mosaic seams). See the Modern Retro design conventions for the palette and per-tile rules.
-- **Themability**: sprite colors that vary by theme come from `ThemeColors` (`src/types.ts`) applied at draw time, not baked into the SVG. Keep gameplay-neutral color in the SVG; keep theme-reactive color in config.
+- **Themability**: sprite colors that vary by theme come from `ThemeColors` (`src/config/types.ts`, re-exported by the root `src/types.ts`) applied at draw time, not baked into the SVG. Keep gameplay-neutral color in the SVG; keep theme-reactive color in config.
 
 ---
 
