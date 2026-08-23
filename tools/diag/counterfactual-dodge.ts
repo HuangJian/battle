@@ -35,7 +35,8 @@ import type { Direction } from '../../src/constants'
 import type { Bullet, Tank } from '../../src/types'
 
 import { arg } from '../lib/cli'
-const fromJson = arg('from-json') ?? 'tmp/open-test-forensics-baseline.json'
+import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
+const fromJson = arg('from-json') ?? DEFAULT_FORENSICS_CORPUS
 const limit = Number(arg('limit') ?? '999')
 const windowTicks = Number(arg('window') ?? '60')
 const jsonOut = arg('json')

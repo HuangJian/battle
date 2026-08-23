@@ -13,9 +13,10 @@
  */
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from '../sim/simulation-runner'
+import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
 
 const j = JSON.parse(
-  await Bun.file(process.argv[2] ?? 'tmp/open-test-forensics-baseline.json').text(),
+  await Bun.file(process.argv[2] ?? DEFAULT_FORENSICS_CORPUS).text(),
 )
 const failures = j.perDifficulty.hard.failures as Array<{
   stageIdx: number

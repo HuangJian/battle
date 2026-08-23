@@ -29,6 +29,7 @@ import { traceSimulation, analyzeTrace } from '../diag/decision-trace'
 import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 import { RNG } from '../../src/utils/RNG'
+import { loadStageRefs } from '../lib/eval-refs'
 import {
   scoreRun,
   aggregateStage,
@@ -43,7 +44,7 @@ import {
   type ScoreConfig,
 } from '../eval/godai-score'
 import type { RunTelemetry } from '../sim/simulation-runner'
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 
@@ -171,17 +172,6 @@ export interface EvalConfig {
   stageRefs?: Record<string, StageRefs>
   /** Base score config (bands + weights). Defaults to v6; v7 uses wider bands. */
   scoreConfigBase?: ScoreConfig
-}
-
-/** Load per-stage v6 references if they have been calibrated. */
-export function loadStageRefs(): Record<string, StageRefs> {
-  const file = join(import.meta.dir, '../eval/eval-refs.json')
-  if (!existsSync(file)) return {}
-  try {
-    return JSON.parse(readFileSync(file, 'utf8')).stages ?? {}
-  } catch {
-    return {}
-  }
 }
 
 /** P4 goal: every classic stage must clear above this win rate (floor). */
