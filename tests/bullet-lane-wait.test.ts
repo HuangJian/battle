@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import {
@@ -8,8 +8,8 @@ import {
   findCloseEnemyImpl,
   safePerpDodgeImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { clearArena } from './helpers'
-import { CELL, BULLET, TANK } from '../src/constants'
+import { clearArena, makeBullet as makeBulletShared } from './helpers'
+import { CELL, TANK } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 import type { Direction } from '../src/constants'
 
@@ -34,24 +34,10 @@ function makeWorld(): { world: World; input: GodAIInput } {
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir']): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir']): Bullet =>
+  makeBulletShared({ x, y, dir, ownerKind: 'basic' })
 
 function makeTank(overrides: Partial<Tank> = {}): Tank {
   return {

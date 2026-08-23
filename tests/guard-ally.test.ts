@@ -40,6 +40,9 @@ function plantTank(world: World, kind: 'player' | 'basic', x: number, y: number)
   return t
 }
 
+// KEPT LOCAL (遗留 #5 audit): the 9000+ id scheme, speed 6 and 'basic' hull
+// are load-bearing for this file's ally-fire assertions — see the 口径差异表
+// in tests/helpers.ts before touching.
 function makeBullet(over: Partial<Bullet>): Bullet {
   return {
     id: 9000 + Math.floor(over.id ?? 0),

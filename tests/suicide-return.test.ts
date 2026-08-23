@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -11,8 +11,8 @@ import {
   controlledLives,
   findSuicideTargetImpl,
 } from '../src/ai/god/SuicideReturn'
-import { clearArena, placeEnemy } from './helpers'
-import { CELL, BULLET } from '../src/constants'
+import { clearArena, placeEnemy, makeBullet as makeBulletShared } from './helpers'
+import { CELL } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 
 /**
@@ -44,24 +44,10 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], damage = 100, speed = 4): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed,
-    power: 1,
-    damage,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], damage = 100, speed = 4): Bullet =>
+  makeBulletShared({ x, y, dir, damage, speed, ownerKind: 'basic' })
 
 function positionPlayer(world: World, x: number, y: number): void {
   const p = world.player!

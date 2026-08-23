@@ -69,6 +69,9 @@ function makeTank(overrides: Partial<Tank> = {}): Tank {
   }
 }
 
+// KEPT LOCAL (遗留 #5 audit): hand-placed player2 at pixel (300,300) is
+// asserted by tests here; helpers.makeCoopWorld spawns P2 at the mirrored
+// spawn cell instead. See 口径差异表 in tests/helpers.ts.
 function makeCoopWorld(seed = 42): World {
   const world = makeWorld(seed)
   world.coop = true

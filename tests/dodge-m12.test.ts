@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -8,7 +8,7 @@ import { dodgeDirectionImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
-import { clearArena } from './helpers'
+import { clearArena, makeBullet as makeBulletShared } from './helpers'
 
 /**
  * M12 (DECISIONS §112): player HP buffer awareness — unit tests.
@@ -53,24 +53,10 @@ function setupWorld(difficulty: 'classic' | 'hard'): { world: World; input: GodA
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], damage = 100): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], damage = 100): Bullet =>
+  makeBulletShared({ x, y, dir, damage, ownerKind: 'basic' })
 
 function positionPlayer(world: World, x: number, y: number, hp: number): void {
   const p = world.player!

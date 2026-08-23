@@ -4,9 +4,8 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { TANK } from '../src/constants'
 import type { PowerUp } from '../src/types'
-import { clearArena, placeEnemy } from './helpers'
+import { clearArena, placeEnemy, makePowerUp as makePowerUpShared } from './helpers'
 
 /**
  * §225 "too late" defense structure (toolate-audit: 40 base_destroyed runs —
@@ -36,19 +35,9 @@ function setupWorld(): { world: World; input: GodAIInput } {
   return { world, input }
 }
 
-function makePowerUp(id: number, type: PowerUp['type'], col: number, row: number): PowerUp {
-  return {
-    id,
-    type,
-    x: col * 16,
-    y: row * 16,
-    w: TANK,
-    h: TANK,
-    alive: true,
-    blinkTimer: 0,
-    lifeTimer: 0,
-  }
-}
+// Local flavor → shared factory (遗留 #5): explicit ids were never asserted.
+const makePowerUp = (type: PowerUp['type'], col: number, row: number): PowerUp =>
+  makePowerUpShared(col, row, type)
 
 function placePlayer(world: World, col: number, row: number): void {
   const p = world.player!
@@ -66,7 +55,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
   it('OFF: ring breached + star nearby still diverts to the power-up branch', () => {
     const { world, input } = setupWorld()
     placePlayer(world, 1, 24) // center col 1, row 24
-    world.addPowerUp(makePowerUp(901, 'star', 4, 24)) // dist 4 → MID tier
+    world.addPowerUp(makePowerUp( 'star', 4, 24)) // dist 4 → MID tier
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(1)
   })
@@ -75,7 +64,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
     const { world, input } = setupWorld()
     input.params.baseAlertPickupSuppress = 1
     placePlayer(world, 1, 24)
-    world.addPowerUp(makePowerUp(901, 'star', 4, 24))
+    world.addPowerUp(makePowerUp( 'star', 4, 24))
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(0)
   })
@@ -84,7 +73,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
     const { world, input } = setupWorld()
     input.params.baseAlertPickupSuppress = 1
     placePlayer(world, 1, 24)
-    world.addPowerUp(makePowerUp(900, 'bomb', 4, 24)) // dist 4 → HIGH tier
+    world.addPowerUp(makePowerUp( 'bomb', 4, 24)) // dist 4 → HIGH tier
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(1)
   })

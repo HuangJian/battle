@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findFreezePickupTargetImpl } from '../src/ai/god/StrategyPlanner'
 import { RNG } from '../src/utils/RNG'
-import { CELL, TANK } from '../src/constants'
+import { CELL } from '../src/constants'
 import type { PowerUp } from '../src/types'
-import { clearArena, placeEnemy } from './helpers'
+import { clearArena, placeEnemy, makePowerUp as makePowerUpShared } from './helpers'
 
 /**
  * §156: freeze-window power-up pickup (unlimited range) — unit tests.
@@ -61,18 +61,14 @@ function positionPlayer(world: World, col: number, row: number): void {
   world.playerLevel = 0
 }
 
-function makePowerUp(world: World, col: number, row: number, type: PowerUp['type']): PowerUp {
-  const pu: PowerUp = {
-    id: genId(),
-    x: col * CELL,
-    y: row * CELL,
-    w: TANK,
-    h: TANK,
-    type,
-    alive: true,
-    blinkTimer: 0,
-    lifeTimer: 0,
-  }
+// Local push-flavor → shared pure factory (遗留 #5; 口径差异表 in tests/helpers.ts).
+const makePowerUp = (
+  world: World,
+  col: number,
+  row: number,
+  type: PowerUp['type'],
+): PowerUp => {
+  const pu = makePowerUpShared(col, row, type)
   world.powerUps.push(pu)
   return pu
 }

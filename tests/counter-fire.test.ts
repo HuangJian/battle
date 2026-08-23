@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -8,7 +8,7 @@ import { findEnemyFacingPlayerImpl } from '../src/ai/god/FireControl'
 import { hasEnemyBulletInLineImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET, TANK } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
-import { clearArena } from './helpers'
+import { clearArena, makeBullet as makeBulletShared } from './helpers'
 
 /**
  * §49-revisit 炮口相向对枪抵消 (§52 v2) unit tests.
@@ -47,24 +47,10 @@ function placeEnemy(world: World, col: number, row: number, dir: Tank['dir'] = '
   return e
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir']): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'fast',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir']): Bullet =>
+  makeBulletShared({ x, y, dir })
 
 // Player tank occupies cols 8-9, rows 10-11 (x=128..160, y=160..192).
 const PCX = 8 * CELL + CELL / 2 // 136

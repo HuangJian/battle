@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -9,7 +9,7 @@ import {
   dodgeCounterFireDirImpl,
   isTerrainPinnedImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { clearArena } from './helpers'
+import { clearArena, makeBullet as makeBulletShared } from './helpers'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 
@@ -38,24 +38,10 @@ function setupWorld(): { world: World; input: GodAIInput } {
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'fast',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet =>
+  makeBulletShared({ x, y, dir, speed })
 
 function positionPlayer(world: World, x: number, y: number): void {
   const p = world.player!

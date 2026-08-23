@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
@@ -7,7 +7,7 @@ import { GodAIInput } from '../src/ai/GodAIInput'
 import { findMostDangerousBulletImpl, isSafeDirImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
-import { clearArena } from './helpers'
+import { clearArena, makeBullet as makeBulletShared } from './helpers'
 
 /**
  * ThreatAssessor unit tests — bullet evasion is DELIBERATELY terrain-blind.
@@ -40,29 +40,10 @@ function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
   return { world, input, sim }
 }
 
-function makeBullet(
-  x: number,
-  y: number,
-  dir: Bullet['dir'],
-  ownerKind: Bullet['ownerKind'] = 'fast',
-): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind,
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], ownerKind: Bullet['ownerKind'] = 'fast'): Bullet =>
+  makeBulletShared({ x, y, dir, ownerKind })
 
 describe('ThreatAssessor — deliberate terrain-blind evasion (DECISIONS §48)', () => {
   describe('findMostDangerousBullet', () => {

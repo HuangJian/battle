@@ -71,6 +71,8 @@ function makeTank(overrides: Partial<Tank> = {}): Tank {
   }
 }
 
+// KEPT LOCAL (遗留 #5 audit): player2 id=99 + manual placement are asserted
+// downstream; helpers.makeCoopWorld would change both. See 口径差异表.
 function makeCoopWorld(seed = 42): World {
   const world = makeWorld(seed)
   world.coop = true
