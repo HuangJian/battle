@@ -6,12 +6,12 @@ import { PlaybackController } from '../src/replay/PlaybackController'
 import { ReplayInput } from '../src/replay/ReplayInput'
 import { packFrames } from '../src/replay/pack'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { TICK_MS, TANK } from '../src/constants'
+import { makeTank } from './helpers'
+import { TICK_MS } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { THEMES } from '../src/config/theme'
 import type { InputFrame, Replay, ReplayMetadata } from '../src/replay/types'
 import type { InputLike } from '../src/game/Input'
-import type { Tank } from '../src/types'
 import type { Direction } from '../src/constants'
 
 // ---- helpers ----
@@ -29,46 +29,6 @@ function makeWorld(seed = 42): World {
   world.tanks = []
   world.bullets = []
   return world
-}
-
-function makeTank(overrides: Partial<Tank> = {}): Tank {
-  return {
-    id: 0,
-    kind: 'basic',
-    x: 100,
-    y: 100,
-    w: TANK,
-    h: TANK,
-    dir: 'up',
-    speed: 1,
-    moving: false,
-    alive: true,
-    hp: 1,
-    maxHp: 1,
-    level: 0,
-    spawnTimer: 0,
-    shieldTimer: 0,
-    lastFire: 0,
-    nextFireInterval: 500,
-    fireCooldown: 0,
-    fireCount: 0,
-    bulletPower: 1,
-    damage: 1,
-    bulletSpeed: 3,
-    vx: 0,
-    vy: 0,
-    profile: {
-      firepower: 50,
-      projectileSpeed: 50,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    },
-    allegiance: 'player',
-    isPlayer: true,
-    ...overrides,
-  }
 }
 
 // KEPT LOCAL (遗留 #5 audit): player2 id=99 + manual placement are asserted

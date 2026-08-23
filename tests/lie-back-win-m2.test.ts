@@ -6,10 +6,10 @@ import { perceive, scanAhead } from '../src/ai/perception'
 import { playerCellImpl, canMoveDirImpl } from '../src/ai/god/Navigator'
 import { baseBulletInterceptCellImpl } from '../src/ai/god/ThreatAssessor'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { CELL, GRID, TANK, BULLET } from '../src/constants'
+import { makeTank } from './helpers'
+import { CELL, GRID, BULLET } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
-import type { Tank } from '../src/types'
 import type { Direction } from '../src/constants'
 import type { WorldSnapshot } from '../src/snapshot/types'
 
@@ -27,46 +27,6 @@ function makeWorld(seed = 42): World {
     for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
   }
   return world
-}
-
-function makeTank(overrides: Partial<Tank> = {}): Tank {
-  return {
-    id: 0,
-    kind: 'basic',
-    x: 100,
-    y: 100,
-    w: TANK,
-    h: TANK,
-    dir: 'up',
-    speed: 1,
-    moving: false,
-    alive: true,
-    hp: 1,
-    maxHp: 1,
-    level: 0,
-    spawnTimer: 0,
-    shieldTimer: 0,
-    lastFire: 0,
-    nextFireInterval: 500,
-    fireCooldown: 0,
-    fireCount: 0,
-    bulletPower: 1,
-    damage: 1,
-    bulletSpeed: 3,
-    vx: 0,
-    vy: 0,
-    profile: {
-      firepower: 50,
-      projectileSpeed: 50,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    },
-    allegiance: 'player',
-    isPlayer: true,
-    ...overrides,
-  }
 }
 
 // KEPT LOCAL (遗留 #5 audit): hand-placed player2 at pixel (300,300) is
