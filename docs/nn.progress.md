@@ -112,6 +112,118 @@ it8 全部 50 shards 恒等成立（2.2e-07）。分数随行为合理分化（1
 8.4→13–16min）。rotate 种子掺启动时刻防课程重放（记入 run_start.rotateSeed）。
 顺手修 wins 计数从未自增的潜伏 bug（历史 winRate 恒 0 掩盖）。
 
+### 3.14 R3 长跑失败复盘：秒投降坍缩 + F3/F3b/F4 修复（2026-08-22）
+
+**失败事实（training_log.jsonl it1–101 全量核验）**：R3 无限长跑在 it41 后 score
+钉死 0.1211（精确 = 0.4×(0.256×1.0+0.044×1.0)/0.991，分毫不差），策略坍缩为
+**开局弃战退化解**——mobility≤0.04 / progress=0 / lives≈1.00，敌人 ~211 tick
+拆基地速终（it100 manifest 单局 ticks=211）。0.121 > 认真打仗实测 ~0.110，
+PPO 收敛到投降是理性的。it100 KL=0.96 爆表更新。
+
+**根因（Goodhart 倒挂，三机理）**：
+1. **指标冻结**：局越短采样越少，basePressure 只采到开局敌人尚远的样本，
+   baseSafety 均值停在 ~0.90–1.0；lives 零损耗。
+2. **权重比倒挂**：progress 权重 0.477 但击杀难赚；lives 0.256 躲着就满值。
+   低击杀率下交战净亏（阵亡扣的 lives > 击杀赚的 progress）。
+3. **鸡生蛋护城河**：打仗有利需先有击杀技术；练击杀必先接受亏损。
+   PPO 选不交学费路径——连枪都不开（accuracy=0），比旧苟活更彻底。
+
+**监控失效教训**：KL_WARN 从 it37 持续告警但无动作，夜间无人值守空转 ~60 轮。
+→ **告警必须自带牙齿**（F4）。
+
+**F3 基地失守门控**（export-rl-rollout.ts）：`BASE_LOSS_MULT=0.25`，
+base_destroyed 局终局锚点 `SCALE×score×M`。**关键设计：M 必须双点落地**——
+只改 Φ 不改终局锚点时，对账项 `extra = SCALE×score − paidTotal` 会精确抵消
+门控差值（Ng et al. 势塑形不变性：Φ-only 改变重分配时机但不改总回报）；
+故 M 同时进 `countersPhi()`（base 拆后所有窗 Φ×0.25，窗口级信用分配语义
+一致）与终局锚点（真正翻转总回报排序）。
+
+**F3b 败局剔除 lives 维度**：`RL_LOSS_WEIGHTS = {...DEFAULT_LOSS_WEIGHTS,
+lives: 0}`。败局里 lives>0 只出现在 base_destroyed 局（lives_exhausted 局
+lives=0），它支付的正是「基地死时自己没死」的投降画像且与交战负相关——
+坍缩主要收入源（0.256/0.991）。其余维度审计结论：**保留全部**——
+progress/tempo/openingTempo/loot 是努力型指标（多打多得）；baseIntegrity 对
+lives_exhausted 局有区分度；baseSafety 的冻结伪影被 F3 门控中和（残余投降
+分 ≈0.4×(0.044/0.735)×0.25 ≈ 0.006）；**胜局带不动**（全维度以「赢」为前提，
+无被动通路）。godai-score.ts 评估口径不动（God-AI 基线可比性），RL 专用
+RL_SCORE_CONFIG 分流。
+
+**F4 KL/熵双判据熔断**（run_rl.py）：KL_BREAK=0.15 连续 3 轮（暴力漂移）或
+ENT_BREAK=0.60 连续 8 轮且 winRate<0.5（退化确定性；纯 KL 判据抓不住本次
+失败——it65/73/79 尖峰均为单轮，从不连续；熵地板按日志本应 it63 即触发）。
+触发后写 circuit_break jsonl 事件 + exit code 3。实现坑：主循环 except 会吞
+SystemExit 重试，故用标志位+break 而非 raise；winRate<0.5 守卫防误杀合法收敛。
+
+**冒烟验证**（坍缩权重 s0/seed0，复现秒投降 231 ticks）：gated score
+0.1211 → **0.005986**（quality=0.044/0.735×0.4，loot 为 null 一并出分母），
+≪ 打仗实测 0.110，倒挂彻底翻转；恒等式 Σr ≡ SCALE×gatedScore 成立
+（|diff|=1.75e-9，float32 精度口径）；manifest 新增 rewardScheme=
+'v7-aligned-f3' / scoreUngated / quality 三值自洽。tsc + py_compile 通过。
+
+**重启指引**：归档坍缩权重后删除 tmp/rl-weights/weights.json（build_model
+自动回退 BC warm-start 全新初始化——坍缩权重 entropy 已塌至 0.36–0.68，
+resume 会滑回同一盆地）。经启动器跑：`nn-training/start-training.ps1 -Script run_rl.py ...`。
+
+### 3.15 R4 无限长跑启动 + detach 后台化修复（2026-08-22）
+
+- 坍缩权重已删，旧轨迹归档 `tmp/rl-traj-r3-collapsed`（取证保留）。
+- **启动器缺口修复**（start-training.ps1）：detach 分支原硬编码只认
+  `train_loop.py`，run_rl.py 落入前台执行（绑终端会话，会话结束即死）。
+  放宽为 `-in @('train_loop.py','run_rl.py')`。坑：编辑工具写回剥掉 UTF-8
+  BOM → PS 5.1 GBK 误读中文注释 ParserError（§2.2 同坑二踩），手工补回
+  EF BB BF。**教训：凡编辑 .ps1 必查 BOM**。
+- **run_rl.py cwd 锚定**：detach 的 WorkingDirectory 是 nn-training/，而
+  run_rl.py 全部默认路径是 repo 根相对（tmp/...）→ 后台首启即死于读不到
+  BC 权重（前台复现过一次）。修法同 train_loop.py 的 REPO_ROOT 模式：
+  main() 开头 `os.chdir(dirname(dirname(abspath(__file__))))`。
+- R4 启动确认：07:45 run_start（iters=0 无限、max_hours=0、rotate 35×2
+  种子、lr 3e-4、epochs 3、BC warm-start 全新初始化），it1 shards 正常产出。
+- **每小时自动巡检上线**（TRAE 定时任务）：进程存活 + training_log 健康度
+  判读（entropy 地板 / KL 连续超限 / ticks 骤降=秒投降复发特征）+ 异常时
+  直接修复并经启动器重启，修复记入本文件。
+
+### 3.16 R4 首次健康度巡检：进程环境性死亡，续训重启（2026-08-22）
+
+- **发现**：12:01 巡检时无 python 进程；日志尾部为 it18（11:32:43 完成），
+  `tmp/rl-traj/it19` 半成品 rollout 最后写入 11:35:02 → 进程死于 it19
+  rollout 中途。**无 circuit_break**（F4 未触发）、无崩溃栈。
+- **根因**：环境性死亡——系统事件日志无重启（uptime 3.2 天）无 OOM，
+  推断为现代待机/外部干预杀进程；非代码缺陷，无需改训练代码。
+- **18 轮健康度（it1–18，hard，70 局/轮）全部健康**：
+  winRate 0%（BC warm-start 起步 4h，base_destroyed 为主败因）；
+  score_mean 0.020→0.051 平稳波动（F3 门控压低败局分属预期）；
+  entropy 1.14→1.31 缓升（≫0.8 地板）；KL 0.035–0.051（稳态区间
+  0.045–0.054 内）；局均 ticks 3105–3891（秒投降 <1000 特征未复发）；
+  progress 0.09→0.17 缓爬、mobility 0.46–0.61 远离 0。无新 hack 模式，
+  不触发奖励公式修改。
+- **修复**：清残留 python → 启动器 detach 重启（同 R4 参数）。权重安全：
+  `tmp/rl-weights/weights.json` 停于 it18（11:32:43），run_rl.py
+  `build_model()` 自动 resume（run_start 在 build_model 之后写盘，
+  12:06:48 run_start = resume 成功）；残缺 it19 目录由每轮开头
+  `shutil.rmtree` 自清理，无 off-policy 样本污染。
+- **验证**：12:07 python 双 PID 存活 + 新 run_start 参数与原配置逐项一致。
+- **待观察**：winRate 连续 18 轮为 0 属 RL 早期正常（progress 在涨），
+  若 ~40 轮后仍全零且 progress 停滞，再议奖励倒挂排查（届时报人工确认）。
+
+### 3.17 keep-iters 3→5 无损切换 + 巡检：可胜关卡 6→16（2026-08-22）
+
+- **巡检（19:00，it25–30 健康）**：winRate 1.4%–14.3% 波动、score_mean 0.087–0.183
+  随胜率联动（F3 门控正常）；entropy 1.19–1.22、KL 0.022–0.028、局均 ticks
+  4000–4300、progress 0.359→0.385 缓爬、mobility ~0.74。无 circuit_break。
+- **数据缺口**：it27 原始报告被 `--keep-iters 3` 滚动删除，巡检增量扫描漏扫
+  （每关少记 2 局）。胜局记录依赖巡检 state 累计，原始目录保留窗口太短是
+  结构性风险 → 用户拍板 keep-iters 3→5（磁盘 ~170MB/iter，5 轮 ~850MB 可接受）。
+- **切换时机（无损）**：it31 的 70/70 rollout 报告已完整落盘、PPO 更新进行中
+  → 先把 it31 扫入 state（7 胜，含新破关 11/堡垒、20/棱堡；同心圆、终极堡垒
+  打破连续 0 胜）→ Stop-Process 停机（权重停于 it30，it31 in-flight 更新作废、
+  新 run 首轮重做）→ 启动器 detach 重启，参数同前仅 keep-iters=5。
+- **验证**：19:20:42 新 run_start `keep_iters: 5` ✓；python 双 PID 存活 ✓；
+  it1 rollout 开跑 ✓。迭代编号重置为 it1，巡检 state 保留累计
+  （420 局 26 胜、可胜关卡 16 个）并注明「新 run_start 不重置累计」；
+  旧 run 孤儿 it29–it32 目录留存盘上（已扫描/作废，新 run 到同编号时自清理）。
+- **教训**：`--keep-iters` 是启动期参数，改值必须重启；重启前先确认当前轮
+  rollout 报告是否已完整（70/70），完整则先扫后杀，零数据损失。
+
 ### 3.12 决策：不做 rollout/PPO 流水线，瓶颈转向 PPO 自身（2026-08-21）
 
 用户问「下一轮 rollout 能否与上一轮 PPO 并行」。实测相位（it7–it9）：rollout

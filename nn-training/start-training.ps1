@@ -181,9 +181,11 @@ if (-not $Force -and $Script -eq 'train_loop.py' -and (Test-Path $LockFile)) {
 }
 
 # ── 启动 ─────────────────────────────────────────────────────────────
-# Windows + 显式 -Detach + 目标是 train_loop.py：Start-Process 隐藏窗口分离
+# Windows + 显式 -Detach + 长训脚本（train_loop.py / run_rl.py）：
+# Start-Process 隐藏窗口分离
 # （ShellExecute 派生完全脱离控制台的进程，替代已弃用的 VBScript/wscript 方案）
-if ($Detach -and $IsWindows -and $Script -eq 'train_loop.py') {
+# run_rl.py 无锁文件，等锁循环对它只是无害的 15s 空转后 exit 0
+if ($Detach -and $IsWindows -and $Script -in @('train_loop.py', 'run_rl.py')) {
   Log 'detaching via Start-Process（后台隐藏窗口）...'
   $argStr = "-u `"$ScriptPath`""
   foreach ($x in $ScriptArgs) { $argStr += " `"$x`"" }

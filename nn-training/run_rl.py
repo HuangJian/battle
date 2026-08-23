@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -36,6 +37,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 KL_WARN = 0.08        # calibrated to our setup: healthy steady state is 0.045-0.054
 ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
+
+# F4 circuit breaker (2026-08-22): warnings had no teeth — the R3 long run kept
+# going ~60 iterations past behavioral collapse because KL>0.15 never persisted
+# two consecutive iterations before it100 (spikes at it65/73/79 were singles).
+# Two trip rules, either fires:
+#   KL:  kl >= KL_BREAK for KL_BREAK_CONSEC consecutive iterations (violent drift)
+#   ENT: entropy <= ENT_BREAK for ENT_BREAK_CONSEC consecutive iterations AND
+#        winRate < ENT_BREAK_MAX_WINRATE (degenerate determinism; the R3 collapse
+#        sat at 0.42-0.55 for ~60 iterations). The winRate guard avoids stopping
+#        a legitimately converged high-winning policy.
+# Historical check against the R3 collapse: ENT rule trips ~it70 (11 consecutive
+# it63-it73 below 0.60); KL rule alone would only fire at it100 — KL is a
+# lagging indicator, entropy is the leading one.
+KL_BREAK = 0.15
+KL_BREAK_CONSEC = 3
+ENT_BREAK = 0.60
+ENT_BREAK_CONSEC = 8
+ENT_BREAK_MAX_WINRATE = 0.5
+CIRCUIT_EXIT_CODE = 3
 
 
 def log(msg: str) -> None:
@@ -178,6 +198,11 @@ def build_pairs(args, it: int, rng, perm_state: dict) -> list[tuple[int, int]]:
 
 
 def main() -> None:
+    # Anchor cwd to the repo root (parent of nn-training/): all default paths
+    # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
+    # relative. Required for start-training.ps1 --detach, whose WorkingDirectory
+    # is nn-training/ — same pattern as train_loop.py's REPO_ROOT.
+    os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc", default="tmp/student-weights-dagger/weights.json",
                     help="BC checkpoint to warm-start from (first init only)")
@@ -255,6 +280,9 @@ def main() -> None:
     total = "∞" if args.iters <= 0 else str(args.iters)
     prev_entropy = None
     consec_fail = 0
+    kl_streak = 0   # F4: consecutive iters with kl >= KL_BREAK
+    ent_streak = 0  # F4: consecutive iters with entropy <= ENT_BREAK and winRate < ENT_BREAK_MAX_WINRATE
+    tripped = None
     it = 0
     while args.iters <= 0 or it < args.iters:
         it += 1
@@ -305,6 +333,33 @@ def main() -> None:
                     "mb": args.mb, "epochs": args.epochs,
                 }) + "\n")
 
+            # F4 circuit breaker — the teeth behind KL_WARN/entropy warnings.
+            # break (not raise): the except handlers below would swallow and retry.
+            kl_streak = kl_streak + 1 if agg["kl"] >= KL_BREAK else 0
+            ent_streak = (ent_streak + 1
+                          if agg["entropy"] <= ENT_BREAK
+                          and report["winRate"] < ENT_BREAK_MAX_WINRATE
+                          else 0)
+            if kl_streak >= KL_BREAK_CONSEC:
+                tripped = f"kl>={KL_BREAK} for {kl_streak} consecutive iters (now {agg['kl']:.3f})"
+            elif ent_streak >= ENT_BREAK_CONSEC:
+                tripped = (f"entropy<={ENT_BREAK} for {ent_streak} consecutive iters "
+                           f"(now {agg['entropy']:.3f}, winRate={report['winRate']})")
+            if tripped is not None:
+                with open(jsonl_path, "a", encoding="utf-8") as jsonl_f:
+                    jsonl_f.write(json.dumps({
+                        "event": "circuit_break", "iter": it,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "reason": tripped,
+                        "kl": agg["kl"], "kl_streak": kl_streak,
+                        "entropy": agg["entropy"], "ent_streak": ent_streak,
+                        "winRate": report["winRate"], "weights": args.out,
+                    }) + "\n")
+                log(f"[run_rl] CRITICAL CIRCUIT-BREAK it{it}: {tripped}")
+                log(f"[run_rl] training PAUSED; weights kept at {args.out}; "
+                    f"inspect policy behavior before relaunching")
+                break
+
             if agg["kl"] > KL_WARN:
                 log(f"[run_rl] WARNING kl={agg['kl']:.3f} > {KL_WARN} — policy drifting fast; "
                     f"consider lower lr/epochs")
@@ -335,6 +390,8 @@ def main() -> None:
                 raise
             time.sleep(30)
 
+    if tripped is not None:
+        sys.exit(CIRCUIT_EXIT_CODE)
     print(f"[{time.strftime('%H:%M:%S')}] [run_rl] ALL DONE -> {args.out}")
 
 

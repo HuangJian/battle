@@ -9,9 +9,17 @@
  *            （Q_partial：当前计数器下的 losses 带加权质量，权重重分配规则与
  *             godai-score.weightedQuality 一致；无生存免费收益——苟活不产出）
  *   r_t    = Φ(t) − Φ(t−1)                       （窗口势差，稠密信用分配）
- *   终局项 = SCALE × scoreRun(final).score − (Φ_end − Φ_0)
- *   ⇒ 每局总回报 ≡ SCALE × v7 score（恒等式），胜局经带切换自然放大
+ *   终局项 = SCALE × gatedScore − (Φ_end − Φ_0)
+ *   ⇒ 每局总回报 ≡ SCALE × gatedScore（恒等式），胜局经带切换自然放大
  *     （V7: clear ≥ 0.70 vs loss ≤ 0.40）。
+ *
+ * F3 基地失守门控（2026-08-22）：base_destroyed 局 gatedScore = v7 score × M(0.25)。
+ * R3 长跑实证 v7 败局带存在 Goodhart 倒挂——秒投降局（lives/baseSafety 满值、
+ * 其余维度归零）score=0.1211 高于认真打仗的 ~0.110，PPO 理性收敛到投降。
+ * 门控同时落两点：① 终局锚点（改变总回报，翻转倒挂：投降上限 0.121×0.25≈0.03）；
+ * ② Φ 本身（基地被拆后势 ×M，塌陷记入死亡所在窗而非堆在末个样本）。
+ * 只改 ② 不改 ① 时终局对账会精确抵消门控（Ng et al. 势塑形不变性），总回报不变。
+ * 评估口径 godai-score.ts 保持纯 v7 不动——那是 God-AI 全部基线的可比性基准。
  *
  * Telemetry 采集语义与 `simulation-runner.ts` 逐字段一致（采样节拍 6 tick、
  * BASE_PRESSURE_RADIUS=12、powerup census 的 same-tick 对账、事件判据
@@ -47,6 +55,8 @@ import {
   V7_SCORE_CONFIG,
   DEFAULT_LOSS_WEIGHTS,
   type DimensionKey,
+  type ScoreConfig,
+  type Weights,
 } from '../eval/godai-score'
 import type { RunTelemetry } from './simulation-runner'
 
@@ -58,7 +68,17 @@ const ITEM_DIM = 3
 const MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
 
 // ---- R3 reward constants ----
-const REWARD_SCALE = 10 // 奖励尺度：每局总回报 ≡ REWARD_SCALE × v7 score
+const REWARD_SCALE = 10 // 奖励尺度：每局总回报 ≡ REWARD_SCALE × gatedScore
+// F3：基地失守局终局 score ×= 0.25（投降上限 ≈0.03 < 打仗实测 ~0.10+，翻转倒挂）。
+const BASE_LOSS_MULT = 0.25
+// F3b：RL 奖励的败局带剔除 lives。败局里的「剩余生命」只可能出现在 base_destroyed
+// 局（lives_exhausted 局 lives=0）——它支付的正是「基地死时自己没死」的投降画像，
+// 且与打仗行为负相关（交战才有阵亡风险），是坍缩的主要收入源（0.256×1.0/0.991）。
+// 评估口径 godai-score.ts 的 DEFAULT_LOSS_WEIGHTS 保持原值不动（God-AI 基线可比性）。
+const RL_LOSS_WEIGHTS: Weights = { ...DEFAULT_LOSS_WEIGHTS, lives: 0 }
+// RL 专用打分配置：v7 带几何 + 剔除 lives 的败局带。weightedQuality 对 w<=0 维度
+// 整体剔除（分子分母都不计），与 null-剔除语义一致。
+const RL_SCORE_CONFIG: ScoreConfig = { ...V7_SCORE_CONFIG, lossWeights: RL_LOSS_WEIGHTS }
 // 与 simulation-runner 相同的 telemetry 节拍/半径（对齐的前提）
 const TELEMETRY_SAMPLE_TICKS = 6
 const BASE_PRESSURE_RADIUS = 12
@@ -182,8 +202,14 @@ function sampleBasePressure(world: World): number {
 }
 
 /** 当前计数器下的 losses 带部分质量（权重重分配规则镜像 weightedQuality）。 */
-function lossPartialQ(t: Telemetry, kills: number, lives: number, ticks: number, baseAlive: boolean): number {
-  const w = DEFAULT_LOSS_WEIGHTS
+function lossPartialQ(
+  t: Telemetry,
+  kills: number,
+  lives: number,
+  ticks: number,
+  baseAlive: boolean,
+  w: Weights,
+): number {
   let acc = 0
   let wsum = 0
   const add = (key: DimensionKey, v: number | null): void => {
@@ -287,6 +313,7 @@ interface RunResult {
   ticks: number
   win: boolean
   score: number
+  scoreUngated: number
   quality: number
   dims: Record<string, { value: number | null; raw: number }>
 }
@@ -354,10 +381,13 @@ function runOne(
 
   const countersPhi = (): number => {
     tel.baseWallIntact = countBaseWall(world)
+    const baseAlive = !world.tileMap.isBaseDestroyed()
+    // F3：M 进入 Φ——基地被拆后势 ×M，塌陷负势差精确记入死亡所在窗。
     return (
       REWARD_SCALE *
-      V7_SCORE_CONFIG.lossBandMax *
-      lossPartialQ(tel, world.killCount, world.lives, t, !world.tileMap.isBaseDestroyed())
+      RL_SCORE_CONFIG.lossBandMax *
+      lossPartialQ(tel, world.killCount, world.lives, t, baseAlive, RL_LOSS_WEIGHTS) *
+      (baseAlive ? 1 : BASE_LOSS_MULT)
     )
   }
 
@@ -499,9 +529,12 @@ function runOne(
       deaths: [],
     } satisfies Omit<RunTelemetry, 'deaths'> & { deaths: never[] },
   } as any
-  const scored = scoreRun(scorable, V7_SCORE_CONFIG)
+  const scored = scoreRun(scorable, RL_SCORE_CONFIG)
+  // F3 终局锚点：base_destroyed 局对账目标 ×= M。恒等式变为 Σr ≡ SCALE × gatedScore
+  // （manifest.score 即 gated 值，训练侧无需感知）。
+  const gatedScore = outcome === 'base_destroyed' ? scored.score * BASE_LOSS_MULT : scored.score
   if (shard.n > 0) {
-    shard.reward[shard.n - 1] += REWARD_SCALE * scored.score - paidTotal
+    shard.reward[shard.n - 1] += REWARD_SCALE * gatedScore - paidTotal
   }
 
   const win = outcome === 'stage_clear'
@@ -509,7 +542,16 @@ function runOne(
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
-  return { shard, outcome, ticks: t, win, score: scored.score, quality: scored.quality, dims }
+  return {
+    shard,
+    outcome,
+    ticks: t,
+    win,
+    score: gatedScore,
+    scoreUngated: scored.score,
+    quality: scored.quality,
+    dims,
+  }
 }
 
 function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
@@ -594,6 +636,7 @@ function main(): void {
 
   const outcomes: Record<string, number> = {}
   const scores: number[] = []
+  const scoresUngated: number[] = []
   const dimAcc: Record<string, number[]> = {}
   let totalSamples = 0
   let totalTicks = 0
@@ -611,6 +654,7 @@ function main(): void {
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       if (res.win) wins++
       scores.push(res.score)
+      scoresUngated.push(res.scoreUngated)
       for (const [k, v] of Object.entries(res.dims)) {
         if (v.value !== null) (dimAcc[k] ??= []).push(v.value)
       }
@@ -619,7 +663,7 @@ function main(): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        rewardScheme: 'v7-aligned',
+        rewardScheme: 'v7-aligned-f3',
         difficulty,
         stage: si,
         seed,
@@ -628,6 +672,7 @@ function main(): void {
         nSamples: res.shard.n,
         k: K,
         score: res.score,
+        scoreUngated: res.scoreUngated,
         quality: res.quality,
         dims: res.dims,
       }
@@ -652,7 +697,7 @@ function main(): void {
   for (const [k, xs] of Object.entries(dimAcc)) dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    rewardScheme: 'v7-aligned',
+    rewardScheme: 'v7-aligned-f3',
     difficulty,
     stages,
     seeds,
@@ -662,13 +707,15 @@ function main(): void {
     totalSamples,
     totalTicks,
     scoreStats: stat(scores),
+    // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化
+    scoreStatsUngated: stat(scoresUngated),
     dimMeans,
     // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
     scoreList: scores.map((x) => +x.toFixed(5)),
     dimLists: Object.fromEntries(Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))])),
   }
   console.log(perGame.join('\n'))
-  console.log(`\n=== RL on-policy rollout (R3 v7-aligned) ===`)
+  console.log(`\n=== RL on-policy rollout (R3 v7-aligned-f3) ===`)
   console.log(`games=${total} winRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`)
   console.log(`score=${JSON.stringify(summary.scoreStats)}`)
   console.log(`dims=${JSON.stringify(dimMeans)}`)
