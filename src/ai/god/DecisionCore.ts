@@ -27,9 +27,11 @@ import type { Direction } from '../../constants'
  *      transcription of the original if-else. This is safer than a
  *      pass/body split for M1: several branch-entry computations write
  *      cross-tick caches (navigateTowards → _navCache, scanAhead → the
- *      shared _scanResult buffer), and evaluating them twice (once to score,
- *      once to apply) would desync parity. M2+ may add a separate score()
- *      phase on top of this skeleton for continuous value/urgency/risk.
+ *      per-tick memo in `_scanResults[dirIdx]`; since §3.2 the
+ *      aimSurvivesTurn guard uses its own `_turnSnapScan` buffer and no
+ *      longer imposes an evaluation order), and evaluating them twice (once
+ *      to score, once to apply) would desync parity. M2+ may add a separate
+ *      score() phase on top of this skeleton for continuous value/urgency/risk.
  *   2. Weights = chain order (strictly decreasing → first commit wins).
  *   3. RNG stream unchanged: only committing bodies consume RNG, in the
  *      same order as the original chain (reaction/dodge consume none; the

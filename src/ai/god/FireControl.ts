@@ -176,23 +176,35 @@ export function scanAheadImpl(
   pcx: number,
   pcy: number,
   dir: Direction,
+  out?: ScanResult,
 ): ScanResult {
   const w = self.world
   // Fast dir → index (avoid DIR_VECTORS string-keyed dict lookup).
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
 
-  // §123 per-tick memo — see the doc comment above. NaN sentinels on the first
-  // call always miss (NaN !== NaN).
-  const bit = 1 << dirIdx
-  if (self._scanCacheX === pcx && self._scanCacheY === pcy) {
-    if ((self._scanCacheMask & bit) !== 0) return self._scanResults[dirIdx]
+  // §3.2 (plan/refactor.zcode.md): an explicit `out` buffer bypasses the
+  // per-tick memo entirely — the caller owns the destination, so this scan
+  // can never clobber a memo slot (nor invalidate/refresh `_scanCache*`).
+  // This is what removed the "aimSurvivesTurnImpl MUST run first" ordering
+  // constraint: its post-turn-origin scan now writes to its own dedicated
+  // reuse buffer (`self._turnSnapScan`) instead of the shared slot.
+  let r: ScanResult
+  if (out) {
+    r = out
   } else {
-    self._scanCacheX = pcx
-    self._scanCacheY = pcy
-    self._scanCacheMask = 0
+    // §123 per-tick memo — see the doc comment above. NaN sentinels on the
+    // first call always miss (NaN !== NaN).
+    const bit = 1 << dirIdx
+    if (self._scanCacheX === pcx && self._scanCacheY === pcy) {
+      if ((self._scanCacheMask & bit) !== 0) return self._scanResults[dirIdx]
+    } else {
+      self._scanCacheX = pcx
+      self._scanCacheY = pcy
+      self._scanCacheMask = 0
+    }
+    self._scanCacheMask |= bit
+    r = self._scanResults[dirIdx]
   }
-  self._scanCacheMask |= bit
-
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
   const vertical = vdx === 0 // up or down
@@ -208,7 +220,6 @@ export function scanAheadImpl(
   // §D4: exact-ring base-wall flag — see the param doc (Battlement pocket fix).
   const exactRing = self.params.baseWallExactRing > 0
 
-  const r = self._scanResults[dirIdx]
   r.enemy = false
   r.wall = false
   r.steel = false
@@ -636,11 +647,13 @@ export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction
   const ny = horizontal ? snap(p.y, CELL) : p.y
   // Already grid-aligned on the perpendicular axis — the snap is a no-op.
   if (nx === p.x && ny === p.y) return true
-  // NOTE (perf §123): scanAheadImpl writes into the shared per-direction
-  // buffers `self._scanResults[dirIdx]` (memoized per origin+dir within a
-  // tick). Callers must invoke this guard BEFORE computing their own scan
-  // result, never after, or their result gets clobbered.
-  return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir).enemy
+  // §3.2: this guard scans from the POST-TURN origin (nx,ny) — a different
+  // origin than any caller's scan. It writes into its own dedicated reuse
+  // buffer (`self._turnSnapScan`) via the `out` parameter, so it can NEVER
+  // clobber the shared `_scanResults[dirIdx]` memo slots. Callers may now
+  // evaluate this guard before OR after their own scanAheadImpl — the old
+  // "guard MUST run first" ordering constraint (§80) is structurally gone.
+  return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir, self._turnSnapScan).enemy
 }
 
 /**

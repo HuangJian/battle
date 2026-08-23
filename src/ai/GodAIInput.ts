@@ -512,6 +512,18 @@ export class GodAIInput implements InputLike {
   _scanCacheY = NaN
   _scanCacheMask = 0
 
+  /**
+   * Dedicated reuse buffer for `aimSurvivesTurnImpl`'s post-turn-origin scan
+   * (§3.2, plan/refactor.zcode.md). It deliberately does NOT participate in
+   * the `_scanResults[dirIdx]` per-tick memo: that guard scans from a
+   * DIFFERENT origin (the grid-snapped post-turn position) than every other
+   * consumer, and sharing the memo slots is what created the "guard must be
+   * evaluated before any same-direction scan" ordering minefield. With its
+   * own buffer, evaluation order no longer matters; the buffer is still
+   * reused across ticks (zero allocation, §14.2).
+   */
+  _turnSnapScan: ScanResult = makeScanResult()
+
   /** Reusable buffer for scanAheadImpl's per-offset aligned-tank pre-filter.
    * Reset (via alignedCount=0) at the start of each offset — no allocation. */
   _scanAligned: Tank[] = []

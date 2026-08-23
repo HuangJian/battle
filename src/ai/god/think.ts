@@ -1019,13 +1019,15 @@ const AGGRO: Candidate = {
       }
       // Skip defense, go straight for the nearest enemy or power-up.
       //
-      // §80: `aimSurvivesTurnImpl` MUST be evaluated BEFORE `scanAheadImpl`
-      // below — both write into the shared `self._scanResult`, so running the
-      // guard afterwards would clobber `aggScan`. The `&&` short-circuit gives
-      // us that ordering for free. When the guard rejects the aim (the turn's
-      // grid-snap would shove the tank off the firing line) we fall through to
-      // the navigate path, which has real stall detection — this is what
-      // breaks the period-2 freeze-window deadlock.
+      // §80 (ordering constraint REMOVED in §3.2): `aimSurvivesTurnImpl` used
+      // to share `_scanResults[dirIdx]` with the scan below, forcing it to be
+      // evaluated FIRST. It now writes to its own dedicated buffer
+      // (`self._turnSnapScan`), so evaluation order no longer matters — the
+      // guard stays inside the same `&&` for short-circuit efficiency only.
+      // When the guard rejects the aim (the turn's grid-snap would shove the
+      // tank off the firing line) we fall through to the navigate path, which
+      // has real stall detection — this is what breaks the period-2
+      // freeze-window deadlock.
       // §186: When pixel-stuck for >= powerupStuckTicks, skip T2a stop-and-
       // aim — the player has been firing without moving or killing for too
       // long. Fall through to nav-stuck escape, which increments every tick
