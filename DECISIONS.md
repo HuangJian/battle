@@ -2050,3 +2050,33 @@ ALLOWLIST 残留改名死键 → 红），另锁两注册表在 endFrame/reset �
 **Implications:** 新增 GodAIInput 字段的标准动作 = 在对应生命周期方法加
 一行清场，或 ALLOWLIST 加一条带理由的豁免；两者都会被此测试强制面对。
 解析器以 sanity floor 自保（字段数 <160 即红），格式化漂移不会静默放水。
+
+## 268. 第三轮重构 Phase 1 落地汇总（plan/refactor.zcode.md §1） (STATUS: 已实施, 2026-08-24)
+
+**Decision:** §1.1–§1.4 全部落地，共 6 个 commit（41094b7 docs / 84a9b7c 死指针 /
+bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与偏离：
+
+- **1.1 活文档**：README / architecture / features / AGENTS 四份按表逐行修订
+  （端口、测试规模与 check 口径、快照 30s/20/100、15 道具、39 SVG、IndexedDB、
+  回放已建成、God AI/躺赢段落、config 表去 tanks.ts、types 四拆、仓库地图补全）；
+  presentation-audit.md 加历史基线横幅。
+- **1.2 死指针**：experimental.ts ×22 处改"已退役（文件已删，git 史可考）"；
+  pickSentryStandImpl / line 721 / see aggressive branch / single source: think.ts:483 /
+  SimulationCore / GameCore / gate-core / god-ai-gate.test 等全部如实化；
+  isBaseUnderThreat 截断文档补全为 6 规则；pickClassicDir 文档归位；Navigator 重复注释去重。
+- **1.3 死代码**：randInt（Math.random 脚枪）/ALIGN/SPAWN_PROTECTION_MS/turnCW/turnCCW/
+  NEUTRAL_BIAS/REPLAY_THUMBNAIL_*/DEFAULT_SNAPSHOT_KEY/bulletPathSteelBlocked 包装/
+  chokepointHoldCheckTicks/GameplayRules 三死旋钮/i18n 死键 ×13×2 全部删除。
+  **部分否决**：`byId` payload——审计称"全仓零消费"不成立，tools/sim/simulation-runner.ts:866
+  取证消费 e.byId 做击杀者归因（§252 先例：前提不成立即记录跳过）；仅删零 push 点的
+  `'self'` union 分支。**幽灵参数 dodgeCounterFireRangeCells**：注释改指 Dodge.ts 硬编码
+  5*CELL 实况（参数化留给 3.11 决策）。
+- **1.4 吞错**：SnapshotManager×2 + ReplayManager×2 的 `.catch(() => {})` → console.warn；
+  AudioManager 构造失败补 warn；captureThumbnail 按计划保持不动。
+
+**Rationale:** 文档是 agent 第一入口，错误声明是最大摩擦源（§0）；死导出中 randInt
+内嵌 Math.random 是确定性契约的脚枪，优先级最高；其余删除项均经执行时 grep 复验。
+
+**Implications:** 度量基线更新——活文档错误声明 ~40→0（四份）；src 内不存在文件的
+注释指针→0；死导出/死旋钮/死 i18n 键清零。`byId` 保留后 types.ts 注释已标注消费方，
+未来再审计不会再误判。
