@@ -1973,3 +1973,27 @@ defenseThreatTarget / guardAnchorHoldGate。
 
 **Implications:** 后续对目标选择的调参/调试可按函数名直接定位；
 新增"撤退门/驻守门"类机制照 `*Gate` 形状接入编排器即可。
+
+## 265. determinism 语料 v2（8→21 组合） (STATUS: 已实施, 2026-08-23, 遗留 #12)
+
+**Decision:** `tools/probe-det-baseline.sh` 语料从 8 组合（33k 签名行/~35s）扩充到
+21 组合（109k 行/~100s）。新增 13 行全部锚定历史事故关并注明出处：
+Lattice idx11（§152-W1 seed 934391936 + classic 对照臂）、Frozen Field idx18
+seed37、Eagle Nest idx30 seeds14/71、Diamond idx32 seed83、Battlement idx33
+seed2（§178）、Star Fort idx31 seed23（chokepoint A/B r3）、Twin Towers idx8、
+Steel Web idx13（central-breach 负例）、Ice Palace idx26（ice glide）、
+Brick Maze idx27（brick-dense，classic+chaos 双臂）。legacy 8 行原样保留。
+
+**Rationale:**
+- 新行选择标准 = "回归实际发生过的地方"：每行对应 DECISIONS/代码注释中记载的
+  具体事故（种子级），而非均匀撒网——同预算下召回率更高。
+- 验证三重：①门自洽（连续两跑 byte-identical）；②legacy 8 行用 git 中 v1 脚本
+  重跑逐行比对 = 零漂移（证明 §264 全程干净）；③修正了 v1 的"S 编号"误导性标注
+  （per-seed-diff 实际消费 raw STAGES index），v2 标注 `idx=N` 与代码行为一致。
+- 已知盲区记录在脚本头：单机 only（无 spectateDual/coop 接线），双玩家路径仍由
+  godai-* gates 覆盖。
+- 运行时成本 ~35s→~100s：接受——该门按"每批一次"运行，不进 per-edit 循环。
+
+**Implications:** 旧基线 sha（1764257587…）作废；当前基线 =
+`b81e240a8c2980bbf805215319be5aa2f483a312235bd35d758a6e522870ec32`
+（tmp/det-batch.baseline.txt）。后续 AI 触碰的标准流程不变：改前改后各跑一次比对。
