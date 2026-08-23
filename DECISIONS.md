@@ -1882,3 +1882,71 @@ re-export 与 `utils/pathfind.ts` shim（唯一消费方 think.ts 已改为直�
 
 **Implications:** plan/refactor.zcode.md Phase 3（params 拆分、候选提取等）放行。
 行为调参本身仍走 §6.3b Phase III 评估框架，禁区废除只解除"不许编辑"的工程约束。
+
+## 263. 第二轮重构落地汇总（plan/refactor.zcode.md B1–B3） (STATUS: 已实施, 2026-08-23)
+
+**Decision:** 按 plan/refactor.zcode.md 完成 Phase 1–3 全部条目，每小项独立
+commit（§编号即 commit 粒度），全部通过 `bun run check` + 批模拟 determinism
+签名 byte-identical 门（8 组合 × 全 tick 签名，`tools/probe-det-baseline.sh`）：
+
+- **§1.1** tests/helpers.ts 增补复合 fixture：`setupGodGame` /
+  `makeBullet(over)` / `makePowerUp(col,row,type,over)` / `makeCoopWorld()` /
+  `makeEmptyStage()` / `makeBoxedArena()` + 头部口径差异表；金丝雀迁移两个逐字节
+  相同的本地 setupWorld（base-clear-shot-threat、godai-threat-sticky）。
+- **§1.2** 新建 `tools/lib/cli.ts`（arg/flag/parseSeeds/parseStages 唯一 CLI 层，
+  断言式报错）；6 个绕过 stage-spec 的 diag 工具改严格解析（§213 静默丢 token 面
+  收窄），高频工具去重本地 arg/parseSeeds（ab-diff 家族找回丢失的 count-only 分支）。
+- **§1.3** 口径单源：STAGE_COUNT 派生自 STAGES.length；新增
+  `EVAL_DIFFICULTY_KEYS`（classic/hard/chaos 三元组唯一来源，relax 不进 sweep）；
+  gateCoreCount/splitRoundRobin 下沉 worker-pool（GATE_CORES/SIM_POOL_WORKERS
+  双 env 别名保留，行为不变）。
+- **§1.4** test-silent 加固：fallback-to-all 输出 ⚠ 提示；HEAVY_TESTS 名单失效
+  （重命名残留）时输出 ⚠ 提示。
+- **§2.1** 删除 GameRendererCore 的 20 个零值委托（render() 直调 slice）；
+  SpriteArtistCore 保留 draw* 门面（slice 跨切路由需要），mixin 幽灵注释清除、
+  参数正名。GameRendererCore 468→403 行。
+- **§2.2** sprite-key 单源化：SPRITE_URLS 派生 TANK_KEY_MAP/ITEM_KEY_MAP 与
+  tank/item 预栅格化清单（新增叶子模块 SpriteKeyMaps 防循环初始化）；顺带修复
+  item.fence/boat/frenzy/sacrifice/guard 与 tank.player2 静默走每帧 SVG 慢路径。
+- **§2.3** 渲染收敛：dirRotation() 单源替换 5 处方向旋转三元；
+  paintPowerUpGlow()/POWERUP_GLOW_FREQ 单源（bake 与 direct 路径像素恒等由构造保证）；
+  爆炸 grow/fade 数学共享（explosionSizeAt/AlphaAt）；地形 redraw/rebuild 孪生
+  switch 合一 paintTerrainCellArt()。
+- **§2.4** computeSceneSig 契约显式化：删除 `_sigTanks` 时序耦合缓存（render 自取
+  allTanks，正确性不再依赖"shouldRender 与 render 之间无 sim tick"注释约定）；
+  4 个 renderer slice 文件头部加 World→pixel 反向指针注释。
+- **§2.5** ControlCenter 五个复制 setter 合一 setToggleState；EmitterConfig 工厂
+  外移 src/config/effects-config.ts；fullscreen CSS-fallback 三连提方法；
+  MenuScreen 行序 off+N 算术改为 ROW_ORDER+rowIndexFor 单源；TileMap.dirty 消费
+  协议（presentation 只读不变量的登记例外）双向文档化。
+- **§3.1** params.ts 机械三拆：params.interface.ts(2378) / params.tables.ts(967) /
+  stage-adapt.ts(299)，params.ts 变 22 行 re-export 门面（消费方 import 路径零变动）。
+- **§3.5** 几何魔数归位：LANE_OUT_OF_BOUNDS 哨兵、26→GRID、map-center 12→
+  MAP_CENTER、中央突破扫描几何命名常量（BREACH_*）。
+- **§3.2** _scanResult 顺序地雷斩断：scanAheadImpl 增显式 out 缓冲（绕过 memo、
+  不触碰 cache 状态）；aimSurvivesTurnImpl 写专属 `_turnSnapScan` 复用缓冲——
+  §80"guard 必须先于 scanAhead 求值"约束结构性消除，调用顺序自由且 byte-identical。
+- **§3.3** 缓存失效集中化：invalidatePerTickCaches()/invalidateStageCaches()
+  两个注册表方法成为唯一字段清单，reset()/endFrame() 改为调用；**实现偏离说明**：
+  计划原文建议字段搬入 navCaches/scanCaches 分组对象，实际采用分组失效方法——
+  达成同一目标（"新增缓存必须动哪里"从 3 处隐式变 1 处显式）而避免 ~202 个
+  self.x 引用点的机械搬移风险；失效集合逐一保持与原两处完全一致。
+- **§3.4** think.ts 20 个候选闭包 → candidates/*.ts 具名导出函数
+  （eval<Id>(self, ctx): boolean，逐字移动），共享 helper 下沉 candidates/shared.ts
+  （打断环）；think.ts 3318→635 行 = 薄注册表 + 壳。权重值仍单源
+  DecisionCore.ACTION_WEIGHTS，注册表顺序 ↔ 权重一致性由 tests/decision-core.test.ts
+  护栏锁定（计划设想的第三处重复记账实为测试断言，非人工负担）。
+- **§3.6 明确不动**：self 整体切片 / 微助手去重（manhattan×81、terrain 字符串比较）
+  / selectTargetUncached 714 行分解 —— 维持原判（热路径纪律 + 成本收益比）。
+
+**Rationale:**
+- 目标对齐 AGENTS §0：降低未来 agent 开发与维护摩擦（规则消歧、样板消除、
+  单一真相源、隐性耦合显式化、可导航性），零玩家可感知行为变化（Gate 1 由
+  determinism 门 + 全量测试保证），不引入新依赖/新模式（Gate 3）。
+- §3.3/§3.4 的两处实现选择（失效方法 vs 分组对象；权重单源维持现状 vs 重构派生）
+  均按 Three Gates 取更简单方案，偏离点已如上记录。
+
+**Implications:** 未来 agent 触碰 God AI 的标准护栏流程 =
+`bun run check` + `tools/probe-det-baseline.sh` 前后 sha256 比对；新 diag 工具必须
+import tools/lib/cli；新测试 fixture 优先 tests/helpers.ts（读口径差异表再动手）；
+新增渲染通道必须同步 computeSceneSig（grep 锚点已布好）。
