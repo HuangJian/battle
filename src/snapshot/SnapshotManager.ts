@@ -211,7 +211,9 @@ export class SnapshotManager {
     const pi = this.pendingThumbnails.indexOf(id)
     if (pi >= 0) this.pendingThumbnails.splice(pi, 1)
     if (this.backend) {
-      this.backend.delete(id).catch(() => {})
+      // Persistence is fire-and-forget, but a failure should at least leave
+      // a trace — silent loss of snapshots is indistinguishable from success.
+      this.backend.delete(id).catch((e) => console.warn('[SnapshotManager] delete failed:', e))
     }
   }
 
@@ -353,6 +355,8 @@ export class SnapshotManager {
 
   private persist(snapshot: GameSnapshot): void {
     if (!this.backend) return
-    this.backend.save(snapshot).catch(() => {})
+    // Fire-and-forget, but log on failure — silent snapshot loss is a bug
+    // that would otherwise be invisible.
+    this.backend.save(snapshot).catch((e) => console.warn('[SnapshotManager] save failed:', e))
   }
 }
