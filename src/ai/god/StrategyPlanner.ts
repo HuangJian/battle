@@ -1661,6 +1661,113 @@ function noBaseNearestTarget(
   return self.tankCell(best)
 }
 
+
+/**
+ * Aggressive-mode (freeze) chase: enemies can't move, so pick the nearest —
+ * by BASE distance when freezeBasePriority > 0 (autopsy seed6 失误 D: a
+ * 20-second freeze window was wasted hunting top-right while an enemy sat
+ * 5 cells from the base; frozen enemies can't move, so travel time is the
+ * only cost of chasing far, while base distance is the threat priority).
+ * Writes _lastSelectTargetId like every committing selector.
+ */
+function freezeChaseTarget(
+  self: GodAIInput,
+  w: World,
+  playerCell: Cell,
+  enemies: Tank[],
+  baseCol: number,
+  baseRow: number,
+): Cell {
+  const freezeBaseFirst = self.params.freezeBasePriority > 0 && self.hasBase && w.spectateDual
+  let best = enemies[0]
+  let bestDist = Infinity
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
+    const tc = self.tankCell(t)
+    const d = freezeBaseFirst
+      ? Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
+      : Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+    if (d < bestDist) {
+      bestDist = d
+      best = t
+    }
+  }
+  self._lastSelectTargetId = best.id
+  return self.tankCell(best)
+}
+
+/**
+ * §88 据守咽喉要地 gate (chokepoint holding). Caller guarantees
+ * chokepointMode > 0 && hasBase && !baseUnderThreat.
+ *
+ * Rule 1 (imminent enemy) outranks rule 2 (hold): an enemy within
+ * chokepointChaseMaxDist of a threat point, facing the base, is about to
+ * attack it — chase it UNLESS the chokepoint already covers its approach
+ * (holding shoots it as it crosses — strictly better). A/B round 3 (S32
+ * seed 23): without the coverage check the hold arm marched to a
+ * chokepoint that could not shoot the imminent fast tank's lane.
+ *
+ * Rule 2 (hold): swarm + live imminent threat + hold cell within march
+ * range (a far hold cell is pure march time the enemy turns during — S26
+ * seed 12). Falls through (null) to normal selection otherwise.
+ */
+function chokepointHoldGate(self: GodAIInput, playerCell: Cell, enemyCount: number): Cell | null {
+  const chase = self.threatChaseTarget()
+  const choke = self.chokepointCell()
+  if (chase && (!choke || !chokepointCoversEnemy(self, choke, chase))) {
+    self.branchCounts.chokepoint++
+    return chase
+  }
+  if (enemyCount > self.params.chokepointHoldThreshold && choke) {
+    const holdDist = Math.abs(choke.col - playerCell.col) + Math.abs(choke.row - playerCell.row)
+    if (
+      chase &&
+      (self.params.chokepointHoldMaxDist <= 0 || holdDist <= self.params.chokepointHoldMaxDist)
+    ) {
+      self.branchCounts.chokepoint++
+      return choke
+    }
+  }
+  return null
+}
+
+/**
+ * D1 approach-band anchor hold gate: when an enemy has entered the base
+ * approach band (rows >= 20 near the base column) but the base is NOT yet
+ * under threat, hold the guard anchor instead of chasing away from the
+ * base — the anchor has clear LOS to the staging band and shoots the rush
+ * before it reaches the ring. Requires 2+ enemies on field (a lone
+ * straggler is better hunted) and the anchor within hold range of the
+ * player (no march time). Returns null to fall through.
+ */
+function anchorApproachHoldGate(
+  self: GodAIInput,
+  playerCell: Cell,
+  enemies: Tank[],
+  baseCol: number,
+): Cell | null {
+  const anchorHold = self.getBaseGuardAnchor()
+  if (!anchorHold) return null
+  let approaching = false
+  for (let ti = 0; ti < enemies.length; ti++) {
+    const t = enemies[ti]
+    const tc = self.tankCell(t)
+    if (tc.row >= 20 && Math.abs(tc.col - baseCol) <= 6) {
+      approaching = true
+      break
+    }
+  }
+  if (
+    enemies.length >= 2 &&
+    approaching &&
+    Math.abs(anchorHold.col - playerCell.col) + Math.abs(anchorHold.row - playerCell.row) <=
+      self.params.baseGuardAnchorHoldRange
+  ) {
+    return anchorHold
+  }
+  return null
+}
+
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
   // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
@@ -1780,112 +1887,19 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     return self.getDefaultDefensePosition()
   }
 
-  // Aggressive mode (freeze): enemies can't move — chase nearest directly.
-  // §179 (autopsy seed6 失误 D): when freezeBasePriority > 0, pick the enemy
-  // nearest to the BASE instead of nearest to the player. The autopsy showed
-  // a 20-second freeze window completely wasted — both tanks hunted enemies
-  // in the top-right while an enemy sat at (7,24), 5 cells from the base.
-  // Frozen enemies can't move, so distance-to-player only matters for travel
-  // time; distance-to-base determines threat priority. Gated by
-  // freezeBasePriority (0 = OFF, byte-identical).
-  if (self.aggressive) {
-    const freezeBaseFirst = self.params.freezeBasePriority > 0 && self.hasBase && w.spectateDual
-    let best = enemies[0]
-    let bestDist = Infinity
-    for (let ti = 0; ti < enemies.length; ti++) {
-      const t = enemies[ti]
-      const tc = self.tankCell(t)
-      const d = freezeBaseFirst
-        ? Math.abs(tc.col - baseCol) + Math.abs(tc.row - baseRow)
-        : Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      if (d < bestDist) {
-        bestDist = d
-        best = t
-      }
-    }
-    self._lastSelectTargetId = best.id
-    return self.tankCell(best)
-  }
+  // Aggressive mode (freeze): chase nearest — see freezeChaseTarget().
+  if (self.aggressive) return freezeChaseTarget(self, w, playerCell, enemies, baseCol, baseRow)
 
-  // ---- §88: 据守咽喉要地 (chokepoint holding, user request 2026-08-02) ----
-  // Rule 2: when the base is NOT under threat, hold the chokepoint (咽喉要地)
-  // while swarmed — enemies on field > chokepointHoldThreshold — and chase the
-  // enemy nearest a threat point otherwise (<= threshold). The chokepoint is
-  // the lower-half cell that can shoot the most threat paths (see
-  // Chokepoint.ts); navigating there and holding lets the player intercept
-  // base-bound enemies instead of roaming. Gated by chokepointMode (0 = OFF,
-  // byte-identical to pre-§88). Falls through to the normal target selection
-  // below when no chokepoint/coverage exists (no threat points, no enemies
-  // heading for the base, steel-sealed base, etc.).
-  //
-  // A/B round 2 (per-seed tick-diff): the hold arm ALSO requires a live
-  // imminent threat (threatChaseTarget non-null — some enemy within
-  // chokepointChaseMaxDist of a threat point). Without it the player walked
-  // to the (30-tick cached) chokepoint, found the enemies had turned away,
-  // and idled there while the base fell from another side (S19 seed 23:
-  // player oscillated at (4,20) for ~1200 ticks). Once at the hold cell with
-  // no imminent threat, fall through to the normal nearest-enemy chase.
+  // §88: 据守咽喉要地 gate — see chokepointHoldGate().
   if (self.params.chokepointMode > 0 && self.hasBase && !baseUnderThreat) {
-    // ---- Rule 1 (imminent enemy) outranks rule 2 (hold) ----
-    // An enemy within chokepointChaseMaxDist of a threat point, facing the
-    // base, is about to attack it — 优先击杀这些敌人. Chase it directly
-    // UNLESS the chokepoint already covers its approach (same row/col with
-    // clear LOS to the enemy or its nearest threat point): then holding lets
-    // the player shoot it as it crosses — strictly better than a chase.
-    // A/B round 3 (S32 seed 23): without this, the hold arm (enemies > 2)
-    // marched the player to a chokepoint that could NOT shoot the imminent
-    // fast tank's lane, and the fast broke through while A chased it.
-    // (chase computed once — the hold arm reuses it, same-tick identical.)
-    const chase = self.threatChaseTarget()
-    const choke = self.chokepointCell()
-    if (chase && (!choke || !chokepointCoversEnemy(self, choke, chase))) {
-      self.branchCounts.chokepoint++
-      return chase
-    }
-    if (enemies.length > self.params.chokepointHoldThreshold && choke) {
-      // Hold only when an enemy is still approaching a threat point (the
-      // imminence gate) AND the hold cell is close enough to march to — a
-      // far hold cell is pure march time the enemy turns during (S26 seed
-      // 12). Otherwise fall through to the normal hunt below.
-      const holdDist = Math.abs(choke.col - playerCell.col) + Math.abs(choke.row - playerCell.row)
-      if (
-        chase &&
-        (self.params.chokepointHoldMaxDist <= 0 || holdDist <= self.params.chokepointHoldMaxDist)
-      ) {
-        self.branchCounts.chokepoint++
-        return choke
-      }
-    }
+    const cp = chokepointHoldGate(self, playerCell, enemies.length)
+    if (cp) return cp
   }
 
-  // ---- D1 (plan §D1): approach-band anchor hold in NORMAL selection ----
-  // §137 v2 only held the anchor inside the base-threat branch. When an
-  // enemy has entered the base approach band (rows >= 20 near the base
-  // column) but the base is NOT yet under threat, hold the anchor instead
-  // of chasing the nearest enemy away from the base — the D1 objective now
-  // places the anchor WITH clear LOS to the staging band, so holding shoots
-  // the rush before it reaches the ring. Only when the player is already
-  // close (no march time — same gate as §137 v2) and enough enemies are on
-  // field (2+ — a lone straggler is better hunted down than waited for).
-  const anchorHold = self.getBaseGuardAnchor()
-  if (anchorModeOn && anchorHold && !baseUnderThreat && !self.aggressive) {
-    let approaching = false
-    for (let ti = 0; ti < enemies.length; ti++) {
-      const t = enemies[ti]
-      const tc = self.tankCell(t)
-      if (tc.row >= 20 && Math.abs(tc.col - baseCol) <= 6) {
-        approaching = true
-        break
-      }
-    }
-    if (
-      enemies.length >= 2 &&
-      approaching &&
-      Math.abs(anchorHold.col - playerCell.col) + Math.abs(anchorHold.row - playerCell.row) <=
-        self.params.baseGuardAnchorHoldRange
-    ) {
-      return anchorHold
-    }
+  // D1 (plan §D1): approach-band anchor hold gate — see anchorApproachHoldGate().
+  if (anchorModeOn && !baseUnderThreat && !self.aggressive) {
+    const hold = anchorApproachHoldGate(self, playerCell, enemies, baseCol)
+    if (hold) return hold
   }
 
   // ---- S6: Aggressive hunt mode ----
