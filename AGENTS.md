@@ -237,9 +237,9 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 > `spawnCapture`/`gitChangedFiles`/result-printing helpers used by that runner.
 >
 > **Heavy gate/integration tests are excluded by default.** The fast runner skips
-> tests that run hundreds–thousands of full-game simulations (the God-AI gates
-> `god-ai-hard-chaos-gate`, `god-ai-regression-gate`, and `calibration`) because
-> they take minutes and defeat the token/time-saving purpose. On a clean tree
+> tests that run hundreds–thousands of full-game simulations (`godai-score-gate` —
+> the 1050-sim worker-pool score gate, and `calibration`) because they take
+> minutes and defeat the token/time-saving purpose. On a clean tree
 > `bun run test` therefore runs the ~fast suite in a few seconds rather than ~1
 > minute. To exercise them, pass `--heavy` (`bun run test --heavy`) or run the full
 > suite with `bun test --parallel --timeout=50000`. Keep the `HEAVY_TESTS` list
@@ -252,16 +252,15 @@ bun run setup        # git config core.hooksPath tools/githook  (enables pre-com
 > **`bun test` MUST be run with `--parallel --timeout=50000`.** These are not
 > optional:
 > - **`--parallel` is mandatory.** `bun test` does **not** parallelize files by
->   default — without it the heavy God-AI gates (the `god-ai-hard-chaos-gate`
-> family is split into 14 part files that only speed things up *because* of
-> `--parallel`) run serially and the full suite blows past ~90s. The split
-> regression-gate design (see `tests/gate-core.ts`) relies on per-file workers
-> spreading the 1400 simulation runs across cores. `bun run check` already
-> includes this flag.
+>   default — without it the heavy God-AI gates (each spawns its own Bun web
+>   workers internally, but per-FILE parallelism across the whole 131-file suite
+>   is what keeps the full run near ~20s) degrade and the full suite slows down
+>   markedly. `bun run check` already includes this flag.
 > - **`--timeout=50000` is mandatory.** The God-AI gates run hundreds–thousands
-> of full-game simulations per file; bun's default per-test timeout (5s) kills
-> them. The part files raise their per-`it` timeout to 900000ms, but the runner
-> default must also be lifted so the harness itself doesn't abort.
+>   of full-game simulations per file; bun's default per-test timeout (5s) kills
+>   them. The gate files raise their own per-`it` timeout (e.g. 300000ms in the
+>   score gate), but the runner default must also be lifted so the harness
+>   itself doesn't abort.
 > - Note: `test.concurrent` does **not** help here — it only does cooperative
 >   (single-thread) scheduling and will NOT parallelize synchronous CPU-bound
 >   simulation work across cores. Real parallelism requires `--parallel`.
