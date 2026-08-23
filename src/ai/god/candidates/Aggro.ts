@@ -188,7 +188,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
     if (puTarget) {
       // §186: Skip powerup when pixel-stuck — the A* path to the
       // powerup is blocked/unreachable, and returning true here blocks
-      // the nav-stuck escape below (line 721).
+      // the nav-stuck escape below (evalAggro 的 nav-stuck 阶梯段).
       // Root cause: S20@seed27 22.9s stuck cycling camp→suppress→
       // powerup-stuck→camp; S35@seed52 19.1s stuck in powerup during
       // freeze; S33@seed35 16.1s; S25@seed6 18.1s; S9@seed69 18.9s.

@@ -434,7 +434,8 @@ export class Game {
       // 2x督战 → 躺赢模式 (coop): human drives P1, the God AI keeps driving P2.
       // Keep the already-spawned player2 (lives2 / playerLevel2 survive).
       // Setting `coop = true` also stops the deferred spectate-off apply
-      // (SimulationCore.updatePlaying) from stripping player2 on the next tick.
+      // (Simulation's deferred-switch guard) from stripping player2 on the
+      // next tick.
       w.coop = true
       this.godInput = p2Ai // coop partner is `godInput`, bound to player2
       this.autoFireInput = new AutoFireInput(this.input)

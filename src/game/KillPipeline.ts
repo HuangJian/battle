@@ -9,7 +9,7 @@ import type { Tank } from '../types'
 //
 // Extracted from four copy-pasted sites (plan/refactor.agy.md §2.1):
 // bulletHitsTank, updateMines, triggerSacrificeAoE, applyPowerUp('bomb').
-// Called ONLY from Simulation mixins — One-Author invariant (AGENTS §2.1)
+// Called ONLY from Simulation subsystems — One-Author invariant (AGENTS §2.1)
 // is preserved because the caller is always the Simulation.
 // ================================================================
 

@@ -211,7 +211,7 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
         adapted = true
       }
 
-      // M0.5 退役（2026-08-03）: §63 openT2a1HpMaxRange 适配已移入 experimental.ts
+      // M0.5 退役（2026-08-03）: §63 openT2a1HpMaxRange 适配已退役归档
       // 归档（60-seed 验证净负 -0.6pp，回退）。
     }
 
@@ -243,7 +243,7 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       adapted = true
     }
 
-    // M0.5 退役: §65 armorMazeSuboptimalPathProb 适配已移入 experimental.ts
+    // M0.5 退役: §65 armorMazeSuboptimalPathProb 适配已退役归档
     // 归档（30-seed +3pp 但 60-seed -1.7pp，回退）。
 
     // §66: steel-maze + low-armor → shorter camp timeout. On S6 Iron Curtain
@@ -256,7 +256,7 @@ export function computeStageAdaptedParams(base: GodAIParams, world: World): GodA
       adapted = true
     }
 
-    // M0.5 退役: §69 crossfireOpenObstacleRatio 适配已移入 experimental.ts 归档
+    // M0.5 退役: §69 crossfireOpenObstacleRatio 适配已退役归档
     // （crossfire 族 §68/§69 双否决）。
 
     // §48-revisit: terrain-gated steel-only evasion occlusion. Auto-enable

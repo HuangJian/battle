@@ -35,9 +35,9 @@ export interface PathConstraints {
    * to arrive at the same time as the player. 0 = no threat (safe cell).
    *
    * The array is indexed by `row * GRID + col` (same as the A* internal
-   * cellKey). The producer (computeThreatCostsImpl) was archived in
-   * src/ai/god/experimental.ts (M0.5 retirement) — this field is kept for
-   * the v2 survive candidate / A* risk-aversion reuse (design §4.4).
+   * cellKey). The producer (computeThreatCostsImpl) was retired at M0.5 —
+   * this field is kept for the v2 survive candidate / A* risk-aversion
+   * reuse (design §4.4).
    *
    * Unlike post-hoc diversion (§68-v2), this bakes threat avoidance into the
    * path itself — A* finds the optimal trade-off between path length and

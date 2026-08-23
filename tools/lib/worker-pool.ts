@@ -48,8 +48,8 @@ export function defaultWorkerCount(): number {
 }
 
 /**
- * Gate-harness worker count (tests/gate-core.ts + score-gate-core.ts — the
- * single shared copy; was duplicated in both). Override: GATE_CORES.
+ * Gate-harness worker count (tests/score-gate-core.ts — the single shared
+ * copy; the retired gate-core twin was deleted). Override: GATE_CORES.
  * Default tuned for THIS host: `navigator.hardwareConcurrency` reports 16
  * logical CPUs, but the gate pool is FASTEST at ~4 workers — beyond that,
  * extra workers contend and slow down (measured: 1→10.5s, 4→6.1s, 8→7.5s,

@@ -1290,9 +1290,23 @@ export class GodAIInput implements InputLike {
   }
 
   /**
-   * P1/P2.3: Check if any enemy is threatening the base. An enemy is a
-   * threat if:
-   *   - Within 3 cols of base AND row >= 18 (close lateral threat), OR
+   * P1/P2.3: Check if any enemy is threatening the base. Six OR-combined
+   * rules (each gated; result is cached per tick in `_baseUnderThreatCache`):
+   *   1. Static box — enemy within 3 cols of base AND row >= 18
+   *      (close lateral threat, the original rule).
+   *   2. P4 race — enemy inside `baseRaceRangeCells` of the base AND would
+   *      beat the player back (playerDist + baseRaceMarginCells >= enemyDist);
+   *      catches edge-lane flank runners the box misses.
+   *   3. §88 threat point — an enemy at/near a chokepoint-plan threat point
+   *      (gated by chokepointMode > 0).
+   *   4. §157 clear shot — an enemy aligned with the base with no brick/steel
+   *      between (enemyCanShootBase), regardless of distance (gated by
+   *      baseClearShotThreat > 0).
+   *   5. §173 damage recall — base has actually taken a hit AND player is
+   *      farther than baseDamageRecall cells (damage never flickers back).
+   *   6. §169 sticky hold — once true, stays true for threatStickyTicks
+   *      (only extends, never shortens) so the defense cascade doesn't
+   *      flicker off between predictive gaps.
    * Used to skip power-ups/T2a and prioritize defense.
    */
   isBaseUnderThreat(): boolean {
@@ -1393,7 +1407,7 @@ export class GodAIInput implements InputLike {
   }
 
   // M0.5 (2026-08-03): D1 hasFastThreatNearBase + SmartThreatModel wrappers
-  // (threatScore / smartIsBaseUnderThreat) retired — archived in experimental.ts.
+  // (threatScore / smartIsBaseUnderThreat) retired (experimental.ts since deleted).
 
   scanAhead(pcx: number, pcy: number, dir: Direction): ScanResult {
     return scanAheadImpl(this, pcx, pcy, dir)
@@ -1599,6 +1613,6 @@ export class GodAIInput implements InputLike {
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
   }
-  // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired —
-  // archived in experimental.ts for the v2 survive candidate.
+  // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired;
+  // recoverable from git history if the v2 survive candidate needs them.
 }

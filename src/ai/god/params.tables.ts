@@ -190,7 +190,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   iceGlideMinSpeed: 0.3,
 
   // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor、smartThreatModel
-  // 族已移入 experimental.ts 归档（见该文件参数规格表）。
+  // 族已退役归档。
   // Close-combat: default 15 (= AIM_RANGE_CELLS, unchanged behavior for
   // 1-HP enemies). For multi-HP enemies (armor), t2aHighHpMaxRange=2
   // triggers point-blank engagement (§56 — generalizes S32 close-combat).
@@ -413,7 +413,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   steelMazeCampTimeoutTicks: 20,
 
   // M0.5 退役: §63 openT2a1HpMaxRange / §65 armorMazeSuboptimalPathProb /
-  // crossfire 族（§68-v2/§69/§69-B）已移入 experimental.ts 归档（60-seed 验证
+  // crossfire 族（§68-v2/§69/§69-B）已退役归档（60-seed 验证
   // 均为净负或否决）。
 
   // §48-revisit: Steel-only evasion occlusion. 0 = OFF (byte-identical to
@@ -434,7 +434,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // with zero per-stage regressions (S14/S26 byte-identical); 120-seed
   // confirmations S32 +2.5pp (68.3→70.8), S6 +0.8pp (80.0→80.8).
   evasionSteelOcclusionBrickRatio: 0.1,
-  // M0.5 退役（2026-08-03）: trapAvoidance 族已移入 experimental.ts 归档
+  // M0.5 退役（2026-08-03）: trapAvoidance 族已退役归档
   // （默认 0 未发布；"包围风险"输入并入 v2 survive 候选设计 §3.2）。
   // §49-revisit: 炮口相向对枪抵消 (§52 v2). 1 = ON (current shipped
   // behavior, byte-identical to pre-parameterization). 0 = OFF (plain T2a).
@@ -478,7 +478,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // default (intentionally left OFF — see interface docs). The canonical fix
   // is the simulation-layer turn cooldown (§86c), not these AI-layer patches.
   // M0.5 退役（2026-08-03）: dodgeHysteresis / dodgeDirPersistence /
-  // canMoveDirFloorSnap 已移入 experimental.ts 归档（A/B 均净负，从未发布；
+  // canMoveDirFloorSnap 已退役归档（A/B 均净负，从未发布；
   // §86c 模拟层转弯冷却为规范修复，dodgeOscillationCounterFire 为唯一发布项）。
   dodgeOscillationCounterFire: 1,
 

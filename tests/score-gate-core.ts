@@ -4,15 +4,16 @@
 // This is NOT a test file (no `.test` infix). It is imported by
 // `godai-score-gate.test.ts` and the `score-gate-worker.ts` Bun web worker.
 //
-// Counterpart to `gate-core.ts` (the pass-rate / clear-count gate). Where
-// `gate-core.ts` asserts on *clear counts* (win rate), this gate asserts on
+// Counterpart to the retired `gate-core.ts` (pass-rate / clear-count gate,
+// since deleted from tests/ — recoverable from git history). Where that gate
+// asserted on *clear counts* (win rate), this gate asserts on
 // the *godai-score v7 composite* of every run — so a regression that keeps a
 // stage clearing but wrecks the underlying behavior (e.g. always turtles,
 // never kills, drags clear-time to the ceiling) still trips the gate. Per
 // Phase III this is the primary behavior-preservation guard; the clear-count
 // gate is disabled (see AGENTS §6.3b).
 //
-// Parallelism: same reasoning as gate-core — a worker *pool* gives true
+// Parallelism: same reasoning as that gate — a worker *pool* gives true
 // in-process parallelism over the SAME isolates, no per-file cold start.
 //
 // §233 (2026-08-17): seeds 20 → 10 (suite <20s). Truth re-captured at 10

@@ -618,8 +618,9 @@ export function travelFireDetourDir(
   const dir: Direction =
     tc.col === pc.col ? (tc.row > pc.row ? 'down' : 'up') : tc.col > pc.col ? 'right' : 'left'
   if (p.dir === dir) return null // 已面向 — baseline navigate 本就会开火
-  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — 与 think.ts
-  // laneCorridorBlocked 同语义 (single source: think.ts:483)。
+  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — 本地实现，
+  // 语义对应 candidates/shared.ts 的 laneCorridorBlocked（此处为内联复实现，
+  // 见 DECISIONS §66 热路径直连惯例；语义漂移时两处需同步）。
   const g = tm.grid
   if (tc.col === pc.col) {
     const step = tc.row > pc.row ? 1 : -1

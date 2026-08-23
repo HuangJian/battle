@@ -71,7 +71,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
   }
 
   if (aimDir && self._antiCampSuppress <= 0 && !skipT2aForDefense) {
-    // Inline scanAheadImpl (perf §66, see aggressive branch above).
+    // Inline call (perf §66): same pattern as the Aggro candidate's inline scan.
     const scan = scanAheadImpl(self, pcx, pcy, aimDir)
 
     // §121: T2a self-fire base guard (default OFF, selfFireBaseGuard=0 →

@@ -6,7 +6,7 @@ import { BASE_POS, GRID } from '../../constants'
 // SmartThreatModel — canShootBaseFrom (base clear-shot predicate).
 //
 // M0.5 退役（2026-08-03, DECISIONS §96）: threatScoreImpl /
-// smartIsBaseUnderThreatImpl（Phase A 否决）已移入 experimental.ts 归档。
+// smartIsBaseUnderThreatImpl（Phase A 否决）已退役归档。
 // 本文件保留 canShootBaseFrom / enemyCanShootBase——它们是 §59
 // defenseClearShotBonus（SHIPPED）与 §88 chokepoint 威胁点（SHIPPED）的
 // 依赖。

@@ -2152,7 +2152,7 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   if (canHunt) return huntModeTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
 
   // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor 空块已移除
-  // （否决，移入 experimental.ts 归档）。
+  // （否决并退役）。
 
   // ---- Normal target selection ----
   // When the base is NOT under threat, behave like the no-base case:

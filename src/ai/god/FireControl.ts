@@ -71,8 +71,8 @@ export function findEnemyDirectionImpl(
 
     // T9: score = threat weight × 1000 - distance (prefer high-threat,
     // then nearest among equal threat).
-    // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp 否决，
-    // 移入 experimental.ts 归档）——hpFactor 保留（原评分组成部分）。
+    // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp
+    // 否决归档）——hpFactor 保留（原评分组成部分）。
     let threatWeight = kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
     const hpFactor = t.hp / (t.maxHp || 1)

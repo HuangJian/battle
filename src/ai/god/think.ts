@@ -100,7 +100,8 @@ const INTERCEPT_BASE: Candidate = {
  * 46/60 败局（base_destroyed 100%）同一 archetype 复现。
  *
  * 与 §134 defenseIntercept(550) 的本质区别：
- *   1. 拦截不动位 — 本候选不对齐时**主动导航到对齐站位**（pickSentryStandImpl）。
+ *   1. 拦截不动位 — 本候选不对齐时**主动导航到对齐站位**（evalBaseLaneSentry
+ *      内的导航段）。
  *   2. 双偏线像点扫描的“可见”幻觉 — 本候选以**格对齐走廊**（laneCorridorBlocked，
  *      真实子弹中线）判定射界；单层砖挡则打砖开路（diggable，下一轮窗口生效）。
  *   3. 850 权重压掉 pickupHigh(800)/aggro(700)/midLane(545)/closePickup(540)/

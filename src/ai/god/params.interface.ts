@@ -550,7 +550,7 @@ export interface GodAIParams {
 
   // ---- M0.5 退役（2026-08-03, DECISIONS §96）----
   // guardBandMode/Row/HalfWidth + damagedArmorBonus（D1/D2 否决）与
-  // smartThreatModel 族（Phase A 否决）已移入 experimental.ts 归档。
+  // smartThreatModel 族（Phase A 否决）已退役归档。
   /**
    * Close-combat T2a range: max distance (in cells) at which the player
    * stops to aim-and-fire at an enemy in the same row/col. Default 15
@@ -1068,9 +1068,9 @@ export interface GodAIParams {
   steelMazeCampTimeoutTicks: number
 
   // M0.5 退役（2026-08-03）: §68-v2 crossfireAwareness / §69-B crossfirePathCost
-  // 已移入 experimental.ts 归档（双否决）。路径威胁基础设施（findPathThreat /
-  // findSafeMoveDir / computeThreatCosts）保留在 experimental.ts 供 v2 survive
-  // 候选与 M2+ risk 分复用（设计 §3.2 / §4.4 整合条款）。
+  // 双否决退役。路径威胁基础设施现状：findPathThreat 存活于 ThreatAssessor；
+  // findSafeMoveDir / computeThreatCosts 已随归档文件删除（git 史可考），供
+  // v2 survive 候选复活时取回（设计 §3.2 / §4.4 整合条款）。
 
   /**
    * §48-revisit: Steel-only evasion occlusion. When > 0, the bullet-threat
@@ -1140,7 +1140,7 @@ export interface GodAIParams {
    */
   evasionSteelOcclusionBrickRatio: number
 
-  // M0.5 退役（2026-08-03）: trapAvoidance 族（3 项）已移入 experimental.ts
+  // M0.5 退役（2026-08-03）: trapAvoidance 族（3 项）已退役归档
   // 归档（默认 0 未发布）。"包围风险"输入并入 v2 survive 候选设计（§3.2）。
 
   /**
@@ -1375,7 +1375,7 @@ export interface GodAIParams {
    */
   bulletLaneWait: number
 
-  // M0.5 退役（2026-08-03）: dodgeHysteresis 已移入 experimental.ts 归档
+  // M0.5 退役（2026-08-03）: dodgeHysteresis 已退役归档
   // （A/B -1.1pp，未发布）。
 
   /**

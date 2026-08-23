@@ -77,8 +77,8 @@ export function findMostDangerousBulletImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     const vertical = b.dir === 'up' || b.dir === 'down'
-    // M0.5 退役（2026-08-03）: dodgeHysteresis（TANK+2 对齐阈值）已移入
-    // experimental.ts 归档（A/B -1.1pp，从未发布）——固定标准 TANK 阈值。
+    // M0.5 退役（2026-08-03）: dodgeHysteresis（TANK+2 对齐阈值）已退役
+    // 归档（A/B -1.1pp，从未发布）——固定标准 TANK 阈值。
     const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
     if (!aligned) continue
 
@@ -433,8 +433,8 @@ export function dodgeDirectionImpl(
   const candA: Direction = vertical ? 'left' : 'up'
   const candB: Direction = vertical ? 'right' : 'down'
 
-  // M0.5 退役（2026-08-03）: dodgeDirPersistence（同威胁保持闪避方向）已移入
-  // experimental.ts 归档（A/B -1.7pp，从未发布）。
+  // M0.5 退役（2026-08-03）: dodgeDirPersistence（同威胁保持闪避方向）已退役
+  // 归档（A/B -1.7pp，从未发布）。
 
   // §86: Oscillation detection + counter-fire. When the dodge direction has
   // flipped 3+ consecutive times for the same threat, the player is stuck in

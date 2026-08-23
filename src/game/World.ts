@@ -406,7 +406,7 @@ export class World {
     this.playerLevel = this.difficulty.playerStartLevel
     // Symmetry with playerLevel: P2 (God AI / 督战双玩家) must start at the SAME
     // star level as P1, otherwise it spawns with no star aura while P1 shows
-    // playerStartLevel stars. Mid-game enable paths (SimulationCore coop /
+    // playerStartLevel stars. Mid-game enable paths (Simulation coop /
     // spectateDual toggles) already set playerLevel2 = playerStartLevel before
     // spawning P2, so this just makes the initial run-start consistent with them.
     this.playerLevel2 = this.difficulty.playerStartLevel

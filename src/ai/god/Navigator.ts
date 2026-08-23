@@ -480,11 +480,6 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
   // to fire at enemies in the same row once aligned. The old horizontal-
   // first approach made the player zigzag across the map without ever
   // getting into the same row as an enemy.
-  // Build direction preference: prioritize vertical movement (up/down)
-  // first to close the row gap with the enemy. This gives more chances
-  // to fire at enemies in the same row once aligned. The old horizontal-
-  // first approach made the player zigzag across the map without ever
-  // getting into the same row as an enemy.
   //
   // §233 (perf): the 2-4 element dirs array was allocated per call — and
   // directMove runs EVERY tick from think's navigate branch (close-range
@@ -635,8 +630,8 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
 }
 
 // M0.5 (2026-08-03): trapAvoidance (Navigator) + crossfirePathCost A* threat
-// costs (computeThreatCostsImpl) retired. Archived verbatim in experimental.ts
-// for the v2 survive candidate / EnemyModel features (design §4.4).
+// costs (computeThreatCostsImpl) retired; recoverable from git history
+// (experimental.ts deleted) if the v2 survive candidate needs them.
 
 /**
  * §145 iceGlideAdjust — 冰上滑行控制（纯函数，供 HUNT 的 navigate 段调用）。

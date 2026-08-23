@@ -16,7 +16,8 @@ import { clearArena, makeBullet as makeBulletShared } from './helpers'
  * only when it is aligned with the player within the standard `< TANK`
  * threshold. This file pins that baseline AFTER the M0.5 retirement of the
  * §86 hysteresis/persistence params (dodgeHysteresis, dodgeDirPersistence —
- * A/B -1.1pp / -1.7pp, never shipped, archived in experimental.ts).
+ * A/B -1.1pp / -1.7pp, never shipped; the archive file (experimental.ts) has
+ * since been deleted — recoverable from git history).
  *
  * Historical context (DECISIONS §86): a global `<= TANK` widening was
  * rejected because it caused -37pp on S33 Diamond — bullets in adjacent steel

@@ -428,7 +428,7 @@ export interface RunOptions {
   /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
   coop?: boolean
   /** 督战双玩家: supervise mode with a SECOND God AI driving player2 (mirrors
-   *  GameCore.requestSpectateToggle(true)). Distinct from `coop`, which is the
+   *  Game.requestSpectateToggle(true)). Distinct from `coop`, which is the
    *  Lie-Back-Win (human P1 + God AI P2) mode. */
   spectateDual?: boolean
   /**
@@ -601,7 +601,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     sim.input2 = coopInput
   }
 
-  // 督战双玩家 (dual supervise): mirror GameCore.requestSpectateToggle(true).
+  // 督战双玩家 (dual supervise): mirror Game.requestSpectateToggle(true).
   // God AI already drives P1 (the `input` above); here we also spawn player2
   // and attach a SECOND God AI so both tanks are machine-controlled.
   // Mode flags (world.spectate / world.spectateDual) were set BEFORE
