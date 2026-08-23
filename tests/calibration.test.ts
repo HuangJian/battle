@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { batchRun, summarize, parseSeeds, type BatchOptions } from '../tools/sim/batch-sim'
+import { batchRun, summarize, parseSeedSpec, type BatchOptions } from '../tools/sim/batch-sim'
 import { generateReport, formatReport } from '../tools/sim/report'
 import { runAICalibration } from '../tools/eval/ai-calibrate'
 import { runEvaluationCalibration } from '../tools/eval/calibrate'
@@ -28,17 +28,17 @@ function makeBatchOpts(overrides?: Partial<BatchOptions>): BatchOptions {
 // ============================================================
 
 describe('batch-sim', () => {
-  describe('parseSeeds', () => {
+  describe('parseSeedSpec', () => {
     it('parses a single seed', () => {
-      expect(parseSeeds('42')).toEqual([42])
+      expect(parseSeedSpec('42')).toEqual([42])
     })
 
     it('parses a seed range', () => {
-      expect(parseSeeds('1-5')).toEqual([1, 2, 3, 4, 5])
+      expect(parseSeedSpec('1-5')).toEqual([1, 2, 3, 4, 5])
     })
 
     it('parses a single-element range', () => {
-      expect(parseSeeds('3-3')).toEqual([3])
+      expect(parseSeedSpec('3-3')).toEqual([3])
     })
   })
 

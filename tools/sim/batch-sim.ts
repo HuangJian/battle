@@ -224,9 +224,11 @@ export function summarize(results: BatchResult[]): BatchSummary {
 // Seed range parser
 // ============================================================
 
-export function parseSeeds(spec: string): number[] {
-  // DIALECT NOTE: unlike tools/lib/cli parseSeeds, a bare count ("60") means
-  // the SINGLE seed 60 here, not 1..60 — kept for backward compatibility.
+export function parseSeedSpec(spec: string): number[] {
+  // DIALECT NOTE (renamed from `parseSeeds`, refactor.zcode.md §2.3): this is
+  // the SINGLE-SEED dialect — a bare count ("60") means the seed 60, NOT
+  // 1..60. tools/lib/cli's parseSeeds means the opposite; the two coexist on
+  // purpose (§213: silent-dialect drift, don't unify).
   if (spec.includes('-')) {
     const [start, end] = spec.split('-').map(Number)
     if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
@@ -249,7 +251,7 @@ if (import.meta.main) {
 
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!
-  const seeds = parseSeeds(seedSpec)
+  const seeds = parseSeedSpec(seedSpec)
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const doEval = process.argv.includes('--eval')
   const pretty = process.argv.includes('--pretty')
