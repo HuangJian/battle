@@ -41,19 +41,13 @@ import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
 import { RNG } from '../../src/utils/RNG'
+import { STAGES } from '../../src/config/stages'
 import type { GameState, Tank } from '../../src/types'
+import { arg, parseStages, parseParamSets } from '../lib/cli'
+import { parseSeedSpec } from './batch-sim'
 
 const stateOf = (w: World): GameState => w.state
-
-function parseRange(spec: string): number[] {
-  if (spec.includes('-')) {
-    const [s, e] = spec.split('-').map(Number)
-    return Array.from({ length: e - s + 1 }, (_, i) => s + i)
-  }
-  return [parseInt(spec, 10)]
-}
 
 interface RunAudit {
   stage: number
@@ -179,36 +173,16 @@ function auditRun(
 }
 
 if (import.meta.main) {
-  const arg = (n: string, d: string) => {
-    const i = process.argv.indexOf(`--${n}`)
-    return i >= 0 ? process.argv[i + 1] : d
-  }
-  const difficulty = arg('difficulty', 'classic')
+  const difficulty: string = arg('difficulty', 'classic') ?? 'classic'
   const mode = arg('mode', 'coop')
-  const seeds = parseRange(arg('seeds', '1-10'))
-  const stages = parseRange(arg('stages', '1-35'))
-    .map((n) => n - 1) // CLI is 1-based (1..35); internal index is 0-based
-    .filter((i) => i >= 0 && i < STAGES.length)
+  // Seeds use the SINGLE-SEED dialect (bare "60" = seed 60), matching the
+  // historical parseRange here — hence parseSeedSpec, not lib/cli parseSeeds.
+  const seeds = parseSeedSpec(arg('seeds', '1-10') ?? '1-10')
+  const stages = parseStages(arg('stages', '1-35') ?? '1-35')
   const coop = mode === 'coop'
 
-  // --set <key>=<value>, repeatable (same convention as per-seed-diff.ts).
-  const overrides: Record<string, number> = {}
-  for (let ai = 0; ai < process.argv.length; ai++) {
-    if (process.argv[ai] !== '--set') continue
-    const kv = process.argv[ai + 1]
-    if (!kv || !kv.includes('=')) {
-      console.error('--set expects key=value (e.g. --set aimTurnSnapGuard=0)')
-      process.exit(1)
-    }
-    const eq = kv.indexOf('=')
-    const key = kv.slice(0, eq)
-    const val = Number(kv.slice(eq + 1))
-    if (isNaN(val) || !(key in DEFAULT_GOD_AI_PARAMS)) {
-      console.error(`--set: unknown or non-numeric param '${key}'`)
-      process.exit(1)
-    }
-    overrides[key] = val
-  }
+  // --set <key>=<value>, repeatable (shared parser; throws on junk).
+  const overrides = parseParamSets(DEFAULT_GOD_AI_PARAMS)
 
   const runs: RunAudit[] = []
   let done = 0

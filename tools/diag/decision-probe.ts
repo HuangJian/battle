@@ -32,6 +32,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { STAGES } from '../../src/config/stages'
+import { arg, parseParamSets } from '../lib/cli'
 
 const USAGE = `
 decision-probe.ts — God-AI decision probe at a specific tick.
@@ -50,22 +51,8 @@ function buildParams(): GodAIParams {
   const params: Record<string, number> = {
     ...(DEFAULT_GOD_AI_PARAMS as unknown as Record<string, number>),
   }
-  for (let ai = 0; ai < process.argv.length; ai++) {
-    if (process.argv[ai] !== '--set') continue
-    const kv = process.argv[ai + 1]
-    if (!kv || !kv.includes('=')) {
-      console.error('--set expects key=value (e.g. --set chokepointMode=1)')
-      process.exit(1)
-    }
-    const eq = kv.indexOf('=')
-    const key = kv.slice(0, eq)
-    const val = Number(kv.slice(eq + 1))
-    if (isNaN(val) || !(key in DEFAULT_GOD_AI_PARAMS)) {
-      console.error(`--set: unknown or non-numeric param '${key}'`)
-      process.exit(1)
-    }
-    params[key] = val
-  }
+  // --set <key>=<value>, repeatable (shared parser; throws on junk).
+  Object.assign(params, parseParamSets(DEFAULT_GOD_AI_PARAMS))
   return params as unknown as GodAIParams
 }
 
@@ -87,12 +74,10 @@ if (
 const stage = STAGES[stageIdx]
 const world = new World()
 world.rng.reseed(seed)
+// Invalid --difficulty values fall back to classic (historical behavior).
+const dArg = arg('difficulty')
 let difficulty = 'classic'
-for (let ai = 0; ai < process.argv.length; ai++) {
-  if (process.argv[ai] !== '--difficulty') continue
-  const d = process.argv[ai + 1]
-  if (d && DIFFICULTIES[d]) difficulty = d
-}
+if (dArg && DIFFICULTIES[dArg]) difficulty = dArg
 world.difficultyKey = difficulty
 world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
 world.rules = RULES[difficulty] ?? DEFAULT_RULES

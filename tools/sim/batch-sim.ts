@@ -23,7 +23,7 @@ import { generateStages, type Theme } from '../level/level-gen'
 import { writeReplayFile } from './replay-writer'
 import type { StageData } from '../../src/types'
 
-import { arg } from '../lib/cli'
+import { arg, parseSeedSpec } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -224,24 +224,9 @@ export function summarize(results: BatchResult[]): BatchSummary {
 // Seed range parser
 // ============================================================
 
-export function parseSeedSpec(spec: string): number[] {
-  // DIALECT NOTE (renamed from `parseSeeds`, refactor.zcode.md §2.3): this is
-  // the SINGLE-SEED dialect — a bare count ("60") means the seed 60, NOT
-  // 1..60. tools/lib/cli's parseSeeds means the opposite; the two coexist on
-  // purpose (§213: silent-dialect drift, don't unify).
-  if (spec.includes('-')) {
-    const [start, end] = spec.split('-').map(Number)
-    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
-      throw new Error(`--seeds: illegal range "${spec}"`)
-    }
-    return Array.from({ length: end - start + 1 }, (_, i) => start + i)
-  }
-  const n = Number.parseInt(spec, 10)
-  if (!Number.isInteger(n) || n < 1) {
-    throw new Error(`--seeds: illegal value "${spec}" (use "1-60" or a single seed number)`)
-  }
-  return [n]
-}
+// Re-exported from lib/cli — the canonical home of the SINGLE-SEED dialect
+// (bare "60" = seed 60; refactor.zcode.md §2.3/§2.4).
+export { parseSeedSpec } from '../lib/cli'
 
 // ============================================================
 // CLI

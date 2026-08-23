@@ -20,6 +20,7 @@ import type { StageData, TankKind } from '../../src/types'
 import { STAGES } from '../../src/config/stages'
 import { runSimulation, type SimResult } from '../sim/simulation-runner'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
+import { arg } from '../lib/cli'
 
 // ============================================================
 // Arena builder (plan §3 缺口 C, §3.5, §5.4)
@@ -278,8 +279,9 @@ export function runCurriculum(only?: number): StageResult[] {
 // ============================================================
 
 if (import.meta.main) {
-  const onlyArg = process.argv.indexOf('--only')
-  const only = onlyArg >= 0 ? parseInt(process.argv[onlyArg + 1], 10) : undefined
+  // --only <id>: run a single curriculum entry (shared cli layer).
+  const onlyRaw = arg('only')
+  const only = onlyRaw !== undefined ? parseInt(onlyRaw, 10) : undefined
 
   process.stderr.write(`\n${'='.repeat(70)}\n`)
   process.stderr.write(`God AI Curriculum — 分阶段验证 (plan/God-AI-Curriculum §4)\n`)
