@@ -8,20 +8,20 @@
  * Usage: bun tools/replay/probe-p2-stuck.ts <file.replay> t1 t2 t3 ...
  */
 
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { ReplayInput } from '../../src/replay/ReplayInput'
-import { parseReplayFile } from '../../src/replay/file'
-import { restoreWorld } from '../../src/snapshot/WorldSerializer'
-import { GodAIInput } from '../../src/ai/GodAIInput'
-import { RNG } from '../../src/utils/RNG'
-import type { GameState } from '../../src/types'
-import { CELL, TANK, DIR_VECTORS, type Direction } from '../../src/constants'
-import { snap } from '../../src/utils/helpers'
-import type { Tank } from '../../src/types'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { ReplayInput } from '../../../src/replay/ReplayInput'
+import { parseReplayFile } from '../../../src/replay/file'
+import { restoreWorld } from '../../../src/snapshot/WorldSerializer'
+import { GodAIInput } from '../../../src/ai/GodAIInput'
+import { RNG } from '../../../src/utils/RNG'
+import type { GameState } from '../../../src/types'
+import { CELL, TANK, DIR_VECTORS, type Direction } from '../../../src/constants'
+import { snap } from '../../../src/utils/helpers'
+import type { Tank } from '../../../src/types'
 
 /** Read world.state without letting TS narrow it to the last assigned literal. */
 const stateOf = (w: World): GameState => w.state

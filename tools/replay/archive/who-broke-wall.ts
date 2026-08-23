@@ -8,16 +8,16 @@
  * Usage: bun tools/replay/who-broke-wall.ts <file.replay>
  */
 
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { ReplayInput } from '../../src/replay/ReplayInput'
-import { parseReplayFile } from '../../src/replay/file'
-import { restoreWorld } from '../../src/snapshot/WorldSerializer'
-import { CELL } from '../../src/constants'
-import type { GameState } from '../../src/types'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { ReplayInput } from '../../../src/replay/ReplayInput'
+import { parseReplayFile } from '../../../src/replay/file'
+import { restoreWorld } from '../../../src/snapshot/WorldSerializer'
+import { CELL } from '../../../src/constants'
+import type { GameState } from '../../../src/types'
 
 const stateOf = (w: World): GameState => w.state
 

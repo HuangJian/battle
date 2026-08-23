@@ -15,12 +15,12 @@
  * Variant syntax: ';' separates variants, ',' separates key=val pairs
  * within one variant. An empty string probes the unmodified base.
  */
-import { STAGES } from '../../src/config/stages'
-import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { runSimulation } from '../sim/simulation-runner'
+import { STAGES } from '../../../src/config/stages'
+import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { runSimulation } from '../../sim/simulation-runner'
 import { readFileSync } from 'fs'
 
-import { arg } from '../lib/cli'
+import { arg } from '../../lib/cli'
 
 const stageIdx = parseInt(arg('stage', '19')!, 10) - 1 // CLI is 1-based (1..35)
 const seedCount = parseInt(arg('seeds', '20')!, 10)

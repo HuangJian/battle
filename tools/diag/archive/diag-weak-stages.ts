@@ -9,12 +9,12 @@
  * Usage:
  *   bun tools/diag/diag-weak-stages.ts --stages 7,15,19,33 --seeds 20 --params <summary.json>
  */
-import { STAGES } from '../../src/config/stages'
-import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { runSimulation } from '../sim/simulation-runner'
+import { STAGES } from '../../../src/config/stages'
+import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { runSimulation } from '../../sim/simulation-runner'
 import { readFileSync } from 'fs'
 
-import { arg } from '../lib/cli'
+import { arg } from '../../lib/cli'
 
 const stageIdxs = arg('stages', '7,15,19,33')!
   .split(',')

@@ -12,17 +12,17 @@
  *   bun tools/replay/analyze-p2.ts <file.replay> [--from=SEC] [--to=SEC]
  */
 
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { ReplayInput } from '../../src/replay/ReplayInput'
-import { parseReplayFile } from '../../src/replay/file'
-import { restoreWorld } from '../../src/snapshot/WorldSerializer'
-import { unpackFrames } from '../../src/replay/pack'
-import type { GameState } from '../../src/types'
-import { CELL } from '../../src/constants'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { ReplayInput } from '../../../src/replay/ReplayInput'
+import { parseReplayFile } from '../../../src/replay/file'
+import { restoreWorld } from '../../../src/snapshot/WorldSerializer'
+import { unpackFrames } from '../../../src/replay/pack'
+import type { GameState } from '../../../src/types'
+import { CELL } from '../../../src/constants'
 
 /** Read world.state without letting TS narrow it to the last assigned literal. */
 const stateOf = (w: World): GameState => w.state

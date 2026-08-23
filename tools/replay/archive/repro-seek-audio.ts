@@ -14,16 +14,16 @@
  * Prints the FIXED pending-queue size and the magnitude the bug would have queued.
  */
 
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { PlaybackController } from '../../src/replay/PlaybackController'
-import { ReplayInput } from '../../src/replay/ReplayInput'
-import { parseReplayFile } from '../../src/replay/file'
-import { restoreWorld } from '../../src/snapshot/WorldSerializer'
-import type { Replay } from '../../src/replay/types'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { PlaybackController } from '../../../src/replay/PlaybackController'
+import { ReplayInput } from '../../../src/replay/ReplayInput'
+import { parseReplayFile } from '../../../src/replay/file'
+import { restoreWorld } from '../../../src/snapshot/WorldSerializer'
+import type { Replay } from '../../../src/replay/types'
 
 function buildWorld(replay: Replay): { world: World; sim: Simulation } {
   const meta = replay.metadata

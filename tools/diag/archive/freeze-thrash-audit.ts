@@ -36,16 +36,16 @@
  * `--set aimTurnSnapGuard=0` = pre-§80 baseline.
  */
 
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { RNG } from '../../src/utils/RNG'
-import { STAGES } from '../../src/config/stages'
-import type { GameState, Tank } from '../../src/types'
-import { arg, parseStages, parseParamSets } from '../lib/cli'
-import { parseSeedSpec } from './batch-sim'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { RNG } from '../../../src/utils/RNG'
+import { STAGES } from '../../../src/config/stages'
+import type { GameState, Tank } from '../../../src/types'
+import { arg, parseStages, parseParamSets } from '../../lib/cli'
+import { parseSeedSpec } from '../../sim/batch-sim'
 
 const stateOf = (w: World): GameState => w.state
 
