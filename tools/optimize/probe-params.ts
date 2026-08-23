@@ -20,10 +20,7 @@ import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { runSimulation } from '../sim/simulation-runner'
 import { readFileSync } from 'fs'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
+import { arg } from '../lib/cli'
 
 const stageIdx = parseInt(arg('stage', '19')!, 10) - 1 // CLI is 1-based (1..35)
 const seedCount = parseInt(arg('seeds', '20')!, 10)

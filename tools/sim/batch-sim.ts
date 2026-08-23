@@ -23,6 +23,7 @@ import { generateStages, type Theme } from '../level/level-gen'
 import { writeReplayFile } from './replay-writer'
 import type { StageData } from '../../src/types'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -224,11 +225,20 @@ export function summarize(results: BatchResult[]): BatchSummary {
 // ============================================================
 
 export function parseSeeds(spec: string): number[] {
+  // DIALECT NOTE: unlike tools/lib/cli parseSeeds, a bare count ("60") means
+  // the SINGLE seed 60 here, not 1..60 — kept for backward compatibility.
   if (spec.includes('-')) {
     const [start, end] = spec.split('-').map(Number)
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
+      throw new Error(`--seeds: illegal range "${spec}"`)
+    }
     return Array.from({ length: end - start + 1 }, (_, i) => start + i)
   }
-  return [parseInt(spec, 10)]
+  const n = Number.parseInt(spec, 10)
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`--seeds: illegal value "${spec}" (use "1-60" or a single seed number)`)
+  }
+  return [n]
 }
 
 // ============================================================
@@ -236,10 +246,6 @@ export function parseSeeds(spec: string): number[] {
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
 
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!

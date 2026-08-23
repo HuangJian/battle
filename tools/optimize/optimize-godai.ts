@@ -47,6 +47,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 
+import { arg as cliArg } from '../lib/cli'
 // ============================================================
 // Search Space Definition
 // ============================================================
@@ -1003,15 +1004,12 @@ function runComparisonTraces(
 // ============================================================
 
 if (import.meta.main) {
-  // Overloaded so that supplying a fallback narrows the result to `string`.
-  // Without this every call site with a default still had to be unwrapped with
-  // `!`, and the ones that forgot silently passed `string | undefined` into
-  // path helpers.
+  // Overload shim: a supplied fallback narrows the result to `string`, sparing
+  // `!` at call sites; the implementation is the shared tools/lib/cli layer.
   function arg(name: string, fallback: string): string
   function arg(name: string): string | undefined
   function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
+    return cliArg(name, fallback)
   }
 
   // M0 §3.1 (open-test protocol): shared parser — `all`, ranges, comma

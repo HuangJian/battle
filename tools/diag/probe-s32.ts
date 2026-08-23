@@ -11,10 +11,7 @@ import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { runSimulation } from '../sim/simulation-runner'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
+import { arg } from '../lib/cli'
 
 const seedCount = parseInt(arg('seeds', '120')!, 10)
 const variantsSpec = arg('variants', '')!

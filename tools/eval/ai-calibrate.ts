@@ -26,6 +26,7 @@ import {
 } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -189,10 +190,6 @@ export function runAICalibration(opts: CalibrationOptions): AICalibrationResult 
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
 
   const seedCount = parseInt(arg('seeds', '10')!, 10)
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)

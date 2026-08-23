@@ -20,13 +20,10 @@ import { STAGES } from '../../src/config/stages'
 import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 
+import { arg } from '../lib/cli'
 const IDLE_THRESHOLD_TICKS = 600 // 10s at 60fps
 const CELL_THRESHOLD = CELL // 16px — 1 cell displacement threshold
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
 
 const stageIdx = Number(arg('stage', '1')) - 1
 const seed = Number(arg('seed', '1'))

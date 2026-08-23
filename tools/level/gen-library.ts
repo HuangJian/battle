@@ -20,6 +20,7 @@ import { evaluate, DEFAULT_BASELINE, type BaselineConfig } from '../eval/evaluat
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -168,10 +169,6 @@ export function generateLibrary(opts: GenLibraryOptions): GenLibraryResult {
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
 
   const count = parseInt(arg('count', '20')!, 10)
   const difficulty = arg('difficulty', 'hard')!

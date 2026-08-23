@@ -20,10 +20,7 @@ import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import { readFileSync } from 'fs'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
+import { arg } from '../lib/cli'
 
 const SEED_COUNT = parseInt(arg('seeds', '20')!, 10)
 const SEEDS = Array.from({ length: SEED_COUNT }, (_, i) => i + 1)

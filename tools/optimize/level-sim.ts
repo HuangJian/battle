@@ -39,11 +39,8 @@ import { runSimulation } from '../sim/simulation-runner'
 import { evaluate, DEFAULT_BASELINE } from '../eval/evaluator'
 import { writeReplayFile } from '../sim/replay-writer'
 
+import { arg } from '../lib/cli'
 // ---- Parse args ----
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
 
 const stageIdx = parseInt(arg('stage', '1')!, 10) - 1 // CLI is 1-based (1..35)
 const difficulty = arg('difficulty', 'hard')!

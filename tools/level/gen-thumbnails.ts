@@ -21,6 +21,7 @@ import { generateStages, type Theme } from './level-gen'
 import type { StageData } from '../../src/types'
 import { GRID, PLAYER_SPAWN, ENEMY_SPAWNS } from '../../src/constants'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Terrain colors (from CLASSIC_THEME)
 // ============================================================
@@ -125,10 +126,6 @@ export async function renderThumbnails(opts: ThumbnailOptions): Promise<string[]
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
 
   const inputFile = arg('input')
   const outputDir = arg('output-dir', 'thumbnails')!

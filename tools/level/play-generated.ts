@@ -20,15 +20,12 @@ import { validateStage } from './level-gen'
 import { parseSeeds } from '../sim/batch-sim'
 import type { StageData } from '../../src/types'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // CLI
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
 
   const inputFile = arg('input', 'generated-stages.json')!
   const difficulty = arg('difficulty', 'hard')!

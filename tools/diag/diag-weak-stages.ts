@@ -14,10 +14,7 @@ import { GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { runSimulation } from '../sim/simulation-runner'
 import { readFileSync } from 'fs'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
+import { arg } from '../lib/cli'
 
 const stageIdxs = arg('stages', '7,15,19,33')!
   .split(',')

@@ -14,6 +14,8 @@
  * The label is optional — it defaults to the current git commit subject.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+
+import { arg } from '../lib/cli'
 import {
   DEFAULT_HISTORY_DIR,
   DEFAULT_RESULTS_PATH,
@@ -25,10 +27,6 @@ import {
   type WinrateSnapshot,
 } from './winrate-history'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
 function flag(name: string): boolean {
   return process.argv.includes(`--${name}`)
 }

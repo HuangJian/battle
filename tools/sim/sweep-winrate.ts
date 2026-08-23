@@ -32,16 +32,22 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import { DEFAULT_HISTORY_DIR, loadSnapshots, type WinrateSnapshot } from './winrate-history'
 import { writeReplayFile } from './replay-writer'
 
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : fallback
-}
+import { arg } from '../lib/cli'
 function parseSeeds(spec: string): number[] {
+  // DIALECT NOTE: unlike tools/lib/cli parseSeeds, a bare count ("60") means
+  // the SINGLE seed 60 here, not 1..60 — kept for backward compatibility.
   if (spec.includes('-')) {
     const [start, end] = spec.split('-').map(Number)
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) {
+      throw new Error(`--seeds: illegal range "${spec}"`)
+    }
     return Array.from({ length: end - start + 1 }, (_, i) => start + i)
   }
-  return [parseInt(spec, 10)]
+  const n = Number.parseInt(spec, 10)
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`--seeds: illegal value "${spec}" (use "1-60" or a single seed number)`)
+  }
+  return [n]
 }
 
 const difficulties = arg('difficulties') ?? EVAL_DIFFICULTY_KEYS.join(',')

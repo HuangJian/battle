@@ -16,6 +16,7 @@ import { STAGES } from '../../src/config/stages'
 import { runSimulation } from './simulation-runner'
 import type { StageData } from '../../src/types'
 
+import { arg as cliArg } from '../lib/cli'
 function parseRange(spec: string, max: number): number[] {
   if (spec === 'all') return Array.from({ length: max }, (_, i) => i)
   if (spec.includes('-')) {
@@ -111,9 +112,11 @@ function runMode(
 }
 
 if (import.meta.main) {
+  // Delegates to the shared tools/lib/cli layer; the required-fallback
+  // signature keeps call sites free of `!`.
   function arg(name: string, fallback: string): string {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
+    const v = cliArg(name)
+    return v === undefined ? fallback : v
   }
   const difficulty = arg('difficulty', 'classic')
   const seeds = parseRange(arg('seeds', '1-3'), 1_000_000)
