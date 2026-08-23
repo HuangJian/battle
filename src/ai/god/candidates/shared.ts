@@ -86,7 +86,13 @@ export const LANE_OUT_OF_BOUNDS = 999
 /** §X 原语: 格对齐走廊检查 — (c,r)→(tc,tr) 必须同排或同列，两格之间逐格扫描。
  * 返回 0 = 走廊全通；>0 = 距 (c,r) 第 n 格（1 起）被非空地形挡住
  * （'base' 亦计 — 永不穿基地射击）。非对齐返回 -1。 */
-export function laneCorridorBlocked(w: World, c: number, r: number, tc: number, tr: number): number {
+export function laneCorridorBlocked(
+  w: World,
+  c: number,
+  r: number,
+  tc: number,
+  tr: number,
+): number {
   const g = w.tileMap.grid
   if (c === tc) {
     if (r === tr) return 0
