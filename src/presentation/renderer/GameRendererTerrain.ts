@@ -4,6 +4,11 @@
 // `this.<slice-own>` stayed; everything else goes through the owning
 // core instance back-reference (`this.r`).
 // ================================================================
+// ================================================================
+// ⚠ World→pixel contract (§2.4): every World field this slice paints must be
+// folded into PresentationLayer.computeSceneSig, or the on-demand render gate
+// will freeze this channel whenever the scene is otherwise idle.
+// ================================================================
 import type { World } from '../../game/World'
 import type { TileMap } from '../../game/TileMap'
 import { CELL, GRID, FIELD } from '../../constants'

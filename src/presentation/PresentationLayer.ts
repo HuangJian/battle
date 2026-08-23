@@ -37,13 +37,6 @@ export class PresentationLayer {
   private _needRender = true
   /** Cheap signature of everything that affects painted pixels. */
   private _lastSceneSig = 0
-  /**
-   * Cached `world.allTanks` buffer fetched inside `computeSceneSig`, consumed
-   * by the next `render()` call (P2). Null after consumption or before first
-   * use. Safe because `_allTanksBuf` is only mutated by the getter itself, and
-   * no sim tick runs between `shouldRender` and `render`.
-   */
-  private _sigTanks: Tank[] | null = null
   // Structural / UI-driving fields whose change must force a repaint.
   private _lastState = ''
   private _lastThemeKey = ''
@@ -469,14 +462,11 @@ export class PresentationLayer {
     // `world.allTanks` is a getter that rebuilds a shared buffer on every access.
     // Nothing in the presentation path mutates the World, so one rebuild per
     // frame is enough — thread it through the two consumers (R1/P1-B).
-    //
-    // P2: when `shouldRender` already fetched the buffer for `computeSceneSig`,
-    // reuse that reference instead of re-fetching. Skips the second ~6-10 entry
-    // array write per repainted frame. Safe because `_allTanksBuf` is only
-    // mutated by the getter itself, and no sim tick runs between shouldRender
-    // and render.
-    const tanks = this._sigTanks ?? world.allTanks
-    this._sigTanks = null // consume; next shouldRender will re-fetch
+    // (Formerly this reused a buffer cached by computeSceneSig — the "_sigTanks
+    // temporal coupling" was removed in §2.4: correctness must not depend on
+    // "no sim tick between shouldRender and render"; one extra small array
+    // rebuild per frame is the entire cost.)
+    const tanks = world.allTanks
 
     // Update visual state from world
     this.updateVisualState(world, tanks)
@@ -584,6 +574,15 @@ export class PresentationLayer {
    * sub-pixel jitter never falsely triggers a repaint, but any real movement
    * (a tank/bullet shifting cells, a spawn/shield/bonus/flash state flip, the
    * water phase advancing, or the camera offset changing) changes it.
+   *
+   * ── BAND-OFF CONTRACT — READ BEFORE ADDING A VISUAL CHANNEL ─────────────
+   * This function must hash EVERY World field that reaches a pixel. If you
+   * add a new World → pixels channel (new entity array, new tank bit, new
+   * animated terrain), you MUST fold it into this signature — otherwise the
+   * on-demand gate will freeze that channel's visuals whenever the scene is
+   * otherwise idle, with the failure far from your change. Grep anchors:
+   * `computeSceneSig` here + the "computeSceneSig" back-pointer notes at the
+   * top of each GameRenderer*Slice file.
    */
   private computeSceneSig(world: World): number {
     let sig = 0
@@ -599,9 +598,8 @@ export class PresentationLayer {
       if (!b.alive) continue
       sig = (sig * 31 + ((b.x >> 3) + (b.y >> 3) * 64)) | 0
     }
-    // Tanks. P2: cache the fetched buffer so `render()` can reuse it instead of
-    // re-fetching `world.allTanks` (which rebuilds the same `_allTanksBuf`).
-    const tanks = (this._sigTanks = world.allTanks)
+    // Tanks.
+    const tanks = world.allTanks
     const animPhase = Math.floor(frame / 4) // spawn(0-3)/shield(0-1)/flash(0-1) cadence
     for (let i = 0; i < tanks.length; i++) {
       const t = tanks[i]
