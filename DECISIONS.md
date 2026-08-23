@@ -2080,3 +2080,39 @@ bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与�
 **Implications:** 度量基线更新——活文档错误声明 ~40→0（四份）；src 内不存在文件的
 注释指针→0；死导出/死旋钮/死 i18n 键清零。`byId` 保留后 types.ts 注释已标注消费方，
 未来再审计不会再误判。
+
+## 269. 第三轮重构 Phase 2 落地汇总（plan/refactor.zcode.md §2） (STATUS: 已实施, 2026-08-24)
+
+**Decision:** §2.1–§2.8 全部落地，8 个 commit。条目清单与偏离：
+
+- **2.1** helpers.makeTank 补齐（语义冻结为五份字节级副本的默认值），5 文件本地
+  副本删除改导入，调用点零改动；顺带清理由此空置的 TANK/Tank 导入。
+- **2.2** 差异表补录 emptyArena/addEnemy(1-based)/placeEnemy 三方言与 positionPlayer
+  三方言（~18 本地副本）。**可选增量否决**：~7 处本地 placeEnemy 与 helpers 版参数序
+  相反（第 3 参 dir vs kind），非 byte-identical——盲收编会静默翻转 4 参调用点语义，
+  陷阱记入差异表（§260 教训的直接应用）。
+- **2.3** batch-sim/sweep-winrate 的 parseSeeds → parseSeedSpec 正名（单颗种子方言）；
+  方言保留不并（§213）。tests/calibration 同步。
+- **2.4** lib/cli 新增 parseParamSets（--set 共享收集器）；parseSeedSpec 提升进 lib/cli
+  （batch-sim 改 re-export）。freeze-thrash-audit/decision-probe/per-seed-diff/
+  curriculum/regression-check 五处手搓 argv 迁移。**行为修正两处**（commit 注明）：
+  freeze-thrash 与 regression-check 的 --stages 从静默过滤越界 token 变为抛错
+  （§213 类坑消除，烟测 StageSpecError 生效）；per-seed-diff 的 --max-ticks 非法值
+  从静默忽略变抛错。cli.ts 头部登记 perf/* 等号语法并存。
+- **2.5** 8 个零引用工具归档（replay/archive 新建 + diag/archive 二批），相对导入层级
+  修正，两侧 archive README 记甄别标准与复活条件。执行前逐个复验零引用成立。
+- **2.6** eval-suite main() 413 行拆 runCompare/runCalibrate/runScorecard + SuiteContext；
+  头部 v6→v7 更正；eval-refs 加载器下沉 tools/lib/eval-refs.ts；取证语料默认路径 ×4
+  收敛为 DEFAULT_FORENSICS_CORPUS。
+- **2.7** sweep-winrate 报告生成器（HTML+内嵌 JS ~460 行）逐字搬至 report-html.ts；
+  ranAt/seedsCount/modeSuffix 参数化（ReportMeta），报告模块零 argv 零 IO。
+- **2.8** 四个测试文件改名归一 godai-* 前缀（含 guard-god-ai→godai-guard），
+  describe 名/交叉引用同步；子目录化维持不做。
+
+**Rationale:** tests/tools 是 agent 开发摩擦主战场（§0）；同名反义函数、静默吞 token、
+字节级 fixture 副本都是"agent 改一处坏三处"的放大器。方言本身承载行为语义，处置原则
+是**显式化而非消灭**（差异表/DIALECT NOTE/参数化），与 §260 一脉相承。
+
+**Implications:** 度量基线更新——makeTank 副本 5→1；parseSeeds 3 份 2 义→具名双义；
+god-AI 测试命名分裂 4→0；零引用工具 8 个 ~1500 行归档；lib/cli 成为唯一 argv 层
+（perf/* 等号语法除外，已登记）。
