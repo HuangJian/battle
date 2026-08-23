@@ -1768,145 +1768,22 @@ function anchorApproachHoldGate(
   return null
 }
 
-function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
-  const w = self.world
-  // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
-  // gating target selection on P1's existence would blank P2's target list
-  // whenever P1 is permanently dead.
-  const p = self.controlledTank(w)
-  if (!p) return null
 
-  const baseCol = BASE_POS.col
-  const baseRow = BASE_POS.row
-  const defenseRow = baseRow - self.params.defenseRowOffset
-
-  // 双玩家协作: 获取伙伴信息用于目标去冲突。当伙伴存活时,
-  // 各自优先攻击自己一侧的敌人, 避免两个 AI 追同一个目标。
-  // 纯 World 读取 — 无隐藏状态 (AGENTS §2.2)。
-  const coopActive = self.hasLivingPartner()
-  const partnerCell = coopActive ? self.tankCell(self.coopPartner()!) : null
-
-  // Cluster C: reuse the per-tick enemy snapshot (built in think()) instead
-  // of allocating a filtered array on every call (AGENTS §14.1).
-  // Falls back to a fresh scan only if think() hasn't populated it yet.
-  let enemies =
-    self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
-
-  self._lastSelectTargetId = -1
-  enemies = applyTargetBlacklist(self, w, enemies)
-
-  if (enemies.length === 0) return self.getDefaultDefensePosition()
-
-  // §179: emergency base defense gate — see emergencyBaseDefenseGate().
-  const emergency = emergencyBaseDefenseGate(self, w)
-  if (emergency) return emergency
-
-  // Gap B: no-base fast path (plan/God-AI-Curriculum §3) — pure hunter,
-  // see noBaseNearestTarget().
-  if (!self.hasBase) return noBaseNearestTarget(self, playerCell, enemies, coopActive, partnerCell)
-
-  // ---- S6: Determine strategy mode ----
-  // Emergency defense: delegated to isBaseUnderThreat() so target selection
-  // and the T2a/power-up defense skips share ONE threat model. This includes
-  // the static ±3-col box AND the P4 race-to-base check (flanking runners
-  // that would beat the player back to the base).
-  const baseUnderThreat = self.isBaseUnderThreat()
-  // D1 (plan §D1): the §137 guard-anchor knob also drives the D1 objective
-  // (approach-band LOS term in computeBaseGuardAnchorImpl) and the D1 hooks
-  // below — flag once, reuse in both the base-threat hold and the normal
-  // selection hold.
-  const anchorModeOn = self.params.baseGuardAnchorMode > 0
-
-  // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
-  // queue. Both conditions must hold — requiring only one sent the player
-  // chasing across the map between spawns (enemies.length dips to 0-1
-  // during the 1.8s spawn gap), leaving the base undefended.
-  //
-  // §5.3 parameterization: the old hardcoded 2/3 thresholds were the root
-  // cause of 0% win rate — the AI only hunted when ≤3 enemies remained in
-  // the queue, spending 85% of the game turtling. Now reads from params:
-  //   huntAllyCount (default 4 = MAX_ENEMIES_ALIVE) — field count gate
-  //   endgameEnemyThreshold (default 6) — queue count gate
-  const canHunt =
-    enemies.length <= self.params.huntAllyCount &&
-    w.enemiesRemaining <= self.params.endgameEnemyThreshold
-
-  // If the player is too far from the base when it's under threat, return
-  // to defense position. This applies regardless of canHunt — even in the
-  // endgame, base defense takes priority over hunting when the player is
-  // too far away to intercept in time.
-  const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
-  if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
-    return self.getDefaultDefensePosition()
-  }
-
-  // ---- P4.2: Outnumbered retreat (S18 crossfire family) ----
-  // When several enemies converge on the player away from the base, pressing
-  // the attack trades 1-for-1 at best (three tanks can fire from three
-  // directions; the player has one barrel). Fall back toward the defense
-  // position: corridors funnel pursuers into single file, and the base
-  // gains a defender. Skipped when the base is already under threat (the
-  // defense logic below handles that) and in aggressive/freeze mode.
-  if (!baseUnderThreat && !self.aggressive) {
-    let nearby = 0
-    for (let ti = 0; ti < enemies.length; ti++) {
-      const t = enemies[ti]
-      const tc = self.tankCell(t)
-      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
-      if (d <= self.params.outnumberedRadiusCells) nearby++
-    }
-    if (nearby >= self.params.outnumberedEnemyCount && playerDistToBase > 6) {
-      return self.getDefaultDefensePosition()
-    }
-  }
-
-  // ---- M13: field-wide pressure retreat (SHIPPED, DECISIONS §113) ----
-  // P4.2 only fires when 3+ enemies CONVERGE within outnumberedRadiusCells.
-  // The M13 probe showed 70% of hard/chaos deaths happen with the FULL
-  // enemy field alive (4/4) and 39% at >20 cells from the base — the player
-  // deep-hunts while the field is at max pressure, and 1★ single-bullet
-  // firepower cannot out-race 3-4 enemies (grinding death, §111). When the
-  // FIELD count (not just nearby) is at/over outnumberedFieldEnemies and the
-  // player is beyond outnumberedFieldDistCells, return to the defense
-  // position — stop over-extending into a full battlefield. `enemies` here
-  // is the Cluster C field-wide live snapshot, not the nearby count.
-  // A/B (official 口径): 20-seed hard +2.7pp / chaos +2.6pp; 60-seed hard
-  // +2.3pp / chaos +0.6pp — the FIRST mechanism without a chaos downside
-  // (base losses and deaths down in BOTH difficulties; every dodge/horizon
-  // mechanism before had the hard+/chaos- signature). The winning tuning
-  // retreats at 3+ alive (attrition starts at 3, not 4 — 1★ can't out-race
-  // 3 enemies either) beyond 15 cells; ON4@10 was measured HARMFUL
-  // (too passive, base falls: hard -5.3pp). Pool-model only: classic
-  // 'instant' has no grinding deaths (1-shot kills, 91% gate byte-locked).
-  // NOTE (endgame interplay): this block runs BEFORE the S6 aggressive-hunt
-  // below, so with 3+ enemies alive in the endgame (queue <= 6) the player
-  // retreats instead of hunting. The 60-seed A/B empirically validated this
-  // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
-  // regression by reordering the blocks.
-  if (isFieldRetreatConditionImpl(self, baseUnderThreat, playerDistToBase, enemies.length)) {
-    return self.getDefaultDefensePosition()
-  }
-
-  // Aggressive mode (freeze): chase nearest — see freezeChaseTarget().
-  if (self.aggressive) return freezeChaseTarget(self, w, playerCell, enemies, baseCol, baseRow)
-
-  // §88: 据守咽喉要地 gate — see chokepointHoldGate().
-  if (self.params.chokepointMode > 0 && self.hasBase && !baseUnderThreat) {
-    const cp = chokepointHoldGate(self, playerCell, enemies.length)
-    if (cp) return cp
-  }
-
-  // D1 (plan §D1): approach-band anchor hold gate — see anchorApproachHoldGate().
-  if (anchorModeOn && !baseUnderThreat && !self.aggressive) {
-    const hold = anchorApproachHoldGate(self, playerCell, enemies, baseCol)
-    if (hold) return hold
-  }
-
-  // ---- S6: Aggressive hunt mode ----
-  // When few enemies remain, go directly for the nearest enemy.
-  // This replaces the old endgame check (which was too restrictive:
-  // enemiesRemaining <= 1 && enemies.length <= 1).
-  if (canHunt) {
+/**
+ * S6 aggressive-hunt selector (canHunt gate evaluated by the caller): few
+ * enemies on field AND few remaining in queue. Intent read → targetValue
+ * ordering → plain bonus/coop-adjusted nearest. Writes _lastSelectTargetId
+ * and the intent/§170-commit side effects exactly as before extraction.
+ */
+function huntModeTarget(
+  self: GodAIInput,
+  w: World,
+  p: Tank,
+  playerCell: Cell,
+  enemies: Tank[],
+  coopActive: boolean,
+  partnerCell: Cell | null,
+): Cell {
     // Phase 2 §6.3: intent read — all defense/override branches above have
     // returned already, so a valid intent never delays threat response.
     if (self.params.intentMode > 0) {
@@ -1967,19 +1844,24 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     self._lastSelectTargetId = best.id
     if (self.params.intentMode > 0) intentWrite(self, w, playerCell, best)
     return self.tankCell(best)
-  }
+}
 
-  // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor 空块已移除
-  // （否决，移入 experimental.ts 归档）。
-
-  // ---- Normal target selection ----
-  // When the base is NOT under threat, behave like the no-base case:
-  // chase the nearest enemy to the player. This prevents the AI from
-  // chasing enemies near the base while ignoring closer enemies,
-  // which was the #1 cause of low kill counts in maze stages.
-  // The baseUnderThreat check runs every tick, so the AI immediately
-  // switches to defense mode when an enemy approaches the base.
-  if (!baseUnderThreat) {
+/**
+ * Normal-selection cascade for "base NOT under threat": §180/§177 dual-breach
+ * P1 anchor hold → P2 spawn-sweep patrol → Phase-3 coverage point → intent
+ * read → §170 hunt commit → nearest-enemy family (targetValue / pathTarget /
+ * plain Manhattan, each with bonus bias + coop de-confliction). Always
+ * commits a target; writes _lastSelectTargetId + commit/intent side effects.
+ */
+function normalSelectionTarget(
+  self: GodAIInput,
+  w: World,
+  p: Tank,
+  playerCell: Cell,
+  enemies: Tank[],
+  coopActive: boolean,
+  partnerCell: Cell | null,
+): Cell {
     // Dual central breach (plan/dual-central-breach-strategy.md §B): P1
     // guards the anchor full-time — its job is to intercept col-12 breachers,
     // not hunt across the map. P2 handles flanks/hunting. P1 still fires at
@@ -2133,6 +2015,162 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     }
     self._lastSelectTargetId = best.id
     return self.tankCell(best)
+}
+
+function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
+  const w = self.world
+  // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
+  // gating target selection on P1's existence would blank P2's target list
+  // whenever P1 is permanently dead.
+  const p = self.controlledTank(w)
+  if (!p) return null
+
+  const baseCol = BASE_POS.col
+  const baseRow = BASE_POS.row
+  const defenseRow = baseRow - self.params.defenseRowOffset
+
+  // 双玩家协作: 获取伙伴信息用于目标去冲突。当伙伴存活时,
+  // 各自优先攻击自己一侧的敌人, 避免两个 AI 追同一个目标。
+  // 纯 World 读取 — 无隐藏状态 (AGENTS §2.2)。
+  const coopActive = self.hasLivingPartner()
+  const partnerCell = coopActive ? self.tankCell(self.coopPartner()!) : null
+
+  // Cluster C: reuse the per-tick enemy snapshot (built in think()) instead
+  // of allocating a filtered array on every call (AGENTS §14.1).
+  // Falls back to a fresh scan only if think() hasn't populated it yet.
+  let enemies =
+    self._enemies.length > 0 ? self._enemies : w.tanks.filter((t) => t.alive && t.spawnTimer <= 0)
+
+  self._lastSelectTargetId = -1
+  enemies = applyTargetBlacklist(self, w, enemies)
+
+  if (enemies.length === 0) return self.getDefaultDefensePosition()
+
+  // §179: emergency base defense gate — see emergencyBaseDefenseGate().
+  const emergency = emergencyBaseDefenseGate(self, w)
+  if (emergency) return emergency
+
+  // Gap B: no-base fast path (plan/God-AI-Curriculum §3) — pure hunter,
+  // see noBaseNearestTarget().
+  if (!self.hasBase) return noBaseNearestTarget(self, playerCell, enemies, coopActive, partnerCell)
+
+  // ---- S6: Determine strategy mode ----
+  // Emergency defense: delegated to isBaseUnderThreat() so target selection
+  // and the T2a/power-up defense skips share ONE threat model. This includes
+  // the static ±3-col box AND the P4 race-to-base check (flanking runners
+  // that would beat the player back to the base).
+  const baseUnderThreat = self.isBaseUnderThreat()
+  // D1 (plan §D1): the §137 guard-anchor knob also drives the D1 objective
+  // (approach-band LOS term in computeBaseGuardAnchorImpl) and the D1 hooks
+  // below — flag once, reuse in both the base-threat hold and the normal
+  // selection hold.
+  const anchorModeOn = self.params.baseGuardAnchorMode > 0
+
+  // S6 Aggressive hunt (§5.3): few enemies on field AND few remaining in
+  // queue. Both conditions must hold — requiring only one sent the player
+  // chasing across the map between spawns (enemies.length dips to 0-1
+  // during the 1.8s spawn gap), leaving the base undefended.
+  //
+  // §5.3 parameterization: the old hardcoded 2/3 thresholds were the root
+  // cause of 0% win rate — the AI only hunted when ≤3 enemies remained in
+  // the queue, spending 85% of the game turtling. Now reads from params:
+  //   huntAllyCount (default 4 = MAX_ENEMIES_ALIVE) — field count gate
+  //   endgameEnemyThreshold (default 6) — queue count gate
+  const canHunt =
+    enemies.length <= self.params.huntAllyCount &&
+    w.enemiesRemaining <= self.params.endgameEnemyThreshold
+
+  // If the player is too far from the base when it's under threat, return
+  // to defense position. This applies regardless of canHunt — even in the
+  // endgame, base defense takes priority over hunting when the player is
+  // too far away to intercept in time.
+  const playerDistToBase = Math.abs(playerCell.col - baseCol) + Math.abs(playerCell.row - baseRow)
+  if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
+    return self.getDefaultDefensePosition()
+  }
+
+  // ---- P4.2: Outnumbered retreat (S18 crossfire family) ----
+  // When several enemies converge on the player away from the base, pressing
+  // the attack trades 1-for-1 at best (three tanks can fire from three
+  // directions; the player has one barrel). Fall back toward the defense
+  // position: corridors funnel pursuers into single file, and the base
+  // gains a defender. Skipped when the base is already under threat (the
+  // defense logic below handles that) and in aggressive/freeze mode.
+  if (!baseUnderThreat && !self.aggressive) {
+    let nearby = 0
+    for (let ti = 0; ti < enemies.length; ti++) {
+      const t = enemies[ti]
+      const tc = self.tankCell(t)
+      const d = Math.abs(tc.col - playerCell.col) + Math.abs(tc.row - playerCell.row)
+      if (d <= self.params.outnumberedRadiusCells) nearby++
+    }
+    if (nearby >= self.params.outnumberedEnemyCount && playerDistToBase > 6) {
+      return self.getDefaultDefensePosition()
+    }
+  }
+
+  // ---- M13: field-wide pressure retreat (SHIPPED, DECISIONS §113) ----
+  // P4.2 only fires when 3+ enemies CONVERGE within outnumberedRadiusCells.
+  // The M13 probe showed 70% of hard/chaos deaths happen with the FULL
+  // enemy field alive (4/4) and 39% at >20 cells from the base — the player
+  // deep-hunts while the field is at max pressure, and 1★ single-bullet
+  // firepower cannot out-race 3-4 enemies (grinding death, §111). When the
+  // FIELD count (not just nearby) is at/over outnumberedFieldEnemies and the
+  // player is beyond outnumberedFieldDistCells, return to the defense
+  // position — stop over-extending into a full battlefield. `enemies` here
+  // is the Cluster C field-wide live snapshot, not the nearby count.
+  // A/B (official 口径): 20-seed hard +2.7pp / chaos +2.6pp; 60-seed hard
+  // +2.3pp / chaos +0.6pp — the FIRST mechanism without a chaos downside
+  // (base losses and deaths down in BOTH difficulties; every dodge/horizon
+  // mechanism before had the hard+/chaos- signature). The winning tuning
+  // retreats at 3+ alive (attrition starts at 3, not 4 — 1★ can't out-race
+  // 3 enemies either) beyond 15 cells; ON4@10 was measured HARMFUL
+  // (too passive, base falls: hard -5.3pp). Pool-model only: classic
+  // 'instant' has no grinding deaths (1-shot kills, 91% gate byte-locked).
+  // NOTE (endgame interplay): this block runs BEFORE the S6 aggressive-hunt
+  // below, so with 3+ enemies alive in the endgame (queue <= 6) the player
+  // retreats instead of hunting. The 60-seed A/B empirically validated this
+  // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
+  // regression by reordering the blocks.
+  if (isFieldRetreatConditionImpl(self, baseUnderThreat, playerDistToBase, enemies.length)) {
+    return self.getDefaultDefensePosition()
+  }
+
+  // Aggressive mode (freeze): chase nearest — see freezeChaseTarget().
+  if (self.aggressive) return freezeChaseTarget(self, w, playerCell, enemies, baseCol, baseRow)
+
+  // §88: 据守咽喉要地 gate — see chokepointHoldGate().
+  if (self.params.chokepointMode > 0 && self.hasBase && !baseUnderThreat) {
+    const cp = chokepointHoldGate(self, playerCell, enemies.length)
+    if (cp) return cp
+  }
+
+  // D1 (plan §D1): approach-band anchor hold gate — see anchorApproachHoldGate().
+  if (anchorModeOn && !baseUnderThreat && !self.aggressive) {
+    const hold = anchorApproachHoldGate(self, playerCell, enemies, baseCol)
+    if (hold) return hold
+  }
+
+  // ---- S6: Aggressive hunt mode ----
+  // When few enemies remain, go directly for the nearest enemy.
+  // This replaces the old endgame check (which was too restrictive:
+  // enemiesRemaining <= 1 && enemies.length <= 1).
+  if (canHunt) return huntModeTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
+
+  // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor 空块已移除
+  // （否决，移入 experimental.ts 归档）。
+
+  // ---- Normal target selection ----
+  // When the base is NOT under threat, behave like the no-base case:
+  // chase the nearest enemy to the player. This prevents the AI from
+  // chasing enemies near the base while ignoring closer enemies,
+  // which was the #1 cause of low kill counts in maze stages.
+  // The baseUnderThreat check runs every tick, so the AI immediately
+  // switches to defense mode when an enemy approaches the base.
+  // Normal target selection (base NOT under threat): dual-breach anchors /
+  // P2 patrol / coverage / intent / §170 commit / nearest-family loops.
+  if (!baseUnderThreat) {
+    return normalSelectionTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
   }
 
   // Base is under threat — find the most threatening enemy. Enemies with a
