@@ -19,8 +19,7 @@ import { buildModelFromText } from '../src/nn/infer.ts'
 // BC model arithmetic (MAdds = MACs), verified against nn-training/model.py
 const BC_MADDS = 30.77e6
 
-const DEFAULT_WEIGHTS =
-  'nn-training/weights/weights.20260819-163911_ep40_val0.9984.json'
+const DEFAULT_WEIGHTS = 'nn-training/weights/weights.20260819-163911_ep40_val0.9984.json'
 
 function main() {
   const path = process.argv[2] ?? DEFAULT_WEIGHTS
@@ -69,7 +68,9 @@ function main() {
   console.log(`total time (ms)  : ${totalMs.toFixed(1)}`)
   console.log(`per forward (ms) : ${perMs.toFixed(4)}`)
   console.log(`forward FPS      : ${fps.toFixed(1)}`)
-  console.log(`implied MAC/s    : ${(macPerSec / 1e6).toFixed(0)} M  (${(macPerSec / 1e9).toFixed(2)} G)`)
+  console.log(
+    `implied MAC/s    : ${(macPerSec / 1e6).toFixed(0)} M  (${(macPerSec / 1e9).toFixed(2)} G)`,
+  )
   console.log(`logits finite    : ${finite}`)
 
   // Map to the plan's decision budget.

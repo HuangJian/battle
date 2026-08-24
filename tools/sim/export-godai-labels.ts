@@ -84,7 +84,12 @@ function parseRange(spec: string): number[] {
  * Run one God-AI game and capture decision-tick (state, label) samples.
  * World setup mirrors `tools/sim/rl-bridge.ts` reset() / simulation-runner.ts.
  */
-export function exportGame(seed: number, stageIndex: number, difficulty: string, maxTicks: number): Acc {
+export function exportGame(
+  seed: number,
+  stageIndex: number,
+  difficulty: string,
+  maxTicks: number,
+): Acc {
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = difficulty
@@ -115,7 +120,15 @@ export function exportGame(seed: number, stageIndex: number, difficulty: string,
     const frenzy = god.wasItemPressed('frenzy')
 
     const { isDecision, condition } = decisionTick(
-      t, world, prevDir, dir, prevGuard, guard, prevFrenzy, frenzy, K,
+      t,
+      world,
+      prevDir,
+      dir,
+      prevGuard,
+      guard,
+      prevFrenzy,
+      frenzy,
+      K,
     )
     if (isDecision) {
       const label = actionFromFrame({ direction: dir, firing, guard, frenzy })
@@ -140,7 +153,12 @@ export function exportGame(seed: number, stageIndex: number, difficulty: string,
   return acc
 }
 
-function flushShard(acc: Acc, dir: string, name: string, baseManifest: Record<string, unknown>): void {
+function flushShard(
+  acc: Acc,
+  dir: string,
+  name: string,
+  baseManifest: Record<string, unknown>,
+): void {
   const N = acc.nSamples
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
@@ -174,7 +192,8 @@ function compareShards(a: string, b: string): { ok: boolean; detail: string } {
   for (const f of files) {
     const ba = readFileSync(`${a}/${f}`)
     const bb = readFileSync(`${b}/${f}`)
-    if (ba.length !== bb.length) return { ok: false, detail: `${f} size ${ba.length} vs ${bb.length}` }
+    if (ba.length !== bb.length)
+      return { ok: false, detail: `${f} size ${ba.length} vs ${bb.length}` }
     if (Buffer.compare(ba, bb) !== 0) return { ok: false, detail: `${f} bytes differ` }
   }
   return { ok: true, detail: `${files.length} npy files byte-identical` }
@@ -199,7 +218,9 @@ function main(): void {
   else stages = parseRange(stageSpec).map((s) => s - 1)
   const seeds = parseRange(seedSpec)
   if (seeds.length === 0 || stages.length === 0) {
-    console.error('usage: bun tools/sim/export-godai-labels.ts --stages all|N|N-M --seeds N|N-M [--out dir] [--verify-determinism]')
+    console.error(
+      'usage: bun tools/sim/export-godai-labels.ts --stages all|N|N-M --seeds N|N-M [--out dir] [--verify-determinism]',
+    )
     process.exit(2)
   }
 
@@ -215,8 +236,20 @@ function main(): void {
       const seed = seeds[0]
       const label = `s${si + 1}_seed${seed}`
       const shardName = `shard_${label}`
-      flushShard(exportGame(seed, si, difficulty, maxTicks), `${detA}/${shardName}`, shardName, { stage: si, seed, difficulty, totalTicks: 0, outcome: 'det' })
-      flushShard(exportGame(seed, si, difficulty, maxTicks), `${detB}/${shardName}`, shardName, { stage: si, seed, difficulty, totalTicks: 0, outcome: 'det' })
+      flushShard(exportGame(seed, si, difficulty, maxTicks), `${detA}/${shardName}`, shardName, {
+        stage: si,
+        seed,
+        difficulty,
+        totalTicks: 0,
+        outcome: 'det',
+      })
+      flushShard(exportGame(seed, si, difficulty, maxTicks), `${detB}/${shardName}`, shardName, {
+        stage: si,
+        seed,
+        difficulty,
+        totalTicks: 0,
+        outcome: 'det',
+      })
       const cmp = compareShards(`${detA}/${shardName}`, `${detB}/${shardName}`)
       if (!cmp.ok) fails++
       results.push(`[${cmp.ok ? 'DET OK' : 'DET FAIL'}] ${label}: ${cmp.detail}`)
@@ -224,7 +257,10 @@ function main(): void {
     console.log(results.join('\n'))
     console.log(`\n=== determinism check ===`)
     console.log(`games=${stages.length} byteIdentical=${stages.length - fails} fails=${fails}`)
-    writeFileSync(`${outDir}/_determinism_report.json`, JSON.stringify({ games: stages.length, fails, env: ENV, results }, null, 2))
+    writeFileSync(
+      `${outDir}/_determinism_report.json`,
+      JSON.stringify({ games: stages.length, fails, env: ENV, results }, null, 2),
+    )
     process.exit(fails > 0 ? 1 : 0)
   }
 
@@ -249,16 +285,23 @@ function main(): void {
   console.log(`\n=== export summary ===`)
   console.log(`games=${stages.length * seeds.length} samples=${totalSamples} elapsed=${elapsed}s`)
   console.log(`shards written under: ${outDir}`)
-  writeFileSync(`${outDir}/_export_report.json`, JSON.stringify({
-    games: stages.length * seeds.length,
-    totalSamples,
-    elapsedSec: Number(elapsed),
-    stages: stages.map((s) => s + 1),
-    seeds,
-    difficulty,
-    outDir,
-    env: ENV,
-  }, null, 2))
+  writeFileSync(
+    `${outDir}/_export_report.json`,
+    JSON.stringify(
+      {
+        games: stages.length * seeds.length,
+        totalSamples,
+        elapsedSec: Number(elapsed),
+        stages: stages.map((s) => s + 1),
+        seeds,
+        difficulty,
+        outDir,
+        env: ENV,
+      },
+      null,
+      2,
+    ),
+  )
 }
 
 if (import.meta.main) {

@@ -187,20 +187,35 @@ describe('decisionTick (event-type predicate)', () => {
 
 describe('computeMasks', () => {
   it('masks fire-hold when cooldown not elapsed', () => {
-    const w = mkWorld({ frame: 0, player: mkTank({ nextFireInterval: 300, lastFire: 0 }), guardStock: 0, frenzyStock: 0 })
+    const w = mkWorld({
+      frame: 0,
+      player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
+      guardStock: 0,
+      frenzyStock: 0,
+    })
     const m = computeMasks(w)
     expect(m.move).toEqual([1, 1, 1, 1, 1])
     expect(m.fire).toEqual([1, 0])
     expect(m.item).toEqual([1, 0, 0])
   })
   it('unmasks fire-hold when ready, and items by stock', () => {
-    const w = mkWorld({ frame: 18, player: mkTank({ nextFireInterval: 300, lastFire: 0 }), guardStock: 2, frenzyStock: 1 })
+    const w = mkWorld({
+      frame: 18,
+      player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
+      guardStock: 2,
+      frenzyStock: 1,
+    })
     const m = computeMasks(w)
     expect(m.fire).toEqual([1, 1])
     expect(m.item).toEqual([1, 1, 1])
   })
   it('enables only guard when frenzy stock is empty', () => {
-    const w = mkWorld({ frame: 18, player: mkTank({ nextFireInterval: 300, lastFire: 0 }), guardStock: 1, frenzyStock: 0 })
+    const w = mkWorld({
+      frame: 18,
+      player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
+      guardStock: 1,
+      frenzyStock: 0,
+    })
     expect(computeMasks(w).item).toEqual([1, 1, 0])
   })
 })

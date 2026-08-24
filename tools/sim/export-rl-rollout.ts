@@ -42,11 +42,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
-import {
-  ObsEncoder,
-  computeMasks,
-  OBS_SCHEMA_MAJOR,
-} from '../../src/nn/obs-encoder'
+import { ObsEncoder, computeMasks, OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
@@ -223,12 +219,27 @@ function lossPartialQ(
   add('lives', t.startLives > 0 ? clamp01(lives / t.startLives) : null)
   add(
     'baseIntegrity',
-    !baseAlive ? 0 : t.baseWallTotal > 0 ? 0.55 + 0.45 * clamp01(t.baseWallIntact / t.baseWallTotal) : null,
+    !baseAlive
+      ? 0
+      : t.baseWallTotal > 0
+        ? 0.55 + 0.45 * clamp01(t.baseWallIntact / t.baseWallTotal)
+        : null,
   )
-  add('tempo', (w.tempo ?? 0) > 0 ? clamp01(minutes > 0 ? kills / minutes / (w.tempo as number) : 0) : null)
-  add('accuracy', t.playerShots > 0 && (w.accuracy ?? 0) > 0 ? clamp01(kills / t.playerShots / (w.accuracy ?? 0.3)) : null)
+  add(
+    'tempo',
+    (w.tempo ?? 0) > 0 ? clamp01(minutes > 0 ? kills / minutes / (w.tempo as number) : 0) : null,
+  )
+  add(
+    'accuracy',
+    t.playerShots > 0 && (w.accuracy ?? 0) > 0
+      ? clamp01(kills / t.playerShots / (w.accuracy ?? 0.3))
+      : null,
+  )
   add('loot', t.powerUpsSpawned > 0 ? clamp01(t.powerUpsCollected / t.powerUpsSpawned) : null)
-  add('baseSafety', t.basePressureSamples > 0 ? clamp01(1 - t.basePressureSum / t.basePressureSamples) : null)
+  add(
+    'baseSafety',
+    t.basePressureSamples > 0 ? clamp01(1 - t.basePressureSum / t.basePressureSamples) : null,
+  )
   add('openingTempo', t.firstKillTick === undefined ? 0 : 1 - ramp(t.firstKillTick, 0, 1800))
   return wsum > 0 ? acc / wsum : 0
 }
@@ -510,7 +521,11 @@ function runOne(
   const scorable = {
     outcome,
     ticks: t,
-    finalState: { killCount: world.killCount, lives: world.lives, baseAlive: !world.tileMap.isBaseDestroyed() },
+    finalState: {
+      killCount: world.killCount,
+      lives: world.lives,
+      baseAlive: !world.tileMap.isBaseDestroyed(),
+    },
     firstKillTick: tel.firstKillTick,
     telemetry: {
       enemyTotal: tel.enemyTotal,
@@ -523,7 +538,8 @@ function runOne(
       finalPlayerLevel: world.playerLevel,
       baseWallIntact: tel.baseWallIntact,
       baseWallTotal: tel.baseWallTotal,
-      basePressureMean: tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
+      basePressureMean:
+        tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
       basePressureSamples: tel.basePressureSamples,
       cellsVisited: tel.cellsVisited.size,
       deaths: [],
@@ -697,11 +713,13 @@ function main(): void {
   const stat = (xs: number[]): { mean: number; std: number; min: number; max: number } | null => {
     if (xs.length === 0) return null
     const mean = xs.reduce((a, b) => a + b, 0) / xs.length
-    const std = xs.length > 1 ? Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1)) : 0
+    const std =
+      xs.length > 1 ? Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1)) : 0
     return { mean, std, min: Math.min(...xs), max: Math.max(...xs) }
   }
   const dimMeans: Record<string, number> = {}
-  for (const [k, xs] of Object.entries(dimAcc)) dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
+  for (const [k, xs] of Object.entries(dimAcc))
+    dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
     rewardScheme: 'v7-aligned-f3',
@@ -719,7 +737,9 @@ function main(): void {
     dimMeans,
     // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
     scoreList: scores.map((x) => +x.toFixed(5)),
-    dimLists: Object.fromEntries(Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))])),
+    dimLists: Object.fromEntries(
+      Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))]),
+    ),
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   console.log(perGame.join('\n'))

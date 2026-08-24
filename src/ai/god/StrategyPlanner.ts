@@ -111,7 +111,10 @@ function intentRead(
     if (currentSlack < it.committedSlack - INTENT_SLACK_RELAX) return null
     for (let i = 0; i < enemies.length; i++) {
       if (enemies[i].id === it.targetId) continue
-      if (enemyDeadline(w, enemies[i]).enemyDamageDeadline < committedDeadline - INTENT_THREAT_DELTA)
+      if (
+        enemyDeadline(w, enemies[i]).enemyDamageDeadline <
+        committedDeadline - INTENT_THREAT_DELTA
+      )
         return null
     }
   }
@@ -1886,7 +1889,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
           if (pd < d - 3) adjustedDist += 5
         }
         const v = targetValue(self.world, p, t)
-        if (v > bestV + TARGET_VALUE_TIE_EPS || (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)) {
+        if (
+          v > bestV + TARGET_VALUE_TIE_EPS ||
+          (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
+        ) {
           bestV = v
           bestD = adjustedDist
           best = t
@@ -2017,7 +2023,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
           }
         }
         const v = targetValue(self.world, p, t)
-        if (v > bestV + TARGET_VALUE_TIE_EPS || (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)) {
+        if (
+          v > bestV + TARGET_VALUE_TIE_EPS ||
+          (Math.abs(v - bestV) <= TARGET_VALUE_TIE_EPS && adjustedDist < bestD)
+        ) {
           bestV = v
           bestD = adjustedDist
           best = t

@@ -217,9 +217,11 @@ function clearLane(
 
 /** Reach the candidate cell and align to fire at the threat (ticks). */
 function reachAndTurn(w: World, p: Tank, pc: Cell, i: Cell, t: CoverageThreat): number {
-  const travel = (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
+  const travel =
+    (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
   const aimDir = aimDirTo(t.col, t.row, i.col, i.row)
-  const turn = aimDir !== null && aimDir !== p.dir ? msToTicks(w.rules?.turnCooldownMs ?? 200) + 1 : 0
+  const turn =
+    aimDir !== null && aimDir !== p.dir ? msToTicks(w.rules?.turnCooldownMs ?? 200) + 1 : 0
   return travel + turn
 }
 
@@ -248,7 +250,8 @@ function coverageValue(w: World, p: Tank, pc: Cell, i: Cell, threats: CoverageTh
   }
   // One gun: prevented damage cannot exceed what the base could lose.
   if (v > w.baseHp) v = w.baseHp
-  const travel = (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
+  const travel =
+    (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
   const exposure = Math.max(0, Math.abs(i.col - BASE_POS.col) + Math.abs(i.row - BASE_POS.row) - 3)
   v -= travel * COVERAGE_TRAVEL_COST
   v -= exposure * COVERAGE_EXPOSURE_PER_CELL
@@ -276,7 +279,8 @@ function collectCandidates(w: World, pc: Cell, threats: CoverageThreat[]): Cell[
     // Coverage points must stay within the base neighborhood — a point that
     // far is a hunt assignment, not a coverage assignment (S34 forensics:
     // base lost with the player 20+ cells away).
-    if (Math.abs(c - BASE_POS.col) + Math.abs(r - BASE_POS.row) > COVERAGE_MAX_PLAYER_BASE_DIST) return
+    if (Math.abs(c - BASE_POS.col) + Math.abs(r - BASE_POS.row) > COVERAGE_MAX_PLAYER_BASE_DIST)
+      return
     seen.add(k)
     out.push({ col: c, row: r })
   }
@@ -305,11 +309,19 @@ function collectCandidates(w: World, pc: Cell, threats: CoverageThreat[]): Cell[
       const a = threats[i]
       const b = threats[j]
       const c1: Cell = { col: b.col, row: a.row }
-      if (walkable(w, c1.col, c1.row) && clearLane(w, c1.col, c1.row, a.col, a.row) && clearLane(w, c1.col, c1.row, b.col, b.row)) {
+      if (
+        walkable(w, c1.col, c1.row) &&
+        clearLane(w, c1.col, c1.row, a.col, a.row) &&
+        clearLane(w, c1.col, c1.row, b.col, b.row)
+      ) {
         push(c1.col, c1.row)
       }
       const c2: Cell = { col: a.col, row: b.row }
-      if (walkable(w, c2.col, c2.row) && clearLane(w, c2.col, c2.row, a.col, a.row) && clearLane(w, c2.col, c2.row, b.col, b.row)) {
+      if (
+        walkable(w, c2.col, c2.row) &&
+        clearLane(w, c2.col, c2.row, a.col, a.row) &&
+        clearLane(w, c2.col, c2.row, b.col, b.row)
+      ) {
         push(c2.col, c2.row)
       }
     }
@@ -361,7 +373,10 @@ export function coveragePlanImpl(
       // parked on a point that protects nothing.
       if (w.frame % self.params.coverageReplanTicks === 0) {
         const cur = collectThreats(w, enemies)
-        if (cur.length === 0 || cur[0].deadline < self._coverageMinDeadline - COVERAGE_FLANK_DELTA) {
+        if (
+          cur.length === 0 ||
+          cur[0].deadline < self._coverageMinDeadline - COVERAGE_FLANK_DELTA
+        ) {
           self._coverageCell = null
         } else {
           return held

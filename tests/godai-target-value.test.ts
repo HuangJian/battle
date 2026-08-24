@@ -39,7 +39,12 @@ function laneClear(w: World): void {
   for (let r = 14; r <= 21; r++) w.tileMap.destroy(12, r)
 }
 
-function placePlayer(w: World, col: number, row: number, dir: 'up' | 'down' | 'left' | 'right'): Tank {
+function placePlayer(
+  w: World,
+  col: number,
+  row: number,
+  dir: 'up' | 'down' | 'left' | 'right',
+): Tank {
   const p = w.player!
   p.x = (col - 1) * CELL
   p.y = (row - 1) * CELL
@@ -49,7 +54,12 @@ function placePlayer(w: World, col: number, row: number, dir: 'up' | 'down' | 'l
   return p
 }
 
-function addEnemy(w: World, col: number, row: number, kind: 'basic' | 'fast' | 'power' | 'armor'): Tank {
+function addEnemy(
+  w: World,
+  col: number,
+  row: number,
+  kind: 'basic' | 'fast' | 'power' | 'armor',
+): Tank {
   const e = w.createTank(kind, (col - 1) * CELL, (row - 1) * CELL, 'up')
   e.spawnTimer = 0
   e.alive = true

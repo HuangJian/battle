@@ -45,7 +45,9 @@ function loadModel(opts: NNInputOptions): ModelLike {
     path = resolveLatestWeights(dir) ?? undefined
   }
   if (!path || !existsSync(path)) {
-    throw new Error(`NNInput: no weights found (weightsPath=${opts.weightsPath}, dir=${opts.weightsDir})`)
+    throw new Error(
+      `NNInput: no weights found (weightsPath=${opts.weightsPath}, dir=${opts.weightsDir})`,
+    )
   }
   // Reuse the decoded model when the resolved path is unchanged.
   if (cachedModel && cachedModelPath === path) return cachedModel
@@ -159,7 +161,11 @@ export class NNInput implements InputLike {
     const mv = this.model.moveLogits
     let bestMove = 0
     let bestMoveV = mv[0]
-    for (let i = 1; i < 5; i++) if (mv[i] > bestMoveV) { bestMoveV = mv[i]; bestMove = i }
+    for (let i = 1; i < 5; i++)
+      if (mv[i] > bestMoveV) {
+        bestMoveV = mv[i]
+        bestMove = i
+      }
     // v1 move mask is all-valid; fall back to none if the chosen slot is masked.
     if (masks.move[bestMove] !== 1) bestMove = 0
     // Held-action semantic: index 0 (none) = keep current heading (see lastDir
@@ -181,7 +187,11 @@ export class NNInput implements InputLike {
     const it = this.model.itemLogits
     let bestItem = 0
     let bestItemV = it[0]
-    for (let i = 1; i < 3; i++) if (it[i] > bestItemV) { bestItemV = it[i]; bestItem = i }
+    for (let i = 1; i < 3; i++)
+      if (it[i] > bestItemV) {
+        bestItemV = it[i]
+        bestItem = i
+      }
     this.guardPulse = bestItem === 1 && masks.item[1] === 1
     this.frenzyPulse = bestItem === 2 && masks.item[2] === 1
 

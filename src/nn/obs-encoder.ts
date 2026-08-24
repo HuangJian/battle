@@ -64,8 +64,21 @@ export const CH = {
 
 // ---- PowerUpType declaration order (src/types.ts:20-38) ----
 export const POWERUP_ORDER: PowerUpType[] = [
-  'star', 'bomb', 'shield', 'freeze', 'tank', 'fence', 'boat',
-  'guard', 'frenzy', 'sacrifice', 'rewind', 'repair', 'emp', 'decoy', 'mine',
+  'star',
+  'bomb',
+  'shield',
+  'freeze',
+  'tank',
+  'fence',
+  'boat',
+  'guard',
+  'frenzy',
+  'sacrifice',
+  'rewind',
+  'repair',
+  'emp',
+  'decoy',
+  'mine',
 ]
 const POWERUP_ENUM = new Map<PowerUpType, number>(POWERUP_ORDER.map((p, i) => [p, i]))
 const POWERUP_COUNT = POWERUP_ORDER.length // 15 (asserted below)
@@ -74,7 +87,11 @@ const POWERUP_COUNT = POWERUP_ORDER.length // 15 (asserted below)
 const KIND_INDEX: Record<string, number> = { basic: 0, fast: 1, power: 2, armor: 3 }
 // ---- Intelligence tier -> tierCode (plan §1.1 ch7-10) ----
 const TIER_INDEX: Record<string, number> = {
-  none: 0, rookie: 1, soldier: 2, veteran: 3, commander: 4,
+  none: 0,
+  rookie: 1,
+  soldier: 2,
+  veteran: 3,
+  commander: 4,
 }
 // ---- Direction -> dirIdx (constants.ts DIR_DX/DY order) ----
 const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3 }
@@ -137,11 +154,21 @@ export class ObsEncoder {
       for (let c = 0; c < BOARD; c++) {
         const t = row[c]
         switch (t) {
-          case 'brick': this.setCell(CH.terrainBrick, c, r, 1); break
-          case 'steel': this.setCell(CH.terrainSteel, c, r, 1); break
-          case 'water': this.setCell(CH.terrainWater, c, r, 1); break
-          case 'forest': this.setCell(CH.terrainForest, c, r, 1); break
-          case 'ice': this.setCell(CH.terrainIce, c, r, 1); break
+          case 'brick':
+            this.setCell(CH.terrainBrick, c, r, 1)
+            break
+          case 'steel':
+            this.setCell(CH.terrainSteel, c, r, 1)
+            break
+          case 'water':
+            this.setCell(CH.terrainWater, c, r, 1)
+            break
+          case 'forest':
+            this.setCell(CH.terrainForest, c, r, 1)
+            break
+          case 'ice':
+            this.setCell(CH.terrainIce, c, r, 1)
+            break
           // 'base' and 'empty' -> 0 in these 5 channels (ch5 handles base)
         }
       }
@@ -239,7 +266,9 @@ export class ObsEncoder {
     // slack / baseDeadline via ThreatBudget (reused, plan §1.2).
     let minKillSlack = Infinity
     let minBaseDeadline = Infinity
-    const enemies = world.tanks.filter((t) => t.alive && t.allegiance === 'enemy' && t.spawnTimer <= 0)
+    const enemies = world.tanks.filter(
+      (t) => t.alive && t.allegiance === 'enemy' && t.spawnTimer <= 0,
+    )
     for (const e of enemies) {
       const ka = killAssessmentSlack(world, p, e)
       if (ka.killSlack < minKillSlack) minKillSlack = ka.killSlack
@@ -413,7 +442,12 @@ export interface FrameLabel {
 }
 
 /** Map a packed human input frame to the 3 action-head labels. */
-export function actionFromFrame(f: { direction: Direction | null; firing: boolean; guard: boolean; frenzy: boolean }): FrameLabel {
+export function actionFromFrame(f: {
+  direction: Direction | null
+  firing: boolean
+  guard: boolean
+  frenzy: boolean
+}): FrameLabel {
   const move = f.direction ? DIR_INDEX[f.direction] + 1 : 0
   const fire = f.firing ? 1 : 0
   const item = f.guard ? 1 : f.frenzy ? 2 : 0

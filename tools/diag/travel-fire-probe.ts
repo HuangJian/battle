@@ -51,7 +51,13 @@ const TURN_WINDOW_TICKS = 13 // one turn window (200ms @60fps) — the detour co
 
 /** 走廊扫描 — mirror of think.ts laneCorridorBlocked (single source of truth
  *  comment there): any non-empty terrain between two aligned cells blocks. */
-function laneCorridorBlocked(tm: World['tileMap'], c: number, r: number, tc: number, tr: number): number {
+function laneCorridorBlocked(
+  tm: World['tileMap'],
+  c: number,
+  r: number,
+  tc: number,
+  tr: number,
+): number {
   const g = tm.grid
   if (c === tc) {
     if (r === tr) return 0
@@ -74,7 +80,10 @@ function laneCorridorBlocked(tm: World['tileMap'], c: number, r: number, tc: num
   return -1
 }
 
-function setupRun(stageIdx: number, seed: number): { world: World; sim: Simulation; input: GodAIInput } {
+function setupRun(
+  stageIdx: number,
+  seed: number,
+): { world: World; sim: Simulation; input: GodAIInput } {
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = difficultyArg()
@@ -170,20 +179,42 @@ for (const { stageIdx, seed, o } of selected) {
     // 机会条件:
     const tc = tankCenterCell(target)
     const aligned = tc.col === pc.col || tc.row === pc.row
-    if (!aligned) { rep.gateFail.aligned++; continue }
-    const dir = tc.col === pc.col ? (tc.row > pc.row ? 'down' : 'up') : tc.col > pc.col ? 'right' : 'left'
-    if (p.dir === dir) { rep.gateFail.facing++; continue } // 已面向 — baseline 本就会开火, 不是 M5 的增量
-    if (onCooldown) { rep.gateFail.cooldown++; continue }
+    if (!aligned) {
+      rep.gateFail.aligned++
+      continue
+    }
+    const dir =
+      tc.col === pc.col ? (tc.row > pc.row ? 'down' : 'up') : tc.col > pc.col ? 'right' : 'left'
+    if (p.dir === dir) {
+      rep.gateFail.facing++
+      continue
+    } // 已面向 — baseline 本就会开火, 不是 M5 的增量
+    if (onCooldown) {
+      rep.gateFail.cooldown++
+      continue
+    }
     const slack = killAssessment(world, p, target).killSlack
-    if (!(slack > TURN_WINDOW_TICKS)) { rep.gateFail.slack++; continue }
-    if (laneCorridorBlocked(world.tileMap, pc.col, pc.row, tc.col, tc.row) !== 0) { rep.gateFail.corridor++; continue }
-    if (fireRayBlocked(world, p, target)) { rep.gateFail.ray++; continue }
+    if (!(slack > TURN_WINDOW_TICKS)) {
+      rep.gateFail.slack++
+      continue
+    }
+    if (laneCorridorBlocked(world.tileMap, pc.col, pc.row, tc.col, tc.row) !== 0) {
+      rep.gateFail.corridor++
+      continue
+    }
+    if (fireRayBlocked(world, p, target)) {
+      rep.gateFail.ray++
+      continue
+    }
     const csb = enemyCanShootBase(input, target)
     const cbr = !csb && enemyCanBreachRing(input, target)
     // fb 目标只在基地逼近带内算机会 (S3s46 类游走威胁) — 地图任意位置的对齐
     // 敌人都算机会的话, 95% tick 都是 (fb deadline 大, slack 恒正), 无信号。
     const inBand = tc.row >= 20 && Math.abs(tc.col - 12) <= 6
-    if (!csb && !cbr && !inBand) { rep.gateFail.band++; continue }
+    if (!csb && !cbr && !inBand) {
+      rep.gateFail.band++
+      continue
+    }
     // 机会成立
     rep.oppTicks++
     if (rep.firstOppTick < 0) rep.firstOppTick = frame + 1
@@ -191,9 +222,17 @@ for (const { stageIdx, seed, o } of selected) {
     const st = csb ? 'csb' : cbr ? 'cbr' : 'fb'
     rep.targetStatus[st] = (rep.targetStatus[st] ?? 0) + 1
   }
-  rep.outcome = world.state === 'stageclear' ? 'stage_clear' : world.state === 'gameover' ? 'gameover' : world.state === 'victory' ? 'victory' : 'playing'
+  rep.outcome =
+    world.state === 'stageclear'
+      ? 'stage_clear'
+      : world.state === 'gameover'
+        ? 'gameover'
+        : world.state === 'victory'
+          ? 'victory'
+          : 'playing'
   if (rep.outcome === 'gameover') {
-    rep.lossKind = world.baseHp <= 0 ? 'base_destroyed' : world.lives < 0 ? 'lives_exhausted' : 'timeout'
+    rep.lossKind =
+      world.baseHp <= 0 ? 'base_destroyed' : world.lives < 0 ? 'lives_exhausted' : 'timeout'
   } else if (rep.outcome !== 'playing') {
     rep.lossKind = 'timeout'
   }
@@ -205,7 +244,9 @@ for (const { stageIdx, seed, o } of selected) {
 const total = reports.length
 const detOk = reports.filter((r) => r.deterministic).length
 const withOpp = reports.filter((r) => r.oppTicks > 0)
-const oppBeforeDmg = withOpp.filter((r) => r.firstOppTick < r.firstBaseDamageTick || r.firstBaseDamageTick < 0)
+const oppBeforeDmg = withOpp.filter(
+  (r) => r.firstOppTick < r.firstBaseDamageTick || r.firstBaseDamageTick < 0,
+)
 const branchMix: Record<string, number> = {}
 const targetStatus: Record<string, number> = {}
 let oppTicksTotal = 0
@@ -215,10 +256,18 @@ for (const r of withOpp) {
   oppTicksTotal += r.oppTicks
 }
 console.log(`corpus=${fromJson} label=${label} losses=${total} deterministic=${detOk}/${total}`)
-console.log(`runs with >=1 travel-fire opportunity: ${withOpp.length}/${total} (${((withOpp.length / total) * 100).toFixed(1)}%)`)
-console.log(`travel ticks total: ${reports.reduce((s, r) => s + r.travelTicks, 0)} (mean ${(reports.reduce((s, r) => s + r.travelTicks, 0) / Math.max(1, total)).toFixed(0)}/run)`)
-console.log(`opp ticks total: ${oppTicksTotal} (mean ${(oppTicksTotal / Math.max(1, withOpp.length)).toFixed(1)} per opp-run)`)
-console.log(`opp precedes first base damage: ${oppBeforeDmg.length}/${withOpp.length} (${((oppBeforeDmg.length / Math.max(1, withOpp.length)) * 100).toFixed(0)}%)`)
+console.log(
+  `runs with >=1 travel-fire opportunity: ${withOpp.length}/${total} (${((withOpp.length / total) * 100).toFixed(1)}%)`,
+)
+console.log(
+  `travel ticks total: ${reports.reduce((s, r) => s + r.travelTicks, 0)} (mean ${(reports.reduce((s, r) => s + r.travelTicks, 0) / Math.max(1, total)).toFixed(0)}/run)`,
+)
+console.log(
+  `opp ticks total: ${oppTicksTotal} (mean ${(oppTicksTotal / Math.max(1, withOpp.length)).toFixed(1)} per opp-run)`,
+)
+console.log(
+  `opp precedes first base damage: ${oppBeforeDmg.length}/${withOpp.length} (${((oppBeforeDmg.length / Math.max(1, withOpp.length)) * 100).toFixed(0)}%)`,
+)
 console.log('branch mix at opp:', JSON.stringify(branchMix))
 console.log('target status at opp:', JSON.stringify(targetStatus))
 const kinds: Record<string, number> = {}
@@ -226,8 +275,15 @@ for (const r of reports) kinds[r.lossKind] = (kinds[r.lossKind] ?? 0) + 1
 console.log('loss kinds:', JSON.stringify(kinds))
 const gf: Record<string, number> = {}
 for (const r of reports) for (const [g, n] of Object.entries(r.gateFail)) gf[g] = (gf[g] ?? 0) + n
-console.log('gate fails per run:', JSON.stringify(Object.fromEntries(Object.entries(gf).map(([k, v]) => [k, +(v / total).toFixed(1)]))))
+console.log(
+  'gate fails per run:',
+  JSON.stringify(
+    Object.fromEntries(Object.entries(gf).map(([k, v]) => [k, +(v / total).toFixed(1)])),
+  ),
+)
 if (withOpp.length) {
   const t = withOpp.map((r) => r.firstOppTick).sort((a, b) => a - b)
-  console.log(`firstOppTick median ${t[Math.floor(t.length / 2)]} p25 ${t[Math.floor(t.length * 0.25)]} p75 ${t[Math.floor(t.length * 0.75)]}`)
+  console.log(
+    `firstOppTick median ${t[Math.floor(t.length / 2)]} p25 ${t[Math.floor(t.length * 0.25)]} p75 ${t[Math.floor(t.length * 0.75)]}`,
+  )
 }

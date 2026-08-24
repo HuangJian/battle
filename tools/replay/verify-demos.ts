@@ -32,7 +32,9 @@ for (let i = 0; i < args.length; i++) {
   else files.push(a)
 }
 if (files.length === 0) {
-  console.error('usage: bun tools/replay/verify-demos.ts <demos1.ndjson> [..] [--json] [--out report.json]')
+  console.error(
+    'usage: bun tools/replay/verify-demos.ts <demos1.ndjson> [..] [--json] [--out report.json]',
+  )
   process.exit(2)
 }
 
@@ -144,7 +146,9 @@ if (!json) {
   }
 }
 
-const clears = rows.filter((r) => r.finalState === 'stageclear' || r.finalState === 'victory').length
+const clears = rows.filter(
+  (r) => r.finalState === 'stageclear' || r.finalState === 'victory',
+).length
 const summary = {
   files: files.length,
   replays: rows.length,
@@ -165,7 +169,7 @@ if (json) {
   }
 } else {
   console.log(
-    `\nsummary: ${rows.length} replays across ${files.length} file(s), ${clears} clear, ${rows.length - clears} non-clear, desync=${desync} (yield-rate=${((summary.yieldRate) * 100).toFixed(1)}%)`,
+    `\nsummary: ${rows.length} replays across ${files.length} file(s), ${clears} clear, ${rows.length - clears} non-clear, desync=${desync} (yield-rate=${(summary.yieldRate * 100).toFixed(1)}%)`,
   )
 }
 

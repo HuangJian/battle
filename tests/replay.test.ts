@@ -7,7 +7,11 @@ import { ReplayManager } from '../src/replay/ReplayManager'
 import { PlaybackController } from '../src/replay/PlaybackController'
 import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import { packFrame, unpackFrame, packFrames, unpackFrames } from '../src/replay/pack'
-import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1, REPLAY_RETENTION_POLICIES } from '../src/replay/config'
+import {
+  FRAME_SCHEMA_VERSION,
+  FRAME_SCHEMA_V1,
+  REPLAY_RETENTION_POLICIES,
+} from '../src/replay/config'
 import type { Direction } from '../src/constants'
 import type { InputLike } from '../src/game/Input'
 import type { InputFrame } from '../src/replay/types'

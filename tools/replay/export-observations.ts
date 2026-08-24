@@ -64,7 +64,19 @@ interface Accumulator {
 }
 
 function newAcc(): Accumulator {
-  return { obs: [], scalars: [], actions: [], masks: [], conditions: [], nTurn: 0, nFire: 0, nItem: 0, nItemEvents: 0, nSub: 0, nSamples: 0 }
+  return {
+    obs: [],
+    scalars: [],
+    actions: [],
+    masks: [],
+    conditions: [],
+    nTurn: 0,
+    nFire: 0,
+    nItem: 0,
+    nItemEvents: 0,
+    nSub: 0,
+    nSamples: 0,
+  }
 }
 
 interface ExportResult {
@@ -76,7 +88,8 @@ interface ExportResult {
 
 export function exportReplay(text: string, fileLabel: string, skipVerify: boolean): ExportResult {
   const parsed = parseReplayFile(text)
-  if ('error' in parsed) return { acc: newAcc(), meta: {}, ok: false, reason: `parse: ${parsed.error}` }
+  if ('error' in parsed)
+    return { acc: newAcc(), meta: {}, ok: false, reason: `parse: ${parsed.error}` }
 
   const replay = parsed.replay
   const meta = replay.metadata
@@ -85,7 +98,12 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
   if (!skipVerify) {
     const v = verifyReplayText(text, fileLabel)
     if (v.verdict !== 'OK') {
-      return { acc: newAcc(), meta: { stage: meta.stage, type: replay.type }, ok: false, reason: `desync: ${v.reason}` }
+      return {
+        acc: newAcc(),
+        meta: { stage: meta.stage, type: replay.type },
+        ok: false,
+        reason: `desync: ${v.reason}`,
+      }
     }
   }
 
@@ -126,10 +144,20 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
     if (prevGuard !== curGuard || prevFrenzy !== curFrenzy) acc.nItemEvents++
 
     const { isDecision, condition } = decisionTick(
-      t, world, prevDir, curDir, prevGuard, curGuard, prevFrenzy, curFrenzy, K,
+      t,
+      world,
+      prevDir,
+      curDir,
+      prevGuard,
+      curGuard,
+      prevFrenzy,
+      curFrenzy,
+      K,
     )
     if (isDecision) {
-      const label = actionFromFrame(cur ?? { direction: null, firing: false, guard: false, frenzy: false })
+      const label = actionFromFrame(
+        cur ?? { direction: null, firing: false, guard: false, frenzy: false },
+      )
       const masks = computeMasks(world)
       acc.obs.push(encoder.obs.slice())
       acc.scalars.push(encoder.scalars.slice())
@@ -166,12 +194,17 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
     conditionBreakdown: { turn: acc.nTurn, fire: acc.nFire, item: acc.nItem, subsample: acc.nSub },
     encodeMs: encEnd - encStart,
     ticks: t,
-    usPerTick: (encEnd - encStart) * 1000 / Math.max(1, t),
+    usPerTick: ((encEnd - encStart) * 1000) / Math.max(1, t),
   }
   return { acc, meta: out, ok: true, reason: 'exported' }
 }
 
-function flushShard(acc: Accumulator, dir: string, name: string, baseManifest: Record<string, unknown>): void {
+function flushShard(
+  acc: Accumulator,
+  dir: string,
+  name: string,
+  baseManifest: Record<string, unknown>,
+): void {
   const N = acc.nSamples
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
@@ -203,9 +236,16 @@ function flushShard(acc: Accumulator, dir: string, name: string, baseManifest: R
 }
 
 /** Export one replay text to <outDir>/<shardName> (gate-skipping optional). */
-function exportAndWrite(text: string, fileLabel: string, outDir: string, shardName: string, skipVerify: boolean): ExportResult {
+function exportAndWrite(
+  text: string,
+  fileLabel: string,
+  outDir: string,
+  shardName: string,
+  skipVerify: boolean,
+): ExportResult {
   const res = exportReplay(text, fileLabel, skipVerify)
-  if (res.ok) flushShard(res.acc, `${outDir}/${shardName}`, shardName, res.meta as Record<string, unknown>)
+  if (res.ok)
+    flushShard(res.acc, `${outDir}/${shardName}`, shardName, res.meta as Record<string, unknown>)
   return res
 }
 
@@ -215,7 +255,8 @@ function compareShards(a: string, b: string): { ok: boolean; detail: string } {
   for (const f of files) {
     const ba = readFileSync(`${a}/${f}`)
     const bb = readFileSync(`${b}/${f}`)
-    if (ba.length !== bb.length) return { ok: false, detail: `${f} size ${ba.length} vs ${bb.length}` }
+    if (ba.length !== bb.length)
+      return { ok: false, detail: `${f} size ${ba.length} vs ${bb.length}` }
     if (Buffer.compare(ba, bb) !== 0) return { ok: false, detail: `${f} bytes differ` }
   }
   return { ok: true, detail: `${files.length} npy files byte-identical` }
@@ -244,7 +285,9 @@ async function main(): Promise<void> {
   const outIdx = args.indexOf('--out')
   const outDir = outIdx >= 0 ? args[outIdx + 1] : 'tmp/nn-export'
   if (files.length === 0) {
-    console.error('usage: bun tools/replay/export-observations.ts <demos.ndjson...> --out <dir> [--skip-verify] [--verify-determinism]')
+    console.error(
+      'usage: bun tools/replay/export-observations.ts <demos.ndjson...> --out <dir> [--skip-verify] [--verify-determinism]',
+    )
     process.exit(2)
   }
   mkdirSync(outDir, { recursive: true })
@@ -258,7 +301,9 @@ async function main(): Promise<void> {
     const lines: { text: string; label: string }[] = []
     for (const f of files) {
       const content = await (Bun.file(f) as any).text()
-      const ls = String(content).split('\n').filter((l: string) => l.trim().length > 0)
+      const ls = String(content)
+        .split('\n')
+        .filter((l: string) => l.trim().length > 0)
       const base = basename(f)
       for (let i = 0; i < ls.length; i++) lines.push({ text: ls[i], label: `${base}#${i}` })
     }
@@ -269,7 +314,9 @@ async function main(): Promise<void> {
       const ra = exportAndWrite(text, label, detA, shard, skipVerify)
       const rb = exportAndWrite(text, label, detB, shard, skipVerify)
       if (!ra.ok || !rb.ok) {
-        results.push(`[DET SKIP] ${label}: ${ra.ok ? '' : 'A ' + ra.reason} ${rb.ok ? '' : 'B ' + rb.reason}`)
+        results.push(
+          `[DET SKIP] ${label}: ${ra.ok ? '' : 'A ' + ra.reason} ${rb.ok ? '' : 'B ' + rb.reason}`,
+        )
         continue
       }
       const cmp = compareShards(`${detA}/${shard}`, `${detB}/${shard}`)
@@ -279,7 +326,10 @@ async function main(): Promise<void> {
     console.log(results.join('\n'))
     console.log(`\n=== determinism check ===`)
     console.log(`replays=${lines.length} byteIdentical=${lines.length - fails} fails=${fails}`)
-    writeFileSync(`${outDir}/_determinism_report.json`, JSON.stringify({ replays: lines.length, fails, env: ENV, results }, null, 2))
+    writeFileSync(
+      `${outDir}/_determinism_report.json`,
+      JSON.stringify({ replays: lines.length, fails, env: ENV, results }, null, 2),
+    )
     process.exit(fails > 0 ? 1 : 0)
   }
 
@@ -293,12 +343,20 @@ async function main(): Promise<void> {
 
   for (const f of files) {
     const content = await (Bun.file(f) as any).text()
-    const lines = String(content).split('\n').filter((l: string) => l.trim().length > 0)
+    const lines = String(content)
+      .split('\n')
+      .filter((l: string) => l.trim().length > 0)
     const base = basename(f)
     for (let i = 0; i < lines.length; i++) {
       total++
       const label = `${base}#${i}`
-      const res = exportAndWrite(lines[i], label, outDir, `shard_${base.replace(/[^a-zA-Z0-9]/g, '_')}_${i.toString().padStart(3, '0')}`, skipVerify)
+      const res = exportAndWrite(
+        lines[i],
+        label,
+        outDir,
+        `shard_${base.replace(/[^a-zA-Z0-9]/g, '_')}_${i.toString().padStart(3, '0')}`,
+        skipVerify,
+      )
       if (!res.ok) {
         skipped++
         perFile.push(`[SKIP] ${label} reason=${res.reason}`)
@@ -309,25 +367,41 @@ async function main(): Promise<void> {
       totalSamples += m.nSamples ?? 0
       totalEncodeMs += m.encodeMs ?? 0
       totalTicks += m.ticks ?? 0
-      perFile.push(`[OK]   ${label} samples=${m.nSamples} stage=${m.stage} outcome=${m.outcome} encMs=${m.encodeMs?.toFixed?.(1)}`)
+      perFile.push(
+        `[OK]   ${label} samples=${m.nSamples} stage=${m.stage} outcome=${m.outcome} encMs=${m.encodeMs?.toFixed?.(1)}`,
+      )
     }
   }
 
   console.log(perFile.join('\n'))
   console.log(`\n=== export summary ===`)
   console.log(`replays total=${total} kept=${kept} skipped=${skipped} samples=${totalSamples}`)
-  const usPerTick = totalEncodeMs * 1000 / Math.max(1, totalTicks)
-  console.log(`encode time: ${totalEncodeMs.toFixed(1)}ms over ${totalTicks} ticks = ${usPerTick.toFixed(3)} us/tick`)
+  const usPerTick = (totalEncodeMs * 1000) / Math.max(1, totalTicks)
+  console.log(
+    `encode time: ${totalEncodeMs.toFixed(1)}ms over ${totalTicks} ticks = ${usPerTick.toFixed(3)} us/tick`,
+  )
   console.log(`shards written under: ${outDir}`)
-  writeFileSync(`${outDir}/_export_report.json`, JSON.stringify({
-    total, kept, skipped, totalSamples, outDir, skipVerify,
-    perf: {
-      ms: Math.round(totalEncodeMs),
-      ticks: totalTicks,
-      usPerTick: +usPerTick.toFixed(3),
-    },
-    env: ENV,
-  }, null, 2))
+  writeFileSync(
+    `${outDir}/_export_report.json`,
+    JSON.stringify(
+      {
+        total,
+        kept,
+        skipped,
+        totalSamples,
+        outDir,
+        skipVerify,
+        perf: {
+          ms: Math.round(totalEncodeMs),
+          ticks: totalTicks,
+          usPerTick: +usPerTick.toFixed(3),
+        },
+        env: ENV,
+      },
+      null,
+      2,
+    ),
+  )
 }
 
 if (import.meta.main) {

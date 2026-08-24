@@ -28,7 +28,14 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : fallback
 }
 
-function runTrace(stageIdx: number, seed: number, difficulty: string, weightsDir: string, maxTicks: number, verboseDecisions: number): void {
+function runTrace(
+  stageIdx: number,
+  seed: number,
+  difficulty: string,
+  weightsDir: string,
+  maxTicks: number,
+  verboseDecisions: number,
+): void {
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = difficulty
@@ -83,7 +90,11 @@ function runTrace(stageIdx: number, seed: number, difficulty: string, weightsDir
       const mv = model.moveLogits
       let bestMv = 0
       let bv = mv[0]
-      for (let i = 1; i < 5; i++) if (mv[i] > bv) { bv = mv[i]; bestMv = i }
+      for (let i = 1; i < 5; i++)
+        if (mv[i] > bv) {
+          bv = mv[i]
+          bestMv = i
+        }
       const manualDir = bestMv === 0 ? 'none' : DIR_DECODE[bestMv - 1]
       const manualFire = model.fireLogits[1] > model.fireLogits[0] ? 1 : 0
       if (decisions <= verboseDecisions) {
@@ -92,8 +103,10 @@ function runTrace(stageIdx: number, seed: number, difficulty: string, weightsDir
         log.push(
           `t=${String(t).padStart(5)} frame=${String(world.frame).padStart(5)} dec#${String(decisions).padStart(3)} ` +
             `NN[dir=${String(dir).padEnd(5)} fire=${firing ? 1 : 0}] ` +
-            `RAW[dir=${manualDir.padEnd(5)} fire=${manualFire} mvLogits=${Array.from(mv).map((x) => x.toFixed(1)).join(',')} ` +
-            `fireLogits=${model.fireLogits[0].toFixed(1)},${model.fireLogits[1].toFixed(1)} ready=${world.player ? (world.frame * (1000 / 60) - (world.player.lastFire ?? -9999) >= (world.player.nextFireInterval ?? 0) && (world.player.nextFireInterval ?? 0) > 0) : '?'} ` +
+            `RAW[dir=${manualDir.padEnd(5)} fire=${manualFire} mvLogits=${Array.from(mv)
+              .map((x) => x.toFixed(1))
+              .join(',')} ` +
+            `fireLogits=${model.fireLogits[0].toFixed(1)},${model.fireLogits[1].toFixed(1)} ready=${world.player ? world.frame * (1000 / 60) - (world.player.lastFire ?? -9999) >= (world.player.nextFireInterval ?? 0) && (world.player.nextFireInterval ?? 0) > 0 : '?'} ` +
             `pos=(${p ? Math.round(p.x) : '?'},${p ? Math.round(p.y) : '?'}) kills=${kc} baseAlive=${!world.tileMap.isBaseDestroyed()}`,
         )
       }
@@ -106,7 +119,9 @@ function runTrace(stageIdx: number, seed: number, difficulty: string, weightsDir
       break
     }
     if (st === 'gameover') {
-      log.push(`OUTCOME=${world.tileMap.isBaseDestroyed() ? 'base_destroyed' : 'lives_exhausted'} ticks=${t} kills=${world.killCount}`)
+      log.push(
+        `OUTCOME=${world.tileMap.isBaseDestroyed() ? 'base_destroyed' : 'lives_exhausted'} ticks=${t} kills=${world.killCount}`,
+      )
       break
     }
   }

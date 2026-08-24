@@ -36,11 +36,15 @@ for (const stageIdx of stageIdxs) {
 }
 
 const pool = new SimWorkerPool()
-process.stderr.write(`m4-diagnose: hard × ${stageIdxs.length} stages × ${seeds.length} seeds = ${tasks.length} runs (${pool.size} workers)\n`)
+process.stderr.write(
+  `m4-diagnose: hard × ${stageIdxs.length} stages × ${seeds.length} seeds = ${tasks.length} runs (${pool.size} workers)\n`,
+)
 const t0 = Date.now()
 const results = await pool.runBatch(tasks)
 pool.terminate()
-process.stderr.write(`m4-diagnose: ran ${results.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`)
+process.stderr.write(
+  `m4-diagnose: ran ${results.length} runs in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
+)
 
 interface Row {
   stage: number
@@ -64,7 +68,8 @@ for (let i = 0; i < results.length; i++) {
     seed: meta[i].seed,
     outcome: r.outcome,
     finalLevel: fx?.terminal?.playerLevel ?? 0,
-    starsCollected: fx?.events.filter((e) => e.type === 'pickup' && e.detail === 'star').length ?? 0,
+    starsCollected:
+      fx?.events.filter((e) => e.type === 'pickup' && e.detail === 'star').length ?? 0,
     kills: fx?.kills ?? 0,
     deaths: fx?.playerDeaths ?? 0,
     pickups: fx?.inventory ?? {},
@@ -100,7 +105,9 @@ for (const [st, arr] of perStage) {
   const avgLevel = clears.reduce((a, r) => a + r.finalLevel, 0) / Math.max(1, clears.length)
   const avgStars = arr.reduce((a, r) => a + r.starsCollected, 0) / arr.length
   weak.push([st, clearRate, avgLevel])
-  console.log(`S${st + 1}: clearRate=${(clearRate * 100).toFixed(0)}%  avgLevel(clears)=${avgLevel.toFixed(2)}  avgStars=${avgStars.toFixed(2)}`)
+  console.log(
+    `S${st + 1}: clearRate=${(clearRate * 100).toFixed(0)}%  avgLevel(clears)=${avgLevel.toFixed(2)}  avgStars=${avgStars.toFixed(2)}`,
+  )
 }
 
 console.log('\nworst 8 by clearRate:')
@@ -136,13 +143,21 @@ const pool2 = new SimWorkerPool()
 const t1 = Date.now()
 const censusResults = await pool2.runBatch(censusTasks)
 pool2.terminate()
-console.log(`census pass: ${censusResults.length} runs in ${((Date.now() - t1) / 1000).toFixed(1)}s`)
+console.log(
+  `census pass: ${censusResults.length} runs in ${((Date.now() - t1) / 1000).toFixed(1)}s`,
+)
 let spawned = 0
 let picked = 0
 let missedNever = 0 // star existed but player never got within 64px (4 cells)
 let missedClose = 0 // star existed, player got within 64px, still not picked
 let noStarsRuns = 0
-const misses: Array<{ stage: number; seed: number; spawnTick: number; minDist: number; despawnTick: number }> = []
+const misses: Array<{
+  stage: number
+  seed: number
+  spawnTick: number
+  minDist: number
+  despawnTick: number
+}> = []
 for (let i = 0; i < censusResults.length; i++) {
   const r = censusResults[i]
   const c = r.powerupCensus
@@ -154,12 +169,20 @@ for (let i = 0; i < censusResults.length; i++) {
     if (!s.picked) {
       if (s.minDist < 0 || s.minDist >= 64) missedNever++
       else missedClose++
-      misses.push({ stage: censusMeta[i].stageIdx, seed: censusMeta[i].seed, spawnTick: s.spawnTick, minDist: s.minDist, despawnTick: s.despawnTick })
+      misses.push({
+        stage: censusMeta[i].stageIdx,
+        seed: censusMeta[i].seed,
+        spawnTick: s.spawnTick,
+        minDist: s.minDist,
+        despawnTick: s.despawnTick,
+      })
     }
   }
 }
 console.log(`failed runs with NO star spawn: ${noStarsRuns}/${censusResults.length}`)
-console.log(`star spawned: ${spawned} | picked by player: ${picked} (${((picked / Math.max(1, spawned)) * 100).toFixed(0)}%)`)
+console.log(
+  `star spawned: ${spawned} | picked by player: ${picked} (${((picked / Math.max(1, spawned)) * 100).toFixed(0)}%)`,
+)
 console.log(`missed: never-in-4-cells=${missedNever}  within-4-cells-but-not-picked=${missedClose}`)
 const byStageMiss = new Map<number, number>()
 for (const m of misses) byStageMiss.set(m.stage, (byStageMiss.get(m.stage) ?? 0) + 1)

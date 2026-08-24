@@ -55,7 +55,13 @@ function newAcc(): Acc {
 
 type Outcome = 'stage_clear' | 'base_destroyed' | 'lives_exhausted' | 'timeout'
 
-function runOne(stageIdx: number, stage: any, seed: number, difficulty: string, maxTicks: number): {
+function runOne(
+  stageIdx: number,
+  stage: any,
+  seed: number,
+  difficulty: string,
+  maxTicks: number,
+): {
   acc: Acc
   outcome: Outcome
   ticks: number
@@ -92,7 +98,17 @@ function runOne(stageIdx: number, stage: any, seed: number, difficulty: string, 
     const g = input.wasItemPressed('guard')
     const fr = input.wasItemPressed('frenzy')
 
-    const { isDecision, condition } = decisionTick(t, world, prevDir, dir, prevGuard, g, prevFrenzy, fr, K)
+    const { isDecision, condition } = decisionTick(
+      t,
+      world,
+      prevDir,
+      dir,
+      prevGuard,
+      g,
+      prevFrenzy,
+      fr,
+      K,
+    )
     if (isDecision) {
       const label = actionFromFrame({ direction: dir, firing, guard: g, frenzy: fr })
       const masks = computeMasks(world)

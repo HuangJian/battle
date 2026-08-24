@@ -1050,7 +1050,9 @@ if (import.meta.main) {
             ? { name: 'default', params: DEFAULT_GOD_AI_PARAMS }
             : null
   if (!profile) {
-    console.error(`unknown --profile: ${profileName} (expected default|all-on|all-on-m5-off|all-on-minus-flm)`)
+    console.error(
+      `unknown --profile: ${profileName} (expected default|all-on|all-on-m5-off|all-on-minus-flm)`,
+    )
     process.exit(1)
   }
   BASE_PARAMS = profile.params

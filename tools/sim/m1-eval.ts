@@ -160,7 +160,9 @@ async function main(): Promise<void> {
   })
   const results = await pool.runAdaptive(tasks, reportProgress)
   const simSeconds = (Date.now() - t0) / 1000
-  process.stderr.write(`[m1-eval] progress ${totalGames}/${totalGames} (100%) done in ${fmt(Date.now() - t0)}\n`)
+  process.stderr.write(
+    `[m1-eval] progress ${totalGames}/${totalGames} (100%) done in ${fmt(Date.now() - t0)}\n`,
+  )
 
   // Aggregate.
   const total = results.length
@@ -243,7 +245,11 @@ async function main(): Promise<void> {
         const c = acc.dimCounts[k] ?? 0
         dims[k] = c > 0 ? Number((acc.dimSums[k] / c).toFixed(3)) : 0
       }
-      const sa = aggregateStage(stageNames[si] ?? `stage${si + 1}`, acc.runScores, DEFAULT_AGGREGATION)
+      const sa = aggregateStage(
+        stageNames[si] ?? `stage${si + 1}`,
+        acc.runScores,
+        DEFAULT_AGGREGATION,
+      )
       stageAgg[si] = sa
       return {
         stage: stageNames[si] ?? `stage${si + 1}`,
@@ -298,7 +304,9 @@ async function main(): Promise<void> {
   )
   process.stderr.write(
     `[m1-eval] SCORE V7 suite=${scoreV7.suite} lcb=${scoreV7.lcb} meanWinRate=${scoreV7.meanWinRate}` +
-      (scoreV7.worstStage ? ` worst=${scoreV7.worstStage.name}(${scoreV7.worstStage.winRate})\n` : '\n'),
+      (scoreV7.worstStage
+        ? ` worst=${scoreV7.worstStage.name}(${scoreV7.worstStage.winRate})\n`
+        : '\n'),
   )
 
   // ---- HTML scorecard (mirrors tmp/god-ai-hard-35stage-scorecard.html) ----
@@ -321,7 +329,9 @@ async function main(): Promise<void> {
     lcb: suite.lcb,
     arithmeticMean: suite.arithmeticMean,
     meanWinRate: suite.meanWinRate,
-    worstStage: suite.worstStage ? { name: suite.worstStage.name, winRate: suite.worstStage.winRate } : null,
+    worstStage: suite.worstStage
+      ? { name: suite.worstStage.name, winRate: suite.worstStage.winRate }
+      : null,
   }
   try {
     const written = writeScorecardHtml(outPath, htmlRows, htmlSuite, {

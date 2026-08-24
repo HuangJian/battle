@@ -536,12 +536,7 @@ export class StudentModel implements ModelLike {
   }
 
   /** Pointwise conv 1x1 (h -> h), no groups. */
-  private conv1x1(
-    input: Float32Array,
-    w: Float32Array,
-    b: Float32Array,
-    out: Float32Array,
-  ): void {
+  private conv1x1(input: Float32Array, w: Float32Array, b: Float32Array, out: Float32Array): void {
     const outCh = b.length
     const sp = this.board * this.board
     for (let oc = 0; oc < outCh; oc++) {

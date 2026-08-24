@@ -217,7 +217,8 @@ export function playerActionEta(
   const fireCooldownEta = ticksUntilFire(world, p)
   // Shots after the first re-arm per base cadence; the final bullet must fly.
   const flightEta = manhattan(pc.col, pc.row, targetCol, targetRow) * ticksPerCellFire(p)
-  const cadenceTicks = p.fireCooldown > 0 ? msToTicks(p.fireCooldown) : msToTicks(p.nextFireInterval)
+  const cadenceTicks =
+    p.fireCooldown > 0 ? msToTicks(p.fireCooldown) : msToTicks(p.nextFireInterval)
   const requiredShotsEta = Math.max(0, shots - 1) * cadenceTicks + flightEta
   const total =
     nextLegalTurnEta + movementEta + aimAlignmentEta + fireCooldownEta + requiredShotsEta
@@ -230,7 +231,14 @@ export function playerActionEta(
     out.total = total
     return out
   }
-  return { nextLegalTurnEta, movementEta, aimAlignmentEta, fireCooldownEta, requiredShotsEta, total }
+  return {
+    nextLegalTurnEta,
+    movementEta,
+    aimAlignmentEta,
+    fireCooldownEta,
+    requiredShotsEta,
+    total,
+  }
 }
 
 /** Player bullet flight per cell (px/tick speed). */
@@ -240,13 +248,19 @@ function ticksPerCellFire(p: Tank): number {
 }
 
 /** Firepower (damage against the base pool) of a tank kind at its level. */
-export function firePower(world: World, kind: 'player' | 'basic' | 'fast' | 'power' | 'armor'): number {
+export function firePower(
+  world: World,
+  kind: 'player' | 'basic' | 'fast' | 'power' | 'armor',
+): number {
   const level = kind === 'player' ? world.playerLevel : 0
   return resolveProfile(kind, level).firepower
 }
 
 /** Per-shot damage against tanks (pool model). */
-export function bulletDamage(world: World, kind: 'player' | 'basic' | 'fast' | 'power' | 'armor'): number {
+export function bulletDamage(
+  world: World,
+  kind: 'player' | 'basic' | 'fast' | 'power' | 'armor',
+): number {
   const level = kind === 'player' ? world.playerLevel : 0
   return Math.round(resolveProfile(kind, level).firepower * (kind === 'player' ? 1.05 : 1) * 2)
 }
@@ -505,7 +519,8 @@ export function killAssessment(
     missesSecondThreat: false,
   }
   o.playerArrivalAndAimEta = eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta
-  o.firstFireEta = eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta + eta.fireCooldownEta
+  o.firstFireEta =
+    eta.movementEta + eta.aimAlignmentEta + eta.nextLegalTurnEta + eta.fireCooldownEta
   o.playerKillEta = eta.total
   o.killSlack = damageDeadline - eta.total
   o.interceptSlack = arrivalLB - margin - (eta.movementEta + eta.aimAlignmentEta)

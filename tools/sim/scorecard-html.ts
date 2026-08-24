@@ -89,16 +89,25 @@ export interface ScorecardOptions {
   /** Extra meta line, e.g. policy=nn · 引用说明. */
   note?: string
   /** Optional extra columns after 胜率. Each entry renders a numeric cell. */
-  extraCols?: Array<{ key: string; label: string; get: (r: ScorecardRow) => number; digits?: number }>
+  extraCols?: Array<{
+    key: string
+    label: string
+    get: (r: ScorecardRow) => number
+    digits?: number
+  }>
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
+  return s.replace(
+    /[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!,
+  )
 }
 
 function buildHtml(rows: ScorecardRow[], suite: ScorecardSuite, opts: ScorecardOptions): string {
   const dimHeaders = DIM_ORDER.map(
-    (k) => `      <th class="num dim" data-key="${k}" title="${esc(DIM_DESC[k])}">${esc(DIM_LABEL[k])}</th>`,
+    (k) =>
+      `      <th class="num dim" data-key="${k}" title="${esc(DIM_DESC[k])}">${esc(DIM_LABEL[k])}</th>`,
   ).join('\n')
   const extraHeaders = (opts.extraCols ?? [])
     .map((c) => `      <th data-key="${c.key}">${esc(c.label)}</th>`)

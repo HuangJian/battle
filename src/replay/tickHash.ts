@@ -171,7 +171,18 @@ function pushBullet(b: CanonBuilder, bl: Bullet): void {
 }
 
 function pushPowerUp(b: CanonBuilder, pu: PowerUp): void {
-  b.push('P', b.canon(pu.id), pu.type, pu.x, pu.y, pu.w, pu.h, pu.alive, pu.blinkTimer, pu.lifeTimer)
+  b.push(
+    'P',
+    b.canon(pu.id),
+    pu.type,
+    pu.x,
+    pu.y,
+    pu.w,
+    pu.h,
+    pu.alive,
+    pu.blinkTimer,
+    pu.lifeTimer,
+  )
 }
 
 /**

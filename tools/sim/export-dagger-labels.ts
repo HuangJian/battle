@@ -131,9 +131,24 @@ function runOne(
     teacher.endFrame()
 
     // (3) 决策 tick 采样（与 BC 同节拍 K=10）。
-    const { isDecision, condition } = decisionTick(t, world, prevDir, tDir, prevGuard, tGuard, prevFrenzy, tFrenzy, K)
+    const { isDecision, condition } = decisionTick(
+      t,
+      world,
+      prevDir,
+      tDir,
+      prevGuard,
+      tGuard,
+      prevFrenzy,
+      tFrenzy,
+      K,
+    )
     if (isDecision) {
-      const label = actionFromFrame({ direction: tDir, firing: tFiring, guard: tGuard, frenzy: tFrenzy })
+      const label = actionFromFrame({
+        direction: tDir,
+        firing: tFiring,
+        guard: tGuard,
+        frenzy: tFrenzy,
+      })
       const masks = computeMasks(world)
       acc.obs.push(encoder.obs.slice())
       acc.scalars.push(encoder.scalars.slice())
@@ -235,7 +250,14 @@ function main(): void {
       continue
     }
     for (const seed of seeds) {
-      const { acc, outcome, ticks, studentWin } = runOne(si, stage, seed, difficulty, maxTicks, nnOpts)
+      const { acc, outcome, ticks, studentWin } = runOne(
+        si,
+        stage,
+        seed,
+        difficulty,
+        maxTicks,
+        nnOpts,
+      )
       outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
       if (studentWin) studentWins++
       const shardName = `dagger_s${si}_seed${seed}`
@@ -255,7 +277,9 @@ function main(): void {
       if (acc.n > 0) flushShard(acc, `${outDir}/${shardName}`, manifest)
       totalSamples += acc.n
       totalTicks += ticks
-      perGame.push(`[OK] s${si} seed${seed} samples=${acc.n} outcome=${outcome} ticks=${ticks} studentWin=${studentWin}`)
+      perGame.push(
+        `[OK] s${si} seed${seed} samples=${acc.n} outcome=${outcome} ticks=${ticks} studentWin=${studentWin}`,
+      )
     }
   }
 
@@ -276,7 +300,9 @@ function main(): void {
   }
   console.log(perGame.join('\n'))
   console.log(`\n=== DAgger online-distillation collection (P1.5) ===`)
-  console.log(`games=${total} studentWinRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`)
+  console.log(
+    `games=${total} studentWinRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`,
+  )
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks}`)
   console.log(`shards under: ${outDir}  (mix with godai shards, then train_bc.py --arch student)`)
   writeFileSync(`${outDir}/_dagger_report.json`, JSON.stringify(summary, null, 2))

@@ -512,8 +512,7 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
 
   // All preferred directions blocked by unbreakable terrain or tanks —
   // try any passable direction (excluding reverse of primary).
-  const primaryOpposite =
-    prefA !== null ? opposite(prefA) : prefB !== null ? opposite(prefB) : null
+  const primaryOpposite = prefA !== null ? opposite(prefA) : prefB !== null ? opposite(prefB) : null
   for (let di = 0; di < ALL_DIRS.length; di++) {
     const d = ALL_DIRS[di]
     if (primaryOpposite !== null && d === primaryOpposite) continue

@@ -35,7 +35,9 @@ async function main(): Promise<void> {
 
   for (const f of files) {
     const content = await (Bun.file(f) as any).text()
-    const lines = String(content).split('\n').filter((l: string) => l.trim().length > 0)
+    const lines = String(content)
+      .split('\n')
+      .filter((l: string) => l.trim().length > 0)
     for (let i = 0; i < lines.length; i++) {
       // skipVerify: item detection is frame-only; desync does not affect it.
       const res = exportReplay(lines[i], `${f}#${i}`, true)
@@ -53,19 +55,27 @@ async function main(): Promise<void> {
       const overridden = nItemEvents - nItem // item-events re-labelled turn/fire by priority
       rows.push(
         `[${ok ? 'OK' : 'PHANTOM'}] ${f}#${i}: exportedItem=${nItem} replayItemEvents=${nItemEvents}` +
-        (ok ? ` (priorityOverride=${overridden})` : `  <-- MORE EXPORTED THAN REPLAY HAS`),
+          (ok ? ` (priorityOverride=${overridden})` : `  <-- MORE EXPORTED THAN REPLAY HAS`),
       )
     }
   }
 
   console.log(rows.join('\n'))
   console.log('\n=== item-event cross-check (gate ⑤) ===')
-  console.log(`replaysChecked=${checked} totalReplayItemEvents=${totalItemEvents} totalExportedItem=${totalNItem} phantom=${phantom}`)
+  console.log(
+    `replaysChecked=${checked} totalReplayItemEvents=${totalItemEvents} totalExportedItem=${totalNItem} phantom=${phantom}`,
+  )
   if (phantom === 0) {
-    console.log('PASS: no phantom item samples — every exported item-condition maps to a real guard/frenzy bit-change in the replay.')
-    console.log('NOTE: drops are structurally impossible (every item-event tick is a decision tick and is always exported).')
+    console.log(
+      'PASS: no phantom item samples — every exported item-condition maps to a real guard/frenzy bit-change in the replay.',
+    )
+    console.log(
+      'NOTE: drops are structurally impossible (every item-event tick is a decision tick and is always exported).',
+    )
   } else {
-    console.log('FAIL: phantom item samples detected (exported item count exceeds replay guard/frenzy changes).')
+    console.log(
+      'FAIL: phantom item samples detected (exported item count exceeds replay guard/frenzy changes).',
+    )
   }
   process.exit(phantom > 0 ? 1 : 0)
 }

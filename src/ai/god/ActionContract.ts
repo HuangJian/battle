@@ -160,7 +160,13 @@ export function enemyBulletOnRay(
       : sigma === 1
         ? playerPos < baseLeft
         : playerPos > baseRight
-    const playerEdge = vertical ? (sigma === 1 ? baseTop : baseBottom) : sigma === 1 ? baseLeft : baseRight
+    const playerEdge = vertical
+      ? sigma === 1
+        ? baseTop
+        : baseBottom
+      : sigma === 1
+        ? baseLeft
+        : baseRight
     if (baseInFront && sigma * (pos - playerEdge) >= 0) continue
     // Advance the bullet through the readiness delay, then require (3) it is
     // still in front of the muzzle.
@@ -171,7 +177,8 @@ export function enemyBulletOnRay(
     // Chase: the player's bullet must be faster and catch before the edge.
     const meetOrCatch: number =
       v === -sigma
-        ? bulletPos + v * ((sigma * (bulletPos - playerPos)) / (player.bulletSpeed + b.speed)) * b.speed
+        ? bulletPos +
+          v * ((sigma * (bulletPos - playerPos)) / (player.bulletSpeed + b.speed)) * b.speed
         : player.bulletSpeed > b.speed
           ? bulletPos +
             v * ((sigma * (bulletPos - playerPos)) / (player.bulletSpeed - b.speed)) * b.speed

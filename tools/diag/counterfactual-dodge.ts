@@ -45,11 +45,13 @@ const jsonOut = arg('json')
 const dumpKey = arg('dump')
 
 const j = JSON.parse(await Bun.file(fromJson).text())
-const failures = (j.perDifficulty.hard.failures as Array<{
-  stageIdx: number
-  seed: number
-  forensics: { events: Array<{ tick: number; type: string; detail: string }> }
-}>).filter((f) => {
+const failures = (
+  j.perDifficulty.hard.failures as Array<{
+    stageIdx: number
+    seed: number
+    forensics: { events: Array<{ tick: number; type: string; detail: string }> }
+  }>
+).filter((f) => {
   const deaths = f.forensics.events.filter((e) => e.type === 'death')
   if (deaths.length === 0) return false
   // last action at terminal tick was dodge (death runs end at the death tick)
@@ -66,7 +68,12 @@ interface BranchOut {
   fires: number
 }
 
-function runBranch(world: World, sim: Simulation, input: InputLike, baseHpAtStart: number): BranchOut {
+function runBranch(
+  world: World,
+  sim: Simulation,
+  input: InputLike,
+  baseHpAtStart: number,
+): BranchOut {
   let fires = 0
   let moved = 0
   let playerDied = false
@@ -102,7 +109,15 @@ function runBranch(world: World, sim: Simulation, input: InputLike, baseHpAtStar
     if (world.state !== 'playing') break
     if (playerDied && baseDamaged) break
   }
-  return { playerDied, diedAt, baseDamaged, baseFirstDamageAt: baseFirst, endState: world.state, movedTicks: moved, fires }
+  return {
+    playerDied,
+    diedAt,
+    baseDamaged,
+    baseFirstDamageAt: baseFirst,
+    endState: world.state,
+    movedTicks: moved,
+    fires,
+  }
 }
 
 /** Nearest live enemy (fallback threat id) — the one with min center distance. */
@@ -144,7 +159,10 @@ function tankById(world: World, id: number | null): Tank | null {
 }
 
 /** Stand: turn toward the threat (Input turn semantics), fire when facing. */
-function planTurnAndFire(world: World, threatId: () => number | null): { move: Direction | null; fire: boolean } {
+function planTurnAndFire(
+  world: World,
+  threatId: () => number | null,
+): { move: Direction | null; fire: boolean } {
   const p = world.player
   const t = threatId()
   if (!p || t == null) return { move: null, fire: false }
@@ -155,13 +173,17 @@ function planTurnAndFire(world: World, threatId: () => number | null): { move: D
   if (tc.col === pc.col && tc.row === pc.row) return { move: null, fire: false }
   const dx = tc.col - pc.col
   const dy = tc.row - pc.row
-  const aim: Direction = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+  const aim: Direction =
+    Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
   if (aim !== p.dir) return { move: aim, fire: false }
   return { move: null, fire: true }
 }
 
 /** Advance toward the nearest enemy (close the kill). */
-function planAdvance2(world: World, threatId: () => number | null): { move: Direction | null; fire: boolean } {
+function planAdvance2(
+  world: World,
+  threatId: () => number | null,
+): { move: Direction | null; fire: boolean } {
   const p = world.player
   const t = threatId()
   if (!p || t == null) return { move: null, fire: false }
@@ -200,7 +222,8 @@ function planHardAway(world: World): { move: Direction | null; fire: boolean } {
   cy /= n
   const dx = p.x - cx
   const dy = p.y - cy
-  const dir: Direction = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+  const dir: Direction =
+    Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
   return { move: dir, fire: false }
 }
 
@@ -273,11 +296,48 @@ for (const f of failures) {
     ['advance', new ScriptedInput(() => planAdvance2(world, threatId))],
     ['hardAway', new ScriptedInput(() => planHardAway(world))],
   ]
-  const res: { factual: BranchOut; turnAndFire: BranchOut; advance: BranchOut; hardAway: BranchOut } = {
-    factual: { playerDied: false, diedAt: -1, baseDamaged: false, baseFirstDamageAt: -1, endState: '', movedTicks: 0, fires: 0 },
-    turnAndFire: { playerDied: false, diedAt: -1, baseDamaged: false, baseFirstDamageAt: -1, endState: '', movedTicks: 0, fires: 0 },
-    advance: { playerDied: false, diedAt: -1, baseDamaged: false, baseFirstDamageAt: -1, endState: '', movedTicks: 0, fires: 0 },
-    hardAway: { playerDied: false, diedAt: -1, baseDamaged: false, baseFirstDamageAt: -1, endState: '', movedTicks: 0, fires: 0 },
+  const res: {
+    factual: BranchOut
+    turnAndFire: BranchOut
+    advance: BranchOut
+    hardAway: BranchOut
+  } = {
+    factual: {
+      playerDied: false,
+      diedAt: -1,
+      baseDamaged: false,
+      baseFirstDamageAt: -1,
+      endState: '',
+      movedTicks: 0,
+      fires: 0,
+    },
+    turnAndFire: {
+      playerDied: false,
+      diedAt: -1,
+      baseDamaged: false,
+      baseFirstDamageAt: -1,
+      endState: '',
+      movedTicks: 0,
+      fires: 0,
+    },
+    advance: {
+      playerDied: false,
+      diedAt: -1,
+      baseDamaged: false,
+      baseFirstDamageAt: -1,
+      endState: '',
+      movedTicks: 0,
+      fires: 0,
+    },
+    hardAway: {
+      playerDied: false,
+      diedAt: -1,
+      baseDamaged: false,
+      baseFirstDamageAt: -1,
+      endState: '',
+      movedTicks: 0,
+      fires: 0,
+    },
   }
   for (const [name, inp] of branches) {
     if (name !== 'factual') {
@@ -289,7 +349,9 @@ for (const f of failures) {
   }
   out.push({ key, deathTick: T, ...res })
   processed++
-  console.error(`[${processed}/${Math.min(limit, failures.length)}] ${key}@${T} f=${res.factual.playerDied} taf=${res.turnAndFire.playerDied} adv=${res.advance.playerDied} away=${res.hardAway.playerDied}`)
+  console.error(
+    `[${processed}/${Math.min(limit, failures.length)}] ${key}@${T} f=${res.factual.playerDied} taf=${res.turnAndFire.playerDied} adv=${res.advance.playerDied} away=${res.hardAway.playerDied}`,
+  )
 }
 
 // ---------------------------------------------------------------- report
@@ -299,11 +361,27 @@ const factualDied = out.filter((r) => r.factual.playerDied).length
 const tafSurv = out.filter((r) => !r.turnAndFire.playerDied && !r.turnAndFire.baseDamaged).length
 const advSurv = out.filter((r) => !r.advance.playerDied && !r.advance.baseDamaged).length
 const awaySurv = out.filter((r) => !r.hardAway.playerDied && !r.hardAway.baseDamaged).length
-const anySurv = out.filter((r) => (!r.turnAndFire.playerDied && !r.turnAndFire.baseDamaged) || (!r.advance.playerDied && !r.advance.baseDamaged) || (!r.hardAway.playerDied && !r.hardAway.baseDamaged)).length
-console.log(`\n=== dodge-death counterfactual (${N} runs, window ${windowTicks}, clone @T-${windowTicks}) ===`)
+const anySurv = out.filter(
+  (r) =>
+    (!r.turnAndFire.playerDied && !r.turnAndFire.baseDamaged) ||
+    (!r.advance.playerDied && !r.advance.baseDamaged) ||
+    (!r.hardAway.playerDied && !r.hardAway.baseDamaged),
+).length
+console.log(
+  `\n=== dodge-death counterfactual (${N} runs, window ${windowTicks}, clone @T-${windowTicks}) ===`,
+)
 console.log(`factual reproduced death: ${factualDied}/${N}`)
-console.log(`survive (alive+base): turn-and-fire ${tafSurv}/${N} · advance ${advSurv}/${N} · hard-away ${awaySurv}/${N}`)
-console.log(`any branch survives: ${anySurv}/${N}${N > 0 ? ' (' + ((anySurv / N) * 100).toFixed(1) + '%)' : ''}`)
-const survivors = out.filter((r) => (!r.turnAndFire.playerDied && !r.turnAndFire.baseDamaged) || (!r.advance.playerDied && !r.advance.baseDamaged) || (!r.hardAway.playerDied && !r.hardAway.baseDamaged))
+console.log(
+  `survive (alive+base): turn-and-fire ${tafSurv}/${N} · advance ${advSurv}/${N} · hard-away ${awaySurv}/${N}`,
+)
+console.log(
+  `any branch survives: ${anySurv}/${N}${N > 0 ? ' (' + ((anySurv / N) * 100).toFixed(1) + '%)' : ''}`,
+)
+const survivors = out.filter(
+  (r) =>
+    (!r.turnAndFire.playerDied && !r.turnAndFire.baseDamaged) ||
+    (!r.advance.playerDied && !r.advance.baseDamaged) ||
+    (!r.hardAway.playerDied && !r.hardAway.baseDamaged),
+)
 console.log('survivor runs:', survivors.map((r) => r.key).join(' '))
 if (jsonOut) await Bun.write(jsonOut, JSON.stringify(out, null, 2))

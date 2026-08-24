@@ -76,7 +76,9 @@ let stageIdxs: number[]
 try {
   stageIdxs = parseStageSpec(stageSpec, STAGES.length)
 } catch (e) {
-  console.error(e instanceof StageSpecError ? e.message : `run-forensics: invalid --stages: ${stageSpec}`)
+  console.error(
+    e instanceof StageSpecError ? e.message : `run-forensics: invalid --stages: ${stageSpec}`,
+  )
   process.exit(1)
 }
 const maxTicks = Number(arg('max-ticks') ?? '36000')

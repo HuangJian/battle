@@ -28,9 +28,18 @@ const REPO_ROOT = path.resolve(import.meta.dir, '..', '..')
 const AGENT_AUTH_PATH = path.join(import.meta.dir, 'agent.auth')
 const WORK_DIR = path.join(REPO_ROOT, 'tmp', 'dist-agent')
 export const SHARD_FILES = [
-  'obs.npy', 'scalars.npy', 'a_move.npy', 'a_fire.npy', 'a_item.npy',
-  'lp_move.npy', 'lp_fire.npy', 'lp_item.npy', 'value.npy', 'reward.npy',
-  'done.npy', 'mask.npy',
+  'obs.npy',
+  'scalars.npy',
+  'a_move.npy',
+  'a_fire.npy',
+  'a_item.npy',
+  'lp_move.npy',
+  'lp_fire.npy',
+  'lp_item.npy',
+  'value.npy',
+  'reward.npy',
+  'done.npy',
+  'mask.npy',
 ] as const
 
 // ---------------- CLI ----------------
@@ -53,7 +62,9 @@ let cacheMaxItems = 32
 // ---------------- codeHash（与 nn-training/dist_common.py 逐字节一致的双语契约） ----------------
 /** 对 entries（posix 相对路径 + 内容）按路径字典序，依次喂 sha256(path)+sha256(content)。 */
 export function computeCodeHashFromFiles(entries: { relPath: string; content: Buffer }[]): string {
-  const sorted = [...entries].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0))
+  const sorted = [...entries].sort((a, b) =>
+    a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
+  )
   const h = createHash('sha256')
   for (const e of sorted) {
     h.update(e.relPath.replace(/\\/g, '/'))
@@ -75,7 +86,8 @@ function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
   }
   walk(nnRoot)
   const rollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-rl-rollout.ts')
-  if (fs.existsSync(rollout)) out.push({ relPath: path.relative(REPO_ROOT, rollout), content: fs.readFileSync(rollout) })
+  if (fs.existsSync(rollout))
+    out.push({ relPath: path.relative(REPO_ROOT, rollout), content: fs.readFileSync(rollout) })
   return out
 }
 
@@ -85,7 +97,10 @@ export function computeCodeHash(): string {
 
 function gitShortHash(): string {
   try {
-    const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    })
     return r.status === 0 ? r.stdout.trim() : 'unknown'
   } catch {
     return 'unknown'
@@ -100,7 +115,9 @@ function loadOrCreateAuthKey(): string {
   }
   const key = randomBytes(32).toString('base64url')
   fs.writeFileSync(AGENT_AUTH_PATH, key + '\n', { mode: 0o600 })
-  console.log(`[sampler-agent] authKey generated -> ${AGENT_AUTH_PATH}\n[sampler-agent] authKey=${key}`)
+  console.log(
+    `[sampler-agent] authKey generated -> ${AGENT_AUTH_PATH}\n[sampler-agent] authKey=${key}`,
+  )
   return key
 }
 
@@ -111,7 +128,10 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 // ---------------- state ----------------
-interface CachedResult { buf: Buffer; bytes: number }
+interface CachedResult {
+  buf: Buffer
+  bytes: number
+}
 const resultCache = new Map<string, CachedResult>()
 let cacheBytes = 0
 let cacheHits = 0
@@ -124,7 +144,11 @@ const inflight = new Map<string, { stage: number; seed: number; startedAt: numbe
 let activeWorkers = 0
 const startedAt = Date.now()
 
-interface WeightsState { sha: string; iterId: string; file: string }
+interface WeightsState {
+  sha: string
+  iterId: string
+  file: string
+}
 let weights: WeightsState | null = null
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
@@ -163,15 +187,26 @@ function diskFreeMB(): number | null {
 let gameSeq = 0
 
 /** 结果容器：gzip(JSON {manifest, files:{name:base64}})——TS/Python 双语契约，见 dist_common.py。 */
-export function packContainer(report: Record<string, unknown>, files: Record<string, string>): Buffer {
+export function packContainer(
+  report: Record<string, unknown>,
+  files: Record<string, string>,
+): Buffer {
   return gzipSync(Buffer.from(JSON.stringify({ manifest: report, files })))
 }
 
-export function unpackContainer(buf: Buffer): { manifest: Record<string, unknown>; files: Record<string, string> } {
+export function unpackContainer(buf: Buffer): {
+  manifest: Record<string, unknown>
+  files: Record<string, string>
+} {
   return JSON.parse(gunzipSync(buf).toString('utf8'))
 }
 
-async function runGame(stage: number, seed: number, maxTicks: number, difficulty: string): Promise<Buffer> {
+async function runGame(
+  stage: number,
+  seed: number,
+  maxTicks: number,
+  difficulty: string,
+): Promise<Buffer> {
   if (!weights) throw new Error('no weights cached')
   const wfile = weights.file
   const seq = ++gameSeq
@@ -181,16 +216,27 @@ async function runGame(stage: number, seed: number, maxTicks: number, difficulty
   try {
     const args = [
       'tools/sim/export-rl-rollout.ts',
-      '--weights', wfile,
-      '--out', gameDir,
-      '--stages', String(stage),
-      '--seeds', String(seed),
-      '--max-ticks', String(maxTicks),
-      '--difficulty', difficulty,
-      '--wver', weights.sha,
-      '--node-label', `bun-${process.pid}`,
+      '--weights',
+      wfile,
+      '--out',
+      gameDir,
+      '--stages',
+      String(stage),
+      '--seeds',
+      String(seed),
+      '--max-ticks',
+      String(maxTicks),
+      '--difficulty',
+      difficulty,
+      '--wver',
+      weights.sha,
+      '--node-label',
+      `bun-${process.pid}`,
     ]
-    const child = spawn(process.execPath, args, { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, args, {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     let tail = ''
     const cap = (chunk: Buffer): void => {
       tail = (tail + chunk.toString('utf8')).slice(-4000)
@@ -239,10 +285,12 @@ async function handle(req: Request): Promise<Response> {
 
   if (req.method === 'POST' && url.pathname === '/v1/weights') {
     const declared = req.headers.get('content-length') ?? '0'
-    if (parseInt(declared, 10) > 64 * 1024 * 1024) return jsonResponse({ error: 'payload too large' }, 413)
+    if (parseInt(declared, 10) > 64 * 1024 * 1024)
+      return jsonResponse({ error: 'payload too large' }, 413)
     const claimedSha = req.headers.get('x-weights-sha256') ?? ''
     const iterId = req.headers.get('x-iter-id') ?? ''
-    if (!claimedSha || !iterId) return jsonResponse({ error: 'missing x-weights-sha256/x-iter-id' }, 400)
+    if (!claimedSha || !iterId)
+      return jsonResponse({ error: 'missing x-weights-sha256/x-iter-id' }, 400)
     const raw = Buffer.from(await req.arrayBuffer())
     let weightsBytes: Buffer
     try {
@@ -265,7 +313,9 @@ async function handle(req: Request): Promise<Response> {
     cacheBytes = 0
     resultCache.clear()
     if (oldFile && oldFile !== wfile) fs.rmSync(oldFile, { force: true })
-    console.log(`[sampler-agent] weights switched -> ${actualSha.slice(0, 12)}… (result cache purged)`)
+    console.log(
+      `[sampler-agent] weights switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
+    )
     // 状态变更触发（清场）：带 JSON body，返回 200（204 不应带 body，HTTP 语义）
     return jsonResponse({ ok: true, cache: 'purged' }, 200)
   }
@@ -277,12 +327,20 @@ async function handle(req: Request): Promise<Response> {
     const seed = parseInt(url.searchParams.get('seed') ?? '', 10)
     const maxTicks = parseInt(url.searchParams.get('maxTicks') ?? '', 10)
     const difficulty = url.searchParams.get('difficulty') ?? 'hard'
-    if (!iterId || !wver || !Number.isInteger(stage) || !Number.isInteger(seed) || !Number.isInteger(maxTicks))
+    if (
+      !iterId ||
+      !wver ||
+      !Number.isInteger(stage) ||
+      !Number.isInteger(seed) ||
+      !Number.isInteger(maxTicks)
+    )
       return jsonResponse({ error: 'missing/invalid query params' }, 400)
-    if (!weights || weights.sha !== wver) return jsonResponse({ error: 'wver not cached here' }, 409)
+    if (!weights || weights.sha !== wver)
+      return jsonResponse({ error: 'wver not cached here' }, 409)
     const free = diskFreeMB()
     if (free !== null && free < 2048) return jsonResponse({ error: `low disk: ${free}MB` }, 503)
-    if (activeWorkers >= workers) return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
+    if (activeWorkers >= workers)
+      return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
     const key = `${iterId}:${stage}:${seed}`
     const cached = resultCache.get(key)
@@ -291,7 +349,9 @@ async function handle(req: Request): Promise<Response> {
       // LRU touch
       resultCache.delete(key)
       resultCache.set(key, cached)
-      return new Response(new Uint8Array(cached.buf), { headers: { 'Content-Type': 'application/octet-stream' } })
+      return new Response(new Uint8Array(cached.buf), {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      })
     }
 
     activeWorkers++
@@ -353,7 +413,11 @@ async function handle(req: Request): Promise<Response> {
       workers,
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
-      inflight: [...inflight.entries()].map(([k, v]) => ({ key: k, ...v, elapsedSec: +((Date.now() - v.startedAt) / 1000).toFixed(1) })),
+      inflight: [...inflight.entries()].map(([k, v]) => ({
+        key: k,
+        ...v,
+        elapsedSec: +((Date.now() - v.startedAt) / 1000).toFixed(1),
+      })),
       lastError,
       diskFreeMB: diskFreeMB(),
       cacheHits,
@@ -384,7 +448,9 @@ if (import.meta.main) {
     process.exit(0)
   }
   if (showHelp) {
-    console.log('usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash]')
+    console.log(
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash]',
+    )
     process.exit(0)
   }
   console.log(

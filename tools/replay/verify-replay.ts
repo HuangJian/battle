@@ -48,7 +48,10 @@ export interface HashMismatchInfo {
  * terminal state (the worlds diverged — the file's frames are not the run's
  * frames). Legacy files (null) fall back to the terminal state alone.
  */
-export function decideVerdict(hashVerified: boolean | null, terminalMatch: boolean): {
+export function decideVerdict(
+  hashVerified: boolean | null,
+  terminalMatch: boolean,
+): {
   verdict: 'OK' | 'DESYNC'
   exitCode: 0 | 1
 } {

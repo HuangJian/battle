@@ -188,10 +188,7 @@ function isRingCell(col: number, row: number): boolean {
  * is a self-inflicted base hit — the S30s27 lesson, base form. */
 function isBaseCell(col: number, row: number): boolean {
   return (
-    col >= BASE_POS.col &&
-    col <= BASE_POS.col + 1 &&
-    row >= BASE_POS.row &&
-    row <= BASE_POS.row + 1
+    col >= BASE_POS.col && col <= BASE_POS.col + 1 && row >= BASE_POS.row && row <= BASE_POS.row + 1
   )
 }
 
@@ -338,7 +335,9 @@ export function evaluateUnifiedCandidates(
   const fireClearU = alignedU && !fireRayBlocked(world, p, urgent)
 
   // ---- clear-lane pre-scan (shared by gates below) ----
-  const rayHit = alignedU ? firstBrickOnRay(world, pc.col, pc.row, uc.col, uc.row, _BRICK_OUT) : 'none'
+  const rayHit = alignedU
+    ? firstBrickOnRay(world, pc.col, pc.row, uc.col, uc.row, _BRICK_OUT)
+    : 'none'
 
   // ---- candidate: kill-current (standing when aligned+facing+ray clear) ----
   // killSlack per §7.2 (a)/(b); standing commits use the STANDING shot eta
@@ -440,8 +439,11 @@ export function evaluateUnifiedCandidates(
       (Math.abs(_BRICK_OUT[0] - pc.col) + Math.abs(_BRICK_OUT[1] - pc.row)) *
       (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
     const cadenceTicks = p.nextFireInterval > 0 ? p.nextFireInterval / (1000 / 60) : 0
-    const flightU = (Math.abs(uc.col - pc.col) + Math.abs(uc.row - pc.row)) * (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
-    clearEta = turnBrick + Math.max(0, ticksUntilFire(world, p)) + flightBrick + cadenceTicks + flightU
+    const flightU =
+      (Math.abs(uc.col - pc.col) + Math.abs(uc.row - pc.row)) *
+      (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
+    clearEta =
+      turnBrick + Math.max(0, ticksUntilFire(world, p)) + flightBrick + cadenceTicks + flightU
     clearSlack = dlU.enemyDamageDeadline - clearEta
     // §7.2 (d): the follow-up shot through the opened lane must still not
     // cross a ring brick or the base itself (a brick cleared on the way does

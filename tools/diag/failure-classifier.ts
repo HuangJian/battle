@@ -24,7 +24,11 @@
  *                              base threats.
  *   7. player_survival       — base safe; the player's deaths ended the run.
  */
-import type { ThreatLedgerRun, ThreatLedgerSample, ForensicsSnapshot } from '../sim/simulation-runner'
+import type {
+  ThreatLedgerRun,
+  ThreatLedgerSample,
+  ForensicsSnapshot,
+} from '../sim/simulation-runner'
 
 export type FailureClass =
   | 'late_detection'
@@ -166,10 +170,13 @@ export function classifyFailure(
       `late_detection: first base hit at t=${samples[firstHitIdx].tick}` +
         ` (baseHp ${baseMaxHp}→${samples[firstHitIdx].baseHp}),` +
         ` but no sample before that had any csb/cbr enemy` +
-        (firstDangerIdx >= 0 ? ` (first danger sample only at t=${samples[firstDangerIdx].tick})` : ` (never)`) +
-        `; branch at hit=${samples[firstHitIdx].branch}, playerDist=${Math.abs(
-          samples[firstHitIdx].playerCell.col - 12,
-        ) + Math.abs(samples[firstHitIdx].playerCell.row - 24)}`,
+        (firstDangerIdx >= 0
+          ? ` (first danger sample only at t=${samples[firstDangerIdx].tick})`
+          : ` (never)`) +
+        `; branch at hit=${samples[firstHitIdx].branch}, playerDist=${
+          Math.abs(samples[firstHitIdx].playerCell.col - 12) +
+          Math.abs(samples[firstHitIdx].playerCell.row - 24)
+        }`,
     )
     return { primary: 'late_detection', secondary, evidence }
   }

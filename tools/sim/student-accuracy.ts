@@ -36,16 +36,28 @@ function readNpy(path: string): Npy {
   const dtype = descrM![1] // e.g. '<u1' or '<f4'
   const raw = buf.subarray(10 + hlen)
   if (dtype === '<u1' || dtype === '|u1') {
-    return { shape, u8: new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength), f32: new Float32Array(0) }
+    return {
+      shape,
+      u8: new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength),
+      f32: new Float32Array(0),
+    }
   }
   // f4 (float32), aligned because NumPy pads header to 64 bytes.
-  return { shape, u8: new Uint8Array(0), f32: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength >> 2) }
+  return {
+    shape,
+    u8: new Uint8Array(0),
+    f32: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength >> 2),
+  }
 }
 
 function argmax(a: Float32Array, n: number): number {
   let b = 0
   let bv = a[0]
-  for (let i = 1; i < n; i++) if (a[i] > bv) { bv = a[i]; b = i }
+  for (let i = 1; i < n; i++)
+    if (a[i] > bv) {
+      bv = a[i]
+      b = i
+    }
   return b
 }
 
@@ -63,14 +75,17 @@ function main(): void {
   const model: ModelLike = buildModelFromText(text)
   const archKind = (JSON.parse(text) as any).arch?.kind
   process.stderr.write(`[student-accuracy] model arch=${archKind} weights=${weightsPath}\n`)
-  process.stderr.write(`[student-accuracy] inCh=${model.inCh} board=${model.board} scalarDim=${model.scalarDim}\n`)
+  process.stderr.write(
+    `[student-accuracy] inCh=${model.inCh} board=${model.board} scalarDim=${model.scalarDim}\n`,
+  )
 
   // Collect shard directories (each contains obs.npy/scalars.npy/actions.npy).
   const entries = readdirSync(dataDir)
   const shardDirs: string[] = []
   for (const e of entries) {
     const full = join(dataDir, e)
-    if (existsSync(join(full, 'obs.npy')) && existsSync(join(full, 'actions.npy'))) shardDirs.push(full)
+    if (existsSync(join(full, 'obs.npy')) && existsSync(join(full, 'actions.npy')))
+      shardDirs.push(full)
   }
   shardDirs.sort()
   process.stderr.write(`[student-accuracy] ${shardDirs.length} shards in ${dataDir}\n`)
@@ -87,7 +102,9 @@ function main(): void {
   for (const dir of shardDirs) {
     if (n >= maxSamples) break
     const obsNpy = readNpy(join(dir, 'obs.npy'))
-    const scNpy = readNpy(join(dir, 'scalars' + (existsSync(join(dir, 'scalars.npy')) ? '.npy' : '')))
+    const scNpy = readNpy(
+      join(dir, 'scalars' + (existsSync(join(dir, 'scalars.npy')) ? '.npy' : '')),
+    )
     const actNpy = readNpy(join(dir, 'actions.npy'))
     const N = obsNpy.shape[0]
     const obs = obsNpy.u8
@@ -115,7 +132,9 @@ function main(): void {
         logged++
         process.stderr.write(
           `  sample#${n} pred[mv=${mv} fr=${fr} it=${it}] label[mv=${lm} fr=${lf} it=${li}] ` +
-            `moveLogits=[${Array.from(model.moveLogits).map((x) => x.toFixed(2)).join(',')}]\n`,
+            `moveLogits=[${Array.from(model.moveLogits)
+              .map((x) => x.toFixed(2))
+              .join(',')}]\n`,
         )
       }
     }
