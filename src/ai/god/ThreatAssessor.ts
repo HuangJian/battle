@@ -1,4 +1,5 @@
 import type { GodAIInput } from '../GodAIInput'
+import type { World } from '../../game/World'
 import type { Bullet, Tank } from '../../types'
 import type { Direction } from '../../constants'
 import { CELL, TANK, BULLET, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
@@ -396,32 +397,21 @@ export function escapeDepthImpl(
  * Choose a dodge direction perpendicular to the incoming bullet.
  * M3: verify the candidate direction is safe (not into another bullet's path).
  */
-export function dodgeDirectionImpl(
-  self: GodAIInput,
-  bullet: Bullet,
-  pcx: number,
-  pcy: number,
-): Direction | null {
-  const w = self.world
-  const p = self.controlledTank(w)!
-  const vertical = bullet.dir === 'up' || bullet.dir === 'down'
-  // Use module-level constants instead of allocating arrays on every dodge.
-  const candA: Direction = vertical ? 'left' : 'up'
-  const candB: Direction = vertical ? 'right' : 'down'
+/** §14.2 reusable dodge-strategy out-buffer (one dodge decision per tick;
+ * dodgeDirectionImpl runs at most once per tick from think's dodge branch).
+ * dir ≠ null ⇒ the strategy committed; otherwise safeA/safeB carry the legacy
+ * binary scan verdicts into the shared pinned/tie-break tails. */
+const _dodgeOut: { dir: Direction | null; safeA: boolean; safeB: boolean } = {
+  dir: null,
+  safeA: false,
+  safeB: false,
+}
 
-  // M0.5 退役（2026-08-03）: dodgeDirPersistence（同威胁保持闪避方向）已退役
-  // 归档（A/B -1.7pp，从未发布）。
-
-  // §86: Oscillation detection + counter-fire. When the dodge direction has
-  // flipped 3+ consecutive times for the same threat, the player is stuck in
-  // an oscillation pattern (up→down→up→down, caused by the snap() function's
-  // Math.round discontinuity at cell midpoints). Instead of continuing to
-  // oscillate (effectively stationary), face the bullet and fire to cancel it
-  // (对枪抵消). This is more targeted than persistence: it only activates
-  // during ACTUAL oscillation, not every time the same threat persists.
-  // A/B: threshold=3 is -0.8pp net (best of all approaches tested).
-  // threshold=2 is -0.9pp. threshold=3+distance_gate is -1.4pp.
-  // persistence is -1.7pp. hysteresis is -1.1pp. floorSnap is -2.6pp.
+/**
+ * §86 oscillation counter-fire (§3.8 extraction): after 3+ direction flips on
+ * the same threat, face the bullet so think()'s fire cancels it.
+ */
+function dodgeOscillationDir(self: GodAIInput, bullet: Bullet): Direction | null {
   if (
     self.params.dodgeOscillationCounterFire > 0 &&
     self._dodgeFlipCount >= 3 &&
@@ -429,31 +419,26 @@ export function dodgeDirectionImpl(
   ) {
     return opposite(bullet.dir) // face the bullet → think() fire cancels it
   }
+  return null
+}
 
-  // ---- §M3: multi-bullet clearance scoring (default OFF, byte-identical) ----
-  // Score each passable perpendicular candidate by its nearest-bullet
-  // CLEARANCE (min arrival tick of any other enemy bullet at the cell the
-  // player would move into) and pick the candidate with the most clearance.
-  // Prevents dodging INTO crossfire: a cell where another bullet arrives in
-  // 2 ticks scores badly vs one with 15 ticks of clearance.
-  let safeA = false
-  let safeB = false
-  // ---- M9/M10: survival-horizon commitment scoring (default OFF, byte-identical) ----
-  // M9 (DECISIONS §107): commits to the longer-horizon perpendicular side,
-  // fixing the measured dominant dodge-death failure mode (commitment failure
-  // — the player oscillated inside the hit band instead of sustaining an
-  // escape). M10 (DECISIONS §108): the commitment is GATED — only commit when
-  // the escape margin is clearly winnable (dodgeHorizonMinMarginTicks) AND the
-  // player is not far from the base (dodgeHorizonMaxDistCells). The ungated
-  // version traded away base-defense/kill efficiency (S10 seed6: 0 deaths but
-  // base destroyed while the player fled 142px away). Gate failure → fall back
-  // to the legacy binary path below (NOTE: with margin=0, when BOTH
-  // perpendiculars are doomed — both margins ≤ 0 — the gate also fails and
-  // the legacy path runs; this differs from M9's later-hit pick, so margin=0
-  // is "any escapable side commits", not a byte-exact M9 replay).
-  // NOTE: horizon wins over dodgeClearanceScore if both are set (only one
-  // block can run per dodge — keep A/B arms mutually exclusive).
-  if (self.params.dodgeHorizonScore > 0) {
+/**
+ * M9/M10/M12 survival-horizon commitment (§3.8 extraction). Writes the commit
+ * direction or the legacy-binary safe flags into _dodgeOut.
+ */
+function dodgeHorizonCommit(
+  self: GodAIInput,
+  w: World,
+  bullet: Bullet,
+  p: Tank,
+  pcx: number,
+  pcy: number,
+  candA: Direction,
+  candB: Direction,
+): void {
+  _dodgeOut.dir = null
+  _dodgeOut.safeA = false
+  _dodgeOut.safeB = false
     const passA = self.canMoveDir(p, candA)
     const passB = self.canMoveDir(p, candB)
     if (passA || passB) {
@@ -498,47 +483,100 @@ export function dodgeDirectionImpl(
           if (distCells > self.params.dodgeHorizonMaxDistCells) commit = false
         }
         if (commit) {
-          if (hA > hB) return candA
-          if (hB > hA) return candB
+          if (hA > hB) {
+            _dodgeOut.dir = candA
+            return
+          }
+          if (hB > hA) {
+            _dodgeOut.dir = candB
+            return
+          }
         }
         // Gate failed or tied — legacy binary path (isSafeDir + passable
         // fallback, same as the default branch below).
-        if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
-        if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
-        if (!safeA && !safeB) {
-          if (self.canMoveDir(p, candA)) safeA = true
-          if (self.canMoveDir(p, candB)) safeB = true
+        if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) _dodgeOut.safeA = true
+        if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) _dodgeOut.safeB = true
+        if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
+          if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
+          if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
         }
       } else {
         // Only ONE perpendicular is passable — commit to it (the legacy path
         // also falls back to a passable-but-unsafe side when nothing is safe,
         // so the outcome is the same; the crossfire next-cell count is
         // redundant here since there is no alternative direction).
-        return passA ? candA : candB
+        {
+          _dodgeOut.dir = passA ? candA : candB
+          return
+        }
       }
     }
     // Neither passable → fall through to the pinned (no-escape) logic below.
-  } else if (self.params.dodgeClearanceScore > 0) {
+}
+
+/**
+ * M3 multi-bullet clearance scoring (§3.8 extraction). Writes the pick or the
+ * tie-safe flags into _dodgeOut.
+ */
+function dodgeClearanceCommit(
+  self: GodAIInput,
+  bullet: Bullet,
+  p: Tank,
+  pcx: number,
+  pcy: number,
+  candA: Direction,
+  candB: Direction,
+): void {
+  _dodgeOut.dir = null
+  _dodgeOut.safeA = false
+  _dodgeOut.safeB = false
     const passA = self.canMoveDir(p, candA)
     const passB = self.canMoveDir(p, candB)
     if (passA || passB) {
       if (passA && passB) {
         const clearA = dodgeClearanceTicksImpl(self, pcx, pcy, candA, bullet.id)
         const clearB = dodgeClearanceTicksImpl(self, pcx, pcy, candB, bullet.id)
-        if (clearA > clearB) return candA
-        if (clearB > clearA) return candB
+        if (clearA > clearB) {
+          _dodgeOut.dir = candA
+          return
+        }
+        if (clearB > clearA) {
+          _dodgeOut.dir = candB
+          return
+        }
         // Tie — fall through with both safe; the shared base-closer tail
         // below breaks the tie (same as the binary path).
-        safeA = true
-        safeB = true
+        _dodgeOut.safeA = true
+        _dodgeOut.safeB = true
       } else if (passA) {
-        return candA
+        _dodgeOut.dir = candA
+        return
       } else {
-        return candB
+        _dodgeOut.dir = candB
+        return
       }
     }
     // Neither perpendicular passable → fall through to the pinned logic.
-  } else {
+}
+
+/**
+ * Default-path strategies (§3.8 extraction): §223 centroid escape, §201
+ * escape-depth probe, then the legacy binary safe scan → _dodgeOut.
+ */
+function dodgeDefaultStrategies(
+  self: GodAIInput,
+  w: World,
+  bullet: Bullet,
+  p: Tank,
+  pcx: number,
+  pcy: number,
+  vertical: boolean,
+  candA: Direction,
+  candB: Direction,
+): void {
+  _dodgeOut.dir = null
+  _dodgeOut.safeA = false
+  _dodgeOut.safeB = false
     // §223: multi-bullet centroid escape (dodgeCentroidMode). The
     // counterfactual-dodge hard-away arm survived 75.3% of dodge-death
     // windows vs 0% factual — running away from the CENTROID of the bullet
@@ -595,7 +633,8 @@ export function dodgeDirectionImpl(
         }
         if (bestDir) {
           self._centroidEscapes++
-          return bestDir
+          _dodgeOut.dir = bestDir
+          return
         }
       }
     }
@@ -632,24 +671,66 @@ export function dodgeDirectionImpl(
             const vb = DIR_VECTORS[axisBName]
             const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
             const distB = manhattan(pcx + vb.dx * CELL, pcy + vb.dy * CELL, baseCx, baseCy)
-            return distA <= distB ? axisAName : axisBName
+            _dodgeOut.dir = distA <= distB ? axisAName : axisBName
+            return
           }
-          return axisAName
+          _dodgeOut.dir = axisAName
+          return
         }
-        if (depthAxisB >= minDepth && takeAxis(axisBName)) return axisBName
+        if (depthAxisB >= minDepth && takeAxis(axisBName)) {
+          _dodgeOut.dir = axisBName
+          return
+        }
       }
     }
     // Try each candidate; prefer the one that's passable AND safe (M3).
     // Use local booleans instead of allocating an `open` array.
-    if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) safeA = true
-    if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) safeB = true
+    if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) _dodgeOut.safeA = true
+    if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) _dodgeOut.safeB = true
 
     // If no safe candidate, try passable but unsafe.
-    if (!safeA && !safeB) {
-      if (self.canMoveDir(p, candA)) safeA = true
-      if (self.canMoveDir(p, candB)) safeB = true
+    if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
+      if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
+      if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
     }
+}
+
+export function dodgeDirectionImpl(
+  self: GodAIInput,
+  bullet: Bullet,
+  pcx: number,
+  pcy: number,
+): Direction | null {
+  const w = self.world
+  const p = self.controlledTank(w)!
+  const vertical = bullet.dir === 'up' || bullet.dir === 'down'
+  // Use module-level constants instead of allocating arrays on every dodge.
+  const candA: Direction = vertical ? 'left' : 'up'
+  const candB: Direction = vertical ? 'right' : 'down'
+
+  // M0.5 退役（2026-08-03）: dodgeDirPersistence（同威胁保持闪避方向）已退役
+  // 归档（A/B -1.7pp，从未发布）。
+
+  // §86: Oscillation detection + counter-fire — see dodgeOscillationDir.
+  // A/B: threshold=3 is -0.8pp net. threshold=2 is -0.9pp.
+  // threshold=3+distance_gate is -1.4pp. persistence is -1.7pp.
+  // hysteresis is -1.1pp. floorSnap is -2.6pp.
+  const oscillationDir = dodgeOscillationDir(self, bullet)
+  if (oscillationDir) return oscillationDir
+
+  // ---- Strategy dispatch (mutually exclusive A/B arms) ----
+  if (self.params.dodgeHorizonScore > 0) {
+    dodgeHorizonCommit(self, w, bullet, p, pcx, pcy, candA, candB)
+    if (_dodgeOut.dir) return _dodgeOut.dir
+  } else if (self.params.dodgeClearanceScore > 0) {
+    dodgeClearanceCommit(self, bullet, p, pcx, pcy, candA, candB)
+    if (_dodgeOut.dir) return _dodgeOut.dir
+  } else {
+    dodgeDefaultStrategies(self, w, bullet, p, pcx, pcy, vertical, candA, candB)
+    if (_dodgeOut.dir) return _dodgeOut.dir
   }
+  const safeA = _dodgeOut.safeA
+  const safeB = _dodgeOut.safeB
 
   // If still nothing [no perpendicular dodge passable], the player is pinned
   // in a corridor aligned with the bullet. §83: NEVER flee in the bullet's own
