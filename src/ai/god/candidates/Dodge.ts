@@ -6,6 +6,7 @@ import { CELL } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
+import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
 
 export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, threat } = ctx
@@ -75,9 +76,9 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
         : Math.abs(threat.x + threat.h / 2 - pcx)
       // 紧急对枪距离阈值：5格 = 80px。子弹 4px/tick，需 20 tick 到达；
       // 玩家垂直闪避需 18+ tick。5格内闪避数学上不可行（§M4 测量）。
-      if (dist <= 5 * CELL) {
+      if (dist <= COUNTER_FIRE_RANGE_CELLS * CELL) {
         // 安全门控：检查是否有其他子弹在 5 格内
-        const hasCrossfire = self.hasCrossFireBullet(pcx, pcy, threat.id, 5, 1)
+        const hasCrossfire = self.hasCrossFireBullet(pcx, pcy, threat.id, COUNTER_FIRE_RANGE_CELLS, 1)
         if (!hasCrossfire) {
           const fireDir = dodgeCounterFireDirImpl(self, threat, pcx, pcy)
           if (fireDir) {

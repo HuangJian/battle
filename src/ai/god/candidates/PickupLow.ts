@@ -37,7 +37,7 @@ export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
       const t = nearbyScan[ni]
       if (!t.alive || t.spawnTimer > 0) continue
       const tc = self.tankCell(t)
-      if (manhattan(tc.col, tc.row, pc2.col, pc2.row) <= 5) {
+      if (manhattan(tc.col, tc.row, pc2.col, pc2.row) <= self.params.pickupPriorityMinEnemyDist) {
         nearbyEnemy = true
         break
       }

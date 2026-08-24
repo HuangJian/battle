@@ -1,4 +1,5 @@
 import type { TankKind, PowerUpType } from '../../types'
+import { BASE_POS, CELL, TANK, BULLET } from '../../constants'
 
 // ============================================================
 // God AI shared constants (moved out of GodAIInput.ts during the
@@ -75,3 +76,21 @@ export const POWERUP_PRIORITY: Record<PowerUpType, number> = {
   // --- new super power-up (§4.3) ---
   rewind: 1, // 时光宝盒 — rewind to recent snapshot (high-value "save" card)
 }
+
+/** Next-cell bullet-lane alignment threshold (§3.11): a bullet within this
+ * lateral distance of the next cell's axis counts as "on lane". Was inlined
+ * as `CELL * 0.75` across FireControl/ThreatAssessor/perception. */
+export const BULLET_ALIGN_NEXT_CELL = CELL * 0.75
+
+/** Actual hitbox overlap half-span (§165): (TANK + BULLET) / 2 = 19px.
+ * Replaces the literal 19 and the local windowHalf spellings. */
+export const HIT_HALF_SPAN = (TANK + BULLET) / 2
+
+/** Base eagle center pixel (center of the 2×2 base block at BASE_POS). */
+export const BASE_CENTER_X_PX = BASE_POS.col * CELL + CELL
+export const BASE_CENTER_Y_PX = BASE_POS.row * CELL + CELL
+
+/** Emergency counter-fire range (§M4): within 5 cells (80px) out-dodging is
+ * mathematically hopeless — face and cancel instead. Hardcoded by design
+ * (the old dodgeCounterFireRangeCells param was removed in §101). */
+export const COUNTER_FIRE_RANGE_CELLS = 5

@@ -1,12 +1,16 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
-import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
+import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
 import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
 import { isBaseRingCell } from './ThreatBudget'
 import { estimatedEnemyLevel } from './EnemyModel'
+import { BULLET_ALIGN_NEXT_CELL, HIT_HALF_SPAN, BASE_CENTER_X_PX, BASE_CENTER_Y_PX } from './constants'
+
+/** Scan-line aabb pre-filter half-span (§3.11): the literal 33 = TANK + 1. */
+const SCAN_AABB_HALF_SPAN = TANK + 1
 
 // ============================================================
 // FireControl — target scanning + fire decisions (T2a, T9, T2b, T6, T11, M6)
@@ -249,15 +253,16 @@ export function scanAheadImpl(
     const sy = vertical ? pcy : pcy + off
 
     // Pre-filter: collect tanks whose perpendicular axis overlaps this offset's
-    // scan line (the constant half of the aabb condition). 33 = TANK + 1.
+    // scan line (the constant half of the aabb condition). 33 = TANK + 1
+    // (§3.11: SCAN_AABB_HALF_SPAN).
     let alignedCount = 0
     for (let ti = 0; ti < tanksArr.length; ti++) {
       const t = tanksArr[ti]
       if (!t.alive || t.spawnTimer > 0) continue
       if (vertical) {
-        if (sx > t.x - 1 && sx < t.x + 33) aligned[alignedCount++] = t
+        if (sx > t.x - 1 && sx < t.x + SCAN_AABB_HALF_SPAN) aligned[alignedCount++] = t
       } else {
-        if (sy > t.y - 1 && sy < t.y + 33) aligned[alignedCount++] = t
+        if (sy > t.y - 1 && sy < t.y + SCAN_AABB_HALF_SPAN) aligned[alignedCount++] = t
       }
     }
 
@@ -543,7 +548,7 @@ function enemySlidesOffLineByArrivalImpl(
 
   const vertical = dir === 'up' || dir === 'down'
   // Hit window half-width: bullet path ± (tank half + bullet half).
-  const windowHalf = (TANK + BULLET) / 2
+  const windowHalf = HIT_HALF_SPAN
   const arrivalTicks = maxDist / bulletSpeed
 
   const tanksArr = w.tanks
@@ -783,7 +788,7 @@ export function shouldFireInDirImpl(
     const bcy = b.y + b.h / 2
     // §3.1 single-sourced lane geometry (verticality keyed on the shooter's
     // own facing dir here; the approaching/inFront formulas coincide).
-    const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, CELL * 0.75)
+    const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, BULLET_ALIGN_NEXT_CELL)
     if (d < 0) continue
     if (d < TANK * 4) {
       return self.rng.next() >= self.params.aimError
@@ -1058,8 +1063,8 @@ export function enemyInShotCorridorImpl(
   dir: Direction,
 ): boolean {
   const w = self.world
-  const baseCx = BASE_POS.col * CELL + CELL
-  const baseCy = BASE_POS.row * CELL + CELL
+  const baseCx = BASE_CENTER_X_PX
+  const baseCy = BASE_CENTER_Y_PX
   const vertical = dir === 'up' || dir === 'down'
   const band = 19 // BULLET/2 (3) + TANK/2 (16) — body overlaps the 6px corridor
   const tanks = w.tanks

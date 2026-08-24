@@ -14,6 +14,24 @@ import { blocksBullet } from './Chokepoint'
 
 import { manhattan } from '../../utils/helpers'
 
+/**
+ * Coop companion distance adjustment (§3.10 single source; was 7 hand-copied
+ * blocks): when coop is active and the partner is >3 cells closer to this
+ * enemy than the player, add +5 so the player defers it.
+ */
+function coopAdjustDist(
+  adjustedDist: number,
+  d: number,
+  tc: { col: number; row: number },
+  coopActive: boolean,
+  partnerCell: { col: number; row: number } | null,
+): number {
+  if (!coopActive || !partnerCell) return adjustedDist
+  const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
+  return pd < d - 3 ? adjustedDist + 5 : adjustedDist
+}
+
+
 // ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
 // A hunt/engage target is locked only for a lease; revalidation releases on
 // target death/unreachability, lease expiry, player stall (no move + no fire
@@ -1638,12 +1656,7 @@ function noBaseNearestTarget(
     const t = enemies[ti]
     const tc = self.tankCell(t)
     const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
-    let adjustedDist = d - (t.bonus ? 2 : 0)
-    // 协作: 伙伴更近的敌人降优先级
-    if (coopActive && partnerCell) {
-      const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-      if (pd < d - 3) adjustedDist += 5
-    }
+    let adjustedDist = coopAdjustDist(d - (t.bonus ? 2 : 0), d, tc, coopActive, partnerCell)
     if (adjustedDist < bestDist) {
       bestDist = adjustedDist
       best = t
@@ -1793,11 +1806,7 @@ function huntModeTarget(
       const t = enemies[ti]
       const tc = self.tankCell(t)
       const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
-      let adjustedDist = d - (t.bonus ? 2 : 0)
-      if (coopActive && partnerCell) {
-        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-        if (pd < d - 3) adjustedDist += 5
-      }
+      let adjustedDist = coopAdjustDist(d - (t.bonus ? 2 : 0), d, tc, coopActive, partnerCell)
       const v = targetValue(self.world, p, t)
       if (
         v > bestV + TARGET_VALUE_TIE_EPS ||
@@ -1819,12 +1828,7 @@ function huntModeTarget(
     const tc = self.tankCell(t)
     const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     // Prefer bonus enemies (they drop power-ups) when distances are close.
-    let adjustedDist = d - (t.bonus ? 2 : 0)
-    // 协作: 伙伴更近的敌人降优先级
-    if (coopActive && partnerCell) {
-      const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-      if (pd < d - 3) adjustedDist += 5
-    }
+    let adjustedDist = coopAdjustDist(d - (t.bonus ? 2 : 0), d, tc, coopActive, partnerCell)
     if (adjustedDist < bestDist) {
       bestDist = adjustedDist
       best = t
@@ -1926,16 +1930,15 @@ function normalSelectionTarget(
         adjustedDist =
           huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
           (t.bonus ? self.params.bonusHuntBias : 0)
-        if (coopActive && partnerCell) {
-          const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-          if (pd < d - 3) adjustedDist += 5
-        }
+        adjustedDist = coopAdjustDist(adjustedDist, d, tc, coopActive, partnerCell)
       } else {
-        adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
-        if (coopActive && partnerCell) {
-          const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-          if (pd < d - 3) adjustedDist += 5
-        }
+        adjustedDist = coopAdjustDist(
+          d - (t.bonus ? self.params.bonusHuntBias : 0),
+          d,
+          tc,
+          coopActive,
+          partnerCell,
+        )
       }
       const v = targetValue(self.world, p, t)
       if (
@@ -1967,11 +1970,13 @@ function normalSelectionTarget(
       let adjustedDist =
         huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
         (t.bonus ? self.params.bonusHuntBias : 0)
-      // 协作: 伙伴更近的敌人降优先级
-      if (coopActive && partnerCell) {
-        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-        if (pd < manhattan(tc.col, tc.row, playerCell.col, playerCell.row) - 3) adjustedDist += 5
-      }
+      adjustedDist = coopAdjustDist(
+        adjustedDist,
+        manhattan(tc.col, tc.row, playerCell.col, playerCell.row),
+        tc,
+        coopActive,
+        partnerCell,
+      )
       if (adjustedDist < bestDist) {
         bestDist = adjustedDist
         best = t
@@ -1984,12 +1989,13 @@ function normalSelectionTarget(
       const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
       // §172: bonus preference is the bonusHuntBias knob (default 2 =
       // the historical constant, byte-identical).
-      let adjustedDist = d - (t.bonus ? self.params.bonusHuntBias : 0)
-      // 协作: 伙伴更近的敌人降优先级
-      if (coopActive && partnerCell) {
-        const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
-        if (pd < d - 3) adjustedDist += 5
-      }
+      let adjustedDist = coopAdjustDist(
+        d - (t.bonus ? self.params.bonusHuntBias : 0),
+        d,
+        tc,
+        coopActive,
+        partnerCell,
+      )
       if (adjustedDist < bestDist) {
         bestDist = adjustedDist
         best = t

@@ -2,11 +2,17 @@ import type { GodAIInput } from '../GodAIInput'
 import type { World } from '../../game/World'
 import type { Bullet, Tank } from '../../types'
 import type { Direction } from '../../constants'
-import { CELL, TANK, BULLET, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
+import { CELL, TANK, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from './pathfind'
 import { ALL_DIRS, opposite } from '../../utils/direction'
 import { snap, aabb, manhattan, bulletLaneDist } from '../../utils/helpers'
-import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
+import {
+  BULLET_TRAJECTORY_MAX_CELLS,
+  BULLET_ALIGN_NEXT_CELL,
+  HIT_HALF_SPAN,
+  BASE_CENTER_X_PX,
+  BASE_CENTER_Y_PX,
+} from './constants'
 import { enemyCanShootBase } from './SmartThreatModel'
 import { isThreatStateImpl } from './Chokepoint'
 import { scanAheadImpl } from './FireControl'
@@ -131,8 +137,8 @@ export function findMostDangerousBulletImpl(
 export function findBulletThreatToBaseImpl(self: GodAIInput): Bullet | null {
   if (!self.hasBase) return null
   const w = self.world
-  const baseCx = BASE_POS.col * CELL + CELL
-  const baseCy = BASE_POS.row * CELL + CELL
+  const baseCx = BASE_CENTER_X_PX
+  const baseCy = BASE_CENTER_Y_PX
   const baseHalf = CELL // base is 2×2 cells = 32px, half = 16px
 
   let best: Bullet | null = null
@@ -298,7 +304,7 @@ function dodgeHorizonTicksImpl(
     // §3.1: lane geometry single-sourced in utils/helpers.bulletLaneDist.
 
     // (1) Next-cell coverage (dodging INTO another bullet's lane) — a hit.
-    const tArrNext = bulletLaneDist(b.dir, bcx, bcy, nx, ny, CELL * 0.75)
+    const tArrNext = bulletLaneDist(b.dir, bcx, bcy, nx, ny, BULLET_ALIGN_NEXT_CELL)
     if (tArrNext >= 0) {
       const tn = tArrNext / b.speed
       if (-tn < minMargin) minMargin = -tn
@@ -738,8 +744,8 @@ function dodgeDefaultStrategies(
           const nx = pcx + v.dx * CELL
           const ny = pcy + v.dy * CELL
           if (self.hasBase) {
-            const baseCx = BASE_POS.col * CELL + CELL
-            const baseCy = BASE_POS.row * CELL + CELL
+            const baseCx = BASE_CENTER_X_PX
+            const baseCy = BASE_CENTER_Y_PX
             const distNow = manhattan(pcx, pcy, baseCx, baseCy)
             const distNext = manhattan(nx, ny, baseCx, baseCy)
             if (distNext > distNow + CENTROID_BASE_SLACK_CELLS * CELL) continue
@@ -784,8 +790,8 @@ function dodgeDefaultStrategies(
         if (depthAxisA >= minDepth && takeAxis(axisAName)) {
           if (depthAxisB >= minDepth && takeAxis(axisBName)) {
             // Both axes long — prefer the base-closer side (defense bias).
-            const baseCx = BASE_POS.col * CELL + CELL
-            const baseCy = BASE_POS.row * CELL + CELL
+            const baseCx = BASE_CENTER_X_PX
+            const baseCy = BASE_CENTER_Y_PX
             const va = DIR_VECTORS[axisAName]
             const vb = DIR_VECTORS[axisBName]
             const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
@@ -866,8 +872,8 @@ export function dodgeDirectionImpl(
   if (!safeA && !safeB) {
     const fleeDir: Direction = bullet.dir
     const towardDir: Direction = opposite(bullet.dir)
-    const baseCx = BASE_POS.col * CELL + CELL
-    const baseCy = BASE_POS.row * CELL + CELL
+    const baseCx = BASE_CENTER_X_PX
+    const baseCy = BASE_CENTER_Y_PX
     // First pass: open directions EXCLUDING the futile flee direction. Prefer
     // towardDir, then (for hasBase) the one closest to the base.
     let bestDist = Infinity
@@ -914,8 +920,8 @@ export function dodgeDirectionImpl(
   // We have at least one perpendicular candidate (safeA or safeB).
   // Prefer the direction that keeps the player closer to the base.
   if (self.hasBase) {
-    const baseCx = BASE_POS.col * CELL + CELL
-    const baseCy = BASE_POS.row * CELL + CELL
+    const baseCx = BASE_CENTER_X_PX
+    const baseCy = BASE_CENTER_Y_PX
     const va = DIR_VECTORS[candA]
     const vb = DIR_VECTORS[candB]
     const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
@@ -954,7 +960,7 @@ export function isSafeDirImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     // §3.1 single-sourced lane geometry.
-    if (bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, CELL * 0.75) >= 0) return false
+    if (bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, BULLET_ALIGN_NEXT_CELL) >= 0) return false
   }
   return true
 }
@@ -988,7 +994,7 @@ function dodgeClearanceTicksImpl(
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
     // Same next-cell alignment gate as isSafeDirImpl (§3.1 single-sourced).
-    const dist = bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, CELL * 0.75)
+    const dist = bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, BULLET_ALIGN_NEXT_CELL)
     if (dist < 0) continue
     const ticks = dist / b.speed
     if (ticks < minTicks) minTicks = ticks
@@ -1137,7 +1143,7 @@ const PATH_THREAT_LOOKAHEAD = 3
  * The old `< TANK` (32px) flagged bullets up to 2 cells away — the primary
  * source of false positives on maze stages where bullets fly in adjacent
  * corridors that never actually cross the player's body. */
-const PATH_THREAT_HIT_RADIUS = (TANK + BULLET) / 2
+const PATH_THREAT_HIT_RADIUS = HIT_HALF_SPAN
 
 export function findPathThreatImpl(
   self: GodAIInput,

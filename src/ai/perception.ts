@@ -6,6 +6,7 @@ import { aabb, snap, bulletLaneDist } from '../utils/helpers'
 import type { Perception, Situation, IntelligenceConfig } from './types'
 
 import { manhattan } from '../utils/helpers'
+import { BULLET_ALIGN_NEXT_CELL } from './god/constants'
 
 /**
  * ai/perception.ts — the "eyes" of the framework.
@@ -244,7 +245,7 @@ export function perceive(
       b.y + b.h / 2,
       sx,
       sy,
-      CELL * 0.75,
+      BULLET_ALIGN_NEXT_CELL,
     )
     if (dist < 0 || dist > range) continue
     // Track the closest threat. Sorting was only needed to pick threats[0];
