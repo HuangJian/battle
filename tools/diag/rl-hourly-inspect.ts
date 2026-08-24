@@ -27,17 +27,36 @@ const STATE_PATH = join(TRAJ_DIR, 'inspection-state.json')
 const REPORT_PATH = join(TRAJ_DIR, 'inspection-report.html')
 const ENEMY_TOTAL = 20
 const START_LIVES = 3
-const GAMES_PER_ITER = 70
 
-interface IterEvent {
+export interface IterEvent {
   iter: number
   time: string
   winRate: number
   outcomes: Record<string, number>
-  score_mean: number
-  entropy: number
-  kl: number
-  ticks: number
+  score_mean: number | null
+  entropy: number | null
+  kl: number | null
+  ticks: number | null
+  rollout_sec?: number | null
+  ppo_sec?: number | null
+}
+
+/** 本轮实际局数 = outcomes 计数之和（随 rotate/补采配置浮动，勿硬编码）。 */
+export function gamesOf(e: IterEvent): number {
+  return Object.values(e.outcomes ?? {}).reduce((a, b) => a + (Number(b) || 0), 0)
+}
+
+/** 局均 ticks；无 rollout 遥测（games=0 或 ticks 缺失）时返回 null——缺数据不是零值信号。 */
+export function avgTicksPerGame(e: IterEvent): number | null {
+  const games = gamesOf(e)
+  if (games <= 0 || typeof e.ticks !== 'number' || e.ticks <= 0) return null
+  return e.ticks / games
+}
+
+/** 相位耗时展示：<90s 显示秒，否则分钟；缺失/旧日志行显示 —。 */
+export function fmtDur(sec: number | null | undefined): string {
+  if (typeof sec !== 'number' || !(sec >= 0)) return '—'
+  return sec < 90 ? `${Math.round(sec)}s` : `${(sec / 60).toFixed(1)}m`
 }
 
 interface RlReport {
@@ -122,6 +141,7 @@ interface AgentRow {
   elapsedN: number
   lastIt: number
   lastError: string
+  lastGames: number
 }
 
 interface HtmlRow {
@@ -167,7 +187,11 @@ interface LogEvent {
   iter?: number
 }
 
-function parseLog(): { runStarts: string[]; circuitBreaks: string[]; iters: Map<number, IterEvent> } {
+function parseLog(): {
+  runStarts: string[]
+  circuitBreaks: string[]
+  iters: Map<number, IterEvent>
+} {
   const runStarts: string[] = []
   const circuitBreaks: string[] = []
   const iters = new Map<number, IterEvent>()
@@ -181,7 +205,8 @@ function parseLog(): { runStarts: string[]; circuitBreaks: string[]; iters: Map<
     }
     if (ev.event === 'run_start' && typeof ev.time === 'string') runStarts.push(ev.time)
     else if (ev.event === 'circuit_break') circuitBreaks.push(line)
-    else if (ev.event === 'iteration' && typeof ev.iter === 'number') iters.set(ev.iter, ev as unknown as IterEvent)
+    else if (ev.event === 'iteration' && typeof ev.iter === 'number')
+      iters.set(ev.iter, ev as unknown as IterEvent)
   }
   return { runStarts, circuitBreaks, iters }
 }
@@ -229,12 +254,35 @@ function scanIterDir(n: number): WorkerData[] {
   const dir = join(TRAJ_DIR, `it${n}`)
   if (!existsSync(dir)) return []
   const out: WorkerData[] = []
+  // 本机直连局：w<slot>/_rl_report.json
   for (const d of readdirSync(dir, { withFileTypes: true })) {
     if (!d.isDirectory() || !/^w\d+$/.test(d.name)) continue
     const rp = join(dir, d.name, '_rl_report.json')
     if (!existsSync(rp)) continue
     const report = JSON.parse(readFileSync(rp, 'utf8')) as RlReport
     out.push({ report, manifest: readWorkerManifest(join(dir, d.name)) })
+  }
+  // 远程 agent 局：dist/<node>/rl_s<stage>_seed<seed>/manifest.json —— 字段与本机
+  // 导出摘要同构（stages/seeds/scoreList/outcomes/totalTicks/dimLists），可直接按
+  // RlReport 消费；dims 走 dimLists 回退（loot 列显示为缺省）。此前只扫 w* 目录，
+  // 远程局被整份报告漏计（2026-08-24 发现）。
+  const distDir = join(dir, 'dist')
+  if (!existsSync(distDir)) return out
+  for (const node of readdirSync(distDir, { withFileTypes: true })) {
+    if (!node.isDirectory()) continue
+    const nodeDir = join(distDir, node.name)
+    for (const shard of readdirSync(nodeDir, { withFileTypes: true })) {
+      if (!shard.isDirectory() || !/^rl_s\d+_seed\d+$/.test(shard.name)) continue
+      const mp = join(nodeDir, shard.name, 'manifest.json')
+      if (!existsSync(mp)) continue
+      try {
+        const raw = JSON.parse(readFileSync(mp, 'utf8')) as Record<string, unknown>
+        if (!Array.isArray(raw.stages) || (raw.stages as number[]).length === 0) continue
+        out.push({ report: raw as unknown as RlReport, manifest: null })
+      } catch {
+        continue
+      }
+    }
   }
   return out
 }
@@ -254,7 +302,8 @@ function metricsOf(w: WorkerData): GameMetrics {
   const r = w.report
   const dl = r.dimLists
   const d = w.manifest
-  const num = (x: DimScore | undefined): number => (x && typeof x.raw === 'number' ? Math.round(x.raw) : -1)
+  const num = (x: DimScore | undefined): number =>
+    x && typeof x.raw === 'number' ? Math.round(x.raw) : -1
   const kills =
     num(d?.progress) >= 0
       ? num(d?.progress)
@@ -282,18 +331,30 @@ function metricsOf(w: WorkerData): GameMetrics {
   }
 }
 
-function healthVerdict(recent: IterEvent[]): string {
+export function healthVerdict(recent: IterEvent[]): string {
   if (recent.length === 0) return '无数据'
-  const entMin = Math.min(...recent.map((e) => e.entropy))
-  const tpgMin = Math.min(...recent.map((e) => e.ticks / GAMES_PER_ITER))
+  const entVals = recent.map((e) => e.entropy).filter((x): x is number => x !== null)
+  const entMin = entVals.length > 0 ? Math.min(...entVals) : null
+  // 无 rollout 遥测的行（如断点续跑合并出的 it1：ticks=0/outcomes={}）不参与
+  // ticks 规则——缺数据不是"秒投降"信号。
+  const tpgValues = recent.map((e) => avgTicksPerGame(e)).filter((x): x is number => x !== null)
+  const tpgMin = tpgValues.length > 0 ? Math.min(...tpgValues) : null
   let klStreak = 0
   let klMaxStreak = 0
   for (const e of recent) {
-    klStreak = e.kl > 0.15 ? klStreak + 1 : 0
+    klStreak = e.kl !== null && e.kl > 0.15 ? klStreak + 1 : 0
     if (klStreak > klMaxStreak) klMaxStreak = klStreak
   }
-  if (entMin <= 0.6 || klMaxStreak >= 3 || tpgMin < 1000) return '异常'
-  if (entMin < 0.8 || klMaxStreak >= 2 || tpgMin < 2000) return '观察'
+  if (
+    (entMin !== null && entMin <= 0.6) ||
+    klMaxStreak >= 3 ||
+    (tpgMin !== null && tpgMin < 1000)
+  ) {
+    return '异常'
+  }
+  if ((entMin !== null && entMin < 0.8) || klMaxStreak >= 2 || (tpgMin !== null && tpgMin < 2000)) {
+    return '观察'
+  }
   return '健康'
 }
 
@@ -304,7 +365,10 @@ function fmtNow(): string {
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
+  return s.replace(
+    /[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!,
+  )
 }
 
 /**
@@ -315,10 +379,23 @@ function esc(s: string): string {
 function readAgentMeta(): AgentRow[] {
   if (!existsSync(META_PATH)) return []
   const by = new Map<string, AgentRow>()
+  // 每节点在每轮的成功局数：用于"上轮局数"列（以全局最新迭代为基准，未参与=0）
+  const okByIt = new Map<string, Map<number, number>>()
   const ensure = (node: string): AgentRow => {
     let a = by.get(node)
     if (!a) {
-      a = { node, attempts: 0, ok: 0, fail: 0, wins: 0, elapsedSum: 0, elapsedN: 0, lastIt: 0, lastError: '' }
+      a = {
+        node,
+        attempts: 0,
+        ok: 0,
+        fail: 0,
+        wins: 0,
+        elapsedSum: 0,
+        elapsedN: 0,
+        lastIt: 0,
+        lastError: '',
+        lastGames: 0,
+      }
       by.set(node, a)
     }
     return a
@@ -342,11 +419,25 @@ function readAgentMeta(): AgentRow[] {
         a.elapsedSum += r.elapsedSec
         a.elapsedN++
       }
+      if (typeof r.it === 'number') {
+        let m = okByIt.get(node)
+        if (!m) {
+          m = new Map<number, number>()
+          okByIt.set(node, m)
+        }
+        m.set(r.it, (m.get(r.it) ?? 0) + 1)
+      }
     } else {
       a.fail++
       if (typeof r.reason === 'string') a.lastError = r.reason.slice(0, 40)
     }
     if (typeof r.it === 'number') a.lastIt = Math.max(a.lastIt, r.it)
+  }
+  let globalLastIt = 0
+  for (const a of by.values()) globalLastIt = Math.max(globalLastIt, a.lastIt)
+  for (const [node, m] of okByIt) {
+    const a = by.get(node)
+    if (a) a.lastGames = m.get(globalLastIt) ?? 0
   }
   return [...by.values()].sort((p, q) => q.ok - p.ok)
 }
@@ -357,7 +448,14 @@ interface PassSection {
   rows: PassHtmlRow[]
 }
 
-function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], newWins: NewWin[], scannedLine: string, pass: PassSection, agent: AgentRow[]): string {
+function buildHtml(
+  rows: HtmlRow[],
+  bannerLines: string[],
+  recent: IterEvent[],
+  scannedLine: string,
+  pass: PassSection,
+  agent: AgentRow[],
+): string {
   const dataJson = JSON.stringify(rows)
   const passJson = JSON.stringify(pass.rows)
   const bannerHtml = bannerLines.map((l) => `<div>${l}</div>`).join('\n')
@@ -366,23 +464,16 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
     .map(
       (e) =>
         `<tr><td class="txt">it${e.iter}</td><td>${esc(e.time)}</td>` +
-        `<td>${(e.winRate * 100).toFixed(1)}%</td><td>${e.score_mean.toFixed(4)}</td>` +
-        `<td>${e.entropy.toFixed(3)}</td><td>${e.kl.toFixed(4)}</td>` +
-        `<td>${Math.round(e.ticks / GAMES_PER_ITER)}</td>` +
+        `<td>${(e.winRate * 100).toFixed(1)}%</td><td>${e.score_mean == null ? '—' : e.score_mean.toFixed(4)}</td>` +
+        `<td>${e.entropy == null ? '—' : e.entropy.toFixed(3)}</td><td>${e.kl == null ? '—' : e.kl.toFixed(4)}</td>` +
+        `<td>${(() => {
+          const t = avgTicksPerGame(e)
+          return t === null ? '—' : Math.round(t)
+        })()}</td>` +
+        `<td>${fmtDur(e.rollout_sec)}</td><td>${fmtDur(e.ppo_sec)}</td>` +
         `<td>${e.outcomes.stage_clear ?? 0}</td></tr>`,
     )
     .join('\n')
-
-  const newWinRows =
-    newWins.length === 0
-      ? '<tr><td colspan="6" class="na">本段无新胜局</td></tr>'
-      : newWins
-          .map(
-            (w) =>
-              `<tr><td class="txt">it${w.iter}</td><td class="txt">s${w.stage + 1} ${esc(w.name)}</td>` +
-              `<td>${w.seed}</td><td>${w.score.toFixed(3)}</td><td>${w.kills}</td></tr>`,
-          )
-          .join('\n')
 
   const totalGames = rows.reduce((a, r) => a + r.games, 0)
 
@@ -425,6 +516,7 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
         +'<td>'+r.fail+'</td>'
         +'<td>'+rate+'</td>'
         +'<td>'+avg+'</td>'
+        +'<td>'+r.lastGames+'</td>'
         +'<td>'+r.wins+'</td>'
         +'<td class="win-cell" style="'+heat(wr)+'\">'+(wr>0?(wr*100).toFixed(1)+'%':'-')+'</td>'
         +'<td>'+(r.lastIt?('it'+r.lastIt):'-')+'</td>'
@@ -433,7 +525,10 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
     } }`,
   ].join(',\n')
 
-  const passHeading = pass.rows.length > 0 ? `本段各关表现（${esc(pass.covered)}，截至 ${esc(pass.endedAt)}）` : '本段各关表现（暂无扫描段数据）'
+  const passHeading =
+    pass.rows.length > 0
+      ? `本段各关表现（${esc(pass.covered)}，截至 ${esc(pass.endedAt)}）`
+      : '本段各关表现（暂无扫描段数据）'
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -461,6 +556,7 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
   tbody tr:hover { background:#fff8e1; }
   .win-cell { font-weight:600; }
   .na { color:#bbb; }
+  .th-note { display:block; font-weight:400; font-size:10px; color:#57606a; white-space:normal; line-height:1.3; margin-top:2px; }
   footer { margin-top:14px; color:#8c959f; font-size:12px; line-height:1.6; }
   code { background:#eef1f4; padding:1px 5px; border-radius:4px; }
 </style>
@@ -475,7 +571,7 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
 <table id="a">
   <thead><tr>
     <th class="txt" data-key="node">节点</th><th data-key="ok">成功局</th><th data-key="fail">失败局</th>
-    <th data-key="rate">采样成功</th><th data-key="avgSec">局均耗时(s)</th><th data-key="wins">胜局</th>
+    <th data-key="rate">采样成功</th><th data-key="avgSec">局均耗时(s)</th><th data-key="lastGames">上轮局数</th><th data-key="wins">胜局</th>
     <th data-key="winRate">胜率</th><th data-key="lastIt">最近迭代</th><th class="txt">最近错误</th>
   </tr></thead>
   <tbody></tbody>
@@ -486,22 +582,10 @@ function buildHtml(rows: HtmlRow[], bannerLines: string[], recent: IterEvent[], 
 <div class="wrap">
 <table>
   <thead><tr>
-    <th class="txt">迭代</th><th class="txt">时间</th><th>胜率</th><th>score_mean</th><th>entropy</th><th>KL</th><th>局均 ticks</th><th>通关局数</th>
+    <th class="txt">迭代</th><th class="txt">完成时刻<span class="th-note">PPO 写回时间，非开始时间</span></th><th>胜率</th><th>score_mean</th><th>entropy<span class="th-note">&le;0.6 异常 · &lt;0.8 观察</span></th><th>KL<span class="th-note">&gt;0.15 连续3轮 异常 · 连续2轮 观察</span></th><th>局均 ticks<span class="th-note">&lt;2000 观察 · &lt;1000 异常</span></th><th>rollout 耗时</th><th>PPO 耗时</th><th>通关局数</th>
   </tr></thead>
   <tbody>
 ${recentRows}
-  </tbody>
-</table>
-</div>
-
-<h2>本段新胜局明细</h2>
-<div class="wrap">
-<table>
-  <thead><tr>
-    <th class="txt">迭代</th><th class="txt">关卡</th><th>种子</th><th>得分</th><th>击杀</th>
-  </tr></thead>
-  <tbody>
-${newWinRows}
   </tbody>
 </table>
 </div>
@@ -602,13 +686,22 @@ function main(): void {
   const { runStarts, circuitBreaks, iters } = parseLog()
 
   const procs = pythonProcCount()
-  const procStr = procs === null ? '未知(tasklist 失败)' : procs > 0 ? `python.exe ×${procs} 存活` : '未发现 python 进程 ⚠'
+  const procStr =
+    procs === null
+      ? '未知(tasklist 失败)'
+      : procs > 0
+        ? `python.exe ×${procs} 存活`
+        : '未发现 python 进程 ⚠'
   const lastRunStart = runStarts[runStarts.length - 1] ?? '(无记录)'
   const iterNums = [...iters.keys()].sort((a, b) => a - b)
   const lastIter = iterNums.length > 0 ? iters.get(iterNums[iterNums.length - 1]) : undefined
-  const cbStr = circuitBreaks.length === 0 ? '无 circuit_break' : `熔断 ${circuitBreaks.length} 次 ⚠ ${circuitBreaks[circuitBreaks.length - 1]}`
+  const cbStr =
+    circuitBreaks.length === 0
+      ? '无 circuit_break'
+      : `熔断 ${circuitBreaks.length} 次 ⚠ ${circuitBreaks[circuitBreaks.length - 1]}`
 
-  const scanUpTo = upTo ?? (iterNums.length > 0 ? iterNums[iterNums.length - 1] : state.lastScannedIter)
+  const scanUpTo =
+    upTo ?? (iterNums.length > 0 ? iterNums[iterNums.length - 1] : state.lastScannedIter)
 
   const fromIter = state.lastScannedIter
   const results: Array<{ iter: number; games: number; wins: number; kills: number }> = []
@@ -642,7 +735,14 @@ function main(): void {
       entry.games++
       if (win) {
         entry.wins++
-        newWins.push({ iter: n, stage: m.stage, name: entry.nameZh, seed: m.seed, score: m.score, kills: Math.max(m.kills, 0) })
+        newWins.push({
+          iter: n,
+          stage: m.stage,
+          name: entry.nameZh,
+          seed: m.seed,
+          score: m.score,
+          kills: Math.max(m.kills, 0),
+        })
         if (prevWins === 0) firstEver.push(`s${m.stage + 1} ${entry.nameZh}`)
       }
       if (m.kills >= 0) entry.kills += m.kills
@@ -707,16 +807,23 @@ function main(): void {
     state.totals.games += totalGames
     state.totals.wins += totalWins
     state.totals.kills += totalKills
-    const span = results.length === 1 ? `it${results[0].iter}` : `it${results[0].iter}-it${results[results.length - 1].iter}`
+    const span =
+      results.length === 1
+        ? `it${results[0].iter}`
+        : `it${results[0].iter}-it${results[results.length - 1].iter}`
     state.coverageNote += ` Last scan ${fmtNow()} covered ${span} (+${totalGames} games / +${totalWins} wins / +${totalKills} kills).`
   }
 
   if (passIters.length > 0) {
-    const span = passIters.length === 1 ? `it${passIters[0]}` : `it${passIters[0]}-it${passIters[passIters.length - 1]}`
+    const span =
+      passIters.length === 1
+        ? `it${passIters[0]}`
+        : `it${passIters[0]}-it${passIters[passIters.length - 1]}`
     state.lastPass = { covered: span, endedAt: fmtNow(), stages: passStages }
   }
 
-  if (!dryRun && (results.length > 0 || passIters.length > 0)) writeFileSync(STATE_PATH, JSON.stringify(state, null, 2))
+  if (!dryRun && (results.length > 0 || passIters.length > 0))
+    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2))
 
   const recentIters = iterNums
     .slice(-5)
@@ -744,7 +851,9 @@ function main(): void {
   const lp = state.lastPass
   const passRows: PassHtmlRow[] = []
   if (lp) {
-    for (const key of Object.keys(lp.stages).map(Number).sort((a, b) => a - b)) {
+    for (const key of Object.keys(lp.stages)
+      .map(Number)
+      .sort((a, b) => a - b)) {
       const s = lp.stages[String(key)]
       const name = state.stageStats[String(key)]?.nameZh ?? `Stage ${key + 1}`
       passRows.push({
@@ -767,7 +876,16 @@ function main(): void {
   const bannerLines = [
     `<b>进程</b>：${esc(procStr)}　·　<b>熔断</b>：${esc(cbStr)}`,
     `<b>最后 run_start</b>：${esc(lastRunStart)}　·　<b>最后迭代</b>：it${lastIter ? lastIter.iter : '?'} @ ${lastIter ? esc(lastIter.time) : '?'}`,
-    `<b>健康判定</b>：<b>${verdict}</b>（近 ${recentIters.length} 轮：entropy 最小 ${(recentIters.length ? Math.min(...recentIters.map((e) => e.entropy)) : 0).toFixed(3)} · KL 最大 ${(recentIters.length ? Math.max(...recentIters.map((e) => e.kl)) : 0).toFixed(4)} · 局均 ticks 最小 ${recentIters.length ? Math.round(Math.min(...recentIters.map((e) => e.ticks / GAMES_PER_ITER))) : 0}）`,
+    `<b>健康判定</b>：<b>${verdict}</b>（近 ${recentIters.length} 轮：${(() => {
+      const entVals = recentIters.map((e) => e.entropy).filter((x): x is number => x !== null)
+      const klVals = recentIters.map((e) => e.kl).filter((x): x is number => x !== null)
+      const tpgs = recentIters.map((e) => avgTicksPerGame(e)).filter((x): x is number => x !== null)
+      return [
+        `entropy 最小 ${entVals.length > 0 ? Math.min(...entVals).toFixed(3) : '—'}`,
+        `KL 最大 ${klVals.length > 0 ? Math.max(...klVals).toFixed(4) : '—'}`,
+        `局均 ticks 最小 ${tpgs.length > 0 ? Math.round(Math.min(...tpgs)) : '—'}`,
+      ].join(' · ')
+    })()}）`,
     `<b>累计</b>：${state.totals.games} 局 / ${state.totals.wins} 胜（<b>${(wrAll * 100).toFixed(1)}%</b>）/ ${state.totals.kills} 击杀 · 已扫至 it${state.lastScannedIter}`,
   ]
 
@@ -775,28 +893,52 @@ function main(): void {
     const passSection: PassSection = lp
       ? { covered: lp.covered, endedAt: lp.endedAt, rows: passRows }
       : { covered: '', endedAt: '', rows: [] }
-    writeFileSync(REPORT_PATH, buildHtml(rows, bannerLines, recentIters, newWins, `扫描范围 it${fromIter + 1}–it${scanUpTo}`, passSection, readAgentMeta()))
+    writeFileSync(
+      REPORT_PATH,
+      buildHtml(
+        rows,
+        bannerLines,
+        recentIters,
+        `扫描范围 it${fromIter + 1}–it${scanUpTo}`,
+        passSection,
+        readAgentMeta(),
+      ),
+    )
   }
 
   console.log('=== RL 小时巡检 ===')
   console.log(`进程: ${procStr} | ${cbStr}`)
-  console.log(`日志: 最后 run_start=${lastRunStart} | 最后迭代=it${lastIter ? `${lastIter.iter}@${lastIter.time}` : '?'} | 已确认迭代 ${iterNums.length} 轮`)
+  console.log(
+    `日志: 最后 run_start=${lastRunStart} | 最后迭代=it${lastIter ? `${lastIter.iter}@${lastIter.time}` : '?'} | 已确认迭代 ${iterNums.length} 轮`,
+  )
   if (results.length > 0) {
-    console.log(`SCAN: ${results.map((r) => `it${r.iter}=${r.games}g/${r.wins}w/${r.kills}k`).join(' ')}`)
-    console.log(`CROSS-CHECK: ${crossCheckBad.length === 0 ? '全部一致 ✓' : '不一致 ⚠ ' + crossCheckBad.join('; ')}`)
+    console.log(
+      `SCAN: ${results.map((r) => `it${r.iter}=${r.games}g/${r.wins}w/${r.kills}k`).join(' ')}`,
+    )
+    console.log(
+      `CROSS-CHECK: ${crossCheckBad.length === 0 ? '全部一致 ✓' : '不一致 ⚠ ' + crossCheckBad.join('; ')}`,
+    )
   } else {
     console.log('SCAN: 无新增已确认迭代' + (missingDirs > 0 ? `（${missingDirs} 个目录缺失）` : ''))
   }
   console.log(`健康判定: ${verdict}`)
-  console.log(`TOTALS: games=${state.totals.games} wins=${state.totals.wins} kills=${state.totals.kills} lastScannedIter=${state.lastScannedIter}`)
-  if (state.lastPass) console.log(`PASS: 本段 ${state.lastPass.covered}（截至 ${state.lastPass.endedAt}）各关表现已写入报告`)
+  console.log(
+    `TOTALS: games=${state.totals.games} wins=${state.totals.wins} kills=${state.totals.kills} lastScannedIter=${state.lastScannedIter}`,
+  )
+  if (state.lastPass)
+    console.log(
+      `PASS: 本段 ${state.lastPass.covered}（截至 ${state.lastPass.endedAt}）各关表现已写入报告`,
+    )
   if (firstEver.length > 0) console.log(`FIRST-EVER WINS: ${firstEver.join(', ')}`)
   if (newWins.length > 0) {
     console.log('--- NEW WINS ---')
-    for (const w of newWins) console.log(`it${w.iter}  s${w.stage + 1} ${w.name}  seed=${w.seed}  score=${w.score.toFixed(3)}  kills=${w.kills}`)
+    for (const w of newWins)
+      console.log(
+        `it${w.iter}  s${w.stage + 1} ${w.name}  seed=${w.seed}  score=${w.score.toFixed(3)}  kills=${w.kills}`,
+      )
   }
   if (dryRun) console.log('DRY-RUN: 未写回任何文件')
   else console.log(`STATE 写回完成 | HTML 报告: ${REPORT_PATH}`)
 }
 
-main()
+if (import.meta.main) main()

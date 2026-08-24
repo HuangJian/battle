@@ -186,10 +186,22 @@ if (-not $Force -and $Script -eq 'train_loop.py' -and (Test-Path $LockFile)) {
 # （ShellExecute 派生完全脱离控制台的进程，替代已弃用的 VBScript/wscript 方案）
 # run_rl.py 无锁文件，等锁循环对它只是无害的 15s 空转后 exit 0
 if ($Detach -and $IsWindows -and $Script -in @('train_loop.py', 'run_rl.py')) {
-  Log 'detaching via Start-Process（后台隐藏窗口）...'
+  Log 'detaching via Start-Process（后台隐藏窗口，stdout/stderr 落盘）...'
   $argStr = "-u `"$ScriptPath`""
   foreach ($x in $ScriptArgs) { $argStr += " `"$x`"" }
-  Start-Process -FilePath $VenvPython -ArgumentList $argStr -WindowStyle Hidden -WorkingDirectory $ScriptDir
+  # 写日记：detach 的 python stdout/stderr 原先随隐藏窗口丢弃——2026-08-24
+  # it2/it3 静默跳轮事故中无任何可复盘痕迹。每次启动独立时间戳日志，不覆盖历史。
+  $repoTmp = Join-Path (Split-Path $ScriptDir -Parent) 'tmp'
+  if (-not (Test-Path $repoTmp)) { New-Item -ItemType Directory -Path $repoTmp | Out-Null }
+  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $tag = $Script -replace '\.py$', ''
+  $outLog = Join-Path $repoTmp ("{0}-{1}.out.log" -f $tag, $stamp)
+  $errLog = Join-Path $repoTmp ("{0}-{1}.err.log" -f $tag, $stamp)
+  Start-Process -FilePath $VenvPython -ArgumentList $argStr -WindowStyle Hidden `
+    -WorkingDirectory $ScriptDir `
+    -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+  Log "logs: $outLog"
+  Log "logs: $errLog"
   for ($n = 0; $n -lt 30; $n++) { if (Test-Path $LockFile) { break }; Start-Sleep -Milliseconds 500 }
   exit 0
 }

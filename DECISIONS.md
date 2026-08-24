@@ -1613,3 +1613,19 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 - 模型初始对齐：`mA`/`mB` 须同初始（真实场景从同一 `weights.json` 加载），否则随机初始化不同导致不可比——这是测试脚本首跑失败根因，非机制缺陷。
 - 崩溃窗口语义：若崩溃在「权重已写回但 jsonl 未写」之间（极小窗口），重启会用新权重重跑该轮——正确且 on-policy 一致（跑该轮用其应有权重），接受。
 - **Implications:** 训练可随时停启无损续跑；`--start-it` 显式覆盖 / 自动续跑。续跑的 rotate 课程置换每次 relaunch 抖动（rotateSeed 含时间戳），it 换代但 140 局仍全覆盖、每关新鲜种子，训练正确性不受影响（PPO 消费全集）。
+
+## 244. RL 队列模式静默跳轮修复 — resumed_manifests 双 schema 归一 + 失败迭代原地重试 (STATUS: SHIPPED, 2026-08-24)
+
+**Decision:** `run_rl.py` 四处修复：
+1. `resumed_manifests(traj_dir, wver, exclude=seen)`：只并入本轮**未采**局（排除本轮 results 已覆盖的 `(stage,seed)`），且把 shard manifest 双 schema（本地单局式 `outcome/nSamples/ticks/score` / 远端单局聚合式 `outcomes/totalSamples/scoreList`）归一为 `combine_reports` 可消费形态。
+2. 「全部已 done」早返回改从磁盘 shard 聚合出完整报告（不再返回空报告——it1 指标全盲的根源）。
+3. 主循环两个 except 分支：写 `iter_error` jsonl 事件 + `it -= 1` 原地重试同一迭代（`consec_fail>=5` 才 raise）——失败迭代不再静默前跳。
+4. `start-training.ps1` detach 分支 stdout/stderr 重定向 `tmp/run_rl-<stamp>.{out,err}.log`（写日记）。
+
+**Rationale:**
+- 事故（2026-08-24 00:19–00:44）：队列模式整轮 rollout 完成后，`resumed_manifests` 把本轮刚落盘的 140 个 shard manifest（单局 schema，无 `games`/`totalSamples` 顶层键）原样并入 → `combine_reports` L168 `r["games"]` KeyError 秒崩 → 主循环吞掉后 `it+=1` → it2/it3 连续跳轮（dist-meta 时间线：it3 末局 00:34:48 → it4 首局 00:35:35，间隔 47s，PPO 从未启动、无 ppo_ckpt）。it1 因 438 前序局全 done 走早返回侥幸未崩，但报告 samples=0/outcomes={} 指标全盲。
+- 失败详情只进易失 stdout（detach 无重定向）→ 零可复盘痕迹。观测必须自带牙齿（§3.14 教训）。
+- 原地重试安全性由三层断点（§243）保证：resume 保留已完成 shard + PPO ckpt，不重跑已完局。
+- 修复以真实事故数据验证：`combine_reports(resumed_manifests(it2))` 修复前 KeyError、修复后 games=140/outcomes 全归类（111 base_destroyed + 20 lives_exhausted + 7 stage_clear + 2 timeout）。
+
+**Implications:** 任何迭代失败都会在 training_log 留 `iter_error` 痕迹并自动原地重试；detach 运行从此可事后取证。巡检工具 `rl-hourly-inspect.ts` 同步修复 null score_mean 渲染崩溃（队列空聚合事件触发）。

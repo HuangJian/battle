@@ -53,6 +53,10 @@ LR = 3e-4
 MAX_GRAD_NORM = 1.0
 MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
 
+# Observability cadences (pure logging; never touches RNG or numerics).
+LOAD_LOG_EVERY = 128   # shard-loading progress lines
+HB_SEC = 60.0          # PPO update heartbeat interval
+
 
 
 def log(msg: str) -> None:
@@ -140,7 +144,10 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
     log(f"[ppo] loaded {len(shards)} trajectory shards from {data_root}")
 
     episodes: list[dict] = []
-    for sd in shards:
+    t_load = time.time()
+    for k, sd in enumerate(shards):
+        if k > 0 and k % LOAD_LOG_EVERY == 0:
+            log(f"[ppo] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
         d = load_shard(sd)
         N = d["obs"].shape[0]
         if N == 0:
@@ -163,6 +170,8 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
             }
         )
 
+    log(f"[ppo] shard IO + GAE done for {len(episodes)} episodes "
+        f"({time.time() - t_load:.0f}s)")
     all_adv = np.concatenate([e["adv"] for e in episodes])
     mean, std = all_adv.mean(), all_adv.std() + 1e-8
     for e in episodes:
@@ -237,13 +246,19 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
     tensored = [
         {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
     ]
+    total_steps = len(tensored) * epochs
+    log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs "
+        f"(~{total_steps} grad steps)")
+    t0 = time.time()
+    last_hb = t0
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
         log(f"[ppo] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
             f"(continuing remaining {epochs - start_epoch})")
     for ep in range(start_epoch, epochs):
         perm = np.random.permutation(len(tensored))
-        for i in perm:
+        n_ep_start = len(stats)
+        for j, i in enumerate(perm):
             e = tensored[int(i)]
             obs = e["obs"]
             sc = e["scalars"]
@@ -281,7 +296,7 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
 
             opt.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            gn = nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             opt.step()
 
             with torch.no_grad():
@@ -294,11 +309,47 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
                     "kl": float(approx_kl),
                     "mean_ret": float(ret.mean().item()),
                     "mean_adv": float(adv.mean().item()),
+                    "gnorm": float(gn),
                 }
             )
+            # Heartbeat: pure-print progress/health line; wall-clock only.
+            now = time.time()
+            if now - last_hb >= HB_SEC:
+                last_hb = now
+                recent = stats[-32:]
+                n_r = len(recent)
+                done_steps = ep * len(tensored) + j + 1
+                elapsed = now - t0
+                eta = elapsed / done_steps * (total_steps - done_steps)
+                log(
+                    f"[ppo] ep {ep + 1}/{epochs} chunk {j + 1}/{len(tensored)} "
+                    f"step {done_steps}/{total_steps} "
+                    f"elapsed={elapsed:.0f}s eta~{eta:.0f}s "
+                    f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
+                    f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
+                    f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
+                    f"value={sum(s['value'] for s in recent) / n_r:.4f} "
+                    f"gnorm={sum(s['gnorm'] for s in recent) / n_r:.3f}"
+                )
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
+        ep_stats = stats[n_ep_start:]
+        n_e = max(1, len(ep_stats))
+        log(f"[ppo] epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
+            f"{len(ep_stats)} chunks)"
+            + (", ckpt saved" if ckpt_path else "")
+            + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
+              f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
+              f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
+              f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
+              f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}")
     # aggregate
+    if not stats:
+        # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，
+        # 返回零聚合——此前 stats[0] 直接 IndexError 让整轮重试空转。
+        log("[ppo] checkpoint already complete — 0 grad steps, returning zero aggregate")
+        return {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0,
+                "gnorm": 0.0, "mean_ret": 0.0}
     n = len(stats)
     agg = {k: sum(s[k] for s in stats) / n for k in stats[0]}
     return agg

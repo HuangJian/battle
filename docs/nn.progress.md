@@ -5,6 +5,189 @@
 
 ---
 
+## §6 训练可观测性落地 + 权重逐轮归档 + mb1024/workers10/self-agent2 重启（2026-08-24 早）
+
+> 背景：it2 的 PPO 阶段跑了 **110 分钟全程零输出**（旧代码只有首尾两行日志），
+> 任务管理器只见 python ~50% CPU，无法判断进度与健康。用户要求阶段性日志。
+
+### 6.1 可观测性（纯打印，零 RNG/数值影响）
+- **ppo.py**：① 分片加载进度（每 128 局一行）；② 更新心跳（≥60s 一行：epoch/chunk/
+  step/elapsed/**eta** + 最近 32 chunk 滚动 kl/entropy/policy/value/gnorm）；③ 每 epoch
+  汇总（含 ckpt 落盘确认）；`gnorm` 入 stats（clip_grad_norm_ 返回值顺手捕获）。
+- **run_rl.py**：本地 rollout 每 10 局结算一行（as_completed 重排，结果按原索引回填）；
+  队列模式逐局 settle 行（node/stage/seed/elapsed）；missing 行附结算进度。
+- **生产验证（it3）**：rollout 140 局逐局可见；PPO 心跳实时读数 kl≈0.014–0.018、
+  entropy 1.33 稳定、gnorm 1.3–1.6、ETA ~2000s——观测黑洞消灭。
+
+### 6.2 权重逐轮归档（用户指令）
+- 每次 PPO 写回后 `shutil.copyfile` 至 `nn-training/weights/rl-weights.it<N>.<YYYYMMDD-
+  HHMMSS>.json`；保留最近 20 份（有界增长）。命名**刻意避开** weights_io
+  `weights.<ts>_ep<N>_val<V>` BC 自动发现正则（§5.3 手工备份同理由）；
+  glob 清理只认 `rl-weights.it*.json`，手工备份永不被删。tmp 合成数据单测通过。
+
+### 6.3 重启（用户指令：mb 512→1024、workers 2→10、本地 agent --workers 2）
+- it2 PPO 于 07:38 自然完成（kl=0.026 健康）后停机重启，rotateSeed 继承、自 it3 续跑。
+- **效果**：rollout 17.5min→**6.7min**（workers 2→10 直连 + macos 8 并发）；PPO 语料
+  回归正常轮规模（190 局/192 chunks×4 epochs≈768 步），ETA ~33min（对比 it2 膨胀语料
+  110min——频繁重启合并历史 shard 的隐性代价再次确认）。
+
+### 6.4 事故与教训
+1. **dist-nodes.json concurrency 必须 ≤ agent 实际 --workers**：首轮 self 按 10 并发打
+   2-worker agent → 3 连 `503 busy` → nodeFailStreak=3 即熔断出局。503 是协调器侧
+   计数的失败，重试还烧 MAX_TASK_ATTEMPTS。已改 concurrency=2（下轮 ping 生效）。
+2. **配置文件被神秘回写**：07:35 编辑的 self.concurrency 10→2 在重启前被改回 10
+   （无进程应写此文件；疑运维编辑器旧缓冲保存）。二次修改后需在后续轮次复核，
+   若复发需查写入方。
+3. 心跳 ETA 用"本 run 已完成步均速"外推，断点续跑时偏乐观——可接受。
+
+### 6.6 报告口径修复 + 收尾智能分发（tail dispatch）（2026-08-24 午后）
+
+- **巡检报告漏计远程局（真 bug）**：`scanIterDir` 只匹配本机 `w*` 目录，
+  `dist/<node>/rl_*_seed*/manifest.json` 全部漏扫——整份 HTML（累计/逐轮表/
+  各关表现/首胜）只统计了本机直连份额。远程 manifest 字段与本机导出摘要同构
+  （stages/seeds/scoreList/outcomes/totalTicks/dimLists），直接按 RlReport 消费；
+  dims 走 dimLists 回退（loot 列远程局暂缺省）。重置账本全量重扫：
+  **5 轮 ×140=700 局入表，crossCheck 0 不一致**（修复前每轮都在悄悄报"扫描≠日志"）。
+- **报告 UX 四项**：移除「本段新胜局明细」表；「最近迭代健康指标」时间列明确标注为
+  **完成时刻（PPO 写回时间）**——jsonl 的 time 字段在 PPO 完成后写入；entropy/KL/
+  局均 ticks 列头标注告警阈值（与 healthVerdict 规则同源）；「采样机健康」新增
+  「上轮局数」列（meta 按 it×node 聚合，全局最新迭代为基准，未参与=0）。
+- **收尾智能分发（tail dispatch）**：此前中央 deque 自由竞争，慢节点可能在
+  135/140 时抢走最后一局长局，PPO 空等。现按局均耗时 EWMA 分快/慢两档：
+  速度表用跨轮 dist-agent-meta.jsonl 最近 20 局播种、本轮 α=0.3 在线更新；
+  队列剩余 ≤ 快速集群单波容量（快节点槽位和，含本机 workers）时慢节点让路
+  （`policy.tailFastFactor=1.8` 分档）；120s 无结算进度则饥饿兜底重新准入
+  （`policy.tailGraceSec`）。无样本节点乐观按快速处理。分配仍属实时负载语义，
+  洗牌确定性不变。**下次重启训练生效。**
+- **流水线提案分析（rollout/PPO 重叠）**（→ **被 §6.7 推翻**：否决理由中的
+  "语料跨版本"不成立，见 §6.7 的修正）：①前提纠正：当前 rollout 完全结束后才进
+  PPO，PPO 独占整机；~50% CPU 是小模型+串行分发的 torch 天花板（§3.10），不是被
+  采样抢占，减 worker 无益。②~~严格依赖链……~~（误判：轮内权重本就冻结）。
+- **实际可用的提速杠杆仍是缩短 PPO**：epochs 4→3（线性 -25%，KL≈0.02 远低于
+  0.08 有富余）或继续观察 mb=1024 后的 KL 再定。
+
+### 6.7 流式迭代落地（--stream 1）：推翻 6.6 的流水线否决（2026-08-24 下午）
+
+- **用户驳倒了两条反对理由**：①"语料横跨两个策略版本"不成立——权重分发只发生在
+  迭代边界，整轮 rollout 期间 agent 持有的都是 W(N)，任意时刻到达的语料都出自
+  同一策略版本，on-policy 比率数学不受到达顺序影响；GAE 用采样时存储的 value，
+  与装载时机无关。②"省 7 分钟不值"是误判——35min/轮 × 几百轮的持续复利，
+  改造成本是一次性的。
+- **实现**（run_rl.py `--stream 1`，默认关闭；串行路径零改动保字节基线）：
+  collector 线程跑 run_rollout_queue（新增 `on_result` 回调 + `local_slots_max`
+  参数），本机槽压到 max(2, workers//4) 给 torch 让核；主线程每当积压 ≥12 局
+  （policy.streamWaveGames）装载这批 shard（load_shard+compute_gae+wave 内 adv
+  归一化）、chunkify 后按 --epochs 遍 ppo_update——每局总更新遍数与串行一致。
+  轮内累计 KL 超 policy.streamKlCap（默认 0.12）即转"只采不训"。断点续跑轮
+  零结算时回退全量磁盘更新。
+- **与串行的语义差异（有意为之，需观察）**：adv 归一化从全轮变为每 wave；
+  各 wave 的更新分布在 θ 漂移轨迹的不同点（PPO clip 容忍范围内）；流式期间
+  不落 PPO epoch checkpoint（崩溃重启该轮重训，语料靠 completed_pairs 秒回）。
+- **验证状态**：py_compile 通过；待下次重启以 --stream 1 实跑一轮观察
+  wave KL / entropy / winRate 曲线后再定是否默认开启。
+- **流式首次实跑三连 bug（15:31-15:43，全部修复）**：①包装函数返回 report 本身，
+  主流程却取 `meta["report"]` → KeyError；②断点续跑"剩余 0 epoch"时
+  `stats[0]` IndexError（ppo_update 空聚合无守卫，已加零聚合返回）；③本地局
+  shard 目录多一层子目录（w9/rl_s30_seed*/obs.npy），loader 拿工作目录当 shard
+  找 obs.npy 扑空 → 本地局全部被 skip（加 `_shard_dir` 探测含 obs.npy 的层）。
+  三连杀导致 it13 重试 5/5 耗尽进程退出一次。
+- **it13 假零指标事件**：skip-update 路径曾以全零聚合写 jsonl（entropy=0/kl=0），
+  报告显示 0.0000 且会误触健康判定。修正为 agg=None → jsonl 写 null → 报告 '—'，
+  历史行已补正（真实值只在旧进程日志：kl≈0.0258 / ent≈1.283）。
+- **流式轮耗时语义（重要）**：ppo_sec = 各 wave 纯更新时间之和（与 rollout 重叠）；
+  rollout_sec = collector 墙钟（含被藏进去的 PPO）。it14 因中途修 bug 重启被劈成
+  两半：95 局 resume 秒回不参与训练，仅 45 新结算局训练（188 grad steps vs 串行
+  ~572），故 ppo=609.8s 远小于串行 1670s——是语料少了不是变快了；干净轮预期
+  ppo_sec ~20m 但完全藏在 rollout 内，墙钟 ~12-15min vs 串行 35min。
+  **观察项**：轮内后期 wave 的 kl 天然偏大（数据由数个 wave 之前的 θ 采集，
+  it14 末波 kl=0.0514 vs 串行 0.02），cum_kl 封顶 0.12 自动停训，继续观察。
+- **it15 巨浪事故与墙钟地板（16:40 修复）**：`_drain` 无上限，结算高峰后积压
+  90 局被一口吞下（单波 376 步算 20 分钟）；且 rollout_sec 在收尾训练后才计时，
+  把训练尾巴记进采集列（报 30.9m，真实采集仅 ~9min）。修复：wave_cap=max(24, 2×
+  wave_games) 封顶 + collector 结束后持续分批清空 + rollout_sec 改为纯采集窗口。
+  **关键认知：ppo_cpu/wall≈96%——流式的墙钟地板是 PPO 纯算力**（epochs4/mb1024
+  ≈29min），藏只能藏采集的 9 分钟。要破地板需砍 PPO 计算量：mb 2048（步数减半，
+  预期 ppo_cpu≈15min）为下一候选实验。it15 本体完全健康：140/140 missing=0、
+  ent 1.268、cum_kl 0.068<0.12、winRate 12.1%（较 it14 回升）、新增第 5 节点
+  android-98 正常入列。
+- **饿死保护（边缘场景：远端集体掉线）**：①启动时全离线 → 既有回退路径
+    （run_rollout 纯本机满额）天然安全；②轮中集体掉线（ping 过了之后死）→
+  本机线程按满额孵化、并发闸门初始压低，若 `remoteDeadSecs`（默认 150s）
+  无任何远端结算则闸门自动放开到满 workers 并打日志——语料供应恢复，
+  流式更新继续吃本地波；③30min queueWindow 兜底：到点强制收轮，
+  missing 局回队语义不变，PPO 用已有语料照常更新。非流式模式行为零变化
+  （cap 恒等于满额，闸门恒开）。
+
+---
+
+### 6.5 rotate 抽签失配事故：it5 整轮重跑（2026-08-24 晚）
+
+- **症状**：09:35 重启后 `resume: 140/140 pairs already done — run 140 remaining`
+  ——140 个已完成对却全部未被剔除，整轮 rollout 重跑，it5 语料 280 局。
+- **根因**：`build_pairs` 从单一连续流按调用顺序抽签。旧进程 it5 = 流的第 3 次抽取；
+  新进程重启后流复位，it5 复用第 1 次抽取（= 旧 it3 的签）→ 与已落盘 shard 完全
+  不相交 → `p not in done` 全员命中。铁证：新旧日志的抽签范围逐字节相同
+  （7050345..1073087402），而那是旧 **it3** 的签。§243 的"rotateSeed 继承"只保证了
+  种子本身连续，没保证流的消费位置与迭代号对齐。
+- **修复**：`build_pairs(args, it, rotate_seed)` 改为 **(rotateSeed, it) 的纯函数**：
+  permutation 按 epoch 键控（同 epoch 窗口仍平铺公共排列）、seeds 按 it 键控
+  （`default_rng([rotate_seed, tag, key])`）。同一 it 任意时刻重放逐字节一致，
+  断点续跑剔除真正生效。无状态冒烟验证：交错调用下 it5 直接求值 == 重放值。
+- **处置**：丢弃错配的 it5 语料（280 局，含两套不相交签）→ 带修复重启 →
+  it5 干净跑满 140 局（winRate 10%，missing=0/retried=0）→ PPO 146 chunks×4 正常。
+- **教训**：①"继承种子"≠"可复现课程"——随机消费必须键控到迭代号而非调用序；
+  ②对同一文件的并行编辑会相互覆盖（本次 run_rl.py 两处编辑丢过一次，串行重做）；
+  ③新节点接入首日隧道偶发 10054 属预期，回队机制兜住（本轮 missing=0）。
+
+---
+
+## §5 队列模式静默跳轮事故复盘 + 修复 + 重启（2026-08-24 凌晨）
+
+> 决策（DECISIONS §244）。事故窗口 00:19–00:44：it1 PPO 完成后，it2/it3 整轮 rollout
+> 完成却从未进 PPO，直接跳下轮（用户发现时已在跑 it4）。
+
+### 5.1 根因（证据链定罪，非猜测）
+- `resumed_manifests` 不排除本轮已采局，且把本轮 shard manifest（**单局 schema**，
+  无 `games`/`totalSamples` 键）原样并入 `combine_reports` → `r["games"]` KeyError
+  秒崩 → 主循环 except 吞掉 + `it+=1`。
+- 时间线铁证（dist-agent-meta.jsonl）：it3 末局 00:34:48 → it4 首局 00:35:35，
+  **间隔 47 秒**（含 sleep 30s）——PPO 根本来不及启动；it2/it3/it4 均无 ppo_ckpt。
+- it1 未崩纯属侥幸：438 个前序局全 done → 早返回空报告路径（绕过合并），代价是
+  it1 事件 winRate/samples/outcomes 全空（指标盲区另一症状）。
+- detach 启动无 stdout 落盘 → 失败栈零痕迹，只能靠数据考古。
+
+### 5.2 修复（run_rl.py ×3 + 启动器 ×1 + 巡检工具 ×1）
+1. `resumed_manifests(..., exclude=seen)`：排除本轮已采；双 schema 归一（本地单局式
+   转换 / 远端聚合式透传）。真实事故数据验证：修复前 KeyError，修复后 games=140、
+   outcomes 全归类（111 bd + 20 le + **7 stage_clear** + 2 timeout）。
+2. 全 done 早返回改磁盘聚合出完整报告（消灭空报告盲区）。
+3. except 分支：`iter_error` jsonl 事件 + `it -= 1` 原地重试同轮（§243 断点保证
+   不重跑已完局）；consec_fail≥5 才退出。
+4. start-training.ps1 detach 分支 stdout/stderr → `tmp/run_rl-<stamp>.{out,err}.log`
+   （编辑后 BOM 被剥，已手工补回——§2.2 同坑三踩，教训再次确认）。
+5. rl-hourly-inspect.ts：null score_mean 渲染崩溃修复（it1 空聚合事件触发；
+   这也是巡检 HTML 从未产出的原因）。
+
+### 5.3 运维动作（按用户指令逐项）
+- 权重备份：`nn-training/weights/rl-weights.20260824-001921_post-it1ppo.json`
+  （= it1 PPO 后权重，SHA256 校验一致；命名避开 BC `weights.*` 自动发现模式）。
+- 巡检账本清零重计（用户指令）：删旧 state 后重跑，it1 新基线 = 98 局 / 6 胜 /
+  812 击杀；HTML 报告 `tmp/rl-traj/inspection-report.html` 首次成功产出。
+- 语料抢救：it2~it5 同权重有效语料全并入 it2（140+140+140+18=**438 局**，
+  目录整体 rename 为 `it2/merged_itN` 零拷贝），源目录随之消失。
+- 05:29 经启动器 detach 重启（参数同前 + keep-iters 5）：resume 自 post-it1 权重 ✓、
+  rotateSeed 继承 ✓、`438/140 pairs already done — run 140 remaining` ✓（macos 节点
+  8 并发补采中；本机 self agent 未起被排除，吞吐减半不影响正确性）。
+
+### 5.4 教训
+1. **异构数据管道必须 schema 归一后再进聚合器**——两条采样路径（本地/远端）的
+   manifest 结构差异在单机时代不存在，分布式化第一天就炸。
+2. **吞异常的循环必须有旁路观测**（iter_error 落盘），否则生产事故只剩行为考古。
+3. 失败迭代前跳 = 静默丢语料；断点续跑机制（§243）使原地重试成为零成本安全选择。
+4. .ps1 编辑三连坑：BOM 必查（第三次踩）。
+
+---
+
 ## §4 RL 训练断点续跑机制（2026-08-23）
 
 > 决策（DECISIONS §243）：三层断点续跑，崩溃/停启后自动继续而非重跑。

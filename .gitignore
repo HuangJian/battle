@@ -25,6 +25,7 @@ reports/
 ab-test-*.ts
 
 nn-demo/
+nn-training/weights/*.json
 
 .venv/
 
