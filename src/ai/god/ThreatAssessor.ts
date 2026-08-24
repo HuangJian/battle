@@ -4,7 +4,7 @@ import type { Direction } from '../../constants'
 import { CELL, TANK, BULLET, DIR_VECTORS, BASE_POS, FIELD, GRID } from '../../constants'
 import { type Cell } from './pathfind'
 import { ALL_DIRS, opposite } from '../../utils/direction'
-import { snap, aabb, manhattan } from '../../utils/helpers'
+import { snap, aabb, manhattan, bulletLaneDist } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
 import { scanAheadImpl } from './FireControl'
 
@@ -76,20 +76,11 @@ export function findMostDangerousBulletImpl(
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
     // M0.5 退役（2026-08-03）: dodgeHysteresis（TANK+2 对齐阈值）已退役
     // 归档（A/B -1.1pp，从未发布）——固定标准 TANK 阈值。
-    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
-    if (!aligned) continue
-
-    const approaching =
-      (b.dir === 'down' && bcy < pcy) ||
-      (b.dir === 'up' && bcy > pcy) ||
-      (b.dir === 'right' && bcx < pcx) ||
-      (b.dir === 'left' && bcx > pcx)
-    if (!approaching) continue
-
-    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    // §3.1: lane geometry single-sourced in utils/helpers.bulletLaneDist.
+    const dist = bulletLaneDist(b.dir, bcx, bcy, pcx, pcy, TANK)
+    if (dist < 0) continue
 
     // §48-revisit: scan the bullet→player path for steel. If any steel cell
     // blocks the path, this bullet (and all future bullets from this enemy
@@ -301,35 +292,20 @@ function dodgeHorizonTicksImpl(
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
+    // §3.1: lane geometry single-sourced in utils/helpers.bulletLaneDist.
 
     // (1) Next-cell coverage (dodging INTO another bullet's lane) — a hit.
-    const alignedNext = vertical
-      ? Math.abs(bcx - nx) < CELL * 0.75
-      : Math.abs(bcy - ny) < CELL * 0.75
-    if (alignedNext) {
-      const approachingNext =
-        (b.dir === 'down' && bcy < ny) ||
-        (b.dir === 'up' && bcy > ny) ||
-        (b.dir === 'right' && bcx < nx) ||
-        (b.dir === 'left' && bcx > nx)
-      if (approachingNext) {
-        const tArrNext = (vertical ? Math.abs(bcy - ny) : Math.abs(bcx - nx)) / b.speed
-        if (-tArrNext < minMargin) minMargin = -tArrNext
-      }
+    const tArrNext = bulletLaneDist(b.dir, bcx, bcy, nx, ny, CELL * 0.75)
+    if (tArrNext >= 0) {
+      const tn = tArrNext / b.speed
+      if (-tn < minMargin) minMargin = -tn
     }
 
     // (2) Current-lane escape model (the primary commitment mechanism).
-    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < pcy) ||
-      (b.dir === 'up' && bcy > pcy) ||
-      (b.dir === 'right' && bcx < pcx) ||
-      (b.dir === 'left' && bcx > pcx)
-    if (!approaching) continue
-    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    const dist = bulletLaneDist(b.dir, bcx, bcy, pcx, pcy, TANK)
+    if (dist < 0) continue
     const tArr = dist / b.speed
+    const vertical = b.dir === 'up' || b.dir === 'down'
     // Is `dir` perpendicular to the bullet's travel (can the player escape its band)?
     const perp =
       (vertical && (dir === 'left' || dir === 'right')) ||
@@ -777,17 +753,8 @@ export function isSafeDirImpl(
     if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical
-      ? Math.abs(bcx - newCx) < CELL * 0.75
-      : Math.abs(bcy - newCy) < CELL * 0.75
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < newCy) ||
-      (b.dir === 'up' && bcy > newCy) ||
-      (b.dir === 'right' && bcx < newCx) ||
-      (b.dir === 'left' && bcx > newCx)
-    if (approaching) return false
+    // §3.1 single-sourced lane geometry.
+    if (bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, CELL * 0.75) >= 0) return false
   }
   return true
 }
@@ -820,19 +787,9 @@ function dodgeClearanceTicksImpl(
     if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    // Same next-cell alignment gate as isSafeDirImpl.
-    const aligned = vertical
-      ? Math.abs(bcx - newCx) < CELL * 0.75
-      : Math.abs(bcy - newCy) < CELL * 0.75
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < newCy) ||
-      (b.dir === 'up' && bcy > newCy) ||
-      (b.dir === 'right' && bcx < newCx) ||
-      (b.dir === 'left' && bcx > newCx)
-    if (!approaching) continue
-    const dist = vertical ? Math.abs(bcy - newCy) : Math.abs(bcx - newCx)
+    // Same next-cell alignment gate as isSafeDirImpl (§3.1 single-sourced).
+    const dist = bulletLaneDist(b.dir, bcx, bcy, newCx, newCy, CELL * 0.75)
+    if (dist < 0) continue
     const ticks = dist / b.speed
     if (ticks < minTicks) minTicks = ticks
   }
@@ -883,16 +840,9 @@ export function hasCrossFireBulletImpl(
     if (!b.alive || b.isPlayer || b.id === excludeBulletId) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < TANK : Math.abs(bcy - pcy) < TANK
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < pcy) ||
-      (b.dir === 'up' && bcy > pcy) ||
-      (b.dir === 'right' && bcx < pcx) ||
-      (b.dir === 'left' && bcx > pcx)
-    if (!approaching) continue
-    const dist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    // §3.1 single-sourced lane geometry.
+    const dist = bulletLaneDist(b.dir, bcx, bcy, pcx, pcy, TANK)
+    if (dist < 0) continue
     if (dist <= rangePx) {
       if (++count >= threshold) return true
     }
@@ -1023,24 +973,12 @@ export function findPathThreatImpl(
 
       const bcx = b.x + b.w / 2
       const bcy = b.y + b.h / 2
-      const vertical = b.dir === 'up' || b.dir === 'down'
-
       // §165 fix 1: tighten alignment from TANK (32px) to the actual hitbox
       // overlap threshold (19px). Bullets in adjacent corridors that never
       // cross the player's body are no longer flagged.
-      const aligned = vertical
-        ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS
-        : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
-      if (!aligned) continue
-
-      const approaching =
-        (b.dir === 'down' && bcy < ccy) ||
-        (b.dir === 'up' && bcy > ccy) ||
-        (b.dir === 'right' && bcx < ccx) ||
-        (b.dir === 'left' && bcx > ccx)
-      if (!approaching) continue
-
-      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      // §3.1 single-sourced lane geometry.
+      const dist = bulletLaneDist(b.dir, bcx, bcy, ccx, ccy, PATH_THREAT_HIT_RADIUS)
+      if (dist < 0) continue
       const bulletArrivalTick = dist / b.speed
 
       if (bulletArrivalTick >= playerEnterTick && bulletArrivalTick <= playerDepartureTick) {
@@ -1119,18 +1057,9 @@ export function findSafeMoveDirImpl(
       if (!b.alive || b.isPlayer) continue
       const bcx = b.x + b.w / 2
       const bcy = b.y + b.h / 2
-      const vertical = b.dir === 'up' || b.dir === 'down'
-      const aligned = vertical
-        ? Math.abs(bcx - ccx) < PATH_THREAT_HIT_RADIUS
-        : Math.abs(bcy - ccy) < PATH_THREAT_HIT_RADIUS
-      if (!aligned) continue
-      const approaching =
-        (b.dir === 'down' && bcy < ccy) ||
-        (b.dir === 'up' && bcy > ccy) ||
-        (b.dir === 'right' && bcx < ccx) ||
-        (b.dir === 'left' && bcx > ccx)
-      if (!approaching) continue
-      const dist = vertical ? Math.abs(bcy - ccy) : Math.abs(bcx - ccx)
+      // §3.1 single-sourced lane geometry.
+      const dist = bulletLaneDist(b.dir, bcx, bcy, ccx, ccy, PATH_THREAT_HIT_RADIUS)
+      if (dist < 0) continue
       const bat = dist / b.speed
       if (bat >= enterTick && bat <= departTick) return false
     }

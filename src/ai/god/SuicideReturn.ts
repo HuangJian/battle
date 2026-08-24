@@ -3,7 +3,8 @@ import type { Bullet, Tank } from '../../types'
 import { GRID, CELL } from '../../constants'
 import { PLAYER_PROGRESSION } from '../../config/combat'
 import { enemyCanShootBase } from './SmartThreatModel'
-import { manhattan } from '../../utils/helpers'
+import { manhattan, bulletLaneDist } from '../../utils/helpers'
+import { TANK } from '../../constants'
 
 // ============================================================
 // SuicideReturn — 自杀秒回 (suicide quick-return, user request 2026-08-04).
@@ -55,16 +56,9 @@ export function hasLethalBulletWithinWindowImpl(
     if (!bulletWouldKillPlayer(p, b)) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < 32 : Math.abs(bcy - pcy) < 32
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < pcy) ||
-      (b.dir === 'up' && bcy > pcy) ||
-      (b.dir === 'right' && bcx < pcx) ||
-      (b.dir === 'left' && bcx > pcx)
-    if (!approaching) continue
-    const bdist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    // §3.1 single-sourced lane geometry (32 → TANK, §3.6 constant hygiene).
+    const bdist = bulletLaneDist(b.dir, bcx, bcy, pcx, pcy, TANK)
+    if (bdist < 0) continue
     const bt = b.speed > 0 ? bdist / b.speed : Infinity
     if (bt <= windowTicks) return true
   }

@@ -1,3 +1,5 @@
+import type { Direction } from './direction'
+
 /** Clamp value to range */
 export function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v
@@ -50,4 +52,78 @@ export function computePlayer2SpawnCol(p1Col: number): number {
  */
 export function manhattan(ax: number, ay: number, bx: number, by: number): number {
   return Math.abs(ax - bx) + Math.abs(ay - by)
+}
+
+/** Sentinel returned by {@link bulletLaneDist} / {@link bulletInFrontDist} when
+ * the bullet is off-lane or fails the directional test. */
+export const BULLET_LANE_MISS = -1
+
+/** Shared axis-alignment check: bullet center within `thresholdPx` of the
+ * row/column through (tx,ty), measured on the axis perpendicular to `dir`. */
+function laneAligned(
+  dir: Direction,
+  bcx: number,
+  bcy: number,
+  tx: number,
+  ty: number,
+  thresholdPx: number,
+): boolean {
+  const vertical = dir === 'up' || dir === 'down'
+  return vertical ? Math.abs(bcx - tx) < thresholdPx : Math.abs(bcy - ty) < thresholdPx
+}
+
+/**
+ * Shared bullet-lane predicate (refactor.zcode.md §3.1, replaces 11 inline
+ * `vertical/aligned/approaching` chains): a bullet is a lane threat to the
+ * point (tx,ty) when it travels on that row/column within `thresholdPx` of
+ * the axis AND its direction closes on the point.
+ *
+ * Returns the along-axis distance from bullet center to the point (≥ 0) when
+ * both conditions hold, else {@link BULLET_LANE_MISS}. Monomorphic numbers
+ * only — no allocation (AGENTS §14.2). Allegiance-agnostic: callers filter
+ * bullets before calling.
+ */
+export function bulletLaneDist(
+  dir: Direction,
+  bcx: number,
+  bcy: number,
+  tx: number,
+  ty: number,
+  thresholdPx: number,
+): number {
+  if (!laneAligned(dir, bcx, bcy, tx, ty, thresholdPx)) return BULLET_LANE_MISS
+  const approaching =
+    (dir === 'down' && bcy < ty) ||
+    (dir === 'up' && bcy > ty) ||
+    (dir === 'right' && bcx < tx) ||
+    (dir === 'left' && bcx > tx)
+  if (!approaching) return BULLET_LANE_MISS
+  const vertical = dir === 'up' || dir === 'down'
+  return vertical ? Math.abs(bcy - ty) : Math.abs(bcx - tx)
+}
+
+/**
+ * Positional twin of {@link bulletLaneDist} for STATIC facing: "is the bullet
+ * in front of a shooter facing `dir`, on the shooter's lane?" Here `dir` is
+ * the SHOOTER's orientation (not a travel direction), so the half-plane
+ * polarity is inverted relative to {@link bulletLaneDist}'s approaching test.
+ * Used by the T2a aim-error gate (FireControl).
+ */
+export function bulletInFrontDist(
+  dir: Direction,
+  bcx: number,
+  bcy: number,
+  tx: number,
+  ty: number,
+  thresholdPx: number,
+): number {
+  if (!laneAligned(dir, bcx, bcy, tx, ty, thresholdPx)) return BULLET_LANE_MISS
+  const inFront =
+    (dir === 'up' && bcy < ty) ||
+    (dir === 'down' && bcy > ty) ||
+    (dir === 'left' && bcx < tx) ||
+    (dir === 'right' && bcx > tx)
+  if (!inFront) return BULLET_LANE_MISS
+  const vertical = dir === 'up' || dir === 'down'
+  return vertical ? Math.abs(bcy - ty) : Math.abs(bcx - tx)
 }

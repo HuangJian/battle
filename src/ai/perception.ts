@@ -2,7 +2,7 @@ import type { World } from '../game/World'
 import type { Tank } from '../types'
 import type { Direction } from '../constants'
 import { CELL, TANK, DIR_VECTORS, FIELD, GRID } from '../constants'
-import { aabb, snap } from '../utils/helpers'
+import { aabb, snap, bulletLaneDist } from '../utils/helpers'
 import type { Perception, Situation, IntelligenceConfig } from './types'
 
 import { manhattan } from '../utils/helpers'
@@ -237,19 +237,16 @@ export function perceive(
     // Only hostile-to-enemy bullets are a threat: player OR ally fire (ally
     // bullets carry allegiance 'ally', never 'enemy').
     if (!b.alive || b.allegiance === 'enemy') continue
-    const bx = b.x + b.w / 2
-    const by = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bx - sx) < CELL * 0.75 : Math.abs(by - sy) < CELL * 0.75
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && by < sy) ||
-      (b.dir === 'up' && by > sy) ||
-      (b.dir === 'right' && bx < sx) ||
-      (b.dir === 'left' && bx > sx)
-    if (!approaching) continue
-    const dist = vertical ? Math.abs(by - sy) : Math.abs(bx - sx)
-    if (dist > range) continue
+    // §3.1 single-sourced lane geometry (allegiance filtered above).
+    const dist = bulletLaneDist(
+      b.dir,
+      b.x + b.w / 2,
+      b.y + b.h / 2,
+      sx,
+      sy,
+      CELL * 0.75,
+    )
+    if (dist < 0 || dist > range) continue
     // Track the closest threat. Sorting was only needed to pick threats[0];
     // a running min replaces the sort + array entirely.
     if (dist < threatDist) {

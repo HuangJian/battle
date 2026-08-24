@@ -2,7 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
-import { snap } from '../../utils/helpers'
+import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { estimatedEnemyLevel } from './EnemyModel'
 
@@ -783,18 +783,10 @@ export function shouldFireInDirImpl(
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const aligned =
-      dir === 'up' || dir === 'down'
-        ? Math.abs(bcx - pcx) < CELL * 0.75
-        : Math.abs(bcy - pcy) < CELL * 0.75
-    if (!aligned) continue
-    const inFront =
-      (dir === 'up' && bcy < pcy) ||
-      (dir === 'down' && bcy > pcy) ||
-      (dir === 'left' && bcx < pcx) ||
-      (dir === 'right' && bcx > pcx)
-    if (!inFront) continue
-    const d = Math.abs(dir === 'up' || dir === 'down' ? bcy - pcy : bcx - pcx)
+    // §3.1 single-sourced lane geometry (verticality keyed on the shooter's
+    // own facing dir here; the approaching/inFront formulas coincide).
+    const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, CELL * 0.75)
+    if (d < 0) continue
     if (d < TANK * 4) {
       return self.rng.next() >= self.params.aimError
     }
