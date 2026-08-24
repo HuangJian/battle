@@ -14,7 +14,8 @@
   ▼
 各节点 = HTTP 服务端（bun tools/agent/sampler-agent.ts --port 8443 --workers N）
   每个任务：GET /v1/task?stage&seed&... → 本地 spawn 一局 headless 游戏
-  → gzip(base64(shard files)) 同步回传 → 协调器落盘 itN/dist/<node>/
+  → 子进程内打 BCV2 容器（v3.6，无 base64）→ 异步模式经 /v1/result 轮询取包
+    （旧同步长连接模式保留兼容）→ 协调器落盘 itN/dist/<node>/
 ```
 
 要点：

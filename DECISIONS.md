@@ -1648,3 +1648,19 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 **Implications:** 评估能力随 agent 逐节点同步灰度点亮（未同步节点自动跳过）；跨 checkpoint 比较仅在 eval-runner 口径不变的前提下有效（口径同步契约写入文件头注释）。后续可挂 HTML 趋势报告与 godai-score 维度面板（本轮只落 JSONL + 控制台摘要行）。
 
 **修订（2026-08-24 晚，实跑发现）：流式模式下钩子位置错误 → 改阻塞式。** 原设计"rollout 返回后的 PPO 空窗"只在串行模式存在；流式模式的空闲窗已被 `run_rollout_stream` 内部的收尾 drain 吃掉，函数返回后距下轮权重分发仅秒级——后台派发的评估局必撞上权重切换全数作废。修正：串行模式保持后台隐藏；流式模式改为**阻塞执行**（墙钟预算 `--eval-window-sec`，默认 900s，即每轮迭代间显式增加约 5 分钟评估段）。代价诚实化：流式的"零成本隐藏"不成立，评估是显式流水线阶段。
+
+## 246. 分布式协议 v3.6 — 结果容器 BCV2 子进程打包 + 任务获取异步化（STATUS: SHIPPED, 2026-08-25）
+
+**Decision:** 针对生产实测瓶颈（macOS 四核节点 workers=8 时每个 rollout 子进程仅 ~50% CPU、整机 Idle ~50%），三项改造：
+1. **容器 v2（BCV2）**：新文件 `tools/sim/pack-container.ts`——`gzip(magic 'BCV2' | headerLen | headerJSON | entry*)`，entry = nameLen u16 + name + dataLen u64 + **原始 npy 字节**。打包从 agent 主线程**下沉到 exporter 子进程**（rollout/eval 两脚本新增 `--pack <path>`），与仿真并行；agent 只做一次文件读。去 base64：线体体积 -25%。Python 解码端 `dist_common.unpack_container()` 按 magic 自动识别 v1/v2。
+2. **任务获取异步化**：`GET /v1/task` 带 `x-async: 1` → 立即 `202 {token}` 后台执行；新增 `GET /v1/result?iterId&stage&seed` 轮询取包（200 容器 | 202 在跑 | 500 失败一次性消费 | 404 过期）。同 key 在跑幂等回同一 token。旧 trainer 同步路径原样保留；submit 用完整 timeout 以兼容旧 agent 长连接。
+3. **协调器零改动接入**：`fetch_task()` 内部透明完成异步提交+轮询+瞬断重试，签名/异常语义不变，`run_rl.py` 两处调用点无需修改。
+
+**Rationale:**
+- 归因链：inactivity 不是 macOS 限核——4 workers 时单进程 98%、8 workers 时单进程 ~50% 是典型的"上游供给限速"特征；供给卡点 = v1 容器的 base64+gzip+JSON 拼装串行在 Bun.serve 单线程主线程上，多局完成体排队，仿真子进程一半时间在等打包。
+- 异步化的真实收益按价值排序：①轮询期网络瞬断不丢局（结果在 agent 缓存里，恢复续拉——Cloud Shell/隧道场景刚需）；②计算槽与传输解耦；③重复提交天然幂等。
+- 兼容性矩阵：新 trainer+旧 agent 可用（magic 自动识别 v1）；反向不兼容——两侧同 commit 部署是既有惯例（codeHash 门强制节点同步）。submit 不用短超时试探旧 agent（会误杀同步长连接），靠 x-async 头灰度。
+- 协议变更入册 plan/distributed-rollout.md v3.6；E2E 全链路验证（本地起 agent + dist_common 驱动）：异步 rollout 校验落盘、eval 任务、并发同 key 幂等（gamesDoneTotal 恰 +1）、未知 token 404、v1 容器解码全过。
+
+**Implications:** codeHash 集内文件 export-rl-rollout.ts 有改动 → 全部远程节点须重新 checkout 到新 commit 才能过门（标准流程）。elapsedSec 语义微变为 exporter 子进程内耗时（少算 spawn 开销，仅日志用）。agent `/v1/status` 新增 `recentFailed`。后续若要进一步压传输成本，可让 /v1/result 支持 ETag 断点续传（当前无需求，不做）。
+

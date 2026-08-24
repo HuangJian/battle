@@ -35,6 +35,7 @@ import { buildModelFromText } from '../../src/nn/infer'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
 import type { RunTelemetry } from './simulation-runner'
+import { buildPack } from './pack-container'
 
 const MAX_TICKS = 36000
 const K = 10
@@ -329,6 +330,7 @@ function runEvalOne(
 }
 
 function main(): void {
+  const t0 = Date.now()
   const argv = process.argv.slice(2)
   let outDir = 'tmp/eval-out'
   let difficulty = 'hard'
@@ -338,6 +340,8 @@ function main(): void {
   let weightsPath = 'tmp/rl-weights/weights.json'
   let wver = ''
   let nodeLabel = ''
+  // --pack <path>（v3.6）：BCV2 容器输出，语义同 export-rl-rollout（无 shards、空 entries）。
+  let packPath = ''
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--difficulty') difficulty = argv[++i]
@@ -347,6 +351,7 @@ function main(): void {
     else if (argv[i] === '--weights') weightsPath = argv[++i]
     else if (argv[i] === '--wver') wver = argv[++i]
     else if (argv[i] === '--node-label') nodeLabel = argv[++i]
+    else if (argv[i] === '--pack') packPath = argv[++i]
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
     console.error('[export-eval-game] --stage/--seed required')
@@ -371,6 +376,15 @@ function main(): void {
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
+  if (packPath) {
+    // 溯源戳与 v1 agent 主线程所盖戳一致（mode='eval' 是 validate_eval_result 的对账项）。
+    const packManifest = {
+      ...report,
+      mode: 'eval',
+      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+    }
+    writeFileSync(packPath, buildPack(packManifest, []))
+  }
   console.log(
     `[eval-game] s${stageIdx} seed${seed} outcome=${res.outcome} ticks=${res.ticks} ` +
       `win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,

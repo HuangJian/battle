@@ -45,7 +45,8 @@ import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks, OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { writeNpy } from '../../src/nn/npy'
-import { writeFileSync, mkdirSync, readFileSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
+import { buildPack } from './pack-container'
 import {
   scoreRun,
   V7_SCORE_CONFIG,
@@ -62,6 +63,22 @@ const MOVE_DIM = 5
 const FIRE_DIM = 2
 const ITEM_DIM = 3
 const MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
+
+// shard 文件名清单（与 writeRlShard 的 writeNpy 调用一一对应；--pack 打容器时按此顺序）。
+const RL_SHARD_FILES = [
+  'obs.npy',
+  'scalars.npy',
+  'a_move.npy',
+  'a_fire.npy',
+  'a_item.npy',
+  'lp_move.npy',
+  'lp_fire.npy',
+  'lp_item.npy',
+  'value.npy',
+  'reward.npy',
+  'done.npy',
+  'mask.npy',
+] as const
 
 // ---- R3 reward constants ----
 const REWARD_SCALE = 10 // 奖励尺度：每局总回报 ≡ REWARD_SCALE × gatedScore
@@ -630,6 +647,7 @@ function parseRange(s: string): number[] {
 }
 
 function main(): void {
+  const t0 = Date.now()
   const args = process.argv.slice(2)
   let outDir = 'tmp/rl-traj'
   let difficulty = 'hard'
@@ -639,6 +657,9 @@ function main(): void {
   let weightsPath = 'tmp/rl-weights/weights.json'
   let wver = ''
   let nodeLabel = ''
+  // --pack <path>（v3.6）：把单局结果打成 BCV2 容器写到指定路径——sampler-agent 用它把
+  // base64+gzip+JSON 拼装从主线程下沉到本子进程并行执行（tools/sim/pack-container.ts）。
+  let packPath = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -650,6 +671,7 @@ function main(): void {
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
     else if (args[i] === '--node-label') nodeLabel = args[++i]
+    else if (args[i] === '--pack') packPath = args[++i]
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -750,6 +772,37 @@ function main(): void {
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks}`)
   console.log(`shards under: ${outDir}  (consume with ppo.py)`)
   writeFileSync(`${outDir}/_rl_report.json`, JSON.stringify(summary, null, 2))
+
+  // ---- BCV2 结果容器（v3.6，sampler-agent 专用；本机直跑不带 --pack 时完全无感）----
+  if (packPath) {
+    if (stages.length !== 1 || seeds.length !== 1) {
+      console.error('[export-rl-rollout] --pack requires exactly one stage and one seed')
+      process.exit(2)
+    }
+    const shardDir = `${outDir}/rl_s${stages[0]}_seed${seeds[0]}`
+    // 0 样本局（maxTicks<K 等异常参数）不会写 shard 目录——显式报错而非 ENOENT 堆栈。
+    if (!existsSync(shardDir)) {
+      console.error(
+        `[export-rl-rollout] --pack: no shards written for s${stages[0]}/seed${seeds[0]} ` +
+          `(0 samples — check maxTicks/stage validity)`,
+      )
+      process.exit(3)
+    }
+    const entries = RL_SHARD_FILES.map((name) => ({
+      name,
+      data: readFileSync(`${shardDir}/${name}`),
+    }))
+    // 溯源戳与 v1 agent 主线程所盖戳逐字段一致：validate_result 按
+    // manifest.stage/seed/wver 对账（标量），elapsedSec 语义改为子进程内耗时。
+    const packManifest = {
+      ...summary,
+      stage: stages[0],
+      seed: seeds[0],
+      mode: 'rollout',
+      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+    }
+    writeFileSync(packPath, buildPack(packManifest, entries))
+  }
 }
 
 if (import.meta.main) main()

@@ -1,13 +1,20 @@
 """
 dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可脱离 torch 独立测试）。
 
-与 tools/agent/sampler-agent.ts 构成双语协议契约（plan/distributed-rollout.md v3.3）：
+与 tools/agent/sampler-agent.ts 构成双语协议契约（plan/distributed-rollout.md v3.6）：
 
 - codeHash 配方（两侧实现必须逐字节一致）：对 glob 集（`src/nn/**` 全部文件 +
   `tools/sim/export-rl-rollout.ts`）按 posix 相对路径字典序遍历，依次喂入
   sha256(path 字节) 与 sha256(文件内容)，最终 hex。
-- 结果容器：gzip(JSON {manifest, files:{name: base64}})；files 恰为 12 个 npy，
-  manifest 为单局 _rl_report.json 内容 + elapsedSec/node 等溯源字段。
+- 结果容器：
+  - v2（BCV2，v3.6 起 agent 缺省）：gzip( magic u32 | headerLen u32 | headerJSON |
+    entry* )，entry = nameLen u16 | name | dataLen u64 | 原始 npy 字节——由 exporter
+    子进程打包，无 base64。files 值为 bytes。
+  - v1（旧 agent 兼容）：gzip(JSON {manifest, files:{name: base64}})。files 值为 str。
+  解码端 unpack_container() 按 magic 自动识别，validate/write_shard 双模兼容。
+- 任务获取：fetch_task() 带 x-async 头提交——新 agent 立即 202+token，转 /v1/result
+  轮询（瞬断可重试，结果在 agent 缓存里不丢）；旧 agent 忽略该头同步返回整包，
+  行为与 v3.5 完全一致。两种响应在同一函数内消化。
 - 权重下发：POST body = gzip(weights.json 字节)，头部 X-Iter-Id / X-Weights-Sha256；
   agent 校验 sha 一致后，同 sha 幂等不动、异 sha 原子切换并清空结果缓存。
 
@@ -21,6 +28,8 @@ import gzip
 import hashlib
 import json
 import os
+import struct
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -138,13 +147,61 @@ def post_weights(url: str, auth_key: str, iter_id: str, sha: str, weights_bytes:
     return str(info.get("cache", "kept"))
 
 
+def unpack_container(raw: bytes) -> tuple[dict, dict]:
+    """解结果容器（自动识别版本）→ (manifest, files)。
+
+    v2（BCV2）files 值为 bytes；v1（旧 agent）值为 base64 str——下游
+    validate_result/write_shard 双模兼容，勿假设其中一种。
+    """
+    frame = gzip.decompress(raw.lstrip(b" \t\r\n"))
+    if len(frame) >= 8:
+        (magic,) = struct.unpack_from(">I", frame, 0)
+        if magic == PACK_MAGIC:
+            return _unpack_bcv2(frame)
+    container = json.loads(frame.decode("utf-8"))
+    if not isinstance(container, dict) or not isinstance(container.get("files"), dict):
+        raise DistError(0, "container missing files map")
+    return container.get("manifest") or {}, container["files"]
+
+
+# BCV2 魔数 'B''C''V''2' —— 与 tools/sim/pack-container.ts 逐字节一致的双语契约。
+PACK_MAGIC = 0x42435632
+
+
+def _unpack_bcv2(frame: bytes) -> tuple[dict, dict]:
+    off = 4
+    (hlen,) = struct.unpack_from(">I", frame, off)
+    off += 4
+    header = json.loads(frame[off : off + hlen].decode("utf-8"))
+    off += hlen
+    manifest = header.get("manifest") or {}
+    files: dict[str, bytes] = {}
+    for spec in header.get("files") or []:
+        (nlen,) = struct.unpack_from(">H", frame, off)
+        off += 2
+        name = frame[off : off + nlen].decode("utf-8")
+        off += nlen
+        (dlen,) = struct.unpack_from(">Q", frame, off)
+        off += 8
+        if name != spec.get("name") or dlen != spec.get("len"):
+            raise DistError(0, f"bcv2 entry mismatch: {name!r} (header said {spec!r})")
+        files[name] = frame[off : off + dlen]
+        off += dlen
+    return manifest, files
+
+
 def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, seed: int,
                max_ticks: int, difficulty: str, timeout: float,
                mode: str | None = None) -> tuple[dict, dict]:
-    """GET /v1/task → (manifest, files)；非 200 抛 DistError。
+    """获取一局结果 → (manifest, files)；失败抛 DistError。
 
     mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
     evalSupport=true 的节点使用——旧 agent 会静默忽略该参数跑成采样局。
+
+    v3.6：提交带 x-async 头。新 agent 立即 202 → 转 /v1/result 轮询（轮询期网络瞬断
+    不丢局：结果在 agent 结果缓存里，恢复后继续拉）；旧 agent 无视该头同步阻塞返回
+    整包（与 v3.5 行为逐字节一致）。注意 submit 必须用完整 timeout——对旧 agent 而言
+    这就是原来的长连接等待，短超时会把同步模式误杀。
     """
     params = {
         "iterId": iter_id, "wver": wver, "stage": stage, "seed": seed,
@@ -153,16 +210,68 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
     if mode:
         params["mode"] = mode
     qs = urllib.parse.urlencode(params)
+    base = url.rstrip("/")
+    started = time.monotonic()
     try:
-        status, body = _request(url.rstrip("/") + "/v1/task?" + qs, auth_key, timeout)
+        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout,
+                                headers={"x-async": "1"})
+        if status == 202:
+            return _poll_result(base, auth_key, params, timeout - (time.monotonic() - started))
+        if status == 200:
+            return unpack_container(body)
+        raise DistError(status, body[:300].decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         raise DistError(e.code, e.read()[:300].decode("utf-8", "replace")) from e
-    if status != 200:
+    except DistError:
+        raise
+    except Exception as e:
+        # 提交期网络错误 + 轮询期逃逸的非 DistError（deadline 时的 socket 超时、
+        # 损坏容器解包错）统一包装；真实原因保留在 message 里。
+        raise DistError(0, f"task fetch failed: {e}") from e
+
+
+def _poll_result(base_url: str, auth_key: str, params: dict, budget: float,
+                 poll_s: float = 3.0) -> tuple[dict, dict]:
+    """轮询 GET /v1/result 直到取包/失败/超时。budget 秒内传输瞬断一律重试。
+
+    只有网络调用本身受瞬断重试保护；容器解包与非预期状态码是确定性错误，
+    必须立即抛出真实原因——绝不能被重试逻辑吞成误导性的 deadline exceeded。
+    """
+    qs = urllib.parse.urlencode({
+        "iterId": params["iterId"], "stage": params["stage"], "seed": params["seed"],
+    })
+    deadline = time.monotonic() + max(1.0, budget)
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            raise DistError(0, "async result deadline exceeded (game still running on node?)")
+        try:
+            status, body = _request(f"{base_url}/v1/result?{qs}", auth_key,
+                                    timeout=min(20.0, remain))
+        except urllib.error.HTTPError as e:
+            detail = e.read()[:300].decode("utf-8", "replace")
+            if e.code == 500:
+                # 局失败已被 agent 一次性消费；trainer 照常回队重试（可能换节点）
+                try:
+                    msg = json.loads(detail).get("error", detail)
+                except ValueError:
+                    msg = detail
+                raise DistError(500, str(msg)) from e
+            if e.code == 404:
+                raise DistError(404, f"task lost on node (restart/purge): {detail}") from e
+            raise DistError(e.code, detail) from e
+        except Exception:
+            # 瞬断（休眠/SSH 重连/隧道抖动）：结果仍在节点缓存里，睡一下继续拉。
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(poll_s, max(0.5, deadline - time.monotonic())))
+            continue
+        if status == 200:
+            return unpack_container(body)
+        if status == 202:
+            time.sleep(min(poll_s, remain))
+            continue
         raise DistError(status, body[:300].decode("utf-8", "replace"))
-    container = json.loads(gzip.decompress(body.lstrip(b" \t\r\n")).decode("utf-8"))
-    if not isinstance(container, dict) or not isinstance(container.get("files"), dict):
-        raise DistError(0, "container missing files map")
-    return container.get("manifest") or {}, container["files"]
 
 
 # ---------------- 结果校验（先验后落盘的红线所在） ----------------
@@ -183,9 +292,11 @@ def validate_result(manifest: dict, files: dict, expected_wver: str,
         extra = sorted(set(files) - set(SHARD_FILES))
         lack = sorted(set(SHARD_FILES) - set(files))
         return f"file set mismatch (extra={extra}, missing={lack})"
-    for name, b64 in files.items():
+    for name, val in files.items():
         try:
-            raw = base64.b64decode(b64, validate=True)
+            # v2 容器值为原始 bytes；v1 旧 agent 值为 base64 str——双模兼容。
+            raw = val if isinstance(val, (bytes, bytearray)) \
+                else base64.b64decode(val, validate=True)
         except Exception:
             return f"{name}: invalid base64"
         if len(raw) == 0:
@@ -211,7 +322,10 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。"""
     os.makedirs(out_dir, exist_ok=True)
     for name in SHARD_FILES:
+        val = files[name]
+        raw = val if isinstance(val, (bytes, bytearray)) \
+            else base64.b64decode(val, validate=True)
         with open(os.path.join(out_dir, name), "wb") as f:
-            f.write(base64.b64decode(files[name], validate=True))
+            f.write(raw)
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

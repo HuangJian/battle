@@ -1,12 +1,15 @@
 /**
  * tools/dist/sampler-agent.ts — 分布式采样节点（bun 零依赖常驻服务）
  *
- * 协议（plan/distributed-rollout.md v3.3）：
+ * 协议（plan/distributed-rollout.md v3.6）：
  *   POST /v1/weights  每轮一次；x-weights-sha256 与缓存不同 → 原子切换并清空结果缓存，
  *                     相同 → 幂等不动（relaunch 续跑不误清本批数据）。
- *   GET  /v1/task     ?iterId&wver&stage&seed&maxTicks&difficulty —— 同步跑一局并随响应
- *                     返回 gzip(JSON {report, files:{name:base64}})；采样期间每 30s 推
- *                     chunked 心跳字节防中间设备空闲回收。结果缓存 LRU：同键重入直接回放。
+ *   GET  /v1/task     ?iterId&wver&stage&seed&maxTicks&difficulty
+ *                     — 同步模式（缺省，v3.5- 兼容）：跑完一局流式回包（20s 心跳防空闲回收）；
+ *                     — 异步模式（x-async:1，v3.6）：202+token 立即返回、后台执行，
+ *                       trainer 轮询 GET /v1/result 取包（同 key 幂等）。
+ *                     结果缓存 LRU：同键重入直接回放。
+ *   GET  /v1/result   异步取包：200 容器 | 202 在跑 | 500 局失败（一次性消费）| 404 过期。
  *   GET  /v1/status   健康快照（巡检用）。
  *   GET  /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus。
  *
@@ -141,6 +144,9 @@ let lastError = ''
 let gamesDoneTotal = 0
 const gamesDoneByIter = new Map<string, number>()
 const inflight = new Map<string, { stage: number; seed: number; startedAt: number }>()
+// v3.6 异步模式：已完成但失败的任务登记表（/v1/result 消费一次即删）。
+// 权重切换清场时与 resultCache 一并清空——跨轮生命周期一致。
+const failedTasks = new Map<string, string>()
 let activeWorkers = 0
 const startedAt = Date.now()
 
@@ -241,7 +247,6 @@ async function runGame(
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
   fs.mkdirSync(gameDir, { recursive: true })
-  const t0 = Date.now()
   try {
     const args = [
       isEval ? 'tools/sim/export-eval-game.ts' : 'tools/sim/export-rl-rollout.ts',
@@ -265,6 +270,10 @@ async function runGame(
       weights.sha,
       '--node-label',
       `bun-${process.pid}`,
+      // v3.6：容器在子进程内组装（BCV2，tools/sim/pack-container.ts）——base64+gzip+JSON
+      // 拼装与仿真并行，不再阻塞 agent 主线程（8 workers 串行打包曾是吞吐瓶颈）。
+      '--pack',
+      path.join(gameDir, '_result.pack'),
     )
     const child = spawn(process.execPath, args, {
       cwd: REPO_ROOT,
@@ -283,28 +292,13 @@ async function runGame(
     const scriptName = isEval ? 'export-eval-game' : 'export-rl-rollout'
     if (rc !== 0) throw new Error(`${scriptName} exited ${rc}: ${tail}`)
 
-    let files: Record<string, string> = {}
-    let reportPath: string
-    if (isEval) {
-      reportPath = path.join(gameDir, '_eval_report.json')
-    } else {
-      const shardDir = path.join(gameDir, `rl_s${stage}_seed${seed}`)
-      for (const name of SHARD_FILES) {
-        const p = path.join(shardDir, name)
-        if (!fs.existsSync(p)) throw new Error(`missing shard file ${name}`)
-        files[name] = fs.readFileSync(p).toString('base64')
-      }
-      reportPath = path.join(gameDir, '_rl_report.json')
+    // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
+    // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
+    const packFile = path.join(gameDir, '_result.pack')
+    if (!fs.existsSync(packFile)) {
+      throw new Error(`${scriptName} produced no result pack: ${tail}`)
     }
-    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as Record<string, unknown>
-    report.elapsedSec = +((Date.now() - t0) / 1000).toFixed(1)
-    // 权威回显：trainer 校验器按标量 stage/seed 对账（export 摘要里是 stages/seeds 列表）
-    report.stage = stage
-    report.seed = seed
-    // 语义回显：eval 局必须带 mode='eval'，中心据此拒绝旧 agent 误跑的采样局
-    report.mode = mode
-
-    return packContainer(report, files)
+    return fs.readFileSync(packFile)
   } finally {
     fs.rmSync(gameDir, { recursive: true, force: true })
   }
@@ -318,6 +312,40 @@ function jsonResponse(obj: unknown, status = 200, headers: Record<string, string
 }
 
 // ---------------- HTTP handler ----------------
+/**
+ * v3.6 异步模式的后台执行器：与同步流式路径共用 runGame/缓存/计数器，
+ * 但不挂任何 HTTP 流——局完成（或失败）后结果落在 resultCache/failedTasks 里，
+ * 由 trainer 轮询 /v1/result 取走。同 key 重复提交幂等（不重复 spawn）。
+ */
+function beginTask(
+  key: string,
+  iterId: string,
+  stage: number,
+  seed: number,
+  maxTicks: number,
+  difficulty: string,
+  mode: string,
+): void {
+  activeWorkers++
+  inflight.set(key, { stage, seed, startedAt: Date.now() })
+  runGame(stage, seed, maxTicks, difficulty, mode)
+    .then((buf) => {
+      lruPut(key, buf)
+      gamesDoneTotal++
+      gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
+    })
+    .catch((e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e)
+      failedTasks.set(key, msg.slice(0, 300))
+      lastError = `${new Date().toISOString()} s${stage}/seed${seed}: ${msg}`
+      console.error(`[sampler-agent] task failed: ${lastError}`)
+    })
+    .finally(() => {
+      activeWorkers--
+      inflight.delete(key)
+    })
+}
+
 async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url)
   const auth = req.headers.get('authorization') ?? ''
@@ -353,6 +381,7 @@ async function handle(req: Request): Promise<Response> {
     cacheEvicted += resultCache.size
     cacheBytes = 0
     resultCache.clear()
+    failedTasks.clear()
     // 尽力而为删除：干净评估局可能在飞、子进程尚持旧权重文件句柄（Windows EBUSY）。
     // 删不掉的留给下方 retention 清扫，绝不让切换失败（那会拖垮整轮权重分发）。
     if (oldFile && oldFile !== wfile) {
@@ -406,6 +435,17 @@ async function handle(req: Request): Promise<Response> {
       })
     }
 
+    // v3.6 异步模式（plan/distributed-rollout.md §4.2）：带 x-async:1 的提交立即返回
+    // 202+token，游戏后台执行，trainer 轮询 /v1/result 取包。同 key 在跑 → 幂等回同一
+    // token（不重复 spawn）；旧 trainer 不发此头，走下方同步流式路径，行为不变。
+    if (req.headers.get('x-async') === '1') {
+      if (inflight.has(key)) return jsonResponse({ status: 'running', token: key }, 202)
+      if (activeWorkers >= workers)
+        return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
+      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode)
+      return jsonResponse({ status: 'accepted', token: key }, 202)
+    }
+
     activeWorkers++
     inflight.set(key, { stage, seed, startedAt: Date.now() })
     // 保活流式响应：单局可能长达 ~480s，而 Bun.serve idleTimeout 上限仅 255s。若连接全程静默，
@@ -454,6 +494,37 @@ async function handle(req: Request): Promise<Response> {
     return new Response(stream, { headers: { 'Content-Type': 'application/octet-stream' } })
   }
 
+  // v3.6 异步模式取包端点：200=容器就绪 | 202=仍在跑 | 500=局失败（登记一次性消费）
+  // | 404=无此任务（重启/跨轮清场后过期，trainer 应重新提交）。
+  if (req.method === 'GET' && url.pathname === '/v1/result') {
+    const iterId = url.searchParams.get('iterId') ?? ''
+    const stage = parseInt(url.searchParams.get('stage') ?? '', 10)
+    const seed = parseInt(url.searchParams.get('seed') ?? '', 10)
+    if (!iterId || !Number.isInteger(stage) || !Number.isInteger(seed))
+      return jsonResponse({ error: 'missing/invalid query params' }, 400)
+    const key = `${iterId}:${stage}:${seed}`
+    const cached = resultCache.get(key)
+    if (cached) {
+      resultCache.delete(key)
+      resultCache.set(key, cached)
+      return new Response(new Uint8Array(cached.buf), {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      })
+    }
+    const failed = failedTasks.get(key)
+    if (failed !== undefined) {
+      failedTasks.delete(key)
+      return jsonResponse({ error: failed }, 500)
+    }
+    const running = inflight.get(key)
+    if (running)
+      return jsonResponse(
+        { status: 'running', elapsedSec: +((Date.now() - running.startedAt) / 1000).toFixed(1) },
+        202,
+      )
+    return jsonResponse({ error: 'unknown task (expired/purged/restart)' }, 404)
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/status') {
     return jsonResponse({
       nodeId: `bun-${process.pid}`,
@@ -471,6 +542,7 @@ async function handle(req: Request): Promise<Response> {
         elapsedSec: +((Date.now() - v.startedAt) / 1000).toFixed(1),
       })),
       lastError,
+      recentFailed: failedTasks.size,
       diskFreeMB: diskFreeMB(),
       cacheHits,
       cacheEvicted,
