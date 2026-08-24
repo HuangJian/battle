@@ -94,6 +94,27 @@ export class Simulation {
   }
 
   /**
+   * One-Author routing (refactor.zcode.md §4.1): takeover flows must flip the
+   * gameplay flag `coop` through the Simulation, not by direct World writes
+   * from Game controllers. Applied immediately (the callers are mid-handoff,
+   * not inside a tick) — same semantics as the previous direct writes.
+   */
+  applyTakeover(coop: boolean): void {
+    this.world.coop = coop
+  }
+
+  /** One-Author routing (§4.1): consume the pending manual-rewind flag. */
+  clearRewindPending(): void {
+    this.world.rewindPending = false
+  }
+
+  /** One-Author routing (§4.1): refund a rewind stock charge (rewind could
+   * not start — recovery busy or not playing). */
+  refundRewind(): void {
+    this.world.rewindStock++
+  }
+
+  /**
    * Lie-Back-Win-Mode §3.5: cancel any pending coop toggle. Called when
    * returning to menu — a stale pending toggle would otherwise fire on the
    * next playing tick and re-enable coop against the player's intent.

@@ -379,13 +379,14 @@ export class LoopController {
       // is owned by RecoveryController (same flow as Load Latest). Stock was
       // already spent in activateRewind; refund it if the rewind can't start.
       if (this.g.world.rewindPending) {
-        this.g.world.rewindPending = false
+        // §4.1: flag consumption + stock refund route through Simulation.
+        this.g.simulation.clearRewindPending()
         const canStart = this.g.recovery.phase === 'idle' && this.g.world.state === 'playing'
         if (canStart && this.g.recovery.beginManualRewind(this.g.world)) {
           this.g.audio.playRecoveryStart()
           this.g.presentation.ui.notify(t('toast.rewindActivated'), 'info')
         } else {
-          this.g.world.rewindStock++
+          this.g.simulation.refundRewind()
         }
       }
     }

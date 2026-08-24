@@ -332,7 +332,8 @@ export class ReplayController {
     // replay `coop` is already true; for a dual-spectate replay we flip it on
     // so the recorded P2 becomes a live God AI instead of a frozen tank.
     if ((wasCoop || wasDual) && this.g.world.player2) {
-      this.g.world.coop = true
+      // §4.1: routed through the Simulation entry point.
+      this.g.simulation.applyTakeover(true)
       const rng = new RNG((this.g.world.seed ^ SEED_HASH) >>> 0)
       this.g.godInput = new GodAIInput(this.g.world, undefined, rng, (world) => world.player2)
       this.g.godInput.reset()

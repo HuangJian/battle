@@ -247,7 +247,8 @@ export class Game {
         this.presentation.ui.controlCenter.setSpectateState('off')
       }
       // Apply immediately since we are paused/menu (no tick will fire).
-      w.coop = true
+      // §4.1: routed through the Simulation entry point.
+      this.simulation.applyTakeover(true)
       w.enablePlayer2()
       // Wire AI inputs
       const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
@@ -435,8 +436,8 @@ export class Game {
       // Keep the already-spawned player2 (lives2 / playerLevel2 survive).
       // Setting `coop = true` also stops the deferred spectate-off apply
       // (Simulation's deferred-switch guard) from stripping player2 on the
-      // next tick.
-      w.coop = true
+      // next tick. §4.1: routed through the Simulation entry point.
+      this.simulation.applyTakeover(true)
       this.godInput = p2Ai // coop partner is `godInput`, bound to player2
       this.autoFireInput = new AutoFireInput(this.input)
       this.presentation.ui.controlCenter.setCoopState(true)
