@@ -7,8 +7,8 @@ import { ALL_DIRS } from '../../../utils/direction'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
-import { selfFireBaseGuardBlocks,
-  MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import { MAP_CENTER, isDualCentralBreachHoldP1, selfFireBaseGuardBlocks } from '../candidates/shared'
+import { updateStuckTrack } from '../stuck-track'
 
 export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -83,7 +83,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
     if (
       aimDir &&
-      self._aggCampSuppress <= 0 &&
+      self._aggCampTrack.suppress <= 0 &&
       !t2aSkipStuck &&
       aimSurvivesTurnImpl(self, p, aimDir)
     ) {
@@ -125,31 +125,21 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
         // aggCampTimeoutTicks with no kills, fall through to navigate.
         if (self.params.aggCampTimeoutTicks > 0) {
           const pc84 = self.playerCell()
-          if (
-            self._aggCampCell &&
-            Math.abs(self._aggCampCell.col - pc84.col) <= 1 &&
-            Math.abs(self._aggCampCell.row - pc84.row) <= 1
-          ) {
-            self._aggCampTicks++
-            if (w.killCount !== self._aggCampKillsAtStart) {
-              self._aggCampTicks = 1
-              self._aggCampKillsAtStart = w.killCount
-            }
-          } else {
-            self._aggCampCell = { col: pc84.col, row: pc84.row }
-            self._aggCampTicks = 1
-            self._aggCampKillsAtStart = w.killCount
-          }
-
-          if (
-            self._aggCampTicks > self.params.aggCampTimeoutTicks &&
-            w.killCount === self._aggCampKillsAtStart
-          ) {
+          // §3.4: shared zone-stuck tracker (god/stuck-track.ts).
+          const campTimedOut = updateStuckTrack(
+            self._aggCampTrack,
+            w,
+            pc84,
+            self.params.aggCampTimeoutTicks,
+            1,
+          )
+          if (campTimedOut) {
             // Camped too long with no kills — suppress aggressive
             // stop-and-aim for a while and fall through to navigate.
-            self._aggCampCell = null
-            self._aggCampTicks = 0
-            self._aggCampSuppress = self.params.antiCampSuppressTicks
+            const st = self._aggCampTrack
+            st.cell = null
+            st.ticks = 0
+            st.suppress = self.params.antiCampSuppressTicks
             // Fall through to power-up / navigate below.
           } else {
             if (p.dir === aimDir) {
@@ -202,36 +192,22 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
     // (A* routes around the blocking tank/water — in a dead-end corridor
     // the only open direction leads OUT).
     if (self.params.aggNavStuckTicks > 0) {
-      let escape152 = self._aggNavSuppress > 0
+      // §3.4: shared zone-stuck tracker (god/stuck-track.ts).
+      let escape152 = self._aggNavTrack.suppress > 0
       if (!escape152) {
         const pc152 = self.playerCell()
         if (
-          self._aggNavStuckCell &&
-          Math.abs(self._aggNavStuckCell.col - pc152.col) <= 1 &&
-          Math.abs(self._aggNavStuckCell.row - pc152.row) <= 1
+          updateStuckTrack(self._aggNavTrack, w, pc152, self.params.aggNavStuckTicks, 1)
         ) {
-          self._aggNavStuckTicks++
-          if (w.killCount !== self._aggNavKillsAtStart) {
-            self._aggNavStuckTicks = 1
-            self._aggNavKillsAtStart = w.killCount
-          }
-        } else {
-          self._aggNavStuckCell = { col: pc152.col, row: pc152.row }
-          self._aggNavStuckTicks = 1
-          self._aggNavKillsAtStart = w.killCount
-        }
-        if (
-          self._aggNavStuckTicks > self.params.aggNavStuckTicks &&
-          w.killCount === self._aggNavKillsAtStart
-        ) {
-          self._aggNavStuckCell = null
-          self._aggNavStuckTicks = 0
-          self._aggNavSuppress = self.params.antiCampSuppressTicks
+          const st = self._aggNavTrack
+          st.cell = null
+          st.ticks = 0
+          st.suppress = self.params.antiCampSuppressTicks
           escape152 = true
         }
       }
       if (escape152) {
-        if (self._aggNavSuppress > 0) self._aggNavSuppress--
+        if (self._aggNavTrack.suppress > 0) self._aggNavTrack.suppress--
         self._moveDir = self.navigateTowards(MAP_CENTER)
         if (!self._moveDir) {
           for (let di = 0; di < ALL_DIRS.length; di++) {
@@ -274,10 +250,11 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   }
 
   // §84: Reset aggressive camp tracking when not in aggressive mode.
-  if (self._aggCampCell) {
-    self._aggCampCell = null
-    self._aggCampTicks = 0
+  const st = self._aggCampTrack
+  if (st.cell) {
+    st.cell = null
+    st.ticks = 0
   }
-  if (self._aggCampSuppress > 0) self._aggCampSuppress = 0
+  if (st.suppress > 0) st.suppress = 0
   return false
 }

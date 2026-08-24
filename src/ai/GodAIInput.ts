@@ -15,6 +15,7 @@ import {
   makeScanResult,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
+import { newStuckTrack, type StuckTrack } from './god/stuck-track'
 import type { ActionIntent } from './god/StrategyPlanner'
 import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
@@ -229,23 +230,21 @@ export class GodAIInput implements InputLike {
   /** Last cell the player was at when consuming a path step (prevents oscillation). */
   _lastPathCell: Cell | null = null
 
-  /** P0.1: the cell where the player is currently camping (T2a stop-and-aim). */
-  _campCell: Cell | null = null
-  /** P0.1: consecutive ticks spent at _campCell in T2a. */
-  _campTicks = 0
-  /** P0.1: world.killCount when camping started (to detect "no kills during camp"). */
-  _campKillsAtStart = 0
+  /**
+   * §3.4 zone-stuck trackers (god/stuck-track.ts single source; replaced the
+   * four hand-copied scalar quartets). AI-internal, not serialized.
+   *   _campTrack   — P0.1 T2a stop-and-aim camp (Engage).
+   *   _aggCampTrack — §84 aggressive stop-and-aim camp (Aggro).
+   *   _aggNavTrack  — §152-W2 aggressive navigate fallback stall (Aggro).
+   *   _navStuckTrack — P0.3/§168 navigate stuck (Hunt).
+   * The separate _antiCampSuppress countdown below is Engage's own escape
+   * window and predates the tracker consolidation — kept as-is.
+   */
+  _campTrack: StuckTrack = newStuckTrack()
   /** P0.1: countdown to suppress T2a after an anti-camp escape. */
   _antiCampSuppress = 0
 
-  /** §84: the cell where the player is camping in the aggressive branch. */
-  _aggCampCell: Cell | null = null
-  /** §84: consecutive ticks spent at _aggCampCell in aggressive stop-and-aim. */
-  _aggCampTicks = 0
-  /** §84: world.killCount when aggressive camping started. */
-  _aggCampKillsAtStart = 0
-  /** §84: countdown to suppress aggressive stop-and-aim after a stall escape. */
-  _aggCampSuppress = 0
+  _aggCampTrack: StuckTrack = newStuckTrack()
 
   /**
    * §152-W2: aggressive-branch MOVEMENT stuck guard state (distinct from the
@@ -257,11 +256,7 @@ export class GodAIInput implements InputLike {
    * a navigate-to-center escape (hard S12 seed 934391936 W2). AI-internal,
    * not serialized — same semantics as _campCell/_campTicks.
    */
-  _aggNavStuckCell: Cell | null = null
-  _aggNavStuckTicks = 0
-  _aggNavKillsAtStart = 0
-  /** countdown forcing the navigate-to-center escape after a movement stall. */
-  _aggNavSuppress = 0
+  _aggNavTrack: StuckTrack = newStuckTrack()
 
   /**
    * §152-W3: urgent-pickup commit state. Once PICKUP_HIGH/MID commits to an
@@ -307,17 +302,13 @@ export class GodAIInput implements InputLike {
   _centroidTriggers: number = 0
   _centroidEscapes: number = 0
 
-  /** P0.3: the cell where the player is currently stuck in navigate. */
-  _navStuckCell: Cell | null = null
-  /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
-  _navStuckTicks = 0
   /**
-   * §168: nav-stuck escape suppression window — while > 0, HUNT keeps the
-   * center escape instead of normal targeting (the trigger alone is not
-   * enough: once the counter resets on leaving the zone, the oscillating
-   * target selection pulls the player straight back into it).
+   * P0.3 + §168: navigate-stuck tracker. `suppress` is the escape window —
+   * while > 0, HUNT keeps the center escape instead of normal targeting (the
+   * trigger alone is not enough: once the counter resets on leaving the zone,
+   * the oscillating target selection pulls the player straight back into it).
    */
-  _navStuckSuppress = 0
+  _navStuckTrack: StuckTrack = newStuckTrack()
 
   /**
    * §169: base-threat sticky hold — while > 0, isBaseUnderThreat() reports
@@ -976,19 +967,11 @@ export class GodAIInput implements InputLike {
     this.reactionCounter = 0
     this.lastThreatId = -1
     this._lastPathCell = null
-    this._campCell = null
-    this._campTicks = 0
-    this._campKillsAtStart = 0
+    // §3.4: fresh zone-stuck trackers (allocation at stage boundaries only).
+    this._campTrack = newStuckTrack()
     this._antiCampSuppress = 0
-    this._aggCampCell = null
-    this._aggCampTicks = 0
-    this._aggCampKillsAtStart = 0
-    this._aggCampSuppress = 0
-    // §152-W2/W3: reset the aggressive-nav stuck guard + pickup commit state.
-    this._aggNavStuckCell = null
-    this._aggNavStuckTicks = 0
-    this._aggNavKillsAtStart = 0
-    this._aggNavSuppress = 0
+    this._aggCampTrack = newStuckTrack()
+    this._aggNavTrack = newStuckTrack()
     this._pickupCommitActive = false
     this._pickupCommitTicks = 0
     this._pickupCommitCol = 0
@@ -999,9 +982,7 @@ export class GodAIInput implements InputLike {
     this._lastDodgeDir = null
     this._lastDodgeThreatId = -1
     this._dodgeFlipCount = 0
-    this._navStuckCell = null
-    this._navStuckTicks = 0
-    this._navStuckSuppress = 0
+    this._navStuckTrack = newStuckTrack()
     this._threatStickyHold = 0 // §169
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170

@@ -212,14 +212,15 @@ describe('§152-W2 — aggressive movement-stuck guard (aggNavStuckTicks)', () =
     p.y = 10 * CELL
     world.freezeTimer = 1000 // aggressive mode
     // Pre-arm the stuck state at the threshold: same zone, no kills.
-    ai._aggNavStuckCell = { col: 6, row: 10 }
-    ai._aggNavStuckTicks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
-    ai._aggNavKillsAtStart = world.killCount
-    ai._aggNavSuppress = 0
+    const st = ai._aggNavTrack
+    st.cell = { col: 6, row: 10 }
+    st.ticks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
+    st.killsAtStart = world.killCount
+    st.suppress = 0
     ai._thought = false
     thinkImpl(ai)
     // The guard increments past the threshold and commits the escape.
-    expect(ai._aggNavSuppress).toBeGreaterThan(0)
+    expect(ai._aggNavTrack.suppress).toBeGreaterThan(0)
     expect(ai._moveDir).not.toBeNull()
     expect(ai._lastBranch).toBe('aggressive')
   })
@@ -230,13 +231,14 @@ describe('§152-W2 — aggressive movement-stuck guard (aggNavStuckTicks)', () =
     p.x = 6 * CELL
     p.y = 10 * CELL
     world.freezeTimer = 1000
-    ai._aggNavStuckCell = { col: 6, row: 10 }
-    ai._aggNavStuckTicks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
-    ai._aggNavKillsAtStart = world.killCount
-    ai._aggNavSuppress = 0
+    const st = ai._aggNavTrack
+    st.cell = { col: 6, row: 10 }
+    st.ticks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
+    st.killsAtStart = world.killCount
+    st.suppress = 0
     ai._thought = false
     thinkImpl(ai)
-    const suppressAfter = ai._aggNavSuppress
+    const suppressAfter = ai._aggNavTrack.suppress
     expect(suppressAfter).toBeGreaterThan(0)
     // A kill DURING the stuck window resets the counter (no false escape).
     const { world: w2, ai: ai2 } = setup()
@@ -244,14 +246,15 @@ describe('§152-W2 — aggressive movement-stuck guard (aggNavStuckTicks)', () =
     p2.x = 6 * CELL
     p2.y = 10 * CELL
     w2.freezeTimer = 1000
-    ai2._aggNavStuckCell = { col: 6, row: 10 }
-    ai2._aggNavStuckTicks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
+    const st2 = ai2._aggNavTrack
+    st2.cell = { col: 6, row: 10 }
+    st2.ticks = DEFAULT_GOD_AI_PARAMS.aggNavStuckTicks
     w2.killCount = 5 // a kill happened since the anchor
-    ai2._aggNavKillsAtStart = 4
-    ai2._aggNavSuppress = 0
+    st2.killsAtStart = 4
+    st2.suppress = 0
     ai2._thought = false
     thinkImpl(ai2)
-    expect(ai2._aggNavSuppress).toBe(0)
+    expect(ai2._aggNavTrack.suppress).toBe(0)
   })
 })
 

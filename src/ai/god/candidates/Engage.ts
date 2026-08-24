@@ -10,6 +10,7 @@ import {
   scanAheadImpl,
 } from '../FireControl'
 import { countAlignedEnemiesImpl } from '../ThreatAssessor'
+import { updateStuckTrack } from '../stuck-track'
 import { selfFireBaseGuardBlocks } from '../candidates/shared'
 
 export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
@@ -145,28 +146,15 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
         // zone fix accumulates camp time across nearby cells, so the
         // escape triggers even if the player wiggles between two cells.
         const pc = self.playerCell()
-        if (
-          self._campCell &&
-          Math.abs(self._campCell.col - pc.col) <= 1 &&
-          Math.abs(self._campCell.row - pc.row) <= 1
-        ) {
-          self._campTicks++
-          // If a kill happened since camping started, reset the camp timer.
-          // The player is being productive — let it continue camping.
-          if (w.killCount !== self._campKillsAtStart) {
-            self._campTicks = 1
-            self._campKillsAtStart = w.killCount
-          }
-        } else {
-          // Moved outside the camp zone — start fresh camp tracking.
-          self._campCell = { col: pc.col, row: pc.row }
-          self._campTicks = 1
-          self._campKillsAtStart = w.killCount
-        }
-
-        // Anti-camp: if too long at this cell with no kills, break out.
-        const campedTooLong =
-          self._campTicks > self.params.campTimeoutTicks && w.killCount === self._campKillsAtStart
+        // §3.4: shared zone-stuck tracker (god/stuck-track.ts). Anti-camp:
+        // if too long at this cell with no kills, break out.
+        const campedTooLong = updateStuckTrack(
+          self._campTrack,
+          w,
+          pc,
+          self.params.campTimeoutTicks,
+          1,
+        )
 
         if (!campedTooLong && !outgunned) {
           // ---- §49: 炮口相向分场景策略 ----
@@ -225,18 +213,20 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
 
         // Camped too long with no kills — suppress T2a and fall through
         // to navigate, which will move the player toward the enemy.
-        self._campCell = null
-        self._campTicks = 0
+        const st = self._campTrack
+        st.cell = null
+        st.ticks = 0
         self._antiCampSuppress = self.params.antiCampSuppressTicks
       }
       // Enemy in line of fire but beyond effective range — fall through
       // to navigate (close the distance for high-HP enemies).
     }
     // No real enemy in line of fire (wall-only or clear) — fall through.
-  } else if (self._campCell) {
+  } else if (self._campTrack.cell) {
     // Not in T2a (suppressed or no aimDir) — reset camp tracking.
-    self._campCell = null
-    self._campTicks = 0
+    const st = self._campTrack
+    st.cell = null
+    st.ticks = 0
   }
   return false
 }

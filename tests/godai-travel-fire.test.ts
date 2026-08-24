@@ -210,7 +210,7 @@ describe('review P1: turn+fire semantics under the 200ms turn cooldown (§218)',
     // so set them to 2 — after the decrement they read 1 at the gate and the
     // branches decline. think then reaches HUNT and the detour claims the tick.
     input._antiCampSuppress = 2
-    input._aggCampSuppress = 2
+    input._aggCampTrack.suppress = 2
     sim.tick()
     input.endFrame()
     expect(input._lastBranch).toBe('navigate') // the detour claims the tick

@@ -153,27 +153,32 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   // (4,6) every ~6 ticks), resetting the counter before it can ever
   // reach navStuckTicks. The ±1 zone check is the §152 aggNavStuckTicks
   // pattern — jitter stays inside the zone, real movement leaves it.
+  // §3.4: cell/ticks live in the shared _navStuckTrack shape, but the KILL
+  // BASELINE deliberately stays aliased to Engage's _campTrack.killsAtStart —
+  // a pre-existing cross-candidate coupling whose decoupling changes escape
+  // timing (caught by the determinism gate). Hence the inline form instead of
+  // updateStuckTrack, which owns its own baseline in its fresh-cell branch.
   const zone168 = self.params.navStuckZone > 0
+  const st = self._navStuckTrack
   if (
-    self._navStuckCell &&
+    st.cell &&
     (zone168
-      ? Math.abs(self._navStuckCell.col - pc.col) <= 1 &&
-        Math.abs(self._navStuckCell.row - pc.row) <= 1
-      : self._navStuckCell.col === pc.col && self._navStuckCell.row === pc.row)
+      ? Math.abs(st.cell.col - pc.col) <= 1 && Math.abs(st.cell.row - pc.row) <= 1
+      : st.cell.col === pc.col && st.cell.row === pc.row)
   ) {
-    self._navStuckTicks++
+    st.ticks++
   } else {
-    self._navStuckCell = { col: pc.col, row: pc.row }
-    self._navStuckTicks = 1
+    st.cell = { col: pc.col, row: pc.row }
+    st.ticks = 1
   }
 
   // Reset stuck timer when a kill happens (player is making progress).
-  if (self._navStuckTicks > 1 && w.killCount !== self._campKillsAtStart) {
-    self._navStuckTicks = 1
-    self._campKillsAtStart = w.killCount
+  if (st.ticks > 1 && w.killCount !== self._campTrack.killsAtStart) {
+    st.ticks = 1
+    self._campTrack.killsAtStart = w.killCount
   }
 
-  let navStuck = self._navStuckTicks > self.params.navStuckTicks
+  let navStuck = st.ticks > self.params.navStuckTicks
   // §168: escape suppression window — triggering the escape once is not
   // enough: leaving the zone resets the counter, and the still-oscillating
   // target selection pulls the player straight back into the same spot
@@ -184,13 +189,13 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
     navStuck &&
     self.params.navStuckZone > 0 &&
     self.params.navStuckSuppressTicks > 0 &&
-    self._navStuckSuppress <= 0
+    st.suppress <= 0
   ) {
-    self._navStuckSuppress = self.params.navStuckSuppressTicks
-    self._navStuckCell = null
-    self._navStuckTicks = 0
-  } else if (self._navStuckSuppress > 0) {
-    self._navStuckSuppress--
+    st.suppress = self.params.navStuckSuppressTicks
+    st.cell = null
+    st.ticks = 0
+  } else if (st.suppress > 0) {
+    st.suppress--
     navStuck = true
   }
 
@@ -199,7 +204,7 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   // player out of the pocket before CARVE_PATH can engage.
   if (navStuck && self.params.carvePathMode > 0 && pc.row >= self.params.carveLowerRow) {
     navStuck = false
-    self._navStuckSuppress = 0
+    self._navStuckTrack.suppress = 0
   }
 
   // §190: pixel-stuck fallback — when the player has been pixel-stuck for

@@ -463,7 +463,7 @@ export function thinkImpl(self: GodAIInput): void {
   // P0.1: Decrement anti-camp suppression every tick the player is alive.
   if (self._antiCampSuppress > 0) self._antiCampSuppress--
   // §84: Decrement aggressive camp suppression every tick.
-  if (self._aggCampSuppress > 0) self._aggCampSuppress--
+  if (self._aggCampTrack.suppress > 0) self._aggCampTrack.suppress--
   // §117: Decrement the mode-2 post-timeout re-commit suppress every tick.
   if (self._suicideStandSuppress > 0) self._suicideStandSuppress--
 
