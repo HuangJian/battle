@@ -4,6 +4,7 @@ import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
 import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
+import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
 import { isBaseRingCell } from './ThreatBudget'
 import { estimatedEnemyLevel } from './EnemyModel'
 
@@ -705,7 +706,7 @@ export function shouldFireInDirImpl(
   // finds an enemy, BOTH result.steel and result.enemy are true. Checking
   // enemy first would cause the AI to fire through steel.
   if (result.baseWall) return false
-  if (result.baseSteel && (p.level ?? 0) >= 3) return false
+  if (result.baseSteel && (p.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL) return false
   // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
   // level ≥ 3 falls through to the enemy check (can pierce).
   if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
@@ -875,7 +876,7 @@ export function shouldFireBreakThroughImpl(
   // causing 4 player-suicide base destructions in S32. Break-through is for
   // breaking walls, so only fire when the wall ahead is breakable (not a base
   // wall / base-ring steel). Enemy-as-obstacle still fires (baseWall=false).
-  return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3)
+  return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL)
 }
 
 /**
@@ -925,7 +926,7 @@ export function shotReachesBaseImpl(
   if (!self.hasBase) return false
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
@@ -1014,7 +1015,7 @@ export function bulletPathSteelBlockedImpl(
 ): boolean {
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
@@ -1115,7 +1116,7 @@ export function centerPathBlockedImpl(
 ): number {
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]

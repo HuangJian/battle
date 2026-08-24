@@ -9,6 +9,7 @@ import { type DecisionContext } from '../DecisionCore'
 import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
 import { MAP_CENTER, isDualCentralBreachHoldP1, selfFireBaseGuardBlocks } from '../candidates/shared'
 import { updateStuckTrack } from '../stuck-track'
+import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
 
 export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -115,7 +116,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
         !aggFireBlocked &&
         !steelPathBlocked152 &&
         !(aggScan.baseWall && aggScan.baseWallDist <= aggScan.enemyDist) &&
-        !(aggScan.baseSteel && (p.level ?? 0) >= 3)
+        !(aggScan.baseSteel && (p.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL)
       ) {
         // §84: Aggressive stall detection — the aggressive branch has NO
         // anti-stall guard (unlike T2a's _campTicks and navigate's

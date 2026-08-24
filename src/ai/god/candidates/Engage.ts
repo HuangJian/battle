@@ -12,6 +12,7 @@ import {
 import { countAlignedEnemiesImpl } from '../ThreatAssessor'
 import { updateStuckTrack } from '../stuck-track'
 import { selfFireBaseGuardBlocks } from '../candidates/shared'
+import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
 
 export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -104,7 +105,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
       !selfFireBlocked &&
       !steelPathBlocked152 &&
       !(scan.baseWall && scan.baseWallDist <= scan.enemyDist) &&
-      !(scan.baseSteel && (p.level ?? 0) >= 3)
+      !(scan.baseSteel && (p.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL)
     ) {
       // §56: dynamic T2a range based on enemy kind.
       // For non-armor enemies (basic/fast/power): use t2aMaxRange (15) —
