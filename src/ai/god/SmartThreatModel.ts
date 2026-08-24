@@ -1,6 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import { BASE_POS, GRID } from '../../constants'
+import { RING_CELLS } from './ThreatBudget'
 
 // ============================================================
 // SmartThreatModel — canShootBaseFrom (base clear-shot predicate).
@@ -87,8 +88,6 @@ export function enemyCanShootBase(self: GodAIInput, t: Tank): boolean {
  * given line. Static terrain read — no RNG, no cache mutation.
  */
 export function canBreachRingFrom(self: GodAIInput, col: number, row: number): boolean {
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
   const tm = self.world.tileMap
   // Ring cells (mirror SimulationCombat.isBaseProtectionCell verbatim):
   //   row br−1 over cols bc−1..bc+2, plus cols bc−1 and bc+2 at rows br..br+1.
@@ -119,12 +118,9 @@ export function canBreachRingFrom(self: GodAIInput, col: number, row: number): b
     // (already destroyed ⇒ the enemy is a §59 clear-shot or not a threat).
     return tm.get(rc, rr) === 'brick'
   }
-  for (let dc = -1; dc <= 2; dc++) {
-    if (clearShotAt(bc + dc, br - 1)) return true
-  }
-  for (let dr = 0; dr <= 1; dr++) {
-    if (clearShotAt(bc - 1, br + dr)) return true
-    if (clearShotAt(bc + 2, br + dr)) return true
+  // §3.2: iterate the canonical RING_CELLS instead of hand-unrolled loops.
+  for (let i = 0; i < RING_CELLS.length; i++) {
+    if (clearShotAt(RING_CELLS[i].col, RING_CELLS[i].row)) return true
   }
   return false
 }

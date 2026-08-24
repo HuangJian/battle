@@ -4,6 +4,7 @@ import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
 import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
+import { isBaseRingCell } from './ThreatBudget'
 import { estimatedEnemyLevel } from './EnemyModel'
 
 // ============================================================
@@ -306,12 +307,8 @@ export function scanAheadImpl(
         // front → spawn-pocket lock (player never digs, zero fire).
         if (hasBase) {
           if (exactRing) {
-            // Ring cells: row 23 across cols 11-14; cols 11/14 at rows 24-25.
-            if (
-              (row === baseRow - 1 && col >= baseCol - 1 && col <= baseCol + 2) ||
-              (col === baseCol - 1 && (row === baseRow || row === baseRow + 1)) ||
-              (col === baseCol + 2 && (row === baseRow || row === baseRow + 1))
-            ) {
+            // §3.2: ring membership via the shared ThreatBudget predicate.
+            if (isBaseRingCell(col, row)) {
               r.baseWall = true
               r.baseWallDist = stepCount
             }
@@ -893,13 +890,6 @@ export function shouldFireBreakThroughImpl(
  * 2026-08-04) — a drift here is a false NEGATIVE: the guard would think a
  * brick stops the bullet when the simulation plows it into the base.
  */
-function isBaseRingCell(col: number, row: number): boolean {
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
-  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
-  if (col === bc - 1 && (row === br || row === br + 1)) return true
-  return col === bc + 2 && (row === br || row === br + 1)
-}
 
 /**
  * §121: Would a bullet fired from (pcx,pcy) along `dir` REACH the base eagle?

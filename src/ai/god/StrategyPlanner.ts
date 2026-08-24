@@ -7,7 +7,7 @@ import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
-import { targetValue, enemyDeadline, killAssessment } from './ThreatBudget'
+import { targetValue, enemyDeadline, killAssessment, countRingBrickCells } from './ThreatBudget'
 import { coveragePlanImpl } from './CoveragePlanner'
 import type { ActionId } from './DecisionCore'
 import { blocksBullet } from './Chokepoint'
@@ -699,16 +699,9 @@ export function findDireItemTargetImpl(self: GodAIInput, pcx: number, pcy: numbe
   // Trigger A (清环前带): swarm converging on the base.
   const swarm = liveEnemies >= p.direItemMinEnemies && anyApproaching
   // Trigger B (补环): the base ring is damaged — fence reinforcement urgent.
+  // §3.2: brick count via the shared ThreatBudget helper.
   let ringIntact = 8
-  if (p.direItemRingLow > 0) {
-    ringIntact = 0
-    const tm = w.tileMap
-    for (let dc = -1; dc <= 2; dc++) if (tm.get(bc + dc, br - 1) === 'brick') ringIntact++
-    for (let dr = 0; dr <= 1; dr++) {
-      if (tm.get(bc - 1, br + dr) === 'brick') ringIntact++
-      if (tm.get(bc + 2, br + dr) === 'brick') ringIntact++
-    }
-  }
+  if (p.direItemRingLow > 0) ringIntact = countRingBrickCells(w.tileMap)
   const ringLow = ringIntact <= p.direItemRingLow
   if (!swarm && !ringLow) return null
 
@@ -2242,18 +2235,9 @@ function defenseThreatTarget(
   // (default both 0 → zero cost, byte-identical).
   const breachCheckOn = breachOn || anchorModeOn
   _defenseScanFlags.anyBreacher = false
+  // §3.2: brick count via the shared ThreatBudget helper.
   let ringIntact = 8
-  if (breachOn) {
-    ringIntact = 0
-    const tm = w.tileMap
-    for (let dc = -1; dc <= 2; dc++) {
-      if (tm.get(baseCol + dc, baseRow - 1) === 'brick') ringIntact++
-    }
-    for (let dr = 0; dr <= 1; dr++) {
-      if (tm.get(baseCol - 1, baseRow + dr) === 'brick') ringIntact++
-      if (tm.get(baseCol + 2, baseRow + dr) === 'brick') ringIntact++
-    }
-  }
+  if (breachOn) ringIntact = countRingBrickCells(w.tileMap)
   for (let ti = 0; ti < enemies.length; ti++) {
     const t = enemies[ti]
     const tc = self.tankCell(t)

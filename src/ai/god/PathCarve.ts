@@ -7,6 +7,7 @@ import { computeBaseGuardAnchorImpl, getDefaultDefensePositionImpl } from './Str
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 
 import { manhattan } from '../../utils/helpers'
+import { isBaseRingCell } from './ThreatBudget'
 
 // ============================================================
 // PathCarve — §161 / 开路策略 (carve path, user request 2026-08-06).
@@ -45,12 +46,8 @@ import { manhattan } from '../../utils/helpers'
  */
 export function isCarveRingBrickImpl(self: GodAIInput, col: number, row: number): boolean {
   const tm = self.world.tileMap
-  if (!self.hasBase || tm.get(col, row) !== 'brick') return false
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
-  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
-  if ((col === bc - 1 || col === bc + 2) && (row === br || row === br + 1)) return true
-  return false
+  // §3.2: ring membership via the shared ThreatBudget predicate.
+  return self.hasBase && tm.get(col, row) === 'brick' && isBaseRingCell(col, row)
 }
 
 /**

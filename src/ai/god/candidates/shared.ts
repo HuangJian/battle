@@ -9,6 +9,7 @@ import type { Cell } from '../../../utils/grid-search'
 import type { Direction } from '../../../constants'
 import { BASE_POS, GRID } from '../../../constants'
 import { scanAheadImpl } from '../FireControl'
+import { RING_CELLS } from '../ThreatBudget'
 import { isFieldRetreatConditionImpl } from '../StrategyPlanner'
 import type { DecisionContext } from '../DecisionCore'
 
@@ -67,20 +68,13 @@ export function retreatGateBlocksPickup(self: GodAIInput): boolean {
  * 几何与 SimulationCombat.isBaseProtectionCell 一致（row 23 × cols 11-14，
  *  cols 11/14 × rows 24-25）。钢环（classic 某些关）= 永不击穿 → 哨兵自关。 */
 export function baseRingBreachedImpl(w: World): boolean {
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
+  // §3.2: iterate the canonical RING_CELLS instead of 8 hand-unrolled calls.
   const g = w.tileMap.grid
-  const hole = (c: number, r: number) => g[r][c] !== 'brick' && g[r][c] !== 'steel'
-  return (
-    hole(bc - 1, br - 1) ||
-    hole(bc, br - 1) ||
-    hole(bc + 1, br - 1) ||
-    hole(bc + 2, br - 1) ||
-    hole(bc - 1, br) ||
-    hole(bc - 1, br + 1) ||
-    hole(bc + 2, br) ||
-    hole(bc + 2, br + 1)
-  )
+  for (let i = 0; i < RING_CELLS.length; i++) {
+    const c = RING_CELLS[i]
+    if (g[c.row][c.col] !== 'brick' && g[c.row][c.col] !== 'steel') return true
+  }
+  return false
 }
 /** laneCorridorBlocked 的越界哨兵（端点出界 → 走廊不可用）。
  * 取 999 = 永远大于任何合法的格距（GRID=26），调用方只判 >0。 */
