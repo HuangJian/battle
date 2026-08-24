@@ -23,19 +23,14 @@ import { MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
 import { manhattan } from '../../../utils/helpers'
 
-export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
-  const { w, p, pcx, pcy, onCooldown, shielded } = ctx
-  // Far from target (>5 cells): A* pathfinding routes around walls via
-  // corridors — essential for maze stages. A* finds the corridor, not the
-  // direct path through walls.
-  //
-  // Close to target (≤5 cells): directMove chases the moving enemy
-  // directly, adjusting every tick.
-  //
-  // P0.3: Navigate stuck escape — if the player has been at the same cell
-  // in the navigate branch for too long (pursuit loop with a faster enemy),
-  // override the target to the map center.
-  const pc = self.playerCell()
+import type { World } from '../../../game/World'
+
+function tryTravelFireDetour(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  pc: { col: number; row: number },
+): boolean {
+  const { w, p, onCooldown } = ctx
   // §217 (open-test round 2): travel-phase fire-line detour — an aligned,
   // ray-clear, off-cooldown killable target (csb/cbr/base band) one turn
   // away beats continuing the nav plan: turn + fire this tick (cost: one
@@ -69,6 +64,16 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
       return true
     }
   }
+  return false
+
+}
+
+/**
+ * §162 carve-dig START + active-session step (§3.7 extraction; body verbatim).
+ * Returns true when HUNT commits this tick; false = fall through to normal HUNT.
+ */
+function runCarveDig(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+  const { p, pcx, pcy, onCooldown } = ctx
   // §162: carve-dig START — the player is pixel-blocked (endFrame stuck
   // detector: moved < carveDigBlockThreshold px for carveDigBlockTicks
   // ticks, i.e. wall-blocked / sealed-pocket oscillation). The cell-level
@@ -147,6 +152,19 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
       }
     }
   }
+  return false
+
+}
+
+/**
+ * §168 nav-stuck zone update + escape-suppression window + §161 carve-yield
+ * (§3.7 extraction; body verbatim). Returns the navStuck verdict for this tick.
+ */
+function updateNavStuckState(
+  self: GodAIInput,
+  w: World,
+  pc: { col: number; row: number },
+): boolean {
   // §168: navStuckZone — exact-cell comparison is defeated by sub-pixel
   // jitter: playerCell() is the tank CENTER and a 1px bounce across a
   // cell boundary flips it (e.g. S34 s8: y 87.02↔88.10 → center (4,5)↔
@@ -206,7 +224,15 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
     navStuck = false
     self._navStuckTrack.suppress = 0
   }
+  return navStuck
 
+}
+
+/**
+ * §190 pixel-stuck direct-move fallback (§3.7 extraction; body verbatim).
+ */
+function tryPixelStuckDirectMove(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+  const { p, pcx, pcy, onCooldown } = ctx
   // §190: pixel-stuck fallback — when the player has been pixel-stuck for
   // >= pixelStuckDirectMoveTicks and no carve-dig is active, bypass A*
   // pathfinding and use directMove. With replanInterval=1 (default on hard),
@@ -251,7 +277,20 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
     self._lastBranch = 'navigate'
     return true
   }
+  return false
 
+}
+
+/**
+ * Nav-target selection for HUNT (§3.7 extraction; body verbatim): nav-stuck
+ * center/defense escape (P3.1/§179), M3 survival retreat, else selectTarget.
+ */
+function selectHuntNavTarget(
+  self: GodAIInput,
+  w: World,
+  pc: { col: number; row: number },
+  navStuck: boolean,
+): Cell | null {
   let navTarget: Cell | null
   // P3.1: When nav-stuck triggers, only go to center if the player is
   // NOT already at/near center (target == current cell → deadlock, the S9
@@ -292,9 +331,27 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   } else {
     navTarget = self.selectTarget(pc)
   }
+  return navTarget
 
-  const navDist = navTarget ? manhattan(navTarget.col, navTarget.row, pc.col, pc.row) : Infinity
+}
 
+/**
+ * Movement-selection chain for HUNT (§3.7 extraction; body verbatim): stuck
+ * escapes, direct-move ranges, §177/§181 dual-breach variants, long-range A*.
+ * Writes self._moveDir only.
+ */
+function pickHuntMoveDir(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  pc: { col: number; row: number },
+  navTarget: Cell | null,
+  navDist: number,
+  navStuck: boolean,
+): void {
+  const { p } = ctx
+  // P3.1: recompute (same formula as selectHuntNavTarget — cheap, pure).
+  const stuckAtCenter =
+    manhattan(pc.col, pc.row, MAP_CENTER.col, MAP_CENTER.row) <= 2
   if (navStuck && !stuckAtCenter) {
     // P2.2: Stuck too long — break the loop. Try A* to center first, then
     // fall back to any passable direction (not directMove, which would
@@ -408,6 +465,13 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
       self._moveDir = self.directMove(pc)
     }
   }
+
+}
+/**
+ * §182 face-enemy fallback when physically immobile (§3.7 extraction).
+ */
+function tryFaceEnemyFallback(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+  const { p, pcx, pcy, onCooldown } = ctx
   // §182: When the player has been physically immobile for >= carveDigBlockTicks
   // (1.5s default) AND either (a) all movement options failed (_moveDir is
   // null) or (b) the movement direction is blocked by an enemy (not terrain),
@@ -448,6 +512,16 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
       return true
     }
   }
+  return false
+
+}
+
+/**
+ * §85 close-combat exposure reaction + §165 duel/dodge (§3.7 extraction;
+ * body verbatim). Returns true when HUNT is committed to this branch.
+ */
+function applyCloseCombatExposure(self: GodAIInput, ctx: DecisionContext): boolean {
+  const { p, pcx, pcy, onCooldown, shielded } = ctx
   // §85: Close-range enemy exposure check — don't turn your back on a
   // close enemy. If an enemy is within closeCombatDangerRange cells,
   // aligned with the player (same row/col), has no wall between them,
@@ -498,6 +572,39 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
       return true
     }
   }
+  return false
+}
+
+export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
+  const { w, p, pcx, pcy, onCooldown, shielded } = ctx
+  void shielded
+  // Far from target (>5 cells): A* pathfinding routes around walls via
+  // corridors — essential for maze stages. A* finds the corridor, not the
+  // direct path through walls.
+  //
+  // Close to target (≤5 cells): directMove chases the moving enemy
+  // directly, adjusting every tick.
+  //
+  // P0.3: Navigate stuck escape — if the player has been at the same cell
+  // in the navigate branch for too long (pursuit loop with a faster enemy),
+  // override the target to the map center.
+  //
+  // §3.7: each mechanism below moved verbatim into a named function above;
+  // this body is the orchestrator. Side effects stayed inside each fn.
+  const pc = self.playerCell()
+  if (tryTravelFireDetour(self, ctx, pc)) return true
+  if (runCarveDig(self, ctx, pc)) return true
+  const navStuck = updateNavStuckState(self, w, pc)
+  if (tryPixelStuckDirectMove(self, ctx, pc)) return true
+
+  const navTarget = selectHuntNavTarget(self, w, pc, navStuck)
+  const navDist = navTarget ? manhattan(navTarget.col, navTarget.row, pc.col, pc.row) : Infinity
+  pickHuntMoveDir(self, ctx, pc, navTarget, navDist, navStuck)
+
+  if (tryFaceEnemyFallback(self, ctx, pc)) return true
+  if (applyCloseCombatExposure(self, ctx)) return true
+
+
   // M5/§165: 站位提前规避 — check the immediate next cell (1 cell ahead)
   // for a bullet that will arrive at the same time as the player. If a
   // threat is found, swap to a safe perpendicular direction. 1-cell
