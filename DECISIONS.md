@@ -2170,3 +2170,34 @@ commit，全部通过 determinism 门（tools/probe-det-baseline.sh，21 组合 
 3.13 关闭保留）；弹道谓词/基地环几何/守卫簇/卡死跟踪器/pickup 尾巴副本清零；
 hub 包装 -11。determinism 语料 v2 在本轮三次拦截行为漂移（1 次 3.1 极性、1 次
 3.4 耦合、若干次拼接损坏由 tsc 拦截），验证 §266 门的价值。
+
+## 271. 第三轮重构 Phase 4 落地汇总（plan/refactor.zcode.md §4） (STATUS: 已实施, 2026-08-24)
+
+**Decision:** §4.1/§4.2/§4.3 落地；**§4.4 按三道门判断后不做**。
+
+- **4.1 One-Author 残余写路由**：Simulation 新增 `applyTakeover(coop)` /
+  `clearRewindPending()` / `refundRewind()` 公共入口；Game.takeOverFromSpectate
+  （两处 w.coop 直写）、GameReplay.takeOverFromReplay、GameLoop 时光宝盒
+  rewindPending 消费与 rewindStock++ 退款全部改走入口。豁免注记写入
+  AGENTS §2.1 与 MANIFEST §3：`world.state = …` / `world.ui.*` 为转移写非实体
+  变更，属既有灰色地带的显式化（本条不动其行为）。度量：Simulation 外
+  gameplay 直写 3→0。
+- **4.2 parseReplayFile 分解**：107 行一体式拆为 validateEnvelope →
+  validateStructure → decodeFrames → buildReplay + reconcileSnapshotStage。
+  全仓最差类型逃逸 `env as unknown as FileEnvelope` 移除——envelope 改为逐字段
+  显式构造。**兼容性纪律**：第一版补的 source/sim/finalState 强校验改变了错误
+  优先级（replay-file 测试 4 红），按"零新增拒绝分支"原则回退为纯构造式守卫，
+  错误消息与历史解析器 byte-identical（测试钉死）。
+- **4.3 genId() 豁免注记**：World.ts nextId 旁加交叉引用注释（权威记录在
+  types.ts 快照 id 字段文档），横幅矛盾消除，行为不动。
+- **4.4 DOM 构建长函数（ControlCenter/ReplayController/MenuScreen 构造器）**：
+  **关闭不做**。三道门判定：无 DOM 单测网（验收仅 tsc+vite build）、收益仅
+  可导航性、且本轮 3.7/3.8 的拼接返工率表明无测试网的机械搬移风险真实存在。
+  不做不算欠账（计划原文授权）。
+
+**Rationale:** Phase 4 是选择性收尾；每处行为面都有测试或 determinism 门兜底，
+4.2 的类型收紧以测试契约优先于审计理想。
+
+**Implications:** 度量基线收口——Simulation 外 gameplay 直写 0；replay/file.ts
+解析器可导航性提升且类型逃逸清零；genId 豁免从口头惯例变为文档注记。
+plan/refactor.zcode.md 全部条目处置完毕（执行/否决/关闭各有记录）。
