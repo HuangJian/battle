@@ -4,10 +4,11 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import { baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import { commitPowerupTail,
+  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
 export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean {
-  const { w, p, pcx, pcy, onCooldown } = ctx
+  const { w, pcx, pcy } = ctx
   // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
   if (isDualCentralBreachHoldP1(self)) return false
   if (self.aggressive) return false
@@ -23,9 +24,5 @@ export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean
   // §186: Skip when pixel-stuck — the powerup is unreachable.
   if (self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks)
     return false
-  self._moveDir = self.navigateTowards(target)
-  self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-  self.branchCounts.powerup++
-  self._lastBranch = 'powerup'
-  return true
+  return commitPowerupTail(self, ctx, target)
 }

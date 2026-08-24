@@ -5,11 +5,12 @@
 import { CELL } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import { isDualCentralBreachHoldP1, retreatGateBlocksPickup } from '../candidates/shared'
+import { commitPowerupTail,
+  isDualCentralBreachHoldP1, retreatGateBlocksPickup } from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
 
 export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean {
-  const { p, pcx, pcy, onCooldown } = ctx
+  const { pcx, pcy } = ctx
   // §180: Dual central breach — fence pickup by EITHER tank (previously
   // P2-only). Fence = steel walls for the base, the single most critical
   // powerup for preventing base destruction. When the fence spawns near
@@ -40,11 +41,7 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
         if (partnerDist < myDist - 2) takeIt = false
       }
       if (takeIt) {
-        self._moveDir = self.navigateTowards(fenceTarget)
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.powerup++
-        self._lastBranch = 'powerup'
-        return true
+        return commitPowerupTail(self, ctx, fenceTarget)
       }
     }
   }
@@ -76,11 +73,7 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
     // engage/defenseIntercept, below dodge/interceptBase). 0 = OFF.
     const direTarget = self.params.direItemMode > 0 ? self.findDireItemTarget(pcx, pcy) : null
     if (direTarget) {
-      self._moveDir = self.navigateTowards(direTarget)
-      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      self.branchCounts.powerup++
-      self._lastBranch = 'powerup'
-      return true
+      return commitPowerupTail(self, ctx, direTarget)
     }
     if (self.params.pickupPriorityMode > 0) {
       // §152-W3: findUrgentPowerUpTargetWithCommit persists an active
@@ -96,11 +89,7 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
         const puStuck =
           self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
         if (!puStuck) {
-          self._moveDir = self.navigateTowards(urgentTarget)
-          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-          self.branchCounts.powerup++
-          self._lastBranch = 'powerup'
-          return true
+          return commitPowerupTail(self, ctx, urgentTarget)
         }
       }
     }

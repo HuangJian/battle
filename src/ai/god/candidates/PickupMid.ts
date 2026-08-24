@@ -4,10 +4,11 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import { baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import { commitPowerupTail,
+  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
 export function evalPickupMid(self: GodAIInput, ctx: DecisionContext): boolean {
-  const { w, p, pcx, pcy, onCooldown } = ctx
+  const { w, pcx, pcy } = ctx
   // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
   if (isDualCentralBreachHoldP1(self)) return false
   // Per the §88 rule-4 chain, MID-tier pickups outrank 据守咽喉要地. The HIGH
@@ -33,11 +34,7 @@ export function evalPickupMid(self: GodAIInput, ctx: DecisionContext): boolean {
       const puStuck =
         self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
       if (!puStuck) {
-        self._moveDir = self.navigateTowards(midTarget)
-        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.powerup++
-        self._lastBranch = 'powerup'
-        return true
+        return commitPowerupTail(self, ctx, midTarget)
       }
     }
   }

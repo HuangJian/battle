@@ -131,6 +131,22 @@ export function selfFireBaseGuardBlocks(
   )
 }
 
+/** §3.5 pickup-commit tail (single source; was byte-identical in
+ * PickupHigh ×3 / PickupMid / PickupLow / ClosePickup): navigate toward
+ * `target`, fire along the chosen move when off cooldown, then count and
+ * label the POWERUP branch. Returns true so callers can `return commit…()`. */
+export function commitPowerupTail(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  target: { col: number; row: number },
+): boolean {
+  self._moveDir = self.navigateTowards(target)
+  self._fire = !ctx.onCooldown && self.shouldFireInDir(ctx.pcx, ctx.pcy, self._moveDir ?? ctx.p.dir)
+  self.branchCounts.powerup++
+  self._lastBranch = 'powerup'
+  return true
+}
+
 /**
  * §139 / 方向 A（进攻侧）: 火力死区解除 (firing-lane re-engage).
  *

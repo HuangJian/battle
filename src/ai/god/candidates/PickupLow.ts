@@ -4,12 +4,13 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import { baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import { commitPowerupTail,
+  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
 import { manhattan } from '../../../utils/helpers'
 
 export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
-  const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
+  const { w, pcx, pcy, onCooldown, aimDir } = ctx
   // §178: dual central-breach P1 — pure defender, never diverts to power-ups.
   if (isDualCentralBreachHoldP1(self)) return false
   // §146 C: LOW tier is deliberately NOT gated by fieldRetreatPickupGate —
@@ -48,11 +49,7 @@ export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
         const puStuck =
           self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
         if (!puStuck) {
-          self._moveDir = self.navigateTowards(puTarget)
-          self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-          self.branchCounts.powerup++
-          self._lastBranch = 'powerup'
-          return true
+          return commitPowerupTail(self, ctx, puTarget)
         }
       }
     }
