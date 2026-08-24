@@ -5,6 +5,41 @@
 
 ---
 
+## §7 干净评估嵌入流水线（2026-08-24 晚，DECISIONS §245）
+
+> 背景：采集成本趋零后，training_log 的 winRate 仍是"带探索噪声的移动靶"——
+> rollout 采样熵≈1.27 nats + 每轮 rotate 换 seed，轮间 ±5pp 摆动无法归因。
+> 用户拍板：PPO 空窗期把固定语料贪心局分发到全部 agents（权重恰为上一轮 PPO
+> 产物，与本轮 rollout winRate 同策略直接对照），评估墙钟藏在 PPO 计算里零成本。
+
+### 7.1 落地（四处）
+- `tools/sim/export-eval-game.ts`（**新文件**）：argmax 贪心单局 runner，纯 v7 打分
+  （无 F3 门控），只写 `_eval_report.json`。干跑双执行字节级一致（DETERMINISM OK，
+  s0/860001 → base_destroyed@3547 ticks、8 杀、score 0.144）。
+- `sampler-agent.ts`：`mode=eval` 任务路由 + ping/status `evalSupport` 能力声明 +
+  manifest 回显 mode；权重切换删除改尽力而为 + retention 清扫（修在飞评估局
+  Windows EBUSY 竞态——此前切换只在 140/140 全结算后发生故未暴露）。
+- `dist_common.py`：`fetch_task(mode=)` + `validate_eval_result()`。
+- `run_rl.py`：rollout 返回后 spawn 守护线程；语料 `EVAL_SEEDS=(860001,860002)` ×35 关；
+  收账 `tmp/rl-traj/eval_log.jsonl`（逐局行 + eval_summary 行，按 wver16 去重断点不重评）。
+
+### 7.2 关键设计判断
+- **不动 export-rl-rollout.ts**：codeHash 是 rollout 准入硬门，动它 = 五节点全部
+  剔除直到同步完。独立文件 + ping 能力声明 → 逐节点灰度，旧 agent 零影响。
+- **节点门四条件**：enabled ∧ ping ∧ evalSupport ∧ bun major.minor 一致。旧 agent
+  会静默忽略 mode 参数把评估跑成采样局——能力声明是防误吃的唯一闸门。
+- **iterId 后缀 `ev`**：agent 结果缓存键空间天然隔离。
+- **读数对照**：eval_summary 行带 rolloutWinRate 同列——clean vs sampled 的系统性
+  偏移本身是健康信号（贪心通常更高；若反而更低说明熵还在乱开火）。
+
+### 7.3 生效条件与观察项
+- 生效需各节点同步代码并重启 agent（ping 出现 evalSupport 即点亮）；trainer 重启时
+  新参数默认已开（--eval-games-per-stage 2）。
+- 观察项：① clean winRate 曲线斜率 vs 墙钟——这才是收敛速度的真裁判；
+  ② dropped 计数若常态非零，调大 --eval-window-sec；③ 后续可挂 HTML 趋势报告。
+
+---
+
 ## §6 训练可观测性落地 + 权重逐轮归档 + mb1024/workers10/self-agent2 重启（2026-08-24 早）
 
 > 背景：it2 的 PPO 阶段跑了 **110 分钟全程零输出**（旧代码只有首尾两行日志），

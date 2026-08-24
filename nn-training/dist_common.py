@@ -139,12 +139,20 @@ def post_weights(url: str, auth_key: str, iter_id: str, sha: str, weights_bytes:
 
 
 def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, seed: int,
-               max_ticks: int, difficulty: str, timeout: float) -> tuple[dict, dict]:
-    """GET /v1/task → (manifest, files)；非 200 抛 DistError。"""
-    qs = urllib.parse.urlencode({
+               max_ticks: int, difficulty: str, timeout: float,
+               mode: str | None = None) -> tuple[dict, dict]:
+    """GET /v1/task → (manifest, files)；非 200 抛 DistError。
+
+    mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
+    evalSupport=true 的节点使用——旧 agent 会静默忽略该参数跑成采样局。
+    """
+    params = {
         "iterId": iter_id, "wver": wver, "stage": stage, "seed": seed,
         "maxTicks": max_ticks, "difficulty": difficulty,
-    })
+    }
+    if mode:
+        params["mode"] = mode
+    qs = urllib.parse.urlencode(params)
     try:
         status, body = _request(url.rstrip("/") + "/v1/task?" + qs, auth_key, timeout)
     except urllib.error.HTTPError as e:
@@ -182,6 +190,20 @@ def validate_result(manifest: dict, files: dict, expected_wver: str,
             return f"{name}: invalid base64"
         if len(raw) == 0:
             return f"{name}: empty payload"
+    return None
+
+
+def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
+    """干净评估局的轻量校验：无 shards，仅对账 wver、模式回显与关键字段。"""
+    if not isinstance(manifest, dict):
+        return "manifest is not an object"
+    if manifest.get("wver") != expected_wver:
+        return f"wver mismatch: got {manifest.get('wver')!r}"
+    if manifest.get("mode") != "eval":
+        return f"mode echo mismatch: got {manifest.get('mode')!r} (old agent ran sampled game?)"
+    for k in ("outcome", "ticks", "win", "stage", "seed"):
+        if k not in manifest:
+            return f"missing field {k!r}"
     return None
 
 

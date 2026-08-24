@@ -183,6 +183,31 @@ function diskFreeMB(): number | null {
   }
 }
 
+/** 权重文件保留清扫：只留最新 KEEP 份；被在飞评估局占用的尽力跳过。 */
+const WEIGHT_FILES_KEEP = 4
+
+function sweepWeightFiles(): void {
+  try {
+    const files = fs
+      .readdirSync(WORK_DIR)
+      .filter((f) => /^weights-[0-9a-f]{16}\.json$/.test(f))
+      .map((f) => {
+        const p = path.join(WORK_DIR, f)
+        return { p, m: fs.statSync(p).mtimeMs }
+      })
+      .sort((a, b) => b.m - a.m)
+    for (const x of files.slice(WEIGHT_FILES_KEEP)) {
+      try {
+        fs.rmSync(x.p, { force: true })
+      } catch {
+        /* busy — next sweep */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
 // ---------------- game execution ----------------
 let gameSeq = 0
 
@@ -206,24 +231,32 @@ async function runGame(
   seed: number,
   maxTicks: number,
   difficulty: string,
+  mode: string,
 ): Promise<Buffer> {
   if (!weights) throw new Error('no weights cached')
   const wfile = weights.file
+  // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
+  // 只产 _eval_report.json，无 npy shards。
+  const isEval = mode === 'eval'
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
   fs.mkdirSync(gameDir, { recursive: true })
   const t0 = Date.now()
   try {
     const args = [
-      'tools/sim/export-rl-rollout.ts',
+      isEval ? 'tools/sim/export-eval-game.ts' : 'tools/sim/export-rl-rollout.ts',
       '--weights',
       wfile,
       '--out',
       gameDir,
-      '--stages',
-      String(stage),
-      '--seeds',
-      String(seed),
+    ]
+    if (isEval) {
+      // export-eval-game.ts 用单数形式 --stage/--seed
+      args.push('--stage', String(stage), '--seed', String(seed))
+    } else {
+      args.push('--stages', String(stage), '--seeds', String(seed))
+    }
+    args.push(
       '--max-ticks',
       String(maxTicks),
       '--difficulty',
@@ -232,7 +265,7 @@ async function runGame(
       weights.sha,
       '--node-label',
       `bun-${process.pid}`,
-    ]
+    )
     const child = spawn(process.execPath, args, {
       cwd: REPO_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -247,21 +280,29 @@ async function runGame(
       child.on('error', reject)
       child.on('close', (code) => resolve(code ?? -1))
     })
-    if (rc !== 0) throw new Error(`export-rl-rollout exited ${rc}: ${tail}`)
+    const scriptName = isEval ? 'export-eval-game' : 'export-rl-rollout'
+    if (rc !== 0) throw new Error(`${scriptName} exited ${rc}: ${tail}`)
 
-    const shardDir = path.join(gameDir, `rl_s${stage}_seed${seed}`)
-    const files: Record<string, string> = {}
-    for (const name of SHARD_FILES) {
-      const p = path.join(shardDir, name)
-      if (!fs.existsSync(p)) throw new Error(`missing shard file ${name}`)
-      files[name] = fs.readFileSync(p).toString('base64')
+    let files: Record<string, string> = {}
+    let reportPath: string
+    if (isEval) {
+      reportPath = path.join(gameDir, '_eval_report.json')
+    } else {
+      const shardDir = path.join(gameDir, `rl_s${stage}_seed${seed}`)
+      for (const name of SHARD_FILES) {
+        const p = path.join(shardDir, name)
+        if (!fs.existsSync(p)) throw new Error(`missing shard file ${name}`)
+        files[name] = fs.readFileSync(p).toString('base64')
+      }
+      reportPath = path.join(gameDir, '_rl_report.json')
     }
-    const reportPath = path.join(gameDir, '_rl_report.json')
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as Record<string, unknown>
     report.elapsedSec = +((Date.now() - t0) / 1000).toFixed(1)
     // 权威回显：trainer 校验器按标量 stage/seed 对账（export 摘要里是 stages/seeds 列表）
     report.stage = stage
     report.seed = seed
+    // 语义回显：eval 局必须带 mode='eval'，中心据此拒绝旧 agent 误跑的采样局
+    report.mode = mode
 
     return packContainer(report, files)
   } finally {
@@ -312,7 +353,16 @@ async function handle(req: Request): Promise<Response> {
     cacheEvicted += resultCache.size
     cacheBytes = 0
     resultCache.clear()
-    if (oldFile && oldFile !== wfile) fs.rmSync(oldFile, { force: true })
+    // 尽力而为删除：干净评估局可能在飞、子进程尚持旧权重文件句柄（Windows EBUSY）。
+    // 删不掉的留给下方 retention 清扫，绝不让切换失败（那会拖垮整轮权重分发）。
+    if (oldFile && oldFile !== wfile) {
+      try {
+        fs.rmSync(oldFile, { force: true })
+      } catch {
+        /* in-flight eval game holds the handle — swept by retention below */
+      }
+    }
+    sweepWeightFiles()
     console.log(
       `[sampler-agent] weights switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
     )
@@ -327,6 +377,8 @@ async function handle(req: Request): Promise<Response> {
     const seed = parseInt(url.searchParams.get('seed') ?? '', 10)
     const maxTicks = parseInt(url.searchParams.get('maxTicks') ?? '', 10)
     const difficulty = url.searchParams.get('difficulty') ?? 'hard'
+    // mode=eval → 干净评估局（贪心、无 shards）；缺省 rollout。旧 trainer 不发此参数。
+    const mode = url.searchParams.get('mode') ?? 'rollout'
     if (
       !iterId ||
       !wver ||
@@ -371,7 +423,7 @@ async function handle(req: Request): Promise<Response> {
             /* client gone */
           }
         }, 20_000)
-        runGame(stage, seed, maxTicks, difficulty)
+        runGame(stage, seed, maxTicks, difficulty, mode)
           .then((buf) => {
             if (hb) clearInterval(hb)
             lruPut(key, buf)
@@ -434,6 +486,8 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: gitShortHash(),
       cpus: CPUS,
+      // 能力声明：trainer 据此把节点纳入干净评估分发（旧 agent 无此字段 → 自动跳过）
+      evalSupport: true,
     })
   }
 

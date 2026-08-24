@@ -45,6 +45,15 @@ RUN_ID = secrets.token_hex(8)
 MAX_TASK_ATTEMPTS = 3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 
+# 干净评估（2026-08-24，用户指令）：rollout 收官后的 PPO 空窗期，用各节点已缓存的
+# 同权重跑固定语料贪心局。两股噪声都消掉：动作 argmax 无探索噪声、(stage,seed) 语料
+# 恒定 → 跨 checkpoint 配对可比（同 seed 胜负是确定事件）。时机即流水线设计：此刻
+# 节点持有的权重正是"上一轮 PPO 产物"，与本轮 rollout winRate 同一策略、直接对照；
+# 评估墙钟完全藏在 PPO 计算里，零额外成本。
+EVAL_SEEDS = (860001, 860002)  # 固定语料种子——改动即失去与历史 checkpoint 的可比性
+EVAL_ITER_SUFFIX = "ev"        # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
+EVAL_TASK_ATTEMPTS = 2         # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
+
 KL_WARN = 0.08        # calibrated to our setup: healthy steady state is 0.045-0.054
 ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
 
@@ -716,6 +725,228 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     return combined
 
 
+# ---------------- 干净评估（PPO 空窗期分布式贪心局） ----------------
+
+def _eval_done_keys(eval_jsonl: Path, wver16: str) -> set[tuple[int, int]]:
+    """已评估账本：eval_log.jsonl 中同 wver 的 (stage,seed) 集（断点/重启不重评）。"""
+    out: set[tuple[int, int]] = set()
+    try:
+        if eval_jsonl.exists():
+            for line in eval_jsonl.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(r, dict) and r.get("event") == "eval" and r.get("wver") == wver16:
+                    try:
+                        out.add((int(r["stage"]), int(r["seed"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+    except OSError:
+        pass
+    return out
+
+
+def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
+                        iter_id: str, it: int, rollout_winrate: float) -> None:
+    """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
+
+    节点门：enabled ∧ ping ∧ ping.evalSupport ∧ bun major.minor 一致——旧 agent 无
+    能力声明即跳过（它会静默忽略 mode 参数把评估局跑成采样局），逐节点灰度点亮。
+    """
+    from collections import deque
+
+    try:
+        policy = cfg.get("policy", {})
+        status_timeout = float(policy.get("statusTimeoutSec", 3))
+        task_timeout = float(policy.get("taskTimeoutSec", 900))
+        fail_streak_max = int(policy.get("nodeFailStreak", 3))
+        window = float(getattr(args, "eval_window_sec", 1500) or 1500)
+        deadline = time.time() + window
+        wver = dist_common.weights_fingerprint(rl_path)
+        key16 = wver[:16]
+        eval_iter_id = f"{iter_id}{EVAL_ITER_SUFFIX}"
+        eval_jsonl = traj_dir.parent / "eval_log.jsonl"
+        n_seeds = max(0, int(getattr(args, "eval_games_per_stage", 0) or 0))
+        pairs = [(s, sd) for s in range(args.total_stages) for sd in EVAL_SEEDS[:n_seeds]]
+        if not pairs:
+            return
+        todo = [p for p in pairs if p not in _eval_done_keys(eval_jsonl, key16)]
+        if not todo:
+            log(f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip")
+            return
+
+        local_bun = _bun_version(bun)
+        alive = []
+        for n in cfg.get("nodes", []):
+            if not n.get("enabled", True):
+                continue
+            nid = str(n.get("id") or n.get("url") or "?")
+            ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+            if ping is None:
+                continue
+            if not ping.get("evalSupport"):
+                log(f"[eval] node {nid}: agent lacks evalSupport — skipped "
+                    f"(sync code + restart agent to enable)")
+                continue
+            if _mm(str(ping.get("bunVersion", "?"))) != _mm(local_bun):
+                log(f"[eval] node {nid}: bun version mismatch — skipped")
+                continue
+            c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+            alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
+        if not alive:
+            log("[eval] no eval-capable node — skipped this round")
+            return
+
+        # 幂等下发（节点通常已持有 → kept；agent 重启过则补发）
+        with open(rl_path, "rb") as f:
+            weights_bytes = f.read()
+        nodes_ok = []
+        for nd in alive:
+            try:
+                dist_common.post_weights(nd["url"], nd["key"], iter_id, wver, weights_bytes,
+                                         timeout=min(300.0, max(60.0, task_timeout)))
+                nodes_ok.append(nd)
+            except dist_common.DistError as e:
+                log(f"[eval] weights POST to {nd['id']} failed ({e}) — excluded")
+        if not nodes_ok:
+            log("[eval] all weight POSTs failed — skipped this round")
+            return
+
+        total = len(todo)
+        log(f"[eval] it{it}: dispatch {total} greedy games "
+            f"(corpus={len(pairs)}, done={len(pairs) - total}) -> "
+            f"{[(n['id'], n['c']) for n in nodes_ok]}")
+
+        pending: deque[tuple[int, int]] = deque(todo)
+        lock = threading.Lock()
+        seen: set[tuple[int, int]] = set()
+        attempts: dict[tuple[int, int], int] = {}
+        streaks = {nd["id"]: 0 for nd in nodes_ok}
+        wins = [0]
+        outcomes: dict[str, int] = {}
+        jsonl_lock = threading.Lock()
+
+        def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
+            dims = manifest.get("dims") or {}
+            dim_vals = {k: (v.get("value") if isinstance(v, dict) else v)
+                        for k, v in dims.items()}
+            win = 1 if manifest.get("win") else 0
+            row = {
+                "event": "eval", "iter": it, "wver": key16,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "stage": task[0], "seed": task[1], "node": nd_id,
+                "outcome": manifest.get("outcome"), "win": win,
+                "ticks": manifest.get("ticks"), "score": manifest.get("score"),
+                "quality": manifest.get("quality"), "dims": dim_vals,
+                "elapsedSec": manifest.get("elapsedSec"),
+            }
+            with jsonl_lock:
+                with open(eval_jsonl, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row) + "\n")
+            with lock:
+                wins[0] += win
+                oc = str(manifest.get("outcome"))
+                outcomes[oc] = outcomes.get(oc, 0) + 1
+
+        def worker(nd: dict) -> None:
+            while time.time() < deadline:
+                task = None
+                with lock:
+                    if streaks.get(nd["id"], 0) >= fail_streak_max:
+                        return
+                    if pending:
+                        task = pending.popleft()
+                        attempts[task] = attempts.get(task, 0) + 1
+                        attempt = attempts[task]
+                    else:
+                        return
+                ok = False
+                err = ""
+                manifest: dict = {}
+                try:
+                    manifest, _files = dist_common.fetch_task(
+                        nd["url"], nd["key"], iter_id=eval_iter_id, wver=wver,
+                        stage=task[0], seed=task[1], max_ticks=args.max_ticks,
+                        difficulty=args.difficulty, timeout=task_timeout, mode="eval")
+                    why = dist_common.validate_eval_result(manifest, wver)
+                    if why:
+                        raise dist_common.DistError(0, why)
+                    record(manifest, nd["id"], task)
+                    ok = True
+                except Exception as e:  # noqa: BLE001 — 单局失败只回队/放弃
+                    err = str(e)[:200]
+                with lock:
+                    if ok:
+                        seen.add(task)
+                        streaks[nd["id"]] = 0
+                        el = manifest.get("elapsedSec")
+                        log(f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
+                            f"node={nd['id']} outcome={manifest.get('outcome')} "
+                            f"ticks={manifest.get('ticks')} "
+                            f"elapsed={str(el) + 's' if el is not None else '-'}")
+                    else:
+                        streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
+                        if attempt < EVAL_TASK_ATTEMPTS and task not in seen:
+                            pending.append(task)
+                            log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                        elif task not in seen:
+                            log(f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) "
+                                f"— dropped")
+
+        threads = []
+        for nd in nodes_ok:
+            for _ in range(nd["c"]):
+                threads.append(threading.Thread(target=worker, args=(nd,), daemon=True,
+                                                name=f"eval-{nd['id']}"))
+        for t_ in threads:
+            t_.start()
+        for t_ in threads:
+            t_.join(timeout=max(30.0, window + task_timeout))
+
+        dropped = total - len(seen)
+        n = len(seen)
+        clean_wr = (wins[0] / n) if n else None
+        summary = {
+            "event": "eval_summary", "iter": it, "wver": key16,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "games": n, "wins": wins[0],
+            "winRate": round(clean_wr, 4) if clean_wr is not None else None,
+            "outcomes": outcomes, "dropped": dropped,
+            "rolloutWinRate": report_winrate_safe(rollout_winrate),
+            "nodes": {nd["id"]: nd["c"] for nd in nodes_ok},
+        }
+        with jsonl_lock:
+            with open(eval_jsonl, "a", encoding="utf-8") as f:
+                f.write(json.dumps(summary) + "\n")
+        if n:
+            log(f"[eval] it{it} DONE wver={key16[:12]}… clean winRate={clean_wr:.1%} "
+                f"({wins[0]}/{n}, dropped={dropped}) vs rollout(sampled)="
+                f"{rollout_winrate:.1%} outcomes={json.dumps(outcomes)}")
+        else:
+            log(f"[eval] it{it}: no game settled within window — nothing recorded")
+    except Exception as e:  # noqa: BLE001 — 评估是旁路，绝不允许拖垮训练主循环
+        log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")
+
+
+def report_winrate_safe(wr: float) -> float | None:
+    try:
+        return round(float(wr), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def dispatch_eval_bg(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
+                     iter_id: str, it: int, rollout_winrate: float) -> threading.Thread:
+    t_ = threading.Thread(target=dispatch_eval_round,
+                          args=(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate),
+                          daemon=True, name=f"eval-it{it}")
+    t_.start()
+    return t_
+
+
 def run_rollout_stream(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
                        args, cfg: dict, iter_id: str, model, opt, device) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
@@ -982,6 +1213,11 @@ def main() -> None:
     ap.add_argument("--stream", type=int, default=0,
                     help="1 = 流式迭代：采集与 PPO 重叠（权重整轮冻结，每积压一批局就跑一轮更新）；"
                          "0 = 串行（采集全部完成后再统一 PPO）")
+    ap.add_argument("--eval-games-per-stage", type=int, default=2,
+                    help="干净评估：每关固定种子贪心局数（0=关闭）。rollout 收官后的 PPO 空窗期 "
+                         "分发到全部 ping.evalSupport 节点；结果追加 tmp/rl-traj/eval_log.jsonl")
+    ap.add_argument("--eval-window-sec", type=int, default=1500,
+                    help="干净评估线程的墙钟预算；超时未结算的局放弃（不阻塞 PPO 与下一轮）")
     args = ap.parse_args()
 
     import numpy as np
@@ -1077,8 +1313,10 @@ def main() -> None:
             dist_cfg = dist_common.load_dist_config()
             t_rollout = time.time()
             stream_meta = None
+            dist_iter_id: str | None = None
             if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
                 iter_id = f"{RUN_ID}.{it}"
+                dist_iter_id = iter_id
                 enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
                 log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
                 if int(getattr(args, "stream", 0) or 0):
@@ -1109,6 +1347,14 @@ def main() -> None:
                     f"min={ss['min']:.4f} max={ss['max']:.4f}")
             if "dimMeans" in report:
                 log(f"[run_rl] dims it{it}: {json.dumps(report['dimMeans'])}")
+
+            # 干净评估：rollout 收官、PPO 空窗期，用各节点已缓存的同权重（= 上一轮 PPO
+            # 产物，与本轮 rollout winRate 同一策略）跑固定语料贪心局。后台线程不阻塞
+            # PPO；下轮权重分发时未完成的评估局自然作废（账本只收已结算的）。
+            if dist_iter_id is not None and dist_cfg is not None \
+                    and int(getattr(args, "eval_games_per_stage", 0) or 0) > 0:
+                dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg, dist_iter_id, it,
+                                 report["winRate"])
 
             if stream_meta is None:
                 t_ppo = time.time()

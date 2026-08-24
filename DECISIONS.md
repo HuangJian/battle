@@ -1629,3 +1629,20 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 - 修复以真实事故数据验证：`combine_reports(resumed_manifests(it2))` 修复前 KeyError、修复后 games=140/outcomes 全归类（111 base_destroyed + 20 lives_exhausted + 7 stage_clear + 2 timeout）。
 
 **Implications:** 任何迭代失败都会在 training_log 留 `iter_error` 痕迹并自动原地重试；detach 运行从此可事后取证。巡检工具 `rl-hourly-inspect.ts` 同步修复 null score_mean 渲染崩溃（队列空聚合事件触发）。
+
+## 245. 干净评估嵌入分布式流水线 — PPO 空窗期全节点贪心局（STATUS: SHIPPED, 2026-08-24）
+
+**Decision:** rollout 收官后、下轮权重分发前的空窗期，trainer 后台线程向全部 eval-capable 节点派发固定语料评估局（默认 35 关 × 2 固定种子 = 70 局，`EVAL_SEEDS=(860001,860002)`），结果追加 `tmp/rl-traj/eval_log.jsonl`（按 wver 前 16 位去重账本）。四处落地：
+1. **新文件 `tools/sim/export-eval-game.ts`**（不在 codeHash 哈希集）：掩码 argmax 贪心单局 runner，只写 `_eval_report.json` 不产 shards；打分纯 v7（无 F3 门控），与 God-AI 全部基线可比。
+2. **`sampler-agent.ts`**：`/v1/task` 增 `mode=eval` 路由；`/v1/ping|status` 增 `evalSupport:true` 能力声明；manifest 回显 `mode` 供中心硬校验；权重切换的旧文件删除改尽力而为 + retention 清扫（保留最新 4 份）——修在飞评估局持句柄导致 Windows EBUSY 的竞态。
+3. **`dist_common.py`**：`fetch_task(mode=)` 参数 + `validate_eval_result()` 轻量校验（wver/mode 回显/关键字段）。
+4. **`run_rl.py`**：rollout 返回后 spawn 守护线程 `dispatch_eval_bg`；节点门 = enabled ∧ ping ∧ evalSupport ∧ bun major.minor 一致；`--eval-games-per-stage`（0=关）/`--eval-window-sec`。
+
+**Rationale:**
+- 动机（用户指令）：采集成本趋零后，训练遥测 winRate 的两股噪声——探索采样（熵≈1.27 nats）与每轮 rotate 换 seed 的构成波动——让轮间比较失去意义。干净评估冻结权重 + argmax + 固定语料，同 seed 胜负成为确定事件，可做配对比较。
+- **时机即流水线**：此刻节点持有的权重恰为上一轮 PPO 产物，与本轮 rollout winRate 同一策略直接对照；评估墙钟完全藏在 PPO 计算窗口里，零额外成本。
+- **独立文件而非给 export-rl-rollout.ts 加 --greedy**：codeHash 是 rollout 准入硬门（§M4），动哈希集内文件会让全部远程节点在同步代码前被剔除、采集塌缩成本机。独立文件 + ping 能力声明实现逐节点灰度，旧 agent 零影响。
+- **iterId 后缀 `ev` 隔离键空间**：agent 结果缓存按 `{iterId}:{stage}:{seed}` 键控，评估与采集天然不混叠；断点重启靠 eval_log.jsonl 账本去重，不重评已完局。
+- 未完成局语义：下轮权重分发触发 agent 切换，在飞评估局失败（409/EBUSY 已修）→ 记 dropped 放弃，绝不阻塞 PPO 或下一轮。
+
+**Implications:** 评估能力随 agent 逐节点同步灰度点亮（未同步节点自动跳过）；跨 checkpoint 比较仅在 eval-runner 口径不变的前提下有效（口径同步契约写入文件头注释）。后续可挂 HTML 趋势报告与 godai-score 维度面板（本轮只落 JSONL + 控制台摘要行）。
