@@ -49,11 +49,12 @@
  * per-tick allocation even with candidateMode > 0 on the default sim path).
  */
 
-import { CELL, BASE_POS, GRID, type Direction } from '../../constants'
+import { CELL, BASE_POS, type Direction } from '../../constants'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
 
 import { manhattan } from '../../utils/helpers'
+import { laneCorridorBlocked } from './candidates/shared'
 import {
   RING_CELLS,
   enemyDeadline,
@@ -594,7 +595,6 @@ export function travelFireDetourDir(
   isWorthKillNow: (t: Tank) => boolean,
   minSlack: number = DETOUR_TURN_WINDOW_TICKS,
 ): Direction | null {
-  const tm = world.tileMap
   // 目标代理 (mirror UNIFIED_CANDIDATES): 最后 selectTarget 目标, 否则最近敌。
   let hunt: Tank | null = null
   let nearest: Tank | null = null
@@ -618,23 +618,10 @@ export function travelFireDetourDir(
   const dir: Direction =
     tc.col === pc.col ? (tc.row > pc.row ? 'down' : 'up') : tc.col > pc.col ? 'right' : 'left'
   if (p.dir === dir) return null // 已面向 — baseline navigate 本就会开火
-  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — 本地实现，
-  // 语义对应 candidates/shared.ts 的 laneCorridorBlocked（此处为内联复实现，
-  // 见 DECISIONS §66 热路径直连惯例；语义漂移时两处需同步）。
-  const g = tm.grid
-  if (tc.col === pc.col) {
-    const step = tc.row > pc.row ? 1 : -1
-    for (let r = pc.row + step; r !== tc.row; r += step) {
-      if (r < 0 || r >= GRID) return null
-      if (g[r][tc.col] !== 'empty') return null
-    }
-  } else {
-    const step = tc.col > pc.col ? 1 : -1
-    for (let c = pc.col + step; c !== tc.col; c += step) {
-      if (c < 0 || c >= GRID) return null
-      if (g[tc.row][c] !== 'empty') return null
-    }
-  }
+  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — §3.3 改为对
+  // candidates/shared.laneCorridorBlocked 的真调用（0=畅通；非 0 一律挡：
+  // 含未对齐 -1 与端点越界哨兵，与原内联的 null 语义一致）。
+  if (laneCorridorBlocked(world, pc.col, pc.row, tc.col, tc.row) !== 0) return null
   if (fireRayBlocked(world, p, target)) return null // 环砖/基地双保险
   const slack = killAssessment(world, p, target, _KA_TMP).killSlack
   if (!(slack > minSlack)) return null

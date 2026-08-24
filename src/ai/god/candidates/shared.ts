@@ -8,7 +8,7 @@ import type { World } from '../../../game/World'
 import type { Cell } from '../../../utils/grid-search'
 import type { Direction } from '../../../constants'
 import { BASE_POS, GRID } from '../../../constants'
-import { scanAheadImpl } from '../FireControl'
+import { shotReachesBaseImpl, enemyInShotCorridorImpl, scanAheadImpl } from '../FireControl'
 import { RING_CELLS } from '../ThreatBudget'
 import { isFieldRetreatConditionImpl } from '../StrategyPlanner'
 import type { DecisionContext } from '../DecisionCore'
@@ -110,6 +110,27 @@ export function laneCorridorBlocked(
   }
   return -1
 }
+
+/** §121/§74/§152-W1 stop-and-aim SELF-FIRE base guard (§3.3 single source;
+ * was hand-synced in Engage / Aggro / DefenseIntercept / BaseLaneSentry).
+ * True when a shot from (pcx,pcy) toward `dir` would fly into the base:
+ * mode 1 strict (any base-reaching center line), mode 2 lenient (allow when
+ * an enemy body truly overlaps the 6px corridor — point-blank overlap kill).
+ * Callers keep their own side effects (branch counter / continue / return). */
+export function selfFireBaseGuardBlocks(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+): boolean {
+  const mode = self.params.selfFireBaseGuard
+  return (
+    mode > 0 &&
+    shotReachesBaseImpl(self, pcx, pcy, dir) &&
+    (mode < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir))
+  )
+}
+
 /**
  * §139 / 方向 A（进攻侧）: 火力死区解除 (firing-lane re-engage).
  *

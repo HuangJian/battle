@@ -6,15 +6,9 @@ import { CELL } from '../../../constants'
 import { ALL_DIRS } from '../../../utils/direction'
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import {
-  aimSurvivesTurnImpl,
-  bulletPathSteelBlockedImpl,
-  enemyInShotCorridorImpl,
-  scanAheadImpl,
-  shotReachesBaseImpl,
-  shouldFireBreakThroughImpl,
-} from '../FireControl'
-import { MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
+import { selfFireBaseGuardBlocks,
+  MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
 export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -103,10 +97,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       // §120 enemy-screen self-kill. Suppress the fire when the bullet's
       // actual center line reaches the base (mode 1 strict; mode 2 lenient
       // keeps it when an enemy body truly overlaps the corridor).
-      const aggFireBlocked =
-        self.params.selfFireBaseGuard > 0 &&
-        shotReachesBaseImpl(self, pcx, pcy, aimDir) &&
-        (self.params.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, aimDir))
+      const aggFireBlocked = selfFireBaseGuardBlocks(self, pcx, pcy, aimDir)
       if (aggFireBlocked) self._selfFireGuardBlocks++
       // §74: Don't fire when a base-protection wall is on the other offset
       // line, or is closer than (or at the same distance as) the enemy — the

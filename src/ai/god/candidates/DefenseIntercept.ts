@@ -7,14 +7,13 @@ import { type GodAIInput } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
 import { type DecisionContext } from '../DecisionCore'
 import {
-  enemyInShotCorridorImpl,
   scanAheadImpl,
-  shotReachesBaseImpl,
   shouldFireInDirImpl,
 } from '../FireControl'
 import { enemyApproachingBaseLaneImpl, enemyCanShootBase } from '../SmartThreatModel'
 
 import { manhattan } from '../../../utils/helpers'
+import { selfFireBaseGuardBlocks } from '../candidates/shared'
 
 export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown } = ctx
@@ -49,13 +48,7 @@ export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): bo
     const dir: Direction = dCol !== 0 ? (dCol > 0 ? 'right' : 'left') : dRow > 0 ? 'down' : 'up'
     // Self-fire base guard (same as ENGAGE/aggressive §121): never shoot
     // THROUGH the base at an enemy on the far side.
-    if (
-      prm.selfFireBaseGuard > 0 &&
-      shotReachesBaseImpl(self, pcx, pcy, dir) &&
-      (prm.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir))
-    ) {
-      continue
-    }
+    if (selfFireBaseGuardBlocks(self, pcx, pcy, dir)) continue
     // Confirm a live enemy is actually on the line within range — the
     // scan may hit a nearer enemy, which is equally worth shooting.
     const scan = scanAheadImpl(self, pcx, pcy, dir)

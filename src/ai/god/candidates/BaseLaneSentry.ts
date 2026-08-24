@@ -7,9 +7,10 @@ import { type Tank } from '../../../types'
 import { type GodAIInput } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
 import { type DecisionContext } from '../DecisionCore'
-import { enemyInShotCorridorImpl, shotReachesBaseImpl, shouldFireInDirImpl } from '../FireControl'
+import { shouldFireInDirImpl } from '../FireControl'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
-import { baseRingBreachedImpl, laneCorridorBlocked } from '../candidates/shared'
+import { selfFireBaseGuardBlocks,
+  baseRingBreachedImpl, laneCorridorBlocked } from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
 
 export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): boolean {
@@ -54,13 +55,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
     const dir: Direction =
       ccol === tc.col ? (tc.row > crow ? 'down' : 'up') : tc.col > ccol ? 'right' : 'left'
     // 自射基地守卫（与 §134/ENGAGE 同源 — 绝不穿基地开火）。
-    if (
-      prm.selfFireBaseGuard > 0 &&
-      shotReachesBaseImpl(self, pcx, pcy, dir) &&
-      (prm.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, dir))
-    ) {
-      return false
-    }
+    if (selfFireBaseGuardBlocks(self, pcx, pcy, dir)) return false
     if (blocked === 0) {
       // 中线畅通 — 持位射击: 立定向目标翻转 + 开火。仅在**能发射的 tick**
       // 接管（onCooldown 不 claim — 冷却期交给 midLane/navigate 正常流动，

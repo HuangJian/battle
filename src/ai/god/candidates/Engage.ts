@@ -7,11 +7,10 @@ import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import {
   bulletPathSteelBlockedImpl,
-  enemyInShotCorridorImpl,
   scanAheadImpl,
-  shotReachesBaseImpl,
 } from '../FireControl'
 import { countAlignedEnemiesImpl } from '../ThreatAssessor'
+import { selfFireBaseGuardBlocks } from '../candidates/shared'
 
 export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -86,10 +85,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
     // through to navigate (which repositions off the base line).
     // Mode 2 (lenient): keep the shot when an enemy body truly overlaps
     // the 6px corridor (point-blank overlap kill — bullet hits enemy first).
-    const selfFireBlocked =
-      self.params.selfFireBaseGuard > 0 &&
-      shotReachesBaseImpl(self, pcx, pcy, aimDir) &&
-      (self.params.selfFireBaseGuard < 2 || !enemyInShotCorridorImpl(self, pcx, pcy, aimDir))
+    const selfFireBlocked = selfFireBaseGuardBlocks(self, pcx, pcy, aimDir)
     if (selfFireBlocked) self._selfFireGuardBlocks++
 
     // §74: Don't enter T2a when a base-protection wall is closer than
