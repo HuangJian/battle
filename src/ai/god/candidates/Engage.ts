@@ -13,6 +13,7 @@ import { countAlignedEnemiesImpl } from '../ThreatAssessor'
 import { updateStuckTrack } from '../stuck-track'
 import { selfFireBaseGuardBlocks } from '../candidates/shared'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
+import { hasEnemyBulletInLineImpl } from '../ThreatAssessor'
 
 export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -172,7 +173,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
 
           if (facing && !onIce && facing.dist <= self.params.counterFireMaxRange * CELL) {
             // ---- 对枪抵消逻辑（适用于所有敌人类型）----
-            const enemyBulletInLine = self.hasEnemyBulletInLine(pcx, pcy, aimDir)
+            const enemyBulletInLine = hasEnemyBulletInLineImpl(self, pcx, pcy, aimDir)
 
             if (enemyBulletInLine && !onCooldown) {
               // 对枪：敌方子弹已在直线上 → 开火抵消

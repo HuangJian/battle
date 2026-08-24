@@ -24,6 +24,7 @@ import { MAP_CENTER, isDualCentralBreachHoldP1 } from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
 
 import type { World } from '../../../game/World'
+import { findPathThreatImpl } from '../ThreatAssessor'
 
 function tryTravelFireDetour(
   self: GodAIInput,
@@ -611,7 +612,7 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   // lookahead is precise (the bullet and player are both at the same
   // cell next tick); 3-cell lookahead was noisy (too many false positives).
   if (self.params.pathThreatAvoidance > 0 && self._moveDir) {
-    const pathBullet = self.findPathThreat(pcx, pcy, self._moveDir, p.speed)
+    const pathBullet = findPathThreatImpl(self, pcx, pcy, self._moveDir, p.speed)
     if (pathBullet) {
       const safeDir = self.findSafeMoveDir(pcx, pcy, self._moveDir, p.speed)
       if (safeDir) {

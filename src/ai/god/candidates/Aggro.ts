@@ -10,6 +10,7 @@ import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldF
 import { MAP_CENTER, isDualCentralBreachHoldP1, selfFireBaseGuardBlocks } from '../candidates/shared'
 import { updateStuckTrack } from '../stuck-track'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
+import { findFreezePickupTargetImpl } from '../StrategyPlanner'
 
 export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -28,7 +29,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       self.params.freezePickupRange > 0 &&
       !isDualCentralBreachHoldP1(self)
     ) {
-      const freezeTarget = self.findFreezePickupTarget(pcx, pcy)
+      const freezeTarget = findFreezePickupTargetImpl(self, pcx, pcy)
       if (freezeTarget) {
         self._moveDir = self.navigateTowards(freezeTarget)
         // §185: When navigateTowards returns null (no path to the pickup),

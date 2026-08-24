@@ -39,6 +39,7 @@ import { evalDodge } from './candidates/Dodge'
 import { evalSuicideReturn } from './candidates/SuicideReturn'
 
 import { manhattan } from '../../utils/helpers'
+import { findEnemyDirectionImpl } from './FireControl'
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the
@@ -509,7 +510,7 @@ export function thinkImpl(self: GodAIInput): void {
   self.aggressive = frozen
 
   // ---- Scan for enemy targets (global vision, T9 priority) ----
-  let aimDir = self.findEnemyDirection(pcx, pcy)
+  let aimDir = findEnemyDirectionImpl(self, pcx, pcy)
 
   // §159: when the base is under threat and the player is past the defense
   // distance threshold, override aimDir to point at the CLOSEST enemy within

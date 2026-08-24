@@ -8,6 +8,8 @@ import { type DecisionContext } from '../DecisionCore'
 import { commitPowerupTail,
   isDualCentralBreachHoldP1, retreatGateBlocksPickup } from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
+import { findDireItemTargetImpl } from '../StrategyPlanner'
+import { findDualFencePickupImpl } from '../StrategyPlanner'
 
 export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean {
   const { pcx, pcy } = ctx
@@ -26,7 +28,7 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
     self.dualStrategyActive &&
     self.params.dualCentralBreachP2FencePickup > 0
   ) {
-    const fenceTarget = self.findDualFencePickup(pcx, pcy)
+    const fenceTarget = findDualFencePickupImpl(self, pcx, pcy)
     if (fenceTarget) {
       const myCol = Math.floor(pcx / CELL)
       const myRow = Math.floor(pcy / CELL)
@@ -71,7 +73,7 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
     // under exactly this 4-enemy pressure). Runs before the normal §87 HIGH
     // tier, keeping the PICKUP_HIGH chain slot (weight 800 — above
     // engage/defenseIntercept, below dodge/interceptBase). 0 = OFF.
-    const direTarget = self.params.direItemMode > 0 ? self.findDireItemTarget(pcx, pcy) : null
+    const direTarget = self.params.direItemMode > 0 ? findDireItemTargetImpl(self, pcx, pcy) : null
     if (direTarget) {
       return commitPowerupTail(self, ctx, direTarget)
     }

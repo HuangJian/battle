@@ -6,7 +6,6 @@ import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
 import { manhattan } from '../utils/helpers'
 import {
-  findEnemyDirectionImpl,
   findEnemyFacingPlayerImpl,
   scanAheadImpl,
   shouldFireInDirImpl,
@@ -35,25 +34,17 @@ export type { GodAIParams } from './god/params'
 import { initEnemyModel, type EnemyModelState } from './god/EnemyModel'
 import {
   findMostDangerousBulletImpl,
-  findBulletThreatToBaseImpl,
-  baseBulletInterceptCellImpl,
-  dodgeDirectionImpl,
   isSafeDirImpl,
-  hasEnemyBulletInLineImpl,
-  findPathThreatImpl,
+  hasCrossFireBulletImpl,
   findSafeMoveDirImpl,
   closeCombatExposureImpl,
   isTerrainPinnedImpl,
-  hasCrossFireBulletImpl,  isBaseUnderThreatImpl,
+  isBaseUnderThreatImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
   findUrgentPowerUpTargetImpl,
   findUrgentPowerUpTargetWithCommitImpl,
-  findDireItemTargetImpl,
-  findDualFencePickupImpl,
-  findFreezePickupTargetImpl,
-  findClosePickupTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   computeBaseGuardAnchorImpl,
@@ -65,7 +56,6 @@ import {
   tankCellImpl,
   navigateTowardsImpl,
   followPathImpl,
-  replanImpl,
   directMoveImpl,
   canMoveOrBreakImpl,
   canMoveDirImpl,
@@ -82,6 +72,10 @@ import type { ChokepointPlan } from './god/Chokepoint'
  * `InputLike`.
  *
  * Tuning plan: plan/God-AI-Tuning.md
+ *
+ * Hub delegation convention (refactor.zcode.md §3.14): multi-caller public
+ * surface stays as hub wrappers; single-caller / hot-path methods go DIRECT
+ * to the god-layer Impl (callers import the Impl themselves).
  *
  * Cell 坐标习惯速查 (refactor.zcode.md §3.12; details at each site):
  *   - ThreatBudget.tankCenterCell  → floor-center (corner cell + 1 on both axes)
@@ -1263,9 +1257,6 @@ export class GodAIInput implements InputLike {
   // ================================================================
 
   // --- FireControl ---
-  findEnemyDirection(pcx: number, pcy: number): Direction | null {
-    return findEnemyDirectionImpl(this, pcx, pcy)
-  }
   findEnemyFacingPlayer(
     pcx: number,
     pcy: number,
@@ -1300,20 +1291,8 @@ export class GodAIInput implements InputLike {
   findMostDangerousBullet(pcx: number, pcy: number): Bullet | null {
     return findMostDangerousBulletImpl(this, pcx, pcy)
   }
-  findBulletThreatToBase(): Bullet | null {
-    return findBulletThreatToBaseImpl(this)
-  }
-  baseBulletInterceptCell(bullet: Bullet): Cell | null {
-    return baseBulletInterceptCellImpl(this, bullet)
-  }
-  dodgeDirection(bullet: Bullet, pcx: number, pcy: number): Direction | null {
-    return dodgeDirectionImpl(this, bullet, pcx, pcy)
-  }
   isSafeDir(pcx: number, pcy: number, dir: Direction, excludeBulletId: number): boolean {
     return isSafeDirImpl(this, pcx, pcy, dir, excludeBulletId)
-  }
-  hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
-    return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
   /** §M3-revisit round 3 (DECISIONS §101): terrain-only pinning — true only
    * when BOTH perpendicular dodge directions are impassable (corridor/corner).
@@ -1333,9 +1312,6 @@ export class GodAIInput implements InputLike {
     threshold = 1,
   ): boolean {
     return hasCrossFireBulletImpl(this, pcx, pcy, excludeId, rangeCells, threshold)
-  }
-  findPathThreat(pcx: number, pcy: number, moveDir: Direction, playerSpeed: number): Bullet | null {
-    return findPathThreatImpl(this, pcx, pcy, moveDir, playerSpeed)
   }
   findSafeMoveDir(
     pcx: number,
@@ -1381,21 +1357,9 @@ export class GodAIInput implements InputLike {
   }
   /** E1 / 道具经济: dire-state item pickup (swarm or ring-damaged → nearby
    * bomb/freeze/fence/emp worth a divert). 0 = OFF (byte-identical). */
-  findDireItemTarget(pcx: number, pcy: number): Cell | null {
-    return findDireItemTargetImpl(this, pcx, pcy)
-  }
   /** §6.3-A: P2 dual central breach fence pickup (bypasses all gates). */
-  findDualFencePickup(pcx: number, pcy: number): Cell | null {
-    return findDualFencePickupImpl(this, pcx, pcy)
-  }
   /** §156: freeze-window power-up pickup (unlimited range). */
-  findFreezePickupTarget(pcx: number, pcy: number): Cell | null {
-    return findFreezePickupTargetImpl(this, pcx, pcy)
-  }
   /** §158: non-freeze close-range power-up pickup. */
-  findClosePickupTarget(pcx: number, pcy: number): Cell | null {
-    return findClosePickupTargetImpl(this, pcx, pcy)
-  }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)
   }
@@ -1472,9 +1436,6 @@ export class GodAIInput implements InputLike {
   }
   followPath(): Direction | null {
     return followPathImpl(this)
-  }
-  replan(playerCell: Cell): void {
-    replanImpl(this, playerCell)
   }
   directMove(playerCell: Cell): Direction | null {
     return directMoveImpl(this, playerCell)

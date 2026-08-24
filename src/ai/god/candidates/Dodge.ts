@@ -7,6 +7,7 @@ import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
+import { dodgeDirectionImpl } from '../ThreatAssessor'
 
 export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, threat } = ctx
@@ -97,7 +98,7 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
     }
 
     // Dodge: move perpendicular to the bullet (M3: verify safety).
-    self._moveDir = self.dodgeDirection(threat, pcx, pcy)
+    self._moveDir = dodgeDirectionImpl(self, threat, pcx, pcy)
     // §86: Track dodge state for oscillation detection + persistence/hysteresis.
     // _lastDodgeThreatId is always set (needed by oscillation detection,
     // hysteresis, and persistence in ThreatAssessor). _lastDodgeDir is always

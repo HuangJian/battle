@@ -4,8 +4,12 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
-import { commitPowerupTail,
-  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import {
+  baseRingBreachedImpl,
+  commitPowerupTail,
+  isDualCentralBreachHoldP1,
+} from '../candidates/shared'
+import { findClosePickupTargetImpl } from '../StrategyPlanner'
 
 export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, pcx, pcy } = ctx
@@ -19,7 +23,7 @@ export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean
   // 在捡 star"）；HIGH tier 豁免在 PICKUP_HIGH（bomb/freeze/fence 有效）。
   if (self.params.baseAlertPickupSuppress > 0 && self.hasBase && baseRingBreachedImpl(w))
     return false
-  const target = self.findClosePickupTarget(pcx, pcy)
+  const target = findClosePickupTargetImpl(self, pcx, pcy)
   if (!target) return false
   // §186: Skip when pixel-stuck — the powerup is unreachable.
   if (self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks)

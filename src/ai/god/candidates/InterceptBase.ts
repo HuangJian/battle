@@ -4,6 +4,8 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type DecisionContext } from '../DecisionCore'
+import { findBulletThreatToBaseImpl } from '../ThreatAssessor'
+import { baseBulletInterceptCellImpl } from '../ThreatAssessor'
 
 export function evalInterceptBase(self: GodAIInput, ctx: DecisionContext): boolean {
   const { p, pcx, pcy, onCooldown } = ctx
@@ -13,9 +15,9 @@ export function evalInterceptBase(self: GodAIInput, ctx: DecisionContext): boole
   // headed for the base — the shield protects the player, not the base.
   // Gap B (plan §3): skip entirely when the stage has no base.
   if (!self.aggressive && self.hasBase) {
-    const baseThreat = self.findBulletThreatToBase()
+    const baseThreat = findBulletThreatToBaseImpl(self)
     if (baseThreat) {
-      const interceptCell = self.baseBulletInterceptCell(baseThreat)
+      const interceptCell = baseBulletInterceptCellImpl(self, baseThreat)
       if (interceptCell) {
         self._moveDir = self.navigateTowards(interceptCell)
         // Fire to intercept the bullet (T5 extended to base defense).

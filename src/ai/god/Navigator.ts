@@ -289,7 +289,7 @@ export function followPathImpl(self: GodAIInput): Direction | null {
   // Re-plan periodically or when the path is exhausted.
   self.replanTimer--
   if (self.replanTimer <= 0 || self.path.length === 0) {
-    self.replan(playerCell)
+    replanImpl(self, playerCell)
     self.replanTimer = self.params.replanInterval
     self._lastPathCell = { col: playerCell.col, row: playerCell.row }
   }
