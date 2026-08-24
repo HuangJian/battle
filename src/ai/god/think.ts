@@ -360,8 +360,10 @@ const MID_LANE_HOLD: Candidate = {
 }
 
 /** The M1 chain — weight order strictly mirrors the original top-level order.
- * Exported for the M1 invariant test (tests/decision-core.test.ts): a reorder
- * without a matching ACTION_WEIGHTS update is a behavior change. */
+ * Authoritative weight-order contract: DecisionCore.ACTION_WEIGHTS (locked by
+ * tests/decision-core.test.ts); this array must stay in the same order.
+ * Exported for the M1 invariant test: a reorder without a matching
+ * ACTION_WEIGHTS update is a behavior change. */
 export const CANDIDATES: Candidate[] = [
   SUICIDE_RETURN,
   DODGE,

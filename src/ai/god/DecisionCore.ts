@@ -103,7 +103,12 @@ export type ActionId =
   | 'baseConnectClear'
 
 /**
- * M1 default weights — strictly mirror the original think() top-level chain
+ * M1 default weights — THE authoritative weight-order record (refactor.zcode.md
+ * §3.12): candidate headers and think.ts keep only local context plus pointers;
+ * consistency between this table and the CANDIDATES chain order is locked by
+ * tests/decision-core.test.ts.
+ *
+ * Strictly mirror the original think() top-level chain
  * evaluation order (doc §3.2):
  *
  *   dodge(1000) > interceptBase(900) > pickupHigh(800) > aggro(700)

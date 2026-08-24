@@ -83,6 +83,13 @@ import type { ChokepointPlan } from './god/Chokepoint'
  *
  * Tuning plan: plan/God-AI-Tuning.md
  *
+ * Cell 坐标习惯速查 (refactor.zcode.md §3.12; details at each site):
+ *   - ThreatBudget.tankCenterCell  → floor-center (corner cell + 1 on both axes)
+ *   - Navigator                    → Math.round(x/CELL) on the top-left corner
+ *   - CoveragePlanner              → floor-corner space
+ * These THREE conventions coexist by design; conversions are pinned by tests,
+ * never assumed. See ThreatBudget.tankCenterCell's doc for the canonical note.
+ *
  * Techniques implemented (by ID from the plan):
  *   T2a  — Stop-and-aim: when an enemy is in the same row/col, turn to face
  *          it and fire (instead of firing in the A* movement direction).
