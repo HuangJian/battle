@@ -2116,3 +2116,57 @@ bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与�
 **Implications:** 度量基线更新——makeTank 副本 5→1；parseSeeds 3 份 2 义→具名双义；
 god-AI 测试命名分裂 4→0；零引用工具 8 个 ~1500 行归档；lib/cli 成为唯一 argv 层
 （perf/* 等号语法除外，已登记）。
+
+## 270. 第三轮重构 Phase 3 落地汇总（plan/refactor.zcode.md §3） (STATUS: 已实施, 2026-08-24)
+
+**Decision:** §3.1–3.9、§3.11、§3.12、§3.14 全部落地；**§3.13 整批关闭**。每项独立
+commit，全部通过 determinism 门（tools/probe-det-baseline.sh，21 组合 ×109,516
+签名行，sha256 与基线 b81e240a… 逐字节一致）+ 全量 127 文件测试。
+
+条目清单：
+- **3.1** 弹道对齐谓词单源化：utils/helpers 新增 bulletLaneDist（行进方向语义）/
+  bulletInFrontDist（静态朝向半平面，T2a aimError 门专用），替换内联链 ×10。
+  **审计漂移**：TA×8 实为 ×7——第 8 处 hasBulletInAimLane 是"子弹逆 aimDir"反向
+  语义变体，不可合并。落点选 utils/helpers 而非 ai/god（沿用 §266 manhattan 先例，
+  避免 perception→god 反向依赖）。中途 det 门红一次：FireControl 站点极性反相
+  （113377≠109516），worktree 逐 tick 对照定位 tick124 后修正——门有效性的实证。
+- **3.2** 基地环几何单源化：ThreatBudget 导出 isBaseRingCell + countRingBrickCells；
+  FireControl/PathCarve/candidates-shared/StrategyPlanner×2/SmartThreatModel 的
+  手展开环遍历全部改走 RING_CELLS/共享谓词。
+- **3.3** 自射基地守卫簇 ×4 → candidates/shared.selfFireBaseGuardBlocks；
+  ActionCandidates 的 laneCorridorBlocked 内联复实现改真调用（1.2 注释谎言兑现）。
+- **3.4** 区域卡死跟踪器 ×4 → god/stuck-track.ts（StuckTrack + updateStuckTrack），
+  GodAIInput 四组标量四件套收敛为 4 个 tracker 字段。**行为边界发现**：Hunt 的击杀
+  基线与 Engage 的 _campKillsAtStart 存在历史跨候选耦合——拆分使 8/21 组合 det 红，
+  插桩定位到 f764 逃逸时机分歧后按纪律保留该耦合（Hunt 保持内联形态并注明）。
+- **3.5** pickup commit 尾巴 ×6 → shared.commitPowerupTail（Aggro 变体保留）。
+- **3.6** 钢穿深字面量 ≥3 ×7 → STEEL_PIERCE_PLAYER_LEVEL import（审计称 8 处，
+  实测第 8 处已随 SuicideReturn 32→TANK 在 3.1 完成）。
+- **3.7** evalHunt 597→127 行编排器 + 8 具名函数（副作用原位保留，M1 parity）。
+- **3.8** dodgeDirectionImpl 330→112 行：4 策略函数 + 编排器，策略通信走 §14.2
+  模块级 _dodgeOut 缓冲；pinned 兜底与平局裁决留编排器（回退契约可见）。
+- **3.9** isBaseUnderThreat 95 行迁 ThreatAssessor.isBaseUnderThreatImpl，hub 一行
+  委托；缓存字段不动。
+- **3.10** coop 调整块 ×7 → 文件内 coopAdjustDist。**第二部分否决**：min-manhattan
+  扫描 ×8 各异（tankCell vs 像素中心、过滤谓词、targetValue 加权、方向约束），
+  非 byte-identical 不合并（§260 先例）；findCloseEnemyImpl/countAlignedEnemiesImpl
+  近孪生同判——argmin vs count 合并需 mode flag，比重复更差（MANIFEST §10）。
+- **3.11** 命名常量批：BULLET_ALIGN_NEXT_CELL/HIT_HALF_SPAN/BASE_CENTER_X|Y_PX/
+  COUNTER_FIRE_RANGE_CELLS(=5，维持硬编码设计)/SCAN_AABB_HALF_SPAN(=TANK+1)；
+  PickupLow <=5 改读 pickupPriorityMinEnemyDist（默认下 byte-identical，耦合显式化）。
+- **3.12** ACTION_WEIGHTS 标注权威契约地位 + think.ts 指针 + GodAIInput 头部
+  坐标习惯速查（审计所称五处逐字重复经查已在前轮局部化）。
+- **3.13 关闭**：按计划判断标准（"3.7/3.8 实际成本与顺利度"）——两项虽最终过门，
+  但拼接手术各返工多次（Hunt 结构行误伤两次、dodge 五轮），对 evaluateUnifiedCandidates
+  等 ~1200 行同类手术预期成本更高而收益同为可导航性；scanAheadImpl 另有 memo/out
+  缓冲契约风险（§263 已固化）。整批关闭不算欠账。
+- **3.14** hub 单调用方纯委托包装删除 ×11，调用点 Impl 直连；约定写入 hub 头部。
+
+**Rationale:** 单源化的价值在"语义改动只改一处"，但前提是合并对象 byte-identical
+或差异被显式参数化——本轮两处否决（3.10 扫描合并、3.4 Hunt 解耦尝试）与一次回退
+均源于此纪律。
+
+**Implications:** god 层 >200 行函数 7→2（evalUnifiedCandidates/scanAheadImpl 按
+3.13 关闭保留）；弹道谓词/基地环几何/守卫簇/卡死跟踪器/pickup 尾巴副本清零；
+hub 包装 -11。determinism 语料 v2 在本轮三次拦截行为漂移（1 次 3.1 极性、1 次
+3.4 耦合、若干次拼接损坏由 tsc 拦截），验证 §266 门的价值。
