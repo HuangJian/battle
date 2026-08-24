@@ -38,6 +38,30 @@
 - 观察项：① clean winRate 曲线斜率 vs 墙钟——这才是收敛速度的真裁判；
   ② dropped 计数若常态非零，调大 --eval-window-sec；③ 后续可挂 HTML 趋势报告。
 
+### 7.4 流式模式时序缺陷（实跑发现，21:05 修复）
+- **现象**：it23 rollout 收官后始终无 [eval] 行。根因：§7.1 的钩子位置假设
+  "rollout 返回后有长 PPO 空窗"，这只在串行模式成立；流式的空闲窗已被
+  run_rollout_stream 内部 drain 吃掉，返回后距下轮权重分发秒级——后台派发的
+  70 局会全体撞上权重切换作废。
+- **修正**：串行=后台隐藏（不变）；流式=阻塞执行（预算 --eval-window-sec，
+  默认 1500→900s）。诚实账：流式下评估是显式流水线阶段（每轮约 +5min），
+  "零成本隐藏"只在串行模式成立。
+- 本机 agent 已重启点亮（ping evalSupport=true, agentVersion=55645d4），
+  权重缓存已手动幂等补发（避免 self 本轮熔断）。
+
+### 7.5 最终形态（21:57 实跑验证通过）
+- 阻塞式也被推翻（用户纠偏：原设计就是"PPO 跑的同时跑 eval"）。终案：
+  **eval 派发提前到 collector 收官时刻**（run_rollout_stream 新增
+  on_collect_done 回调），与 drain 完全重叠；主循环在写回 jsonl 后才 join
+  （预算封顶），保证下轮新权重分发前评估必已收官。
+- 同时按用户指令：流式模式禁用收尾智能分发（tail_dispatch=False，无脑转发；
+  串行模式保留），并加 drain 横幅日志（积压 < wave 阈值时打印）。
+- **实跑验证（it25）**：round done 21:57:23 → eval dispatch 21:57:36 → DONE
+  22:04:04（4/70 = 5.7%，dropped=0），期间 drain wave 持续推进至 22:06+——
+  评估墙钟完全藏进 drain，迭代间零额外等待。it24（阻塞旧版）：clean 2.9%
+  vs sampled 11.4%；it25 clean 5.7%。clean 曲线正式开画。
+- 观测注记：drain 横幅在积压降至 wave 阈值下方才打印，属正常节奏。
+
 ---
 
 ## §6 训练可观测性落地 + 权重逐轮归档 + mb1024/workers10/self-agent2 重启（2026-08-24 早）

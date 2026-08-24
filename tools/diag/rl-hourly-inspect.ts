@@ -23,10 +23,22 @@ const ROOT = resolve(import.meta.dir, '..', '..')
 const TRAJ_DIR = join(ROOT, 'tmp', 'rl-traj')
 const LOG_PATH = join(TRAJ_DIR, 'training_log.jsonl')
 const META_PATH = join(TRAJ_DIR, 'dist-agent-meta.jsonl')
+const EVAL_LOG_PATH = join(TRAJ_DIR, 'eval_log.jsonl')
 const STATE_PATH = join(TRAJ_DIR, 'inspection-state.json')
 const REPORT_PATH = join(TRAJ_DIR, 'inspection-report.html')
 const ENEMY_TOTAL = 20
 const START_LIVES = 3
+
+const NODE_ALIASES: Record<string, string> = {
+  'google-cloud-shell': 'gcs',
+  'android-97': 'a97',
+  'android-98': 'a98',
+  macos: 'mac',
+}
+function normNode(n: string): string {
+  const s = String(n ?? '?')
+  return NODE_ALIASES[s] ?? s
+}
 
 export interface IterEvent {
   iter: number
@@ -39,6 +51,8 @@ export interface IterEvent {
   ticks: number | null
   rollout_sec?: number | null
   ppo_sec?: number | null
+  /** 流式三阶段拆分：纯采集窗口（= collector 墙钟 − 窗口内重叠的 PPO）。 */
+  pure_collect_sec?: number | null
 }
 
 /** 本轮实际局数 = outcomes 计数之和（随 rotate/补采配置浮动，勿硬编码）。 */
@@ -153,6 +167,59 @@ interface HtmlRow {
   winRate: number
   kills: number
   avgKills: number
+}
+
+/** eval_log.jsonl 的 eval_summary 行（干净评估轮汇总，run_rl.py dispatch_eval_round 写出）。 */
+export interface EvalSummary {
+  iter: number
+  wver: string
+  time: string
+  sec: number | null
+  games: number
+  wins: number
+  winRate: number | null
+  dropped: number
+  rolloutWinRate: number | null
+  nodes: Record<string, number>
+}
+
+/** 每个迭代取最新一条 eval_summary（同 iter 重跑时后写覆盖先写）。 */
+export function readEvalSummaries(): Map<number, EvalSummary> {
+  const out = new Map<number, EvalSummary>()
+  if (!existsSync(EVAL_LOG_PATH)) return out
+  for (const line of readFileSync(EVAL_LOG_PATH, 'utf8').split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    let r: Record<string, unknown>
+    try {
+      r = JSON.parse(t) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (r.event !== 'eval_summary' || typeof r.iter !== 'number') continue
+    const nodes: Record<string, number> = {}
+    if (r.nodes && typeof r.nodes === 'object') {
+      for (const [k, v] of Object.entries(r.nodes as Record<string, unknown>)) {
+        if (typeof v === 'number') {
+          const key = normNode(k)
+          nodes[key] = (nodes[key] ?? 0) + v
+        }
+      }
+    }
+    out.set(r.iter, {
+      iter: r.iter,
+      wver: String(r.wver ?? ''),
+      time: String(r.time ?? ''),
+      sec: typeof r.sec === 'number' ? r.sec : null,
+      games: typeof r.games === 'number' ? r.games : 0,
+      wins: typeof r.wins === 'number' ? r.wins : 0,
+      winRate: typeof r.winRate === 'number' ? r.winRate : null,
+      dropped: typeof r.dropped === 'number' ? r.dropped : -1,
+      rolloutWinRate: typeof r.rolloutWinRate === 'number' ? r.rolloutWinRate : null,
+      nodes,
+    })
+  }
+  return out
 }
 
 interface PassHtmlRow {
@@ -376,8 +443,12 @@ function esc(s: string): string {
  * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（run_rl.py _record_agent_meta）。
  * 行字段：node / it / stage / seed / ok / win / elapsedSec(成功) | reason(失败) / ts。
  */
-function readAgentMeta(): AgentRow[] {
-  if (!existsSync(META_PATH)) return []
+function readAgentMeta(): {
+  agents: AgentRow[]
+  /** 每节点每迭代成功局数（rollout 贡献列的数据源）。 */
+  okByIt: Map<string, Map<number, number>>
+} {
+  if (!existsSync(META_PATH)) return { agents: [], okByIt: new Map() }
   const by = new Map<string, AgentRow>()
   // 每节点在每轮的成功局数：用于"上轮局数"列（以全局最新迭代为基准，未参与=0）
   const okByIt = new Map<string, Map<number, number>>()
@@ -409,7 +480,7 @@ function readAgentMeta(): AgentRow[] {
     } catch {
       continue
     }
-    const node = String(r.node ?? '?')
+    const node = normNode(String(r.node ?? '?'))
     const a = ensure(node)
     a.attempts++
     if (r.ok) {
@@ -439,7 +510,7 @@ function readAgentMeta(): AgentRow[] {
     const a = by.get(node)
     if (a) a.lastGames = m.get(globalLastIt) ?? 0
   }
-  return [...by.values()].sort((p, q) => q.ok - p.ok)
+  return { agents: [...by.values()].sort((p, q) => q.ok - p.ok), okByIt }
 }
 
 interface PassSection {
@@ -455,24 +526,51 @@ function buildHtml(
   scannedLine: string,
   pass: PassSection,
   agent: AgentRow[],
+  evalSummaries: Map<number, EvalSummary>,
+  rolloutByItNode: Map<number, Map<string, number>>,
 ): string {
   const dataJson = JSON.stringify(rows)
   const passJson = JSON.stringify(pass.rows)
   const bannerHtml = bannerLines.map((l) => `<div>${l}</div>`).join('\n')
 
-  const recentRows = recent
-    .map(
-      (e) =>
+  const recentRows = [...recent]
+    .sort((a, b) => b.iter - a.iter)
+    .map((e) => {
+      const ev = evalSummaries.get(e.iter)
+      const evalSec = ev ? fmtDur(ev.sec ?? null) : '—'
+      // 节点贡献 = 节点 rollout 局数（meta 账本）+ eval 局数（summary.nodes），并集按总贡献降序
+      const roll = rolloutByItNode.get(e.iter)
+      const seenNodes = new Set<string>()
+      for (const k of Object.keys(ev?.nodes ?? {})) seenNodes.add(normNode(k))
+      if (roll) for (const n of roll.keys()) seenNodes.add(normNode(String(n)))
+      const parts = [...seenNodes].map((n) => {
+        const r = roll?.get(n) ?? 0
+        const v = ev?.nodes?.[n] ?? 0
+        return { n, r, v, t: r + v }
+      })
+      parts.sort((a, b) => b.t - a.t)
+      const contrib =
+        parts.length === 0 ? '—' : parts.map((p) => `${p.n} ${p.r}+${p.v}`).join(' · ')
+      const rollWins = e.outcomes.stage_clear ?? 0
+      const rollGames = gamesOf(e)
+      const rollWrCell =
+        rollGames > 0 ? `${(e.winRate * 100).toFixed(1)}% (${rollWins}/${rollGames})` : '—'
+      const evalWrCell =
+        ev && typeof ev.winRate === 'number'
+          ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games})`
+          : '—'
+      return (
         `<tr><td class="txt">it${e.iter}</td><td>${esc(e.time)}</td>` +
-        `<td>${(e.winRate * 100).toFixed(1)}%</td><td>${e.score_mean == null ? '—' : e.score_mean.toFixed(4)}</td>` +
+        `<td>${rollWrCell}</td><td>${evalWrCell}</td><td>${e.score_mean == null ? '—' : e.score_mean.toFixed(4)}</td>` +
         `<td>${e.entropy == null ? '—' : e.entropy.toFixed(3)}</td><td>${e.kl == null ? '—' : e.kl.toFixed(4)}</td>` +
         `<td>${(() => {
           const t = avgTicksPerGame(e)
           return t === null ? '—' : Math.round(t)
         })()}</td>` +
-        `<td>${fmtDur(e.rollout_sec)}</td><td>${fmtDur(e.ppo_sec)}</td>` +
-        `<td>${e.outcomes.stage_clear ?? 0}</td></tr>`,
-    )
+        `<td>${fmtDur(e.pure_collect_sec)}</td><td>${fmtDur(e.ppo_sec)}</td><td>${evalSec}</td>` +
+        `<td class="txt">${esc(contrib)}</td></tr>`
+      )
+    })
     .join('\n')
 
   const totalGames = rows.reduce((a, r) => a + r.games, 0)
@@ -578,11 +676,11 @@ function buildHtml(
 </table>
 </div>
 
-<h2>最近迭代健康指标</h2>
-<div class="wrap">
+<h2>迭代健康指标</h2>
+<div class="wrap" style="max-height:250px;">
 <table>
   <thead><tr>
-    <th class="txt">迭代</th><th class="txt">完成时刻<span class="th-note">PPO 写回时间，非开始时间</span></th><th>胜率</th><th>score_mean</th><th>entropy<span class="th-note">&le;0.6 异常 · &lt;0.8 观察</span></th><th>KL<span class="th-note">&gt;0.15 连续3轮 异常 · 连续2轮 观察</span></th><th>局均 ticks<span class="th-note">&lt;2000 观察 · &lt;1000 异常</span></th><th>rollout 耗时</th><th>PPO 耗时</th><th>通关局数</th>
+    <th class="txt">迭代</th><th class="txt">完成时刻</th><th>rollout 胜率</th><th>eval 胜率</th><th>score_mean</th><th>entropy</th><th>KL</th><th>局均 ticks</th><th>采集耗时</th><th>PPO 耗时</th><th>eval 耗时</th><th class="txt">节点贡献</th>
   </tr></thead>
   <tbody>
 ${recentRows}
@@ -628,7 +726,7 @@ ${recentRows}
   关号显示 = 0 基索引 + 1（与 STAGES / STAGE_NAMES_ZH 对应）。<br>
   「本段」= 最近一次增量扫描覆盖的迭代段；余命含 tank 道具加成可大于 3；拾取道具为该关本段拾取总数。<br>
   击杀口径：manifest.dims.progress.raw（缺失时 round(dimLists.progress × ${ENEMY_TOTAL})）；自 2026-08-23 起累计，此前轮转删除的迭代无击杀数据。<br>
-  数据源：<code>tmp/rl-traj/training_log.jsonl</code> · 累计账本：<code>tmp/rl-traj/inspection-state.json</code>（共 ${totalGames} 局入表）。
+  数据源：<code>tmp/rl-traj/training_log.jsonl</code> · 干净评估：<code>tmp/rl-traj/eval_log.jsonl</code> · 累计账本：<code>tmp/rl-traj/inspection-state.json</code>（共 ${totalGames} 局入表）。
 </footer>
 <script>
 function heat(v){
@@ -830,6 +928,8 @@ function main(): void {
     .map((n) => iters.get(n))
     .filter((e): e is IterEvent => e !== undefined)
   const verdict = healthVerdict(recentIters)
+  // 健康表展示全量历史（用户指令 2026-08-24）；healthVerdict 的告警规则仍只看近 5 轮。
+  const allIters = iterNums.map((n) => iters.get(n)).filter((e): e is IterEvent => e !== undefined)
 
   const rows: HtmlRow[] = Object.keys(state.stageStats)
     .map(Number)
@@ -885,10 +985,25 @@ function main(): void {
         `KL 最大 ${klVals.length > 0 ? Math.max(...klVals).toFixed(4) : '—'}`,
         `局均 ticks 最小 ${tpgs.length > 0 ? Math.round(Math.min(...tpgs)) : '—'}`,
       ].join(' · ')
-    })()}）`,
+    })()}）　·　<b>阈值</b>：entropy &le;0.6 异常 / &lt;0.8 观察 · KL &gt;0.15 连续3轮 异常 / 连续2轮 观察 · 局均 ticks &lt;1000 异常 / &lt;2000 观察`,
     `<b>累计</b>：${state.totals.games} 局 / ${state.totals.wins} 胜（<b>${(wrAll * 100).toFixed(1)}%</b>）/ ${state.totals.kills} 击杀 · 已扫至 it${state.lastScannedIter}`,
   ]
 
+  const meta = readAgentMeta()
+  // 反转索引：meta.okByIt 是 节点→(迭代→局数)，健康表按行取某迭代的全部节点贡献，
+  // 需要 迭代→(节点→局数)。
+  const rolloutByItNode = new Map<number, Map<string, number>>()
+  for (const [node, m] of meta.okByIt) {
+    const nk = normNode(node)
+    for (const [itN, cnt] of m) {
+      let row = rolloutByItNode.get(itN)
+      if (!row) {
+        row = new Map<string, number>()
+        rolloutByItNode.set(itN, row)
+      }
+      row.set(nk, (row.get(nk) ?? 0) + cnt)
+    }
+  }
   if (!dryRun) {
     const passSection: PassSection = lp
       ? { covered: lp.covered, endedAt: lp.endedAt, rows: passRows }
@@ -898,10 +1013,12 @@ function main(): void {
       buildHtml(
         rows,
         bannerLines,
-        recentIters,
+        allIters,
         `扫描范围 it${fromIter + 1}–it${scanUpTo}`,
         passSection,
-        readAgentMeta(),
+        meta.agents,
+        readEvalSummaries(),
+        rolloutByItNode,
       ),
     )
   }

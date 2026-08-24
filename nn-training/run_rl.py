@@ -403,7 +403,8 @@ def _run_inspect(bun: str, it: int) -> None:
 
 def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
                       args, cfg: dict, iter_id: str,
-                      on_result=None, local_slots_max: int | None = None) -> dict:
+                      on_result=None, local_slots_max: int | None = None,
+                      tail_dispatch: bool = True) -> dict:
     """中央队列调度模式（plan/distributed-rollout.md v3.3 §5.2）。
 
     140 局组成全局队列（runId 种子确定性预洗牌），各节点 C_n 条工作线程 + 本机
@@ -470,6 +471,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     if not alive:
         log("[dist] all weights POST failed — falling back to local-only rollout")
         return run_rollout(bun, rl_path, traj_dir, pairs, args)
+    # 纯采集起点（用户定义 2026-08-24）：新权重分发完毕的时刻。
+    # 纯采集耗时 = 最后一局结算时刻 − 本时刻；与 PPO 重叠与否无关，就是两个事件锚点。
+    t_dist_done = time.time()
+    last_settle_at = [None]  # 最后一局成功结算的时刻（worker 内更新）
 
     # ③ 中央队列 + 消费者（远端 C_n 线程 + 本机 workers 线程）
     # 断点续跑：剔除已完整落盘且 wver 匹配的局（本轮重启/重试不重跑已完成任务）。
@@ -539,7 +544,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             pass
         return {k: sum(v[-20:]) / len(v[-20:]) for k, v in hist.items() if v}
 
-    speed = _seed_speeds()
+    speed = _seed_speeds() if tail_dispatch else {}
     if speed:
         preview = ", ".join(f"{k}={v:.0f}s" for k, v in sorted(speed.items(), key=lambda x: x[1]))
         log(f"[dist] tail-dispatch speeds (seeded): {preview}")
@@ -547,7 +552,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     last_progress = [time.time()]
 
     def _fast_enough(nid: str, pending_len: int) -> bool:
-        if not speed or pending_len <= 0:
+        if not tail_dispatch or not speed or pending_len <= 0:
             return True
         my = speed.get(nid)
         best = min(speed.values())
@@ -648,6 +653,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     local_active[0] -= 1
                 if summary is not None:
                     seen.add(task)
+                    last_settle_at[0] = time.time()
                     streaks[nd_id] = 0
                     if nd is not None:
                         last_remote_ok[0] = time.time()
@@ -722,6 +728,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     combined["missing"] = [list(k) for k in missing]
     combined["expectedGames"] = len(pairs)
     combined["dist"] = {"iterId": iter_id, "nodes": by_node, "retried": stats["retried"], "resumed": len(done)}
+    # 纯采集（用户定义）：最后一局结算时刻 − 权重分发完毕时刻。与 PPO 重叠无关。
+    if last_settle_at[0] is not None:
+        combined["pure_collect_sec"] = round(last_settle_at[0] - t_dist_done, 1)
+        combined["weights_dist_done_at"] = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done))
     return combined
 
 
@@ -750,7 +761,8 @@ def _eval_done_keys(eval_jsonl: Path, wver16: str) -> set[tuple[int, int]]:
 
 
 def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
-                        iter_id: str, it: int, rollout_winrate: float) -> None:
+                        iter_id: str, it: int,
+                        rollout_winrate: float | None = None) -> None:
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
     节点门：enabled ∧ ping ∧ ping.evalSupport ∧ bun major.minor 一致——旧 agent 无
@@ -777,6 +789,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         if not todo:
             log(f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip")
             return
+        t_eval_start = time.time()
 
         local_bun = _bun_version(bun)
         alive = []
@@ -827,6 +840,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         streaks = {nd["id"]: 0 for nd in nodes_ok}
         wins = [0]
         outcomes: dict[str, int] = {}
+        node_games: dict[str, int] = {}  # 每节点实际结算的评估局数（summary 用）
         jsonl_lock = threading.Lock()
 
         def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
@@ -848,6 +862,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
                     f.write(json.dumps(row) + "\n")
             with lock:
                 wins[0] += win
+                node_games[nd_id] = node_games.get(nd_id, 0) + 1
                 oc = str(manifest.get("outcome"))
                 outcomes[oc] = outcomes.get(oc, 0) + 1
 
@@ -907,24 +922,59 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
             t_.join(timeout=max(30.0, window + task_timeout))
 
         dropped = total - len(seen)
-        n = len(seen)
-        clean_wr = (wins[0] / n) if n else None
+        # 断点续跑口径：summary 必须聚合台账中该 (iter,wver) 的全部逐局行——
+        # 只统计本次补跑会低估分母（it29 实测教训：补跑 20 局写出 2/20）。
+        led_wins = 0
+        led_outcomes: dict[str, int] = {}
+        led_nodes: dict[str, int] = {}
+        try:
+            with open(eval_jsonl, "r", encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        r = json.loads(ln)
+                    except Exception:
+                        continue
+                    if (r.get("event") != "eval" or r.get("wver") != key16
+                            or r.get("iter") != it):
+                        continue
+                    led_wins += 1 if r.get("win") else 0
+                    oc = str(r.get("outcome") or "?")
+                    led_outcomes[oc] = led_outcomes.get(oc, 0) + 1
+                    ndm = str(r.get("node") or "?")
+                    led_nodes[ndm] = led_nodes.get(ndm, 0) + 1
+        except FileNotFoundError:
+            pass
+        if led_outcomes:
+            n = sum(led_outcomes.values())
+            wins_v = led_wins
+            outcomes = led_outcomes
+            node_games = led_nodes
+        else:
+            n = len(seen)
+            wins_v = wins[0]
+        dropped = max(dropped, len(pairs) - n)
+        clean_wr = (wins_v / n) if n else None
         summary = {
             "event": "eval_summary", "iter": it, "wver": key16,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "games": n, "wins": wins[0],
+            "sec": round(time.time() - t_eval_start, 1),
+            "games": n, "wins": wins_v,
             "winRate": round(clean_wr, 4) if clean_wr is not None else None,
             "outcomes": outcomes, "dropped": dropped,
             "rolloutWinRate": report_winrate_safe(rollout_winrate),
-            "nodes": {nd["id"]: nd["c"] for nd in nodes_ok},
+            # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
+            "nodes": dict(sorted(node_games.items())),
         }
         with jsonl_lock:
             with open(eval_jsonl, "a", encoding="utf-8") as f:
                 f.write(json.dumps(summary) + "\n")
         if n:
-            log(f"[eval] it{it} DONE wver={key16[:12]}… clean winRate={clean_wr:.1%} "
-                f"({wins[0]}/{n}, dropped={dropped}) vs rollout(sampled)="
-                f"{rollout_winrate:.1%} outcomes={json.dumps(outcomes)}")
+            done_msg = (f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="
+                        f"{clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
+                        + (f" vs rollout(sampled)={rollout_winrate:.1%}"
+                           if rollout_winrate is not None else "")
+                        + f" outcomes={json.dumps(outcomes)}")
+            log(done_msg)
         else:
             log(f"[eval] it{it}: no game settled within window — nothing recorded")
     except Exception as e:  # noqa: BLE001 — 评估是旁路，绝不允许拖垮训练主循环
@@ -939,7 +989,8 @@ def report_winrate_safe(wr: float) -> float | None:
 
 
 def dispatch_eval_bg(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
-                     iter_id: str, it: int, rollout_winrate: float) -> threading.Thread:
+                     iter_id: str, it: int,
+                     rollout_winrate: float | None = None) -> threading.Thread:
     t_ = threading.Thread(target=dispatch_eval_round,
                           args=(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate),
                           daemon=True, name=f"eval-it{it}")
@@ -948,7 +999,8 @@ def dispatch_eval_bg(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
 
 
 def run_rollout_stream(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
-                       args, cfg: dict, iter_id: str, model, opt, device) -> dict:
+                       args, cfg: dict, iter_id: str, model, opt, device,
+                       on_collect_done=None) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
     正确性依据：整轮权重冻结为 W(N)（分发只发生在迭代边界），故任意时刻到达的
@@ -990,7 +1042,15 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple
         try:
             box["report"] = run_rollout_queue(
                 bun, rl_path, traj_dir, pairs, args, cfg, iter_id,
-                on_result=_on_result, local_slots_max=local_slots)
+                on_result=_on_result, local_slots_max=local_slots,
+                tail_dispatch=False)
+            # collector 收官即触发干净评估（此刻各节点恰持有本轮冻结权重）：
+            # 评估局与后续 drain/收尾完全重叠，实现"训练在跑的同时跑 eval"。
+            if on_collect_done is not None:
+                try:
+                    box["eval_thread"] = on_collect_done()
+                except Exception as cb_err:  # noqa: BLE001 — 评估旁路不拖垮采集
+                    log(f"[stream] on_collect_done error: {str(cb_err)[:120]}")
         except Exception as e:  # noqa: BLE001 — 主线程统一上报
             box["err"] = str(e)
 
@@ -1091,6 +1151,10 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple
         th.join(timeout=3.0)
     collect_done = time.time()
     th.join(timeout=5.0)
+    with lock:
+        n_left = len(pend)
+    log(f"[stream] collector done in {collect_done - t0:.0f}s — "
+        f"draining {n_left} settled-but-untrained games (wave_cap={wave_cap})")
     while True:
         with lock:
             n_pending = len(pend)
@@ -1128,6 +1192,8 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple
     # agg=None 表示本轮没有发生任何梯度步（checkpoint 已在先前进程完整跑完）。
     # 指标不伪造为 0——jsonl 写 null，报告显示 '—'，健康判定自动忽略该轮。
     last = state["last_agg"]
+    # pure_collect_sec 由 run_rollout_queue 实测（末局结算 − 权重分发完毕），
+    # 经 box["report"] 顶层透传——此处不做任何公式派生。
     report["_stream"] = {"rollout_sec": rollout_sec, "ppo_sec": round(state["ppo_sec"], 1),
                          "steps": state["steps"], "chunks": state["chunks"],
                          "kl_cum": state["cum_kl"], "agg": last}
@@ -1314,18 +1380,29 @@ def main() -> None:
             t_rollout = time.time()
             stream_meta = None
             dist_iter_id: str | None = None
+            eval_thread: threading.Thread | None = None
             if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
                 iter_id = f"{RUN_ID}.{it}"
                 dist_iter_id = iter_id
                 enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
                 log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
                 if int(getattr(args, "stream", 0) or 0):
+                    def _fire_eval():
+                        # collector 收官时刻触发（各节点仍持有本轮冻结权重）；线程句柄
+                        # 存入单元格，主循环写回 jsonl 后 join——下轮新权重分发前评估
+                        # 必已收官或到预算。positional args 创建即快照，无闭包竞态。
+                        return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
+                                                iter_id, it)
                     report = run_rollout_stream(
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
-                        model, opt, device)
+                        model, opt, device, on_collect_done=_fire_eval)
                     stream_meta = report
                 else:
                     report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
+                    # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 PPO 空窗
+                    if int(getattr(args, "eval_games_per_stage", 0) or 0) > 0:
+                        eval_thread = dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
+                                                       iter_id, it, report["winRate"])
             else:
                 report = run_rollout(bun, args.out, traj_dir, pairs, args)
 
@@ -1347,14 +1424,6 @@ def main() -> None:
                     f"min={ss['min']:.4f} max={ss['max']:.4f}")
             if "dimMeans" in report:
                 log(f"[run_rl] dims it{it}: {json.dumps(report['dimMeans'])}")
-
-            # 干净评估：rollout 收官、PPO 空窗期，用各节点已缓存的同权重（= 上一轮 PPO
-            # 产物，与本轮 rollout winRate 同一策略）跑固定语料贪心局。后台线程不阻塞
-            # PPO；下轮权重分发时未完成的评估局自然作废（账本只收已结算的）。
-            if dist_iter_id is not None and dist_cfg is not None \
-                    and int(getattr(args, "eval_games_per_stage", 0) or 0) > 0:
-                dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg, dist_iter_id, it,
-                                 report["winRate"])
 
             if stream_meta is None:
                 t_ppo = time.time()
@@ -1396,7 +1465,19 @@ def main() -> None:
                     # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）
                     **({"missing": report["missing"], "expectedGames": report["expectedGames"],
                         "dist": report["dist"]} if "missing" in report else {}),
+                    # 纯采集（用户定义）：末局结算 − 权重分发完毕；队列模式实测透传，
+                    # 纯本地路径回退为 rollout 全长（无重叠即等价纯采集）。
+                    "pure_collect_sec": report.get(
+                        "pure_collect_sec", round(rollout_sec, 1)),
                 }) + "\n")
+
+            # 下轮权重分发前等评估收官（预算封顶）：串行模式此时早已跑完（join 即返）；
+            # 流式模式评估与 drain 重叠，此处通常只需等剩余尾巴。超时未完的局放弃。
+            if eval_thread is not None and eval_thread.is_alive():
+                budget = float(getattr(args, "eval_window_sec", 900)) + 60.0
+                log(f"[run_rl] waiting up to {budget:.0f}s for clean-eval round "
+                    f"before next weight distribution")
+                eval_thread.join(timeout=budget)
 
             # 每轮 PPO 写回后自动生成巡检 HTML（仅默认 traj；非致命，失败不断训练）
             if auto_inspect:
