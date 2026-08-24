@@ -7,6 +7,8 @@ import { type Cell } from './pathfind'
 import { ALL_DIRS, opposite } from '../../utils/direction'
 import { snap, aabb, manhattan, bulletLaneDist } from '../../utils/helpers'
 import { BULLET_TRAJECTORY_MAX_CELLS } from './constants'
+import { enemyCanShootBase } from './SmartThreatModel'
+import { isThreatStateImpl } from './Chokepoint'
 import { scanAheadImpl } from './FireControl'
 
 /** §223 centroid-escape: bullets within this L1 radius (px) of the player
@@ -405,6 +407,123 @@ const _dodgeOut: { dir: Direction | null; safeA: boolean; safeB: boolean } = {
   dir: null,
   safeA: false,
   safeB: false,
+}
+
+/**
+ * P1/P2.3: Check if any enemy is threatening the base. Six OR-combined
+ * rules (each gated; result is cached per tick in `_baseUnderThreatCache`):
+ *   1. Static box — enemy within 3 cols of base AND row >= 18
+ *      (close lateral threat, the original rule).
+ *   2. P4 race — enemy inside `baseRaceRangeCells` of the base AND would
+ *      beat the player back (playerDist + baseRaceMarginCells >= enemyDist);
+ *      catches edge-lane flank runners the box misses.
+ *   3. §88 threat point — an enemy at/near a chokepoint-plan threat point
+ *      (gated by chokepointMode > 0).
+ *   4. §157 clear shot — an enemy aligned with the base with no brick/steel
+ *      between (enemyCanShootBase), regardless of distance (gated by
+ *      baseClearShotThreat > 0).
+ *   5. §173 damage recall — base has actually taken a hit AND player is
+ *      farther than baseDamageRecall cells (damage never flickers back).
+ *   6. §169 sticky hold — once true, stays true for threatStickyTicks
+ *      (only extends, never shortens) so the defense cascade doesn't
+ *      flicker off between predictive gaps.
+ * Used to skip power-ups/T2a and prioritize defense.
+ */
+export function isBaseUnderThreatImpl(self: GodAIInput): boolean {
+  if (!self.hasBase) return false
+  if (self._baseUnderThreatCache !== null) return self._baseUnderThreatCache
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  // P4: race-to-base check — player's distance to the base. If the player
+  // is dead/respawning, treat any near-base enemy as a threat.
+  const p = self.controlledTank(self.world)
+  const pc = p ? self.playerCell() : null
+  const playerDistToBase = pc ? manhattan(pc.col, pc.row, bc, br) : Infinity
+  // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
+  // if think() hasn't populated it yet — should never happen in normal flow).
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  let result = false
+  for (let li = 0; li < list.length; li++) {
+    const t = list[li]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    // Static box: close lateral threat (original P1/P2.3 rule).
+    if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
+      result = true
+      break
+    }
+    // P4: race check — enemy is in the base region AND would beat the
+    // player back to the base (with safety margin). Catches flanking
+    // runners along the map edges that the static box misses (S6 root
+    // cause: base died with the player 20+ cells away behind steel).
+    const enemyDistToBase = manhattan(tc.col, tc.row, bc, br)
+    if (
+      enemyDistToBase <= self.params.baseRaceRangeCells &&
+      playerDistToBase + self.params.baseRaceMarginCells >= enemyDistToBase
+    ) {
+      result = true
+      break
+    }
+  }
+  // §88 rule 1: an enemy at/near a threat point (威胁点外 margin 格) also
+  // puts the base into the threatened state — the enemy can shoot the base
+  // from there, so defense must outrank MID-tier pickups and chokepoint
+  // holding. OR'd with the existing box/race detection (never reduces it).
+  if (!result && self.params.chokepointMode > 0) {
+    self.chokepointPlan() // ensure the throttled threat-point cache
+    const plan = self._chokepointPlan
+    if (plan && plan.threatPoints.length > 0 && isThreatStateImpl(self, plan.threatPoints)) {
+      result = true
+    }
+  }
+  // §157: an enemy with a CLEAR SHOT at the base (enemyCanShootBase —
+  // aligned + no brick/steel in between) is a threat regardless of
+  // distance. The static box (row >= 18) and race check (range ≤ 18)
+  // miss enemies firing at the base from far away through cleared lanes.
+  // The next bullet could destroy the base, so defense must activate.
+  // Gated by baseClearShotThreat (0 = OFF, byte-identical).
+  if (!result && self.params.baseClearShotThreat > 0) {
+    for (let li2 = 0; li2 < list.length; li2++) {
+      const t2 = list[li2]
+      if (!t2.alive || t2.spawnTimer > 0) continue
+      if (enemyCanShootBase(self, t2)) {
+        result = true
+        break
+      }
+    }
+  }
+  // §173: factual damage recall — once the base has actually TAKEN A HIT
+  // (baseHp < baseMaxHp), the threat is no longer a prediction: the ring
+  // bricks are breached and direct fire is landing. The predictive checks
+  // above flicker (§169: 9.8 flips/10s before the first hit); damage never
+  // flickers back. OR'd with the existing detection (never reduces it).
+  // baseDamageRecall = 0 → OFF (byte-identical); >0 → the trigger engages
+  // only while the player is farther than this many cells from the base
+  // (arm 1 = unconditional was net −24: the permanent threat cascade hurt
+  // open stages; the probe asymmetry is player-distance, so gate on it).
+  if (!result && self.params.baseDamageRecall > 0) {
+    if (
+      self.world.baseHp < self.world.baseMaxHp &&
+      playerDistToBase > self.params.baseDamageRecall
+    ) {
+      result = true
+    }
+  }
+  // §169: sticky hold — the threat signal flickers as enemies cross the
+  // race-range/alignment boundaries (defeat probe: 9.8 flips/10s before
+  // the base's first hit). Once true, keep it true for threatStickyTicks
+  // so the defense cascade (selectTarget, skipT2aForDefense, item gates,
+  // F5 guard summon, carve gate) stays engaged through the gaps. Only
+  // extends, never shortens; 0 = OFF = byte-identical.
+  if (self.params.threatStickyTicks > 0) {
+    if (result) {
+      self._threatStickyHold = self.params.threatStickyTicks
+    } else if (self._threatStickyHold > 0) {
+      result = true
+    }
+  }
+  self._baseUnderThreatCache = result
+  return result
 }
 
 /**

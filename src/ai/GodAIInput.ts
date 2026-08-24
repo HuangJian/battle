@@ -4,7 +4,6 @@ import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
 import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS } from '../constants'
 import { manhattan } from '../utils/helpers'
 import {
   findEnemyDirectionImpl,
@@ -45,7 +44,7 @@ import {
   findSafeMoveDirImpl,
   closeCombatExposureImpl,
   isTerrainPinnedImpl,
-  hasCrossFireBulletImpl,
+  hasCrossFireBulletImpl,  isBaseUnderThreatImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
@@ -77,7 +76,6 @@ import {
   threatChaseTargetImpl,
 } from './god/Chokepoint'
 import type { ChokepointPlan } from './god/Chokepoint'
-import { enemyCanShootBase } from './god/SmartThreatModel'
 
 /**
  * GodAIInput — a "theoretically optimal player" simulator that implements
@@ -1269,123 +1267,6 @@ export class GodAIInput implements InputLike {
     return findEnemyFacingPlayerImpl(this, pcx, pcy, aimDir)
   }
 
-  /**
-   * P1/P2.3: Check if any enemy is threatening the base. Six OR-combined
-   * rules (each gated; result is cached per tick in `_baseUnderThreatCache`):
-   *   1. Static box — enemy within 3 cols of base AND row >= 18
-   *      (close lateral threat, the original rule).
-   *   2. P4 race — enemy inside `baseRaceRangeCells` of the base AND would
-   *      beat the player back (playerDist + baseRaceMarginCells >= enemyDist);
-   *      catches edge-lane flank runners the box misses.
-   *   3. §88 threat point — an enemy at/near a chokepoint-plan threat point
-   *      (gated by chokepointMode > 0).
-   *   4. §157 clear shot — an enemy aligned with the base with no brick/steel
-   *      between (enemyCanShootBase), regardless of distance (gated by
-   *      baseClearShotThreat > 0).
-   *   5. §173 damage recall — base has actually taken a hit AND player is
-   *      farther than baseDamageRecall cells (damage never flickers back).
-   *   6. §169 sticky hold — once true, stays true for threatStickyTicks
-   *      (only extends, never shortens) so the defense cascade doesn't
-   *      flicker off between predictive gaps.
-   * Used to skip power-ups/T2a and prioritize defense.
-   */
-  isBaseUnderThreat(): boolean {
-    if (!this.hasBase) return false
-    if (this._baseUnderThreatCache !== null) return this._baseUnderThreatCache
-    const bc = BASE_POS.col
-    const br = BASE_POS.row
-    // P4: race-to-base check — player's distance to the base. If the player
-    // is dead/respawning, treat any near-base enemy as a threat.
-    const p = this.controlledTank(this.world)
-    const pc = p ? this.playerCell() : null
-    const playerDistToBase = pc ? manhattan(pc.col, pc.row, bc, br) : Infinity
-    // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
-    // if think() hasn't populated it yet — should never happen in normal flow).
-    const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
-    let result = false
-    for (let li = 0; li < list.length; li++) {
-      const t = list[li]
-      if (!t.alive || t.spawnTimer > 0) continue
-      const tc = this.tankCell(t)
-      // Static box: close lateral threat (original P1/P2.3 rule).
-      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
-        result = true
-        break
-      }
-      // P4: race check — enemy is in the base region AND would beat the
-      // player back to the base (with safety margin). Catches flanking
-      // runners along the map edges that the static box misses (S6 root
-      // cause: base died with the player 20+ cells away behind steel).
-      const enemyDistToBase = manhattan(tc.col, tc.row, bc, br)
-      if (
-        enemyDistToBase <= this.params.baseRaceRangeCells &&
-        playerDistToBase + this.params.baseRaceMarginCells >= enemyDistToBase
-      ) {
-        result = true
-        break
-      }
-    }
-    // §88 rule 1: an enemy at/near a threat point (威胁点外 margin 格) also
-    // puts the base into the threatened state — the enemy can shoot the base
-    // from there, so defense must outrank MID-tier pickups and chokepoint
-    // holding. OR'd with the existing box/race detection (never reduces it).
-    if (!result && this.params.chokepointMode > 0) {
-      this.chokepointPlan() // ensure the throttled threat-point cache
-      const plan = this._chokepointPlan
-      if (plan && plan.threatPoints.length > 0 && isThreatStateImpl(this, plan.threatPoints)) {
-        result = true
-      }
-    }
-    // §157: an enemy with a CLEAR SHOT at the base (enemyCanShootBase —
-    // aligned + no brick/steel in between) is a threat regardless of
-    // distance. The static box (row >= 18) and race check (range ≤ 18)
-    // miss enemies firing at the base from far away through cleared lanes.
-    // The next bullet could destroy the base, so defense must activate.
-    // Gated by baseClearShotThreat (0 = OFF, byte-identical).
-    if (!result && this.params.baseClearShotThreat > 0) {
-      for (let li2 = 0; li2 < list.length; li2++) {
-        const t2 = list[li2]
-        if (!t2.alive || t2.spawnTimer > 0) continue
-        if (enemyCanShootBase(this, t2)) {
-          result = true
-          break
-        }
-      }
-    }
-    // §173: factual damage recall — once the base has actually TAKEN A HIT
-    // (baseHp < baseMaxHp), the threat is no longer a prediction: the ring
-    // bricks are breached and direct fire is landing. The predictive checks
-    // above flicker (§169: 9.8 flips/10s before the first hit); damage never
-    // flickers back. OR'd with the existing detection (never reduces it).
-    // baseDamageRecall = 0 → OFF (byte-identical); >0 → the trigger engages
-    // only while the player is farther than this many cells from the base
-    // (arm 1 = unconditional was net −24: the permanent threat cascade hurt
-    // open stages; the probe asymmetry is player-distance, so gate on it).
-    if (!result && this.params.baseDamageRecall > 0) {
-      if (
-        this.world.baseHp < this.world.baseMaxHp &&
-        playerDistToBase > this.params.baseDamageRecall
-      ) {
-        result = true
-      }
-    }
-    // §169: sticky hold — the threat signal flickers as enemies cross the
-    // race-range/alignment boundaries (defeat probe: 9.8 flips/10s before
-    // the base's first hit). Once true, keep it true for threatStickyTicks
-    // so the defense cascade (selectTarget, skipT2aForDefense, item gates,
-    // F5 guard summon, carve gate) stays engaged through the gaps. Only
-    // extends, never shortens; 0 = OFF = byte-identical.
-    if (this.params.threatStickyTicks > 0) {
-      if (result) {
-        this._threatStickyHold = this.params.threatStickyTicks
-      } else if (this._threatStickyHold > 0) {
-        result = true
-      }
-    }
-    this._baseUnderThreatCache = result
-    return result
-  }
-
   // M0.5 (2026-08-03): D1 hasFastThreatNearBase + SmartThreatModel wrappers
   // (threatScore / smartIsBaseUnderThreat) retired (experimental.ts since deleted).
 
@@ -1397,6 +1278,15 @@ export class GodAIInput implements InputLike {
   }
   shouldFireInDir(pcx: number, pcy: number, dir: Direction, allowWallFire = true): boolean {
     return shouldFireInDirImpl(this, pcx, pcy, dir, allowWallFire)
+  }
+
+  /**
+   * P1/P2.3 six-rule base-threat detection with per-tick cache — full docs and
+   * implementation in god/ThreatAssessor.isBaseUnderThreatImpl (§3.9 moved the
+   * 95-line body out of the hub; fields/cache stay here untouched).
+   */
+  isBaseUnderThreat(): boolean {
+    return isBaseUnderThreatImpl(this)
   }
 
   // --- ThreatAssessor ---
