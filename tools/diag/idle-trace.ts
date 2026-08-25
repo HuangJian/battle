@@ -24,7 +24,6 @@ import { arg } from '../lib/cli'
 const IDLE_THRESHOLD_TICKS = 600 // 10s at 60fps
 const CELL_THRESHOLD = CELL // 16px — 1 cell displacement threshold
 
-
 const stageIdx = Number(arg('stage', '1')) - 1
 const seed = Number(arg('seed', '1'))
 const difficulty = arg('difficulty', 'hard')!

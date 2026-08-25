@@ -87,7 +87,6 @@ export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
   return true
 }
 
-
 /**
  * carvePath(250) — §161 / 开路策略 (carve path, user request 2026-08-06).
  *

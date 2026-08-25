@@ -160,7 +160,9 @@ describe('fieldRetreatPickupGate knob (§146 C)', () => {
   })
 
   it('does not appear in CLASSIC_MODEL_PARAMS (pool-only, predicate gates itself)', () => {
-    expect((CLASSIC_MODEL_PARAMS as unknown as Record<string, unknown>).fieldRetreatPickupGate ?? 0).toBe(0)
+    expect(
+      (CLASSIC_MODEL_PARAMS as unknown as Record<string, unknown>).fieldRetreatPickupGate ?? 0,
+    ).toBe(0)
   })
 
   it('HIGH pickup target exists in the pocket but the gate suppresses it when ON', () => {

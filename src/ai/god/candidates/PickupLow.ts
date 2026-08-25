@@ -4,8 +4,11 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import { commitPowerupTail,
-  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import {
+  commitPowerupTail,
+  baseRingBreachedImpl,
+  isDualCentralBreachHoldP1,
+} from '../candidates/shared'
 
 import { manhattan } from '../../../utils/helpers'
 
@@ -56,7 +59,6 @@ export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
   }
   return false
 }
-
 
 /** pickupLow(400) — S5: opportunistic power-up economy in normal mode. */
 

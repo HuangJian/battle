@@ -53,7 +53,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
   it('OFF: ring breached + star nearby still diverts to the power-up branch', () => {
     const { world, input } = setupWorld()
     placePlayer(world, 1, 24) // center col 1, row 24
-    world.addPowerUp(makePowerUp( 'star', 4, 24)) // dist 4 → MID tier
+    world.addPowerUp(makePowerUp('star', 4, 24)) // dist 4 → MID tier
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(1)
   })
@@ -62,7 +62,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
     const { world, input } = setupWorld()
     input.params.baseAlertPickupSuppress = 1
     placePlayer(world, 1, 24)
-    world.addPowerUp(makePowerUp( 'star', 4, 24))
+    world.addPowerUp(makePowerUp('star', 4, 24))
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(0)
   })
@@ -71,7 +71,7 @@ describe('§225-B baseAlertPickupSuppress (MID-tier yield, HIGH exempt)', () => 
     const { world, input } = setupWorld()
     input.params.baseAlertPickupSuppress = 1
     placePlayer(world, 1, 24)
-    world.addPowerUp(makePowerUp( 'bomb', 4, 24)) // dist 4 → HIGH tier
+    world.addPowerUp(makePowerUp('bomb', 4, 24)) // dist 4 → HIGH tier
     input.getMoveDirection()
     expect(input.branchCounts.powerup).toBe(1)
   })

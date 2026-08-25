@@ -40,8 +40,12 @@ function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
 
 // Local positional flavor → shared field-complete fixture (遗留 #5;
 // 口径差异表 in tests/helpers.ts).
-const makeBullet = (x: number, y: number, dir: Bullet['dir'], ownerKind: Bullet['ownerKind'] = 'fast'): Bullet =>
-  makeBulletShared({ x, y, dir, ownerKind })
+const makeBullet = (
+  x: number,
+  y: number,
+  dir: Bullet['dir'],
+  ownerKind: Bullet['ownerKind'] = 'fast',
+): Bullet => makeBulletShared({ x, y, dir, ownerKind })
 
 describe('ThreatAssessor — deliberate terrain-blind evasion (DECISIONS §48)', () => {
   describe('findMostDangerousBullet', () => {

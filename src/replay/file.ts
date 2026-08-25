@@ -236,9 +236,7 @@ function validateEnvelope(text: string): { env: FileEnvelope } | { error: string
 }
 
 /** Stage 2 — replay-section structure validation. */
-function validateStructure(
-  env: FileEnvelope,
-): { replay: ReplayEnvelope } | { error: string } {
+function validateStructure(env: FileEnvelope): { replay: ReplayEnvelope } | { error: string } {
   // Runtime files may omit members the interface requires — validate each.
   const replay = env.replay as Partial<ReplayEnvelope> | undefined
   if (!replay) {

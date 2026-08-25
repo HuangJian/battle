@@ -177,7 +177,6 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
   return true
 }
 
-
 /**
  * midLaneDefense(545) — §163 / 中路防守 (user request 2026-08-06, replay
  * hard-s34-base-l2-t69-seed2050197249 Problem 2).

@@ -98,9 +98,7 @@ function parseCli(): Cli {
     setOverrides[key] = val
   }
 
-  const paramsA = arg('params-a')
-    ? loadParamsFile(arg('params-a')!)
-    : { ...DEFAULT_GOD_AI_PARAMS }
+  const paramsA = arg('params-a') ? loadParamsFile(arg('params-a')!) : { ...DEFAULT_GOD_AI_PARAMS }
   const paramsB = arg('params-b')
     ? loadParamsFile(arg('params-b')!)
     : { ...paramsA, ...setOverrides }

@@ -7,7 +7,12 @@ import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
 import { isBaseRingCell } from './ThreatBudget'
 import { estimatedEnemyLevel } from './EnemyModel'
-import { BULLET_ALIGN_NEXT_CELL, HIT_HALF_SPAN, BASE_CENTER_X_PX, BASE_CENTER_Y_PX } from './constants'
+import {
+  BULLET_ALIGN_NEXT_CELL,
+  HIT_HALF_SPAN,
+  BASE_CENTER_X_PX,
+  BASE_CENTER_Y_PX,
+} from './constants'
 
 /** Scan-line aabb pre-filter half-span (§3.11): the literal 33 = TANK + 1. */
 const SCAN_AABB_HALF_SPAN = TANK + 1

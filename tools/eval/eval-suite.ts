@@ -61,7 +61,6 @@ const DEFAULT_MAX_TICKS = 18000
 // CLI plumbing
 // ============================================================
 
-
 /**
  * Accept any of the shapes our tooling writes: a bare GodAIParams object, an
  * optimizer summary (`{ bestParams }`), or a candidate record (`{ params }`).
@@ -827,111 +826,111 @@ async function runCompare(ctx: SuiteContext, pathA: string, pathB: string): Prom
   // ---- --compare A/B: paired A/B under common random numbers ----
   const refsFile = loadEvalRefs()
   const t0 = Date.now()
-    const cellsA = await runCorpus(
-      loadParams(pathA),
-      ctx.stageIdxs,
-      ctx.seeds,
-      ctx.difficulty,
-      ctx.maxTicks,
-      ctx.pool,
-    )
-    const cellsB = await runCorpus(
-      loadParams(pathB),
-      ctx.stageIdxs,
-      ctx.seeds,
-      ctx.difficulty,
-      ctx.maxTicks,
-      ctx.pool,
-    )
-    const scA = scoreCorpus(cellsA, refsFile)
-    const scB = scoreCorpus(cellsB, refsFile)
-    process.stderr.write(
-      `ran ${ctx.totalRuns * 2} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
-    )
+  const cellsA = await runCorpus(
+    loadParams(pathA),
+    ctx.stageIdxs,
+    ctx.seeds,
+    ctx.difficulty,
+    ctx.maxTicks,
+    ctx.pool,
+  )
+  const cellsB = await runCorpus(
+    loadParams(pathB),
+    ctx.stageIdxs,
+    ctx.seeds,
+    ctx.difficulty,
+    ctx.maxTicks,
+    ctx.pool,
+  )
+  const scA = scoreCorpus(cellsA, refsFile)
+  const scB = scoreCorpus(cellsB, refsFile)
+  process.stderr.write(
+    `ran ${ctx.totalRuns * 2} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
+  )
 
-    console.log(`\nA = ${pathA}`)
-    printScorecard(scA, ctx.stageIdxs)
-    console.log(`\nB = ${pathB}`)
-    printScorecard(scB, ctx.stageIdxs)
+  console.log(`\nA = ${pathA}`)
+  printScorecard(scA, ctx.stageIdxs)
+  console.log(`\nB = ${pathB}`)
+  printScorecard(scB, ctx.stageIdxs)
 
-    const cmp = comparePaired(
-      scA.runScores.map((r) => r.score),
-      scB.runScores.map((r) => r.score),
-    )
-    console.log('\n' + '═'.repeat(70))
-    console.log('PAIRED COMPARISON  (B − A, matched on stage+seed)')
-    console.log('═'.repeat(70))
-    console.log(`  paired cells    ${cmp.n}`)
+  const cmp = comparePaired(
+    scA.runScores.map((r) => r.score),
+    scB.runScores.map((r) => r.score),
+  )
+  console.log('\n' + '═'.repeat(70))
+  console.log('PAIRED COMPARISON  (B − A, matched on stage+seed)')
+  console.log('═'.repeat(70))
+  console.log(`  paired cells    ${cmp.n}`)
+  console.log(
+    `  mean Δscore     ${cmp.meanDelta >= 0 ? '+' : ''}${cmp.meanDelta.toFixed(4)} ± ${cmp.se.toFixed(4)}`,
+  )
+  console.log(`  t / p           ${cmp.t.toFixed(2)} / ${cmp.p.toFixed(4)}`)
+  console.log(`  B better/worse/tied  ${cmp.wins} / ${cmp.losses} / ${cmp.ties}`)
+  console.log(`  suite A → B     ${scA.suite.suite.toFixed(4)} → ${scB.suite.suite.toFixed(4)}`)
+  console.log(`  win rate A → B  ${pct(scA.suite.meanWinRate)} → ${pct(scB.suite.meanWinRate)}`)
+
+  // Per-stage breakdown. The suite number is a harmonic mean over stages,
+  // so it deliberately reacts more to the weak tail than a flat average
+  // would — a suite delta can therefore be several times the mean paired
+  // delta if the change happened to land on the stages that were already
+  // struggling. Without this table you cannot tell "slightly worse
+  // everywhere" from "fine everywhere except two stages that collapsed",
+  // and those call for completely different responses.
+  console.log('\n  per-stage Δ (paired within stage, B − A):')
+  const perStage: Array<{ name: string; d: number; p: number; a: number; b: number }> = []
+  for (const st of ctx.stageIdxs) {
+    const name = STAGES[st].name
+    const ia = scA.runScores
+      .map((r, i) => ({ r, i }))
+      .filter(({ i }) => scA.cells[i].stageName === name)
+    const a = ia.map(({ r }) => r.score)
+    const b = ia.map(({ i }) => scB.runScores[i].score)
+    const c = comparePaired(a, b)
+    const aggA = scA.stages.find((s) => s.stageName === name)
+    const aggB = scB.stages.find((s) => s.stageName === name)
+    perStage.push({
+      name,
+      d: c.meanDelta,
+      p: c.p,
+      a: aggA?.score ?? 0,
+      b: aggB?.score ?? 0,
+    })
+  }
+  perStage.sort((x, y) => x.d - y.d)
+  const notable = perStage.filter((s) => s.p < 0.05)
+  if (notable.length === 0) {
+    console.log('    no individual stage moved significantly (all p ≥ 0.05)')
+  } else {
+    for (const s of notable) {
+      const arrow = s.d > 0 ? '▲' : '▼'
+      console.log(
+        `    ${arrow} ${s.name.slice(0, 20).padEnd(21)}` +
+          `Δ ${(s.d >= 0 ? '+' : '') + s.d.toFixed(4)}  p=${s.p.toFixed(4)}  ` +
+          `stage ${s.a.toFixed(3)} → ${s.b.toFixed(3)}`,
+      )
+    }
     console.log(
-      `  mean Δscore     ${cmp.meanDelta >= 0 ? '+' : ''}${cmp.meanDelta.toFixed(4)} ± ${cmp.se.toFixed(4)}`,
+      `    (${notable.filter((s) => s.d < 0).length} worse, ` +
+        `${notable.filter((s) => s.d > 0).length} better, ` +
+        `${perStage.length - notable.length} unchanged)`,
     )
-    console.log(`  t / p           ${cmp.t.toFixed(2)} / ${cmp.p.toFixed(4)}`)
-    console.log(`  B better/worse/tied  ${cmp.wins} / ${cmp.losses} / ${cmp.ties}`)
-    console.log(`  suite A → B     ${scA.suite.suite.toFixed(4)} → ${scB.suite.suite.toFixed(4)}`)
-    console.log(`  win rate A → B  ${pct(scA.suite.meanWinRate)} → ${pct(scB.suite.meanWinRate)}`)
+  }
 
-    // Per-stage breakdown. The suite number is a harmonic mean over stages,
-    // so it deliberately reacts more to the weak tail than a flat average
-    // would — a suite delta can therefore be several times the mean paired
-    // delta if the change happened to land on the stages that were already
-    // struggling. Without this table you cannot tell "slightly worse
-    // everywhere" from "fine everywhere except two stages that collapsed",
-    // and those call for completely different responses.
-    console.log('\n  per-stage Δ (paired within stage, B − A):')
-    const perStage: Array<{ name: string; d: number; p: number; a: number; b: number }> = []
-    for (const st of ctx.stageIdxs) {
-      const name = STAGES[st].name
-      const ia = scA.runScores
-        .map((r, i) => ({ r, i }))
-        .filter(({ i }) => scA.cells[i].stageName === name)
-      const a = ia.map(({ r }) => r.score)
-      const b = ia.map(({ i }) => scB.runScores[i].score)
-      const c = comparePaired(a, b)
-      const aggA = scA.stages.find((s) => s.stageName === name)
-      const aggB = scB.stages.find((s) => s.stageName === name)
-      perStage.push({
-        name,
-        d: c.meanDelta,
-        p: c.p,
-        a: aggA?.score ?? 0,
-        b: aggB?.score ?? 0,
-      })
-    }
-    perStage.sort((x, y) => x.d - y.d)
-    const notable = perStage.filter((s) => s.p < 0.05)
-    if (notable.length === 0) {
-      console.log('    no individual stage moved significantly (all p ≥ 0.05)')
-    } else {
-      for (const s of notable) {
-        const arrow = s.d > 0 ? '▲' : '▼'
-        console.log(
-          `    ${arrow} ${s.name.slice(0, 20).padEnd(21)}` +
-            `Δ ${(s.d >= 0 ? '+' : '') + s.d.toFixed(4)}  p=${s.p.toFixed(4)}  ` +
-            `stage ${s.a.toFixed(3)} → ${s.b.toFixed(3)}`,
-        )
-      }
-      console.log(
-        `    (${notable.filter((s) => s.d < 0).length} worse, ` +
-          `${notable.filter((s) => s.d > 0).length} better, ` +
-          `${perStage.length - notable.length} unchanged)`,
-      )
-    }
-
-    const verdict =
-      cmp.p < 0.05
-        ? cmp.meanDelta > 0
-          ? 'B is better (p < 0.05)'
-          : 'B is worse (p < 0.05)'
-        : 'no significant difference — do not ship on this evidence'
-    console.log(`\n  VERDICT: ${verdict}`)
-    if (cmp.p >= 0.05 && notable.length > 0) {
-      console.log(
-        `  NOTE: the suite is flat overall, but ${notable.length} stage(s) moved\n` +
-          `  significantly. A wash on average can still be a real regression on\n` +
-          `  specific stages — check the table before dismissing the change.`,
-      )
-    }
-    return
+  const verdict =
+    cmp.p < 0.05
+      ? cmp.meanDelta > 0
+        ? 'B is better (p < 0.05)'
+        : 'B is worse (p < 0.05)'
+      : 'no significant difference — do not ship on this evidence'
+  console.log(`\n  VERDICT: ${verdict}`)
+  if (cmp.p >= 0.05 && notable.length > 0) {
+    console.log(
+      `  NOTE: the suite is flat overall, but ${notable.length} stage(s) moved\n` +
+        `  significantly. A wash on average can still be a real regression on\n` +
+        `  specific stages — check the table before dismissing the change.`,
+    )
+  }
+  return
 }
 
 /**

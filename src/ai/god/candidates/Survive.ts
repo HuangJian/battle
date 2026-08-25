@@ -85,7 +85,6 @@ export function evalSurvive(self: GodAIInput, ctx: DecisionContext): boolean {
   return true
 }
 
-
 /**
  * survive (M3, plan/God-AI-Redesign-v2 §3.2, P1-3 生存优先) — 主动换位.
  *

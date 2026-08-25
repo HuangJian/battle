@@ -399,5 +399,4 @@ export class GameRendererCore {
       this.effectsSlice.drawVignette(world)
     }
   }
-
 }

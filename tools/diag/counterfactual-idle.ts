@@ -73,7 +73,6 @@ import { isDefenseBranch } from './failure-classifier'
 import { arg } from '../lib/cli'
 // ---------------------------------------------------------------- CLI args
 
-
 const fromJson = arg('from-json')
 const kinds = new Set((arg('kinds') ?? 'base_destroyed').split(',').map((s) => s.trim()))
 const limit = Number(arg('limit') ?? '40')

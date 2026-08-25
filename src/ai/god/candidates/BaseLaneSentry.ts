@@ -9,8 +9,11 @@ import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../Actio
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { shouldFireInDirImpl } from '../FireControl'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
-import { selfFireBaseGuardBlocks,
-  baseRingBreachedImpl, laneCorridorBlocked } from '../candidates/shared'
+import {
+  selfFireBaseGuardBlocks,
+  baseRingBreachedImpl,
+  laneCorridorBlocked,
+} from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
 
 export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): boolean {
@@ -206,8 +209,6 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
   }
   return false
 }
-
-
 
 export const BASE_LANE_SENTRY: Candidate = {
   id: 'baseLaneSentry',

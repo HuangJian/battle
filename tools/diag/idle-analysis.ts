@@ -404,7 +404,6 @@ function makeAlert(
 // CLI
 // ============================================================
 
-
 async function main() {
   const difficulty = arg('difficulty', 'hard')!
   const seeds = parseSeeds(arg('seeds'))

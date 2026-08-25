@@ -26,7 +26,6 @@ import { arg } from '../lib/cli'
 // ============================================================
 
 if (import.meta.main) {
-
   const inputFile = arg('input', 'generated-stages.json')!
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!

@@ -169,7 +169,6 @@ export function generateLibrary(opts: GenLibraryOptions): GenLibraryResult {
 // ============================================================
 
 if (import.meta.main) {
-
   const count = parseInt(arg('count', '20')!, 10)
   const difficulty = arg('difficulty', 'hard')!
   const theme = (arg('theme', 'mixed') ?? 'mixed') as Theme

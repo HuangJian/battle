@@ -95,7 +95,7 @@ export function positionPlayer(world: World, col: number, row: number, dir?: Dir
 
 // ── Composite fixtures (plan/refactor.trae.md §1.1) ────────────────────────
 // Incremental adoption: new tests should reach for these instead of copying
- // setup boilerplate; existing local copies are NOT rewritten.
+// setup boilerplate; existing local copies are NOT rewritten.
 //
 // 口径差异表 — known historical local variants that intentionally differ from
 // these shared fixtures. Do NOT blindly swap them for the shared versions:

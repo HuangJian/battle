@@ -5,7 +5,12 @@
 // core instance back-reference (`this.r`).
 // ================================================================
 import type { Direction } from '../../constants'
-import { POWERUP_GLOW_FREQ, paintPowerUpGlow, explosionSizeAt, explosionAlphaAt } from './SpriteArtistCore'
+import {
+  POWERUP_GLOW_FREQ,
+  paintPowerUpGlow,
+  explosionSizeAt,
+  explosionAlphaAt,
+} from './SpriteArtistCore'
 import {
   ITEM_KEY_MAP,
   HP_LEVEL_KEYS,

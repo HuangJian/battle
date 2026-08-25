@@ -4,8 +4,11 @@
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import { commitPowerupTail,
-  baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
+import {
+  commitPowerupTail,
+  baseRingBreachedImpl,
+  isDualCentralBreachHoldP1,
+} from '../candidates/shared'
 
 export function evalPickupMid(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, pcx, pcy } = ctx
@@ -40,7 +43,6 @@ export function evalPickupMid(self: GodAIInput, ctx: DecisionContext): boolean {
   }
   return false
 }
-
 
 /** pickupMid(600) — §88 MID-tier urgent pickup (star/tank/shield ≤4格). */
 

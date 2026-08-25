@@ -202,7 +202,6 @@ export function runEvaluationCalibration(opts: CalibrationOptions): CalibrationR
 // ============================================================
 
 if (import.meta.main) {
-
   const seedCount = parseInt(arg('seeds', '10')!, 10)
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const diffSpec = arg('difficulty', 'hard')!

@@ -214,12 +214,7 @@ export interface Tank extends Entity {
  * (§2.6) Enemy-brain types live in `src/ai/types.ts`; re-exported here for
  * compatibility. `AIState` is imported above for `Tank.aiState`.
  */
-export type {
-  IntelligenceLevel,
-  GoalType,
-  CommanderDirective,
-  AIState,
-} from './ai/types'
+export type { IntelligenceLevel, GoalType, CommanderDirective, AIState } from './ai/types'
 
 export interface Bullet extends Entity {
   ownerId: number
@@ -304,12 +299,7 @@ export type GameEvent =
 // (§2.6) The config-layer data contracts moved to `src/config/types.ts`;
 // re-exported here for compatibility.
 
-export type {
-  DifficultyConfig,
-  StageData,
-  ThemeColors,
-  ThemeDefinition,
-} from './config/types'
+export type { DifficultyConfig, StageData, ThemeColors, ThemeDefinition } from './config/types'
 
 // ============================================================
 // Settings

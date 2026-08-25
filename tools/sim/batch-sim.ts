@@ -233,7 +233,6 @@ export { parseSeedSpec } from '../lib/cli'
 // ============================================================
 
 if (import.meta.main) {
-
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!
   const seeds = parseSeedSpec(seedSpec)

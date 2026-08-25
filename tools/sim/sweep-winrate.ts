@@ -61,9 +61,11 @@ function parseSeedSpec(spec: string): number[] {
   return [n]
 }
 
-const difficulties = arg('difficulties') ?? EVAL_DIFFICULTY_KEYS.join(',')
-  .split(',')
-  .map((s) => s.trim())
+const difficulties =
+  arg('difficulties') ??
+  EVAL_DIFFICULTY_KEYS.join(',')
+    .split(',')
+    .map((s) => s.trim())
 const seeds = parseSeedSpec(arg('seeds', '1-60')!)
 const outDir = arg('out', 'reports/winrate')!
 const historyDir = arg('history', DEFAULT_HISTORY_DIR)!
@@ -280,7 +282,6 @@ function a_for(aggs: DiffAgg[], name: string): DiffAgg {
   return a
 }
 
-
 /* ===== Compact run shape shared by the current sweep and every history snapshot.
    Kept tiny because it is embedded verbatim into the HTML for client-side diffing. */
 function buildMarkdown(aggs: DiffAgg[], unionWorst: number[], history: WinrateSnapshot[]): string {
@@ -374,7 +375,7 @@ function historyMarkdown(aggs: DiffAgg[], history: WinrateSnapshot[]): string[] 
     seedsCount: seeds.length,
   })
   const runs = history.map((s) =>
-      compactSnapshot(s, { ranAt: s.generatedAt || s.savedAt, seedsCount: s.scope?.seedsCount ?? 0 }),
+    compactSnapshot(s, { ranAt: s.generatedAt || s.savedAt, seedsCount: s.scope?.seedsCount ?? 0 }),
   )
   const baseline = runs[runs.length - 1]
   const names = aggs.map((a) => a.name)
@@ -432,6 +433,5 @@ function historyMarkdown(aggs: DiffAgg[], history: WinrateSnapshot[]): string[] 
   out.push('')
   return out
 }
-
 
 await main()

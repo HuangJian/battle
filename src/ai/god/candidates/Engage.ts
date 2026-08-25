@@ -5,10 +5,7 @@
 import { BASE_POS, CELL } from '../../../constants'
 import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import {
-  bulletPathSteelBlockedImpl,
-  scanAheadImpl,
-} from '../FireControl'
+import { bulletPathSteelBlockedImpl, scanAheadImpl } from '../FireControl'
 import { countAlignedEnemiesImpl } from '../ThreatAssessor'
 import { updateStuckTrack } from '../stuck-track'
 import { selfFireBaseGuardBlocks } from '../candidates/shared'
@@ -229,7 +226,6 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
   }
   return false
 }
-
 
 /** engage(500) — T2a: stop-and-aim when an enemy is in the line of fire. */
 

@@ -631,7 +631,6 @@ export function computeStats(stage: StageData): StageStats {
 // ============================================================
 
 if (import.meta.main) {
-
   const count = parseInt(arg('count', '1')!, 10)
   const seed = parseInt(arg('seed', '1')!, 10)
   const difficulty = arg('difficulty', 'hard')!

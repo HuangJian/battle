@@ -31,7 +31,6 @@ export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean
   return commitPowerupTail(self, ctx, target)
 }
 
-
 /** closePickup(540) — §158: non-freeze close-range power-up pickup.
  *
  * When NOT in freeze/shield mode, if a power-up is within `closePickupRange`

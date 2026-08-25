@@ -214,6 +214,10 @@ describe('godai-hub-fields (遗留 #1 structural guardrail)', () => {
 
   it('allowlist has no stale entries (every entry matches a real field)', () => {
     const stale = Object.keys(ALLOWLIST).filter((f) => !fields.has(f))
-    expect(stale.length === 0 ? true : `stale allowlist keys (renamed/removed fields): ${stale.join(', ')}`).toBe(true)
+    expect(
+      stale.length === 0
+        ? true
+        : `stale allowlist keys (renamed/removed fields): ${stale.join(', ')}`,
+    ).toBe(true)
   })
 })

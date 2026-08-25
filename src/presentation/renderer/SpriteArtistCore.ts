@@ -499,15 +499,7 @@ export class SpriteArtistCore {
   drawBrick(x: number, y: number, size: number): void {
     this.spriteTerrainSlice.drawBrick(x, y, size)
   }
-  drawSteel(
-    x: number,
-    y: number,
-    size: number,
-    n = false,
-    e = false,
-    s = false,
-    w = false,
-  ): void {
+  drawSteel(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
     this.spriteTerrainSlice.drawSteel(x, y, size, n, e, s, w)
   }
   drawWater(x: number, y: number, size: number, frame: number): void {
@@ -516,15 +508,7 @@ export class SpriteArtistCore {
   drawForest(x: number, y: number, size: number): void {
     this.spriteTerrainSlice.drawForest(x, y, size)
   }
-  drawIce(
-    x: number,
-    y: number,
-    size: number,
-    n = false,
-    e = false,
-    s = false,
-    w = false,
-  ): void {
+  drawIce(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
     this.spriteTerrainSlice.drawIce(x, y, size, n, e, s, w)
   }
   drawBase(x: number, y: number, size: number, destroyed: boolean, damage = 0): void {
@@ -625,13 +609,7 @@ export class SpriteArtistCore {
   drawShield(x: number, y: number, size: number, frame: number): void {
     this.spriteEffectSlice.drawShield(x, y, size, frame)
   }
-  drawExplosion(
-    x: number,
-    y: number,
-    size: number,
-    progress: number,
-    kind: 'small' | 'big',
-  ): void {
+  drawExplosion(x: number, y: number, size: number, progress: number, kind: 'small' | 'big'): void {
     this.spriteEffectSlice.drawExplosion(x, y, size, progress, kind)
   }
   drawHpLevelAura(x: number, y: number, size: number, hpLevel: number, frame: number): void {

@@ -239,14 +239,7 @@ export function perceive(
     // bullets carry allegiance 'ally', never 'enemy').
     if (!b.alive || b.allegiance === 'enemy') continue
     // §3.1 single-sourced lane geometry (allegiance filtered above).
-    const dist = bulletLaneDist(
-      b.dir,
-      b.x + b.w / 2,
-      b.y + b.h / 2,
-      sx,
-      sy,
-      BULLET_ALIGN_NEXT_CELL,
-    )
+    const dist = bulletLaneDist(b.dir, b.x + b.w / 2, b.y + b.h / 2, sx, sy, BULLET_ALIGN_NEXT_CELL)
     if (dist < 0 || dist > range) continue
     // Track the closest threat. Sorting was only needed to pick threats[0];
     // a running min replaces the sort + array entirely.

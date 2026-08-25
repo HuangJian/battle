@@ -564,79 +564,81 @@ function dodgeHorizonCommit(
   _dodgeOut.dir = null
   _dodgeOut.safeA = false
   _dodgeOut.safeB = false
-    const passA = self.canMoveDir(p, candA)
-    const passB = self.canMoveDir(p, candB)
-    if (passA || passB) {
-      if (passA && passB) {
-        const hA = dodgeHorizonTicksImpl(self, p, pcx, pcy, candA)
-        const hB = dodgeHorizonTicksImpl(self, p, pcx, pcy, candB)
-        const bestH = hA > hB ? hA : hB
-        // M12 (DECISIONS §112): player HP buffer awareness — the commit
-        // margin is HP-adaptive, but ONLY in the 'pool' combat model (classic
-        // 'instant' has no HP buffer — 1 hit = death, no commit/trade
-        // gradient exists). hits-to-die = ceil(player.hp / threat.damage).
-        //   danger: hits-to-die <= hpDangerHits → RELAX to hpDangerCommitMargin
-        //     (low HP: the escape is survival — commit to the longer-horizon
-        //     side and stop oscillating inside the hit band; §111 probe: 70%
-        //     of hard/chaos deaths absorb >= 3 hits while grinding).
-        //   trade:  hits-to-die >= hpTradeHits → ADD hpTradeCommitPenalty
-        //     (high HP: the buffer absorbs a hit — accept the partial dodge,
-        //     keep moving/attacking instead of over-committing to an escape
-        //     that costs base-defense and kill efficiency, M9/M10 measured).
-        // Default playerHpAwareness=0 → margin unchanged (byte-identical).
-        let margin = self.params.dodgeHorizonMinMarginTicks
-        if (self.params.playerHpAwareness > 0 && w.rules.combatModel === 'pool') {
-          const hitsToDie = Math.ceil(p.hp / Math.max(1, bullet.damage))
-          // Danger takes precedence: when the danger condition matches, only
-          // hpDangerCommitMargin applies (trade is skipped for that HP range
-          // even if hpTradeHits is also satisfied). Overlapping thresholds
-          // resolve to danger — the more urgent mode.
-          if (self.params.hpDangerHits > 0 && hitsToDie <= self.params.hpDangerHits) {
-            if (self.params.hpDangerCommitMargin > 0) margin = self.params.hpDangerCommitMargin
-          } else if (self.params.hpTradeHits > 0 && hitsToDie >= self.params.hpTradeHits) {
-            margin += self.params.hpTradeCommitPenalty
-          }
+  const passA = self.canMoveDir(p, candA)
+  const passB = self.canMoveDir(p, candB)
+  if (passA || passB) {
+    if (passA && passB) {
+      const hA = dodgeHorizonTicksImpl(self, p, pcx, pcy, candA)
+      const hB = dodgeHorizonTicksImpl(self, p, pcx, pcy, candB)
+      const bestH = hA > hB ? hA : hB
+      // M12 (DECISIONS §112): player HP buffer awareness — the commit
+      // margin is HP-adaptive, but ONLY in the 'pool' combat model (classic
+      // 'instant' has no HP buffer — 1 hit = death, no commit/trade
+      // gradient exists). hits-to-die = ceil(player.hp / threat.damage).
+      //   danger: hits-to-die <= hpDangerHits → RELAX to hpDangerCommitMargin
+      //     (low HP: the escape is survival — commit to the longer-horizon
+      //     side and stop oscillating inside the hit band; §111 probe: 70%
+      //     of hard/chaos deaths absorb >= 3 hits while grinding).
+      //   trade:  hits-to-die >= hpTradeHits → ADD hpTradeCommitPenalty
+      //     (high HP: the buffer absorbs a hit — accept the partial dodge,
+      //     keep moving/attacking instead of over-committing to an escape
+      //     that costs base-defense and kill efficiency, M9/M10 measured).
+      // Default playerHpAwareness=0 → margin unchanged (byte-identical).
+      let margin = self.params.dodgeHorizonMinMarginTicks
+      if (self.params.playerHpAwareness > 0 && w.rules.combatModel === 'pool') {
+        const hitsToDie = Math.ceil(p.hp / Math.max(1, bullet.damage))
+        // Danger takes precedence: when the danger condition matches, only
+        // hpDangerCommitMargin applies (trade is skipped for that HP range
+        // even if hpTradeHits is also satisfied). Overlapping thresholds
+        // resolve to danger — the more urgent mode.
+        if (self.params.hpDangerHits > 0 && hitsToDie <= self.params.hpDangerHits) {
+          if (self.params.hpDangerCommitMargin > 0) margin = self.params.hpDangerCommitMargin
+        } else if (self.params.hpTradeHits > 0 && hitsToDie >= self.params.hpTradeHits) {
+          margin += self.params.hpTradeCommitPenalty
         }
-        let commit = bestH >= margin
-        // Distance gate — only meaningful when the stage has a base; on
-        // no-base stages the fixed BASE_POS is not a defense anchor.
-        if (commit && self.hasBase && self.params.dodgeHorizonMaxDistCells > 0) {
-          const pc = self.playerCell()
-          const baseCol = BASE_POS.col + 1
-          const baseRow = BASE_POS.row + 1
-          const distCells = manhattan(pc.col, pc.row, baseCol, baseRow)
-          if (distCells > self.params.dodgeHorizonMaxDistCells) commit = false
+      }
+      let commit = bestH >= margin
+      // Distance gate — only meaningful when the stage has a base; on
+      // no-base stages the fixed BASE_POS is not a defense anchor.
+      if (commit && self.hasBase && self.params.dodgeHorizonMaxDistCells > 0) {
+        const pc = self.playerCell()
+        const baseCol = BASE_POS.col + 1
+        const baseRow = BASE_POS.row + 1
+        const distCells = manhattan(pc.col, pc.row, baseCol, baseRow)
+        if (distCells > self.params.dodgeHorizonMaxDistCells) commit = false
+      }
+      if (commit) {
+        if (hA > hB) {
+          _dodgeOut.dir = candA
+          return
         }
-        if (commit) {
-          if (hA > hB) {
-            _dodgeOut.dir = candA
-            return
-          }
-          if (hB > hA) {
-            _dodgeOut.dir = candB
-            return
-          }
-        }
-        // Gate failed or tied — legacy binary path (isSafeDir + passable
-        // fallback, same as the default branch below).
-        if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) _dodgeOut.safeA = true
-        if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) _dodgeOut.safeB = true
-        if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
-          if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
-          if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
-        }
-      } else {
-        // Only ONE perpendicular is passable — commit to it (the legacy path
-        // also falls back to a passable-but-unsafe side when nothing is safe,
-        // so the outcome is the same; the crossfire next-cell count is
-        // redundant here since there is no alternative direction).
-        {
-          _dodgeOut.dir = passA ? candA : candB
+        if (hB > hA) {
+          _dodgeOut.dir = candB
           return
         }
       }
+      // Gate failed or tied — legacy binary path (isSafeDir + passable
+      // fallback, same as the default branch below).
+      if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id))
+        _dodgeOut.safeA = true
+      if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id))
+        _dodgeOut.safeB = true
+      if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
+        if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
+        if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
+      }
+    } else {
+      // Only ONE perpendicular is passable — commit to it (the legacy path
+      // also falls back to a passable-but-unsafe side when nothing is safe,
+      // so the outcome is the same; the crossfire next-cell count is
+      // redundant here since there is no alternative direction).
+      {
+        _dodgeOut.dir = passA ? candA : candB
+        return
+      }
     }
-    // Neither passable → fall through to the pinned (no-escape) logic below.
+  }
+  // Neither passable → fall through to the pinned (no-escape) logic below.
 }
 
 /**
@@ -655,33 +657,33 @@ function dodgeClearanceCommit(
   _dodgeOut.dir = null
   _dodgeOut.safeA = false
   _dodgeOut.safeB = false
-    const passA = self.canMoveDir(p, candA)
-    const passB = self.canMoveDir(p, candB)
-    if (passA || passB) {
-      if (passA && passB) {
-        const clearA = dodgeClearanceTicksImpl(self, pcx, pcy, candA, bullet.id)
-        const clearB = dodgeClearanceTicksImpl(self, pcx, pcy, candB, bullet.id)
-        if (clearA > clearB) {
-          _dodgeOut.dir = candA
-          return
-        }
-        if (clearB > clearA) {
-          _dodgeOut.dir = candB
-          return
-        }
-        // Tie — fall through with both safe; the shared base-closer tail
-        // below breaks the tie (same as the binary path).
-        _dodgeOut.safeA = true
-        _dodgeOut.safeB = true
-      } else if (passA) {
+  const passA = self.canMoveDir(p, candA)
+  const passB = self.canMoveDir(p, candB)
+  if (passA || passB) {
+    if (passA && passB) {
+      const clearA = dodgeClearanceTicksImpl(self, pcx, pcy, candA, bullet.id)
+      const clearB = dodgeClearanceTicksImpl(self, pcx, pcy, candB, bullet.id)
+      if (clearA > clearB) {
         _dodgeOut.dir = candA
         return
-      } else {
+      }
+      if (clearB > clearA) {
         _dodgeOut.dir = candB
         return
       }
+      // Tie — fall through with both safe; the shared base-closer tail
+      // below breaks the tie (same as the binary path).
+      _dodgeOut.safeA = true
+      _dodgeOut.safeB = true
+    } else if (passA) {
+      _dodgeOut.dir = candA
+      return
+    } else {
+      _dodgeOut.dir = candB
+      return
     }
-    // Neither perpendicular passable → fall through to the pinned logic.
+  }
+  // Neither perpendicular passable → fall through to the pinned logic.
 }
 
 /**
@@ -702,122 +704,124 @@ function dodgeDefaultStrategies(
   _dodgeOut.dir = null
   _dodgeOut.safeA = false
   _dodgeOut.safeB = false
-    // §223: multi-bullet centroid escape (dodgeCentroidMode). The
-    // counterfactual-dodge hard-away arm survived 75.3% of dodge-death
-    // windows vs 0% factual — running away from the CENTROID of the bullet
-    // cluster beats dodging the single nearest bullet. Active only when ≥2
-    // enemy bullets threaten the immediate vicinity; single-bullet and
-    // no-bullet situations fall through to the legacy path (byte-identical).
-    if (self.params.dodgeCentroidMode > 0) {
-      self._centroidChecks++
-      let cSumX = 0
-      let cSumY = 0
-      let cN = 0
-      const bullets = w.bullets
-      for (let bi = 0; bi < bullets.length; bi++) {
-        const b = bullets[bi]
-        if (!b.alive || b.isPlayer) continue
-        const bcx = b.x + b.w / 2
-        const bcy = b.y + b.h / 2
-        if (manhattan(bcx, bcy, pcx, pcy) <= CENTROID_RADIUS_PX) {
-          cSumX += bcx
-          cSumY += bcy
-          cN++
-        }
-      }
-      if (cN >= 2) {
-        self._centroidTriggers++
-        const cx = cSumX / cN
-        const cy = cSumY / cN
-        let bestDir: Direction | null = null
-        let bestScore = -Infinity
-        for (let di = 0; di < ALL_DIRS.length; di++) {
-          const d = ALL_DIRS[di]
-          // §83 stays in force: never flee in the bullet's own travel
-          // direction, and the centroid escape never advances INTO the
-          // dodged bullet's lane (that is the oscillation counter-fire's
-          // job; the perpendicular escape semantics are preserved).
-          if (d === bullet.dir || d === opposite(bullet.dir)) continue
-          if (!self.canMoveDir(p, d)) continue
-          if (!self.isSafeDir(pcx, pcy, d, bullet.id)) continue
-          const v = DIR_VECTORS[d]
-          const nx = pcx + v.dx * CELL
-          const ny = pcy + v.dy * CELL
-          if (self.hasBase) {
-            const baseCx = BASE_CENTER_X_PX
-            const baseCy = BASE_CENTER_Y_PX
-            const distNow = manhattan(pcx, pcy, baseCx, baseCy)
-            const distNext = manhattan(nx, ny, baseCx, baseCy)
-            if (distNext > distNow + CENTROID_BASE_SLACK_CELLS * CELL) continue
-          }
-          const away = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)
-          if (away > bestScore) {
-            bestScore = away
-            bestDir = d
-          }
-        }
-        if (bestDir) {
-          self._centroidEscapes++
-          _dodgeOut.dir = bestDir
-          return
-        }
+  // §223: multi-bullet centroid escape (dodgeCentroidMode). The
+  // counterfactual-dodge hard-away arm survived 75.3% of dodge-death
+  // windows vs 0% factual — running away from the CENTROID of the bullet
+  // cluster beats dodging the single nearest bullet. Active only when ≥2
+  // enemy bullets threaten the immediate vicinity; single-bullet and
+  // no-bullet situations fall through to the legacy path (byte-identical).
+  if (self.params.dodgeCentroidMode > 0) {
+    self._centroidChecks++
+    let cSumX = 0
+    let cSumY = 0
+    let cN = 0
+    const bullets = w.bullets
+    for (let bi = 0; bi < bullets.length; bi++) {
+      const b = bullets[bi]
+      if (!b.alive || b.isPlayer) continue
+      const bcx = b.x + b.w / 2
+      const bcy = b.y + b.h / 2
+      if (manhattan(bcx, bcy, pcx, pcy) <= CENTROID_RADIUS_PX) {
+        cSumX += bcx
+        cSumY += bcy
+        cN++
       }
     }
-    // §201: escape-depth-aware dodge — dead-end perpendiculars. When BOTH
-    // perpendicular sides are shallow pockets (< dodgeEscapeDepth cells of
-    // travel), the binary step-into-pocket dodge oscillates between them
-    // while the enemy keeps firing (S14 hard s60: 93-tick up/down jitter,
-    // hp 315→0 in a water-belt pocket). Probe the bullet-axis directions
-    // for a genuinely longer escape and take it (safe-gated like every
-    // dodge; §83's no-flee-in-bullet-axis rule applies to fleeing ALONG a
-    // corridor the bullet traverses — the axis probe only fires when the
-    // perpendicular pockets are dead ends and the axis move is clear).
-    if (self.params.dodgeEscapeDepth > 0) {
-      const depthA = escapeDepthImpl(self, pcx, pcy, candA, 10)
-      const depthB = escapeDepthImpl(self, pcx, pcy, candB, 10)
-      const minDepth = self.params.dodgeEscapeDepth
-      if (depthA < minDepth && depthB < minDepth) {
-        const axisA: Direction = vertical ? 'up' : 'left'
-        const axisB: Direction = vertical ? 'down' : 'right'
-        const depthAxisA = escapeDepthImpl(self, pcx, pcy, axisA, 10)
-        const depthAxisB = escapeDepthImpl(self, pcx, pcy, axisB, 10)
-        const takeAxis = (dir: Direction): boolean =>
-          dir === bullet.dir
-            ? false // §83: never flee in the bullet's travel direction
-            : self.canMoveDir(p, dir) && self.isSafeDir(pcx, pcy, dir, bullet.id)
-        const axisAName = axisA
-        const axisBName = axisB
-        if (depthAxisA >= minDepth && takeAxis(axisAName)) {
-          if (depthAxisB >= minDepth && takeAxis(axisBName)) {
-            // Both axes long — prefer the base-closer side (defense bias).
-            const baseCx = BASE_CENTER_X_PX
-            const baseCy = BASE_CENTER_Y_PX
-            const va = DIR_VECTORS[axisAName]
-            const vb = DIR_VECTORS[axisBName]
-            const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
-            const distB = manhattan(pcx + vb.dx * CELL, pcy + vb.dy * CELL, baseCx, baseCy)
-            _dodgeOut.dir = distA <= distB ? axisAName : axisBName
-            return
-          }
-          _dodgeOut.dir = axisAName
-          return
+    if (cN >= 2) {
+      self._centroidTriggers++
+      const cx = cSumX / cN
+      const cy = cSumY / cN
+      let bestDir: Direction | null = null
+      let bestScore = -Infinity
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        // §83 stays in force: never flee in the bullet's own travel
+        // direction, and the centroid escape never advances INTO the
+        // dodged bullet's lane (that is the oscillation counter-fire's
+        // job; the perpendicular escape semantics are preserved).
+        if (d === bullet.dir || d === opposite(bullet.dir)) continue
+        if (!self.canMoveDir(p, d)) continue
+        if (!self.isSafeDir(pcx, pcy, d, bullet.id)) continue
+        const v = DIR_VECTORS[d]
+        const nx = pcx + v.dx * CELL
+        const ny = pcy + v.dy * CELL
+        if (self.hasBase) {
+          const baseCx = BASE_CENTER_X_PX
+          const baseCy = BASE_CENTER_Y_PX
+          const distNow = manhattan(pcx, pcy, baseCx, baseCy)
+          const distNext = manhattan(nx, ny, baseCx, baseCy)
+          if (distNext > distNow + CENTROID_BASE_SLACK_CELLS * CELL) continue
         }
+        const away = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy)
+        if (away > bestScore) {
+          bestScore = away
+          bestDir = d
+        }
+      }
+      if (bestDir) {
+        self._centroidEscapes++
+        _dodgeOut.dir = bestDir
+        return
+      }
+    }
+  }
+  // §201: escape-depth-aware dodge — dead-end perpendiculars. When BOTH
+  // perpendicular sides are shallow pockets (< dodgeEscapeDepth cells of
+  // travel), the binary step-into-pocket dodge oscillates between them
+  // while the enemy keeps firing (S14 hard s60: 93-tick up/down jitter,
+  // hp 315→0 in a water-belt pocket). Probe the bullet-axis directions
+  // for a genuinely longer escape and take it (safe-gated like every
+  // dodge; §83's no-flee-in-bullet-axis rule applies to fleeing ALONG a
+  // corridor the bullet traverses — the axis probe only fires when the
+  // perpendicular pockets are dead ends and the axis move is clear).
+  if (self.params.dodgeEscapeDepth > 0) {
+    const depthA = escapeDepthImpl(self, pcx, pcy, candA, 10)
+    const depthB = escapeDepthImpl(self, pcx, pcy, candB, 10)
+    const minDepth = self.params.dodgeEscapeDepth
+    if (depthA < minDepth && depthB < minDepth) {
+      const axisA: Direction = vertical ? 'up' : 'left'
+      const axisB: Direction = vertical ? 'down' : 'right'
+      const depthAxisA = escapeDepthImpl(self, pcx, pcy, axisA, 10)
+      const depthAxisB = escapeDepthImpl(self, pcx, pcy, axisB, 10)
+      const takeAxis = (dir: Direction): boolean =>
+        dir === bullet.dir
+          ? false // §83: never flee in the bullet's travel direction
+          : self.canMoveDir(p, dir) && self.isSafeDir(pcx, pcy, dir, bullet.id)
+      const axisAName = axisA
+      const axisBName = axisB
+      if (depthAxisA >= minDepth && takeAxis(axisAName)) {
         if (depthAxisB >= minDepth && takeAxis(axisBName)) {
-          _dodgeOut.dir = axisBName
+          // Both axes long — prefer the base-closer side (defense bias).
+          const baseCx = BASE_CENTER_X_PX
+          const baseCy = BASE_CENTER_Y_PX
+          const va = DIR_VECTORS[axisAName]
+          const vb = DIR_VECTORS[axisBName]
+          const distA = manhattan(pcx + va.dx * CELL, pcy + va.dy * CELL, baseCx, baseCy)
+          const distB = manhattan(pcx + vb.dx * CELL, pcy + vb.dy * CELL, baseCx, baseCy)
+          _dodgeOut.dir = distA <= distB ? axisAName : axisBName
           return
         }
+        _dodgeOut.dir = axisAName
+        return
+      }
+      if (depthAxisB >= minDepth && takeAxis(axisBName)) {
+        _dodgeOut.dir = axisBName
+        return
       }
     }
-    // Try each candidate; prefer the one that's passable AND safe (M3).
-    // Use local booleans instead of allocating an `open` array.
-    if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id)) _dodgeOut.safeA = true
-    if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id)) _dodgeOut.safeB = true
+  }
+  // Try each candidate; prefer the one that's passable AND safe (M3).
+  // Use local booleans instead of allocating an `open` array.
+  if (self.canMoveDir(p, candA) && self.isSafeDir(pcx, pcy, candA, bullet.id))
+    _dodgeOut.safeA = true
+  if (self.canMoveDir(p, candB) && self.isSafeDir(pcx, pcy, candB, bullet.id))
+    _dodgeOut.safeB = true
 
-    // If no safe candidate, try passable but unsafe.
-    if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
-      if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
-      if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
-    }
+  // If no safe candidate, try passable but unsafe.
+  if (!_dodgeOut.safeA && !_dodgeOut.safeB) {
+    if (self.canMoveDir(p, candA)) _dodgeOut.safeA = true
+    if (self.canMoveDir(p, candB)) _dodgeOut.safeB = true
+  }
 }
 
 export function dodgeDirectionImpl(

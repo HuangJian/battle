@@ -126,7 +126,6 @@ export async function renderThumbnails(opts: ThumbnailOptions): Promise<string[]
 // ============================================================
 
 if (import.meta.main) {
-
   const inputFile = arg('input')
   const outputDir = arg('output-dir', 'thumbnails')!
   const stageSpec = arg('stages')

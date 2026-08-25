@@ -65,12 +65,7 @@ function positionPlayer(world: World, col: number, row: number): void {
 }
 
 // Local push-flavor → shared pure factory (遗留 #5; 口径差异表 in tests/helpers.ts).
-const makePowerUp = (
-  world: World,
-  col: number,
-  row: number,
-  type: PowerUp['type'],
-): PowerUp => {
+const makePowerUp = (world: World, col: number, row: number, type: PowerUp['type']): PowerUp => {
   const pu = makePowerUpShared(col, row, type)
   world.powerUps.push(pu)
   return pu

@@ -6,10 +6,7 @@ import { type Direction, BASE_POS, CELL } from '../../../constants'
 import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import {
-  scanAheadImpl,
-  shouldFireInDirImpl,
-} from '../FireControl'
+import { scanAheadImpl, shouldFireInDirImpl } from '../FireControl'
 import { enemyApproachingBaseLaneImpl, enemyCanShootBase } from '../SmartThreatModel'
 
 import { manhattan } from '../../../utils/helpers'
@@ -112,7 +109,6 @@ export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): bo
   }
   return false
 }
-
 
 /**
  * defenseIntercept(550) — §134/方向 D: 防守位停射拦截基地车道敌人。

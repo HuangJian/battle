@@ -5,8 +5,11 @@
 import { CELL } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import { commitPowerupTail,
-  isDualCentralBreachHoldP1, retreatGateBlocksPickup } from '../candidates/shared'
+import {
+  commitPowerupTail,
+  isDualCentralBreachHoldP1,
+  retreatGateBlocksPickup,
+} from '../candidates/shared'
 import { manhattan } from '../../../utils/helpers'
 import { findDireItemTargetImpl } from '../StrategyPlanner'
 import { findDualFencePickupImpl } from '../StrategyPlanner'
@@ -98,7 +101,6 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
   }
   return false
 }
-
 
 /** pickupHigh(800) — §87/§88 HIGH-tier urgent pickup (bomb/freeze/fence ≤8格). */
 

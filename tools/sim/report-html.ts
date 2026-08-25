@@ -147,7 +147,10 @@ export function buildHtml(
     compactSnapshot(s, { ranAt: s.generatedAt || s.savedAt, seedsCount: s.scope?.seedsCount ?? 0 }),
   )
   const historyPayload = JSON.stringify({
-    current: compactCurrent(aggs, { ranAt: new Date().toISOString(), seedsCount: scope.seedsCount }),
+    current: compactCurrent(aggs, {
+      ranAt: new Date().toISOString(),
+      seedsCount: scope.seedsCount,
+    }),
     snapshots: histRuns,
     diffNames: aggs.map((a) => a.name),
     stageNames: STAGES.map((s) => s.name),

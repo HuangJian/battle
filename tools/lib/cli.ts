@@ -49,7 +49,7 @@ export function flag(name: string): boolean {
  *
  * The count-only branch is load-bearing: half the historical copies dropped
  * it, so `--seeds 60` silently meant "seed 60 only" there.
- */export function parseSeeds(spec: string | undefined, defaultCount = 120): number[] {
+ */ export function parseSeeds(spec: string | undefined, defaultCount = 120): number[] {
   if (!spec) return Array.from({ length: defaultCount }, (_, i) => i + 1)
   const s = spec.trim()
   if (/^\d+-\d+$/.test(s)) {
