@@ -44,7 +44,7 @@ from weights_io import load_state_into, save_weights_json
 
 # rl/ 包：编排逻辑单点实现（本文件以下仅存 CLI + 主循环 + 权重归档/巡检）
 from rl.log import log
-from rl.course import build_pairs, parse_range  # noqa: F401  (re-export)
+from rl.course import build_pairs, parse_range, curriculum_active_count  # noqa: F401
 from rl.reports import combine_reports, win_of as _win_of  # noqa: F401
 from rl.resume import (completed_pairs, last_completed_iter,  # noqa: F401
                        last_rotate_seed, resumed_manifests)
@@ -171,6 +171,18 @@ def main() -> None:
                     help="random seeds per stage in rotate mode")
     ap.add_argument("--total-stages", type=int, default=35,
                     help="stage count for rotate mode (repo has 35)")
+    ap.add_argument("--curriculum-stages", default="",
+                    help="curriculum mode: easy→hard ordered stage list (e.g. "
+                         "'13,1,16,8,21,4,15,31,0,29,33,...'). Non-empty enables it: each "
+                         "iteration samples only the active window (first N stages), N grows "
+                         "deterministically with it (see --curriculum-every). Recommended "
+                         "ordering = per-stage eval win rate desc (2026-08-25 audit).")
+    ap.add_argument("--curriculum-start", type=int, default=4,
+                    help="curriculum initial active-stage count")
+    ap.add_argument("--curriculum-every", type=int, default=8,
+                    help="curriculum: expand every N iterations (0 = never expand)")
+    ap.add_argument("--curriculum-grow", type=int, default=4,
+                    help="curriculum: +G stages per expansion step")
     ap.add_argument("--difficulty", default="hard")
     ap.add_argument("--max-ticks", type=int, default=12000)
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
@@ -234,7 +246,10 @@ def main() -> None:
     log(f"[run_rl] iters={'infinite' if args.iters <= 0 else args.iters}"
         + (f" (max-hours={args.max_hours})" if args.max_hours > 0 else "")
         + " "
-        + (f"rotate=shuffled {args.rotate_stages}-stage batches x{args.seeds_per_stage}seeds "
+        + (f"curriculum={args.curriculum_stages} start={args.curriculum_start} "
+           f"every={args.curriculum_every} grow={args.curriculum_grow}"
+           if args.curriculum_stages else
+           f"rotate=shuffled {args.rotate_stages}-stage batches x{args.seeds_per_stage}seeds "
            f"of {args.total_stages} (full coverage every "
            f"{-(-args.total_stages // args.rotate_stages)} iters)" if args.rotate_stages > 0
            else f"stages={args.stages} seeds={args.seeds}")

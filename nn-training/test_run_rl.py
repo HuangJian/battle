@@ -84,6 +84,28 @@ def test_build_pairs() -> None:
     check(all(st in perm for st, _sd in inter), "overlap confined to first 3 perm stages")
 
 
+def test_curriculum() -> None:
+    print("[fast] curriculum_active_count + build_pairs curriculum mode")
+    # 纯函数时间驱动扩展：start → 每 every 轮后 +grow → 封顶（首扩发生在 it=every+1）
+    check(run_rl.curriculum_active_count(35, 1, 4, 8, 4) == 4, "it1 = start")
+    check(run_rl.curriculum_active_count(35, 8, 4, 8, 4) == 4, "it8 still first window")
+    check(run_rl.curriculum_active_count(35, 9, 4, 8, 4) == 8, "it9 = start+grow")
+    check(run_rl.curriculum_active_count(35, 17, 4, 8, 4) == 12, "it17 = start+2*grow")
+    check(run_rl.curriculum_active_count(6, 100, 4, 8, 4) == 6, "caps at order_len")
+    check(run_rl.curriculum_active_count(35, 1, 4, 0, 4) == 4, "every=0 never expands")
+    # build_pairs 课程模式：激活窗口是排序前缀，且随 it 扩展；种子 (rotateSeed,it) 确定
+    ca = types.SimpleNamespace(curriculum_stages="13,1,16,8,21,4", seeds_per_stage=3,
+                               curriculum_start=2, curriculum_every=5, curriculum_grow=2,
+                               rotate_stages=0, total_stages=35, stages="0-3", seeds="0-3")
+    p1 = run_rl.build_pairs(ca, 1, 4242)
+    p2 = run_rl.build_pairs(ca, 1, 4242)
+    check(p1 == p2 and len(p1) == 2 * 3, "curriculum deterministic; it1 = 2 stages x 3 seeds")
+    check({st for st, _sd in p1} == {13, 1}, "it1 active = first 2 stages of ordering")
+    p6 = run_rl.build_pairs(ca, 6, 4242)
+    check({st for st, _sd in p6} == {13, 1, 16, 8}, "it6 expanded to first 4 stages")
+    check(len(p6) == 4 * 3, "it6 = 4 stages x 3 seeds")
+
+
 def test_combine_reports() -> None:
     print("[fast] combine_reports")
     r1 = {"games": 2, "winRate": 0.5, "outcomes": {"stage_clear": 1, "base_destroyed": 1},
@@ -419,6 +441,7 @@ def main() -> None:
     tmp.mkdir(parents=True, exist_ok=True)
     test_parse_range()
     test_build_pairs()
+    test_curriculum()
     test_combine_reports()
     test_resume_scope(tmp)
     test_jsonl_anchors(tmp)

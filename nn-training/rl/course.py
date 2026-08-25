@@ -16,6 +16,18 @@ def parse_range(s: str) -> list[int]:
     return out
 
 
+def curriculum_active_count(order_len: int, it: int, start: int, every: int, grow: int) -> int:
+    """课程模式第 `it` 轮激活的关卡数——(order_len, it) 的纯函数，断点续跑安全。
+
+    确定性时间驱动扩展：每 `every` 轮 +`grow` 关，从 `start` 起步，封顶 `order_len`。
+    `every <= 0` 表示不扩展（永远只用前 `start` 关）。
+    """
+    if every <= 0:
+        return min(order_len, start)
+    n = start + grow * ((it - 1) // every)
+    return min(order_len, n)
+
+
 def build_pairs(args, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     """Game pairs for iteration `it` — 纯函数 of (rotateSeed, it)，与调用顺序无关。
 
@@ -24,7 +36,34 @@ def build_pairs(args, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     整轮重跑 + 语料膨胀。现改为按 (rotateSeed, it) 派生独立流：permutation 按
     epoch 键控（同 epoch 内窗口平铺一个公共排列），seeds 按 it 键控（同一 it 跨
     重启逐字节一致）。
+
+    课程模式（R6，2026-08-25）：--curriculum-stages 给出易→难有序关卡列表时启用，
+    每轮只在激活窗口（前 N 关）内采样，N 随 it 确定性扩展（curriculum_active_count）。
+    与 rotate 模式同款 (rotateSeed, it) 键控种子流，逐字节可复现、断点续跑剔除生效。
     """
+    order = getattr(args, "curriculum_stages", "")
+    if order:
+        order_list = parse_range(order)
+        n_active = curriculum_active_count(
+            len(order_list), it,
+            getattr(args, "curriculum_start", 4),
+            getattr(args, "curriculum_every", 8),
+            getattr(args, "curriculum_grow", 4),
+        )
+        active = order_list[:n_active]
+        import numpy as np
+
+        rng_draw = np.random.default_rng([rotate_seed, 0xC0E, it])
+        draw = rng_draw.integers(1, 2 ** 30, size=len(active) * args.seeds_per_stage)
+        pairs = [
+            (stage, int(draw[i * args.seeds_per_stage + j]))
+            for i, stage in enumerate(active)
+            for j in range(args.seeds_per_stage)
+        ]
+        print(f"[{time.strftime('%H:%M:%S')}] [run_rl] curriculum: it{it} active "
+              f"{n_active}/{len(order_list)} stages={active} "
+              f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
+        return pairs
     if args.rotate_stages <= 0:
         return [(si, sd) for si in parse_range(args.stages) for sd in parse_range(args.seeds)]
     import numpy as np

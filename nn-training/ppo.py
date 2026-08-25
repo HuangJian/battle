@@ -44,10 +44,16 @@ from weights_io import load_weights_json, save_weights_json
 
 
 # ---------------- hyper-params (CLI-overridable) ----------------
-GAMMA = 0.99
+# R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级
+# ~0.03-0.09 vs 回报 0.1-0.3 → GAE 优势被噪声主导、policy loss≈0）。两处收紧：
+#   GAMMA 0.99 → 0.995：决策间隔 K=10 下有效时域从 ~100 决策(16.7s) 拉长到 ~200
+#     决策(33s)——守家/拦截是长时域行为，需要更远的信用回溯；
+#   VF_COEF 0.5 → 1.0：价值头训练强度翻倍，缩小 value loss 与 policy loss 的量级差，
+#     让 baseline 脱离噪声、给策略梯度注入真实优势信号。
+GAMMA = 0.995
 LAM = 0.95
 CLIP_EPS = 0.2
-VF_COEF = 0.5
+VF_COEF = 1.0
 ENT_COEF = 0.01
 LR = 3e-4
 MAX_GRAD_NORM = 1.0

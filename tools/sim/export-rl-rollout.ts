@@ -13,10 +13,12 @@
  *   ⇒ 每局总回报 ≡ SCALE × gatedScore（恒等式），胜局经带切换自然放大
  *     （V7: clear ≥ 0.70 vs loss ≤ 0.40）。
  *
- * F3 基地失守门控（2026-08-22）：base_destroyed 局 gatedScore = v7 score × M(0.25)。
- * R3 长跑实证 v7 败局带存在 Goodhart 倒挂——秒投降局（lives/baseSafety 满值、
- * 其余维度归零）score=0.1211 高于认真打仗的 ~0.110，PPO 理性收敛到投降。
- * 门控同时落两点：① 终局锚点（改变总回报，翻转倒挂：投降上限 0.121×0.25≈0.03）；
+ * F3 基地失守门控（2026-08-22，R6 收紧）：base_destroyed 局 gatedScore = v7 score × M。
+ *   M 原 0.25，R6（2026-08-25 训练质量审计：it1–it68 未收敛、eval base_destroyed
+ *   占 ~80%、baseIntegrity 恒 0）降至 0.1——投降更昂贵，守家成为第一顺位目标。
+ *   R3 长跑实证 v7 败局带存在 Goodhart 倒挂——秒投降局（lives/baseSafety 满值、
+ *   其余维度归零）score=0.1211 高于认真打仗的 ~0.110，PPO 理性收敛到投降。
+ * 门控同时落两点：① 终局锚点（改变总回报，翻转倒挂：投降上限 0.121×M）；
  * ② Φ 本身（基地被拆后势 ×M，塌陷记入死亡所在窗而非堆在末个样本）。
  * 只改 ② 不改 ① 时终局对账会精确抵消门控（Ng et al. 势塑形不变性），总回报不变。
  * 评估口径 godai-score.ts 保持纯 v7 不动——那是 God-AI 全部基线的可比性基准。
@@ -50,7 +52,7 @@ import { buildPack } from './pack-container'
 import {
   scoreRun,
   V7_SCORE_CONFIG,
-  DEFAULT_LOSS_WEIGHTS,
+  DEFAULT_STAGE_REFS,
   type DimensionKey,
   type ScoreConfig,
   type Weights,
@@ -82,14 +84,35 @@ const RL_SHARD_FILES = [
 
 // ---- R3 reward constants ----
 const REWARD_SCALE = 10 // 奖励尺度：每局总回报 ≡ REWARD_SCALE × gatedScore
-// F3：基地失守局终局 score ×= 0.25（投降上限 ≈0.03 < 打仗实测 ~0.10+，翻转倒挂）。
-const BASE_LOSS_MULT = 0.25
+// F3：基地失守局终局 score ×= BASE_LOSS_MULT。旧值 0.25 让「投降」太便宜——
+// it1–it68 审计发现 agent 卡在「会动不会守家」局部最优（eval base_destroyed 占
+// ~80%、baseIntegrity 恒 0），根因之一就是守家梯度太弱 + 失守代价太低。降至 0.1：
+// 基地失守时势 Φ ×0.1（→ 失守瞬间负势差放大），把「守住基地」变成第一顺位目标。
+// F3b 的「投降坍缩」诱因（lives 高权重 + base_destroyed 保留 lives）已由
+// RL_LOSS_WEIGHTS.lives=0 消除，故此处可放心收紧而不复发。
+const BASE_LOSS_MULT = 0.1
 // F3b：RL 奖励的败局带剔除 lives。败局里的「剩余生命」只可能出现在 base_destroyed
 // 局（lives_exhausted 局 lives=0）——它支付的正是「基地死时自己没死」的投降画像，
 // 且与打仗行为负相关（交战才有阵亡风险），是坍缩的主要收入源（0.256×1.0/0.991）。
 // 评估口径 godai-score.ts 的 DEFAULT_LOSS_WEIGHTS 保持原值不动（God-AI 基线可比性）。
-const RL_LOSS_WEIGHTS: Weights = { ...DEFAULT_LOSS_WEIGHTS, lives: 0 }
-// RL 专用打分配置：v7 带几何 + 剔除 lives 的败局带。weightedQuality 对 w<=0 维度
+//
+// R6（2026-08-25 训练质量审计）：重做 RL 败局带权重——原值 progress 0.477 占 64% 有效
+// 权重、基地防守（baseIntegrity 0.17 + baseSafety 0.044）仅 29%，奖励势几乎只追击杀数，
+// 对「守家/拦截」给不出梯度。现改为基地防守 50%（baseIntegrity 0.25 + baseSafety 0.25，
+// 其中 baseSafety=1−mean(basePressure) 是每 6 tick 采样的密集信号）+ progress 30% +
+// 补回 accuracy（原 DEFAULT_LOSS_WEIGHTS 无 accuracy 键 → lossPartialQ 静默丢弃）。
+// 显式列出而非展开 DEFAULT_LOSS_WEIGHTS：权重是「守家优先」的人类先验，与 God-AI
+// 评估口径解耦，后续调权不必惊动评估基线。
+const RL_LOSS_WEIGHTS: Weights = {
+  progress: 0.3,
+  baseIntegrity: 0.25,
+  baseSafety: 0.25,
+  tempo: 0.08,
+  accuracy: 0.06,
+  openingTempo: 0.03,
+  loot: 0.03,
+}
+// RL 专用打分配置：v7 带几何 + 守家优先的败局带。weightedQuality 对 w<=0 维度
 // 整体剔除（分子分母都不计），与 null-剔除语义一致。
 const RL_SCORE_CONFIG: ScoreConfig = { ...V7_SCORE_CONFIG, lossWeights: RL_LOSS_WEIGHTS }
 // 与 simulation-runner 相同的 telemetry 节拍/半径（对齐的前提）
@@ -242,14 +265,20 @@ function lossPartialQ(
         ? 0.55 + 0.45 * clamp01(t.baseWallIntact / t.baseWallTotal)
         : null,
   )
+  // R6 修复：tempo / accuracy 的归一化参考值必须是 StageRefs（kpmRef=8、
+  // accuracyRef=0.3），不能拿「权重」当参考——原实现用 w.tempo(=0.026)/w.accuracy
+  // 作除数，导致 tempo 恒饱和到 1.0（无梯度）、accuracy 因 DEFAULT_LOSS_WEIGHTS
+  // 无 accuracy 键而恒为 null（死维度）。与 computeDimensions 对齐。
   add(
     'tempo',
-    (w.tempo ?? 0) > 0 ? clamp01(minutes > 0 ? kills / minutes / (w.tempo as number) : 0) : null,
+    DEFAULT_STAGE_REFS.kpmRef > 0
+      ? clamp01(minutes > 0 ? kills / minutes / DEFAULT_STAGE_REFS.kpmRef : 0)
+      : null,
   )
   add(
     'accuracy',
-    t.playerShots > 0 && (w.accuracy ?? 0) > 0
-      ? clamp01(kills / t.playerShots / (w.accuracy ?? 0.3))
+    t.playerShots > 0 && DEFAULT_STAGE_REFS.accuracyRef > 0
+      ? clamp01(kills / t.playerShots / DEFAULT_STAGE_REFS.accuracyRef)
       : null,
   )
   add('loot', t.powerUpsSpawned > 0 ? clamp01(t.powerUpsCollected / t.powerUpsSpawned) : null)
