@@ -435,15 +435,19 @@ Hunt/Engage 基线耦合），务必逐项跑门而非只跑测试（zcode 教�
 | §2.2 + §2.1 | `b56f5b1` | 数值单源化 + `TankSpec` 注册表 + `fc-faithful.ts` 覆盖层 | 派生值=旧字面量；确定性门过 |
 | §1.2-2/3 | `d9555b0` | OFF 候选四条件核查→按 §5.1 留档标注、不移出数组 | 四条件均不满足，留档 |
 | §1.3-1 + §1.4 | `dbdf48d` | 19 候选对象移入各自 `candidates/X.ts` 自包含 + `recordBranch` 单点遥测记账 | batch-sim 逐 run 字节一致；1392 test 绿 |
+| §1.4 补齐 | `e73976d` | 遥测单点记账**补齐**：dbdf48d 首轮仅转换 6 个候选文件（§7 当时「全部经 recordBranch」的表述与树不符，2026-08-26 审计纠正）；本轮收敛其余全部站点（think dead/hold、Hunt ×8、Aggro ×6、Dodge ×4 等 ~30 站点）至 GodAIInput 三助手 | grep `branchCounts.`/`_lastBranch=` 在 src/ai/god 仅余注释；batch-sim 字节一致；check 绿 |
 | §3.2 | 见下 | `tests/helpers.ts` 增 `ALL_DIRS` / `seedWorld()`；替换散落 `['up','down','left','right']` 与 `world.rng = new RNG(...)` | `bun test` 绿 |
-| §3.3 | 见下 | `serializer-field-guard.test.ts` 增 clone→restore 往返字段等价测试 | 测试绿；legacy fallback 标注供版本 |
+| §3.3 | `334ed63` | `serializer-field-guard.test.ts` 增 clone→restore 往返字段等价测试 | 测试绿；legacy fallback 标注供版本 |
 
-### §1.3-2 — evaluate 副作用显式化：PARTIAL（遥测部分已交付，契约部分延期）
+### §1.3-2 — evaluate 副作用显式化：延期（契约部分；遥测部分已由 §1.4 全额交付）
 
-- **已交付（借 §1.4）**：`branchCounts`/`_lastBranch` 单点记账（`recordBranch`）。
-  原 §1.4 验收「`grep branchCounts\.` 只命中单一记账函数」已满足——具体 key
-  写入全部经 `recordBranch`，仅 `GodAIInput.branchCounts` 声明与 `recordBranch`
-  内一次 `self.branchCounts as Record<...>` 访问。
+- **§1.4 已全额交付**（`dbdf48d` + `e73976d` 补齐）：`branchCounts`/`_lastBranch`
+  写入全部收敛至 `GodAIInput` 三助手——`recordBranch(self, countKey, label?)`
+  （计数+标注，label 缺省=countKey）、`markBranch(self, label)`（仅置位不计数：
+  Dodge 反应延迟、Aggro stop-and-aim 子分支的既有语义）、`countBranch(self, key)`
+  （仅计数不改 `_lastBranch`：StrategyPlanner chokepoint 门）。三种形态逐一
+  保真了改前的值语义（unifiedCandidates 计数键≠分支名、部分路径只置位、
+  chokepoint 每 tick 计一次），验收「grep 只命中单一记账点」达成。
 - **延期：`evaluate` 返回 `{moveDir, fire} | null` 由 `runChain` 统一提交**。
   - 理由：各 `evaluate` 携**丰富跨 tick 持久状态**（`_suicideStanding`、
     `_carveDigTicks`、`_dodgeFlipCount`、`_carveAimDir` 等），远超
