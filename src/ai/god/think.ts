@@ -40,51 +40,52 @@ import { SUICIDE_RETURN } from './candidates/SuicideReturn'
 
 import { manhattan } from '../../utils/helpers'
 import { findEnemyDirectionImpl } from './FireControl'
+import type { GodAIParams } from './params.interface'
 
 /**
- * ─── 候选存活状态清单 (Candidate Survival Status) — refactor.trae.md §1.2-1 ──
- * 唯一事实源：id → 门控参数 → DEFAULT → DECISIONS 结论 → 决策链状态。
- * 未来 agent 遍历 CANDIDATES 前先读本清单，避免把「数组里存在」误判为「默认在跑」。
- * 完整 A/B 数据见 docs/god-ai-tuning.progress.md；§ 编号见 DECISIONS.md。
- *
- *   suicideReturn       suicideReturnMode=0      OFF  (§116/§117 阴性, 保留为可重开 A/B)
- *   dodge               (always)                 ON   (生存优先, 顶层)
- *   interceptBase       (always)                 ON   (T8 拦子弹)
- *   unifiedCandidates   candidateMode=0          OFF  (§221 reject, 保留实验资产)
- *   baseLaneSentry      baseLaneSentryMode=1     ON   (§X SHIPPED)
- *   pickupHigh          pickupPriorityMode=1     ON   (§87/§88 SHIPPED)
- *   aggro               (always, freeze/shield)  ON   (S8/S9)
- *   pickupMid           pickupPriorityMode=1     ON   (§88 SHIPPED)
- *   defenseIntercept    defenseInterceptMode=1   ON   (§134 SHIPPED; classic restore 0)
- *   midLaneDefense      midLaneDefense=1         ON   (§163/§165 SHIPPED)
- *   closePickup         closePickupRange=2       ON   (§158 SHIPPED)
- *   engage              (always)                 ON   (T2a)
- *   pickupLow           pickupPriorityMode=1     ON   (S5)
- *   firingLane          firingLaneMode=0         OFF  (§139 灾难性阴性, 保留实验资产)
- *   baseConnectClear    baseConnectClearMode=1   ON   (§189 SHIPPED; classic restore 0)
- *   carvePath           carvePathMode=0          OFF  (§161 诚实阴性, 保留实验资产)
- *   midLaneHold         midLaneHold=0            OFF  (§164 灾难性阴性, 保留实验资产)
- *   hunt                (always)                 ON   (T2b)
- *   survive             actionWeights.survive=0  OFF  (M3, weight 0 → 链中永不可达, 保留实验资产)
+ * ─── 候选存活状态清单 — 已数据化为下方 CANDIDATE_SURVIVAL（唯一事实源）──
+ * plan/God-AI-Organization.md §6 C1（2026-08-26）：tests/godai-archived-knobs.test.ts
+ * 消费该常量做 L1 守卫（OFF 候选门控必须 === 0、ON 候选门控必须非 0、与
+ * params.interface 的 ARCHIVED_KNOB_GROUPS 交叉一致）。
  *
  * 移出决策链的条件（refactor.trae.md §1.2-2）：DECISIONS=阴性/reject + DEFAULT=0
- *   + 零引用 + 无 1 态 A/B 测试调用，四者同时成立。满足者 → src/ai/god/experiments/。
- *
- * 四条件核查（2026-08-25，refactor.trae §1.2-2 落实）：当前所有 OFF 候选
- * 均**不满足**「零引用 + 无 1 态测试」，按 AGENTS §5.1 一律留档标注、不移出
- * 数组、不删文件：
- *   - carvePath      → tests/battlement-carve-path.test.ts 以 carvePathMode=carveMode
- *                      多态 A/B；且与 Hunt / MidLaneDefense 共享 PathCarve.ts 谓词。
- *   - midLaneHold    → tests/midlane-hold.test.ts 断言 branchCounts.midLaneHold；
- *                      与 MidLaneDefense 共享谓词。
- *   - suicideReturn  → tests/suicide-return.test.ts 以 suicideReturnMode=1 多态。
- *   - unifiedCandidates → tests/godai-candidates.test.ts 以 candidateMode 多态 A/B。
- *   - firingLane     → candidates/shared.ts + tools/diag/failure-classifier.ts 引用；
- *                      decision-core.test.ts 引用权重表。
- *   - survive        → survivalPressure 与 Hunt.ts 共享。
- * 故本项转为「标注而非移出」：OFF 候选在数组内已显式标注（见各 const 注释 +
- * 上方存活状态清单），杜绝「以为它在跑」。experiments/ 目录本轮不创建。
+ *   + 零引用 + 无 1 态 A/B 测试调用，四者同时成立。四条件核查（2026-08-25）：
+ * 当前所有 OFF 候选均不满足「零引用 + 无 1 态测试」，按 AGENTS §5.1 一律留档标注、
+ * 不移出数组、不删文件（逐候选引用证据见 git 历史 / plan/refactor.trae.md §7）。
+ * 完整 A/B 数据见 docs/god-ai-tuning.progress.md；§ 编号见 DECISIONS.md。
  */
+export interface CandidateSurvivalRow {
+  /** 候选名（CANDIDATES 数组成员的语义 id）。 */
+  candidate: string
+  /** 门控字段；'(always)' 行为 null；actionWeights.survive 用点路径字符串。 */
+  gate: keyof GodAIParams | 'actionWeights.survive' | null
+  /** 是否在默认决策链中可达。 */
+  on: boolean
+  /** 决策号 / 备注。 */
+  note: string
+}
+
+export const CANDIDATE_SURVIVAL: readonly CandidateSurvivalRow[] = [
+  { candidate: 'suicideReturn', gate: 'suicideReturnMode', on: false, note: '§116/§117 阴性, 保留可重开 A/B' },
+  { candidate: 'dodge', gate: null, on: true, note: '生存优先, 顶层' },
+  { candidate: 'interceptBase', gate: null, on: true, note: 'T8 拦子弹' },
+  { candidate: 'unifiedCandidates', gate: 'candidateMode', on: false, note: '§221 reject, 保留实验资产' },
+  { candidate: 'baseLaneSentry', gate: 'baseLaneSentryMode', on: true, note: '§198 SHIPPED (classic restore 0)' },
+  { candidate: 'pickupHigh', gate: 'pickupPriorityMode', on: true, note: '§87/§88 SHIPPED' },
+  { candidate: 'aggro', gate: null, on: true, note: '(always, freeze/shield) S8/S9' },
+  { candidate: 'pickupMid', gate: 'pickupPriorityMode', on: true, note: '§88 SHIPPED' },
+  { candidate: 'defenseIntercept', gate: 'defenseInterceptMode', on: true, note: '§134 SHIPPED (classic restore 0)' },
+  { candidate: 'midLaneDefense', gate: 'midLaneDefense', on: true, note: '§163/§165 SHIPPED' },
+  { candidate: 'closePickup', gate: 'closePickupRange', on: true, note: '§158 SHIPPED (range 2 ≠ 0 即 ON)' },
+  { candidate: 'engage', gate: null, on: true, note: 'T2a' },
+  { candidate: 'pickupLow', gate: 'pickupPriorityMode', on: true, note: 'S5' },
+  { candidate: 'firingLane', gate: 'firingLaneMode', on: false, note: '§139 灾难性阴性, 保留实验资产' },
+  { candidate: 'baseConnectClear', gate: 'baseConnectClearMode', on: true, note: '§189 SHIPPED (classic restore 0)' },
+  { candidate: 'carvePath', gate: 'carvePathMode', on: false, note: '§161 诚实阴性, 保留实验资产' },
+  { candidate: 'midLaneHold', gate: 'midLaneHold', on: false, note: '§164 灾难性阴性, 保留实验资产' },
+  { candidate: 'hunt', gate: null, on: true, note: 'T2b' },
+  { candidate: 'survive', gate: 'actionWeights.survive', on: false, note: 'M3, weight 0 → 链中永不可达, 保留实验资产' },
+]
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Authoritative weight-order contract: DecisionCore.ACTION_WEIGHTS (locked by
  * tests/decision-core.test.ts); this array must stay in the same order.

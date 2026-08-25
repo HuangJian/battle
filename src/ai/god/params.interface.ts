@@ -17,44 +17,11 @@ import type { ActionId } from './DecisionCore'
  */
 
 /**
- * ─── 留档旋钮清单 (Archived / default-OFF knobs) ─ refactor.trae.md §1.1-1 ──
- * 以下参数 DEFAULT=0，属「被否决但保留 / 仅留档 / 实验旋钮」——它们参与类型但
- * 默认不参与决策（门控 = 0 → byte-identical 基线）。未来 agent 加旋钮时，若新
- * 旋钮也是实验态，应在本清单登记，避免「以为它在跑」。完整 A/B 结论见
- * DECISIONS.md 与 docs/god-ai-tuning.progress.md。
- *
- * 按门控参数归组（同组子参数随门控一起 OFF）：
- *  - candidateMode=0              → UNIFIED_CANDIDATES (§221 reject)
- *  - firingLaneMode=0             → FIRING_LANE (+ firingLaneRadius/MinEnemyDist/ReplanTicks/BoxRow) (§139 灾难性阴性)
- *  - carvePathMode=0              → CARVE_PATH (+ carve* 子参数) (§161 诚实阴性)
- *  - midLaneHold=0                → MID_LANE_HOLD (+ midLaneHoldMaxRow/EnemyDist) (§164 灾难性阴性)
- *  - suicideReturnMode=0          → SUICIDE_RETURN (+ suicideReturn* 子参数) (§116/§117 阴性)
- *  - defenseInterceptPredictCells=0 / defenseInterceptDigBricks=0 (§135/§136, byte-identical)
- *  - defensePosStandable=0        (+ minDist) (§146B)
- *  - iceGlideControl=0            (+ minSpeed) (§145)
- *  - defenseBreachBonus=0         (D2)
- *  - baseLaneSentryInBandNav=0 / baseAlertPickupSuppress=0 (§225 A/B)
- *  - baseGuardAnchorMode=0        (§137, A/B 候选)
- *  - actionContractMode=0 / targetValueMode=0 / intentMode=0 (Phase2 §6.1/6.2/6.3; + intent* / coverage* 子参数)
- *  - coverageMode=0               (Phase3; + coverage* 子参数)
- *  - fastBaseApproachWeight=0     (§132)
- *  - brickHeavy*                  (§133, 全部默认 0)
- *  - evasionSteelOcclusion=0      (§48-revisit; + *Range/BrickRatio)
- *  - pathThreatAvoidance=0        (M5)
- *  - dodgeCounterFire=0 (§M3 revert; + alignPx/clearanceScore) / dodgeHorizonScore=0 (M9; + escapeDepth / Margin / Dist) / dodgeCentroidMode=0 (§223) / dodgeClearanceScore=0
- *  - playerHpAwareness=0          (M12; + hp* 子参数)
- *  - pickupStarBoxRow=0           (D5) / direItemMode=0 (E1; + direItem* 子参数)
- *  - enemyModelMode=0             (M3; + enemyModelWindowTicks/tierWeightScale/dodgeRateShrinksT2a/coordinationRiskWeight/enemyAccuracyRaisesSurvival/enemyTierWeight* / survivalModeLives/survivalRiskWeight/surviveMinEnemies/RadiusCells)
- *  - fieldRetreatPickupGate=0     (§146C)
- *  - pickupCommitTicks=0          (§152)
- *  - starRushMode=0               (§166; + maxLevel/range/liftGates)
- *  - superItemFrenzyAim=0         (§167)
- *  - threatStickyTicks=0 (§169) / huntCommitTicks=0 (§170) / pathTargetMode=0 (§171) / baseDamageRecall=0 (§173)
- *  - t2aOutnumberedRetreat=0      (§159)
- *  - pixelStuckDirectMoveTicks=0  (§190 净负, 保留为门控)
- *
- * 注：survive 候选默认 weight=0（actionWeights.survive=0）→ 链中永不可达，属同一
- * 类「默认 OFF」资产；其依赖 survive* / survival* 子参数同上 enemyModel 族。
+ * ─── 留档旋钮清单（指针）── refactor.trae.md §1.1-1 + plan/God-AI-Organization.md §6 C1 ──
+ * 「默认关闭 / 被否决但保留」的实验旋钮已数据化为**本文件底部的 ARCHIVED_KNOB_GROUPS**
+ * （唯一事实源；tests/godai-archived-knobs.test.ts 消费：断言每个门控在 DEFAULT 表中 === 0）。
+ * 新增实验旋钮时在该常量登记，勿再维护散文清单（两源必漂移）。完整 A/B 结论见
+ * DECISIONS.md 与 docs/god-ai-tuning.progress.md；2026-08-25 版散文清单见 git 历史。
  */
 export interface GodAIParams {
   // ---- Imperfection params ----
@@ -2415,3 +2382,69 @@ export interface GodAIParams {
    */
   powerupEnemyOverlapSkip: number
 }
+
+// ============================================================
+// Archived knobs registry — 留档旋钮注册表（唯一事实源）
+// (plan/God-AI-Organization.md §6 C1 · DECISIONS §272 · 2026-08-26 数据化)
+// ============================================================
+
+/** One archived-knob group: a gate field whose DEFAULT value must stay 0. */
+export interface ArchivedKnobGroup {
+  /** 门控字段；DEFAULT_GOD_AI_PARAMS 中必须 === 0（守卫测试强制）。 */
+  gate: keyof GodAIParams
+  /** 归组说明 + 决策号（同组子参数随门控一起 OFF）。 */
+  note: string
+}
+
+/**
+ * 「被否决但保留 / 仅留档 / 实验旋钮」：参与类型、默认不参与决策（门控 = 0 →
+ * byte-identical 基线）。
+ *
+ * un-archive 闸门（四步缺一不可，plan/God-AI-Organization.md §6 C1）：
+ *   ① 改本常量 + 守卫测试断言（L1 会红——预期的显式摩擦）
+ *   ② 新 DECISIONS 条目说明重开依据
+ *   ③ 更新冻结签名 golden（tools/det-golden.v1.sha256）
+ *   ④ 重跑 60-seed 三难度基线（eval-suite v7 官方口径）
+ */
+export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
+  { gate: 'candidateMode', note: 'UNIFIED_CANDIDATES + u* 子参数 (§221 reject)' },
+  { gate: 'firingLaneMode', note: 'FIRING_LANE + firingLaneRadius/MinEnemyDist/ReplanTicks/BoxRow (§139 灾难性阴性)' },
+  { gate: 'carvePathMode', note: 'CARVE_PATH + carve* 子参数 (§161 诚实阴性)' },
+  { gate: 'midLaneHold', note: 'MID_LANE_HOLD + midLaneHoldMaxRow/EnemyDist (§164 灾难性阴性)' },
+  { gate: 'suicideReturnMode', note: 'SUICIDE_RETURN + suicideReturnBaseHpFrac/DefendDistCells (§116/§117 阴性)' },
+  { gate: 'defenseInterceptPredictCells', note: '方向 D 预测版 (§135, byte-identical)' },
+  { gate: 'defenseInterceptDigBricks', note: '方向 D 破砖版 (§136, byte-identical)' },
+  { gate: 'defensePosStandable', note: '+ minDist 子参数 (§146B 收窄版外全关, §149 边际≈0)' },
+  { gate: 'iceGlideControl', note: '+ minSpeed 子参数 (§145, S24 难度地板关)' },
+  { gate: 'defenseBreachBonus', note: 'D2 拆环威胁评分 (§141)' },
+  { gate: 'baseLaneSentryInBandNav', note: '带内应急进 lane (§225A/§226 双否决)' },
+  { gate: 'baseAlertPickupSuppress', note: '危局拾取抑制 (§225B/§226 双否决)' },
+  { gate: 'baseGuardAnchorMode', note: '基地守位格 (+ baseGuardAnchorHoldRange §138 v2) (§137)' },
+  { gate: 'actionContractMode', note: 'Phase2 §6.1 防守站桩门控 (§204; §220 三线微负)' },
+  { gate: 'targetValueMode', note: 'Phase2 §6.2 targetValue 排序键 (§205)' },
+  { gate: 'intentMode', note: 'Phase2 §6.3 短期 intent (+ intent* 子参数) (§206)' },
+  { gate: 'coverageMode', note: 'Phase3 §7 动态攻击覆盖点 (+ coverage* 子参数) (§207–§211 五轮收口)' },
+  { gate: 'fastBaseApproachWeight', note: '+ fastBaseApproachRangeCells (§132 方向 B)' },
+  { gate: 'brickHeavyDefenseWallRatio', note: 'brick-heavy 防守再校准族 (+ Race/MaxPlayerDist/FieldDist) (§133 全负)' },
+  { gate: 'evasionSteelOcclusion', note: '+ evasionSteelOcclusionRange (§48-revisit, stays OFF)' },
+  { gate: 'pathThreatAvoidance', note: 'M5 站位提前规避 (~1% 触发无信号)' },
+  { gate: 'dodgeCounterFire', note: 'M3 对枪抵消 (+ alignPx/clearanceScore; §90b 复核维持 OFF)' },
+  { gate: 'dodgeHorizonScore', note: 'M9 horizon 承诺闪避 (+ dodgeEscapeDepth §200 / MinMarginTicks / MaxDistCells)' },
+  { gate: 'dodgeCentroidMode', note: '§223/§224 质心远离闪避 (dodge 族第四度确认无杠杆)' },
+  { gate: 'dodgeClearanceScore', note: 'dodge clearance 变体 (M3 族)' },
+  { gate: 'playerHpAwareness', note: 'M12 HP 感知 (+ hpDanger*/hpTrade* 子参数)' },
+  { gate: 'pickupStarBoxRow', note: 'D5 星经济拾取行' },
+  { gate: 'direItemMode', note: 'E1 危急道具拾取 (+ direItem* 子参数) (§144 反证判据收束)' },
+  { gate: 'enemyModelMode', note: 'M3 敌人模型族 (+ WindowTicks/tierWeightScale/dodgeRateShrinksT2a/coordinationRiskWeight/enemyAccuracyRaisesSurvival/enemyTierWeight*/survivalModeLives/survivalRiskWeight/surviveMinEnemies)' },
+  { gate: 'fieldRetreatPickupGate', note: '§146C/§148 HIGH-only 定稿后全局关闭' },
+  { gate: 'pickupCommitTicks', note: '§152 拾取承诺' },
+  { gate: 'starRushMode', note: '星经济冲刺 (+ maxLevel/range/liftGates) (§166)' },
+  { gate: 'superItemFrenzyAim', note: '§167 super item 连射瞄准' },
+  { gate: 'threatStickyTicks', note: '§169 威胁信号粘滞' },
+  { gate: 'huntCommitTicks', note: '§170 追击承诺' },
+  { gate: 'pathTargetMode', note: '§171 路径长度感知目标选择' },
+  { gate: 'baseDamageRecall', note: '§173 基地损伤召回' },
+  { gate: 't2aOutnumberedRetreat', note: '§159 T2a 多敌撤退' },
+  { gate: 'pixelStuckDirectMoveTicks', note: '§190 像素卡死 directMove 兜底 (净负, 保留为门控)' },
+  { gate: 'dualCentralBreachP2Patrol', note: 'dual P2 patrol 导航 (+ PatrolRow) (§177 实测回退; 2026-08-26 盘点补登记)' },
+]
