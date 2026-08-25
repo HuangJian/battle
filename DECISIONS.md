@@ -181,6 +181,12 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 **Current state**: 92.1% mean (post-§74 distance-aware base-wall guard), 0/35 below floor, 0 stage overrides. Default params frozen.
 
+> **§2.3 压缩状态（refactor.trae.md）**：§71–§169 条目已在先前轮次统一压缩为
+> `docs/*.progress.md` 指针（全文 → 共 165 处），阴性 / REJECTED 细节均已下沉，
+> 本段无冗余正文，原 §2.3 范围已满足。本文件当前的 2223 行主要来自 §192–§271
+> 较新 verbose 条目（重构落地汇总 + M 系列 A/B），超出 §2.3 既定范围；其中含活跃
+> 结论（SHIPPED 默认 / 进行中），按 AGENTS §5.1 不擅自压缩。
+
 ## 71. §48-Revisit: Steel-Only Evasion Occlusion, Terrain-Gated (SHIPPED)
 > 全文 → docs/god-ai-tuning.progress.md
 
