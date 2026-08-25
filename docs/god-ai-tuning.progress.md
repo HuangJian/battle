@@ -2718,3 +2718,58 @@ t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 
   maxDist/不回头/csb-cbr 均移除）; `fireLineDetourMinSlack` 保留为调参入口。
 - `tests/godai-params-override.test.ts` 三处断言更新为默认 1（§228 钩子语义
   不变, 恢复默认 = 1 而非 0）。
+
+---
+
+# 补录：§194 与 §230–§234（2026-08-26 M4.0 落点盘点补齐，DECISIONS 压缩前落点）
+
+> M4.0 机械盘点发现六条无 progress 落点的 DECISIONS 条目，压缩前在此补录要点。
+
+## §194 像素卡死 directMove 兜底（2026-08-13，默认 0 关闭）
+
+- 根因：`replanInterval=1` 下 A* 每 tick 重规划，敌方移动使缓存失效 → 首步方向 left↔right
+  振荡 × turn cooldown(50ms) = 「来回走净位移零」卡死（S35@seed10 卡 30.6s 等 17 处告警）。
+- 机制：HUNT 分支绕过 A* 改 directMove 选向（优先垂直），阈值参数 `pixelStuckDirectMoveTicks`
+  （480=8s，高于 navBreakStuck escape 3s、低于 10s 告警线）。
+- 结案：paired A/B（hard 20 seeds CRN）suite 0.5308→0.5363（Δ+0.0053 p=0.0185，B 更优）
+  ——**净负回退默认 0**；300 值曾回归 chaos S5/S8。代码路径保留门控待重调。
+- 门禁当时全绿（hard 0.742 / chaos 0.716 / classic 0.875）；剩余 14 个告警根因不同
+  （snap 精度/密封口袋/dead-end）。
+
+## §230 门禁 runner 瘦身（SHIPPED）
+
+- `runSimulation` 新增 opt-in `collectMetrics:false` / `collectEvents:false`（默认 true 行为不变），
+  score-gate 与 pass-rate gate 关闭两者——scorer 只读 outcome/ticks/finalState/firstKillTick/telemetry。
+- telemetry power-up census 每 tick `new Set()`（§14.1 反模式）→ 双缓冲 ping-pong（liveIdSetA/B）。
+- 读-only 采样跳过不消耗 RNG、不触碰 World：60 sims score-sum 开/关完全相同，classic truth 字节不变。
+- 背景：门禁 CPU-bound（2100 sims ≈ 全套 85%），runner 开销直接放大。
+
+## §231 thinkInterval 决策链节流（否决，旋钮保留默认 1）
+
+- thinkInterval=2（off-tick 保持上次输出）：hard 35×60 paired A/B win 75.6%→72.8%（**−2.8pp**
+  ≈2SE 真实回归，691/2100 outcome 翻转）。
+- 机制：1-tick 决策延迟仍打穿 dodge/火力窗口；且 off-tick 跳过 godRng aim roll → RNG 流移位
+  级联改决策（与 §68 同型）。classic 不测不开（instant 1-HP 纪律）。
+- 节流方向收束：naive −2.8pp；条件节流理论收益 ~5-6% sim CPU，不值得（Three Gates）。
+
+## §232 决策链小数组分配消除 + scanAhead 整数步进（SHIPPED，字节等价）
+
+- 三处 per-call 小数组改局部变量：Navigator.directMoveImpl `dirs[]`、BASE_LANE_SENTRY `cands[]`、
+  HUNT navStuck 回退 `pref[]`；scanAhead 改整数 cell 步进；`world.allies` 提出循环。
+- 选择顺序/比较次序/AABB 像素语义逐位不变；45 sims 签名 IDENTICAL + godai-score-gate 通过。
+- 全套 41.4s→37.5s（连同 §230/§231 runner 改动）。拒绝 getDefaultDefensePositionImpl 的 def 对象
+  （共享 buffer 别名风险 > 收益）。
+
+## §233 bun test 吞吐墙 + 门禁种子 20→10（完成）
+
+- 测量结论：Ryzen 5800H 上该负载有效并行度仅 ~2.5×（内存带宽/功耗墙，非结构问题）；
+  gate 1050 sims 实测 ~20s 已达机器地板 ~88%。全套 54.5s→~25.9s，<20s 未达成（用户接受）。
+- score gate 种子 **20→10**（用户拍板保统计功效），truth 重标定（seeds 1-10），
+  margin ~2-SE 加宽：MARGIN_SCORE 0.05→0.07、AGG_MARGIN_SCORE 0.03→0.04。
+
+## §234 test-silent HEAVY_TESTS 修复 + 强制 --parallel（SHIPPED）
+
+- 清洁树 `bun run test` 曾 12 fail 根因：runner 缺 `--parallel` 致跨文件模块态泄漏
+  （order-dependent）+ HEAVY_TESTS 指向已 skip 的旧 gate。既有缺陷，非 §230-233 引入。
+- 修复：HEAVY_TESTS 过期项 `god-ai-gate`→`godai-score-gate`；spawnCapture 强制
+  `--parallel --timeout=50000`。修复后清洁树 7.3s 0 fail、check ~26s 全绿。
