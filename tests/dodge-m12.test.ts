@@ -2,13 +2,12 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { dodgeDirectionImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
-import { clearArena, makeBullet as makeBulletShared } from './helpers'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * M12 (DECISIONS §112): player HP buffer awareness — unit tests.
@@ -37,8 +36,7 @@ import { clearArena, makeBullet as makeBulletShared } from './helpers'
  */
 
 function setupWorld(difficulty: 'classic' | 'hard'): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton): mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (cross-file module state is shared in
   // bun test — DECISIONS §98).

@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
-import { RNG } from '../src/utils/RNG'
 import { PlaybackController } from '../src/replay/PlaybackController'
 import { ReplayInput } from '../src/replay/ReplayInput'
 import { packFrames } from '../src/replay/pack'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { makeTank } from './helpers'
+import { makeTank, seedWorld } from './helpers'
 import { TICK_MS } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { THEMES } from '../src/config/theme'
@@ -17,8 +16,7 @@ import type { Direction } from '../src/constants'
 // ---- helpers ----
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.themeKey = 'classic'

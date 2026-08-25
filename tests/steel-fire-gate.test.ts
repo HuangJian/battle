@@ -2,14 +2,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import {
   steelFireBlockedImpl,
   shouldFireBreakThroughImpl,
   scanAheadImpl,
 } from '../src/ai/god/FireControl'
-import { clearArena, placeEnemy } from './helpers'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 import { CELL } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
@@ -58,8 +57,7 @@ import type { Tank } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = RULES['classic'] ?? DEFAULT_RULES

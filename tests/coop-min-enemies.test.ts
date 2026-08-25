@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import type { Tank } from '../src/types'
 import { MAX_ENEMIES_ALIVE, COOP_MAX_ENEMIES_ALIVE } from '../src/constants'
 
@@ -16,8 +16,7 @@ import { MAX_ENEMIES_ALIVE, COOP_MAX_ENEMIES_ALIVE } from '../src/constants'
  * holds — this pinpoints the cap exactly (single-player = 4, co-op = 5).
  */
 function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)

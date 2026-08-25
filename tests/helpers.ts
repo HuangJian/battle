@@ -9,6 +9,11 @@ import { CELL, GRID, BASE_POS, TANK, BULLET } from '../src/constants'
 import type { Direction } from '../src/constants'
 import type { Tank, TankKind, Bullet, PowerUp, StageData } from '../src/types'
 
+/** Canonical four-direction list (plan/refactor.trae.md §3.2). Use this
+ * instead of hand-writing `['up', 'down', 'left', 'right']` so the literal
+ * lives in exactly one place. */
+export const ALL_DIRS: Direction[] = ['up', 'down', 'left', 'right']
+
 /**
  * Shared test fixtures (plan/refactor.agy.md §3.4).
  *
@@ -30,6 +35,16 @@ export function createTestWorld(opts: TestWorldOptions = {}): World {
   const world = new World()
   world.rng = new RNG(opts.rngSeed ?? 42)
   return world
+}
+
+/**
+ * Seeded world constructor (plan/refactor.trae.md §3.2). Convenience alias for
+ * `createTestWorld({ rngSeed })` with a name that signals intent — prefer this
+ * over `new World(); world.rng = new RNG(seed)` in new tests so the world-RNG
+ * seeding pattern stays in one place.
+ */
+export function seedWorld(seed = 42): World {
+  return createTestWorld({ rngSeed: seed })
 }
 
 /**

@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -69,8 +70,7 @@ function coopGod(world: World, params: GodAIParams, seed: number): GodAIInput {
  * The key assertion is that the player eventually MOVES (not stuck).
  */
 function stallWorld(seed: number, aggTimeout: number): { world: World; god: GodAIInput; p2: Tank } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.startGame('classic', 'modern', 0)
   emptyArena(world)
 
@@ -196,8 +196,7 @@ describe('§84 aggressive stall detection — freeze window', () => {
   it('kill resets the stall timer — player can camp if productive', () => {
     // When the player kills an enemy, the camp timer resets. This ensures
     // the stall detection doesn't break legitimate camping.
-    const world = new World()
-    world.rng = new RNG(99)
+    const world = seedWorld(99)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -273,8 +272,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns null for perpendicular movement (dodge is safe)', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -306,8 +304,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns enemy direction when player flees (opposite moveDir) from a close aligned enemy', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -340,8 +337,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns null when player moves toward the close enemy', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -373,8 +369,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns null when a wall blocks the line to the enemy', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -409,8 +404,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns null when enemy is beyond closeCombatDangerRange', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []
@@ -441,8 +435,7 @@ describe('§85 close-range enemy exposure check — navigate branch', () => {
   })
 
   it('returns null when check is disabled (closeCombatDangerCheck = 0)', () => {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     world.startGame('classic', 'modern', 0)
     emptyArena(world)
     world.spawnQueue = []

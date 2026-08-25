@@ -2,13 +2,12 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findEnemyFacingPlayerImpl } from '../src/ai/god/FireControl'
 import { hasEnemyBulletInLineImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET, TANK } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
-import { clearArena, makeBullet as makeBulletShared } from './helpers'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * §49-revisit 炮口相向对枪抵消 (§52 v2) unit tests.
@@ -27,8 +26,7 @@ import { clearArena, makeBullet as makeBulletShared } from './helpers'
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)

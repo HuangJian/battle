@@ -2,10 +2,9 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { TankKind, Tank } from '../src/types'
-import { clearArena } from './helpers'
+import { clearArena, seedWorld } from './helpers'
 
 /**
  * Classic AI jam fix — enemies must re-roll direction when blocked by other
@@ -18,8 +17,7 @@ import { clearArena } from './helpers'
  */
 
 function seededWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   return { world, sim }
@@ -132,8 +130,7 @@ describe('Classic AI jam fix — tank-tank collision detection', () => {
   })
 
   it('modern mode (turnOnCollisionOnly: false) still uses timer re-roll', () => {
-    const world = new World()
-    world.rng = new RNG(400)
+    const world = seedWorld(400)
     const sim = new Simulation(world, new Input())
     world.startGame('hard', 'modern', 0) // modern mode
     openArena(world)
@@ -167,8 +164,7 @@ describe('Classic AI jam fix — tank-tank collision detection', () => {
  */
 describe('Dead-end shaft recovery — tunnel out of a 1-wide vertical channel', () => {
   function runShaft(level: 'none' | 'veteran', seed: number): { spanX: number; spanY: number } {
-    const world = new World()
-    world.rng = new RNG(seed)
+    const world = seedWorld(seed)
     const sim = new Simulation(world, new Input())
     world.startGame('classic', 'modern', 7) // Stage 8 (Riverbed)
 

@@ -7,7 +7,7 @@ import { RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { GRID, TANK } from '../src/constants'
 import type { PowerUp, StageData } from '../src/types'
-import { placeEnemy } from './helpers'
+import { placeEnemy, seedWorld } from './helpers'
 
 // ================================================================
 // §87 — Urgent power-up pickup priority (user request 2026-08-02).
@@ -77,8 +77,7 @@ function setup(
   seed = 42,
   stage: StageData = makeEmptyStage(),
 ): { world: World; ai: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = { ...RULES['classic'] }

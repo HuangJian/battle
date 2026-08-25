@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { STAGES } from '../src/config/stages'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES } from '../src/config/rules'
@@ -35,8 +35,7 @@ function setupWorld(turnCooldownMs: number = 50): {
   sim: Simulation
   input: TestInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = { ...RULES['classic'], turnCooldownMs }

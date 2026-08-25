@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World, genId } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL, TANK, GRID } from '../src/constants'
 import { SUPER_POWERUP_TYPES } from '../src/config/powerups'
 
@@ -17,8 +17,7 @@ import { SUPER_POWERUP_TYPES } from '../src/config/powerups'
  */
 
 function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)
@@ -153,8 +152,7 @@ describe('classic bonus carriers are config-driven (no hardcoded `i % 4`)', () =
   })
 
   it("modern 'hard' marks every 4th spawned enemy as a bonus carrier", () => {
-    const world = new World()
-    world.rng = new RNG(0x1234)
+    const world = seedWorld(0x1234)
     new Simulation(world, new Input())
     world.startGame('hard', 'modern', 0)
     const carriers = world.spawnQueue.map((e, i) => (e.bonus ? i + 1 : -1)).filter((n) => n > 0)

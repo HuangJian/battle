@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 // §162 nav-stuck break-out (carve-dig escape) — SHIPPED default
 // (params.navBreakStuck = 1, user request 2026-08-06, replay
 // hard-s34-base-l2-t69-seed2050197249 Problem 1: 出生点被砖墙围堵，
@@ -45,8 +46,7 @@ describe('§162 — params', () => {
 
 describe('§162 — pixel-stuck detector (endFrame)', () => {
   function makePausedWorld(): { world: World; ai: GodAIInput } {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     world.difficultyKey = 'hard'
     world.difficulty = DIFFICULTIES['hard']
     world.rules = { ...RULES['hard'] }

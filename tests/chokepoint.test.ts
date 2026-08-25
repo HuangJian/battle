@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
@@ -102,8 +103,7 @@ function setup(
   pcy = 20,
   stage: StageData = makeEmptyStage(),
 ): { world: World; ai: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = { ...RULES['classic'] }

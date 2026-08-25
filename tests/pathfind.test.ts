@@ -1,3 +1,4 @@
+import { ALL_DIRS } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { TileMap } from '../src/game/TileMap'
 import { isReachable, floodFill, pxToCell } from '../src/utils/grid-search'
@@ -145,7 +146,7 @@ describe('findPath', () => {
     const path = findPath(tm, { col: 2, row: 2 }, { col: 8, row: 20 })
     if (path) {
       expect(Array.isArray(path)).toBe(true)
-      expect(path.every((d) => ['up', 'down', 'left', 'right'].includes(d))).toBe(true)
+      expect(path.every((d) => ALL_DIRS.includes(d))).toBe(true)
     }
   })
 })

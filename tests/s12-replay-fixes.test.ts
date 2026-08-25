@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -71,8 +72,7 @@ function steelArena(steelCol: number, steelRow: number): StageData {
 }
 
 function setup(stage?: StageData): { world: World; ai: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'hard'
   world.difficulty = DIFFICULTIES['hard']
   world.rules = { ...RULES['hard'] }
@@ -353,8 +353,7 @@ describe('§152-W3 — urgent-pickup commit persistence (pickupCommitTicks)', ()
 describe('§152-W4 — decoy spawns at a clear cell, never on the player', () => {
   it('the decoy does NOT spawn on the player cell (the W4 box-in fix)', () => {
     const { world, sim } = (() => {
-      const w = new World()
-      w.rng = new RNG(6)
+      const w = seedWorld(6)
       w.difficultyKey = 'hard'
       w.difficulty = DIFFICULTIES['hard']
       w.rules = { ...RULES['hard'] }

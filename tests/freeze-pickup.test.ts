@@ -4,10 +4,9 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findFreezePickupTargetImpl } from '../src/ai/god/StrategyPlanner'
-import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { PowerUp } from '../src/types'
-import { clearArena, placeEnemy, makePowerUp as makePowerUpShared } from './helpers'
+import { clearArena, placeEnemy, makePowerUp as makePowerUpShared, seedWorld } from './helpers'
 
 /**
  * §156: freeze-window power-up pickup (unlimited range) — unit tests.
@@ -39,8 +38,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)

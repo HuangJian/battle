@@ -2,7 +2,6 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import {
   canShootEnemyFrom,
@@ -11,7 +10,7 @@ import {
   controlledLives,
   findSuicideTargetImpl,
 } from '../src/ai/god/SuicideReturn'
-import { clearArena, placeEnemy, makeBullet as makeBulletShared } from './helpers'
+import { clearArena, placeEnemy, makeBullet as makeBulletShared, seedWorld } from './helpers'
 import { CELL } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 
@@ -31,8 +30,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, suicideReturnMode: 1, ...params })
@@ -182,8 +180,7 @@ describe('controlledLives', () => {
   })
 
   it('coop (controls P2) → world.lives2', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     world.coop = true
     const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS }, undefined, (w) => w.player2)
     world.startGame('classic', 'modern', 0)

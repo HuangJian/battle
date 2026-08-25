@@ -2,14 +2,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { genId } from '../src/game/World'
 import { CELL, BULLET } from '../src/constants'
 import type { TankKind } from '../src/types'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../src/config/base'
 import { resolveProfile } from '../src/config/combat'
-import { clearArena } from './helpers'
+import { clearArena, seedWorld } from './helpers'
 
 /**
  * Base (eagle) HP tests — 2026-07-27 (revised: one fixed pool, damage =
@@ -34,8 +33,7 @@ function fp(kind: TankKind, level = 0): number {
 }
 
 function seededWorld(seed: number, difficulty = 'relax'): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
   return { world, sim }

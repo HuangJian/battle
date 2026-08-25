@@ -2,14 +2,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import {
   dodgeDirectionImpl,
   dodgeCounterFireDirImpl,
   isTerrainPinnedImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { clearArena, makeBullet as makeBulletShared } from './helpers'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 
@@ -24,8 +23,7 @@ import type { Bullet } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton): mutating input.params below
   // for the clearance-score cases must not leak into the shared
   // DEFAULT_GOD_AI_PARAMS (cross-file module state is shared in bun test —

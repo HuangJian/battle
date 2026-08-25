@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { Direction } from '../src/constants'
 import type { Tank } from '../src/types'
@@ -23,8 +23,7 @@ import type { Tank } from '../src/types'
 
 /** Fresh, seeded World on stage 0 in 'playing' state. */
 function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   return { world, sim }

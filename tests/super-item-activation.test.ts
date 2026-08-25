@@ -10,7 +10,7 @@ import { RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { GRID, TANK } from '../src/constants'
 import type { StageData } from '../src/types'
-import { placeEnemy } from './helpers'
+import { placeEnemy, seedWorld } from './helpers'
 
 // ================================================================
 // §167 / B4 — super-item strategic activation.
@@ -54,8 +54,7 @@ function setup(
   params: GodAIParams = DEFAULT_GOD_AI_PARAMS,
   seed = 42,
 ): { world: World; ai: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'hard'
   world.difficulty = DIFFICULTIES['hard']
   world.rules = { ...RULES['hard'] }
@@ -214,8 +213,7 @@ describe('§167 / B4 — super-item strategic activation', () => {
   })
 
   it('end-to-end: Simulation consumes the press — guard ally spawns, stock spent', () => {
-    const world = new World()
-    world.rng = new RNG(1234)
+    const world = seedWorld(1234)
     world.difficultyKey = 'hard'
     world.difficulty = DIFFICULTIES['hard']
     world.rules = { ...RULES['hard'] }

@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -50,8 +51,7 @@ function ringArena(): StageData {
 }
 
 function makeWorld(carveMode: number): { world: World; ai: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'hard'
   world.difficulty = DIFFICULTIES['hard']
   world.rules = { ...RULES['hard'] }
@@ -92,8 +92,7 @@ function makePocketWorld(carveMode: number): { world: World; ai: GodAIInput } {
 }
 
 function makeBattlement(carveMode: number): { world: World; ai: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'hard'
   world.difficulty = DIFFICULTIES['hard']
   world.rules = { ...RULES['hard'] }

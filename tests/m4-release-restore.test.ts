@@ -1,6 +1,6 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
-import { RNG } from '../src/utils/RNG'
+
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 
 /**
@@ -28,8 +28,7 @@ describe('m4-release-restore', () => {
   })
 
   it('CLASSIC_MODEL_PARAMS restores pre-M4 values on classic (instant)', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
     world.startGame('classic', 'modern', 0)
     input.reset()
@@ -51,8 +50,7 @@ describe('m4-release-restore', () => {
   })
 
   it('pool difficulty (hard) keeps the M4-tuned defaults', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
     world.startGame('hard', 'modern', 0)
     input.reset()
@@ -63,8 +61,7 @@ describe('m4-release-restore', () => {
   })
 
   it('explicit M4 override wins even on classic (restore is default-only)', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     // Caller explicitly overrides replanInterval — must survive the restore.
     const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, replanInterval: 7 })
     world.startGame('classic', 'modern', 0)

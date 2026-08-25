@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import type { PowerUpType } from '../src/types'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { SnapshotManager } from '../src/snapshot/SnapshotManager'
@@ -32,8 +32,7 @@ import { POWERUP_TIERS, SUPER_POWERUP_TYPES } from '../src/config/powerups'
 
 /** Fresh, seeded World on stage 0 in 'playing' state, modern mode. */
 function buildWorld(seed: number, difficulty = 'hard'): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame(difficulty, 'modern', 0)

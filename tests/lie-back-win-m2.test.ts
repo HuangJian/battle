@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { perceive, scanAhead } from '../src/ai/perception'
 import { playerCellImpl, canMoveDirImpl } from '../src/ai/god/Navigator'
 import { baseBulletInterceptCellImpl } from '../src/ai/god/ThreatAssessor'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { makeTank } from './helpers'
+import { makeTank, seedWorld } from './helpers'
 import { CELL, GRID, BULLET } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
@@ -16,8 +15,7 @@ import type { WorldSnapshot } from '../src/snapshot/types'
 // ---- helpers ----
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = RULES['classic'] ?? DEFAULT_RULES
@@ -352,8 +350,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     const snap = cloneWorld(world)
     expect(snap.coop).toBe(false)
     expect(snap.player2).toBeNull()
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(false)
     expect(restored.player2).toBeNull()
@@ -375,8 +372,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     expect(snap.lives2).toBe(2)
     expect(snap.playerLevel2).toBe(1)
     expect(snap.score2).toBe(1500)
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(true)
     expect(restored.player2).not.toBeNull()
@@ -395,8 +391,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     const snap = cloneWorld(world)
     expect(snap.coop).toBe(true)
     expect(snap.player2).toBeNull()
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(true)
     expect(restored.player2).toBeNull()
@@ -414,8 +409,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     delete oldSnap.playerLevel2
     delete oldSnap.score2
     delete oldSnap.player2SpawnPoint
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, oldSnap as WorldSnapshot)
     // Should default to coop off.
     expect(restored.coop).toBe(false)

@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -73,8 +74,7 @@ function coopStandoff(seed: number): {
   god: GodAIInput
   p2: Tank
 } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   baseArena(world)
@@ -263,8 +263,7 @@ describe('§79 co-op God AI drives the tank it controls', () => {
   })
 
   it('single-player God AI still controls world.player (parity)', () => {
-    const world = new World()
-    world.rng = new RNG(3)
+    const world = seedWorld(3)
     const sim = new Simulation(world, new Input())
     world.startGame('classic', 'modern', 0)
     baseArena(world)

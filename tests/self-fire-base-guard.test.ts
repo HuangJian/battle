@@ -2,12 +2,11 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { CLASSIC_MODEL_PARAMS } from '../src/ai/god/params'
 import { shotReachesBaseImpl, enemyInShotCorridorImpl } from '../src/ai/god/FireControl'
 import { CELL } from '../src/constants'
-import { clearArena, placeEnemy } from './helpers'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 
 /**
  * §121 t2a/aggressive 停射自毁守卫 (self-fire base guard) — unit tests.
@@ -35,8 +34,7 @@ function setupWorld(
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })

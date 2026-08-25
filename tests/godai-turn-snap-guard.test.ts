@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -89,8 +90,7 @@ function coopGod(
  *   killing it within ~120 ticks.
  */
 function lieAimWorld(seed: number): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.startGame('classic', 'modern', 0)
   emptyArena(world)
 

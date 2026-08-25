@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -64,8 +65,7 @@ function baseArena(world: World): void {
  *  Game.enableSpectateDual(). `seed` decouples the God-AI RNGs from the
  *  world RNG exactly like the production paths do. */
 function dualSpectateWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   baseArena(world)

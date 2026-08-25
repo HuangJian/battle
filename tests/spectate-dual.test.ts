@@ -3,7 +3,7 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { makeTank } from './helpers'
+import { makeTank, seedWorld } from './helpers'
 import { computePlayer2SpawnCol } from '../src/utils/helpers'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
@@ -21,8 +21,7 @@ import type { InputLike } from '../src/game/Input'
 // ================================================================
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.themeKey = 'classic'

@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
+
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL } from '../src/constants'
 import type { TankKind } from '../src/types'
 import { TANK_PROFILES, applyEliteModifier, profileToStats } from '../src/config/combat'
@@ -105,8 +105,7 @@ interface DuelResult {
  * lands the surplus shell.
  */
 function runDuel(kind: Exclude<TankKind, 'player'>, ticks: number): DuelResult {
-  const world = new World()
-  world.rng = new RNG(1234)
+  const world = seedWorld(1234)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('hard', 'modern', 0)
@@ -233,8 +232,7 @@ describe('Fire-rate standard — head-on duel vs every enemy type (no buffs)', (
   it('max-level player out-rates even the power enemy (behavioral)', () => {
     // Promote the player to 3 stars and re-run the power duel; the player must
     // now fire strictly more often than power.
-    const world = new World()
-    world.rng = new RNG(99)
+    const world = seedWorld(99)
     const input = new Input()
     const sim = new Simulation(world, input)
     world.startGame('hard', 'modern', 0)

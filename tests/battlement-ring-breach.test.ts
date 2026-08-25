@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
@@ -26,8 +27,7 @@ import type { StageData, Tank } from '../src/types'
 
 /** Battlement (STAGES[33]): pure-brick maze, eagle at (12-13, 24-25). */
 function battlementWorld(): World {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = { ...RULES['classic'] }
@@ -141,8 +141,7 @@ describe('D2 — params gating', () => {
   })
 
   it('breach bonus outranks a mid-field enemy in base-threat scoring (knob ON)', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     world.difficultyKey = 'classic'
     world.difficulty = DIFFICULTIES['classic']
     world.rules = { ...RULES['classic'] }

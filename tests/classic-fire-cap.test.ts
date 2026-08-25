@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import type { Tank } from '../src/types'
 
 /**
@@ -14,8 +14,7 @@ import type { Tank } from '../src/types'
  */
 
 function buildSeededWorld(seed: number, difficulty: string): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame(difficulty, 'modern', 0)

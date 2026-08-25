@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
-import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../src/snapshot/types'
-import { makeTank } from './helpers'
+import { makeTank, seedWorld } from './helpers'
 import { cycleBattleSpeed, BATTLE_SPEEDS } from '../src/game/battleSpeed'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { THEMES } from '../src/config/theme'
@@ -18,8 +17,7 @@ import type { InputLike } from '../src/game/Input'
 // ================================================================
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.themeKey = 'classic'

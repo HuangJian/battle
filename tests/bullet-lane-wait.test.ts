@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import {
   bulletLaneClearImpl,
@@ -8,7 +7,7 @@ import {
   findCloseEnemyImpl,
   safePerpDodgeImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { clearArena, makeBullet as makeBulletShared, makeTank } from './helpers'
+import { clearArena, makeBullet as makeBulletShared, makeTank, seedWorld } from './helpers'
 import { CELL, TANK } from '../src/constants'
 import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
@@ -26,8 +25,7 @@ import type { Direction } from '../src/constants'
 // ================================================================
 
 function makeWorld(): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world)
   world.startGame('hard', 'modern', 0)
   clearArena(world)

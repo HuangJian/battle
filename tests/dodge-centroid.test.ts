@@ -2,12 +2,11 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { dodgeDirectionImpl } from '../src/ai/god/ThreatAssessor'
 import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
-import { clearArena, makeBullet as makeBulletShared } from './helpers'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * §223 (dodge idle forensics → candidate): multi-bullet centroid escape —
@@ -20,8 +19,7 @@ import { clearArena, makeBullet as makeBulletShared } from './helpers'
  */
 
 function setupWorld(): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)

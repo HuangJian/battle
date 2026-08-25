@@ -4,10 +4,9 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { CLASSIC_MODEL_PARAMS, GUARD_GOD_AI_PARAMS } from '../src/ai/god/params'
-import { RNG } from '../src/utils/RNG'
 import { GRID } from '../src/constants'
 import type { Tank } from '../src/types'
-import { clearArena, placeEnemy } from './helpers'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 
 /**
  * §171: path-aware target selection (路径长度感知目标选择) — unit tests.
@@ -30,8 +29,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)
