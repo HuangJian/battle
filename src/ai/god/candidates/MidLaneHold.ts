@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type Direction } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 
 import { manhattan } from '../../../utils/helpers'
@@ -37,19 +37,16 @@ export function evalMidLaneHold(self: GodAIInput, ctx: DecisionContext): boolean
     const dir: Direction = 'up'
     self._moveDir = p.dir === dir ? null : dir
     self._fire = !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, dir))
-    self.branchCounts.midLaneHold++
-    self._lastBranch = 'midLaneHold'
+    recordBranch(self, 'midLaneHold')
     return true
   }
   if (!busy) return false
   // 前往对消格（findParryHoldCellImpl 已保证走廊可达 — 顶部广场不打砖）。
   self._moveDir = self.navigateTowards(hold)
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-  self.branchCounts.midLaneHold++
-  self._lastBranch = 'midLaneHold'
+  recordBranch(self, 'midLaneHold')
   return true
 }
-
 
 /**
  * §164 中路列旁主动驻守 (proactive mid-lane flank hold) — 用户需求

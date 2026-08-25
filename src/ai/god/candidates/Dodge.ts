@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { CELL } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, markBranch, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
@@ -23,7 +23,7 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
       self._moveDir = self.followPath()
       if (!self._moveDir) self._moveDir = self.directMove(self.playerCell())
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-      self._lastBranch = 'dodge'
+      markBranch(self, 'dodge')
       return true
     }
 
@@ -56,8 +56,7 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
           self._lastDodgeThreatId = threat.id
           self._lastDodgeDir = self._moveDir
           self._dodgeFlipCount = 0
-          self.branchCounts.dodge++
-          self._lastBranch = 'dodge'
+          recordBranch(self, 'dodge')
           return true
         }
       }
@@ -79,7 +78,13 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
       // 玩家垂直闪避需 18+ tick。5格内闪避数学上不可行（§M4 测量）。
       if (dist <= COUNTER_FIRE_RANGE_CELLS * CELL) {
         // 安全门控：检查是否有其他子弹在 5 格内
-        const hasCrossfire = self.hasCrossFireBullet(pcx, pcy, threat.id, COUNTER_FIRE_RANGE_CELLS, 1)
+        const hasCrossfire = self.hasCrossFireBullet(
+          pcx,
+          pcy,
+          threat.id,
+          COUNTER_FIRE_RANGE_CELLS,
+          1,
+        )
         if (!hasCrossfire) {
           const fireDir = dodgeCounterFireDirImpl(self, threat, pcx, pcy)
           if (fireDir) {
@@ -89,8 +94,7 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
             self._lastDodgeThreatId = threat.id
             self._lastDodgeDir = self._moveDir
             self._dodgeFlipCount = 0
-            self.branchCounts.dodge++
-            self._lastBranch = 'dodge'
+            recordBranch(self, 'dodge')
             return true
           }
         }
@@ -119,8 +123,7 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
     self._lastDodgeThreatId = threat.id
     self._lastDodgeDir = self._moveDir
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-    self.branchCounts.dodge++
-    self._lastBranch = 'dodge'
+    recordBranch(self, 'dodge')
     return true
   }
 
@@ -133,7 +136,6 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   self._dodgeFlipCount = 0
   return false
 }
-
 
 /** dodge(1000) — survive first: reaction, M3 counter-fire, perpendicular dodge. */
 

@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { BASE_POS } from '../../../constants'
 import { type Tank } from '../../../types'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { clearLaneFireDir, evaluateUnifiedCandidates, fireRayBlocked } from '../ActionCandidates'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { shouldFireInDirImpl } from '../FireControl'
@@ -50,8 +50,7 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
   if (v.kind === 'returnDefense') {
     self._moveDir = self.navigateTowards({ col: anchorCol, row: anchorRow })
     self._fire = false
-    self.branchCounts.unifiedCandidates++
-    self._lastBranch = 'candidateReturn'
+    recordBranch(self, 'unifiedCandidates', 'candidateReturn')
     return true
   }
   // All fight candidates address one threat tank (verdict.threatId).
@@ -81,8 +80,7 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
     if (!dir) return false
     self._moveDir = p.dir === dir ? null : dir
     self._fire = p.dir === dir && !onCooldown && shouldFireInDirImpl(self, pcx, pcy, dir)
-    self.branchCounts.unifiedCandidates++
-    self._lastBranch = 'candidateClear'
+    recordBranch(self, 'unifiedCandidates', 'candidateClear')
     return true
   }
   // killCurrent / interceptBase: standing hold only when the VERDICT came
@@ -99,11 +97,13 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
     self._moveDir = self.navigateTowards(tc)
     self._fire = aligned && facing && !fireRayBlocked(w, p, target) && !onCooldown && roll()
   }
-  self.branchCounts.unifiedCandidates++
-  self._lastBranch = v.kind === 'killCurrent' ? 'candidateKill' : 'candidateIntercept'
+  recordBranch(
+    self,
+    'unifiedCandidates',
+    v.kind === 'killCurrent' ? 'candidateKill' : 'candidateIntercept',
+  )
   return true
 }
-
 
 // ================================================================
 // §X Base lane sentry — 基地车道哨兵

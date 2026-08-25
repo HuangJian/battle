@@ -5,7 +5,7 @@
 import { type Direction, BASE_POS, CELL } from '../../../constants'
 import { ALL_DIRS } from '../../../utils/direction'
 import { type Cell } from '../../../utils/grid-search'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { travelFireDetourDir } from '../ActionCandidates'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
@@ -60,20 +60,22 @@ function tryTravelFireDetour(
     if (detourDir) {
       self._moveDir = detourDir
       self._fire = self.rng.next() >= self.params.aimError
-      self.branchCounts.navigate++
-      self._lastBranch = 'navigate'
+      recordBranch(self, 'navigate')
       return true
     }
   }
   return false
-
 }
 
 /**
  * §162 carve-dig START + active-session step (§3.7 extraction; body verbatim).
  * Returns true when HUNT commits this tick; false = fall through to normal HUNT.
  */
-function runCarveDig(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+function runCarveDig(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  pc: { col: number; row: number },
+): boolean {
   const { p, pcx, pcy, onCooldown } = ctx
   // §162: carve-dig START — the player is pixel-blocked (endFrame stuck
   // detector: moved < carveDigBlockThreshold px for carveDigBlockTicks
@@ -96,8 +98,7 @@ function runCarveDig(self: GodAIInput, ctx: DecisionContext, pc: { col: number; 
         self._carveDigTarget = escape
         self._moveDir = info.path[0]
         self._fire = !onCooldown && carveFireAheadImpl(self, pcx, pcy, info.path[0])
-        self.branchCounts.navigate++
-        self._lastBranch = 'navigate'
+        recordBranch(self, 'navigate')
         return true
       }
     }
@@ -147,14 +148,12 @@ function runCarveDig(self: GodAIInput, ctx: DecisionContext, pc: { col: number; 
         self._digBlockTicks = 0
       }
       if (self._carveDigActive) {
-        self.branchCounts.navigate++
-        self._lastBranch = 'navigate'
+        recordBranch(self, 'navigate')
         return true
       }
     }
   }
   return false
-
 }
 
 /**
@@ -226,13 +225,16 @@ function updateNavStuckState(
     self._navStuckTrack.suppress = 0
   }
   return navStuck
-
 }
 
 /**
  * §190 pixel-stuck direct-move fallback (§3.7 extraction; body verbatim).
  */
-function tryPixelStuckDirectMove(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+function tryPixelStuckDirectMove(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  pc: { col: number; row: number },
+): boolean {
   const { p, pcx, pcy, onCooldown } = ctx
   // §190: pixel-stuck fallback — when the player has been pixel-stuck for
   // >= pixelStuckDirectMoveTicks and no carve-dig is active, bypass A*
@@ -274,12 +276,10 @@ function tryPixelStuckDirectMove(self: GodAIInput, ctx: DecisionContext, pc: { c
     } else {
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     }
-    self.branchCounts.navigate++
-    self._lastBranch = 'navigate'
+    recordBranch(self, 'navigate')
     return true
   }
   return false
-
 }
 
 /**
@@ -333,7 +333,6 @@ function selectHuntNavTarget(
     navTarget = self.selectTarget(pc)
   }
   return navTarget
-
 }
 
 /**
@@ -351,8 +350,7 @@ function pickHuntMoveDir(
 ): void {
   const { p } = ctx
   // P3.1: recompute (same formula as selectHuntNavTarget — cheap, pure).
-  const stuckAtCenter =
-    manhattan(pc.col, pc.row, MAP_CENTER.col, MAP_CENTER.row) <= 2
+  const stuckAtCenter = manhattan(pc.col, pc.row, MAP_CENTER.col, MAP_CENTER.row) <= 2
   if (navStuck && !stuckAtCenter) {
     // P2.2: Stuck too long — break the loop. Try A* to center first, then
     // fall back to any passable direction (not directMove, which would
@@ -466,12 +464,15 @@ function pickHuntMoveDir(
       self._moveDir = self.directMove(pc)
     }
   }
-
 }
 /**
  * §182 face-enemy fallback when physically immobile (§3.7 extraction).
  */
-function tryFaceEnemyFallback(self: GodAIInput, ctx: DecisionContext, pc: { col: number; row: number }): boolean {
+function tryFaceEnemyFallback(
+  self: GodAIInput,
+  ctx: DecisionContext,
+  pc: { col: number; row: number },
+): boolean {
   const { p, pcx, pcy, onCooldown } = ctx
   // §182: When the player has been physically immobile for >= carveDigBlockTicks
   // (1.5s default) AND either (a) all movement options failed (_moveDir is
@@ -508,13 +509,11 @@ function tryFaceEnemyFallback(self: GodAIInput, ctx: DecisionContext, pc: { col:
     if (bestDir) {
       self._moveDir = bestDir
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, bestDir, false)
-      self.branchCounts.navigate++
-      self._lastBranch = 'navigate'
+      recordBranch(self, 'navigate')
       return true
     }
   }
   return false
-
 }
 
 /**
@@ -559,8 +558,7 @@ function applyCloseCombatExposure(self: GodAIInput, ctx: DecisionContext): boole
           if (dodgeDir) {
             self._moveDir = dodgeDir
             self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dodgeDir)
-            self.branchCounts.navigate++
-            self._lastBranch = 'navigate'
+            recordBranch(self, 'navigate')
             return true
           }
         }
@@ -568,8 +566,7 @@ function applyCloseCombatExposure(self: GodAIInput, ctx: DecisionContext): boole
       // Cancel the move — face the enemy and fire.
       self._moveDir = p.dir === dangerDir ? null : dangerDir
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dangerDir)
-      self.branchCounts.navigate++
-      self._lastBranch = 'navigate'
+      recordBranch(self, 'navigate')
       return true
     }
   }
@@ -604,7 +601,6 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
 
   if (tryFaceEnemyFallback(self, ctx, pc)) return true
   if (applyCloseCombatExposure(self, ctx)) return true
-
 
   // M5/§165: 站位提前规避 — check the immediate next cell (1 cell ahead)
   // for a bullet that will arrive at the same time as the player. If a
@@ -699,11 +695,9 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
     const p1DigFireDir = p1DigFire && fireDir !== 'down'
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, fireDir, p1DigFireDir)
   }
-  self.branchCounts.navigate++
-  self._lastBranch = 'navigate'
+  recordBranch(self, 'navigate')
   return true
 }
-
 
 /** hunt(200) — T2b: navigate towards the target (distance-adaptive). */
 

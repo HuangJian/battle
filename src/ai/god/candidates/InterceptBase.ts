@@ -2,7 +2,7 @@
 // Extracted verbatim from think.ts (plan/refactor.trae.md §3.4):
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { findBulletThreatToBaseImpl } from '../ThreatAssessor'
 import { baseBulletInterceptCellImpl } from '../ThreatAssessor'
@@ -22,15 +22,13 @@ export function evalInterceptBase(self: GodAIInput, ctx: DecisionContext): boole
         self._moveDir = self.navigateTowards(interceptCell)
         // Fire to intercept the bullet (T5 extended to base defense).
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.t8++
-        self._lastBranch = 't8'
+        recordBranch(self, 't8')
         return true
       }
     }
   }
   return false
 }
-
 
 /** interceptBase(900) — T8: stop an in-flight bullet aimed at the base. */
 

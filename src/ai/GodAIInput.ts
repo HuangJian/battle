@@ -1451,15 +1451,40 @@ export class GodAIInput implements InputLike {
 }
 
 /**
- * Single-point telemetry bookkeeping for the decision chain.
- *
- * Every candidate (and the shell's dead/hold early-outs) records its commit
- * here instead of touching `branchCounts`/`_lastBranch` directly — one place
- * to change if the profiling surface ever evolves. Pure observation: no World
- * mutation, no RNG, no serialization. Replay- and determinism-safe.
+ * Single-point telemetry bookkeeping for the decision chain (refactor.trae
+ * §1.4). Candidates and the shell's dead/hold early-outs route ALL
+ * `branchCounts`/`_lastBranch` writes through the three helpers below — one
+ * place to change if the profiling surface ever evolves. Pure observation:
+ * no World mutation, no RNG, no serialization. Replay- and determinism-safe.
  */
-export function recordBranch(self: GodAIInput, branch: string): void {
-  self._lastBranch = branch
+
+/**
+ * Count a commit under `countKey` and label the tick `label ?? countKey`.
+ * The common shape: counter key and _lastBranch label are the same string
+ * (e.g. recordBranch(self, 'navigate')). Pass a distinct `label` when the
+ * counter aggregates several sub-branches (unifiedCandidates →
+ * candidateKill/candidateIntercept/candidateClear/candidateReturn).
+ */
+export function recordBranch(self: GodAIInput, countKey: string, label?: string): void {
   const bc = self.branchCounts as Record<string, number>
-  bc[branch] = (bc[branch] ?? 0) + 1
+  bc[countKey] = (bc[countKey] ?? 0) + 1
+  self._lastBranch = label ?? countKey
+}
+
+/**
+ * Label-only variant: this tick's decision belongs to `label`, but no commit
+ * is counted (pre-reaction dodge hold, stop-and-aim sub-branches that share
+ * the aggressive candidate's existing count semantics).
+ */
+export function markBranch(self: GodAIInput, label: string): void {
+  self._lastBranch = label
+}
+
+/**
+ * Count-only variant: an internal gate fired (once per tick), but whichever
+ * candidate eventually commits owns the tick's `_lastBranch` label.
+ */
+export function countBranch(self: GodAIInput, countKey: string): void {
+  const bc = self.branchCounts as Record<string, number>
+  bc[countKey] = (bc[countKey] ?? 0) + 1
 }

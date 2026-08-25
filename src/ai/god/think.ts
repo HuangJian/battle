@@ -9,7 +9,7 @@
 // candidate body is a VERBATIM transcription of the original branch — parity
 // by construction (M1 theorem, doc §3.3). Weights strictly mirror the chain
 // order, so behavior under default params is byte-identical to pre-M1.
-import type { GodAIInput } from '../GodAIInput'
+import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
@@ -134,8 +134,7 @@ export function thinkImpl(self: GodAIInput): void {
   if (!p || !p.alive || p.spawnTimer > 0) {
     self._moveDir = null
     self._fire = false
-    self.branchCounts.dead++
-    self._lastBranch = 'dead'
+    recordBranch(self, 'dead')
     return
   }
 
@@ -153,8 +152,7 @@ export function thinkImpl(self: GodAIInput): void {
       // the previous branch's direction — movement is cell-gated and bullets
       // are long-horizon, so the 1-tick hold is imperceptible. Pure
       // observation counters only.
-      self.branchCounts.hold++
-      self._lastBranch = 'hold'
+      recordBranch(self, 'hold')
       return
     }
   }

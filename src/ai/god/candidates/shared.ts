@@ -3,7 +3,7 @@
 // candidate extraction; pure relocation, zero semantic change. This module
 // breaks the import cycle: candidates import helpers HERE, never from
 // think.ts.
-import type { GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import type { World } from '../../../game/World'
 import type { Cell } from '../../../utils/grid-search'
 import type { Direction } from '../../../constants'
@@ -142,8 +142,7 @@ export function commitPowerupTail(
 ): boolean {
   self._moveDir = self.navigateTowards(target)
   self._fire = !ctx.onCooldown && self.shouldFireInDir(ctx.pcx, ctx.pcy, self._moveDir ?? ctx.p.dir)
-  self.branchCounts.powerup++
-  self._lastBranch = 'powerup'
+  recordBranch(self, 'powerup')
   return true
 }
 

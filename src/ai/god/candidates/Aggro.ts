@@ -4,10 +4,19 @@
 // is byte-identical (per-tick determinism gate).
 import { CELL } from '../../../constants'
 import { ALL_DIRS } from '../../../utils/direction'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, markBranch, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
-import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
-import { MAP_CENTER, isDualCentralBreachHoldP1, selfFireBaseGuardBlocks } from '../candidates/shared'
+import {
+  aimSurvivesTurnImpl,
+  bulletPathSteelBlockedImpl,
+  scanAheadImpl,
+  shouldFireBreakThroughImpl,
+} from '../FireControl'
+import {
+  MAP_CENTER,
+  isDualCentralBreachHoldP1,
+  selfFireBaseGuardBlocks,
+} from '../candidates/shared'
 import { updateStuckTrack } from '../stuck-track'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
 import { findFreezePickupTargetImpl } from '../StrategyPlanner'
@@ -57,8 +66,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
             // Don't commit — let stop-and-aim / navigate handle the enemy
           } else {
             self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir)
-            self.branchCounts.powerup++
-            self._lastBranch = 'powerup'
+            recordBranch(self, 'powerup')
             return true
           }
         }
@@ -150,7 +158,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
               self._moveDir = aimDir
             }
             self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-            self._lastBranch = 'aggressive'
+            markBranch(self, 'aggressive')
             return true
           }
         } else {
@@ -160,7 +168,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
             self._moveDir = aimDir
           }
           self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-          self._lastBranch = 'aggressive'
+          markBranch(self, 'aggressive')
           return true
         }
       }
@@ -180,7 +188,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       if (!puStuck) {
         self._moveDir = self.navigateTowards(puTarget)
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self._lastBranch = 'aggressive'
+        markBranch(self, 'aggressive')
         return true
       }
     }
@@ -198,9 +206,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       let escape152 = self._aggNavTrack.suppress > 0
       if (!escape152) {
         const pc152 = self.playerCell()
-        if (
-          updateStuckTrack(self._aggNavTrack, w, pc152, self.params.aggNavStuckTicks, 1)
-        ) {
+        if (updateStuckTrack(self._aggNavTrack, w, pc152, self.params.aggNavStuckTicks, 1)) {
           const st = self._aggNavTrack
           st.cell = null
           st.ticks = 0
@@ -221,8 +227,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
           }
         }
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-        self.branchCounts.aggressive++
-        self._lastBranch = 'aggressive'
+        recordBranch(self, 'aggressive')
         return true
       }
     }
@@ -246,8 +251,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
     } else {
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     }
-    self.branchCounts.aggressive++
-    self._lastBranch = 'aggressive'
+    recordBranch(self, 'aggressive')
     return true
   }
 
@@ -260,7 +264,6 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   if (st.suppress > 0) st.suppress = 0
   return false
 }
-
 
 /** aggro(700) — S8/S9 freeze/shield window: stop-and-aim → power-up → navigate. */
 

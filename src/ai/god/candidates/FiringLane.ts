@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { ALL_DIRS } from '../../../utils/direction'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { scanAheadImpl } from '../FireControl'
 import { findFiringLaneCellImpl } from '../candidates/shared'
@@ -78,12 +78,9 @@ export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean 
     }
   }
   if (!self._moveDir) return false
-  self.branchCounts.firingLane++
-  self._lastBranch = 'firingLane'
+  recordBranch(self, 'firingLane')
   return true
 }
-
-
 
 export const FIRING_LANE: Candidate = {
   id: 'firingLane',

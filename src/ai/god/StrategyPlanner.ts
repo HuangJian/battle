@@ -1,4 +1,4 @@
-import type { GodAIInput } from '../GodAIInput'
+import { type GodAIInput, countBranch } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import type { World } from '../../game/World'
 import { findPath, type Cell } from './pathfind'
@@ -30,7 +30,6 @@ function coopAdjustDist(
   const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
   return pd < d - 3 ? adjustedDist + 5 : adjustedDist
 }
-
 
 // ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
 // A hunt/engage target is locked only for a lease; revalidation releases on
@@ -1718,7 +1717,7 @@ function chokepointHoldGate(self: GodAIInput, playerCell: Cell, enemyCount: numb
   const chase = self.threatChaseTarget()
   const choke = self.chokepointCell()
   if (chase && (!choke || !chokepointCoversEnemy(self, choke, chase))) {
-    self.branchCounts.chokepoint++
+    countBranch(self, 'chokepoint')
     return chase
   }
   if (enemyCount > self.params.chokepointHoldThreshold && choke) {
@@ -1727,7 +1726,7 @@ function chokepointHoldGate(self: GodAIInput, playerCell: Cell, enemyCount: numb
       chase &&
       (self.params.chokepointHoldMaxDist <= 0 || holdDist <= self.params.chokepointHoldMaxDist)
     ) {
-      self.branchCounts.chokepoint++
+      countBranch(self, 'chokepoint')
       return choke
     }
   }

@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { BASE_POS } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   anyThreatPointEnemyImpl,
@@ -35,8 +35,7 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
       }
       self._moveDir = null
       self._fire = false
-      self.branchCounts.suicideReturn++
-      self._lastBranch = 'suicideReturn'
+      recordBranch(self, 'suicideReturn')
       return true
     }
 
@@ -81,8 +80,7 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
       self._moveDir = self.navigateTowards(tc)
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     }
-    self.branchCounts.suicideReturn++
-    self._lastBranch = 'suicideReturn'
+    recordBranch(self, 'suicideReturn')
     return true
   }
 
@@ -155,11 +153,9 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
     self._moveDir = null
     self._fire = false
   }
-  self.branchCounts.suicideReturn++
-  self._lastBranch = 'suicideReturn'
+  recordBranch(self, 'suicideReturn')
   return true
 }
-
 
 // ===========================================================================
 // Candidates — verbatim branch transcriptions. One object per action; the

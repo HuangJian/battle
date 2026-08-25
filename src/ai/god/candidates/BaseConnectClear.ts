@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type Cell } from '../../../utils/grid-search'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { digPathInfoCached } from '../PathCarve'
 import { manhattan } from '../../../utils/helpers'
@@ -59,11 +59,9 @@ export function evalBaseConnectClear(self: GodAIInput, ctx: DecisionContext): bo
   const dir = info.path[0]
   self._moveDir = dir
   carveFire(self, ctx, dir)
-  self.branchCounts.baseConnectClear++
-  self._lastBranch = 'baseConnectClear'
+  recordBranch(self, 'baseConnectClear')
   return true
 }
-
 
 /**
  * baseConnectClear(270) — §189 / 开局联通清墙 (user request 2026-08-11).
