@@ -5,6 +5,39 @@
 
 ---
 
+## §12.5 补丁：eval 本地参与（PPO 收尾后本机算力入列）（2026-08-25 傍晚）
+
+> 用户指出的容量缺口：eval 只派 HTTP 节点，PPO/采集收尾后训练机 idle 无贡献；
+> 极端情形（无可用节点）整轮评估直接 skip。
+
+- **实现**（rl/eval_dispatch.py + run_rl.py）：① 派发时刻把 rl_path 复制为
+  traj_dir/_eval_frozen_weights.json 冻结快照（主循环 PPO 写回会原地覆盖
+  rl_path，本地局读错版本=对账灾难）；② `run_local_eval_game` 本机直跑
+  export-eval-game.ts，补 wver/mode 戳后走同一 validate_eval_result 与台账聚合，
+  summary 的 nodes 字典自然出现 "local" 键；③ `local_gate`（threading.Event）
+  由调用方在「梯度步已尽」时 set——流式=末波排水完、串行=PPO 完成，join 前置
+  set；worker 放行前每 5s 醒来看 deadline，不让位时零开销；④ 无节点时 gate 存在
+  即 local-only 继续跑（旧行为=整轮 skip）；槽位 policy.evalLocalSlots 默认 4、0=禁用。
+- **测试**：test_eval_local_gate 双子用例（gate 开→6 局全落 local+summary 聚合；
+  gate 关→runner 零调用+窗口到期 dropped 全记），快速层 ALL PASS ×2 连跑。
+  教训复训：台账按 wver 去重，跨进程残留 fixture 会把用例推进 skip 早退——
+  work 目录必须 rmtree 重建；断言基线要显式捕获而非硬编码。
+- **本地参与保底三件套**（同日追加，用户质询「local 完全没参与 dist 和 eval」驱动，
+  语义按用户修订定稿）：
+  ① `--local-slots N` 显式 CLI（0=自动 max(2,workers//4)），**调度语义 =
+  「dist 阶段最先被分派 → PPO 启动即让位 → PPO 结束转 eval 尾段」**：
+  · dist：洗牌后前 N 个任务划入本机专用队列（头部分配，节点线程不可触及，
+  确定性保底）；首个 PPO 波次启动置 local_suspend → 本机停止领新任务、保留段
+  一次性并回主队列交远端消化（防饿死；远端集体失联超 remoteDeadSec 时让位
+  自动失效）。附带修复两处真缺陷：完成判定/missing 原用切割后的 len(tasks)
+  会提前 all_settled（日志溢出 3/2 可见）；_fast_enough 的 EWMA 持留曾把 local
+  彻底饿死——现豁免（上限+让位自治理）。
+  · eval：gate 放行前节点不取最后 evalLocalSlots 局（hold_for_local 纯函数，
+  距窗口截止 300s 强制释放），派发行打 `[local tail-reserved ×N]` 标记。
+- 生效时机：运行中的进程已加载旧模块，**下次 relaunch 生效**。
+
+---
+
 ## §12 R6 破局三件套落地 + 评审修订与重启记录（2026-08-25 下午）
 
 > §11 审计定位 loss-band 局部最优后，实施三方向改动（奖励重做 / 课程化 / PPO
