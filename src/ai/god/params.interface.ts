@@ -15,6 +15,47 @@ import type { ActionId } from './DecisionCore'
  * threat ranges, replan intervals, etc.). All tunable values live here per
  * the plan's "implementation discipline" — data over code.
  */
+
+/**
+ * ─── 留档旋钮清单 (Archived / default-OFF knobs) ─ refactor.trae.md §1.1-1 ──
+ * 以下参数 DEFAULT=0，属「被否决但保留 / 仅留档 / 实验旋钮」——它们参与类型但
+ * 默认不参与决策（门控 = 0 → byte-identical 基线）。未来 agent 加旋钮时，若新
+ * 旋钮也是实验态，应在本清单登记，避免「以为它在跑」。完整 A/B 结论见
+ * DECISIONS.md 与 docs/god-ai-tuning.progress.md。
+ *
+ * 按门控参数归组（同组子参数随门控一起 OFF）：
+ *  - candidateMode=0              → UNIFIED_CANDIDATES (§221 reject)
+ *  - firingLaneMode=0             → FIRING_LANE (+ firingLaneRadius/MinEnemyDist/ReplanTicks/BoxRow) (§139 灾难性阴性)
+ *  - carvePathMode=0              → CARVE_PATH (+ carve* 子参数) (§161 诚实阴性)
+ *  - midLaneHold=0                → MID_LANE_HOLD (+ midLaneHoldMaxRow/EnemyDist) (§164 灾难性阴性)
+ *  - suicideReturnMode=0          → SUICIDE_RETURN (+ suicideReturn* 子参数) (§116/§117 阴性)
+ *  - defenseInterceptPredictCells=0 / defenseInterceptDigBricks=0 (§135/§136, byte-identical)
+ *  - defensePosStandable=0        (+ minDist) (§146B)
+ *  - iceGlideControl=0            (+ minSpeed) (§145)
+ *  - defenseBreachBonus=0         (D2)
+ *  - baseLaneSentryInBandNav=0 / baseAlertPickupSuppress=0 (§225 A/B)
+ *  - baseGuardAnchorMode=0        (§137, A/B 候选)
+ *  - actionContractMode=0 / targetValueMode=0 / intentMode=0 (Phase2 §6.1/6.2/6.3; + intent* / coverage* 子参数)
+ *  - coverageMode=0               (Phase3; + coverage* 子参数)
+ *  - fastBaseApproachWeight=0     (§132)
+ *  - brickHeavy*                  (§133, 全部默认 0)
+ *  - evasionSteelOcclusion=0      (§48-revisit; + *Range/BrickRatio)
+ *  - pathThreatAvoidance=0        (M5)
+ *  - dodgeCounterFire=0 (§M3 revert; + alignPx/clearanceScore) / dodgeHorizonScore=0 (M9; + escapeDepth / Margin / Dist) / dodgeCentroidMode=0 (§223) / dodgeClearanceScore=0
+ *  - playerHpAwareness=0          (M12; + hp* 子参数)
+ *  - pickupStarBoxRow=0           (D5) / direItemMode=0 (E1; + direItem* 子参数)
+ *  - enemyModelMode=0             (M3; + enemyModelWindowTicks/tierWeightScale/dodgeRateShrinksT2a/coordinationRiskWeight/enemyAccuracyRaisesSurvival/enemyTierWeight* / survivalModeLives/survivalRiskWeight/surviveMinEnemies/RadiusCells)
+ *  - fieldRetreatPickupGate=0     (§146C)
+ *  - pickupCommitTicks=0          (§152)
+ *  - starRushMode=0               (§166; + maxLevel/range/liftGates)
+ *  - superItemFrenzyAim=0         (§167)
+ *  - threatStickyTicks=0 (§169) / huntCommitTicks=0 (§170) / pathTargetMode=0 (§171) / baseDamageRecall=0 (§173)
+ *  - t2aOutnumberedRetreat=0      (§159)
+ *  - pixelStuckDirectMoveTicks=0  (§190 净负, 保留为门控)
+ *
+ * 注：survive 候选默认 weight=0（actionWeights.survive=0）→ 链中永不可达，属同一
+ * 类「默认 OFF」资产；其依赖 survive* / survival* 子参数同上 enemyModel 族。
+ */
 export interface GodAIParams {
   // ---- Imperfection params ----
   /** Ticks of delay before reacting to a new threat. */
