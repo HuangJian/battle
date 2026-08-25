@@ -3065,14 +3065,17 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   starRushRangeCells: 8,
   starRushLiftGates: 1,
 
-  // §167 / B4: super-item strategic activation — SHIPPED guard-only
-  // (2026-08-07, DECISIONS §167). 60-seed paired A/B: hard 75.9→76.5%
-  // (L→W 25 / W→L 12, z=2.14 significant); chaos neutral (net +4, z=0.57,
-  // no regression). frenzy (F6) is a NET NEGATIVE arm (20-seed net −5:
-  // the barrage locks movement into incoming fire) — keep the knob but
-  // default 0. classic restored to 0 via CLASSIC_MODEL_PARAMS (§115).
-  superItemMode: 1,
-  superItemGuardThreat: 1,
+  // §167 / B4: super-item strategic activation — RETIRED by default
+  // (2026-08-25, plan/AI-No-Items-Warmstart.md M0). All NN-AI training uses
+  // NO active items (guard/frenzy never pressed): knobs defaulted to 0,
+  // kept only as rotatable experiments (DECISIONS §167 revision, M0).
+  // Original 60-seed paired A/B: hard 75.9→76.5% (L→W 25 / W→L 12,
+  // z=2.14 significant); chaos neutral. M0 paired A/B (60 seeds): hard
+  // 75→76%→ OFF ≈ −1pt (Lattice 65→58%, p=0.0002) — quantified cost,
+  // accepted per plan §0.2 (risk R4); classic restored to 0 via
+  // CLASSIC_MODEL_PARAMS (§115).
+  superItemMode: 0,
+  superItemGuardThreat: 0,
   superItemFrenzyAim: 0,
 
   // §157: base clear-shot threat detection.

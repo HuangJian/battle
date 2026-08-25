@@ -131,6 +131,29 @@ export class NNInput implements InputLike {
     this.prevFrenzyStock = 0
   }
 
+  /**
+   * M1 divergence-probe support (tools/diag/divergence-probe.ts): force a
+   * decision NOW (idempotent within the tick) and read the greedy argmax.
+   * Read-only relative to the World; never mutates gameplay state.
+   */
+  thinkNow(): void {
+    if (!this.thought) this.think()
+  }
+
+  /** Greedy move-argmax (0-4) from the latest forward pass. */
+  moveArgmax(): number {
+    const mv = this.model.moveLogits
+    let b = 0
+    for (let i = 1; i < 5; i++) if (mv[i] > mv[b]) b = i
+    return b
+  }
+
+  /** Greedy fire-argmax (0 release / 1 hold) from the latest forward pass. */
+  fireArgmax(): number {
+    const fr = this.model.fireLogits
+    return fr[1] > fr[0] ? 1 : 0
+  }
+
   /** Run the NN forward at most once per tick, gated by the decision cadence. */
   private think(): void {
     if (this.thought) return

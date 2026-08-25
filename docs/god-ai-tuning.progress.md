@@ -14,6 +14,32 @@
 
 ---
 
+## §M0. God-AI 摘除主动道具（superItemMode/GuardThreat 默认归零）— plan/AI-No-Items-Warmstart.md M0（2026-08-25）
+
+> DECISIONS 索引：§167（修订："机制退役"）。目的：NN AI 全链路（语料/训练/推理）不使用主动道具；
+> 同一 A/B 预检口径复测确认新基线与预检 B 臂一致，−1pt 地板侵蚀（R4）已在案。
+
+**改动**（`src/ai/god/params.ts` DEFAULT_GOD_AI_PARAMS）：
+`superItemMode: 1 → 0`、`superItemGuardThreat: 1 → 0`；`superItemFrenzyAim` 保持 0。
+命名预设（SKILLED_HUMAN / GUARD_GOD_AI / CLASSIC_MODEL_PARAMS）不动——CLASSIC/GUARD 本就为 0。
+
+**配对复测**（eval-suite `--compare tmp/m0-guard-on.json tmp/ab-guard-off.json --difficulty hard --seeds 60`，
+A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 paired cells）：
+
+| 指标 | A (guard ON) | B (新默认 OFF) | 预检（plan §0.2） |
+|---|---|---|---|
+| 胜率 | 76% | **75%** | 76→75% |
+| suite v7 | 0.5450 | **0.5328** | 0.5451→0.5328 |
+| Δscore (B−A) | — | **−0.0093 ± 0.0025** | −0.0093 |
+| t / p | — | −3.77 / 0.0002 | −3.77 / 0.0002 |
+| 显著关 | — | Lattice 0.519→0.485 (p=0.028)；Ramparts +0.0028 (p=0.033) | Lattice 65→58% |
+
+结论：摘除成本 ≈ −1pt hard 胜率 / −0.0093 score，微小但显著，不构成结构性支柱；新基线（OFF）与
+预检 B 臂**完全一致**。R4 缺口转列为 RL 守家目标，不再返工。
+回退：参数回 1 即恢复，零代码成本。
+
+---
+
 # Part 0. 当前状态速览（2026-08-12，含 2026-08-12 三难度基线重测，见 §0.A）
 
 ## 0.A 三难度基线（官方口径）

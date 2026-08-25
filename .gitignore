@@ -26,6 +26,7 @@ ab-test-*.ts
 
 nn-demo/
 nn-training/weights/*.json
+nn-training/archive
 
 .venv/
 

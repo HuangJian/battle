@@ -473,8 +473,11 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 ## 166. B1 starRush 星经济冲刺 — 诚实阴性归档（旋钮默认 0，2026-08-07）
 > 全文 → docs/god-ai-tuning.progress.md
 
-## 167. B4 超级道具战略激活（superItemMode）— SHIPPED guard-only（2026-08-07）
-> 全文 → docs/god-ai-tuning.progress.md
+## 167. B4 超级道具战略激活（superItemMode）— SHIPPED guard-only → RETIRED by default（2026-08-07 → 修订 2026-08-25 M0）
+> 修订：plan/AI-No-Items-Warmstart.md M0 将 superItemMode/GuardThreat 默认归零（NN AI 全链路不使用主动道具）。
+> 配对复测（A=显式 ON, B=新默认 OFF, hard 60 seeds）：胜率 76→75%、Δscore −0.0093±0.0025、t=−3.77、p=0.0002
+> （Lattice 显著变差 0.519→0.485）——与新预检 B 臂完全一致；−1pt 缺口（R4）转列 RL 守家目标。
+> 全文 → docs/god-ai-tuning.progress.md §M0
 
 ## 168. navStuck 计数器抖动重置 bug（navStuckZone）— 实验阴性，旋钮留档默认 0（2026-08-07）
 > 全文 → docs/god-ai-tuning.progress.md
