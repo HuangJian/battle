@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { cloneWorld } from '../src/snapshot/WorldSerializer'
+import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
+import { seedWorld, placeEnemy } from './helpers'
 
 /**
  * §1.5 (plan/refactor.agy.md) — WorldSerializer field-coverage guard.
@@ -86,5 +87,54 @@ describe('WorldSerializer field coverage (§1.5 Option C guard)', () => {
       .map((k) => KEY_MAP[k] ?? k)
       .filter((k) => !worldKeys.has(k))
     expect(stale).toEqual([])
+  })
+})
+
+/**
+ * §3.3 (plan/refactor.trae.md) — clone → restore → clone roundtrip.
+ *
+ * The coverage guard above only checks that cloneWorld enumerates every live
+ * World field. This test goes further: it proves the serialization is
+ * LOSSLESS — cloning a populated world, restoring it into a fresh World, then
+ * re-cloning must reproduce the identical snapshot.
+ *
+ * Note on the `??` legacy fallbacks inside restoreWorld (e.g. `enemiesTotal ??
+ * enemiesRemaining`, `coop ?? false`, `difficultyKey ?? world.difficultyKey`):
+ * because cloneWorld always emits every field, the common (full-snapshot) path
+ * never exercises them, so this test pins the lossless common path. The
+ * fallbacks themselves are intentionally RETAINED for backward-compat with
+ * older stored replays/snapshots that may predate a given field — removing any
+ * of them requires a prior compat audit (scan `replays/` + any persisted
+ * snapshot stores) confirming no live artifact relies on the default. That
+ * removal is out of scope for this round (low priority, snapshot-compat risk).
+ */
+describe('WorldSerializer clone→restore→clone roundtrip (§3.3)', () => {
+  it('roundtrips a populated world including entities', () => {
+    const original = seedWorld(42)
+    original.startGame('hard', 'modern', 0)
+    placeEnemy(original, 5, 5, 'basic', 'down')
+    placeEnemy(original, 7, 7, 'fast', 'up')
+    original.score = 1234
+    original.lives = 2
+    original.frame = 500
+    original.killCount = 7
+    original.allies.push() // no-op guard for the allies array path
+    original.baseHp = 3
+
+    const snap1 = cloneWorld(original)
+    const restored = new World()
+    restoreWorld(restored, snap1)
+    const snap2 = cloneWorld(restored)
+
+    expect(snap2).toEqual(snap1)
+  })
+
+  it('roundtrips an empty (menu) world', () => {
+    const original = seedWorld(7)
+    const snap1 = cloneWorld(original)
+    const restored = new World()
+    restoreWorld(restored, snap1)
+    const snap2 = cloneWorld(restored)
+    expect(snap2).toEqual(snap1)
   })
 })
