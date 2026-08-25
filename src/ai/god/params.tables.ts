@@ -749,6 +749,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
 
 /**
  * §115 (M4 round-2): instant/classic restore table. The M4 search was
+ * SINGLE-SOURCE (refactor.trae.md §1.1-2): DEFAULT_GOD_AI_PARAMS is the only
+ * authoritative table; CLASSIC_MODEL_PARAMS = { ...DEFAULT, ...CLASSIC_OVERRIDES }
+ * below, so a param added to DEFAULT auto-propagates to classic unless
+ * explicitly restored here. The GodAIInput.reset() loop only restores keys
+ * still at DEFAULT → byte-identical to the prior Partial table.
  * optimized on the POOL combat model (hard/chaos — HP buffers, 磨血死亡).
  * classic ('instant': flat per-bullet damage, 1 hit ≈ death for most kinds)
  * has no 磨血死亡 and the search-tuned aggression is MEASURED HARMFUL there
@@ -756,7 +761,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
  * applies this restore when world.rules.combatModel === 'instant', keeping
  * the classic regression gate byte-identical (DECISIONS §115).
  */
-export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
+const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   defenseColSpread: 5,
   threatRangeCells: 10,
   baseRaceRangeCells: 11,
@@ -871,6 +876,16 @@ export const CLASSIC_MODEL_PARAMS: Partial<GodAIParams> = {
   navBrickStopCost: 0,
   // §nav-cost 3.3(c): firecontrol model gated by navBrickStopCost=0 → OFF.
   navFireStopModel: 'flat',
+}
+
+/**
+ * Classic restore = single-source spread (refactor.trae.md §1.1-2). Every
+ * value not listed in CLASSIC_OVERRIDES above is inherited verbatim from
+ * DEFAULT_GOD_AI_PARAMS, so the table has exactly one authoritative copy.
+ */
+export const CLASSIC_MODEL_PARAMS: GodAIParams = {
+  ...DEFAULT_GOD_AI_PARAMS,
+  ...CLASSIC_OVERRIDES,
 }
 
 /**
