@@ -10,9 +10,9 @@
  * (nearestThreatEta), and the noOpReason breakdown. Whole-run t2a idle
  * rate is reported as the comparison baseline.
  */
-import { STAGES } from '../../src/config/stages'
-import { runSimulation } from '../sim/simulation-runner'
-import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
+import { STAGES } from '../../../src/config/stages'
+import { runSimulation } from '../../sim/simulation-runner'
+import { DEFAULT_FORENSICS_CORPUS } from '../../lib/eval-refs'
 
 const j = JSON.parse(await Bun.file(process.argv[2] ?? DEFAULT_FORENSICS_CORPUS).text())
 const failures = j.perDifficulty.hard.failures as Array<{

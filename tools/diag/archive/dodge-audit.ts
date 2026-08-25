@@ -10,7 +10,7 @@
  * Input: a run-forensics --json sweep (baseline params, same caliber).
  */
 export {}
-import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
+import { DEFAULT_FORENSICS_CORPUS } from '../../lib/eval-refs'
 const j = JSON.parse(await Bun.file(process.argv[2] ?? DEFAULT_FORENSICS_CORPUS).text())
 const failures = j.perDifficulty.hard.failures as Array<{
   stageIdx: number

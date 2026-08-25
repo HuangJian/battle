@@ -11,16 +11,16 @@
  *       --from 5880 --to 6120
  *   bun tools/diag/idle-trace.ts --stage 1 --seed 1 --summary --from 5880 --to 6120
  */
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { CELL, BASE_POS, START_LIVES } from '../../src/constants'
-import { RNG } from '../../src/utils/RNG'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { CELL, BASE_POS, START_LIVES } from '../../../src/constants'
+import { RNG } from '../../../src/utils/RNG'
 
-import { arg } from '../lib/cli'
+import { arg } from '../../lib/cli'
 const IDLE_THRESHOLD_TICKS = 600 // 10s at 60fps
 const CELL_THRESHOLD = CELL // 16px — 1 cell displacement threshold
 

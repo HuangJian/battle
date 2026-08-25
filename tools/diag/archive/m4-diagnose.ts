@@ -10,10 +10,10 @@
  * Read-only: runs DEFAULT params, no behavior change, no Math.random.
  * Output: compact summary + tmp/m4-diag.json (per-run rows).
  */
-import { STAGES } from '../../src/config/stages'
-import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { SimWorkerPool } from '../sim/sim-pool'
-import type { SimTask } from '../sim/sim-worker'
+import { STAGES } from '../../../src/config/stages'
+import { DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { SimWorkerPool } from '../../sim/sim-pool'
+import type { SimTask } from '../../sim/sim-worker'
 
 const seeds = Array.from({ length: 60 }, (_, i) => i + 1)
 const stageIdxs = Array.from({ length: STAGES.length }, (_, i) => i)

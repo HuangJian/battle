@@ -11,9 +11,9 @@
  * base_destroyed runs is replayed with threatLedger to get the per-tick
  * baseHp curve + player position + branch.
  */
-import { STAGES } from '../../src/config/stages'
-import { runSimulation } from '../sim/simulation-runner'
-import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
+import { STAGES } from '../../../src/config/stages'
+import { runSimulation } from '../../sim/simulation-runner'
+import { DEFAULT_FORENSICS_CORPUS } from '../../lib/eval-refs'
 
 const j = JSON.parse(await Bun.file(process.argv[2] ?? DEFAULT_FORENSICS_CORPUS).text())
 const failures = j.perDifficulty.hard.failures as Array<{

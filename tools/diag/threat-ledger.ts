@@ -3,6 +3,10 @@
  * threat-ledger.ts — M0 failure-attribution sweep (plan/
  * God-AI-Hard-Breakthrough-Implementation.md §4: Phase 0 建立失败归因基线).
  *
+ * 「forensics 语料分层抽样 → ledger 重放 → 行为画像」审计框架模式的先例实现见
+ * archive/t2a-audit.ts 与 archive/toolate-audit.ts（2026-08-26 归档的一次性审计，
+ * 复用其模式时 git mv 回 tools/diag/ 并修相对 import）。
+ *
  * Runs a stage×seed sweep with BOTH forensics and the event-driven threat
  * ledger ON, classifies every failed run into the §4.2 families, and prints:
  *

@@ -7,11 +7,11 @@
  *   bun tools/diag/probe-s32.ts --seeds 120
  *   bun tools/diag/probe-s32.ts --seeds 120 --variants "t8MaxInterceptDistCells=16"
  */
-import { STAGES } from '../../src/config/stages'
-import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
-import { runSimulation } from '../sim/simulation-runner'
+import { STAGES } from '../../../src/config/stages'
+import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../../src/ai/GodAIInput'
+import { runSimulation } from '../../sim/simulation-runner'
 
-import { arg } from '../lib/cli'
+import { arg } from '../../lib/cli'
 
 const seedCount = parseInt(arg('seeds', '120')!, 10)
 const variantsSpec = arg('variants', '')!

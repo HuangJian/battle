@@ -5,15 +5,15 @@
  * SUICIDE_RETURN candidate commits (branchCounts.suicideReturn), per stage.
  * Helps answer "does the strategy fire at all" before A/B interpretation.
  */
-import { World } from '../../src/game/World'
-import { Simulation } from '../../src/game/Simulation'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { DIFFICULTIES } from '../../src/config/difficulty'
-import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { STAGES } from '../../src/config/stages'
-import { RNG } from '../../src/utils/RNG'
-import { START_LIVES } from '../../src/constants'
-import { parseStages } from '../lib/cli'
+import { World } from '../../../src/game/World'
+import { Simulation } from '../../../src/game/Simulation'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { DIFFICULTIES } from '../../../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../../../src/config/rules'
+import { STAGES } from '../../../src/config/stages'
+import { RNG } from '../../../src/utils/RNG'
+import { START_LIVES } from '../../../src/constants'
+import { parseStages } from '../../lib/cli'
 
 const difficulty = process.argv[2] ?? 'classic'
 const seedCount = parseInt(process.argv[3] ?? '60', 10)

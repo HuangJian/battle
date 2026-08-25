@@ -39,11 +39,11 @@
  *       --defend-dist 8 --json out.json
  *   bun tools/diag/ab-suicide-v2.ts --seeds 20 --stages 3,24,34 --json out.json
  */
-import { STAGES } from '../../src/config/stages'
-import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { SimWorkerPool } from '../sim/sim-pool'
-import type { SimTask, SimTaskResult } from '../sim/sim-worker'
-import { arg, parseSeeds, parseStages } from '../lib/cli'
+import { STAGES } from '../../../src/config/stages'
+import { DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { SimWorkerPool } from '../../sim/sim-pool'
+import type { SimTask, SimTaskResult } from '../../sim/sim-worker'
+import { arg, parseSeeds, parseStages } from '../../lib/cli'
 
 const difficulties = (arg('difficulty') ?? 'hard,chaos')
   .split(',')

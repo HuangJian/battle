@@ -3,9 +3,9 @@
  * diagnose-s32.ts — Log failure details for S32 Diamond.
  * Reports player distance to base, killer kind, and tick for each failure.
  */
-import { STAGES } from '../../src/config/stages'
-import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
-import { runSimulation } from '../sim/simulation-runner'
+import { STAGES } from '../../../src/config/stages'
+import { DEFAULT_GOD_AI_PARAMS } from '../../../src/ai/GodAIInput'
+import { runSimulation } from '../../sim/simulation-runner'
 
 const seeds = 120
 const stage = STAGES[32]
