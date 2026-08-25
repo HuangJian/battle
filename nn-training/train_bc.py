@@ -103,10 +103,12 @@ def _append_weights_md(out_dir: str, versioned_path: str, trained_at: str,
     Creates the file with a header (naming convention + backup strategy) on first run.
     """
     md_path = os.path.join(out_dir, "WEIGHTS.md")
+    vl = history["value_loss"][-1]
+    vl_s = "n/a" if (isinstance(vl, float) and math.isnan(vl)) else f"{vl}"
     row = (
         f"| {trained_at} | `{os.path.basename(versioned_path)}` | {args.epochs} "
         f"| {sizes['train']}/{sizes['val']} | {best_val:.4f} "
-        f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{history['value_loss'][-1]} "
+        f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{vl_s} "
         f"| {_git_sha()} | {args.notes} |\n"
     )
     if not os.path.exists(md_path):
@@ -137,6 +139,18 @@ def _majority_baseline(dl) -> dict:
         maj = c.most_common(1)[0][1]
         out[name] = -math.log(maj / total)  # CE of constant majority prediction
     return out
+
+
+def _sanitize_json(o):
+    """递归把 float NaN → None（json.dump 默认写出非标准 `NaN` 字面量，
+    TS JSON.parse 会直接抛错——weights 文件里不能带 NaN）。"""
+    if isinstance(o, float) and math.isnan(o):
+        return None
+    if isinstance(o, dict):
+        return {k: _sanitize_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_sanitize_json(v) for v in o]
+    return o
 
 
 def train(args) -> dict:
@@ -243,6 +257,7 @@ def train(args) -> dict:
         "best_val_loss": round(float(best_val), 4),
         "history": history,
     }
+    meta = _sanitize_json(meta)
     out_dir = os.path.dirname(os.path.abspath(args.out))
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     versioned = os.path.join(out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json")
