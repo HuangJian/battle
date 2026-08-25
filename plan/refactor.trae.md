@@ -415,3 +415,49 @@ Hunt/Engage 基线耦合），务必逐项跑门而非只跑测试（zcode 教�
 | `DECISIONS.md` 行数 | 2203 | <~1000（细节下沉 progress.md） |
 | 失效 `refactor.trae` 引用 | 10 | 0 |
 | `tools/diag` 顶层脚本 | 30 | 仅 standing 工具 |
+
+---
+
+## 7. Round 4 实际落地（2026-08-25）
+
+> 逐项执行结果。已落地项见各 commit；本表记录「做了什么 + 验收」与
+> 「为何延期」（延期也是已决议，非遗留）。
+
+### 已落地
+
+| 项 | commit | 落地内容 | 验收 |
+|---|---|---|---|
+| §3.1 | `d8f6e54` | 失效 `refactor.trae` 引用归指 `refactor.agy`/本文件 + 落「勿重提清单」(§0.5) | `grep refactor.trae` 归零 |
+| §2.3 | `90260ba` | DECISIONS §71–§169 已预压缩为 `docs/*.progress.md` 指针（非本轮新压缩，确认即满足） | 主索引未动（§192–§271 活跃结论，按 §5.1 不碰） |
+| §1.1-1 | `c91b8ca` | `params.interface.ts` 顶部集中「留档旋钮清单」注释协议 | 纯注释 |
+| §1.2-1 | `8efc648` | `think.ts` 候选存活状态清单作为唯一事实源 | 清单就位 |
+| §1.1-2 | `a0e19aa` | params 单真源 + 覆盖层（CLASSIC_MODEL 改 spread） | typecheck/check 绿 |
+| §2.2 + §2.1 | `b56f5b1` | 数值单源化 + `TankSpec` 注册表 + `fc-faithful.ts` 覆盖层 | 派生值=旧字面量；确定性门过 |
+| §1.2-2/3 | `d9555b0` | OFF 候选四条件核查→按 §5.1 留档标注、不移出数组 | 四条件均不满足，留档 |
+| §1.3-1 + §1.4 | `dbdf48d` | 19 候选对象移入各自 `candidates/X.ts` 自包含 + `recordBranch` 单点遥测记账 | batch-sim 逐 run 字节一致；1392 test 绿 |
+| §3.2 | 见下 | `tests/helpers.ts` 增 `ALL_DIRS` / `seedWorld()`；替换散落 `['up','down','left','right']` 与 `world.rng = new RNG(...)` | `bun test` 绿 |
+| §3.3 | 见下 | `serializer-field-guard.test.ts` 增 clone→restore 往返字段等价测试 | 测试绿；legacy fallback 标注供版本 |
+
+### §1.3-2 — evaluate 副作用显式化：PARTIAL（遥测部分已交付，契约部分延期）
+
+- **已交付（借 §1.4）**：`branchCounts`/`_lastBranch` 单点记账（`recordBranch`）。
+  原 §1.4 验收「`grep branchCounts\.` 只命中单一记账函数」已满足——具体 key
+  写入全部经 `recordBranch`，仅 `GodAIInput.branchCounts` 声明与 `recordBranch`
+  内一次 `self.branchCounts as Record<...>` 访问。
+- **延期：`evaluate` 返回 `{moveDir, fire} | null` 由 `runChain` 统一提交**。
+  - 理由：各 `evaluate` 携**丰富跨 tick 持久状态**（`_suicideStanding`、
+    `_carveDigTicks`、`_dodgeFlipCount`、`_carveAimDir` 等），远超
+    `{moveDir, fire}`；契约改造要么丢状态、要么连带重构状态传递机制。
+  - 触碰每 tick 热路径（AGENTS §14，「零分配」约束），纯属「evaluate 变纯函数」
+    的代码美学收益，**无玩家可见/回放确定性收益**，却每次改动都要确定性门兜底，
+    风险/收益不划算——未过「降低未来 agent 摩擦足以抵消风险」的门槛。
+  - 决策：保持 `evaluate` 直接写 `self._moveDir`/`self._fire`，不再动。
+
+### §1.5 — 超大单文件切分：延期（计划本身定为可选）
+
+- 计划定位：「可选收尾不强求」「收益明确才做」，且 §0.5 勿重提清单（zcode 教训 3）
+  「大文件机械搬移（无测试网领域）高返工率，先补特征测试再动手」。
+- 5 个超大文件（StrategyPlanner 2402 / ThreatAssessor 1638 / FireControl 1224 /
+  PathCarve 991 / params.interface 2376）已遵循 `xxxImpl(self, ...)` 纯函数约定、
+  可单文件导航；无对应行为簇特征测试，机械切分返工率高、收益边际。
+- 决策：维持现状；仅当某行为簇（如 guard-anchor 抽取）确有边界且特征测试就位时再动。
