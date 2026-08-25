@@ -43,7 +43,7 @@ import { writeReplayFile } from './replay-writer'
 
 import { arg } from '../lib/cli'
 function parseSeedSpec(spec: string): number[] {
-  // DIALECT NOTE (renamed from `parseSeeds`, refactor.zcode.md §2.3): this is
+  // DIALECT NOTE (renamed from `parseSeeds`, refactor.trae.md §2.3): this is
   // the SINGLE-SEED dialect — a bare count ("60") means the seed 60, NOT
   // 1..60. tools/lib/cli's parseSeeds means the opposite; the two coexist on
   // purpose (§213: silent-dialect drift, don't unify).

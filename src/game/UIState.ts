@@ -34,7 +34,7 @@ export function createUIState(): UIState {
 }
 
 // ── Menu row order — single source for the row ↔ menuCursor contract ──────
-// (遗留 #6 / plan/refactor.zcode.md §2.5 follow-up: this mapping used to be
+// (遗留 #6 / plan/refactor.trae.md §2.5 follow-up: this mapping used to be
 // encoded twice as `off + N` arithmetic in GameMenu.ts and once more in
 // MenuScreen.ts.) RESUME sits at index 0 only when a resumable manual
 // snapshot exists; without it the row is hidden and every index shifts down

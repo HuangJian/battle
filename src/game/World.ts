@@ -43,7 +43,7 @@ import {
   RESPAWN_SHIELD_MS,
 } from '../constants'
 
-// Deliberate hidden-state exemption (refactor.zcode.md §4.3): the module-level
+// Deliberate hidden-state exemption (refactor.trae.md §4.3): the module-level
 // id counter survives World resets so restored snapshots never reissue ids that
 // are still live in replay/undo history. Rationale recorded at types.ts
 // (WorldSnapshot id field doc) — this does NOT contradict the "no hidden state"

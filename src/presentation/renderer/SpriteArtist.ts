@@ -24,7 +24,7 @@ export type { AuraConfig } from './SpriteArtistCore'
  * {@link SpriteArtistCore}'s constructor (TerrainSpriteSlice /
  * TankSpriteSlice / EffectSpriteSlice). Core's draw* methods remain as the
  * public facade — slices route cross-slice draws through them — with bodies
- * living in the slices (plan/refactor.zcode.md §2.1). Pure relocation —
+ * living in the slices (plan/refactor.trae.md §2.1). Pure relocation —
  * runtime behavior identical.
  */
 export class SpriteArtist extends SpriteArtistCore {}

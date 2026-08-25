@@ -1,6 +1,6 @@
 /**
  * report-html.ts — the HTML report generator for sweep-winrate.ts
- * (refactor.zcode.md §2.7). Pure string-building: no argv access, no I/O,
+ * (refactor.trae.md §2.7). Pure string-building: no argv access, no I/O,
  * no scheduling — sweep-winrate owns the run loop and writes the file.
  * Bodies moved verbatim from sweep-winrate.ts.
  */

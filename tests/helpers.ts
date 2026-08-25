@@ -78,7 +78,7 @@ export function positionPlayer(world: World, col: number, row: number, dir?: Dir
   if (dir) p.dir = dir
 }
 
-// ── Composite fixtures (plan/refactor.zcode.md §1.1) ────────────────────────
+// ── Composite fixtures (plan/refactor.trae.md §1.1) ────────────────────────
 // Incremental adoption: new tests should reach for these instead of copying
  // setup boilerplate; existing local copies are NOT rewritten.
 //
@@ -104,7 +104,7 @@ export function positionPlayer(world: World, col: number, row: number, dir?: Dir
 //   battlement-* / chokepoint / close-pickup / counter-fire / …): **PARAMETER
 //   ORDER TRAP** — local 3rd arg is `dir` ('down' default), shared
 //   helpers.placeEnemy's 3rd arg is `kind`. NOT byte-identical → not adopted
-//   (refactor.zcode.md §2.2 optional increment rejected: a blind swap would
+//   (refactor.trae.md §2.2 optional increment rejected: a blind swap would
 //   silently turn `placeEnemy(w,c,r,'up')` into kind='up'). Check the local
 //   signature before adding a 4-arg call to any of these files.
 // - `positionPlayer` / `placePlayer` (~18 local copies, three dialects):
@@ -140,7 +140,7 @@ export interface GodGame {
  * World + GodAIInput + Simulation wired and ready: startGame on a real stage,
  * arena cleared to empty + base eagle at BASE_POS, base caches rebuilt,
  * state='playing', input.hasBase synced, input.reset() applied.
- * Adoption status (refactor.zcode.md §2.2): ~24 local `setupWorld()` copies
+ * Adoption status (refactor.trae.md §2.2): ~24 local `setupWorld()` copies
  * remain across tests/ (mostly dialect carriers — see 口径差异表 above);
  * 3 files use this shared version. Migration is opt-in, not forced (§260
  * lesson: byte-level fixture semantics beat DRY when tests pin geometry).

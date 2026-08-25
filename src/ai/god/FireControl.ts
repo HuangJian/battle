@@ -188,7 +188,7 @@ export function scanAheadImpl(
   // Fast dir → index (avoid DIR_VECTORS string-keyed dict lookup).
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
 
-  // §3.2 (plan/refactor.zcode.md): an explicit `out` buffer bypasses the
+  // §3.2 (plan/refactor.trae.md): an explicit `out` buffer bypasses the
   // per-tick memo entirely — the caller owns the destination, so this scan
   // can never clobber a memo slot (nor invalidate/refresh `_scanCache*`).
   // This is what removed the "aimSurvivesTurnImpl MUST run first" ordering

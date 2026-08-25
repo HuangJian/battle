@@ -1,7 +1,7 @@
 import type { EmitterConfig } from '../types'
 
 /**
- * Particle emitter 手感参数 (feel configs) — plan/refactor.zcode.md §2.5.
+ * Particle emitter 手感参数 (feel configs) — plan/refactor.trae.md §2.5.
  *
  * "Data over code" (AGENTS §2.4): these five factories are pure parameter
  * packs for the particle system. They used to be private methods inside

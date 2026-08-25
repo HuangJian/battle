@@ -1,5 +1,5 @@
 /**
- * SpriteKeyMaps — registry-derived key maps (plan/refactor.zcode.md §2.2).
+ * SpriteKeyMaps — registry-derived key maps (plan/refactor.trae.md §2.2).
  *
  * Single source of truth is SPRITE_URLS (src/assets/sprites). These maps are
  * DERIVED from it via prefix filtering, so registering a new SVG propagates

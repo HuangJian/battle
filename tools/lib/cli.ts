@@ -1,5 +1,5 @@
 /**
- * cli.ts — the one CLI argument layer for tools/ (plan/refactor.zcode.md §1.2).
+ * cli.ts — the one CLI argument layer for tools/ (plan/refactor.trae.md §1.2).
  *
  * Before this module existed, ~34 tools each hand-rolled an `arg()` helper in
  * three mutually incompatible signatures, `parseSeeds()` was copied ≥6× with
@@ -83,7 +83,7 @@ export function parseStages(spec: string | undefined): number[] {
 
 /**
  * Collect every `--set <key>=<value>` occurrence into a numeric override
- * table (refactor.zcode.md §2.4 — replaces the per-tool argv scan loops).
+ * table (refactor.trae.md §2.4 — replaces the per-tool argv scan loops).
  *
  * `allowed` is the key-validity oracle (pass DEFAULT_GOD_AI_PARAMS); a key
  * outside it, a missing `=`, or a non-numeric value THROWS with the flag
@@ -110,7 +110,7 @@ export function parseParamSets(allowed: object): Record<string, number> {
 }
 
 /**
- * SINGLE-SEED seed-spec dialect (refactor.zcode.md §2.3/§2.4): a bare count
+ * SINGLE-SEED seed-spec dialect (refactor.trae.md §2.3/§2.4): a bare count
  * ("60") means the SINGLE seed 60, not 1..60 — the exact opposite of
  * {@link parseSeeds}. Both dialects are load-bearing in historical tools;
  * this is the canonical home for the single-seed flavor (moved here from

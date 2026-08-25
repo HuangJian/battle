@@ -1,6 +1,6 @@
 # Archived replay one-off scripts
 
-Moved out of `tools/replay/` by plan/refactor.zcode.md §2.5 (2026-08-24),
+Moved out of `tools/replay/` by plan/refactor.trae.md §2.5 (2026-08-24),
 mirroring `tools/diag/archive/` (DECISIONS §259 methodology). Each was
 verified to have **zero references** — no imports from src/tests/tools, no
 mentions in AGENTS.md / DECISIONS.md / docs / plan / README.

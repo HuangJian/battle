@@ -1,5 +1,5 @@
 // params.interface.ts — the GodAIParams type + its 218-field documentation
-// (plan/refactor.zcode.md §3.1). Split out of the former monolithic
+// (plan/refactor.trae.md §3.1). Split out of the former monolithic
 // params.ts (3,635 lines = interface + 4 param tables + stage-adapt logic);
 // pure relocation, zero semantic change.
 import type { ActionId } from './DecisionCore'

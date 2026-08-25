@@ -225,7 +225,7 @@ export function summarize(results: BatchResult[]): BatchSummary {
 // ============================================================
 
 // Re-exported from lib/cli — the canonical home of the SINGLE-SEED dialect
-// (bare "60" = seed 60; refactor.zcode.md §2.3/§2.4).
+// (bare "60" = seed 60; refactor.trae.md §2.3/§2.4).
 export { parseSeedSpec } from '../lib/cli'
 
 // ============================================================

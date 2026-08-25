@@ -97,7 +97,7 @@ export type SpriteKey = keyof typeof SPRITE_URLS
  * All registered sprite keys with the given prefix (`'item.'`, `'tank.'`, …).
  * Single-source derivation for the key maps / pre-rasterization lists in
  * SpriteCache and SpriteArtist — adding an SVG here automatically propagates
- * to every consumer (plan/refactor.zcode.md §2.2).
+ * to every consumer (plan/refactor.trae.md §2.2).
  */
 export function spriteKeys(prefix: string): string[] {
   return Object.keys(SPRITE_URLS).filter((k) => k.startsWith(prefix))

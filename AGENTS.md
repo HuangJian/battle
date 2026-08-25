@@ -44,7 +44,7 @@ Input → Simulation → World → Renderer / Audio / UI / Stats
 - **Only `Simulation` may modify the `World`.** (`src/game/Simulation.ts`)
 - Everything else — `Input`, `PresentationLayer`, `AudioManager`, `UIManager`, `RecoveryController` — **observes** the World read-only.
 - The `RecoveryController` (with `WorldSerializer`) is the single exception: it restores the World from a snapshot, but it does so by overwriting state atomically, never by participating in gameplay rules (see plan/Snapshot-Management-Framework.md).
-- **Explicit exemptions (gray zone, documented — refactor.zcode.md §4.1/§4.3):** controller-driven state TRANSITIONS (`world.state = …`) and menu/UI-state writes (`world.ui.*`) are not entity mutations and are allowed from Game controllers; `genId()`'s module-level `nextId` counter in World.ts is a deliberate hidden-state exemption (cross-snapshot id uniqueness — see types.ts). Gameplay ENTITY writes outside Simulation must route through Simulation entry points (e.g. `sim.applyTakeover()`, `sim.refundRewind()`), never direct.
+- **Explicit exemptions (gray zone, documented — refactor.trae.md §4.1/§4.3):** controller-driven state TRANSITIONS (`world.state = …`) and menu/UI-state writes (`world.ui.*`) are not entity mutations and are allowed from Game controllers; `genId()`'s module-level `nextId` counter in World.ts is a deliberate hidden-state exemption (cross-snapshot id uniqueness — see types.ts). Gameplay ENTITY writes outside Simulation must route through Simulation entry points (e.g. `sim.applyTakeover()`, `sim.refundRewind()`), never direct.
 
 ### 2.2 No Hidden State
 

@@ -73,11 +73,11 @@ import type { ChokepointPlan } from './god/Chokepoint'
  *
  * Tuning plan: plan/God-AI-Tuning.md
  *
- * Hub delegation convention (refactor.zcode.md §3.14): multi-caller public
+ * Hub delegation convention (refactor.trae.md §3.14): multi-caller public
  * surface stays as hub wrappers; single-caller / hot-path methods go DIRECT
  * to the god-layer Impl (callers import the Impl themselves).
  *
- * Cell 坐标习惯速查 (refactor.zcode.md §3.12; details at each site):
+ * Cell 坐标习惯速查 (refactor.trae.md §3.12; details at each site):
  *   - ThreatBudget.tankCenterCell  → floor-center (corner cell + 1 on both axes)
  *   - Navigator                    → Math.round(x/CELL) on the top-left corner
  *   - CoveragePlanner              → floor-corner space
@@ -504,7 +504,7 @@ export class GodAIInput implements InputLike {
 
   /**
    * Dedicated reuse buffer for `aimSurvivesTurnImpl`'s post-turn-origin scan
-   * (§3.2, plan/refactor.zcode.md). It deliberately does NOT participate in
+   * (§3.2, plan/refactor.trae.md). It deliberately does NOT participate in
    * the `_scanResults[dirIdx]` per-tick memo: that guard scans from a
    * DIFFERENT origin (the grid-snapped post-turn position) than every other
    * consumer, and sharing the memo slots is what created the "guard must be
@@ -858,7 +858,7 @@ export class GodAIInput implements InputLike {
   }
 
   // ================================================================
-  // Cache-invalidation registry (§3.3, plan/refactor.zcode.md)
+  // Cache-invalidation registry (§3.3, plan/refactor.trae.md)
   // ================================================================
   //
   // Cross-tick caches used to be invalidated by hand-listing their fields at

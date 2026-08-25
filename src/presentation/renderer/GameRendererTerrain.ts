@@ -257,7 +257,7 @@ export class TerrainRenderSlice {
    *
    * Single source for the twin switches that used to live in
    * {@link redrawTerrainCell} and {@link rebuildTerrainCache} and had to be
-   * kept in sync by hand (plan/refactor.zcode.md §2.3). Base cells repaint
+   * kept in sync by hand (plan/refactor.trae.md §2.3). Base cells repaint
    * the WHOLE 2×2 crystal from its block top-left — see the note inside.
    */
   private paintTerrainCellArt(type: TerrainType, c: number, r: number, tm: TileMap): void {

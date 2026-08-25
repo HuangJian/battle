@@ -94,7 +94,7 @@ export class Simulation {
   }
 
   /**
-   * One-Author routing (refactor.zcode.md §4.1): takeover flows must flip the
+   * One-Author routing (refactor.trae.md §4.1): takeover flows must flip the
    * gameplay flag `coop` through the Simulation, not by direct World writes
    * from Game controllers. Applied immediately (the callers are mid-handoff,
    * not inside a tick) — same semantics as the previous direct writes.

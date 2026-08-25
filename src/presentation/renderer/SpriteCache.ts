@@ -76,7 +76,7 @@ export const DIR_TO_INDEX: Record<string, number> = {
  * Rotation (radians) for a facing direction — the authoritative direction→
  * rotation mapping. Single source for both pre-rasterization (ROTATIONS
  * above) and every per-frame SVG fallback in SpriteArtistTanks, which used
- * to re-derive it as a hand-copied ternary (plan/refactor.zcode.md §2.3).
+ * to re-derive it as a hand-copied ternary (plan/refactor.trae.md §2.3).
  */
 export function dirRotation(dir: string): number {
   return ROTATIONS[DIR_TO_INDEX[dir] ?? 0]

@@ -1,7 +1,7 @@
 /**
  * eval-suite.ts — v7 God AI evaluation harness (v7 scoring band; the header
  * previously said "v6" while defaulting to V7_SCORE_CONFIG — corrected
- * 2026-08-24, refactor.zcode.md §2.6).
+ * 2026-08-24, refactor.trae.md §2.6).
  *
  * Design: plan/God-AI-Evaluation-Redesign.md
  *

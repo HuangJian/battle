@@ -172,7 +172,7 @@ export interface ParseError {
  * Parse a .replay file string back into a Replay object.
  * Validates format, version, and structure. Returns error on any failure.
  *
- * §4.2 (refactor.zcode.md): split into four named stages — envelope
+ * §4.2 (refactor.trae.md): split into four named stages — envelope
  * validation → structure validation → frame decode → object build +
  * metadata reconciliation. The old blind `env as unknown as FileEnvelope`
  * escape is replaced by field-by-field guards with one guarded cast.

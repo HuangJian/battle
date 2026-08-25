@@ -73,7 +73,7 @@ function laneAligned(
 }
 
 /**
- * Shared bullet-lane predicate (refactor.zcode.md §3.1, replaces 11 inline
+ * Shared bullet-lane predicate (refactor.trae.md §3.1, replaces 11 inline
  * `vertical/aligned/approaching` chains): a bullet is a lane threat to the
  * point (tx,ty) when it travels on that row/column within `thresholdPx` of
  * the axis AND its direction closes on the point.

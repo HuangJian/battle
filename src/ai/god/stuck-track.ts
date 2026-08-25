@@ -1,5 +1,5 @@
 /**
- * stuck-track.ts — the one zone-stuck tracker (refactor.zcode.md §3.4).
+ * stuck-track.ts — the one zone-stuck tracker (refactor.trae.md §3.4).
  *
  * Replaces the four hand-copied "±1 zone + killCount baseline + timeout +
  * suppression window" quartets that lived as scalar field groups on

@@ -56,7 +56,7 @@ export function drawWaterTile(
  * (`sin(frame * POWERUP_GLOW_FREQ)`) and the pre-rendered glow buckets
  * (`auraBucket(frame, POWERUP_GLOW_FREQ)`). Lives here so both SpriteCache
  * and the effects slice import ONE constant instead of a literal that had to
- * be kept in sync by hand (plan/refactor.zcode.md §2.3).
+ * be kept in sync by hand (plan/refactor.trae.md §2.3).
  */
 export const POWERUP_GLOW_FREQ = 0.11
 
@@ -65,7 +65,7 @@ export const POWERUP_GLOW_FREQ = 0.11
  * for a CELL-sized power-up at pulse `p` ∈ [0, 1].
  *
  * Single source for BOTH consumers that used to hand-copy this math
- * (plan/refactor.zcode.md §2.3):
+ * (plan/refactor.trae.md §2.3):
  *  - SpriteCache.rebuildPowerUpGlow — bakes it into 16 pulse-bucket bitmaps;
  *  - EffectSpriteSlice.drawPowerUpGlowDirect — per-frame fallback when no
  *    cache bitmap exists.

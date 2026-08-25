@@ -9,7 +9,7 @@ part of the standing toolkit (run-forensics / per-seed-diff / decision-probe /
 ab-* / base-loss-*). Do not resurrect them without re-verifying they compile
 against current World/Simulation APIs.
 
-## Second batch — plan/refactor.zcode.md §2.5 (2026-08-24)
+## Second batch — plan/refactor.trae.md §2.5 (2026-08-24)
 
 Added from three directories after a fresh zero-reference sweep (src/tests/
 tools imports + package.json + AGENTS/DECISIONS/docs/plan/README; session

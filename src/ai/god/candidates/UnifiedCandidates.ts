@@ -1,5 +1,5 @@
 // candidates/UnifiedCandidates.ts — the unifiedCandidates candidate body.
-// Extracted verbatim from think.ts (plan/refactor.zcode.md §3.4):
+// Extracted verbatim from think.ts (plan/refactor.trae.md §3.4):
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { BASE_POS } from '../../../constants'

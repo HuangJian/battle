@@ -1,6 +1,6 @@
 /**
  * eval-refs.ts — the single loader for tools/eval/eval-refs.json
- * (refactor.zcode.md §2.6: was duplicated in eval-suite.ts and
+ * (refactor.trae.md §2.6: was duplicated in eval-suite.ts and
  * optimize-godai.ts with drift-prone path math).
  *
  * Pure module: reads one JSON file, no RNG, no params mutation.

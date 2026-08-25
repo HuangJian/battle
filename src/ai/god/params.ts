@@ -1,4 +1,4 @@
-// params.ts — re-export facade (plan/refactor.zcode.md §3.1).
+// params.ts — re-export facade (plan/refactor.trae.md §3.1).
 //
 // The former 3,635-line monolith was three unrelated artifacts fused
 // together; the CONTENT now lives in three sibling files and this module

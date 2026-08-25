@@ -1,5 +1,5 @@
 // candidates/shared.ts — module-level helpers shared by the candidate files
-// (plan/refactor.zcode.md §3.4). Moved verbatim from think.ts during the
+// (plan/refactor.trae.md §3.4). Moved verbatim from think.ts during the
 // candidate extraction; pure relocation, zero semantic change. This module
 // breaks the import cycle: candidates import helpers HERE, never from
 // think.ts.

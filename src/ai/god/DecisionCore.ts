@@ -103,7 +103,7 @@ export type ActionId =
   | 'baseConnectClear'
 
 /**
- * M1 default weights — THE authoritative weight-order record (refactor.zcode.md
+ * M1 default weights — THE authoritative weight-order record (refactor.trae.md
  * §3.12): candidate headers and think.ts keep only local context plus pointers;
  * consistency between this table and the CANDIDATES chain order is locked by
  * tests/decision-core.test.ts.

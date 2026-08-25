@@ -12,6 +12,26 @@
 
 > **本文为决策索引**：§1–§10 为基础架构决策（全文保留）；God AI / 性能 / 渲染调参条目已按主题将全文迁入 `docs/*.progress.md`，本文件仅保留编号、标题、状态与指针（`→` 链接）。
 
+---
+
+## 勿重提清单 (Do-Not-Re-Investigate)
+
+> 以下结论已在重构审计中反复确认，未来 agent 不要再重查或推翻。完整依据见 `plan/refactor.trae.md` §0.5。
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| `Tank` 实体字段拆分 | 不拆。42 字段逐字段 grep 读写方，零死字段；spread 克隆零漂移。 | refactor.trae.md §0.5 / zcode §257 |
+| `WorldSerializer` 改实体级 spread 为字段级手写 | 维持现状（实体已走 spread 克隆，护栏只需守 World 顶层且已完备）。 | refactor.trae.md §0.5 / zcode §257 |
+| 主题 `skipSvg` 分支删除 | 保留。`skipSvg = (themeKey !== 'modern')` 是活代码。 | agy §3.1 / §252 |
+| 测试子目录化 | 不做（churn 高、零玩家价值）。仅廉价改名已做。 | agy §3.5 / zcode §269 |
+| `byId` 事件字段删除 | 保留。`simulation-runner` 取证工具在消费它。 | zcode P1 |
+| `applyPowerUp` switch → 派发表 | 维持。switch 本身就是派发表，形态合理。 | zcode 复核 |
+| 大文件机械搬移（无测试网领域） | 先补特征测试再动手（高返工率）。 | zcode 教训 3 |
+
+> **重构计划文件保留约定**：重构计划文件（如 `plan/refactor.agy.md` / `plan/refactor.trae.md`）除非其内容已并入本文件，否则保留在仓库内，不得删除；其否决结论以本文件 § 编号或上方「勿重提清单」作持久落点。（`refactor.zcode.md` 已删、仅留历史于本文件与 refactor.trae.md 顶部，未来引用一律改指 `refactor.trae.md`。）
+
+---
+
 ## 1. Sprite Rendering: SVG → Pre-Rasterized Cache
 
 **Decision:** All sprites are hand-authored SVG (96×96 viewBox), registered in `SPRITE_URLS`,
@@ -1861,7 +1881,7 @@ AI 数据契约的唯一归所）；(b) config 层数据契约 `DifficultyConfig
 **Implications:** plan/refactor.agy.md §2.4 关闭，全计划条目清偿完毕。新增 UI 面 =
 对应切片内加成员；UIManager 不再直接持有 [data-hud]/菜单 DOM 引用。
 
-## 262. 废除 God AI 禁区（AGENTS §5.1 幽灵规则消歧） (STATUS: 已实施, plan/refactor.zcode.md §0.1)
+## 262. 废除 God AI 禁区（AGENTS §5.1 幽灵规则消歧） (STATUS: 已实施, plan/refactor.trae.md §0.1)
 
 **Decision:** 废除 `src/ai/god/think.ts` / `ActionCandidates.ts` 的"禁区"保护
 （§239 / §242 记载的 "AGENTS §5.1 God AI 禁区" 豁免条款全部失效）。两文件回归
@@ -1877,15 +1897,15 @@ re-export 与 `utils/pathfind.ts` shim（唯一消费方 think.ts 已改为直�
 - 原保护目标（防止无护栏手改破坏 God-AI 调参成果）已由测试结构达成：godai-*
   行为 gate 家族 + `bun test --parallel --timeout=50000` 全量门 + 批模拟
   determinism byte-identical 签名流程。
-- 人工批准（2026-08-23）：在 plan/refactor.zcode.md §0.1 的"废除/重述"二选一中
+- 人工批准（2026-08-23）：在 plan/refactor.trae.md §0.1 的"废除/重述"二选一中
   用户选择废除。
 
-**Implications:** plan/refactor.zcode.md Phase 3（params 拆分、候选提取等）放行。
+**Implications:** plan/refactor.trae.md Phase 3（params 拆分、候选提取等）放行。
 行为调参本身仍走 §6.3b Phase III 评估框架，禁区废除只解除"不许编辑"的工程约束。
 
-## 263. 第二轮重构落地汇总（plan/refactor.zcode.md B1–B3） (STATUS: 已实施, 2026-08-23)
+## 263. 第二轮重构落地汇总（plan/refactor.trae.md B1–B3） (STATUS: 已实施, 2026-08-23)
 
-**Decision:** 按 plan/refactor.zcode.md 完成 Phase 1–3 全部条目，每小项独立
+**Decision:** 按 plan/refactor.trae.md 完成 Phase 1–3 全部条目，每小项独立
 commit（§编号即 commit 粒度），全部通过 `bun run check` + 批模拟 determinism
 签名 byte-identical 门（8 组合 × 全 tick 签名，`tools/probe-det-baseline.sh`）：
 
@@ -2051,7 +2071,7 @@ ALLOWLIST 残留改名死键 → 红），另锁两注册表在 endFrame/reset �
 一行清场，或 ALLOWLIST 加一条带理由的豁免；两者都会被此测试强制面对。
 解析器以 sanity floor 自保（字段数 <160 即红），格式化漂移不会静默放水。
 
-## 268. 第三轮重构 Phase 1 落地汇总（plan/refactor.zcode.md §1） (STATUS: 已实施, 2026-08-24)
+## 268. 第三轮重构 Phase 1 落地汇总（plan/refactor.trae.md §1） (STATUS: 已实施, 2026-08-24)
 
 **Decision:** §1.1–§1.4 全部落地，共 6 个 commit（41094b7 docs / 84a9b7c 死指针 /
 bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与偏离：
@@ -2081,7 +2101,7 @@ bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与�
 注释指针→0；死导出/死旋钮/死 i18n 键清零。`byId` 保留后 types.ts 注释已标注消费方，
 未来再审计不会再误判。
 
-## 269. 第三轮重构 Phase 2 落地汇总（plan/refactor.zcode.md §2） (STATUS: 已实施, 2026-08-24)
+## 269. 第三轮重构 Phase 2 落地汇总（plan/refactor.trae.md §2） (STATUS: 已实施, 2026-08-24)
 
 **Decision:** §2.1–§2.8 全部落地，8 个 commit。条目清单与偏离：
 
@@ -2117,7 +2137,7 @@ bb96340+2a18531+d116cb0+f5e4ed4 死代码 / ccd85ef 吞错）。条目清单与�
 god-AI 测试命名分裂 4→0；零引用工具 8 个 ~1500 行归档；lib/cli 成为唯一 argv 层
 （perf/* 等号语法除外，已登记）。
 
-## 270. 第三轮重构 Phase 3 落地汇总（plan/refactor.zcode.md §3） (STATUS: 已实施, 2026-08-24)
+## 270. 第三轮重构 Phase 3 落地汇总（plan/refactor.trae.md §3） (STATUS: 已实施, 2026-08-24)
 
 **Decision:** §3.1–3.9、§3.11、§3.12、§3.14 全部落地；**§3.13 整批关闭**。每项独立
 commit，全部通过 determinism 门（tools/probe-det-baseline.sh，21 组合 ×109,516
@@ -2171,7 +2191,7 @@ commit，全部通过 determinism 门（tools/probe-det-baseline.sh，21 组合 
 hub 包装 -11。determinism 语料 v2 在本轮三次拦截行为漂移（1 次 3.1 极性、1 次
 3.4 耦合、若干次拼接损坏由 tsc 拦截），验证 §266 门的价值。
 
-## 271. 第三轮重构 Phase 4 落地汇总（plan/refactor.zcode.md §4） (STATUS: 已实施, 2026-08-24)
+## 271. 第三轮重构 Phase 4 落地汇总（plan/refactor.trae.md §4） (STATUS: 已实施, 2026-08-24)
 
 **Decision:** §4.1/§4.2/§4.3 落地；**§4.4 按三道门判断后不做**。
 
@@ -2200,4 +2220,4 @@ hub 包装 -11。determinism 语料 v2 在本轮三次拦截行为漂移（1 次
 
 **Implications:** 度量基线收口——Simulation 外 gameplay 直写 0；replay/file.ts
 解析器可导航性提升且类型逃逸清零；genId 豁免从口头惯例变为文档注记。
-plan/refactor.zcode.md 全部条目处置完毕（执行/否决/关闭各有记录）。
+plan/refactor.trae.md 全部条目处置完毕（执行/否决/关闭各有记录）。
