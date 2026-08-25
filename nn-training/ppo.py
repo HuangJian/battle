@@ -38,7 +38,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM, ITEM_DIM
+from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
 from student_model import PPOStudent
 from weights_io import load_weights_json, save_weights_json
 
@@ -57,7 +57,7 @@ VF_COEF = 1.0
 ENT_COEF = 0.01
 LR = 3e-4
 MAX_GRAD_NORM = 1.0
-MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
+MASK_DIM = MOVE_DIM + FIRE_DIM  # 7 (v2: item head removed)
 
 # Observability cadences (pure logging; never touches RNG or numerics).
 LOAD_LOG_EVERY = 128   # shard-loading progress lines
@@ -99,10 +99,8 @@ def load_shard(dirpath: str) -> Dict[str, np.ndarray]:
         "scalars": npy("scalars.npy").astype(np.float32, copy=False),
         "a_move": npy("a_move.npy").astype(np.int64, copy=False),
         "a_fire": npy("a_fire.npy").astype(np.int64, copy=False),
-        "a_item": npy("a_item.npy").astype(np.int64, copy=False),
         "lp_move": npy("lp_move.npy").astype(np.float32, copy=False),
         "lp_fire": npy("lp_fire.npy").astype(np.float32, copy=False),
-        "lp_item": npy("lp_item.npy").astype(np.float32, copy=False),
         "value": npy("value.npy").astype(np.float32, copy=False),
         "reward": npy("reward.npy").astype(np.float32, copy=False),
         "done": npy("done.npy").astype(np.int64, copy=False),
@@ -166,10 +164,8 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
                 "scalars": d["scalars"],
                 "a_move": d["a_move"],
                 "a_fire": d["a_fire"],
-                "a_item": d["a_item"],
                 "lp_move": d["lp_move"],
                 "lp_fire": d["lp_fire"],
-                "lp_item": d["lp_item"],
                 "value": d["value"],
                 "adv": adv.astype(np.float32),
                 "ret": ret.astype(np.float32),
@@ -271,25 +267,21 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
             sc = e["scalars"]
             a_move = e["a_move"]
             a_fire = e["a_fire"]
-            a_item = e["a_item"]
             lp_move = e["lp_move"]
             lp_fire = e["lp_fire"]
-            lp_item = e["lp_item"]
             adv = e["adv"]
             ret = e["ret"]
-            mask = e["mask"]  # (T, 10)
+            mask = e["mask"]  # (T, 7)
 
-            mv, fr, it, val = model(obs, sc)
+            mv, fr, val = model(obs, sc)
             move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
             fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM:MOVE_DIM + FIRE_DIM])
-            item_logp = masked_logsoftmax(it, mask[:, MOVE_DIM + FIRE_DIM:])
 
             lp_new = (
                 cat_logprob(a_move, move_logp)
                 + cat_logprob(a_fire, fire_logp)
-                + cat_logprob(a_item, item_logp)
             )
-            lp_old = lp_move + lp_fire + lp_item
+            lp_old = lp_move + lp_fire
 
             ratio = torch.exp(lp_new - lp_old)
             surr1 = ratio * adv
@@ -297,7 +289,7 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
             policy_loss = -torch.min(surr1, surr2).mean()
 
             value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp) + cat_entropy(item_logp)
+            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
 
             loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
 

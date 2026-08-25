@@ -63,8 +63,7 @@ const MAX_TICKS = 36000
 const K = 10
 const MOVE_DIM = 5
 const FIRE_DIM = 2
-const ITEM_DIM = 3
-const MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM
+const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 
 // shard 文件名清单（与 writeRlShard 的 writeNpy 调用一一对应；--pack 打容器时按此顺序）。
 const RL_SHARD_FILES = [
@@ -72,10 +71,8 @@ const RL_SHARD_FILES = [
   'scalars.npy',
   'a_move.npy',
   'a_fire.npy',
-  'a_item.npy',
   'lp_move.npy',
   'lp_fire.npy',
-  'lp_item.npy',
   'value.npy',
   'reward.npy',
   'done.npy',
@@ -126,21 +123,14 @@ class ScriptedInput {
   moveDir: Direction | null = null
   lastDir: Direction = 'up'
   firing = false
-  guardPulse = false
-  frenzyPulse = false
-  private curItem = 0
 
-  setAction(move: number, fire: number, item: number): void {
-    this.curItem = item
+  setAction(move: number, fire: number): void {
     if (move === 0) this.moveDir = this.lastDir
     else {
       this.lastDir = MOVE_DECODE[move - 1]
       this.moveDir = this.lastDir
     }
     this.firing = fire === 1
-    // 道具脉冲只在持有窗口首帧有效（endFrame 后清零），避免每帧重复激活。
-    this.guardPulse = this.curItem === 1
-    this.frenzyPulse = this.curItem === 2
   }
 
   getMoveDirection(): Direction | null {
@@ -149,22 +139,16 @@ class ScriptedInput {
   isFiring(): boolean {
     return this.firing
   }
-  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
-    if (kind === 'guard') return this.guardPulse
-    if (kind === 'frenzy') return this.frenzyPulse
+  wasItemPressed(): false {
     return false
   }
   endFrame(): void {
-    this.guardPulse = false
-    this.frenzyPulse = false
+    // no per-tick pulses in v2
   }
   reset(): void {
     this.moveDir = null
     this.lastDir = 'up'
     this.firing = false
-    this.guardPulse = false
-    this.frenzyPulse = false
-    this.curItem = 0
   }
 }
 
@@ -172,7 +156,6 @@ interface RolloutModel {
   forward(obs: Uint8Array, scalars: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
-  readonly itemLogits: Float32Array
   readonly valueOut: Float32Array
 }
 
@@ -335,10 +318,8 @@ interface ShardData {
   scalars: Float32Array[]
   aMove: number[]
   aFire: number[]
-  aItem: number[]
   lpMove: number[]
   lpFire: number[]
-  lpItem: number[]
   value: number[]
   reward: number[]
   done: number[]
@@ -352,10 +333,8 @@ function newShard(): ShardData {
     scalars: [],
     aMove: [],
     aFire: [],
-    aItem: [],
     lpMove: [],
     lpFire: [],
-    lpItem: [],
     value: [],
     reward: [],
     done: [],
@@ -424,10 +403,8 @@ function runOne(
     sc: Float32Array
     aMove: number
     aFire: number
-    aItem: number
     lpMove: number
     lpFire: number
-    lpItem: number
     value: number
     mask: number[]
   } | null = null
@@ -454,10 +431,8 @@ function runOne(
     shard.scalars.push(pending.sc)
     shard.aMove.push(pending.aMove)
     shard.aFire.push(pending.aFire)
-    shard.aItem.push(pending.aItem)
     shard.lpMove.push(pending.lpMove)
     shard.lpFire.push(pending.lpFire)
-    shard.lpItem.push(pending.lpItem)
     shard.value.push(pending.value)
     shard.reward.push(reward)
     shard.done.push(term ? 1 : 0)
@@ -473,7 +448,6 @@ function runOne(
       const masks = computeMasks(world)
       const mv = sampleCat(model.moveLogits, masks.move, rng)
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
-      const it = sampleCat(model.itemLogits, masks.item, rng)
       const value = model.valueOut[0]
 
       // 窗口势差结算：上一窗口的 Φ 变化记入其 reward。
@@ -491,14 +465,12 @@ function runOne(
         sc: encoder.scalars.slice(),
         aMove: mv.idx,
         aFire: fr.idx,
-        aItem: it.idx,
         lpMove: mv.logp,
         lpFire: fr.logp,
-        lpItem: it.logp,
         value,
-        mask: [...masks.move, ...masks.fire, ...masks.item],
+        mask: [...masks.move, ...masks.fire],
       }
-      scripted.setAction(mv.idx, fr.idx, it.idx)
+      scripted.setAction(mv.idx, fr.idx)
     }
     sim.tick()
     scripted.endFrame()
@@ -624,39 +596,33 @@ function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
   const N = d.n
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 24)
+  const scalars = new Float32Array(N * 19)
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
-  const aItem = new Uint8Array(N)
   const lpMove = new Float32Array(N)
   const lpFire = new Float32Array(N)
-  const lpItem = new Float32Array(N)
   const value = new Float32Array(N)
   const reward = new Float32Array(N)
   const done = new Uint8Array(N)
   const mask = new Uint8Array(N * MASK_DIM)
   for (let i = 0; i < N; i++) {
     obs.set(d.obs[i], i * 14 * 26 * 26)
-    scalars.set(d.scalars[i], i * 24)
+    scalars.set(d.scalars[i], i * 19)
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
-    aItem[i] = d.aItem[i]
     lpMove[i] = d.lpMove[i]
     lpFire[i] = d.lpFire[i]
-    lpItem[i] = d.lpItem[i]
     value[i] = d.value[i]
     reward[i] = d.reward[i]
     done[i] = d.done[i]
     for (let j = 0; j < MASK_DIM; j++) mask[i * MASK_DIM + j] = d.mask[i * MASK_DIM + j]
   }
   writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, scalars, [N, 24], 'f4')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
   writeNpy(`${dir}/a_move.npy`, aMove, [N], 'u1')
   writeNpy(`${dir}/a_fire.npy`, aFire, [N], 'u1')
-  writeNpy(`${dir}/a_item.npy`, aItem, [N], 'u1')
   writeNpy(`${dir}/lp_move.npy`, lpMove, [N], 'f4')
   writeNpy(`${dir}/lp_fire.npy`, lpFire, [N], 'f4')
-  writeNpy(`${dir}/lp_item.npy`, lpItem, [N], 'f4')
   writeNpy(`${dir}/value.npy`, value, [N], 'f4')
   writeNpy(`${dir}/reward.npy`, reward, [N], 'f4')
   writeNpy(`${dir}/done.npy`, done, [N], 'u1')

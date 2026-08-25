@@ -157,8 +157,8 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
                                            ppo_mod.GAMMA, ppo_mod.LAM)
             eps.append({
                 "obs": dd["obs"], "scalars": dd["scalars"],
-                "a_move": dd["a_move"], "a_fire": dd["a_fire"], "a_item": dd["a_item"],
-                "lp_move": dd["lp_move"], "lp_fire": dd["lp_fire"], "lp_item": dd["lp_item"],
+                "a_move": dd["a_move"], "a_fire": dd["a_fire"],
+                "lp_move": dd["lp_move"], "lp_fire": dd["lp_fire"],
                 "value": dd["value"], "adv": adv.astype(np.float32),
                 "ret": ret.astype(np.float32), "mask": dd["mask"],
             })

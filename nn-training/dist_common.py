@@ -38,8 +38,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "dist-nodes.json")
 
 SHARD_FILES = (
-    "obs.npy", "scalars.npy", "a_move.npy", "a_fire.npy", "a_item.npy",
-    "lp_move.npy", "lp_fire.npy", "lp_item.npy", "value.npy", "reward.npy",
+    "obs.npy", "scalars.npy", "a_move.npy", "a_fire.npy",
+    "lp_move.npy", "lp_fire.npy", "value.npy", "reward.npy",
     "done.npy", "mask.npy",
 )
 

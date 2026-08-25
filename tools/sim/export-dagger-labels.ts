@@ -19,7 +19,8 @@
  *       教师的 (move/fire/item) 动作作为标号——即对学生所见状态的教师动作。
  *
  * 输出与 collect-godai.ts（BC 教师采集）【完全同构】的 npy shards：
- *   obs/14×26×26 u1, scalars/24 f4, actions/3 u1, masks/10 u1, conditions/1 u1
+ *   obs/14×26×26 u1, scalars/19 f4, actions/2 u1, masks/7 u1, conditions/1 u1
+ * （v2 = OBS_SCHEMA_MAJOR 2：item 头删除，actions/masks 缩减为 move+fire）
  * 因此 train_bc.py 只需把 --data-dir 指向同时含 godai/ + dagger/ 两个子目录
  * 的根目录即可混合重训（见文件头用法示例）。manifest 额外标注
  *   teacher='GodAI', collector='DAgger', policy='nn-student'
@@ -146,14 +147,12 @@ function runOne(
       const label = actionFromFrame({
         direction: tDir,
         firing: tFiring,
-        guard: tGuard,
-        frenzy: tFrenzy,
       })
       const masks = computeMasks(world)
       acc.obs.push(encoder.obs.slice())
       acc.scalars.push(encoder.scalars.slice())
-      acc.actions.push(label.move, label.fire, label.item)
-      acc.masks.push(...masks.move, ...masks.fire, ...masks.item)
+      acc.actions.push(label.move, label.fire)
+      acc.masks.push(...masks.move, ...masks.fire)
       acc.conditions.push(condition)
       acc.n++
     }
@@ -187,17 +186,16 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
   const N = acc.n
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 24)
-  const actions = new Uint8Array(N * 3)
-  const masks = new Uint8Array(N * 10)
+  const scalars = new Float32Array(N * 19)
+  const actions = new Uint8Array(N * 2)
+  const masks = new Uint8Array(N * 7)
   const conditions = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * 14 * 26 * 26)
-    scalars.set(acc.scalars[i], i * 24)
-    actions[i * 3] = acc.actions[i * 3]
-    actions[i * 3 + 1] = acc.actions[i * 3 + 1]
-    actions[i * 3 + 2] = acc.actions[i * 3 + 2]
-    for (let j = 0; j < 10; j++) masks[i * 10 + j] = acc.masks[i * 10 + j]
+    scalars.set(acc.scalars[i], i * 19)
+    actions[i * 2] = acc.actions[i * 2]
+    actions[i * 2 + 1] = acc.actions[i * 2 + 1]
+    for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]
     conditions[i] = acc.conditions[i]
   }
   writeShard(dir, { obs, scalars, actions, masks, conditions }, manifest)

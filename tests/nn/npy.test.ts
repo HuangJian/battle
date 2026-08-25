@@ -50,8 +50,8 @@ describe('npy.ts writer', () => {
   })
 
   it('round-trips a float32 scalar shard with correct byte length', () => {
-    const shape = [5, 24]
-    const data = new Float32Array(5 * 24)
+    const shape = [5, 19]
+    const data = new Float32Array(5 * 19)
     for (let i = 0; i < data.length; i++) data[i] = i * 0.5
     const p = join(tmpdir(), `npy-test-f4-${Date.now()}.npy`)
     writeNpy(p, data, shape, 'f4')

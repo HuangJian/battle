@@ -31,7 +31,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import make_loaders  # noqa: E402
 from model import NNPolicy, param_count  # noqa: E402
-from student_model import StudentNet  # noqa: E402
+from student_model import StudentNet, PPOStudent  # noqa: E402
 from weights_io import save_weights_json, load_state_into  # noqa: E402
 from schema import OBS_SCHEMA_MAJOR  # noqa: E402
 
@@ -106,7 +106,7 @@ def _append_weights_md(out_dir: str, versioned_path: str, trained_at: str,
     row = (
         f"| {trained_at} | `{os.path.basename(versioned_path)}` | {args.epochs} "
         f"| {sizes['train']}/{sizes['val']} | {best_val:.4f} "
-        f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{history['item_acc'][-1]} "
+        f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{history['value_loss'][-1]} "
         f"| {_git_sha()} | {args.notes} |\n"
     )
     if not os.path.exists(md_path):
@@ -122,14 +122,14 @@ def _majority_baseline(dl) -> dict:
     Provides a floor to interpret the trained val_loss against (audit gap #2):
     is 1.2431 near the majority-class ceiling, or is there real signal learned?
     """
-    c_m, c_f, c_i = Counter(), Counter(), Counter()
+    c_m, c_f = Counter(), Counter()
     for batch in dl:
-        _, _, mv, fr, it, _, _, _ = [b for b in batch]
-        for t, c in ((mv, c_m), (fr, c_f), (it, c_i)):
+        obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
+        for t, c in ((mv, c_m), (fr, c_f)):
             for v in t.tolist():
                 c[v] += 1
     out = {}
-    for name, c in (("move", c_m), ("fire", c_f), ("item", c_i)):
+    for name, c in (("move", c_m), ("fire", c_f)):
         total = sum(c.values())
         if total == 0:
             out[name] = float("nan")
@@ -148,14 +148,18 @@ def train(args) -> dict:
 
     # Majority-class baseline: a floor to interpret val_loss against (audit gap #2).
     mb = _majority_baseline(train_dl)
-    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f} item={mb['item']:.4f}")
+    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}")
 
-    model = StudentNet() if args.arch == "student" else NNPolicy()
+    # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
+    # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
+    # 纯 BC（无 returns）沿用 StudentNet / NNPolicy 双头。
+    use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
+    model = PPOStudent() if use_value else (StudentNet() if args.arch == "student" else NNPolicy())  # type: ignore
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
     n_params = param_count(model)
-    print(f"[train] NNPolicy params={n_params} (~{n_params/1000:.1f}K) budget<=200K: {n_params <= 200_000}")
+    print(f"[train] model params={n_params} (~{n_params/1000:.1f}K) budget<=200K: {n_params <= 200_000}")
     if n_params > 200_000:
         print(f"[train] WARNING: {n_params} > 200K budget; consider shrinking conv_ch/head_hidden")
 
@@ -163,17 +167,27 @@ def train(args) -> dict:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs))
 
     best_val = float("inf")
-    history = {"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "item_acc": []}
+    history = {"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []}
 
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         model.train()
-        run = {"loss": 0.0, "n": 0}
+        run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
-            obs, sc, mv, fr, it, mm, mf, mi = [b for b in batch]
+            obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
             opt.zero_grad()
-            lm, lf, li = model(obs, sc)
-            loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf) + _masked_ce(li, it, mi)
+            if use_value:
+                lm, lf, vpred = model(obs, sc)
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                valid = ~torch.isnan(ret)
+                if valid.any():
+                    vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
+                    loss = loss + args.value_coef * vloss
+                    run["vloss"] += float(vloss.item()) * int(valid.sum())
+                    run["vn"] += int(valid.sum())
+            else:
+                lm, lf = model(obs, sc)
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
             loss.backward()
             opt.step()
             run["loss"] += loss.item() * obs.shape[0]
@@ -183,28 +197,37 @@ def train(args) -> dict:
 
         # Validation (no augmentation).
         model.eval()
-        v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "ia": 0.0}
+        v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "vloss": 0.0, "vn": 0}
         with torch.no_grad():
             for batch in val_dl:
-                obs, sc, mv, fr, it, mm, mf, mi = [b for b in batch]
-                lm, lf, li = model(obs, sc)
-                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf) + _masked_ce(li, it, mi)
+                obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
+                if use_value:
+                    lm, lf, vpred = model(obs, sc)
+                else:
+                    lm, lf = model(obs, sc)
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                if use_value:
+                    valid = ~torch.isnan(ret)
+                    if valid.any():
+                        v["vloss"] += float(F.mse_loss(vpred.squeeze(-1)[valid], ret[valid]).item()) * int(valid.sum())
+                        v["vn"] += int(valid.sum())
                 v["loss"] += loss.item() * obs.shape[0]
                 v["n"] += obs.shape[0]
                 v["ma"] += _masked_acc(lm, mv, mm) * obs.shape[0]
                 v["fa"] += _masked_acc(lf, fr, mf) * obs.shape[0]
-                v["ia"] += _masked_acc(li, it, mi) * obs.shape[0]
         val_loss = v["loss"] / max(1, v["n"])
-        ma, fa, ia = v["ma"] / v["n"], v["fa"] / v["n"], v["ia"] / v["n"]
+        ma, fa = v["ma"] / v["n"], v["fa"] / v["n"]
+        vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
         history["train_loss"].append(round(train_loss, 4))
         history["val_loss"].append(round(val_loss, 4))
         history["move_acc"].append(round(ma, 4))
         history["fire_acc"].append(round(fa, 4))
-        history["item_acc"].append(round(ia, 4))
+        history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
         print(f"[epoch {epoch:3d}/{args.epochs}] "
               f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-              f"acc move={ma:.3f} fire={fa:.3f} item={ia:.3f} "
-              f"lr={opt.param_groups[0]['lr']:.2e}")
+              f"acc move={ma:.3f} fire={fa:.3f} "
+              + (f"value={vl:.4f} " if not math.isnan(vl) else "")
+              + f"lr={opt.param_groups[0]['lr']:.2e}")
         if val_loss < best_val:
             best_val = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -285,6 +308,9 @@ def main():
     ap.add_argument("--mirror-p", type=float, default=0.5, help="mirrorX augmentation prob")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--num-workers", type=int, default=0)
+    ap.add_argument("--value-coef", type=float, default=0.0,
+                    help=">0: 语料带 returns.npy 时按该系数对 value 头做 MC return 回归 "
+                         "（M2 ⑥ / M3 value 预置；仅 --arch student 生效）")
     args = ap.parse_args()
     train(args)
 

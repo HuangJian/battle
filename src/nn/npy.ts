@@ -67,9 +67,9 @@ export function writeNpy(
 /** Per-shard arrays (flat, row-major). */
 export interface ShardArrays {
   obs: Uint8Array // N * 14 * 26 * 26
-  scalars: Float32Array // N * 24
-  actions: Uint8Array // N * 3   [move, fire, item]
-  masks: Uint8Array // N * 10  [move5, fire2, item3], 1 = valid
+  scalars: Float32Array // N * 19
+  actions: Uint8Array // N * 2   [move, fire]  (v2: item head removed)
+  masks: Uint8Array // N * 7  [move5, fire2], 1 = valid
   conditions: Uint8Array // N * 1 (uint8 category)
 }
 
@@ -79,9 +79,9 @@ export function writeShard(dir: string, a: ShardArrays, manifest: unknown): void
   const N = a.conditions.length
   if (N === 0) return
   writeNpy(`${dir}/obs.npy`, a.obs, [N, 14, 26, 26], 'u1')
-  writeNpy(`${dir}/scalars.npy`, a.scalars, [N, 24], 'f4')
-  writeNpy(`${dir}/actions.npy`, a.actions, [N, 3], 'u1')
-  writeNpy(`${dir}/masks.npy`, a.masks, [N, 10], 'u1')
+  writeNpy(`${dir}/scalars.npy`, a.scalars, [N, 19], 'f4')
+  writeNpy(`${dir}/actions.npy`, a.actions, [N, 2], 'u1')
+  writeNpy(`${dir}/masks.npy`, a.masks, [N, 7], 'u1')
   writeNpy(`${dir}/conditions.npy`, a.conditions, [N], 'u1')
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }

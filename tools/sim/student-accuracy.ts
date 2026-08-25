@@ -93,7 +93,6 @@ function main(): void {
   let n = 0
   let moveOk = 0
   let fireOk = 0
-  let itemOk = 0
   const movePredDist = [0, 0, 0, 0, 0]
   const moveLabDist = [0, 0, 0, 0, 0]
   const C = 26 * 26
@@ -113,25 +112,22 @@ function main(): void {
     for (let i = 0; i < N && n < maxSamples; i++) {
       const oBase = i * 14 * C
       const obsSample = obs.subarray(oBase, oBase + 14 * C)
-      const sBase = i * 24
-      const scSample = sc.subarray(sBase, sBase + 24)
+      const sBase = i * 19
+      const scSample = sc.subarray(sBase, sBase + 19)
       model.forward(obsSample, scSample)
       const mv = argmax(model.moveLogits, 5)
       const fr = argmax(model.fireLogits, 2)
-      const it = argmax(model.itemLogits, 3)
-      const lm = act[i * 3 + 0]
-      const lf = act[i * 3 + 1]
-      const li = act[i * 3 + 2]
+      const lm = act[i * 2 + 0]
+      const lf = act[i * 2 + 1]
       if (mv === lm) moveOk++
       if (fr === lf) fireOk++
-      if (it === li) itemOk++
       movePredDist[mv]++
       moveLabDist[lm]++
       n++
       if (logged < 5) {
         logged++
         process.stderr.write(
-          `  sample#${n} pred[mv=${mv} fr=${fr} it=${it}] label[mv=${lm} fr=${lf} it=${li}] ` +
+          `  sample#${n} pred[mv=${mv} fr=${fr}] label[mv=${lm} fr=${lf}] ` +
             `moveLogits=[${Array.from(model.moveLogits)
               .map((x) => x.toFixed(2))
               .join(',')}]\n`,
@@ -144,12 +140,9 @@ function main(): void {
   console.log(`samples=${n}`)
   console.log(`move_acc=${pct(moveOk)} (${moveOk}/${n})`)
   console.log(`fire_acc=${pct(fireOk)} (${fireOk}/${n})`)
-  console.log(`item_acc=${pct(itemOk)} (${itemOk}/${n})`)
   console.log(`move_pred_dist=${JSON.stringify(movePredDist)}`)
   console.log(`move_label_dist=${JSON.stringify(moveLabDist)}`)
-  process.stderr.write(
-    `[student-accuracy] DONE move=${pct(moveOk)} fire=${pct(fireOk)} item=${pct(itemOk)}\n`,
-  )
+  process.stderr.write(`[student-accuracy] DONE move=${pct(moveOk)} fire=${pct(fireOk)}\n`)
 }
 
 main()

@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import NNPolicy  # noqa: E402
 from weights_io import load_state_into, latest_weights_path  # noqa: E402
 from npyio import load_dataset  # noqa: E402
-from schema import MOVE_DIM, FIRE_DIM, ITEM_DIM  # noqa: E402
+from schema import MOVE_DIM, FIRE_DIM  # noqa: E402
 
 
 def quick_eval(weights_path: str, data_dir: str) -> dict:
@@ -46,14 +46,12 @@ def quick_eval(weights_path: str, data_dir: str) -> dict:
     sc = torch.from_numpy(data["scalars"].astype(np.float32))
     mv = data["actions"][:, 0]
     fr = data["actions"][:, 1]
-    it = data["actions"][:, 2]
     masks = data["masks"].astype(np.float32)
 
     with torch.no_grad():
-        lm, lf, li = model(obs, sc)
+        lm, lf = model(obs, sc)
     pm = lm.argmax(-1).numpy()
     pf = lf.argmax(-1).numpy()
-    pi = li.argmax(-1).numpy()
 
     def acc(pred, gold, m, k):
         m = m[:, :k]
@@ -66,7 +64,6 @@ def quick_eval(weights_path: str, data_dir: str) -> dict:
     out = {
         "move_acc": acc(pm, mv, masks, MOVE_DIM),
         "fire_acc": acc(pf, fr, masks, FIRE_DIM),
-        "item_acc": acc(pi, it, masks, ITEM_DIM),
         "n": int(obs.shape[0]),
     }
     return out

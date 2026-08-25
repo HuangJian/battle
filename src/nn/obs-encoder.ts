@@ -41,8 +41,8 @@ import {
 // ---- Canonical dimensions (mirror nn-training/schema.py) ----
 export const OBS_CHANNELS = 14
 export const BOARD = GRID // 26
-export const SCALAR_DIM = 24
-export const OBS_SCHEMA_MAJOR = 1
+export const SCALAR_DIM = 19
+export const OBS_SCHEMA_MAJOR = 2
 
 // ---- Channel index map (plan §1.1) ----
 export const CH = {
@@ -97,7 +97,9 @@ const TIER_INDEX: Record<string, number> = {
 const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3 }
 
 // Scalar indices that flip sign under mirrorX (relative-direction x-components).
-export const SCALAR_X_INDICES = [20, 23]
+// v2 (OBS_SCHEMA_MAJOR=2): item inventory scalars removed (24→19), the two
+// rel-x components renumbered [20,23] → [15,18].
+export const SCALAR_X_INDICES = [15, 18]
 
 if (POWERUP_COUNT !== 15) {
   throw new Error(`POWERUP_ORDER must have exactly 15 members, got ${POWERUP_COUNT}`)
@@ -307,18 +309,9 @@ export class ObsEncoder {
     }
     s[6] = intact / RING_CELLS.length
 
-    // inventory
-    s[7] = clamp01(Math.min(world.guardStock, 4) / 4)
-    s[8] = clamp01(Math.min(world.frenzyStock, 4) / 4)
-    s[9] = clamp01(Math.min(world.rewindStock, 4) / 4)
-
-    // frenzy active + shots left
-    s[10] = p && (p.frenzyTimer ?? 0) > 0 ? 1 : 0
-    s[11] = p ? clamp01(Math.min(p.frenzyShotsLeft ?? 0, 20) / 20) : 0
-
     // enemies on field / spawn queue remaining
-    s[12] = clamp01(world.enemyCount / MAX_ENEMIES_ALIVE)
-    s[13] = clamp01(world.spawnQueue.length / Math.max(1, world.enemiesTotal))
+    s[7] = clamp01(world.enemyCount / MAX_ENEMIES_ALIVE)
+    s[8] = clamp01(world.spawnQueue.length / Math.max(1, world.enemiesTotal))
 
     // tier composition
     const tierCounts = [0, 0, 0, 0, 0]
@@ -327,7 +320,7 @@ export class ObsEncoder {
       tierCounts[ti]++
     }
     const denom = Math.max(1, enemies.length)
-    for (let i = 0; i < 5; i++) s[14 + i] = tierCounts[i] / denom
+    for (let i = 0; i < 5; i++) s[9 + i] = tierCounts[i] / denom
 
     // nearest enemy relative (dist, dx/dist, dy/dist)
     const pc = p ? { x: p.x + p.w / 2, y: p.y + p.h / 2 } : null
@@ -349,13 +342,13 @@ export class ObsEncoder {
       }
     }
     if (pc && nd < Infinity) {
-      s[19] = clamp01(nd / FIELD_DIAG)
-      s[20] = ndx / nd
-      s[21] = ndy / nd
+      s[14] = clamp01(nd / FIELD_DIAG)
+      s[15] = ndx / nd
+      s[16] = ndy / nd
     } else {
-      s[19] = 0
-      s[20] = 0
-      s[21] = 0
+      s[14] = 0
+      s[15] = 0
+      s[16] = 0
     }
 
     // nearest base relative
@@ -365,11 +358,11 @@ export class ObsEncoder {
       const dx = bcx - pc.x
       const dy = bcy - pc.y
       const d = Math.hypot(dx, dy) || 1
-      s[22] = clamp01(d / FIELD_DIAG)
-      s[23] = dx / d
+      s[17] = clamp01(d / FIELD_DIAG)
+      s[18] = dx / d
     } else {
-      s[22] = 0
-      s[23] = 0
+      s[17] = 0
+      s[18] = 0
     }
   }
 }
@@ -438,41 +431,32 @@ export function decisionTick(
 export interface FrameLabel {
   move: number // 0 none,1 up,2 down,3 left,4 right
   fire: number // 0 release,1 hold
-  item: number // 0 none,1 guard,2 frenzy
 }
 
-/** Map a packed human input frame to the 3 action-head labels. */
-export function actionFromFrame(f: {
-  direction: Direction | null
-  firing: boolean
-  guard: boolean
-  frenzy: boolean
-}): FrameLabel {
+/** Map a packed human input frame to the 2 action-head labels (v2: no item head). */
+export function actionFromFrame(f: { direction: Direction | null; firing: boolean }): FrameLabel {
   const move = f.direction ? DIR_INDEX[f.direction] + 1 : 0
   const fire = f.firing ? 1 : 0
-  const item = f.guard ? 1 : f.frenzy ? 2 : 0
-  return { move, fire, item }
+  return { move, fire }
 }
 
 export interface Masks {
   move: number[] // length 5
   fire: number[] // length 2  ([release valid, hold valid])
-  item: number[] // length 3  ([none, guard, frenzy])
 }
 
 /**
  * Invalid-action mask (plan §1.3-4), generated from World state.
  *   fire : hold-mask valid only when cooldown elapsed (else masked).
- *   item : guard/frenzy valid only when that stock > 0.
  *   move : v1 = all valid (turn-lock refinement deferred; noted in plan).
+ * v2: item head removed — guard/frenzy (and their masks) no longer exist.
  */
 export function computeMasks(world: World): Masks {
   const p = world.player
   const ready = p ? isFireReady(world) : false
   const fire: number[] = [1, ready ? 1 : 0]
-  const item: number[] = [1, world.guardStock > 0 ? 1 : 0, world.frenzyStock > 0 ? 1 : 0]
   const move: number[] = [1, 1, 1, 1, 1]
-  return { move, fire, item }
+  return { move, fire }
 }
 
 function isFireReady(world: World): boolean {

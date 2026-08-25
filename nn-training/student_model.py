@@ -13,9 +13,9 @@ Architecture (h=64 / d=8 sweet spot, plan §4.3):
               depthwise  h→h, 5×5, groups=h, ReLU
               pointwise  h→h, 1×1, ReLU
               残差连接
-    → GAP  → (h,)  + concat scalars(24) → (h+24,)
-    → FC   (h+24)→128, ReLU
-    → 三头: move-5 / fire-2 / item-3
+    → GAP  → (h,)  + concat scalars(19) → (h+19,)
+    → FC   (h+19)→128, ReLU
+    → 双头(v2): move-5 / fire-2   （item 头删除 —— AI 不使用主动道具）
 
 Params (h=64, d=8): ~69K. MAdds (26×26): ~37M.
 Coord channel formula — MUST match the TS runtime exactly:
@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM, ITEM_DIM
+from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
 
 DEFAULT_H = 64
 DEFAULT_D = 8
@@ -64,8 +64,8 @@ class StudentNet(nn.Module):
 
     Input:
       obs:     (B, 14, 26, 26) uint8 — encoder output (14 channels)
-      scalars: (B, 24) float32
-    Output: (move_logits, fire_logits, item_logits), each (B, K).
+      scalars: (B, 19) float32
+    Output: (move_logits, fire_logits)（v2：双头，item 头已删除）.
     """
 
     def __init__(
@@ -90,7 +90,6 @@ class StudentNet(nn.Module):
         self.fc = nn.Linear(h + scalar_dim, head_hidden, bias=True)
         self.move_head = nn.Linear(head_hidden, MOVE_DIM, bias=True)
         self.fire_head = nn.Linear(head_hidden, FIRE_DIM, bias=True)
-        self.item_head = nn.Linear(head_hidden, ITEM_DIM, bias=True)
 
         self._init_weights()
 
@@ -123,19 +122,20 @@ class StudentNet(nn.Module):
         for b in self.blocks:
             x = b(x)
         x = x.mean(dim=(2, 3))  # GAP → (B, h)
-        x = torch.cat([x, scalars], dim=1)  # (B, h + 24)
+        x = torch.cat([x, scalars], dim=1)  # (B, h + 19)
         return F.relu(self.fc(x))
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """obs: (B,14,26,26) u1; scalars: (B,19) f4 → (move_logits, fire_logits)."""
         h = self.features(obs, scalars)
-        return self.move_head(h), self.fire_head(h), self.item_head(h)
+        return self.move_head(h), self.fire_head(h)
 
 
 class PPOStudent(StudentNet):
     """
-    RL-ready variant: StudentNet trunk + 3 factored policy heads + a value head.
+    RL-ready variant: StudentNet trunk + 2 factored policy heads + a value head.
     Value head is trained by PPO (init random; BC checkpoints lack it).
     Exports the SAME weight keys as StudentNet plus `value_head.{weight,bias}`,
     so the TS runtime (`src/nn/infer.ts` StudentModel) can load it via the
@@ -148,9 +148,9 @@ class PPOStudent(StudentNet):
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.features(obs, scalars)
-        return self.move_head(h), self.fire_head(h), self.item_head(h), self.value_head(h)
+        return self.move_head(h), self.fire_head(h), self.value_head(h)
 
     @torch.no_grad()
     def predict(self, obs: torch.Tensor, scalars: torch.Tensor | None = None):
@@ -158,11 +158,10 @@ class PPOStudent(StudentNet):
         self.eval()
         if scalars is None:
             scalars = torch.zeros(obs.shape[0], self.scalar_dim)
-        m, f, i = self.forward(obs, scalars)
+        m, f = self.forward(obs, scalars)
         return (
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),
-            torch.softmax(i, dim=-1),
         )
 
 
@@ -176,6 +175,6 @@ if __name__ == "__main__":
     print(f"StudentNet params: {n} (~{n/1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
-    mv, fr, it = m(dummy_obs, dummy_sc)
-    print("move", tuple(mv.shape), "fire", tuple(fr.shape), "item", tuple(it.shape))
+    mv, fr = m(dummy_obs, dummy_sc)
+    print("move", tuple(mv.shape), "fire", tuple(fr.shape))
     print("arch:", m.arch())

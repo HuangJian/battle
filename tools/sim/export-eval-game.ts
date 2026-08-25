@@ -49,21 +49,14 @@ class ScriptedInput {
   moveDir: Direction | null = null
   lastDir: Direction = 'up'
   firing = false
-  guardPulse = false
-  frenzyPulse = false
-  private curItem = 0
 
-  setAction(move: number, fire: number, item: number): void {
-    this.curItem = item
+  setAction(move: number, fire: number): void {
     if (move === 0) this.moveDir = this.lastDir
     else {
       this.lastDir = MOVE_DECODE[move - 1]
       this.moveDir = this.lastDir
     }
     this.firing = fire === 1
-    // 道具脉冲只在持有窗口首帧有效（endFrame 后清零），避免每帧重复激活。
-    this.guardPulse = this.curItem === 1
-    this.frenzyPulse = this.curItem === 2
   }
 
   getMoveDirection(): Direction | null {
@@ -74,23 +67,18 @@ class ScriptedInput {
     return this.firing
   }
 
-  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
-    if (kind === 'guard') return this.guardPulse
-    if (kind === 'frenzy') return this.frenzyPulse
+  wasItemPressed(): false {
     return false
   }
 
   endFrame(): void {
-    this.guardPulse = false
-    this.frenzyPulse = false
+    // no per-tick pulses in v2
   }
 
   reset(): void {
     this.moveDir = null
     this.lastDir = 'up'
     this.firing = false
-    this.guardPulse = false
-    this.curItem = 0
   }
 }
 
@@ -98,7 +86,6 @@ interface RolloutModel {
   forward(obs: Uint8Array, scalars: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
-  readonly itemLogits: Float32Array
   readonly valueOut: Float32Array
 }
 
@@ -228,8 +215,7 @@ function runEvalOne(
       const masks = computeMasks(world)
       const mv = argmaxCat(model.moveLogits, masks.move)
       const fr = argmaxCat(model.fireLogits, masks.fire)
-      const it = argmaxCat(model.itemLogits, masks.item)
-      scripted.setAction(mv, fr, it)
+      scripted.setAction(mv, fr)
     }
     sim.tick()
     scripted.endFrame()

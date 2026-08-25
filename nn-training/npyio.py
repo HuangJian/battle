@@ -23,9 +23,9 @@ import numpy as np
 # Per-shard file names produced by the TS exporter.
 SHARD_FILES = {
     "obs": "obs.npy",          # uint8  (N, 14, 26, 26)
-    "scalars": "scalars.npy",  # float32 (N, 24)
-    "actions": "actions.npy",  # uint8  (N, 3)  [move, fire, item]
-    "masks": "masks.npy",      # uint8  (N, 10) [move5, fire2, item3], 1=valid
+    "scalars": "scalars.npy",  # float32 (N, 19)
+    "actions": "actions.npy",  # uint8  (N, 2)  [move, fire] (v2: item 头删除)
+    "masks": "masks.npy",      # uint8  (N, 7) [move5, fire2], 1=valid
     "conditions": "conditions.npy",  # uint8 (N,) decision condition
 }
 MANIFEST_FILE = "manifest.json"
@@ -36,6 +36,9 @@ def read_npy(path: str) -> np.ndarray:
     return np.load(path, allow_pickle=False)
 
 
+OPTIONAL_FILES = {"returns": "returns.npy"}  # v2: M3 value MC 预置（可选）
+
+
 def load_shard(shard_dir: str) -> Dict[str, np.ndarray]:
     """Load one exported replay shard into a dict of numpy arrays."""
     out: Dict[str, np.ndarray] = {}
@@ -44,6 +47,10 @@ def load_shard(shard_dir: str) -> Dict[str, np.ndarray]:
         if not os.path.exists(p):
             raise FileNotFoundError(f"missing shard file {p}")
         out[key] = read_npy(p)
+    for key, fname in OPTIONAL_FILES.items():
+        p = os.path.join(shard_dir, fname)
+        if os.path.exists(p):
+            out[key] = read_npy(p)
     return out
 
 
@@ -62,11 +69,26 @@ def load_dataset(data_dir: str) -> Dict[str, np.ndarray]:
     if not shards:
         raise FileNotFoundError(f"no shards (obs.npy) found under {data_dir}")
     parts: Dict[str, list[np.ndarray]] = {k: [] for k in SHARD_FILES}
+    opt_parts: Dict[str, list[np.ndarray]] = {k: [] for k in OPTIONAL_FILES}
     for s in shards:
         d = load_shard(s)
         for k in SHARD_FILES:
             parts[k].append(d[k])
-    return {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+        for k in OPTIONAL_FILES:
+            if k in d:
+                opt_parts[k].append(d[k])
+    out = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+    for k, v in opt_parts.items():
+        if v:
+            # 可选文件部分 shard 缺失 → 拼接后以 NaN 补齐（与 dataset.py 的 n/a 语义一致）
+            n = out["obs"].shape[0]
+            full = np.full((n,), np.nan, dtype=np.float32)
+            off = 0
+            for arr in v:
+                full[off:off + arr.shape[0]] = arr
+                off += arr.shape[0]
+            out[k] = full
+    return out
 
 
 def save_shard(shard_dir: str, arrays: Dict[str, np.ndarray], manifest: Dict[str, Any]) -> None:

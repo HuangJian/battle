@@ -110,12 +110,12 @@ function runOne(
       K,
     )
     if (isDecision) {
-      const label = actionFromFrame({ direction: dir, firing, guard: g, frenzy: fr })
+      const label = actionFromFrame({ direction: dir, firing })
       const masks = computeMasks(world)
       acc.obs.push(encoder.obs.slice())
       acc.scalars.push(encoder.scalars.slice())
-      acc.actions.push(label.move, label.fire, label.item)
-      acc.masks.push(...masks.move, ...masks.fire, ...masks.item)
+      acc.actions.push(label.move, label.fire)
+      acc.masks.push(...masks.move, ...masks.fire)
       acc.conditions.push(condition)
       acc.n++
     }
@@ -144,17 +144,16 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
   const N = acc.n
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 24)
-  const actions = new Uint8Array(N * 3)
-  const masks = new Uint8Array(N * 10)
+  const scalars = new Float32Array(N * 19)
+  const actions = new Uint8Array(N * 2)
+  const masks = new Uint8Array(N * 7)
   const conditions = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * 14 * 26 * 26)
-    scalars.set(acc.scalars[i], i * 24)
-    actions[i * 3] = acc.actions[i * 3]
-    actions[i * 3 + 1] = acc.actions[i * 3 + 1]
-    actions[i * 3 + 2] = acc.actions[i * 3 + 2]
-    for (let j = 0; j < 10; j++) masks[i * 10 + j] = acc.masks[i * 10 + j]
+    scalars.set(acc.scalars[i], i * 19)
+    actions[i * 2] = acc.actions[i * 2]
+    actions[i * 2 + 1] = acc.actions[i * 2 + 1]
+    for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]
     conditions[i] = acc.conditions[i]
   }
   writeShard(dir, { obs, scalars, actions, masks, conditions }, manifest)

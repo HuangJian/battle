@@ -38,7 +38,7 @@ sys.path.insert(0, str(REPO / "nn-training"))
 
 import dist_common  # noqa: E402
 import run_rl  # noqa: E402
-from schema import BOARD, FIRE_DIM, ITEM_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM  # noqa: E402
+from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM  # noqa: E402
 
 FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
@@ -82,6 +82,27 @@ def test_build_pairs() -> None:
     check(len(inter) == 6, f"sps 4->3 overlap == 6 (got {len(inter)})")
     perm = [24, 1, 33]  # 该 rotateSeed/it 的置换前三关
     check(all(st in perm for st, _sd in inter), "overlap confined to first 3 perm stages")
+
+
+def test_mirror_scalar_lockstep() -> None:
+    """M2 镜像索引锁步：SCALAR_X_INDICES 已迁移为 [15,18]（v2 重编号）——
+    mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
+    from dataset import mirror_x
+    from schema import SCALAR_X_INDICES, SCALAR_DIM
+    check(SCALAR_X_INDICES == [15, 18], f"SCALAR_X_INDICES == [15,18] (got {SCALAR_X_INDICES})")
+    n = 26
+    obs = np.zeros((1, 14, n, n), dtype=np.uint8)
+    sc = np.zeros(SCALAR_DIM, dtype=np.float32)
+    sc[15] = 0.5   # nearestEnemyRelX → 翻转
+    sc[18] = -0.25  # nearestBaseRelX → 翻转
+    sc[20] = 0.7   # 旧索引必须已是死位（不再参与翻转）
+    sc[23] = 0.7
+    obs2, sc2, mv2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
+    check(mv2 == 4, "move left<->right flip")
+    check(abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX")
+    check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
+    check(abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)")
+    check(abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)")
 
 
 def test_curriculum() -> None:
@@ -196,8 +217,8 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
     done[-1] = 1
     return {"obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
             "scalars": f32((n, SCALAR_DIM)), "a_move": i64(MOVE_DIM), "a_fire": i64(FIRE_DIM),
-            "a_item": i64(ITEM_DIM), "lp_move": -np.abs(f32(n)) - 0.05,
-            "lp_fire": -np.abs(f32(n)) - 0.05, "lp_item": -np.abs(f32(n)) - 0.05,
+            "lp_move": -np.abs(f32(n)) - 0.05,
+            "lp_fire": -np.abs(f32(n)) - 0.05,
             "value": f32(n), "reward": f32(n), "done": done,
             "mask": np.ones((n, MASK_DIM), dtype=np.int64)}
 

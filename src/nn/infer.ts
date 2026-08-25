@@ -19,7 +19,6 @@ import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
 
 export const MOVE_DIM = 5
 export const FIRE_DIM = 2
-export const ITEM_DIM = 3
 
 /** Default conv channel plan (14 -> 32 -> 48 -> 64). Mirrors model.py. */
 export const CONV_CH = [32, 48, 64] as const
@@ -33,7 +32,6 @@ export interface ModelLike {
   readonly scalarDim: number
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
-  readonly itemLogits: Float32Array
 }
 
 const RELU = (x: number): number => (x > 0 ? x : 0)
@@ -98,8 +96,6 @@ export class NNModel {
   private moveB: Float32Array // [MOVE_DIM]
   private fireW: Float32Array // [FIRE_DIM, headHidden]
   private fireB: Float32Array // [FIRE_DIM]
-  private itemW: Float32Array // [ITEM_DIM, headHidden]
-  private itemB: Float32Array // [ITEM_DIM]
 
   // ---- reusable buffers (no per-tick allocation) ----
   private obsF: Float32Array // [inCh * board * board]
@@ -108,7 +104,6 @@ export class NNModel {
   private hidden: Float32Array // [headHidden]
   readonly moveLogits: Float32Array // [MOVE_DIM]
   readonly fireLogits: Float32Array // [FIRE_DIM]
-  readonly itemLogits: Float32Array // [ITEM_DIM]
 
   constructor(params: Record<string, Float32Array>, shapes?: Record<string, number[]>) {
     const p = (name: string): Float32Array => {
@@ -124,15 +119,13 @@ export class NNModel {
       { w: p('conv.2.weight'), b: p('conv.2.bias'), inCh: 32, outCh: 48 },
       { w: p('conv.4.weight'), b: p('conv.4.bias'), inCh: 48, outCh: 64 },
     ]
-    // FC input = convOutCh (64) + scalarDim (24) = 88 for v2 scalar-fusion
+    // FC input = convOutCh (64) + scalarDim (19) = 83 for v2 scalar-fusion
     this.fcW = p('fc.weight')
     this.fcB = p('fc.bias')
     this.moveW = p('move_head.weight')
     this.moveB = p('move_head.bias')
     this.fireW = p('fire_head.weight')
     this.fireB = p('fire_head.bias')
-    this.itemW = p('item_head.weight')
-    this.itemB = p('item_head.bias')
 
     const sp = BOARD * BOARD
     this.obsF = new Float32Array(this.inCh * sp)
@@ -141,12 +134,11 @@ export class NNModel {
     this.hidden = new Float32Array(HEAD_HIDDEN)
     this.moveLogits = new Float32Array(MOVE_DIM)
     this.fireLogits = new Float32Array(FIRE_DIM)
-    this.itemLogits = new Float32Array(ITEM_DIM)
   }
 
   /**
    * Forward pass. `obs` is the flat NCHW Uint8 buffer from ObsEncoder.
-   * `scalars` is the 24-dim feature vector fused into the FC layer.
+   * `scalars` is the 19-dim feature vector fused into the FC layer.
    */
   forward(obs: Uint8Array, scalars: Float32Array): void {
     const sp = this.board * this.board
@@ -189,7 +181,6 @@ export class NNModel {
 
     this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, HEAD_HIDDEN)
     this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, HEAD_HIDDEN)
-    this.linear(this.hidden, this.itemW, this.itemB, this.itemLogits, ITEM_DIM, HEAD_HIDDEN)
   }
 
   /** head = W · h + b ; W is [outDim, inDim] (PyTorch Linear layout). */
@@ -299,8 +290,6 @@ export class StudentModel implements ModelLike {
   private moveB: Float32Array
   private fireW: Float32Array
   private fireB: Float32Array
-  private itemW: Float32Array
-  private itemB: Float32Array
   private valueW: Float32Array
   private valueB: Float32Array
 
@@ -314,7 +303,6 @@ export class StudentModel implements ModelLike {
   private hidden: Float32Array // [headHidden]
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
-  readonly itemLogits: Float32Array
   readonly valueOut: Float32Array
 
   constructor(params: Record<string, Float32Array>, arch: { h?: number; d?: number }) {
@@ -347,8 +335,6 @@ export class StudentModel implements ModelLike {
     this.moveB = p('move_head.bias')
     this.fireW = p('fire_head.weight')
     this.fireB = p('fire_head.bias')
-    this.itemW = p('item_head.weight')
-    this.itemB = p('item_head.bias')
     // Value head is OPTIONAL: RL weights include value_head.*; BC-only
     // checkpoints don't, in which case we zero-init (harmless for the
     // pure-policy deployment path).
@@ -378,7 +364,6 @@ export class StudentModel implements ModelLike {
     this.hidden = new Float32Array(this.headHidden)
     this.moveLogits = new Float32Array(MOVE_DIM)
     this.fireLogits = new Float32Array(FIRE_DIM)
-    this.itemLogits = new Float32Array(ITEM_DIM)
     this.valueOut = new Float32Array(1)
   }
 
@@ -424,7 +409,6 @@ export class StudentModel implements ModelLike {
 
     this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
     this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
-    this.linear(this.hidden, this.itemW, this.itemB, this.itemLogits, ITEM_DIM, this.headHidden)
     this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
   }
 

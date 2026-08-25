@@ -1667,3 +1667,10 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 
 **Implications:** codeHash 集内文件 export-rl-rollout.ts 有改动 → 全部远程节点须重新 checkout 到新 commit 才能过门（标准流程）。elapsedSec 语义微变为 exporter 子进程内耗时（少算 spawn 开销，仅日志用）。agent `/v1/status` 新增 `recentFailed`。后续若要进一步压传输成本，可让 /v1/result 支持 ETag 断点续传（当前无需求，不做）。
 
+## 247. M1 分歧探针 — 归因 ①/③ 边界（2026-08-26，plan/AI-No-Items-Warmstart.md §4）
+> 工具 `tools/diag/divergence-probe.ts`（预注册：分歧=学生贪心≠教师标签且 120-tick 内
+> 有可观测后果；三桶 基地高压/交战/巡航；后果代理指标从学生实际轨迹提取，不做双臂重放）。
+> 结果（25 局 hard）：分歧率 70.6%，基地高压桶最高 74.6% 且特征表完整 →
+> 按预注册规则判 **①/③ 边界**（标签或监督）：M3 走 wins-only + 守家帧回补（near-miss
+> 3×），预留 DAgger 交互轮。全文 → docs/nn.progress.md §13.2。
+

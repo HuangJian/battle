@@ -99,13 +99,13 @@ function mkWorld(over: Record<string, unknown> = {}): World {
 }
 
 describe('obs-encoder dimensions', () => {
-  it('exposes the canonical 14×26×26 obs and 24-dim scalar', () => {
+  it('exposes the canonical 14×26×26 obs and 19-dim scalar (v2, items removed)', () => {
     expect(OBS_CHANNELS).toBe(14)
     expect(BOARD).toBe(26)
-    expect(SCALAR_DIM).toBe(24)
+    expect(SCALAR_DIM).toBe(19)
     const enc = new ObsEncoder()
     expect(enc.obs.length).toBe(14 * 26 * 26)
-    expect(enc.scalars.length).toBe(24)
+    expect(enc.scalars.length).toBe(19)
   })
 })
 
@@ -121,19 +121,17 @@ describe('POWERUP_ORDER', () => {
 })
 
 describe('actionFromFrame', () => {
-  const cases: Array<[Direction | null, boolean, boolean, boolean, FrameLabel]> = [
-    [null, false, false, false, { move: 0, fire: 0, item: 0 }],
-    ['up', false, false, false, { move: 1, fire: 0, item: 0 }],
-    ['down', false, false, false, { move: 2, fire: 0, item: 0 }],
-    ['left', false, false, false, { move: 3, fire: 0, item: 0 }],
-    ['right', false, false, false, { move: 4, fire: 0, item: 0 }],
-    ['up', true, false, false, { move: 1, fire: 1, item: 0 }],
-    ['up', false, true, false, { move: 1, fire: 0, item: 1 }],
-    ['up', false, false, true, { move: 1, fire: 0, item: 2 }],
+  const cases: Array<[Direction | null, boolean, FrameLabel]> = [
+    [null, false, { move: 0, fire: 0 }],
+    ['up', false, { move: 1, fire: 0 }],
+    ['down', false, { move: 2, fire: 0 }],
+    ['left', false, { move: 3, fire: 0 }],
+    ['right', false, { move: 4, fire: 0 }],
+    ['up', true, { move: 1, fire: 1 }],
   ]
-  for (const [dir, firing, guard, frenzy, exp] of cases) {
-    it(`dir=${dir} firing=${firing} guard=${guard} frenzy=${frenzy} -> ${JSON.stringify(exp)}`, () => {
-      expect(actionFromFrame({ direction: dir, firing, guard, frenzy })).toEqual(exp)
+  for (const [dir, firing, exp] of cases) {
+    it(`dir=${dir} firing=${firing} -> ${JSON.stringify(exp)}`, () => {
+      expect(actionFromFrame({ direction: dir, firing })).toEqual(exp)
     })
   }
 })
@@ -186,37 +184,22 @@ describe('decisionTick (event-type predicate)', () => {
 })
 
 describe('computeMasks', () => {
-  it('masks fire-hold when cooldown not elapsed', () => {
+  it('masks fire-hold when cooldown not elapsed (v2: no item masks)', () => {
     const w = mkWorld({
       frame: 0,
       player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
-      guardStock: 0,
-      frenzyStock: 0,
     })
     const m = computeMasks(w)
     expect(m.move).toEqual([1, 1, 1, 1, 1])
     expect(m.fire).toEqual([1, 0])
-    expect(m.item).toEqual([1, 0, 0])
   })
-  it('unmasks fire-hold when ready, and items by stock', () => {
+  it('unmasks fire-hold when ready', () => {
     const w = mkWorld({
       frame: 18,
       player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
-      guardStock: 2,
-      frenzyStock: 1,
     })
     const m = computeMasks(w)
     expect(m.fire).toEqual([1, 1])
-    expect(m.item).toEqual([1, 1, 1])
-  })
-  it('enables only guard when frenzy stock is empty', () => {
-    const w = mkWorld({
-      frame: 18,
-      player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
-      guardStock: 1,
-      frenzyStock: 0,
-    })
-    expect(computeMasks(w).item).toEqual([1, 1, 0])
   })
 })
 
@@ -285,7 +268,19 @@ describe('ObsEncoder.encode — spatial channels', () => {
     expect(Array.from(enc.scalars)).toEqual(Array.from(sa))
   })
 
-  it('SCALAR_X_INDICES are the relative-direction x-components (20,23)', () => {
-    expect(SCALAR_X_INDICES).toEqual([20, 23])
+  it('SCALAR_X_INDICES are the relative-direction x-components (15,18) (v2 renumber)', () => {
+    expect(SCALAR_X_INDICES).toEqual([15, 18])
+  })
+
+  it('v2 scalar layout: item inventory scalars removed, rest renumbered', () => {
+    const enc = new ObsEncoder()
+    const w = mkWorld({ enemyCount: 2, spawnQueue: [1, 2, 3] })
+    enc.encode(w)
+    const s = enc.scalars
+    // idx7 = enemiesOnField (was idx12), idx8 = spawnQueueRemaining (was idx13)
+    expect(s[7]).toBeCloseTo(2 / 4, 4) // MAX_ENEMIES_ALIVE=4
+    expect(s[8]).toBeCloseTo(3 / 20, 4)
+    // tier block renumbered to 9..13 (was 14..18); with no enemies all 0
+    for (let i = 9; i <= 13; i++) expect(s[i]).toBe(0)
   })
 })

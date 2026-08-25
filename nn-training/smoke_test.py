@@ -20,7 +20,7 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from schema import (OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM, ITEM_DIM,
+from schema import (OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM,
                     MASK_DIM, OBS_SCHEMA_MAJOR)  # noqa: E402
 from npyio import save_shard, scan_shards  # noqa: E402
 from train_bc import train  # noqa: E402
@@ -35,16 +35,16 @@ def _make_synthetic_shard(n: int, seed: int) -> dict:
     actions = np.stack([
         rng.integers(0, MOVE_DIM, n).astype(np.uint8),
         rng.integers(0, FIRE_DIM, n).astype(np.uint8),
-        rng.integers(0, ITEM_DIM, n).astype(np.uint8),
     ], axis=1)
     masks = np.ones((n, MASK_DIM), dtype=np.uint8)
     # occasionally drop a class to exercise the mask machinery
     drop = rng.random(n) < 0.1
     masks[drop, :MOVE_DIM] = rng.integers(0, 2, (drop.sum(), MOVE_DIM)).astype(np.uint8)
     conditions = rng.integers(0, 4, n).astype(np.uint8)
+    returns = (rng.random(n) * 2).astype(np.float32)  # v2: returns 可选字段
     return {
         "obs": obs, "scalars": scalars, "actions": actions,
-        "masks": masks, "conditions": conditions,
+        "masks": masks, "conditions": conditions, "returns": returns,
     }
 
 
@@ -71,7 +71,7 @@ def main():
     load_state_into(m, out)
     import torch
     dummy = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
-    mv, fr, it = m(dummy, torch.zeros(2, SCALAR_DIM))
+    mv, fr = m(dummy, torch.zeros(2, SCALAR_DIM))
     assert tuple(mv.shape) == (2, MOVE_DIM)
 
     hl = res["history"]["val_loss"]

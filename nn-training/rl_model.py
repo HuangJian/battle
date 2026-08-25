@@ -8,8 +8,8 @@ Do not wire into the student pipeline without updating that plan.
 
 Architecture:
   obs(14×26×26) → ConvIn(14→64) → 11×ResBlock(64) → ConvOut(64→128) → GAP
-  scalars(24) → FC(24→64)
-  concat(128+64=192) → Actor(192→256→10) + Critic(192→256→1)
+  scalars(19) → FC(19→64)
+  concat(128+64=192) → Actor(192→256→7) + Critic(192→256→1)   (v2: item 删除)
 
 Receptive field: 27×27 (104% coverage of 26×26 board)
 Total params: ~999K
@@ -24,11 +24,10 @@ from torch.distributions import Categorical
 
 from schema import OBS_CHANNELS, BOARD, SCALAR_DIM
 
-# Action space dimensions
+# Action space dimensions (v2: item 删除 —— AI 不使用主动道具)
 MOVE_DIM = 5   # none/up/down/left/right
 FIRE_DIM = 2   # hold/fire
-ITEM_DIM = 3   # none/guard/frenzy
-TOTAL_ACTION_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM  # 10
+TOTAL_ACTION_DIM = MOVE_DIM + FIRE_DIM  # 7
 
 
 class ResBlock(nn.Module):
@@ -53,10 +52,10 @@ class RLNet(nn.Module):
 
     Input:
       obs:     (B, 14, 26, 26) uint8 — 14-channel spatial observation
-      scalars: (B, 24) float32 — 24-dim scalar features
+      scalars: (B, 19) float32 — 19-dim scalar features
 
     Output:
-      action_logits: (B, 10) — [move(5), fire(2), item(3)]
+      action_logits: (B, 7) — [move(5), fire(2)]（v2：item 删除）
       value:         (B, 1)  — state value V(s)
     """
 
@@ -131,7 +130,7 @@ class RLNet(nn.Module):
         Forward pass.
 
         Returns:
-            action_logits: (B, 10) raw logits for [move, fire, item]
+            action_logits: (B, 7) raw logits for [move, fire]（v2：item 删除）
             value:         (B, 1)  state value
         """
         # Backbone
@@ -150,7 +149,7 @@ class RLNet(nn.Module):
         h = self.shared(h)            # (B, 256)
 
         # Dual heads
-        action_logits = self.actor(h)  # (B, 10)
+        action_logits = self.actor(h)  # (B, 7)
         value = self.critic(h)         # (B, 1)
 
         return action_logits, value
@@ -169,37 +168,31 @@ class RLNet(nn.Module):
         """
         logits, value = self.forward(obs, scalars)
 
-        # Split logits into move/fire/item heads
+        # Split logits into move/fire heads (v2: item 删除)
         move_logits = logits[:, :MOVE_DIM]
         fire_logits = logits[:, MOVE_DIM:MOVE_DIM + FIRE_DIM]
-        item_logits = logits[:, MOVE_DIM + FIRE_DIM:]
 
         # Create independent distributions
         move_dist = Categorical(logits=move_logits)
         fire_dist = Categorical(logits=fire_logits)
-        item_dist = Categorical(logits=item_logits)
 
         # Sample or use provided action
         if action is None:
             move_action = move_dist.sample()
             fire_action = fire_dist.sample()
-            item_action = item_dist.sample()
-            action = torch.stack([move_action, fire_action, item_action], dim=1)
+            action = torch.stack([move_action, fire_action], dim=1)
         else:
             move_action = action[:, 0]
             fire_action = action[:, 1]
-            item_action = action[:, 2]
 
         # Log probabilities and entropy
         log_prob = (
             move_dist.log_prob(move_action)
             + fire_dist.log_prob(fire_action)
-            + item_dist.log_prob(item_action)
         )
         entropy = (
             move_dist.entropy()
             + fire_dist.entropy()
-            + item_dist.entropy()
         )
 
         return action, log_prob, entropy, value.squeeze(-1)

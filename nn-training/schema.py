@@ -16,17 +16,19 @@ BOARD = 26                 # GRID — 26x26 sub-block grid
 OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 
 # ---- Scalar feature vector ----
-SCALAR_DIM = 24            # plan §1.2 (~24 维, nn3 N9)
+# v2 (OBS_SCHEMA_MAJOR=2): item-inventory scalars removed (guard/frenzy/
+# rewind stock, frenzyActive, frenzyShotsLeft) — 24 → 19 (plan AI-No-Items
+# Warmstart M2 ②). SCALAR_X_INDICES renumbered [20,23] → [15,18].
+SCALAR_DIM = 19
 
-# ---- Action heads ----
+# ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
 MOVE_DIM = 5               # none/up/down/left/right
 FIRE_DIM = 2               # hold-state: 0=release, 1=hold
-ITEM_DIM = 3               # none/guard/frenzy
-MASK_DIM = MOVE_DIM + FIRE_DIM + ITEM_DIM  # 10
+MASK_DIM = MOVE_DIM + FIRE_DIM  # 7
 
 # Schema major version. Written into every npy shard manifest and into the
 # exported weights file. Bump +1 on ANY channel/scalar/action layout change.
-OBS_SCHEMA_MAJOR = 1
+OBS_SCHEMA_MAJOR = 2
 
 # ---- Channel index map (plan §1.1) ----
 CH = {
@@ -65,9 +67,9 @@ TIER_INDEX = {"none": 0, "rookie": 1, "soldier": 2, "veteran": 3, "commander": 4
 DIR_INDEX = {"up": 0, "down": 1, "left": 2, "right": 3}
 DIR_FROM_INDEX = ["up", "down", "left", "right"]
 
-# ---- Scalar layout (plan §1.2). 24 contiguous floats. ----
+# ---- Scalar layout (plan §1.2, v2: 19 floats; item inventory scalars removed). ----
 # Indices that flip sign under mirrorX (relative-direction x-components).
-SCALAR_X_INDICES = [20, 23]
+SCALAR_X_INDICES = [15, 18]
 
 SCALAR_LAYOUT = [
     (0,  "slack"),                 # min enemy killSlack, normalized 0..1
@@ -77,23 +79,18 @@ SCALAR_LAYOUT = [
     (4,  "fireProgress"),          # 0..1 cooldown progress (nextFireInterval)
     (5,  "turnCooldownRemaining"), # 0..1 (turnCooldownMs - elapsed)/cd
     (6,  "ringCompleteness"),      # intact ring cells / 8
-    (7,  "guardStock"),            # guard inventory count (clamped)
-    (8,  "frenzyStock"),           # frenzy inventory count (clamped)
-    (9,  "rewindStock"),           # rewind inventory count (clamped)
-    (10, "frenzyActive"),          # frenzyTimer>0 ? 1 : 0
-    (11, "frenzyShotsLeft"),       # frenzyShotsLeft / some max
-    (12, "enemiesOnField"),        # alive enemies / MAX_ENEMIES_ALIVE
-    (13, "spawnQueueRemaining"),   # remaining queue / enemiesTotal
-    (14, "tier_none"),             # fraction of enemies at tier none
-    (15, "tier_rookie"),
-    (16, "tier_soldier"),
-    (17, "tier_veteran"),
-    (18, "tier_commander"),
-    (19, "nearestEnemyDist"),      # normalized 0..1 by field diagonal
-    (20, "nearestEnemyRelX"),      # dx/dist, -1..1  (FLIPS on mirrorX)
-    (21, "nearestEnemyRelY"),      # dy/dist, -1..1
-    (22, "nearestBaseDist"),       # normalized 0..1
-    (23, "nearestBaseRelX"),       # dx/dist, -1..1  (FLIPS on mirrorX)
+    (7,  "enemiesOnField"),        # alive enemies / MAX_ENEMIES_ALIVE
+    (8,  "spawnQueueRemaining"),   # remaining queue / enemiesTotal
+    (9,  "tier_none"),             # fraction of enemies at tier none
+    (10, "tier_rookie"),
+    (11, "tier_soldier"),
+    (12, "tier_veteran"),
+    (13, "tier_commander"),
+    (14, "nearestEnemyDist"),      # normalized 0..1 by field diagonal
+    (15, "nearestEnemyRelX"),      # dx/dist, -1..1  (FLIPS on mirrorX)
+    (16, "nearestEnemyRelY"),      # dy/dist, -1..1
+    (17, "nearestBaseDist"),       # normalized 0..1
+    (18, "nearestBaseRelX"),       # dx/dist, -1..1  (FLIPS on mirrorX)
 ]
 assert len(SCALAR_LAYOUT) == SCALAR_DIM
 assert sorted(i for i, _ in SCALAR_LAYOUT) == list(range(SCALAR_DIM))

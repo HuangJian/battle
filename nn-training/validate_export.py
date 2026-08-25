@@ -24,9 +24,9 @@ import sys
 
 EXPECT = {
     "obs.npy": ("<u1", (14, 26, 26)),
-    "scalars.npy": ("<f4", (24,)),
-    "actions.npy": ("<u1", (3,)),
-    "masks.npy": ("<u1", (10,)),
+    "scalars.npy": ("<f4", (19,)),
+    "actions.npy": ("<u1", (2,)),   # v2: [move, fire]，item 头删除
+    "masks.npy": ("<u1", (7,)),     # v2: [move5, fire2]
     "conditions.npy": ("<u1", ()),
 }
 
@@ -73,7 +73,7 @@ def main():
 
     total = 0
     cond_counts = [0, 0, 0, 0]
-    action_range = {"move": [99, -1], "fire": [99, -1], "item": [99, -1]}
+    action_range = {"move": [99, -1], "fire": [99, -1]}
     mask_bad = 0
     scalar_oob = 0
     obs_nonempty = 0
@@ -105,29 +105,26 @@ def main():
 
         acts = arrays["actions.npy"]
         for i in range(N):
-            m, fr, it = acts[i * 3], acts[i * 3 + 1], acts[i * 3 + 2]
+            m, fr = acts[i * 2], acts[i * 2 + 1]
             action_range["move"] = [min(action_range["move"][0], m), max(action_range["move"][1], m)]
             action_range["fire"] = [min(action_range["fire"][0], fr), max(action_range["fire"][1], fr)]
-            action_range["item"] = [min(action_range["item"][0], it), max(action_range["item"][1], it)]
             if not (0 <= m <= 4):
                 errs.append(f"{os.path.basename(sd)}: move label {m} out of [0,4]")
             if not (0 <= fr <= 1):
                 errs.append(f"{os.path.basename(sd)}: fire label {fr} out of [0,1]")
-            if not (0 <= it <= 2):
-                errs.append(f"{os.path.basename(sd)}: item label {it} out of [0,2]")
 
         masks = arrays["masks.npy"]
         for i in range(N):
-            mrow = masks[i * 10 : i * 10 + 10]
+            mrow = masks[i * 7 : i * 7 + 7]
             if any(v not in (0, 1) for v in mrow):
                 mask_bad += 1
-            if mrow[0] != 1 or mrow[5] != 1 or mrow[7] != 1:
-                # move[0], fire[0](release-valid), item[0](none-valid) must always be 1
+            if mrow[0] != 1 or mrow[5] != 1:
+                # move[0], fire[0](release-valid) must always be 1
                 mask_bad += 1
 
         sc = arrays["scalars.npy"]
         # All scalars are normalized: most in [0,1]; the relative-direction
-        # x/y components (indices 20,21,22,23) are in [-1,1]. So the valid
+        # x/y components (indices 14,15,16,17,18) are in [-1,1]. So the valid
         # range for every scalar is [-1,1].
         for v in sc:
             if not (-1.001 <= v <= 1.001):
@@ -143,7 +140,7 @@ def main():
     print(f"shards            : {len(shards)}")
     print(f"total samples     : {total}")
     print(f"condition dist    : turn={cond_counts[0]} fire={cond_counts[1]} item={cond_counts[2]} subsample={cond_counts[3]}")
-    print(f"action ranges     : move={tuple(action_range['move'])} fire={tuple(action_range['fire'])} item={tuple(action_range['item'])}")
+    print(f"action ranges     : move={tuple(action_range['move'])} fire={tuple(action_range['fire'])}")
     print(f"obs non-empty     : {obs_nonempty}/{total}")
     print(f"mask violations   : {mask_bad}")
     print(f"scalar out-of-[0,1]: {scalar_oob}")

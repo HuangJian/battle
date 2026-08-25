@@ -23,7 +23,6 @@ from schema import (
     DIRECTION_CHANNELS,
     MOVE_DIM,
     FIRE_DIM,
-    ITEM_DIM,
     MASK_DIM,
 )
 
@@ -49,7 +48,10 @@ def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):
 
 
 class NNDataset(Dataset):
-    """Wraps a concatenated sample dict; applies mirrorX on training draws."""
+    """Wraps a concatenated sample dict; applies mirrorX on training draws.
+
+    v2: actions = (N,2) [move, fire]；masks = (N,7) [move5, fire2]（item 头删除）。
+    """
 
     def __init__(
         self,
@@ -60,9 +62,15 @@ class NNDataset(Dataset):
     ):
         self.obs = data["obs"].astype(np.uint8)
         self.scalars = data["scalars"].astype(np.float32)
-        self.actions = data["actions"].astype(np.int64)   # (N,3) move,fire,item
-        self.masks = data["masks"].astype(np.float32)      # (N,10)
+        self.actions = data["actions"].astype(np.int64)   # (N,2) move,fire
+        self.masks = data["masks"].astype(np.float32)      # (N,7)
         self.conditions = data["conditions"].astype(np.int64)
+        # v2: returns.npy（M3 value 头 MC 预置）可选——不存在时 n/a
+        self.returns = (
+            data["returns"].astype(np.float32)
+            if "returns" in data
+            else np.full(self.actions.shape[0], np.nan, dtype=np.float32)
+        )
         self.augment = augment
         self.mirror_p = mirror_p
         self.rng = rng or np.random.default_rng(0)
@@ -76,8 +84,8 @@ class NNDataset(Dataset):
         sc = self.scalars[idx]
         mv = int(self.actions[idx, 0])
         fr = int(self.actions[idx, 1])
-        it = int(self.actions[idx, 2])
         mask = self.masks[idx]
+        ret = self.returns[idx]
         if self.augment and self.rng.random() < self.mirror_p:
             obs, sc, mv = mirror_x(obs, sc, mv)
         # Torch expects (C,H,W); obs is (C,H,W) already.
@@ -86,10 +94,9 @@ class NNDataset(Dataset):
             sc,
             mv,
             fr,
-            it,
             mask[:MOVE_DIM],
             mask[MOVE_DIM:MOVE_DIM + FIRE_DIM],
-            mask[MOVE_DIM + FIRE_DIM:MOVE_DIM + FIRE_DIM + ITEM_DIM],
+            ret,
         )
 
 

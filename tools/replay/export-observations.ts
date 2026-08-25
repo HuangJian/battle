@@ -6,6 +6,12 @@
  *   (obs-encoder(world), human frame, invalid-action mask, decision condition)
  * and write one npy shard per replay plus a manifest.json.
  *
+ * v2 (plan/AI-No-Items-Warmstart.md M2, OBS_SCHEMA_MAJOR=2)：
+ *   · item 头删除 —— actions→(N,2) [move,fire]，masks→(N,7)；
+ *   · 道具动作帧过滤（a_item≠none 剔除，与新政策一致；实测 ~0.07% 决策帧）；
+ *   · returns：按 RL reward 定义（tools/sim/rl-reward.ts）逐决策帧结算、
+ *     γ=0.995 折现为 return，落盘 returns.npy（M3 value 头 MC 预置）。
+ *
  * Acceptance gate (plan §2.1 / §0): every replay is first re-verified with
  * verifyReplayText (terminal-state + tick-hash chain). Desynced replays are
  * skipped and logged — they never poison the training set.
@@ -20,13 +26,13 @@
  * Usage:
  *   bun tools/replay/export-observations.ts nn-demo/*.ndjson --out tmp/nn-export
  *   bun tools/replay/export-observations.ts nn-demo/*.ndjson --out tmp/nn-export --skip-verify
- *   bun tools/replay/export-observations.ts nn-demo/bc-replays-s1-s2.ndjson --out tmp/nn-det --verify-determinism
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
+import { START_LIVES, GRID, CELL, ENEMIES_PER_STAGE } from '../../src/constants'
 import { ReplayInput } from '../../src/replay/ReplayInput'
 import { parseReplayFile } from '../../src/replay/file'
 import { restoreWorld } from '../../src/snapshot/WorldSerializer'
@@ -40,26 +46,54 @@ import {
   actionFromFrame,
   computeMasks,
   OBS_SCHEMA_MAJOR,
+  SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
-import { writeShard } from '../../src/nn/npy'
+import { writeNpy } from '../../src/nn/npy'
 import { mkdirSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { basename } from 'path'
 import { platform, arch, cpus } from 'os'
+import {
+  REWARD_SCALE,
+  discountReturns,
+  phiNow,
+  countBaseWall,
+  sampleBasePressure,
+  TELEMETRY_SAMPLE_TICKS,
+  type PhiCounters,
+} from '../sim/rl-reward'
+import { scoreRun, V7_SCORE_CONFIG, type Weights } from '../eval/godai-score'
+import type { RunTelemetry } from '../sim/simulation-runner'
 
-const EXPORTER_VERSION = '0.2.0'
+const EXPORTER_VERSION = '2.0.0'
 const K = 10 // subsample period (plan §1.3)
+const MASK_DIM = 7
+
+const RL_SCORE_CONFIG = {
+  ...V7_SCORE_CONFIG,
+  lossWeights: {
+    progress: 0.3,
+    baseIntegrity: 0.25,
+    baseSafety: 0.25,
+    tempo: 0.08,
+    accuracy: 0.06,
+    openingTempo: 0.03,
+    loot: 0.03,
+  } as Weights,
+}
 
 interface Accumulator {
   obs: Uint8Array[]
   scalars: Float32Array[]
-  actions: number[]
+  actions: number[] // [move, fire] pairs, flattened
   masks: number[]
   conditions: number[]
+  rewards: number[] // v2: RL reward per sample（terminal-anchored, Σ ≡ SCALE×gatedScore）
   nTurn: number
   nFire: number
   nItem: number
   nItemEvents: number // raw guard/frenzy bit-changes (gate ⑤ cross-check)
   nSub: number
+  nFilteredItem: number // v2: 剔除的道具动作帧数
   nSamples: number
 }
 
@@ -70,10 +104,12 @@ function newAcc(): Accumulator {
     actions: [],
     masks: [],
     conditions: [],
+    rewards: [],
     nTurn: 0,
     nFire: 0,
     nItem: 0,
     nItemEvents: 0,
+    nFilteredItem: 0,
     nSub: 0,
     nSamples: 0,
   }
@@ -84,6 +120,60 @@ interface ExportResult {
   meta: Record<string, unknown>
   ok: boolean
   reason: string
+}
+
+interface Tel {
+  enemyTotal: number
+  startLives: number
+  playerDeaths: number
+  playerShots: number
+  powerUpsSpawned: number
+  powerUpsCollected: number
+  starsCollected: number
+  baseWallTotal: number
+  baseWallIntact: number
+  basePressureSum: number
+  basePressureSamples: number
+  cellsVisited: Set<number>
+  firstKillTick: number | undefined
+}
+
+function newTel(stage: unknown, world: World): Tel {
+  return {
+    enemyTotal: (stage as { enemyCount?: number })?.enemyCount ?? ENEMIES_PER_STAGE,
+    startLives: world.difficulty?.startLives ?? START_LIVES,
+    playerDeaths: 0,
+    playerShots: 0,
+    powerUpsSpawned: 0,
+    powerUpsCollected: 0,
+    starsCollected: 0,
+    baseWallTotal: countBaseWall(world),
+    baseWallIntact: countBaseWall(world),
+    basePressureSum: 0,
+    basePressureSamples: 0,
+    cellsVisited: new Set<number>(),
+    firstKillTick: undefined,
+  }
+}
+
+function makeCounters(tel: Tel, world: World, ticks: number, baseAlive: boolean): PhiCounters {
+  return {
+    enemyTotal: tel.enemyTotal,
+    startLives: tel.startLives,
+    kills: world.killCount,
+    lives: world.lives,
+    ticks,
+    baseAlive,
+    baseWallTotal: tel.baseWallTotal,
+    baseWallIntact: tel.baseWallIntact,
+    playerShots: tel.playerShots,
+    powerUpsCollected: tel.powerUpsCollected,
+    powerUpsSpawned: tel.powerUpsSpawned,
+    basePressureMean:
+      tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
+    basePressureSamples: tel.basePressureSamples,
+    firstKillTick: tel.firstKillTick,
+  }
 }
 
 export function exportReplay(text: string, fileLabel: string, skipVerify: boolean): ExportResult {
@@ -126,13 +216,18 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
   const frames1: InputFrame[] = unpackFrames(replay.frames)?.p1 ?? []
   const encoder = new ObsEncoder()
   const acc = newAcc()
+  const tel = newTel(stage, world)
+  const seenPuIds = new Set<number>()
+  let prevLivePuIds = new Set<number>()
 
+  const phis: number[] = [] // Φ(捕获样本状态)，长度 == acc.nSamples
   let prevDir: Direction | null = null
   let prevGuard = false
   let prevFrenzy = false
   let t = 0
   const startState = world.state
   const encStart = performance.now()
+  let outcome: 'stage_clear' | 'base_destroyed' | 'lives_exhausted' | 'timeout' = 'timeout'
 
   while (!input.isFinished && t < replay.totalTicks + 10) {
     // obs(t): world state BEFORE tick t's human input is consumed (plan §1.3 phase).
@@ -155,34 +250,128 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
       K,
     )
     if (isDecision) {
-      const label = actionFromFrame(
-        cur ?? { direction: null, firing: false, guard: false, frenzy: false },
-      )
-      const masks = computeMasks(world)
-      acc.obs.push(encoder.obs.slice())
-      acc.scalars.push(encoder.scalars.slice())
-      acc.actions.push(label.move, label.fire, label.item)
-      acc.masks.push(...masks.move, ...masks.fire, ...masks.item)
-      acc.conditions.push(condition)
-      if (condition === 0) acc.nTurn++
-      else if (condition === 1) acc.nFire++
-      else if (condition === 2) acc.nItem++
-      else acc.nSub++
-      acc.nSamples++
+      // v2: 道具动作帧剔除（guard/frenzy 任一激活 → 不入训练样本）
+      if (curGuard || curFrenzy) {
+        acc.nFilteredItem++
+      } else {
+        const label = actionFromFrame({ direction: curDir, firing: cur?.firing ?? false })
+        const masks = computeMasks(world)
+        acc.obs.push(encoder.obs.slice())
+        acc.scalars.push(encoder.scalars.slice())
+        acc.actions.push(label.move, label.fire)
+        acc.masks.push(...masks.move, ...masks.fire)
+        acc.conditions.push(condition)
+        const baseAlive = !world.tileMap.isBaseDestroyed()
+        tel.baseWallIntact = countBaseWall(world)
+        phis.push(phiNow(makeCounters(tel, world, t, baseAlive)))
+        if (condition === 0) acc.nTurn++
+        else if (condition === 1) acc.nFire++
+        else if (condition === 2) acc.nItem++
+        else acc.nSub++
+        acc.nSamples++
+      }
     }
 
     sim.tick()
     input.advance()
-    world.consumeEvents?.()
+    // ---- telemetry（语义对齐 simulation-runner）----
+    let collectedThisTick = 0
+    for (const e of world.consumeEvents()) {
+      if (e.type === 'tank_destroyed') {
+        if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t
+        if ((e as any).tank?.isPlayer) tel.playerDeaths++
+      } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
+        tel.playerShots++
+      } else if (e.type === 'powerup_collected') {
+        collectedThisTick++
+        tel.powerUpsCollected++
+        if ((e as any).powerUp === 'star') tel.starsCollected++
+      }
+    }
+    {
+      const live = new Set<number>()
+      for (const pu of world.powerUps) {
+        live.add(pu.id)
+        if (!seenPuIds.has(pu.id)) {
+          seenPuIds.add(pu.id)
+          tel.powerUpsSpawned++
+        }
+      }
+      let vanished = 0
+      for (const id of prevLivePuIds) if (!live.has(id)) vanished++
+      tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
+      prevLivePuIds = live
+    }
+    if (t % TELEMETRY_SAMPLE_TICKS === 0) {
+      tel.basePressureSum += sampleBasePressure(world)
+      tel.basePressureSamples++
+      if (world.player?.alive) {
+        const col = Math.floor((world.player.x + world.player.w / 2) / CELL)
+        const row = Math.floor((world.player.y + world.player.h / 2) / CELL)
+        tel.cellsVisited.add(row * GRID + col)
+      }
+    }
     prevDir = curDir
     prevGuard = curGuard
     prevFrenzy = curFrenzy
     t++
     const st: string = world.state
-    if (st === 'stageclear' || st === 'gameover' || st === 'victory') break
+    if (st === 'stageclear' || st === 'victory' || st === 'gameover') {
+      outcome =
+        st === 'gameover'
+          ? world.tileMap.isBaseDestroyed()
+            ? 'base_destroyed'
+            : 'lives_exhausted'
+          : 'stage_clear'
+      break
+    }
   }
-  const encEnd = performance.now()
+  // 超时（replay 截断但未清关）→ 按 replay.type 兜底
+  if (outcome === 'timeout' && replay.type === 'clear') outcome = 'stage_clear'
 
+  // ---- 终局打分 + reward（telescoping）----
+  const baseAliveFinal = !world.tileMap.isBaseDestroyed()
+  tel.baseWallIntact = countBaseWall(world)
+  const scorable = {
+    outcome,
+    ticks: t,
+    finalState: {
+      killCount: world.killCount,
+      lives: world.lives,
+      baseAlive: baseAliveFinal,
+    },
+    firstKillTick: tel.firstKillTick,
+    telemetry: {
+      enemyTotal: tel.enemyTotal,
+      startLives: tel.startLives,
+      playerDeaths: tel.playerDeaths,
+      playerShots: tel.playerShots,
+      powerUpsSpawned: tel.powerUpsSpawned,
+      powerUpsCollected: tel.powerUpsCollected,
+      starsCollected: tel.starsCollected,
+      finalPlayerLevel: world.playerLevel,
+      baseWallIntact: tel.baseWallIntact,
+      baseWallTotal: tel.baseWallTotal,
+      basePressureMean:
+        tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
+      basePressureSamples: tel.basePressureSamples,
+      cellsVisited: tel.cellsVisited.size,
+      deaths: [],
+    } satisfies Omit<RunTelemetry, 'deaths'> & { deaths: never[] },
+  } as any
+  const scored = scoreRun(scorable, RL_SCORE_CONFIG as any)
+  const gatedScore = outcome === 'base_destroyed' ? scored.score * 0.1 : scored.score
+  const phiFinal = phiNow(makeCounters(tel, world, t, baseAliveFinal))
+  const n = phis.length
+  for (let i = 0; i < n; i++) {
+    const next = i + 1 < n ? phis[i + 1] : phiFinal
+    acc.rewards.push(next - phis[i])
+  }
+  if (n > 0) {
+    acc.rewards[n - 1] += REWARD_SCALE * gatedScore - (phiFinal - phis[0])
+  }
+
+  const encEnd = performance.now()
   const out: Record<string, unknown> = {
     stage: meta.stage,
     outcome: replay.type,
@@ -192,6 +381,9 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
     totalTicks: replay.totalTicks,
     nSamples: acc.nSamples,
     conditionBreakdown: { turn: acc.nTurn, fire: acc.nFire, item: acc.nItem, subsample: acc.nSub },
+    filteredItemFrames: acc.nFilteredItem,
+    gatedScore,
+    score: scored.score,
     encodeMs: encEnd - encStart,
     ticks: t,
     usPerTick: ((encEnd - encStart) * 1000) / Math.max(1, t),
@@ -208,18 +400,20 @@ function flushShard(
   const N = acc.nSamples
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
-  const scalars = new Float32Array(N * 24)
-  const actions = new Uint8Array(N * 3)
-  const masks = new Uint8Array(N * 10)
+  const scalars = new Float32Array(N * SCALAR_DIM)
+  const actions = new Uint8Array(N * 2)
+  const masks = new Uint8Array(N * MASK_DIM)
   const conditions = new Uint8Array(N)
+  const returns = new Float32Array(N)
+  const ret = discountReturns(acc.rewards)
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * 14 * 26 * 26)
-    scalars.set(acc.scalars[i], i * 24)
-    actions[i * 3] = acc.actions[i * 3]
-    actions[i * 3 + 1] = acc.actions[i * 3 + 1]
-    actions[i * 3 + 2] = acc.actions[i * 3 + 2]
-    for (let j = 0; j < 10; j++) masks[i * 10 + j] = acc.masks[i * 10 + j]
+    scalars.set(acc.scalars[i], i * SCALAR_DIM)
+    actions[i * 2] = acc.actions[i * 2]
+    actions[i * 2 + 1] = acc.actions[i * 2 + 1]
+    for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = acc.masks[i * MASK_DIM + j]
     conditions[i] = acc.conditions[i]
+    returns[i] = ret[i]
   }
   const manifest = {
     schemaMajor: OBS_SCHEMA_MAJOR,
@@ -230,7 +424,14 @@ function flushShard(
     conditionBreakdown: baseManifest.conditionBreakdown,
     ...baseManifest,
   }
-  writeShard(dir, { obs, scalars, actions, masks, conditions }, manifest)
+  mkdirSync(dir, { recursive: true })
+  writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
+  writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
+  writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
+  writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
+  writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')
+  writeNpy(`${dir}/returns.npy`, returns, [N], 'f4')
+  writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
   // also drop a tiny npy summary for quick inspection
   writeFileSync(`${dir}/_summary.json`, JSON.stringify(manifest, null, 2))
 }
@@ -337,6 +538,7 @@ async function main(): Promise<void> {
   let kept = 0
   let skipped = 0
   let totalSamples = 0
+  let totalFilteredItem = 0
   let totalEncodeMs = 0
   let totalTicks = 0
   const perFile: string[] = []
@@ -365,17 +567,20 @@ async function main(): Promise<void> {
       kept++
       const m = res.meta as any
       totalSamples += m.nSamples ?? 0
+      totalFilteredItem += m.filteredItemFrames ?? 0
       totalEncodeMs += m.encodeMs ?? 0
       totalTicks += m.ticks ?? 0
       perFile.push(
-        `[OK]   ${label} samples=${m.nSamples} stage=${m.stage} outcome=${m.outcome} encMs=${m.encodeMs?.toFixed?.(1)}`,
+        `[OK]   ${label} samples=${m.nSamples} stage=${m.stage} outcome=${m.outcome} filteredItem=${m.filteredItemFrames} encMs=${m.encodeMs?.toFixed?.(1)}`,
       )
     }
   }
 
   console.log(perFile.join('\n'))
   console.log(`\n=== export summary ===`)
-  console.log(`replays total=${total} kept=${kept} skipped=${skipped} samples=${totalSamples}`)
+  console.log(
+    `replays total=${total} kept=${kept} skipped=${skipped} samples=${totalSamples} filteredItemFrames=${totalFilteredItem}`,
+  )
   const usPerTick = (totalEncodeMs * 1000) / Math.max(1, totalTicks)
   console.log(
     `encode time: ${totalEncodeMs.toFixed(1)}ms over ${totalTicks} ticks = ${usPerTick.toFixed(3)} us/tick`,
@@ -389,6 +594,7 @@ async function main(): Promise<void> {
         kept,
         skipped,
         totalSamples,
+        totalFilteredItem,
         outDir,
         skipVerify,
         perf: {

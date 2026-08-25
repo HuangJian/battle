@@ -80,14 +80,10 @@ export class NNInput implements InputLike {
   // the last commanded direction instead, which keeps the state active.
   private lastDir: Direction = 'up'
   private firing = false
-  private guardPulse = false
-  private frenzyPulse = false
 
   // per-tick evaluation guard
   private thought = false
   private forceThink = true // think at least once after reset()
-  private prevGuardStock = 0
-  private prevFrenzyStock = 0
 
   constructor(world: World, opts: NNInputOptions = {}) {
     this.world = world
@@ -105,18 +101,15 @@ export class NNInput implements InputLike {
     return this.firing
   }
 
-  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
-    if (!this.thought) this.think()
-    if (kind === 'guard') return this.guardPulse
-    if (kind === 'frenzy') return this.frenzyPulse
+  // v2: AI 不使用主动道具 — guard/frenzy/rewind 一律不激活。
+  wasItemPressed(kind?: 'guard' | 'frenzy' | 'rewind'): false {
+    void kind
     return false
   }
 
   endFrame(): void {
-    // Release the per-tick edge pulses and allow a fresh decision next tick.
+    // Allow a fresh decision next tick (edge pulses only — no items in v2).
     this.thought = false
-    this.guardPulse = false
-    this.frenzyPulse = false
   }
 
   reset(): void {
@@ -125,10 +118,6 @@ export class NNInput implements InputLike {
     this.moveDir = null
     this.lastDir = 'up'
     this.firing = false
-    this.guardPulse = false
-    this.frenzyPulse = false
-    this.prevGuardStock = 0
-    this.prevFrenzyStock = 0
   }
 
   /**
@@ -160,13 +149,9 @@ export class NNInput implements InputLike {
     const w = this.world
 
     // Decide whether a new decision is due this tick.
+    // v2: no item events — decision cadence is forceThink + K-subsample.
     const frame = w.frame
-    const guardStock = w.guardStock
-    const frenzyStock = w.frenzyStock
-    const itemAppeared = guardStock > this.prevGuardStock || frenzyStock > this.prevFrenzyStock
-    const due = this.forceThink || frame % this.K === 0 || itemAppeared
-    this.prevGuardStock = guardStock
-    this.prevFrenzyStock = frenzyStock
+    const due = this.forceThink || frame % this.K === 0
 
     if (!due) {
       // Hold the previously committed action; do NOT run the conv forward.
@@ -206,17 +191,7 @@ export class NNInput implements InputLike {
     const fireHold = fr[1] > fr[0] && masks.fire[1] === 1
     this.firing = fireHold
 
-    // --- item head (argmax over 3: 0 none, 1 guard, 2 frenzy) ---
-    const it = this.model.itemLogits
-    let bestItem = 0
-    let bestItemV = it[0]
-    for (let i = 1; i < 3; i++)
-      if (it[i] > bestItemV) {
-        bestItemV = it[i]
-        bestItem = i
-      }
-    this.guardPulse = bestItem === 1 && masks.item[1] === 1
-    this.frenzyPulse = bestItem === 2 && masks.item[2] === 1
+    // v2: item head removed — AI never activates guard/frenzy/rewind.
 
     this.forceThink = false
     this.thought = true

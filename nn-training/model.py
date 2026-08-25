@@ -1,10 +1,10 @@
 """
-NN policy network — fully-convolutional backbone + scalar fusion + 3 factored heads.
+NN policy network — fully-convolutional backbone + scalar fusion + 2 factored heads.
 
-Architecture (v2 — scalars fused):
+Architecture (v2 — scalars fused, item head removed):
   obs  → Conv(14→32→48→64) → GAP → (B, 64)
-  scalars (24-dim) → (B, 24)
-  concat → (B, 88) → FC(88→64) → ReLU → heads
+  scalars (19-dim) → (B, 19)
+  concat → (B, 83) → FC(83→64) → ReLU → heads
 
 Design constraints (plan §NN-M1):
   * Only ReLU activations + self-implemented softmax at inference time, so
@@ -13,17 +13,16 @@ Design constraints (plan §NN-M1):
   * Parameter budget <= ~200K. With conv_ch=(32,48,64) + scalar fusion
     this lands ~112K — deliberately small to match the 40-120K BC sample count.
 
-Heads:
+Heads (v2):
   move  : 5  (none/up/down/left/right)   — predicted desired direction (hold)
   fire  : 2  (hold-state 0/1)            — label = firing bit at decision tick
-  item  : 3  (none/guard/frenzy)        — guard/frenzy pulse (rewind deferred)
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM, ITEM_DIM
+from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
 
 DEFAULT_CONV_CH = (32, 48, 64)
 DEFAULT_HEAD_HIDDEN = 64
@@ -61,7 +60,6 @@ class NNPolicy(nn.Module):
 
         self.move_head = nn.Linear(head_hidden, MOVE_DIM, bias=True)
         self.fire_head = nn.Linear(head_hidden, FIRE_DIM, bias=True)
-        self.item_head = nn.Linear(head_hidden, ITEM_DIM, bias=True)
 
         self._init_weights()
 
@@ -86,11 +84,11 @@ class NNPolicy(nn.Module):
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         obs     : (B, 14, 26, 26) uint8
-        scalars : (B, 24) float32 — 24-dim feature vector fused into the FC layer
-        Returns (move_logits, fire_logits, item_logits), each (B, K).
+        scalars : (B, 19) float32 — 19-dim feature vector fused into the FC layer
+        Returns (move_logits, fire_logits).
         """
         x = obs.float()
         x = self.conv(x)                 # (B, C, 26, 26)
@@ -98,7 +96,7 @@ class NNPolicy(nn.Module):
         x = x.flatten(1)                # (B, C)
         x = torch.cat([x, scalars], dim=1)  # (B, C + scalar_dim)
         h = self.fc_relu(self.fc(x))    # (B, head_hidden)
-        return self.move_head(h), self.fire_head(h), self.item_head(h)
+        return self.move_head(h), self.fire_head(h)
 
     @torch.no_grad()
     def predict(self, obs: torch.Tensor, scalars: torch.Tensor | None = None):
@@ -106,11 +104,10 @@ class NNPolicy(nn.Module):
         self.eval()
         if scalars is None:
             scalars = torch.zeros(obs.shape[0], self.scalar_dim)
-        m, f, i = self.forward(obs, scalars)
+        m, f = self.forward(obs, scalars)
         return (
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),
-            torch.softmax(i, dim=-1),
         )
 
 
@@ -124,5 +121,5 @@ if __name__ == "__main__":
     print(f"NNPolicy params: {n} (~{n/1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
-    mv, fr, it = m(dummy_obs, dummy_sc)
-    print("move", tuple(mv.shape), "fire", tuple(fr.shape), "item", tuple(it.shape))
+    mv, fr = m(dummy_obs, dummy_sc)
+    print("move", tuple(mv.shape), "fire", tuple(fr.shape))
