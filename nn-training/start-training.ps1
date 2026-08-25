@@ -18,16 +18,19 @@ start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerS
   .\start-training.ps1 -Script train_rl.py --num-envs 4 --num-steps 2048
   .\start-training.ps1 -Script eval_bridge.py --data-dir <shards>
   .\start-training.ps1 -Force -TorchThreads 8
+  .\start-training.ps1 -KillPrevious -Detach -Script run_rl.py   # 一键带杀重启 RL
 
   注：-Script 之后的所有“未知”参数（--data-dir/--arch/--epochs 等）原样透传给
   目标脚本 —— 本脚本不自带参数校验（无 [CmdletBinding]），故不会把它们当绑定
-  错误。真正被本脚本消费的：-Force -Check -Echo -Help -Detach -Script
-  -TorchThreads；其余全部进入 $args 转发。
+  错误。真正被本脚本消费的：-Force -KillPrevious -Check -Echo -Help -Detach
+  -Script -TorchThreads；其余全部进入 $args 转发。
 
 锁策略（同 bash 版）：本脚本不写锁文件。.train_loop.lock 由 train_loop.py 独占
 管理（acquire_lock()/cleanup_lock()），避免 shell-PID / Python-PID 错配导致
 Windows 双起。-Force 只在 pre-flight 跳过「已有训练运行」检查，真正清理 stale
-锁仍交给 Python 端。
+锁仍交给 Python 端。-KillPrevious（R6 新增）：启动前按 --script 名清杀旧的
+python 训练进程（排除自身/父进程，仅匹配 python* 进程名防误伤）——专为无锁的
+run_rl.py 一键带杀重启；bun 在途局子进程不杀，自然结算落盘供断点续跑回收。
 
 退出码：0=成功  2=用法错误  3=找不到系统 python  4=torch 装不上
 #>
@@ -35,6 +38,7 @@ Windows 双起。-Force 只在 pre-flight 跳过「已有训练运行」检查�
 $ErrorActionPreference = 'Stop'
 
 $Force = $false; $Check = $false; $Echo = $false; $Help = $false; $Detach = $false
+$KillPrevious = $false
 $Script = 'train_loop.py'
 $ScriptArgs = @()
 $TorchThreads = 0
@@ -48,6 +52,7 @@ while ($i -lt $args.Count) {
   $a = $args[$i]
   switch -Regex ($a) {
     '^--?force$'         { $Force = $true }
+    '^--?(kill-previous|killprevious)$' { $KillPrevious = $true }
     '^--?check$'         { $Check = $true }
     '^--?echo$'          { $Echo = $true }
     '^--?help$'          { $Help = $true }
@@ -178,6 +183,26 @@ if (-not $Force -and $Script -eq 'train_loop.py' -and (Test-Path $LockFile)) {
     }
   }
   # stale 锁：交给 train_loop.py 的 acquire_lock() 清除
+}
+
+# ── -KillPrevious：按 --script 名清杀上一轮训练进程 ──────────────────
+# 仅匹配 python* 进程名（防误伤把脚本名当参数的外层 shell/编辑器/终端宿主），
+# 排除自身($PID)与父进程。bun 在途局子进程不杀——自然结算落盘，断点续跑可回收。
+if ($KillPrevious) {
+  $pat = '(?<![A-Za-z0-9_])' + [regex]::Escape($Script) + '(?![A-Za-z0-9_])'
+  $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+  $victims = @(Get-CimInstance Win32_Process | Where-Object {
+      $_.ProcessId -ne $PID -and $_.ProcessId -ne $parentPid -and
+      $_.Name -match '^python' -and $_.CommandLine -and $_.CommandLine -match $pat })
+  if ($victims.Count -gt 0) {
+    foreach ($v in $victims) {
+      Log ("kill-previous: stopping pid={0} ({1})" -f $v.ProcessId, $v.Name)
+      Stop-Process -Id $v.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 1
+  } else {
+    Log "kill-previous: no previous trainer matched ($Script)"
+  }
 }
 
 # ── 启动 ─────────────────────────────────────────────────────────────

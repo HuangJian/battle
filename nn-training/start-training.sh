@@ -20,11 +20,15 @@
 #   ./start-training.sh --script eval_bridge.py --data-dir <shards>
 #   ./start-training.sh --rounds 5 --epochs-per-round 60 --lr 1e-3    # 转发给 train_loop.py
 #   ./start-training.sh --force --torch-threads 8
+#   ./start-training.sh --kill-previous --detach --script run_rl.py  # 一键带杀重启 RL
 #
 # 锁策略（沿袭原版）：本脚本不写锁文件。.train_loop.lock 由 train_loop.py 独占
 # 管理（通过 acquire_lock()/cleanup_lock()），避免 shell-PID / Python-PID 错配
 # 导致的 Windows 双起。--force 只在脚本侧 pre-flight 跳过「已有训练运行」检查，
-# 真正清理 stale 锁仍交给 Python 端。
+# 真正清理 stale 锁仍交给 Python 端。--kill-previous（R6 新增）：启动前按
+# --script 名清杀旧的 python 训练进程（pgrep -f 匹配；排除自身/$PPID，仅杀
+# 命令行含 python 的进程防误伤）——专为无锁的 run_rl.py 一键带杀重启；bun 在途
+# 局子进程不杀，自然结算落盘供断点续跑回收。
 #
 # 退出码：0=成功  2=用法错误  3=找不到系统 python  4=torch 装不上
 #
@@ -74,7 +78,7 @@ to_win_path() {
 }
 
 # ── 解析 CLI ─────────────────────────────────────────────────────────
-FORCE=0; CHECK=0; ECHO=0; HELP=0; DETACH=0
+FORCE=0; CHECK=0; ECHO=0; HELP=0; DETACH=0; KILLPREV=0
 SCRIPT="train_loop.py"
 SCRIPT_ARGS=()
 TT_CLI=""
@@ -85,6 +89,7 @@ while [ "$I" -lt "$#" ]; do
   A="${CLI_ARGS[$I]}"; I=$((I+1))
   case "$A" in
     --force)   FORCE=1 ;;
+    --kill-previous|--KillPrevious|--killprevious) KILLPREV=1 ;;
     --check)   CHECK=1 ;;
     --echo)    ECHO=1 ;;
     --help)    HELP=1 ;;
@@ -225,6 +230,36 @@ if [ "$FORCE" != "1" ] && [ "$SCRIPT" = "train_loop.py" ] && [ -f "$LOCK_FILE" ]
     exit 0
   fi
   # stale 锁：交给 train_loop.py 的 acquire_lock() 清除
+fi
+
+# ── --kill-previous：按 --script 名清杀上一轮训练进程 ────────────────
+# pgrep -f 匹配命令行含本 <script>.py 的进程；排除自身($$)与父 shell($PPID)，
+# 且只杀命令行含 python 的进程（防误伤把脚本名当参数的外层 runner/编辑器）。
+# bun 在途局子进程不杀——自然结算落盘，断点续跑可回收。
+if [ "$KILLPREV" = "1" ]; then
+  if command -v pgrep >/dev/null 2>&1; then
+    KILLED=0
+    for PID_ in $(pgrep -f "$SCRIPT" 2>/dev/null); do
+      [ "$PID_" = "$$" ] && continue
+      [ "$PID_" = "$PPID" ] && continue
+      CMD_="$(ps -p "$PID_" -o command= 2>/dev/null || true)"
+      case "$CMD_" in
+        *python*) ;;
+        *) continue ;;
+      esac
+      if kill -9 "$PID_" 2>/dev/null; then
+        log "kill-previous: killed pid=$PID_ ($SCRIPT)"
+        KILLED=$((KILLED + 1))
+      fi
+    done
+    if [ "$KILLED" -gt 0 ]; then
+      sleep 1
+    else
+      log "kill-previous: no previous trainer matched ($SCRIPT)"
+    fi
+  else
+    log "kill-previous: pgrep unavailable — skipped"
+  fi
 fi
 
 # ── 启动 ─────────────────────────────────────────────────────────────
