@@ -187,6 +187,11 @@ def main() -> None:
     ap.add_argument("--max-ticks", type=int, default=12000)
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
                     help="concurrent bun rollout workers (games partitioned by seed)")
+    ap.add_argument("--local-slots", type=int, default=0,
+                    help="trainer direct-thread slots (stream mode). R6 schedule: "
+                         "first-dispatched during collection; suspend once PPO waves "
+                         "begin (auto-resume if the whole cluster stalls); join eval "
+                         "remainder after PPO. 0 = auto (max(2, workers//4))")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--mb", type=int, default=512,
                     help="minibatch size — 512 halves gradient steps vs 256 "
@@ -305,11 +310,14 @@ def main() -> None:
             stream_meta = None
             dist_iter_id: str | None = None
             eval_thread: threading.Thread | None = None
+            eval_gate: threading.Event | None = None  # R6：PPO 收尾后放行本地 eval 参与
             if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
                 iter_id = f"{RUN_ID}.{it}"
                 dist_iter_id = iter_id
                 enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
                 log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
+                # 本地 eval 参与的门控事件：派发即创建，PPO/采集收尾时 set 放行
+                eval_gate = threading.Event()
                 if int(getattr(args, "stream", 0) or 0):
                     def _fire_eval():
                         # 触发点在中央派发队列清空瞬间（on_queue_drained →
@@ -317,9 +325,9 @@ def main() -> None:
                         # 评估局顺势填补收尾空槽（2026-08-25 用户修订）。
                         # 线程句柄经报告回传主循环，jsonl 写回前 join——下轮新权重
                         # 分发前评估必已收官或到预算。positional args 创建即快照，
-                        # 无闭包竞态。
+                        # 无闭包竞态。eval_gate 随闭包捕获：PPO 收尾时 set 放行本地。
                         return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
-                                                iter_id, it)
+                                                iter_id, it, local_gate=eval_gate)
                     report = run_rollout_stream(
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
                         model, opt, device, on_collect_done=_fire_eval)
@@ -329,7 +337,8 @@ def main() -> None:
                     # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 PPO 空窗
                     if int(getattr(args, "eval_games_per_stage", 0) or 0) > 0:
                         eval_thread = dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
-                                                       iter_id, it, report["winRate"])
+                                                       iter_id, it, report["winRate"],
+                                                       local_gate=eval_gate)
             else:
                 report = run_rollout(bun, args.out, traj_dir, pairs, args)
 
@@ -392,6 +401,10 @@ def main() -> None:
             # 通常只等剩余尾巴；超时未完的局放弃（下轮异 sha 清场会杀掉它们，
             # eval_log 以 dropped 记账）。join 前置于 jsonl 写回：字段同轮入账；
             # 若此间崩溃，断点续跑走「语料秒回 + PPO checkpoint 完整」路径无损重放。
+            # R6 补丁：训练侧梯度步已尽（流式=末波排水完，串行=PPO 完成）——
+            # 本机 idle 算力此刻入列补评估尾局。若评估已收官，set 无害。
+            if eval_gate is not None:
+                eval_gate.set()
             eval_join_sec = 0.0
             if eval_thread is not None and eval_thread.is_alive():
                 budget = float(getattr(args, "eval_window_sec", 900)) + 60.0

@@ -350,6 +350,24 @@ def test_integration(tmp: Path) -> None:
         sm4 = rep4.pop("_stream")
         check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
         check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
+
+        # I5 local_suspend 语义：置位后本机直跑让位（全部落 fake 节点）
+        pairs5 = [(0, 111), (3, 222)]
+        traj = fresh("i5a")
+        susp = threading.Event()
+        susp.set()
+        rep5a = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.51",
+            local_slots_max=2, local_suspend=susp)
+        check(rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
+              f"I5 suspended → zero local settlements (byNode={rep5a['dist']['nodes']})")
+        # 对照组（不置位）：头部分配使 local 独占前 N 局——确定性断言
+        traj = fresh("i5b")
+        rep5b = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52",
+            local_slots_max=2)
+        check(rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
+              f"I5b no-suspend → local owns head tasks ({rep5b['dist']['nodes']})")
     finally:
         srv.shutdown()
 
@@ -434,6 +452,93 @@ def test_backup_weights(tmp: Path) -> None:
         run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
 
 
+def test_eval_local_gate(tmp: Path) -> None:
+    """R6 补丁：eval 本地参与——gate 放行后本机直跑全部/尾局；gate 不放行则让位。"""
+    import rl.eval_dispatch as ed
+
+    work = tmp / "eval-local"
+    shutil.rmtree(work, ignore_errors=True)  # 台账按 wver 去重——残留会让 todo 清空走 skip 早退
+    work.mkdir(parents=True, exist_ok=True)
+    rl = work / "w.json"
+    rl.write_text("{\"arch\":{}}", encoding="utf-8")
+
+    def mk_args(window: float):
+        return types.SimpleNamespace(eval_games_per_stage=2, total_stages=3,
+                                     eval_window_sec=window, max_ticks=10,
+                                     difficulty="hard")
+
+    cfg = {"nodes": [], "policy": {"evalLocalSlots": 2}}
+    calls: list[tuple[int, int]] = []
+
+    def fake_runner(bun, snap, stage, seed, out_dir, max_ticks, difficulty,
+                    timeout_sec, wver):
+        calls.append((stage, seed))
+        assert Path(snap).read_text(encoding="utf-8") == "{\"arch\":{}}"
+        return {"stage": stage, "seed": seed, "outcome": "timeout", "ticks": 10,
+                "win": 0, "score": 0.1, "quality": 0.2, "dims": {},
+                "elapsedSec": 0.001, "wver": wver, "mode": "eval"}
+
+    orig = ed.run_local_eval_game
+    ed.run_local_eval_game = fake_runner
+    try:
+        # 预留判定纯函数：gate/宽限期放行、余量边界、零预留回退旧路径
+        check(not ed.hold_for_local(6, 2, True, False), "reserve: gate set → no hold")
+        check(ed.hold_for_local(2, 2, False, False), "reserve: within tail → hold for local")
+        check(not ed.hold_for_local(3, 2, False, False), "reserve: above tail → nodes flow")
+        check(not ed.hold_for_local(2, 2, False, True), "reserve: release grace forces flow")
+        check(not ed.hold_for_local(0, 2, False, False), "reserve: empty pending → no hold")
+        check(not ed.hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior")
+        # A：gate 放行（无可用节点）→ 3 关 ×2 种子全部由 local 结算并聚合进 summary
+        traj_a = work / "trajA"
+        gate = threading.Event()
+        gate.set()
+        ed.dispatch_eval_round("bun", str(rl), traj_a, mk_args(30), cfg,
+                               "rid.1", 1, local_gate=gate)
+        rows = [json.loads(l) for l in
+                (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+                if l.strip()]
+        eval_rows = [r for r in rows if r.get("event") == "eval"]
+        summ = [r for r in rows if r.get("event") == "eval_summary"]
+        check(len(calls) == 6 and len(eval_rows) == 6,
+              f"gate set → all 6 games ran locally (calls={len(calls)}, rows={len(eval_rows)})")
+        check(all(r.get("node") == "local" for r in eval_rows),
+              "ledger rows attributed to node=local")
+        check(bool(summ) and summ[-1]["games"] == 6 and summ[-1]["nodes"] == {"local": 6}
+              and summ[-1]["dropped"] == 0, "summary aggregates local-only round")
+        check((traj_a / "_eval_frozen_weights.json").exists(),
+              "frozen weights snapshot written into traj_dir")
+        # 采样机健康账本：eval 局同册入账（mode:"eval"），喂「采样机健康」表指标
+        meta_rows = [json.loads(l) for l in
+                     (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
+                     if l.strip()]
+        check(len(meta_rows) == 6 and all(r.get("mode") == "eval" and r.get("ok")
+                                          and r.get("node") == "local"
+                                          for r in meta_rows),
+              f"meta ledger records 6 eval games ({len(meta_rows)} rows)")
+        # B：gate 从不放行 → runner 零新增调用，窗口到期自然收场（不挂死、不越权训练侧）。
+        # 用不同权重文件（不同 wver）确保 todo 非空，真正进入关门等待路径。
+        baseline_calls = len(calls)
+        traj_b = work / "trajB"
+        rl_b = work / "w2.json"
+        rl_b.write_text("{\"arch\":{\"h\":32}}", encoding="utf-8")
+        gate_open_never = threading.Event()
+        t0 = time.time()
+        ed.dispatch_eval_round("bun", str(rl_b), traj_b, mk_args(1), cfg,
+                               "rid.2", 2, local_gate=gate_open_never)
+        took = time.time() - t0
+        check(len(calls) == baseline_calls, "gate closed → local runner never invoked")
+        check(took < 8, f"closed-gate round exits at window ({took:.1f}s)")
+        rows_b = [json.loads(l) for l in
+                  (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+                  if l.strip()]
+        summ_b = [r for r in rows_b if r.get("event") == "eval_summary"
+                  and r.get("iter") == 2]
+        check(bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6,
+              "closed-gate round settles nothing, all dropped")
+    finally:
+        ed.run_local_eval_game = orig
+
+
 def main() -> None:
     if not WEIGHTS.exists():
         print(f"[skip-integration] missing weights fixture: {WEIGHTS}")
@@ -450,6 +555,7 @@ def main() -> None:
     test_compute_gae()
     test_chunk_episodes()
     test_backup_weights(tmp)
+    test_eval_local_gate(tmp)
     if ITEST:
         if not WEIGHTS.exists() or shutil.which("bun") is None:
             raise SystemExit("RUN_RL_ITEST=1 requires bun on PATH and tmp/rl-weights/weights.json")

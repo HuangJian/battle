@@ -116,7 +116,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                       on_result=None, local_slots_max: int | None = None,
                       tail_dispatch: bool = True,
                       halt_event: threading.Event | None = None,
-                      on_queue_drained=None) -> dict:
+                      on_queue_drained=None,
+                      local_suspend: threading.Event | None = None) -> dict:
     """中央队列调度模式（plan/distributed-rollout.md v3.3 §5.2）。
 
     140 局组成全局队列（runId 种子确定性预洗牌），各节点 C_n 条工作线程 + 本机
@@ -132,6 +133,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     on_queue_drained: 中央派发队列清空（全部采集任务已交到节点/本地线程手上、
     结果仍在途）即刻回调——干净评估据此进场填收尾空槽（2026-08-25 用户修订：
     取代初版「权重分发完即派」，那会与采集全程抢节点）。
+    local_suspend: 非空且被置位时本机直跑线程停止领取新任务（在途局自然收尾）
+    ——R6 语义：「--local-slots 的 N 个 worker 在 dist 阶段最先被分派，PPO 启动后
+    暂时不参与 dist」。集群停摆豁免：远端失联超 remoteDeadSec 时让位自动失效，
+    保底采样不被挂死。
     """
     t_queue_enter = time.time()  # ping+权重下发阶段计时起点（→ dist_phase_sec）
 
@@ -225,6 +230,20 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                             "offPlanShards": max(0, len(done_all) - len(done))}
         return combined
     random.Random(f"queue:{RUN_ID}:{iter_id}").shuffle(tasks)  # 队列可复现；分配依实时负载
+    if local_slots_max is not None:
+        local_slots = max(0, min(int(local_slots_max), len(tasks)))
+    else:
+        local_slots = max(1, min(args.workers, len(tasks)))
+    n_total_tasks = len(tasks)
+    # R6：--local-slots 头部分配——洗牌后的前 local_slots 个任务划入本机专用队列，
+    # 节点线程不可触及（确定性「dist 阶段最先被分派」）；本机让位（local_suspend）
+    # 时一次性并回主队列交远端消化，防挂死。
+    head_tasks: deque[tuple[int, int]] = deque()
+    if local_slots > 0 and tasks:
+        k = min(local_slots, len(tasks))
+        head_tasks = deque(tasks[:k])
+        tasks = tasks[k:]
+    all_tasks = list(tasks)  # 全量任务清单（含已划入本机保留段的）——完成判定/missing 口径
     pending: deque[tuple[int, int]] = deque(tasks)
     lock = threading.Lock()
     seen: set[tuple[int, int]] = set()
@@ -235,15 +254,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     missing_keys: set[tuple[int, int]] = set()
     all_settled = threading.Event()  # 成功+永久缺失 == 总局数 时置位，worker 立即收工
     deadline = time.time() + window
-    if local_slots_max is not None:
-        local_slots = max(0, min(int(local_slots_max), len(tasks)))
-    else:
-        local_slots = max(1, min(args.workers, len(tasks)))
     next_idx = [0]
     # 远端集体失联保护：本机线程按满额孵化、并发闸门初始为 local_slots
     # （流式模式下被压低以给 torch 让核）；若连续 remoteDeadSecs 无任何远端
     # 结算，则闸门放开到满额，保证 PPO 语料供应不被死掉的远端拖垮。
-    cap_full = max(1, min(args.workers, len(tasks)))
+    cap_full = max(1, min(args.workers, n_total_tasks))
     local_cap = [local_slots]
     local_active = [0]
     last_remote_ok = [time.time()]
@@ -283,6 +298,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     last_progress = [time.time()]
 
     def _fast_enough(nid: str, pending_len: int) -> bool:
+        # R6：本机直跑槽位豁免速度持留——它由 local_slots 上限 + local_suspend
+        # 让位语义自治理；再叠加 EWMA 持留会把 local 彻底饿死（实测 local=0）。
+        if nid == "local":
+            return True
         if not tail_dispatch or not speed or pending_len <= 0:
             return True
         my = speed.get(nid)
@@ -350,21 +369,36 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         local_cap[0] = cap_full
                         log(f"[dist] no remote settle for {remote_dead_sec:.0f}s — "
                             f"local slots {local_slots} -> {cap_full}")
-                    if local_active[0] < local_cap[0]:
+                    # R6：PPO 波次启动后本机让位训练（local_suspend 置位）；
+                    # 集群停摆豁免——远端失联超阈值时让位自动失效，采集不饿死。
+                    suspended = (local_suspend is not None and local_suspend.is_set()
+                                 and time.time() - last_remote_ok[0] <= remote_dead_sec)
+                    if not suspended and local_active[0] < local_cap[0]:
                         took_local = True
-                if pending and (nd is not None or took_local):
-                    if _fast_enough(nd_id, len(pending)):
-                        task = pending.popleft()
+                    # 让位即交还保留段：任务并回主队列由远端消化（防饿死）
+                    if suspended and head_tasks:
+                        pending.extend(head_tasks)
+                        head_tasks.clear()
+                src: deque | None = None
+                if nd is not None:
+                    if pending:
+                        src = pending
+                elif took_local:
+                    src = head_tasks or pending or None
+                if src is not None:
+                    probe = len(head_tasks) if src is head_tasks else len(pending)
+                    if _fast_enough(nd_id, probe):
+                        task = src.popleft()
                         attempts[task] = attempts.get(task, 0) + 1
                         attempt = attempts[task]
                         if nd is None:
                             local_active[0] += 1
-                        if not pending:
+                        if not head_tasks and not pending:
                             drained = True
                     elif f"{nd_id}:hold" not in tail_notes:
                         tail_notes.add(f"{nd_id}:hold")
                         log(f"[dist] tail-mode: holding {nd_id} "
-                            f"(ewma={speed.get(nd_id, -1):.0f}s, pending={len(pending)})")
+                            f"(ewma={speed.get(nd_id, -1):.0f}s, pending={probe})")
                         task = None
             if drained and on_queue_drained is not None:
                 # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
@@ -423,10 +457,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                             on_result(summary)
                         except Exception as cb_err:  # noqa: BLE001 — 回调异常不拖垮采集
                             log(f"[dist] on_result callback error: {str(cb_err)[:120]}")
-                    log(f"[dist] {len(seen) + len(missing_keys)}/{len(tasks)} settled "
+                    log(f"[dist] {len(seen) + len(missing_keys)}/{n_total_tasks} settled "
                         f"node={nd_id} s{task[0]}/seed{task[1]} "
                         f"elapsed={str(el) + 's' if el is not None else '-'}")
-                    if len(seen) + len(missing_keys) >= len(tasks):
+                    if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
                     continue
                 if nd is not None:
@@ -446,30 +480,33 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         "ok": False, "reason": err,
                         "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
                     log(f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
-                        f"[{len(seen) + len(missing_keys)}/{len(tasks)} settled]")
+                        f"[{len(seen) + len(missing_keys)}/{n_total_tasks} settled]")
                 if broke:
                     log(f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
                         f"circuit-broken for this round")
-                if len(seen) + len(missing_keys) >= len(tasks):
+                if len(seen) + len(missing_keys) >= n_total_tasks:
                     all_settled.set()
 
     threads: list[threading.Thread] = []
+    # 本地线程先孵化：任务队列在启动瞬间是满的，谁先起跑谁抢到——agent 线程在
+    # 前的历史顺序曾让课程小轮（12 局）被远端瞬间清空、local 全程零参与。
+    for _ in range(max(local_slots, cap_full)):
+        threads.append(threading.Thread(target=worker, args=(None,), daemon=True,
+                                        name="rollout-local"))
     for nd in alive:
         for _ in range(nd["c"]):
             threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
-    for _ in range(max(local_slots, cap_full)):
-        threads.append(threading.Thread(target=worker, args=(None,), daemon=True))
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=max(30.0, window + task_timeout))
 
-    missing = sorted(k for k in tasks if k not in seen)
+    missing = sorted(k for k in all_tasks if k not in seen)
     by_node: dict[str, int] = {}
     for s in results:
         nid = str(s.get("node", "?"))
         by_node[nid] = by_node.get(nid, 0) + 1
-    log(f"[dist] round done: ok={len(results)}/{len(tasks)} missing={len(missing)} "
+    log(f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
         f"retried={stats['retried']} byNode={json.dumps(by_node)}")
     if missing:
         log(f"[dist] missing pairs: {[list(k) for k in missing]}")

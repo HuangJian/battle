@@ -80,6 +80,9 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     lock = threading.Lock()
     box: dict = {}
     halt_ev = threading.Event()  # 置位 → 队列停止派发新任务（R1 熔断止损）
+    # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
+    # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
+    ppo_started_ev = threading.Event()
     eval_fired = [False]         # 干净评估一次性护栏：队列清空主触发，熔断/收官兜底
     state = {"cum_kl": 0.0, "steps": 0, "chunks": 0, "waves": 0, "ppo_sec": 0.0,
              "load_sec": 0.0, "dropped": 0, "halted": False, "last_agg": None}
@@ -88,7 +91,12 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         with lock:
             pend.append(dict(summary))
 
-    local_slots = max(2, int(args.workers) // 4)
+    # 本机直跑槽位：--local-slots 显式指定优先；0 = 自动 max(2, workers//4)
+    # （给 torch 让核的历史折中）。这些槽与远端 agent 同队抢任务，保证训练机
+    # 自身有保底采样份额——课程起步期每轮仅 12 局，不保底会被先孵化的远端
+    # 线程瞬间抢空（2026-08-25 实测 local=0）。
+    _ovr = int(getattr(args, "local_slots", 0) or 0)
+    local_slots = _ovr if _ovr > 0 else max(2, int(args.workers) // 4)
     policy = cfg.get("policy", {})
     kl_cap = float(policy.get("streamKlCap", 0.12))
     wave_games = max(4, int(policy.get("streamWaveGames", 12)))
@@ -119,6 +127,7 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
                 bun, rl_path, traj_dir, pairs, args, cfg, iter_id,
                 on_result=_on_result, local_slots_max=local_slots,
                 tail_dispatch=False, halt_event=halt_ev,
+                local_suspend=ppo_started_ev,
                 on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"))
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             _fire_eval_once("collector done")
@@ -179,6 +188,10 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
             return
         chs = ppo_mod.chunk_episodes(eps, args.mb)
         t_p = time.time()
+        if not ppo_started_ev.is_set():
+            ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
+            log("[stream] PPO phase started — local dist slots suspending "
+                "(auto-resume if cluster stalls)")
         agg_w = ppo_mod.ppo_update(model, opt, chs, args.epochs, device)
         state["ppo_sec"] += time.time() - t_p
         state["cum_kl"] += float(agg_w["kl"])
