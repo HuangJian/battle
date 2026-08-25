@@ -388,6 +388,21 @@ const MID_LANE_HOLD: Candidate = {
  *
  * 移出决策链的条件（refactor.trae.md §1.2-2）：DECISIONS=阴性/reject + DEFAULT=0
  *   + 零引用 + 无 1 态 A/B 测试调用，四者同时成立。满足者 → src/ai/god/experiments/。
+ *
+ * 四条件核查（2026-08-25，refactor.trae §1.2-2 落实）：当前所有 OFF 候选
+ * 均**不满足**「零引用 + 无 1 态测试」，按 AGENTS §5.1 一律留档标注、不移出
+ * 数组、不删文件：
+ *   - carvePath      → tests/battlement-carve-path.test.ts 以 carvePathMode=carveMode
+ *                      多态 A/B；且与 Hunt / MidLaneDefense 共享 PathCarve.ts 谓词。
+ *   - midLaneHold    → tests/midlane-hold.test.ts 断言 branchCounts.midLaneHold；
+ *                      与 MidLaneDefense 共享谓词。
+ *   - suicideReturn  → tests/suicide-return.test.ts 以 suicideReturnMode=1 多态。
+ *   - unifiedCandidates → tests/godai-candidates.test.ts 以 candidateMode 多态 A/B。
+ *   - firingLane     → candidates/shared.ts + tools/diag/failure-classifier.ts 引用；
+ *                      decision-core.test.ts 引用权重表。
+ *   - survive        → survivalPressure 与 Hunt.ts 共享。
+ * 故本项转为「标注而非移出」：OFF 候选在数组内已显式标注（见各 const 注释 +
+ * 上方存活状态清单），杜绝「以为它在跑」。experiments/ 目录本轮不创建。
  */
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Authoritative weight-order contract: DecisionCore.ACTION_WEIGHTS (locked by
