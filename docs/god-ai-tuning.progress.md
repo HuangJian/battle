@@ -37,6 +37,9 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 结论：摘除成本 ≈ −1pt hard 胜率 / −0.0093 score，微小但显著，不构成结构性支柱；新基线（OFF）与
 预检 B 臂**完全一致**。R4 缺口转列为 RL 守家目标，不再返工。
 回退：参数回 1 即恢复，零代码成本。
+> 复测覆盖说明：正式配对复测仅 hard（60 seeds，如上）；chaos 未单独重跑——以预检 B 臂
+> （70→69%，Δscore −0.0105±0.0029, t=−3.63, p=0.0003，Ice Palace/Thicket 显著变差）为准，
+> 同口径可背书。classic guard 预设本为 0，无变化。
 
 ---
 

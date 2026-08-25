@@ -1671,8 +1671,9 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 > 工具 `tools/diag/divergence-probe.ts`（预注册：分歧=学生贪心≠教师标签且 120-tick 内
 > 有可观测后果；三桶 基地高压/交战/巡航；后果代理指标从学生实际轨迹提取，不做双臂重放）。
 > 结果（25 局 hard）：分歧率 70.6%，基地高压桶最高 74.6% 且特征表完整 →
-> 按预注册规则判 **①/③ 边界**（标签或监督）：M3 走 wins-only + 守家帧回补（near-miss
-> 3×），预留 DAgger 交互轮。全文 → docs/nn.progress.md §13.2。
+> 判 **①/③ 边界**（标签或监督）：M3 走 wins-only + 守家帧回补（near-miss 3×），预留 DAgger
+> 交互轮。注：预注册表原无「高压桶+特征完整」格，本次属**表外裁量**——已事后补格入方案
+> （plan §4 执行态修订），结论不变。全文 → docs/nn.progress.md §13.2。
 
 ## 248. 语料纪元 OBS_SCHEMA_MAJOR 1→2 — item 头删除 + 标量收编 + wins-only + returns（2026-08-26，plan M2）
 > 一次 MAJOR 打包：① 动作空间 10→7（actions (N,2)/masks (N,7)）；② SCALAR_DIM 24→19、
