@@ -59,6 +59,8 @@ export interface IterEvent {
   halted?: boolean
   /** 熔断后丢弃的已结算局数。 */
   dropped_games?: number | null
+  /** 各维度轮均值（jsonl dim_means 原样透传；旧日志行可能缺失）。 */
+  dim_means?: Record<string, number | null> | null
 }
 
 /** 本轮实际局数 = outcomes 计数之和（随 rotate/补采配置浮动，勿硬编码）。 */
@@ -71,6 +73,15 @@ export function avgTicksPerGame(e: IterEvent): number | null {
   const games = gamesOf(e)
   if (games <= 0 || typeof e.ticks !== 'number' || e.ticks <= 0) return null
   return e.ticks / games
+}
+
+/**
+ * 守家维度轮均值（dim_means.baseIntegrity）——R6 观察项：检验「守家优先奖励」
+ * 是否真的在教防守的第一信号（旧谱系该值恒 ~0.25 平台）。旧日志行缺失 → null。
+ */
+export function baseIntegrityOf(e: IterEvent): number | null {
+  const v = e.dim_means?.baseIntegrity
+  return typeof v === 'number' ? v : null
 }
 
 /**
@@ -455,12 +466,14 @@ function esc(s: string): string {
 
 /**
  * 读调度器落盘的 dist-agent-meta.jsonl，按节点聚合采样元数据。
- * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（run_rl.py _record_agent_meta）。
- * 行字段：node / it / stage / seed / ok / win / elapsedSec(成功) | reason(失败) / ts。
+ * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（run_rl.py _record_agent_meta）；
+ * 干净评估局也同册入账（eval_dispatch.record，mode:"eval"）——健康表全量计入，
+ * 但 okByIt（节点贡献列数据源）排除 eval 行：该列已另行合并 ev.nodes，不排则双算。
+ * 行字段：node / [mode] / it / stage / seed / ok / win / elapsedSec(成功) | reason(失败) / ts。
  */
 function readAgentMeta(): {
   agents: AgentRow[]
-  /** 每节点每迭代成功局数（rollout 贡献列的数据源）。 */
+  /** 每节点每迭代成功局数（rollout 贡献列的数据源；不含 eval）。 */
   okByIt: Map<string, Map<number, number>>
 } {
   if (!existsSync(META_PATH)) return { agents: [], okByIt: new Map() }
@@ -495,6 +508,7 @@ function readAgentMeta(): {
     } catch {
       continue
     }
+    const isEval = r.mode === 'eval'
     const node = normNode(String(r.node ?? '?'))
     const a = ensure(node)
     a.attempts++
@@ -505,7 +519,7 @@ function readAgentMeta(): {
         a.elapsedSum += r.elapsedSec
         a.elapsedN++
       }
-      if (typeof r.it === 'number') {
+      if (!isEval && typeof r.it === 'number') {
         let m = okByIt.get(node)
         if (!m) {
           m = new Map<number, number>()
@@ -575,6 +589,7 @@ function buildHtml(
           ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games})`
           : '—'
       const ke = klEff(e)
+      const bi = baseIntegrityOf(e)
       const klCell =
         ke === null
           ? '—'
@@ -585,6 +600,7 @@ function buildHtml(
       return (
         `<tr><td class="txt">it${e.iter}</td><td>${esc(e.time)}</td>` +
         `<td>${rollWrCell}</td><td>${evalWrCell}</td><td>${e.score_mean == null ? '—' : e.score_mean.toFixed(4)}</td>` +
+        `<td>${bi == null ? '—' : bi.toFixed(3)}</td>` +
         `<td>${e.entropy == null ? '—' : e.entropy.toFixed(3)}</td><td>${klCell}</td>` +
         `<td>${(() => {
           const t = avgTicksPerGame(e)
@@ -704,7 +720,7 @@ function buildHtml(
 <div class="wrap" style="max-height:250px;">
 <table>
   <thead><tr>
-    <th class="txt">迭代</th><th class="txt">完成时刻</th><th>rollout 胜率</th><th>eval 胜率</th><th>score_mean</th><th>entropy</th><th>KL 累计</th><th>局均 ticks</th><th>采集耗时</th><th>PPO 耗时</th><th>eval 耗时</th><th class="txt">节点贡献</th>
+    <th class="txt">迭代</th><th class="txt">完成时刻</th><th>rollout 胜率</th><th>eval 胜率</th><th>score_mean</th><th>baseIntegrity</th><th>entropy</th><th>KL 累计</th><th>局均 ticks</th><th>采集耗时</th><th>PPO 耗时</th><th>eval 耗时</th><th class="txt">节点贡献</th>
   </tr></thead>
   <tbody>
 ${recentRows}
@@ -751,7 +767,7 @@ ${recentRows}
   关号显示 = 0 基索引 + 1（与 STAGES / STAGE_NAMES_ZH 对应）。<br>
   「本段」= 最近一次增量扫描覆盖的迭代段；余命含 tank 道具加成可大于 3；拾取道具为该关本段拾取总数。<br>
   击杀口径：manifest.dims.progress.raw（缺失时 round(dimLists.progress × ${ENEMY_TOTAL})）；自 2026-08-23 起累计，此前轮转删除的迭代无击杀数据。<br>
-  数据源：<code>tmp/rl-traj/training_log.jsonl</code> · 干净评估：<code>tmp/rl-traj/eval_log.jsonl</code> · 累计账本：<code>tmp/rl-traj/inspection-state.json</code>（共 ${totalGames} 局入表）。
+  数据源：<code>tmp/rl-traj/training_log.jsonl</code> · 干净评估：<code>tmp/rl-traj/eval_log.jsonl</code> · 累计账本：<code>tmp/rl-traj/inspection-state.json</code>（共 ${totalGames} 局入表）· 节点采样元数据：<code>tmp/rl-traj/dist-agent-meta.jsonl</code>（rollout+eval 合并口径；「节点贡献」列仅 rollout）。
 </footer>
 <script>
 function heat(v){

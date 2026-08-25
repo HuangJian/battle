@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   avgTicksPerGame,
+  baseIntegrityOf,
   fmtDur,
   gamesOf,
   healthVerdict,
@@ -111,5 +112,17 @@ describe('klEff — 累计 KL 展示口径（2026-08-25 遥测补盲）', () => 
   it('explicit null kl_cum (串行 checkpoint-complete 轮) falls back to kl, then null', () => {
     expect(klEff(ev({ kl_cum: null, kl: 0.0389 }))).toBe(0.0389)
     expect(klEff(ev({ kl_cum: null, kl: null }))).toBeNull()
+  })
+})
+
+describe('baseIntegrityOf — 守家维度读取（R6 观察项）', () => {
+  it('reads dim_means.baseIntegrity when present', () => {
+    expect(baseIntegrityOf(ev({ dim_means: { baseIntegrity: 0.3969 } }))).toBe(0.3969)
+  })
+
+  it('null-safe for legacy rows / empty / null-valued dims', () => {
+    expect(baseIntegrityOf(ev({}))).toBeNull()
+    expect(baseIntegrityOf(ev({ dim_means: {} }))).toBeNull()
+    expect(baseIntegrityOf(ev({ dim_means: { baseIntegrity: null } }))).toBeNull()
   })
 })
