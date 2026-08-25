@@ -2227,3 +2227,36 @@ hub 包装 -11。determinism 语料 v2 在本轮三次拦截行为漂移（1 次
 **Implications:** 度量基线收口——Simulation 外 gameplay 直写 0；replay/file.ts
 解析器可导航性提升且类型逃逸清零；genId 豁免从口头惯例变为文档注记。
 plan/refactor.trae.md 全部条目处置完毕（执行/否决/关闭各有记录）。
+
+## 272. God AI v1 封版冻结 —— D0 拍板 + 冻结基线 + 签名 golden (STATUS: 已实施, 2026-08-26)
+
+**Decision:** owner 拍板（plan/God-AI-Organization.md §3，选项 A，不含敌人 AI 转向）：
+**player 侧 God AI v1 就此定版**。无新证据不再开调优轮；此后任何 God-AI 行为改动 = 新纪元，
+必须走「三件套」——新 DECISIONS 条目 + 重跑 60-seed 三难度基线 + 更新冻结 golden，缺一不可。
+
+**冻结基线（v1 官方口径）**（2026-08-26，eval-suite v7 · 35 关 × 60 seeds · params=351325f1，
+命令与 seed 来源见 progress.md Part 0；语料 tmp/freeze/baseline-<难度>.json 不作长期凭证）：
+
+| 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
+|---|---|---|---|---|
+| classic | 0.7258（0.7211 ±0.0048） | 90% | 721.1 | Ice Palace 68% |
+| **hard（主）** | **0.5450**（0.5388 ±0.0062） | **76%** | 538.8 | Battlement 30% |
+| chaos | 0.4943（0.4878 ±0.0065） | 70% | 487.8 | Battlement 17% |
+
+较 Phase III 基线（§0.C.5，08-12）：classic 逐位持平（0.7259→0.7258）；hard **+3.18pp SUITE /
++3pp 胜率**（§195/§198/§229 发货杠杆的累计收益）；chaos +0.17pp。hard 维度均值详见 progress.md Part 0。
+
+**冻结签名 golden**：`tools/det-golden.v1.sha256` =
+`b81e240a8c2980bbf805215319be5aa2f483a312235bd35d758a6e522870ec32`
+（probe-det-baseline.sh 全量 21 组合 · 109,516 签名行 · @dc18e6a pristine 行为采集）。
+`--golden` 校验模式并入 pre-commit（M6 落地）；门红 ≠ 出错，是强制显式判定（走上述三件套或回滚）。
+已知盲区照录脚本头注：det 语料单玩家 only，dual/coop 由 godai-* 门禁覆盖。
+
+**Rationale:**
+- §226 已收口「hard 行为微调杠杆耗尽」，剩余失败面是结构性物理（弹速 × 中位 271 tick 拆基窗口）；
+- score-gate（10 seeds 统计 floor）+ det 语料（相对自洽）都拦不住「字节自洽但语义漂移」——
+  封版必须以冻结签名门强制（评审 god-ai-org.review.md P1）;
+- MANIFEST Three Gates：继续调参无玩家可感知收益，只消耗维护面。
+
+**Implications:** 重启协议（必读顺序 / un-archive 四步闸门）见 plan/God-AI-Organization.md §8 / §6 C1；
+L2 可达性审计证据于 M6 落地时补录至本条。B（敌人 AI）/C（规则层）/D（人类体验）出口均需新立项拍板。
