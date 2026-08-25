@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { findBulletThreatToBaseImpl } from '../ThreatAssessor'
 import { baseBulletInterceptCellImpl } from '../ThreatAssessor'
 
@@ -29,4 +29,13 @@ export function evalInterceptBase(self: GodAIInput, ctx: DecisionContext): boole
     }
   }
   return false
+}
+
+
+/** interceptBase(900) — T8: stop an in-flight bullet aimed at the base. */
+
+export const INTERCEPT_BASE: Candidate = {
+  id: 'interceptBase',
+  weight: ACTION_WEIGHTS.interceptBase,
+  evaluate: evalInterceptBase,
 }

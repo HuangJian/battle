@@ -6,7 +6,7 @@ import { BASE_POS } from '../../../constants'
 import { type Tank } from '../../../types'
 import { type GodAIInput } from '../../GodAIInput'
 import { clearLaneFireDir, evaluateUnifiedCandidates, fireRayBlocked } from '../ActionCandidates'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { shouldFireInDirImpl } from '../FireControl'
 
 import { manhattan } from '../../../utils/helpers'
@@ -102,4 +102,54 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
   self.branchCounts.unifiedCandidates++
   self._lastBranch = v.kind === 'killCurrent' ? 'candidateKill' : 'candidateIntercept'
   return true
+}
+
+
+// ================================================================
+// §X Base lane sentry — 基地车道哨兵
+// ================================================================
+
+/**
+ * §X baseLaneSentry(850) — 基地车道哨兵: 基地危局下「走到车道、持位击杀」。
+ *
+ * 来源（Battlement hard seed 14 弹道级还原）：拆环 fast 在 (16,25)↔(15,25)
+ * 口袋横走、hp 24（一枪线），玩家在 (16,21) 与其同列 40 ticks — 但唯一一枪
+ * 从 (16,23) 砖格内发射被墙吃掉（双偏线像素扫描看见敌人边缘、真实子弹中线
+ * 打墙），800ms 冷却后才恢复开火而敌人已转身逃离；随即 midLaneDefense(545)
+ * 把玩家拖去中路横向火力送死（43hp 死于 t2255，重生空隙基地连受 3 发）。
+ * 46/60 败局（base_destroyed 100%）同一 archetype 复现。
+ *
+ * 与 §134 defenseIntercept(550) 的本质区别：
+ *   1. 拦截不动位 — 本候选不对齐时**主动导航到对齐站位**（evalBaseLaneSentry
+ *      内的导航段）。
+ *   2. 双偏线像点扫描的“可见”幻觉 — 本候选以**格对齐走廊**（laneCorridorBlocked，
+ *      真实子弹中线）判定射界；单层砖挡则打砖开路（diggable，下一轮窗口生效）。
+ *   3. 850 权重压掉 pickupHigh(800)/aggro(700)/midLane(545)/closePickup(540)/
+ *      engage(500) — 威胁成立时整体锁定直到车道敌人被处理（dodge 1000 /
+ *      interceptBase 900 仍在上方：生存与子弹拦截优先）。
+ *
+ * 门控：baseLaneSentryMode=0 短路（byte-identical）；无基地关；aggro 期让路。
+ * 泛化：环格几何、csb/cbr 谓词、车道走廊全部只依赖 BASE_POS —— 任何带基地
+ * 的地图通用；钢环/无拆环风险时哨兵永不激活（自关）。
+ */
+/**
+ * M4 / 统一行动候选 (open-test protocol §7, 2026-08-16)。
+ *
+ * 基地受直接威胁(csb/cbr)时,不再让旧防守级联在"窗口已关"状态下提交,
+ * 而是按 §7.1 度量比较四个固定候选(kill-current / intercept-base /
+ * clear-lane / return-defense),§7.2 门控全过才提交:
+ *   a. 安全 deadline slack > 0(站桩提交用 standing 击杀 slack — M3 S28s26:
+ *      全行程 killAssessment 对"就差一枪"的场景系统性悲观);
+ *   b. 有真实产出,站桩仅在 standing shot 赢 deadline 时合法;
+ *   c. 第二威胁不可在完成前进入不可逆窗口;
+ *   d. 射线不得穿过自家完好环砖(M3 S30s27 反例: 朝威胁开火打掉自家环
+ *      反而引弹上身),clear-lane 永不打环砖。
+ * 门控全不过 → return false,旧级联照旧(M3 主导机理就是窗口早已关闭,
+ * 此时本层让路)。RNG 纪律: 仅提交时消耗 aimError roll,与其它候选一致。
+ */
+
+export const UNIFIED_CANDIDATES: Candidate = {
+  id: 'unifiedCandidates',
+  weight: ACTION_WEIGHTS.unifiedCandidates,
+  evaluate: evalUnifiedCandidates,
 }

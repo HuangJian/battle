@@ -3,8 +3,8 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { BASE_POS, CELL } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   bulletPathSteelBlockedImpl,
   scanAheadImpl,
@@ -183,8 +183,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
                 self._moveDir = aimDir
               }
               self._fire = true
-              self.branchCounts.t2a++
-              self._lastBranch = 't2a'
+              recordBranch(self, 't2a')
               return true
             }
 
@@ -196,8 +195,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
               self._moveDir = aimDir
             }
             self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-            self.branchCounts.t2a++
-            self._lastBranch = 't2a'
+            recordBranch(self, 't2a')
             return true
           }
 
@@ -208,8 +206,7 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
             self._moveDir = aimDir // Turn to face enemy
           }
           self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-          self.branchCounts.t2a++
-          self._lastBranch = 't2a'
+          recordBranch(self, 't2a')
           return true
         }
 
@@ -231,4 +228,13 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
     st.ticks = 0
   }
   return false
+}
+
+
+/** engage(500) — T2a: stop-and-aim when an enemy is in the line of fire. */
+
+export const ENGAGE: Candidate = {
+  id: 'engage',
+  weight: ACTION_WEIGHTS.engage,
+  evaluate: evalEngage,
 }

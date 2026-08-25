@@ -5,7 +5,7 @@
 import { CELL } from '../../../constants'
 import { ALL_DIRS } from '../../../utils/direction'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { aimSurvivesTurnImpl, bulletPathSteelBlockedImpl, scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
 import { MAP_CENTER, isDualCentralBreachHoldP1, selfFireBaseGuardBlocks } from '../candidates/shared'
 import { updateStuckTrack } from '../stuck-track'
@@ -259,4 +259,13 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   }
   if (st.suppress > 0) st.suppress = 0
   return false
+}
+
+
+/** aggro(700) — S8/S9 freeze/shield window: stop-and-aim → power-up → navigate. */
+
+export const AGGRO: Candidate = {
+  id: 'aggro',
+  weight: ACTION_WEIGHTS.aggro,
+  evaluate: evalAggro,
 }

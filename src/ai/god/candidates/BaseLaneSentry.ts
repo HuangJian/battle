@@ -4,9 +4,9 @@
 // is byte-identical (per-tick determinism gate).
 import { type Direction, BASE_POS, GRID } from '../../../constants'
 import { type Tank } from '../../../types'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { shouldFireInDirImpl } from '../FireControl'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
 import { selfFireBaseGuardBlocks,
@@ -64,8 +64,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
       if (onCooldown) return false
       self._moveDir = p.dir === dir ? null : dir
       self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-      self.branchCounts.baseLaneSentry++
-      self._lastBranch = 'baseLaneSentry'
+      recordBranch(self, 'baseLaneSentry')
       return true
     }
     // 单层砖挡（相邻格）且非即刻杀手 — 原位打砖开路。本 tick 打砖不可行
@@ -92,8 +91,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
       }
       self._moveDir = p.dir === dir ? null : dir
       self._fire = !onCooldown
-      self.branchCounts.baseLaneSentry++
-      self._lastBranch = 'baseLaneSentry'
+      recordBranch(self, 'baseLaneSentry')
       return true
     }
     return false
@@ -168,8 +166,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
         ) {
           self._moveDir = sc1 > ccol ? 'right' : 'left'
           self._fire = false
-          self.branchCounts.baseLaneSentry++
-          self._lastBranch = 'baseLaneSentry'
+          recordBranch(self, 'baseLaneSentry')
           return true
         }
       }
@@ -182,8 +179,7 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
         ) {
           self._moveDir = sc2 > ccol ? 'right' : 'left'
           self._fire = false
-          self.branchCounts.baseLaneSentry++
-          self._lastBranch = 'baseLaneSentry'
+          recordBranch(self, 'baseLaneSentry')
           return true
         }
       }
@@ -204,10 +200,17 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
       if (laneCorridorBlocked(w, sc, crow, sc, tc.row) !== 0) return false
       self._moveDir = sc > ccol ? 'right' : 'left'
       self._fire = false
-      self.branchCounts.baseLaneSentry++
-      self._lastBranch = 'baseLaneSentry'
+      recordBranch(self, 'baseLaneSentry')
       return true
     }
   }
   return false
+}
+
+
+
+export const BASE_LANE_SENTRY: Candidate = {
+  id: 'baseLaneSentry',
+  weight: ACTION_WEIGHTS.baseLaneSentry,
+  evaluate: evalBaseLaneSentry,
 }

@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { commitPowerupTail,
   baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
@@ -39,4 +39,13 @@ export function evalPickupMid(self: GodAIInput, ctx: DecisionContext): boolean {
     }
   }
   return false
+}
+
+
+/** pickupMid(600) — §88 MID-tier urgent pickup (star/tank/shield ≤4格). */
+
+export const PICKUP_MID: Candidate = {
+  id: 'pickupMid',
+  weight: ACTION_WEIGHTS.pickupMid,
+  evaluate: evalPickupMid,
 }

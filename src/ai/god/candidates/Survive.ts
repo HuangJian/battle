@@ -4,8 +4,8 @@
 // is byte-identical (per-tick determinism gate).
 import { type Direction, BASE_POS, DIR_VECTORS, GRID } from '../../../constants'
 import { ALL_DIRS } from '../../../utils/direction'
-import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
 
 import { manhattan } from '../../../utils/helpers'
@@ -79,9 +79,39 @@ export function evalSurvive(self: GodAIInput, ctx: DecisionContext): boolean {
   if (bestExits <= exits) return false
   self._moveDir = bestDir
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, bestDir)
-  self.branchCounts.survive++
-  self._lastBranch = 'survive'
+  recordBranch(self, 'survive')
   // Update the last-aim so the engine sees a coherent turn (same as T2b).
   if (aimDir) void aimDir
   return true
+}
+
+
+/**
+ * survive (M3, plan/God-AI-Redesign-v2 §3.2, P1-3 生存优先) — 主动换位.
+ *
+ * Default weight 0 ⇒ never reached (orderedCandidates sorts it below every
+ * active candidate; hunt is unconditional so the chain always terminates
+ * before it). Promoted via `actionWeights.survive` (M4 tuning surface), it
+ * runs when NO bullet is in flight (dodge declined — the immediate threat is
+ * gone) but the player is in a positional dead-end: surrounded by enemies in
+ * a low-exit cell. The player actively repositions to a safer cell instead
+ * of continuing the current navigate/hunt path into the crossfire.
+ *
+ * Design (plan §4.4 整合: trapAvoidance 族的"包围风险"输入): a cell with
+ * ≤ 2 passable exits is a corridor/corner/dead-end (the §48-revisit surround
+ * heuristic); with `surviveMinEnemies` live enemies within
+ * `surviveEnemyRadiusCells`, that dead-end is a kill box. The candidate picks
+ * the open direction whose next cell has the MOST exits (tie-break toward the
+ * base), strictly better than the current cell — never trades one dead-end
+ * for another. Fire stays gated on the move direction (normal fire control).
+ *
+ * Gated additionally by survival pressure: only when `survivalPressure(self) > 0`
+ * (last lives / high accuracy / surrounded) does the AI spend ticks on
+ * repositioning — otherwise the regular hunt/engage chain is the better play.
+ */
+
+export const SURVIVE: Candidate = {
+  id: 'survive',
+  weight: ACTION_WEIGHTS.survive,
+  evaluate: evalSurvive,
 }

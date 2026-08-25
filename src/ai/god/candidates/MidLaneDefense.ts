@@ -3,9 +3,9 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type Direction, BULLET, TANK } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 
 import { manhattan } from '../../../utils/helpers'
 import {
@@ -84,8 +84,7 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
       const laneDir: Direction = 'up'
       self._moveDir = p.dir === laneDir ? null : laneDir
       self._fire = !onCooldown
-      self.branchCounts.midLaneDefense++
-      self._lastBranch = 'midLaneDefense'
+      recordBranch(self, 'midLaneDefense')
       return true
     }
     if (absOff <= TANK) {
@@ -100,8 +99,7 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
       const stepDir: Direction = shellOff > 0 ? 'right' : 'left'
       self._moveDir = stepDir
       self._fire = false
-      self.branchCounts.midLaneDefense++
-      self._lastBranch = 'midLaneDefense'
+      recordBranch(self, 'midLaneDefense')
       return true
     }
     // Shell line too far sideways to acquire by stepping — fall through to
@@ -147,8 +145,7 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
     self._moveDir = p.dir === laneDir ? null : laneDir
     self._fire =
       !onCooldown && (laneShellInColumnImpl(self) || self.shouldFireInDir(pcx, pcy, laneDir))
-    self.branchCounts.midLaneDefense++
-    self._lastBranch = 'midLaneDefense'
+    recordBranch(self, 'midLaneDefense')
     return true
   }
 
@@ -170,14 +167,39 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
     } else {
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, d)
     }
-    self.branchCounts.midLaneDefense++
-    self._lastBranch = 'midLaneDefense'
+    recordBranch(self, 'midLaneDefense')
     return true
   }
   // No carve path (rare — point unreachable) — plain navigation.
   self._moveDir = self.navigateTowards(point)
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
-  self.branchCounts.midLaneDefense++
-  self._lastBranch = 'midLaneDefense'
+  recordBranch(self, 'midLaneDefense')
   return true
+}
+
+
+/**
+ * midLaneDefense(545) — §163 / 中路防守 (user request 2026-08-06, replay
+ * hard-s34-base-l2-t69-seed2050197249 Problem 2).
+ *
+ * 背景：基地所在列（BASE_POS.col..+1 正上方）多数地图没有钢铁防护，敌人只要
+ * 进入该列就能沿列向下流弹凿穿砖墙直逼老鹰（回放：baseCol 20→0，28 秒凿穿），
+ * 而玩家往往在边路/出生点游荡击杀。
+ *
+ * 行为（全参数门控，midLaneDefense=0 默认 OFF → byte-identical）：
+ *   1. 锚定：玩家到基地列上方的可站防守点（findLaneDefensePointImpl，开路
+ *      A* 挖过去——出生点被封时同 §162 carve-dig 挖通）。
+ *   2. 持枪（midLaneHoldRange 内）：面向列上方停射——scan 到敌人/敌弹就开火
+ *      对消（shouldFireInDir 含 T5 拦截），不再追击边路。
+ *   3. 牵绳（midLaneMaxDist）：近基才锚定，超距即回撤，随时准备回防；
+ *   4. 中路无威胁且玩家已在 leash 内 → return false（放行 hunt/engage）。
+ *
+ * 权重 545：defenseIntercept(550) 之下（已上车道的敌人由拦截一枪解除）、
+ * closePickup(540) 之上（防守不被顺手拾取打断）。
+ */
+
+export const MID_LANE_DEFENSE: Candidate = {
+  id: 'midLaneDefense',
+  weight: ACTION_WEIGHTS.midLaneDefense,
+  evaluate: evalMidLaneDefense,
 }

@@ -7,7 +7,7 @@ import { ALL_DIRS } from '../../../utils/direction'
 import { type Cell } from '../../../utils/grid-search'
 import { type GodAIInput } from '../../GodAIInput'
 import { travelFireDetourDir } from '../ActionCandidates'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
 import { scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
 import { iceGlideAdjust } from '../Navigator'
@@ -702,4 +702,13 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   self.branchCounts.navigate++
   self._lastBranch = 'navigate'
   return true
+}
+
+
+/** hunt(200) — T2b: navigate towards the target (distance-adaptive). */
+
+export const HUNT: Candidate = {
+  id: 'hunt',
+  weight: ACTION_WEIGHTS.hunt,
+  evaluate: evalHunt,
 }

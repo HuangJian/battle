@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { CELL } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
 import { dodgeDirectionImpl } from '../ThreatAssessor'
@@ -132,4 +132,13 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   self._lastDodgeDir = null
   self._dodgeFlipCount = 0
   return false
+}
+
+
+/** dodge(1000) — survive first: reaction, M3 counter-fire, perpendicular dodge. */
+
+export const DODGE: Candidate = {
+  id: 'dodge',
+  weight: ACTION_WEIGHTS.dodge,
+  evaluate: evalDodge,
 }

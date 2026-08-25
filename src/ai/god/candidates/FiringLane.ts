@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { ALL_DIRS } from '../../../utils/direction'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { scanAheadImpl } from '../FireControl'
 import { findFiringLaneCellImpl } from '../candidates/shared'
 
@@ -81,4 +81,12 @@ export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean 
   self.branchCounts.firingLane++
   self._lastBranch = 'firingLane'
   return true
+}
+
+
+
+export const FIRING_LANE: Candidate = {
+  id: 'firingLane',
+  weight: ACTION_WEIGHTS.firingLane,
+  evaluate: evalFiringLane,
 }

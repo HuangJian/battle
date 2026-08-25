@@ -1449,3 +1449,17 @@ export class GodAIInput implements InputLike {
   // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired;
   // recoverable from git history if the v2 survive candidate needs them.
 }
+
+/**
+ * Single-point telemetry bookkeeping for the decision chain.
+ *
+ * Every candidate (and the shell's dead/hold early-outs) records its commit
+ * here instead of touching `branchCounts`/`_lastBranch` directly — one place
+ * to change if the profiling surface ever evolves. Pure observation: no World
+ * mutation, no RNG, no serialization. Replay- and determinism-safe.
+ */
+export function recordBranch(self: GodAIInput, branch: string): void {
+  self._lastBranch = branch
+  const bc = self.branchCounts as Record<string, number>
+  bc[branch] = (bc[branch] ?? 0) + 1
+}

@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { BASE_POS } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   anyThreatPointEnemyImpl,
   controlledLives,
@@ -158,4 +158,37 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
   self.branchCounts.suicideReturn++
   self._lastBranch = 'suicideReturn'
   return true
+}
+
+
+// ===========================================================================
+// Candidates — verbatim branch transcriptions. One object per action; the
+// shell evaluates them strictly in weight order (chain order), first commit
+// wins. Each evaluate() returns true exactly when the original branch would
+// have `return`ed from the top-level chain.
+// ===========================================================================
+
+/** suicideReturn(1100) — 自杀秒回: embrace death to respawn at the spawn point
+ * closer to a base-threatening enemy the player was too far to reach.
+ * Suppresses dodging when the preconditions are met (see SuicideReturn.ts).
+ *
+ * Modes (suicideReturnMode):
+ *   0 = OFF (byte-identical to pre-§116).
+ *   1 = §116 original: trigger on condition ⑤ — a LETHAL bullet hits within
+ *       1s (the player is about to die anyway, so the life-trade is nearly
+ *       free). The player stands still and takes that bullet.
+ *   2 = §117 condition-① variant, STAND: trigger when an enemy is at a threat
+ *       point while a bullet is actively flying at the base (no lethal-bullet
+ *       requirement); the player stands still waiting to be killed, with a
+ *       suicideReturnStandMaxTicks timeout — if no death comes it resumes.
+ *   3 = §117 condition-① variant, CHARGE: same trigger, but the player
+ *       actively drives at the threat enemy (no dodging — this candidate
+ *       outranks dodge) to die fast and respawn near the base, or to kill the
+ *       enemy first; whichever happens first ends the trade.
+ * All modes share the base-bullet GATE (S23 seed-14 fix). */
+
+export const SUICIDE_RETURN: Candidate = {
+  id: 'suicideReturn',
+  weight: ACTION_WEIGHTS.suicideReturn,
+  evaluate: evalSuicideReturn,
 }

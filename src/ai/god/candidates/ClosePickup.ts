@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   baseRingBreachedImpl,
   commitPowerupTail,
@@ -29,4 +29,32 @@ export function evalClosePickup(self: GodAIInput, ctx: DecisionContext): boolean
   if (self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks)
     return false
   return commitPowerupTail(self, ctx, target)
+}
+
+
+/** closePickup(540) — §158: non-freeze close-range power-up pickup.
+ *
+ * When NOT in freeze/shield mode, if a power-up is within `closePickupRange`
+ * (default 4) cells and there is no immediate bullet threat (DODGE at weight
+ * 1000 already declined — if it hadn't, this candidate would never run),
+ * navigate to pick it up while firing at enemies in the move direction
+ * (随手开火).
+ *
+ * Weight 540 < DEFENSE_INTERCEPT(550): defense intercept runs first when an
+ * enemy is aligned with or approaching the base lane. This prevents the
+ * seed-999 regression where the player diverted to a nearby power-up while
+ * an enemy was breaking through to the base lane, arriving too late to
+ * intercept. The isBaseUnderThreat guard still catches aligned enemies.
+ *
+ * Unlike PICKUP_HIGH/MID (which gate on nearby-enemy proximity and route
+ * danger), this candidate has NO enemy gates — close items are worth
+ * grabbing even with enemies nearby, as long as no bullet is currently
+ * threatening the player AND no defense intercept is needed.
+ *
+ * Gated by closePickupRange (0 = OFF, byte-identical). */
+
+export const CLOSE_PICKUP: Candidate = {
+  id: 'closePickup',
+  weight: ACTION_WEIGHTS.closePickup,
+  evaluate: evalClosePickup,
 }

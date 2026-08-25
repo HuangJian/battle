@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { type Cell } from '../../../utils/grid-search'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { digPathInfoCached } from '../PathCarve'
 import { manhattan } from '../../../utils/helpers'
 import { carveFire } from '../candidates/shared'
@@ -62,4 +62,32 @@ export function evalBaseConnectClear(self: GodAIInput, ctx: DecisionContext): bo
   self.branchCounts.baseConnectClear++
   self._lastBranch = 'baseConnectClear'
   return true
+}
+
+
+/**
+ * baseConnectClear(270) — §189 / 开局联通清墙 (user request 2026-08-11).
+ *
+ * At game start, the player observes the lower-half layout. If the player's
+ * side of the base is NOT corridor-connected to the P2 spawn point (the
+ * opposite side), the player proactively clears walls to reach it — going
+ * AROUND the base ring, not through it. Once the corridor path is open,
+ * the candidate stops and normal AI behavior takes over (出击/防守).
+ *
+ * The target is FIXED (P2 spawn point = 24 - P1 spawn col), not dynamic —
+ * this ensures the player keeps carving toward the same goal regardless of
+ * their current position, preventing the "reached base column → switched
+ * target → went back" oscillation that the wing-anchor approach caused.
+ *
+ * Same hard constraints as §161 carve (R5/R6): never break steel, never
+ * break base-ring bricks. The fire control (carveFire) already prevents
+ * firing at ring/base walls. Reuses digPathInfoCached (findPath with
+ * breakBrick + buildDigCosts) so A* routes AROUND the ring.
+ * Runs only when baseConnectClearMode > 0 (default ON for hard/chaos).
+ */
+
+export const BASE_CONNECT_CLEAR: Candidate = {
+  id: 'baseConnectClear',
+  weight: ACTION_WEIGHTS.baseConnectClear,
+  evaluate: evalBaseConnectClear,
 }

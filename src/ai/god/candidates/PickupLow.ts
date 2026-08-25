@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { commitPowerupTail,
   baseRingBreachedImpl, isDualCentralBreachHoldP1 } from '../candidates/shared'
 
@@ -55,4 +55,13 @@ export function evalPickupLow(self: GodAIInput, ctx: DecisionContext): boolean {
     }
   }
   return false
+}
+
+
+/** pickupLow(400) — S5: opportunistic power-up economy in normal mode. */
+
+export const PICKUP_LOW: Candidate = {
+  id: 'pickupLow',
+  weight: ACTION_WEIGHTS.pickupLow,
+  evaluate: evalPickupLow,
 }

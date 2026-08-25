@@ -4,7 +4,7 @@
 // is byte-identical (per-tick determinism gate).
 import { type Direction } from '../../../constants'
 import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 
 import { manhattan } from '../../../utils/helpers'
 import {
@@ -48,4 +48,26 @@ export function evalMidLaneHold(self: GodAIInput, ctx: DecisionContext): boolean
   self.branchCounts.midLaneHold++
   self._lastBranch = 'midLaneHold'
   return true
+}
+
+
+/**
+ * §164 中路列旁主动驻守 (proactive mid-lane flank hold) — 用户需求
+ * 2026-08-06：§162 出袋后玩家优先走中路走廊（而非左侧），在列旁持枪对消。
+ * 基地列无钢防时，顶部广场是基地凿穿弹的必经之路：本候选在玩家处于地图
+ * 上半区（row ≤ midLaneHoldMaxRow）且中路繁忙（列内有敌弹，或敌人临近基地
+ * 列）时，导航到/驻守基地列旁的对消格（pcx 在列 x 范围 ±BULLET 内、可站、
+ * 走廊可达——findParryHoldCellImpl），面朝上开火对消。中路无威胁时
+ * return false 放行 hunt/engage（击杀边路游荡敌人）；已在对消格且无威胁时
+ * 同样放行（不钉子户）。
+ *
+ * 权重 220：carvePath(250) 之下、hunt(200) 之上 — 覆盖 hunt 的盲走，低于
+ * 一切战斗/道具/瞭望格/开路候选；DODGE/ENGAGE/DEFENSE_INTERCEPT 全部高于
+ * 它，危险时正常接战。默认 midLaneHold=0 OFF（byte-identical）。
+ */
+
+export const MID_LANE_HOLD: Candidate = {
+  id: 'midLaneHold',
+  weight: ACTION_WEIGHTS.midLaneHold,
+  evaluate: evalMidLaneHold,
 }

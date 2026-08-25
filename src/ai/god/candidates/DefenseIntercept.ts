@@ -3,9 +3,9 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { type Direction, BASE_POS, CELL } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { contractStandingHold, enemyBulletOnRay, ownBulletOnRay } from '../ActionContract'
-import { type DecisionContext } from '../DecisionCore'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   scanAheadImpl,
   shouldFireInDirImpl,
@@ -74,8 +74,7 @@ export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): bo
       }
       self._moveDir = p.dir === dir ? null : dir
       self._fire = !onCooldown && self.rng.next() >= self.params.aimError
-      self.branchCounts.defenseIntercept++
-      self._lastBranch = 'defenseIntercept'
+      recordBranch(self, 'defenseIntercept')
       return true
     }
     // §136 / 方向 D 破砖版: 预测命中（enemyApproachingBaseLaneImpl）但
@@ -107,10 +106,38 @@ export function evalDefenseIntercept(self: GodAIInput, ctx: DecisionContext): bo
       }
       self._moveDir = p.dir === dir ? null : dir
       self._fire = !onCooldown && shouldFireInDirImpl(self, pcx, pcy, dir)
-      self.branchCounts.defenseIntercept++
-      self._lastBranch = 'defenseIntercept'
+      recordBranch(self, 'defenseIntercept')
       return true
     }
   }
   return false
+}
+
+
+/**
+ * defenseIntercept(550) — §134/方向 D: 防守位停射拦截基地车道敌人。
+ *
+ * 与 §132（selectTarget 威胁重排，追快车）的本质区别：本候选**不离开防守位**。
+ * 玩家在基地附近（distToBase ≤ defenseInterceptMaxDist）时，若某存活敌人
+ * 已经与基地对齐且无遮挡（enemyCanShootBase——下一发子弹就能毁基地），同时
+ * 该敌人与玩家同排/同列（玩家能从防守位直接命中），则停射拦截它——turn to
+ * face + fire，像 T2a 但目标不是 aimDir 选中的最近敌人，而是基地车道上的敌人。
+ *
+ * 背景（hard 35×120 取证，§131-§133）：Battlement 基地被毁 117/120、凶手 59%
+ * fast。三个方向先后证伪——T8 拦子弹（已离膛）、威胁重排（fast 4.5cps 追不上
+ * 1★ 玩家 4.19cps）、距离收紧（早回防=把中场让给敌人）。存活下来的思路是
+ * 「在车道口把敌人打掉」：敌人与 base 对齐的瞬间（它破砖进入 row 23-25 或 base
+ * 列的走廊）正是它最脆弱也最危险的时刻，玩家在防守位（base 列上方）与它同列
+ * 的概率最高，一枪命中即解除威胁。
+ *
+ * 门控（全部默认 OFF → byte-identical）：defenseInterceptMode=0 短路；
+ * aggressive（freeze 窗口由 aggro 处理）；无基地关；玩家太远（不出防位追）。
+ * 复用 ENGAGE 的 self-fire base guard（shotReachesBaseImpl）——绝不朝基地方向
+ * 开火穿过基地打敌人。
+ */
+
+export const DEFENSE_INTERCEPT: Candidate = {
+  id: 'defenseIntercept',
+  weight: ACTION_WEIGHTS.defenseIntercept,
+  evaluate: evalDefenseIntercept,
 }

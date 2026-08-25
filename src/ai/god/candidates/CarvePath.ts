@@ -2,8 +2,8 @@
 // Extracted verbatim from think.ts (plan/refactor.trae.md §3.4):
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
-import { type GodAIInput } from '../../GodAIInput'
-import { type DecisionContext } from '../DecisionCore'
+import { type GodAIInput, recordBranch } from '../../GodAIInput'
+import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   carvePathInfoCached,
   carvePostImpl,
@@ -53,8 +53,7 @@ export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
     const dir = info.path[0]
     self._moveDir = dir
     carveFire(self, ctx, dir)
-    self.branchCounts.carvePath++
-    self._lastBranch = 'carvePath'
+    recordBranch(self, 'carvePath')
     return true
   }
 
@@ -77,15 +76,34 @@ export function evalCarvePath(self: GodAIInput, ctx: DecisionContext): boolean {
     const dir = einfo.path[0]
     self._moveDir = dir
     carveFire(self, ctx, dir)
-    self.branchCounts.carvePath++
-    self._lastBranch = 'carvePath'
+    recordBranch(self, 'carvePath')
     return true
   }
   if (info.corridor) return false // R4: 通畅路线 → 不打砖开路
   const dir = info.path[0]
   self._moveDir = dir
   carveFire(self, ctx, dir)
-  self.branchCounts.carvePath++
-  self._lastBranch = 'carvePath'
+  recordBranch(self, 'carvePath')
   return true
+}
+
+
+/**
+ * carvePath(250) — §161 / 开路策略 (carve path, user request 2026-08-06).
+ *
+ * R1/R2: when the spawn point is trapped in a brick maze and the standable
+ * defense post (base guard anchor) is NOT smoothly reachable, shoot through
+ * LOWER-HALF brick walls to carve a through-route to the post. R4: if a
+ * smooth route exists, no carving. R5: never break steel (even when the
+ * player could pierce it). R6: never break base-ring bricks; break at most
+ * carveMaxBaseColumn bricks in the base's own columns when no alternative
+ * exists. R3: once at the post with nothing fightable, carve toward the
+ * enemy most likely to threaten the base. Data-driven — no stage names.
+ * Runs only when carvePathMode > 0 (default OFF, byte-identical).
+ */
+
+export const CARVE_PATH: Candidate = {
+  id: 'carvePath',
+  weight: ACTION_WEIGHTS.carvePath,
+  evaluate: evalCarvePath,
 }
