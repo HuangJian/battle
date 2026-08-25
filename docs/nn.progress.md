@@ -5,6 +5,40 @@
 
 ---
 
+## §14 语料纪元 OBS_SCHEMA_MAJOR 1→2（2026-08-26 凌晨，plan/AI-No-Items-Warmstart.md M2）
+
+### 14.1 打包改动（一次 MAJOR，全部落地并提交 f4afb43）
+- **① item 头删除**：动作空间 10→7（MASK_DIM 7）；actions→(N,2) [move,fire]、masks→(N,7)。
+  TS（infer/policy-input/npy/observations）与 Python（schema/model/student_model/ppo/
+  train_bc/dataset/npyio/validate_export/eval_bridge/dist_common/rl-model/rl·stream）锁步。
+- **② SCALAR_DIM 24→19**（删 guard/frenzy/rewind stock + frenzyActive/frenzyShotsLeft）；
+  **SCALAR_X_INDICES [20,23]→[15,18]**（mirrorX 索引锁步 + 反例测试 test_mirror_scalar_lockstep）。
+- **③ wins-only 口径**（export-godai-labels 默认 --wins 1）；near-miss 守家帧超采样默认 3×
+  （M1 探针证据：守家桶分歧率 74.6% 最高）；人像导出过滤道具动作帧（guard/frenzy 激活帧剔除）。
+- **⑥ returns**：`tools/sim/rl-reward.ts` 共享 RL reward（lossPartialQ/Φ/γ=0.995 折现），
+  God-AI 与人像导出均落盘 returns.npy → M3 value 头 MC 预置数据源；train_bc 增 --value-coef
+  对 PPOStudent 的 value 头做 MC 回归（纯 BC 兼容不改）。
+
+### 14.2 验证
+- determinism：export-godai-labels --verify-determinism（2 关 × 6 npy 字节一致）✅
+- mirror 锁步反例测试（[15,18] 翻转、[20,23] 死位不翻）✅；python 快速层 ALL PASS ✅；tsc ✅
+- 旧 npy 归档：tmp/rl-traj/it36-39 + e2e-v36-out + exp-bench → tmp/npy-v1-archive/ ✅
+
+### 14.3 重导 + 覆盖率（完成）
+- **God-AI wins 底料**：35 关 × 60 seeds 重导（--wins 1 --near-miss-times 3）：
+  games=2100，kept=1526（lossSkipped=574），样本 **2,774,052**（含 3× 濒危超采样），
+  rawFrames=1,398,906 / nearMiss=687,573（**frac 0.4915，≥2000 帧**，3× 后有效守家帧占比 74.4%）。
+- **人像**：nn-demo 104 局 → 97 OK（7 DESYNC 剔除），**65,513** 样本，道具动作帧剔除 17 帧。
+- validate_export 双语料 PASS；A/B 语料（corpus-a 330K / corpus-b 396K 帧）构建完成。
+- 承压关触发线：nearMiss frac 0.4915 < 0.5（全量占比参考 M1 探针 base 桶 75.6%）——
+  已用 near-miss 3× 超采样内置回补（有效占比 74.4%），无需另行补录败局（wins-only 口径）。
+
+### 14.4 BC smoke + M3 双臂（结果见下）
+- A 臂（对照）：wins 底料 185 shards BC warm-start（--value-coef 1.0，PPOStudent 带 value MC 预置）。
+- B 臂（实验）：A + 人像 97 shards（守家帧加权采样内置）。
+
+---
+
 ## §13 无道具纪元开启：M0 + M1（2026-08-26 凌晨，plan/AI-No-Items-Warmstart.md）
 
 > 用户拍板「全部 AI 不使用主动道具 + RL 预热」路线；执行 M0（摘除道具）→ M1（分歧探针）。

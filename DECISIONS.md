@@ -1674,3 +1674,11 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 > 按预注册规则判 **①/③ 边界**（标签或监督）：M3 走 wins-only + 守家帧回补（near-miss
 > 3×），预留 DAgger 交互轮。全文 → docs/nn.progress.md §13.2。
 
+## 248. 语料纪元 OBS_SCHEMA_MAJOR 1→2 — item 头删除 + 标量收编 + wins-only + returns（2026-08-26，plan M2）
+> 一次 MAJOR 打包：① 动作空间 10→7（actions (N,2)/masks (N,7)）；② SCALAR_DIM 24→19、
+> SCALAR_X_INDICES [20,23]→[15,18]（mirror 锁步 + 反例测试）；③ wins-only（--wins 1）+ 守家帧
+> near-miss 3× 超采样（M1 证据）+ 人像道具帧剔除；⑥ returns.npy（rl-reward.ts 共享 RL reward，
+> γ=0.995 折现）→ train_bc --value-coef 对 PPOStudent value 头做 MC 预置。
+> 重导：God-AI 1526 胜局 / 2.77M 帧（near-miss frac 0.4915，≥2000 帧）；人像 97 局 / 65.5K 帧；
+> determinism + validate_export + python 快速层全绿。全文 → docs/nn.progress.md §14。
+
