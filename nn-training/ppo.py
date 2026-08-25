@@ -87,19 +87,20 @@ def load_shard(dirpath: str) -> Dict[str, np.ndarray]:
     def npy(name: str) -> np.ndarray:
         return np.load(os.path.join(dirpath, name))
 
+    # copy=False：dtype 已符合时零拷贝——obs 每轮 ~550MB，无谓 astype 拷贝纯烧内存带宽。
     return {
-        "obs": npy("obs.npy").astype(np.uint8),
-        "scalars": npy("scalars.npy").astype(np.float32),
-        "a_move": npy("a_move.npy").astype(np.int64),
-        "a_fire": npy("a_fire.npy").astype(np.int64),
-        "a_item": npy("a_item.npy").astype(np.int64),
-        "lp_move": npy("lp_move.npy").astype(np.float32),
-        "lp_fire": npy("lp_fire.npy").astype(np.float32),
-        "lp_item": npy("lp_item.npy").astype(np.float32),
-        "value": npy("value.npy").astype(np.float32),
-        "reward": npy("reward.npy").astype(np.float32),
-        "done": npy("done.npy").astype(np.int64),
-        "mask": npy("mask.npy").astype(np.int64),
+        "obs": npy("obs.npy").astype(np.uint8, copy=False),
+        "scalars": npy("scalars.npy").astype(np.float32, copy=False),
+        "a_move": npy("a_move.npy").astype(np.int64, copy=False),
+        "a_fire": npy("a_fire.npy").astype(np.int64, copy=False),
+        "a_item": npy("a_item.npy").astype(np.int64, copy=False),
+        "lp_move": npy("lp_move.npy").astype(np.float32, copy=False),
+        "lp_fire": npy("lp_fire.npy").astype(np.float32, copy=False),
+        "lp_item": npy("lp_item.npy").astype(np.float32, copy=False),
+        "value": npy("value.npy").astype(np.float32, copy=False),
+        "reward": npy("reward.npy").astype(np.float32, copy=False),
+        "done": npy("done.npy").astype(np.int64, copy=False),
+        "mask": npy("mask.npy").astype(np.int64, copy=False),
     }
 
 

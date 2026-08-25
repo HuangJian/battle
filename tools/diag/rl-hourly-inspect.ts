@@ -53,6 +53,12 @@ export interface IterEvent {
   ppo_sec?: number | null
   /** 流式三阶段拆分：纯采集窗口（= collector 墙钟 − 窗口内重叠的 PPO）。 */
   pure_collect_sec?: number | null
+  /** 轮内累计 KL（流式 = Σ各 wave，即熔断口径）；串行模式该值即全轮均值。旧日志行缺失——此时看 kl。 */
+  kl_cum?: number | null
+  /** 本轮 KL 是否触发熔断（停止训练并丢弃后续已结算语料）。 */
+  halted?: boolean
+  /** 熔断后丢弃的已结算局数。 */
+  dropped_games?: number | null
 }
 
 /** 本轮实际局数 = outcomes 计数之和（随 rotate/补采配置浮动，勿硬编码）。 */
@@ -65,6 +71,15 @@ export function avgTicksPerGame(e: IterEvent): number | null {
   const games = gamesOf(e)
   if (games <= 0 || typeof e.ticks !== 'number' || e.ticks <= 0) return null
   return e.ticks / games
+}
+
+/**
+ * KL 展示口径：优先轮内累计 kl_cum（熔断判据看的就是它）。此前表格显示的 kl 在
+ * 流式模式下只是「最后一个 wave 的均值」（~0.03-0.04），对轮内累积漂移（常到
+ * 0.12-0.15 并触发熔断）全盲——2026-08-25 用户质询「KL 从没超 0.1」暴露此误导。
+ */
+export function klEff(e: IterEvent): number | null {
+  return e.kl_cum ?? e.kl
 }
 
 /** 相位耗时展示：<90s 显示秒，否则分钟；缺失/旧日志行显示 —。 */
@@ -559,10 +574,18 @@ function buildHtml(
         ev && typeof ev.winRate === 'number'
           ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games})`
           : '—'
+      const ke = klEff(e)
+      const klCell =
+        ke === null
+          ? '—'
+          : ke.toFixed(4) +
+            (e.halted
+              ? ` <span class="halt" title="KL 熔断：停止训练并丢弃 ${e.dropped_games ?? '?'} 局已结算语料">⛔${e.dropped_games ?? ''}</span>`
+              : '')
       return (
         `<tr><td class="txt">it${e.iter}</td><td>${esc(e.time)}</td>` +
         `<td>${rollWrCell}</td><td>${evalWrCell}</td><td>${e.score_mean == null ? '—' : e.score_mean.toFixed(4)}</td>` +
-        `<td>${e.entropy == null ? '—' : e.entropy.toFixed(3)}</td><td>${e.kl == null ? '—' : e.kl.toFixed(4)}</td>` +
+        `<td>${e.entropy == null ? '—' : e.entropy.toFixed(3)}</td><td>${klCell}</td>` +
         `<td>${(() => {
           const t = avgTicksPerGame(e)
           return t === null ? '—' : Math.round(t)
@@ -653,6 +676,7 @@ function buildHtml(
   tbody tr:nth-child(even) { background:#f9fafb; }
   tbody tr:hover { background:#fff8e1; }
   .win-cell { font-weight:600; }
+  .halt { color:#cf222e; font-size:11px; font-weight:600; }
   .na { color:#bbb; }
   .th-note { display:block; font-weight:400; font-size:10px; color:#57606a; white-space:normal; line-height:1.3; margin-top:2px; }
   footer { margin-top:14px; color:#8c959f; font-size:12px; line-height:1.6; }
@@ -680,13 +704,14 @@ function buildHtml(
 <div class="wrap" style="max-height:250px;">
 <table>
   <thead><tr>
-    <th class="txt">迭代</th><th class="txt">完成时刻</th><th>rollout 胜率</th><th>eval 胜率</th><th>score_mean</th><th>entropy</th><th>KL</th><th>局均 ticks</th><th>采集耗时</th><th>PPO 耗时</th><th>eval 耗时</th><th class="txt">节点贡献</th>
+    <th class="txt">迭代</th><th class="txt">完成时刻</th><th>rollout 胜率</th><th>eval 胜率</th><th>score_mean</th><th>entropy</th><th>KL 累计</th><th>局均 ticks</th><th>采集耗时</th><th>PPO 耗时</th><th>eval 耗时</th><th class="txt">节点贡献</th>
   </tr></thead>
   <tbody>
 ${recentRows}
   </tbody>
 </table>
 </div>
+<div class="meta">KL 累计口径：流式 = Σ各 wave（熔断判据，上限 policy.streamKlCap 默认 0.12）· ⛔N = 该轮熔断丢弃的已结算局数 · 旧日志行无 kl_cum，显示单值 kl（串行模式即全轮均值）。</div>
 
 <h2>${passHeading}</h2>
 <div class="wrap">
@@ -978,11 +1003,11 @@ function main(): void {
     `<b>最后 run_start</b>：${esc(lastRunStart)}　·　<b>最后迭代</b>：it${lastIter ? lastIter.iter : '?'} @ ${lastIter ? esc(lastIter.time) : '?'}`,
     `<b>健康判定</b>：<b>${verdict}</b>（近 ${recentIters.length} 轮：${(() => {
       const entVals = recentIters.map((e) => e.entropy).filter((x): x is number => x !== null)
-      const klVals = recentIters.map((e) => e.kl).filter((x): x is number => x !== null)
+      const klVals = recentIters.map((e) => klEff(e)).filter((x): x is number => x !== null)
       const tpgs = recentIters.map((e) => avgTicksPerGame(e)).filter((x): x is number => x !== null)
       return [
         `entropy 最小 ${entVals.length > 0 ? Math.min(...entVals).toFixed(3) : '—'}`,
-        `KL 最大 ${klVals.length > 0 ? Math.max(...klVals).toFixed(4) : '—'}`,
+        `KL累计 最大 ${klVals.length > 0 ? Math.max(...klVals).toFixed(4) : '—'}`,
         `局均 ticks 最小 ${tpgs.length > 0 ? Math.round(Math.min(...tpgs)) : '—'}`,
       ].join(' · ')
     })()}）　·　<b>阈值</b>：entropy &le;0.6 异常 / &lt;0.8 观察 · KL &gt;0.15 连续3轮 异常 / 连续2轮 观察 · 局均 ticks &lt;1000 异常 / &lt;2000 观察`,

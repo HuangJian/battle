@@ -1,0 +1,446 @@
+"""test_run_rl.py — run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
+
+两层：
+  快速层（默认）：纯逻辑 + 磁盘 fixture —— parse_range / build_pairs（确定性、
+      sps 变更重叠性质） / combine_reports / completed_pairs+resumed_manifests
+      （only/exclude 口径） / last_completed_iter / last_rotate_seed。
+  集成层（RUN_RL_ITEST=1）：本地假 HTTP agent 节点驱动真 run_rollout_queue /
+      run_rollout_stream —— 正常流、halt 流、派发队列清空回调的触发与次序。
+
+运行（经统一启动器，venv/torch 由它保证）：
+  bash nn-training/start-training.sh --script test_run_rl.py
+  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_run_rl.py
+  集成层追加环境变量 RUN_RL_ITEST=1（需 PATH 上有 bun、tmp/rl-weights/weights.json 存在）。
+
+退出码：全部通过 0，否则 1。新增队列/流式行为时请在此补用例，不要写临时脚本。
+"""
+from __future__ import annotations
+
+import gzip
+import io
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import threading
+import time
+import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import numpy as np
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "nn-training"))
+
+import dist_common  # noqa: E402
+import run_rl  # noqa: E402
+from schema import BOARD, FIRE_DIM, ITEM_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM  # noqa: E402
+
+FAILS: list[str] = []
+ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
+WEIGHTS = REPO / "tmp" / "rl-weights" / "weights.json"
+
+
+def check(cond: bool, msg: str) -> None:
+    global_n = len(FAILS)
+    print(("  PASS " if cond else "  FAIL ") + msg, flush=True)
+    if not cond:
+        FAILS.append(msg)
+        _ = global_n
+
+
+def bp_args(sps: int, rotate_stages: int = 35, total_stages: int = 35):
+    return types.SimpleNamespace(rotate_stages=rotate_stages, seeds_per_stage=sps,
+                                 total_stages=total_stages, stages="0-3", seeds="0-3")
+
+
+# ---------------- 快速层 ----------------
+
+def test_parse_range() -> None:
+    print("[fast] parse_range")
+    check(run_rl.parse_range("0-3") == [0, 1, 2, 3], "range expansion")
+    check(run_rl.parse_range("0,2,5") == [0, 2, 5], "comma list")
+    check(run_rl.parse_range("0-1,4") == [0, 1, 4], "mixed")
+    check(run_rl.parse_range("7") == [7], "single")
+
+
+def test_build_pairs() -> None:
+    print("[fast] build_pairs")
+    a = run_rl.build_pairs(bp_args(3), 60, 1787503550)
+    b = run_rl.build_pairs(bp_args(3), 60, 1787503550)
+    check(a == b and len(a) == 105, "deterministic per (rotateSeed, it); size=35x3")
+    c = run_rl.build_pairs(bp_args(3), 61, 1787503550)
+    check(a != c, "different it -> different draw")
+    # it60 实测回归：sps 4->3 只改变每关种子索引窗，底流前缀一致，
+    # 仅置换前三关相交，重合数恒为 3+2+1=6。
+    old = run_rl.build_pairs(bp_args(4), 60, 1787503550)
+    inter = set(old) & set(a)
+    check(len(inter) == 6, f"sps 4->3 overlap == 6 (got {len(inter)})")
+    perm = [24, 1, 33]  # 该 rotateSeed/it 的置换前三关
+    check(all(st in perm for st, _sd in inter), "overlap confined to first 3 perm stages")
+
+
+def test_combine_reports() -> None:
+    print("[fast] combine_reports")
+    r1 = {"games": 2, "winRate": 0.5, "outcomes": {"stage_clear": 1, "base_destroyed": 1},
+          "totalSamples": 100, "totalTicks": 200, "scoreList": [0.1, 0.3],
+          "dimLists": {"progress": [0.2, 0.4]}}
+    r2 = {"games": 1, "winRate": 0.0, "outcomes": {"base_destroyed": 1},
+          "totalSamples": 50, "totalTicks": 90, "scoreList": [0.2],
+          "dimLists": {"progress": [0.1]}, "elapsedSec": 1.0}
+    comb = run_rl.combine_reports([r1, r2])
+    check(comb["games"] == 3 and comb["totalSamples"] == 150 and comb["totalTicks"] == 290,
+          "counts summed")
+    check(comb["winRate"] == round(1 / 3, 4), "winRate recomputed across workers")
+    check(len(comb["scoreList"]) == 3 and abs(comb["scoreStats"]["mean"] - 0.2) < 1e-9,
+          "scoreList merged + stats")
+    check(comb["dimMeans"]["progress"] == round((0.2 + 0.4 + 0.1) / 3, 4), "dimMeans merged")
+
+
+def _mk_shard(traj: Path, stage: int, seed: int, wver: str, *, aggregate: bool = False) -> None:
+    d = traj / f"rl_s{stage}_seed{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    if aggregate:
+        mm = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
+              "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
+              "scoreList": [0.5], "dimLists": {}, "node": "fake"}
+    else:
+        mm = {"wver": wver, "stage": stage, "seed": seed, "nSamples": 30, "ticks": 900,
+              "outcome": "stage_clear", "score": 0.4}
+    (d / "obs.npy").write_bytes(b"\x00")
+    (d / "manifest.json").write_text(json.dumps(mm), encoding="utf-8")
+
+
+def test_resume_scope(tmp: Path) -> None:
+    print("[fast] completed_pairs + resumed_manifests (plan scope)")
+    traj = tmp / "resume"
+    shutil.rmtree(traj, ignore_errors=True)
+    traj.mkdir(parents=True)
+    wver = "a" * 64
+    _mk_shard(traj, 0, 111, wver)
+    _mk_shard(traj, 3, 222, wver, aggregate=True)
+    _mk_shard(traj, 9, 999, wver)           # 计划外残留（跨配置断点）
+    _mk_shard(traj, 5, 555, "b" * 64)       # 旧权重代际
+    plan = {(0, 111), (3, 222)}
+    done_all = run_rl.completed_pairs(traj, wver)
+    check(done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only")
+    done_plan = done_all & plan
+    check(done_plan == {(0, 111), (3, 222)}, "plan intersection")
+    rm = run_rl.resumed_manifests(traj, wver, only=plan)
+    check({(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)},
+          "resumed honors only=plan (drops off-plan)")
+    agg = [m for m in rm if m.get("games") == 1 and m.get("node") == "fake"]
+    check(len(agg) == 1, "aggregate-schema manifest passed through")
+    legacy = [m for m in rm if m.get("node") != "fake"]
+    check(len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30,
+          "legacy schema converted to aggregate shape")
+    rm_ex = run_rl.resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
+    check({(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored")
+
+
+def test_jsonl_anchors(tmp: Path) -> None:
+    print("[fast] last_completed_iter / last_rotate_seed")
+    jl = tmp / "log.jsonl"
+    rows = [
+        {"event": "run_start", "time": "t0", "rotateSeed": 42},
+        {"event": "iteration", "iter": 3},
+        {"event": "iter_error", "iter": 4, "error": "x"},
+        {"event": "iteration", "iter": 7},
+        {"event": "run_start", "time": "t1", "args": {}, "rotateSeed": 42},
+        {"event": "circuit_break", "iter": 7},
+    ]
+    jl.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    check(run_rl.last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)")
+    check(run_rl.last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start")
+
+
+# ---------------- 集成层（RUN_RL_ITEST=1）----------------
+
+def _npy_bytes(arr: np.ndarray) -> bytes:
+    bio = io.BytesIO()
+    np.lib.format.write_array(bio, arr)
+    return bio.getvalue()
+
+
+def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(11)
+    i64 = lambda hi: rng.integers(0, hi, n).astype(np.int64)  # noqa: E731
+    f32 = lambda x: rng.standard_normal(x).astype(np.float32)  # noqa: E731
+    done = np.zeros(n, dtype=np.int64)
+    done[-1] = 1
+    return {"obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
+            "scalars": f32((n, SCALAR_DIM)), "a_move": i64(MOVE_DIM), "a_fire": i64(FIRE_DIM),
+            "a_item": i64(ITEM_DIM), "lp_move": -np.abs(f32(n)) - 0.05,
+            "lp_fire": -np.abs(f32(n)) - 0.05, "lp_item": -np.abs(f32(n)) - 0.05,
+            "value": f32(n), "reward": f32(n), "done": done,
+            "mask": np.ones((n, MASK_DIM), dtype=np.int64)}
+
+
+def _pack_container(stage: int, seed: int, wver: str) -> bytes:
+    manifest = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
+                "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
+                "scoreList": [0.5], "dimLists": {}, "elapsedSec": 0.01, "node": "fake"}
+    header_files, body = [], b""
+    for name, arr in _synth_payload().items():
+        fname = f"{name}.npy"
+        raw = _npy_bytes(arr)
+        header_files.append({"name": fname, "len": len(raw)})
+        body += struct.pack(">H", len(fname)) + fname.encode() + struct.pack(">Q", len(raw)) + raw
+    header = json.dumps({"manifest": manifest, "files": header_files}).encode()
+    return gzip.compress(struct.pack(">I", 0x42435632) + struct.pack(">I", len(header)) + header + body)
+
+
+class FakeAgent(BaseHTTPRequestHandler):
+    events: list[tuple[str, float, tuple]] = []
+
+    def log_message(self, *_a) -> None:
+        return
+
+    def _json(self, obj: dict) -> None:
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        u = urlparse(self.path)
+        if u.path == "/v1/ping":
+            bun = shutil.which("bun")
+            self._json({"codeHash": dist_common.compute_code_hash(),
+                        "bunVersion": subprocess.run([bun, "--version"], capture_output=True,
+                                                     text=True, timeout=10).stdout.strip(),
+                        "cpus": 4})
+        elif u.path == "/v1/task":
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            FakeAgent.events.append(("dispatch", time.time(), (int(q["stage"]), int(q["seed"]))))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            body = _pack_container(int(q["stage"]), int(q["seed"]), q["wver"])
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self._json({"error": "nf"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        FakeAgent.events.append(("weights", time.time(), ()))
+        self._json({"cache": "kept"})
+
+
+def test_integration(tmp: Path) -> None:
+    import torch
+
+    print("[itest] queue normal / halt / queue-drained ordering")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeAgent)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    bun = shutil.which("bun")
+    cfg = {"nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
+           "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3}}
+    args = types.SimpleNamespace(workers=4, max_ticks=300, difficulty="hard")
+
+    def fresh(tag: str) -> Path:
+        p = tmp / tag
+        shutil.rmtree(p, ignore_errors=True)
+        p.mkdir(parents=True)
+        FakeAgent.events.clear()
+        return p
+
+    try:
+        # I1 正常流：结算齐全；queue-drained 恰一次，且在首次 dispatch 之后
+        traj = fresh("i1")
+        drained_ts, result_ts = [], []
+        rep = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i1.1",
+            local_slots_max=0,
+            on_result=lambda _s: result_ts.append(time.time()),
+            on_queue_drained=lambda: drained_ts.append(time.time()))
+        disp = [t for kind, t, _x in FakeAgent.events if kind == "dispatch"]
+        wts = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
+        disp_pairs = {p for kind, _t, p in FakeAgent.events if kind == "dispatch"}
+        check(rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully")
+        check(rep.get("dist_phase_sec") is not None, "I1 dist_phase_sec present")
+        check(len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})")
+        # 契约：清空信号晚于权重分发（不得退回 dist-done 时代）；pop 即交接，
+        # 最后一个任务的 HTTP 提交允许在信号之后，但必须全部发生。
+        check(wts and drained_ts[0] > wts[0], "I1 drained after weight distribution")
+        check(disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched")
+        check(rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards")
+
+        # I2 预置 halt：零派发、drained 不触发、halt_aborted
+        traj = fresh("i2")
+        ev = threading.Event()
+        ev.set()
+        calls = []
+        rep2 = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i2.2",
+            local_slots_max=0, halt_event=ev,
+            on_queue_drained=lambda: calls.append(1))
+        check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
+        check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
+        check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
+
+        # I3 流式迷你轮：真 PPO 更新 + 评估恰一次（队列清空时）+ 句柄回传
+        import ppo as ppo_mod
+        traj = fresh("i3")
+        model = ppo_mod.build_ppo(None)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+        cfg3 = json.loads(json.dumps(cfg))
+        cfg3["policy"]["streamWaveGames"] = 2
+        cfg3["policy"]["streamKlCap"] = 1e12  # 随机权重首波 KL 天文数字，只验非熔断路径
+        fired = []
+
+        def on_collect_done():
+            fired.append(time.time())
+            th = threading.Thread(target=lambda: None)
+            th.start()
+            return th
+
+        rep3 = run_rl.run_rollout_stream(
+            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+            cfg3, "i3.3", model, opt, torch.device("cpu"), on_collect_done=on_collect_done)
+        sm = rep3.pop("_stream")
+        check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
+        check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
+        check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
+        wts3 = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
+        check(wts3 and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
+        check("_eval_thread" in rep3, "I3 eval thread returned via report")
+
+        # I4 流式熔断轮：触顶停训 + 停派发
+        traj = fresh("i4")
+        model4 = ppo_mod.build_ppo(None)
+        opt4 = torch.optim.Adam(model4.parameters(), lr=1e-4)
+        cfg4 = json.loads(json.dumps(cfg))
+        cfg4["policy"]["streamWaveGames"] = 2
+        cfg4["policy"]["streamKlCap"] = 1e-6
+        rep4 = run_rl.run_rollout_stream(
+            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+            cfg4, "i4.4", model4, opt4, torch.device("cpu"), on_collect_done=None)
+        sm4 = rep4.pop("_stream")
+        check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
+        check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
+    finally:
+        srv.shutdown()
+
+
+def test_breaker_update() -> None:
+    from rl.breaker import breaker_update
+    print("[fast] breaker_update (F4 纯逻辑)")
+    # KL 规则：连续 3 轮 ≥0.15 触发；中间一轮回落即清零
+    s = breaker_update(0, 0, kl=0.16, entropy=1.2, win_rate=0.9)
+    check(s[:2] == (1, 0) and s[2] is None, "KL streak advances, no early trip")
+    s = breaker_update(s[0], s[1], kl=0.16, entropy=1.2, win_rate=0.9)
+    check(s[0] == 2 and s[2] is None, "KL streak 2")
+    s = breaker_update(s[0], s[1], kl=0.16, entropy=1.2, win_rate=0.9)
+    check(s[0] == 3 and s[2] is not None and "kl>=0.15" in s[2], "KL trips at 3rd consecutive")
+    reset = breaker_update(2, 0, kl=0.01, entropy=1.2, win_rate=0.9)
+    check(reset[0] == 0 and reset[2] is None, "good iter resets KL streak")
+    # ENT 规则：低熵 + 低胜率护栏；高胜率策略永不误停
+    e = breaker_update(0, 7, kl=0.01, entropy=0.55, win_rate=0.3)
+    check(e[1] == 8 and e[2] is not None and "entropy<=" in e[2], "ENT trips at 8th consecutive")
+    guard = breaker_update(0, 0, kl=0.01, entropy=0.4, win_rate=0.9)
+    check(guard[1] == 0 and guard[2] is None, "high winRate guards ENT rule")
+
+
+def test_wave_params() -> None:
+    from rl.stream import wave_params
+    print("[fast] wave_params (软降档 + 残局上限)")
+    check(wave_params(0.0, 0.12, 12, 24) == (12, 24), "normal zone unchanged")
+    check(wave_params(0.0839, 0.12, 12, 24) == (12, 24), "below 70% cap unchanged")
+    check(wave_params(0.0841, 0.12, 12, 24) == (4, 8), "soft zone shrinks to floor")
+    check(wave_params(0.5, 0.12, 3, 3) == (4, 4), "floors at 4 even with tiny config")
+    # 残局上限（it63 教训：只剩 2 局却要等满阈值 4 → 静默空等收官）
+    check(wave_params(0.0, 0.12, 12, 24, remaining=2) == (2, 2), "remaining caps threshold+cap")
+    check(wave_params(0.0, 0.12, 12, 24, remaining=50) == (12, 24), "larger remaining ignored")
+    check(wave_params(0.0841, 0.12, 12, 24, remaining=2) == (2, 2), "soft zone + tiny remaining")
+    check(wave_params(0.0841, 0.12, 12, 24, remaining=6) == (4, 6), "soft zone capped by remaining")
+
+
+def test_compute_gae() -> None:
+    import numpy as np
+    import ppo as ppo_mod
+    print("[fast] ppo.compute_gae (手算用例)")
+    rewards = np.array([1.0, 0.0])
+    values = np.array([0.5, 0.8])
+    dones = np.array([0, 1])
+    adv, ret = ppo_mod.compute_gae(rewards, values, dones, gamma=0.99, lam=0.95)
+    # t=1: delta=-0.8（终止，无 bootstrap）→ adv1=-0.8
+    # t=0: delta=1+0.99*0.8-0.5=1.292 → adv0=1.292+0.99*0.95*(-0.8)=0.5396
+    check(abs(adv[1] - (-0.8)) < 1e-6, "terminal step advantage == delta")
+    check(abs(adv[0] - 0.5396) < 1e-6, f"bootstrapped advantage (got {adv[0]:.6f})")
+    # 手算期望：ret = adv + values = [1.0396, 0.0]；显式容差吸收 float32 舍入
+    check(np.allclose(ret, [1.0396, 0.0], atol=1e-6), f"returns hand-computed (got {ret})")
+
+
+def test_chunk_episodes() -> None:
+    import ppo as ppo_mod
+    print("[fast] ppo.chunk_episodes (ragged 尾巴)")
+    eps = [{"obs": np.zeros((1000, 2)), "adv": np.arange(1000)}]
+    chs = ppo_mod.chunk_episodes(eps, 600)
+    sizes = [c["obs"].shape[0] for c in chs]
+    check(sizes == [600, 400], f"ragged tail split (got {sizes})")
+    total = sum(c["obs"].shape[0] for c in chs)
+    check(total == 1000, "no samples lost")
+    check(all(set(c.keys()) == set(eps[0].keys()) for c in chs), "keys preserved per chunk")
+
+
+def test_backup_weights(tmp: Path) -> None:
+    import run_rl
+    print("[fast] backup_weights (归档 + 有界清理)")
+    bdir = tmp / "weights-archive"
+    shutil.rmtree(bdir, ignore_errors=True)
+    src = tmp / "src-weights.json"
+    src.write_text("{}", encoding="utf-8")
+    old_dir, old_keep = run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP
+    run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = bdir, 2
+    try:
+        for it in (1, 2, 3):
+            out = run_rl.backup_weights(str(src), it)
+            check(out is not None, f"backup it{it} returned path")
+        remain = sorted(p.name.split(".")[1] for p in bdir.glob("rl-weights.it*.json"))
+        check(remain == ["it2", "it3"], f"bounded prune keeps newest KEEP (got {remain})")
+    finally:
+        run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
+
+
+def main() -> None:
+    if not WEIGHTS.exists():
+        print(f"[skip-integration] missing weights fixture: {WEIGHTS}")
+    tmp = REPO / "tmp" / "test-run-rl"
+    tmp.mkdir(parents=True, exist_ok=True)
+    test_parse_range()
+    test_build_pairs()
+    test_combine_reports()
+    test_resume_scope(tmp)
+    test_jsonl_anchors(tmp)
+    test_breaker_update()
+    test_wave_params()
+    test_compute_gae()
+    test_chunk_episodes()
+    test_backup_weights(tmp)
+    if ITEST:
+        if not WEIGHTS.exists() or shutil.which("bun") is None:
+            raise SystemExit("RUN_RL_ITEST=1 requires bun on PATH and tmp/rl-weights/weights.json")
+        test_integration(tmp)
+    else:
+        print("[skip] integration tier: set RUN_RL_ITEST=1 to enable")
+    print()
+    if FAILS:
+        print(f"RESULT: {len(FAILS)} FAILURE(S)")
+        for f in FAILS:
+            print("  - " + f)
+        raise SystemExit(1)
+    print("RESULT: ALL PASS")
+
+
+if __name__ == "__main__":
+    main()

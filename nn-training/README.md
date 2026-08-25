@@ -16,6 +16,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | `schema.py` | TS↔Python **唯一** schema 常量（通道 / 标量 / 动作 / 掩码布局）。 |
+| `rl/` | **RL 训练核心包**（2026-08-25 自 run_rl.py 抽取）：`course.py` 课程采样 · `queue.py` 中央队列调度 · `stream.py` 流式迭代 · `eval_dispatch.py` 干净评估分发 · `resume.py` 断点对账 · `reports.py` 报告聚合 · `breaker.py` F4 熔断纯逻辑 · `log.py` 统一日志。入口仍为顶层 `run_rl.py`（启动器只接受裸文件名）。 |
+| `test_run_rl.py` | RL 编排回归测试：快速层（纯逻辑，默认）+ 集成层（假 HTTP 节点，`--itest`）。运行：`start-training.sh --script test_run_rl.py [--itest]`。 |
 | `npyio.py` | 手写 raw `.npy` 读写（TS 侧无 numpy 也能写出；Python 侧用 `numpy.load` 读取）。 |
 | `model.py` | `NNPolicy`：卷积 backbone + 3 个 factored head（move-5 / fire-2 / item-3），≤200K 参数，ReLU-only + 自实现 softmax（与 TS 推理逐字节一致）。 |
 | `weights_io.py` | 权重 JSON 导出 / 加载（base64 `<f4`），供 TS 运行时 `infer.ts` 加载。 |

@@ -5,6 +5,96 @@
 
 ---
 
+## §9 Python 侧工程化重组 + 常驻单元测试（2026-08-25）
+
+### 9.1 结构（nn-training/rl/ 新包）
+run_rl.py 从 ~1700 行瘦身为 ~500 行入口（CLI + 迭代主循环 + 权重归档/巡检），
+编排逻辑抽取至 `rl/`：course（课程纯函数）/ queue（中央队列+本地回退）/
+stream（流式波次）/ eval_dispatch（干净评估）/ resume（断点对账）/
+reports（聚合）/ breaker（F4 纯逻辑）/ log。入口必须留在顶层——启动器只接受
+裸 .py 文件名；`rl/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
+re-export，旧引用路径不破。
+
+### 9.2 可测试性抽取与潜在缺陷修复
+- **breaker_update(kl_streak, ent_streak, *, kl, entropy, win_rate)** 纯函数化
+  （阈值+连击判定），主循环改调它；顺带修复潜在缺陷：流式 checkpoint-complete 轮
+  agg=None 时旧代码直接读 agg["kl"] → TypeError → 被兜底 except 吞掉后原地重试。
+  现在 agg None 短路（不计连击不告警——本轮本无梯度步）。
+- **wave_params(cum_kl, kl_cap, wave_games, wave_cap)** 纯函数化（软降档阈值）。
+
+### 9.3 测试（test_run_rl.py 常驻，禁临时脚本）
+快速层默认跑（~30 断言）：parse_range / build_pairs 确定性+sps 重叠=6 回归 /
+combine_reports / completed_pairs+resumed_manifests(only/exclude) / jsonl 锚点 /
+breaker_update 全规则 / wave_params 边界 / compute_gae 手算用例 / chunk_episodes
+ragged / backup_weights 有界清理。集成层 `--itest`：假 HTTP 节点驱动真队列与
+流式轮（结算、halt、queue-drained 次序契约、评估恰一次）。教训入册：
+① float32 ret 与 float64 重算差 ~1.2e-8 会越过 allclose 默认 atol——手算用例
+必须带显式容差；② 大块 SearchReplace 在该文件上会模糊匹配失真（缩进漂移/
+整文件截断各一次），结构性移动优先用「新文件 Write + 入口重写」，行内小修才用
+SearchReplace 且改后必 py_compile。
+
+---
+
+## §8 流水线衔接优化：KL 遥测补盲 + 熔断止损 + dist/eval 解串（2026-08-25）
+
+> 起因：用户质询「跑这么多轮 KL 都没超 0.1」——jsonl 的 `kl` 在流式模式下只是
+> **末 wave 单值**，而轮内累计 cum_kl 实际在 50 轮里触发熔断 33 次（66%，通宵段
+> 95%），max 0.129–0.155。遥测盲区让最常触发的路径无人察觉；且熔断后已结算语料
+> 整批丢弃、远端仍在采无人消费的局（it53 实测 53/140 局白采）。
+
+### 8.1 落地（run_rl.py / ppo.py / rl-hourly-inspect.ts）
+- **KL 记录**：jsonl 新增 `kl_cum`（流式=Σ各 wave，串行=单次更新均值）、
+  `halted`、`dropped_games`、`waves`；HTML 巡检「KL 累计」列优先显示 kl_cum，
+  ⛔N 角标标注熔断丢局数（旧日志行无 kl_cum 时回退显示单值 kl）。
+- **R1 熔断止损**：`halt_event` 贯穿 run_rollout_queue——触顶后 worker 停止领取
+  新任务（在途局自然收尾），报告带 `halt_aborted`；cum_kl 过 cap 70% 后软降档
+  （wave 12→4 / drain cap 24→8），把过冲从一个整波压到个位数局。
+- **dist↔eval 解串（用户指令，同日修订一次）**：初版按「权重分发完毕即并行派发」，
+  用户复核后纠正为**中央派发队列清空**时触发——全部采集任务已交到节点/本地线程、
+  结果仍在途，评估局顺势填收尾空槽；既不与采集全程抢节点（初版问题），也不必等
+  全部结果落定（回到串行时代）。熔断 / collector 收官仅兜底再触发（eval_fired
+  护栏去重）。评估线程句柄经 report["_eval_thread"] 回传主循环，jsonl 写回前
+  join——修复流式模式评估线程此前根本不被 join 的隐患。**仅流式改此时机**；
+  串行关键路径是采集→PPO，评估提前会抢采集节点反而拉长整轮。
+- **rollout_sec 锚点修正**：collector 线程 finally 里记 box["t_end"]，主线程以它为
+  collect_done——此前最后一个 in-flight wave 的 PPO 时长被误计入"纯采集窗口"
+  （即 rollout_sec − pure_collect_sec 缺口 450–650s 的真正来源）。
+- **新增耗时字段**：`dist_phase_sec`（ping+POST 阶段）、`tail_drain_sec`、
+  `load_sec`（_load_wave 的 npy IO+GAE，此前完全不可见）、`eval_join_sec`
+  （轮间气泡直接观测）。join 前置于 jsonl 写回以便同轮入账；崩溃时断点续跑按
+  「语料秒回 + PPO checkpoint 完整」路径无损重放。
+- **ppo.load_shard astype(copy=False)**：obs 每轮 ~550MB 的无谓 dtype 拷贝消除。
+- **UI/遥测微调（用户指令）**：「KL 累计」的口径说明从表头 th-note 移到迭代健康表
+  下方；`run_local` 注入 `report["elapsedSec"]`（整局墙钟，与远端 manifest 同口径）
+  → dist-agent-meta.jsonl 的 local 行开始带耗时，「采样机健康」表的局均耗时列对
+  local 不再恒为 '—'（数据自下次 relaunch 起积累）；串行模式 local 也因此进入
+  tail-dispatch 快慢分档速度表。
+- **断点续跑「计划口径」修复（it60 实测驱动）**：sps 4→3 后重启同一迭代，目录残留
+  旧计划同权重 shard（140 局 vs 新计划 105），旧逻辑把两者混算——resume 日志显示
+  「140/105」歧义、报告聚合混入 134 局计划外语料。修复：`completed_pairs` 结果与
+  `plan_set` 求交后再算缺口；`resumed_manifests` 增加 `only=` 计划内过滤；日志改为
+  「planned pairs on disk (+ ignoring N off-plan shards)」无歧义格式；dist 遥测新增
+  `offPlanShards`；早退路径补齐 missing/expectedGames/dist 与全流程同 schema。
+  重叠恰为 6 局的数学：sps 变更只改变每关种子索引窗（旧 [4i,4i+4) / 新 [3i,3i+3)，
+  底流前缀一致），仅置换前三关相交，3+2+1=6，实测逐位吻合。
+
+### 8.2 设计判断
+- **F4 熔断仍读 `kl`（每梯度步均值）不读 kl_cum**：阈值 0.15 是按每更新均值标定
+  的（健康带 0.045–0.054）；喂 Σwave 值（常态 0.12–0.15）会三轮即假熔断。轮内
+  漂移的治理者是 streamKlCap 本身，kl_cum 只负责可见性。
+- **远端全挂时没有本地 eval 兜底**（确认过的现状）：节点配置缺失→纯本地路径
+  根本不走 eval 分支；节点配置了但全 ping/POST 失败→回退本地后 dispatch_eval
+  因无 evalSupport 节点而 skip。如需本地贪心评估需另起 runner（未做）。
+- **R2 配方建议（未改代码）**：PPO 已是瓶颈（ppo_cpu≈927s vs 纯采集≈540s），
+  下次启动可试 `--seeds-per-stage 3`（140→105 局）让采集量贴 KL 预算走。
+
+### 8.3 生效与观察项
+- 当前运行中的 run_rl 仍是旧代码（run_rl 无锁文件）；改动在下次 relaunch 生效。
+- 观察项：① `dropped_games` 应显著下降（软降档+停派发）；② `load_sec` 占比决定
+  是否值得做双缓冲预装载；③ eval 与采集并行后 pure_collect_sec 会略涨——只要
+  迭代墙钟下降即为净赚；④ `eval_join_sec` 若仍常态 >0，考虑再压 eval 语料。
+
+
 ## §7 干净评估嵌入流水线（2026-08-24 晚，DECISIONS §245）
 
 > 背景：采集成本趋零后，training_log 的 winRate 仍是"带探索噪声的移动靶"——

@@ -1,0 +1,495 @@
+"""中央队列调度：远端 agent 节点 + 本地槽位同队消费，含纯本地回退。
+
+协议契约见 dist_common.py（plan/distributed-rollout.md）。本模块只做编排：
+ping 门 → 权重下发 → 任务派发/回队/熔断 → 聚合报告。
+"""
+from __future__ import annotations
+
+import json
+import random
+import secrets
+import subprocess
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import dist_common
+from rl.log import log
+from rl.reports import combine_reports, win_of
+from rl.resume import completed_pairs, resumed_manifests
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
+# 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
+RUN_ID = secrets.token_hex(8)
+MAX_TASK_ATTEMPTS = 3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
+ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
+
+
+def bun_version(bun: str) -> str:
+    try:
+        return subprocess.run([bun, "--version"], capture_output=True, text=True,
+                              timeout=10).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+def mm(version: str) -> str:
+    return ".".join(str(version).split(".")[:2])
+
+
+def _record_agent_meta(meta_path: Path, rec: dict) -> None:
+    """追加一条节点采样元数据到 dist-agent-meta.jsonl（巡检读它聚合进 HTML）。
+
+    rec: {node, it, stage, seed, ok, [win, elapsedSec | reason], ts}。
+    放锁内调用保证顺序；单局一次 IO，成本可忽略。
+    """
+    try:
+        with open(meta_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]], args) -> dict:
+    """Run one rollout generation into traj_dir with up to W concurrent bun
+    processes over the given (stage, seed) game pairs.
+
+    Each game is one single-threaded bun process writing shards under
+    traj_dir/w{i}/ — disjoint by construction, and discover_rl_shards() scans
+    recursively, so the PPO side needs no knowledge of the layout. Per-game
+    granularity saturates all cores regardless of how few stages/seeds the
+    sweep has (bun startup ~300ms is noise vs a 12000-tick game).
+    Returns the aggregated report dict.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    workers = max(1, min(args.workers, len(pairs)))
+
+    def run_one(idx: int, si: int, seed: int) -> tuple[int, dict | None]:
+        wdir = traj_dir / f"w{idx}"
+        wdir.mkdir(parents=True, exist_ok=True)
+        log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
+        cmd = [
+            bun,
+            "tools/sim/export-rl-rollout.ts",
+            "--weights", rl_path,
+            "--out", str(wdir),
+            "--stages", str(si),
+            "--seeds", str(seed),
+            "--max-ticks", str(args.max_ticks),
+            "--difficulty", args.difficulty,
+        ]
+        p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT)
+        rc = p.wait()
+        log_f.close()
+        report = None
+        if rc == 0:
+            report = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))
+        return rc, report
+
+    t0 = time.time()
+    results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
+        done_n = 0
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            done_n += 1
+            if done_n % ROLLOUT_LOG_EVERY == 0 or done_n == len(pairs):
+                log(f"[rollout] local {done_n}/{len(pairs)} games settled "
+                    f"({time.time() - t0:.0f}s)")
+
+    failed = [i for i, (rc, _r) in enumerate(results) if rc != 0]
+    if failed:
+        tail = (traj_dir / f"w{failed[0]}" / "rollout.log").read_text(encoding="utf-8")[-2000:]
+        raise SystemExit(f"[run_rl] rollout worker(s) {failed} failed:\n{tail}")
+
+    reports = [r for _rc, r in results if r is not None]
+    return combine_reports(reports)
+
+
+def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
+                      args, cfg: dict, iter_id: str,
+                      on_result=None, local_slots_max: int | None = None,
+                      tail_dispatch: bool = True,
+                      halt_event: threading.Event | None = None,
+                      on_queue_drained=None) -> dict:
+    """中央队列调度模式（plan/distributed-rollout.md v3.3 §5.2）。
+
+    140 局组成全局队列（runId 种子确定性预洗牌），各节点 C_n 条工作线程 + 本机
+    N_local 条线程同队消费；逐局 RPC（GET /v1/task）同步取结果。失败回队改派、
+    超限当轮放弃不阻塞 PPO；节点连续失败熔断。本机与远端统一软失败语义。
+
+    on_result: 非空则每局结算后回调 on_result(summary)；summary 注入 "_dir"
+    （该局 shard 目录，供流式 PPO 增量装载 npz）。回调在锁内做 O(1) 入队，
+    重活由调用方自行异步化。
+    local_slots_max: 覆盖本机并发槽（流式模式下压低以给 torch 让核）。
+    halt_event: 非空且被置位时 worker 不再领取新任务（在途局自然收尾）——
+    流式 KL 熔断止损用：更新预算耗尽后，继续采集是无人消费的纯浪费。
+    on_queue_drained: 中央派发队列清空（全部采集任务已交到节点/本地线程手上、
+    结果仍在途）即刻回调——干净评估据此进场填收尾空槽（2026-08-25 用户修订：
+    取代初版「权重分发完即派」，那会与采集全程抢节点）。
+    """
+    t_queue_enter = time.time()  # ping+权重下发阶段计时起点（→ dist_phase_sec）
+
+    policy = cfg.get("policy", {})
+    task_timeout = float(policy.get("taskTimeoutSec", 900))
+    window = float(policy.get("queueWindowSec", 1800))
+    status_timeout = float(policy.get("statusTimeoutSec", 3))
+    fail_streak_max = int(policy.get("nodeFailStreak", 3))
+    wver = dist_common.weights_fingerprint(rl_path)
+    local_bun = bun_version(bun)
+    iter_no = int(iter_id.rsplit(".", 1)[-1])
+    meta_path = traj_dir.parent / "dist-agent-meta.jsonl"  # traj 根，跨轮累积（不被 keep-iters 清理）
+
+    # ① ping 门：codeHash 一致 ∧ bunVersion major.minor 一致（确定性红线，M4）
+    nodes = []
+    for n in cfg.get("nodes", []):
+        if not n.get("enabled", True):
+            continue
+        nid = str(n.get("id") or n.get("url") or "?")
+        ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+        if ping is None:
+            log(f"[dist] node {nid}: ping failed — excluded this round")
+            continue
+        if ping.get("codeHash") != dist_common.compute_code_hash():
+            log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
+            continue
+        remote_full = str(ping.get("bunVersion", "?"))
+        if mm(remote_full) != mm(local_bun):
+            log(f"[dist] node {nid}: bun {remote_full} vs local {local_bun} "
+                f"(major.minor differs) — excluded (red)")
+            continue
+        if remote_full != local_bun:
+            log(f"[dist] node {nid}: bun patch differs ({remote_full} vs {local_bun}) — allowed (yellow)")
+        c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+        log(f"[dist] node {nid}: online, concurrency={c_n}")
+        nodes.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
+    if not nodes:
+        log("[dist] no eligible node — falling back to local-only rollout")
+        return run_rollout(bun, rl_path, traj_dir, pairs, args)
+
+    # ② 权重一次下发；异 sha 由 agent 原子清场，同 sha 幂等不动
+    with open(rl_path, "rb") as f:
+        weights_bytes = f.read()
+    alive = []
+    for nd in nodes:
+        try:
+            mode = dist_common.post_weights(nd["url"], nd["key"], iter_id, wver,
+                                            weights_bytes,
+                                            timeout=min(300.0, max(60.0, task_timeout)))
+            log(f"[dist] weights -> {nd['id']} ({mode})")
+            alive.append(nd)
+        except dist_common.DistError as e:
+            log(f"[dist] weights POST to {nd['id']} failed ({e}) — excluded")
+    if not alive:
+        log("[dist] all weights POST failed — falling back to local-only rollout")
+        return run_rollout(bun, rl_path, traj_dir, pairs, args)
+    # 纯采集起点（用户定义 2026-08-24）：新权重分发完毕的时刻。
+    # 纯采集耗时 = 最后一局结算时刻 − 本时刻；与 PPO 重叠与否无关，就是两个事件锚点。
+    t_dist_done = time.time()
+    last_settle_at = [None]  # 最后一局成功结算的时刻（worker 内更新）
+
+    # ③ 中央队列 + 消费者（远端 C_n 线程 + 本机 workers 线程）
+    # 断点续跑：剔除已完整落盘且 wver 匹配的局（本轮重启/重试不重跑已完成任务）。
+    # pairs 元素强制 int 化：build_pairs 产生的元组可能是 numpy 标量，其 hash/相等 与
+    # completed_pairs 返回的 Python int 元组不一致 → `in done` 过滤失效 → 重跑已完成局（浪费）。
+    # norm_pairs 统一为 (int,int)，与 done 集合可比。
+    norm_pairs = [(int(a), int(b)) for a, b in pairs]
+    # 断点续跑按「本轮计划」口径：目录里可能有跨配置残留的同权重 shard（sps 变更后
+    # 重启同一迭代，it60 实测目录 235 局/计划 105 局），它们不在新计划里——既不重跑
+    # 也不并入报告。done 一词自此恒指计划内已完成。
+    plan_set = set(norm_pairs)
+    done_all = completed_pairs(traj_dir, wver)
+    done = done_all & plan_set
+    tasks = [p for p in norm_pairs if p not in done]
+    if done_all:
+        log(f"[dist] resume: {len(done)}/{len(norm_pairs)} planned pairs already on disk — "
+            f"run {len(tasks)} remaining"
+            + (f" (ignoring {len(done_all) - len(done)} off-plan shards)"
+               if len(done_all) != len(done) else ""))
+    if not tasks:
+        log("[dist] all planned pairs already on disk — aggregating report from shards "
+            "(PPO will resume/replay)")
+        # 从磁盘 shard 聚合而非返回空报告：空报告曾让 it1 的 winRate/samples
+        # 全为零（指标盲区）；only=plan_set 保证跨配置残留下聚合口径仍等于本轮计划。
+        # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
+        combined = combine_reports(resumed_manifests(traj_dir, wver, only=plan_set))
+        combined["missing"] = []
+        combined["expectedGames"] = len(pairs)
+        combined["dist"] = {"iterId": iter_id, "nodes": {}, "retried": 0,
+                            "resumed": len(done),
+                            "offPlanShards": max(0, len(done_all) - len(done))}
+        return combined
+    random.Random(f"queue:{RUN_ID}:{iter_id}").shuffle(tasks)  # 队列可复现；分配依实时负载
+    pending: deque[tuple[int, int]] = deque(tasks)
+    lock = threading.Lock()
+    seen: set[tuple[int, int]] = set()
+    attempts: dict[tuple[int, int], int] = {}
+    streaks = {nd["id"]: 0 for nd in alive}
+    results: list[dict] = []
+    stats = {"retried": 0}
+    missing_keys: set[tuple[int, int]] = set()
+    all_settled = threading.Event()  # 成功+永久缺失 == 总局数 时置位，worker 立即收工
+    deadline = time.time() + window
+    if local_slots_max is not None:
+        local_slots = max(0, min(int(local_slots_max), len(tasks)))
+    else:
+        local_slots = max(1, min(args.workers, len(tasks)))
+    next_idx = [0]
+    # 远端集体失联保护：本机线程按满额孵化、并发闸门初始为 local_slots
+    # （流式模式下被压低以给 torch 让核）；若连续 remoteDeadSecs 无任何远端
+    # 结算，则闸门放开到满额，保证 PPO 语料供应不被死掉的远端拖垮。
+    cap_full = max(1, min(args.workers, len(tasks)))
+    local_cap = [local_slots]
+    local_active = [0]
+    last_remote_ok = [time.time()]
+    remote_dead_sec = float(policy.get("remoteDeadSecs", 150))
+
+    # 收尾调度（tail dispatch）：按局均耗时的 EWMA 把节点分为快/慢两档；
+    # 队列剩余量降到"快速集群一波容量"以下时，慢节点停止取任务，
+    # 避免最后几局落在慢节点上拖长整轮（PPO 空等）。速度表用跨轮累积的
+    # dist-agent-meta.jsonl 播种、本轮在线更新；无样本节点按快速处理（乐观）。
+    # 分配依旧依赖实时负载（与既有语义一致），洗牌仍由 runId 种子确定。
+    tail_factor = float(policy.get("tailFastFactor", 1.8))
+    tail_grace = float(policy.get("tailGraceSec", 120.0))
+
+    def _seed_speeds() -> dict[str, float]:
+        hist: dict[str, list[float]] = {}
+        try:
+            if meta_path.exists():
+                for line in meta_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if r.get("ok") and isinstance(r.get("elapsedSec"), (int, float)) \
+                            and isinstance(r.get("node"), str):
+                        hist.setdefault(r["node"], []).append(float(r["elapsedSec"]))
+        except OSError:
+            pass
+        return {k: sum(v[-20:]) / len(v[-20:]) for k, v in hist.items() if v}
+
+    speed = _seed_speeds() if tail_dispatch else {}
+    if speed:
+        preview = ", ".join(f"{k}={v:.0f}s" for k, v in sorted(speed.items(), key=lambda x: x[1]))
+        log(f"[dist] tail-dispatch speeds (seeded): {preview}")
+    tail_notes: set[str] = set()
+    last_progress = [time.time()]
+
+    def _fast_enough(nid: str, pending_len: int) -> bool:
+        if not tail_dispatch or not speed or pending_len <= 0:
+            return True
+        my = speed.get(nid)
+        best = min(speed.values())
+        if my is None or my <= best * tail_factor:
+            return True
+        if time.time() - last_progress[0] > tail_grace:
+            key = f"{nid}:grace"
+            if key not in tail_notes:
+                tail_notes.add(key)
+                log(f"[dist] tail-grace: no settle for {tail_grace:.0f}s — {nid} re-admitted")
+            return True
+        fast_slots = 0
+        for a in alive:
+            s = speed.get(a["id"])
+            if s is not None and s <= best * tail_factor:
+                fast_slots += a["c"]
+        if speed.get("local", 1e18) <= best * tail_factor:
+            fast_slots += local_slots
+        return pending_len > fast_slots
+
+    def run_local(task: tuple[int, int]) -> dict:
+        si, sd = task
+        idx = next_idx[0]
+        next_idx[0] += 1
+        wdir = traj_dir / f"w{idx}"
+        wdir.mkdir(parents=True, exist_ok=True)
+        with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
+            cmd = [bun, "tools/sim/export-rl-rollout.ts",
+                   "--weights", rl_path, "--out", str(wdir),
+                   "--stages", str(si), "--seeds", str(sd),
+                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
+                   "--wver", wver, "--node-label", "local"]
+            # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
+            # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
+            t0 = time.time()
+            p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT)
+            rc = p.wait()
+            elapsed_sec = round(time.time() - t0, 3)
+        if rc != 0:
+            raise RuntimeError(f"local rollout rc={rc} (see {wdir}/rollout.log)")
+        report = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))
+        if report.get("wver") != wver:
+            raise RuntimeError("local report wver mismatch")
+        report["elapsedSec"] = elapsed_sec
+        report["_dir"] = str(wdir)
+        return report
+
+    def worker(nd: dict | None) -> None:
+        while (not all_settled.is_set()
+               and not (halt_event is not None and halt_event.is_set())
+               and time.time() < deadline):
+            nd_id = nd["id"] if nd else "local"
+            task = None
+            attempt = 0
+            took_local = False
+            drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
+            with lock:
+                if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
+                    return
+                if nd is None:
+                    # 远端失联 → 本机并发恢复满额（防流式 PPO 被饿死）
+                    if (time.time() - last_remote_ok[0] > remote_dead_sec
+                            and local_cap[0] != cap_full):
+                        local_cap[0] = cap_full
+                        log(f"[dist] no remote settle for {remote_dead_sec:.0f}s — "
+                            f"local slots {local_slots} -> {cap_full}")
+                    if local_active[0] < local_cap[0]:
+                        took_local = True
+                if pending and (nd is not None or took_local):
+                    if _fast_enough(nd_id, len(pending)):
+                        task = pending.popleft()
+                        attempts[task] = attempts.get(task, 0) + 1
+                        attempt = attempts[task]
+                        if nd is None:
+                            local_active[0] += 1
+                        if not pending:
+                            drained = True
+                    elif f"{nd_id}:hold" not in tail_notes:
+                        tail_notes.add(f"{nd_id}:hold")
+                        log(f"[dist] tail-mode: holding {nd_id} "
+                            f"(ewma={speed.get(nd_id, -1):.0f}s, pending={len(pending)})")
+                        task = None
+            if drained and on_queue_drained is not None:
+                # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
+                # 干净评估此刻进场填收尾空槽（2026-08-25 用户修订，取代「权重分发完
+                # 即派」——那会与采集全程抢节点）。失败回队会让队列再次非空乃至二次
+                # 清空；重复触发由调用方的护栏去重。
+                try:
+                    on_queue_drained()
+                except Exception as cb_err:  # noqa: BLE001 — 评估旁路不拖垮采集
+                    log(f"[dist] on_queue_drained error: {str(cb_err)[:120]}")
+            if task is None:
+                all_settled.wait(0.5)
+                continue
+            summary = None
+            err = ""
+            try:
+                if nd is None:
+                    summary = run_local(task)
+                else:
+                    manifest, files = dist_common.fetch_task(
+                        nd["url"], nd["key"], iter_id=iter_id, wver=wver,
+                        stage=task[0], seed=task[1], max_ticks=args.max_ticks,
+                        difficulty=args.difficulty, timeout=task_timeout)
+                    why = dist_common.validate_result(manifest, files, wver,
+                                                      set(norm_pairs), seen)
+                    if why:
+                        raise dist_common.DistError(0, why)
+                    out_dir = traj_dir / "dist" / nd_id / f"rl_s{task[0]}_seed{task[1]}"
+                    dist_common.write_shard(files, manifest, str(out_dir))
+                    manifest["_dir"] = str(out_dir)
+                    summary = manifest
+            except Exception as e:  # noqa: BLE001 — 单局任何失败都只回队/记 missing
+                err = str(e)[:200]
+            with lock:
+                if nd is None and task is not None:
+                    local_active[0] -= 1
+                if summary is not None:
+                    seen.add(task)
+                    last_settle_at[0] = time.time()
+                    streaks[nd_id] = 0
+                    if nd is not None:
+                        last_remote_ok[0] = time.time()
+                    results.append(summary)
+                    _record_agent_meta(meta_path, {
+                        "node": nd_id, "it": iter_no, "stage": task[0], "seed": task[1],
+                        "ok": True, "win": win_of(summary),
+                        "elapsedSec": summary.get("elapsedSec"),
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    el = summary.get("elapsedSec")
+                    if isinstance(el, (int, float)) and el > 0:
+                        prev = speed.get(nd_id)
+                        speed[nd_id] = 0.3 * float(el) + 0.7 * prev if prev else float(el)
+                    last_progress[0] = time.time()
+                    if on_result:
+                        try:
+                            on_result(summary)
+                        except Exception as cb_err:  # noqa: BLE001 — 回调异常不拖垮采集
+                            log(f"[dist] on_result callback error: {str(cb_err)[:120]}")
+                    log(f"[dist] {len(seen) + len(missing_keys)}/{len(tasks)} settled "
+                        f"node={nd_id} s{task[0]}/seed{task[1]} "
+                        f"elapsed={str(el) + 's' if el is not None else '-'}")
+                    if len(seen) + len(missing_keys) >= len(tasks):
+                        all_settled.set()
+                    continue
+                if nd is not None:
+                    streaks[nd_id] = streaks.get(nd_id, 0) + 1
+                    broke = streaks[nd_id] == fail_streak_max
+                else:
+                    broke = False
+                if attempt < MAX_TASK_ATTEMPTS:
+                    pending.append(task)
+                    stats["retried"] += 1
+                    log(f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
+                        f"(attempt {attempt}/{MAX_TASK_ATTEMPTS})")
+                else:
+                    missing_keys.add(task)
+                    _record_agent_meta(meta_path, {
+                        "node": nd_id, "it": iter_no, "stage": task[0], "seed": task[1],
+                        "ok": False, "reason": err,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    log(f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
+                        f"[{len(seen) + len(missing_keys)}/{len(tasks)} settled]")
+                if broke:
+                    log(f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
+                        f"circuit-broken for this round")
+                if len(seen) + len(missing_keys) >= len(tasks):
+                    all_settled.set()
+
+    threads: list[threading.Thread] = []
+    for nd in alive:
+        for _ in range(nd["c"]):
+            threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
+    for _ in range(max(local_slots, cap_full)):
+        threads.append(threading.Thread(target=worker, args=(None,), daemon=True))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=max(30.0, window + task_timeout))
+
+    missing = sorted(k for k in tasks if k not in seen)
+    by_node: dict[str, int] = {}
+    for s in results:
+        nid = str(s.get("node", "?"))
+        by_node[nid] = by_node.get(nid, 0) + 1
+    log(f"[dist] round done: ok={len(results)}/{len(tasks)} missing={len(missing)} "
+        f"retried={stats['retried']} byNode={json.dumps(by_node)}")
+    if missing:
+        log(f"[dist] missing pairs: {[list(k) for k in missing]}")
+
+    combined = combine_reports(
+        results + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set))
+    combined["missing"] = [list(k) for k in missing]
+    combined["expectedGames"] = len(pairs)
+    combined["dist"] = {"iterId": iter_id, "nodes": by_node, "retried": stats["retried"],
+                        "resumed": len(done),
+                        # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
+                        "offPlanShards": max(0, len(done_all) - len(done))}
+    combined["dist_phase_sec"] = round(t_dist_done - t_queue_enter, 1)
+    if halt_event is not None and halt_event.is_set():
+        combined["halt_aborted"] = True
+        log(f"[dist] KL halt active — dispatch stopped early "
+            f"({len(missing)} task(s) left undispatched/unsettled)")
+    # 纯采集（用户定义）：最后一局结算时刻 − 权重分发完毕时刻。与 PPO 重叠无关。
+    if last_settle_at[0] is not None:
+        combined["pure_collect_sec"] = round(last_settle_at[0] - t_dist_done, 1)
+        combined["weights_dist_done_at"] = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done))
+    return combined
