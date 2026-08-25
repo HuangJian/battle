@@ -8,6 +8,13 @@ import {
   BASE_BULLET_SPEED_CPS,
   PLAYER_BULLET_SPEED_PER_STAR_CPS,
 } from './speed'
+import {
+  FC_FAITHFUL_SPEED_CPS,
+  FC_FAITHFUL_PLAYER_SPEED_PER_STAR_CPS,
+  FC_FAITHFUL_BULLET_SPEED_CPS,
+  FC_FAITHFUL_PLAYER_BULLET_SPEED_PER_STAR_CPS,
+  FC_FAITHFUL_SCORE_BY_KIND,
+} from './fc-faithful'
 
 /**
  * GameplayRules — the single, difficulty-selected rules object that lets the
@@ -298,26 +305,19 @@ export const RULES: Record<string, GameplayRules> = {
 
     speedJitter: false, // no ±5% jitter (issue #7: BOTH tank + bullet)
 
-    // Faithful FC movement speeds (cells/sec). Conversion FC px/frame @60fps →
-    // px/sec (×60) → FC tiles/sec (÷16, tile=16px) → project cells/sec (×2 because
-    // 1 FC tile = 1 FC tank = 16px while 1 project cell = 0.5 project tank, and both
-    // fields are 13 tanks wide). Net factor = ×7.5. Thus basic 0.5 px/frame → 3.75
-    // cps, fast 1.0 → 7.5 cps; player T1 3.75 → T4 7.5.
-    speedCps: { basic: 3.75, fast: 7.5, power: 3.75, armor: 3.75, player: 3.75 },
-    playerSpeedPerStarCps: 1.25,
+    // Faithful FC movement speeds (cells/sec) — isolated in config/fc-faithful.ts
+    // so the FC numbers are never "tidied" into the modern balance (see that file
+    // for the px/frame→cps conversion rationale).
+    speedCps: FC_FAITHFUL_SPEED_CPS,
+    playerSpeedPerStarCps: FC_FAITHFUL_PLAYER_SPEED_PER_STAR_CPS,
 
-    // Faithful FC bullet speeds (cells/sec). Same ×7.5 px/frame→cps factor as
-    // movement. FC bullets are 2 px/frame (slow) for basic/fast/armor/player and
-    // 4 px/frame (fast) for Power — NOT a per-kind 1.05/0.95/0.90 spread like
-    // modern. Player growth is perk-driven: base 2 px/frame (15 cps); the 1★
-    // 'fastBullet' star jumps it to 4 px/frame (30 cps) via fastBulletMult (2.0),
-    // and that fast bullet stays for every higher star level (FC keeps the fast
-    // bullet once earned). Hence playerBulletSpeedPerStarCps is 0 here.
-    bulletSpeedCps: { basic: 15, fast: 15, power: 30, armor: 15, player: 15 },
-    playerBulletSpeedPerStarCps: 0,
+    // Faithful FC bullet speeds (cells/sec) — see config/fc-faithful.ts for the
+    // px/frame→cps rationale and why playerBulletSpeedPerStarCps is 0 here.
+    bulletSpeedCps: FC_FAITHFUL_BULLET_SPEED_CPS,
+    playerBulletSpeedPerStarCps: FC_FAITHFUL_PLAYER_BULLET_SPEED_PER_STAR_CPS,
 
     scoreModel: 'byKind',
-    scoreByKind: { basic: 100, fast: 200, power: 300, armor: 400 },
+    scoreByKind: FC_FAITHFUL_SCORE_BY_KIND,
     itemScore: 500, // FC item = 500
     scoreStageFactor: 1.0, // FC score is flat (no stage scaling)
 

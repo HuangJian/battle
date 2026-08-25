@@ -1,5 +1,6 @@
 import type { TankKind, PowerUpType } from '../../types'
 import { BASE_POS, CELL, TANK, BULLET } from '../../constants'
+import { TANK_SPEC, specField } from '../../config/tank-spec'
 
 // ============================================================
 // God AI shared constants (moved out of GodAIInput.ts during the
@@ -18,36 +19,32 @@ export const AIM_RANGE_CELLS = 15
 /** T8: how far ahead to project a bullet's trajectory (entire field). */
 export const BULLET_TRAJECTORY_MAX_CELLS = 26
 
-/** T3: kind-based threat weights for target selection. */
-export const KIND_THREAT_WEIGHT: Record<TankKind, number> = {
-  power: 4,
-  armor: 3,
-  fast: 2,
-  basic: 1,
-  player: 0,
-}
+/** T3: kind-based threat weights for target selection.
+ * Derived view of `TANK_SPEC.threatWeight` (refactor.trae.md §2.1) — the only
+ * authoritative per-kind copy lives in config/tank-spec.ts. */
+export const KIND_THREAT_WEIGHT: Record<TankKind, number> = specField('threatWeight')
 
 /**
  * (perf) Kind → threat weight as a switch. `KIND_THREAT_WEIGHT[t.kind]` is a
  * string-keyed Record lookup that V8 cannot constant-fold (Record is a mutable
  * exported object); in `findEnemyDirectionImpl` and `selectTargetImpl` it runs
  * once per live enemy per tick. A switch over the 5 literal kinds compiles to
- * a jump table — ~1ns vs ~5-8ns for the dict probe. Same return values as the
- * Record for every TankKind. The original `?? 1` defensive fallback at the
- * call sites was a no-op (TankKind is a closed 5-member union, all covered).
+ * a jump table — ~1ns vs ~5-8ns for the dict probe. The literals below are
+ * sourced from `TANK_SPEC` (single source of truth) so the only per-kind edit
+ * point for threat weight is config/tank-spec.ts.
  */
 export function kindThreatWeight(kind: TankKind): number {
   switch (kind) {
     case 'power':
-      return 4
+      return TANK_SPEC.power.threatWeight
     case 'armor':
-      return 3
+      return TANK_SPEC.armor.threatWeight
     case 'fast':
-      return 2
+      return TANK_SPEC.fast.threatWeight
     case 'basic':
-      return 1
+      return TANK_SPEC.basic.threatWeight
     default:
-      return 0 // 'player'
+      return TANK_SPEC.player.threatWeight // 'player'
   }
 }
 
