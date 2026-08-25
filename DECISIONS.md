@@ -1682,3 +1682,10 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 > 重导：God-AI 1526 胜局 / 2.77M 帧（near-miss frac 0.4915，≥2000 帧）；人像 97 局 / 65.5K 帧；
 > determinism + validate_export + python 快速层全绿。全文 → docs/nn.progress.md §14。
 
+## 249. M3 BC warm-start 双臂 — 双 0% WIN，Gate ≈0% → 回环 DAgger/长训（2026-08-26，plan §6）
+> A（wins 24sh / 46K 帧）与 B（A+人像 97sh / 112K 帧）均 8ep 纯 BC（value 预置因 returns
+> 终局锚定 O(9) 爆方差而降级，见 nn.progress §15.1）。move acc A 0.365 / B 0.441（人像加权增益），
+> 但 m1-eval 贪心 WIN 均 0.0%（suite A 0.0773 / B 0.0757，非瞬死但永不清关）。
+> **按预注册 Gate → 不走 M4，回环整改**：下一步 = M1 ③路径（DAgger 交互采集轮）或全量
+> 2.77M 帧长训。工程教训：weights 导出 NaN→null sanitize（commit 3c40e55）。
+

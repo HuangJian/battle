@@ -5,6 +5,44 @@
 
 ---
 
+## §15 M3 BC warm-start 双臂（2026-08-26，plan/AI-No-Items-Warmstart.md §6）
+
+### 15.1 训练（纯 BC，value 预置降级说明）
+- A 臂（对照）：wins 底料 24 shards（46,359 帧），8 epochs，batch 512，~43 min。
+- B 臂（实验）：A + 人像 97 shards（112K 帧），同超参/同 seed（结果见下）。
+- **value MC 预置降级**：returns 终局锚定（Σ≡REWARD_SCALE×gatedScore≈O(9)）使 value MSE@coef1.0
+  爆方差（train_loss ~10⁴，move acc 卡在多数线 0.23），coef 0.05 仍使 ep-1 loss 6867 且 move 不学。
+  结论：该尺度下 value 回归会压制策略头——**A/B 走纯 BC（value_coef=0）**；value 预置留待 M4 前
+  用「逐关规范化 returns」再启（工程项，非路线否决）。M3 gate 只测策略，不受影响。
+
+### 15.2 训练收敛（8 epochs / batch 512）
+| 臂 | 语料 | move acc | fire acc | val_loss |
+|---|---|---|---|---|
+| A（wins 24sh） | 46,359 | **0.365**（峰 0.381） | 0.919 | 1.72 |
+| B（A+人像 97sh） | 111,872 | **0.441** | 0.792 | 1.81 |
+
+B 臂 move 显著高于 A（0.441 vs 0.365）——人像加权改善了移动；fire 稍低（0.792 vs 0.919，
+wins 底料 fire 高度饱和）。
+
+### 15.3 Gate（m1-eval --policy nn，hard 35×10 贪心，350 局真实仿真）
+| 臂 | WIN | suite v7 | 说明 |
+|---|---|---|---|
+| A | **0.0%** | 0.0773 | 全败但非瞬死（有击杀/节奏，score>0），永不清关 |
+| B | **0.0%** | 0.0757 | 同上；better move 未转化为清关 |
+
+- 对照历史：DAgger 后 0%（L950）——**BC warm-start 在此尺度下未突破历史 0% 平台**；
+  it36≈10% 是旧 schema RL 谱系，跨纪元仅定性参照。
+- **按 plan §6 Gate 规则 → 「≈0%：不走 M4，回环整改」**：本路线正式分叉到 **M1 ③路径
+  （监督方式/分布漂移指纹）**——下一步执行项：
+  1. **DAgger 交互采集轮**（export-dagger-labels.ts 现成）：学生驱动 + 教师在线标号，
+     补学生实际分布内的 (s,a) 样本，重训混合语料；
+  2. 或 **全量 wins 底料长训**（corpus-a full 2.77M 帧 × ≥12 epochs，~24h CPU）以排除
+     子集尺度不足。
+- **工程教训（已落地 commit 3c40e55）**：weights 导出 sanitize NaN→null（TS JSON.parse
+  拒绝 Python 非标准 NaN 字面量——value_loss 纯 BC 下 NaN 曾让 m1-eval 350 局全 error 伪读 0 分）。
+
+---
+
 ## §14 语料纪元 OBS_SCHEMA_MAJOR 1→2（2026-08-26 凌晨，plan/AI-No-Items-Warmstart.md M2）
 
 ### 14.1 打包改动（一次 MAJOR，全部落地并提交 f4afb43）
