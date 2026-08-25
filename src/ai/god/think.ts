@@ -360,6 +360,35 @@ const MID_LANE_HOLD: Candidate = {
   evaluate: evalMidLaneHold,
 }
 
+/**
+ * ─── 候选存活状态清单 (Candidate Survival Status) — refactor.trae.md §1.2-1 ──
+ * 唯一事实源：id → 门控参数 → DEFAULT → DECISIONS 结论 → 决策链状态。
+ * 未来 agent 遍历 CANDIDATES 前先读本清单，避免把「数组里存在」误判为「默认在跑」。
+ * 完整 A/B 数据见 docs/god-ai-tuning.progress.md；§ 编号见 DECISIONS.md。
+ *
+ *   suicideReturn       suicideReturnMode=0      OFF  (§116/§117 阴性, 保留为可重开 A/B)
+ *   dodge               (always)                 ON   (生存优先, 顶层)
+ *   interceptBase       (always)                 ON   (T8 拦子弹)
+ *   unifiedCandidates   candidateMode=0          OFF  (§221 reject, 保留实验资产)
+ *   baseLaneSentry      baseLaneSentryMode=1     ON   (§X SHIPPED)
+ *   pickupHigh          pickupPriorityMode=1     ON   (§87/§88 SHIPPED)
+ *   aggro               (always, freeze/shield)  ON   (S8/S9)
+ *   pickupMid           pickupPriorityMode=1     ON   (§88 SHIPPED)
+ *   defenseIntercept    defenseInterceptMode=1   ON   (§134 SHIPPED; classic restore 0)
+ *   midLaneDefense      midLaneDefense=1         ON   (§163/§165 SHIPPED)
+ *   closePickup         closePickupRange=2       ON   (§158 SHIPPED)
+ *   engage              (always)                 ON   (T2a)
+ *   pickupLow           pickupPriorityMode=1     ON   (S5)
+ *   firingLane          firingLaneMode=0         OFF  (§139 灾难性阴性, 保留实验资产)
+ *   baseConnectClear    baseConnectClearMode=1   ON   (§189 SHIPPED; classic restore 0)
+ *   carvePath           carvePathMode=0          OFF  (§161 诚实阴性, 保留实验资产)
+ *   midLaneHold         midLaneHold=0            OFF  (§164 灾难性阴性, 保留实验资产)
+ *   hunt                (always)                 ON   (T2b)
+ *   survive             actionWeights.survive=0  OFF  (M3, weight 0 → 链中永不可达, 保留实验资产)
+ *
+ * 移出决策链的条件（refactor.trae.md §1.2-2）：DECISIONS=阴性/reject + DEFAULT=0
+ *   + 零引用 + 无 1 态 A/B 测试调用，四者同时成立。满足者 → src/ai/god/experiments/。
+ */
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Authoritative weight-order contract: DecisionCore.ACTION_WEIGHTS (locked by
  * tests/decision-core.test.ts); this array must stay in the same order.
