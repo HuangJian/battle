@@ -115,11 +115,12 @@ def main() -> None:
     def load_split(indices) -> tuple[np.ndarray, ...]:
         obs_l, sc_l, in_l, bk_l = [], [], [], []
         total = 0
+        cap = args.max_train * 1.5 if args.max_train > 0 else 0
         for i in indices:
             base = os.path.join(args.data, shards[i])
             o = np.load(os.path.join(base, "obs.npy"))
             total += o.shape[0]
-            if total > args.max_train * 1.5:
+            if cap > 0 and total > cap:
                 break
             obs_l.append(o)
             sc_l.append(np.load(os.path.join(base, "scalars.npy")))
