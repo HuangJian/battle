@@ -63,6 +63,8 @@ export interface SimTask {
   powerupCensus?: boolean
   /** Player policy: 'god' (default), 'nn', 'intent' (stub), 'intent-exec' (M6) or 'intent-oracle' (M7① 探针). */
   policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle'
+  /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
+  replanEvery?: number
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
@@ -126,6 +128,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       policy: task.policy,
       nnWeightsDir: task.nnWeightsDir,
       intentWeightsDir: task.intentWeightsDir,
+      replanEvery: task.replanEvery,
     })
     msg = {
       id: task.id,

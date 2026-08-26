@@ -203,6 +203,43 @@ export const WHITELISTS: Record<IntentId, readonly WhitelistEntry[]> = {
 }
 
 /**
+ * 细分支标签 → 候选 ActionId（§3.1 正向映射第②层：细分支→候选；P0-1 反向映射的
+ * 执行侧半桥）。
+ *
+ * 背景（M7① 天花板探针发现，2026-08-27）：WHITELISTS 引用的是 **细分支标签**（t8/
+ * t2a/navigate/aggressive/powerup/candidateX —— God-AI `_lastBranch` 分类法，与
+ * STATIC_FORWARD/tagger 同源），而 `_candidateOverride` 过滤用的是 **候选 ActionId**
+ * （DecisionCore 枚举）。两套分类法不匹配 → 执行器 override 静默丢弃未命中候选
+ * （实测命中率仅 46%：CRUISE 只剩 dodge、PICKUP 只剩 dodge、HUNT 只剩 firingLane+dodge）
+ * → 词表×执行器压缩损失 27pp（oracle 46.9% vs God-AI 74.3%）。本映射把白名单标签
+ * 翻译成候选 id，执行器据此设 override。
+ *
+ * 单标签可展开多候选（powerup = 拾取族 pickupLow/Mid/High/closePickup）。
+ * 完整性：ALL_NON_REFLEX_LABELS + REFLEX_TRANSPARENT_LABELS 全覆盖（测试断言）。
+ */
+export const LABEL_TO_CANDIDATE: Record<string, readonly string[]> = {
+  t8: ['interceptBase'],
+  baseLaneSentry: ['baseLaneSentry'],
+  defenseIntercept: ['defenseIntercept'],
+  candidateIntercept: ['unifiedCandidates'],
+  candidateReturn: ['unifiedCandidates'],
+  candidateClear: ['unifiedCandidates'],
+  candidateKill: ['unifiedCandidates'],
+  suicideReturn: ['suicideReturn'],
+  carvePath: ['carvePath'],
+  baseConnectClear: ['baseConnectClear'],
+  powerup: ['pickupLow', 'pickupMid', 'pickupHigh', 'closePickup'],
+  midLaneDefense: ['midLaneDefense'],
+  midLaneHold: ['midLaneHold'],
+  t2a: ['engage'],
+  navigate: ['hunt'],
+  aggressive: ['aggro'],
+  firingLane: ['firingLane'],
+  dodge: ['dodge'],
+  survive: ['survive'],
+}
+
+/**
  * 父意图→激活头矩阵（§3.5 / 预注册 #9）。非激活头：训练损失权重置 0（不产梯度、
  * 不计 acc、不喂占位标签）；推理时仅当意图头选中该类后才解释其激活头；执行器
  * 契约写明"未激活头输出必须忽略"。草案定稿：enemy 头 ⊆ {INTERCEPT,HUNT,CRUISE}；

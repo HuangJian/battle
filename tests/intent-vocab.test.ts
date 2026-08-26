@@ -11,6 +11,7 @@ import {
   INTENT_IDS,
   INTENT_DIM,
   isEndgameRegime,
+  LABEL_TO_CANDIDATE,
   MIN_WINDOWS_PER_CLASS,
   REFLEX_TRANSPARENT_LABELS,
   segmentIntents,
@@ -104,6 +105,24 @@ describe('intent vocab — M0a 静态契约', () => {
     for (const rows of Object.values(WHITELISTS))
       for (const r of rows) if (r.suppressDodge) marked.push(r.branch)
     expect(marked).toEqual(['suicideReturn'])
+  })
+
+  it('LABEL_TO_CANDIDATE 全覆盖：每个非 reflex 标签 + reflex 标签均有映射（M7① 修复）', () => {
+    const mapped = new Set(Object.keys(LABEL_TO_CANDIDATE))
+    for (const label of ALL_NON_REFLEX_LABELS) expect(mapped.has(label)).toBe(true)
+    for (const label of REFLEX_TRANSPARENT_LABELS) expect(mapped.has(label)).toBe(true)
+    // 白名单每个分支都映射（执行器绝不静默丢弃）。
+    for (const rows of Object.values(WHITELISTS))
+      for (const r of rows) expect(mapped.has(r.branch)).toBe(true)
+  })
+
+  it('LABEL_TO_CANDIDATE 值全部是合法候选 ActionId（DecisionCore 全集内）', () => {
+    const { CANDIDATES } = require('../src/ai/god/think') as typeof import('../src/ai/god/think')
+    const ids = new Set<string>(CANDIDATES.map((c) => c.id))
+    for (const [label, cands] of Object.entries(LABEL_TO_CANDIDATE)) {
+      expect(cands.length).toBeGreaterThan(0)
+      for (const c of cands) expect(ids.has(c), `${label} -> ${c}`).toBe(true)
+    }
   })
 
   it('激活头矩阵 8×2 全定义且与计划草案一致', () => {

@@ -422,6 +422,8 @@ export interface RunOptions {
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
   intentWeightsDir?: string
+  /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
+  replanEvery?: number
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -591,15 +593,18 @@ export function runSimulation(opts: RunOptions): SimResult {
       : opts.policy === 'intent'
         ? (new IntentPlayer(world, {
             weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
+            replanEvery: opts.replanEvery,
           }) as unknown as GodAIInput)
         : opts.policy === 'intent-exec'
           ? (new IntentExecutor(world, {
               weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
               rng: godRng, // §47：执行器内部 God-AI 独立 RNG，与 world 解耦
+              replanEvery: opts.replanEvery,
             }) as unknown as GodAIInput)
           : opts.policy === 'intent-oracle'
             ? (new IntentOracleProbe(world, {
                 seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
+                replanEvery: opts.replanEvery,
               }) as unknown as GodAIInput)
             : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)

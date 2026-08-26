@@ -21,7 +21,7 @@ import type { World } from '../game/World'
 import { RNG } from '../utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../ai/GodAIInput'
 import { currentIntent } from '../ai/intent/tagger'
-import { INTENT_IDS, WHITELISTS, type IntentId } from '../ai/intent/vocab'
+import { INTENT_IDS, WHITELISTS, LABEL_TO_CANDIDATE, type IntentId } from '../ai/intent/vocab'
 import { INTENT_REPLAN_TICKS } from '../ai/intent/tagger'
 
 export interface IntentOracleProbeOptions {
@@ -114,14 +114,16 @@ export class IntentOracleProbe implements InputLike {
     this.firing = this.exec._fire
   }
 
-  /** 意图 → God-AI 候选白名单（三层契约，与 M6 执行器同仲裁）→ override。 */
+  /** 意图 → God-AI 候选白名单（三层契约，与 M6 执行器同仲裁）→ override。
+   *  白名单细分支标签经 LABEL_TO_CANDIDATE 翻译为候选 ActionId（M7① 修复）。 */
   private applyIntent(intent: IntentId): void {
     const rows = WHITELISTS[intent]
     const ids = new Set<string>()
     let suppressDodge = false
     for (const r of rows) {
       if (r.layer === 'window' && r.suppressDodge === true) suppressDodge = true
-      ids.add(r.branch)
+      const mapped = LABEL_TO_CANDIDATE[r.branch]
+      if (mapped) for (const c of mapped) ids.add(c)
     }
     if (suppressDodge) ids.delete('dodge')
     this.exec._candidateOverride = ids.size > 0 ? ids : null

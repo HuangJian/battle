@@ -27,7 +27,7 @@ import type { RNG } from '../utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../ai/GodAIInput'
 import { ObsEncoder } from './obs-encoder'
 import { buildIntentModelFromText, type IntentModelLike } from './infer'
-import { INTENT_IDS, WHITELISTS, type IntentId } from '../ai/intent/vocab'
+import { INTENT_IDS, WHITELISTS, LABEL_TO_CANDIDATE, type IntentId } from '../ai/intent/vocab'
 import { INTENT_REPLAN_TICKS } from '../ai/intent/tagger'
 
 const MASKED_INTENTS: ReadonlySet<string> = new Set(['ESCAPE']) // reflex-only
@@ -194,7 +194,10 @@ export class IntentExecutor implements InputLike {
    * 覆盖移动默认成立（dodge 在决策链顶层、先跑即赢）；**唯一例外** = 白名单内某 window
    * 候选显式标注 `suppressDodge`（当前仅 RETURN_DEFENSE 的 suicideReturn）→ 剔除 dodge。
    * overlay 候选（powerup 顺路拾取）随白名单保留（自带威胁门控，PICKUP overlay 只在
-   * 无直接威胁时经候选自身 gate 生效）。 */
+   * 无直接威胁时经候选自身 gate 生效）。
+   *
+   * M7① 修复（2026-08-27）：WHITELISTS 引用细分支标签（t8/t2a/navigate...），override
+   * 过滤用候选 ActionId——必须经 LABEL_TO_CANDIDATE 翻译，否则 46% 候选被静默丢弃。 */
   private applyIntent(intentIdx: number): void {
     const intent = INTENT_IDS[intentIdx] as IntentId
     const rows = WHITELISTS[intent]
@@ -202,7 +205,8 @@ export class IntentExecutor implements InputLike {
     let suppressDodge = false
     for (const r of rows) {
       if (r.layer === 'window' && r.suppressDodge === true) suppressDodge = true
-      ids.add(r.branch)
+      const mapped = LABEL_TO_CANDIDATE[r.branch]
+      if (mapped) for (const c of mapped) ids.add(c)
     }
     if (suppressDodge) ids.delete('dodge')
     // 子链 override：window + overlay + reflex（减被压制项）；reflex 层由 God-AI 全链
