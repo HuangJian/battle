@@ -1690,3 +1690,10 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 > **按预注册 Gate → 不走 M4，回环整改**：下一步 = M1 ③路径（DAgger 交互采集轮）或全量
 > 2.77M 帧长训。工程教训：weights 导出 NaN→null sanitize（commit 3c40e55）。
 
+## 250. M3 回环整改 — DAgger 混合亦 0%，BC 三线收敛 0% 平台（2026-08-26 晨）
+> wins93sh + dagger50sh 混合、warmstart B、6ep：move 0.476（三线最高）/ fire 0.899，
+> 但 m1-eval 贪心 WIN 仍 **0.0%**（suite 0.0777）——与历史 L950「DAgger 后 0%」一致。
+> **结论：0% 是策略深度差距而非语料/监督缺陷；BC 蒸馏在 46K–185K 尺度无非此平台。**
+> 决策点（需拍板）：① 全量 2.77M 长训（~24h CPU）排除尺度；② schema v2 RL 直接启动
+> （旧谱系 it36 ≈10% 是唯一 >0 实证）；③ 路线 F 高层语义监督单独立项。全文 → nn.progress §15.4。
+
