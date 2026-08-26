@@ -73,9 +73,40 @@ def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
     return xo[sel], xs[sel], xi[sel], xb[sel]
 
 
+def quota_sample_priority(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
+                          xr: np.ndarray, quota: int, rng: np.random.RandomState,
+                          priority_root: int):
+    """B 臂配额采样（预注册 #20）：priority_root 帧优先保留，God-AI 帧补足每类配额。
+
+    目的：人像黄金样本（人类守家分布）不因"每类配额随机采样"被按比例稀释——比例采样下
+    人类帧只占各类的自然份额（合并语料人类仅 4.4%，quota 后 ~13%），达不到 #20 的
+    ≥30% 训练混合比。本采样：每类先取全部 priority 帧（>quota 则随机下采样），
+    God-AI 帧补足至 quota（不足则全取）→ 人类混合比显著抬升、人像分布保真。"""
+    idx = []
+    for c in range(8):
+        ci = np.where(xi == c)[0]
+        if len(ci) == 0:
+            continue
+        pri = ci[xr[ci] == priority_root]
+        god = ci[xr[ci] != priority_root]
+        if len(pri) >= quota:
+            sel = rng.choice(pri, size=quota, replace=False)
+        else:
+            sel = list(pri)
+            need = quota - len(sel)
+            if len(god) > need:
+                sel += list(rng.choice(god, size=need, replace=False))
+            else:
+                sel += list(god)
+        idx.append(np.array(sel, dtype=np.int64))
+    sel = np.concatenate(idx)
+    rng.shuffle(sel)
+    return xo[sel], xs[sel], xi[sel], xb[sel]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="export-intent-labels 的 shards 目录")
+    ap.add_argument("--data", nargs="+", required=True, help="shards 目录（可多个根合并训练，M5-B 用：God-AI + 人像）")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-train", type=int, default=60_000, help="训练帧上限（内存预算；60K ≈ 1 轮 ~15-20min CPU）")
     ap.add_argument("--val-shard-frac", type=float, default=0.2)
@@ -85,6 +116,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）")
     ap.add_argument("--quota", type=int, default=0, help="P2-2 每类配额采样帧数（0=不限）")
+    ap.add_argument("--priority-root", type=int, default=-1,
+                    help="B 臂（预注册 #20）：该 data 根索引的帧优先保留（人类黄金样本），"
+                         "God-AI 帧补足每类配额；-1 = 关闭（A 臂比例采样）")
     ap.add_argument("--save", metavar="OUT", default="", help="M5：训练后保存全尺寸权重 JSON（intent_net 导出格式）")
     ap.add_argument("--h", type=int, default=DEFAULT_H, help="主干宽度（探针可瘦身；M5 全尺寸 64）")
     ap.add_argument("--d", type=int, default=DEFAULT_D)
@@ -93,24 +127,32 @@ def main() -> None:
     torch.manual_seed(args.seed)
     rng = np.random.RandomState(args.seed)
 
-    # ---- 索引 shards，按局切分 train/val ----
-    shards = sorted(
-        d for d in os.listdir(args.data)
-        if os.path.isdir(os.path.join(args.data, d)) and os.path.exists(os.path.join(args.data, d, "intent.npy"))
-    )
+    # ---- 索引 shards，按局切分 train/val（多数据根合并训练，shards[i] 为完整路径）----
+    shards = []
+    root_of: dict[str, int] = {}
+    for ri, root in enumerate(args.data):
+        root_of[root] = ri
+        shards += [
+            os.path.join(root, d)
+            for d in sorted(os.listdir(root))
+            if os.path.isdir(os.path.join(root, d)) and os.path.exists(os.path.join(root, d, "intent.npy"))
+        ]
+    shards = sorted(shards)
     if not shards:
         print(f"[probe] no shards under {args.data}", file=sys.stderr)
         sys.exit(1)
+    # 每个 shard 的根索引（B 臂 priority-root 需要按根识别帧来源）。
+    shard_roots = [root_of[os.path.dirname(d)] for d in shards]
     perm = rng.permutation(len(shards))
     n_val = max(1, int(len(shards) * args.val_shard_frac))
     val_idx = set(perm[:n_val].tolist())
 
     def load_split(indices) -> tuple[np.ndarray, ...]:
-        obs_l, sc_l, in_l, bk_l = [], [], [], []
+        obs_l, sc_l, in_l, bk_l, rt_l = [], [], [], [], []
         total = 0
         cap = args.max_train * 1.5 if args.max_train > 0 else 0
         for i in indices:
-            base = os.path.join(args.data, shards[i])
+            base = shards[i]
             o = np.load(os.path.join(base, "obs.npy"))
             total += o.shape[0]
             if cap > 0 and total > cap:
@@ -119,25 +161,30 @@ def main() -> None:
             sc_l.append(np.load(os.path.join(base, "scalars.npy")))
             in_l.append(np.load(os.path.join(base, "intent.npy")))
             bk_l.append(np.load(os.path.join(base, "bucket.npy")))
+            rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
         return (
             np.concatenate(obs_l),
             np.concatenate(sc_l),
             np.concatenate(in_l).astype(np.int64),
             np.concatenate(bk_l).astype(np.int64),
+            np.concatenate(rt_l).astype(np.int64),
         )
 
     val_shards = [i for i in range(len(shards)) if i in val_idx]
     train_shards = [i for i in range(len(shards)) if i not in val_idx]
-    xo, xs, xi, xb = load_split(train_shards)
+    xo, xs, xi, xb, xr = load_split(train_shards)
 
     # 先按混合上限子采样、再按类配额采样（P2-2，配额 ≪ 上限时以配额为准）。
     if args.max_train > 0 and len(xi) > args.max_train:
         sel = rng.choice(len(xi), size=args.max_train, replace=False)
-        xo, xs, xi, xb = xo[sel], xs[sel], xi[sel], xb[sel]
+        xo, xs, xi, xb, xr = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel]
     if args.quota > 0:
-        xo, xs, xi, xb = quota_sample(xi, xo, xs, xb, args.quota, rng)
+        if args.priority_root >= 0:
+            xo, xs, xi, xb = quota_sample_priority(xi, xo, xs, xb, xr, args.quota, rng, args.priority_root)
+        else:
+            xo, xs, xi, xb = quota_sample(xi, xo, xs, xb, args.quota, rng)
 
-    vo, vs_, vi, vb = load_split(val_shards)
+    vo, vs_, vi, vb, _vr = load_split(val_shards)
 
     # 注入特征（teacher-forced）：per-shard 序列重建在做子采样之前不可行，
     # 这里用全局重建近似——探针仅测"加上时序特征是否显著提升"。
@@ -240,6 +287,18 @@ def main() -> None:
         }
 
     report["gatePass"] = all(b["pass"] for b in report["buckets"].values())
+
+    # M5 gate：类级 recall vs majority（§18 修订口径）——非多数类 recall 必须显著 >0。
+    perClassRecall = {}
+    perClassMajority = {}
+    total = len(vi)
+    for c in range(8):
+        n_c = int((vi == c).sum())
+        perClassRecall[INTENT_IDS[c]] = float((pred[vi == c] == c).sum() / n_c) if n_c else None
+        perClassMajority[INTENT_IDS[c]] = n_c / total
+    report["perClassRecall"] = perClassRecall
+    report["perClassShare"] = perClassMajority
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
