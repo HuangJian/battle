@@ -2081,3 +2081,10 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > 全文 → docs/nn.progress.intent.md §18。注：cruise 桶负 margin 受分布 mismatch 污染，
 > 不以它为"CRUISE 不可学"证据——CRUISE 类 recall 48% vs majority 0%。
 
+## 293. M4 完成 — 网络 + 字节一致 + 推理基准 + IntentPlayer（2026-08-26 夜）
+> 意图网（StudentNet 主干+三头+9 维注入，71.5K）；TS/Py 前向一致测试新建（P3-4，检入
+> golden h16/d2，三头 logits ≤1e-4）；bench 实测单前向 **41.1ms**（理论带 34–56ms 正中；
+> 摊销 ÷24→1.71 / ÷50→0.82 ms·tick；实机需 Worker/瘦身档=R3）；IntentPlayer +
+> `m1-eval --policy intent`（I6）单局闭环跑通；stub=3 意图最小执行器（M6 真执行器交接）。
+> **M4 gate 全绿**：check 1512 pass / 0 fail。全文 → docs/nn.progress.intent.md §19。
+

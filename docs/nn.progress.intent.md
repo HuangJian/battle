@@ -29,3 +29,20 @@ HUNT/CRUISE/PICKUP 满配额 15K。loss 32.07→1.35，trainAcc 0.234→0.446。
 
 **M4 待办**：意图网三头+注入（intent_net.py 骨架已就位）、TS/Py 前向字节一致测试（新建）、
 bench-nn-infer 实测单前向 ms、IntentPlayer 策略适配器 + m1-eval --policy intent。
+
+## §19. M4 完成 — 网络 + 字节一致 + 推理基准 + IntentPlayer 适配器（2026-08-26 夜）
+
+- **M4-A（P3-4）**：`nn-training/intent_net.py`（IntentNet：StudentNet 主干 + 三头 + 9 维注入，
+  71.5K；主干 shape 断言内置=预注册 #8）；`infer.ts` StudentModel 加可选三头 +
+  `intentForward` + `buildIntentModelFromText`；`tests/nn/intent-infer.test.ts` 用检入 golden
+  （h16/d2 固定 seed，tests/fixtures/intent-golden.json）锁三头 logits ≤1e-4 一致。
+- **M4-B**：`tools/bench-intent-infer.ts` 实测 **单前向 41.1ms**（0.91G MAC/s；理论带 34–56ms 正中），
+  摊销 ÷24→1.71 / ÷50→0.82 ms·tick；>16.7ms 帧预算 → 实机 Worker/瘦身档（R3），headless 不限。
+  权重值与 MAC 数无关（M5 真权重重跑确认）。
+- **M4-C（I6）**：`src/nn/intent-player.ts`（InputLike；replan 30 → 三头 argmax，ESCAPE 掩码；
+  注入 prev/duration 维护同 tagger；3 意图最小执行器 stub 直读 World、零 RNG、确定性）；
+  `simulation-runner/m1-eval/sim-worker` 接 `policy:'intent'` + `--intent-weights`；
+  `tools/gen-intent-weights.ts`（确定性随机全尺寸权重，M5 前 sanity 用）；
+  `tests/nn/intent-player.test.ts`（闭环 ≥600 tick 不崩 + 确定性 + 意图合法，4 例）；
+  smoke：m1-eval S10 seed1 WIN 100%（接线验证，非真实水平）。
+- **M4 gate 全绿**：`bun run check` 1512 pass / 0 fail @ 2026-08-26 23:31。
