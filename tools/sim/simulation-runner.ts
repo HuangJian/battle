@@ -4,6 +4,7 @@ import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/a
 import { NNInput } from '../../src/nn/policy-input'
 import { IntentPlayer } from '../../src/nn/intent-player'
 import { IntentExecutor } from '../../src/nn/intent-executor'
+import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
@@ -416,7 +417,7 @@ export interface RunOptions {
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
   /** Player policy for the headless run: 'god' (default), 'nn' or 'intent'. */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec'
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
@@ -596,7 +597,11 @@ export function runSimulation(opts: RunOptions): SimResult {
               weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
               rng: godRng, // §47：执行器内部 God-AI 独立 RNG，与 world 解耦
             }) as unknown as GodAIInput)
-          : new GodAIInput(world, godAIParams, godRng)
+          : opts.policy === 'intent-oracle'
+            ? (new IntentOracleProbe(world, {
+                seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
+              }) as unknown as GodAIInput)
+            : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.

@@ -80,7 +80,8 @@ async function main(): Promise<void> {
   const stageSpec = arg('stages', 'all')!
   const seedSpec = arg('seeds', '1-10')!
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
-  const policy = (arg('policy', 'nn') as 'god' | 'nn' | 'intent' | 'intent-exec') ?? 'nn'
+  const policy =
+    (arg('policy', 'nn') as 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle') ?? 'nn'
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
   // Max concurrency is the real physical core count (never oversubscribe the
