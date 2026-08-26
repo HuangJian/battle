@@ -2088,3 +2088,14 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > `m1-eval --policy intent`（I6）单局闭环跑通；stub=3 意图最小执行器（M6 真执行器交接）。
 > **M4 gate 全绿**：check 1512 pass / 0 fail。全文 → docs/nn.progress.intent.md §19。
 
+## 294. M1 压缩认定 + M2 人像签名完成（2026-08-26 夜）
+> **M1（God-AI tagger）已由 M0b 用同一实现覆盖**：tagger 钩子（intentTaggerMode，
+> ON/OFF 字节等价测试）在 M0b 前已落地；逐 tick 打标/分段四件套/vocab 映射即
+> M0b 探针所用的同一实现——M1 不再单列，挂标点后续随 M4 IntentPlayer 的 replay
+> 注入复用（student rollout 冷启动问价见 §5.1）。
+> **M2（人像签名标签器）完成**：signature.ts 8 类纯函数判据（宁缺勿错、ESCAPE 不签名）
+> + 104 局重放导出（outcome 与 verify-demos 逐局一致）+ two-oracle 分布报告。
+> B 臂支柱证据：人像更据守（10.2% vs 1.2%）/回防（11.0% vs 7.4%）/巡航；PICKUP 4.5%
+> 为纯拾取下限（用户修正：人"边走边打顺路捡"属战斗类，非不捡）。CLEAR 人像 60 窗口
+> <200 → B 臂宁缺勿错、A 臂补齐。全文 → docs/nn.progress.intent.md §20。
+
