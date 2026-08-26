@@ -75,14 +75,17 @@ def main() -> None:
             h = model.features(torch.from_numpy(obs), torch.from_numpy(scalars))
             hc = torch.from_numpy(np.ascontiguousarray(h.numpy(), dtype=np.float32))
 
-            inj = np.zeros((n, 9), dtype=np.float32)
-            prev_c, dur_c = 0, 1
+            # 逐帧 self-feed：预分配 torch 注入张量（避免每帧 from_numpy/cat/unsqueeze 的
+            # torch dispatch 开销——原实现逐帧 head 前向 ~2-3ms，2204 shards 需 ~1.5h）。
+            inj = torch.zeros(n, 9, dtype=torch.float32)
             inj[0, 8] = 1.0  # dur=1, prev 全零（首帧语义）
+            prev_c, dur_c = 0, 1
             for t in range(n):
                 if t > 0:
+                    inj[t].zero_()
                     inj[t, prev_c] = 1.0
                     inj[t, 8] = min(dur_c, D_MAX)
-                logit = model.intent_head(torch.cat([hc[t], torch.from_numpy(inj[t])]).unsqueeze(0))
+                logit = model.intent_head(torch.cat([hc[t : t + 1], inj[t : t + 1]], dim=1))
                 p = int(logit.argmax(1)[0])
                 if p == prev_c:
                     dur_c += 1
@@ -90,7 +93,7 @@ def main() -> None:
                     dur_c = 1
                 prev_c = p
 
-            np.save(out_p, inj)
+            np.save(out_p, inj.numpy())
             done += 1
 
     print(f"[gen-self-inj] shards={len(shards)} done={done} -> self_inj.npy under each shard")
