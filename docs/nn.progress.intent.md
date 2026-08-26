@@ -1,3 +1,39 @@
+## §23. M5-B′ 平滑对照臂 + M5 gate 结论 — 人像温和混合胜出（2026-08-27 凌晨）
+
+**B′ 配置**：双根（intent-probe-hard + human-obs），quota 15000（与 A 同口径）+ `--priority-root 1`
+（人类混合比 26.6%，集中 CRUISE 71%/HOLD_LANE 56%/HUNT 21%），inject、8ep、seed7。
+trainFrames 66880（HOLD_LANE 1691→4641 = 人类 +174%、RETURN_DEFENSE 6997 +30%、INTERCEPT 4983 +37%）。
+
+**结果（val 89090 帧）对比 A 臂（val 86642）**：
+
+| 指标 | A（纯 God-AI） | B（4000+priority） | **B′（15000+priority）** |
+|---|---|---|---|
+| overall acc | 60.3% | 16.9% | **60.1%** |
+| base 桶 margin | +0.113 | −0.224 | **+0.142** |
+| combat 桶 margin | +0.106 | −0.398 | +0.093（差 0.7pp 未过 0.1 门槛） |
+| cruise 桶 margin | +0.110 | −0.370 | **+0.164** |
+| RETURN_DEFENSE recall | 14.7% | 90.7% | **31.3%** |
+| INTERCEPT recall | 82.7% | 29.2% | 53.3% |
+| 守家桶安全级误判 | 12.55% | 60.1% | **7.72%** |
+| 路由错配率 | 37.8% | 82.2% | 39.1% |
+| self-feed gap | 12.8pp | 1.3pp | 13.7pp |
+| stub 冒烟 WIN（5 关×10 seeds） | 22% | 18% | **24%** |
+
+**归因（I5/Q3 判定）**：
+- B（quota 4000）＝训练配置过强（45% 人类 × 平衡配额）导致自然分布塌向 RETURN_DEFENSE ——
+  **配置失败，不是"人像无用"**；#20 的 ≥30% 混合比在 priority 采样下需以温和配额（15000）落地。
+- **B′ 定向增益成立**：同等 overall acc（60.1% ≈ 60.3%）下，base 桶 margin +0.142（> A 的 +0.113）、
+  守家桶安全级误判 **7.72%（较 A 减半）**、RETURN_DEFENSE recall **14.7%→31.3%**、stub WIN 24%（> A 22%）
+  ——人像守家信号确实改善 base 路由。代价：INTERCEPT recall 82.7%→53.3%、combat 桶 margin 差 0.7pp。
+- **HOLD_LANE 双臂仍 ~0%**（A 0.0% / B′ 0.7%）——§18 已知弱项，守家段超采样/DAgger 补强留 M5 增补轮或 M7。
+
+**M5 gate 判定**：A 臂 learnability 成立（60.3%、6/7 类 recall 显著 >0）；B 臂经 B′ 温和混合
+定向增益（base 路由改善 + WIN 上行），**B oracle 增益 > A（方向性）→ B 臂降级分支不触发**。
+M5 gate **PASS**，权重携带：A（`intent-weights-A.json`）+ B′（`intent-weights-Bp.json`）双轨进 M6/M7；
+完整 WIN 归因（配对评估）在 M7② 用全执行器定论。
+
+---
+
 ## §22. M5-B（quota 4000 + priority）— 自然分布 gate FAIL，塌向 RETURN_DEFENSE（2026-08-27 凌晨）
 
 **配置**：intent-probe-hard + human-obs 双根，quota 4000 + `--priority-root 1`（人类优先保留、

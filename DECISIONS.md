@@ -2099,3 +2099,23 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > 为纯拾取下限（用户修正：人"边走边打顺路捡"属战斗类，非不捡）。CLEAR 人像 60 窗口
 > <200 → B 臂宁缺勿错、A 臂补齐。全文 → docs/nn.progress.intent.md §20。
 
+## 295. M5 双臂完成 — A 臂 learnability 成立 + B′ 人像温和混合定向增益（2026-08-27 凌晨）
+> **A 臂**（纯 God-AI 意图标签，quota 15000、inject、8ep）：trainAcc 0.568、自然分布 val acc
+> **60.3%**、三桶 margin 全 ≥0.1 → gate PASS；类级 recall 6/7 >0（INTERCEPT 82.7 / HUNT 90.3 /
+> CLEAR 66.6 / PICKUP 49.5；RETURN_DEFENSE 14.7 / CRUISE 24.8 弱；HOLD_LANE 0% 已知弱项）。
+> 四必报项：self-feed gap 12.8pp（运行时自喂 prev 低于 teacher）、prev ±3 鲁棒、守家安全级误判
+> **12.55% > 5%**、路由错配 37.8%。
+> **B 臂**（+人像签名，quota 4000 + priority 45% 人类）：自然分布塌向 RETURN_DEFENSE（acc 16.9%）
+> → **配置失败非"人像无用"**；#20 的 ≥30% 混合比须以温和配额落地。
+> **B′ 平滑对照臂**（quota 15000 + priority 26.6% 人类）：overall acc 60.1%（≈A）、base 桶 margin
+> +0.142（>A）、守家安全级误判 **7.72%（较 A 减半）**、RETURN_DEFENSE recall **14.7%→31.3%**、
+> stub 冒烟 WIN **24%**（A 22% / B 18%）→ **人像守家信号定向增益成立，B 臂降级分支不触发**。
+> M5 gate PASS；A + B′ 双轨权重进 M6/M7，完整 WIN 归因在 M7② 全执行器配对评估定论。
+> 全文 → docs/nn.progress.intent.md §21–§23。
+
+## 296. M6 仲裁修复 — reflex dodge 默认保留，仅 suppressDodge 显式压制（2026-08-27 凌晨）
+> 原 applyIntent 只把 window 层候选写入 `_candidateOverride` → **排除 reflex(dodge)，违反 P0-5
+> "reflex 覆盖移动默认成立"**。修复：override = 白名单全部三层候选（window+overlay+reflex），
+> 仅当 window 候选标注 `suppressDodge`（RETURN_DEFENSE 的 suicideReturn）时剔除 dodge。
+> 新增行为级仲裁测试（8 意图 dodge 保留/剔除断言，P0-5）。确定性不受影响（freeze gate 通过）。
+
