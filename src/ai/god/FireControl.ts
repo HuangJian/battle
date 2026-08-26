@@ -78,10 +78,10 @@ export function findEnemyDirectionImpl(
       }
     }
 
-    if (!dir || dist > AIM_RANGE_CELLS * CELL) continue // static — always full field
+    if (!dir || dist > AIM_RANGE_CELLS * CELL) continue // range limit (240px)
 
-    // T9: score = threat weight × 1000 - distance (prefer high-threat,
-    // then nearest among equal threat).
+    // T9: score = (threat weight + bonus weight) × 10000 - distance + hp bonus
+    // (prefer high-threat, then nearest among equal threat).
     // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp
     // 否决归档）——hpFactor 保留（原评分组成部分）。
     let threatWeight = kindThreatWeight(t.kind)
@@ -719,7 +719,7 @@ export function shouldFireInDirImpl(
   if (result.baseSteel && (p.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL) return false
   // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
   // level ≥ 3 falls through to the enemy check (can pierce).
-  if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
+  if (result.steel && !result.baseSteel && (p.level ?? 0) < STEEL_PIERCE_PLAYER_LEVEL) return false
 
   // §121: self-fire base guard — never fire a bullet whose CENTER line
   // (the actual 6px path, NOT the scan's ±8px offset lines) can reach the
@@ -848,7 +848,7 @@ export function steelFireBlockedImpl(
   level: number | undefined,
   gateOn: number,
 ): boolean {
-  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < 3
+  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < STEEL_PIERCE_PLAYER_LEVEL
 }
 
 /**
@@ -1075,7 +1075,7 @@ export function enemyInShotCorridorImpl(
   const tanks = w.tanks
   for (let ti = 0; ti < tanks.length; ti++) {
     const t = tanks[ti]
-    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    if (!t.alive || t.spawnTimer > 0) continue
     const tcx = t.x + t.w / 2
     const tcy = t.y + t.h / 2
     if (vertical) {

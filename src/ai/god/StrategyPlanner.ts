@@ -2,7 +2,7 @@ import { type GodAIInput, countBranch } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import type { World } from '../../game/World'
 import { findPath, type Cell } from './pathfind'
-import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID } from '../../constants'
+import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID, TICK_MS } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
 import type { GodAIParams } from './params'
@@ -102,15 +102,19 @@ function intentRead(
     it.lastPlayerRow = playerCell.row
   }
   // Stall: unmoved and not recently firing for the window → release. Firing
-  // means the player is still engaging (hold-fire) — fireCooldown > 0 marks a
-  // recent shot (cadence ≥ 99, so the window cannot outlive the marker).
-  if (w.frame - it.lastMoveFrame >= self.params.intentProgressWindowTicks && p.fireCooldown <= 0) {
+  // means the player is still engaging (hold-fire). "Recent shot" is
+  // determined by the time-based cooldown (lastFire + nextFireInterval),
+  // mirroring think.ts's onCooldown predicate — NOT the base fireCooldown
+  // field which is the interval constant and never decrements.
+  const nowMs = w.frame * TICK_MS
+  const onCooldown = nowMs - p.lastFire < p.nextFireInterval
+  if (w.frame - it.lastMoveFrame >= self.params.intentProgressWindowTicks && !onCooldown) {
     return null
   }
   // Flight: target farther than at commit (+ degrade) → the approach sunk.
   const tc = self.tankCell(t)
   const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
-  if (d > it.expectedProgress + INTENT_PROGRESS_DEGRADE && p.fireCooldown <= 0) return null
+  if (d > it.expectedProgress + INTENT_PROGRESS_DEGRADE && !onCooldown) return null
   // Threat revalidation (throttled): the CURRENT slack (safe deadline minus
   // current kill ETA, legal-turn waits included) must not have collapsed
   // past the committed slack, and no other enemy's deadline may be clearly
@@ -143,7 +147,9 @@ function intentRead(
 /** Commit the freshly picked target as a short-term intent. */
 function intentWrite(self: GodAIInput, w: World, playerCell: Cell, best: Tank) {
   const tc = self.tankCell(best)
-  const ka = killAssessment(w, w.player!, best)
+  const p = self.controlledTank(w)
+  if (!p) return
+  const ka = killAssessment(w, p, best)
   self._intent = {
     kind: 'hunt',
     targetId: best.id,

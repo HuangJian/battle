@@ -295,6 +295,10 @@ export function carvePathInfoCached(self: GodAIInput, from: Cell, to: Cell): Car
   // dual central breach, so both join the revision in the validity key. Any
   // mismatch — or the carveReplanTicks staleness bound running out — drops the
   // whole map, so a stale answer can never be served.
+  // NOTE: memo entries are stored by reference (NOT copied). Current callers
+  // only read .length/.corridor, so aliasing is safe. If a future caller
+  // mutates the returned path array (e.g. shift/pop), it would corrupt the
+  // memo. Such a caller must clone the result.
   const baseCost = self.params.carveBaseColumnCost
   const maxBase = self.params.carveMaxBaseColumn
   let memo = self._carveMemo
@@ -803,11 +807,14 @@ export function enemyNearLaneImpl(self: GodAIInput, dist: number): boolean {
 
 /**
  * §189: find a standable cell in the lower-half wing nearest to the base.
- * `side` = -1 for left wing (cols 0..bc-2), +1 for right wing (cols bc+3..GRID-1).
- * Scans rows br-4..br (the lower-half band where the player needs mobility),
- * nearest to the base first. A "standable" cell has no brick/steel/water/base
- * in its 2×2 tank footprint. Returns null when no standable cell exists.
- * Pure World read — no RNG.
+ * `side` = -1 for left wing (cols 0..bc-3), +1 for right wing (cols bc+4..GRID-2).
+ * The ±1 column gap from bc accounts for the 2×2 tank footprint:
+ * a tank at col bc-2 has footprint cols bc-2..bc-1 which overlaps the
+ * base columns, so the leftmost safe column is bc-3. Similarly bc+4
+ * on the right. Scans rows br-4..br (the lower-half band where the
+ * player needs mobility), nearest to the base first. A "standable" cell
+ * has no brick/steel/water/base in its 2×2 tank footprint. Returns null
+ * when no standable cell exists. Pure World read — no RNG.
  */
 export function findWingAnchorImpl(self: GodAIInput, side: -1 | 1): Cell | null {
   const w = self.world

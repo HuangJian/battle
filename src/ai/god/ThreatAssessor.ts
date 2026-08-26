@@ -1073,7 +1073,7 @@ export function isTerrainPinnedImpl(self: GodAIInput, p: Tank, bullet: Bullet): 
  *
  * Returns `opposite(bullet.dir)` (face the bullet's source) only when:
  *   1. The bullet is closely aligned with the player center (lateral offset
- *      < `dodgeCounterFireAlignPx`) — the player's 6px bullet must actually
+ *      ≤ `dodgeCounterFireAlignPx`) — the player's 6px bullet must actually
  *      collide with the enemy bullet (SimulationCombat.bulletHitsBullet:
  *      bullets cancel across opposing sides when their hitboxes overlap).
  *   2. The lane from the player to the bullet is clear (no brick/steel/base
@@ -1120,12 +1120,12 @@ export function dodgeCounterFireDirImpl(
  *
  * Scans the player's movement path from cell 1 to LOOKAHEAD cells ahead in
  * moveDir. For each cell, checks ALL enemy bullets (from target or non-target
- * enemies) using time-of-arrival estimation:
+ * enemies) using a ±10 tick threat window around the player's arrival time:
  *
  *   - Player arrives at cell i at tick:  i * CELL / playerSpeed
- *   - Player departs (clears TANK hitbox) at tick:  arrival + TANK / playerSpeed
+ *   - Player departs (clears TANK hitbox) at tick:  arrival ± threatWindow
  *   - Bullet arrives at cell i at tick:  dist / bullet.speed
- *   - Threat if bullet arrives before player departs the cell
+ *   - Threat if bullet arrives within the threat window
  *
  * This replaces the old fixed-proximity approach (which used TANK or TANK*2
  * as a distance threshold). The time-aware check naturally adapts to bullet
@@ -1204,10 +1204,10 @@ export function findPathThreatImpl(
         for (let d = CELL; d < dist; d += CELL) {
           const fx = bcx + bv.dx * d
           const fy = bcy + bv.dy * d
-          if (fx < 0 || fx > FIELD || fy < 0 || fy > FIELD) break
+          if (fx < 0 || fx >= FIELD || fy < 0 || fy >= FIELD) break
           const tcol = Math.floor(fx / CELL)
           const trow = Math.floor(fy / CELL)
-          const t = grid[trow][tcol]
+          const t = grid[trow]?.[tcol]
           if (t === 'steel') {
             terrainBlocked = true
             break

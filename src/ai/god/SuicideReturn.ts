@@ -274,9 +274,10 @@ export function findSuicideTargetImpl(self: GodAIInput, pcx: number, pcy: number
     //   c. the spawn is strictly closer to the enemy than the player (a
     //      positional win — the respawned player reaches the threat sooner).
     const spawnDist = manhattan(w.playerSpawnPoint.col, w.playerSpawnPoint.row, ecCol, ecRow)
-    const playerCol = Math.round(pcx / CELL)
-    const playerRow = Math.round(pcy / CELL)
-    const playerDist = manhattan(playerCol, playerRow, ecCol, ecRow)
+    // Use corner-cell convention (tankCell) matching ecCol/ecRow, not center.
+    const pt = self.controlledTank(w)
+    const pc = pt ? self.tankCell(pt) : { col: Math.floor(pcx / CELL), row: Math.floor(pcy / CELL) }
+    const playerDist = manhattan(pc.col, pc.row, ecCol, ecRow)
     const spawnUseful =
       spawnCanHitEnemyImpl(self, ecCol, ecRow) ||
       (self.params.suicideReturnSpawnDistCells > 0 &&

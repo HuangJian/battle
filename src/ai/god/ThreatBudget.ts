@@ -61,7 +61,14 @@ export function isBaseRingCell(col: number, row: number): boolean {
 }
 
 /** Number of ring cells still 'brick' (0..8). TileMap-typed to stay
- * allocation-free at call sites (no closure — AGENTS §14.1). */
+ * allocation-free at call sites (no closure — AGENTS §14.1).
+ * NOTE: this counts ONLY 'brick', not 'steel'. When the fence converts
+ * ring bricks to steel (§129), countRingBrickCells drops to 0 but the
+ * ring is still structurally intact (steel stops bullets). See the
+ * three distinct ring-intact predicates below:
+ *   1. countRingBrickCells: only 'brick' — counts breachable cells
+ *   2. enemyDeadline's ringIntact: 'brick' || 'steel' — any solid ring cell
+ *   3. canBreachRingLine: requires target cell === 'brick' — productive breach only */
 export function countRingBrickCells(tm: TileMap): number {
   let n = 0
   for (let i = 0; i < RING_CELLS.length; i++) {
@@ -147,6 +154,11 @@ export interface KillAssessment {
   missesSecondThreat: boolean
 }
 
+/** Float ms→ticks (no rounding). Used for threat-timing arithmetic where
+ *  fractional ticks are intentional. Note: CoveragePlanner.ts uses a
+ *  separate msToTicks that rounds to integer ticks (Math.round + max(1));
+ *  both produce identical results for current inputs but serve different
+ *  precision needs. */
 const msToTicks = (ms: number): number => Math.max(0, ms / TICK_MS)
 
 // §14.2 hot-path scratch: every object-returning helper below accepts an

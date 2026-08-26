@@ -33,14 +33,14 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
   ) {
     const fenceTarget = findDualFencePickupImpl(self, pcx, pcy)
     if (fenceTarget) {
-      const myCol = Math.floor(pcx / CELL)
-      const myRow = Math.floor(pcy / CELL)
-      const myDist = manhattan(fenceTarget.col, fenceTarget.row, myCol, myRow)
+      const pc = self.playerCell()
+      const myDist = manhattan(fenceTarget.col, fenceTarget.row, pc.col, pc.row)
       let takeIt = true
       const partner = self.coopPartner()
       if (partner && partner.alive && partner.spawnTimer <= 0) {
-        const pCol = Math.floor(partner.x / CELL)
-        const pRow = Math.floor(partner.y / CELL)
+        // Use center-cell convention (Math.round) matching playerCell/tankCell.
+        const pCol = Math.round(partner.x / CELL)
+        const pRow = Math.round(partner.y / CELL)
         const partnerDist = manhattan(fenceTarget.col, fenceTarget.row, pCol, pRow)
         // Partner is significantly closer → let them handle it
         if (partnerDist < myDist - 2) takeIt = false

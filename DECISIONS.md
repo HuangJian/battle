@@ -1654,3 +1654,48 @@ trim + 空 token 拒绝 + validKeys 域校验，缺省回落 fallback），`swee
 **Implications:** run-forensics / threat-ledger 等已自行 split 的工具不受影响；
 后续可逐步迁移到本解析器（本次不顺手重构）。simulation-runner 的静默回落保留
 （改动面大），防线前移到 CLI 解析层。
+
+## 275. God AI code-review 批量 bug 修复（冻结路径零行为变更）(STATUS: 已实施, 2026-08-26)
+
+**Decision:** 根据 `docs/god-ai-code-review.md`（未追踪文件，未入 git）审计结果，
+实施一批冻结路径（`intentMode=0, candidateMode=0`, 单人）上零行为变更的修复。
+剩余行为变更项（§273 留档）不触动，留待下一纪元走三件套。
+
+**已修复（frozen-path 零行为变更）：**
+
+| 编号 | 文件 | 修复 |
+|---|---|---|
+| M-1 | StrategyPlanner.ts:279 | `intentWrite` 恒等式：`w.player!` → `self.controlledTank(w)!`（coop 写 P2 意图） |
+| M-2 | StrategyPlanner.ts:109 | 意图 stall 判断：`p.fireCooldown <= 0`（永假）→ `now - lastFire < nextFireInterval` |
+| #5 | ThreatAssessor.ts:376 | 行边界：`> FIELD` → `>= FIELD` + `?.` 安全访问 |
+| #7 | FireControl.ts:722,851 | 魔术字面 `< 3` → `< STEEL_PIERCE_PLAYER_LEVEL` |
+| #8-9 | FireControl.ts:385-386,704 | 注释与公式/值不匹配，修正 |
+| #10 | FireControl.ts:180-232 | 死分支 `t.isPlayer`：World.tanks 已无玩家 |
+| #11-12 | ThreatAssessor.ts:21,426 | docstring 不匹配实际常量/公式 |
+| #15 | ThreatBudget.ts:27 | msToTicks 浮点含义注释 |
+| #16 | ThreatBudget.ts:71 | ring-intact 谓词三分支注释 |
+| #17 | Navigator.ts:247 | "byte-identical" → "deterministic" |
+| #18 | Navigator.ts:324 | _navCache 无 tileMap.revision 注释 |
+| #19 | Navigator.ts:507-508 | `mult > 0` → `mult >= 1`（负倍率穿透砖块 guard） |
+| #20-21 | PathCarve.ts:244,614 | doc 不匹配 cols 范围 + memo 别名警告 |
+| #22 | Navigator.ts:390 | firecontrol gate 耦合注释 |
+| #23 | FiringLane.ts:60 | `self._fire = false` before recordBranch |
+| #24 | PickupHigh.ts:20 | 行格约定：`Math.floor(partner.x/CELL)` → `Math.round(partner.x/CELL)` |
+| #25 | SuicideReturn.ts:276-279 | `Math.round(pcx/CELL)` → `self.tankCell(p)` |
+
+**未修复（留档，下一纪元走三件套）：**
+- Medium-3: `buildCarveCosts` — 更薄 brick 意图 = 行为变更
+- Medium-4: `BaseConnectClear` `maxKillsGate=0` 死 config — 行为变更
+- #6: ring steel 后退逻辑 — 行为变更
+- #13-14: EnemyModel 信息泄漏 — 行为变更
+- #15 msToTicks 统一 — 跨层重构
+- #26-27: clear-lane OFF 候选 — 行为变更
+
+**Rationale:**
+- §272 冻结协议要求冻结路径零行为变更；M-1/M-2 在 `intentMode=0` 路径不触达；
+  所有注释/死分支/保守 guard 修复亦不影响 frozen det 签名。
+- `freeze:check` 通过：签名 `b81e240a`（109516 行）与 golden 字节一致。
+- 新增两个 intent stall 测试（`tests/godai-intent.test.ts`）验证 M-2 onCooldown 逻辑。
+
+**Implications:** 行为变更项（M-3/M-4/#6/#13-14/#15/#26-27）留待下一轮纪元，
+届时需走三件套（新 DECISIONS + 60-seed 三难度基线 + 更新 det-golden）。

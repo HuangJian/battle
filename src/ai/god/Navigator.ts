@@ -23,8 +23,10 @@ import { snap, aabb } from '../../utils/helpers'
  * discipline as buildCarveCosts / buildDigCosts (PathCarve.ts). Terrain
  * mutation bumps the revision the same tick, so the cache never goes stale.
  *
- * When navBaseRingMult <= 0 (OFF / classic), returns an all-zero array
- * (byte-identical — no extra cost in the A* hot loop).
+ * When navBaseRingMult < 1 (OFF / classic / degenerate), returns an all-zero
+ * array (byte-identical — no extra cost in the A* hot loop). Values in (0,1)
+ * are treated as OFF to prevent the ring penalty from reversing (making ring
+ * bricks cheaper than normal bricks).
  *
  * Pure World read — no RNG, no mutation. O(GRID² × 4) per rebuild, only on
  * terrain revision change.
@@ -34,7 +36,7 @@ export function buildBaseRingCosts(self: GodAIInput): Float64Array {
   if (self._baseRingCosts && self._baseRingCostsRev === rev) return self._baseRingCosts
   const costs = new Float64Array(GRID * GRID)
   const mult = self.params.navBaseRingMult
-  if (mult > 0 && self.hasBase) {
+  if (mult >= 1 && self.hasBase) {
     const grid = self.world.tileMap.grid
     // Extra cost = (mult - 1): total brick cost = 1 + (mult - 1) = mult.
     const extra = mult - 1
@@ -165,6 +167,11 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   const blkRow = blkCell ? blkCell.row : -99
 
   // (perf §68) Cache hit: same player + target cells, not expired.
+  // NOTE: unlike _replanCache, this cache does NOT key tileMap.revision —
+  // terrain changes (e.g. brick destruction, fence conversion) may occur
+  // between cache fills. The stale path is gracefully degraded: canMoveDir /
+  // canMoveOrBreak re-check passability every tick, so the player won't walk
+  // into newly-destroyed walls. The safety timer (60 ticks) bounds staleness.
   // We do NOT draw rng.next() here — the original always called it for the
   // suboptimalPathProb gate, but suboptimalPathProb defaults to 0 (result
   // discarded). Skipping the draw desyncs RNG state but the user-accepted
@@ -199,6 +206,9 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
       ...(self.params.navBaseRingMult > 0 ? { baseRingCosts: buildBaseRingCosts(self) } : {}),
+      // NOTE: firecontrol model is gated by navBrickStopCost > 0 (the
+      // flat/off master switch) — setting navFireStopModel:'firecontrol'
+      // with navBrickStopCost:0 silently falls back to flat/off.
       ...(self.params.navBrickStopCost > 0 ? buildFireStopConstraints(self, p) : {}),
     })
   }
@@ -373,11 +383,14 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   // terrain revision, not expired. replanInterval defaults to 1, so without
   // this replanImpl ran full A* every tick — measured 73-89% of all findPath
   // calls (§2.10). replanImpl draws NO RNG, so skipping identical
-  // recomputation is byte-identical (unlike the §68 navigateTowards cache,
-  // which skipped an rng.next() and relaxed the signature to win-rate). The
-  // path is only consumed (followPath shift) when the player enters a new
-  // cell — which changes the cache key → miss → fresh path — so the cached
-  // array is never served pre-consumed.
+  // recomputation is deterministic when inputs are unchanged (unlike the §68
+  // navigateTowards cache, which skipped an rng.next() and relaxed the
+  // signature to win-rate-only). NOTE: when navFireStopModel === 'firecontrol',
+  // the fire stop constraints include `now = frame * TICK_MS` which changes
+  // every tick and is NOT in the cache key — the timer-based expiry bounds
+  // the staleness window. The path is only consumed (followPath shift) when
+  // the player enters a new cell — which changes the cache key → miss → fresh
+  // path — so the cached array is never served pre-consumed.
   //
   // The terrain revision check (tileMap.revision) is what makes this a
   // STRICT pure memo: any brick destroyed by a bullet bumps the revision the

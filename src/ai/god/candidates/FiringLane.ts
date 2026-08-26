@@ -78,6 +78,7 @@ export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean 
     }
   }
   if (!self._moveDir) return false
+  self._fire = false
   recordBranch(self, 'firingLane')
   return true
 }
