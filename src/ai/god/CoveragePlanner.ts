@@ -1,7 +1,8 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { World } from '../../game/World'
-import { BASE_POS, CELL, GRID, TICK_MS } from '../../constants'
+import { BASE_POS, CELL, GRID } from '../../constants'
+import { msToTicksInt as msToTicks } from './constants'
 import type { Cell } from './pathfind'
 import { enemyDeadline, aimDirTo, playerShotsToKill, firePower } from './ThreatBudget'
 import { blocksBullet } from './Chokepoint'
@@ -83,8 +84,6 @@ interface CoverageThreat {
   flight: number
   fp: number
 }
-
-const msToTicks = (ms: number): number => Math.max(1, Math.round(ms / TICK_MS))
 
 /** Corner-space cell of a tank (top-left sub-block; footprint is 2×2). */
 function cornerCell(t: Tank): Cell {

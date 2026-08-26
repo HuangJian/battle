@@ -1699,3 +1699,52 @@ trim + 空 token 拒绝 + validKeys 域校验，缺省回落 fallback），`swee
 
 **Implications:** 行为变更项（M-3/M-4/#6/#13-14/#15/#26-27）留待下一轮纪元，
 届时需走三件套（新 DECISIONS + 60-seed 三难度基线 + 更新 det-golden）。
+
+## 276. code-review 遗留项全清 —— 新纪元三件套执行（§275 遗留 → 全部落地）(STATUS: 已实施, 2026-08-26)
+
+**Decision:** 用户拍板"不要推迟，所有问题都要处理掉"。将 §275 留档的 8 个遗留项
+全部修复，并完整执行 §272 新纪元三件套（本条目 + 60-seed×3 难度基线重跑 + golden
+替换为 `20784637…`）。
+
+**修复内容：**
+
+| 编号 | 文件 | 修复 | 行为影响 |
+|---|---|---|---|
+| M-3 | PathCarve.ts buildCarveCosts | 足迹感知：代价写在 2×2 坦克位置（任一足迹格命中环/基柱砖即付价），对齐 buildDigCosts/buildBaseRingCosts 语义；环砖压过基柱 | A* 导航路径变化 |
+| M-4 | BaseConnectClear.ts | 实现 baseConnectClearMaxKills 门控（killCount ≥ maxKills 即退出并复位 travel flag），兑现参数文档"开局阶段"语义 | frozen 默认 OFF（baseConnectClearMode=0） |
+| #6 | FireControl.ts shouldFireInDirImpl | `if (result.baseSteel) return false`——环钢全等级禁射（<3 打不动浪费冷却；≥3 T6 不许拆自家保护） | 射击决策变化 |
+| #13 | EnemyModel.ts updateEnemyModel | 窗口边界重置 `_enemyModelLastHp`，跨窗口 HP 跳变（含死亡）不再虚增 winHits→fireAccuracy | 敌方模型精度估计变化 |
+| #14 | EnemyModel.ts staticPriorLevel | 归一化分母 count → MAX_ENEMIES_ALIVE，与三个动态特征口径一致（单个指挥官不再读满权重） | estimatedLevel 变化 |
+| #15 | constants.ts + ThreatBudget/CoveragePlanner | msToTicks 统一为共享 msToTicksFloat/msToTicksInt（语义不变，消除双定义漂移风险） | 无行为变化（当前输入整数 ms） |
+| #26 | ActionCandidates.ts fireRayBlocked | 扫描全射线任意障碍（brick/steel/base）；clear-lane follow-up 检查跳过正被清除的首砖（skipCol/skipRow 参数） | frozen 默认 OFF（candidateMode=0） |
+| #27 | ActionCandidates.ts clear-lane | cadenceTicks 改用 fireCooldown 基础节奏惯用式（msToTicksInt），与 ThreatBudget/think/CoveragePlanner 一致 | frozen 默认 OFF（candidateMode=0） |
+
+**60-seed × 3 难度基线对比（sweep-winrate，seeds 1-60）：**
+
+| 难度 | 修复前 | 修复后 | Δ |
+|---|---|---|---|
+| classic | 89.52% | 89.52% | ±0 |
+| **hard（主）** | 75.90% | 75.29% | −0.62pp（n=2100 SE≈0.94pp，<1 SE 噪声内） |
+| chaos | 70.14% | 70.57% | +0.43pp |
+
+逐阶段再分配主要来自 M-3（导航路径改变）：hard S17 −10pp / S34 −6.7pp 与
+chaos S14 +11.7pp / S25 +8.3pp 同源。hard 总胜率仍高于 Phase III 基线 ~73%。
+
+**测试更新：**
+- battlement-carve-path：M-3 后 A* 正确避开全部环重叠足迹位，pocket→post 找到
+  carve-safe 路径（原断言返回 null 已过时）
+- navbreak-carve-dig：navBreakStuck=0 回归对照翻转——nb=0 现在 stageclear
+  （足迹感知代价让 A* 找到更优路线，正向改进）
+- score-gate truth 全量重采（1050 局，三难度并行采集），gate 绿：
+  classic 0.870/0.830 · hard 0.766/0.726 · chaos 0.756/0.716
+
+**Rationale:**
+- M-3 是索引语义缺陷（构建按子块、消费按坦克左上角），修复后 R5/R6 代价转向
+  与 §178 中央破口覆盖真正生效；pathCarveSafeImpl 足迹门控保证安全性不破。
+- #6/#13/#14 为正确性修复：浪费冷却、winHits>winShots clamp 到 1.0 的虚假
+  "完美"、先验幅值独立于场敌数，均属冻结帧内的实现缺陷。
+- 用户明确指令全清（2026-08-26 会话），三件套已完整执行。
+
+**Implications:** det golden 进入 §276 新基线（21 组合 111176 行，
+`20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf`）。后续任何
+God-AI 行为改动再次触发 freeze:check 红 = 下一纪元。

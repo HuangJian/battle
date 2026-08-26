@@ -42,30 +42,28 @@ export const STAGE_COUNT = STAGES.length // 35
 
 // ---- Per-stage godai-score v7 truth (mean over SCORE_SEEDS) ----
 // §233 (2026-08-17): re-captured at SCORE_SEEDS=10 (seeds 1-10) after the
-// seeds 20→10 reduction (suite <20s target). Same harness/口径 as the 20-seed
-// truth (telemetry on, v7 scoring) — the sims are deterministic, so a 10-seed
-// mean is a stable baseline; per-stage means shift only by the sampling
-// subset. Margins widened to ~2 SE of the per-stage mean at n=10
-// (MARGIN_SCORE 0.05→0.07; AGG_MARGIN_SCORE 0.03→0.04). The aggregate floor
-// (35 stages × 10 seeds = 350 samples) stays statistically tight.
+// seeds 20→10 reduction (suite <20s target).
+// §276 (2026-08-26): re-captured after the code-review batch fixes
+// (footprint-aware buildCarveCosts / ring-steel fire block / EnemyModel
+// corrections) shifted sim behavior — same harness/口径, deterministic sims.
 // Re-capture by re-running SCORE_SEEDS sims per stage with this file's own
 // imports (runSimulation + scoreRun, telemetry on, v7 scoring) and replacing
 // the means below — the original one-off capture script was ephemeral.
 export const TRUTH_SCORES: Record<string, number[]> = {
   classic: [
-    0.9762, 0.8782, 0.9112, 0.966, 0.9703, 0.818, 0.785, 0.956, 0.9659, 0.9686, 0.8218, 0.6489,
-    0.9295, 0.9774, 0.7204, 0.9651, 0.7426, 0.8946, 0.6467, 0.8249, 0.8257, 0.9613, 0.9461, 0.8149,
-    0.8274, 0.6584, 0.8563, 0.9725, 0.8763, 0.891, 0.8959, 0.9529, 0.7305, 0.9715, 0.8945,
+    0.9763, 0.8795, 0.9112, 0.966, 0.9731, 0.8188, 0.8526, 0.956, 0.9651, 0.9616, 0.8218, 0.648,
+    0.9295, 0.9774, 0.7204, 0.9614, 0.7426, 0.8946, 0.7148, 0.8249, 0.8221, 0.9605, 0.9492, 0.8149,
+    0.8274, 0.6587, 0.8563, 0.9725, 0.8763, 0.891, 0.9002, 0.9529, 0.6606, 0.9064, 0.8945,
   ],
   hard: [
-    0.878, 0.7352, 0.6829, 0.5787, 0.8128, 0.8521, 0.818, 0.8688, 0.8186, 0.7432, 0.9567, 0.6661,
-    0.8553, 0.5029, 0.8708, 0.6689, 0.8591, 0.811, 0.7986, 0.6628, 0.7247, 0.6232, 0.9572, 0.5862,
-    0.9411, 0.7193, 0.943, 0.6562, 0.9613, 0.8062, 0.7917, 0.7224, 0.9336, 0.4284, 0.8667,
+    0.8765, 0.6709, 0.6824, 0.579, 0.8785, 0.8516, 0.8049, 0.8688, 0.7561, 0.8214, 0.9533, 0.6684,
+    0.86, 0.6582, 0.8638, 0.6653, 0.7198, 0.8067, 0.7961, 0.6562, 0.7322, 0.558, 0.9628, 0.5834,
+    0.8613, 0.7806, 0.9475, 0.6562, 0.9627, 0.8041, 0.7911, 0.5925, 0.9294, 0.3558, 0.8667,
   ],
   chaos: [
-    0.7976, 0.8159, 0.8848, 0.6514, 0.7245, 0.6412, 0.5883, 0.5366, 0.81, 0.96, 0.8785, 0.5748,
-    0.8218, 0.9449, 0.8006, 0.7276, 0.6501, 0.974, 0.7137, 0.5192, 0.7999, 0.5933, 0.9598, 0.5705,
-    0.8109, 0.4929, 0.9401, 0.6654, 0.8831, 0.9504, 0.6323, 0.4386, 0.9372, 0.5119, 0.8742,
+    0.7971, 0.8729, 0.8848, 0.6511, 0.7323, 0.6441, 0.6495, 0.5366, 0.8152, 0.9603, 0.8778, 0.6457,
+    0.8875, 0.8046, 0.8733, 0.6604, 0.8653, 0.9749, 0.6526, 0.5202, 0.8204, 0.6641, 0.9658, 0.5005,
+    0.8712, 0.5785, 0.9449, 0.6654, 0.8072, 0.9568, 0.6329, 0.4274, 0.9392, 0.5108, 0.8743,
   ],
 }
 

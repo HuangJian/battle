@@ -159,7 +159,7 @@ export interface KillAssessment {
  *  separate msToTicks that rounds to integer ticks (Math.round + max(1));
  *  both produce identical results for current inputs but serve different
  *  precision needs. */
-const msToTicks = (ms: number): number => Math.max(0, ms / TICK_MS)
+import { msToTicksFloat as msToTicks } from './constants'
 
 // §14.2 hot-path scratch: every object-returning helper below accepts an
 // optional caller-owned `out` (reused across ticks — zero per-tick

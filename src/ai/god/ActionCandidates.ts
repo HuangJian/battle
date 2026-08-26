@@ -49,7 +49,8 @@
  * per-tick allocation even with candidateMode > 0 on the default sim path).
  */
 
-import { CELL, BASE_POS, type Direction } from '../../constants'
+import { CELL, type Direction } from '../../constants'
+import { msToTicksInt } from './constants'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
 
@@ -187,22 +188,23 @@ function isRingCell(col: number, row: number): boolean {
   return false
 }
 
-/** Cell is inside the 2×2 eagle footprint (BASE_POS..+1). Firing THROUGH it
- * is a self-inflicted base hit — the S30s27 lesson, base form. */
-function isBaseCell(col: number, row: number): boolean {
-  return (
-    col >= BASE_POS.col && col <= BASE_POS.col + 1 && row >= BASE_POS.row && row <= BASE_POS.row + 1
-  )
-}
-
 /**
- * §7.2 (d): does the aligned ray player→target cross an INTACT ring cell
- * (brick/steel still standing) or the base eagle itself, strictly between
- * the two tanks? Firing then would chip the own ring or self-hit the base
- * (S30s27). Center-cell space (tankCenterCell), same as the rest of this
- * module — never compare with CoveragePlanner's corner space.
+ * §7.2 (d): does the aligned ray player→target cross any INTACT obstacle
+ * (brick, steel, ring, or base eagle) strictly between the two tanks?
+ * Firing then would chip the own ring, waste a shot on a second obstacle
+ * behind a clearable brick, or self-hit the base (S30s27). Center-cell
+ * space (tankCenterCell), same as the rest of this module.
+ *
+ * @param skipCol optional: skip this cell (col/row) when scanning — used by
+ *   clear-lane to ignore the brick being cleared on the follow-up check.
  */
-export function fireRayBlocked(world: World, p: Tank, t: Tank): boolean {
+export function fireRayBlocked(
+  world: World,
+  p: Tank,
+  t: Tank,
+  skipCol = -1,
+  skipRow = -1,
+): boolean {
   const pc = tankCenterCell(p, _CELL_FB_A)
   const tc = tankCenterCell(t, _CELL_FB_B)
   const tm = world.tileMap
@@ -210,18 +212,16 @@ export function fireRayBlocked(world: World, p: Tank, t: Tank): boolean {
   if (pc.col === tc.col) {
     const step = tc.row > pc.row ? 1 : -1
     for (let r = pc.row + step; r !== tc.row; r += step) {
-      if (isBaseCell(pc.col, r)) return true
-      if (!isRingCell(pc.col, r)) continue
+      if (pc.col === skipCol && r === skipRow) continue
       const tile = tm.get(pc.col, r)
-      if (tile === 'brick' || tile === 'steel') return true
+      if (tile === 'brick' || tile === 'steel' || tile === 'base') return true
     }
   } else if (pc.row === tc.row) {
     const step = tc.col > pc.col ? 1 : -1
     for (let c = pc.col + step; c !== tc.col; c += step) {
-      if (isBaseCell(c, pc.row)) return true
-      if (!isRingCell(c, pc.row)) continue
+      if (c === skipCol && pc.row === skipRow) continue
       const tile = tm.get(c, pc.row)
-      if (tile === 'brick' || tile === 'steel') return true
+      if (tile === 'brick' || tile === 'steel' || tile === 'base') return true
     }
   }
   return false
@@ -441,7 +441,8 @@ export function evaluateUnifiedCandidates(
     const flightBrick =
       manhattan(_BRICK_OUT[0], _BRICK_OUT[1], pc.col, pc.row) *
       (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
-    const cadenceTicks = p.nextFireInterval > 0 ? p.nextFireInterval / (1000 / 60) : 0
+    const cadenceTicks =
+      p.fireCooldown > 0 ? msToTicksInt(p.fireCooldown) : msToTicksInt(p.nextFireInterval)
     const flightU =
       manhattan(uc.col, uc.row, pc.col, pc.row) * (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
     clearEta =
@@ -449,8 +450,9 @@ export function evaluateUnifiedCandidates(
     clearSlack = dlU.enemyDamageDeadline - clearEta
     // §7.2 (d): the follow-up shot through the opened lane must still not
     // cross a ring brick or the base itself (a brick cleared on the way does
-    // not make a base-crossing ray safe — S30s27 base form).
-    const followUpClear = !fireRayBlocked(world, p, urgent)
+    // not make a base-crossing ray safe — S30s27 base form). Skip the first
+    // brick (the one being cleared) — any second obstacle blocks the lane.
+    const followUpClear = !fireRayBlocked(world, p, urgent, _BRICK_OUT[0], _BRICK_OUT[1])
     clearValid = clearSlack > 0 && !kaU.missesSecondThreat && followUpClear
     clearReason = clearValid
       ? `clear-lane brick(${_BRICK_OUT[0]},${_BRICK_OUT[1]}) slack=${clearSlack.toFixed(1)}`

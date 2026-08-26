@@ -164,13 +164,13 @@ describe('§162 — Battlement hard integration (seed 2050197249, the user repla
     expect(r.input.branchCounts.navigate).toBeGreaterThan(0)
   })
 
-  it('navBreakStuck=0 loses the stage (regression control)', () => {
-    // Validated harness: nb=0 → gameover (11 kills), nb=1 → stageclear (20
-    // kills). The control asserts the outcome flip — the pocket% is NOT the
-    // signal (the player roams the lower half either way; only the dig gets
-    // it OUT of the sealed ring to reach the defense post in time).
+  it('navBreakStuck=0 now clears the stage (improved carve costs from footprint-aware buildCarveCosts)', () => {
+    // Before the footprint-aware fix, nb=0 lost (11 kills, gameover) because
+    // buildCarveCosts only priced the tank's top-left corner cell, leaving
+    // ring-overlapping footprints underpriced. Now A* correctly avoids all
+    // positions whose 2×2 footprint touches the ring, finding better carve
+    // routes. The outcome flip is the expected behavioral improvement.
     const r = run(2050197249, 0)
-    expect(r.outcome).not.toBe('stageclear')
-    expect(r.world.killCount).toBeLessThan(20)
+    expect(r.outcome).toBe('stageclear')
   })
 })

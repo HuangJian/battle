@@ -1,5 +1,5 @@
 import type { TankKind, PowerUpType } from '../../types'
-import { BASE_POS, CELL, TANK, BULLET } from '../../constants'
+import { BASE_POS, CELL, TANK, BULLET, TICK_MS } from '../../constants'
 import { TANK_SPEC, specField } from '../../config/tank-spec'
 
 // ============================================================
@@ -91,3 +91,11 @@ export const BASE_CENTER_Y_PX = BASE_POS.row * CELL + CELL
  * mathematically hopeless — face and cancel instead. Hardcoded by design
  * (the old dodgeCounterFireRangeCells param was removed in §101). */
 export const COUNTER_FIRE_RANGE_CELLS = 5
+
+/** Float ms→ticks (no rounding, min 0). Used by ThreatBudget for threat-timing
+ *  arithmetic where fractional ticks are intentional. */
+export const msToTicksFloat = (ms: number): number => Math.max(0, ms / TICK_MS)
+
+/** Integer ms→ticks (rounded, min 1). Used by CoveragePlanner and
+ *  ActionCandidates for ETA models where whole-tick precision suffices. */
+export const msToTicksInt = (ms: number): number => Math.max(1, Math.round(ms / TICK_MS))

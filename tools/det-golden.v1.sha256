@@ -1,5 +1,6 @@
 # God AI v1 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-08-26 @ commit dc18e6a（封版前 pristine 行为，DECISIONS §272）
+# 采集：2026-08-26 @ §276（code-review 批量修复新纪元：M-3 足迹感知 carve 代价 /
+#       #6 环钢禁射 / #13-14 EnemyModel 校正，DECISIONS §276）
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-b81e240a8c2980bbf805215319be5aa2f483a312235bd35d758a6e522870ec32
+20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf

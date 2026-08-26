@@ -46,6 +46,13 @@ export function evalBaseConnectClear(self: GodAIInput, ctx: DecisionContext): bo
     self._baseConnectClearActive = true
   }
 
+  // Kill-count gate: only active during the opening phase (§189).
+  // After enough kills, normal combat AI takes over.
+  if (self.world.killCount >= prm.baseConnectClearMaxKills) {
+    self._baseConnectClearActive = false
+    return false
+  }
+
   // Tick limit: bound the total active duration (carve + travel) so the
   // player eventually yields to combat even if they haven't reached P2.
   if (self._baseConnectClearActiveTicks >= prm.baseConnectClearMaxTicks) {

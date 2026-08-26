@@ -75,6 +75,12 @@ export function isBaseColumnBrickImpl(self: GodAIInput, col: number, row: number
  * — a strict pure memo (same discipline as the §127 replan cache): a brick
  * destroyed bumps the revision the same tick, so the cache never goes
  * stale.
+ *
+ * Footprint-aware: costs are written per 2×2 tank position (top-left cell),
+ * not per sub-block cell. A tank at position (c,r) has a 2×2 footprint
+ * covering (c,r),(c+1,r),(c,r+1),(c+1,r+1) — if ANY cell in that
+ * footprint is a ring/base-column brick, the position pays the cost.
+ * This matches buildDigCosts and buildBaseRingCosts semantics.
  */
 export function buildCarveCosts(self: GodAIInput): Float64Array {
   const rev = self.world.tileMap.revision
@@ -83,14 +89,20 @@ export function buildCarveCosts(self: GodAIInput): Float64Array {
   const grid = self.world.tileMap.grid
   const baseCost = self.params.carveBaseColumnCost
   for (let r = 0; r < GRID; r++) {
-    const grow = grid[r]
     for (let c = 0; c < GRID; c++) {
-      if (grow[c] !== 'brick') continue
-      if (isCarveRingBrickImpl(self, c, r)) {
-        costs[r * GRID + c] = 1e9
-      } else if (isBaseColumnBrickImpl(self, c, r)) {
-        costs[r * GRID + c] = baseCost
+      if (c + 1 >= GRID || r + 1 >= GRID) continue
+      let ringCost = 0
+      let baseCostHit = 0
+      for (let dr = 0; dr <= 1; dr++) {
+        const grow = grid[r + dr]
+        for (let dc = 0; dc <= 1; dc++) {
+          if (grow[c + dc] !== 'brick') continue
+          if (isCarveRingBrickImpl(self, c + dc, r + dr)) ringCost = 1e9
+          else if (isBaseColumnBrickImpl(self, c + dc, r + dr)) baseCostHit = baseCost
+        }
       }
+      // Ring supersedes base-column (ring is never carveable).
+      costs[r * GRID + c] = ringCost || baseCostHit
     }
   }
   self._carveCosts = costs

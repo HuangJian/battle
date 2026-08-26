@@ -720,6 +720,9 @@ export function shouldFireInDirImpl(
   // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
   // level ≥ 3 falls through to the enemy check (can pierce).
   if (result.steel && !result.baseSteel && (p.level ?? 0) < STEEL_PIERCE_PLAYER_LEVEL) return false
+  // Base-ring steel: never fire — at level < 3 the player can't pierce it
+  // (wasted shot), at level ≥ 3 T6 prevents destroying own base protection.
+  if (result.baseSteel) return false
 
   // §121: self-fire base guard — never fire a bullet whose CENTER line
   // (the actual 6px path, NOT the scan's ±8px offset lines) can reach the

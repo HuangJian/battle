@@ -162,15 +162,32 @@ describe('§161 — carve predicates (Battlement geometry)', () => {
     expect(isBaseColumnBrickImpl(ai, 12, 24)).toBe(false) // the eagle itself
   })
 
-  it('buildCarveCosts — ring + base-column bricks cost 1e9, ordinary brick 0, cached per revision', () => {
+  it('buildCarveCosts — footprint-aware: ring + base-column bricks cost propagated to 2×2 positions', () => {
     const { world, ai } = makeWorld(1)
     world.tileMap.grid[20][12] = 'brick'
     world.tileMap.grid[20][10] = 'brick'
     const costs = buildCarveCosts(ai)
-    expect(costs[23 * GRID + 11]).toBe(1e9) // ring (11,23)
-    expect(costs[24 * GRID + 14]).toBe(1e9) // ring (14,24)
-    expect(costs[20 * GRID + 12]).toBe(1e9) // base column (12,20)
-    expect(costs[20 * GRID + 10]).toBe(0) // ordinary brick
+    // Ring brick at (11,23): all 2×2 positions covering it pay 1e9.
+    expect(costs[22 * GRID + 10]).toBe(1e9) // footprint (10,22) covers (11,23)
+    expect(costs[23 * GRID + 10]).toBe(1e9) // footprint (10,23) covers (11,23)
+    expect(costs[22 * GRID + 11]).toBe(1e9) // footprint (11,22) covers (11,23)
+    expect(costs[23 * GRID + 11]).toBe(1e9) // footprint (11,23) covers (11,23)
+    // Ring brick at (14,24): all 2×2 positions covering it pay 1e9.
+    expect(costs[23 * GRID + 13]).toBe(1e9) // footprint (13,23) covers (14,24)
+    expect(costs[24 * GRID + 13]).toBe(1e9) // footprint (13,24) covers (14,24)
+    expect(costs[23 * GRID + 14]).toBe(1e9) // footprint (14,23) covers (14,24)
+    expect(costs[24 * GRID + 14]).toBe(1e9) // footprint (14,24) covers (14,24)
+    // Base column brick at (12,20): all 2×2 positions covering it pay baseCost.
+    const baseCost = ai.params.carveBaseColumnCost
+    expect(costs[19 * GRID + 11]).toBe(baseCost)
+    expect(costs[20 * GRID + 11]).toBe(baseCost)
+    expect(costs[19 * GRID + 12]).toBe(baseCost)
+    expect(costs[20 * GRID + 12]).toBe(baseCost)
+    // Ordinary brick at (10,20): all 2×2 positions covering it pay 0.
+    expect(costs[19 * GRID + 9]).toBe(0)
+    expect(costs[20 * GRID + 9]).toBe(0)
+    expect(costs[19 * GRID + 10]).toBe(0)
+    expect(costs[20 * GRID + 10]).toBe(0)
     const again = buildCarveCosts(ai)
     expect(again).toBe(costs) // same object — memoized
   })
@@ -246,7 +263,7 @@ describe('§161 — carve path search', () => {
     expect(pathCarveSafeImpl(ai, pc, info.path!)).toBe(true) // and safe
   })
 
-  it('Battlement invariant: the carve declines because the RING blocks the pocket→post route (search is not degenerate)', () => {
+  it('Battlement invariant: the carve finds a safe route now that buildCarveCosts is footprint-aware (§161 fix)', () => {
     const { ai } = makeBattlement(1)
     const pc = { col: 8, row: 24 }
     const post = carvePostImpl(ai)!
@@ -255,11 +272,12 @@ describe('§161 — carve path search', () => {
     // The UNRESTRICTED dig search finds a route — the search is not degenerate.
     const dig = findPath(ai.world.tileMap, pc, post, { breakBrick: true })
     expect(dig).not.toBeNull()
-    // ...but that route's tank footprints cross the BASE RING (row 23 cols
-    // 11-14 / col 14 rows 24-25) — R6 (never break the ring) is what bites,
-    // so the carve correctly returns null instead of damaging the fortress.
-    expect(pathCarveSafeImpl(ai, pc, dig!)).toBe(false)
-    expect(findCarvePathImpl(ai, pc, post)).toBeNull()
+    // With footprint-aware buildCarveCosts, A* now correctly prices all positions
+    // whose 2×2 footprint overlaps ring bricks, avoiding them entirely. This lets
+    // it find a carve-safe route that the old per-cell costs couldn't guide it to.
+    const carve = findCarvePathImpl(ai, pc, post)
+    expect(carve).not.toBeNull()
+    expect(pathCarveSafeImpl(ai, pc, carve!)).toBe(true)
   })
 
   it('R6 cap is a per-PATH base-column count: one brick shared by two consecutive footprints counts once (dedupe)', () => {
