@@ -61,8 +61,8 @@ export interface SimTask {
   recordReplay?: boolean
   /** M4 star census observer (spawn/pickup/min-dist per star). Read-only. */
   powerupCensus?: boolean
-  /** Player policy: 'god' (default), 'nn' or 'intent'. */
-  policy?: 'god' | 'nn' | 'intent'
+  /** Player policy: 'god' (default), 'nn', 'intent' (stub) or 'intent-exec' (M6 执行器). */
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */

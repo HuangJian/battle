@@ -23,6 +23,7 @@
 import { type Direction } from '../constants'
 import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
+import type { RNG } from '../utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../ai/GodAIInput'
 import { ObsEncoder } from './obs-encoder'
 import { buildIntentModelFromText, type IntentModelLike } from './infer'
@@ -55,6 +56,8 @@ function argmaxWithMargin(logits: Float32Array, masked: ReadonlySet<string>): nu
 export interface IntentExecutorOptions {
   weightsText: string
   godParams?: GodAIParams
+  /** 内部 God-AI 决策 RNG（§47：与 world.rng 解耦，重放保真）。缺省 = world.rng（不推荐）。 */
+  rng?: RNG
   replanEvery?: number
   switchMargin?: number
 }
@@ -88,7 +91,7 @@ export class IntentExecutor implements InputLike {
   constructor(world: World, opts: IntentExecutorOptions) {
     this.world = world
     this.model = buildIntentModelFromText(opts.weightsText)
-    this.god = new GodAIInput(world, opts.godParams ?? { ...DEFAULT_GOD_AI_PARAMS })
+    this.god = new GodAIInput(world, opts.godParams ?? { ...DEFAULT_GOD_AI_PARAMS }, opts.rng)
     this.replanEvery = opts.replanEvery ?? INTENT_REPLAN_TICKS
     this.switchMargin = opts.switchMargin ?? SWITCH_MARGIN
   }
