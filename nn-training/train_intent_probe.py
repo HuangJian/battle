@@ -60,8 +60,8 @@ def build_injection(seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
-                 quota: int, rng: np.random.RandomState):
-    """P2-2 每类配额采样：每类至多 quota 帧（超类下采样、稀有类全留）。"""
+                 xinj: np.ndarray | None, quota: int, rng: np.random.RandomState):
+    """P2-2 每类配额采样：每类至多 quota 帧（超类下采样、稀有类全留）。xinj 随帧对齐。"""
     idx = []
     for c in range(8):
         ci = np.where(xi == c)[0]
@@ -70,12 +70,13 @@ def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
         idx.append(ci)
     sel = np.concatenate(idx)
     rng.shuffle(sel)
-    return xo[sel], xs[sel], xi[sel], xb[sel]
+    return (xo[sel], xs[sel], xi[sel], xb[sel],
+            xinj[sel] if xinj is not None else None)
 
 
 def quota_sample_priority(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
-                          xr: np.ndarray, quota: int, rng: np.random.RandomState,
-                          priority_root: int):
+                          xr: np.ndarray, xinj: np.ndarray | None, quota: int,
+                          rng: np.random.RandomState, priority_root: int):
     """B 臂配额采样（预注册 #20）：priority_root 帧优先保留，God-AI 帧补足每类配额。
 
     目的：人像黄金样本（人类守家分布）不因"每类配额随机采样"被按比例稀释——比例采样下
@@ -101,7 +102,8 @@ def quota_sample_priority(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np
         idx.append(np.array(sel, dtype=np.int64))
     sel = np.concatenate(idx)
     rng.shuffle(sel)
-    return xo[sel], xs[sel], xi[sel], xb[sel]
+    return (xo[sel], xs[sel], xi[sel], xb[sel],
+            xinj[sel] if xinj is not None else None)
 
 
 def main() -> None:
@@ -115,6 +117,9 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）")
+    ap.add_argument("--ss-eps", type=float, default=0.0,
+                    help="P1-2 scheduled sampling ε：训练时按 ε 概率用离线 self-feed 注入"
+                         "（gen_self_inj.py 产出 self_inj.npy）混合 teacher 注入——收敛 self-feed gap")
     ap.add_argument("--quota", type=int, default=0, help="P2-2 每类配额采样帧数（0=不限）")
     ap.add_argument("--priority-root", type=int, default=-1,
                     help="B 臂（预注册 #20）：该 data 根索引的帧优先保留（人类黄金样本），"
@@ -148,7 +153,7 @@ def main() -> None:
     val_idx = set(perm[:n_val].tolist())
 
     def load_split(indices) -> tuple[np.ndarray, ...]:
-        obs_l, sc_l, in_l, bk_l, rt_l = [], [], [], [], []
+        obs_l, sc_l, in_l, bk_l, rt_l, inx_l = [], [], [], [], [], []
         total = 0
         cap = args.max_train * 1.5 if args.max_train > 0 else 0
         for i in indices:
@@ -162,29 +167,33 @@ def main() -> None:
             in_l.append(np.load(os.path.join(base, "intent.npy")))
             bk_l.append(np.load(os.path.join(base, "bucket.npy")))
             rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
+            # self-feed 注入（P1-2 scheduled sampling 数据源；缺省 -1 哨兵 = 该帧无 self 注入）。
+            sj = os.path.join(base, "self_inj.npy")
+            inx_l.append(np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32))
         return (
             np.concatenate(obs_l),
             np.concatenate(sc_l),
             np.concatenate(in_l).astype(np.int64),
             np.concatenate(bk_l).astype(np.int64),
             np.concatenate(rt_l).astype(np.int64),
+            np.concatenate(inx_l).astype(np.float32),
         )
 
     val_shards = [i for i in range(len(shards)) if i in val_idx]
     train_shards = [i for i in range(len(shards)) if i not in val_idx]
-    xo, xs, xi, xb, xr = load_split(train_shards)
+    xo, xs, xi, xb, xr, xinj = load_split(train_shards)
 
     # 先按混合上限子采样、再按类配额采样（P2-2，配额 ≪ 上限时以配额为准）。
     if args.max_train > 0 and len(xi) > args.max_train:
         sel = rng.choice(len(xi), size=args.max_train, replace=False)
-        xo, xs, xi, xb, xr = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel]
+        xo, xs, xi, xb, xr, xinj = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel], xinj[sel]
     if args.quota > 0:
         if args.priority_root >= 0:
-            xo, xs, xi, xb = quota_sample_priority(xi, xo, xs, xb, xr, args.quota, rng, args.priority_root)
+            xo, xs, xi, xb, xinj = quota_sample_priority(xi, xo, xs, xb, xr, xinj, args.quota, rng, args.priority_root)
         else:
-            xo, xs, xi, xb = quota_sample(xi, xo, xs, xb, args.quota, rng)
+            xo, xs, xi, xb, xinj = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
 
-    vo, vs_, vi, vb, _vr = load_split(val_shards)
+    vo, vs_, vi, vb, _vr, _vx = load_split(val_shards)
 
     # 注入特征（teacher-forced）：per-shard 序列重建在做子采样之前不可行，
     # 这里用全局重建近似——探针仅测"加上时序特征是否显著提升"。
@@ -195,6 +204,12 @@ def main() -> None:
         v_inj_oh, v_inj_dur = build_injection(vi)
         train_inj = np.concatenate([t_inj_oh, t_inj_dur[:, None]], axis=1).astype(np.float32)
         val_inj = np.concatenate([v_inj_oh, v_inj_dur[:, None]], axis=1).astype(np.float32)
+        # P1-2 scheduled sampling（离线 self 注入混合）：训练时按 ε 概率用自喂 prev/dur
+        # 注入，让模型见过真实 self-feed 输入分布（收敛 M5 的 12.8pp teacher/self-feed gap）。
+        if args.ss_eps > 0:
+            avail = xinj[:, 0] >= 0  # 有 self_inj 的帧
+            mask = avail & (rng.rand(len(xi)) < args.ss_eps)
+            train_inj = np.where(mask[:, None], xinj, train_inj)
 
     print(
         f"[probe] shards={len(shards)} (train {len(train_shards)} / val {len(val_shards)}) "
