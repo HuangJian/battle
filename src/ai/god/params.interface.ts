@@ -315,6 +315,14 @@ export interface GodAIParams {
    */
   thinkInterval: number
   /**
+   * §290/M0b: intent-tagger observation hook (plan/Intent-Policy-NN-Plan.md
+   * §5.1). 0 = OFF (byte-identical, default). >0 = collectIntentSample pushes
+   * an IntentLogSample every INTENT_REPLAN_TICKS — pure observation, zero
+   * RNG/World access (tagger.ts); state lives on the GodAIInput instance and
+   * reset() clears it. ON/OFF byte-identical asserted by tests.
+   */
+  intentTaggerMode: number
+  /**
    * §127 (perf): 1 = cross-tick replan cache ON (default). 0 = OFF
    * (byte-identical to pre-§127 — replanImpl re-runs full A* every tick).
    *

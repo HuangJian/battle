@@ -40,6 +40,8 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 1-tick decision latency is NOT free (dodge/fire windows). NOT shipped;
   // default 1 = byte-identical baseline. Kept as an experiment knob.
   thinkInterval: 1,
+  // §290/M0b: intent-tagger observation hook — OFF default (byte-identical).
+  intentTaggerMode: 0,
 
   defenseRowOffset: 1,
   // §115 (M4 round-2, 2026-08-04): full-corpus CMA-ES search shipped values —

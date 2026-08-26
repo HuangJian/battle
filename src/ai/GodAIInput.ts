@@ -5,6 +5,7 @@ import type { Direction } from '../constants'
 import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
 import { manhattan } from '../utils/helpers'
+import { collectIntentSample, resetIntentTagger } from './intent/tagger'
 import {
   findEnemyFacingPlayerImpl,
   scanAheadImpl,
@@ -483,6 +484,20 @@ export class GodAIInput implements InputLike {
   _lastBranch: string = 'navigate'
 
   /**
+   * §290/M0b: intent-tagger 观测状态（src/ai/intent/tagger.ts）。纯观察、零 RNG；
+   * 只存于 Input 实例（预注册 §5.1 语义），reset() 清空，不进 World。
+   */
+  _intentPrev: string | null = null
+  _intentDuration = 0
+  _intentLog: Array<{
+    tick: number
+    intent: string
+    targetEnemySlot: number
+    prevIntent: string | null
+    duration: number
+  }> = []
+
+  /**
    * Reusable scan results for scanAheadImpl — one buffer per direction index
    * (0=up, 1=down, 2=left, 3=right). Avoids allocating a result object per call.
    *
@@ -957,6 +972,7 @@ export class GodAIInput implements InputLike {
     this._thought = false
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
+    resetIntentTagger(this)
     // §3.3: stage-scoped cache invalidation — the full registry lives in
     // invalidateStageCaches() above (scan memos + nav/carve/dig/ring/parry/
     // memo/pickup families).
@@ -1094,6 +1110,9 @@ export class GodAIInput implements InputLike {
 
   endFrame(): void {
     this._thought = false
+    // §290/M0b: intent-tagger 采样钩子——纯观察（tagger.ts），每 replan 网格帧
+    // 推一条采样；默认 intentTaggerMode=0 时不进入（字节等价）。
+    if (this.params.intentTaggerMode > 0) collectIntentSample(this, this.world.frame)
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
     // Invalidate per-tick lazy caches (§3.3 registry — full list in
