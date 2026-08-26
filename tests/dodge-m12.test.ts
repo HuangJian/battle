@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { dodgeDirectionImpl } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * M12 (DECISIONS §112): player HP buffer awareness — unit tests.
@@ -36,20 +36,14 @@ import type { Direction } from '../src/constants'
  */
 
 function setupWorld(difficulty: 'classic' | 'hard'): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton): mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (cross-file module state is shared in
   // bun test — DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   // Brick wall at col 7, rows 9-11: caps freeDist('right') at 16px without
   // blocking canMoveDir('right') (destination rect = cols 5-6).
   for (const r of [9, 10, 11]) world.tileMap.grid[r][7] = 'brick'
@@ -57,24 +51,10 @@ function setupWorld(difficulty: 'classic' | 'hard'): { world: World; input: GodA
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], damage = 100): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], damage = 100): Bullet =>
+  makeBulletShared({ x, y, dir, damage, ownerKind: 'basic' })
 
 function positionPlayer(world: World, x: number, y: number, hp: number): void {
   const p = world.player!

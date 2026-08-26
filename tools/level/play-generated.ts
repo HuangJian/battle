@@ -17,23 +17,19 @@
 import { runSimulation } from '../sim/simulation-runner'
 import { evaluate, DEFAULT_BASELINE } from '../eval/evaluator'
 import { validateStage } from './level-gen'
-import { parseSeeds } from '../sim/batch-sim'
+import { parseSeedSpec } from '../sim/batch-sim'
 import type { StageData } from '../../src/types'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // CLI
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
-
   const inputFile = arg('input', 'generated-stages.json')!
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!
-  const seeds = parseSeeds(seedSpec)
+  const seeds = parseSeedSpec(seedSpec)
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const pretty = process.argv.includes('--pretty')
   const doEval = process.argv.includes('--eval')

@@ -1,3 +1,4 @@
+import { ALL_DIRS } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -49,7 +50,7 @@ class IdleInput implements InputLike {
 /** A deterministic "human": moves and fires on a fixed cadence. */
 class ScriptedInput implements InputLike {
   private t = 0
-  private static readonly DIRS: Direction[] = ['up', 'down', 'left', 'right']
+  private static readonly DIRS: Direction[] = ALL_DIRS
   getMoveDirection(): Direction | null {
     return this.t % 7 === 0 ? null : ScriptedInput.DIRS[Math.floor(this.t / 23) % 4]
   }

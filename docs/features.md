@@ -34,9 +34,11 @@
 
 地形七种：空地、砖（可打碎，**按 16px 子格精确破坏**）、钢（只有穿甲弹能啃）、水（挡车不挡弹）、森林（藏车）、冰、基地。砖墙被一发发凿穿的手感——就是当年那个手感。
 
-### 1.3 道具六件套
+### 1.3 道具系统（15 种）
 
-星星（升级）、炸弹（全屏清敌）、铁锹级护盾、冰冻（8 秒定身）、1UP 坦克、头盔（短护盾）。奖励坦克掉落，20 秒不捡就消失。星星是**全维成长**：每颗星把玩家六项能力一起 +10（见 §3）。死了？星星全掉，回到起点重新挣——经典规则，绝不惯着你。
+经典六件套：星星（全维升级）、炸弹（全屏清敌）、护盾、冰冻（8 秒定身）、1UP 坦克、头盔（短护盾）。奖励坦克掉落，20 秒不捡就消失。星星是**全维成长**：每颗星把玩家六项能力一起 +10（见 §3）。死了？星星全掉，回到起点重新挣——经典规则，绝不惯着你。
+
+扩展八件：船（水地形通行）、栅栏（临时钢墙）；超级道具走**背包累积制**（DECISIONS §31）——天降神兵（召唤基地守卫）、狂暴宣泄（F6 主动弹幕）、同归于尽（阵亡 AoE）、时光宝盒（F7 回溯快照）；常规四件——维修（回满 HP）、电磁静默（敌方停火）、诱饵（假身吸火力）、地雷（原地布雷）。全部定义在 `PowerUpType`（`src/types.ts`）+ `config/powerups.ts`，加一种道具 = 加一行数据。
 
 ### 1.4 操控
 
@@ -111,23 +113,35 @@ World → 感知 → 态势分析 → 目标评估 → 决策 → 行动规划 �
 
 **不完美模型**：反应延迟、瞄准失误、路线噪声让高档 AI 强而不神（闪避率封顶 0.95）。**能力驱动决策**：`capabilityBias()` 让高机动的爱包抄、重装甲的敢硬推、高火力的更好战——同一套管线，每辆车打出自己的性格。
 
-全部熵走 `world.rng`，全部大脑状态（`AIBrain`，扁平可序列化）挂在坦克上进 World——AI 完全确定性、完全可快照。`tests/tactical-ai.test.ts` 守护确定性、不卡死、指挥官选举与"智能越高闪得越多"。
+全部熵走 `world.rng`，全部大脑状态（`AIState`，扁平可序列化）挂在坦克上进 World——AI 完全确定性、完全可快照。`tests/tactical-ai.test.ts` 守护确定性、不卡死、指挥官选举与"智能越高闪得越多"。
+
+### 4.1 God AI —— 会替你开车的队友
+
+`src/ai/god/` 是仓库里最大的子系统（~40 文件）：一套给 **P1/P2 玩家坦克代驾**的决策层。菜单里可开启"躺赢"模式让 God AI 打完整关；双打督战局里空出的座位也能交给它接管。
+
+- **管线**：`think.ts` 编排候选生成（`candidates/`，Hunt/Engage/Dodge/PickupHigh 等约 20 个评估器）→ `DecisionCore` 按权重契约择优 → `Navigator`/`PathCarve`/`pathfind.ts` 寻路 → `FireControl`/`ThreatAssessor` 火控与威胁规避 → `StrategyPlanner`/`CoveragePlanner` 战略层。
+- **参数面**：218 个调优参数分三表（`params.ts` / `params.interface.ts` / `params.tables.ts`）+ 关卡自适应（`stage-adapt.ts`），全部走 `world.rng`，完全确定。
+- **调优纪律**：headless 批量模拟（`tools/sim/`）、取证工具（`tools/diag/`）、分数门禁（`tests/godai-score-gate.test.ts` + `tools/eval/godai-score.ts` v7 十一维评分）——改 God AI 必须过硬难度胜率与 determinism 门。
 
 ---
 
-## 5. 时光回溯 —— 失败不是终点
+## 5. 快照与时光回溯 —— 失败不是终点
 
-这是全项目最浪漫的功能。游戏在后台**每秒静默拍一张世界快照**，存进 60 格环形缓冲（固定内存，永不膨胀）。基地爆炸、命数归零的那一刻，游戏不甩你一脸 GAME OVER，而是问你：
+这是全项目最浪漫的功能。快照框架（`src/snapshot/`）在后台**每 30 秒静默拍一张世界快照**：自动/开局/暂停三类各留 **20 张循环缓冲**，手动档（默认 Alt+S）留 **100 张永不覆盖**，全部存 IndexedDB 并带 JPEG 缩略图——固定内存，永不膨胀。基地爆炸、命数归零的那一刻，游戏不甩你一脸 GAME OVER，而是问你：
 
 > **回到 30 秒前？回到 60 秒前？还是重打本关？**
 
-实现（`src/game/RecoverySystem.ts`）：
+实现（`SnapshotManager` + `WorldSerializer` + `RecoveryController`）：
 
-- **快照 = 完整世界**：地形网格、玩家/敌人/子弹/道具（深克隆）、出兵队列、分数命数星级、全部计时器、**RNG 内部状态**、帧号。恢复时整体原子覆盖，绝不参与游戏规则——它是 One Author 铁律的唯一豁免者，也只做搬运工。
-- **流程**：gameover 被拦截 → 回溯菜单 → 选择 → 黑屏淡出 → 快照恢复 + `PresentationLayer.reset()`（表现层全弃重建）→ 3-2-1 倒计时（配合成音效）→ 开打。
+- **快照 = 完整世界**：地形网格、玩家/敌人/子弹/道具（spread 深克隆）、出兵队列、分数命数星级、全部计时器、**RNG 内部状态**、帧号。恢复时整体原子覆盖，绝不参与游戏规则——它是 One Author 铁律的唯一豁免者，也只做搬运工。
+- **流程**：失败被拦截 → 回溯菜单 → 选择 → 黑屏淡出 → 快照恢复 + `PresentationLayer.reset()`（表现层全弃重建）→ 3-2-1 倒计时（配合成音效）→ 开打。
 - 因为 RNG 状态在快照里，**回溯后的世界会走向和当初一模一样的未来**——除非你这次打得更好。
 
-同一台机器，明天就能驱动回放、检查点和调试。这就叫基建。
+同一台机器，今天就驱动着回放、手动存档和接管续玩。这就叫基建。
+
+### 5.1 回放系统 —— 已建成
+
+`src/replay/`：`InputRecorder` 录制输入边沿，`ReplayManager` 把确定性回放存进 IndexedDB，`PlaybackController` 从录制输入重演整局。回放浏览器可列出/载入历史对局；回放进行中还能**接管续玩**（takeover）转成躺赢双人局。同种子 + 同输入 = 逐帧一致，这就是回放的全部秘密。
 
 ---
 
@@ -135,7 +149,7 @@ World → 感知 → 态势分析 → 目标评估 → 决策 → 行动规划 �
 
 ### 6.1 零素材纪律
 
-**没有一张 PNG，没有一个音频文件。** 30 个精灵全部是手写 SVG（`src/assets/sprites/`，96×96 viewBox，坦克一律朝上、渲染时旋转），加载时由 `SpriteCache` 按 DPR 预光栅化成 canvas 位图。音效全部由 Web Audio API 实时合成。整个游戏自包含——打开页面，直接开战。
+**没有一张 PNG，没有一个音频文件。** 39 个精灵全部是手写 SVG（`src/assets/sprites/`，96×96 viewBox，坦克一律朝上、渲染时旋转），加载时由 `SpriteCache` 按 DPR 预光栅化成 canvas 位图。音效全部由 Web Audio API 实时合成。整个游戏自包含——打开页面，直接开战。
 
 ### 6.2 视觉语言：一眼分敌我
 
@@ -167,17 +181,19 @@ Canvas 只画 416×416 战场（离屏缓冲 + DPR 缩放，视网膜屏像素�
 
 ## 8. 质量防线 —— 测试是弹药库
 
-Bun + TypeScript strict 全家桶，`bun run check`（test + typecheck + oxlint + oxfmt）是"绿灯"的唯一定义。8 个测试文件、75 个用例，专打要害：
+Bun + TypeScript strict 全家桶。**`bun run check` = `tsc --noEmit` + 全量 `bun test --parallel --timeout=50000`**，是"绿灯"的唯一定义（lint/format 在 `bun run build` 的 oxlint/oxfmt 里）。127 个测试文件、~1400 个用例，专打要害，代表性岗哨：
 
 | 测试 | 守护什么 |
 |---|---|
 | `simulation.test.ts` | 确定性：同种子跑两遍 + 中途扰动 `Math.random()`，世界必须逐帧一致 |
-| `tactical-ai.test.ts` | AI 确定性、不卡死、指挥官选举、闪避随智能递增 |
+| `tactical-ai.test.ts` | 敌方 AI 确定性、不卡死、指挥官选举、闪避随智能递增 |
 | `fire-rate-duel.test.ts` | 对枪公平不变量（真模拟对射，玩家必不败） |
 | `combat.test.ts` | 六维推导、预算、穿钢门槛、速度带 |
 | `stages.test.ts` | 关卡解码器（独立重实现比对，黄金文件抓不到的回归它抓得到） |
+| `snapshot-framework.test.ts` / `serializer-field-guard.test.ts` | 快照字段完备性、双向恢复一致 |
+| `godai-score-gate.test.ts` | God AI 分数门禁（1050 局 headless 模拟，防行为退化） |
+| `godai-hub-fields.test.ts` | GodAIInput 字段护栏（新增字段必须登记） |
 | `input.test.ts` | last-pressed-wins、跨帧按键持久 |
-| `player-respawn.test.ts` / `shield-sprite.test.ts` | 死亡星级重置 / 护盾视觉 |
 
 铁规矩：**修 bug 必须先写出失败的复现测试**，先红后绿，绝不裸修（AGENTS §7）。
 
@@ -187,11 +203,12 @@ Bun + TypeScript strict 全家桶，`bun run check`（test + typecheck + oxlint 
 
 架构今天就为它们留好了位置，一行引擎代码都不用动：
 
-- **回放系统**：确定性 + 可录输入 + RNG 快照，三件套已齐
 - **新坦克** = 一条能力配置；**新关卡** = 一张网格;**新主题** = 一组颜色；**新 AI 档** = 一条注册表
 - **新模式**（无尽 / 塔防 / Boss Rush）= 规则 + 出兵 + 胜利条件的组合
 - **统计面板** = 订阅现成的 GameEvent 流
 - **社区内容** = 数据全部 JSON 兼容，随时可外置
+
+（回放与快照框架已建成——见 §5。）
 
 ---
 
@@ -199,14 +216,22 @@ Bun + TypeScript strict 全家桶，`bun run check`（test + typecheck + oxlint 
 
 ```
 src/
-  game/          Simulation（唯一作者）· World · TileMap · Input · Game · RecoverySystem
-  ai/            TacticalIntelligence · config（智能档）· perception
-  config/        combat（六维）· stages+stageData（35 关）· difficulty · theme · tanks
-  presentation/  PresentationLayer · renderer（SVG→SpriteCache）· UIManager · 粒子/相机/动画/特效
-  audio/         AudioManager（Web Audio 合成，15 种音效）
-  assets/        30 个手写 SVG 精灵
-  utils/         RNG（mulberry32）· helpers
-tests/           75 个用例的弹药库
+  game/          Simulation + 六子系统（Spawn/Player/Enemies/Combat/PowerUps/Effects）
+                 · World · TileMap · Input · Game/GameLoop/GameMenu/GameSnapshot/GameReplay
+                 · systems/EventBus/KillPipeline/TankFactory/GridQuery/UIState/settings
+  ai/            TacticalIntelligence + perception（敌方 AI）· god/（God AI：think、candidates/、
+                 FireControl、ThreatAssessor、StrategyPlanner、Navigator、params 三表 …）
+  snapshot/      SnapshotManager · WorldSerializer · RecoveryController · storage（IndexedDB）
+  replay/        InputRecorder · ReplayManager · PlaybackController · storage
+  config/        combat（六维）· stages+stageData（35 关）· difficulty · theme · score(+constants)
+                 · rules · powerups · fire-rate · hp-level · speed · base · effects-config
+  presentation/  PresentationLayer · renderer（Core+切片，SVG→SpriteCache）· ui/（HudView、
+                 MenuScreen、ControlsPanel、OverlayManager、ControlCenter、ReplayBrowser…）
+                 · 粒子/相机/动画/特效
+  audio/         AudioManager（Web Audio 合成）
+  assets/        39 个手写 SVG 精灵
+  utils/         RNG（mulberry32）· helpers · idb-store
+tests/           127 个文件、~1400 个用例的弹药库
 ```
 
 > 三十年了，基地还在 26×26 的战场正下方等你守护。

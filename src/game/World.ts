@@ -11,38 +11,43 @@ import type {
   TankKind,
   DifficultyConfig,
   ThemeColors,
-  AIState,
-  GoalType,
   StageData,
 } from '../types'
 import type { Direction } from '../constants'
 import { TileMap } from './TileMap'
 import { RNG } from '../utils/RNG'
-import { computePlayer2SpawnCol, aabb, clamp } from '../utils/helpers'
+import { findNearestFreeCell } from './GridQuery'
+import { loadHighScore as loadPersistedHighScore, persistHighScore } from './settings'
+import { computePlayer2SpawnCol, aabb } from '../utils/helpers'
 import { STAGES, localizedStageName } from '../config/stages'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
-import { resolveProfile, profileToStats } from '../config/combat'
-import { RULES, DEFAULT_RULES, hasStarPerk } from '../config/rules'
+import { RULES, DEFAULT_RULES } from '../config/rules'
 import type { GameplayRules } from '../config/rules'
-import { rollSpeedJitter } from '../config/speed'
-import { INTELLIGENCE_LEVELS, COMMANDER_FLOOR } from '../ai/config'
+import { COMMANDER_FLOOR } from '../ai/config'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../config/base'
 import { restoreWorld } from '../snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../snapshot/types'
+import { EventBus } from './EventBus'
+import { createUIState, type UIState } from './UIState'
+import { createTank } from './TankFactory'
 import {
   GRID,
   CELL,
   TANK,
   ENEMIES_PER_STAGE,
   START_LIVES,
-  STRATEGIC_INTERVAL_MS,
-  COMMANDER_INTERVAL_MS,
   PLAYER_SPAWN,
+  DEFAULT_P2_SPAWN,
   ENEMY_SPAWNS,
-  FIELD,
+  RESPAWN_SHIELD_MS,
 } from '../constants'
 
+// Deliberate hidden-state exemption (refactor.trae.md §4.3): the module-level
+// id counter survives World resets so restored snapshots never reissue ids that
+// are still live in replay/undo history. Rationale recorded at types.ts
+// (WorldSnapshot id field doc) — this does NOT contradict the "no hidden state"
+// banner below, which is about gameplay state.
 let nextId = 1
 export function genId(): number {
   return nextId++
@@ -146,21 +151,22 @@ export class World {
    *  module global). Set in `startGame` from `RULES[difficultyKey]`. Survives
    *  snapshot rewind because `restoreWorld` never touches it (plan §1). */
   rules: GameplayRules
-  menuCursor: number
-  selectedStage: number
+  /**
+   * Menu & recovery-overlay UI navigation state (§1.3 Phase A). Grouped so
+   * gameplay state and menu navigation state stay visibly separated; written
+   * by Game-layer controllers, read by presentation. Never serialized.
+   */
+  ui: UIState
   rng: RNG
   /** Initial RNG seed (Date.now() at construction). Surfaces as the replay
    *  filename seed so browser recordings are reproducible / round-trippable. */
   seed: number
 
-  // Events (consumed by renderer/audio/stats)
-  events: GameEvent[]
-
-  /**
-   * Spare event buffer for double-buffering. consumeEvents() swaps the active
-   * and spare buffers so the per-frame event array is never reallocated.
-   */
-  private eventsSpare: GameEvent[] = []
+  // Events (consumed by renderer/audio/stats) — double-buffered bus (§1.3
+  // Phase E); pushEvent/consumeEvents below are the World's stable façade.
+  // Field-initialized so it exists before any constructor-body call
+  // (previewStage clears it).
+  events: EventBus = new EventBus()
 
   // Reusable buffer for allTanks getter — avoids allocating a new array each call
   private _allTanksBuf: Tank[] = []
@@ -273,10 +279,7 @@ export class World {
   /** Active mines placed by the player. Snapshot-safe. */
   mines: Mine[]
 
-  // Recovery UI state (read by UIManager, written by RecoveryController)
-  recoveryCursor: number // selected recovery menu option index
-  recoveryCountdown: number // 0 = none, 3/2/1 = counting down
-  recoveryFading: boolean // true while fading to black before restore
+  // (Recovery overlay UI cursor/countdown/fade live in `ui` — §1.3 Phase A.)
 
   constructor() {
     this.tileMap = new TileMap()
@@ -321,13 +324,11 @@ export class World {
     this.rules = DEFAULT_RULES
     this.theme = THEMES[DEFAULT_THEME]
     this.themeKey = DEFAULT_THEME
-    this.menuCursor = 0
-    this.selectedStage = 0
+    this.ui = createUIState()
     // Show the selected stage's layout behind the start menu from the outset.
-    this.previewStage(this.selectedStage)
+    this.previewStage(this.ui.selectedStage)
     this.seed = Date.now()
     this.rng = new RNG(this.seed)
-    this.events = []
     this.frame = 0
     this.bulletSeq = 0
     this.spawnSeqCounter = 0
@@ -339,10 +340,7 @@ export class World {
     this.coop = false
     this.spectate = false
     this.spectateDual = false
-    this.player2SpawnPoint = { col: 16, row: 24 }
-    this.recoveryCursor = 0
-    this.recoveryCountdown = 0
-    this.recoveryFading = false
+    this.player2SpawnPoint = { ...DEFAULT_P2_SPAWN }
     // Super power-up inventory & frenzy (DECISIONS.md §31)
     this.guardStock = 0
     this.frenzyStock = 0
@@ -355,6 +353,50 @@ export class World {
   }
 
   // ---- Lifecycle ----
+
+  /**
+   * Menu-time difficulty selection (menu rows, dropdowns, saved-settings
+   * bootstrap). Single write path for `difficultyKey`/`difficulty` outside an
+   * actual game start — previously hand-rolled at five sites (One-Author, §1.4).
+   */
+  selectDifficulty(key: string): void {
+    this.difficultyKey = key
+    this.difficulty = DIFFICULTIES[key] ?? DIFFICULTIES['classic']
+  }
+
+  /** Menu-time theme selection — single write path for `themeKey`/`theme`. */
+  selectTheme(key: string): void {
+    this.themeKey = key
+    this.theme = THEMES[key] ?? THEMES[DEFAULT_THEME]
+  }
+
+  /**
+   * Tear the current game down and return to the start menu: clears all
+   * entities and mode flags, resets recovery overlay state, zeroes P2 score.
+   * The single sanctioned lifecycle transition back to 'menu' — Game's
+   * resetToMenu() handles only its own presentation/input concerns around
+   * this call. (Mirrors startGame/loadStage: lifecycle transitions are World
+   * methods; per-tick gameplay mutation stays Simulation-only.)
+   */
+  resetToMenu(): void {
+    this.state = 'menu'
+    this.player = null
+    this.tanks = []
+    this.bullets = []
+    this.powerUps = []
+    this.explosions = []
+    this.popups = []
+    this.spawnQueue = []
+    this.ui.recoveryCountdown = 0
+    this.ui.recoveryFading = false
+    // Lie-Back-Win-Mode: clean up coop state on return to menu.
+    this.coop = false
+    this.disablePlayer2()
+    this.score2 = 0
+    // 督战 (supervise) mode: clean up spectate state too.
+    this.spectate = false
+    this.spectateDual = false
+  }
 
   startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
     this.difficultyKey = difficultyKey
@@ -369,7 +411,7 @@ export class World {
     this.playerLevel = this.difficulty.playerStartLevel
     // Symmetry with playerLevel: P2 (God AI / 督战双玩家) must start at the SAME
     // star level as P1, otherwise it spawns with no star aura while P1 shows
-    // playerStartLevel stars. Mid-game enable paths (SimulationCore coop /
+    // playerStartLevel stars. Mid-game enable paths (Simulation coop /
     // spectateDual toggles) already set playerLevel2 = playerStartLevel before
     // spawning P2, so this just makes the initial run-start consistent with them.
     this.playerLevel2 = this.difficulty.playerStartLevel
@@ -514,7 +556,7 @@ export class World {
     this.explosions = []
     this.popups = []
     this.pendingDrops = []
-    this.events = []
+    this.events.clear()
     this.stageIndex = index
     this.fenceExpireFrame = undefined
   }
@@ -541,7 +583,7 @@ export class World {
     const cell = this.findFreeSpawnCell(col * CELL, row * CELL)
     this.player = this.createTank('player', cell.x, cell.y, 'up')
     this.player.level = this.playerLevel
-    this.player.shieldTimer = 3000
+    this.player.shieldTimer = RESPAWN_SHIELD_MS
     this.player.isPlayer = true
   }
 
@@ -559,117 +601,51 @@ export class World {
     // spawnPlayer; createTank already used playerLevel2 for maxHp/hp/speed/etc.
     this.player2 = this.createTank('player', cell.x, cell.y, 'up', 2)
     this.player2.level = this.playerLevel2
-    this.player2.shieldTimer = 3000
+    this.player2.shieldTimer = RESPAWN_SHIELD_MS
     this.player2.isPlayer = true
   }
 
   /**
+   * Bring Player 2 online (Lie-Back-Win coop / 督战双玩家): roll its lives and
+   * star level from the current difficulty, mirror the spawn point across the
+   * field center, and spawn its tank. The single setup path for P2 — previously
+   * copy-pasted at four toggle sites (plan/refactor.agy.md §2.2).
+   *
+   * @param opts.respawnShield Grant the spawn shield (RESPAWN_SHIELD_MS).
+   *   Mid-game entries (sim tick deferral) grant it; menu-time entries (paused,
+   *   no ticks firing) historically did not — preserved exactly.
+   */
+  enablePlayer2(opts: { respawnShield?: boolean } = {}): void {
+    const d = this.difficulty
+    this.lives2 = d?.startLives ?? 3
+    this.playerLevel2 = d?.playerStartLevel ?? 0
+    const p1Col = this.playerSpawnPoint?.col ?? 8
+    this.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
+    this.spawnPlayer2()
+    if (opts.respawnShield) this.player2!.shieldTimer = RESPAWN_SHIELD_MS
+  }
+
+  /**
+   * Take Player 2 offline: clear its tank, lives, and star level. Score is
+   * deliberately untouched (per-run score survives a coop exit mid-stage;
+   * only resetToMenu wipes it). Single teardown path for P2 — previously
+   * copy-pasted at seven sites (plan/refactor.agy.md §2.2).
+   */
+  disablePlayer2(): void {
+    this.player2 = null
+    this.lives2 = 0
+    this.playerLevel2 = 0
+  }
+
+  /**
+   * Build a tank entity. Construction lives in TankFactory (§1.3 Phase B);
+   * this delegate keeps the historical `world.createTank(...)` call sites
+   * (Simulation systems, tests, tools) stable.
+   *
    * @param playerSlot Which player tank is being created (1 = P1, 2 = P2/God AI).
-   *   Only meaningful when `kind === 'player'`: it selects which star level
-   *   drives the spawned stats (playerLevel for P1, playerLevel2 for P2). Enemy
-   *   and ally tanks ignore it.
    */
   createTank(kind: TankKind, x: number, y: number, dir: Direction, playerSlot = 1): Tank {
-    // Combat Capability System: stats come from the tank's profile, not
-    // hardcoded numbers. Player profiles scale with star level; enemies use
-    // their fixed archetype profile (modified only when promoted to elite).
-    const isPlayer = kind === 'player'
-    // P2 (God AI / Lie-Back-Win-Mode) must use its OWN star level so its
-    // combat power (HP/speed/fire) tracks the stars IT collects, not P1's.
-    const playerLevel = isPlayer ? (playerSlot === 2 ? this.playerLevel2 : this.playerLevel) : 0
-    const profile = resolveProfile(kind, playerLevel)
-    const stats = profileToStats(profile, kind, playerLevel, this.rules)
-    // Enemy combat stats (including HP/armor) are fixed per archetype and never
-    // scaled by difficulty — difficulty only changes the tier distribution that
-    // enemies are rolled from (plan/AI-Tier-System-Revision.md §5). Scaling
-    // enemy HP here would "enhance enemy power", which is explicitly forbidden.
-    const hp = stats.maxHp
-
-    // Functional star ladder: the player's `fastBullet` perk (classic) is a
-    // multiplier on the base bullet speed. Apply it at spawn so a stage-
-    // persistent star level is correct, not just on star pickup (Simulation).
-    let bulletSpeed = stats.bulletSpeed
-    if (
-      isPlayer &&
-      this.rules.starModel === 'functional' &&
-      hasStarPerk(this.rules, playerLevel, 'fastBullet')
-    ) {
-      bulletSpeed *= this.rules.fastBulletMult
-    }
-
-    // Enemy brains are initialized here (on the World — no hidden state).
-    // The Tactical Intelligence Framework reads/writes these fields every tick.
-    // `level` is a PLACEHOLDER ('rookie'); the real tier is rolled at spawn
-    // time in `Simulation.updateSpawning` (plan §5) which overwrites
-    // `aiState.level` / `isCommander` there. `spawnSeq` is stamped from
-    // the World's monotonic counter so command authority is derivable.
-    let aiState: AIState | undefined
-    if (kind !== 'player') {
-      const base = this.tileMap.getBasePos()
-      const placeholder = INTELLIGENCE_LEVELS['rookie']
-      aiState = {
-        level: 'rookie',
-        isCommander: false,
-        spawnSeq: this.spawnSeqCounter++,
-        thinkTimer: 200 + this.rng.next() * 600,
-        fireTimer: 400 + this.rng.next() * 600,
-        currentDir: dir,
-        tacticalGoal: 'advance' as GoalType,
-        targetX: base ? base.x + CELL : x + TANK / 2,
-        targetY: base ? base.y + CELL : y + TANK / 2,
-        strategicTimer: STRATEGIC_INTERVAL_MS * (0.8 + this.rng.next() * 0.4),
-        strategicGoal: 'attackBase' as GoalType,
-        reactionTimer: placeholder.reactionTime,
-        dodgeLock: 0,
-        vertOnlyTicks: 0,
-        commanderTimer: COMMANDER_INTERVAL_MS,
-        directive: 'none',
-        directiveAge: 1e9,
-        directiveSeq: 0,
-        directiveCompliant: false,
-      }
-    }
-
-    return {
-      id: genId(),
-      x,
-      y,
-      w: TANK,
-      h: TANK,
-      dir,
-      alive: true,
-      kind,
-      // Per-instance speed jitter (±5%): identical archetypes don't move in
-      // lockstep, but it's drawn from world.rng so it stays deterministic.
-      speed: stats.speed * (this.rules.speedJitter ? rollSpeedJitter(this.rng) : 1),
-      hp,
-      maxHp: hp,
-      bulletPower: stats.bulletPower,
-      damage: stats.damage,
-      bulletSpeed,
-      fireCooldown: stats.fireCooldown,
-      nextFireInterval: stats.fireCooldown,
-      fireCount: 0,
-      lastFire: 0,
-      moving: false,
-      vx: 0,
-      vy: 0,
-      spawnTimer: 1000,
-      // §86c: Initialize turn cooldown tracking. prevMoveDir = dir so the
-      // first frame doesn't register as a turn. lastTurnMs = -9999 so
-      // the first real turn is always allowed.
-      prevMoveDir: dir,
-      lastTurnMs: -9999,
-      level: isPlayer ? playerLevel : 0,
-      shieldTimer: kind === 'player' ? 3000 : 0,
-      isPlayer: kind === 'player',
-      allegiance: kind === 'player' ? 'player' : 'enemy',
-      profile,
-      flashTimer: 0,
-      hitCount: 0,
-      aiState,
-      bonus: false,
-    }
+    return createTank(this, kind, x, y, dir, playerSlot)
   }
 
   // ---- Entity Management ----
@@ -815,33 +791,21 @@ export class World {
   }
 
   consumeEvents(): GameEvent[] {
-    // Double-buffer: return the current accumulation buffer and start fresh in
-    // the spare (now-cleared) buffer. No per-frame array allocation.
-    const out = this.events
-    this.events = this.eventsSpare
-    this.eventsSpare = out
-    this.events.length = 0
-    return out
+    return this.events.consume()
   }
 
   // ---- Persistence ----
+  // (§1.3 Phase C: the localStorage I/O lives in settings.ts; the World only
+  // owns the `highScore` field because it is serialized gameplay state.)
 
   private loadHighScore(): number {
-    try {
-      return parseInt(localStorage.getItem('bc_highscore') || '0', 10) || 0
-    } catch {
-      return 0
-    }
+    return loadPersistedHighScore()
   }
 
   saveHighScore(): void {
     if (this.score > this.highScore) {
       this.highScore = this.score
-      try {
-        localStorage.setItem('bc_highscore', String(this.highScore))
-      } catch {
-        /* ignore */
-      }
+      persistHighScore(this.highScore)
     }
   }
 
@@ -919,27 +883,9 @@ export class World {
    *   requested (clamped) cell rather than throwing.
    */
   findFreeSpawnCell(x: number, y: number): { x: number; y: number } {
-    const step = TANK // tanks are 2×2 tiles ⇒ spawn on the 32px grid
-    const maxX = FIELD - TANK
-    const maxY = FIELD - TANK
-    const rx = clamp(x, 0, maxX)
-    const ry = clamp(y, 0, maxY)
-    if (this.isSpawnCellFree(rx, ry)) return { x: rx, y: ry }
-    let best: { x: number; y: number } | null = null
-    let bestD = Infinity
-    for (let gy = 0; gy <= maxY; gy += step) {
-      for (let gx = 0; gx <= maxX; gx += step) {
-        if (!this.isSpawnCellFree(gx, gy)) continue
-        const dx = gx - rx
-        const dy = gy - ry
-        const d = dx * dx + dy * dy
-        if (d < bestD) {
-          bestD = d
-          best = { x: gx, y: gy }
-        }
-      }
-    }
-    return best ?? { x: rx, y: ry }
+    // Scan skeleton shared with findFreeDropCell via GridQuery (§2.3);
+    // spawns require terrain-clear AND no tank overlap.
+    return findNearestFreeCell(x, y, (gx, gy) => this.isSpawnCellFree(gx, gy))
   }
 
   /** A 32×32 footprint at (x, y) is spawnable iff it clears terrain AND every live tank. */

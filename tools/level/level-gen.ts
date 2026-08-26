@@ -26,8 +26,9 @@ import { GRID, BASE_POS, PLAYER_SPAWN, ENEMY_SPAWNS } from '../../src/constants'
 import type { StageData, TankKind } from '../../src/types'
 import { TileMap } from '../../src/game/TileMap'
 import { RNG } from '../../src/utils/RNG'
-import { floodFill, type Cell } from '../../src/utils/pathfind'
+import { floodFill, type Cell } from '../../src/utils/grid-search'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -630,11 +631,6 @@ export function computeStats(stage: StageData): StageStats {
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
-
   const count = parseInt(arg('count', '1')!, 10)
   const seed = parseInt(arg('seed', '1')!, 10)
   const difficulty = arg('difficulty', 'hard')!

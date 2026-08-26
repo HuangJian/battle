@@ -2,13 +2,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { genId } from '../src/game/World'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { TankKind } from '../src/types'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
 import { BASE_MAX_HP, CLASSIC_BASE_MAX_HP } from '../src/config/base'
 import { resolveProfile } from '../src/config/combat'
+import { clearArena, seedWorld } from './helpers'
 
 /**
  * Base (eagle) HP tests — 2026-07-27 (revised: one fixed pool, damage =
@@ -33,8 +33,7 @@ function fp(kind: TankKind, level = 0): number {
 }
 
 function seededWorld(seed: number, difficulty = 'relax'): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
   return { world, sim }
@@ -42,12 +41,7 @@ function seededWorld(seed: number, difficulty = 'relax'): { world: World; sim: S
 
 /** Clear all terrain and place a single base at the bottom-center (open arena). */
 function openArena(world: World): void {
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   world.tileMap.rebuildBaseCache()
   // Stop stray spawns from intercepting the test bullet.
   world.spawnQueue = []
@@ -180,7 +174,7 @@ describe('Base HP — classic is one-shot', () => {
     // Even the weakest gun (firePower 36) exceeds HP 1 on the first hit.
     shootOnce(world, sim, 'basic')
     expect(world.tileMap.isBaseDestroyed()).toBe(true)
-    expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(true)
+    expect(world.events.items.some((e) => e.type === 'base_destroyed')).toBe(true)
   })
 
   it('a protection brick blocks a bullet before it can hit the base in the same tick', () => {
@@ -210,7 +204,7 @@ describe('Base HP — classic is one-shot', () => {
     expect(world.tileMap.get(11, 24)).toBe('empty')
     expect(world.tileMap.isBaseDestroyed()).toBe(false)
     expect(world.baseHp).toBe(CLASSIC_BASE_MAX_HP)
-    expect(world.events.some((e) => e.type === 'base_destroyed')).toBe(false)
+    expect(world.events.items.some((e) => e.type === 'base_destroyed')).toBe(false)
   })
 
   it('base_destroyed records the owner kind of the bullet that hit it', () => {
@@ -236,7 +230,7 @@ describe('Base HP — classic is one-shot', () => {
 
     sim.tick()
 
-    const event = world.events.find((e) => e.type === 'base_destroyed')
+    const event = world.events.items.find((e) => e.type === 'base_destroyed')
     expect(event).toEqual({ type: 'base_destroyed', by: 'fast' })
   })
 

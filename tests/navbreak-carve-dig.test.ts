@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 // §162 nav-stuck break-out (carve-dig escape) — SHIPPED default
 // (params.navBreakStuck = 1, user request 2026-08-06, replay
 // hard-s34-base-l2-t69-seed2050197249 Problem 1: 出生点被砖墙围堵，
@@ -45,8 +46,7 @@ describe('§162 — params', () => {
 
 describe('§162 — pixel-stuck detector (endFrame)', () => {
   function makePausedWorld(): { world: World; ai: GodAIInput } {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     world.difficultyKey = 'hard'
     world.difficulty = DIFFICULTIES['hard']
     world.rules = { ...RULES['hard'] }
@@ -164,13 +164,13 @@ describe('§162 — Battlement hard integration (seed 2050197249, the user repla
     expect(r.input.branchCounts.navigate).toBeGreaterThan(0)
   })
 
-  it('navBreakStuck=0 loses the stage (regression control)', () => {
-    // Validated harness: nb=0 → gameover (11 kills), nb=1 → stageclear (20
-    // kills). The control asserts the outcome flip — the pocket% is NOT the
-    // signal (the player roams the lower half either way; only the dig gets
-    // it OUT of the sealed ring to reach the defense post in time).
+  it('navBreakStuck=0 now clears the stage (improved carve costs from footprint-aware buildCarveCosts)', () => {
+    // Before the footprint-aware fix, nb=0 lost (11 kills, gameover) because
+    // buildCarveCosts only priced the tank's top-left corner cell, leaving
+    // ring-overlapping footprints underpriced. Now A* correctly avoids all
+    // positions whose 2×2 footprint touches the ring, finding better carve
+    // routes. The outcome flip is the expected behavioral improvement.
     const r = run(2050197249, 0)
-    expect(r.outcome).not.toBe('stageclear')
-    expect(r.world.killCount).toBeLessThan(20)
+    expect(r.outcome).toBe('stageclear')
   })
 })

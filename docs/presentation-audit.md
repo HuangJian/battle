@@ -1,5 +1,11 @@
 # Presentation Audit
 
+> **HISTORICAL BASELINE (2026-07-20).** This audit was taken *before* the
+> presentation upgrade. Its "current state" sections below have been superseded:
+> the SVG sprite pipeline, HTML/CSS UI, DPR scaling, and particles/camera are all
+> **built** — do not treat the descriptions below as facts about today's code.
+> Kept for method/structure reference only.
+
 ## Existing Rendering
 
 ### Sprite Loading Method

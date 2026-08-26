@@ -1,6 +1,14 @@
 // ============================================================
 // Game Constants
 // ============================================================
+//
+// ── Naming convention for time-bearing constants (plan/refactor.agy.md §2.9)
+// ─────────────────────────────────────────────────────────────
+//   *_MS     milliseconds (wall-clock or sim-clock durations/timestamps)
+//   *_FRAMES simulation frames @60Hz (e.g. DECOY_LIFESPAN_FRAMES = 30 * 60)
+//   *_TICKS  simulation ticks (1 tick = TICK_MS; prefer *_MS at API borders)
+// The suffix is part of the contract: a value's unit must be obvious at the
+// call site without reading its definition.
 
 /** Size of one sub-block in pixels (smallest terrain unit) */
 export const CELL = 16
@@ -17,11 +25,24 @@ export const TANK = CELL * 2 // 32
 /** Bullet pixel size */
 export const BULLET = 6
 
-/** Movement alignment grid (tanks snap to multiples of this when turning) */
-export const ALIGN = CELL // 16
-
 /** Fixed timestep for simulation (ms) */
 export const TICK_MS = 1000 / 60
+
+/**
+ * Golden-ratio hash used to derive per-purpose RNG seed streams from
+ * `world.seed` (replay RNG, AoE rolls, P2 streams): `(seed ^ SEED_HASH) >>> 0`.
+ * Changing this value invalidates every recorded replay/snapshot.
+ */
+export const SEED_HASH = 0x9e3779b9
+
+/** XOR offset that keeps Player-2 (God AI) RNG streams independent of P1's. */
+export const P2_SEED_OFFSET = 0xdeadbeef
+
+/**
+ * Sentinel timestamp for `lastTurnMs` / `lastFire`: "never happened". Being far
+ * in the past guarantees the first turn / first shot is always allowed.
+ */
+export const TURN_SENTINEL_MS = -9999
 
 /**
  * Render-rate cap (frames/sec). Decoupled from the simulation: the sim always
@@ -59,6 +80,14 @@ export const START_LIVES = 3
 /** Player respawn position (tile coords) */
 export const PLAYER_SPAWN = { col: 8, row: 24 } // 4×8 grid → center-bottom
 
+/**
+ * Default P2 (God AI / 躺赢) spawn point — the classic mirrored position
+ * col 16. Mid-game enable paths recompute it from P1's column via
+ * `computePlayer2SpawnCol` (utils/helpers); this constant is the fallback
+ * when no stage/player data drives the mirror.
+ */
+export const DEFAULT_P2_SPAWN = { col: 16, row: 24 }
+
 /** Base (eagle) position */
 export const BASE_POS = { col: 12, row: 24 }
 
@@ -68,9 +97,6 @@ export const ENEMY_SPAWNS = [
   { col: 12, row: 0 },
   { col: 6, row: 0 },
 ]
-
-/** Spawn protection duration (ms) */
-export const SPAWN_PROTECTION_MS = 2000
 
 /** Power-up duration (ms) — unified to 20s for all timed power-ups */
 export const POWERUP_DURATION_MS = 20000
@@ -133,31 +159,25 @@ export const POWERUP_PICKUP_END_DELAY_MS = 1000
 /** Stage-clear transition delay (ms) when there is nothing left to collect. */
 export const STAGE_CLEAR_DELAY_MS = 3000
 
-/** Direction vectors */
-export const DIR_VECTORS: Record<Direction, { dx: number; dy: number }> = {
-  up: { dx: 0, dy: -1 },
-  down: { dx: 0, dy: 1 },
-  left: { dx: -1, dy: 0 },
-  right: { dx: 1, dy: 0 },
-}
+/** Score-popup lifetime (ms). */
+export const POPUP_DURATION_MS = 1500
+
+/** Game-over screen countdown (ms) before the menu takes over. */
+export const GAME_OVER_TIMER_MS = 3000
+
+/** Small (bullet-size) explosion animation lifetime (ms). */
+export const SMALL_EXPLOSION_MS = 200
+
+/** Big (tank-size) explosion animation lifetime (ms). */
+export const BIG_EXPLOSION_MS = 500
 
 /**
- * Flat parallel arrays for hot-path direction lookups (perf §64):
- * `DIR_VECTORS[dir]` is a string-keyed Record lookup that allocates a
- * {dx,dy} object reference and forces a dict hash probe. The flat arrays
- * let callers do `const i = dirIdx(dir); DIR_DX[i], DIR_DY[i]` — index
- * access only, no dict probe. dirIdx is a 4-way ternary.
- *
- * `dirIdx` is provided as a helper so all hot-path callers share the same
- * string→index conversion; cold-path code can keep using `DIR_VECTORS`.
+ * Direction data & helpers — canonical definitions live in
+ * `utils/direction.ts` (plan/refactor.agy.md §2.8); re-exported here so
+ * existing imports keep working. New code should import from
+ * `utils/direction` directly.
  */
-export const DIR_DX: readonly number[] = [0, 0, -1, 1] // up, down, left, right
-export const DIR_DY: readonly number[] = [-1, 1, 0, 0]
-export function dirIdx(dir: Direction): number {
-  return dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
-}
-
-export type Direction = 'up' | 'down' | 'left' | 'right'
+export { DIR_VECTORS, DIR_DX, DIR_DY, dirIdx, type Direction } from './utils/direction'
 
 // ================================================================
 // Ice momentum (slide / glide) model — see Simulation.updateMovement.
@@ -176,62 +196,6 @@ export type Direction = 'up' | 'down' | 'left' | 'right'
 export const ICE_ACCEL_TRACTION = 0.35
 /** Fraction of the velocity gap closed per tick while decelerating on ice. */
 export const ICE_DECEL_TRACTION = 0.05
-
-// ============================================================
-// Tactical Intelligence Framework (AI) timing
-// ============================================================
-
-/** Default interval between tactical (5s) re-evaluations. */
-export const TACTICAL_INTERVAL_MS = 5000
-
-/** Default interval between strategic (20s) re-evaluations. */
-export const STRATEGIC_INTERVAL_MS = 20000
-
-/** Commander broadcast cadence (20s). */
-export const COMMANDER_INTERVAL_MS = 20000
-
-/** How long (ms) a committed dodge direction is held before re-evaluating. */
-export const DODGE_LOCK_MS = 350
-
-// ================================================================
-// None-tier (classic) behavior branch timing
-// ================================================================
-
-/** Min ms before a None-tier tank re-rolls its wander direction. */
-export const NONE_TURN_MIN_MS = 700
-/** Uniform jitter (ms) added on top of NONE_TURN_MIN_MS. */
-export const NONE_TURN_JITTER_MS = 900
-/** Fire-cadence jitter (ms) added on top of the tank's base cooldown. */
-export const NONE_FIRE_JITTER_MS = 1400
-
-/**
- * Dead-end recovery: if an enemy is confined to a vertical-only (or
- * horizontal-only) channel — open directions contain no lateral axis — for
- * this long without escaping, it faces a destructible brick wall on the side
- * and fires to tunnel out. Prevents the "stuck spinning up/down in a 1-wide
- * shaft" trap (e.g. Stage 8's middle spawn, bounded by brick/steel/water).
- * A pure steel/water box has nothing to break, so it still oscillates — but
- * authentic stages box spawns only with destructible brick, which we clear.
- */
-export const VERT_TUNNEL_THRESHOLD_MS = 450
-
-/**
- * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
- * open direction available, this is the probability it will take that orthogonal
- * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
- * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
- * At 60 FPS, 1% ≈ one escape attempt every ~1.7 seconds on average — rare enough
- * to not look erratic, frequent enough to unstick within a few seconds.
- */
-/**
- * Corridor-escape chance per tick: when an enemy has a perpendicular (lateral)
- * open direction available, this is the probability it will take that orthogonal
- * turn instead of its greedy choice. Prevents infinite bounce in 1-wide corridors
- * bounded by steel/water where maybeTunnelOut cannot help (non-destructible walls).
- * At 60 FPS, ~0.56% ≈ one escape attempt every ~3 seconds on average — rare enough
- * to not look erratic, frequent enough to unstick within a few seconds.
- */
-export const CORRIDOR_ESCAPE_CHANCE = 0.005601
 
 // NOTE: player & bullet speeds are no longer hardcoded here. They are derived
 // from each tank's CombatProfile by `profileToStats()` in `config/combat.ts`,

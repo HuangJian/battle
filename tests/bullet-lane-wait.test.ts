@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
-import { RNG } from '../src/utils/RNG'
+import { World } from '../src/game/World'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import {
   bulletLaneClearImpl,
@@ -8,8 +7,9 @@ import {
   findCloseEnemyImpl,
   safePerpDodgeImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, TANK, GRID } from '../src/constants'
-import type { Bullet, Tank } from '../src/types'
+import { clearArena, makeBullet as makeBulletShared, makeTank, seedWorld } from './helpers'
+import { CELL, TANK } from '../src/constants'
+import type { Bullet } from '../src/types'
 import type { Direction } from '../src/constants'
 
 // ================================================================
@@ -25,77 +25,17 @@ import type { Direction } from '../src/constants'
 // ================================================================
 
 function makeWorld(): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world)
   world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir']): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage: 1,
-  }
-}
-
-function makeTank(overrides: Partial<Tank> = {}): Tank {
-  return {
-    id: 0,
-    kind: 'basic',
-    x: 100,
-    y: 100,
-    w: TANK,
-    h: TANK,
-    dir: 'up',
-    speed: 1,
-    moving: false,
-    alive: true,
-    hp: 1,
-    maxHp: 1,
-    level: 0,
-    spawnTimer: 0,
-    shieldTimer: 0,
-    lastFire: 0,
-    nextFireInterval: 500,
-    fireCooldown: 0,
-    fireCount: 0,
-    bulletPower: 1,
-    damage: 1,
-    bulletSpeed: 3,
-    vx: 0,
-    vy: 0,
-    profile: {
-      firepower: 50,
-      projectileSpeed: 50,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    },
-    allegiance: 'player',
-    isPlayer: true,
-    ...overrides,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir']): Bullet =>
+  makeBulletShared({ x, y, dir, ownerKind: 'basic' })
 
 describe('§153-W1 — bulletLaneClear (wait for the bullet to clear)', () => {
   it('holds when the intended move would drive the body onto a passing bullet (the W1 geometry)', () => {

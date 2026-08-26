@@ -2,10 +2,10 @@ import { describe, it, expect } from 'bun:test'
 import { World, genId } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { CELL, GRID } from '../src/constants'
+import { CELL } from '../src/constants'
 import type { Tank } from '../src/types'
+import { clearArena, positionPlayer, seedWorld } from './helpers'
 
 /**
  * M13 (DECISIONS §113, SHIPPED 2026-08-04): field-wide outnumbered positioning
@@ -35,19 +35,13 @@ import type { Tank } from '../src/types'
  */
 
 function setupWorld(difficulty: 'hard' | 'classic'): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   input.hasBase = world.tileMap.hasBase()
   input._baseUnderThreatCache = false
   void sim
@@ -70,14 +64,6 @@ function makeEnemy(world: World, x: number, y: number): Tank {
     bonus: false,
     level: 0,
   }
-}
-
-function positionPlayer(world: World, col: number, row: number): void {
-  const p = world.player!
-  p.x = col * CELL
-  p.y = row * CELL
-  p.spawnTimer = 0
-  p.shieldTimer = 0
 }
 
 /** Corner enemies — every one >9 cells from the center (isolates P4.2). */

@@ -1,9 +1,10 @@
+import { TICK_MS } from '../constants'
 import type { WorldSnapshot } from '../snapshot/types'
 import { GAME_VERSION } from '../snapshot/config'
 import { FRAME_SCHEMA_VERSION, REPLAY_HASH_INTERVAL, isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf, packFrames, unpackFrames } from './pack'
 import type { Replay, ReplayMetadata, ReplayType } from './types'
-import { generateUUID } from './uuid'
+import { generateUUID } from '../utils/uuid'
 
 // ================================================================
 // Replay File Format — .replay envelope serialization
@@ -184,8 +185,26 @@ export interface ParseError {
 /**
  * Parse a .replay file string back into a Replay object.
  * Validates format, version, and structure. Returns error on any failure.
+ *
+ * §4.2 (refactor.trae.md): split into four named stages — envelope
+ * validation → structure validation → frame decode → object build +
+ * metadata reconciliation. The old blind `env as unknown as FileEnvelope`
+ * escape is replaced by field-by-field guards with one guarded cast.
  */
 export function parseReplayFile(text: string): ParseSuccess | ParseError {
+  const envResult = validateEnvelope(text)
+  if ('error' in envResult) return envResult
+  const structResult = validateStructure(envResult.env)
+  if ('error' in structResult) return structResult
+  const decodeResult = decodeFrames(structResult.replay)
+  if ('error' in decodeResult) return decodeResult
+  const built = buildReplay(envResult.env, structResult.replay, decodeResult)
+  reconcileSnapshotStage(built)
+  return { replay: built, envelope: envResult.env }
+}
+
+/** Stage 1 — JSON parse + hard format/version gates + full envelope guard. */
+function validateEnvelope(text: string): { env: FileEnvelope } | { error: string } {
   let raw: unknown
   try {
     raw = JSON.parse(text)
@@ -193,7 +212,7 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     return { error: 'Invalid JSON' }
   }
 
-  const env = raw as Record<string, unknown>
+  const env = raw as Partial<FileEnvelope> & Record<string, unknown>
 
   // Hard validations
   if (env.format !== FORMAT_ID) {
@@ -211,9 +230,29 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
 
   // Soft warning: gameVersion mismatch is non-blocking (L3).
   // The caller can check envelope.gameVersion after a successful parse.
+  //
+  // §4.2: instead of the old blind `env as unknown as FileEnvelope`, each
+  // member of the returned envelope is set explicitly from its guarded
+  // source field below — no NEW rejections are introduced (error precedence
+  // stays byte-identical with the historical parser; pinned by tests).
+  return {
+    env: {
+      format: env.format as string,
+      formatVersion: env.formatVersion as number,
+      gameVersion: (env.gameVersion as string | undefined) ?? GAME_VERSION,
+      frameSchemaVersion: env.frameSchemaVersion as number,
+      source: env.source as 'sim' | 'browser',
+      sim: env.sim as SimEnvelope | undefined,
+      finalState: env.finalState as FinalStateEnvelope | undefined,
+      replay: env.replay as ReplayEnvelope, // presence+shape validated in stage 2
+    },
+  }
+}
 
-  // Structure validation
-  const replay = env.replay as Record<string, unknown> | undefined
+/** Stage 2 — replay-section structure validation. */
+function validateStructure(env: FileEnvelope): { replay: ReplayEnvelope } | { error: string } {
+  // Runtime files may omit members the interface requires — validate each.
+  const replay = env.replay as Partial<ReplayEnvelope> | undefined
   if (!replay) {
     return { error: 'Missing replay section' }
   }
@@ -226,8 +265,15 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   if (typeof replay.totalTicks !== 'number') {
     return { error: 'Missing or invalid totalTicks' }
   }
+  const typed = replay as ReplayEnvelope
+  env.replay = typed
+  return { replay: typed }
+}
 
-  // Decode frames
+/** Stage 3 — base64 decode + blob-authoritative schema gate. */
+function decodeFrames(
+  replay: ReplayEnvelope,
+): { frames: Uint8Array; blobSchema: number; frames2: Uint8Array | null } | { error: string } {
   let frames: Uint8Array
   try {
     frames = fromBase64(replay.framesBase64)
@@ -247,10 +293,19 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
   const streams = unpackFrames(frames)
   const frames2 = streams?.p2 && streams.p2.length > 0 ? packFrames(streams.p2) : null
 
+  return { frames, blobSchema, frames2 }
+}
+
+/** Stage 4 — rebuild the Replay object. */
+function buildReplay(
+  env: FileEnvelope,
+  replay: ReplayEnvelope,
+  decoded: { frames: Uint8Array; blobSchema: number; frames2: Uint8Array | null },
+): Replay {
   // Rebuild Replay object
   const metadata = (replay.metadata ?? {}) as Partial<ReplayMetadata>
   const type: ReplayType = ((env.sim as SimEnvelope | undefined)?.status as ReplayType) ?? 'clear'
-  const durationMs = (replay.totalTicks as number) * (1000 / 60)
+  const durationMs = (replay.totalTicks as number) * TICK_MS
 
   // Tick-hash chain — tolerant of legacy files (absent → undefined) and of
   // malformed values (non-string entries dropped).
@@ -267,11 +322,11 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     type,
     createdAt: Date.now(),
     gameVersion: (env.gameVersion as string) ?? GAME_VERSION,
-    schemaVersion: blobSchema,
+    schemaVersion: decoded.blobSchema,
     seed: (replay.seed as number) ?? (env.sim as SimEnvelope | undefined)?.seed ?? 0,
     initialSnapshot: replay.initialSnapshot as WorldSnapshot,
-    frames,
-    frames2,
+    frames: decoded.frames,
+    frames2: decoded.frames2,
     totalTicks: replay.totalTicks as number,
     durationMs,
     metadata: {
@@ -291,18 +346,19 @@ export function parseReplayFile(text: string): ParseSuccess | ParseError {
     tickHashes,
     hashInterval,
   }
+  return built
+}
 
-  // Reconcile the snapshot's stage index with the authoritative metadata.
-  // Sim-generated replays historically recorded the stage via
-  // loadStageData(stage, 0), leaving initialSnapshot.stageIndex === 0 even
-  // though metadata.stage is correct. Without this, playback restores
-  // stageIndex 0 and the HUD shows "STAGE 01" for a later stage (bug: import
-  // 的 S32 replay 播放时显示 STAGE 01). metadata.stage is the source of truth.
+/** Reconcile the snapshot's stage index with the authoritative metadata.
+ * Sim-generated replays historically recorded the stage via
+ * loadStageData(stage, 0), leaving initialSnapshot.stageIndex === 0 even
+ * though metadata.stage is correct. Without this, playback restores
+ * stageIndex 0 and the HUD shows "STAGE 01" for a later stage (bug: import
+ * 的 S32 replay 播放时显示 STAGE 01). metadata.stage is the source of truth. */
+function reconcileSnapshotStage(built: Replay): void {
   if (built.initialSnapshot && built.initialSnapshot.stageIndex !== built.metadata.stage) {
     built.initialSnapshot.stageIndex = built.metadata.stage
   }
-
-  return { replay: built, envelope: env as unknown as FileEnvelope }
 }
 
 // ---- Filename builder ----

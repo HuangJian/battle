@@ -1,12 +1,9 @@
 import type { World } from '../game/World'
 import type { Tank, AIState, GoalType, CommanderDirective } from '../types'
-import type { Direction } from '../constants'
+import { TICK_MS, type Direction } from '../constants'
 import type { GameplayRules } from '../config/rules'
+import { CELL, TANK, FIELD, DIR_VECTORS } from '../constants'
 import {
-  CELL,
-  TANK,
-  FIELD,
-  DIR_VECTORS,
   TACTICAL_INTERVAL_MS,
   STRATEGIC_INTERVAL_MS,
   COMMANDER_INTERVAL_MS,
@@ -16,8 +13,9 @@ import {
   NONE_FIRE_JITTER_MS,
   VERT_TUNNEL_THRESHOLD_MS,
   CORRIDOR_ESCAPE_CHANCE,
-} from '../constants'
-import { opposite, ALL_DIRS, snap, aabb } from '../utils/helpers'
+} from './config'
+import { opposite, ALL_DIRS } from '../utils/direction'
+import { snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
@@ -60,7 +58,7 @@ const _noneOpenBuf: Direction[] = ['up', 'up', 'up', 'up']
  * orchestrator that reads/writes brain state on the World.
  */
 export class TacticalIntelligence {
-  private readonly dt = 1000 / 60 // ms per simulation tick
+  private readonly dt = TICK_MS // ms per simulation tick
 
   /** Entry point called by Simulation.updateEnemyAI. */
   update(world: World, fire: (tank: Tank) => void): void {
@@ -903,17 +901,6 @@ function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v
 }
 
-/**
- * pickClassicDir — classic wander bias (§3). Among open directions, weight
- * toward the base (downward — enemies spawn at the top and the eagle sits at
- * the bottom, so "down" is "toward base") so None-tier tanks still drift
- * toward the objective like the original game while allowing lateral jukes. A
- * single `world.rng` draw keeps the None branch fully deterministic.
- *
- * The direction weights come from `world.rules.classicDirWeights` so that
- * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
- * while modern modes keep the strong downward pull (down: 3, up: 0.35).
- */
 /** True if a live tank (other than `self`) occupies the given cell region.
  * Accepts the pre-computed allTanks buffer to avoid N getter calls per tick. */
 function isTankAhead(allTanks: Tank[], self: Tank, x: number, y: number): boolean {
@@ -925,6 +912,17 @@ function isTankAhead(allTanks: Tank[], self: Tank, x: number, y: number): boolea
   return false
 }
 
+/**
+ * pickClassicDir — classic wander bias (§3). Among open directions, weight
+ * toward the base (downward — enemies spawn at the top and the eagle sits at
+ * the bottom, so "down" is "toward base") so None-tier tanks still drift
+ * toward the objective like the original game while allowing lateral jukes. A
+ * single `world.rng` draw keeps the None branch fully deterministic.
+ *
+ * The direction weights come from `world.rules.classicDirWeights` so that
+ * classic mode can use FC-faithful near-uniform weights (down: 1.2, others: 1.0)
+ * while modern modes keep the strong downward pull (down: 3, up: 0.35).
+ */
 function pickClassicDirFast(
   open: Direction[],
   count: number,

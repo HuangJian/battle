@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -37,8 +38,7 @@ import { resolveProfile, ELITE_DIMENSION } from '../src/config/combat'
  */
 
 function seededWorld(seed: number, difficulty = 'classic'): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
   return { world, sim }
@@ -442,8 +442,7 @@ describe('Tactical Intelligence — bullet avoidance (DoD #6)', () => {
   function survivalRate(kind: TankKind, level: IntelligenceLevel, trials: number): number {
     let survived = 0
     for (let s = 0; s < trials; s++) {
-      const world = new World()
-      world.rng = new RNG(1000 + s * 7)
+      const world = seedWorld(1000 + s * 7)
       openArena(world)
       const sim = new Simulation(world, new Input())
       const ex = 12 * CELL // aligned with base column (x = 192)
@@ -620,7 +619,7 @@ describe('None branch — deterministic classic behaviour (§3)', () => {
       let sawNone = false
       for (let i = 0; i < 600; i++) {
         sim.tick()
-        bulletFired += world.events.filter((e) => e.type === 'bullet_fired').length
+        bulletFired += world.events.items.filter((e) => e.type === 'bullet_fired').length
         for (const t of world.tanks) {
           if (!t.alive) continue
           if (t.aiState?.level !== 'none') continue

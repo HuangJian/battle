@@ -1,5 +1,6 @@
 import type { GodAIInput } from '../GodAIInput'
 import { BASE_POS, CELL, TANK, MAX_ENEMIES_ALIVE } from '../../constants'
+import { manhattan } from '../../utils/helpers'
 import type { Direction } from '../../constants'
 
 /**
@@ -129,7 +130,7 @@ export function updateEnemyModel(self: GodAIInput): void {
     // Distance (cell-level, pixel-rounded like tankCell).
     const tc = Math.floor(t.x / CELL)
     const tr = Math.floor(t.y / CELL)
-    const distToBase = Math.abs(tc - bc) + Math.abs(tr - br)
+    const distToBase = manhattan(tc, tr, bc, br)
 
     // Turns: dir changed since last tick.
     if (prev && prev.dir !== t.dir) turnCount++
@@ -204,6 +205,9 @@ export function updateEnemyModel(self: GodAIInput): void {
     m.winAligned = 0
     m.winTurns = 0
     m.winTicks = 0
+    // Reset HP baseline to prevent cross-window HP drops (including death
+    // transitions) from being attributed to the next window's winHits.
+    self._enemyModelLastHp = p ? (p.alive ? p.hp : 0) : 0
   }
 }
 
@@ -232,7 +236,10 @@ function staticPriorLevel(self: GodAIInput): number {
     count++
   }
   if (count === 0) return 0
-  return Math.min(1, sum / count)
+  // Normalize by MAX_ENEMIES_ALIVE (not count) to align with the dynamic
+  // features' normalization — a single commander should not read as full
+  // threat when the field could hold 4.
+  return Math.min(1, sum / MAX_ENEMIES_ALIVE)
 }
 
 /**

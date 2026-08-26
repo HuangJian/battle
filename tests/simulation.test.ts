@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World, genId } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -131,8 +132,8 @@ describe('Simulation determinism (AGENTS.md §2.3)', () => {
       // spawnPowerUp is private — invoke it directly to isolate the RNG
       // behaviour from the bonus-enemy-kill precondition. Two calls give
       // us two power-ups to compare across runs.
-      ;(sim as unknown as { spawnPowerUp: () => void }).spawnPowerUp()
-      ;(sim as unknown as { spawnPowerUp: () => void }).spawnPowerUp()
+      sim.systems.powerUps.spawnPowerUp()
+      sim.systems.powerUps.spawnPowerUp()
       return world.powerUps.map((p) => `${p.type}@${p.x},${p.y}`)
     }
 
@@ -184,8 +185,7 @@ describe('Enemy spawn does not deadlock or overlap (bug regression)', () => {
     SPAWN_PTS.some((p) => Math.abs(p.x - x) < TANK && Math.abs(p.y - y) < TANK)
 
   function runStage(stageIndex: number, seed: number, ticks: number) {
-    const world = new World()
-    world.rng = new RNG(seed)
+    const world = seedWorld(seed)
     const input = new Input()
     const sim = new Simulation(world, input)
 
@@ -302,8 +302,7 @@ describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
   }
 
   it('never creates a tank embedded in blocking terrain when a spawn point is occupied by an obstacle', () => {
-    const world = new World()
-    world.rng = new RNG(12345)
+    const world = seedWorld(12345)
     const input = new Input()
     const sim = new Simulation(world, input)
     world.startGame('classic', 'modern', 0)
@@ -331,8 +330,7 @@ describe('Enemy spawn skips terrain-blocked points (bug regression)', () => {
   })
 
   it('still skips safely when ALL three spawn points are terrain-blocked (no crash, resumed when cleared)', () => {
-    const world = new World()
-    world.rng = new RNG(999)
+    const world = seedWorld(999)
     const input = new Input()
     const sim = new Simulation(world, input)
     world.startGame('classic', 'modern', 0)
@@ -388,8 +386,7 @@ describe('Fire rate is fixed per type and independent of hit outcomes', () => {
   }
 
   function runFireScenario(terrain: 'open' | 'wall'): FireRun {
-    const world = new World()
-    world.rng = new RNG(7)
+    const world = seedWorld(7)
     const input = new Input()
     const sim = new Simulation(world, input)
     world.startGame('hard', 'modern', 0)
@@ -477,7 +474,7 @@ describe('Star progression — classic cap vs unbounded (spec: 星星增益无�
     world.startGame('classic', 'modern', 0)
     world.playerLevel = 3
     world.player!.level = 3
-    ;(sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp('star')
+    sim.systems.powerUps.applyPowerUp('star')
     expect(world.playerLevel).toBe(3) // capped, did NOT increment
   })
 
@@ -486,7 +483,7 @@ describe('Star progression — classic cap vs unbounded (spec: 星星增益无�
     world.startGame('hard', 'modern', 0)
     world.playerLevel = 3
     world.player!.level = 3
-    const apply = (sim as unknown as { applyPowerUp: (t: 'star') => void }).applyPowerUp.bind(sim)
+    const apply = (t: 'star') => sim.systems.powerUps.applyPowerUp(t)
     apply('star')
     expect(world.playerLevel).toBe(4) // first unbounded star
     apply('star')

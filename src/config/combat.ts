@@ -400,8 +400,6 @@ export interface CapabilityBias {
   attack: number
 }
 
-export const NEUTRAL_BIAS: CapabilityBias = { flank: 0, push: 0, attack: 0 }
-
 /**
  * Convert a profile into decision-weight biases in roughly [-1, +1].
  * 50 (baseline) → 0; 80 (fast mobility) → +0.6 flank; 90 (heavy armor) → +0.8

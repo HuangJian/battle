@@ -13,7 +13,7 @@
 // This guards GOD AI *behavior logic*, not just the pass rate: a regression that
 // keeps a stage clearing but wrecks how it clears (turtling, no kills, maxed
 // clear-time) still drops the v7 composite below its floor. Per Phase III this
-// is the primary guard; the clear-count gate (god-ai-gate.test.ts) is disabled.
+// is the primary guard; the clear-count gate (godai-gates.test.ts) is disabled.
 
 import { expect, test } from 'bun:test'
 import {
@@ -24,7 +24,9 @@ import {
   MARGIN_SCORE,
 } from './score-gate-core'
 
-const DIFFS = ['classic', 'hard', 'chaos'] as const
+import { EVAL_DIFFICULTY_KEYS } from '../src/config/difficulty'
+
+const DIFFS = EVAL_DIFFICULTY_KEYS
 
 test(
   'God-AI score gate (classic+hard+chaos, godai-score v7, worker pool)',

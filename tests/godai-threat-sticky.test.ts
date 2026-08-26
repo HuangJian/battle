@@ -1,12 +1,10 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { Simulation } from '../src/game/Simulation'
-import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { CLASSIC_MODEL_PARAMS, GUARD_GOD_AI_PARAMS } from '../src/ai/god/params'
-import { RNG } from '../src/utils/RNG'
-import { CELL, GRID } from '../src/constants'
+import { CELL } from '../src/constants'
 import type { Tank } from '../src/types'
+import { placeEnemy, setupGodGame } from './helpers'
 
 /**
  * §169: base-threat signal stickiness — unit tests.
@@ -26,34 +24,8 @@ import type { Tank } from '../src/types'
  * moving a single enemy in/out of the static threat box.
  */
 
-function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
-  world: World
-  input: GodAIInput
-} {
-  const world = new World()
-  world.rng = new RNG(42)
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
-  const sim = new Simulation(world, new Input())
-  world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
-  void sim
-  input.hasBase = world.tileMap.hasBase()
-  input.reset()
-  return { world, input }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
-}
+// setupWorld (§1.1 canary) → shared setupGodGame from ./helpers; the local
+// copy was byte-identical to base-clear-shot-threat.test.ts's.
 
 function moveEnemy(enemy: Tank, col: number, row: number): void {
   enemy.x = col * CELL
@@ -72,7 +44,7 @@ const ISOLATED = { chokepointMode: 0, baseClearShotThreat: 0 }
 
 describe('§169: base-threat signal stickiness', () => {
   it('OFF (default 0): the signal clears the tick the enemy leaves the box', () => {
-    const { world, input } = setupWorld(ISOLATED)
+    const { world, input } = setupGodGame({ params: ISOLATED })
     const enemy = placeEnemy(world, 12, 20) // inside static box (±3 col, row>=18)
     refresh(input, world)
     expect(input.isBaseUnderThreat()).toBe(true)
@@ -83,7 +55,7 @@ describe('§169: base-threat signal stickiness', () => {
   })
 
   it('ON: the signal persists through the gap after the enemy leaves', () => {
-    const { world, input } = setupWorld({ ...ISOLATED, threatStickyTicks: 10 })
+    const { world, input } = setupGodGame({ params: { ...ISOLATED, threatStickyTicks: 10 } })
     const enemy = placeEnemy(world, 12, 20)
     refresh(input, world)
     expect(input.isBaseUnderThreat()).toBe(true)
@@ -107,7 +79,7 @@ describe('§169: base-threat signal stickiness', () => {
   })
 
   it('ON: re-entering the box refreshes the hold (only extends, never shortens)', () => {
-    const { world, input } = setupWorld({ ...ISOLATED, threatStickyTicks: 10 })
+    const { world, input } = setupGodGame({ params: { ...ISOLATED, threatStickyTicks: 10 } })
     const enemy = placeEnemy(world, 12, 20)
     refresh(input, world)
     expect(input.isBaseUnderThreat()).toBe(true)
@@ -124,7 +96,7 @@ describe('§169: base-threat signal stickiness', () => {
   })
 
   it('reset() clears the sticky hold', () => {
-    const { world, input } = setupWorld({ ...ISOLATED, threatStickyTicks: 10 })
+    const { world, input } = setupGodGame({ params: { ...ISOLATED, threatStickyTicks: 10 } })
     placeEnemy(world, 12, 20)
     refresh(input, world)
     expect(input.isBaseUnderThreat()).toBe(true)

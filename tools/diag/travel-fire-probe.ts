@@ -31,10 +31,7 @@ import { killAssessment, tankCenterCell } from '../../src/ai/god/ThreatBudget'
 import { fireRayBlocked } from '../../src/ai/god/ActionCandidates'
 import { enemyCanShootBase, enemyCanBreachRing } from '../../src/ai/god/SmartThreatModel'
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : def
-}
+import { arg } from '../lib/cli'
 
 const fromJson = arg('from-json')
 if (!fromJson) {

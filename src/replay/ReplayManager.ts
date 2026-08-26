@@ -13,7 +13,7 @@ import { REPLAY_RETENTION_POLICIES, REPLAY_FAVORITE_LIMIT } from './config'
 import { GAME_VERSION } from '../snapshot/config'
 import { isSupportedFrameSchema } from './config'
 import { frameSchemaVersionOf } from './pack'
-import { generateUUID } from './uuid'
+import { generateUUID } from '../utils/uuid'
 
 export interface ReplayManagerOptions {
   backend?: ReplayStorageBackend | null
@@ -139,7 +139,9 @@ export class ReplayManager {
     const pi = this.pendingThumbnails.indexOf(id)
     if (pi >= 0) this.pendingThumbnails.splice(pi, 1)
     if (this.backend) {
-      this.backend.delete(id).catch(() => {})
+      // Persistence is fire-and-forget, but a failure should at least leave
+      // a trace — silent loss of replays is indistinguishable from success.
+      this.backend.delete(id).catch((e) => console.warn('[ReplayManager] delete failed:', e))
     }
   }
 
@@ -295,7 +297,9 @@ export class ReplayManager {
 
   persist(replay: Replay): void {
     if (!this.backend) return
-    this.backend.save(replay).catch(() => {})
+    // Fire-and-forget, but log on failure — silent replay loss is a bug
+    // that would otherwise be invisible.
+    this.backend.save(replay).catch((e) => console.warn('[ReplayManager] save failed:', e))
   }
 
   /**

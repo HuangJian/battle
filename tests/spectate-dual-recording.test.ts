@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -13,7 +14,7 @@ import type { InputFrame } from '../src/replay/types'
 // ================================================================
 // 督战双玩家 (dual-spectate) recording regression
 //
-// BUG: GameCore.requestSpectateToggle's in-place single<->dual switch
+// BUG: Game.requestSpectateToggle's in-place single<->dual switch
 // created `godInput2` (via enableSpectateDual) but never re-wired
 // `simulation.input2` — unlike every sibling branch (enableSpectate /
 // disableSpectate / rearmSpectateGodInput all call wireLiveInputs()). So
@@ -61,11 +62,10 @@ function baseArena(world: World): void {
 }
 
 /** Build a dual-spectate (督战双玩家) world + spawn player2, mirroring
- *  GameCore.enableSpectate(dual). `seed` decouples the God-AI RNGs from the
+ *  Game.enableSpectateDual(). `seed` decouples the God-AI RNGs from the
  *  world RNG exactly like the production paths do. */
 function dualSpectateWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   baseArena(world)
@@ -143,7 +143,7 @@ function countNonIdle(frames: InputFrame[]): number {
   return frames.filter((f) => f.direction !== null || f.firing || f.guard || f.frenzy).length
 }
 
-describe('督战双玩家 recording — P2 input is captured (GameCore wiring)', () => {
+describe('督战双玩家 recording — P2 input is captured (Game controller wiring)', () => {
   const SEED = 1786239570044
 
   it('captures an ACTIVE P2 stream when input2 is wired to the player2 God AI', () => {

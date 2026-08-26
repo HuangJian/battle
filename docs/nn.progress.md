@@ -369,7 +369,7 @@ SearchReplace 且改后必 py_compile。
   迭代墙钟下降即为净赚；④ `eval_join_sec` 若仍常态 >0，考虑再压 eval 语料。
 
 
-## §7 干净评估嵌入流水线（2026-08-24 晚，DECISIONS §245）
+## §7 干净评估嵌入流水线（2026-08-24 晚，DECISIONS §283）
 
 > 背景：采集成本趋零后，training_log 的 winRate 仍是"带探索噪声的移动靶"——
 > rollout 采样熵≈1.27 nats + 每轮 rotate 换 seed，轮间 ±5pp 摆动无法归因。
@@ -550,7 +550,7 @@ SearchReplace 且改后必 py_compile。
 - **根因**：`build_pairs` 从单一连续流按调用顺序抽签。旧进程 it5 = 流的第 3 次抽取；
   新进程重启后流复位，it5 复用第 1 次抽取（= 旧 it3 的签）→ 与已落盘 shard 完全
   不相交 → `p not in done` 全员命中。铁证：新旧日志的抽签范围逐字节相同
-  （7050345..1073087402），而那是旧 **it3** 的签。§243 的"rotateSeed 继承"只保证了
+  （7050345..1073087402），而那是旧 **it3** 的签。§281 的"rotateSeed 继承"只保证了
   种子本身连续，没保证流的消费位置与迭代号对齐。
 - **修复**：`build_pairs(args, it, rotate_seed)` 改为 **(rotateSeed, it) 的纯函数**：
   permutation 按 epoch 键控（同 epoch 窗口仍平铺公共排列）、seeds 按 it 键控
@@ -566,7 +566,7 @@ SearchReplace 且改后必 py_compile。
 
 ## §5 队列模式静默跳轮事故复盘 + 修复 + 重启（2026-08-24 凌晨）
 
-> 决策（DECISIONS §244）。事故窗口 00:19–00:44：it1 PPO 完成后，it2/it3 整轮 rollout
+> 决策（DECISIONS §282）。事故窗口 00:19–00:44：it1 PPO 完成后，it2/it3 整轮 rollout
 > 完成却从未进 PPO，直接跳下轮（用户发现时已在跑 it4）。
 
 ### 5.1 根因（证据链定罪，非猜测）
@@ -584,7 +584,7 @@ SearchReplace 且改后必 py_compile。
    转换 / 远端聚合式透传）。真实事故数据验证：修复前 KeyError，修复后 games=140、
    outcomes 全归类（111 bd + 20 le + **7 stage_clear** + 2 timeout）。
 2. 全 done 早返回改磁盘聚合出完整报告（消灭空报告盲区）。
-3. except 分支：`iter_error` jsonl 事件 + `it -= 1` 原地重试同轮（§243 断点保证
+3. except 分支：`iter_error` jsonl 事件 + `it -= 1` 原地重试同轮（§281 断点保证
    不重跑已完局）；consec_fail≥5 才退出。
 4. start-training.ps1 detach 分支 stdout/stderr → `tmp/run_rl-<stamp>.{out,err}.log`
    （编辑后 BOM 被剥，已手工补回——§2.2 同坑三踩，教训再次确认）。
@@ -606,14 +606,14 @@ SearchReplace 且改后必 py_compile。
 1. **异构数据管道必须 schema 归一后再进聚合器**——两条采样路径（本地/远端）的
    manifest 结构差异在单机时代不存在，分布式化第一天就炸。
 2. **吞异常的循环必须有旁路观测**（iter_error 落盘），否则生产事故只剩行为考古。
-3. 失败迭代前跳 = 静默丢语料；断点续跑机制（§243）使原地重试成为零成本安全选择。
+3. 失败迭代前跳 = 静默丢语料；断点续跑机制（§281）使原地重试成为零成本安全选择。
 4. .ps1 编辑三连坑：BOM 必查（第三次踩）。
 
 ---
 
 ## §4 RL 训练断点续跑机制（2026-08-23）
 
-> 决策（DECISIONS §243）：三层断点续跑，崩溃/停启后自动继续而非重跑。
+> 决策（DECISIONS §281）：三层断点续跑，崩溃/停启后自动继续而非重跑。
 
 ### 4.1 实现
 - **it 续跑**：`--start-it`（缺省自动 = jsonl 最后完成迭代 + 1）。

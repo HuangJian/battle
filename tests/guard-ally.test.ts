@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { BULLET, TANK } from '../src/constants'
 import type { Direction } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
@@ -22,8 +22,7 @@ const GUARD_LIFESPAN = 120 * 60 // frames (mirrors Simulation.GUARD_LIFESPAN_FRA
 
 /** Fresh, seeded World on stage 0 in 'playing' state. */
 function buildSeededWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
   return { world, sim }
@@ -40,6 +39,9 @@ function plantTank(world: World, kind: 'player' | 'basic', x: number, y: number)
   return t
 }
 
+// KEPT LOCAL (遗留 #5 audit): the 9000+ id scheme, speed 6 and 'basic' hull
+// are load-bearing for this file's ally-fire assertions — see the 口径差异表
+// in tests/helpers.ts before touching.
 function makeBullet(over: Partial<Bullet>): Bullet {
   return {
     id: 9000 + Math.floor(over.id ?? 0),
@@ -72,9 +74,7 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     const alliesBefore = world.allies.length
     const tanksBefore = world.tanks.length
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
-      sim,
-    )
+    const activate = sim.systems.enemies.activateGuard.bind(sim.systems.enemies)
     activate(p)
 
     // One ally appears.
@@ -99,9 +99,7 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     p.spawnTimer = 0
     world.guardStock = 2
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
-      sim,
-    )
+    const activate = sim.systems.enemies.activateGuard.bind(sim.systems.enemies)
 
     // First summon.
     activate(p)
@@ -125,9 +123,7 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     const alliesBefore = world.allies.length
     const tanksBefore = world.tanks.length
 
-    const activate = (sim as unknown as { activateGuard: (pl: Tank) => void }).activateGuard.bind(
-      sim,
-    )
+    const activate = sim.systems.enemies.activateGuard.bind(sim.systems.enemies)
     activate(p)
 
     expect(world.allies.length).toBe(alliesBefore)
@@ -147,9 +143,7 @@ describe('天降神兵 — 3-way friendly fire (DECISIONS.md §31 Phase 2)', () 
     // bulletHitsTank takes the allTanks buffer as a parameter (perf: avoids
     // N getter calls per tick). Must pass a fresh snapshot that includes the
     // just-pushed target.
-    ;(sim as unknown as { bulletHitsTank: (b: Bullet, a: Tank[]) => boolean }).bulletHitsTank.bind(
-      sim,
-    )(bullet, world.allTanks)
+    sim.systems.combat.bulletHitsTank.bind(sim.systems.combat)(bullet, world.allTanks)
   }
 
   it('ally bullet strikes an enemy (opposing sides)', () => {
@@ -246,7 +240,7 @@ describe('天降神兵 — guard lifespan expiry (DECISIONS.md §31 Phase 2)', (
     world.allies.push(g)
     const explosionsBefore = world.explosions.length
 
-    const updateGuards = (sim as unknown as { updateGuards: () => void }).updateGuards.bind(sim)
+    const updateGuards = sim.systems.enemies.updateGuards.bind(sim.systems.enemies)
     updateGuards()
 
     expect(g.alive).toBe(false) // expired
@@ -266,7 +260,7 @@ describe('天降神兵 — guard lifespan expiry (DECISIONS.md §31 Phase 2)', (
     g.guardExpireFrame = world.frame + 600 // far future
     world.allies.push(g)
 
-    const updateGuards = (sim as unknown as { updateGuards: () => void }).updateGuards.bind(sim)
+    const updateGuards = sim.systems.enemies.updateGuards.bind(sim.systems.enemies)
     updateGuards()
 
     expect(g.alive).toBe(true) // not yet expired
@@ -288,9 +282,7 @@ describe('天降神兵 — 同归于尽 ignores allied guards (DECISIONS.md §31
     world.allies.push(ally)
 
     world.sacrificeStock = 1
-    const trigger = (
-      sim as unknown as { triggerSacrificeAoE: (pl: Tank) => void }
-    ).triggerSacrificeAoE.bind(sim)
+    const trigger = sim.systems.enemies.triggerSacrificeAoE.bind(sim.systems.enemies)
     trigger(p)
 
     expect(ally.alive).toBe(true) // allies are never harmed by the player's AoE
@@ -325,7 +317,7 @@ describe('freeze powerup must NOT freeze allied guards (§184)', () => {
     const yBefore = g.y
 
     // Run updateGuards + updateMovement (the movement pipeline)
-    const updateGuards = (sim as unknown as { updateGuards: () => void }).updateGuards.bind(sim)
+    const updateGuards = sim.systems.enemies.updateGuards.bind(sim.systems.enemies)
     updateGuards()
     sim.tick() // advances movement
 

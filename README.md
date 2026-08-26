@@ -26,10 +26,11 @@ Battle City Web 是经典红白机《坦克大战》的现代重制：原汁原�
 ## 你能玩到什么
 
 - **35 个正版 FC 关卡** —— 13×13 数字地块码被无损展开成 26×26 子格网格，当年那堵让你卡关的墙，分毫不差。
-- **六类道具** —— 星星（全维升级）、炸弹（清屏）、护盾、冰冻、加命、头盔。
+- **15 种道具** —— 经典六件套（星星全维升级、炸弹清屏、护盾、冰冻、加命、头盔）+ 船/栅栏 + 超级道具（天降神兵、狂暴宣泄、同归于尽、时光宝盒）+ 维修/电磁静默/诱饵/地雷。
 - **四种敌车 × 指挥官 AI** —— 新兵/士兵/老兵/指挥官四档智能，全是**配置不是代码**；高难度下会选举指挥官带队包抄。
+- **God AI 队友 / 躺赢模式** —— 玩家 P2 可交给内置的"上帝 AI"代驾（~40 文件的独立决策层），双打督战时也能把另一个座位交给它。它有自己的调优框架与分数门禁（`tools/eval/godai-score.ts`）。
 - **六维战斗系统** —— 每辆坦克由火力/弹速/火控/机动/装甲/特殊描述，数值由能力卡推导；对枪公平、子弹永远追得上坦克这些不变量被测试钉死。
-- **时光回溯** —— 基地被打爆不甩你 GAME OVER，而是问你：回到 30 秒前？60 秒前？还是重打？后台每秒静默存档。
+- **时光回溯** —— 基地被打爆不甩你 GAME OVER，而是问你：回到 30 秒前？60 秒前？还是重打？后台每 30 秒静默快照（自动档 20 张循环 + 手动档 100 张永不覆盖）。
 - **四档难度** —— Relax / Classic / Hard / Chaos，主要提升敌人"智商"而非数值。
 - **三套主题** —— Classic / Neon / Modern Retro，换主题只换颜色数据，玩法零变化。
 
@@ -47,7 +48,7 @@ Input → Simulation → World → Renderer / Audio / UI
 
 - **确定性**：固定 60Hz 时间步 + 种子化 RNG，所有熵走 `world.rng`。
 - **数据高于代码**：坦克/关卡/难度/主题/AI 全是 `config/`，加内容 = 加一行数据。
-- **零素材**：30 个手写 SVG 预光栅化为位图缓存；Web Audio 实时合成音效。
+- **零素材**：39 个手写 SVG 预光栅化为位图缓存；Web Audio 实时合成音效。
 - **性能**：稳态零分配、增量地形重绘、场景签名驱动的按需跳帧——风扇不转。
 
 完整的技术选型表、分层职责、GameEvent 跨层通道、回溯与重演的预备设计，全部在 **[`docs/architecture.md`](docs/architecture.md)**。
@@ -65,7 +66,7 @@ Input → Simulation → World → Renderer / Audio / UI
 | 样式 | CSS 变量（主题注入） |
 | 资源 | 手写 SVG → 预光栅化位图缓存 |
 | 音频 | Web Audio API 合成 |
-| 存储 | localStorage（设置 + 最高分） |
+| 存储 | localStorage（设置 + 最高分）+ IndexedDB（快照 / 回放存档） |
 
 ---
 
@@ -73,13 +74,16 @@ Input → Simulation → World → Renderer / Audio / UI
 
 ```bash
 bun install        # 装依赖
-bun run dev        # 起开发服（默认 :3000），浏览器打开即玩
+bun run dev        # 起开发服（默认 :8956），浏览器打开即玩
 bun run build      # 构建产出（oxlint && tsc && vite build）
-bun run test       # 跑测试（75 个用例的弹药库）
-bun run check      # 全量门禁：test + typecheck + lint + format
+bun run test       # 跑测试（scoped runner：只跑与本地改动相关的用例，静默通过）
+bun run check      # 全量门禁：tsc --noEmit + bun test --parallel --timeout=50000
+bun test --parallel --timeout=50000   # 全量测试（127 个文件、~1400 个用例）
 ```
 
 > 要求 **Bun** 运行时。没有 npm 那套分裂的体验。
+>
+> `bun run check` 不含 lint/format（那是 `bun run build` 里 oxlint 的职责）。
 
 操控：WASD / 方向键移动，空格开火，P 暂停，R 回菜单，按键可在设置面板里改。
 
@@ -90,18 +94,18 @@ bun run check      # 全量门禁：test + typecheck + lint + format
 | 文件 | 看它得到什么 |
 |---|---|
 | [`MANIFEST.md`](MANIFEST.md) | 信条、不可动摇的三道门、为什么这么设计 |
-| [`DECISIONS.md`](DECISIONS.md) | 每一次具体技术决策的来龙去脉（26 条） |
+| [`DECISIONS.md`](DECISIONS.md) | 每一次具体技术决策的来龙去脉（260+ 条） |
 | [`AGENTS.md`](AGENTS.md) | 给编码 agent 的操作契约（怎么在这个仓库安全地改代码） |
 | [`docs/features.md`](docs/features.md) | 功能清单 + 实现方法，铁杆粉燃系文风 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构决策、技术选型、未来扩展接缝 |
 | [`plan/`](plan/) | 里程碑与各功能计划书（MVP / Recovery / 战术 AI / 战斗能力等） |
-| [`tests/`](tests/) | 75 个用例，专打要害（确定性、对枪公平、关卡解码、AI 等） |
+| [`tests/`](tests/) | 127 个测试文件、~1400 个用例，专打要害（确定性、对枪公平、关卡解码、God-AI 分数门禁等） |
 
 ---
 
 ## 留给未来的座位
 
-架构今天就为这些留好了位置，一行引擎代码都不用动：回放系统（确定性+快照+可录输入已齐）、新游戏模式（规则+关卡+胜利条件的组合）、统计面板（订阅现成事件流）、社区/程序化关卡（关卡解码器已把数据从加载器解耦）。
+架构今天就为这些留好了位置，一行引擎代码都不用动：新游戏模式（规则+关卡+胜利条件的组合）、统计面板（订阅现成事件流）、社区/程序化关卡（关卡解码器已把数据从加载器解耦）。回放系统**已经建成**（`src/replay/`：确定性 + 快照 + 输入录制三件套落地，含回放浏览器与接管续玩），不再是未来席位。
 
 > 三十年了，基地还在战场正下方等你守护。
 > `bun run dev`，上车。

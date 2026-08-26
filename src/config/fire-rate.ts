@@ -1,6 +1,7 @@
 import type { TankKind } from '../types'
 import { FIELD, TICK_MS } from '../constants'
 import { baseBulletSpeedPxPerTick } from './speed'
+import { specField } from './tank-spec'
 
 /**
  * Fire-rate standard (user requirement, 2026-07-26).
@@ -65,14 +66,12 @@ export const BALANCED_FIRE_INTERVAL_MS = BALANCED_BULLET_TRAVEL_MS / 2
 /**
  * > 1 = fires more often (shorter interval). Anchored to the user spec:
  *   basic 1.00×, fast 1.05×, power 1.10×, armor 0.90×, player 1.05×.
+ *
+ * Derived view of `TANK_SPEC.fireFreqMult` (refactor.trae.md §2.1) — the only
+ * authoritative per-kind copy lives in config/tank-spec.ts, so adding a tank
+ * needs no hand-edit here.
  */
-export const FIRE_FREQUENCY_MULTIPLIER: Record<TankKind, number> = {
-  basic: 1.0,
-  fast: 1.05,
-  power: 1.1,
-  armor: 0.9,
-  player: 1.05,
-}
+export const FIRE_FREQUENCY_MULTIPLIER: Record<TankKind, number> = specField('fireFreqMult')
 
 /**
  * Per-star bonus added to the player's firing-frequency multiplier. The spec

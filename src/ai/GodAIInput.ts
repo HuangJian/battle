@@ -2,19 +2,18 @@ import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import type { Tank, Bullet } from '../types'
 import type { Direction } from '../constants'
-import type { Cell } from '../utils/pathfind'
+import type { Cell } from './god/pathfind'
 import type { RNG } from '../utils/RNG'
-import { BASE_POS } from '../constants'
+import { manhattan } from '../utils/helpers'
 import {
-  findEnemyDirectionImpl,
   findEnemyFacingPlayerImpl,
   scanAheadImpl,
   shouldFireInDirImpl,
   isBaseProtectionBrickImpl,
   makeScanResult,
-  bulletPathSteelBlockedImpl,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
+import { newStuckTrack, type StuckTrack } from './god/stuck-track'
 import type { ActionIntent } from './god/StrategyPlanner'
 import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
@@ -35,25 +34,17 @@ export type { GodAIParams } from './god/params'
 import { initEnemyModel, type EnemyModelState } from './god/EnemyModel'
 import {
   findMostDangerousBulletImpl,
-  findBulletThreatToBaseImpl,
-  baseBulletInterceptCellImpl,
-  dodgeDirectionImpl,
   isSafeDirImpl,
-  hasEnemyBulletInLineImpl,
-  findPathThreatImpl,
+  hasCrossFireBulletImpl,
   findSafeMoveDirImpl,
   closeCombatExposureImpl,
   isTerrainPinnedImpl,
-  hasCrossFireBulletImpl,
+  isBaseUnderThreatImpl,
 } from './god/ThreatAssessor'
 import {
   findPowerUpTargetImpl,
   findUrgentPowerUpTargetImpl,
   findUrgentPowerUpTargetWithCommitImpl,
-  findDireItemTargetImpl,
-  findDualFencePickupImpl,
-  findFreezePickupTargetImpl,
-  findClosePickupTargetImpl,
   calculateRouteDangerImpl,
   getDefaultDefensePositionImpl,
   computeBaseGuardAnchorImpl,
@@ -65,7 +56,6 @@ import {
   tankCellImpl,
   navigateTowardsImpl,
   followPathImpl,
-  replanImpl,
   directMoveImpl,
   canMoveOrBreakImpl,
   canMoveDirImpl,
@@ -76,13 +66,23 @@ import {
   threatChaseTargetImpl,
 } from './god/Chokepoint'
 import type { ChokepointPlan } from './god/Chokepoint'
-import { enemyCanShootBase } from './god/SmartThreatModel'
 
 /**
  * GodAIInput — a "theoretically optimal player" simulator that implements
  * `InputLike`.
  *
  * Tuning plan: plan/God-AI-Tuning.md
+ *
+ * Hub delegation convention (refactor.trae.md §3.14): multi-caller public
+ * surface stays as hub wrappers; single-caller / hot-path methods go DIRECT
+ * to the god-layer Impl (callers import the Impl themselves).
+ *
+ * Cell 坐标习惯速查 (refactor.trae.md §3.12; details at each site):
+ *   - ThreatBudget.tankCenterCell  → floor-center (corner cell + 1 on both axes)
+ *   - Navigator                    → Math.round(x/CELL) on the top-left corner
+ *   - CoveragePlanner              → floor-corner space
+ * These THREE conventions coexist by design; conversions are pinned by tests,
+ * never assumed. See ThreatBudget.tankCenterCell's doc for the canonical note.
  *
  * Techniques implemented (by ID from the plan):
  *   T2a  — Stop-and-aim: when an enemy is in the same row/col, turn to face
@@ -229,23 +229,21 @@ export class GodAIInput implements InputLike {
   /** Last cell the player was at when consuming a path step (prevents oscillation). */
   _lastPathCell: Cell | null = null
 
-  /** P0.1: the cell where the player is currently camping (T2a stop-and-aim). */
-  _campCell: Cell | null = null
-  /** P0.1: consecutive ticks spent at _campCell in T2a. */
-  _campTicks = 0
-  /** P0.1: world.killCount when camping started (to detect "no kills during camp"). */
-  _campKillsAtStart = 0
+  /**
+   * §3.4 zone-stuck trackers (god/stuck-track.ts single source; replaced the
+   * four hand-copied scalar quartets). AI-internal, not serialized.
+   *   _campTrack   — P0.1 T2a stop-and-aim camp (Engage).
+   *   _aggCampTrack — §84 aggressive stop-and-aim camp (Aggro).
+   *   _aggNavTrack  — §152-W2 aggressive navigate fallback stall (Aggro).
+   *   _navStuckTrack — P0.3/§168 navigate stuck (Hunt).
+   * The separate _antiCampSuppress countdown below is Engage's own escape
+   * window and predates the tracker consolidation — kept as-is.
+   */
+  _campTrack: StuckTrack = newStuckTrack()
   /** P0.1: countdown to suppress T2a after an anti-camp escape. */
   _antiCampSuppress = 0
 
-  /** §84: the cell where the player is camping in the aggressive branch. */
-  _aggCampCell: Cell | null = null
-  /** §84: consecutive ticks spent at _aggCampCell in aggressive stop-and-aim. */
-  _aggCampTicks = 0
-  /** §84: world.killCount when aggressive camping started. */
-  _aggCampKillsAtStart = 0
-  /** §84: countdown to suppress aggressive stop-and-aim after a stall escape. */
-  _aggCampSuppress = 0
+  _aggCampTrack: StuckTrack = newStuckTrack()
 
   /**
    * §152-W2: aggressive-branch MOVEMENT stuck guard state (distinct from the
@@ -257,11 +255,7 @@ export class GodAIInput implements InputLike {
    * a navigate-to-center escape (hard S12 seed 934391936 W2). AI-internal,
    * not serialized — same semantics as _campCell/_campTicks.
    */
-  _aggNavStuckCell: Cell | null = null
-  _aggNavStuckTicks = 0
-  _aggNavKillsAtStart = 0
-  /** countdown forcing the navigate-to-center escape after a movement stall. */
-  _aggNavSuppress = 0
+  _aggNavTrack: StuckTrack = newStuckTrack()
 
   /**
    * §152-W3: urgent-pickup commit state. Once PICKUP_HIGH/MID commits to an
@@ -307,17 +301,13 @@ export class GodAIInput implements InputLike {
   _centroidTriggers: number = 0
   _centroidEscapes: number = 0
 
-  /** P0.3: the cell where the player is currently stuck in navigate. */
-  _navStuckCell: Cell | null = null
-  /** P0.3: consecutive ticks spent at _navStuckCell in navigate. */
-  _navStuckTicks = 0
   /**
-   * §168: nav-stuck escape suppression window — while > 0, HUNT keeps the
-   * center escape instead of normal targeting (the trigger alone is not
-   * enough: once the counter resets on leaving the zone, the oscillating
-   * target selection pulls the player straight back into it).
+   * P0.3 + §168: navigate-stuck tracker. `suppress` is the escape window —
+   * while > 0, HUNT keeps the center escape instead of normal targeting (the
+   * trigger alone is not enough: once the counter resets on leaving the zone,
+   * the oscillating target selection pulls the player straight back into it).
    */
-  _navStuckSuppress = 0
+  _navStuckTrack: StuckTrack = newStuckTrack()
 
   /**
    * §169: base-threat sticky hold — while > 0, isBaseUnderThreat() reports
@@ -511,6 +501,18 @@ export class GodAIInput implements InputLike {
   _scanCacheX = NaN
   _scanCacheY = NaN
   _scanCacheMask = 0
+
+  /**
+   * Dedicated reuse buffer for `aimSurvivesTurnImpl`'s post-turn-origin scan
+   * (§3.2, plan/refactor.trae.md). It deliberately does NOT participate in
+   * the `_scanResults[dirIdx]` per-tick memo: that guard scans from a
+   * DIFFERENT origin (the grid-snapped post-turn position) than every other
+   * consumer, and sharing the memo slots is what created the "guard must be
+   * evaluated before any same-direction scan" ordering minefield. With its
+   * own buffer, evaluation order no longer matters; the buffer is still
+   * reused across ticks (zero allocation, §14.2).
+   */
+  _turnSnapScan: ScanResult = makeScanResult()
 
   /** Reusable buffer for scanAheadImpl's per-offset aligned-tank pre-filter.
    * Reset (via alignedCount=0) at the start of each offset — no allocation. */
@@ -855,13 +857,47 @@ export class GodAIInput implements InputLike {
     if (controlledTank) this.controlledTank = controlledTank
   }
 
-  reset(): void {
-    this._moveDir = null
-    this._fire = false
-    this._thought = false
-    this._pressGuard = false // §167
-    this._pressFrenzy = false // §167
-    // §123/§125 (perf): clear the within-tick memo flags on stage reset —
+  // ================================================================
+  // Cache-invalidation registry (§3.3, plan/refactor.trae.md)
+  // ================================================================
+  //
+  // Cross-tick caches used to be invalidated by hand-listing their fields at
+  // every site (reset(), endFrame()) — a new cache had to be remembered in
+  // each place, and missing one was a type-invisible stale-cache bug
+  // (documented incident: three nav caches invalidated separately on stage
+  // reset). The two methods below are now THE single registry:
+  //
+  //   - Adding a cache? Declare the field near its consumers and add ONE
+  //     invalidation line inside the matching group method. Every call site
+  //     that invokes the method picks it up automatically.
+  //   - Never hand-list cache fields at call sites; call the method.
+  //
+  // Lifetime groups mirror how the caches are keyed:
+  //   per-tick memos   → key on world state within one tick → cleared every
+  //                      endFrame() AND on stage reset;
+  //   stage-level nav  → keyed on terrain/revision → cleared ONLY on stage
+  //                      reset (reset() calls both methods).
+  // Targeted mid-think invalidations (e.g. `_navCacheValid = false` after a
+  // blocked nav) stay at their semantic sites — they express "THIS entry is
+  // stale", not "clear the group".
+  // (`_turnSnapScan` needs no entry: scanAheadImpl overwrites every field of
+  // its out buffer before reading it.)
+
+  /** Per-tick lazy memos — pure functions of the current World state.
+   * Called by endFrame() every tick and by reset() on stage transitions. */
+  private invalidatePerTickCaches(): void {
+    this._baseUnderThreatCache = null
+    this._playerCellValid = false
+    this._canMoveComputed = 0
+    this._scanCacheMask = 0 // §123
+    this._selTargetValid = false // §125
+  }
+
+  /** Stage-scoped navigation/path memo families — keyed on terrain content
+   * or revision counters, so they are invalidated ONLY when the stage (and
+   * with it the terrain) changes. */
+  private invalidateStageCaches(): void {
+    // §123/§125 (perf): clear the within-tick memo flags on stage reset too —
     // reset() can run between a think and its endFrame (browser stage
     // transition path), and a stale bit would serve a result computed
     // against the OLD world (player spawn origin is identical every stage).
@@ -869,24 +905,72 @@ export class GodAIInput implements InputLike {
     this._scanCacheX = NaN
     this._scanCacheY = NaN
     this._selTargetValid = false
+    // §161: invalidate the carve-path caches on stage reset (new terrain).
+    this._carvePost = null
+    this._carvePostComputed = false
+    this._carveCosts = null
+    this._carveCostsRev = -1
+    this._carvePathCache = null
+    this._carvePathCacheValid = false
+    this._carvePathTimer = 0
+    // (perf §131) The second-level memo is keyed on terrain — a new stage
+    // invalidates every entry.
+    if (this._carveMemo !== null) this._carveMemo.clear()
+    this._carveMemoRev = -1
+    this._carveMemoBaseCost = -1
+    this._carveMemoMaxBase = -1
+    this._carveMemoTtl = 0
+    // §164: invalidate the mid-lane parry-hold cache on stage reset.
+    this._parryHoldRev = -1
+    this._parryHoldCell = null
+    // §189: invalidate the dig-path cache on stage reset.
+    this._digPathCache = null
+    this._digPathCacheValid = false
+    this._digPathTimer = 0
+    this._digCosts = null
+    this._digCostsRev = -1
+    // §nav-cost: invalidate the base-ring cost cache on stage reset.
+    this._baseRingCosts = null
+    this._baseRingCostsRev = -1
+    // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
+    // stage reset — the next tick must recompute A* from scratch.
+    this._navCacheValid = false
+    this._navReplanTimer = 0
+    this._navBlockedCol = -99
+    this._navBlockedRow = -99
+    // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
+    this._replanCacheValid = false
+    this._replanTimer = 0
+    this._replanRev = -1
+    this._replanBlockedCol = -99
+    this._replanBlockedRow = -99
+    // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
+    for (let i = 0; i < this._pickupReachSlots.length; i++) {
+      this._pickupReachSlots[i].valid = false
+    }
+    this._pickupReachTimer = 0
+  }
+
+  reset(): void {
+    this._moveDir = null
+    this._fire = false
+    this._thought = false
+    this._pressGuard = false // §167
+    this._pressFrenzy = false // §167
+    // §3.3: stage-scoped cache invalidation — the full registry lives in
+    // invalidateStageCaches() above (scan memos + nav/carve/dig/ring/parry/
+    // memo/pickup families).
+    this.invalidateStageCaches()
     this.path = []
     this.replanTimer = 0
     this.reactionCounter = 0
     this.lastThreatId = -1
     this._lastPathCell = null
-    this._campCell = null
-    this._campTicks = 0
-    this._campKillsAtStart = 0
+    // §3.4: fresh zone-stuck trackers (allocation at stage boundaries only).
+    this._campTrack = newStuckTrack()
     this._antiCampSuppress = 0
-    this._aggCampCell = null
-    this._aggCampTicks = 0
-    this._aggCampKillsAtStart = 0
-    this._aggCampSuppress = 0
-    // §152-W2/W3: reset the aggressive-nav stuck guard + pickup commit state.
-    this._aggNavStuckCell = null
-    this._aggNavStuckTicks = 0
-    this._aggNavKillsAtStart = 0
-    this._aggNavSuppress = 0
+    this._aggCampTrack = newStuckTrack()
+    this._aggNavTrack = newStuckTrack()
     this._pickupCommitActive = false
     this._pickupCommitTicks = 0
     this._pickupCommitCol = 0
@@ -897,9 +981,7 @@ export class GodAIInput implements InputLike {
     this._lastDodgeDir = null
     this._lastDodgeThreatId = -1
     this._dodgeFlipCount = 0
-    this._navStuckCell = null
-    this._navStuckTicks = 0
-    this._navStuckSuppress = 0
+    this._navStuckTrack = newStuckTrack()
     this._threatStickyHold = 0 // §169
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
@@ -928,33 +1010,6 @@ export class GodAIInput implements InputLike {
     this._baseGuardAnchor = null
     this._firingLaneCell = null
     this._firingLaneTick = 0
-    // §161: invalidate the carve-path caches on stage reset (new terrain).
-    this._carvePost = null
-    this._carvePostComputed = false
-    this._carveCosts = null
-    this._carveCostsRev = -1
-    this._carvePathCache = null
-    this._carvePathCacheValid = false
-    this._carvePathTimer = 0
-    // (perf §131) The second-level memo is keyed on terrain — a new stage
-    // invalidates every entry.
-    if (this._carveMemo !== null) this._carveMemo.clear()
-    this._carveMemoRev = -1
-    this._carveMemoBaseCost = -1
-    this._carveMemoMaxBase = -1
-    this._carveMemoTtl = 0
-    // §164: invalidate the mid-lane parry-hold cache on stage reset.
-    this._parryHoldRev = -1
-    this._parryHoldCell = null
-    // §189: invalidate the dig-path cache on stage reset.
-    this._digPathCache = null
-    this._digPathCacheValid = false
-    this._digPathTimer = 0
-    this._digCosts = null
-    this._digCostsRev = -1
-    // §nav-cost: invalidate the base-ring cost cache on stage reset.
-    this._baseRingCosts = null
-    this._baseRingCostsRev = -1
     this._baseConnectClearActive = false
     this._baseConnectClearActiveTicks = 0
     // §162: reset the carve-dig session (new stage = new pocket).
@@ -970,28 +1025,11 @@ export class GodAIInput implements InputLike {
     const modelActive = this.params.enemyModelMode > 0 && this.params.enemyModelWindowTicks > 0
     this._enemyModel = initEnemyModel(modelActive)
     this._enemyModelLastHp = this.world.player ? this.world.player.hp : 0
-    // (perf §68 Round 9) Invalidate cross-tick navigateTowards cache on
-    // stage reset — the next tick must recompute A* from scratch.
-    this._navCacheValid = false
-    this._navReplanTimer = 0
-    this._navBlockedCol = -99
-    this._navBlockedRow = -99
-    // (perf §127) Invalidate the cross-tick replan cache on stage reset too.
-    this._replanCacheValid = false
-    this._replanTimer = 0
-    this._replanRev = -1
-    this._replanBlockedCol = -99
-    this._replanBlockedRow = -99
     // §187: reset target blacklist on stage reset.
     this._blacklistEnemyId = -1
     this._blacklistExpiryFrame = 0
     this._lastSelectTargetId = -1
     this._targetStuckTicks = 0
-    // (perf §129) Invalidate the pickup-reachability memo on stage reset too.
-    for (let i = 0; i < this._pickupReachSlots.length; i++) {
-      this._pickupReachSlots[i].valid = false
-    }
-    this._pickupReachTimer = 0
     // Gap B (plan §3): cache whether this stage has a base. All BASE_POS-
     // dependent logic checks this flag instead of assuming a base exists.
     this.hasBase = this.world.tileMap.hasBase()
@@ -1058,12 +1096,9 @@ export class GodAIInput implements InputLike {
     this._thought = false
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
-    // Invalidate per-tick lazy caches.
-    this._baseUnderThreatCache = null
-    this._playerCellValid = false
-    this._canMoveComputed = 0
-    this._scanCacheMask = 0 // §123
-    this._selTargetValid = false // §125
+    // Invalidate per-tick lazy caches (§3.3 registry — full list in
+    // invalidatePerTickCaches()).
+    this.invalidatePerTickCaches()
     // §169: threat-signal sticky hold countdown (runs every tick; 0 = OFF ⇒
     // the branch never executes — byte-identical).
     if (this._threatStickyHold > 0) this._threatStickyHold--
@@ -1082,9 +1117,9 @@ export class GodAIInput implements InputLike {
       // NOT a pocket lock; counting it would trigger a premature dig every
       // stage start, abandoning the base defense for a fresh pocket dig).
       if (p && p.alive && !(p.spawnTimer > 0)) {
-        const dx = p.x - this._digAnchorX
-        const dy = p.y - this._digAnchorY
-        if (Math.abs(dx) + Math.abs(dy) > this.params.carveDigNetEscape) {
+        if (
+          manhattan(p.x, p.y, this._digAnchorX, this._digAnchorY) > this.params.carveDigNetEscape
+        ) {
           // Real movement — re-anchor.
           this._digAnchorX = p.x
           this._digAnchorY = p.y
@@ -1222,9 +1257,6 @@ export class GodAIInput implements InputLike {
   // ================================================================
 
   // --- FireControl ---
-  findEnemyDirection(pcx: number, pcy: number): Direction | null {
-    return findEnemyDirectionImpl(this, pcx, pcy)
-  }
   findEnemyFacingPlayer(
     pcx: number,
     pcy: number,
@@ -1233,111 +1265,8 @@ export class GodAIInput implements InputLike {
     return findEnemyFacingPlayerImpl(this, pcx, pcy, aimDir)
   }
 
-  /**
-   * P1/P2.3: Check if any enemy is threatening the base. An enemy is a
-   * threat if:
-   *   - Within 3 cols of base AND row >= 18 (close lateral threat), OR
-   * Used to skip power-ups/T2a and prioritize defense.
-   */
-  isBaseUnderThreat(): boolean {
-    if (!this.hasBase) return false
-    if (this._baseUnderThreatCache !== null) return this._baseUnderThreatCache
-    const bc = BASE_POS.col
-    const br = BASE_POS.row
-    // P4: race-to-base check — player's distance to the base. If the player
-    // is dead/respawning, treat any near-base enemy as a threat.
-    const p = this.controlledTank(this.world)
-    const pc = p ? this.playerCell() : null
-    const playerDistToBase = pc ? Math.abs(pc.col - bc) + Math.abs(pc.row - br) : Infinity
-    // Cluster C: reuse the per-tick snapshot (falls back to a fresh scan only
-    // if think() hasn't populated it yet — should never happen in normal flow).
-    const list = this._enemies.length > 0 ? this._enemies : this.world.tanks
-    let result = false
-    for (let li = 0; li < list.length; li++) {
-      const t = list[li]
-      if (!t.alive || t.spawnTimer > 0) continue
-      const tc = this.tankCell(t)
-      // Static box: close lateral threat (original P1/P2.3 rule).
-      if (Math.abs(tc.col - bc) <= 3 && tc.row >= 18) {
-        result = true
-        break
-      }
-      // P4: race check — enemy is in the base region AND would beat the
-      // player back to the base (with safety margin). Catches flanking
-      // runners along the map edges that the static box misses (S6 root
-      // cause: base died with the player 20+ cells away behind steel).
-      const enemyDistToBase = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
-      if (
-        enemyDistToBase <= this.params.baseRaceRangeCells &&
-        playerDistToBase + this.params.baseRaceMarginCells >= enemyDistToBase
-      ) {
-        result = true
-        break
-      }
-    }
-    // §88 rule 1: an enemy at/near a threat point (威胁点外 margin 格) also
-    // puts the base into the threatened state — the enemy can shoot the base
-    // from there, so defense must outrank MID-tier pickups and chokepoint
-    // holding. OR'd with the existing box/race detection (never reduces it).
-    if (!result && this.params.chokepointMode > 0) {
-      this.chokepointPlan() // ensure the throttled threat-point cache
-      const plan = this._chokepointPlan
-      if (plan && plan.threatPoints.length > 0 && isThreatStateImpl(this, plan.threatPoints)) {
-        result = true
-      }
-    }
-    // §157: an enemy with a CLEAR SHOT at the base (enemyCanShootBase —
-    // aligned + no brick/steel in between) is a threat regardless of
-    // distance. The static box (row >= 18) and race check (range ≤ 18)
-    // miss enemies firing at the base from far away through cleared lanes.
-    // The next bullet could destroy the base, so defense must activate.
-    // Gated by baseClearShotThreat (0 = OFF, byte-identical).
-    if (!result && this.params.baseClearShotThreat > 0) {
-      for (let li2 = 0; li2 < list.length; li2++) {
-        const t2 = list[li2]
-        if (!t2.alive || t2.spawnTimer > 0) continue
-        if (enemyCanShootBase(this, t2)) {
-          result = true
-          break
-        }
-      }
-    }
-    // §173: factual damage recall — once the base has actually TAKEN A HIT
-    // (baseHp < baseMaxHp), the threat is no longer a prediction: the ring
-    // bricks are breached and direct fire is landing. The predictive checks
-    // above flicker (§169: 9.8 flips/10s before the first hit); damage never
-    // flickers back. OR'd with the existing detection (never reduces it).
-    // baseDamageRecall = 0 → OFF (byte-identical); >0 → the trigger engages
-    // only while the player is farther than this many cells from the base
-    // (arm 1 = unconditional was net −24: the permanent threat cascade hurt
-    // open stages; the probe asymmetry is player-distance, so gate on it).
-    if (!result && this.params.baseDamageRecall > 0) {
-      if (
-        this.world.baseHp < this.world.baseMaxHp &&
-        playerDistToBase > this.params.baseDamageRecall
-      ) {
-        result = true
-      }
-    }
-    // §169: sticky hold — the threat signal flickers as enemies cross the
-    // race-range/alignment boundaries (defeat probe: 9.8 flips/10s before
-    // the base's first hit). Once true, keep it true for threatStickyTicks
-    // so the defense cascade (selectTarget, skipT2aForDefense, item gates,
-    // F5 guard summon, carve gate) stays engaged through the gaps. Only
-    // extends, never shortens; 0 = OFF = byte-identical.
-    if (this.params.threatStickyTicks > 0) {
-      if (result) {
-        this._threatStickyHold = this.params.threatStickyTicks
-      } else if (this._threatStickyHold > 0) {
-        result = true
-      }
-    }
-    this._baseUnderThreatCache = result
-    return result
-  }
-
   // M0.5 (2026-08-03): D1 hasFastThreatNearBase + SmartThreatModel wrappers
-  // (threatScore / smartIsBaseUnderThreat) retired — archived in experimental.ts.
+  // (threatScore / smartIsBaseUnderThreat) retired (experimental.ts since deleted).
 
   scanAhead(pcx: number, pcy: number, dir: Direction): ScanResult {
     return scanAheadImpl(this, pcx, pcy, dir)
@@ -1348,30 +1277,22 @@ export class GodAIInput implements InputLike {
   shouldFireInDir(pcx: number, pcy: number, dir: Direction, allowWallFire = true): boolean {
     return shouldFireInDirImpl(this, pcx, pcy, dir, allowWallFire)
   }
-  /** §152-W1: does the bullet's ACTUAL 6px path hit non-ring steel within
-   * maxDist? Mirrors SimulationCombat.bulletHitsTerrain — see FireControl. */
-  bulletPathSteelBlocked(pcx: number, pcy: number, dir: Direction, maxDist: number): boolean {
-    return bulletPathSteelBlockedImpl(this, pcx, pcy, dir, maxDist)
+
+  /**
+   * P1/P2.3 six-rule base-threat detection with per-tick cache — full docs and
+   * implementation in god/ThreatAssessor.isBaseUnderThreatImpl (§3.9 moved the
+   * 95-line body out of the hub; fields/cache stay here untouched).
+   */
+  isBaseUnderThreat(): boolean {
+    return isBaseUnderThreatImpl(this)
   }
 
   // --- ThreatAssessor ---
   findMostDangerousBullet(pcx: number, pcy: number): Bullet | null {
     return findMostDangerousBulletImpl(this, pcx, pcy)
   }
-  findBulletThreatToBase(): Bullet | null {
-    return findBulletThreatToBaseImpl(this)
-  }
-  baseBulletInterceptCell(bullet: Bullet): Cell | null {
-    return baseBulletInterceptCellImpl(this, bullet)
-  }
-  dodgeDirection(bullet: Bullet, pcx: number, pcy: number): Direction | null {
-    return dodgeDirectionImpl(this, bullet, pcx, pcy)
-  }
   isSafeDir(pcx: number, pcy: number, dir: Direction, excludeBulletId: number): boolean {
     return isSafeDirImpl(this, pcx, pcy, dir, excludeBulletId)
-  }
-  hasEnemyBulletInLine(pcx: number, pcy: number, aimDir: Direction): boolean {
-    return hasEnemyBulletInLineImpl(this, pcx, pcy, aimDir)
   }
   /** §M3-revisit round 3 (DECISIONS §101): terrain-only pinning — true only
    * when BOTH perpendicular dodge directions are impassable (corridor/corner).
@@ -1391,9 +1312,6 @@ export class GodAIInput implements InputLike {
     threshold = 1,
   ): boolean {
     return hasCrossFireBulletImpl(this, pcx, pcy, excludeId, rangeCells, threshold)
-  }
-  findPathThreat(pcx: number, pcy: number, moveDir: Direction, playerSpeed: number): Bullet | null {
-    return findPathThreatImpl(this, pcx, pcy, moveDir, playerSpeed)
   }
   findSafeMoveDir(
     pcx: number,
@@ -1439,21 +1357,9 @@ export class GodAIInput implements InputLike {
   }
   /** E1 / 道具经济: dire-state item pickup (swarm or ring-damaged → nearby
    * bomb/freeze/fence/emp worth a divert). 0 = OFF (byte-identical). */
-  findDireItemTarget(pcx: number, pcy: number): Cell | null {
-    return findDireItemTargetImpl(this, pcx, pcy)
-  }
   /** §6.3-A: P2 dual central breach fence pickup (bypasses all gates). */
-  findDualFencePickup(pcx: number, pcy: number): Cell | null {
-    return findDualFencePickupImpl(this, pcx, pcy)
-  }
   /** §156: freeze-window power-up pickup (unlimited range). */
-  findFreezePickupTarget(pcx: number, pcy: number): Cell | null {
-    return findFreezePickupTargetImpl(this, pcx, pcy)
-  }
   /** §158: non-freeze close-range power-up pickup. */
-  findClosePickupTarget(pcx: number, pcy: number): Cell | null {
-    return findClosePickupTargetImpl(this, pcx, pcy)
-  }
   calculateRouteDanger(fromX: number, fromY: number, toX: number, toY: number): number {
     return calculateRouteDangerImpl(this, fromX, fromY, toX, toY)
   }
@@ -1531,9 +1437,6 @@ export class GodAIInput implements InputLike {
   followPath(): Direction | null {
     return followPathImpl(this)
   }
-  replan(playerCell: Cell): void {
-    replanImpl(this, playerCell)
-  }
   directMove(playerCell: Cell): Direction | null {
     return directMoveImpl(this, playerCell)
   }
@@ -1543,6 +1446,45 @@ export class GodAIInput implements InputLike {
   canMoveDir(tank: Tank, dir: Direction): boolean {
     return canMoveDirImpl(this, tank, dir)
   }
-  // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired —
-  // archived in experimental.ts for the v2 survive candidate.
+  // M0.5 (2026-08-03): trapAvoidance + computeThreatCosts wrappers retired;
+  // recoverable from git history if the v2 survive candidate needs them.
+}
+
+/**
+ * Single-point telemetry bookkeeping for the decision chain (refactor.trae
+ * §1.4). Candidates and the shell's dead/hold early-outs route ALL
+ * `branchCounts`/`_lastBranch` writes through the three helpers below — one
+ * place to change if the profiling surface ever evolves. Pure observation:
+ * no World mutation, no RNG, no serialization. Replay- and determinism-safe.
+ */
+
+/**
+ * Count a commit under `countKey` and label the tick `label ?? countKey`.
+ * The common shape: counter key and _lastBranch label are the same string
+ * (e.g. recordBranch(self, 'navigate')). Pass a distinct `label` when the
+ * counter aggregates several sub-branches (unifiedCandidates →
+ * candidateKill/candidateIntercept/candidateClear/candidateReturn).
+ */
+export function recordBranch(self: GodAIInput, countKey: string, label?: string): void {
+  const bc = self.branchCounts as Record<string, number>
+  bc[countKey] = (bc[countKey] ?? 0) + 1
+  self._lastBranch = label ?? countKey
+}
+
+/**
+ * Label-only variant: this tick's decision belongs to `label`, but no commit
+ * is counted (pre-reaction dodge hold, stop-and-aim sub-branches that share
+ * the aggressive candidate's existing count semantics).
+ */
+export function markBranch(self: GodAIInput, label: string): void {
+  self._lastBranch = label
+}
+
+/**
+ * Count-only variant: an internal gate fired (once per tick), but whichever
+ * candidate eventually commits owns the tick's `_lastBranch` label.
+ */
+export function countBranch(self: GodAIInput, countKey: string): void {
+  const bc = self.branchCounts as Record<string, number>
+  bc[countKey] = (bc[countKey] ?? 0) + 1
 }

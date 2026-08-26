@@ -18,29 +18,9 @@ import { writeFileSync } from 'node:fs'
 import { STAGES } from '../../src/config/stages'
 import { runSimulation } from '../sim/simulation-runner'
 import type { PlayerDeath } from '../sim/simulation-runner'
+import { arg, parseStages } from '../lib/cli'
 
 const MAX_TICKS = 18000
-
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback
-}
-
-function parseStages(spec: string | undefined): number[] {
-  if (!spec) return STAGES.map((_, i) => i)
-  const out: number[] = []
-  for (const part of spec.split(',')) {
-    const m = /^(\d+)-(\d+)$/.exec(part.trim())
-    if (m) {
-      // CLI is 1-based (1..35); internal index is 0-based.
-      for (let i = Number(m[1]); i <= Number(m[2]); i++) out.push(i - 1)
-    } else {
-      const n = Number(part.trim())
-      if (Number.isInteger(n) && n >= 1 && n <= STAGES.length) out.push(n - 1)
-    }
-  }
-  return out
-}
 
 interface DeathRow extends PlayerDeath {
   stage: string

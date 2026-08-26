@@ -37,44 +37,15 @@ import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask, SimTaskResult } from '../sim/sim-worker'
+import { arg, parseSeeds, parseStages } from '../lib/cli'
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : undefined
-}
-
-function parseSeeds(spec: string | undefined): number[] {
-  // "1-60" range, "60" count (seeds 1..N), or "1,3,5" list.
-  if (!spec) return Array.from({ length: 120 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    return Array.from({ length: n }, (_, i) => i + 1)
-  }
-  return s.split(',').map(Number)
-}
+const seeds = parseSeeds(arg('seeds'))
+const stageIdxs = parseStages(arg('stages'))
 
 const difficulties = (arg('difficulty') ?? 'hard,chaos')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean)
-const seeds = parseSeeds(arg('seeds'))
-const stageSpec = arg('stages') ?? 'all'
-const stageIdxs =
-  stageSpec === 'all'
-    ? STAGES.map((_, i) => i)
-    : stageSpec
-        .split(',')
-        .map((n) => Number(n.trim()) - 1)
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
-if (stageIdxs.length === 0) {
-  console.error('ab-fire-guard: --stages: no valid stage indexes (1..35)')
-  process.exit(1)
-}
 const modes = (arg('mode') ?? '1,2')
   .split(',')
   .map((n) => Number(n.trim()))

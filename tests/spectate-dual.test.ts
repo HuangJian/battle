@@ -3,14 +3,13 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { RNG } from '../src/utils/RNG'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
+import { makeTank, seedWorld } from './helpers'
 import { computePlayer2SpawnCol } from '../src/utils/helpers'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { THEMES } from '../src/config/theme'
 import { STAGES } from '../src/config/stages'
 import type { InputLike } from '../src/game/Input'
-import type { Tank } from '../src/types'
-import { TANK } from '../src/constants'
 
 // ================================================================
 // 督战双玩家 (dual supervise) — God AI drives BOTH player1 and player2.
@@ -22,8 +21,7 @@ import { TANK } from '../src/constants'
 // ================================================================
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.themeKey = 'classic'
@@ -36,46 +34,6 @@ function makeWorld(seed = 42): World {
   world.spectate = false
   world.spectateDual = false
   return world
-}
-
-function makeTank(overrides: Partial<Tank> = {}): Tank {
-  return {
-    id: 0,
-    kind: 'basic',
-    x: 100,
-    y: 100,
-    w: TANK,
-    h: TANK,
-    dir: 'up',
-    speed: 1,
-    moving: false,
-    alive: true,
-    hp: 1,
-    maxHp: 1,
-    level: 0,
-    spawnTimer: 0,
-    shieldTimer: 0,
-    lastFire: 0,
-    nextFireInterval: 500,
-    fireCooldown: 0,
-    fireCount: 0,
-    bulletPower: 1,
-    damage: 1,
-    bulletSpeed: 3,
-    vx: 0,
-    vy: 0,
-    profile: {
-      firepower: 50,
-      projectileSpeed: 50,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    },
-    allegiance: 'player',
-    isPlayer: true,
-    ...overrides,
-  }
 }
 
 /** A minimal InputLike that never moves or fires (idle keyboard). */

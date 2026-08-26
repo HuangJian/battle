@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 /**
  * Classic movement speed — faithful 1985 FC Battle City.
  *
@@ -15,10 +16,9 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
+
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { profileToStats } from '../src/config/combat'
 import { cpsToPxPerTick } from '../src/config/speed'
 import type { TankKind } from '../src/types'
@@ -32,8 +32,7 @@ const FC_CPS: Record<TankKind, number> = {
 }
 
 function classicRules() {
-  const w = new World()
-  w.rng = new RNG(1)
+  const w = seedWorld(1)
   new Simulation(w, new Input())
   w.startGame('classic', 'modern', 0)
   return w.rules
@@ -72,8 +71,7 @@ describe('classic movement speed — faithful FC table via config', () => {
   it('modern balanced speed matches classic (both 3.75 cps, same baseline)', () => {
     const classic = classicRules()
     const modern = (() => {
-      const w = new World()
-      w.rng = new RNG(1)
+      const w = seedWorld(1)
       new Simulation(w, new Input())
       w.startGame('hard', 'modern', 0)
       return w.rules

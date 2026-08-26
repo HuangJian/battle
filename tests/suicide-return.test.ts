@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import {
   canShootEnemyFrom,
@@ -11,7 +10,8 @@ import {
   controlledLives,
   findSuicideTargetImpl,
 } from '../src/ai/god/SuicideReturn'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { clearArena, placeEnemy, makeBullet as makeBulletShared, seedWorld } from './helpers'
+import { CELL } from '../src/constants'
 import type { Bullet, Tank } from '../src/types'
 
 /**
@@ -30,50 +30,22 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, suicideReturnMode: 1, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.reset()
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], damage = 100, speed = 4): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'basic',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed,
-    power: 1,
-    damage,
-  }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], damage = 100, speed = 4): Bullet =>
+  makeBulletShared({ x, y, dir, damage, speed, ownerKind: 'basic' })
 
 function positionPlayer(world: World, x: number, y: number): void {
   const p = world.player!
@@ -208,8 +180,7 @@ describe('controlledLives', () => {
   })
 
   it('coop (controls P2) → world.lives2', () => {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     world.coop = true
     const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS }, undefined, (w) => w.player2)
     world.startGame('classic', 'modern', 0)

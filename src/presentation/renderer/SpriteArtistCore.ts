@@ -1,7 +1,15 @@
 import type { ThemeColors } from '../../types'
 import type { Direction } from '../../constants'
+import { TANK_KEY_MAP, ITEM_KEY_MAP } from './SpriteKeyMaps'
 import type { SpriteLibrary } from './SpriteLibrary'
 import type { SpriteCache } from './SpriteCache'
+import { TerrainSpriteSlice } from './SpriteArtistTerrain'
+import { TankSpriteSlice } from './SpriteArtistTanks'
+import { EffectSpriteSlice } from './SpriteArtistEffects'
+
+// Registry-derived key maps (§2.2) — re-exported here so existing consumers
+// (slices, SpriteCache-adjacent code) keep their import path.
+export { TANK_KEY_MAP, ITEM_KEY_MAP }
 
 /**
  * Draw a single water tile (procedural, theme-aware, phase-animated) into `ctx`
@@ -41,6 +49,60 @@ export function drawWaterTile(
     ctx.fillRect(x + s * 2, y + s - 2, s * 2, 1)
     ctx.fillRect(x + s, y + s * 3 - 2, s * 2, 1)
   }
+}
+
+/**
+ * Power-up glow pulse frequency — single source for `drawPowerUp`'s pulse
+ * (`sin(frame * POWERUP_GLOW_FREQ)`) and the pre-rendered glow buckets
+ * (`auraBucket(frame, POWERUP_GLOW_FREQ)`). Lives here so both SpriteCache
+ * and the effects slice import ONE constant instead of a literal that had to
+ * be kept in sync by hand (plan/refactor.trae.md §2.3).
+ */
+export const POWERUP_GLOW_FREQ = 0.11
+
+/**
+ * Paint the power-up glow halo (golden radial gradient) centered at (cx, cy)
+ * for a CELL-sized power-up at pulse `p` ∈ [0, 1].
+ *
+ * Single source for BOTH consumers that used to hand-copy this math
+ * (plan/refactor.trae.md §2.3):
+ *  - SpriteCache.rebuildPowerUpGlow — bakes it into 16 pulse-bucket bitmaps;
+ *  - EffectSpriteSlice.drawPowerUpGlowDirect — per-frame fallback when no
+ *    cache bitmap exists.
+ * Pixel-identical between the two paths by construction.
+ */
+export function paintPowerUpGlow(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  p: number,
+): void {
+  const glowR = size * (0.66 + 0.06 * p)
+  const g = ctx.createRadialGradient(cx, cy, size * 0.12, cx, cy, glowR)
+  g.addColorStop(0, `rgba(255, 224, 130, ${0.4 + 0.22 * p})`)
+  g.addColorStop(0.55, `rgba(255, 200, 70, ${0.16 + 0.1 * p})`)
+  g.addColorStop(1, 'rgba(255, 200, 70, 0)')
+  const prevFill = ctx.fillStyle
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = prevFill
+}
+
+/**
+ * Explosion bitmap draw geometry shared by the cached-blit and SVG-fallback
+ * paths of drawExplosion: grown side length at progress `progress`.
+ * `grow` = extra expansion for big vs small blasts.
+ */
+export function explosionSizeAt(size: number, progress: number, kind: 'small' | 'big'): number {
+  return size * (0.6 + progress * (1.0 + (kind === 'big' ? 1.0 : 0.7)))
+}
+
+/** Explosion fade alpha at progress: opaque until 70%, then linear to 0. */
+export function explosionAlphaAt(progress: number): number {
+  return progress < 0.7 ? 1 : Math.max(0, 1 - (progress - 0.7) / 0.3)
 }
 
 // ================================================================
@@ -310,30 +372,6 @@ export function drawCommanderAuraPaths(
   ctx.fill()
 }
 
-/** Maps enemy tank kind → sprite key (module-level to avoid per-call allocation). */
-export const TANK_KEY_MAP: Record<string, string> = {
-  basic: 'tank.basic',
-  fast: 'tank.fast',
-  power: 'tank.power',
-  armor: 'tank.armor',
-}
-
-/** Maps power-up type → sprite key (module-level to avoid per-call allocation). */
-export const ITEM_KEY_MAP: Record<string, string> = {
-  star: 'item.star',
-  bomb: 'item.bomb',
-  shield: 'item.shield',
-  freeze: 'item.freeze',
-  tank: 'item.tank',
-  fence: 'item.fence',
-  boat: 'item.boat',
-  frenzy: 'item.frenzy',
-  sacrifice: 'item.sacrifice',
-  guard: 'item.guard',
-  repair: 'item.repair',
-  decoy: 'item.decoy',
-}
-
 /**
  * SpriteArtist — enhanced programmatic sprite drawing.
  * Draws all game sprites with Canvas 2D primitives at higher visual quality.
@@ -375,16 +413,25 @@ export class SpriteArtistCore {
    * ``${fontSize}:${text}`` — that template string was 1 allocation per
    * power-up per frame.
    */
-  protected digitWidthCache: Record<number, Record<string, number>> = {}
+  digitWidthCache: Record<number, Record<string, number>> = {}
 
   /**
    * Cached `ctx.font` strings per `fontSize` (P0 GC fix). Power-ups are always
    * CELL-sized, so `fontSize` is constant → the font string is computed once
    * and reused. Avoids a template-string allocation per power-up per frame.
    */
-  protected fontStringCache: Record<number, string> = {}
+  fontStringCache: Record<number, string> = {}
+
+  // ---- Subsystem slices (§1.1 composition; back-references only) ----
+  private readonly spriteTerrainSlice: TerrainSpriteSlice
+  private readonly tankSpriteSlice: TankSpriteSlice
+  private readonly spriteEffectSlice: EffectSpriteSlice
 
   constructor(ctx: CanvasRenderingContext2D, theme: ThemeColors) {
+    // Slices take a back-reference; bodies never run during construction.
+    this.spriteTerrainSlice = new TerrainSpriteSlice(this)
+    this.tankSpriteSlice = new TankSpriteSlice(this)
+    this.spriteEffectSlice = new EffectSpriteSlice(this)
     this.ctx = ctx
     this.theme = theme
   }
@@ -407,7 +454,7 @@ export class SpriteArtistCore {
    * Returns false when the sprite is not loaded, so callers can fall back
    * to the procedural drawing.
    */
-  protected drawSvgCentered(
+  drawSvgCentered(
     key: string,
     x: number,
     y: number,
@@ -439,143 +486,136 @@ export class SpriteArtistCore {
   }
 
   // ================================================================
-  // Subsystem stubs — overridden by the SpriteArtist*Mixin classes
-  // (Terrain / Tanks / Effects). Throwing stubs keep the public draw*
-  // API type-safe before composition.
+  // Public draw* API — thin delegators into the three slices below.
+  //
+  // This is deliberate, NOT dead forwarding: the slices call each other's
+  // draws through this facade (`this.r.drawCommanderAura(...)` from
+  // TankSpriteSlice etc.), and it keeps every external caller — renderer
+  // slices, tests, tools — on one stable surface regardless of which slice
+  // owns the body today. Parameter names are the real drawing coordinates.
   // ================================================================
 
-  // ---- Terrain (SpriteArtistTerrainMixin) ----
-  drawBrick(_x: number, _y: number, _size: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  // ---- Terrain (bodies: spriteTerrainSlice) ----
+  drawBrick(x: number, y: number, size: number): void {
+    this.spriteTerrainSlice.drawBrick(x, y, size)
   }
-  drawSteel(
-    _x: number,
-    _y: number,
-    _size: number,
-    _n = false,
-    _e = false,
-    _s = false,
-    _w = false,
-  ): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  drawSteel(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
+    this.spriteTerrainSlice.drawSteel(x, y, size, n, e, s, w)
   }
-  drawWater(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  drawWater(x: number, y: number, size: number, frame: number): void {
+    this.spriteTerrainSlice.drawWater(x, y, size, frame)
   }
-  drawForest(_x: number, _y: number, _size: number): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  drawForest(x: number, y: number, size: number): void {
+    this.spriteTerrainSlice.drawForest(x, y, size)
   }
-  drawIce(
-    _x: number,
-    _y: number,
-    _size: number,
-    _n = false,
-    _e = false,
-    _s = false,
-    _w = false,
-  ): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  drawIce(x: number, y: number, size: number, n = false, e = false, s = false, w = false): void {
+    this.spriteTerrainSlice.drawIce(x, y, size, n, e, s, w)
   }
-  drawBase(_x: number, _y: number, _size: number, _destroyed: boolean, _damage = 0): void {
-    throw new Error('stub: SpriteArtistTerrainMixin')
+  drawBase(x: number, y: number, size: number, destroyed: boolean, damage = 0): void {
+    this.spriteTerrainSlice.drawBase(x, y, size, destroyed, damage)
   }
-  // ---- Tanks (SpriteArtistTanksMixin) ----
+  // ---- Tanks (bodies: tankSpriteSlice) ----
   drawTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _bodyColor: string,
-    _turretColor: string,
-    _animFrame: number,
-    _level = 0,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    bodyColor: string,
+    turretColor: string,
+    animFrame: number,
+    level = 0,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawTank(x, y, size, dir, bodyColor, turretColor, animFrame, level)
   }
   drawPlayerTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _level: number,
-    _animFrame: number,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    level: number,
+    animFrame: number,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawPlayerTank(x, y, size, dir, level, animFrame)
   }
   drawPlayer2Tank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _level: number,
-    _animFrame: number,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    level: number,
+    animFrame: number,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawPlayer2Tank(x, y, size, dir, level, animFrame)
   }
   drawEnemyTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _kind: string,
-    _animFrame: number,
-    _flash: boolean,
-    _hp: number,
-    _hitStage = 0,
-    _isCommander = false,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    kind: string,
+    animFrame: number,
+    flash: boolean,
+    hp: number,
+    hitStage = 0,
+    isCommander = false,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawEnemyTank(
+      x,
+      y,
+      size,
+      dir,
+      kind,
+      animFrame,
+      flash,
+      hp,
+      hitStage,
+      isCommander,
+    )
   }
   drawAllyTank(
-    _x: number,
-    _y: number,
-    _size: number,
-    _dir: Direction,
-    _animFrame: number,
-    _isDecoy = false,
+    x: number,
+    y: number,
+    size: number,
+    dir: Direction,
+    animFrame: number,
+    isDecoy = false,
   ): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+    this.tankSpriteSlice.drawAllyTank(x, y, size, dir, animFrame, isDecoy)
   }
-  drawAllyAura(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+  drawAllyAura(x: number, y: number, size: number, frame: number): void {
+    this.tankSpriteSlice.drawAllyAura(x, y, size, frame)
   }
-  drawInsignia(_x: number, _y: number, _size: number, _level: string, _isCommander = false): void {
-    throw new Error('stub: SpriteArtistTanksMixin')
+  drawInsignia(x: number, y: number, size: number, level: string, isCommander = false): void {
+    this.tankSpriteSlice.drawInsignia(x, y, size, level, isCommander)
   }
-  // ---- Effects (SpriteArtistEffectsMixin) ----
-  drawBullet(_x: number, _y: number, _size: number, _dir: Direction): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  // ---- Effects (bodies: spriteEffectSlice) ----
+  drawBullet(x: number, y: number, size: number, dir: Direction): void {
+    this.spriteEffectSlice.drawBullet(x, y, size, dir)
   }
   drawPowerUp(
-    _x: number,
-    _y: number,
-    _size: number,
-    _type: string,
-    _frame: number,
-    _lifeTimer?: number,
-    _maxLife?: number,
+    x: number,
+    y: number,
+    size: number,
+    type: string,
+    frame: number,
+    lifeTimer?: number,
+    maxLife?: number,
   ): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+    this.spriteEffectSlice.drawPowerUp(x, y, size, type, frame, lifeTimer, maxLife)
   }
-  drawSpawn(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  drawSpawn(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawSpawn(x, y, size, frame)
   }
-  drawShield(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  drawShield(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawShield(x, y, size, frame)
   }
-  drawExplosion(
-    _x: number,
-    _y: number,
-    _size: number,
-    _progress: number,
-    _kind: 'small' | 'big',
-  ): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  drawExplosion(x: number, y: number, size: number, progress: number, kind: 'small' | 'big'): void {
+    this.spriteEffectSlice.drawExplosion(x, y, size, progress, kind)
   }
-  drawHpLevelAura(_x: number, _y: number, _size: number, _hpLevel: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  drawHpLevelAura(x: number, y: number, size: number, hpLevel: number, frame: number): void {
+    this.spriteEffectSlice.drawHpLevelAura(x, y, size, hpLevel, frame)
   }
-  drawCommanderAura(_x: number, _y: number, _size: number, _frame: number): void {
-    throw new Error('stub: SpriteArtistEffectsMixin')
+  drawCommanderAura(x: number, y: number, size: number, frame: number): void {
+    this.spriteEffectSlice.drawCommanderAura(x, y, size, frame)
   }
 }

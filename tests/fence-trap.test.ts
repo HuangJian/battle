@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL, TANK, BASE_POS } from '../src/constants'
 import { STAGES } from '../src/config/stages'
 import { DIFFICULTIES } from '../src/config/difficulty'
@@ -20,8 +20,7 @@ import { RULES } from '../src/config/rules'
  */
 describe('§189 fence power-up pushes tanks outside the ring', () => {
   function setup(): { world: World; sim: Simulation } {
-    const world = new World()
-    world.rng = new RNG(42)
+    const world = seedWorld(42)
     const input = new Input()
     const sim = new Simulation(world, input)
     world.difficultyKey = 'hard'
@@ -56,7 +55,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     expect(world.tileMap.get(14, 25)).toBe('empty')
 
     // Apply fence power-up.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // The tank should have been pushed outside the ring (position changed).
     const moved = p.x !== originalX || p.y !== originalY
@@ -84,7 +83,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     p.dir = 'right'
 
     // Apply fence.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // Player should be able to move from the pushed position.
     // Try multiple directions to ensure the tank is not boxed in.
@@ -109,7 +108,7 @@ describe('§189 fence power-up pushes tanks outside the ring', () => {
     p.dir = 'right'
 
     // Apply fence.
-    ;(sim as unknown as { applyFencePowerUp: () => void }).applyFencePowerUp()
+    sim.systems.powerUps.applyFencePowerUp()
 
     // Simulate movement in each direction — the tank should be able to move
     // at least one direction for 24 ticks (0.7px/tick × 24 ≈ 17px).

@@ -70,12 +70,8 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { isDefenseBranch } from './failure-classifier'
 
+import { arg } from '../lib/cli'
 // ---------------------------------------------------------------- CLI args
-
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
 
 const fromJson = arg('from-json')
 const kinds = new Set((arg('kinds') ?? 'base_destroyed').split(',').map((s) => s.trim()))

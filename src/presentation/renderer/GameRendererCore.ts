@@ -1,5 +1,4 @@
 import type { World } from '../../game/World'
-import type { TileMap } from '../../game/TileMap'
 import { FIELD, GRID } from '../../constants'
 import { SpriteArtist } from './SpriteArtist'
 import type { SpriteLibrary } from './SpriteLibrary'
@@ -8,11 +7,23 @@ import type { Camera } from '../Camera'
 import type { AnimationSystem } from '../AnimationSystem'
 import type { ParticleSystem } from '../ParticleSystem'
 import type { EffectsSystem } from '../EffectsSystem'
-import type { ThemeColors, TerrainType, Tank } from '../../types'
+import type { ThemeColors, Tank } from '../../types'
 import { createOffscreenCanvas } from '../../utils/canvas'
+import { TerrainRenderSlice } from './GameRendererTerrain'
+import { EntityRenderSlice } from './GameRendererEntities'
+import { EffectsRenderSlice } from './GameRendererEffects'
 
 /**
  * GameRenderer — renders the game world to a canvas.
+ *
+ * Structure (§1.1 composition): this class is the composition root and the
+ * only entry point callers see. Rendering bodies live in three slice objects
+ * constructed in the constructor — {@link TerrainRenderSlice} (terrain/water/
+ * forest/vignette caches), {@link EntityRenderSlice} (tanks/bullets/power-ups),
+ * {@link EffectsRenderSlice} (explosions/particles/popups/flash). `render()`
+ * below is the frame orchestrator: it drives the slices in draw order. The
+ * slices hold a back-reference to this Core (`r`) for shared fields (ctx,
+ * caches, camera transform); they never call each other directly.
  *
  * Advanced performance techniques:
  * 1. Terrain cache: static tiles (brick/steel/ice/base) pre-rendered to
@@ -31,9 +42,9 @@ export class GameRendererCore {
   ctx: CanvasRenderingContext2D
   canvas: HTMLCanvasElement
   artist: SpriteArtist
-  protected camera: Camera
-  protected animations: AnimationSystem
-  protected particles: ParticleSystem
+  camera: Camera
+  animations: AnimationSystem
+  particles: ParticleSystem
   private effects: EffectsSystem
 
   private dpr: number
@@ -61,13 +72,13 @@ export class GameRendererCore {
   private _origStrokeRect: ((...a: any[]) => void) | null = null
 
   // ---- Terrain cache (static: brick/steel/ice/base, NO water, NO grid) ----
-  protected terrainCache: CanvasImageSource
-  protected terrainCacheCtx: CanvasRenderingContext2D
-  protected terrainCacheDirty = true
+  terrainCache: CanvasImageSource
+  terrainCacheCtx: CanvasRenderingContext2D
+  terrainCacheDirty = true
 
   // ---- Forest cache ----
-  protected forestCache: CanvasImageSource
-  protected forestCacheCtx: CanvasRenderingContext2D
+  forestCache: CanvasImageSource
+  forestCacheCtx: CanvasRenderingContext2D
   /**
    * Whether the stage has any forest tiles. Compositing the full 1024×1024
    * forest surface costs a full-screen drawImage every frame even though it is
@@ -78,19 +89,19 @@ export class GameRendererCore {
    * prototyped and rejected because the 9-arg drawImage is ~2-3× slower than
    * the whole-image fast path in the Skia backend.
    */
-  protected hasForest = false
+  hasForest = false
 
   // ---- Water cell positions (for direct rendering each frame) ----
-  protected waterCells: Array<{ c: number; r: number }> = []
+  waterCells: Array<{ c: number; r: number }> = []
 
   // ---- Vignette cache (offscreen canvas per theme) ----
-  protected vignetteCanvas: CanvasImageSource
-  protected vignetteCtx: CanvasRenderingContext2D
-  protected vignetteDirty = true
+  vignetteCanvas: CanvasImageSource
+  vignetteCtx: CanvasRenderingContext2D
+  vignetteDirty = true
 
   // ---- Gradient cache ----
-  protected cachedBgGradient: CanvasGradient | null = null
-  protected cachedTheme: ThemeColors | null = null
+  cachedBgGradient: CanvasGradient | null = null
+  cachedTheme: ThemeColors | null = null
   /**
    * Bg gradient + theme cached for the TERRAIN CACHE context (R5-A). A separate
    * gradient is required because `CanvasGradient` objects are tied to the context
@@ -99,20 +110,20 @@ export class GameRendererCore {
    * per-frame full-field `fillRect` is eliminated (camera-at-rest path: a single
    * opaque `drawImage` replaces `fillRect` + alpha-blended `drawImage`).
    */
-  protected cachedCacheBgGradient: CanvasGradient | null = null
-  protected cachedCacheTheme: ThemeColors | null = null
+  cachedCacheBgGradient: CanvasGradient | null = null
+  cachedCacheTheme: ThemeColors | null = null
 
   // ---- Water sprite cache (theme-aware, phase-animated) ----
   private waterSpriteDirty = true
   private bulletSpriteDirty = true
 
   /** Base (eagle) damage fraction 0..1, derived from world each frame. */
-  protected baseDamageFrac = 0
+  baseDamageFrac = 0
 
   // ---- Base transform components (for allocation-free debris rendering) ----
-  protected _baseDpr = 1
-  protected _baseCamX = 0
-  protected _baseCamY = 0
+  _baseDpr = 1
+  _baseCamX = 0
+  _baseCamY = 0
 
   // ---- Reusable buffers for incremental terrain cache rebuild (P1) ----
   // Replaces a per-call `new Set<number>(tm.dirtyCells)` + 4-element neighbor
@@ -123,8 +134,13 @@ export class GameRendererCore {
   // `_dirtyMark` is a 676-byte flat tag grid (1 = cell needs repaint, 0 = skip).
   // `_dirtyList` is the sparse list of marked indices, reset to length=0 after
   // each rebuild. Both are zero-allocation in steady state.
-  protected _dirtyMark = new Uint8Array(GRID * GRID)
-  protected _dirtyList: number[] = []
+  _dirtyMark = new Uint8Array(GRID * GRID)
+  _dirtyList: number[] = []
+
+  // ---- Subsystem slices (§1.1 composition; back-references only) ----
+  private readonly terrainSlice: TerrainRenderSlice
+  private readonly entitySlice: EntityRenderSlice
+  private readonly effectsSlice: EffectsRenderSlice
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -135,6 +151,11 @@ export class GameRendererCore {
     dpr: number = 1,
     lib?: SpriteLibrary,
   ) {
+    // Slices take a back-reference; bodies never run during construction.
+    this.terrainSlice = new TerrainRenderSlice(this)
+    this.entitySlice = new EntityRenderSlice(this)
+    this.effectsSlice = new EffectsRenderSlice(this)
+
     this.canvas = canvas
     this.dpr = dpr
     canvas.width = FIELD * dpr
@@ -319,43 +340,43 @@ export class GameRendererCore {
     //   eat a large fraction of the frame budget.
     //   Camera shifted (shake/pan): fill the overscroll border with bg first so
     //   no stale pixels leak at the edges, then blit the cache over the interior.
-    this.updateTerrainCache(world)
+    this.terrainSlice.updateTerrainCache(world)
     if (cam.x !== 0 || cam.y !== 0) {
-      this.fillBackground(world)
+      this.terrainSlice.fillBackground(world)
     }
-    this.blitTerrain()
+    this.terrainSlice.blitTerrain()
 
     // 3. Water tiles (drawn directly — cheap, few tiles, animated)
     if (this.waterSpriteDirty) {
       this.artist.spriteCache?.rebuildWater(world.theme)
       this.waterSpriteDirty = false
     }
-    this.renderWater(world)
+    this.terrainSlice.renderWater(world)
 
     // 4. Tanks
-    this.renderTanks(world, tanks ?? world.allTanks)
+    this.entitySlice.renderTanks(world, tanks ?? world.allTanks)
 
     // 5. Bullets (rebuild the theme-colored bullet bitmap if the theme changed)
     if (this.bulletSpriteDirty) {
       this.artist.spriteCache?.rebuildBullet(world.theme)
       this.bulletSpriteDirty = false
     }
-    this.renderBullets(world)
+    this.entitySlice.renderBullets(world)
 
     // 6. Power-ups
-    this.renderPowerUps(world)
+    this.entitySlice.renderPowerUps(world)
 
     // 7. Forest (cached, drawn on top of tanks for hiding)
-    this.blitForest()
+    this.terrainSlice.blitForest()
 
     // 8. Explosions
-    this.renderExplosions(world)
+    this.effectsSlice.renderExplosions(world)
 
     // 9. Particles (batched by type)
-    this.renderParticles()
+    this.effectsSlice.renderParticles()
 
     // 10. Score popups
-    this.renderPopups(world)
+    this.effectsSlice.renderPopups(world)
 
     // Reset transform for screen-space effects
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -375,81 +396,7 @@ export class GameRendererCore {
     // estimated 7–14ms on a 20-year-old machine without GPU). The vignette is
     // purely decorative — its absence does not affect gameplay readability.
     if (!this.lowQuality) {
-      this.drawVignette(world)
+      this.effectsSlice.drawVignette(world)
     }
-  }
-
-  // ================================================================
-  // Subsystem stubs — overridden by the GameRenderer*Mixin classes
-  // (terrain/water, entities, effects). Throwing stubs keep the render()
-  // orchestrator type-safe before composition.
-  // ================================================================
-
-  protected blitTerrain(): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected blitForest(): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected recomputeHasForest(_tm: TileMap): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected fillBackground(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected paintCacheBg(
-    _ctx: CanvasRenderingContext2D,
-    _x: number,
-    _y: number,
-    _w: number,
-    _h: number,
-    _theme: ThemeColors,
-  ): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected updateTerrainCache(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected neighborMask(_tm: TileMap, _c: number, _r: number, _type: TerrainType): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected redrawTerrainCell(_c: number, _r: number, _type: TerrainType, _tm: TileMap): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected redrawForestCell(_c: number, _r: number): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected rebuildTerrainCache(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected rebuildForestCache(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected scanWaterCells(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected renderWater(_world: World): void {
-    throw new Error('stub: GameRendererTerrainMixin')
-  }
-  protected renderTanks(_world: World, _tanks: Tank[]): void {
-    throw new Error('stub: GameRendererEntitiesMixin')
-  }
-  protected renderBullets(_world: World): void {
-    throw new Error('stub: GameRendererEntitiesMixin')
-  }
-  protected renderPowerUps(_world: World): void {
-    throw new Error('stub: GameRendererEntitiesMixin')
-  }
-  protected renderExplosions(_world: World): void {
-    throw new Error('stub: GameRendererEffectsMixin')
-  }
-  protected renderParticles(): void {
-    throw new Error('stub: GameRendererEffectsMixin')
-  }
-  protected renderPopups(_world: World): void {
-    throw new Error('stub: GameRendererEffectsMixin')
-  }
-  protected drawVignette(_world: World): void {
-    throw new Error('stub: GameRendererEffectsMixin')
   }
 }

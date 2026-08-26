@@ -1,5 +1,18 @@
 import type { World } from '../game/World'
-import type { GameEvent, EmitterConfig, Tank } from '../types'
+import type { GameEvent, Tank } from '../types'
+// ── Registered invariant exception (§2.5) ──────────────────────────────────
+// Presentation is read-only on the World — with ONE registered exception:
+// the renderer CONSUMES TileMap.dirty / dirtyCells (clears them after using
+// them to invalidate its terrain cache). The full protocol — who sets, who
+// consumes, order constraints — is documented at the `dirty` declaration in
+// ../game/TileMap.ts. Do not add a second presentation-side mutation.
+import {
+  makeSparkEmitter,
+  makeDebrisEmitter,
+  makeSmokeEmitter,
+  makeFlashEmitter,
+  makeRingEmitter,
+} from '../config/effects-config'
 import { FIELD, TANK } from '../constants'
 import { THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, THUMBNAIL_QUALITY } from '../snapshot/config'
 import { Camera } from './Camera'
@@ -37,13 +50,6 @@ export class PresentationLayer {
   private _needRender = true
   /** Cheap signature of everything that affects painted pixels. */
   private _lastSceneSig = 0
-  /**
-   * Cached `world.allTanks` buffer fetched inside `computeSceneSig`, consumed
-   * by the next `render()` call (P2). Null after consumption or before first
-   * use. Safe because `_allTanksBuf` is only mutated by the getter itself, and
-   * no sim tick runs between `shouldRender` and `render`.
-   */
-  private _sigTanks: Tank[] | null = null
   // Structural / UI-driving fields whose change must force a repaint.
   private _lastState = ''
   private _lastThemeKey = ''
@@ -157,18 +163,21 @@ export class PresentationLayer {
     if (this.isFullscreenSupported()) {
       this.root.requestFullscreen().catch(() => {
         // Fullscreen rejected (no user gesture? iframe?) → CSS fallback
-        this.root.classList.toggle('is-maximized')
-        this.resizeCanvas()
-        this.markNeedsRender()
-        this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+        this.toggleCssFullscreenFallback()
       })
     } else {
       // iOS Safari / unsupported → CSS fallback
-      this.root.classList.toggle('is-maximized')
-      this.resizeCanvas()
-      this.markNeedsRender()
-      this.ui.controlCenter.setFullscreenState(this.isFullscreen)
+      this.toggleCssFullscreenFallback()
     }
+  }
+
+  /** The CSS `.is-maximized` fullscreen fallback path, shared by the
+   *  unsupported-browser branch and the rejected-API branch. */
+  private toggleCssFullscreenFallback(): void {
+    this.root.classList.toggle('is-maximized')
+    this.resizeCanvas()
+    this.markNeedsRender()
+    this.ui.controlCenter.setFullscreenState(this.isFullscreen)
   }
 
   /** Whether we are currently in fullscreen (API or CSS fallback). */
@@ -270,22 +279,22 @@ export class PresentationLayer {
       this.effects.triggerFlash('#ffaa40', 0.15)
 
       // Flash particle
-      this.particles.emit(this.makeFlashEmitter(x, y))
+      this.particles.emit(makeFlashEmitter(x, y))
 
       // Expanding ring
-      this.particles.emit(this.makeRingEmitter(x, y))
+      this.particles.emit(makeRingEmitter(x, y))
 
       // Sparks
-      this.particles.emit(this.makeSparkEmitter(x, y, 12, 2, 5))
+      this.particles.emit(makeSparkEmitter(x, y, 12, 2, 5))
 
       // Debris
-      this.particles.emit(this.makeDebrisEmitter(x, y, 8))
+      this.particles.emit(makeDebrisEmitter(x, y, 8))
 
       // Smoke
-      this.particles.emit(this.makeSmokeEmitter(x, y, 5))
+      this.particles.emit(makeSmokeEmitter(x, y, 5))
     } else {
       // Small sparks
-      this.particles.emit(this.makeSparkEmitter(x, y, 5, 1, 3))
+      this.particles.emit(makeSparkEmitter(x, y, 5, 1, 3))
     }
   }
 
@@ -301,10 +310,10 @@ export class PresentationLayer {
       this.effects.triggerFlash('#ff4040', 0.4)
       this.effects.triggerHitPause(120)
       // Extra debris for player
-      this.particles.emit(this.makeDebrisEmitter(cx, cy, 12))
+      this.particles.emit(makeDebrisEmitter(cx, cy, 12))
     } else if (by === 'player') {
       // Debris from destroyed enemy
-      this.particles.emit(this.makeDebrisEmitter(cx, cy, 6))
+      this.particles.emit(makeDebrisEmitter(cx, cy, 6))
     }
   }
 
@@ -316,9 +325,9 @@ export class PresentationLayer {
     // Big particle burst at base location
     const cx = FIELD / 2
     const cy = FIELD - TANK
-    this.particles.emit(this.makeSparkEmitter(cx, cy, 20, 3, 7))
-    this.particles.emit(this.makeDebrisEmitter(cx, cy, 15))
-    this.particles.emit(this.makeSmokeEmitter(cx, cy, 8))
+    this.particles.emit(makeSparkEmitter(cx, cy, 20, 3, 7))
+    this.particles.emit(makeDebrisEmitter(cx, cy, 15))
+    this.particles.emit(makeSmokeEmitter(cx, cy, 8))
   }
 
   private onPowerUpCollected(_type: string): void {
@@ -349,119 +358,6 @@ export class PresentationLayer {
     }
   }
 
-  // ---- Emitter configs ----
-
-  private makeSparkEmitter(
-    x: number,
-    y: number,
-    count: number,
-    speedMin: number,
-    speedMax: number,
-  ): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: speedMin * 0.5,
-      speedMax: speedMax * 0.5,
-      lifeMin: 200,
-      lifeMax: 500,
-      sizeMin: 1,
-      sizeMax: 3,
-      colors: ['#ffe040', '#ff8020', '#ff4020', '#ffffff'],
-      type: 'spark',
-      gravity: 0.05,
-      drag: 0.92,
-      angleMin: 0,
-      angleMax: Math.PI * 2,
-      spread: 4,
-    }
-  }
-
-  private makeDebrisEmitter(x: number, y: number, count: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: 1,
-      speedMax: 3,
-      lifeMin: 400,
-      lifeMax: 800,
-      sizeMin: 2,
-      sizeMax: 4,
-      colors: ['#808080', '#606060', '#a0a0a0', '#404040'],
-      type: 'debris',
-      gravity: 0.15,
-      drag: 0.95,
-      angleMin: 0,
-      angleMax: Math.PI * 2,
-      spread: 8,
-    }
-  }
-
-  private makeSmokeEmitter(x: number, y: number, count: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count,
-      speedMin: 0.2,
-      speedMax: 0.8,
-      lifeMin: 600,
-      lifeMax: 1000,
-      sizeMin: 4,
-      sizeMax: 8,
-      colors: ['#606060', '#404040', '#808080'],
-      type: 'smoke',
-      gravity: -0.02,
-      drag: 0.96,
-      angleMin: -Math.PI / 2 - 0.5,
-      angleMax: -Math.PI / 2 + 0.5,
-      spread: 6,
-    }
-  }
-
-  private makeFlashEmitter(x: number, y: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count: 1,
-      speedMin: 0,
-      speedMax: 0,
-      lifeMin: 150,
-      lifeMax: 150,
-      sizeMin: 20,
-      sizeMax: 20,
-      colors: ['#ffffff'],
-      type: 'flash',
-      gravity: 0,
-      drag: 1,
-      angleMin: 0,
-      angleMax: 0,
-      spread: 0,
-    }
-  }
-
-  private makeRingEmitter(x: number, y: number): EmitterConfig {
-    return {
-      x,
-      y,
-      count: 1,
-      speedMin: 0,
-      speedMax: 0,
-      lifeMin: 300,
-      lifeMax: 300,
-      sizeMin: 8,
-      sizeMax: 8,
-      colors: ['#ffe040'],
-      type: 'ring',
-      gravity: 0,
-      drag: 1,
-      angleMin: 0,
-      angleMax: 0,
-      spread: 0,
-    }
-  }
-
   // ---- Update & Render ----
 
   /** Update visual state from world, then render everything */
@@ -469,14 +365,11 @@ export class PresentationLayer {
     // `world.allTanks` is a getter that rebuilds a shared buffer on every access.
     // Nothing in the presentation path mutates the World, so one rebuild per
     // frame is enough — thread it through the two consumers (R1/P1-B).
-    //
-    // P2: when `shouldRender` already fetched the buffer for `computeSceneSig`,
-    // reuse that reference instead of re-fetching. Skips the second ~6-10 entry
-    // array write per repainted frame. Safe because `_allTanksBuf` is only
-    // mutated by the getter itself, and no sim tick runs between shouldRender
-    // and render.
-    const tanks = this._sigTanks ?? world.allTanks
-    this._sigTanks = null // consume; next shouldRender will re-fetch
+    // (Formerly this reused a buffer cached by computeSceneSig — the "_sigTanks
+    // temporal coupling" was removed in §2.4: correctness must not depend on
+    // "no sim tick between shouldRender and render"; one extra small array
+    // rebuild per frame is the entire cost.)
+    const tanks = world.allTanks
 
     // Update visual state from world
     this.updateVisualState(world, tanks)
@@ -534,10 +427,10 @@ export class PresentationLayer {
     // Structural / UI-driving changes.
     if (world.state !== this._lastState) return this.forceRender(world)
     if (world.themeKey !== this._lastThemeKey) return this.forceRender(world)
-    if (world.menuCursor !== this._lastMenuCursor) return this.forceRender(world)
-    if (world.selectedStage !== this._lastSelectedStage) return this.forceRender(world)
-    if (world.recoveryCursor !== this._lastRecoveryCursor) return this.forceRender(world)
-    if (world.recoveryCountdown !== this._lastRecoveryCountdown) return this.forceRender(world)
+    if (world.ui.menuCursor !== this._lastMenuCursor) return this.forceRender(world)
+    if (world.ui.selectedStage !== this._lastSelectedStage) return this.forceRender(world)
+    if (world.ui.recoveryCursor !== this._lastRecoveryCursor) return this.forceRender(world)
+    if (world.ui.recoveryCountdown !== this._lastRecoveryCountdown) return this.forceRender(world)
     const tm = world.tileMap
     if (tm.dirty || tm.dirtyCells.length > 0) return this.forceRender(world)
     // Static scene signature.
@@ -573,10 +466,10 @@ export class PresentationLayer {
     this._lastSceneSig = sig ?? this.computeSceneSig(world)
     this._lastState = world.state
     this._lastThemeKey = world.themeKey
-    this._lastMenuCursor = world.menuCursor
-    this._lastSelectedStage = world.selectedStage
-    this._lastRecoveryCursor = world.recoveryCursor
-    this._lastRecoveryCountdown = world.recoveryCountdown
+    this._lastMenuCursor = world.ui.menuCursor
+    this._lastSelectedStage = world.ui.selectedStage
+    this._lastRecoveryCursor = world.ui.recoveryCursor
+    this._lastRecoveryCountdown = world.ui.recoveryCountdown
   }
 
   /**
@@ -584,6 +477,15 @@ export class PresentationLayer {
    * sub-pixel jitter never falsely triggers a repaint, but any real movement
    * (a tank/bullet shifting cells, a spawn/shield/bonus/flash state flip, the
    * water phase advancing, or the camera offset changing) changes it.
+   *
+   * ── BAND-OFF CONTRACT — READ BEFORE ADDING A VISUAL CHANNEL ─────────────
+   * This function must hash EVERY World field that reaches a pixel. If you
+   * add a new World → pixels channel (new entity array, new tank bit, new
+   * animated terrain), you MUST fold it into this signature — otherwise the
+   * on-demand gate will freeze that channel's visuals whenever the scene is
+   * otherwise idle, with the failure far from your change. Grep anchors:
+   * `computeSceneSig` here + the "computeSceneSig" back-pointer notes at the
+   * top of each GameRenderer*Slice file.
    */
   private computeSceneSig(world: World): number {
     let sig = 0
@@ -599,9 +501,8 @@ export class PresentationLayer {
       if (!b.alive) continue
       sig = (sig * 31 + ((b.x >> 3) + (b.y >> 3) * 64)) | 0
     }
-    // Tanks. P2: cache the fetched buffer so `render()` can reuse it instead of
-    // re-fetching `world.allTanks` (which rebuilds the same `_allTanksBuf`).
-    const tanks = (this._sigTanks = world.allTanks)
+    // Tanks.
+    const tanks = world.allTanks
     const animPhase = Math.floor(frame / 4) // spawn(0-3)/shield(0-1)/flash(0-1) cadence
     for (let i = 0; i < tanks.length; i++) {
       const t = tanks[i]

@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import type { Tank } from '../src/types'
 
 /**
@@ -14,8 +14,7 @@ import type { Tank } from '../src/types'
  */
 
 function buildSeededWorld(seed: number, difficulty: string): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame(difficulty, 'modern', 0)
@@ -36,8 +35,7 @@ function readyToFire(t: Tank): void {
   t.lastFire = -1e9
 }
 
-type FireSim = { tryFire: (t: Tank) => void }
-const fire = (sim: Simulation, t: Tank) => (sim as unknown as FireSim).tryFire(t)
+const fire = (sim: Simulation, t: Tank) => sim.systems.combat.tryFire(t)
 
 describe('classic fire cap — player (plan Phase 2)', () => {
   it('0★ player: max 1 live bullet; slot frees when the bullet dies', () => {
@@ -142,7 +140,7 @@ describe('classic fire cap — minimum cooldown floor', () => {
     // Override the rule to 0 — no cooldown floor.
     // IMPORTANT: clone the rules object. `world.rules` is a reference to the
     // shared `RULES['classic']` config; mutating it in place leaks the change
-    // into every later test (and silently breaks the god-ai-split-parity
+    // into every later test (and silently breaks the godai-split-parity
     // determinism guard, which reads the same global). See classic-drop-position.test.ts
     // for the same clone pattern.
     world.rules = { ...world.rules, bulletCapMinCooldownMs: 0 }

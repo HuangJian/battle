@@ -2,8 +2,11 @@ import type { World } from '../game/World'
 import type { Tank } from '../types'
 import type { Direction } from '../constants'
 import { CELL, TANK, DIR_VECTORS, FIELD, GRID } from '../constants'
-import { aabb, snap } from '../utils/helpers'
+import { aabb, snap, bulletLaneDist } from '../utils/helpers'
 import type { Perception, Situation, IntelligenceConfig } from './types'
+
+import { manhattan } from '../utils/helpers'
+import { BULLET_ALIGN_NEXT_CELL } from './god/constants'
 
 /**
  * ai/perception.ts — the "eyes" of the framework.
@@ -15,9 +18,9 @@ import type { Perception, Situation, IntelligenceConfig } from './types'
  */
 
 /** Manhattan distance between two tank centers (px). */
-export function manhattan(ax: number, ay: number, bx: number, by: number): number {
-  return Math.abs(ax - bx) + Math.abs(ay - by)
-}
+// Canonical manhattan moved to utils/helpers (遗留 #2 unification) —
+// re-exported to keep TacticalIntelligence's import path stable.
+export { manhattan } from '../utils/helpers'
 
 /** Primary-axis direction from a tank toward a target point (used for routing). */
 export function dirToward(x: number, y: number, tx: number, ty: number): Direction {
@@ -208,11 +211,14 @@ export function perceive(
   // to P1 instead of its own tank (grossly mis-targets, e.g. defends P1's side).
   if ((world.coop || world.spectateDual) && world.player2) {
     const p1Dist = player
-      ? Math.abs(player.x + player.w / 2 - sx) + Math.abs(player.y + player.h / 2 - sy)
+      ? manhattan(player.x + player.w / 2, player.y + player.h / 2, sx, sy)
       : Infinity
-    const p2Dist =
-      Math.abs(world.player2.x + world.player2.w / 2 - sx) +
-      Math.abs(world.player2.y + world.player2.h / 2 - sy)
+    const p2Dist = manhattan(
+      world.player2.x + world.player2.w / 2,
+      world.player2.y + world.player2.h / 2,
+      sx,
+      sy,
+    )
     if (p2Dist < p1Dist) player = world.player2
   }
   const base = world.tileMap.getBasePos()
@@ -232,19 +238,9 @@ export function perceive(
     // Only hostile-to-enemy bullets are a threat: player OR ally fire (ally
     // bullets carry allegiance 'ally', never 'enemy').
     if (!b.alive || b.allegiance === 'enemy') continue
-    const bx = b.x + b.w / 2
-    const by = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bx - sx) < CELL * 0.75 : Math.abs(by - sy) < CELL * 0.75
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && by < sy) ||
-      (b.dir === 'up' && by > sy) ||
-      (b.dir === 'right' && bx < sx) ||
-      (b.dir === 'left' && bx > sx)
-    if (!approaching) continue
-    const dist = vertical ? Math.abs(by - sy) : Math.abs(bx - sx)
-    if (dist > range) continue
+    // §3.1 single-sourced lane geometry (allegiance filtered above).
+    const dist = bulletLaneDist(b.dir, b.x + b.w / 2, b.y + b.h / 2, sx, sy, BULLET_ALIGN_NEXT_CELL)
+    if (dist < 0 || dist > range) continue
     // Track the closest threat. Sorting was only needed to pick threats[0];
     // a running min replaces the sort + array entirely.
     if (dist < threatDist) {

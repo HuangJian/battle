@@ -3,6 +3,8 @@ import type { Bullet, Tank } from '../../types'
 import { GRID, CELL } from '../../constants'
 import { PLAYER_PROGRESSION } from '../../config/combat'
 import { enemyCanShootBase } from './SmartThreatModel'
+import { manhattan, bulletLaneDist } from '../../utils/helpers'
+import { TANK } from '../../constants'
 
 // ============================================================
 // SuicideReturn — 自杀秒回 (suicide quick-return, user request 2026-08-04).
@@ -54,16 +56,9 @@ export function hasLethalBulletWithinWindowImpl(
     if (!bulletWouldKillPlayer(p, b)) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const vertical = b.dir === 'up' || b.dir === 'down'
-    const aligned = vertical ? Math.abs(bcx - pcx) < 32 : Math.abs(bcy - pcy) < 32
-    if (!aligned) continue
-    const approaching =
-      (b.dir === 'down' && bcy < pcy) ||
-      (b.dir === 'up' && bcy > pcy) ||
-      (b.dir === 'right' && bcx < pcx) ||
-      (b.dir === 'left' && bcx > pcx)
-    if (!approaching) continue
-    const bdist = vertical ? Math.abs(bcy - pcy) : Math.abs(bcx - pcx)
+    // §3.1 single-sourced lane geometry (32 → TANK, §3.6 constant hygiene).
+    const bdist = bulletLaneDist(b.dir, bcx, bcy, pcx, pcy, TANK)
+    if (bdist < 0) continue
     const bt = b.speed > 0 ? bdist / b.speed : Infinity
     if (bt <= windowTicks) return true
   }
@@ -278,11 +273,11 @@ export function findSuicideTargetImpl(self: GodAIInput, pcx: number, pcy: number
     //   b. the spawn is within suicideReturnSpawnDistCells of the enemy, OR
     //   c. the spawn is strictly closer to the enemy than the player (a
     //      positional win — the respawned player reaches the threat sooner).
-    const spawnDist =
-      Math.abs(w.playerSpawnPoint.col - ecCol) + Math.abs(w.playerSpawnPoint.row - ecRow)
-    const playerCol = Math.round(pcx / CELL)
-    const playerRow = Math.round(pcy / CELL)
-    const playerDist = Math.abs(playerCol - ecCol) + Math.abs(playerRow - ecRow)
+    const spawnDist = manhattan(w.playerSpawnPoint.col, w.playerSpawnPoint.row, ecCol, ecRow)
+    // Use corner-cell convention (tankCell) matching ecCol/ecRow, not center.
+    const pt = self.controlledTank(w)
+    const pc = pt ? self.tankCell(pt) : { col: Math.floor(pcx / CELL), row: Math.floor(pcy / CELL) }
+    const playerDist = manhattan(pc.col, pc.row, ecCol, ecRow)
     const spawnUseful =
       spawnCanHitEnemyImpl(self, ecCol, ecRow) ||
       (self.params.suicideReturnSpawnDistCells > 0 &&
@@ -292,7 +287,7 @@ export function findSuicideTargetImpl(self: GodAIInput, pcx: number, pcy: number
     // Condition 4: player is too far to reach this enemy in time.
     const ecx = e.x + e.w / 2
     const ecy = e.y + e.h / 2
-    const distPx = Math.abs(ecx - pcx) + Math.abs(ecy - pcy)
+    const distPx = manhattan(ecx, ecy, pcx, pcy)
     const timeTicks = playerSpeed > 0 ? distPx / playerSpeed : Infinity
     if (timeTicks <= enemyDistTicks) continue
     // Prefer the farthest enemy (the one the player is worst positioned for).

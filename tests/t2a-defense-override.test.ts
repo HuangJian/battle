@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
@@ -27,8 +28,7 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Give the AI a FRESH rng so startGame/reset don't consume its stream.
   const aiRng = new RNG(999)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params }, aiRng)

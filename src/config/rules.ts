@@ -8,6 +8,13 @@ import {
   BASE_BULLET_SPEED_CPS,
   PLAYER_BULLET_SPEED_PER_STAR_CPS,
 } from './speed'
+import {
+  FC_FAITHFUL_SPEED_CPS,
+  FC_FAITHFUL_PLAYER_SPEED_PER_STAR_CPS,
+  FC_FAITHFUL_BULLET_SPEED_CPS,
+  FC_FAITHFUL_PLAYER_BULLET_SPEED_PER_STAR_CPS,
+  FC_FAITHFUL_SCORE_BY_KIND,
+} from './fc-faithful'
 
 /**
  * GameplayRules — the single, difficulty-selected rules object that lets the
@@ -128,14 +135,10 @@ export interface GameplayRules {
   scoreByKind: Partial<Record<TankKind, number>>
   /** Score for collecting a power-up. */
   itemScore: number
-  /** Score threshold that grants an extra life (0 = disabled). */
-  extraLifeScore: number
   /** Stage-clear score multiplier base (1.05^N modern, 1.0 FC). */
   scoreStageFactor: number
 
   // ── Enemy behavior (classic none-tier branch) ────────────────
-  /** 'phased' is a NON-faithful modern extra; classic stays 'wander'. */
-  enemyBehavior: 'wander' | 'phased'
   /** Direction-weight table for classic wander bias (updateNoneTank → pickClassicDir).
    *  Keys are cardinal directions; higher weight = more likely to be chosen.
    *  FC-1985: enemies wander with a VERY slight downward bias (the eagle sits
@@ -146,9 +149,6 @@ export interface GameplayRules {
    *  If false, enemies also re-roll periodically (modern convenience that
    *  prevents permanent jams). */
   turnOnCollisionOnly: boolean
-
-  // ── Terrain (stretch, not implemented) ───────────────────────
-  brickGranularity: 'cell' | 'quarter'
 
   // ── Drop position randomization ─────────────────────────────
   /** Probability weights for near/mid/far drop positions relative to the
@@ -243,13 +243,10 @@ export const DEFAULT_RULES: GameplayRules = {
   scoreModel: 'flat',
   scoreByKind: {},
   itemScore: ITEM_SCORE, // 100
-  extraLifeScore: 0, // current: no score→life (life only via 'tank')
   scoreStageFactor: 1.05, // current 1.05^stage
 
-  enemyBehavior: 'wander', // current 100%-none constant wander
   classicDirWeights: { down: 3, left: 1, right: 1, up: 0.35 }, // modern strong downward bias
   turnOnCollisionOnly: false, // modern: timer + collision both trigger re-roll
-  brickGranularity: 'cell', // current 16px cell destruction
   spawnIntervalMs: 1500, // Simulation.ts:329
   // §86c: Turn cooldown — minimum turn period enforced for ALL tanks (player +
   // enemy) in SimulationCombat.updateMovement(). User request (2026-08-09):
@@ -308,31 +305,22 @@ export const RULES: Record<string, GameplayRules> = {
 
     speedJitter: false, // no ±5% jitter (issue #7: BOTH tank + bullet)
 
-    // Faithful FC movement speeds (cells/sec). Conversion FC px/frame @60fps →
-    // px/sec (×60) → FC tiles/sec (÷16, tile=16px) → project cells/sec (×2 because
-    // 1 FC tile = 1 FC tank = 16px while 1 project cell = 0.5 project tank, and both
-    // fields are 13 tanks wide). Net factor = ×7.5. Thus basic 0.5 px/frame → 3.75
-    // cps, fast 1.0 → 7.5 cps; player T1 3.75 → T4 7.5.
-    speedCps: { basic: 3.75, fast: 7.5, power: 3.75, armor: 3.75, player: 3.75 },
-    playerSpeedPerStarCps: 1.25,
+    // Faithful FC movement speeds (cells/sec) — isolated in config/fc-faithful.ts
+    // so the FC numbers are never "tidied" into the modern balance (see that file
+    // for the px/frame→cps conversion rationale).
+    speedCps: FC_FAITHFUL_SPEED_CPS,
+    playerSpeedPerStarCps: FC_FAITHFUL_PLAYER_SPEED_PER_STAR_CPS,
 
-    // Faithful FC bullet speeds (cells/sec). Same ×7.5 px/frame→cps factor as
-    // movement. FC bullets are 2 px/frame (slow) for basic/fast/armor/player and
-    // 4 px/frame (fast) for Power — NOT a per-kind 1.05/0.95/0.90 spread like
-    // modern. Player growth is perk-driven: base 2 px/frame (15 cps); the 1★
-    // 'fastBullet' star jumps it to 4 px/frame (30 cps) via fastBulletMult (2.0),
-    // and that fast bullet stays for every higher star level (FC keeps the fast
-    // bullet once earned). Hence playerBulletSpeedPerStarCps is 0 here.
-    bulletSpeedCps: { basic: 15, fast: 15, power: 30, armor: 15, player: 15 },
-    playerBulletSpeedPerStarCps: 0,
+    // Faithful FC bullet speeds (cells/sec) — see config/fc-faithful.ts for the
+    // px/frame→cps rationale and why playerBulletSpeedPerStarCps is 0 here.
+    bulletSpeedCps: FC_FAITHFUL_BULLET_SPEED_CPS,
+    playerBulletSpeedPerStarCps: FC_FAITHFUL_PLAYER_BULLET_SPEED_PER_STAR_CPS,
 
     scoreModel: 'byKind',
-    scoreByKind: { basic: 100, fast: 200, power: 300, armor: 400 },
+    scoreByKind: FC_FAITHFUL_SCORE_BY_KIND,
     itemScore: 500, // FC item = 500
-    extraLifeScore: 0, // no score→life; life only via 'tank'
     scoreStageFactor: 1.0, // FC score is flat (no stage scaling)
 
-    enemyBehavior: 'wander', // FAITHFUL: constant random wander, NO chase/push phases
     // FC-1985 direction weights: enemies wander with a VERY slight downward bias
     // (the eagle is at the bottom of the field), but lateral directions are nearly
     // equal. The original game has no strong directional preference — enemies
@@ -347,7 +335,6 @@ export const RULES: Record<string, GameplayRules> = {
     // direction. The modern timer re-roll (turnOnCollisionOnly: false) is
     // a convenience that prevents permanent jams in tight corridors.
     turnOnCollisionOnly: true,
-    brickGranularity: 'cell', // stretch (see plan Phase 8)
     spawnIntervalMs: 1800, // ~1.8s, closer to FC's ~1.8–2.0s (issue #8)
     // §86c: Turn cooldown — uniform 200ms for ALL tanks (see DEFAULT_RULES note;
     // deliberately exceeds the §95 sweet spot of 100ms per user request).

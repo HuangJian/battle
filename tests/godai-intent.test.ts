@@ -150,9 +150,9 @@ describe('intentMode wiring (Phase 2 §6.3)', () => {
     const t1 = ai.selectTarget(pc)
     expect(t1!.col).toBe(ai.tankCell(a).col)
     // Advance past the lease; keep the stall check inert by marking a recent
-    // shot (fireCooldown > 0) so the release is purely lease-driven.
+    // shot (onCooldown = true) so the release is purely lease-driven.
     w.frame += DEFAULT_GOD_AI_PARAMS.intentLeaseTicks + 1
-    p.fireCooldown = 50
+    p.lastFire = w.frame * (1000 / 60) - 1 // last shot 1ms ago → onCooldown
     refresh(ai, w)
     const t2 = ai.selectTarget(pc)
     expect(t2!.col).toBe(ai.tankCell(c).col)
@@ -236,5 +236,54 @@ describe('intentMode wiring (Phase 2 §6.3)', () => {
       return seq
     }
     expect(run()).toEqual(run())
+  })
+
+  it('releases on stall when player has not fired recently (onCooldown=false)', () => {
+    // §7.2 medium-risk-2: intentRead stall/flight conditions now use the
+    // time-based onCooldown predicate (now - lastFire < nextFireInterval)
+    // instead of the always-false fireCooldown <= 0.
+    // OLD: fireCooldown <= 0 always false → stall never triggers → intent holds
+    // NEW: !onCooldown = true (lastFire=-9999) → stall triggers → intent released
+    const w = buildWorld()
+    openArena(w)
+    const a = addEnemy(w, 15, 17)
+    addEnemy(w, 10, 12)
+    placePlayer(w, 15, 22, 'down')
+    const ai = buildAI(w, 1)
+    const pc = ai.playerCell()
+    // Commit intent to a (nearest at dist 5).
+    const t1 = ai.selectTarget(pc)
+    expect(t1!.col).toBe(ai.tankCell(a).col)
+    // Add a NEW closer enemy after intent is committed.
+    const c = addEnemy(w, 15, 19) // dist 3 from player — closer than a
+    // Player hasn't moved and hasn't fired recently (lastFire=-9999 → onCooldown=false).
+    // Advance past intentProgressWindowTicks (10) so the stall condition fires.
+    w.frame += DEFAULT_GOD_AI_PARAMS.intentProgressWindowTicks + 1
+    // Avoid INTENT_REVALIDATE_EVERY (10) hitting on this frame: 11 % 10 = 1.
+    refresh(ai, w)
+    const t2 = ai.selectTarget(pc)
+    // Old: stall never fires → intent holds → t2 = a
+    // New: stall fires → intent released → t2 = c (nearest at dist 3)
+    expect(t2!.col).toBe(ai.tankCell(c).col)
+  })
+
+  it('holds intent when player is on cooldown (recent shot suppresses stall)', () => {
+    const w = buildWorld()
+    openArena(w)
+    const a = addEnemy(w, 15, 17)
+    addEnemy(w, 10, 12)
+    placePlayer(w, 15, 22, 'down')
+    const ai = buildAI(w, 1)
+    const pc = ai.playerCell()
+    const t1 = ai.selectTarget(pc)
+    expect(t1!.col).toBe(ai.tankCell(a).col)
+    // Add closer enemy, but player IS on cooldown → stall check suppressed.
+    addEnemy(w, 15, 19)
+    w.frame += DEFAULT_GOD_AI_PARAMS.intentProgressWindowTicks + 1
+    const p = w.player!
+    p.lastFire = w.frame * (1000 / 60) - 1 // last shot 1ms ago → onCooldown
+    refresh(ai, w)
+    const t2 = ai.selectTarget(pc)
+    expect(t2!.col).toBe(ai.tankCell(a).col) // intent still holds (stall suppressed)
   })
 })

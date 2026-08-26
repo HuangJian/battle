@@ -49,9 +49,13 @@
  * per-tick allocation even with candidateMode > 0 on the default sim path).
  */
 
-import { CELL, BASE_POS, GRID, type Direction } from '../../constants'
+import { CELL, type Direction } from '../../constants'
+import { msToTicksInt } from './constants'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
+
+import { manhattan } from '../../utils/helpers'
+import { laneCorridorBlocked } from './candidates/shared'
 import {
   RING_CELLS,
   enemyDeadline,
@@ -184,22 +188,23 @@ function isRingCell(col: number, row: number): boolean {
   return false
 }
 
-/** Cell is inside the 2×2 eagle footprint (BASE_POS..+1). Firing THROUGH it
- * is a self-inflicted base hit — the S30s27 lesson, base form. */
-function isBaseCell(col: number, row: number): boolean {
-  return (
-    col >= BASE_POS.col && col <= BASE_POS.col + 1 && row >= BASE_POS.row && row <= BASE_POS.row + 1
-  )
-}
-
 /**
- * §7.2 (d): does the aligned ray player→target cross an INTACT ring cell
- * (brick/steel still standing) or the base eagle itself, strictly between
- * the two tanks? Firing then would chip the own ring or self-hit the base
- * (S30s27). Center-cell space (tankCenterCell), same as the rest of this
- * module — never compare with CoveragePlanner's corner space.
+ * §7.2 (d): does the aligned ray player→target cross any INTACT obstacle
+ * (brick, steel, ring, or base eagle) strictly between the two tanks?
+ * Firing then would chip the own ring, waste a shot on a second obstacle
+ * behind a clearable brick, or self-hit the base (S30s27). Center-cell
+ * space (tankCenterCell), same as the rest of this module.
+ *
+ * @param skipCol optional: skip this cell (col/row) when scanning — used by
+ *   clear-lane to ignore the brick being cleared on the follow-up check.
  */
-export function fireRayBlocked(world: World, p: Tank, t: Tank): boolean {
+export function fireRayBlocked(
+  world: World,
+  p: Tank,
+  t: Tank,
+  skipCol = -1,
+  skipRow = -1,
+): boolean {
   const pc = tankCenterCell(p, _CELL_FB_A)
   const tc = tankCenterCell(t, _CELL_FB_B)
   const tm = world.tileMap
@@ -207,18 +212,16 @@ export function fireRayBlocked(world: World, p: Tank, t: Tank): boolean {
   if (pc.col === tc.col) {
     const step = tc.row > pc.row ? 1 : -1
     for (let r = pc.row + step; r !== tc.row; r += step) {
-      if (isBaseCell(pc.col, r)) return true
-      if (!isRingCell(pc.col, r)) continue
+      if (pc.col === skipCol && r === skipRow) continue
       const tile = tm.get(pc.col, r)
-      if (tile === 'brick' || tile === 'steel') return true
+      if (tile === 'brick' || tile === 'steel' || tile === 'base') return true
     }
   } else if (pc.row === tc.row) {
     const step = tc.col > pc.col ? 1 : -1
     for (let c = pc.col + step; c !== tc.col; c += step) {
-      if (isBaseCell(c, pc.row)) return true
-      if (!isRingCell(c, pc.row)) continue
+      if (c === skipCol && pc.row === skipRow) continue
       const tile = tm.get(c, pc.row)
-      if (tile === 'brick' || tile === 'steel') return true
+      if (tile === 'brick' || tile === 'steel' || tile === 'base') return true
     }
   }
   return false
@@ -309,7 +312,7 @@ export function evaluateUnifiedCandidates(
       urgent = e
     }
     const ec = tankCenterCell(e, _CELL_TMP)
-    const d = Math.abs(ec.col - pc.col) + Math.abs(ec.row - pc.row)
+    const d = manhattan(ec.col, ec.row, pc.col, pc.row)
     if (d < nearestD) {
       nearestD = d
       nearest = e
@@ -436,19 +439,20 @@ export function evaluateUnifiedCandidates(
     const turnBrick =
       p.dir !== dirToBrick ? ticksUntilLegalTurn(world, p) + turnCostTicks(world) : 0
     const flightBrick =
-      (Math.abs(_BRICK_OUT[0] - pc.col) + Math.abs(_BRICK_OUT[1] - pc.row)) *
+      manhattan(_BRICK_OUT[0], _BRICK_OUT[1], pc.col, pc.row) *
       (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
-    const cadenceTicks = p.nextFireInterval > 0 ? p.nextFireInterval / (1000 / 60) : 0
+    const cadenceTicks =
+      p.fireCooldown > 0 ? msToTicksInt(p.fireCooldown) : msToTicksInt(p.nextFireInterval)
     const flightU =
-      (Math.abs(uc.col - pc.col) + Math.abs(uc.row - pc.row)) *
-      (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
+      manhattan(uc.col, uc.row, pc.col, pc.row) * (p.bulletSpeed > 0 ? CELL / p.bulletSpeed : 0)
     clearEta =
       turnBrick + Math.max(0, ticksUntilFire(world, p)) + flightBrick + cadenceTicks + flightU
     clearSlack = dlU.enemyDamageDeadline - clearEta
     // §7.2 (d): the follow-up shot through the opened lane must still not
     // cross a ring brick or the base itself (a brick cleared on the way does
-    // not make a base-crossing ray safe — S30s27 base form).
-    const followUpClear = !fireRayBlocked(world, p, urgent)
+    // not make a base-crossing ray safe — S30s27 base form). Skip the first
+    // brick (the one being cleared) — any second obstacle blocks the lane.
+    const followUpClear = !fireRayBlocked(world, p, urgent, _BRICK_OUT[0], _BRICK_OUT[1])
     clearValid = clearSlack > 0 && !kaU.missesSecondThreat && followUpClear
     clearReason = clearValid
       ? `clear-lane brick(${_BRICK_OUT[0]},${_BRICK_OUT[1]}) slack=${clearSlack.toFixed(1)}`
@@ -464,7 +468,7 @@ export function evaluateUnifiedCandidates(
   {
     const etaA = playerActionEta(world, p, anchorCol, anchorRow, 'down', 1, _ETA)
     const arrival = etaA.nextLegalTurnEta + etaA.movementEta + etaA.aimAlignmentEta
-    const anchorD = Math.abs(anchorCol - pc.col) + Math.abs(anchorRow - pc.row)
+    const anchorD = manhattan(anchorCol, anchorRow, pc.col, pc.row)
     if (anchorD <= 2) {
       returnReason = 'return-defense already at anchor'
     } else {
@@ -593,7 +597,6 @@ export function travelFireDetourDir(
   isWorthKillNow: (t: Tank) => boolean,
   minSlack: number = DETOUR_TURN_WINDOW_TICKS,
 ): Direction | null {
-  const tm = world.tileMap
   // 目标代理 (mirror UNIFIED_CANDIDATES): 最后 selectTarget 目标, 否则最近敌。
   let hunt: Tank | null = null
   let nearest: Tank | null = null
@@ -603,7 +606,7 @@ export function travelFireDetourDir(
     if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
     if (t.id === huntId) hunt = t
     const tc = tankCenterCell(t, _CELL_TMP)
-    const dd = Math.abs(tc.col - pc.col) + Math.abs(tc.row - pc.row)
+    const dd = manhattan(tc.col, tc.row, pc.col, pc.row)
     if (dd < nearestD) {
       nearestD = dd
       nearest = t
@@ -617,22 +620,10 @@ export function travelFireDetourDir(
   const dir: Direction =
     tc.col === pc.col ? (tc.row > pc.row ? 'down' : 'up') : tc.col > pc.col ? 'right' : 'left'
   if (p.dir === dir) return null // 已面向 — baseline navigate 本就会开火
-  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — 与 think.ts
-  // laneCorridorBlocked 同语义 (single source: think.ts:483)。
-  const g = tm.grid
-  if (tc.col === pc.col) {
-    const step = tc.row > pc.row ? 1 : -1
-    for (let r = pc.row + step; r !== tc.row; r += step) {
-      if (r < 0 || r >= GRID) return null
-      if (g[r][tc.col] !== 'empty') return null
-    }
-  } else {
-    const step = tc.col > pc.col ? 1 : -1
-    for (let c = pc.col + step; c !== tc.col; c += step) {
-      if (c < 0 || c >= GRID) return null
-      if (g[tc.row][c] !== 'empty') return null
-    }
-  }
+  // 走廊: 两格之间逐格扫描, 任何非空地形 (含 base) 都挡 — §3.3 改为对
+  // candidates/shared.laneCorridorBlocked 的真调用（0=畅通；非 0 一律挡：
+  // 含未对齐 -1 与端点越界哨兵，与原内联的 null 语义一致）。
+  if (laneCorridorBlocked(world, pc.col, pc.row, tc.col, tc.row) !== 0) return null
   if (fireRayBlocked(world, p, target)) return null // 环砖/基地双保险
   const slack = killAssessment(world, p, target, _KA_TMP).killSlack
   if (!(slack > minSlack)) return null

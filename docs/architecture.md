@@ -33,13 +33,13 @@ This is an architectural decision, recorded here so future changes know which si
 |---|---|---|
 | Language | **TypeScript** (`strict`, `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`) | The compiler is treated as a reviewer; `any` and `@ts-ignore` are banned. |
 | Runtime / toolchain | **Bun** | One tool for runtime, `bun test`, and package management. No npm/ts-node split. |
-| Build / dev server | **Vite** (target `es2020`) | Fast HMR for the loop-on-`:3000` dev experience; `vite build` ships the bundle. |
+| Build / dev server | **Vite** (target `es2020`) | Fast HMR for the loop-on-`:8956` dev experience; `vite build` ships the bundle. |
 | Rendering | **Canvas 2D** (playfield only) | HUD/menu/overlays are HTML/CSS; the canvas stays a 416×416 battle surface. |
 | Styling | **CSS Custom Properties** | Themes are injected as variables at runtime; UI reacts without a re-render of the game. |
 | Lint / format | **oxlint + oxfmt** | Deliberately *not* ESLint/Prettier — one faster pass, one fewer dependency. |
 | Sprites | **Hand-authored SVG → pre-rasterized bitmap cache** | Zero binary assets in the repo; theme color is applied at draw time, not baked. |
 | Audio | **Web Audio API synthesis** | Zero audio files; 8-bit-style effects generated per event. |
-| Persistence | **localStorage** | Settings (volume/difficulty/theme/keys/scale) and high score only. No server. |
+| Persistence | **localStorage + IndexedDB** | localStorage holds settings (volume/difficulty/theme/keys/scale) and high score; snapshots and replays go to IndexedDB (large binary-ish blobs, quota headroom). No server. |
 
 Every one of these keeps the bundle small and the project self-contained. A new dependency requires a `DECISIONS.md` entry (AGENTS §5) — the bar is intentional.
 
@@ -50,11 +50,17 @@ Every one of these keeps the bundle small and the project self-contained. A new 
 The single source of truth and the only writer of gameplay state.
 
 * **`World.ts`** — the complete runtime state object plus entity management helpers (`createTank`, `addBullet`, `removeDeadEntities`). All gameplay state lives here; there is no gameplay state elsewhere.
-* **`Simulation.ts`** — runs every system per tick in a fixed order: spawn timers → spawning → player → enemy AI → movement → bullets → power-ups → explosions → win/lose conditions → dead-entity compaction. Ordering is part of the contract.
+* **`Simulation.ts`** — the composition root. It owns the `World` and delegates each tick to six subsystems registered in **`systems.ts`** (`SimulationSystems`): `SimulationSpawn` (spawn timers + spawning) → `SimulationPlayer` (player control) → `SimulationEnemies` (enemy AI invocation) → `SimulationCombat` (movement + bullets + combat) → `SimulationPowerUps` → `SimulationEffects` (explosions/win/lose). Ordering is part of the contract.
+* **Supporting modules** — `EventBus.ts` (the typed per-tick event buffer), `KillPipeline.ts` (unified kill resolution), `TankFactory.ts` (entity construction), `GridQuery.ts` (grid lookups), `UIState.ts` (menu/HUD-facing state on the World), `settings.ts` (settings load/save), `AutoFireInput.ts`, `battleSpeed.ts`, `uiFlowGates.ts`.
 * **`TileMap.ts`** — the 26×26 sub-block grid. Brick/steel store four `quadrants` so destruction is resolved per 16px quarter-cell. `dirtyCells` records changed cells for incremental redraw; `dirty` triggers a full rebuild.
 * **`Input.ts`** — keyboard capture with per-frame edge detection (`wasPressed`) and a `moveStack` that resolves "last pressed wins." Persists held keys across the per-frame clear.
-* **`Game.ts`** — the conductor: fixed-timestep accumulator loop, top-level state machine, settings load/save, wiring of every subsystem, and the recovery intercept.
-* **`RecoverySystem.ts`** — snapshot manager and history recorder (see §7).
+
+Above the layer sit four thin controllers that orchestrate but never mutate gameplay state directly:
+
+* **`Game.ts`** — top-level wiring: instantiates World/Simulation/controllers, drains events to Audio/Presentation.
+* **`GameLoop.ts`** — fixed-timestep accumulator loop, pause/visibility handling.
+* **`GameMenu.ts`** — menu flow, difficulty/theme selection, stage start.
+* **`GameSnapshot.ts` / `GameReplay.ts`** — snapshot & replay entry points, backed by `src/snapshot/` and `src/replay/` (see §7).
 
 The layer is *allowed* to mutate the World. Nothing outside it is.
 
@@ -65,8 +71,8 @@ The layer is *allowed* to mutate the World. Nothing outside it is.
 Reads the World and the event stream. Never imports simulation behavior; imports types only.
 
 * **`PresentationLayer.ts`** — orchestrates the visual subsystems and decides whether to repaint (`shouldRender` + a coarse scene signature). `reset()` rebuilds all visual state from the World — this is how rewind and menu-return discard ephemera.
-* **`renderer/`** — `SpriteLibrary` (loads SVGs) → `SpriteCache` (rasterizes to DPR-scaled bitmaps once) → `SpriteArtist` / `GameRenderer` (blits). The render loop blits cached bitmaps; it never decodes images per frame.
-* **`ui/UIManager.ts`** — HTML/CSS HUD and overlays (menu, pause, stage-clear, game-over, recovery, controls panel). Kept strictly out of the canvas.
+* **`renderer/`** — a Core + slices structure (`GameRendererCore` with per-concern draw slices) over the pipeline: `SpriteLibrary` (loads SVGs) → `SpriteCache` (rasterizes to DPR-scaled bitmaps once) → `SpriteArtist` (blits). The render loop blits cached bitmaps; it never decodes images per frame.
+* **`ui/`** — HTML/CSS HUD and overlays, strictly out of the canvas. `UIManager.ts` is a facade over four view controllers (`HudView`, `MenuScreen`, `ControlsPanel`, `OverlayManager`) plus `ControlCenter`, `PerfOverlay`, `ReplayBrowser`, `SnapshotBrowser`, `ReplayController`.
 * **`Camera` / `AnimationSystem` / `ParticleSystem` / `EffectsSystem`** — shake, time-based animation, pooled particles, screen flashes. All hold-state-in-the-presentation, none in the World.
 
 The separation is mechanical, not ceremonial: because Presentation cannot write the World, a rendering bug can never change a game outcome.
@@ -101,17 +107,17 @@ Player progression raises all six dimensions together per star; elite commanders
 
 ---
 
-## 7. Determinism & Recovery (`src/utils/RNG.ts`, `RecoverySystem.ts`)
+## 7. Determinism, Snapshots & Replay (`src/utils/RNG.ts`, `src/snapshot/`, `src/replay/`)
 
-**Decision:** all gameplay entropy flows through one seeded `RNG` (mulberry32), whose entire state is a single number. `Math.random()` is forbidden inside `src/game/`; permitted only in Presentation, where it never feeds back.
+**Decision:** all gameplay entropy flows through one seeded `RNG` (mulberry32), whose entire state is a single number. `Math.random()` is forbidden inside the Simulation; permitted only in Presentation, where it never feeds back.
 
-**Why:** same seed + same input ⇒ identical World every run. This single property is what makes the following three features possible from one design:
+**Why:** same seed + same input ⇒ identical World every run. This single property is what makes the following features possible from one design:
 
-* **Recovery (built):** `RecoverySystem` keeps a fixed 60-entry circular buffer of `WorldSnapshot` (one per second). A snapshot deep-clones terrain, entities, stage, score, lives, timers, the enemy queue, and the RNG state — and shares no references with the live World. On game-over, the player chooses rewind 30s / 60s / restart; the chosen snapshot overwrites the World atomically and Presentation rebuilds. Because RNG state is captured, the restored future reproduces exactly.
-* **Replay (prepared, not built):** the same snapshot + seeded RNG + recordable input stream is everything a replay system needs. No architectural change required — only a recorder/player around the existing loop.
+* **Snapshot framework (built):** `src/snapshot/` — `SnapshotManager` keeps bounded history per retention policy (20 circular entries each for auto / stage-start / pause; 100 never-overwritten manual entries) with auto snapshots taken **every 30 s**, stored in IndexedDB with JPEG thumbnails. A snapshot deep-clones terrain, entities, stage, score, lives, timers, the enemy queue, and the RNG state — and shares no references with the live World. `WorldSerializer` clones/restores via spread so new entity fields are covered automatically. On failure, `RecoveryController` offers rewind 30s / 60s / restart; the chosen snapshot overwrites the World atomically and Presentation rebuilds. Because RNG state is captured, the restored future reproduces exactly.
+* **Replay (built):** `src/replay/` — `InputRecorder` captures input edges, `ReplayManager` persists deterministic replays to IndexedDB, `PlaybackController` re-drives the loop from recorded inputs. The replay browser (`presentation/ui/ReplayBrowser`) lists saved runs; a replay can be *taken over* into a live coop session.
 * **Networked experiment (prepared, not built):** deterministic lockstep is the foundation. Left as a research seam.
 
-Memory is bounded by construction (circular buffer). The system owns no mutable growth.
+Memory is bounded by construction (per-type retention policies). The system owns no unbounded growth.
 
 ---
 
@@ -125,7 +131,8 @@ Content is data, separated from engine code:
 | `stages.ts` → `stageData.ts` | 35 classic levels (13×13 numeric → 26×26 decoded grid) + enemy forces | new stage = new grid |
 | `difficulty.ts` | 4 presets: speed/fire/HP mults, lives, start level | new preset = new row |
 | `theme.ts` | `ThemeColors` palettes (Canvas + HTML UI) | new theme = new color set |
-| `tanks.ts` | score / color / drops metadata | cosmetic only |
+| `score.ts` + `score-constants.ts` | score values, drop timing, bonus rules | scoring change = one constant |
+| `rules.ts` / `powerups.ts` / `fire-rate.ts` / `hp-level.ts` / `speed.ts` / `base.ts` / `effects-config.ts` | gameplay rule knobs (see each file's header for its contract) | tuning = data edit |
 | `ai/config.ts` | intelligence tiers + difficulty AI scaling | new tier = new entry |
 
 The level decoder (`stages.ts`) deliberately keeps raw numeric data separate from the codec, so the Famicom-derived maps stay diffable against their reference. Stage JSON can be externalized later by swapping one `import` for a `fetch` — the architecture already assumes it.
@@ -162,7 +169,6 @@ The architecture anticipates these without implementing them. Each is a composit
 
 | Future capability | What already exists to support it |
 |---|---|
-| **Replay** | seeded RNG + `WorldSnapshot` + recordable input edges |
 | **Game modes** (endless / tower-defense / boss rush) | data-driven stages, difficulty, victory conditions; rules compose |
 | **New tank / stage / theme / AI tier** | pure `config/` additions, no system change |
 | **Statistics dashboard** | subscribe to the existing `GameEvent` stream |
@@ -179,7 +185,7 @@ The seats are intentionally empty. Filling them means adding data and small syst
 
 These are load-bearing. They are recorded here so any future change knows the cost of crossing them (a `DECISIONS.md` entry is mandatory before any of these is reconsidered):
 
-1. Only the Simulation writes the World. (`RecoverySystem` is the sole exception — atomic restore, not play.)
+1. Only the Simulation writes the World. (`src/snapshot/RecoveryController` is the sole exception — atomic restore, not play.)
 2. No gameplay state outside the World object.
 3. No `Math.random()` inside `src/game/`.
 4. No UI drawn on the game canvas — the canvas is playfield-only.

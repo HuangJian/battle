@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import { findMostDangerousBulletImpl } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, TANK, GRID } from '../src/constants'
+import { CELL, BULLET, TANK } from '../src/constants'
 import type { Bullet } from '../src/types'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * §86 threat-alignment baseline regression guard.
@@ -15,7 +15,8 @@ import type { Bullet } from '../src/types'
  * only when it is aligned with the player within the standard `< TANK`
  * threshold. This file pins that baseline AFTER the M0.5 retirement of the
  * §86 hysteresis/persistence params (dodgeHysteresis, dodgeDirPersistence —
- * A/B -1.1pp / -1.7pp, never shipped, archived in experimental.ts).
+ * A/B -1.1pp / -1.7pp, never shipped; the archive file (experimental.ts) has
+ * since been deleted — recoverable from git history).
  *
  * Historical context (DECISIONS §86): a global `<= TANK` widening was
  * rejected because it caused -37pp on S33 Diamond — bullets in adjacent steel
@@ -25,38 +26,18 @@ import type { Bullet } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   return { world, input, sim }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'fast',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet =>
+  makeBulletShared({ x, y, dir, speed })
 
 function positionPlayer(world: World, x: number, y: number): void {
   const p = world.player!

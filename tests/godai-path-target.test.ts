@@ -4,9 +4,9 @@ import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { CLASSIC_MODEL_PARAMS, GUARD_GOD_AI_PARAMS } from '../src/ai/god/params'
-import { RNG } from '../src/utils/RNG'
-import { CELL, GRID } from '../src/constants'
+import { GRID } from '../src/constants'
 import type { Tank } from '../src/types'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 
 /**
  * §171: path-aware target selection (路径长度感知目标选择) — unit tests.
@@ -29,17 +29,11 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   world.enemiesRemaining = 20 // keep canHunt false → normal hunt branch
   input.hasBase = world.tileMap.hasBase()
@@ -73,14 +67,6 @@ function buildLowWall(world: World): void {
     for (let c = 4; c <= 11; c++) world.tileMap.grid[r][c] = 'brick'
   }
   world.tileMap.revision++
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
 }
 
 function refresh(input: GodAIInput, world: World): void {

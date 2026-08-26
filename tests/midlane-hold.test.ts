@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 // §164 中路列旁主动驻守 (proactive mid-lane flank hold) — 诚实阴性归档基线。
 // 用户需求 2026-08-06：让 §162 出袋后的玩家优先走中路走廊（而非左侧），在列旁
 // 持枪对消。三轮 A/B 全部显著为负：
@@ -30,8 +31,7 @@ function makeWorld(
   world: World
   ai: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'hard'
   world.difficulty = DIFFICULTIES['hard']
   world.rules = { ...RULES['hard'] }

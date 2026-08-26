@@ -1,7 +1,4 @@
 import { SpriteArtistCore } from './SpriteArtistCore'
-import { SpriteArtistTerrainMixin } from './SpriteArtistTerrain'
-import { SpriteArtistTanksMixin } from './SpriteArtistTanks'
-import { SpriteArtistEffectsMixin } from './SpriteArtistEffects'
 
 // Re-export the module-level helpers SpriteCache imports (drawn from the
 // pre-split SpriteArtist.ts; relocated to SpriteArtistCore during the
@@ -14,19 +11,20 @@ export {
   drawAllyAuraPaths,
   drawHpLevelAuraPaths,
   drawCommanderAuraPaths,
+  POWERUP_GLOW_FREQ,
+  paintPowerUpGlow,
 } from './SpriteArtistCore'
 export type { AuraConfig } from './SpriteArtistCore'
 
 /**
  * SpriteArtist — draws all game sprites to a canvas context.
  *
- * Giant-file split: the class is composed from `SpriteArtistCore` (module
- * helpers, fields, constructor, setters, `drawSvgCentered`, stub API) plus
- * three subsystem mixins — Terrain (brick/steel/water/forest/ice/base),
- * Tanks (shadow/tank/player/enemy/ally/aura/insignia), Effects (bullet/
- * power-up/spawn/shield/explosion/HP-level-aura/commander-aura). Pure
- * relocation — runtime behavior is identical to the pre-split single class.
+ * §1.1 composition: the former three-mixin chain (Terrain/Tanks/Effects +
+ * throwing stubs) became explicit slice objects constructed INSIDE
+ * {@link SpriteArtistCore}'s constructor (TerrainSpriteSlice /
+ * TankSpriteSlice / EffectSpriteSlice). Core's draw* methods remain as the
+ * public facade — slices route cross-slice draws through them — with bodies
+ * living in the slices (plan/refactor.trae.md §2.1). Pure relocation —
+ * runtime behavior identical.
  */
-export class SpriteArtist extends SpriteArtistEffectsMixin(
-  SpriteArtistTanksMixin(SpriteArtistTerrainMixin(SpriteArtistCore)),
-) {}
+export class SpriteArtist extends SpriteArtistCore {}

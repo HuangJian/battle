@@ -1,23 +1,21 @@
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { perceive, scanAhead } from '../src/ai/perception'
 import { playerCellImpl, canMoveDirImpl } from '../src/ai/god/Navigator'
 import { baseBulletInterceptCellImpl } from '../src/ai/god/ThreatAssessor'
 import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
-import { CELL, GRID, TANK, BULLET } from '../src/constants'
+import { makeTank, seedWorld } from './helpers'
+import { CELL, GRID, BULLET } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
-import type { Tank } from '../src/types'
 import type { Direction } from '../src/constants'
 import type { WorldSnapshot } from '../src/snapshot/types'
 
 // ---- helpers ----
 
 function makeWorld(seed = 42): World {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = RULES['classic'] ?? DEFAULT_RULES
@@ -29,46 +27,9 @@ function makeWorld(seed = 42): World {
   return world
 }
 
-function makeTank(overrides: Partial<Tank> = {}): Tank {
-  return {
-    id: 0,
-    kind: 'basic',
-    x: 100,
-    y: 100,
-    w: TANK,
-    h: TANK,
-    dir: 'up',
-    speed: 1,
-    moving: false,
-    alive: true,
-    hp: 1,
-    maxHp: 1,
-    level: 0,
-    spawnTimer: 0,
-    shieldTimer: 0,
-    lastFire: 0,
-    nextFireInterval: 500,
-    fireCooldown: 0,
-    fireCount: 0,
-    bulletPower: 1,
-    damage: 1,
-    bulletSpeed: 3,
-    vx: 0,
-    vy: 0,
-    profile: {
-      firepower: 50,
-      projectileSpeed: 50,
-      fireControl: 50,
-      mobility: 50,
-      armor: 50,
-      special: 50,
-    },
-    allegiance: 'player',
-    isPlayer: true,
-    ...overrides,
-  }
-}
-
+// KEPT LOCAL (遗留 #5 audit): hand-placed player2 at pixel (300,300) is
+// asserted by tests here; helpers.makeCoopWorld spawns P2 at the mirrored
+// spawn cell instead. See 口径差异表 in tests/helpers.ts.
 function makeCoopWorld(seed = 42): World {
   const world = makeWorld(seed)
   world.coop = true
@@ -389,8 +350,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     const snap = cloneWorld(world)
     expect(snap.coop).toBe(false)
     expect(snap.player2).toBeNull()
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(false)
     expect(restored.player2).toBeNull()
@@ -412,8 +372,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     expect(snap.lives2).toBe(2)
     expect(snap.playerLevel2).toBe(1)
     expect(snap.score2).toBe(1500)
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(true)
     expect(restored.player2).not.toBeNull()
@@ -432,8 +391,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     const snap = cloneWorld(world)
     expect(snap.coop).toBe(true)
     expect(snap.player2).toBeNull()
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, snap)
     expect(restored.coop).toBe(true)
     expect(restored.player2).toBeNull()
@@ -451,8 +409,7 @@ describe('WorldSnapshot — backward compat (frenzy fields removed)', () => {
     delete oldSnap.playerLevel2
     delete oldSnap.score2
     delete oldSnap.player2SpawnPoint
-    const restored = new World()
-    restored.rng = new RNG(99)
+    const restored = seedWorld(99)
     restoreWorld(restored, oldSnap as WorldSnapshot)
     // Should default to coop off.
     expect(restored.coop).toBe(false)

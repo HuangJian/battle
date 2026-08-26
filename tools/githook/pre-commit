@@ -72,4 +72,11 @@ git add -u
 echo " ▸ lint (oxlint)"
 "$BUN" x oxlint
 
+echo " ▸ freeze gate (det signature vs golden — DECISIONS §272)"
+# God AI v1 frozen-signature gate (~100s). A red gate is NOT an error per se:
+# it means current behavior ≠ the frozen baseline. Either roll back, or run
+# the new-era triple (new DECISIONS entry + 60-seed baseline re-run + golden
+# update). See plan/God-AI-Organization.md §7 / docs/god-ai-tuning.progress.md Part 0.
+bash tools/probe-det-baseline.sh --golden
+
 echo "✓ All pre-commit checks passed."

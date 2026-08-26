@@ -1,6 +1,6 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { RNG } from '../src/utils/RNG'
-import { World } from '../src/game/World'
 import { CELL } from '../src/constants'
 import type { TankKind } from '../src/types'
 import {
@@ -197,8 +197,7 @@ describe('spawnSpeedPxPerTick = base × jitter', () => {
 
 describe('Integration — World spawns tanks at a jittered base speed', () => {
   it('spawned player speed is within the jitter band of its base', () => {
-    const world = new World()
-    world.rng = new RNG(2024)
+    const world = seedWorld(2024)
     world.startGame('classic', 'modern', 0)
     const p = world.player!
     const base = cpsToPxPerTick(world.rules.speedCps.player)
@@ -207,8 +206,7 @@ describe('Integration — World spawns tanks at a jittered base speed', () => {
   })
 
   it('every enemy kind spawns within its jitter band', () => {
-    const world = new World()
-    world.rng = new RNG(2024)
+    const world = seedWorld(2024)
     world.startGame('classic', 'modern', 0)
     for (const kind of ENEMY_KINDS) {
       const t = world.createTank(kind, 8 * CELL, 8 * CELL, 'down')
@@ -220,8 +218,7 @@ describe('Integration — World spawns tanks at a jittered base speed', () => {
 
   it('same seed ⇒ identical spawn speeds (replay/snapshot safe)', () => {
     const build = () => {
-      const w = new World()
-      w.rng = new RNG(55)
+      const w = seedWorld(55)
       w.startGame('classic', 'modern', 0)
       const playerSpeed = w.player!.speed
       const enemySpeed = w.createTank('fast', 8 * CELL, 8 * CELL, 'down').speed
@@ -239,8 +236,7 @@ describe('Speed is a per-kind constant for the modern difficulties', () => {
     expect(hard).toBe(chaos)
     // Every MODERN difficulty spawns within its (modern) jitter band.
     for (const diff of ['relax', 'hard', 'chaos'] as const) {
-      const w = new World()
-      w.rng = new RNG(8)
+      const w = seedWorld(8)
       w.startGame(diff, 'modern', 0)
       const t = w.createTank('armor', 8 * CELL, 8 * CELL, 'down')
       const base = cpsToPxPerTick(w.rules.speedCps.armor)

@@ -26,7 +26,10 @@ export class AudioManager {
       this.masterGain = this.ctx.createGain()
       this.masterGain.gain.value = this.volume
       this.masterGain.connect(this.ctx.destination)
-    } catch {
+    } catch (e) {
+      // Audio is optional (autoplay policy / missing Web Audio) — stay
+      // disabled, but leave a trace so the user knows why it's silent.
+      console.warn('[AudioManager] unavailable — audio disabled:', e)
       this.enabled = false
     }
   }

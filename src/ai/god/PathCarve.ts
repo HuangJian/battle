@@ -1,10 +1,13 @@
 import type { GodAIInput } from '../GodAIInput'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import type { Direction } from '../../constants'
 import { BASE_POS, GRID, CELL, DIR_VECTORS, BULLET } from '../../constants'
-import { findPath } from '../../utils/pathfind'
+import { findPath } from './pathfind'
 import { computeBaseGuardAnchorImpl, getDefaultDefensePositionImpl } from './StrategyPlanner'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
+
+import { manhattan } from '../../utils/helpers'
+import { isBaseRingCell } from './ThreatBudget'
 
 // ============================================================
 // PathCarve — §161 / 开路策略 (carve path, user request 2026-08-06).
@@ -43,12 +46,8 @@ import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
  */
 export function isCarveRingBrickImpl(self: GodAIInput, col: number, row: number): boolean {
   const tm = self.world.tileMap
-  if (!self.hasBase || tm.get(col, row) !== 'brick') return false
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
-  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
-  if ((col === bc - 1 || col === bc + 2) && (row === br || row === br + 1)) return true
-  return false
+  // §3.2: ring membership via the shared ThreatBudget predicate.
+  return self.hasBase && tm.get(col, row) === 'brick' && isBaseRingCell(col, row)
 }
 
 /**
@@ -76,6 +75,12 @@ export function isBaseColumnBrickImpl(self: GodAIInput, col: number, row: number
  * — a strict pure memo (same discipline as the §127 replan cache): a brick
  * destroyed bumps the revision the same tick, so the cache never goes
  * stale.
+ *
+ * Footprint-aware: costs are written per 2×2 tank position (top-left cell),
+ * not per sub-block cell. A tank at position (c,r) has a 2×2 footprint
+ * covering (c,r),(c+1,r),(c,r+1),(c+1,r+1) — if ANY cell in that
+ * footprint is a ring/base-column brick, the position pays the cost.
+ * This matches buildDigCosts and buildBaseRingCosts semantics.
  */
 export function buildCarveCosts(self: GodAIInput): Float64Array {
   const rev = self.world.tileMap.revision
@@ -84,14 +89,20 @@ export function buildCarveCosts(self: GodAIInput): Float64Array {
   const grid = self.world.tileMap.grid
   const baseCost = self.params.carveBaseColumnCost
   for (let r = 0; r < GRID; r++) {
-    const grow = grid[r]
     for (let c = 0; c < GRID; c++) {
-      if (grow[c] !== 'brick') continue
-      if (isCarveRingBrickImpl(self, c, r)) {
-        costs[r * GRID + c] = 1e9
-      } else if (isBaseColumnBrickImpl(self, c, r)) {
-        costs[r * GRID + c] = baseCost
+      if (c + 1 >= GRID || r + 1 >= GRID) continue
+      let ringCost = 0
+      let baseCostHit = 0
+      for (let dr = 0; dr <= 1; dr++) {
+        const grow = grid[r + dr]
+        for (let dc = 0; dc <= 1; dc++) {
+          if (grow[c + dc] !== 'brick') continue
+          if (isCarveRingBrickImpl(self, c + dc, r + dr)) ringCost = 1e9
+          else if (isBaseColumnBrickImpl(self, c + dc, r + dr)) baseCostHit = baseCost
+        }
       }
+      // Ring supersedes base-column (ring is never carveable).
+      costs[r * GRID + c] = ringCost || baseCostHit
     }
   }
   self._carveCosts = costs
@@ -121,7 +132,7 @@ export function carveThreatEnemyImpl(self: GodAIInput): Cell | null {
     const t = list[li]
     if (!t.alive || t.spawnTimer > 0) continue
     const tc = self.tankCell(t)
-    const dist = Math.abs(tc.col - bc) + Math.abs(tc.row - br)
+    const dist = manhattan(tc.col, tc.row, bc, br)
     if (dist > prm.carveThreatDistCells) continue
     const breacher = enemyCanShootBase(self, t) || enemyCanBreachRing(self, t)
     if (breacher && !bestBreacher) {
@@ -213,7 +224,7 @@ export function pathCarveSafeImpl(self: GodAIInput, from: Cell, path: Direction[
  * findCarvePathImpl. It was a second full-map A* attempted on every
  * restricted-unsafe / restricted-null outcome but returned a carve-safe path
  * only 3/17683 times across all 2100 gate sims (all chaos, all
- * restricted-unsafe). The god-ai-gate (620/508/473) still passes with margin.
+ * restricted-unsafe). The godai-gate (620/508/473) still passes with margin.
  */
 export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direction[] | null {
   const tm = self.world.tileMap
@@ -227,7 +238,7 @@ export function findCarvePathImpl(self: GodAIInput, from: Cell, to: Cell): Direc
   // threatCosts, attempted on every restricted-unsafe / restricted-null outcome
   // — was removed. Instrumented across all 2100 gate sims it returned a
   // carve-safe path only 3/17683 times (all chaos, all restricted-unsafe). The
-  // god-ai-gate (620/508/473) still passes with margin, so dropping it is
+  // godai-gate (620/508/473) still passes with margin, so dropping it is
   // accepted as non-regressing per the gate contract.
   const restricted = findPath(tm, from, to, {
     breakBrick: true,
@@ -296,6 +307,10 @@ export function carvePathInfoCached(self: GodAIInput, from: Cell, to: Cell): Car
   // dual central breach, so both join the revision in the validity key. Any
   // mismatch — or the carveReplanTicks staleness bound running out — drops the
   // whole map, so a stale answer can never be served.
+  // NOTE: memo entries are stored by reference (NOT copied). Current callers
+  // only read .length/.corridor, so aliasing is safe. If a future caller
+  // mutates the returned path array (e.g. shift/pop), it would corrupt the
+  // memo. Such a caller must clone the result.
   const baseCost = self.params.carveBaseColumnCost
   const maxBase = self.params.carveMaxBaseColumn
   let memo = self._carveMemo
@@ -804,11 +819,14 @@ export function enemyNearLaneImpl(self: GodAIInput, dist: number): boolean {
 
 /**
  * §189: find a standable cell in the lower-half wing nearest to the base.
- * `side` = -1 for left wing (cols 0..bc-2), +1 for right wing (cols bc+3..GRID-1).
- * Scans rows br-4..br (the lower-half band where the player needs mobility),
- * nearest to the base first. A "standable" cell has no brick/steel/water/base
- * in its 2×2 tank footprint. Returns null when no standable cell exists.
- * Pure World read — no RNG.
+ * `side` = -1 for left wing (cols 0..bc-3), +1 for right wing (cols bc+4..GRID-2).
+ * The ±1 column gap from bc accounts for the 2×2 tank footprint:
+ * a tank at col bc-2 has footprint cols bc-2..bc-1 which overlaps the
+ * base columns, so the leftmost safe column is bc-3. Similarly bc+4
+ * on the right. Scans rows br-4..br (the lower-half band where the
+ * player needs mobility), nearest to the base first. A "standable" cell
+ * has no brick/steel/water/base in its 2×2 tank footprint. Returns null
+ * when no standable cell exists. Pure World read — no RNG.
  */
 export function findWingAnchorImpl(self: GodAIInput, side: -1 | 1): Cell | null {
   const w = self.world
@@ -888,8 +906,8 @@ export function findConnectCarveTargetImpl(self: GodAIInput, pc: Cell): Cell | n
   if (right && !rightConnected && (!left || leftConnected)) return right
   // Both disconnected — nearer wing wins.
   if (left && right) {
-    const distL = Math.abs(pc.col - left.col) + Math.abs(pc.row - left.row)
-    const distR = Math.abs(pc.col - right.col) + Math.abs(pc.row - right.row)
+    const distL = manhattan(pc.col, pc.row, left.col, left.row)
+    const distR = manhattan(pc.col, pc.row, right.col, right.row)
     return distL <= distR ? left : right
   }
   return left ?? right

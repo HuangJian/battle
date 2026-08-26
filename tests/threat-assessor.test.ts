@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput } from '../src/ai/GodAIInput'
 import { findMostDangerousBulletImpl, isSafeDirImpl } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
 
 /**
  * ThreatAssessor unit tests — bullet evasion is DELIBERATELY terrain-blind.
@@ -27,46 +27,25 @@ import type { Bullet } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world)
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
 
   // Clear all terrain and place base cells.
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
 
   return { world, input, sim }
 }
 
-function makeBullet(
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (
   x: number,
   y: number,
   dir: Bullet['dir'],
   ownerKind: Bullet['ownerKind'] = 'fast',
-): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind,
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed: 4,
-    power: 1,
-    damage: 1,
-  }
-}
+): Bullet => makeBulletShared({ x, y, dir, ownerKind })
 
 describe('ThreatAssessor — deliberate terrain-blind evasion (DECISIONS §48)', () => {
   describe('findMostDangerousBullet', () => {

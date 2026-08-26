@@ -1,8 +1,7 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL, ICE_DECEL_TRACTION } from '../src/constants'
 
 /**
@@ -17,8 +16,7 @@ import { CELL, ICE_DECEL_TRACTION } from '../src/constants'
 
 /** Build a World with a controlled stage: a band of ice flanked by open ground. */
 function buildIceWorld(seed: number) {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)

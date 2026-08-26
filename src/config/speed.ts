@@ -1,6 +1,7 @@
 import { CELL } from '../constants'
 import type { RNG } from '../utils/RNG'
 import type { TankKind } from '../types'
+import { TANK_SPEC, specField } from './tank-spec'
 
 /**
  * Movement speed design — data-driven, NOT derived from the mobility profile.
@@ -36,13 +37,10 @@ export const BALANCED_ENEMY_CPS = 3.75
  *   armor  = 3.1875 cps (0.85 × basic, original modern ratio)
  *   player = 3.9375 cps (1.05 × basic, original modern ratio)
  */
-export const BASE_SPEED_CPS: Record<TankKind, number> = {
-  basic: BALANCED_ENEMY_CPS,
-  fast: BALANCED_ENEMY_CPS * 1.2,
-  power: BALANCED_ENEMY_CPS * 0.95,
-  armor: BALANCED_ENEMY_CPS * 0.85,
-  player: BALANCED_ENEMY_CPS * 1.05,
-}
+/** Base movement speed on normal terrain, cells/sec, per kind.
+ * Derived view of TANK_SPEC (refactor.trae.md §2.1) — the only authoritative
+ * copy of the per-kind numbers is config/tank-spec.ts. */
+export const BASE_SPEED_CPS = specField('speedCps')
 
 /**
  * Player universal-growth speed bonus: each star adds this many cells/sec on
@@ -130,12 +128,14 @@ export const BULLET_SPEED_RATIO = 4
  *   armor  = 0.90 ×  → 13.50 cps (original modern ratio)
  *   player = 1.05 ×  → 15.75 cps (original modern ratio)
  */
+/** Per-kind multiplier on the balanced-enemy bullet speed (original modern ratios).
+ * Derived from TANK_SPEC so the bullet-speed numbers stay single-sourced. */
 export const BULLET_SPEED_MULT: Record<TankKind, number> = {
-  basic: 1.0,
-  fast: 1.05,
-  power: 0.95,
-  armor: 0.9,
-  player: 1.05,
+  basic: TANK_SPEC.basic.bulletSpeedCps / (BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO),
+  fast: TANK_SPEC.fast.bulletSpeedCps / (BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO),
+  power: TANK_SPEC.power.bulletSpeedCps / (BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO),
+  armor: TANK_SPEC.armor.bulletSpeedCps / (BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO),
+  player: TANK_SPEC.player.bulletSpeedCps / (BALANCED_ENEMY_CPS * BULLET_SPEED_RATIO),
 }
 
 /**

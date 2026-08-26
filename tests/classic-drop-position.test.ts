@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 /**
  * Drop position randomization — weighted near/mid/far offset (50/30/20%).
  *
@@ -12,15 +13,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { CELL, TANK, FIELD } from '../src/constants'
 import { RULES } from '../src/config/rules'
 import type { GameplayRules } from '../src/config/rules'
 import type { TerrainType } from '../src/types'
 
 function buildWorld(seed: number, rules?: GameplayRules): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)
@@ -35,11 +34,7 @@ function callBuildDrop(
   sim: Simulation,
   at?: { x: number; y: number },
 ): { type: string; x: number; y: number } {
-  return (
-    sim as unknown as {
-      buildDrop: (at?: { x: number; y: number }) => { type: string; x: number; y: number }
-    }
-  ).buildDrop(at)
+  return sim.systems.powerUps.buildDrop(at)
 }
 
 /**

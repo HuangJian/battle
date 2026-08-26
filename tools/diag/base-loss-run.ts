@@ -142,7 +142,8 @@ interface BaseHit {
   baseHpBefore: number
 }
 
-/** Resolve `damageBase` on the Simulation prototype chain (mixin-safe). */
+/** Resolve `damageBase` on the Simulation prototype chain (works across the
+ * composition subsystems — the method lives on a SimulationCombat slice). */
 function findDamageBase(sim: Simulation): (b: Bullet) => void {
   let p: object | null = Object.getPrototypeOf(sim)
   while (p) {

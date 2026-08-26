@@ -2,13 +2,12 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { scanAheadImpl, shouldFireInDirImpl } from '../src/ai/god/FireControl'
-import { CELL, GRID } from '../src/constants'
+import { CELL } from '../src/constants'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../src/config/rules'
-import type { Tank } from '../src/types'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 
 /**
  * FireControl steel-blocking unit tests.
@@ -24,8 +23,7 @@ import type { Tank } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   world.difficultyKey = 'classic'
   world.difficulty = DIFFICULTIES['classic']
   world.rules = RULES['classic'] ?? DEFAULT_RULES
@@ -34,22 +32,9 @@ function setupWorld(): { world: World; input: GodAIInput; sim: Simulation } {
   world.startGame('classic', 'modern', 0)
 
   // Clear all terrain and place base cells.
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
 
   return { world, input, sim }
-}
-
-/** Create an enemy tank and place it at the given grid position. */
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const e = world.createTank('basic', col * CELL, row * CELL, 'down')
-  e.spawnTimer = 0
-  world.tanks.push(e)
-  return e
 }
 
 describe('scanAheadImpl — steel and enemy on dual offset lines', () => {

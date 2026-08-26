@@ -16,14 +16,7 @@ import { STAGES } from '../../src/config/stages'
 import { runSimulation } from './simulation-runner'
 import type { StageData } from '../../src/types'
 
-function parseRange(spec: string, max: number): number[] {
-  if (spec === 'all') return Array.from({ length: max }, (_, i) => i)
-  if (spec.includes('-')) {
-    const [s, e] = spec.split('-').map(Number)
-    return Array.from({ length: e - s + 1 }, (_, i) => s + i)
-  }
-  return [parseInt(spec, 10)]
-}
+import { arg, parseStages, parseSeedSpec } from '../lib/cli'
 
 interface ModeSummary {
   mode: 'single' | 'coop'
@@ -111,15 +104,14 @@ function runMode(
 }
 
 if (import.meta.main) {
-  function arg(name: string, fallback: string): string {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
-  const difficulty = arg('difficulty', 'classic')
-  const seeds = parseRange(arg('seeds', '1-3'), 1_000_000)
-  const stageIdxs = parseRange(arg('stages', '1-26'), STAGES.length)
-    .map((n) => n - 1) // CLI is 1-based (1..35); internal index is 0-based
-    .filter((i) => i >= 0 && i < STAGES.length)
+  const difficulty = arg('difficulty', 'classic')!
+  // Seeds use the SINGLE-SEED dialect (bare "5" = seed 5) — parseSeedSpec, not
+  // lib/cli parseSeeds whose bare number means a 1..N count.
+  const seeds = parseSeedSpec(arg('seeds', '1-3'))
+  // Strict §213 parser: out-of-range/junk stage tokens now THROW instead of
+  // being silently dropped (behavior fix — the old .filter() could turn
+  // "--stages 40" into an empty sweep).
+  const stageIdxs = parseStages(arg('stages', '1-26'))
   const stages = stageIdxs.map((i) => STAGES[i]).filter(Boolean)
   const outputFile = arg('output', '')
 

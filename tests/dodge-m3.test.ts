@@ -1,15 +1,15 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import {
   dodgeDirectionImpl,
   dodgeCounterFireDirImpl,
   isTerrainPinnedImpl,
 } from '../src/ai/god/ThreatAssessor'
-import { CELL, BULLET, GRID } from '../src/constants'
+import { clearArena, makeBullet as makeBulletShared, seedWorld } from './helpers'
+import { CELL, BULLET } from '../src/constants'
 import type { Bullet } from '../src/types'
 
 /**
@@ -23,8 +23,7 @@ import type { Bullet } from '../src/types'
  */
 
 function setupWorld(): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton): mutating input.params below
   // for the clearance-score cases must not leak into the shared
   // DEFAULT_GOD_AI_PARAMS (cross-file module state is shared in bun test —
@@ -32,34 +31,15 @@ function setupWorld(): { world: World; input: GodAIInput } {
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame('classic', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   return { world, input }
 }
 
-function makeBullet(x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet {
-  return {
-    id: genId(),
-    x,
-    y,
-    w: BULLET,
-    h: BULLET,
-    dir,
-    alive: true,
-    ownerId: -1,
-    ownerKind: 'fast',
-    isPlayer: false,
-    allegiance: 'enemy',
-    speed,
-    power: 1,
-    damage: 1,
-  }
-}
+// Local positional flavor → shared field-complete fixture (遗留 #5;
+// 口径差异表 in tests/helpers.ts).
+const makeBullet = (x: number, y: number, dir: Bullet['dir'], speed = 4): Bullet =>
+  makeBulletShared({ x, y, dir, speed })
 
 function positionPlayer(world: World, x: number, y: number): void {
   const p = world.player!

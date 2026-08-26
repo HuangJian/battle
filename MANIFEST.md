@@ -55,6 +55,11 @@ Renderer / Audio / UI / Stats
 
 This separation is the most important rule in the project. It is what makes every other property possible: determinism, recovery, replay, disposable presentation, multiple game modes sharing one engine.
 
+> Documented exemptions: controller-driven state transitions (`world.state = …`,
+> `world.ui.*` — transitions, not entity mutations) and `genId()`'s module-level
+> id counter (cross-snapshot uniqueness). Entity gameplay writes stay
+> Simulation-only; takeover flows route through Simulation entry points.
+
 ---
 
 # 4. No Hidden State

@@ -1,10 +1,13 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { World } from '../../game/World'
-import { BASE_POS, CELL, GRID, TICK_MS } from '../../constants'
-import type { Cell } from '../../utils/pathfind'
+import { BASE_POS, CELL, GRID } from '../../constants'
+import { msToTicksInt as msToTicks } from './constants'
+import type { Cell } from './pathfind'
 import { enemyDeadline, aimDirTo, playerShotsToKill, firePower } from './ThreatBudget'
 import { blocksBullet } from './Chokepoint'
+
+import { manhattan } from '../../utils/helpers'
 
 /**
  * COORDINATE CONVENTION (§209, §210): every cell in this module is CORNER
@@ -81,8 +84,6 @@ interface CoverageThreat {
   flight: number
   fp: number
 }
-
-const msToTicks = (ms: number): number => Math.max(1, Math.round(ms / TICK_MS))
 
 /** Corner-space cell of a tank (top-left sub-block; footprint is 2×2). */
 function cornerCell(t: Tank): Cell {
@@ -217,8 +218,7 @@ function clearLane(
 
 /** Reach the candidate cell and align to fire at the threat (ticks). */
 function reachAndTurn(w: World, p: Tank, pc: Cell, i: Cell, t: CoverageThreat): number {
-  const travel =
-    (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
+  const travel = manhattan(pc.col, pc.row, i.col, i.row) * (p.speed > 0 ? CELL / p.speed : 1e9)
   const aimDir = aimDirTo(t.col, t.row, i.col, i.row)
   const turn =
     aimDir !== null && aimDir !== p.dir ? msToTicks(w.rules?.turnCooldownMs ?? 200) + 1 : 0
@@ -250,9 +250,8 @@ function coverageValue(w: World, p: Tank, pc: Cell, i: Cell, threats: CoverageTh
   }
   // One gun: prevented damage cannot exceed what the base could lose.
   if (v > w.baseHp) v = w.baseHp
-  const travel =
-    (Math.abs(pc.col - i.col) + Math.abs(pc.row - i.row)) * (p.speed > 0 ? CELL / p.speed : 1e9)
-  const exposure = Math.max(0, Math.abs(i.col - BASE_POS.col) + Math.abs(i.row - BASE_POS.row) - 3)
+  const travel = manhattan(pc.col, pc.row, i.col, i.row) * (p.speed > 0 ? CELL / p.speed : 1e9)
+  const exposure = Math.max(0, manhattan(i.col, i.row, BASE_POS.col, BASE_POS.row) - 3)
   v -= travel * COVERAGE_TRAVEL_COST
   v -= exposure * COVERAGE_EXPOSURE_PER_CELL
   return v
@@ -279,8 +278,7 @@ function collectCandidates(w: World, pc: Cell, threats: CoverageThreat[]): Cell[
     // Coverage points must stay within the base neighborhood — a point that
     // far is a hunt assignment, not a coverage assignment (S34 forensics:
     // base lost with the player 20+ cells away).
-    if (Math.abs(c - BASE_POS.col) + Math.abs(r - BASE_POS.row) > COVERAGE_MAX_PLAYER_BASE_DIST)
-      return
+    if (manhattan(c, r, BASE_POS.col, BASE_POS.row) > COVERAGE_MAX_PLAYER_BASE_DIST) return
     seen.add(k)
     out.push({ col: c, row: r })
   }
@@ -424,7 +422,7 @@ export function coveragePlanImpl(
   // imminent damage and the normal hunt handles the rest — re-routing the
   // player to a far point is exactly the S34 collapse pattern (forensics:
   // base lost with the player 20+ cells away from the base).
-  const baseDist = Math.abs(pc.col - BASE_POS.col) + Math.abs(pc.row - BASE_POS.row)
+  const baseDist = manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row)
   if (baseDist > COVERAGE_MAX_PLAYER_BASE_DIST) {
     self._coverageCell = null
     return null

@@ -34,11 +34,9 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import type { Direction } from '../../src/constants'
 import type { Bullet, Tank } from '../../src/types'
 
-function arg(name: string, def?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def
-}
-const fromJson = arg('from-json') ?? 'tmp/open-test-forensics-baseline.json'
+import { arg } from '../lib/cli'
+import { DEFAULT_FORENSICS_CORPUS } from '../lib/eval-refs'
+const fromJson = arg('from-json') ?? DEFAULT_FORENSICS_CORPUS
 const limit = Number(arg('limit') ?? '999')
 const windowTicks = Number(arg('window') ?? '60')
 const jsonOut = arg('json')

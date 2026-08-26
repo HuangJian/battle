@@ -2,12 +2,11 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { CLASSIC_MODEL_PARAMS } from '../src/ai/god/params'
 import { shotReachesBaseImpl, enemyInShotCorridorImpl } from '../src/ai/god/FireControl'
-import { CELL, GRID } from '../src/constants'
-import type { Tank } from '../src/types'
+import { CELL } from '../src/constants'
+import { clearArena, placeEnemy, seedWorld } from './helpers'
 
 /**
  * §121 t2a/aggressive 停射自毁守卫 (self-fire base guard) — unit tests.
@@ -35,8 +34,7 @@ function setupWorld(
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
@@ -45,23 +43,10 @@ function setupWorld(
   // selfFireBaseGuard→0 from CLASSIC_MODEL_PARAMS, so shipped-default tests
   // must run in a pool world (where the §121 default 2 actually applies).
   world.startGame(difficulty, 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.reset()
   return { world, input }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
 }
 
 function positionPlayer(world: World, x: number, y: number): void {

@@ -23,7 +23,19 @@ export class TileMap {
    */
   revision = 0
 
-  /** Set to true when terrain changes; renderer checks this to invalidate its cache. */
+  /**
+   * Set to true when terrain changes; renderer checks this to invalidate its cache.
+   *
+   * ── Registered exception to "presentation never mutates World" (§2.5) ──
+   * The RENDERER is the consumer of this flag: GameRendererTerrain's
+   * updateTerrainCache clears `dirty` (and drains `dirtyCells`) after
+   * rebuilding its cache. This is a presentation-side consumption protocol,
+   * not a simulation write: who sets it — TileMap mutations + snapshot
+   * restore; who consumes it — the renderer, once per repaint, in
+   * PresentationLayer.render → updateTerrainCache; order constraint — the
+   * clear must happen only AFTER the rebuild that observed it. Do not add a
+   * second consumer without restating this contract at both ends.
+   */
   dirty = true
 
   /**

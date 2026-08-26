@@ -1,8 +1,8 @@
+import { seedWorld } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World, genId } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { RULES } from '../src/config/rules'
 import { CELL, TANK, GRID } from '../src/constants'
 import type { TankKind } from '../src/types'
@@ -15,8 +15,7 @@ import type { TankKind } from '../src/types'
  */
 
 function buildClassicWorld(seed: number): { world: World; sim: Simulation } {
-  const world = new World()
-  world.rng = new RNG(seed)
+  const world = seedWorld(seed)
   const input = new Input()
   const sim = new Simulation(world, input)
   world.startGame('classic', 'modern', 0)
@@ -133,8 +132,7 @@ describe('classic stage — end-to-end faithful feel (plan §7)', () => {
   })
 
   it('modern regression: hard keeps pool TTK (basic ≠ one-shot) and flat scoring', () => {
-    const world = new World()
-    world.rng = new RNG(99)
+    const world = seedWorld(99)
     const sim = new Simulation(world, new Input())
     world.startGame('hard', 'modern', 0)
     world.tanks.length = 0

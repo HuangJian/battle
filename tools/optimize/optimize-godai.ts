@@ -34,6 +34,7 @@ import {
 } from '../../src/ai/god/all-on-experiment'
 import type { StageData } from '../../src/types'
 import { RNG } from '../../src/utils/RNG'
+import { loadStageRefs } from '../lib/eval-refs'
 import {
   scoreRun,
   aggregateStage,
@@ -48,10 +49,11 @@ import {
   type ScoreConfig,
 } from '../eval/godai-score'
 import type { RunTelemetry } from '../sim/simulation-runner'
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { parseStageSpec, StageSpecError, runHeader, paramsHash } from '../lib/stage-spec'
 
+import { arg as cliArg } from '../lib/cli'
 // ============================================================
 // Search Space Definition
 // ============================================================
@@ -182,17 +184,6 @@ export interface EvalConfig {
   stageRefs?: Record<string, StageRefs>
   /** Base score config (bands + weights). Defaults to v6; v7 uses wider bands. */
   scoreConfigBase?: ScoreConfig
-}
-
-/** Load per-stage v6 references if they have been calibrated. */
-export function loadStageRefs(): Record<string, StageRefs> {
-  const file = join(import.meta.dir, '../eval/eval-refs.json')
-  if (!existsSync(file)) return {}
-  try {
-    return JSON.parse(readFileSync(file, 'utf8')).stages ?? {}
-  } catch {
-    return {}
-  }
 }
 
 /** P4 goal: every classic stage must clear above this win rate (floor). */
@@ -1015,15 +1006,12 @@ function runComparisonTraces(
 // ============================================================
 
 if (import.meta.main) {
-  // Overloaded so that supplying a fallback narrows the result to `string`.
-  // Without this every call site with a default still had to be unwrapped with
-  // `!`, and the ones that forgot silently passed `string | undefined` into
-  // path helpers.
+  // Overload shim: a supplied fallback narrows the result to `string`, sparing
+  // `!` at call sites; the implementation is the shared tools/lib/cli layer.
   function arg(name: string, fallback: string): string
   function arg(name: string): string | undefined
   function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
+    return cliArg(name, fallback)
   }
 
   // M0 §3.1 (open-test protocol): shared parser — `all`, ranges, comma

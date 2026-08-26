@@ -62,3 +62,11 @@ export const DIFFICULTIES: Record<string, DifficultyConfig> = {
 }
 
 export const DIFFICULTY_KEYS = Object.keys(DIFFICULTIES)
+
+/**
+ * The three God-AI evaluation difficulties (AGENTS §6.3b: hard 主 /
+ * classic·chaos 参考). relax is the human-ease tier and stays out of tooling
+ * sweeps — single source for every `['classic','hard','chaos']` literal that
+ * tools/tests used to hand-roll.
+ */
+export const EVAL_DIFFICULTY_KEYS = ['classic', 'hard', 'chaos']

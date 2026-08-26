@@ -1,3 +1,4 @@
+import { seedWorld } from './helpers'
 /**
  * Classic bullet speed — faithful 1985 FC Battle City.
  *
@@ -19,10 +20,9 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { World } from '../src/game/World'
+
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { profileToStats } from '../src/config/combat'
 import { cpsToPxPerTick, spawnBulletSpeedPxPerTick } from '../src/config/speed'
 import { hasStarPerk } from '../src/config/rules'
@@ -37,16 +37,14 @@ const FC_BULLET_CPS: Record<TankKind, number> = {
 }
 
 function classicRules() {
-  const w = new World()
-  w.rng = new RNG(1)
+  const w = seedWorld(1)
   new Simulation(w, new Input())
   w.startGame('classic', 'modern', 0)
   return w.rules
 }
 
 function modernRules() {
-  const w = new World()
-  w.rng = new RNG(1)
+  const w = seedWorld(1)
   new Simulation(w, new Input())
   w.startGame('hard', 'modern', 0)
   return w.rules

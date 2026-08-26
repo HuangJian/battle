@@ -23,6 +23,7 @@ import { generateStages, type Theme } from '../level/level-gen'
 import { writeReplayFile } from './replay-writer'
 import type { StageData } from '../../src/types'
 
+import { arg, parseSeedSpec } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -223,27 +224,18 @@ export function summarize(results: BatchResult[]): BatchSummary {
 // Seed range parser
 // ============================================================
 
-export function parseSeeds(spec: string): number[] {
-  if (spec.includes('-')) {
-    const [start, end] = spec.split('-').map(Number)
-    return Array.from({ length: end - start + 1 }, (_, i) => start + i)
-  }
-  return [parseInt(spec, 10)]
-}
+// Re-exported from lib/cli — the canonical home of the SINGLE-SEED dialect
+// (bare "60" = seed 60; refactor.trae.md §2.3/§2.4).
+export { parseSeedSpec } from '../lib/cli'
 
 // ============================================================
 // CLI
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
-
   const difficulty = arg('difficulty', 'hard')!
   const seedSpec = arg('seeds', '1')!
-  const seeds = parseSeeds(seedSpec)
+  const seeds = parseSeedSpec(seedSpec)
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const doEval = process.argv.includes('--eval')
   const pretty = process.argv.includes('--pretty')

@@ -28,6 +28,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { STAGES } from '../../src/config/stages'
+import { arg, parseParamSets } from '../lib/cli'
 import { readFileSync } from 'fs'
 
 const USAGE = `
@@ -60,32 +61,15 @@ function dump(stageIdx: number, seed: number): void {
   // Any numeric GodAIParams key — future diagnostics need no tool changes.
   // Param-specific hardcoded flags (--steelOcclusion / --noCounterFire /
   // --brickGate) are deliberately unsupported; see progress doc §0.C rule 2.
-  for (let ai = 0; ai < process.argv.length; ai++) {
-    if (process.argv[ai] === '--difficulty') {
-      const d = process.argv[ai + 1]
-      if (d && DIFFICULTIES[d]) difficulty = d
-      continue
-    }
-    if (process.argv[ai] === '--max-ticks') {
-      const n = Number(process.argv[ai + 1])
-      if (Number.isInteger(n) && n > 0) maxTicks = n
-      continue
-    }
-    if (process.argv[ai] !== '--set') continue
-    const kv = process.argv[ai + 1]
-    if (!kv || !kv.includes('=')) {
-      console.error('--set expects key=value (e.g. --set counterFire=0)')
-      process.exit(1)
-    }
-    const eq = kv.indexOf('=')
-    const key = kv.slice(0, eq)
-    const val = Number(kv.slice(eq + 1))
-    if (isNaN(val) || !(key in godAIParams)) {
-      console.error(`--set: unknown or non-numeric param '${key}'`)
-      process.exit(1)
-    }
-    ;(godAIParams as unknown as Record<string, number>)[key] = val
+  const dArg = arg('difficulty')
+  if (dArg && DIFFICULTIES[dArg]) difficulty = dArg
+  const mtArg = arg('max-ticks')
+  if (mtArg !== undefined) {
+    const n = Number(mtArg)
+    if (!Number.isInteger(n) || n <= 0) throw new Error(`--max-ticks: illegal value "${mtArg}"`)
+    maxTicks = n
   }
+  Object.assign(godAIParams, parseParamSets(DEFAULT_GOD_AI_PARAMS))
   const world = new World()
   world.rng.reseed(seed)
   world.difficultyKey = difficulty

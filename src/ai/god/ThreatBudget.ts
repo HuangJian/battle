@@ -27,12 +27,12 @@
  * (tests/godai-threat-budget.test.ts) pins them to the AI's predicates.
  */
 
-import { CELL, GRID, BASE_POS, type Direction } from '../../constants'
+import { CELL, GRID, BASE_POS, TICK_MS, TURN_SENTINEL_MS, type Direction } from '../../constants'
+import { manhattan } from '../../utils/helpers'
 import { resolveProfile } from '../../config/combat'
 import type { World } from '../../game/World'
 import type { Tank } from '../../types'
-
-const TICK_MS = 1000 / 60
+import type { TileMap } from '../../game/TileMap'
 
 /** The 8 cells of the base protection ring — mirror of isBaseProtectionCell. */
 export const RING_CELLS: ReadonlyArray<{ col: number; row: number }> = (() => {
@@ -46,6 +46,36 @@ export const RING_CELLS: ReadonlyArray<{ col: number; row: number }> = (() => {
   }
   return cells
 })()
+
+/**
+ * Membership test for the 8-cell base protection ring (§3.2 single source;
+ * was re-enumerated in FireControl.isBaseRingCell / PathCarve ring check /
+ * the scanAhead exact-ring inline).
+ */
+export function isBaseRingCell(col: number, row: number): boolean {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
+  if ((col === bc - 1 || col === bc + 2) && (row === br || row === br + 1)) return true
+  return false
+}
+
+/** Number of ring cells still 'brick' (0..8). TileMap-typed to stay
+ * allocation-free at call sites (no closure — AGENTS §14.1).
+ * NOTE: this counts ONLY 'brick', not 'steel'. When the fence converts
+ * ring bricks to steel (§129), countRingBrickCells drops to 0 but the
+ * ring is still structurally intact (steel stops bullets). See the
+ * three distinct ring-intact predicates below:
+ *   1. countRingBrickCells: only 'brick' — counts breachable cells
+ *   2. enemyDeadline's ringIntact: 'brick' || 'steel' — any solid ring cell
+ *   3. canBreachRingLine: requires target cell === 'brick' — productive breach only */
+export function countRingBrickCells(tm: TileMap): number {
+  let n = 0
+  for (let i = 0; i < RING_CELLS.length; i++) {
+    if (tm.get(RING_CELLS[i].col, RING_CELLS[i].row) === 'brick') n++
+  }
+  return n
+}
 
 export interface ActionEta {
   /**
@@ -124,9 +154,12 @@ export interface KillAssessment {
   missesSecondThreat: boolean
 }
 
-const msToTicks = (ms: number): number => Math.max(0, ms / TICK_MS)
-const manhattan = (aCol: number, aRow: number, bCol: number, bRow: number): number =>
-  Math.abs(aCol - bCol) + Math.abs(aRow - bRow)
+/** Float ms→ticks (no rounding). Used for threat-timing arithmetic where
+ *  fractional ticks are intentional. Note: CoveragePlanner.ts uses a
+ *  separate msToTicks that rounds to integer ticks (Math.round + max(1));
+ *  both produce identical results for current inputs but serve different
+ *  precision needs. */
+import { msToTicksFloat as msToTicks } from './constants'
 
 // §14.2 hot-path scratch: every object-returning helper below accepts an
 // optional caller-owned `out` (reused across ticks — zero per-tick
@@ -157,7 +190,7 @@ export function ticksUntilLegalTurn(world: World, t: Tank): number {
   const turnCd = world.rules?.turnCooldownMs ?? 0
   if (turnCd <= 0) return 0
   const nowMs = world.frame * TICK_MS
-  const elapsed = nowMs - (t.lastTurnMs ?? -9999)
+  const elapsed = nowMs - (t.lastTurnMs ?? TURN_SENTINEL_MS)
   return elapsed >= turnCd ? 0 : msToTicks(turnCd - elapsed)
 }
 
@@ -166,7 +199,7 @@ export function ticksUntilFire(world: World, t: Tank): number {
   const iv = t.nextFireInterval
   if (!(iv > 0)) return 0
   const nowMs = world.frame * TICK_MS
-  const elapsed = nowMs - (t.lastFire ?? -9999)
+  const elapsed = nowMs - (t.lastFire ?? TURN_SENTINEL_MS)
   return elapsed >= iv ? 0 : msToTicks(iv - elapsed)
 }
 
@@ -310,8 +343,6 @@ export function canShootBaseLine(world: World, col: number, row: number): boolea
  * intact ring brick (productive breach)? Mirrors SmartThreatModel verbatim.
  */
 export function canBreachRingLine(world: World, col: number, row: number): boolean {
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
   const tm = world.tileMap
   const clearShotAt = (rc: number, rr: number): boolean => {
     if (col === rc) {
@@ -335,12 +366,9 @@ export function canBreachRingLine(world: World, col: number, row: number): boole
     }
     return tm.get(rc, rr) === 'brick'
   }
-  for (let dc = -1; dc <= 2; dc++) {
-    if (clearShotAt(bc + dc, br - 1)) return true
-  }
-  for (let dr = 0; dr <= 1; dr++) {
-    if (clearShotAt(bc - 1, br + dr)) return true
-    if (clearShotAt(bc + 2, br + dr)) return true
+  // §3.2: iterate the canonical RING_CELLS instead of hand-unrolled loops.
+  for (let i = 0; i < RING_CELLS.length; i++) {
+    if (clearShotAt(RING_CELLS[i].col, RING_CELLS[i].row)) return true
   }
   return false
 }

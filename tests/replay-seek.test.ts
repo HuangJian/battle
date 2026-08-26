@@ -296,7 +296,7 @@ describe('PlaybackController seek leaves no audio backlog (DECISIONS #78)', () =
     pb.start(world, new Simulation(world, null as any))
     const sim = (pb as unknown as { simulation: Simulation }).simulation
     pb.seekTo(world, sim, frac)
-    return world.events.length
+    return world.events.items.length
   }
 
   it('coop seekTo leaves the world event queue empty at every seek point', () => {
@@ -334,6 +334,6 @@ describe('PlaybackController seek leaves no audio backlog (DECISIONS #78)', () =
       () => {},
       () => ({}) as unknown as ImageData,
     )
-    expect(world.events.length).toBe(0)
+    expect(world.events.items.length).toBe(0)
   })
 })

@@ -1,9 +1,10 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
-import type { Cell } from '../../utils/pathfind'
+import type { Cell } from './pathfind'
 import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
-import { findPath } from '../../utils/pathfind'
-import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
+import { findPath } from './pathfind'
+import { opposite, ALL_DIRS } from '../../utils/direction'
+import { snap, aabb } from '../../utils/helpers'
 
 // ============================================================
 // Navigator — movement, pathfinding, and wall-breaking (T1, S7, S10)
@@ -22,8 +23,10 @@ import { snap, aabb, opposite, ALL_DIRS } from '../../utils/helpers'
  * discipline as buildCarveCosts / buildDigCosts (PathCarve.ts). Terrain
  * mutation bumps the revision the same tick, so the cache never goes stale.
  *
- * When navBaseRingMult <= 0 (OFF / classic), returns an all-zero array
- * (byte-identical — no extra cost in the A* hot loop).
+ * When navBaseRingMult < 1 (OFF / classic / degenerate), returns an all-zero
+ * array (byte-identical — no extra cost in the A* hot loop). Values in (0,1)
+ * are treated as OFF to prevent the ring penalty from reversing (making ring
+ * bricks cheaper than normal bricks).
  *
  * Pure World read — no RNG, no mutation. O(GRID² × 4) per rebuild, only on
  * terrain revision change.
@@ -33,7 +36,7 @@ export function buildBaseRingCosts(self: GodAIInput): Float64Array {
   if (self._baseRingCosts && self._baseRingCostsRev === rev) return self._baseRingCosts
   const costs = new Float64Array(GRID * GRID)
   const mult = self.params.navBaseRingMult
-  if (mult > 0 && self.hasBase) {
+  if (mult >= 1 && self.hasBase) {
     const grid = self.world.tileMap.grid
     // Extra cost = (mult - 1): total brick cost = 1 + (mult - 1) = mult.
     const extra = mult - 1
@@ -76,7 +79,7 @@ function buildFireStopConstraints(
   self: GodAIInput,
   p: Tank,
 ): Pick<
-  import('../../utils/pathfind').PathConstraints,
+  import('./pathfind').PathConstraints,
   'brickStopCost' | 'startDir' | 'fireCooldownTicks' | 'fireIntervalTicks' | 'marchTicksPerCell'
 > {
   const startDir = p.dir
@@ -164,6 +167,11 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
   const blkRow = blkCell ? blkCell.row : -99
 
   // (perf §68) Cache hit: same player + target cells, not expired.
+  // NOTE: unlike _replanCache, this cache does NOT key tileMap.revision —
+  // terrain changes (e.g. brick destruction, fence conversion) may occur
+  // between cache fills. The stale path is gracefully degraded: canMoveDir /
+  // canMoveOrBreak re-check passability every tick, so the player won't walk
+  // into newly-destroyed walls. The safety timer (60 ticks) bounds staleness.
   // We do NOT draw rng.next() here — the original always called it for the
   // suboptimalPathProb gate, but suboptimalPathProb defaults to 0 (result
   // discarded). Skipping the draw desyncs RNG state but the user-accepted
@@ -198,6 +206,9 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
       ...(self.params.navBaseRingMult > 0 ? { baseRingCosts: buildBaseRingCosts(self) } : {}),
+      // NOTE: firecontrol model is gated by navBrickStopCost > 0 (the
+      // flat/off master switch) — setting navFireStopModel:'firecontrol'
+      // with navBrickStopCost:0 silently falls back to flat/off.
       ...(self.params.navBrickStopCost > 0 ? buildFireStopConstraints(self, p) : {}),
     })
   }
@@ -288,7 +299,7 @@ export function followPathImpl(self: GodAIInput): Direction | null {
   // Re-plan periodically or when the path is exhausted.
   self.replanTimer--
   if (self.replanTimer <= 0 || self.path.length === 0) {
-    self.replan(playerCell)
+    replanImpl(self, playerCell)
     self.replanTimer = self.params.replanInterval
     self._lastPathCell = { col: playerCell.col, row: playerCell.row }
   }
@@ -372,11 +383,14 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   // terrain revision, not expired. replanInterval defaults to 1, so without
   // this replanImpl ran full A* every tick — measured 73-89% of all findPath
   // calls (§2.10). replanImpl draws NO RNG, so skipping identical
-  // recomputation is byte-identical (unlike the §68 navigateTowards cache,
-  // which skipped an rng.next() and relaxed the signature to win-rate). The
-  // path is only consumed (followPath shift) when the player enters a new
-  // cell — which changes the cache key → miss → fresh path — so the cached
-  // array is never served pre-consumed.
+  // recomputation is deterministic when inputs are unchanged (unlike the §68
+  // navigateTowards cache, which skipped an rng.next() and relaxed the
+  // signature to win-rate-only). NOTE: when navFireStopModel === 'firecontrol',
+  // the fire stop constraints include `now = frame * TICK_MS` which changes
+  // every tick and is NOT in the cache key — the timer-based expiry bounds
+  // the staleness window. The path is only consumed (followPath shift) when
+  // the player enters a new cell — which changes the cache key → miss → fresh
+  // path — so the cached array is never served pre-consumed.
   //
   // The terrain revision check (tileMap.revision) is what makes this a
   // STRICT pure memo: any brick destroyed by a bullet bumps the revision the
@@ -474,11 +488,6 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
   const dx = target.col * CELL - p.x
   const dy = target.row * CELL - p.y
 
-  // Build direction preference: prioritize vertical movement (up/down)
-  // first to close the row gap with the enemy. This gives more chances
-  // to fire at enemies in the same row once aligned. The old horizontal-
-  // first approach made the player zigzag across the map without ever
-  // getting into the same row as an enemy.
   // Build direction preference: prioritize vertical movement (up/down)
   // first to close the row gap with the enemy. This gives more chances
   // to fire at enemies in the same row once aligned. The old horizontal-
@@ -634,8 +643,8 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
 }
 
 // M0.5 (2026-08-03): trapAvoidance (Navigator) + crossfirePathCost A* threat
-// costs (computeThreatCostsImpl) retired. Archived verbatim in experimental.ts
-// for the v2 survive candidate / EnemyModel features (design §4.4).
+// costs (computeThreatCostsImpl) retired; recoverable from git history
+// (experimental.ts deleted) if the v2 survive candidate needs them.
 
 /**
  * §145 iceGlideAdjust — 冰上滑行控制（纯函数，供 HUNT 的 navigate 段调用）。

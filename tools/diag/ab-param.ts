@@ -17,24 +17,10 @@ import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
 import { readFileSync } from 'fs'
-
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 ? process.argv[i + 1] : undefined
-}
-
-function parseSeeds(spec: string | undefined): number[] {
-  if (!spec) return Array.from({ length: 60 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  return s.split(',').map(Number)
-}
+import { arg, parseSeeds } from '../lib/cli'
 
 const difficulty = arg('difficulty') ?? 'hard'
-const seeds = parseSeeds(arg('seeds'))
+const seeds = parseSeeds(arg('seeds'), 60)
 const stageSpec = arg('stages') ?? 'all'
 let stageIdxs: number[]
 try {

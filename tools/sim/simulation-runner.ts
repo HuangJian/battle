@@ -163,6 +163,10 @@ export interface SimResult {
   /** §121 self-fire base-guard block ticks (only when `commitCounts: true`).
    *  A/B trigger-rate proxy: 0 = the arm never suppressed a base-line shot. */
   selfFireGuardBlocks?: number
+  /** Full branch-counter totals snapshot (only when `branchTotals: true`).
+   *  §272 L2 archived-candidate reachability audit: every key must be 0 for
+   *  candidates whose gate is OFF (see tools/diag/archived-reach-audit.ts). */
+  branchTotals?: Record<string, number>
   /** Per-run forensics (only when `forensics: true`). */
   forensics?: RunForensics
   /** Event-driven threat ledger (only when `threatLedger: true`). */
@@ -438,7 +442,7 @@ export interface RunOptions {
   /** Lie-Back-Win-Mode: enable coop (God AI controls player2, human idle). */
   coop?: boolean
   /** 督战双玩家: supervise mode with a SECOND God AI driving player2 (mirrors
-   *  GameCore.requestSpectateToggle(true)). Distinct from `coop`, which is the
+   *  Game.requestSpectateToggle(true)). Distinct from `coop`, which is the
    *  Lie-Back-Win (human P1 + God AI P2) mode. */
   spectateDual?: boolean
   /**
@@ -453,6 +457,10 @@ export interface RunOptions {
    * work, byte-identical run).
    */
   commitCounts?: boolean
+  /** Snapshot the full `input.branchCounts` object into the result (default
+   *  false). Read-only observation — never touches the World or RNG streams,
+   *  so outcomes stay byte-identical. Consumers: §272 L2 reachability audit. */
+  branchTotals?: boolean
   /**
    * Collect per-run forensics (DECISIONS §119): terminal snapshot (player /
    * base / per-enemy / per-bullet), last-10-ticks action+rule log, and the
@@ -614,7 +622,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     sim.input2 = coopInput
   }
 
-  // 督战双玩家 (dual supervise): mirror GameCore.requestSpectateToggle(true).
+  // 督战双玩家 (dual supervise): mirror Game.requestSpectateToggle(true).
   // God AI already drives P1 (the `input` above); here we also spawn player2
   // and attach a SECOND God AI so both tanks are machine-controlled.
   // Mode flags (world.spectate / world.spectateDual) were set BEFORE
@@ -1079,6 +1087,10 @@ export function runSimulation(opts: RunOptions): SimResult {
   if (opts.commitCounts === true) {
     result.suicideReturnCommits = input.branchCounts.suicideReturn
     result.selfFireGuardBlocks = input._selfFireGuardBlocks
+  }
+
+  if (opts.branchTotals === true) {
+    result.branchTotals = { ...input.branchCounts }
   }
 
   if (wantForensics) {

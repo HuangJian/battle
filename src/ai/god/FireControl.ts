@@ -1,10 +1,21 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
-import { CELL, TANK, FIELD, GRID, BASE_POS, BULLET } from '../../constants'
-import { snap } from '../../utils/helpers'
+import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
+import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
+import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
+import { isBaseRingCell } from './ThreatBudget'
 import { estimatedEnemyLevel } from './EnemyModel'
+import {
+  BULLET_ALIGN_NEXT_CELL,
+  HIT_HALF_SPAN,
+  BASE_CENTER_X_PX,
+  BASE_CENTER_Y_PX,
+} from './constants'
+
+/** Scan-line aabb pre-filter half-span (§3.11): the literal 33 = TANK + 1. */
+const SCAN_AABB_HALF_SPAN = TANK + 1
 
 // ============================================================
 // FireControl — target scanning + fire decisions (T2a, T9, T2b, T6, T11, M6)
@@ -67,12 +78,12 @@ export function findEnemyDirectionImpl(
       }
     }
 
-    if (!dir || dist > AIM_RANGE_CELLS * CELL) continue // static — always full field
+    if (!dir || dist > AIM_RANGE_CELLS * CELL) continue // range limit (240px)
 
-    // T9: score = threat weight × 1000 - distance (prefer high-threat,
-    // then nearest among equal threat).
-    // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp 否决，
-    // 移入 experimental.ts 归档）——hpFactor 保留（原评分组成部分）。
+    // T9: score = (threat weight + bonus weight) × 10000 - distance + hp bonus
+    // (prefer high-threat, then nearest among equal threat).
+    // M0.5 退役（2026-08-03）: D2 damagedArmorBonus 加权已移除（S32 -8.4pp
+    // 否决归档）——hpFactor 保留（原评分组成部分）。
     let threatWeight = kindThreatWeight(t.kind)
     const bonusWeight = t.bonus ? 2 : 0 // S5c: bonus enemies are higher priority
     const hpFactor = t.hp / (t.maxHp || 1)
@@ -176,23 +187,35 @@ export function scanAheadImpl(
   pcx: number,
   pcy: number,
   dir: Direction,
+  out?: ScanResult,
 ): ScanResult {
   const w = self.world
   // Fast dir → index (avoid DIR_VECTORS string-keyed dict lookup).
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
 
-  // §123 per-tick memo — see the doc comment above. NaN sentinels on the first
-  // call always miss (NaN !== NaN).
-  const bit = 1 << dirIdx
-  if (self._scanCacheX === pcx && self._scanCacheY === pcy) {
-    if ((self._scanCacheMask & bit) !== 0) return self._scanResults[dirIdx]
+  // §3.2 (plan/refactor.trae.md): an explicit `out` buffer bypasses the
+  // per-tick memo entirely — the caller owns the destination, so this scan
+  // can never clobber a memo slot (nor invalidate/refresh `_scanCache*`).
+  // This is what removed the "aimSurvivesTurnImpl MUST run first" ordering
+  // constraint: its post-turn-origin scan now writes to its own dedicated
+  // reuse buffer (`self._turnSnapScan`) instead of the shared slot.
+  let r: ScanResult
+  if (out) {
+    r = out
   } else {
-    self._scanCacheX = pcx
-    self._scanCacheY = pcy
-    self._scanCacheMask = 0
+    // §123 per-tick memo — see the doc comment above. NaN sentinels on the
+    // first call always miss (NaN !== NaN).
+    const bit = 1 << dirIdx
+    if (self._scanCacheX === pcx && self._scanCacheY === pcy) {
+      if ((self._scanCacheMask & bit) !== 0) return self._scanResults[dirIdx]
+    } else {
+      self._scanCacheX = pcx
+      self._scanCacheY = pcy
+      self._scanCacheMask = 0
+    }
+    self._scanCacheMask |= bit
+    r = self._scanResults[dirIdx]
   }
-  self._scanCacheMask |= bit
-
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
   const vertical = vdx === 0 // up or down
@@ -208,7 +231,6 @@ export function scanAheadImpl(
   // §D4: exact-ring base-wall flag — see the param doc (Battlement pocket fix).
   const exactRing = self.params.baseWallExactRing > 0
 
-  const r = self._scanResults[dirIdx]
   r.enemy = false
   r.wall = false
   r.steel = false
@@ -236,15 +258,16 @@ export function scanAheadImpl(
     const sy = vertical ? pcy : pcy + off
 
     // Pre-filter: collect tanks whose perpendicular axis overlaps this offset's
-    // scan line (the constant half of the aabb condition). 33 = TANK + 1.
+    // scan line (the constant half of the aabb condition). 33 = TANK + 1
+    // (§3.11: SCAN_AABB_HALF_SPAN).
     let alignedCount = 0
     for (let ti = 0; ti < tanksArr.length; ti++) {
       const t = tanksArr[ti]
       if (!t.alive || t.spawnTimer > 0) continue
       if (vertical) {
-        if (sx > t.x - 1 && sx < t.x + 33) aligned[alignedCount++] = t
+        if (sx > t.x - 1 && sx < t.x + SCAN_AABB_HALF_SPAN) aligned[alignedCount++] = t
       } else {
-        if (sy > t.y - 1 && sy < t.y + 33) aligned[alignedCount++] = t
+        if (sy > t.y - 1 && sy < t.y + SCAN_AABB_HALF_SPAN) aligned[alignedCount++] = t
       }
     }
 
@@ -295,12 +318,8 @@ export function scanAheadImpl(
         // front → spawn-pocket lock (player never digs, zero fire).
         if (hasBase) {
           if (exactRing) {
-            // Ring cells: row 23 across cols 11-14; cols 11/14 at rows 24-25.
-            if (
-              (row === baseRow - 1 && col >= baseCol - 1 && col <= baseCol + 2) ||
-              (col === baseCol - 1 && (row === baseRow || row === baseRow + 1)) ||
-              (col === baseCol + 2 && (row === baseRow || row === baseRow + 1))
-            ) {
+            // §3.2: ring membership via the shared ThreatBudget predicate.
+            if (isBaseRingCell(col, row)) {
               r.baseWall = true
               r.baseWallDist = stepCount
             }
@@ -534,7 +553,7 @@ function enemySlidesOffLineByArrivalImpl(
 
   const vertical = dir === 'up' || dir === 'down'
   // Hit window half-width: bullet path ± (tank half + bullet half).
-  const windowHalf = (TANK + BULLET) / 2
+  const windowHalf = HIT_HALF_SPAN
   const arrivalTicks = maxDist / bulletSpeed
 
   const tanksArr = w.tanks
@@ -636,11 +655,13 @@ export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction
   const ny = horizontal ? snap(p.y, CELL) : p.y
   // Already grid-aligned on the perpendicular axis — the snap is a no-op.
   if (nx === p.x && ny === p.y) return true
-  // NOTE (perf §123): scanAheadImpl writes into the shared per-direction
-  // buffers `self._scanResults[dirIdx]` (memoized per origin+dir within a
-  // tick). Callers must invoke this guard BEFORE computing their own scan
-  // result, never after, or their result gets clobbered.
-  return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir).enemy
+  // §3.2: this guard scans from the POST-TURN origin (nx,ny) — a different
+  // origin than any caller's scan. It writes into its own dedicated reuse
+  // buffer (`self._turnSnapScan`) via the `out` parameter, so it can NEVER
+  // clobber the shared `_scanResults[dirIdx]` memo slots. Callers may now
+  // evaluate this guard before OR after their own scanAheadImpl — the old
+  // "guard MUST run first" ordering constraint (§80) is structurally gone.
+  return scanAheadImpl(self, nx + TANK / 2, ny + TANK / 2, aimDir, self._turnSnapScan).enemy
 }
 
 /**
@@ -695,10 +716,13 @@ export function shouldFireInDirImpl(
   // finds an enemy, BOTH result.steel and result.enemy are true. Checking
   // enemy first would cause the AI to fire through steel.
   if (result.baseWall) return false
-  if (result.baseSteel && (p.level ?? 0) >= 3) return false
+  if (result.baseSteel && (p.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL) return false
   // Non-ring steel (level < 3): can't pierce, block. Non-ring steel at
   // level ≥ 3 falls through to the enemy check (can pierce).
-  if (result.steel && !result.baseSteel && (p.level ?? 0) < 3) return false
+  if (result.steel && !result.baseSteel && (p.level ?? 0) < STEEL_PIERCE_PLAYER_LEVEL) return false
+  // Base-ring steel: never fire — at level < 3 the player can't pierce it
+  // (wasted shot), at level ≥ 3 T6 prevents destroying own base protection.
+  if (result.baseSteel) return false
 
   // §121: self-fire base guard — never fire a bullet whose CENTER line
   // (the actual 6px path, NOT the scan's ±8px offset lines) can reach the
@@ -770,18 +794,10 @@ export function shouldFireInDirImpl(
     if (!b.alive || b.isPlayer) continue
     const bcx = b.x + b.w / 2
     const bcy = b.y + b.h / 2
-    const aligned =
-      dir === 'up' || dir === 'down'
-        ? Math.abs(bcx - pcx) < CELL * 0.75
-        : Math.abs(bcy - pcy) < CELL * 0.75
-    if (!aligned) continue
-    const inFront =
-      (dir === 'up' && bcy < pcy) ||
-      (dir === 'down' && bcy > pcy) ||
-      (dir === 'left' && bcx < pcx) ||
-      (dir === 'right' && bcx > pcx)
-    if (!inFront) continue
-    const d = Math.abs(dir === 'up' || dir === 'down' ? bcy - pcy : bcx - pcx)
+    // §3.1 single-sourced lane geometry (verticality keyed on the shooter's
+    // own facing dir here; the approaching/inFront formulas coincide).
+    const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, BULLET_ALIGN_NEXT_CELL)
+    if (d < 0) continue
     if (d < TANK * 4) {
       return self.rng.next() >= self.params.aimError
     }
@@ -835,7 +851,7 @@ export function steelFireBlockedImpl(
   level: number | undefined,
   gateOn: number,
 ): boolean {
-  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < 3
+  return gateOn > 0 && result.steel && !result.baseSteel && (level ?? 0) < STEEL_PIERCE_PLAYER_LEVEL
 }
 
 /**
@@ -873,7 +889,7 @@ export function shouldFireBreakThroughImpl(
   // causing 4 player-suicide base destructions in S32. Break-through is for
   // breaking walls, so only fire when the wall ahead is breakable (not a base
   // wall / base-ring steel). Enemy-as-obstacle still fires (baseWall=false).
-  return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= 3)
+  return !bs.baseWall && !(bs.baseSteel && (level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL)
 }
 
 /**
@@ -888,13 +904,6 @@ export function shouldFireBreakThroughImpl(
  * 2026-08-04) — a drift here is a false NEGATIVE: the guard would think a
  * brick stops the bullet when the simulation plows it into the base.
  */
-function isBaseRingCell(col: number, row: number): boolean {
-  const bc = BASE_POS.col
-  const br = BASE_POS.row
-  if (row === br - 1 && col >= bc - 1 && col <= bc + 2) return true
-  if (col === bc - 1 && (row === br || row === br + 1)) return true
-  return col === bc + 2 && (row === br || row === br + 1)
-}
 
 /**
  * §121: Would a bullet fired from (pcx,pcy) along `dir` REACH the base eagle?
@@ -930,7 +939,7 @@ export function shotReachesBaseImpl(
   if (!self.hasBase) return false
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
@@ -1019,7 +1028,7 @@ export function bulletPathSteelBlockedImpl(
 ): boolean {
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]
@@ -1062,14 +1071,14 @@ export function enemyInShotCorridorImpl(
   dir: Direction,
 ): boolean {
   const w = self.world
-  const baseCx = BASE_POS.col * CELL + CELL
-  const baseCy = BASE_POS.row * CELL + CELL
+  const baseCx = BASE_CENTER_X_PX
+  const baseCy = BASE_CENTER_Y_PX
   const vertical = dir === 'up' || dir === 'down'
   const band = 19 // BULLET/2 (3) + TANK/2 (16) — body overlaps the 6px corridor
   const tanks = w.tanks
   for (let ti = 0; ti < tanks.length; ti++) {
     const t = tanks[ti]
-    if (!t.alive || t.spawnTimer > 0 || t.isPlayer) continue
+    if (!t.alive || t.spawnTimer > 0) continue
     const tcx = t.x + t.w / 2
     const tcy = t.y + t.h / 2
     if (vertical) {
@@ -1120,7 +1129,7 @@ export function centerPathBlockedImpl(
 ): number {
   const w = self.world
   const p = self.controlledTank(w)
-  const pierce = (p?.level ?? 0) >= 3
+  const pierce = (p?.level ?? 0) >= STEEL_PIERCE_PLAYER_LEVEL
   const dirIdx = dir === 'up' ? 0 : dir === 'down' ? 1 : dir === 'left' ? 2 : 3
   const vdx = DIR_DX[dirIdx]
   const vdy = DIR_DY[dirIdx]

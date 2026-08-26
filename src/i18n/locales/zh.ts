@@ -9,8 +9,6 @@ import type { Catalog } from '../types'
  */
 export const zh: Catalog = {
   // ---- Language ----
-  'language.en': 'English',
-  'language.zh': '中文',
 
   // ---- Menu ----
   'menu.title': '坦克大战',
@@ -65,7 +63,6 @@ export const zh: Catalog = {
 
   // ---- Victory ----
   'victory.title': '胜利！',
-  'victory.score': '最终得分：{score}',
   'victory.hint': '按 Alt+R 或 Enter 再玩一次',
 
   // ---- Recovery (mission failed) ----
@@ -78,7 +75,6 @@ export const zh: Catalog = {
   'recovery.option.replay.label': '重玩本关',
   'recovery.option.replay.desc': '读取本关开始时的存档',
   'recovery.option.restart.label': '重新开始',
-  'recovery.option.restart.desc': '全新关卡开始 —— 不使用存档',
   'recovery.option.choose.label': '选择存档…',
   'recovery.option.choose.desc': '打开存档浏览器',
   'recovery.controls': '↑ ↓ 选择    Enter 确认    Alt+R 菜单',
@@ -120,17 +116,8 @@ export const zh: Catalog = {
 
   // ---- Toast notifications ----
   'toast.perfCopied': '性能报告已复制',
-  'toast.gameSaved': '游戏已存档',
   'toast.snapshotDeleted': '存档已删除',
-  'toast.snapshotCapacity': '存档空间已满 —— 已自动移除最早存档',
-  'toast.rewindReady': '可倒流',
   'toast.languageSet': '语言已切换为{name}',
-  'toast.controlsReset': '按键已恢复默认',
-  'toast.keyConflict': '该按键已被占用',
-  'toast.replayCopied': '回放已复制到剪贴板',
-  'toast.replaySaved': '回放已保存',
-  'toast.snapshotLoaded': '存档已读取',
-  'toast.copied': '已复制到剪贴板',
 
   // ---- Toast: co-op / snapshots / replays (Game.ts) ----
   'toast.coopOff': '躺赢：关闭',

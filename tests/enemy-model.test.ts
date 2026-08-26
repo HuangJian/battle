@@ -2,13 +2,13 @@ import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
-import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { initEnemyModel, updateEnemyModel, survivalPressure } from '../src/ai/god/EnemyModel'
 import { CANDIDATES } from '../src/ai/god/think'
 import { orderedCandidates } from '../src/ai/god/DecisionCore'
-import { CELL, GRID } from '../src/constants'
+import { CELL } from '../src/constants'
 import type { Tank, TankKind } from '../src/types'
+import { clearArena, seedWorld } from './helpers'
 
 /**
  * M3 (plan/God-AI-Redesign-v2 §4.2b): EnemyModel 敌情感知 + survive 候选 +
@@ -20,17 +20,11 @@ import type { Tank, TankKind } from '../src/types'
  */
 
 function setupWorld(difficulty = 'classic'): { world: World; input: GodAIInput } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS })
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.reset()
   return { world, input }

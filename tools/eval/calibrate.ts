@@ -21,6 +21,7 @@ import { runSimulation } from '../sim/simulation-runner'
 import { evaluate, DEFAULT_BASELINE, type BaselineConfig } from './evaluator'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 
+import { arg } from '../lib/cli'
 // ============================================================
 // Types
 // ============================================================
@@ -201,11 +202,6 @@ export function runEvaluationCalibration(opts: CalibrationOptions): CalibrationR
 // ============================================================
 
 if (import.meta.main) {
-  function arg(name: string, fallback?: string): string | undefined {
-    const i = process.argv.indexOf(`--${name}`)
-    return i >= 0 ? process.argv[i + 1] : fallback
-  }
-
   const seedCount = parseInt(arg('seeds', '10')!, 10)
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
   const diffSpec = arg('difficulty', 'hard')!

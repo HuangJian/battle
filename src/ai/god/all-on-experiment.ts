@@ -62,7 +62,7 @@ export const ALL_ON_M5_OFF_CONTROL_PARAMS: GodAIParams = {
   fireLineDetourMode: 0,
 }
 
-/** all-on 关闭 firingLaneMode：§239 M1 LOO 定位的头号冲突（all-on 中关掉
+/** all-on 关闭 firingLaneMode：§277 M1 LOO 定位的头号冲突（all-on 中关掉
  *  +416/2100 @60-seed，+19.8pp）。用户拍板：以此为基础 profile 跑 CMA-ES
  *  （M2 search 的 base 不再是纯 default 而是 all-on−flm）。 */
 export const ALL_ON_MINUS_FLM_PARAMS: GodAIParams = {

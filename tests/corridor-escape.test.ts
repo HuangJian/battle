@@ -1,10 +1,12 @@
+import { seedWorld, ALL_DIRS } from './helpers'
 import { describe, it, expect } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { RNG } from '../src/utils/RNG'
 import { TacticalIntelligence } from '../src/ai/TacticalIntelligence'
-import { CELL, GRID, CORRIDOR_ESCAPE_CHANCE } from '../src/constants'
+import { CELL, GRID } from '../src/constants'
+import { CORRIDOR_ESCAPE_CHANCE } from '../src/ai/config'
 import type { Tank } from '../src/types'
 
 /**
@@ -21,8 +23,7 @@ import type { Tank } from '../src/types'
 
 /** Create a minimal world with empty terrain and a base. */
 function setupWorld(difficulty = 'classic'): World {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const sim = new Simulation(world, new Input())
   world.startGame(difficulty, 'modern', 0)
   // Clear all terrain to empty so we control exactly where walls are.
@@ -97,7 +98,7 @@ describe('corridor-escape — none-tier (updateNoneTank)', () => {
     // Tank must be moving (invariant of updateNoneTank)
     expect(tank.moving).toBe(true)
     // Direction must be valid
-    expect(['up', 'down', 'left', 'right']).toContain(tank.dir)
+    expect(ALL_DIRS).toContain(tank.dir)
   })
 
   it('does not corrupt direction when no lateral option exists (true 1-wide corridor)', () => {
@@ -147,7 +148,7 @@ describe('corridor-escape — none-tier (updateNoneTank)', () => {
     ai.update(world, () => {})
 
     expect(tank.moving).toBe(true)
-    expect(['up', 'down', 'left', 'right']).toContain(tank.dir)
+    expect(ALL_DIRS).toContain(tank.dir)
   })
 })
 
@@ -171,7 +172,7 @@ describe('corridor-escape — tiered (chooseDirection)', () => {
     ai.update(world, () => {})
 
     expect(tank.moving).toBe(true)
-    expect(['up', 'down', 'left', 'right']).toContain(tank.dir)
+    expect(ALL_DIRS).toContain(tank.dir)
   })
 
   it('constant value targets ~3s mean interval at 60fps (0.0056)', () => {

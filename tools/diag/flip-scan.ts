@@ -39,6 +39,7 @@ import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask } from '../sim/sim-worker'
+import { arg, parseSeeds, parseStages } from '../lib/cli'
 
 const USAGE = `
 flip-scan.ts — A/B flip-seed scanner (parallel worker pool).
@@ -70,49 +71,16 @@ interface Cli {
   difficulty: string
 }
 
-function arg(name: string): string | undefined {
-  const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : undefined
-}
-
 function loadParamsFile(path: string): GodAIParams {
   const raw = JSON.parse(readFileSync(path, 'utf8'))
   const obj = raw.bestParams ?? raw.params ?? raw
   return { ...DEFAULT_GOD_AI_PARAMS, ...obj } as GodAIParams
 }
 
-function parseSeeds(spec: string | undefined): number[] {
-  // Accept "1-60" (range) or "1,3,5" (list) or "60" (count, seeds 1..N).
-  if (!spec) return Array.from({ length: 60 }, (_, i) => i + 1)
-  const s = spec.trim()
-  if (/^\d+-\d+$/.test(s)) {
-    const [lo, hi] = s.split('-').map(Number)
-    if (lo >= 1 && hi >= lo && hi <= 100000)
-      return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i)
-  }
-  if (/^\d+$/.test(s)) {
-    const n = Number(s)
-    return Array.from({ length: n }, (_, i) => i + 1)
-  }
-  const list = s
-    .split(',')
-    .map((x) => Number(x.trim()))
-    .filter((n) => Number.isInteger(n) && n >= 1)
-  if (list.length > 0) return list
-  throw new Error(`--seeds: cannot parse '${spec}' (use "1-60" or "1,3,5" or "60")`)
-}
-
 function parseCli(): Cli {
-  const stageArg = arg('--stages')
-  const stageIdxs = stageArg
-    ? stageArg
-        .split(',')
-        .map((s) => Number(s.trim()) - 1) // CLI is 1-based (1..35); internal index is 0-based
-        .filter((i) => Number.isInteger(i) && i >= 0 && i < STAGES.length)
-    : STAGES.map((_, i) => i)
-  if (stageIdxs.length === 0) throw new Error('--stages: no valid stage indexes (1..35)')
+  const stageIdxs = parseStages(arg('stages'))
 
-  const seeds = parseSeeds(arg('--seeds'))
+  const seeds = parseSeeds(arg('seeds'), 60)
 
   // --set overrides (repeatable).
   const setOverrides: Record<string, number> = {}
@@ -130,17 +98,15 @@ function parseCli(): Cli {
     setOverrides[key] = val
   }
 
-  const paramsA = arg('--params-a')
-    ? loadParamsFile(arg('--params-a')!)
-    : { ...DEFAULT_GOD_AI_PARAMS }
-  const paramsB = arg('--params-b')
-    ? loadParamsFile(arg('--params-b')!)
+  const paramsA = arg('params-a') ? loadParamsFile(arg('params-a')!) : { ...DEFAULT_GOD_AI_PARAMS }
+  const paramsB = arg('params-b')
+    ? loadParamsFile(arg('params-b')!)
     : { ...paramsA, ...setOverrides }
 
-  const workersArg = arg('--workers')
+  const workersArg = arg('workers')
   const workers = workersArg ? Number(workersArg) : undefined
 
-  const difficulty = arg('--difficulty') ?? 'classic'
+  const difficulty = arg('difficulty') ?? 'classic'
   if (!DIFFICULTIES[difficulty]) {
     throw new Error(`--difficulty: unknown difficulty '${difficulty}'`)
   }

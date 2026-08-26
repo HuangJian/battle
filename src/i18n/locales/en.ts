@@ -13,8 +13,6 @@ import type { Catalog } from '../types'
  */
 export const en: Catalog = {
   // ---- Language ----
-  'language.en': 'English',
-  'language.zh': '中文',
 
   // ---- Menu ----
   'menu.title': 'BATTLE CITY',
@@ -69,7 +67,6 @@ export const en: Catalog = {
 
   // ---- Victory ----
   'victory.title': 'VICTORY!',
-  'victory.score': 'Final Score: {score}',
   'victory.hint': 'Press Alt+R or Enter to play again',
 
   // ---- Recovery (mission failed) ----
@@ -82,7 +79,6 @@ export const en: Catalog = {
   'recovery.option.replay.label': 'Replay This Stage',
   'recovery.option.replay.desc': 'Load the stage-start snapshot',
   'recovery.option.restart.label': 'Restart Without Loading',
-  'recovery.option.restart.desc': 'Fresh stage start — no snapshot',
   'recovery.option.choose.label': 'Choose a Snapshot…',
   'recovery.option.choose.desc': 'Open the Snapshot Browser',
   'recovery.controls': '↑ ↓ Select    Enter Confirm    Alt+R Menu',
@@ -124,17 +120,8 @@ export const en: Catalog = {
 
   // ---- Toast notifications ----
   'toast.perfCopied': 'Performance report copied',
-  'toast.gameSaved': 'Game saved',
   'toast.snapshotDeleted': 'Snapshot deleted',
-  'toast.snapshotCapacity': 'Snapshot storage full — oldest auto-removed',
-  'toast.rewindReady': 'Rewind ready',
   'toast.languageSet': 'Language set to {name}',
-  'toast.controlsReset': 'Key bindings reset',
-  'toast.keyConflict': 'That key is already used',
-  'toast.replayCopied': 'Replay copied to clipboard',
-  'toast.replaySaved': 'Replay saved',
-  'toast.snapshotLoaded': 'Snapshot loaded',
-  'toast.copied': 'Copied to clipboard',
 
   // ---- Toast: co-op / snapshots / replays (Game.ts) ----
   'toast.coopOff': 'Co-op: OFF',

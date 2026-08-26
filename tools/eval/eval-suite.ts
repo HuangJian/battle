@@ -1,5 +1,7 @@
 /**
- * eval-suite.ts — v6 God AI evaluation harness.
+ * eval-suite.ts — v7 God AI evaluation harness (v7 scoring band; the header
+ * previously said "v6" while defaulting to V7_SCORE_CONFIG — corrected
+ * 2026-08-24, refactor.trae.md §2.6).
  *
  * Design: plan/God-AI-Evaluation-Redesign.md
  *
@@ -22,14 +24,15 @@
  * every stage and every parameter set, so A/B differences are paired and the
  * "some seeds are just harder" variance cancels out (design §6).
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { SimWorkerPool } from '../sim/sim-pool'
 import type { SimTask, SimTaskResult } from '../sim/sim-worker'
 import { runSimulation } from '../sim/simulation-runner'
 import { parseStageSpec, StageSpecError, runHeader } from '../lib/stage-spec'
+import { arg, flag } from '../lib/cli'
+import { EVAL_REFS_FILE, loadEvalRefs, type RefsFile } from '../lib/eval-refs'
 import {
   scoreRun,
   aggregateStage,
@@ -52,20 +55,11 @@ import {
   type Weights,
 } from './godai-score'
 
-const REFS_FILE = join(import.meta.dir, 'eval-refs.json')
 const DEFAULT_MAX_TICKS = 18000
 
 // ============================================================
 // CLI plumbing
 // ============================================================
-
-function arg(name: string, fallback?: string): string | undefined {
-  const i = process.argv.indexOf(`--${name}`)
-  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback
-}
-function flag(name: string): boolean {
-  return process.argv.includes(`--${name}`)
-}
 
 /**
  * Accept any of the shapes our tooling writes: a bare GodAIParams object, an
@@ -75,18 +69,6 @@ function loadParams(path: string): GodAIParams {
   const raw = JSON.parse(readFileSync(path, 'utf8'))
   const obj = raw.bestParams ?? raw.params ?? raw
   return { ...DEFAULT_GOD_AI_PARAMS, ...obj } as GodAIParams
-}
-
-/** Per-stage references, keyed by stage name. */
-type RefsFile = Record<string, StageRefs>
-
-function loadRefs(): RefsFile {
-  if (!existsSync(REFS_FILE)) return {}
-  try {
-    return JSON.parse(readFileSync(REFS_FILE, 'utf8')).stages ?? {}
-  } catch {
-    return {}
-  }
 }
 
 /**
@@ -824,6 +806,379 @@ async function checkpointDataset(
 // main
 // ============================================================
 
+interface SuiteContext {
+  seeds: number[]
+  difficulty: string
+  maxTicks: number
+  stageIdxs: number[]
+  params: GodAIParams
+  pool: SimWorkerPool | null
+  totalRuns: number
+}
+
+/**
+ * --compare A B: paired A/B under common random numbers. Runs both parameter
+ * sets over the SAME stage×seed grid, scores both corpora with shared refs,
+ * prints both scorecards + the paired verdict. Self-contained: parses its own
+ * --compare argv pair.
+ */
+async function runCompare(ctx: SuiteContext, pathA: string, pathB: string): Promise<void> {
+  // ---- --compare A/B: paired A/B under common random numbers ----
+  const refsFile = loadEvalRefs()
+  const t0 = Date.now()
+  const cellsA = await runCorpus(
+    loadParams(pathA),
+    ctx.stageIdxs,
+    ctx.seeds,
+    ctx.difficulty,
+    ctx.maxTicks,
+    ctx.pool,
+  )
+  const cellsB = await runCorpus(
+    loadParams(pathB),
+    ctx.stageIdxs,
+    ctx.seeds,
+    ctx.difficulty,
+    ctx.maxTicks,
+    ctx.pool,
+  )
+  const scA = scoreCorpus(cellsA, refsFile)
+  const scB = scoreCorpus(cellsB, refsFile)
+  process.stderr.write(
+    `ran ${ctx.totalRuns * 2} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
+  )
+
+  console.log(`\nA = ${pathA}`)
+  printScorecard(scA, ctx.stageIdxs)
+  console.log(`\nB = ${pathB}`)
+  printScorecard(scB, ctx.stageIdxs)
+
+  const cmp = comparePaired(
+    scA.runScores.map((r) => r.score),
+    scB.runScores.map((r) => r.score),
+  )
+  console.log('\n' + '═'.repeat(70))
+  console.log('PAIRED COMPARISON  (B − A, matched on stage+seed)')
+  console.log('═'.repeat(70))
+  console.log(`  paired cells    ${cmp.n}`)
+  console.log(
+    `  mean Δscore     ${cmp.meanDelta >= 0 ? '+' : ''}${cmp.meanDelta.toFixed(4)} ± ${cmp.se.toFixed(4)}`,
+  )
+  console.log(`  t / p           ${cmp.t.toFixed(2)} / ${cmp.p.toFixed(4)}`)
+  console.log(`  B better/worse/tied  ${cmp.wins} / ${cmp.losses} / ${cmp.ties}`)
+  console.log(`  suite A → B     ${scA.suite.suite.toFixed(4)} → ${scB.suite.suite.toFixed(4)}`)
+  console.log(`  win rate A → B  ${pct(scA.suite.meanWinRate)} → ${pct(scB.suite.meanWinRate)}`)
+
+  // Per-stage breakdown. The suite number is a harmonic mean over stages,
+  // so it deliberately reacts more to the weak tail than a flat average
+  // would — a suite delta can therefore be several times the mean paired
+  // delta if the change happened to land on the stages that were already
+  // struggling. Without this table you cannot tell "slightly worse
+  // everywhere" from "fine everywhere except two stages that collapsed",
+  // and those call for completely different responses.
+  console.log('\n  per-stage Δ (paired within stage, B − A):')
+  const perStage: Array<{ name: string; d: number; p: number; a: number; b: number }> = []
+  for (const st of ctx.stageIdxs) {
+    const name = STAGES[st].name
+    const ia = scA.runScores
+      .map((r, i) => ({ r, i }))
+      .filter(({ i }) => scA.cells[i].stageName === name)
+    const a = ia.map(({ r }) => r.score)
+    const b = ia.map(({ i }) => scB.runScores[i].score)
+    const c = comparePaired(a, b)
+    const aggA = scA.stages.find((s) => s.stageName === name)
+    const aggB = scB.stages.find((s) => s.stageName === name)
+    perStage.push({
+      name,
+      d: c.meanDelta,
+      p: c.p,
+      a: aggA?.score ?? 0,
+      b: aggB?.score ?? 0,
+    })
+  }
+  perStage.sort((x, y) => x.d - y.d)
+  const notable = perStage.filter((s) => s.p < 0.05)
+  if (notable.length === 0) {
+    console.log('    no individual stage moved significantly (all p ≥ 0.05)')
+  } else {
+    for (const s of notable) {
+      const arrow = s.d > 0 ? '▲' : '▼'
+      console.log(
+        `    ${arrow} ${s.name.slice(0, 20).padEnd(21)}` +
+          `Δ ${(s.d >= 0 ? '+' : '') + s.d.toFixed(4)}  p=${s.p.toFixed(4)}  ` +
+          `stage ${s.a.toFixed(3)} → ${s.b.toFixed(3)}`,
+      )
+    }
+    console.log(
+      `    (${notable.filter((s) => s.d < 0).length} worse, ` +
+        `${notable.filter((s) => s.d > 0).length} better, ` +
+        `${perStage.length - notable.length} unchanged)`,
+    )
+  }
+
+  const verdict =
+    cmp.p < 0.05
+      ? cmp.meanDelta > 0
+        ? 'B is better (p < 0.05)'
+        : 'B is worse (p < 0.05)'
+      : 'no significant difference — do not ship on this evidence'
+  console.log(`\n  VERDICT: ${verdict}`)
+  if (cmp.p >= 0.05 && notable.length > 0) {
+    console.log(
+      `  NOTE: the suite is flat overall, but ${notable.length} stage(s) moved\n` +
+        `  significantly. A wash on average can still be a real regression on\n` +
+        `  specific stages — check the table before dismissing the change.`,
+    )
+  }
+  return
+}
+
+/**
+ * --calibrate: regenerate tools/eval/eval-refs.json (per-stage references +
+ * loss-weight fit). Consumes the freshly-run corpus.
+ */
+async function runCalibrate(ctx: SuiteContext, cells: Cell[]): Promise<void> {
+  if (flag('calibrate')) {
+    // Calibrate against the DEFAULT parameters unless told otherwise: the
+    // references describe the stage, so they must not drift every time a
+    // candidate parameter set happens to play the stage differently.
+    const byStage = new Map<string, Cell[]>()
+    for (const c of cells) {
+      if (!byStage.has(c.stageName)) byStage.set(c.stageName, [])
+      byStage.get(c.stageName)!.push(c)
+    }
+    const stages: RefsFile = {}
+    for (const [name, group] of byStage) stages[name] = calibrateStage(group)
+
+    // Loss weights are regressed from checkpoint states, not finished runs.
+    const sc = scoreCorpus(cells, stages)
+    const lossKeys = Object.keys(DEFAULT_LOSS_WEIGHTS) as DimensionKey[]
+    const checkpoints = (arg('checkpoints', '1800,3000,4200') as string)
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((t) => t > 0)
+    process.stderr.write(
+      `fitting loss weights from checkpoints at ticks ${checkpoints.join(', ')}...\n`,
+    )
+    const dataset = await checkpointDataset(
+      ctx.params,
+      ctx.stageIdxs,
+      ctx.seeds,
+      ctx.difficulty,
+      checkpoints,
+      cells,
+      stages,
+      ctx.pool,
+    )
+    const fit = fitLossWeights(dataset, lossKeys)
+    // The same fit on finished runs — kept only to show how badly the naive
+    // formulation lies. `progress` == 1 iff cleared, so it scores ~100%.
+    const leaky = fitLossWeights(
+      sc.runScores.map((r, i) => ({ features: r, cleared: r.cleared, group: i })),
+      lossKeys,
+    )
+
+    const adopt = shrinkToPrior(fit.weights, DEFAULT_LOSS_WEIGHTS, fit.cvAuc)
+
+    const out = {
+      generatedAt: new Date().toISOString(),
+      source: {
+        tool: 'tools/eval/eval-suite.ts --calibrate',
+        stages: ctx.stageIdxs.length,
+        seeds: ctx.seeds.length,
+        difficulty: ctx.difficulty,
+        maxTicks: ctx.maxTicks,
+        params: arg('params') ?? 'DEFAULT_GOD_AI_PARAMS',
+      },
+      stages,
+      lossWeightFit: {
+        note:
+          `Class-weighted logistic P(final clear | dimensions observed mid-run), ` +
+          'standardised, negative coefficients clipped, fitted only on cells still ' +
+          'undecided at each checkpoint. Judge it by AUC, not accuracy. See ' +
+          'plan/God-AI-Evaluation-Redesign.md §5.3.',
+        checkpoints,
+        samples: fit.n,
+        runs: fit.groups,
+        baseRate: round3(fit.baseRate),
+        cvAuc: round3(fit.cvAuc),
+        aucInSample: round3(fit.auc),
+        accuracy: round3(fit.accuracy),
+        coefficients: fit.coefficients,
+        marginal: fit.marginal,
+        rawFittedWeights: fit.weights,
+        currentWeights: DEFAULT_LOSS_WEIGHTS,
+        shrinkage: {
+          note:
+            'Recommended weights: convex blend of the fit and the hand prior, ' +
+            'lambda = clamp(2*(cvAuc-0.5), 0, 0.8). Prevents a good-but-collinear ' +
+            'fit from zeroing dimensions the loss band exists to shape.',
+          lambda: adopt.lambda,
+          recommendedWeights: adopt.weights,
+        },
+        leakyControl: {
+          note:
+            'Same fit on FINISHED runs. progress == 1 iff cleared, so this is ' +
+            'label leakage; reported only as a warning against using it.',
+          accuracy: round3(leaky.accuracy),
+          auc: round3(leaky.auc),
+          cvAuc: round3(leaky.cvAuc),
+          suggestedWeights: leaky.weights,
+        },
+      },
+    }
+    writeFileSync(EVAL_REFS_FILE, JSON.stringify(out, null, 2))
+    console.log(`\nWrote ${EVAL_REFS_FILE}`)
+    console.log('\nPer-stage references:')
+    console.log('─'.repeat(86))
+    console.log(
+      'stage'.padEnd(24) +
+        'fast'.padStart(8) +
+        'slow'.padStart(8) +
+        'kpm'.padStart(8) +
+        'acc'.padStart(8) +
+        'open'.padStart(8) +
+        'mob'.padStart(8),
+    )
+    console.log('─'.repeat(86))
+    for (const [name, r] of Object.entries(stages)) {
+      console.log(
+        name.slice(0, 23).padEnd(24) +
+          String(r.clearTicksFast).padStart(8) +
+          String(r.clearTicksSlow).padStart(8) +
+          r.kpmRef.toFixed(2).padStart(8) +
+          r.accuracyRef.toFixed(3).padStart(8) +
+          String(r.openingTicksRef).padStart(8) +
+          String(r.mobilityRef).padStart(8),
+      )
+    }
+    console.log('─'.repeat(86))
+    console.log(
+      `\nLoss-weight fit — P(clear | mid-run state), checkpoints ${checkpoints.join('/')}, ` +
+        `${fit.n} observations from ${fit.groups} undecided runs, ` +
+        `base rate ${(fit.baseRate * 100).toFixed(1)}%`,
+    )
+    const auc = fit.cvAuc
+    const verdict =
+      auc >= 0.75
+        ? 'strong'
+        : auc >= 0.65
+          ? 'usable'
+          : auc >= 0.58
+            ? 'weak'
+            : 'no better than chance'
+    console.log(
+      `  grouped 5-fold CV AUC ${auc.toFixed(3)} (${verdict})` +
+        `   [in-sample ${fit.auc.toFixed(3)}, optimism ${(fit.auc - auc >= 0 ? '+' : '') + (fit.auc - auc).toFixed(3)}]`,
+    )
+    console.log(
+      `  accuracy ${(fit.accuracy * 100).toFixed(1)}% — ignore it, the base rate alone scores ` +
+        `${(Math.max(fit.baseRate, 1 - fit.baseRate) * 100).toFixed(1)}%`,
+    )
+    if (auc < 0.65) {
+      console.log(
+        `  ⚠ CV AUC below 0.65: mid-run state does not predict the outcome well here.\n` +
+          `    Keep the hand prior rather than adopting these weights.`,
+      )
+    }
+    console.log(
+      '  dimension'.padEnd(18) +
+        'coef'.padStart(9) +
+        'rawFit'.padStart(9) +
+        'current'.padStart(9) +
+        'ADOPT'.padStart(9) +
+        'soloAUC'.padStart(10) +
+        'r(prog)'.padStart(10) +
+        '  note',
+    )
+    for (const k of lossKeys) {
+      const m = fit.marginal[k]
+      const coef = fit.coefficients[k] ?? 0
+      // Why a coefficient came out negative. Only the first case means the
+      // dimension is actually useless; the others mean its information is
+      // already counted, or that it tracks losing.
+      let note = ''
+      if (coef < 0 && m) {
+        const r = Math.abs(m.corrWithProgress)
+        if (m.auc < 0.48) note = 'tracks losing on its own'
+        else if (m.auc <= 0.52) note = 'no signal (solo AUC ~ chance)'
+        else if (r > 0.3) note = `redundant: r=${r.toFixed(2)} with progress`
+        else note = 'suppressed — predicts alone but not jointly'
+      }
+      console.log(
+        ('  ' + k).padEnd(18) +
+          coef.toFixed(3).padStart(9) +
+          (fit.weights[k] ?? 0).toFixed(3).padStart(9) +
+          (DEFAULT_LOSS_WEIGHTS[k] ?? 0).toFixed(3).padStart(9) +
+          (adopt.weights[k] ?? 0).toFixed(3).padStart(9) +
+          (m ? m.auc.toFixed(3) : '  -  ').padStart(10) +
+          (m ? m.corrWithProgress.toFixed(2) : '  -  ').padStart(10) +
+          '  ' +
+          note,
+      )
+    }
+    console.log(
+      `\n  ADOPT = ${adopt.lambda.toFixed(2)}·fit + ${(1 - adopt.lambda).toFixed(2)}·prior. ` +
+        `The fit is trusted in proportion to its cross-validated skill, and the\n` +
+        `  prior keeps weak dimensions at a non-zero floor so the loss band still shapes them.`,
+    )
+    console.log(
+      `\n  [leakage control] the same fit on FINISHED runs scores AUC ` +
+        `${leaky.auc.toFixed(3)} / ${(leaky.accuracy * 100).toFixed(1)}% accuracy — and is worthless:\n` +
+        `  progress == 1.0 exactly when a run clears, so it just reads its own label.\n` +
+        `  Never calibrate loss weights on finished-run dimensions.`,
+    )
+    console.log(
+      '\nWeights are NOT applied automatically. Copy the ADOPT column into\n' +
+        'DEFAULT_LOSS_WEIGHTS in tools/eval/godai-score.ts only after reviewing the fit.',
+    )
+    return
+  }
+}
+
+/**
+ * Default path: score the corpus against eval-refs.json and print the
+ * scorecard (+ optional --dims / --weights / --json dump).
+ */
+async function runScorecard(ctx: SuiteContext, cells: Cell[]): Promise<void> {
+  const sc = scoreCorpus(cells, loadEvalRefs())
+  printScorecard(sc, ctx.stageIdxs)
+  if (flag('dims')) printDimensions(sc)
+  if (flag('weights')) printWeights(sc)
+
+  const jsonOut = arg('json')
+  if (jsonOut) {
+    writeFileSync(
+      jsonOut,
+      JSON.stringify(
+        {
+          generatedAt: new Date().toISOString(),
+          config: {
+            seeds: ctx.seeds.length,
+            difficulty: ctx.difficulty,
+            maxTicks: ctx.maxTicks,
+            params: arg('params') ?? 'default',
+          },
+          suite: { ...sc.suite, stages: undefined },
+          stages: sc.stages,
+          cells: sc.cells.map((c, i) => ({
+            stage: c.stageName,
+            seed: c.seed,
+            outcome: c.run.outcome,
+            score: round3(sc.runScores[i].score),
+            kills: c.run.finalState.killCount,
+            lives: c.run.finalState.lives,
+            ticks: c.run.ticks,
+          })),
+        },
+        null,
+        2,
+      ),
+    )
+    console.log(`\nWrote ${jsonOut}`)
+  }
+}
+
 async function main(): Promise<void> {
   const seedCount = Number(arg('seeds', '20'))
   const seeds = Array.from({ length: seedCount }, (_, i) => i + 1)
@@ -853,7 +1208,7 @@ async function main(): Promise<void> {
 
   const totalRuns = stageIdxs.length * seeds.length
   process.stderr.write(
-    `eval-suite v6 · ${stageIdxs.length} stages × ${seeds.length} seeds = ${totalRuns} runs` +
+    `eval-suite v7 · ${stageIdxs.length} stages × ${seeds.length} seeds = ${totalRuns} runs` +
       `${pool ? ` · ${pool.size} workers` : ' · serial'}\n`,
   )
   // M0 §3.2 official caliber line (stageIndex=0 keeps gate/eval parity).
@@ -874,6 +1229,16 @@ async function main(): Promise<void> {
     )
   }
 
+  const ctx: SuiteContext = {
+    seeds,
+    difficulty,
+    maxTicks,
+    stageIdxs,
+    params,
+    pool,
+    totalRuns,
+  }
+
   try {
     // ---- --compare A B: paired A/B under common random numbers ----
     const compareIdx = process.argv.indexOf('--compare')
@@ -884,112 +1249,7 @@ async function main(): Promise<void> {
         console.error('usage: --compare <a.json> <b.json>')
         process.exit(1)
       }
-      const refsFile = loadRefs()
-      const t0 = Date.now()
-      const cellsA = await runCorpus(
-        loadParams(pathA),
-        stageIdxs,
-        seeds,
-        difficulty,
-        maxTicks,
-        pool,
-      )
-      const cellsB = await runCorpus(
-        loadParams(pathB),
-        stageIdxs,
-        seeds,
-        difficulty,
-        maxTicks,
-        pool,
-      )
-      const scA = scoreCorpus(cellsA, refsFile)
-      const scB = scoreCorpus(cellsB, refsFile)
-      process.stderr.write(
-        `ran ${totalRuns * 2} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`,
-      )
-
-      console.log(`\nA = ${pathA}`)
-      printScorecard(scA, stageIdxs)
-      console.log(`\nB = ${pathB}`)
-      printScorecard(scB, stageIdxs)
-
-      const cmp = comparePaired(
-        scA.runScores.map((r) => r.score),
-        scB.runScores.map((r) => r.score),
-      )
-      console.log('\n' + '═'.repeat(70))
-      console.log('PAIRED COMPARISON  (B − A, matched on stage+seed)')
-      console.log('═'.repeat(70))
-      console.log(`  paired cells    ${cmp.n}`)
-      console.log(
-        `  mean Δscore     ${cmp.meanDelta >= 0 ? '+' : ''}${cmp.meanDelta.toFixed(4)} ± ${cmp.se.toFixed(4)}`,
-      )
-      console.log(`  t / p           ${cmp.t.toFixed(2)} / ${cmp.p.toFixed(4)}`)
-      console.log(`  B better/worse/tied  ${cmp.wins} / ${cmp.losses} / ${cmp.ties}`)
-      console.log(`  suite A → B     ${scA.suite.suite.toFixed(4)} → ${scB.suite.suite.toFixed(4)}`)
-      console.log(`  win rate A → B  ${pct(scA.suite.meanWinRate)} → ${pct(scB.suite.meanWinRate)}`)
-
-      // Per-stage breakdown. The suite number is a harmonic mean over stages,
-      // so it deliberately reacts more to the weak tail than a flat average
-      // would — a suite delta can therefore be several times the mean paired
-      // delta if the change happened to land on the stages that were already
-      // struggling. Without this table you cannot tell "slightly worse
-      // everywhere" from "fine everywhere except two stages that collapsed",
-      // and those call for completely different responses.
-      console.log('\n  per-stage Δ (paired within stage, B − A):')
-      const perStage: Array<{ name: string; d: number; p: number; a: number; b: number }> = []
-      for (const st of stageIdxs) {
-        const name = STAGES[st].name
-        const ia = scA.runScores
-          .map((r, i) => ({ r, i }))
-          .filter(({ i }) => scA.cells[i].stageName === name)
-        const a = ia.map(({ r }) => r.score)
-        const b = ia.map(({ i }) => scB.runScores[i].score)
-        const c = comparePaired(a, b)
-        const aggA = scA.stages.find((s) => s.stageName === name)
-        const aggB = scB.stages.find((s) => s.stageName === name)
-        perStage.push({
-          name,
-          d: c.meanDelta,
-          p: c.p,
-          a: aggA?.score ?? 0,
-          b: aggB?.score ?? 0,
-        })
-      }
-      perStage.sort((x, y) => x.d - y.d)
-      const notable = perStage.filter((s) => s.p < 0.05)
-      if (notable.length === 0) {
-        console.log('    no individual stage moved significantly (all p ≥ 0.05)')
-      } else {
-        for (const s of notable) {
-          const arrow = s.d > 0 ? '▲' : '▼'
-          console.log(
-            `    ${arrow} ${s.name.slice(0, 20).padEnd(21)}` +
-              `Δ ${(s.d >= 0 ? '+' : '') + s.d.toFixed(4)}  p=${s.p.toFixed(4)}  ` +
-              `stage ${s.a.toFixed(3)} → ${s.b.toFixed(3)}`,
-          )
-        }
-        console.log(
-          `    (${notable.filter((s) => s.d < 0).length} worse, ` +
-            `${notable.filter((s) => s.d > 0).length} better, ` +
-            `${perStage.length - notable.length} unchanged)`,
-        )
-      }
-
-      const verdict =
-        cmp.p < 0.05
-          ? cmp.meanDelta > 0
-            ? 'B is better (p < 0.05)'
-            : 'B is worse (p < 0.05)'
-          : 'no significant difference — do not ship on this evidence'
-      console.log(`\n  VERDICT: ${verdict}`)
-      if (cmp.p >= 0.05 && notable.length > 0) {
-        console.log(
-          `  NOTE: the suite is flat overall, but ${notable.length} stage(s) moved\n` +
-            `  significantly. A wash on average can still be a real regression on\n` +
-            `  specific stages — check the table before dismissing the change.`,
-        )
-      }
+      await runCompare(ctx, pathA, pathB)
       return
     }
 
@@ -1000,241 +1260,13 @@ async function main(): Promise<void> {
     process.stderr.write(`ran ${totalRuns} sims in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`)
 
     if (flag('calibrate')) {
-      // Calibrate against the DEFAULT parameters unless told otherwise: the
-      // references describe the stage, so they must not drift every time a
-      // candidate parameter set happens to play the stage differently.
-      const byStage = new Map<string, Cell[]>()
-      for (const c of cells) {
-        if (!byStage.has(c.stageName)) byStage.set(c.stageName, [])
-        byStage.get(c.stageName)!.push(c)
-      }
-      const stages: RefsFile = {}
-      for (const [name, group] of byStage) stages[name] = calibrateStage(group)
-
-      // Loss weights are regressed from checkpoint states, not finished runs.
-      const sc = scoreCorpus(cells, stages)
-      const lossKeys = Object.keys(DEFAULT_LOSS_WEIGHTS) as DimensionKey[]
-      const checkpoints = (arg('checkpoints', '1800,3000,4200') as string)
-        .split(',')
-        .map((s) => Number(s.trim()))
-        .filter((t) => t > 0)
-      process.stderr.write(
-        `fitting loss weights from checkpoints at ticks ${checkpoints.join(', ')}...\n`,
-      )
-      const dataset = await checkpointDataset(
-        params,
-        stageIdxs,
-        seeds,
-        difficulty,
-        checkpoints,
-        cells,
-        stages,
-        pool,
-      )
-      const fit = fitLossWeights(dataset, lossKeys)
-      // The same fit on finished runs — kept only to show how badly the naive
-      // formulation lies. `progress` == 1 iff cleared, so it scores ~100%.
-      const leaky = fitLossWeights(
-        sc.runScores.map((r, i) => ({ features: r, cleared: r.cleared, group: i })),
-        lossKeys,
-      )
-
-      const adopt = shrinkToPrior(fit.weights, DEFAULT_LOSS_WEIGHTS, fit.cvAuc)
-
-      const out = {
-        generatedAt: new Date().toISOString(),
-        source: {
-          tool: 'tools/eval/eval-suite.ts --calibrate',
-          stages: stageIdxs.length,
-          seeds: seeds.length,
-          difficulty,
-          maxTicks,
-          params: arg('params') ?? 'DEFAULT_GOD_AI_PARAMS',
-        },
-        stages,
-        lossWeightFit: {
-          note:
-            `Class-weighted logistic P(final clear | dimensions observed mid-run), ` +
-            'standardised, negative coefficients clipped, fitted only on cells still ' +
-            'undecided at each checkpoint. Judge it by AUC, not accuracy. See ' +
-            'plan/God-AI-Evaluation-Redesign.md §5.3.',
-          checkpoints,
-          samples: fit.n,
-          runs: fit.groups,
-          baseRate: round3(fit.baseRate),
-          cvAuc: round3(fit.cvAuc),
-          aucInSample: round3(fit.auc),
-          accuracy: round3(fit.accuracy),
-          coefficients: fit.coefficients,
-          marginal: fit.marginal,
-          rawFittedWeights: fit.weights,
-          currentWeights: DEFAULT_LOSS_WEIGHTS,
-          shrinkage: {
-            note:
-              'Recommended weights: convex blend of the fit and the hand prior, ' +
-              'lambda = clamp(2*(cvAuc-0.5), 0, 0.8). Prevents a good-but-collinear ' +
-              'fit from zeroing dimensions the loss band exists to shape.',
-            lambda: adopt.lambda,
-            recommendedWeights: adopt.weights,
-          },
-          leakyControl: {
-            note:
-              'Same fit on FINISHED runs. progress == 1 iff cleared, so this is ' +
-              'label leakage; reported only as a warning against using it.',
-            accuracy: round3(leaky.accuracy),
-            auc: round3(leaky.auc),
-            cvAuc: round3(leaky.cvAuc),
-            suggestedWeights: leaky.weights,
-          },
-        },
-      }
-      writeFileSync(REFS_FILE, JSON.stringify(out, null, 2))
-      console.log(`\nWrote ${REFS_FILE}`)
-      console.log('\nPer-stage references:')
-      console.log('─'.repeat(86))
-      console.log(
-        'stage'.padEnd(24) +
-          'fast'.padStart(8) +
-          'slow'.padStart(8) +
-          'kpm'.padStart(8) +
-          'acc'.padStart(8) +
-          'open'.padStart(8) +
-          'mob'.padStart(8),
-      )
-      console.log('─'.repeat(86))
-      for (const [name, r] of Object.entries(stages)) {
-        console.log(
-          name.slice(0, 23).padEnd(24) +
-            String(r.clearTicksFast).padStart(8) +
-            String(r.clearTicksSlow).padStart(8) +
-            r.kpmRef.toFixed(2).padStart(8) +
-            r.accuracyRef.toFixed(3).padStart(8) +
-            String(r.openingTicksRef).padStart(8) +
-            String(r.mobilityRef).padStart(8),
-        )
-      }
-      console.log('─'.repeat(86))
-      console.log(
-        `\nLoss-weight fit — P(clear | mid-run state), checkpoints ${checkpoints.join('/')}, ` +
-          `${fit.n} observations from ${fit.groups} undecided runs, ` +
-          `base rate ${(fit.baseRate * 100).toFixed(1)}%`,
-      )
-      const auc = fit.cvAuc
-      const verdict =
-        auc >= 0.75
-          ? 'strong'
-          : auc >= 0.65
-            ? 'usable'
-            : auc >= 0.58
-              ? 'weak'
-              : 'no better than chance'
-      console.log(
-        `  grouped 5-fold CV AUC ${auc.toFixed(3)} (${verdict})` +
-          `   [in-sample ${fit.auc.toFixed(3)}, optimism ${(fit.auc - auc >= 0 ? '+' : '') + (fit.auc - auc).toFixed(3)}]`,
-      )
-      console.log(
-        `  accuracy ${(fit.accuracy * 100).toFixed(1)}% — ignore it, the base rate alone scores ` +
-          `${(Math.max(fit.baseRate, 1 - fit.baseRate) * 100).toFixed(1)}%`,
-      )
-      if (auc < 0.65) {
-        console.log(
-          `  ⚠ CV AUC below 0.65: mid-run state does not predict the outcome well here.\n` +
-            `    Keep the hand prior rather than adopting these weights.`,
-        )
-      }
-      console.log(
-        '  dimension'.padEnd(18) +
-          'coef'.padStart(9) +
-          'rawFit'.padStart(9) +
-          'current'.padStart(9) +
-          'ADOPT'.padStart(9) +
-          'soloAUC'.padStart(10) +
-          'r(prog)'.padStart(10) +
-          '  note',
-      )
-      for (const k of lossKeys) {
-        const m = fit.marginal[k]
-        const coef = fit.coefficients[k] ?? 0
-        // Why a coefficient came out negative. Only the first case means the
-        // dimension is actually useless; the others mean its information is
-        // already counted, or that it tracks losing.
-        let note = ''
-        if (coef < 0 && m) {
-          const r = Math.abs(m.corrWithProgress)
-          if (m.auc < 0.48) note = 'tracks losing on its own'
-          else if (m.auc <= 0.52) note = 'no signal (solo AUC ~ chance)'
-          else if (r > 0.3) note = `redundant: r=${r.toFixed(2)} with progress`
-          else note = 'suppressed — predicts alone but not jointly'
-        }
-        console.log(
-          ('  ' + k).padEnd(18) +
-            coef.toFixed(3).padStart(9) +
-            (fit.weights[k] ?? 0).toFixed(3).padStart(9) +
-            (DEFAULT_LOSS_WEIGHTS[k] ?? 0).toFixed(3).padStart(9) +
-            (adopt.weights[k] ?? 0).toFixed(3).padStart(9) +
-            (m ? m.auc.toFixed(3) : '  -  ').padStart(10) +
-            (m ? m.corrWithProgress.toFixed(2) : '  -  ').padStart(10) +
-            '  ' +
-            note,
-        )
-      }
-      console.log(
-        `\n  ADOPT = ${adopt.lambda.toFixed(2)}·fit + ${(1 - adopt.lambda).toFixed(2)}·prior. ` +
-          `The fit is trusted in proportion to its cross-validated skill, and the\n` +
-          `  prior keeps weak dimensions at a non-zero floor so the loss band still shapes them.`,
-      )
-      console.log(
-        `\n  [leakage control] the same fit on FINISHED runs scores AUC ` +
-          `${leaky.auc.toFixed(3)} / ${(leaky.accuracy * 100).toFixed(1)}% accuracy — and is worthless:\n` +
-          `  progress == 1.0 exactly when a run clears, so it just reads its own label.\n` +
-          `  Never calibrate loss weights on finished-run dimensions.`,
-      )
-      console.log(
-        '\nWeights are NOT applied automatically. Copy the ADOPT column into\n' +
-          'DEFAULT_LOSS_WEIGHTS in tools/eval/godai-score.ts only after reviewing the fit.',
-      )
+      await runCalibrate(ctx, cells)
       return
     }
 
-    const sc = scoreCorpus(cells, loadRefs())
-    printScorecard(sc, stageIdxs)
-    if (flag('dims')) printDimensions(sc)
-    if (flag('weights')) printWeights(sc)
-
-    const jsonOut = arg('json')
-    if (jsonOut) {
-      writeFileSync(
-        jsonOut,
-        JSON.stringify(
-          {
-            generatedAt: new Date().toISOString(),
-            config: {
-              seeds: seeds.length,
-              difficulty,
-              maxTicks,
-              params: arg('params') ?? 'default',
-            },
-            suite: { ...sc.suite, stages: undefined },
-            stages: sc.stages,
-            cells: sc.cells.map((c, i) => ({
-              stage: c.stageName,
-              seed: c.seed,
-              outcome: c.run.outcome,
-              score: round3(sc.runScores[i].score),
-              kills: c.run.finalState.killCount,
-              lives: c.run.finalState.lives,
-              ticks: c.run.ticks,
-            })),
-          },
-          null,
-          2,
-        ),
-      )
-      console.log(`\nWrote ${jsonOut}`)
-    }
+    await runScorecard(ctx, cells)
   } finally {
     pool?.terminate()
   }
 }
-
 await main()

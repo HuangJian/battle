@@ -7,6 +7,7 @@ import {
   type Theme,
 } from '../tools/level/level-gen'
 import { GRID, ENEMIES_PER_STAGE } from '../src/constants'
+import { DIFFICULTY_KEYS } from '../src/config/difficulty'
 import type { TankKind } from '../src/types'
 
 // ============================================================
@@ -14,7 +15,7 @@ import type { TankKind } from '../src/types'
 // ============================================================
 
 const ALL_THEMES: Theme[] = ['forest', 'ice', 'fortress', 'mixed']
-const ALL_DIFFICULTIES = ['relax', 'classic', 'hard', 'chaos']
+const ALL_DIFFICULTIES = DIFFICULTY_KEYS
 
 function countTerrainChar(stage: { tiles: string[] }, ch: string): number {
   let n = 0

@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'bun:test'
-import { World, genId } from '../src/game/World'
+import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
 import { findFreezePickupTargetImpl } from '../src/ai/god/StrategyPlanner'
-import { RNG } from '../src/utils/RNG'
-import { CELL, GRID, TANK } from '../src/constants'
-import type { Tank, PowerUp } from '../src/types'
+import { CELL } from '../src/constants'
+import type { PowerUp } from '../src/types'
+import { clearArena, placeEnemy, makePowerUp as makePowerUpShared, seedWorld } from './helpers'
 
 /**
  * §156: freeze-window power-up pickup (unlimited range) — unit tests.
@@ -38,28 +38,14 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   world: World
   input: GodAIInput
 } {
-  const world = new World()
-  world.rng = new RNG(42)
+  const world = seedWorld(42)
   const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)
-  for (let r = 0; r < GRID; r++) {
-    for (let c = 0; c < GRID; c++) world.tileMap.grid[r][c] = 'empty'
-  }
-  for (const r of [24, 25]) {
-    for (const c of [12, 13]) world.tileMap.grid[r][c] = 'base'
-  }
+  clearArena(world)
   void sim
   input.reset()
   return { world, input }
-}
-
-function placeEnemy(world: World, col: number, row: number): Tank {
-  const enemy = world.createTank('basic', col * CELL, row * CELL, 'down')
-  enemy.alive = true
-  enemy.spawnTimer = 0
-  world.tanks.push(enemy)
-  return enemy
 }
 
 function positionPlayer(world: World, col: number, row: number): void {
@@ -73,18 +59,9 @@ function positionPlayer(world: World, col: number, row: number): void {
   world.playerLevel = 0
 }
 
-function makePowerUp(world: World, col: number, row: number, type: PowerUp['type']): PowerUp {
-  const pu: PowerUp = {
-    id: genId(),
-    x: col * CELL,
-    y: row * CELL,
-    w: TANK,
-    h: TANK,
-    type,
-    alive: true,
-    blinkTimer: 0,
-    lifeTimer: 0,
-  }
+// Local push-flavor → shared pure factory (遗留 #5; 口径差异表 in tests/helpers.ts).
+const makePowerUp = (world: World, col: number, row: number, type: PowerUp['type']): PowerUp => {
+  const pu = makePowerUpShared(col, row, type)
   world.powerUps.push(pu)
   return pu
 }

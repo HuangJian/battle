@@ -1,7 +1,7 @@
 import type { World, SpawnEntry } from '../game/World'
 import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
 import type { WorldSnapshot } from './types'
-import { GRID } from '../constants'
+import { DEFAULT_P2_SPAWN, GRID } from '../constants'
 import { RULES, DEFAULT_RULES } from '../config/rules'
 import { DIFFICULTIES } from '../config/difficulty'
 import { THEMES, DEFAULT_THEME } from '../config/theme'
@@ -152,7 +152,7 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   // Clear transient visual data — Presentation will rebuild
   world.explosions = []
   world.popups = []
-  world.events = []
+  world.events.clear()
 
   // Stage info
   world.stageIndex = snap.stageIndex
@@ -183,7 +183,7 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.lives2 = snap.lives2 ?? 0
   world.playerLevel2 = snap.playerLevel2 ?? 0
   world.score2 = snap.score2 ?? 0
-  world.player2SpawnPoint = snap.player2SpawnPoint ?? { col: 16, row: 24 }
+  world.player2SpawnPoint = snap.player2SpawnPoint ?? { ...DEFAULT_P2_SPAWN }
   world.highScore = snap.highScore
   world.killCount = snap.killCount ?? 0
   world.playTimeMs = snap.playTimeMs ?? 0

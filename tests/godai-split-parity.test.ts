@@ -121,7 +121,7 @@ const BASELINE: Record<number, Expected> = {
   },
 }
 
-describe.skip('god-ai-split-parity', () => {
+describe.skip('godai-split-parity', () => {
   // DISABLED: Phase III — locks stage_clear outcomes (pass-rate tied)
   for (const [seedStr, expected] of Object.entries(BASELINE)) {
     const seed = Number(seedStr)
