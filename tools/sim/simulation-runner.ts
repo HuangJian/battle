@@ -157,6 +157,10 @@ export interface SimResult {
   /** §121 self-fire base-guard block ticks (only when `commitCounts: true`).
    *  A/B trigger-rate proxy: 0 = the arm never suppressed a base-line shot. */
   selfFireGuardBlocks?: number
+  /** Full branch-counter totals snapshot (only when `branchTotals: true`).
+   *  §272 L2 archived-candidate reachability audit: every key must be 0 for
+   *  candidates whose gate is OFF (see tools/diag/archived-reach-audit.ts). */
+  branchTotals?: Record<string, number>
   /** Per-run forensics (only when `forensics: true`). */
   forensics?: RunForensics
   /** Event-driven threat ledger (only when `threatLedger: true`). */
@@ -443,6 +447,10 @@ export interface RunOptions {
    * work, byte-identical run).
    */
   commitCounts?: boolean
+  /** Snapshot the full `input.branchCounts` object into the result (default
+   *  false). Read-only observation — never touches the World or RNG streams,
+   *  so outcomes stay byte-identical. Consumers: §272 L2 reachability audit. */
+  branchTotals?: boolean
   /**
    * Collect per-run forensics (DECISIONS §119): terminal snapshot (player /
    * base / per-enemy / per-bullet), last-10-ticks action+rule log, and the
@@ -1064,6 +1072,10 @@ export function runSimulation(opts: RunOptions): SimResult {
   if (opts.commitCounts === true) {
     result.suicideReturnCommits = input.branchCounts.suicideReturn
     result.selfFireGuardBlocks = input._selfFireGuardBlocks
+  }
+
+  if (opts.branchTotals === true) {
+    result.branchTotals = { ...input.branchCounts }
   }
 
   if (wantForensics) {

@@ -25,9 +25,18 @@
 #
 # Known blind spot: single-player only (per-seed-diff has no spectateDual/coop
 # wiring) — dual-central-breach/coop paths stay covered by the godai-* gates.
+#
+# --golden mode (DECISIONS §272, plan/God-AI-Organization.md §7): after the run,
+# compare the full-grid sha256 against tools/det-golden.v1.sha256. Mismatch →
+# print per-combo hashes + non-zero exit. A red gate is NOT an error per se —
+# it forces the explicit "new era" triple (new DECISIONS entry + re-run 60-seed
+# baseline + update golden), or a rollback.
 set -e
 cd "$(dirname "$0")/.."
 OUT=tmp/det-batch.txt
+GOLDEN=tools/det-golden.v1.sha256
+# NB: `set -- $combo` inside the loop clobbers positional params — capture flags first.
+MODE="${1:-}"
 : > "$OUT"
 
 COMBOS=(
@@ -63,4 +72,31 @@ for combo in "${COMBOS[@]}"; do
 done
 
 echo "corpus: ${#COMBOS[@]} runs, $(wc -l < "$OUT") signature lines"
-shasum -a 256 "$OUT"
+HASH=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
+echo "$HASH  $OUT"
+
+if [ "$MODE" = "--golden" ]; then
+  EXPECT=$(grep -Ev '^[[:space:]]*#|^[[:space:]]*$' "$GOLDEN" | head -1 | cut -d' ' -f1)
+  if [ "$HASH" = "$EXPECT" ]; then
+    echo "FROZEN-SIGNATURE OK ($HASH)"
+  else
+    echo "FROZEN-SIGNATURE MISMATCH — current behavior ≠ frozen God AI v1 (§272)"
+    echo "  golden : $EXPECT"
+    echo "  current: $HASH"
+    echo "per-combo sha256 (compare against the previous run to localize drift):"
+    sec_name=""; sec_file=""
+    while IFS= read -r line; do
+      case "$line" in
+        "== "*)
+          if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(shasum -a 256 "$sec_file" | cut -d' ' -f1)" "$sec_name"; rm -f "$sec_file"; fi
+          sec_name="$line"
+          sec_file=$(mktemp)
+          ;;
+        *) [ -n "$sec_file" ] && printf '%s\n' "$line" >> "$sec_file" ;;
+      esac
+    done < "$OUT"
+    if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(shasum -a 256 "$sec_file" | cut -d' ' -f1)" "$sec_name"; rm -f "$sec_file"; fi
+    echo "next step: either roll back, or run the new-era triple (DECISIONS entry + 60-seed baseline + golden update)"
+    exit 1
+  fi
+fi

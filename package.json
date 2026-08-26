@@ -23,6 +23,8 @@
     "lint": "oxlint",
     "format": "oxfmt",
     "check": "tsc --noEmit --incremental && bun test --parallel --timeout=50000",
+    "freeze:check": "bash tools/probe-det-baseline.sh --golden",
+    "freeze:l2": "bun tools/diag/archived-reach-audit.ts",
     "setup": "git config core.hooksPath tools/githook"
   },
   "devDependencies": {
