@@ -1,0 +1,189 @@
+"""
+train_intent_probe.py — M0b 意图可学习性前置探针（plan/Intent-Policy-NN-Plan.md §3.6）。
+
+训【纯 intent-8 head 分类器】（复用 StudentNet 主干，无 prev-intent 注入），按
+divergence-probe 三桶（base/combat/cruise）报告 acc vs majority 基线余量。
+Q1 预注册门槛：任何桶余量 < 0.1 → 表达/时序缺口嫌疑升级，先改分段/词表/obs，
+不许进入执行器投入；探针重试上限 3 轮。
+
+数据：tools/sim/export-intent-labels.ts 产出的 shards/*/（obs/scalars/intent/bucket npy）。
+train/val 按【局（shard）】切分——同局相邻帧不跨集，防时序泄漏高估。
+
+用法（经启动器，勿裸跑 python）：
+  powershell nn-training/start-training.ps1 -Script train_intent_probe.py \
+      -ScriptArgs "--data tmp/intent-probe-hard/shards --out tmp/intent-probe-hard/probe-report.json"
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from student_model import StudentNet
+
+INTENT_IDS = ["INTERCEPT", "RETURN_DEFENSE", "HUNT", "HOLD_LANE", "CLEAR", "PICKUP", "CRUISE", "ESCAPE"]
+BUCKET_NAMES = ["base", "combat", "cruise"]
+MARGIN_GATE = 0.1  # 预注册 #16
+
+
+class IntentProbeNet(StudentNet):
+    """StudentNet 主干（stem/ConvMixer/FC 原样）+ intent-8 头（替代 move/fire）。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.intent_head = nn.Linear(self.head_hidden, len(INTENT_IDS))
+
+    def forward(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
+        return self.intent_head(self.features(obs, scalars))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True, help="export-intent-labels 的 shards 目录")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--max-train", type=int, default=120_000, help="训练帧上限（内存预算）")
+    ap.add_argument("--val-shard-frac", type=float, default=0.2)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--seed", type=int, default=7)
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    rng = np.random.RandomState(args.seed)
+
+    # ---- 索引 shards，按局切分 train/val ----
+    shards = sorted(
+        d for d in os.listdir(args.data)
+        if os.path.isdir(os.path.join(args.data, d)) and os.path.exists(os.path.join(args.data, d, "intent.npy"))
+    )
+    if not shards:
+        print(f"[probe] no shards under {args.data}", file=sys.stderr)
+        sys.exit(1)
+    perm = rng.permutation(len(shards))
+    n_val = max(1, int(len(shards) * args.val_shard_frac))
+    val_idx = set(perm[:n_val].tolist())
+
+    def load_split(indices) -> tuple[np.ndarray, ...]:
+        obs_l, sc_l, in_l, bk_l = [], [], [], []
+        total = 0
+        for i in indices:
+            base = os.path.join(args.data, shards[i])
+            o = np.load(os.path.join(base, "obs.npy"))
+            total += o.shape[0]
+            if total > args.max_train * 1.5:
+                break
+            obs_l.append(o)
+            sc_l.append(np.load(os.path.join(base, "scalars.npy")))
+            in_l.append(np.load(os.path.join(base, "intent.npy")))
+            bk_l.append(np.load(os.path.join(base, "bucket.npy")))
+        return (
+            np.concatenate(obs_l),
+            np.concatenate(sc_l),
+            np.concatenate(in_l).astype(np.int64),
+            np.concatenate(bk_l).astype(np.int64),
+        )
+
+    val_shards = [i for i in range(len(shards)) if i in val_idx]
+    train_shards = [i for i in range(len(shards)) if i not in val_idx]
+    xo, xs, xi, xb = load_split(train_shards)
+
+    # 训练帧上限子采样（确定性）。
+    if len(xi) > args.max_train:
+        sel = rng.choice(len(xi), size=args.max_train, replace=False)
+        xo, xs, xi, xb = xo[sel], xs[sel], xi[sel], xb[sel]
+
+    vo, vs_, vi, vb = load_split(val_shards)
+    print(
+        f"[probe] shards={len(shards)} (train {len(train_shards)} / val {len(val_shards)}) "
+        f"trainFrames={len(xi)} valFrames={len(vi)}",
+        file=sys.stderr,
+    )
+    print(f"[probe] label dist train={np.bincount(xi, minlength=8).tolist()} "
+          f"val={np.bincount(vi, minlength=8).tolist()}", file=sys.stderr)
+
+    dev = torch.device("cpu")
+    model = IntentProbeNet().to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    ce = nn.CrossEntropyLoss()
+
+    to = torch.from_numpy(xo)
+    ts = torch.from_numpy(xs)
+    ti = torch.from_numpy(xi)
+    n = len(xi)
+
+    for ep in range(args.epochs):
+        model.train()
+        order = torch.randperm(n)
+        tot_loss, correct = 0.0, 0
+        for b in range(0, n, args.batch):
+            idx = order[b : b + args.batch]
+            opt.zero_grad()
+            logits = model(to[idx], ts[idx])
+            loss = ce(logits, ti[idx])
+            loss.backward()
+            opt.step()
+            tot_loss += float(loss) * len(idx)
+            correct += int((logits.argmax(1) == ti[idx]).sum())
+        print(f"[probe] epoch {ep + 1}/{args.epochs} loss={tot_loss / n:.4f} trainAcc={correct / n:.4f}",
+              file=sys.stderr)
+
+    # ---- 评估：overall + 三桶 acc vs majority 余量 ----
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for b in range(0, len(vi), 1024):
+            logits = model(torch.from_numpy(vo[b : b + 1024]), torch.from_numpy(vs_[b : b + 1024]))
+            preds.append(logits.argmax(1).numpy())
+    pred = np.concatenate(preds)
+
+    report: dict = {
+        "gate": "any-bucket margin < 0.1 -> fail (prereg #16)",
+        "marginGate": MARGIN_GATE,
+        "shards": len(shards),
+        "trainFrames": int(len(xi)),
+        "valFrames": int(len(vi)),
+        "epochs": args.epochs,
+        "overall": {"acc": float((pred == vi).mean())},
+        "buckets": {},
+        "confusion8x8": np.zeros((8, 8), dtype=int).tolist(),
+    }
+    cm = np.zeros((8, 8), dtype=int)
+    for t, p in zip(vi, pred):
+        cm[t][p] += 1
+    report["confusion8x8"] = cm.tolist()
+
+    for bk in range(3):
+        m = vb == bk
+        if m.sum() == 0:
+            continue
+        y, yh = vi[m], pred[m]
+        counts = np.bincount(y, minlength=8)
+        majority = float(counts.max()) / len(y)
+        acc = float((y == yh).mean())
+        report["buckets"][BUCKET_NAMES[bk]] = {
+            "frames": int(m.sum()),
+            "acc": acc,
+            "majorityAcc": majority,
+            "margin": acc - majority,
+            "pass": bool(acc - majority >= MARGIN_GATE),
+            "majorityClass": INTENT_IDS[int(counts.argmax())],
+            "perClassTrue": counts.tolist(),
+        }
+
+    report["gatePass"] = all(b["pass"] for b in report["buckets"].values())
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print(json.dumps({k: v for k, v in report.items() if k != "confusion8x8"}, indent=2))
+    print(f"[probe] gate {'PASS' if report['gatePass'] else 'FAIL'} -> {args.out}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

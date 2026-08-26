@@ -27,7 +27,7 @@ import { WorkerPool, defaultWorkerCount } from '../lib/worker-pool'
 import { STAGES } from '../../src/config/stages'
 import { INTENT_IDS } from '../../src/ai/intent/vocab'
 import { writeFileSync, mkdirSync } from 'fs'
-import type { TaggerAggregate, TaggerJob, TaggerPayload } from './export-intent-labels-worker'
+import type { TaggerAggregate, TaggerJob, TaggerPayload } from './intent-label-core'
 
 const EXPORTER_VERSION = '0.2.0'
 
