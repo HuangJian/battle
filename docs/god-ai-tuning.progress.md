@@ -14,29 +14,49 @@
 
 ---
 
-# Part 0. 当前状态速览（2026-08-12，含 2026-08-12 三难度基线重测，见 §0.A）
+# Part 0. 当前状态速览（2026-08-26 · **v1 封版冻结**，DECISIONS §272）
 
-## 0.A 三难度基线（官方口径）
+> ★ **player God AI v1 已封版**（owner 拍板 D0=A，2026-08-26；评审 `god-ai-org.review.md` P1–P5 吸收）。
+> 本 Part 为冻结基线的唯一口径。此后任何 God-AI 行为改动 = 新纪元「三件套」：
+> 新 DECISIONS 条目 + 重跑 60-seed 三难度基线 + 更新冻结签名 golden——缺一不可。
+> 强制机制：pre-commit 冻结签名门 / `bun run freeze:check`（~100s，门红 ≠ 出错，是强制显式判定）；
+> L2 可达性审计 `bun run freeze:l2`。重启协议见文末专节；执行手册 plan/God-AI-Organization.md。
 
-> 官方口径 = 35 关 × N seeds，`runSimulation` 直驱（不传 stageIndex、正确同步 playerLevel/lives），
-> 门禁 seed 1..20，决定性结论 ≥60 seeds。口径历史与修复见 §II.5。
+## 0.0 导航索引（决策号段 ↔ 章节）
 
-| 难度 | 20-seed 门禁真值 | 60-seed 参考 | 命数/星级 | 目标 | 状态 |
-|---|---|---|---|---|---|
-| classic | **88.6%**（620/700，floor 581） | 89.6% | 3 命 / 0★ | >98%（v2 目标） | 门禁全绿（620≥581）；较 §134 91% 微降 ~1.4pp，距目标 ~9pp |
-| hard | **72.0%**（504/700，floor 415） | 72.7% | **3 命** / 1★ | >80%（v2 目标） | 门禁全绿（504≥415）；较 §134 63.1% **+8.9pp**，距 80% 目标 ~8pp |
-| chaos | **67.9%**（475/700，floor 394） | 68.8% | **3 命** / 1★ | >50%（v2 目标） | 门禁全绿（475≥394）；较 §134 60.0% **+7.9pp**，已超目标 ~18pp |
+| 号段 | 内容 | 正文位置 |
+|---|---|---|
+| §33–§95 | Classic 纪元（单难度调优 + 方法论沉淀） | Part I |
+| §96–§110 / M0–M11 | v2 重设计纪元 | Part II |
+| §111–§167 | 双玩家 Central Breach / 防守位等详细决策补录 | 文末「叙事未覆盖条目的精简补录」 |
+| §168–§173 | HARD 瓶颈轮（selectTarget 五连阴性封盘） | 文末「追加：2026-08-07 HARD 瓶颈轮」 |
+| §192–§229 | baseLaneSentry 家族 / 开放测试 M0–M5 / fireLineDetour 发货轮 | 文末各追加小节（M4.0 已逐号核验落点） |
+| §194、§230–§234 | pixelStuck 兜底回退史 / 工具与门禁口径收口 | 文末「补录：§194 与 §230–§234」 |
+| §235 起 | 渲染/重构轮（非调优，未压缩） | DECISIONS.md 原文 |
 
-- classic 门禁真值自 M0 起保持 637/700 字节持平（所有 M 行为默认 OFF / 逐字节不变）。
-- §130（2026-08-05）：**全难度命数统一为 3**（relax 5→3、hard 2→3；classic/chaos 已为 3）。
-  hard/chaos 门禁真值按 gate-context 重测：hard 54.4%→**61.6%**（全 35 关无回退）、chaos 58.1%→**58.3%**
-  （命数未变，7 关 ±1 跨进程 genId 上下文噪声）。此前 hard/chaos 真值在 §105 模拟口径修复后重生成
-  （hard 曾被 3 命伪口径高估 ~6pp）；§130 后命数差异不再参与难度区分。
-- §134（2026-08-05）：**方向 D 防守位停射拦截 SHIPPED**（defenseInterceptMode=1，pool-only，
-  classic restore 0）。hard/chaos 门禁真值按 gate-context 重测：hard 61.6%→**63.1%**（Battlement
-  1→3 首次离开地板）、chaos 58.3%→**60.0%**（60-seed 显著 p=0.0087，+2.15pp）。
-- 质量门禁：三门禁 + split-parity 12/12 全绿；**891 tests**、0 lint、`bun run build` ✓。
-- 2026-08-12 重测（eval-suite v6 官方口径，三难度各 20/60 seed）：classic 88.6%/89.6%、hard 72.0%/72.7%、chaos 67.9%/68.8%。hard/chaos 较 §134 显著 **+8~9pp**（§131–§191 防守位/导航 carve-dig/双玩家 Central Breach 等收益落地）；classic 较 §134 91% 微降 ~1.4pp（20-seed 门禁 620/700 仍 ≥ floor 581，门禁全绿——classic 为 byte-identical 路径，降幅疑为 20-seed 采样噪声，60-seed 89.6% 更稳）。
+## 0.A v1 冻结基线（官方口径）
+
+> eval-suite v7 · 35 关 × 60 seeds · params=351325f1 · 2026-08-26 于 pristine 行为采集。
+> 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty <d> --dims --json tmp/freeze/baseline-<d>.json`
+> （seeds = eval-suite 内置默认序列；无 `--params`/`--set`/`--fitness` 覆盖。tmp 语料不作长期凭证，以本表为准。）
+> **口径区分**：本表 = 60-seed 基线；score-gate 门禁自 §233 起用 10 seeds（truth/margin 见 `tests/score-gate-core.ts`）。两者勿混用。
+
+| 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
+|---|---|---|---|---|
+| classic | 0.7258（0.7211 ±0.0048） | 90% | 721.1 | Ice Palace（win 68%） |
+| **hard（主评估）** | **0.5450**（0.5388 ±0.0062） | **76%** | 538.8 | Battlement（win 30%） |
+| chaos（参） | 0.4943（0.4878 ±0.0065） | 70% | 487.8 | Battlement（win 17%） |
+
+- hard 维度均值（all/clears/losses）：progress 0.888/1.000/0.533 · lives 0.809/0.839/0.716 ·
+  baseIntegrity 0.703/0.884/**0.134** · clearSpeed 0.148（clears-only）· accuracy 0.840/0.880/0.713 ·
+  tempo 0.558 · loot 0.836 · growth 0.451 · baseSafety 0.917 · openingTempo 0.090 · mobility 0.925。
+- 与 Phase III 基线（§0.C.5，2026-08-12）对比：classic 持平（0.7259→0.7258）、
+  **hard +3.18pp SUITE / +3pp 胜率**（§195/§198/§229 发货杠杆的累计收益）、chaos +0.17pp。
+- **冻结签名 golden**：`b81e240a8c2980bbf805215319be5aa2f483a312235bd35d758a6e522870ec32`
+  （probe-det-baseline.sh 21 组合 · 109,516 签名行）；L2 可达性审计 **PASS**
+  （六个 OFF 候选在 21 组合语料上零可达，`tools/diag/archived-reach-audit.ts`）。
+- tmp 引用治理：正文引用的 `tmp/` 证据路径均为临时产物、不作长期凭证；关键数字必须已落在
+  本档或 DECISIONS；再生方式随对应工具节命令。
 
 ## 0.B v2 纪元发布清单
 
@@ -122,6 +142,7 @@
 
 ### 0.C.5 Phase III 基线（godai-score 多维，2026-08-12）
 
+> ⚠️ **历史基线**（已被 §0.A 的 2026-08-26 v1 冻结基线取代，保留作对比锚点）。
 > 测量：eval-suite v6 官方口径（`runSimulation` 直驱，35 关 × 60 seeds），godai-score v7 band（loss 0.40 / clear 0.70）。
 > **hard = 主评估难度**；classic / chaos = 参考（仅防大幅倒退）。详见 §0.C。
 > 维度含义：progress=击杀数(kills/enemies)、lives=存命数、clearSpeed=过关时间、accuracy=开火命中率(kills/shot)、baseIntegrity/baseSafety=基地、tempo=kpm、loot/growth/openingTempo/mobility 见 §0.C 维度表。
@@ -602,22 +623,48 @@ chaos 上全部无发布级杠杆；引擎方向耦合（移动 = 面朝 = 开�
 
 ---
 
-# 附：工具链索引（合并）
+# 附：工具链索引（standing toolbox，2026-08-26 重写；一次性审计已归档 tools/diag/archive/）
+
+**冻结门禁（DECISIONS §272）**
 
 | 工具 | 用途 |
 |---|---|
-| `tools/optimize/optimize-godai.ts` | CMA-ES 参数优化（SEARCH_SPACE 机制，v2 纪元 M4 调优面） |
-| `tools/sim/simulation-runner.ts` + `sim-pool.ts` / `sim-worker.ts` | 并行仿真（官方口径：不传 stageIndex、同步 playerLevel/lives） |
-| `tools/eval/eval-suite.ts` | 全量 A/B（35×60 paired CRN，`--compare a.json b.json`） |
-| `tools/eval/validate-p4.ts` / `gate-truth.ts` | 全 35 关扫描终审 / 门禁真值生成 |
-| `tools/diag/per-seed-diff.ts` | dump + diff（`--set` 覆盖），单种子 tick 级分歧定位 |
-| `tools/diag/flip-scan.ts` | 翻转扫描（FLIP-TO-WIN / FLIP-TO-LOSE / TIED 自动分类） |
-| `tools/diag/decision-probe.ts` | 单 tick 完整决策上下文打印 |
-| `tools/diag/death-attribution.ts` | **v2 纪元**：逐死亡事件归因（tick/凶手层级/行为分支） |
-| `tools/diag/diagnose-s32.ts` / `probe-s32.ts` / `analyze-trace.ts` / `decision-trace.ts` | 失败归因 / 参数敏感度 / 决策追踪 |
-| `tests/god-ai-regression-gate.test.ts` | classic 35×20 回归门禁 |
-| `tests/god-ai-hard-chaos-gate.test.ts` | **v2 纪元**：hard/chaos 三难度门禁（35×20，floor=truth-3.7pp） |
-| `tests/godai-split-parity.test.ts` | **v2 纪元**：M1 决策链 parity 重锁 |
+| `bun run freeze:check` | det 语料 21 组合签名 vs `tools/det-golden.v1.sha256`（~100s）；门红 ⇒ 新纪元三件套 |
+| `bun run freeze:l2` | archived 候选可达性审计（同语料 branchTotals 全零断言） |
+| `tools/diag/archived-reach-audit.ts` | 上者的实现；组合清单与 probe-det-baseline.sh 手工同步 |
+
+**常备诊断（tools/diag/ 顶层）**
+
+| 工具 | 用途 |
+|---|---|
+| `run-forensics.ts` | 分层取证采集（`--from-json` 子集重跑，AGENTS §4 Step 7）+ `base-loss-{run,worker}.ts` |
+| `per-seed-diff.ts` | dump + diff（`--set` 覆盖），单种子 tick 级分歧定位（方法论基石 §I.5.1） |
+| `decision-probe.ts` / `decision-trace.ts` | 单 tick 完整决策上下文 / 决策追踪 |
+| `failure-classifier.ts` / `threat-ledger.ts` | 失败归因分类库 / M0 威胁台账 sweep |
+| `death-attribution.ts` | 逐死亡事件归因（tick/凶手层级/行为分支） |
+| `flip-scan.ts` / `ab-diff.ts` | 翻转扫描 / 语料 A/B 对比 |
+| `ab-param.ts` / `ab-multi-param.ts` / `ab-fire-guard.ts` | 参数 A/B（paired CRN 官方口径） |
+| `counterfactual-idle.ts` / `counterfactual-dodge.ts` / `idle-analysis.ts` | 反事实取证（tests 消费） |
+| `travel-fire-probe.ts` | §217/§229 fireLineDetour 证据链工具 |
+
+**评估/优化/仿真核心**
+
+| 工具 | 用途 |
+|---|---|
+| `tools/eval/eval-suite.ts` | 官方口径 scorecard（35×N CRN、`--compare` paired A/B、`--dims` 维度拆解） |
+| `tools/eval/godai-score.ts` + `calibrate.ts` | godai-score v7 评分器 / per-stage 参考标定（eval-refs.json） |
+| `tools/sim/simulation-runner.ts` + `sim-pool/sim-worker` | 并行仿真内核（官方口径直驱） |
+| `tools/sim/batch-sim.ts` | 批量仿真 CLI（确定性 smoke：五关种子字节一致） |
+| `tools/optimize/optimize-godai.ts` / `curriculum.ts` | CMA-ES 参数面（两轮无 ROI 收口 §214/§222，留档） |
+
+**测试门禁**
+
+| 文件 | 用途 |
+|---|---|
+| `tests/godai-score-gate.test.ts` + `score-gate-core.ts` | 三难度分数门禁（10 seeds · truth/margin §233 口径） |
+| `tests/godai-split-parity.test.ts` | 决策链 parity 锁 |
+| `tests/godai-archived-knobs.test.ts` | 留档旋钮 L1 守卫（ARCHIVED_KNOB_GROUPS × CANDIDATE_SURVIVAL × DEFAULT 表互锁） |
+| `tests/calibration.test.ts` | 标定回归 |
 
 # 附：文献索引
 
@@ -2773,3 +2820,21 @@ t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 
   （order-dependent）+ HEAVY_TESTS 指向已 skip 的旧 gate。既有缺陷，非 §230-233 引入。
 - 修复：HEAVY_TESTS 过期项 `god-ai-gate`→`godai-score-gate`；spawnCapture 强制
   `--parallel --timeout=50000`。修复后清洁树 7.3s 0 fail、check ~26s 全绿。
+
+---
+
+# 重启协议（Resume Protocol，2026-08-26 · v1 冻结）
+
+> 未来任何 agent 若要重开 God AI 调优（= 宣告新纪元），按序执行：
+
+1. **坟场核查**：`plan/God-AI-Organization.md` §1.1 封盘清单 + `plan/refactor.trae.md` §0.5
+   勿重提清单——先证明新想法不在已证伪方向里；
+2. **口径装载**：本档 §0.A 冻结基线 + §0.C 评估框架 + §I.5 方法论（per-seed tick-diff 基石）；
+3. **开关面盘点**：`params.interface.ts` ARCHIVED_KNOB_GROUPS × `think.ts` CANDIDATE_SURVIVAL
+   （哪些旋钮存在但没在跑）；un-archive 走四步闸门（改常量/断言 → 新 DECISIONS 条目 →
+   更新 golden → 重跑 60-seed 基线）；
+4. **纪律三条回归线不变**：不泄漏 SP / 不冻结失败种子当硬门槛 / byte-identical 确定性；
+   决定性结论 ≥60 seeds；子集重跑用 `run-forensics --from-json`（AGENTS §4 Step 7）。
+
+新纪元「三件套」（缺一不可）：**新 DECISIONS 条目 → 重跑 60-seed 三难度基线 → 更新
+冻结签名 golden**。行为改动会让 `bun run freeze:check` 变红——这是预期闸门而非故障。

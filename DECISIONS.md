@@ -1605,4 +1605,32 @@ plan/refactor.trae.md 全部条目处置完毕（执行/否决/关闭各有记�
 - MANIFEST Three Gates：继续调参无玩家可感知收益，只消耗维护面。
 
 **Implications:** 重启协议（必读顺序 / un-archive 四步闸门）见 plan/God-AI-Organization.md §8 / §6 C1；
-L2 可达性审计证据于 M6 落地时补录至本条。B（敌人 AI）/C（规则层）/D（人类体验）出口均需新立项拍板。
+B（敌人 AI）/C（规则层）/D（人类体验）出口均需新立项拍板。
+
+> **L2 可达性审计证据（2026-08-26 M6 落地补录，评审 P2 兜底项）**：
+> `tools/diag/archived-reach-audit.ts` 在同一 21 组合语料上以 `branchTotals:true` 逐局运行，
+> 六个 OFF 候选（suicideReturn / unifiedCandidates / firingLane / carvePath / midLaneHold / survive）
+> 分支计数**全部为 0**——「字段=0 但代码仍可达」的漏网不存在。观测到的活跃分支计数
+> （证据表）：navigate 72697 · t2a 13669 · powerup 8042 · dodge 4924 · aggressive 3352 ·
+> baseConnectClear 1259 · defenseIntercept 580 · midLaneDefense 348 · baseLaneSentry 300 ·
+> chokepoint 91。复跑：`bun run freeze:l2`。
+>
+> **强制机制落地（同日）**：`probe-det-baseline.sh --golden` 校验模式（mismatch → per-combo
+> sha256 分歧报告 + 非零退出）；pre-commit 钩子新增 freeze gate 步骤；
+> `bun run freeze:check` / `freeze:l2` 入 package.json；AGENTS §6.3b 加收官状态注记。
+
+## 273. 留档实验资产不删决策（OFF 旋钮 / OFF 候选 / 锁存测试全保留）(STATUS: 已实施, 2026-08-26)
+
+**Decision:** God AI v1 封版（§272）语境下，~40 个 default-OFF 留档旋钮、6 个 OFF 候选、
+以及对应的 OFF 特征锁存测试**全部保留，不删除、不移出数组**。
+
+**Rationale:**
+- refactor.trae §1.2-2 四条件核查（2026-08-25）：所有 OFF 候选均被 A/B 测试以非零态调用
+  或被 standing 工具引用，不满足删除条件；
+- 重启成本对称性：删掉省下的复杂度 < 未来重开实验时的重建成本（这些是已付学费的实验基建）；
+- L1/L2 双守卫（tests/godai-archived-knobs.test.ts + tools/diag/archived-reach-audit.ts）
+  已把「以为它在跑」的风险锁死，保留不再有歧义代价。
+
+**Implications:** 此后任何删除提议须先推翻本条（新 DECISIONS 条目论证四条件已满足或资产
+已无重启价值）。数据化注册表：`ARCHIVED_KNOB_GROUPS`（params.interface.ts 底部）+
+`CANDIDATE_SURVIVAL`（think.ts）。

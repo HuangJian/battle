@@ -233,6 +233,13 @@ bun run check        # full gate: tsc --noEmit --incremental && bun test --paral
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 ```
 
+God AI v1 freeze gates (DECISIONS §272; pre-commit runs the first one):
+
+```
+bun run freeze:check # det 21-combo signature vs frozen golden (~100s) — red ⇒ new-era triple
+bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~100s)
+```
+
 `bun run check` is the definition of "green". Run it before declaring a task done.
 
 > **Scoped vs full test runs.** `bun run test` invokes `tools/test-silent.ts`, a
@@ -356,6 +363,13 @@ Full-entry format (for `DECISIONS.md` foundational decisions):
 Keep numbering sequential. If your decision revises an earlier one, mark the old one `_(superseded by §N)_` rather than deleting it — history matters.
 
 ### 6.3b God-AI tuning evaluation framework (Phase III, 2026-08-12)
+
+> **⛔ 状态注记（2026-08-26，DECISIONS §272）：player 侧 God AI v1 已封版冻结。**
+> Phase III 已收官——本节框架保留供重启参考。任何 God-AI 行为改动 = 新纪元，
+> 必须走「三件套」：新 DECISIONS 条目 + 重跑 60-seed 三难度基线 + 更新冻结签名 golden
+> （`tools/det-golden.v1.sha256`，`bun run freeze:check` 会红）。重启协议：
+> `plan/God-AI-Organization.md` §8（执行后移 docs/god-ai-organization.md）；
+> 封盘方向清单：该 plan §1.1 + `plan/refactor.trae.md` §0.5。
 
 God-AI tuning has entered **Phase III: Hard-focused behavior tuning**. When judging a God-AI change, apply:
 
