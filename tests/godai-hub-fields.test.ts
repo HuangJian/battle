@@ -123,6 +123,12 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   _predictiveFireBlocks: { cls: 'A', why: '§193-D diag' },
   branchCounts: { cls: 'A', why: 'branch telemetry, never feeds back' },
   _lastBranch: { cls: 'A', why: 'forensics label, read by simulation-runner' },
+  _intentPrev: { cls: 'A', why: '§290 intent-tagger prev-intent (tagger.ts observation)' },
+  _intentDuration: { cls: 'A', why: '§290 intent-tagger duration (tagger.ts observation)' },
+  _intentLog: {
+    cls: 'A',
+    why: '§290 intent-tagger sample ring (tagger.ts observation, reset()-cleared)',
+  },
   // ---- B: §14.2 reusable out-buffers ----
   _candVerdict: { cls: 'B', why: 'makeCandidateVerdict out-buffer' },
   _decisionCtx: { cls: 'B', why: 'DecisionContext scratch, rewritten per think' },
