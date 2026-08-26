@@ -7,6 +7,7 @@ import { STAGES } from '../src/config/stages'
 import { START_LIVES } from '../src/constants'
 import { RNG } from '../src/utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
+import { collectIntentSample, currentIntent } from '../src/ai/intent/tagger'
 import { INTENT_IDS } from '../src/ai/intent/vocab'
 import { INTENT_REPLAN_TICKS } from '../src/ai/intent/tagger'
 
@@ -163,5 +164,35 @@ describe('M1 tagger 钩子（预注册 #15：ON/OFF 字节等价 + 确定性）'
     const a = runGame({ intentTaggerMode: 1 }, 21, 2000)
     const b = runGame({ intentTaggerMode: 1 }, 21, 2000)
     expect(a).toEqual(b)
+  })
+
+  it('未知细分支：tagger 运行时跳样本而非抛错（观测降级）', () => {
+    const world = new World()
+    world.rng.reseed(9)
+    world.difficultyKey = 'hard'
+    world.difficulty = DIFFICULTIES['hard']
+    world.rules = RULES['hard'] ?? DEFAULT_RULES
+    world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+    world.lives = world.difficulty?.startLives ?? START_LIVES
+    const god = new GodAIInput(
+      world,
+      { ...DEFAULT_GOD_AI_PARAMS, intentTaggerMode: 1 },
+      new RNG((9 ^ 0x9e3779b9) >>> 0),
+    )
+    new Simulation(world, god)
+    world.loadStageData(STAGES[9], 9)
+    god.reset()
+
+    // 注入一个未知细分支（vocab 映射外）——运行时必须降级不抛（M1 纯观测纪律）。
+    ;(god as unknown as { _lastBranch: string })._lastBranch = 'futureCandidateX'
+
+    expect(currentIntent(god)).toBeNull() // 防御：null + 计数
+    expect(god._intentUnknownLabels).toBe(1)
+
+    collectIntentSample(god, INTENT_REPLAN_TICKS) // 网格帧：样本跳过
+    expect(god._intentLog.length).toBe(0)
+
+    god.reset()
+    expect(god._intentUnknownLabels).toBe(0)
   })
 })

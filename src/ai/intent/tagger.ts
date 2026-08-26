@@ -58,9 +58,18 @@ export function combatChainFromGod(input: GodAIInput): CombatChainInput | null {
  * 当前 tick 的意图定性（与探针机械 tagger/branch-map 同口径）。
  * 返回 null = 非意图帧（shell/reflex/战斗链但 combat 原语缺失——正常运行时
  * combatChainFromGod 覆盖战斗链，null 仅发生在 reset 边界）。
+ * 未知细分支：vocab 契约要求显式 throw（开发期抓漏挂靠），但运行时观测必须
+ * 降级为"跳过本样本"而非让游戏循环崩溃（M1 语义：tagger 是纯观测，绝不阻断
+ * 决策链）——未知标签计入 _intentUnknownLabels。
  */
 export function currentIntent(input: GodAIInput): IntentId | null {
-  const m = forwardMapLabel(input._lastBranch)
+  let m: ReturnType<typeof forwardMapLabel>
+  try {
+    m = forwardMapLabel(input._lastBranch)
+  } catch {
+    input._intentUnknownLabels++
+    return null
+  }
   if (m.kind === 'static') return m.intent
   if (m.kind === 'combat-chain') {
     const combat = combatChainFromGod(input)
@@ -98,5 +107,6 @@ export function collectIntentSample(input: GodAIInput, tick: number): void {
 export function resetIntentTagger(input: GodAIInput): void {
   input._intentPrev = null
   input._intentDuration = 0
+  input._intentUnknownLabels = 0
   input._intentLog.length = 0
 }

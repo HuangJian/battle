@@ -489,6 +489,7 @@ export class GodAIInput implements InputLike {
    */
   _intentPrev: string | null = null
   _intentDuration = 0
+  _intentUnknownLabels = 0
   _intentLog: Array<{
     tick: number
     intent: string

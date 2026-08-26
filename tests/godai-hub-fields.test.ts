@@ -125,6 +125,10 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   _lastBranch: { cls: 'A', why: 'forensics label, read by simulation-runner' },
   _intentPrev: { cls: 'A', why: '§290 intent-tagger prev-intent (tagger.ts observation)' },
   _intentDuration: { cls: 'A', why: '§290 intent-tagger duration (tagger.ts observation)' },
+  _intentUnknownLabels: {
+    cls: 'A',
+    why: '§290 intent-tagger unknown-branch skip counter (observer safety)',
+  },
   _intentLog: {
     cls: 'A',
     why: '§290 intent-tagger sample ring (tagger.ts observation, reset()-cleared)',
