@@ -496,20 +496,19 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
                     continue
-                # v3.7 fan-out 副本失败：主副本/其它副本可能仍在跑——不重复回队（防重复执行
-                # 放大），只递减副本计数；若任务尚未结算且无在跑副本，走下方正常回队/记 missing。
-                if fanout_copy and task in inflight:
-                    inflight[task] -= 1
-                    if inflight[task] <= 0:
-                        inflight.pop(task, None)
-                        if task not in seen and task not in missing_keys:
-                            log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — "
-                                f"no copies left, requeued")
-                            pending.append(task)
-                            stats["retried"] += 1
-                        continue
-                    log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — "
-                        f"main copy still in flight ({inflight.get(task, 0)})")
+                # v3.7 fan-out 副本失败：**永不回队**（防重复执行放大/死循环）。副本是竞速
+                # 用的冗余执行——输了即静默；主副本失败自会走下方正常回队/记 missing。
+                # 教训（实测 2026-08-27）：初版在「主副本已 settled → inflight key 被删」时
+                # 副本落入正常失败分支 → pending.append 把已结算任务重新派发 → 无限循环。
+                if fanout_copy:
+                    if task in inflight:
+                        inflight[task] -= 1
+                        if inflight[task] <= 0:
+                            inflight.pop(task, None)
+                    if task in seen or task in missing_keys:
+                        log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped")
+                    else:
+                        log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped")
                     continue
                 if nd is not None:
                     streaks[nd_id] = streaks.get(nd_id, 0) + 1
