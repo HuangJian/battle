@@ -342,16 +342,27 @@ interface RawRun {
 }
 
 export function segmentIntents(frames: readonly TagFrame[]): IntentSegment[] {
-  const n = frames.length
+  return segmentIntentSeq(
+    frames.map((f): IntentId | null => {
+      const m = forwardMapLabel(f.label)
+      if (m.kind === 'static') return m.intent
+      if (m.kind === 'combat-chain' && f.combat) return classifyCombatIntent(f.combat)
+      return null
+    }),
+  )
+}
+
+/**
+ * 分段四件套底核：输入逐帧意图序列（IntentId | null，null=透传帧），输出稳定段。
+ * God-AI 标签流（segmentIntents 经 forwardMap）与人像签名流（segmentIntentSeq 直喂）
+ * 共用同一实现（M2 签名器 ↔ M1 tagger 分段同步）。
+ */
+export function segmentIntentSeq(seq: readonly (IntentId | null)[]): IntentSegment[] {
+  const n = seq.length
   if (n === 0) return []
 
-  // A. 解析。
-  let resolved: (IntentId | null)[] = frames.map((f) => {
-    const m = forwardMapLabel(f.label)
-    if (m.kind === 'static') return m.intent
-    if (m.kind === 'combat-chain' && f.combat) return classifyCombatIntent(f.combat)
-    return null
-  })
+  // A. 解析（上游已提供意图或 null）。
+  const resolved = [...seq]
 
   // B. reflex/shell 透明：向前继承；局首向后继承。
   let firstIdx = resolved.findIndex((v) => v !== null)
