@@ -1,3 +1,33 @@
+## §21. M5-A 完成 — A 臂意图 BC（2026-08-27 凌晨）
+
+**训练**：intent-probe-hard（2100 局 God-AI 打标 432K 帧），quota 15000、inject、8ep、seed7
+→ trainAcc 0.236→**0.568**；**gate PASS**（三桶 margin 全 ≥0.1：base +0.113 / combat +0.106 / cruise +0.110）。
+
+**M5 gate 四必报项**（`eval_intent_m5.py`，per-shard 注入口径，val 86642 帧；权重
+`tmp/intent-weights-A.json`）：
+1. **teacher 60.25% vs self-feed 47.4%，gap 12.8pp** —— self-feed 下模型塌向 HUNT（训练先验类，
+   self-feed 混淆矩阵列 2 占绝对多数）→ 注入特征存在时序依赖，运行时（自喂 prev）低于 teacher 口径；
+   M8 前需 scheduled sampling 缓解（P1-2）。
+2. **prev ±3 tick 扰动：maxDrop 0.02pp**（全 shift 60.2–60.3%）—— 模型主要依赖 obs/scalars，
+   prev 特征不主导（鲁棒性优）。
+3. **守家桶（42799 帧）安全级误判 12.55% > 5% 阈值** —— 主误差带：RETURN_DEFENSE 真值被分到
+   CRUISE(450)/HUNT(386)、CRUISE 真值被分到 INTERCEPT(1807)/HUNT(8880)/PICKUP(2314) → base 桶
+   守家↔巡游/进攻混淆显著，触发回补警示（守家段超采样 / 收紧口径为下一步处理项）。
+4. **路由错配率 37.8%**（32776/86642）—— 几乎全部错误（1−acc=39.7%）都是激活头集合不同
+   （8 类中多数头集合两两相异），错配即执行器走错误白名单。
+
+**类级 recall（teacher-feed，per-shard）**：INTERCEPT **82.7%** / HUNT **90.3%** / CLEAR **66.6%** 强；
+PICKUP 49.5%；RETURN_DEFENSE 14.7% / CRUISE 24.8% 弱；**HOLD_LANE 0%**（§18 已知弱项，
+581 验证帧全部未命中——交 M5 守家段超采样/DAgger 补强，不构成本里程碑阻塞）。
+
+**stub 闭环冒烟**：m1-eval 5 关×10 seeds hard → **WIN 22%**（M4-C 3 意图极简执行器口径；
+sanity 不崩溃、产出合法意图 trace 即过；真实 WIN gate ≥50% 是 M7② 全执行器口径）。
+
+**M5-A gate 判定**：per-class recall 6/7 类显著 >0（多数类基线对非多数类 recall=0）；
+四必报项全部落档；**A 臂放行，进入 M5-B**（人像混合臂）。
+
+---
+
 ## §18. 探针轮 3（B′：注入+配额修复版）— gate PASS（口径修正为类级 recall）（2026-08-26 夜）
 
 **B′**：inject + quota 15K + max-train 300K + 6ep（修复 B 轮缺陷：5% 语料 × 2ep）。
