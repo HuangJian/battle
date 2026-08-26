@@ -2119,3 +2119,19 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > 仅当 window 候选标注 `suppressDodge`（RETURN_DEFENSE 的 suicideReturn）时剔除 dodge。
 > 新增行为级仲裁测试（8 意图 dodge 保留/剔除断言，P0-5）。确定性不受影响（freeze gate 通过）。
 
+## 297. M7① 天花板探针 — 白名单分类法 bug 修复，oracle 47%→73.4%、NN 44.6%→72.3%（2026-08-27 凌晨）
+> **探针**：IntentOracleProbe（双 God：oracle 全链 = 完美意图源 + executor 受限链驱动世界）。
+> **初测**：oracle 全量 46.9% vs God-AI 74.3%（m1-eval 35×10 hard）→ 27pp 压缩损失，M7① 返工判定。
+> **根因**：WHITELISTS 引用细分支标签（t8/t2a/navigate... `_lastBranch` 分类法），override 过滤用
+> 候选 ActionId——两套分类法不匹配，命中率仅 **46%**（CRUISE/PICKUP 只剩 dodge）。
+> **修复**：`LABEL_TO_CANDIDATE`（vocab.ts 正向映射第②层），白名单标签→候选 id 翻译，映射率 100%。
+> **修复后**：oracle **73.4%**（≈God-AI 74.3%，噪声带内）→ **M7① 前置标定通过**；NN 执行器（B′）
+> **72.3%**（oracle 天花板 99% 价值、距 God-AI 2.0pp）→ **M7② WIN gate（≥50%）决定性通过，进 M8 门开**。
+> 教训：WHITELISTS 双重消费（tagger 标签侧 vs 执行器候选侧）需显式半桥，两套分类法不可混用。
+> 全文 → docs/nn.progress.intent.md §24。
+
+## 298. M5 训练脚本多根 + priority 配额（2026-08-27 凌晨）
+> train_intent_probe.py 支持多 data 根合并训练 + `--priority-root`（B 臂人类优先配额：#20 混合比
+> 达标需 priority 而非比例采样——比例采样下人类仅 13% <30%）。eval_intent_m5.py 新脚本计算
+> M5 gate 四必报项（teacher/self-feed gap、prev ±3 鲁棒、守家安全级误判、路由错配率）。
+

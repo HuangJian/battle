@@ -1,3 +1,30 @@
+## §24. M7① 天花板探针 — 白名单分类法 bug 修复，天花板 47%→73.4%（2026-08-27 凌晨）
+
+**探针**：`IntentOracleProbe`（双 God 实例：oracle 全链提供"完美意图" + executor 受限链驱动世界；
+tagger `currentIntent` 读 oracle 意图，每 replan 窗口提交白名单 override）。
+
+**初测（修复前）暴露压缩损失 27pp**：oracle 全量 **46.9%** vs God-AI **74.3%**（m1-eval 35×10 hard）——
+即使意图选择完美，词表×执行器也复现不了 God-AI → 触发 M7① 返工判定。
+
+**根因（diag-whitelist-coverage 实证）**：WHITELISTS 引用**细分支标签**（t8/t2a/navigate/
+aggressive/powerup/candidateX —— `_lastBranch` 分类法，与 tagger 同源），而 `_candidateOverride`
+过滤用**候选 ActionId**（DecisionCore 枚举）——两套分类法不匹配，override 静默丢弃未命中候选：
+**命中率仅 46%**（CRUISE 只剩 dodge、PICKUP 只剩 dodge、HUNT 只剩 firingLane+dodge）。
+
+**修复**：`LABEL_TO_CANDIDATE`（vocab.ts，§3.1 正向映射第②层细分支→候选）——白名单标签翻译成
+候选 id 后再设 override，映射率 **100%**（INTERCEPT 11 候选 / HUNT 10 / CRUISE 8 / PICKUP 5 / …）。
+补测试：标签全覆盖 + 值全为合法 ActionId。
+
+**修复后**：
+- oracle 全量 **73.4%**（God-AI 74.3%，差 0.9pp ≈ SE 2.3pp 噪声带内）→ **M7① 前置标定通过**：
+  词表×执行器已能表达 God-AI 行为（压缩损失归零）。
+- NN 执行器（B′ 权重）5 关 **48%→66%**（oracle 70% vs NN 66% 差 ~4pp → 意图训练有效）。
+
+**教训**：WHITELISTS 的双重消费（tagger 标签侧 vs 执行器候选侧）需要显式半桥映射，两套分类法
+不可混用。此 bug 同时解释了 M5 之后执行器 WIN 偏低的全部现象——非词表表达力问题。
+
+---
+
 ## §23. M5-B′ 平滑对照臂 + M5 gate 结论 — 人像温和混合胜出（2026-08-27 凌晨）
 
 **B′ 配置**：双根（intent-probe-hard + human-obs），quota 15000（与 A 同口径）+ `--priority-root 1`
