@@ -71,11 +71,25 @@ describe('dist sampler-agent helpers (plan/distributed-rollout.md v3.3)', () => 
     expect(d).not.toBe(a) // 路径变化也要改变 hash
   })
 
-  it('shard file set matches ppo.py load_shard expectation (12 npy)', () => {
+  it('shard file set matches ppo.py load_shard expectation (10 npy)', () => {
+    // v2 schema (AI-No-Items-Warmstart M2) deleted the item head → the shard
+    // dropped a_item/lp_item (12 → 10 npy). ppo.py load_shard loads exactly
+    // these 10 keys — mirror them here (independent re-statement).
+    const expected = [
+      'obs.npy',
+      'scalars.npy',
+      'a_move.npy',
+      'a_fire.npy',
+      'lp_move.npy',
+      'lp_fire.npy',
+      'value.npy',
+      'reward.npy',
+      'done.npy',
+      'mask.npy',
+    ]
     const names: string[] = [...SHARD_FILES]
-    expect(names.length).toBe(12)
-    for (const must of ['obs.npy', 'reward.npy', 'scalars.npy', 'done.npy', 'mask.npy'])
-      expect(names).toContain(must)
+    expect(names.length).toBe(expected.length)
+    expect([...names].sort()).toEqual([...expected].sort())
   })
 })
 

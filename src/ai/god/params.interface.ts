@@ -2408,10 +2408,16 @@ export interface ArchivedKnobGroup {
  */
 export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   { gate: 'candidateMode', note: 'UNIFIED_CANDIDATES + u* 子参数 (§221 reject)' },
-  { gate: 'firingLaneMode', note: 'FIRING_LANE + firingLaneRadius/MinEnemyDist/ReplanTicks/BoxRow (§139 灾难性阴性)' },
+  {
+    gate: 'firingLaneMode',
+    note: 'FIRING_LANE + firingLaneRadius/MinEnemyDist/ReplanTicks/BoxRow (§139 灾难性阴性)',
+  },
   { gate: 'carvePathMode', note: 'CARVE_PATH + carve* 子参数 (§161 诚实阴性)' },
   { gate: 'midLaneHold', note: 'MID_LANE_HOLD + midLaneHoldMaxRow/EnemyDist (§164 灾难性阴性)' },
-  { gate: 'suicideReturnMode', note: 'SUICIDE_RETURN + suicideReturnBaseHpFrac/DefendDistCells (§116/§117 阴性)' },
+  {
+    gate: 'suicideReturnMode',
+    note: 'SUICIDE_RETURN + suicideReturnBaseHpFrac/DefendDistCells (§116/§117 阴性)',
+  },
   { gate: 'defenseInterceptPredictCells', note: '方向 D 预测版 (§135, byte-identical)' },
   { gate: 'defenseInterceptDigBricks', note: '方向 D 破砖版 (§136, byte-identical)' },
   { gate: 'defensePosStandable', note: '+ minDist 子参数 (§146B 收窄版外全关, §149 边际≈0)' },
@@ -2423,19 +2429,31 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   { gate: 'actionContractMode', note: 'Phase2 §6.1 防守站桩门控 (§204; §220 三线微负)' },
   { gate: 'targetValueMode', note: 'Phase2 §6.2 targetValue 排序键 (§205)' },
   { gate: 'intentMode', note: 'Phase2 §6.3 短期 intent (+ intent* 子参数) (§206)' },
-  { gate: 'coverageMode', note: 'Phase3 §7 动态攻击覆盖点 (+ coverage* 子参数) (§207–§211 五轮收口)' },
+  {
+    gate: 'coverageMode',
+    note: 'Phase3 §7 动态攻击覆盖点 (+ coverage* 子参数) (§207–§211 五轮收口)',
+  },
   { gate: 'fastBaseApproachWeight', note: '+ fastBaseApproachRangeCells (§132 方向 B)' },
-  { gate: 'brickHeavyDefenseWallRatio', note: 'brick-heavy 防守再校准族 (+ Race/MaxPlayerDist/FieldDist) (§133 全负)' },
+  {
+    gate: 'brickHeavyDefenseWallRatio',
+    note: 'brick-heavy 防守再校准族 (+ Race/MaxPlayerDist/FieldDist) (§133 全负)',
+  },
   { gate: 'evasionSteelOcclusion', note: '+ evasionSteelOcclusionRange (§48-revisit, stays OFF)' },
   { gate: 'pathThreatAvoidance', note: 'M5 站位提前规避 (~1% 触发无信号)' },
   { gate: 'dodgeCounterFire', note: 'M3 对枪抵消 (+ alignPx/clearanceScore; §90b 复核维持 OFF)' },
-  { gate: 'dodgeHorizonScore', note: 'M9 horizon 承诺闪避 (+ dodgeEscapeDepth §200 / MinMarginTicks / MaxDistCells)' },
+  {
+    gate: 'dodgeHorizonScore',
+    note: 'M9 horizon 承诺闪避 (+ dodgeEscapeDepth §200 / MinMarginTicks / MaxDistCells)',
+  },
   { gate: 'dodgeCentroidMode', note: '§223/§224 质心远离闪避 (dodge 族第四度确认无杠杆)' },
   { gate: 'dodgeClearanceScore', note: 'dodge clearance 变体 (M3 族)' },
   { gate: 'playerHpAwareness', note: 'M12 HP 感知 (+ hpDanger*/hpTrade* 子参数)' },
   { gate: 'pickupStarBoxRow', note: 'D5 星经济拾取行' },
   { gate: 'direItemMode', note: 'E1 危急道具拾取 (+ direItem* 子参数) (§144 反证判据收束)' },
-  { gate: 'enemyModelMode', note: 'M3 敌人模型族 (+ WindowTicks/tierWeightScale/dodgeRateShrinksT2a/coordinationRiskWeight/enemyAccuracyRaisesSurvival/enemyTierWeight*/survivalModeLives/survivalRiskWeight/surviveMinEnemies)' },
+  {
+    gate: 'enemyModelMode',
+    note: 'M3 敌人模型族 (+ WindowTicks/tierWeightScale/dodgeRateShrinksT2a/coordinationRiskWeight/enemyAccuracyRaisesSurvival/enemyTierWeight*/survivalModeLives/survivalRiskWeight/surviveMinEnemies)',
+  },
   { gate: 'fieldRetreatPickupGate', note: '§146C/§148 HIGH-only 定稿后全局关闭' },
   { gate: 'pickupCommitTicks', note: '§152 拾取承诺' },
   { gate: 'starRushMode', note: '星经济冲刺 (+ maxLevel/range/liftGates) (§166)' },
@@ -2446,5 +2464,8 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   { gate: 'baseDamageRecall', note: '§173 基地损伤召回' },
   { gate: 't2aOutnumberedRetreat', note: '§159 T2a 多敌撤退' },
   { gate: 'pixelStuckDirectMoveTicks', note: '§190 像素卡死 directMove 兜底 (净负, 保留为门控)' },
-  { gate: 'dualCentralBreachP2Patrol', note: 'dual P2 patrol 导航 (+ PatrolRow) (§177 实测回退; 2026-08-26 盘点补登记)' },
+  {
+    gate: 'dualCentralBreachP2Patrol',
+    note: 'dual P2 patrol 导航 (+ PatrolRow) (§177 实测回退; 2026-08-26 盘点补登记)',
+  },
 ]

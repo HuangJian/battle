@@ -43,7 +43,6 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 
 ---
 
-# Part 0. 当前状态速览（2026-08-12，含 2026-08-12 三难度基线重测，见 §0.A）
 # Part 0. 当前状态速览（2026-08-26 · **v1 封版冻结**，DECISIONS §272）
 
 > ★ **player God AI v1 已封版**（owner 拍板 D0=A，2026-08-26；评审 `god-ai-org.review.md` P1–P5 吸收）。

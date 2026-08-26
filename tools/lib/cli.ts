@@ -134,7 +134,9 @@ export function parseDifficulties(
   if (validKeys) {
     for (const tok of out) {
       if (!validKeys.includes(tok)) {
-        throw new Error(`--difficulties: unknown difficulty "${tok}" (valid: ${validKeys.join(',')})`)
+        throw new Error(
+          `--difficulties: unknown difficulty "${tok}" (valid: ${validKeys.join(',')})`,
+        )
       }
     }
   }

@@ -82,7 +82,9 @@ for (const cand of offCandidates) {
 }
 
 if (failed) {
-  console.error('[L2] FAIL — archived candidate(s) reachable with defaults; freeze signature is stale.')
+  console.error(
+    '[L2] FAIL — archived candidate(s) reachable with defaults; freeze signature is stale.',
+  )
   process.exit(1)
 }
 console.log('[L2] PASS — no archived candidate reachable under frozen defaults.')

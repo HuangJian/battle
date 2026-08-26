@@ -2014,3 +2014,46 @@ verdict 决策抽纯函数 `decideVerdict(hashVerified, terminalMatch)` 按 §1.
 > 决策点（需拍板）：① 全量 2.77M 长训（~24h CPU）排除尺度；② schema v2 RL 直接启动
 > （旧谱系 it36 ≈10% 是唯一 >0 实证）；③ 路线 F 高层语义监督单独立项。全文 → nn.progress §15.4。
 
+## 289. 窗口 0 稳定化 gate — super-item 退役默认 OFF + 基线重钉三件套（2026-08-26，plan/Intent-Policy-NN-Plan.md §5.4）
+**Decision:** window-0 合并（f956d3f）落地后，按 AI-No-Items-Warmstart M0 决策把
+`superItemMode/superItemGuardThreat` 退役为默认 **OFF**（NN 训练语料必须无主动道具；
+原 §167 的 ON 默认仅保留为可重开旋钮），并完成新纪元三件套：① 本条目；② eval-suite
+35×60 三难度 pinned run 重跑；③ det golden 更新（aa395e1f…）。
+
+**Rationale:**
+- 意图策略计划的全案前提是"摘道具后 ~75%"基线；训练分布与部署分布必须一致。
+- 成本已量化并接受（plan §0.2 R4）：M0 60-seed 配对 A/B hard ≈ −1pt（p=0.0002）。
+- 稳定化 gate 五项全过：check 绿 / verify-demos 产出率 93.3%（104→97，≥90% 照旧可用分支）/
+  决策面 diff = ACTION_WEIGHTS 逐值一致 + 共享旋钮默认零变更（chokepointHoldCheckTicks 随封版移除）/
+  机械 tagger 单局冒烟通过。
+
+**Implications:** 新 pinned run = **2026-08-26 @ post-merge+super-item-OFF，seeds 1–60，v7**：
+classic SUITE 0.7286 (lcb 0.7238±0.0048, WIN 89.5%) / **hard 0.5290 (0.5228±0.0063, WIN 74.3%)** /
+chaos 0.4862 (0.4797±0.0066, WIN 69.0%)。74/76/78 锚点与全部 A/B 对比自此相对本 run 定义
+（预注册 #4）；score-gate TRUTH_SCORES 第三次重钉（hard agg −0.89pt、chaos −1.9pt、classic 不变，
+`tools/diag/recapture-score-truth.ts` 常备化）。
+
+## 290. M0a 词表契约定稿 — spec-in-code 单一实现（2026-08-26，plan/Intent-Policy-NN-Plan.md §3）
+**Decision:** M0a 全部规格落在 `src/ai/intent/vocab.ts` 一处（tagger/executor/探针共享，禁第二份）：
+① 8 类词表 `INTERCEPT/RETURN_DEFENSE/HUNT/HOLD_LANE/CLEAR/PICKUP/CRUISE/ESCAPE`；
+② 正向映射以**细分支标签**为主键（19 候选全量挂靠，两层口径 P1-7④），战斗族四分支
+（t2a/navigate/aggressive/firingLane/candidateKill）走预注册战斗链谓词：
+回防(基地受威胁∧距基地>maxPlayerDistFromBase) > CRUISE(≤endgameEnemyThreshold) > HUNT；
+③ 反向白名单三层标注（window/overlay/reflex），压制 dodge 标记唯一挂 suicideReturn（默认 OFF 反例）；
+④ 分段四件套 N=4 / reflex 透明 {dodge,survive} / 短段归前段（局首归后段）/ 探针同模块；
+⑤ 激活头矩阵：enemy⊆{INTERCEPT,HUNT,CRUISE}、anchor⊆{RETURN_DEFENSE,HOLD_LANE,CRUISE}、
+CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
+⑥ 目标敌槽序 = 距基地 Manhattan 升序 + 行主扫描 tie-break（单一数值秩 dist×1024+row×32+col）；
+⑦ 锚点 16 role 实例级槽位 + 35 关解析报表（0 miss；ok 34.5% 经现役 impl，其余确定性几何回退）。
+
+**Rationale:**
+- 计划明文要求映射表/槽序/分段为 tagger 与 executor 的共享实现（禁两份）→ 规格即代码 + 测试锁定，
+  比 prose 规格更抗漂移；反向完备性断言（P0-1）由 tests/intent-vocab.test.ts 静态执行。
+- INTERCEPT vs HUNT 区分判据用状态谓词预注册（敌是否威胁基地/是否在回防距离外），
+  复用 §159 同款阈值 maxPlayerDistFromBase=26，不新增旋钮。
+- CRUISE 切分复用 StrategyPlanner 现役 ENDGAME 门（enemiesRemaining ≤ endgameEnemyThreshold）。
+
+**Implications:** M1 正式 tagger 只需在 think 层加日志支路消费本模块；M0b 探针已用同一实现
+冒烟通过（单局 38 窗口、±5 tick 翻转率 6.8%；stages 30-32×seeds1-3 分布合理）。锚点排名解析器
+`rankBaseGuardAnchorsImpl` 为 additive 提取（k=1 与原 computeBaseGuardAnchorImpl 逐字节等价）。
+

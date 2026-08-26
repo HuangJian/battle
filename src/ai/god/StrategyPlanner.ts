@@ -1054,6 +1054,18 @@ export function calculateRouteDangerImpl(
  * applies wherever the default defense position is unreachable.
  */
 export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
+  return rankBaseGuardAnchorsImpl(self, 1)[0] ?? null
+}
+
+/**
+ * Intent-Policy 锚点契约（plan/Intent-Policy-NN-Plan.md §3.4 / M0a）：BASE_GUARD
+ * role 家族（4 个实例级槽位）的排名解析器——与 computeBaseGuardAnchorImpl 同一
+ * 评分公式（ringCover/approachCover/laneCover/cover/dist），top-k 输出。k=1 时与
+ * 原实现的「严格 > 首个胜者（行主扫描序）」语义一致：收集顺序即扫描顺序，
+ * 稳定排序保序。仅关卡加载/replan 时调用（非热路径）；调用方负责缓存失效语义
+ * （与 getBaseGuardAnchor 同组：stage reset 失效）。
+ */
+export function rankBaseGuardAnchorsImpl(self: GodAIInput, k: number): Cell[] {
   const w = self.world
   const tm = w.tileMap
   const bc = BASE_POS.col
@@ -1098,8 +1110,7 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
     [0, -1],
     [0, 1],
   ]
-  let best: Cell | null = null
-  let bestScore = -1
+  const scored: Array<{ cell: Cell; score: number }> = []
   for (let r = br - 3; r <= br + 1; r++) {
     for (let c = bc - 2; c <= bc + 3; c++) {
       if (!standable(c, r)) continue
@@ -1123,21 +1134,14 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
         }
         return false
       }
-      // ringCover: ring cells sharing row/col with clear LOS from (c,r).
       let ringCover = 0
       for (let ri = 0; ri < ring.length; ri++) {
         if (lineClearTo(ring[ri][0], ring[ri][1])) ringCover++
       }
-      // D1: approach-band LOS coverage — staging cells the candidate can
-      // SHOOT (equal weight to ringCover). This is the term that makes a
-      // right-wing/antechamber cell ((14-15,22-23)/(15,24)) win over the
-      // §137 pick (12,22), which stares at the ring and cannot shoot the
-      // breachers on the band.
       let approachCover = 0
       for (let bi = 0; bi < band.length; bi++) {
         if (lineClearTo(band[bi][0], band[bi][1])) approachCover++
       }
-      // laneCover: open bullet range along row + col (up to 6 cells each way).
       let laneCover = 0
       for (let di = 0; di < DIRS.length; di++) {
         let x = c + DIRS[di][0]
@@ -1150,7 +1154,6 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
         }
         laneCover += steps
       }
-      // cover: solid orthogonal neighbours.
       let cover = 0
       for (let di = 0; di < DIRS.length; di++) {
         const x = c + DIRS[di][0]
@@ -1162,13 +1165,12 @@ export function computeBaseGuardAnchorImpl(self: GodAIInput): Cell | null {
       }
       const dist = manhattan(c, r, bc, br)
       const score = ringCover * 60 + approachCover * 60 + laneCover * 4 + cover * 15 - dist * 6
-      if (score > bestScore) {
-        bestScore = score
-        best = { col: c, row: r }
-      }
+      scored.push({ cell: { col: c, row: r }, score })
     }
   }
-  return best
+  // 稳定排序：分数降序、扫描序（插入序）升序 —— k=1 恒等于原首个胜者。
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, k).map((s) => s.cell)
 }
 
 /**

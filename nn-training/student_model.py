@@ -17,7 +17,8 @@ Architecture (h=64 / d=8 sweet spot, plan §4.3):
     → FC   (h+19)→128, ReLU
     → 双头(v2): move-5 / fire-2   （item 头删除 —— AI 不使用主动道具）
 
-Params (h=64, d=8): ~69K. MAdds (26×26): ~37M.
+Params (h=64, d=8, v2 实算): 67.5K — v1 三头旧口径 "~69K" 已废弃（P2k3-8）.
+MAdds (26×26): ~37M.
 Coord channel formula — MUST match the TS runtime exactly:
   ch0[row][col] = round(col/(BOARD-1) * 255)   // x, varies along columns
   ch1[row][col] = round(row/(BOARD-1) * 255)   // y, varies along rows

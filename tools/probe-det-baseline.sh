@@ -35,6 +35,18 @@ set -e
 cd "$(dirname "$0")/.."
 OUT=tmp/det-batch.txt
 GOLDEN=tools/det-golden.v1.sha256
+
+# Portable sha256: git's bundled-sh hook environment on Windows often lacks
+# shasum/sha256sum — fall back to bun (already a hard dependency of this script).
+hash256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    bun -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");process.stdout.write(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$1"
+  fi
+}
 # NB: `set -- $combo` inside the loop clobbers positional params — capture flags first.
 MODE="${1:-}"
 : > "$OUT"
@@ -72,7 +84,7 @@ for combo in "${COMBOS[@]}"; do
 done
 
 echo "corpus: ${#COMBOS[@]} runs, $(wc -l < "$OUT") signature lines"
-HASH=$(shasum -a 256 "$OUT" | cut -d' ' -f1)
+HASH=$(hash256 "$OUT")
 echo "$HASH  $OUT"
 
 if [ "$MODE" = "--golden" ]; then
@@ -88,14 +100,14 @@ if [ "$MODE" = "--golden" ]; then
     while IFS= read -r line; do
       case "$line" in
         "== "*)
-          if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(shasum -a 256 "$sec_file" | cut -d' ' -f1)" "$sec_name"; rm -f "$sec_file"; fi
+          if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(hash256 "$sec_file")" "$sec_name"; rm -f "$sec_file"; fi
           sec_name="$line"
           sec_file=$(mktemp)
           ;;
         *) [ -n "$sec_file" ] && printf '%s\n' "$line" >> "$sec_file" ;;
       esac
     done < "$OUT"
-    if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(shasum -a 256 "$sec_file" | cut -d' ' -f1)" "$sec_name"; rm -f "$sec_file"; fi
+    if [ -n "$sec_file" ]; then printf '%s  %s\n' "$(hash256 "$sec_file")" "$sec_name"; rm -f "$sec_file"; fi
     echo "next step: either roll back, or run the new-era triple (DECISIONS entry + 60-seed baseline + golden update)"
     exit 1
   fi

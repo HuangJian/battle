@@ -66,25 +66,70 @@ export interface CandidateSurvivalRow {
 }
 
 export const CANDIDATE_SURVIVAL: readonly CandidateSurvivalRow[] = [
-  { candidate: 'suicideReturn', gate: 'suicideReturnMode', on: false, note: '§116/§117 阴性, 保留可重开 A/B' },
+  {
+    candidate: 'suicideReturn',
+    gate: 'suicideReturnMode',
+    on: false,
+    note: '§116/§117 阴性, 保留可重开 A/B',
+  },
   { candidate: 'dodge', gate: null, on: true, note: '生存优先, 顶层' },
   { candidate: 'interceptBase', gate: null, on: true, note: 'T8 拦子弹' },
-  { candidate: 'unifiedCandidates', gate: 'candidateMode', on: false, note: '§221 reject, 保留实验资产' },
-  { candidate: 'baseLaneSentry', gate: 'baseLaneSentryMode', on: true, note: '§198 SHIPPED (classic restore 0)' },
+  {
+    candidate: 'unifiedCandidates',
+    gate: 'candidateMode',
+    on: false,
+    note: '§221 reject, 保留实验资产',
+  },
+  {
+    candidate: 'baseLaneSentry',
+    gate: 'baseLaneSentryMode',
+    on: true,
+    note: '§198 SHIPPED (classic restore 0)',
+  },
   { candidate: 'pickupHigh', gate: 'pickupPriorityMode', on: true, note: '§87/§88 SHIPPED' },
   { candidate: 'aggro', gate: null, on: true, note: '(always, freeze/shield) S8/S9' },
   { candidate: 'pickupMid', gate: 'pickupPriorityMode', on: true, note: '§88 SHIPPED' },
-  { candidate: 'defenseIntercept', gate: 'defenseInterceptMode', on: true, note: '§134 SHIPPED (classic restore 0)' },
+  {
+    candidate: 'defenseIntercept',
+    gate: 'defenseInterceptMode',
+    on: true,
+    note: '§134 SHIPPED (classic restore 0)',
+  },
   { candidate: 'midLaneDefense', gate: 'midLaneDefense', on: true, note: '§163/§165 SHIPPED' },
-  { candidate: 'closePickup', gate: 'closePickupRange', on: true, note: '§158 SHIPPED (range 2 ≠ 0 即 ON)' },
+  {
+    candidate: 'closePickup',
+    gate: 'closePickupRange',
+    on: true,
+    note: '§158 SHIPPED (range 2 ≠ 0 即 ON)',
+  },
   { candidate: 'engage', gate: null, on: true, note: 'T2a' },
   { candidate: 'pickupLow', gate: 'pickupPriorityMode', on: true, note: 'S5' },
-  { candidate: 'firingLane', gate: 'firingLaneMode', on: false, note: '§139 灾难性阴性, 保留实验资产' },
-  { candidate: 'baseConnectClear', gate: 'baseConnectClearMode', on: true, note: '§189 SHIPPED (classic restore 0)' },
+  {
+    candidate: 'firingLane',
+    gate: 'firingLaneMode',
+    on: false,
+    note: '§139 灾难性阴性, 保留实验资产',
+  },
+  {
+    candidate: 'baseConnectClear',
+    gate: 'baseConnectClearMode',
+    on: true,
+    note: '§189 SHIPPED (classic restore 0)',
+  },
   { candidate: 'carvePath', gate: 'carvePathMode', on: false, note: '§161 诚实阴性, 保留实验资产' },
-  { candidate: 'midLaneHold', gate: 'midLaneHold', on: false, note: '§164 灾难性阴性, 保留实验资产' },
+  {
+    candidate: 'midLaneHold',
+    gate: 'midLaneHold',
+    on: false,
+    note: '§164 灾难性阴性, 保留实验资产',
+  },
   { candidate: 'hunt', gate: null, on: true, note: 'T2b' },
-  { candidate: 'survive', gate: 'actionWeights.survive', on: false, note: 'M3, weight 0 → 链中永不可达, 保留实验资产' },
+  {
+    candidate: 'survive',
+    gate: 'actionWeights.survive',
+    on: false,
+    note: 'M3, weight 0 → 链中永不可达, 保留实验资产',
+  },
 ]
 /** The M1 chain — weight order strictly mirrors the original top-level order.
  * Authoritative weight-order contract: DecisionCore.ACTION_WEIGHTS (locked by
