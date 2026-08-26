@@ -61,10 +61,12 @@ export interface SimTask {
   recordReplay?: boolean
   /** M4 star census observer (spawn/pickup/min-dist per star). Read-only. */
   powerupCensus?: boolean
-  /** Player policy: 'god' (default) or 'nn'. */
-  policy?: 'god' | 'nn'
+  /** Player policy: 'god' (default), 'nn' or 'intent'. */
+  policy?: 'god' | 'nn' | 'intent'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
+  /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
+  intentWeightsDir?: string
 }
 
 export interface SimTaskResult {
@@ -123,6 +125,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       record: task.recordReplay === true,
       policy: task.policy,
       nnWeightsDir: task.nnWeightsDir,
+      intentWeightsDir: task.intentWeightsDir,
     })
     msg = {
       id: task.id,

@@ -2,10 +2,12 @@ import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { NNInput } from '../../src/nn/policy-input'
+import { IntentPlayer } from '../../src/nn/intent-player'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
+import { readFileSync } from 'fs'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { paramsHash } from '../lib/stage-spec'
 import { InputRecorder } from '../../src/replay/InputRecorder'
@@ -412,10 +414,12 @@ export interface RunOptions {
   stageIndex?: number
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
-  /** Player policy for the headless run: 'god' (default) or 'nn'. */
-  policy?: 'god' | 'nn'
+  /** Player policy for the headless run: 'god' (default), 'nn' or 'intent'. */
+  policy?: 'god' | 'nn' | 'intent'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
+  /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
+  intentWeightsDir?: string
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -582,7 +586,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   const input: GodAIInput =
     opts.policy === 'nn'
       ? (new NNInput(world, { weightsDir: opts.nnWeightsDir }) as unknown as GodAIInput)
-      : new GodAIInput(world, godAIParams, godRng)
+      : opts.policy === 'intent'
+        ? (new IntentPlayer(world, {
+            weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
+          }) as unknown as GodAIInput)
+        : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
