@@ -66,7 +66,10 @@ export function signatureIntent(c: SigContext): string | null {
   if (c.firing && c.wallAhead) {
     return 'CLEAR'
   }
-  // PICKUP：不交战、往道具走。
+  // PICKUP：不交战、往道具走（**纯拾取**）。
+  // 人类"边走边打、顺路捡"的帧因 firing∧朝敌 已被 HUNT/INTERCEPT 捕获——混战顺路
+  // 拾取不标 PICKUP（宁缺勿错：意图级错标比少标更毒）。故本判据 = 灵敏度下限：
+  // 只捕获"道具远离敌人、专注拾取"的干净决策。
   if (!c.firing && c.pickupNear && c.moveDir !== null) {
     return 'PICKUP'
   }

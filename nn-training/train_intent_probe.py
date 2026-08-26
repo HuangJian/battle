@@ -24,29 +24,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from student_model import StudentNet
+from student_model import StudentNet, DEFAULT_H, DEFAULT_D
+from intent_net import IntentNet, export_intent_weights
 
 INTENT_IDS = ["INTERCEPT", "RETURN_DEFENSE", "HUNT", "HOLD_LANE", "CLEAR", "PICKUP", "CRUISE", "ESCAPE"]
 BUCKET_NAMES = ["base", "combat", "cruise"]
 MARGIN_GATE = 0.1  # 预注册 #16
 
 
-class IntentProbeNet(StudentNet):
-    """StudentNet 主干（stem/ConvMixer/FC 原样）+ intent-8 头（替代 move/fire）。
+class IntentProbeNet(IntentNet):
+    """M5：IntentNet 全尺寸三头 + 注入；训练仅对 intent 头算 CE（enemy/anchor 头
+    随机初始化保留导出——M6 之后由 M8/enemy-anchor 监督接管）。探针瘦身 h/d 亦支持。"""
 
-    inject=True：M4 §4.2 注入同构——FC 输出 128 后 concat prev-intent one-hot(8)
-    + duration(1) → 137 进 intent 头（①.5 注入版探针：teacher-forced，区分
-    "状态表达缺口"与"缺时序上下文"）。
-    """
-
-    def __init__(self, inject: bool = False, **kwargs):
-        super().__init__(**kwargs)
-        self.inject = inject
-        self.intent_head = nn.Linear(
-            self.head_hidden + (9 if inject else 0), len(INTENT_IDS)
-        )
-
-    def forward(self, obs: torch.Tensor, scalars: torch.Tensor, inject_vec=None) -> torch.Tensor:
+    def intent_forward(self, obs: torch.Tensor, scalars: torch.Tensor, inject_vec=None) -> torch.Tensor:
         h = self.features(obs, scalars)
         if self.inject:
             if inject_vec is None:
@@ -95,6 +85,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）")
     ap.add_argument("--quota", type=int, default=0, help="P2-2 每类配额采样帧数（0=不限）")
+    ap.add_argument("--save", metavar="OUT", default="", help="M5：训练后保存全尺寸权重 JSON（intent_net 导出格式）")
+    ap.add_argument("--h", type=int, default=DEFAULT_H, help="主干宽度（探针可瘦身；M5 全尺寸 64）")
+    ap.add_argument("--d", type=int, default=DEFAULT_D)
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -165,7 +158,7 @@ def main() -> None:
           f"val={np.bincount(vi, minlength=8).tolist()}", file=sys.stderr)
 
     dev = torch.device("cpu")
-    model = IntentProbeNet(inject=args.inject).to(dev)
+    model = IntentProbeNet(inject=args.inject, h=args.h, d=args.d).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
 
@@ -183,7 +176,7 @@ def main() -> None:
         for b in range(0, n, args.batch):
             idx = order[b : b + args.batch]
             opt.zero_grad()
-            logits = model(to[idx], ts[idx], t_inj_t[idx] if t_inj_t is not None else None)
+            logits = model.intent_forward(to[idx], ts[idx], t_inj_t[idx] if t_inj_t is not None else None)
             loss = ce(logits, ti[idx])
             loss.backward()
             opt.step()
@@ -192,12 +185,17 @@ def main() -> None:
         print(f"[probe] epoch {ep + 1}/{args.epochs} loss={tot_loss / n:.4f} trainAcc={correct / n:.4f}",
               file=sys.stderr)
 
+    # M5：保存全尺寸权重（intent_net 导出格式，含主干 shape 断言 + 三头）。
+    if args.save:
+        export_intent_weights(model, args.save)
+        print(f"[probe] weights saved -> {args.save}", file=sys.stderr)
+
     # ---- 评估：overall + 三桶 acc vs majority 余量 ----
     model.eval()
     preds = []
     with torch.no_grad():
         for b in range(0, len(vi), 1024):
-            logits = model(
+            logits = model.intent_forward(
                 torch.from_numpy(vo[b : b + 1024]),
                 torch.from_numpy(vs_[b : b + 1024]),
                 v_inj_t[b : b + 1024] if v_inj_t is not None else None,

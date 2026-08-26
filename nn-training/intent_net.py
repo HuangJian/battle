@@ -33,9 +33,10 @@ INJECT_DIM = 9  # one-hot(8) + duration(1)
 class IntentNet(StudentNet):
     """StudentNet 主干 + 三意图头（+可选 value 头，M8）。"""
 
-    def __init__(self, with_value: bool = False, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, inject: bool = False, with_value: bool = False, **kwargs):
+        self.inject = inject
         self.inject_dim = INJECT_DIM
+        super().__init__(**kwargs)
         head_in = self.head_hidden + INJECT_DIM  # 137
         self.intent_head = nn.Linear(head_in, INTENT_DIM)
         self.enemy_head = nn.Linear(head_in, ENEMY_HEAD_DIM)

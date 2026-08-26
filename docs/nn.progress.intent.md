@@ -46,3 +46,19 @@ bench-nn-infer 实测单前向 ms、IntentPlayer 策略适配器 + m1-eval --pol
   `tests/nn/intent-player.test.ts`（闭环 ≥600 tick 不崩 + 确定性 + 意图合法，4 例）；
   smoke：m1-eval S10 seed1 WIN 100%（接线验证，非真实水平）。
 - **M4 gate 全绿**：`bun run check` 1512 pass / 0 fail @ 2026-08-26 23:31。
+
+## §20. M2 人像签名标签器 + two-oracle 报告（2026-08-26 夜）
+
+- `src/ai/intent/signature.ts`：8 类纯函数签名判据（判据镜像执行器语义、宁缺勿错、
+  ESCAPE 不签名）；`segmentIntentSeq` 底核抽出——M2 签名流与 M1 tagger 流共享分段四件套。
+- `tools/sim/export-human-signatures.ts`：重放 104 局 → 逐帧 SigContext → 签名 →
+  共享分段；outcome 与 verify-demos 逐局一致（97 胜 / 7 败）。
+- **two-oracle 分布（标准化窗口占比）**：CRUISE 40.9%（God-AI 24.7%）/ HUNT 27.5%（26.0%）/
+  PICKUP **4.5%**（34.3%）/ RETURN_DEFENSE 11.0%（7.4%）/ HOLD_LANE 10.2%（1.2%）/ INTERCEPT 5.4%（5.1%）。
+  → 人像更据守/回防/巡航、更少"专注拾取"——与 B 臂支柱（人守家优于 God-AI）方向一致。
+- **PICKUP 灵敏度修正（用户指正）**：人像 4.5% ≠ "人不捡"——是签名器只捕获**纯拾取**
+  （`!firing ∧ pickupNear`，道具远离敌人的干净决策）；人类"边走边打顺路捡"的帧因
+  firing∧朝敌归入 HUNT/INTERCEPT（宁缺勿错，混战顺路拾取不误标）。已固化于 signature.ts
+  判据注释；B 臂该类别信号 = 灵敏度下限，PICKUP 训练信号主要由 A 臂补齐。
+- CLEAR 人像 60 窗口 <200 → B 臂宁缺勿错、A 臂补齐（与 §18 死类裁决一致）。
+- M2 gate：签名器已知样本抽检 10/10。
