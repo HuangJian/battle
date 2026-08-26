@@ -133,6 +133,10 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
     cls: 'A',
     why: '§290 intent-tagger sample ring (tagger.ts observation, reset()-cleared)',
   },
+  _candidateOverride: {
+    cls: 'A',
+    why: '§294/M6 intent-executor candidate-subset override (default null = byte-identical)',
+  },
   // ---- B: §14.2 reusable out-buffers ----
   _candVerdict: { cls: 'B', why: 'makeCandidateVerdict out-buffer' },
   _decisionCtx: { cls: 'B', why: 'DecisionContext scratch, rewritten per think' },

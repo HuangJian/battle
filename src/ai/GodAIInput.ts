@@ -499,6 +499,13 @@ export class GodAIInput implements InputLike {
   }> = []
 
   /**
+   * M6: intent-executor candidate override（执行器共享委托子链）。null = 全链
+   * （字节等价，默认）。非 null = thinkImpl 只跑该 id 子集候选；reset() 清空。
+   * 纯执行器机制，默认不激活。
+   */
+  _candidateOverride: ReadonlySet<string> | null = null
+
+  /**
    * Reusable scan results for scanAheadImpl — one buffer per direction index
    * (0=up, 1=down, 2=left, 3=right). Avoids allocating a result object per call.
    *
@@ -974,6 +981,7 @@ export class GodAIInput implements InputLike {
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
     resetIntentTagger(this)
+    this._candidateOverride = null // M6：执行器子链 override 每关重置
     // §3.3: stage-scoped cache invalidation — the full registry lives in
     // invalidateStageCaches() above (scan memos + nav/carve/dig/ring/parry/
     // memo/pickup families).

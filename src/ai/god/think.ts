@@ -352,7 +352,17 @@ export function thinkImpl(self: GodAIInput): void {
   // candidate decline (DecisionCore.runChain doc).
   // M2: the chain runs in effective-weight order (pre-built per reset in
   // GodAIInput._orderedCandidates; default = the M1 chain order).
-  if (!runChain(self, ctx, self._orderedCandidates)) HUNT.evaluate(self, ctx)
+  // M6: intent-executor candidate-override — when set, run ONLY the subset
+  // (intent whitelist) via runChain on the same candidates; a null override
+  // keeps the full chain (byte-identical). Fallback to HUNT on total decline.
+  const subset = self._candidateOverride
+  if (subset === null) {
+    if (!runChain(self, ctx, self._orderedCandidates)) HUNT.evaluate(self, ctx)
+  } else {
+    const active = self._orderedCandidates.filter((c) => subset.has(c.id))
+    if (!runChain(self, ctx, active.length > 0 ? active : self._orderedCandidates))
+      HUNT.evaluate(self, ctx)
+  }
 
   // §167 / B4: super-item press flags ride the same tick's decision context
   // (reactive gates only — never feed back into the chain above). The dead
