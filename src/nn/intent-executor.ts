@@ -185,13 +185,25 @@ export class IntentExecutor implements InputLike {
     return best - second
   }
 
-  /** 意图 → God-AI 候选白名单（window 层）→ 子链 override。 */
+  /** 意图 → God-AI 候选白名单（三层契约 P0-5）→ 子链 override。
+   *
+   * 仲裁规则（写死）：reflex 候选（dodge/survive）**默认保留**在 override 内——reflex
+   * 覆盖移动默认成立（dodge 在决策链顶层、先跑即赢）；**唯一例外** = 白名单内某 window
+   * 候选显式标注 `suppressDodge`（当前仅 RETURN_DEFENSE 的 suicideReturn）→ 剔除 dodge。
+   * overlay 候选（powerup 顺路拾取）随白名单保留（自带威胁门控，PICKUP overlay 只在
+   * 无直接威胁时经候选自身 gate 生效）。 */
   private applyIntent(intentIdx: number): void {
     const intent = INTENT_IDS[intentIdx] as IntentId
     const rows = WHITELISTS[intent]
-    const windowIds = new Set<string>()
-    for (const r of rows) if (r.layer === 'window') windowIds.add(r.branch)
-    // 子链 override：window 层候选（共享委托；reflex 层由 God-AI 全链每 tick 保底）。
-    this.god._candidateOverride = windowIds
+    const ids = new Set<string>()
+    let suppressDodge = false
+    for (const r of rows) {
+      if (r.layer === 'window' && r.suppressDodge === true) suppressDodge = true
+      ids.add(r.branch)
+    }
+    if (suppressDodge) ids.delete('dodge')
+    // 子链 override：window + overlay + reflex（减被压制项）；reflex 层由 God-AI 全链
+    // 逐 tick 保底。空集→thinkImpl fallback 全链（安全兜底）。
+    this.god._candidateOverride = ids.size > 0 ? ids : null
   }
 }

@@ -82,4 +82,38 @@ describe('M6 IntentExecutor（子链共享委托）', () => {
     const r = run(3, 600)
     for (const i of r.trace) expect(INTENT_IDS[i] !== undefined).toBe(true)
   })
+
+  it('P0-5 仲裁：reflex dodge 默认保留，RETURN_DEFENSE 经 suppressDodge 剔除', () => {
+    const world = new World()
+    world.rng.reseed(1)
+    world.difficultyKey = 'hard'
+    world.difficulty = DIFFICULTIES['hard']
+    world.rules = RULES['hard'] ?? DEFAULT_RULES
+    world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+    world.lives = world.difficulty?.startLives ?? START_LIVES
+    const exec = new IntentExecutor(world, { weightsText: WEIGHTS_TEXT })
+    const apply = exec['applyIntent'].bind(exec) as (i: number) => void
+
+    // 非 RETURN_DEFENSE 意图：dodge 保留（reflex 覆盖移动默认成立）。
+    for (const id of [
+      'INTERCEPT',
+      'HUNT',
+      'HOLD_LANE',
+      'CLEAR',
+      'PICKUP',
+      'CRUISE',
+      'ESCAPE',
+    ] as const) {
+      apply(INTENT_IDS.indexOf(id))
+      expect(exec['god']._candidateOverride?.has('dodge')).toBe(true)
+    }
+    // RETURN_DEFENSE：suicideReturn 标注 suppressDodge → dodge 被剔除（压制发生）。
+    apply(INTENT_IDS.indexOf('RETURN_DEFENSE'))
+    expect(exec['god']._candidateOverride?.has('dodge')).toBe(false)
+    // 白名单 window 层仍保留（子链未塌空）。
+    expect(exec['god']._candidateOverride?.size).toBeGreaterThan(0)
+    // 压制仅针对 dodge；reflex survive（ESCAPE 白名单）不连带剔除。
+    apply(INTENT_IDS.indexOf('ESCAPE'))
+    expect(exec['god']._candidateOverride?.has('dodge')).toBe(true)
+  })
 })
