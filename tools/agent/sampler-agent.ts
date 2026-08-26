@@ -201,7 +201,8 @@ interface WeightsState {
   iterId: string
   file: string
 }
-let weights: WeightsState | null = null
+// v3.7 权重按 kind 分桶：'rollout'（RL 采样权重）/ 'intent'（意图网络权重，供 intent-exec 评估）。
+const weightsByKind: Record<string, WeightsState> = {}
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
 
@@ -284,11 +285,15 @@ async function runGame(
   maxTicks: number,
   difficulty: string,
   mode: string,
+  kind = 'rollout',
+  policy = 'nn',
 ): Promise<Buffer> {
-  if (!weights) throw new Error('no weights cached')
-  const wfile = weights.file
+  const ws = weightsByKind[kind]
+  if (!ws) throw new Error(`no weights cached for kind=${kind}`)
+  const wfile = ws.file
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
-  // 只产 _eval_report.json，无 npy shards。
+  // 只产 _eval_report.json，无 npy shards。v3.7：mode=eval 支持 policy=intent-exec
+  // （意图网络选意图 + God-AI 白名单子链），意图权重经 kind='intent' 单独缓存。
   const isEval = mode === 'eval'
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
@@ -304,6 +309,11 @@ async function runGame(
     if (isEval) {
       // export-eval-game.ts 用单数形式 --stage/--seed
       args.push('--stage', String(stage), '--seed', String(seed))
+      if (policy && policy !== 'nn') {
+        args.push('--policy', policy)
+        const iw = weightsByKind['intent']
+        if (policy === 'intent-exec' && iw) args.push('--intent-weights', iw.file)
+      }
     } else {
       args.push('--stages', String(stage), '--seeds', String(seed))
     }
@@ -313,7 +323,7 @@ async function runGame(
       '--difficulty',
       difficulty,
       '--wver',
-      weights.sha,
+      ws.sha,
       '--node-label',
       `bun-${process.pid}`,
       // v3.6：容器在子进程内组装（BCV2，tools/sim/pack-container.ts）——base64+gzip+JSON
@@ -371,10 +381,12 @@ function beginTask(
   maxTicks: number,
   difficulty: string,
   mode: string,
+  kind = 'rollout',
+  policy = 'nn',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
-  runGame(stage, seed, maxTicks, difficulty, mode)
+  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy)
     .then((buf) => {
       lruPut(key, buf)
       gamesDoneTotal++
@@ -418,12 +430,15 @@ async function handle(req: Request): Promise<Response> {
       rejectedCount++
       return jsonResponse({ error: `sha mismatch: header=${claimedSha} actual=${actualSha}` }, 400)
     }
-    if (weights && weights.sha === actualSha) return jsonResponse({ ok: true, cache: 'kept' }, 204)
+    // v3.7 kind 分桶：x-kind 头（缺省 'rollout'）决定存哪个权重桶（'intent' 供 intent-exec 评估）。
+    const kind = req.headers.get('x-kind') ?? 'rollout'
+    const prevWs = weightsByKind[kind]
+    if (prevWs && prevWs.sha === actualSha) return jsonResponse({ ok: true, cache: 'kept' }, 204)
     // 原子切换：先备好新权重文件，再换状态、清结果缓存（跨轮生命周期显式化，v3.3）
-    const wfile = path.join(WORK_DIR, `weights-${actualSha.slice(0, 16)}.json`)
+    const wfile = path.join(WORK_DIR, `weights-${kind}-${actualSha.slice(0, 16)}.json`)
     fs.writeFileSync(wfile, weightsBytes)
-    const oldFile = weights?.file
-    weights = { sha: actualSha, iterId, file: wfile }
+    const oldFile = prevWs?.file
+    weightsByKind[kind] = { sha: actualSha, iterId, file: wfile }
     cacheEvicted += resultCache.size
     cacheBytes = 0
     resultCache.clear()
@@ -439,7 +454,7 @@ async function handle(req: Request): Promise<Response> {
     }
     sweepWeightFiles()
     console.log(
-      `[sampler-agent] weights switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
+      `[sampler-agent] weights[${kind}] switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
     )
     // 状态变更触发（清场）：带 JSON body，返回 200（204 不应带 body，HTTP 语义）
     return jsonResponse({ ok: true, cache: 'purged' }, 200)
@@ -547,14 +562,23 @@ async function handle(req: Request): Promise<Response> {
       !Number.isInteger(maxTicks)
     )
       return jsonResponse({ error: 'missing/invalid query params' }, 400)
-    if (!weights || weights.sha !== wver)
-      return jsonResponse({ error: 'wver not cached here' }, 409)
+    // v3.7 kind 分桶 + policy 透传（mode=eval 支持 intent-exec）。
+    const kind = url.searchParams.get('kind') ?? 'rollout'
+    const policy = url.searchParams.get('policy') ?? 'nn'
+    const ws = weightsByKind[kind]
+    if (!ws || ws.sha !== wver) return jsonResponse({ error: 'wver not cached here' }, 409)
+    if (mode === 'eval' && policy === 'intent-exec' && !weightsByKind['intent'])
+      return jsonResponse(
+        { error: 'intent weights not cached (POST /v1/weights x-kind=intent)' },
+        409,
+      )
     const free = diskFreeMB()
     if (free !== null && free < 2048) return jsonResponse({ error: `low disk: ${free}MB` }, 503)
     if (activeWorkers >= workers)
       return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
-    const key = `${iterId}:${stage}:${seed}`
+    // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
+    const key = `${iterId}:${mode}:${kind}:${stage}:${seed}`
     const cached = resultCache.get(key)
     if (cached) {
       cacheHits++
@@ -573,7 +597,7 @@ async function handle(req: Request): Promise<Response> {
       if (inflight.has(key)) return jsonResponse({ status: 'running', token: key }, 202)
       if (activeWorkers >= workers)
         return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
-      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode)
+      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode, kind, policy)
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
 
@@ -594,7 +618,7 @@ async function handle(req: Request): Promise<Response> {
             /* client gone */
           }
         }, 20_000)
-        runGame(stage, seed, maxTicks, difficulty, mode)
+        runGame(stage, seed, maxTicks, difficulty, mode, kind, policy)
           .then((buf) => {
             if (hb) clearInterval(hb)
             lruPut(key, buf)
@@ -633,7 +657,10 @@ async function handle(req: Request): Promise<Response> {
     const seed = parseInt(url.searchParams.get('seed') ?? '', 10)
     if (!iterId || !Number.isInteger(stage) || !Number.isInteger(seed))
       return jsonResponse({ error: 'missing/invalid query params' }, 400)
-    const key = `${iterId}:${stage}:${seed}`
+    // v3.7：与提交端同 key 配方（mode+kind 避免 eval/rollout 同局撞缓存）。
+    const mode = url.searchParams.get('mode') ?? 'rollout'
+    const kind = url.searchParams.get('kind') ?? 'rollout'
+    const key = `${iterId}:${mode}:${kind}:${stage}:${seed}`
     const cached = resultCache.get(key)
     if (cached) {
       resultCache.delete(key)

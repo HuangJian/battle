@@ -32,6 +32,8 @@ import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import { IntentExecutor } from '../../src/nn/intent-executor'
+import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
 import type { RunTelemetry } from './simulation-runner'
@@ -170,6 +172,8 @@ function runEvalOne(
   difficulty: string,
   maxTicks: number,
   weightsText: string,
+  policy = 'nn',
+  intentWeightsText = '',
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -179,9 +183,19 @@ function runEvalOne(
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
 
-  const model = buildModelFromText(weightsText) as unknown as RolloutModel
+  // v3.7：policy='intent-exec' → 意图执行器驱动（NN 选意图 + God-AI 白名单子链），
+  // 替代 RL 学生模型贪心。intent-weights 经 --intent-weights 单独提供。
+  const isIntent = policy === 'intent-exec'
+  const model = isIntent ? null : (buildModelFromText(weightsText) as unknown as RolloutModel)
   const scripted = new ScriptedInput()
-  const sim = new Simulation(world, scripted as any)
+  let exec: IntentExecutor | null = null
+  if (isIntent) {
+    exec = new IntentExecutor(world, {
+      weightsText: intentWeightsText,
+      rng: new RNG((seed ^ 0x9e3779b9) >>> 0), // §47：执行器内部 God-AI 独立 RNG
+    })
+  }
+  const sim = new Simulation(world, (exec ?? scripted) as any)
   world.loadStageData(stage, stageIdx)
   scripted.reset()
 
@@ -209,16 +223,20 @@ function runEvalOne(
   let outcome = 'timeout'
 
   while (t < maxTicks) {
-    encoder.encode(world)
-    if (t % K === 0) {
-      model.forward(encoder.obs, encoder.scalars)
-      const masks = computeMasks(world)
-      const mv = argmaxCat(model.moveLogits, masks.move)
-      const fr = argmaxCat(model.fireLogits, masks.fire)
-      scripted.setAction(mv, fr)
+    // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
+    if (!isIntent) {
+      encoder.encode(world)
+      if (t % K === 0) {
+        model!.forward(encoder.obs, encoder.scalars)
+        const masks = computeMasks(world)
+        const mv = argmaxCat(model!.moveLogits, masks.move)
+        const fr = argmaxCat(model!.fireLogits, masks.fire)
+        scripted.setAction(mv, fr)
+      }
     }
     sim.tick()
-    scripted.endFrame()
+    if (isIntent) exec!.endFrame()
+    else scripted.endFrame()
     t++
 
     // ---- telemetry（语义对齐 simulation-runner / export-rl-rollout）----
@@ -324,6 +342,8 @@ function main(): void {
   let seed = -1
   let maxTicks = MAX_TICKS
   let weightsPath = 'tmp/rl-weights/weights.json'
+  let intentWeightsPath = ''
+  let policy = 'nn'
   let wver = ''
   let nodeLabel = ''
   // --pack <path>（v3.6）：BCV2 容器输出，语义同 export-rl-rollout（无 shards、空 entries）。
@@ -335,6 +355,8 @@ function main(): void {
     else if (argv[i] === '--seed') seed = parseInt(argv[++i], 10)
     else if (argv[i] === '--max-ticks') maxTicks = parseInt(argv[++i], 10)
     else if (argv[i] === '--weights') weightsPath = argv[++i]
+    else if (argv[i] === '--policy') policy = argv[++i]
+    else if (argv[i] === '--intent-weights') intentWeightsPath = argv[++i]
     else if (argv[i] === '--wver') wver = argv[++i]
     else if (argv[i] === '--node-label') nodeLabel = argv[++i]
     else if (argv[i] === '--pack') packPath = argv[++i]
@@ -346,13 +368,24 @@ function main(): void {
   const stage = STAGES[stageIdx]
   mkdirSync(outDir, { recursive: true })
   const weightsText = readFileSync(weightsPath, 'utf8')
-  const res = runEvalOne(stageIdx, stage, seed, difficulty, maxTicks, weightsText)
+  const intentWeightsText = intentWeightsPath ? readFileSync(intentWeightsPath, 'utf8') : ''
+  const res = runEvalOne(
+    stageIdx,
+    stage,
+    seed,
+    difficulty,
+    maxTicks,
+    weightsText,
+    policy,
+    intentWeightsText,
+  )
   const report = {
     collector: 'RL-eval',
     rewardScheme: 'v7-pure',
     difficulty,
     stage: stageIdx,
     seed,
+    policy,
     outcome: res.outcome,
     ticks: res.ticks,
     win: res.win,
