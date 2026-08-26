@@ -2135,3 +2135,12 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > 达标需 priority 而非比例采样——比例采样下人类仅 13% <30%）。eval_intent_m5.py 新脚本计算
 > M5 gate 四必报项（teacher/self-feed gap、prev ±3 鲁棒、守家安全级误判、路由错配率）。
 
+## 299. M7① cadence 定稿 + risk-gated 负结果（2026-08-27 凌晨）
+> **oracle cadence 扫描**（35×10 hard）：{12: 76.3%, 24: 74.6%, 30: 73.4%, 36: **76.6%**, 50: 73.7%}
+> ——承诺期在正确 cadence 超越 God-AI（74.3%），R0 风险反转（执行器逐 tick 读 World + reflex 豁免成立）。
+> **NN cadence 扫描**（B′）：{12: 70.6%, 30: **72.3%**, 36: 70.9%}——中速最优，**定稿 replan=30**（预注册 #1）。
+> **risk-gated 负结果**：base30/danger8 → 68.0%（< 固定 30 的 72.3%），危险窗口频繁重选造成扰动；
+> 维持固定档，risk-gated 留 M8 RL 可选动作空间。
+> **头部空间**：oracle 36 的 76.6% = M8 RL 优化意图选择后的可达上限（NN 现 72.3%）。
+> 全文 → docs/nn.progress.intent.md §25。
+
