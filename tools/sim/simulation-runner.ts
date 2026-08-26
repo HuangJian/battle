@@ -424,6 +424,10 @@ export interface RunOptions {
   intentWeightsDir?: string
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
+  /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
+  riskGated?: boolean
+  baseCadence?: number
+  dangerCadence?: number
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -600,6 +604,9 @@ export function runSimulation(opts: RunOptions): SimResult {
               weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
               rng: godRng, // §47：执行器内部 God-AI 独立 RNG，与 world 解耦
               replanEvery: opts.replanEvery,
+              riskGated: opts.riskGated,
+              baseCadence: opts.baseCadence,
+              dangerCadence: opts.dangerCadence,
             }) as unknown as GodAIInput)
           : opts.policy === 'intent-oracle'
             ? (new IntentOracleProbe(world, {

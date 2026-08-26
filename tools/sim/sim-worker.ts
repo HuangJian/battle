@@ -65,6 +65,10 @@ export interface SimTask {
   policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle'
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
+  /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
+  riskGated?: boolean
+  baseCadence?: number
+  dangerCadence?: number
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
@@ -129,6 +133,9 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       nnWeightsDir: task.nnWeightsDir,
       intentWeightsDir: task.intentWeightsDir,
       replanEvery: task.replanEvery,
+      riskGated: task.riskGated,
+      baseCadence: task.baseCadence,
+      dangerCadence: task.dangerCadence,
     })
     msg = {
       id: task.id,

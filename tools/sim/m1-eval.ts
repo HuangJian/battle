@@ -85,6 +85,9 @@ async function main(): Promise<void> {
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
   const replan = parseInt(arg('replan', '0')!, 10) // M7① cadence 扫描（0 = 策略默认）
+  const riskGated = arg('risk-gated') === '1' || arg('risk-gated') === 'true'
+  const baseCadence = parseInt(arg('base-cadence', '0')!, 10)
+  const dangerCadence = parseInt(arg('danger-cadence', '0')!, 10)
   // Max concurrency is the real physical core count (never oversubscribe the
   // machine). `--workers` may LOWER the cap for a conservative run but can never
   // exceed it. Live concurrency then tracks system CPU load via AdaptiveSimWorkerPool:
@@ -131,6 +134,9 @@ async function main(): Promise<void> {
         nnWeightsDir: weightsDir,
         intentWeightsDir: intentWeights,
         replanEvery: replan || undefined,
+        riskGated,
+        baseCadence: baseCadence || undefined,
+        dangerCadence: dangerCadence || undefined,
         telemetry: true,
       })
     }

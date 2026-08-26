@@ -60,6 +60,11 @@ export interface IntentExecutorOptions {
   rng?: RNG
   replanEvery?: number
   switchMargin?: number
+  /** M7① risk-gated（Q7）：危险窗口（enemyCanShootBase/近环突破，isBaseUnderThreat 纯函数）
+   * 内 cadence 临时压缩至 dangerCadence，窗口外维持 baseCadence。默认关闭。 */
+  riskGated?: boolean
+  baseCadence?: number
+  dangerCadence?: number
 }
 
 /**
@@ -73,6 +78,11 @@ export class IntentExecutor implements InputLike {
   private god: GodAIInput
   private replanEvery: number
   private switchMargin: number
+  private riskGated: boolean
+  private baseCadence: number
+  private dangerCadence: number
+  /** risk-gated 动态 replan 调度：下一次 replan 的帧号。 */
+  private nextReplanTick = -1
 
   // 网络注入态
   private prevIntentId = -1
@@ -94,6 +104,9 @@ export class IntentExecutor implements InputLike {
     this.god = new GodAIInput(world, opts.godParams ?? { ...DEFAULT_GOD_AI_PARAMS }, opts.rng)
     this.replanEvery = opts.replanEvery ?? INTENT_REPLAN_TICKS
     this.switchMargin = opts.switchMargin ?? SWITCH_MARGIN
+    this.riskGated = opts.riskGated ?? false
+    this.baseCadence = opts.baseCadence ?? this.replanEvery
+    this.dangerCadence = opts.dangerCadence ?? 8
   }
 
   getMoveDirection(): Direction | null {
@@ -120,8 +133,25 @@ export class IntentExecutor implements InputLike {
     this.prevIntentId = -1
     this.duration = 0
     this.currentIntentId = -1
+    this.nextReplanTick = -1
     this.intentTrace.length = 0
     this.god.reset()
+  }
+
+  /** 是否到达 replan 帧（risk-gated 用动态调度，否则固定 cadence）。 */
+  private isReplanFrame(f: number): boolean {
+    if (this.riskGated) {
+      if (this.nextReplanTick < 0) this.nextReplanTick = f
+      return f >= this.nextReplanTick
+    }
+    return f % this.replanEvery === 0
+  }
+
+  /** 更新下一次 replan 帧（risk-gated：危险窗口压缩 cadence，纯函数 isBaseUnderThreat）。 */
+  private advanceReplan(f: number): void {
+    if (!this.riskGated) return
+    const danger = this.god.isBaseUnderThreat()
+    this.nextReplanTick = f + (danger ? this.dangerCadence : this.baseCadence)
   }
 
   /** 每 replan 窗口：网络选意图 → 更新 God-AI 子链 override。 */
@@ -134,7 +164,7 @@ export class IntentExecutor implements InputLike {
     this.god.getMoveDirection()
     this.god.isFiring()
 
-    if (f % this.replanEvery !== 0) {
+    if (!this.isReplanFrame(f)) {
       // 承诺期 off-tick：直接采用 God-AI 已跑结果（全链输出作为窗口内默认）。
       this.moveDir = this.god._moveDir
       this.firing = this.god._fire
@@ -164,6 +194,7 @@ export class IntentExecutor implements InputLike {
         this.intentTrace.push(intentIdx)
       }
     }
+    this.advanceReplan(f)
 
     // 本帧输出：意图子链已提交到 god._moveDir/_fire。
     this.moveDir = this.god._moveDir

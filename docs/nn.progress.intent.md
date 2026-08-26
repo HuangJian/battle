@@ -1,3 +1,20 @@
+## §25. M7① replan cadence 扫描 + risk-gated 变体（2026-08-27 凌晨）
+
+**oracle（完美意图，35×10 hard）**：replan {12: **76.3%**, 24: 74.6%, 30: 73.4%, 36: **76.6%**, 50: 73.7%}
+——承诺期在正确 cadence 下**超越 God-AI（74.3%）**：36/12 达 +2pp。R0 风险（replan 粗化成本）反转：
+执行器逐 tick 读 World + reflex 硬代码 = 豁免因素成立。
+
+**NN（B′ 权重，35×10 hard）**：replan {12: 70.6%, 30: **72.3%**, 36: 70.9%} —— **中速最优（默认 30 保持）**。
+NN 偏好更快 cadence 纠错，但 30 是最优平衡；oracle 偏好 36（意图完美时承诺更久更优）。
+**结论**：NN 与 oracle 的 cadence 偏好差异 = 意图选择误差的代价（承诺越久、错选代价越高）；
+oracle 36 的 76.6% = **M8 RL 优化意图选择后的头部空间**（NN 现 72.3% → 天花板 76.6%）。
+
+**risk-gated（Q7 已实现）**：IntentExecutor 支持危险窗口（`isBaseUnderThreat` 纯函数）cadence 动态
+压缩至 dangerCadence（默认 8），窗口外维持 baseCadence（默认 30）。固定 cadence 路径字节等价
+（riskGated 默认关，测试断言）。
+
+---
+
 ## §24. M7① 天花板探针 — 白名单分类法 bug 修复，天花板 47%→73.4%（2026-08-27 凌晨）
 
 **探针**：`IntentOracleProbe`（双 God 实例：oracle 全链提供"完美意图" + executor 受限链驱动世界；
