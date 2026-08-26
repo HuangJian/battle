@@ -26,7 +26,7 @@ import { STAGES } from '../../src/config/stages'
 import { SimWorkerPool } from './sim-pool'
 import type { SimTask, SimTaskResult } from './sim-worker'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
-import { EVAL_DIFFICULTY_KEYS } from '../../src/config/difficulty'
+import { DIFFICULTY_KEYS, EVAL_DIFFICULTY_KEYS } from '../../src/config/difficulty'
 import { MAX_TICKS } from './simulation-runner'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { DEFAULT_HISTORY_DIR, loadSnapshots, type WinrateSnapshot } from './winrate-history'
@@ -41,7 +41,7 @@ import {
 } from './report-html'
 import { writeReplayFile } from './replay-writer'
 
-import { arg } from '../lib/cli'
+import { arg, parseDifficulties } from '../lib/cli'
 function parseSeedSpec(spec: string): number[] {
   // DIALECT NOTE (renamed from `parseSeeds`, refactor.trae.md §2.3): this is
   // the SINGLE-SEED dialect — a bare count ("60") means the seed 60, NOT
@@ -61,11 +61,7 @@ function parseSeedSpec(spec: string): number[] {
   return [n]
 }
 
-const difficulties =
-  arg('difficulties') ??
-  EVAL_DIFFICULTY_KEYS.join(',')
-    .split(',')
-    .map((s) => s.trim())
+const difficulties = parseDifficulties(arg('difficulties'), EVAL_DIFFICULTY_KEYS, DIFFICULTY_KEYS)
 const seeds = parseSeedSpec(arg('seeds', '1-60')!)
 const outDir = arg('out', 'reports/winrate')!
 const historyDir = arg('history', DEFAULT_HISTORY_DIR)!

@@ -110,6 +110,38 @@ export function parseParamSets(allowed: object): Record<string, number> {
 }
 
 /**
+ * Comma-separated difficulty list spec → trimmed, non-empty tokens.
+ * Absent spec → `fallback` defaults; when `validKeys` is supplied every token
+ * is checked against it and an unknown key THROWS with the valid set in the
+ * message (M0 §3.1 protocol: never silently degrade — simulation-runner's
+ * `?? DIFFICULTIES['classic']` would otherwise relabel junk keys as classic).
+ *
+ * The load-bearing case is the bare word: `"hard"` must parse as ONE key,
+ * not iterate into characters h/a/r/d (2026-08-26: `--difficulties hard`
+ * ran 4×2100 classic runs labeled h/a/r/d because only the default path
+ * was split).
+ */
+export function parseDifficulties(
+  spec: string | undefined,
+  fallback: readonly string[],
+  validKeys?: readonly string[],
+): string[] {
+  const s = spec ?? fallback.join(',')
+  const out = s.split(',').map((tok) => tok.trim())
+  if (out.some((tok) => !tok)) {
+    throw new Error(`--difficulties: illegal spec "${s}" (use e.g. "hard" or "classic,hard,chaos")`)
+  }
+  if (validKeys) {
+    for (const tok of out) {
+      if (!validKeys.includes(tok)) {
+        throw new Error(`--difficulties: unknown difficulty "${tok}" (valid: ${validKeys.join(',')})`)
+      }
+    }
+  }
+  return out
+}
+
+/**
  * SINGLE-SEED seed-spec dialect (refactor.trae.md §2.3/§2.4): a bare count
  * ("60") means the SINGLE seed 60, not 1..60 — the exact opposite of
  * {@link parseSeeds}. Both dialects are load-bearing in historical tools;

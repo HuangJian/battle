@@ -1634,3 +1634,23 @@ B（敌人 AI）/C（规则层）/D（人类体验）出口均需新立项拍板
 **Implications:** 此后任何删除提议须先推翻本条（新 DECISIONS 条目论证四条件已满足或资产
 已无重启价值）。数据化注册表：`ARCHIVED_KNOB_GROUPS`（params.interface.ts 底部）+
 `CANDIDATE_SURVIVAL`（think.ts）。
+
+## 274. sweep-winrate `--difficulties` 字符迭代 bug 修复 —— 列表参数走 assertive 解析器 (STATUS: 已实施, 2026-08-26)
+
+**Decision:** `tools/lib/cli.ts` 新增 `parseDifficulties(spec, fallback, validKeys)`（逗号切分 +
+trim + 空 token 拒绝 + validKeys 域校验，缺省回落 fallback），`sweep-winrate.ts` 的
+`--difficulties` 改为经它解析。测试：`tests/cli-parse.test.ts`。
+
+**Rationale:**
+- 原实现对 arg 结果**不做 split**，仅默认路径 split——`--difficulties hard` 被
+  `for…of` 按字符迭代成 h/a/r/d 四个"难度"，各 2100 局共 8400 局白跑。
+- 更危险的是 simulation-runner.ts:554 的 `?? DIFFICULTIES['classic']` 静默回落：
+  四个非法键全部跑成 **classic 却以 h/a/r/d 标签出报告**（实测四行结果逐字节相同）。
+  这是 §213「35 关扫描静默跑 S1」同一失败类：静默降级。M0 §3.1 协议（坏 token 抛错）
+  是既有先例，cli.ts 头注亦明言"Parsers are assertive: a bad token throws"。
+- 修复后 hard×35×60 实测 75.9% 胜率，与 Phase III 基线（~73%）吻合，反证此前
+  66.4% 系 classic 冒名。
+
+**Implications:** run-forensics / threat-ledger 等已自行 split 的工具不受影响；
+后续可逐步迁移到本解析器（本次不顺手重构）。simulation-runner 的静默回落保留
+（改动面大），防线前移到 CLI 解析层。
