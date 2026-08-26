@@ -124,8 +124,21 @@ def load_intent_weights(model: IntentNet, weights_path: str) -> None:
     model.load_state_dict(filtered, strict=False)
 
 
-if __name__ == "__main__":
-    m = IntentNet()
+def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--golden", metavar="OUT", help="P3-4 golden 导出：固定权重+输入 → 期望三头 logits JSON")
+    ap.add_argument("--h", type=int, default=64)
+    ap.add_argument("--d", type=int, default=8)
+    ap.add_argument("--golden-seed", type=int, default=20260826)
+    args = ap.parse_args()
+
+    if args.golden:
+        export_golden(args.golden, args.h, args.d, args.golden_seed)
+        return
+
+    m = IntentNet(h=args.h, d=args.d)
     n = sum(int(p.numel()) for p in m.parameters())
     print(f"IntentNet params: {n} (~{n/1000:.1f}K)")
     obs = torch.zeros(2, 14, 26, 26, dtype=torch.uint8)
@@ -133,7 +146,61 @@ if __name__ == "__main__":
     inj = torch.zeros(2, INJECT_DIM)
     i, e, a = m(obs, sc, inj)
     print("intent", tuple(i.shape), "enemy", tuple(e.shape), "anchor", tuple(a.shape))
-    tmp = "tmp/_intent_net_meta.json"
-    os.makedirs(os.path.dirname(tmp) or ".", exist_ok=True)
     export_intent_weights(m, "tmp/_intent_net_weights.json")
-    print(f"export roundtrip ok -> {tmp}")
+    print("export roundtrip ok")
+
+
+def export_golden(path: str, h: int, d: int, seed: int) -> None:
+    """P3-4：固定 seed 初始化瘦身 IntentNet → 固定输入 → 写期望 logits。
+
+    输出 JSON 顶层结构：
+      { h, d, seed,
+        obs:     [14*26*26]  (u1, 0..255),
+        scalars: [19]        (f4),
+        inject:  [9]         (f4),
+        intentLogits: [8], enemyLogits: [5], anchorLogits: [16],
+        ...weights_io 的 params 字段（stem/blocks/fc/intent_head/enemy_head/anchor_head）
+      }
+    TS 端 buildIntentModelFromJson 只需 params（arch.kind=intent,h,d）→ intentForward 对比 logits。
+    """
+    torch.manual_seed(seed)
+    # 输入：确定性伪随机 obs（0..255）+ 非零 scalars/inject（覆盖注入路径）。
+    rng = torch.Generator().manual_seed(seed)
+    obs = torch.randint(0, 256, (1, 14, 26, 26), generator=rng, dtype=torch.uint8)
+    sc = (torch.rand(1, 19, generator=rng) - 0.5) * 4  # 有正有负
+    inj = torch.rand(1, INJECT_DIM, generator=rng)  # 非 one-hot 更严（时长非整数路径）
+    inj[0, 0] = 1.0  # prev 类 0 热
+
+    torch.manual_seed(seed + 1)
+    m = IntentNet(h=h, d=d).eval()
+    with torch.no_grad():
+        i_log, e_log, a_log = m(obs, sc, inj)
+
+    from weights_io import _tensor_to_b64, OBS_SCHEMA_MAJOR
+
+    params = {}
+    for name, p in m.state_dict().items():
+        params[name] = {"shape": list(p.shape), "data": _tensor_to_b64(p)}
+    golden = {
+        "format": "intent-golden",
+        "version": 1,
+        "schema_major": OBS_SCHEMA_MAJOR,
+        "h": h,
+        "d": d,
+        "seed": seed,
+        "obs": [int(v) for v in obs.flatten().tolist()],
+        "scalars": [float(v) for v in sc.flatten().tolist()],
+        "inject": [float(v) for v in inj.flatten().tolist()],
+        "intentLogits": [float(v) for v in i_log.flatten().tolist()],
+        "enemyLogits": [float(v) for v in e_log.flatten().tolist()],
+        "anchorLogits": [float(v) for v in a_log.flatten().tolist()],
+        "params": params,
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(golden, f)
+    print(f"golden written: {path} (h={h} d={d} params={len(params)})")
+
+
+if __name__ == "__main__":
+    main()

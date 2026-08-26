@@ -292,6 +292,13 @@ export class StudentModel implements ModelLike {
   private fireB: Float32Array
   private valueW: Float32Array
   private valueB: Float32Array
+  // M4 intent heads (optional): [137, out] where 137 = 128 hidden + 9 inject.
+  private intentW: Float32Array | null
+  private intentB: Float32Array | null
+  private enemyW: Float32Array | null
+  private enemyB: Float32Array | null
+  private anchorW: Float32Array | null
+  private anchorB: Float32Array | null
 
   // ---- reusable buffers (no per-tick allocation) ----
   private in16: Float32Array // [16 * board * board] (14 obs + 2 coords)
@@ -301,11 +308,20 @@ export class StudentModel implements ModelLike {
   private bufC: Float32Array // [h * board * board] (pointwise out)
   private pooled: Float32Array // [h]
   private hidden: Float32Array // [headHidden]
+  /** inject concat buffer (M4): hidden(128) + inject(9) -> [137]. */
+  private hiddenInject: Float32Array
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
   readonly valueOut: Float32Array
+  readonly intentLogits: Float32Array // [8] (M4)
+  readonly enemyLogits: Float32Array // [5] (M4)
+  readonly anchorLogits: Float32Array // [16] (M4)
 
-  constructor(params: Record<string, Float32Array>, arch: { h?: number; d?: number }) {
+  constructor(
+    params: Record<string, Float32Array>,
+    arch: { h?: number; d?: number },
+    intentHeads?: boolean,
+  ) {
     const p = (name: string): Float32Array => {
       const arr = params[name]
       if (!arr) throw new Error(`StudentModel: missing weight "${name}"`)
@@ -346,6 +362,20 @@ export class StudentModel implements ModelLike {
       this.valueW = new Float32Array(this.headHidden)
       this.valueB = new Float32Array(1)
     }
+    // M4 intent heads: intent_head./enemy_head./anchor_head. on the 137-dim
+    // (hidden 128 + inject 9) entry space. Loaded only when intentHeads=true
+    // (IntentModel path); the plain StudentModel stays byte-identical.
+    if (intentHeads) {
+      this.intentW = p('intent_head.weight')
+      this.intentB = p('intent_head.bias')
+      this.enemyW = p('enemy_head.weight')
+      this.enemyB = p('enemy_head.bias')
+      this.anchorW = p('anchor_head.weight')
+      this.anchorB = p('anchor_head.bias')
+    } else {
+      this.intentW = this.enemyW = this.anchorW = null
+      this.intentB = this.enemyB = this.anchorB = null
+    }
 
     this.in16 = new Float32Array(16 * sp)
     // Coord channels: ch14[r*B+c] = round(c/(B-1)*255), ch15[r*B+c] = round(r/(B-1)*255).
@@ -362,12 +392,48 @@ export class StudentModel implements ModelLike {
     this.bufC = new Float32Array(h * sp)
     this.pooled = new Float32Array(h)
     this.hidden = new Float32Array(this.headHidden)
+    this.hiddenInject = new Float32Array(this.headHidden + 9)
     this.moveLogits = new Float32Array(MOVE_DIM)
     this.fireLogits = new Float32Array(FIRE_DIM)
     this.valueOut = new Float32Array(1)
+    this.intentLogits = new Float32Array(8)
+    this.enemyLogits = new Float32Array(5)
+    this.anchorLogits = new Float32Array(16)
   }
 
   forward(obs: Uint8Array, scalars: Float32Array): void {
+    this.features(obs, scalars)
+
+    this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
+    this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
+    this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
+  }
+
+  /**
+   * M4: intent 三头前向（IntentModel 路径）。inject = Float32Array(9)：
+   * [prev-intent one-hot(8), duration]。hidden(128) + inject(9) -> 137 -> 三头。
+   * 与 intent_net.py 的 forward 数值一致（P3-4 字节一致测试锚定）。
+   */
+  intentForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void {
+    const iw = this.intentW
+    const ew = this.enemyW
+    const aw = this.anchorW
+    if (!iw || !ew || !aw) {
+      for (let i = 0; i < 8; i++) this.intentLogits[i] = 0
+      for (let i = 0; i < 5; i++) this.enemyLogits[i] = 0
+      for (let i = 0; i < 16; i++) this.anchorLogits[i] = 0
+      return
+    }
+    this.features(obs, scalars)
+    this.hiddenInject.set(this.hidden)
+    this.hiddenInject.set(inject, this.headHidden)
+    this.linear(this.hiddenInject, iw, this.intentB as Float32Array, this.intentLogits, 8, 137)
+    this.linear(this.hiddenInject, ew, this.enemyB as Float32Array, this.enemyLogits, 5, 137)
+    this.linear(this.hiddenInject, aw, this.anchorB as Float32Array, this.anchorLogits, 16, 137)
+  }
+
+  /** 主干：stem + ConvMixer + GAP + fc → this.hidden（forward/intentForward 共用）。 */
+  private features(obs: Uint8Array, scalars: Float32Array): void {
     const sp = this.board * this.board
     const h = this.h
     // 16ch input: copy 14 obs channels then append the precomputed coords.
@@ -406,10 +472,6 @@ export class StudentModel implements ModelLike {
       for (let i = 0; i < this.scalarDim; i++) acc += this.fcW[wb + h + i] * scalars[i]
       this.hidden[o] = RELU(acc)
     }
-
-    this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
-    this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
-    this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
   }
 
   private reluInPlace(buf: Float32Array): void {
@@ -549,6 +611,29 @@ export function buildModelFromJson(json: WeightsJson): ModelLike {
     return new StudentModel(params, arch as { h?: number; d?: number })
   }
   return new NNModel(params, shapes)
+}
+
+/** M4: intent 三头模型的推理面（intentForward + 三组 logits）。 */
+export interface IntentModelLike {
+  intentForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void
+  readonly intentLogits: Float32Array // [8]
+  readonly enemyLogits: Float32Array // [5]
+  readonly anchorLogits: Float32Array // [16]
+}
+
+/** 解析 intent 权重 JSON（arch.kind === 'intent'）→ IntentModelLike。 */
+export function buildIntentModelFromJson(json: WeightsJson): IntentModelLike {
+  const params: Record<string, Float32Array> = {}
+  for (const [name, param] of Object.entries(json.params)) {
+    params[name] = b64ToF32(param.data)
+  }
+  const arch = json.arch ?? {}
+  return new StudentModel(params, arch as { h?: number; d?: number }, true)
+}
+
+/** 从 JSON 文本解析 intent 模型。 */
+export function buildIntentModelFromText(text: string): IntentModelLike {
+  return buildIntentModelFromJson(JSON.parse(text) as WeightsJson)
 }
 
 /** Decode the base64 weights JSON text into a ModelLike. */
