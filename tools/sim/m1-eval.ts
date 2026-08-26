@@ -93,7 +93,11 @@ async function main(): Promise<void> {
   // exceed it. Live concurrency then tracks system CPU load via AdaptiveSimWorkerPool:
   //   load > 90% → −1 worker ; load < 85% → +1 worker ; floor = 1.
   const physical = physicalCores()
-  const workers = Math.min(parseInt(arg('workers', String(physical))!, 10), physical)
+  const fixedWorkers = parseInt(arg('fixed-workers', '0')!, 10) // 0 = 自适应并发（默认）
+  const workers =
+    fixedWorkers > 0
+      ? Math.min(fixedWorkers, physical)
+      : Math.min(parseInt(arg('workers', String(physical))!, 10), physical)
   const outPath = arg('out', 'tmp/m1_eval_scorecard.html')!
 
   let stages
@@ -169,7 +173,7 @@ async function main(): Promise<void> {
   pool.setAdjustHook((desired, load) => {
     process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
   })
-  const results = await pool.runAdaptive(tasks, reportProgress)
+  const results = await pool.runAdaptive(tasks, reportProgress, { fixed: fixedWorkers > 0 })
   const simSeconds = (Date.now() - t0) / 1000
   process.stderr.write(
     `[m1-eval] progress ${totalGames}/${totalGames} (100%) done in ${fmt(Date.now() - t0)}\n`,

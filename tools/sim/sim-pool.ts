@@ -103,6 +103,13 @@ export interface AdaptivePoolOptions {
   sampleMs?: number
   /** Starting concurrency; clamped to [min, max] (default = max). */
   initial?: number
+  /**
+   * Fixed concurrency (default false): skip the CPU-load sampler entirely.
+   * For CPU-bound batch runs (e.g. intent-NN evals where every core is pinned
+   * at ~100%), the adaptive rule "load > 90% → −1 worker" self-throttles to 1
+   * worker and starves the run. `fixed` keeps desired = max for the whole run.
+   */
+  fixed?: boolean
 }
 
 /**
@@ -244,6 +251,11 @@ export class AdaptiveSimWorkerPool {
       }
 
       // Adaptive sampler: nudge `desired` from system CPU load, then resize.
+      // Fixed mode skips the sampler — desired stays at max for the whole run
+      // (CPU-bound batch: 100% load is the normal state, not overload).
+      if (opts.fixed) {
+        return
+      }
       this.sampler = setInterval(() => {
         if (this.sampling || this.failed) return
         this.sampling = true
