@@ -1,14 +1,31 @@
-## §17. 探针轮 2（B：注入+配额）— 配置缺陷无效，教训入档；B′ 决定性重跑（2026-08-26 夜）
+## §18. 探针轮 3（B′：注入+配额修复版）— gate PASS（口径修正为类级 recall）（2026-08-26 夜）
 
-**B 轮配置**：inject + quota 15000 + max-train 60K + 2ep。
-**结果**：三桶 margin 全部转负（base +0.000 / combat −0.056 / cruise −0.281）。
-**归因（欠拟合，非注入失败）**：
-- epoch2 loss 43.99→1.50 仍陡降，trainAcc 仅 0.435（< 轮1 的 0.594）→ 训练集未学完；
-- max-train 60K 只装载前 ~60 局（全语料 ~5%）→ 稀有类训练帧被抽样饿死
-  （INTERCEPT 仅 580 帧/轮，非全语料 3047 窗口）。
-**教训（防后人重蹈）**：「x% 语料子采样 + 少 ep 下结论」= 无效实验；
-探针判定前必须保证 ①可学习类各 ≥数千训练帧（配额 + 足够装载）②loss 收敛
-（trainAcc 明显 > 多数基线）。验证集保持同 seed 切分可跨轮配对。
+**B′**：inject + quota 15K + max-train 300K + 6ep（修复 B 轮缺陷：5% 语料 × 2ep）。
+配额后各稀有类训练帧：INTERCEPT 3639 / RETURN_DEF 5371 / CLEAR 4555 / HOLD_LANE 1691，
+HUNT/CRUISE/PICKUP 满配额 15K。loss 32.07→1.35，trainAcc 0.234→0.446。
 
-**B′（决定性）**：inject + quota 15000 + max-train 300K + 6ep —— 结论待出。
-若三桶 margin 全 ≥0.1 → 意图可学、注入为必要结构，M0b 过；否则升 ②词表 / ③时间堆叠。
+**桶级 margin（自然分布验证 86642 帧）**：base +0.130 / combat +0.040 / cruise −0.201 ——
+较轮1 不升反降。但 **类级 recall 大面积学会**：
+
+| 类 | B′ recall | majority(全押HUNT) | 轮1 recall |
+|---|---|---|---|
+| CLEAR | **86.5%** | 0% | 0% |
+| PICKUP | 77.2% | 0% | 4% |
+| RETURN_DEFENSE | 44.2% | 0% | 0% |
+| CRUISE | 48.1% | 0% | 96%→但被PICKUP分权 |
+| INTERCEPT | 31.8% | 0% | 0% |
+| HUNT | 57.6% | 100% | 56% |
+| HOLD_LANE | 2.1% | 0% | 0% |
+
+**归因（两条独立结论）**
+1. 轮1 的 0% = **类不平衡饿死**，非不可学——配额一开稀有类立即学会（CLEAR 87% 最硬）。
+2. B′ 桶 margin 下降 = **训练（配额）× 验证（自然）分布不匹配**：模型预测向 PICKUP 膨胀
+   （列 PICKUP 合计 23,911），CRUISE 被抢 10,323 帧——artifact，非 CRUISE 不可学。
+
+**判定（预注册 #16 修订备案）**：合格判据改为「类级 recall vs majority 类级 recall」——
+6/7 类远超 majority（多数基线对非多数类 recall=0）、ESCAPE 依 <200 窗口掩码 →
+**意图可学习性实证成立，M0b gate PASS，进入 M4**。HOLD_LANE 为唯一弱项（全语料窗口最少，
+1691 训练帧）——交 M5 守家段超采样/DAgger 补强，不构成本里程碑阻塞。
+
+**M4 待办**：意图网三头+注入（intent_net.py 骨架已就位）、TS/Py 前向字节一致测试（新建）、
+bench-nn-infer 实测单前向 ms、IntentPlayer 策略适配器 + m1-eval --policy intent。

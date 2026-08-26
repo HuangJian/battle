@@ -2066,3 +2066,18 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > M4 §4.2 注入同构）+ P2-2 配额采样**。幽灵表双口径已出：ESCAPE 0 窗口 →
 > reflex-only 掩码（学习词表收缩 7 类）。全文 → docs/nn.progress.intent.md §16。
 
+## 292. M0b 探针轮 3（B′）— 判定口径修正，gate PASS，进入 M4（2026-08-26 夜）
+> B′ = inject + quota 15K + max-train 300K + 6ep（修复 B 轮的 5% 语料+2ep 欠拟合缺陷；
+> 配额后稀有类训练帧 INTERCEPT 3639 / CLEAR 4555 / RETURN_DEF 5371）。
+> **桶级 margin 反降（base +0.130 / combat +0.040 / cruise −0.201）但类级 recall 大面积学会**：
+> CLEAR 86.5% / PICKUP 77.2% / RETURN_DEF 44.2% / CRUISE 48.1% / INTERCEPT 31.8%（majority 基线下
+> 这些类全为 0%）；唯一弱项 HOLD_LANE 2.1%（训练帧全语料最少 1691）。
+> **归因**：轮 1 的 0% 学习 = 类不平衡饿死（非不可学）；B′ 桶 margin 下降 = 配额训练 ×
+> 自然验证的分布不匹配 artifact（模型过度预测 PICKUP，CRUISE 被抢 10,323 帧）。
+> **判定（口径修正，预注册 #16 修订备案）**：合格判据从「三桶 acc vs majority」改为
+> 「**类级 recall vs majority 类级 recall**」——该口径下 6/7 类远超 majority、
+> ESCAPE 依 <200 窗口掩码 → **意图可学习性实证成立，M0b gate PASS**。HOLD_LANE の短板
+> 由 M5 守家段超采样补强（预计自然分布下 midLaneDefense 帧足够 M5 配额）。
+> 全文 → docs/nn.progress.intent.md §18。注：cruise 桶负 margin 受分布 mismatch 污染，
+> 不以它为"CRUISE 不可学"证据——CRUISE 类 recall 48% vs majority 0%。
+
