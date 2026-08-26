@@ -32,26 +32,69 @@ MARGIN_GATE = 0.1  # 预注册 #16
 
 
 class IntentProbeNet(StudentNet):
-    """StudentNet 主干（stem/ConvMixer/FC 原样）+ intent-8 头（替代 move/fire）。"""
+    """StudentNet 主干（stem/ConvMixer/FC 原样）+ intent-8 头（替代 move/fire）。
 
-    def __init__(self, **kwargs):
+    inject=True：M4 §4.2 注入同构——FC 输出 128 后 concat prev-intent one-hot(8)
+    + duration(1) → 137 进 intent 头（①.5 注入版探针：teacher-forced，区分
+    "状态表达缺口"与"缺时序上下文"）。
+    """
+
+    def __init__(self, inject: bool = False, **kwargs):
         super().__init__(**kwargs)
-        self.intent_head = nn.Linear(self.head_hidden, len(INTENT_IDS))
+        self.inject = inject
+        self.intent_head = nn.Linear(
+            self.head_hidden + (9 if inject else 0), len(INTENT_IDS)
+        )
 
-    def forward(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
-        return self.intent_head(self.features(obs, scalars))
+    def forward(self, obs: torch.Tensor, scalars: torch.Tensor, inject_vec=None) -> torch.Tensor:
+        h = self.features(obs, scalars)
+        if self.inject:
+            if inject_vec is None:
+                inject_vec = torch.zeros(h.shape[0], 9, device=h.device)
+            h = torch.cat([h, inject_vec], dim=1)
+        return self.intent_head(h)
+
+
+def build_injection(seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """从逐采样帧 intent 序列重建 (prev one-hot(8), duration 标量)。
+    prev[i] = seq[i-1]（帧 0 用 zero）；duration[i] = 与 prev 同类的连续计数。"""
+    n = len(seq)
+    prev = np.zeros(n, dtype=np.int64)
+    dur = np.ones(n, dtype=np.float32)
+    for i in range(1, n):
+        prev[i] = seq[i - 1]
+        dur[i] = dur[i - 1] + 1 if seq[i] == seq[i - 1] else 1
+    onehot = np.zeros((n, 8), dtype=np.float32)
+    onehot[np.arange(n), prev] = 1.0
+    return onehot, dur
+
+
+def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
+                 quota: int, rng: np.random.RandomState):
+    """P2-2 每类配额采样：每类至多 quota 帧（超类下采样、稀有类全留）。"""
+    idx = []
+    for c in range(8):
+        ci = np.where(xi == c)[0]
+        if len(ci) > quota:
+            ci = rng.choice(ci, size=quota, replace=False)
+        idx.append(ci)
+    sel = np.concatenate(idx)
+    rng.shuffle(sel)
+    return xo[sel], xs[sel], xi[sel], xb[sel]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="export-intent-labels 的 shards 目录")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--max-train", type=int, default=120_000, help="训练帧上限（内存预算）")
+    ap.add_argument("--max-train", type=int, default=60_000, help="训练帧上限（内存预算；60K ≈ 1 轮 ~15-20min CPU）")
     ap.add_argument("--val-shard-frac", type=float, default=0.2)
-    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）")
+    ap.add_argument("--quota", type=int, default=0, help="P2-2 每类配额采样帧数（0=不限）")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -93,28 +136,43 @@ def main() -> None:
     train_shards = [i for i in range(len(shards)) if i not in val_idx]
     xo, xs, xi, xb = load_split(train_shards)
 
-    # 训练帧上限子采样（确定性）。
-    if len(xi) > args.max_train:
+    # 先按混合上限子采样、再按类配额采样（P2-2，配额 ≪ 上限时以配额为准）。
+    if args.max_train > 0 and len(xi) > args.max_train:
         sel = rng.choice(len(xi), size=args.max_train, replace=False)
         xo, xs, xi, xb = xo[sel], xs[sel], xi[sel], xb[sel]
+    if args.quota > 0:
+        xo, xs, xi, xb = quota_sample(xi, xo, xs, xb, args.quota, rng)
 
     vo, vs_, vi, vb = load_split(val_shards)
+
+    # 注入特征（teacher-forced）：per-shard 序列重建在做子采样之前不可行，
+    # 这里用全局重建近似——探针仅测"加上时序特征是否显著提升"。
+    train_inj = None
+    val_inj = None
+    if args.inject:
+        t_inj_oh, t_inj_dur = build_injection(xi)
+        v_inj_oh, v_inj_dur = build_injection(vi)
+        train_inj = np.concatenate([t_inj_oh, t_inj_dur[:, None]], axis=1).astype(np.float32)
+        val_inj = np.concatenate([v_inj_oh, v_inj_dur[:, None]], axis=1).astype(np.float32)
+
     print(
         f"[probe] shards={len(shards)} (train {len(train_shards)} / val {len(val_shards)}) "
-        f"trainFrames={len(xi)} valFrames={len(vi)}",
+        f"trainFrames={len(xi)} valFrames={len(vi)} inject={args.inject} quota={args.quota}",
         file=sys.stderr,
     )
     print(f"[probe] label dist train={np.bincount(xi, minlength=8).tolist()} "
           f"val={np.bincount(vi, minlength=8).tolist()}", file=sys.stderr)
 
     dev = torch.device("cpu")
-    model = IntentProbeNet().to(dev)
+    model = IntentProbeNet(inject=args.inject).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
 
     to = torch.from_numpy(xo)
     ts = torch.from_numpy(xs)
     ti = torch.from_numpy(xi)
+    t_inj_t = torch.from_numpy(train_inj) if train_inj is not None else None
+    v_inj_t = torch.from_numpy(val_inj) if val_inj is not None else None
     n = len(xi)
 
     for ep in range(args.epochs):
@@ -124,7 +182,7 @@ def main() -> None:
         for b in range(0, n, args.batch):
             idx = order[b : b + args.batch]
             opt.zero_grad()
-            logits = model(to[idx], ts[idx])
+            logits = model(to[idx], ts[idx], t_inj_t[idx] if t_inj_t is not None else None)
             loss = ce(logits, ti[idx])
             loss.backward()
             opt.step()
@@ -138,7 +196,11 @@ def main() -> None:
     preds = []
     with torch.no_grad():
         for b in range(0, len(vi), 1024):
-            logits = model(torch.from_numpy(vo[b : b + 1024]), torch.from_numpy(vs_[b : b + 1024]))
+            logits = model(
+                torch.from_numpy(vo[b : b + 1024]),
+                torch.from_numpy(vs_[b : b + 1024]),
+                v_inj_t[b : b + 1024] if v_inj_t is not None else None,
+            )
             preds.append(logits.argmax(1).numpy())
     pred = np.concatenate(preds)
 
@@ -149,6 +211,8 @@ def main() -> None:
         "trainFrames": int(len(xi)),
         "valFrames": int(len(vi)),
         "epochs": args.epochs,
+        "inject": args.inject,
+        "quota": args.quota,
         "overall": {"acc": float((pred == vi).mean())},
         "buckets": {},
         "confusion8x8": np.zeros((8, 8), dtype=int).tolist(),

@@ -2057,3 +2057,12 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 冒烟通过（单局 38 窗口、±5 tick 翻转率 6.8%；stages 30-32×seeds1-3 分布合理）。锚点排名解析器
 `rankBaseGuardAnchorsImpl` 为 additive 提取（k=1 与原 computeBaseGuardAnchorImpl 逐字节等价）。
 
+## 291. M0b 探针轮 1 — gate FAIL，处置启动注入版（2026-08-26 夜）
+> 全量 2100 局 hard 机械打标 → intent-8 分类器（StudentNet 主干，120K 帧自然分布/3ep）。
+> 三桶 margin：base +0.143 ✅ / combat +0.065 ❌ / cruise +0.015 ❌（近噪声，n=4187）。
+> 整体 acc 0.594；confusion 显示模型全行只落 HUNT/CRUISE——稀有类未学习 +
+> combat/cruise 分歧核心是 **HUNT vs CRUISE 的 endgame 切换**（单帧无时序上下文）。
+> 按 §3.6 五径启动第一轮：**①.5 注入版探针（prev-intent+duration teacher-forced，
+> M4 §4.2 注入同构）+ P2-2 配额采样**。幽灵表双口径已出：ESCAPE 0 窗口 →
+> reflex-only 掩码（学习词表收缩 7 类）。全文 → docs/nn.progress.intent.md §16。
+
