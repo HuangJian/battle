@@ -271,6 +271,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 分配依旧依赖实时负载（与既有语义一致），洗牌仍由 runId 种子确定。
     tail_factor = float(policy.get("tailFastFactor", 1.8))
     tail_grace = float(policy.get("tailGraceSec", 120.0))
+    # v3.7 尾部 fan-out（用户需求 2026-08-27）：pending 剩 ≤ tail_fanout_n 时，空闲执行槽
+    # 优先复制一个在跑的尾部任务（重复派发），与主副本竞速取先返回——即使有 EWMA 分档，
+    # 末尾任务仍可能落在低速 agent（EWMA 是预期、单局有方差），fan-out 用重复执行兜底。
+    tail_fanout_n = int(policy.get("tailFanoutN", 4))
+    tail_fanout_dup = int(policy.get("tailFanoutDup", 2))
 
     def _seed_speeds() -> dict[str, float]:
         hist: dict[str, list[float]] = {}
@@ -296,6 +301,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         log(f"[dist] tail-dispatch speeds (seeded): {preview}")
     tail_notes: set[str] = set()
     last_progress = [time.time()]
+    # v3.7 fan-out：尾部任务 -> 当前在跑副本数（>1 = 已被重复派发竞速）。
+    inflight: dict[tuple[int, int], int] = {}
 
     def _fast_enough(nid: str, pending_len: int) -> bool:
         # R6：本机直跑槽位豁免速度持留——它由 local_slots 上限 + local_suspend
@@ -358,6 +365,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             task = None
             attempt = 0
             took_local = False
+            fanout_copy = False
             drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
             with lock:
                 if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
@@ -388,9 +396,24 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if src is not None:
                     probe = len(head_tasks) if src is head_tasks else len(pending)
                     if _fast_enough(nd_id, probe):
-                        task = src.popleft()
-                        attempts[task] = attempts.get(task, 0) + 1
-                        attempt = attempts[task]
+                        fanout_copy = False
+                        # v3.7 尾部 fan-out：pending 剩 ≤ tail_fanout_n 且存在在跑的尾部任务时，
+                        # 空闲执行槽复制一个在跑任务（重复派发），与主副本竞速取先返回。
+                        # 复制不 pop pending（主副本完成前任务保持"未完成"状态）。
+                        if (src is pending and len(pending) <= tail_fanout_n and inflight):
+                            cand = next(
+                                (t for t, c in inflight.items() if c < tail_fanout_dup), None)
+                            if cand is not None:
+                                task = cand
+                                inflight[task] += 1
+                                fanout_copy = True
+                                attempt = attempts.get(task, 0) + 1
+                        if not fanout_copy:
+                            task = src.popleft()
+                            attempts[task] = attempts.get(task, 0) + 1
+                            attempt = attempts[task]
+                            if src is pending and len(pending) <= tail_fanout_n:
+                                inflight[task] = inflight.get(task, 0) + 1
                         if nd is None:
                             local_active[0] += 1
                         if not head_tasks and not pending:
@@ -436,7 +459,17 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if nd is None and task is not None:
                     local_active[0] -= 1
                 if summary is not None:
+                    # v3.7 fan-out 副本后到：任务已结算（主副本或更快的副本先落盘）→ 丢弃，
+                    # 不重复落盘/不重复记录台账（校验层已对重复局 reject，这里提前拦截）。
+                    if fanout_copy and task in seen:
+                        inflight[task] = inflight.get(task, 0) - 1
+                        if inflight[task] <= 0:
+                            inflight.pop(task, None)
+                        log(f"[dist] fanout dup s{task[0]}/seed{task[1]} node={nd_id} — dropped")
+                        continue
                     seen.add(task)
+                    if task in inflight:
+                        inflight.pop(task, None)
                     last_settle_at[0] = time.time()
                     streaks[nd_id] = 0
                     if nd is not None:
@@ -462,6 +495,21 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         f"elapsed={str(el) + 's' if el is not None else '-'}")
                     if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
+                    continue
+                # v3.7 fan-out 副本失败：主副本/其它副本可能仍在跑——不重复回队（防重复执行
+                # 放大），只递减副本计数；若任务尚未结算且无在跑副本，走下方正常回队/记 missing。
+                if fanout_copy and task in inflight:
+                    inflight[task] -= 1
+                    if inflight[task] <= 0:
+                        inflight.pop(task, None)
+                        if task not in seen and task not in missing_keys:
+                            log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — "
+                                f"no copies left, requeued")
+                            pending.append(task)
+                            stats["retried"] += 1
+                        continue
+                    log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — "
+                        f"main copy still in flight ({inflight.get(task, 0)})")
                     continue
                 if nd is not None:
                     streaks[nd_id] = streaks.get(nd_id, 0) + 1

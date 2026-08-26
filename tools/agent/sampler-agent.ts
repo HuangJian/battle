@@ -60,6 +60,54 @@ let cacheMaxItems = 32
   }
 }
 
+// ---------------- 运维控制：git pull / 重启（v3.7，用户需求 2026-08-27） ----------------
+/** /v1/update 进行中（git pull 期间拒绝新 task，避免拉取中签发旧代码样本）。 */
+let updating = false
+
+function git(args: string[]): string {
+  const r = spawnSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8', timeout: 120_000 })
+  if (r.status !== 0) {
+    throw new Error(
+      `git ${args.join(' ')} rc=${r.status}: ${(r.stderr ?? '').trim().slice(0, 300)}`,
+    )
+  }
+  return (r.stdout ?? '').trim()
+}
+
+/** 拉取指定 branch（缺省 = 当前分支）最新代码：fetch + reset --hard origin/<branch>。 */
+function runGitPull(branch?: string): {
+  branch: string
+  oldSha: string
+  newSha: string
+  changed: boolean
+} {
+  const oldSha = git(['rev-parse', 'HEAD'])
+  const cur = git(['branch', '--show-current']) || git(['rev-parse', '--abbrev-ref', 'HEAD'])
+  const b = branch && branch !== '.' ? branch : cur
+  git(['fetch', 'origin', b])
+  git(['reset', '--hard', `origin/${b}`])
+  const newSha = git(['rev-parse', 'HEAD'])
+  return { branch: b, oldSha, newSha, changed: oldSha !== newSha }
+}
+
+/** 端口绑定重试：restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。 */
+function serveWithRetry(port: number, fetchFn: (req: Request) => Promise<Response>): unknown {
+  const opts = {
+    port,
+    idleTimeout: 255,
+    fetch: fetchFn,
+  } as Parameters<typeof Bun.serve>[0]
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return Bun.serve(opts)
+    } catch (e) {
+      const code = (e as { code?: string })?.code ?? ''
+      if (!code.startsWith('EADDRINUSE') || attempt >= 60) throw e
+      Bun.sleepSync(500) // 旧实例正在退出，等端口释放
+    }
+  }
+}
+
 // ---------------- codeHash（与 nn-training/dist_common.py 逐字节一致的双语契约） ----------------
 /** 对 entries（posix 相对路径 + 内容）按路径字典序，依次喂 sha256(path)+sha256(content)。 */
 export function computeCodeHashFromFiles(entries: { relPath: string; content: Buffer }[]): string {
@@ -397,7 +445,92 @@ async function handle(req: Request): Promise<Response> {
     return jsonResponse({ ok: true, cache: 'purged' }, 200)
   }
 
+  // ---- 运维控制（v3.7）：拉取指定 branch 最新代码 ----
+  if (req.method === 'POST' && url.pathname === '/v1/update') {
+    let branch: string | undefined
+    try {
+      const body = JSON.parse(await req.text()) as { branch?: string }
+      if (body?.branch) branch = body.branch
+    } catch {
+      /* 空 body = 用当前分支 */
+    }
+    if (updating) return jsonResponse({ error: 'update already in progress' }, 409)
+    updating = true
+    try {
+      const r = runGitPull(branch)
+      // 代码可能已变 → codeHash 缓存作废（下轮 /v1/ping 重新计算）
+      if (r.changed)
+        console.log(
+          `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
+        )
+      return jsonResponse({ ok: true, ...r }, 200)
+    } catch (e) {
+      return jsonResponse(
+        { error: `pull failed: ${e instanceof Error ? e.message : String(e)}` },
+        500,
+      )
+    } finally {
+      updating = false
+    }
+  }
+
+  // ---- 运维控制（v3.7）：重启 agent（应用最新代码；可选先 pull） ----
+  if (req.method === 'POST' && url.pathname === '/v1/restart') {
+    let pullBranch: string | undefined
+    let delayMs = 500
+    try {
+      const body = JSON.parse(await req.text()) as { pullBranch?: string; delayMs?: number }
+      if (body?.pullBranch) pullBranch = body.pullBranch
+      if (typeof body?.delayMs === 'number' && body.delayMs > 0 && body.delayMs <= 5000)
+        delayMs = body.delayMs
+    } catch {
+      /* 空 body 合法 */
+    }
+    try {
+      if (pullBranch) {
+        const r = runGitPull(pullBranch)
+        if (r.changed)
+          console.log(
+            `[sampler-agent] restart-pull ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
+          )
+      }
+      const self = process.argv[1]
+      const args = process.argv.slice(2)
+      // 先应答 202，再 spawn 新实例（detached，同参）+ 短暂延迟后退出旧实例释放端口。
+      setImmediate(() => {
+        try {
+          const child = spawn(process.execPath, [self, ...args], {
+            cwd: REPO_ROOT,
+            detached: true,
+            stdio: 'inherit',
+          })
+          child.unref()
+        } catch (e) {
+          console.error(
+            `[sampler-agent] restart spawn failed: ${e instanceof Error ? e.message : String(e)}`,
+          )
+          return // 不退出，保持旧实例存活
+        }
+        setTimeout(() => {
+          console.log(`[sampler-agent] restarting (exit)`)
+          process.exit(0)
+        }, delayMs)
+      })
+      return jsonResponse(
+        { ok: true, restarting: true, delayMs, pullBranch: pullBranch ?? null },
+        202,
+      )
+    } catch (e) {
+      return jsonResponse(
+        { error: `restart failed: ${e instanceof Error ? e.message : String(e)}` },
+        500,
+      )
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/v1/task') {
+    if (updating)
+      return jsonResponse({ error: 'agent updating (git pull in progress)', retryAfter: 30 }, 503)
     const iterId = url.searchParams.get('iterId') ?? ''
     const wver = url.searchParams.get('wver') ?? ''
     const stage = parseInt(url.searchParams.get('stage') ?? '', 10)
@@ -581,17 +714,15 @@ if (import.meta.main) {
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${cacheMaxBytes >> 20}MB/${cacheMaxItems} ` +
       `codeHash=${computeCodeHash().slice(0, 12)}… agentVersion=${gitShortHash()} cpus=${CPUS}`,
   )
-  Bun.serve({
-    port,
-    // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
-    // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
-    // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
-    // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
-    idleTimeout: 255,
-    fetch: (req) =>
-      handle(req).catch((e: unknown) => {
-        lastError = `${new Date().toISOString()} handler: ${e instanceof Error ? e.message : String(e)}`
-        return jsonResponse({ error: 'internal error', detail: lastError }, 500)
-      }),
-  })
+  // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
+  // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
+  // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
+  // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
+  // serveWithRetry：/v1/restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。
+  serveWithRetry(port, (req) =>
+    handle(req).catch((e: unknown) => {
+      lastError = `${new Date().toISOString()} handler: ${e instanceof Error ? e.message : String(e)}`
+      return jsonResponse({ error: 'internal error', detail: lastError }, 500)
+    }),
+  )
 }
