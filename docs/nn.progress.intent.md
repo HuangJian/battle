@@ -1,3 +1,27 @@
+## §22. M5-B（quota 4000 + priority）— 自然分布 gate FAIL，塌向 RETURN_DEFENSE（2026-08-27 凌晨）
+
+**配置**：intent-probe-hard + human-obs 双根，quota 4000 + `--priority-root 1`（人类优先保留、
+God-AI 补足每类配额；人类混合比 45% 达标 #20 ≥30%），inject、8ep、seed7。trainFrames 28000（4000/类）。
+
+**结果（自然分布 val 89090 帧）**：overall acc **16.9%**（A 臂 60.3%），三桶全负 margin
+（base −0.22 / combat −0.40 / cruise −0.37）→ **gate FAIL**。模型塌向 RETURN_DEFENSE（人类优先的
+守家类）：混淆矩阵 HUNT 26707 / CRUISE 21281 / PICKUP 5514 帧被分到 RETURN_DEFENSE 列。
+RETURN_DEFENSE recall 90.7%（A 臂 14.7%）——但 HUNT recall 15.3%、PICKUP 0.0%、CRUISE 18.7%。
+
+**四必报项**：teacher 16.9% / self-feed 15.6%（gap 1.3pp，均匀错故无自举复合）；守家桶安全级误判
+**60.1%**（A 臂 12.6%）；路由错配率 **82.2%**（A 臂 37.8%）。
+
+**stub 冒烟**：m1-eval 5 关×10 seeds → **WIN 18%**（A 臂 22%）。
+
+**归因（§18 B′ 现象的放大版）**：训练（平衡 4000/类 × 45% 人类）与验证（自然分布 HUNT 46%/
+CRUISE 35%）分布不匹配，模型过度学到"人类守家先验"，把 RETURN_DEFENSE 当兜底类。**结论 =
+训练配置失败，非"人像数据无用"**——B 臂假设（人守家更优）仍需 B′ 平滑对照臂（P1-4）检验。
+
+**下一步**：B′ = quota 15000（与 A 同口径，人类混合比 26.6%、集中 CRUISE 71%/HOLD_LANE 56%）+
+priority，验证不破坏自然分布下的人像增益。
+
+---
+
 ## §21. M5-A 完成 — A 臂意图 BC（2026-08-27 凌晨）
 
 **训练**：intent-probe-hard（2100 局 God-AI 打标 432K 帧），quota 15000、inject、8ep、seed7
