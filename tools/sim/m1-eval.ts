@@ -34,6 +34,10 @@ import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { AdaptiveSimWorkerPool, physicalCores } from './sim-pool'
 import type { SimTask } from './sim-worker'
+import { gzipSync } from 'node:zlib'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { unpackContainer } from './pack-container'
 import {
   scoreRun,
   aggregateStage,
@@ -99,6 +103,10 @@ async function main(): Promise<void> {
       ? Math.min(fixedWorkers, physical)
       : Math.min(parseInt(arg('workers', String(physical))!, 10), physical)
   const outPath = arg('out', 'tmp/m1_eval_scorecard.html')!
+  // v3.7 分布式分派：--dist-nodes <dist-nodes.json> 时，评估任务经 HTTP 派发到
+  // rollout agent（mode=eval&kind=intent&policy=intent-exec），利用云机算力跑 NN 策略。
+  const distNodesPath = arg('dist-nodes', '')
+  const iterId = arg('iter-id', `m1eval-${Date.now()}`)!
 
   let stages
   let stageNames: string[]
@@ -169,11 +177,26 @@ async function main(): Promise<void> {
     )
   }
 
-  const pool = new AdaptiveSimWorkerPool(workers, 1)
-  pool.setAdjustHook((desired, load) => {
-    process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
-  })
-  const results = await pool.runAdaptive(tasks, reportProgress, { fixed: fixedWorkers > 0 })
+  // v3.7：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
+  // 否则走本地 worker pool。dist 模式须 policy=intent-exec（NN 前向重，适合外派）。
+  let results: import('./sim-worker').SimTaskResult[]
+  if (distNodesPath) {
+    if (policy !== 'intent-exec') {
+      process.stderr.write('[m1-eval] --dist-nodes requires --policy intent-exec\n')
+      process.exit(2)
+    }
+    if (!intentWeights) {
+      process.stderr.write('[m1-eval] --dist-nodes requires --intent-weights\n')
+      process.exit(2)
+    }
+    results = await runDist(tasks, distNodesPath, iterId, intentWeights)
+  } else {
+    const pool = new AdaptiveSimWorkerPool(workers, 1)
+    pool.setAdjustHook((desired, load) => {
+      process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
+    })
+    results = await pool.runAdaptive(tasks, reportProgress, { fixed: fixedWorkers > 0 })
+  }
   const simSeconds = (Date.now() - t0) / 1000
   process.stderr.write(
     `[m1-eval] progress ${totalGames}/${totalGames} (100%) done in ${fmt(Date.now() - t0)}\n`,
@@ -363,6 +386,119 @@ async function main(): Promise<void> {
   } catch (e) {
     process.stderr.write(`[m1-eval] HTML scorecard failed: ${(e as Error).message}\n`)
   }
+}
+
+// ---------------- v3.7 分布式分派：评估任务经 HTTP 派发到 rollout agent ----------------
+
+interface DistNodeCfg {
+  id: string
+  url: string
+  authKey?: string
+  concurrency?: number
+  enabled?: boolean
+}
+
+async function uploadWeights(
+  node: DistNodeCfg,
+  kind: string,
+  bytes: Buffer,
+  sha: string,
+  iterId: string,
+): Promise<void> {
+  const resp = await fetch(`${node.url}/v1/weights`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${node.authKey ?? ''}`,
+      'Content-Type': 'application/octet-stream',
+      'x-weights-sha256': sha,
+      'x-iter-id': iterId,
+      'x-kind': kind,
+    },
+    body: gzipSync(bytes),
+  })
+  if (resp.status !== 200 && resp.status !== 204)
+    throw new Error(`${node.id} weights upload HTTP ${resp.status}`)
+}
+
+/** 把 tasks 派发到 dist-nodes.json 的启用节点（mode=eval&kind=intent&policy=intent-exec）。
+ *  并发 = 节点 concurrency 之和（缺省取 4）；单局失败重试一次。 */
+async function runDist(
+  tasks: SimTask[],
+  nodesPath: string,
+  iterId: string,
+  intentWeightsPath: string,
+): Promise<import('./sim-worker').SimTaskResult[]> {
+  const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
+  const nodes = (cfg.nodes ?? []).filter((n) => n.enabled !== false && n.url)
+  if (nodes.length === 0) throw new Error('no enabled nodes in dist-nodes.json')
+  const concurrency = nodes.reduce((s, n) => s + Math.max(1, n.concurrency ?? 4), 0)
+  process.stderr.write(
+    `[m1-eval] dist dispatch: ${nodes.length} nodes, ${concurrency} slots, ${tasks.length} games\n`,
+  )
+
+  const bytes = readFileSync(intentWeightsPath)
+  const wver = createHash('sha256').update(bytes).digest('hex')
+  for (const n of nodes) await uploadWeights(n, 'intent', bytes, wver, iterId)
+  process.stderr.write(
+    `[m1-eval] intent weights uploaded to ${nodes.length} nodes (${wver.slice(0, 12)}…)\n`,
+  )
+
+  const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
+  let next = 0
+  const fail = (id: number): import('./sim-worker').SimTaskResult => ({
+    id,
+    ok: false,
+    outcome: 'error',
+    ticks: 0,
+    killCount: 0,
+    baseAlive: false,
+  })
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++
+      if (i >= tasks.length) return
+      const task = tasks[i]
+      const node = nodes[i % nodes.length]
+      const url =
+        `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
+        `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
+        `&difficulty=${task.difficulty}&mode=eval&kind=intent&policy=intent-exec`
+      let ok = false
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try {
+          const resp = await fetch(url, {
+            headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
+            signal: AbortSignal.timeout((task.maxTicks / 20 + 120) * 1000),
+          })
+          if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
+          const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
+          const m = manifest as any
+          const sc = m.scorable ?? {}
+          const fs = sc.finalState ?? {}
+          results[i] = {
+            id: task.id,
+            ok: true,
+            outcome: m.outcome ?? 'error',
+            ticks: typeof m.ticks === 'number' ? m.ticks : 0,
+            killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
+            baseAlive: fs.baseAlive === true,
+            lives: typeof fs.lives === 'number' ? fs.lives : undefined,
+            firstKillTick: typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
+            telemetry: sc.telemetry,
+          }
+          ok = true
+        } catch {
+          /* retry */
+        }
+      }
+      if (!ok) results[i] = fail(task.id)
+    }
+  }
+
+  const threads = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker())
+  await Promise.all(threads)
+  return results
 }
 
 await main()

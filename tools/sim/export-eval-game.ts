@@ -163,6 +163,8 @@ interface EvalResult {
   score: number
   quality: number
   dims: Record<string, { value: number | null; raw: number }>
+  /** 完整 ScorableRun 输入（v3.7，供 m1-eval --dist-nodes 复用本地聚合零改动）。 */
+  scorable: Record<string, unknown>
 }
 
 function runEvalOne(
@@ -330,6 +332,13 @@ function runEvalOne(
     score: scored.score,
     quality: scored.quality,
     dims,
+    scorable: {
+      outcome,
+      ticks: t,
+      finalState: scorable.finalState,
+      firstKillTick: scorable.firstKillTick,
+      telemetry: scorable.telemetry,
+    },
   }
 }
 
@@ -392,6 +401,7 @@ function main(): void {
     score: res.score,
     quality: res.quality,
     dims: res.dims,
+    scorable: res.scorable,
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))

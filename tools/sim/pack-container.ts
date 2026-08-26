@@ -19,13 +19,58 @@
  * 兼容性：coordinator 解码端按 magic 自动识别 v2/v1——新 trainer + 旧 agent（v1 包）
  * 直接可用；反向（旧 trainer + 新 agent）不兼容，部署时两侧同 commit 即可（既有惯例）。
  */
-import { gzipSync } from 'node:zlib'
+import { gzipSync, gunzipSync } from 'node:zlib'
 
 export const PACK_MAGIC = 0x42435632
 
 export interface PackEntry {
   name: string
   data: Buffer
+}
+
+export interface PackHeader {
+  fmt: 'bcv2'
+  manifest: Record<string, unknown>
+  files: Array<{ name: string; len: number }>
+}
+
+/** 解包 BCV2 容器（m1-eval --dist-nodes 消费端；与 Python dist_common.unpack_container 对等）。 */
+export function unpackContainer(buf: Buffer): {
+  manifest: Record<string, unknown>
+  entries: Map<string, Buffer>
+} {
+  const frame = gunzipSync(buf)
+  if (frame.length < 8) throw new Error('pack too small')
+  const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  const magic = dv.getUint32(0, false)
+  if (magic !== PACK_MAGIC) {
+    // 兼容 v1：gzip(JSON {manifest, files:{name:base64}})。
+    const v1 = JSON.parse(frame.toString('utf8')) as {
+      manifest?: Record<string, unknown>
+      files?: Record<string, string>
+    }
+    if (!v1.manifest) throw new Error('unrecognized pack magic')
+    const entries = new Map<string, Buffer>()
+    for (const [k, b64] of Object.entries(v1.files ?? {}))
+      entries.set(k, Buffer.from(b64, 'base64'))
+    return { manifest: v1.manifest, entries }
+  }
+  const headerLen = dv.getUint32(4, false)
+  const headerJson = frame.toString('utf8', 8, 8 + headerLen)
+  const header = JSON.parse(headerJson) as PackHeader
+  let off = 8 + headerLen
+  const entries = new Map<string, Buffer>()
+  for (let fi = 0; fi < header.files.length; fi++) {
+    const nameLen = dv.getUint16(off, false)
+    const name = frame.toString('utf8', off + 2, off + 2 + nameLen)
+    const dataLen = Number(dv.getBigUint64(off + 2 + nameLen, false))
+    entries.set(
+      name,
+      Buffer.from(frame.subarray(off + 2 + nameLen + 8, off + 2 + nameLen + 8 + dataLen)),
+    )
+    off += 2 + nameLen + 8 + dataLen
+  }
+  return { manifest: header.manifest, entries }
 }
 
 /** 组装 BCV2 容器：单次分配 frame 缓冲 → gzip。manifest/entries 均为纯数据。 */
