@@ -535,13 +535,28 @@ async function runHybrid(
               `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
               `&difficulty=${task.difficulty}&mode=eval&kind=intent&policy=intent-exec`
             let ok = false
-            for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+            // 退避重试（§30 启发）：agent 忙（503 busy / HTTP 错误）时尊重 Retry-After
+            // 或阶梯退避，熬过 rollout 尾巴与 eval 并发的忙窗——纯 2 连击失败会把
+            // 350 局大半打成 error → winRate 假阳性暴跌 → 误触发止损。409（wver 不
+            // 匹配）是确定性错误，不重试浪费时间。
+            const RETRY_BACKOFF = [3, 5, 8, 12, 18, 26, 38, 60] // 秒
+            for (let attempt = 0; attempt < RETRY_BACKOFF.length && !ok; attempt++) {
               try {
                 const resp = await fetch(url, {
                   headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
                   signal: AbortSignal.timeout((task.maxTicks / 20 + 120) * 1000),
                 })
-                if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
+                if (resp.status !== 200) {
+                  if (resp.status === 409) break // 确定性错误（wver 未缓存）
+                  const retryAfter = Number(resp.headers.get('retry-after') ?? '')
+                  await new Promise((r) =>
+                    setTimeout(
+                      r,
+                      ((retryAfter > 0 ? retryAfter : RETRY_BACKOFF[attempt]) || 5) * 1000,
+                    ),
+                  )
+                  continue
+                }
                 const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
                 const m = manifest as any
                 const sc = m.scorable ?? {}
@@ -560,7 +575,8 @@ async function runHybrid(
                 })
                 ok = true
               } catch {
-                /* retry */
+                // 网络/超时：退避后重试
+                await new Promise((r) => setTimeout(r, RETRY_BACKOFF[attempt] * 1000))
               }
             }
             if (!ok) settle(i, fail(task.id))

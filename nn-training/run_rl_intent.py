@@ -102,11 +102,16 @@ def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
 
 
 def run_clean_eval(bun: str, rl_path: str, args) -> dict:
-    """m1-eval intent-exec 固定语料贪心评估（派发到 4 LAN agent；35 关 × eval_seeds/关）。
+    """m1-eval intent-exec 固定语料贪心评估（35 关 × eval_seeds/关，**派发远端 agents**）。
 
     seeds 固定为 1..N 与 M7② 基线同语料 → 配对可比（P1-1k3 / §245 协议）。
-    --dist-nodes 派发到远端（agent evalSupport=true，mode=eval&kind=intent 跑 NN 策略），
-    本机不再独占 350 局；若无可达节点 m1-eval 自动回退本机（幂等）。
+    --dist-nodes 把 350 局派到全部 agent（40+ 槽，~4–6min），**本机不再独占**。
+
+    2026-08-27 §30 修订（两次教训）：① 取消『eval 本地跑』——远端算力必须被利用
+    （用户：纯 eval 任务也应分派 agents）；② 触发时机从『队列清空』改为 stream 的
+    on_ppo_started（PPO 启动 = 全量结算到账 + 节点空闲）——『队列清空』会撞尾局
+    tail_drain → eval 350 局与 rollout 残余并行抢槽 → 大批 503 → winRate 掉到
+    4.9%/6.9% → 假阳性止损（it25 实测）。PPO 本地跑、eval 远端跑、互不抢。
     """
     seeds = args.eval_seeds
     cmd = [bun, "tools/sim/m1-eval.ts",
@@ -347,14 +352,15 @@ def main() -> None:
                 iter_id = f"{RUN_ID}.{it}"
                 if args.stream:
                     def _fire_eval():
-                        # 只在 eval_at 迭代派发干净评估（350 局约 10min，全轮跑太贵）。
+                        # 只在 eval_at 迭代派发干净评估（350 局约 5min，全轮跑太贵）。
                         if it not in eval_at:
                             return None
                         return dispatch_eval_bg_intent(bun, args.out, args, it,
                                                        jsonl_path, args.baseline)
                     report = run_rollout_stream(
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
-                        model, opt, device, on_collect_done=_fire_eval,
+                        model, opt, device, on_collect_done=None,
+                        on_ppo_started=_fire_eval,
                         backend=ppo_intent, update_kwargs=_update_kwargs(args, it, start_it,
                                                                          ref_model))
                     stream_meta = report

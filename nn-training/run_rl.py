@@ -100,15 +100,24 @@ def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> st
     re-runs of the same iter. Deliberately NOT matching weights_io's strict
     `weights.<ts>_ep<N>_val<V>.json` BC auto-discovery regex (same reason the
     manual `rl-weights.*_post-it*ppo.json` backup avoided it): eval_bridge's
-    latest_weights_path must never pick up RL archives. Oldest pruned beyond
-    WEIGHTS_BACKUP_KEEP; non-fatal on any IO error.
+    latest_weights_path must never pick up RL archives. Less-recent pruned
+    beyond WEIGHTS_BACKUP_KEEP; non-fatal on any IO error.
     prefix（工程化共享）：run_rl_intent 用 'intent-rl-weights' 独立前缀，与 per-tick
-    RL 归档分桶（各自按前缀 prune，互不干扰）。"""
+    RL 归档分桶（各自按前缀 prune，互不干扰）。
+
+    2026-08-27 §30 修复 prune 排序：原来是 `sorted(glob)`（按**文件名**字典序）取最小
+    一批删——而名字 `it2 < it20 < it3`（'2'<'3'），字典序最小 ≠ 最旧，导致重启后轮
+    it20–23 的最新多样权重被当"最旧"误删、12:00 时代的老 it3–9 反而幸存（it21–24
+    多样 checkpoint 永久丢失的根因）。改为按 **st_mtime**（真实新旧）排序删最旧，
+    名字时间戳只作同 mtime 兜底。"""
     try:
         WEIGHTS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         dst = WEIGHTS_BACKUP_DIR / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
         shutil.copyfile(weights_path, dst)
-        baks = sorted(WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"))
+        baks = sorted(
+            WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"),
+            key=lambda p: (p.stat().st_mtime, p.name),
+        )
         if len(baks) > WEIGHTS_BACKUP_KEEP:
             for old in baks[:len(baks) - WEIGHTS_BACKUP_KEEP]:
                 old.unlink(missing_ok=True)

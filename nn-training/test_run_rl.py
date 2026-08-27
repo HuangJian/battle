@@ -479,6 +479,46 @@ def test_backup_weights(tmp: Path) -> None:
         run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
 
 
+def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
+    """§30 回归：prune 必须按真实新旧（st_mtime），不能按文件名字典序。
+
+    原 bug：`sorted(glob)` 字典序下 it20 < it3（'2'<'3'），清理把重启后的
+    it20–23 最新多样权重当"最旧"误删、12:00 时代老 it3–9 幸存（it21–24
+    checkpoint 永久丢失）。本用例用**真实存档文件名 + 交错 mtime** 复现：
+    老 it2/it3 的 mtime 早于新 it20–25，KEEP 足够 → 必须删老留新。"""
+    import os
+    import run_rl
+    print("[fast] backup_weights prune by mtime (it20 not before it3)")
+    bdir = tmp / "weights-archive-mt"
+    shutil.rmtree(bdir, ignore_errors=True)
+    src = tmp / "src-weights.json"
+    src.write_text("{}", encoding="utf-8")
+    # 手工放老迭代（it2/it3，12:00 时代）与重启后新迭代（it20–25，21:00 时代）。
+    now = time.time()
+    created = []
+    # 老文件：it2 ×2 / it3 — mtime 设为最早。
+    for it in (2, 3, 2):
+        p = bdir / f"rl-weights.it{it}.20260827-120000.json"
+        p.write_text("{}", encoding="utf-8")
+        created.append(p)
+        os.utime(p, (now - 5000, now - 5000))
+    old_dir, old_keep = run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP
+    run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = bdir, 5
+    try:
+        # 新迭代 20–25 逐个备份（mtime 晚于老文件）。
+        for it in range(20, 26):
+            out = run_rl.backup_weights(str(src), it)
+            check(out is not None, f"backup it{it} returned path")
+        remain = sorted(p.name.split(".")[1] for p in bdir.glob("rl-weights.it*.json"))
+        # 应保留最新 5 个 = it21–25；老 it2/it3 与最早的 it20 被清理。
+        check(
+            remain == ["it21", "it22", "it23", "it24", "it25"],
+            f"prune 保留最新 KEEP (got {remain})",
+        )
+    finally:
+        run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
+
+
 def test_eval_local_gate(tmp: Path) -> None:
     """R6 补丁：eval 本地参与——gate 放行后本机直跑全部/尾局；gate 不放行则让位。"""
     import rl.eval_dispatch as ed

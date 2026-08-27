@@ -47,8 +47,11 @@ MAX_GRAD_NORM = 1.0
 INTENT_DIM = 8
 # target_kl 早停：单 epoch 平均近似 KL 超此值即停止剩余 epoch。参照现有 per-tick RL
 # 健康稳态 kl≈0.045-0.054/iter（rl/breaker.py，熔断 0.15×连续 3）——per-epoch 预算取 0.1
+#（2026-08-27 §30 改：0.1 → **0.04**。意图 8 类小空间 ~280 步/轮，单 epoch KL=0.101 的
+# 大更新就把策略从多样（熵 0.346）推到近单点（0.098）——too coarse。0.04 把单轮漂移
+# 压到意图熵正则（0.08）能拉回的幅度内）
 # 允许每迭代 ~2 epoch 策略更新，同时早停仍能拦截单轮剧烈漂移（P1-1k3 pace 护栏）。
-TARGET_KL = 0.1
+TARGET_KL = 0.04
 LOAD_LOG_EVERY = 128
 HB_SEC = 60.0
 

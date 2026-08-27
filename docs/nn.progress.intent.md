@@ -1,3 +1,36 @@
+## §30. M8 重启第一轮（it21–25）— 修复部分生效 + 两个基础设施 bug 实锤修复（2026-08-27 深夜）
+
+**it21–25（重启后，修复三件套已生效）**：
+- it21 entropy 0.379 / it22 0.376 / it23 **0.410** / it24 0.346 —— **意图多样稳定挂住**
+  （vs 旧 run it22 就崩），shaping 加权 + ENT 0.08 + kickstart 0.85 方向正确 ✓
+- it25 entropy 骤降 0.098（HUNT 99%）——**单轮过冲**：it24 PPO 单 epoch KL=0.101
+  （≈ target_kl 0.1 顶格）就把策略从多样推到近单点。8 类小空间 ~280 步/轮下
+  0.1/epoch 太宽 → **target_kl 0.1 → 0.04**（§30 改，poo_intent.py）
+
+**Bug E（假阳性止损实锤）**：it25 clean eval winRate=**0.069**（Δ=-0.654）→ 触发 STOP-LOSS。
+但同权重**本地跑 350 局 = 74.6%**（Δ=+2.3pp）→ dist eval 与 rollout 尾局（tail_drain 412s）
+并行抢节点槽位 → 大量 503 → 350 局大半 error → winRate 假性暴跌。**根因 + 修复**：
+1. **触发时机错**：eval 在『派发队列清空』（on_collect_done）触发，此刻节点上仍有
+   tail_drain 在途局 → 撞车。修复：意图 RL 改 **on_ppo_started** 触发（PPO 启动 =
+   140 局单波全量到账 + 节点完全空闲）→ eval 350 局跑空闲节点，与本地 PPO 并行，
+   **远端算力全程不闲置**（用户要求）。
+2. **m1-eval runHybrid 无退避**：非 200 → 2 连击失败即 error。加 503 阶梯退避
+   （Retry-After 优先，3s..60s）兜底忙窗。
+3. eval 明确**纯 dist 派发**（恢复 --dist-nodes；中途一度改本地被否决——"不能浪费远端"）。
+
+**Bug F（权重备份误删，用户点爆）**：`backup_weights` prune 用 `sorted(glob)`（**文件名
+字典序**）删最小 —— `it2 < it20 < it3`（'2'<'3'），重启后 it20–23 的最新多样权重被当
+"最旧"误删、12:00 时代老 it3–9 幸存 → **it21–24 多样 checkpoint 永久丢失**（本可作
+重启起点的 it24 没了）。修复：按 **st_mtime**（真实新旧）排序删最旧，文件名时间戳仅作
+同 mtime 兜底（run_rl.py）。**新增回归测试**（test_run_rl.py：交错 mtime 场景断言保留
+it21–25、清掉老 it2/it3 与 it20——原排序下必失败）。
+
+**重启决策**：可用多样起点 = 仅 B′（it20/it24 均被 Bug F 吞了）。B′ 冷启动 + 全套修复
+（target_kl 0.04 / shaping 加权 / ENT 0.08 / kickstart 0.85 / eval dist@PPO 窗口）——
+it25 的 74.6% 真值记作修复前参照线。
+
+---
+
 ## §29. M8 it14–it29 接管检视 — eval 全盲真因 + HUNT 坍缩修复 + 干净评估 Δ=+1.7pp（2026-08-27 夜）
 
 **接管基线**（git `intent-ai`，it29 权重 `intent-rl-weights.it29.20260827-204953.json`）：

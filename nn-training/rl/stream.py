@@ -51,7 +51,7 @@ def _shard_dir(entry: str) -> str | None:
 
 def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, int]],
                        args, cfg: dict, iter_id: str, model, opt, device,
-                       on_collect_done=None,
+                       on_collect_done=None, on_ppo_started=None,
                        backend=None, update_kwargs: dict | None = None) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
@@ -125,15 +125,28 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         remaining_games = None
 
     def _fire_eval_once(tag: str) -> None:
-        """干净评估一次性触发：派发队列清空为主触发点（节点进入收尾空转，
-        评估局顺势填槽），熔断 / collector 收官仅作兜底再触发点。"""
-        if eval_fired[0] or on_collect_done is None:
+        """干净评估一次性触发（去重守卫）。
+
+        2026-08-27（M8 意图 RL）触发点修订：per-tick RL 保持『派发队列清空』
+        （on_collect_done，节点进入收尾空转顺势填槽）；**意图 RL 改传
+        on_collect_done=None + on_ppo_started=_fire_eval**——『PPO 启动』才是
+        节点真正全部空闲的窗口（140 局单波全量 to_ack 后 PPO 才开始），此前
+        『队列清空』触发会撞尾局收结算（tail_drain）→ 节点槽位被占 → eval 350 局
+        大批 503 → 假阳性止损（§30）。PPO 本地跑、eval 远端跑、两不抢，远端算力
+        全程不被闲置。熔断 / collector 收官仍作兜底再触发点。
+        """
+        if eval_fired[0] or (on_collect_done is None and on_ppo_started is None):
             return
         eval_fired[0] = True
+        cb = on_ppo_started if (tag == "ppo started" and on_collect_done is None) \
+            else on_collect_done
+        if cb is None:
+            eval_fired[0] = False
+            return
         log(f"[stream] clean-eval dispatched ({tag}) — frozen weights on nodes, "
             f"running parallel to collection")
         try:
-            box["eval_thread"] = on_collect_done()
+            box["eval_thread"] = cb()
         except Exception as cb_err:  # noqa: BLE001 — 评估旁路不拖垮采集
             log(f"[stream] on_collect_done error: {str(cb_err)[:120]}")
 
@@ -200,6 +213,10 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
             ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
             log("[stream] PPO phase started — local dist slots suspending "
                 "(auto-resume if cluster stalls)")
+            # M8 意图 RL：PPO 启动 = 全量结算到账 + 节点空闲 → 在此派发 eval（远端并行）。
+            # per-tick 模式不在此触发（on_collect_done 有值 → 维持队列清空触发语义）。
+            if on_collect_done is None and on_ppo_started is not None:
+                _fire_eval_once("ppo started")
         agg_w = backend.update(model, opt, chs, args.epochs, device, **update_kwargs)
         state["ppo_sec"] += time.time() - t_p
         state["cum_kl"] += float(agg_w["kl"])
