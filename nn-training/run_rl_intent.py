@@ -121,7 +121,11 @@ def run_clean_eval(bun: str, rl_path: str, args) -> dict:
     if proc.returncode != 0:
         raise RuntimeError(f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
     win = None
-    for line in proc.stdout.splitlines():
+    # 横幅 `[m1-eval] WIN RATE 65.7%` 打印到 **stderr**（m1-eval.ts L350
+    # process.stderr.write），JSON 报告在 stdout——只解析 stdout 会让干净评估
+    # 恒为 null（it20/25 实测：banner missed），iter15 止损形同虚设。
+    # 修复：stdout ∪ stderr 一起查。
+    for line in proc.stdout.splitlines() + proc.stderr.splitlines():
         # m1-eval prints "WIN RATE 65.7%" (uppercase, with a space) — case-insensitive
         # match so the gate metric is never silently null (regression: a case-sensitive
         # 'winRate' pattern never matched the banner line → every clean eval read null).

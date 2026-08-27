@@ -1,3 +1,62 @@
+## §29. M8 it14–it29 接管检视 — eval 全盲真因 + HUNT 坍缩修复 + 干净评估 Δ=+1.7pp（2026-08-27 夜）
+
+**接管基线**（git `intent-ai`，it29 权重 `intent-rl-weights.it29.20260827-204953.json`）：
+训练已悄悄跑到 it29（远超计划 iter15 止损线）。巡检报告停在 it14（自动巡检未随轮更新——it15-26
+目录被 keep_iters 轮转）。两条硬伤叠加，使"看似进步"的 it1–it29 全程缺主指标：
+
+**Bug C — clean eval 恒 null（§27 Bug B 修复不彻底，stop-loss 全程失效）**：
+`run_clean_eval` 只解析 `proc.stdout`，而 m1-eval 的 `WIN RATE xx.x%` 横幅打印在 **stderr**
+（m1-eval.ts L350 `process.stderr.write`）。it20/it25 的 eval_summary 全部 `winRate:null` →
+iter15 的 Δ≤0 止损（STOP_AT_ITER=15）从未触发 → 训练在错误轨道上多跑了 14 轮。
+**修复**：解析 `stdout + stderr` 合并流（run_rl_intent.py）。
+
+**Bug D' — dist eval 瞬态大批 error（it29 350 局 326 error，42s 完成）**：
+首次手动 350 局派发时 93% 局 0.1s 级失败（fetch HTTP 非 200 → runHybrid retry→fail）。训练停止、
+节点空闲后复跑 **350 局 100% 成功** → 属节点过渡期瞬态（训练刚停时节点仍在收尾/权重句柄竞争），
+非代码 bug。m1-eval 的 runHybrid 对失败静默（无状态码日志）——已知弱点，未修（成功率可复现）。
+
+**HUNT 坍缩（P2-7 报警实锤）**：
+- entropy：it19 0.451 → it22 0.085 → it28 **0.0066**；kl→0.0004（策略完全冻结）
+- intentCounts：it28 `[0,0,24751,2,0,0,69,0]` = HUNT 99.9% / CRUISE 0.3%——意图选择退化恒 HUNT
+- it22–25 低谷（0.657/0.686/0.736/0.707）即坍缩窗口；it28–29"回升"（0.773/0.721）=
+  恒 HUNT 收敛后的稳定态，非意图学习
+- **根因链路**：奖励表密集分量（KILL=4.0）对**全部意图同等生效** → 意图语义无收益差 →
+  argmax 退化为"行为上限最宽的类"（HUNT 白名单 ≈ God-AI 默认行为）；kickstart KL 0.5^27≈3e-05
+  早已消失 → 无恢复力；ENT_COEF 0.02 在 ~280 步/轮的梯度体量下推不动。
+- plan §6 P2-7 预注册"量纲平衡"（潜在 shaping ×1.0）被实测证明不够——需更强手段。
+
+**干净评估（修复后，it29 权重 350 局）**：WIN **74.0%**（259/350，0 error）
+- scoreV7 suite 0.5548 · lcb 0.5387 · meanWinRate 0.740
+- **Δ vs M7② 基线 0.723 = +1.7pp**（iter15 gate 的 Δ>0 判据在 it29 权重上成立）
+- worst = Battlement (s34) **20%**（avgKills 11.1）——纯 HUNT 在高 base 压力关防守瓦解的残留
+- 结论：恒 HUNT 也是可用策略（74%），但**策略退化 ≠ 学到意图选择**，and Stage 34 冒头 ——
+  M8 的"学意图切换"目标未实现。74% vs oracle 天花板（M7① 36-cadence 76.6%）的 2.6pp 缺口
+  正是意图选择的优化空间。
+
+**修复三件套（M8 坍缩，plan §6 P2-7 消融定稿）**：
+1. **`INTENT_SHAPING_MULT`（intent-rl-reward.ts）**：potential shaping 按意图加权
+   （INTERCEPT 1.2 / RETURN_DEFENSE 1.8 / HOLD_LANE 1.6 / CRUISE 1.3 / 其余 1.0）——
+   防守类窗口的守家梯度放大（非饱和、无 sparse 死区），PPO 学"何时守"有正当收益；
+   telescoping 一致性保持（同一窗口 shaping 和 = mult·(Φ末−Φ初)，γ=1 无 farming）。
+2. **`ENT_COEF` 0.02 → 0.08**（ppo_intent.py）：8 类意图步熵正则 4×。
+3. **`kickstart_decay` 0.5 → 0.85**（rl-config.json）：保住 B′/多样形状更久；
+   重启时 kickstart 系数从 1.0 重新计数（policy_iter 从 0 起）。
+
+**重启决策（重要，防止修复白做）**：从 **it20** 权重（entropy 0.379、意图多样：
+HUNT 85.5% / CRUISE 11.6% / RETURN_DEFENSE 2.6%）而非 it29（恒 HUNT 冻结）——
+kickstart 参考策略 = args.out 当前权重：从 it29 重启 = ref 就是坍缩策略本身，kickstart 无意义。
+用 `--start-it 21 --iters 36`（绝对迭代上限），weights.json = it20 备份，清空 it21+ shards，
+it25/30/35 触发修复后 eval。**目标：意图多样前提下胜率 ≥74% 且 baseIntegrity 上行。**
+
+**巡检工具修复（分派指令）**：rl-hourly-inspect.ts 增 `buildBackfill`——it 目录被 keep_iters
+轮转后，从 dist-agent-meta.jsonl 回填 per-stage games/wins（kills 无 meta 层数据，注明缺失），
+避免巡检账本随目录轮转永久丢失。it1–29 账本已回填修复（3996 局 / 2900 胜 / 72.6% 累计）。
+
+**测试**：intent-rl-rollout 单测改固定 golden 权重（与训练产物解耦，防 HUNT 坍缩期 flaky）；
+sampleCat 导出直测采样多样性；reward 对账界按加权塑形放宽。24 pass。
+
+---
+
 ## §28. Bug A 修复深层合理性 — streamKlCap / streamWaveGames 语义分解（2026-08-27 傍晚）
 
 **背景**：§27 记录了 Bug A（stream 半途 halt）的修复——`rl-config.json` policy 加

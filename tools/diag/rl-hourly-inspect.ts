@@ -197,6 +197,43 @@ interface AgentRow {
   lastGames: number
 }
 
+/** 单迭代单关的回填汇总（dist-agent-meta 逐局重建；kills 在 meta 层不可得）。 */
+export interface BackfillStage {
+  games: number
+  wins: number
+}
+
+/**
+ * 从 dist-agent-meta.jsonl 原始行构建「迭代 → 关 → 战绩」回填索引（仅 ok=true 局）。
+ * 用途：--keep-iters 轮转删除 it* 目录后，历史迭代的 per-stage 战绩无法从目录扫描，
+ * 但调度器落盘的每局记录（it/stage/win）仍在——用它对缺失迭代回填 games/wins，
+ * 让巡检累计账本（t 表）与 winRate 不因轮转而永久丢失（kills 无法恢复，标注缺失）。
+ */
+export function buildBackfill(
+  rows: Array<{ it?: unknown; stage?: unknown; ok?: unknown; win?: unknown }>,
+): Map<number, Map<number, BackfillStage>> {
+  const out = new Map<number, Map<number, BackfillStage>>()
+  for (const r of rows) {
+    if (!(r.ok === true || r.ok === 1)) continue
+    const it = Number(r.it)
+    const stage = Number(r.stage)
+    if (!Number.isInteger(it) || it <= 0 || !Number.isInteger(stage) || stage < 0) continue
+    let m = out.get(it)
+    if (!m) {
+      m = new Map<number, BackfillStage>()
+      out.set(it, m)
+    }
+    const s = m.get(stage)
+    if (s) {
+      s.games++
+      if (r.win === true || r.win === 1) s.wins++
+    } else {
+      m.set(stage, { games: 1, wins: r.win === true || r.win === 1 ? 1 : 0 })
+    }
+  }
+  return out
+}
+
 interface HtmlRow {
   idx: number
   dispIdx: number
@@ -516,11 +553,14 @@ function readAgentMeta(): {
   agents: AgentRow[]
   /** 每节点每迭代成功局数（rollout 贡献列的数据源；不含 eval）。 */
   okByIt: Map<string, Map<number, number>>
+  /** 目录轮转缺失迭代的 per-stage 回填索引（仅 ok=true 局）。 */
+  backfill: Map<number, Map<number, BackfillStage>>
 } {
-  if (!existsSync(META_PATH)) return { agents: [], okByIt: new Map() }
+  if (!existsSync(META_PATH)) return { agents: [], okByIt: new Map(), backfill: new Map() }
   const by = new Map<string, AgentRow>()
   // 每节点在每轮的成功局数：用于"上轮局数"列（以全局最新迭代为基准，未参与=0）
   const okByIt = new Map<string, Map<number, number>>()
+  const backfillRows: Array<{ it?: number; stage?: number; ok?: boolean; win?: boolean }> = []
   const ensure = (node: string): AgentRow => {
     let a = by.get(node)
     if (!a) {
@@ -553,6 +593,16 @@ function readAgentMeta(): {
     const node = normNode(String(r.node ?? '?'))
     const a = ensure(node)
     a.attempts++
+    // 逐局明细收集（回填索引源；eval 行不入回填——目录扫描只覆盖 rollout 账本，
+    // 干净评估另有 eval_summary 事件，双源对账见 cross-check）。
+    if (!isEval && typeof r.it === 'number' && typeof r.stage === 'number') {
+      backfillRows.push({
+        it: r.it,
+        stage: r.stage,
+        ok: r.ok === true || r.ok === 1,
+        win: r.win === true || r.win === 1,
+      })
+    }
     if (r.ok) {
       a.ok++
       if (r.win) a.wins++
@@ -580,7 +630,11 @@ function readAgentMeta(): {
     const a = by.get(node)
     if (a) a.lastGames = m.get(globalLastIt) ?? 0
   }
-  return { agents: [...by.values()].sort((p, q) => q.ok - p.ok), okByIt }
+  return {
+    agents: [...by.values()].sort((p, q) => q.ok - p.ok),
+    okByIt,
+    backfill: buildBackfill(backfillRows),
+  }
 }
 
 interface PassSection {
@@ -884,11 +938,13 @@ function main(): void {
     upTo ?? (iterNums.length > 0 ? iterNums[iterNums.length - 1] : state.lastScannedIter)
 
   const fromIter = state.lastScannedIter
+  const meta = readAgentMeta() // 提前读取：目录轮转后需用 meta 回填缺失迭代
   const results: Array<{ iter: number; games: number; wins: number; kills: number }> = []
   const newWins: NewWin[] = []
   const firstEver: string[] = []
   const crossCheckBad: string[] = []
   const passStages: Record<string, PassStageStat> = {}
+  const backfilledIters: number[] = []
   let totalGames = 0
   let totalWins = 0
   let totalKills = 0
@@ -897,6 +953,41 @@ function main(): void {
   for (let n = fromIter + 1; n <= scanUpTo; n++) {
     const workers = scanIterDir(n)
     if (workers.length === 0) {
+      // 目录被 --keep-iters 轮转删除时，从 dist-agent-meta 回填 per-stage 战绩
+      // （games/wins 与 training_log stage_clear 对账一致；kills 无 meta 层数据）。
+      const bf = meta.backfill.get(n)
+      if (bf && bf.size > 0) {
+        let g = 0
+        let w = 0
+        for (const [stageIdx, s] of bf) {
+          g += s.games
+          w += s.wins
+          const entry = ensureEntry(state, stageIdx)
+          entry.games += s.games
+          entry.wins += s.wins
+          const pk = String(stageIdx)
+          let ps = passStages[pk]
+          if (!ps) {
+            ps = { games: 0, wins: 0, kills: 0, ticks: 0, livesSum: 0, lootSum: 0, lootGames: 0 }
+            passStages[pk] = ps
+          }
+          ps.games += s.games
+          ps.wins += s.wins
+        }
+        totalGames += g
+        totalWins += w
+        results.push({ iter: n, games: g, wins: w, kills: -1 }) // kills 缺失（meta 无该数据）
+        if (!state.scannedIters.includes(n)) state.scannedIters.push(n)
+        backfilledIters.push(n)
+        console.log(
+          `META-BACKFILL it${n}: 目录缺失，从 dist-agent-meta 回填 ${g} 局 / ${w} 胜（无击杀数据）`,
+        )
+        const ev = iters.get(n)
+        const logClears = ev ? (ev.outcomes.stage_clear ?? 0) : -1
+        if (logClears >= 0 && logClears !== w)
+          crossCheckBad.push(`it${n}: 回填=${w} 日志=${logClears}`)
+        continue
+      }
       missingDirs++
       console.log(`WARN it${n} 无可扫报告（目录缺失或为空），跳过`)
       continue
@@ -992,6 +1083,8 @@ function main(): void {
         ? `it${results[0].iter}`
         : `it${results[0].iter}-it${results[results.length - 1].iter}`
     state.coverageNote += ` Last scan ${fmtNow()} covered ${span} (+${totalGames} games / +${totalWins} wins / +${totalKills} kills).`
+    if (backfilledIters.length > 0)
+      state.coverageNote += ` it${backfilledIters.join('/')} 目录已轮转，战绩由 dist-agent-meta 回填（kills 缺失）。`
   }
 
   if (passIters.length > 0) {
@@ -1071,9 +1164,7 @@ function main(): void {
     `<b>累计</b>：${state.totals.games} 局 / ${state.totals.wins} 胜（<b>${(wrAll * 100).toFixed(1)}%</b>）/ ${state.totals.kills} 击杀 · 已扫至 it${state.lastScannedIter}`,
   ]
 
-  const meta = readAgentMeta()
-  // 反转索引：meta.okByIt 是 节点→(迭代→局数)，健康表按行取某迭代的全部节点贡献，
-  // 需要 迭代→(节点→局数)。
+  // meta 已在扫描循环前读取（回填需要）；此处复用其 okByIt 构建反转索引。
   const rolloutByItNode = new Map<number, Map<string, number>>()
   for (const [node, m] of meta.okByIt) {
     const nk = normNode(node)

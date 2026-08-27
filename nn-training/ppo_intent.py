@@ -39,7 +39,9 @@ GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）
 LAM = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 1.0
-ENT_COEF = 0.02  # 略高于 per-tick 的 0.01：B′ 逐状态峰值 → 抵抗策略塌缩
+ENT_COEF = 0.08  # 2026-08-27 M8 坍缩修复：0.02 → 0.08（8 类意图步熵正则 4×，
+# 反制 it22→it28 实测的 HUNT 单点坍缩 entropy 0.38→0.006；0.02 在 ~280 步/轮的
+# 小梯度体量下已失效）。
 LR = 1e-4  # 低于 per-tick 的 3e-4：强策略微调，慢而稳（B′ 逐状态峰值，梯度易塌缩）
 MAX_GRAD_NORM = 1.0
 INTENT_DIM = 8

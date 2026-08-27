@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   avgTicksPerGame,
   baseIntegrityOf,
+  buildBackfill,
   fmtDur,
   gamesOf,
   healthVerdict,
@@ -124,5 +125,34 @@ describe('baseIntegrityOf — 守家维度读取（R6 观察项）', () => {
     expect(baseIntegrityOf(ev({}))).toBeNull()
     expect(baseIntegrityOf(ev({ dim_means: {} }))).toBeNull()
     expect(baseIntegrityOf(ev({ dim_means: { baseIntegrity: null } }))).toBeNull()
+  })
+})
+
+describe('buildBackfill — 目录轮转后 dist-agent-meta 回填（2026-08-27）', () => {
+  it('aggregates per-iter per-stage wins/games from ok rows only', () => {
+    const rows = [
+      { it: 15, stage: 3, ok: true, win: true },
+      { it: 15, stage: 3, ok: true, win: false },
+      { it: 15, stage: 4, ok: true, win: true },
+      { it: 15, stage: 4, ok: false, win: false }, // 失败局不入 games
+      { it: 15, stage: 3, ok: 1, win: 1 }, // 兼容 JSON 1/0 布尔
+      { it: 16, stage: 3, ok: true, win: false },
+    ]
+    const bf = buildBackfill(rows)
+    expect(bf.get(15)!.get(3)).toEqual({ games: 3, wins: 2 })
+    expect(bf.get(15)!.get(4)).toEqual({ games: 1, wins: 1 })
+    expect(bf.get(16)!.get(3)).toEqual({ games: 1, wins: 0 })
+  })
+
+  it('skips malformed rows and falsy ok', () => {
+    const bf = buildBackfill([
+      { it: 15, stage: 3, ok: false, win: true },
+      { it: 'x', stage: 3, ok: true, win: true },
+      { it: -1, stage: 3, ok: true, win: true },
+      { it: 15, stage: -2, ok: true, win: true },
+      { it: 15, ok: true, win: true },
+      {},
+    ] as never)
+    expect(bf.size).toBe(0)
   })
 })

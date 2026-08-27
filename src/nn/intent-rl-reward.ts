@@ -27,6 +27,7 @@
  */
 import { CELL, BASE_POS } from '../constants'
 import type { World } from '../game/World'
+import { INTENT_IDS, type IntentId } from '../ai/intent/vocab'
 
 /** 逐 tick 密集分量（窗口内累加）。 */
 export const INTENT_REWARD = {
@@ -40,6 +41,39 @@ export const INTENT_REWARD = {
   LIVES_EXHAUSTED: -30.0, // 命尽（终局）
   TIMEOUT: -1.0, // 超时（轻罚防挂机）
 } as const
+
+/**
+ * potential shaping 的意图加权（2026-08-27 M8 坍缩修复，plan §6 P2-7 消融定稿）。
+ *
+ * 背景：M8 it22→it28 实测策略熵 0.38 → 0.006，意图分布坍缩为纯 HUNT（99.9%）。
+ * 根因 = 密集分量（击杀 4.0）对**全部意图**同等生效 → 选择意图没有语义收益差 →
+ * argmax 自然退化为"行为上限最宽、最容易吃击杀的类"（HUNT 白名单覆盖 God-AI 默认
+ * 行为的大部分）。P2-7 预注册的"量纲平衡"在纯 shaping（×1.0）下不足以拦下坍缩。
+ *
+ * 修复：potential shaping（守家语义的即时梯度通道）按意图加权——基地高压时选
+ * RETURN_DEFENSE/HOLD_LANE 的压力减免收益放大（非饱和、无 sparse 死区；shaping 每 tick
+ * 都在跑，加权只是幅度差），PPO 因此学到"何时守、何时攻"而非"永远攻"。
+ *
+ * telescoping 一致性（P1-8k3）保持：同一意图窗口内 shaping 仍精确 = mult × (Φ_末 − Φ_初)；
+ * 加权不引入 farming（势差对 γ=1 的零和性质不变）。跨窗口切换时各窗口乘各自 mult，
+ * 只改变"防守类窗口的相对价值"，不产生凭空正分。
+ */
+export const INTENT_SHAPING_MULT: Record<IntentId, number> = {
+  INTERCEPT: 1.2, // 拦截 = 主动守家，略放大
+  RETURN_DEFENSE: 1.8, // 回防/据守:主被动守家，放大最强（HUNT 坍缩的主要缺口）
+  HUNT: 1.0, // 进攻基线
+  HOLD_LANE: 1.6, // 走廊据守（近基地防线），放大
+  CLEAR: 1.0, // 清障与守家语义无关
+  PICKUP: 1.0, // 拾取
+  CRUISE: 1.3, // 巡航含收尾守势，温和放大
+  ESCAPE: 1.0, // reflex-only 掩码，不进训练（占位值）
+}
+
+/** 按意图索引取 shaping 权重（vocab 顺序 = INTENT_IDS，与掩码/标签同源）。 */
+export function shapingMult(idx: number): number {
+  const id = INTENT_IDS[idx]
+  return id ? INTENT_SHAPING_MULT[id] : 1.0
+}
 
 /** 切换成本（每无产出切换，预注册 #5 初值 0.05）。"无产出" = 前窗口无击杀/清砖/拾取。 */
 export const SWITCH_COST = 0.05

@@ -39,6 +39,7 @@ import {
   SWITCH_COST,
   potential,
   shapingStep,
+  shapingMult,
   settleWindow,
 } from '../../src/nn/intent-rl-reward'
 import { GRID, CELL, ENEMIES_PER_STAGE } from '../../src/constants'
@@ -84,8 +85,8 @@ function mulberry32(seed: number): () => number {
   }
 }
 
-/** 掩码 softmax 采样（ESCAPE 恒 -inf；返回 idx + logp）。 */
-function sampleCat(
+/** 掩码 softmax 采样（ESCAPE 恒 -inf；返回 idx + logp）。导出供单测直测采样器。 */
+export function sampleCat(
   logits: Float32Array,
   mask: readonly number[],
   rng: () => number,
@@ -215,6 +216,7 @@ export function runOne(
   let pending: Step | null = null
   let windowStart = 0
   let windowReward = 0
+  let windowShaping = 0 // potential shaping 单独累计（结算按意图 shapingMult 加权）
   let windowOutput = false // 本窗口是否有击杀/清砖/拾取（无产出切换成本判定）
   let prevIntent = -1
 
@@ -222,7 +224,13 @@ export function runOne(
     if (!pending) return
     const dt = tick - windowStart
     const switched = !terminal && currentIntent !== prevIntent
-    pending.reward = settleWindow(windowReward, switched, windowOutput)
+    // shaping 按本窗口意图加权（INTENT_SHAPING_MULT）：防守类窗口的守家梯度放大，
+    // 反制 HUNT 单点坍缩；dense 分量不加权（语义无区分是坍缩根因，见 reward 注释）。
+    pending.reward = settleWindow(
+      windowReward + windowShaping * shapingMult(prevIntent),
+      switched,
+      windowOutput,
+    )
     pending.done = terminal ? 1 : 0
     pending.dt = dt
     shard.steps.push(pending)
@@ -254,6 +262,7 @@ export function runOne(
     }
     windowStart = tick
     windowReward = 0
+    windowShaping = 0
     windowOutput = false
     prevIntent = idx
     return idx
@@ -293,7 +302,7 @@ export function runOne(
     executor.endFrame() // 每 tick 重置 thought（InputLike 契约），否则 decide 只跑一次
     const phiAfter = potential(world)
     const shaping = shapingStep(phiBefore, phiAfter)
-    windowReward += shaping
+    windowShaping += shaping
 
     // 逐 tick 密集分量（窗口累计；击杀/清砖/拾取记产出）。
     let dense = 0
