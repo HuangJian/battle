@@ -35,7 +35,7 @@ function run(seed: number, ticks: number) {
   const encMs = (performance.now() - t0) / 50
 
   // 2) forward 单次耗时（模型 internal intentForward）
-  const model = exec['model']
+  const model = exec['model']!
   const obs = new Uint8Array(14 * 26 * 26)
   const scal = new Float32Array(19)
   const inj = new Float32Array(9)

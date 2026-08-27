@@ -291,6 +291,12 @@ export type GameEvent =
   | { type: 'stage_clear'; stage: number }
   | { type: 'player_hit' }
   | { type: 'explosion'; x: number; y: number; kind: 'small' | 'big' }
+  | {
+      type: 'terrain_destroyed'
+      col: number
+      row: number
+      by: TankKind
+    }
 
 // ============================================================
 // Config Types

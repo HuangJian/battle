@@ -290,8 +290,14 @@ export class StudentModel implements ModelLike {
   private moveB: Float32Array
   private fireW: Float32Array
   private fireB: Float32Array
+  // Per-tick value head [128 -> 1] (PPOStudent): consumes `hidden`, used in forward().
   private valueW: Float32Array
   private valueB: Float32Array
+  // Intent value head [137 -> 1] (IntentNet with_value, P1-5②): consumes the 137-dim
+  // hidden+inject commitment vector, used in intentForward(). M8-only; BC/intent
+  // checkpoints without a value head leave this null and valueOut reads 0.
+  private valueW137: Float32Array | null
+  private valueB137: Float32Array | null
   // M4 intent heads (optional): [137, out] where 137 = 128 hidden + 9 inject.
   private intentW: Float32Array | null
   private intentB: Float32Array | null
@@ -353,14 +359,26 @@ export class StudentModel implements ModelLike {
     this.fireB = p('fire_head.bias')
     // Value head is OPTIONAL: RL weights include value_head.*; BC-only
     // checkpoints don't, in which case we zero-init (harmless for the
-    // pure-policy deployment path).
+    // pure-policy deployment path). M8 (P1-5②): intent RL weights carry a
+    // 137-wide value head (128 hidden + 9 inject) — value must see the
+    // commitment state, so intentForward() consumes hiddenInject. The
+    // per-tick student value head is 128-wide and stays in forward().
     const vh = params['value_head.weight']
-    if (vh) {
-      this.valueW = vh
-      this.valueB = params['value_head.bias'] ?? new Float32Array(1)
-    } else {
-      this.valueW = new Float32Array(this.headHidden)
+    if (vh && vh.length === this.headHidden + 9) {
+      this.valueW137 = vh
+      this.valueB137 = params['value_head.bias'] ?? new Float32Array(1)
+      this.valueW = new Float32Array(0)
       this.valueB = new Float32Array(1)
+    } else {
+      this.valueW137 = null
+      this.valueB137 = null
+      if (vh) {
+        this.valueW = vh
+        this.valueB = params['value_head.bias'] ?? new Float32Array(1)
+      } else {
+        this.valueW = new Float32Array(this.headHidden)
+        this.valueB = new Float32Array(1)
+      }
     }
     // M4 intent heads: intent_head./enemy_head./anchor_head. on the 137-dim
     // (hidden 128 + inject 9) entry space. Loaded only when intentHeads=true
@@ -406,13 +424,21 @@ export class StudentModel implements ModelLike {
 
     this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
     this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
-    this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
+    if (this.valueW.length === this.headHidden) {
+      this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
+    } else {
+      this.valueOut[0] = 0 // no per-tick value head (intent model path)
+    }
   }
 
   /**
    * M4: intent 三头前向（IntentModel 路径）。inject = Float32Array(9)：
    * [prev-intent one-hot(8), duration]。hidden(128) + inject(9) -> 137 -> 三头。
    * 与 intent_net.py 的 forward 数值一致（P3-4 字节一致测试锚定）。
+   *
+   * M8（P1-5②）：value 头与三头并列消费同一 137 隐藏（128+9 注入）——value 必须
+   * 看到承诺状态，否则同 obs 不同意图龄的 value 估计系统性偏差。137 宽 value 头
+   * 在此计算 valueOut；无 value 头（BC/intent 检查点）置 0（首个 RL 轮次零基线）。
    */
   intentForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void {
     const iw = this.intentW
@@ -422,6 +448,7 @@ export class StudentModel implements ModelLike {
       for (let i = 0; i < 8; i++) this.intentLogits[i] = 0
       for (let i = 0; i < 5; i++) this.enemyLogits[i] = 0
       for (let i = 0; i < 16; i++) this.anchorLogits[i] = 0
+      this.valueOut[0] = 0
       return
     }
     this.features(obs, scalars)
@@ -430,6 +457,18 @@ export class StudentModel implements ModelLike {
     this.linear(this.hiddenInject, iw, this.intentB as Float32Array, this.intentLogits, 8, 137)
     this.linear(this.hiddenInject, ew, this.enemyB as Float32Array, this.enemyLogits, 5, 137)
     this.linear(this.hiddenInject, aw, this.anchorB as Float32Array, this.anchorLogits, 16, 137)
+    if (this.valueW137) {
+      this.linear(
+        this.hiddenInject,
+        this.valueW137,
+        this.valueB137 as Float32Array,
+        this.valueOut,
+        1,
+        137,
+      )
+    } else {
+      this.valueOut[0] = 0
+    }
   }
 
   /** 主干：stem + ConvMixer + GAP + fc → this.hidden（forward/intentForward 共用）。 */
@@ -613,12 +652,13 @@ export function buildModelFromJson(json: WeightsJson): ModelLike {
   return new NNModel(params, shapes)
 }
 
-/** M4: intent 三头模型的推理面（intentForward + 三组 logits）。 */
+/** M4: intent 三头模型的推理面（intentForward + 三组 logits）。M8: + valueOut。 */
 export interface IntentModelLike {
   intentForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void
   readonly intentLogits: Float32Array // [8]
   readonly enemyLogits: Float32Array // [5]
   readonly anchorLogits: Float32Array // [16]
+  readonly valueOut: Float32Array // [1] — value head over the 137 hidden+inject (P1-5②)
 }
 
 /** 解析 intent 权重 JSON（arch.kind === 'intent'）→ IntentModelLike。 */

@@ -2176,3 +2176,30 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > RL 数据流确实消费 rollout 实际意图（B′ 初始值），注入与 PPO 冲突走 §300 判读。
 > **记录**：docs/nn.progress.intent.md §26（下一段续写落地）。
 
+## 302. M8 意图 RL 落地 — 半 MDP 意图步 PPO + 变步长 GAE + B′ 冷启动 value 预热（2026-08-27）
+> **决策**（plan §6/I13/P1-7k3，M8 架构落地）：
+> 1. **半 MDP 意图步 PPO**：决策只在 replan tick（30，M7① 定稿）；动作 = 采样的意图
+>    （8 类，ESCAPE 死类掩码）；窗口冻结（IntentExecutor rlPick → God-AI 白名单子链）。
+>    GAE 在意图步上算，**γ_step = γ_tick^Δt**（Δt = 窗口时长 tick，dt.npy），
+>    **Δt≡1 退化与 ppo.py 定长 per-tick GAE 逐字节一致**（单元测试断言）。
+> 2. **奖励 = 意图窗口稠密分量**（击杀 +4 / 清砖 +0.5 / 拾取 +2 / 阵亡 −5 / 基地墙损 −3）
+>    **+ potential shaping**（Φ = −最近敌 base pressure，**γ=1 势差** F=Φ(s′)−Φ(s)——
+>    γ_tick 势差会累积 (γ−1)ΣΦ 残余，高压长局实测 +60 伪正奖励；γ=1 精确 telescoping、
+>    整局塑形和 = Φ_T−Φ_0 ∈ [−1,1] 有界，P1-8k3）+ **无产出切换成本**（−0.05/切换）
+>    + 终局（通关 +50 / 基地失守 −50 / 命尽 −30 / 超时 −1）。
+> 3. **B′ 冷启动 value 预热**：value 头随机 → 直接 PPO 实测 KL 爆炸 262（优势被 value
+>    噪声主导、策略单 epoch 塌缩）。预热 = 前 warmup-iters 迭代**只训 value 头且冻结
+>    主干+三头**（经共享主干训 value 会扰动策略特征→意图分布，实测熵 0.90→0.33，
+>    等于 RL 前先毁掉 B′）；adv/ret 全局归一（I13 逐关规范化，value MSE 数百→O(1)）。
+> 4. **注入特征**（prev one-hot 8 + duration 1，9 维）由 rollout 记录、PPO 前向消费；
+>    **value 头 137→1 与三头并列消费同一 137 隐藏**（P1-5②：value 必须看到承诺状态，
+>    infer.ts 修复 137 宽 value 头经 intentForward 计算 valueOut）。
+> 5. **评估与止损**：m1-eval intent-exec 固定语料贪心局（iter15 350 局，P1-1k3）；
+>    主指标 = Δ vs M7② 基线（B′ 72.3%）；iter15 Δ≤0 → 止损转 M9（P2-5 不续命）；
+>    target_kl=0.1 per-epoch 早停（参照现有 per-tick RL 健康 kl≈0.05/iter，breaker 0.15）。
+> 6. **reward 有界性**：逐 reward ∈ (−60, 60)；整局 Σr = 终局 + 塑形(±1) + 稠密 + 切换。
+> **Rationale**：意图步 semi-MDP 是 plan I13 定案；γ=1 塑形修正了 per-tick 折扣塑形的
+> 累积残余（伪正奖励会奖励"高压持续"这一与守家相反的行为）；value 预热修 B′ 冷启动
+> 基线噪声塌缩（M8 的 kickstarting 落地形式）。
+> **记录**：docs/nn.progress.intent.md §27（训练首轮结果续写）。
+

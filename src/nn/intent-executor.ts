@@ -54,7 +54,7 @@ function argmaxWithMargin(logits: Float32Array, masked: ReadonlySet<string>): nu
 }
 
 export interface IntentExecutorOptions {
-  weightsText: string
+  weightsText?: string
   godParams?: GodAIParams
   /** 内部 God-AI 决策 RNG（§47：与 world.rng 解耦，重放保真）。缺省 = world.rng（不推荐）。 */
   rng?: RNG
@@ -68,6 +68,16 @@ export interface IntentExecutorOptions {
   /** M7② 探针（Q：rollout 意图分布熵 / HUNT 占比）：每 replan 记录原始 argmax 意图
    *  + 相对次大的边际。只读、零 RNG、确定性；默认关 = 不产数组分配（AGENTS §14）。 */
   recordReplanTrace?: boolean
+  /**
+   * M8 RL：外部采样器（rollout collector）。在 replan 帧调用，返回要锁定的意图
+   * idx（替代网络 argmax）；返回 -1 = 保持当前承诺不变（不提交新意图）。采样器负责
+   * 网络前向 + 采样 + logp/value 记录（collector 侧持有模型）。设此回调时：
+   *  - 网络 argmax/switch-margin 路径被跳过（RL 的承诺由策略输出本身决定，margin 门控
+   *    是 RL 前的启发式，RL 用切换成本奖励替代——plan §6 I13 semi-MDP）；
+   *  - 注入态（prev/duration）仍由 executor 单源维护并推进（自馈语义同 tagger）；
+   *  - weightsText 可省略（executor 不再构建模型）。
+   */
+  rlPick?: (obs: Uint8Array, scalars: Float32Array, inject: Float32Array, tick: number) => number
 }
 
 /**
@@ -76,7 +86,7 @@ export interface IntentExecutorOptions {
  */
 export class IntentExecutor implements InputLike {
   private world: World
-  private model: IntentModelLike
+  private model: IntentModelLike | null
   private encoder = new ObsEncoder()
   private god: GodAIInput
   private replanEvery: number
@@ -84,6 +94,8 @@ export class IntentExecutor implements InputLike {
   private riskGated: boolean
   private baseCadence: number
   private dangerCadence: number
+  /** M8 RL 外部采样器（rlPick 选项；undefined = 网络 argmax 路径）。 */
+  private rlPick: IntentExecutorOptions['rlPick']
   /** risk-gated 动态 replan 调度：下一次 replan 的帧号。 */
   private nextReplanTick = -1
 
@@ -108,7 +120,9 @@ export class IntentExecutor implements InputLike {
 
   constructor(world: World, opts: IntentExecutorOptions) {
     this.world = world
-    this.model = buildIntentModelFromText(opts.weightsText)
+    // rlPick 模式下 executor 不构建模型（collector 持有并前向），避免双份。
+    this.model = opts.rlPick ? null : buildIntentModelFromText(opts.weightsText ?? '')
+    this.rlPick = opts.rlPick
     this.god = new GodAIInput(world, opts.godParams ?? { ...DEFAULT_GOD_AI_PARAMS }, opts.rng)
     this.replanEvery = opts.replanEvery ?? INTENT_REPLAN_TICKS
     this.switchMargin = opts.switchMargin ?? SWITCH_MARGIN
@@ -181,14 +195,42 @@ export class IntentExecutor implements InputLike {
       return
     }
 
+    if (this.rlPick) {
+      // M8 RL 模式：外部采样器负责网络前向+采样+记录（collector 持有模型）。executor
+      // 只做注入态推进 + 子链锁定——采样到的意图即为本窗口动作（无 margin 门控，RL
+      // 的承诺由策略输出本身决定，切换成本奖励治理摇摆——plan §6 I13 semi-MDP）。
+      this.encoder.encode(this.world)
+      const inject = new Float32Array(9)
+      if (this.prevIntentId >= 0) inject[this.prevIntentId] = 1
+      inject[8] = Math.min(this.duration, 300) / 300
+      const intentIdx = this.rlPick(this.encoder.obs, this.encoder.scalars, inject, f)
+      if (intentIdx >= 0) {
+        if (this.prevIntentId === intentIdx) this.duration++
+        else {
+          this.prevIntentId = intentIdx
+          this.duration = 1
+        }
+        // 承诺切换：RL 策略输出即承诺（与 argmax 路径不同，不做 margin 门控）。
+        if (intentIdx !== this.currentIntentId) {
+          this.currentIntentId = intentIdx
+          this.applyIntent(intentIdx)
+          this.intentTrace.push(intentIdx)
+        }
+      }
+      this.advanceReplan(f)
+      this.moveDir = this.god._moveDir
+      this.firing = this.god._fire
+      return
+    }
+
     // replan 帧：网络选意图。
     this.encoder.encode(this.world)
     const inject = new Float32Array(9)
     if (this.prevIntentId >= 0) inject[this.prevIntentId] = 1
     inject[8] = Math.min(this.duration, 300) / 300
-    this.model.intentForward(this.encoder.obs, this.encoder.scalars, inject)
+    this.model!.intentForward(this.encoder.obs, this.encoder.scalars, inject)
 
-    const intentIdx = argmaxWithMargin(this.model.intentLogits, MASKED_INTENTS)
+    const intentIdx = argmaxWithMargin(this.model!.intentLogits, MASKED_INTENTS)
     if (this.prevIntentId === intentIdx) this.duration++
     else {
       this.prevIntentId = intentIdx
@@ -217,7 +259,7 @@ export class IntentExecutor implements InputLike {
 
   /** 计算当前 argmax 相对次大的边际。 */
   private argmaxMargin(): number {
-    const l = this.model.intentLogits
+    const l = this.model!.intentLogits
     let best = -Infinity
     let second = -Infinity
     for (let i = 0; i < INTENT_IDS.length; i++) {

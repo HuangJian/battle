@@ -473,12 +473,14 @@ export class CombatSystem {
           const type = row && c >= 0 && c < GRID ? row[c] : 'steel'
           if (type === 'brick') {
             w.tileMap.destroy(c, r)
+            w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
             this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
             return true
           }
           if (type === 'steel') {
             if (bullet.power >= 2) {
               w.tileMap.destroy(c, r)
+              w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
               this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
             } else {
               this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
@@ -506,11 +508,13 @@ export class CombatSystem {
           return true
         } else if (type === 'brick') {
           w.tileMap.destroy(c, r)
+          w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
           hit = true
           this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
         } else if (type === 'steel') {
           if (bullet.power >= 2) {
             w.tileMap.destroy(c, r)
+            w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
             this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
           } else {
             // Ricochet effect on steel — small spark explosion even when not destroyed

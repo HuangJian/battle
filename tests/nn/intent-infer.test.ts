@@ -20,12 +20,14 @@ const GOLDEN = JSON.parse(
   h: number
   d: number
   format: string
+  version?: number
   obs: number[]
   scalars: number[]
   inject: number[]
   intentLogits: number[]
   enemyLogits: number[]
   anchorLogits: number[]
+  valueLogits?: number[] // M8（P1-5②）：value 头 137→1 与三头并列
   params: Record<string, unknown>
 }
 
@@ -63,6 +65,23 @@ describe('IntentNet TS/Py forward consistency (P3-4)', () => {
     model.intentForward(obs, scalars, inject)
     const diff = maxAbsDiff(GOLDEN.anchorLogits, model.anchorLogits)
     expect(diff).toBeLessThanOrEqual(1e-4)
+  })
+
+  it('M8: value 头 logits（137→1 消费注入）与 py golden ≤1e-4 一致', () => {
+    expect(GOLDEN.valueLogits).toBeDefined()
+    model.intentForward(obs, scalars, inject)
+    const diff = maxAbsDiff(GOLDEN.valueLogits as number[], model.valueOut)
+    expect(diff).toBeLessThanOrEqual(1e-4)
+  })
+
+  it('M8: 注入变化 → value 输出变化（value 必须看到承诺状态）', () => {
+    model.intentForward(obs, scalars, inject)
+    const base = model.valueOut[0]
+    const inject2 = new Float32Array(9)
+    inject2[7] = 1 // prev-intent = 最后一类
+    inject2[8] = 0.9 // 长承诺期
+    model.intentForward(obs, scalars, inject2)
+    expect(model.valueOut[0]).not.toBe(base)
   })
 
   it('注入变化 → 输出变化（注入路径确实被消费）', () => {

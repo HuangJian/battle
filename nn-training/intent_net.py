@@ -51,11 +51,25 @@ class IntentNet(StudentNet):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """obs:(B,14,26,26)u1 scalars:(B,19)f4 inject:(B,9)f4
         → (intent_logits, enemy_logits, anchor_logits). inject=None 时置 0。"""
-        h = self.features(obs, scalars)  # (B,128)
+        h = self.features(obs, scalars)
         if inject is None:
             inject = torch.zeros(h.shape[0], self.inject_dim)
         h = torch.cat([h, inject.float()], dim=1)  # (B,137)
         return self.intent_head(h), self.enemy_head(h), self.anchor_head(h)
+
+    def forward_rl(
+        self,
+        obs: torch.Tensor,
+        scalars: torch.Tensor,
+        inject: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """M8（P1-5②）：value 头与三头并列消费同一 137 隐藏（128+9 注入）——
+        value 必须看到承诺状态（同 obs 不同意图龄的 value 估计才不偏）。inject 必传。
+        → (intent, enemy, anchor, value)。仅 when with_value（ppo_intent 用）。"""
+        h = self.features(obs, scalars)
+        h = torch.cat([h, inject.float()], dim=1)  # (B,137)
+        v = self.value_head(h) if self.value_head is not None else torch.zeros(h.shape[0], 1)
+        return self.intent_head(h), self.enemy_head(h), self.anchor_head(h), v
 
     def arch(self) -> dict:
         d = super().arch()
@@ -160,7 +174,8 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
         scalars: [19]        (f4),
         inject:  [9]         (f4),
         intentLogits: [8], enemyLogits: [5], anchorLogits: [16],
-        ...weights_io 的 params 字段（stem/blocks/fc/intent_head/enemy_head/anchor_head）
+        valueLogits: [1]  (M8：value 头 137→1 与三头并列，with_value=True),
+        ...weights_io 的 params 字段（stem/blocks/fc/intent_head/enemy_head/anchor_head/value_head）
       }
     TS 端 buildIntentModelFromJson 只需 params（arch.kind=intent,h,d）→ intentForward 对比 logits。
     """
@@ -173,9 +188,9 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     inj[0, 0] = 1.0  # prev 类 0 热
 
     torch.manual_seed(seed + 1)
-    m = IntentNet(h=h, d=d).eval()
+    m = IntentNet(h=h, d=d, with_value=True).eval()
     with torch.no_grad():
-        i_log, e_log, a_log = m(obs, sc, inj)
+        i_log, e_log, a_log, v_log = m.forward_rl(obs, sc, inj)
 
     from weights_io import _tensor_to_b64, OBS_SCHEMA_MAJOR
 
@@ -184,7 +199,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
         params[name] = {"shape": list(p.shape), "data": _tensor_to_b64(p)}
     golden = {
         "format": "intent-golden",
-        "version": 1,
+        "version": 2,
         "schema_major": OBS_SCHEMA_MAJOR,
         "h": h,
         "d": d,
@@ -195,6 +210,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
         "intentLogits": [float(v) for v in i_log.flatten().tolist()],
         "enemyLogits": [float(v) for v in e_log.flatten().tolist()],
         "anchorLogits": [float(v) for v in a_log.flatten().tolist()],
+        "valueLogits": [float(v) for v in v_log.flatten().tolist()],
         "params": params,
     }
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

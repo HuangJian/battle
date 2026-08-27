@@ -20,10 +20,11 @@
 import { writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
 
-export type NpyDtype = 'u1' | 'i1' | 'f4' | 'f8'
+export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
 
 const DESCR: Record<NpyDtype, string> = {
   u1: '<u1',
+  u2: '<u2',
   i1: '<i1',
   f4: '<f4',
   f8: '<f8',
