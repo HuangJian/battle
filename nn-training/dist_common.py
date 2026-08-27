@@ -143,6 +143,53 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
     return None
 
 
+def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0) -> bool:
+    """主动升级机制（M8）：POST /v1/restart {pullBranch} → agent 端 git pull + 重启。
+
+    编排层 ping 发现节点 codeHash 不符（stale）时调用——把它从「静默排除」升级为
+    「主动指示更新重启」。返回 True = 接受（agent 异步执行，重启窗口内不可达，
+    rescan 会在它恢复后按新 codeHash 纳入）。失败返回 False（不抛、不阻塞训练）。
+    """
+    try:
+        status, _body = _request(
+            url.rstrip("/") + "/v1/restart", auth_key, timeout,
+            data=json.dumps({"pullBranch": branch}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return status in (200, 202)
+    except Exception:
+        return False
+
+
+def upgrade_stale_nodes(cfg: dict, expected_hash: str, branch: str,
+                        status_timeout: float = 3.0, restart_timeout: float = 20.0,
+                        max_nodes: int = 16) -> list[dict]:
+    """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→ request_upgrade。
+
+    返回 [{id, upgraded, reason}]（诊断用）。不可达/失败跳过——升级机制是 best-effort，
+    绝不阻塞本轮 dispatch（stale 节点本轮仍不参与，待重启后由 rescan 纳入）。
+    """
+    out: list[dict] = []
+    for n in cfg.get("nodes", [])[:max_nodes]:
+        if not n.get("enabled", True):
+            continue
+        nid = str(n.get("id") or n.get("url") or "?")
+        ping = node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+        if ping is None:
+            out.append({"id": nid, "upgraded": False, "reason": "unreachable"})
+            continue
+        if ping.get("codeHash") == expected_hash:
+            out.append({"id": nid, "upgraded": False, "reason": "current"})
+            continue
+        upgraded = request_upgrade(n["url"], n.get("authKey", ""), branch,
+                                   timeout=restart_timeout)
+        out.append({"id": nid, "upgraded": upgraded,
+                    "reason": "stale" if upgraded else "stale-upgrade-failed",
+                    "agentVersion": ping.get("agentVersion")})
+    return out
+
+
 def post_weights(url: str, auth_key: str, iter_id: str, sha: str, weights_bytes: bytes,
                  timeout: float = 120.0, kind: str = "rollout") -> str:
     """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。

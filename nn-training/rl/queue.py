@@ -159,6 +159,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     window = float(policy.get("queueWindowSec", 1800))
     status_timeout = float(policy.get("statusTimeoutSec", 3))
     fail_streak_max = int(policy.get("nodeFailStreak", 3))
+    # 主动升级机制（M8）：policy.upgradeBranch 非空时，ping 发现 codeHash stale 的
+    # 节点 → POST /v1/restart 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）。
+    upgrade_branch = str(policy.get("upgradeBranch") or "")
+    upgrade_requested: set[str] = set()
     wver = dist_common.weights_fingerprint(rl_path)
     local_bun = bun_version(bun)
     iter_no = int(iter_id.rsplit(".", 1)[-1])
@@ -176,6 +180,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             continue
         if ping.get("codeHash") != dist_common.compute_code_hash():
             log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
+            # 主动升级：配置了 upgradeBranch 且本节点未请求过 → 指示 git pull + 重启。
+            if upgrade_branch and nid not in upgrade_requested:
+                upgrade_requested.add(nid)
+                ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""),
+                                                 upgrade_branch)
+                log(f"[dist] node {nid}: requested upgrade to {upgrade_branch} "
+                    f"({'accepted' if ok else 'FAILED'}) — will rejoin after restart")
             continue
         remote_full = str(ping.get("bunVersion", "?"))
         if mm(remote_full) != mm(local_bun):
@@ -618,6 +629,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if ping is None:
                     continue  # 仍未上线，下轮再试
                 if ping.get("codeHash") != dist_common.compute_code_hash():
+                    # 主动升级：rescan 发现 stale 节点 → 指示 git pull + 重启（每轮一次）。
+                    if upgrade_branch and nid not in upgrade_requested:
+                        upgrade_requested.add(nid)
+                        ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""),
+                                                         upgrade_branch)
+                        log(f"[dist] rescan {nid}: codeHash stale — requested upgrade "
+                            f"to {upgrade_branch} ({'accepted' if ok else 'FAILED'})")
                     continue
                 remote_full = str(ping.get("bunVersion", "?"))
                 if mm(remote_full) != mm(local_bun):
