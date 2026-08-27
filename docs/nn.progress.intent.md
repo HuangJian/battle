@@ -24,6 +24,22 @@
 
 **纪律**：这些方向不在 M8/M9 当前交付内；执行任何一项前重读 §0 与阴性归档。
 
+## §32. 评估结果校验 + error 自动重跑 — 内置进 run_clean_eval 并加单测（2026-08-28）
+
+**用户指令**：结果返回要检查 error，有错误放回队列重跑——且要求**写进 eval 脚本本身 + 单测**，
+不要外部临时脚本。
+
+**实现**（run_rl_intent.py）：
+- `parse_m1_eval_report(text)` 纯函数：从合并文本提取 winRate（stderr 横幅）+ total/cleared/
+  error（JSON report outcomes 块）；逐关 perStage 的 "total" 不误匹配顶层。
+- `run_clean_eval(..., _runner=None)`：跑完解析 error，>0 即整批重跑，最多
+  `CLEAN_EVAL_MAX_RETRY=3` 次；超限接受带 error 标记结果（不无限重试）。`_runner` 供测试注入。
+- 单测 `test_run_rl_intent.py`（fast tier）：parse 5 断言 + 重跑决策 4 断言（干净一次过 /
+  error→重跑至干净 / 一直 error→3 次上限 / games 兼容字段）。ALL PASS。
+
+**触发背景**：it33 首跑 87% error（9.6%）→ 同权重重跑即正常——节点瞬态失败是干净评估的
+真实污染源，必须自动兜底，杜绝假阳性胜率再进止损判定（it25 教训）。
+
 ---
 
 ## §30. M8 重启第一轮（it21–25）— 修复部分生效 + 两个基础设施 bug 实锤修复（2026-08-27 深夜）

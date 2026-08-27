@@ -101,7 +101,43 @@ def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
         pass
 
 
-def run_clean_eval(bun: str, rl_path: str, args) -> dict:
+def parse_m1_eval_report(text: str) -> dict:
+    """从 m1-eval 输出（stdout+stderr 合并文本）提取结果。**纯函数，可单测**。
+
+    返回：
+      winRate — 横幅 `[m1-eval] WIN RATE xx.x%` 打印在 stderr（m1-eval.ts L350
+        process.stderr.write），JSON 报告在 stdout——必须合并查（it20/25 教训：
+        只解析 stdout → 干净评估恒 null → 止损失效）；
+      total / cleared / error — 顶层 JSON report 的 `"total": N, "outcomes": {...}`。
+        逐关 perStage 数组里的 "total" 后不跟 "outcomes"，不会被误匹配。
+    """
+    win = None
+    for line in text.splitlines():
+        # 大小写不敏感（横幅曾只匹配 'winRate' 漏掉 'WIN RATE'——§27 教训）。
+        m = re.search(r"win[ -]?rate[=:\s]+([\d.]+)\s*%", line, re.IGNORECASE)
+        if m:
+            win = float(m.group(1)) / 100
+            break
+    total = 0
+    cleared = 0
+    error = 0
+    m = re.search(r'"total": (\d+),\s*"outcomes": \{([^}]*)\}', text)
+    if m:
+        total = int(m.group(1))
+        oc = m.group(2)
+        m2 = re.search(r'"stage_clear": (\d+)', oc)
+        cleared = int(m2.group(1)) if m2 else 0
+        m3 = re.search(r'"error": (\d+)', oc)
+        error = int(m3.group(1)) if m3 else 0
+    return {"winRate": win, "total": total, "cleared": cleared, "error": error}
+
+
+# 干净评估最大重跑次数：error 局 > 0 就整批重跑（节点瞬态失败常见——it33 实测
+# 87% error、同权重重跑即干净）。超限后接受带 error 标记的结果，不再无限重试。
+CLEAN_EVAL_MAX_RETRY = 3
+
+
+def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     """m1-eval intent-exec 固定语料贪心评估（35 关 × eval_seeds/关，**派发远端 agents**）。
 
     seeds 固定为 1..N 与 M7② 基线同语料 → 配对可比（P1-1k3 / §245 协议）。
@@ -112,6 +148,10 @@ def run_clean_eval(bun: str, rl_path: str, args) -> dict:
     on_ppo_started（PPO 启动 = 全量结算到账 + 节点空闲）——『队列清空』会撞尾局
     tail_drain → eval 350 局与 rollout 残余并行抢槽 → 大批 503 → winRate 掉到
     4.9%/6.9% → 假阳性止损（it25 实测）。PPO 本地跑、eval 远端跑、互不抢。
+    ③ **结果校验 + 自动重跑**（用户指令 2026-08-28）：跑完解析 outcomes.error，
+    非零即整批重跑（最多 CLEAN_EVAL_MAX_RETRY 次），杜绝假阳性胜率污染止损判定
+    （it33 首跑 87% error → 同权重重跑即干净 75% 量级的实证）。
+    `_runner` 供测试注入 fake runner（替换 subprocess 执行）。
     """
     seeds = args.eval_seeds
     cmd = [bun, "tools/sim/m1-eval.ts",
@@ -120,25 +160,30 @@ def run_clean_eval(bun: str, rl_path: str, args) -> dict:
            "--policy", "intent-exec", "--intent-weights", rl_path,
            "--dist-nodes", "nn-training/rl-config.json",
            "--workers", str(max(2, min(8, args.workers)))]
-    log(f"clean eval (distributed): {' '.join(cmd)}")
-    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
-                          timeout=3600, **_POPEN_NO_WINDOW)
-    if proc.returncode != 0:
-        raise RuntimeError(f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
-    win = None
-    # 横幅 `[m1-eval] WIN RATE 65.7%` 打印到 **stderr**（m1-eval.ts L350
-    # process.stderr.write），JSON 报告在 stdout——只解析 stdout 会让干净评估
-    # 恒为 null（it20/25 实测：banner missed），iter15 止损形同虚设。
-    # 修复：stdout ∪ stderr 一起查。
-    for line in proc.stdout.splitlines() + proc.stderr.splitlines():
-        # m1-eval prints "WIN RATE 65.7%" (uppercase, with a space) — case-insensitive
-        # match so the gate metric is never silently null (regression: a case-sensitive
-        # 'winRate' pattern never matched the banner line → every clean eval read null).
-        m = re.search(r"win[ -]?rate[=:\s]+([\d.]+)\s*%", line, re.IGNORECASE)
-        if m:
-            win = float(m.group(1)) / 100
-            break
-    return {"winRate": win, "games": 35 * seeds}
+    attempts = 0
+    while True:
+        attempts += 1
+        log(f"clean eval (distributed) attempt {attempts}/{CLEAN_EVAL_MAX_RETRY}: {' '.join(cmd)}")
+        if _runner is not None:
+            res = _runner(cmd)
+        else:
+            proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
+                                  timeout=3600, **_POPEN_NO_WINDOW)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
+            res = parse_m1_eval_report(proc.stdout + "\n" + proc.stderr)
+        err = res.get("error") or 0
+        if err > 0 and attempts < CLEAN_EVAL_MAX_RETRY:
+            log(f"WARN clean eval attempt {attempts} had {err} error games "
+                f"(total={res.get('total')}) — rerunning whole batch")
+            continue
+        res["retries"] = attempts - 1
+        res["games"] = 35 * seeds  # 兼容 dispatch_eval_bg_intent 的 eval_summary 字段
+        if err > 0:
+            log(f"WARN clean eval accepted with {err} error games after {attempts} "
+                f"attempts (max {CLEAN_EVAL_MAX_RETRY}) — result carries error mark")
+        return res
 
 
 def dispatch_eval_bg_intent(bun: str, rl_path: str, args, it: int,
