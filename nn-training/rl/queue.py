@@ -9,6 +9,7 @@ import json
 import random
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -18,6 +19,13 @@ import dist_common
 from rl.log import log
 from rl.reports import combine_reports, win_of
 from rl.resume import completed_pairs, resumed_manifests
+
+# Windows：spawn 本地对局子进程（bun/node 跑游戏模拟）时使用 CREATE_NO_WINDOW，
+# 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
+# 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,7 +39,7 @@ ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 def bun_version(bun: str) -> str:
     try:
         return subprocess.run([bun, "--version"], capture_output=True, text=True,
-                              timeout=10).stdout.strip() or "?"
+                              timeout=10, **_POPEN_NO_WINDOW).stdout.strip() or "?"
     except Exception:
         return "?"
 
@@ -96,7 +104,8 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
                 "--max-ticks", str(args.max_ticks),
                 "--difficulty", args.difficulty,
             ]
-        p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f,
+                              stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW)
         rc = p.wait()
         log_f.close()
         report = None
@@ -384,7 +393,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
             # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
             t0 = time.time()
-            p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT)
+            p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f,
+                                  stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW)
             rc = p.wait()
             elapsed_sec = round(time.time() - t0, 3)
         if rc != 0:

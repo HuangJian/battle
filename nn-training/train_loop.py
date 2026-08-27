@@ -55,8 +55,14 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
+
+# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -359,7 +365,7 @@ def auto_export_corpus(data_dir: str, log=None) -> int:
             capture_output=True,
             text=True,
             timeout=300,  # 5 min budget — 101 replays take ~9s
-        )
+            **_POPEN_NO_WINDOW)
         dt = time.time() - t0
         # Print last few lines of output (summary)
         lines = (result.stdout + result.stderr).strip().splitlines()

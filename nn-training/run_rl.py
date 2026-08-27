@@ -36,6 +36,11 @@ import threading
 import time
 from pathlib import Path
 
+# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 import torch
 
 import dist_common
@@ -140,7 +145,8 @@ def _run_inspect(bun: str, it: int) -> None:
     try:
         subprocess.run(
             [bun, "tools/diag/rl-hourly-inspect.ts", "--up-to", str(it)],
-            cwd=str(REPO_ROOT), timeout=180, capture_output=True, text=True)
+            cwd=str(REPO_ROOT), timeout=180, capture_output=True, text=True,
+            **_POPEN_NO_WINDOW)
         log(f"[run_rl] inspection HTML regenerated (up to it{it})")
     except Exception as e:  # noqa: BLE001 — 巡检失败不中断训练
         log(f"[run_rl] WARN inspection failed (non-fatal): {e}")

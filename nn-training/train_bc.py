@@ -28,6 +28,11 @@ from collections import Counter
 import torch
 import torch.nn.functional as F
 
+# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import make_loaders  # noqa: E402
 from model import NNPolicy, param_count  # noqa: E402
@@ -91,6 +96,7 @@ def _git_sha() -> str:
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=os.path.dirname(os.path.abspath(__file__)),
             stderr=subprocess.DEVNULL,
+            **_POPEN_NO_WINDOW,
         ).decode().strip()
     except Exception:
         return "n/a"

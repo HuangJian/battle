@@ -68,6 +68,12 @@ STOP_AT_ITER = 15
 # 意图 RL 干净评估默认迭代（评估旁路不拖慢采集：只在这几个迭代跑）。
 DEFAULT_EVAL_AT = "5,10,15"
 
+# Windows：spawn 子进程（bun 巡检/评估、python 权重初始化）时用 CREATE_NO_WINDOW，
+# 避免每个子进程开黑色控制台窗口反复弹出抢占焦点。stdout/stderr 已 capture 或重定向。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 
 def _run_inspect(bun: str, traj_root: Path, it: int) -> None:
     """每轮 PPO 写回后自动生成巡检 HTML（rl-hourly-inspect.ts --traj-dir）。非致命。"""
@@ -75,7 +81,8 @@ def _run_inspect(bun: str, traj_root: Path, it: int) -> None:
         subprocess.run(
             [bun, "tools/diag/rl-hourly-inspect.ts", "--up-to", str(it),
              "--traj-dir", str(traj_root)],
-            cwd=str(REPO_ROOT), timeout=180, capture_output=True, text=True)
+            cwd=str(REPO_ROOT), timeout=180, capture_output=True, text=True,
+            **_POPEN_NO_WINDOW)
         log(f"inspection HTML regenerated (up to it{it})")
     except Exception as e:  # noqa: BLE001 — 巡检失败不中断训练
         log(f"WARN inspection failed (non-fatal): {e}")
@@ -109,7 +116,8 @@ def run_clean_eval(bun: str, rl_path: str, args) -> dict:
            "--dist-nodes", "nn-training/rl-config.json",
            "--workers", str(max(2, min(8, args.workers)))]
     log(f"clean eval (distributed): {' '.join(cmd)}")
-    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=3600)
+    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
+                          timeout=3600, **_POPEN_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
     win = None
@@ -250,7 +258,7 @@ def main() -> None:
         subprocess.run([sys.executable, "nn-training/ppo_intent.py",
                         "--init-from", args.bc, "--out", args.out,
                         "--threads", str(max(1, min(8, args.workers)))],
-                       cwd=str(REPO_ROOT), check=True)
+                       cwd=str(REPO_ROOT), check=True, **_POPEN_NO_WINDOW)
 
     device = torch.device("cpu")
     model = ppo_intent.build_rl_net(args.out)

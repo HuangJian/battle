@@ -33,6 +33,11 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "nn-training"))
 
@@ -256,7 +261,8 @@ class FakeAgent(BaseHTTPRequestHandler):
             bun = shutil.which("bun")
             self._json({"codeHash": dist_common.compute_code_hash(),
                         "bunVersion": subprocess.run([bun, "--version"], capture_output=True,
-                                                     text=True, timeout=10).stdout.strip(),
+                                                     text=True, timeout=10,
+                                                     **_POPEN_NO_WINDOW).stdout.strip(),
                         "cpus": 4})
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}

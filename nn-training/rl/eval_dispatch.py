@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -16,6 +17,11 @@ from pathlib import Path
 import dist_common
 from rl.log import log
 from rl.queue import REPO_ROOT, _record_agent_meta, bun_version, mm
+
+# 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
+_POPEN_NO_WINDOW: dict = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 # 干净评估（2026-08-24，用户指令）：用各节点已缓存的同权重跑固定语料贪心局。
 # 两股噪声都消掉：动作 argmax 无探索噪声、(stage,seed) 语料恒定 → 跨 checkpoint
@@ -67,7 +73,7 @@ def run_local_eval_game(bun: str, weights_snapshot: str, stage: int, seed: int,
            "--wver", wver, "--node-label", "local"]
     t0 = time.time()
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
-                          timeout=timeout_sec)
+                          timeout=timeout_sec, **_POPEN_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
     manifest = json.loads((Path(out_dir) / "_eval_report.json").read_text(encoding="utf-8"))
