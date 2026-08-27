@@ -465,6 +465,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 continue
             summary = None
             err = ""
+            busy503 = False  # HTTP 503(busy) 瞬时负载标记——重排后背压退避
             try:
                 if nd is None:
                     summary = run_local(task)
@@ -577,6 +578,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         f"circuit-broken for this round")
                 if len(seen) + len(missing_keys) >= n_total_tasks:
                     all_settled.set()
+            # 503(busy) 背压：agent 满负荷 → 本 worker 退避再领下一任务，防提交洪峰
+            # （无限重排会把 attempt 刷到上百、日志洪水——实测 503 洪峰教训）。
+            if busy503:
+                time.sleep(min(5.0, max(0.5, deadline - time.time())))
 
     threads: list[threading.Thread] = []
     # 本地线程先孵化：任务队列在启动瞬间是满的，谁先起跑谁抢到——agent 线程在

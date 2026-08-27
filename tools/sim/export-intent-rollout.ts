@@ -41,6 +41,15 @@ import {
   shapingStep,
   settleWindow,
 } from '../../src/nn/intent-rl-reward'
+import { GRID, CELL, ENEMIES_PER_STAGE } from '../../src/constants'
+import {
+  scoreRun,
+  V7_SCORE_CONFIG,
+  type DimensionKey,
+  type ScoreConfig,
+  type Weights,
+} from '../eval/godai-score'
+import type { RunTelemetry } from './simulation-runner'
 
 const MAX_TICKS = 36000
 const DEFAULT_REPLAN = 30
@@ -161,7 +170,24 @@ interface RunResult {
   win: boolean
   kills: number
   intentCounts: number[]
+  /** v7 godai-score 诊断（HTML 报告 score_mean/baseIntegrity/击杀数；reward 另用意图窗口）。 */
+  score: number
+  dims: Record<string, { value: number | null; raw: number }>
 }
+
+// ---- v7 诊断打分配置（与 export-rl-rollout 同款守家优先 RL 败局带）----
+// 意图 RL 的 reward 是意图窗口奖励（intent-rl-reward.ts），v7 dims 仅作 HTML 报告/
+// 评估诊断（score_mean/baseIntegrity/击杀数），与训练奖励解耦。
+const RL_LOSS_WEIGHTS: Weights = {
+  progress: 0.3,
+  baseIntegrity: 0.25,
+  baseSafety: 0.25,
+  tempo: 0.08,
+  accuracy: 0.06,
+  openingTempo: 0.03,
+  loot: 0.03,
+}
+const RL_SCORE_CONFIG: ScoreConfig = { ...V7_SCORE_CONFIG, lossWeights: RL_LOSS_WEIGHTS }
 
 export function runOne(
   stageIdx: number,
@@ -245,8 +271,21 @@ export function runOne(
   const intentCounts = new Array<number>(INTENT_DIM).fill(0)
   let kills = 0
   let prevWalls = countBaseWall(world)
+  const baseWallTotalInitial = prevWalls // 初始保护环格数（baseIntegrity 分母）
   let t = 0
   let outcome: string = 'timeout'
+
+  // ---- v7 诊断 telemetry（scoreRun 消费；与 export-rl-rollout 同口径）----
+  let playerShots = 0
+  let playerDeaths = 0
+  let powerUpsSpawned = 0
+  let powerUpsCollected = 0
+  let firstKillTick: number | undefined
+  let basePressureSum = 0
+  let basePressureSamples = 0
+  const cellsVisited = new Set<number>()
+  const seenPuIds = new Set<number>()
+  let prevLivePuIds = new Set<number>()
 
   while (t < maxTicks) {
     const phiBefore = potential(world)
@@ -258,14 +297,19 @@ export function runOne(
 
     // 逐 tick 密集分量（窗口累计；击杀/清砖/拾取记产出）。
     let dense = 0
+    let collectedThisTick = 0
     for (const e of world.consumeEvents()) {
       if (e.type === 'tank_destroyed') {
         if (e.by === 'player') {
           dense += INTENT_REWARD.KILL
           kills++
+          if (firstKillTick === undefined) firstKillTick = t - 1
           windowOutput = true
         }
-        if (e.tank?.isPlayer) dense += INTENT_REWARD.LIFE_LOSS
+        if (e.tank?.isPlayer) {
+          dense += INTENT_REWARD.LIFE_LOSS
+          playerDeaths++
+        }
       } else if (e.type === 'terrain_destroyed') {
         if (e.by === 'player' && !isBaseRingCell(e.col, e.row)) {
           dense += INTENT_REWARD.BRICK_CLEAR
@@ -273,13 +317,40 @@ export function runOne(
         }
       } else if (e.type === 'powerup_collected') {
         dense += INTENT_REWARD.PICKUP
+        powerUpsCollected++
+        collectedThisTick++
         windowOutput = true
+      } else if (e.type === 'bullet_fired' && (e.bullet as { isPlayer?: boolean })?.isPlayer) {
+        playerShots++
       }
+    }
+    // power-up census（seen-ids + same-tick pickup 对账，镜像 export-rl-rollout）。
+    {
+      const live = new Set<number>()
+      for (const pu of world.powerUps) {
+        live.add(pu.id)
+        if (!seenPuIds.has(pu.id)) {
+          seenPuIds.add(pu.id)
+          powerUpsSpawned++
+        }
+      }
+      let vanished = 0
+      for (const id of prevLivePuIds) if (!live.has(id)) vanished++
+      powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
+      prevLivePuIds = live
     }
     const wallsNow = countBaseWall(world)
     if (wallsNow < prevWalls) dense += (wallsNow - prevWalls) * INTENT_REWARD.BASE_WALL_LOSS
     prevWalls = wallsNow
     windowReward += dense
+    if (world.player?.alive) {
+      const col = Math.floor((world.player.x + world.player.w / 2) / CELL)
+      const row = Math.floor((world.player.y + world.player.h / 2) / CELL)
+      cellsVisited.add(row * GRID + col)
+    }
+    // baseSafety 诊断：每 tick 采样 base pressure（= -potential，复用已算值）。
+    basePressureSum += -phiAfter
+    basePressureSamples++
 
     t++
     if (world.state === 'stageclear' || world.state === 'victory' || world.state === 'gameover') {
@@ -308,6 +379,42 @@ export function runOne(
   // 意图动作分布（诊断；切换判定在结算时已入 reward）。
   for (const s of shard.steps) intentCounts[s.a]++
 
+  // ---- v7 诊断打分（HTML 报告 score_mean/baseIntegrity/击杀数；与 reward 解耦）----
+  const baseAlive = !world.tileMap.isBaseDestroyed()
+  const baseWallIntact = countBaseWall(world)
+  const baseWallTotal = baseWallTotalInitial
+  const scorable = {
+    outcome,
+    ticks: t,
+    finalState: {
+      killCount: kills,
+      lives: world.lives,
+      baseAlive,
+    },
+    firstKillTick,
+    telemetry: {
+      enemyTotal: (stage as { enemyCount?: number })?.enemyCount ?? ENEMIES_PER_STAGE,
+      startLives: world.difficulty?.startLives ?? START_LIVES,
+      playerDeaths,
+      playerShots,
+      powerUpsSpawned,
+      powerUpsCollected,
+      starsCollected: 0,
+      finalPlayerLevel: world.playerLevel,
+      baseWallIntact,
+      baseWallTotal,
+      basePressureMean: basePressureSamples > 0 ? basePressureSum / basePressureSamples : 0,
+      basePressureSamples,
+      cellsVisited: cellsVisited.size,
+      deaths: [],
+    } satisfies Omit<RunTelemetry, 'deaths'> & { deaths: never[] },
+  } as never
+  const scored = scoreRun(scorable, RL_SCORE_CONFIG)
+  const dims: Record<string, { value: number | null; raw: number }> = {}
+  for (const k of Object.keys(scored.dims) as DimensionKey[]) {
+    dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
+  }
+
   return {
     shard,
     outcome,
@@ -315,6 +422,8 @@ export function runOne(
     win: outcome === 'stage_clear',
     kills,
     intentCounts,
+    score: scored.score,
+    dims,
   }
 }
 
@@ -405,6 +514,8 @@ function main(): void {
   let totalKills = 0
   const intentAcc = new Array<number>(INTENT_DIM).fill(0)
   const perGame: string[] = []
+  const scoreList: number[] = []
+  const dimAcc: Record<string, number[]> = {}
 
   for (const si of stages) {
     const stage = STAGES[si]
@@ -418,6 +529,10 @@ function main(): void {
       if (res.win) wins++
       totalKills += res.kills
       for (let j = 0; j < INTENT_DIM; j++) intentAcc[j] += res.intentCounts[j]
+      scoreList.push(res.score)
+      for (const [k, v] of Object.entries(res.dims)) {
+        if (v.value !== null) (dimAcc[k] ??= []).push(v.value)
+      }
       const shardName = `rl_s${si}_seed${seed}`
       const manifest = {
         schemaMajor: OBS_SCHEMA_MAJOR,
@@ -434,6 +549,9 @@ function main(): void {
         kills: res.kills,
         intentCounts: res.intentCounts,
         switchCost: SWITCH_COST,
+        // v7 诊断（HTML 报告 baseIntegrity 等读取）。
+        score: res.score,
+        dims: res.dims,
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
       if (res.shard.n > 0) writeIntentShard(`${outDir}/${shardName}`, res.shard, manifest)
@@ -447,6 +565,16 @@ function main(): void {
 
   const total = seeds.length * stages.length
   const winRate = total > 0 ? wins / total : 0
+  const stat = (xs: number[]): { mean: number; std: number; min: number; max: number } | null => {
+    if (xs.length === 0) return null
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length
+    const std =
+      xs.length > 1 ? Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1)) : 0
+    return { mean, std, min: Math.min(...xs), max: Math.max(...xs) }
+  }
+  const dimMeans: Record<string, number> = {}
+  for (const [k, xs] of Object.entries(dimAcc))
+    dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'INTENT-RL',
     rewardScheme: 'intent-window-v1',
@@ -462,6 +590,14 @@ function main(): void {
     intentCounts: intentAcc,
     replan,
     switchCost: SWITCH_COST,
+    // v7 诊断：scoreList/dimLists 供 run_rl_intent 聚合 score_mean/baseIntegrity 与
+    // HTML 巡检「本段各关表现」读取。
+    scoreStats: stat(scoreList),
+    dimMeans,
+    scoreList: scoreList.map((x) => +x.toFixed(5)),
+    dimLists: Object.fromEntries(
+      Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))]),
+    ),
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   console.log(perGame.join('\n'))

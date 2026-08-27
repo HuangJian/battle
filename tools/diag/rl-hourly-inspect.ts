@@ -407,7 +407,7 @@ interface GameMetrics {
   ticks: number
 }
 
-function metricsOf(w: WorkerData): GameMetrics {
+export function metricsOf(w: WorkerData): GameMetrics {
   const r = w.report
   const dl = r.dimLists
   const d = w.manifest

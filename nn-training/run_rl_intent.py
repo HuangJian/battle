@@ -258,7 +258,7 @@ def main() -> None:
     tripped = None
     it = start_it - 1
     stop_reason = None
-    while args.iters <= 0 or it < start_it - 1 + args.iters:
+    while args.iters <= 0 or it < args.iters:
         it += 1
         traj_dir = traj_root / f"it{it}"
         try:
@@ -273,7 +273,7 @@ def main() -> None:
                     shutil.rmtree(traj_dir)
                 traj_dir.mkdir(parents=True)
 
-            log(f"=== iteration {it}/{start_it - 1 + args.iters} ===")
+            log(f"=== iteration {it}/{args.iters} ===")
             pairs = build_pairs(args, it, rotate_seed)
             dist_cfg = _load_dist_config()
             t_rollout = time.time()
@@ -284,6 +284,9 @@ def main() -> None:
                 iter_id = f"{RUN_ID}.{it}"
                 if args.stream:
                     def _fire_eval():
+                        # 只在 eval_at 迭代派发干净评估（350 局约 10min，全轮跑太贵）。
+                        if it not in eval_at:
+                            return None
                         return dispatch_eval_bg_intent(bun, args.out, args, it,
                                                        jsonl_path, args.baseline)
                     report = run_rollout_stream(
@@ -372,12 +375,18 @@ def main() -> None:
                 log("WARN pace: no clear by iter5 (rollout winRate=0) — investigate")
 
             with open(jsonl_path, "a", encoding="utf-8") as f:
+                dm = report.get("dimMeans") or {}
+                ss = report.get("scoreStats") or {}
                 rec = {
                     "event": "iteration", "iter": it,
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "winRate": report["winRate"], "outcomes": report["outcomes"],
                     "samples": report["totalSamples"], "ticks": report["totalTicks"],
                     "kills": report["totalKills"], "intentCounts": report["intentCounts"],
+                    # v7 诊断（HTML 报告 score_mean/baseIntegrity 列）。
+                    "score_mean": ss.get("mean") if ss else None,
+                    "baseIntegrity": dm.get("baseIntegrity"),
+                    "dim_means": dm,
                     "rollout_sec": rollout_sec, "ppo_sec": ppo_sec,
                     "steps": total_steps, "chunks": chunks_n,
                     "policy": agg["policy"] if agg else None,
