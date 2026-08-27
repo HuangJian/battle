@@ -312,6 +312,41 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 - This is the single source of truth for NN training history — not scattered in chat or commit messages.
 - When making architectural changes (model.py, infer.ts, obs-encoder.ts), check this file first for prior decisions.
 
+### PowerShell git commit — the reliable recipe (Windows agents)
+
+The shell here is **PowerShell**, not bash. Redirect-and-heredoc tricks that work in
+bash silently break in PowerShell; the failure modes below were hit and debugged
+(2026-08-27). Follows §7's "reproduce first" spirit — each pitfall is the reproduce.
+
+1. **Do NOT use a multi-line message via heredoc / `$(cat <<'EOF' …)`.** PowerShell
+   parses `<<` as a redirection operator and throws `Missing file specification after
+   redirection operator` before git even runs. Same for `-m "line1" -m "line2"` when
+   the message contains non-ASCII (Chinese, `§`, `→`, `±`): PowerShell→git arg
+   mangles it, `git commit` whines with an **empty output and exit 1** and the commit
+   never lands — no cross-reference verbosity, no reason, just silent.
+2. **Commit message recipe that works (single source of truth):**
+   - Write the message to a temp file with the `Write` tool, then `git commit ... -F <file>`.
+   - Or, when the message is already staged, land a `--amend` same way: `git commit --amend -F tmp/…`.
+   - Keep the temp message file **ASCII / path in `tmp/`**, delete it after the commit.
+   - Pathological fallback that also proved reliable: commit first with an ASCII
+     one-liner (`git commit -m "commit-test"`), then `git commit --amend -F tmp/…`.
+3. **pre-commit hook output is invisible when the hook fails.** The hook
+   (`tools/githook/pre-commit` — typecheck, scoped tests, oxfmt in place, oxlint,
+   freeze:`check`) prints to its own stdout, which the RunCommand wrapper swallows on a
+   failing exit. It prints a PASS line but its exit code is what matters: **exit 1 with
+   *empty* output is indistinguishable from a real hook failure.** Diagnose by running
+   the hook directly and capturing stdout:
+   ```
+   bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"
+   ```
+   The hook reformats with oxfmt **in place and re-stages** — after it runs, re-check
+   `git status` / re-stage before the real commit (a stale index is a common downstream
+   confusion).
+4. **Verify, never assume.** After any commit, `git log -1 --pretty=fuller` + `git log
+   --oneline -3` to confirm the intended message (and hash) actually landed; the silent
+   exit-1 above can leave the message wrong (e.g. a `commit-test` placeholder) while the
+   tree looks committed.
+
 ### NEVER add an untracked `*.md` file to git tracking
 
 - Markdown that is **already in git tracking** (e.g. `AGENTS.md`, `DECISIONS.md`, `MANIFEST.md`, `README.md`, any `*.md` already committed) is fair game: an agent may edit, stage, and commit it like any other source file.
