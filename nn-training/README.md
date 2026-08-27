@@ -142,7 +142,7 @@ init：RL 权重不存在 → 从 BC 检查点 warm-start（策略头加载，va
 
 ### 5. 分布式采样（plan/distributed-rollout.md，rl/queue.py + tools/agent/sampler-agent.ts）
 
-- `dist-nodes.json`（gitignored）：节点 url/authKey/concurrency/enabled；每轮分派点动态读取。
+- `rl-config.json`（gitignored）：节点 url/authKey/concurrency/enabled；每轮分派点动态读取。
 - 中央队列逐局 RPC：`POST /v1/weights`（x-kind 分桶：rollout / intent）→ `GET /v1/task`
   （kind/replan 透传）→ 异步 202 + `/v1/result` 轮询（结果缓存幂等）。
 - 权重切换（异 sha）→ agent 原子清场（旧权重+结果缓存）；同 sha 幂等不动。

@@ -108,6 +108,14 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     policy = cfg.get("policy", {})
     kl_cap = float(policy.get("streamKlCap", 0.12))
     wave_games = max(4, int(policy.get("streamWaveGames", 12)))
+    # M8 意图 RL：streamKlCap=0.2 是为 per-tick RL（单波数千步）标定的——意图 RL 单波
+    # 仅 ~12 局（~14 chunks），单波 KL 已达 ~0.32–0.49，会在第 1 波即触顶 → 派发停摆 →
+    # ~90% rollout 被丢弃、整轮空等 1800s 窗口。意图 RL 改用「单波覆盖整缓冲」语义：
+    # 大 wave_games（>每轮局数）→ 全量 140 局合成 1 波训完（均属 W(N) 同策略、完全
+    # on-policy），cum_kl ~0.15 远低于放宽后的 Intent 上限，不再半途 halt。
+    if getattr(args, "intent_rollout", False):
+        kl_cap = float(policy.get("streamKlCapIntent", kl_cap))
+        wave_games = max(4, int(policy.get("streamWaveGamesIntent", wave_games)))
     # 残局感知：本轮最多会到账多少新结算（计划 − 已在盘）。断点续跑常剩个位数
     # 缺口（it63：103/105），波次阈值以此为上限，避免静默空等收官。
     try:

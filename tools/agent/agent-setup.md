@@ -9,7 +9,7 @@
 
 ```
 协调器（Windows, run_rl.py 常驻）
-  │  每轮迭代开始时：读 dist-nodes.json → GET /v1/ping 各节点
+  │  每轮迭代开始时：读 rl-config.json → GET /v1/ping 各节点
   │  → POST /v1/weights 下发权重 → 中央队列派局
   ▼
 各节点 = HTTP 服务端（bun tools/agent/sampler-agent.ts --port 8443 --workers N）
@@ -21,7 +21,7 @@
 要点：
 - **节点是服务端**，协调器主动连它。节点只需允许入站 8443（或用出站隧道暴露，
   见 §4）。
-- **配置动态生效**：协调器每轮 rollout 前重读 `nn-training/dist-nodes.json`，
+- **配置动态生效**：协调器每轮 rollout 前重读 `nn-training/rl-config.json`，
   加/改节点**不需要重启训练**，下一轮迭代自动生效。
 - 任务级超时 900s 由协调器兜底回队重试；协议自带 20s 心跳字节防中间设备
   空闲回收连接——长任务可安全穿过反向代理。
@@ -153,7 +153,7 @@ chmod +x cloudflared && mkdir -p ~/bin && mv cloudflared ~/bin/
 ```
 
 ⚠️ quick tunnel 的 URL **每次重启 cloudflared 都会变**，变了要同步改
-dist-nodes.json。要固定 URL 需注册 Cloudflare 账号建命名隧道（免费档即可）。
+rl-config.json。要固定 URL 需注册 Cloudflare 账号建命名隧道（免费档即可）。
 
 ### 4.3 Cloud Shell 特有坑
 
@@ -198,13 +198,13 @@ while ($true) {
 - **绕不过的硬上限**：单会话 12h 硬杀（重连即重置时钟）；50 小时/周配额意味着
   24×7 保活物理不可能（需 168h/周）——保活必须绑定训练窗口，收训即停。
 - 收益：少废在跑局（否则等 900s 才回队）；cloudflared 少重启 → quick tunnel URL
-  稳定、dist-nodes.json 少改；人工重连次数趋零。
+  稳定、rl-config.json 少改；人工重连次数趋零。
 - 节点若要真正 7×24，正确路径是迁 GCE e2-micro 免费层或其他免费 VM：
   Cloud Shell 无配额豁免机制，天生不是常驻算力。
 
 ## 5. 协调器侧接入（Windows）
 
-编辑 `nn-training/dist-nodes.json`，`nodes[]` 追加：
+编辑 `nn-training/rl-config.json`，`nodes[]` 追加：
 
 ```json
 {
@@ -221,7 +221,7 @@ while ($true) {
 详见 docs/nn.progress.md §6.4）。
 
 安全：authKey 是节点唯一门禁。走公网隧道时尤其保管好；疑似泄露就删掉该节点
-的 `tools/agent/agent.auth` 重启 agent 轮换，再同步更新 dist-nodes.json。
+的 `tools/agent/agent.auth` 重启 agent 轮换，再同步更新 rl-config.json。
 
 ## 6. 接入验证清单（按序核对）
 
@@ -241,7 +241,7 @@ while ($true) {
 | curl 得到 `<a>Found</a>` / jwt 重定向页 | Cloud Shell 端口预览鉴权墙 | 改走 §4 cloudflared 隧道 |
 | `codeHash mismatch — excluded (red)` | commit 不一致或有本地改动 | `git status` 必须干净且在指定 commit |
 | `bunVersion ... differs — excluded (red)` | 非 1.4.x | 更换 bun 构建（major.minor 必须一致） |
-| 大量 `HTTP 503: {"error":"busy"}` | concurrency > workers | 调低 dist-nodes.json 的 concurrency |
+| 大量 `HTTP 503: {"error":"busy"}` | concurrency > workers | 调低 rl-config.json 的 concurrency |
 | `wver not cached here` (409) | 该节点尚未收到本轮权重 | 等下轮 weights POST；持续出现则查 POST 失败行 |
 | `Remote end closed` | 传输中断连（休眠/省电断网） | 插电 + wake-lock；任务 900s 超时自动回队 |
 

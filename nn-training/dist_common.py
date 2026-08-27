@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "dist-nodes.json")
+CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "rl-config.json")
 
 SHARD_FILES = (
     "obs.npy", "scalars.npy", "a_move.npy", "a_fire.npy",

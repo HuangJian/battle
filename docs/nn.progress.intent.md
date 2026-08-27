@@ -1,3 +1,65 @@
+## §28. Bug A 修复深层合理性 — streamKlCap / streamWaveGames 语义分解（2026-08-27 傍晚）
+
+**背景**：§27 记录了 Bug A（stream 半途 halt）的修复——`rl-config.json` policy 加
+`streamKlCapIntent:1.0, streamWaveGamesIntent:200`。本节对「这样改是否合理」做机制级论证。
+
+**机制**（依据 `rl/stream.py`）：
+- `kl_cap` 是 `cum_kl` 预算上限；`cum_kl` 在 L205 为**每波 KL 累加**（= 整轮策略相对数据生成策略
+  W(N) 的总漂移）；L213 `if state["cum_kl"] > kl_cap: halted=True` → 置 `halt_ev` → 队列停派发 →
+  后续已结算未训语料记 `dropped`。
+- `wave_games` 是每波吞局数触发阈值 `w_thr`（L231）；每波实际上限 `wave_cap = max(wave_games*2, 24)`
+  （L224）。
+
+**per-tick 的 `streamKlCap=0.2` 为何合理**：per-tick 一轮 = 大 rollout 分多波（每波 ~12 局），单波 PPO
+更新 KL 极小（健康 ~0.045–0.054）。`cum_kl` 跨整轮累加到 0.2 才 halt = 真正的「每轮 KL 预算」语义：
+多波累计漂移超限即停，保 on-policy。
+
+**直接套 0.2 到 intent 为何炸（Bug A 根因）**：intent 单波更新 KL ~0.32–0.49（L112 注释）。若沿用
+`wave_games=12` + `kl_cap=0.2`：第 1 波 `cum_kl≈0.35 > 0.2` → `halted` → 派发停摆 → 剩余 ~128 局永不
+采集、`dropped` 记账、空等 1800s。与 `training_log` 实测（`halted=true, waves=1, dropped≈52–58`）吻合。
+**根因 = per-tick 的「预算」标定误用于 intent 的「单次大更新」**（与 Bug D 同类问题）。
+
+**修复合理性分解**：
+
+| 旋钮 | 作用 | 是否真修好 Bug A |
+|---|---|---|
+| `streamWaveGamesIntent:200` | `w_thr=200 > 每轮 140 局` → 采集中途永不 drain；全部 140 局收尾一次性 `_drain(True, cap=400)` → **合成 1 波**单 PPO 更新 | ✅ **修复本体** |
+| `streamKlCapIntent:1.0` | 单波 `cum_kl≈0.15–0.35 << 1.0` → 不触顶 | ⚠️ 必要但不充分 |
+
+**关键判据**：若只把 `kl_cap` 改成 1.0、保留 `wave_games=12`，第 ~3 波 `cum_kl~1.0` → 仍 halt、仍丢
+~70% rollout。**`1.0` 单独不能修 Bug A，必须配 `200` 把迭代压成单波。**
+
+**为何 intent 必须「等全部 140 局采完才启动 PPO」（单波是设计意图，非 200 的副作用）**：
+1. **on-policy 完整性**：intent 单步更新 KL ~0.35，是 per-tick 单波（~0.05）的 ~7×。若每轮分 ~12 波，
+   整轮累计漂移 ≈ 12×0.35 ≈ **4.2 KL**——越后的波训练的是 W(N) 数据，但当前策略已离 W(N) 4+ KL →
+   重要性采样比爆炸、PPO clip 砍光梯度 → 后波变噪声/废更新。
+2. **`kl_cap` 机制与 intent 语义冲突**：它是为 per-tick 多波小步标定的，表达不了「一轮只做一次大更新」。
+   多波 intent 陷入两难：cap 低 → 第 1–3 波 halt 丢数据；cap 高 → 放任 4.2 累计漂移更糟。单波是**唯一**
+   同时避开「halt 丢数据」与「漂移失控」的路。
+3. 对应 M8 semi-MDP「每轮一次决策级大更新」与 `stream.py` L63-65「整轮权重冻结 W(N)」设计：单波 = 一次
+   更新把整轮 W(N) 数据训完，累计漂移锁在「一次自然更新」量级。
+
+**`1.0` 数值本身是否合理**：单波下 `cum_kl > kl_cap` 检查发生在**单波 PPO 已写完权重之后**（L213 在
+L203 之后）→ 无法阻止数据丢失，纯「事后天花板」。自然单波 KL ~0.15–0.35 → 1.0 留巨大 headroom 不误杀；
+若某次更新 KL≥1.0（灾难性漂移）则 halt 无害（单波下后续无可拦）。真正的跨迭代持续漂移由 `breaker`
+（`kl_break=0.6 × 3 iters`，Bug D 修的）兜——**两层防护**：stream kl_cap 拦单次发疯更新、breaker 拦
+持续漂移。1.0 作「慷慨的单次上限」合理。
+
+**`200` 的隐含脆弱性**：假设每轮 ≤~140 局（当前 `35×4=140` 安全）。若未来 games/iter 调到 >200，会
+**静默裂成 2 波** → 重新累积 `cum_kl` 可能再 halt。当前安全，但略脆；更稳写法是明确超界常数（如
+`100000`）或专用 `singleWaveIntent` flag。
+
+**`--stream` 在 intent 模式剩什么价值**：单波下「波级采集/训练重叠」确实失效（PPO 等 140 局采完才启）。
+但 `--stream` 仍保住两块真价值：(1) 分布式派发（4 LAN agent + 本地槽并行采 140 局）；(2) **采集中并行
+干净评估**——eval 在「派发队列清空」时触发（L147 `on_queue_drained`，140 局一发出就 fire），与节点跑
+游戏/PPO 全程并行。即牺牲「波级流水线重叠」（对 intent 本不该有），留住「分布式采集 + 评估并行」（对
+intent 真正有用）。
+
+**结论**：`streamWaveGamesIntent:200`（单波）+ `streamKlCapIntent:1.0`（事后天花板）组合根治 Bug A，
+且与 Bug D 的 `breaker` 阈值形成一致的「两层 KL 护栏」。单波是 intent RL 的**预期形态**，非回归。
+
+---
+
 ## §26. M7② rollout 意图分布探针 — B′ vs SS 冷启动风险预评（2026-08-27）
 
 **目的**：M8 RL 冷启动选臂前，量化 B′（72%胜率网）与 SS（60.1%，self-feed gap 2.1pp）的
@@ -27,6 +89,44 @@ intent-exec 精确环路，复用 runSimulation）。主口径=每 replan **原�
 4. 探针基础设施（intent trace）只读、零 RNG、默认关——非探针路径字节等价（AGENTS §14）。
 
 **下一步**：以 B′ 作为 M8 RL 初始策略（replan=30 固定），PPO 从 B′ 权重冷启动。
+
+---
+
+## §27. M8 it1–it6 接管 + 两个真 bug 定位与修复（2026-08-27 下午）
+
+**接管基线（git `intent-ai` 分支，latest `intent-rl-weights.it6.20260827-151258.json`）**：
+rollout winRate 单调爬升 it1 0.721 → it4 0.764 → it6 **0.776**（M7② 基线 0.723，rollout 口径已为正）。
+但两处埋雷，使"看似进步"的迭代其实没在正确学习：
+
+**Bug A — stream 半途 halt（90% rollout 浪费，R1 熔断误触发）**：
+`rl-config.json` 的 `streamKlCap=0.2` 为 per-tick RL（单波数千步、单波 KL~0.05）标定。意图 RL
+单波仅 ~12 局（~14 chunks），**单波 KL 已达 0.32–0.49**（it5 0.489 / it6 0.319）→ 第 1 波即
+`cum_kl>cap` → `halt_event` 置位 → 派发停摆、剩余 ~128 局永不派发 → 整轮空等 1800s 窗口。
+实测 it5/6：`halted=true, waves=1, dropped_games=52–58, rollout_sec=1802, steps≈56–60`
+（PPO 只训了 14 chunks ≈ 10% 的 rollout 数据）。4 个 LAN agent 其实 codeHash 匹配、可达、
+evalSupport=True，但因派发在单波后停摆，它们几乎没被用上 → 140 局硬扛在 ~13 本地槽 → 30min。
+
+**修复**：`rl/stream.py` 在 `intent_rollout` 时改用意图专属覆盖；`rl-config.json` policy 加
+`streamKlCapIntent:1.0, streamWaveGamesIntent:200`。语义改为"单波覆盖整缓冲"——全量 140 局
+合成 1 波（均属 W(N) 同策略、完全 on-policy）训完，cum_kl~0.15 远低于放宽后的 Intent 上限，
+不再半途 halt，LAN agent 正常吃满。
+
+**Bug B — clean eval 恒为 null（gate 全盲）**：
+`run_rl_intent.run_clean_eval` 正则 `r"winRate[=:\s]+([\d.]+)%"` 大小写敏感，但 m1-eval 打印
+横幅为 **`WIN RATE 65.7%`**（大写 + 空格）→ 永不命中 → `win=None` → `delta=None`。it5 干净
+评估因此全 blind（eval_summary winRate=null），M8 主门指标（Δ vs 0.723）至今无从判读。
+
+**修复**：正则改 `r"win[ -]?rate[=:\s]+([\d.]+)\s*%" + re.IGNORECASE`。
+
+**验证（排除"B 是崩溃"假设）**：35 关×1 seed 干净评估（it6 权重）实跑 **PASS 65.7%**，逐关无
+崩溃 → 确认是正则 bug 而非执行器崩溃。350 关×10 seed 干净评估（it6 权重）后台跑批取真值 Δ。
+
+**结论**：it1–it6 的"进步"是在错误训练配置下取得的（90% 数据被丢弃 + gate 盲），必须带着修复
+从 it6 resume 重跑 it7→it15，并以修正后的 350-game 干净评估重判 Δ。修复后单轮应 ~5–8min
+（LAN 满负荷）而非 30min，且 PPO 训满整缓冲。
+
+>&nbsp;后续：it6 真值 → resume it7–it15（LAN 现高效 + eval 不盲）；门 = iter15 Δ>0 vs 0.723
+>&nbsp;且 baseIntegrity 上行；iter15 Δ≤0 → 止损转 M9。
 
 ---
 

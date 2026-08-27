@@ -18,7 +18,7 @@
  * 稳定性问题，允许降级为等价的 node:http 实现（协议不变）。
  *
  * 启动：bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048]
- * 首启生成随机 authKey 写同目录 agent.auth 并打印一次；运维复制到 dist-nodes.json。
+ * 首启生成随机 authKey 写同目录 agent.auth 并打印一次；运维复制到 rl-config.json。
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'

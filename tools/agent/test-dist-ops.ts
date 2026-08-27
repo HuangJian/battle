@@ -17,7 +17,7 @@ const doPull = process.argv.includes('--pull')
 const doRestart = process.argv.includes('--restart')
 const branch = arg('branch', '')
 
-const cfg = JSON.parse(readFileSync('nn-training/dist-nodes.json', 'utf8')) as {
+const cfg = JSON.parse(readFileSync('nn-training/rl-config.json', 'utf8')) as {
   nodes: Array<{
     id: string
     url: string

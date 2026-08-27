@@ -26,19 +26,24 @@ CIRCUIT_EXIT_CODE = 3
 
 
 def breaker_update(kl_streak: int, ent_streak: int, *, kl: float, entropy: float,
-                   win_rate: float) -> tuple[int, int, str | None]:
+                   win_rate: float, kl_break: float = KL_BREAK,
+                   kl_consec: int = KL_BREAK_CONSEC) -> tuple[int, int, str | None]:
     """推进连击计数并判定是否熔断。
 
     返回 (kl_streak, ent_streak, tripped)：tripped 为 None 表示继续训练，
     否则为可读的熔断原因（调用方写 circuit_break 事件并停车）。
     agg 缺失（流式 checkpoint-complete 轮无任何梯度步）由调用方短路，不计连击。
+
+    kl_break / kl_consec 为可选覆盖（默认 = per-tick 常量 KL_BREAK / KL_BREAK_CONSEC）。
+    意图 RL 每代是一次 12–15 局大更新，每代 KL 天然 ≈0.32–0.49，远超 per-tick 的
+    0.045–0.054 健康带 → 必须用更高阈值（如 0.6 / 3），否则连续 3 代必误熔断（Bug D）。
     """
-    kl_streak = kl_streak + 1 if kl >= KL_BREAK else 0
+    kl_streak = kl_streak + 1 if kl >= kl_break else 0
     ent_streak = (ent_streak + 1
                   if entropy <= ENT_BREAK and win_rate < ENT_BREAK_MAX_WINRATE else 0)
-    if kl_streak >= KL_BREAK_CONSEC:
+    if kl_streak >= kl_consec:
         return kl_streak, ent_streak, \
-            f"kl>={KL_BREAK} for {kl_streak} consecutive iters (now {kl:.3f})"
+            f"kl>={kl_break} for {kl_streak} consecutive iters (now {kl:.3f})"
     if ent_streak >= ENT_BREAK_CONSEC:
         return kl_streak, ent_streak, (
             f"entropy<={ENT_BREAK} for {ent_streak} consecutive iters "

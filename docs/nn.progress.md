@@ -350,7 +350,7 @@ checkpoint 归档（当前权重只进不退无法回滚峰值）。沿现奖励
   （同轮干净评估正常，探索态扰动非永久损伤）。
 
 ### 10.2 决策与观察项
-- **决策（用户拍板 A1）**：`dist-nodes.json` policy 增加 `"streamKlCap": 0.20`
+- **决策（用户拍板 A1）**：`rl-config.json` policy 增加 `"streamKlCap": 0.20`
   （≈105 局成本 0.19+增长余量）。热生效：主循环每迭代重读配置，无需重启进程。
   软降档点随动至 0.14（~第 78 局收缩波次），仍保留熔断兜底。
 - 观察：① dropped_games 应归零或个位数；② 干净评估胜率是否因单轮移动幅度变大
@@ -538,7 +538,7 @@ SearchReplace 且改后必 py_compile。
   110min——频繁重启合并历史 shard 的隐性代价再次确认）。
 
 ### 6.4 事故与教训
-1. **dist-nodes.json concurrency 必须 ≤ agent 实际 --workers**：首轮 self 按 10 并发打
+1. **rl-config.json concurrency 必须 ≤ agent 实际 --workers**：首轮 self 按 10 并发打
    2-worker agent → 3 连 `503 busy` → nodeFailStreak=3 即熔断出局。503 是协调器侧
    计数的失败，重试还烧 MAX_TASK_ATTEMPTS。已改 concurrency=2（下轮 ping 生效）。
 2. **配置文件被神秘回写**：07:35 编辑的 self.concurrency 10→2 在重启前被改回 10

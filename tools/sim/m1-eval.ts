@@ -103,7 +103,7 @@ async function main(): Promise<void> {
       ? Math.min(fixedWorkers, physical)
       : Math.min(parseInt(arg('workers', String(physical))!, 10), physical)
   const outPath = arg('out', 'tmp/m1_eval_scorecard.html')!
-  // v3.7 分布式分派：--dist-nodes <dist-nodes.json> 时，评估任务经 HTTP 派发到
+  // v3.7 分布式分派：--dist-nodes <rl-config.json> 时，评估任务经 HTTP 派发到
   // rollout agent（mode=eval&kind=intent&policy=intent-exec），利用云机算力跑 NN 策略。
   const distNodesPath = arg('dist-nodes', '')
   const iterId = arg('iter-id', `m1eval-${Date.now()}`)!
@@ -630,7 +630,7 @@ async function runHybrid(
     }, 2500)
   })().catch(() => {})
 
-  // v3.9 动态节点发现：周期（默认 120s）重读 dist-nodes.json，把中途上线的
+  // v3.9 动态节点发现：周期（默认 120s）重读 rl-config.json，把中途上线的
   // 新节点（或运行中被加入配置的节点）也纳入分派——权重幂等上传 + spawn 其并发链。
   const rescanCfg = (cfg as { policy?: { agentRescanSec?: number } }).policy
   const rescanSec = ((): number => {

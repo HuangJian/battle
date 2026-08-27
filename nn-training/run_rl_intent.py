@@ -16,9 +16,19 @@
     主指标 = Δ vs --baseline（M7② 72.3%，预注册 #27 iter15 350 局）；iter15 Δ≤0 →
     止损转 M9（P2-5）。
 
+**启动参数单一事实来源（用户 2026-08-27 指令）**：
+所有 argparse 启动参数的默认值存放在 `nn-training/rl-config.json` 的 `intent_rl`
+块；本文件 argparse 的 `default` 直接读该块（缺失才回退下方硬编码常量）。使用纪律：
+  1. 平时启动 RL 直接用 json 默认参数，命令行不必重复指定（启动器仅传
+     `-Script run_rl_intent.py`）。
+  2. 仅在排查/调试问题时，才在启动命令里显式追加参数（覆盖 json 默认）用于定位。
+  3. 调试结束、参数验证有效后，把该值写回 `rl-config.json` 的 `intent_rl` 块作为新默认。
+禁止在 json 之外把可调参数硬编码成"第二个默认"——保持单一事实来源。
+注意：`--start-it` 不在此块内（续跑轮次由 training_log 自动派生，仅手动重跑时显式传 CLI）。
+
 经统一启动器进入（venv/torch 由它保证）：
-  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 ^
-      -Script run_rl_intent.py --iters 15 --workers 8
+  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script run_rl_intent.py
+  # 启动参数取自 rl-config.json 的 intent_rl 块；调试时追加 --iters 20 等覆盖即可。
 """
 from __future__ import annotations
 
@@ -47,9 +57,8 @@ from rl.queue import (REPO_ROOT as _RQ, RUN_ID,  # noqa: E402,F401
 from rl.resume import (completed_pairs, last_completed_iter,  # noqa: E402
                        last_rotate_seed)
 from rl.stream import run_rollout_stream  # noqa: E402
-from rl.breaker import (CIRCUIT_EXIT_CODE, ENT_BREAK, ENT_BREAK_CONSEC,  # noqa: E402
-                        ENT_BREAK_MAX_WINRATE, ENT_COLLAPSE_DROP, KL_BREAK,
-                        KL_BREAK_CONSEC, KL_WARN, breaker_update)
+from rl.breaker import (CIRCUIT_EXIT_CODE, KL_WARN, ENT_COLLAPSE_DROP,  # noqa: E402
+                        breaker_update)
 from run_rl import backup_weights  # noqa: E402
 
 # M7② 基线（m1-eval 35×10 hard，intent-exec B′，nn.progress.intent §25/§26）。
@@ -86,23 +95,29 @@ def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
 
 
 def run_clean_eval(bun: str, rl_path: str, args) -> dict:
-    """m1-eval intent-exec 固定语料贪心评估（本机并发；35 关 × eval_seeds/关）。
+    """m1-eval intent-exec 固定语料贪心评估（派发到 4 LAN agent；35 关 × eval_seeds/关）。
 
     seeds 固定为 1..N 与 M7② 基线同语料 → 配对可比（P1-1k3 / §245 协议）。
+    --dist-nodes 派发到远端（agent evalSupport=true，mode=eval&kind=intent 跑 NN 策略），
+    本机不再独占 350 局；若无可达节点 m1-eval 自动回退本机（幂等）。
     """
     seeds = args.eval_seeds
     cmd = [bun, "tools/sim/m1-eval.ts",
            "--stages", "all", "--seeds", f"1-{seeds}",
            "--difficulty", args.difficulty,
            "--policy", "intent-exec", "--intent-weights", rl_path,
+           "--dist-nodes", "nn-training/rl-config.json",
            "--workers", str(max(2, min(8, args.workers)))]
-    log(f"clean eval: {' '.join(cmd)}")
+    log(f"clean eval (distributed): {' '.join(cmd)}")
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=3600)
     if proc.returncode != 0:
         raise RuntimeError(f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
     win = None
     for line in proc.stdout.splitlines():
-        m = re.search(r"winRate[=:\s]+([\d.]+)%", line)
+        # m1-eval prints "WIN RATE 65.7%" (uppercase, with a space) — case-insensitive
+        # match so the gate metric is never silently null (regression: a case-sensitive
+        # 'winRate' pattern never matched the banner line → every clean eval read null).
+        m = re.search(r"win[ -]?rate[=:\s]+([\d.]+)\s*%", line, re.IGNORECASE)
         if m:
             win = float(m.group(1)) / 100
             break
@@ -158,43 +173,72 @@ def _read_eval_summary(jsonl_path: Path, it: int) -> dict | None:
 
 def main() -> None:
     os.chdir(REPO_ROOT)
+    # 启动参数默认取自 rl-config.json 的 intent_rl 块（单一事实来源，见文件顶部规则）。
+    # CLI 显式传参会覆盖 json 默认，用于调试；调试结束写回 json。
+    rl_args = _load_intent_rl_args()
+
+    def _d(name, fallback):
+        """json 默认优先，缺失回退硬编码常量（CLI 在 argparse 层再覆盖）。"""
+        return rl_args.get(name, fallback)
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bc", default="tmp/intent-weights-Bp.json", help="B′ 意图 BC 权重（首轮 init）")
-    ap.add_argument("--out", default="tmp/intent-rl/weights.json", help="RL 意图权重路径（每轮写回；续跑源）")
-    ap.add_argument("--traj", default="tmp/intent-rl", help="意图 rollout shard 根（默认 tmp/intent-rl）")
-    ap.add_argument("--iters", type=int, default=15)
-    ap.add_argument("--start-it", type=int, default=None)
-    ap.add_argument("--rotate-stages", type=int, default=35, help="每轮轮转覆盖的关数（35=全量）")
-    ap.add_argument("--seeds-per-stage", type=int, default=4, help="每关新鲜种子数（4 → 140 局/轮）")
-    ap.add_argument("--total-stages", type=int, default=35)
-    ap.add_argument("--difficulty", default="hard")
-    ap.add_argument("--max-ticks", type=int, default=12000)
-    ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12))
-    ap.add_argument("--local-slots", type=int, default=10,
+    ap.add_argument("--bc", default=_d("bc", "tmp/intent-weights-Bp.json"),
+                    help="B′ 意图 BC 权重（首轮 init）")
+    ap.add_argument("--out", default=_d("out", "tmp/intent-rl/weights.json"),
+                    help="RL 意图权重路径（每轮写回；续跑源）")
+    ap.add_argument("--traj", default=_d("traj", "tmp/intent-rl"),
+                    help="意图 rollout shard 根（默认 tmp/intent-rl）")
+    ap.add_argument("--iters", type=int, default=_d("iters", 15))
+    ap.add_argument("--start-it", type=int, default=None,
+                    help="手动指定起始迭代（续跑由 training_log 自动派生；仅手动重跑时传 CLI，不进 json）")
+    ap.add_argument("--rotate-stages", type=int, default=_d("rotate_stages", 35),
+                    help="每轮轮转覆盖的关数（35=全量）")
+    ap.add_argument("--seeds-per-stage", type=int, default=_d("seeds_per_stage", 4),
+                    help="每关新鲜种子数（4 → 140 局/轮）")
+    ap.add_argument("--total-stages", type=int, default=_d("total_stages", 35))
+    ap.add_argument("--difficulty", default=_d("difficulty", "hard"))
+    ap.add_argument("--max-ticks", type=int, default=_d("max_ticks", 12000))
+    ap.add_argument("--workers", type=int, default=_d("workers", min(os.cpu_count() or 4, 12)))
+    ap.add_argument("--local-slots", type=int, default=_d("local_slots", 10),
                     help="本机直接 rollout 槽位（流式下首个 PPO 波次后让位训练；0=自动 max(2,workers//4)）")
-    ap.add_argument("--stream", type=int, default=1,
+    ap.add_argument("--stream", type=int, default=_d("stream", 1),
                     help="1=流式（rollout 与 PPO 波次重叠，推荐）；0=串行")
-    ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=512)
-    ap.add_argument("--lr", type=float, default=ppo_intent.LR)
-    ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--replan", type=int, default=30, help="意图 replan cadence（M7① 定稿 30）")
-    ap.add_argument("--warmup-iters", type=int, default=1,
+    ap.add_argument("--epochs", type=int, default=_d("epochs", 4))
+    ap.add_argument("--mb", type=int, default=_d("mb", 512))
+    ap.add_argument("--lr", type=float, default=_d("lr", ppo_intent.LR))
+    ap.add_argument("--seed", type=int, default=_d("seed", 7))
+    ap.add_argument("--replan", type=int, default=_d("replan", 30), help="意图 replan cadence（M7① 定稿 30）")
+    ap.add_argument("--warmup-iters", type=int, default=_d("warmup_iters", 1),
                     help="前 N 迭代只训 value 头（B′ 冷启动 value 随机 → 先学回报基线再动策略）")
-    ap.add_argument("--kickstart-kl", type=float, default=1.0,
+    ap.add_argument("--kickstart-kl", type=float, default=_d("kickstart_kl", 1.0),
                     help="kickstarting KL 惩罚基础系数（plan #5；0=关闭）")
-    ap.add_argument("--kickstart-decay", type=float, default=0.5,
+    ap.add_argument("--kickstart-decay", type=float, default=_d("kickstart_decay", 0.5),
                     help="kickstarting 系数每策略迭代衰减因子（预注册 #5：0.5/iter）")
-    ap.add_argument("--keep-iters", type=int, default=3)
-    ap.add_argument("--eval-at", default=DEFAULT_EVAL_AT, help="干净评估的迭代集合（逗号分隔）")
-    ap.add_argument("--eval-seeds", type=int, default=10, help="干净评估每关种子数（350 局/轮 @10）")
-    ap.add_argument("--eval-window-sec", type=int, default=1800,
+    ap.add_argument("--keep-iters", type=int, default=_d("keep_iters", 3))
+    ap.add_argument("--eval-at", default=_d("eval_at", DEFAULT_EVAL_AT),
+                    help="干净评估的迭代集合（逗号分隔）")
+    ap.add_argument("--eval-seeds", type=int, default=_d("eval_seeds", 10),
+                    help="干净评估每关种子数（350 局/轮 @10）")
+    ap.add_argument("--eval-window-sec", type=int, default=_d("eval_window_sec", 1800),
                     help="干净评估线程 join 预算；超时未结算放弃（不阻塞下一轮）")
-    ap.add_argument("--baseline", type=float, default=DEFAULT_BASELINE,
+    ap.add_argument("--baseline", type=float, default=_d("baseline", DEFAULT_BASELINE),
                     help="M7② 基线胜率（干净评估 Δ 的参照）")
+    ap.add_argument("--kl-break", type=float, default=_d("kl_break", 0.6),
+                    help="F4 KL 熔断阈值（意图 RL 专属；per-tick 用 breaker.py 常量 0.15）。"
+                         "正常意图 KL≈0.32–0.49 不触发，仅极端漂移才拦。覆盖 json intent_rl.kl_break。")
+    ap.add_argument("--kl-break-consec", type=int, default=_d("kl_break_consec", 3),
+                    help="F4 KL 连续代阈值（意图 RL 专属）。覆盖 json intent_rl.kl_break_consec。")
+    ap.add_argument("--out-log", default=_d("out_log", "tmp/intent-rl/train.out.log"),
+                    help="stdout 落盘路径（json intent_rl.out_log；CLI 覆盖；空=仅控制台）。Tee 控制台+文件。")
+    ap.add_argument("--err-log", default=_d("err_log", "tmp/intent-rl/train.err.log"),
+                    help="stderr 落盘路径（json intent_rl.err_log；CLI 覆盖；空=仅控制台）。Tee 控制台+文件。")
     args = ap.parse_args()
     # 意图 rollout 语义透传给 rl.queue / rl.stream（intent_rollout 分支 + kind/replan）。
     args.intent_rollout = True
+    # stdout/stderr 落盘（路径来自 json intent_rl.out_log/err_log，CLI 可覆盖调试）。
+    _setup_log_redirect(args)
+    # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
+    _log_rl_args(args, rl_args)
 
     bun = shutil.which("bun")
     if bun is None:
@@ -403,11 +447,12 @@ def main() -> None:
                 }
                 f.write(json.dumps(rec) + "\n")
 
-            # F4 熔断（纯逻辑 rl/breaker.py，与 run_rl.py 同阈值语义）。
+            # F4 熔断（纯逻辑 rl/breaker.py；意图 RL 用更高的 KL 阈值，避免误熔断 Bug D）。
             if agg is not None:
                 kl_streak, ent_streak, tripped_now = breaker_update(
                     kl_streak, ent_streak, kl=agg["kl"], entropy=agg["entropy"],
-                    win_rate=report["winRate"])
+                    win_rate=report["winRate"],
+                    kl_break=args.kl_break, kl_consec=args.kl_break_consec)
                 if tripped_now is not None:
                     tripped = tripped_now
                 if tripped is not None:
@@ -480,6 +525,86 @@ def _weights_fingerprint(path: str) -> str:
 def _load_dist_config():
     import dist_common
     return dist_common.load_dist_config()
+
+
+def _load_intent_rl_args() -> dict:
+    """启动参数默认来源：rl-config.json 的 intent_rl 块（单一事实来源）。
+
+    见文件顶部「启动参数单一事实来源」规则。加载失败（缺文件/坏 JSON/路径异常）时
+    返回空 dict，argparse 回退到硬编码常量，训练仍可离线启动。
+    """
+    try:
+        cfg = _load_dist_config()
+        return dict(cfg.get("intent_rl", {}) or {})
+    except Exception as e:  # noqa: BLE001
+        log(f"WARN cannot load intent_rl args from rl-config.json ({e}); "
+            f"falling back to hardcoded defaults")
+        return {}
+
+
+# intent_rl 块中受管的启动参数名（与 argparse dest 一一对应）。
+_RL_ARG_KEYS = ("bc", "out", "traj", "iters", "rotate_stages", "seeds_per_stage",
+                "total_stages", "difficulty", "max_ticks", "workers", "local_slots",
+                "stream", "epochs", "mb", "lr", "seed", "replan", "warmup_iters",
+                "kickstart_kl", "kickstart_decay", "keep_iters", "eval_at",
+                "eval_seeds", "eval_window_sec", "baseline", "kl_break",
+                "kl_break_consec", "out_log", "err_log")
+
+
+def _log_rl_args(args, rl_args: dict) -> None:
+    """生效启动配置落地日志：标注每个参数来源（json / fallback），便于核对单一事实来源。"""
+    src = {k: ("json" if k in rl_args else "fallback") for k in _RL_ARG_KEYS}
+    log(f"[launch] intent_rl args source: " + " ".join(f"{k}={src[k]}" for k in _RL_ARG_KEYS))
+    log(f"[launch] intent_rl effective: " + json.dumps(
+        {k: getattr(args, k) for k in _RL_ARG_KEYS}, default=str))
+
+
+class _Tee:
+    """同时写多个流（控制台 + 文件），供长训日志持久化且终端仍可见。"""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _setup_log_redirect(args) -> None:
+    """stdout/stderr 重定向到 json 配置的 out_log/err_log（Tee 控制台+文件）。
+
+    路径来自 intent_rl 块（CLI --out-log/--err-log 可覆盖调试）。空字符串=仅控制台。
+    落盘采用追加模式 + 启动横幅，多次启动日志累积且可按时间轴复盘。
+    """
+    if args.out_log:
+        try:
+            p = Path(args.out_log)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))
+            log(f"[launch] stdout -> {p} (tee console+file, append)")
+        except Exception as e:  # noqa: BLE001
+            log(f"WARN cannot redirect stdout to {args.out_log}: {e}")
+    if args.err_log:
+        try:
+            pe = Path(args.err_log)
+            pe.parent.mkdir(parents=True, exist_ok=True)
+            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))
+            log(f"[launch] stderr -> {pe} (tee console+file, append)")
+        except Exception as e:  # noqa: BLE001
+            log(f"WARN cannot redirect stderr to {args.err_log}: {e}")
 
 
 def _update_kwargs(args, it: int, start_it: int, ref_model):
