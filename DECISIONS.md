@@ -2144,3 +2144,23 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > **头部空间**：oracle 36 的 76.6% = M8 RL 优化意图选择后的可达上限（NN 现 72.3%）。
 > 全文 → docs/nn.progress.intent.md §25。
 
+## 300. M7② rollout 意图分布探针 — B′ vs SS 冷启动风险预评（2026-08-27）
+> **同一确定性 (stage×seed) 网格各 50 局**（hard，`tools/sim/rollout-intent-probe.ts`，`tmp/rollout_intent_probe.json`）：
+>
+> | 指标 | B′ | SS | Δ(B′−SS) |
+> |---|---|---|---|
+> | 胜率 | 78.0% | 76.0% | +2.0pp |
+> | replan 意图熵（原始 argmax） | 1.880 bits | 1.858 bits | +0.022 |
+> | replan HUNT 占比 | **42.6%** | **36.9%** | **+5.7pp** |
+> | 承诺意图熵 | 2.318 bits | 2.207 bits | +0.111 |
+> | 承诺 HUNT 占比 | 26.7% | 23.7% | +3.1pp |
+>
+> **口径**：主口径=每 replan 的原始 argmax（自馈注入序列推进的意图流，最接近 RL 冷启动策略产出）；
+> 次口径=实际承诺意图 trace（margin 门控后真正驱动玩法）。
+> **结论**：SS 未如期"更防御"——熵几乎持平（+0.022，无更分散/更保守信号），而 HUNT 占比低 5.7pp。
+> SS 的代价（胜率 −12pp 于 m1-eval 大网）源自 **HUNT recall 下降（0.93→0.71）**，
+> 而非意图分布熵的涣散；此探针佐证"佣金偏移不显著，进攻主力意图削弱"这一判断。
+> **M8 RL 冷启动选臂**：B′ 初始 rollout 意图分布更进攻（HUNT 高 5.7pp）、胜率更高 → 采样效率更优，
+> 作为 RL 起始策略优于 SS（SS 的 self-feed 优势在 RL on-policy 下收益为零）。开始 RL 即用 B′。
+> 全文 → docs/nn.progress.intent.md §26。
+

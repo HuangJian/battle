@@ -5,6 +5,89 @@
 
 ---
 
+## §16 tail fan-out 反向竞速修复 + 三节点就绪验证（2026-08-27）
+
+### 16.1 背景
+rollout 尾部分发（`nn-training/rl/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
+竞速取先返回。此前只修了「fan-out 副本迟到被 duplicate 拒收后误回队」的一面（主副本
+已 settled → inflight key 被删 → 副本落入正常失败分支 → 无限循环）。单节点 20 局测试
+暴露**反向竞速**：fan-out 副本抢先结算、**主副本**（`fanout_copy=False`）迟到被判
+duplicate 后仍落入正常回队分支，把已结算任务重新派发（`retried=2`）。
+
+### 16.2 修复
+`queue.py` 失败分支在 `if fanout_copy:` 之后新增对等拦截：`task in seen` 即已结算，
+静默丢弃（补 inflight 减计数）。重跑同 20 局：`retried=2 → 0`，新增日志
+`main s4/seed3 failed (duplicate) — settled by fanout copy, dropped` 命中验证。
+
+### 16.3 三节点验证（mac 192.168.0.88 / a97 192.168.0.97 / a98 192.168.0.98）
+- 三节点同 commit（codeHash `1fd6b9bf…`, agentVersion `e0a01e1`），evalSupport 均 true。
+- rollout fan-out：30 局三节点，30/30 settled、missing=0、retried=0，负载 12/10/8，
+  3 个 fanout 副本正确丢弃。
+- m1-eval `--dist-nodes`：30 局（stages 1-5 × seeds 1-6）三节点分布式评估成功，
+  BCV2 解码 + v7 维度汇总 + HTML 输出正常。
+
+### 16.4 m1-eval v3.8 混合分派（用户指正 2026-08-27）
+v3.7 `runDist` 两个问题被用户当场指出：
+1. **本机闲置**：dist 模式下本机只当协调者，16 核全空。
+2. **并发未打满**：`i % nodes.length` 轮转指派，节点 concurrency 只决定总线程数，
+   不控制每节点在飞请求数——本应 mac4/a97 7/a98 7 = 18 slots，轮转下每节点同额分单。
+
+改为 `runHybrid`：每节点按其 concurrency 生成独立 fetch-loop（在飞请求数 = concurrency，
+精确占用节点容量），本地生成 `--dist-local` 个 worker-loop，全部共用同一共享游标——
+快节点/本地自动多吃尾部。冒烟 6 局（3 nodes 8 slots + local 2）全过，进度上报打通。
+正式 2100 局用 18 slots + local 16，10% 仅 1m12s（v7 纯本地 16 核 51min → 预计 ~12min）。
+
+### 16.5 scheduled sampling BC（M5 补件）训练验证（2026-08-27）
+训练：`--ss-eps 0.3 --quota 15000 --epochs 8`（B′ 同语料/shards），8 轮 loss 28.54→1.33、
+trainAcc 0.20→0.46。训练期 M5 probe gate FAIL（base margin 0.089 < 0.1）。
+
+**Self-feed gap（eval_intent_m5，评价目标）**：
+
+| 指标 | B′ 基线 | SS ε=0.3 | 变化 |
+|---|---|---|---|
+| teacher acc | 0.6009 | 0.5741 | -2.7pp |
+| self-feed acc | 0.4642 | **0.5531** | **+8.9pp** |
+| **gap** | **0.1367** | **0.0211** | **-11.6pp** |
+| RETURN_DEFENSE recall | 0.3135 | 0.4768 | +36pp |
+| HOLD_LANE recall | 0.0073 | 0.3408 | +33pp |
+| CLEAR recall | 0.5018 | 0.8368 | +34pp |
+| HUNT recall | 0.9277 | 0.7089 | **-22pp** |
+| safetyMisclass | 0.0772 | 0.1139 | 恶化 |
+
+**游戏级（hard 35×60，v3.8 hybrid 18slots+16local，~31min）**：
+
+| 指标 | B′ | SS | Δ |
+|---|---|---|---|
+| WIN | **71.7%** | **60.1%** (PASS ≥60%) | **-11.6pp** |
+| suite | 0.5364 | 0.5036 | -0.033 |
+
+**结论**：SS ε=0.3 把 self-feed gap 压缩到 2.1pp（目标达成），但代价是主力意图 HUNT
+recall 0.93→0.71、安全级误判 7.7%→11.4%，游戏胜率 71.7%→60.1% 显著退化（仅勉强
+PASS gate）。**ε=0.3 过猛**——自喂注入把重防御类（RETURN_DEFENSE/CLEAR）拉高、
+把进攻主力 HUNT 拉崩。下一步：试温和 ε=0.1（预期 gap ~5-8pp，保 HUNT 高位、胜率
+回 ~68-70%），或仅对非 HUNT 类做 SS 注入。
+
+### 16.6 v3.9 动态节点发现（用户需求 2026-08-27）
+跑批中途上线的 agent 也能贡献算力：rollout（`rl/queue.py`）与 m1-eval
+（`tools/sim/m1-eval.ts` runHybrid）都加了周期 agent 发现。
+
+- **rollout**：rescan 线程周期（policy `agentRescanSec`，默认 120s）ping 配置里未在跑的
+  节点，合格（codeHash/bun 版本/在线）→ 权重下发（幂等 kept）+ 孵化新 worker 线程
+  （共享 pending 队列）；`spawned_ids` 防重复孵化，不重启整轮。
+- **m1-eval**：初始激活改为 tryActivate（ping→幂等上传→spawn），离线节点不中断跑批、
+  留给 rescan 周期再探；`--dist-rescan` / policy `agentRescanSec` 控制周期
+  （默认 120s），运行中被加入配置文件的节点也能被发现；补了无消费者守护
+  （dist-local 0 且全离线不永久挂起，2.5s 内标记失败收尾）。
+
+**验证**（本机临时 agent，rescan=8s，late 节点延迟 10-12s 上线）：
+- rollout：`rescan: node late online mid-run — weights purged, spawning 2 workers`，
+  12/12 settled，late 贡献 7 局，fan-out/tail-dispatch 共存无冲突。
+- m1-eval：`rescan: node late online mid-run (+2 slots)`，16 局真实仿真全部完成；
+  纯远端 local=0 正常；全离线场景触发 `no consumer available` 守护不挂死。
+- 回归：`bun run check` 1536 pass / 0 fail；三节点混合分派 WIN 66.7% 正常。
+
+---
+
 ## §15 M3 BC warm-start 双臂（2026-08-26，plan/AI-No-Items-Warmstart.md §6）
 
 ### 15.1 训练（纯 BC，value 预置降级说明）

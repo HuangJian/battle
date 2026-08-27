@@ -175,6 +175,11 @@ export interface SimResult {
   forensics?: RunForensics
   /** Event-driven threat ledger (only when `threatLedger: true`). */
   ledger?: ThreatLedgerRun
+  /** intent-exec 策略每 replan 的原始 argmax 意图 + 边际（only when `recordIntentTrace`）。
+   *  intent 用作 rollout 意图分布探针（意图分布熵 / HUNT 占比）。 */
+  replanIntentTrace?: Array<{ tick: number; intent: number; margin: number }>
+  /** intent-exec 策略实际承诺（切换生效）的意图序列（only when `recordIntentTrace`）。 */
+  committedIntentTrace?: number[]
   /** M4 star census (only when `powerupCensus: true`). */
   powerupCensus?: {
     spawned: number
@@ -428,6 +433,9 @@ export interface RunOptions {
   riskGated?: boolean
   baseCadence?: number
   dangerCadence?: number
+  /** 返回 intent-exec 策略每 replan 的原始 argmax 意图 trace（只读，零 RNG，默认关）。
+   *  intent 用作 rollout 意图分布探针（意图分布熵 / HUNT 占比）。 */
+  recordIntentTrace?: boolean
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -607,6 +615,7 @@ export function runSimulation(opts: RunOptions): SimResult {
               riskGated: opts.riskGated,
               baseCadence: opts.baseCadence,
               dangerCadence: opts.dangerCadence,
+              recordReplanTrace: opts.recordIntentTrace,
             }) as unknown as GodAIInput)
           : opts.policy === 'intent-oracle'
             ? (new IntentOracleProbe(world, {
@@ -1122,6 +1131,18 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   if (opts.branchTotals === true) {
     result.branchTotals = { ...input.branchCounts }
+  }
+
+  if (
+    opts.recordIntentTrace === true &&
+    (opts.policy === 'intent-exec' || opts.policy === 'intent')
+  ) {
+    const ex = input as unknown as {
+      replanTrace?: Array<{ tick: number; intent: number; margin: number }>
+      intentTrace?: number[]
+    }
+    if (ex.replanTrace && ex.replanTrace.length) result.replanIntentTrace = ex.replanTrace
+    if (ex.intentTrace && ex.intentTrace.length) result.committedIntentTrace = ex.intentTrace
   }
 
   if (wantForensics) {

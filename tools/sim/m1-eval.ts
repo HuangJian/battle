@@ -177,8 +177,9 @@ async function main(): Promise<void> {
     )
   }
 
-  // v3.7：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
-  // 否则走本地 worker pool。dist 模式须 policy=intent-exec（NN 前向重，适合外派）。
+  // v3.8：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
+  // 本机 worker 同时并行参与（--dist-local 控制本机并发，0=纯远端；缺省全核）。
+  // dist 模式须 policy=intent-exec（NN 前向重，适合外派）。
   let results: import('./sim-worker').SimTaskResult[]
   if (distNodesPath) {
     if (policy !== 'intent-exec') {
@@ -189,7 +190,15 @@ async function main(): Promise<void> {
       process.stderr.write('[m1-eval] --dist-nodes requires --intent-weights\n')
       process.exit(2)
     }
-    results = await runDist(tasks, distNodesPath, iterId, intentWeights)
+    const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
+    results = await runHybrid(
+      tasks,
+      distNodesPath,
+      distLocal,
+      iterId,
+      intentWeights,
+      reportProgress,
+    )
   } else {
     const pool = new AdaptiveSimWorkerPool(workers, 1)
     pool.setAdjustHook((desired, load) => {
@@ -420,31 +429,44 @@ async function uploadWeights(
     throw new Error(`${node.id} weights upload HTTP ${resp.status}`)
 }
 
-/** 把 tasks 派发到 dist-nodes.json 的启用节点（mode=eval&kind=intent&policy=intent-exec）。
- *  并发 = 节点 concurrency 之和（缺省取 4）；单局失败重试一次。 */
-async function runDist(
+/**
+ * 混合分派（v3.8）：本机 worker + 远端节点共用同一任务游标并行消费。
+ *
+ * 为什么不是 v3.7 的 runDist：
+ *  - v3.7 用 `i % nodes.length` 轮转指派，节点 concurrency 只影响总线程数，
+ *    不控制每个节点实际在飞请求数——慢节点与快节点同额分单，并发没打满。
+ *  - v3.7 本机只当协调者，16 个本地核闲置。
+ *
+ * 本实现：每个节点按自己的 concurrency 生成独立 fetch-loop（在飞请求数 =
+ * concurrency，精确利用节点容量），本地生成 localWorkers 个 worker-loop，
+ * 全部从一个共享游标取任务——快节点/本地自动多吃，尾部不再被慢节点拖住。
+ */
+async function runHybrid(
   tasks: SimTask[],
   nodesPath: string,
+  localWorkers: number,
   iterId: string,
   intentWeightsPath: string,
+  onProgress: (done: number, total: number) => void,
 ): Promise<import('./sim-worker').SimTaskResult[]> {
   const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
   const nodes = (cfg.nodes ?? []).filter((n) => n.enabled !== false && n.url)
-  if (nodes.length === 0) throw new Error('no enabled nodes in dist-nodes.json')
-  const concurrency = nodes.reduce((s, n) => s + Math.max(1, n.concurrency ?? 4), 0)
+  if (nodes.length === 0 && localWorkers <= 0)
+    throw new Error('no enabled nodes and no local workers')
+
+  const localCap = Math.max(0, localWorkers)
+  const remoteCap = nodes.reduce((s, n) => s + Math.max(1, n.concurrency ?? 4), 0)
   process.stderr.write(
-    `[m1-eval] dist dispatch: ${nodes.length} nodes, ${concurrency} slots, ${tasks.length} games\n`,
+    `[m1-eval] hybrid dispatch: ${nodes.length} nodes (${remoteCap} slots) + local ${localCap}, ${tasks.length} games\n`,
   )
 
   const bytes = readFileSync(intentWeightsPath)
   const wver = createHash('sha256').update(bytes).digest('hex')
-  for (const n of nodes) await uploadWeights(n, 'intent', bytes, wver, iterId)
-  process.stderr.write(
-    `[m1-eval] intent weights uploaded to ${nodes.length} nodes (${wver.slice(0, 12)}…)\n`,
-  )
 
   const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
-  let next = 0
+  let next = 0 // 共享游标：同步读改写，事件循环内无竞态
+  let done = 0
+  const total = tasks.length
   const fail = (id: number): import('./sim-worker').SimTaskResult => ({
     id,
     ok: false,
@@ -453,51 +475,196 @@ async function runDist(
     killCount: 0,
     baseAlive: false,
   })
+  const settle = (i: number, res: import('./sim-worker').SimTaskResult): void => {
+    results[i] = res
+    done++
+    onProgress(done, total)
+  }
 
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const i = next++
-      if (i >= tasks.length) return
-      const task = tasks[i]
-      const node = nodes[i % nodes.length]
-      const url =
-        `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
-        `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
-        `&difficulty=${task.difficulty}&mode=eval&kind=intent&policy=intent-exec`
-      let ok = false
-      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+  // v3.9 动态节点发现：build 期不再用固定 Promise.all 收尾——改为计数式，
+  // 中途 spawn 的新 fetch-loop `pending++`，全部 loop 结束归零后 resolve。
+  let pending = 0
+  let resolveAll: () => void = () => {}
+  const allDone = new Promise<void>((r) => (resolveAll = r))
+  const finishLoop = (): void => {
+    pending--
+    if (pending <= 0) resolveAll()
+  }
+
+  // 已激活节点（按 url 去重）：初始节点 + rescan 中途加入的节点。
+  const activeNodes = new Set<string>()
+
+  // v3.9 动态节点激活：ping 通过 → 权重幂等上传 → spawn 并发链。
+  // 初始/中途统一走此路径——离线节点不激活、不中断整个跑批，留给 rescan 周期再探。
+  const tryActivate = async (node: DistNodeCfg): Promise<boolean> => {
+    let ok = false
+    try {
+      const r = await fetch(`${node.url}/v1/ping`, {
+        headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
+        signal: AbortSignal.timeout(5000),
+      })
+      ok = r.status === 200
+    } catch {
+      /* offline */
+    }
+    if (!ok) return false
+    try {
+      await uploadWeights(node, 'intent', bytes, wver, iterId)
+    } catch {
+      process.stderr.write(`[m1-eval] ${node.id ?? node.url}: weights upload failed — skipped\n`)
+      return false
+    }
+    activeNodes.add(node.url)
+    spawnNode(node)
+    return true
+  }
+
+  // 远端 fetch-loop：单条并发链，精确占用节点容量。返回后 pending--。
+  const spawnNode = (node: DistNodeCfg): void => {
+    const cap = Math.max(1, node.concurrency ?? 4)
+    for (let s = 0; s < cap; s++) {
+      pending++
+      ;(async (): Promise<void> => {
         try {
-          const resp = await fetch(url, {
-            headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
-            signal: AbortSignal.timeout((task.maxTicks / 20 + 120) * 1000),
-          })
-          if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
-          const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
-          const m = manifest as any
-          const sc = m.scorable ?? {}
-          const fs = sc.finalState ?? {}
-          results[i] = {
-            id: task.id,
-            ok: true,
-            outcome: m.outcome ?? 'error',
-            ticks: typeof m.ticks === 'number' ? m.ticks : 0,
-            killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
-            baseAlive: fs.baseAlive === true,
-            lives: typeof fs.lives === 'number' ? fs.lives : undefined,
-            firstKillTick: typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
-            telemetry: sc.telemetry,
+          for (;;) {
+            const i = next++
+            if (i >= total) return
+            const task = tasks[i]
+            const url =
+              `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
+              `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
+              `&difficulty=${task.difficulty}&mode=eval&kind=intent&policy=intent-exec`
+            let ok = false
+            for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+              try {
+                const resp = await fetch(url, {
+                  headers: { Authorization: `Bearer ${node.authKey ?? ''}` },
+                  signal: AbortSignal.timeout((task.maxTicks / 20 + 120) * 1000),
+                })
+                if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`)
+                const { manifest } = unpackContainer(Buffer.from(await resp.arrayBuffer()))
+                const m = manifest as any
+                const sc = m.scorable ?? {}
+                const fs = sc.finalState ?? {}
+                settle(i, {
+                  id: task.id,
+                  ok: true,
+                  outcome: m.outcome ?? 'error',
+                  ticks: typeof m.ticks === 'number' ? m.ticks : 0,
+                  killCount: typeof fs.killCount === 'number' ? fs.killCount : 0,
+                  baseAlive: fs.baseAlive === true,
+                  lives: typeof fs.lives === 'number' ? fs.lives : undefined,
+                  firstKillTick:
+                    typeof sc.firstKillTick === 'number' ? sc.firstKillTick : undefined,
+                  telemetry: sc.telemetry,
+                })
+                ok = true
+              } catch {
+                /* retry */
+              }
+            }
+            if (!ok) settle(i, fail(task.id))
           }
-          ok = true
-        } catch {
-          /* retry */
+        } finally {
+          finishLoop()
         }
-      }
-      if (!ok) results[i] = fail(task.id)
+      })()
     }
   }
 
-  const threads = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker())
-  await Promise.all(threads)
+  const spawnLocal = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const worker = new Worker(WORKER_URL)
+      const run = async (): Promise<void> => {
+        try {
+          for (;;) {
+            const i = next++
+            if (i >= total) return
+            const task = tasks[i]
+            const res = await new Promise<import('./sim-worker').SimTaskResult>((r) => {
+              worker.addEventListener(
+                'message',
+                (ev: MessageEvent<import('./sim-worker').SimTaskResult>) => r(ev.data),
+                {
+                  once: true,
+                },
+              )
+              worker.postMessage(task)
+            })
+            settle(i, res)
+          }
+        } finally {
+          worker.terminate()
+          finishLoop()
+        }
+      }
+      void run().then(resolve)
+    })
+
+  // 本地 worker-loop：每个 worker 串行消费，独占一条并发链。
+  const WORKER_URL = new URL('./sim-worker.ts', import.meta.url).href
+  for (let w = 0; w < localCap; w++) {
+    pending++
+    void spawnLocal()
+  }
+  for (const node of nodes) {
+    void tryActivate(node) // 初始在线节点尽快激活；离线节点留待 rescan
+  }
+
+  // 无消费者守护：--dist-local 0 且初始节点全部离线时（或任务太少被本地瞬取），
+  // 若干 loop 都没被 spawn、pending=0 → allDone 永不 resolve → 永久挂起。
+  // 首轮激活尝试后仍未 spawn 任何 loop，则剩余任务标记失败收尾。
+  ;(async (): Promise<void> => {
+    await Promise.resolve()
+    setTimeout(() => {
+      if (pending <= 0 && next < total) {
+        process.stderr.write(
+          `[m1-eval] no consumer available (local ${localCap}, ${activeNodes.size}/${nodes.length} nodes) — failing ${total - next} remaining tasks\n`,
+        )
+        while (next < total) {
+          const i = next++
+          settle(i, fail(tasks[i].id))
+        }
+        resolveAll()
+      }
+    }, 2500)
+  })().catch(() => {})
+
+  // v3.9 动态节点发现：周期（默认 120s）重读 dist-nodes.json，把中途上线的
+  // 新节点（或运行中被加入配置的节点）也纳入分派——权重幂等上传 + spawn 其并发链。
+  const rescanCfg = (cfg as { policy?: { agentRescanSec?: number } }).policy
+  const rescanSec = ((): number => {
+    const cli = parseInt(arg('dist-rescan', '0')!, 10)
+    if (cli > 0) return cli
+    const pol = rescanCfg?.agentRescanSec
+    return typeof pol === 'number' && pol > 0 ? pol : 120
+  })()
+  let rescanTimer: ReturnType<typeof setInterval> | undefined
+  if (rescanSec > 0) {
+    const scan = async (): Promise<void> => {
+      if (next >= total) return // 已派完，无需再发现
+      let fresh: { nodes?: DistNodeCfg[] } | null = null
+      try {
+        fresh = JSON.parse(readFileSync(nodesPath, 'utf8'))
+      } catch {
+        return
+      }
+      if (!fresh) return
+      for (const cand of fresh.nodes ?? []) {
+        if (cand.enabled === false || !cand.url || activeNodes.has(cand.url)) continue
+        const act = await tryActivate(cand)
+        if (act) {
+          process.stderr.write(
+            `[m1-eval] rescan: node ${cand.id ?? cand.url} online mid-run (+${Math.max(1, cand.concurrency ?? 4)} slots)\n`,
+          )
+        }
+      }
+    }
+    rescanTimer = setInterval(() => void scan(), rescanSec * 1000)
+  }
+
+  await allDone
+  if (rescanTimer) clearInterval(rescanTimer)
   return results
 }
 

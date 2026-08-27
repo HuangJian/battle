@@ -63,6 +63,7 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 - 安装 Termux： https://github.com/termux/termux-app/releases
 - adb 连接 Termux
   ```bash
+  export ANDROID_SERIAL="318b9188c234" #192.168.0.96 MI CC 9e
   export ANDROID_SERIAL="DYEYUOLNBI5LH6FQ" #192.168.0.97 unused
   export ANDROID_SERIAL="4P7TY5SWOJ6HK7S8" #192.168.0.98 weread
 

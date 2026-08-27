@@ -65,6 +65,9 @@ export interface IntentExecutorOptions {
   riskGated?: boolean
   baseCadence?: number
   dangerCadence?: number
+  /** M7② 探针（Q：rollout 意图分布熵 / HUNT 占比）：每 replan 记录原始 argmax 意图
+   *  + 相对次大的边际。只读、零 RNG、确定性；默认关 = 不产数组分配（AGENTS §14）。 */
+  recordReplanTrace?: boolean
 }
 
 /**
@@ -98,6 +101,11 @@ export class IntentExecutor implements InputLike {
   /** telemetry：每 replan 记录所选意图 id。 */
   readonly intentTrace: number[] = []
 
+  /** 探针 telemetry（仅 recordReplanTrace 时填充）：每 replan 的原始 argmax 意图
+   *  + 相对次大的边际。只读、零 RNG、确定性。 */
+  readonly replanTrace: Array<{ tick: number; intent: number; margin: number }> = []
+  private recordReplan = false
+
   constructor(world: World, opts: IntentExecutorOptions) {
     this.world = world
     this.model = buildIntentModelFromText(opts.weightsText)
@@ -107,6 +115,7 @@ export class IntentExecutor implements InputLike {
     this.riskGated = opts.riskGated ?? false
     this.baseCadence = opts.baseCadence ?? this.replanEvery
     this.dangerCadence = opts.dangerCadence ?? 8
+    this.recordReplan = opts.recordReplanTrace === true
   }
 
   getMoveDirection(): Direction | null {
@@ -135,6 +144,7 @@ export class IntentExecutor implements InputLike {
     this.currentIntentId = -1
     this.nextReplanTick = -1
     this.intentTrace.length = 0
+    this.replanTrace.length = 0
     this.god.reset()
   }
 
@@ -184,6 +194,10 @@ export class IntentExecutor implements InputLike {
       this.prevIntentId = intentIdx
       this.duration = 1
     }
+    // 探针 telemetry：每 replan 记录原始 argmax 意图（含未承诺切换的）——这就是自馈注入
+    // 序列所推进的意图流，是反映网络自身意图偏好的最诚实口径（只读、零 RNG）。默认关。
+    if (this.recordReplan)
+      this.replanTrace.push({ tick: f, intent: intentIdx, margin: this.argmaxMargin() })
 
     // 承诺切换：仅当新意图 ≠ 当前承诺 且 argmax 边际 ≥ 阈值。
     if (intentIdx >= 0 && intentIdx !== this.currentIntentId) {

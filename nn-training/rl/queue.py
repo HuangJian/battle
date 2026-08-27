@@ -276,6 +276,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 末尾任务仍可能落在低速 agent（EWMA 是预期、单局有方差），fan-out 用重复执行兜底。
     tail_fanout_n = int(policy.get("tailFanoutN", 4))
     tail_fanout_dup = int(policy.get("tailFanoutDup", 2))
+    # v3.9 动态节点发现（用户需求 2026-08-27）：跑批中途上线的 agent 也能贡献算力。
+    # rescan 线程周期 ping 配置里未在跑的节点，合格即权重下发 + 孵化新 worker 线程
+    # （共享 pending 队列），无需重启整轮。0 = 关闭。
+    rescan_sec = float(policy.get("agentRescanSec", 120))
 
     def _seed_speeds() -> dict[str, float]:
         hist: dict[str, list[float]] = {}
@@ -510,6 +514,16 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     else:
                         log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped")
                     continue
+                # v3.7 反向竞速：fan-out 副本抢先结算、主副本迟到被判 duplicate——
+                # 主副本 fanout_copy=False，若不拦截会落入正常回队分支，把已结算任务
+                # 重新派发（重复执行/潜在死循环）。任务已在 seen 即已结算，静默丢弃。
+                if task in seen:
+                    if task in inflight:
+                        inflight[task] -= 1
+                        if inflight[task] <= 0:
+                            inflight.pop(task, None)
+                    log(f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped")
+                    continue
                 if nd is not None:
                     streaks[nd_id] = streaks.get(nd_id, 0) + 1
                     broke = streaks[nd_id] == fail_streak_max
@@ -543,9 +557,65 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     for nd in alive:
         for _ in range(nd["c"]):
             threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
+
+    # v3.9 动态节点发现：rescan 线程周期 ping 配置里未上线的节点，合格则
+    # 权重下发 + 孵化新 worker 线程（与初始节点同等待遇，共享 pending 队列）。
+    # strategies: 初始 alive 已是共享可变列表（后续 append），spawned_ids 防重复孵化。
+    spawned_ids: set[str] = {nd["id"] for nd in alive}
+    extra_threads: list[threading.Thread] = []
+
+    def rescan_body() -> None:
+        configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+        while not all_settled.is_set() and time.time() < deadline:
+            sleep_sec = min(rescan_sec, max(1.0, deadline - time.time()))
+            if sleep_sec <= 0:
+                return
+            time.sleep(sleep_sec)
+            if all_settled.is_set() or time.time() >= deadline:
+                return
+            for n in configured:
+                nid = str(n.get("id") or n.get("url") or "?")
+                with lock:
+                    if nid in spawned_ids:
+                        continue
+                ping = dist_common.node_ping(n["url"], n.get("authKey", ""),
+                                             timeout=status_timeout)
+                if ping is None:
+                    continue  # 仍未上线，下轮再试
+                if ping.get("codeHash") != dist_common.compute_code_hash():
+                    continue
+                remote_full = str(ping.get("bunVersion", "?"))
+                if mm(remote_full) != mm(local_bun):
+                    continue
+                c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+                try:
+                    mode = dist_common.post_weights(n["url"], n.get("authKey", ""),
+                                                    iter_id, wver, weights_bytes,
+                                                    timeout=min(300.0, max(60.0, task_timeout)))
+                except dist_common.DistError as e:
+                    log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
+                    continue
+                nd = {"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n}
+                with lock:
+                    spawned_ids.add(nid)
+                    alive.append(nd)
+                log(f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
+                    f"spawning {c_n} workers")
+                for _ in range(c_n):
+                    t = threading.Thread(target=worker, args=(nd,), daemon=True)
+                    t.start()
+                    extra_threads.append(t)
+
+    if rescan_sec > 0 and cfg.get("nodes"):
+        scan_t = threading.Thread(target=rescan_body, daemon=True, name="rollout-rescan")
+        threads.append(scan_t)
+
     for t in threads:
         t.start()
     for t in threads:
+        t.join(timeout=max(30.0, window + task_timeout))
+    # rescan 中途孵化的 worker 已由 all_settled/deadline 自然收尾，这里兜底 join。
+    for t in extra_threads:
         t.join(timeout=max(30.0, window + task_timeout))
 
     missing = sorted(k for k in all_tasks if k not in seen)
