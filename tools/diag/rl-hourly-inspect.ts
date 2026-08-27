@@ -371,10 +371,10 @@ function scanIterDir(n: number): WorkerData[] {
     const report = JSON.parse(readFileSync(rp, 'utf8')) as RlReport
     out.push({ report, manifest: readWorkerManifest(join(dir, d.name)) })
   }
-  // 远程 agent 局：dist/<node>/rl_s<stage>_seed<seed>/manifest.json —— 字段与本机
-  // 导出摘要同构（stages/seeds/scoreList/outcomes/totalTicks/dimLists），可直接按
-  // RlReport 消费；dims 走 dimLists 回退（loot 列显示为缺省）。此前只扫 w* 目录，
-  // 远程局被整份报告漏计（2026-08-24 发现）。
+  // 远程 agent 局：dist/<node>/rl_s<stage>_seed<seed>/manifest.json —— per-tick 导出
+  // 摘要同构（stages/seeds/scoreList/outcomes/totalTicks/dimLists）可直接按 RlReport
+  // 消费；**意图 RL manifest**（export-intent-rollout：stage/outcome/ticks/kills/score
+  // 标量 + dims）归一化为同形状，否则远程意图局被整份漏计（2026-08-27 发现）。
   const distDir = join(dir, 'dist')
   if (!existsSync(distDir)) return out
   for (const node of readdirSync(distDir, { withFileTypes: true })) {
@@ -386,8 +386,23 @@ function scanIterDir(n: number): WorkerData[] {
       if (!existsSync(mp)) continue
       try {
         const raw = JSON.parse(readFileSync(mp, 'utf8')) as Record<string, unknown>
-        if (!Array.isArray(raw.stages) || (raw.stages as number[]).length === 0) continue
-        out.push({ report: raw as unknown as RlReport, manifest: null })
+        if (Array.isArray(raw.stages) && (raw.stages as number[]).length > 0) {
+          // per-tick RL 摘要：原样消费。
+          out.push({ report: raw as unknown as RlReport, manifest: null })
+        } else if (typeof raw.stage === 'number' && typeof raw.outcome === 'string') {
+          // 意图 RL 局：归一化（scoreList/outcomes/totalTicks/kills + dims 透传）。
+          out.push({
+            report: {
+              stages: [raw.stage as number],
+              seeds: [raw.seed as number],
+              scoreList: typeof raw.score === 'number' ? [raw.score as number] : [],
+              outcomes: { [raw.outcome as string]: 1 },
+              totalTicks: typeof raw.ticks === 'number' ? (raw.ticks as number) : undefined,
+              kills: typeof raw.kills === 'number' ? (raw.kills as number) : undefined,
+            } as RlReport,
+            manifest: (raw.dims as ManifestDims | undefined) ?? null,
+          })
+        }
       } catch {
         continue
       }
