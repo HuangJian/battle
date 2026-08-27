@@ -211,6 +211,11 @@ def main() -> None:
     ap.add_argument("--baseline", type=float, default=DEFAULT_BASELINE,
                     help="M7② 基线胜率（干净评估 Δ 的参照）")
     args = ap.parse_args()
+    # 意图 rollout 语义透传给 rl.queue（run_rollout_queue 按 intent_rollout 分支
+    # spawn export-intent-rollout.ts / x-kind=intent 权重桶 / kind+replan 任务参数）。
+    args.intent_rollout = True
+    if not hasattr(args, "replan"):
+        args.replan = 30
 
     bun = shutil.which("bun")
     if bun is None:
@@ -269,7 +274,17 @@ def main() -> None:
         pairs = build_pairs(args, it, rotate_seed)
 
         t_roll = time.time()
-        report = run_rollout(bun, args.out, traj_dir, pairs, args)
+        # 分布式（LAN agent 协助 rollout）：dist-nodes.json 有 enabled 节点 → 中央队列
+        # 调度（run_rollout_queue，意图 kind+replan 已由 args.intent_rollout 透传）；
+        # 否则纯本地（run_rollout，export-intent-rollout.ts）。
+        import dist_common
+        dist_cfg = dist_common.load_dist_config()
+        if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
+            iter_id = f"intent.{int(time.time())}.{it}"
+            from rl.queue import run_rollout_queue
+            report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
+        else:
+            report = run_rollout(bun, args.out, traj_dir, pairs, args)
         rollout_sec = round(time.time() - t_roll, 1)
         log(f"rollout it{it}: games={report['games']} winRate={report['winRate']} "
             f"outcomes={json.dumps(report['outcomes'])} samples={report['totalSamples']} "

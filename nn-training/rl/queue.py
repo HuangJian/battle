@@ -72,16 +72,30 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
         log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
-        cmd = [
-            bun,
-            "tools/sim/export-rl-rollout.ts",
-            "--weights", rl_path,
-            "--out", str(wdir),
-            "--stages", str(si),
-            "--seeds", str(seed),
-            "--max-ticks", str(args.max_ticks),
-            "--difficulty", args.difficulty,
-        ]
+        if getattr(args, "intent_rollout", False):
+            # M8 意图 RL：意图步半 MDP 采样器（export-intent-rollout.ts，replan cadence）。
+            cmd = [
+                bun,
+                "tools/sim/export-intent-rollout.ts",
+                "--weights", rl_path,
+                "--out", str(wdir),
+                "--stages", str(si),
+                "--seeds", str(seed),
+                "--max-ticks", str(args.max_ticks),
+                "--difficulty", args.difficulty,
+                "--replan", str(getattr(args, "replan", 30)),
+            ]
+        else:
+            cmd = [
+                bun,
+                "tools/sim/export-rl-rollout.ts",
+                "--weights", rl_path,
+                "--out", str(wdir),
+                "--stages", str(si),
+                "--seeds", str(seed),
+                "--max-ticks", str(args.max_ticks),
+                "--difficulty", args.difficulty,
+            ]
         p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT)
         rc = p.wait()
         log_f.close()
@@ -181,12 +195,14 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     with open(rl_path, "rb") as f:
         weights_bytes = f.read()
     alive = []
+    wkind = "intent" if getattr(args, "intent_rollout", False) else "rollout"
     for nd in nodes:
         try:
             mode = dist_common.post_weights(nd["url"], nd["key"], iter_id, wver,
                                             weights_bytes,
-                                            timeout=min(300.0, max(60.0, task_timeout)))
-            log(f"[dist] weights -> {nd['id']} ({mode})")
+                                            timeout=min(300.0, max(60.0, task_timeout)),
+                                            kind=wkind)
+            log(f"[dist] weights[{wkind}] -> {nd['id']} ({mode})")
             alive.append(nd)
         except dist_common.DistError as e:
             log(f"[dist] weights POST to {nd['id']} failed ({e}) — excluded")
@@ -340,12 +356,20 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         next_idx[0] += 1
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
-        with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
+        if getattr(args, "intent_rollout", False):
+            cmd = [bun, "tools/sim/export-intent-rollout.ts",
+                   "--weights", rl_path, "--out", str(wdir),
+                   "--stages", str(si), "--seeds", str(sd),
+                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
+                   "--replan", str(getattr(args, "replan", 30)),
+                   "--wver", wver, "--node-label", "local"]
+        else:
             cmd = [bun, "tools/sim/export-rl-rollout.ts",
                    "--weights", rl_path, "--out", str(wdir),
                    "--stages", str(si), "--seeds", str(sd),
                    "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
                    "--wver", wver, "--node-label", "local"]
+        with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
             # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
             # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
             t0 = time.time()
@@ -448,7 +472,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     manifest, files = dist_common.fetch_task(
                         nd["url"], nd["key"], iter_id=iter_id, wver=wver,
                         stage=task[0], seed=task[1], max_ticks=args.max_ticks,
-                        difficulty=args.difficulty, timeout=task_timeout)
+                        difficulty=args.difficulty, timeout=task_timeout,
+                        kind=wkind, replan=getattr(args, "replan", 0))
                     why = dist_common.validate_result(manifest, files, wver,
                                                       set(norm_pairs), seen)
                     if why:
@@ -459,6 +484,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     summary = manifest
             except Exception as e:  # noqa: BLE001 — 单局任何失败都只回队/记 missing
                 err = str(e)[:200]
+                # HTTP 503（busy）是瞬时负载不是节点故障——except 内捕获（Python 3
+                # 在 except 块后删除 e，必须在块内读出标记）。
+                busy503 = isinstance(e, dist_common.DistError) and e.status == 503
             with lock:
                 if nd is None and task is not None:
                     local_active[0] -= 1
@@ -524,16 +552,18 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                             inflight.pop(task, None)
                     log(f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped")
                     continue
-                if nd is not None:
+                # 503（busy）不计熔断连击、不计重试上限（小批量突发提交防误熔断）。
+                if nd is not None and not busy503:
                     streaks[nd_id] = streaks.get(nd_id, 0) + 1
                     broke = streaks[nd_id] == fail_streak_max
                 else:
                     broke = False
-                if attempt < MAX_TASK_ATTEMPTS:
+                if attempt < MAX_TASK_ATTEMPTS or busy503:
                     pending.append(task)
                     stats["retried"] += 1
                     log(f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
-                        f"(attempt {attempt}/{MAX_TASK_ATTEMPTS})")
+                        f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
+                        + (", busy" if busy503 else "") + ")")
                 else:
                     missing_keys.add(task)
                     _record_agent_meta(meta_path, {

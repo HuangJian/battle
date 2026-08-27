@@ -43,6 +43,14 @@ SHARD_FILES = (
     "done.npy", "mask.npy",
 )
 
+# M8 意图 RL shard 清单（export-intent-rollout.ts 产物）——意图步 semi-MDP：
+# inject（prev one-hot 8 + duration）与 dt（窗口时长 tick，变步长 GAE 用）替换
+# a_move/a_fire/lp_move/lp_fire；mask 为 8 类死类掩码。
+INTENT_SHARD_FILES = (
+    "obs.npy", "scalars.npy", "inject.npy", "a_intent.npy", "lp_intent.npy",
+    "value.npy", "reward.npy", "done.npy", "mask.npy", "dt.npy",
+)
+
 
 class DistError(RuntimeError):
     """节点交互失败：status=HTTP 状态码（0=本地校验拒绝），reason=可读原因。"""
@@ -103,6 +111,12 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     if os.path.exists(rollout):
         with open(rollout, "rb") as f:
             out.append(("tools/sim/export-rl-rollout.ts", f.read()))
+    # M8：意图 RL 分布式 rollout 走 export-intent-rollout.ts —— 入 codeHash，
+    # 保证节点代码同步（意图步采样语义与 per-tick 完全不同）。
+    intent_rollout = os.path.join(REPO_ROOT, "tools", "sim", "export-intent-rollout.ts")
+    if os.path.exists(intent_rollout):
+        with open(intent_rollout, "rb") as f:
+            out.append(("tools/sim/export-intent-rollout.ts", f.read()))
     return out
 
 
@@ -130,12 +144,17 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
 
 
 def post_weights(url: str, auth_key: str, iter_id: str, sha: str, weights_bytes: bytes,
-                 timeout: float = 120.0) -> str:
-    """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。"""
+                 timeout: float = 120.0, kind: str = "rollout") -> str:
+    """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。
+
+    kind（v3.7/M8）：'rollout'（per-tick RL 采样）/ 'intent'（意图权重桶——
+    intent-exec 评估 + 意图 RL rollout 共用）。agent 按 x-kind 分桶缓存。
+    """
     status, body = _request(
         url.rstrip("/") + "/v1/weights", auth_key, timeout,
         data=gzip.compress(weights_bytes),
-        headers={"Content-Encoding": "gzip", "X-Iter-Id": iter_id, "X-Weights-Sha256": sha},
+        headers={"Content-Encoding": "gzip", "X-Iter-Id": iter_id,
+                 "X-Weights-Sha256": sha, "X-Kind": kind},
         method="POST",
     )
     if status not in (200, 204):
@@ -192,11 +211,16 @@ def _unpack_bcv2(frame: bytes) -> tuple[dict, dict]:
 
 def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, seed: int,
                max_ticks: int, difficulty: str, timeout: float,
-               mode: str | None = None) -> tuple[dict, dict]:
+               mode: str | None = None,
+               kind: str = "rollout",
+               replan: int = 0) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
     mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
     evalSupport=true 的节点使用——旧 agent 会静默忽略该参数跑成采样局。
+
+    kind（M8）：'intent' 请求意图权重桶（意图 RL rollout 走 export-intent-rollout.ts）。
+    replan（M8）：意图 rollout 的 replan cadence（0=不传）。
 
     v3.6：提交带 x-async 头。新 agent 立即 202 → 转 /v1/result 轮询（轮询期网络瞬断
     不丢局：结果在 agent 结果缓存里，恢复后继续拉）；旧 agent 无视该头同步阻塞返回
@@ -209,6 +233,10 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
     }
     if mode:
         params["mode"] = mode
+    if kind != "rollout":
+        params["kind"] = kind
+    if replan > 0:
+        params["replan"] = replan
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
@@ -237,9 +265,16 @@ def _poll_result(base_url: str, auth_key: str, params: dict, budget: float,
     只有网络调用本身受瞬断重试保护；容器解包与非预期状态码是确定性错误，
     必须立即抛出真实原因——绝不能被重试逻辑吞成误导性的 deadline exceeded。
     """
-    qs = urllib.parse.urlencode({
+    qparams = {
         "iterId": params["iterId"], "stage": params["stage"], "seed": params["seed"],
-    })
+    }
+    # mode/kind 必须与提交端 key 配方一致（agent 的 result key = iterId:mode:kind:stage:seed）——
+    # 意图 rollout（kind=intent）不传则轮询落空 404（实测教训）。
+    if params.get("mode"):
+        qparams["mode"] = params["mode"]
+    if params.get("kind"):
+        qparams["kind"] = params["kind"]
+    qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(1.0, budget)
     while True:
         remain = deadline - time.monotonic()
@@ -275,6 +310,13 @@ def _poll_result(base_url: str, auth_key: str, params: dict, budget: float,
 
 
 # ---------------- 结果校验（先验后落盘的红线所在） ----------------
+def _shard_files_for(manifest: dict) -> tuple:
+    """意图 RL shard（collector=INTENT-RL）用 INTENT_SHARD_FILES，否则 per-tick SHARD_FILES。"""
+    if manifest.get("collector") == "INTENT-RL" or "a_intent.npy" in manifest:
+        return INTENT_SHARD_FILES
+    return SHARD_FILES
+
+
 def validate_result(manifest: dict, files: dict, expected_wver: str,
                     expected_pairs: set[tuple[int, int]],
                     seen_keys: set[tuple[int, int]]) -> str | None:
@@ -288,9 +330,10 @@ def validate_result(manifest: dict, files: dict, expected_wver: str,
         return f"unexpected (stage,seed)={key}"
     if key in seen_keys:
         return f"duplicate (stage,seed)={key}"
-    if set(files.keys()) != set(SHARD_FILES):
-        extra = sorted(set(files) - set(SHARD_FILES))
-        lack = sorted(set(SHARD_FILES) - set(files))
+    want = _shard_files_for(manifest)
+    if set(files.keys()) != set(want):
+        extra = sorted(set(files) - set(want))
+        lack = sorted(set(want) - set(files))
         return f"file set mismatch (extra={extra}, missing={lack})"
     for name, val in files.items():
         try:
@@ -321,7 +364,7 @@ def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
 def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。"""
     os.makedirs(out_dir, exist_ok=True)
-    for name in SHARD_FILES:
+    for name in _shard_files_for(manifest):
         val = files[name]
         raw = val if isinstance(val, (bytes, bytearray)) \
             else base64.b64decode(val, validate=True)

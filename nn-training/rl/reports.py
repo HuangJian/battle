@@ -12,14 +12,18 @@ def combine_reports(reports: list[dict]) -> dict:
 
     本地 rollout 与远端单局摘要同构（远端 manifest 即单局 _rl_report.json 内容，
     另带 wver/node/elapsedSec 溯源字段，不影响聚合），两条采样路径共用本函数。
+    M8 意图 RL：额外聚合 intentCounts（意图动作分布）与 totalKills（存在时）。
     """
     combined = {"games": 0, "winRate": 0.0, "outcomes": {}, "totalSamples": 0, "totalTicks": 0,
                 "scoreList": [], "dimLists": {}}
     wins = 0
+    intentCounts = None
+    totalKills = 0
     for r in reports:
         combined["games"] += r["games"]
         combined["totalSamples"] += r["totalSamples"]
         combined["totalTicks"] += r["totalTicks"]
+        totalKills += r.get("totalKills", 0)
         for o, c in r.get("outcomes", {}).items():
             combined["outcomes"][o] = combined["outcomes"].get(o, 0) + c
             if o == "stage_clear":
@@ -27,7 +31,16 @@ def combine_reports(reports: list[dict]) -> dict:
         combined["scoreList"].extend(r.get("scoreList", []))
         for k, vs in r.get("dimLists", {}).items():
             combined["dimLists"].setdefault(k, []).extend(vs)
+        ic = r.get("intentCounts")
+        if ic:
+            if intentCounts is None:
+                intentCounts = [0] * len(ic)
+            for i in range(min(len(intentCounts), len(ic))):
+                intentCounts[i] += ic[i]
     combined["winRate"] = round(wins / combined["games"], 4) if combined["games"] else 0.0
+    if intentCounts is not None:
+        combined["intentCounts"] = intentCounts
+        combined["totalKills"] = totalKills
     sl = combined["scoreList"]
     if sl:
         n = len(sl)

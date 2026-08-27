@@ -137,6 +137,14 @@ function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
   const rollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-rl-rollout.ts')
   if (fs.existsSync(rollout))
     out.push({ relPath: path.relative(REPO_ROOT, rollout), content: fs.readFileSync(rollout) })
+  // M8：意图 RL 分布式 rollout（export-intent-rollout.ts）入 codeHash——
+  // 与 dist_common.py 的双语配方保持一致（意图步采样语义与 per-tick 完全不同）。
+  const intentRollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-intent-rollout.ts')
+  if (fs.existsSync(intentRollout))
+    out.push({
+      relPath: path.relative(REPO_ROOT, intentRollout),
+      content: fs.readFileSync(intentRollout),
+    })
   return out
 }
 
@@ -315,6 +323,7 @@ async function runGame(
   mode: string,
   kind = 'rollout',
   policy = 'nn',
+  replan = 0,
 ): Promise<Buffer> {
   const ws = weightsByKind[kind]
   if (!ws) throw new Error(`no weights cached for kind=${kind}`)
@@ -322,13 +331,20 @@ async function runGame(
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
   // 只产 _eval_report.json，无 npy shards。v3.7：mode=eval 支持 policy=intent-exec
   // （意图网络选意图 + God-AI 白名单子链），意图权重经 kind='intent' 单独缓存。
+  // M8（v3.10）：kind='intent' 且 mode='rollout' → export-intent-rollout.ts（意图步
+  // semi-MDP 采样，reward/dt/mask/inject 全变）——意图 RL 分布式 rollout。
   const isEval = mode === 'eval'
+  const isIntentRollout = kind === 'intent' && !isEval
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
   fs.mkdirSync(gameDir, { recursive: true })
   try {
     const args = [
-      isEval ? 'tools/sim/export-eval-game.ts' : 'tools/sim/export-rl-rollout.ts',
+      isEval
+        ? 'tools/sim/export-eval-game.ts'
+        : isIntentRollout
+          ? 'tools/sim/export-intent-rollout.ts'
+          : 'tools/sim/export-rl-rollout.ts',
       '--weights',
       wfile,
       '--out',
@@ -344,6 +360,7 @@ async function runGame(
       }
     } else {
       args.push('--stages', String(stage), '--seeds', String(seed))
+      if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
     }
     args.push(
       '--max-ticks',
@@ -373,7 +390,11 @@ async function runGame(
       child.on('error', reject)
       child.on('close', (code) => resolve(code ?? -1))
     })
-    const scriptName = isEval ? 'export-eval-game' : 'export-rl-rollout'
+    const scriptName = isEval
+      ? 'export-eval-game'
+      : isIntentRollout
+        ? 'export-intent-rollout'
+        : 'export-rl-rollout'
     if (rc !== 0) throw new Error(`${scriptName} exited ${rc}: ${tail}`)
 
     // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
@@ -411,10 +432,11 @@ function beginTask(
   mode: string,
   kind = 'rollout',
   policy = 'nn',
+  replan = 0,
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
-  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy)
+  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
     .then((buf) => {
       lruPut(key, buf)
       gamesDoneTotal++
@@ -596,6 +618,8 @@ async function handle(req: Request): Promise<Response> {
     // v3.7 kind 分桶 + policy 透传（mode=eval 支持 intent-exec）。
     const kind = url.searchParams.get('kind') ?? 'rollout'
     const policy = url.searchParams.get('policy') ?? 'nn'
+    // M8：意图 rollout 的 replan cadence（export-intent-rollout --replan；缺省 0=不传）。
+    const replan = parseInt(url.searchParams.get('replan') ?? '0', 10)
     const ws = weightsByKind[kind]
     if (!ws || ws.sha !== wver) return jsonResponse({ error: 'wver not cached here' }, 409)
     if (mode === 'eval' && policy === 'intent-exec' && !weightsByKind['intent'])
@@ -628,7 +652,7 @@ async function handle(req: Request): Promise<Response> {
       if (inflight.has(key)) return jsonResponse({ status: 'running', token: key }, 202)
       if (activeWorkers >= workers)
         return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
-      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode, kind, policy)
+      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
 
@@ -649,7 +673,7 @@ async function handle(req: Request): Promise<Response> {
             /* client gone */
           }
         }, 20_000)
-        runGame(stage, seed, maxTicks, difficulty, mode, kind, policy)
+        runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
           .then((buf) => {
             if (hb) clearInterval(hb)
             lruPut(key, buf)
