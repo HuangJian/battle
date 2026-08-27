@@ -65,7 +65,12 @@ let cacheMaxItems = 32
 let updating = false
 
 function git(args: string[]): string {
-  const r = spawnSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8', timeout: 120_000 })
+  const r = spawnSync('git', args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    windowsHide: true,
+  })
   if (r.status !== 0) {
     throw new Error(
       `git ${args.join(' ')} rc=${r.status}: ${(r.stderr ?? '').trim().slice(0, 300)}`,
@@ -171,6 +176,7 @@ function gitShortHash(): string {
     const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
+      windowsHide: true,
     })
     return r.status === 0 ? r.stdout.trim() : 'unknown'
   } catch {
@@ -379,6 +385,8 @@ async function runGame(
     const child = spawn(process.execPath, args, {
       cwd: REPO_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Windows：隐藏子进程控制台窗口（否则 self 节点每个对局都会弹黑窗抢焦点）。
+      windowsHide: true,
     })
     let tail = ''
     const cap = (chunk: Buffer): void => {
@@ -571,6 +579,7 @@ async function handle(req: Request): Promise<Response> {
             cwd: REPO_ROOT,
             detached: true,
             stdio: 'inherit',
+            windowsHide: true,
           })
           child.unref()
         } catch (e) {

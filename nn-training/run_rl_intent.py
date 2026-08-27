@@ -151,8 +151,15 @@ def dispatch_eval_bg_intent(bun: str, rl_path: str, args, it: int,
             }
             with open(jsonl_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
-            log(f"eval it{it}: clean winRate={ev:.1%} ({er['games']} games) "
-                f"Δ vs baseline={delta:+.1%}")
+            if ev is not None:
+                log(f"eval it{it}: clean winRate={ev:.1%} ({er['games']} games) "
+                    f"Δ vs baseline={delta:+.1%}")
+            else:
+                # 评估盲（横幅未命中）必须显式告警，而不是靠 f-string 对 None 抛
+                # ValueError 伪装成「评估失败」（it10 实测教训：kill agent 打断评估
+                # → m1-eval rc=0 无横幅 → win=None → None.__format__ 崩溃）。
+                log(f"eval it{it}: WARN clean winRate=null (banner missed) — "
+                    f"games={er['games']} baseline={baseline}")
         except Exception as e:  # noqa: BLE001 — 评估旁路失败不中断训练
             log(f"WARN clean eval it{it} failed (ignored): {e}")
     t = threading.Thread(target=_body, daemon=True, name=f"eval-intent-it{it}")
