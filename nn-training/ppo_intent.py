@@ -364,6 +364,15 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
     return agg
 
 
+# ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes / _ppo_load）----
+# 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 格式同构（model.pt/opt.pt/
+# state.json + numpy RNG），复用 ppo 的通用 _ppo_load。ppo 不依赖本模块，无环。
+from ppo import _ppo_load  # noqa: E402,F401
+
+update = ppo_update_intent
+load_episodes = load_episodes_intent
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--init-from", type=str, default=None, help="B′/BC intent weights (init mode)")
