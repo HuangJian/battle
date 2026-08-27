@@ -81,14 +81,14 @@ $ScriptPath = Join-Path $ScriptDir $Script
 if (-not (Test-Path $ScriptPath)) { Write-Host "ERROR: script not found: $ScriptPath"; exit 2 }
 
 # ── 平台检测 ─────────────────────────────────────────────────────────
-$IsWindows = $false
-if ($env:WINDIR) { $IsWindows = $true }
-if (-not $IsWindows) {
+$IsWin = $false
+if ($env:WINDIR) { $IsWin = $true }
+if (-not $IsWin) {
   $un = (& uname -s 2>$null)
-  if ($un -match 'MSYS|MINGW|CYGWIN') { $IsWindows = $true }
+  if ($un -match 'MSYS|MINGW|CYGWIN') { $IsWin = $true }
 }
 $VenvDir = Join-Path $ScriptDir '.venv'
-if ($IsWindows) { $VenvPython = Join-Path $VenvDir 'Scripts\python.exe' }
+if ($IsWin) { $VenvPython = Join-Path $VenvDir 'Scripts\python.exe' }
 else { $VenvPython = Join-Path $VenvDir 'bin\python' }
 $LockFile = Join-Path $ScriptDir '.train_loop.lock'
 
@@ -97,7 +97,7 @@ $SysPy = ''
 if ($env:PYTHON) { $SysPy = $env:PYTHON }
 if (-not $SysPy -and (Get-Command python3 -ErrorAction SilentlyContinue)) { $SysPy = 'python3' }
 if (-not $SysPy -and (Get-Command python  -ErrorAction SilentlyContinue)) { $SysPy = 'python' }
-if (-not $SysPy -and $IsWindows -and (Get-Command py -ErrorAction SilentlyContinue)) { $SysPy = 'py' }
+if (-not $SysPy -and $IsWin -and (Get-Command py -ErrorAction SilentlyContinue)) { $SysPy = 'py' }
 
 function Invoke-SysPy {
   param([string[]]$PyArgs)
@@ -210,7 +210,7 @@ if ($KillPrevious) {
 # Start-Process 隐藏窗口分离
 # （ShellExecute 派生完全脱离控制台的进程，替代已弃用的 VBScript/wscript 方案）
 # run_rl.py 无锁文件，等锁循环对它只是无害的 15s 空转后 exit 0
-if ($Detach -and $IsWindows -and $Script -in @('train_loop.py', 'run_rl.py')) {
+if ($Detach -and $IsWin -and $Script -in @('train_loop.py', 'run_rl.py')) {
   Log 'detaching via Start-Process（后台隐藏窗口，stdout/stderr 落盘）...'
   $argStr = "-u `"$ScriptPath`""
   foreach ($x in $ScriptArgs) { $argStr += " `"$x`"" }
