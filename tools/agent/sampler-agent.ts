@@ -170,6 +170,20 @@ function gitShortHash(): string {
   }
 }
 
+/**
+ * memo 化 gitShortHash：进程启动/首次调用算一次缓存，仅在 /v1/update 的 git pull 切换
+ * 代码后置空重算（与 codeHash 同策略）。否则每次 /v1/ping /v1/status 都 spawn 一次
+ * git 子进程——在 proot/ptrace 环境每次 fork+exec+读 .git 被拖到几十秒，是弱机上的
+ * 隐藏瓶颈。
+ */
+function cachedGitShortHash(): string {
+  if (gitShortMemo.value === null) gitShortMemo.value = gitShortHash()
+  return gitShortMemo.value
+}
+
+/** 模块级 memo 单元：null=未算/已失效，非 null=缓存值，仅在 git pull 切换后置空。 */
+const gitShortMemo: { value: string | null } = { value: null }
+
 // ---------------- authKey ----------------
 function loadOrCreateAuthKey(): string {
   if (fs.existsSync(AGENT_AUTH_PATH)) {
@@ -487,9 +501,10 @@ async function handle(req: Request): Promise<Response> {
     updating = true
     try {
       const r = runGitPull(branch)
-      // 代码已变 → codeHash 缓存作废（下轮 /v1/status /v1/ping 重新计算）
+      // 代码已变 → codeHash / gitVersion 缓存作废（下轮 /v1/status /v1/ping 重新计算）
       if (r.changed) {
         codeHashMemo.value = null
+        gitShortMemo.value = null
         console.log(
           `[sampler-agent] pulled ${r.branch} ${r.oldSha.slice(0, 8)} -> ${r.newSha.slice(0, 8)}`,
         )
@@ -705,7 +720,7 @@ async function handle(req: Request): Promise<Response> {
       uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
       codeHash: memoizedCodeHash(),
       bunVersion: Bun.version,
-      agentVersion: gitShortHash(),
+      agentVersion: cachedGitShortHash(),
       cpus: CPUS,
       workers,
       gamesDoneTotal,
@@ -730,7 +745,7 @@ async function handle(req: Request): Promise<Response> {
       ok: true,
       codeHash: memoizedCodeHash(),
       bunVersion: Bun.version,
-      agentVersion: gitShortHash(),
+      agentVersion: cachedGitShortHash(),
       cpus: CPUS,
       // 能力声明：trainer 据此把节点纳入干净评估分发（旧 agent 无此字段 → 自动跳过）
       evalSupport: true,
@@ -755,7 +770,7 @@ if (import.meta.main) {
   }
   console.log(
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${(cacheMaxBytes / (1024 * 1024)).toFixed(0)}MB/${cacheMaxItems} ` +
-      `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${gitShortHash()} cpus=${CPUS}`,
+      `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS}`,
   )
   // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
   // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
