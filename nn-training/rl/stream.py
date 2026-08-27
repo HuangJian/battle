@@ -51,8 +51,14 @@ def _shard_dir(entry: str) -> str | None:
 
 def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, int]],
                        args, cfg: dict, iter_id: str, model, opt, device,
-                       on_collect_done=None) -> dict:
+                       on_collect_done=None,
+                       backend=None, update_kwargs: dict | None = None) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
+
+    backend（工程化共享）：per-tick RL 用 ppo（默认），意图 RL 用 ppo_intent——
+    两者都实现 load_episode_from_shard / chunk_episodes / update / load_episodes /
+    _ppo_load，本函数不复制第二份加载/更新逻辑。update_kwargs 透传给 backend.update
+    （意图 RL：value_warmup_epochs / ref_model / kl_coef / seed）。
 
     正确性依据：整轮权重冻结为 W(N)（分发只发生在迭代边界），故任意时刻到达的
     语料都出自同一策略版本，on-policy 比率数学不受到达顺序影响；GAE 用采样时
@@ -79,6 +85,8 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     pend: collections.deque = collections.deque()
     lock = threading.Lock()
     box: dict = {}
+    backend = backend or ppo_mod
+    update_kwargs = update_kwargs or {}
     halt_ev = threading.Event()  # 置位 → 队列停止派发新任务（R1 熔断止损）
     # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
     # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
@@ -147,21 +155,13 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
             if shard is None:
                 continue
             try:
-                dd = ppo_mod.load_shard(shard)
+                ep = backend.load_episode_from_shard(shard)
             except Exception as e:  # noqa: BLE001 — 单局坏 shard 跳过
                 log(f"[stream] skip bad shard {shard}: {str(e)[:100]}")
                 continue
-            if dd["obs"].shape[0] == 0:
+            if ep is None:
                 continue
-            adv, ret = ppo_mod.compute_gae(dd["reward"], dd["value"], dd["done"],
-                                           ppo_mod.GAMMA, ppo_mod.LAM)
-            eps.append({
-                "obs": dd["obs"], "scalars": dd["scalars"],
-                "a_move": dd["a_move"], "a_fire": dd["a_fire"],
-                "lp_move": dd["lp_move"], "lp_fire": dd["lp_fire"],
-                "value": dd["value"], "adv": adv.astype(np.float32),
-                "ret": ret.astype(np.float32), "mask": dd["mask"],
-            })
+            eps.append(ep)
         if eps:
             all_adv = np.concatenate([e["adv"] for e in eps])
             mean, std = all_adv.mean(), all_adv.std() + 1e-8
@@ -186,13 +186,13 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         eps = _load_wave(took)
         if not eps:
             return
-        chs = ppo_mod.chunk_episodes(eps, args.mb)
+        chs = backend.chunk_episodes(eps, args.mb)
         t_p = time.time()
         if not ppo_started_ev.is_set():
             ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
             log("[stream] PPO phase started — local dist slots suspending "
                 "(auto-resume if cluster stalls)")
-        agg_w = ppo_mod.ppo_update(model, opt, chs, args.epochs, device)
+        agg_w = backend.update(model, opt, chs, args.epochs, device, **update_kwargs)
         state["ppo_sec"] += time.time() - t_p
         state["cum_kl"] += float(agg_w["kl"])
         state["steps"] += len(chs) * args.epochs
@@ -249,7 +249,7 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         raise RuntimeError("stream collector produced no report")
     # 断点续跑轮可能零结算（全部秒回）
     if state["chunks"] == 0 and int(getattr(args, "epochs", 0)) > 0:
-        eps_done = ppo_mod._ppo_load(str(traj_dir / "ppo_ckpt"), model, opt)
+        eps_done = backend._ppo_load(str(traj_dir / "ppo_ckpt"), model, opt)
         if eps_done >= args.epochs:
             # 该轮 PPO 已在先前进程中完整跑完：权重以当前状态收尾即可，
             # 重复调用 ppo_update 会走"剩余 0 epoch"路径（空聚合）。
@@ -257,11 +257,12 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
                 f"({eps_done}/{args.epochs} epochs) — weights final, skipping update")
         else:
             log("[stream] no fresh settles this round — falling back to full-disk update")
-            episodes = ppo_mod.load_episodes(str(traj_dir))
-            chunks = ppo_mod.chunk_episodes(episodes, args.mb)
+            episodes = backend.load_episodes(str(traj_dir))
+            chunks = backend.chunk_episodes(episodes, args.mb)
             t_p = time.time()
-            state["last_agg"] = ppo_mod.ppo_update(model, opt, chunks, args.epochs, device,
-                                                   ckpt_path=str(traj_dir / "ppo_ckpt"))
+            state["last_agg"] = backend.update(model, opt, chunks, args.epochs, device,
+                                               ckpt_path=str(traj_dir / "ppo_ckpt"),
+                                               **update_kwargs)
             state["ppo_sec"] += time.time() - t_p
             state["steps"] = sum(e["obs"].shape[0] for e in episodes)
             state["chunks"] = len(chunks)

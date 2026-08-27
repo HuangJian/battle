@@ -139,6 +139,31 @@ def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
     return -(logp.exp() * logp).sum(dim=-1).mean()
 
 
+def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
+    """流式 backend 接口（rl/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
+
+    ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
+    复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
+    """
+    d = load_shard(dirpath)
+    N = d["obs"].shape[0]
+    if N == 0:
+        return None
+    adv, ret = compute_gae(d["reward"], d["value"], d["done"], gamma, lam)
+    return {
+        "obs": d["obs"],
+        "scalars": d["scalars"],
+        "a_move": d["a_move"],
+        "a_fire": d["a_fire"],
+        "lp_move": d["lp_move"],
+        "lp_fire": d["lp_fire"],
+        "value": d["value"],
+        "adv": adv.astype(np.float32),
+        "ret": ret.astype(np.float32),
+        "mask": d["mask"],
+    }
+
+
 def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> list[dict]:
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's

@@ -125,6 +125,30 @@ def compute_gae_variable(rewards, values, dones, dt, gamma_tick: float = GAMMA_T
     return adv, ret
 
 
+def load_episode_from_shard(dirpath: str) -> dict | None:
+    """流式 backend 接口（rl/stream.py）：意图 shard → 可训练 episode（adv/ret 未归一）。
+
+    与 ppo.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数复用
+    同一套流式基础设施（意图步变步长 GAE + inject/dt 字段）。"""
+    d = load_intent_shard(dirpath)
+    N = d["obs"].shape[0]
+    if N == 0:
+        return None
+    adv, ret = compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"])
+    return {
+        "obs": d["obs"],
+        "scalars": d["scalars"],
+        "inject": d["inject"],
+        "a_intent": d["a_intent"],
+        "lp_intent": d["lp_intent"],
+        "value": d["value"],
+        "adv": adv.astype(np.float32),
+        "ret": ret.astype(np.float32),
+        "mask": d["mask"],
+        "dt": d["dt"],
+    }
+
+
 def load_episodes_intent(data_root: str) -> list[dict]:
     shards = discover_intent_shards(data_root)
     if not shards:

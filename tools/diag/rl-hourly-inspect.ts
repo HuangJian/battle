@@ -20,12 +20,23 @@ import { join, resolve } from 'node:path'
 import { execSync } from 'node:child_process'
 
 const ROOT = resolve(import.meta.dir, '..', '..')
-const TRAJ_DIR = join(ROOT, 'tmp', 'rl-traj')
-const LOG_PATH = join(TRAJ_DIR, 'training_log.jsonl')
-const META_PATH = join(TRAJ_DIR, 'dist-agent-meta.jsonl')
-const EVAL_LOG_PATH = join(TRAJ_DIR, 'eval_log.jsonl')
-const STATE_PATH = join(TRAJ_DIR, 'inspection-state.json')
-const REPORT_PATH = join(TRAJ_DIR, 'inspection-report.html')
+// 默认 tmp/rl-traj（per-tick RL）；意图 RL（run_rl_intent）经 --traj-dir 指定
+// tmp/intent-rl。路径为 let：setTrajDir() 在 main() 内 argv 解析后统一重置。
+let TRAJ_DIR = join(ROOT, 'tmp', 'rl-traj')
+let LOG_PATH = join(TRAJ_DIR, 'training_log.jsonl')
+let META_PATH = join(TRAJ_DIR, 'dist-agent-meta.jsonl')
+let EVAL_LOG_PATH = join(TRAJ_DIR, 'eval_log.jsonl')
+let STATE_PATH = join(TRAJ_DIR, 'inspection-state.json')
+let REPORT_PATH = join(TRAJ_DIR, 'inspection-report.html')
+
+function setTrajDir(dir: string): void {
+  TRAJ_DIR = dir
+  LOG_PATH = join(dir, 'training_log.jsonl')
+  META_PATH = join(dir, 'dist-agent-meta.jsonl')
+  EVAL_LOG_PATH = join(dir, 'eval_log.jsonl')
+  STATE_PATH = join(dir, 'inspection-state.json')
+  REPORT_PATH = join(dir, 'inspection-report.html')
+}
 const ENEMY_TOTAL = 20
 const START_LIVES = 3
 
@@ -100,11 +111,13 @@ export function fmtDur(sec: number | null | undefined): string {
 }
 
 interface RlReport {
-  stages: number[]
-  seeds: number[]
-  outcomes: Record<string, number>
+  stages?: number[]
+  seeds?: number[]
+  outcomes?: Record<string, number>
   totalTicks?: number
-  scoreList: number[]
+  scoreList?: number[]
+  score?: number // 意图 RL 单局摘要（export-intent-rollout manifest）
+  kills?: number
   dimLists?: Record<string, number[]>
 }
 
@@ -271,6 +284,9 @@ function parseArgs(): { dryRun: boolean; upTo: number | null; passFrom: number |
   let passFrom: number | null = null
   const j = argv.indexOf('--pass-from')
   if (j >= 0 && argv[j + 1]) passFrom = Number(argv[j + 1])
+  // --traj-dir：意图 RL（run_rl_intent）用独立 traj 目录，巡检读该目录而非默认 rl-traj。
+  const t = argv.indexOf('--traj-dir')
+  if (t >= 0 && argv[t + 1]) setTrajDir(argv[t + 1])
   return { dryRun, upTo, passFrom }
 }
 
@@ -402,7 +418,9 @@ function metricsOf(w: WorkerData): GameMetrics {
       ? num(d?.progress)
       : dl?.progress && dl.progress.length > 0
         ? Math.round(dl.progress[0] * ENEMY_TOTAL)
-        : -1
+        : typeof r.kills === 'number'
+          ? r.kills
+          : -1
   const lives =
     num(d?.lives) >= 0
       ? num(d?.lives)
@@ -412,10 +430,18 @@ function metricsOf(w: WorkerData): GameMetrics {
   const loot = num(d?.loot)
   const csRaw = d?.clearSpeed && typeof d.clearSpeed.raw === 'number' ? d.clearSpeed.raw : -1
   const ticks = csRaw > 0 ? Math.round(csRaw) : typeof r.totalTicks === 'number' ? r.totalTicks : -1
+  // 意图 RL manifest 无 scoreList/dims（export-intent-rollout.ts 口径）——缺省打 -1/0，
+  // 巡检表仍可展示 wins/ticks/耗时，score 列显 '—'。
+  const score =
+    Array.isArray(r.scoreList) && r.scoreList.length > 0
+      ? r.scoreList[0]
+      : typeof r.score === 'number'
+        ? r.score
+        : -1
   return {
-    stage: r.stages[0],
-    seed: r.seeds[0],
-    score: r.scoreList[0],
+    stage: r.stages?.[0] ?? -1,
+    seed: r.seeds?.[0] ?? -1,
+    score,
     win: (r.outcomes?.stage_clear ?? 0) >= 1,
     kills,
     lives,

@@ -87,21 +87,23 @@ def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
     return model
 
 
-def backup_weights(weights_path: str, it: int) -> str | None:
+def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
 
-    Name: rl-weights.it<N>.<YYYYMMDD-HHMMSS>.json — iteration-first so the
+    Name: <prefix>.it<N>.<YYYYMMDD-HHMMSS>.json — iteration-first so the
     archive sorts by training progress at a glance; the timestamp disambiguates
     re-runs of the same iter. Deliberately NOT matching weights_io's strict
     `weights.<ts>_ep<N>_val<V>.json` BC auto-discovery regex (same reason the
     manual `rl-weights.*_post-it*ppo.json` backup avoided it): eval_bridge's
     latest_weights_path must never pick up RL archives. Oldest pruned beyond
-    WEIGHTS_BACKUP_KEEP; non-fatal on any IO error."""
+    WEIGHTS_BACKUP_KEEP; non-fatal on any IO error.
+    prefix（工程化共享）：run_rl_intent 用 'intent-rl-weights' 独立前缀，与 per-tick
+    RL 归档分桶（各自按前缀 prune，互不干扰）。"""
     try:
         WEIGHTS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        dst = WEIGHTS_BACKUP_DIR / f"rl-weights.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
+        dst = WEIGHTS_BACKUP_DIR / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
         shutil.copyfile(weights_path, dst)
-        baks = sorted(WEIGHTS_BACKUP_DIR.glob("rl-weights.it*.json"))
+        baks = sorted(WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"))
         if len(baks) > WEIGHTS_BACKUP_KEEP:
             for old in baks[:len(baks) - WEIGHTS_BACKUP_KEEP]:
                 old.unlink(missing_ok=True)
