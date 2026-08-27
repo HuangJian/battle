@@ -59,7 +59,7 @@ from rl.resume import (completed_pairs, last_completed_iter,  # noqa: E402
 from rl.stream import run_rollout_stream  # noqa: E402
 from rl.breaker import (CIRCUIT_EXIT_CODE, KL_WARN, ENT_COLLAPSE_DROP,  # noqa: E402
                         breaker_update)
-from run_rl import backup_weights  # noqa: E402
+from run_rl import backup_weights, ensure_current_branch_pushed  # noqa: E402
 
 # M7② 基线（m1-eval 35×10 hard，intent-exec B′，nn.progress.intent §25/§26）。
 DEFAULT_BASELINE = 0.723
@@ -263,6 +263,9 @@ def main() -> None:
     _setup_log_redirect(args)
     # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
     _log_rl_args(args, rl_args)
+    # 启动前推送当前分支到 origin——远端 agent 靠 git pull 同步（§30：不 push
+    # 则 agents 永远拉旧代码 → codeHash 排除 → 远端 30+ 槽闲置）。
+    ensure_current_branch_pushed(REPO_ROOT)
 
     bun = shutil.which("bun")
     if bun is None:

@@ -127,6 +127,31 @@ def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> st
         return None
 
 
+def ensure_current_branch_pushed(repo_root: Path) -> str | None:
+    """启动前把当前 git 分支 push 到 origin——远端 agent 的 upgrade 是 `git pull`，
+    拉的是 **origin**，本地 ahead 的 commit 不 push，agents 永久拉旧代码 →
+    codeHash 对不上被排除 → 训练全程本机独扛、远端 30+ 槽闲置（§30 实测教训）。
+    push 失败（离线/无远端/无 upstream）仅告警不中断——本地训练不依赖远端。
+    返回 push 的分支名（失败返回 None）。"""
+    try:
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo_root),
+            capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+        if not branch or branch == "HEAD":
+            return None
+        r = subprocess.run(["git", "push", "origin", branch], cwd=str(repo_root),
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            log(f"[run_rl] pushed {branch} -> origin (agents can git-pull to sync)")
+            return branch
+        log(f"[run_rl] WARN git push {branch} failed (rc={r.returncode}): "
+            f"{(r.stderr or r.stdout)[-200:]} — remote agents may stay stale")
+    except Exception as e:  # noqa: BLE001 — 非致命：不阻断本地训练
+        log(f"[run_rl] WARN git push skipped: {e}")
+    return None
+
+
 def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
     """迭代失败落 training_log.jsonl（iter_error 事件）。
 
@@ -232,6 +257,9 @@ def main() -> None:
     import numpy as np
 
     np.random.seed(args.seed)
+
+    # 启动前推送当前分支到 origin（远端 agent 靠 git pull 同步——§30 教训）。
+    ensure_current_branch_pushed(REPO_ROOT)
 
     bun = shutil.which("bun")
     if bun is None:
