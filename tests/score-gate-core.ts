@@ -47,11 +47,12 @@ export const STAGE_COUNT = STAGES.length // 35
 // (footprint-aware buildCarveCosts / ring-steel fire block / EnemyModel
 // corrections) shifted sim behavior — same harness/口径, deterministic sims.
 // 2026-08-26 (post window-0 merge): re-captured after the super-item knobs
-// retired to OFF by default (AI-No-Items-Warmstart M0, DECISIONS §167 rev;
-// NN training corpus must be item-free). classic byte-unchanged (already 0
-// via CLASSIC_MODEL_PARAMS); hard aggregate 0.7663→0.7575 (−0.89pt, matches
-// the M0 60-seed paired A/B ≈−1pt); chaos 0.7562→0.7372 (−1.9pt). Accepted
-// quantified cost of the no-items deployment baseline (plan §0.2 R4).
+// retired to OFF by default (AI-No-Items-Warmstart M0, plan §0.2 R4 cost:
+// hard 0.7663→0.7575 (−0.89pt), chaos 0.7562→0.7372 (−1.9pt)).
+// 2026-08-28 (DECISIONS §293): God AI unfrozen — super-item activation restored
+// (superItemMode/superItemGuardThreat → 1). hard returns to 0.7663, chaos to
+// 0.7562 — the exact pre-retirement numbers, i.e. the M0 cost is fully reversed;
+// classic byte-unchanged (superItemMode kept 0 via CLASSIC_MODEL_PARAMS).
 // Re-capture with `bun tools/diag/recapture-score-truth.ts` (standing tool).
 export const TRUTH_SCORES: Record<string, number[]> = {
   classic: [
@@ -60,14 +61,14 @@ export const TRUTH_SCORES: Record<string, number[]> = {
     0.8274, 0.6587, 0.8563, 0.9725, 0.8763, 0.891, 0.9002, 0.9529, 0.6606, 0.9064, 0.8945,
   ],
   hard: [
-    0.8765, 0.6661, 0.6856, 0.5838, 0.8144, 0.8532, 0.8053, 0.8688, 0.7555, 0.8211, 0.9558, 0.6677,
-    0.8591, 0.5813, 0.7949, 0.6655, 0.7888, 0.8789, 0.7931, 0.5117, 0.7322, 0.5589, 0.9628, 0.5869,
-    0.8613, 0.706, 0.9442, 0.5805, 0.9624, 0.8708, 0.7235, 0.6649, 0.9246, 0.3486, 0.8573,
+    0.8765, 0.6709, 0.6824, 0.579, 0.8785, 0.8516, 0.8049, 0.8688, 0.7561, 0.8214, 0.9533, 0.6684,
+    0.86, 0.6582, 0.8638, 0.6653, 0.7198, 0.8067, 0.7961, 0.6562, 0.7322, 0.558, 0.9628, 0.5834,
+    0.8613, 0.7806, 0.9475, 0.6562, 0.9627, 0.8041, 0.7911, 0.5925, 0.9294, 0.3558, 0.8667,
   ],
   chaos: [
-    0.8001, 0.7433, 0.8183, 0.6511, 0.7334, 0.6398, 0.6483, 0.5366, 0.7491, 0.9567, 0.882, 0.6457,
-    0.8877, 0.8053, 0.8074, 0.6604, 0.8687, 0.9774, 0.6501, 0.4466, 0.8204, 0.6612, 0.9705, 0.501,
-    0.8703, 0.5785, 0.951, 0.6654, 0.8072, 0.8894, 0.633, 0.4287, 0.7945, 0.5103, 0.8126,
+    0.7971, 0.8729, 0.8848, 0.6511, 0.7323, 0.6441, 0.6495, 0.5366, 0.8152, 0.9603, 0.8778, 0.6457,
+    0.8875, 0.8046, 0.8733, 0.6604, 0.8653, 0.9749, 0.6526, 0.5202, 0.8204, 0.6641, 0.9658, 0.5005,
+    0.8712, 0.5785, 0.9449, 0.6654, 0.8072, 0.9568, 0.6329, 0.4274, 0.9392, 0.5108, 0.8743,
   ],
 }
 

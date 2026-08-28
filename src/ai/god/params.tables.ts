@@ -693,17 +693,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   starRushRangeCells: 8,
   starRushLiftGates: 1,
 
-  // §167 / B4: super-item strategic activation — RETIRED by default
-  // (2026-08-25, plan/AI-No-Items-Warmstart.md M0; re-applied post-merge on
-  // params.tables.ts). All NN-AI training uses NO active items (guard/frenzy
-  // never pressed): knobs defaulted to 0, kept only as rotatable experiments
-  // (DECISIONS §167 revision, M0). Original 60-seed paired A/B: hard
-  // 75.9→76.5% (L→W 25 / W→L 12, z=2.14 significant); chaos neutral. M0
-  // paired A/B (60 seeds): hard OFF ≈ −1pt (Lattice 65→58%, p=0.0002) —
-  // quantified cost, accepted per plan §0.2 (risk R4); classic restored to 0
-  // via CLASSIC_MODEL_PARAMS (§115).
-  superItemMode: 0,
-  superItemGuardThreat: 0,
+  // §167 / B4: super-item strategic activation — RE-ENABLED by default
+  // (2026-08-28, unfreeze DECISIONS §293; reverse of AI-No-Items-Warmstart
+  // M0 / DECISIONS §167-rev / §289). The God AI presses F5 (guard, when the
+  // base is under threat) / F6 (frenzy, when the facing corridor holds an
+  // enemy and no bullet is inbound). Original 60-seed paired A/B (§167):
+  // hard 75.9→76.5% (L→W 25 / W→L 12, z=2.14 significant); chaos neutral.
+  // M0 measured the no-items cost at −1pt hard (Lattice 65→58%, p=0.0002).
+  // superItemFrenzyAim stays 0 (archived knob — §273/§293, L1 guard).
+  // classic kept 0 via CLASSIC_MODEL_PARAMS (§115); guards never activate via
+  // GUARD_GOD_AI_PARAMS (they own no inventory).
+  superItemMode: 1,
+  superItemGuardThreat: 1,
   superItemFrenzyAim: 0,
 
   // §157: base clear-shot threat detection.

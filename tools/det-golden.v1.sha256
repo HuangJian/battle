@@ -1,7 +1,8 @@
-# God AI v1 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-08-26 @ 窗口0稳定化新纪元（super-item 退役默认 OFF，
-#       AI-No-Items-Warmstart M0 / DECISIONS §167 rev；NN 训练语料必须无主动道具。
-#       配套重钉：score-gate TRUTH_SCORES 第三次重捕获 + eval-suite 三难度 pinned run）
+# God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# 采集：2026-08-28 @ God-AI 解冻 + super-item 恢复纪元（DECISIONS §293；
+#       superItemMode/superItemGuardThreat 默认 1，NN 训练语料仍可用无道具口径）。
+#       配套重钉：score-gate TRUTH_SCORES 第四次重捕获（hard/chaos 回到退役前值）
+#       + freeze baseline 更新。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-aa395e1f5a5428eed0a437108fb1b8231ac70c3cc70cfdb971b7fd02d03f30dc
+20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf

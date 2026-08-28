@@ -43,13 +43,15 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 
 ---
 
-# Part 0. 当前状态速览（2026-08-26 · **v1 封版冻结**，DECISIONS §272）
+# Part 0. 当前状态速览（2026-08-28 · God AI 解冻 + super-item 恢复纪元，DECISIONS §293）
 
 > ★ **player God AI v1 已封版**（owner 拍板 D0=A，2026-08-26；评审 `god-ai-org.review.md` P1–P5 吸收）。
-> 本 Part 为冻结基线的唯一口径。此后任何 God-AI 行为改动 = 新纪元「三件套」：
-> 新 DECISIONS 条目 + 重跑 60-seed 三难度基线 + 更新冻结签名 golden——缺一不可。
-> 强制机制：pre-commit 冻结签名门 / `bun run freeze:check`（~100s，门红 ≠ 出错，是强制显式判定）；
-> L2 可达性审计 `bun run freeze:l2`。重启协议见文末专节；执行手册 plan/God-AI-Organization.md。
+> **2026-08-28 解冻**：owner 拍板「取消冻结 god ai，恢复使用道具策略」（DECISIONS §293）——
+> `superItemMode`/`superItemGuardThreat` 恢复默认 **ON**（frenzy 维持 OFF）；§272 三件套已完整重跑。
+> 此后任何 God-AI 行为改动 = 新纪元「三件套」：新 DECISIONS 条目 + 重跑 60-seed 三难度基线 + 更新
+> 冻结签名 golden——缺一不可。强制机制：pre-commit 冻结签名门 / `bun run freeze:check`
+> （~100s，门红 ≠ 出错，是强制显式判定）；L2 可达性审计 `bun run freeze:l2`。
+> 重启协议见文末专节；执行手册 plan/God-AI-Organization.md。
 
 ## 0.0 导航索引（决策号段 ↔ 章节）
 
@@ -75,6 +77,25 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 | classic | 0.7258（0.7211 ±0.0048） | 90% | 721.1 | Ice Palace（win 68%） |
 | **hard（主评估）** | **0.5450**（0.5388 ±0.0062） | **76%** | 538.8 | Battlement（win 30%） |
 | chaos（参） | 0.4943（0.4878 ±0.0065） | 70% | 487.8 | Battlement（win 17%） |
+
+### 0.A.1 §293 解冻纪元基线（super-item ON，2026-08-28 采集）— 现口径
+
+> 逆 §289 / 修订 §167-rev：`superItemMode`/`superItemGuardThreat` 恢复默认 1，
+> `superItemFrenzyAim` 维持 0（archived，§273）。eval-suite v7 · 35 关 × 60 seeds · HEAD 参数。
+> 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty <d> --dims --json tmp/freeze/baseline-<d>.json`。
+> golden = `20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf`（21 组合，111,176 签名行）。
+
+| 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
+|---|---|---|---|---|
+| classic | 0.7286（0.7238 ±0.0048） | 89.5% | 723.8 | Ice Palace（win 68%） |
+| **hard（主评估）** | **0.5403**（0.5341 ±0.0062） | **75.3%** | 534.1 | Battlement（win 23%） |
+| chaos（参） | 0.4964（0.4899 ±0.0065） | 70.6% | 489.9 | Battlement（win 20%） |
+
+- vs §289 冻结 OFF（classic 0.7286/89.5%、hard 0.5290/74.3%、chaos 0.4862/69.0%）：classic **逐位持平**
+  （字节不变，superItemMode 经 `CLASSIC_MODEL_PARAMS` 仍归 0）；**hard +1.13pp SUITE / +1.0pp 胜率**、
+  **chaos +1.02pp SUITE / +1.6pp 胜率** —— M0 摘除代价（hard −1pt、chaos −1.9pt）完整反还。
+- score-gate `TRUTH_SCORES` 第四次重捕获（10 seeds）：hard 0.7575→0.7663、chaos 0.7372→0.7562
+  （均回到 M0 退役前值），classic 0.8697 不变；`bun run freeze:check` 门绿。
 
 - hard 维度均值（all/clears/losses）：progress 0.888/1.000/0.533 · lives 0.809/0.839/0.716 ·
   baseIntegrity 0.703/0.884/**0.134** · clearSpeed 0.148（clears-only）· accuracy 0.840/0.880/0.713 ·

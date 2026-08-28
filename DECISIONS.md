@@ -2203,3 +2203,44 @@ CRUISE 双激活、PICKUP/CLEAR/ESCAPE 双不激活；
 > 基线噪声塌缩（M8 的 kickstarting 落地形式）。
 > **记录**：docs/nn.progress.intent.md §27（训练首轮结果续写）。
 
+## 293. God AI 解冻 + 恢复超级道具策略（super-item 战略激活）(STATUS: 已实施, 2026-08-28)
+
+**Decision:** 取消 §272 对"无主动道具"默认的口径冻结，恢复 §167/B4 超级道具战略激活为默认 ON：
+`DEFAULT_GOD_AI_PARAMS.superItemMode: 0→1`、`superItemGuardThreat: 0→1`
+（`superItemFrenzyAim` 保持 0 —— 它在 `ARCHIVED_KNOB_GROUPS`（params.interface.ts:2468），
+§273 + L1 守卫强制 OFF，与 §167 原始 SHIPPED 默认一致）。这是 §289（super-item 退役 OFF）
+的**逆操作**，完成上帝 AI 解冻 + 恢复道具使用策略。
+
+**完成的新纪元「三件套」（§272 强制）：**
+1. **本条目**（§293，逆 §289 / 修订 §167-rev）。`docs/god-ai-tuning.progress.md` Part 0 基线更新。
+2. **60-seed 三难度基线**（eval-suite v7 · 35 关 × 60 seeds，2026-08-28 采集）：
+   | 难度 | SUITE (lcb ±se) | 平均胜率 | 最弱关 |
+   |---|---|---|---|
+   | classic | 0.7286（0.7238 ±0.0048） | 89.5% | Ice Palace 68% |
+   | **hard（主）** | **0.5403**（0.5341 ±0.0062） | **75.3%** | Battlement 23% |
+   | chaos（参） | 0.4964（0.4899 ±0.0065） | 70.6% | Battlement 20% |
+   - vs 冻结 OFF 口径（§289：0.7286/89.5% · 0.5290/74.3% · 0.4862/69.0%）：classic **逐位持平**（字节不变，
+     superItemMode 经 `CLASSIC_MODEL_PARAMS` 仍归 0）；hard **+1.13pp SUITE / +1.0pp 胜率**；chaos
+     **+1.02pp SUITE / +1.6pp 胜率**——即 M0 摘除代价（hard −1pt、chaos −1.9pt）被**完整反还**。
+3. **冻结签名 golden 重钉**：`tools/det-golden.v1.sha256` 更新为
+   `20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf`
+   （probe-det-baseline 全量 21 组合 · 111,176 签名行；guard 召唤使签名行 109,516→111,176）。
+
+**配套重钉：** score-gate `TRUTH_SCORES` 第四次重捕获（`bun tools/diag/recapture-score-truth.ts`）——
+hard 0.7575→0.7663、chaos 0.7372→0.7562（**恰为 M0 退役前的数值**，10-seed 与 60-seed 方向一致）；
+classic 0.8697 不变。`tests/godai-score-gate.test.ts` 与 `bun run freeze:check` 全绿。
+
+**Rationale:**
+- owner 拍板：「取消冻结 god ai，恢复使用道具策略」——§167 的原始可行性数据（hard 60-seed
+  配对 A/B：75.9→76.5%，L→W 25 / W→L 12，z=2.14 显著）与本次 60-seed 全量复测（hard/chaos 双升、
+  classic 零回归）方向一致；§289 的 NN 语料"无主动道具"前提（AI-No-Items-Warmstart M0）是**训练分布**
+  约束，与**运行时 God AI** 使用道具不冲突——训练口径仍可保持无道具，runtime 已恢复道具策略。
+- MANIFEST 三道门：道具策略在 M0 A/B 已证明净正（hard 提升），恢复它提升玩家可感知的对局质量；
+  实现零新增复杂度（旋钮已存在）；忠于经典超级道具。
+- 不恢复 `superItemFrenzyAim`（§273 留档旋钮；frenzy 的连射瞄准从未 SHIPPED，维持 OFF）。
+
+**Implications:** 冻结基线自此以"道具 ON"为口径（§272 表格已被本节更新取代）。此后再改 God-AI
+行为仍须走三件套。`plan/AI-No-Items-Warmstart.md` M0 的"God-AI 摘除主动道具"仅保留为训练语料口径，
+其 M4 cleanup（删除 `src/ai/god/SuperItems.ts`）**不再执行**——该模块恢复为运行时活跃路径。
+
+
