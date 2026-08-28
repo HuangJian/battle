@@ -19,9 +19,7 @@ from rl.log import log
 from rl.queue import REPO_ROOT, _record_agent_meta, bun_version, mm
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
-_POPEN_NO_WINDOW: dict = {}
-if sys.platform == "win32":
-    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 
 # 干净评估（2026-08-24，用户指令）：用各节点已缓存的同权重跑固定语料贪心局。
 # 两股噪声都消掉：动作 argmax 无探索噪声、(stage,seed) 语料恒定 → 跨 checkpoint

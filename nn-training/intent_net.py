@@ -192,11 +192,11 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     with torch.no_grad():
         i_log, e_log, a_log, v_log = m.forward_rl(obs, sc, inj)
 
-    from weights_io import _tensor_to_b64, OBS_SCHEMA_MAJOR
+    from weights_io import tensor_to_b64, OBS_SCHEMA_MAJOR
 
     params = {}
     for name, p in m.state_dict().items():
-        params[name] = {"shape": list(p.shape), "data": _tensor_to_b64(p)}
+        params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
     golden = {
         "format": "intent-golden",
         "version": 2,

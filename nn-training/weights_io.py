@@ -29,9 +29,14 @@ import torch
 from schema import OBS_SCHEMA_MAJOR
 
 
-def _tensor_to_b64(t: torch.Tensor) -> str:
+def tensor_to_b64(t: torch.Tensor) -> str:
+    """Tensor → base64 of little-endian float32 bytes (weights JSON `data` 字段)。"""
     arr = t.detach().cpu().contiguous().numpy().astype("<f4")
     return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+# 兼容别名：早期版本以私有名导出，外部（intent_net.export_golden 等）沿用旧名。
+_tensor_to_b64 = tensor_to_b64
 
 
 def _b64_to_tensor(b64: str, shape: list[int]) -> torch.Tensor:
@@ -44,7 +49,7 @@ def save_weights_json(model: torch.nn.Module, path: str, extra_meta: Dict[str, A
     """Write the model weights in the JSON+base64 format (plan §5)."""
     params: Dict[str, Any] = {}
     for name, p in model.state_dict().items():
-        params[name] = {"shape": list(p.shape), "data": _tensor_to_b64(p)}
+        params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
     meta = {
         "format": "nn-weights-json",
         "version": 1,

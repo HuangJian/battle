@@ -22,7 +22,14 @@ import { STAGES } from '../../src/config/stages'
  *  - export-intent-rollout 的 v7 dims：progress/baseIntegrity/baseSafety 与局内实际状态一致。
  */
 
-const WEIGHTS = readFileSync('tmp/intent-rl/weights.json', 'utf8')
+const WEIGHTS = (() => {
+  try {
+    return readFileSync('tmp/intent-rl/weights.json', 'utf8')
+  } catch {
+    // 训练产物缺失（tmp/ 为临时区，产物随训练运行存在）——依赖它的用例整体跳过。
+    return null
+  }
+})()
 
 function iterEvent(partial: Partial<IterEvent>): IterEvent {
   return {
@@ -133,9 +140,11 @@ describe('HTML 报告指标（本段各关表现表 — metricsOf）', () => {
 })
 
 describe('export-intent-rollout v7 dims 正确性（HTML 报告数据源）', () => {
-  it('baseIntegrity：基地失守=0；存活 ∈ [0.55, 1]（0.55+0.45·完好墙比，含 telemetry）', () => {
+  // 依赖 tmp/intent-rl/weights.json（训练产物）；缺失时跳过（确定性测试不依赖外部产物）。
+  const itW = WEIGHTS !== null ? it : it.skip
+  itW('baseIntegrity：基地失守=0；存活 ∈ [0.55, 1]（0.55+0.45·完好墙比，含 telemetry）', () => {
     for (const seed of [1, 2]) {
-      const r = runOne(0, STAGES[0], seed, 'hard', 4000, WEIGHTS, 30)
+      const r = runOne(0, STAGES[0], seed, 'hard', 4000, WEIGHTS!, 30)
       if (r.outcome === 'base_destroyed') {
         expect(r.dims.baseIntegrity.value).toBe(0)
       } else {
@@ -146,16 +155,16 @@ describe('export-intent-rollout v7 dims 正确性（HTML 报告数据源）', ()
     }
   })
 
-  it('progress = clamp01(kills / enemyTotal)（π 定义，God-AI 评分同口径）', () => {
+  itW('progress = clamp01(kills / enemyTotal)（π 定义，God-AI 评分同口径）', () => {
     const enemyTotal = STAGES[0].enemyCount ?? 20
     for (const seed of [3, 4]) {
-      const r = runOne(0, STAGES[0], seed, 'hard', 4000, WEIGHTS, 30)
+      const r = runOne(0, STAGES[0], seed, 'hard', 4000, WEIGHTS!, 30)
       expect(r.dims.progress.value).toBeCloseTo(Math.min(1, r.kills / enemyTotal), 5)
     }
   })
 
-  it('任何局的 dims 值域合法：progress/baseIntegrity/baseSafety ∈ [0,1]', () => {
-    const r = runOne(0, STAGES[0], 99, 'hard', 3000, WEIGHTS, 30)
+  itW('任何局的 dims 值域合法：progress/baseIntegrity/baseSafety ∈ [0,1]', () => {
+    const r = runOne(0, STAGES[0], 99, 'hard', 3000, WEIGHTS!, 30)
     for (const k of ['progress', 'baseIntegrity', 'baseSafety'] as const) {
       const v = r.dims[k]?.value
       if (v === null) continue // 某些维度缺数据可合法为 null

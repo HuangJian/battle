@@ -70,9 +70,7 @@ DEFAULT_EVAL_AT = "5,10,15"
 
 # Windows：spawn 子进程（bun 巡检/评估、python 权重初始化）时用 CREATE_NO_WINDOW，
 # 避免每个子进程开黑色控制台窗口反复弹出抢占焦点。stdout/stderr 已 capture 或重定向。
-_POPEN_NO_WINDOW: dict = {}
-if sys.platform == "win32":
-    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 
 
 def _run_inspect(bun: str, traj_root: Path, it: int) -> None:

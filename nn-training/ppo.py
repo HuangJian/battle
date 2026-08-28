@@ -26,21 +26,34 @@ Usage (via start-training.{sh,ps1} which provides the venv + torch):
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
-import re
 import time
-from typing import Any, Dict
+from typing import Dict
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
+from schema import MOVE_DIM, FIRE_DIM
 from student_model import PPOStudent
 from weights_io import load_weights_json, save_weights_json
+# 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
+from ppo_common import (  # noqa: E402
+    log,
+    masked_logsoftmax,
+    cat_logprob,
+    cat_entropy,
+    compute_gae,
+    discover_shards,
+    load_shard_fields,
+    _pack_np_state,
+    _unpack_np_state,
+    _ppo_save,
+    _ppo_load,
+    chunk_episodes,
+    load_episodes_common,
+)
 
 
 # ---------------- hyper-params (CLI-overridable) ----------------
@@ -64,11 +77,6 @@ LOAD_LOG_EVERY = 128   # shard-loading progress lines
 HB_SEC = 60.0          # PPO update heartbeat interval
 
 
-
-def log(msg: str) -> None:
-    """Timestamped log line (matches run_rl.log format)."""
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
 def build_ppo(weights_path: str | None) -> PPOStudent:
     h = d = head_hidden = None
     if weights_path and os.path.exists(weights_path):
@@ -81,62 +89,27 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 
 # ---------------- trajectory loading ----------------
+# RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
+_RL_SHARD_SPEC = {
+    "obs": ("obs.npy", np.uint8),
+    "scalars": ("scalars.npy", np.float32),
+    "a_move": ("a_move.npy", np.int64),
+    "a_fire": ("a_fire.npy", np.int64),
+    "lp_move": ("lp_move.npy", np.float32),
+    "lp_fire": ("lp_fire.npy", np.float32),
+    "value": ("value.npy", np.float32),
+    "reward": ("reward.npy", np.float32),
+    "done": ("done.npy", np.int64),
+    "mask": ("mask.npy", np.int64),
+}
+
+
 def discover_rl_shards(root: str) -> list[str]:
-    out = []
-    for dirpath, _dirs, files in os.walk(root):
-        if "reward.npy" in files and "obs.npy" in files:
-            out.append(dirpath)
-    return sorted(out)
+    return discover_shards(root, ("reward.npy", "obs.npy"))
 
 
 def load_shard(dirpath: str) -> Dict[str, np.ndarray]:
-    def npy(name: str) -> np.ndarray:
-        return np.load(os.path.join(dirpath, name))
-
-    # copy=False：dtype 已符合时零拷贝——obs 每轮 ~550MB，无谓 astype 拷贝纯烧内存带宽。
-    return {
-        "obs": npy("obs.npy").astype(np.uint8, copy=False),
-        "scalars": npy("scalars.npy").astype(np.float32, copy=False),
-        "a_move": npy("a_move.npy").astype(np.int64, copy=False),
-        "a_fire": npy("a_fire.npy").astype(np.int64, copy=False),
-        "lp_move": npy("lp_move.npy").astype(np.float32, copy=False),
-        "lp_fire": npy("lp_fire.npy").astype(np.float32, copy=False),
-        "value": npy("value.npy").astype(np.float32, copy=False),
-        "reward": npy("reward.npy").astype(np.float32, copy=False),
-        "done": npy("done.npy").astype(np.int64, copy=False),
-        "mask": npy("mask.npy").astype(np.int64, copy=False),
-    }
-
-
-def compute_gae(rewards, values, dones, gamma, lam):
-    """Per-episode GAE. rewards[t]=r_{t+1}, values[t]=V(s_t)."""
-    N = len(rewards)
-    adv = np.zeros(N, dtype=np.float32)
-    last = 0.0
-    for t in reversed(range(N)):
-        non_term = 1.0 - float(dones[t])
-        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
-        delta = float(rewards[t]) + gamma * next_value - float(values[t])
-        last = delta + gamma * lam * non_term * last
-        adv[t] = last
-    ret = adv + np.asarray(values, dtype=np.float32)
-    return adv, ret
-
-
-# ---------------- policy helpers ----------------
-def masked_logsoftmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    # mask: 1 valid, 0 invalid → push invalid to -inf
-    big = torch.tensor(1e9, device=logits.device, dtype=logits.dtype)
-    m = mask.to(logits.dtype)
-    return F.log_softmax(logits + (1.0 - m) * (-big), dim=-1)
-
-
-def cat_logprob(action: torch.Tensor, logp: torch.Tensor) -> torch.Tensor:
-    return logp.gather(1, action.unsqueeze(1)).squeeze(1)
-
-
-def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
-    return -(logp.exp() * logp).sum(dim=-1).mean()
+    return load_shard_fields(dirpath, _RL_SHARD_SPEC)
 
 
 def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
@@ -168,96 +141,21 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's
     update mode and the run_rl.py loop."""
-    shards = discover_rl_shards(data_root)
-    if not shards:
-        raise SystemExit(f"[ppo] no RL shards found under {data_root}")
-    log(f"[ppo] loaded {len(shards)} trajectory shards from {data_root}")
-
-    episodes: list[dict] = []
-    t_load = time.time()
-    for k, sd in enumerate(shards):
-        if k > 0 and k % LOAD_LOG_EVERY == 0:
-            log(f"[ppo] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
-        d = load_shard(sd)
-        N = d["obs"].shape[0]
-        if N == 0:
-            continue
-        adv, ret = compute_gae(d["reward"], d["value"], d["done"], gamma, lam)
-        episodes.append(
-            {
-                "obs": d["obs"],
-                "scalars": d["scalars"],
-                "a_move": d["a_move"],
-                "a_fire": d["a_fire"],
-                "lp_move": d["lp_move"],
-                "lp_fire": d["lp_fire"],
-                "value": d["value"],
-                "adv": adv.astype(np.float32),
-                "ret": ret.astype(np.float32),
-                "mask": d["mask"],
-            }
-        )
-
-    log(f"[ppo] shard IO + GAE done for {len(episodes)} episodes "
-        f"({time.time() - t_load:.0f}s)")
-    all_adv = np.concatenate([e["adv"] for e in episodes])
-    mean, std = all_adv.mean(), all_adv.std() + 1e-8
-    for e in episodes:
-        e["adv"] = (e["adv"] - mean) / std
-    return episodes
+    return load_episodes_common(
+        data_root,
+        label="ppo",
+        shard_kind="RL",
+        need_files=("reward.npy", "obs.npy"),
+        shard_loader=load_shard,
+        gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
+        gae_name="GAE",
+        normalize_ret=False,
+    )
 
 
 # ---------------- PPO update ----------------
-def _pack_np_state() -> list:
-    """numpy MT19937 全局状态 → JSON 可序列化（续跑需精确重建 epoch 乱序）。"""
-    s = np.random.get_state()
-    return [s[0], s[1].tolist(), s[2], s[3], s[4]]
-
-
-def _unpack_np_state(packed: list) -> None:
-    np.random.set_state((packed[0], np.asarray(packed[1], dtype=np.uint32),
-                         packed[2], packed[3], packed[4]))
-
-
-def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
-    """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
-    恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
-    os.makedirs(ckpt_path, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(ckpt_path, "model.pt"))
-    torch.save(opt.state_dict(), os.path.join(ckpt_path, "opt.pt"))
-    with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
-        json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)
-
-
-def _ppo_load(ckpt_path: str | None, model, opt) -> int:
-    """返回已完成 epoch 数（0=无 checkpoint / 无法加载）。加载 model/opt + 恢复 RNG。"""
-    if not ckpt_path:
-        return 0
-    sp = os.path.join(ckpt_path, "state.json")
-    mp = os.path.join(ckpt_path, "model.pt")
-    op = os.path.join(ckpt_path, "opt.pt")
-    if not all(os.path.exists(p) for p in (sp, mp, op)):
-        return 0
-    with open(sp, encoding="utf-8") as f:
-        st = json.load(f)
-    model.load_state_dict(torch.load(mp, map_location="cpu"))
-    opt.load_state_dict(torch.load(op, map_location="cpu"))
-    _unpack_np_state(st["rng"])
-    return int(st.get("epochs_done", 0))
-
-
-def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
-    """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
-
-    GAE is computed per-episode BEFORE chunking; chunks are only an update-
-    granularity unit (bounds activation memory, adds gradient steps).
-    """
-    out: list[dict] = []
-    for e in episodes:
-        n = e["obs"].shape[0]
-        for s in range(0, n, mb):
-            out.append({k: v[s:s + mb] for k, v in e.items()})
-    return out
+# checkpoint 原语（_pack_np_state/_unpack_np_state/_ppo_save/_ppo_load）与
+# chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
 
 
 def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None):

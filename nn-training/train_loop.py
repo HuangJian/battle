@@ -60,9 +60,7 @@ import threading
 import time
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
-_POPEN_NO_WINDOW: dict = {}
-if sys.platform == "win32":
-    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

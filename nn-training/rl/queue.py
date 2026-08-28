@@ -23,9 +23,7 @@ from rl.resume import completed_pairs, resumed_manifests
 # Windows：spawn 本地对局子进程（bun/node 跑游戏模拟）时使用 CREATE_NO_WINDOW，
 # 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
 # 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
-_POPEN_NO_WINDOW: dict = {}
-if sys.platform == "win32":
-    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

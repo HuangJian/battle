@@ -23,9 +23,11 @@
 **Rule (AGENTS §1):** read MANIFEST → DECISIONS → active plans → this file, every session; MANIFEST wins over plans.
 
 - `MANIFEST.md` — the creed; §13 settles most doubts. Non-negotiable.
-- `DECISIONS.md` — the decision **index**: §1–§10 foundational decisions in full + compressed pointers.
-  You extend it, not contradict it. Full God-AI / perf / render tuning text lives in
-  `docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`, `docs/render-optimization.progress.md`.
+- `DECISIONS.md` — the decision **index**: one line per decision (§ + one-sentence status + pointer).
+  You extend it, not contradict it. Full bodies live in `docs/decisions.details.md` (foundational §1–§10,
+  refactor/engineering §239–§271, God-AI freeze ops §273–§276, replay/RL-bridge §279–§280, NN epoch §289–§290)
+  and the topic progress docs (`docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`,
+  `docs/render-optimization.progress.md`, `docs/nn.progress.md`, `docs/nn.progress.intent.md`).
 - `plan/mvp.md` — what the product is; its §10 MVP DoD applies to every change.
 - `plan/Snapshot-Management-Framework.md` and `plan/presentation-upgrade.md` — active feature plans;
   their "Definition of Done" sections are acceptance criteria.

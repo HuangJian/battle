@@ -22,10 +22,9 @@ run_rl_intent.py 用它做 pace 护栏）。
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import time
-from typing import Any, Dict
+from typing import Dict
 
 import numpy as np
 import torch
@@ -33,6 +32,18 @@ import torch.nn.functional as F
 
 from schema import OBS_CHANNELS, BOARD, SCALAR_DIM  # noqa: F401 — re-export for callers
 from intent_net import IntentNet, load_intent_weights, export_intent_weights
+# 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
+from ppo_common import (  # noqa: E402
+    log,
+    masked_logsoftmax,
+    compute_gae,
+    discover_shards,
+    load_shard_fields,
+    _ppo_save,
+    _ppo_load,
+    chunk_episodes,
+    load_episodes_common,
+)
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
 GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）
@@ -56,10 +67,6 @@ LOAD_LOG_EVERY = 128
 HB_SEC = 60.0
 
 
-def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-
 class IntentRLNet(IntentNet):
     """IntentNet + value 头（M8 默认 inject=True, with_value=True）。"""
 
@@ -78,56 +85,44 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
             a = meta.get("arch", {})
             h = a.get("h", 64)
             d = a.get("d", 8)
-        except Exception:
-            pass
+        except Exception as e:  # 权重损坏/格式不符 → 回落默认架构（保留原行为，仅不再静默）
+            log(f"[ppo_intent] WARN build_rl_net: ignoring {weights_path}: {e!r}")
     return IntentRLNet(h=h or 64, d=d or 8)
 
 
 # ---------------- trajectory loading ----------------
+# 意图 shard 字段表：{key: (filename, dtype)} —— 与旧 load_intent_shard 逐字段一致。
+_INTENT_SHARD_SPEC = {
+    "obs": ("obs.npy", np.uint8),
+    "scalars": ("scalars.npy", np.float32),
+    "inject": ("inject.npy", np.float32),
+    "a_intent": ("a_intent.npy", np.int64),
+    "lp_intent": ("lp_intent.npy", np.float32),
+    "value": ("value.npy", np.float32),
+    "reward": ("reward.npy", np.float32),
+    "done": ("done.npy", np.int64),
+    "mask": ("mask.npy", np.int64),
+    "dt": ("dt.npy", np.int64),
+}
+
+
 def discover_intent_shards(root: str) -> list[str]:
-    out = []
-    for dirpath, _dirs, files in os.walk(root):
-        if "reward.npy" in files and "obs.npy" in files and "dt.npy" in files:
-            out.append(dirpath)
-    return sorted(out)
+    return discover_shards(root, ("reward.npy", "obs.npy", "dt.npy"))
 
 
 def load_intent_shard(dirpath: str) -> Dict[str, np.ndarray]:
-    def npy(name: str) -> np.ndarray:
-        return np.load(os.path.join(dirpath, name))
-
-    return {
-        "obs": npy("obs.npy").astype(np.uint8, copy=False),
-        "scalars": npy("scalars.npy").astype(np.float32, copy=False),
-        "inject": npy("inject.npy").astype(np.float32, copy=False),
-        "a_intent": npy("a_intent.npy").astype(np.int64, copy=False),
-        "lp_intent": npy("lp_intent.npy").astype(np.float32, copy=False),
-        "value": npy("value.npy").astype(np.float32, copy=False),
-        "reward": npy("reward.npy").astype(np.float32, copy=False),
-        "done": npy("done.npy").astype(np.int64, copy=False),
-        "mask": npy("mask.npy").astype(np.int64, copy=False),
-        "dt": npy("dt.npy").astype(np.int64, copy=False),
-    }
+    return load_shard_fields(dirpath, _INTENT_SHARD_SPEC)
 
 
-def compute_gae_variable(rewards, values, dones, dt, gamma_tick: float = GAMMA_TICK, lam: float = LAM):
+def compute_gae_variable(rewards, values, dones, dt,
+                         gamma_tick: float = GAMMA_TICK, lam: float = LAM):
     """意图步 GAE：每步折扣 γ_step = γ_tick^Δt（Δt = 窗口时长 tick）。
 
-    Δt≡1 时与 ppo.py 的定长 per-tick GAE 逐字节一致（单元测试断言）。
+    Δt≡1 时与 ppo.py 的定长 per-tick GAE 逐字节一致（test_ppo_intent.py 断言）。
     rewards[t]=r_{t+1}（意图步回报），values[t]=V(s_t)，dones[t]=是否终局步。
+    （实现统一收敛至 ppo_common.compute_gae(dt=...)，本名保留为兼容别名。）
     """
-    N = len(rewards)
-    adv = np.zeros(N, dtype=np.float32)
-    last = 0.0
-    for t in reversed(range(N)):
-        non_term = 1.0 - float(dones[t])
-        gamma_step = float(gamma_tick ** float(dt[t]))
-        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
-        delta = float(rewards[t]) + gamma_step * next_value - float(values[t])
-        last = delta + gamma_step * lam * non_term * last
-        adv[t] = last
-    ret = adv + np.asarray(values, dtype=np.float32)
-    return adv, ret
+    return compute_gae(rewards, values, dones, gamma_tick, lam, dt)
 
 
 def load_episode_from_shard(dirpath: str) -> dict | None:
@@ -155,66 +150,21 @@ def load_episode_from_shard(dirpath: str) -> dict | None:
 
 
 def load_episodes_intent(data_root: str) -> list[dict]:
-    shards = discover_intent_shards(data_root)
-    if not shards:
-        raise SystemExit(f"[ppo_intent] no intent RL shards found under {data_root}")
-    log(f"[ppo_intent] loaded {len(shards)} intent trajectory shards from {data_root}")
-
-    episodes: list[dict] = []
-    t_load = time.time()
-    for k, sd in enumerate(shards):
-        if k > 0 and k % LOAD_LOG_EVERY == 0:
-            log(f"[ppo_intent] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
-        d = load_intent_shard(sd)
-        N = d["obs"].shape[0]
-        if N == 0:
-            continue
-        adv, ret = compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"])
-        episodes.append(
-            {
-                "obs": d["obs"],
-                "scalars": d["scalars"],
-                "inject": d["inject"],
-                "a_intent": d["a_intent"],
-                "lp_intent": d["lp_intent"],
-                "value": d["value"],
-                "adv": adv.astype(np.float32),
-                "ret": ret.astype(np.float32),
-                "mask": d["mask"],
-                "dt": d["dt"],
-            }
-        )
-
-    log(f"[ppo_intent] shard IO + variable-step GAE done for {len(episodes)} episodes "
-        f"({time.time() - t_load:.0f}s)")
-    # 全局规范化（I13 "逐关规范化 returns"）：adv 与 ret 都归一到单位尺度。
-    #  - adv：PPO 标准（mean 0 / std 1）——策略梯度的方向信号。
-    #  - ret：value 头目标同步归一——否则 ±50 终局量级让 value MSE 数百、收敛极慢、
-    #    基线噪声使策略单 epoch 塌缩（B′ 冷启动实测）。归一后 value 收敛到 ~O(1)。
-    all_adv = np.concatenate([e["adv"] for e in episodes])
-    amean, astd = all_adv.mean(), all_adv.std() + 1e-8
-    all_ret = np.concatenate([e["ret"] for e in episodes])
-    rmean, rstd = all_ret.mean(), all_ret.std() + 1e-8
-    for e in episodes:
-        e["adv"] = (e["adv"] - amean) / astd
-        e["ret"] = (e["ret"] - rmean) / rstd
-    return episodes
+    return load_episodes_common(
+        data_root,
+        label="ppo_intent",
+        shard_kind="intent RL",
+        need_files=("reward.npy", "obs.npy", "dt.npy"),
+        shard_loader=load_intent_shard,
+        gae=lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        gae_name="variable-step GAE",
+        normalize_ret=True,  # intent：adv 与 ret 都全局归一（I13 逐关规范化）
+    )
 
 
 # ---------------- PPO update ----------------
-def masked_logsoftmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    big = torch.tensor(1e9, device=logits.device, dtype=logits.dtype)
-    m = mask.to(logits.dtype)
-    return F.log_softmax(logits + (1.0 - m) * (-big), dim=-1)
-
-
-def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
-    out: list[dict] = []
-    for e in episodes:
-        n = e["obs"].shape[0]
-        for s in range(0, n, mb):
-            out.append({k: v[s:s + mb] for k, v in e.items()})
-    return out
+# masked_logsoftmax / chunk_episodes / checkpoint 原语（_ppo_save/_ppo_load）由
+# ppo_common 提供（re-export 见顶部 import）；ppo_update_intent 直接使用。
 
 
 def ppo_update_intent(model, opt, chunks, epochs, device,
@@ -259,15 +209,8 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
     last_hb = t0
     start_epoch = 0
     if ckpt_path:
-        sp = os.path.join(ckpt_path, "state.json")
-        if os.path.exists(sp):
-            with open(sp, encoding="utf-8") as f:
-                st = json.load(f)
-            model.load_state_dict(torch.load(os.path.join(ckpt_path, "model.pt"),
-                                             map_location="cpu"))
-            opt.load_state_dict(torch.load(os.path.join(ckpt_path, "opt.pt"),
-                                           map_location="cpu"))
-            start_epoch = int(st.get("epochs_done", 0))
+        start_epoch = _ppo_load(ckpt_path, model, opt)
+        if start_epoch:
             log(f"[ppo_intent] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
 
     early_stopped = False
@@ -341,13 +284,7 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
                     f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
                     f"value={sum(s['value'] for s in recent) / n_r:.4f}")
         if ckpt_path:
-            os.makedirs(ckpt_path, exist_ok=True)
-            torch.save(model.state_dict(), os.path.join(ckpt_path, "model.pt"))
-            torch.save(opt.state_dict(), os.path.join(ckpt_path, "opt.pt"))
-            s = np.random.get_state()
-            with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
-                json.dump({"epochs_done": ep + 1,
-                           "rng": [s[0], s[1].tolist(), s[2], s[3], s[4]]}, f)
+            _ppo_save(ckpt_path, model, opt, ep + 1)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         ep_kl = sum(s["kl"] for s in ep_stats) / n_e
@@ -370,10 +307,9 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
 
 
 # ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes / _ppo_load）----
-# 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 格式同构（model.pt/opt.pt/
-# state.json + numpy RNG），复用 ppo 的通用 _ppo_load。ppo 不依赖本模块，无环。
-from ppo import _ppo_load  # noqa: E402,F401
-
+# ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes）----
+# 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 原语由 ppo_common
+# 提供（顶部 import _ppo_save/_ppo_load）。ppo 不依赖本模块，无环。
 update = ppo_update_intent
 load_episodes = load_episodes_intent
 
