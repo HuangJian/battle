@@ -156,6 +156,7 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 
 - **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
 - **Never `git add` an untracked `*.md`** (and no blanket `git add -A`/`git add .`) — commit tracked markdown freely, and only the markdown the human explicitly requested (details: `docs/agents.details.md` §5.8).
+- **Never `git stash`** — in this sandbox the stash's object writes get silently intercepted and can delete the whole object store (2026-08-28 incident: all packs vanished, 503 commits unreadable). For A/B comparisons use `git worktree add` or a scratch clone. Normal git flow (`add`/`commit`/`push`/`fetch`) writes `.git` all the time and is safe — no backup needed; back up `.git/objects` only if you are about to run a genuinely destructive command (`reset --hard`, `filter-branch`, `gc`, `repack`). Remote access is HTTPS-only here (origin is already switched; SSH is unreachable from the sandbox) (details: `docs/agents.details.md` §5.12).
 
 ### Style
 

@@ -309,6 +309,38 @@ before architectural changes (`model.py`, `infer.ts`, `obs-encoder.ts`).
   96×96 viewBox, tanks face UP.
 - New test → `tests/`, mirroring the concern (e.g. `tests/stages.test.ts` ↔ `src/config/stages.ts`).
 
+### 5.12 NEVER `git stash` — sandbox object-store destruction (2026-08-28 incident)
+This environment's sandbox silently intercepts some git writes to `.git`. `git stash -u` (used during
+an A/B baseline check) deleted the entire object store: all 4 pack files vanished, `.git/refs` was
+removed, and `git status` reported "not a git repository". Only the working tree and `.git/logs`
+survived. 503 commits were temporarily unreadable.
+
+**Rules that follow:**
+- **Never run `git stash`** (with or without `-u`). For before/after comparisons use
+  `git worktree add <path> HEAD` (safe, parallel working trees) or copy the directory. Never reach
+  for stash.
+- Normal git usage (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe —
+  **no backup needed**. Back up the object store only before a genuinely destructive command
+  (`reset --hard`, `filter-branch`, `gc`, `repack`): `cp -r .git/objects /tmp/git-objects-backup`.
+- Remote access in this sandbox is **HTTPS-only** (SSH port is blocked: "Connection closed by
+  UNKNOWN port 65535"). `origin` is already switched to `https://github.com/HuangJian/battle.git`.
+  Do not switch it back to SSH.
+
+**Recovery path (verified working, in case it ever happens again):**
+1. The object store is the only loss — working tree + `.git/logs` + `packed-refs` are intact.
+2. Recreate the ref dirs: `mkdir -p .git/refs/{heads,tags,remotes}`; restore `main` from the last
+   reflog entry if needed.
+3. Fetch the full history over HTTPS:
+   `git fetch https://github.com/HuangJian/battle.git '+refs/heads/*:refs/remotes/origin/*'`
+   (delete any refs whose objects are missing first, e.g. stale `refs/cline/checkpoints/*`).
+4. **Gotcha:** in this environment `git update-ref` silently does NOT persist updates to refs that
+   live in `packed-refs` (rc=0 but nothing written). Write the loose ref file directly instead:
+   `printf '<sha>\n' > .git/refs/remotes/origin/<branch>`.
+5. Re-attach un-pushed local work onto the recovered remote history:
+   `git commit-tree <local-tree> -p <remote-main-sha> -m "..."` → point `refs/heads/main` at it.
+6. Keep `.git/recovery-backup/` (reflog snapshot) and `.git/objects.broken/` until recovery is
+   confirmed; delete after a successful `git push` of the local-ahead branches.
+
 ---
 
 ## §6 When in doubt — derive from the MANIFEST, record, then execute
