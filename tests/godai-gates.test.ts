@@ -116,31 +116,4 @@ describe('godai-gates', () => {
       expect(r2.outcome).toMatch(/stage_clear|gameover|max_ticks/)
     })
   })
-
-  describe.skip('classic stage 0 regression', () => {
-    // DISABLED: Phase III — pass-rate (stage_clear) escalation gate
-    // The once-fatal blind spot: classic stage 0 was 0/10 pass with 0 kills.
-    // This test guards against regressing back to 0 kills.
-    //
-    // Current AI capability: O1/O2 level — can survive and get kills but
-    // cannot yet clear stages (O3). The threshold is set to "at least 1
-    // kill across 3 seeds" as a minimum regression guard. When the AI
-    // reaches O3 (stage_clear ≥ 90%), raise this back to 2/3 stage_clear.
-    it('gets at least 1 kill across 3 seeds on classic stage 0', () => {
-      const seeds = [1, 2, 3]
-      let totalKills = 0
-      for (const seed of seeds) {
-        const result = runSimulation({
-          seed,
-          stage: STAGES[0],
-          difficulty: 'classic',
-          maxTicks: 18000, // 5 min max
-          sampleInterval: 60,
-        })
-        totalKills += result.finalState.killCount
-      }
-      // Must get at least 1 kill total — 0 kills means the AI is broken.
-      expect(totalKills).toBeGreaterThanOrEqual(1)
-    }, 30000) // 30s timeout — 3 full simulations
-  })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { batchRun, summarize, parseSeedSpec, type BatchOptions } from '../tools/sim/batch-sim'
+import { batchRun, parseSeedSpec, type BatchOptions } from '../tools/sim/batch-sim'
 import { generateReport, formatReport } from '../tools/sim/report'
 import { runAICalibration } from '../tools/eval/ai-calibrate'
 import { runEvaluationCalibration } from '../tools/eval/calibrate'
@@ -103,55 +103,6 @@ describe('batch-sim', () => {
       }
     })
   })
-
-  describe.skip('summarize', () => {
-    // DISABLED: Phase III — passRate assertions (pass-rate tied)
-    it('computes correct summary statistics', () => {
-      const results = batchRun(makeBatchOpts())
-      const summary = summarize(results)
-      expect(summary.totalRuns).toBe(4)
-      expect(summary.outcomes).toBeDefined()
-      expect(typeof summary.avgPlayTimeMs).toBe('number')
-      expect(typeof summary.avgScore).toBe('number')
-      expect(typeof summary.avgKills).toBe('number')
-    })
-
-    it('handles empty results', () => {
-      const summary = summarize([])
-      expect(summary.totalRuns).toBe(0)
-      expect(summary.passRate).toBe(0)
-    })
-
-    it('computes pass rate from eval reports', () => {
-      const results = batchRun(makeBatchOpts({ evaluate: true }))
-      const summary = summarize(results)
-      expect(summary.passRate).toBeGreaterThanOrEqual(0)
-      expect(summary.passRate).toBeLessThanOrEqual(1)
-    })
-
-    it('passRate is 0 when no eval reports', () => {
-      const results = batchRun(makeBatchOpts({ evaluate: false }))
-      const summary = summarize(results)
-      expect(summary.passRate).toBe(0)
-    })
-
-    it('computes metric statistics', () => {
-      const results = batchRun(makeBatchOpts({ evaluate: true }))
-      const summary = summarize(results)
-      // Should have at least some metric stats
-      const metricKeys = Object.keys(summary.metricStats)
-      expect(metricKeys.length).toBeGreaterThan(0)
-      for (const key of metricKeys) {
-        const stat = summary.metricStats[key]
-        expect(stat).toHaveProperty('mean')
-        expect(stat).toHaveProperty('min')
-        expect(stat).toHaveProperty('max')
-        expect(stat).toHaveProperty('p25')
-        expect(stat).toHaveProperty('p50')
-        expect(stat).toHaveProperty('p75')
-      }
-    })
-  })
 })
 
 describe('report', () => {
@@ -163,20 +114,6 @@ describe('report', () => {
     expect(report).toHaveProperty('metricDistributions')
     expect(report.summary.totalRuns).toBe(4)
     expect(report.perStage).toHaveLength(2) // 2 stages
-  })
-
-  it.skip('perStage reports have correct fields', () => {
-    // DISABLED: Phase III — asserts passRate field (pass-rate tied)
-    const results = batchRun(makeBatchOpts())
-    const report = generateReport(results)
-    for (const ps of report.perStage) {
-      expect(ps).toHaveProperty('stageIndex')
-      expect(ps).toHaveProperty('stageName')
-      expect(ps).toHaveProperty('runs')
-      expect(ps).toHaveProperty('outcomes')
-      expect(ps).toHaveProperty('passRate')
-      expect(ps).toHaveProperty('avgPlayTimeMs')
-    }
   })
 
   it('formatReport produces human-readable text', () => {

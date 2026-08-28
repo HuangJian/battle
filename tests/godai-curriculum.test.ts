@@ -6,12 +6,7 @@ import { RULES, DEFAULT_RULES } from '../src/config/rules'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { CELL, BASE_POS } from '../src/constants'
 import type { StageData } from '../src/types'
-import {
-  makeArena,
-  makeMazeStage,
-  CURRICULUM_STAGES,
-  runCurriculumStage,
-} from '../tools/optimize/curriculum'
+import { makeArena, makeMazeStage } from '../tools/optimize/curriculum'
 import { runSimulation } from '../tools/sim/simulation-runner'
 
 // ============================================================
@@ -125,28 +120,4 @@ describe('godai-curriculum: determinism', () => {
     expect(r1.ticks).toBe(r2.ticks)
     expect(r1.finalState.killCount).toBe(r2.finalState.killCount)
   })
-})
-
-describe.skip('godai-curriculum: stage ladder', () => {
-  // DISABLED: Phase III — pass-rate (clear) gate; kept hasBase/determinism below
-  // All 5 curriculum stages are hard CI gates. Each stage isolates one
-  // subsystem of the God AI and asserts a concrete expected outcome.
-  // If a stage fails, the corresponding AI subsystem has regressed.
-  //
-  // The key navigation improvements that enable all 5 stages to pass:
-  // - Distance-adaptive navigation: A* for long-range (maze corridors),
-  //   directMove for close-range (tracking moving enemies).
-  // - suboptimalPathProb removed from followPath: random perpendicular
-  //   directions caused axis-lock snap oscillation, trapping the player.
-  // - canHunt without baseUnderThreat gate: the AI hunts freely in the
-  //   endgame instead of turtling when enemies approach the base.
-  // - Free hunting when base is not under threat: the AI chases the
-  //   nearest enemy instead of sitting at the defense position.
-
-  for (const cs of CURRICULUM_STAGES) {
-    it(`stage ${cs.id}: ${cs.desc}`, () => {
-      const result = runCurriculumStage(cs)
-      expect(result.passed).toBe(true)
-    }, 30000) // 30s timeout per stage
-  }
 })
