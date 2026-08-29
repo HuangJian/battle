@@ -191,16 +191,30 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     meta_path = traj_dir.parent / "dist-agent-meta.jsonl"  # traj 根，跨轮累积（不被 keep-iters 清理）
 
     # ① ping 门：codeHash 一致 ∧ bunVersion major.minor 一致（确定性红线，M4）
-    nodes = []
-    for n in cfg.get("nodes", []):
-        if not n.get("enabled", True):
-            continue
+    # v4.0 ping-first 并行化（用户指令 2026-08-29，移植 m1-eval 激活模式）：死节点的
+    # ping 超时（statusTimeoutSec=3s）全部并行——7 死节点从串行 ~21s/轮 压到 ~3s；
+    # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
+    # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
+    code_hash = dist_common.compute_code_hash()
+    cfg_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+
+    def _probe(n: dict):
         nid = str(n.get("id") or n.get("url") or "?")
-        ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+        return nid, dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+
+    probe_results: list = []
+    if cfg_nodes:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(8, len(cfg_nodes))) as _ex:
+            probe_results = list(_ex.map(_probe, cfg_nodes))
+
+    nodes = []
+    for (nid, ping), n in zip(probe_results, cfg_nodes):
         if ping is None:
             log(f"[dist] node {nid}: ping failed — excluded this round")
             continue
-        if ping.get("codeHash") != dist_common.compute_code_hash():
+        if ping.get("codeHash") != code_hash:
             log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
             # 主动升级：配置了 upgradeBranch 且本节点未请求过 → 指示 git pull + 重启。
             if upgrade_branch and nid not in upgrade_requested:
