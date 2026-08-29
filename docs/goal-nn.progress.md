@@ -4,6 +4,61 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §3 T9a 金丝雀：门 FAIL 与三重归因（2026-08-29，commits b04f4d6..b84c012）
+
+### 训练（本地 10 槽，~14 min / 6 轮）
+
+```
+./start-training.sh --script run_rl_intent.py --goal --goal-coarse   --bc nn-training/tmp/goal-bc/weights.json --out nn-training/tmp/goal-rl-t9a/weights.json   --iters 6 --warmup-iters 1 --kickstart-kl 1.0 --kickstart-decay 0.85 --heartbeat 240 --eval-at 999
+```
+
+BC：15 epochs loss 59→**4.60**（39,663 点，λ=0.5 τ=1.0，长样本 ×3 加权）。
+PPO：140 局/轮 ≈2,200 步；熵 3.15→3.33；value 326→1.65；KL 每 epoch 触发 target_kl=0.04
+早停；it6 出现首个 stage_clear（1/140）。
+
+### 门判定（tools/sim/paired-gate.ts，2100 局 --policy goal vs 基线 78.81%）
+
+**canary ② FAIL**：overall **−78.81pp ± 2.49**（goal 0.05%）；B 桶 −83.18pp / C 桶 −78.91pp
+非劣界双破。**canary ① PASS**（学习机器正常：BC loss 59→4.6；同网格击杀
+random 0.9 → BC 2.9 → PPO 2.9 单调）。
+
+### 三重归因（两次反转的追查，全部记录以警示）
+
+1. **伪影**：首个 "executor-ceiling 85%" 是 `--policy goal-god` 未接入
+   m1-eval/simulation-runner policy 链、静默回落纯 God-AI 所致（配对差 0.00pp = 同跑暴露）。
+   **教训：新增 policy 必须先做与已知策略的可区分性冒烟（同网格 avgKills 对比）。**
+2. **坦克冻结 bug**：接线修复后 goal-god 仍 0% → 插桩发现 989 tick 只走 5 格。根因 =
+   §6.1.1 可满足性门 "travelEst ≤ T 否则拒绝重选" 在 T=240（≈10 格 @23 tick/格）下形成
+   **移动拴绳**：到达首个目标后任何更远目标被永久拒绝，E4 缓解分支 keeps 旧契约 ⇒ 冻结。
+   这是**规格内在矛盾**（承诺期 T=H≤240 vs 地图级 travelEst 300–500 tick），实现期选错了
+   语义。**修复**：可满足性门只拒不可达（travelEst=∞），T 只管重评估节奏（commit b84c012，
+   含单测更新）。
+3. **修复后的真话**：2100 局 goal-god（God-AI 导航目标喂执行器、零网络）＝ **0.0%**
+   （−78.81pp ± 2.49）。执行层短板与目标选择、学习无关：L2 裸 A* 跟随 + L3-min 开火
+   （顺路+凿墙）+ 窄 dodge（仅 dodge 候选提交时生效）+ 无道具 + 承诺期 240 tick 不回防，
+   在 hard 下无生存能力。God-AI 的 78.8% 靠 19 候选全链 + 威胁感知导航 + 主动道具
+   （§293 解冻）+ 逐 tick 重定向。
+
+**T9a 最终判定**：②FAIL 且在独立执行器架构下**不可测**（执行器 −78.8pp 淹没一切目标轴
+信号）；手册 T9a 隐含前提"执行器 + 好目标 ≈ 竞争力下限"被证伪。T9/T10 暂停。
+
+### 三条路线（待用户决策；本 agent 推荐 B）
+
+- **A. 按手册止损**：机时转 T3——但 T3（导航参数化）量级不足以填 78pp。
+- **B. 换集成口径重定义 canary（推荐）**：网络热图作为**目标提供者嵌进 God-AI**
+  （替换其导航目标选择，保留全部逐 tick 执行链）——在 78.8% 级执行器上单独测目标轴
+  边际贡献。与 R1"反掩码化"不冲突（网络选目的地，不是候选链剪枝）；
+  是 §9.2"当函数库/保底层"哲学的自然延伸。改动小、可快速重跑 canary。
+- **C. 把独立执行器练到竞争力**：真 L3（§10 全量开火纪律）+ 威胁感知路径 + 道具 +
+  回防——本质是重写 God-AI 的执行技艺，风险与工期最大。
+
+### §T9.0（k9）预注册归因处置
+
+新基线由 super-item 恢复 + pursuit-tail 造成，与 T2 承诺机制无关 ⇒ "红利重叠"不适用；
+T2 本轨未做 ⇒ 只对新基线判定。
+
+---
+
 ## §2 T7.2 goal PPO 基建 + T6 反事实标注（2026-08-29，commits b04f4d6/f74a7cb + pilot）
 
 ### T7.2（全绿）
