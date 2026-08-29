@@ -53,19 +53,19 @@ bun run check
 
 | 卡 | 交付 | 门（验收） | 依赖 | 估时 | 状态 |
 |---|---|---|---|---|---|
-| **T0** | 仪表（分两期，评审 k3） | 断言进 CI | — | 1d | ⬜ |
+| **T0** | 仪表（分两期，评审 k3） | 断言进 CI | — | 1d | 🟨 T0-goal 部分落地（reselectTrace/遥测挂 GoalExecutor） |
 | **T1** | 决策权审计工具 | 输出 `HUNT≡CRUISE`；词表漂移 exit 1 | — | **✅ 已完成**<br>（剩 0.2d 接门禁链） | ✅ |
 | **T2** | 承诺红利（God-AI 加承诺期） | 配对差 ≥+2pp（降级 +1~1.5pp 也可过，§14.2） | T0 | **2d**（含 T2.1 扫描） | ⬜ |
-| **T3** | 执行层参数化 + carve 掩码 | 离流形优雅退化 + 池化无 GC 断言 | T1 | **3.5d**（+0.5d carve） | ⬜ |
+| **T3** | 执行层参数化 + carve 掩码 | 离流形优雅退化 + 池化无 GC 断言 | T1 | **3.5d**（+0.5d carve） | 🟨 carve 掩码子件 ✅（reach-mask.ts + findPath 交叉验证 + GC 断言）；其余参数化未动（不触发新纪元） |
 | **T4** | 开火消融 + L3 谓词规格 | 定出最优 `lateralFireMaxDelayTicks` | T0 | 1d | ⬜ |
 | **T5** ★canary | 开火策略（首个学习项） | ①反事实出梯度 ②配对差方向为正 | T3/T4 | **2d**（T5-A′）/<br>3d（T5-B′） | ⬜ |
-| **T6** | 反事实标注管线 | 350 局 ≤15 min@6节点；shard 含 `k_i` | T1 + **T4** | 3d | ⬜ |
-| **T7** | 网络改造（goal+engage+value） | TS/Py 字节一致 + inject 语义单测 | — | 3d | ⬜ |
+| **T6** | 反事实标注管线 | 350 局 ≤15 min@6节点；shard 含 `k_i` | T1 + **T4** | 3d | ✅ 试点能力齐（并行多窗口标注 + §11.8 判读 + train_goal_bc 软目标 CE；H 扫描实证 enemyRear 9%@60→44%@240）；T4 依赖以 L3-min 替代并记账 |
+| **T7** | 网络改造（goal+engage+value） | TS/Py 字节一致 + inject 语义单测 | — | 3d | ✅（goal_net.py + infer.ts + goal-inject.ts；热图 1e-3 按 §T7.3 预案；TS 保留 intent 头加载兼容 it38 重评） |
 | ├ T7.1 | FiLM（可选，T9a 结果决定） | 恒等初始化断言 | T7 | +0.5d | ⏸ |
-| ├ **T7.2** | **goal PPO 基建** | 1 轮 on-policy rollout 跑通 + 墙钟合 §11.9.1 | T7 + T3(软) | **1.5–2d** | ⬜ |
-| └ T7.3 | 字节一致容差 | ≤1e-4 | T7 | — | ⬜ |
-| **T8** | 目标契约（两期化） | 失效条款单测 + E3 防抖回归 | T7 | 1d+1d | ⬜ |
-| **T8.5** | **goal 执行器 + `--policy goal`** | `--policy goal` 跑出与 god 同构的 60-seed 报告 | T7 + T8-min + T3(软) | **1.5–2d** | ⬜ |
+| ├ **T7.2** | **goal PPO 基建** | 1 轮 on-policy rollout 跑通 + 墙钟合 §11.9.1 | T7 + T3(软) | **1.5–2d** | ✅（ppo_goal.py 双动作空间 + multi-head loss；export-goal-rollout.ts；rl/ goal_rollout 分支；test_ppo_goal 全绿；实测 ~64ms/前向） |
+| └ T7.3 | 字节一致容差 | ≤1e-4 | T7 | — | ✅ 热图头按预案降级 1e-3（实测 1.068e-4），标量头 1e-4 |
+| **T8** | 目标契约（两期化） | 失效条款单测 + E3 防抖回归 | T7 | 1d+1d | ✅ T8-min（E1/E3/E5/E4 + 固定 T + travelEst 校验 + 防抖回归）；T8-full 待 T9 后 |
+| **T8.5** | **goal 执行器 + `--policy goal`** | `--policy goal` 跑出与 god 同构的 60-seed 报告 | T7 + T8-min + T3(软) | **1.5–2d** | ✅（goal-executor.ts + 全链接线；60-seed 报告挂 T9a 门评估） |
 | **T9a** ★canary | 目标轴 canary（13×13） | ①出梯度 ②配对差方向为正 | **T6-pilot** + T7 + T7.2<br>+ T8-min + **T8.5** | 2d | ⬜ |
 | **T9** | 目标空间训练 | 主门 ≥2pp 显著；**桶改非劣界 ≥−1pp**（§14.1.1） | T5 / T6-生产 / T7<br>/ T7.2 / T8 / **T8.5** / T9a | 4d+ | ⬜ |
 | **T10** | 联合 RL | 配对差 >0 | T9 | — | ⏸ 展望 |

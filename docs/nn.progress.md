@@ -5,6 +5,27 @@
 
 ---
 
+## §17 goal-space 策略网络重建开工（2026-08-29，M9 时代）
+
+按 `plan/Goal-Space-Policy-Rebuild.md`（2865 行开发手册，六轮评审收敛）启动 goal-space 轨：
+动作空间从 8 路意图换成 26×26 目标热图，NN 输出从 God-AI 候选链掩码改为参数。
+**全部进展/决策/教训记 `docs/goal-nn.progress.md`**（本档只留交叉引用）。
+
+已落地（`bun run check` 全绿）：
+- T7 网络改造：`nn-training/goal_net.py`（goal 热图 conv + engage + value，inject 9 维语义重定义）+
+  `src/nn/infer.ts` goalForward + golden 一致测试（热图 1e-3 按 §T7.3 预案，标量头 1e-4）
+- T8-min 契约（E1/E3/E5/E4 纯谓词）· reach-mask 池化 Dijkstra（T3 子件）·
+  T8.5 goal-executor + `--policy goal` 全链接线
+- T7.2 goal PPO 基建：`ppo_goal.py`（fine 676 / coarse 169 块 logsumexp 双动作空间）+
+  `export-goal-rollout.ts` 采集器 + rl/ goal_rollout 分支 + `run_rl_intent.py --goal`
+- T6 反事实标注管线：并行多窗口分叉 rollout（cloneWorld 分支克隆）+ §11.8 H 扫描判读
+  （实证：argmax 落敌后格 9%@H60 → 44%@H240，长窗口恢复追尾行为）+ `train_goal_bc.py`
+  软目标稀疏 CE（λ/τ 训练超参，shard 存 (s_i,k_i)）
+- God-AI 基线重钉（super-item 恢复 + pursuit-tail 后）：**78.81%**（1655/2100，hard），
+  旧 pinned 75.86% 作废
+
+新基线与偏差决策清单见 goal-nn.progress.md §0/§1/§2。
+
 ## §16 tail fan-out 反向竞速修复 + 三节点就绪验证（2026-08-27）
 
 ### 16.1 背景

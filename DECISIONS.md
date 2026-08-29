@@ -1104,3 +1104,31 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > **连带修复**：`laneShotClear` 增加目标车道坐标的越界守卫（横向分支此前只守列
 > 不守行；测试夹具的越界敌格使其显形）。NN 训练语料：训练用 God-AI 对手行为
 > 随此启用改变，无道具口径语料如需再生另行处理（nn.progress.md 不涉架构变更）。
+
+---
+
+## §294 Goal-Space 策略网络重建开工（2026-08-29，M9 时代启动）
+
+> 全文 → `docs/goal-nn.progress.md`（§0–§3）· 规格 → `plan/Goal-Space-Policy-Rebuild.md`
+
+**决策**：按手册依赖图走**网络轨 + 数据轨 + 训练轨**（T7→T8-min→reach-mask→T8.5→T7.2→
+T6-pilot→T9a→T9），**暂缓执行层轨**（T2/T4/T5——会改 God-AI 行为触发新纪元三件套；
+T9 卡已记录 fire_head 随机初始化的回退路径）。reach-mask 按规格独立实现、不动 God-AI
+任何默认参数（不触发新纪元）。
+
+**基线重钉**：God-AI hard **78.81%**（1655/2100，pinned `reports/godai-baseline-hard-35x60`），
+旧 pinned 75.86% 作废（§293-God AI + pursuit-tail am=4 两个行为纪元之后）。
+T9/T9a 配对差门以新基线判定。
+
+**解释性决策**（实现期澄清手册留白，全部记录于 goal-nn.progress.md §1）：
+1. T7 TS 侧保留 intent 头加载能力（§14.3 it38 重评依赖；"删"落在 GoalNet 定义/权重 JSON）
+2. 热图头 golden 容差按 §T7.3 预案降级 1e-3（TS mul+add vs torch FMA 舍入差 1.068e-4）
+3. 可满足性校验 = top-K(6) 首个 travelEst≤T；全不可满足强制提交 argmax（telemetry 'unsat'）
+4. E4 同格续约：bornTick 重置 + pursueSince 独立累计（inject duration 连续）+ dodgeTicks 重置
+5. 重选失败冷却 30 tick（防全遮情形逐 tick 重前向）
+6. 采样分布 = softmax(热图) 限可达格（λ·k 只进执行 argmax，不进采样分布；与 §T9a.1b 一致）
+7. engage 在 on-policy PPO 期只记录不训练（§8.3.0"有监督才入网"；反事实语料的 engage
+   标签在 BC 期训练）
+
+**H 扫描实证（§11.8，pilot 冒烟）**：argmax 落敌后格 9%@H60 → 25%@H120 → 44%@H240，
+godTarget 重合率 62%→33% —— 长窗口系统性恢复追尾行为，手册 §11.8 "短窗近视"论断成立。
