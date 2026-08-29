@@ -39,6 +39,21 @@ function plantTank(world: World, kind: 'player' | 'basic', x: number, y: number)
   return t
 }
 
+/** Summon a guard and assert its spawn position is free of terrain and tanks. */
+function activateAndCheckSpawn(world: World, sim: Simulation, p: Tank): void {
+  const before = world.allies.length
+  sim.systems.enemies.activateGuard(p)
+  expect(world.allies.length).toBe(before + 1)
+  const g = world.allies[world.allies.length - 1]
+  expect(world.rectHitsTerrain(g.x, g.y, TANK, TANK)).toBe(false)
+  for (const t of world.allTanks) {
+    if (t === g || !t.alive) continue
+    expect(
+      g.x < t.x + t.w && g.x + g.w > t.x && g.y < t.y + t.h && g.y + g.h > t.y
+    ).toBe(false)
+  }
+}
+
 // KEPT LOCAL (遗留 #5 audit): the 9000+ id scheme, speed 6 and 'basic' hull
 // are load-bearing for this file's ally-fire assertions — see the 口径差异表
 // in tests/helpers.ts before touching.
@@ -113,6 +128,35 @@ describe('天降神兵 — activateGuard summon (DECISIONS.md §31 Phase 2)', ()
     expect(world.tanks.length).toBe(tanksAfterFirst + 2)
     // We now have 2 allied guards.
     expect(world.allies.length).toBe(2)
+  })
+
+  it('never spawns the guard stuck inside blocking terrain when the base sides are walled', () => {
+    const { world, sim } = buildSeededWorld(24)
+    const p = world.player!
+    p.x = 200
+    p.y = 200
+    p.spawnTimer = 0
+    world.guardStock = 1
+
+    // Wall off both candidate side columns (base is 2×2 at cols 12-13, rows
+    // 24-25; spawn candidates live at cols 11 and 14, rows 22-25) so the old
+    // "fallback onto the wall" path used to fire.
+    const tm = world.tileMap
+    for (const col of [11, 14]) {
+      for (let r = 20; r <= 25; r++) tm.set(col, r, 'brick')
+    }
+
+    activateAndCheckSpawn(world, sim, p)
+  })
+
+  it('never spawns the guard overlapping terrain on a normal stage either', () => {
+    const { world, sim } = buildSeededWorld(25)
+    const p = world.player!
+    p.x = 200
+    p.y = 200
+    p.spawnTimer = 0
+    world.guardStock = 1
+    activateAndCheckSpawn(world, sim, p)
   })
 
   it('is a no-op when guardStock is empty', () => {

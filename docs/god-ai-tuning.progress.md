@@ -84,6 +84,7 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 > `superItemFrenzyAim` 维持 0（archived，§273）。eval-suite v7 · 35 关 × 60 seeds · HEAD 参数。
 > 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty <d> --dims --json tmp/freeze/baseline-<d>.json`。
 > golden = `20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf`（21 组合，111,176 签名行）。
+> （2026-08-29 起 golden 以 §0.A.2 §303 重钉为准。）
 
 | 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
 |---|---|---|---|---|
@@ -107,6 +108,25 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
   （六个 OFF 候选在 21 组合语料上零可达，`tools/diag/archived-reach-audit.ts`）。
 - tmp 引用治理：正文引用的 `tmp/` 证据路径均为临时产物、不作长期凭证；关键数字必须已落在
   本档或 DECISIONS；再生方式随对应工具节命令。
+
+### 0.A.2 §303 护卫出生修复 golden 重钉 + hard 60-seed 基线（2026-08-29）— 现 golden
+
+> 护卫（天降神兵）出生卡墙 bug 修复（DECISIONS §303）：`baseSideSpawnCell` 全列阻塞时兜底
+> 不再落墙（请求侧列贴基地 4 行 → 对侧列 → 同列向上直扫 → 全场最近空位，偏好请求侧）。
+> 仿真行为变化 → `freeze:check` 翻红为预期显式判定；golden 重钉
+> `20784637c6…` → **`b9a629e0e2c64f1c35889dc211e7bd3ee762311abee5bf1006690b5d75d688d6`**
+> （21 组合，109,325 签名行），门回绿。非 God-AI 决策逻辑改动；按 owner 指令仅重跑 hard
+> （classic/chaos 未重跑，§293 基线仍为其现口径）。
+> 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty hard --dims --json tmp/freeze/baseline-hard-303.json`。
+
+| 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
+|---|---|---|---|---|
+| **hard（主评估）** | **0.5428**（0.5366 ±0.0062） | **75.7%** | 536.6 | Battlement（win 23%） |
+
+- vs §293 解冻纪元（hard 0.5403 / 75.3% / fitness 534.1 / Battlement 23%）：SUITE +0.25pp、
+  胜率 +0.4pp、fitness +2.5 —— 方向温和正、幅度在 ±se 0.0062 噪声带内（统计上持平），
+  与"修复仅改变护卫召出局的走向"的预期一致。losses 侧 baseIntegrity 0.134→0.104、
+  lives 0.716→0.740 均改善（护卫终于能离墙守基地的旁证）；最弱关 Battlement 持平（23%）。
 
 ## 0.B v2 纪元发布清单
 

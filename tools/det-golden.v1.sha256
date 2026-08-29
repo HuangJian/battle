@@ -1,8 +1,7 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-08-28 @ God-AI 解冻 + super-item 恢复纪元（DECISIONS §293；
-#       superItemMode/superItemGuardThreat 默认 1，NN 训练语料仍可用无道具口径）。
-#       配套重钉：score-gate TRUTH_SCORES 第四次重捕获（hard/chaos 回到退役前值）
-#       + freeze baseline 更新。
+# 采集：2026-08-29 @ 护卫出生点 bug 修复重钉（DECISIONS §303：天降神兵不再卡基地墙，
+#       baseSideSpawnCell 全列阻塞时改扫对侧/向上/全场最近空位，替代落在墙上的旧兜底）。
+#       上一版：20784637c6…（§293 解冻纪元，2026-08-28）。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf
+b9a629e0e2c64f1c35889dc211e7bd3ee762311abee5bf1006690b5d75d688d6

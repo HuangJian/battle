@@ -5,7 +5,7 @@
 // and cross-system calls go through the shared SimulationSystems
 // registry wired once in Simulation's constructor.
 // ================================================================
-import { CELL, TANK, DIR_VECTORS, Direction, SEED_HASH } from '../constants'
+import { CELL, TANK, GRID, DIR_VECTORS, Direction, SEED_HASH } from '../constants'
 import { SACRIFICE_BASE_RADIUS_CELLS } from '../config/powerups'
 import { recordEnemyKill, destroyBrickAoE } from './KillPipeline'
 import { aabb } from '../utils/helpers'
@@ -115,9 +115,12 @@ export class EnemiesSystem {
   }
 
   /**
-   * Find a clear spawn cell on the requested side of the base (scanning rows
-   * around the base for terrain- and tank-free space). Falls back to the base's
-   * own column if every candidate is blocked.
+   * Find a clear spawn cell beside the base, preferring the requested side.
+   * Scans the requested side column first (rows hugging the base, then
+   * upward), then the opposite column, and finally the nearest free
+   * cell-aligned 2×2 spot to the base. Only ever returns a terrain- and
+   * tank-free cell — never a fallback position on top of the base wall
+   * (which used to wedge the freshly summoned guard in place).
    */
   private baseSideSpawnCell(side: 'left' | 'right'): { x: number; y: number } {
     const w = this.d.world
@@ -127,23 +130,50 @@ export class EnemiesSystem {
     const baseCol = Math.floor(base.x / CELL)
     const baseRow = Math.floor(base.y / CELL)
     // One cell to the right of the 2×2 base (col baseCol+2) or one to the left
-    // (col baseCol-1).
-    const col = side === 'right' ? baseCol + 2 : baseCol - 1
-    for (let r = baseRow - 2; r <= baseRow + 2; r++) {
-      const x = col * CELL
-      const y = r * CELL
-      if (!w.isInBounds(x, y, TANK, TANK)) continue
-      if (w.rectHitsTerrain(x, y, TANK, TANK)) continue
-      let blocked = false
-      for (const t of w.allTanks) {
-        if (t.alive && aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) {
-          blocked = true
-          break
+    // (col baseCol-1). Requested side wins; the opposite side is next.
+    const cols = side === 'right' ? [baseCol + 2, baseCol - 1] : [baseCol - 1, baseCol + 2]
+    for (const col of cols) {
+      for (let r = baseRow - 2; r <= baseRow + 1; r++) {
+        if (this.isFreeSpawnCell(col * CELL, r * CELL)) return { x: col * CELL, y: r * CELL }
+      }
+      // Column fully walled beside the base: walk straight up away from it.
+      for (let r = baseRow - 3; r >= 0; r--) {
+        if (this.isFreeSpawnCell(col * CELL, r * CELL)) return { x: col * CELL, y: r * CELL }
+      }
+    }
+    // Both side columns are unusable: nearest free cell-aligned spot to the
+    // base centre, preferring the requested side of the field.
+    const bcx = baseCol * CELL
+    const bcy = baseRow * CELL
+    let best: { x: number; y: number } | null = null
+    let bestScore = Infinity
+    for (let col = 0; col < GRID - 1; col++) {
+      for (let row = 0; row < GRID - 1; row++) {
+        const x = col * CELL
+        const y = row * CELL
+        if (!this.isFreeSpawnCell(x, y)) continue
+        const dx = x - bcx
+        const dy = y - bcy
+        const wrongSide = side === 'right' ? x < bcx : x > bcx + CELL
+        const score = dx * dx + dy * dy + (wrongSide ? 1e6 : 0)
+        if (score < bestScore) {
+          bestScore = score
+          best = { x, y }
         }
       }
-      if (!blocked) return { x, y }
     }
-    return { x: col * CELL, y: baseRow * CELL }
+    return best ?? fallback
+  }
+
+  /** Is a tank-sized rect at (x, y) in bounds, free of blocking terrain and other tanks? */
+  private isFreeSpawnCell(x: number, y: number): boolean {
+    const w = this.d.world
+    if (!w.isInBounds(x, y, TANK, TANK)) return false
+    if (w.rectHitsTerrain(x, y, TANK, TANK)) return false
+    for (const t of w.allTanks) {
+      if (t.alive && aabb(x, y, TANK, TANK, t.x, t.y, t.w, t.h)) return false
+    }
+    return true
   }
 
   /**
