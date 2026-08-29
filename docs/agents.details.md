@@ -552,3 +552,31 @@ the tests pass.
 - **14.6 Reuse the `allTanks` buffer — don't rebuild.** `World.allTanks` rebuilds `_allTanksBuf` per
   call; consumers needing the list multiple times in one tick call the getter once and pass the
   reference (perceive() takes an optional `all?` param and passes it to `canStep()` 4×).
+
+### 5.13 Never sleep-wait on long tasks — notification + marker-grep, never fixed `sleep N`
+
+> 提炼自 2026-08-29 goal-nn 会话教训：`sleep 420 && tail log` 这类定长傻等会把回合阻塞满
+> 全时长（任务早完成也干等）、还可能被用户取消；而任务完成后的推进应该零延迟。
+
+**三条模式（按优先级）**：
+
+1. **默认：后台任务 + 完成通知，零轮询。** 长任务（训练 / 2100 局评估 / 基线仿真）一律
+   `run_in_background: true` 启动——完成时运行器自动投递通知，收到即跑下一步。
+   不要在前台 `sleep` 等它。
+2. **子步触发：后台 `tail -F | grep -m1`。** 需要在长日志里等**中间里程碑**（如
+   `iteration 3/6`、`epoch 10/15`）时，把等待本身也放后台：
+   `tail -F tmp/train.log | grep -m1 -E "iteration 3/|ALL DONE"` —— 模式一命中 grep 即退
+   （SIGPIPE 带掉 tail），后台任务通知立刻到达，马上继续。用 `-F`（大写）而非 `-f`：
+   训练器每轮可能重建/截断日志，`-F` 能跟随重建。
+3. **短等待（<10 min）：有界标记循环。** 确实要在前台等一个很快的标记时，用单次调用内
+   的有界循环，命中即出：
+   ```bash
+   for i in $(seq 1 20); do grep -q "ALL DONE" tmp/train.log && break; sleep 15; done; tail -5 tmp/train.log
+   ```
+   上限 20×15s=300s < 工具超时；关键是**退出条件是标记不是时长**。
+
+**反模式**：`sleep N && tail log`（N 猜大了干等、猜小了没等到）；`tail -F` 裸跟（永远不退，
+占满工具超时）；对已完成的后台任务再开监控（通知已经在路上）。
+
+**纪律**：收到完成通知后立即推进下一步（读日志 → 判定 → 启动下一阶段），不要让已完成
+的任务排队等下一次交互。
