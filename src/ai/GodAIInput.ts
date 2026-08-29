@@ -418,6 +418,38 @@ export class GodAIInput implements InputLike {
   _predictiveFireBlocks = 0
 
   /**
+   * §302: total ticks the pursuit-tail lane merge overrode the HUNT movement
+   * direction. Pure observation (like _centerLineFireBlocks) — never feeds back
+   * into gameplay. Read by the §302 probe as the trigger-rate proxy: 0 means
+   * the arm never diverged and the A/B result is vacuous.
+   */
+  _pursuitTailOverrides = 0
+
+  /**
+   * §302: ticks on which the lane-merge override actually REPLACED the
+   * direction the normal HUNT chain had picked. `_pursuitTailOverrides` counts
+   * every firing, including the many that silently agree with directMove and
+   * are therefore invisible in a replay; this counter is the honest measure of
+   * how much behaviour §302 really changes. Pure observation.
+   */
+  _pursuitTailChanged = 0
+
+  /**
+   * §302: the direction the normal chain had picked on the most recent
+   * `_pursuitTailChanged` tick. Diagnostics only (scene forensics compares it
+   * against the merge direction); never read by gameplay.
+   */
+  _pursuitTailLastPrev: Direction | null = null
+
+  /**
+   * §302 AlongMode=3: ticks on which the yield-then-tail branch HELD (released
+   * the throttle, `_moveDir = null`) so a level/closing target could sweep past
+   * before the wake merge. Subset of `_pursuitTailOverrides`. Pure observation
+   * (read by the §302 probe as the hold-dose measure) — never feeds back.
+   */
+  _pursuitTailHolds = 0
+
+  /**
    * §117: mode-2 (STAND) standing tick counter — how many consecutive ticks
    * the player has been standing still waiting to die. Capped by
    * `suicideReturnStandMaxTicks`; when exceeded, the trade aborts and normal

@@ -84,6 +84,7 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
 > `superItemFrenzyAim` 维持 0（archived，§273）。eval-suite v7 · 35 关 × 60 seeds · HEAD 参数。
 > 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty <d> --dims --json tmp/freeze/baseline-<d>.json`。
 > golden = `20784637c67ecd72e0c297d77bf3415b6621120475e3dc0cec6ee63a5caeadaf`（21 组合，111,176 签名行）。
+> （2026-08-29 起 golden 以 §0.A.2 §303 重钉为准。）
 
 | 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
 |---|---|---|---|---|
@@ -107,6 +108,25 @@ A = 显式 {superItemMode:1, superItemGuardThreat:1}，B = 新默认 OFF；2100 
   （六个 OFF 候选在 21 组合语料上零可达，`tools/diag/archived-reach-audit.ts`）。
 - tmp 引用治理：正文引用的 `tmp/` 证据路径均为临时产物、不作长期凭证；关键数字必须已落在
   本档或 DECISIONS；再生方式随对应工具节命令。
+
+### 0.A.2 §303 护卫出生修复 golden 重钉 + hard 60-seed 基线（2026-08-29）— 现 golden
+
+> 护卫（天降神兵）出生卡墙 bug 修复（DECISIONS §303）：`baseSideSpawnCell` 全列阻塞时兜底
+> 不再落墙（请求侧列贴基地 4 行 → 对侧列 → 同列向上直扫 → 全场最近空位，偏好请求侧）。
+> 仿真行为变化 → `freeze:check` 翻红为预期显式判定；golden 重钉
+> `20784637c6…` → **`b9a629e0e2c64f1c35889dc211e7bd3ee762311abee5bf1006690b5d75d688d6`**
+> （21 组合，109,325 签名行），门回绿。非 God-AI 决策逻辑改动；按 owner 指令仅重跑 hard
+> （classic/chaos 未重跑，§293 基线仍为其现口径）。
+> 再生命令：`bun tools/eval/eval-suite.ts --seeds 60 --difficulty hard --dims --json tmp/freeze/baseline-hard-303.json`。
+
+| 难度 | SUITE (lcb ±se) | 平均胜率 | fitness v6 | 最弱关 |
+|---|---|---|---|---|
+| **hard（主评估）** | **0.5428**（0.5366 ±0.0062） | **75.7%** | 536.6 | Battlement（win 23%） |
+
+- vs §293 解冻纪元（hard 0.5403 / 75.3% / fitness 534.1 / Battlement 23%）：SUITE +0.25pp、
+  胜率 +0.4pp、fitness +2.5 —— 方向温和正、幅度在 ±se 0.0062 噪声带内（统计上持平），
+  与"修复仅改变护卫召出局的走向"的预期一致。losses 侧 baseIntegrity 0.134→0.104、
+  lives 0.716→0.740 均改善（护卫终于能离墙守基地的旁证）；最弱关 Battlement 持平（23%）。
 
 ## 0.B v2 纪元发布清单
 
@@ -3017,6 +3037,254 @@ t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 
 
 ---
 
+# §302 追尾导航（pursuit-tail / 并入目标车道后方）— 阴性归档（2026-08-29，含 mode 7 二轮与 AlongMode=3 三轮）
+
+> 来源：`plan/Intent-Policy-NN-Plan.md` §12.1 实施层缺陷 #3「追击走并行车道横向开火，
+> 不并入目标车道后方」。执行范围仅限 God AI，不涉 NN。§1–6 = 第一轮（modes 1–6，
+> 阴性）；§7–8 = 第二轮（mode 7 相邻车道 + AlongMode 拆分）；§9 = 第三轮
+> （AlongMode=3 等待后并道，用户拍板）。最终处置见 §9。
+
+## 1. 根因（代码层已确认）
+
+`directMoveImpl`（Navigator.ts）的方向优先级是**垂直优先**——历史规则「先对齐行，
+同排才有更多射击机会」。对**纵向行进**的敌人这恰好是反的：
+
+- 玩家一路收敛到目标的 ROW，而目标沿自己的 COLUMN 持续爬升；
+- 结果玩家稳定停在**并行车道**上，横向开火打一个正在滑走的目标——
+  飞行期间命中窗横向移开，`predictiveFireGate`（§193-D）还会直接压掉其中一大半。
+
+处方（plan 原文）：路径目标从「目标所在格」改为「目标**后方 1–2 格**」，先补车道
+（垂直）间隙再沿车道追。
+
+## 2. 实现（全部 `pursuitTailMode` 门控，默认 0 = OFF = 字节一致）
+
+`pursuitTailDirImpl`（Navigator.ts）在 `evalHunt` 里 `pickHuntMoveDir` 之后、
+§182/§85 两道安全网之前覆写 `_moveDir`；射击链路保持共用。安全约束：
+
+- 只对**真实敌人目标**生效（navTarget 必须命中一个活敌人的格子）→ HUNT 的
+  MAP_CENTER / 守位格回落一律不接管；
+- **只在后方**（沿行进轴投影 `along ≤ 0`）→ 不会横穿目标正面；
+- 距离窗 `[pursuitTailMinCells, pursuitTailMaxCells]` + 变道预算 `pursuitTailMaxLaneGap`；
+- `allowBreak` 只在近距（navDist ≤ 5，directMove 区）为真 → 长距不干扰 A* 走廊路由。
+
+## 3. 五个构型的 hard 35×60 配对 A/B（口径 stageIndex=0，各 2100 局/臂）
+
+| 构型 | 语义 | L→W | W→L | **净** | SE | t |
+|---|---|---|---|---|---|---|
+| mode 1 | 导航到尾格（先补车道再沿车道） | 308 | 338 | **−30** | 25.4 | −1.18 |
+| mode 2 | 仅横向并道，车道间隙 ≤ 4 | 304 | 304 | **0** | 24.7 | 0.00 |
+| mode 3 | mode 2 + 车道必须能打出一发净射 | 300 | 292 | **+8** | 24.3 | +0.33 |
+| mode 3(gap≤2) | 低剂量对照 | 251 | 278 | **−27** | 23.0 | −1.17 |
+| mode 6 | mode 3 + 基地受威胁时抑制 | 258 | 293 | **−35** | 23.5 | −1.49 |
+
+基线 `baseW = 1581/2100 = 75.3%`（= eval-suite v7 官方口径，同批）。SE 按
+discordant 对数 √n 估。**全部 |t| ≤ 1.5：符号随任意参数选择翻转 = 噪声特征，不是机制。**
+
+## 4. 微观测（新增 `tools/diag/pursuit-tail-probe.ts`，口径已与 ab-param 逐位对齐）
+
+以 mode 3 / s1+s21+s26 / 20 seeds 为例：
+
+| 指标 | base | cand | Δ |
+|---|---|---|---|
+| 覆写触发率 | 0% | 7.74% | 机制**确实**在跑 |
+| 在车道上的 tick 占比 | 8.06% | 9.95% | **+23%**（并道成功） |
+| 在车道上的射击对齐率 | 73.20% | 72.62% | **−0.6pp（无提升）** |
+| 开火 tick 占比 | 1.24% | 1.29% | 持平 |
+| 击杀 | 524 | 494 | **−5.7%** |
+| 最近敌平均距离 | 8.32c | 8.66c | 变远 |
+
+**并道做成了，但没换来更好的射击**——这是本条归档的核心反证。旁证：最近敌的
+行进轴约每 1.3 秒翻转一次（0.76 次/秒），车道不是稳定可驻留的目标。
+
+## 5. 负翻转的 per-tick 取证（用户指定流程）
+
+败因分解（mode 3 全套件）：`base_destroyed` 458→451、`lives_out` 59→60，整体中性；
+但**逐关的负翻转全部落在 base_destroyed**：
+
+| 关 | base | cand | 负翻转败因 |
+|---|---|---|---|
+| s26 Ice Palace | 15 次基地失守 | **26** | +11 基地失守（20 seeds 击杀 366→309，−15.6%） |
+| s21 Checkers | 14 | **21** | +7 基地失守 |
+| s32 Star Fort | 15 | **7** | −8（正翻转，mode 3 +8/60 的主要来源） |
+
+`tools/diag/pursuit-tail-flip.ts`（本次新增）逐 tick 时间线（s26@seed9）：t=408 首次
+分歧（玩家改横向并道而非转向追击），cand 在 t≈2000–2267 连死两命、5 杀告负，base
+同期 6216 tick 20 杀通关。**因果链 = 并道期间玩家不射击且被拉开距离 → 击杀率降 →
+存活敌人变多 → 基地被破。**
+
+## 6. 结论与处置
+
+**直接贴脸优于绕到车道后方**：本作玩家的伤害来自贴到近身交火距离，不是远距离车道射击；
+`TANK_SPEC` 里玩家 1★ 4.1875 cps 快于 basic/power/armor 但**慢于 fast(4.5)**，
+横向并道让出的距离在多数兵种上都要不回来。
+
+- `pursuitTailMode: 0` 保持 OFF，登记进 `ARCHIVED_KNOB_GROUPS`（`godai-archived-knobs`
+  L1 守卫强制 DEFAULT === 0）；
+- 代码路径保留（`pixelStuckDirectMoveTicks` 先例），单测
+  `tests/godai-pursuit-tail.test.ts` 钉住 OFF 无副作用 + ON 只在 HUNT 追击窗内触发；
+- 新增两个可复用诊断工具：`tools/diag/pursuit-tail-probe.ts`（触发率 + 射击几何 +
+  败因分解，口径与 ab-param 逐位一致）与 `tools/diag/pursuit-tail-flip.ts`
+  （单 stage@seed 的并排时间线 + 首次分歧上下文）；
+- `bun run freeze:check` FROZEN-SIGNATURE OK（默认 OFF 字节一致）；
+  `bun run check` 1569 pass / 0 fail。
+
+**重开条件**（避免无谓重试）：除非能先证明一个可测的中间量会随并道改善——
+例如「在车道上的射击对齐率」显著上行，或把覆写触发率压到 ~1% 以下仍保收益。
+否则应转向 §12.5（HUNT 意图内的 action-NN 探针），它不预设几何处方。
+
+## 7. Round 2 — mode 7 相邻车道并道（gap=2 修正；有效剂量决定一切）
+
+用户复核 v2 录像推翻 modes 1–6 的"隔 2–4 格强行并线"：缺陷是**相邻车道**上
+directMove 并行追击 + 侧向开火，修法 = 趁目标在邻道经过/即将经过时**横移一格**
+并入其车道。`pursuitTailMode >= 7` 分支：`laneGap === 2`（坦克 2×2 格，邻道是
+gap 2 不是 1——第一版 gap=1 有效剂量 0.04% of ticks，改 2 后 0.72%，**18 倍**）、
+距离窗、`|along| ≤ AlongWindow(3)`、`laneShotClear`。
+
+覆写触发 ≠ 覆写生效：mode 3 实测触发 46575 tick 仅 45% 真改变 `_moveDir`。
+诊断字段 `_pursuitTailOverrides / _pursuitTailChanged / _pursuitTailLastPrev`
+（ALLOWLIST class A）+ `tools/diag/pursuit-tail-{scenes,export}.ts`（场景扫描/
+录像导出，含轨迹自检）即为此设。
+
+## 8. AlongMode 拆分：−58 是全套件唯一统计显著信号
+
+mode 7 两测皆负后按 along 符号拆分（hard 35×60，2100 配对/臂，SE≈√discordant）：
+
+| 构型 | L→W | W→L | **净** | SE | t |
+|---|---|---|---|---|---|
+| mode 7（两侧都并，am=0） | 241 | 280 | **−39** | 22.8 | −1.71 |
+| am=1 仅后方（严格追尾） | 188 | 187 | **+1** | 19.4 | +0.05 |
+| am=2 仅侧方/前方 | 188 | 246 | **−58** | 20.8 | **−2.79** |
+
+`along < 0` = 目标正远离（玩家在其 wake，可安全并道）；`along ≥ 0` = 目标并排/
+正逼近（此时并道 = 挡在目标去路上，切入瞬间朝向横向、要转身才能开火 → 被撞/
+贴身换弹）。am=2 的 −58 与用户对缺陷机制的描述完全一致。
+
+## 9. Round 3 — AlongMode=3 等待后并道（用户拍板 + 三轮复核修正，2026-08-29）：净 +29 仍噪声带内，维持 OFF
+
+**用户指令**：侧方/前方不能提前切入——稍等，等敌人经过后再并道。实现 =
+`pursuitTailAlongMode: 3`（yield-then-tail）：`along ≥ 0` 时返回新哨兵
+`PURSUIT_TAIL_HOLD`，调用点置 `_moveDir = null`（松油门，§182/§153 已有先例；
+§182/§85 安全网仍在其上运行）；目标通过后并入其 wake。归档构型 am=0/1/2 执行
+路径逐指令不变（前置分支对它们是纯跳过），历史 A/B 数据继续可配对。
+
+**第一版缺陷（用户录像复核发现，勿重蹈）**：hold 正确，但并道**从未完成**——
+mode-7 的 `laneGap === 2` 门控在横移一格后（gap→1）即交还 directMove，垂直优先
+把它拽回并行追击；`along = −1` 时还会尝试并道（被车身碰撞拒绝）。用户判定
+s9@11"教科书序列"完全错误、s21@8 无并道——**复核扫描表里 10 个场景
+`入车道` 全为 `n`，铁证在眼前没读出来**。
+
+**修正版（自包含状态机，即用户规格）**：敌并排/逼近/仅错开 1 格
+（`along ∈ [−1, +窗口]`）→ hold；敌错开**两格**（`along ≤ −2`，2×2 车身垂直
+错开、横移不被卡——两格是车身几何阈值，非可调参数，MinCells 不参与 am=3）
+→ **接管整个横移**（gap ∈ {1,2} 均按横向直到 gap 0；wake 侧无 along 上限，
+由 MaxCells 收口）→ 上道后交还纵向追击 + `shouldFireInDir` 沿道开火。
+`along === 0` 跳过 `laneShotClear`（该函数同行时刻朝反向走查整列必 false，
+否则 hold 在通过瞬间闪断）。
+
+**第三处缺陷（用户二次复核 s21@30 38–41s 抓出）**：敌下行、玩家追击、未并道。
+逐 tick 诊断（`tmp/s302-diag21-30.ts`，打印 tgtBlk/othBlk/dest 地形）坐实：
+`along = −2` 是**取整值**，目标半格下行时其车身仍物理挡住滑行脚印
+（tgtBlk=1 持续 ~24 tick，ey 抖动 153→174），滑行被拒后 tick 交还 directMove，
+垂直优先**下追把刚错开的身位又贴回去**（along −2→−1 振荡 1.5s）。修正 =
+并道相滑行被拒且拒者是目标车身（`laneShotClear` 已过 + `canMoveOrBreak` 也拒
+⇒ 只能是坦克；AABB 对目标车身验证）→ **HOLD 等像素间隙自行张开**，不再交还。
+
+**剂量**（probe，5 关 × 15 seed，第三版）：**Δwin +6/75**、击杀 1413 vs 1358
+（**首次反超基线**）、aligned +223、perp −104、在车道 7.28%→9.26%。
+
+**全量 A/B**（hard 35×60）：L→W 319 / W→L 290，**净 +29**，SE≈24.7 ⇒ 仍在
+噪声带（±2SE≈±49），但为 §302 全程序最佳构型：
+
+| 构型 | 净 |
+|---|---|
+| am=0 两侧直切（二轮） | −39 |
+| am=2 仅侧方/前方直切（二轮） | **−58**（唯一显著，有害） |
+| am=1 仅后方（二轮） | +1 |
+| am=3 第一版（hold + 半途并道） | −4 |
+| am=3 第二版（hold + 全程并道） | +16 |
+| **am=3 第三版（+ 目标车身阻挡时等待）** | **+29** |
+
+趋势单调：并道机制每补全一层（半途→全程→像素级不被卡），净胜一致上移——
+用户的几何规格（等待 + 错开两格 + 全程滑入 + 不被车身卡住）在逐层落地。
++29 未过显著性线，按 §6.3b 纪律不转 ON。基线臂三次 A/B 均 1581/2100。
+
+**处置**：`pursuitTailMode` 维持 0 = OFF，`ARCHIVED_KNOB_GROUPS` 登记不变；
+代码与单测保留（am=3 状态机行为级测试：两格错开阈值 / gap1 收尾 / **目标车身
+阻挡等待** / 带外交还，+ 归档构型回归钉）；`bun run check` 1589 pass / 0 fail；
+`freeze:check` 三轮 src 改动前后均同哈希（2078463…）= 默认 OFF 字节一致。
+复核材料 `tmp/s302-replays3/`（第三版 3 组录像全 MATCH ✓ + REVIEW.md，
+含用户投诉 seed s21@30 的结局翻转 gameover→stageclear）；逐 tick 诊断工具
+`tmp/s302-diag21-30.ts`（tgtBlk/othBlk/dest 地形，可复用于任何"该并没并"投诉）。
+
+---
+
+# §304 追尾导航启用纪元（原编号 §303，合并时让位于远端 guard 修复条目）（2026-08-29）
+
+> 用户拍板："净胜 +29 已经很好了，启用。" 新纪元三件套（§6.3b）：
+
+1. **DECISIONS §303**（本纪元条目；§302 标注 superseded）。
+2. **冻结签名 golden 重钉**：`tools/det-golden.v1.sha256` =
+   `7b2e5097e218fc8200e62959b7a1b1ebdfd2d2275777fed4829c73cd6f1951bb`
+   （99490 签名行；上一纪元 2078463…）。
+3. **基线重捕获**：
+   - score-gate TRUTH_SCORES 第五次重捕获：hard 0.7663→**0.7890（+2.26pt）**、
+     chaos 0.7562→**0.7337（−2.25pt）**、classic 0.8697→0.8697（**0.0000**，
+     CLASSIC_OVERRIDES 字节不变）。
+   - eval-suite v7 三难度 60-seed 基线（`tmp/freeze/baseline-{hard,chaos,classic}.json`）：
+     mean win rate **hard 77% / chaos 71% / classic 90%**；
+     最弱关 hard/chaos = Battlement（0.323/0.266）、classic = Ice Palace（0.558）。
+
+**默认值**：`pursuitTailMode: 7, pursuitTailAlongMode: 3`；classic 经
+CLASSIC_OVERRIDES 保持 0。chaos 继承 ON，其 score −2.25pt 为已知代价
+（胜率口径未单独测量）；若需要可给 CHAOS_OVERRIDES 置 0，用户未要求不预置。
+
+**连带修复**：`laneShotClear` 目标车道坐标越界守卫（横向分支此前只守列不守行，
+测试夹具的越界敌格使其显形——生产不会出现，但守卫使夹具健壮）。
+
+**遗留（下一批）**：两类 1–3 tick 自愈型中断（Engage/t2a 候选按优先级夺 tick、
+selectHuntNavTarget 与锁定目标偶发错位）——用户已点名下一批处理，改动后
+看胜率能否在 +29 上再改善。
+
+---
+
+# §304 追尾导航启用纪元（原编号 §303，合并时让位于远端 guard 修复条目）·am=4 增补（2026-08-29 同日）
+
+> 用户点名的两类自愈型中断当日处理完毕，配对 A/B 净 +20 → 默认 3→4。
+
+**实现**（均参数门控 am=4，am=3 归档语义不动）：
+
+1. `pursuitTailTargetCell`（Navigator 导出，纯函数）：tail 几何键控从 HUNT 的
+   navTarget 改为**锁定战斗目标**（`_lastSelectTargetId`）——navTarget 受 §170
+   目标摇摆影响会与玩家正在打的敌人错位（s21@30 t2523 实测：几何可并、覆写
+   静默）。Hunt 调用点接入，`allowBreak` 按实际尾随目标距离重算。
+2. `pursuitTailSlideDir`（Navigator 导出，纯函数）：T2a 的两处提交（先手等待 /
+   正常 T2a）前查询 tail——**滑行抢占转身**（移动=滑行、关火：转身背敌时开火
+   必浪费）；HOLD 不抢占（对枪站桩开炮正是 hold 想要的）；**对枪抵消提交
+   （敌方子弹在线上）永不抢占**（安全关键）。Engage.ts 两处接入，分支标签
+   分支计数仍走 `t2a`（不扩 intent 词表，取证走 `_pursuitTailHolds` 计数器）。
+
+**教训（首跑 A/B 净 −59 揭穿）**：状态机门最初写 `pursuitTailAlongMode === 3`，
+am=4 整个漏进归档构型路径（正面切入 = −58 几何）；单测因该几何在旧路径下
+恰好同结果而全绿——**分层参数的门一律 `>=`，单测钉不住全轨迹效应，A/B 才是
+行为门**。修正为 `>= 3` 后复测 +20。
+
+**数据**：A/B（hard 35×60 配对，base=am3=1612）cand=am4=1632，**净 +20**
+（256/236，SE≈22，正向未过 2SE）。全程弧线：OFF 1581 → am3 1612 →
+am4 1632（76.8%→77.7%）。另确认 laneShotClear 越界守卫修掉了真实边界格
+（居中坐标贴墙 round 出 26 越界），am3 臂 1597→1612 的漂移即此。
+
+**新纪元三件套（随默认迁移第二次完成）**：golden `91faa793…`（99490 行签名）；
+TRUTH 第六次重捕获：hard 0.7890→0.7743（−1.47pt）、chaos 0.7337→**0.7528
+（+1.91pt）**、classic 0.0000——score 与胜率两口径在 hard 上方向相反（score
+重罚败局余量；胜率为用户治理口径），双记。eval-suite v7 基线：
+**hard 78% / chaos 73% / classic 90%**（am3 时代 77/71/90）。
+
+**处置**：默认 `pursuitTailMode: 7, pursuitTailAlongMode: 4`；classic OFF 不变。
+单测 32 个（am4 helper 纯函数级：锁定键控 / 滑行抢占 / HOLD 不抢占 /
+像素错开等待 / am3 不变）。
+
+---
+
 # 重启协议（Resume Protocol，2026-08-26 · v1 冻结）
 
 > 未来任何 agent 若要重开 God AI 调优（= 宣告新纪元），按序执行：
@@ -3032,3 +3300,8 @@ t2a idle 是冷却形态的正常表现, 不是独立病因。"中场缠斗 → 
 
 新纪元「三件套」（缺一不可）：**新 DECISIONS 条目 → 重跑 60-seed 三难度基线 → 更新
 冻结签名 golden**。行为改动会让 `bun run freeze:check` 变红——这是预期闸门而非故障。
+
+**合并纪元注（2026-08-29，merge origin/main 护卫出生修复）**：§303（远端，guard
+修复）与本纪元 §304 同源合并后 golden 三钉 `c2c25cdb…`（97,696 签名行）、TRUTH
+第七捕（hard +0.32pt / chaos +0.06pt / classic 0）、三难度基线重跑
+**hard 78% / chaos 74% / classic 90%**（chaos +1pt 为 guard 修复副贡献）。

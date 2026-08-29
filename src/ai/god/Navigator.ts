@@ -3,6 +3,7 @@ import type { Tank } from '../../types'
 import type { Cell } from './pathfind'
 import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
 import { findPath } from './pathfind'
+import { blocksBullet } from './Chokepoint'
 import { opposite, ALL_DIRS } from '../../utils/direction'
 import { snap, aabb } from '../../utils/helpers'
 
@@ -645,6 +646,495 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
 // M0.5 (2026-08-03): trapAvoidance (Navigator) + crossfirePathCost A* threat
 // costs (computeThreatCostsImpl) retired; recoverable from git history
 // (experimental.ts deleted) if the v2 survive candidate needs them.
+
+/**
+ * §302 mode 3: is the lane line from the player's would-be on-lane cell to the
+ * target clear of bullet-blocking terrain?
+ *
+ * The check runs on the lane the player would merge onto — `eCol` for a
+ * vertically travelling target (the shot then runs along its column), `eRow`
+ * for a horizontal one — starting from the player's own along-axis coordinate
+ * (where the merge lands it) and walking to the target. Water is transparent
+ * to bullets (TileMap.blocksBullet), so only brick/steel/base stop the shot.
+ */
+function laneShotClear(
+  self: GodAIInput,
+  pc: { col: number; row: number },
+  eCol: number,
+  eRow: number,
+  vertical: boolean,
+): boolean {
+  // Off-lane bounds guard: the vertical walk below bounds-checks its own
+  // rows, but `grid[eRow]` / `grid[r][eCol]` index the TARGET's lane
+  // coordinate directly — an out-of-grid lane (test fixtures place tanks
+  // off-grid; production never should) must refuse the lane, not throw.
+  if (eCol < 0 || eCol >= GRID || eRow < 0 || eRow >= GRID) return false
+  const grid = self.world.tileMap.grid
+  if (vertical) {
+    if (pc.col === eCol) return true
+    const step = eRow > pc.row ? 1 : -1
+    for (let r = pc.row + step; r !== eRow; r += step) {
+      if (r < 0 || r >= GRID) return false
+      if (blocksBullet(grid[r][eCol])) return false
+    }
+  } else {
+    if (pc.row === eRow) return true
+    const step = eCol > pc.col ? 1 : -1
+    for (let c = pc.col + step; c !== eCol; c += step) {
+      if (c < 0 || c >= GRID) return false
+      if (blocksBullet(grid[eRow][c])) return false
+    }
+  }
+  return true
+}
+
+/**
+ * §302 mode 4: is the lateral run from the player to the lane unobstructed?
+ *
+ * Autopsy of the mode-3 A/B (hard 35×60): every net-negative stage lost on
+ * `base_destroyed`, not on player deaths (s26 15→26, s21 14→21, while the
+ * positive outlier s32 went 15→7). The merge itself was fine on open ground
+ * but on brick-dense boards (Checkers' checkerboard, Ice Palace's wall maze)
+ * "merge sideways" turns into a corridor detour: the player burns seconds
+ * walking around walls to reach a lane the target has already left, the kill
+ * rate drops ~15%, and the extra live enemies eventually take the base.
+ *
+ * So the merge only earns its cost when the lateral run is a straight,
+ * unobstructed sprint — one the player can actually complete before the
+ * target turns. The check is 2 cells wide, matching the 2×2 tank footprint.
+ */
+function lateralRunClear(
+  self: GodAIInput,
+  pc: { col: number; row: number },
+  eCol: number,
+  eRow: number,
+  vertical: boolean,
+): boolean {
+  const grid = self.world.tileMap.grid
+  if (vertical) {
+    if (pc.col === eCol) return true
+    const step = eCol > pc.col ? 1 : -1
+    for (let c = pc.col + step; c !== eCol + step; c += step) {
+      if (c < 0 || c >= GRID) return false
+      for (let r = pc.row; r <= pc.row + 1; r++) {
+        if (r < 0 || r >= GRID) return false
+        if (blocksBullet(grid[r][c])) return false
+      }
+    }
+  } else {
+    if (pc.row === eRow) return true
+    const step = eRow > pc.row ? 1 : -1
+    for (let r = pc.row + step; r !== eRow + step; r += step) {
+      if (r < 0 || r >= GRID) return false
+      for (let c = pc.col; c <= pc.col + 1; c++) {
+        if (c < 0 || c >= GRID) return false
+        if (blocksBullet(grid[r][c])) return false
+      }
+    }
+  }
+  return true
+}
+
+/**
+ * §302: is the tail-merge cell a plausible place to stand?
+ *
+ * The tank footprint is 2×2 cells (TANK=32 vs CELL=16), so the whole
+ * footprint must be on-grid and free of terrain the player can never enter
+ * (steel / water / base). Brick is accepted — the player can shoot it away —
+ * and `forest`/`ice` are passable.
+ */
+function tailCellUsable(self: GodAIInput, col: number, row: number): boolean {
+  if (col < 0 || row < 0 || col + 1 >= GRID || row + 1 >= GRID) return false
+  const tm = self.world.tileMap
+  for (let r = row; r <= row + 1; r++) {
+    for (let c = col; c <= col + 1; c++) {
+      const t = tm.get(c, r)
+      if (t === 'steel' || t === 'water' || t === 'base') return false
+    }
+  }
+  return true
+}
+
+/**
+ * §302 pursuit-tail navigation — HUNT lane merge (plan/Intent-Policy-NN-Plan.md
+ * §12.1 defect #3: "追击走并行车道横向开火，不并入目标车道后方").
+ *
+ * ROOT CAUSE. `directMoveImpl` closes the ROW gap first — the historical
+ * "align rows to get more shots" rule. Against an enemy travelling VERTICALLY
+ * that is exactly wrong: the player converges onto the target's row while the
+ * target keeps climbing its own column, so the player settles in a PARALLEL
+ * lane and fires perpendicular at a moving target. Those are the worst shots
+ * in the game — the hit window slides sideways during bullet flight and
+ * `predictiveFireGate` (§193-D) suppresses a large share of them outright.
+ *
+ * FIX. Merge onto the target's LANE (its column when it travels vertically,
+ * its row when it travels horizontally) and close that perpendicular gap
+ * BEFORE the along-lane gap, so the player ends up on the same line as the
+ * target and `shouldFireInDir` gets a stable aligned shot instead of a
+ * perpendicular one at a sliding window.
+ *
+ * TWO MODES (measured — see DECISIONS §302):
+ *   mode 1 (REJECTED, net −30 on hard 35×60): navigate to the tail CELL
+ *     (perpendicular gap first, then along-lane). It also walks the player
+ *     BACKWARD to reach a tail cell that sits farther behind than the
+ *     player already is — pure wasted distance.
+ *   mode 2 (shipped candidate): LATERAL MERGE ONLY. The override fires only
+ *     while the player is off-lane; once on the lane the normal chase owns
+ *     the along-lane pursuit. No backward step is ever taken.
+ *
+ * SCOPE / SAFETY (§12.2 — an archived-negative repo, so the override is narrow):
+ *   - chase targets only: `navTarget` must be a live enemy's cell, so HUNT's
+ *     center / defense-position fallbacks (nav-stuck escape, §179 emergency,
+ *     M3 survival retreat) never get re-aimed;
+ *   - behind only: `along > 0` (player ahead of the target on its travel axis)
+ *     bails out — merging there would mean cutting across the target's front;
+ *   - distance window [pursuitTailMinCells, pursuitTailMaxCells] plus a
+ *     perpendicular budget (pursuitTailMaxLaneGap) — a long lateral detour
+ *     costs more time than the aligned shot is worth;
+ *   - `allowBreak` is only set inside the close-range directMove regime — at
+ *     long range (A* corridor routing) a brick detour would dig the player off
+ *     its corridor, so only genuinely passable lanes are merged into there.
+ *
+ * Pure World + params read: no RNG, no mutation (AGENTS §2.1/§2.3). Returns
+ * null when the override does not apply — the caller then keeps whatever
+ * direction the normal HUNT chain already chose. Returns `PURSUIT_TAIL_HOLD`
+ * (a sentinel, not a Direction) when the override wants the player to STOP —
+ * the caller maps that to `_moveDir = null` (release the throttle), the same
+ * "hold this tick" value §182 and §153-W1 already use.
+ */
+/** §302 AlongMode=3 sentinel: hold this tick (release the throttle) so a
+ * level/closing target can sweep past the player's row before the merge. */
+export const PURSUIT_TAIL_HOLD = 'hold' as const
+export type PursuitTailDir = Direction | typeof PURSUIT_TAIL_HOLD
+
+/**
+ * §302 AlongMode=4: resolve which enemy cell the tail geometry keys on.
+ *
+ * am ≤ 3 keys on HUNT's navTarget — which is the NAV chain's pick and can
+ * diverge from the COMBAT lock (`_lastSelectTargetId`, §170 target sway):
+ * the tail then goes blind on exactly the chase the player is fighting
+ * (measured s21@30 t2523: `br=navigate`, mergeable geometry, override
+ * silent because navTarget pointed elsewhere). am ≥ 4 keys on the locked
+ * target whenever one is alive — the tail is a 1-2 cell movement tweak, and
+ * the navStuck/carve gates still own the escape paths.
+ *
+ * Pure: reads observation state only. Returns `navTarget` unchanged for
+ * am ≤ 3 (archived arms byte-faithful) and whenever no live locked tank
+ * exists.
+ */
+export function pursuitTailTargetCell(self: GodAIInput, navTarget: Cell | null): Cell | null {
+  if (self.params.pursuitTailAlongMode < 4) return navTarget
+  const lockedId = self._lastSelectTargetId
+  if (lockedId < 0) return navTarget
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.id === lockedId && t.alive && t.spawnTimer <= 0) {
+      return { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+    }
+  }
+  return navTarget
+}
+
+/**
+ * §302 AlongMode=4: the slide command for the ENGAGE/T2a duel branch.
+ *
+ * T2a commits `moveDir = aimDir` (turn to face) + fire when its scan sees
+ * the enemy on a gun line — correct when the shot is real, but during a
+ * tail SLIDE those 1-3 turning ticks abort the merge mid-run and the turn
+ * fires at nothing (the player faces away from the enemy the next tick).
+ * am ≥ 4 lets an active SLIDE preempt the T2a turn: movement = the slide,
+ * fire = off (shooting while turned away wastes the bullet). A HOLD does
+ * NOT preempt — the duel's stand-and-shoot is exactly what a hold wants
+ * (the target is approaching/level, and a real shot beats repositioning).
+ * The bullet-cancel commit (enemy bullet on the line) is safety-critical
+ * and is never preempted (call-site choice).
+ *
+ * Pure; returns null whenever the tail has no slide this tick (HOLD, OFF,
+ * no locked target, geometry not met) so the caller keeps its own plan.
+ */
+export function pursuitTailSlideDir(self: GodAIInput, p: Tank): Direction | null {
+  if (self.params.pursuitTailMode <= 0 || self.params.pursuitTailAlongMode < 4) return null
+  const lockedId = self._lastSelectTargetId
+  if (lockedId < 0) return null
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  let cell: Cell | null = null
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.id === lockedId && t.alive && t.spawnTimer <= 0) {
+      cell = { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+      break
+    }
+  }
+  if (cell === null) return null
+  const dir = pursuitTailDirImpl(self, p, self.playerCell(), cell, true)
+  return dir === null || dir === PURSUIT_TAIL_HOLD ? null : dir
+}
+
+export function pursuitTailDirImpl(
+  self: GodAIInput,
+  p: Tank,
+  pc: { col: number; row: number },
+  navTarget: Cell | null,
+  allowBreak: boolean,
+): PursuitTailDir | null {
+  const params = self.params
+  if (params.pursuitTailMode <= 0 || navTarget === null) return null
+  // Mode 6: never merge while the base is under threat. The §302 autopsy on
+  // hard 35×60 traced every net-negative stage to `base_destroyed`, not to
+  // player deaths (s26 15→26, s21 14→21; the positive outlier s32 went 15→7).
+  // A lateral merge is time spent NOT closing on the enemy, and under a base
+  // threat that is exactly the time the defense cannot spare.
+  if (params.pursuitTailMode >= 6 && self.hasBase && self.isBaseUnderThreat()) return null
+  // Mode 5: close-range engagement geometry only. `allowBreak` is already
+  // scoped to the directMove regime (navDist ≤ 5); beyond that A* owns a
+  // corridor route and a lateral steering command can push the player into a
+  // dead end the pathfinder had already routed around.
+  if (params.pursuitTailMode >= 5 && !allowBreak) return null
+
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  let eCol = 0
+  let eRow = 0
+  let tdx = 0
+  let tdy = 0
+  let found = false
+  let et: Tank | null = null
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.spawnTimer > 0) continue
+    const c = Math.round(t.x / CELL)
+    const r = Math.round(t.y / CELL)
+    if (c !== navTarget.col || r !== navTarget.row) continue
+    // Travel axis: real velocity when the tank is actually moving (an enemy
+    // can be FACING a wall it is pressed against) — except on ice, where the
+    // velocity is a SLIDE, not an intent, and the facing direction is the
+    // reliable signal (same reasoning as the player-side exclusion above).
+    if (!self.world.isTankOnIce(t) && Math.abs(t.vx) + Math.abs(t.vy) > 0.01) {
+      if (Math.abs(t.vx) >= Math.abs(t.vy)) tdx = t.vx > 0 ? 1 : -1
+      else tdy = t.vy > 0 ? 1 : -1
+    } else {
+      const v = DIR_VECTORS[t.dir]
+      tdx = v.dx
+      tdy = v.dy
+    }
+    eCol = c
+    eRow = r
+    et = t
+    found = true
+    break
+  }
+  if (!found) return null
+
+  const dCol = pc.col - eCol
+  const dRow = pc.row - eRow
+  // Signed offset ALONG the target's travel axis. `along < 0` ⇒ the player
+  // sits in the target's wake (tail-chase); `along > 0` ⇒ the player is in
+  // front of it and it is closing (head-on intercept); `0` ⇒ level with it.
+  const along = dCol * tdx + dRow * tdy
+  const dist = Math.abs(dCol) + Math.abs(dRow)
+
+  // ------------------------------------------------------------------
+  // mode 7 — ADJACENT-LANE MERGE: what §12.1 #3 actually asks for.
+  //
+  // The defect is NOT "the player is far from the target's lane". It is that
+  // directMove runs the player PARALLEL in the ADJACENT lane, catches up
+  // level with the target, then turns 90° to snap-fire sideways — and misses,
+  // because by the time the turn completes the target has moved on.
+  //
+  // The cure is to slip ONE lane over while the target is in the next lane
+  // and is passing / about to pass: the player then stands IN the target's
+  // lane and fights along the lane axis (tail-chase when behind, intercept
+  // when the target is closing), instead of firing across it. One cell of
+  // lateral movement costs ~0.4 s — nothing like the 2-4 cell cross-map
+  // detours modes 1-6 made, which the user rejected on replay review.
+  // ------------------------------------------------------------------
+  if (params.pursuitTailMode >= 7) {
+    const laneGap = tdy !== 0 ? Math.abs(pc.col - eCol) : Math.abs(pc.row - eRow)
+    const vertical = tdy !== 0
+    // ----------------------------------------------------------------
+    // §302 AlongMode ≥ 3 — YIELD-THEN-TAIL, self-contained state machine
+    // (user directive 2026-08-29, refined after replay review the same
+    // day). The user's spec, for a target climbing the adjacent lane:
+    //   wait until it is TWO cells up-left of the player (the 2×2 bodies
+    //   vertically staggered, so the lateral slide cannot grind its
+    //   flank), then slide ONTO its lane (through laneGap 1 — the
+    //   half-entered sub-cell — all the way to gap 0), then turn up the
+    //   lane and shoot it in the back. The first cut of this mode held
+    //   correctly but handed the slide back to directMove at gap 1, and
+    //   directMove's vertical-first priority yanked the player back into
+    //   the parallel chase one sub-cell short of the lane — "并道" never
+    //   completed on film (replay review: s9@11 / s21@8, both arms).
+    // ----------------------------------------------------------------
+    if (params.pursuitTailAlongMode >= 3) {
+      // `>= 3`, never `=== 3`: am=4 layers the sticky-target/T2a-preemption
+      // call-site fixes ON TOP of this machine. A strict equality here
+      // silently dropped am=4 into the archived arms' path below — which
+      // merges head-on at along > 0 (the measured −58 geometry) — and the
+      // am=4 arm lost by net −59 before the A/B caught it (2026-08-29).
+      // The adjacent band includes the half-entered laneGap 1: the merge is
+      // a 2-sub-cell slide and must be owned through its whole duration.
+      // gap 0 (on-lane) hands back to the normal chase; gap ≥ 3 is not the
+      // defect geometry.
+      if (laneGap !== 1 && laneGap !== 2) return null
+      // MERGE: the target has cleared the player's row by the 2-row stagger
+      // (its body vertically adjacent to the player's — the slide cannot
+      // collide). No wake-side along cap: once staggered, the lane IS the
+      // chase, and MaxCells bounds how far the target may drift before the
+      // merge is given up. This is also why MinCells is NOT consulted here:
+      // the stagger is body geometry (2 rows = 2×2 bodies adjacent), not a
+      // tunable stand-off — MinCells ≥ 5 would self-lock (the vertical-first
+      // chase pins the gap before the window opens).
+      if (along <= -2) {
+        if (dist > params.pursuitTailMaxCells) return null
+        if (!laneShotClear(self, pc, eCol, eRow, vertical)) return null
+        const want: Direction = vertical
+          ? eCol > pc.col
+            ? 'right'
+            : 'left'
+          : eRow > pc.row
+            ? 'down'
+            : 'up'
+        if (self.canMoveDir(p, want)) return want
+        if (allowBreak && self.canMoveOrBreak(p, want)) return want
+        // The slide is refused while the shot line checked clear ⇒ the
+        // blocker is a TANK (steel/base would have failed laneShotClear;
+        // breakable brick returns true from canMoveOrBreak). When the
+        // blocker is the TARGET'S OWN BODY — `along = -2` is a ROUNDED cell
+        // distance, and a mid-cell target can still physically overlap the
+        // slide footprint by most of a sub-cell (s21@30 t2475: its y wobble
+        // 153→174 blocked the slide for ~24 ticks) — do NOT hand the tick
+        // back: directMove's vertical-first priority chases the target and
+        // closes the very stagger this phase is waiting for (measured: the
+        // player oscillated down-chase → hold → blocked-slide for 1.5 s).
+        // HOLD; the target's own travel opens the pixel gap within a few
+        // ticks and the slide fires (verified per-tick on film).
+        if (et !== null) {
+          const v = DIR_VECTORS[want]
+          const nx = snap(p.x, CELL) + v.dx * CELL
+          const ny = snap(p.y, CELL) + v.dy * CELL
+          if (aabb(nx, ny, TANK, TANK, et.x, et.y, et.w, et.h)) return PURSUIT_TAIL_HOLD
+        }
+        return null
+      }
+      // YIELD: the target is level with, closing on, or only 1 row clear of
+      // the player — merging now would cut its bow or grind its flank
+      // (measured net −58 for exactly this). Release the throttle and let
+      // it climb past until the stagger opens.
+      if (along > params.pursuitTailAlongWindow) return null
+      if (dist > params.pursuitTailMaxCells) return null
+      // At along ≤ 0 skip the shot-line check: laneShotClear steps AWAY from
+      // the target when the rows coincide and walks off-grid to `false`,
+      // which would drop the hold on the very ticks the target passes the
+      // player's row. The merge phase re-validates before every slide tick.
+      if (along > 0 && !laneShotClear(self, pc, eCol, eRow, vertical)) return null
+      return PURSUIT_TAIL_HOLD
+    }
+    // The NEIGHBOURING lane — and because the tank body is 2×2 cells
+    // (TANK=32 vs CELL=16), "neighbouring" is a gap of 2, not 1. Measured
+    // laneGap distribution while the target is moving: gap2 = 26.9% (the
+    // single largest bucket), gap1 = 7.9% (bodies already overlap laterally,
+    // so the lateral step is refused by canMoveDir and the override is a
+    // no-op). The first implementation used gap1 and scored a 0.12% effective
+    // dose — indistinguishable from OFF.
+    if (laneGap !== 2) return null
+    // Distance window. dist = laneGap + |along| = 2 + |along|, so
+    // `pursuitTailMinCells` doubles as a minimum tail-chase stand-off:
+    // minCells 3 ⇒ |along| ≥ 1; 4 ⇒ ≥ 2; 5 ⇒ ≥ 3. Wire the generic window in
+    // here too — it was silently dead for mode 7 (the branch returns before
+    // the shared dist check), which made the first minCells=4 experiment a
+    // no-op mislabelled as a result.
+    //
+    // AlongMode 0/1/2 below are ARCHIVED arms (round-2 A/B evidence): their
+    // evaluation sequence must stay exactly as measured.
+    if (dist < params.pursuitTailMinCells || dist > params.pursuitTailMaxCells) return null
+    // Passing or about to pass: within `pursuitTailAlongWindow` cells along
+    // the travel axis, either side. Not restricted to strictly-behind — a
+    // target about to sweep past in the next lane is exactly when the merge
+    // is cheap and the payoff immediate (user review, 2026-08-29).
+    if (Math.abs(along) > params.pursuitTailAlongWindow) return null
+    // Diagnostic split (§302 forensics): is the merge helpful when the player
+    // is in the target's WAKE (tail-chase) or when the target is level with /
+    // closing on the player (side-by-side / head-on intercept)? Measured as
+    // one net −39 bundle; this splits it so the two cases can be judged apart.
+    //   0 = both (default)   1 = wake only (along < 0)   2 = level/ahead only
+    if (params.pursuitTailAlongMode === 1 && along >= 0) return null
+    if (params.pursuitTailAlongMode === 2 && along < 0) return null
+    // Still require the lane to buy a shot: merging onto a lane whose line
+    // to the target is walled off just swaps one wasted shot for another.
+    if (!laneShotClear(self, pc, eCol, eRow, vertical)) return null
+    const want: Direction | null = vertical
+      ? eCol > pc.col
+        ? 'right'
+        : 'left'
+      : eRow > pc.row
+        ? 'down'
+        : 'up'
+    if (self.canMoveDir(p, want)) return want
+    if (allowBreak && self.canMoveOrBreak(p, want)) return want
+    return null
+  }
+
+  if (along > 0) return null
+  if (dist < params.pursuitTailMinCells || dist > params.pursuitTailMaxCells) return null
+
+  // The lane coordinate is the target's own coordinate on the perpendicular
+  // axis — vertical travel ⇒ its column, horizontal travel ⇒ its row. (That is
+  // also `eCol - tdx*k` / `eRow - tdy*k` for any k, which is why mode 2 needs
+  // no tail-cell validation: the merge target is the lane LINE, not a cell.)
+  if (params.pursuitTailMode >= 2) {
+    const laneGap = tdy !== 0 ? Math.abs(pc.col - eCol) : Math.abs(pc.row - eRow)
+    // Off-lane only: on the lane the normal chase (directMove) already owns
+    // the along-lane pursuit, and steering here could only push the player
+    // BACKWARD toward a tail cell it has already passed.
+    if (laneGap === 0) return null
+    if (laneGap > params.pursuitTailMaxLaneGap) return null
+    // Mode 3: only pay the lateral detour when it actually buys a shot. A
+    // merge onto a lane whose line back to the target is blocked by terrain
+    // produces the same perpendicular nothing-shot as before, minus the time
+    // spent driving sideways — measured: on-lane fire quality is unchanged by
+    // the merge (probe §302, 73.2% → 72.6% aligned), so this gate is what
+    // separates "merge that buys an aligned shot" from "merge that doesn't".
+    if (params.pursuitTailMode >= 3 && !laneShotClear(self, pc, eCol, eRow, tdy !== 0)) {
+      return null
+    }
+    if (params.pursuitTailMode >= 4 && !lateralRunClear(self, pc, eCol, eRow, tdy !== 0)) {
+      return null
+    }
+    const want: Direction | null =
+      tdy !== 0 ? (eCol > pc.col ? 'right' : 'left') : eRow > pc.row ? 'down' : 'up'
+    if (self.canMoveDir(p, want)) return want
+    if (allowBreak && self.canMoveOrBreak(p, want)) return want
+    return null
+  }
+
+  // Mode 1 (measured net-negative — kept for the record, see the doc block).
+  // Merge point, walked back toward the target when the far cell is off-grid
+  // or unbreakable terrain (a steel tail is a dead end, not a lane).
+  let k = params.pursuitTailCells
+  let tc = eCol - tdx * k
+  let tr = eRow - tdy * k
+  while (k > 1 && !tailCellUsable(self, tc, tr)) {
+    k--
+    tc = eCol - tdx * k
+    tr = eRow - tdy * k
+  }
+  if (!tailCellUsable(self, tc, tr)) return null
+
+  // Perpendicular (lane) gap first, then chase along the lane. Vertical travel
+  // ⇒ the lane is the target's COLUMN; horizontal travel ⇒ its ROW.
+  let want: Direction | null = null
+  if (tdy !== 0) {
+    if (pc.col !== tc) want = tc > pc.col ? 'right' : 'left'
+    else if (pc.row !== tr) want = tr > pc.row ? 'down' : 'up'
+  } else {
+    if (pc.row !== tr) want = tr > pc.row ? 'down' : 'up'
+    else if (pc.col !== tc) want = tc > pc.col ? 'right' : 'left'
+  }
+  if (want === null) return null
+  if (self.canMoveDir(p, want)) return want
+  if (allowBreak && self.canMoveOrBreak(p, want)) return want
+  return null
+}
 
 /**
  * §145 iceGlideAdjust — 冰上滑行控制（纯函数，供 HUNT 的 navigate 段调用）。

@@ -6,6 +6,7 @@ import { BASE_POS, CELL } from '../../../constants'
 import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { bulletPathSteelBlockedImpl, scanAheadImpl } from '../FireControl'
+import { pursuitTailSlideDir } from '../Navigator'
 import { countAlignedEnemiesImpl } from '../ThreatAssessor'
 import { updateStuckTrack } from '../stuck-track'
 import { selfFireBaseGuardBlocks } from '../candidates/shared'
@@ -186,6 +187,15 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
 
             // 先手开火 / 冷却中等待：保持对齐以备对枪
             // 不横移——横移会脱离防守位，在密集关卡导致更多死亡
+            // §302 am=4: 活动中的 tail 滑行抢占 T2a 的转身（仅移动；转身
+            // 背敌时开火必浪费故关火）。见 Navigator.pursuitTailSlideDir。
+            const tailSlideA = pursuitTailSlideDir(self, p)
+            if (tailSlideA) {
+              self._moveDir = tailSlideA
+              self._fire = false
+              recordBranch(self, 't2a')
+              return true
+            }
             if (p.dir === aimDir) {
               self._moveDir = null
             } else {
@@ -197,6 +207,14 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
           }
 
           // ---- 正常 T2a（非炮口相向 / 1HP / 冰面）----
+          // §302 am=4: 同上，滑行抢占转身开火。
+          const tailSlideB = pursuitTailSlideDir(self, p)
+          if (tailSlideB) {
+            self._moveDir = tailSlideB
+            self._fire = false
+            recordBranch(self, 't2a')
+            return true
+          }
           if (p.dir === aimDir) {
             self._moveDir = null // Already facing — stop and shoot
           } else {

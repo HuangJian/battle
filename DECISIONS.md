@@ -1037,3 +1037,70 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > 全文 → docs/god-ai-tuning.progress.md Part 0.1（2026-08-28 解冻纪元基线 / golden 重钉）
 
 > （编号冲突：与 §293-intent「M4 完成」撞号，见头部「编号冲突注」；两者编号均被外部引用，保持不动）
+
+## 302. 追尾导航（pursuit-tail / 并入目标车道后方）— 三轮归档：用户规格的等待后并道（am=3）净 +29 为全程序最佳，仍噪声带内，维持 OFF _(STATUS 已被 §304 取代：2026-08-29 用户拍板启用，见下两条)_(原 STATUS: 否决, 默认 0 = OFF, 2026-08-29)
+
+> 全文 → docs/god-ai-tuning.progress.md §302（§1–6 一轮 modes 1–6；§7–8 二轮
+> mode 7；§9 三轮 AlongMode=3 三版）
+
+> 来源 plan/Intent-Policy-NN-Plan.md §12.1 #3（执行器实施层缺陷）。实现 = `pursuitTailDirImpl`
+> （Navigator.ts，HUNT 内 `_moveDir` 覆写，射击链路共用）。三轮 hard 35×60 配对 A/B：
+> ①modes 1–6 净 −35…+8 全噪声；②mode 7 拆分出**唯一显著信号 am=2 仅侧方/前方 净 −58
+> (t=−2.79)**——切入挡路且朝向横向；③**用户拍板 AlongMode=3 等待后并道**并经三轮复核
+> 修正：v1 hold 对但并道半途夭折（`laneGap===2` 门控在 gap→1 交还 directMove 被拽回）；
+> v2 全程接管横移；v3（用户二次复核 s21@30 抓出）`along=−2` 是取整值、目标半格下行时
+> **车身仍物理挡住滑行脚印**，交还 directMove 会下追把身位贴回去（振荡 1.5s）——修正为
+> 滑行被拒且拒者是目标车身时 HOLD 等间隙自行张开。最终语义 = 自包含状态机：
+> `along ∈ [−1,+窗]` hold；`along ≤ −2` 且像素级不被卡 → 接管横移 gap∈{1,2} 直到 gap 0；
+> 上道交还纵向追击开火。剂量：Δwin +6/75、击杀首次反超（1413 vs 1358）、aligned +223、
+> 在车道 7.28%→9.26%。全量**净 +29（319/290）= 全程序最佳**，版本弧线 −39/−58/+1/−4/
+> +16/**+29** 随机制完整度单调改善，但 < 2SE≈49 ⇒ 按 §6.3b 不转 ON。
+> 维持 `pursuitTailMode: 0`，ARCHIVED_KNOB_GROUPS 不变；归档构型 am=0/1/2 路径逐指令未动
+> （基线臂三次 A/B 均 1581）。工具 `tools/diag/pursuit-tail-{probe,flip,scenes,export}.ts`
+> + `tmp/s302-diag21-30.ts`（tgtBlk/othBlk 逐 tick 诊断）留用；复核录像
+> `tmp/s302-replays3/`（全 MATCH ✓，含 s21@30 结局翻转 gameover→stageclear）。
+
+
+## 303. 护卫出生卡墙 bug 修复 — baseSideSpawnCell 兜底不再落墙 + golden 重钉 b9a629e0（STATUS: 已实施, 2026-08-29）
+> **Bug**（用户报告）：使用基地护卫（天降神兵）道具时，护卫出生在基地砖墙上被卡死无法出击。
+> 根因：`SimulationEnemies.baseSideSpawnCell` 只扫基地两侧固定列各 5 行候选，全阻塞时
+> 兜底直接返回 `(col, baseRow)`——即基地墙环砖所在格；普通关卡基地环砖即触发
+> （新增回归测试在未改动的 stage0 上即红）。
+> **修复**：候选序 = 请求侧列（贴基地 4 行）→ 对侧列 → 同列向上直扫 → 全场最近空位
+> （偏好请求侧）；`isFreeSpawnCell` 统一 bounds/terrain/tank 三查，任何路径不再返回阻塞格。
+> **判定**：仿真行为变化 → `freeze:check` 翻红（预期显式判定，非 God-AI 决策逻辑改动），
+> golden 重钉 `20784637c6…` → `b9a629e0e2…`（21 组合，109,325 签名行），门回绿。
+> **配套**：按 owner 指令仅重跑 hard 60-seed 基线（classic/chaos 未动，见 Part 0.A.2）。
+> **测试**：`tests/guard-ally.test.ts` 新增 2 条（基地两侧全砖 / 普通关卡，出生格必无阻塞、不叠tank）。
+> **记录**：docs/god-ai-tuning.progress.md Part 0.A.2（golden 重钉 + hard 基线对比）。
+
+## 304. 启用追尾导航 — pursuitTailMode=7 + AlongMode=4 默认 ON（用户拍板，新纪元三件套完成；同日 am=4 增补见 dated note）(STATUS: 已实施, 2026-08-29)
+
+> 用户决策：净 +29 已足够好，启用。随后按 §6.3b 完成新纪元三件套：
+> ①本条目；②冻结签名 golden 重钉 `7b2e5097…`（tools/det-golden.v1.sha256，
+> 采集于启用后）；③score-gate TRUTH_SCORES 第五次重捕获 + 三难度 60-seed
+> eval-suite v7 基线（docs/god-ai-tuning.progress.md §304）。
+>
+> **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 4`（yield-then-tail 状态机
+> + 锁定目标键控 + T2a 滑行抢占；语义见 §302/progress §9/§304）。**classic 经
+> CLASSIC_OVERRIDES 保持 0 = 字节不变**（instant 1-HP 池未 A/B，复刻一致性门槛）；
+> **chaos 继承默认 = ON**。
+>
+> **2026-08-29 同日增补（§6.4 dated note）**：用户点名处理两类自愈型中断后，
+> `AlongMode=4`（`pursuitTailTargetCell` 锁定目标键控 + `pursuitTailSlideDir`
+> T2a 滑行抢占、对枪抵消提交不可抢占）配对 A/B 对 am=3 **净 +20**（256/236，
+> 1632 vs 1612 / 2100）→ 默认 3→4。实现教训：状态机门若写 `=== 3` 会把 am=4
+> 静默漏进归档路径（正面切入 −58 几何），首跑 A/B 净 −59 才暴露——**分层参数
+> 的门一律 `>=`**。三件套随默认迁移再次完成：golden 重钉 `91faa793…`、
+> TRUTH 第六次重捕获、三难度基线重跑。
+>
+> **代价记录**：score-gate v7 口径（am=3 启用时）hard 0.7663→**0.7890（+2.26pt）**、
+> chaos 0.7562→**0.7337（−2.25pt）**、classic 0.8697→0.8697（0.0000）。
+> **am=4 默认后（第六次重捕获）**：hard 0.7890→0.7743（−1.47pt）、
+> chaos 0.7337→**0.7528（+1.91pt）**、classic 0.0000 不变——score 与胜率两口径
+> 在 hard 上方向相反（score 重罚败局余量，胜率是用户指定的治理口径），
+> 如实双记。若 chaos 体验需要，可给 CHAOS_OVERRIDES 置 0（一行动手）。
+>
+> **连带修复**：`laneShotClear` 增加目标车道坐标的越界守卫（横向分支此前只守列
+> 不守行；测试夹具的越界敌格使其显形）。NN 训练语料：训练用 God-AI 对手行为
+> 随此启用改变，无道具口径语料如需再生另行处理（nn.progress.md 不涉架构变更）。

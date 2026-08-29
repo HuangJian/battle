@@ -2389,6 +2389,55 @@ export interface GodAIParams {
    * (S2@seed83: 17.6s stuck).
    */
   powerupEnemyOverlapSkip: number
+
+  /**
+   * §302: pursuit-tail navigation (plan/Intent-Policy-NN-Plan.md §12.1
+   * defect #3 — "追击走并行车道横向开火，不并入目标车道后方").
+   *
+   * 0 = OFF (byte-identical). 1 = while HUNT chases a live enemy, steer to
+   * the cell `pursuitTailCells` BEHIND the target along its travel axis and
+   * close the perpendicular (lane) gap first, instead of walking a parallel
+   * lane and firing sideways. See pursuitTailDirImpl (Navigator.ts) for the
+   * root-cause analysis of why directMove's vertical-first priority produces
+   * the parallel-lane pattern against vertically travelling targets.
+   */
+  pursuitTailMode: number
+  /** §302: how many cells behind the target the merge point sits. */
+  pursuitTailCells: number
+  /** §302: don't tail-gate closer than this (cells) — close combat owns it. */
+  pursuitTailMinCells: number
+  /** §302: don't tail-gate beyond this (cells) — the lane detour costs more
+   * than the aligned shot is worth. */
+  pursuitTailMaxCells: number
+  /**
+   * §302 mode 2: max perpendicular (lane) gap the player will cross to merge
+   * onto the target's lane. Beyond this the detour costs more time than the
+   * aligned shot is worth, and the normal chase is left alone.
+   */
+  pursuitTailMaxLaneGap: number
+  /**
+   * §302 mode 7: how close along its travel axis the target must be for the
+   * adjacent-lane merge to fire (cells, either side). The merge is intended
+   * for a target that is PASSING or ABOUT TO PASS in the neighbouring lane —
+   * not for a far-away target the player would have to march across the map
+   * to reach (that was the rejected modes 1-6 behaviour).
+   */
+  pursuitTailAlongWindow: number
+  /**
+   * §302 mode 7: which side of the target the merge may fire on.
+   * 0 = either side (default); 1 = only when the player is in the target's
+   * wake (`along < 0`, a true tail-chase); 2 = only when the target is level
+   * with or closing on the player (`along >= 0`, side-by-side / intercept);
+   * 3 = yield-then-tail — hold (`_moveDir = null`) while `along >= -1` so the
+   * target sweeps past the player's row, then merge into its wake with
+   * whole-slide ownership. Measured net −58 for merging at `along >= 0`
+   * directly (the player cuts the target's bow, facing sideways, and eats
+   * the ram); the user directive is to wait, not to cut in early.
+   * 4 = 3 + sticky locked-target keying (pursuitTailTargetCell) + T2a slide
+   * preemption (pursuitTailSlideDir) — paired net +20 over 3 on hard 35×60;
+   * SHIPPED default (DECISIONS §304). See Navigator.pursuitTailDirImpl.
+   */
+  pursuitTailAlongMode: number
 }
 
 // ============================================================
@@ -2476,4 +2525,6 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
     gate: 'dualCentralBreachP2Patrol',
     note: 'dual P2 patrol 导航 (+ PatrolRow) (§177 实测回退; 2026-08-26 盘点补登记)',
   },
+  // §302 pursuitTailMode 已于 2026-08-29 启用（DECISIONS §304, AlongMode=3
+  // 净 +29），移出归档组；机制与诊断字段留在测试钉内。
 ]

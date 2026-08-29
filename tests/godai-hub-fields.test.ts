@@ -121,6 +121,19 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   _selfFireGuardBlocks: { cls: 'A', why: '§121 diag, read by ab-fire-guard' },
   _centerLineFireBlocks: { cls: 'A', why: '§193-A diag' },
   _predictiveFireBlocks: { cls: 'A', why: '§193-D diag' },
+  _pursuitTailOverrides: { cls: 'A', why: '§302 diag, read by pursuit-tail-probe' },
+  _pursuitTailChanged: {
+    cls: 'A',
+    why: '§302 diag, overrides that actually REPLACED the chain direction (55% are no-ops)',
+  },
+  _pursuitTailLastPrev: {
+    cls: 'A',
+    why: '§302 diag, pre-override direction for scene forensics',
+  },
+  _pursuitTailHolds: {
+    cls: 'A',
+    why: '§302 AlongMode=3 diag, yield-phase hold ticks (probe hold-dose)',
+  },
   branchCounts: { cls: 'A', why: 'branch telemetry, never feeds back' },
   _lastBranch: { cls: 'A', why: 'forensics label, read by simulation-runner' },
   _intentPrev: { cls: 'A', why: '§290 intent-tagger prev-intent (tagger.ts observation)' },

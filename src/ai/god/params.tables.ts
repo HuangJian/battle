@@ -751,6 +751,20 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   targetBlacklistStuckTicks: 240,
   targetBlacklistDuration: 180,
   powerupEnemyOverlapSkip: 1,
+
+  // §302/§304: pursuit-tail navigation (merge behind the chase target instead
+  // of firing from a parallel lane). ENABLED 2026-08-29 (DECISIONS §304) after
+  // the user-directed yield-then-tail redesign (AlongMode=3) measured net +29
+  // on hard 35×60; the same-day am=4 add-on (sticky locked-target keying +
+  // T2a slide preemption) added a paired net +20 over am=3 → default raised
+  // to 4 (dated note in DECISIONS §304). Arc: OFF 1581 → am3 1612 → am4 1632.
+  pursuitTailMode: 7,
+  pursuitTailCells: 2,
+  pursuitTailMinCells: 3,
+  pursuitTailMaxCells: 9,
+  pursuitTailMaxLaneGap: 4,
+  pursuitTailAlongWindow: 3,
+  pursuitTailAlongMode: 4,
 }
 
 /**
@@ -882,6 +896,9 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   navBrickStopCost: 0,
   // §nav-cost 3.3(c): firecontrol model gated by navBrickStopCost=0 → OFF.
   navFireStopModel: 'flat',
+  // §302: pursuit-tail is a pool-model (hard/chaos) candidate — classic
+  // instant 1-HP 未 A/B，restore 0（byte-identical classic gate）.
+  pursuitTailMode: 0,
 }
 
 /**
