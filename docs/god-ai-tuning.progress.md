@@ -3227,6 +3227,44 @@ selectHuntNavTarget 与锁定目标偶发错位）——用户已点名下一批
 
 ---
 
+# §303 追尾导航启用纪元·am=4 增补（2026-08-29 同日）
+
+> 用户点名的两类自愈型中断当日处理完毕，配对 A/B 净 +20 → 默认 3→4。
+
+**实现**（均参数门控 am=4，am=3 归档语义不动）：
+
+1. `pursuitTailTargetCell`（Navigator 导出，纯函数）：tail 几何键控从 HUNT 的
+   navTarget 改为**锁定战斗目标**（`_lastSelectTargetId`）——navTarget 受 §170
+   目标摇摆影响会与玩家正在打的敌人错位（s21@30 t2523 实测：几何可并、覆写
+   静默）。Hunt 调用点接入，`allowBreak` 按实际尾随目标距离重算。
+2. `pursuitTailSlideDir`（Navigator 导出，纯函数）：T2a 的两处提交（先手等待 /
+   正常 T2a）前查询 tail——**滑行抢占转身**（移动=滑行、关火：转身背敌时开火
+   必浪费）；HOLD 不抢占（对枪站桩开炮正是 hold 想要的）；**对枪抵消提交
+   （敌方子弹在线上）永不抢占**（安全关键）。Engage.ts 两处接入，分支标签
+   分支计数仍走 `t2a`（不扩 intent 词表，取证走 `_pursuitTailHolds` 计数器）。
+
+**教训（首跑 A/B 净 −59 揭穿）**：状态机门最初写 `pursuitTailAlongMode === 3`，
+am=4 整个漏进归档构型路径（正面切入 = −58 几何）；单测因该几何在旧路径下
+恰好同结果而全绿——**分层参数的门一律 `>=`，单测钉不住全轨迹效应，A/B 才是
+行为门**。修正为 `>= 3` 后复测 +20。
+
+**数据**：A/B（hard 35×60 配对，base=am3=1612）cand=am4=1632，**净 +20**
+（256/236，SE≈22，正向未过 2SE）。全程弧线：OFF 1581 → am3 1612 →
+am4 1632（76.8%→77.7%）。另确认 laneShotClear 越界守卫修掉了真实边界格
+（居中坐标贴墙 round 出 26 越界），am3 臂 1597→1612 的漂移即此。
+
+**新纪元三件套（随默认迁移第二次完成）**：golden `91faa793…`（99490 行签名）；
+TRUTH 第六次重捕获：hard 0.7890→0.7743（−1.47pt）、chaos 0.7337→**0.7528
+（+1.91pt）**、classic 0.0000——score 与胜率两口径在 hard 上方向相反（score
+重罚败局余量；胜率为用户治理口径），双记。eval-suite v7 基线：
+**hard 78% / chaos 73% / classic 90%**（am3 时代 77/71/90）。
+
+**处置**：默认 `pursuitTailMode: 7, pursuitTailAlongMode: 4`；classic OFF 不变。
+单测 32 个（am4 helper 纯函数级：锁定键控 / 滑行抢占 / HOLD 不抢占 /
+像素错开等待 / am3 不变）。
+
+---
+
 # 重启协议（Resume Protocol，2026-08-26 · v1 冻结）
 
 > 未来任何 agent 若要重开 God AI 调优（= 宣告新纪元），按序执行：

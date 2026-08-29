@@ -8,8 +8,10 @@
 // instead.
 //
 // ⚠️ ENABLED 2026-08-29 (DECISIONS §303) — `pursuitTailMode: 7` +
-// `pursuitTailAlongMode: 3` ship ON after the user-directed yield-then-tail
-// redesign reached net +29 on hard 35×60 (best arm of the program). classic
+// `pursuitTailAlongMode: 4` ships ON: the user-directed yield-then-tail
+// redesign reached net +29 on hard 35×60, then the am=4 add-on (sticky
+// locked-target keying + T2a slide preemption) added a paired net +20 over
+// am=3 (OFF 1581 → am3 1612 → am4 1632 of 2100). classic
 // stays OFF via CLASSIC_OVERRIDES (instant 1-HP pool never A/B'd,
 // byte-identical gate).
 //
@@ -40,7 +42,12 @@ import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import { Input } from '../src/game/Input'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../src/ai/GodAIInput'
-import { pursuitTailDirImpl, PURSUIT_TAIL_HOLD } from '../src/ai/god/Navigator'
+import {
+  pursuitTailDirImpl,
+  pursuitTailSlideDir,
+  pursuitTailTargetCell,
+  PURSUIT_TAIL_HOLD,
+} from '../src/ai/god/Navigator'
 import { ARCHIVED_KNOB_GROUPS } from '../src/ai/god/params.interface'
 import { MAP_CENTER } from '../src/ai/god/candidates/shared'
 import { BASE_POS, CELL } from '../src/constants'
@@ -95,7 +102,7 @@ const ISOLATED = { chokepointMode: 0, baseGuardAnchorMode: 0 }
 describe('§302: pursuit-tail ships ON (DECISIONS §303)', () => {
   it('DEFAULT is mode 7 + AlongMode=3 and NOT in ARCHIVED_KNOB_GROUPS', () => {
     expect(DEFAULT_GOD_AI_PARAMS.pursuitTailMode).toBe(7)
-    expect(DEFAULT_GOD_AI_PARAMS.pursuitTailAlongMode).toBe(3)
+    expect(DEFAULT_GOD_AI_PARAMS.pursuitTailAlongMode).toBe(4)
     expect(ARCHIVED_KNOB_GROUPS.some((g) => g.gate === 'pursuitTailMode')).toBe(false)
   })
 
@@ -408,5 +415,73 @@ describe('§302: mode 7 AlongMode=3 — yield-then-tail (wait, then merge)', () 
     expect(
       pursuitTailDirImpl(input, at(world, 12, 5), { col: 12, row: 5 }, { col: 10, row: 5 }, true),
     ).toBe(PURSUIT_TAIL_HOLD)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AlongMode=4 — the two self-healing-interruption fixes (user directive,
+// 2026-08-29, after the am=3 enablement): (a) the tail keys on the LOCKED
+// combat target when it diverges from HUNT's nav pick, (b) an active tail
+// SLIDE preempts the ENGAGE/T2a turn (fire dropped while turned away).
+// Both live behind am=4 so am=3 (the shipped default) stays byte-faithful.
+// ---------------------------------------------------------------------------
+describe('§302: AlongMode=4 — locked-target keying and T2a slide preemption', () => {
+  const AM4 = { ...ISOLATED, ...M7, pursuitTailAlongMode: 4 }
+
+  it('am=3: pursuitTailTargetCell returns navTarget untouched (archived arms)', () => {
+    const { world, input } = setupWorld({ ...ISOLATED, ...M7, pursuitTailAlongMode: 3 })
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    refresh(input, world)
+    input._lastSelectTargetId = e.id
+    const nav = { col: 20, row: 20 }
+    expect(pursuitTailTargetCell(input, nav)).toBe(nav)
+    expect(pursuitTailSlideDir(input, at(world, 12, 7))).toBeNull()
+  })
+
+  it('am=4: keys on the locked combat target over the nav pick', () => {
+    const { world, input } = setupWorld(AM4)
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    refresh(input, world)
+    input._lastSelectTargetId = e.id
+    expect(pursuitTailTargetCell(input, { col: 20, row: 20 })).toEqual({ col: 10, row: 5 })
+  })
+
+  it('am=4: falls back to navTarget with no lock or a dead locked tank', () => {
+    const { world, input } = setupWorld(AM4)
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    refresh(input, world)
+    const nav = { col: 20, row: 20 }
+    expect(pursuitTailTargetCell(input, nav)).toBe(nav)
+    input._lastSelectTargetId = e.id
+    e.alive = false
+    expect(pursuitTailTargetCell(input, nav)).toBe(nav)
+  })
+
+  it('am=4: the slide preempts the T2a turn when the stagger is open', () => {
+    const { world, input } = setupWorld(AM4)
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    refresh(input, world)
+    input._lastSelectTargetId = e.id
+    // staggered (along = -2): a real slide command for the T2a call site.
+    expect(pursuitTailSlideDir(input, at(world, 12, 7))).toBe('left')
+  })
+
+  it('am=4: HOLD does not preempt — the duel shot stands (level geometry)', () => {
+    // (playerCell is per-tick cached, so each geometry gets a fresh world —
+    // repositioning within one tick would read the stale cached cell.)
+    const { world, input } = setupWorld(AM4)
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    refresh(input, world)
+    input._lastSelectTargetId = e.id
+    expect(pursuitTailSlideDir(input, at(world, 12, 5))).toBeNull()
+  })
+
+  it('am=4: the slide respects the pixel-stagger wait (mid-cell target)', () => {
+    const { world, input } = setupWorld(AM4)
+    const e = travelling(placeEnemy(world, 10, 5), 10, 5, 'up')
+    e.y = 5 * CELL + 7 // body pokes into the slide band → hold, not slide
+    refresh(input, world)
+    input._lastSelectTargetId = e.id
+    expect(pursuitTailSlideDir(input, at(world, 12, 7))).toBeNull()
   })
 })

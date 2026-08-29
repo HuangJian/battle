@@ -755,16 +755,16 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §302/§303: pursuit-tail navigation (merge behind the chase target instead
   // of firing from a parallel lane). ENABLED 2026-08-29 (DECISIONS §303) after
   // the user-directed yield-then-tail redesign (AlongMode=3) measured net +29
-  // on hard 35×60 — the best arm of the three-round §302 program (arc −39/−58/
-  // +1/−4/+16/+29 tracking mechanic completeness). plan/Intent-Policy-NN-Plan.md
-  // §12.1 defect #3.
+  // on hard 35×60; the same-day am=4 add-on (sticky locked-target keying +
+  // T2a slide preemption) added a paired net +20 over am=3 → default raised
+  // to 4 (dated note in DECISIONS §303). Arc: OFF 1581 → am3 1612 → am4 1632.
   pursuitTailMode: 7,
   pursuitTailCells: 2,
   pursuitTailMinCells: 3,
   pursuitTailMaxCells: 9,
   pursuitTailMaxLaneGap: 4,
   pursuitTailAlongWindow: 3,
-  pursuitTailAlongMode: 3,
+  pursuitTailAlongMode: 4,
 }
 
 /**

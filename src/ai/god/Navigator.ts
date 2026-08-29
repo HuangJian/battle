@@ -807,6 +807,70 @@ function tailCellUsable(self: GodAIInput, col: number, row: number): boolean {
 export const PURSUIT_TAIL_HOLD = 'hold' as const
 export type PursuitTailDir = Direction | typeof PURSUIT_TAIL_HOLD
 
+/**
+ * §302 AlongMode=4: resolve which enemy cell the tail geometry keys on.
+ *
+ * am ≤ 3 keys on HUNT's navTarget — which is the NAV chain's pick and can
+ * diverge from the COMBAT lock (`_lastSelectTargetId`, §170 target sway):
+ * the tail then goes blind on exactly the chase the player is fighting
+ * (measured s21@30 t2523: `br=navigate`, mergeable geometry, override
+ * silent because navTarget pointed elsewhere). am ≥ 4 keys on the locked
+ * target whenever one is alive — the tail is a 1-2 cell movement tweak, and
+ * the navStuck/carve gates still own the escape paths.
+ *
+ * Pure: reads observation state only. Returns `navTarget` unchanged for
+ * am ≤ 3 (archived arms byte-faithful) and whenever no live locked tank
+ * exists.
+ */
+export function pursuitTailTargetCell(self: GodAIInput, navTarget: Cell | null): Cell | null {
+  if (self.params.pursuitTailAlongMode < 4) return navTarget
+  const lockedId = self._lastSelectTargetId
+  if (lockedId < 0) return navTarget
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.id === lockedId && t.alive && t.spawnTimer <= 0) {
+      return { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+    }
+  }
+  return navTarget
+}
+
+/**
+ * §302 AlongMode=4: the slide command for the ENGAGE/T2a duel branch.
+ *
+ * T2a commits `moveDir = aimDir` (turn to face) + fire when its scan sees
+ * the enemy on a gun line — correct when the shot is real, but during a
+ * tail SLIDE those 1-3 turning ticks abort the merge mid-run and the turn
+ * fires at nothing (the player faces away from the enemy the next tick).
+ * am ≥ 4 lets an active SLIDE preempt the T2a turn: movement = the slide,
+ * fire = off (shooting while turned away wastes the bullet). A HOLD does
+ * NOT preempt — the duel's stand-and-shoot is exactly what a hold wants
+ * (the target is approaching/level, and a real shot beats repositioning).
+ * The bullet-cancel commit (enemy bullet on the line) is safety-critical
+ * and is never preempted (call-site choice).
+ *
+ * Pure; returns null whenever the tail has no slide this tick (HOLD, OFF,
+ * no locked target, geometry not met) so the caller keeps its own plan.
+ */
+export function pursuitTailSlideDir(self: GodAIInput, p: Tank): Direction | null {
+  if (self.params.pursuitTailMode <= 0 || self.params.pursuitTailAlongMode < 4) return null
+  const lockedId = self._lastSelectTargetId
+  if (lockedId < 0) return null
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  let cell: Cell | null = null
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (t.id === lockedId && t.alive && t.spawnTimer <= 0) {
+      cell = { col: Math.round(t.x / CELL), row: Math.round(t.y / CELL) }
+      break
+    }
+  }
+  if (cell === null) return null
+  const dir = pursuitTailDirImpl(self, p, self.playerCell(), cell, true)
+  return dir === null || dir === PURSUIT_TAIL_HOLD ? null : dir
+}
+
 export function pursuitTailDirImpl(
   self: GodAIInput,
   p: Tank,
@@ -888,7 +952,7 @@ export function pursuitTailDirImpl(
     const laneGap = tdy !== 0 ? Math.abs(pc.col - eCol) : Math.abs(pc.row - eRow)
     const vertical = tdy !== 0
     // ----------------------------------------------------------------
-    // §302 AlongMode=3 — YIELD-THEN-TAIL, self-contained state machine
+    // §302 AlongMode ≥ 3 — YIELD-THEN-TAIL, self-contained state machine
     // (user directive 2026-08-29, refined after replay review the same
     // day). The user's spec, for a target climbing the adjacent lane:
     //   wait until it is TWO cells up-left of the player (the 2×2 bodies
@@ -901,7 +965,12 @@ export function pursuitTailDirImpl(
     //   the parallel chase one sub-cell short of the lane — "并道" never
     //   completed on film (replay review: s9@11 / s21@8, both arms).
     // ----------------------------------------------------------------
-    if (params.pursuitTailAlongMode === 3) {
+    if (params.pursuitTailAlongMode >= 3) {
+      // `>= 3`, never `=== 3`: am=4 layers the sticky-target/T2a-preemption
+      // call-site fixes ON TOP of this machine. A strict equality here
+      // silently dropped am=4 into the archived arms' path below — which
+      // merges head-on at along > 0 (the measured −58 geometry) — and the
+      // am=4 arm lost by net −59 before the A/B caught it (2026-08-29).
       // The adjacent band includes the half-entered laneGap 1: the merge is
       // a 2-sub-cell slide and must be owned through its whole duration.
       // gap 0 (on-lane) hands back to the normal chase; gap ≥ 3 is not the

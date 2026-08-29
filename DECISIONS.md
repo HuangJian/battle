@@ -1067,15 +1067,25 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > 采集于启用后）；③score-gate TRUTH_SCORES 第五次重捕获 + 三难度 60-seed
 > eval-suite v7 基线（docs/god-ai-tuning.progress.md §303）。
 >
-> **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 3`（yield-then-tail 状态机，
-> 语义见 §302/progress §9）。**classic 经 CLASSIC_OVERRIDES 保持 0 = 字节不变**
->（instant 1-HP 池未 A/B，复刻一致性门槛）；**chaos 继承默认 = ON**。
+> **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 4`（yield-then-tail 状态机
+> + 锁定目标键控 + T2a 滑行抢占；语义见 §302/progress §9/§303）。**classic 经
+> CLASSIC_OVERRIDES 保持 0 = 字节不变**（instant 1-HP 池未 A/B，复刻一致性门槛）；
+> **chaos 继承默认 = ON**。
 >
-> **代价记录**：score-gate v7 口径 hard 0.7663→**0.7890（+2.26pt）**、
+> **2026-08-29 同日增补（§6.4 dated note）**：用户点名处理两类自愈型中断后，
+> `AlongMode=4`（`pursuitTailTargetCell` 锁定目标键控 + `pursuitTailSlideDir`
+> T2a 滑行抢占、对枪抵消提交不可抢占）配对 A/B 对 am=3 **净 +20**（256/236，
+> 1632 vs 1612 / 2100）→ 默认 3→4。实现教训：状态机门若写 `=== 3` 会把 am=4
+> 静默漏进归档路径（正面切入 −58 几何），首跑 A/B 净 −59 才暴露——**分层参数
+> 的门一律 `>=`**。三件套随默认迁移再次完成：golden 重钉 `91faa793…`、
+> TRUTH 第六次重捕获、三难度基线重跑。
+>
+> **代价记录**：score-gate v7 口径（am=3 启用时）hard 0.7663→**0.7890（+2.26pt）**、
 > chaos 0.7562→**0.7337（−2.25pt）**、classic 0.8697→0.8697（0.0000）。
-> hard（官方主调难度）胜率净 +29；chaos 的 score 下滑是已知代价，胜率口径
-> 未单独测量——若 chaos 体验需要，可给 CHAOS_OVERRIDES 置 0（一行动手），
-> 用户未要求，不预置。
+> **am=4 默认后（第六次重捕获）**：hard 0.7890→0.7743（−1.47pt）、
+> chaos 0.7337→**0.7528（+1.91pt）**、classic 0.0000 不变——score 与胜率两口径
+> 在 hard 上方向相反（score 重罚败局余量，胜率是用户指定的治理口径），
+> 如实双记。若 chaos 体验需要，可给 CHAOS_OVERRIDES 置 0（一行动手）。
 >
 > **连带修复**：`laneShotClear` 增加目标车道坐标的越界守卫（横向分支此前只守列
 > 不守行；测试夹具的越界敌格使其显形）。NN 训练语料：训练用 God-AI 对手行为

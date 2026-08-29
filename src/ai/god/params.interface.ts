@@ -2428,11 +2428,14 @@ export interface GodAIParams {
    * 0 = either side (default); 1 = only when the player is in the target's
    * wake (`along < 0`, a true tail-chase); 2 = only when the target is level
    * with or closing on the player (`along >= 0`, side-by-side / intercept);
-   * 3 = yield-then-tail — hold (`_moveDir = null`) while `along >= 0` so the
-   * target sweeps past the player's row, then merge into its wake. Measured
-   * net −58 for merging at `along >= 0` directly (the player cuts the target's
-   * bow, facing sideways, and eats the ram); the user directive is to wait,
-   * not to cut in early. See Navigator.pursuitTailDirImpl.
+   * 3 = yield-then-tail — hold (`_moveDir = null`) while `along >= -1` so the
+   * target sweeps past the player's row, then merge into its wake with
+   * whole-slide ownership. Measured net −58 for merging at `along >= 0`
+   * directly (the player cuts the target's bow, facing sideways, and eats
+   * the ram); the user directive is to wait, not to cut in early.
+   * 4 = 3 + sticky locked-target keying (pursuitTailTargetCell) + T2a slide
+   * preemption (pursuitTailSlideDir) — paired net +20 over 3 on hard 35×60;
+   * SHIPPED default (DECISIONS §303). See Navigator.pursuitTailDirImpl.
    */
   pursuitTailAlongMode: number
 }

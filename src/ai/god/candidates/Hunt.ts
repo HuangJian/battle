@@ -10,7 +10,12 @@ import { travelFireDetourDir } from '../ActionCandidates'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
 import { scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
-import { iceGlideAdjust, pursuitTailDirImpl, PURSUIT_TAIL_HOLD } from '../Navigator'
+import {
+  iceGlideAdjust,
+  pursuitTailDirImpl,
+  pursuitTailTargetCell,
+  PURSUIT_TAIL_HOLD,
+} from '../Navigator'
 import { carveFireAheadImpl, carvePathInfoCached, findCarveEscapeImpl } from '../PathCarve'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
 import {
@@ -608,7 +613,14 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   // directMove regime: at long range A* owns the corridor route, and a brick
   // detour there would dig the player out of it.
   if (!navStuck && !self._carveDigActive && self.params.pursuitTailMode > 0) {
-    const tailDir = pursuitTailDirImpl(self, p, pc, navTarget, navDist <= 5)
+    // am=4: key the tail on the LOCKED combat target when it diverges from
+    // the nav chain's pick (§170 sway) — see Navigator.pursuitTailTargetCell.
+    const tailTarget = pursuitTailTargetCell(self, navTarget)
+    const tailAllowBreak =
+      tailTarget !== null && tailTarget !== navTarget
+        ? manhattan(tailTarget.col, tailTarget.row, pc.col, pc.row) <= 5
+        : navDist <= 5
+    const tailDir = pursuitTailDirImpl(self, p, pc, tailTarget, tailAllowBreak)
     if (tailDir === PURSUIT_TAIL_HOLD) {
       // §302 yield-then-tail: the target is level with / closing on the
       // player — cut nothing, release the throttle and let it sweep past
