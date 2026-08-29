@@ -603,6 +603,7 @@ function main(): void {
   let totalTicks = 0
   let wins = 0
   let totalKills = 0
+  const actionCounts = new Array<number>(coarse ? COARSE_DIM : FINE_DIM).fill(0)
   const scoreList: number[] = []
   const dimAcc: Record<string, number[]> = {}
 
@@ -638,6 +639,7 @@ function main(): void {
         dims: res.dims,
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
+      for (const st of res.shard.steps) actionCounts[st.a]++
       if (res.shard.n > 0) writeGoalShard(`${outDir}/${shardName}`, res.shard, manifest)
       totalSamples += res.shard.n
       totalTicks += res.ticks
@@ -668,6 +670,7 @@ function main(): void {
     totalSamples,
     totalTicks,
     totalKills,
+    actionCounts,
     heartbeat,
     actionSpace: coarse ? 'coarse-169' : 'fine-676',
     scoreStats: stat(scoreList),

@@ -38,9 +38,11 @@ def combine_reports(reports: list[dict]) -> dict:
             for i in range(min(len(intentCounts), len(ic))):
                 intentCounts[i] += ic[i]
     combined["winRate"] = round(wins / combined["games"], 4) if combined["games"] else 0.0
+    # T7.2 goal rollout 无 intentCounts 但报告 totalKills（run_rl_intent 日志行消费）——
+    # 无条件聚合（per-tick RL 报告缺省 0，只增字段不破兼容）。
+    combined["totalKills"] = totalKills
     if intentCounts is not None:
         combined["intentCounts"] = intentCounts
-        combined["totalKills"] = totalKills
     sl = combined["scoreList"]
     if sl:
         n = len(sl)

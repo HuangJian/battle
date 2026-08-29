@@ -473,7 +473,7 @@ def main() -> None:
                 total_steps = sum(e["obs"].shape[0] for e in episodes)
                 chunks = PPO.chunk_episodes(episodes, args.mb)
                 agg = PPO.update(
-                    model, opt, chunks, args.epochs, device, seed=args.seed,
+                    model, opt, chunks, args.epochs, device,
                     ckpt_path=str(traj_dir / "ppo_ckpt"),
                     **_update_kwargs(args, it, start_it, ref_model))
                 ppo_sec = round(time.time() - t_ppo, 1)
@@ -521,7 +521,10 @@ def main() -> None:
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "winRate": report["winRate"], "outcomes": report["outcomes"],
                     "samples": report["totalSamples"], "ticks": report["totalTicks"],
-                    "kills": report["totalKills"], "intentCounts": report["intentCounts"],
+                    "kills": report["totalKills"],
+                    # goal 模式无意图动作分布；动作分布字段名统一 intentCounts（goal 下为空表）。
+                    "intentCounts": report.get("intentCounts")
+                    if not args.goal else report.get("actionCounts"),
                     # v7 诊断（HTML 报告 score_mean/baseIntegrity 列）。
                     "score_mean": ss.get("mean") if ss else None,
                     "baseIntegrity": dm.get("baseIntegrity"),
