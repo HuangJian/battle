@@ -113,7 +113,9 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     # ~90% rollout 被丢弃、整轮空等 1800s 窗口。意图 RL 改用「单波覆盖整缓冲」语义：
     # 大 wave_games（>每轮局数）→ 全量 140 局合成 1 波训完（均属 W(N) 同策略、完全
     # on-policy），cum_kl ~0.15 远低于放宽后的 Intent 上限，不再半途 halt。
-    if getattr(args, "intent_rollout", False):
+    if getattr(args, "intent_rollout", False) or getattr(args, "goal_rollout", False):
+        # 意图/goal 同为 semi-MDP 小步数采样：单波覆盖整缓冲语义（goal 单局步数更少，
+        # 同样不能让 per-tick 的小 wave 阈值把采集器饿死）。
         kl_cap = float(policy.get("streamKlCapIntent", kl_cap))
         wave_games = max(4, int(policy.get("streamWaveGamesIntent", wave_games)))
     # 残局感知：本轮最多会到账多少新结算（计划 − 已在盘）。断点续跑常剩个位数

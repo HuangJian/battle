@@ -105,7 +105,7 @@ def export_goal_weights(model: GoalNet, out_path: str) -> None:
     from weights_io import save_weights_json
 
     sd = model.state_dict()
-    ref = StudentNet().state_dict()
+    ref = StudentNet(h=model.h, d=model.d).state_dict()
     missing = [k for k in ref if k not in sd]
     shape_mismatch = [k for k in ref if k in sd and tuple(sd[k].shape) != tuple(ref[k].shape)]
     if missing or shape_mismatch:

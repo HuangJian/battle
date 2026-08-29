@@ -46,6 +46,7 @@ from pathlib import Path
 import torch
 
 import ppo_intent
+import ppo_goal
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -155,7 +156,8 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     cmd = [bun, "tools/sim/m1-eval.ts",
            "--stages", "all", "--seeds", f"1-{seeds}",
            "--difficulty", args.difficulty,
-           "--policy", "intent-exec", "--intent-weights", rl_path,
+           "--policy", "goal" if args.goal else "intent-exec",
+           "--goal-weights" if args.goal else "--intent-weights", rl_path,
            "--dist-nodes", "nn-training/rl-config.json",
            "--workers", str(max(2, min(8, args.workers)))]
     attempts = 0
@@ -299,9 +301,22 @@ def main() -> None:
                     help="stdout 落盘路径（json intent_rl.out_log；CLI 覆盖；空=仅控制台）。Tee 控制台+文件。")
     ap.add_argument("--err-log", default=_d("err_log", "tmp/intent-rl/train.err.log"),
                     help="stderr 落盘路径（json intent_rl.err_log；CLI 覆盖；空=仅控制台）。Tee 控制台+文件。")
+    ap.add_argument("--goal", action="store_true",
+                    help="T7.2：goal 承诺步 RL（后端 ppo_goal + export-goal-rollout 采集器 + "
+                         "--policy goal 评估）。与意图 RL 共用主循环/熔断/巡检/断点续跑。")
+    ap.add_argument("--heartbeat", type=int, default=_d("heartbeat", 240),
+                    help="goal 承诺期 T ticks（--goal 时生效；json intent_rl.heartbeat）。")
+    ap.add_argument("--goal-coarse", action="store_true",
+                    help="T9a：169 路块级动作空间（logsumexp 聚合）。")
     args = ap.parse_args()
-    # 意图 rollout 语义透传给 rl.queue / rl.stream（intent_rollout 分支 + kind/replan）。
-    args.intent_rollout = True
+    if args.goal:
+        # T7.2 goal rollout 语义透传（kind='goal' + heartbeat/coarse）。
+        args.goal_rollout = True
+        args.intent_rollout = False
+        PPO = ppo_goal
+    else:
+        args.intent_rollout = True
+        PPO = ppo_intent
     # stdout/stderr 落盘（路径来自 json intent_rl.out_log/err_log，CLI 可覆盖调试）。
     _setup_log_redirect(args)
     # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
@@ -317,14 +332,17 @@ def main() -> None:
     # 权重初始化（幂等）：RL 权重不存在时从 B′ warm-start（value 头随机）。
     if not os.path.exists(args.out):
         log(f"init RL weights from B′ ({args.bc}) -> {args.out}")
-        subprocess.run([sys.executable, "nn-training/ppo_intent.py",
+        subprocess.run([sys.executable, "nn-training/ppo_goal.py" if args.goal else "nn-training/ppo_intent.py",
                         "--init-from", args.bc, "--out", args.out,
                         "--threads", str(max(1, min(8, args.workers)))],
                        cwd=str(REPO_ROOT), check=True, **_POPEN_NO_WINDOW)
 
     device = torch.device("cpu")
-    model = ppo_intent.build_rl_net(args.out)
-    ppo_intent.load_intent_weights(model, args.out)
+    model = PPO.build_rl_net(args.out)
+    if args.goal:
+        ppo_goal.load_goal_weights(model, args.out)
+    else:
+        ppo_intent.load_intent_weights(model, args.out)
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     log(f"model params={sum(int(p.numel()) for p in model.parameters())}")
@@ -332,8 +350,11 @@ def main() -> None:
     # kickstarting 参考策略：B′ 策略冻结快照（warmup 冻结主干+三头 → 策略与 B′ 一致）。
     ref_model = None
     if args.kickstart_kl > 0:
-        ref_model = ppo_intent.build_rl_net(args.out)
-        ppo_intent.load_intent_weights(ref_model, args.out)
+        ref_model = PPO.build_rl_net(args.out)
+        if args.goal:
+            ppo_goal.load_goal_weights(ref_model, args.out)
+        else:
+            ppo_intent.load_intent_weights(ref_model, args.out)
         for p in ref_model.parameters():
             p.requires_grad = False
         ref_model.eval()
@@ -407,7 +428,7 @@ def main() -> None:
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
                         model, opt, device, on_collect_done=None,
                         on_ppo_started=_fire_eval,
-                        backend=ppo_intent, update_kwargs=_update_kwargs(args, it, start_it,
+                        backend=PPO, update_kwargs=_update_kwargs(args, it, start_it,
                                                                          ref_model))
                     stream_meta = report
                 else:
@@ -448,10 +469,10 @@ def main() -> None:
 
             if stream_meta is None:
                 t_ppo = time.time()
-                episodes = ppo_intent.load_episodes_intent(str(traj_dir))
+                episodes = PPO.load_episodes(str(traj_dir))
                 total_steps = sum(e["obs"].shape[0] for e in episodes)
-                chunks = ppo_intent.chunk_episodes(episodes, args.mb)
-                agg = ppo_intent.ppo_update_intent(
+                chunks = PPO.chunk_episodes(episodes, args.mb)
+                agg = PPO.update(
                     model, opt, chunks, args.epochs, device, seed=args.seed,
                     ckpt_path=str(traj_dir / "ppo_ckpt"),
                     **_update_kwargs(args, it, start_it, ref_model))
@@ -459,7 +480,10 @@ def main() -> None:
                 chunks_n = len(chunks)
                 kl_cum = agg["kl"] if agg else None
 
-            ppo_intent.export_intent_weights(model, args.out)
+            if args.goal:
+                ppo_goal.export_goal_weights(model, args.out)
+            else:
+                ppo_intent.export_intent_weights(model, args.out)
             bak = backup_weights(args.out, it, prefix="intent-rl-weights")
             log(f"ppo it{it}: steps={total_steps} chunks={chunks_n} "
                 f"policy={agg['policy']:.4f} value={agg['value']:.4f} "

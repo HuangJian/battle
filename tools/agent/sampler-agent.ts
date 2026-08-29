@@ -330,6 +330,8 @@ async function runGame(
   kind = 'rollout',
   policy = 'nn',
   replan = 0,
+  heartbeat = 240,
+  goalCoarse = false,
 ): Promise<Buffer> {
   const ws = weightsByKind[kind]
   if (!ws) throw new Error(`no weights cached for kind=${kind}`)
@@ -341,6 +343,9 @@ async function runGame(
   // semi-MDP 采样，reward/dt/mask/inject 全变）——意图 RL 分布式 rollout。
   const isEval = mode === 'eval'
   const isIntentRollout = kind === 'intent' && !isEval
+  // T7.2：kind='goal' 且 mode='rollout' → export-goal-rollout.ts（goal 承诺步采样）。
+  // 心跳承诺期经 URL 参数 heartbeat 透传（缺省 240）；--coarse 由 URL 参数 goalCoarse=1。
+  const isGoalRollout = kind === 'goal' && !isEval
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
   fs.mkdirSync(gameDir, { recursive: true })
@@ -348,9 +353,11 @@ async function runGame(
     const args = [
       isEval
         ? 'tools/sim/export-eval-game.ts'
-        : isIntentRollout
-          ? 'tools/sim/export-intent-rollout.ts'
-          : 'tools/sim/export-rl-rollout.ts',
+        : isGoalRollout
+          ? 'tools/sim/export-goal-rollout.ts'
+          : isIntentRollout
+            ? 'tools/sim/export-intent-rollout.ts'
+            : 'tools/sim/export-rl-rollout.ts',
       '--weights',
       wfile,
       '--out',
@@ -370,6 +377,10 @@ async function runGame(
     } else {
       args.push('--stages', String(stage), '--seeds', String(seed))
       if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
+      if (isGoalRollout) {
+        args.push('--heartbeat', String(heartbeat))
+        if (goalCoarse) args.push('--coarse')
+      }
     }
     args.push(
       '--max-ticks',
@@ -444,10 +455,12 @@ function beginTask(
   kind = 'rollout',
   policy = 'nn',
   replan = 0,
+  heartbeat = 240,
+  goalCoarse = false,
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
-  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
+  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan, heartbeat, goalCoarse)
     .then((buf) => {
       lruPut(key, buf)
       gamesDoneTotal++
@@ -666,7 +679,20 @@ async function handle(req: Request): Promise<Response> {
       if (inflight.has(key)) return jsonResponse({ status: 'running', token: key }, 202)
       if (activeWorkers >= workers)
         return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
-      beginTask(key, iterId, stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
+      beginTask(
+        key,
+        iterId,
+        stage,
+        seed,
+        maxTicks,
+        difficulty,
+        mode,
+        kind,
+        policy,
+        replan,
+        parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
+        url.searchParams.get('goalCoarse') === '1',
+      )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
 
@@ -687,7 +713,18 @@ async function handle(req: Request): Promise<Response> {
             /* client gone */
           }
         }, 20_000)
-        runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan)
+        runGame(
+          stage,
+          seed,
+          maxTicks,
+          difficulty,
+          mode,
+          kind,
+          policy,
+          replan,
+          parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
+          url.searchParams.get('goalCoarse') === '1',
+        )
           .then((buf) => {
             if (hb) clearInterval(hb)
             lruPut(key, buf)

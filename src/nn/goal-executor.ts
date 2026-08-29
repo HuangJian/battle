@@ -331,7 +331,9 @@ export class GoalExecutor implements InputLike {
         this.pathReplanTimer = 0
       }
       // 同格续约（E4 心跳确认同一目标）：bornTick 重置 ⇒ 承诺期重新起算（E4 不抖动）；
-      // pursueSince 保留 ⇒ inject duration 连续增长；E5 位移计数同口径累计。
+      // pursueSince 保留 ⇒ inject duration 连续增长；dodgeTicks 重置 = "自上次重承诺起
+      // 累计"口径（否则 E5 同格续约会逐 tick 重触发）。
+      this.dodgeTicks = 0
       this.prevGoalRow = row
       this.prevGoalCol = col
       this.arrived = false

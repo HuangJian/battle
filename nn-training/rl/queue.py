@@ -78,7 +78,22 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
         log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
-        if getattr(args, "intent_rollout", False):
+        if getattr(args, "goal_rollout", False):
+            # T7.2 goal RL：goal 承诺步采样器（export-goal-rollout.ts，心跳承诺期）。
+            cmd = [
+                bun,
+                "tools/sim/export-goal-rollout.ts",
+                "--weights", rl_path,
+                "--out", str(wdir),
+                "--stages", str(si),
+                "--seeds", str(seed),
+                "--max-ticks", str(args.max_ticks),
+                "--difficulty", args.difficulty,
+                "--heartbeat", str(getattr(args, "heartbeat", 240)),
+            ]
+            if getattr(args, "goal_coarse", False):
+                cmd.append("--coarse")
+        elif getattr(args, "intent_rollout", False):
             # M8 意图 RL：意图步半 MDP 采样器（export-intent-rollout.ts，replan cadence）。
             cmd = [
                 bun,
@@ -213,7 +228,12 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     with open(rl_path, "rb") as f:
         weights_bytes = f.read()
     alive = []
-    wkind = "intent" if getattr(args, "intent_rollout", False) else "rollout"
+    if getattr(args, "goal_rollout", False):
+        wkind = "goal"
+    elif getattr(args, "intent_rollout", False):
+        wkind = "intent"
+    else:
+        wkind = "rollout"
     for nd in nodes:
         try:
             mode = dist_common.post_weights(nd["url"], nd["key"], iter_id, wver,
@@ -374,7 +394,16 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         next_idx[0] += 1
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
-        if getattr(args, "intent_rollout", False):
+        if getattr(args, "goal_rollout", False):
+            cmd = [bun, "tools/sim/export-goal-rollout.ts",
+                   "--weights", rl_path, "--out", str(wdir),
+                   "--stages", str(si), "--seeds", str(sd),
+                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
+                   "--heartbeat", str(getattr(args, "heartbeat", 240)),
+                   "--wver", wver, "--node-label", "local"]
+            if getattr(args, "goal_coarse", False):
+                cmd.append("--coarse")
+        elif getattr(args, "intent_rollout", False):
             cmd = [bun, "tools/sim/export-intent-rollout.ts",
                    "--weights", rl_path, "--out", str(wdir),
                    "--stages", str(si), "--seeds", str(sd),
