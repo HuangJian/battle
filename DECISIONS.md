@@ -1038,7 +1038,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 > （编号冲突：与 §293-intent「M4 完成」撞号，见头部「编号冲突注」；两者编号均被外部引用，保持不动）
 
-## 302. 追尾导航（pursuit-tail / 并入目标车道后方）— 三轮归档：用户规格的等待后并道（am=3）净 +29 为全程序最佳，仍噪声带内，维持 OFF _(STATUS 已被 §303 取代：2026-08-29 用户拍板启用，见下条)_(原 STATUS: 否决, 默认 0 = OFF, 2026-08-29)
+## 302. 追尾导航（pursuit-tail / 并入目标车道后方）— 三轮归档：用户规格的等待后并道（am=3）净 +29 为全程序最佳，仍噪声带内，维持 OFF _(STATUS 已被 §304 取代：2026-08-29 用户拍板启用，见下两条)_(原 STATUS: 否决, 默认 0 = OFF, 2026-08-29)
 
 > 全文 → docs/god-ai-tuning.progress.md §302（§1–6 一轮 modes 1–6；§7–8 二轮
 > mode 7；§9 三轮 AlongMode=3 三版）
@@ -1060,15 +1060,29 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > + `tmp/s302-diag21-30.ts`（tgtBlk/othBlk 逐 tick 诊断）留用；复核录像
 > `tmp/s302-replays3/`（全 MATCH ✓，含 s21@30 结局翻转 gameover→stageclear）。
 
-## 303. 启用追尾导航 — pursuitTailMode=7 + AlongMode=3 默认 ON（用户拍板，新纪元三件套完成）(STATUS: 已实施, 2026-08-29)
+
+## 303. 护卫出生卡墙 bug 修复 — baseSideSpawnCell 兜底不再落墙 + golden 重钉 b9a629e0（STATUS: 已实施, 2026-08-29）
+> **Bug**（用户报告）：使用基地护卫（天降神兵）道具时，护卫出生在基地砖墙上被卡死无法出击。
+> 根因：`SimulationEnemies.baseSideSpawnCell` 只扫基地两侧固定列各 5 行候选，全阻塞时
+> 兜底直接返回 `(col, baseRow)`——即基地墙环砖所在格；普通关卡基地环砖即触发
+> （新增回归测试在未改动的 stage0 上即红）。
+> **修复**：候选序 = 请求侧列（贴基地 4 行）→ 对侧列 → 同列向上直扫 → 全场最近空位
+> （偏好请求侧）；`isFreeSpawnCell` 统一 bounds/terrain/tank 三查，任何路径不再返回阻塞格。
+> **判定**：仿真行为变化 → `freeze:check` 翻红（预期显式判定，非 God-AI 决策逻辑改动），
+> golden 重钉 `20784637c6…` → `b9a629e0e2…`（21 组合，109,325 签名行），门回绿。
+> **配套**：按 owner 指令仅重跑 hard 60-seed 基线（classic/chaos 未动，见 Part 0.A.2）。
+> **测试**：`tests/guard-ally.test.ts` 新增 2 条（基地两侧全砖 / 普通关卡，出生格必无阻塞、不叠tank）。
+> **记录**：docs/god-ai-tuning.progress.md Part 0.A.2（golden 重钉 + hard 基线对比）。
+
+## 304. 启用追尾导航 — pursuitTailMode=7 + AlongMode=4 默认 ON（用户拍板，新纪元三件套完成；同日 am=4 增补见 dated note）(STATUS: 已实施, 2026-08-29)
 
 > 用户决策：净 +29 已足够好，启用。随后按 §6.3b 完成新纪元三件套：
 > ①本条目；②冻结签名 golden 重钉 `7b2e5097…`（tools/det-golden.v1.sha256，
 > 采集于启用后）；③score-gate TRUTH_SCORES 第五次重捕获 + 三难度 60-seed
-> eval-suite v7 基线（docs/god-ai-tuning.progress.md §303）。
+> eval-suite v7 基线（docs/god-ai-tuning.progress.md §304）。
 >
 > **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 4`（yield-then-tail 状态机
-> + 锁定目标键控 + T2a 滑行抢占；语义见 §302/progress §9/§303）。**classic 经
+> + 锁定目标键控 + T2a 滑行抢占；语义见 §302/progress §9/§304）。**classic 经
 > CLASSIC_OVERRIDES 保持 0 = 字节不变**（instant 1-HP 池未 A/B，复刻一致性门槛）；
 > **chaos 继承默认 = ON**。
 >

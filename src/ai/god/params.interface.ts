@@ -2435,7 +2435,7 @@ export interface GodAIParams {
    * the ram); the user directive is to wait, not to cut in early.
    * 4 = 3 + sticky locked-target keying (pursuitTailTargetCell) + T2a slide
    * preemption (pursuitTailSlideDir) — paired net +20 over 3 on hard 35×60;
-   * SHIPPED default (DECISIONS §303). See Navigator.pursuitTailDirImpl.
+   * SHIPPED default (DECISIONS §304). See Navigator.pursuitTailDirImpl.
    */
   pursuitTailAlongMode: number
 }
@@ -2525,6 +2525,6 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
     gate: 'dualCentralBreachP2Patrol',
     note: 'dual P2 patrol 导航 (+ PatrolRow) (§177 实测回退; 2026-08-26 盘点补登记)',
   },
-  // §302 pursuitTailMode 已于 2026-08-29 启用（DECISIONS §303, AlongMode=3
+  // §302 pursuitTailMode 已于 2026-08-29 启用（DECISIONS §304, AlongMode=3
   // 净 +29），移出归档组；机制与诊断字段留在测试钉内。
 ]

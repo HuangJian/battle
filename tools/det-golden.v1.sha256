@@ -1,10 +1,8 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-08-29 @ §302 追尾导航启用纪元 am=4（DECISIONS §303 dated note；
-#       pursuitTailMode=7 + pursuitTailAlongMode=4 默认 ON，classic 经
-#       CLASSIC_OVERRIDES 保持 0 字节不变）。am=4 = am=3 状态机 + 锁定目标
-#       键控 + T2a 滑行抢占（配对净 +20）。
-#       配套重钉：score-gate TRUTH_SCORES 第六次重捕获 + 三难度 60-seed 基线
-#       （eval-suite v7）。
+# 采集：2026-08-29 @ 合并重钉（merge of 护卫出生修复 §303 + 追尾导航启用 §304）。
+#       双方行为变更同源合并：§303 baseSideSpawnCell 兜底不再落墙（原钉 b9a629e0…）
+#       + §304 pursuitTailMode=7/AlongMode=4（原钉 91faa793…，am=4 纪元）。
+#       合并后签名两边旧钉均失效，本哈希为合并代码实测（97,696 签名行，21 组合）。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-91faa79379076174c588912c196f2e3f7959c2706879260e4194325f1c8962f9
+c2c25cdb32819c65dde4a931800e561011623b4011a98be344bc21cbd0477bd7

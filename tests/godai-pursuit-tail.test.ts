@@ -7,7 +7,7 @@
 // at a sliding target. The §302 knob steers the player onto the target's lane
 // instead.
 //
-// ⚠️ ENABLED 2026-08-29 (DECISIONS §303) — `pursuitTailMode: 7` +
+// ⚠️ ENABLED 2026-08-29 (DECISIONS §304; renumbered from §303 on merge — the remote guard-fix commit had taken §303) — `pursuitTailMode: 7` +
 // `pursuitTailAlongMode: 4` ships ON: the user-directed yield-then-tail
 // redesign reached net +29 on hard 35×60, then the am=4 add-on (sticky
 // locked-target keying + T2a slide preemption) added a paired net +20 over
@@ -99,7 +99,7 @@ function travelling(enemy: Tank, col: number, row: number, axis: 'up' | 'right')
 const ON = { pursuitTailMode: 2 }
 const ISOLATED = { chokepointMode: 0, baseGuardAnchorMode: 0 }
 
-describe('§302: pursuit-tail ships ON (DECISIONS §303)', () => {
+describe('§302: pursuit-tail ships ON (DECISIONS §304)', () => {
   it('DEFAULT is mode 7 + AlongMode=3 and NOT in ARCHIVED_KNOB_GROUPS', () => {
     expect(DEFAULT_GOD_AI_PARAMS.pursuitTailMode).toBe(7)
     expect(DEFAULT_GOD_AI_PARAMS.pursuitTailAlongMode).toBe(4)
