@@ -36,7 +36,7 @@ import { AdaptiveSimWorkerPool, physicalCores } from './sim-pool'
 import type { SimTask } from './sim-worker'
 import { gzipSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { unpackContainer } from './pack-container'
 import {
   scoreRun,
@@ -50,6 +50,8 @@ import {
   type StageAggregate,
 } from '../eval/godai-score'
 import { writeScorecardHtml, type ScorecardRow, type ScorecardSuite } from './scorecard-html'
+import { TailRaceBatch } from '../lib/hybrid-batch'
+import { BatchLedger, ledgerKey } from '../lib/batch-ledger'
 
 /** The 11 scored dimensions of the God AI score-v7 model (design §3). */
 const DIM_KEYS: DimensionKey[] = [
@@ -85,8 +87,14 @@ async function main(): Promise<void> {
   const seedSpec = arg('seeds', '1-10')!
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const policy =
-    (arg('policy', 'nn') as 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal') ??
-    'nn'
+    (arg('policy', 'nn') as
+      | 'god'
+      | 'nn'
+      | 'intent'
+      | 'intent-exec'
+      | 'intent-oracle'
+      | 'goal'
+      | 'goal-god') ?? 'nn'
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
   const goalWeights = arg('goal-weights')
@@ -171,6 +179,111 @@ async function main(): Promise<void> {
     }
   }
 
+  // ---- v4.1 逐局账本：断点续跑 + 错误局重跑（rollout resume 机制的 TS 提取）----
+  // wver 覆盖"影响结果的全部输入"（权重字节 / 无权重策略的占位）；权重变更或
+  // 代码变更（--fresh）都会使旧账本条目不计入 done。
+  const noFresh = arg('fresh') === undefined
+  let wverBytes: Buffer | null = null
+  if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
+  else if (policy === 'intent-exec' && intentWeights) wverBytes = readFileSync(intentWeights)
+  else if (policy === 'god' || policy === 'goal-god') wverBytes = Buffer.from('{}')
+  const wver = wverBytes ? createHash('sha256').update(wverBytes).digest('hex') : `local-${policy}`
+  const ledger = noFresh ? new BatchLedger(`${outPath}.ledger.jsonl`, wver) : null
+  const ledgerDone = ledger ? ledger.loadDone() : new Map()
+  const milestone: Record<string, boolean> = {}
+
+  const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
+  const tasksTodo: SimTask[] = []
+  for (const t of tasks) {
+    const key = ledgerKey(t.stageIndex ?? 0, t.seed)
+    const done = ledgerDone.get(key)
+    if (done) {
+      results[t.id] = {
+        id: t.id,
+        ok: done.ok,
+        outcome: done.outcome,
+        ticks: done.ticks,
+        killCount: done.killCount,
+        baseAlive: done.baseAlive,
+      }
+    } else {
+      tasksTodo.push(t)
+    }
+  }
+  if (ledgerDone.size > 0) {
+    process.stderr.write(
+      `[m1-eval] ledger resume: ${ledgerDone.size}/${tasks.length} already settled (wver=${wver.slice(0, 12)}) — running ${tasksTodo.length}\n`,
+    )
+  }
+
+  /** 单局结算（含账本追加；results 按任务 id 归位）。 */
+  const onSettleOne = (t: SimTask, res: import('./sim-worker').SimTaskResult): void => {
+    results[t.id] = res
+    ledger?.append({
+      wver,
+      stage: t.stageIndex ?? 0,
+      seed: t.seed,
+      ok: res.ok === true,
+      outcome: res.outcome,
+      ticks: res.ticks ?? 0,
+      killCount: res.killCount,
+      baseAlive: res.baseAlive === true,
+    })
+  }
+
+  /** 一轮分派（断点续跑子集/重跑子集都走同一入口）。 */
+  const runOnce = async (batchTasks: SimTask[]): Promise<void> => {
+    const base = results.filter(Boolean).length
+    const progress = (d: number, tot: number): void => {
+      reportProgress(base + d, tasks.length)
+      // 里程碑快照（巡航口径）：每过 25% 落一份已结算局清单（机器可读）。
+      const pct = (base + d) / tasks.length
+      const mk = [0.25, 0.5, 0.75].find((m) => !milestone[String(m)] && pct >= m)
+      if (mk !== undefined) {
+        milestone[String(mk)] = true
+        const rows = results.flatMap((r, i) =>
+          r
+            ? {
+                stage: tasks[i].stageIndex,
+                seed: tasks[i].seed,
+                ok: r.ok,
+                outcome: r.outcome,
+                ticks: r.ticks,
+                kills: r.killCount,
+              }
+            : [],
+        )
+        writeFileSync(
+          `${outPath}.partial.json`,
+          JSON.stringify({ done: base + d, total: tasks.length, rows }, null, 2),
+        )
+      }
+      void tot
+    }
+    if (distNodesPath) {
+      await runHybrid(
+        batchTasks,
+        distNodesPath,
+        distLocal,
+        iterId,
+        weightsArg,
+        distKind,
+        progress,
+        (i, res) => onSettleOne(batchTasks[i], res),
+      )
+    } else {
+      const pool = new AdaptiveSimWorkerPool(workers, 1)
+      pool.setAdjustHook((desired, load) => {
+        process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
+      })
+      const sub = await pool.runAdaptive(batchTasks, progress, { fixed: fixedWorkers > 0 })
+      for (const r of sub) {
+        const t = batchTasks.find((x) => x.id === r.id)
+        if (t) onSettleOne(t, r)
+      }
+    }
+  }
+
   // Staged progress reporter (to stderr, so stdout stays clean JSON).
   // Prints ~20 waypoints + a final 100% line — no blind waiting.
   const totalGames = tasks.length
@@ -194,9 +307,7 @@ async function main(): Promise<void> {
     )
   }
 
-  // v3.8：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
-  // 本机 worker 同时并行参与（--dist-local 控制本机并发，0=纯远端；缺省全核）。
-  // dist 白名单（T8.5：NN 前向重的策略适合外派）——表驱动，新增策略在此扩一行。
+  // v4.0 auto-dist：策略可分发（在白名单内）且配置存在 ⇒ 混合分派；否则纯本地回落。
   // kind='none'：无权重策略（god/goal-god），上传占位桶满足 agent 的 wver 协议。
   const DIST_POLICIES: Record<string, 'intent' | 'goal' | 'none'> = {
     'intent-exec': 'intent',
@@ -204,15 +315,14 @@ async function main(): Promise<void> {
     god: 'none',
     'goal-god': 'none',
   }
-  let results: import('./sim-worker').SimTaskResult[]
+  const distKind = DIST_POLICIES[policy]
+  if (distNodesPath && !distKind) {
+    process.stderr.write(
+      `[m1-eval] policy ${policy} is not dispatchable (${Object.keys(DIST_POLICIES).join('|')}) — running local only\n`,
+    )
+    distNodesPath = ''
+  }
   if (distNodesPath) {
-    const distKind = DIST_POLICIES[policy]
-    if (!distKind) {
-      process.stderr.write(
-        `[m1-eval] --dist-nodes requires --policy ${Object.keys(DIST_POLICIES).join('|')}\n`,
-      )
-      process.exit(2)
-    }
     if (distKind === 'intent' && !intentWeights) {
       process.stderr.write(
         '[m1-eval] --dist-nodes --policy intent-exec requires --intent-weights\n',
@@ -223,27 +333,25 @@ async function main(): Promise<void> {
       process.stderr.write('[m1-eval] --dist-nodes --policy goal requires --goal-weights\n')
       process.exit(2)
     }
-    // kind='none'：上传占位（agent 按 wver 协议缓存桶；god/goal-god 不读权重文件）
-    const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
-    results = await runHybrid(
-      tasks,
-      distNodesPath,
-      distLocal,
-      iterId,
-      distKind === 'goal'
-        ? (goalWeights as string)
-        : distKind === 'intent'
-          ? (intentWeights as string)
-          : '', // 'none'：runHybrid 内部用占位字节
-      distKind,
-      reportProgress,
-    )
-  } else {
-    const pool = new AdaptiveSimWorkerPool(workers, 1)
-    pool.setAdjustHook((desired, load) => {
-      process.stderr.write(`[m1-eval] concurrency ${desired} (cpu ${load}%)\n`)
-    })
-    results = await pool.runAdaptive(tasks, reportProgress, { fixed: fixedWorkers > 0 })
+  }
+  const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
+  const weightsArg =
+    distKind === 'goal'
+      ? (goalWeights as string)
+      : distKind === 'intent'
+        ? (intentWeights as string)
+        : '' // 'none'：runHybrid 内部用占位字节
+  // 错误局重跑（rollout clean-eval 的 CLEAN_EVAL_MAX_RETRY 语义）：错误局最多再跑 2 次。
+  let todo = tasksTodo
+  for (let attempt = 0; attempt <= 2 && todo.length > 0; attempt++) {
+    if (attempt > 0) {
+      process.stderr.write(
+        `[m1-eval] error-game rerun attempt ${attempt}: ${todo.length} games
+`,
+      )
+    }
+    await runOnce(todo)
+    todo = tasks.filter((t) => results[t.id] && results[t.id]!.ok === false)
   }
   const simSeconds = (Date.now() - t0) / 1000
   process.stderr.write(
@@ -488,6 +596,7 @@ async function runHybrid(
   weightsPath: string,
   distKind: 'intent' | 'goal' | 'none' = 'intent',
   onProgress: (done: number, total: number) => void,
+  onSettle?: (i: number, res: import('./sim-worker').SimTaskResult) => void,
 ): Promise<import('./sim-worker').SimTaskResult[]> {
   const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
   const nodes = (cfg.nodes ?? []).filter((n) => n.enabled !== false && n.url)
@@ -505,8 +614,6 @@ async function runHybrid(
   const wver = createHash('sha256').update(bytes).digest('hex')
 
   const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
-  let next = 0 // 共享游标：同步读改写，事件循环内无竞态
-  let done = 0
   const total = tasks.length
   const fail = (id: number): import('./sim-worker').SimTaskResult => ({
     id,
@@ -516,21 +623,18 @@ async function runHybrid(
     killCount: 0,
     baseAlive: false,
   })
+  // v4.1 调度状态机（rollout queue v3.7 机制的 TS 提取，tools/lib/hybrid-batch.ts）：
+  // 共享游标 + 尾部 fan-out 竞速（先结算者胜）+ 幂等结算。
+  const batch = new TailRaceBatch(total)
+  let done = 0
   const settle = (i: number, res: import('./sim-worker').SimTaskResult): void => {
+    if (!batch.settle(i)) return // 幂等：竞速副本后到即弃
     results[i] = res
     done++
     onProgress(done, total)
+    onSettle?.(i, res)
   }
-
-  // v3.9 动态节点发现：build 期不再用固定 Promise.all 收尾——改为计数式，
-  // 中途 spawn 的新 fetch-loop `pending++`，全部 loop 结束归零后 resolve。
-  let pending = 0
-  let resolveAll: () => void = () => {}
-  const allDone = new Promise<void>((r) => (resolveAll = r))
-  const finishLoop = (): void => {
-    pending--
-    if (pending <= 0) resolveAll()
-  }
+  const allDone = batch.whenAll()
 
   // 已激活节点（按 url 去重）：初始节点 + rescan 中途加入的节点。
   const activeNodes = new Set<string>()
@@ -564,12 +668,13 @@ async function runHybrid(
   // 远端 fetch-loop：单条并发链，精确占用节点容量。返回后 pending--。
   const spawnNode = (node: DistNodeCfg): void => {
     const cap = Math.max(1, node.concurrency ?? 4)
+    batch.consumer(cap)
     for (let s = 0; s < cap; s++) {
-      pending++
       ;(async (): Promise<void> => {
         try {
           for (;;) {
-            const i = next++
+            const i = batch.claim(batch.hasInflight)
+            if (i < 0) return
             if (i >= total) return
             const task = tasks[i]
             const url =
@@ -624,7 +729,7 @@ async function runHybrid(
             if (!ok) settle(i, fail(task.id))
           }
         } finally {
-          finishLoop()
+          batch.finishConsumer()
         }
       })()
     }
@@ -636,7 +741,8 @@ async function runHybrid(
       const run = async (): Promise<void> => {
         try {
           for (;;) {
-            const i = next++
+            const i = batch.claim(batch.hasInflight)
+            if (i < 0) return
             if (i >= total) return
             const task = tasks[i]
             const res = await new Promise<import('./sim-worker').SimTaskResult>((r) => {
@@ -653,7 +759,7 @@ async function runHybrid(
           }
         } finally {
           worker.terminate()
-          finishLoop()
+          batch.finishConsumer()
         }
       }
       void run().then(resolve)
@@ -662,7 +768,7 @@ async function runHybrid(
   // 本地 worker-loop：每个 worker 串行消费，独占一条并发链。
   const WORKER_URL = new URL('./sim-worker.ts', import.meta.url).href
   for (let w = 0; w < localCap; w++) {
-    pending++
+    batch.consumer(1)
     void spawnLocal()
   }
   for (const node of nodes) {
@@ -675,15 +781,11 @@ async function runHybrid(
   ;(async (): Promise<void> => {
     await Promise.resolve()
     setTimeout(() => {
-      if (pending <= 0 && next < total) {
+      if (batch.pendingConsumers <= 0 && batch.done < total) {
+        const failed = batch.failUnsettled()
         process.stderr.write(
-          `[m1-eval] no consumer available (local ${localCap}, ${activeNodes.size}/${nodes.length} nodes) — failing ${total - next} remaining tasks\n`,
+          `[m1-eval] no consumer available (local ${localCap}, ${activeNodes.size}/${nodes.length} nodes) — failing ${failed.length} remaining tasks\n`,
         )
-        while (next < total) {
-          const i = next++
-          settle(i, fail(tasks[i].id))
-        }
-        resolveAll()
       }
     }, 2500)
   })().catch(() => {})
@@ -700,7 +802,7 @@ async function runHybrid(
   let rescanTimer: ReturnType<typeof setInterval> | undefined
   if (rescanSec > 0) {
     const scan = async (): Promise<void> => {
-      if (next >= total) return // 已派完，无需再发现
+      if (batch.done >= total) return // 已派完，无需再发现
       let fresh: { nodes?: DistNodeCfg[] } | null = null
       try {
         fresh = JSON.parse(readFileSync(nodesPath, 'utf8'))

@@ -1124,6 +1124,10 @@ T9/T9a 配对差门以新基线判定。
 1. T7 TS 侧保留 intent 头加载能力（§14.3 it38 重评依赖；"删"落在 GoalNet 定义/权重 JSON）
 2. 热图头 golden 容差按 §T7.3 预案降级 1e-3（TS mul+add vs torch FMA 舍入差 1.068e-4）
 3. 可满足性校验 = top-K(6) 首个 travelEst≤T；全不可满足强制提交 argmax（telemetry 'unsat'）
+   —— ⚠️ **2026-08-29 修订（T9a 归因，commit `b84c012`）**：该语义造成**移动拴绳**
+   （T=240≈10 格；到达首个目标后更远目标被永久拒绝，而 E4 是续约非放弃 ⇒ 冻结，
+   实测 989 tick/5 格）。改为**只拒绝不可达**（travelEst=∞），T 只管重评估节奏；
+   手册 §6.1.1 规格正文已同步。
 4. E4 同格续约：bornTick 重置 + pursueSince 独立累计（inject duration 连续）+ dodgeTicks 重置
 5. 重选失败冷却 30 tick（防全遮情形逐 tick 重前向）
 6. 采样分布 = softmax(热图) 限可达格（λ·k 只进执行 argmax，不进采样分布；与 §T9a.1b 一致）
