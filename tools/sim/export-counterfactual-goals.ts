@@ -47,6 +47,7 @@ import { cloneWorld, restoreWorld } from '../../src/snapshot/WorldSerializer'
 import { RNG } from '../../src/utils/RNG'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync } from 'node:fs'
+import { WorkerPool, defaultWorkerCount } from '../lib/worker-pool'
 import type { Tank } from '../../src/types'
 
 const MAX_TICKS = 36000
@@ -62,9 +63,11 @@ const W_ENEMIES = 2.0
 export interface CfDecision {
   tick: number
   candidates: number[] // cell idx（含 padding 前的实际数 ≤ K）
+  srcs: number[] // 候选来源（CAND_SRC）
   ks: number[]
-  scores: number[]
-  engage: number
+  /** 每窗口的分数（windows[i] → scores[i]；单分支多检查点，RNG 连续） */
+  scoresW: number[][]
+  engageW: number[]
 }
 
 export interface CfGameResult {
@@ -72,6 +75,7 @@ export interface CfGameResult {
   obs: Uint8Array[] // 每决策点的 obs 拷贝
   scalars: Float32Array[]
   injects: Float32Array[] // 每决策点的 §8.1.1 自馈注入态
+  windows: number[]
   outcome: string
   ticks: number
   /** 候选集覆盖率诊断（§11.4）：被截掉的数量统计 */
@@ -126,29 +130,44 @@ function dirDelta(dir: string): { dc: number; dr: number } {
  * 其余按 score = −dist(godTarget) + LOS + (1−basePressure) 降序取 top-(K−2)，
  * 平局取索引最小。全部候选过顶点合法性 + 可达性（k ≠ UNREACH）过滤。
  */
+/** 候选来源（H 扫描三判据 + 覆盖率归因）：godTarget/current/enemyRear/brick/anchor/midpoint。 */
+export const CAND_SRC = {
+  GOD_TARGET: 0,
+  CURRENT: 1,
+  ENEMY_REAR: 2,
+  BRICK: 3,
+  ANCHOR: 4,
+  MIDPOINT: 5,
+} as const
+
 export function generateCandidates(
   world: World,
   god: GodAIInput,
   masker: ReachMasker,
   K: number,
-): { cells: number[]; truncated: number; total: number } {
+): { cells: number[]; srcs: number[]; truncated: number; total: number } {
   const pc = playerVertex(world)
   const startValid = masker.compute(world.tileMap, pc.col, pc.row)
   const k = masker.k
   const seen = new Set<number>()
   const reserved: number[] = []
-  const pool: Array<{ cell: number; score: number }> = []
+  const reservedSrc: number[] = []
+  const pool: Array<{ cell: number; src: number; score: number }> = []
   let total = 0
 
-  const push = (col: number, row: number, reserved_: boolean): void => {
+  const push = (col: number, row: number, reserved_: boolean, src = 0): void => {
     if (col < 0 || col + 1 >= GRID || row < 0 || row + 1 >= GRID) return
     const idx = row * GRID + col
     total++
     if (!startValid || k[idx] === UNREACH) return
     if (seen.has(idx)) return
     seen.add(idx)
-    if (reserved_) reserved.push(idx)
-    else pool.push({ cell: idx, score: 0 })
+    if (reserved_) {
+      reserved.push(idx)
+      reservedSrc.push(src)
+    } else {
+      pool.push({ cell: idx, src, score: 0 })
+    }
   }
 
   // ① God-AI 导航目标（保底；_navCache 未命中时用移动方向投影 4 格）。
@@ -163,10 +182,10 @@ export function generateCandidates(
       tc = pc.col + d.dc * 4
       tr = pc.row + d.dr * 4
     }
-    push(tc, tr, true)
+    push(tc, tr, true, CAND_SRC.GOD_TARGET)
   }
   // ② 当前格（基线）。
-  push(pc.col, pc.row, true)
+  push(pc.col, pc.row, true, CAND_SRC.CURRENT)
 
   // ③ 敌人后方 1–2 格（§11.2 缺陷③直击；≤4 敌 × 2 深度）。
   const tanks = world.allTanks
@@ -187,7 +206,7 @@ export function generateCandidates(
     const ec = enemyCell(e)
     const d = dirDelta(e.dir)
     for (const depth of [1, 2]) {
-      push(ec.col - d.dc * depth, ec.row - d.dr * depth, false)
+      push(ec.col - d.dc * depth, ec.row - d.dr * depth, false, CAND_SRC.ENEMY_REAR)
     }
   }
 
@@ -210,23 +229,24 @@ export function generateCandidates(
       // 朝玩家的邻格（坦克站位于砖前开火）
       const dc = Math.sign(pc.col - b.col)
       const dr = Math.sign(pc.row - b.row)
-      if (Math.abs(b.row - pc.row) >= Math.abs(b.col - pc.col)) push(b.col, b.row + dr, false)
-      else push(b.col + dc, b.row, false)
+      if (Math.abs(b.row - pc.row) >= Math.abs(b.col - pc.col))
+        push(b.col, b.row + dr, false, CAND_SRC.BRICK)
+      else push(b.col + dc, b.row, false, CAND_SRC.BRICK)
     }
   }
 
   // ⑤ 基地防御锚点（§9.2 蒸馏为候选）。
   {
     const anchor = computeBaseGuardAnchorImpl(god)
-    if (anchor) push(anchor.col, anchor.row, false)
+    if (anchor) push(anchor.col, anchor.row, false, CAND_SRC.ANCHOR)
     const def = getDefaultDefensePositionImpl(god)
-    push(def.col, def.row, false)
+    push(def.col, def.row, false, CAND_SRC.ANCHOR)
   }
 
   // ⑥ 路径中点（折返/截断；player→base 走行距离场路径长 ≥6 才取）。
   {
     const mid = pathMidpoint(world, pc)
-    if (mid) push(mid.col, mid.row, false)
+    if (mid) push(mid.col, mid.row, false, CAND_SRC.MIDPOINT)
   }
 
   // top-(K−2) 确定性排序（§11.4）：−dist(godTarget) + LOS + (1−basePressure)，等权。
@@ -244,7 +264,9 @@ export function generateCandidates(
   pool.sort((a, b) => b.score - a.score || a.cell - b.cell)
   const topK = pool.slice(0, Math.max(0, K - 2))
   const truncated = pool.length - topK.length
-  return { cells: [...reserved, ...topK.map((c) => c.cell)].slice(0, K), truncated, total }
+  const cells = [...reserved, ...topK.map((c) => c.cell)].slice(0, K)
+  const srcs = [...reservedSrc, ...topK.map((c) => c.src)].slice(0, K)
+  return { cells, srcs, truncated, total }
 }
 
 function pathMidpoint(
@@ -319,10 +341,17 @@ export function runCounterfactualGame(
   stage: unknown,
   seed: number,
   difficulty: string,
-  opts: { replan?: number; window?: number; K?: number; maxTicks?: number } = {},
+  opts: {
+    replan?: number
+    window?: number
+    windows?: number[]
+    K?: number
+    maxTicks?: number
+  } = {},
 ): CfGameResult {
   const replan = opts.replan ?? 30
-  const H = opts.window ?? 120
+  const windows = opts.windows ?? [opts.window ?? 120]
+  const H = Math.max(...windows)
   const K = opts.K ?? 12
   const maxTicks = opts.maxTicks ?? MAX_TICKS
 
@@ -406,8 +435,7 @@ export function runCounterfactualGame(
 
     // 分支 rollout（§T6.1b：每分支一次 clone/restore）。
     const snap = cloneWorld(world)
-    const scores: number[] = []
-    const enemies0 = countEnemies(world)
+    const scoresW: number[][] = windows.map(() => [])
     for (const cell of cands.cells) {
       restoreWorld(world, snap)
       const branch = new GoalExecutor(world, {
@@ -417,47 +445,52 @@ export function runCounterfactualGame(
       })
       sim.input = branch as unknown as GodAIInput
       branch.reset()
-      // 分支前基线
+      // 分支起点基线（restore 后的状态）
       const phi0 = basePressure(world)
+      const enemiesB = countEnemies(world)
       let kills = 0
       let deaths = 0
       let wallLoss = 0
       let wallNow = countBaseWall(world)
       let h = 0
-      while (h < H) {
-        sim.tick()
-        branch.endFrame()
-        h++
-        for (const e of world.consumeEvents()) {
-          if (e.type === 'tank_destroyed') {
-            if (e.by === 'player') kills++
-            if ((e.tank as Tank | undefined)?.isPlayer) deaths++
-          } else if (e.type === 'terrain_destroyed') {
-            // 环墙损失在任何分支都计（候选比较口径一致）
+      let dead = false
+      for (let wi = 0; wi < windows.length; wi++) {
+        const target = windows[wi]
+        while (h < target && !dead) {
+          sim.tick()
+          branch.endFrame()
+          h++
+          for (const e of world.consumeEvents()) {
+            if (e.type === 'tank_destroyed') {
+              if (e.by === 'player') kills++
+              if ((e.tank as Tank | undefined)?.isPlayer) deaths++
+            }
           }
+          const w = countBaseWall(world)
+          if (w < wallNow) {
+            wallLoss += wallNow - w
+            wallNow = w
+          }
+          if (world.state !== 'playing') dead = true
         }
-        const w = countBaseWall(world)
-        if (w < wallNow) {
-          wallLoss += wallNow - w
-          wallNow = w
-        }
-        if (world.state !== 'playing') break
+        // 检查点打分（终局后各窗口共享终局口径）
+        const phi1 = basePressure(world)
+        const enemies1 = countEnemies(world)
+        scoresW[wi].push(
+          W_KILL * kills +
+            W_DEATH * deaths +
+            W_WALL * wallLoss +
+            W_PRESSURE * (phi0 - phi1) +
+            W_ENEMIES * (enemiesB - enemies1),
+        )
       }
-      const phi1 = basePressure(world)
-      const enemies1 = countEnemies(world)
-      scores.push(
-        W_KILL * kills +
-          W_DEATH * deaths +
-          W_WALL * wallLoss +
-          W_PRESSURE * (phi0 - phi1) +
-          W_ENEMIES * (enemies0 - enemies1),
-      )
     }
     restoreWorld(world, snap)
     sim.input = god as unknown as GodAIInput
 
-    // 自馈态推进：prevGoal ← 本决策 argmax 候选（软目标的峰）。
+    // 自馈态推进：prevGoal ← 本决策 argmax 候选（最后一档窗口的软目标峰）。
     {
+      const scores = scoresW[scoresW.length - 1]
       let bestJ = 0
       for (let j = 1; j < cands.cells.length; j++) {
         if (scores[j] > scores[bestJ]) bestJ = j
@@ -474,18 +507,20 @@ export function runCounterfactualGame(
       prevArrived = arrivedNow
     }
 
-    // engage 标签（§8.3.2）：max(s) − s(当前格) > ε=0。当前格必在候选集（§11.2）。
+    // engage 标签（§8.3.2）：max(s) − s(当前格) > ε=0，逐窗口。当前格必在候选集（§11.2）。
     const pcNow = playerVertex(world)
     const curIdx = pcNow.row * GRID + pcNow.col
     const curPos = cands.cells.indexOf(curIdx)
-    const curScore = curPos >= 0 ? scores[curPos] : -Infinity
-    const maxScore = Math.max(...scores)
-    const engage = maxScore - curScore > 0 ? 1 : 0
+    const engageW = scoresW.map((scores) => {
+      const curScore = curPos >= 0 ? scores[curPos] : -Infinity
+      const maxScore = Math.max(...scores)
+      return maxScore - curScore > 0 ? 1 : 0
+    })
 
     // 候选 k 值（§9.4.3：shard 必存 k_i）。
     const ks = cands.cells.map((cell) => masker.k[cell])
 
-    decisions.push({ tick: t, candidates: cands.cells, ks, scores, engage })
+    decisions.push({ tick: t, candidates: cands.cells, srcs: cands.srcs, ks, scoresW, engageW })
     obsList.push(obsCopy)
     scalarList.push(scalarsCopy)
     injectList.push(inject)
@@ -497,6 +532,7 @@ export function runCounterfactualGame(
     obs: obsList,
     scalars: scalarList,
     injects: injectList,
+    windows,
     outcome,
     ticks: t,
     truncated: truncatedTotal,
@@ -533,6 +569,34 @@ function countEnemies(world: World): number {
 
 // ---------------------------------------------------------------- CLI
 
+const WORKER_URL = new URL('./cf-goal-worker.ts', import.meta.url).href
+
+interface CfTask {
+  id: number
+  stageIdx: number
+  seed: number
+  difficulty: string
+  windows: number[]
+  K: number
+  replan: number
+  maxTicks: number
+  outDir: string
+}
+
+interface CfResult {
+  id: number
+  decisions: number
+  truncated: number
+  totalCands: number
+  outcome: string
+  ticks: number
+}
+
+function arg2(args: string[], name: string, dflt: string): string {
+  const i = args.indexOf(name)
+  return i >= 0 ? args[i + 1] : dflt
+}
+
 function parseRange(s: string): number[] {
   const out: number[] = []
   for (const part of s.split(',')) {
@@ -544,7 +608,7 @@ function parseRange(s: string): number[] {
   return out
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const t0 = Date.now()
   const args = process.argv.slice(2)
   let outDir = 'tmp/cf-goals'
@@ -552,6 +616,7 @@ function main(): void {
   let stagesStr = '0-34'
   let seedsStr = '1-10'
   let window = 120
+  let windowsStr = ''
   let K = 12
   let replan = 30
   let maxTicks = MAX_TICKS
@@ -561,26 +626,66 @@ function main(): void {
     else if (args[i] === '--stages') stagesStr = args[++i]
     else if (args[i] === '--seeds') seedsStr = args[++i]
     else if (args[i] === '--window') window = parseInt(args[++i], 10)
+    else if (args[i] === '--windows') windowsStr = args[++i]
     else if (args[i] === '--k') K = parseInt(args[++i], 10)
     else if (args[i] === '--replan') replan = parseInt(args[++i], 10)
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
   }
+  const windows = windowsStr
+    ? windowsStr
+        .split(',')
+        .map((x) => parseInt(x, 10))
+        .filter((x) => x > 0)
+    : [window]
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
   mkdirSync(outDir, { recursive: true })
+  const workers = parseInt(arg2(args, '--workers', String(defaultWorkerCount())), 10)
 
   const lines: string[] = []
   let totalDecisions = 0
   let truncatedTotal = 0
   let totalCands = 0
   let games = 0
-  for (const si of stages) {
-    const stage = STAGES[si]
-    if (!stage) continue
-    for (const seed of seeds) {
-      const res = runCounterfactualGame(si, stage, seed, difficulty, {
+
+  // 并行：每 worker 一局（worker 内写 shard，obs 不跨线程搬运）；workers=1 串行回退。
+  const gameSpecs: Array<{ stageIdx: number; seed: number }> = []
+  for (const si of stages)
+    if (STAGES[si]) for (const seed of seeds) gameSpecs.push({ stageIdx: si, seed })
+
+  if (workers > 1) {
+    const tasks = gameSpecs.map((g, id) => ({
+      id,
+      ...g,
+      difficulty,
+      windows,
+      K,
+      replan,
+      maxTicks,
+      outDir,
+    }))
+    const pool = new WorkerPool<CfTask, CfResult>(WORKER_URL, workers, 'cf-goal-worker')
+    const results = await pool.runBatch(tasks, (done) => {
+      const elapsed = (Date.now() - t0) / 1000
+      console.error(
+        `[cf] ${done}/${tasks.length} games, ${elapsed.toFixed(0)}s (${(elapsed / done).toFixed(2)} s/game)`,
+      )
+    })
+    pool.terminate()
+    for (const r of results) {
+      games++
+      totalDecisions += r.decisions
+      truncatedTotal += r.truncated
+      totalCands += r.totalCands
+      lines.push(`[OK] game${r.id} decisions=${r.decisions} outcome=${r.outcome} ticks=${r.ticks}`)
+    }
+  } else {
+    for (const g of gameSpecs) {
+      const stage = STAGES[g.stageIdx]
+      if (!stage) continue
+      const res = runCounterfactualGame(g.stageIdx, stage, g.seed, difficulty, {
         replan,
-        window,
+        windows,
         K,
         maxTicks,
       })
@@ -588,11 +693,11 @@ function main(): void {
       totalDecisions += res.decisions.length
       truncatedTotal += res.truncated
       totalCands += res.totalCandidates
-      const dir = `${outDir}/cf_s${si}_seed${seed}`
+      const dir = `${outDir}/cf_s${g.stageIdx}_seed${g.seed}`
       mkdirSync(dir, { recursive: true })
-      writeCfShard(dir, res, K, { difficulty, stage: si, seed, window, K, replan })
+      writeCfShard(dir, res, K, { difficulty, stage: g.stageIdx, seed: g.seed, windows, K, replan })
       lines.push(
-        `[OK] s${si} seed${seed} decisions=${res.decisions.length} outcome=${res.outcome} ticks=${res.ticks}`,
+        `[OK] s${g.stageIdx} seed${g.seed} decisions=${res.decisions.length} outcome=${res.outcome} ticks=${res.ticks}`,
       )
       if (games % 10 === 0) {
         const elapsed = (Date.now() - t0) / 1000
@@ -610,7 +715,7 @@ function main(): void {
     difficulty,
     stages: stagesStr,
     seeds: seedsStr,
-    window,
+    windows,
     K,
     replan,
     games,
@@ -622,11 +727,13 @@ function main(): void {
   console.log(lines.join('\n'))
   console.log(`\n=== CF-GOAL labeling ===`)
   console.log(`games=${games} decisions=${totalDecisions} candidateCoverage=${coverage}`)
-  console.log(`window=${window} K=${K} replan=${replan} (firePolicy firecontrol-l3-min)`)
+  console.log(
+    `windows=${windows.join(',')} K=${K} replan=${replan} (firePolicy firecontrol-l3-min)`,
+  )
   console.log(`shards under: ${outDir}  (consume with train_goal_bc.py)`)
 }
 
-function writeCfShard(
+export function writeCfShard(
   dir: string,
   res: CfGameResult,
   K: number,
@@ -634,13 +741,15 @@ function writeCfShard(
 ): void {
   const N = res.decisions.length
   if (N === 0) return
+  const windows = res.windows
   const obs = new Uint8Array(N * 14 * 26 * 26)
   const scalars = new Float32Array(N * 19)
   const injects = new Float32Array(N * GOAL_INJECT_DIM)
   const cells = new Uint16Array(N * K).fill(UNREACH)
+  const srcs = new Uint8Array(N * K)
   const ks = new Uint16Array(N * K).fill(UNREACH)
-  const ss = new Float32Array(N * K).fill(0)
-  const engage = new Uint8Array(N)
+  const ss = windows.map(() => new Float32Array(N * K).fill(0))
+  const engage = windows.map(() => new Uint8Array(N))
   for (let i = 0; i < N; i++) {
     const d = res.decisions[i]
     obs.set(res.obs[i], i * 14 * 26 * 26)
@@ -648,19 +757,23 @@ function writeCfShard(
     injects.set(res.injects[i], i * GOAL_INJECT_DIM)
     for (let j = 0; j < d.candidates.length && j < K; j++) {
       cells[i * K + j] = d.candidates[j]
+      srcs[i * K + j] = d.srcs[j]
       ks[i * K + j] = d.ks[j]
-      ss[i * K + j] = d.scores[j]
+      for (let w = 0; w < windows.length; w++) ss[w][i * K + j] = d.scoresW[w][j]
     }
-    engage[i] = d.engage
+    for (let w = 0; w < windows.length; w++) engage[w][i] = d.engageW[w]
   }
   writeNpy(`${dir}/obs.npy`, obs, [N, 14, 26, 26], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, 19], 'f4')
   writeNpy(`${dir}/inject.npy`, injects, [N, GOAL_INJECT_DIM], 'f4')
   writeNpy(`${dir}/cand_cell.npy`, cells, [N, K], 'u2')
+  writeNpy(`${dir}/cand_src.npy`, srcs, [N, K], 'u1')
   writeNpy(`${dir}/cand_k.npy`, ks, [N, K], 'u2')
-  writeNpy(`${dir}/cand_s.npy`, ss, [N, K], 'f4')
-  writeNpy(`${dir}/engage.npy`, engage, [N], 'u1')
+  for (let w = 0; w < windows.length; w++) {
+    writeNpy(`${dir}/cand_s_w${windows[w]}.npy`, ss[w], [N, K], 'f4')
+    writeNpy(`${dir}/engage_w${windows[w]}.npy`, engage[w], [N], 'u1')
+  }
   writeFileSync(`${dir}/manifest.json`, JSON.stringify({ ...meta, nDecisions: N }, null, 2))
 }
 
-if (import.meta.main) main()
+if (import.meta.main) void main()
