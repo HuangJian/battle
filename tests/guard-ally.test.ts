@@ -48,9 +48,7 @@ function activateAndCheckSpawn(world: World, sim: Simulation, p: Tank): void {
   expect(world.rectHitsTerrain(g.x, g.y, TANK, TANK)).toBe(false)
   for (const t of world.allTanks) {
     if (t === g || !t.alive) continue
-    expect(
-      g.x < t.x + t.w && g.x + g.w > t.x && g.y < t.y + t.h && g.y + g.h > t.y
-    ).toBe(false)
+    expect(g.x < t.x + t.w && g.x + g.w > t.x && g.y < t.y + t.h && g.y + g.h > t.y).toBe(false)
   }
 }
 
