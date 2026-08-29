@@ -59,6 +59,35 @@ T2 本轨未做 ⇒ 只对新基线判定。
 
 ---
 
+## §4 m1-eval auto-dist：每批评估机会性利用远程 agents（2026-08-29，commit 61538b6）
+
+用户指令：远程节点随时可能上线，m1-eval 要像 rollout 一样周期性检查节点状态、每批都
+充分利用 agents 算力（"每次跑批能缩短一两分钟都是好的"）。
+
+**缺口 → 修复**（v4.0）：
+1. `--dist-nodes` 是 opt-in → **auto-dist 默认开**：不传时默认读 `nn-training/rl-config.json`
+   （存在即走混合分派）；`--no-dist` 显式关闭。v3.9 rescan（120s 周期重读配置 + ping）保持
+   ——节点中途上线即刻接管份额。死节点开销 = 并行 5s ping（实测 7 死节点配置下 6 局
+   总墙钟 5.2s，本地立即开跑）。
+2. **无权重策略不可分发** → `kind='none'` 占位桶（3 字节，wver 协议兼容）：
+   `god` / `goal-god` 进 DIST_POLICIES 白名单——基线/上限这类最常跑的 2100 局批
+   现在可全量外派。
+3. **潜在 409 bug**：`uploadWeights(node, 'intent', ...)` 写死 kind——goal 分发会在活节点上
+   wver-not-cached 409（此前无活节点从未暴露）。改为随 distKind。
+4. **export-eval-game 无 god 分支** → 新增真 God-AI 分支（RNG 派生与 runSimulation 逐字节
+   一致；weights 仅 'nn' 策略必需）；顺手修 `scripted.reset()` 写死导致的
+   **GodAIInput.reset() 从未执行** bug（关卡自适应参数从未生效——远程 god 局此前
+   等于默认参数乱打）。
+
+**护栏测试**（tests/sim/eval-game-parity.test.ts）：
+- 远程/本地等价：export-eval-game god ≡ runSimulation god（4 局 outcome/ticks 逐一对齐）。
+- **可区分性冒烟**：god vs goal-god 同局必须不同（goal-god 静默回落伪影的永久哨兵）。
+
+**遗留提示**：run_rl_intent 训练器的 post_weights 仍有 60–300s 死节点超时（每轮一次），
+靠"配置离线"绕过；如需训练器也 auto-dist 可复用本套 ping-first 激活。
+
+---
+
 ## §2 T7.2 goal PPO 基建 + T6 反事实标注（2026-08-29，commits b04f4d6/f74a7cb + pilot）
 
 ### T7.2（全绿）
