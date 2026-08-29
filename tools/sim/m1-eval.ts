@@ -108,7 +108,19 @@ async function main(): Promise<void> {
   const outPath = arg('out', 'tmp/m1_eval_scorecard.html')!
   // v3.7 分布式分派：--dist-nodes <rl-config.json> 时，评估任务经 HTTP 派发到
   // rollout agent（mode=eval&kind=intent&policy=intent-exec），利用云机算力跑 NN 策略。
-  const distNodesPath = arg('dist-nodes', '')
+  // v4.0 auto-dist（用户指令 2026-08-29：远程节点随时可能上线，每批都要充分利用）：
+  // 不传 --dist-nodes 时，若默认 rl-config.json 存在且未给 --no-dist，也走混合分派——
+  // 死节点只有 ~5s ping 快速失败（并行），活节点即刻接管份额；纯本地用 --no-dist 显式关闭。
+  const noDist = arg('no-dist') !== undefined
+  let distNodesPath = arg('dist-nodes', '')
+  if (!distNodesPath && !noDist) {
+    const defaultCfg = 'nn-training/rl-config.json'
+    try {
+      if (readFileSync(defaultCfg, 'utf8').includes('"nodes"')) distNodesPath = defaultCfg
+    } catch {
+      /* 无配置文件 → 纯本地 */
+    }
+  }
   const iterId = arg('iter-id', `m1eval-${Date.now()}`)!
 
   let stages
@@ -185,9 +197,12 @@ async function main(): Promise<void> {
   // v3.8：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
   // 本机 worker 同时并行参与（--dist-local 控制本机并发，0=纯远端；缺省全核）。
   // dist 白名单（T8.5：NN 前向重的策略适合外派）——表驱动，新增策略在此扩一行。
-  const DIST_POLICIES: Record<string, 'intent' | 'goal'> = {
+  // kind='none'：无权重策略（god/goal-god），上传占位桶满足 agent 的 wver 协议。
+  const DIST_POLICIES: Record<string, 'intent' | 'goal' | 'none'> = {
     'intent-exec': 'intent',
     goal: 'goal',
+    god: 'none',
+    'goal-god': 'none',
   }
   let results: import('./sim-worker').SimTaskResult[]
   if (distNodesPath) {
@@ -208,13 +223,18 @@ async function main(): Promise<void> {
       process.stderr.write('[m1-eval] --dist-nodes --policy goal requires --goal-weights\n')
       process.exit(2)
     }
+    // kind='none'：上传占位（agent 按 wver 协议缓存桶；god/goal-god 不读权重文件）
     const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
     results = await runHybrid(
       tasks,
       distNodesPath,
       distLocal,
       iterId,
-      distKind === 'goal' ? (goalWeights as string) : (intentWeights as string),
+      distKind === 'goal'
+        ? (goalWeights as string)
+        : distKind === 'intent'
+          ? (intentWeights as string)
+          : '', // 'none'：runHybrid 内部用占位字节
       distKind,
       reportProgress,
     )
@@ -466,7 +486,7 @@ async function runHybrid(
   localWorkers: number,
   iterId: string,
   weightsPath: string,
-  distKind: 'intent' | 'goal' = 'intent',
+  distKind: 'intent' | 'goal' | 'none' = 'intent',
   onProgress: (done: number, total: number) => void,
 ): Promise<import('./sim-worker').SimTaskResult[]> {
   const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
@@ -480,7 +500,8 @@ async function runHybrid(
     `[m1-eval] hybrid dispatch: ${nodes.length} nodes (${remoteCap} slots) + local ${localCap}, ${tasks.length} games\n`,
   )
 
-  const bytes = readFileSync(weightsPath)
+  // kind='none'（god/goal-god 无权重策略）：占位字节满足 wver 协议，内容恒定。
+  const bytes = distKind === 'none' ? Buffer.from('{}') : readFileSync(weightsPath)
   const wver = createHash('sha256').update(bytes).digest('hex')
 
   const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
@@ -529,7 +550,8 @@ async function runHybrid(
     }
     if (!ok) return false
     try {
-      await uploadWeights(node, 'intent', bytes, wver, iterId)
+      // v4.0 修复：kind 随 distKind（原写死 'intent'——goal 分发会 409 wver-not-cached）
+      await uploadWeights(node, distKind, bytes, wver, iterId)
     } catch {
       process.stderr.write(`[m1-eval] ${node.id ?? node.url}: weights upload failed — skipped\n`)
       return false
@@ -553,7 +575,7 @@ async function runHybrid(
             const url =
               `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
               `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
-              `&difficulty=${task.difficulty}&mode=eval&kind=${distKind}&policy=${distKind === 'goal' ? 'goal' : 'intent-exec'}`
+              `&difficulty=${task.difficulty}&mode=eval&kind=${distKind}&policy=${task.policy ?? 'nn'}`
             let ok = false
             // 退避重试（§30 启发）：agent 忙（503 busy / HTTP 错误）时尊重 Retry-After
             // 或阶梯退避，熬过 rollout 尾巴与 eval 并发的忙窗——纯 2 连击失败会把

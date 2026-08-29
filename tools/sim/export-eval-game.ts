@@ -33,6 +33,8 @@ import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { GoalExecutor } from '../../src/nn/goal-executor'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
+import type { InputLike } from '../../src/game/Input'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
@@ -168,7 +170,7 @@ interface EvalResult {
   scorable: Record<string, unknown>
 }
 
-function runEvalOne(
+export function runEvalOne(
   stageIdx: number,
   stage: any,
   seed: number,
@@ -193,10 +195,14 @@ function runEvalOne(
   const isIntent = policy === 'intent-exec'
   // T8.5：policy='goal' → goal-space 执行器驱动（NN 选目标格 + L2 路径跟随 + 契约）。
   const isGoal = policy === 'goal' || policy === 'goal-god'
+  // v4.0：policy='god' → 真 God-AI（远程分发口径；此前 'god' 会错误落入 NN+ScriptedInput）。
+  // RNG 派生与 simulation-runner.runSimulation 逐字节一致（seed ^ 0x9e3779b9），
+  // 远程局与本地局结果可对账。
+  const isGod = policy === 'god'
   const model =
-    isIntent || isGoal ? null : (buildModelFromText(weightsText) as unknown as RolloutModel)
+    policy === 'nn' ? (buildModelFromText(weightsText) as unknown as RolloutModel) : null
   const scripted = new ScriptedInput()
-  let exec: IntentExecutor | GoalExecutor | null = null
+  let exec: IntentExecutor | GoalExecutor | GodAIInput | null = null
   if (isIntent) {
     exec = new IntentExecutor(world, {
       weightsText: intentWeightsText,
@@ -210,10 +216,15 @@ function runEvalOne(
       recordTrace: false,
       followGodNav: policy === 'goal-god',
     })
+  } else if (isGod) {
+    exec = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS }, new RNG((seed ^ 0x9e3779b9) >>> 0))
   }
-  const sim = new Simulation(world, (exec ?? scripted) as any)
+  const ai = (exec ?? scripted) as InputLike
+  const sim = new Simulation(world, ai as any)
   world.loadStageData(stage, stageIdx)
-  scripted.reset()
+  // v4.0：reset 当前输入（GodAIInput 的关卡自适应在 reset() 里做——此前固定
+  // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
+  ai.reset()
 
   const encoder = new ObsEncoder()
 
@@ -240,7 +251,7 @@ function runEvalOne(
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
-    if (!isIntent && !isGoal) {
+    if (policy === 'nn') {
       encoder.encode(world)
       if (t % K === 0) {
         model!.forward(encoder.obs, encoder.scalars)
@@ -251,8 +262,7 @@ function runEvalOne(
       }
     }
     sim.tick()
-    if (isIntent || isGoal) exec!.endFrame()
-    else scripted.endFrame()
+    ai.endFrame()
     t++
 
     // ---- telemetry（语义对齐 simulation-runner / export-rl-rollout）----
@@ -394,7 +404,8 @@ function main(): void {
   }
   const stage = STAGES[stageIdx]
   mkdirSync(outDir, { recursive: true })
-  const weightsText = readFileSync(weightsPath, 'utf8')
+  // v4.0：仅 'nn' 策略需要权重文件（god/goal-god/intent/goal 各自携带自己的权重源）。
+  const weightsText = policy === 'nn' ? readFileSync(weightsPath, 'utf8') : '{}'
   const intentWeightsText = intentWeightsPath ? readFileSync(intentWeightsPath, 'utf8') : ''
   const goalWeightsText = goalWeightsPath ? readFileSync(goalWeightsPath, 'utf8') : ''
   if (policy === 'goal' && !goalWeightsText) {
