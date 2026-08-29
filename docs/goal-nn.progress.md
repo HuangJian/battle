@@ -105,6 +105,45 @@ T2 本轨未做 ⇒ 只对新基线判定。
 
 ---
 
+## §6 rollout 机制 → m1-eval 的能力提取（2026-08-29，commit 4d21d9b）
+
+用户指令：检查 rollout 的巡航报告 / 断点续跑 / 本地优先 / 尾部 fan-out 竞速是否适用于
+m1-eval，适用的提取为公共能力、两边复用。
+
+### 适用性判定
+
+| 机制 | 适用 | 处置 |
+|---|---|---|
+| 断点续跑（rl/resume.py completed_pairs + wver 过滤） | ✅ 高价值——此前崩一批全丢 | `tools/lib/batch-ledger.ts`：逐局 jsonl 账本，(stage,seed)+wver 记账，后写覆盖先读（错误重跑审计留痕） |
+| 尾部 fan-out 竞速（queue.py v3.7 tail_fanout_n/dup + duplicate-settled suppression） | ✅ 尾部时延从 max 变 min | `tools/lib/hybrid-batch.ts` `TailRaceBatch`：共享游标 + 竞速（每任务副本 ≤ dup、first-settle-wins 幂等）+ 无消费者守护 |
+| 错误局自动重跑（run_rl_intent CLEAN_EVAL_MAX_RETRY） | ✅ 瞬态 503 不再污染整批 | main 重试循环：错误局最多再跑 2 次，账本追加审计行 |
+| 巡航报告（training_log.jsonl + 巡检 HTML） | ✅ 部分提取 | `<out>.partial.json` 25/50/75% 里程碑快照 + 全量 jsonl 账本；终局 HTML 评分卡不变 |
+| 本地优先（local_slots/local_suspend） | ❌ 不适用 | eval 无 PPO 抢核问题；共享游标本就公平调度。Python 侧语义保留在 queue.py |
+
+### 复用关系
+
+- **m1-eval**（本次接线）：runHybrid 两类消费循环 claim/settle 走 TailRaceBatch；
+  main 分 tasks→(ledger-done ∪ todo)，todo 跑完对 ok=false 局重跑 ≤2 次。
+- **rollout（python）**：queue.py/resume.py 机制已完备不动；trainer 的 clean-eval
+  经 `m1-eval --dist-nodes` 间接继承本套能力。
+- **未来 TS 批工具**（export-*-rollout 等）可直接复用两个 lib 模块。
+
+### 实测
+
+- **断点续跑**：同一命令双跑——第二次 `ledger resume: 6/6 already settled — running 0`，
+  0.16s 完成，评分卡由账本重建（结果与首跑一致）。
+- **单测 9 项**：游标顺序 / 幂等结算 / 竞速进入条件与副本上限 / failUnsettled /
+  账本往返 / wver 过滤 / 重跑覆盖。全量 check 1641 tests 绿。
+
+### 语义细节（实现期澄清）
+
+- 竞速的进入条件 = 游标耗尽 ∧ remaining ≤ fanoutN ∧ 有在跑副本；游标发号时每个任务
+  已带 1 个在跑副本，竞速将其补到 dup 上限后轮到下一未结算任务（单测 3 记录了完整序列）。
+- wver 覆盖"影响结果的输入"：goal/intent 权重字节、god/goal-god 占位；nn 策略走
+  `local-nn` 键（纯本地无权重文件）。代码变更需 `--fresh` 忽略账本。
+
+---
+
 ## §2 T7.2 goal PPO 基建 + T6 反事实标注（2026-08-29，commits b04f4d6/f74a7cb + pilot）
 
 ### T7.2（全绿）
