@@ -4,6 +4,70 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §2 T7.2 goal PPO 基建 + T6 反事实标注（2026-08-29，commits b04f4d6/f74a7cb + pilot）
+
+### T7.2（全绿）
+
+- `nn-training/ppo_goal.py`：GoalRLNet + **双动作空间**（fine 676 / coarse 169 块 logsumexp，
+  §T9a.1b）+ multi-head loss（surrogate_clip 主项 + 可选 BC kickstart + engage 辅助 CE +
+  value MSE + 熵 + KL 锚）+ ppo_common 变步长 GAE + value warmup + stream backend 别名。
+- `tools/sim/export-goal-rollout.ts`：goalPick 回调式采集器（与执行器共享 L2/L3 代码路径）；
+  §12.3 奖励 = R_event（继承 INTENT_REWARD 量级）+ 到达 1.0 + 守家 0.5（γ^dt telescoping）
+  + 交战效率 0.3；shard 含 goal_mask（u1）/dt/inject/engage，manifest 记 firePolicy（§11.3.1）。
+- rl/ goal_rollout 分支：queue 采集命令 ×2 + wkind='goal'，stream semi-MDP 波次语义，
+  sampler-agent kind=goal 桶 + heartbeat/goalCoarse URL 参数，`run_rl_intent.py --goal` 开关
+  （同一主循环/熔断/巡检/断点续跑复用）。
+- `test_ppo_goal.py`：dt 退化字节一致、coarse logsumexp 单调/可导、双空间掩码 logp
+  （被 mask 动作 < −1e8）、微型 shard 冒烟 + warmup 冻结断言。
+- **采样/训练一致性修复**：coarse 块 logit 两侧统一为"全 4 格 logsumexp + 块级有效性过滤"
+  （采集器原按可达格聚合，importance ratio 会偏）。
+- 前向实测 **~64ms**（h=64，含间隔 sim），比 §11.9.1 保守口径（110–170ms）快 ~4.5×
+  ⇒ hb240 on-policy 单局 ≈1.1s，140 局/轮单核 ≈2.6 min。
+
+### T6（全绿 + pilot 已跑）
+
+- `tools/sim/export-counterfactual-goals.ts`：God-AI 状态分布 + 候选生成（§11.2 六来源 +
+  §11.4 确定性 top-K + 来源标记）+ cloneWorld 分支 rollout（§T6.1b，每分支一次克隆）+
+  **多窗口检查点打分**（一次 480-tick 分支产出 {60,120,240,480} 四档分数，4× 省时）+
+  inject 自馈流（prevGoal = 上决策 argmax）+ cand_src 来源标记 + engage 逐窗口。
+- `tools/sim/cf-goal-worker.ts` + WorkerPool：并行 == 串行**逐字节一致**（哈希对账）。
+- `tools/sim/cf-hsweep-report.ts`：§11.8 三判据判读。
+- `nn-training/train_goal_bc.py`：软目标 + 全 676 维稀疏 CE（λ/τ 训练超参，shard 存原始
+  (s_i,k_i)）+ engage CE + **长承诺样本加权**（§8.1.1 a1 缓解#2）。
+
+### Pilot（350 局 = 35 关 × 10 seed，replan30×210 + replan240×140，K=12）
+
+吞吐：**2.06 s/局**（8 workers；含四档窗口分支）⇒ 350 局 ≈ 12 min，符合 T6 验收口径
+（≤15 min@6 节点折算）。语料 383MB / 39,663 决策点 / 覆盖率 0.981。
+
+**§11.8 H 扫描定案**（argmax 落点占比，λ=0.5）：
+
+| window | enemyRear(追尾) | anchor(守家) | carve/brick | godTarget 重合 |
+|---|---|---|---|---|
+| 60 | 8.9% | 0.6% | 1.0% | 72.8% |
+| 120 | 21.5% | 1.5% | 2.9% | 56.6% |
+| **240** | **39.1%** | 2.9% | 5.7% | 36.9% |
+| 480 | 52.7% | 3.5% | 10.5% | 22.9% |
+
+长窗口系统性恢复追尾行为（§11.8 "短窗近视"论断实证成立）；480 超 §11.7 上限 ⇒
+**操作点 H = T = 240**。
+
+**§8.1.1 检查⑤（duration 覆盖）诚实记录**：按决策点算长承诺（≥0.5）占 ~12.8%
+（replan240 局决策点少 ⇒ 局数占比 40% ≠ 点数占比），低于 50% 目标。缓解：BC 长样本
+加权 ×3.0 + PPO on-policy 在 hb240 自行覆盖部署分布。记为 T9a 已知风险。
+
+### 实现期新决策（续 §1）
+
+9. **H 扫描四档共用一个 max-H 分支**：分支在检查点打分，RNG 连续性保证与独立跑一致
+   （省 4× 机时；代价是 cand_s 按窗口分文件）。
+10. **CF 语料 replan 混合**：210 局 replan=30 + 140 局 replan=240（局数口径 40% 长承诺，
+    对齐 a1 缓解#1 的"≥1/3"精神；点数口径不足部分由加权补偿）。
+11. **T4 依赖以 L3-min 替代**：T6 的 rollout 开火 = FireControl 原样（§T6.1a 钉死的
+    "现有 L3 规则"），未做 T4 的 lateralFire 扫参——T6 依赖修正记账，T5（开火 canary）
+    暂缓不影响本轨。
+
+---
+
 ---
 
 ## §1 网络轨落地：T7 → T8-min → reach-mask → T8.5（2026-08-29，commit 9be15d2）

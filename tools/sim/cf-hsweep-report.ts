@@ -71,7 +71,21 @@ function main(): void {
     if (args[i] === '--data') dataDir = args[++i]
     else if (args[i] === '--lambda') lambda = parseFloat(args[++i])
   }
-  const shardDirs = readdirSync(dataDir).filter((d) => d.startsWith('cf_s'))
+  // 两层遍历：根目录或 replanXX 分组子目录下的 cf_s* shard。
+  let shardDirs = readdirSync(dataDir).filter((d) => d.startsWith('cf_s'))
+  if (shardDirs.length === 0) {
+    for (const sub of readdirSync(dataDir)) {
+      const subPath = join(dataDir, sub)
+      try {
+        if (readdirSync(subPath).some((d) => d.startsWith('cf_s'))) {
+          for (const d of readdirSync(subPath))
+            if (d.startsWith('cf_s')) shardDirs.push(`${sub}/${d}`)
+        }
+      } catch {
+        /* 非目录，跳过 */
+      }
+    }
+  }
   if (shardDirs.length === 0) {
     console.error(`[hsweep] no shards under ${dataDir}`)
     process.exit(2)

@@ -270,26 +270,30 @@ export function runOne(
       for (let b = 0; b < COARSE_DIM; b++) {
         const bc = b % COARSE_SIDE
         const br = (b - bc) / COARSE_SIDE
+        // 块 logit = 块内全 4 格 logsumexp（与 ppo_goal.coarse_block_logsumexp 逐格一致；
+        // 可达性只作块级有效性过滤 —— 采样/训练分布一致性，importance ratio 不偏）。
         let mx = -Infinity
         for (let dr = 0; dr < 2; dr++) {
           for (let dc = 0; dc < 2; dc++) {
             const cell = (br * 2 + dr) * GRID + (bc * 2 + dc)
-            if (k[cell] !== 65535 && model.goalHeatmap[cell] > mx) mx = model.goalHeatmap[cell]
+            if (model.goalHeatmap[cell] > mx) mx = model.goalHeatmap[cell]
           }
         }
         let lse = 0
-        if (mx > -Infinity) {
-          // 稳定 logsumexp（仅可达格参与；全不可达块 logit = -1e9 由 valid=0 屏蔽）
-          for (let dr = 0; dr < 2; dr++) {
-            for (let dc = 0; dc < 2; dc++) {
-              const cell = (br * 2 + dr) * GRID + (bc * 2 + dc)
-              if (k[cell] !== 65535) lse += Math.exp(model.goalHeatmap[cell] - mx)
-            }
+        for (let dr = 0; dr < 2; dr++) {
+          for (let dc = 0; dc < 2; dc++) {
+            const cell = (br * 2 + dr) * GRID + (bc * 2 + dc)
+            lse += Math.exp(model.goalHeatmap[cell] - mx)
           }
-          lse = mx + Math.log(lse)
         }
-        blockLogits[b] = lse
-        blockValid[b] = mx > -Infinity ? 1 : 0
+        blockLogits[b] = mx + Math.log(lse)
+        let valid = 0
+        for (let dr = 0; dr < 2 && !valid; dr++) {
+          for (let dc = 0; dc < 2 && !valid; dc++) {
+            if (k[(br * 2 + dr) * GRID + (bc * 2 + dc)] !== 65535) valid = 1
+          }
+        }
+        blockValid[b] = valid
       }
       const s = sampleCat(blockLogits, blockValid, rng)
       a = s.idx

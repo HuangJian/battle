@@ -39,15 +39,20 @@ LOAD_LOG_EVERY = 128
 HB_SEC = 30.0
 
 
-def load_cf_shard(dirpath: str) -> dict:
+def load_cf_shard(dirpath: str, window: int) -> dict:
+    """多窗口 shard（cand_s_w{W}.npy）；旧单窗口文件 cand_s.npy 作为回退。"""
+    s_name = f"cand_s_w{window}.npy" if os.path.exists(
+        os.path.join(dirpath, f"cand_s_w{window}.npy")) else "cand_s.npy"
+    e_name = f"engage_w{window}.npy" if os.path.exists(
+        os.path.join(dirpath, f"engage_w{window}.npy")) else "engage.npy"
     d = {
         "obs": np.load(os.path.join(dirpath, "obs.npy")),
         "scalars": np.load(os.path.join(dirpath, "scalars.npy")),
         "inject": np.load(os.path.join(dirpath, "inject.npy")),
         "cand_cell": np.load(os.path.join(dirpath, "cand_cell.npy")).astype(np.int64),
         "cand_k": np.load(os.path.join(dirpath, "cand_k.npy")).astype(np.float32),
-        "cand_s": np.load(os.path.join(dirpath, "cand_s.npy")).astype(np.float32),
-        "engage": np.load(os.path.join(dirpath, "engage.npy")).astype(np.int64),
+        "cand_s": np.load(os.path.join(dirpath, s_name)).astype(np.float32),
+        "engage": np.load(os.path.join(dirpath, e_name)).astype(np.int64),
     }
     return d
 
@@ -82,7 +87,7 @@ def build_soft_target(cand_s, cand_k, cand_cell, lam: float, tau: float, fine: i
     return target, valid_any
 
 
-def load_episodes(data_root: str) -> list[dict]:
+def load_episodes(data_root: str, window: int) -> list[dict]:
     shards = discover_shards(data_root, ("obs.npy", "cand_cell.npy"))
     if not shards:
         raise SystemExit(f"[goal-bc] no cf shards found under {data_root}")
@@ -92,7 +97,7 @@ def load_episodes(data_root: str) -> list[dict]:
     for k, sd in enumerate(shards):
         if k > 0 and k % LOAD_LOG_EVERY == 0:
             log(f"[goal-bc] loading shards {k}/{len(shards)} ({time.time() - t0:.0f}s)")
-        d = load_cf_shard(sd)
+        d = load_cf_shard(sd, window)
         N = d["obs"].shape[0]
         if N == 0:
             continue
@@ -112,7 +117,10 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--lambda", dest="lam", type=float, default=0.5, help="carve 代价系数 λ（§9.4.2）")
     ap.add_argument("--tau", type=float, default=1.0, help="软目标温度 τ（§11.5）")
+    ap.add_argument("--window", type=int, default=240, help="H 扫描选出的窗口档（§11.8）")
     ap.add_argument("--engage-coef", type=float, default=0.3, help="engage 辅助 CE 权重")
+    ap.add_argument("--long-weight", type=float, default=1.0,
+                    help="长承诺样本（inject duration ≥0.5）的损失加权（§8.1.1 评审 a1 OOD 缓解#2）")
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=8)
@@ -124,7 +132,7 @@ def main():
         torch.set_num_threads(args.threads)
     device = torch.device(args.device)
 
-    episodes = load_episodes(args.data)
+    episodes = load_episodes(args.data, args.window)
 
     model = GoalNet()
     if args.init_from and os.path.exists(args.init_from):
@@ -135,11 +143,19 @@ def main():
 
     # 预构建软目标（λ/τ 变更需重跑本脚本；目标构建 < 1s/万点）
     target_chunks = []
+    weight_chunks = []
+    n_long = 0
     for e in episodes:
         tgt, valid = build_soft_target(e["cand_s"], e["cand_k"], e["cand_cell"], args.lam, args.tau)
         target_chunks.append((tgt, valid))
+        # 来源加权：长承诺（duration ≥0.5，replan240 档）样本权重上浮（§8.1.1 a1 缓解）。
+        dur = e["inject"][:, 2]
+        w = np.where(dur >= 0.5, args.long_weight, 1.0).astype(np.float32)
+        n_long += int((dur >= 0.5).sum())
+        weight_chunks.append(w)
     n_valid = sum(int(v.sum()) for _, v in target_chunks)
-    log(f"[goal-bc] soft targets built (λ={args.lam} τ={args.tau}) valid={n_valid}")
+    log(f"[goal-bc] soft targets built (λ={args.lam} τ={args.tau}) valid={n_valid} "
+        f"long={n_long} ({100.0 * n_long / max(1, n_valid):.1f}%)")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     model.train()
@@ -157,6 +173,7 @@ def main():
             inj = torch.from_numpy(e["inject"]).to(device)
             tgtT = torch.from_numpy(tgt).to(device)
             validT = torch.from_numpy(valid).to(device)
+            wT = torch.from_numpy(weight_chunks[bi]).to(device)
             eng = torch.from_numpy(e["engage"]).to(device)
 
             sp, h = model.spatial(obs, sc)
@@ -166,7 +183,7 @@ def main():
 
             logp = F.log_softmax(goal_logits, dim=-1)
             ce = -(tgtT * logp).sum(dim=-1)  # 软目标 CE（全 676 维稀疏）
-            ce = (ce * validT).sum() / torch.clamp(validT.sum(), min=1.0)
+            ce = (ce * validT * wT).sum() / torch.clamp((validT * wT).sum(), min=1.0)
             engage_loss = F.cross_entropy(engage_logits, eng)
             loss = ce + args.engage_coef * engage_loss
 
