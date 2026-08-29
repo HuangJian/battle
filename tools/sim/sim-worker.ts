@@ -61,8 +61,9 @@ export interface SimTask {
   recordReplay?: boolean
   /** M4 star census observer (spawn/pickup/min-dist per star). Read-only. */
   powerupCensus?: boolean
-  /** Player policy: 'god' (default), 'nn', 'intent' (stub), 'intent-exec' (M6) or 'intent-oracle' (M7① 探针). */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle'
+  /** Player policy: 'god' (default), 'nn', 'intent' (stub), 'intent-exec' (M6),
+   *  'intent-oracle' (M7① 探针) or 'goal' (T8.5 goal-space 执行器). */
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal'
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
@@ -73,6 +74,10 @@ export interface SimTask {
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
   intentWeightsDir?: string
+  /** Weights JSON file for the 'goal' policy (T8.5 goal-space 执行器). */
+  goalWeightsDir?: string
+  /** Goal 承诺期 T ticks（E4 心跳；0/缺省 = 执行器默认 240）。 */
+  promiseTicks?: number
 }
 
 export interface SimTaskResult {
@@ -132,6 +137,8 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       policy: task.policy,
       nnWeightsDir: task.nnWeightsDir,
       intentWeightsDir: task.intentWeightsDir,
+      goalWeightsDir: task.goalWeightsDir,
+      promiseTicks: task.promiseTicks,
       replanEvery: task.replanEvery,
       riskGated: task.riskGated,
       baseCadence: task.baseCadence,

@@ -64,7 +64,9 @@ const decisionsPerGame = Math.round(ticksPerGame / replan)
 console.log('===== ① 硬模拟吞吐（hard, policy=god）=====')
 console.log(`样本 ${games} 局（${probeStages.length} 关 × ${GAMES_PER_STAGE} seed）`)
 console.log(`吞吐        : ${Math.round(tps).toLocaleString()} ticks/sec/core`)
-console.log(`单局        : ${Math.round(ticksPerGame).toLocaleString()} tick / ${msPerGame.toFixed(0)} ms`)
+console.log(
+  `单局        : ${Math.round(ticksPerGame).toLocaleString()} tick / ${msPerGame.toFixed(0)} ms`,
+)
 console.log(`决策数/局   : ${decisionsPerGame}（replan=${replan}）`)
 
 console.log('')
@@ -79,7 +81,7 @@ for (const nGames of [350, 2100]) {
       if (K === 12 || H === 120) {
         console.log(
           `  ${String(nGames).padStart(4)} 局 K=${String(K).padStart(2)} H=${String(H).padStart(3)}` +
-            ` : ${oneCore.toFixed(1).padStart(6)} min/核 · 6 节点 ${six.toFixed(1).padStart(5)} min`
+            ` : ${oneCore.toFixed(1).padStart(6)} min/核 · 6 节点 ${six.toFixed(1).padStart(5)} min`,
         )
       }
     }
@@ -153,7 +155,9 @@ if (hasFlag('skip-infer')) {
   console.log('===== ③ 单前向推理成本（h=64 d=8，随机权重）=====')
   console.log(`迭代 ${iters} × 3 组，中位 = ${median.toFixed(1)} ms`)
   console.log(`implied     = ${(macPerSec / 1e9).toFixed(2)} G MAC/s`)
-  console.log(`60fps 帧预算 16.7 ms : ${median <= 16.7 ? 'FITS' : 'EXCEEDS → 需 Worker / 分帧摊还'}`)
+  console.log(
+    `60fps 帧预算 16.7 ms : ${median <= 16.7 ? 'FITS' : 'EXCEEDS → 需 Worker / 分帧摊还'}`,
+  )
   console.log(`文档 §19 记的 41.1 ms 已过期，勿引用（手册 §16.1）`)
 }
 
@@ -162,11 +166,15 @@ console.log('')
 console.log('===== ④ 目标头算力占比（解析值）=====')
 const goalMacs = NET_H * 1 * SP
 console.log(`主干            : ${MADDS_LABEL()}`)
-console.log(`goal 热图（1×1）: ${goalMacs.toLocaleString()} MACs = ${((goalMacs / 37.5e6) * 100).toFixed(3)}%`)
-console.log(`两张热图        : ${((2 * goalMacs / 37.5e6) * 100).toFixed(3)}%`)
+console.log(
+  `goal 热图（1×1）: ${goalMacs.toLocaleString()} MACs = ${((goalMacs / 37.5e6) * 100).toFixed(3)}%`,
+)
+console.log(`两张热图        : ${(((2 * goalMacs) / 37.5e6) * 100).toFixed(3)}%`)
 console.log(`删除 enemy+anchor 头: -${(137 * 5 + 137 * 16).toLocaleString()} MACs`)
-console.log(`净变化          : +${(2 * goalMacs - 137 * 21).toLocaleString()} MACs = ` +
-  `${(((2 * goalMacs - 137 * 21) / 37.5e6) * 100).toFixed(3)}%`)
+console.log(
+  `净变化          : +${(2 * goalMacs - 137 * 21).toLocaleString()} MACs = ` +
+    `${(((2 * goalMacs - 137 * 21) / 37.5e6) * 100).toFixed(3)}%`,
+)
 
 function MADDS_LABEL(): string {
   return '37.5 M MACs（bench-intent-infer.ts 常量）'

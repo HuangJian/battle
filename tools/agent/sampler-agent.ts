@@ -363,6 +363,9 @@ async function runGame(
         args.push('--policy', policy)
         const iw = weightsByKind['intent']
         if (policy === 'intent-exec' && iw) args.push('--intent-weights', iw.file)
+        // T8.5：goal 策略权重经 kind='goal' 桶缓存。
+        const gw = weightsByKind['goal']
+        if (policy === 'goal' && gw) args.push('--goal-weights', gw.file)
       }
     } else {
       args.push('--stages', String(stage), '--seeds', String(seed))
@@ -636,6 +639,8 @@ async function handle(req: Request): Promise<Response> {
         { error: 'intent weights not cached (POST /v1/weights x-kind=intent)' },
         409,
       )
+    if (mode === 'eval' && policy === 'goal' && !weightsByKind['goal'])
+      return jsonResponse({ error: 'goal weights not cached (POST /v1/weights x-kind=goal)' }, 409)
     const free = diskFreeMB()
     if (free !== null && free < 2048) return jsonResponse({ error: `low disk: ${free}MB` }, 503)
     if (activeWorkers >= workers)

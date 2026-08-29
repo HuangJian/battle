@@ -32,6 +32,7 @@ import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import { GoalExecutor } from '../../src/nn/goal-executor'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
@@ -176,6 +177,8 @@ function runEvalOne(
   weightsText: string,
   policy = 'nn',
   intentWeightsText = '',
+  goalWeightsText = '',
+  promiseTicks = 0,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -188,13 +191,23 @@ function runEvalOne(
   // v3.7：policy='intent-exec' → 意图执行器驱动（NN 选意图 + God-AI 白名单子链），
   // 替代 RL 学生模型贪心。intent-weights 经 --intent-weights 单独提供。
   const isIntent = policy === 'intent-exec'
-  const model = isIntent ? null : (buildModelFromText(weightsText) as unknown as RolloutModel)
+  // T8.5：policy='goal' → goal-space 执行器驱动（NN 选目标格 + L2 路径跟随 + 契约）。
+  const isGoal = policy === 'goal'
+  const model =
+    isIntent || isGoal ? null : (buildModelFromText(weightsText) as unknown as RolloutModel)
   const scripted = new ScriptedInput()
-  let exec: IntentExecutor | null = null
+  let exec: IntentExecutor | GoalExecutor | null = null
   if (isIntent) {
     exec = new IntentExecutor(world, {
       weightsText: intentWeightsText,
       rng: new RNG((seed ^ 0x9e3779b9) >>> 0), // §47：执行器内部 God-AI 独立 RNG
+    })
+  } else if (isGoal) {
+    exec = new GoalExecutor(world, {
+      weightsText: goalWeightsText,
+      rng: new RNG((seed ^ 0x9e3779b9) >>> 0),
+      promiseTicks: promiseTicks || undefined,
+      recordTrace: false,
     })
   }
   const sim = new Simulation(world, (exec ?? scripted) as any)
@@ -226,7 +239,7 @@ function runEvalOne(
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
-    if (!isIntent) {
+    if (!isIntent && !isGoal) {
       encoder.encode(world)
       if (t % K === 0) {
         model!.forward(encoder.obs, encoder.scalars)
@@ -237,7 +250,7 @@ function runEvalOne(
       }
     }
     sim.tick()
-    if (isIntent) exec!.endFrame()
+    if (isIntent || isGoal) exec!.endFrame()
     else scripted.endFrame()
     t++
 
@@ -352,6 +365,8 @@ function main(): void {
   let maxTicks = MAX_TICKS
   let weightsPath = 'tmp/rl-weights/weights.json'
   let intentWeightsPath = ''
+  let goalWeightsPath = ''
+  let promiseTicks = 0
   let policy = 'nn'
   let wver = ''
   let nodeLabel = ''
@@ -366,6 +381,8 @@ function main(): void {
     else if (argv[i] === '--weights') weightsPath = argv[++i]
     else if (argv[i] === '--policy') policy = argv[++i]
     else if (argv[i] === '--intent-weights') intentWeightsPath = argv[++i]
+    else if (argv[i] === '--goal-weights') goalWeightsPath = argv[++i]
+    else if (argv[i] === '--promise-ticks') promiseTicks = parseInt(argv[++i], 10)
     else if (argv[i] === '--wver') wver = argv[++i]
     else if (argv[i] === '--node-label') nodeLabel = argv[++i]
     else if (argv[i] === '--pack') packPath = argv[++i]
@@ -378,6 +395,11 @@ function main(): void {
   mkdirSync(outDir, { recursive: true })
   const weightsText = readFileSync(weightsPath, 'utf8')
   const intentWeightsText = intentWeightsPath ? readFileSync(intentWeightsPath, 'utf8') : ''
+  const goalWeightsText = goalWeightsPath ? readFileSync(goalWeightsPath, 'utf8') : ''
+  if (policy === 'goal' && !goalWeightsText) {
+    console.error('[export-eval-game] --policy goal requires --goal-weights')
+    process.exit(2)
+  }
   const res = runEvalOne(
     stageIdx,
     stage,
@@ -387,6 +409,8 @@ function main(): void {
     weightsText,
     policy,
     intentWeightsText,
+    goalWeightsText,
+    promiseTicks,
   )
   const report = {
     collector: 'RL-eval',

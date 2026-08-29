@@ -47,7 +47,9 @@ function loadWinRates(path?: string): Map<string, number> {
   const start = text.indexOf('{')
   const banner = text.indexOf('[m1-eval] WIN RATE')
   const json = text.slice(start, banner > start ? banner : undefined).trimEnd()
-  const rep = JSON.parse(json) as { perStage?: Array<{ stage?: string; name?: string; winRate: number }> }
+  const rep = JSON.parse(json) as {
+    perStage?: Array<{ stage?: string; name?: string; winRate: number }>
+  }
   for (const s of rep.perStage ?? []) m.set((s.stage ?? s.name) as string, s.winRate)
   return m
 }
@@ -90,14 +92,16 @@ const pct = (v: number | null) => (v === null ? '  n/a' : (v * 100).toFixed(1).p
 const lines: string[] = []
 lines.push('# 地图原型分桶报表')
 lines.push('')
-lines.push(`难度 **${difficulty}** · 共 ${rows.length} 关 · 胜率来源：${arg('report') ?? '（未提供，仅结构分桶）'}`)
+lines.push(
+  `难度 **${difficulty}** · 共 ${rows.length} 关 · 胜率来源：${arg('report') ?? '（未提供，仅结构分桶）'}`,
+)
 lines.push('')
 lines.push('| 关卡 | 胜率 | 中路无钢 | 砖占比 | 钢占比 |')
 lines.push('|---|---|---|---|---|')
 for (const r of rows) {
   lines.push(
     `| ${r.name} | ${pct(r.win)} | ${r.centralBreach ? '**YES**' : 'no'} | ` +
-      `${(r.brickRatio * 100).toFixed(1)}% | ${(r.steelRatio * 100).toFixed(1)}% |`
+      `${(r.brickRatio * 100).toFixed(1)}% | ${(r.steelRatio * 100).toFixed(1)}% |`,
   )
 }
 

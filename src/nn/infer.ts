@@ -305,6 +305,13 @@ export class StudentModel implements ModelLike {
   private enemyB: Float32Array | null
   private anchorW: Float32Array | null
   private anchorB: Float32Array | null
+  // Goal-Space heads (optional, T7 §8.3.0): goal = 1×1 conv (h→1) on bufA (pre-GAP
+  // spatial features) → 26×26 heatmap; engage = 137→2 on hiddenInject. Loaded by
+  // key presence (goal_conv.*), so plain/intent checkpoints are untouched.
+  private goalConvW: Float32Array | null // [h] (outCh=1 × inCh=h)
+  private goalConvB: Float32Array | null // [1]
+  private engageW: Float32Array | null // [2, 137]
+  private engageB: Float32Array | null // [2]
 
   // ---- reusable buffers (no per-tick allocation) ----
   private in16: Float32Array // [16 * board * board] (14 obs + 2 coords)
@@ -322,6 +329,8 @@ export class StudentModel implements ModelLike {
   readonly intentLogits: Float32Array // [8] (M4)
   readonly enemyLogits: Float32Array // [5] (M4)
   readonly anchorLogits: Float32Array // [16] (M4)
+  readonly goalHeatmap: Float32Array // [676] row-major r*26+c (T7)
+  readonly engageLogits: Float32Array // [2] (T7)
 
   constructor(
     params: Record<string, Float32Array>,
@@ -394,6 +403,21 @@ export class StudentModel implements ModelLike {
       this.intentW = this.enemyW = this.anchorW = null
       this.intentB = this.enemyB = this.anchorB = null
     }
+    // Goal-Space heads: loaded by key presence (goal weights JSON carries
+    // goal_conv.*/engage_head.*; intent/BC checkpoints don't). No separate
+    // constructor flag → buildModelFromJson stays byte-identical for old JSONs.
+    const gcw = params['goal_conv.weight']
+    if (gcw) {
+      this.goalConvW = gcw
+      this.goalConvB = params['goal_conv.bias'] ?? new Float32Array(1)
+      this.engageW = params['engage_head.weight'] ?? null
+      this.engageB = params['engage_head.bias'] ?? null
+    } else {
+      this.goalConvW = null
+      this.goalConvB = null
+      this.engageW = null
+      this.engageB = null
+    }
 
     this.in16 = new Float32Array(16 * sp)
     // Coord channels: ch14[r*B+c] = round(c/(B-1)*255), ch15[r*B+c] = round(r/(B-1)*255).
@@ -417,6 +441,8 @@ export class StudentModel implements ModelLike {
     this.intentLogits = new Float32Array(8)
     this.enemyLogits = new Float32Array(5)
     this.anchorLogits = new Float32Array(16)
+    this.goalHeatmap = new Float32Array(sp)
+    this.engageLogits = new Float32Array(2)
   }
 
   forward(obs: Uint8Array, scalars: Float32Array): void {
@@ -457,6 +483,53 @@ export class StudentModel implements ModelLike {
     this.linear(this.hiddenInject, iw, this.intentB as Float32Array, this.intentLogits, 8, 137)
     this.linear(this.hiddenInject, ew, this.enemyB as Float32Array, this.enemyLogits, 5, 137)
     this.linear(this.hiddenInject, aw, this.anchorB as Float32Array, this.anchorLogits, 16, 137)
+    if (this.valueW137) {
+      this.linear(
+        this.hiddenInject,
+        this.valueW137,
+        this.valueB137 as Float32Array,
+        this.valueOut,
+        1,
+        137,
+      )
+    } else {
+      this.valueOut[0] = 0
+    }
+  }
+
+  /**
+   * T7（goal-space，§8.3.0）：goal 热图 + engage + value 三头前向。
+   * inject = Float32Array(9)（§8.1.1 语义，见 src/nn/goal-inject.ts）。
+   * 热图头消费 bufA（stem+d×ConvMixer 后、GAP 前的空间特征）做 1×1 卷积；
+   * engage/value 消费 hiddenInject(137)。与 goal_net.py forward 数值一致
+   * （goal-infer golden 测试锚定，容差 ≤1e-4 §T7.3）。
+   */
+  goalForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void {
+    const gw = this.goalConvW
+    if (!gw) {
+      this.goalHeatmap.fill(0)
+      this.engageLogits.fill(0)
+      this.valueOut[0] = 0
+      return
+    }
+    this.features(obs, scalars)
+    // goal 热图：out[p] = goalConvB[0] + Σ_ic gw[ic] * bufA[ic*sp + p]（Conv2d(h,1,1)）。
+    const sp = this.board * this.board
+    const bias = this.goalConvB![0]
+    for (let p = 0; p < sp; p++) this.goalHeatmap[p] = bias
+    for (let ic = 0; ic < this.h; ic++) {
+      const w = gw[ic]
+      if (w === 0) continue
+      const base = ic * sp
+      for (let p = 0; p < sp; p++) this.goalHeatmap[p] += w * this.bufA[base + p]
+    }
+    this.hiddenInject.set(this.hidden)
+    this.hiddenInject.set(inject, this.headHidden)
+    if (this.engageW && this.engageB) {
+      this.linear(this.hiddenInject, this.engageW, this.engageB, this.engageLogits, 2, 137)
+    } else {
+      this.engageLogits.fill(0)
+    }
     if (this.valueW137) {
       this.linear(
         this.hiddenInject,
@@ -674,6 +747,35 @@ export function buildIntentModelFromJson(json: WeightsJson): IntentModelLike {
 /** 从 JSON 文本解析 intent 模型。 */
 export function buildIntentModelFromText(text: string): IntentModelLike {
   return buildIntentModelFromJson(JSON.parse(text) as WeightsJson)
+}
+
+/**
+ * T7: goal 三头模型的推理面（goalForward + 热图/engage/value）。
+ * valueOut 复用 StudentModel 的 137 宽 value 槽（BC goal checkpoints 无 value 头时读 0）。
+ */
+export interface GoalModelLike {
+  goalForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void
+  readonly goalHeatmap: Float32Array // [676] row-major r*26+c
+  readonly engageLogits: Float32Array // [2]
+  readonly valueOut: Float32Array // [1] — 137 宽 value 头（hiddenInject 消费）
+}
+
+/** 解析 goal 权重 JSON（arch.kind === 'goal'）→ GoalModelLike。 */
+export function buildGoalModelFromJson(json: WeightsJson): GoalModelLike {
+  const params: Record<string, Float32Array> = {}
+  for (const [name, param] of Object.entries(json.params)) {
+    params[name] = b64ToF32(param.data)
+  }
+  const arch = json.arch ?? {}
+  if (arch.kind !== 'goal') {
+    throw new Error(`buildGoalModelFromJson: arch.kind must be "goal", got "${arch.kind}"`)
+  }
+  return new StudentModel(params, arch as { h?: number; d?: number })
+}
+
+/** 从 JSON 文本解析 goal 模型。 */
+export function buildGoalModelFromText(text: string): GoalModelLike {
+  return buildGoalModelFromJson(JSON.parse(text) as WeightsJson)
 }
 
 /** Decode the base64 weights JSON text into a ModelLike. */

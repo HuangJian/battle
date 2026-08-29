@@ -105,11 +105,17 @@ for (const id of INTENT_IDS) {
 const effective = distinct.size
 
 console.log('')
-console.log(`名义决策比特：log2(${nominal}) = ${Math.log2(nominal).toFixed(2)} bit / ${REPLAN} tick`)
+console.log(
+  `名义决策比特：log2(${nominal}) = ${Math.log2(nominal).toFixed(2)} bit / ${REPLAN} tick`,
+)
 console.log(`               = ${(Math.log2(nominal) / REPLAN).toFixed(4)} bit/tick`)
 console.log(`有效决策比特：候选集去重后仅 ${effective} 种不同行为`)
-console.log(`               log2(${effective}) = ${Math.log2(effective).toFixed(2)} bit / ${REPLAN} tick`)
-console.log(`               = ${(Math.log2(effective) / REPLAN).toFixed(4)} bit/tick   << 真实决策权`)
+console.log(
+  `               log2(${effective}) = ${Math.log2(effective).toFixed(2)} bit / ${REPLAN} tick`,
+)
+console.log(
+  `               = ${(Math.log2(effective) / REPLAN).toFixed(4)} bit/tick   << 真实决策权`,
+)
 for (const ids of distinct.values()) {
   console.log(`   等价组: ${ids.join(' = ')}（候选数 ${sets[ids[0]].length}）`)
 }
@@ -119,7 +125,7 @@ const meaningful = [...distinct.values()].filter((ids) => sets[ids[0]].length >=
 console.log(
   `其中候选数 ≥${MIN_MEANINGFUL} 的「有意义」行为 = ${meaningful.length} 种` +
     ` ⇒ log2(${meaningful.length}) = ${Math.log2(meaningful.length).toFixed(2)} bit / ${REPLAN} tick` +
-    ` = ${(Math.log2(meaningful.length) / REPLAN).toFixed(4)} bit/tick`
+    ` = ${(Math.log2(meaningful.length) / REPLAN).toFixed(4)} bit/tick`,
 )
 
 // ---- 回归断言：词表退化结论必须仍成立（漂移即报警）----

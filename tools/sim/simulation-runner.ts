@@ -2,6 +2,7 @@ import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { NNInput } from '../../src/nn/policy-input'
+import { GoalExecutor } from '../../src/nn/goal-executor'
 import { IntentPlayer } from '../../src/nn/intent-player'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
@@ -421,12 +422,17 @@ export interface RunOptions {
   stageIndex?: number
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
-  /** Player policy for the headless run: 'god' (default), 'nn' or 'intent'. */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle'
+  /** Player policy for the headless run: 'god' (default), 'nn', 'intent',
+   *  'intent-exec', 'intent-oracle' or 'goal' (T8.5 goal-space 执行器). */
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
   intentWeightsDir?: string
+  /** Weights JSON file for the 'goal' policy (T8.5). */
+  goalWeightsDir?: string
+  /** Goal 承诺期 T ticks（0/缺省 = 执行器默认 240）。 */
+  promiseTicks?: number
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
@@ -436,6 +442,8 @@ export interface RunOptions {
   /** 返回 intent-exec 策略每 replan 的原始 argmax 意图 trace（只读，零 RNG，默认关）。
    *  intent 用作 rollout 意图分布探针（意图分布熵 / HUNT 占比）。 */
   recordIntentTrace?: boolean
+  /** 返回 goal 策略的重选 trace（T0-goal 遥测；只读，默认关）。 */
+  recordGoalTrace?: boolean
   /** Max ticks before stopping (default: MAX_TICKS). */
   maxTicks?: number
   /** Sample metrics every N ticks (default: 1 = every frame). */
@@ -622,7 +630,13 @@ export function runSimulation(opts: RunOptions): SimResult {
                 seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
                 replanEvery: opts.replanEvery,
               }) as unknown as GodAIInput)
-            : new GodAIInput(world, godAIParams, godRng)
+            : opts.policy === 'goal'
+              ? (new GoalExecutor(world, {
+                  weightsText: readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
+                  rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
+                  promiseTicks: opts.promiseTicks || undefined,
+                }) as unknown as GodAIInput)
+              : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
@@ -1131,6 +1145,15 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   if (opts.branchTotals === true) {
     result.branchTotals = { ...input.branchCounts }
+  }
+
+  if (opts.recordGoalTrace === true && opts.policy === 'goal') {
+    const gx = input as unknown as {
+      reselectTrace?: Array<{ tick: number; cell: number; clause: string; outcome: string }>
+    }
+    if (gx.reselectTrace && gx.reselectTrace.length) {
+      ;(result as { goalReselectTrace?: unknown }).goalReselectTrace = gx.reselectTrace
+    }
   }
 
   if (

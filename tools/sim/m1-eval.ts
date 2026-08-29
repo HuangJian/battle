@@ -85,9 +85,12 @@ async function main(): Promise<void> {
   const seedSpec = arg('seeds', '1-10')!
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const policy =
-    (arg('policy', 'nn') as 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle') ?? 'nn'
+    (arg('policy', 'nn') as 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal') ??
+    'nn'
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
+  const goalWeights = arg('goal-weights')
+  const promiseTicks = parseInt(arg('promise', '0')!, 10) // goal 承诺期 T（0 = 默认 240）
   const replan = parseInt(arg('replan', '0')!, 10) // M7① cadence 扫描（0 = 策略默认）
   const riskGated = arg('risk-gated') === '1' || arg('risk-gated') === 'true'
   const baseCadence = parseInt(arg('base-cadence', '0')!, 10)
@@ -145,6 +148,8 @@ async function main(): Promise<void> {
         policy,
         nnWeightsDir: weightsDir,
         intentWeightsDir: intentWeights,
+        goalWeightsDir: goalWeights,
+        promiseTicks: promiseTicks || undefined,
         replanEvery: replan || undefined,
         riskGated,
         baseCadence: baseCadence || undefined,
@@ -179,15 +184,28 @@ async function main(): Promise<void> {
 
   // v3.8：--dist-nodes 提供时，评估任务经 HTTP 派发到 rollout agent（云机算力），
   // 本机 worker 同时并行参与（--dist-local 控制本机并发，0=纯远端；缺省全核）。
-  // dist 模式须 policy=intent-exec（NN 前向重，适合外派）。
+  // dist 白名单（T8.5：NN 前向重的策略适合外派）——表驱动，新增策略在此扩一行。
+  const DIST_POLICIES: Record<string, 'intent' | 'goal'> = {
+    'intent-exec': 'intent',
+    goal: 'goal',
+  }
   let results: import('./sim-worker').SimTaskResult[]
   if (distNodesPath) {
-    if (policy !== 'intent-exec') {
-      process.stderr.write('[m1-eval] --dist-nodes requires --policy intent-exec\n')
+    const distKind = DIST_POLICIES[policy]
+    if (!distKind) {
+      process.stderr.write(
+        `[m1-eval] --dist-nodes requires --policy ${Object.keys(DIST_POLICIES).join('|')}\n`,
+      )
       process.exit(2)
     }
-    if (!intentWeights) {
-      process.stderr.write('[m1-eval] --dist-nodes requires --intent-weights\n')
+    if (distKind === 'intent' && !intentWeights) {
+      process.stderr.write(
+        '[m1-eval] --dist-nodes --policy intent-exec requires --intent-weights\n',
+      )
+      process.exit(2)
+    }
+    if (distKind === 'goal' && !goalWeights) {
+      process.stderr.write('[m1-eval] --dist-nodes --policy goal requires --goal-weights\n')
       process.exit(2)
     }
     const distLocal = parseInt(arg('dist-local', String(workers))!, 10) // 本机并发，缺省 = --workers 全核
@@ -196,7 +214,8 @@ async function main(): Promise<void> {
       distNodesPath,
       distLocal,
       iterId,
-      intentWeights,
+      distKind === 'goal' ? (goalWeights as string) : (intentWeights as string),
+      distKind,
       reportProgress,
     )
   } else {
@@ -446,7 +465,8 @@ async function runHybrid(
   nodesPath: string,
   localWorkers: number,
   iterId: string,
-  intentWeightsPath: string,
+  weightsPath: string,
+  distKind: 'intent' | 'goal' = 'intent',
   onProgress: (done: number, total: number) => void,
 ): Promise<import('./sim-worker').SimTaskResult[]> {
   const cfg = JSON.parse(readFileSync(nodesPath, 'utf8')) as { nodes?: DistNodeCfg[] }
@@ -460,7 +480,7 @@ async function runHybrid(
     `[m1-eval] hybrid dispatch: ${nodes.length} nodes (${remoteCap} slots) + local ${localCap}, ${tasks.length} games\n`,
   )
 
-  const bytes = readFileSync(intentWeightsPath)
+  const bytes = readFileSync(weightsPath)
   const wver = createHash('sha256').update(bytes).digest('hex')
 
   const results: import('./sim-worker').SimTaskResult[] = new Array(tasks.length)
@@ -533,7 +553,7 @@ async function runHybrid(
             const url =
               `${node.url}/v1/task?iterId=${encodeURIComponent(iterId)}&wver=${wver}` +
               `&stage=${task.stageIndex}&seed=${task.seed}&maxTicks=${task.maxTicks}` +
-              `&difficulty=${task.difficulty}&mode=eval&kind=intent&policy=intent-exec`
+              `&difficulty=${task.difficulty}&mode=eval&kind=${distKind}&policy=${distKind === 'goal' ? 'goal' : 'intent-exec'}`
             let ok = false
             // 退避重试（§30 启发）：agent 忙（503 busy / HTTP 错误）时尊重 Retry-After
             // 或阶梯退避，熬过 rollout 尾巴与 eval 并发的忙窗——纯 2 连击失败会把
