@@ -63,7 +63,7 @@ export interface SimTask {
   powerupCensus?: boolean
   /** Player policy: 'god' (default), 'nn', 'intent' (stub), 'intent-exec' (M6),
    *  'intent-oracle' (M7① 探针) or 'goal' (T8.5 goal-space 执行器). */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal'
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god'
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */

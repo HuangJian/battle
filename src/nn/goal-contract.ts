@@ -135,7 +135,12 @@ export function makeGoalContract(
   travelEst: number,
   force = false,
 ): GoalContract | null {
-  if (!force && travelEst > T) return null
+  // 可满足性（§6.1.1 的实现修订，2026-08-29）：只拒绝**不可达**（travelEst = ∞）。
+  // 原"travelEst ≤ T 否则拒绝"在 T=240（=心跳/承诺期）下把可承诺目标限死在 ~10 格
+  // 半径内——坦克到达首个目标后任何更远目标被永久拒绝 ⇒ 冻结在原地（T9a 门失败
+  // 的根因，实测 989 tick 走 5 格）。T 的职责是重评估节奏（E4），不是移动拴绳。
+  void force
+  if (!Number.isFinite(travelEst)) return null
   return { cell, premise: makeDefaultPremise(world), T, travelEst, bornTick: tick }
 }
 

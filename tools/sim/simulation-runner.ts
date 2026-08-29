@@ -424,7 +424,7 @@ export interface RunOptions {
   godAIParams?: GodAIParams
   /** Player policy for the headless run: 'god' (default), 'nn', 'intent',
    *  'intent-exec', 'intent-oracle' or 'goal' (T8.5 goal-space 执行器). */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal'
+  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
@@ -630,11 +630,17 @@ export function runSimulation(opts: RunOptions): SimResult {
                 seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
                 replanEvery: opts.replanEvery,
               }) as unknown as GodAIInput)
-            : opts.policy === 'goal'
+            : opts.policy === 'goal' || opts.policy === 'goal-god'
               ? (new GoalExecutor(world, {
-                  weightsText: readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
+                  weightsText:
+                    opts.policy === 'goal-god'
+                      ? ''
+                      : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
                   rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
                   promiseTicks: opts.promiseTicks || undefined,
+                  // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
+                  // 测执行器上限。不构建模型 ⇒ weights 可缺。
+                  followGodNav: opts.policy === 'goal-god',
                 }) as unknown as GodAIInput)
               : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)

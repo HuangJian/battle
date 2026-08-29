@@ -110,11 +110,12 @@ describe('goal-contract（T8-min：E1/E3/E5/E4 + 固定 T）', () => {
     expect(evaluateContract(c, world, { ...baseCtx, goalMaskedOut: true })).toBe('E3')
   })
 
-  it('makeGoalContract：travelEst > T 的不可满足契约被拒绝', () => {
+  it('makeGoalContract：不可达（travelEst=∞）被拒绝；远距目标不再被 T 拒绝（2026-08-29 修订）', () => {
     const world = seedWorld(42)
     world.loadStageData(openArena(), 0)
-    expect(makeGoalContract({ col: 8, row: 10 }, world, 100, 180, 181)).toBeNull()
-    expect(makeGoalContract({ col: 8, row: 10 }, world, 100, 180, 180)).not.toBeNull()
+    expect(makeGoalContract({ col: 8, row: 10 }, world, 100, 180, Infinity)).toBeNull()
+    // travelEst 远超 T 仍可承诺（T 是重评估节奏，不是移动拴绳——§6.1.1 实现修订）
+    expect(makeGoalContract({ col: 8, row: 10 }, world, 100, 180, 5000)).not.toBeNull()
   })
 
   it('确定性：同输入双跑 premise label 一致；零 world.rng 消费', () => {

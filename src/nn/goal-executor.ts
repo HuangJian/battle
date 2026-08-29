@@ -69,6 +69,12 @@ export interface GoalExecutorOptions {
    * weightsText 可省略（executor 不构建模型）。
    */
   goalPick?: (obs: Uint8Array, scalars: Float32Array, inject: Float32Array, tick: number) => number
+  /**
+   * 诊断模式（executor-ceiling 对照，§T9a 门失败归因）：不跑网络，每心跳直接采用
+   * God-AI 全链的导航目标格作为 goal —— "目标选择 = God-AI 口径"时执行器本身的
+   * 上限测量。与网络模式互斥；设置时 weightsText 可省略。
+   */
+  followGodNav?: boolean
   /** T0-goal 遥测：记录每次重选（低频，仅显式开启时）。 */
   recordTrace?: boolean
 }
@@ -124,10 +130,14 @@ export class GoalExecutor implements InputLike {
   /** T0-goal 遥测（recordTrace 时填充）。 */
   readonly reselectTrace: GoalReselect[] = []
 
+  private followGodNav: boolean
+
   constructor(world: World, opts: GoalExecutorOptions) {
     this.world = world
     this.goalPick = opts.goalPick
-    this.model = opts.goalPick ? null : buildGoalModelFromText(opts.weightsText ?? '')
+    this.followGodNav = opts.followGodNav === true
+    this.model =
+      opts.goalPick || this.followGodNav ? null : buildGoalModelFromText(opts.weightsText ?? '')
     this.god = new GodAIInput(world, opts.godParams ?? { ...DEFAULT_GOD_AI_PARAMS }, opts.rng)
     this.promiseTicks = opts.promiseTicks ?? 240
     this.lambda = opts.lambda ?? GOAL_MASK_LAMBDA_DEFAULT
@@ -265,7 +275,25 @@ export class GoalExecutor implements InputLike {
 
     const maskReady = this.ensureMask()
     let idx = -1
-    if (this.goalPick) {
+    if (this.followGodNav) {
+      // 诊断：God-AI 导航目标（_navCache 未命中时投影）；过顶点合法性即可。
+      let tc: number
+      let tr: number
+      if (this.god._navCacheValid) {
+        tc = this.god._navTargetCol
+        tr = this.god._navTargetRow
+      } else {
+        const pc0 = this.playerCell()
+        const d = this.god._moveDir
+        const dx = d === 'left' ? -1 : d === 'right' ? 1 : 0
+        const dy = d === 'up' ? -1 : d === 'down' ? 1 : 0
+        tc = pc0.col + dx * 4
+        tr = pc0.row + dy * 4
+      }
+      tc = Math.max(0, Math.min(GRID - 1, tc))
+      tr = Math.max(0, Math.min(GRID - 1, tr))
+      idx = tr * GRID + tc
+    } else if (this.goalPick) {
       idx = this.goalPick(this.encoder.obs, this.encoder.scalars, inject, f)
     } else if (this.model) {
       this.model.goalForward(this.encoder.obs, this.encoder.scalars, inject)
@@ -349,9 +377,13 @@ export class GoalExecutor implements InputLike {
     if (this.recordTrace) this.reselectTrace.push({ tick: f, cell: idx, clause, outcome })
   }
 
-  /** top-K 可满足扫描：按 heat+mask 降序找第一个 travelEst ≤ T 的格；无则 -1。 */
+  /**
+   * top-K 可达性扫描（2026-08-29 修订）：按 heat+mask 降序找第一个**可达**格
+   * （travelEst 有限 ⇒ 掩码有限）；不可达格跳过。T 不再过滤远距目标（见
+   * makeGoalContract 修订注——T 是重评估节奏，不是移动拴绳）。
+   */
   private satisfiableIdx(argmaxIdx: number): number {
-    if (!this.model) return argmaxIdx // RL 模式：采样动作直接提交（训练语义）
+    if (!this.model) return argmaxIdx // RL/诊断模式：采样/导航动作直接提交
     const heat = this.model.goalHeatmap
     const mask = this.masker.mask(this.lambda)
     const topIdx = this.topIdx
@@ -378,7 +410,7 @@ export class GoalExecutor implements InputLike {
       if (idx < 0) break
       const col = idx % GRID
       const row = (idx - col) / GRID
-      if (this.estimateTravelTicks(col, row) <= this.promiseTicks) return idx
+      if (Number.isFinite(this.estimateTravelTicks(col, row))) return idx
     }
     return -1
   }
@@ -393,7 +425,7 @@ export class GoalExecutor implements InputLike {
     const k = this.masker.k[row * GRID + col]
     const kCost = k === 65535 ? CARVE_TICKS_PER_BRICK * 8 : k * CARVE_TICKS_PER_BRICK
     if (carve) return carve.length * MARCH_TICKS_PER_CELL + kCost
-    return Number.MAX_SAFE_INTEGER // 不可达
+    return Infinity // 不可达（makeGoalContract 的 isFinite 检查依赖此哨兵）
   }
 
   /** 邻域最近可达格（回退第 2 步）：min (k, 距离) 的有限 k 格。 */

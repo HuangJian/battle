@@ -192,7 +192,7 @@ function runEvalOne(
   // 替代 RL 学生模型贪心。intent-weights 经 --intent-weights 单独提供。
   const isIntent = policy === 'intent-exec'
   // T8.5：policy='goal' → goal-space 执行器驱动（NN 选目标格 + L2 路径跟随 + 契约）。
-  const isGoal = policy === 'goal'
+  const isGoal = policy === 'goal' || policy === 'goal-god'
   const model =
     isIntent || isGoal ? null : (buildModelFromText(weightsText) as unknown as RolloutModel)
   const scripted = new ScriptedInput()
@@ -208,6 +208,7 @@ function runEvalOne(
       rng: new RNG((seed ^ 0x9e3779b9) >>> 0),
       promiseTicks: promiseTicks || undefined,
       recordTrace: false,
+      followGodNav: policy === 'goal-god',
     })
   }
   const sim = new Simulation(world, (exec ?? scripted) as any)
