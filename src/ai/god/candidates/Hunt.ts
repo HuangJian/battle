@@ -10,7 +10,7 @@ import { travelFireDetourDir } from '../ActionCandidates'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { survivalPressure } from '../EnemyModel'
 import { scanAheadImpl, shouldFireBreakThroughImpl } from '../FireControl'
-import { iceGlideAdjust } from '../Navigator'
+import { iceGlideAdjust, pursuitTailDirImpl, PURSUIT_TAIL_HOLD } from '../Navigator'
 import { carveFireAheadImpl, carvePathInfoCached, findCarveEscapeImpl } from '../PathCarve'
 import { enemyCanBreachRing, enemyCanShootBase } from '../SmartThreatModel'
 import {
@@ -598,6 +598,46 @@ export function evalHunt(self: GodAIInput, ctx: DecisionContext): boolean {
   const navTarget = selectHuntNavTarget(self, w, pc, navStuck)
   const navDist = navTarget ? manhattan(navTarget.col, navTarget.row, pc.col, pc.row) : Infinity
   pickHuntMoveDir(self, ctx, pc, navTarget, navDist, navStuck)
+
+  // §302: pursuit-tail lane merge — HUNT chase only. Overrides the movement
+  // direction when the tail geometry applies (default OFF = byte-identical).
+  // The fire chain below stays shared, and both safety nets that follow
+  // (§182 face-enemy fallback, §85 close-combat exposure) still run on top of
+  // the overridden direction, so the merge can never park the player with its
+  // back to a close enemy. `allowBreak` is limited to the close-range
+  // directMove regime: at long range A* owns the corridor route, and a brick
+  // detour there would dig the player out of it.
+  if (!navStuck && !self._carveDigActive && self.params.pursuitTailMode > 0) {
+    const tailDir = pursuitTailDirImpl(self, p, pc, navTarget, navDist <= 5)
+    if (tailDir === PURSUIT_TAIL_HOLD) {
+      // §302 yield-then-tail: the target is level with / closing on the
+      // player — cut nothing, release the throttle and let it sweep past
+      // this row, then merge behind it (user directive 2026-08-29).
+      // `_moveDir = null` is the chain's established hold value (§182
+      // face-enemy fallback, §153 wait-for-bullet); the fire chain below
+      // falls back to `p.dir`, and the §182/§85 nets still run on top.
+      if (self._moveDir !== null) {
+        self._pursuitTailChanged++
+        self._pursuitTailLastPrev = self._moveDir
+      }
+      self._moveDir = null
+      self._pursuitTailOverrides++
+      self._pursuitTailHolds++
+    } else if (tailDir) {
+      // §302 diag: how often the override actually CHANGES the direction the
+      // normal HUNT chain had already picked. A merge command that happens to
+      // equal directMove's own pick is a no-op on screen — counting those as
+      // "merge scenes" is what produced review clips with no visible lane
+      // change (2026-08-29). Only `changed` ticks are real merge behaviour.
+      const prev = self._moveDir
+      if (prev !== tailDir) {
+        self._pursuitTailChanged++
+        self._pursuitTailLastPrev = prev
+      }
+      self._moveDir = tailDir
+      self._pursuitTailOverrides++
+    }
+  }
 
   if (tryFaceEnemyFallback(self, ctx, pc)) return true
   if (applyCloseCombatExposure(self, ctx)) return true

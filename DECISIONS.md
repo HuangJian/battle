@@ -1037,3 +1037,46 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 > 全文 → docs/god-ai-tuning.progress.md Part 0.1（2026-08-28 解冻纪元基线 / golden 重钉）
 
 > （编号冲突：与 §293-intent「M4 完成」撞号，见头部「编号冲突注」；两者编号均被外部引用，保持不动）
+
+## 302. 追尾导航（pursuit-tail / 并入目标车道后方）— 三轮归档：用户规格的等待后并道（am=3）净 +29 为全程序最佳，仍噪声带内，维持 OFF _(STATUS 已被 §303 取代：2026-08-29 用户拍板启用，见下条)_(原 STATUS: 否决, 默认 0 = OFF, 2026-08-29)
+
+> 全文 → docs/god-ai-tuning.progress.md §302（§1–6 一轮 modes 1–6；§7–8 二轮
+> mode 7；§9 三轮 AlongMode=3 三版）
+
+> 来源 plan/Intent-Policy-NN-Plan.md §12.1 #3（执行器实施层缺陷）。实现 = `pursuitTailDirImpl`
+> （Navigator.ts，HUNT 内 `_moveDir` 覆写，射击链路共用）。三轮 hard 35×60 配对 A/B：
+> ①modes 1–6 净 −35…+8 全噪声；②mode 7 拆分出**唯一显著信号 am=2 仅侧方/前方 净 −58
+> (t=−2.79)**——切入挡路且朝向横向；③**用户拍板 AlongMode=3 等待后并道**并经三轮复核
+> 修正：v1 hold 对但并道半途夭折（`laneGap===2` 门控在 gap→1 交还 directMove 被拽回）；
+> v2 全程接管横移；v3（用户二次复核 s21@30 抓出）`along=−2` 是取整值、目标半格下行时
+> **车身仍物理挡住滑行脚印**，交还 directMove 会下追把身位贴回去（振荡 1.5s）——修正为
+> 滑行被拒且拒者是目标车身时 HOLD 等间隙自行张开。最终语义 = 自包含状态机：
+> `along ∈ [−1,+窗]` hold；`along ≤ −2` 且像素级不被卡 → 接管横移 gap∈{1,2} 直到 gap 0；
+> 上道交还纵向追击开火。剂量：Δwin +6/75、击杀首次反超（1413 vs 1358）、aligned +223、
+> 在车道 7.28%→9.26%。全量**净 +29（319/290）= 全程序最佳**，版本弧线 −39/−58/+1/−4/
+> +16/**+29** 随机制完整度单调改善，但 < 2SE≈49 ⇒ 按 §6.3b 不转 ON。
+> 维持 `pursuitTailMode: 0`，ARCHIVED_KNOB_GROUPS 不变；归档构型 am=0/1/2 路径逐指令未动
+> （基线臂三次 A/B 均 1581）。工具 `tools/diag/pursuit-tail-{probe,flip,scenes,export}.ts`
+> + `tmp/s302-diag21-30.ts`（tgtBlk/othBlk 逐 tick 诊断）留用；复核录像
+> `tmp/s302-replays3/`（全 MATCH ✓，含 s21@30 结局翻转 gameover→stageclear）。
+
+## 303. 启用追尾导航 — pursuitTailMode=7 + AlongMode=3 默认 ON（用户拍板，新纪元三件套完成）(STATUS: 已实施, 2026-08-29)
+
+> 用户决策：净 +29 已足够好，启用。随后按 §6.3b 完成新纪元三件套：
+> ①本条目；②冻结签名 golden 重钉 `7b2e5097…`（tools/det-golden.v1.sha256，
+> 采集于启用后）；③score-gate TRUTH_SCORES 第五次重捕获 + 三难度 60-seed
+> eval-suite v7 基线（docs/god-ai-tuning.progress.md §303）。
+>
+> **默认**：`pursuitTailMode: 7, pursuitTailAlongMode: 3`（yield-then-tail 状态机，
+> 语义见 §302/progress §9）。**classic 经 CLASSIC_OVERRIDES 保持 0 = 字节不变**
+>（instant 1-HP 池未 A/B，复刻一致性门槛）；**chaos 继承默认 = ON**。
+>
+> **代价记录**：score-gate v7 口径 hard 0.7663→**0.7890（+2.26pt）**、
+> chaos 0.7562→**0.7337（−2.25pt）**、classic 0.8697→0.8697（0.0000）。
+> hard（官方主调难度）胜率净 +29；chaos 的 score 下滑是已知代价，胜率口径
+> 未单独测量——若 chaos 体验需要，可给 CHAOS_OVERRIDES 置 0（一行动手），
+> 用户未要求，不预置。
+>
+> **连带修复**：`laneShotClear` 增加目标车道坐标的越界守卫（横向分支此前只守列
+> 不守行；测试夹具的越界敌格使其显形）。NN 训练语料：训练用 God-AI 对手行为
+> 随此启用改变，无道具口径语料如需再生另行处理（nn.progress.md 不涉架构变更）。
