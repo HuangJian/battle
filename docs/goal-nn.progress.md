@@ -38,6 +38,16 @@ S2 门（方案 §2.1）：全歼 ≥80% + 受伤 ≤1.2×锚(0.01) + 存活 ≥
 `--stream 1`；③AGENTS §15.6 新规：RL 训练默认 stream（run_rl 代码默认 0→1），
 串行仅调试用；新增 backend 必须实现完整 stream 契约。
 
+### 二次"35 关意外"——config 默认值 authored bug（2026-08-30 晚，自省）
+rl 块提炼时照抄了 intent_rl 的 `rotate_stages: 35`，且 `--rotate-stages` 默认接
+`_d("rotate_stages", 0)` ⇒ config 的 35 覆盖了显式意图 0 ⇒ S2 战役静默跑成
+rotate 模式（真实 35 关 × 10 seed = 350 局，`--stages 1010-1012` 被 rotate 模式
+忽略）。修复：`rl.rotate_stages → 0`（arena 战役显式模式；真实关 rotate 属各
+战役显式传参）+ 启动命令显式 `--rotate-stages 0` + 清目录重跑。
+**教训**：config 化默认值 = 把"启动命令里看不见的语义"搬进配置文件——每个键都
+要过一遍"这个默认对所有未来战役都安全吗"；rotate_stages 这类**切换器**的默认值
+必须取保守态（0=off），非拷贝他人块。
+
 ### 节点池卫生（待用户节点侧处理）
 - lite：7b0beea↔8a319c0 三次横跳，疑节点侧 pull 分支竞争或双 agent，需上机排查
 - a95：停在 3a9b907（codeHash 恰好正确——3a9b907 后无 hash 集内改动），需正常
