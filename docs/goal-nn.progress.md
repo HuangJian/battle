@@ -4,6 +4,30 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §11 文档同步：决策包 §297 归档 + S2 进行中（2026-08-30 晚）
+
+**S1 过门确认**（§10）后至本条的增量，全部决策已归档 **DECISIONS §297**（一次
+读齐，不再散落 commit message）：
+
+| # | 决策 | 触发证据 |
+|---|---|---|
+| 1 | 奖励臂 **kill2**（wAlive→0） | A4 贪心塌缩诊断；S1 重开 17 iters 97-100% 过门 |
+| 2 | **A4b 缓期** | S1-only 学生缺 S2/S3 技能，真实关复测结构性无解 |
+| 3 | **L0 退场判据更换** | off vs l0 逐位一致（强权重 L0 惰性）；红线 = off deaths/局 + alive-ticks |
+| 4 | **eval 门控升难** | 新档 eval>80%（5 迭代趋势）进档；rollout<50% 降档 |
+| 5 | **arena 自评**（--eval-stages） | 真实关评估对 S2 实验无意义；EVAL_SEEDS 扩至 20 |
+| 6 | **stream 默认**（AGENTS §15.6） | 串行闲置集群 ~50% 墙钟；ppo.update 别名补齐 |
+| 7 | **rl-config rl 块**（11 项机制默认） | "config 键被忽略"类别根治；切换器默认取保守态（二次 35 关意外免疫） |
+
+**AGENTS §15 落地**（用户确认后）：闭环训练语料纪律五条——语料逐轮轮转 /
+微课只配当哨兵 / 部署口径单独评估 / 大批量稳 KL / 换语义=换实验；细节与
+s1-cap 案例进 docs/agents.details.md §15。
+
+**S2 进行中**（tmp/s2-cap，stream + local_slots=10 + dodge off）：it1 = 33%
+（150 全新局，诚实基线），arena 自评 60 局/迭代已上线（s1012 timeout 但
+2/3 击杀，quality 0.82——比 S1 同期低，符合升档预期）。检点：eval<80% 且
+rollout<50% ⇒ 降档减敌；eval>80% 连续 5 迭代 ⇒ 过门进 S3。
+
 ## §10 S1 过门 + S2 升档 + 节点池运营（2026-08-30 下午–晚间）
 
 ### S1 封顶实验：**过门**（回答了"路线成立吗"）
