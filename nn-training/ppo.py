@@ -277,6 +277,12 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
     return agg
 
 
+# rl/stream.py 的 backend 契约要求模块暴露 update(...)（intent 的 ppo_intent 已有）；
+# 普通训练器的流式路径（run_rl.py --stream 1）此前从未被拉通——补此别名。
+# 签名与 ppo_update 完全一致（ckpt_path 经 update_kwargs 透传）。
+update = ppo_update
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--init-from", type=str, default=None, help="BC weights to warm-start from (init mode)")
