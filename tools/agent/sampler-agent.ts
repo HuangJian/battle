@@ -27,6 +27,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+// 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
+// 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
+const _agentLog = console.log.bind(console)
+const _agentLogErr = console.error.bind(console)
+const _ts = (): string => new Date().toLocaleTimeString('sv-SE')
+console.log = (...a: unknown[]): void => _agentLog(`[${_ts()}]`, ...a)
+console.error = (...a: unknown[]): void => _agentLogErr(`[${_ts()}]`, ...a)
+
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..')
 const AGENT_AUTH_PATH = path.join(import.meta.dir, 'agent.auth')
 const WORK_DIR = path.join(REPO_ROOT, 'tmp', 'dist-agent')
