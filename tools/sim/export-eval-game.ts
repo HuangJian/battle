@@ -27,6 +27,7 @@ import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
+import { createHash } from 'node:crypto'
 import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
@@ -257,6 +258,11 @@ export function runEvalOne(
       encoder.encode(world)
       if (t % K === 0) {
         model!.forward(encoder.obs, encoder.scalars)
+        if (t === 0 && process.env.EVAL_DEBUG) {
+          console.error(
+            `[dbg] weightsSha=${createHash('sha256').update(weightsText).digest('hex').slice(0, 12)} move=[${Array.from(model!.moveLogits).map((x) => x.toFixed(2))}] fire=[${Array.from(model!.fireLogits).map((x) => x.toFixed(2))}]`,
+          )
+        }
         const masks = computeMasks(world)
         const mv = argmaxCat(model!.moveLogits, masks.move)
         const fr = argmaxCat(model!.fireLogits, masks.fire)
@@ -430,7 +436,11 @@ function main(): void {
     goalWeightsText,
     promiseTicks,
   )
+  // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
+  // 排查教训——无指纹时静默回退无法被发现）。
+  const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 12)
   const report = {
+    weightsSha,
     collector: 'RL-eval',
     rewardScheme: 'v7-pure',
     difficulty,
