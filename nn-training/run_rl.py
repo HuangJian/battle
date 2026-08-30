@@ -89,23 +89,32 @@ def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
         import numpy as np
         import torch
 
-        def _sample_real_obs(n: int = 32) -> torch.Tensor | None:
-            """从既有 shard 里抓真实 obs（任意最近一次 rollout 的）；抓不到用合成兜底。"""
+        def _sample_real_obs(n: int = 16) -> torch.Tensor:
+            """真实 obs 校准样本：多个最近 shard 各取一层 + 合成极端（全零/全亮/条纹），
+            取并集——单一 shard 可能是退化样本（全暗 obs 曾让 feat_max=1，α 放大 14x
+            把已归一的 trunk 再抬爆，2026-08-30 s1-cap 首启实测）。"""
             import glob
+            import os
 
-            for path in glob.glob(str(REPO_ROOT / "tmp" / "*" / "it*" / "**" / "obs.npy"),
-                                  recursive=True)[:4]:
+            paths = sorted(
+                glob.glob(str(REPO_ROOT / "tmp" / "*" / "it*" / "**" / "obs.npy"),
+                          recursive=True),
+                key=os.path.getmtime,
+                reverse=True,
+            )[:8]
+            chunks: list[torch.Tensor] = []
+            for p_ in paths:
                 try:
-                    arr = np.load(path, mmap_mode="r")
-                    if arr.ndim == 4 and arr.shape[0] >= 1:
-                        take = arr[:n]
-                        return torch.from_numpy(np.ascontiguousarray(take))
+                    arr = np.load(p_, mmap_mode="r")
+                    if arr.ndim == 4 and arr.shape[1] == 14 and arr.shape[0] >= 1:
+                        chunks.append(torch.from_numpy(np.ascontiguousarray(arr[:n])))
                 except Exception:
                     continue
-            obs = torch.zeros(n, 14, 26, 26, dtype=torch.uint8)
-            obs[1] = 255
-            obs[2, :, ::2] = 255
-            return obs
+            synth = torch.zeros(3, 14, 26, 26, dtype=torch.uint8)
+            synth[1] = 255
+            synth[2, :, ::2] = 255
+            chunks.append(synth)
+            return torch.cat(chunks, dim=0)
 
         def warm_start_normalize(model: torch.nn.Module) -> None:
             TRUNK = ("stem.", "blocks.", "fc.")
