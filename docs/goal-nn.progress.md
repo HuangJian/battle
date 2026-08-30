@@ -4,6 +4,62 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §15 A4b 复测**通过** + P0-1 遥测修复 + S3 启动（2026-08-31 凌晨，goal-nn-next 卡）
+
+### A4b 复测（卡 P1-2：S2 出口立即触发，硬闸）—— **过** ✅
+- 协议（方案 §4.3）：真实 hard STAGES 0–3 × 60 seed = 240 局，与随机权重基线**同 seed
+  配对**，走 `.ledger.jsonl`；判据 = 胜率 ≥ 基线 +5pp **且** 中位存活 tick 高于基线。
+- 基线 = `tmp/scratch-init/weights.json`（近均匀 scratch init，N=240）；候选 = S2 过门权重
+  `tmp/s2-cap/weights.json`（它16）。
+- **结果（2026-08-31 01:00，双臂各 240 局，同 seed）**：
+  | 臂 | 胜 | 胜率 | 中位存活 tick |
+  |---|---|---|---|
+  | 随机基线 | 0 | 0.0% | 3299 |
+  | **S2 权重** | **37** | **15.4%** | **3536** |
+- **判定：双判据皆正 ⇒ 过闸**（15.4 ≥ 0+5 pp；3536 > 3299）。对比 §9 旧判定（A4-warm
+  0% / 中位存活 2274 < 3299 = 门败）——S2/新配方（kill2 + seed-rotate + 量级归一化）在
+  真实关**首次实测到正迁移**。二阶段（S3–S4b）解锁。
+- 产物：`reports/p1-random-baseline-S2.html.{html,ledger.jsonl}`、`reports/migration-probe-S2.html.{html,ledger.jsonl}`。
+
+### P0-1 修 eval 遥测矛盾 —— **已修 + 锚值核验通过**
+- **根因查清（实测，非猜）**：reward-sweep 时代 shots=0 属一次性路径残留；当前
+  `export-rl-rollout` 遥测本就正常（实测 shotsPerGame=8.75）。**真正的口径 bug 有两个**：
+  1. **outcome 枚举不齐**：`runSimulation`(本地/锚) 用 `SimOutcome`
+     （'max_ticks'/'gameover'/'stage_clear'），`runEvalOne`（m1-eval 远程分发）用
+     'timeout'/'base_destroyed'/'lives_exhausted' ⇒ 同批内 本地/远程 结果在 ledger/报告层
+     **不可比**（门判与配对评估会判错）。**修复**：`export-eval-game.ts` 对齐 SimOutcome，
+     细分归一 'gameover' + 新增 `lossDetail` 字段透出；`EvalResult.outcome` 类型收紧。
+  2. **kills 双口径（语义差异，非 bug，已记录）**：`world.killCount` = 敌人阵亡总数
+     （含地雷/友军 AoE 殃及，KillPipeline 记账）；事件流 `by==='player'` = 玩家直接击杀。
+     双侧评估（锚与 candidate）**统一用 killCount 即自洽**（runEvalOne ≡ runSimulation
+     killCount 对账已单测锁定）。
+- **交叉校验单测**（`tests/sim/telemetry-parity.test.ts`，独立 re-implementation 非复制实现）：
+  ① 事件流重算 vs `RunTelemetry`：shots/deaths 全等、kills ≤ killCount 守恒；
+  ② `player_hit` 与死亡口径兼容（death≥1 ⇒ hits≥deaths）；
+  ③ 分发对账：runEvalOne ≡ runSimulation 的 outcome/ticks/killCount/playerShots/playerDeaths。
+- **验收②**：重跑 A0 S2 锚（`arena-god-baseline --levels S2`，hard+classic 各 180 局）——
+  锚值**不变**：胜 100%、击杀 3.0、**死亡 0.01**、aliveTicks 中位 **672**、shots 9.24。✓
+  布局散列 S2-v0..2 = 43212861/bde445b2/70ade799（与 A0 报告一致）。
+- typecheck + lint + 相关 sim 测试全绿。
+
+### P2-1 S3 升档 —— **已启动**（tmp/s3-cap，2026-08-31 01:01）
+- 命令：`start-training.sh --script run_rl.py --bc tmp/s2-cap/weights.json --out/--traj
+  tmp/s3-cap --iters 60 --max-hours 12 --stages 1020-1022 --seed-rotate 50 --max-ticks 3600
+  --workers 8 --stream 1 --dodge off --reward toy:kill2 --eval-stages 1020-1022
+  --eval-games-per-stage 20 --keep-iters 3 --rotate-stages 0`。
+- 启动确认：Git-Bash venv 正确（**⚠️ 启动必须显式
+  `& "C:\Program Files\Git\bin\bash.exe" -c ...`——本机默认 `bash` 解析到 WSL
+  WindowsApps 别名，会把 Windows venv 当 Unix 分支重装依赖失败**，踩过一次，已免疫）；
+  warm_start_normalize（trunk×0.8884 / policy heads×0.04759 / value zeroed）✓；已 push；
+  ⚠️ `--kill-previous` 的 pgrep 在 git-bash 不可用（skipped）——停训一律走进程名限定 ps1。
+- S3 门（方案 §2.1）：全歼 ≥70% + 三项指标达 S2 水平（击杀 7.96/死亡 0.68/中位 2184）；
+  中途检点：rollout <50% 持续 3 iter ⇒ 降档评估；熵 <0.7 查、<0.3 按塌缩处理。
+- P0-2（A5 重跑）待 S3 曲线稳定后再定并行（本机 8 workers 已占满 + 集群被 S3 占用）。
+
+### 启动教训（本节第三条事故免疫）
+- `bash` 在 PowerShell 下解析到 WSL `WindowsApps\bash.exe` ⇒ 平台检测走 Unix 分支、
+  venv 选 bin/python、`/mnt/d` 路径、pip 缺失——启动脚本必须显式 Git-Bash 全路径。
+
 ## §14 P0-0 timeout 尸检：S2 的 38% 失败里 21/60 是**伪负局**（2026-08-30 夜）
 
 **做法**：把交接单的 `_trace-s1012-860006.ts` 批量化（`tmp/vrecord/_autopsy-{timeouts,worker}.ts`），

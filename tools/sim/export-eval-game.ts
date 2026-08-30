@@ -41,7 +41,7 @@ import { IntentExecutor } from '../../src/nn/intent-executor'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
-import type { RunTelemetry } from './simulation-runner'
+import type { RunTelemetry, SimOutcome } from './simulation-runner'
 import { buildPack } from './pack-container'
 
 const MAX_TICKS = 36000
@@ -162,7 +162,9 @@ function sampleBasePressure(world: World): number {
 }
 
 interface EvalResult {
-  outcome: string
+  outcome: SimOutcome
+  /** 失败细分（仅 gameover：'base_destroyed' | 'lives_exhausted'；其余 undefined）。 */
+  lossDetail?: 'base_destroyed' | 'lives_exhausted'
   ticks: number
   win: boolean
   score: number
@@ -250,7 +252,8 @@ export function runEvalOne(
   let prevLivePuIds = new Set<number>()
 
   let t = 0
-  let outcome = 'timeout'
+  let outcome: SimOutcome = 'max_ticks'
+  let lossDetail: 'base_destroyed' | 'lives_exhausted' | undefined
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
@@ -313,12 +316,16 @@ export function runEvalOne(
     }
 
     if (world.state === 'stageclear' || world.state === 'victory' || world.state === 'gameover') {
-      outcome =
-        world.state === 'gameover'
-          ? world.tileMap.isBaseDestroyed()
-            ? 'base_destroyed'
-            : 'lives_exhausted'
-          : 'stage_clear'
+      // 枚举对齐 simulation-runner 的 SimOutcome：细分（base_destroyed /
+      // lives_exhausted）归一为 'gameover' 并经 lossDetail 单独透出，保证
+      // ledger/报告与本地批可比（P0-1：此前 'timeout'/'base_destroyed'/
+      // 'lives_exhausted' 与本地 'max_ticks'/'gameover' 不齐，门判不可比）。
+      if (world.state === 'gameover') {
+        outcome = 'gameover'
+        lossDetail = world.tileMap.isBaseDestroyed() ? 'base_destroyed' : 'lives_exhausted'
+      } else {
+        outcome = 'stage_clear'
+      }
       break
     }
   }
@@ -359,6 +366,7 @@ export function runEvalOne(
   }
   return {
     outcome,
+    lossDetail,
     ticks: t,
     win: outcome === 'stage_clear',
     score: scored.score,
