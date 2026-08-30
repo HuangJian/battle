@@ -4,6 +4,39 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §8 并行流水线 + 节点池基建重写 + A2 扫描判定（2026-08-30）
+
+### A2 扫描判定（reports/reward-sweep-S1.{json,md}）
+kill 臂 26.7% 决定性胜出（balanced/survival 均 1.7%）→ `TOY_REWARD_DEFAULT_ARM` 不变
+（kill）。survival 臂近零胜率实证了"高生存权重压制杀敌梯度"的预期风险。
+A2 只选臂不判门；S1 绝对门（≥90% 通关）由 A4 出口判。
+
+### 节点池事故与基建重写（用户三指令 + 两个 bug 报告）
+**事故链**：rl-config 残留 `upgradeBranch: 'intent-ai'` → goal-nn 推送后 codeHash
+变化 → 全部节点（含本机 self agent）被远控 `reset --hard origin/intent-ai` →
+回到 31 个提交前。我的提交均在 origin（无损），本地 fast-forward 恢复。
+
+修复（commit 7b0beea / ecfb9e8 / 3553b22）：
+1. 升级分支永远 = 训练机当前分支（run_rl 启动锁存 `dist_common.UPGRADE_BRANCH`），
+   config 键清空仅作回退；
+2. 节点同步 = fetch → checkout branch → pull --ff-only（禁 hash），分叉且干净才
+   硬回齐；**脏工作区拒绝破坏性同步**；
+3. `/pool` 节点池监控页（主控机 agent，配置含 nodes 才启用）：实时 ping +
+   meta 历史聚合，v2 = 60s 刷新 + 最近失败时间 + 表头点击排序；
+4. self/回环节点跳过远控（`is_self_node`）——共享工作区禁破坏性 pull；
+5. restart 单飞护栏（并发升级请求去重）+ 优雅交接（先停监听再 spawn child）；
+6. agent pidfile（agent.pid / agent-child.pid）+ SIGTERM 取消 pending 交接
+   ——手动停服不再被 detached 子进程复活；
+7. agent 本体入 codeHash（双语同集）+ relPath 归一化正斜杠（Windows self agent
+   与 Python 哈希不一致的第二个根因）；权重桶 8 → 64（三训练流并发时慢节点
+   409 的根因：每轮 3 个新 sha，8 桶不够滞后任务用）。
+
+### 并行流水线状态
+P1 随机基线（真实关 0–3 × 60 seed）：**0/240 胜、中位存活 3299 tick** ——
+A4b 闸判据：胜率 ≥5% 且中位存活 >3299。arena-DAgger BC 完成（val_loss 0.97，
+acc move 0.83/fire 0.78）。A4(warm=bc-arena) 与 A5(scratch=init_scratch)
+同批启动（同 seed / 21 iters / toy:kill / dodge=l0）。
+
 ## §7 崩溃归因反转：stageIndex 里程碑爆内存（非 JIT）+ scratch init 修复 + 三处用户修正（2026-08-30）
 
 > 本条取代 §6 中"A8a 按 headroom 不足登记方案 3"的表述，并落账用户指出的三处修正。
