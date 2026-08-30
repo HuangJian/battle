@@ -22,8 +22,8 @@ import {
 import { stageClearScore } from '../config/score'
 import { genId } from './World'
 import type { Tank } from '../types'
-import type { SimulationSystems } from './systems'
 import type { World } from './World'
+import type { SimulationSystems } from './systems'
 
 /**
  * True when every enemy in the list is either an "extra" (balance spawn,
@@ -31,12 +31,23 @@ import type { World } from './World'
  * `checkConditions` to decide stage clear. Indexed loop avoids allocating a
  * `.every()` closure every tick the stage-clear gate is evaluated (AGENTS §14.1).
  */
-function allNonExtraEnemiesDead(tanks: Tank[]): boolean {
+export function allNonExtraEnemiesDead(tanks: Tank[]): boolean {
   for (let i = 0; i < tanks.length; i++) {
     const t = tanks[i]
     if (!t.isExtra && t.alive) return false
   }
   return true
+}
+
+/**
+ * 全灭（歼灭率口径，§295 方案 §2.1「全歼率」的判定）：敌人队列已空 **且** 场上无存活的
+ * 非 extra 敌人。与「是否 stage_clear」**不是一回事**：
+ * `checkStageClear` 还要求**地上没有存活道具**，否则进入 BONUS TIME 窗口
+ * （`POWERUP_PICKUP_WINDOW_MS ≈ 600 tick`）才判通关；若 max-ticks 在窗口结束前截断，
+ * outcome 会记为 `max_ticks` 而实际敌人已全灭 —— 那类局应算歼灭成功。
+ */
+export function allEnemiesCleared(w: World): boolean {
+  return w.enemiesRemaining <= 0 && allNonExtraEnemiesDead(w.tanks)
 }
 
 /**

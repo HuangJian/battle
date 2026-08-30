@@ -1,5 +1,6 @@
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
+import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { NNInput } from '../../src/nn/policy-input'
 import { GoalExecutor } from '../../src/nn/goal-executor'
@@ -124,6 +125,13 @@ export interface RunTelemetry {
 export interface SimResult {
   /** What ended the simulation. */
   outcome: SimOutcome
+  /**
+   * 全灭（歼灭率口径）：敌人队列已空 + 场上无存活非 extra 敌人。
+   * 与 `outcome === 'stage_clear'` **不等价** —— 后者还要求地上没有存活道具，
+   * 否则要等 BONUS TIME 窗口（≈600 tick）结束；若 max-ticks 先到，`outcome` 记为
+   * `max_ticks` 但敌人其实已全灭。方案 §2.1 的「全歼率」门以此字段判定。
+   */
+  cleared: boolean
   /** Total ticks simulated. */
   ticks: number
   /** Wall-clock simulation time in ms (for perf reporting). */
@@ -1120,6 +1128,8 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   const result: SimResult = {
     outcome,
+    // 全灭口径：与 stage_clear 解耦（BONUS TIME 窗口内被 max-ticks 截断的局仍算全灭）。
+    cleared: allEnemiesCleared(world),
     ticks: tick,
     wallMs,
     finalState: {

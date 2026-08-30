@@ -87,6 +87,9 @@ export interface SimTaskResult {
   ticks: number
   killCount: number
   baseAlive: boolean
+  /** 全灭（歼灭率口径，方案 §2.1「全歼率」）：敌人队列已空 + 场上无存活非 extra 敌人。
+   *  与 outcome==='stage_clear' 不等价（BONUS TIME 窗口内被 max-ticks 截断但已全灭的局）。 */
+  cleared?: boolean
   /** Only populated when the task requested telemetry. */
   lives?: number
   firstKillTick?: number
@@ -151,6 +154,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       ticks: result.ticks,
       killCount: result.finalState.killCount,
       baseAlive: result.finalState.baseAlive,
+      cleared: result.cleared,
       paramsHash: result.paramsHash,
     }
     // When the caller asked to persist replays, hand back the full result

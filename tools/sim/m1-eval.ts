@@ -361,6 +361,12 @@ async function main(): Promise<void> {
   // Aggregate.
   const total = results.length
   let cleared = 0
+  /**
+   * 全灭局数（歼灭率口径，与 stage_clear 解耦）。
+   * BONUS TIME 窗口（≈600 tick）内被 max-ticks 截断的局：outcome = max_ticks，
+   * 但敌人已全灭 ⇒ 计入 `clearedAll`。方案 §2.1 的「全歼率」门以此为准。
+   */
+  let clearedAll = 0
   const outcomes: Record<string, number> = {}
   let totalKills = 0
   let totalTicks = 0
@@ -372,6 +378,8 @@ async function main(): Promise<void> {
     {
       total: number
       cleared: number
+      /** 全灭局数（含 BONUS TIME 窗口被截断的局） */
+      clearedAll: number
       kills: number
       dimSums: Record<string, number>
       dimCounts: Record<string, number>
@@ -384,6 +392,7 @@ async function main(): Promise<void> {
       perStage[si] = {
         total: 0,
         cleared: 0,
+        clearedAll: 0,
         kills: 0,
         dimSums: {},
         dimCounts: {},
@@ -397,6 +406,7 @@ async function main(): Promise<void> {
     }
     outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1
     if (r.outcome === 'stage_clear') cleared++
+    if (r.outcome === 'stage_clear' || r.cleared === true) clearedAll++
     totalKills += r.killCount
     if (typeof r.ticks === 'number') {
       totalTicks += r.ticks
@@ -404,6 +414,8 @@ async function main(): Promise<void> {
     }
     acc.total++
     if (r.outcome === 'stage_clear') acc.cleared++
+    if (r.outcome === 'stage_clear' || r.cleared === true)
+      acc.clearedAll = (acc.clearedAll ?? 0) + 1
     acc.kills += r.killCount
 
     // Score this run with the God AI score-v7 model.
@@ -450,6 +462,7 @@ async function main(): Promise<void> {
         total: acc.total,
         cleared: acc.cleared,
         winRate: acc.total > 0 ? Number((acc.cleared / acc.total).toFixed(3)) : 0,
+        clearRate: acc.total > 0 ? Number((acc.clearedAll / acc.total).toFixed(3)) : 0,
         avgKills: acc.total > 0 ? Number((acc.kills / acc.total).toFixed(2)) : 0,
         scoreV7: Number(sa.score.toFixed(4)),
         dims,
@@ -483,6 +496,8 @@ async function main(): Promise<void> {
     total,
     outcomes,
     winRate: Number(winRate.toFixed(4)),
+    /** 全灭率（歼灭率口径）—— 方案 §2.1「全歼率」门以此判定 */
+    clearRate: Number((total > 0 ? clearedAll / total : 0).toFixed(4)),
     gate,
     pass,
     totalKills,
@@ -495,6 +510,10 @@ async function main(): Promise<void> {
   console.log(JSON.stringify(report, null, 2))
   process.stderr.write(
     `\n[m1-eval] WIN RATE ${(winRate * 100).toFixed(1)}% (gate ${gate * 100}%) -> ${pass ? 'PASS' : 'FAIL'}\n`,
+  )
+  process.stderr.write(
+    `[m1-eval] CLEAR RATE（全灭率） ${((total > 0 ? clearedAll / total : 0) * 100).toFixed(1)}% ` +
+      `(${clearedAll}/${total}) —— 含 BONUS TIME 窗口内被 max-ticks 截断的局；方案 §2.1「全歼率」门以此判定\n`,
   )
   process.stderr.write(
     `[m1-eval] SCORE V7 suite=${scoreV7.suite} lcb=${scoreV7.lcb} meanWinRate=${scoreV7.meanWinRate}` +
