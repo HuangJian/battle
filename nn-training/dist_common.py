@@ -107,6 +107,12 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
             rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
             with open(p, "rb") as f:
                 out.append((rel, f.read()))
+    # 2026-08-30：agent 本体入 codeHash（与 sampler-agent.ts 的 TS 侧同集）——
+    # agent 的协议/桶/重启行为修复必须触发节点自动升级。
+    agent_self = os.path.join(REPO_ROOT, "tools", "agent", "sampler-agent.ts")
+    if os.path.exists(agent_self):
+        with open(agent_self, "rb") as f:
+            out.append(("tools/agent/sampler-agent.ts", f.read()))
     rollout = os.path.join(REPO_ROOT, "tools", "sim", "export-rl-rollout.ts")
     if os.path.exists(rollout):
         with open(rollout, "rb") as f:

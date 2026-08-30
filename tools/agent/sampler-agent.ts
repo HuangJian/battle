@@ -175,6 +175,18 @@ function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
     }
   }
   walk(nnRoot)
+  // 2026-08-30a：agent 本体入 codeHash——agent 的协议/桶/重启行为修复必须触发
+  // 节点自动升级，否则只能靠人工逐台重启（两侧与 dist_common.py 保持逐字节同集）。
+  const agentSelf = path.join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts')
+  if (fs.existsSync(agentSelf)) {
+    out.push({
+      relPath: path.relative(REPO_ROOT, agentSelf),
+      content: fs.readFileSync(agentSelf),
+    })
+  }
+  // 2026-08-30b：relPath 归一化正斜杠——Windows 上的 self agent 用 path.relative
+  // 会产出反斜杠，与 Python 侧（已归一化）哈希不一致 ⇒ self 永远 codeHash 红姻。
+  for (const e of out) e.relPath = e.relPath.replace(/\\/g, '/')
   const rollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-rl-rollout.ts')
   if (fs.existsSync(rollout))
     out.push({ relPath: path.relative(REPO_ROOT, rollout), content: fs.readFileSync(rollout) })
@@ -316,6 +328,7 @@ interface NodeHistory {
   fail: number
   lastTs: string
   lastOkTs: string
+  lastFailTs: string
   lastError: string
   avgElapsedSec: number | null
   elapsedSamples: number
@@ -331,6 +344,7 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
         fail: 0,
         lastTs: '',
         lastOkTs: '',
+        lastFailTs: '',
         lastError: '',
         avgElapsedSec: null,
         elapsedSamples: 0,
@@ -376,6 +390,7 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
           } else {
             h.fail++
             h.lastError = (r.reason ?? '').slice(0, 120)
+            if (r.ts && r.ts > h.lastFailTs) h.lastFailTs = r.ts
           }
           if (r.ts && r.ts > h.lastTs) h.lastTs = r.ts
         } catch {
@@ -419,6 +434,7 @@ async function renderPoolPage(): Promise<string> {
         fail: 0,
         lastTs: '-',
         lastOkTs: '-',
+        lastFailTs: '-',
         lastError: '',
         avgElapsedSec: null,
         elapsedSamples: 0,
@@ -430,14 +446,17 @@ async function renderPoolPage(): Promise<string> {
           ? `<span style="color:#0a0">在线·代码同步</span>`
           : `<span style="color:#c60">在线·代码旧（等待/请求升级）</span>`
         : `<span style="color:#c00">不可达</span>`
+      const errCell = h.lastError
+        ? `<span style="color:#c00">${h.lastError}</span><br><span style="color:#999">${h.lastFailTs || ''}</span>`
+        : '-'
       rows.push(
         `<tr><td>${n.id}</td><td>${status}</td>` +
           `<td>${online ? `${(ping as any)?.cpus ?? '?'} 核 / v${(ping as any)?.agentVersion?.slice(0, 7) ?? '?'}` : '-'}</td>` +
-          `<td>${ping ? `${ms}ms` : '-'}</td>` +
-          `<td style="text-align:right">${h.ok}</td><td style="text-align:right">${h.fail}</td>` +
-          `<td>${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
-          `<td>${h.lastOkTs || '-'}</td>` +
-          `<td>${h.lastError ? `<span style="color:#c00">${h.lastError}</span>` : '-'}</td></tr>`,
+          `<td data-v="${ping ? ms : 9999}">${ping ? `${ms}ms` : '-'}</td>` +
+          `<td data-v="${h.ok}" style="text-align:right">${h.ok}</td><td data-v="${h.fail}" style="text-align:right">${h.fail}</td>` +
+          `<td data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
+          `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
+          `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`,
       )
     }
   }
@@ -446,18 +465,37 @@ async function renderPoolPage(): Promise<string> {
     .join('，')
   const weightsRows =
     [...weightsByKindSha.entries()].map(([kind, m]) => `${kind}×${m.size}桶`).join('，') || '—'
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="5">
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
 <title>sampler-agent 节点池</title></head>
 <body style="font-family:system-ui,sans-serif;margin:24px">
-<h2>节点池监控（每 5s 自动刷新）</h2>
+<h2>节点池监控（每 60s 自动刷新）</h2>
 <p>本机 agent：workers=${workers}，在飞=${inflight.size}${inflightRows ? `（${inflightRows}）` : ''}，
 累计完成=${gamesDoneTotal}，权重桶=${weightsRows}${lastError ? `，<span style="color:#c00">lastError=${lastError}</span>` : ''}</p>
-<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:14px">
-<tr style="background:#eee"><th>节点</th><th>状态</th><th>规格</th><th>ping</th>
-<th>已结算局</th><th>失败局</th><th>平均耗时</th><th>最近成功</th><th>最近错误</th></tr>
-${rows.join(String.fromCharCode(10))}
+<table border="1" cellpadding="6" cellspacing="0" id="pool" style="border-collapse:collapse;font-size:14px">
+<thead><tr style="background:#eee">
+<th onclick="sortTbl(0,this)">节点</th><th onclick="sortTbl(1,this)">状态</th><th onclick="sortTbl(2,this)">规格</th>
+<th onclick="sortTbl(3,this)">ping</th><th onclick="sortTbl(4,this)">已结算局</th><th onclick="sortTbl(5,this)">失败局</th>
+<th onclick="sortTbl(6,this)">平均耗时</th><th onclick="sortTbl(7,this)">最近成功</th><th onclick="sortTbl(8,this)">最近错误</th>
+</tr></thead>
+<tbody>${rows.join(String.fromCharCode(10))}</tbody>
 </table>
-<p style="color:#666">数据源：dist-agent-meta.jsonl（tmp/* 各训练流聚合）+ 实时 ping。只读页面，不含密钥。</p>
+<script>
+function sortTbl(col, th) {
+  const tb = document.querySelector('#pool tbody');
+  const rows = Array.from(tb.rows);
+  const dir = th.dataset.dir === 'asc' ? -1 : 1;
+  th.dataset.dir = dir === 1 ? 'asc' : 'desc';
+  rows.sort((a, b) => {
+    const av = a.cells[col].dataset.v ?? a.cells[col].innerText;
+    const bv = b.cells[col].dataset.v ?? b.cells[col].innerText;
+    const an = parseFloat(av), bn = parseFloat(bv);
+    const cmp = !isNaN(an) && !isNaN(bn) ? an - bn : String(av).localeCompare(String(bv));
+    return dir * cmp;
+  });
+  for (const r of rows) tb.appendChild(r);
+}
+</script>
+<p style="color:#666">数据源：dist-agent-meta.jsonl（tmp/* 各训练流聚合）+ 实时 ping。只读页面，不含密钥。点击表头排序（再点反转方向）。</p>
 </body></html>`
 }
 
@@ -466,7 +504,9 @@ ${rows.join(String.fromCharCode(10))}
 // 多桶 LRU——不同训练流（A2 三臂 / A4+A5 消融）各有自己的权重 sha，共享同一节点池
 // 时按 (kind, wver) 精确取桶，不再互相 409 顶掉对方的权重。'intent'/'goal' 的
 // "最新桶"语义由 latestWeightsOfKind() 保持（评估类调用方不受影响）。
-const WEIGHT_BUCKETS_PER_KIND = 8
+// 64：三训练流并发时每轮各产生 1 个新 sha（8 → 慢节点滞后 2–3 轮就被挤掉 ⇒
+// 永远 409，2026-08-30 实测）。单桶 ~0.5MB，64 桶 ≈ 32MB 内存/磁盘，可忽略。
+const WEIGHT_BUCKETS_PER_KIND = 64
 const weightsByKindSha: Map<string, Map<string, WeightsState>> = new Map()
 
 function weightsOf(kind: string, wver: string): WeightsState | null {
