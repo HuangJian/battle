@@ -95,20 +95,33 @@ function runGitPull(branch?: string): {
   return { branch: b, oldSha, newSha, changed: oldSha !== newSha }
 }
 
-/** 端口绑定重试：restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。 */
+/**
+ * 端口绑定重试：restart 后新实例会撞 EADDRINUSE，两种来源：
+ *   ① 旧实例尚在退出（spawn 先于 exit，窗口 = delayMs）；
+ *   ② 旧实例退出后监听 socket 处于 TIME_WAIT（最长 ~60s，20s 保活连接的半开
+ *      状态所致——此时 lsof 看不到任何进程，2026-08-30 远程实测）。
+ * 处置：Linux 开 reusePort（SO_REUSEPORT，重启链两端都设置后可即时重绑）+
+ * 重试预算 120s（覆盖整个 TIME_WAIT 窗口）+ 错误匹配兜底（Bun 抛出的
+ * SystemError 的 .code 在某些版本可能缺失，回退匹配 message 文本）。
+ */
 function serveWithRetry(port: number, fetchFn: (req: Request) => Promise<Response>): unknown {
   const opts = {
     port,
     idleTimeout: 255,
     fetch: fetchFn,
+    ...(process.platform === 'linux' ? { reusePort: true } : {}),
   } as Parameters<typeof Bun.serve>[0]
+  const isAddrInUse = (e: unknown): boolean => {
+    const code = (e as { code?: string })?.code ?? ''
+    if (code.includes('EADDRINUSE')) return true
+    return /EADDRINUSE|address in use/i.test(e instanceof Error ? e.message : String(e))
+  }
   for (let attempt = 0; ; attempt++) {
     try {
       return Bun.serve(opts)
     } catch (e) {
-      const code = (e as { code?: string })?.code ?? ''
-      if (!code.startsWith('EADDRINUSE') || attempt >= 60) throw e
-      Bun.sleepSync(500) // 旧实例正在退出，等端口释放
+      if (!isAddrInUse(e) || attempt >= 240) throw e
+      Bun.sleepSync(500) // 旧实例退出 / TIME_WAIT 消散
     }
   }
 }
@@ -244,7 +257,24 @@ interface WeightsState {
   file: string
 }
 // v3.7 权重按 kind 分桶：'rollout'（RL 采样权重）/ 'intent'（意图网络权重，供 intent-exec 评估）。
-const weightsByKind: Record<string, WeightsState> = {}
+// goal-nn 卡 A2/A5（2026-08-30，用户指令"不同实验并行"）：同一 kind 升级为按 sha 的
+// 多桶 LRU——不同训练流（A2 三臂 / A4+A5 消融）各有自己的权重 sha，共享同一节点池
+// 时按 (kind, wver) 精确取桶，不再互相 409 顶掉对方的权重。'intent'/'goal' 的
+// "最新桶"语义由 latestWeightsOfKind() 保持（评估类调用方不受影响）。
+const WEIGHT_BUCKETS_PER_KIND = 8
+const weightsByKindSha: Map<string, Map<string, WeightsState>> = new Map()
+
+function weightsOf(kind: string, wver: string): WeightsState | null {
+  return weightsByKindSha.get(kind)?.get(wver) ?? null
+}
+
+function latestWeightsOfKind(kind: string): WeightsState | null {
+  const m = weightsByKindSha.get(kind)
+  if (!m || m.size === 0) return null
+  let latest: WeightsState | null = null
+  for (const ws of m.values()) latest = ws // Map 保持插入序，最后一个 = 最新
+  return latest
+}
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
 
@@ -334,9 +364,11 @@ async function runGame(
   goalCoarse = false,
   reward = '',
   dodge = '',
+  wver = '',
 ): Promise<Buffer> {
-  const ws = weightsByKind[kind]
-  if (!ws) throw new Error(`no weights cached for kind=${kind}`)
+  // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流
+  const ws = weightsOf(kind, wver)
+  if (!ws) throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
   const wfile = ws.file
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
   // 只产 _eval_report.json，无 npy shards。v3.7：mode=eval 支持 policy=intent-exec
@@ -370,10 +402,10 @@ async function runGame(
       args.push('--stage', String(stage), '--seed', String(seed))
       if (policy && policy !== 'nn') {
         args.push('--policy', policy)
-        const iw = weightsByKind['intent']
+        const iw = latestWeightsOfKind('intent')
         if (policy === 'intent-exec' && iw) args.push('--intent-weights', iw.file)
         // T8.5：goal 策略权重经 kind='goal' 桶缓存。
-        const gw = weightsByKind['goal']
+        const gw = latestWeightsOfKind('goal')
         if (policy === 'goal' && gw) args.push('--goal-weights', gw.file)
       }
     } else {
@@ -465,6 +497,7 @@ function beginTask(
   goalCoarse = false,
   reward = '',
   dodge = '',
+  wver = '',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -481,6 +514,7 @@ function beginTask(
     goalCoarse,
     reward,
     dodge,
+    wver,
   )
     .then((buf) => {
       lruPut(key, buf)
@@ -527,24 +561,28 @@ async function handle(req: Request): Promise<Response> {
     }
     // v3.7 kind 分桶：x-kind 头（缺省 'rollout'）决定存哪个权重桶（'intent' 供 intent-exec 评估）。
     const kind = req.headers.get('x-kind') ?? 'rollout'
-    const prevWs = weightsByKind[kind]
-    if (prevWs && prevWs.sha === actualSha) return jsonResponse({ ok: true, cache: 'kept' }, 204)
-    // 原子切换：先备好新权重文件，再换状态、清结果缓存（跨轮生命周期显式化，v3.3）
+    let bucket = weightsByKindSha.get(kind)
+    if (!bucket) {
+      bucket = new Map()
+      weightsByKindSha.set(kind, bucket)
+    }
+    if (bucket.has(actualSha)) return jsonResponse({ ok: true, cache: 'kept' }, 204)
+    // 多桶（v4.1）：新 sha 追加进该 kind 的桶组。结果缓存按 iterId 天然分命名空间
+    //（不同训练流互不可见），整池清除会把其它训练流在飞结果顶掉——不再全清。
     const wfile = path.join(WORK_DIR, `weights-${kind}-${actualSha.slice(0, 16)}.json`)
     fs.writeFileSync(wfile, weightsBytes)
-    const oldFile = prevWs?.file
-    weightsByKind[kind] = { sha: actualSha, iterId, file: wfile }
-    cacheEvicted += resultCache.size
-    cacheBytes = 0
-    resultCache.clear()
-    failedTasks.clear()
-    // 尽力而为删除：干净评估局可能在飞、子进程尚持旧权重文件句柄（Windows EBUSY）。
-    // 删不掉的留给下方 retention 清扫，绝不让切换失败（那会拖垮整轮权重分发）。
-    if (oldFile && oldFile !== wfile) {
-      try {
-        fs.rmSync(oldFile, { force: true })
-      } catch {
-        /* in-flight eval game holds the handle — swept by retention below */
+    bucket.set(actualSha, { sha: actualSha, iterId, file: wfile })
+    // 该 kind 桶数超限 → 驱逐最旧（文件尽力删，忙时留给 retention 扫）
+    while (bucket.size > WEIGHT_BUCKETS_PER_KIND) {
+      const oldestSha = bucket.keys().next().value as string
+      const oldest = bucket.get(oldestSha)
+      bucket.delete(oldestSha)
+      if (oldest) {
+        try {
+          fs.rmSync(oldest.file, { force: true })
+        } catch {
+          /* in-flight game holds the handle — best effort */
+        }
       }
     }
     sweepWeightFiles()
@@ -666,14 +704,14 @@ async function handle(req: Request): Promise<Response> {
     const policy = url.searchParams.get('policy') ?? 'nn'
     // M8：意图 rollout 的 replan cadence（export-intent-rollout --replan；缺省 0=不传）。
     const replan = parseInt(url.searchParams.get('replan') ?? '0', 10)
-    const ws = weightsByKind[kind]
-    if (!ws || ws.sha !== wver) return jsonResponse({ error: 'wver not cached here' }, 409)
-    if (mode === 'eval' && policy === 'intent-exec' && !weightsByKind['intent'])
+    const ws = weightsOf(kind, wver)
+    if (!ws) return jsonResponse({ error: 'wver not cached here' }, 409)
+    if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
       return jsonResponse(
         { error: 'intent weights not cached (POST /v1/weights x-kind=intent)' },
         409,
       )
-    if (mode === 'eval' && policy === 'goal' && !weightsByKind['goal'])
+    if (mode === 'eval' && policy === 'goal' && !latestWeightsOfKind('goal'))
       return jsonResponse({ error: 'goal weights not cached (POST /v1/weights x-kind=goal)' }, 409)
     const free = diskFreeMB()
     if (free !== null && free < 2048) return jsonResponse({ error: `low disk: ${free}MB` }, 503)
@@ -715,6 +753,7 @@ async function handle(req: Request): Promise<Response> {
         url.searchParams.get('goalCoarse') === '1',
         url.searchParams.get('reward') ?? '',
         url.searchParams.get('dodge') ?? '',
+        wver,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -749,6 +788,7 @@ async function handle(req: Request): Promise<Response> {
           url.searchParams.get('goalCoarse') === '1',
           url.searchParams.get('reward') ?? '',
           url.searchParams.get('dodge') ?? '',
+          wver,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)

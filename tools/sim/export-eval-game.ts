@@ -28,6 +28,7 @@ import { Simulation } from '../../src/game/Simulation'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
+import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
@@ -221,6 +222,7 @@ export function runEvalOne(
   }
   const ai = (exec ?? scripted) as InputLike
   const sim = new Simulation(world, ai as any)
+  // 调用方已对 arena 传 loadIndex=0（killScore 缩放不进 arena，见 main 解析处）
   world.loadStageData(stage, stageIdx)
   // v4.0：reset 当前输入（GodAIInput 的关卡自适应在 reset() 里做——此前固定
   // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
@@ -402,7 +404,11 @@ function main(): void {
     console.error('[export-eval-game] --stage/--seed required')
     process.exit(2)
   }
-  const stage = STAGES[stageIdx]
+  // arena 编号命名空间（goal-nn 卡 A1/A2）：si >= 1000 经 ARENA_LADDER 解析，
+  // 门禁贪心评估（S 级通关率）在 arena 上进行。stageIndex 传 0（同
+  // export-rl-rollout 的修复——1.05^index 缩放经里程碑掉落反哺玩法）。
+  const stage = isArenaId(stageIdx) ? resolveArenaStage(stageIdx)! : STAGES[stageIdx]
+  const loadIndex = isArenaId(stageIdx) ? 0 : stageIdx
   mkdirSync(outDir, { recursive: true })
   // v4.0：仅 'nn' 策略需要权重文件（god/goal-god/intent/goal 各自携带自己的权重源）。
   const weightsText = policy === 'nn' ? readFileSync(weightsPath, 'utf8') : '{}'
@@ -413,7 +419,7 @@ function main(): void {
     process.exit(2)
   }
   const res = runEvalOne(
-    stageIdx,
+    loadIndex,
     stage,
     seed,
     difficulty,
