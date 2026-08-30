@@ -65,7 +65,22 @@ def build_pairs(args, it: int, rotate_seed: int) -> list[tuple[int, int]]:
               f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
         return pairs
     if args.rotate_stages <= 0:
-        return [(si, sd) for si in parse_range(args.stages) for sd in parse_range(args.seeds)]
+        base = parse_range(args.stages)
+        # goal-nn（2026-08-30，用户指令）：显式模式 seed 轮转——--seed-rotate N 时
+        # 每迭代对 --stages 的每个关卡抽 N 个全新 seed（(rotateSeed, it) 键控、
+        # 断点复现）。固定 seeds 反复刷 = 记忆化过拟合（微课最差形态）；轮转后
+        # 训练胜率自带泛化语义。N <= 0 退回固定 seeds 旧口径（逐字节不变）。
+        rotate = int(getattr(args, "seed_rotate", 0) or 0)
+        if rotate > 0:
+            import numpy as np
+
+            rng = np.random.default_rng([rotate_seed, 0x5EED, it])
+            pairs: list[tuple[int, int]] = []
+            for si in base:
+                draws = rng.integers(1, 2 ** 30, size=rotate)
+                pairs.extend((si, int(d)) for d in draws)
+            return pairs
+        return [(si, sd) for si in base for sd in parse_range(args.seeds)]
     import numpy as np
 
     k = args.rotate_stages

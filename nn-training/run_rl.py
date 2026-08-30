@@ -271,6 +271,9 @@ def main() -> None:
                          "training_log.jsonl + 1, so restarts continue where they stopped)")
     ap.add_argument("--stages", default="0-3", help="explicit stage range (ignored in rotate mode)")
     ap.add_argument("--seeds", default="0-3", help="explicit seed range (ignored in rotate mode)")
+    ap.add_argument("--seed-rotate", type=int, default=0,
+                    help="explicit 模式 seed 轮转：>0 时每迭代对 --stages 每关抽 N 个全新 "
+                         "seed（(rotateSeed,it) 键控、断点复现）；0 = 固定 --seeds（旧行为）")
     ap.add_argument("--rotate-stages", type=int, default=0,
                     help=">0: rotate through ALL stages this many per iteration "
                          "(iteration i uses stages [(i-1)*N %% 35 ...]); seeds are drawn "
