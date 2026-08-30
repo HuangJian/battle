@@ -1210,3 +1210,13 @@ S4b 的 40 CPU-h 对应单 iter ≈6.8 CPU-h（≈6 个迭代），而同档唯�
 ④ **A4b 升级为二元 Phase-1 无效性闸**（STAGES 0–3 胜率 ≥ 随机基线 +5pp 且中位存活 tick 更高）。
 **§3–§7 的门禁与预算自本轮起冻结**（DS-11 收口）：后续意见只进 progress/DECISIONS，除非出现
 证伪某条已定案项的新代码事实。关键路径 ≈ **16.5d 人日 + ≈106 CPU 小时**。
+
+## §296 大语料 rotate 战役（2026-08-30，用户指令）
+S1 微课（固定 12 局/it）被判定为最差形态（记忆化过拟合、SE≈±14%、无泛化信号）。
+改用 repo 标准 rotate 语料收尾：`--rotate-stages 35 --total-stages 35 --seeds-per-stage 10`
+= 350 局/it、每迭代全新 (stage,seed)（(rotateSeed,it) 键控、断点可复现）、max-ticks 12000、
+workers=8、干净评估 2 局/关开起。热启动 = tmp/s1-cap/weights.json（kill2 微课 10 iters
+产物）——**value 头一次性重训可接受**（BC/微课 checkpoint 无有效 value 头，归一化路径
+清零重学）；策略头经 warm_start_normalize 软先验延续。奖励臂不变（toy:kill2，换奖励
+= 换实验）。新战役独立目录 tmp/s1-big（课程类型切换不作断点复用）。封顶 = --max-hours 8
+与 --iters 40 先到者。改的是启动命令，不是训练代码。
