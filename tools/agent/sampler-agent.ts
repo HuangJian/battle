@@ -89,8 +89,28 @@ function runGitPull(branch?: string): {
   const oldSha = git(['rev-parse', 'HEAD'])
   const cur = git(['branch', '--show-current']) || git(['rev-parse', '--abbrev-ref', 'HEAD'])
   const b = branch && branch !== '.' ? branch : cur
+  // 用户指令（2026-08-30）：节点同步 = `git fetch` → `git checkout <branch>` →
+  // `git pull`（ff-only）——**按分支同步，禁止 checkout/reset 到 hash**；分叉且
+  // 工作区干净时才硬回齐（确定性节点契约）。工作区脏（有人手改）→ 拒绝破坏性
+  // 同步并保持旧代码继续服务（此前曾把手动更新+重启中的节点打断）。
+  const dirty = git(['status', '--porcelain']).trim().length > 0
+  if (dirty) {
+    throw new Error('working tree dirty — refusing destructive sync (manual state present)')
+  }
   git(['fetch', 'origin', b])
-  git(['reset', '--hard', `origin/${b}`])
+  if (cur !== b) {
+    git(['checkout', '-B', b, `origin/${b}`])
+  } else {
+    const ff = spawnSync('git', ['pull', '--ff-only', 'origin', b], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 120_000,
+      windowsHide: true,
+    })
+    if (ff.status !== 0) {
+      git(['reset', '--hard', `origin/${b}`]) // 分叉回齐（仅限干净树，见上）
+    }
+  }
   const newSha = git(['rev-parse', 'HEAD'])
   return { branch: b, oldSha, newSha, changed: oldSha !== newSha }
 }
@@ -104,7 +124,10 @@ function runGitPull(branch?: string): {
  * 重试预算 120s（覆盖整个 TIME_WAIT 窗口）+ 错误匹配兜底（Bun 抛出的
  * SystemError 的 .code 在某些版本可能缺失，回退匹配 message 文本）。
  */
-function serveWithRetry(port: number, fetchFn: (req: Request) => Promise<Response>): unknown {
+function serveWithRetry(
+  port: number,
+  fetchFn: (req: Request) => Promise<Response>,
+): ReturnType<typeof Bun.serve> {
   const opts = {
     port,
     idleTimeout: 255,
@@ -256,6 +279,187 @@ interface WeightsState {
   iterId: string
   file: string
 }
+// /v1/restart 单飞护栏 + 监听句柄（优雅交接用，见 restart 处理器）
+let restartPending = false
+let activeServer: ReturnType<typeof Bun.serve> | null = null
+
+// ---------------- 节点池监控页（③，2026-08-30 用户指令） ----------------
+// 仅当本机配置了 nn-training/rl-config.json 的 nodes（= 主控机）时启用 /pool；
+// 远程节点机器无此配置 → 无此页面（无感）。只读、不渲染任何密钥。
+interface PoolNodeCfg {
+  id: string
+  url: string
+  authKey: string
+}
+
+function loadPoolConfig(): PoolNodeCfg[] | null {
+  try {
+    const cfgPath = path.join(REPO_ROOT, 'nn-training', 'rl-config.json')
+    if (!fs.existsSync(cfgPath)) return null
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
+      nodes?: Array<{ id?: string; url: string; authKey?: string }>
+    }
+    const nodes = (cfg.nodes ?? [])
+      .filter((n) => n && typeof n.url === 'string')
+      .map((n) => ({ id: n.id || n.url, url: n.url, authKey: n.authKey ?? '' }))
+    return nodes.length > 0 ? nodes : null
+  } catch {
+    return null
+  }
+}
+
+const POOL_NODES: PoolNodeCfg[] | null = loadPoolConfig()
+
+interface NodeHistory {
+  ok: number
+  fail: number
+  lastTs: string
+  lastOkTs: string
+  lastError: string
+  avgElapsedSec: number | null
+  elapsedSamples: number
+}
+
+function aggregateNodeHistory(): Map<string, NodeHistory> {
+  const hist = new Map<string, NodeHistory>()
+  const bump = (node: string): NodeHistory => {
+    let h = hist.get(node)
+    if (!h) {
+      h = {
+        ok: 0,
+        fail: 0,
+        lastTs: '',
+        lastOkTs: '',
+        lastError: '',
+        avgElapsedSec: null,
+        elapsedSamples: 0,
+      }
+      hist.set(node, h)
+    }
+    return h
+  }
+  let roots: string[] = []
+  try {
+    roots = fs
+      .readdirSync(path.join(REPO_ROOT, 'tmp'), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => path.join(REPO_ROOT, 'tmp', d.name, 'dist-agent-meta.jsonl'))
+  } catch {
+    /* tmp missing */
+  }
+  roots.push(path.join(REPO_ROOT, 'tmp', 'dist-agent-meta.jsonl'))
+  for (const metaPath of roots) {
+    try {
+      if (!fs.existsSync(metaPath)) continue
+      for (const line of fs.readFileSync(metaPath, 'utf8').split(String.fromCharCode(10))) {
+        if (!line.trim()) continue
+        try {
+          const r = JSON.parse(line) as {
+            node?: string
+            ok?: boolean
+            elapsedSec?: number
+            ts?: string
+            reason?: string
+          }
+          if (!r.node) continue
+          const h = bump(r.node)
+          if (r.ok) {
+            h.ok++
+            const ts = r.ts ?? ''
+            if (ts >= h.lastOkTs) h.lastOkTs = ts
+            if (typeof r.elapsedSec === 'number' && r.elapsedSec > 0) {
+              const prevTotal = (h.avgElapsedSec ?? 0) * h.elapsedSamples
+              h.elapsedSamples++
+              h.avgElapsedSec = +((prevTotal + r.elapsedSec) / h.elapsedSamples).toFixed(1)
+            }
+          } else {
+            h.fail++
+            h.lastError = (r.reason ?? '').slice(0, 120)
+          }
+          if (r.ts && r.ts > h.lastTs) h.lastTs = r.ts
+        } catch {
+          /* skip bad line */
+        }
+      }
+    } catch {
+      /* unreadable */
+    }
+  }
+  return hist
+}
+
+async function renderPoolPage(): Promise<string> {
+  const hist = aggregateNodeHistory()
+  const localHash = memoizedCodeHash()
+  const rows: string[] = []
+  if (POOL_NODES) {
+    const probes = await Promise.all(
+      POOL_NODES.map(async (n) => {
+        const started = Date.now()
+        try {
+          const resp = await fetch(`${n.url.replace(/\/$/, '')}/v1/ping`, {
+            headers: { Authorization: `Bearer ${n.authKey}` },
+            signal: AbortSignal.timeout(2500),
+          })
+          if (!resp.ok) return { n, ping: null, ms: Date.now() - started }
+          return {
+            n,
+            ping: (await resp.json()) as Record<string, unknown>,
+            ms: Date.now() - started,
+          }
+        } catch {
+          return { n, ping: null, ms: Date.now() - started }
+        }
+      }),
+    )
+    for (const { n, ping, ms } of probes) {
+      const h = hist.get(n.id) ?? {
+        ok: 0,
+        fail: 0,
+        lastTs: '-',
+        lastOkTs: '-',
+        lastError: '',
+        avgElapsedSec: null,
+        elapsedSamples: 0,
+      }
+      const online = !!ping
+      const hashOk = online && String((ping as any)?.codeHash) === localHash
+      const status = online
+        ? hashOk
+          ? `<span style="color:#0a0">在线·代码同步</span>`
+          : `<span style="color:#c60">在线·代码旧（等待/请求升级）</span>`
+        : `<span style="color:#c00">不可达</span>`
+      rows.push(
+        `<tr><td>${n.id}</td><td>${status}</td>` +
+          `<td>${online ? `${(ping as any)?.cpus ?? '?'} 核 / v${(ping as any)?.agentVersion?.slice(0, 7) ?? '?'}` : '-'}</td>` +
+          `<td>${ping ? `${ms}ms` : '-'}</td>` +
+          `<td style="text-align:right">${h.ok}</td><td style="text-align:right">${h.fail}</td>` +
+          `<td>${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
+          `<td>${h.lastOkTs || '-'}</td>` +
+          `<td>${h.lastError ? `<span style="color:#c00">${h.lastError}</span>` : '-'}</td></tr>`,
+      )
+    }
+  }
+  const inflightRows = [...inflight.values()]
+    .map((v) => `s${v.stage}/seed${v.seed}（${((Date.now() - v.startedAt) / 1000).toFixed(0)}s）`)
+    .join('，')
+  const weightsRows =
+    [...weightsByKindSha.entries()].map(([kind, m]) => `${kind}×${m.size}桶`).join('，') || '—'
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="5">
+<title>sampler-agent 节点池</title></head>
+<body style="font-family:system-ui,sans-serif;margin:24px">
+<h2>节点池监控（每 5s 自动刷新）</h2>
+<p>本机 agent：workers=${workers}，在飞=${inflight.size}${inflightRows ? `（${inflightRows}）` : ''}，
+累计完成=${gamesDoneTotal}，权重桶=${weightsRows}${lastError ? `，<span style="color:#c00">lastError=${lastError}</span>` : ''}</p>
+<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:14px">
+<tr style="background:#eee"><th>节点</th><th>状态</th><th>规格</th><th>ping</th>
+<th>已结算局</th><th>失败局</th><th>平均耗时</th><th>最近成功</th><th>最近错误</th></tr>
+${rows.join(String.fromCharCode(10))}
+</table>
+<p style="color:#666">数据源：dist-agent-meta.jsonl（tmp/* 各训练流聚合）+ 实时 ping。只读页面，不含密钥。</p>
+</body></html>`
+}
+
 // v3.7 权重按 kind 分桶：'rollout'（RL 采样权重）/ 'intent'（意图网络权重，供 intent-exec 评估）。
 // goal-nn 卡 A2/A5（2026-08-30，用户指令"不同实验并行"）：同一 kind 升级为按 sha 的
 // 多桶 LRU——不同训练流（A2 三臂 / A4+A5 消融）各有自己的权重 sha，共享同一节点池
@@ -535,6 +739,14 @@ function beginTask(
 
 async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url)
+  // 节点池监控页（③）：公开只读、无密钥渲染；仅主控机（配置含 nodes）有内容。
+  if (req.method === 'GET' && (url.pathname === '/pool' || url.pathname === '/pool/')) {
+    if (!POOL_NODES)
+      return new Response('pool page disabled (no nodes in rl-config.json)', { status: 404 })
+    return new Response(await renderPoolPage(), {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    })
+  }
   const auth = req.headers.get('authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token || !safeEqual(token, AUTH_KEY)) return jsonResponse({ error: 'unauthorized' }, 401)
@@ -637,6 +849,15 @@ async function handle(req: Request): Promise<Response> {
     } catch {
       /* 空 body 合法 */
     }
+    // 单飞护栏：多个训练流的升级请求并发到达时，只有第一个触发重启
+    //（此前曾出现两个 child 竞速抢端口、输家 EADDRINUSE 崩溃——2026-08-30）。
+    if (restartPending) {
+      return jsonResponse(
+        { ok: true, restarting: true, dedup: true, pullBranch: pullBranch ?? null },
+        200,
+      )
+    }
+    restartPending = true
     try {
       if (pullBranch) {
         const r = runGitPull(pullBranch)
@@ -647,8 +868,14 @@ async function handle(req: Request): Promise<Response> {
       }
       const self = process.argv[1]
       const args = process.argv.slice(2)
-      // 先应答 202，再 spawn 新实例（detached，同参）+ 短暂延迟后退出旧实例释放端口。
+      // 先应答 202，再【停监听 → spawn 新实例 → 退出】：端口先释放，child 立即
+      // 绑定成功，消除"child 先起、parent 未退"的 EADDRINUSE 竞速窗口。
       setImmediate(() => {
+        try {
+          activeServer?.stop(true)
+        } catch {
+          /* best effort */
+        }
         try {
           const child = spawn(process.execPath, [self, ...args], {
             cwd: REPO_ROOT,
@@ -661,7 +888,8 @@ async function handle(req: Request): Promise<Response> {
           console.error(
             `[sampler-agent] restart spawn failed: ${e instanceof Error ? e.message : String(e)}`,
           )
-          return // 不退出，保持旧实例存活
+          restartPending = false // 不退出，保持旧实例存活
+          return
         }
         setTimeout(() => {
           console.log(`[sampler-agent] restarting (exit)`)
@@ -917,7 +1145,7 @@ if (import.meta.main) {
   // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
   // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
   // serveWithRetry：/v1/restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。
-  serveWithRetry(port, (req) =>
+  activeServer = serveWithRetry(port, (req) =>
     handle(req).catch((e: unknown) => {
       lastError = `${new Date().toISOString()} handler: ${e instanceof Error ? e.message : String(e)}`
       return jsonResponse({ error: 'internal error', detail: lastError }, 500)

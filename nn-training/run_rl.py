@@ -265,7 +265,18 @@ def main() -> None:
     np.random.seed(args.seed)
 
     # 启动前推送当前分支到 origin（远端 agent 靠 git pull 同步——§30 教训）。
-    ensure_current_branch_pushed(REPO_ROOT)
+    # 2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，
+    # 不再读 rl-config 的 upgradeBranch（残留旧战役分支名曾把全部节点 reset 回
+    # 31 个提交前的 intent-ai）。config 键仅作 push 失败时的最后回退。
+    pushed_branch = ensure_current_branch_pushed(REPO_ROOT)
+    _current_branch = (
+        subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(REPO_ROOT),
+                       capture_output=True, text=True, timeout=30).stdout.strip()
+    )
+    if _current_branch and _current_branch != "HEAD":
+        import dist_common as _dc
+        _dc.set_upgrade_branch(_current_branch)
+        log(f"[run_rl] node upgrade branch locked to training-machine branch: {_current_branch}")
 
     bun = shutil.which("bun")
     if bun is None:

@@ -189,7 +189,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     fail_streak_max = int(policy.get("nodeFailStreak", 3))
     # 主动升级机制（M8）：policy.upgradeBranch 非空时，ping 发现 codeHash stale 的
     # 节点 → POST /v1/restart 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）。
-    upgrade_branch = str(policy.get("upgradeBranch") or "")
+    # 节点远控升级分支：永远以训练机当前分支为准（run_rl 启动时锁存到
+    # dist_common.UPGRADE_BRANCH）。config 的 upgradeBranch 只在该锁存缺失时兜底
+    # （2026-08-30 事故：残留 'intent-ai' 把全部节点 reset 回旧代码）。
+    upgrade_branch = dist_common.upgrade_branch_or(str(policy.get("upgradeBranch") or ""))
     upgrade_requested: set[str] = set()
     wver = dist_common.weights_fingerprint(rl_path)
     local_bun = bun_version(bun)

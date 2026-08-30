@@ -143,6 +143,23 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
     return None
 
 
+# 训练机当前分支（run_rl.py 启动时锁存）。节点远控升级**永远**用这个分支——
+# rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把全部节点 reset 回
+# 旧代码，2026-08-30 事故）。queue/eval_dispatch 传来的 branch 参数为空时用它。
+UPGRADE_BRANCH: str | None = None
+
+
+def set_upgrade_branch(branch: str) -> None:
+    global UPGRADE_BRANCH
+    UPGRADE_BRANCH = branch
+
+
+def upgrade_branch_or(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    return UPGRADE_BRANCH or ""
+
+
 def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0) -> bool:
     """主动升级机制（M8）：POST /v1/restart {pullBranch} → agent 端 git pull + 重启。
 
