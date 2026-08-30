@@ -391,6 +391,9 @@ interface RunResult {
   dims: Record<string, { value: number | null; raw: number }>
   decisionTicks: number
   dodgeTicks: number
+  playerDeaths: number
+  playerHits: number
+  playerShots: number
 }
 
 /** 奖励 scheme 解析结果（§3.4：arena → 玩具臂；真实关 → v7；--reward 可显式覆盖）。 */
@@ -710,6 +713,9 @@ function runOne(
     dims,
     decisionTicks,
     dodgeTicks,
+    playerDeaths: tel.playerDeaths,
+    playerHits: tel.playerHits,
+    playerShots: tel.playerShots,
   }
 }
 
@@ -815,6 +821,9 @@ function main(): void {
   let wins = 0
   let totalDecisionTicks = 0
   let totalDodgeTicks = 0
+  let totalDeaths = 0
+  let totalHits = 0
+  let totalShots = 0
   const perGame: string[] = []
 
   for (const si of stages) {
@@ -878,6 +887,9 @@ function main(): void {
       totalTicks += res.ticks
       totalDecisionTicks += res.decisionTicks
       totalDodgeTicks += res.dodgeTicks
+      totalDeaths += res.playerDeaths
+      totalHits += res.playerHits
+      totalShots += res.playerShots
       perGame.push(
         `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,
       )
@@ -913,6 +925,11 @@ function main(): void {
       coverage: totalDecisionTicks > 0 ? +(totalDodgeTicks / totalDecisionTicks).toFixed(5) : 0,
       dodgeTicks: totalDodgeTicks,
       decisionTicks: totalDecisionTicks,
+    },
+    behavior: {
+      deathsPerGame: +(totalDeaths / Math.max(1, total)).toFixed(3),
+      hitsPerGame: +(totalHits / Math.max(1, total)).toFixed(3),
+      shotsPerGame: +(totalShots / Math.max(1, total)).toFixed(2),
     },
     scoreStats: stat(scores),
     // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化
