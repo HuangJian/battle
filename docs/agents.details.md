@@ -580,3 +580,74 @@ the tests pass.
 
 **纪律**：收到完成通知后立即推进下一步（读日志 → 判定 → 启动下一阶段），不要让已完成
 的任务排队等下一次交互。
+
+---
+
+## §15 Closed-loop corpus discipline — why & recipes (AGENTS §15)
+
+### The case study (goal-nn s1-cap, 2026-08-30)
+
+A capped S1 RL continuation ran with a **locked corpus**: explicit `--stages
+1000-1002 --seeds 0-3` = the same 12 games every iteration. Symptoms, in the
+order an operator should learn to recognize them:
+
+1. **Training win curve rises while capability does not** — 23→44% sampled win
+   rate over 10 iterations, but greedy (deployment-mode) eval sat at 26.7% with
+   the policy visiting ~10 cells and firing 22.7 shots/game for **zero kills**
+   in losing games (a fixed "push up + spray the midline" routine that never
+   tracks the enemy).
+2. **Different weights, identical games** — the A4-warm and A5-scratch policies
+   (provably different logits, verified via an `EVAL_DEBUG` first-frame dump)
+   produced **60/60 identical** greedy outcome/tick vectors. Argmax had converged
+   to the same routine on every visited state. This is the mode-collapse
+   fingerprint; its eval-side enabler was reports without a weights fingerprint
+   (fixed: `_eval_report.json` now carries `weightsSha`).
+3. **Inverted greedy-vs-sampled gap** — sampling escapes the routine ~15-25% of
+   the time and wins more than argmax. Greedy should never be *worse* than
+   sampling; when it is, suspect deterministic mode collapse before blaming
+   training budget.
+
+### The KL explosion gallery (all small-batch + miscalibrated scale)
+
+| kl (one update) | context | root cause |
+|---|---|---|
+| 69.9 | 12-game iter, BC warm start | random-init value head on a BC-scale trunk (V(s)≈±700) → value grads wreck the shared trunk → policy scramble |
+| 119 | scratch init, kaiming | ConvMixer trunk activations ~1000 (inputs 0..255, no norm) amplify even clip-1.0 grads into 100-nat logp swings |
+| 32905 | scratch init after partial fix | real-obs activations were 13× the synthetic probe's estimate; 1/α-rescaled heads hypersensitive to trunk drift |
+
+Fixes that worked, in `run_rl.py build_model` (!resume path) and
+`nn-training/init_scratch_weights.py`:
+
+- **warm_start_normalize**: sample REAL obs (multi-shard max-union + synthetic
+  extremes — a single degenerate shard once read feat_max=1 and α blew up 14×),
+  scale trunk to hidden≈15, scale move/fire heads to a logit range of ~3
+  (argmax-preserving soft prior, entropy≈1), zero the value head (BC checkpoints
+  have none). The trunk/head rescaling is exactly function-preserving
+  (Conv/Linear+ReLU are positively homogeneous).
+- **Batch size as the KL stabilizer**: kl per update ≈ f(gradient SNR). At 12
+  games (1.4K samples) the global advantage normalization is dominated by single-
+  episode luck; at 150 games (17K samples) it is stable. Measured: first big-batch
+  iter kl=0.0135 with entropy 1.77 — lower than any healthy micro iteration.
+
+### Recipes
+
+- **Corpus rotation**: explicit-mode `--seed-rotate N` draws N fresh seeds per
+  stage per iteration, keyed `(rotateSeed, it)` (deterministic, resume-safe);
+  `N=0` keeps the legacy fixed-seed behavior byte-identical. Rotate-mode
+  (`--rotate-stages`) already rotates but is hard-wired to real stages.
+- **Corpus sizing**: saturate the pool. Rule of thumb: games/round ≈ workers ×
+  (a few minutes of wall per round). 2026-08-30 cluster (~60 workers): 150
+  games/round ≈ 5-6 min rollout + ~7 min PPO. Re-estimate when the cluster
+  changes; the AGENTS rule deliberately states magnitudes, not constants.
+- **Free OOD validation**: keep `--eval-games-per-stage > 0` — the clean eval
+  runs on real stages during the PPO window and appends `eval_log.jsonl`; with
+  seed rotation the training win rate itself is also OOD.
+- **Checkpoint discipline**: pre-register a mid-run greedy checkpoint with a
+  stop bar (s1-cap: "greedy <50% at midpoint → stop") so a doomed run dies on a
+  number, not on willpower.
+- **Report fingerprints**: eval reports carry `weightsSha`; rollout manifests
+  carry rewardScheme + arena layoutHash. A metric that cannot answer "which
+  weights produced this" is unauditable.
+- **New experiment = new directories**: switching corpus/curriculum/reward
+  semantics changes the shard accounting contract; never resume `--out/--traj`
+  across it (DECISIONS §296).

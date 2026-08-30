@@ -286,3 +286,31 @@ When this file and your instincts disagree, this file wins. When this file and t
 - **14.4** Don't fight V8 string interning — keep terrain as strings in the TileMap; never "optimize" through mutable numeric lookup objects (measured 28% regression).
 - **14.5** No `.filter()` + `.sort()` chains in per-tick paths — prefer inline scoring with a running best.
 - **14.6** Reuse the `World.allTanks` buffer — call the getter once and pass the reference to same-tick consumers.
+
+---
+
+## 15. Closed-loop corpus discipline (training / CMA-ES / sweep loops)
+
+> Any "evaluate → update → re-evaluate" loop (RL/PPO, BC-DAgger, CMA-ES, parameter
+> sweeps) optimizes its evaluation set itself — without corpus rotation the score
+> rises while the capability does not. Case study & recipes:
+> `docs/agents.details.md` §15 (s1-cap: a locked 12-game set produced a 23->44% memorized win curve while greedy eval sat at 26.7% with 60/60 identical games across two policies).
+
+- **15.1 Rotate the corpus every round**: the (stage, seed) pairs of round *it*
+  must not repeat any earlier round (draw keyed by `(runSeed, it)`, resume-safe).
+  Re-grinding a fixed set = memorization; treat those metrics as void.
+- **15.2 Micro-corpus is a sentinel, not a verdict**: small fast loops (<~50
+  games/round, order-of-magnitude — re-estimate with cluster size) only validate
+  "pipeline works / reward arm has gradient / incident attribution"; their win
+  curves are never a capability conclusion. Capability claims need a corpus that
+  saturates the cluster plus an independent validation channel (e.g. clean eval).
+- **15.3 Evaluate the deployment mode separately**: training sampling win rate ≠
+  greedy/deployment win rate — argmax converges onto fixed routines that sampling
+  would escape. The gap between the two, and "different weights produce 60/60
+  identical greedy games", are mode-collapse fingerprints worth acting on.
+- **15.4 Large batches are the KL stabilizer**: size closed-loop updates (PPO
+  etc.) so advantage normalization is not dominated by single-episode luck;
+  kl / entropy / value / gnorm are the four must-read numbers of every update.
+- **15.5 Changing corpus / curriculum / reward semantics = a new experiment**:
+  fresh `--out/--traj` directories + a DECISIONS entry; never resume across the
+  change (the accounting contract has changed).
