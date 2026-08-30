@@ -284,13 +284,13 @@ def main() -> None:
     ap.add_argument("--seed-rotate", type=int, default=0,
                     help="explicit 模式 seed 轮转：>0 时每迭代对 --stages 每关抽 N 个全新 "
                          "seed（(rotateSeed,it) 键控、断点复现）；0 = 固定 --seeds（旧行为）")
-    ap.add_argument("--rotate-stages", type=int, default=0,
+    ap.add_argument("--rotate-stages", type=int, default=_d("rotate_stages", 0),
                     help=">0: rotate through ALL stages this many per iteration "
                          "(iteration i uses stages [(i-1)*N %% 35 ...]); seeds are drawn "
                          "fresh every iteration from a (seed, iter)-derived RNG")
     ap.add_argument("--seeds-per-stage", type=int, default=10,
                     help="random seeds per stage in rotate mode")
-    ap.add_argument("--total-stages", type=int, default=35,
+    ap.add_argument("--total-stages", type=int, default=_d("total_stages", 35),
                     help="stage count for rotate mode (repo has 35)")
     ap.add_argument("--curriculum-stages", default="",
                     help="curriculum mode: easy→hard ordered stage list (e.g. "
@@ -304,8 +304,8 @@ def main() -> None:
                     help="curriculum: expand every N iterations (0 = never expand)")
     ap.add_argument("--curriculum-grow", type=int, default=4,
                     help="curriculum: +G stages per expansion step")
-    ap.add_argument("--difficulty", default="hard")
-    ap.add_argument("--max-ticks", type=int, default=12000)
+    ap.add_argument("--difficulty", default=_d("difficulty", "hard"))
+    ap.add_argument("--max-ticks", type=int, default=_d("max_ticks", 12000))
     # goal-nn 卡 A2：玩具奖励臂覆盖（''=按 stage 解析：arena→级默认臂，真实关→v7；
     # 'toy:<arm>' 强制玩具臂用于扫参，'v7' 强制 v7）。经 queue/agent 透传到导出器。
     ap.add_argument("--reward", default="",
@@ -314,7 +314,7 @@ def main() -> None:
     # 'off'|'l0'|'god' 强制，'god' 仅 A/B 报告用）。经 queue/agent 透传到导出器。
     ap.add_argument("--dodge", default="",
                     help="dodge override: '' (stage-derived), 'off', 'l0', or 'god'")
-    ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
+    ap.add_argument("--workers", type=int, default=_d("workers", min(os.cpu_count() or 4, 12)),
                     help="concurrent bun rollout workers (games partitioned by seed)")
     ap.add_argument("--local-slots", type=int, default=_d("local_slots", 0),
                     help="trainer direct-thread slots (stream mode). R6 schedule: "
@@ -323,16 +323,16 @@ def main() -> None:
                          "remainder after PPO. 0 = auto (max(2, workers//4))；默认取 "
                          "rl-config 的 rl.local_slots")
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=512,
+    ap.add_argument("--mb", type=int, default=_d("mb", 512),
                     help="minibatch size — 512 halves gradient steps vs 256 "
                          "(faster PPO, smaller per-iteration KL drift)")
     ap.add_argument("--lr", type=float, default=ppo_mod.LR)
-    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--seed", type=int, default=_d("seed", 7))
     ap.add_argument("--max-hours", type=float, default=0.0,
                     help="wall-clock budget in hours; checked between iterations; 0 = unlimited")
-    ap.add_argument("--keep-iters", type=int, default=3,
+    ap.add_argument("--keep-iters", type=int, default=_d("keep_iters", 3),
                     help="keep only the last N trajectory dirs (disk bound); 0 = keep all")
-    ap.add_argument("--stream", type=int, default=1,
+    ap.add_argument("--stream", type=int, default=_d("stream", 1),
                     help="1（默认，AGENTS §15.6）= 流式迭代：采集与 PPO 波次重叠，集群不在 PPO 窗口闲置；"
                          "0 = 串行（采集全部完成后再统一 PPO）——仅调试/归因用")
     ap.add_argument("--eval-stages", default="",
@@ -341,7 +341,7 @@ def main() -> None:
     ap.add_argument("--eval-games-per-stage", type=int, default=2,
                     help="干净评估：每关固定种子贪心局数（0=关闭）。rollout 收官后的 PPO 空窗期 "
                          "分发到全部 ping.evalSupport 节点；结果追加 tmp/rl-traj/eval_log.jsonl")
-    ap.add_argument("--eval-window-sec", type=int, default=1500,
+    ap.add_argument("--eval-window-sec", type=int, default=_d("eval_window_sec", 1500),
                     help="干净评估线程的墙钟预算；超时未结算的局放弃（不阻塞 PPO 与下一轮）")
     args = ap.parse_args()
 
