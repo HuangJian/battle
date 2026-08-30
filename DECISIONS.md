@@ -1220,3 +1220,23 @@ workers=8、干净评估 2 局/关开起。热启动 = tmp/s1-cap/weights.json�
 清零重学）；策略头经 warm_start_normalize 软先验延续。奖励臂不变（toy:kill2，换奖励
 = 换实验）。新战役独立目录 tmp/s1-big（课程类型切换不作断点复用）。封顶 = --max-hours 8
 与 --iters 40 先到者。改的是启动命令，不是训练代码。
+
+## §297 S1 过门后的战役修订包（2026-08-30，随 Phase-1 重启累积决策，一次归档）
+1. **奖励臂 kill2**（wAlive 0.0005→0）：A4 贪心塌缩诊断（败局非冻死，是"上推+扫射
+   不追踪"套路）⇒ 拔掉"原地骚扰稳拿 0.6/局"的激励锚；存活压力由 wDmg 承担。
+   实证：S1 大语料重开 17 iters 即 97-100% 过门（A4 时代 21 iters 仅 26.7%）。
+2. **A4b 缓期**：只会开火的 S1 学生缺闪避/躲弹（S2/S3 课），真实关复测结构性无解；
+   待 S2/S3 能力建立后随门判定自然复测，不单独烧机时。
+3. **L0 退场判据更换**：强权重下 off vs l0 逐位一致（L0 惰性）⇒ dodgeCov≥2% 判据
+   作废；新档以 `--dodge off` 自持探针开档，红线 = off 下 deaths/局 + alive-ticks
+   （弱权重基线 0.222 / 强 0.0）；L0 代码保留，弱策略/高难档可重新启用。
+4. **eval 门控升难**：新档 eval >80%（5 迭代趋势）再进下一档；rollout 崩 <50% 判
+   过难降档。训练语料逐轮轮转（AGENTS §15.1），评估种子固定（860001+，可比性）。
+5. **干净评估语料可配**（`--eval-stages`）：arena 战役自评训练场（OOD 信号）；
+   EVAL_SEEDS 扩至 20（前 2 保历史可比）。
+6. **stream 默认**（AGENTS §15.6）：run_rl 代码默认 0→1 + ppo.update 别名补齐
+   （流式路径曾腐化）。串行仅调试用。
+7. **rl-config `rl` 共享块**：机制默认值（rotate_stages=0 保守态、total_stages、
+   difficulty、max_ticks、stream、mb、seed、keep_iters、eval_window、workers、
+   local_slots）run_rl `_d` 接入；**切换器默认值必须取保守态**（rotate_stages:35
+   曾把 S2 静默切到真实关 rotate——二次 35 关意外，本条为免疫记录）。
