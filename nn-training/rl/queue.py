@@ -225,10 +225,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             continue
         if ping.get("codeHash") != code_hash:
             if dist_common.is_self_node(n["url"], nid):
-                # self/回环节点 = 训练机同一工作区起的服务——远控会破坏共享工作区，
-                # 只排除该轮，绝不发升级请求（操作者手动重启）。
-                log(f"[dist] node {nid}: codeHash mismatch — self/loopback node, "
-                    f"remote upgrade SKIPPED (restart it manually); excluded this round")
+                # self/回环节点 = 训练机同一工作区起的服务：代码天然同源，stale 时
+                # 只需**纯重启**（无 pullBranch ⇒ 零 git 操作，不碰共享工作区）。
+                if upgrade_branch and nid not in upgrade_requested:
+                    upgrade_requested.add(nid)
+                    ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""), "")
+                    log(f"[dist] node {nid}: self node stale — restart-only upgrade "
+                        f"({'accepted' if ok else 'FAILED'}), no git pull; excluded this round")
                 continue
             log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
             # 主动升级：分支 = 训练机当前分支（dist_common.UPGRADE_BRANCH 锁存）。
@@ -704,7 +707,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     continue  # 仍未上线，下轮再试
                 if ping.get("codeHash") != dist_common.compute_code_hash():
                     if dist_common.is_self_node(n["url"], nid):
-                        continue  # self/回环节点：永不远控（见 ping 门注释）
+                        # self：纯重启远控（无 pull，见 ping 门注释）
+                        if upgrade_branch and nid not in upgrade_requested:
+                            upgrade_requested.add(nid)
+                            ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""), "")
+                            log(f"[dist] rescan {nid}: self node stale — restart-only "
+                                f"({'accepted' if ok else 'FAILED'})")
+                        continue
                     # 主动升级：rescan 发现 stale 节点 → 指示 git pull + 重启（每轮一次）。
                     if upgrade_branch and nid not in upgrade_requested:
                         upgrade_requested.add(nid)

@@ -161,10 +161,12 @@ def set_upgrade_branch(branch: str) -> None:
 
 
 def is_self_node(url: str, node_id: str = "") -> bool:
-    """self/回环节点：agent 由训练机同一工作区启动——它的代码就是训练机代码，
-    远控 upgrade 会在共享工作区做破坏性 pull（2026-08-30 事故：本机被 reset 回
-    旧代码）。此类节点只参与派单，**永不发升级请求**（代码不同步时仅排除该轮，
-    由操作者手动重启）。"""
+    """self/回环节点：agent 由训练机同一工作区启动——代码与训练机**天然同源**。
+
+    远控语义（2026-08-30 用户修订）：stale 时允许远控，但只做**纯重启**
+    （request_upgrade 不带 pullBranch ⇒ agent 不做任何 git 操作，重启进程即
+    拾取工作区新代码）；**禁止 pull**——共享工作区上的 git pull 是破坏性的
+    （曾把本机 reset 回旧分支，2026-08-30 事故）。codeHash 正确时零动作。"""
     if node_id.strip().lower() == "self":
         return True
     try:
