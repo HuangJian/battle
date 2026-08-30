@@ -4,6 +4,45 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
+
+**用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与
+全灭"——对**本地 m1-eval** 成立，对**分布式 export-eval-game.ts** 不成立。当时 export-eval-game.ts
+无 cleared、EvalResult 只有 win、eval_log 只存 win/dims ⇒ 分布式 eval 仍在报被 BONUS TIME 窗口
+（600 tick）截断的 stage_clear 胜率，系统性少算 ~10-15pp（it13 实测 win 60.7% vs 真全歼 73.2%）。
+
+**根因**（不止一处）：
+1. `export-eval-game.ts` 无 `cleared` 字段（EvalResult 只有 win）
+2. `rl/eval_dispatch.py` record() 只透传 win，eval_log 无 cleared
+3. `export-eval-game.ts` **不在 codeHash 集内** ⇒ 节点 agent 不会随 schema 变更升级，节点局
+   产出旧版数据（本地 self 用新枚举 `max_ticks`、节点 mac/a96 用旧枚举 `timeout` ——重启后
+   实测实时印证）⇒ 本地/节点混合数据不可比
+4. 训练器 summary 无 clearRate，门判定全歼无处可读
+
+**修复**（commit 待定）：
+- `export-eval-game.ts`：EvalResult 加 `cleared`（= `allEnemiesCleared(world)`），透传进
+  `_eval_report.json`；头注释更新（本文件 2026-08-31 起入 codeHash，旧"不在哈希集"说明作废）
+- `rl/eval_dispatch.py`：record() 透传 cleared 进 eval_log；summary 加 `clears`/`clearRate`
+  （聚合含 ledger 重放，旧行无 cleared 保守记 0）；done_msg 打印 clearRate 与 winRate 并排
+- `dist_common.py` + `sampler-agent.ts` 双语：`export-eval-game.ts` 入 codeHash（与 rollout
+  同集）⇒ 节点随 schema 同步
+- `tests/sim/telemetry-parity.test.ts`：分发对账加 `remote.cleared === local.cleared` 断言
+- 冒烟：s1020/seed860001 单局 `_eval_report` 产出 `cleared=true`（stage_clear 且全歼）✓
+- typecheck + 15 sim tests + lint 全绿
+
+**操作**：S3 训练器已重启两次（断点续跑无损）——① 加载 cleared 透传的 eval_dispatch；
+② 加载含 export-eval-game 的新 dist_common（节点升级判断）。节点将随下一轮 codeHash 检测
+自动 pull + 重启。**it14 为过渡轮**：本地局已有 cleared、节点局尚无（旧 agent），clearRate
+聚合以节点升级完成后的迭代为准。
+
+**🟠 门禁字段定案**：run_rl.py 的 `winRate` 是 rollout 训练语料口径，**不读 eval_log**；
+S3 门（全歼 ≥70%）出口判读**读 eval_log 的 cleared**（或 dims.progress>=1.0 兜底），
+与方案 A（§14）同一口径，不会卡死。eval summary 的 clearRate 即门禁读数。
+
+**待办（延续）**：P0-2 A5 重跑（kaiming init 纯从零臂）待 S3 稳定后并行；S3 捡道具技能
+未涌现（loot it1 0.63 → 0.56 无升，kill2 无拾取激励，符合预期，门禁不卡 loot；S4a 若有
+道具需求再议）。
+
 ## §15 A4b 复测**通过** + P0-1 遥测修复 + S3 启动（2026-08-31 凌晨，goal-nn-next 卡）
 
 ### A4b 复测（卡 P1-2：S2 出口立即触发，硬闸）—— **过** ✅

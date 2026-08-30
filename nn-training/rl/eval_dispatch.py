@@ -222,6 +222,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         attempts: dict[tuple[int, int], int] = {}
         streaks = {nd["id"]: 0 for nd in nodes_ok}
         wins = [0]
+        cleared_total = [0]
         outcomes: dict[str, int] = {}
         node_games: dict[str, int] = {}  # 每节点实际结算的评估局数（summary 用）
         jsonl_lock = threading.Lock()
@@ -231,11 +232,16 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
             dim_vals = {k: (v.get("value") if isinstance(v, dict) else v)
                         for k, v in dims.items()}
             win = 1 if manifest.get("win") else 0
+            # 全歼率（方案 A 口径，§15/P0-1）：export-eval-game 已透传 cleared——
+            # 敌人全灭即算歼灭，不受 BONUS TIME 窗口截断影响。门判定全歼必须读它，
+            # 否则 S3/S4a 的 timeout 局被系统性少算（eval_win 偏低 10-15pp）。
+            cleared = 1 if manifest.get("cleared") else 0
             row = {
                 "event": "eval", "iter": it, "wver": key16,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "stage": task[0], "seed": task[1], "node": nd_id,
                 "outcome": manifest.get("outcome"), "win": win,
+                "cleared": cleared,
                 "ticks": manifest.get("ticks"), "score": manifest.get("score"),
                 "quality": manifest.get("quality"), "dims": dim_vals,
                 "elapsedSec": manifest.get("elapsedSec"),
@@ -251,6 +257,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
                     "ts": time.strftime("%Y-%m-%d %H:%M:%S")})
             with lock:
                 wins[0] += win
+                cleared_total[0] += cleared
                 node_games[nd_id] = node_games.get(nd_id, 0) + 1
                 oc = str(manifest.get("outcome"))
                 outcomes[oc] = outcomes.get(oc, 0) + 1
@@ -390,6 +397,7 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         # 断点续跑口径：summary 必须聚合台账中该 (iter,wver) 的全部逐局行——
         # 只统计本次补跑会低估分母（it29 实测教训：补跑 20 局写出 2/20）。
         led_wins = 0
+        led_clears = 0
         led_outcomes: dict[str, int] = {}
         led_nodes: dict[str, int] = {}
         try:
@@ -403,6 +411,9 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
                             or r.get("iter") != it):
                         continue
                     led_wins += 1 if r.get("win") else 0
+                    # 全歼率（方案 A 口径）：旧行（cleared 缺省）视为未全歼——新 schema
+                    # 上线前的行只有本地局有 cleared，此处保守记 0，聚合以新行口径为准。
+                    led_clears += 1 if r.get("cleared") else 0
                     oc = str(r.get("outcome") or "?")
                     led_outcomes[oc] = led_outcomes.get(oc, 0) + 1
                     ndm = str(r.get("node") or "?")
@@ -412,19 +423,25 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         if led_outcomes:
             n = sum(led_outcomes.values())
             wins_v = led_wins
+            clears_v = led_clears
             outcomes = led_outcomes
             node_games = led_nodes
         else:
             n = len(seen)
             wins_v = wins[0]
+            clears_v = cleared_total[0]
         dropped = max(dropped, len(pairs) - n)
         clean_wr = (wins_v / n) if n else None
+        clear_rate = (clears_v / n) if n else None
         summary = {
             "event": "eval_summary", "iter": it, "wver": key16,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "sec": round(time.time() - t_eval_start, 1),
             "games": n, "wins": wins_v,
             "winRate": round(clean_wr, 4) if clean_wr is not None else None,
+            # 全歼率（敌人全灭即算，不受 BONUS TIME 截断影响）——S3/S4a 门判定读它。
+            "clears": clears_v,
+            "clearRate": round(clear_rate, 4) if clear_rate is not None else None,
             "outcomes": outcomes, "dropped": dropped,
             "rolloutWinRate": report_winrate_safe(rollout_winrate),
             # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
@@ -436,6 +453,8 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         if n:
             done_msg = (f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="
                         f"{clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
+                        + (f" clearRate={clear_rate:.1%} ({clears_v}/{n})"
+                           if clear_rate is not None else "")
                         + (f" vs rollout(sampled)={rollout_winrate:.1%}"
                            if rollout_winrate is not None else "")
                         + f" outcomes={json.dumps(outcomes)}")

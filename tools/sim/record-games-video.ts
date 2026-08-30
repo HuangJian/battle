@@ -1,14 +1,19 @@
 /**
  * record-games-video.ts — 用给定 RL 权重在指定 (关, 种子) 上逐 tick 渲染成 mp4 录像。
  *
- * 策略 = export-eval-game 同一个贪心 NN(掩码 argmax,零探索)——与评估口径一致,
+ * 策略双口径(浅份):
+ *   --mode greedy  (缺省) export-eval-game 同款贪心 NN(掩码 argmax,零探索);
+ *   --mode rollout export-rl-rollout.ts 同款采样策略——逐字节复制其 sampleCat 的
+ *                   masked softmax 采样 + mulberry32((seed ^ 0x85ebca6b)>>>0) 种子,
+ *                   与训练 rollout 完全同分布同轨迹(同一权重+种子 ⇒ 逐 tick 复现
+ *                   该轮训练的真实对局)。
  * 只在每次 sim.tick 后把 world 画到 @napi-rs/canvas(Skia) 上存 PNG 帧,再用 ffmpeg 编码。
  * 不建 dev server(AGENTS §5 硬规则);渲染管线复用 render-bench 的 headless 基座。
  *
  * Usage:
  *   bun tools/sim/record-games-video.ts --weights <weights.json> \
- *       --games s1010:860011,s1011:860012 \
- *       --difficulty hard --max-ticks 1200 --dpr 2 --out tmp/vrecord
+ *       --games s1010:860011,s1011:860012 --mode rollout \
+ *       --difficulty hard --max-ticks 3600 --dpr 2 --out tmp/vrecord
  */
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
@@ -90,6 +95,43 @@ function argmaxCat(logits: Float32Array, mask: number[] | null): number {
   return bi
 }
 
+/** mulberry32(seed ^ 0x85ebca6b)——与 export-rl-rollout.ts 采样 RNG 逐字节一致。 */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return function () {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** 与 export-rl-rollout.sampleCat 逐字节一致的 masked softmax 采样。 */
+function sampleCat(logits: Float32Array, mask: number[] | null, rng: () => number): number {
+  const n = logits.length
+  let max = -Infinity
+  for (let i = 0; i < n; i++) {
+    const v = mask && mask[i] !== 1 ? -1e9 : logits[i]
+    if (v > max) max = v
+  }
+  const ps = new Float32Array(n)
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    const v = mask && mask[i] !== 1 ? -1e9 : logits[i]
+    ps[i] = Math.exp(v - max)
+    sum += ps[i]
+  }
+  for (let i = 0; i < n; i++) ps[i] /= sum
+  const u = rng()
+  let c = 0
+  for (let i = 0; i < n; i++) {
+    c += ps[i]
+    if (u <= c) return i
+  }
+  return n - 1
+}
+
 interface GameSpec {
   stage: number
   seed: number
@@ -120,6 +162,8 @@ function recordOne(
   difficulty: string,
   maxTicks: number,
   weightsText: string,
+  mode: 'greedy' | 'rollout',
+  dumpPath: string | null,
   snaps: {
     camera: Camera
     anim: AnimationSystem
@@ -148,6 +192,8 @@ function recordOne(
   ai.reset()
 
   const encoder = new ObsEncoder()
+  const rng = mode === 'rollout' ? mulberry32((game.seed ^ 0x85ebca6b) >>> 0) : null
+  const acted: string[] = []
   let t = 0
   let outcome = 'timeout'
 
@@ -156,10 +202,17 @@ function recordOne(
     if (t % K === 0) {
       model.forward(encoder.obs, encoder.scalars)
       const masks = computeMasks(world)
-      scripted.setAction(
-        argmaxCat(model.moveLogits, masks.move),
-        argmaxCat(model.fireLogits, masks.fire),
-      )
+      let aMove: number
+      let aFire: number
+      if (mode === 'rollout') {
+        aMove = sampleCat(model.moveLogits, masks.move, rng!)
+        aFire = sampleCat(model.fireLogits, masks.fire, rng!)
+      } else {
+        aMove = argmaxCat(model.moveLogits, masks.move)
+        aFire = argmaxCat(model.fireLogits, masks.fire)
+      }
+      scripted.setAction(aMove, aFire)
+      acted.push(`${t},${aMove},${aFire}`)
     }
     sim.tick()
     ai.endFrame()
@@ -187,6 +240,7 @@ function recordOne(
       break
     }
   }
+  if (dumpPath) writeFileSync(dumpPath, acted.join('\n') + '\n')
   return { outcome, ticks: t, win: outcome === 'stage_clear' }
 }
 
@@ -198,6 +252,8 @@ async function main(): Promise<void> {
   let maxTicks = 1200
   let dpr = 2
   let outDir = 'tmp/vrecord'
+  let mode: 'greedy' | 'rollout' = 'greedy'
+  let dumpPath: string | null = null
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--weights') weightsPath = argv[++i]
     else if (argv[i] === '--games') gamesSpec = argv[++i]
@@ -205,6 +261,15 @@ async function main(): Promise<void> {
     else if (argv[i] === '--max-ticks') maxTicks = parseInt(argv[++i], 10)
     else if (argv[i] === '--dpr') dpr = parseInt(argv[++i], 10)
     else if (argv[i] === '--out') outDir = argv[++i]
+    else if (argv[i] === '--dump-actions') dumpPath = argv[++i]
+    else if (argv[i] === '--mode') {
+      const m = argv[++i]
+      if (m !== 'greedy' && m !== 'rollout') {
+        console.error(`[record-games-video] unknown --mode ${m} (greedy|rollout)`)
+        process.exit(2)
+      }
+      mode = m
+    }
   }
   if (!gamesSpec) {
     console.error('[record-games-video] --games required (e.g. s1010:860011,s1011:860012)')
@@ -235,7 +300,7 @@ async function main(): Promise<void> {
     const framesDir = join(outDir, `.frames-${tag}`)
     rmSync(framesDir, { recursive: true, force: true })
     mkdirSync(framesDir, { recursive: true })
-    const res = recordOne(g, difficulty, maxTicks, weightsText, snaps, framesDir)
+    const res = recordOne(g, difficulty, maxTicks, weightsText, mode, dumpPath, snaps, framesDir)
     const mp4 = join(
       outDir,
       `${tag}-${res.outcome === 'lives_exhausted' ? 'lost' : res.outcome}.mp4`,
@@ -270,7 +335,7 @@ async function main(): Promise<void> {
       `[record] ${tag} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} -> ${mp4}${r.status === 0 ? '' : ' (ENCODE FAILED)'}`,
     )
   }
-  console.log(`[record] weightsSha=${weightsSha} difficulty=${difficulty} dpr=${dpr}`)
+  console.log(`[record] weightsSha=${weightsSha} difficulty=${difficulty} mode=${mode} dpr=${dpr}`)
 }
 
 await (async () => {

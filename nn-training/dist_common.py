@@ -123,6 +123,13 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     if os.path.exists(intent_rollout):
         with open(intent_rollout, "rb") as f:
             out.append(("tools/sim/export-intent-rollout.ts", f.read()))
+    # 2026-08-31：干净评估走 export-eval-game.ts —— 入 codeHash。评估报告 schema
+    # 曾加 cleared（全歼率口径，P0-1/§15），节点若跑旧版则 cleared 恒 0、本地与节点
+    # 混合数据不可比。节点必须随新 schema 同步（否则门判定全歼被系统性少算）。
+    eval_game = os.path.join(REPO_ROOT, "tools", "sim", "export-eval-game.ts")
+    if os.path.exists(eval_game):
+        with open(eval_game, "rb") as f:
+            out.append(("tools/sim/export-eval-game.ts", f.read()))
     return out
 
 

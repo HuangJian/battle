@@ -5,14 +5,18 @@
  *   codeHash 红线（plan/distributed-rollup v3.3 M4）覆盖 `src/nn/**` +
  *   `tools/sim/export-rl-rollout.ts`，trainer 与 agent 逐字节一致才准入 rollout。
  *   动采集脚本会让全部远程节点在同步代码前被剔除（rollout 塌缩成本机）。
- *   本文件不在哈希集内 —— 旧 agent 忽略 eval 任务（ping 无 evalSupport 即跳过），
- *   新 agent 同步后逐节点灰度点亮，采集主链路零影响。
  *
  * 与训练 rollout 的语义差异（有意为之）：
  *   - 动作 = 掩码 argmax（无探索噪声）；整局零随机决策 → 同 (权重, 关, seed) 逐 tick 确定。
- *   - 只写 `_eval_report.json`（outcome/ticks/win/score/dims），不产 trajectory shards。
+ *   - 只写 `_eval_report.json`（outcome/ticks/win/cleared/score/dims），不产 trajectory shards。
  *   - 打分 = 纯 v7（V7_SCORE_CONFIG 原值，不做 F3 门控、不败局带剔 lives）
  *     ——与 God-AI 全部基线可比（评估口径 godai-score.ts 保持不动）。
+ *   - `cleared` = 全歼率口径（方案 §2.1「全歼率」门）：敌人全灭即算，不受 BONUS TIME
+ *     窗口截断影响。分布式 eval 的门判定与巡检必须读它（P0-1/§15）。
+ *
+ * codeHash：2026-08-31 起本文件入 dist 哈希集（dist_common.py + sampler-agent.ts 双语）——
+ * 评估报告 schema 一旦变更（如 cleared），节点必须随新代码同步，否则本地/节点混合数据
+ * 不可比。早先"不在哈希集内，旧 agent 忽略 eval 任务"的灰度说明已过时。
  *
  * 口径同步契约：telemetry 采样节拍/事件判据/维度定义复制自 export-rl-rollout.ts
  * （其本身逐字段对齐 simulation-runner.ts）。若打分口径变更，三个文件须双侧同步，
@@ -25,6 +29,7 @@
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
+import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { createHash } from 'node:crypto'
@@ -165,6 +170,11 @@ interface EvalResult {
   outcome: SimOutcome
   /** 失败细分（仅 gameover：'base_destroyed' | 'lives_exhausted'；其余 undefined）。 */
   lossDetail?: 'base_destroyed' | 'lives_exhausted'
+  /** 全灭（歼灭率口径，方案 §2.1「全歼率」门）：敌人队列已空且场上无存活非 extra
+   *  敌人（SimulationEffects.allEnemiesCleared）。与 win 不同——win 要求 stage_clear
+   *  （地上无存活道具，BONUS TIME 窗口 600 tick 内截断即 max_ticks）。分布式 eval
+   *  门判定全歼必须读它，否则 BONUS 截断局被系统性少算（P0-1 同源口径，§15）。 */
+  cleared: boolean
   ticks: number
   win: boolean
   score: number
@@ -367,6 +377,7 @@ export function runEvalOne(
   return {
     outcome,
     lossDetail,
+    cleared: allEnemiesCleared(world),
     ticks: t,
     win: outcome === 'stage_clear',
     score: scored.score,
@@ -458,6 +469,7 @@ function main(): void {
     outcome: res.outcome,
     ticks: res.ticks,
     win: res.win,
+    cleared: res.cleared,
     score: res.score,
     quality: res.quality,
     dims: res.dims,

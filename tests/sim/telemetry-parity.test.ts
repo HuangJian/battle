@@ -102,6 +102,7 @@ describe('远程/本地评估遥测口径一致（P0-1 分发对账）', () => {
       }
       expect(remote.outcome).toBe(local.outcome)
       expect(remote.ticks).toBe(local.ticks)
+      expect(remote.cleared).toBe(local.cleared) // 全歼口径：分布式/本地必须一致（P0-1）
       expect(remoteScorable.finalState.killCount).toBe(local.finalState.killCount)
       expect(remoteScorable.telemetry.playerShots).toBe(local.telemetry!.playerShots)
       expect(remoteScorable.telemetry.playerDeaths).toBe(local.telemetry!.playerDeaths)

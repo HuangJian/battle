@@ -206,6 +206,15 @@ function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
       relPath: path.relative(REPO_ROOT, intentRollout),
       content: fs.readFileSync(intentRollout),
     })
+  // 2026-08-31：干净评估走 export-eval-game.ts —— 入 codeHash（与 dist_common.py
+  // 双语同集）。评估报告加过 cleared（全歼率口径），节点旧版会 cleared 恒 0 ⇒ 本地
+  // 与节点混合数据不可比、门判定全歼被系统性少算。节点必须随新 schema 同步。
+  const evalGame = path.join(REPO_ROOT, 'tools', 'sim', 'export-eval-game.ts')
+  if (fs.existsSync(evalGame))
+    out.push({
+      relPath: path.relative(REPO_ROOT, evalGame),
+      content: fs.readFileSync(evalGame),
+    })
   return out
 }
 
