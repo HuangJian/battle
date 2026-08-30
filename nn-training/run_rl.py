@@ -258,6 +258,16 @@ def main() -> None:
     # relative. Required for start-training.ps1 --detach, whose WorkingDirectory
     # is nn-training/ — same pattern as train_loop.py's REPO_ROOT.
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # 启动参数默认取自 rl-config.json 的 rl 块（与 run_rl_intent 的 intent_rl 块
+    # 同一模式——单一事实来源；CLI 显式传参覆盖 json 默认）。
+    try:
+        _rl_args = json.loads((REPO_ROOT / "nn-training" / "rl-config.json").read_text(encoding="utf-8")).get("rl", {}) or {}
+    except Exception:
+        _rl_args = {}
+
+    def _d(name, fallback):
+        return _rl_args.get(name, fallback)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--bc", default="tmp/student-weights-dagger/weights.json",
                     help="BC checkpoint to warm-start from (first init only)")
@@ -306,11 +316,12 @@ def main() -> None:
                     help="dodge override: '' (stage-derived), 'off', 'l0', or 'god'")
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
                     help="concurrent bun rollout workers (games partitioned by seed)")
-    ap.add_argument("--local-slots", type=int, default=0,
+    ap.add_argument("--local-slots", type=int, default=_d("local_slots", 0),
                     help="trainer direct-thread slots (stream mode). R6 schedule: "
                          "first-dispatched during collection; suspend once PPO waves "
                          "begin (auto-resume if the whole cluster stalls); join eval "
-                         "remainder after PPO. 0 = auto (max(2, workers//4))")
+                         "remainder after PPO. 0 = auto (max(2, workers//4))；默认取 "
+                         "rl-config 的 rl.local_slots")
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--mb", type=int, default=512,
                     help="minibatch size — 512 halves gradient steps vs 256 "
