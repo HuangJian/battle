@@ -15,119 +15,34 @@
  *   bun tools/optimize/curriculum.ts --verbose    # show per-tick metrics
  */
 
-import { GRID } from '../../src/constants'
-import type { StageData, TankKind } from '../../src/types'
-import { STAGES } from '../../src/config/stages'
+import type { StageData } from '../../src/types'
 import { runSimulation, type SimResult } from '../sim/simulation-runner'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { arg } from '../lib/cli'
 
 // ============================================================
 // Arena builder (plan §3 缺口 C, §3.5, §5.4)
+//
+// 2026-08-29（goal-nn 卡 A0a）：生成器实现迁入 `src/nn/arena-ladder.ts` ——
+// 分布式 rollout 的 codeHash 只覆盖 `src/nn/**` + 两个 rollout 导出器，
+// arena 定义（含 layoutSeed / enemyCount 扩展与训练阶梯注册表）必须落在
+// 这个集合里，dist 节点才能经 git-pull 升级自动同步（plan 卡 A1 步骤 4）。
+// 此处 re-export 保持既有消费方（curriculum CLI / 测试）不动。
 // ============================================================
 
-export interface ArenaOpts {
-  /** Edge length (in sub-blocks) of the open area inside the steel ring. */
-  size: number
-  /** Whether to include a 2×2 base at the bottom-center of the arena. */
-  base?: boolean
-  /** Total enemy count for this stage. */
-  enemyCount: number
-  /** Enemy kind queue (cycled if shorter than enemyCount). */
-  enemyKinds?: TankKind[]
-  /** Player spawn in sub-block coords (default: bottom-center of arena). */
-  playerSpawn?: { col: number; row: number }
-  /** Enemy spawns in sub-block coords (default: spread across top of arena). */
-  enemySpawns?: { col: number; row: number }[]
-}
-
-/**
- * Programatically generate a 26×26 open arena surrounded by steel walls.
- *
- * The open area is `size × size` sub-blocks, centered in the 26×26 grid. A
- * 1-cell-thick steel ring encloses it. If `base` is true, a 2×2 base is placed
- * at the bottom-center of the arena. Spawn points default to inside the open
- * area: player at bottom-center, enemies spread across the top.
- *
- * This is a pure data generator — no engine code is touched. The returned
- * `StageData` feeds directly into `runSimulation`.
- */
-export function makeArena(opts: ArenaOpts): StageData {
-  const { size, base = false, enemyCount, enemyKinds = ['basic'] as TankKind[] } = opts
-  const offset = Math.floor((GRID - size) / 2)
-
-  // Build 26×26 grid: steel ring + open interior.
-  const tiles: string[] = []
-  for (let r = 0; r < GRID; r++) {
-    let line = ''
-    for (let c = 0; c < GRID; c++) {
-      const isRing =
-        r === offset - 1 || r === offset + size || c === offset - 1 || c === offset + size
-      const inOpen = r >= offset && r < offset + size && c >= offset && c < offset + size
-      if (isRing) {
-        line += 's'
-      } else if (inOpen) {
-        // Base at bottom-center (2×2), only if requested.
-        const baseCol = offset + Math.floor(size / 2) - 1
-        const baseRow = offset + size - 2
-        if (base && c >= baseCol && c <= baseCol + 1 && r >= baseRow && r <= baseRow + 1) {
-          line += 'E'
-        } else {
-          line += '.'
-        }
-      } else {
-        // Outside the ring — fill with steel to prevent escape.
-        line += 's'
-      }
-    }
-    tiles.push(line)
-  }
-
-  // Default spawn points inside the open area.
-  const centerCol = offset + Math.floor(size / 2)
-  const playerSpawn = opts.playerSpawn ?? {
-    col: centerCol,
-    row: offset + size - 2,
-  }
-  const enemySpawns = opts.enemySpawns ?? [
-    { col: offset + 1, row: offset },
-    { col: centerCol, row: offset },
-    { col: offset + size - 2, row: offset },
-  ]
-
-  // Build enemy queue (cycled if shorter).
-  const enemies: TankKind[] = []
-  for (let i = 0; i < enemyCount; i++) {
-    enemies.push(enemyKinds[i % enemyKinds.length])
-  }
-
-  return {
-    id: -1,
-    name: `arena-${size}x${size}-${enemyCount}enemies${base ? '-base' : ''}`,
-    tiles,
-    enemies,
-    enemyCount,
-    playerSpawn,
-    enemySpawns,
-  }
-}
-
-/**
- * Generate a 26×26 maze stage (plan §4 stage 4/5). Uses the real stage 0
- * layout but optionally strips the base. This tests `directMove` wall-breaking
- * and navigation in a realistic brick-maze environment.
- */
-export function makeMazeStage(opts: { base?: boolean }): StageData {
-  const real = STAGES[0]
-  const tiles = real.tiles.map((line) => line.replace(/E/g, opts.base ? 'E' : '.'))
-  return {
-    ...real,
-    id: -1,
-    name: `maze-${opts.base ? 'base' : 'nobase'}`,
-    tiles,
-    // No enemyCount/playerSpawn/enemySpawns overrides — use defaults.
-  }
-}
+import { makeArena, makeMazeStage } from '../../src/nn/arena-ladder'
+export {
+  makeArena,
+  makeMazeStage,
+  stratifiedSampleKinds,
+  ARENA_ID_BASE,
+  isArenaId,
+  resolveArenaStage,
+  arenaLevelOfId,
+  stageLayoutHash,
+  ARENA_LADDER,
+} from '../../src/nn/arena-ladder'
+export type { ArenaOpts, MazeOpts, ArenaLevel, ArenaSpec } from '../../src/nn/arena-ladder'
 
 // ============================================================
 // Curriculum stages (plan §4)

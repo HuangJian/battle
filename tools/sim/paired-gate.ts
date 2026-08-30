@@ -16,8 +16,16 @@
  * Usage:
  *   bun tools/sim/paired-gate.ts --baseline reports/godai-baseline-hard-35x60.html \
  *       --candidate tmp/goal-t9a-eval.html [--gate canary|main]
+ *
+ * Ledger 配对模式（plan/goal-nn-action.md §4.2，A0 出口默认口径）：
+ *   bun tools/sim/paired-gate.ts --baseline-ledger a.html.ledger.jsonl \
+ *       --candidate-ledger b.html.ledger.jsonl
+ * 数据源 = m1-eval 逐局账本（每局一行 stage/seed/outcome），配对粒度 =
+ * (stage, seed)（2100 对）——关级配对 35 对的独立二项噪声底把可测门推到
+ * ≳2.4pp；(stage,seed) 级配对把功效提升一个数量级（§4.2 裁定默认走这条）。
+ * 零效应功率冒烟：同一 pinned 基线跑两次互配，读 SD/SE/CI（A0 步骤 5）。
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { STAGES } from '../../src/config/stages'
 
 interface StageRow {
@@ -82,8 +90,104 @@ function pairedStats(diffs: number[]): { mean: number; se: number; lo: number; h
   return { mean, se, lo: mean - 1.96 * se, hi: mean + 1.96 * se }
 }
 
+// ============================================================
+// Ledger 配对模式（§4.2 (stage,seed) 级 2100 对）
+// ============================================================
+
+interface LedgerRow {
+  wver: string
+  stage: number
+  seed: number
+  ok: boolean
+  outcome: string
+  ticks: number
+}
+
+function loadLedger(path: string): Map<string, LedgerRow> {
+  if (!existsSync(path)) {
+    console.error(`[paired-gate] ledger not found: ${path}`)
+    process.exit(2)
+  }
+  const out = new Map<string, LedgerRow>()
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const e = JSON.parse(line) as LedgerRow
+      if (!e.ok || !Number.isInteger(e.stage) || !Number.isInteger(e.seed)) continue
+      out.set(`${e.stage}:${e.seed}`, e) // 后写覆盖先读（错误重跑审计行生效）
+    } catch {
+      /* 跳过残行 */
+    }
+  }
+  return out
+}
+
+function ledgerGateMain(): void {
+  const args = process.argv.slice(2)
+  let baselinePath = ''
+  let candidatePath = ''
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--baseline-ledger') baselinePath = args[++i]
+    else if (args[i] === '--candidate-ledger') candidatePath = args[++i]
+  }
+  const base = loadLedger(baselinePath)
+  const cand = loadLedger(candidatePath)
+
+  // (stage,seed) 配对
+  const diffs: number[] = []
+  const perStage = new Map<number, number[]>()
+  let ticksMatched = 0
+  let zeroDiff = 0
+  for (const [key, b] of base) {
+    const c = cand.get(key)
+    if (!c) continue
+    const stage = b.stage
+    const d = (c.outcome === 'stage_clear' ? 1 : 0) - (b.outcome === 'stage_clear' ? 1 : 0)
+    diffs.push(d)
+    if (d === 0) zeroDiff++
+    if (c.ticks === b.ticks) ticksMatched++
+    const arr = perStage.get(stage) ?? []
+    arr.push(d)
+    perStage.set(stage, arr)
+  }
+  if (diffs.length === 0) {
+    console.error('[paired-gate] no (stage,seed) pairs matched between ledgers')
+    process.exit(2)
+  }
+  const st = pairedStats(diffs)
+  console.log(
+    `=== (stage,seed) 配对差（${diffs.length} 对；基线 ${baselinePath} / 候选 ${candidatePath}）===`,
+  )
+  console.log(
+    `paired diff: ${(st.mean * 100).toFixed(2)}pp  SD ${(Math.sqrt(st.se * st.se * diffs.length) * 100).toFixed(2)}pp  ` +
+      `SE ${(st.se * 100).toFixed(3)}pp  95% CI [${(st.lo * 100).toFixed(2)}, ${(st.hi * 100).toFixed(2)}]pp`,
+  )
+  console.log(
+    `零效应指纹: 恒等对 ${zeroDiff}/${diffs.length}（100% = 静默回退嫌疑），ticks 全等对 ${ticksMatched}/${diffs.length}`,
+  )
+  // 可测门口径（§4.2 二选一之 1 的换算：观测均值 ≥ 2pp + 1.96·SE_实测）
+  console.log(
+    `实测功效口径: 关级配对需 ≳2.4pp 的可测门在本配对粒度下为 ` +
+      `≥ ${(0.02 + 1.96 * st.se).toFixed(4)}（均值）才能 CI 下界 > 0`,
+  )
+  // 逐关聚合（与 HTML 关级口径对照）
+  const stageRows = [...perStage.entries()]
+    .map(([s, ds]) => ({ s, mean: ds.reduce((a, b) => a + b, 0) / ds.length, n: ds.length }))
+    .sort((a, b) => a.s - b.s)
+  const stageLevel = pairedStats(stageRows.map((r) => r.mean))
+  console.log(
+    `关级聚合（${stageRows.length} 关）: ${(stageLevel.mean * 100).toFixed(2)}pp ` +
+      `SE ${(stageLevel.se * 100).toFixed(2)}pp（对照用）`,
+  )
+}
+
 function main(): void {
   const args = process.argv.slice(2)
+  // ledger 模式分流（§4.2）：--baseline-ledger / --candidate-ledger
+  if (args.includes('--baseline-ledger') || args.includes('--candidate-ledger')) {
+    ledgerGateMain()
+    return
+  }
   let baselinePath = ''
   let candidatePath = ''
   let gate = 'canary'

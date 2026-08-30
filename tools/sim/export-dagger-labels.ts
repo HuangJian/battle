@@ -54,6 +54,7 @@ import {
   OBS_SCHEMA_MAJOR,
 } from '../../src/nn/obs-encoder'
 import { NNInput, type NNInputOptions } from '../../src/nn/policy-input'
+import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
 import { writeShard } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync } from 'fs'
 
@@ -106,7 +107,9 @@ function runOne(
   const student = new NNInput(world, nnOpts)
 
   const sim = new Simulation(world, student)
-  world.loadStageData(stage, stageIdx)
+  // arena 编号不进 stageIndex（killScore 的 1.05^index 缩放经里程碑掉落反哺
+  // 玩法，index=1000 会让单杀掉落循环爆内存——同 export-rl-rollout 的修复）。
+  world.loadStageData(stage, isArenaId(stageIdx) ? 0 : stageIdx)
   teacher.reset()
   student.reset()
 
@@ -242,7 +245,11 @@ function main(): void {
   const perGame: string[] = []
 
   for (const si of stages) {
-    const stage = STAGES[si]
+    // arena 编号命名空间（goal-nn 卡 A1）：si >= 1000 经 ARENA_LADDER 解析为
+    // 玩具场——arena-DAgger warm start（§3.7）的教师标号在学生访问的 arena
+    // 状态上采集，与真实关 dagger 权重（0% 胜率学生，§1.2 失败条件③）严格区分。
+    const arenaStage = isArenaId(si) ? resolveArenaStage(si) : null
+    const stage = arenaStage ?? STAGES[si]
     if (!stage) {
       perGame.push(`[SKIP] stage ${si}: not found`)
       continue

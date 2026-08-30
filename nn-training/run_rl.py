@@ -225,6 +225,14 @@ def main() -> None:
                     help="curriculum: +G stages per expansion step")
     ap.add_argument("--difficulty", default="hard")
     ap.add_argument("--max-ticks", type=int, default=12000)
+    # goal-nn 卡 A2：玩具奖励臂覆盖（''=按 stage 解析：arena→级默认臂，真实关→v7；
+    # 'toy:<arm>' 强制玩具臂用于扫参，'v7' 强制 v7）。经 queue/agent 透传到导出器。
+    ap.add_argument("--reward", default="",
+                    help="rollout reward override: '' (stage-derived), 'v7', or 'toy:<arm>'")
+    # goal-nn 卡 A3：dodge 模式覆盖（''=按 stage 解析：arena→l0，真实关→off；
+    # 'off'|'l0'|'god' 强制，'god' 仅 A/B 报告用）。经 queue/agent 透传到导出器。
+    ap.add_argument("--dodge", default="",
+                    help="dodge override: '' (stage-derived), 'off', 'l0', or 'god'")
     ap.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 12),
                     help="concurrent bun rollout workers (games partitioned by seed)")
     ap.add_argument("--local-slots", type=int, default=0,

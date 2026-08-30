@@ -332,6 +332,8 @@ async function runGame(
   replan = 0,
   heartbeat = 240,
   goalCoarse = false,
+  reward = '',
+  dodge = '',
 ): Promise<Buffer> {
   const ws = weightsByKind[kind]
   if (!ws) throw new Error(`no weights cached for kind=${kind}`)
@@ -381,6 +383,10 @@ async function runGame(
         args.push('--heartbeat', String(heartbeat))
         if (goalCoarse) args.push('--coarse')
       }
+      // goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
+      if (reward) args.push('--reward', reward)
+      // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+      if (dodge) args.push('--dodge', dodge)
     }
     args.push(
       '--max-ticks',
@@ -457,10 +463,25 @@ function beginTask(
   replan = 0,
   heartbeat = 240,
   goalCoarse = false,
+  reward = '',
+  dodge = '',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
-  runGame(stage, seed, maxTicks, difficulty, mode, kind, policy, replan, heartbeat, goalCoarse)
+  runGame(
+    stage,
+    seed,
+    maxTicks,
+    difficulty,
+    mode,
+    kind,
+    policy,
+    replan,
+    heartbeat,
+    goalCoarse,
+    reward,
+    dodge,
+  )
     .then((buf) => {
       lruPut(key, buf)
       gamesDoneTotal++
@@ -692,6 +713,8 @@ async function handle(req: Request): Promise<Response> {
         replan,
         parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
         url.searchParams.get('goalCoarse') === '1',
+        url.searchParams.get('reward') ?? '',
+        url.searchParams.get('dodge') ?? '',
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -724,6 +747,8 @@ async function handle(req: Request): Promise<Response> {
           replan,
           parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
           url.searchParams.get('goalCoarse') === '1',
+          url.searchParams.get('reward') ?? '',
+          url.searchParams.get('dodge') ?? '',
         )
           .then((buf) => {
             if (hb) clearInterval(hb)

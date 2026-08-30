@@ -117,6 +117,12 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
                 "--max-ticks", str(args.max_ticks),
                 "--difficulty", args.difficulty,
             ]
+            # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
+            if getattr(args, "reward", ""):
+                cmd += ["--reward", args.reward]
+            # goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+            if getattr(args, "dodge", ""):
+                cmd += ["--dodge", args.dodge]
         p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f,
                               stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW)
         rc = p.wait()
@@ -430,6 +436,12 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                    "--stages", str(si), "--seeds", str(sd),
                    "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
                    "--wver", wver, "--node-label", "local"]
+            # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
+            if getattr(args, "reward", ""):
+                cmd += ["--reward", args.reward]
+            # goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+            if getattr(args, "dodge", ""):
+                cmd += ["--dodge", args.dodge]
         with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
             # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
             # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
@@ -536,7 +548,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         nd["url"], nd["key"], iter_id=iter_id, wver=wver,
                         stage=task[0], seed=task[1], max_ticks=args.max_ticks,
                         difficulty=args.difficulty, timeout=task_timeout,
-                        kind=wkind, replan=getattr(args, "replan", 0))
+                        kind=wkind, replan=getattr(args, "replan", 0),
+                        reward=getattr(args, "reward", ""),
+                        dodge=getattr(args, "dodge", ""))
                     why = dist_common.validate_result(manifest, files, wver,
                                                       set(norm_pairs), seen)
                     if why:

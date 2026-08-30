@@ -67,6 +67,10 @@ function mkWorld(over: Record<string, unknown> = {}): World {
       isBaseDestroyed: () => false,
       // every queried cell is brick so base ring cells light up at 1
       get: () => 'brick',
+      // fixture is a WITH-base world (goal-nn A0a: encoder now gates base
+      // channels/scalars on hasBase() — no-base coverage lives in the
+      // dedicated arena-ladder/obs tests)
+      hasBase: () => true,
     },
     player: mkTank({
       allegiance: 'player',

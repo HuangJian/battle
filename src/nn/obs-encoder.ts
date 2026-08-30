@@ -123,14 +123,15 @@ export class ObsEncoder {
   encode(world: World): void {
     this.obs.fill(0)
     this.scalars.fill(0)
+    const hasBase = world.tileMap.hasBase()
     this.encodeTerrain(world)
-    this.encodeBase(world)
+    this.encodeBase(world, hasBase)
     this.encodeSelf(world)
     this.encodeEnemies(world)
     this.encodeBullets(world)
     this.encodePowerups(world)
     this.encodeWaveHeat(world)
-    this.encodeScalars(world)
+    this.encodeScalars(world, hasBase)
   }
 
   // ---- spatial channels ----
@@ -177,7 +178,16 @@ export class ObsEncoder {
     }
   }
 
-  private encodeBase(world: World): void {
+  /**
+   * 幻影基地修复（plan/goal-nn-action.md §3.2 / 卡 A0a）：无基地 arena 上
+   * TileMap 的 guard 明说"无基地不算被摧毁"，旧实现却无条件在 BASE_POS 画鹰、
+   * 画 ring、算 baseDeadline/基地相对标量——整条课程梯子会把它们训成
+   * "常量、可忽略"，到 S4a 出现真基地时突然变成生死信号。现在无基地 ⇒
+   * ch5 全 0 + s1/s6/s17/s18 全 0（"无基地"= 0，与 ch5 同语义；shape 不变）。
+   * 有基地场行为逐字节不变。
+   */
+  private encodeBase(world: World, hasBase: boolean): void {
+    if (!hasBase) return
     const bc = BASE_POS.col
     const br = BASE_POS.row
     // Eagle cell: 2 if still alive, 0 if destroyed.
@@ -260,7 +270,7 @@ export class ObsEncoder {
 
   // ---- scalar vector (plan §1.2) ----
 
-  private encodeScalars(world: World): void {
+  private encodeScalars(world: World, hasBase: boolean): void {
     const s = this.scalars
     const p = world.player
     const FIELD_DIAG = 26 * CELL * 1.5
@@ -277,7 +287,9 @@ export class ObsEncoder {
       if (ka.baseDeadline < minBaseDeadline) minBaseDeadline = ka.baseDeadline
     }
     s[0] = enemies.length === 0 ? 1 : clamp01(minKillSlack / 600)
-    s[1] = enemies.length === 0 ? 1 : clamp01(minBaseDeadline / 600)
+    // 幻影基地修复（卡 A0a）：无基地 ⇒ baseDeadline 标量恒 0（"无基地"= 0，
+    // 与 ch5 同语义），不写 ThreatBudget 对不存在基地算出的幽灵值。
+    s[1] = !hasBase ? 0 : enemies.length === 0 ? 1 : clamp01(minBaseDeadline / 600)
 
     // lives / level
     s[2] = clamp01(world.lives / 3)
@@ -301,13 +313,17 @@ export class ObsEncoder {
       s[5] = 0
     }
 
-    // ring completeness
-    let intact = 0
-    for (const cell of RING_CELLS) {
-      const t = world.tileMap.get(cell.col, cell.row)
-      if (t === 'brick' || t === 'steel') intact++
+    // ring completeness（无基地 ⇒ 恒 0，且跳过 RING_CELLS 扫描）
+    if (!hasBase) {
+      s[6] = 0
+    } else {
+      let intact = 0
+      for (const cell of RING_CELLS) {
+        const t = world.tileMap.get(cell.col, cell.row)
+        if (t === 'brick' || t === 'steel') intact++
+      }
+      s[6] = intact / RING_CELLS.length
     }
-    s[6] = intact / RING_CELLS.length
 
     // enemies on field / spawn queue remaining
     s[7] = clamp01(world.enemyCount / MAX_ENEMIES_ALIVE)
@@ -351,18 +367,23 @@ export class ObsEncoder {
       s[16] = 0
     }
 
-    // nearest base relative
-    const bcx = BASE_POS.col * CELL + CELL / 2
-    const bcy = BASE_POS.row * CELL + CELL / 2
-    if (pc) {
-      const dx = bcx - pc.x
-      const dy = bcy - pc.y
-      const d = Math.hypot(dx, dy) || 1
-      s[17] = clamp01(d / FIELD_DIAG)
-      s[18] = dx / d
-    } else {
+    // nearest base relative（无基地 ⇒ 恒 0；有基地时才是真基地信号）
+    if (!hasBase) {
       s[17] = 0
       s[18] = 0
+    } else {
+      const bcx = BASE_POS.col * CELL + CELL / 2
+      const bcy = BASE_POS.row * CELL + CELL / 2
+      if (pc) {
+        const dx = bcx - pc.x
+        const dy = bcy - pc.y
+        const d = Math.hypot(dx, dy) || 1
+        s[17] = clamp01(d / FIELD_DIAG)
+        s[18] = dx / d
+      } else {
+        s[17] = 0
+        s[18] = 0
+      }
     }
   }
 }

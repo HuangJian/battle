@@ -4,7 +4,121 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §7 崩溃归因反转：stageIndex 里程碑爆内存（非 JIT）+ scratch init 修复 + 三处用户修正（2026-08-30）
+
+> 本条取代 §6 中"A8a 按 headroom 不足登记方案 3"的表述，并落账用户指出的三处修正。
+
+### 校准爆出的崩溃与两次归因（第二次才对）
+
+S1 校准（`--stages 1000 --seeds 0-3`）中 export-rl-rollout 在 s1000/seed2 段错误
+（RSS 12.7GB / Peak 20GB，bun 1.4.0 "segfault @0x10"）。**第一次归因错误**：用
+`BUN_JSC_useJIT=0` 后进程不再立即崩（实为慢到没跑完）＋崩点近空解引用的形状，
+误判为 Bun DFG/FTO JIT 误编译，在 `SimulationCombat` 做了三处"绕行扰动"
+（快照循环界 / 数值 dir 分支 / 抽出 applyBulletHit 经数组派发）——全部无效且已
+**git checkout 回退**。**正确归因**（tmp/memprobe.ts 逐语句打点定位）：
+
+- 崩点 = `scheduleItemDrops` 的里程碑掉落循环 `for (i < milestones) drops.push(...)`；
+- 我在 arena 集成把 **stageIndex=1000** 传进了 `World.loadStageData`。killScore 的
+  `levelFactor = 1.05^(index+偏移)` 在 index=1000 下单杀得分 ≈4e22 ⇒
+  `milestones ≈ 8e18` ⇒ 一次性 push 亿级掉落物 → 内存耗尽段错误；
+- "以前不崩"的原因：历史 rollout 全部用真实关 index 0–34。**用户质疑
+  （"就你新加的代码会崩？"）是对的**——不是策略轨迹触发 JIT，是我违反了
+  `loadStageData` 文档口径（"generated stages use index 0"）却误判 index
+  "只影响计分"（分数经里程碑掉落反哺玩法，不是纯观测）。
+- **修复**：export-rl-rollout / export-dagger-labels 对 arena 编号传 index 0
+  （真实关不变）。修复后该局正常 `stage_clear` 跑完，同 seed 双跑逐字节一致。
+- 教训：确定性仿真里"关 JIT 就不崩"不是 JIT bug 的证据（LLInt 只是慢，循环还在
+  跑）；管道里的退出码归属（`| tail` 的 EXIT 是 tail 的）是这次误判的直接来源。
+
+### scratch init（纯从零臂的前置条件）
+
+默认 kaiming init 在 8 层残差 ConvMixer 上复合放大（输入 0..255 无归一）：策略头
+logits 随机初始化即 ±2000 ⇒ 采样 one-hot、熵≈0 无探索；value 头量级失衡还会在
+首个 PPO 更新把策略打成确定性（实测 entropy 0.41→0.009、kl 后续恒 0 自锁）。
+`nn-training/init_scratch_weights.py`（工作流级，不改共享 student_model.py）：
+trunk×0.1 / move+fire 头×0.01 / value×0.1（正齐次性，测一次按比缩放是精确的）。
+校准实测（12 局/iter）：**it1 winRate 16.7%（entropy 1.83、kl 0.0037）→ it2 50%**
+——坍缩消失、学习在飞。A5 消融的"纯从零"臂必须从这份 init 起步，否则消融测的
+是坏 init 而不是教师价值。
+
+### 用户三处修正的处置
+
+1. **账本滞后（已由用户补）**：§6 置顶条目 + 卡片状态表已建；本条继续置顶维护。
+2. **A8a 判读逻辑（已改）**：headroom = **−25pp**（orig 35.83% < random-legal 60.83%
+   < static-corner 0%，n=120，可区分性冒烟 114/120 不同）是**倒挂**而非"headroom 不足"。
+   正确读法：**当前执行器下测不出正 headroom（探针非真上界）**——教师目标选择对该
+   执行器失配（与 §1.1 goal-god 0% 同源，探针保真度①已声明）。A4 仍登记方案 3
+   （不开目标头），但理由记为"测不出正 headroom"；A9b 出口由 A8b 用在训 RL 执行器
+   复核，可撤销。`goal-headroom-a8a.ts` 的判读分支已改为三态。
+3. **obs 位势表口径（已修）**：census 的通道步长误用 `OBS_CHANNELS×26×26`（=整张
+   obs 长度），ch1–13 全部越界读到 undefined≠0 计成假 100%。改回 26×26 后重跑，
+   现在两列有判别力（S1：ch1 钢 78.7%、ch0/ch5=0；真实 35 关：砖 11.7% / 水 3.6% /
+   林 12.3% / 冰 4.1% / **ch5 基地 1.2%**——幻影基地修复在位势表上可见）。
+
+### 其余 A0/A1 出口结论
+
+- **锚值表**（60 seed × 3 变异 × {hard, classic}）：S1/S2/S3/S3H 锚可用（hard 通关
+  100/100/97.78/97.78%）；**S4a 锚不可用**（49.44% < 60% ⇒ 按预案该级用绝对阈值，
+  `reports/arena-god-baseline.{json,md}`）。
+- **max-ticks 钉死**：S1/S2 = 1200（A0 p95 430/992）；S3 = 3600（p95 3129）；
+  S3H = 4000；S4a = 12000（p95 触 20000 timeout 上限，按真实关口径）。
+- **配对粒度与 CPU 锚**：已按用户指示落账 plan §4.2（(stage,seed) 2100 对定案）
+  与 §4.5（实测单价 0.9 CPU-s/100 tick，S4b 反推历史口径吻合）。
+- 训练链新旗标：`run_rl.py --reward ''|v7|toy:<arm>` 与 `--dodge ''|off|l0|god`
+  经 queue/dist_common/sampler-agent 全链透传（缺省按 stage 解析，真实关行为不变）。
+
+---
+
+## §6 基建卡落地：A0a / A0 / A1 / A2 / A3 / A8a（2026-08-30 凌晨，未 commit）
+
+> 补记：本条由核实进度时补写（纪律 6：卡落地即更账本）。产物均在，代码与单测已过。
+
+**已完成**（`bun test tests/nn/{obs-encoder,arena-ladder,dodge-l0}.test.ts` → **50 pass / 0 fail**）：
+
+- **A0a**：`makeArena`/`makeMazeStage` 加 `layoutSeed`、`makeMazeStage` 加 `enemyCount` 覆盖位；
+  **`obs-encoder` 幻影基地已修**（无基地场 `s1/s6/s17/s18` 实测全为 0，S4a 有基地场 s6=0.995 ⇒ 修复生效）。
+  产出 `reports/arena-layout-hashes.json`。
+- **A0**：`reports/arena-god-baseline.{json,md}`（5 场 × 3 变异 × 60 seed，hard 主 / classic 对照）。
+- **A1**：arena 身份贯通，`1000+n` 命名空间生效（`tmp/arena-smoke/rl_s1000_*`、`rl_s1010_*`）、
+  dagger arena 冒烟（`tmp/dagger-smoke/dagger_s1000_seed0`）、`--max-ticks 1200` 已钉、
+  CPU 校准（`tmp/cpu-calibration.log`，`--stages 1000 --seeds 0-3 --iters 5 --workers 8`）。
+- **A2**：`src/nn/rl-reward-toy.ts` 已接入 `export-rl-rollout.ts:60`。
+- **A3**：`src/nn/dodge-l0.ts` 已接入 `:62/:542`；**F1 白名单合规**（只 import `perception.canStep`
+  与常量，无 `GodAIInput`/`ThreatAssessor`）；**F3 记账合规**（覆盖步落盘 executed 动作 +
+  `logProbAt(...)` 重算的 logp，`l0` 与 `god` 两臂都有）。
+- **A8a**：`reports/goal-headroom-a8a.{json,md}`（含可区分性冒烟 114/120 不同 + 保真度声明）。
+
+**待办（都不是代码活，是账本活）**：① A0 缺 §4.2 配对粒度定案；② A1 缺把实测缩放写进 §4.5 账本；
+③ A2 三组扫描 / A3 四条验收需随 S1、S2 数据补。
+
+---
+
+## §5 路线定案：课程学习从零练执行器（2026-08-29，plan/goal-nn-action.md）
+
+**决策（用户拍板）**：A/B/C 三条路线都不取。改走**玩具竞技场课程学习**：
+S1 开火命中 → S2 闪避走位 → S3 砖墙+道具 → S4 有基地→真实关卡 → S5 解冻目标头。
+理由：① 模仿学习的天花板在构造上就是教师本身，蒸馏 God-AI 出不了 78.81% 以上；
+② 直接用 God-AI 执行器同样被其结构封顶；③ 目标轴在玩具场上没有战略时域可学，
+提前开只是噪声。派工文档 → `plan/goal-nn-action.md`（任务卡 A0–A11 + 可选 A-x）。
+
+**God-AI 的新角色**：只当 warm start（定起点），**RL 自身奖励才是天花板（定终点）**；
+由卡 A5 做同预算「纯从零 vs DAgger warm start」消融来验证教师是否构成天花板。
+
+**可复用基建（已核对）**：`tools/optimize/curriculum.ts` 的 `makeArena` / `makeMazeStage`
+（5 个 arena，原为 God-AI 验证脚手架）、`nn-training/rl_model.py` 逐决策步 `[move(5), fire(2)]`
+双头、`export-dagger-labels.ts` v2 schema、`run_rl.py --bc` + `--curriculum-*` 开关
+（现有课程维度是"关卡数量"，本方案要的是"环境复杂度"，由卡 A1 新增）。
+缺口：`export-rl-rollout.ts` 需加 `--arena` 入口；玩具场需一套**非守家**稠密奖励。
+
+**纪律升级（三次伪影教训）**：新 policy / 奖励 / 权重必须先做**可区分性冒烟**；
+任何"上限探针"必须报告**代理保真度**；门数字必须来自**修复后的代码**（T9a 门② 即反例）。
+
+---
+
 ## §3 T9a 金丝雀：门 FAIL 与三重归因（2026-08-29，commits b04f4d6..b84c012）
+
+> **后续判定（§5）**：本节的 goal 0.05% 与 goal-god 0.0% 分别来自冻结修复前代码与失真探针，
+> 均不作为路线判定依据；路线已转向课程学习，两个数字由卡 A0 重测。
 
 ### 训练（本地 10 槽，~14 min / 6 轮）
 

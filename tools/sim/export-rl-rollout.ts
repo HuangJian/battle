@@ -45,7 +45,23 @@ import { STAGES } from '../../src/config/stages'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks, OBS_SCHEMA_MAJOR } from '../../src/nn/obs-encoder'
+import {
+  isArenaId,
+  resolveArenaStage,
+  arenaLevelOfId,
+  stageLayoutHash,
+} from '../../src/nn/arena-ladder'
+import {
+  TOY_REWARD_ARMS,
+  TOY_REWARD_DEFAULT_ARM,
+  toyPotential,
+  toyTerminal,
+  type ToyRewardArm,
+} from '../../src/nn/rl-reward-toy'
 import { buildModelFromText } from '../../src/nn/infer'
+import { dodgeL0 } from '../../src/nn/dodge-l0'
+import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
+import { RNG } from '../../src/utils/RNG'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { buildPack } from './pack-container'
@@ -164,6 +180,8 @@ interface Telemetry {
   enemyTotal: number
   startLives: number
   playerDeaths: number
+  /** 玩家被命中次数（player_hit 事件：死亡 + 星盾消耗）。玩具奖励的 w_dmg 项。 */
+  playerHits: number
   playerShots: number
   powerUpsSpawned: number
   powerUpsCollected: number
@@ -313,6 +331,25 @@ function sampleCat(
   return { idx: n - 1, logp: Math.log(ps[n - 1] + 1e-8) }
 }
 
+const _logpBuf = new Float32Array(8) // 复用缓冲（§14.2）：logProbAt 与 sampleCat 同 softmax 口径
+
+/** 任意下标在采集策略分布下的 logp（保底层覆盖步记账，§3.5 F3）。 */
+function logProbAt(logits: Float32Array, mask: number[] | null, idx: number): number {
+  const n = logits.length
+  let max = -Infinity
+  for (let i = 0; i < n; i++) {
+    const v = mask && mask[i] !== 1 ? -1e9 : logits[i]
+    if (v > max) max = v
+    _logpBuf[i] = v
+  }
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    _logpBuf[i] = Math.exp(_logpBuf[i] - max)
+    sum += _logpBuf[i]
+  }
+  return Math.log(_logpBuf[idx] / sum + 1e-8)
+}
+
 interface ShardData {
   obs: Uint8Array[]
   scalars: Float32Array[]
@@ -352,6 +389,39 @@ interface RunResult {
   scoreUngated: number
   quality: number
   dims: Record<string, { value: number | null; raw: number }>
+  decisionTicks: number
+  dodgeTicks: number
+}
+
+/** 奖励 scheme 解析结果（§3.4：arena → 玩具臂；真实关 → v7；--reward 可显式覆盖）。 */
+type ResolvedReward =
+  | { scheme: 'v7'; label: string }
+  | { scheme: 'toy'; arm: ToyRewardArm; label: string }
+
+function resolveReward(rewardArg: string, stageIdx: number): ResolvedReward {
+  if (rewardArg === 'v7') return { scheme: 'v7', label: 'v7-aligned-f3' }
+  if (rewardArg.startsWith('toy:')) {
+    const arm = TOY_REWARD_ARMS[rewardArg.slice(4)]
+    if (!arm)
+      throw new Error(
+        `unknown toy reward arm: ${rewardArg} (known: ${Object.keys(TOY_REWARD_ARMS).join('|')})`,
+      )
+    return { scheme: 'toy', arm, label: `toy-${arm.name}` }
+  }
+  // 缺省：arena 编号 → 级默认臂（TOY_REWARD_DEFAULT_ARM，A2 扫描选定后改写）；
+  // 真实关 → v7（既有口径，逐字节不变）。
+  const level = arenaLevelOfId(stageIdx)
+  if (level) {
+    const armName = TOY_REWARD_DEFAULT_ARM[level]
+    return { scheme: 'toy', arm: TOY_REWARD_ARMS[armName], label: `toy-${armName}` }
+  }
+  return { scheme: 'v7', label: 'v7-aligned-f3' }
+}
+
+/** dodge 模式解析（卡 A3）：arena → l0；真实关 → off（既有 rollout 逐字节不变）。 */
+function resolveDodge(dodgeArg: string, stageIdx: number): 'off' | 'l0' | 'god' {
+  if (dodgeArg === 'off' || dodgeArg === 'l0' || dodgeArg === 'god') return dodgeArg
+  return isArenaId(stageIdx) ? 'l0' : 'off'
 }
 
 function runOne(
@@ -361,6 +431,8 @@ function runOne(
   difficulty: string,
   maxTicks: number,
   weightsText: string,
+  reward: ResolvedReward,
+  dodgeMode: 'off' | 'l0' | 'god',
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -373,8 +445,20 @@ function runOne(
   const model = buildModelFromText(weightsText) as unknown as RolloutModel
   const scripted = new ScriptedInput()
   const sim = new Simulation(world, scripted as any)
-  world.loadStageData(stage, stageIdx)
+  // arena 编号不得进入 loadStageData 的 stageIndex：index 进 killScore 的
+  // 1.05^index 关卡缩放，而分数经 dropOnScoreMilestone 反哺玩法——index=1000
+  // 时单杀得分 ~4e22，里程碑掉落循环 push ~1e18 个掉落物 → 内存耗尽段错误
+  //（2026-08-30 实测，tmp/memprobe.ts 逐语句定位）。arena 一律用 index 0
+  // （与 World.loadStageData 文档"generated stages use index 0"同口径）。
+  world.loadStageData(stage, isArenaId(stageIdx) ? 0 : stageIdx)
   scripted.reset()
+  // god 链臂（A3 A/B 对照专用）：God-AI 探针只读 World（自身独立 RNG，§47），
+  // 不参与驱动仿真——每决策 tick 跑一次 think 判 _lastBranch==='dodge'。
+  const godProbe =
+    dodgeMode === 'god'
+      ? new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS }, new RNG((seed ^ 0x5bd1e995) >>> 0))
+      : null
+  godProbe?.reset()
 
   const encoder = new ObsEncoder()
   const shard = newShard()
@@ -384,6 +468,7 @@ function runOne(
     enemyTotal: (stage as any)?.enemyCount ?? ENEMIES_PER_STAGE,
     startLives: world.difficulty?.startLives ?? START_LIVES,
     playerDeaths: 0,
+    playerHits: 0,
     playerShots: 0,
     powerUpsSpawned: 0,
     powerUpsCollected: 0,
@@ -412,8 +497,14 @@ function runOne(
   let paidTotal = 0 // Σ 已支付势差
   let t = 0
   let outcome = 'timeout'
+  let decisionTicks = 0 // 决策 tick 数（K 间隔）
+  let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
   const countersPhi = (): number => {
+    if (reward.scheme === 'toy') {
+      // 玩具场势（§3.4 / 卡 A2）：击杀 − 被命中 + 存活；与 v7 势互斥。
+      return toyPotential({ kills: world.killCount, playerHits: tel.playerHits }, t, reward.arm)
+    }
     tel.baseWallIntact = countBaseWall(world)
     const baseAlive = !world.tileMap.isBaseDestroyed()
     // F3：M 进入 Φ——基地被拆后势 ×M，塌陷负势差精确记入死亡所在窗。
@@ -449,6 +540,31 @@ function runOne(
       const mv = sampleCat(model.moveLogits, masks.move, rng)
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
       const value = model.valueOut[0]
+      decisionTicks++
+
+      // ---- L0 保底层覆盖（§3.5 / 卡 A3）----
+      // 覆盖步记账（F3）：落盘 executed 动作 + executed 动作在采集策略下的 logp
+      // （logProbAt 与采样同 softmax 口径）⇒ PPO ratio 对覆盖步良定义。
+      let aMove = mv.idx
+      let lpMove = mv.logp
+      if (dodgeMode === 'l0') {
+        const sampledDir = mv.idx === 0 ? scripted.lastDir : MOVE_DECODE[mv.idx - 1]
+        const d = dodgeL0(world, sampledDir)
+        if (d.triggered && d.dir) {
+          aMove = MOVE_DECODE.indexOf(d.dir) + 1
+          lpMove = logProbAt(model.moveLogits, masks.move, aMove)
+          dodgeTicks++
+        }
+      } else if (dodgeMode === 'god' && godProbe) {
+        godProbe.getMoveDirection()
+        godProbe.isFiring()
+        if (godProbe._lastBranch === 'dodge' && godProbe._moveDir) {
+          aMove = MOVE_DECODE.indexOf(godProbe._moveDir) + 1
+          lpMove = logProbAt(model.moveLogits, masks.move, aMove)
+          dodgeTicks++
+        }
+        godProbe.endFrame()
+      }
 
       // 窗口势差结算：上一窗口的 Φ 变化记入其 reward。
       // 注意：首个决策点无 pending 可收，只建立势基准，不入账。
@@ -463,14 +579,14 @@ function runOne(
       pending = {
         obs: encoder.obs.slice(),
         sc: encoder.scalars.slice(),
-        aMove: mv.idx,
+        aMove,
         aFire: fr.idx,
-        lpMove: mv.logp,
+        lpMove,
         lpFire: fr.logp,
         value,
         mask: [...masks.move, ...masks.fire],
       }
-      scripted.setAction(mv.idx, fr.idx)
+      scripted.setAction(aMove, fr.idx)
     }
     sim.tick()
     scripted.endFrame()
@@ -482,6 +598,8 @@ function runOne(
       if (e.type === 'tank_destroyed') {
         if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
         if ((e as any).tank?.isPlayer) tel.playerDeaths++
+      } else if (e.type === 'player_hit') {
+        tel.playerHits++
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
       } else if (e.type === 'powerup_collected') {
@@ -568,7 +686,12 @@ function runOne(
   // （manifest.score 即 gated 值，训练侧无需感知）。
   const gatedScore = outcome === 'base_destroyed' ? scored.score * BASE_LOSS_MULT : scored.score
   if (shard.n > 0) {
-    shard.reward[shard.n - 1] += REWARD_SCALE * gatedScore - paidTotal
+    if (reward.scheme === 'toy') {
+      // 玩具场（卡 A2）：终局奖励 = 全歼 +w_clear / 阵亡终局 −w_death；势差已在窗口付讫。
+      shard.reward[shard.n - 1] += toyTerminal(outcome, reward.arm)
+    } else {
+      shard.reward[shard.n - 1] += REWARD_SCALE * gatedScore - paidTotal
+    }
   }
 
   const win = outcome === 'stage_clear'
@@ -585,6 +708,8 @@ function runOne(
     scoreUngated: scored.score,
     quality: scored.quality,
     dims,
+    decisionTicks,
+    dodgeTicks,
   }
 }
 
@@ -652,6 +777,12 @@ function main(): void {
   let weightsPath = 'tmp/rl-weights/weights.json'
   let wver = ''
   let nodeLabel = ''
+  // --reward <spec>（goal-nn 卡 A2）：'' = 按 stage 解析（arena → 玩具默认臂 /
+  // 真实关 → v7）；'v7' 强制 v7；'toy:<arm>' 强制玩具臂（扫参用）。
+  let rewardArg = ''
+  // --dodge <mode>（goal-nn 卡 A3）：'' = 按 stage 解析（arena → 'l0'，真实关 →
+  // 'off'，既有真实关 rollout 逐字节不变）；'off'|'l0'|'god' 强制（'god' 仅 A/B 报告用）。
+  let dodgeArg = ''
   // --pack <path>（v3.6）：把单局结果打成 BCV2 容器写到指定路径——sampler-agent 用它把
   // base64+gzip+JSON 拼装从主线程下沉到本子进程并行执行（tools/sim/pack-container.ts）。
   let packPath = ''
@@ -662,6 +793,8 @@ function main(): void {
     else if (args[i] === '--seeds') seedsStr = args[++i]
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
     else if (args[i] === '--weights') weightsPath = args[++i]
+    else if (args[i] === '--reward') rewardArg = args[++i]
+    else if (args[i] === '--dodge') dodgeArg = args[++i]
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
@@ -680,16 +813,24 @@ function main(): void {
   let totalSamples = 0
   let totalTicks = 0
   let wins = 0
+  let totalDecisionTicks = 0
+  let totalDodgeTicks = 0
   const perGame: string[] = []
 
   for (const si of stages) {
-    const stage = STAGES[si]
+    // arena 编号命名空间（goal-nn 卡 A1）：si >= 1000 经 ARENA_LADDER 解析为
+    // 玩具场；真实关走 STAGES。同一整数贯穿 course.py → run_rl.py → queue.py →
+    // sampler-agent → 本解析层 → shard 命名，六环节零改动（agent 原样透传）。
+    const arenaStage = isArenaId(si) ? resolveArenaStage(si) : null
+    const stage = arenaStage ?? STAGES[si]
     if (!stage) {
       perGame.push(`[SKIP] stage ${si}: not found`)
       continue
     }
+    const reward = resolveReward(rewardArg, si)
+    const dodgeMode = resolveDodge(dodgeArg, si)
     for (const seed of seeds) {
-      const res = runOne(si, stage, seed, difficulty, maxTicks, weightsText)
+      const res = runOne(si, stage, seed, difficulty, maxTicks, weightsText, reward, dodgeMode)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       if (res.win) wins++
       scores.push(res.score)
@@ -702,7 +843,7 @@ function main(): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        rewardScheme: 'v7-aligned-f3',
+        rewardScheme: reward.label,
         difficulty,
         stage: si,
         seed,
@@ -714,11 +855,29 @@ function main(): void {
         scoreUngated: res.scoreUngated,
         quality: res.quality,
         dims: res.dims,
+        // arena 身份（卡 A1 验收③：布局散列与 reports/arena-layout-hashes.json 对账）
+        ...(arenaStage
+          ? {
+              arena: {
+                level: arenaLevelOfId(si),
+                layoutHash: stageLayoutHash(arenaStage),
+              },
+            }
+          : {}),
+        // L0 保底层覆盖率（卡 A3 验收①：<2% 可辩护；≥2% 升级 P0 决策）
+        dodge: {
+          mode: dodgeMode,
+          coverage: res.decisionTicks > 0 ? +(res.dodgeTicks / res.decisionTicks).toFixed(5) : 0,
+          dodgeTicks: res.dodgeTicks,
+          decisionTicks: res.decisionTicks,
+        },
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
       if (res.shard.n > 0) writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
       totalSamples += res.shard.n
       totalTicks += res.ticks
+      totalDecisionTicks += res.decisionTicks
+      totalDodgeTicks += res.dodgeTicks
       perGame.push(
         `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,
       )
@@ -739,7 +898,8 @@ function main(): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'RL',
-    rewardScheme: 'v7-aligned-f3',
+    // 混合 stage 集可能多 scheme（实践中单 stage/局）——逐局 label 集合。
+    rewardScheme: [...new Set(stages.map((si) => resolveReward(rewardArg, si).label))].join(','),
     difficulty,
     stages,
     seeds,
@@ -748,6 +908,12 @@ function main(): void {
     outcomes,
     totalSamples,
     totalTicks,
+    dodge: {
+      mode: [...new Set(stages.map((si) => resolveDodge(dodgeArg, si)))].join(','),
+      coverage: totalDecisionTicks > 0 ? +(totalDodgeTicks / totalDecisionTicks).toFixed(5) : 0,
+      dodgeTicks: totalDodgeTicks,
+      decisionTicks: totalDecisionTicks,
+    },
     scoreStats: stat(scores),
     // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化
     scoreStatsUngated: stat(scoresUngated),

@@ -75,6 +75,16 @@ export interface GoalExecutorOptions {
    * 上限测量。与网络模式互斥；设置时 weightsText 可省略。
    */
   followGodNav?: boolean
+  /**
+   * A8a headroom 探针的破坏臂（plan/goal-nn-action.md 卡 A8a）：在 followGodNav
+   * 模式下把"原目标"替换为受损目标，量目标轴的敏感度。
+   *   'random-legal'  = 每 240 tick（= 承诺窗口）换一个确定性随机合法格
+   *   'static-corner' = 固定格（首个合法格扫描结果，全场不变）
+   * 仅诊断旋钮：默认 'none' = 原口径，逐字节不变。
+   */
+  navCorrupt?: 'none' | 'random-legal' | 'static-corner'
+  /** navCorrupt 随机臂的确定性种子（缺省 0）。 */
+  navCorruptSeed?: number
   /** T0-goal 遥测：记录每次重选（低频，仅显式开启时）。 */
   recordTrace?: boolean
 }
@@ -131,6 +141,8 @@ export class GoalExecutor implements InputLike {
   readonly reselectTrace: GoalReselect[] = []
 
   private followGodNav: boolean
+  private navCorrupt: 'none' | 'random-legal' | 'static-corner'
+  private navCorruptSeed: number
 
   constructor(world: World, opts: GoalExecutorOptions) {
     this.world = world
@@ -142,6 +154,42 @@ export class GoalExecutor implements InputLike {
     this.promiseTicks = opts.promiseTicks ?? 240
     this.lambda = opts.lambda ?? GOAL_MASK_LAMBDA_DEFAULT
     this.recordTrace = opts.recordTrace === true
+    this.navCorrupt = opts.navCorrupt ?? 'none'
+    this.navCorruptSeed = opts.navCorruptSeed ?? 0
+  }
+
+  /**
+   * A8a 破坏目标：确定性采样一个合法格（'.'/'f'/'i'，避开 base 足印）。
+   * 'random-legal' 每 240 tick 换一格（对齐承诺窗口——与 God-AI 逐 tick 重选的
+   * 代理差异在此显式声明，DS-9②）；'static-corner' 恒返回同一格。
+   */
+  private corruptTarget(f: number): { col: number; row: number } | null {
+    const grid = this.world.tileMap
+    const walkable = (c: number, r: number): boolean => {
+      const t = grid.get(c, r)
+      return t === 'empty' || t === 'forest' || t === 'ice'
+    }
+    if (this.navCorrupt === 'static-corner') {
+      for (let r = 0; r < GRID; r++) {
+        for (let c = 0; c < GRID; c++) {
+          if (walkable(c, r)) return { col: c, row: r }
+        }
+      }
+      return null
+    }
+    // random-legal：把候选格铺成序号空间，用 (seed, 窗口号) 哈希选一格。
+    const slot = Math.floor(f / 240)
+    let h = (this.navCorruptSeed ^ 0x9e3779b9) >>> 0
+    h = (Math.imul(h ^ (slot + 1), 0x85ebca6b) >>> 13) >>> 0
+    const stride = 269 // 与 GRID 互素的步长，避免周期性落在同一行列
+    let c = ((h % GRID) + GRID) % GRID
+    let r = (Math.floor(h / GRID) * stride + c) % GRID
+    for (let tries = 0; tries < GRID * GRID; tries++) {
+      if (walkable(c, r)) return { col: c, row: r }
+      c = (c + 7) % GRID
+      r = (r + 1) % GRID
+    }
+    return null
   }
 
   // ---- InputLike ----
@@ -276,23 +324,23 @@ export class GoalExecutor implements InputLike {
     const maskReady = this.ensureMask()
     let idx = -1
     if (this.followGodNav) {
-      // 诊断：God-AI 导航目标（_navCache 未命中时投影）；过顶点合法性即可。
-      let tc: number
-      let tr: number
+      // 诊断：God-AI 导航目标。
+      // 幻影点修复（plan/goal-nn-action.md 卡 A8a 前置，2026-08-29）：旧实现在
+      // `_navCacheValid === false` 时回退成"朝当前朝向 +4 格"的幻影点——God-AI
+      // 每帧都在改主意，幻影点不是任何真实导航目标（§1.1 探针失真的硬证据之一）。
+      // 现改为放弃本次重选（idx = -1 走有序回退），探针只消费真实 nav 目标。
       if (this.god._navCacheValid) {
-        tc = this.god._navTargetCol
-        tr = this.god._navTargetRow
-      } else {
-        const pc0 = this.playerCell()
-        const d = this.god._moveDir
-        const dx = d === 'left' ? -1 : d === 'right' ? 1 : 0
-        const dy = d === 'up' ? -1 : d === 'down' ? 1 : 0
-        tc = pc0.col + dx * 4
-        tr = pc0.row + dy * 4
+        let tc = Math.max(0, Math.min(GRID - 1, this.god._navTargetCol))
+        let tr = Math.max(0, Math.min(GRID - 1, this.god._navTargetRow))
+        if (this.navCorrupt !== 'none') {
+          const cell = this.corruptTarget(f)
+          if (cell) {
+            tc = cell.col
+            tr = cell.row
+          }
+        }
+        idx = tr * GRID + tc
       }
-      tc = Math.max(0, Math.min(GRID - 1, tc))
-      tr = Math.max(0, Math.min(GRID - 1, tr))
-      idx = tr * GRID + tc
     } else if (this.goalPick) {
       idx = this.goalPick(this.encoder.obs, this.encoder.scalars, inject, f)
     } else if (this.model) {

@@ -260,7 +260,9 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
                max_ticks: int, difficulty: str, timeout: float,
                mode: str | None = None,
                kind: str = "rollout",
-               replan: int = 0) -> tuple[dict, dict]:
+               replan: int = 0,
+               reward: str = "",
+               dodge: str = "") -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
     mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
@@ -268,6 +270,8 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
 
     kind（M8）：'intent' 请求意图权重桶（意图 RL rollout 走 export-intent-rollout.ts）。
     replan（M8）：意图 rollout 的 replan cadence（0=不传）。
+    reward（goal-nn 卡 A2）：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
+    dodge（goal-nn 卡 A3）：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
 
     v3.6：提交带 x-async 头。新 agent 立即 202 → 转 /v1/result 轮询（轮询期网络瞬断
     不丢局：结果在 agent 结果缓存里，恢复后继续拉）；旧 agent 无视该头同步阻塞返回
@@ -284,6 +288,10 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
         params["kind"] = kind
     if replan > 0:
         params["replan"] = replan
+    if reward:
+        params["reward"] = reward
+    if dodge:
+        params["dodge"] = dodge
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
