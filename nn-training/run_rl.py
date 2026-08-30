@@ -324,6 +324,9 @@ def main() -> None:
     ap.add_argument("--stream", type=int, default=0,
                     help="1 = 流式迭代：采集与 PPO 重叠（权重整轮冻结，每积压一批局就跑一轮更新）；"
                          "0 = 串行（采集全部完成后再统一 PPO）")
+    ap.add_argument("--eval-stages", default="",
+                    help="干净评估语料（goal-nn）：'' = 真实关 0..total_stages-1（旧行为）；"
+                         "传关卡规格如 '1000-1002' = arena 训练场自评（OOD 信号）")
     ap.add_argument("--eval-games-per-stage", type=int, default=2,
                     help="干净评估：每关固定种子贪心局数（0=关闭）。rollout 收官后的 PPO 空窗期 "
                          "分发到全部 ping.evalSupport 节点；结果追加 tmp/rl-traj/eval_log.jsonl")

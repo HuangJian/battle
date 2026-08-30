@@ -24,7 +24,9 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 # 干净评估（2026-08-24，用户指令）：用各节点已缓存的同权重跑固定语料贪心局。
 # 两股噪声都消掉：动作 argmax 无探索噪声、(stage,seed) 语料恒定 → 跨 checkpoint
 # 配对可比（同 seed 胜负是确定事件）。
-EVAL_SEEDS = (860001, 860002)  # 固定语料种子——改动即失去与历史 checkpoint 的可比性
+# 固定语料种子——前 2 个承载历史可比性（永不改动）；860003+ 为 goal-nn 扩展
+# （arena 自评需要 20 seed/关的 trend 精度，纯增量、不影响旧口径）。
+EVAL_SEEDS = tuple([860001, 860002] + list(range(860003, 860021)))
 EVAL_ITER_SUFFIX = "ev"        # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
 EVAL_TASK_ATTEMPTS = 2         # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 EVAL_LOCAL_SLOTS_DEFAULT = 4   # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）
@@ -131,7 +133,16 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
         # 巡检「采样机健康」表按本文件聚合，eval 不入账则节点贡献被系统性低估。
         meta_path = traj_dir.parent / "dist-agent-meta.jsonl"
         n_seeds = max(0, int(getattr(args, "eval_games_per_stage", 0) or 0))
-        pairs = [(s, sd) for s in range(args.total_stages) for sd in EVAL_SEEDS[:n_seeds]]
+        # 干净评估语料（goal-nn）：--eval-stages 非空 = 按规格解析（如 arena
+        # '1000-1002'，训练场自评）；空 = 真实关 0..total_stages-1（旧行为）。
+        eval_stage_spec = str(getattr(args, "eval_stages", "") or "")
+        if eval_stage_spec:
+            from rl.course import parse_range
+
+            eval_stages = parse_range(eval_stage_spec)
+        else:
+            eval_stages = list(range(args.total_stages))
+        pairs = [(s, sd) for s in eval_stages for sd in EVAL_SEEDS[:n_seeds]]
         if not pairs:
             return
         todo = [p for p in pairs if p not in eval_done_keys(eval_jsonl, key16)]
