@@ -224,8 +224,14 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             log(f"[dist] node {nid}: ping failed — excluded this round")
             continue
         if ping.get("codeHash") != code_hash:
+            if dist_common.is_self_node(n["url"], nid):
+                # self/回环节点 = 训练机同一工作区起的服务——远控会破坏共享工作区，
+                # 只排除该轮，绝不发升级请求（操作者手动重启）。
+                log(f"[dist] node {nid}: codeHash mismatch — self/loopback node, "
+                    f"remote upgrade SKIPPED (restart it manually); excluded this round")
+                continue
             log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
-            # 主动升级：配置了 upgradeBranch 且本节点未请求过 → 指示 git pull + 重启。
+            # 主动升级：分支 = 训练机当前分支（dist_common.UPGRADE_BRANCH 锁存）。
             if upgrade_branch and nid not in upgrade_requested:
                 upgrade_requested.add(nid)
                 ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""),
@@ -697,6 +703,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if ping is None:
                     continue  # 仍未上线，下轮再试
                 if ping.get("codeHash") != dist_common.compute_code_hash():
+                    if dist_common.is_self_node(n["url"], nid):
+                        continue  # self/回环节点：永不远控（见 ping 门注释）
                     # 主动升级：rescan 发现 stale 节点 → 指示 git pull + 重启（每轮一次）。
                     if upgrade_branch and nid not in upgrade_requested:
                         upgrade_requested.add(nid)

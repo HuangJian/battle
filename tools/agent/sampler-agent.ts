@@ -282,6 +282,7 @@ interface WeightsState {
 // /v1/restart 单飞护栏 + 监听句柄（优雅交接用，见 restart 处理器）
 let restartPending = false
 let activeServer: ReturnType<typeof Bun.serve> | null = null
+let pendingChildPid: number | null = null
 
 // ---------------- 节点池监控页（③，2026-08-30 用户指令） ----------------
 // 仅当本机配置了 nn-training/rl-config.json 的 nodes（= 主控机）时启用 /pool；
@@ -884,6 +885,19 @@ async function handle(req: Request): Promise<Response> {
             windowsHide: true,
           })
           child.unref()
+          pendingChildPid = child.pid ?? null
+          // pidfile：彻底停止服务时 kill 这个 PID（detached 子进程不随父进程退出，
+          // 手动 kill 父进程后它会接管端口——2026-08-30 运维教训）。
+          try {
+            fs.writeFileSync(path.join(WORK_DIR, 'agent.pid'), String(process.pid))
+            fs.writeFileSync(path.join(WORK_DIR, 'agent-child.pid'), String(child.pid ?? -1))
+          } catch {
+            /* best effort */
+          }
+          console.log(
+            `[sampler-agent] restart: parent pid ${process.pid} -> child pid ${child.pid} ` +
+              `(彻底停止请 kill ${child.pid}，或 kill \`cat ${path.join(WORK_DIR, 'agent-child.pid')}\`)`,
+          )
         } catch (e) {
           console.error(
             `[sampler-agent] restart spawn failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -1145,6 +1159,23 @@ if (import.meta.main) {
   // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
   // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
   // serveWithRetry：/v1/restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。
+  // SIGTERM/SIGINT（手动停止）时取消未完成的 restart 交接——避免"手动停了服务，
+  // 重启交接的 detached 子进程又把服务拉起来"（2026-08-30 用户报告）。
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(sig, () => {
+      console.log(
+        `[sampler-agent] ${sig} received — exiting (pending child: ${pendingChildPid ?? 'none'})`,
+      )
+      if (restartPending && pendingChildPid) {
+        try {
+          process.kill(pendingChildPid, 'SIGTERM')
+        } catch {
+          /* already gone */
+        }
+      }
+      process.exit(0)
+    })
+  }
   activeServer = serveWithRetry(port, (req) =>
     handle(req).catch((e: unknown) => {
       lastError = `${new Date().toISOString()} handler: ${e instanceof Error ? e.message : String(e)}`

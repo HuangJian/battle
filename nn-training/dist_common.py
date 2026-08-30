@@ -154,6 +154,20 @@ def set_upgrade_branch(branch: str) -> None:
     UPGRADE_BRANCH = branch
 
 
+def is_self_node(url: str, node_id: str = "") -> bool:
+    """self/回环节点：agent 由训练机同一工作区启动——它的代码就是训练机代码，
+    远控 upgrade 会在共享工作区做破坏性 pull（2026-08-30 事故：本机被 reset 回
+    旧代码）。此类节点只参与派单，**永不发升级请求**（代码不同步时仅排除该轮，
+    由操作者手动重启）。"""
+    if node_id.strip().lower() == "self":
+        return True
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def upgrade_branch_or(explicit: str | None) -> str:
     if explicit:
         return explicit
