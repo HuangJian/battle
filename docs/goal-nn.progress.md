@@ -4,6 +4,46 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §10 S1 过门 + S2 升档 + 节点池运营（2026-08-30 下午–晚间）
+
+### S1 封顶实验：**过门**（回答了"路线成立吗"）
+大语料修订后（seed-rotate 50 × 3 变异 = 150 局/迭代，kill2 奖励，stream 模式），
+17 iters 内 rollout 胜率 25% → **97/99/100%**（末三轮），arena 自评 96–100%
+（固定 held-out 种子 860001+，与训练抽签空间近乎无交）。**S1 门（≥90%）通过，
+"从零练执行器"路线成立。** 对比：A4 时代（固定 12 局 + wAlive 锚 + 坏 init）
+21 iters 只到 26.7%——三个修复各自可归因：①量级归一化（init/warm-start）；
+②wAlive→0（kill2，拔掉"原地骚扰"锚）；③语料轮转（去记忆化）。
+
+### 观察员交接（观测建议 2026-08-30 19:50，全部采纳）
+- 双口径饱和（rollout it13-15 = 95.3/98.0/97.3%，eval 96-100%，KL<0.03、熵缓降
+  1.77→1.21 = 健康饱和非塌缩）⇒ S1 语料打穿，it16+ 纯烧算力 ⇒ 停。
+- dodge A/B 复测：当前强权重 `--dodge off` vs `l0` 15 局逐位一致（93.3%、0 死），
+  弱权重（a4-warm）亦无差 ⇒ L0 在强策略下惰性；S2 起以 `--dodge off` 自持探针
+  开档，红线 = off 下 deaths/局 + alive-ticks（弱 0.222 / 强 0.0），dodgeCov≥2%
+  判据随 L0 退场作废。
+- eval 门控升难：新档 eval >80% 再进下一档；rollout 崩 <50% 判过难降档；
+  用 5 迭代 eval 趋势代替单点。
+
+### S2 已启动（tmp/s2-cap）
+1010-1012（size14、3 敌 basic+fast）× seed-rotate 50 = 150 局/it，S1 过门权重
+热启动，--dodge off，toy:kill2 不变，stream 模式，eval 自评 60 局/it。
+S2 门（方案 §2.1）：全歼 ≥80% + 受伤 ≤1.2×锚(0.01) + 存活 ≥80%×锚(672)。
+中途检点：eval <80% 且 rollout <50% ⇒ 降档（减敌数）。
+
+### 流式修复（用户报障 → 一行根因）
+`"stream": 1` 在 intent_rl 块（run_rl_intent 专属），run_rl.py 从不读它且启动
+命令未传 ⇒ 四次训练全串行、PPO 窗口集群闲置。且 `run_rl --stream 1` 的流式
+路径本身从未拉通：`stream.py` 契约要求 backend 暴露 `update`，ppo 后端缺别名
+（仅 intent 有）。修复 = ①ppo.py 补 `update = ppo_update` 别名；②启动命令
+`--stream 1`；③AGENTS §15.6 新规：RL 训练默认 stream（run_rl 代码默认 0→1），
+串行仅调试用；新增 backend 必须实现完整 stream 契约。
+
+### 节点池卫生（待用户节点侧处理）
+- lite：7b0beea↔8a319c0 三次横跳，疑节点侧 pull 分支竞争或双 agent，需上机排查
+- a95：停在 3a9b907（codeHash 恰好正确——3a9b907 后无 hash 集内改动），需正常
+  pull 升级到最新
+- a96：仍 ping 不通
+
 ## §9 Phase-1 收官：A4/A5/A4b/dodge-A/B 全部落地，A4b 门败 ⇒ 二阶段不投（2026-08-30）
 
 ### A4/A5 出口（reports/s1-exit-report.md）
