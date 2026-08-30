@@ -79,6 +79,65 @@ def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
     model = ppo_mod.build_ppo(src)
     load_state_into(model, src)
     if not resume:
+        # goal-nn 卡 A4（2026-08-30 最终版）：BC 权重有两个 PPO 不可消费的量级问题——
+        # ① BC 训练动态把 ConvMixer trunk 激活放大到真实局面上 ~千级（合成探针会
+        #    低估百倍，必须用真实 shard obs 校准）；
+        # ② 策略头 logits ±7600 ⇒ 采样近 one-hot、熵≈0.01，PPO 无法探索也无法
+        #    消费（kl 一次更新爆 3 万）。
+        # 处置（warm_start_normalize，见下）：真实 obs 校准 trunk→h≈15；
+        # move/fire 头缩到 logit 范围 ~3（保 argmax、软先验、熵≈1）；value 头清零。
+        import numpy as np
+        import torch
+
+        def _sample_real_obs(n: int = 32) -> torch.Tensor | None:
+            """从既有 shard 里抓真实 obs（任意最近一次 rollout 的）；抓不到用合成兜底。"""
+            import glob
+
+            for path in glob.glob(str(REPO_ROOT / "tmp" / "*" / "it*" / "**" / "obs.npy"),
+                                  recursive=True)[:4]:
+                try:
+                    arr = np.load(path, mmap_mode="r")
+                    if arr.ndim == 4 and arr.shape[0] >= 1:
+                        take = arr[:n]
+                        return torch.from_numpy(np.ascontiguousarray(take))
+                except Exception:
+                    continue
+            obs = torch.zeros(n, 14, 26, 26, dtype=torch.uint8)
+            obs[1] = 255
+            obs[2, :, ::2] = 255
+            return obs
+
+        def warm_start_normalize(model: torch.nn.Module) -> None:
+            TRUNK = ("stem.", "blocks.", "fc.")
+            sample = _sample_real_obs(32)
+            sc = torch.zeros(sample.shape[0], 19)
+
+            def _feat_max() -> float:
+                with torch.no_grad():
+                    return float(model.features(sample, sc).abs().max()) + 1e-6
+
+            def _logit_max() -> float:
+                with torch.no_grad():
+                    mv, fr, _v = model(sample, sc)
+                return max(float(mv.abs().max()), float(fr.abs().max())) + 1e-6
+
+            alpha = 15.0 / _feat_max()
+            with torch.no_grad():
+                for n, p_ in model.named_parameters():
+                    if n.startswith(TRUNK):
+                        p_.mul_(alpha)
+            beta = 3.0 / _logit_max()  # 保 argmax 的软先验：logit 范围 ~3（熵≈1.2）
+            with torch.no_grad():
+                for n, p_ in model.named_parameters():
+                    if n.startswith(("move_head.", "fire_head.")):
+                        p_.mul_(beta)
+                    elif n.startswith("value_head."):
+                        p_.zero_()
+            print(f"[run_rl] BC warm-start normalize: trunk x{alpha:.4g}, "
+                  f"policy heads x{beta:.4g} (logit range -> 3.0 soft prior), value zeroed; "
+                  f"feat_max={15.0 / alpha:.0f}, logit_max_pre={3.0 / beta:.1f}")
+
+        warm_start_normalize(model)
         save_weights_json(model, rl_path)
     print(
         f"[{time.strftime('%H:%M:%S')}] [run_rl] "
