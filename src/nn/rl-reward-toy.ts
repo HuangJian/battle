@@ -40,13 +40,19 @@ export interface ToyRewardArm {
  */
 export const TOY_REWARD_ARMS: Record<string, ToyRewardArm> = {
   kill: { name: 'kill', wKill: 1.0, wDmg: 0.15, wAlive: 0.0005, wClear: 2.0, wDeath: 0.5 },
+  // kill2（2026-08-30，卡 S1 追加预算）：wAlive→0。诊断依据（docs/goal-nn.progress.md
+  // §10）：A4 贪心评估败局非"冻死"（cellsVisited 9.8、22.7 发/局）而是"上推+扫射
+  // 从不追踪敌人"的固定套路——wAlive 让"原地存活骚扰"每局稳拿 0.6，锚死了
+  // "转向追杀"的高方差路径（argmax 永不转向 ⇒ 贪心 26.7% << 采样 50%）。存活
+  // 压力由 wDmg（被命中惩罚）承担。
+  kill2: { name: 'kill2', wKill: 1.0, wDmg: 0.15, wAlive: 0, wClear: 2.0, wDeath: 0.5 },
   balanced: { name: 'balanced', wKill: 1.0, wDmg: 0.35, wAlive: 0.001, wClear: 2.0, wDeath: 1.0 },
   survival: { name: 'survival', wKill: 0.5, wDmg: 0.5, wAlive: 0.002, wClear: 2.0, wDeath: 1.5 },
 }
 
 /** 各级默认臂。A2 扫描按"门指标最高者"选定后改写此表（代码即预注册记录）。 */
 export const TOY_REWARD_DEFAULT_ARM: Record<ArenaLevel, string> = {
-  S1: 'kill',
+  S1: 'kill2',
   S2: 'kill',
   S3: 'kill',
   S3H: 'kill',
