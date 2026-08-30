@@ -321,9 +321,9 @@ def main() -> None:
                     help="wall-clock budget in hours; checked between iterations; 0 = unlimited")
     ap.add_argument("--keep-iters", type=int, default=3,
                     help="keep only the last N trajectory dirs (disk bound); 0 = keep all")
-    ap.add_argument("--stream", type=int, default=0,
-                    help="1 = 流式迭代：采集与 PPO 重叠（权重整轮冻结，每积压一批局就跑一轮更新）；"
-                         "0 = 串行（采集全部完成后再统一 PPO）")
+    ap.add_argument("--stream", type=int, default=1,
+                    help="1（默认，AGENTS §15.6）= 流式迭代：采集与 PPO 波次重叠，集群不在 PPO 窗口闲置；"
+                         "0 = 串行（采集全部完成后再统一 PPO）——仅调试/归因用")
     ap.add_argument("--eval-stages", default="",
                     help="干净评估语料（goal-nn）：'' = 真实关 0..total_stages-1（旧行为）；"
                          "传关卡规格如 '1000-1002' = arena 训练场自评（OOD 信号）")

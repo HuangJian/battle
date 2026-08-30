@@ -314,3 +314,8 @@ When this file and your instincts disagree, this file wins. When this file and t
 - **15.5 Changing corpus / curriculum / reward semantics = a new experiment**:
   fresh `--out/--traj` directories + a DECISIONS entry; never resume across the
   change (the accounting contract has changed).
+- **15.6 RL training defaults to stream mode** (collection and PPO waves
+  overlap): serial mode idles the entire collection cluster during every PPO
+  window (~half of wall time at 150 games/iter). Pass `--stream 0` only with a
+  stated reason; keep the stream path exercised — it rotted once unnoticed
+  (`ppo.update` alias missing for the plain backend).

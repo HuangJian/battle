@@ -651,3 +651,14 @@ Fixes that worked, in `run_rl.py build_model` (!resume path) and
 - **New experiment = new directories**: switching corpus/curriculum/reward
   semantics changes the shard accounting contract; never resume `--out/--traj`
   across it (DECISIONS §296).
+- **Stream mode is the default (AGENTS 15.6)**: serial runs idle the whole
+  collection cluster during every PPO window (measured: ~8 min idle per
+  150-game iteration ≈ half of wall time). Two rot hazards to keep in check:
+  ① `rl/stream.py` requires the backend module to expose `update(...)` — the
+  plain `ppo` backend lacked the alias for months (built for intent only, never
+  exercised by run_rl); any new trainer backend must implement the full stream
+  contract (`update` / `_ppo_load` / `load_episodes` / `chunk_episodes`).
+  ② the `"stream": 1` key lives in rl-config's `intent_rl` block and is read by
+  `run_rl_intent` only — `run_rl` ignores it; the launch must pass `--stream 1`
+  (now the code default). Serial remains available via `--stream 0` for
+  debugging (deterministic, easier attribution).
