@@ -604,6 +604,20 @@ def test_eval_local_gate(tmp: Path) -> None:
         ed.run_local_eval_game = orig
 
 
+def test_pick_tail_race() -> None:
+    """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
+    from rl.queue import pick_tail_race
+
+    check(pick_tail_race({}, 2) is None, "empty inflight -> None")
+    check(pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked")
+    check(pick_tail_race({(1, 2): 2}, 2) is None, "dup full -> None")
+    check(pick_tail_race({(1, 2): 1}, 1) is None, "dup=1 disables racing")
+    check(pick_tail_race({(5, 9): 2, (3, 4): 1, (0, 7): 1}, 2) == (0, 7),
+          "lexicographically smallest raceable task picked")
+    check(pick_tail_race({(0, 7): 2, (3, 4): 1}, 2) == (3, 4),
+          "only non-full in-flight task picked")
+
+
 def main() -> None:
     if not WEIGHTS.exists():
         print(f"[skip-integration] missing weights fixture: {WEIGHTS}")
@@ -621,6 +635,7 @@ def main() -> None:
     test_chunk_episodes()
     test_backup_weights(tmp)
     test_eval_local_gate(tmp)
+    test_pick_tail_race()
     if ITEST:
         if not WEIGHTS.exists() or shutil.which("bun") is None:
             raise SystemExit("RUN_RL_ITEST=1 requires bun on PATH and tmp/rl-weights/weights.json")

@@ -158,6 +158,19 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     return combine_reports(reports)
 
 
+def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:
+    """v3.10 长尾竞速选择（纯函数，v3.10 单测覆盖）：排队队列已空时，空闲执行槽应复制
+    哪个 in-flight 任务竞速——只要副本数 < tailFanoutDup 即选（**不看任务已耗时**，
+    用户裁定"有空槽就派发"）。确定性：字典序最小者优先（避免多 worker 锁竞争抖动）。
+    dup=1 或 inflight 为空 → None（无竞速副本名额）。"""
+    cand: tuple[int, int] | None = None
+    for t, c in inflight.items():
+        if c < dup:
+            if cand is None or t < cand:
+                cand = t
+    return cand
+
+
 def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
                       args, cfg: dict, iter_id: str,
                       on_result=None, local_slots_max: int | None = None,
@@ -367,6 +380,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 末尾任务仍可能落在低速 agent（EWMA 是预期、单局有方差），fan-out 用重复执行兜底。
     tail_fanout_n = int(policy.get("tailFanoutN", 4))
     tail_fanout_dup = int(policy.get("tailFanoutDup", 2))
+    # v3.10 长尾竞速（用户需求 2026-08-31）：v3.7 的 fan-out 只在「pending 还有排队任务」
+    # 时复制。末尾任务一旦被某 worker pop 出队、独占 in-flight（长 RPC 挂起），其他空闲
+    # 执行槽因 src=None 退化为干等 → 整轮被一个慢副本拖住。本机制：排队队列已空时，
+    # **只要空槽**就复制一个 in-flight 任务竞速（每任务副本数上限 = tailFanoutDup，
+    # 不按时间阈值等待——用户裁定"有空槽就派发"）。
     # v3.9 动态节点发现（用户需求 2026-08-27）：跑批中途上线的 agent 也能贡献算力。
     # rescan 线程周期 ping 配置里未在跑的节点，合格即权重下发 + 孵化新 worker 线程
     # （共享 pending 队列），无需重启整轮。0 = 关闭。
@@ -477,6 +495,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         return report
 
     def worker(nd: dict | None) -> None:
+        suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
         while (not all_settled.is_set()
                and not (halt_event is not None and halt_event.is_set())
                and time.time() < deadline):
@@ -542,6 +561,21 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         log(f"[dist] tail-mode: holding {nd_id} "
                             f"(ewma={speed.get(nd_id, -1):.0f}s, pending={probe})")
                         task = None
+                else:
+                    # v3.10 长尾竞速（用户需求 2026-08-31）：排队队列已空，**只要空槽**就
+                    # 复制一个 in-flight 任务竞速（不看任务已耗时；用户裁定"有空槽就派发"）。
+                    # 每任务副本数上限 tailFanoutDup 防无限复制；副本失败静默、成功到 seen
+                    # 则丢弃（v3.7 既有 fan-out 语义）。本机槽被 local_suspend 让位时不竞速
+                    # （让位语义 = 给 PPO 腾核，不抢尾流）。
+                    if not (nd is None and suspended) and inflight:
+                        tail_cand = pick_tail_race(inflight, tail_fanout_dup)
+                        if tail_cand is not None:
+                            task = tail_cand
+                            inflight[task] += 1
+                            fanout_copy = True
+                            attempt = attempts.get(task, 0) + 1
+                            log(f"[dist] tail-race s{task[0]}/seed{task[1]} "
+                                f"(inflight x{inflight[task]}) — race lane")
             if drained and on_queue_drained is not None:
                 # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
                 # 干净评估此刻进场填收尾空槽（2026-08-25 用户修订，取代「权重分发完

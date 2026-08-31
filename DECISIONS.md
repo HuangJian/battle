@@ -1337,3 +1337,24 @@ on-policy 期望一致（不会用 wave1/epoch1 中间权重预采）。
 **已知残留开销（非正确性）**：`run_rollout_queue` 收官等待 settled 后 ~112s 才返回，
 collect-only 子进程会跟着多挂 ~2min（主进程 join 前子进程此窗口未写盘 → 命中晚）。其
 `round done` 于 `settled` 之后。吞吐收益（155s→6.6s 采集墙钟）已远大于此开销，暂不优化。
+
+## §302 S3 balanced 胜率崩塌 → 回滚 it4 峰值权重续训（2026-08-31，用户拍板"回滚"）
+
+**触发（plan/s3-balanced-restart.md §4 风险 1 判据）**：accuracy 连续 2 settle 塌到 <0.40
+（it6=0.370、it7=0.355，且 it4 峰值 0.427 → it5 0.391 → it6 0.370 → it7 0.355 连续三降），
+eval 胜率从 it4 的 70% 三连崩至 38.3%（clearRate 78.3%→51.7%）；DoD 前 3 settle 三项
+（lives≥0.80 单调 / loot≥0.60 / acc≥0.50）全部不达标且反向。非初期 U 形（it1-3 平台 58-60%，
+it5-7 是从 70% 高位崩塌）。it6 eval 全 drop（节点升级恢复期，样本缺失）。
+
+**裁定**：用户选「回滚 it4 峰值权重续训」——排除"权重已劣化"因素，观察复现性以定位是
+权重问题还是 balanced 臂本身问题。
+
+**执行**：it4 结算权重 = `nn-training/weights/rl-weights.it3.20260831-093140.json`
+（sha 96b1383ecf1d；归档名与迭代号 off-by-one，it{N} 文件实为 it{N+1} 权重——已核对
+eval wver）。备份 it7 权重（`tmp/s3-cap2/weights.it7-backup.json`，sha a53a8e3）→ 覆盖
+weights.json → 带杀重启（OMP8+PROC_BIND + --double-buffer 1），it8 起以 96b1383 重新采集
+（旧 it8 shard wver 不匹配被清空重建）。
+
+**判读约定**：it8 eval（回归 96b1383 权重后首轮）若 ≥ it4 水准（eval 70%、acc 0.43 一带）→
+崩盘可归因 it5-7 的权重劣化路径，续观 3 settle 是否复现；若仍 <50% / acc<0.40 → balanced
+臂本身不稳，转备选臂 survival（wKill0.5/wDmg0.5/wDeath1.5，需用户再拍板）。
