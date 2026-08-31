@@ -4,6 +4,26 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §17 吞吐优化 T0–T2：OMP 扫档定案 OMP8+PROC_BIND，主役恢复并提速 18%（2026-08-31）
+
+**背景**：plan/goal-nn-throughput.md 吞吐优化。T0 基线（balanced S3 cap2，152 shards it3 实测）：PPO 150chunks×4ep ≈ 1260s（chunk ~8.4s）。用户修正方案：**PPO-only 基准**（复用已有 shards 重跑 PPO 计时，不重新 rollout）——`nn-training/ppo-bench.py`（新工具，可复用）。
+- 内存确认 32GB（此前 16GB 疑虑解除；T4 双缓冲可行）。
+- **档序**：OMP {12, 8+PROC_BIND=close, 16} × mb{512} → 最佳 OMP=8（6.887s/chunk）→ mb{1024,2048}@OMP8。
+- **结论表**（chunk_time，越小越好）：
+  | 档 | chunk_time | ppo_sec |
+  |---|---|---|
+  | **OMP8+PROC_BIND × mb512** | **6.887s** | 1033s |
+  | OMP8 × mb1024 | 7.195s | 1079s |
+  | OMP8 × mb2048 | 7.388s | 1108s |
+  | OMP16 × mb512 | 7.713s | 1157s |
+  | OMP12 × mb512（默认） | 8.401s | 1260s |
+- **定案：OMP8 + OMP_PROC_BIND=close + mb512**（PPO 提速 −18%）。mb 调大无收益（2048 反慢 7.3%）——chunk 粒度已非算术强度瓶颈。
+- CPU 澄清：OMP=12/16 在 8 物理核上也是**满载 8 核**（实测 810% 单核等价），"任务管理器 50%"= HT 机器物理核占比的正常读数；OMP8+PROC_BIND 靠消除 HT 缓存争用胜出。
+- **事故/教训**：① 双训练器并发 = OMP 争抢、测量失真（必须独占时停主役）；② 杀训练器必须连 bash 包装链（此前只杀 python 致残留链自动推进 spawn rollout bun）；③ ppo-bench 首版把 `ppo_update` 返回值当 list（实为**聚合 dict**）导致崩溃丢数据——已修 + 重跑。
+- **主役恢复**：balanced S3（tmp/s3-cap2）以 OMP8+PROC_BIND 续跑（weights it3 09:46，shards 复用 wver 对齐，PPO 直接重放）。
+- T3（`--eval-every`/`--eval-at`，commit 0f8d940）已落地默认 1 字节一致；主役暂用每轮 eval（门判节奏不变），需稀疏化时 `--eval-at` 显式指定。
+- T4 双缓冲：内存 OK（32GB），待主役稳态后另行评估（高 ROI：藏掉采集 500-850s/轮）。
+
 ## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
 
 **用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与
