@@ -14,11 +14,29 @@
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve } from 'path'
 
-// ---------------- 模块级常量（历史锚点，默认不清空） ----------------
+/** 仓库根（本文件在 tools/agent/ 下）。 */
+const REPO_ROOT = resolve(import.meta.dir ?? process.cwd(), '..', '..')
 
-/** 历史锚点：默认**保留全部历史**（用户指令 2026-08-31：除非明确要求，部署不清空历史）。
- *  仅当启动环境显式置 POOL_HISTORY_FRESH=1 时，才按本进程启动时刻清零重汇总。 */
-const POOL_EPOCH_MS = process.env.POOL_HISTORY_FRESH === '1' ? Date.now() : 0
+// ---------------- 历史锚点（一次性，受控清空） ----------------
+
+/** 锚点文件：tmp/dist-agent/pool-epoch.txt（毫秒时间戳）。语义（用户 2026-08-31）：
+ *  · 本次修正部署写入一次 → 历史自此刻起重新累计；
+ *  · 此后任何部署/重启**只读**同一锚点 → 历史持续累计，不再按部署重置；
+ *  · 用户明确要求清空时，重写/删除该文件再重启 agent = 新锚点。 */
+const EPOCH_FILE = join(REPO_ROOT, 'tmp', 'dist-agent', 'pool-epoch.txt')
+
+function poolEpochMs(): number {
+  try {
+    if (!existsSync(EPOCH_FILE)) return 0
+    const v = parseInt(readFileSync(EPOCH_FILE, 'utf8').trim(), 10)
+    return Number.isFinite(v) && v > 0 ? v : 0
+  } catch {
+    return 0
+  }
+}
+
+/** 0 = 锚点未建立（累计全部历史）；>0 = 只统计该时刻之后的行。 */
+const POOL_EPOCH_MS = poolEpochMs()
 
 // ---------------- 配置 ----------------
 
@@ -29,8 +47,6 @@ interface PoolNodeCfg {
   /** rl-config 的 enabled 字段；disabled 节点不 ping、状态列显示 disabled、历史仍展示。 */
   enabled: boolean
 }
-
-const REPO_ROOT = resolve(import.meta.dir ?? process.cwd(), '..', '..')
 
 function loadPoolConfig(): PoolNodeCfg[] | null {
   try {
@@ -125,7 +141,9 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
     return h
   }
   const epochStr = fmtTs(POOL_EPOCH_MS)
-  const hourAgoStr = fmtTs(POOL_EPOCH_MS - 3_600_000)
+  // 最近一小时永远相对"当下"（不可复用 epoch——epoch 是部署锚点，过去的部署会使
+  // hourAgo 退到远古，昨天错误也会被判"一小时以内"）。
+  const hourAgoStr = fmtTs(Date.now() - 3_600_000)
   let roots: string[] = []
   try {
     roots = readdirSync(join(REPO_ROOT, 'tmp'), { withFileTypes: true })
@@ -195,10 +213,10 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
 function poolStatusCell(h: NodeHistory): string {
   const n = h.recent.length
   const okN = h.recent.filter(Boolean).length
-  if (n === 0) return `<span style="color:#999">无数据</span>`
-  if (okN / n >= 0.9) return `<span style="color:#0a0">健康 ${okN}/${n}</span>`
-  if (okN / n >= 0.7) return `<span style="color:#c60">波动 ${okN}/${n}</span>`
-  return `<span style="color:#c00">异常 ${okN}/${n}</span>`
+  if (n === 0) return `<span class="badge b-gray">无数据</span>`
+  if (okN / n >= 0.9) return `<span class="badge b-green">健康 ${okN}/${n}</span>`
+  if (okN / n >= 0.7) return `<span class="badge b-yellow">波动 ${okN}/${n}</span>`
+  return `<span class="badge b-red">异常 ${okN}/${n}</span>`
 }
 
 // ---------------- 渲染上下文（sampler-agent 侧状态注入） ----------------
@@ -260,28 +278,28 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
       let specCell = '-'
       let verCell = '-'
       if (disabled) {
-        statusCell = `<span style="color:#999">disabled</span>`
+        statusCell = `<span class="badge b-gray">disabled</span>`
       } else if (ping) {
         const hashOk = String((ping as any)?.codeHash) === localHash
         verCell = `v${String((ping as any)?.codeHash ?? '?').slice(0, 7)}`
-        if (!hashOk) verCell += ` <span style="color:#c60">(旧)</span>`
+        if (!hashOk) verCell += `<span class="pill">旧</span>`
         statusCell = poolStatusCell(h)
         specCell = `${(ping as any)?.cpus ?? '?'} 核`
       } else {
         // ping 失败：状态仍以最近 10 次完成率表征（用户指令 8），ping 列如实显示失败。
         statusCell = poolStatusCell(h)
-        if (h.recent.length === 0) statusCell = `<span style="color:#c00">无 ping · 无历史</span>`
+        if (h.recent.length === 0) statusCell = `<span class="badge b-red">无 ping · 无历史</span>`
       }
       const errCell = h.lastError
-        ? `<span style="color:#c00">${h.lastError}</span><br><span style="color:#999">${h.lastFailTs || ''}</span>`
-        : '-'
+        ? `<span class="err">${h.lastError}</span><br><span class="muted">${h.lastFailTs || ''}</span>`
+        : '<span class="muted">-</span>'
       rows.push(
-        `<tr><td>${n.id}</td><td>${statusCell}</td>` +
-          `<td>${specCell}</td><td>${verCell}</td>` +
-          `<td data-v="${disabled || !ping ? 9999 : ms}">${!disabled && ping ? `${ms}ms` : '-'}</td>` +
-          `<td data-v="${h.ok}" style="text-align:right">${h.ok}</td><td data-v="${h.fail}" style="text-align:right">${h.fail}</td>` +
-          `<td data-v="${h.lastIterOk}" style="text-align:right">${h.lastIter >= 0 ? h.lastIterOk : '-'}</td>` +
-          `<td data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
+        `<tr><td class="name">${n.id}</td><td>${statusCell}</td>` +
+          `<td>${specCell}</td><td class="ver">${verCell}</td>` +
+          `<td class="num" data-v="${disabled || !ping ? 9999 : ms}">${!disabled && ping ? `${ms}ms` : '-'}</td>` +
+          `<td class="num" data-v="${h.ok}">${h.ok}</td><td class="num" data-v="${h.fail}">${h.fail}</td>` +
+          `<td class="num" data-v="${h.lastIterOk}">${h.lastIter >= 0 ? h.lastIterOk : '-'}</td>` +
+          `<td class="num" data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
           `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
           `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`,
       )
@@ -304,51 +322,82 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
     }
     {
       const errCellL = localH.lastError
-        ? `<span style="color:#c00">${localH.lastError}</span><br><span style="color:#999">${localH.lastFailTs || ''}</span>`
-        : '-'
+        ? `<span class="err">${localH.lastError}</span><br><span class="muted">${localH.lastFailTs || ''}</span>`
+        : '<span class="muted">-</span>'
       rows.push(
-        `<tr><td>local（本机直跑）</td><td>${poolStatusCell(localH)}</td>` +
-          `<td>${localSlots !== null ? `${localSlots} 槽` : '-'}</td><td>-</td>` +
-          `<td data-v="9999">-</td>` +
-          `<td data-v="${localH.ok}" style="text-align:right">${localH.ok}</td><td data-v="${localH.fail}" style="text-align:right">${localH.fail}</td>` +
-          `<td data-v="${localH.lastIterOk}" style="text-align:right">${localH.lastIter >= 0 ? localH.lastIterOk : '-'}</td>` +
-          `<td data-v="${localH.avgElapsedSec ?? 9999}">${localH.avgElapsedSec !== null ? `${localH.avgElapsedSec}s` : '-'}</td>` +
+        `<tr><td class="name">local<span class="dim">（本机直跑）</span></td><td>${poolStatusCell(localH)}</td>` +
+          `<td>${localSlots !== null ? `${localSlots} 槽` : '-'}</td><td class="ver">-</td>` +
+          `<td class="num" data-v="9999">-</td>` +
+          `<td class="num" data-v="${localH.ok}">${localH.ok}</td><td class="num" data-v="${localH.fail}">${localH.fail}</td>` +
+          `<td class="num" data-v="${localH.lastIterOk}">${localH.lastIter >= 0 ? localH.lastIterOk : '-'}</td>` +
+          `<td class="num" data-v="${localH.avgElapsedSec ?? 9999}">${localH.avgElapsedSec !== null ? `${localH.avgElapsedSec}s` : '-'}</td>` +
           `<td data-v="${localH.lastOkTs}">${localH.lastOkTs || '-'}</td>` +
           `<td data-v="${localH.lastFailTs}">${errCellL}</td></tr>`,
       )
     }
   }
-  // 默认按「已结算局」倒序（点击表头仍可手动排）。
+  // 默认按「已结算局」倒序（点击表头仍可手动排）。num cell 列表：ping、已结算局、失败局、
+  // 上轮贡献度、平均耗时——第 2 个（index 1）= 已结算局。
   rows.sort((a, b) => {
-    const ma = a.match(
-      /data-v="(\d+)" style="text-align:right">(\d+)<\/td><td data-v="(\d+)" style="text-align:right">/,
-    )
-    const mb = b.match(
-      /data-v="(\d+)" style="text-align:right">(\d+)<\/td><td data-v="(\d+)" style="text-align:right">/,
-    )
-    if (!ma || !mb) return 0
-    return Number(mb[2]) - Number(ma[2])
+    const okA = Number((a.match(/<td class="num" data-v="(\d+)">/g) ?? [])[1]?.match(/\d+/) ?? 0)
+    const okB = Number((b.match(/<td class="num" data-v="(\d+)">/g) ?? [])[1]?.match(/\d+/) ?? 0)
+    return okB - okA
   })
-  const inflightRows = [...ctx.inflight.values()]
-    .map((v) => `s${v.stage}/seed${v.seed}（${((Date.now() - v.startedAt) / 1000).toFixed(0)}s）`)
-    .join('，')
-  const weightsRows =
-    [...ctx.weightsByKindSha.entries()].map(([kind, m]) => `${kind}×${m.size}桶`).join('，') || '—'
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
-<title>sampler-agent 节点池</title></head>
-<body style="font-family:system-ui,sans-serif;margin:24px">
-<h2>节点池监控（每 60s 自动刷新 · 本次刷新 ${nowStr}）</h2>
-<p>本机 agent：workers=${ctx.workers}，在飞=${ctx.inflight.size}${inflightRows ? `（${inflightRows}）` : ''}，
-累计完成=${ctx.gamesDoneTotal}，权重桶=${weightsRows}${ctx.lastError ? `，<span style="color:#c00">lastError=${ctx.lastError}</span>` : ''}</p>
-<table border="1" cellpadding="6" cellspacing="0" id="pool" style="border-collapse:collapse;font-size:14px">
-<thead><tr style="background:#eee">
+<title>sampler-agent 节点池</title>
+<style>
+:root{--bg:#f4f6f9;--card:#ffffff;--border:#e5e8ee;--text:#1c2333;--muted:#7a8395;
+--green:#16a34a;--green-bg:#e9f9ef;--yellow:#b45309;--yellow-bg:#fdf3e7;--red:#dc2626;--red-bg:#fdecec;
+--gray:#7a8395;--gray-bg:#f1f3f7;--accent:#2f5fe0;--accent-bg:#eef2fe;--row-hover:#f7f9fc}
+*{box-sizing:border-box}
+body{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+margin:0;background:var(--bg);color:var(--text);padding:24px 28px}
+.wrap{max-width:1180px;margin:0 auto}
+.pool-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;
+margin-bottom:16px}
+.pool-header h2{margin:0;font-size:20px;font-weight:700;letter-spacing:.2px}
+.pool-header h2 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);
+margin-right:8px;vertical-align:1px}
+.pool-header .ts{font-size:12.5px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;
+box-shadow:0 1px 3px rgba(16,24,40,.05)}
+table{width:100%;border-collapse:collapse}
+thead th{background:#fafbfd;border-bottom:2px solid var(--border);text-align:left;padding:11px 14px;
+font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none;
+letter-spacing:.3px}
+thead th:hover{background:#f0f3f8;color:var(--accent)}
+tbody td{padding:10px 14px;border-bottom:1px solid #f0f2f6;font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:var(--row-hover)}
+td.name{font-weight:600}
+td.name .dim{color:var(--muted);font-weight:400;font-size:12px}
+td.ver{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4b5563}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
+.b-green{background:var(--green-bg);color:var(--green)}
+.b-yellow{background:var(--yellow-bg);color:var(--yellow)}
+.b-red{background:var(--red-bg);color:var(--red)}
+.b-gray{background:var(--gray-bg);color:var(--gray)}
+.pill{display:inline-block;margin-left:6px;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:600;
+background:var(--yellow-bg);color:var(--yellow);vertical-align:1px}
+.err{color:var(--red);font-size:12px;word-break:break-all}
+.muted{color:var(--muted);font-size:12px}
+.foot{margin:16px 2px 0;font-size:12.5px;color:var(--muted);line-height:1.8}
+.foot b{color:#59606f}
+@media (max-width:900px){body{padding:14px}thead th,tbody td{padding:8px 10px}}
+</style></head>
+<body><div class="wrap">
+<div class="pool-header"><h2><span class="dot"></span>节点池监控</h2>
+<span class="ts">每 60s 自动刷新 · 本次刷新 ${nowStr}</span></div>
+<div class="card"><table id="pool">
+<thead><tr>
 <th onclick="sortTbl(0,this)">节点</th><th onclick="sortTbl(1,this)">状态</th><th onclick="sortTbl(2,this)">规格</th>
 <th onclick="sortTbl(3,this)">版本</th><th onclick="sortTbl(4,this)">ping</th><th onclick="sortTbl(5,this)">已结算局</th>
 <th onclick="sortTbl(6,this)">失败局</th><th onclick="sortTbl(7,this)">上轮贡献度</th><th onclick="sortTbl(8,this)">平均耗时</th>
 <th onclick="sortTbl(9,this)">最近成功</th><th onclick="sortTbl(10,this)">最近错误</th>
 </tr></thead>
 <tbody>${rows.join(String.fromCharCode(10))}</tbody>
-</table>
+</table></div>
 <script>
 function sortTbl(col, th) {
   const tb = document.querySelector('#pool tbody');
@@ -365,9 +414,9 @@ function sortTbl(col, th) {
   for (const r of rows) tb.appendChild(r);
 }
 </script>
-<p style="color:#666">状态 = 最近 10 次 rollout/eval 结算完成率（健康≥90% · 波动≥70% · 异常&lt;70%），替代单次 ping 判断；
-ping 列仅作实时参考。最近错误仅显示最近 1 小时内。数据源：dist-agent-meta.jsonl（tmp 下各训练流聚合；
-${POOL_EPOCH_MS > 0 ? `<b>自 ${fmtTs(POOL_EPOCH_MS)}（POOL_HISTORY_FRESH=1 显式清零）起重新汇总</b>` : `<b>累计全部历史</b>（部署不清空，除非显式设置 POOL_HISTORY_FRESH=1）`}）。
+<p class="foot">状态 = 最近 10 次 rollout/eval 结算完成率（<b>健康</b>≥90% · <b>波动</b>≥70% · <b>异常</b>&lt;70%），替代单次 ping 判断；ping 列仅作实时参考。
+最近错误仅显示最近 1 小时内。数据源：dist-agent-meta.jsonl（tmp 下各训练流聚合）·
+${POOL_EPOCH_MS > 0 ? `<b>历史自 ${fmtTs(POOL_EPOCH_MS)} 起重新累计</b>（此后部署不再重置）` : `<b>累计全部历史</b>`}。
 只读页面，不含密钥。默认按「已结算局」倒序，点击表头排序。</p>
-</body></html>`
+</div></body></html>`
 }
