@@ -187,6 +187,16 @@ def test_resume_scope(tmp: Path) -> None:
     rm_ex = run_rl.resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
     check({(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored")
 
+    # 吞吐 T4 提前预采：double-wver 对账——本轮 θ_N(wver) 之外还需认上一轮 epoch3
+    # 快照（extra_wver）采的首波 shard（预采首波 wver=θ_{N,e3}，否则被当未完成清场）。
+    _mk_shard(traj, 7, 777, "e" * 64)      # 模拟预采首波：wver=快照指纹（extra）
+    e_done = run_rl.completed_pairs(traj, wver, extra_wver="e" * 64)
+    check((7, 777) in e_done, "extra-wver precollected shard counted as done")
+    rm_e = run_rl.resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
+    check(len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard")
+    check((7, 777) not in run_rl.completed_pairs(traj, wver),
+          "without extra_wver precollected shard NOT treated as current-θ shard")
+
 
 def test_jsonl_anchors(tmp: Path) -> None:
     print("[fast] last_completed_iter / last_rotate_seed")
@@ -498,6 +508,30 @@ def test_integration(tmp: Path) -> None:
               "I7 slow eval still running afterwards (deferred to background)")
         eval_th.join(timeout=45)  # 放 eval 收尾（不阻塞断言路径）
         FakeAgent.eval_delay = 0.0
+
+        # I8 吞吐 T4 提前预采：上一轮 epoch3 快照（θ_{N,e3}，wver=extra）采的首波
+        # shard 已在盘 → 本轮 stream 应①把它注入第一波训练（seed pend）；②collector
+        # resume 对账（double-wver）跳过它、只现场采计划内剩余局（不重复 dispatch）。
+        traj = fresh("i8")
+        plan8 = [(0, 111), (3, 222)]                       # 本轮计划 2 局
+        pre_pair, cur_pair = (0, 111), (3, 222)
+        # 预采首波盘上 shard：wver = "e"*64（模拟 θ_{N,e3} 快照指纹，≠当前权重）
+        _mk_shard(traj, *pre_pair, "e" * 64)
+        args8 = types.SimpleNamespace(**{**vars(args), "max_ticks": 600,
+                                     "mb": 128, "epochs": 1, "seed": 7})
+        cfg8 = json.loads(json.dumps(cfg))
+        cfg8["policy"]["streamWaveGames"] = 1  # 每局一波（首波注入立即起训）
+        calls8 = []
+        stub8 = _StubPpo(kl=1e-12)
+        rep8 = run_rl.run_rollout_stream(
+            bun, str(WEIGHTS), traj, plan8, args8, cfg8, "i8.8", None, None, None,
+            backend=stub8, extra_wver="e" * 64)
+        disp8 = [p for kind, _t, p in FakeAgent.events if kind == "dispatch"]
+        check(stub8.updates >= 2,
+              f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})")
+        check(pre_pair not in disp8 and cur_pair in disp8,
+              f"I8 collector skips precollected pair, dispatches only remaining ({disp8})")
+        check(rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})")
     finally:
         srv.shutdown()
 

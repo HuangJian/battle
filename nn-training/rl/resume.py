@@ -5,30 +5,44 @@ import json
 from pathlib import Path
 
 
-def completed_pairs(traj_dir: Path, wver: str) -> set[tuple[int, int]]:
-    """扫描 traj_dir 已完整落盘且 manifest.wver==当前权重的 (stage,seed)——rollout 断点。
+def completed_pairs(traj_dir: Path, wver: str,
+                    extra_wver: str | None = None) -> set[tuple[int, int]]:
+    """扫描 traj_dir 已完整落盘且 manifest.wver∈{wver, extra_wver} 的 (stage,seed)——rollout 断点。
+
+    extra_wver：双缓冲预采快照的 wver（θ_{N,e3}）。下一轮对账时当前 args.out 已是
+    θ_N（PPO 末写好），而预采首波 shard 的 wver = 快照指纹——必须双白名单，否则
+    首波被当"未完成"重新派发/清场，预采白做。
 
     完整 shard 判定：write_shard 先写 12 npy 后写 manifest；存在 manifest.json ⇒ 目录完整。
     仅在 manifest 显式回显 stage/seed（agent 打包时回填）后才算数，否则不计入 done。
     """
-    done: set[tuple[int, int]] = set()
+    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver)}
+
+
+def _scan_shards(traj_dir: Path, wver: str, extra_wver: str | None = None):
+    """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
+    dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
+    """
+    res = []
     if not traj_dir.exists():
-        return done
+        return res
     for m in traj_dir.rglob("rl_s*_seed*/manifest.json"):
         try:
             mm = json.loads(m.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         st, sd = mm.get("stage"), mm.get("seed")
-        if mm.get("wver") != wver or not isinstance(st, int) or not isinstance(sd, int):
+        wv = mm.get("wver")
+        if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
-        done.add((int(st), int(sd)))
-    return done
+        res.append(((int(st), int(sd)), m.parent))
+    return res
 
 
 def resumed_manifests(traj_dir: Path, wver: str,
                       exclude: set[tuple[int, int]] | None = None,
-                      only: set[tuple[int, int]] | None = None) -> list[dict]:
+                      only: set[tuple[int, int]] | None = None,
+                      extra_wver: str | None = None) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
 
@@ -52,7 +66,8 @@ def resumed_manifests(traj_dir: Path, wver: str,
         except (OSError, ValueError):
             continue
         st, sd = mm.get("stage"), mm.get("seed")
-        if mm.get("wver") != wver or not isinstance(st, int) or not isinstance(sd, int):
+        wv = mm.get("wver")
+        if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
         if (int(st), int(sd)) in skip:
             continue

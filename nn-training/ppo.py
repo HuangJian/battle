@@ -158,11 +158,15 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
 # chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
 
 
-def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None):
+def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None,
+               on_epoch_done=None):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
     ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/numpy RNG），
     并支持断点续跑（重启后从已完成 epoch 数继续，minibatch 乱序精确复现）。
+    on_epoch_done(ep_done, model): 每个 epoch 完成后同步回调（双缓冲提前预采的
+    触发点——stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn 首波预采，PPO 继续
+    最后一个 epoch；模型在此处即当前 epoch 训练完的状态）。
     """
     model.train()
     clip = CLIP_EPS
@@ -255,6 +259,8 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None)
                 )
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
+        if on_epoch_done is not None:
+            on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         log(f"[ppo] epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "

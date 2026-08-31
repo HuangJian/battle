@@ -173,7 +173,8 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
                       seed: int = 7,
                       value_warmup_epochs: int = 0,
                       ref_model: torch.nn.Module | None = None,
-                      kl_coef: float = 0.0):
+                      kl_coef: float = 0.0,
+                      on_epoch_done=None):
     """chunks: intent 步 minibatch dicts（obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
 
     value_warmup_epochs（M8 冷启动，plan "kickstarting 辅助项递减"）：前 N 个 epoch 只训
@@ -285,6 +286,8 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
                     f"value={sum(s['value'] for s in recent) / n_r:.4f}")
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
+        if on_epoch_done is not None:
+            on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         ep_kl = sum(s["kl"] for s in ep_stats) / n_e

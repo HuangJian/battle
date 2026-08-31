@@ -197,7 +197,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                       tail_dispatch: bool = True,
                       halt_event: threading.Event | None = None,
                       on_queue_drained=None,
-                      local_suspend: threading.Event | None = None) -> dict:
+                      local_suspend: threading.Event | None = None,
+                      extra_wver: str | None = None) -> dict:
     """中央队列调度模式（plan/distributed-rollout.md v3.3 §5.2）。
 
     140 局组成全局队列（runId 种子确定性预洗牌），各节点 C_n 条工作线程 + 本机
@@ -332,7 +333,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 重启同一迭代，it60 实测目录 235 局/计划 105 局），它们不在新计划里——既不重跑
     # 也不并入报告。done 一词自此恒指计划内已完成。
     plan_set = set(norm_pairs)
-    done_all = completed_pairs(traj_dir, wver)
+    done_all = completed_pairs(traj_dir, wver, extra_wver=extra_wver)
     done = done_all & plan_set
     tasks = [p for p in norm_pairs if p not in done]
     if done_all:
@@ -346,7 +347,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         # 从磁盘 shard 聚合而非返回空报告：空报告曾让 it1 的 winRate/samples
         # 全为零（指标盲区）；only=plan_set 保证跨配置残留下聚合口径仍等于本轮计划。
         # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
-        combined = combine_reports(resumed_manifests(traj_dir, wver, only=plan_set))
+        combined = combine_reports(resumed_manifests(traj_dir, wver, only=plan_set,
+                                                 extra_wver=extra_wver))
         combined["missing"] = []
         combined["expectedGames"] = len(pairs)
         combined["dist"] = {"iterId": iter_id, "nodes": {}, "retried": 0,
@@ -832,7 +834,8 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         log(f"[dist] missing pairs: {[list(k) for k in missing]}")
 
     combined = combine_reports(
-        results + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set))
+        results + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set,
+                                    extra_wver=extra_wver))
     combined["missing"] = [list(k) for k in missing]
     combined["expectedGames"] = len(pairs)
     combined["dist"] = {"iterId": iter_id, "nodes": by_node, "retried": stats["retried"],

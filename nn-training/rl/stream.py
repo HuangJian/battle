@@ -12,7 +12,7 @@ import dist_common
 import ppo as ppo_mod
 from rl.log import log
 from rl.queue import run_rollout_queue
-from rl.resume import completed_pairs
+from rl.resume import completed_pairs, _scan_shards
 
 
 def wave_params(cum_kl: float, kl_cap: float, wave_games: int, wave_cap: int,
@@ -52,7 +52,9 @@ def _shard_dir(entry: str) -> str | None:
 def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, int]],
                        args, cfg: dict, iter_id: str, model, opt, device,
                        on_collect_done=None, on_ppo_started=None,
-                       backend=None, update_kwargs: dict | None = None) -> dict:
+                       on_epoch_done=None,
+                       backend=None, update_kwargs: dict | None = None,
+                       extra_wver: str | None = None) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
     backend（工程化共享）：per-tick RL 用 ppo（默认），意图 RL 用 ppo_intent——
@@ -87,6 +89,8 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     box: dict = {}
     backend = backend or ppo_mod
     update_kwargs = update_kwargs or {}
+    if on_epoch_done is not None:
+        update_kwargs["on_epoch_done"] = on_epoch_done
     halt_ev = threading.Event()  # 置位 → 队列停止派发新任务（R1 熔断止损）
     # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
     # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
@@ -120,9 +124,12 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         wave_games = max(4, int(policy.get("streamWaveGamesIntent", wave_games)))
     # 残局感知：本轮最多会到账多少新结算（计划 − 已在盘）。断点续跑常剩个位数
     # 缺口（it63：103/105），波次阈值以此为上限，避免静默空等收官。
+    # 吞吐 T4 提前预采：extra_wver（θ_{N,e3} 快照）的首波局也算"已在盘"，不算进
+    # 等待窗口（它们作为首波语料已注入 pend，collector 只补采真正缺失的局）。
     try:
         wver_start = dist_common.weights_fingerprint(rl_path)
-        remaining_games = max(0, len(pairs) - len(completed_pairs(traj_dir, wver_start)))
+        _done_start = completed_pairs(traj_dir, wver_start, extra_wver=extra_wver)
+        remaining_games = max(0, len(pairs) - len(_done_start))
     except OSError:
         remaining_games = None
 
@@ -159,7 +166,8 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
                 on_result=_on_result, local_slots_max=local_slots,
                 tail_dispatch=False, halt_event=halt_ev,
                 local_suspend=ppo_started_ev,
-                on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"))
+                on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"),
+                extra_wver=extra_wver)
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             _fire_eval_once("collector done")
         except Exception as e:  # noqa: BLE001 — 主线程统一上报
@@ -241,6 +249,22 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     log(f"[stream] collector started (local_slots={local_slots}, "
         f"wave={wave_games} games, kl_cap={kl_cap})")
     wave_cap = max(wave_games * 2, 24)
+    # 吞吐 T4 提前预采：上一轮 epoch3 快照（θ_{N,e3}）采的首波 shard 已在盘且 wver=
+    # extra_wver（≠ 本轮 θ_N 的 wver）。把它们作为**第一波语料**直接注入训练（不等待
+    # 现场采集）——这正是"预采墙钟藏进上轮 PPO 尾段"的落点；collector 会跳过这些已完成局
+    # （resume 对账含 extra_wver），只现场采计划内剩余局，两批语料本轮都被训练。
+    _pre_seeded = 0
+    if extra_wver and extra_wver != wver_start:
+        plan_set_ = {(int(a), int(b)) for a, b in pairs}
+        for (_pair, _dir) in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver):
+            if _pair not in plan_set_:
+                continue
+            with lock:
+                pend.append({"_dir": str(_dir), "_pre": True})
+            _pre_seeded += 1
+        if _pre_seeded:
+            log(f"[stream] seeded {_pre_seeded} precollected first-wave shards "
+                f"(extra wver {extra_wver[:12]}…) into training queue")
     th.start()
     while True:
         with lock:

@@ -71,11 +71,18 @@ WEIGHTS_BACKUP_KEEP = 20  # bounded archive: prune oldest it-backups beyond this
 
 def _run_collect_only(args, traj_root, rotate_seed, bun) -> None:
     """吞吐 T4：仅采集一轮落盘后退出（双缓冲子进程模式）。不 PPO/不 eval/不写权重。
-    落盘 shard 的 manifest.wver = 快照权重指纹 → 主进程下一轮 completed_pairs 命中走聚合。"""
+    落盘 shard 的 manifest.wver = 快照权重指纹 → 主进程下一轮 completed_pairs 命中走聚合。
+    --precollect-games>0 时只采前 N 局（下一轮首波 wave 语料，其余由下轮以 θ_N 现场采）。
+    """
     it = args.start_it or 1
     traj_dir = traj_root / f"it{it}"
     traj_dir.mkdir(parents=True, exist_ok=True)
     pairs = build_pairs(args, it, rotate_seed)
+    pre_games = int(getattr(args, "precollect_games", 0) or 0)
+    if 0 < pre_games < len(pairs):
+        pairs = pairs[:pre_games]
+        log(f"[collect-only] it{it}: limited to first {pre_games} games "
+            f"(rest collected by next round with θ_N)")
     dist_cfg = dist_common.load_dist_config()
     # iter_id 必须遵循 "{RUN_ID}.{it}" —— run_rollout_queue 用 rsplit('.',1)[-1]
     # 做 int() 解析迭代号（2026-08-31 实测：'collect-1-<pid>' 格式直接 ValueError
@@ -90,19 +97,23 @@ def _run_collect_only(args, traj_root, rotate_seed, bun) -> None:
         f"outcomes={json.dumps(report['outcomes'])}")
 
 
-def _spawn_collect_next(args, it) -> subprocess.Popen | None:
-    """吞吐 T4：后台子进程预采 it+1（θ_N 行为快照）。返回 Popen 或 None。
+def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Popen | None:
+    """吞吐 T4：后台子进程预采 it+1（行为快照）。返回 Popen 或 None。
 
-    正确性：子进程用 args.out 的**快照**（θ_N）——下轮 PPO 若写回 args.out 不回影响
-    子进程（它读 snap 文件）；shards 自带 θ_N 采样的 lp → IS 分母天然正确（on-policy）。"""
+    正确性：子进程用 args.out（或 snap_src，提前预采时=epoch3 快照）的**快照**——下轮
+    PPO 若写回 args.out 不回影响子进程（它读 snap 文件）；shards 自带快照权重的 lp →
+    IS 分母天然正确（快照≈θ_N 时仍 on-policy 带内，差最后一段梯度）。子进程同样继承
+    --precollect-games：>0 则只采下一轮首波，其余局由下轮以 θ_N 现场采（严格 on-policy）。
+    """
     import shutil
 
     next_it = it + 1
     if args.iters > 0 and next_it > args.iters:
         return None
+    src = snap_src or args.out
     snap = str(Path(args.out).with_name(f"weights-collect-{next_it}.json"))
     try:
-        shutil.copyfile(args.out, snap)
+        shutil.copyfile(src, snap)
     except OSError as e:  # noqa: BLE001
         log(f"[double-buffer] snapshot fail: {e} — skip precollect")
         return None
@@ -118,8 +129,25 @@ def _spawn_collect_next(args, it) -> subprocess.Popen | None:
     except Exception as e:  # noqa: BLE001
         log(f"[double-buffer] spawn fail: {e} — skip precollect")
         return None
-    log(f"[double-buffer] precollect it{next_it} spawned pid={p.pid} snapshot={snap}")
+    log(f"[double-buffer] precollect it{next_it} spawned pid={p.pid} snapshot={snap}"
+        + (f" (early, src={snap_src})" if snap_src else ""))
     return p
+
+
+def _precollect_snapshot_wver(out_path: str, it: int) -> str | None:
+    """回读上一轮提前预采（epoch3 快照）写入的 weights-collect-{it}.json 的 wver。
+
+    提前预采时快照=θ_{N,e3}（尚未最终写回 args.out），其 shard 的 wver=快照指纹；
+    本轮对账需把该 wver 也纳入 done 判定（双白名单），否则预采首波被当作未完成清场。
+    文件存在才返回（无提前预采/常规尾部预采都返回 None——尾部预采时 args.out 已是 θ_N，
+    wver 与当前一致，无需双白名单）。"""
+    try:
+        snap = Path(out_path).with_name(f"weights-collect-{it}.json")
+        if not snap.exists():
+            return None
+        return dist_common.weights_fingerprint(str(snap))
+    except OSError:  # noqa: BLE001
+        return None
 
 
 def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
@@ -407,6 +435,14 @@ def main() -> None:
                          "下一轮（行为快照 θ_N，子进程读快照不读 args.out，防权重写回污染）；"
                          "下轮开头 join 子进程后直接走盘上 shard 聚合重放（藏掉采集墙钟）。"
                          "依赖 T3（--eval-at/--eval-every 释放集群尾段）。默认 0 = 原行为字节一致。")
+    ap.add_argument("--precollect-early", type=int, default=_d("precollect_early", 0),
+                    help="吞吐 T4 提前量：预采 spawn 时机从『PPO 全收尾』提前到『第"
+                         "(epochs-提前量) 个 epoch 完成后』（如 1 = epoch3/4 后就 spawn，PO 藏进"
+                         "最后 1 个 epoch）。快照 θ_{N,e3} ≈ θ_N（差最后一段梯度），语义仍 on-policy 带内；"
+                         "配合 --precollect-games 只预采下一轮首波语料。0 = 原行为（PPO 后 spawn）。")
+    ap.add_argument("--precollect-games", type=int, default=_d("precollect_games", 0),
+                    help="吞吐 T4 限制：预采子进程只采前 N 局（下一轮首波 wave 的语料），其余"
+                         "局由下轮以 θ_N 现场采集（严格 on-policy）。0 = 全量 150 局预采（原行为）。")
     ap.add_argument("--collect-only", type=int, default=0,
                     help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。")
     args = ap.parse_args()
@@ -512,6 +548,7 @@ def main() -> None:
     # 吞吐 T3：eval 绝对迭代点集（复用 run_rl_intent 的 eval_at 语义；空 = 不启用该维）。
     eval_at_set = {int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()}
     _collect_child: subprocess.Popen | None = None  # 吞吐 T4：预采子进程句柄（下一轮开头 join）
+    _spawned_early = False  # 吞吐 T4：本轮是否已在 PPO 中途（epoch 提前量处）spawn 过预采
     while args.iters <= 0 or it < args.iters:
         it += 1
         # 吞吐 T4：本轮开头 join 预采子进程（bounded）——shards 全量落盘后走盘上聚合路径，
@@ -533,10 +570,14 @@ def main() -> None:
             # rollout/PPO 断点感知：若该迭代已有 wver 匹配的完整 shard（中途崩过），
             # 保留续跑（跳过已完成局 + 续 PPO checkpoint）；否则清空重建。
             wver = dist_common.weights_fingerprint(args.out)
-            have_resume = bool(completed_pairs(traj_dir, wver))
+            # 吞吐 T4 提前预采：上一轮若在 epoch3 已 spawn，本轮对账还需接受快照 wver
+            # （θ_{N,e3} ≈ θ_N 于最后 1 个 epoch 前）——否则预采首波被当"未完成"清场。
+            extra_wver = _precollect_snapshot_wver(args.out, it)
+            have_resume = bool(completed_pairs(traj_dir, wver, extra_wver=extra_wver))
             if have_resume:
                 traj_dir.mkdir(parents=True, exist_ok=True)
-                log(f"[run_rl] resume iteration {it}: keeping existing shards + PPO checkpoint")
+                log(f"[run_rl] resume iteration {it}: keeping existing shards + PPO checkpoint"
+                    + (f" (precollect snapshot wver {extra_wver[:12]}…)" if extra_wver else ""))
             else:
                 if traj_dir.exists():
                     shutil.rmtree(traj_dir)
@@ -579,9 +620,46 @@ def main() -> None:
                             return None
                         return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
                                                 iter_id, it, local_gate=eval_gate)
+
+                    # 吞吐 T4 提前预采（--precollect-early>0）：PPO 第 (epochs-early) 个
+                    # epoch 完成后，把当前 model（θ_{N,e3}）冻结为快照并 spawn 预采下一轮
+                    # 首波——预采墙钟藏进剩下的 epochs 里，而非 PPO 全部结束后的串行等待。
+                    # 快照≈最终权重（差最后一段梯度），on-policy 带内；配合
+                    # --precollect-games 限制只采首波，剩余局由下轮以 θ_N 现场采。
+                    _early = int(getattr(args, "precollect_early", 0) or 0)
+                    _spawned_early = False
+
+                    def _on_epoch_done(ep_done: int, _mdl):
+                        nonlocal _collect_child  # 提前 spawn 的句柄存入主循环变量（下轮开头 join）
+                        nonlocal _spawned_early
+                        if _early <= 0 or _spawned_early:
+                            return
+                        if ep_done < args.epochs - _early:
+                            return
+                        if not (getattr(args, "double_buffer", 0)
+                                and not getattr(args, "collect_only", 0)
+                                and (args.iters <= 0 or it < args.iters)):
+                            return
+                        # 冻结当前权重快照（θ_{N,e3}）→ spawn；PPO 尾段自然完成临时文件。
+                        _snap = str(Path(args.out).with_name(
+                            f"weights-collect-{it + 1}.json"))
+                        try:
+                            save_weights_json(_mdl, _snap)
+                            log(f"[double-buffer] early snapshot θ_{{N,e{ep_done}}} -> {_snap}")
+                        except Exception as _e:  # noqa: BLE001
+                            log(f"[double-buffer] early snapshot fail: {_e} — skip")
+                            return
+                        _spawned_early = True
+                        _collect_child = _spawn_collect_next(args, it, snap_src=_snap)
+                        if _collect_child is not None:
+                            log(f"[double-buffer] precollect EARLY at epoch {ep_done}/{args.epochs} "
+                                f"(rest of PPO hides collection)")
+
                     report = run_rollout_stream(
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
-                        model, opt, device, on_collect_done=_fire_eval)
+                        model, opt, device, on_collect_done=_fire_eval,
+                        on_epoch_done=_on_epoch_done,
+                        extra_wver=extra_wver)
                     stream_meta = report
                 else:
                     report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
@@ -754,9 +832,11 @@ def main() -> None:
 
             # 吞吐 T4：双缓冲 spawn 下一轮预采（仅 stream + 双缓冲开启 + 非 collect-only）。
             # 下一轮开头 join（上方）：采集藏进本轮 PPO 尾段 + 非 eval 轮集群空档，墙钟直降。
+            # 提前预采（--precollect-early）已在 epoch3 spawn 过 → 尾部跳过，避免双 spawn。
             if (getattr(args, "double_buffer", 0) and stream_meta is not None
                     and not getattr(args, "collect_only", 0)
-                    and (args.iters <= 0 or it < args.iters)):
+                    and (args.iters <= 0 or it < args.iters)
+                    and not _spawned_early):
                 _collect_child = _spawn_collect_next(args, it)
             consec_fail = 0
         except SystemExit as e:
