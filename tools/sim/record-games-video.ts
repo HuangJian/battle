@@ -164,6 +164,7 @@ function recordOne(
   maxTicks: number,
   weightsText: string,
   mode: 'greedy' | 'rollout',
+  dodgeMode: 'off' | 'l0',
   dumpPath: string | null,
   snaps: {
     camera: Camera
@@ -208,11 +209,14 @@ function recordOne(
       if (mode === 'rollout') {
         aMove = sampleCat(model.moveLogits, masks.move, rng!)
         aFire = sampleCat(model.fireLogits, masks.fire, rng!)
-        // L0 保底层（goal-nn 卡 A3）：arena → 'l0'，与 export-rl-rollout 的
-        // resolveDodge 缺省解析一致——采样动作会被改写为 dodgeL0 的脱险方向。
-        const sampledDir = aMove === 0 ? scripted.lastDir : MOVE_DECODE[aMove - 1]
-        const d = dodgeL0(world, sampledDir)
-        if (d.triggered && d.dir) aMove = MOVE_DECODE.indexOf(d.dir) + 1
+        // L0 保底层（goal-nn 卡 A3）：仅 --dodge l0 时应用（对齐 export-rl-rollout
+        // 的 resolveDodge——arena 缺省 l0，但 --dodge off 的 rollout 不覆盖采样动作，
+        // 若此处无条件改写会偏离真实训练轨迹）。rollout 阵亡局复现必须 --dodge off。
+        if (dodgeMode === 'l0') {
+          const sampledDir = aMove === 0 ? scripted.lastDir : MOVE_DECODE[aMove - 1]
+          const d = dodgeL0(world, sampledDir)
+          if (d.triggered && d.dir) aMove = MOVE_DECODE.indexOf(d.dir) + 1
+        }
       } else {
         aMove = argmaxCat(model.moveLogits, masks.move)
         aFire = argmaxCat(model.fireLogits, masks.fire)
@@ -259,6 +263,7 @@ async function main(): Promise<void> {
   let dpr = 2
   let outDir = 'tmp/vrecord'
   let mode: 'greedy' | 'rollout' = 'greedy'
+  let dodgeArg = ''
   let dumpPath: string | null = null
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--weights') weightsPath = argv[++i]
@@ -268,6 +273,7 @@ async function main(): Promise<void> {
     else if (argv[i] === '--dpr') dpr = parseInt(argv[++i], 10)
     else if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--dump-actions') dumpPath = argv[++i]
+    else if (argv[i] === '--dodge') dodgeArg = argv[++i]
     else if (argv[i] === '--mode') {
       const m = argv[++i]
       if (m !== 'greedy' && m !== 'rollout') {
@@ -282,6 +288,10 @@ async function main(): Promise<void> {
     process.exit(2)
   }
   const games = parseGames(gamesSpec)
+  // dodge 模式解析（对齐 export-rl-rollout 的 resolveDodge）：缺省 arena → 'l0'，
+  // --dodge off 显式关闭（复现阵亡局必须 off——训练 rollout 正是 dodge off）。
+  const dodgeMode: 'off' | 'l0' =
+    dodgeArg === 'off' || dodgeArg === 'l0' ? dodgeArg : isArenaId(games[0].stage) ? 'l0' : 'off'
   const weightsText = readFileSync(weightsPath, 'utf8')
   const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 12)
   mkdirSync(outDir, { recursive: true })
@@ -306,7 +316,17 @@ async function main(): Promise<void> {
     const framesDir = join(outDir, `.frames-${tag}`)
     rmSync(framesDir, { recursive: true, force: true })
     mkdirSync(framesDir, { recursive: true })
-    const res = recordOne(g, difficulty, maxTicks, weightsText, mode, dumpPath, snaps, framesDir)
+    const res = recordOne(
+      g,
+      difficulty,
+      maxTicks,
+      weightsText,
+      mode,
+      dodgeMode,
+      dumpPath,
+      snaps,
+      framesDir,
+    )
     const mp4 = join(
       outDir,
       `${tag}-${res.outcome === 'lives_exhausted' ? 'lost' : res.outcome}.mp4`,

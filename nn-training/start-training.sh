@@ -101,7 +101,7 @@ while [ "$I" -lt "$#" ]; do
         echo "ERROR: --script requires a <name>.py"; exit 2
       fi
       ;;
-    --torch-threads)
+    --torch-threads|--TorchThreads|--torch_threads)
       if [ "$I" -lt "$#" ]; then TT_CLI="${CLI_ARGS[$I]}"; I=$((I+1)); fi
       ;;
     *) SCRIPT_ARGS+=("$A") ;;
@@ -197,6 +197,9 @@ fi
 export OMP_NUM_THREADS="$TT"
 export OPENBLAS_NUM_THREADS="$TT"
 export MKL_NUM_THREADS="$TT"
+# §17 定案（2026-08-31，OMP 扫档）：OMP8 + PROC_BIND=close 消除 HT 缓存争用，PPO 提速
+# -18%（1260→1033s，chunk 8.4→6.9s）。仅 OMP≤8 时设（close 绑核在低线程档才有收益）。
+if [ "$TT" -le 8 ] 2>/dev/null; then export OMP_PROC_BIND=CLOSE; fi
 export PYTHONUTF8=1
 
 log "venv  python : $VENV_PYTHON"

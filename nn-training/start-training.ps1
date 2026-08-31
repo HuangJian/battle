@@ -1,4 +1,4 @@
-﻿<#
+<#
 start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerShell 版，与 start-training.sh 等价）
 
 支持：Windows(Windows PowerShell / PowerShell 7) · Linux · macOS(PowerShell 7+)
@@ -61,7 +61,7 @@ while ($i -lt $args.Count) {
       if ($i + 1 -lt $args.Count) { $i++; $Script = $args[$i] }
       else { Write-Host 'ERROR: --script requires a <name>.py'; exit 2 }
     }
-    '^--?torch-threads$' {
+    '(?i)^--?torch[-_]?threads$' {
       if ($i + 1 -lt $args.Count) { $i++; $TorchThreads = [int]$args[$i] }
     }
     default { $ScriptArgs += $a }
@@ -151,6 +151,10 @@ if ($TT -le 0) {
 $env:OMP_NUM_THREADS = "$TT"
 $env:OPENBLAS_NUM_THREADS = "$TT"
 $env:MKL_NUM_THREADS = "$TT"
+# §17 定案（2026-08-31，OMP 扫档）：OMP8 + PROC_BIND=close 消除 HT 缓存争用，PPO 提速
+# -18%（1260→1033s，chunk 8.4→6.9s）。仅 OMP≤8 时设（close 绑核在低线程档才有收益；
+# OMP12/16 满载 8 物理核硬撑时绑核无意义）。OMP=8 是 run_rl PPO 的优化档。
+if ([int]$TT -le 8) { $env:OMP_PROC_BIND = 'CLOSE' }
 $env:PYTHONUTF8 = '1'
 
 Log "venv  python : $VenvPython"
