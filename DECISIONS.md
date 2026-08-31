@@ -1358,3 +1358,34 @@ weights.json → 带杀重启（OMP8+PROC_BIND + --double-buffer 1），it8 起�
 **判读约定**：it8 eval（回归 96b1383 权重后首轮）若 ≥ it4 水准（eval 70%、acc 0.43 一带）→
 崩盘可归因 it5-7 的权重劣化路径，续观 3 settle 是否复现；若仍 <50% / acc<0.40 → balanced
 臂本身不稳，转备选臂 survival（wKill0.5/wDmg0.5/wDeath1.5，需用户再拍板）。
+
+**§302a it8/it9 判读结果（2026-08-31 下午）**：it8=回滚后第一轮：rollWin 58.7%、acc 0.421
+（回到 it4 一带），但该轮 PPO gnorm 44.9 / kl 0.10 → 熔断丢 107 局（KL 更新爆炸仍在）；
+it8 干净的贪心 eval 因 KL 熔断掐了派发而未产生。it9（回滚续训下一步）：
+**evalWin 75.0% / clearRate 80.0%（wver b35d8349）——超过 it4 峰值（70%），未复现 it5
+的"70% 后第一步崩塌"**。结论：回滚策略有效、权重健康路径成立，it5-7 崩盘非必然复现；
+但 KL/gnorm 逐轮爆炸（gnorm 44-56、kl 常 >0.08）仍是悬而未决的动力学风险（未崩但随时
+可能重演 it5-7 型崩塌），列为观察项：若再现连续 2 settle 胜率下滑+acc<0.40 则按 §302 处置。
+
+## §303 v3.10 长尾竞速：in-flight 尾部任务空槽即竞速（2026-08-31，用户指令"有空槽就派发"）
+
+**问题（用户实测观察）**：v3.7 尾部 fan-out 只在「pending 还有排队任务」时复制在跑副本。
+末尾任务一旦被单个 worker pop 出队、独占 in-flight（长 RPC/慢节点），其余空闲执行槽因
+`src=None` 干等 → 整轮被 1 个慢副本拖住（it9 实测末尾 1 局空等至 task 超时）。双缓冲
+挤出的墙钟被尾部慢速全数还回。
+
+**处置**：queue worker 在排队队列已空时，**只要空槽**就复制一个 in-flight 任务竞速
+（每任务副本数上限 tailFanoutDup=2，防无限复制）——**不看任务已耗时**（用户裁定）。
+选择逻辑抽为纯函数 `pick_tail_race`（字典序最小，锁内确定性）。
+
+**配套**：
+- **去重结算修复**：成功分支从「仅 fanout 副本检查 dup」改为「所有后到副本一律丢弃」——
+  漏网的（main 后到/竞速副本后到）重复 append 曾导致报告 ok=3/2、seen 触顶但 all_settled
+  不触发 → 每轮空等 deadline 120s（集成 I1 实测 0.2s→120s）。
+- **集成测试 mock 化**：I3/I4 的 PPO 以 `_StubPpo` 桩替代（stream 的 `backend` 注入点），
+  不再 build 真 torch 模型；rollout 由 FakeAgent 合成包承担（TS 引擎真实性由
+  tools/sim/export-rl-rollout.ts 单测保证）。新增 **I6**：slow_first 注入 2s 慢副本 →
+  验证空闲槽竞速复制（dispatch ≥2）且快速收官。
+- **测试 cfg**：`agentRescanSec=1`（默认 120s 轮询会让每轮收官白等 120s）。
+
+**效果**：集成全套 146s（原 ~10min+）；v3.10 上线后 S3 尾部慢速局由竞速兜底。
