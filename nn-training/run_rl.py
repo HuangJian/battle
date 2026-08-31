@@ -130,6 +130,7 @@ def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pop
     PPO 若写回 args.out 不回影响子进程（它读 snap 文件）；shards 自带快照权重的 lp →
     IS 分母天然正确（快照≈θ_N 时仍 on-policy 带内，差最后一段梯度）。子进程同样继承
     --precollect-games：>0 则只采下一轮首波，其余局由下轮以 θ_N 现场采（严格 on-policy）。
+    --precollect-samples 自动从 training_log 上一轮实测数据计算：wave_games × avg_sppg × 1.5。
     """
     import shutil
 
@@ -148,9 +149,34 @@ def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pop
     # 跳过 copy 直接复用——否则 copyfile(自己→自己) 抛 same-file 错误。
     elif snap_src is not None:
         log(f"[double-buffer] early snapshot already at {snap} — reuse")
+
+    # 动态计算 precollect_samples：从 training_log 上一轮实测 avg_sppg × wave_games × 1.5
+    pre_samples = 0
+    jsonl_path = Path(args.traj) / "training_log.jsonl"
+    if jsonl_path.exists():
+        try:
+            with open(jsonl_path) as _f:
+                _lines = [l for l in _f if l.strip()]
+            if _lines:
+                _last = json.loads(_lines[-1])
+                _last_samples = _last.get("samples", 0)
+                _last_games = _last.get("expectedGames", 1)
+                if _last_samples > 0 and _last_games > 0:
+                    _avg_sppg = _last_samples / _last_games
+                    _cfg = dist_common.load_dist_config()
+                    _wave = max(4, int(_cfg.get("policy", {}).get("streamWaveGames", 12)))
+                    pre_samples = int(_wave * _avg_sppg * 1.5)
+                    log(f"[double-buffer] precollect it{next_it}: auto-calc precollect_samples="
+                        f"{pre_samples} (wave={_wave} × avg_sppg={_avg_sppg:.1f} × 1.5)")
+        except Exception as _e:
+            log(f"[double-buffer] precollect it{next_it}: calc failed ({_e}), "
+                f"fallback to --precollect-games")
+
     argv = [sys.executable, "-u", os.path.abspath(__file__),
             *sys.argv[1:], "--collect-only", "1", "--bc", snap,
             "--start-it", str(next_it), "--iters", "1"]
+    if pre_samples > 0:
+        argv += ["--precollect-samples", str(pre_samples)]
     kwargs: dict = {}
     if os.name == "nt":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
