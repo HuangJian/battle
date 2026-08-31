@@ -27,6 +27,7 @@ import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
 import { START_LIVES, FIELD } from '../../src/constants'
 import type { Direction } from '../../src/constants'
+import { dodgeL0 } from '../../src/nn/dodge-l0'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import type { InputLike } from '../../src/game/Input'
@@ -207,6 +208,11 @@ function recordOne(
       if (mode === 'rollout') {
         aMove = sampleCat(model.moveLogits, masks.move, rng!)
         aFire = sampleCat(model.fireLogits, masks.fire, rng!)
+        // L0 保底层（goal-nn 卡 A3）：arena → 'l0'，与 export-rl-rollout 的
+        // resolveDodge 缺省解析一致——采样动作会被改写为 dodgeL0 的脱险方向。
+        const sampledDir = aMove === 0 ? scripted.lastDir : MOVE_DECODE[aMove - 1]
+        const d = dodgeL0(world, sampledDir)
+        if (d.triggered && d.dir) aMove = MOVE_DECODE.indexOf(d.dir) + 1
       } else {
         aMove = argmaxCat(model.moveLogits, masks.move)
         aFire = argmaxCat(model.fireLogits, masks.fire)
