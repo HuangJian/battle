@@ -343,6 +343,12 @@ def main() -> None:
                          "分发到全部 ping.evalSupport 节点；结果追加 tmp/rl-traj/eval_log.jsonl")
     ap.add_argument("--eval-window-sec", type=int, default=_d("eval_window_sec", 1500),
                     help="干净评估线程的墙钟预算；超时未结算的局放弃（不阻塞 PPO 与下一轮）")
+    ap.add_argument("--eval-every", type=int, default=_d("eval_every", 1),
+                    help="干净评估稀疏化（吞吐 T3）：每 N 轮跑一次 eval。1 = 每轮（默认，字节一致）；N>1 = 非 eval 轮不派发不 join（集群尾段留给下一轮采集/双缓冲）。判门频率随之降为每 N 轮，判据不变（plan/goal-nn-throughput.md）。")
+    ap.add_argument("--eval-at", default=_d("eval_at", ""),
+                    help=("干净评估绝对迭代点集（复用 run_rl_intent 的 eval_at 语义，如 "
+                          "'5,10,15,20'）：只在列出的迭代派发 eval；空 = 关闭该维（配合 "
+                          "--eval-every 或默认每轮）。与 --eval-every 可叠加（两者都满足才跑）。"))
     args = ap.parse_args()
 
     import numpy as np
@@ -429,6 +435,10 @@ def main() -> None:
         log(f"[run_rl] resume: continuing from iteration {start_it} "
             f"(weights resume from {args.out})")
     it = start_it - 1
+    # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
+    eval_every = int(getattr(args, "eval_every", 1) or 1)
+    # 吞吐 T3：eval 绝对迭代点集（复用 run_rl_intent 的 eval_at 语义；空 = 不启用该维）。
+    eval_at_set = {int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()}
     while args.iters <= 0 or it < args.iters:
         it += 1
         if deadline is not None and time.time() >= deadline:
@@ -453,6 +463,12 @@ def main() -> None:
             # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
             # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
             dist_cfg = dist_common.load_dist_config()
+            # 吞吐 T3：本轮是否派发干净评估（eval_games>0 ∧ 周期命中 ∧ 绝对点命中）。
+            # stream 的 _fire_eval 闭包与本分支共用；非 eval 轮 = 不派发不 join。
+            eval_on_round = (
+                int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
+                and (eval_every <= 1 or it % eval_every == 0)
+                and (not eval_at_set or it in eval_at_set))
             t_rollout = time.time()
             stream_meta = None
             dist_iter_id: str | None = None
@@ -473,6 +489,10 @@ def main() -> None:
                         # 线程句柄经报告回传主循环，jsonl 写回前 join——下轮新权重
                         # 分发前评估必已收官或到预算。positional args 创建即快照，
                         # 无闭包竞态。eval_gate 随闭包捕获：PPO 收尾时 set 放行本地。
+                        # 吞吐 T3：非 eval 轮不派发（返回 None → 无 eval_thread →
+                        # 下方 join 跳过，集群尾段留给下一轮采集/双缓冲）。
+                        if not eval_on_round:
+                            return None
                         return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
                                                 iter_id, it, local_gate=eval_gate)
                     report = run_rollout_stream(
@@ -482,7 +502,8 @@ def main() -> None:
                 else:
                     report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
                     # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 PPO 空窗
-                    if int(getattr(args, "eval_games_per_stage", 0) or 0) > 0:
+                    # 吞吐 T3：非 eval 轮不派发（eval_on_round 循环级统一门控）。
+                    if eval_on_round:
                         eval_thread = dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
                                                        iter_id, it, report["winRate"],
                                                        local_gate=eval_gate)
