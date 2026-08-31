@@ -556,17 +556,35 @@ def main() -> None:
     _spawned_early = False  # 吞吐 T4：本轮是否已在 PPO 中途（epoch 提前量处）spawn 过预采
     while args.iters <= 0 or it < args.iters:
         it += 1
-        # 吞吐 T4：本轮开头 join 预采子进程（bounded）——shards 全量落盘后走盘上聚合路径，
-        # 采集墙钟藏进上一轮 PPO 尾段；子进程失败/超时则回退本轮自采（completed_pairs 空）。
+        # 吞吐 T4：本轮开头检查预采子进程产出——轮询 completed_pairs 直到足够开首波
+        # （而非 wait 子进程退出），避免预采尾段拖慢、主进程空等。
+        # 子进程在后台继续产出剩余 shard，run_rollout_queue 的 completed_pairs 会跳过已落盘局。
         if _collect_child is not None:
-            try:
-                _collect_child.wait(timeout=3600)
-                log(f"[double-buffer] precollect it{it} done rc={_collect_child.returncode}")
-            except subprocess.TimeoutExpired:
+            _pre_traj_dir = traj_root / f"it{it}"
+            # wver/extra_wver 需在子进程退出前算出才能匹配预采 shard
+            _pre_wver = dist_common.weights_fingerprint(args.out)
+            _pre_extra_wver = _precollect_snapshot_wver(args.out, it)
+            _pre_policy = dist_common.load_dist_config().get("policy", {})
+            _pre_wave = max(4, int(_pre_policy.get("streamWaveGames", 12)))
+            _pre_min_wave = max(4, _pre_wave // 2)  # 半波即可开训
+            _pre_deadline = time.time() + 3600
+            _pre_ready = False
+            while time.time() < _pre_deadline:
+                _pre_done = completed_pairs(_pre_traj_dir, _pre_wver, extra_wver=_pre_extra_wver)
+                if len(_pre_done) >= _pre_min_wave:
+                    log(f"[double-buffer] precollect it{it}: {len(_pre_done)} shards ready "
+                        f"(≥{_pre_min_wave}), proceeding before subprocess exit")
+                    _pre_ready = True
+                    break
+                if _collect_child.poll() is not None:
+                    log(f"[double-buffer] precollect it{it} done rc={_collect_child.returncode}")
+                    _pre_ready = True
+                    break
+                time.sleep(2)
+            if not _pre_ready:
                 log(f"[double-buffer] precollect it{it} timeout — fall back to own collect")
                 _collect_child.terminate()
-            finally:
-                _collect_child = None
+            _collect_child = None
         if deadline is not None and time.time() >= deadline:
             log(f"[run_rl] max-hours={args.max_hours} reached — stopping before it{it}")
             break

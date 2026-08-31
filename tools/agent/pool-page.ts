@@ -11,7 +11,7 @@
  * 本文件只读：聚合 tmp 下各训练流目录的 dist-agent-meta.jsonl + 实时 ping，不渲染任何密钥。
  */
 
-import { readFileSync, readdirSync, existsSync } from 'fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, resolve } from 'path'
 
 /** 仓库根（本文件在 tools/agent/ 下）。 */
@@ -118,7 +118,20 @@ interface NodeHistory {
   lastIterOk: number
 }
 
-function aggregateNodeHistory(): Map<string, NodeHistory> {
+/** 活跃训练流信息：mtime 最新的 dist-agent-meta.jsonl 所在目录。 */
+interface ActiveFlow {
+  /** 目录短名（如 s3-cap2、rl-traj）。 */
+  dir: string
+  /** 该 meta 文件最后修改时间。 */
+  mtimeMs: number
+  /** 该文件行数（条目数）。 */
+  lines: number
+}
+
+function aggregateNodeHistory(): {
+  hist: Map<string, NodeHistory>
+  activeFlow: ActiveFlow | null
+} {
   const hist = new Map<string, NodeHistory>()
   const bump = (node: string): NodeHistory => {
     let h = hist.get(node)
@@ -144,19 +157,60 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
   // 最近一小时永远相对"当下"（不可复用 epoch——epoch 是部署锚点，过去的部署会使
   // hourAgo 退到远古，昨天错误也会被判"一小时以内"）。
   const hourAgoStr = fmtTs(Date.now() - 3_600_000)
-  let roots: string[] = []
+
+  // 收集所有候选 meta 文件（递归扫描 tmp/ 下所有 dist-agent-meta.jsonl）。
+  // 训练流的 traj_root 可以是 tmp/X（一层）或 tmp/X/traj（两层），必须递归搜索。
+  interface MetaCandidate {
+    path: string
+    /** 相对 tmp/ 的目录路径（如 s3-cap2、s-dodge/traj）。 */
+    dir: string
+    mtimeMs: number
+  }
+  const candidates: MetaCandidate[] = []
+  const tmpDir = join(REPO_ROOT, 'tmp')
+  const walk = (base: string, rel: string): void => {
+    try {
+      for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
+        const childRel = rel ? `${rel}/${d.name}` : d.name
+        if (d.isDirectory()) {
+          // 限制深度：最多 3 层（tmp/X/traj/it1 级别），避免扫描 node_modules 等
+          if (childRel.split('/').length <= 3) walk(base, childRel)
+        } else if (d.name === 'dist-agent-meta.jsonl') {
+          const p = join(base, childRel)
+          try {
+            candidates.push({
+              path: p,
+              dir: childRel.replace(/\/dist-agent-meta\.jsonl$/, ''),
+              mtimeMs: statSync(p).mtimeMs,
+            })
+          } catch {
+            /* stat failed */
+          }
+        }
+      }
+    } catch {
+      /* unreadable */
+    }
+  }
   try {
-    roots = readdirSync(join(REPO_ROOT, 'tmp'), { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => join(REPO_ROOT, 'tmp', d.name, 'dist-agent-meta.jsonl'))
+    walk(tmpDir, '')
   } catch {
     /* tmp missing */
   }
-  roots.push(join(REPO_ROOT, 'tmp', 'dist-agent-meta.jsonl'))
-  for (const metaPath of roots) {
+
+  // 按 mtime 降序：最新修改的 = 当前活跃训练流。
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const activeFlow: ActiveFlow | null =
+    candidates.length > 0
+      ? { dir: candidates[0].dir, mtimeMs: candidates[0].mtimeMs, lines: 0 }
+      : null
+  // 仅聚合 mtime 最新的那个 meta 文件——避免旧训练流的数千条历史淹没新训练数据。
+  // 若无候选（tmp 不存在）则退化为不聚合（返回空 map）。
+  const sources = candidates.length > 0 ? [candidates[0]] : []
+  for (const src of sources) {
     try {
-      if (!existsSync(metaPath)) continue
-      for (const line of readFileSync(metaPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!existsSync(src.path)) continue
+      for (const line of readFileSync(src.path, 'utf8').split(String.fromCharCode(10))) {
         if (!line.trim()) continue
         try {
           const r = JSON.parse(line) as {
@@ -207,7 +261,16 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
       /* unreadable */
     }
   }
-  return hist
+  if (activeFlow && sources.length > 0) {
+    try {
+      activeFlow.lines = readFileSync(sources[0].path, 'utf8')
+        .split(String.fromCharCode(10))
+        .filter((l) => l.trim()).length
+    } catch {
+      /* ignore */
+    }
+  }
+  return { hist, activeFlow }
 }
 
 function poolStatusCell(h: NodeHistory): string {
@@ -217,6 +280,131 @@ function poolStatusCell(h: NodeHistory): string {
   if (okN / n >= 0.9) return `<span class="badge b-green">健康 ${okN}/${n}</span>`
   if (okN / n >= 0.7) return `<span class="badge b-yellow">波动 ${okN}/${n}</span>`
   return `<span class="badge b-red">异常 ${okN}/${n}</span>`
+}
+
+// ---------------- 每轮迭代指标（training_log.jsonl） ----------------
+
+interface IterRow {
+  iter: number
+  time: string
+  winRate: number
+  scoreMean: number
+  scoreStd: number
+  samples: number
+  rolloutSec: number
+  ppoSec: number
+  kl: number
+  entropy: number
+  policyLoss: number
+  valueLoss: number
+  meanRet: number
+  lr: number
+  expectedGames: number
+  halted: boolean
+  /** dist.nodes 值（node→count），用于渲染节点贡献。 */
+  distNodes: Record<string, number>
+  /** dim_means 前三名 key（简化展示）。 */
+  topDims: string
+  avgTicks: number
+  accuracy: number
+  loot: number
+  kills: number
+}
+
+/** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标。 */
+function readIterMetrics(trajDir: string): IterRow[] {
+  const MAX = 20
+  const logPath = join(trajDir, 'training_log.jsonl')
+  try {
+    if (!existsSync(logPath)) return []
+    const lines = readFileSync(logPath, 'utf8').split(String.fromCharCode(10))
+    const rows: IterRow[] = []
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'iteration') continue
+        const dm = (r.dim_means ?? {}) as Record<string, number>
+        const topDims = Object.entries(dm)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([k, v]) => `${k}:${(v * 100).toFixed(0)}%`)
+          .join(' ')
+        rows.push({
+          iter: Number(r.iter ?? 0),
+          time: String(r.time ?? ''),
+          winRate: Number(r.winRate ?? 0),
+          scoreMean: Number(r.score_mean ?? 0),
+          scoreStd: Number(r.score_std ?? 0),
+          samples: Number(r.samples ?? 0),
+          rolloutSec: Number(r.rollout_sec ?? 0),
+          ppoSec: Number(r.ppo_sec ?? 0),
+          kl: Number(r.kl ?? 0),
+          entropy: Number(r.entropy ?? 0),
+          policyLoss: Number(r.policy ?? 0),
+          valueLoss: Number(r.value ?? 0),
+          meanRet: Number(r.mean_ret ?? 0),
+          lr: Number(r.lr ?? 0),
+          expectedGames: Number(r.expectedGames ?? 0),
+          halted: Boolean(r.halted),
+          distNodes: (r.dist as any)?.nodes ?? {},
+          topDims,
+          avgTicks:
+            Number(r.expectedGames) > 0
+              ? Math.round(Number(r.ticks ?? 0) / Number(r.expectedGames))
+              : 0,
+          accuracy: Number(dm.accuracy ?? 0),
+          loot: Number(dm.loot ?? 0),
+          kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
+        })
+      } catch {
+        /* skip bad line */
+      }
+    }
+    rows.sort((a, b) => b.iter - a.iter)
+    return rows.slice(0, MAX)
+  } catch {
+    return []
+  }
+}
+
+function renderIterTable(rows: IterRow[]): string {
+  if (rows.length === 0) return ''
+  const hdr = `<thead><tr>
+<th>iter</th><th>时间</th><th>胜率</th><th>得分</th>
+<th>rollout</th><th>PPO</th>
+<th>KL</th><th>entropy</th><th>mean_ret</th>
+<th>lr</th><th>avg_ticks</th><th>击杀</th><th>道具</th>
+</tr></thead>`
+  const cells = rows.map((r) => {
+    const winPct = (r.winRate * 100).toFixed(1)
+    const winCls = r.winRate >= 0.3 ? 'b-green' : r.winRate >= 0.1 ? 'b-yellow' : 'b-red'
+    const klCls = r.kl > 0.05 ? 'b-red' : r.kl > 0.02 ? 'b-yellow' : 'b-green'
+    const retCls = r.meanRet > -0.5 ? 'b-green' : r.meanRet > -1.0 ? 'b-yellow' : 'b-red'
+    const halted = r.halted ? ' <span class="pill">halted</span>' : ''
+    return `<tr>
+<td class="num">${r.iter}${halted}</td>
+<td class="muted">${r.time}</td>
+<td><span class="badge ${winCls}">${winPct}%</span></td>
+<td class="num">${r.scoreMean.toFixed(4)}<span class="muted">±${r.scoreStd.toFixed(4)}</span></td>
+<td class="num">${r.rolloutSec.toFixed(0)}s</td>
+<td class="num">${r.ppoSec.toFixed(0)}s</td>
+<td><span class="badge ${klCls}">${r.kl.toFixed(4)}</span></td>
+<td class="num">${r.entropy.toFixed(3)}</td>
+<td><span class="badge ${retCls}">${r.meanRet.toFixed(3)}</span></td>
+<td class="num">${r.lr}</td>
+<td class="num">${r.avgTicks}</td>
+<td class="num">${r.kills.toFixed(2)}</td>
+<td class="num">${(r.loot * 100).toFixed(0)}%</td>
+</tr>`
+  })
+  return `<div class="card" style="margin-top:16px">
+<h3 style="margin:0;padding:14px 14px 0;font-size:15px;font-weight:600;color:var(--text)">📈 每轮训练指标</h3>
+<table id="iters">${hdr}
+<tbody>${cells.join(String.fromCharCode(10))}</tbody>
+</table>
+<p class="foot" style="margin:8px 2px 0">数据源：<code>training_log.jsonl</code>（最近 ${rows.length} 轮迭代）。胜率/得分/PPO 指标来自 PPO 收敛日志；节点贡献为该轮 rollout 阶段各节点完成局数。</p>
+</div>`
 }
 
 // ---------------- 渲染上下文（sampler-agent 侧状态注入） ----------------
@@ -232,10 +420,13 @@ export interface PoolPageCtx {
 }
 
 export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
-  const hist = aggregateNodeHistory()
+  const { hist, activeFlow } = aggregateNodeHistory()
   const localHash = ctx.localHash()
   const nodes = loadPoolConfig()
   const nowStr = fmtTs(Date.now())
+  // 每轮迭代指标：从 activeFlow 目录下的 training_log.jsonl 读取。
+  const iterRows = activeFlow ? readIterMetrics(join(REPO_ROOT, 'tmp', activeFlow.dir)) : []
+  const iterTableHtml = renderIterTable(iterRows)
   const rows: string[] = []
   if (nodes) {
     const probes = await Promise.all(
@@ -343,7 +534,7 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
     const okB = Number((b.match(/<td class="num" data-v="(\d+)">/g) ?? [])[1]?.match(/\d+/) ?? 0)
     return okB - okA
   })
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
+  return `<!doctype html><html><head><meta charset="utf-8">
 <title>sampler-agent 节点池</title>
 <style>
 :root{--bg:#f4f6f9;--card:#ffffff;--border:#e5e8ee;--text:#1c2333;--muted:#7a8395;
@@ -378,6 +569,7 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .b-yellow{background:var(--yellow-bg);color:var(--yellow)}
 .b-red{background:var(--red-bg);color:var(--red)}
 .b-gray{background:var(--gray-bg);color:var(--gray)}
+.b-accent{background:var(--accent-bg);color:var(--accent)}
 .pill{display:inline-block;margin-left:6px;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:600;
 background:var(--yellow-bg);color:var(--yellow);vertical-align:1px}
 .err{color:var(--red);font-size:12px;word-break:break-all}
@@ -388,7 +580,17 @@ background:var(--yellow-bg);color:var(--yellow);vertical-align:1px}
 </style></head>
 <body><div class="wrap">
 <div class="pool-header"><h2><span class="dot"></span>节点池监控</h2>
-<span class="ts">每 60s 自动刷新 · 本次刷新 ${nowStr}</span></div>
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+${activeFlow ? `<span class="badge b-accent">当前训练流: ${activeFlow.dir}（${activeFlow.lines} 条 · 更新于 ${fmtTs(activeFlow.mtimeMs)}）</span>` : `<span class="badge b-gray">无活跃训练流</span>`}
+<span class="ts" id="status">本次刷新 ${nowStr}</span>
+<select id="interval" style="font-size:12px;padding:2px 6px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);cursor:pointer">
+<option value="60">1 分钟</option>
+<option value="300" selected>5 分钟</option>
+<option value="600">10 分钟</option>
+<option value="1800">30 分钟</option>
+</select>
+<button onclick="location.reload()" style="font-size:12px;padding:2px 10px;border:1px solid var(--border);border-radius:6px;background:var(--accent-bg);color:var(--accent);cursor:pointer;font-weight:600">⟳ 立即刷新</button>
+</div></div>
 <div class="card"><table id="pool">
 <thead><tr>
 <th onclick="sortTbl(0,this)">节点</th><th onclick="sortTbl(1,this)">状态</th><th onclick="sortTbl(2,this)">规格</th>
@@ -398,6 +600,7 @@ background:var(--yellow-bg);color:var(--yellow);vertical-align:1px}
 </tr></thead>
 <tbody>${rows.join(String.fromCharCode(10))}</tbody>
 </table></div>
+${iterTableHtml}
 <script>
 function sortTbl(col, th) {
   const tb = document.querySelector('#pool tbody');
@@ -413,9 +616,20 @@ function sortTbl(col, th) {
   });
   for (const r of rows) tb.appendChild(r);
 }
+// 自动刷新定时器
+let _timer = null;
+function _startTimer() {
+  if (_timer) clearInterval(_timer);
+  const sec = parseInt(document.getElementById('interval').value, 10);
+  var label = sec >= 60 ? (sec/60)+' 分钟' : sec+'s';
+  document.getElementById('status').textContent = '\u6bcf ' + label + ' \u81ea\u52a8\u5237\u65b0 \u00b7 \u672c\u6b21\u5237\u65b0 ' + '${nowStr}';
+  _timer = setInterval(function() { location.reload(); }, sec * 1000);
+}
+document.getElementById('interval').addEventListener('change', _startTimer);
+_startTimer();
 </script>
 <p class="foot">状态 = 最近 10 次 rollout/eval 结算完成率（<b>健康</b>≥90% · <b>波动</b>≥70% · <b>异常</b>&lt;70%），替代单次 ping 判断；ping 列仅作实时参考。
-最近错误仅显示最近 1 小时内。数据源：dist-agent-meta.jsonl（tmp 下各训练流聚合）·
+最近错误仅显示最近 1 小时内。数据源：按 mtime 自动选取最新训练流的 dist-agent-meta.jsonl（仅聚合最近活跃目录）·
 ${POOL_EPOCH_MS > 0 ? `<b>历史自 ${fmtTs(POOL_EPOCH_MS)} 起重新累计</b>（此后部署不再重置）` : `<b>累计全部历史</b>`}。
 只读页面，不含密钥。默认按「已结算局」倒序，点击表头排序。</p>
 </div></body></html>`
