@@ -56,6 +56,36 @@
 
 **测试**：test_run_rl.py / test_train_loop_pure.py 全 PASS；pre-commit 全过（含 freeze gate）。
 
+## §17.2 v3.12 eval 延迟化落地：集成测试保障 + 重启验证（2026-08-31，commit e79ca5c）
+
+**用户方向**（三连）：eval 可以慢慢做——it10 eval 利用 it11/12/13 采集 & PPO 间隙消化；
+远程节点算力充裕（it11 PPO 期间 it10 eval 大概率已完）；eval 最低优先级，必须写集成测试。
+
+**旧行为**：PPO 收尾后 `eval_thread.join(timeout=budget)`，budget=eval_window_sec+60=1860s（全额等账，
+日志 "waiting up to 1860s"）——eval 慢时会拖死主链下一轮。
+
+**v3.12 改动**（run_rl.py）：
+- 全额等待 → **软等待 ≤180s**（`soft = min(budget, 180.0)`）——只吃已收官尾巴 + 给在途 eval 局
+  缓存缓冲（防下轮新权重 POST purge 掐掉），长尾 eval 留到 it+1..N 采集/PPO 空档消化。
+- 账按 **wver 晚入**（`eval_done_keys` 按 wver16 去重，晚到不重跑）；门判定读 eval_log 的
+  eval_summary（iter 保留原轮号 + wver），晚入账只顺延判定窗口、判据不变。
+- 溢出预算未收官的在途局：下轮异 sha 清场 + 阈值熔断兜底（与 v3.10 前语义一致）。
+
+**I7 集成测试**（test_run_rl.py，FakeAgent.eval_delay=3s 慢 eval 注入）断言：
+1. eval 慢速在途（后台线程）时下一轮采集照常进行不阻塞（`rep7.games==2 && missing==[]`）；
+2. 采集完成后 eval 仍在后台跑（`eval_th.is_alive()`）→ 证实"不抢主链、后台消化"。
+修测点：eval_log 台账在 traj.parent 按 wver 去重，上次运行残留同 wver 记录会让 eval 全量
+skip 早退 → I7 前清共享 `tmp/eval_log.jsonl`（test_run_rl 专用 tmp 目录，无生产影响）。
+
+**实测验证**（重启前旧代码进程，14:47–15:47）：
+- it10 eval：14:47:45 派发 → 14:51:17 DONE（3.5min，winRate=66.7%）——在 it11 启动前即收官；
+- it11 eval：14:55:54 派发 → 15:15:31 DONE（20min，winRate=65.0%）——与 it11 PPO（~19min）重叠完成，
+  正好落在用户预测的"it11 PPO 期间 it10 eval 完"语义（实际 it10 更早完）。
+符合"eval 最低优先级、间隙消化、不阻塞主链"目标。
+
+**重启**：commit e79ca5c push 后，15:48 以同参数重启（`--double-buffer 1`依然在），
+resume it13（precollect 152 shards 已在磁盘 → 直接进 PPO，eval it13 并行派发中）。
+
 ## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
 
 **用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与

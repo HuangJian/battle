@@ -1389,3 +1389,43 @@ it8 干净的贪心 eval 因 KL 熔断掐了派发而未产生。it9（回滚续
 - **测试 cfg**：`agentRescanSec=1`（默认 120s 轮询会让每轮收官白等 120s）。
 
 **效果**：集成全套 146s（原 ~10min+）；v3.10 上线后 S3 尾部慢速局由竞速兜底。
+
+## §303a v3.11 竞速副本只派快节点（2026-08-31，用户观察"副本落到慢节点=白等"）
+
+**问题**：长尾竞速虽已派副本，但**副本可能派到慢节点**——两个副本都落在慢速节点上时
+仍是等慢的（竞速形同虚设）。
+
+**处置**：竞速副本只派给 top-N 快节点。纯函数 `race_tier_ok(speeds, nid, top_n=3)`——
+- 本机（local）豁免（实测最快、无网络往返）；
+- 无速度样本（首轮/全空）乐观放行（没数据不该设门槛）；
+- 否则按 EWMA 平均耗时（speed 表 = 各节点最近任务平均耗时）取 top_n 快档，
+  不在快档的节点不参与竞速（慢节点对竞速是负资产）；
+- 节点数 ≤ top_n 时全员参与（退化回无门槛）。
+
+**配套测试**：`test_race_tier_ok`（9 断言：top3 内全过、第 4 快排除、最慢排除、
+local 豁免、无数据放行、节点数 ≤ top_n 退化为全员）。
+
+## §304 v3.12 eval 最低优先级：软等待 + 后台消化 + 集成测试（2026-08-31，commit e79ca5c）
+
+**用户方向**（三连）：eval 可以慢慢做（利用后续迭代采集/PPO 间隙消化）；远程节点算力
+充裕（it11 PPO 期间 it10 eval 大概率已完）；eval 最低优先级，必须写集成测试保障。
+
+**问题（v3.12 前）**：PPO 收尾后 `eval_thread.join(timeout=budget)`，budget=eval_window_sec+60
+=1860s 全额等账——eval 慢时拖死主链下一轮（日志 "waiting up to 1860s"）。
+
+**处置**：
+- 全额等待 → **软等待 ≤180s**（`soft = min(budget, 180.0)`）：只吃已收官尾巴 + 给在途
+  eval 局缓存缓冲（防下轮新权重 POST purge 掐掉），长尾 eval 留到 it+1..N 采集/PPO
+  空档消化（节点任务队列天然仲裁：采集忙 eval 排队，采集 done eval 补做）。
+- 账按 **wver 晚入**（`eval_done_keys` 按 wver16 去重，晚到不重跑）；门判定读 eval_log
+  的 eval_summary（iter 保留原轮号 + wver），晚入账只顺延判定窗口，判据不变。
+- 溢出预算未收官的在途局：下轮异 sha 清场 + 阈值熔断兜底（同 v3.10 前语义）。
+
+**实测证据**（重启前旧代码进程，恰证用户预判）：it10 eval 3.5min 收官（it11 启动前），
+it11 eval 20min 与 it11 PPO（~19min）重叠完成——eval 天然在训练间隙消化、不占主链。
+
+**I7 集成测试**（test_run_rl.py，FakeAgent.eval_delay=3s/局慢 eval 注入）：断言 ①eval
+慢速在途时下一轮采集照常完成不阻塞（games==2, missing==[]）；②采集完成后 eval 仍在
+后台跑（is_alive()）——证明"不抢主链、后台消化"。修测点：eval_log 台账按 wver 去重，
+残留同 wver 记录会让 eval 全量 skip 早退 → I7 前清共享测试 tmp 的 eval_log.jsonl。
+I1–I7 全套 + 单测 + freeze gate 全过。
