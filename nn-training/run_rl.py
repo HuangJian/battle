@@ -648,22 +648,25 @@ def main() -> None:
             if bak:
                 log(f"[run_rl] weights archived -> {bak}")
 
-            # 下轮权重分发前等评估收官（预算封顶），耗时计入 eval_join_sec——它是
-            # 轮间气泡的直接观测。流式模式评估在派发队列清空时已并行触发，此处
-            # 通常只等剩余尾巴；超时未完的局放弃（下轮异 sha 清场会杀掉它们，
-            # eval_log 以 dropped 记账）。join 前置于 jsonl 写回：字段同轮入账；
-            # 若此间崩溃，断点续跑走「语料秒回 + PPO checkpoint 完整」路径无损重放。
-            # R6 补丁：训练侧梯度步已尽（流式=末波排水完，串行=PPO 完成）——
-            # 本机 idle 算力此刻入列补评估尾局。若评估已收官，set 无害。
+            # v3.12 eval 延迟化（用户 2026-08-31）：eval **不阻塞训练主链**。eval 冻结本轮
+            # 权重、由后台线程独立写 eval_log（dispatch_eval_bg 返回 daemon 线程），账按
+            # wver 晚入（eval_done_keys 按 wver16 去重，晚到不重跑）。此处只做短软等待
+            # （吃已收官尾巴 + 给在途 eval 局一段缓存缓冲，防止下轮新权重 POST purge 掐
+            # 掉），长尾 eval 项留在 it+1..N 的采集/PPO 空档消化——节点任务队列天然仲裁
+            # （采集忙则 eval 排队，采集 done 则 eval 补做）。
+            # 门判定读 eval_log 的 eval_summary（iter 字段保留原轮号 + wver），晚入账只
+            # 让判定窗口顺延，判据不变。溢出预算未收官的在途局由下轮异 sha 清场 + 阈值
+            # 熔断兜底（与 v3.10 前语义一致）。
             if eval_gate is not None:
                 eval_gate.set()
             eval_join_sec = 0.0
             if eval_thread is not None and eval_thread.is_alive():
                 budget = float(getattr(args, "eval_window_sec", 900)) + 60.0
-                log(f"[run_rl] waiting up to {budget:.0f}s for clean-eval round "
-                    f"before next weight distribution")
+                soft = min(budget, 180.0)  # 软等待上限：吃尾巴 + 缓存缓冲，不再全额等账
+                log(f"[run_rl] eval deferred: soft-wait {soft:.0f}s for tail "
+                    f"(remaining eval finishes in background, wver-keyed)")
                 _t_join = time.time()
-                eval_thread.join(timeout=budget)
+                eval_thread.join(timeout=soft)
                 eval_join_sec = round(time.time() - _t_join, 1)
 
             with open(jsonl_path, "a", encoding="utf-8") as jsonl_f:

@@ -226,16 +226,25 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
             "mask": np.ones((n, MASK_DIM), dtype=np.int64)}
 
 
-def _pack_container(stage: int, seed: int, wver: str) -> bytes:
-    manifest = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
-                "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
-                "scoreList": [0.5], "dimLists": {}, "elapsedSec": 0.01, "node": "fake"}
-    header_files, body = [], b""
-    for name, arr in _synth_payload().items():
-        fname = f"{name}.npy"
-        raw = _npy_bytes(arr)
-        header_files.append({"name": fname, "len": len(raw)})
-        body += struct.pack(">H", len(fname)) + fname.encode() + struct.pack(">Q", len(raw)) + raw
+def _pack_container(stage: int, seed: int, wver: str, mode: str | None = None) -> bytes:
+    if mode == "eval":
+        # eval 局：validate_eval_result 校验的清单（wver/mode/outcome/ticks/win/stage/seed）；
+        # 无 shards（eval 不落盘），payload 可省略，直接空。
+        manifest = {"wver": wver, "mode": "eval", "stage": stage, "seed": seed,
+                    "outcome": "timeout", "ticks": 600, "win": 0, "elapsedSec": 0.01,
+                    "node": "fake"}
+        header_files: list[dict] = []
+        body = b""
+    else:
+        manifest = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
+                    "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
+                    "scoreList": [0.5], "dimLists": {}, "elapsedSec": 0.01, "node": "fake"}
+        header_files, body = [], b""
+        for name, arr in _synth_payload().items():
+            fname = f"{name}.npy"
+            raw = _npy_bytes(arr)
+            header_files.append({"name": fname, "len": len(raw)})
+            body += struct.pack(">H", len(fname)) + fname.encode() + struct.pack(">Q", len(raw)) + raw
     header = json.dumps({"manifest": manifest, "files": header_files}).encode()
     return gzip.compress(struct.pack(">I", 0x42435632) + struct.pack(">I", len(header)) + header + body)
 
@@ -246,6 +255,9 @@ class FakeAgent(BaseHTTPRequestHandler):
     # 之后（含竞速副本）秒回 —— 竞速副本必须绕开慢窗口才会赢。
     slow_first: set[tuple[int, int]] = set()
     _slowed_once: set[tuple[int, int]] = set()
+    # I7 eval 最低优先级注入：mode=eval 的每局任务 sleep（模拟慢 eval 后台消化）——
+    # 验证它与采集/训练并行时互不阻塞（采集照常、eval 慢慢做）。
+    eval_delay = 0.0
 
     def log_message(self, *_a) -> None:
         return
@@ -265,7 +277,7 @@ class FakeAgent(BaseHTTPRequestHandler):
                         "bunVersion": subprocess.run([bun, "--version"], capture_output=True,
                                                      text=True, timeout=10,
                                                      **_POPEN_NO_WINDOW).stdout.strip(),
-                        "cpus": 4})
+                        "cpus": 4, "evalSupport": True})
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             key = (int(q["stage"]), int(q["seed"]))
@@ -273,9 +285,11 @@ class FakeAgent(BaseHTTPRequestHandler):
             if key in FakeAgent.slow_first and key not in FakeAgent._slowed_once:
                 FakeAgent._slowed_once.add(key)
                 time.sleep(2.0)  # 慢主副本窗口
+            if q.get("mode") == "eval" and FakeAgent.eval_delay > 0:
+                time.sleep(FakeAgent.eval_delay)  # I7 慢 eval（后台消化模拟）
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            body = _pack_container(*key, q["wver"])
+            body = _pack_container(*key, q["wver"], mode=q.get("mode"))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -452,6 +466,38 @@ def test_integration(tmp: Path) -> None:
         check(took6 < 10.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")
         FakeAgent.slow_first = set()
         FakeAgent._slowed_once = set()
+
+        # I7 eval 最低优先级（v3.12 语义）：eval 慢速在途（后台线程）时，下一轮采集照常
+        # 进行、互不阻塞——eval 冻结本轮权重、后台消化，采集/PPO 空档慢慢做，不抢主链。
+        import rl.eval_dispatch as ed
+
+        traj = fresh("i7")
+        # eval_done_keys 台账在 traj.parent（= tmp/eval_log.jsonl）按 wver 去重——
+        # 上次运行残留的同 wver 记录会让本轮 eval 全量 skip 早退、is_alive 断言落空。
+        # 隔离：删共享台账（test_run_rl 专用 tmp 目录，无生产影响）。
+        shared_eval_log = traj.parent / "eval_log.jsonl"
+        if shared_eval_log.exists():
+            shared_eval_log.unlink()
+        FakeAgent.eval_delay = 3.0  # 每局 mode=eval 延迟 3s（6 局/4 并发 ≈ 6s+）≫ 采集 1.4s
+        args_eval = types.SimpleNamespace(**{**vars(args), "eval_games_per_stage": 2,
+                                             "eval_stages": "0-2"})
+        eval_th = threading.Thread(
+            target=lambda: ed.dispatch_eval_round(
+                bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10),
+            daemon=True, name="eval-it10")
+        eval_th.start()
+        time.sleep(0.3)  # 让 eval 抢先派发、进入在途（模拟"eval 已在跑"）
+        t_collect = time.time()
+        rep7 = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9",
+            local_slots_max=0)
+        t_collect = round(time.time() - t_collect, 1)
+        check(rep7["games"] == 2 and rep7["missing"] == [],
+              f"I7 collection completes while slow eval in flight ({t_collect}s)")
+        check(eval_th.is_alive(),
+              "I7 slow eval still running afterwards (deferred to background)")
+        eval_th.join(timeout=45)  # 放 eval 收尾（不阻塞断言路径）
+        FakeAgent.eval_delay = 0.0
     finally:
         srv.shutdown()
 
