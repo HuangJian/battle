@@ -112,11 +112,16 @@ def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pop
         return None
     src = snap_src or args.out
     snap = str(Path(args.out).with_name(f"weights-collect-{next_it}.json"))
-    try:
-        shutil.copyfile(src, snap)
-    except OSError as e:  # noqa: BLE001
-        log(f"[double-buffer] snapshot fail: {e} — skip precollect")
-        return None
+    if os.path.abspath(src) != os.path.abspath(snap):
+        try:
+            shutil.copyfile(src, snap)
+        except OSError as e:  # noqa: BLE001
+            log(f"[double-buffer] snapshot fail: {e} — skip precollect")
+            return None
+    # 提前预采（snap_src 已由调用方 save_weights_json 写好目标文件）：src==snap，
+    # 跳过 copy 直接复用——否则 copyfile(自己→自己) 抛 same-file 错误。
+    elif snap_src is not None:
+        log(f"[double-buffer] early snapshot already at {snap} — reuse")
     argv = [sys.executable, "-u", os.path.abspath(__file__),
             *sys.argv[1:], "--collect-only", "1", "--bc", snap,
             "--start-it", str(next_it), "--iters", "1"]
