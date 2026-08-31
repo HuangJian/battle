@@ -242,6 +242,10 @@ def _pack_container(stage: int, seed: int, wver: str) -> bytes:
 
 class FakeAgent(BaseHTTPRequestHandler):
     events: list[tuple[str, float, tuple]] = []
+    # I6 长尾竞速注入：首次 dispatch 该 (stage,seed) 时 sleep（模拟慢节点独占 in-flight）；
+    # 之后（含竞速副本）秒回 —— 竞速副本必须绕开慢窗口才会赢。
+    slow_first: set[tuple[int, int]] = set()
+    _slowed_once: set[tuple[int, int]] = set()
 
     def log_message(self, *_a) -> None:
         return
@@ -264,10 +268,14 @@ class FakeAgent(BaseHTTPRequestHandler):
                         "cpus": 4})
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
-            FakeAgent.events.append(("dispatch", time.time(), (int(q["stage"]), int(q["seed"]))))
+            key = (int(q["stage"]), int(q["seed"]))
+            FakeAgent.events.append(("dispatch", time.time(), key))
+            if key in FakeAgent.slow_first and key not in FakeAgent._slowed_once:
+                FakeAgent._slowed_once.add(key)
+                time.sleep(2.0)  # 慢主副本窗口
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            body = _pack_container(int(q["stage"]), int(q["seed"]), q["wver"])
+            body = _pack_container(*key, q["wver"])
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -280,16 +288,47 @@ class FakeAgent(BaseHTTPRequestHandler):
         self._json({"cache": "kept"})
 
 
-def test_integration(tmp: Path) -> None:
-    import torch
+class _StubPpo:
+    """I3/I4 集成桩：mock PPO 更新——编排测试（wave/eval 时机/熔断/停派发）不需要真 torch
+    权重。只消费 chunks 数量并回可控 agg（kl 可调），stream 的 steps/chunks/waves 计数仍由
+    其自身维护（rl/stream.py _drain），本桩只决定「每次更新回什么指标」。
 
+    backend 依赖接口（run_rollout_stream 的 backend 参数即注入点，默认 ppo_mod）：
+      update / _ppo_load / load_episodes / chunk_episodes —— 按需实现。"""
+
+    def __init__(self, kl: float = 0.01):
+        self.kl = float(kl)
+        self.updates = 0
+
+    def update(self, model, opt, chunks, epochs, device, ckpt_path=None, **kw):
+        self.updates += 1
+        return {"kl": self.kl, "entropy": 1.0, "policy": 0.0, "value": 0.0,
+                "mean_ret": 0.5, "gnorm": 1.0}
+
+    def _ppo_load(self, path, model, opt) -> int:
+        return 0  # 无 checkpoint 路径 → 轮内零结算走全盘更新分支
+
+    def load_episodes(self, path):
+        return [object()]  # 1 个假 episode → chunk_episodes 至少 1 chunk
+
+    def chunk_episodes(self, eps, mb):
+        return list(eps)
+
+    def load_episode_from_shard(self, shard_dir):
+        # stream._load_wave 只要求 ep["adv"]（做 wave 内归一化）；具体轨迹数值不重要
+        # ——rollout 引擎的真实性由 tools/sim/export-rl-rollout.ts 的 TS 测试保证。
+        return {"adv": np.zeros(1, dtype=np.float32)}
+
+
+def test_integration(tmp: Path) -> None:
     print("[itest] queue normal / halt / queue-drained ordering")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     bun = shutil.which("bun")
     cfg = {"nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
-           "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3}}
+           "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3,
+                      "agentRescanSec": 1}}  # rescan 默认 120s 轮询 → 每轮白等 120s 才收官
     args = types.SimpleNamespace(workers=4, max_ticks=300, difficulty="hard")
 
     def fresh(tag: str) -> Path:
@@ -333,14 +372,13 @@ def test_integration(tmp: Path) -> None:
         check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
         check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
 
-        # I3 流式迷你轮：真 PPO 更新 + 评估恰一次（队列清空时）+ 句柄回传
-        import ppo as ppo_mod
+        # I3 流式迷你轮（PPO 桩化版）——只验编排：真 PPO 更新由 _StubPpo 取代，
+        # 断言 wave 训练调用真实发生 + 评估恰一次（队列清空时）+ 句柄回传。
         traj = fresh("i3")
-        model = ppo_mod.build_ppo(None)
-        opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+        stub3 = _StubPpo(kl=1e-12)
         cfg3 = json.loads(json.dumps(cfg))
         cfg3["policy"]["streamWaveGames"] = 2
-        cfg3["policy"]["streamKlCap"] = 1e12  # 随机权重首波 KL 天文数字，只验非熔断路径
+        cfg3["policy"]["streamKlCap"] = 1e12  # 桩 kl 极小，只验非熔断路径
         fired = []
 
         def on_collect_done():
@@ -352,26 +390,28 @@ def test_integration(tmp: Path) -> None:
         rep3 = run_rl.run_rollout_stream(
             bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3, "i3.3", model, opt, torch.device("cpu"), on_collect_done=on_collect_done)
+            cfg3, "i3.3", None, None, "cpu", on_collect_done=on_collect_done,
+            backend=stub3)
         sm = rep3.pop("_stream")
         check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
+        check(stub3.updates >= 1, f"I3 stub PPO invoked for waves ({stub3.updates})")
         check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
         check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
         wts3 = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
         check(wts3 and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
         check("_eval_thread" in rep3, "I3 eval thread returned via report")
 
-        # I4 流式熔断轮：触顶停训 + 停派发
+        # I4 流式熔断轮（PPO 桩化版）：桩 kl=1e6 单波触顶 → 停训 + 停派发
         traj = fresh("i4")
-        model4 = ppo_mod.build_ppo(None)
-        opt4 = torch.optim.Adam(model4.parameters(), lr=1e-4)
+        stub4 = _StubPpo(kl=1e6)
         cfg4 = json.loads(json.dumps(cfg))
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = run_rl.run_rollout_stream(
             bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4, "i4.4", model4, opt4, torch.device("cpu"), on_collect_done=None)
+            cfg4, "i4.4", None, None, "cpu", on_collect_done=None,
+            backend=stub4)
         sm4 = rep4.pop("_stream")
         check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
         check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
@@ -386,13 +426,32 @@ def test_integration(tmp: Path) -> None:
             local_slots_max=2, local_suspend=susp)
         check(rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
               f"I5 suspended → zero local settlements (byNode={rep5a['dist']['nodes']})")
-        # 对照组（不置位）：头部分配使 local 独占前 N 局——确定性断言
+        # I5b 对照组（不置位）：头部分配使 local 独占前 N 局——确定性断言
         traj = fresh("i5b")
         rep5b = run_rl.run_rollout_queue(
             bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52",
             local_slots_max=2)
         check(rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
               f"I5b no-suspend → local owns head tasks ({rep5b['dist']['nodes']})")
+
+        # I6 v3.10 长尾竞速：慢主副本独占 in-flight（2s 窗口）→ 空闲槽复制竞速先返回。
+        # 若末尾任务被单 worker 独占后无人竞速（v3.7 盲区），本轮会被 2s 窗口拖住且
+        # (0,111) 只会 dispatch 1 次；v3.10 下应 dispatch ≥2（主 + 竞速副本）且快速收官。
+        traj = fresh("i6")
+        FakeAgent.slow_first = {(0, 111)}
+        FakeAgent._slowed_once = set()
+        t0 = time.time()
+        rep6 = run_rl.run_rollout_queue(
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6",
+            local_slots_max=0)
+        took6 = time.time() - t0
+        n_slow_disp = sum(1 for kind, _t, p in FakeAgent.events
+                          if kind == "dispatch" and p == (0, 111))
+        check(rep6["games"] == 2 and rep6["missing"] == [], "I6 long-tail race settled all")
+        check(n_slow_disp >= 2, f"I6 slow task re-raced by idle slot (dispatches={n_slow_disp})")
+        check(took6 < 10.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")
+        FakeAgent.slow_first = set()
+        FakeAgent._slowed_once = set()
     finally:
         srv.shutdown()
 

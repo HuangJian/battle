@@ -619,13 +619,16 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if nd is None and task is not None:
                     local_active[0] -= 1
                 if summary is not None:
-                    # v3.7 fan-out 副本后到：任务已结算（主副本或更快的副本先落盘）→ 丢弃，
-                    # 不重复落盘/不重复记录台账（校验层已对重复局 reject，这里提前拦截）。
-                    if fanout_copy and task in seen:
-                        inflight[task] = inflight.get(task, 0) - 1
-                        if inflight[task] <= 0:
-                            inflight.pop(task, None)
-                        log(f"[dist] fanout dup s{task[0]}/seed{task[1]} node={nd_id} — dropped")
+                    # v3.10 去重结算（对 main / 竞速(fan-out) 副本一律适用）：
+                    # v3.7 只在 fanout_copy 且 seen 时丢——漏网的后到者（主副本/竞速副本）
+                    # 会重复 append → 报告 ok=3/2、seen 触顶但 all_settled 滞后 → 整轮
+                    # 空等到 deadline（集成 I1 实测 0.2s → 120s）。先到者结算、后到者丢弃。
+                    if task in seen:
+                        if task in inflight:
+                            inflight[task] = inflight.get(task, 0) - 1
+                            if inflight[task] <= 0:
+                                inflight.pop(task, None)
+                        log(f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped")
                         continue
                     seen.add(task)
                     if task in inflight:
