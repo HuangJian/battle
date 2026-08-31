@@ -73,26 +73,52 @@ def _run_collect_only(args, traj_root, rotate_seed, bun) -> None:
     """吞吐 T4：仅采集一轮落盘后退出（双缓冲子进程模式）。不 PPO/不 eval/不写权重。
     落盘 shard 的 manifest.wver = 快照权重指纹 → 主进程下一轮 completed_pairs 命中走聚合。
     --precollect-games>0 时只采前 N 局（下一轮首波 wave 语料，其余由下轮以 θ_N 现场采）。
+    --precollect-samples>0 时按样本量提前 halt（样本数达标即停，无需等满 N 局）。
     """
+    import threading as _threading
+
     it = args.start_it or 1
     traj_dir = traj_root / f"it{it}"
     traj_dir.mkdir(parents=True, exist_ok=True)
     pairs = build_pairs(args, it, rotate_seed)
     pre_games = int(getattr(args, "precollect_games", 0) or 0)
+    pre_samples = int(getattr(args, "precollect_samples", 0) or 0)
+    halt_event: _threading.Event | None = None
     if 0 < pre_games < len(pairs):
         pairs = pairs[:pre_games]
         log(f"[collect-only] it{it}: limited to first {pre_games} games "
             f"(rest collected by next round with θ_N)")
+    elif pre_samples > 0 and len(pairs) > 0:
+        # 按样本量 halt：不截断 pairs，用 halt_event 在累计样本达标时提前停采。
+        # 主进程的轮询逻辑在检测到足够 shard 后也会放行，两者互补。
+        halt_event = _threading.Event()
+        log(f"[collect-only] it{it}: {len(pairs)} pairs, target_samples={pre_samples}, "
+            f"halt when reached (subprocess exits early, excess collected by next round)")
     dist_cfg = dist_common.load_dist_config()
     # iter_id 必须遵循 "{RUN_ID}.{it}" —— run_rollout_queue 用 rsplit('.',1)[-1]
     # 做 int() 解析迭代号（2026-08-31 实测：'collect-1-<pid>' 格式直接 ValueError
     # 崩崩，分布式路径的子进程从未成功采集过一轮，等于双缓冲静默失效）。
     iter_id = f"{RUN_ID}.{it}"
     log(f"[collect-only] it{it}: {len(pairs)} pairs -> {traj_dir} (weights={args.bc})")
-    if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
-        report = run_rollout_queue(bun, args.bc, traj_dir, pairs, args, dist_cfg, iter_id)
+    if halt_event:
+        # 样本量提前 halt 模式：on_result 累计样本，达标即 set halt_event。
+        # 在途局自然收尾，子进程退出，主进程 wait() 返回。
+        _pre_samples_acc = [0]
+        def _on_result(summary):
+            s = summary.get("totalSamples", 0) or summary.get("samples", 0) or 0
+            _pre_samples_acc[0] += s
+            if _pre_samples_acc[0] >= pre_samples:
+                halt_event.set()
+        if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
+            report = run_rollout_queue(bun, args.bc, traj_dir, pairs, args, dist_cfg, iter_id,
+                                       on_result=_on_result, halt_event=halt_event)
+        else:
+            report = run_rollout(bun, args.bc, traj_dir, pairs, args)
     else:
-        report = run_rollout(bun, args.bc, traj_dir, pairs, args)
+        if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
+            report = run_rollout_queue(bun, args.bc, traj_dir, pairs, args, dist_cfg, iter_id)
+        else:
+            report = run_rollout(bun, args.bc, traj_dir, pairs, args)
     log(f"[collect-only] it{it}: games={report['games']} samples={report['totalSamples']} "
         f"outcomes={json.dumps(report['outcomes'])}")
 
@@ -448,6 +474,10 @@ def main() -> None:
     ap.add_argument("--precollect-games", type=int, default=_d("precollect_games", 0),
                     help="吞吐 T4 限制：预采子进程只采前 N 局（下一轮首波 wave 的语料），其余"
                          "局由下轮以 θ_N 现场采集（严格 on-policy）。0 = 全量 150 局预采（原行为）。")
+    ap.add_argument("--precollect-samples", type=int, default=_d("precollect_samples", 0),
+                    help="吞吐 T4 样本量 halt：预采子进程累计样本达此值即停采（不截断 pairs，"
+                         "用 halt_event 提前退出）。0 = 不启用（用 --precollect-games 或全量）。"
+                         "与 --precollect-games 互斥：precollect_samples 优先。")
     ap.add_argument("--collect-only", type=int, default=0,
                     help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。")
     args = ap.parse_args()
