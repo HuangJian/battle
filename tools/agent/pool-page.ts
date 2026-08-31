@@ -58,6 +58,19 @@ export function poolNodes(): PoolNodeCfg[] | null {
   return loadPoolConfig()
 }
 
+/** 训练机直跑槽位数（rl-config 的 rl.local_slots；缺省 null = 未配置/不可读）。 */
+function poolLocalSlots(): number | null {
+  try {
+    const cfgPath = join(REPO_ROOT, 'nn-training', 'rl-config.json')
+    if (!existsSync(cfgPath)) return null
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { rl?: { local_slots?: number } }
+    const v = cfg.rl?.local_slots
+    return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
 // ---------------- 时间格式化 ----------------
 
 function fmtTs(ms: number): string {
@@ -272,15 +285,29 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
           `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`,
       )
     }
-    // 本机直跑（训练器 local 槽位）随表展示：无 ping/规格，状态与贡献度来自历史聚合。
-    const localH = hist.get('local')
-    if (localH) {
+    // 本机直跑（训练器 local 槽位）固定入表一行：无 ping/版本，状态按最近完成率、
+    // 上轮贡献度照常聚合。无历史（部署清零后）也占位显示，槽位数来自 rl-config。
+    const localSlots = poolLocalSlots()
+    const localH = hist.get('local') ?? {
+      ok: 0,
+      fail: 0,
+      lastTs: '-',
+      lastOkTs: '-',
+      lastFailTs: '-',
+      lastError: '',
+      avgElapsedSec: null,
+      elapsedSamples: 0,
+      recent: [],
+      lastIter: -1,
+      lastIterOk: 0,
+    }
+    {
       const errCellL = localH.lastError
         ? `<span style="color:#c00">${localH.lastError}</span><br><span style="color:#999">${localH.lastFailTs || ''}</span>`
         : '-'
       rows.push(
         `<tr><td>local（本机直跑）</td><td>${poolStatusCell(localH)}</td>` +
-          `<td>-</td><td>-</td>` +
+          `<td>${localSlots !== null ? `${localSlots} 槽` : '-'}</td><td>-</td>` +
           `<td data-v="9999">-</td>` +
           `<td data-v="${localH.ok}" style="text-align:right">${localH.ok}</td><td data-v="${localH.fail}" style="text-align:right">${localH.fail}</td>` +
           `<td data-v="${localH.lastIterOk}" style="text-align:right">${localH.lastIter >= 0 ? localH.lastIterOk : '-'}</td>` +
