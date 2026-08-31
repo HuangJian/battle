@@ -34,7 +34,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { createHash } from 'node:crypto'
 import { STAGES } from '../../src/config/stages'
-import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
+import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena-ladder'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
@@ -203,6 +203,10 @@ export function runEvalOne(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
+  // 一命覆写（plan/dodge-item-curriculum.md §1a）：S-Dodge 强制 1 命。
+  if (isArenaId(stageIdx) && arenaLevelOfId(stageIdx) === 'S-Dodge') {
+    world.lives = 1
+  }
 
   // v3.7：policy='intent-exec' → 意图执行器驱动（NN 选意图 + God-AI 白名单子链），
   // 替代 RL 学生模型贪心。intent-weights 经 --intent-weights 单独提供。

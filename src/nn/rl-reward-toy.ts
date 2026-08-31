@@ -32,6 +32,12 @@ export interface ToyRewardArm {
   wClear: number
   /** 终局阵亡（lives_exhausted）。 */
   wDeath: number
+  /** 击杀凸性指数（p>1 时 Convex 递增，默认 1=线性，向后兼容）。 */
+  p?: number
+  /** 每个 powerup_collected 的步内分（默认 0）。 */
+  wLoot?: number
+  /** 按命损稠密扣分：每 HP × wDmg2（默认 0）；pool 血池下让非致命扣血有梯度。 */
+  wDmg2?: number
 }
 
 /**
@@ -48,6 +54,19 @@ export const TOY_REWARD_ARMS: Record<string, ToyRewardArm> = {
   kill2: { name: 'kill2', wKill: 1.0, wDmg: 0.15, wAlive: 0, wClear: 2.0, wDeath: 0.5 },
   balanced: { name: 'balanced', wKill: 1.0, wDmg: 0.35, wAlive: 0.001, wClear: 2.0, wDeath: 1.0 },
   survival: { name: 'survival', wKill: 0.5, wDmg: 0.5, wAlive: 0.002, wClear: 2.0, wDeath: 1.5 },
+  // dodge-mix（plan/dodge-item-curriculum.md §2）：递增击杀 + 按命损扣分 + 低拾取分。
+  // 一命三命下均可，但在一命时 wDmg2 是让非致命扣血有梯度的关键杠杆。
+  'dodge-mix': {
+    name: 'dodge-mix',
+    wKill: 1.0,
+    p: 1.15,
+    wDmg: 1.0,
+    wDmg2: 0.003,
+    wAlive: 0,
+    wClear: 2.0,
+    wDeath: 1.5,
+    wLoot: 0.15,
+  },
 }
 
 /** 各级默认臂。A2 扫描按"门指标最高者"选定后改写此表（代码即预注册记录）。 */
@@ -57,17 +76,25 @@ export const TOY_REWARD_DEFAULT_ARM: Record<ArenaLevel, string> = {
   S3: 'kill',
   S3H: 'kill',
   S4a: 'kill',
+  'S-Dodge': 'dodge-mix',
 }
 
 /** 势函数输入计数器（事件流 + World 计数，零埋点，§7.2）。 */
 export interface ToyCounters {
   kills: number
   playerHits: number
+  /** 非致命扣血累计（player_damage 事件 damage 累计，§2.4）。 */
+  playerDamageTaken?: number
+  /** 拾取道具数（powerup_collected 事件累计）。 */
+  powerUpsCollected?: number
 }
 
 /** 势 Φ：窗口势差即稠密奖励。 */
 export function toyPotential(c: ToyCounters, ticks: number, arm: ToyRewardArm): number {
-  return arm.wKill * c.kills - arm.wDmg * c.playerHits + arm.wAlive * ticks
+  let v = arm.wKill * (c.kills + 1) ** (arm.p ?? 1) - arm.wDmg * c.playerHits + arm.wAlive * ticks
+  if (arm.wDmg2) v -= arm.wDmg2 * (c.playerDamageTaken ?? 0)
+  if (arm.wLoot) v += arm.wLoot * (c.powerUpsCollected ?? 0)
+  return v
 }
 
 /** 终局奖励（并入最后一个窗口的 reward）。timeout = 0。 */

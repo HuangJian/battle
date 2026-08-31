@@ -56,6 +56,9 @@ export interface SimTask {
   /** 督战双玩家: supervise mode with a second God AI driving player2 (distinct
    *  from `coop`, the Lie-Back-Win / human-P1 mode). Default off. */
   spectateDual?: boolean
+  /** 一命覆写（plan/dodge-item-curriculum.md §1b F1）：强制玩家命数（缺省 =
+   *  difficulty.startLives）。S-Dodge 锚定探针传 1。 */
+  livesOverride?: number
   /** Record the run and return the full SimResult (incl. replay) in the task
    *  result, so the caller can persist failure replays. Default off. */
   recordReplay?: boolean
@@ -137,6 +140,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       coop: task.coop === true,
       spectateDual: task.spectateDual === true,
       record: task.recordReplay === true,
+      livesOverride: task.livesOverride,
       policy: task.policy,
       nnWeightsDir: task.nnWeightsDir,
       intentWeightsDir: task.intentWeightsDir,

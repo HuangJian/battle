@@ -601,6 +601,13 @@ export class CombatSystem {
       tank.hitCount = Math.min((tank.hitCount ?? 0) + 1, 4)
       this.d.effects.createExplosion(bullet.x, bullet.y, 'small')
 
+      // 非致命扣血事件（player_damage，§2.4 F2）：仅当命中后 hp > 0 且 isPlayer 时推。
+      // 致死命（hp ≤ 0）与星盾消耗（shield 分支）不推——致死已由 player_hit 覆盖，
+      // 星盾 HP 回满净失血=0。口径 = bullet.damage（非致命时 = 实际失血）。
+      if (tank.hp > 0 && tank.isPlayer) {
+        this.d.world.pushEvent({ type: 'player_damage', damage: bullet.damage })
+      }
+
       if (tank.hp <= 0) {
         // FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态, DECISIONS
         // §111: 2026-08-04 从 classic-only 扩展到所有难度). A max-level player does

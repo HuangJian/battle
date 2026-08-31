@@ -160,7 +160,7 @@ describe('arena-ladder: maze 变体与敌种分层抽样（§2.3b）', () => {
 describe('arena-ladder: 编号命名空间（卡 A1）', () => {
   it('arena 编号 ∩ 真实 stage 下标 = ∅', () => {
     const ids = [...ARENA_LADDER.keys()]
-    expect(ids.length).toBe(15) // 5 级 × 3 变体（写死 3，§2.3a）
+    expect(ids.length).toBe(18) // 6 级 × 3 变体（写死 3，§2.3a）
     for (const id of ids) {
       expect(id).toBeGreaterThanOrEqual(ARENA_ID_BASE)
       expect(isArenaId(id)).toBe(true)
@@ -177,7 +177,7 @@ describe('arena-ladder: 编号命名空间（卡 A1）', () => {
       expect(arenaLevelOfId(id)).toBe(spec.level)
       levels.add(spec.level)
     }
-    expect(levels).toEqual(new Set(['S1', 'S2', 'S3', 'S3H', 'S4a']))
+    expect(levels).toEqual(new Set(['S1', 'S2', 'S3', 'S3H', 'S4a', 'S-Dodge']))
     expect(resolveArenaStage(34)).toBeNull() // 真实 stage 不经 arena 解析
     expect(arenaLevelOfId(34)).toBeNull()
   })
@@ -191,6 +191,32 @@ describe('arena-ladder: 编号命名空间（卡 A1）', () => {
     const world4 = new World()
     world4.loadStageData(s4a, 0)
     expect(world4.tileMap.hasBase()).toBe(true)
+  })
+
+  it('S-Dodge 规格验证（plan/dodge-item-curriculum.md §1）', () => {
+    const ids = [...ARENA_LADDER.keys()].filter((id) => arenaLevelOfId(id) === 'S-Dodge')
+    expect(ids.length).toBe(3) // 3 布局变异
+    for (const id of ids) {
+      const stage = resolveArenaStage(id)!
+      expect(stage.enemyCount).toBe(20)
+      expect(stage.tiles.length).toBe(GRID)
+      // 所有行长度一致
+      expect(stage.tiles.every((row) => row.length === GRID)).toBe(true)
+      // 无基地（E 字符）
+      expect(stage.tiles.some((row) => row.includes('E'))).toBe(false)
+      // 开放场：中心区域是空地（.），周围钢环（s）
+      const offset = Math.floor((GRID - 20) / 2)
+      // 钢环外是钢
+      expect(stage.tiles[offset - 1].slice(offset, offset + 20)).toBe('s'.repeat(20))
+      // 钢环内是空地
+      expect(stage.tiles[offset + 1][offset + 1]).toBe('.')
+      // 敌种频率：basic 占 40%（5 元循环 basic×2）
+      const kinds = stage.enemies.slice(0, 20)
+      const basicCount = kinds.filter((k) => k === 'basic').length
+      expect(basicCount).toBe(8)
+      // 敌种数 = 20
+      expect(stage.enemies.length).toBe(20)
+    }
   })
 })
 

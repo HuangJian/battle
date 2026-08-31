@@ -290,6 +290,7 @@ export type GameEvent =
   | { type: 'base_destroyed'; by: TankKind }
   | { type: 'stage_clear'; stage: number }
   | { type: 'player_hit' }
+  | { type: 'player_damage'; damage: number }
   | { type: 'explosion'; x: number; y: number; kind: 'small' | 'big' }
   | {
       type: 'terrain_destroyed'

@@ -4,6 +4,59 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §18 S-Dodge 训练执行器落地（plan/dodge-item-curriculum.md，2026-08-31）
+
+**背景**：按照 plan/dodge-item-curriculum.md 方案，新建 S-Dodge 竞技场（20×20 空旷/20 敌/无基地），dodge-mix 奖励臂（递增击杀+按命损扣分+低拾取分），一命覆写，player_damage 事件，集成到现有训练基础设施。
+
+### 代码改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/nn/arena-ladder.ts` | ArenaLevel 加 `S-Dodge`；LEVEL_SEED_BASE 加 `5`；ARENA_LADDER 加 3 个变体（20×20, 20敌, basic×2/fast/power/armor） |
+| `src/nn/rl-reward-toy.ts` | ToyRewardArm 加 `p`/`wLoot`/`wDmg2` 字段；toyPotential 改为 `(kills+1)^p` + `wDmg2` + `wLoot`；注册 `dodge-mix` 臂（wKill=1, p=1.15, wDmg=1, wDmg2=0.003, wAlive=0, wClear=2, wDeath=1.5, wLoot=0.15）；TOY_REWARD_DEFAULT_ARM 加 `S-Dodge:dodge-mix` |
+| `src/types.ts` | GameEvent 加 `{ type:'player_damage'; damage:number }` |
+| `src/game/SimulationCombat.ts` | 非致命扣血（hp>0 且 isPlayer）时推 `player_damage` 事件（口径=bullet.damage，致死/盾耗不推，§2.4 F2） |
+| `tools/sim/export-rl-rollout.ts` | 一命覆写（S-Dodge 强制 1 命）；tel 加 `playerDamageTaken`；消费 `player_damage` 事件；`countersPhi` 传 `playerDamageTaken`/`powerUpsCollected` |
+| `tools/sim/export-eval-game.ts` | 一命覆写（S-Dodge 强制 1 命）；import `arenaLevelOfId` |
+| `tools/sim/sim-worker.ts` | SimTask 加 `livesOverride?: number` 输入字段 |
+| `tools/sim/simulation-runner.ts` | RunOptions 加 `livesOverride?: number`；`world.lives` 应用覆写 |
+| `tools/sim/arena-god-baseline.ts` | LEVEL_MAX_TICKS 加 `S-Dodge:6000`；LEVEL_ORDER 加 `S-Dodge`；对 S-Dodge/hard 任务传 `livesOverride:1` |
+| `tests/nn/arena-ladder.test.ts` | 更新断言（15→18 IDs, 加 S-Dodge 级）；加 S-Dodge 规格验证测试 |
+| `tests/nn/rl-reward-toy.test.ts` | 新建：线性臂向后兼容、dodge-mix 臂计算、终局奖励、势塑形对账 |
+
+### God-AI 锚定探针结果
+
+`bun tools/sim/arena-god-baseline.ts --levels S-Dodge --skip-census`（60 seed × 3 变体 × {hard,classic}）：
+
+| 项 | Hard (一命) | Classic (3命) |
+|---|---|---|
+| 通关率 | 56.11% | 95.56% |
+| 击杀 | 14.95±6.67 | 19.69±1.54 |
+| 开火 | 41.6 | 40.3 |
+| 受伤 | 0.57 | 0.73 |
+| 存活tick | 2803 | 2854 |
+| tick中位/P95 | 3120/4577 | 2836/3768 |
+| 变异间σ | 8.85pp | 2.83pp |
+| 锚可用 | ❌绝对阈值 | ✅ |
+
+max-ticks 定 6000（P95=4577, P90×1.2≈4800, 保守取整）。
+
+### 训练启动
+
+- 命令：`start-training.ps1 -Detach -Script run_rl.py --iters 30 --bc tmp/s3-cap2/weights.json --out tmp/s-dodge/weights.json --traj tmp/s-dodge/traj --stages 1050-1052 --reward toy:dodge-mix --dodge off --max-ticks 6000 --difficulty hard --seeds-per-stage 50 --workers 8 --stream 1 --keep-iters 3`
+- 进程已后台启动（2026-08-31 20:29），日志：`tmp/run_rl-20260831-202954.out.log`
+- it1 完成：12 local games, 0% winRate (expected), score=0.2237, progress=0.0292
+- it2 已启动（20:35），dist 节点因 codeHash 变更被排除，本地纯采集每轮 ~12s
+- 分布式节点将逐步升级到 goal-nn 分支，后续轮次可恢复集群采集
+
+### 待办事项（快速验证阶段）
+
+- [ ] 监控 it2-it5 的 winRate 方向性收敛（对锚对比）
+- [ ] 分布式节点升级后重新加入集群，加速采集
+- [ ] 运行 S-Dodge 专用 eval 获取贪心胜率
+- [ ] 检查 warm-start 复现 S3 坏习惯（mobility/openingTempo 判据）
+- [ ] 若 wDmg2 梯度不够，升 `0.003→0.01` 阶梯
+
 ## §17 吞吐优化 T0–T2：OMP 扫档定案 OMP8+PROC_BIND，主役恢复并提速 18%（2026-08-31）
 
 **背景**：plan/goal-nn-throughput.md 吞吐优化。T0 基线（balanced S3 cap2，152 shards it3 实测）：PPO 150chunks×4ep ≈ 1260s（chunk ~8.4s）。用户修正方案：**PPO-only 基准**（复用已有 shards 重跑 PPO 计时，不重新 rollout）——`nn-training/ppo-bench.py`（新工具，可复用）。

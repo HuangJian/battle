@@ -482,6 +482,11 @@ export interface RunOptions {
    *  Lie-Back-Win (human P1 + God AI P2) mode. */
   spectateDual?: boolean
   /**
+   * 一命覆写（plan/dodge-item-curriculum.md §1b F1）：强制玩家命数替代
+   * difficulty.startLives。S-Dodge 锚定探针传 1。缺省 = difficulty.startLives。
+   */
+  livesOverride?: number
+  /**
    * Collect v6 evaluation telemetry (plan/God-AI-Evaluation-Redesign.md §3).
    * Default false — when off, the run path is byte-identical to before.
    */
@@ -609,7 +614,7 @@ export function runSimulation(opts: RunOptions): SimResult {
   // 3 lives" baseline that understates the shipped config. Sync both here so
   // the simulation matches the real game on the first life.
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
-  world.lives = world.difficulty?.startLives ?? START_LIVES
+  world.lives = opts.livesOverride ?? world.difficulty?.startLives ?? START_LIVES
 
   // Create the God AI input with an independent RNG (DECISIONS #47).
   // This decouples God AI decisions from the world RNG stream, enabling

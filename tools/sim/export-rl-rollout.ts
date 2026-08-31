@@ -182,6 +182,8 @@ interface Telemetry {
   playerDeaths: number
   /** 玩家被命中次数（player_hit 事件：死亡 + 星盾消耗）。玩具奖励的 w_dmg 项。 */
   playerHits: number
+  /** 非致命扣血累计（player_damage 事件 damage 累计，§2.4）。 */
+  playerDamageTaken: number
   playerShots: number
   powerUpsSpawned: number
   powerUpsCollected: number
@@ -444,6 +446,10 @@ function runOne(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
+  // 一命覆写（plan/dodge-item-curriculum.md §1a）：S-Dodge 强制 1 命。
+  if (isArenaId(stageIdx) && arenaLevelOfId(stageIdx) === 'S-Dodge') {
+    world.lives = 1
+  }
 
   const model = buildModelFromText(weightsText) as unknown as RolloutModel
   const scripted = new ScriptedInput()
@@ -469,9 +475,10 @@ function runOne(
 
   const tel: Telemetry = {
     enemyTotal: (stage as any)?.enemyCount ?? ENEMIES_PER_STAGE,
-    startLives: world.difficulty?.startLives ?? START_LIVES,
+    startLives: world.lives,
     playerDeaths: 0,
     playerHits: 0,
+    playerDamageTaken: 0,
     playerShots: 0,
     powerUpsSpawned: 0,
     powerUpsCollected: 0,
@@ -505,8 +512,17 @@ function runOne(
 
   const countersPhi = (): number => {
     if (reward.scheme === 'toy') {
-      // 玩具场势（§3.4 / 卡 A2）：击杀 − 被命中 + 存活；与 v7 势互斥。
-      return toyPotential({ kills: world.killCount, playerHits: tel.playerHits }, t, reward.arm)
+      // 玩具场势（§3.4 / 卡 A2）：递增击杀 − 被命中 + 存活 + 拾取 − 命损；与 v7 势互斥。
+      return toyPotential(
+        {
+          kills: world.killCount,
+          playerHits: tel.playerHits,
+          playerDamageTaken: tel.playerDamageTaken,
+          powerUpsCollected: tel.powerUpsCollected,
+        },
+        t,
+        reward.arm,
+      )
     }
     tel.baseWallIntact = countBaseWall(world)
     const baseAlive = !world.tileMap.isBaseDestroyed()
@@ -603,6 +619,8 @@ function runOne(
         if ((e as any).tank?.isPlayer) tel.playerDeaths++
       } else if (e.type === 'player_hit') {
         tel.playerHits++
+      } else if (e.type === 'player_damage') {
+        tel.playerDamageTaken += e.damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
       } else if (e.type === 'powerup_collected') {

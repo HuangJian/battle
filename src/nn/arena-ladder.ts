@@ -322,7 +322,7 @@ export function isArenaId(id: number): boolean {
   return Number.isInteger(id) && id >= ARENA_ID_BASE
 }
 
-export type ArenaLevel = 'S1' | 'S2' | 'S3' | 'S3H' | 'S4a'
+export type ArenaLevel = 'S1' | 'S2' | 'S3' | 'S3H' | 'S4a' | 'S-Dodge'
 
 export interface ArenaSpec {
   level: ArenaLevel
@@ -341,7 +341,14 @@ function arenaSpecs(level: ArenaLevel, levelIdx: number, build: (seed: number) =
   }))
 }
 
-const LEVEL_SEED_BASE: Record<ArenaLevel, number> = { S1: 0, S2: 1, S3: 2, S3H: 3, S4a: 4 }
+const LEVEL_SEED_BASE: Record<ArenaLevel, number> = {
+  S1: 0,
+  S2: 1,
+  S3: 2,
+  S3H: 3,
+  S4a: 4,
+  'S-Dodge': 5,
+}
 
 /** 训练/锚定共用 arena 阶梯（plan §2.1 五场 × 3 布局变异）。 */
 export const ARENA_LADDER: Map<number, ArenaSpec> = new Map(
@@ -360,6 +367,14 @@ export const ARENA_LADDER: Map<number, ArenaSpec> = new Map(
       makeMazeStage({ base: false, enemyCount: 10, layoutSeed: s }),
     ),
     ...arenaSpecs('S4a', LEVEL_SEED_BASE.S4a, (s) => makeMazeStage({ base: true, layoutSeed: s })),
+    ...arenaSpecs('S-Dodge', LEVEL_SEED_BASE['S-Dodge'], (s) =>
+      makeArena({
+        size: 20,
+        enemyCount: 20,
+        enemyKinds: ['basic', 'basic', 'fast', 'power', 'armor'],
+        layoutSeed: s,
+      }),
+    ),
   ].map(({ id, spec }) => [id, spec] as [number, ArenaSpec]),
 )
 

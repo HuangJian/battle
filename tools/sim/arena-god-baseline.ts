@@ -43,9 +43,10 @@ const LEVEL_MAX_TICKS: Record<ArenaLevel, number> = {
   S3: 20000,
   S3H: 20000,
   S4a: 20000,
+  'S-Dodge': 6000, // 锚定后确认：P95=4577, P90×1.2≈4800，保守取 6000
 }
 const SEEDS = Array.from({ length: 60 }, (_, i) => i + 1) // 1..60（与 pinned 基线同约定）
-const LEVEL_ORDER: ArenaLevel[] = ['S1', 'S2', 'S3', 'S3H', 'S4a']
+const LEVEL_ORDER: ArenaLevel[] = ['S1', 'S2', 'S3', 'S3H', 'S4a', 'S-Dodge']
 
 interface GameOutcome {
   level: ArenaLevel
@@ -210,6 +211,9 @@ async function main(): Promise<void> {
             params: { ...DEFAULT_GOD_AI_PARAMS },
             maxTicks: LEVEL_MAX_TICKS[level],
             telemetry: true,
+            // 一命锚定（plan/dodge-item-curriculum.md §1b F1）：S-Dodge/hard 覆写为 1 命。
+            // classic 天然 instant 一命但 combatModel 不同，不可当 S-Dodge 锚。
+            ...(level === 'S-Dodge' && difficulty === 'hard' ? { livesOverride: 1 } : {}),
           })
           taskMeta.push({ level, variant: spec.variant, seed, difficulty })
         }
