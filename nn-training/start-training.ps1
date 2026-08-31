@@ -141,12 +141,22 @@ $TorchVer = (& $VenvPython -c 'import torch; print(torch.__version__)' 2>$null)
 # ── torch 线程 env（在任何 torch import 之前设置）────────────────────
 $TT = $TorchThreads
 if ($TT -le 0) {
-  $n = 4
-  if (Get-Command nproc -ErrorAction SilentlyContinue) { $n = [int](& nproc 2>$null) }
-  elseif ($env:NUMBER_OF_PROCESSORS) { $n = [int]$env:NUMBER_OF_PROCESSORS }
-  if ($n -gt 12) { $n = 12 }
-  if ($n -lt 1) { $n = 1 }
-  $TT = $n
+  # 先从 rl-config.json 读配置（若存在）
+  $ConfigPath = Join-Path $ScriptDir 'rl-config.json'
+  if (Test-Path $ConfigPath) {
+    try {
+      $cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+      if ($cfg.rl.torch_threads -gt 0) { $TT = [int]$cfg.rl.torch_threads }
+    } catch { }
+  }
+  if ($TT -le 0) {
+    $n = 4
+    if (Get-Command nproc -ErrorAction SilentlyContinue) { $n = [int](& nproc 2>$null) }
+    elseif ($env:NUMBER_OF_PROCESSORS) { $n = [int]$env:NUMBER_OF_PROCESSORS }
+    if ($n -gt 12) { $n = 12 }
+    if ($n -lt 1) { $n = 1 }
+    $TT = $n
+  }
 }
 $env:OMP_NUM_THREADS = "$TT"
 $env:OPENBLAS_NUM_THREADS = "$TT"
