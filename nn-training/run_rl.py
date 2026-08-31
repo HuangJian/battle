@@ -69,6 +69,59 @@ WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # bounded archive: prune oldest it-backups beyond this
 
 
+def _run_collect_only(args, traj_root, rotate_seed, bun) -> None:
+    """吞吐 T4：仅采集一轮落盘后退出（双缓冲子进程模式）。不 PPO/不 eval/不写权重。
+    落盘 shard 的 manifest.wver = 快照权重指纹 → 主进程下一轮 completed_pairs 命中走聚合。"""
+    it = args.start_it or 1
+    traj_dir = traj_root / f"it{it}"
+    traj_dir.mkdir(parents=True, exist_ok=True)
+    pairs = build_pairs(args, it, rotate_seed)
+    dist_cfg = dist_common.load_dist_config()
+    # iter_id 必须遵循 "{RUN_ID}.{it}" —— run_rollout_queue 用 rsplit('.',1)[-1]
+    # 做 int() 解析迭代号（2026-08-31 实测：'collect-1-<pid>' 格式直接 ValueError
+    # 崩崩，分布式路径的子进程从未成功采集过一轮，等于双缓冲静默失效）。
+    iter_id = f"{RUN_ID}.{it}"
+    log(f"[collect-only] it{it}: {len(pairs)} pairs -> {traj_dir} (weights={args.bc})")
+    if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
+        report = run_rollout_queue(bun, args.bc, traj_dir, pairs, args, dist_cfg, iter_id)
+    else:
+        report = run_rollout(bun, args.bc, traj_dir, pairs, args)
+    log(f"[collect-only] it{it}: games={report['games']} samples={report['totalSamples']} "
+        f"outcomes={json.dumps(report['outcomes'])}")
+
+
+def _spawn_collect_next(args, it) -> subprocess.Popen | None:
+    """吞吐 T4：后台子进程预采 it+1（θ_N 行为快照）。返回 Popen 或 None。
+
+    正确性：子进程用 args.out 的**快照**（θ_N）——下轮 PPO 若写回 args.out 不回影响
+    子进程（它读 snap 文件）；shards 自带 θ_N 采样的 lp → IS 分母天然正确（on-policy）。"""
+    import shutil
+
+    next_it = it + 1
+    if args.iters > 0 and next_it > args.iters:
+        return None
+    snap = str(Path(args.out).with_name(f"weights-collect-{next_it}.json"))
+    try:
+        shutil.copyfile(args.out, snap)
+    except OSError as e:  # noqa: BLE001
+        log(f"[double-buffer] snapshot fail: {e} — skip precollect")
+        return None
+    argv = [sys.executable, "-u", os.path.abspath(__file__),
+            *sys.argv[1:], "--collect-only", "1", "--bc", snap,
+            "--start-it", str(next_it), "--iters", "1"]
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        p = subprocess.Popen(argv, cwd=str(REPO_ROOT), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        log(f"[double-buffer] spawn fail: {e} — skip precollect")
+        return None
+    log(f"[double-buffer] precollect it{next_it} spawned pid={p.pid} snapshot={snap}")
+    return p
+
+
 def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
     """Init once: warm-start policy heads from BC when no RL weights exist yet;
     otherwise resume from the existing RL weights (policy + trained value).
@@ -349,6 +402,13 @@ def main() -> None:
                     help=("干净评估绝对迭代点集（复用 run_rl_intent 的 eval_at 语义，如 "
                           "'5,10,15,20'）：只在列出的迭代派发 eval；空 = 关闭该维（配合 "
                           "--eval-every 或默认每轮）。与 --eval-every 可叠加（两者都满足才跑）。"))
+    ap.add_argument("--double-buffer", type=int, default=_d("double_buffer", 0),
+                    help="吞吐 T4：双缓冲——本轮 PPO 收尾后 spawn 后台 collect-only 子进程预采"
+                         "下一轮（行为快照 θ_N，子进程读快照不读 args.out，防权重写回污染）；"
+                         "下轮开头 join 子进程后直接走盘上 shard 聚合重放（藏掉采集墙钟）。"
+                         "依赖 T3（--eval-at/--eval-every 释放集群尾段）。默认 0 = 原行为字节一致。")
+    ap.add_argument("--collect-only", type=int, default=0,
+                    help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。")
     args = ap.parse_args()
 
     import numpy as np
@@ -372,6 +432,18 @@ def main() -> None:
     bun = shutil.which("bun")
     if bun is None:
         raise SystemExit("[run_rl] bun not found on PATH — rollout needs it")
+
+    # ===== 吞吐 T4：collect-only 分支必须在 build_model 之前（子进程无需 torch 模型/权重）=====
+    _traj_root = Path(args.traj)
+    _traj_root.mkdir(parents=True, exist_ok=True)
+    _jpath = _traj_root / "training_log.jsonl"
+    _prs = last_rotate_seed(_jpath)
+    _rseed = _prs if _prs is not None else (args.seed * 1009 + 1 + int(time.time())) % (2 ** 32)
+    if getattr(args, "collect_only", 0):
+        _run_collect_only(args, _traj_root, _rseed, bun)
+        log("[run_rl] collect-only done — exit")
+        return 0
+    # ===== 双缓冲：collect-only 分支结束 =====
 
     device = torch.device("cpu")
     model = build_model(args.bc, args.out)
@@ -439,8 +511,20 @@ def main() -> None:
     eval_every = int(getattr(args, "eval_every", 1) or 1)
     # 吞吐 T3：eval 绝对迭代点集（复用 run_rl_intent 的 eval_at 语义；空 = 不启用该维）。
     eval_at_set = {int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()}
+    _collect_child: subprocess.Popen | None = None  # 吞吐 T4：预采子进程句柄（下一轮开头 join）
     while args.iters <= 0 or it < args.iters:
         it += 1
+        # 吞吐 T4：本轮开头 join 预采子进程（bounded）——shards 全量落盘后走盘上聚合路径，
+        # 采集墙钟藏进上一轮 PPO 尾段；子进程失败/超时则回退本轮自采（completed_pairs 空）。
+        if _collect_child is not None:
+            try:
+                _collect_child.wait(timeout=3600)
+                log(f"[double-buffer] precollect it{it} done rc={_collect_child.returncode}")
+            except subprocess.TimeoutExpired:
+                log(f"[double-buffer] precollect it{it} timeout — fall back to own collect")
+                _collect_child.terminate()
+            finally:
+                _collect_child = None
         if deadline is not None and time.time() >= deadline:
             log(f"[run_rl] max-hours={args.max_hours} reached — stopping before it{it}")
             break
@@ -664,6 +748,13 @@ def main() -> None:
                         continue
                     if n_old <= it - args.keep_iters:
                         shutil.rmtree(old, ignore_errors=True)
+
+            # 吞吐 T4：双缓冲 spawn 下一轮预采（仅 stream + 双缓冲开启 + 非 collect-only）。
+            # 下一轮开头 join（上方）：采集藏进本轮 PPO 尾段 + 非 eval 轮集群空档，墙钟直降。
+            if (getattr(args, "double_buffer", 0) and stream_meta is not None
+                    and not getattr(args, "collect_only", 0)
+                    and (args.iters <= 0 or it < args.iters)):
+                _collect_child = _spawn_collect_next(args, it)
             consec_fail = 0
         except SystemExit as e:
             consec_fail += 1

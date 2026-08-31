@@ -72,6 +72,9 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # 吞吐 T4：双缓冲复用前提——本地 shard 也必须写 wver（与 run_rollout_queue 的
+    # local slot 对齐），否则主进程下一轮 completed_pairs 不命中、预采产物作废。
+    wver = dist_common.weights_fingerprint(rl_path)
     workers = max(1, min(args.workers, len(pairs)))
 
     def run_one(idx: int, si: int, seed: int) -> tuple[int, dict | None]:
@@ -116,6 +119,8 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
                 "--seeds", str(seed),
                 "--max-ticks", str(args.max_ticks),
                 "--difficulty", args.difficulty,
+                "--wver", wver,
+                "--node-label", "local",
             ]
             # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
             if getattr(args, "reward", ""):
