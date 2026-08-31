@@ -86,6 +86,31 @@ skip 早退 → I7 前清共享 `tmp/eval_log.jsonl`（test_run_rl 专用 tmp �
 **重启**：commit e79ca5c push 后，15:48 以同参数重启（`--double-buffer 1`依然在），
 resume it13（precollect 152 shards 已在磁盘 → 直接进 PPO，eval it13 并行派发中）。
 
+## §17.3 应用 §17 定案 OMP8+PROC_BIND 到 S3-cap2（2026-08-31，commit 0558951）
+
+**用户观察（正确）**：§17 测得的 OMP8+PROC_BIND 提速（1260→1033s，−18%）未应用到
+S3-cap2——实测 it13–it16 每轮 PPO 均 1260–1369s（=OMP12 默认档），证明确实没生效。
+
+**根因（两处）**：
+1. **启动器从未设 OMP_PROC_BIND**：start-training.ps1/.sh 只设 OMP_NUM_THREADS 等，
+   无 PROC_BIND → §17 定案的「+PROC_BIND=close」缺半。
+2. **`-TorchThreads` 解析失效**：ps1 文档写 `-TorchThreads 8`（驼峰），源码 switch
+   正则却是 `^--?torch-threads$`（蛇形）→ 驼峰参数从未被识别、静默落进透传；sh 同理。
+
+**修复**（commit 0558951）：
+- ps1：正则改 `(?i)^--?torch[-_]?threads$`（兼容驼峰/蛇形/下划线）；sh：case 补
+  `--TorchThreads|--torch_threads`。
+- 两版在 `OMP_NUM_THREADS≤8` 时补 `OMP_PROC_BIND=CLOSE`（§17 实测档）。
+- 验证：`-Echo -TorchThreads 8` 正确显示 `OMP threads=8` 且不再透传给脚本。
+
+**附带**：修 `tools/sim/export-nn-replays.ts` 两个 typecheck 错误（未跟踪遗留文件的
+GRID/BASE_POS/CELL 未用导入 + GodAIParams 索引签名转换），否则 gate 全红无法提交
+（该文件不属于任何历史提交，修复后仍留作未跟踪）。
+
+**重启**：18:02 经 start-training.ps1 规范重启（AGENTS §5.6 硬规则），resume it17
+PPO（预采 152 shards 复用），eval 局面因 wver 去重只补 11/60 局（v3.12 晚入账生效
+的又一证据）。以 it17 收官 `ppo_sec` 对比 §17 基线验证提速。
+
 ## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
 
 **用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与
