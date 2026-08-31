@@ -14,11 +14,11 @@
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve } from 'path'
 
-// ---------------- 模块级常量（进程启动 = 本次部署时刻） ----------------
+// ---------------- 模块级常量（历史锚点，默认不清空） ----------------
 
-/** 本进程启动（= 本次部署）时刻；更早的 dist-agent-meta 行不参与统计（用户指令：历史
- *  数据从本次更新部署时重新汇总；v1/update 触发重启亦视为新部署）。 */
-const POOL_EPOCH_MS = Date.now()
+/** 历史锚点：默认**保留全部历史**（用户指令 2026-08-31：除非明确要求，部署不清空历史）。
+ *  仅当启动环境显式置 POOL_HISTORY_FRESH=1 时，才按本进程启动时刻清零重汇总。 */
+const POOL_EPOCH_MS = process.env.POOL_HISTORY_FRESH === '1' ? Date.now() : 0
 
 // ---------------- 配置 ----------------
 
@@ -151,7 +151,8 @@ function aggregateNodeHistory(): Map<string, NodeHistory> {
           }
           if (!r.node) continue
           const nts = normTs(r.ts)
-          // 只统计本次部署后的行（ts 缺失无法判定新旧 → 忽略，保守）。
+          // 只统计"清空锚点之后"的行（POOL_HISTORY_FRESH=1 显式清零时才有锚点；
+          // 默认 0 = 保留全部历史）。ts 缺失无法判定新旧 → 忽略，保守。
           if (!r.ts || nts < epochStr) continue
           const h = bump(r.node)
           // 最近 10 次完成率（rollout+eval 混合）：状态判定数据源。
@@ -365,6 +366,8 @@ function sortTbl(col, th) {
 }
 </script>
 <p style="color:#666">状态 = 最近 10 次 rollout/eval 结算完成率（健康≥90% · 波动≥70% · 异常&lt;70%），替代单次 ping 判断；
-ping 列仅作实时参考。最近错误仅显示最近 1 小时内。数据源：dist-agent-meta.jsonl（tmp/* 各训练流聚合，<b>自 ${fmtTs(POOL_EPOCH_MS)}（本次部署）起重新汇总</b>）——历史数据从本次更新部署时清零重计。只读页面，不含密钥。默认按「已结算局」倒序，点击表头排序。</p>
+ping 列仅作实时参考。最近错误仅显示最近 1 小时内。数据源：dist-agent-meta.jsonl（tmp 下各训练流聚合；
+${POOL_EPOCH_MS > 0 ? `<b>自 ${fmtTs(POOL_EPOCH_MS)}（POOL_HISTORY_FRESH=1 显式清零）起重新汇总</b>` : `<b>累计全部历史</b>（部署不清空，除非显式设置 POOL_HISTORY_FRESH=1）`}）。
+只读页面，不含密钥。默认按「已结算局」倒序，点击表头排序。</p>
 </body></html>`
 }
