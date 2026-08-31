@@ -24,6 +24,38 @@
 - T3（`--eval-every`/`--eval-at`，commit 0f8d940）已落地默认 1 字节一致；主役暂用每轮 eval（门判节奏不变），需稀疏化时 `--eval-at` 显式指定。
 - T4 双缓冲：内存 OK（32GB），待主役稳态后另行评估（高 ROI：藏掉采集 500-850s/轮）。
 
+## §17.1 T4 双缓冲落地：两处隐式缺陷 + 端到端验证（2026-08-31，commit 85f3953）
+
+`--double-buffer` 冒烟全链路实测（`--iters 2 --stream 1 --seeds 1`，本机+集群）暴露两个让双缓冲
+**静默失效**的缺陷，修复后 2 轮端到端通过——
+
+1. **iter_id 格式崩分布式子进程**：`_run_collect_only` 的 `iter_id=f"collect-{it}-{pid}"`
+   撞 `run_rollout_queue` 的 `int(iter_id.rsplit('.',1)[-1])` → 每个 collect-only 子进程
+   ValueError 崩溃（rc=1），预采从未落盘。改 `f"{RUN_ID}.{it}"`（run_rl.py）。
+2. **本地路径漏 wver**：`run_rollout` 未给 export-rl-rollout.ts 传 `--wver`（队列 local slot
+   有传），本地 shard manifest 无 wver → 下一轮 `completed_pairs` 永不命中。已对齐补
+   `--wver`+`--node-label local`（rl/queue.py）。
+
+**端到端证据**（collect_wall 墙钟）：
+- it1（自采+PPO）：`collect_wall=155.2s` → 写回 → **spawn 子进程 pid=15500**（快照=最终权重）
+- it2：`dist resume: 1/1 planned pairs already on disk` → `collect_wall=6.6s`（采集墙钟
+  藏进上轮 PPO 尾段），PPO 直接消费子进程 shard（`loaded 1 RL shards from it2`）
+
+**对你（on-policy）问题的实证结论**：spawn 位于主循环唯一写回点（run_rl.py 638，steam 返回后
+= 所有 wave+tail-drain 完成）之后 → 快照恒为**整轮最终权重**；stream wave 只改内存 model 不落盘
+（节点采集权重 stream 启动时冻结）。集群采集再快也只是把 it N 提前收尾，够不到 it N+1 的预采
+权重。不变量已记 DECISIONS §301。
+
+**顺带修复/发现**：
+- 期间 `rl-config.json` 缺失（被 T0/T1 测试链弄丢）→ 主役一度全本地，已从 `tmp/rl-config.bak`
+  恢复；`load_dist_config` 每轮动态读，主役无需重启即重挂集群。
+- 节点升级恢复期 a95 偶发 ping failed / 404-409（"task lost / wver not cached"）——节点侧
+  状态问题，非 T4 逻辑；现在已在线。
+- 残留开销（非正确性）：`run_rollout_queue` round 收官贴 settled +~112s，collect-only 子进程
+  跟挂 ~2min。吞吐收益远大于此，暂不优化。
+
+**测试**：test_run_rl.py / test_train_loop_pure.py 全 PASS；pre-commit 全过（含 freeze gate）。
+
 ## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
 
 **用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与

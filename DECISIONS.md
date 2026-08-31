@@ -1314,3 +1314,26 @@ wDmg0.35/wDeath1.0/wAlive0.001，预注册臂，不新增第 4 臂）。旧 s3-c
 "存活复锚"风险（accuracy/mobility 连续退化则停，备选臂 survival 需用户再拍板）；
 lives/loot/accuracy 逐 settle 对照 S2 锚（0.997/0.577/0.590）。
 执行：`plan/s3-balanced-restart.md`（含 §3.4 验证与每 settle 必报表）。
+
+## §301 T4 双缓冲落地的两个隐式缺陷修复（2026-08-31，commit 85f3953）
+
+`plan/goal-nn-throughput.md` 的轻量版双缓冲（collect-only 子进程 + 行为快照 θ_N + 原子权重回写）
+冒烟实测发现两处让双缓冲**静默失效**的缺陷，修复后端到端验证通过——
+
+1. **iter_id 格式**：`_run_collect_only` 用 `f"collect-{it}-{pid}"`，而 `run_rollout_queue`
+   用 `int(iter_id.rsplit('.',1)[-1])` 解析迭代号 → 分布式路径下每个 collect-only 子进程
+   必 `ValueError` 崩溃（rc=1），预采产物从未落盘。改为 `f"{RUN_ID}.{it}"`。
+2. **本地路径缺 wver**：`run_rollout`（纯本地采集）传给 export-rl-rollout.ts 的命令漏
+   `--wver`（run_rollout_queue 的 local slot 有传）→ 本地 shard 的 manifest 无 wver →
+   主进程下一轮 `completed_pairs` 永不命中 → 预采作废、回退自采。补上与队列 local slot
+   一致的 `--wver` + `--node-label local`。
+
+**已确立的 spawn 时序不变量（重构禁止破坏）**：`_spawn_collect_next` 必须保持在
+「本轮最终写回 `args.out`（run_rl.py 638，唯一写回点）→ eval join → breaker」**之后**、
+「下一轮 PPO」之前。stream 的 wave 更新只改内存 model、从不写盘（节点采集权重在 stream
+启动时冻结），因此快照恒为"整轮所有 wave + tail-drain 完成后的最终权重"，与用户确认的
+on-policy 期望一致（不会用 wave1/epoch1 中间权重预采）。
+
+**已知残留开销（非正确性）**：`run_rollout_queue` 收官等待 settled 后 ~112s 才返回，
+collect-only 子进程会跟着多挂 ~2min（主进程 join 前子进程此窗口未写盘 → 命中晚）。其
+`round done` 于 `settled` 之后。吞吐收益（155s→6.6s 采集墙钟）已远大于此开销，暂不优化。
