@@ -171,6 +171,26 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
     return cand
 
 
+def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
+    """v3.11 竞速派档（纯函数，单测覆盖）：竞速副本只派给**快节点**，避免副本恰好落入
+    慢节点、竞速形同虚设（用户 2026-08-31 观察："两个副本都分派到慢速节点，不还是要等"）。
+
+    - 本机（local）：豁免（实测最快、无网络往返），永久参与竞速。
+    - 无速度样本（首轮/全空）：乐观放行——没数据时不该设门槛。
+    - 其余按 EWMA 耗时（speed 表，即各节点最近任务平均耗时）排序，取 top_n 快档；
+      不在快档的节点不参与竞速（慢节点对竞速是负资产）。
+    - 节点数 ≤ top_n：全员参与（退化回无门槛，正确）。"""
+    if nid == "local":
+        return True
+    if not speeds:
+        return True
+    ranked = sorted((v, k) for k, v in speeds.items() if k != "local")
+    if not ranked:
+        return True
+    tier = {k for _v, k in ranked[:top_n]}
+    return nid in tier
+
+
 def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
                       args, cfg: dict, iter_id: str,
                       on_result=None, local_slots_max: int | None = None,
@@ -567,7 +587,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     # 每任务副本数上限 tailFanoutDup 防无限复制；副本失败静默、成功到 seen
                     # 则丢弃（v3.7 既有 fan-out 语义）。本机槽被 local_suspend 让位时不竞速
                     # （让位语义 = 给 PPO 腾核，不抢尾流）。
-                    if not (nd is None and suspended) and inflight:
+                    # v3.11 竞速派档（用户 2026-08-31 观察"副本落到慢节点=白等"）：竞速名额
+                    # 只给 top-3 快节点（EWMA 耗时，speed 表）——慢节点不浪费竞速副本。
+                    if (not (nd is None and suspended) and inflight
+                            and race_tier_ok(speed, nd_id, 3)):
                         tail_cand = pick_tail_race(inflight, tail_fanout_dup)
                         if tail_cand is not None:
                             task = tail_cand

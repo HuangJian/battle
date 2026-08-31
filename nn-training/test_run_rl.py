@@ -663,6 +663,23 @@ def test_eval_local_gate(tmp: Path) -> None:
         ed.run_local_eval_game = orig
 
 
+def test_race_tier_ok() -> None:
+    """v3.11 竞速派档：慢节点不浪费竞速名额（用户"副本落到慢节点=白等"）。"""
+    from rl.queue import race_tier_ok
+
+    spd = {"a": 5.0, "b": 20.0, "c": 8.0, "d": 60.0, "e": 12.0}
+    # 按耗时升序：a(5) < c(8) < e(12) < b(20) < d(60) → top-3 = {a, c, e}
+    check(race_tier_ok(spd, "a", 3) is True, "fastest in top-3")
+    check(race_tier_ok(spd, "c", 3) is True, "2nd-fast in top-3")
+    check(race_tier_ok(spd, "e", 3) is True, "3rd-fast in top-3")
+    check(race_tier_ok(spd, "b", 3) is False, "4th-fast excluded (b=20)")
+    check(race_tier_ok(spd, "d", 3) is False, "slowest excluded (d=60)")
+    check(race_tier_ok(spd, "local", 3) is True, "local always races (no RPC)")
+    check(race_tier_ok({}, "a", 3) is True, "no speed data -> optimistic pass")
+    check(race_tier_ok({"a": 5.0, "b": 9.0}, "b", 3) is True,
+          "node count <= top_n -> all in tier (degenerate no-gate)")
+
+
 def test_pick_tail_race() -> None:
     """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
     from rl.queue import pick_tail_race
@@ -695,6 +712,7 @@ def main() -> None:
     test_backup_weights(tmp)
     test_eval_local_gate(tmp)
     test_pick_tail_race()
+    test_race_tier_ok()
     if ITEST:
         if not WEIGHTS.exists() or shutil.which("bun") is None:
             raise SystemExit("RUN_RL_ITEST=1 requires bun on PATH and tmp/rl-weights/weights.json")
