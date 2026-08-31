@@ -1303,3 +1303,14 @@ A8b（S4b 出口复核）保留 —— 若届时执行器已具备 S2/S3 技能�
 - 此决策**只改 S2 过门的判定口径**，不动方案 §2–§4 冻结的门数值；相对门（判据② 受伤 ≤1.2×锚 /
   判据③ 存活 ≥80%×锚）仍受 **P0-1 eval 遥测 bug 阻塞**，修 P0-1 后再补判，不阻塞进 S3。
 - 旧 `stage_clear` 口径作废**仅限 S2 过门判定**；S3 起若 BONUS 窗口仍是噪声源，沿用同一 `全歼率` 口径。
+
+## §300 S3 换臂 balanced，tmp/s3-cap2 新实验（2026-08-31，用户拍板"方案 B"）
+
+kill2 下"以命换击杀"正期望（wKill1.0 vs wDmg0.15，3 命缓冲）致 S3 lives 维度 0.758≪S2 锚
+0.997、accuracy 0.445<0.590，S3 相对门（受伤/存活/开火效率三项）按字面判负。依 §15.5 另开
+新实验 tmp/s3-cap2（BC = 旧 s3-cap it15 结算权重 **97d5990d32f6**，reward=toy:balanced
+wDmg0.35/wDeath1.0/wAlive0.001，预注册臂，不新增第 4 臂）。旧 s3-cap 曲线存档不续用；
+节点与场景（1020-1022，hard，3600tick，8 敌迷宫）不变。监控：balanced wAlive=0.001 的
+"存活复锚"风险（accuracy/mobility 连续退化则停，备选臂 survival 需用户再拍板）；
+lives/loot/accuracy 逐 settle 对照 S2 锚（0.997/0.577/0.590）。
+执行：`plan/s3-balanced-restart.md`（含 §3.4 验证与每 settle 必报表）。

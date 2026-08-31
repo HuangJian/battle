@@ -26,6 +26,8 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+// /pool 渲染（独立文件，2026-08-31 拆出——不在 dist codeHash 集，监控调整零升级波）
+import { poolNodes, renderPoolPage as poolRender } from './pool-page'
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -314,206 +316,18 @@ let activeServer: ReturnType<typeof Bun.serve> | null = null
 let pendingChildPid: number | null = null
 
 // ---------------- 节点池监控页（③，2026-08-30 用户指令） ----------------
-// 仅当本机配置了 nn-training/rl-config.json 的 nodes（= 主控机）时启用 /pool；
-// 远程节点机器无此配置 → 无此页面（无感）。只读、不渲染任何密钥。
-interface PoolNodeCfg {
-  id: string
-  url: string
-  authKey: string
-}
+// 实现已拆至独立文件 tools/agent/pool-page.ts（不在 dist codeHash 集内——
+// 节点监控调整不触发全节点升级波）。本文件只保留 GET /pool handler 接线。
 
-function loadPoolConfig(): PoolNodeCfg[] | null {
-  try {
-    const cfgPath = path.join(REPO_ROOT, 'nn-training', 'rl-config.json')
-    if (!fs.existsSync(cfgPath)) return null
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
-      nodes?: Array<{ id?: string; url: string; authKey?: string }>
-    }
-    const nodes = (cfg.nodes ?? [])
-      .filter((n) => n && typeof n.url === 'string')
-      .map((n) => ({ id: n.id || n.url, url: n.url, authKey: n.authKey ?? '' }))
-    return nodes.length > 0 ? nodes : null
-  } catch {
-    return null
-  }
-}
-
-const POOL_NODES: PoolNodeCfg[] | null = loadPoolConfig()
-
-interface NodeHistory {
-  ok: number
-  fail: number
-  lastTs: string
-  lastOkTs: string
-  lastFailTs: string
-  lastError: string
-  avgElapsedSec: number | null
-  elapsedSamples: number
-}
-
-function aggregateNodeHistory(): Map<string, NodeHistory> {
-  const hist = new Map<string, NodeHistory>()
-  const bump = (node: string): NodeHistory => {
-    let h = hist.get(node)
-    if (!h) {
-      h = {
-        ok: 0,
-        fail: 0,
-        lastTs: '',
-        lastOkTs: '',
-        lastFailTs: '',
-        lastError: '',
-        avgElapsedSec: null,
-        elapsedSamples: 0,
-      }
-      hist.set(node, h)
-    }
-    return h
-  }
-  let roots: string[] = []
-  try {
-    roots = fs
-      .readdirSync(path.join(REPO_ROOT, 'tmp'), { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => path.join(REPO_ROOT, 'tmp', d.name, 'dist-agent-meta.jsonl'))
-  } catch {
-    /* tmp missing */
-  }
-  roots.push(path.join(REPO_ROOT, 'tmp', 'dist-agent-meta.jsonl'))
-  for (const metaPath of roots) {
-    try {
-      if (!fs.existsSync(metaPath)) continue
-      for (const line of fs.readFileSync(metaPath, 'utf8').split(String.fromCharCode(10))) {
-        if (!line.trim()) continue
-        try {
-          const r = JSON.parse(line) as {
-            node?: string
-            ok?: boolean
-            elapsedSec?: number
-            ts?: string
-            reason?: string
-          }
-          if (!r.node) continue
-          const h = bump(r.node)
-          if (r.ok) {
-            h.ok++
-            const ts = r.ts ?? ''
-            if (ts >= h.lastOkTs) h.lastOkTs = ts
-            if (typeof r.elapsedSec === 'number' && r.elapsedSec > 0) {
-              const prevTotal = (h.avgElapsedSec ?? 0) * h.elapsedSamples
-              h.elapsedSamples++
-              h.avgElapsedSec = +((prevTotal + r.elapsedSec) / h.elapsedSamples).toFixed(1)
-            }
-          } else {
-            h.fail++
-            h.lastError = (r.reason ?? '').slice(0, 120)
-            if (r.ts && r.ts > h.lastFailTs) h.lastFailTs = r.ts
-          }
-          if (r.ts && r.ts > h.lastTs) h.lastTs = r.ts
-        } catch {
-          /* skip bad line */
-        }
-      }
-    } catch {
-      /* unreadable */
-    }
-  }
-  return hist
-}
-
-async function renderPoolPage(): Promise<string> {
-  const hist = aggregateNodeHistory()
-  const localHash = memoizedCodeHash()
-  const rows: string[] = []
-  if (POOL_NODES) {
-    const probes = await Promise.all(
-      POOL_NODES.map(async (n) => {
-        const started = Date.now()
-        try {
-          const resp = await fetch(`${n.url.replace(/\/$/, '')}/v1/ping`, {
-            headers: { Authorization: `Bearer ${n.authKey}` },
-            signal: AbortSignal.timeout(2500),
-          })
-          if (!resp.ok) return { n, ping: null, ms: Date.now() - started }
-          return {
-            n,
-            ping: (await resp.json()) as Record<string, unknown>,
-            ms: Date.now() - started,
-          }
-        } catch {
-          return { n, ping: null, ms: Date.now() - started }
-        }
-      }),
-    )
-    for (const { n, ping, ms } of probes) {
-      const h = hist.get(n.id) ?? {
-        ok: 0,
-        fail: 0,
-        lastTs: '-',
-        lastOkTs: '-',
-        lastFailTs: '-',
-        lastError: '',
-        avgElapsedSec: null,
-        elapsedSamples: 0,
-      }
-      const online = !!ping
-      const hashOk = online && String((ping as any)?.codeHash) === localHash
-      const status = online
-        ? hashOk
-          ? `<span style="color:#0a0">在线·代码同步</span>`
-          : `<span style="color:#c60">在线·代码旧（等待/请求升级）</span>`
-        : `<span style="color:#c00">不可达</span>`
-      const errCell = h.lastError
-        ? `<span style="color:#c00">${h.lastError}</span><br><span style="color:#999">${h.lastFailTs || ''}</span>`
-        : '-'
-      rows.push(
-        `<tr><td>${n.id}</td><td>${status}</td>` +
-          `<td>${online ? `${(ping as any)?.cpus ?? '?'} 核 / v${(ping as any)?.agentVersion?.slice(0, 7) ?? '?'}` : '-'}</td>` +
-          `<td data-v="${ping ? ms : 9999}">${ping ? `${ms}ms` : '-'}</td>` +
-          `<td data-v="${h.ok}" style="text-align:right">${h.ok}</td><td data-v="${h.fail}" style="text-align:right">${h.fail}</td>` +
-          `<td data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
-          `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
-          `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`,
-      )
-    }
-  }
-  const inflightRows = [...inflight.values()]
-    .map((v) => `s${v.stage}/seed${v.seed}（${((Date.now() - v.startedAt) / 1000).toFixed(0)}s）`)
-    .join('，')
-  const weightsRows =
-    [...weightsByKindSha.entries()].map(([kind, m]) => `${kind}×${m.size}桶`).join('，') || '—'
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="60">
-<title>sampler-agent 节点池</title></head>
-<body style="font-family:system-ui,sans-serif;margin:24px">
-<h2>节点池监控（每 60s 自动刷新）</h2>
-<p>本机 agent：workers=${workers}，在飞=${inflight.size}${inflightRows ? `（${inflightRows}）` : ''}，
-累计完成=${gamesDoneTotal}，权重桶=${weightsRows}${lastError ? `，<span style="color:#c00">lastError=${lastError}</span>` : ''}</p>
-<table border="1" cellpadding="6" cellspacing="0" id="pool" style="border-collapse:collapse;font-size:14px">
-<thead><tr style="background:#eee">
-<th onclick="sortTbl(0,this)">节点</th><th onclick="sortTbl(1,this)">状态</th><th onclick="sortTbl(2,this)">规格</th>
-<th onclick="sortTbl(3,this)">ping</th><th onclick="sortTbl(4,this)">已结算局</th><th onclick="sortTbl(5,this)">失败局</th>
-<th onclick="sortTbl(6,this)">平均耗时</th><th onclick="sortTbl(7,this)">最近成功</th><th onclick="sortTbl(8,this)">最近错误</th>
-</tr></thead>
-<tbody>${rows.join(String.fromCharCode(10))}</tbody>
-</table>
-<script>
-function sortTbl(col, th) {
-  const tb = document.querySelector('#pool tbody');
-  const rows = Array.from(tb.rows);
-  const dir = th.dataset.dir === 'asc' ? -1 : 1;
-  th.dataset.dir = dir === 1 ? 'asc' : 'desc';
-  rows.sort((a, b) => {
-    const av = a.cells[col].dataset.v ?? a.cells[col].innerText;
-    const bv = b.cells[col].dataset.v ?? b.cells[col].innerText;
-    const an = parseFloat(av), bn = parseFloat(bv);
-    const cmp = !isNaN(an) && !isNaN(bn) ? an - bn : String(av).localeCompare(String(bv));
-    return dir * cmp;
-  });
-  for (const r of rows) tb.appendChild(r);
-}
-</script>
-<p style="color:#666">数据源：dist-agent-meta.jsonl（tmp/* 各训练流聚合）+ 实时 ping。只读页面，不含密钥。点击表头排序（再点反转方向）。</p>
-</body></html>`
+function renderPoolPageLocal(): Promise<string> {
+  return poolRender({
+    workers,
+    inflight,
+    gamesDoneTotal,
+    weightsByKindSha,
+    lastError,
+    localHash: memoizedCodeHash,
+  })
 }
 
 // v3.7 权重按 kind 分桶：'rollout'（RL 采样权重）/ 'intent'（意图网络权重，供 intent-exec 评估）。
@@ -799,9 +613,9 @@ async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url)
   // 节点池监控页（③）：公开只读、无密钥渲染；仅主控机（配置含 nodes）有内容。
   if (req.method === 'GET' && (url.pathname === '/pool' || url.pathname === '/pool/')) {
-    if (!POOL_NODES)
+    if (!poolNodes())
       return new Response('pool page disabled (no nodes in rl-config.json)', { status: 404 })
-    return new Response(await renderPoolPage(), {
+    return new Response(await renderPoolPageLocal(), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     })
   }
