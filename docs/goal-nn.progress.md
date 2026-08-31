@@ -111,6 +111,23 @@ GRID/BASE_POS/CELL 未用导入 + GodAIParams 索引签名转换），否则 gat
 PPO（预采 152 shards 复用），eval 局面因 wver 去重只补 11/60 局（v3.12 晚入账生效
 的又一证据）。以 it17 收官 `ppo_sec` 对比 §17 基线验证提速。
 
+## §17.4 v3.13 提前预采首波：消灭 600s 串行 gap（2026-08-31，commit c1e33db/3ebf8d2）
+
+**触发**：用户 + 观察者指出 §17.1 双缓冲的 spawn 在 PPO **结束后**——预采 600s 纯串行
+（it13→14 gap 252s … it16→17 736s）。观察者建议提前到 PPO 开始（整轮 off-policy 不可取）；
+用户拍板"wave3 存盘 + 只采首波"方案（§305）。
+
+**落地 5 组件**（详见 DECISIONS §305）：
+- `ppo_update`/`ppo_update_intent` 加 `on_epoch_done(ep_done, model)` 回调（stream 透传）；
+- 主循环在 epoch≥epochs-1 时 `save_weights_json(model, snap)` + 提前 spawn（--precollect-early）；
+- `--precollect-games N` 限预采局数（首波 wave 语料，其余下轮 θ_N 现场采）；
+- 双 wver 对账（completed_pairs/resumed_manifests + queue + stream remaining）；
+- stream collector 启动前把在盘首波注入 pend（第一 wave 直接训练）。
+
+**实测**：I8 集成测试（预置首波 shard → 注入+跳过+全计划覆盖）三断言全过；修过 copyfile
+same-file bug（3ebf8d2）。重启后 it19 `resume: 85/150 + 65 remaining`（历史预采与现场补采
+混合，双 wver 对账正确）；it20 起稳态 = epoch4 藏首波预采 + 下轮现场补 3/4，串行 gap≈0。
+
 ## §16 🔴 HIGH 修复：cleared 传播到分布式 eval + 训练器 clearRate（2026-08-31 晨，用户审计项）
 
 **用户审计暴露的遗漏**（progress §15 高估了覆盖面）：§15 写"eval 同时报告 stage_clear 与

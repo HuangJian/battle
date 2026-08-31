@@ -1429,3 +1429,38 @@ it11 eval 20min 与 it11 PPO（~19min）重叠完成——eval 天然在训练�
 后台跑（is_alive()）——证明"不抢主链、后台消化"。修测点：eval_log 台账按 wver 去重，
 残留同 wver 记录会让 eval 全量 skip 早退 → I7 前清共享测试 tmp 的 eval_log.jsonl。
 I1–I7 全套 + 单测 + freeze gate 全过。
+
+## §305 v3.13 提前预采首波：epoch3 快照 spawn + 双 wver 对账 + stream 首波注入（2026-08-31，commit c1e33db/3ebf8d2）
+
+**问题（用户 + 观察者双重指出）**：v3.10 双缓冲 spawn 在 PPO **全部结束之后**（run_rl.py
+原 755 行），预采 600s 是**串行等待**（it13→14 实测 gap 252s … it16→17 736s），并未藏进
+PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0）PPO 前期权重=θ_{N-1}，
+提前 spawn 会整轮 off-policy。用户修正方案（2026-08-31 拍板）：**PPO epoch3/4 完成时**用
+当前权重（θ_{N,e3}，差最后一段梯度、on-policy 带内）存快照并 spawn，预采**只采下一轮首波**
+（--precollect-games 12 局），墙钟藏进最后 1 个 epoch；其余 ~138 局由下轮以 θ_N 严格现场采。
+
+**改动**：
+1. **epoch 完成回调**：ppo.py / ppo_intent.py 的 update 增加 `on_epoch_done(ep_done, model)`
+   （stream 透传给 backend.update）。主循环回调在 `ep_done >= epochs - precollect_early` 时
+   `save_weights_json(model, weights-collect-{it+1}.json)` + `_spawn_collect_next(snap_src=…)`。
+2. **预采限局**：`--precollect-games N` — collect-only 子进程只采前 N 局（首波 wave 语料）。
+3. **双 wver 对账**：`completed_pairs/resumed_manifests` 增加 `extra_wver`（预采快照 θ_{N,e3}
+   指纹）；主循环 `_precollect_snapshot_wver` 回读 weights-collect-{it}.json → 下轮对账双白名单，
+   否则预采首波被当"未完成" rmtree 清场。run_rollout_queue 同样透传（stream 的 collector）。
+4. **stream 首波注入**：collector 启动前把盘上 extra_wver 匹配的首波 shard 注入 pend（作为
+   第一 wave 语料），collector 对账跳过它只现场补采剩余局——两批语料本轮都被训练。
+5. **尾部 spawn 防重复**：`_spawned_early` 置位后循环尾不重复 spawn（避免双 spawn 同快照）。
+
+**修测点（3ebf8d2）**：提前 spawn 时调用方已 `save_weights_json` 写好目标文件，`_spawn_collect_next`
+内部 `copyfile(snap_src, snap)` 因 src==snap 抛 same-file → precollect 静默失败。改：abs 路径相同则
+跳过 copy 直接复用。
+
+**集成测试 I8**：盘上预置 extra_wver 首波 shard → run_rollout_stream 应 ①注入训练（seed pend）、
+②collector 只派剩余局（dispatch 不含首波对）、③报告覆盖全计划（games==2）。实测三断言全过。
+
+**实测（重启后 it19）**：`resume: 85/150 已在盘 + 65 remaining`——历史预采与现场补采混合，对账
+（含 extra_wver）正确识别；it20 起将出现"提前 spawn 藏进 epoch4 + 只采 12 局首波"的稳态行为。
+
+**语义说明**：首波 12 局用 θ_{N,e3}（≈θ_N，kl 通常 <0.02，PPO clip 0.2 带内），IS 分母取
+快照采样的 lp（on-policy 数学不破坏）；剩余 3/4 严格 θ_N。失败救济 = 只废弃 12 局（而非全量）。
+训练曲线与历史有轻微口径差异（首波半代滞后），记 DECISIONS 备案。
