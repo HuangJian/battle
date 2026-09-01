@@ -88,6 +88,16 @@ def target_typecheck() -> int:
     return run([PYTHON, "-m", "mypy", ".", "--config-file", str(HERE / "pyproject.toml")])
 
 
+def target_weights_prune(dry_run: bool = True) -> int:
+    cmd = [PYTHON, "weights_prune.py", "--keep", "3", "--dir", "weights/"]
+    cmd += ["--dry-run" if dry_run else "--apply"]
+    return run(cmd)
+
+
+def target_weights_update_md() -> int:
+    return run([PYTHON, "weights_prune.py", "--dir", "weights/", "--update-md"])
+
+
 TARGETS = {
     "check": target_check,
     "test": target_test,
@@ -97,6 +107,9 @@ TARGETS = {
     "format": target_format,
     "lint": target_lint,
     "typecheck": target_typecheck,
+    "weights-prune": lambda: target_weights_prune(dry_run=True),
+    "weights-prune-apply": lambda: target_weights_prune(dry_run=False),
+    "weights-update-md": target_weights_update_md,
 }
 
 
