@@ -1,9 +1,10 @@
 """test_run_rl.py — run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
 
 两层：
-  快速层（默认）：纯逻辑 + 磁盘 fixture —— parse_range / build_pairs（确定性、
-      sps 变更重叠性质） / combine_reports / completed_pairs+resumed_manifests
-      （only/exclude 口径） / last_completed_iter / last_rotate_seed。
+  快速层（默认）：已迁移到 tests/ 独立文件（test_rl_course / test_rl_reports /
+      test_rl_breaker / test_rl_stream / test_rl_resume）。本文件仅保留
+      集成层与无法拆出的 fixture-重测试（mirror / resume / jsonl / compute_gae /
+      chunk / backup / eval_local_gate / race-tier）。
   集成层（RUN_RL_ITEST=1）：本地假 HTTP agent 节点驱动真 run_rollout_queue /
       run_rollout_stream —— 正常流、halt 流、派发队列清空回调的触发与次序。
 
@@ -56,43 +57,6 @@ def check(cond: bool, msg: str) -> None:
         _ = global_n
 
 
-def bp_args(sps: int, rotate_stages: int = 35, total_stages: int = 35):
-    return types.SimpleNamespace(
-        rotate_stages=rotate_stages,
-        seeds_per_stage=sps,
-        total_stages=total_stages,
-        stages="0-3",
-        seeds="0-3",
-    )
-
-
-# ---------------- 快速层 ----------------
-
-
-def test_parse_range() -> None:
-    print("[fast] parse_range")
-    check(run_rl.parse_range("0-3") == [0, 1, 2, 3], "range expansion")
-    check(run_rl.parse_range("0,2,5") == [0, 2, 5], "comma list")
-    check(run_rl.parse_range("0-1,4") == [0, 1, 4], "mixed")
-    check(run_rl.parse_range("7") == [7], "single")
-
-
-def test_build_pairs() -> None:
-    print("[fast] build_pairs")
-    a = run_rl.build_pairs(bp_args(3), 60, 1787503550)
-    b = run_rl.build_pairs(bp_args(3), 60, 1787503550)
-    check(a == b and len(a) == 105, "deterministic per (rotateSeed, it); size=35x3")
-    c = run_rl.build_pairs(bp_args(3), 61, 1787503550)
-    check(a != c, "different it -> different draw")
-    # it60 实测回归：sps 4->3 只改变每关种子索引窗，底流前缀一致，
-    # 仅置换前三关相交，重合数恒为 3+2+1=6。
-    old = run_rl.build_pairs(bp_args(4), 60, 1787503550)
-    inter = set(old) & set(a)
-    check(len(inter) == 6, f"sps 4->3 overlap == 6 (got {len(inter)})")
-    perm = [24, 1, 33]  # 该 rotateSeed/it 的置换前三关
-    check(all(st in perm for st, _sd in inter), "overlap confined to first 3 perm stages")
-
-
 def test_mirror_scalar_lockstep() -> None:
     """M2 镜像索引锁步：SCALAR_X_INDICES 已迁移为 [15,18]（v2 重编号）——
     mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
@@ -101,8 +65,12 @@ def test_mirror_scalar_lockstep() -> None:
 
     check(SCALAR_X_INDICES == [15, 18], f"SCALAR_X_INDICES == [15,18] (got {SCALAR_X_INDICES})")
     n = 26
-    obs = np.zeros((1, 14, n, n), dtype=np.uint8)
-    sc = np.zeros(SCALAR_DIM, dtype=np.float32)
+    # mirror_x expects (C, H, W) — the trailing (1,) batch dim was a historic typo.
+    obs = np.zeros((14, n, n), dtype=np.uint8)
+    # Buffer must span legacy slot 23 even when SCALAR_DIM (<24) has dropped those
+    # indices — mirror_x only mutates SCALAR_X_INDICES=[15,18], so dead-slot
+    # assertions are reachable for every SCALAR_DIM.
+    sc = np.zeros(max(SCALAR_DIM, 24), dtype=np.float32)
     sc[15] = 0.5  # nearestEnemyRelX → 翻转
     sc[18] = -0.25  # nearestBaseRelX → 翻转
     sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
@@ -113,70 +81,6 @@ def test_mirror_scalar_lockstep() -> None:
     check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
     check(abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)")
     check(abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)")
-
-
-def test_curriculum() -> None:
-    print("[fast] curriculum_active_count + build_pairs curriculum mode")
-    # 纯函数时间驱动扩展：start → 每 every 轮后 +grow → 封顶（首扩发生在 it=every+1）
-    check(run_rl.curriculum_active_count(35, 1, 4, 8, 4) == 4, "it1 = start")
-    check(run_rl.curriculum_active_count(35, 8, 4, 8, 4) == 4, "it8 still first window")
-    check(run_rl.curriculum_active_count(35, 9, 4, 8, 4) == 8, "it9 = start+grow")
-    check(run_rl.curriculum_active_count(35, 17, 4, 8, 4) == 12, "it17 = start+2*grow")
-    check(run_rl.curriculum_active_count(6, 100, 4, 8, 4) == 6, "caps at order_len")
-    check(run_rl.curriculum_active_count(35, 1, 4, 0, 4) == 4, "every=0 never expands")
-    # build_pairs 课程模式：激活窗口是排序前缀，且随 it 扩展；种子 (rotateSeed,it) 确定
-    ca = types.SimpleNamespace(
-        curriculum_stages="13,1,16,8,21,4",
-        seeds_per_stage=3,
-        curriculum_start=2,
-        curriculum_every=5,
-        curriculum_grow=2,
-        rotate_stages=0,
-        total_stages=35,
-        stages="0-3",
-        seeds="0-3",
-    )
-    p1 = run_rl.build_pairs(ca, 1, 4242)
-    p2 = run_rl.build_pairs(ca, 1, 4242)
-    check(p1 == p2 and len(p1) == 2 * 3, "curriculum deterministic; it1 = 2 stages x 3 seeds")
-    check({st for st, _sd in p1} == {13, 1}, "it1 active = first 2 stages of ordering")
-    p6 = run_rl.build_pairs(ca, 6, 4242)
-    check({st for st, _sd in p6} == {13, 1, 16, 8}, "it6 expanded to first 4 stages")
-    check(len(p6) == 4 * 3, "it6 = 4 stages x 3 seeds")
-
-
-def test_combine_reports() -> None:
-    print("[fast] combine_reports")
-    r1 = {
-        "games": 2,
-        "winRate": 0.5,
-        "outcomes": {"stage_clear": 1, "base_destroyed": 1},
-        "totalSamples": 100,
-        "totalTicks": 200,
-        "scoreList": [0.1, 0.3],
-        "dimLists": {"progress": [0.2, 0.4]},
-    }
-    r2 = {
-        "games": 1,
-        "winRate": 0.0,
-        "outcomes": {"base_destroyed": 1},
-        "totalSamples": 50,
-        "totalTicks": 90,
-        "scoreList": [0.2],
-        "dimLists": {"progress": [0.1]},
-        "elapsedSec": 1.0,
-    }
-    comb = run_rl.combine_reports([r1, r2])
-    check(
-        comb["games"] == 3 and comb["totalSamples"] == 150 and comb["totalTicks"] == 290,
-        "counts summed",
-    )
-    check(comb["winRate"] == round(1 / 3, 4), "winRate recomputed across workers")
-    check(
-        len(comb["scoreList"]) == 3 and abs(comb["scoreStats"]["mean"] - 0.2) < 1e-9,
-        "scoreList merged + stats",
-    )
-    check(comb["dimMeans"]["progress"] == round((0.2 + 0.4 + 0.1) / 3, 4), "dimMeans merged")
 
 
 def _mk_shard(traj: Path, stage: int, seed: int, wver: str, *, aggregate: bool = False) -> None:
@@ -707,41 +611,6 @@ def test_integration(tmp: Path) -> None:
         srv.shutdown()
 
 
-def test_breaker_update() -> None:
-    from rl.breaker import breaker_update
-
-    print("[fast] breaker_update (F4 纯逻辑)")
-    # KL 规则：连续 3 轮 ≥0.15 触发；中间一轮回落即清零
-    s = breaker_update(0, 0, kl=0.16, entropy=1.2, win_rate=0.9)
-    check(s[:2] == (1, 0) and s[2] is None, "KL streak advances, no early trip")
-    s = breaker_update(s[0], s[1], kl=0.16, entropy=1.2, win_rate=0.9)
-    check(s[0] == 2 and s[2] is None, "KL streak 2")
-    s = breaker_update(s[0], s[1], kl=0.16, entropy=1.2, win_rate=0.9)
-    check(s[0] == 3 and s[2] is not None and "kl>=0.15" in s[2], "KL trips at 3rd consecutive")
-    reset = breaker_update(2, 0, kl=0.01, entropy=1.2, win_rate=0.9)
-    check(reset[0] == 0 and reset[2] is None, "good iter resets KL streak")
-    # ENT 规则：低熵 + 低胜率护栏；高胜率策略永不误停
-    e = breaker_update(0, 7, kl=0.01, entropy=0.55, win_rate=0.3)
-    check(e[1] == 8 and e[2] is not None and "entropy<=" in e[2], "ENT trips at 8th consecutive")
-    guard = breaker_update(0, 0, kl=0.01, entropy=0.4, win_rate=0.9)
-    check(guard[1] == 0 and guard[2] is None, "high winRate guards ENT rule")
-
-
-def test_wave_params() -> None:
-    from rl.stream import wave_params
-
-    print("[fast] wave_params (软降档 + 残局上限)")
-    check(wave_params(0.0, 0.12, 12, 24) == (12, 24), "normal zone unchanged")
-    check(wave_params(0.0839, 0.12, 12, 24) == (12, 24), "below 70% cap unchanged")
-    check(wave_params(0.0841, 0.12, 12, 24) == (4, 8), "soft zone shrinks to floor")
-    check(wave_params(0.5, 0.12, 3, 3) == (4, 4), "floors at 4 even with tiny config")
-    # 残局上限（it63 教训：只剩 2 局却要等满阈值 4 → 静默空等收官）
-    check(wave_params(0.0, 0.12, 12, 24, remaining=2) == (2, 2), "remaining caps threshold+cap")
-    check(wave_params(0.0, 0.12, 12, 24, remaining=50) == (12, 24), "larger remaining ignored")
-    check(wave_params(0.0841, 0.12, 12, 24, remaining=2) == (2, 2), "soft zone + tiny remaining")
-    check(wave_params(0.0841, 0.12, 12, 24, remaining=6) == (4, 6), "soft zone capped by remaining")
-
-
 def test_compute_gae() -> None:
     import numpy as np
     import ppo as ppo_mod
@@ -998,14 +867,9 @@ def main() -> None:
         print(f"[skip-integration] missing weights fixture: {WEIGHTS}")
     tmp = REPO / "tmp" / "test-run-rl"
     tmp.mkdir(parents=True, exist_ok=True)
-    test_parse_range()
-    test_build_pairs()
-    test_curriculum()
-    test_combine_reports()
+    test_mirror_scalar_lockstep()
     test_resume_scope(tmp)
     test_jsonl_anchors(tmp)
-    test_breaker_update()
-    test_wave_params()
     test_compute_gae()
     test_chunk_episodes()
     test_backup_weights(tmp)
