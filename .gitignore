@@ -36,3 +36,4 @@ tools/agent/agent.auth
 *.lock
 *.lock.*
 *.log
+nn-training/rl-config.json
