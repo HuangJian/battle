@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 
 def parse_range(s: str) -> list[int]:
@@ -28,7 +29,7 @@ def curriculum_active_count(order_len: int, it: int, start: int, every: int, gro
     return min(order_len, n)
 
 
-def build_pairs(args, it: int, rotate_seed: int) -> list[tuple[int, int]]:
+def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     """Game pairs for iteration `it` — 纯函数 of (rotateSeed, it)，与调用顺序无关。
 
     2026-08-24 it5 重跑事故根因：旧实现从单一连续流按调用顺序抽签，重启后 it5

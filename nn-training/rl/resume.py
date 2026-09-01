@@ -19,7 +19,7 @@ def completed_pairs(traj_dir: Path, wver: str,
     return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver)}
 
 
-def _scan_shards(traj_dir: Path, wver: str, extra_wver: str | None = None):
+def _scan_shards(traj_dir: Path, wver: str, extra_wver: str | None = None) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
     """
