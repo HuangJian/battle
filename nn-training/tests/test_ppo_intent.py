@@ -92,7 +92,7 @@ def test_variable_dt_differs() -> None:
     check(bool(np.all(dt >= 1)) and bool(np.all(dt <= 50)), "dt 范围合法")
 
 
-def test_rl_net_roundtrip_value_head() -> None:
+def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     """IntentRLNet 含 value 头：export/load 往返 + 主干 shape 断言（预注册 #8）。"""
     torch.manual_seed(3)
     m = ppo_intent.IntentRLNet(h=64, d=8)
@@ -116,7 +116,7 @@ def test_rl_net_roundtrip_value_head() -> None:
     check(not torch.equal(va, vb), "value 输出随注入变化（value 看到承诺状态）")
 
     # export/load 往返。
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
         p = os.path.join(td, "w.json")
         export_intent_weights(m, p)
         meta, params = load_weights_json(p)
@@ -225,10 +225,12 @@ def test_ppo_update_smoke() -> None:
 
 
 def main() -> None:
+    # 手动运行入口：临时目录放项目内 tmp/（与 pytest basetemp 同区，避免碰系统 %TEMP% 触发沙箱权限）
+    _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parent.parent / 'tmp' / 'manual-tests'))
     print("== test_ppo_intent ==")
     test_dt1_degradation()
     test_variable_dt_differs()
-    test_rl_net_roundtrip_value_head()
+    test_rl_net_roundtrip_value_head(Path(_td))
     test_ppo_update_smoke()
     print(f"== {'PASS' if not FAILS else 'FAIL'} ({len(FAILS)} failures) ==")
     for m in FAILS:

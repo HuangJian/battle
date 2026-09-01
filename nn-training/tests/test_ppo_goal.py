@@ -70,8 +70,8 @@ def test_variable_dt_differs() -> None:
     check(not np.array_equal(a1, a2), "变步长: dt∈[60,240] 与 dt≡1 的 adv 不同")
 
 
-def test_goal_net_roundtrip() -> None:
-    with tempfile.TemporaryDirectory() as td:
+def test_goal_net_roundtrip(tmp_path: Path) -> None:
+    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
         path = os.path.join(td, "goal.json")
         m = ppo_goal.GoalRLNet(h=32, d=2)
         export_goal_weights(m, path)
@@ -222,10 +222,12 @@ def test_ppo_update_smoke() -> None:
 
 
 def main() -> None:
+    # 手动运行入口：临时目录放项目内 tmp/（与 pytest basetemp 同区，避免碰系统 %TEMP% 触发沙箱权限）
+    _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parent.parent / 'tmp' / 'manual-tests'))
     print("== test_ppo_goal ==")
     test_dt1_degradation()
     test_variable_dt_differs()
-    test_goal_net_roundtrip()
+    test_goal_net_roundtrip(Path(_td))
     test_coarse_logsumexp()
     test_policy_logprobs_dims()
     test_ppo_update_smoke()

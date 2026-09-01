@@ -185,30 +185,37 @@ def main():
         for bi in order:
             e = episodes[bi]
             tgt, valid = target_chunks[bi]
-            obs = torch.from_numpy(e["obs"]).to(device)
-            sc = torch.from_numpy(e["scalars"]).to(device)
-            inj = torch.from_numpy(e["inject"]).to(device)
-            tgtT = torch.from_numpy(tgt).to(device)
-            validT = torch.from_numpy(valid).to(device)
-            wT = torch.from_numpy(weight_chunks[bi]).to(device)
-            eng = torch.from_numpy(e["engage"]).to(device)
+            wgt = weight_chunks[bi]
+            n = e["obs"].shape[0]
+            # --mb 生效（P2-6a 修复）：此前 --mb 定义后从未使用，更新单位恒为整
+            # episode，batch size 完全不受控。按 mb 切片后每个 minibatch 一次梯度。
+            mb = max(1, args.mb)
+            for s in range(0, n, mb):
+                sl = slice(s, s + mb)
+                obs = torch.from_numpy(e["obs"][sl]).to(device)
+                sc = torch.from_numpy(e["scalars"][sl]).to(device)
+                inj = torch.from_numpy(e["inject"][sl]).to(device)
+                tgtT = torch.from_numpy(tgt[sl]).to(device)
+                validT = torch.from_numpy(valid[sl]).to(device)
+                wT = torch.from_numpy(wgt[sl]).to(device)
+                eng = torch.from_numpy(e["engage"][sl]).to(device)
 
-            sp, h = model.spatial(obs, sc)
-            goal_logits = model.goal_conv(sp).flatten(1)  # (n,676)
-            hi = torch.cat([h, inj], dim=1)
-            engage_logits = model.engage_head(hi)
+                sp, h = model.spatial(obs, sc)
+                goal_logits = model.goal_conv(sp).flatten(1)  # (n,676)
+                hi = torch.cat([h, inj], dim=1)
+                engage_logits = model.engage_head(hi)
 
-            logp = F.log_softmax(goal_logits, dim=-1)
-            ce = -(tgtT * logp).sum(dim=-1)  # 软目标 CE（全 676 维稀疏）
-            ce = (ce * validT * wT).sum() / torch.clamp((validT * wT).sum(), min=1.0)
-            engage_loss = F.cross_entropy(engage_logits, eng)
-            loss = ce + args.engage_coef * engage_loss
+                logp = F.log_softmax(goal_logits, dim=-1)
+                ce = -(tgtT * logp).sum(dim=-1)  # 软目标 CE（全 676 维稀疏）
+                ce = (ce * validT * wT).sum() / torch.clamp((validT * wT).sum(), min=1.0)
+                engage_loss = F.cross_entropy(engage_logits, eng)
+                loss = ce + args.engage_coef * engage_loss
 
-            opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            ep_losses.append(float(loss.item()))
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                ep_losses.append(float(loss.item()))
         mean_loss = sum(ep_losses) / max(1, len(ep_losses))
         all_losses.extend(ep_losses)
         now = time.time()

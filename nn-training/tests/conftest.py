@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import types
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,7 +31,12 @@ def bp_args(sps: int = 3, rotate_stages: int = 35, total_stages: int = 35,
 
 
 @pytest.fixture
-def tmp() -> Iterator[Path]:
-    """Legacy test_run_rl.py compat: mirrors pytest's tmp_path API used across tests."""
-    with tempfile.TemporaryDirectory() as d:
-        yield Path(d)
+def tmp(tmp_path: Path) -> Iterator[Path]:
+    """Legacy test_run_rl.py compat.
+
+    2026-09-02 改为直接复用 pytest 内置 tmp_path：此前用
+    `tempfile.TemporaryDirectory()` 在系统 %TEMP% 创建/删除临时目录，叠加 pytest
+    启动时的 basetemp 垃圾回收，每次跑测试都触发沙箱删除权限请求。现在 basetemp
+    已配置到项目内 tmp/pytest-tmp（pyproject.toml），一切临时文件都在工作区内。
+    """
+    yield tmp_path

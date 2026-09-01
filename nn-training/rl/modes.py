@@ -7,7 +7,7 @@ DECISIONS §307 三模式基础设施（RL 入口整合 2026-09-01）：
 
 常量
   _MODES             合法 --mode 值的元组
-  _MODE_BACKENDS     模式 → PPO 后端模块 的注册表（契约见 **rl/backend.py** 的
+  _MODE_BACKEND_NAMES 模式 → PPO 后端模块名 的注册表（契约见 **rl/backend.py** 的
                      RolloutBackend Protocol：load_episode_from_shard /
                      chunk_episodes / update / load_episodes / _ppo_load 五者，
                      且 update 必须接受 stream.py 注入的 ckpt_path / on_epoch_done；
@@ -18,24 +18,27 @@ DECISIONS §307 三模式基础设施（RL 入口整合 2026-09-01）：
   resolve_mode()         两阶段 argparse 第一阶段：从 argv 预解析 --mode / --goal
   apply_mode_flags()     按 --mode 置位采集器/权重桶 flag（--goal 别名 → goal）
   merged_mode_args()     配置块合并（rl.<mode> → intent_rl(legacy) → rl）
+  get_backend()          模式 → PPO 后端模块（**延迟导入**——见下）
+
+**延迟导入（B7，2026-09-02）**：本模块原先顶层 `import ppo.{engine,goal,intent}`，
+而它们 import torch。`run_rl.py --collect-only` 子进程只需采样（不碰 torch），却因
+import 链白白支付 torch 加载（CPU 上 3~8s/轮）。改为按需 `importlib.import_module`：
+import 本模块不再触发 torch 加载；`collect-only` 路径全程零 torch（rl/course、
+rl/queue、dist_common 均 stdlib-only）。
 """
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
-from typing import Any
-
-import ppo.engine as ppo_mod
-import ppo.goal as ppo_goal
-import ppo.intent as ppo_intent
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _MODES: tuple[str, ...] = ("per-tick", "intent", "goal")
-_MODE_BACKENDS: dict[str, Any] = {
-    "per-tick": ppo_mod,
-    "intent": ppo_intent,
-    "goal": ppo_goal,
+_MODE_BACKEND_NAMES: dict[str, str] = {
+    "per-tick": "ppo.engine",
+    "intent": "ppo.intent",
+    "goal": "ppo.goal",
 }
 _MODE_BACKUP_PREFIX: dict[str, str] = {
     "per-tick": "rl-weights",
@@ -43,6 +46,11 @@ _MODE_BACKUP_PREFIX: dict[str, str] = {
     "goal": "goal-rl-weights",
 }
 DEFAULT_EVAL_AT_INTENT = "5,10,15"
+
+
+def get_backend(mode: str):
+    """模式 → PPO 后端模块（延迟导入；importlib 缓存，重复调用零开销）。"""
+    return importlib.import_module(_MODE_BACKEND_NAMES[mode])
 
 
 def resolve_mode(argv: list[str]) -> str:

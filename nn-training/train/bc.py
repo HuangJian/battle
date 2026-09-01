@@ -34,12 +34,14 @@ import argparse
 import datetime
 import math
 import os
+import random
 import shutil
 import subprocess
 import sys
 import time
 from collections import Counter
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -183,7 +185,13 @@ def _sanitize_json(o):
 
 
 def train(args) -> dict:
+    # P2-3（2026-09-02）：可复现性补全——此前只有 torch.manual_seed，numpy/random
+    # 全局 RNG 未播种（_majority_baseline 的 Counter 顺序、DataLoader worker 内
+    # mirrorX 增强的 np rng 依赖全局状态时会漂移）。train DataLoader 的 shuffle
+    # 已用独立 generator（data/dataset.py），此处播种保证其余随机源可复现。
     torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
     train_dl, val_dl, sizes = make_loaders(
         args.data_dir, args.batch, args.val_split, args.mirror_p, args.seed, args.num_workers
     )
@@ -269,7 +277,7 @@ def train(args) -> dict:
                 v["ma"] += _masked_acc(lm, mv, mm) * obs.shape[0]
                 v["fa"] += _masked_acc(lf, fr, mf) * obs.shape[0]
         val_loss = v["loss"] / max(1, v["n"])
-        ma, fa = v["ma"] / v["n"], v["fa"] / v["n"]
+        ma, fa = v["ma"] / max(1, v["n"]), v["fa"] / max(1, v["n"])  # P2-3：--val-split 0 时 v["n"]==0
         vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
         history["train_loss"].append(round(train_loss, 4))
         history["val_loss"].append(round(val_loss, 4))

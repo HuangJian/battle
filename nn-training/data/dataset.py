@@ -29,6 +29,8 @@ if _ilu.find_spec("schema") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
+import random
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
@@ -146,8 +148,24 @@ def make_loaders(
     seed: int = 1234,
     num_workers: int = 0,
 ):
-    """Build train/val DataLoaders from a directory of npy shards."""
+    """Build train/val DataLoaders from a directory of npy shards.
+
+    可复现性（P2-3，2026-09-02）：train DataLoader 的 shuffle 使用**独立
+    generator**（seed+1），不再消费 torch 全局 RNG——否则调用方在训练前迭代
+    loader（如 _majority_baseline）会改变训练批次顺序。num_workers>0 时
+    worker_init_fn 在（Windows spawn 的）worker 进程内播种，增强可复现。
+
+    **shard 级切分（P2-6d，2026-09-02）**：语料带 shard_ids 时按**整 shard**切分
+    train/val（同局相邻帧不再跨集 → val 不再虚高）。无 shard_ids 的旧语料回退
+    样本级 random_split。
+    """
     from data.npyio import load_dataset
+
+    def _worker_init(wid: int) -> None:
+        # Windows spawn：worker 是全新进程，必须重新播种（torch/numpy/random 全种）
+        np.random.seed(seed + 1000 + wid)
+        random.seed(seed + 2000 + wid)
+        torch.manual_seed(seed + 3000 + wid)
 
     data = load_dataset(data_dir)
     full = NNDataset(data, augment=False)
@@ -155,13 +173,47 @@ def make_loaders(
     n_val = int(n * val_split)
     n_tr = n - n_val
     gen = torch.Generator().manual_seed(seed)
-    train_sub, val_ds = random_split(full, [n_tr, n_val], generator=gen)
-    # Re-wrap so augmentation only applies to the training split.
-    train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed)
+    shard_ids = data.get("shard_ids")
+    if shard_ids is not None:
+        # P2-6d：shard 级切分——val 取整 shard，样本数累计 ≥ n_val 即停
+        n_shards = int(shard_ids.max()) + 1
+        shard_sizes = [int((shard_ids == s).sum()) for s in range(n_shards)]
+        val_shards: list[int] = []
+        acc = 0
+        for s in torch.randperm(n_shards, generator=gen).tolist():
+            if val_shards and acc >= n_val:
+                break
+            val_shards.append(s)
+            acc += shard_sizes[s]
+        val_mask = np.isin(shard_ids, val_shards)
+        tr_idx = np.flatnonzero(~val_mask)
+        val_idx = np.flatnonzero(val_mask)
+        train_ds = _AugWrapper(data, tr_idx.tolist(), mirror_p, seed)
+        val_ds = torch.utils.data.Subset(full, val_idx.tolist())
+        # sizes 用**实际**切分大小（shard 级切分后 val 是整 shard，可能略超 n_val）
+        sizes = {"train": len(train_ds), "val": len(val_ds), "total": n}
+    else:
+        # 旧语料（无 shard 元数据）：样本级 random_split
+        train_sub, val_ds = random_split(full, [n_tr, n_val], generator=gen)
+        train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed)
+        sizes = {"train": n_tr, "val": n_val, "total": n}
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers),
-        DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers),
-        {"train": n_tr, "val": n_val, "total": n},
+        DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            generator=torch.Generator().manual_seed(seed + 1),  # P2-3：独立于全局 RNG
+            worker_init_fn=_worker_init,
+        ),
+        DataLoader(
+            val_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            worker_init_fn=_worker_init,
+        ),
+        sizes,
     )
 
 

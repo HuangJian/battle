@@ -63,9 +63,19 @@ def _b64_to_tensor(b64: str, shape: list[int]) -> torch.Tensor:
 def save_weights_json(
     model: torch.nn.Module, path: str, extra_meta: dict[str, Any] | None = None
 ) -> None:
-    """Write the model weights in the JSON+base64 format (plan §5)."""
+    """Write the model weights in the JSON+base64 format (plan §5).
+
+    P2-6c（2026-09-02）：序列化前检查**非有限值**（NaN/Inf）。权重文件是 TS 运行时
+    的逐字节消费对象，NaN 会让浏览器端推理静默跑歪（且经 base64 编码后无任何告警）。
+    训练发散产 NaN 是严重信号——fail fast 优于写出坏文件。
+    """
     params: dict[str, Any] = {}
     for name, p in model.state_dict().items():
+        if not torch.isfinite(p).all():
+            raise ValueError(
+                f"[weights] 参数 {name} 含非有限值（NaN/Inf）——拒绝写出坏权重；"
+                f"请检查训练是否发散（loss/gnorm 爆炸），不要用坏权重续跑"
+            )
         params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
     meta = {
         "format": "nn-weights-json",

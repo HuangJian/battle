@@ -47,20 +47,17 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-import torch
+if TYPE_CHECKING:  # build_model 返回注解（future annotations 下不运行时求值）
+    import torch
 
+# 注意（B7，2026-09-02）：本文件**顶层不 import torch / ppo.* / models.**——它们是
+# 训练路径的依赖，而 `--collect-only` 子进程只采样不训练。若顶层加载 torch，
+# 每个双缓冲预采子进程白白支付 3~8s 的 torch import（run_rl.py:912 的注释正是
+# 如此声称，但此前实现并未兑现）。torch 相关 import 一律延迟到 build_model() /
+# main() 内（rl/modes.get_backend 与 rl/stream 的默认后端同样延迟）。
 import dist_common
-import ppo.engine as ppo_mod
-import ppo.goal as ppo_goal
-import ppo.intent as ppo_intent
-from data.weights_io import load_state_into, save_weights_json
-from models.goal_net import GoalNet
-from models.intent_net import IntentNet
-from models.student import PPOStudent
-
-# Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.archive import backup_weights, ensure_current_branch_pushed
 from rl.breaker import (
@@ -83,11 +80,11 @@ from rl.eval_m1 import (
 # rl/ 包：编排逻辑单点实现（本文件以下仅存 CLI + 主循环 + 权重归档/巡检）
 from rl.log import log
 from rl.modes import (
-    _MODE_BACKENDS,
     _MODE_BACKUP_PREFIX,
     _MODES,
     DEFAULT_EVAL_AT_INTENT,
     apply_mode_flags,
+    get_backend,
     merged_mode_args,
     resolve_mode,
 )
@@ -103,7 +100,6 @@ from rl.resume import (
     last_rotate_seed,
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
-from rl.stream import run_rollout_stream
 
 
 # Per-iteration weights archive (user request 2026-08-24): every completed PPO
@@ -424,9 +420,23 @@ def build_model(
       - per-tick：DAgger BC warm-start + A4 trunk 校准归一（warm_start_normalize）。
       - intent/goal：ppo_intent/ppo_goal CLI init-from（B′ 三头迁移，value 头
         随机），幂等；已存在则 load_intent_weights / load_goal_weights 续跑。
+
+    torch 延迟导入（B7，2026-09-02）：本函数是训练路径首个需要 torch 的点——
+    它之前的 collect-only 子进程流程（argparse / build_pairs / queue 派发）全程
+    零 torch。
     """
+    # 延迟导入：torch 及其依赖只在此刻加载（collect-only 路径永远到不了这里）
+    import numpy as np
+    import torch
+
+    import ppo.engine as ppo_mod
+    import ppo.goal as ppo_goal
+    import ppo.intent as ppo_intent
+    from data.weights_io import load_state_into, save_weights_json
+    from models.student import PPOStudent
+
     if mode in ("intent", "goal"):
-        PPO = _MODE_BACKENDS[mode]
+        PPO = get_backend(mode)
         resume = os.path.exists(rl_path)
         if not resume:
             script = "ppo_goal.py" if mode == "goal" else "ppo_intent.py"
@@ -814,7 +824,13 @@ def main() -> None:
         help="minibatch size — 512 halves gradient steps vs 256 "
         "(faster PPO, smaller per-iteration KL drift)",
     )
-    ap.add_argument("--lr", type=float, default=ppo_mod.LR)
+    ap.add_argument(
+        "--lr",
+        type=float,
+        default=_d("lr", 3e-4),
+        help="PPO learning rate（默认 3e-4，与 ppo/engine.py LR 同步；collect-only "
+        "子进程不得 import torch，故不用模块常量）",
+    )
     ap.add_argument("--seed", type=int, default=_d("seed", 7))
     ap.add_argument(
         "--max-hours",
@@ -910,16 +926,11 @@ def main() -> None:
     )
     args = ap.parse_args()
     apply_mode_flags(args)
-    PPO = _MODE_BACKENDS[args.mode]
 
     # stdout/stderr 落盘（out_log/err_log；CLI 可覆盖调试；per-tick 默认空=仅控制台）。
     _setup_log_redirect(args)
     # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
     _log_rl_args(_rl_src, _rl_args)
-
-    import numpy as np
-
-    np.random.seed(args.seed)
 
     # 启动前推送当前分支到 origin（远端 agent 靠 git pull 同步——§30 教训）。
     # 2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，
@@ -954,6 +965,23 @@ def main() -> None:
         log("[run_rl] collect-only done — exit")
         return
     # ===== 双缓冲：collect-only 分支结束 =====
+
+    # ===== 训练路径延迟导入（B7，2026-09-02）：collect-only 子进程已提前 return，
+    # 此刻起才允许拉起 torch / ppo.* / models.*（CPU 上 ~3-8s 的 torch 加载不再
+    # 出现在每轮的双缓冲预采子进程里）。=====
+    import numpy as np
+    import torch
+
+    import ppo.engine as ppo_mod
+    import ppo.goal as ppo_goal
+    import ppo.intent as ppo_intent
+    from data.weights_io import save_weights_json
+    from models.goal_net import GoalNet
+    from models.intent_net import IntentNet
+    from rl.stream import run_rollout_stream
+
+    np.random.seed(args.seed)
+    PPO = get_backend(args.mode)
 
     device = torch.device("cpu")
     model = build_model(args.bc, args.out, mode=args.mode, workers=args.workers)

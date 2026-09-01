@@ -11,10 +11,18 @@ from typing import Any, TypedDict
 import numpy as np
 
 import dist_common
-import ppo.engine as ppo_mod
 from rl.log import log
 from rl.queue import run_rollout_queue
 from rl.resume import _scan_shards, completed_pairs
+
+
+def _default_ppo_backend():
+    """默认 PPO 后端（per-tick）。延迟导入（B7，2026-09-02）：本模块可能被
+    run_rl.py --collect-only 子进程间接加载，而 ppo.engine 会 import torch——
+    采样路径不需要 torch，不得在模块级拉起它。"""
+    import ppo.engine as ppo_mod
+
+    return ppo_mod
 
 
 class _StreamState(TypedDict):
@@ -118,7 +126,7 @@ def run_rollout_stream(
     pend: collections.deque = collections.deque()
     lock = threading.Lock()
     box: dict = {}
-    backend = backend or ppo_mod
+    backend = backend or _default_ppo_backend()
     update_kwargs = update_kwargs or {}
     if on_epoch_done is not None:
         update_kwargs["on_epoch_done"] = on_epoch_done

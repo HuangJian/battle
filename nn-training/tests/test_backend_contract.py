@@ -27,17 +27,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.backend import REQUIRED_UPDATE_KWARGS, RolloutBackend
-from rl.modes import _MODE_BACKENDS, _MODES
+from rl.modes import _MODE_BACKEND_NAMES, _MODES, get_backend
 
 
 def _backends() -> list[tuple[str, Any]]:
-    return list(_MODE_BACKENDS.items())
+    return [(m, get_backend(m)) for m in _MODES]
 
 
 def test_all_modes_have_a_registered_backend() -> None:
     """模式注册表与后端注册表必须逐项对应——新增模式忘记注册后端即失败。"""
-    assert set(_MODES) == set(_MODE_BACKENDS), (
-        f"--mode 取值 {sorted(_MODES)} 与后端注册表 {sorted(_MODE_BACKENDS)} 不一致"
+    assert set(_MODES) == set(_MODE_BACKEND_NAMES), (
+        f"--mode 取值 {sorted(_MODES)} 与后端注册表 {sorted(_MODE_BACKEND_NAMES)} 不一致"
     )
 
 

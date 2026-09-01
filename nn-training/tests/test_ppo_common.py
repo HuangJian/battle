@@ -141,12 +141,12 @@ def test_np_state_roundtrip() -> None:
     check(np.array_equal(got, expected), "numpy RNG 状态 pack/unpack 精确重建")
 
 
-def test_ppo_save_load() -> None:
+def test_ppo_save_load(tmp_path: Path) -> None:
     import torch.nn as nn
 
     model = nn.Linear(4, 2)
     opt = torch.optim.Adam(model.parameters(), lr=0.1)
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
         ppo_common._ppo_save(td, model, opt, 3)
         # 文件齐备
         for f in ("model.pt", "opt.pt", "state.json"):
@@ -166,8 +166,8 @@ def test_ppo_save_load() -> None:
     check(ppo_common._ppo_load(None, m3, o3) == 0, "ckpt_path=None → 0")
 
 
-def test_discover_and_load_shard_fields() -> None:
-    with tempfile.TemporaryDirectory() as td:
+def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
+    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
         root = Path(td)
         shard = root / "s1"
         shard.mkdir()
@@ -191,6 +191,8 @@ def test_discover_and_load_shard_fields() -> None:
 
 
 def main() -> None:
+    # 手动运行入口：临时目录放项目内 tmp/（与 pytest basetemp 同区，避免碰系统 %TEMP% 触发沙箱权限）
+    _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parent.parent / 'tmp' / 'manual-tests'))
     test_gae_dt1_degradation()
     test_gae_hand_computed()
     test_gae_variable_differs()
@@ -198,8 +200,8 @@ def main() -> None:
     test_cat_logprob_entropy()
     test_chunk_episodes()
     test_np_state_roundtrip()
-    test_ppo_save_load()
-    test_discover_and_load_shard_fields()
+    test_ppo_save_load(Path(_td))
+    test_discover_and_load_shard_fields(Path(_td))
     if FAILS:
         print(f"\n{len(FAILS)} FAILED")
         sys.exit(1)

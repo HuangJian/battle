@@ -43,6 +43,7 @@ sys.path.insert(0, str(REPO))
 import dist_common
 import run_rl
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from rl.stream import run_rollout_stream as _run_rollout_stream  # B7：run_rl 模块级不再 re-export
 from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
@@ -444,7 +445,7 @@ def test_integration(tmp: Path) -> None:
             th.start()
             return th
 
-        rep3 = run_rl.run_rollout_stream(
+        rep3 = _run_rollout_stream(
             bun,
             str(WEIGHTS),
             traj,
@@ -473,7 +474,7 @@ def test_integration(tmp: Path) -> None:
         cfg4 = json.loads(json.dumps(cfg))
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
-        rep4 = run_rl.run_rollout_stream(
+        rep4 = _run_rollout_stream(
             bun,
             str(WEIGHTS),
             traj,
@@ -592,7 +593,7 @@ def test_integration(tmp: Path) -> None:
         cfg8 = json.loads(json.dumps(cfg))
         cfg8["policy"]["streamWaveGames"] = 1  # 每局一波（首波注入立即起训）
         stub8 = _StubPpo(kl=1e-12)
-        rep8 = run_rl.run_rollout_stream(
+        rep8 = _run_rollout_stream(
             bun,
             str(WEIGHTS),
             traj,

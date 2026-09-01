@@ -91,7 +91,8 @@ def quota_sample(
         idx.append(ci)
     sel = np.concatenate(idx)
     rng.shuffle(sel)
-    return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None)
+    # 返回 sel（P2-6c 修复）：调用方需要按同一下标同步筛时序重建的注入特征
+    return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None), sel
 
 
 def quota_sample_priority(
@@ -131,13 +132,14 @@ def quota_sample_priority(
         idx.append(np.array(sel, dtype=np.int64))
     picked = np.concatenate(idx)
     rng.shuffle(picked)
+    # 返回 picked（P2-6c 修复）：调用方按同一下标同步筛时序重建的注入特征
     return (
         xo[picked],
         xs[picked],
         xi[picked],
         xb[picked],
         xinj[picked] if xinj is not None else None,
-    )
+    ), picked
 
 
 def main() -> None:
@@ -245,32 +247,42 @@ def main() -> None:
     train_shards = [i for i in range(len(shards)) if i not in val_idx]
     xo, xs, xi, xb, xr, xinj = load_split(train_shards)
 
+    # 注入特征（teacher-forced）**必须先于任何子采样构建**（P2-6c，2026-09-02 修复）：
+    # build_injection 依赖序列顺序（prev = seq[i-1]、dur 连续计数），而
+    # max_train / quota 采样都是乱序选取——在乱序后的 xi 上重建会把"上一帧"变成
+    # "随机他帧"（旧实现，探针结论不可信）。全量有序构建 → 按采样 sel 同步取行。
+    # load_split 输出在 shard 内部保持帧序（scan_shards 排序拼接），跨 shard 边界的
+    # prev 断裂是既有的近似（注释已承认 per-shard 重建不可行，探针只测特征增益）。
+    train_inj = None
+    if args.inject:
+        t_inj_oh, t_inj_dur = build_injection(xi)
+        train_inj = np.concatenate([t_inj_oh, t_inj_dur[:, None]], axis=1).astype(np.float32)
+
     # 先按混合上限子采样、再按类配额采样（P2-2，配额 ≪ 上限时以配额为准）。
     if args.max_train > 0 and len(xi) > args.max_train:
         sel = rng.choice(len(xi), size=args.max_train, replace=False)
         xo, xs, xi, xb, xr, xinj = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel], xinj[sel]
+        if train_inj is not None:
+            train_inj = train_inj[sel]
     if args.quota > 0:
         if args.priority_root >= 0:
-            xo, xs, xi, xb, xinj = quota_sample_priority(
+            xo, xs, xi, xb, xinj, sel = quota_sample_priority(
                 xi, xo, xs, xb, xr, xinj, args.quota, rng, args.priority_root
             )
         else:
-            xo, xs, xi, xb, xinj = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
+            xo, xs, xi, xb, xinj, sel = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
+        if train_inj is not None:
+            train_inj = train_inj[sel]
 
     vo, vs_, vi, vb, _vr, _vx = load_split(val_shards)
-
-    # 注入特征（teacher-forced）：per-shard 序列重建在做子采样之前不可行，
-    # 这里用全局重建近似——探针仅测"加上时序特征是否显著提升"。
-    train_inj = None
     val_inj = None
     if args.inject:
-        t_inj_oh, t_inj_dur = build_injection(xi)
         v_inj_oh, v_inj_dur = build_injection(vi)
-        train_inj = np.concatenate([t_inj_oh, t_inj_dur[:, None]], axis=1).astype(np.float32)
         val_inj = np.concatenate([v_inj_oh, v_inj_dur[:, None]], axis=1).astype(np.float32)
         # P1-2 scheduled sampling（离线 self 注入混合）：训练时按 ε 概率用自喂 prev/dur
         # 注入，让模型见过真实 self-feed 输入分布（收敛 M5 的 12.8pp teacher/self-feed gap）。
         if args.ss_eps > 0:
+            assert train_inj is not None  # args.inject 分支内必已构建（mypy 收窄）
             avail = xinj[:, 0] >= 0  # 有 self_inj 的帧
             mask = avail & (rng.rand(len(xi)) < args.ss_eps)
             train_inj = np.where(mask[:, None], xinj, train_inj)

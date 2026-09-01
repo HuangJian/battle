@@ -67,7 +67,12 @@ def scan_shards(data_dir: str) -> list[str]:
 
 
 def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
-    """Concatenate every shard under `data_dir` into one big sample dict."""
+    """Concatenate every shard under `data_dir` into one big sample dict.
+
+    P2-6d（2026-09-02）：额外产出 **"shard_ids"**（(N,) int64，每样本所属 shard
+    索引）——让 dataset 层能做 **shard 级 train/val 切分**，杜绝"同局相邻帧跨集
+    泄漏 → val 虚高"。旧调用方只读已知键，不受影响。
+    """
     shards = scan_shards(data_dir)
     if not shards:
         raise FileNotFoundError(f"no shards (obs.npy) found under {data_dir}")
@@ -81,6 +86,9 @@ def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
             if k in d:
                 opt_parts[k].append(d[k])
     out = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+    out["shard_ids"] = np.repeat(
+        np.arange(len(shards), dtype=np.int64), [v.shape[0] for v in parts["obs"]]
+    )
     for k, v in opt_parts.items():
         if v:
             # 可选文件部分 shard 缺失 → 拼接后以 NaN 补齐（与 dataset.py 的 n/a 语义一致）

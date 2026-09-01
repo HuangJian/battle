@@ -131,3 +131,21 @@ def test_coverage_constants_guard_the_legit_boundary() -> None:
     # PPOStudent←StudentNet 的覆盖率略高于 0.95（value 头 2/42 缺失）
     # —— 若未来有人把 COVERAGE_WARN 提到 0.99，合法路径会被误杀，故锚定该值。
     assert COVERAGE_WARN <= 0.96
+
+
+# ---- P2-6c：NaN/Inf 权重拒绝写出 ----
+def test_save_rejects_nan_weights(tmp_path: Path) -> None:
+    """参数含 NaN 时 save 必须 raise（fail fast），不得写出让 TS 静默跑歪的坏文件。"""
+    model = StudentNet()
+    with torch.no_grad():
+        model.stem.weight[0, 0, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="非有限值"):
+        save_weights_json(model, str(tmp_path / "nan.json"))
+
+
+def test_save_rejects_inf_weights(tmp_path: Path) -> None:
+    model = StudentNet()
+    with torch.no_grad():
+        model.fc.bias[0] = float("inf")
+    with pytest.raises(ValueError, match="非有限值"):
+        save_weights_json(model, str(tmp_path / "inf.json"))
