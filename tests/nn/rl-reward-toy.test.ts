@@ -7,7 +7,12 @@
  * 3. 势塑形对账：Σr = Φ_end − Φ_0 + 终局项
  */
 import { describe, it, expect } from 'bun:test'
-import { TOY_REWARD_ARMS, toyPotential, toyTerminal } from '../../src/nn/rl-reward-toy'
+import {
+  TOY_REWARD_ARMS,
+  toyPotential,
+  toyTerminal,
+  STUCK_THRESHOLD,
+} from '../../src/nn/rl-reward-toy'
 
 describe('rl-reward-toy: 线性臂向后兼容', () => {
   it('kill 臂 Φ 值含 (kills+1)^1 偏移（势塑形框架下 Σr 不变）', () => {
@@ -71,16 +76,59 @@ describe('rl-reward-toy: dodge-mix 臂', () => {
     expect(v0 - v100).toBeCloseTo(arm.wDmg2! * 100, 6)
   })
 
+  it('wHit 命中奖励 + wMiss 打偏惩罚', () => {
+    const arm = TOY_REWARD_ARMS['dodge-mix']
+    // 5 发命中 2 发：hits=2, shots=5
+    // 命中奖励 = wHit*hits = 0.20*2 = 0.40
+    // 打偏惩罚 = wMiss*(shots-hits) = 0.063*3 = 0.189
+    // 净 = 0.40 - 0.189 = +0.211
+    const v0 = toyPotential({ kills: 0, playerHits: 0, hits: 0, shots: 0 }, 0, arm)
+    const v1 = toyPotential({ kills: 0, playerHits: 0, hits: 2, shots: 5 }, 0, arm)
+    const net = v1 - v0
+    const expected = 0.2 * 2 - 0.063 * (5 - 2)
+    expect(net).toBeCloseTo(expected, 6)
+  })
+
+  it('wStuck 停滞惩罚：超阈值后扣势', () => {
+    const arm = TOY_REWARD_ARMS['dodge-mix']
+    // stuckTicks=200（超阈值 180 共 20 tick）
+    const v0 = toyPotential({ kills: 0, playerHits: 0, stuckTicks: 0 }, 0, arm)
+    const v200 = toyPotential({ kills: 0, playerHits: 0, stuckTicks: 200 }, 0, arm)
+    expect(v0 - v200).toBeCloseTo(arm.wStuck! * (200 - STUCK_THRESHOLD), 6)
+  })
+
+  it('wStuck 停滞惩罚：未超阈值不扣势', () => {
+    const arm = TOY_REWARD_ARMS['dodge-mix']
+    // stuckTicks=100（未超阈值 180）
+    const v0 = toyPotential({ kills: 0, playerHits: 0, stuckTicks: 0 }, 0, arm)
+    const v100 = toyPotential({ kills: 0, playerHits: 0, stuckTicks: 100 }, 0, arm)
+    expect(v100 - v0).toBe(0) // 未超阈值，势差为 0
+  })
+
   it('全参数组合正确', () => {
     const arm = TOY_REWARD_ARMS['dodge-mix']
-    // kills=8, playerHits=2, playerDamageTaken=150, powerUpsCollected=3, ticks=3000
+    // kills=8, playerHits=2, playerDamageTaken=150, powerUpsCollected=3, hits=5, shots=20, stuckTicks=200, ticks=3000
     const v = toyPotential(
-      { kills: 8, playerHits: 2, playerDamageTaken: 150, powerUpsCollected: 3 },
+      {
+        kills: 8,
+        playerHits: 2,
+        playerDamageTaken: 150,
+        powerUpsCollected: 3,
+        hits: 5,
+        shots: 20,
+        stuckTicks: 200,
+      },
       3000,
       arm,
     )
-    // 预期: 1.0*(9)^1.15 - 1.0*2 - 0.003*150 + 0.15*3 + 0*3000
-    const expected = 1.0 * 9 ** 1.15 - 1.0 * 2 - 0.003 * 150 + 0.15 * 3
+    // 预期: 1.0*(9)^1.15 - 1.0*2 - 0.01*150 + 0.40*3 + 0*3000 + (0.20*5 - 0.063*(20-5)) - 0.002*max(0,200-180)
+    const expected =
+      1.0 * 9 ** 1.15 -
+      1.0 * 2 -
+      0.01 * 150 +
+      0.4 * 3 +
+      (0.2 * 5 - 0.063 * (20 - 5)) -
+      0.002 * (200 - STUCK_THRESHOLD)
     expect(v).toBeCloseTo(expected, 5)
   })
 })

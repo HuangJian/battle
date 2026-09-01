@@ -18,11 +18,13 @@ function recount(events: GameEvent[]): {
   deaths: number
   kills: number
   hits: number
+  enemyHits: number
 } {
   let shots = 0
   let deaths = 0
   let kills = 0
   let hits = 0
+  let enemyHits = 0
   for (const e of events) {
     if (e.type === 'bullet_fired') {
       if (e.bullet.isPlayer) shots++
@@ -31,9 +33,11 @@ function recount(events: GameEvent[]): {
       if (e.by === 'player') kills++
     } else if (e.type === 'player_hit') {
       hits++
+    } else if (e.type === 'enemy_hit') {
+      enemyHits++
     }
   }
-  return { shots, deaths, kills, hits }
+  return { shots, deaths, kills, hits, enemyHits }
 }
 
 function simOne(stageIdx: number, seed: number, maxTicks = 4000): SimResult {
@@ -77,10 +81,19 @@ describe('telemetry 与事件流独立重算一致（P0-1）', () => {
     }
     expect(foundDeath).toBe(true) // God-AI 至少一局有死亡，否则本断言空转
   })
+
+  it('enemy_hit 事件存在（God-AI 必有击杀 ⇒ 必有命中）', () => {
+    for (const seed of [1, 3, 5]) {
+      const r = simOne(0, seed)
+      const { enemyHits, kills } = recount(r.events)
+      expect(kills).toBeGreaterThanOrEqual(1)
+      expect(enemyHits).toBeGreaterThanOrEqual(kills) // 每杀至少 1 发命中
+    }
+  })
 })
 
 describe('远程/本地评估遥测口径一致（P0-1 分发对账）', () => {
-  it('runEvalOne ≡ runSimulation：outcome/ticks/killCount/playerShots/playerDeaths', () => {
+  it('runEvalOne ≡ runSimulation：outcome/ticks/killCount/playerShots/playerDeaths/enemyHits', () => {
     for (const [stageIdx, seed] of [
       [0, 1],
       [0, 2],
@@ -106,6 +119,9 @@ describe('远程/本地评估遥测口径一致（P0-1 分发对账）', () => {
       expect(remoteScorable.finalState.killCount).toBe(local.finalState.killCount)
       expect(remoteScorable.telemetry.playerShots).toBe(local.telemetry!.playerShots)
       expect(remoteScorable.telemetry.playerDeaths).toBe(local.telemetry!.playerDeaths)
+      // enemy_hit 双侧一致（2026-09-01 新增 telemetry 字段）
+      const recount1 = recount(local.events)
+      expect(remote.enemyHits).toBe(recount1.enemyHits)
     }
   })
 })

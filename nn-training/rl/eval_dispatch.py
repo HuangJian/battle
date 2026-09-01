@@ -244,6 +244,10 @@ def dispatch_eval_round(bun: str, rl_path: str, traj_dir: Path, args, cfg: dict,
                 "cleared": cleared,
                 "ticks": manifest.get("ticks"), "score": manifest.get("score"),
                 "quality": manifest.get("quality"), "dims": dim_vals,
+                "kills": manifest.get("kills"),
+                "enemyHits": manifest.get("enemyHits"),
+                "hitRate": manifest.get("hitRate"),
+                "powerUpsCollected": manifest.get("powerUpsCollected"),
                 "elapsedSec": manifest.get("elapsedSec"),
             }
             with jsonl_lock:

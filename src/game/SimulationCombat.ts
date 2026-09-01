@@ -607,6 +607,12 @@ export class CombatSystem {
       if (tank.hp > 0 && tank.isPlayer) {
         this.d.world.pushEvent({ type: 'player_damage', damage: bullet.damage })
       }
+      // 玩家子弹命中敌方（含致死命中，命中即有意义）。
+      // 击杀那一枪同时推 enemy_hit（+wHit 命中）与 tank_destroyed（+wKill 击杀）——
+      // 叠加是有意义的记账，非 double counting。
+      if (bullet.isPlayer && tank.allegiance === 'enemy') {
+        this.d.world.pushEvent({ type: 'enemy_hit', damage: bullet.damage })
+      }
 
       if (tank.hp <= 0) {
         // FC "star shield" (plan: 三星 player 被击中 → 掉落回两星状态, DECISIONS

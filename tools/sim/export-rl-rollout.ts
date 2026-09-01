@@ -1,6 +1,12 @@
 /**
  * export-rl-rollout.ts — RL on-policy rollout collector (R3: v7-aligned reward).
  *
+ * ⚠️ 本脚本内部是串行的（多 stage × 多 seed 逐局跑）。调用方必须并行执行以提高效率：
+ *   每局耗时 0.5-5s，30 局串行 15-150s，并行可压缩到数秒。
+ *   推荐做法：拆成 N 个单局进程（--stages N --seeds M --out 独立目录），
+ *   各自写 manifest.json，事后聚合。不要给本文件加 Worker 池——它在 codeHash
+ *   覆盖集内，改动触发全节点重编译，且训练侧 queue.py 的分发模式已正确。
+ *
  * 复用 ObsEncoder + StudentModel(+value head) 驱动 headless 仿真，按决策 tick
  * (K=10) 跑随机策略采样 → 写出 trajectory shards 供 Python PPO 消费。
  *
@@ -194,6 +200,10 @@ interface Telemetry {
   basePressureSamples: number
   cellsVisited: Set<number>
   firstKillTick: number | undefined
+  /** 命中敌方累计（enemy_hit 事件数，含致死命中）。 */
+  enemyHits: number
+  /** 连续「原地 + 未命中」tick 数。 */
+  stuckTicks: number
 }
 
 function clamp01(x: number): number {
@@ -396,6 +406,11 @@ interface RunResult {
   playerDeaths: number
   playerHits: number
   playerShots: number
+  kills: number
+  enemyHits: number
+  powerUpsCollected: number
+  playerDamageTaken: number
+  stuckTicks: number
 }
 
 /** 奖励 scheme 解析结果（§3.4：arena → 玩具臂；真实关 → v7；--reward 可显式覆盖）。 */
@@ -489,9 +504,12 @@ function runOne(
     basePressureSamples: 0,
     cellsVisited: new Set<number>(),
     firstKillTick: undefined,
+    enemyHits: 0,
+    stuckTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
+  let prevCell = { col: -1, row: -1 }
 
   let pending: {
     obs: Uint8Array
@@ -519,6 +537,9 @@ function runOne(
           playerHits: tel.playerHits,
           playerDamageTaken: tel.playerDamageTaken,
           powerUpsCollected: tel.powerUpsCollected,
+          hits: tel.enemyHits,
+          shots: tel.playerShots,
+          stuckTicks: tel.stuckTicks,
         },
         t,
         reward.arm,
@@ -613,6 +634,7 @@ function runOne(
 
     // ---- telemetry（语义对齐 simulation-runner）----
     let collectedThisTick = 0
+    let hitThisTick = false
     for (const e of world.consumeEvents()) {
       if (e.type === 'tank_destroyed') {
         if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
@@ -627,6 +649,9 @@ function runOne(
         collectedThisTick++
         tel.powerUpsCollected++
         if ((e as any).powerUp === 'star') tel.starsCollected++
+      } else if (e.type === 'enemy_hit') {
+        tel.enemyHits++
+        hitThisTick = true
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -644,6 +669,16 @@ function runOne(
       tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
       prevLivePuIds = live
     }
+    // 停滞判定：中心 cell 不变 且 本 tick 未命中 → stuckTicks++；否则清零。
+    const pcx = Math.floor(((world.player?.x ?? 0) + 16) / CELL)
+    const pcy = Math.floor(((world.player?.y ?? 0) + 16) / CELL)
+    if (world.player?.alive && pcx === prevCell.col && pcy === prevCell.row && !hitThisTick) {
+      tel.stuckTicks++
+    } else {
+      tel.stuckTicks = 0
+    }
+    prevCell = { col: pcx, row: pcy }
+
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)
       tel.basePressureSamples++
@@ -734,6 +769,11 @@ function runOne(
     playerDeaths: tel.playerDeaths,
     playerHits: tel.playerHits,
     playerShots: tel.playerShots,
+    kills: world.killCount,
+    enemyHits: tel.enemyHits,
+    powerUpsCollected: tel.powerUpsCollected,
+    playerDamageTaken: tel.playerDamageTaken,
+    stuckTicks: tel.stuckTicks,
   }
 }
 
@@ -842,6 +882,8 @@ function main(): void {
   let totalDeaths = 0
   let totalHits = 0
   let totalShots = 0
+  let totalEnemyHits = 0
+  let totalPowerUps = 0
   const perGame: string[] = []
 
   for (const si of stages) {
@@ -898,6 +940,14 @@ function main(): void {
           dodgeTicks: res.dodgeTicks,
           decisionTicks: res.decisionTicks,
         },
+        kills: res.kills,
+        enemyHits: res.enemyHits,
+        hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
+        powerUpsCollected: res.powerUpsCollected,
+        playerHits: res.playerHits,
+        playerShots: res.playerShots,
+        playerDamageTaken: res.playerDamageTaken,
+        stuckTicks: res.stuckTicks,
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
       if (res.shard.n > 0) writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
@@ -908,8 +958,10 @@ function main(): void {
       totalDeaths += res.playerDeaths
       totalHits += res.playerHits
       totalShots += res.playerShots
+      totalEnemyHits += res.enemyHits
+      totalPowerUps += res.powerUpsCollected
       perGame.push(
-        `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,
+        `[OK] s${si} seed${seed} samples=${res.shard.n} outcome=${res.outcome} ticks=${res.ticks} win=${res.win} score=${res.score.toFixed(3)} kills=${res.kills} enemyHits=${res.enemyHits} hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0}`,
       )
     }
   }
@@ -946,8 +998,11 @@ function main(): void {
     },
     behavior: {
       deathsPerGame: +(totalDeaths / Math.max(1, total)).toFixed(3),
-      hitsPerGame: +(totalHits / Math.max(1, total)).toFixed(3),
+      playerHitsPerGame: +(totalHits / Math.max(1, total)).toFixed(3),
       shotsPerGame: +(totalShots / Math.max(1, total)).toFixed(2),
+      enemyHitsPerGame: +(totalEnemyHits / Math.max(1, total)).toFixed(3),
+      hitRateOverall: totalShots > 0 ? +(totalEnemyHits / totalShots).toFixed(4) : 0,
+      powerUpsPerGame: +(totalPowerUps / Math.max(1, total)).toFixed(3),
     },
     scoreStats: stat(scores),
     // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化

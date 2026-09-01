@@ -130,6 +130,12 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     if os.path.exists(eval_game):
         with open(eval_game, "rb") as f:
             out.append(("tools/sim/export-eval-game.ts", f.read()))
+    # 2026-09-01：enemy_hit 事件类型 + 战斗埋点入 codeHash，否则节点跑旧代码、埋点失效。
+    for rel in ("src/types.ts", "src/game/SimulationCombat.ts"):
+        p = os.path.join(REPO_ROOT, *rel.split("/"))
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                out.append((rel, f.read()))
     return out
 
 

@@ -38,6 +38,12 @@ export interface ToyRewardArm {
   wLoot?: number
   /** 按命损稠密扣分：每 HP × wDmg2（默认 0）；pool 血池下让非致命扣血有梯度。 */
   wDmg2?: number
+  /** 每次命中敌方 +wHit（含致死命中；对齐弹道稠密信号）。 */
+  wHit?: number
+  /** 每次打偏 −wMiss（开火未命中；省 cooldown、防乱开火）。 */
+  wMiss?: number
+  /** 停滞惩罚：连续「原地 + 未命中」超阈值后每 tick -wStuck。 */
+  wStuck?: number
 }
 
 /**
@@ -60,12 +66,15 @@ export const TOY_REWARD_ARMS: Record<string, ToyRewardArm> = {
     name: 'dodge-mix',
     wKill: 1.0,
     p: 1.15,
+    wHit: 0.2,
+    wMiss: 0.063, // 标定：hitRate0=34.07%, c=23.85%, wMiss/wHit=0.313
     wDmg: 1.0,
-    wDmg2: 0.003,
+    wDmg2: 0.01,
     wAlive: 0,
     wClear: 2.0,
     wDeath: 1.5,
-    wLoot: 0.15,
+    wLoot: 0.4,
+    wStuck: 0.002,
   },
 }
 
@@ -87,13 +96,26 @@ export interface ToyCounters {
   playerDamageTaken?: number
   /** 拾取道具数（powerup_collected 事件累计）。 */
   powerUpsCollected?: number
+  /** 命中敌方累计（enemy_hit 事件数，含致死命中）。 */
+  hits?: number
+  /** 开火累计（bullet_fired by player）。 */
+  shots?: number
+  /** 连续「原地 + 未命中」tick 数。 */
+  stuckTicks?: number
 }
+
+/** 停滞容忍：连续「原地 + 未命中」超过该 tick 数才开始扣势（3s @60fps）。 */
+export const STUCK_THRESHOLD = 180
 
 /** 势 Φ：窗口势差即稠密奖励。 */
 export function toyPotential(c: ToyCounters, ticks: number, arm: ToyRewardArm): number {
   let v = arm.wKill * (c.kills + 1) ** (arm.p ?? 1) - arm.wDmg * c.playerHits + arm.wAlive * ticks
   if (arm.wDmg2) v -= arm.wDmg2 * (c.playerDamageTaken ?? 0)
   if (arm.wLoot) v += arm.wLoot * (c.powerUpsCollected ?? 0)
+  // 命中率激励（线性化）：命中奖励 + 打偏惩罚 = (wHit+wMiss)·hits − wMiss·shots
+  if (arm.wHit || arm.wMiss)
+    v += (arm.wHit ?? 0) * (c.hits ?? 0) - (arm.wMiss ?? 0) * ((c.shots ?? 0) - (c.hits ?? 0))
+  if (arm.wStuck) v -= arm.wStuck * Math.max(0, (c.stuckTicks ?? 0) - STUCK_THRESHOLD)
   return v
 }
 

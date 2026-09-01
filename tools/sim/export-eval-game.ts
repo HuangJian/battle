@@ -130,6 +130,8 @@ interface Telemetry {
   basePressureSamples: number
   cellsVisited: Set<number>
   firstKillTick: number | undefined
+  /** 命中敌方累计（enemy_hit 事件数，含致死命中）。双侧同步字段。 */
+  enemyHits: number
 }
 
 function countBaseWall(world: World): number {
@@ -182,6 +184,10 @@ interface EvalResult {
   dims: Record<string, { value: number | null; raw: number }>
   /** 完整 ScorableRun 输入（v3.7，供 m1-eval --dist-nodes 复用本地聚合零改动）。 */
   scorable: Record<string, unknown>
+  kills: number
+  enemyHits: number
+  playerShots: number
+  powerUpsCollected: number
 }
 
 export function runEvalOne(
@@ -269,6 +275,7 @@ export function runEvalOne(
     basePressureSamples: 0,
     cellsVisited: new Set<number>(),
     firstKillTick: undefined,
+    enemyHits: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -306,6 +313,8 @@ export function runEvalOne(
         if ((e as any).tank?.isPlayer) tel.playerDeaths++
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
+      } else if (e.type === 'enemy_hit') {
+        tel.enemyHits++
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
@@ -402,6 +411,10 @@ export function runEvalOne(
       firstKillTick: scorable.firstKillTick,
       telemetry: scorable.telemetry,
     },
+    kills: world.killCount,
+    enemyHits: tel.enemyHits,
+    playerShots: tel.playerShots,
+    powerUpsCollected: tel.powerUpsCollected,
   }
 }
 
@@ -487,6 +500,10 @@ function main(): void {
     quality: res.quality,
     dims: res.dims,
     scorable: res.scorable,
+    kills: res.kills,
+    enemyHits: res.enemyHits,
+    hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
+    powerUpsCollected: res.powerUpsCollected,
     ...(wver ? { wver, node: nodeLabel } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
@@ -501,7 +518,8 @@ function main(): void {
   }
   console.log(
     `[eval-game] s${stageIdx} seed${seed} outcome=${res.outcome} ticks=${res.ticks} ` +
-      `win=${res.win} score=${res.score.toFixed(3)} kills=${res.dims.progress.raw}`,
+      `win=${res.win} score=${res.score.toFixed(3)} kills=${res.kills} ` +
+      `hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0} pickups=${res.powerUpsCollected}`,
   )
 }
 

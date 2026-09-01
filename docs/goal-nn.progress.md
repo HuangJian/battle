@@ -4,6 +4,65 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
+## §19 S-Dodge 奖励函数重构与每局指标观测（plan/dodge-item-reward-v2.md，2026-09-01）
+
+**背景**：按照 plan/dodge-item-reward-v2.md 方案，实现四项能力（对齐弹道/躲避子弹/主动捡道具/不卡住）+ 三个每局指标（命中率/击杀数/捡取道具数）。零 obs 改动，直接改 dodge-mix 臂。
+
+### 代码改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/types.ts` | GameEvent 加 `{ type:'enemy_hit'; damage:number }` |
+| `src/game/SimulationCombat.ts` | 玩家子弹命中敌方（含致死）时推 `enemy_hit` 事件（盾弹开不推） |
+| `src/nn/rl-reward-toy.ts` | ToyRewardArm 加 `wHit`/`wMiss`/`wStuck`；ToyCounters 加 `hits`/`shots`/`stuckTicks`；toyPotential 加命中率线性化激励 + 停滞惩罚；dodge-mix 臂参数更新：wHit=0.20, wMiss=0.05, wDmg2=0.01, wLoot=0.40, wStuck=0.002；加 `STUCK_THRESHOLD=180` |
+| `tools/sim/export-rl-rollout.ts` | Telemetry 加 `enemyHits`/`stuckTicks`；消费 `enemy_hit` 事件；停滞判定（中心 cell 不变+未命中）；`countersPhi` 传 `hits`/`shots`/`stuckTicks`；RunResult 加 `kills`/`enemyHits`/`powerUpsCollected`；manifest 加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected`；summary.behavior 加 `playerHitsPerGame`/`enemyHitsPerGame`/`hitRateOverall`/`powerUpsPerGame` |
+| `tools/sim/export-eval-game.ts` | Telemetry 加 `enemyHits`；消费 `enemy_hit` 事件；EvalResult 加 `kills`/`enemyHits`/`playerShots`/`powerUpsCollected`；report 加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected`；console.log 加 hitRate/pickups |
+| `nn-training/rl/eval_dispatch.py` | eval_log 行加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected` 透传字段 |
+| `nn-training/dist_common.py` | codeHash 覆盖集加 `src/types.ts` + `src/game/SimulationCombat.ts` |
+| `tests/combat-enemy-hit.test.ts` | 新建：enemy_hit 三种情况（非致死/致死/盾弹开） |
+| `tests/nn/rl-reward-toy.test.ts` | 加 wHit+wMiss 测试、wStuck 超阈值/未超阈值测试、全参数组合测试 |
+| `tests/sim/telemetry-parity.test.ts` | recount 加 `enemyHits`；加 enemy_hit 事件存在性断言；远程/本地对账加 enemyHits 一致性验证 |
+
+### 决策记录
+
+- **`behavior.hitsPerGame` 重命名**：原有 `hitsPerGame` 实际是 `playerHitsPerGame`（玩家被命中），新增 `enemyHitsPerGame`（玩家命中敌人）。为避免混淆，将旧字段重命名为 `playerHitsPerGame`，新增 `enemyHitsPerGame`/`hitRateOverall`/`powerUpsPerGame`。
+- **`wHit/wMiss` 初值**：采用计划初值 wHit=0.20, wMiss=0.05（盈亏平衡命中率 20%），待 mini 实测后标定。
+- **停滞惩罚**：采用 potential-based shaping 形式，`STUCK_THRESHOLD=180`（3s @60fps），仅当连续「原地+未命中」超阈值后扣势。
+
+### Mini 标定结果
+
+**基线（30 局 S-Dodge × seeds 0-9，weights-collect-50）**：
+- `hitRate0 = 34.07%`（totalHits=232, totalShots=681）
+- killsPerGame=3.133, hitsPerGame=7.733
+
+**标定计算**：
+- `c = hitRate0 × 0.7 = 23.85%`（略低于现状、留上行空间）
+- `wMiss/wHit = c/(1-c) = 0.3132`
+- 保持 `wHit=0.20`，得 `wMiss=0.063`（盈亏平衡命中率 23.95%，匹配 c=23.85%）
+
+### A/B 对照结果（30 局并行，相同 weights）
+
+| 指标 | 旧臂 | 新臂 | 变化 |
+|---|---|---|---|
+| Reward mean | 2.05 | 0.85 | −58.5% |
+| Reward std | 4.82 | 5.47 | +13.5% |
+| Reward min | −2.40 | −4.98 | 惩罚加重 |
+| Reward max | 17.83 | 17.97 | ≈持平 |
+| hitRate | 34.07% | 34.07% | 同（same weights） |
+| kills/game | 3.13 | 3.13 | 同 |
+
+新臂 reward 均值下降但方差增大，坏局惩罚更重、好局奖励略增——梯度信号更强，有利于 PPO 学习。
+
+### 验收状态
+
+- [x] `bun run check` 全绿（1683 pass, 0 fail）
+- [x] `enemy_hit` 在致死/非致死/盾弹开三种情况下行为正确
+- [x] rollout 与 eval 的 `enemyHits` 双侧一致（telemetry-parity 对账通过）
+- [x] 零 obs 改动（`git diff src/nn/obs-encoder.ts` 为空）
+- [x] `wHit/wMiss` 已按实测命中率标定（hitRate0=34.07%, c=23.85%, wMiss=0.063）
+- [x] A/B 对照完成（30 局并行，新臂 reward mean=0.85 std=5.47 vs 旧臂 mean=2.05 std=4.82）
+- [ ] 完整 S-Dodge 训练待启动（Step 11）
+
 ## §18 S-Dodge 训练执行器落地（plan/dodge-item-curriculum.md，2026-08-31）
 
 **背景**：按照 plan/dodge-item-curriculum.md 方案，新建 S-Dodge 竞技场（20×20 空旷/20 敌/无基地），dodge-mix 奖励臂（递增击杀+按命损扣分+低拾取分），一命覆写，player_damage 事件，集成到现有训练基础设施。
