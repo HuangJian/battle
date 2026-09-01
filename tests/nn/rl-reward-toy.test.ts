@@ -76,16 +76,14 @@ describe('rl-reward-toy: dodge-mix 臂', () => {
     expect(v0 - v100).toBeCloseTo(arm.wDmg2! * 100, 6)
   })
 
-  it('wHit 命中奖励 + wMiss 打偏惩罚', () => {
+  it('wHit 命中奖励（wMiss 已移除，§12）', () => {
     const arm = TOY_REWARD_ARMS['dodge-mix']
     // 5 发命中 2 发：hits=2, shots=5
-    // 命中奖励 = wHit*hits = 0.20*2 = 0.40
-    // 打偏惩罚 = wMiss*(shots-hits) = 0.063*3 = 0.189
-    // 净 = 0.40 - 0.189 = +0.211
+    // 命中奖励 = wHit*hits = 0.20*2 = 0.40（wMiss 已移除，打偏不惩罚）
     const v0 = toyPotential({ kills: 0, playerHits: 0, hits: 0, shots: 0 }, 0, arm)
     const v1 = toyPotential({ kills: 0, playerHits: 0, hits: 2, shots: 5 }, 0, arm)
     const net = v1 - v0
-    const expected = 0.2 * 2 - 0.063 * (5 - 2)
+    const expected = 0.2 * 2 // 命中奖励，无打偏惩罚
     expect(net).toBeCloseTo(expected, 6)
   })
 
@@ -121,14 +119,10 @@ describe('rl-reward-toy: dodge-mix 臂', () => {
       3000,
       arm,
     )
-    // 预期: 1.0*(9)^1.15 - 1.0*2 - 0.01*150 + 0.40*3 + 0*3000 + (0.20*5 - 0.063*(20-5)) - 0.002*max(0,200-180)
+    // 预期: 1.0*(9)^1.15 - 1.0*2 - 0.01*150 + 0.40*3 + 0*3000 + 0.20*5 - 0.002*max(0,200-180)
+    // wMiss 已移除（§12），打偏不惩罚
     const expected =
-      1.0 * 9 ** 1.15 -
-      1.0 * 2 -
-      0.01 * 150 +
-      0.4 * 3 +
-      (0.2 * 5 - 0.063 * (20 - 5)) -
-      0.002 * (200 - STUCK_THRESHOLD)
+      1.0 * 9 ** 1.15 - 1.0 * 2 - 0.01 * 150 + 0.4 * 3 + 0.2 * 5 - 0.002 * (200 - STUCK_THRESHOLD)
     expect(v).toBeCloseTo(expected, 5)
   })
 })

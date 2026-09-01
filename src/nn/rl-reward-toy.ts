@@ -67,7 +67,8 @@ export const TOY_REWARD_ARMS: Record<string, ToyRewardArm> = {
     wKill: 1.0,
     p: 1.15,
     wHit: 0.2,
-    wMiss: 0.063, // 标定：hitRate0=34.07%, c=23.85%, wMiss/wHit=0.313
+    // wMiss 已移除（§12：打偏惩罚标定错误致训练坍塌）；命中激励退化为 wHit·hits，
+    // "不乱开火"暂靠 cooldown 自然约束，命中率稳定后按 curriculum 加回。
     wDmg: 1.0,
     wDmg2: 0.01,
     wAlive: 0,
