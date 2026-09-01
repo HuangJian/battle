@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import struct
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -113,6 +114,12 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     if os.path.exists(agent_self):
         with open(agent_self, "rb") as f:
             out.append(("tools/agent/sampler-agent.ts", f.read()))
+    # 2026-09-01：/v1/restart 防循环护栏（restart-guard.ts，sampler-agent 的依赖）——
+    # agent 重启行为变更必须触发节点自动升级，与 sampler-agent.ts 同集。
+    guard = os.path.join(REPO_ROOT, "tools", "agent", "restart-guard.ts")
+    if os.path.exists(guard):
+        with open(guard, "rb") as f:
+            out.append(("tools/agent/restart-guard.ts", f.read()))
     rollout = os.path.join(REPO_ROOT, "tools", "sim", "export-rl-rollout.ts")
     if os.path.exists(rollout):
         with open(rollout, "rb") as f:
@@ -214,10 +221,96 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
         return False
 
 
+# ---------------- 远控重启护栏（2026-09-01 重启循环修复） ----------------
+# 症状：① 远控重启过的进程被再次远控重启（无限循环，节点无法贡献）；
+#       ② 用户手动更新代码重启的进程被远控杀掉再重启。
+# 根因：expected codeHash 由训练机**工作区**文件内容算出——含未提交改动；远端
+#   `git pull` 只能拿到已推送提交，永远无法收敛到该 hash ⇒ 每轮 ping 门 / rescan
+#   都判 stale ⇒ 再杀再拉，无限循环（2026-09-01 实测四连杀）。叠加根因：旧实现的
+#   去重集合 upgrade_requested 是每轮局部变量，新一轮迭代重新建集合，stale 节点
+#   每轮、每次 rescan 都再收一次 restart。
+# 处置（双层）：
+#   - 脏工作区护栏：hash 集内有未提交改动时，拒绝对**远端**节点下发 pull+restart
+#     （无效且具破坏性）；self/回环节点豁免（代码同源，纯重启即拾取工作区新代码）。
+#   - 跨代去重：同一节点 + 同一 agent codeHash 只下发一次 restart；节点 hash 变化
+#     （pull 生效 / 手动更新）后自动恢复资格。
+_RESTART_SEEN: dict[str, str] = {}
+
+
+def reset_restart_state() -> None:
+    """测试专用：清空跨代去重状态（模块级状态，测试间必须隔离）。"""
+    _RESTART_SEEN.clear()
+
+
+def _parse_porcelain(text: str) -> list[str]:
+    """git status --porcelain v1 输出 → 路径列表（含改名目标、去引号）。"""
+    out: list[str] = []
+    for line in text.splitlines():
+        if len(line) < 4:
+            continue
+        # 格式：XY<space>PATH；改名行形如 "R  old -> new"
+        p = line[3:].split(" -> ", 1)[-1].strip().strip('"')
+        if p:
+            out.append(p)
+    return out
+
+
+def dirty_hash_files() -> list[str]:
+    """codeHash 覆盖集中与 git HEAD 不一致的文件（修改/暂存/未跟踪）。
+
+    非空 ⇒ 期望 codeHash 含未推送的本地改动，远端 git pull 永远无法收敛——
+    此时对远端节点下发 restart+pull 只会产生无效扰动（拉到同样的提交、hash 依旧
+    不等 → 下轮再杀，无限重启循环）。返回空列表 = 集内代码全部已提交（pull 可收敛）。
+    git 不可用/出错时返回 []（保守放行）——跨代去重护栏仍兜底防循环。
+    """
+    rels = [rel for rel, _content in _collect_code_hash_files()]
+    if not rels:
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--"] + rels,
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            return []
+        return _parse_porcelain(proc.stdout)
+    except Exception:
+        return []
+
+
+def request_upgrade_guarded(nid: str, url: str, auth_key: str, branch: str,
+                            ping_hash: str, timeout: float = 20.0,
+                            dirty: list[str] | None = None) -> tuple[bool, str]:
+    """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
+
+    返回 (ok, reason)：
+      restart-requested  — 已下发，节点将 pull + 重启（本轮生效）
+      dedup              — 同节点同 agent codeHash 已重启过，跳过（防连环杀）
+      dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
+      restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
+                           （协调器下轮 rescan 自动重试）
+    self/回环节点：永远**纯重启**（branch 强制空——共享工作区禁 pull），不受
+    脏工作区护栏限制，去重同样生效。
+    dirty 显式传参供测试与调用方复用每轮已检测结果；None = 自动检测。
+    """
+    if dirty is None:
+        dirty = [] if is_self_node(url, nid) else dirty_hash_files()
+    if not is_self_node(url, nid) and dirty:
+        return False, f"dirty-tree:{len(dirty)}"
+    if _RESTART_SEEN.get(nid) == ping_hash:
+        return False, "dedup"
+    actual_branch = "" if is_self_node(url, nid) else branch
+    ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
+    if ok:
+        _RESTART_SEEN[nid] = ping_hash
+    return ok, ("restart-requested" if ok else "restart-failed")
+
+
 def upgrade_stale_nodes(cfg: dict, expected_hash: str, branch: str,
                         status_timeout: float = 3.0, restart_timeout: float = 20.0,
-                        max_nodes: int = 16) -> list[dict]:
-    """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→ request_upgrade。
+                        max_nodes: int = 16, dirty: list[str] | None = None) -> list[dict]:
+    """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
+    request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
 
     返回 [{id, upgraded, reason}]（诊断用）。不可达/失败跳过——升级机制是 best-effort，
     绝不阻塞本轮 dispatch（stale 节点本轮仍不参与，待重启后由 rescan 纳入）。
@@ -231,13 +324,14 @@ def upgrade_stale_nodes(cfg: dict, expected_hash: str, branch: str,
         if ping is None:
             out.append({"id": nid, "upgraded": False, "reason": "unreachable"})
             continue
-        if ping.get("codeHash") == expected_hash:
+        ping_hash = str(ping.get("codeHash"))
+        if ping_hash == expected_hash:
             out.append({"id": nid, "upgraded": False, "reason": "current"})
             continue
-        upgraded = request_upgrade(n["url"], n.get("authKey", ""), branch,
-                                   timeout=restart_timeout)
-        out.append({"id": nid, "upgraded": upgraded,
-                    "reason": "stale" if upgraded else "stale-upgrade-failed",
+        ok, reason = request_upgrade_guarded(nid, n["url"], n.get("authKey", ""),
+                                             branch, ping_hash,
+                                             timeout=restart_timeout, dirty=dirty)
+        out.append({"id": nid, "upgraded": ok, "reason": reason,
                     "agentVersion": ping.get("agentVersion")})
     return out
 

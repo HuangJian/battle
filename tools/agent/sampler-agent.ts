@@ -28,6 +28,8 @@ import os from 'node:os'
 import path from 'node:path'
 // /pool 渲染（独立文件，2026-08-31 拆出——不在 dist codeHash 集，监控调整零升级波）
 import { poolNodes, renderPoolPage as poolRender } from './pool-page'
+// /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
+import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -711,6 +713,15 @@ async function handle(req: Request): Promise<Response> {
 
   // ---- 运维控制（v3.7）：重启 agent（应用最新代码；可选先 pull） ----
   if (req.method === 'POST' && url.pathname === '/v1/restart') {
+    // 防循环护栏（2026-09-01）：本代进程启动 grace 窗口内的重启请求是「协调器重扫
+    // 回声」（它尚未观察到本代新 codeHash）——拒绝 409，协调器下轮 rescan 再试
+    //（request_upgrade 对非 200/202 记为失败、不写去重状态，故稍后必然重试）。
+    if (!shouldAcceptRestart(Date.now(), startedAt)) {
+      return jsonResponse(
+        { ok: false, error: 'restart-grace-period', graceMs: RESTART_GRACE_MS },
+        409,
+      )
+    }
     let pullBranch: string | undefined
     let delayMs = 500
     try {

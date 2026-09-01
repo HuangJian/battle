@@ -61,7 +61,9 @@
 - [x] 零 obs 改动（`git diff src/nn/obs-encoder.ts` 为空）
 - [x] `wHit/wMiss` 已按实测命中率标定（hitRate0=34.07%, c=23.85%, wMiss=0.063）
 - [x] A/B 对照完成（30 局并行，新臂 reward mean=0.85 std=5.47 vs 旧臂 mean=2.05 std=4.82）
-- [ ] 完整 S-Dodge 训练待启动（Step 11）
+- [x] 双缓冲机制已启用并固化到配置（`double_buffer: 1` + `precollect_early: 1`）
+- [x] 训练启动，KL 熔断告警处理：降 lr 从 0.0003 → 0.00015（方案①，暂不动 wMiss）
+- [ ] 监控后续轮次 KL/命中率/熵变化
 
 ## §18 S-Dodge 训练执行器落地（plan/dodge-item-curriculum.md，2026-08-31）
 

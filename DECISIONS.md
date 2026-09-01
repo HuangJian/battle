@@ -1464,3 +1464,18 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 **语义说明**：首波 12 局用 θ_{N,e3}（≈θ_N，kl 通常 <0.02，PPO clip 0.2 带内），IS 分母取
 快照采样的 lp（on-policy 数学不破坏）；剩余 3/4 严格 θ_N。失败救济 = 只废弃 12 局（而非全量）。
 训练曲线与历史有轻微口径差异（首波半代滞后），记 DECISIONS 备案。
+
+## §306 远控重启护栏：脏工作区拒发 + 跨代去重 + agent grace 窗口（2026-09-01）
+
+**问题**（用户报告 + 节点实测日志）：① 远控重启过的进程被再次远控重启（10:16–10:18 四连杀，节点始终无法贡献）；② 用户手动更新代码重启的进程被远控杀掉再重启。
+
+**根因**：expected codeHash 由训练机**工作区**文件内容算出（`_collect_code_hash_files` 直读磁盘），含未提交改动；远端 `git pull` 只能拿到已推送提交，hash 永不收敛 ⇒ 每轮 ping 门 / rescan（~15s）都判 stale ⇒ 再杀再拉成死循环。叠加：旧实现去重集合 `upgrade_requested` 是每轮局部变量，新一轮迭代重建 ⇒ stale 节点每轮再收一次 restart。
+
+**处置**（三层，全部带单测）：
+1. `dist_common.dirty_hash_files()`：对 hash 集跑 `git status --porcelain`，检测未提交文件；`request_upgrade_guarded()` 在脏工作区时拒绝对**远端**节点下发 pull+restart（`dirty-tree:N`）——pull 无法收敛时重启纯属无效扰动。self/回环节点豁免（代码同源，纯重启有效，禁 pull 语义不变）。
+2. `dist_common.request_upgrade_guarded()`：跨代去重——同节点 + 同 agent codeHash 只下发一次 restart（`dedup`）；节点 hash 变化（pull 生效 / 手动更新）自动恢复资格。替换掉 queue.py 每轮重建的 `upgrade_requested`；queue.py ping 门与 rescan 双调用点接入，脏树 WARN 每轮一条。
+3. `tools/agent/restart-guard.ts`：agent 侧 grace 窗口（30s，覆盖 rescan 两个周期）——进程启动窗口内的 `/v1/restart` 是协调器重扫回声，回 409；`request_upgrade` 对非 200/202 记失败、不写去重状态，下轮必然重试。`restart-guard.ts` 纳入 codeHash 集（agent 重启行为变更必须触发升级波）。
+
+**测试**：`nn-training/test_upgrade.py`（+4 用例：跨代去重 / 脏树拒发+self 豁免 / upgrade_stale_nodes 脏树 / porcelain 解析+冒烟；注意 mock 绑 127.0.0.1 会被判 self，远端用例 monkeypatch `is_self_node`）；`tests/agent/restart-guard.test.ts`（grace 边界 4 用例）。`test_run_rl.py` 全过、tsc / oxlint 绿。
+
+**运维语义**：训练机工作区有未提交的 hash 集改动时，远端节点被抑制重启并保持 excluded（日志 `dirty-tree:N`）；要节点升级 = commit + push（run_rl 启动时已自动 push 分支）→ 下轮 rescan 下发升级。agent 日志新增 409 `restart-grace-period`。

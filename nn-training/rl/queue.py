@@ -232,7 +232,6 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # dist_common.UPGRADE_BRANCH）。config 的 upgradeBranch 只在该锁存缺失时兜底
     # （2026-08-30 事故：残留 'intent-ai' 把全部节点 reset 回旧代码）。
     upgrade_branch = dist_common.upgrade_branch_or(str(policy.get("upgradeBranch") or ""))
-    upgrade_requested: set[str] = set()
     wver = dist_common.weights_fingerprint(rl_path)
     local_bun = bun_version(bun)
     iter_no = int(iter_id.rsplit(".", 1)[-1])
@@ -244,6 +243,15 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
     # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
     code_hash = dist_common.compute_code_hash()
+    # 脏工作区护栏（2026-09-01 重启循环修复①）：期望 codeHash 由训练机工作区算出，
+    # 含未提交改动时远端 git pull 永不收敛 ⇒ 对远端节点下发 pull+restart 是无效扰动
+    #（实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
+    # 每轮检测一次；self/回环节点不受限（代码同源，纯重启即可拾取工作区代码）。
+    dirty_files = dist_common.dirty_hash_files()
+    if dirty_files:
+        log(f"[dist] WARN: {len(dirty_files)} uncommitted file(s) in codeHash set "
+            f"({', '.join(dirty_files[:5])}{', …' if len(dirty_files) > 5 else ''}) — "
+            f"remote restart suppressed until committed+pushed")
     cfg_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
 
     def _probe(n: dict):
@@ -263,23 +271,32 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             log(f"[dist] node {nid}: ping failed — excluded this round")
             continue
         if ping.get("codeHash") != code_hash:
-            if dist_common.is_self_node(n["url"], nid):
-                # self/回环节点 = 训练机同一工作区起的服务：代码天然同源，stale 时
-                # 只需**纯重启**（无 pullBranch ⇒ 零 git 操作，不碰共享工作区）。
-                if upgrade_branch and nid not in upgrade_requested:
-                    upgrade_requested.add(nid)
-                    ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""), "")
-                    log(f"[dist] node {nid}: self node stale — restart-only upgrade "
-                        f"({'accepted' if ok else 'FAILED'}), no git pull; excluded this round")
+            # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
+            #（dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
+            # guarded——跨代去重（同节点同 agent codeHash 只杀一次）+ 脏工作区拒发
+            #（远端 pull 永不收敛，手动更新重启的进程不再被远控杀掉）。
+            if not upgrade_branch:
+                log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
                 continue
-            log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
-            # 主动升级：分支 = 训练机当前分支（dist_common.UPGRADE_BRANCH 锁存）。
-            if upgrade_branch and nid not in upgrade_requested:
-                upgrade_requested.add(nid)
-                ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""),
-                                                 upgrade_branch)
+            ok, reason = dist_common.request_upgrade_guarded(
+                nid, n["url"], n.get("authKey", ""), upgrade_branch,
+                str(ping.get("codeHash")), dirty=dirty_files)
+            if dist_common.is_self_node(n["url"], nid):
+                log(f"[dist] node {nid}: self node stale — restart-only upgrade "
+                    f"({reason}), no git pull; excluded this round")
+            elif reason == "restart-requested":
                 log(f"[dist] node {nid}: requested upgrade to {upgrade_branch} "
-                    f"({'accepted' if ok else 'FAILED'}) — will rejoin after restart")
+                    f"(accepted) — will rejoin after restart")
+            elif reason == "dedup":
+                log(f"[dist] node {nid}: codeHash mismatch — restart already sent "
+                    f"for this agent codeHash (dedup) — excluded this round")
+            elif reason.startswith("dirty-tree"):
+                log(f"[dist] node {nid}: codeHash mismatch — remote pull cannot "
+                    f"converge (uncommitted training-tree changes), restart "
+                    f"suppressed ({reason}) — excluded this round")
+            else:
+                log(f"[dist] node {nid}: codeHash mismatch — upgrade request failed "
+                    f"({reason}) — excluded this round")
             continue
         remote_full = str(ping.get("bunVersion", "?"))
         if mm(remote_full) != mm(local_bun):
@@ -772,22 +789,26 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                                              timeout=status_timeout)
                 if ping is None:
                     continue  # 仍未上线，下轮再试
-                if ping.get("codeHash") != dist_common.compute_code_hash():
-                    if dist_common.is_self_node(n["url"], nid):
-                        # self：纯重启远控（无 pull，见 ping 门注释）
-                        if upgrade_branch and nid not in upgrade_requested:
-                            upgrade_requested.add(nid)
-                            ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""), "")
-                            log(f"[dist] rescan {nid}: self node stale — restart-only "
-                                f"({'accepted' if ok else 'FAILED'})")
+                if ping.get("codeHash") != code_hash:
+                    # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
+                    #（rescan 周期 ~15s，重复刷屏无信息量）。
+                    if not upgrade_branch:
                         continue
-                    # 主动升级：rescan 发现 stale 节点 → 指示 git pull + 重启（每轮一次）。
-                    if upgrade_branch and nid not in upgrade_requested:
-                        upgrade_requested.add(nid)
-                        ok = dist_common.request_upgrade(n["url"], n.get("authKey", ""),
-                                                         upgrade_branch)
+                    ok, reason = dist_common.request_upgrade_guarded(
+                        nid, n["url"], n.get("authKey", ""), upgrade_branch,
+                        str(ping.get("codeHash")), dirty=dirty_files)
+                    if reason == "restart-requested":
                         log(f"[dist] rescan {nid}: codeHash stale — requested upgrade "
-                            f"to {upgrade_branch} ({'accepted' if ok else 'FAILED'})")
+                            f"to {upgrade_branch} (accepted)")
+                    elif reason.startswith("dirty-tree"):
+                        log(f"[dist] rescan {nid}: codeHash stale — remote restart "
+                            f"suppressed ({reason}: uncommitted training-tree changes)")
+                    elif dist_common.is_self_node(n["url"], nid):
+                        log(f"[dist] rescan {nid}: self node stale — restart-only "
+                            f"({reason})")
+                    elif reason != "dedup":
+                        log(f"[dist] rescan {nid}: codeHash stale — upgrade request "
+                            f"failed ({reason})")
                     continue
                 remote_full = str(ping.get("bunVersion", "?"))
                 if mm(remote_full) != mm(local_bun):
