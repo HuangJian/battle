@@ -20,7 +20,14 @@ target_kl 早停：每个 epoch 后累计 KL 超阈值即停止剩余 epoch（�
 run_rl_intent.py 用它做 pace 护栏）。
 """
 
+
+
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
 
 import argparse
 import os
@@ -30,10 +37,10 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn.functional as F
-from intent_net import IntentNet, export_intent_weights, load_intent_weights
+from models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
-from ppo_common import (
+from ppo.common import (
     _ppo_load,
     _ppo_save,
     chunk_episodes,
@@ -81,7 +88,7 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
     h = d = None
     if weights_path and os.path.exists(weights_path):
         try:
-            from weights_io import load_weights_json
+            from data.weights_io import load_weights_json
 
             meta, _ = load_weights_json(weights_path)
             a = meta.get("arch", {})

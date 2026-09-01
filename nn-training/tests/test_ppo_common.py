@@ -26,7 +26,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ppo_common
+import ppo.common as ppo_common
 
 FAILS: list[str] = []
 

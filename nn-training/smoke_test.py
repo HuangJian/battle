@@ -21,8 +21,8 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model import NNPolicy, param_count
-from npyio import save_shard, scan_shards
+from models.core import NNPolicy, param_count
+from data.npyio import save_shard, scan_shards
 from schema import (
     BOARD,
     FIRE_DIM,
@@ -32,8 +32,8 @@ from schema import (
     OBS_SCHEMA_MAJOR,
     SCALAR_DIM,
 )
-from train_bc import train
-from weights_io import load_state_into, load_weights_json
+from train.bc import train
+from data.weights_io import load_state_into, load_weights_json
 
 
 def _make_synthetic_shard(n: int, seed: int) -> dict:

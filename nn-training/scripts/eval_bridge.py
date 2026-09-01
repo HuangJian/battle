@@ -20,7 +20,14 @@ Usage:
   python eval_bridge.py --emit-bun-cmd --weights-dir .
 """
 
+
+
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
 
 import argparse
 import json
@@ -31,10 +38,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model import NNPolicy
-from npyio import load_dataset
+from models.core import NNPolicy
+from data.npyio import load_dataset
 from schema import FIRE_DIM, MOVE_DIM
-from weights_io import latest_weights_path, load_state_into
+from data.weights_io import latest_weights_path, load_state_into
 
 
 def quick_eval(weights_path: str, data_dir: str) -> dict:

@@ -13,7 +13,14 @@ Flipping the grid but NOT the labels (or vice-versa) is explicitly forbidden —
 it produces a contradictory (input, target) pair.
 """
 
+
+
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
 
 import numpy as np
 import torch
@@ -109,7 +116,7 @@ def make_loaders(
     num_workers: int = 0,
 ):
     """Build train/val DataLoaders from a directory of npy shards."""
-    from npyio import load_dataset
+    from data.npyio import load_dataset
 
     data = load_dataset(data_dir)
     full = NNDataset(data, augment=False)

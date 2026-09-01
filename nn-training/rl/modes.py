@@ -22,9 +22,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import ppo as ppo_mod
-import ppo_goal
-import ppo_intent
+import ppo.engine as ppo_mod
+import ppo.goal as ppo_goal
+import ppo.intent as ppo_intent
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

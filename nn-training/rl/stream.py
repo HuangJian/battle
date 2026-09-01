@@ -9,7 +9,7 @@ import time
 
 import dist_common
 import numpy as np
-import ppo as ppo_mod
+import ppo.engine as ppo_mod
 
 from rl.log import log
 from rl.queue import run_rollout_queue

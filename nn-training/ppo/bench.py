@@ -19,9 +19,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
-import ppo as ppo_mod
+import ppo.engine as ppo_mod
 import torch
-from weights_io import load_state_into
+from data.weights_io import load_state_into
 
 
 def collect_shard_dirs(root: str):

@@ -24,7 +24,14 @@ shard 工具全部来自 ppo_common；网络类 / shard spec / 采集器为 goal
 engage 明定：**不是 PPO 动作**（shard 无 lp_engage）——rollout/部署均 argmax（k1）。
 """
 
+
+
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
 
 import argparse
 import os
@@ -34,8 +41,8 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn.functional as F
-from goal_net import GoalNet, export_goal_weights, load_goal_weights
-from ppo_common import (
+from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
+from ppo.common import (
     _ppo_load,
     _ppo_save,
     chunk_episodes,
@@ -86,7 +93,7 @@ def build_rl_net(weights_path: str | None) -> GoalRLNet:
     h = d = None
     if weights_path and os.path.exists(weights_path):
         try:
-            from weights_io import load_weights_json
+            from data.weights_io import load_weights_json
 
             meta, _ = load_weights_json(weights_path)
             a = meta.get("arch", {})

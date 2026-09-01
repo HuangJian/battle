@@ -22,7 +22,7 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-from student_model import StudentNet
+from models.student import StudentNet
 
 INTENT_DIM = 8
 ENEMY_HEAD_DIM = 5  # none + e0..e3
@@ -93,7 +93,7 @@ def export_intent_weights(model: IntentNet, out_path: str) -> None:
     transfer init——P1-3 双臂的 transfer 臂）。heads 以 intent_head.* 等键名导出。
     save_weights_json 自动写 model.arch() 并支持 extra_meta。
     """
-    from weights_io import save_weights_json
+    from data.weights_io import save_weights_json
 
     sd = model.state_dict()
     ref = StudentNet().state_dict()
@@ -118,7 +118,7 @@ def export_intent_weights(model: IntentNet, out_path: str) -> None:
 def load_intent_weights(model: IntentNet, weights_path: str) -> None:
     """加载导出 JSON（主干部分缺失时——例如 transfer 只给主干——也接受，仅校验
     存在的键 shape 一致；heads 必须齐全）。"""
-    from weights_io import load_weights_json
+    from data.weights_io import load_weights_json
 
     _meta, data = load_weights_json(weights_path)
     sd = model.state_dict()
@@ -196,7 +196,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     with torch.no_grad():
         i_log, e_log, a_log, v_log = m.forward_rl(obs, sc, inj)
 
-    from weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
+    from data.weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
 
     params = {}
     for name, p in m.state_dict().items():

@@ -68,7 +68,7 @@ sys.path.insert(0, HERE)
 # Import train() IN-PROCESS. Because train_loop already holds a single-instance
 # lock, running training here (instead of via a subprocess) removes the
 # launcher's double-spawn race and keeps epoch stdout directly visible.
-from train_bc import train as _train_bc
+from train.bc import train as _train_bc
 
 DEFAULT_DATA = os.path.join(HERE, "..", "tmp", "nn-export")
 DEFAULT_WEIGHTS = os.path.join(HERE, "weights")
@@ -112,7 +112,7 @@ def _emit(line: str, log) -> None:
 
 def latest_weights(weights_dir: str) -> str | None:
     sys.path.insert(0, HERE)
-    from weights_io import latest_weights_path
+    from data.weights_io import latest_weights_path
 
     return latest_weights_path(weights_dir)
 

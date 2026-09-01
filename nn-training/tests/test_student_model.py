@@ -22,7 +22,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
-from student_model import (
+from models.student import (
     DEFAULT_D,
     DEFAULT_H,
     PPOStudent,

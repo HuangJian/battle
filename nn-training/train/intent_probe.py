@@ -24,8 +24,8 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
-from intent_net import IntentNet, export_intent_weights
-from student_model import DEFAULT_D, DEFAULT_H, StudentNet
+from models.intent_net import IntentNet, export_intent_weights
+from models.student import DEFAULT_D, DEFAULT_H, StudentNet
 
 INTENT_IDS = [
     "INTERCEPT",

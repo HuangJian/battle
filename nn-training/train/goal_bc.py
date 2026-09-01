@@ -31,8 +31,8 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from goal_net import GoalNet, export_goal_weights, load_goal_weights
-from ppo_common import discover_shards, log
+from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
+from ppo.common import discover_shards, log
 
 UNREACH = 65535
 LOAD_LOG_EVERY = 128

@@ -21,8 +21,8 @@ import sys
 
 import numpy as np
 import torch
-from intent_net import IntentNet
-from weights_io import load_weights_json
+from models.intent_net import IntentNet
+from data.weights_io import load_weights_json
 
 D_MAX = 300.0
 

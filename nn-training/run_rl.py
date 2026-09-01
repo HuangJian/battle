@@ -49,9 +49,9 @@ import time
 from pathlib import Path
 
 import dist_common
-import ppo as ppo_mod
-import ppo_goal
-import ppo_intent
+import ppo.engine as ppo_mod
+import ppo.goal as ppo_goal
+import ppo.intent as ppo_intent
 import torch
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
@@ -116,7 +116,7 @@ from rl.resume import (  # noqa: F401
     resumed_manifests,
 )
 from rl.stream import run_rollout_stream, wave_params  # noqa: F401
-from weights_io import load_state_into, save_weights_json
+from data.weights_io import load_state_into, save_weights_json
 
 # Per-iteration weights archive (user request 2026-08-24): every completed PPO
 # write-back is copied into nn-training/weights/ with an identifiable name.

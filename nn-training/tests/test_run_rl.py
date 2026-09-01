@@ -61,7 +61,7 @@ def check(cond: bool, msg: str) -> None:
 def test_mirror_scalar_lockstep() -> None:
     """M2 镜像索引锁步：SCALAR_X_INDICES 已迁移为 [15,18]（v2 重编号）——
     mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
-    from dataset import mirror_x
+    from data.dataset import mirror_x
     from schema import SCALAR_DIM, SCALAR_X_INDICES
 
     check(SCALAR_X_INDICES == [15, 18], f"SCALAR_X_INDICES == [15,18] (got {SCALAR_X_INDICES})")

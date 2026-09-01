@@ -21,7 +21,14 @@ Params（h=64/d=8）：主干 67.5K + goal_conv 65 + engage 276 + value 138 ≈ 
 MAdds：主干 ~37M + goal 头 43,264（0.115%，§16.2）。
 """
 
+
+
 from __future__ import annotations
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parent.parent
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
 
 import json
 import os
@@ -30,7 +37,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
-from student_model import StudentNet, coord_channels
+from models.student import StudentNet, coord_channels
 
 GOAL_HEATMAP_DIM = BOARD * BOARD  # 676（动作空间 = 坦克顶点热图；§9.4.0 合法顶点 25×25=625）
 ENGAGE_DIM = 2
@@ -100,7 +107,7 @@ class GoalNet(StudentNet):
 
 def export_goal_weights(model: GoalNet, out_path: str) -> None:
     """weights_io 同构 JSON 导出（预注册 #8 校验内置：主干键名/shape 与 StudentNet 一致）。"""
-    from weights_io import save_weights_json
+    from data.weights_io import save_weights_json
 
     sd = model.state_dict()
     ref = StudentNet(h=model.h, d=model.d).state_dict()
@@ -123,7 +130,7 @@ def export_goal_weights(model: GoalNet, out_path: str) -> None:
 
 def load_goal_weights(model: GoalNet, weights_path: str) -> None:
     """加载导出 JSON（主干缺失可接受——transfer init 只给主干；goal/engage 头必须齐全）。"""
-    from weights_io import load_weights_json
+    from data.weights_io import load_weights_json
 
     _meta, data = load_weights_json(weights_path)
     sd = model.state_dict()
@@ -193,7 +200,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     with torch.no_grad():
         g_log, e_log, v_log = m.forward_rl(obs, sc, inj)
 
-    from weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
+    from data.weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
 
     params = {}
     for name, p in m.state_dict().items():
