@@ -1,0 +1,27 @@
+# codeHash 文件集 SSOT（单一事实来源）
+#
+# python（nn-training/dist_common.py）与 typescript（tools/agent/sampler-agent.ts）
+# 都读本文件，按同一规则展开为 (posix 相对路径, 内容) 列表后计算 codeHash。
+# 两侧哈希必须逐字节一致——任一侧漏同步都会让节点被永久误判 stale、反复重启
+#（2026-09-01 事故：dist_common.py 加了 3 个文件、sampler-agent.ts 漏同步）。
+#
+# 规则：
+#   '#' 开头 = 注释；空行忽略；
+#   以 '/' 结尾 = 目录，递归纳入其下所有文件；
+#   其余 = 具体文件（相对 repo 根、posix 路径；不存在则跳过）。
+# 增删改文件集只改这里，严禁在两侧源码里硬编码清单。
+#
+# 纳入原则：影响节点采样/评估语义或 agent 协议行为的代码，必须入集——
+#   src/nn/**                    策略网络（infer / obs-encoder / goal / intent / rl-reward …）
+#   tools/sim/export-*           采样导出器（per-tick / 意图 / 干净评估 schema）
+#   tools/agent/*.ts             agent 本体 + /v1/restart 护栏（重启行为修复须触发升级）
+#   src/types.ts                 事件类型（enemy_hit 等埋点契约）
+#   src/game/SimulationCombat.ts 战斗埋点
+src/nn/
+tools/agent/sampler-agent.ts
+tools/agent/restart-guard.ts
+tools/sim/export-rl-rollout.ts
+tools/sim/export-intent-rollout.ts
+tools/sim/export-eval-game.ts
+src/types.ts
+src/game/SimulationCombat.ts

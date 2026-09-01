@@ -175,9 +175,19 @@ export function computeCodeHashFromFiles(entries: { relPath: string; content: Bu
   return h.digest('hex')
 }
 
-function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
+const CODE_HASH_MANIFEST = path.join(import.meta.dir, 'codehash-files.txt')
+
+export function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
+  // 按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 dist_common.py 同源）。
+  // 清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归）；其余 = 具体
+  // 文件（相对 repo 根、posix 路径；不存在则跳过）。两侧读同一清单，杜绝单侧漂移。
   const out: { relPath: string; content: Buffer }[] = []
-  const nnRoot = path.join(REPO_ROOT, 'src', 'nn')
+  let text = ''
+  try {
+    text = fs.readFileSync(CODE_HASH_MANIFEST, 'utf8')
+  } catch {
+    return out
+  }
   const walk = (dir: string): void => {
     if (!fs.existsSync(dir)) return
     for (const name of fs.readdirSync(dir)) {
@@ -186,39 +196,20 @@ function collectCodeHashEntries(): { relPath: string; content: Buffer }[] {
       else out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
     }
   }
-  walk(nnRoot)
-  // 2026-08-30a：agent 本体入 codeHash——agent 的协议/桶/重启行为修复必须触发
-  // 节点自动升级，否则只能靠人工逐台重启（两侧与 dist_common.py 保持逐字节同集）。
-  const agentSelf = path.join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts')
-  if (fs.existsSync(agentSelf)) {
-    out.push({
-      relPath: path.relative(REPO_ROOT, agentSelf),
-      content: fs.readFileSync(agentSelf),
-    })
+  for (const raw of text.split(/\r?\n/)) {
+    const spec = raw.trim()
+    if (!spec || spec.startsWith('#')) continue
+    const s = spec.replace(/\\/g, '/')
+    if (s.endsWith('/')) walk(path.join(REPO_ROOT, ...s.slice(0, -1).split('/')))
+    else {
+      const p = path.join(REPO_ROOT, ...s.split('/'))
+      if (fs.existsSync(p) && fs.statSync(p).isFile())
+        out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
+    }
   }
-  // 2026-08-30b：relPath 归一化正斜杠——Windows 上的 self agent 用 path.relative
-  // 会产出反斜杠，与 Python 侧（已归一化）哈希不一致 ⇒ self 永远 codeHash 红姻。
+  // relPath 归一化正斜杠——Windows 上的 self agent 用 path.relative 会产出反斜杠，
+  // 与 Python 侧（已归一化）哈希不一致 ⇒ self 永远 codeHash 红姻。
   for (const e of out) e.relPath = e.relPath.replace(/\\/g, '/')
-  const rollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-rl-rollout.ts')
-  if (fs.existsSync(rollout))
-    out.push({ relPath: path.relative(REPO_ROOT, rollout), content: fs.readFileSync(rollout) })
-  // M8：意图 RL 分布式 rollout（export-intent-rollout.ts）入 codeHash——
-  // 与 dist_common.py 的双语配方保持一致（意图步采样语义与 per-tick 完全不同）。
-  const intentRollout = path.join(REPO_ROOT, 'tools', 'sim', 'export-intent-rollout.ts')
-  if (fs.existsSync(intentRollout))
-    out.push({
-      relPath: path.relative(REPO_ROOT, intentRollout),
-      content: fs.readFileSync(intentRollout),
-    })
-  // 2026-08-31：干净评估走 export-eval-game.ts —— 入 codeHash（与 dist_common.py
-  // 双语同集）。评估报告加过 cleared（全歼率口径），节点旧版会 cleared 恒 0 ⇒ 本地
-  // 与节点混合数据不可比、门判定全歼被系统性少算。节点必须随新 schema 同步。
-  const evalGame = path.join(REPO_ROOT, 'tools', 'sim', 'export-eval-game.ts')
-  if (fs.existsSync(evalGame))
-    out.push({
-      relPath: path.relative(REPO_ROOT, evalGame),
-      content: fs.readFileSync(evalGame),
-    })
   return out
 }
 

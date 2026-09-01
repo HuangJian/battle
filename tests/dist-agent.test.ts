@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  collectCodeHashEntries,
   computeCodeHashFromFiles,
   packContainer,
   unpackContainer,
@@ -142,5 +143,24 @@ describe('BCV2 result container v2 (plan/distributed-rollout.md v3.6)', () => {
     const back = unpackContainer(buf)
     expect(back.manifest).toEqual({ stage: 1, seed: 2 })
     expect(back.files['value.npy']).toBe(Buffer.from([7]).toString('base64'))
+  })
+})
+
+describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
+  it('collectCodeHashEntries expands dir + file entries with posix relPath', () => {
+    const rels = collectCodeHashEntries().map((e) => e.relPath)
+    expect(rels.length).toBeGreaterThan(10)
+    // 2026-09-01 事故：Python 侧加了这 3 个文件、TS 侧漏同步 → 节点被永久误判 stale。
+    for (const need of [
+      'tools/agent/restart-guard.ts',
+      'src/types.ts',
+      'src/game/SimulationCombat.ts',
+      'tools/agent/sampler-agent.ts',
+    ]) {
+      expect(rels).toContain(need)
+    }
+    expect(rels.some((r) => r.startsWith('src/nn/'))).toBe(true) // 目录条目递归纳入
+    expect(rels.every((r) => !r.includes('\\'))).toBe(true) // 全 posix 正斜杠
+    expect(new Set(rels).size).toBe(rels.length) // 无重复
   })
 })

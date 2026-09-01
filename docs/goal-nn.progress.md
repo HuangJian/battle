@@ -61,6 +61,45 @@
 
 当前训练（wMiss 移除版）处于同一轨迹早期阶段，需继续观察。
 
+---
+
+## §21 S-Dodge 修正训练重启：seed_rotate=50 + 150 局/轮（2026-09-01）
+
+**背景**：§20 训练在 12 局/轮下 KL cap 频繁触发，有效训练步数极少（4-36 步/轮），浪费算力。用户建议停掉，恢复 seed_rotate=50 后再重启。
+
+### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `nn-training/run_rl.py` | `--seed-rotate` 默认值改为 `_d("seed_rotate", 0)`，可从 rl-config.json 读取 |
+| `nn-training/rl-config.json` | `rl` 块新增 `seed_rotate: 50`（git-ignored，本地生效） |
+
+### 训练启动
+
+- **命令**：`.\start-training.ps1 -KillPrevious -Detach -Script run_rl.py --iters 30 --bc tmp/s3-cap2/weights.json --out tmp/s-dodge-v3/weights.json --traj tmp/s-dodge-v3/traj --stages 1050-1052 --reward toy:dodge-mix --dodge off --max-ticks 6000 --difficulty hard`
+- **seed_rotate**：50（从 config 读取），3 stages × 50 seeds = **150 局/轮**
+- **lr**：0.0003（ppo.py 默认值）
+
+### it1 结果（150 局）
+
+| 指标 | 值 |
+|---|---|
+| winRate | 0.0%（预期，BC 首轮） |
+| 样本数 | 18782（vs 12 局时的 1282） |
+| chunks | 150（vs 12） |
+| KL | 0.01730（未触发 cap，halted=false） |
+| 熵 | 1.8120（健康） |
+| 策略 | 0.3545（学习正常） |
+| progress | 0.054 |
+| accuracy | 0.1435 |
+| mobility | 0.3116 |
+| loot | 0.4359 |
+| 采集耗时 | ~180s（150 局本地） |
+| PPO 耗时 | ~400s（150 chunks × 4 epoch） |
+| 双缓冲 | 48 shards 预采完成，it2 首波直接消费 |
+
+**关键改进**：KL cap 未被触发，训练稳定。150 局/轮提供了足够的数据多样性，解决了 12 局/轮下 KL 频繁触发的根本问题。
+
 **背景**：按照 plan/dodge-item-reward-v2.md 方案，实现四项能力（对齐弹道/躲避子弹/主动捡道具/不卡住）+ 三个每局指标（命中率/击杀数/捡取道具数）。零 obs 改动，直接改 dodge-mix 臂。
 
 ### 代码改动清单

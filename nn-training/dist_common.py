@@ -99,50 +99,39 @@ def compute_code_hash() -> str:
     return h.hexdigest()
 
 
+CODE_HASH_MANIFEST = os.path.join(REPO_ROOT, "tools", "agent", "codehash-files.txt")
+
+
 def _collect_code_hash_files() -> list[tuple[str, bytes]]:
+    """按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 sampler-agent.ts 同源）。
+
+    清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归纳入其下所有
+    文件）；其余 = 具体文件（相对 repo 根、posix 路径；不存在则跳过）。两侧读同一
+    清单、按同一规则展开，杜绝单侧硬编码漂移（2026-09-01 事故教训）。
+    """
     out: list[tuple[str, bytes]] = []
-    nn_root = os.path.join(REPO_ROOT, "src", "nn")
-    for dirpath, _dirs, files in os.walk(nn_root):
-        for name in files:
-            p = os.path.join(dirpath, name)
-            rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
-            with open(p, "rb") as f:
-                out.append((rel, f.read()))
-    # 2026-08-30：agent 本体入 codeHash（与 sampler-agent.ts 的 TS 侧同集）——
-    # agent 的协议/桶/重启行为修复必须触发节点自动升级。
-    agent_self = os.path.join(REPO_ROOT, "tools", "agent", "sampler-agent.ts")
-    if os.path.exists(agent_self):
-        with open(agent_self, "rb") as f:
-            out.append(("tools/agent/sampler-agent.ts", f.read()))
-    # 2026-09-01：/v1/restart 防循环护栏（restart-guard.ts，sampler-agent 的依赖）——
-    # agent 重启行为变更必须触发节点自动升级，与 sampler-agent.ts 同集。
-    guard = os.path.join(REPO_ROOT, "tools", "agent", "restart-guard.ts")
-    if os.path.exists(guard):
-        with open(guard, "rb") as f:
-            out.append(("tools/agent/restart-guard.ts", f.read()))
-    rollout = os.path.join(REPO_ROOT, "tools", "sim", "export-rl-rollout.ts")
-    if os.path.exists(rollout):
-        with open(rollout, "rb") as f:
-            out.append(("tools/sim/export-rl-rollout.ts", f.read()))
-    # M8：意图 RL 分布式 rollout 走 export-intent-rollout.ts —— 入 codeHash，
-    # 保证节点代码同步（意图步采样语义与 per-tick 完全不同）。
-    intent_rollout = os.path.join(REPO_ROOT, "tools", "sim", "export-intent-rollout.ts")
-    if os.path.exists(intent_rollout):
-        with open(intent_rollout, "rb") as f:
-            out.append(("tools/sim/export-intent-rollout.ts", f.read()))
-    # 2026-08-31：干净评估走 export-eval-game.ts —— 入 codeHash。评估报告 schema
-    # 曾加 cleared（全歼率口径，P0-1/§15），节点若跑旧版则 cleared 恒 0、本地与节点
-    # 混合数据不可比。节点必须随新 schema 同步（否则门判定全歼被系统性少算）。
-    eval_game = os.path.join(REPO_ROOT, "tools", "sim", "export-eval-game.ts")
-    if os.path.exists(eval_game):
-        with open(eval_game, "rb") as f:
-            out.append(("tools/sim/export-eval-game.ts", f.read()))
-    # 2026-09-01：enemy_hit 事件类型 + 战斗埋点入 codeHash，否则节点跑旧代码、埋点失效。
-    for rel in ("src/types.ts", "src/game/SimulationCombat.ts"):
-        p = os.path.join(REPO_ROOT, *rel.split("/"))
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                out.append((rel, f.read()))
+    try:
+        with open(CODE_HASH_MANIFEST, encoding="utf-8") as f:
+            specs = [ln.strip() for ln in f
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+    except OSError:
+        return out
+    for spec in specs:
+        spec = spec.replace("\\", "/")
+        if spec.endswith("/"):
+            root = os.path.join(REPO_ROOT, *spec.rstrip("/").split("/"))
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    p = os.path.join(dirpath, name)
+                    rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
+                    with open(p, "rb") as f:
+                        out.append((rel, f.read()))
+        else:
+            p = os.path.join(REPO_ROOT, *spec.split("/"))
+            if os.path.isfile(p):
+                rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
+                with open(p, "rb") as f:
+                    out.append((rel, f.read()))
     return out
 
 

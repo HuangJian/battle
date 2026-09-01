@@ -1,28 +1,38 @@
-"""run_rl.py — RL on-policy 主循环入口（P1.5 蒸馏 → RL 阶段）。
+"""run_rl.py — RL on-policy 主循环入口（唯一 RL 入口，P1.5 蒸馏 → RL 阶段）。
+
+**三模式入口**（2026-09-01 RL 入口整合，plan/RL-Entry-Consolidation.md /
+DECISIONS §307）：`--mode {per-tick,intent,goal}` 参数化三套后端；
+`run_rl_intent.py` 已退役并入本文件。`--goal` 保留为 `--mode goal` 的别名。
+  - per-tick（默认）：逐 tick move/fire PPO（ppo.py，ConvMixer rl_model）。
+  - intent：意图步 semi-MDP PPO（ppo_intent.py，8 类意图，变步长 GAE γ^Δt）。
+  - goal：goal 承诺步 PPO（ppo_goal.py，676/169 路目标格，心跳承诺期）。
 
 工程结构（2026-08-25 工程化重组）：编排逻辑抽取至 rl/ 包 ——
   rl/course.py        课程（build_pairs / parse_range）
   rl/queue.py         中央队列调度 + 纯本地回退（run_rollout_queue / run_rollout）
   rl/stream.py        流式迭代（run_rollout_stream / wave_params）
-  rl/eval_dispatch.py 干净评估分发（dispatch_eval_bg 等）
+  rl/eval_dispatch.py 干净评估分发（per-tick：逐局派发 + eval_log 对账）
+  rl/eval_m1.py       干净评估管线（intent/goal：m1-eval 整批 + Δ 止损）
   rl/resume.py        断点对账（completed_pairs / resumed_manifests / jsonl 锚点）
   rl/reports.py       报告聚合（combine_reports / win_of）
   rl/breaker.py       F4 熔断纯逻辑（阈值 + 连击判定）
 本文件只保留：CLI、迭代主循环、权重初始化/归档、巡检与熔断停车。
 
 流程：
-  ① 权重初始化（幂等）：RL 权重不存在时，从 DAgger BC 检查点 warm-start 策略头
-     （价值头随机初始化）；已存在则直接续跑。
+  ① 权重初始化（幂等）：RL 权重不存在时从 BC 检查点 warm-start——per-tick 走
+     DAgger 检查点 + A4 trunk 校准归一；intent/goal 走 ppo_intent/ppo_goal CLI
+     init-from（B′ 三头迁移，value 头随机）；已存在则直接续跑。
   ② 迭代 N 次：bun TS rollout（subprocess，无需 torch）→ 进程内 clipped PPO 更新
-     （复用 ppo.py 的 GAE/minibatch/更新函数，模型常驻内存）→ 原子写回权重文件，
-     下一轮 rollout 即用新权重（标准 on-policy）。
+     （模型常驻内存）→ 原子写回权重文件，下一轮 rollout 即用新权重（标准 on-policy）。
 
 经统一启动器进入（venv/torch 由它保证）：
   bash nn-training/start-training.sh --script run_rl.py --iters 15 --stream 1
   powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 ^
       -Script run_rl.py --iters 15          # --xxx 参数原样透传
+  # 意图 RL（原 run_rl_intent.py）：-Script run_rl.py --mode intent
+  # goal 承诺步 RL（原 run_rl_intent.py --goal）：-Script run_rl.py --mode goal
 
-单步调试仍可用 ppo.py 的 --init-from / --resume CLI；回归测试见 test_run_rl.py。
+单步调试仍可用 ppo*.py 的 --init-from / --resume CLI；回归测试见 test_run_rl.py。
 """
 from __future__ import annotations
 
@@ -43,6 +53,8 @@ import torch
 
 import dist_common
 import ppo as ppo_mod
+import ppo_intent
+import ppo_goal
 from weights_io import load_state_into, save_weights_json
 
 # rl/ 包：编排逻辑单点实现（本文件以下仅存 CLI + 主循环 + 权重归档/巡检）
@@ -59,14 +71,151 @@ from rl.eval_dispatch import (EVAL_ITER_SUFFIX, EVAL_SEEDS,  # noqa: F401
                               EVAL_TASK_ATTEMPTS, dispatch_eval_bg,
                               dispatch_eval_round, eval_done_keys as _eval_done_keys,
                               report_winrate_safe)
+from rl.eval_m1 import (CLEAN_EVAL_MAX_RETRY, dispatch_eval_bg_m1,  # noqa: F401
+                        parse_m1_eval_report, read_eval_summary, run_clean_eval)
 from rl.breaker import (CIRCUIT_EXIT_CODE, ENT_BREAK, ENT_BREAK_CONSEC,
                         ENT_BREAK_MAX_WINRATE, ENT_COLLAPSE_DROP, KL_BREAK,
                         KL_BREAK_CONSEC, KL_WARN, breaker_update)
+
 
 # Per-iteration weights archive (user request 2026-08-24): every completed PPO
 # write-back is copied into nn-training/weights/ with an identifiable name.
 WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # bounded archive: prune oldest it-backups beyond this
+
+# ==================== RL 入口整合（DECISIONS §307）：三模式基础设施 ====================
+
+_MODES = ("per-tick", "intent", "goal")
+# PPO 后端注册表：stream.py 的 backend 契约（update/_ppo_load/load_episodes/
+# chunk_episodes）三者都实现（ppo.py 尾部 update = ppo_update 别名）。
+_MODE_BACKENDS = {"per-tick": ppo_mod, "intent": ppo_intent, "goal": ppo_goal}
+# 权重归档前缀分桶（backup_weights 按 mtime prune，互不干扰）。
+_MODE_BACKUP_PREFIX = {"per-tick": "rl-weights", "intent": "intent-rl-weights",
+                       "goal": "goal-rl-weights"}
+# 意图 RL 干净评估默认迭代（评估旁路不拖慢采集：只在这几个迭代跑）。
+DEFAULT_EVAL_AT_INTENT = "5,10,15"
+
+
+def resolve_mode(argv: list[str]) -> str:
+    """从 argv 预解析 --mode / --goal（两阶段 argparse 的第一阶段）。纯函数。"""
+    mode = "per-tick"
+    for i, a in enumerate(argv):
+        if a == "--mode" and i + 1 < len(argv):
+            mode = argv[i + 1]
+        elif a.startswith("--mode="):
+            mode = a.split("=", 1)[1]
+        elif a == "--goal":
+            mode = "goal"
+    return mode if mode in _MODES else mode  # 非法值留给 argparse 报错
+
+
+def merged_mode_args(cfg: dict, mode: str) -> tuple[dict, dict]:
+    """启动参数默认合并（单一事实来源，DECISIONS §307 D2）。纯函数。
+
+    查找优先级（高→低）：rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl。
+    返回 (合并后的默认字典, {key: 来源块}) 供 trust-but-verify 日志。"""
+    rl_block = dict(cfg.get("rl", {}) or {})
+    mode_key = "intent" if mode == "intent" else ("goal" if mode == "goal" else "")
+    nested = dict((cfg.get("rl", {}) or {}).get(mode_key, {}) or {}) if mode_key else {}
+    legacy = {}
+    if mode in ("intent", "goal"):
+        legacy = dict(cfg.get("intent_rl", {}) or {})
+    merged = {**rl_block, **legacy, **nested}
+    src = {k: ("rl" if k in rl_block else "fallback") for k in merged}
+    for k in legacy:
+        src[k] = "intent_rl(legacy)"
+    for k in nested:
+        src[k] = f"rl.{mode_key}"
+    return merged, src
+
+
+def apply_mode_flags(args) -> None:
+    """按 --mode 置位采集器/权重桶 flag（rl/queue.py 与 rl/stream.py 按此分支，
+    机制层零改动）。--goal 别名 → mode=goal。"""
+    if getattr(args, "goal", False):
+        args.mode = "goal"
+    args.intent_rollout = (args.mode == "intent")
+    args.goal_rollout = (args.mode == "goal")
+    args.goal = (args.mode == "goal")
+    return args
+
+
+def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
+    """intent/goal 模式的 PPO 更新参数：value 预热（前 warmup-iters 冻结主干只训
+    value 头）+ kickstarting KL 惩罚（系数按策略迭代衰减）。自 run_rl_intent 原样
+    迁入（数学不变）。纯函数，可单测。"""
+    warmup_epochs = args.epochs if (it - start_it) < args.warmup_iters else 0
+    policy_iter = (it - start_it) - args.warmup_iters + 1
+    kl_coef = args.kickstart_kl * (args.kickstart_decay ** max(0, policy_iter - 1)) \
+        if args.kickstart_kl > 0 and policy_iter >= 1 else 0.0
+    return {"value_warmup_epochs": warmup_epochs, "ref_model": ref_model, "kl_coef": kl_coef,
+            "seed": args.seed}
+
+
+def stop_loss_hit(mode: str, stop_loss_at: int, stop_loss_delta: float,
+                  it: int, eval_rec: dict | None) -> bool:
+    """预注册止损判门（D4 泛化：原 run_rl_intent 的 iter15 Δ≤0 硬编码）。纯函数。
+
+    仅 intent/goal 模式生效；stop_loss_at=0 = 关闭（per-tick 恒 False）。"""
+    if mode == "per-tick" or stop_loss_at <= 0:
+        return False
+    return bool(it >= stop_loss_at and eval_rec
+                and eval_rec.get("delta") is not None
+                and eval_rec["delta"] <= stop_loss_delta)
+
+
+class _Tee:
+    """同时写多个流（控制台 + 文件），供长训日志持久化且终端仍可见。
+    自 run_rl_intent 迁入（per-tick 模式从此也获得 out_log/err_log 落盘能力）。"""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _setup_log_redirect(args) -> None:
+    """stdout/stderr 重定向到 out_log/err_log（Tee 控制台+文件）。空字符串=仅控制台
+    （per-tick 默认 → 行为不变）。落盘追加模式 + 启动横幅，多次启动日志累积。"""
+    if getattr(args, "out_log", ""):
+        try:
+            p = Path(args.out_log)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))
+            log(f"[launch] stdout -> {p} (tee console+file, append)")
+        except Exception as e:  # noqa: BLE001
+            log(f"WARN cannot redirect stdout to {args.out_log}: {e}")
+    if getattr(args, "err_log", ""):
+        try:
+            pe = Path(args.err_log)
+            pe.parent.mkdir(parents=True, exist_ok=True)
+            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))
+            log(f"[launch] stderr -> {pe} (tee console+file, append)")
+        except Exception as e:  # noqa: BLE001
+            log(f"WARN cannot redirect stderr to {args.err_log}: {e}")
+
+
+def _log_rl_args(src: dict, merged: dict) -> None:
+    """生效启动配置落地日志：标注每个键来源（rl.<mode> / intent_rl(legacy) / rl /
+    fallback），便于核对单一事实来源（trust-but-verify）。"""
+    log("[launch] rl args source: " + " ".join(f"{k}={src.get(k, 'fallback')}"
+                                               for k in sorted(merged)))
+
 
 
 def _run_collect_only(args, traj_root, rotate_seed, bun) -> None:
@@ -207,11 +356,42 @@ def _precollect_snapshot_wver(out_path: str, it: int) -> str | None:
         return None
 
 
-def build_model(bc_path: str, rl_path: str) -> torch.nn.Module:
+def build_model(bc_path: str, rl_path: str, mode: str = "per-tick",
+                workers: int = 8) -> torch.nn.Module:
     """Init once: warm-start policy heads from BC when no RL weights exist yet;
     otherwise resume from the existing RL weights (policy + trained value).
     The init path SAVES the merged weights to rl_path before returning — the
-    TS rollout reads that file, so it must exist before iteration 1."""
+    TS rollout reads that file, so it must exist before iteration 1.
+
+    mode 分模式（RL 入口整合，DECISIONS §307）：
+      - per-tick：DAgger BC warm-start + A4 trunk 校准归一（warm_start_normalize）。
+      - intent/goal：ppo_intent/ppo_goal CLI init-from（B′ 三头迁移，value 头
+        随机），幂等；已存在则 load_intent_weights / load_goal_weights 续跑。
+    """
+    if mode in ("intent", "goal"):
+        PPO = _MODE_BACKENDS[mode]
+        resume = os.path.exists(rl_path)
+        if not resume:
+            script = "ppo_goal.py" if mode == "goal" else "ppo_intent.py"
+            log(f"init RL weights from BC ({bc_path}) -> {rl_path} ({mode} backend)")
+            subprocess.run(
+                [sys.executable, f"nn-training/{script}",
+                 "--init-from", bc_path, "--out", rl_path,
+                 "--threads", str(max(1, min(8, workers)))],
+                cwd=str(REPO_ROOT), check=True, **_POPEN_NO_WINDOW)
+        model = PPO.build_rl_net(rl_path)
+        if mode == "goal":
+            ppo_goal.load_goal_weights(model, rl_path)
+        else:
+            ppo_intent.load_intent_weights(model, rl_path)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [run_rl] "
+            + ("resume" if resume else "init")
+            + f" weights <- {rl_path if resume else bc_path} "
+            f"({mode}, params={sum(int(p.numel()) for p in model.parameters())})"
+            + ("" if resume else f" -> {rl_path}"))
+        return model
+
     resume = os.path.exists(rl_path)
     src = rl_path if resume else bc_path
     model = ppo_mod.build_ppo(src)
@@ -374,15 +554,15 @@ def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
         pass
 
 
-def _run_inspect(bun: str, it: int) -> None:
-    """每轮 PPO 写回后自动生成巡检 HTML（rl-hourly-inspect.ts）。
+def _run_inspect(bun: str, it: int, traj_dir: Path) -> None:
+    """每轮 PPO 写回后自动生成巡检 HTML（rl-hourly-inspect.ts --traj-dir）。
 
     非致命：巡检失败仅记录 warning，绝不中断训练主线（AGENTS §14 / 训练可用性优先）。
-    仅当 traj 为默认 tmp/rl-traj 时生效（巡检脚本读固定 TRAJ_DIR）。
-    """
+    显式传 --traj-dir（intent/goal 的非默认 traj 也要能出巡检 HTML）。"""
     try:
         subprocess.run(
-            [bun, "tools/diag/rl-hourly-inspect.ts", "--up-to", str(it)],
+            [bun, "tools/diag/rl-hourly-inspect.ts", "--up-to", str(it),
+             "--traj-dir", str(traj_dir)],
             cwd=str(REPO_ROOT), timeout=180, capture_output=True, text=True,
             **_POPEN_NO_WINDOW)
         log(f"[run_rl] inspection HTML regenerated (up to it{it})")
@@ -396,17 +576,56 @@ def main() -> None:
     # relative. Required for start-training.ps1 --detach, whose WorkingDirectory
     # is nn-training/ — same pattern as train_loop.py's REPO_ROOT.
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    # 启动参数默认取自 rl-config.json 的 rl 块（与 run_rl_intent 的 intent_rl 块
-    # 同一模式——单一事实来源；CLI 显式传参覆盖 json 默认）。
+    # ===== RL 入口整合（DECISIONS §307）：两阶段 argparse，先预解析 --mode/--goal =====
+    mode = resolve_mode(sys.argv[1:])
+    # 启动参数默认取自 rl-config.json（单一事实来源；CLI 显式传参覆盖 json 默认）。
+    # 查找优先级 rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl（D2）。
     try:
-        _rl_args = json.loads((REPO_ROOT / "nn-training" / "rl-config.json").read_text(encoding="utf-8")).get("rl", {}) or {}
+        _cfg = json.loads((REPO_ROOT / "nn-training" / "rl-config.json").read_text(encoding="utf-8"))
     except Exception:
-        _rl_args = {}
+        _cfg = {}
+    _rl_args, _rl_src = merged_mode_args(_cfg, mode)
 
     def _d(name, fallback):
         return _rl_args.get(name, fallback)
 
     ap = argparse.ArgumentParser()
+    # ===== RL 入口整合（DECISIONS §307）：三模式后端 =====
+    ap.add_argument("--mode", default=mode, choices=list(_MODES),
+                    help="后端：per-tick（默认）/ intent（意图步）/ goal（goal 承诺步，"
+                         "原 run_rl_intent --goal）")
+    ap.add_argument("--goal", action="store_true",
+                    help="兼容别名：--mode goal（原 run_rl_intent --goal）")
+    # ---- intent/goal 模式专属（原 run_rl_intent 参数；全模式注册不报错，未用即忽略）----
+    ap.add_argument("--replan", type=int, default=_d("replan", 30),
+                    help="intent replan cadence（M7① 定稿 30）")
+    ap.add_argument("--heartbeat", type=int, default=_d("heartbeat", 240),
+                    help="goal 承诺期 T ticks（--mode goal 时生效）")
+    ap.add_argument("--goal-coarse", action="store_true",
+                    help="T9a：169 路块级动作空间（logsumexp 聚合）")
+    ap.add_argument("--warmup-iters", type=int, default=_d("warmup_iters", 1),
+                    help="前 N 迭代只训 value 头（intent/goal 冷启动 value 随机 → 先学回报基线）")
+    ap.add_argument("--kickstart-kl", type=float, default=_d("kickstart_kl", 1.0),
+                    help="kickstarting KL 惩罚基础系数（plan #5；0=关闭）")
+    ap.add_argument("--kickstart-decay", type=float, default=_d("kickstart_decay", 0.5),
+                    help="kickstarting 系数每策略迭代衰减因子")
+    ap.add_argument("--eval-seeds", type=int, default=_d("eval_seeds", 10),
+                    help="m1-eval 每关种子数（intent/goal 干净评估；350 局/轮 @10）")
+    ap.add_argument("--baseline", type=float, default=_d("baseline", 0.723),
+                    help="intent/goal 干净评估 Δ 的参照基线（M7② 72.3%）")
+    ap.add_argument("--stop-loss-at", type=int,
+                    default=_d("stop_loss_at", 15 if mode in ("intent", "goal") else 0),
+                    help="止损迭代：>= 此迭代且 Δ<=stop-loss-delta 即停车（0=关闭）")
+    ap.add_argument("--stop-loss-delta", type=float, default=_d("stop_loss_delta", 0.0),
+                    help="止损 Δ 阈值（相对 baseline）")
+    ap.add_argument("--kl-break", type=float, default=_d("kl_break", KL_BREAK),
+                    help="F4 KL 熔断阈值（intent/goal 放宽到 json/0.6，避免误熔断 Bug D）")
+    ap.add_argument("--kl-break-consec", type=int, default=_d("kl_break_consec", KL_BREAK_CONSEC),
+                    help="F4 KL 连续代阈值（intent/goal 专属）")
+    ap.add_argument("--out-log", default=_d("out_log", ""),
+                    help="stdout 落盘路径（json out_log；空=仅控制台）。Tee 控制台+文件。")
+    ap.add_argument("--err-log", default=_d("err_log", ""),
+                    help="stderr 落盘路径（json err_log；空=仅控制台）。Tee 控制台+文件。")
     ap.add_argument("--bc", default="tmp/student-weights-dagger/weights.json",
                     help="BC checkpoint to warm-start from (first init only)")
     ap.add_argument("--out", default="tmp/rl-weights/weights.json",
@@ -483,7 +702,8 @@ def main() -> None:
                     help="干净评估线程的墙钟预算；超时未结算的局放弃（不阻塞 PPO 与下一轮）")
     ap.add_argument("--eval-every", type=int, default=_d("eval_every", 1),
                     help="干净评估稀疏化（吞吐 T3）：每 N 轮跑一次 eval。1 = 每轮（默认，字节一致）；N>1 = 非 eval 轮不派发不 join（集群尾段留给下一轮采集/双缓冲）。判门频率随之降为每 N 轮，判据不变（plan/goal-nn-throughput.md）。")
-    ap.add_argument("--eval-at", default=_d("eval_at", ""),
+    ap.add_argument("--eval-at", default=_d(
+        "eval_at", DEFAULT_EVAL_AT_INTENT if mode in ("intent", "goal") else ""),
                     help=("干净评估绝对迭代点集（复用 run_rl_intent 的 eval_at 语义，如 "
                           "'5,10,15,20'）：只在列出的迭代派发 eval；空 = 关闭该维（配合 "
                           "--eval-every 或默认每轮）。与 --eval-every 可叠加（两者都满足才跑）。"))
@@ -507,6 +727,24 @@ def main() -> None:
     ap.add_argument("--collect-only", type=int, default=0,
                     help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。")
     args = ap.parse_args()
+    apply_mode_flags(args)
+    PPO = _MODE_BACKENDS[args.mode]
+    ref_model = None
+    if args.mode in ("intent", "goal") and args.kickstart_kl > 0:
+        # kickstarting 参考策略：B′ 冻结快照（warmup 冻结主干+三头 → 策略与 B′ 一致）。
+        ref_model = PPO.build_rl_net(args.out)
+        if args.mode == "goal":
+            ppo_goal.load_goal_weights(ref_model, args.out)
+        else:
+            ppo_intent.load_intent_weights(ref_model, args.out)
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        ref_model.eval()
+
+    # stdout/stderr 落盘（out_log/err_log；CLI 可覆盖调试；per-tick 默认空=仅控制台）。
+    _setup_log_redirect(args)
+    # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
+    _log_rl_args(_rl_src, _rl_args)
 
     import numpy as np
 
@@ -543,7 +781,7 @@ def main() -> None:
     # ===== 双缓冲：collect-only 分支结束 =====
 
     device = torch.device("cpu")
-    model = build_model(args.bc, args.out)
+    model = build_model(args.bc, args.out, mode=args.mode, workers=args.workers)
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -570,7 +808,8 @@ def main() -> None:
             "rotateSeed": rotate_seed,
         }) + "\n")
 
-    log(f"[run_rl] iters={'infinite' if args.iters <= 0 else args.iters}"
+    log(f"[run_rl] mode={args.mode} "
+        f"iters={'infinite' if args.iters <= 0 else args.iters}"
         + (f" (max-hours={args.max_hours})" if args.max_hours > 0 else "")
         + " "
         + (f"curriculum={args.curriculum_stages} start={args.curriculum_start} "
@@ -585,8 +824,10 @@ def main() -> None:
     log(f"training_log: {jsonl_path}")
     log(f"[run_rl] runId={RUN_ID}")
 
-    # 自动巡检仅对默认 traj 生效（巡检脚本读固定 tmp/rl-traj 的 TRAJ_DIR）
-    auto_inspect = traj_root.resolve() == (REPO_ROOT / "tmp" / "rl-traj").resolve()
+    # 自动巡检：per-tick 仅对默认 traj 生效（巡检脚本默认读 tmp/rl-traj）；
+    # intent/goal 总是生成巡检 HTML（_run_inspect 显式传 --traj-dir）。
+    auto_inspect = (True if args.mode in ("intent", "goal")
+                    else traj_root.resolve() == (REPO_ROOT / "tmp" / "rl-traj").resolve())
     if auto_inspect:
         log("[run_rl] per-iteration auto-inspection ENABLED (HTML report after each PPO)")
 
@@ -667,12 +908,15 @@ def main() -> None:
             # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
             # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
             dist_cfg = dist_common.load_dist_config()
-            # 吞吐 T3：本轮是否派发干净评估（eval_games>0 ∧ 周期命中 ∧ 绝对点命中）。
-            # stream 的 _fire_eval 闭包与本分支共用；非 eval 轮 = 不派发不 join。
-            eval_on_round = (
-                int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
-                and (eval_every <= 1 or it % eval_every == 0)
-                and (not eval_at_set or it in eval_at_set))
+            # 吞吐 T3：本轮是否派发干净评估。per-tick 按 eval-games/eval-every/eval-at
+            # 三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。
+            if args.mode == "per-tick":
+                eval_on_round = (
+                    int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
+                    and (eval_every <= 1 or it % eval_every == 0)
+                    and (not eval_at_set or it in eval_at_set))
+            else:
+                eval_on_round = (it in eval_at_set)
             t_rollout = time.time()
             stream_meta = None
             dist_iter_id: str | None = None
@@ -697,8 +941,12 @@ def main() -> None:
                         # 下方 join 跳过，集群尾段留给下一轮采集/双缓冲）。
                         if not eval_on_round:
                             return None
-                        return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
-                                                iter_id, it, local_gate=eval_gate)
+                        if args.mode == "per-tick":
+                            return dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
+                                                    iter_id, it, local_gate=eval_gate)
+                        # intent/goal：m1-eval 固定语料整批路线（rl/eval_m1.py）。
+                        return dispatch_eval_bg_m1(bun, args.out, args, it,
+                                                   jsonl_path, args.baseline)
 
                     # 吞吐 T4 提前预采（--precollect-early>0）：PPO 第 (epochs-early) 个
                     # epoch 完成后，把当前 model（θ_{N,e3}）冻结为快照并 spawn 预采下一轮
@@ -734,20 +982,30 @@ def main() -> None:
                             log(f"[double-buffer] precollect EARLY at epoch {ep_done}/{args.epochs} "
                                 f"(rest of PPO hides collection)")
 
+                    _stream_kwargs = {}
+                    if args.mode in ("intent", "goal"):
+                        # backend/update_kwargs 注入（intent 的 value warmup + kickstarting）。
+                        _stream_kwargs = {"backend": PPO,
+                                          "update_kwargs": update_kwargs(
+                                              args, it, start_it, ref_model)}
                     report = run_rollout_stream(
                         bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id,
                         model, opt, device, on_collect_done=_fire_eval,
                         on_epoch_done=_on_epoch_done,
-                        extra_wver=extra_wver)
+                        extra_wver=extra_wver, **_stream_kwargs)
                     stream_meta = report
                 else:
                     report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
                     # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 PPO 空窗
                     # 吞吐 T3：非 eval 轮不派发（eval_on_round 循环级统一门控）。
                     if eval_on_round:
-                        eval_thread = dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
-                                                       iter_id, it, report["winRate"],
-                                                       local_gate=eval_gate)
+                        if args.mode == "per-tick":
+                            eval_thread = dispatch_eval_bg(bun, args.out, traj_dir, args, dist_cfg,
+                                                           iter_id, it, report["winRate"],
+                                                           local_gate=eval_gate)
+                        else:
+                            eval_thread = dispatch_eval_bg_m1(
+                                bun, args.out, args, it, jsonl_path, args.baseline)
             else:
                 report = run_rollout(bun, args.out, traj_dir, pairs, args)
 
@@ -786,17 +1044,27 @@ def main() -> None:
 
             if stream_meta is None:
                 t_ppo = time.time()
-                episodes = ppo_mod.load_episodes(str(traj_dir))
+                episodes = PPO.load_episodes(str(traj_dir))
                 total_steps = sum(e["obs"].shape[0] for e in episodes)
-                chunks = ppo_mod.chunk_episodes(episodes, args.mb)
+                chunks = PPO.chunk_episodes(episodes, args.mb)
                 # PPO epoch 级断点续跑：崩溃重启后从最近 checkpoint 继续未完成批次
-                agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, device,
-                                         ckpt_path=str(traj_dir / "ppo_ckpt"))
+                if args.mode in ("intent", "goal"):
+                    agg = PPO.update(model, opt, chunks, args.epochs, device,
+                                     ckpt_path=str(traj_dir / "ppo_ckpt"),
+                                     **update_kwargs(args, it, start_it, ref_model))
+                else:
+                    agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, device,
+                                             ckpt_path=str(traj_dir / "ppo_ckpt"))
                 ppo_sec = round(time.time() - t_ppo, 1)
                 chunks_n = len(chunks)
                 kl_cum = agg["kl"] if agg else None  # 串行：单次大更新，均值即累计口径
-            save_weights_json(model, args.out)
-            bak = backup_weights(args.out, it)
+            if args.mode == "goal":
+                ppo_goal.export_goal_weights(model, args.out)
+            elif args.mode == "intent":
+                ppo_intent.export_intent_weights(model, args.out)
+            else:
+                save_weights_json(model, args.out)
+            bak = backup_weights(args.out, it, prefix=_MODE_BACKUP_PREFIX[args.mode])
             log(f"[run_rl] ppo it{it}: steps={total_steps} chunks={chunks_n} "
                 + (f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
                    f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} -> {args.out}"
@@ -818,13 +1086,26 @@ def main() -> None:
                 eval_gate.set()
             eval_join_sec = 0.0
             if eval_thread is not None and eval_thread.is_alive():
-                budget = float(getattr(args, "eval_window_sec", 900)) + 60.0
-                soft = min(budget, 180.0)  # 软等待上限：吃尾巴 + 缓存缓冲，不再全额等账
-                log(f"[run_rl] eval deferred: soft-wait {soft:.0f}s for tail "
-                    f"(remaining eval finishes in background, wver-keyed)")
-                _t_join = time.time()
-                eval_thread.join(timeout=soft)
-                eval_join_sec = round(time.time() - _t_join, 1)
+                budget = float(args.eval_window_sec) + 60.0
+                if args.mode in ("intent", "goal"):
+                    # intent/goal：eval_summary 须在 jsonl 写回前结算（止损判门依赖）。
+                    log(f"waiting up to {budget:.0f}s for clean-eval round before next "
+                        f"weight distribution")
+                    _t_join = time.time()
+                    eval_thread.join(timeout=budget)
+                    eval_join_sec = round(time.time() - _t_join, 1)
+                else:
+                    soft = min(budget, 180.0)  # per-tick 软等待上限：吃尾巴 + 缓存缓冲
+                    log(f"[run_rl] eval deferred: soft-wait {soft:.0f}s for tail "
+                        f"(remaining eval finishes in background, wver-keyed)")
+                    _t_join = time.time()
+                    eval_thread.join(timeout=soft)
+                    eval_join_sec = round(time.time() - _t_join, 1)
+            # intent/goal：回读该迭代 eval_summary（评估线程写入；止损判门的数据源）。
+            eval_rec = read_eval_summary(jsonl_path, it) if args.mode in ("intent", "goal") else None
+            # pace checkpoint（intent/goal 护栏）：iter5 首现通关。
+            if args.mode in ("intent", "goal") and it == 5 and report["winRate"] <= 0:
+                log("WARN pace: no clear by iter5 (rollout winRate=0) — investigate")
 
             with open(jsonl_path, "a", encoding="utf-8") as jsonl_f:
                 jsonl_f.write(json.dumps({
@@ -834,6 +1115,10 @@ def main() -> None:
                     "score_mean": report.get("scoreStats", {}).get("mean"),
                     "score_std": report.get("scoreStats", {}).get("std"),
                     "dim_means": report.get("dimMeans", {}),
+                    # 意图 RL 字段（per-tick 报告无此行 → None，不破兼容）。
+                    "intentCounts": report.get(
+                        "intentCounts" if args.mode != "goal" else "actionCounts"),
+                    "baseIntegrity": report.get("dimMeans", {}).get("baseIntegrity"),
                     "samples": report["totalSamples"], "ticks": report["totalTicks"],
                     "rollout_sec": rollout_sec, "ppo_sec": ppo_sec,
                     "steps": total_steps, "chunks": chunks_n,
@@ -864,17 +1149,22 @@ def main() -> None:
                     "eval_join_sec": eval_join_sec,
                 }) + "\n")
 
-            # 每轮 PPO 写回后自动生成巡检 HTML（仅默认 traj；非致命，失败不断训练）
+            # 每轮 PPO 写回后自动生成巡检 HTML（intent/goal 总是生成；per-tick 仅默认 traj）
             if auto_inspect:
-                _run_inspect(bun, it)
+                _run_inspect(bun, it, traj_dir=traj_root)
 
             # F4 circuit breaker（纯逻辑在 rl/breaker.py）。agg 为 None 的轮
             # （流式 checkpoint-complete，无任何梯度步）不计连击也不告警——
             # 本来就没有发生新的策略更新。break (not raise)：下方 except 会吞掉重试。
             if agg is not None:
+                # intent/goal 用放宽的 KL 熔断阈值（原 intent_rl 专属 --kl-break
+                # 0.6 / --kl-break-consec 3，避免误熔断 Bug D；per-tick 用默认 0.15/3）。
+                _kl_break = args.kl_break if args.mode in ("intent", "goal") else KL_BREAK
+                _kl_consec = args.kl_break_consec \
+                    if args.mode in ("intent", "goal") else KL_BREAK_CONSEC
                 kl_streak, ent_streak, tripped_now = breaker_update(
                     kl_streak, ent_streak, kl=agg["kl"], entropy=agg["entropy"],
-                    win_rate=report["winRate"])
+                    win_rate=report["winRate"], kl_break=_kl_break, kl_consec=_kl_consec)
                 if tripped_now is not None:
                     tripped = tripped_now
                 if tripped is not None:
@@ -899,6 +1189,16 @@ def main() -> None:
                     log(f"[run_rl] WARNING entropy dropped {prev_entropy - agg['entropy']:.3f} "
                         f"in one iteration (now {agg['entropy']:.3f}) — possible premature convergence")
                 prev_entropy = agg["entropy"]
+
+            # 止损判定（D4 泛化，仅 intent/goal 生效）：eval_summary 的 Δ（相对
+            # baseline）在 stop-loss-at 迭代 ≤ stop-loss-delta → 停车（原
+            # run_rl_intent iter15 Δ≤0 转 M9 语义由 --stop-loss-at 15 --stop-loss-delta 0 复现）。
+            if stop_loss_hit(args.mode, args.stop_loss_at, args.stop_loss_delta,
+                             it, eval_rec):
+                stop_reason = (f"iter{it} clean-eval Δ={eval_rec['delta']:+.4f} "
+                               f"<= {args.stop_loss_delta:+.4f} — stop-loss")
+                log(f"STOP-LOSS: {stop_reason}")
+                break
 
             if args.keep_iters > 0:
                 for old in traj_root.glob("it*"):

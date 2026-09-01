@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -270,6 +272,45 @@ def test_dirty_hash_files_smoke() -> None:
     check(isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}")
 
 
+def test_codehash_manifest_expansion() -> None:
+    """SSOT 清单 codehash-files.txt 展开：目录条目递归、文件条目直接纳入，relPath 全
+    正斜杠且无重复；本次事故的 3 个关键文件必须在集内。"""
+    entries = dist_common._collect_code_hash_files()
+    rels = [rel for rel, _content in entries]
+    check(len(rels) > 10, f"清单展开非空（got {len(rels)} files）")
+    # 2026-09-01 事故：Python 侧加了这 3 个文件、TS 侧漏同步 → 节点被永久误判 stale。
+    for need in ("tools/agent/restart-guard.ts", "src/types.ts",
+                 "src/game/SimulationCombat.ts", "tools/agent/sampler-agent.ts"):
+        check(need in rels, f"清单含 {need}")
+    check(any(r.startswith("src/nn/") for r in rels), "src/nn/ 目录条目递归纳入")
+    check(all("\\" not in r for r in rels), "relPath 全 posix 正斜杠")
+    check(len(rels) == len(set(rels)), "文件集无重复")
+
+
+def test_codehash_bilingual_contract() -> None:
+    """双语 codeHash 契约：TS 侧（节点）与 Python 侧（训练机）算出的 hash 必须逐字节
+    一致。任一侧漂移（文件集/内容/排序/归一化）都会红。bun 不可用则跳过。"""
+    bun = shutil.which("bun")
+    if bun is None:
+        print("  SKIP bun 不可用，跳过双语契约比对", flush=True)
+        return
+    agent = REPO / "tools" / "agent" / "sampler-agent.ts"
+    try:
+        proc = subprocess.run([bun, str(agent), "--print-code-hash"],
+                              cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        check(False, f"bun --print-code-hash 执行失败: {e}")
+        return
+    if proc.returncode != 0:
+        check(False, f"bun --print-code-hash 非零退出: {proc.stderr.strip()}")
+        return
+    # --print-code-hash 输出带 [HH:MM:SS] 时间戳前缀，取最后一个 token。
+    ts_hash = proc.stdout.strip().split()[-1]
+    py_hash = dist_common.compute_code_hash()
+    check(len(ts_hash) == 64 and ts_hash == py_hash,
+          f"双语 codeHash 一致 (TS={ts_hash[:12]}… Python={py_hash[:12]}…)")
+
+
 def main() -> None:
     print("== test_upgrade ==")
     test_request_upgrade()
@@ -279,6 +320,8 @@ def main() -> None:
     test_upgrade_stale_nodes_dirty_tree()
     test_parse_porcelain()
     test_dirty_hash_files_smoke()
+    test_codehash_manifest_expansion()
+    test_codehash_bilingual_contract()
     print(f"== {'PASS' if not FAILS else 'FAIL'} ({len(FAILS)} failures) ==")
     for m in FAILS:
         print("  -", m)
