@@ -24,8 +24,9 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+
 from models.intent_net import IntentNet, export_intent_weights
-from models.student import DEFAULT_D, DEFAULT_H, StudentNet
+from models.student import DEFAULT_D, DEFAULT_H
 
 INTENT_IDS = [
     "INTERCEPT",
@@ -340,7 +341,7 @@ def main() -> None:
         "confusion8x8": np.zeros((8, 8), dtype=int).tolist(),
     }
     cm = np.zeros((8, 8), dtype=int)
-    for t, p in zip(vi, pred):
+    for t, p in zip(vi, pred, strict=True):
         cm[t][p] += 1
     report["confusion8x8"] = cm.tolist()
 

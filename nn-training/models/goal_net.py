@@ -24,8 +24,10 @@ MAdds：主干 ~37M + goal 头 43,264（0.115%，§16.2）。
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -36,8 +38,9 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+
 from models.student import StudentNet, coord_channels
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 GOAL_HEATMAP_DIM = BOARD * BOARD  # 676（动作空间 = 坦克顶点热图；§9.4.0 合法顶点 25×25=625）
 ENGAGE_DIM = 2

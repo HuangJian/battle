@@ -40,7 +40,7 @@ def backup_weights(
         import shutil
 
         shutil.copyfile(weights_path, dst)
-        import glob as _glob  # local import keeps module-load side-effects minimal
+        # glob removed (unused) keeps module-load side-effects minimal
 
         baks = sorted(
             WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"),

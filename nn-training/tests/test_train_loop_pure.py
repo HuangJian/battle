@@ -15,7 +15,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import train_loop  
+import train_loop
+
 FAILS: list[str] = []
 
 

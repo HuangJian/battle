@@ -28,8 +28,10 @@ Coord channel formula — MUST match the TS runtime exactly:
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -37,6 +39,7 @@ if str(_ROOT) not in _sys.path:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 DEFAULT_H = 64
@@ -168,7 +171,7 @@ class PPOStudent(StudentNet):
         self.eval()
         if scalars is None:
             scalars = torch.zeros(obs.shape[0], self.scalar_dim)
-        m, f = self.forward(obs, scalars)
+        m, f, _v = self.forward(obs, scalars)
         return (
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),

@@ -4,8 +4,7 @@ Determinism invariants + curriculum progression rules.
 """
 from __future__ import annotations
 
-from rl.course import build_pairs, parse_range, curriculum_active_count
-
+from rl.course import build_pairs, curriculum_active_count, parse_range
 from tests.conftest import bp_args
 
 

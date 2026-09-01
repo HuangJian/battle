@@ -21,14 +21,17 @@ Heads (v2):
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
 import torch
 import torch.nn as nn
+
 from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 DEFAULT_CONV_CH = (32, 48, 64)
@@ -54,7 +57,7 @@ class NNPolicy(nn.Module):
         # ---- Conv backbone (no batchnorm, no dropout — inference-reproducible) ----
         layers: list[nn.Module] = []
         c = in_ch
-        for i, oc in enumerate(conv_ch):
+        for _i, oc in enumerate(conv_ch):
             layers.append(nn.Conv2d(c, oc, kernel_size=3, padding=1, bias=True))
             layers.append(nn.ReLU(inplace=True))
             c = oc

@@ -21,7 +21,6 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 from models.student import (
     DEFAULT_D,
     DEFAULT_H,
@@ -30,6 +29,7 @@ from models.student import (
     coord_channels,
     param_count,
 )
+from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 
@@ -108,7 +108,7 @@ def test_deterministic_init() -> None:
     m1 = StudentNet()
     torch.manual_seed(99)
     m2 = StudentNet()
-    for (k1, p1), (k2, p2) in zip(m1.state_dict().items(), m2.state_dict().items()):
+    for (k1, p1), (k2, p2) in zip(m1.state_dict().items(), m2.state_dict().items(), strict=True):
         check(k1 == k2 and torch.equal(p1, p2), f"同 seed 初始化逐位一致（{k1}）")
 
 

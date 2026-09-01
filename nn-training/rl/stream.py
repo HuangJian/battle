@@ -7,10 +7,10 @@ import os
 import threading
 import time
 
-import dist_common
 import numpy as np
-import ppo.engine as ppo_mod
 
+import dist_common
+import ppo.engine as ppo_mod
 from rl.log import log
 from rl.queue import run_rollout_queue
 from rl.resume import _scan_shards, completed_pairs

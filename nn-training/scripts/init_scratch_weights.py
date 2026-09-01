@@ -34,8 +34,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ppo.engine import build_ppo
 from data.weights_io import save_weights_json
+from ppo.engine import build_ppo
 
 TRUNK_SCALE = 0.1
 HEAD_SCALE = 0.01

@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 
 import numpy as np
 import torch
-from models.intent_net import IntentNet
+
 from data.weights_io import load_weights_json
+from models.intent_net import IntentNet
 
 D_MAX = 300.0
 

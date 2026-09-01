@@ -27,8 +27,10 @@ Usage (via start-training.{sh,ps1} which provides the venv + torch):
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -36,19 +38,19 @@ if str(_ROOT) not in _sys.path:
 import argparse
 import os
 import time
-from typing import Dict
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from data.weights_io import load_weights_json, save_weights_json
+from models.student import PPOStudent
+
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
 from ppo.common import (
-    _pack_np_state,
     _ppo_load,
     _ppo_save,
-    _unpack_np_state,
     cat_entropy,
     cat_logprob,
     chunk_episodes,
@@ -60,8 +62,6 @@ from ppo.common import (
     masked_logsoftmax,
 )
 from schema import FIRE_DIM, MOVE_DIM
-from models.student import PPOStudent
-from data.weights_io import load_weights_json, save_weights_json
 
 # ---------------- hyper-params (CLI-overridable) ----------------
 # R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级

@@ -28,8 +28,9 @@ import sys
 
 import numpy as np
 import torch
-from models.intent_net import IntentNet
+
 from data.weights_io import load_weights_json
+from models.intent_net import IntentNet
 
 INTENT_IDS = [
     "INTERCEPT",
@@ -222,7 +223,7 @@ def main() -> None:
 
     teach_acc = n_teach_correct / n_total if n_total else 0.0
     self_acc = n_self_correct / n_total if n_total else 0.0
-    base_t = conf_base.sum()
+    _ = conf_base.sum()  # diagnostic: total predictions
     safety_cross = 0
     for r in range(8):
         for c in range(8):

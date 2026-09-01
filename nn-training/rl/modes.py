@@ -52,7 +52,7 @@ def resolve_mode(argv: list[str]) -> str:
             mode = a.split("=", 1)[1]
         elif a == "--goal":
             mode = "goal"
-    return mode if mode in _MODES else mode  # invalid values surface via argparse
+    return mode  # invalid values surface via argparse
 
 
 def apply_mode_flags(args: argparse.Namespace) -> argparse.Namespace:

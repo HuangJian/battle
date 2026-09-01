@@ -19,8 +19,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
-import ppo.engine as ppo_mod
 import torch
+
+import ppo.engine as ppo_mod
 from data.weights_io import load_state_into
 
 

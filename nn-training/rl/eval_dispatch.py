@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
@@ -19,7 +18,6 @@ import dist_common
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-
 from rl.log import log
 from rl.queue import REPO_ROOT, _record_agent_meta, bun_version, mm
 
@@ -28,7 +26,7 @@ from rl.queue import REPO_ROOT, _record_agent_meta, bun_version, mm
 # 配对可比（同 seed 胜负是确定事件）。
 # 固定语料种子——前 2 个承载历史可比性（永不改动）；860003+ 为 goal-nn 扩展
 # （arena 自评需要 20 seed/关的 trend 精度，纯增量、不影响旧口径）。
-EVAL_SEEDS = tuple([860001, 860002] + list(range(860003, 860021)))
+EVAL_SEEDS = tuple([860001, 860002, *range(860003, 860021)])
 EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 EVAL_LOCAL_SLOTS_DEFAULT = 4  # 本地直跑槽位默认值（policy.evalLocalSlots 可覆写；0=禁用）

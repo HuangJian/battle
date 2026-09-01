@@ -38,11 +38,22 @@ select = [
 ]
 ignore = [
   "E501", # line-length (handled by formatter)
+  "E402", # module-level import not at top (intentional _ROOT sys.path hack)
+  "RUF001", # ambiguous unicode in text (中文标点/字符在 docstring/comment 中合法)
   "RUF002", # ambiguous unicode in text (中文标点：逗号/句号在 docstring 中合法)
   "RUF003", # ambiguous unicode in text (中文标点：括号/冒号在 comment 中合法)
-  "SIM108", # if-else-block-instead-of-if-explicit-exit (opinion)
+  "RUF012", # mutable class variable (intentional in model classes)
+  "RUF059", # unused __all__ entries (may be re-exports for IDE support)
+  "N806", # variable in function should be lowercase (intentional: N, B, PPO, etc.)
+  "N812", # local variable should be lowercase (intentional: F for torch.nn.functional)
+  "SIM105", # use contextlib.suppress (style preference, not a bug)
+  "SIM115", # use context manager for file operations (style preference)
+  "B023", # loop variable capture in closures (safe in immediately-called callbacks)
 ]
 unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-exports)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"] # test imports are often re-exports for pytest discovery
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

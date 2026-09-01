@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Any
 
-def win_of(summary: dict) -> int:
+
+def win_of(summary: dict[str, Any]) -> int:
     """单局摘要是否 stage_clear（meta 账本 win 字段的唯一口径）。"""
     return 1 if summary.get("outcomes", {}).get("stage_clear", 0) > 0 else 0
 
 
-def combine_reports(reports: list[dict]) -> dict:
+def combine_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """跨 worker 精确重聚合（scoreList/dimLists 原始值列表）。
 
     本地 rollout 与远端单局摘要同构（远端 manifest 即单局 _rl_report.json 内容，
     另带 wver/node/elapsedSec 溯源字段，不影响聚合），两条采样路径共用本函数。
     M8 意图 RL：额外聚合 intentCounts（意图动作分布）与 totalKills（存在时）。
     """
-    combined = {
+    combined: dict[str, Any] = {
         "games": 0,
         "winRate": 0.0,
         "outcomes": {},
@@ -25,7 +27,7 @@ def combine_reports(reports: list[dict]) -> dict:
         "dimLists": {},
     }
     wins = 0
-    intentCounts = None
+    intentCounts: list[int] | None = None
     totalKills = 0
     for r in reports:
         combined["games"] += r["games"]

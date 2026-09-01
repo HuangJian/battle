@@ -23,8 +23,10 @@ run_rl_intent.py 用它做 pace 护栏）。
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -32,11 +34,11 @@ if str(_ROOT) not in _sys.path:
 import argparse
 import os
 import time
-from typing import Dict
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -51,7 +53,6 @@ from ppo.common import (
     log,
     masked_logsoftmax,
 )
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # noqa: F401 — re-export for callers
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
 GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）

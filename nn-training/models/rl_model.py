@@ -18,8 +18,10 @@ Total params: ~999K
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -27,8 +29,9 @@ if str(_ROOT) not in _sys.path:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from torch.distributions import Categorical
+
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 # Action space dimensions (v2: item 删除 —— AI 不使用主动道具)
 MOVE_DIM = 5  # none/up/down/left/right

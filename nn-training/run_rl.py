@@ -48,75 +48,59 @@ import threading
 import time
 from pathlib import Path
 
+import torch
+
 import dist_common
 import ppo.engine as ppo_mod
 import ppo.goal as ppo_goal
 import ppo.intent as ppo_intent
-import torch
+from data.weights_io import load_state_into, save_weights_json
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from rl.archive import backup_weights, ensure_current_branch_pushed
 from rl.breaker import (
     CIRCUIT_EXIT_CODE,
-    ENT_BREAK,
-    ENT_BREAK_CONSEC,
-    ENT_BREAK_MAX_WINRATE,
     ENT_COLLAPSE_DROP,
     KL_BREAK,
     KL_BREAK_CONSEC,
     KL_WARN,
     breaker_update,
 )
-from rl.archive import backup_weights, ensure_current_branch_pushed  # noqa: F401
-from rl.course import build_pairs, curriculum_active_count, parse_range  # noqa: F401
-from rl.modes import (  # noqa: F401
-    DEFAULT_EVAL_AT_INTENT,
-    _MODE_BACKENDS,
-    _MODE_BACKUP_PREFIX,
-    _MODES,
-    apply_mode_flags,
-    merged_mode_args,
-    resolve_mode,
-)
-from rl.eval_dispatch import (  # noqa: F401
-    EVAL_ITER_SUFFIX,
-    EVAL_SEEDS,
-    EVAL_TASK_ATTEMPTS,
+from rl.course import build_pairs
+from rl.eval_dispatch import (
     dispatch_eval_bg,
-    dispatch_eval_round,
-    report_winrate_safe,
 )
-from rl.eval_dispatch import eval_done_keys as _eval_done_keys
-from rl.eval_m1 import (  # noqa: F401
-    CLEAN_EVAL_MAX_RETRY,
+from rl.eval_m1 import (
     dispatch_eval_bg_m1,
-    parse_m1_eval_report,
     read_eval_summary,
-    run_clean_eval,
 )
 
 # rl/ 包：编排逻辑单点实现（本文件以下仅存 CLI + 主循环 + 权重归档/巡检）
 from rl.log import log
-from rl.queue import (  # noqa: F401
-    MAX_TASK_ATTEMPTS,
+from rl.modes import (
+    _MODE_BACKENDS,
+    _MODE_BACKUP_PREFIX,
+    _MODES,
+    DEFAULT_EVAL_AT_INTENT,
+    apply_mode_flags,
+    merged_mode_args,
+    resolve_mode,
+)
+from rl.queue import (
     REPO_ROOT,
-    ROLLOUT_LOG_EVERY,
     RUN_ID,
     run_rollout,
     run_rollout_queue,
 )
-from rl.queue import bun_version as _bun_version
-from rl.queue import mm as _mm
-from rl.reports import combine_reports  # noqa: F401
-from rl.reports import win_of as _win_of
-from rl.resume import (  # noqa: F401
+from rl.resume import (
     completed_pairs,
     last_completed_iter,
     last_rotate_seed,
-    resumed_manifests,
+    resumed_manifests,  # noqa: F401 — re-exported for tests
 )
-from rl.stream import run_rollout_stream, wave_params  # noqa: F401
-from data.weights_io import load_state_into, save_weights_json
+from rl.stream import run_rollout_stream
+
 
 # Per-iteration weights archive (user request 2026-08-24): every completed PPO
 # write-back is copied into nn-training/weights/ with an identifiable name.
@@ -314,7 +298,7 @@ def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pop
     if jsonl_path.exists():
         try:
             with open(jsonl_path) as _f:
-                _lines = [l for l in _f if l.strip()]
+                _lines = [line for line in _f if line.strip()]
             if _lines:
                 _last = json.loads(_lines[-1])
                 _last_samples = _last.get("samples", 0)
@@ -901,7 +885,7 @@ def main() -> None:
     # 2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，
     # 不再读 rl-config 的 upgradeBranch（残留旧战役分支名曾把全部节点 reset 回
     # 31 个提交前的 intent-ai）。config 键仅作 push 失败时的最后回退。
-    pushed_branch = ensure_current_branch_pushed(REPO_ROOT)
+    ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
     _current_branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=str(REPO_ROOT),
@@ -1102,12 +1086,10 @@ def main() -> None:
                 eval_on_round = it in eval_at_set
             t_rollout = time.time()
             stream_meta = None
-            dist_iter_id: str | None = None
             eval_thread: threading.Thread | None = None
             eval_gate: threading.Event | None = None  # R6：PPO 收尾后放行本地 eval 参与
             if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
                 iter_id = f"{RUN_ID}.{it}"
-                dist_iter_id = iter_id
                 enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
                 log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
                 # 本地 eval 参与的门控事件：派发即创建，PPO/采集收尾时 set 放行

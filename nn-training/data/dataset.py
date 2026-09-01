@@ -16,22 +16,24 @@ it produces a contradictory (input, target) pair.
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset, random_split
+
 from schema import (
     DIRECTION_CHANNELS,
     FIRE_DIM,
-    MASK_DIM,
     MOVE_DIM,
     SCALAR_X_INDICES,
 )
-from torch.utils.data import DataLoader, Dataset, random_split
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 

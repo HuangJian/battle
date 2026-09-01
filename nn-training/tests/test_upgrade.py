@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import dist_common  # noqa: E402
+import dist_common
 
 FAILS: list[str] = []
 

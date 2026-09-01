@@ -61,7 +61,7 @@ import threading
 import time
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -81,7 +81,7 @@ SPIN_WARN_S = 60.0
 
 def _fmt_dur(sec: float) -> str:
     """Human-readable duration: 45s, 3m20s, 1h05m."""
-    sec = int(round(sec))
+    sec = round(sec)
     if sec < 60:
         return f"{sec}s"
     m, s = divmod(sec, 60)
@@ -468,7 +468,7 @@ def main() -> None:
     )
 
     # Track per-epoch progress by watching train_bc stdout lines.
-    epoch_re = re.compile(r"\[epoch\s+(\d+)/(\d+)\]")
+    _ = re.compile(r"\[epoch\s+(\d+)/(\d+)\]")  # reserved for future progress tracking
 
     try:
         while True:

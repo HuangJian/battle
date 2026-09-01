@@ -281,7 +281,7 @@ def dirty_hash_files() -> list[str]:
         return []
     try:
         proc = subprocess.run(
-            ["git", "status", "--porcelain", "--"] + rels,
+            ["git", "status", "--porcelain", "--", *rels],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

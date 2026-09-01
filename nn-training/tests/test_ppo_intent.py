@@ -24,10 +24,10 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import ppo.engine as ppo  # noqa: E402
-import ppo.intent as ppo_intent  # noqa: E402
-from models.intent_net import export_intent_weights  # noqa: E402
-from data.weights_io import load_weights_json  # noqa: E402
+import ppo.engine as ppo
+import ppo.intent as ppo_intent
+from data.weights_io import load_weights_json
+from models.intent_net import export_intent_weights
 
 FAILS: list[str] = []
 

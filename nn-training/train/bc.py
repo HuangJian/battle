@@ -17,8 +17,10 @@ Outputs:
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -41,10 +43,10 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data.dataset import make_loaders
-from models.core import NNPolicy, param_count
-from schema import OBS_SCHEMA_MAJOR
-from models.student import PPOStudent, StudentNet
 from data.weights_io import load_state_into, save_weights_json
+from models.core import NNPolicy, param_count
+from models.student import PPOStudent, StudentNet
+from schema import OBS_SCHEMA_MAJOR
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

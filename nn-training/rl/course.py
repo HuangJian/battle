@@ -80,11 +80,11 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
             import numpy as np
 
             rng = np.random.default_rng([rotate_seed, 0x5EED, it])
-            pairs: list[tuple[int, int]] = []
+            rotate_pairs: list[tuple[int, int]] = []
             for si in base:
                 draws = rng.integers(1, 2**30, size=rotate)
-                pairs.extend((si, int(d)) for d in draws)
-            return pairs
+                rotate_pairs.extend((si, int(d)) for d in draws)
+            return rotate_pairs
         return [(si, sd) for si in base for sd in parse_range(args.seeds)]
     import numpy as np
 

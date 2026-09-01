@@ -37,13 +37,13 @@ def run(cmd: list[str], *, check: bool = False) -> int:
 
 
 def target_check() -> int:
-    lint()
-    typecheck()
-    return test_fast()
+    target_lint()
+    target_typecheck()
+    return target_test_fast()
 
 
 def target_test() -> int:
-    test_fast()
+    target_test_fast()
     pytest_path = shutil.which("pytest") or "pytest"
     return run([PYTHON, "-m", pytest_path, "tests/", "-v", "--timeout=50000"])
 

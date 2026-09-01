@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import Any, Dict
+from typing import Any
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 POPEN_NO_WINDOW: dict[str, Any] = {}

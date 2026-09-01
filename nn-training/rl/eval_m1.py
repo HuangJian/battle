@@ -24,7 +24,6 @@ from pathlib import Path
 
 # Windows：spawn 子进程（bun 评估）时用 CREATE_NO_WINDOW，避免黑控制台窗口抢焦点。
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-
 from rl.log import log
 from rl.queue import REPO_ROOT
 

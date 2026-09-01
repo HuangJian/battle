@@ -31,6 +31,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from ppo.common import discover_shards, log
 

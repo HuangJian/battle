@@ -40,10 +40,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-import dist_common  # noqa: E402
-import run_rl  # noqa: E402
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
-from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM  # noqa: E402
+import dist_common
+import run_rl
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
@@ -184,8 +184,11 @@ def _npy_bytes(arr: np.ndarray) -> bytes:
 
 def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(11)
-    i64 = lambda hi: rng.integers(0, hi, n).astype(np.int64)  # noqa: E731
-    f32 = lambda x: rng.standard_normal(x).astype(np.float32)  # noqa: E731
+    def i64(hi):
+        return rng.integers(0, hi, n).astype(np.int64)
+
+    def f32(x):
+        return rng.standard_normal(x).astype(np.float32)
     done = np.zeros(n, dtype=np.int64)
     done[-1] = 1
     return {
@@ -391,7 +394,7 @@ def test_integration(tmp: Path) -> None:
             on_result=lambda _s: result_ts.append(time.time()),
             on_queue_drained=lambda: drained_ts.append(time.time()),
         )
-        disp = [t for kind, t, _x in FakeAgent.events if kind == "dispatch"]
+        _ = [t for kind, t, _x in FakeAgent.events if kind == "dispatch"]
         wts = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
         disp_pairs = {p for kind, _t, p in FakeAgent.events if kind == "dispatch"}
         check(rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully")
@@ -586,7 +589,6 @@ def test_integration(tmp: Path) -> None:
         )
         cfg8 = json.loads(json.dumps(cfg))
         cfg8["policy"]["streamWaveGames"] = 1  # 每局一波（首波注入立即起训）
-        calls8 = []
         stub8 = _StubPpo(kl=1e-12)
         rep8 = run_rl.run_rollout_stream(
             bun,
@@ -618,6 +620,7 @@ def test_integration(tmp: Path) -> None:
 
 def test_compute_gae() -> None:
     import numpy as np
+
     import ppo as ppo_mod
 
     print("[fast] ppo.compute_gae (手算用例)")
@@ -648,7 +651,6 @@ def test_chunk_episodes() -> None:
 
 def test_backup_weights(tmp: Path) -> None:
     import run_rl
-
     from rl import archive as rl_archive
 
     print("[fast] backup_weights (归档 + 有界清理)")
@@ -769,9 +771,9 @@ def test_eval_local_gate(tmp: Path) -> None:
             "bun", str(rl), traj_a, mk_args(30), cfg, "rid.1", 1, local_gate=gate
         )
         rows = [
-            json.loads(l)
-            for l in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
-            if l.strip()
+            json.loads(line)
+            for line in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
         ]
         eval_rows = [r for r in rows if r.get("event") == "eval"]
         summ = [r for r in rows if r.get("event") == "eval_summary"]
@@ -795,9 +797,9 @@ def test_eval_local_gate(tmp: Path) -> None:
         )
         # 采样机健康账本：eval 局同册入账（mode:"eval"），喂「采样机健康」表指标
         meta_rows = [
-            json.loads(l)
-            for l in (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
-            if l.strip()
+            json.loads(line)
+            for line in (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
         ]
         check(
             len(meta_rows) == 6
@@ -822,9 +824,9 @@ def test_eval_local_gate(tmp: Path) -> None:
         check(len(calls) == baseline_calls, "gate closed → local runner never invoked")
         check(took < 8, f"closed-gate round exits at window ({took:.1f}s)")
         rows_b = [
-            json.loads(l)
-            for l in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
-            if l.strip()
+            json.loads(line)
+            for line in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
         ]
         summ_b = [r for r in rows_b if r.get("event") == "eval_summary" and r.get("iter") == 2]
         check(

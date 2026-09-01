@@ -27,8 +27,10 @@ engage 明定：**不是 PPO 动作**（shard 无 lp_engage）——rollout/部�
 
 
 from __future__ import annotations
+
 import sys as _sys
 from pathlib import Path as _Path
+
 _ROOT = _Path(__file__).resolve().parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -36,11 +38,11 @@ if str(_ROOT) not in _sys.path:
 import argparse
 import os
 import time
-from typing import Dict
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from ppo.common import (
     _ppo_load,
@@ -53,7 +55,7 @@ from ppo.common import (
     log,
     masked_logsoftmax,
 )
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # noqa: F401 — re-export for callers
+from schema import BOARD
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
 GAMMA_TICK = 0.995
@@ -158,10 +160,7 @@ def policy_logprobs(model, obs, sc, inj, mask):
     log-prob 只记块级，执行侧块内 mask 约束 argmax 由采集器负责）。"""
     goal, engage, val = model.forward_rl(obs, sc, inj)
     n = action_dim_of(mask.shape[1])
-    if n == COARSE_DIM:
-        logits = coarse_block_logsumexp(goal)
-    else:
-        logits = goal
+    logits = coarse_block_logsumexp(goal) if n == COARSE_DIM else goal
     lp = masked_logsoftmax(logits, mask)
     return lp, engage, val
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 DEFAULT_LOG = "train.log"
@@ -26,7 +25,7 @@ RESUME_RE = re.compile(r"resume=(\S+)")
 
 
 class RoundStats:
-    __slots__ = ("n", "vals", "wins", "kls", "resume", "started")
+    __slots__ = ("kls", "n", "resume", "started", "vals", "wins")
 
     def __init__(self, n: int):
         self.n = n

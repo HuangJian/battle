@@ -10,11 +10,11 @@ import json
 import random
 import secrets
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import dist_common
 
@@ -22,7 +22,6 @@ import dist_common
 # 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
 # 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-
 from rl.log import log
 from rl.reports import combine_reports, win_of
 from rl.resume import completed_pairs, resumed_manifests
@@ -172,10 +171,8 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
-        done_n = 0
-        for fut in as_completed(futures):
+        for done_n, fut in enumerate(as_completed(futures), 1):
             results[futures[fut]] = fut.result()
-            done_n += 1
             if done_n % ROLLOUT_LOG_EVERY == 0 or done_n == len(pairs):
                 log(
                     f"[rollout] local {done_n}/{len(pairs)} games settled ({time.time() - t0:.0f}s)"
@@ -197,9 +194,8 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
     dup=1 或 inflight 为空 → None（无竞速副本名额）。"""
     cand: tuple[int, int] | None = None
     for t, c in inflight.items():
-        if c < dup:
-            if cand is None or t < cand:
-                cand = t
+        if c < dup and (cand is None or t < cand):
+            cand = t
     return cand
 
 
@@ -310,7 +306,7 @@ def run_rollout_queue(
             probe_results = list(_ex.map(_probe, cfg_nodes))
 
     nodes = []
-    for (nid, ping), n in zip(probe_results, cfg_nodes):
+    for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
         if ping is None:
             log(f"[dist] node {nid}: ping failed — excluded this round")
             continue
@@ -657,7 +653,7 @@ def run_rollout_queue(
             elapsed_sec = round(time.time() - t0, 3)
         if rc != 0:
             raise RuntimeError(f"local rollout rc={rc} (see {wdir}/rollout.log)")
-        report = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))
+        report: dict[str, Any] = json.loads((wdir / "_rl_report.json").read_text(encoding="utf-8"))
         if report.get("wver") != wver:
             raise RuntimeError("local report wver mismatch")
         report["elapsedSec"] = elapsed_sec
