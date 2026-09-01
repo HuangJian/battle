@@ -195,6 +195,7 @@ export function runEvalOne(
   intentWeightsText = '',
   goalWeightsText = '',
   promiseTicks = 0,
+  arenaId = 0,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -203,10 +204,17 @@ export function runEvalOne(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
-  // 一命覆写（plan/dodge-item-curriculum.md §1a）：S-Dodge 强制 1 命。
-  if (isArenaId(stageIdx) && arenaLevelOfId(stageIdx) === 'S-Dodge') {
+  // 一命覆写（plan/dodge-item-curriculum.md §1a）：S-Dodge 强制 1 命。必须用真实
+  // 竞技场号 arenaId（调用方传的真实 --stage，如 1050）判定——stageIdx 参数是
+  // loadStageData 的 loadIndex（arena 恒 0），用它判 isArenaId 恒为 false，曾导致
+  // S-Dodge 评估静默用 3 命跑完、胜率虚高（2026-09-01 复核时实证）。
+  if (isArenaId(arenaId) && arenaLevelOfId(arenaId) === 'S-Dodge') {
     world.lives = 1
   }
+  // 有效初始生命（覆写后）：S-Dodge 一命 → 1；其余关卡 → difficulty.startLives。
+  // 下游 lives 归一与报告均以此为准（此前误用 difficulty.startLives=3，一命局
+  // 的 lives 被错算成 1/3）。
+  const startLives = world.lives
 
   // v3.7：policy='intent-exec' → 意图执行器驱动（NN 选意图 + God-AI 白名单子链），
   // 替代 RL 学生模型贪心。intent-weights 经 --intent-weights 单独提供。
@@ -249,7 +257,7 @@ export function runEvalOne(
 
   const tel: Telemetry = {
     enemyTotal: (stage as any)?.enemyCount ?? ENEMIES_PER_STAGE,
-    startLives: world.difficulty?.startLives ?? START_LIVES,
+    startLives,
     playerDeaths: 0,
     playerShots: 0,
     powerUpsSpawned: 0,
@@ -458,6 +466,7 @@ function main(): void {
     intentWeightsText,
     goalWeightsText,
     promiseTicks,
+    isArenaId(stageIdx) ? stageIdx : 0,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。
