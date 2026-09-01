@@ -79,4 +79,14 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-ra -q --tb=short"
+addopts = "-ra -q --tb=short -x"
+
+# NOTE: tests/test_run_rl.py is ALSO runnable as a standalone script
+# (python tests/test_run_rl.py). This is intentional for ad-hoc regression
+# without pytest overhead. The pytest collection path is the canonical CI one.
+# Markers:
+#   @pytest.mark.heavy  → excluded from fast-gate (integration / torch training)
+markers = [
+  "heavy: marks tests that require the heavy test gate (torch full-train, integration)",
+  "slow: marks slow tests (full determinism corpus)",
+]

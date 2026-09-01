@@ -34,9 +34,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
+import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "nn-training"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 import dist_common  # noqa: E402
@@ -346,6 +347,10 @@ class _StubPpo:
         return {"adv": np.zeros(1, dtype=np.float32)}
 
 
+@pytest.mark.skipif(
+    shutil.which("bun") is None or not WEIGHTS.exists(),
+    reason="integration: requires bun on PATH + tmp/rl-weights/weights.json",
+)
 def test_integration(tmp: Path) -> None:
     print("[itest] queue normal / halt / queue-drained ordering")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeAgent)
@@ -677,6 +682,7 @@ def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
     print("[fast] backup_weights prune by mtime (it20 not before it3)")
     bdir = tmp / "weights-archive-mt"
     shutil.rmtree(bdir, ignore_errors=True)
+    bdir.mkdir(parents=True, exist_ok=True)
     src = tmp / "src-weights.json"
     src.write_text("{}", encoding="utf-8")
     # 手工放老迭代（it2/it3，12:00 时代）与重启后新迭代（it20–25，21:00 时代）。

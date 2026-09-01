@@ -21,8 +21,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "nn-training"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import dist_common  # noqa: E402
 

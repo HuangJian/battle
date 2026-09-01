@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -25,3 +28,10 @@ def bp_args(sps: int = 3, rotate_stages: int = 35, total_stages: int = 35,
         curriculum_grow=4,
         seed_rotate=0,
     )
+
+
+@pytest.fixture
+def tmp() -> Path:
+    """Legacy test_run_rl.py compat: mirrors pytest's tmp_path API used across tests."""
+    with tempfile.TemporaryDirectory() as d:
+        yield Path(d)

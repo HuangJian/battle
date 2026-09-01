@@ -10,8 +10,8 @@ import sys
 import types
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "nn-training"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import run_rl  # noqa: E402
 from rl.eval_m1 import CLEAN_EVAL_MAX_RETRY, parse_m1_eval_report, run_clean_eval  # noqa: E402

@@ -67,7 +67,17 @@ from rl.breaker import (
     KL_WARN,
     breaker_update,
 )
+from rl.archive import backup_weights, ensure_current_branch_pushed  # noqa: F401
 from rl.course import build_pairs, curriculum_active_count, parse_range  # noqa: F401
+from rl.modes import (  # noqa: F401
+    DEFAULT_EVAL_AT_INTENT,
+    _MODE_BACKENDS,
+    _MODE_BACKUP_PREFIX,
+    _MODES,
+    apply_mode_flags,
+    merged_mode_args,
+    resolve_mode,
+)
 from rl.eval_dispatch import (  # noqa: F401
     EVAL_ITER_SUFFIX,
     EVAL_SEEDS,

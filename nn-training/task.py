@@ -49,7 +49,7 @@ def target_test() -> int:
 
 
 def target_test_fast() -> int:
-    return run([PYTHON, str(HERE / "test_run_rl.py")])
+    return run([PYTHON, "-m", "pytest", "tests/", "-q"])
 
 
 def target_smoke() -> int:

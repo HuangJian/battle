@@ -23,8 +23,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "nn-training"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import ppo  # noqa: E402
 import ppo_goal  # noqa: E402

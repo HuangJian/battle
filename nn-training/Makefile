@@ -35,7 +35,7 @@ test: test-fast
 	$(PREFIX) $(PYTHON) -m pytest tests/ -v --timeout=50000
 
 test-fast:
-	$(PREFIX) $(PYTHON) test_run_rl.py
+	$(PREFIX) $(PYTHON) -m pytest tests/ -q
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"
