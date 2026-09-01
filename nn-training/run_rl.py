@@ -47,6 +47,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -55,6 +56,9 @@ import ppo.engine as ppo_mod
 import ppo.goal as ppo_goal
 import ppo.intent as ppo_intent
 from data.weights_io import load_state_into, save_weights_json
+from models.goal_net import GoalNet
+from models.intent_net import IntentNet
+from models.student import PPOStudent
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口反复弹出抢焦点。
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
@@ -306,6 +310,8 @@ def _spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pop
                 if _last_samples > 0 and _last_games > 0:
                     _avg_sppg = _last_samples / _last_games
                     _cfg = dist_common.load_dist_config()
+                    if _cfg is None:
+                        _cfg = {}
                     _wave = max(4, int(_cfg.get("policy", {}).get("streamWaveGames", 12)))
                     pre_samples = int(_wave * _avg_sppg * 1.5)
                     log(
@@ -418,7 +424,7 @@ def build_model(
             f"({mode}, params={sum(int(p.numel()) for p in model.parameters())})"
             + ("" if resume else f" -> {rl_path}")
         )
-        return model
+        return model  # type: ignore[no-any-return]
 
     resume = os.path.exists(rl_path)
     src = rl_path if resume else bc_path
@@ -461,7 +467,7 @@ def build_model(
             chunks.append(synth)
             return torch.cat(chunks, dim=0)
 
-        def warm_start_normalize(model: torch.nn.Module) -> None:
+        def warm_start_normalize(model: PPOStudent) -> None:
             TRUNK = ("stem.", "blocks.", "fc.")
             sample = _sample_real_obs(32)
             sc = torch.zeros(sample.shape[0], 19)
@@ -912,7 +918,7 @@ def main() -> None:
     if getattr(args, "collect_only", 0):
         _run_collect_only(args, _traj_root, _rseed, bun)
         log("[run_rl] collect-only done — exit")
-        return 0
+        return
     # ===== 双缓冲：collect-only 分支结束 =====
 
     device = torch.device("cpu")
@@ -1023,7 +1029,8 @@ def main() -> None:
             # wver/extra_wver 需在子进程退出前算出才能匹配预采 shard
             _pre_wver = dist_common.weights_fingerprint(args.out)
             _pre_extra_wver = _precollect_snapshot_wver(args.out, it)
-            _pre_policy = dist_common.load_dist_config().get("policy", {})
+            _pre_cfg = dist_common.load_dist_config() or {}
+            _pre_policy = _pre_cfg.get("policy", {})
             _pre_wave = max(4, int(_pre_policy.get("streamWaveGames", 12)))
             _pre_min_wave = max(4, _pre_wave // 2)  # 半波即可开训
             _pre_deadline = time.time() + 3600
@@ -1276,9 +1283,9 @@ def main() -> None:
                 chunks_n = len(chunks)
                 kl_cum = agg["kl"] if agg else None  # 串行：单次大更新，均值即累计口径
             if args.mode == "goal":
-                ppo_goal.export_goal_weights(model, args.out)
+                ppo_goal.export_goal_weights(cast(GoalNet, model), args.out)
             elif args.mode == "intent":
-                ppo_intent.export_intent_weights(model, args.out)
+                ppo_intent.export_intent_weights(cast(IntentNet, model), args.out)
             else:
                 save_weights_json(model, args.out)
             bak = backup_weights(args.out, it, prefix=_MODE_BACKUP_PREFIX[args.mode])
@@ -1464,6 +1471,7 @@ def main() -> None:
             # baseline）在 stop-loss-at 迭代 ≤ stop-loss-delta → 停车（原
             # run_rl_intent iter15 Δ≤0 转 M9 语义由 --stop-loss-at 15 --stop-loss-delta 0 复现）。
             if stop_loss_hit(args.mode, args.stop_loss_at, args.stop_loss_delta, it, eval_rec):
+                assert eval_rec is not None
                 stop_reason = (
                     f"iter{it} clean-eval Δ={eval_rec['delta']:+.4f} "
                     f"<= {args.stop_loss_delta:+.4f} — stop-loss"

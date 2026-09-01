@@ -140,8 +140,12 @@ class StudentNet(nn.Module):
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """obs: (B,14,26,26) u1; scalars: (B,19) f4 → (move_logits, fire_logits)."""
+    ) -> tuple[torch.Tensor, ...]:
+        """obs: (B,14,26,26) u1; scalars: (B,19) f4 → (move_logits, fire_logits).
+
+        返回类型刻意写成变长 tuple：子类（PPOStudent / IntentNet / GoalNet）会在
+        尾部追加 value 等头，固定 2 元组会让每处 override 都违反 LSP。运行时不变。
+        """
         h = self.features(obs, scalars)
         return self.move_head(h), self.fire_head(h)
 

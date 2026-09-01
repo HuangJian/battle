@@ -53,6 +53,9 @@ class GoalNet(StudentNet):
 
     def __init__(self, with_value: bool = False, **kwargs):
         super().__init__(**kwargs)
+        # 必须显式赋值：nn.Module.__getattr__ 对未注册名抛 AttributeError，
+        # forward(inject=None) 分支此前会在此炸掉（mypy 也是靠它才暴露的）。
+        self.inject_dim = INJECT_DIM
         self.goal_conv = nn.Conv2d(self.h, 1, 1, bias=True)  # bufA → 26×26 热图
         head_in = self.head_hidden + INJECT_DIM  # 137
         self.engage_head = nn.Linear(head_in, ENGAGE_DIM)

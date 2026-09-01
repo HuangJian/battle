@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -109,11 +110,12 @@ def test_cat_logprob_entropy() -> None:
     check(torch.allclose(got, torch.tensor([0.5, 0.5])), "cat_logprob gather 正确")
     ent = ppo_common.cat_entropy(logp)
     manual = -(logp.exp() * logp).sum(dim=-1).mean()
-    check(torch.isclose(ent, manual), "cat_entropy 与手算一致")
+    check(bool(torch.isclose(ent, manual).item()), "cat_entropy 与手算一致")
 
 
 def test_chunk_episodes() -> None:
-    eps = [
+    # 显式标注：np.zeros 不同 dtype 的 ndarray join 会退化成 object，导致 ["obs"] 不可索引。
+    eps: list[dict[str, np.ndarray]] = [
         {"obs": np.zeros((10, 3), dtype=np.uint8), "adv": np.zeros(10)},
         {"obs": np.zeros((5, 3), dtype=np.uint8), "adv": np.zeros(5)},
     ]
@@ -178,7 +180,7 @@ def test_discover_and_load_shard_fields() -> None:
         np.save(partial / "obs.npy", np.zeros(1))
         found = ppo_common.discover_shards(str(root), ("reward.npy", "obs.npy"))
         check(found == [str(shard)], f"discover 只含完整 shard (got {found})")
-        spec = {
+        spec: dict[str, tuple[str, npt.DTypeLike]] = {
             "obs": ("obs.npy", np.uint8),
             "reward": ("reward.npy", np.float32),
             "dt": ("dt.npy", np.int64),

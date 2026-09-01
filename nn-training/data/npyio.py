@@ -34,7 +34,9 @@ MANIFEST_FILE = "manifest.json"
 
 def read_npy(path: str) -> np.ndarray:
     """Read a standard .npy file written by either numpy or the TS writer."""
-    return np.load(path, allow_pickle=False)
+    # np.load 存根返回 Any（mmap/NpzFile 多态），显式收窄为本函数契约的 ndarray。
+    arr: np.ndarray = np.load(path, allow_pickle=False)
+    return arr
 
 
 OPTIONAL_FILES = {"returns": "returns.npy"}  # v2: M3 value MC 预置（可选）

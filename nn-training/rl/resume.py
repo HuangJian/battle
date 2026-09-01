@@ -27,7 +27,7 @@ def _scan_shards(
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
     """
-    res: list[tuple[int, int]] = []
+    res: list[tuple[tuple[int, int], Path]] = []
     if not traj_dir.exists():
         return res
     for m in traj_dir.rglob("rl_s*_seed*/manifest.json"):

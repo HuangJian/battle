@@ -100,16 +100,14 @@ actual `weights.*.json` files on disk.
 def _git_sha() -> str:
     """Best-effort short git sha of the repo at training time (for the registry)."""
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=os.path.dirname(os.path.abspath(__file__)),
-                stderr=subprocess.DEVNULL,
-                **_POPEN_NO_WINDOW,
-            )
-            .decode()
-            .strip()
+        # **_POPEN_NO_WINDOW 使 check_output 的重载无法解析（→ Any），显式收窄为 bytes。
+        raw: bytes = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+            **_POPEN_NO_WINDOW,
         )
+        return raw.decode().strip()
     except Exception:
         return "n/a"
 
@@ -149,7 +147,8 @@ def _majority_baseline(dl) -> dict:
     Provides a floor to interpret the trained val_loss against (audit gap #2):
     is 1.2431 near the majority-class ceiling, or is there real signal learned?
     """
-    c_m, c_f = Counter(), Counter()
+    c_m: Counter[int] = Counter()
+    c_f: Counter[int] = Counter()
     for batch in dl:
         obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
         for t, c in ((mv, c_m), (fr, c_f)):
@@ -208,7 +207,13 @@ def train(args) -> dict:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs))
 
     best_val = float("inf")
-    history = {"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []}
+    history: dict[str, list[float]] = {
+        "train_loss": [],
+        "val_loss": [],
+        "move_acc": [],
+        "fire_acc": [],
+        "value_loss": [],
+    }
 
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):

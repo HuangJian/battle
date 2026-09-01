@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import types
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ def bp_args(sps: int = 3, rotate_stages: int = 35, total_stages: int = 35,
 
 
 @pytest.fixture
-def tmp() -> Path:
+def tmp() -> Iterator[Path]:
     """Legacy test_run_rl.py compat: mirrors pytest's tmp_path API used across tests."""
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)

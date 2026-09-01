@@ -40,6 +40,7 @@ import os
 import time
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
@@ -108,7 +109,7 @@ def build_rl_net(weights_path: str | None) -> GoalRLNet:
 
 # ---------------- trajectory loading ----------------
 # goal shard 字段表。goal_mask: 每步 N 路可达掩码（u1，1=可选）；N 由文件形状判别。
-_GOAL_SHARD_SPEC = {
+_GOAL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
     "inject": ("inject.npy", np.float32),
@@ -250,7 +251,7 @@ def ppo_update_goal(
     np.random.seed(seed)
     model.train()
     clip = CLIP_EPS
-    stats = []
+    stats: list[dict[str, float]] = []
     tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
     total_steps = len(tensored) * epochs
     log(

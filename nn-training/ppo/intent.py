@@ -36,6 +36,7 @@ import os
 import time
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
@@ -102,7 +103,7 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
 
 # ---------------- trajectory loading ----------------
 # 意图 shard 字段表：{key: (filename, dtype)} —— 与旧 load_intent_shard 逐字段一致。
-_INTENT_SHARD_SPEC = {
+_INTENT_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
     "inject": ("inject.npy", np.float32),
@@ -188,7 +189,7 @@ def ppo_update_intent(
     target_kl: float = TARGET_KL,
     seed: int = 7,
     value_warmup_epochs: int = 0,
-    ref_model: torch.nn.Module | None = None,
+    ref_model: IntentNet | None = None,
     kl_coef: float = 0.0,
     on_epoch_done=None,
 ):
@@ -222,7 +223,7 @@ def ppo_update_intent(
     np.random.seed(seed)
     model.train()
     clip = CLIP_EPS
-    stats = []
+    stats: list[dict[str, float]] = []
     tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
     total_steps = len(tensored) * epochs
     log(

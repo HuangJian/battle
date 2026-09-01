@@ -274,6 +274,7 @@ class FakeAgent(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/v1/ping":
             bun = shutil.which("bun")
+            assert bun is not None, "bun not found"
             self._json(
                 {
                     "codeHash": dist_common.compute_code_hash(),
@@ -360,6 +361,7 @@ def test_integration(tmp: Path) -> None:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     bun = shutil.which("bun")
+    assert bun is not None, "bun not found"
     cfg = {
         "nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
         "policy": {
@@ -402,7 +404,7 @@ def test_integration(tmp: Path) -> None:
         check(len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})")
         # 契约：清空信号晚于权重分发（不得退回 dist-done 时代）；pop 即交接，
         # 最后一个任务的 HTTP 提交允许在信号之后，但必须全部发生。
-        check(wts and drained_ts[0] > wts[0], "I1 drained after weight distribution")
+        check(bool(wts) and drained_ts[0] > wts[0], "I1 drained after weight distribution")
         check(disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched")
         check(rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards")
 
@@ -462,7 +464,7 @@ def test_integration(tmp: Path) -> None:
         check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
         check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
         wts3 = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
-        check(wts3 and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
+        check(bool(wts3) and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
         check("_eval_thread" in rep3, "I3 eval thread returned via report")
 
         # I4 流式熔断轮（PPO 桩化版）：桩 kl=1e6 单波触顶 → 停训 + 停派发

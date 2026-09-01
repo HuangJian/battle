@@ -6,6 +6,7 @@ import collections
 import os
 import threading
 import time
+from typing import Any, TypedDict
 
 import numpy as np
 
@@ -14,6 +15,22 @@ import ppo.engine as ppo_mod
 from rl.log import log
 from rl.queue import run_rollout_queue
 from rl.resume import _scan_shards, completed_pairs
+
+
+class _StreamState(TypedDict):
+    """流式迭代的演进状态（原为 dict[str, float|int|bool|dict|None]，取值后
+    类型发散到 union，参与算术/round/float 时全部报错——改 TypedDict 后按字段
+    精确收窄，行为零变化）。"""
+
+    cum_kl: float
+    steps: int
+    chunks: int
+    waves: int
+    ppo_sec: float
+    load_sec: float
+    dropped: int
+    halted: bool
+    last_agg: dict[str, Any] | None
 
 
 def wave_params(
@@ -110,7 +127,7 @@ def run_rollout_stream(
     # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
     ppo_started_ev = threading.Event()
     eval_fired = [False]  # 干净评估一次性护栏：队列清空主触发，熔断/收官兜底
-    state = {
+    state: _StreamState = {
         "cum_kl": 0.0,
         "steps": 0,
         "chunks": 0,
@@ -231,10 +248,10 @@ def run_rollout_stream(
                 continue
             eps.append(ep)
         if eps:
-            all_adv = np.concatenate([e["adv"] for e in eps])
+            all_adv = np.concatenate([ep["adv"] for ep in eps])
             mean, std = all_adv.mean(), all_adv.std() + 1e-8
-            for e in eps:
-                e["adv"] = ((e["adv"] - mean) / std).astype(np.float32)
+            for ep in eps:
+                ep["adv"] = ((ep["adv"] - mean) / std).astype(np.float32)
         state["load_sec"] += time.time() - t_load
         return eps
 
@@ -317,7 +334,7 @@ def run_rollout_stream(
         with lock:
             n_pending = len(pend)
         w_thr, w_cap = wave_params(
-            state["cum_kl"], kl_cap, wave_games, wave_cap, remaining=remaining_games
+            float(state["cum_kl"]), kl_cap, wave_games, wave_cap, remaining=remaining_games
         )
         if n_pending >= w_thr:
             _drain(False, cap=w_cap)
@@ -341,12 +358,12 @@ def run_rollout_stream(
         if n_pending == 0:
             break
         _, tw_cap = wave_params(
-            state["cum_kl"], kl_cap, wave_games, wave_cap, remaining=remaining_games
+            float(state["cum_kl"]), kl_cap, wave_games, wave_cap, remaining=remaining_games
         )
         _drain(True, cap=tw_cap)
     if "err" in box:
         raise RuntimeError(f"stream collector failed: {box['err']}")
-    report = box.get("report")
+    report: dict[str, Any] | None = box.get("report")
     if report is None:
         raise RuntimeError("stream collector produced no report")
     # 断点续跑轮可能零结算（全部秒回）

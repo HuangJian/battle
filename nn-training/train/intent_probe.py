@@ -54,7 +54,9 @@ class IntentProbeNet(IntentNet):
             if inject_vec is None:
                 inject_vec = torch.zeros(h.shape[0], 9, device=h.device)
             h = torch.cat([h, inject_vec], dim=1)
-        return self.intent_head(h)
+        # nn.Module.__call__ 存根返回 Any（多态 forward），显式收窄为本函数契约。
+        logits: torch.Tensor = self.intent_head(h)
+        return logits
 
 
 def build_injection(seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -117,7 +119,8 @@ def quota_sample_priority(
         pri = ci[xr[ci] == priority_root]
         god = ci[xr[ci] != priority_root]
         if len(pri) >= quota:
-            sel = rng.choice(pri, size=quota, replace=False)
+            # 用 list 收口：两个分支后续都要 += 拼接，ndarray 会走完全不同的语义。
+            sel: list = list(rng.choice(pri, size=quota, replace=False))
         else:
             sel = list(pri)
             need = quota - len(sel)
@@ -126,9 +129,15 @@ def quota_sample_priority(
             else:
                 sel += list(god)
         idx.append(np.array(sel, dtype=np.int64))
-    sel = np.concatenate(idx)
-    rng.shuffle(sel)
-    return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None)
+    picked = np.concatenate(idx)
+    rng.shuffle(picked)
+    return (
+        xo[picked],
+        xs[picked],
+        xi[picked],
+        xb[picked],
+        xinj[picked] if xinj is not None else None,
+    )
 
 
 def main() -> None:

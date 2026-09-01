@@ -232,7 +232,7 @@ def test_request_upgrade_guarded_dirty_tree() -> None:
     remote = MockAgent(code_hash="stale-hash-abc")
     self_mock = MockAgent(code_hash="stale-hash-abc")
     real_is_self = dist_common.is_self_node
-    dist_common.is_self_node = lambda url, nid="": nid == "self"
+    dist_common.is_self_node = lambda url, node_id="": node_id == "self"
     try:
         dirty = ["src/types.ts", "src/game/SimulationCombat.ts"]
         ok, r = dist_common.request_upgrade_guarded(
@@ -268,7 +268,7 @@ def test_upgrade_stale_nodes_dirty_tree() -> None:
     stale = MockAgent(code_hash="stale-hash-abc")
     cfg = {"nodes": [{"id": "stale", "url": stale.url(), "authKey": "K1", "enabled": True}]}
     real_is_self = dist_common.is_self_node
-    dist_common.is_self_node = lambda url, nid="": False  # 模拟非回环远端节点
+    dist_common.is_self_node = lambda url, node_id="": False  # 模拟非回环远端节点
     try:
         res = dist_common.upgrade_stale_nodes(
             cfg,

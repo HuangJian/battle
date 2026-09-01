@@ -103,14 +103,17 @@ def test_coarse_logsumexp() -> None:
     g2 = g.detach().clone()
     g2[0, 0] += 10.0  # cell (0,0) ∈ block 0
     coarse2 = ppo_goal.coarse_block_logsumexp(g2)
-    check(coarse2[0, 0] > coarse.detach()[0, 0], "块 logit 随块内格单调")
+    check(bool(coarse2[0, 0] > coarse.detach()[0, 0]), "块 logit 随块内格单调")
     # 数值：block0 的 4 格 = flat {0,1,26,27}（r=br*2+dr, c=bc*2+dc）
     idx = torch.tensor([0, 1, 26, 27])
     expect = torch.logsumexp(g.detach()[0, idx], dim=0)
     check(torch.allclose(coarse.detach()[0, 0], expect, atol=1e-5), "block0 = logsumexp(cells)")
     # 可导
     coarse.sum().backward()
-    check(g.grad is not None and torch.isfinite(g.grad).all(), "logsumexp 可导且梯度有限")
+    check(
+        g.grad is not None and bool(torch.isfinite(g.grad).all()),
+        "logsumexp 可导且梯度有限",
+    )
 
 
 def _fake_chunks(coarse: bool):
@@ -198,6 +201,8 @@ def test_ppo_update_smoke() -> None:
         opt3 = torch.optim.Adam(model3.parameters(), lr=1e-3)
         stem_before = model3.stem.weight.detach().clone()
         goal_before = model3.goal_conv.weight.detach().clone()
+        # GoalRLNet 默认 with_value=True（基类 value_head 声明为 Linear|None，此处收窄）。
+        assert model3.value_head is not None
         vhead_before = model3.value_head.weight.detach().clone()
         agg3 = ppo_goal.ppo_update_goal(
             model3,

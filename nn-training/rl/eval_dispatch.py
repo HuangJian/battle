@@ -13,6 +13,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import dist_common
 
@@ -47,7 +48,9 @@ def hold_for_local(pending_len: int, reserved: int, gate_set: bool, past_release
     return 0 < pending_len <= reserved
 
 
-def report_winrate_safe(wr: float) -> float | None:
+def report_winrate_safe(wr: float | None) -> float | None:
+    if wr is None:
+        return None
     try:
         return round(float(wr), 4)
     except (TypeError, ValueError):
@@ -104,7 +107,10 @@ def run_local_eval_game(
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
-    manifest = json.loads((Path(out_dir) / "_eval_report.json").read_text(encoding="utf-8"))
+    # json.loads 返回 Any；_eval_report.json 契约固定为 dict。
+    manifest: dict[str, Any] = json.loads(
+        (Path(out_dir) / "_eval_report.json").read_text(encoding="utf-8")
+    )
     manifest.setdefault("wver", wver)
     manifest["mode"] = "eval"
     manifest["elapsedSec"] = round(time.time() - t0, 1)
@@ -304,8 +310,8 @@ def dispatch_eval_round(
                 "elapsedSec": manifest.get("elapsedSec"),
             }
             with jsonl_lock:
-                with open(eval_jsonl, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row) + "\n")
+                with open(eval_jsonl, "a", encoding="utf-8") as jf:
+                    jf.write(json.dumps(row) + "\n")
                 # 采样机健康账本同册入账（mode:"eval"）——成功局才记，与 rollout 口径一致
                 _record_agent_meta(
                     meta_path,
@@ -508,8 +514,8 @@ def dispatch_eval_round(
         led_outcomes: dict[str, int] = {}
         led_nodes: dict[str, int] = {}
         try:
-            with open(eval_jsonl, encoding="utf-8") as f:
-                for ln in f:
+            with open(eval_jsonl, encoding="utf-8") as jf:
+                for ln in jf:
                     try:
                         r = json.loads(ln)
                     except Exception:
@@ -557,8 +563,8 @@ def dispatch_eval_round(
             # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
             "nodes": dict(sorted(node_games.items())),
         }
-        with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as f:
-            f.write(json.dumps(summary) + "\n")
+        with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as jf:
+            jf.write(json.dumps(summary) + "\n")
         if n:
             done_msg = (
                 f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="

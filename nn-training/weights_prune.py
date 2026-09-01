@@ -62,11 +62,13 @@ def _sha12(p: Path) -> str:
 
 
 def _human_size(n: int) -> str:
+    # size 用 float 递进：n 是 int，直接 /= 会违反声明类型。
+    size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def _parse_iter(rel: str) -> str:

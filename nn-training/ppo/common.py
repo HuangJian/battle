@@ -23,12 +23,18 @@ import json
 import os
 import time
 from collections.abc import Callable, Sequence
+from typing import cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
 from rl.log import log  # 统一时间戳日志（与 ppo 旧 log 逐字节一致）
+
+# numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
+# 实测返回的是 legacy 元组。显式传 legacy=True 并断言元组形态，双层保险。
+_RNGState = tuple[str, np.ndarray, int, int, float]
 
 
 # ---------------- policy helpers ----------------
@@ -48,7 +54,14 @@ def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------- GAE ----------------
-def compute_gae(rewards, values, dones, gamma: float, lam: float, dt: Sequence[int] | None = None):
+def compute_gae(
+    rewards,
+    values,
+    dones,
+    gamma: float,
+    lam: float,
+    dt: np.ndarray | Sequence[int] | None = None,
+):
     """Per-episode GAE. rewards[t]=r_{t+1}, values[t]=V(s_t).
 
     dt=None — 定长 per-tick 折扣（ppo.py 原路径，逐字节一致）。
@@ -78,7 +91,9 @@ def discover_shards(root: str, need: Sequence[str]) -> list[str]:
     return sorted(out)
 
 
-def load_shard_fields(dirpath: str, spec: dict[str, tuple[str, np.dtype]]) -> dict[str, np.ndarray]:
+def load_shard_fields(
+    dirpath: str, spec: dict[str, tuple[str, npt.DTypeLike]]
+) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
     `dtype` 用 np.uint8/np.float32/np.int64；astype(..., copy=False) 在 dtype 已
@@ -93,7 +108,7 @@ def load_shard_fields(dirpath: str, spec: dict[str, tuple[str, np.dtype]]) -> di
 # ---------------- checkpoint (epoch-granularity, RNG-preserving) ----------------
 def _pack_np_state() -> list:
     """numpy MT19937 全局状态 → JSON 可序列化（续跑需精确重建 epoch 乱序）。"""
-    s = np.random.get_state()
+    s = cast(_RNGState, np.random.get_state(legacy=True))
     return [s[0], s[1].tolist(), s[2], s[3], s[4]]
 
 

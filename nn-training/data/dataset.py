@@ -86,7 +86,7 @@ class NNDataset(Dataset):
         assert self.obs.shape[0] == self.scalars.shape[0] == self.actions.shape[0]
 
     def __len__(self) -> int:
-        return self.obs.shape[0]
+        return int(self.obs.shape[0])
 
     def __getitem__(self, idx: int):
         obs = self.obs[idx]
@@ -126,9 +126,9 @@ def make_loaders(
     n_val = int(n * val_split)
     n_tr = n - n_val
     gen = torch.Generator().manual_seed(seed)
-    train_ds, val_ds = random_split(full, [n_tr, n_val], generator=gen)
+    train_sub, val_ds = random_split(full, [n_tr, n_val], generator=gen)
     # Re-wrap so augmentation only applies to the training split.
-    train_ds = _AugWrapper(data, train_ds.indices, mirror_p, seed)
+    train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed)
     return (
         DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers),
         DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers),

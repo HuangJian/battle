@@ -174,7 +174,9 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
     try:
         status, body = _request(url.rstrip("/") + "/v1/ping", auth_key, timeout)
         if status == 200:
-            return json.loads(body.decode("utf-8"))
+            # json.loads 返回 Any；节点 /v1/ping 契约固定为 dict。
+            info: dict = json.loads(body.decode("utf-8"))
+            return info
     except Exception:
         return None
     return None

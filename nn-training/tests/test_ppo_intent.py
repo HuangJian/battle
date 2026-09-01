@@ -89,7 +89,7 @@ def test_variable_dt_differs() -> None:
     )
     check(not np.array_equal(adv_var, adv_fixed), "dt 可变: adv 与定长不同（半 MDP 折扣生效）")
     # 变长窗口的 gamma 应单调：dt 越大 → γ_step 越小 → 提前步的 adv 量级越小（松弛）。
-    check(np.all(dt >= 1) and np.all(dt <= 50), "dt 范围合法")
+    check(bool(np.all(dt >= 1)) and bool(np.all(dt <= 50)), "dt 范围合法")
 
 
 def test_rl_net_roundtrip_value_head() -> None:
@@ -192,6 +192,8 @@ def test_ppo_update_smoke() -> None:
     opt3 = torch.optim.Adam(model3.parameters(), lr=1e-3)
     stem_before = model3.stem.weight.detach().clone()
     policy_w_before = model3.intent_head.weight.detach().clone()
+    # IntentRLNet 默认 with_value=True（基类 value_head 声明为 Linear|None，此处收窄）。
+    assert model3.value_head is not None
     vhead_before = model3.value_head.weight.detach().clone()
     agg3 = ppo_intent.ppo_update_intent(
         model3,

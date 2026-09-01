@@ -105,24 +105,23 @@ def main():
 
 
 def __arg_proxy(data_dir: str, out: str):
-    class A:  # minimal argparse stand-in
-        pass
+    from types import SimpleNamespace
 
-    a = A()
-    a.data_dir = data_dir
-    a.out = out
-    a.checkpoint = None
-    a.arch = "bc"
-    a.epochs = 12
-    a.batch = 128
-    a.lr = 3e-3
-    a.val_split = 0.15
-    a.mirror_p = 0.5
-    a.seed = 7
-    a.num_workers = 0
-    a.notes = "smoke"
-    a.resume = None
-    return a
+    return SimpleNamespace(
+        data_dir=data_dir,
+        out=out,
+        checkpoint=None,
+        arch="bc",
+        epochs=12,
+        batch=128,
+        lr=3e-3,
+        val_split=0.15,
+        mirror_p=0.5,
+        seed=7,
+        num_workers=0,
+        notes="smoke",
+        resume=None,
+    )
 
 
 if __name__ == "__main__":

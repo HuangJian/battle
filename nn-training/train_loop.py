@@ -482,10 +482,14 @@ def main() -> None:
                 auto_export_corpus(args.data_dir, log)
 
             prev = latest_weights(args.weights_dir)
-            resume_arg = ["--resume", prev] if prev and os.path.exists(prev) else []
-            note = f"round {state['round']}" + (
-                f" resume {os.path.basename(prev)}" if resume_arg else " from-scratch"
-            )
+            resume_ok = prev is not None and os.path.exists(prev)
+            note = f"round {state['round']}"
+            if resume_ok:
+                # resume_ok 已确认 prev 非空且落盘，可安全 basename。
+                assert prev is not None
+                note += f" resume {os.path.basename(prev)}"
+            else:
+                note += " from-scratch"
 
             # ---- In-process training (no subprocess / lock / launcher double-spawn) ----
             # train_loop already holds a single-instance lock, so exactly one

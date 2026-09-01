@@ -6,6 +6,7 @@ plan/RL-Entry-Consolidation.md P5；DECISIONS §307）。迁移自 test_run_rl_i
 
 from __future__ import annotations
 
+import argparse
 import sys
 import types
 from pathlib import Path
@@ -132,19 +133,19 @@ def test_resolve_mode() -> None:
 
 def test_apply_mode_flags() -> None:
     print("[fast] apply_mode_flags：置位 intent_rollout/goal_rollout/goal")
-    args = types.SimpleNamespace(mode="intent", goal=False)
+    args = argparse.Namespace(mode="intent", goal=False)
     run_rl.apply_mode_flags(args)
     check(
         args.intent_rollout and not args.goal_rollout and not args.goal,
         "intent：intent_rollout=True 其余 False",
     )
-    args = types.SimpleNamespace(mode="per-tick", goal=False)
+    args = argparse.Namespace(mode="per-tick", goal=False)
     run_rl.apply_mode_flags(args)
     check(
         not args.intent_rollout and not args.goal_rollout and not args.goal,
         "per-tick：三 flag 全 False",
     )
-    args = types.SimpleNamespace(mode="per-tick", goal=True)
+    args = argparse.Namespace(mode="per-tick", goal=True)
     run_rl.apply_mode_flags(args)
     check(
         args.mode == "goal" and args.goal_rollout and args.goal,

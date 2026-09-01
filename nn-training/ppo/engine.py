@@ -40,6 +40,7 @@ import os
 import time
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -97,7 +98,7 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 # ---------------- trajectory loading ----------------
 # RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
-_RL_SHARD_SPEC = {
+_RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
     "a_move": ("a_move.npy", np.int64),
@@ -178,7 +179,7 @@ def ppo_update(
     """
     model.train()
     clip = CLIP_EPS
-    stats = []
+    stats: list[dict[str, float]] = []
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
     tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]

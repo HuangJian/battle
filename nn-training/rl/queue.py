@@ -402,7 +402,9 @@ def run_rollout_queue(
     # 纯采集起点（用户定义 2026-08-24）：新权重分发完毕的时刻。
     # 纯采集耗时 = 最后一局结算时刻 − 本时刻；与 PPO 重叠与否无关，就是两个事件锚点。
     t_dist_done = time.time()
-    last_settle_at = [None]  # 最后一局成功结算的时刻（worker 内更新）
+    # 最后一局成功结算的时刻（worker 内更新）。用单元素 list 做闭包可变捕获；
+    # 显式标注 float|None，否则被推成 list[None]、写入 time.time() 报错。
+    last_settle_at: list[float | None] = [None]
 
     # ③ 中央队列 + 消费者（远端 C_n 线程 + 本机 workers 线程）
     # 断点续跑：剔除已完整落盘且 wver 匹配的局（本轮重启/重试不重跑已完成任务）。

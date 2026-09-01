@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import ppo.engine as ppo_mod
 import ppo.goal as ppo_goal
@@ -29,7 +30,7 @@ import ppo.intent as ppo_intent
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _MODES: tuple[str, ...] = ("per-tick", "intent", "goal")
-_MODE_BACKENDS: dict[str, object] = {
+_MODE_BACKENDS: dict[str, Any] = {
     "per-tick": ppo_mod,
     "intent": ppo_intent,
     "goal": ppo_goal,

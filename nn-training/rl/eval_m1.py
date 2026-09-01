@@ -103,6 +103,8 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     while True:
         attempts += 1
         log(f"clean eval (distributed) attempt {attempts}/{CLEAN_EVAL_MAX_RETRY}: {' '.join(cmd)}")
+        # _runner 为测试注入点（未标注 → Any），显式收窄 res 以免整段退化成 Any。
+        res: dict
         if _runner is not None:
             res = _runner(cmd)
         else:

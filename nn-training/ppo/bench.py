@@ -60,10 +60,10 @@ def main() -> None:
         print("[ppo-bench] no valid episodes")
         sys.exit(1)
     # adv 归一化（与 rl/stream._load_wave 同口径，PPO 主循环一致）
-    all_adv = np.concatenate([e["adv"] for e in eps])
+    all_adv = np.concatenate([ep["adv"] for ep in eps])
     mean, std = all_adv.mean(), all_adv.std() + 1e-8
-    for e in eps:
-        e["adv"] = ((e["adv"] - mean) / std).astype(np.float32)
+    for ep in eps:
+        ep["adv"] = ((ep["adv"] - mean) / std).astype(np.float32)
     print(f"[ppo-bench] episodes={len(eps)} shards={len(dirs)} mb={args.mb} epochs={args.epochs}")
 
     model = ppo_mod.build_ppo(args.weights)

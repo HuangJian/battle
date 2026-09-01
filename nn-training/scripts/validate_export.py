@@ -41,8 +41,12 @@ def read_npy(path):
             struct.unpack("<H", f.read(2))[0] if major == 1 else struct.unpack("<I", f.read(4))[0]
         )
         header = f.read(hlen).decode("latin1")
-        descr = re.search(r"'descr':\s*'([^']+)'", header).group(1)
-        shp = re.search(r"'shape':\s*\(([^)]*)\)", header).group(1)
+        m_descr = re.search(r"'descr':\s*'([^']+)'", header)
+        assert m_descr is not None, f"{path}: missing 'descr' in npy header"
+        descr = m_descr.group(1)
+        m_shape = re.search(r"'shape':\s*\(([^)]*)\)", header)
+        assert m_shape is not None, f"{path}: missing 'shape' in npy header"
+        shp = m_shape.group(1)
         shape = tuple(int(x) for x in re.findall(r"\d+", shp))
         data = f.read()
     return descr, shape, data
