@@ -23,6 +23,16 @@ env/
 # ---- distributed rollout（plan/distributed-rollout.md v3.3，含密钥严禁入库）----
 rl-config.json
 agent.auth
+dist-agent-meta.jsonl
+
+# ---- runtime / training artifacts ----
+*.log
+*.out.log
+*.err.log
+.train_loop.lock
+
+# ---- python version pinning ----
+.python-version
 
 # ---- OS / editor ----
 .DS_Store
