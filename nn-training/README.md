@@ -83,10 +83,13 @@
 
 ---
 
-## RL 训练机制（run_rl.py — per-tick RL / run_rl_intent.py — 意图 RL）
+## RL 训练机制（run_rl.py — 唯一 RL 入口：--mode per-tick/intent/goal）
 
-> 两份入口**共享同一套训练机制**（除网络与超参不同外，机制逐项一致）。本节约定机制全貌，
-> 任何 RL 入口（含未来新策略）都必须复用 `rl/` 包实现，禁止复制第二份。
+> `run_rl.py` 是三套后端的**唯一入口**（RL 入口整合，plan/RL-Entry-Consolidation.md
+> / DECISIONS §307）：`--mode per-tick`（逐 tick move/fire）/ `--mode intent`（意图步
+> semi-MDP）/ `--mode goal`（goal 承诺步，原 run_rl_intent --goal）。`--goal` 保留为
+> `--mode goal` 别名。任何 RL 入口（含未来新策略）都必须复用 `rl/` 包实现，禁止复制
+> 第二份。
 
 ### 1. 训练循环（单轮迭代）
 
@@ -151,12 +154,20 @@ init：RL 权重不存在 → 从 BC 检查点 warm-start（策略头加载，va
 - 本机槽位与远端同队消费（head_tasks 保留段 = local 优先领任务）；HTTP 503(busy) 不计
   熔断连击；尾部 fan-out 竞速 + EWMA 分档 + 动态节点发现（rescan）。
 
-### 6. 意图 RL（run_rl_intent.py）差异点（机制全同，仅以下不同）
+### 6. 意图/goal 模式（--mode intent/goal）差异点（机制全同，仅以下不同）
 
-- 网络：`IntentNet`（StudentNet 主干 + 意图/enemy/anchor/value 头，137 隐藏含注入）。
-- 动作：意图 8 类（replan 周期决策，窗口冻结）；rollout 走 `export-intent-rollout.ts`
-  （意图步 shard：inject/dt/mask）；PPO 走 `ppo_intent.py`（意图步变步长 GAE γ_step=γ_tick^Δt）。
-- 冷启动：B′ 权重 + value 预热（冻结主干只训 value 头）+ kickstarting KL 惩罚（系数 0.5/iter 衰减）。
-- 评估：m1-eval --policy intent-exec 固定语料（35 关 × N seeds）贪心局；iter15 350 局
-  Δ vs M7② 基线（72.3%）；Δ≤0 → 止损转 M9。
-- 权重归档前缀 `intent-rl-weights`（与 per-tick `rl-weights` 分桶）。
+- 网络：意图 `IntentNet`（StudentNet 主干 + 意图/enemy/anchor/value 头，137 隐藏
+  含注入）/ goal `GoalRLNet`。
+- 动作：意图 8 类（replan 周期决策）/ goal 676·169 路目标格（心跳承诺期），窗口冻结；
+  rollout 走 `export-intent-rollout.ts` / `export-goal-rollout.ts`（意图/目标步 shard：
+  inject/dt/mask）；PPO 走 `ppo_intent.py` / `ppo_goal.py`（变步长 GAE γ^Δt）。
+- 冷启动：B′/goal-BC 权重 + value 预热（冻结主干只训 value 头）+ kickstarting KL
+  惩罚（系数 decay/iter 衰减）；权重初始化及续跑 = `build_model --mode` 幂等分叉。
+- 评估：m1-eval --policy intent-exec/goal 固定语料（35 关 × N seeds）贪心局；Δ vs
+  baseline，`--stop-loss-at/--stop-loss-delta` 判门（原 iter15 Δ≤0 转 M9 语义）。
+- 权重归档前缀 `intent-rl-weights` / `goal-rl-weights`（与 per-tick `rl-weights` 分桶）。
+
+启动（原 run_rl_intent.py 命令等价）：
+  bash nn-training/start-training.sh --script run_rl.py --mode intent --bc tmp/intent-weights-Bp.json ...
+  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 \
+      -Script run_rl.py --mode goal --bc tmp/goal-bc/weights.json ...

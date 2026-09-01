@@ -729,17 +729,6 @@ def main() -> None:
     args = ap.parse_args()
     apply_mode_flags(args)
     PPO = _MODE_BACKENDS[args.mode]
-    ref_model = None
-    if args.mode in ("intent", "goal") and args.kickstart_kl > 0:
-        # kickstarting 参考策略：B′ 冻结快照（warmup 冻结主干+三头 → 策略与 B′ 一致）。
-        ref_model = PPO.build_rl_net(args.out)
-        if args.mode == "goal":
-            ppo_goal.load_goal_weights(ref_model, args.out)
-        else:
-            ppo_intent.load_intent_weights(ref_model, args.out)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
 
     # stdout/stderr 落盘（out_log/err_log；CLI 可覆盖调试；per-tick 默认空=仅控制台）。
     _setup_log_redirect(args)
@@ -783,6 +772,18 @@ def main() -> None:
     device = torch.device("cpu")
     model = build_model(args.bc, args.out, mode=args.mode, workers=args.workers)
     model.to(device)
+    ref_model = None
+    if args.mode in ("intent", "goal") and args.kickstart_kl > 0:
+        # kickstarting 参考策略：B′ 冻结快照（须在 build_model 完成 init-from 落盘
+        # args.out 之后构建）。warmup 冻结主干+三头 → 策略与 B′ 一致。
+        ref_model = PPO.build_rl_net(args.out)
+        if args.mode == "goal":
+            ppo_goal.load_goal_weights(ref_model, args.out)
+        else:
+            ppo_intent.load_intent_weights(ref_model, args.out)
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        ref_model.eval()
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     traj_root = Path(args.traj)

@@ -1479,3 +1479,12 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 **测试**：`nn-training/test_upgrade.py`（+4 用例：跨代去重 / 脏树拒发+self 豁免 / upgrade_stale_nodes 脏树 / porcelain 解析+冒烟；注意 mock 绑 127.0.0.1 会被判 self，远端用例 monkeypatch `is_self_node`）；`tests/agent/restart-guard.test.ts`（grace 边界 4 用例）。`test_run_rl.py` 全过、tsc / oxlint 绿。
 
 **运维语义**：训练机工作区有未提交的 hash 集改动时，远端节点被抑制重启并保持 excluded（日志 `dirty-tree:N`）；要节点升级 = commit + push（run_rl 启动时已自动 push 分支）→ 下轮 rescan 下发升级。agent 日志新增 409 `restart-grace-period`。
+## §307 RL 入口整合：run_rl_intent（含 --goal）并入 run_rl.py（2026-09-01，用户拍板" 直接删除）
+
+## §307 RL 入口整合：run_rl_intent（含 --goal）并入 run_rl.py（2026-09-01，用户拍板直接删除）
+
+**决策（D1–D5，plan/RL-Entry-Consolidation.md）**：run_rl.py 成为唯一 RL 入口，--mode {per-tick,intent,goal} 参数化三后端；--goal 保留为 --mode goal 别名。rl/eval_m1.py 承接 intent/goal 的 m1-eval 评估管线（与 eval_dispatch 双轨并存，D3）；rl-config 查找顺序 rl.<mode> → intent_rl 遗留块 → rl（D2）；止损泛化为 --stop-loss-at/--stop-loss-delta（D4）。run_rl_intent.py + test_run_rl_intent.py 直接删除（D5，intent 战役不再续跑）。
+
+**理由**：机制层（rl/ 包）早已共享；残留差异仅剩后端/采集器/评估/配置四处绑定点，全部可参数化。per-tick 默认路径行为字节一致（回归护栏 = test_run_rl 快速层）。
+
+**验证**：test_run_rl / test_run_rl_m1 / test_ppo_intent / test_ppo_goal / test_ppo_common 全 PASS；无遗留 run_rl_intent 引用。

@@ -18,7 +18,7 @@ start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerS
   .\start-training.ps1 -Script train_rl.py --num-envs 4 --num-steps 2048
   .\start-training.ps1 -Script eval_bridge.py --data-dir <shards>
   .\start-training.ps1 -Force -TorchThreads 8
-  .\start-training.ps1 -KillPrevious -Detach -Script run_rl.py   # 一键带杀重启 RL
+  .\start-training.ps1 -Script run_rl.py   # RL（per-tick）；--mode intent/goal 意图/goal 步 RL
 
   注：-Script 之后的所有“未知”参数（--data-dir/--arch/--epochs 等）原样透传给
   目标脚本 —— 本脚本不自带参数校验（无 [CmdletBinding]），故不会把它们当绑定
