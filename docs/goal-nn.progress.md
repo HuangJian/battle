@@ -4,7 +4,62 @@
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
-## §19 S-Dodge 奖励函数重构与每局指标观测（plan/dodge-item-reward-v2.md，2026-09-01）
+## §20 S-Dodge 坍塌修正：移除 wMiss + 从 s3-cap2 重启训练（2026-09-01）
+
+**背景**：§19 实施后训练坍塌（命中率 34%→9%，通关 0%）。根因是 wMiss 打偏惩罚标定错误（盈亏平衡命中率 23.85% 远高于实际 9%），"开火即负奖励"扼杀探索。按 §12 修正方案执行。
+
+### 修正决策（§12 R1–R4）
+
+- **R1**：移除 `dodge-mix` 臂中 `wMiss=0.063`（命中激励退化为 `wHit·hits`，不乱开火靠 cooldown 自然约束）
+- **R2**：权重回滚到 `tmp/s3-cap2/weights.json`（BC 干净起点）
+- **R3**：暂时单机跑（已修正：集群节点已升级，但大部分仍 codeHash 不匹配）
+- **R4**：命中率稳定后按 curriculum 加回 wMiss
+
+### 代码改动
+
+| 文件 | 改动 |
+|---|---|
+| `src/nn/rl-reward-toy.ts` | dodge-mix 臂移除 `wMiss` 行（势函数 `if (arm.wHit \|\| arm.wMiss)` 兼容逻辑保留） |
+| `tests/nn/rl-reward-toy.test.ts` | wHit 测试改为仅命中奖励，全参数组合移除 wMiss 项 |
+
+### 训练启动
+
+- **命令**：`.\start-training.ps1 -KillPrevious -Detach -Script run_rl.py --iters 30 --bc tmp/s3-cap2/weights.json --out tmp/s-dodge-v2/weights.json --traj tmp/s-dodge-v2/traj --stages 1050-1052 --reward toy:dodge-mix --dodge off --max-ticks 6000 --difficulty hard --seeds-per-stage 50`
+- **配置**：rl-config.json 固化 OMP8+PROC_BIND、double_buffer=1、precollect_early=1、stream=1、mb=512、torch_threads=8
+- **lr**：0.0003（ppo.py 默认值，与 §12.5 一致）
+- **节点**：self 节点 stale（自动重启后恢复），mac/a95/a97/a98/a96 均 codeHash 不匹配（升级失败），gcs ping 不通，实际本地单机运行
+
+### 训练进度（it1–it10）
+
+| iter | winRate | steps | entropy | kl | kl_cum | halted | dropped | progress | accuracy | mobility |
+|------|---------|-------|---------|----|--------|--------|---------|----------|----------|----------|
+| 1 | 0% | 1282 | 1.805 | 0.016 | 0.000 | false | 0 | 0.029 | 0.106 | 0.256 |
+| 2 | 0% | 16 | 1.777 | 0.041 | 0.239 | true | 8 | 0.033 | 0.107 | 0.279 |
+| 3 | 0% | 20 | 1.691 | 0.049 | 0.243 | true | 7 | 0.038 | 0.137 | 0.268 |
+| 4 | 0% | 36 | 1.709 | 0.031 | 0.198 | false | 0 | 0.071 | 0.188 | 0.366 |
+| 5 | 0% | 8 | 1.696 | 0.080 | 0.208 | true | 10 | 0.029 | 0.125 | 0.220 |
+| 6 | 0% | 4 | 1.660 | 0.256 | 0.256 | true | 11 | 0.054 | 0.184 | 0.333 |
+| 7 | 0% | 24 | 1.422 | 0.079 | 0.254 | true | 5 | 0.054 | 0.181 | 0.303 |
+| 8 | 0% | 32 | 1.639 | 0.089 | 0.180 | false | 0 | 0.025 | 0.140 | 0.295 |
+| 9 | 0% | 4 | 1.608 | 0.313 | 0.313 | true | 11 | 0.013 | 0.065 | 0.330 |
+| 10 | 0% | 24 | 1.587 | 0.044 | 0.235 | true | 6 | 0.017 | 0.082 | 0.305 |
+
+**观察**：
+- winRate 仍为 0%（与原始训练 it1–it82 一致，原始训练在 it83 才首次通关）
+- stream KL cap（0.2）频繁触发，每轮有效训练步数仅 4–36 步（远低于 it1 的 1282 步）
+- 熵在 1.42–1.80 之间波动，尚未触发色红（<0.7）或塌缩（<0.3）警戒线
+- dims 指标波动大（12 局/轮方差高），无明确上升趋势
+- 双缓冲机制正常工作（precollect 提前藏入采集时间）
+- 与原始训练轨迹一致（原始训练在 lr=0.0003 下也频繁 KL cap，it68 后降 lr 至 0.00015）
+
+### 与原始训练（§19）对比
+
+原始训练 at it62–83（wMiss 版本）轨迹：
+- it62–82：0% winRate，progress 0.17→0.06，accuracy 0.38→0.13
+- it83：首次出现 8.3% winRate（1/12）
+- lr 从 0.0003 降至 0.00015 后 KL cap 缓解但仍被触发
+
+当前训练（wMiss 移除版）处于同一轨迹早期阶段，需继续观察。
 
 **背景**：按照 plan/dodge-item-reward-v2.md 方案，实现四项能力（对齐弹道/躲避子弹/主动捡道具/不卡住）+ 三个每局指标（命中率/击杀数/捡取道具数）。零 obs 改动，直接改 dodge-mix 臂。
 
