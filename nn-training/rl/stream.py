@@ -150,13 +150,13 @@ def run_rollout_stream(
     _ovr = int(getattr(args, "local_slots", 0) or 0)
     local_slots = _ovr if _ovr > 0 else max(2, int(args.workers) // 4)
     policy = cfg.get("policy", {})
-    kl_cap = float(policy.get("streamKlCap", 0.12))
+    kl_cap = float(policy.get("streamKlCap", 0.06))  # 0.12 为旧 2× 口径（P0-3 换算）
     wave_games = max(4, int(policy.get("streamWaveGames", 12)))
-    # M8 意图 RL：streamKlCap=0.2 是为 per-tick RL（单波数千步）标定的——意图 RL 单波
-    # 仅 ~12 局（~14 chunks），单波 KL 已达 ~0.32–0.49，会在第 1 波即触顶 → 派发停摆 →
+    # M8 意图 RL：streamKlCap=0.2（旧 2× 口径，新口径 0.1）是为 per-tick RL（单波数千步）标定的——意图 RL 单波
+    # 仅 ~12 局（~14 chunks），单波 KL 已达 ~0.32–0.49（旧 2× 口径，新口径 ~0.16–0.245），会在第 1 波即触顶 → 派发停摆 →
     # ~90% rollout 被丢弃、整轮空等 1800s 窗口。意图 RL 改用「单波覆盖整缓冲」语义：
     # 大 wave_games（>每轮局数）→ 全量 140 局合成 1 波训完（均属 W(N) 同策略、完全
-    # on-policy），cum_kl ~0.15 远低于放宽后的 Intent 上限，不再半途 halt。
+    # on-policy），cum_kl ~0.15（旧 2× 口径）远低于放宽后的 Intent 上限，不再半途 halt。
     if getattr(args, "intent_rollout", False) or getattr(args, "goal_rollout", False):
         # 意图/goal 同为 semi-MDP 小步数采样：单波覆盖整缓冲语义（goal 单局步数更少，
         # 同样不能让 per-tick 的小 wave 阈值把采集器饿死）。

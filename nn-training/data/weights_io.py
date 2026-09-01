@@ -21,12 +21,17 @@ Python forward pass (plan §NN-M1 determinism ②).
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import base64
 import json
@@ -84,11 +89,42 @@ def save_weights_json(
 
 
 def load_weights_json(path: str) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    """Load a JSON+base64 weights file -> (meta, {name: tensor})."""
+    """Load a JSON+base64 weights file -> (meta, {name: tensor}).
+
+    读入端强校验（plan/python-refactor.md P0-4，2026-09-02）：
+      * 文件必须有非空 params；format 若存在必须为 "nn-weights-json"；
+      * **schema_major 必须等于当前 OBS_SCHEMA_MAJOR**——schema 变更意味着 obs/
+        scalar/action 布局已变（schema.py 红线：MAJOR bump 必须全量重导），旧文件
+        静默加载只会把 24 维 scalar 的旧权重灌进 19 维模型，逐字段错位。
+    不匹配直接 raise（fail fast）：训练前的崩溃永远比训练后的错误结论便宜。
+    """
     with open(path, encoding="utf-8") as f:
         meta = json.load(f)
+    if not isinstance(meta, dict) or not isinstance(meta.get("params"), dict) or not meta["params"]:
+        raise ValueError(f"[weights] {path}: 空或损坏权重文件（无 params）")
+    fmt = meta.get("format")
+    if fmt is not None and fmt != "nn-weights-json":
+        raise ValueError(f"[weights] {path}: 未知 format {fmt!r}")
+    sm = meta.get("schema_major")
+    if sm is not None and int(sm) != OBS_SCHEMA_MAJOR:
+        raise ValueError(
+            f"[weights] {path}: schema_major={sm} ≠ 当前 {OBS_SCHEMA_MAJOR} —— "
+            f"obs/scalar/action 布局已变更（schema.py 红线），该权重必须全量重导后使用"
+        )
     params = {k: _b64_to_tensor(v["data"], v["shape"]) for k, v in meta["params"].items()}
     return meta, params
+
+
+# load_state_into 的覆盖率两档门禁（2026-09-02 P0-4 修复）：
+#   < COVERAGE_RAISE   → 权重与模型族严重不匹配（如 intent/goal 权重灌进 per-tick
+#                        模型），raise——此前 strict=False 静默随机初始化，训练照常跑、
+#                        日志照常绿，唯一线索是 stdout 一行 print。
+#   < COVERAGE_WARN    → 合法架构演进（如 FC 维度变更 / StudentNet→PPOStudent
+#                        value 头缺失），警告并继续。
+# 实测基线：PPOStudent←StudentNet = 95.2%（合法 warm-start），PPOStudent←NNPolicy
+# = 14.3%（错误族）。
+COVERAGE_RAISE = 0.5
+COVERAGE_WARN = 0.95
 
 
 def load_state_into(model: torch.nn.Module, path: str) -> None:
@@ -99,8 +135,21 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
     keys and load what we can — the remaining params keep their random init.
     This lets training continue from a new architecture without a manual
     weights file rename.
+
+    P0-4（2026-09-02）：加载前先算**参数名覆盖率**（匹配键数 / 模型期望键数）——
+    低于 COVERAGE_RAISE 直接 raise，杜绝"错误权重族被静默加载成随机初始化"。
     """
-    _meta, params = load_weights_json(path)
+    meta, params = load_weights_json(path)
+    expected = set(model.state_dict().keys())
+    provided = set(params.keys())
+    matched = expected & provided
+    coverage = len(matched) / max(1, len(expected))
+    if coverage < COVERAGE_RAISE:
+        raise ValueError(
+            f"[weights] {path}: 参数覆盖率 {coverage:.0%}（{len(matched)}/{len(expected)}）"
+            f"—— 权重与模型族严重不匹配（arch={meta.get('arch')}），拒绝静默随机初始化。"
+            f"请确认 --init-from/--resume 指向正确模型族的权重。"
+        )
     try:
         missing, unexpected = model.load_state_dict(params, strict=False)
     except RuntimeError:
@@ -122,7 +171,11 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
         )
     else:
         if missing or unexpected:
-            print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")
+            level = "WARN" if coverage >= COVERAGE_WARN else "WARN(partial)"
+            print(
+                f"[weights] load_state_into: {level}: coverage={coverage:.0%} "
+                f"missing={sorted(missing)} unexpected={sorted(unexpected)[:8]}"
+            )
     model.eval()
 
 

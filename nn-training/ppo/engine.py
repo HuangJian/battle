@@ -28,12 +28,17 @@ Usage (via start-training.{sh,ps1} which provides the venv + torch):
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import argparse
 import os
@@ -52,6 +57,7 @@ from models.student import PPOStudent
 from ppo.common import (
     _ppo_load,
     _ppo_save,
+    approx_kl_est,
     cat_entropy,
     cat_logprob,
     chunk_episodes,
@@ -231,7 +237,7 @@ def ppo_update(
             opt.step()
 
             with torch.no_grad():
-                approx_kl = ((lp_old - lp_new) ** 2).mean().item()
+                approx_kl = approx_kl_est(lp_old, lp_new).item()
             stats.append(
                 {
                     "policy": float(policy_loss.item()),

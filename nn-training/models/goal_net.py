@@ -25,12 +25,17 @@ MAdds：主干 ~37M + goal 头 43,264（0.115%，§16.2）。
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import json
 import os

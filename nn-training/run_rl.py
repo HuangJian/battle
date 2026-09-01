@@ -127,20 +127,54 @@ def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
     }
 
 
+def _eval_sigma(eval_rec: dict | None) -> float | None:
+    """单次干净评估的 winRate 标准误 σ = √(p(1−p)/n)（二项分布）。
+
+    返回 None = eval_rec 无 games/winRate 字段（旧调用方），调用侧回退旧语义。
+    注意这是**乐观下界**：同 stage 的 n 局共享关卡、存在 stage 级相关性，真实 σ
+    更大——因此"显著"判定是保守的（宁可少停，不可乱停）。
+    """
+    if not eval_rec:
+        return None
+    games = eval_rec.get("games")
+    wr = eval_rec.get("winRate")
+    if not isinstance(games, (int, float)) or games <= 0 or not isinstance(wr, (int, float)):
+        return None
+    p = max(0.0, min(1.0, float(wr)))
+    return float((p * (1.0 - p) / games) ** 0.5)
+
+
 def stop_loss_hit(
-    mode: str, stop_loss_at: int, stop_loss_delta: float, it: int, eval_rec: dict | None
+    mode: str,
+    stop_loss_at: int,
+    stop_loss_delta: float,
+    it: int,
+    eval_rec: dict | None,
+    *,
+    z_score: float = 2.0,
 ) -> bool:
     """预注册止损判门（D4 泛化：原 run_rl_intent 的 iter15 Δ≤0 硬编码）。纯函数。
 
-    仅 intent/goal 模式生效；stop_loss_at=0 = 关闭（per-tick 恒 False）。"""
+    仅 intent/goal 模式生效；stop_loss_at=0 = 关闭（per-tick 恒 False）。
+
+    **统计化修正（plan/python-refactor.md P1-9，2026-09-02）**：旧逻辑 `Δ ≤ delta`
+    （默认 0.0）在评估 σ≈0.024（350 局 p≈0.72；stage 级相关下实为 0.03~0.04）时，
+    真实中立策略单次评估约 50% 概率误停——抛硬币。新逻辑要求 Δ **显著**为负：
+      trip = (Δ ≤ stop_loss_delta) ∧ (σ 未知 ∨ Δ ≤ −z·σ)
+    eval_rec 带 games/winRate 时按二项分布推 σ（z=2 → 约 97.5% 置信单侧）；
+    不带时（旧调用方）回退原语义。连击护栏（连续 ≥2 轮显著）在调用侧实现。
+    """
     if mode == "per-tick" or stop_loss_at <= 0:
         return False
-    return bool(
-        it >= stop_loss_at
-        and eval_rec
-        and eval_rec.get("delta") is not None
-        and eval_rec["delta"] <= stop_loss_delta
-    )
+    if not (it >= stop_loss_at and eval_rec and eval_rec.get("delta") is not None):
+        return False
+    delta = float(eval_rec["delta"])
+    if delta > stop_loss_delta:
+        return False
+    sigma = _eval_sigma(eval_rec)
+    if sigma is None:
+        return True  # 无 games 数据：保持原语义（Δ≤bar 即停）
+    return delta <= -z_score * sigma
 
 
 class _Tee:
@@ -635,7 +669,7 @@ def main() -> None:
         "--baseline",
         type=float,
         default=_d("baseline", 0.723),
-        help="intent/goal 干净评估 Δ 的参照基线（M7② 72.3%）",
+        help="intent/goal 干净评估 Δ 的参照基线（M7② 72.3 个百分点）",
     )
     ap.add_argument(
         "--stop-loss-at",
@@ -1004,6 +1038,7 @@ def main() -> None:
     consec_fail = 0
     kl_streak = 0  # F4: consecutive iters with kl >= KL_BREAK
     ent_streak = 0  # F4: consecutive iters with entropy <= ENT_BREAK and winRate < MAX_WINRATE
+    stop_loss_streak = 0  # P1-9: 统计显著止损（Δ≤−2σ）的连续轮数，≥2 才停车
     tripped = None
     # it 断点续跑：--start-it 显式，否则自动 = 日志最后一个完成迭代 + 1
     start_it = args.start_it if args.start_it is not None else (last_completed_iter(jsonl_path) + 1)
@@ -1470,13 +1505,27 @@ def main() -> None:
             # 止损判定（D4 泛化，仅 intent/goal 生效）：eval_summary 的 Δ（相对
             # baseline）在 stop-loss-at 迭代 ≤ stop-loss-delta → 停车（原
             # run_rl_intent iter15 Δ≤0 转 M9 语义由 --stop-loss-at 15 --stop-loss-delta 0 复现）。
+            # P1-9（2026-09-02）：单次评估噪声 σ≈0.024~0.04，旧"Δ≤0 即停"是抛硬币——
+            # 现在要求 Δ 统计显著（≤ −2σ，_eval_sigma 推 σ）且**连续 2 轮**才停车。
             if stop_loss_hit(args.mode, args.stop_loss_at, args.stop_loss_delta, it, eval_rec):
+                assert eval_rec is not None  # stop_loss_hit 已保证非 None（delta 可读）
+                stop_loss_streak += 1
+                sigma = _eval_sigma(eval_rec)
+                log(
+                    f"STOP-LOSS: iter{it} clean-eval Δ={eval_rec['delta']:+.4f} "
+                    f"(σ={'--' if sigma is None else f'{sigma:.4f}'}, "
+                    f"z·σ={'--' if sigma is None else f'{2.0 * sigma:.4f}'}) "
+                    f"streak={stop_loss_streak}/2 — waiting for confirmation"
+                )
+            else:
+                stop_loss_streak = 0
+            if stop_loss_streak >= 2:
                 assert eval_rec is not None
                 stop_reason = (
                     f"iter{it} clean-eval Δ={eval_rec['delta']:+.4f} "
-                    f"<= {args.stop_loss_delta:+.4f} — stop-loss"
+                    f"<= {args.stop_loss_delta:+.4f} (显著: Δ≤−2σ) × 2 轮 — stop-loss"
                 )
-                log(f"STOP-LOSS: {stop_reason}")
+                log(f"STOP-LOSS CONFIRMED: {stop_reason}")
                 break
 
             if args.keep_iters > 0:

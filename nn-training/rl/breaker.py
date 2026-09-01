@@ -15,10 +15,14 @@ it100 才触发——KL 是滞后指标，entropy 才是先导。
 
 from __future__ import annotations
 
-KL_WARN = 0.08  # calibrated to our setup: healthy steady state is 0.045-0.054
+KL_WARN = 0.04  # 2026-09-02 P0-3 口径换算 ×0.5（Schulman 无偏估计量，旧 2× 口径 0.08）；
+# 健康稳态即"0.045-0.054"为旧口径历史值 → 新口径 0.0225-0.027，见下文换算表。
 ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
 
-KL_BREAK = 0.15
+# P0-3 阈值换算表（2026-09-02）：估计量 (Δlnπ)²·0.5 → Schulman (r-1)-ln r 后，全部
+# KL 阈值 ÷2 保持行为等价：KL_WARN 0.08→0.04，KL_BREAK 0.15→0.075，intent/goal
+# TARGET_KL 0.04→0.02，rl-config streamKlCap 0.20→0.10，intent kl_break 0.6→0.3。
+KL_BREAK = 0.075
 KL_BREAK_CONSEC = 3
 ENT_BREAK = 0.60
 ENT_BREAK_CONSEC = 8
@@ -43,8 +47,9 @@ def breaker_update(
     agg 缺失（流式 checkpoint-complete 轮无任何梯度步）由调用方短路，不计连击。
 
     kl_break / kl_consec 为可选覆盖（默认 = per-tick 常量 KL_BREAK / KL_BREAK_CONSEC）。
-    意图 RL 每代是一次 12–15 局大更新，每代 KL 天然 ≈0.32–0.49，远超 per-tick 的
-    0.045–0.054 健康带 → 必须用更高阈值（如 0.6 / 3），否则连续 3 代必误熔断（Bug D）。
+    意图 RL 每代是一次 12–15 局大更新，每代 KL 天然 ≈0.32–0.49（旧 2× 口径；P0-3 后
+    新口径 ≈0.16–0.245），远超 per-tick 的 0.045–0.054（旧口径）健康带 → 必须用更高
+    阈值（如 0.6 → 新口径 0.3 / 3），否则连续 3 代必误熔断（Bug D）。
     """
     kl_streak = kl_streak + 1 if kl >= kl_break else 0
     ent_streak = ent_streak + 1 if entropy <= ENT_BREAK and win_rate < ENT_BREAK_MAX_WINRATE else 0

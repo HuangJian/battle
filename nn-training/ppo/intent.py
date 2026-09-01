@@ -24,12 +24,17 @@ run_rl_intent.py 用它做 pace 护栏）。
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import argparse
 import os
@@ -46,6 +51,7 @@ from models.intent_net import IntentNet, export_intent_weights, load_intent_weig
 from ppo.common import (
     _ppo_load,
     _ppo_save,
+    approx_kl_est,
     chunk_episodes,
     compute_gae,
     discover_shards,
@@ -72,7 +78,10 @@ INTENT_DIM = 8
 # 大更新就把策略从多样（熵 0.346）推到近单点（0.098）——too coarse。0.04 把单轮漂移
 # 压到意图熵正则（0.08）能拉回的幅度内）
 # 允许每迭代 ~2 epoch 策略更新，同时早停仍能拦截单轮剧烈漂移（P1-1k3 pace 护栏）。
-TARGET_KL = 0.04
+# 2026-09-02（plan/python-refactor.md P0-3）：估计量改为 Schulman 无偏式
+# （ppo.common.approx_kl_est），阈值随口径换算 ×0.5——旧 2× 有偏口径下"0.04"
+# 实为真实 KL≈0.02，early stopping 在真实漂移减半处即触发。
+TARGET_KL = 0.02
 LOAD_LOG_EVERY = 128
 HB_SEC = 60.0
 
@@ -289,7 +298,7 @@ def ppo_update_intent(
             opt.step()
 
             with torch.no_grad():
-                approx_kl = 0.0 if warmup else ((lp_old - lp_new_a) ** 2).mean().item()
+                approx_kl = 0.0 if warmup else approx_kl_est(lp_old, lp_new_a).item()
             stats.append(
                 {
                     "policy": float(policy_loss.item()),

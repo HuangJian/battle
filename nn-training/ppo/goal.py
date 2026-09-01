@@ -28,12 +28,17 @@ engage 明定：**不是 PPO 动作**（shard 无 lp_engage）——rollout/部�
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import argparse
 import os
@@ -48,6 +53,7 @@ from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from ppo.common import (
     _ppo_load,
     _ppo_save,
+    approx_kl_est,
     chunk_episodes,
     compute_gae,
     discover_shards,
@@ -66,7 +72,7 @@ VF_COEF = 1.0
 ENT_COEF = 0.08  # 676/169 路大动作空间熵更高，起点与 intent 修复后的 0.08 同值
 LR = 1e-4
 MAX_GRAD_NORM = 1.0
-TARGET_KL = 0.04
+TARGET_KL = 0.02  # 2026-09-02 P0-3：Schulman 无偏估计量口径（旧 2× 口径 0.04）
 LOAD_LOG_EVERY = 128
 HB_SEC = 60.0
 
@@ -226,9 +232,16 @@ def ppo_update_goal(
     ref_model: torch.nn.Module | None = None,
     kl_coef: float = 0.0,
     bc_coef: float = 0.0,
+    on_epoch_done=None,
 ):
     """chunks: goal 承诺步 minibatch dicts（obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask
     [+ bc_p/bc_idx + engage_label]）。
+
+    on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（与 ppo / ppo_intent 逐
+    行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
+    首波预采，PPO 继续最后一个 epoch。rl/stream.py:123-124 **无条件**注入该回调，
+    故本形参是契约的一部分（缺失即 `--mode goal --stream 1` 首个波次 TypeError，
+    plan/python-refactor.md P0-1；由 tests/test_backend_contract.py 守护）。
 
     value_warmup：同 ppo_intent——前 N epoch 冻结主干只训 value 头（goal-BC 冷启动
     value 随机，直接 PPO 会被 value 噪声主导）。
@@ -325,7 +338,7 @@ def ppo_update_goal(
             opt.step()
 
             with torch.no_grad():
-                approx_kl = 0.0 if warmup else ((lp_old - lp_new_a) ** 2).mean().item()
+                approx_kl = 0.0 if warmup else approx_kl_est(lp_old, lp_new_a).item()
             stats.append(
                 {
                     "policy": float(policy_loss.item()),
@@ -352,6 +365,8 @@ def ppo_update_goal(
                 )
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
+        if on_epoch_done is not None:
+            on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         ep_kl = sum(s["kl"] for s in ep_stats) / n_e

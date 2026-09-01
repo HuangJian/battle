@@ -53,6 +53,29 @@ def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
     return -(logp.exp() * logp).sum(dim=-1).mean()
 
 
+def approx_kl_est(lp_old: torch.Tensor, lp_new: torch.Tensor) -> torch.Tensor:
+    """PPO 策略漂移估计——Schulman et al. 2017 的无偏下界估计量。
+
+    KL(π_old‖π_new) ≈ E[(r − 1) − ln r]，r = exp(lp_new − lp_old)。
+    对 π_old 期望下 r−1−ln r ≥ 0，是 KL 的无偏下界，且对任意漂移幅度稳健
+    （大漂移时 r−1−ln r 仍保持正确的单调关系，不像二阶近似那样失真）。
+
+    历史（plan/python-refactor.md P0-3，2026-09-02 修复）：旧实现
+    `((lp_old - lp_new) ** 2).mean()` 是二阶近似 ½·E[(Δlnπ)²] 的 **2 倍**——
+    三处一致高估，而所有阈值（TARGET_KL / breaker KL_WARN / KL_BREAK /
+    streamKlCap / rl-config kl_break）都是照这个有偏口径标定的（内部自洽、
+    永不报错，但语义漂移：early stopping 实际在真实 KL≈½ 阈值处触发，且与
+    文献经验不可比）。本次修复**估计量 × 阈值 同步换算**，行为等价：
+      TARGET_KL       0.04 → 0.02
+      breaker KL_WARN 0.08 → 0.04
+      breaker KL_BREAK 0.15 → 0.075
+      streamKlCap     0.20 → 0.10（config）
+      intent kl_break 0.6  → 0.30（config）
+    """
+    ratio = torch.exp(lp_new - lp_old)
+    return ((ratio - 1.0) - (lp_new - lp_old)).mean()
+
+
 # ---------------- GAE ----------------
 def compute_gae(
     rewards,

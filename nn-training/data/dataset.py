@@ -17,18 +17,24 @@ it produces a contradictory (input, target) pair.
 
 from __future__ import annotations
 
-import sys as _sys
-from pathlib import Path as _Path
+# 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
+# nn-training/ 内时直接可用；仅当探针失败才把仓库根临时加入 sys.path——
+# 不无条件抢占 sys.path 前端、不遮蔽 site-packages。find_spec 不真正 import，
+# 避免探针导入产生 F401。
+import importlib.util as _ilu
 
-_ROOT = _Path(__file__).resolve().parent.parent
-if str(_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_ROOT))
+if _ilu.find_spec("schema") is None:
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
 from schema import (
+    CH,
     DIRECTION_CHANNELS,
     FIRE_DIM,
     MOVE_DIM,
@@ -38,18 +44,41 @@ from schema import (
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 
 
+def _flip_direction(channel: np.ndarray, is_bullet: bool) -> np.ndarray:
+    """左右翻转方向编码 `(hi<<3)|dirIdx+1`；bullet 通道按敌我区分编码。
+
+    编码（src/nn/obs-encoder.ts，dirIdx 顺序见 schema.DIR_INDEX up/down/left/right）：
+      坦克/敌车：val = (hi << 3) | (d + 1)      低 3 位 ∈ 1..4（hi = star/tier）
+      敌弹     ：val = d + 1                    低 3 位 ∈ 1..4
+      玩家子弹 ：val = d + 1 + 4                低 3 位 ∈ 5..7，**right=8 → slot=0**
+
+    旧实现只翻转 d∈{2,3}（`(col&7)-1`），玩家子弹低 3 位 ∈ {5,6,7,0} 恒不命中，
+    且 right=8 的 slot=0 被解成 d=-1 原样保留——玩家子弹方向**从不翻转**，镜像后
+    obs 与 move 标签自相矛盾（plan/python-refactor.md P0-2，2026-09-02 修复）。
+
+    修复：按 slot 解出方向 d（slot=0 → d=3 即 right），翻转 left↔right 后
+    按通道语义重编码；`mirror(mirror(x)) == x` 对全部 8 方向 × 敌我成立
+    （tests/test_dataset_mirror.py 逐例断言）。
+    """
+    col = channel.astype(np.int32)
+    slot = col & 7
+    d = (slot - 1) & 3  # slot∈1..4→0..3；5..7→0..2；0(player right)→3
+    newd = np.where(d == 2, 3, np.where(d == 3, 2, d))
+    if is_bullet:
+        # 敌弹 hi=0；玩家 right=8 的 bit3 是 d+1+4 的溢出伪影，重编码时用加法还原
+        player = (slot >= 5) | (slot == 0)
+        val = np.where(player, newd + 1 + 4, newd + 1)
+        return np.where(col > 0, val, 0).astype(np.uint8)
+    hi = (col >> 3) & 0x1F
+    return np.where(col > 0, (hi << 3) | (newd + 1), 0).astype(np.uint8)
+
+
 def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):
     """Return (obs', scalars', move_label') for a left-right reflection."""
     obs = obs.copy()
     obs = obs[:, :, ::-1].copy()  # flip width (copy -> positive strides for torch collate)
     for ch in DIRECTION_CHANNELS:
-        col = obs[ch].astype(np.int32)
-        mask = col > 0
-        hi = (col >> 3) & 0x1F
-        d = (col & 7) - 1  # -1..3
-        newd = np.where(d == 2, 3, np.where(d == 3, 2, d))
-        col = np.where(mask, (hi << 3) | (newd + 1), 0).astype(np.uint8)
-        obs[ch] = col
+        obs[ch] = _flip_direction(obs[ch], is_bullet=(ch == CH["bullet"]))
     scalars = scalars.copy()
     for i in SCALAR_X_INDICES:
         scalars[i] = -scalars[i]

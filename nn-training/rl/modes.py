@@ -7,9 +7,11 @@ DECISIONS §307 三模式基础设施（RL 入口整合 2026-09-01）：
 
 常量
   _MODES             合法 --mode 值的元组
-  _MODE_BACKENDS     模式 → PPO 后端模块 的注册表（stream.py 的 backend 契约：
-                     update / _ppo_load / load_episodes / chunk_episodes 四者都实现，
-                     ppo.py 尾部 update = ppo_update 别名）
+  _MODE_BACKENDS     模式 → PPO 后端模块 的注册表（契约见 **rl/backend.py** 的
+                     RolloutBackend Protocol：load_episode_from_shard /
+                     chunk_episodes / update / load_episodes / _ppo_load 五者，
+                     且 update 必须接受 stream.py 注入的 ckpt_path / on_epoch_done；
+                     由 tests/test_backend_contract.py 逐后端断言，勿退化回注释契约）
   _MODE_BACKUP_PREFIX 模式 → 归档文件前缀（backup_weights 按前缀分桶 prune）
 
 函数
