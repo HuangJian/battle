@@ -14,6 +14,7 @@ Targets:
     lint        - lint-only with ruff
     typecheck   - type-check with mypy
 """
+
 from __future__ import annotations
 
 import argparse

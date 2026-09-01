@@ -19,6 +19,7 @@ ppo_intent.py — M8 意图 PPO（semi-MDP，变步长 GAE）(plan/Intent-Policy
 target_kl 早停：每个 epoch 后累计 KL 超阈值即停止剩余 epoch（防单轮漂移过大，
 run_rl_intent.py 用它做 pace 护栏）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,21 +30,21 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn.functional as F
+from intent_net import IntentNet, export_intent_weights, load_intent_weights
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM  # noqa: F401 — re-export for callers
-from intent_net import IntentNet, load_intent_weights, export_intent_weights
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
-from ppo_common import (  # noqa: E402
-    log,
-    masked_logsoftmax,
+from ppo_common import (
+    _ppo_load,
+    _ppo_save,
+    chunk_episodes,
     compute_gae,
     discover_shards,
-    load_shard_fields,
-    _ppo_save,
-    _ppo_load,
-    chunk_episodes,
     load_episodes_common,
+    load_shard_fields,
+    log,
+    masked_logsoftmax,
 )
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # noqa: F401 — re-export for callers
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
 GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）
@@ -58,7 +59,7 @@ MAX_GRAD_NORM = 1.0
 INTENT_DIM = 8
 # target_kl 早停：单 epoch 平均近似 KL 超此值即停止剩余 epoch。参照现有 per-tick RL
 # 健康稳态 kl≈0.045-0.054/iter（rl/breaker.py，熔断 0.15×连续 3）——per-epoch 预算取 0.1
-#（2026-08-27 §30 改：0.1 → **0.04**。意图 8 类小空间 ~280 步/轮，单 epoch KL=0.101 的
+# （2026-08-27 §30 改：0.1 → **0.04**。意图 8 类小空间 ~280 步/轮，单 epoch KL=0.101 的
 # 大更新就把策略从多样（熵 0.346）推到近单点（0.098）——too coarse。0.04 把单轮漂移
 # 压到意图熵正则（0.08）能拉回的幅度内）
 # 允许每迭代 ~2 epoch 策略更新，同时早停仍能拦截单轮剧烈漂移（P1-1k3 pace 护栏）。
@@ -81,6 +82,7 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
     if weights_path and os.path.exists(weights_path):
         try:
             from weights_io import load_weights_json
+
             meta, _ = load_weights_json(weights_path)
             a = meta.get("arch", {})
             h = a.get("h", 64)
@@ -110,12 +112,13 @@ def discover_intent_shards(root: str) -> list[str]:
     return discover_shards(root, ("reward.npy", "obs.npy", "dt.npy"))
 
 
-def load_intent_shard(dirpath: str) -> Dict[str, np.ndarray]:
+def load_intent_shard(dirpath: str) -> dict[str, np.ndarray]:
     return load_shard_fields(dirpath, _INTENT_SHARD_SPEC)
 
 
-def compute_gae_variable(rewards, values, dones, dt,
-                         gamma_tick: float = GAMMA_TICK, lam: float = LAM):
+def compute_gae_variable(
+    rewards, values, dones, dt, gamma_tick: float = GAMMA_TICK, lam: float = LAM
+):
     """意图步 GAE：每步折扣 γ_step = γ_tick^Δt（Δt = 窗口时长 tick）。
 
     Δt≡1 时与 ppo.py 的定长 per-tick GAE 逐字节一致（test_ppo_intent.py 断言）。
@@ -167,14 +170,20 @@ def load_episodes_intent(data_root: str) -> list[dict]:
 # ppo_common 提供（re-export 见顶部 import）；ppo_update_intent 直接使用。
 
 
-def ppo_update_intent(model, opt, chunks, epochs, device,
-                      ckpt_path: str | None = None,
-                      target_kl: float = TARGET_KL,
-                      seed: int = 7,
-                      value_warmup_epochs: int = 0,
-                      ref_model: torch.nn.Module | None = None,
-                      kl_coef: float = 0.0,
-                      on_epoch_done=None):
+def ppo_update_intent(
+    model,
+    opt,
+    chunks,
+    epochs,
+    device,
+    ckpt_path: str | None = None,
+    target_kl: float = TARGET_KL,
+    seed: int = 7,
+    value_warmup_epochs: int = 0,
+    ref_model: torch.nn.Module | None = None,
+    kl_coef: float = 0.0,
+    on_epoch_done=None,
+):
     """chunks: intent 步 minibatch dicts（obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
 
     value_warmup_epochs（M8 冷启动，plan "kickstarting 辅助项递减"）：前 N 个 epoch 只训
@@ -193,19 +202,26 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
     ckpt_path: 非空则每 epoch 落盘（model/opt/epochs_done/numpy RNG），支持断点续跑。
     """
     if not chunks:
-        return {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "gnorm": 0.0,
-                "mean_ret": 0.0, "early_stopped": False}
+        return {
+            "policy": 0.0,
+            "value": 0.0,
+            "entropy": 0.0,
+            "kl": 0.0,
+            "gnorm": 0.0,
+            "mean_ret": 0.0,
+            "early_stopped": False,
+        }
     np.random.seed(seed)
     model.train()
     clip = CLIP_EPS
     stats = []
-    tensored = [
-        {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
-    ]
+    tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
     total_steps = len(tensored) * epochs
-    log(f"[ppo_intent] update start: {len(tensored)} chunks x {epochs} epochs "
+    log(
+        f"[ppo_intent] update start: {len(tensored)} chunks x {epochs} epochs "
         f"(~{total_steps} grad steps) value_warmup={value_warmup_epochs} "
-        f"kickstart_kl_coef={kl_coef}")
+        f"kickstart_kl_coef={kl_coef}"
+    )
     t0 = time.time()
     last_hb = t0
     start_epoch = 0
@@ -219,7 +235,7 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
         warmup = ep < value_warmup_epochs
         # warmup 只训 value 头（冻结主干+三头，防扰动 B′ 策略特征）；否则全量可训。
         for name, p in model.named_parameters():
-            p.requires_grad = (not warmup) or name.startswith('value_head.')
+            p.requires_grad = (not warmup) or name.startswith("value_head.")
         perm = np.random.permutation(len(tensored))
         n_ep_start = len(stats)
         for j, i in enumerate(perm):
@@ -265,25 +281,29 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
 
             with torch.no_grad():
                 approx_kl = 0.0 if warmup else ((lp_old - lp_new_a) ** 2).mean().item()
-            stats.append({
-                "policy": float(policy_loss.item()),
-                "value": float(value_loss.item()),
-                "entropy": float(entropy.item()),
-                "kl": float(approx_kl),
-                "mean_ret": float(ret.mean().item()),
-                "gnorm": float(gn),
-            })
+            stats.append(
+                {
+                    "policy": float(policy_loss.item()),
+                    "value": float(value_loss.item()),
+                    "entropy": float(entropy.item()),
+                    "kl": float(approx_kl),
+                    "mean_ret": float(ret.mean().item()),
+                    "gnorm": float(gn),
+                }
+            )
             now = time.time()
             if now - last_hb >= HB_SEC:
                 last_hb = now
                 recent = stats[-32:]
                 n_r = len(recent)
-                log(f"[ppo_intent] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
+                log(
+                    f"[ppo_intent] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
                     f"chunk {j + 1}/{len(tensored)} elapsed={now - t0:.0f}s "
                     f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
                     f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
                     f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
-                    f"value={sum(s['value'] for s in recent) / n_r:.4f}")
+                    f"value={sum(s['value'] for s in recent) / n_r:.4f}"
+                )
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
         if on_epoch_done is not None:
@@ -291,20 +311,27 @@ def ppo_update_intent(model, opt, chunks, epochs, device,
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         ep_kl = sum(s["kl"] for s in ep_stats) / n_e
-        log(f"[ppo_intent] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
+        log(
+            f"[ppo_intent] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
             f"({time.time() - t0:.0f}s total): kl={ep_kl:.4f} "
             f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
             f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}")
+            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}"
+        )
         if not warmup and ep_kl > target_kl:
-            log(f"[ppo_intent] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
-                f"— early stopping remaining epochs")
+            log(
+                f"[ppo_intent] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
+                f"— early stopping remaining epochs"
+            )
             early_stopped = True
             break
 
     n = len(stats)
-    agg = {k: sum(s[k] for s in stats) / n for k in stats[0]} if n else \
-        {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "gnorm": 0.0, "mean_ret": 0.0}
+    agg = (
+        {k: sum(s[k] for s in stats) / n for k in stats[0]}
+        if n
+        else {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "gnorm": 0.0, "mean_ret": 0.0}
+    )
     agg["early_stopped"] = early_stopped
     return agg
 
@@ -326,12 +353,24 @@ def main():
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--mb", type=int, default=512)
     ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--value-warmup-epochs", type=int, default=0,
-                    help="前 N 个 epoch 只训 value 头（策略冻结；B′ 冷启动 value 随机）")
-    ap.add_argument("--kl-coef", type=float, default=0.0,
-                    help="kickstarting KL 惩罚系数（plan #5 衰减 0.5/iter；0=关闭）")
-    ap.add_argument("--ref-weights", type=str, default=None,
-                    help="kickstarting 参考策略权重（B′ 冻结快照；缺省 = 当前权重）")
+    ap.add_argument(
+        "--value-warmup-epochs",
+        type=int,
+        default=0,
+        help="前 N 个 epoch 只训 value 头（策略冻结；B′ 冷启动 value 随机）",
+    )
+    ap.add_argument(
+        "--kl-coef",
+        type=float,
+        default=0.0,
+        help="kickstarting KL 惩罚系数（plan #5 衰减 0.5/iter；0=关闭）",
+    )
+    ap.add_argument(
+        "--ref-weights",
+        type=str,
+        default=None,
+        help="kickstarting 参考策略权重（B′ 冻结快照；缺省 = 当前权重）",
+    )
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=8)
@@ -377,9 +416,17 @@ def main():
             p.requires_grad = False
         ref_model.eval()
         log(f"[ppo_intent] kickstarting: ref={ref_src} kl_coef={args.kl_coef}")
-    agg = ppo_update_intent(model, opt, chunks, args.epochs, device, seed=args.seed,
-                            value_warmup_epochs=args.value_warmup_epochs,
-                            ref_model=ref_model, kl_coef=args.kl_coef)
+    agg = ppo_update_intent(
+        model,
+        opt,
+        chunks,
+        args.epochs,
+        device,
+        seed=args.seed,
+        value_warmup_epochs=args.value_warmup_epochs,
+        ref_model=ref_model,
+        kl_coef=args.kl_coef,
+    )
 
     model.to("cpu")
     export_intent_weights(model, args.out)

@@ -12,6 +12,7 @@ RL 入口整合，plan/RL-Entry-Consolidation.md P3）。
   - dispatch_eval_bg_m1：后台线程派发 → eval_summary 写回 training_log.jsonl
   - read_eval_summary：回读该迭代最新 eval_summary（断点/线程竞态下对账）
 """
+
 from __future__ import annotations
 
 import json
@@ -21,11 +22,11 @@ import threading
 import time
 from pathlib import Path
 
-from rl.log import log
-from rl.queue import REPO_ROOT  # noqa: F401 — 与 eval_dispatch 同源约定
-
 # Windows：spawn 子进程（bun 评估）时用 CREATE_NO_WINDOW，避免黑控制台窗口抢焦点。
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
+from rl.log import log
+from rl.queue import REPO_ROOT
 
 
 def parse_m1_eval_report(text: str) -> dict:
@@ -81,13 +82,24 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     `_runner` 供测试注入 fake runner（替换 subprocess 执行）。
     """
     seeds = args.eval_seeds
-    cmd = [bun, "tools/sim/m1-eval.ts",
-           "--stages", "all", "--seeds", f"1-{seeds}",
-           "--difficulty", args.difficulty,
-           "--policy", "goal" if args.goal else "intent-exec",
-           "--goal-weights" if args.goal else "--intent-weights", rl_path,
-           "--dist-nodes", "nn-training/rl-config.json",
-           "--workers", str(max(2, min(8, args.workers)))]
+    cmd = [
+        bun,
+        "tools/sim/m1-eval.ts",
+        "--stages",
+        "all",
+        "--seeds",
+        f"1-{seeds}",
+        "--difficulty",
+        args.difficulty,
+        "--policy",
+        "goal" if args.goal else "intent-exec",
+        "--goal-weights" if args.goal else "--intent-weights",
+        rl_path,
+        "--dist-nodes",
+        "nn-training/rl-config.json",
+        "--workers",
+        str(max(2, min(8, args.workers))),
+    ]
     attempts = 0
     while True:
         attempts += 1
@@ -95,56 +107,76 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
         if _runner is not None:
             res = _runner(cmd)
         else:
-            proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
-                                  timeout=3600, **_POPEN_NO_WINDOW)
+            proc = subprocess.run(
+                cmd,
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                **_POPEN_NO_WINDOW,
+            )
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}")
+                    f"m1-eval rc={proc.returncode}: {(proc.stderr or proc.stdout)[-400:]}"
+                )
             res = parse_m1_eval_report(proc.stdout + "\n" + proc.stderr)
         err = res.get("error") or 0
         if err > 0 and attempts < CLEAN_EVAL_MAX_RETRY:
-            log(f"WARN clean eval attempt {attempts} had {err} error games "
-                f"(total={res.get('total')}) — rerunning whole batch")
+            log(
+                f"WARN clean eval attempt {attempts} had {err} error games "
+                f"(total={res.get('total')}) — rerunning whole batch"
+            )
             continue
         res["retries"] = attempts - 1
         res["games"] = 35 * seeds  # 兼容 dispatch_eval_bg_m1 的 eval_summary 字段
         if err > 0:
-            log(f"WARN clean eval accepted with {err} error games after {attempts} "
-                f"attempts (max {CLEAN_EVAL_MAX_RETRY}) — result carries error mark")
+            log(
+                f"WARN clean eval accepted with {err} error games after {attempts} "
+                f"attempts (max {CLEAN_EVAL_MAX_RETRY}) — result carries error mark"
+            )
         return res
 
 
-def dispatch_eval_bg_m1(bun: str, rl_path: str, args, it: int,
-                        jsonl_path: Path, baseline: float) -> threading.Thread:
+def dispatch_eval_bg_m1(
+    bun: str, rl_path: str, args, it: int, jsonl_path: Path, baseline: float
+) -> threading.Thread:
     """干净评估后台线程（流式 on_ppo_started / 串行 rollout 收官后触发）：跑
     m1-eval → 结果写回 training_log.jsonl 的 eval_summary 事件 + 供止损判定。
     返回线程句柄，主循环在 jsonl 写回前 join（与 eval_dispatch.dispatch_eval_bg
     同语义）。"""
+
     def _body() -> None:
         try:
             er = run_clean_eval(bun, rl_path, args)
             ev = er.get("winRate")
             delta = (ev - baseline) if ev is not None else None
             rec = {
-                "event": "eval_summary", "iter": it,
+                "event": "eval_summary",
+                "iter": it,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "winRate": round(ev, 4) if ev is not None else None,
-                "games": er["games"], "baseline": baseline,
+                "games": er["games"],
+                "baseline": baseline,
                 "delta": round(delta, 4) if delta is not None else None,
             }
             with open(jsonl_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
             if ev is not None:
-                log(f"eval it{it}: clean winRate={ev:.1%} ({er['games']} games) "
-                    f"Δ vs baseline={delta:+.1%}")
+                log(
+                    f"eval it{it}: clean winRate={ev:.1%} ({er['games']} games) "
+                    f"Δ vs baseline={delta:+.1%}"
+                )
             else:
                 # 评估盲（横幅未命中）必须显式告警，而不是靠 f-string 对 None 抛
                 # ValueError 伪装成「评估失败」（it10 实测教训：kill agent 打断评估
                 # → m1-eval rc=0 无横幅 → win=None → None.__format__ 崩溃）。
-                log(f"eval it{it}: WARN clean winRate=null (banner missed) — "
-                    f"games={er['games']} baseline={baseline}")
-        except Exception as e:  # noqa: BLE001 — 评估旁路失败不中断训练
+                log(
+                    f"eval it{it}: WARN clean winRate=null (banner missed) — "
+                    f"games={er['games']} baseline={baseline}"
+                )
+        except Exception as e:
             log(f"WARN clean eval it{it} failed (ignored): {e}")
+
     t = threading.Thread(target=_body, daemon=True, name=f"eval-m1-it{it}")
     t.start()
     return t

@@ -1,4 +1,5 @@
 """课程采样：每轮迭代采哪些 (stage, seed)。"""
+
 from __future__ import annotations
 
 import time
@@ -46,7 +47,8 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     if order:
         order_list = parse_range(order)
         n_active = curriculum_active_count(
-            len(order_list), it,
+            len(order_list),
+            it,
             getattr(args, "curriculum_start", 4),
             getattr(args, "curriculum_every", 8),
             getattr(args, "curriculum_grow", 4),
@@ -55,15 +57,17 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
         import numpy as np
 
         rng_draw = np.random.default_rng([rotate_seed, 0xC0E, it])
-        draw = rng_draw.integers(1, 2 ** 30, size=len(active) * args.seeds_per_stage)
+        draw = rng_draw.integers(1, 2**30, size=len(active) * args.seeds_per_stage)
         pairs = [
             (stage, int(draw[i * args.seeds_per_stage + j]))
             for i, stage in enumerate(active)
             for j in range(args.seeds_per_stage)
         ]
-        print(f"[{time.strftime('%H:%M:%S')}] [run_rl] curriculum: it{it} active "
-              f"{n_active}/{len(order_list)} stages={active} "
-              f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [run_rl] curriculum: it{it} active "
+            f"{n_active}/{len(order_list)} stages={active} "
+            f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})"
+        )
         return pairs
     if args.rotate_stages <= 0:
         base = parse_range(args.stages)
@@ -78,7 +82,7 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
             rng = np.random.default_rng([rotate_seed, 0x5EED, it])
             pairs: list[tuple[int, int]] = []
             for si in base:
-                draws = rng.integers(1, 2 ** 30, size=rotate)
+                draws = rng.integers(1, 2**30, size=rotate)
                 pairs.extend((si, int(d)) for d in draws)
             return pairs
         return [(si, sd) for si in base for sd in parse_range(args.seeds)]
@@ -91,16 +95,20 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     rng_perm = np.random.default_rng([rotate_seed, 0xA11CE, epoch_idx])
     perm = [int(s) for s in rng_perm.permutation(args.total_stages)]
     if pos == 0:
-        print(f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: new epoch — permutation "
-              f"{perm} split into {per_epoch} batches")
-    window = perm[pos * k:(pos + 1) * k]
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: new epoch — permutation "
+            f"{perm} split into {per_epoch} batches"
+        )
+    window = perm[pos * k : (pos + 1) * k]
     rng_draw = np.random.default_rng([rotate_seed, 0xB0B, it])
-    draw = rng_draw.integers(1, 2 ** 30, size=len(window) * args.seeds_per_stage)
+    draw = rng_draw.integers(1, 2**30, size=len(window) * args.seeds_per_stage)
     pairs = [
         (stage, int(draw[i * args.seeds_per_stage + j]))
         for i, stage in enumerate(window)
         for j in range(args.seeds_per_stage)
     ]
-    print(f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: batch {pos + 1}/{per_epoch} "
-          f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})")
+    print(
+        f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: batch {pos + 1}/{per_epoch} "
+        f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})"
+    )
     return pairs

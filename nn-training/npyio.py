@@ -12,20 +12,21 @@ Standard `.npy` (v1.0) layout (must match `src/nn/npy.ts`):
     header  dict repr + spaces, 64-byte aligned
     raw bytes (C order)
 """
+
 from __future__ import annotations
 
 import json
 import os
-from typing import Dict, Any
+from typing import Any, Dict
 
 import numpy as np
 
 # Per-shard file names produced by the TS exporter.
 SHARD_FILES = {
-    "obs": "obs.npy",          # uint8  (N, 14, 26, 26)
+    "obs": "obs.npy",  # uint8  (N, 14, 26, 26)
     "scalars": "scalars.npy",  # float32 (N, 19)
     "actions": "actions.npy",  # uint8  (N, 2)  [move, fire] (v2: item 头删除)
-    "masks": "masks.npy",      # uint8  (N, 7) [move5, fire2], 1=valid
+    "masks": "masks.npy",  # uint8  (N, 7) [move5, fire2], 1=valid
     "conditions": "conditions.npy",  # uint8 (N,) decision condition
 }
 MANIFEST_FILE = "manifest.json"
@@ -39,9 +40,9 @@ def read_npy(path: str) -> np.ndarray:
 OPTIONAL_FILES = {"returns": "returns.npy"}  # v2: M3 value MC 预置（可选）
 
 
-def load_shard(shard_dir: str) -> Dict[str, np.ndarray]:
+def load_shard(shard_dir: str) -> dict[str, np.ndarray]:
     """Load one exported replay shard into a dict of numpy arrays."""
-    out: Dict[str, np.ndarray] = {}
+    out: dict[str, np.ndarray] = {}
     for key, fname in SHARD_FILES.items():
         p = os.path.join(shard_dir, fname)
         if not os.path.exists(p):
@@ -63,13 +64,13 @@ def scan_shards(data_dir: str) -> list[str]:
     return sorted(shards)
 
 
-def load_dataset(data_dir: str) -> Dict[str, np.ndarray]:
+def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
     """Concatenate every shard under `data_dir` into one big sample dict."""
     shards = scan_shards(data_dir)
     if not shards:
         raise FileNotFoundError(f"no shards (obs.npy) found under {data_dir}")
-    parts: Dict[str, list[np.ndarray]] = {k: [] for k in SHARD_FILES}
-    opt_parts: Dict[str, list[np.ndarray]] = {k: [] for k in OPTIONAL_FILES}
+    parts: dict[str, list[np.ndarray]] = {k: [] for k in SHARD_FILES}
+    opt_parts: dict[str, list[np.ndarray]] = {k: [] for k in OPTIONAL_FILES}
     for s in shards:
         d = load_shard(s)
         for k in SHARD_FILES:
@@ -85,17 +86,21 @@ def load_dataset(data_dir: str) -> Dict[str, np.ndarray]:
             full = np.full((n,), np.nan, dtype=np.float32)
             off = 0
             for arr in v:
-                full[off:off + arr.shape[0]] = arr
+                full[off : off + arr.shape[0]] = arr
                 off += arr.shape[0]
             out[k] = full
     return out
 
 
-def save_shard(shard_dir: str, arrays: Dict[str, np.ndarray], manifest: Dict[str, Any]) -> None:
+def save_shard(shard_dir: str, arrays: dict[str, np.ndarray], manifest: dict[str, Any]) -> None:
     """Write a shard (numpy) — used by smoke_test to synthesize data."""
     os.makedirs(shard_dir, exist_ok=True)
     for key, fname in SHARD_FILES.items():
-        np.save(os.path.join(shard_dir, fname), arrays[key].astype(
-            np.uint8 if key in ("obs", "actions", "masks", "conditions") else np.float32))
+        np.save(
+            os.path.join(shard_dir, fname),
+            arrays[key].astype(
+                np.uint8 if key in ("obs", "actions", "masks", "conditions") else np.float32
+            ),
+        )
     with open(os.path.join(shard_dir, MANIFEST_FILE), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

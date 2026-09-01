@@ -23,6 +23,7 @@ multi-head loss（§T7.2，对照 ppo_intent.py）：
 shard 工具全部来自 ppo_common；网络类 / shard spec / 采集器为 goal 专属。
 engage 明定：**不是 PPO 动作**（shard 无 lp_engage）——rollout/部署均 argmax（k1）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,20 +34,19 @@ from typing import Dict
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM  # noqa: F401 — re-export for callers
-from goal_net import GoalNet, load_goal_weights, export_goal_weights
-from ppo_common import (  # noqa: F402
-    log,
-    masked_logsoftmax,
+from goal_net import GoalNet, export_goal_weights, load_goal_weights
+from ppo_common import (
+    _ppo_load,
+    _ppo_save,
+    chunk_episodes,
     compute_gae,
     discover_shards,
-    load_shard_fields,
-    _ppo_save,
-    _ppo_load,
-    chunk_episodes,
     load_episodes_common,
+    load_shard_fields,
+    log,
+    masked_logsoftmax,
 )
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # noqa: F401 — re-export for callers
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
 GAMMA_TICK = 0.995
@@ -87,6 +87,7 @@ def build_rl_net(weights_path: str | None) -> GoalRLNet:
     if weights_path and os.path.exists(weights_path):
         try:
             from weights_io import load_weights_json
+
             meta, _ = load_weights_json(weights_path)
             a = meta.get("arch", {})
             h = a.get("h", 64)
@@ -123,7 +124,7 @@ def discover_goal_shards(root: str) -> list[str]:
     return discover_shards(root, ("reward.npy", "obs.npy", "dt.npy", "goal_mask.npy"))
 
 
-def load_goal_shard(dirpath: str) -> Dict[str, np.ndarray]:
+def load_goal_shard(dirpath: str) -> dict[str, np.ndarray]:
     d = load_shard_fields(dirpath, _GOAL_SHARD_SPEC)
     for key, (fname, dtype) in _GOAL_OPT_SPEC.items():
         p = os.path.join(dirpath, fname)
@@ -158,8 +159,9 @@ def policy_logprobs(model, obs, sc, inj, mask):
     return lp, engage, val
 
 
-def compute_gae_variable(rewards, values, dones, dt,
-                         gamma_tick: float = GAMMA_TICK, lam: float = LAM):
+def compute_gae_variable(
+    rewards, values, dones, dt, gamma_tick: float = GAMMA_TICK, lam: float = LAM
+):
     """goal 承诺步 GAE（γ_step = γ_tick^Δt；统一收敛至 ppo_common.compute_gae）。"""
     return compute_gae(rewards, values, dones, gamma_tick, lam, dt)
 
@@ -204,14 +206,20 @@ def load_episodes_goal(data_root: str) -> list[dict]:
 
 
 # ---------------- PPO update ----------------
-def ppo_update_goal(model, opt, chunks, epochs, device,
-                    ckpt_path: str | None = None,
-                    target_kl: float = TARGET_KL,
-                    seed: int = 7,
-                    value_warmup_epochs: int = 0,
-                    ref_model: torch.nn.Module | None = None,
-                    kl_coef: float = 0.0,
-                    bc_coef: float = 0.0):
+def ppo_update_goal(
+    model,
+    opt,
+    chunks,
+    epochs,
+    device,
+    ckpt_path: str | None = None,
+    target_kl: float = TARGET_KL,
+    seed: int = 7,
+    value_warmup_epochs: int = 0,
+    ref_model: torch.nn.Module | None = None,
+    kl_coef: float = 0.0,
+    bc_coef: float = 0.0,
+):
     """chunks: goal 承诺步 minibatch dicts（obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask
     [+ bc_p/bc_idx + engage_label]）。
 
@@ -223,19 +231,27 @@ def ppo_update_goal(model, opt, chunks, epochs, device,
     target_kl 早停同 ppo_intent。
     """
     if not chunks:
-        return {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "bc": 0.0,
-                "gnorm": 0.0, "mean_ret": 0.0, "early_stopped": False}
+        return {
+            "policy": 0.0,
+            "value": 0.0,
+            "entropy": 0.0,
+            "kl": 0.0,
+            "bc": 0.0,
+            "gnorm": 0.0,
+            "mean_ret": 0.0,
+            "early_stopped": False,
+        }
     np.random.seed(seed)
     model.train()
     clip = CLIP_EPS
     stats = []
-    tensored = [
-        {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
-    ]
+    tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
     total_steps = len(tensored) * epochs
-    log(f"[ppo_goal] update start: {len(tensored)} chunks x {epochs} epochs "
+    log(
+        f"[ppo_goal] update start: {len(tensored)} chunks x {epochs} epochs "
         f"(~{total_steps} grad steps) value_warmup={value_warmup_epochs} "
-        f"kickstart_kl_coef={kl_coef} bc_coef={bc_coef}")
+        f"kickstart_kl_coef={kl_coef} bc_coef={bc_coef}"
+    )
     t0 = time.time()
     last_hb = t0
     start_epoch = 0
@@ -248,7 +264,7 @@ def ppo_update_goal(model, opt, chunks, epochs, device,
     for ep in range(start_epoch, epochs):
         warmup = ep < value_warmup_epochs
         for name, p in model.named_parameters():
-            p.requires_grad = (not warmup) or name.startswith('value_head.')
+            p.requires_grad = (not warmup) or name.startswith("value_head.")
         perm = np.random.permutation(len(tensored))
         n_ep_start = len(stats)
         for j, i in enumerate(perm):
@@ -303,46 +319,64 @@ def ppo_update_goal(model, opt, chunks, epochs, device,
 
             with torch.no_grad():
                 approx_kl = 0.0 if warmup else ((lp_old - lp_new_a) ** 2).mean().item()
-            stats.append({
-                "policy": float(policy_loss.item()),
-                "value": float(value_loss.item()),
-                "entropy": float(entropy.item()),
-                "kl": float(approx_kl),
-                "bc": float(bc_loss.item()),
-                "mean_ret": float(ret.mean().item()),
-                "gnorm": float(gn),
-            })
+            stats.append(
+                {
+                    "policy": float(policy_loss.item()),
+                    "value": float(value_loss.item()),
+                    "entropy": float(entropy.item()),
+                    "kl": float(approx_kl),
+                    "bc": float(bc_loss.item()),
+                    "mean_ret": float(ret.mean().item()),
+                    "gnorm": float(gn),
+                }
+            )
             now = time.time()
             if now - last_hb >= HB_SEC:
                 last_hb = now
                 recent = stats[-32:]
                 n_r = len(recent)
-                log(f"[ppo_goal] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
+                log(
+                    f"[ppo_goal] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
                     f"chunk {j + 1}/{len(tensored)} elapsed={now - t0:.0f}s "
                     f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
                     f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
                     f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
-                    f"value={sum(s['value'] for s in recent) / n_r:.4f}")
+                    f"value={sum(s['value'] for s in recent) / n_r:.4f}"
+                )
         if ckpt_path:
             _ppo_save(ckpt_path, model, opt, ep + 1)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
         ep_kl = sum(s["kl"] for s in ep_stats) / n_e
-        log(f"[ppo_goal] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
+        log(
+            f"[ppo_goal] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
             f"({time.time() - t0:.0f}s total): kl={ep_kl:.4f} "
             f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
             f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}")
+            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}"
+        )
         if not warmup and ep_kl > target_kl:
-            log(f"[ppo_goal] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
-                f"— early stopping remaining epochs")
+            log(
+                f"[ppo_goal] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
+                f"— early stopping remaining epochs"
+            )
             early_stopped = True
             break
 
     n = len(stats)
-    agg = {k: sum(s[k] for s in stats) / n for k in stats[0]} if n else \
-        {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "bc": 0.0,
-         "gnorm": 0.0, "mean_ret": 0.0}
+    agg = (
+        {k: sum(s[k] for s in stats) / n for k in stats[0]}
+        if n
+        else {
+            "policy": 0.0,
+            "value": 0.0,
+            "entropy": 0.0,
+            "kl": 0.0,
+            "bc": 0.0,
+            "gnorm": 0.0,
+            "mean_ret": 0.0,
+        }
+    )
     agg["early_stopped"] = early_stopped
     return agg
 
@@ -363,10 +397,18 @@ def main():
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--value-warmup-epochs", type=int, default=0)
     ap.add_argument("--kl-coef", type=float, default=0.0)
-    ap.add_argument("--ref-weights", type=str, default=None,
-                    help="kickstarting 参考策略权重（goal-BC 冻结快照；缺省 = 当前权重）")
-    ap.add_argument("--bc-coef", type=float, default=0.0,
-                    help="BC 软目标 kickstart 系数（shard 带 bc_p 时生效）")
+    ap.add_argument(
+        "--ref-weights",
+        type=str,
+        default=None,
+        help="kickstarting 参考策略权重（goal-BC 冻结快照；缺省 = 当前权重）",
+    )
+    ap.add_argument(
+        "--bc-coef",
+        type=float,
+        default=0.0,
+        help="BC 软目标 kickstart 系数（shard 带 bc_p 时生效）",
+    )
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=8)
@@ -411,10 +453,18 @@ def main():
             p.requires_grad = False
         ref_model.eval()
         log(f"[ppo_goal] kickstarting: ref={ref_src} kl_coef={args.kl_coef}")
-    agg = ppo_update_goal(model, opt, chunks, args.epochs, device, seed=args.seed,
-                          value_warmup_epochs=args.value_warmup_epochs,
-                          ref_model=ref_model, kl_coef=args.kl_coef,
-                          bc_coef=args.bc_coef)
+    agg = ppo_update_goal(
+        model,
+        opt,
+        chunks,
+        args.epochs,
+        device,
+        seed=args.seed,
+        value_warmup_epochs=args.value_warmup_epochs,
+        ref_model=ref_model,
+        kl_coef=args.kl_coef,
+        bc_coef=args.bc_coef,
+    )
 
     model.to("cpu")
     export_goal_weights(model, args.out)

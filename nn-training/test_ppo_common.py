@@ -13,6 +13,7 @@
 运行（经统一启动器进入 venv）：
   python test_ppo_common.py
 """
+
 from __future__ import annotations
 
 import os
@@ -25,7 +26,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ppo_common  # noqa: E402
+import ppo_common
 
 FAILS: list[str] = []
 
@@ -81,8 +82,7 @@ def test_gae_variable_differs() -> None:
     dt = np.full(N, 3, dtype=np.int64)  # 每个意图步 = 3 tick
     adv_var, _ = ppo_common.compute_gae(rewards, values, dones, gamma, lam, dt)
     adv_fixed, _ = ppo_common.compute_gae(rewards, values, dones, gamma, lam)
-    check(not np.allclose(adv_var, adv_fixed, atol=1e-6),
-          "dt=3 的变步长 adv 与定长 adv 确有差异")
+    check(not np.allclose(adv_var, adv_fixed, atol=1e-6), "dt=3 的变步长 adv 与定长 adv 确有差异")
 
 
 def test_masked_logsoftmax() -> None:
@@ -96,8 +96,10 @@ def test_masked_logsoftmax() -> None:
     check(torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)")
     # 概率和（exp）在有效位上 = 1
     probs = out.exp()
-    check(bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()),
-          "有效位概率和为 1")
+    check(
+        bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()),
+        "有效位概率和为 1",
+    )
 
 
 def test_cat_logprob_entropy() -> None:
@@ -120,8 +122,11 @@ def test_chunk_episodes() -> None:
     check(sizes == [4, 4, 2, 4, 1], f"chunk 尺寸 [4,4,2,4,1] (got {sizes})")
     check(all(set(c.keys()) == {"obs", "adv"} for c in chunks), "chunk 保留全部键")
     # 跨 episode 不混：每个 chunk 内部数据来自单一 episode
-    check(chunks[0]["obs"][0, 0] == eps[0]["obs"][0, 0] and chunks[3]["obs"][0, 0] == eps[1]["obs"][0, 0],
-          "chunk 不跨 episode 混数据")
+    check(
+        chunks[0]["obs"][0, 0] == eps[0]["obs"][0, 0]
+        and chunks[3]["obs"][0, 0] == eps[1]["obs"][0, 0],
+        "chunk 不跨 episode 混数据",
+    )
 
 
 def test_np_state_roundtrip() -> None:
@@ -149,8 +154,10 @@ def test_ppo_save_load() -> None:
         o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
         done = ppo_common._ppo_load(td, m2, o2)
         check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
-        check(np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
-              "checkpoint 加载后权重一致")
+        check(
+            np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
+            "checkpoint 加载后权重一致",
+        )
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
@@ -178,8 +185,7 @@ def test_discover_and_load_shard_fields() -> None:
         }
         d = ppo_common.load_shard_fields(str(shard), spec)
         check(set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备")
-        check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64,
-              "字段 dtype 按 spec 转换")
+        check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换")
 
 
 def main() -> None:

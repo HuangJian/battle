@@ -17,12 +17,12 @@ Heads (v2):
   move  : 5  (none/up/down/left/right)   — predicted desired direction (hold)
   fire  : 2  (hold-state 0/1)            — label = firing bit at decision tick
 """
+
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
+from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 DEFAULT_CONV_CH = (32, 48, 64)
 DEFAULT_HEAD_HIDDEN = 64
@@ -91,11 +91,11 @@ class NNPolicy(nn.Module):
         Returns (move_logits, fire_logits).
         """
         x = obs.float()
-        x = self.conv(x)                 # (B, C, 26, 26)
-        x = self.gap(x)                  # (B, C, 1, 1)
-        x = x.flatten(1)                # (B, C)
+        x = self.conv(x)  # (B, C, 26, 26)
+        x = self.gap(x)  # (B, C, 1, 1)
+        x = x.flatten(1)  # (B, C)
         x = torch.cat([x, scalars], dim=1)  # (B, C + scalar_dim)
-        h = self.fc_relu(self.fc(x))    # (B, head_hidden)
+        h = self.fc_relu(self.fc(x))  # (B, head_hidden)
         return self.move_head(h), self.fire_head(h)
 
     @torch.no_grad()
@@ -118,7 +118,7 @@ def param_count(model: nn.Module) -> int:
 if __name__ == "__main__":
     m = NNPolicy()
     n = param_count(m)
-    print(f"NNPolicy params: {n} (~{n/1000:.1f}K)  budget<=200K: {n <= 200_000}")
+    print(f"NNPolicy params: {n} (~{n / 1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
     mv, fr = m(dummy_obs, dummy_sc)

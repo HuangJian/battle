@@ -16,6 +16,7 @@ The TS side decodes `data` with atob -> Uint8Array -> Float32Array and feeds
 the SAME conv/linear ops (see src/nn/infer.ts) so inference reproduces the
 Python forward pass (plan §NN-M1 determinism ②).
 """
+
 from __future__ import annotations
 
 import base64
@@ -25,7 +26,6 @@ import re
 from typing import Any, Dict
 
 import torch
-
 from schema import OBS_SCHEMA_MAJOR
 
 
@@ -45,9 +45,11 @@ def _b64_to_tensor(b64: str, shape: list[int]) -> torch.Tensor:
     return arr.clone()
 
 
-def save_weights_json(model: torch.nn.Module, path: str, extra_meta: Dict[str, Any] | None = None) -> None:
+def save_weights_json(
+    model: torch.nn.Module, path: str, extra_meta: dict[str, Any] | None = None
+) -> None:
     """Write the model weights in the JSON+base64 format (plan §5)."""
-    params: Dict[str, Any] = {}
+    params: dict[str, Any] = {}
     for name, p in model.state_dict().items():
         params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
     meta = {
@@ -71,9 +73,9 @@ def save_weights_json(model: torch.nn.Module, path: str, extra_meta: Dict[str, A
     os.replace(tmp_path, abs_path)
 
 
-def load_weights_json(path: str) -> tuple[Dict[str, Any], Dict[str, torch.Tensor]]:
+def load_weights_json(path: str) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     """Load a JSON+base64 weights file -> (meta, {name: tensor})."""
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         meta = json.load(f)
     params = {k: _b64_to_tensor(v["data"], v["shape"]) for k, v in meta["params"].items()}
     return meta, params
@@ -91,7 +93,7 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
     _meta, params = load_weights_json(path)
     try:
         missing, unexpected = model.load_state_dict(params, strict=False)
-    except RuntimeError as e:
+    except RuntimeError:
         # Shape mismatch (e.g. FC layer changed): filter out mismatched keys
         # and load everything else.
         state = model.state_dict()
@@ -105,7 +107,9 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
         if skipped:
             print(f"[weights] load_state_into: skipped (shape mismatch) {skipped}")
         model.load_state_dict(compatible, strict=False)
-        print(f"[weights] load_state_into: loaded {len(compatible)}/{len(params)} params from {path}")
+        print(
+            f"[weights] load_state_into: loaded {len(compatible)}/{len(params)} params from {path}"
+        )
     else:
         if missing or unexpected:
             print(f"[weights] load_state_into: missing={missing} unexpected={unexpected}")

@@ -10,6 +10,7 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
     creationflags=CREATE_NO_WINDOW；非 Windows 为空 dict）。
   popen_kwargs(**extra) —— 便捷包装：返回 {**POPEN_NO_WINDOW, **extra}。
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -17,12 +18,12 @@ import sys
 from typing import Any, Dict
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-POPEN_NO_WINDOW: Dict[str, Any] = {}
+POPEN_NO_WINDOW: dict[str, Any] = {}
 if sys.platform == "win32":
     POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 
-def popen_kwargs(**extra: Any) -> Dict[str, Any]:
+def popen_kwargs(**extra: Any) -> dict[str, Any]:
     """subprocess 调用 kwargs：始终带上无窗口 flags，并合并调用方参数。
 
     ``subprocess.run(cmd, ..., **popen_kwargs(capture_output=True))`` 等价于旧的

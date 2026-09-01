@@ -24,6 +24,7 @@ Usage:
   python train_loop.py --rounds 5           # stop after 5 rounds
   python train_loop.py --epochs-per-round 60 --lr 1e-3
 """
+
 from __future__ import annotations
 
 import os
@@ -73,8 +74,8 @@ DEFAULT_DATA = os.path.join(HERE, "..", "tmp", "nn-export")
 DEFAULT_WEIGHTS = os.path.join(HERE, "weights")
 
 # A round that finishes in less than this many seconds with no val_loss is    # almost certainly a *spin* (train_bc exited early, crashed, or hit a
-    # PermissionError). Real rounds take minutes. We surface this loudly
-    # instead of silently continuing so the operator notices immediately.
+# PermissionError). Real rounds take minutes. We surface this loudly
+# instead of silently continuing so the operator notices immediately.
 SPIN_WARN_S = 60.0
 
 
@@ -203,7 +204,6 @@ def heartbeat(stop: threading.Event, interval: int, state: dict, log) -> None:
         _emit(line, log)
 
 
-
 def _pid_alive(pid: int) -> bool:
     """Cross-platform check: is a process with this PID still running?
 
@@ -232,7 +232,7 @@ def _write_lock(lock_path: str) -> None:
 def _read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
     """Read lock file → (pid, exe_path, start_ts).  Any parse error → Nones."""
     try:
-        with open(lock_path, "r") as f:
+        with open(lock_path) as f:
             raw = f.read().strip()
     except OSError:
         return None, None, None
@@ -351,9 +351,11 @@ def auto_export_corpus(data_dir: str, log=None) -> int:
         return 0
 
     cmd = [
-        bun_exe, "tools/replay/export-observations.ts",
+        bun_exe,
+        "tools/replay/export-observations.ts",
         "--skip-verify",
-        "--out", data_dir,
+        "--out",
+        data_dir,
         *ndjson_files,
     ]
     try:
@@ -363,7 +365,8 @@ def auto_export_corpus(data_dir: str, log=None) -> int:
             capture_output=True,
             text=True,
             timeout=300,  # 5 min budget — 101 replays take ~9s
-            **_POPEN_NO_WINDOW)
+            **_POPEN_NO_WINDOW,
+        )
         dt = time.time() - t0
         # Print last few lines of output (summary)
         lines = (result.stdout + result.stderr).strip().splitlines()
@@ -378,7 +381,7 @@ def auto_export_corpus(data_dir: str, log=None) -> int:
         _emit("[export] WARNING: 'bun' not found on PATH — skipping", log)
         return 0
     except subprocess.TimeoutExpired:
-        _emit(f"[export] WARNING: export timed out after 300s — skipping", log)
+        _emit("[export] WARNING: export timed out after 300s — skipping", log)
         return 0
     except Exception as e:
         _emit(f"[export] WARNING: {e!r} — skipping", log)
@@ -397,14 +400,26 @@ def main() -> None:
     ap.add_argument("--mirror-p", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--report-interval", type=int, default=600, help="progress heartbeat seconds")
-    ap.add_argument("--torch-threads", type=int, default=12, help="OMP/OpenBLAS threads for training")
-    ap.add_argument("--num-workers", type=int, default=0,
-                     help="DataLoader workers (parallel prefetch). NOTE: >0 uses Windows 'spawn' "
-                          "which hangs this training (workers fail to start); keep 0 on Windows.")
-    ap.add_argument("--force", action="store_true",
-                     help="Break any existing lock and start (for manual restart after a crash).")
-    ap.add_argument("--no-auto-export", action="store_true",
-                     help="Disable auto-export of new NN replay corpus before each round.")
+    ap.add_argument(
+        "--torch-threads", type=int, default=12, help="OMP/OpenBLAS threads for training"
+    )
+    ap.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers (parallel prefetch). NOTE: >0 uses Windows 'spawn' "
+        "which hangs this training (workers fail to start); keep 0 on Windows.",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Break any existing lock and start (for manual restart after a crash).",
+    )
+    ap.add_argument(
+        "--no-auto-export",
+        action="store_true",
+        help="Disable auto-export of new NN replay corpus before each round.",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.weights_dir, exist_ok=True)
@@ -416,11 +431,13 @@ def main() -> None:
     if not acquire_lock(lock_path, force=args.force):
         sys.exit(0)
     atexit.register(cleanup_lock, lock_path)
+
     # Also clean up on SIGTERM / SIGINT (Ctrl-C) so the lock is released
     # even if atexit doesn't run (e.g. killed by taskkill / task manager).
     def _signal_cleanup(signum, frame):
         cleanup_lock(lock_path)
         sys.exit(0)
+
     signal.signal(signal.SIGTERM, _signal_cleanup)
     signal.signal(signal.SIGINT, _signal_cleanup)
 
@@ -438,12 +455,17 @@ def main() -> None:
         "round_durations": [],
     }
     stop = threading.Event()
-    hb = threading.Thread(target=heartbeat, args=(stop, args.report_interval, state, log), daemon=True)
+    hb = threading.Thread(
+        target=heartbeat, args=(stop, args.report_interval, state, log), daemon=True
+    )
     hb.start()
 
-    _emit(f"[loop] START pid={os.getpid()} data={args.data_dir} weights={args.weights_dir} "
-          f"rounds={'inf' if args.rounds == 0 else args.rounds} "
-          f"epochs/round={args.epochs_per_round} lr={args.lr} torch_threads={args.torch_threads}", log)
+    _emit(
+        f"[loop] START pid={os.getpid()} data={args.data_dir} weights={args.weights_dir} "
+        f"rounds={'inf' if args.rounds == 0 else args.rounds} "
+        f"epochs/round={args.epochs_per_round} lr={args.lr} torch_threads={args.torch_threads}",
+        log,
+    )
 
     # Track per-epoch progress by watching train_bc stdout lines.
     epoch_re = re.compile(r"\[epoch\s+(\d+)/(\d+)\]")
@@ -456,12 +478,14 @@ def main() -> None:
 
             # Auto-export: scan nn-demo/ for new NDJSON replays and export
             # them to npy shards before training.  Takes ~9s for 101 replays.
-            if not getattr(args, 'no_auto_export', False):
+            if not getattr(args, "no_auto_export", False):
                 auto_export_corpus(args.data_dir, log)
 
             prev = latest_weights(args.weights_dir)
             resume_arg = ["--resume", prev] if prev and os.path.exists(prev) else []
-            note = f"round {state['round']}" + (f" resume {os.path.basename(prev)}" if resume_arg else " from-scratch")
+            note = f"round {state['round']}" + (
+                f" resume {os.path.basename(prev)}" if resume_arg else " from-scratch"
+            )
 
             # ---- In-process training (no subprocess / lock / launcher double-spawn) ----
             # train_loop already holds a single-instance lock, so exactly one
@@ -501,6 +525,7 @@ def main() -> None:
                 val = result.get("best_val_loss")
             except Exception as e:  # never let one bad round kill the loop
                 import traceback as _tb
+
                 crashed = True
                 _emit(f"[loop] !! round {state['round']} CRASHED: {e!r}", log)
                 if log:
@@ -522,10 +547,14 @@ def main() -> None:
                 _emit(
                     f"[loop] !! WARNING: round {state['round']} finished in {dt:.1f}s "
                     f"with val_loss={val} — likely a SPIN/CRASH (no real training). "
-                    f"NOT auto-stopping; watch the next round.", log)
-            done_line = (f"[loop] round {state['round']} done in {_fmt_dur(dt)} "
-                         f"val_loss={val} active={os.path.basename(active)} "
-                         f"total_rounds={state['round']}")
+                    f"NOT auto-stopping; watch the next round.",
+                    log,
+                )
+            done_line = (
+                f"[loop] round {state['round']} done in {_fmt_dur(dt)} "
+                f"val_loss={val} active={os.path.basename(active)} "
+                f"total_rounds={state['round']}"
+            )
             _emit(done_line, log)
             # After a round, verify the active pointer is the newest (train_bc copies it).
     except KeyboardInterrupt:
@@ -534,7 +563,10 @@ def main() -> None:
         stop.set()
         if log:
             log.close()
-        print(f"[loop] stopped after {state['round']} round(s); last_val={state['last_val']}", flush=True)
+        print(
+            f"[loop] stopped after {state['round']} round(s); last_val={state['last_val']}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

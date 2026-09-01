@@ -17,6 +17,7 @@ Usage:
   python validate_export.py <path-to-shards-root>
   python validate_export.py ../battle2/tmp/nn-export
 """
+
 import os
 import re
 import struct
@@ -25,8 +26,8 @@ import sys
 EXPECT = {
     "obs.npy": ("<u1", (14, 26, 26)),
     "scalars.npy": ("<f4", (19,)),
-    "actions.npy": ("<u1", (2,)),   # v2: [move, fire]，item 头删除
-    "masks.npy": ("<u1", (7,)),     # v2: [move5, fire2]
+    "actions.npy": ("<u1", (2,)),  # v2: [move, fire]，item 头删除
+    "masks.npy": ("<u1", (7,)),  # v2: [move5, fire2]
     "conditions.npy": ("<u1", ()),
 }
 
@@ -36,7 +37,9 @@ def read_npy(path):
         assert f.read(6) == b"\x93NUMPY", f"{path}: bad magic"
         major = f.read(1)[0]
         f.read(1)  # minor
-        hlen = struct.unpack("<H", f.read(2))[0] if major == 1 else struct.unpack("<I", f.read(4))[0]
+        hlen = (
+            struct.unpack("<H", f.read(2))[0] if major == 1 else struct.unpack("<I", f.read(4))[0]
+        )
         header = f.read(hlen).decode("latin1")
         descr = re.search(r"'descr':\s*'([^']+)'", header).group(1)
         shp = re.search(r"'shape':\s*\(([^)]*)\)", header).group(1)
@@ -53,7 +56,7 @@ def to_array(descr, shape, data):
         assert len(data) == n, f"uint8 len {len(data)} != {n}"
         return list(data)
     if descr == "<f4":
-        assert len(data) == n * 4, f"f4 len {len(data)} != {n*4}"
+        assert len(data) == n * 4, f"f4 len {len(data)} != {n * 4}"
         return list(struct.unpack("<" + "f" * n, data))
     raise ValueError(f"unsupported descr {descr}")
 
@@ -106,8 +109,14 @@ def main():
         acts = arrays["actions.npy"]
         for i in range(N):
             m, fr = acts[i * 2], acts[i * 2 + 1]
-            action_range["move"] = [min(action_range["move"][0], m), max(action_range["move"][1], m)]
-            action_range["fire"] = [min(action_range["fire"][0], fr), max(action_range["fire"][1], fr)]
+            action_range["move"] = [
+                min(action_range["move"][0], m),
+                max(action_range["move"][1], m),
+            ]
+            action_range["fire"] = [
+                min(action_range["fire"][0], fr),
+                max(action_range["fire"][1], fr),
+            ]
             if not (0 <= m <= 4):
                 errs.append(f"{os.path.basename(sd)}: move label {m} out of [0,4]")
             if not (0 <= fr <= 1):
@@ -139,8 +148,12 @@ def main():
 
     print(f"shards            : {len(shards)}")
     print(f"total samples     : {total}")
-    print(f"condition dist    : turn={cond_counts[0]} fire={cond_counts[1]} item={cond_counts[2]} subsample={cond_counts[3]}")
-    print(f"action ranges     : move={tuple(action_range['move'])} fire={tuple(action_range['fire'])}")
+    print(
+        f"condition dist    : turn={cond_counts[0]} fire={cond_counts[1]} item={cond_counts[2]} subsample={cond_counts[3]}"
+    )
+    print(
+        f"action ranges     : move={tuple(action_range['move'])} fire={tuple(action_range['fire'])}"
+    )
     print(f"obs non-empty     : {obs_nonempty}/{total}")
     print(f"mask violations   : {mask_bad}")
     print(f"scalar out-of-[0,1]: {scalar_oob}")

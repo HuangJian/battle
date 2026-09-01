@@ -13,6 +13,7 @@ StudentNet——预注册 #8：导出时校验 stem/ConvMixer/FC shape 与 stude
 Params（h=64/d=8）：主干 67.5K + 三头 (137→8=1104 / 137→5=690 / 137→16=2208)
 ≈ 70.6K。存 torch 权重仅存【权衡层】；StudentNet 主干部分复用既有导出键名。
 """
+
 from __future__ import annotations
 
 import json
@@ -21,7 +22,6 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-
 from student_model import StudentNet
 
 INTENT_DIM = 8
@@ -128,7 +128,9 @@ def load_intent_weights(model: IntentNet, weights_path: str) -> None:
         if not any(k.startswith(h + ".") for k in data)
     ]
     if missing_heads:
-        raise AssertionError(f"load_intent_weights: missing heads {missing_heads} in {weights_path}")
+        raise AssertionError(
+            f"load_intent_weights: missing heads {missing_heads} in {weights_path}"
+        )
     filtered = OrderedDict()
     for k, v in data.items():
         if k in sd:
@@ -143,7 +145,9 @@ def main() -> None:
     import argparse
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--golden", metavar="OUT", help="P3-4 golden 导出：固定权重+输入 → 期望三头 logits JSON")
+    ap.add_argument(
+        "--golden", metavar="OUT", help="P3-4 golden 导出：固定权重+输入 → 期望三头 logits JSON"
+    )
     ap.add_argument("--h", type=int, default=64)
     ap.add_argument("--d", type=int, default=8)
     ap.add_argument("--golden-seed", type=int, default=20260826)
@@ -155,7 +159,7 @@ def main() -> None:
 
     m = IntentNet(h=args.h, d=args.d)
     n = sum(int(p.numel()) for p in m.parameters())
-    print(f"IntentNet params: {n} (~{n/1000:.1f}K)")
+    print(f"IntentNet params: {n} (~{n / 1000:.1f}K)")
     obs = torch.zeros(2, 14, 26, 26, dtype=torch.uint8)
     sc = torch.zeros(2, 19)
     inj = torch.zeros(2, INJECT_DIM)
@@ -192,7 +196,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     with torch.no_grad():
         i_log, e_log, a_log, v_log = m.forward_rl(obs, sc, inj)
 
-    from weights_io import tensor_to_b64, OBS_SCHEMA_MAJOR
+    from weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
 
     params = {}
     for name, p in m.state_dict().items():

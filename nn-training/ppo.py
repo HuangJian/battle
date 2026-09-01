@@ -23,6 +23,7 @@ Usage (via start-training.{sh,ps1} which provides the venv + torch):
   python ppo.py --resume tmp/rl-weights/weights.json \
       --data tmp/rl-traj/it1 --out tmp/rl-weights/weights.json --epochs 4
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,26 +36,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from schema import MOVE_DIM, FIRE_DIM
-from student_model import PPOStudent
-from weights_io import load_weights_json, save_weights_json
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
-from ppo_common import (  # noqa: E402
-    log,
-    masked_logsoftmax,
-    cat_logprob,
+from ppo_common import (
+    _pack_np_state,
+    _ppo_load,
+    _ppo_save,
+    _unpack_np_state,
     cat_entropy,
+    cat_logprob,
+    chunk_episodes,
     compute_gae,
     discover_shards,
-    load_shard_fields,
-    _pack_np_state,
-    _unpack_np_state,
-    _ppo_save,
-    _ppo_load,
-    chunk_episodes,
     load_episodes_common,
+    load_shard_fields,
+    log,
+    masked_logsoftmax,
 )
-
+from schema import FIRE_DIM, MOVE_DIM
+from student_model import PPOStudent
+from weights_io import load_weights_json, save_weights_json
 
 # ---------------- hyper-params (CLI-overridable) ----------------
 # R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级
@@ -73,8 +73,8 @@ MAX_GRAD_NORM = 1.0
 MASK_DIM = MOVE_DIM + FIRE_DIM  # 7 (v2: item head removed)
 
 # Observability cadences (pure logging; never touches RNG or numerics).
-LOAD_LOG_EVERY = 128   # shard-loading progress lines
-HB_SEC = 60.0          # PPO update heartbeat interval
+LOAD_LOG_EVERY = 128  # shard-loading progress lines
+HB_SEC = 60.0  # PPO update heartbeat interval
 
 
 def build_ppo(weights_path: str | None) -> PPOStudent:
@@ -108,7 +108,7 @@ def discover_rl_shards(root: str) -> list[str]:
     return discover_shards(root, ("reward.npy", "obs.npy"))
 
 
-def load_shard(dirpath: str) -> Dict[str, np.ndarray]:
+def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     return load_shard_fields(dirpath, _RL_SHARD_SPEC)
 
 
@@ -158,8 +158,9 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
 # chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
 
 
-def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None,
-               on_epoch_done=None):
+def ppo_update(
+    model, opt, chunks, epochs, device, ckpt_path: str | None = None, on_epoch_done=None
+):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
     ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/numpy RNG），
@@ -173,18 +174,17 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None,
     stats = []
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
-    tensored = [
-        {k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks
-    ]
+    tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
     total_steps = len(tensored) * epochs
-    log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs "
-        f"(~{total_steps} grad steps)")
+    log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)")
     t0 = time.time()
     last_hb = t0
     start_epoch = _ppo_load(ckpt_path, model, opt)
     if start_epoch:
-        log(f"[ppo] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
-            f"(continuing remaining {epochs - start_epoch})")
+        log(
+            f"[ppo] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
+            f"(continuing remaining {epochs - start_epoch})"
+        )
     for ep in range(start_epoch, epochs):
         perm = np.random.permutation(len(tensored))
         n_ep_start = len(stats)
@@ -202,12 +202,9 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None,
 
             mv, fr, val = model(obs, sc)
             move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-            fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM:MOVE_DIM + FIRE_DIM])
+            fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
 
-            lp_new = (
-                cat_logprob(a_move, move_logp)
-                + cat_logprob(a_fire, fire_logp)
-            )
+            lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
             lp_old = lp_move + lp_fire
 
             ratio = torch.exp(lp_new - lp_old)
@@ -263,21 +260,29 @@ def ppo_update(model, opt, chunks, epochs, device, ckpt_path: str | None = None,
             on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
         n_e = max(1, len(ep_stats))
-        log(f"[ppo] epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
+        log(
+            f"[ppo] epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
             f"{len(ep_stats)} chunks)"
             + (", ckpt saved" if ckpt_path else "")
             + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
-              f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
-              f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-              f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
-              f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}")
+            f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
+            f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
+            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
+            f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
+        )
     # aggregate
     if not stats:
         # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，
         # 返回零聚合——此前 stats[0] 直接 IndexError 让整轮重试空转。
         log("[ppo] checkpoint already complete — 0 grad steps, returning zero aggregate")
-        return {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0,
-                "gnorm": 0.0, "mean_ret": 0.0}
+        return {
+            "policy": 0.0,
+            "value": 0.0,
+            "entropy": 0.0,
+            "kl": 0.0,
+            "gnorm": 0.0,
+            "mean_ret": 0.0,
+        }
     n = len(stats)
     agg = {k: sum(s[k] for s in stats) / n for k in stats[0]}
     return agg
@@ -291,22 +296,29 @@ update = ppo_update
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--init-from", type=str, default=None, help="BC weights to warm-start from (init mode)")
+    ap.add_argument(
+        "--init-from", type=str, default=None, help="BC weights to warm-start from (init mode)"
+    )
     ap.add_argument("--resume", type=str, default=None, help="RL weights to resume (update mode)")
     ap.add_argument("--data", type=str, default=None, help="trajectory shard root (update mode)")
     ap.add_argument("--out", type=str, required=True, help="output weights path")
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=512,
-                    help="minibatch size (transitions per update step)")
+    ap.add_argument(
+        "--mb", type=int, default=512, help="minibatch size (transitions per update step)"
+    )
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--gamma", type=float, default=GAMMA)
     ap.add_argument("--lam", type=float, default=LAM)
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7, help="numpy seed for minibatch shuffling")
-    ap.add_argument("--threads", type=int, default=8,
-                    help="torch intra-op threads; 0 keeps the launcher default "
-                         "(OMP_NUM_THREADS). 8 = physical cores on the dev box — "
-                         "avoids HT contention + OMP sync overhead on this small model.")
+    ap.add_argument(
+        "--threads",
+        type=int,
+        default=8,
+        help="torch intra-op threads; 0 keeps the launcher default "
+        "(OMP_NUM_THREADS). 8 = physical cores on the dev box — "
+        "avoids HT contention + OMP sync overhead on this small model.",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)

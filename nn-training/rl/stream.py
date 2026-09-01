@@ -1,4 +1,5 @@
 """流式迭代：采集与 PPO 波次重叠（--stream 1）。"""
+
 from __future__ import annotations
 
 import collections
@@ -6,17 +7,18 @@ import os
 import threading
 import time
 
-import numpy as np
-
 import dist_common
+import numpy as np
 import ppo as ppo_mod
+
 from rl.log import log
 from rl.queue import run_rollout_queue
-from rl.resume import completed_pairs, _scan_shards
+from rl.resume import _scan_shards, completed_pairs
 
 
-def wave_params(cum_kl: float, kl_cap: float, wave_games: int, wave_cap: int,
-                remaining: int | None = None) -> tuple[int, int]:
+def wave_params(
+    cum_kl: float, kl_cap: float, wave_games: int, wave_cap: int, remaining: int | None = None
+) -> tuple[int, int]:
     """波次阈值/容量：软降档（R1）+ 残局上限。
 
     软降档：cum_kl 过 70% 上限后收缩 wave 规模——把熔断过冲从一整个 wave
@@ -49,12 +51,24 @@ def _shard_dir(entry: str) -> str | None:
     return None
 
 
-def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, int]],
-                       args, cfg: dict, iter_id: str, model, opt, device,
-                       on_collect_done=None, on_ppo_started=None,
-                       on_epoch_done=None,
-                       backend=None, update_kwargs: dict | None = None,
-                       extra_wver: str | None = None) -> dict:
+def run_rollout_stream(
+    bun: str,
+    rl_path: str,
+    traj_dir,
+    pairs: list[tuple[int, int]],
+    args,
+    cfg: dict,
+    iter_id: str,
+    model,
+    opt,
+    device,
+    on_collect_done=None,
+    on_ppo_started=None,
+    on_epoch_done=None,
+    backend=None,
+    update_kwargs: dict | None = None,
+    extra_wver: str | None = None,
+) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
     backend（工程化共享）：per-tick RL 用 ppo（默认），意图 RL 用 ppo_intent——
@@ -95,9 +109,18 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
     # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
     ppo_started_ev = threading.Event()
-    eval_fired = [False]         # 干净评估一次性护栏：队列清空主触发，熔断/收官兜底
-    state = {"cum_kl": 0.0, "steps": 0, "chunks": 0, "waves": 0, "ppo_sec": 0.0,
-             "load_sec": 0.0, "dropped": 0, "halted": False, "last_agg": None}
+    eval_fired = [False]  # 干净评估一次性护栏：队列清空主触发，熔断/收官兜底
+    state = {
+        "cum_kl": 0.0,
+        "steps": 0,
+        "chunks": 0,
+        "waves": 0,
+        "ppo_sec": 0.0,
+        "load_sec": 0.0,
+        "dropped": 0,
+        "halted": False,
+        "last_agg": None,
+    }
 
     def _on_result(summary):
         with lock:
@@ -147,30 +170,44 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         if eval_fired[0] or (on_collect_done is None and on_ppo_started is None):
             return
         eval_fired[0] = True
-        cb = on_ppo_started if (tag == "ppo started" and on_collect_done is None) \
+        cb = (
+            on_ppo_started
+            if (tag == "ppo started" and on_collect_done is None)
             else on_collect_done
+        )
         if cb is None:
             eval_fired[0] = False
             return
-        log(f"[stream] clean-eval dispatched ({tag}) — frozen weights on nodes, "
-            f"running parallel to collection")
+        log(
+            f"[stream] clean-eval dispatched ({tag}) — frozen weights on nodes, "
+            f"running parallel to collection"
+        )
         try:
             box["eval_thread"] = cb()
-        except Exception as cb_err:  # noqa: BLE001 — 评估旁路不拖垮采集
+        except Exception as cb_err:
             log(f"[stream] on_collect_done error: {str(cb_err)[:120]}")
 
     def _collector():
         try:
             box["report"] = run_rollout_queue(
-                bun, rl_path, traj_dir, pairs, args, cfg, iter_id,
-                on_result=_on_result, local_slots_max=local_slots,
-                tail_dispatch=False, halt_event=halt_ev,
+                bun,
+                rl_path,
+                traj_dir,
+                pairs,
+                args,
+                cfg,
+                iter_id,
+                on_result=_on_result,
+                local_slots_max=local_slots,
+                tail_dispatch=False,
+                halt_event=halt_ev,
                 local_suspend=ppo_started_ev,
                 on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"),
-                extra_wver=extra_wver)
+                extra_wver=extra_wver,
+            )
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             _fire_eval_once("collector done")
-        except Exception as e:  # noqa: BLE001 — 主线程统一上报
+        except Exception as e:
             box["err"] = str(e)
         finally:
             box["t_end"] = time.time()  # rollout_sec 锚点：collector 真实退出时刻
@@ -187,7 +224,7 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
                 continue
             try:
                 ep = backend.load_episode_from_shard(shard)
-            except Exception as e:  # noqa: BLE001 — 单局坏 shard 跳过
+            except Exception as e:
                 log(f"[stream] skip bad shard {shard}: {str(e)[:100]}")
                 continue
             if ep is None:
@@ -221,8 +258,10 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         t_p = time.time()
         if not ppo_started_ev.is_set():
             ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
-            log("[stream] PPO phase started — local dist slots suspending "
-                "(auto-resume if cluster stalls)")
+            log(
+                "[stream] PPO phase started — local dist slots suspending "
+                "(auto-resume if cluster stalls)"
+            )
             # M8 意图 RL：PPO 启动 = 全量结算到账 + 节点空闲 → 在此派发 eval（远端并行）。
             # per-tick 模式不在此触发（on_collect_done 有值 → 维持队列清空触发语义）。
             if on_collect_done is None and on_ppo_started is not None:
@@ -234,20 +273,26 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         state["chunks"] += len(chs)
         state["waves"] += 1
         state["last_agg"] = agg_w
-        log(f"[stream] wave: {len(took)} games -> {len(chs)} chunks x{args.epochs}ep "
+        log(
+            f"[stream] wave: {len(took)} games -> {len(chs)} chunks x{args.epochs}ep "
             f"kl={agg_w['kl']:.4f} cum_kl={state['cum_kl']:.4f} "
-            f"ent={agg_w['entropy']:.3f}")
+            f"ent={agg_w['entropy']:.3f}"
+        )
         if state["cum_kl"] > kl_cap:
             state["halted"] = True
             halt_ev.set()  # R1：预算耗尽，队列停止派发新任务（在途局自然收尾）
             _fire_eval_once("kl-cap halt")
-            log(f"[stream] cumulative KL {state['cum_kl']:.4f} > cap {kl_cap} — "
-                f"collect-only for the rest of this round; task dispatch stopped")
+            log(
+                f"[stream] cumulative KL {state['cum_kl']:.4f} > cap {kl_cap} — "
+                f"collect-only for the rest of this round; task dispatch stopped"
+            )
 
     th = threading.Thread(target=_collector, daemon=True)
     t0 = time.time()
-    log(f"[stream] collector started (local_slots={local_slots}, "
-        f"wave={wave_games} games, kl_cap={kl_cap})")
+    log(
+        f"[stream] collector started (local_slots={local_slots}, "
+        f"wave={wave_games} games, kl_cap={kl_cap})"
+    )
     wave_cap = max(wave_games * 2, 24)
     # 吞吐 T4 提前预采：上一轮 epoch3 快照（θ_{N,e3}）采的首波 shard 已在盘且 wver=
     # extra_wver（≠ 本轮 θ_N 的 wver）。把它们作为**第一波语料**直接注入训练（不等待
@@ -256,21 +301,24 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     _pre_seeded = 0
     if extra_wver and extra_wver != wver_start:
         plan_set_ = {(int(a), int(b)) for a, b in pairs}
-        for (_pair, _dir) in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver):
+        for _pair, _dir in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver):
             if _pair not in plan_set_:
                 continue
             with lock:
                 pend.append({"_dir": str(_dir), "_pre": True})
             _pre_seeded += 1
         if _pre_seeded:
-            log(f"[stream] seeded {_pre_seeded} precollected first-wave shards "
-                f"(extra wver {extra_wver[:12]}…) into training queue")
+            log(
+                f"[stream] seeded {_pre_seeded} precollected first-wave shards "
+                f"(extra wver {extra_wver[:12]}…) into training queue"
+            )
     th.start()
     while True:
         with lock:
             n_pending = len(pend)
-        w_thr, w_cap = wave_params(state["cum_kl"], kl_cap, wave_games, wave_cap,
-                                   remaining=remaining_games)
+        w_thr, w_cap = wave_params(
+            state["cum_kl"], kl_cap, wave_games, wave_cap, remaining=remaining_games
+        )
         if n_pending >= w_thr:
             _drain(False, cap=w_cap)
             continue
@@ -283,15 +331,18 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
     th.join(timeout=5.0)
     with lock:
         n_left = len(pend)
-    log(f"[stream] collector done in {collect_done - t0:.0f}s — "
-        f"draining {n_left} settled-but-untrained games")
+    log(
+        f"[stream] collector done in {collect_done - t0:.0f}s — "
+        f"draining {n_left} settled-but-untrained games"
+    )
     while True:
         with lock:
             n_pending = len(pend)
         if n_pending == 0:
             break
-        _, tw_cap = wave_params(state["cum_kl"], kl_cap, wave_games, wave_cap,
-                                remaining=remaining_games)
+        _, tw_cap = wave_params(
+            state["cum_kl"], kl_cap, wave_games, wave_cap, remaining=remaining_games
+        )
         _drain(True, cap=tw_cap)
     if "err" in box:
         raise RuntimeError(f"stream collector failed: {box['err']}")
@@ -304,38 +355,54 @@ def run_rollout_stream(bun: str, rl_path: str, traj_dir, pairs: list[tuple[int, 
         if eps_done >= args.epochs:
             # 该轮 PPO 已在先前进程中完整跑完：权重以当前状态收尾即可，
             # 重复调用 ppo_update 会走"剩余 0 epoch"路径（空聚合）。
-            log(f"[stream] no fresh settles + PPO checkpoint already complete "
-                f"({eps_done}/{args.epochs} epochs) — weights final, skipping update")
+            log(
+                f"[stream] no fresh settles + PPO checkpoint already complete "
+                f"({eps_done}/{args.epochs} epochs) — weights final, skipping update"
+            )
         else:
             log("[stream] no fresh settles this round — falling back to full-disk update")
             episodes = backend.load_episodes(str(traj_dir))
             chunks = backend.chunk_episodes(episodes, args.mb)
             t_p = time.time()
-            state["last_agg"] = backend.update(model, opt, chunks, args.epochs, device,
-                                               ckpt_path=str(traj_dir / "ppo_ckpt"),
-                                               **update_kwargs)
+            state["last_agg"] = backend.update(
+                model,
+                opt,
+                chunks,
+                args.epochs,
+                device,
+                ckpt_path=str(traj_dir / "ppo_ckpt"),
+                **update_kwargs,
+            )
             state["ppo_sec"] += time.time() - t_p
             state["steps"] = sum(e["obs"].shape[0] for e in episodes)
             state["chunks"] = len(chunks)
     rollout_sec = round(collect_done - t0, 1)  # 采集窗口（collector 真实退出锚点）
     tail_sec = round(time.time() - collect_done, 1)
-    log(f"[stream] done: games={report['games']} kl_cum={state['cum_kl']:.4f} "
+    log(
+        f"[stream] done: games={report['games']} kl_cum={state['cum_kl']:.4f} "
         f"steps={state['steps']} chunks={state['chunks']} waves={state['waves']} "
         f"halted={state['halted']} dropped={state['dropped']} "
         f"collect_wall={rollout_sec}s tail_update={tail_sec}s "
-        f"ppo_cpu={state['ppo_sec']:.0f}s load_cpu={state['load_sec']:.0f}s")
+        f"ppo_cpu={state['ppo_sec']:.0f}s load_cpu={state['load_sec']:.0f}s"
+    )
     # agg=None 表示本轮没有发生任何梯度步（checkpoint 已在先前进程完整跑完）。
     # 指标不伪造为 0——jsonl 写 null，报告显示 '—'，健康判定自动忽略该轮。
     last = state["last_agg"]
     # pure_collect_sec 由 run_rollout_queue 实测（末局结算 − 权重分发完毕），
     # 经 box["report"] 顶层透传——此处不做任何公式派生。
-    report["_stream"] = {"rollout_sec": rollout_sec, "tail_drain_sec": tail_sec,
-                         "ppo_sec": round(state["ppo_sec"], 1),
-                         "load_sec": round(state["load_sec"], 1),
-                         "steps": state["steps"], "chunks": state["chunks"],
-                         "waves": state["waves"], "kl_cum": round(state["cum_kl"], 4),
-                         "halted": state["halted"], "dropped_games": state["dropped"],
-                         "agg": last}
+    report["_stream"] = {
+        "rollout_sec": rollout_sec,
+        "tail_drain_sec": tail_sec,
+        "ppo_sec": round(state["ppo_sec"], 1),
+        "load_sec": round(state["load_sec"], 1),
+        "steps": state["steps"],
+        "chunks": state["chunks"],
+        "waves": state["waves"],
+        "kl_cum": round(state["cum_kl"], 4),
+        "halted": state["halted"],
+        "dropped_games": state["dropped"],
+        "agg": last,
+    }
     # 评估线程句柄随报告回传主循环（R4）：下轮权重分发前必须 join——否则提前触发
     # 或长尾的评估会被下一轮异 sha 权重的原子清场杀掉（eval_log 记 dropped）。
     if box.get("eval_thread") is not None:

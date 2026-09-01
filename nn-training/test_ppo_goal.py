@@ -12,6 +12,7 @@
   ./start-training.sh --script test_ppo_goal.py
 退出码：全部通过 0，否则 1。
 """
+
 from __future__ import annotations
 
 import os
@@ -85,9 +86,12 @@ def test_goal_net_roundtrip() -> None:
         m2 = ppo_goal.GoalRLNet(h=32, d=2)
         ppo_goal.load_goal_weights(m2, path)
         for k in ("goal_conv.weight", "engage_head.weight", "value_head.weight"):
-            check(torch.equal(dict(m.named_parameters())[k].data,
-                              dict(m2.named_parameters())[k].data),
-                  f"roundtrip {k}")
+            check(
+                torch.equal(
+                    dict(m.named_parameters())[k].data, dict(m2.named_parameters())[k].data
+                ),
+                f"roundtrip {k}",
+            )
 
 
 def test_coarse_logsumexp() -> None:
@@ -130,9 +134,19 @@ def _fake_chunks(coarse: bool):
     mask[:, dim // 2 :] = 0  # 一半动作不可达
     dt = rng.randint(60, 241, size=N).astype(np.int64)
     engage = rng.randint(0, 2, size=N).astype(np.int64)
-    ep = {"obs": obs, "scalars": scalars, "inject": inject, "a_goal": a,
-          "lp_goal": lp, "value": value, "reward": reward, "done": done,
-          "goal_mask": mask, "dt": dt, "engage": engage}
+    ep = {
+        "obs": obs,
+        "scalars": scalars,
+        "inject": inject,
+        "a_goal": a,
+        "lp_goal": lp,
+        "value": value,
+        "reward": reward,
+        "done": done,
+        "goal_mask": mask,
+        "dt": dt,
+        "engage": engage,
+    }
     adv, ret = ppo_goal.compute_gae_variable(reward, value, done, dt)
     ep["adv"] = (adv - adv.mean()) / (adv.std() + 1e-8)
     ep["ret"] = ret
@@ -144,12 +158,10 @@ def test_policy_logprobs_dims() -> None:
     obs = torch.randint(0, 256, (4, 14, 26, 26), dtype=torch.uint8)
     sc = torch.randn(4, 19)
     inj = torch.rand(4, 9)
-    lp_f, eng, val = ppo_goal.policy_logprobs(
-        model, obs, sc, inj, torch.ones(4, ppo_goal.FINE_DIM))
+    lp_f, eng, val = ppo_goal.policy_logprobs(model, obs, sc, inj, torch.ones(4, ppo_goal.FINE_DIM))
     check(tuple(lp_f.shape) == (4, 676), "fine logp (4,676)")
     check(tuple(eng.shape) == (4, 2) and tuple(val.shape) == (4, 1), "engage(4,2)/value(4,1)")
-    lp_c, _, _ = ppo_goal.policy_logprobs(
-        model, obs, sc, inj, torch.ones(4, ppo_goal.COARSE_DIM))
+    lp_c, _, _ = ppo_goal.policy_logprobs(model, obs, sc, inj, torch.ones(4, ppo_goal.COARSE_DIM))
     check(tuple(lp_c.shape) == (4, 169), "coarse logp (4,169)")
     # 掩码零概率：被 mask 的动作 logp = -inf（softmax 后 0）
     m = torch.zeros(4, ppo_goal.FINE_DIM)
@@ -165,16 +177,20 @@ def test_ppo_update_smoke() -> None:
         chunks = _fake_chunks(coarse)
         model = ppo_goal.GoalRLNet(h=32, d=2)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-        agg = ppo_goal.ppo_update_goal(model, opt, chunks, epochs=3, device=torch.device("cpu"),
-                                       target_kl=1e9, seed=1)
-        check(np.isfinite(agg["policy"]) and np.isfinite(agg["value"]),
-              f"coarse={coarse}: update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})")
+        agg = ppo_goal.ppo_update_goal(
+            model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
+        )
+        check(
+            np.isfinite(agg["policy"]) and np.isfinite(agg["value"]),
+            f"coarse={coarse}: update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})",
+        )
         check(not agg["early_stopped"], f"coarse={coarse}: target_kl=1e9 不触发早停")
 
         model2 = ppo_goal.GoalRLNet(h=32, d=2)
         opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
-        agg2 = ppo_goal.ppo_update_goal(model2, opt2, chunks, epochs=3,
-                                        device=torch.device("cpu"), target_kl=1e-9, seed=1)
+        agg2 = ppo_goal.ppo_update_goal(
+            model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
+        )
         check(agg2["early_stopped"], f"coarse={coarse}: target_kl 极小 → early stop")
 
         # value warmup：策略头零梯度、主干冻结、value 头被训练。
@@ -183,15 +199,20 @@ def test_ppo_update_smoke() -> None:
         stem_before = model3.stem.weight.detach().clone()
         goal_before = model3.goal_conv.weight.detach().clone()
         vhead_before = model3.value_head.weight.detach().clone()
-        agg3 = ppo_goal.ppo_update_goal(model3, opt3, chunks, epochs=2,
-                                        device=torch.device("cpu"),
-                                        target_kl=1e9, seed=1, value_warmup_epochs=2)
+        agg3 = ppo_goal.ppo_update_goal(
+            model3,
+            opt3,
+            chunks,
+            epochs=2,
+            device=torch.device("cpu"),
+            target_kl=1e9,
+            seed=1,
+            value_warmup_epochs=2,
+        )
         check(agg3["kl"] == 0.0, f"coarse={coarse}: warmup kl=0（策略冻结）")
-        check(torch.equal(goal_before, model3.goal_conv.weight),
-              "warmup: goal_conv 权重不变")
+        check(torch.equal(goal_before, model3.goal_conv.weight), "warmup: goal_conv 权重不变")
         check(torch.equal(stem_before, model3.stem.weight), "warmup: stem 冻结")
-        check(not torch.equal(vhead_before, model3.value_head.weight),
-              "warmup: value_head 已更新")
+        check(not torch.equal(vhead_before, model3.value_head.weight), "warmup: value_head 已更新")
         check(np.isfinite(agg3["value"]) and agg3["value"] > 0, "warmup: value 头在学")
 
 

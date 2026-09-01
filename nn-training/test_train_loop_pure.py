@@ -6,6 +6,7 @@
 运行（经统一启动器进入 venv）：
   python test_train_loop_pure.py
 """
+
 from __future__ import annotations
 
 import os
@@ -13,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import train_loop  # noqa: E402
+import train_loop
 
 FAILS: list[str] = []
 
@@ -61,8 +62,7 @@ def test_parse_val_loss_fallback() -> None:
 
 
 def test_parse_val_loss_none() -> None:
-    check(train_loop.parse_val_loss_from_output("no numbers here") is None,
-          "无可解析内容 → None")
+    check(train_loop.parse_val_loss_from_output("no numbers here") is None, "无可解析内容 → None")
     check(train_loop.parse_val_loss_from_output("") is None, "空串 → None")
 
 

@@ -1,12 +1,14 @@
 """断点续跑：磁盘 shard 对账 + training_log.jsonl 锚点回读。"""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
 
-def completed_pairs(traj_dir: Path, wver: str,
-                    extra_wver: str | None = None) -> set[tuple[int, int]]:
+def completed_pairs(
+    traj_dir: Path, wver: str, extra_wver: str | None = None
+) -> set[tuple[int, int]]:
     """扫描 traj_dir 已完整落盘且 manifest.wver∈{wver, extra_wver} 的 (stage,seed)——rollout 断点。
 
     extra_wver：双缓冲预采快照的 wver（θ_{N,e3}）。下一轮对账时当前 args.out 已是
@@ -19,7 +21,9 @@ def completed_pairs(traj_dir: Path, wver: str,
     return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver)}
 
 
-def _scan_shards(traj_dir: Path, wver: str, extra_wver: str | None = None) -> list[tuple[tuple[int, int], Path]]:
+def _scan_shards(
+    traj_dir: Path, wver: str, extra_wver: str | None = None
+) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
     """
@@ -39,10 +43,13 @@ def _scan_shards(traj_dir: Path, wver: str, extra_wver: str | None = None) -> li
     return res
 
 
-def resumed_manifests(traj_dir: Path, wver: str,
-                      exclude: set[tuple[int, int]] | None = None,
-                      only: set[tuple[int, int]] | None = None,
-                      extra_wver: str | None = None) -> list[dict]:
+def resumed_manifests(
+    traj_dir: Path,
+    wver: str,
+    exclude: set[tuple[int, int]] | None = None,
+    only: set[tuple[int, int]] | None = None,
+    extra_wver: str | None = None,
+) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
 
@@ -79,20 +86,22 @@ def resumed_manifests(traj_dir: Path, wver: str,
             out.append(mm)
             continue
         score = mm.get("score")
-        out.append({
-            "games": 1,
-            # stage/seed 回填：让转换产物自识别（combine_reports 忽略附加键，
-            # 测试与排查按身份对账时不再依赖目录遍历顺序）。
-            "stage": int(st),
-            "seed": int(sd),
-            "outcomes": {str(mm.get("outcome", "unknown")): 1},
-            "totalSamples": int(mm.get("nSamples") or 0),
-            "totalTicks": int(mm.get("ticks") or 0),
-            "scoreList": [score] if isinstance(score, (int, float)) else [],
-            # dims 细分维度暂不回填（单局 dims→dimLists 映射待统一 schema），只保
-            # 证 games/outcomes/ticks/score 口径完整。
-            "dimLists": {},
-        })
+        out.append(
+            {
+                "games": 1,
+                # stage/seed 回填：让转换产物自识别（combine_reports 忽略附加键，
+                # 测试与排查按身份对账时不再依赖目录遍历顺序）。
+                "stage": int(st),
+                "seed": int(sd),
+                "outcomes": {str(mm.get("outcome", "unknown")): 1},
+                "totalSamples": int(mm.get("nSamples") or 0),
+                "totalTicks": int(mm.get("ticks") or 0),
+                "scoreList": [score] if isinstance(score, (int, float)) else [],
+                # dims 细分维度暂不回填（单局 dims→dimLists 映射待统一 schema），只保
+                # 证 games/outcomes/ticks/score 口径完整。
+                "dimLists": {},
+            }
+        )
     return out
 
 

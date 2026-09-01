@@ -20,6 +20,7 @@ checkpoint（it38 重评 §14.3）兼容，goal 权重 JSON 不含它们。
 Params（h=64/d=8）：主干 67.5K + goal_conv 65 + engage 276 + value 138 ≈ 67.9K。
 MAdds：主干 ~37M + goal 头 43,264（0.115%，§16.2）。
 """
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,8 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from student_model import StudentNet, coord_channels
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM
 
 GOAL_HEATMAP_DIM = BOARD * BOARD  # 676（动作空间 = 坦克顶点热图；§9.4.0 合法顶点 25×25=625）
 ENGAGE_DIM = 2
@@ -78,9 +78,7 @@ class GoalNet(StudentNet):
             return goal, engage, self.value_head(hi)
         return goal, engage
 
-    def forward_rl(
-        self, obs: torch.Tensor, scalars: torch.Tensor, inject: torch.Tensor
-    ):
+    def forward_rl(self, obs: torch.Tensor, scalars: torch.Tensor, inject: torch.Tensor):
         """PPO 变体（value 必须看到承诺状态——与 intent_net.forward_rl 同理由）。"""
         assert self.value_head is not None, "forward_rl requires with_value=True"
         goal, engage, value = self.forward(obs, scalars, inject)
@@ -146,7 +144,9 @@ def main() -> None:
     import argparse
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--golden", metavar="OUT", help="T7 golden 导出：固定权重+输入 → 期望头 logits JSON")
+    ap.add_argument(
+        "--golden", metavar="OUT", help="T7 golden 导出：固定权重+输入 → 期望头 logits JSON"
+    )
     ap.add_argument("--h", type=int, default=64)
     ap.add_argument("--d", type=int, default=8)
     ap.add_argument("--golden-seed", type=int, default=20260829)
@@ -158,7 +158,7 @@ def main() -> None:
 
     m = GoalNet(h=args.h, d=args.d)
     n = sum(int(p.numel()) for p in m.parameters())
-    print(f"GoalNet params: {n} (~{n/1000:.1f}K)")
+    print(f"GoalNet params: {n} (~{n / 1000:.1f}K)")
     obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     sc = torch.zeros(2, SCALAR_DIM)
     inj = torch.zeros(2, INJECT_DIM)
@@ -193,7 +193,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     with torch.no_grad():
         g_log, e_log, v_log = m.forward_rl(obs, sc, inj)
 
-    from weights_io import tensor_to_b64, OBS_SCHEMA_MAJOR
+    from weights_io import OBS_SCHEMA_MAJOR, tensor_to_b64
 
     params = {}
     for name, p in m.state_dict().items():

@@ -13,6 +13,7 @@ Outputs:
   * <--out>  : JSON+base64 weights (plan §5), loadable by the TS runtime.
   * <--out>.pt : torch checkpoint (Python-side convenience).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,14 +30,14 @@ import torch
 import torch.nn.functional as F
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dataset import make_loaders  # noqa: E402
-from model import NNPolicy, param_count  # noqa: E402
-from student_model import StudentNet, PPOStudent  # noqa: E402
-from weights_io import save_weights_json, load_state_into  # noqa: E402
-from schema import OBS_SCHEMA_MAJOR  # noqa: E402
+from dataset import make_loaders
+from model import NNPolicy, param_count
+from schema import OBS_SCHEMA_MAJOR
+from student_model import PPOStudent, StudentNet
+from weights_io import load_state_into, save_weights_json
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -90,18 +91,29 @@ actual `weights.*.json` files on disk.
 def _git_sha() -> str:
     """Best-effort short git sha of the repo at training time (for the registry)."""
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            stderr=subprocess.DEVNULL,
-            **_POPEN_NO_WINDOW,
-        ).decode().strip()
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+                **_POPEN_NO_WINDOW,
+            )
+            .decode()
+            .strip()
+        )
     except Exception:
         return "n/a"
 
 
-def _append_weights_md(out_dir: str, versioned_path: str, trained_at: str,
-                       args, sizes: dict, best_val: float, history: dict) -> None:
+def _append_weights_md(
+    out_dir: str,
+    versioned_path: str,
+    trained_at: str,
+    args,
+    sizes: dict,
+    best_val: float,
+    history: dict,
+) -> None:
     """Append a row to the committed weights registry (WEIGHTS.md).
 
     Creates the file with a header (naming convention + backup strategy) on first run.
@@ -177,7 +189,9 @@ def train(args) -> dict:
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
     n_params = param_count(model)
-    print(f"[train] model params={n_params} (~{n_params/1000:.1f}K) budget<=200K: {n_params <= 200_000}")
+    print(
+        f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"
+    )
     if n_params > 200_000:
         print(f"[train] WARNING: {n_params} > 200K budget; consider shrinking conv_ch/head_hidden")
 
@@ -227,7 +241,9 @@ def train(args) -> dict:
                 if use_value:
                     valid = ~torch.isnan(ret)
                     if valid.any():
-                        v["vloss"] += float(F.mse_loss(vpred.squeeze(-1)[valid], ret[valid]).item()) * int(valid.sum())
+                        v["vloss"] += float(
+                            F.mse_loss(vpred.squeeze(-1)[valid], ret[valid]).item()
+                        ) * int(valid.sum())
                         v["vn"] += int(valid.sum())
                 v["loss"] += loss.item() * obs.shape[0]
                 v["n"] += obs.shape[0]
@@ -241,11 +257,13 @@ def train(args) -> dict:
         history["move_acc"].append(round(ma, 4))
         history["fire_acc"].append(round(fa, 4))
         history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
-        print(f"[epoch {epoch:3d}/{args.epochs}] "
-              f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-              f"acc move={ma:.3f} fire={fa:.3f} "
-              + (f"value={vl:.4f} " if not math.isnan(vl) else "")
-              + f"lr={opt.param_groups[0]['lr']:.2e}")
+        print(
+            f"[epoch {epoch:3d}/{args.epochs}] "
+            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+            f"acc move={ma:.3f} fire={fa:.3f} "
+            + (f"value={vl:.4f} " if not math.isnan(vl) else "")
+            + f"lr={opt.param_groups[0]['lr']:.2e}"
+        )
         if val_loss < best_val:
             best_val = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -264,15 +282,26 @@ def train(args) -> dict:
     meta = _sanitize_json(meta)
     out_dir = os.path.dirname(os.path.abspath(args.out))
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    versioned = os.path.join(out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json")
+    versioned = os.path.join(
+        out_dir, f"weights.{stamp}_ep{args.epochs}_val{float(best_val):.4f}.json"
+    )
     save_weights_json(model, versioned, extra_meta=meta)
     _safe_copy(versioned, args.out)  # active pointer for the TS runtime (read-only tolerant)
     _append_weights_md(out_dir, versioned, trained_at, args, sizes, float(best_val), history)
     if args.checkpoint:
-        torch.save({"state_dict": model.state_dict(), "arch": model.arch(), "meta": meta},
-                   args.checkpoint)
-    print(f"[train] done in {time.time()-t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}")
-    return {"out": versioned, "active": args.out, "best_val_loss": best_val, "params": n_params, "history": history}
+        torch.save(
+            {"state_dict": model.state_dict(), "arch": model.arch(), "meta": meta}, args.checkpoint
+        )
+    print(
+        f"[train] done in {time.time() - t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}"
+    )
+    return {
+        "out": versioned,
+        "active": args.out,
+        "best_val_loss": best_val,
+        "params": n_params,
+        "history": history,
+    }
 
 
 def _safe_copy(src: str, dst: str) -> None:
@@ -300,8 +329,7 @@ def _safe_copy(src: str, dst: str) -> None:
         except PermissionError:
             if attempt == 29:
                 print(
-                    f"[warn] _safe_copy: cannot update {dst} after 30 s; "
-                    f"archive {src} is safe",
+                    f"[warn] _safe_copy: cannot update {dst} after 30 s; archive {src} is safe",
                     file=sys.stderr,
                 )
                 return
@@ -311,14 +339,24 @@ def _safe_copy(src: str, dst: str) -> None:
 def main():
     ap = argparse.ArgumentParser(description="BC/distillation trainer for NN Player AI")
     ap.add_argument("--data-dir", required=True, help="directory of exported npy shards")
-    ap.add_argument("--arch", choices=["bc", "student"], default="bc",
-                    help="model architecture: 'bc' = NNPolicy (default), 'student' = "
-                         "CoordConv-ConvMixer-Lite (plan/RL-Net-Selection.md §4.3; P1.5 distillation)")
-    ap.add_argument("--out",
-                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "weights.json"),
-                    help="active weights JSON path (a versioned weights.<stamp>.json archive + WEIGHTS.md are written alongside in the same dir)")
-    ap.add_argument("--notes", default="", help="free-text note recorded in WEIGHTS.md for this run")
-    ap.add_argument("--resume", default=None, help="resume training from a weights JSON (continue, not retrain)")
+    ap.add_argument(
+        "--arch",
+        choices=["bc", "student"],
+        default="bc",
+        help="model architecture: 'bc' = NNPolicy (default), 'student' = "
+        "CoordConv-ConvMixer-Lite (plan/RL-Net-Selection.md §4.3; P1.5 distillation)",
+    )
+    ap.add_argument(
+        "--out",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "weights.json"),
+        help="active weights JSON path (a versioned weights.<stamp>.json archive + WEIGHTS.md are written alongside in the same dir)",
+    )
+    ap.add_argument(
+        "--notes", default="", help="free-text note recorded in WEIGHTS.md for this run"
+    )
+    ap.add_argument(
+        "--resume", default=None, help="resume training from a weights JSON (continue, not retrain)"
+    )
     ap.add_argument("--checkpoint", default=None, help="optional .pt checkpoint path")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch", type=int, default=256)
@@ -327,9 +365,13 @@ def main():
     ap.add_argument("--mirror-p", type=float, default=0.5, help="mirrorX augmentation prob")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--num-workers", type=int, default=0)
-    ap.add_argument("--value-coef", type=float, default=0.0,
-                    help=">0: 语料带 returns.npy 时按该系数对 value 头做 MC return 回归 "
-                         "（M2 ⑥ / M3 value 预置；仅 --arch student 生效）")
+    ap.add_argument(
+        "--value-coef",
+        type=float,
+        default=0.0,
+        help=">0: 语料带 returns.npy 时按该系数对 value 头做 MC return 回归 "
+        "（M2 ⑥ / M3 value 预置；仅 --arch student 生效）",
+    )
     args = ap.parse_args()
     train(args)
 

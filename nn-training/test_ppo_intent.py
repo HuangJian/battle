@@ -10,6 +10,7 @@
   powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_ppo_intent.py
 退出码：全部通过 0，否则 1。
 """
+
 from __future__ import annotations
 
 import os
@@ -47,20 +48,26 @@ def test_dt1_degradation() -> None:
     dones[-1] = 1
     dt = np.ones(N, dtype=np.int64)
 
-    adv_fixed, ret_fixed = ppo.compute_gae(rewards, values, dones,
-                                           gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM)
+    adv_fixed, ret_fixed = ppo.compute_gae(
+        rewards, values, dones, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
+    )
     adv_var, ret_var = ppo_intent.compute_gae_variable(rewards, values, dones, dt)
 
-    check(np.array_equal(adv_fixed, adv_var),
-          f"Δt≡1: adv byte-identical (maxdiff={np.max(np.abs(adv_fixed - adv_var)):.2e})")
-    check(np.array_equal(ret_fixed, ret_var),
-          f"Δt≡1: ret byte-identical (maxdiff={np.max(np.abs(ret_fixed - ret_var)):.2e})")
+    check(
+        np.array_equal(adv_fixed, adv_var),
+        f"Δt≡1: adv byte-identical (maxdiff={np.max(np.abs(adv_fixed - adv_var)):.2e})",
+    )
+    check(
+        np.array_equal(ret_fixed, ret_var),
+        f"Δt≡1: ret byte-identical (maxdiff={np.max(np.abs(ret_fixed - ret_var)):.2e})",
+    )
 
     # 中间 done（子局断点）路径也要一致。
     dones2 = dones.copy()
     dones2[60] = 1
-    a2f, r2f = ppo.compute_gae(rewards, values, dones2,
-                               gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM)
+    a2f, r2f = ppo.compute_gae(
+        rewards, values, dones2, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
+    )
     a2v, r2v = ppo_intent.compute_gae_variable(rewards, values, dones2, dt)
     check(np.array_equal(a2f, a2v), "Δt≡1 mid-done: adv byte-identical")
     check(np.array_equal(r2f, r2v), "Δt≡1 mid-done: ret byte-identical")
@@ -77,10 +84,10 @@ def test_variable_dt_differs() -> None:
     dt = rng.randint(1, 50, size=N).astype(np.int64)  # 可变窗口
 
     adv_var, ret_var = ppo_intent.compute_gae_variable(rewards, values, dones, dt)
-    adv_fixed, ret_fixed = ppo.compute_gae(rewards, values, dones,
-                                           gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM)
-    check(not np.array_equal(adv_var, adv_fixed),
-          "dt 可变: adv 与定长不同（半 MDP 折扣生效）")
+    adv_fixed, ret_fixed = ppo.compute_gae(
+        rewards, values, dones, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
+    )
+    check(not np.array_equal(adv_var, adv_fixed), "dt 可变: adv 与定长不同（半 MDP 折扣生效）")
     # 变长窗口的 gamma 应单调：dt 越大 → γ_step 越小 → 提前步的 adv 量级越小（松弛）。
     check(np.all(dt >= 1) and np.all(dt <= 50), "dt 范围合法")
 
@@ -91,8 +98,7 @@ def test_rl_net_roundtrip_value_head() -> None:
     m = ppo_intent.IntentRLNet(h=64, d=8)
     # 三头 + value 头全在。
     for hname in ("intent_head", "enemy_head", "anchor_head", "value_head"):
-        check(any(k.startswith(hname + ".") for k in m.state_dict()),
-              f"IntentRLNet has {hname}")
+        check(any(k.startswith(hname + ".") for k in m.state_dict()), f"IntentRLNet has {hname}")
     # value 头 137→1（P1-5②：value 消费注入）。
     vw = m.state_dict()["value_head.weight"]
     check(tuple(vw.shape) == (1, 137), f"value_head.weight shape {tuple(vw.shape)} == (1,137)")
@@ -118,6 +124,7 @@ def test_rl_net_roundtrip_value_head() -> None:
         check("value_head.weight" in params, "exported value_head.weight present")
         m2 = ppo_intent.IntentRLNet(h=64, d=8)
         from intent_net import load_intent_weights
+
         load_intent_weights(m2, p)
         check(True, "load_intent_weights roundtrip ok")
 
@@ -142,9 +149,18 @@ def test_ppo_update_smoke() -> None:
     mask[:, 7] = 0  # ESCAPE 死类
     dt = rng.randint(1, 40, size=N).astype(np.int64)
 
-    ep = {"obs": obs, "scalars": scalars, "inject": inject, "a_intent": a,
-          "lp_intent": lp, "value": value, "reward": reward, "done": done,
-          "mask": mask, "dt": dt}
+    ep = {
+        "obs": obs,
+        "scalars": scalars,
+        "inject": inject,
+        "a_intent": a,
+        "lp_intent": lp,
+        "value": value,
+        "reward": reward,
+        "done": done,
+        "mask": mask,
+        "dt": dt,
+    }
     adv, ret = ppo_intent.compute_gae_variable(reward, value, done, dt)
     ep["adv"] = (adv - adv.mean()) / (adv.std() + 1e-8)
     ep["ret"] = ret
@@ -154,18 +170,21 @@ def test_ppo_update_smoke() -> None:
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     # 合成随机数据下 lp_old 与随机模型初始 logp 严重失配 → KL 必然爆炸；
     # 用极大阈值只测"不早停"路径（真实数据 lp_old 来自同一模型，KL 正常）。
-    agg = ppo_intent.ppo_update_intent(model, opt, chunks, epochs=3, device=torch.device("cpu"),
-                                       target_kl=1e9, seed=1)  # 极大阈值：不早停
-    check(np.isfinite(agg["policy"]) and np.isfinite(agg["value"]),
-          f"ppo update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})")
+    agg = ppo_intent.ppo_update_intent(
+        model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
+    )  # 极大阈值：不早停
+    check(
+        np.isfinite(agg["policy"]) and np.isfinite(agg["value"]),
+        f"ppo update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})",
+    )
     check(not agg["early_stopped"], "target_kl=1e9 不触发早停")
 
     # 极小阈值 → 早停触发。
     model2 = ppo_intent.IntentRLNet(h=32, d=2)
     opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
-    agg2 = ppo_intent.ppo_update_intent(model2, opt2, chunks, epochs=3,
-                                        device=torch.device("cpu"),
-                                        target_kl=1e-9, seed=1)
+    agg2 = ppo_intent.ppo_update_intent(
+        model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
+    )
     check(agg2["early_stopped"], "target_kl 极小 → early stop 触发")
 
     # value warmup：前 epochs 全预热 → 策略（主干+三头）零梯度、KL=0、value 头被训练。
@@ -174,18 +193,33 @@ def test_ppo_update_smoke() -> None:
     stem_before = model3.stem.weight.detach().clone()
     policy_w_before = model3.intent_head.weight.detach().clone()
     vhead_before = model3.value_head.weight.detach().clone()
-    agg3 = ppo_intent.ppo_update_intent(model3, opt3, chunks, epochs=2,
-                                        device=torch.device("cpu"),
-                                        target_kl=1e9, seed=1, value_warmup_epochs=2)
+    agg3 = ppo_intent.ppo_update_intent(
+        model3,
+        opt3,
+        chunks,
+        epochs=2,
+        device=torch.device("cpu"),
+        target_kl=1e9,
+        seed=1,
+        value_warmup_epochs=2,
+    )
     check(agg3["kl"] == 0.0, f"warmup: kl=0 (policy frozen), got {agg3['kl']}")
-    check(torch.equal(policy_w_before, model3.intent_head.weight),
-          "warmup: intent_head 权重不变（策略零梯度）")
-    check(torch.equal(stem_before, model3.stem.weight),
-          "warmup: stem 权重不变（主干冻结，value 不扰动策略特征）")
-    check(not torch.equal(vhead_before, model3.value_head.weight),
-          "warmup: value_head 权重已更新（在冻结特征上学基线）")
-    check(np.isfinite(agg3["value"]) and agg3["value"] > 0,
-          f"warmup: value 头在学 (value={agg3['value']:.3f})")
+    check(
+        torch.equal(policy_w_before, model3.intent_head.weight),
+        "warmup: intent_head 权重不变（策略零梯度）",
+    )
+    check(
+        torch.equal(stem_before, model3.stem.weight),
+        "warmup: stem 权重不变（主干冻结，value 不扰动策略特征）",
+    )
+    check(
+        not torch.equal(vhead_before, model3.value_head.weight),
+        "warmup: value_head 权重已更新（在冻结特征上学基线）",
+    )
+    check(
+        np.isfinite(agg3["value"]) and agg3["value"] > 0,
+        f"warmup: value 头在学 (value={agg3['value']:.3f})",
+    )
 
 
 def main() -> None:

@@ -11,6 +11,7 @@ This verifies the Python side of the engineering (npy IO, dataset, augmentation,
 model, masked-CE training, weight export) WITHOUT needing the game-side exporter
 or a GPU. Run:  python smoke_test.py
 """
+
 from __future__ import annotations
 
 import os
@@ -20,22 +21,32 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from schema import (OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM,
-                    MASK_DIM, OBS_SCHEMA_MAJOR)  # noqa: E402
-from npyio import save_shard, scan_shards  # noqa: E402
-from train_bc import train  # noqa: E402
-from model import NNPolicy, param_count  # noqa: E402
-from weights_io import load_weights_json, load_state_into  # noqa: E402
+from model import NNPolicy, param_count
+from npyio import save_shard, scan_shards
+from schema import (
+    BOARD,
+    FIRE_DIM,
+    MASK_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    OBS_SCHEMA_MAJOR,
+    SCALAR_DIM,
+)
+from train_bc import train
+from weights_io import load_state_into, load_weights_json
 
 
 def _make_synthetic_shard(n: int, seed: int) -> dict:
     rng = np.random.default_rng(seed)
     obs = rng.integers(0, 4, size=(n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8)
     scalars = rng.random((n, SCALAR_DIM)).astype(np.float32)
-    actions = np.stack([
-        rng.integers(0, MOVE_DIM, n).astype(np.uint8),
-        rng.integers(0, FIRE_DIM, n).astype(np.uint8),
-    ], axis=1)
+    actions = np.stack(
+        [
+            rng.integers(0, MOVE_DIM, n).astype(np.uint8),
+            rng.integers(0, FIRE_DIM, n).astype(np.uint8),
+        ],
+        axis=1,
+    )
     masks = np.ones((n, MASK_DIM), dtype=np.uint8)
     # occasionally drop a class to exercise the mask machinery
     drop = rng.random(n) < 0.1
@@ -43,8 +54,12 @@ def _make_synthetic_shard(n: int, seed: int) -> dict:
     conditions = rng.integers(0, 4, n).astype(np.uint8)
     returns = (rng.random(n) * 2).astype(np.float32)  # v2: returns 可选字段
     return {
-        "obs": obs, "scalars": scalars, "actions": actions,
-        "masks": masks, "conditions": conditions, "returns": returns,
+        "obs": obs,
+        "scalars": scalars,
+        "actions": actions,
+        "masks": masks,
+        "conditions": conditions,
+        "returns": returns,
     }
 
 
@@ -70,6 +85,7 @@ def main():
     m = NNPolicy()
     load_state_into(m, out)
     import torch
+
     dummy = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     mv, fr = m(dummy, torch.zeros(2, SCALAR_DIM))
     assert tuple(mv.shape) == (2, MOVE_DIM)
@@ -83,12 +99,15 @@ def main():
     if not improved:
         print("[smoke] FAIL: validation loss did not improve")
         sys.exit(1)
-    print("[smoke] PASS: end-to-end pipeline works (npy IO -> dataset -> train -> export -> reload)")
+    print(
+        "[smoke] PASS: end-to-end pipeline works (npy IO -> dataset -> train -> export -> reload)"
+    )
 
 
 def __arg_proxy(data_dir: str, out: str):
     class A:  # minimal argparse stand-in
         pass
+
     a = A()
     a.data_dir = data_dir
     a.out = out

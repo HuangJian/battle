@@ -3,6 +3,7 @@
 协议契约见 dist_common.py（plan/distributed-rollout.md）。本模块只做编排：
 ping 门 → 权重下发 → 任务派发/回队/熔断 → 聚合报告。
 """
+
 from __future__ import annotations
 
 import json
@@ -16,28 +17,35 @@ from collections import deque
 from pathlib import Path
 
 import dist_common
-from rl.log import log
-from rl.reports import combine_reports, win_of
-from rl.resume import completed_pairs, resumed_manifests
 
 # Windows：spawn 本地对局子进程（bun/node 跑游戏模拟）时使用 CREATE_NO_WINDOW，
 # 否则每个本地槽位都会开一个黑色 cmd 控制台窗口，反复弹出抢占焦点。stdout/stderr
 # 已重定向到文件，故隐藏窗口不影响日志落盘。（非 win32 平台此 dict 为空，无副作用）
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
+from rl.log import log
+from rl.reports import combine_reports, win_of
+from rl.resume import completed_pairs, resumed_manifests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
 # 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
 RUN_ID = secrets.token_hex(8)
-MAX_TASK_ATTEMPTS = 3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
+MAX_TASK_ATTEMPTS = (
+    3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
+)
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 
 
 def bun_version(bun: str) -> str:
     try:
-        return subprocess.run([bun, "--version"], capture_output=True, text=True,
-                              timeout=10, **_POPEN_NO_WINDOW).stdout.strip() or "?"
+        return (
+            subprocess.run(
+                [bun, "--version"], capture_output=True, text=True, timeout=10, **_POPEN_NO_WINDOW
+            ).stdout.strip()
+            or "?"
+        )
     except Exception:
         return "?"
 
@@ -86,13 +94,20 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             cmd = [
                 bun,
                 "tools/sim/export-goal-rollout.ts",
-                "--weights", rl_path,
-                "--out", str(wdir),
-                "--stages", str(si),
-                "--seeds", str(seed),
-                "--max-ticks", str(args.max_ticks),
-                "--difficulty", args.difficulty,
-                "--heartbeat", str(getattr(args, "heartbeat", 240)),
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(seed),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--heartbeat",
+                str(getattr(args, "heartbeat", 240)),
             ]
             if getattr(args, "goal_coarse", False):
                 cmd.append("--coarse")
@@ -101,26 +116,41 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             cmd = [
                 bun,
                 "tools/sim/export-intent-rollout.ts",
-                "--weights", rl_path,
-                "--out", str(wdir),
-                "--stages", str(si),
-                "--seeds", str(seed),
-                "--max-ticks", str(args.max_ticks),
-                "--difficulty", args.difficulty,
-                "--replan", str(getattr(args, "replan", 30)),
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(seed),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--replan",
+                str(getattr(args, "replan", 30)),
             ]
         else:
             cmd = [
                 bun,
                 "tools/sim/export-rl-rollout.ts",
-                "--weights", rl_path,
-                "--out", str(wdir),
-                "--stages", str(si),
-                "--seeds", str(seed),
-                "--max-ticks", str(args.max_ticks),
-                "--difficulty", args.difficulty,
-                "--wver", wver,
-                "--node-label", "local",
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(seed),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--wver",
+                wver,
+                "--node-label",
+                "local",
             ]
             # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
             if getattr(args, "reward", ""):
@@ -128,8 +158,9 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             # goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
             if getattr(args, "dodge", ""):
                 cmd += ["--dodge", args.dodge]
-        p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f,
-                              stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW)
+        p = subprocess.Popen(
+            cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
+        )
         rc = p.wait()
         log_f.close()
         report = None
@@ -146,8 +177,9 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             results[futures[fut]] = fut.result()
             done_n += 1
             if done_n % ROLLOUT_LOG_EVERY == 0 or done_n == len(pairs):
-                log(f"[rollout] local {done_n}/{len(pairs)} games settled "
-                    f"({time.time() - t0:.0f}s)")
+                log(
+                    f"[rollout] local {done_n}/{len(pairs)} games settled ({time.time() - t0:.0f}s)"
+                )
 
     failed = [i for i, (rc, _r) in enumerate(results) if rc != 0]
     if failed:
@@ -191,14 +223,22 @@ def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
     return nid in tier
 
 
-def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]],
-                      args, cfg: dict, iter_id: str,
-                      on_result=None, local_slots_max: int | None = None,
-                      tail_dispatch: bool = True,
-                      halt_event: threading.Event | None = None,
-                      on_queue_drained=None,
-                      local_suspend: threading.Event | None = None,
-                      extra_wver: str | None = None) -> dict:
+def run_rollout_queue(
+    bun: str,
+    rl_path: str,
+    traj_dir: Path,
+    pairs: list[tuple[int, int]],
+    args,
+    cfg: dict,
+    iter_id: str,
+    on_result=None,
+    local_slots_max: int | None = None,
+    tail_dispatch: bool = True,
+    halt_event: threading.Event | None = None,
+    on_queue_drained=None,
+    local_suspend: threading.Event | None = None,
+    extra_wver: str | None = None,
+) -> dict:
     """中央队列调度模式（plan/distributed-rollout.md v3.3 §5.2）。
 
     140 局组成全局队列（runId 种子确定性预洗牌），各节点 C_n 条工作线程 + 本机
@@ -235,7 +275,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     wver = dist_common.weights_fingerprint(rl_path)
     local_bun = bun_version(bun)
     iter_no = int(iter_id.rsplit(".", 1)[-1])
-    meta_path = traj_dir.parent / "dist-agent-meta.jsonl"  # traj 根，跨轮累积（不被 keep-iters 清理）
+    meta_path = (
+        traj_dir.parent / "dist-agent-meta.jsonl"
+    )  # traj 根，跨轮累积（不被 keep-iters 清理）
 
     # ① ping 门：codeHash 一致 ∧ bunVersion major.minor 一致（确定性红线，M4）
     # v4.0 ping-first 并行化（用户指令 2026-08-29，移植 m1-eval 激活模式）：死节点的
@@ -245,13 +287,15 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     code_hash = dist_common.compute_code_hash()
     # 脏工作区护栏（2026-09-01 重启循环修复①）：期望 codeHash 由训练机工作区算出，
     # 含未提交改动时远端 git pull 永不收敛 ⇒ 对远端节点下发 pull+restart 是无效扰动
-    #（实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
+    # （实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
     # 每轮检测一次；self/回环节点不受限（代码同源，纯重启即可拾取工作区代码）。
     dirty_files = dist_common.dirty_hash_files()
     if dirty_files:
-        log(f"[dist] WARN: {len(dirty_files)} uncommitted file(s) in codeHash set "
+        log(
+            f"[dist] WARN: {len(dirty_files)} uncommitted file(s) in codeHash set "
             f"({', '.join(dirty_files[:5])}{', …' if len(dirty_files) > 5 else ''}) — "
-            f"remote restart suppressed until committed+pushed")
+            f"remote restart suppressed until committed+pushed"
+        )
     cfg_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
 
     def _probe(n: dict):
@@ -272,39 +316,58 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             continue
         if ping.get("codeHash") != code_hash:
             # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
-            #（dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
+            # （dist_common.UPGRADE_BRANCH 锁存）。护栏见 dist_common.request_upgrade_
             # guarded——跨代去重（同节点同 agent codeHash 只杀一次）+ 脏工作区拒发
-            #（远端 pull 永不收敛，手动更新重启的进程不再被远控杀掉）。
+            # （远端 pull 永不收敛，手动更新重启的进程不再被远控杀掉）。
             if not upgrade_branch:
                 log(f"[dist] node {nid}: codeHash mismatch — excluded (red)")
                 continue
             ok, reason = dist_common.request_upgrade_guarded(
-                nid, n["url"], n.get("authKey", ""), upgrade_branch,
-                str(ping.get("codeHash")), dirty=dirty_files)
+                nid,
+                n["url"],
+                n.get("authKey", ""),
+                upgrade_branch,
+                str(ping.get("codeHash")),
+                dirty=dirty_files,
+            )
             if dist_common.is_self_node(n["url"], nid):
-                log(f"[dist] node {nid}: self node stale — restart-only upgrade "
-                    f"({reason}), no git pull; excluded this round")
+                log(
+                    f"[dist] node {nid}: self node stale — restart-only upgrade "
+                    f"({reason}), no git pull; excluded this round"
+                )
             elif reason == "restart-requested":
-                log(f"[dist] node {nid}: requested upgrade to {upgrade_branch} "
-                    f"(accepted) — will rejoin after restart")
+                log(
+                    f"[dist] node {nid}: requested upgrade to {upgrade_branch} "
+                    f"(accepted) — will rejoin after restart"
+                )
             elif reason == "dedup":
-                log(f"[dist] node {nid}: codeHash mismatch — restart already sent "
-                    f"for this agent codeHash (dedup) — excluded this round")
+                log(
+                    f"[dist] node {nid}: codeHash mismatch — restart already sent "
+                    f"for this agent codeHash (dedup) — excluded this round"
+                )
             elif reason.startswith("dirty-tree"):
-                log(f"[dist] node {nid}: codeHash mismatch — remote pull cannot "
+                log(
+                    f"[dist] node {nid}: codeHash mismatch — remote pull cannot "
                     f"converge (uncommitted training-tree changes), restart "
-                    f"suppressed ({reason}) — excluded this round")
+                    f"suppressed ({reason}) — excluded this round"
+                )
             else:
-                log(f"[dist] node {nid}: codeHash mismatch — upgrade request failed "
-                    f"({reason}) — excluded this round")
+                log(
+                    f"[dist] node {nid}: codeHash mismatch — upgrade request failed "
+                    f"({reason}) — excluded this round"
+                )
             continue
         remote_full = str(ping.get("bunVersion", "?"))
         if mm(remote_full) != mm(local_bun):
-            log(f"[dist] node {nid}: bun {remote_full} vs local {local_bun} "
-                f"(major.minor differs) — excluded (red)")
+            log(
+                f"[dist] node {nid}: bun {remote_full} vs local {local_bun} "
+                f"(major.minor differs) — excluded (red)"
+            )
             continue
         if remote_full != local_bun:
-            log(f"[dist] node {nid}: bun patch differs ({remote_full} vs {local_bun}) — allowed (yellow)")
+            log(
+                f"[dist] node {nid}: bun patch differs ({remote_full} vs {local_bun}) — allowed (yellow)"
+            )
         c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
         log(f"[dist] node {nid}: online, concurrency={c_n}")
         nodes.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
@@ -324,10 +387,15 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         wkind = "rollout"
     for nd in nodes:
         try:
-            mode = dist_common.post_weights(nd["url"], nd["key"], iter_id, wver,
-                                            weights_bytes,
-                                            timeout=min(300.0, max(60.0, task_timeout)),
-                                            kind=wkind)
+            mode = dist_common.post_weights(
+                nd["url"],
+                nd["key"],
+                iter_id,
+                wver,
+                weights_bytes,
+                timeout=min(300.0, max(60.0, task_timeout)),
+                kind=wkind,
+            )
             log(f"[dist] weights[{wkind}] -> {nd['id']} ({mode})")
             alive.append(nd)
         except dist_common.DistError as e:
@@ -354,23 +422,35 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     done = done_all & plan_set
     tasks = [p for p in norm_pairs if p not in done]
     if done_all:
-        log(f"[dist] resume: {len(done)}/{len(norm_pairs)} planned pairs already on disk — "
+        log(
+            f"[dist] resume: {len(done)}/{len(norm_pairs)} planned pairs already on disk — "
             f"run {len(tasks)} remaining"
-            + (f" (ignoring {len(done_all) - len(done)} off-plan shards)"
-               if len(done_all) != len(done) else ""))
+            + (
+                f" (ignoring {len(done_all) - len(done)} off-plan shards)"
+                if len(done_all) != len(done)
+                else ""
+            )
+        )
     if not tasks:
-        log("[dist] all planned pairs already on disk — aggregating report from shards "
-            "(PPO will resume/replay)")
+        log(
+            "[dist] all planned pairs already on disk — aggregating report from shards "
+            "(PPO will resume/replay)"
+        )
         # 从磁盘 shard 聚合而非返回空报告：空报告曾让 it1 的 winRate/samples
         # 全为零（指标盲区）；only=plan_set 保证跨配置残留下聚合口径仍等于本轮计划。
         # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
-        combined = combine_reports(resumed_manifests(traj_dir, wver, only=plan_set,
-                                                 extra_wver=extra_wver))
+        combined = combine_reports(
+            resumed_manifests(traj_dir, wver, only=plan_set, extra_wver=extra_wver)
+        )
         combined["missing"] = []
         combined["expectedGames"] = len(pairs)
-        combined["dist"] = {"iterId": iter_id, "nodes": {}, "retried": 0,
-                            "resumed": len(done),
-                            "offPlanShards": max(0, len(done_all) - len(done))}
+        combined["dist"] = {
+            "iterId": iter_id,
+            "nodes": {},
+            "retried": 0,
+            "resumed": len(done),
+            "offPlanShards": max(0, len(done_all) - len(done)),
+        }
         return combined
     random.Random(f"queue:{RUN_ID}:{iter_id}").shuffle(tasks)  # 队列可复现；分配依实时负载
     if local_slots_max is not None:
@@ -440,8 +520,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         r = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if r.get("ok") and isinstance(r.get("elapsedSec"), (int, float)) \
-                            and isinstance(r.get("node"), str):
+                    if (
+                        r.get("ok")
+                        and isinstance(r.get("elapsedSec"), (int, float))
+                        and isinstance(r.get("node"), str)
+                    ):
                         hist.setdefault(r["node"], []).append(float(r["elapsedSec"]))
         except OSError:
             pass
@@ -489,27 +572,74 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
         if getattr(args, "goal_rollout", False):
-            cmd = [bun, "tools/sim/export-goal-rollout.ts",
-                   "--weights", rl_path, "--out", str(wdir),
-                   "--stages", str(si), "--seeds", str(sd),
-                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
-                   "--heartbeat", str(getattr(args, "heartbeat", 240)),
-                   "--wver", wver, "--node-label", "local"]
+            cmd = [
+                bun,
+                "tools/sim/export-goal-rollout.ts",
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(sd),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--heartbeat",
+                str(getattr(args, "heartbeat", 240)),
+                "--wver",
+                wver,
+                "--node-label",
+                "local",
+            ]
             if getattr(args, "goal_coarse", False):
                 cmd.append("--coarse")
         elif getattr(args, "intent_rollout", False):
-            cmd = [bun, "tools/sim/export-intent-rollout.ts",
-                   "--weights", rl_path, "--out", str(wdir),
-                   "--stages", str(si), "--seeds", str(sd),
-                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
-                   "--replan", str(getattr(args, "replan", 30)),
-                   "--wver", wver, "--node-label", "local"]
+            cmd = [
+                bun,
+                "tools/sim/export-intent-rollout.ts",
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(sd),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--replan",
+                str(getattr(args, "replan", 30)),
+                "--wver",
+                wver,
+                "--node-label",
+                "local",
+            ]
         else:
-            cmd = [bun, "tools/sim/export-rl-rollout.ts",
-                   "--weights", rl_path, "--out", str(wdir),
-                   "--stages", str(si), "--seeds", str(sd),
-                   "--max-ticks", str(args.max_ticks), "--difficulty", args.difficulty,
-                   "--wver", wver, "--node-label", "local"]
+            cmd = [
+                bun,
+                "tools/sim/export-rl-rollout.ts",
+                "--weights",
+                rl_path,
+                "--out",
+                str(wdir),
+                "--stages",
+                str(si),
+                "--seeds",
+                str(sd),
+                "--max-ticks",
+                str(args.max_ticks),
+                "--difficulty",
+                args.difficulty,
+                "--wver",
+                wver,
+                "--node-label",
+                "local",
+            ]
             # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
             if getattr(args, "reward", ""):
                 cmd += ["--reward", args.reward]
@@ -520,8 +650,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
             # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
             # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
             t0 = time.time()
-            p = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=log_f,
-                                  stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW)
+            p = subprocess.Popen(
+                cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
+            )
             rc = p.wait()
             elapsed_sec = round(time.time() - t0, 3)
         if rc != 0:
@@ -535,9 +666,11 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
 
     def worker(nd: dict | None) -> None:
         suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
-        while (not all_settled.is_set()
-               and not (halt_event is not None and halt_event.is_set())
-               and time.time() < deadline):
+        while (
+            not all_settled.is_set()
+            and not (halt_event is not None and halt_event.is_set())
+            and time.time() < deadline
+        ):
             nd_id = nd["id"] if nd else "local"
             task = None
             attempt = 0
@@ -549,15 +682,22 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     return
                 if nd is None:
                     # 远端失联 → 本机并发恢复满额（防流式 PPO 被饿死）
-                    if (time.time() - last_remote_ok[0] > remote_dead_sec
-                            and local_cap[0] != cap_full):
+                    if (
+                        time.time() - last_remote_ok[0] > remote_dead_sec
+                        and local_cap[0] != cap_full
+                    ):
                         local_cap[0] = cap_full
-                        log(f"[dist] no remote settle for {remote_dead_sec:.0f}s — "
-                            f"local slots {local_slots} -> {cap_full}")
+                        log(
+                            f"[dist] no remote settle for {remote_dead_sec:.0f}s — "
+                            f"local slots {local_slots} -> {cap_full}"
+                        )
                     # R6：PPO 波次启动后本机让位训练（local_suspend 置位）；
                     # 集群停摆豁免——远端失联超阈值时让位自动失效，采集不饿死。
-                    suspended = (local_suspend is not None and local_suspend.is_set()
-                                 and time.time() - last_remote_ok[0] <= remote_dead_sec)
+                    suspended = (
+                        local_suspend is not None
+                        and local_suspend.is_set()
+                        and time.time() - last_remote_ok[0] <= remote_dead_sec
+                    )
                     if not suspended and local_active[0] < local_cap[0]:
                         took_local = True
                     # 让位即交还保留段：任务并回主队列由远端消化（防饿死）
@@ -577,9 +717,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         # v3.7 尾部 fan-out：pending 剩 ≤ tail_fanout_n 且存在在跑的尾部任务时，
                         # 空闲执行槽复制一个在跑任务（重复派发），与主副本竞速取先返回。
                         # 复制不 pop pending（主副本完成前任务保持"未完成"状态）。
-                        if (src is pending and len(pending) <= tail_fanout_n and inflight):
+                        if src is pending and len(pending) <= tail_fanout_n and inflight:
                             cand = next(
-                                (t for t, c in inflight.items() if c < tail_fanout_dup), None)
+                                (t for t, c in inflight.items() if c < tail_fanout_dup), None
+                            )
                             if cand is not None:
                                 task = cand
                                 inflight[task] += 1
@@ -597,8 +738,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                             drained = True
                     elif f"{nd_id}:hold" not in tail_notes:
                         tail_notes.add(f"{nd_id}:hold")
-                        log(f"[dist] tail-mode: holding {nd_id} "
-                            f"(ewma={speed.get(nd_id, -1):.0f}s, pending={probe})")
+                        log(
+                            f"[dist] tail-mode: holding {nd_id} "
+                            f"(ewma={speed.get(nd_id, -1):.0f}s, pending={probe})"
+                        )
                         task = None
                 else:
                     # v3.10 长尾竞速（用户需求 2026-08-31）：排队队列已空，**只要空槽**就
@@ -608,16 +751,21 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     # （让位语义 = 给 PPO 腾核，不抢尾流）。
                     # v3.11 竞速派档（用户 2026-08-31 观察"副本落到慢节点=白等"）：竞速名额
                     # 只给 top-3 快节点（EWMA 耗时，speed 表）——慢节点不浪费竞速副本。
-                    if (not (nd is None and suspended) and inflight
-                            and race_tier_ok(speed, nd_id, 3)):
+                    if (
+                        not (nd is None and suspended)
+                        and inflight
+                        and race_tier_ok(speed, nd_id, 3)
+                    ):
                         tail_cand = pick_tail_race(inflight, tail_fanout_dup)
                         if tail_cand is not None:
                             task = tail_cand
                             inflight[task] += 1
                             fanout_copy = True
                             attempt = attempts.get(task, 0) + 1
-                            log(f"[dist] tail-race s{task[0]}/seed{task[1]} "
-                                f"(inflight x{inflight[task]}) — race lane")
+                            log(
+                                f"[dist] tail-race s{task[0]}/seed{task[1]} "
+                                f"(inflight x{inflight[task]}) — race lane"
+                            )
             if drained and on_queue_drained is not None:
                 # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
                 # 干净评估此刻进场填收尾空槽（2026-08-25 用户修订，取代「权重分发完
@@ -625,7 +773,7 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 # 清空；重复触发由调用方的护栏去重。
                 try:
                     on_queue_drained()
-                except Exception as cb_err:  # noqa: BLE001 — 评估旁路不拖垮采集
+                except Exception as cb_err:
                     log(f"[dist] on_queue_drained error: {str(cb_err)[:120]}")
             if task is None:
                 all_settled.wait(0.5)
@@ -638,21 +786,28 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     summary = run_local(task)
                 else:
                     manifest, files = dist_common.fetch_task(
-                        nd["url"], nd["key"], iter_id=iter_id, wver=wver,
-                        stage=task[0], seed=task[1], max_ticks=args.max_ticks,
-                        difficulty=args.difficulty, timeout=task_timeout,
-                        kind=wkind, replan=getattr(args, "replan", 0),
+                        nd["url"],
+                        nd["key"],
+                        iter_id=iter_id,
+                        wver=wver,
+                        stage=task[0],
+                        seed=task[1],
+                        max_ticks=args.max_ticks,
+                        difficulty=args.difficulty,
+                        timeout=task_timeout,
+                        kind=wkind,
+                        replan=getattr(args, "replan", 0),
                         reward=getattr(args, "reward", ""),
-                        dodge=getattr(args, "dodge", ""))
-                    why = dist_common.validate_result(manifest, files, wver,
-                                                      set(norm_pairs), seen)
+                        dodge=getattr(args, "dodge", ""),
+                    )
+                    why = dist_common.validate_result(manifest, files, wver, set(norm_pairs), seen)
                     if why:
                         raise dist_common.DistError(0, why)
                     out_dir = traj_dir / "dist" / nd_id / f"rl_s{task[0]}_seed{task[1]}"
                     dist_common.write_shard(files, manifest, str(out_dir))
                     manifest["_dir"] = str(out_dir)
                     summary = manifest
-            except Exception as e:  # noqa: BLE001 — 单局任何失败都只回队/记 missing
+            except Exception as e:
                 err = str(e)[:200]
                 # HTTP 503（busy）是瞬时负载不是节点故障——except 内捕获（Python 3
                 # 在 except 块后删除 e，必须在块内读出标记）。
@@ -680,11 +835,19 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     if nd is not None:
                         last_remote_ok[0] = time.time()
                     results.append(summary)
-                    _record_agent_meta(meta_path, {
-                        "node": nd_id, "it": iter_no, "stage": task[0], "seed": task[1],
-                        "ok": True, "win": win_of(summary),
-                        "elapsedSec": summary.get("elapsedSec"),
-                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    _record_agent_meta(
+                        meta_path,
+                        {
+                            "node": nd_id,
+                            "it": iter_no,
+                            "stage": task[0],
+                            "seed": task[1],
+                            "ok": True,
+                            "win": win_of(summary),
+                            "elapsedSec": summary.get("elapsedSec"),
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        },
+                    )
                     el = summary.get("elapsedSec")
                     if isinstance(el, (int, float)) and el > 0:
                         prev = speed.get(nd_id)
@@ -693,11 +856,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                     if on_result:
                         try:
                             on_result(summary)
-                        except Exception as cb_err:  # noqa: BLE001 — 回调异常不拖垮采集
+                        except Exception as cb_err:
                             log(f"[dist] on_result callback error: {str(cb_err)[:120]}")
-                    log(f"[dist] {len(seen) + len(missing_keys)}/{n_total_tasks} settled "
+                    log(
+                        f"[dist] {len(seen) + len(missing_keys)}/{n_total_tasks} settled "
                         f"node={nd_id} s{task[0]}/seed{task[1]} "
-                        f"elapsed={str(el) + 's' if el is not None else '-'}")
+                        f"elapsed={str(el) + 's' if el is not None else '-'}"
+                    )
                     if len(seen) + len(missing_keys) >= n_total_tasks:
                         all_settled.set()
                     continue
@@ -711,9 +876,13 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         if inflight[task] <= 0:
                             inflight.pop(task, None)
                     if task in seen or task in missing_keys:
-                        log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped")
+                        log(
+                            f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped"
+                        )
                     else:
-                        log(f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped")
+                        log(
+                            f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — main in flight, dropped"
+                        )
                     continue
                 # v3.7 反向竞速：fan-out 副本抢先结算、主副本迟到被判 duplicate——
                 # 主副本 fanout_copy=False，若不拦截会落入正常回队分支，把已结算任务
@@ -723,7 +892,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                         inflight[task] -= 1
                         if inflight[task] <= 0:
                             inflight.pop(task, None)
-                    log(f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped")
+                    log(
+                        f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
+                    )
                     continue
                 # 503（busy）不计熔断连击、不计重试上限（小批量突发提交防误熔断）。
                 if nd is not None and not busy503:
@@ -734,20 +905,35 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 if attempt < MAX_TASK_ATTEMPTS or busy503:
                     pending.append(task)
                     stats["retried"] += 1
-                    log(f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
+                    log(
+                        f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
                         f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
-                        + (", busy" if busy503 else "") + ")")
+                        + (", busy" if busy503 else "")
+                        + ")"
+                    )
                 else:
                     missing_keys.add(task)
-                    _record_agent_meta(meta_path, {
-                        "node": nd_id, "it": iter_no, "stage": task[0], "seed": task[1],
-                        "ok": False, "reason": err,
-                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
-                    log(f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
-                        f"[{len(seen) + len(missing_keys)}/{n_total_tasks} settled]")
+                    _record_agent_meta(
+                        meta_path,
+                        {
+                            "node": nd_id,
+                            "it": iter_no,
+                            "stage": task[0],
+                            "seed": task[1],
+                            "ok": False,
+                            "reason": err,
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        },
+                    )
+                    log(
+                        f"[dist] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — missing this round "
+                        f"[{len(seen) + len(missing_keys)}/{n_total_tasks} settled]"
+                    )
                 if broke:
-                    log(f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
-                        f"circuit-broken for this round")
+                    log(
+                        f"[dist] node {nd_id}: {fail_streak_max} consecutive failures — "
+                        f"circuit-broken for this round"
+                    )
                 if len(seen) + len(missing_keys) >= n_total_tasks:
                     all_settled.set()
             # 503(busy) 背压：agent 满负荷 → 本 worker 退避再领下一任务，防提交洪峰
@@ -759,8 +945,9 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     # 本地线程先孵化：任务队列在启动瞬间是满的，谁先起跑谁抢到——agent 线程在
     # 前的历史顺序曾让课程小轮（12 局）被远端瞬间清空、local 全程零参与。
     for _ in range(max(local_slots, cap_full)):
-        threads.append(threading.Thread(target=worker, args=(None,), daemon=True,
-                                        name="rollout-local"))
+        threads.append(
+            threading.Thread(target=worker, args=(None,), daemon=True, name="rollout-local")
+        )
     for nd in alive:
         for _ in range(nd["c"]):
             threads.append(threading.Thread(target=worker, args=(nd,), daemon=True))
@@ -785,39 +972,53 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 with lock:
                     if nid in spawned_ids:
                         continue
-                ping = dist_common.node_ping(n["url"], n.get("authKey", ""),
-                                             timeout=status_timeout)
+                ping = dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
                 if ping is None:
                     continue  # 仍未上线，下轮再试
                 if ping.get("codeHash") != code_hash:
                     # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
-                    #（rescan 周期 ~15s，重复刷屏无信息量）。
+                    # （rescan 周期 ~15s，重复刷屏无信息量）。
                     if not upgrade_branch:
                         continue
                     ok, reason = dist_common.request_upgrade_guarded(
-                        nid, n["url"], n.get("authKey", ""), upgrade_branch,
-                        str(ping.get("codeHash")), dirty=dirty_files)
+                        nid,
+                        n["url"],
+                        n.get("authKey", ""),
+                        upgrade_branch,
+                        str(ping.get("codeHash")),
+                        dirty=dirty_files,
+                    )
                     if reason == "restart-requested":
-                        log(f"[dist] rescan {nid}: codeHash stale — requested upgrade "
-                            f"to {upgrade_branch} (accepted)")
+                        log(
+                            f"[dist] rescan {nid}: codeHash stale — requested upgrade "
+                            f"to {upgrade_branch} (accepted)"
+                        )
                     elif reason.startswith("dirty-tree"):
-                        log(f"[dist] rescan {nid}: codeHash stale — remote restart "
-                            f"suppressed ({reason}: uncommitted training-tree changes)")
+                        log(
+                            f"[dist] rescan {nid}: codeHash stale — remote restart "
+                            f"suppressed ({reason}: uncommitted training-tree changes)"
+                        )
                     elif dist_common.is_self_node(n["url"], nid):
-                        log(f"[dist] rescan {nid}: self node stale — restart-only "
-                            f"({reason})")
+                        log(f"[dist] rescan {nid}: self node stale — restart-only ({reason})")
                     elif reason != "dedup":
-                        log(f"[dist] rescan {nid}: codeHash stale — upgrade request "
-                            f"failed ({reason})")
+                        log(
+                            f"[dist] rescan {nid}: codeHash stale — upgrade request "
+                            f"failed ({reason})"
+                        )
                     continue
                 remote_full = str(ping.get("bunVersion", "?"))
                 if mm(remote_full) != mm(local_bun):
                     continue
                 c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
                 try:
-                    mode = dist_common.post_weights(n["url"], n.get("authKey", ""),
-                                                    iter_id, wver, weights_bytes,
-                                                    timeout=min(300.0, max(60.0, task_timeout)))
+                    mode = dist_common.post_weights(
+                        n["url"],
+                        n.get("authKey", ""),
+                        iter_id,
+                        wver,
+                        weights_bytes,
+                        timeout=min(300.0, max(60.0, task_timeout)),
+                    )
                 except dist_common.DistError as e:
                     log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
                     continue
@@ -825,8 +1026,10 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
                 with lock:
                     spawned_ids.add(nid)
                     alive.append(nd)
-                log(f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
-                    f"spawning {c_n} workers")
+                log(
+                    f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
+                    f"spawning {c_n} workers"
+                )
                 for _ in range(c_n):
                     t = threading.Thread(target=worker, args=(nd,), daemon=True)
                     t.start()
@@ -849,28 +1052,38 @@ def run_rollout_queue(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[
     for s in results:
         nid = str(s.get("node", "?"))
         by_node[nid] = by_node.get(nid, 0) + 1
-    log(f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
-        f"retried={stats['retried']} byNode={json.dumps(by_node)}")
+    log(
+        f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
+        f"retried={stats['retried']} byNode={json.dumps(by_node)}"
+    )
     if missing:
         log(f"[dist] missing pairs: {[list(k) for k in missing]}")
 
     combined = combine_reports(
-        results + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set,
-                                    extra_wver=extra_wver))
+        results
+        + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set, extra_wver=extra_wver)
+    )
     combined["missing"] = [list(k) for k in missing]
     combined["expectedGames"] = len(pairs)
-    combined["dist"] = {"iterId": iter_id, "nodes": by_node, "retried": stats["retried"],
-                        "resumed": len(done),
-                        # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
-                        "offPlanShards": max(0, len(done_all) - len(done))}
+    combined["dist"] = {
+        "iterId": iter_id,
+        "nodes": by_node,
+        "retried": stats["retried"],
+        "resumed": len(done),
+        # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
+        "offPlanShards": max(0, len(done_all) - len(done)),
+    }
     combined["dist_phase_sec"] = round(t_dist_done - t_queue_enter, 1)
     if halt_event is not None and halt_event.is_set():
         combined["halt_aborted"] = True
-        log(f"[dist] KL halt active — dispatch stopped early "
-            f"({len(missing)} task(s) left undispatched/unsettled)")
+        log(
+            f"[dist] KL halt active — dispatch stopped early "
+            f"({len(missing)} task(s) left undispatched/unsettled)"
+        )
     # 纯采集（用户定义）：最后一局结算时刻 − 权重分发完毕时刻。与 PPO 重叠无关。
     if last_settle_at[0] is not None:
         combined["pure_collect_sec"] = round(last_settle_at[0] - t_dist_done, 1)
         combined["weights_dist_done_at"] = time.strftime(
-            "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done))
+            "%Y-%m-%d %H:%M:%S", time.localtime(t_dist_done)
+        )
     return combined

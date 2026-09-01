@@ -21,6 +21,7 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
 红线：远端结果必须先过 validate_result() 再落进 traj_dir —— discover_rl_shards()
 对已落盘目录是无条件递归扫描的，落盘之后没有任何兜底。
 """
+
 from __future__ import annotations
 
 import base64
@@ -39,17 +40,32 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "rl-config.json")
 
 SHARD_FILES = (
-    "obs.npy", "scalars.npy", "a_move.npy", "a_fire.npy",
-    "lp_move.npy", "lp_fire.npy", "value.npy", "reward.npy",
-    "done.npy", "mask.npy",
+    "obs.npy",
+    "scalars.npy",
+    "a_move.npy",
+    "a_fire.npy",
+    "lp_move.npy",
+    "lp_fire.npy",
+    "value.npy",
+    "reward.npy",
+    "done.npy",
+    "mask.npy",
 )
 
 # M8 意图 RL shard 清单（export-intent-rollout.ts 产物）——意图步 semi-MDP：
 # inject（prev one-hot 8 + duration）与 dt（窗口时长 tick，变步长 GAE 用）替换
 # a_move/a_fire/lp_move/lp_fire；mask 为 8 类死类掩码。
 INTENT_SHARD_FILES = (
-    "obs.npy", "scalars.npy", "inject.npy", "a_intent.npy", "lp_intent.npy",
-    "value.npy", "reward.npy", "done.npy", "mask.npy", "dt.npy",
+    "obs.npy",
+    "scalars.npy",
+    "inject.npy",
+    "a_intent.npy",
+    "lp_intent.npy",
+    "value.npy",
+    "reward.npy",
+    "done.npy",
+    "mask.npy",
+    "dt.npy",
 )
 
 
@@ -112,8 +128,7 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
     out: list[tuple[str, bytes]] = []
     try:
         with open(CODE_HASH_MANIFEST, encoding="utf-8") as f:
-            specs = [ln.strip() for ln in f
-                     if ln.strip() and not ln.lstrip().startswith("#")]
+            specs = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
     except OSError:
         return out
     for spec in specs:
@@ -136,10 +151,17 @@ def _collect_code_hash_files() -> list[tuple[str, bytes]]:
 
 
 # ---------------- HTTP ----------------
-def _request(url: str, auth_key: str, timeout: float, data: bytes | None = None,
-             headers: dict[str, str] | None = None, method: str | None = None):
+def _request(
+    url: str,
+    auth_key: str,
+    timeout: float,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    method: str | None = None,
+):
     req = urllib.request.Request(
-        url, data=data,
+        url,
+        data=data,
         headers={"Authorization": f"Bearer {auth_key}", **(headers or {})},
         method=method,
     )
@@ -200,7 +222,9 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
     """
     try:
         status, _body = _request(
-            url.rstrip("/") + "/v1/restart", auth_key, timeout,
+            url.rstrip("/") + "/v1/restart",
+            auth_key,
+            timeout,
             data=json.dumps({"pullBranch": branch}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -258,7 +282,10 @@ def dirty_hash_files() -> list[str]:
     try:
         proc = subprocess.run(
             ["git", "status", "--porcelain", "--"] + rels,
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if proc.returncode != 0:
             return []
@@ -267,9 +294,15 @@ def dirty_hash_files() -> list[str]:
         return []
 
 
-def request_upgrade_guarded(nid: str, url: str, auth_key: str, branch: str,
-                            ping_hash: str, timeout: float = 20.0,
-                            dirty: list[str] | None = None) -> tuple[bool, str]:
+def request_upgrade_guarded(
+    nid: str,
+    url: str,
+    auth_key: str,
+    branch: str,
+    ping_hash: str,
+    timeout: float = 20.0,
+    dirty: list[str] | None = None,
+) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
@@ -295,9 +328,15 @@ def request_upgrade_guarded(nid: str, url: str, auth_key: str, branch: str,
     return ok, ("restart-requested" if ok else "restart-failed")
 
 
-def upgrade_stale_nodes(cfg: dict, expected_hash: str, branch: str,
-                        status_timeout: float = 3.0, restart_timeout: float = 20.0,
-                        max_nodes: int = 16, dirty: list[str] | None = None) -> list[dict]:
+def upgrade_stale_nodes(
+    cfg: dict,
+    expected_hash: str,
+    branch: str,
+    status_timeout: float = 3.0,
+    restart_timeout: float = 20.0,
+    max_nodes: int = 16,
+    dirty: list[str] | None = None,
+) -> list[dict]:
     """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
     request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
 
@@ -317,26 +356,46 @@ def upgrade_stale_nodes(cfg: dict, expected_hash: str, branch: str,
         if ping_hash == expected_hash:
             out.append({"id": nid, "upgraded": False, "reason": "current"})
             continue
-        ok, reason = request_upgrade_guarded(nid, n["url"], n.get("authKey", ""),
-                                             branch, ping_hash,
-                                             timeout=restart_timeout, dirty=dirty)
-        out.append({"id": nid, "upgraded": ok, "reason": reason,
-                    "agentVersion": ping.get("agentVersion")})
+        ok, reason = request_upgrade_guarded(
+            nid,
+            n["url"],
+            n.get("authKey", ""),
+            branch,
+            ping_hash,
+            timeout=restart_timeout,
+            dirty=dirty,
+        )
+        out.append(
+            {"id": nid, "upgraded": ok, "reason": reason, "agentVersion": ping.get("agentVersion")}
+        )
     return out
 
 
-def post_weights(url: str, auth_key: str, iter_id: str, sha: str, weights_bytes: bytes,
-                 timeout: float = 120.0, kind: str = "rollout") -> str:
+def post_weights(
+    url: str,
+    auth_key: str,
+    iter_id: str,
+    sha: str,
+    weights_bytes: bytes,
+    timeout: float = 120.0,
+    kind: str = "rollout",
+) -> str:
     """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。
 
     kind（v3.7/M8）：'rollout'（per-tick RL 采样）/ 'intent'（意图权重桶——
     intent-exec 评估 + 意图 RL rollout 共用）。agent 按 x-kind 分桶缓存。
     """
     status, body = _request(
-        url.rstrip("/") + "/v1/weights", auth_key, timeout,
+        url.rstrip("/") + "/v1/weights",
+        auth_key,
+        timeout,
         data=gzip.compress(weights_bytes),
-        headers={"Content-Encoding": "gzip", "X-Iter-Id": iter_id,
-                 "X-Weights-Sha256": sha, "X-Kind": kind},
+        headers={
+            "Content-Encoding": "gzip",
+            "X-Iter-Id": iter_id,
+            "X-Weights-Sha256": sha,
+            "X-Kind": kind,
+        },
         method="POST",
     )
     if status not in (200, 204):
@@ -391,13 +450,23 @@ def _unpack_bcv2(frame: bytes) -> tuple[dict, dict]:
     return manifest, files
 
 
-def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, seed: int,
-               max_ticks: int, difficulty: str, timeout: float,
-               mode: str | None = None,
-               kind: str = "rollout",
-               replan: int = 0,
-               reward: str = "",
-               dodge: str = "") -> tuple[dict, dict]:
+def fetch_task(
+    url: str,
+    auth_key: str,
+    *,
+    iter_id: str,
+    wver: str,
+    stage: int,
+    seed: int,
+    max_ticks: int,
+    difficulty: str,
+    timeout: float,
+    mode: str | None = None,
+    kind: str = "rollout",
+    replan: int = 0,
+    reward: str = "",
+    dodge: str = "",
+) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
     mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
@@ -414,8 +483,12 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
     这就是原来的长连接等待，短超时会把同步模式误杀。
     """
     params = {
-        "iterId": iter_id, "wver": wver, "stage": stage, "seed": seed,
-        "maxTicks": max_ticks, "difficulty": difficulty,
+        "iterId": iter_id,
+        "wver": wver,
+        "stage": stage,
+        "seed": seed,
+        "maxTicks": max_ticks,
+        "difficulty": difficulty,
     }
     if mode:
         params["mode"] = mode
@@ -431,8 +504,7 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
     base = url.rstrip("/")
     started = time.monotonic()
     try:
-        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout,
-                                headers={"x-async": "1"})
+        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout, headers={"x-async": "1"})
         if status == 202:
             return _poll_result(base, auth_key, params, timeout - (time.monotonic() - started))
         if status == 200:
@@ -448,15 +520,18 @@ def fetch_task(url: str, auth_key: str, *, iter_id: str, wver: str, stage: int, 
         raise DistError(0, f"task fetch failed: {e}") from e
 
 
-def _poll_result(base_url: str, auth_key: str, params: dict, budget: float,
-                 poll_s: float = 3.0) -> tuple[dict, dict]:
+def _poll_result(
+    base_url: str, auth_key: str, params: dict, budget: float, poll_s: float = 3.0
+) -> tuple[dict, dict]:
     """轮询 GET /v1/result 直到取包/失败/超时。budget 秒内传输瞬断一律重试。
 
     只有网络调用本身受瞬断重试保护；容器解包与非预期状态码是确定性错误，
     必须立即抛出真实原因——绝不能被重试逻辑吞成误导性的 deadline exceeded。
     """
     qparams = {
-        "iterId": params["iterId"], "stage": params["stage"], "seed": params["seed"],
+        "iterId": params["iterId"],
+        "stage": params["stage"],
+        "seed": params["seed"],
     }
     # mode/kind 必须与提交端 key 配方一致（agent 的 result key = iterId:mode:kind:stage:seed）——
     # 意图 rollout（kind=intent）不传则轮询落空 404（实测教训）。
@@ -471,8 +546,9 @@ def _poll_result(base_url: str, auth_key: str, params: dict, budget: float,
         if remain <= 0:
             raise DistError(0, "async result deadline exceeded (game still running on node?)")
         try:
-            status, body = _request(f"{base_url}/v1/result?{qs}", auth_key,
-                                    timeout=min(20.0, remain))
+            status, body = _request(
+                f"{base_url}/v1/result?{qs}", auth_key, timeout=min(20.0, remain)
+            )
         except urllib.error.HTTPError as e:
             detail = e.read()[:300].decode("utf-8", "replace")
             if e.code == 500:
@@ -507,9 +583,13 @@ def _shard_files_for(manifest: dict) -> tuple:
     return SHARD_FILES
 
 
-def validate_result(manifest: dict, files: dict, expected_wver: str,
-                    expected_pairs: set[tuple[int, int]],
-                    seen_keys: set[tuple[int, int]]) -> str | None:
+def validate_result(
+    manifest: dict,
+    files: dict,
+    expected_wver: str,
+    expected_pairs: set[tuple[int, int]],
+    seen_keys: set[tuple[int, int]],
+) -> str | None:
     """返回 None=通过；否则给出拒收原因。"""
     if not isinstance(manifest, dict):
         return "manifest is not an object"
@@ -528,8 +608,9 @@ def validate_result(manifest: dict, files: dict, expected_wver: str,
     for name, val in files.items():
         try:
             # v2 容器值为原始 bytes；v1 旧 agent 值为 base64 str——双模兼容。
-            raw = val if isinstance(val, (bytes, bytearray)) \
-                else base64.b64decode(val, validate=True)
+            raw = (
+                val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
+            )
         except Exception:
             return f"{name}: invalid base64"
         if len(raw) == 0:
@@ -556,8 +637,7 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
     for name in _shard_files_for(manifest):
         val = files[name]
-        raw = val if isinstance(val, (bytes, bytearray)) \
-            else base64.b64decode(val, validate=True)
+        raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
         with open(os.path.join(out_dir, name), "wb") as f:
             f.write(raw)
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:

@@ -24,13 +24,13 @@ Coord channel formula — MUST match the TS runtime exactly:
   ch1[row][col] = round(row/(BOARD-1) * 255)   // y, varies along rows
 (uint8 0..255, same scale as the encoder's uint8 obs; obs.float() keeps 0..255.)
 """
+
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM
+from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 DEFAULT_H = 64
 DEFAULT_D = 8
@@ -54,7 +54,7 @@ def coord_channels(board: int, device) -> torch.Tensor:
     """(2, board, board) uint8 — x/y normalized channels (see module doc)."""
     r = torch.arange(board, dtype=torch.float32, device=device) / (board - 1)
     x = r.repeat(board, 1)  # row i: [j] = j/(board-1)
-    y = x.t()               # row i: [j] = i/(board-1)
+    y = x.t()  # row i: [j] = i/(board-1)
     ch = torch.stack([x, y])
     return (ch * 255).round().to(torch.uint8)
 
@@ -118,7 +118,9 @@ class StudentNet(nn.Module):
     def features(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
         """Shared trunk → hidden (B, head_hidden). Reused by PPO value head."""
         coords = coord_channels(self.board, obs.device).float().unsqueeze(0)
-        x = torch.cat([obs.float(), coords.expand(obs.shape[0], -1, -1, -1)], dim=1)  # (B, 16, 26, 26)
+        x = torch.cat(
+            [obs.float(), coords.expand(obs.shape[0], -1, -1, -1)], dim=1
+        )  # (B, 16, 26, 26)
         x = F.relu(self.stem(x))
         for b in self.blocks:
             x = b(x)
@@ -173,7 +175,7 @@ def param_count(model: nn.Module) -> int:
 if __name__ == "__main__":
     m = StudentNet()
     n = param_count(m)
-    print(f"StudentNet params: {n} (~{n/1000:.1f}K)  budget<=200K: {n <= 200_000}")
+    print(f"StudentNet params: {n} (~{n / 1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
     mv, fr = m(dummy_obs, dummy_sc)

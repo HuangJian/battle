@@ -12,6 +12,7 @@ self-feed 输入分布，收敛 gap。成本 = 一次模型推理（CPU 秒级/�
   powershell nn-training/start-training.ps1 -Script gen_self_inj.py \
     -ScriptArgs "--data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-Bp.json"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,7 +21,6 @@ import sys
 
 import numpy as np
 import torch
-
 from intent_net import IntentNet
 from weights_io import load_weights_json
 
@@ -54,7 +54,8 @@ def main() -> None:
         shards += [
             os.path.join(root, d)
             for d in sorted(os.listdir(root))
-            if os.path.isdir(os.path.join(root, d)) and os.path.exists(os.path.join(root, d, "intent.npy"))
+            if os.path.isdir(os.path.join(root, d))
+            and os.path.exists(os.path.join(root, d, "intent.npy"))
         ]
     shards = sorted(shards)
 

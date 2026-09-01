@@ -11,6 +11,7 @@
 运行（经统一启动器进入 venv）：
   python test_student_model.py
 """
+
 from __future__ import annotations
 
 import os
@@ -20,14 +21,14 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM, MOVE_DIM, FIRE_DIM  # noqa: E402
-from student_model import (  # noqa: E402
-    StudentNet,
-    PPOStudent,
-    param_count,
-    coord_channels,
-    DEFAULT_H,
+from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from student_model import (
     DEFAULT_D,
+    DEFAULT_H,
+    PPOStudent,
+    StudentNet,
+    coord_channels,
+    param_count,
 )
 
 FAILS: list[str] = []
@@ -68,8 +69,10 @@ def test_ppo_student_value_head() -> None:
     # value head 是额外参数；学生主干与 StudentNet 同参数
     n_student = param_count(StudentNet())
     n_ppo = param_count(m)
-    check(n_ppo == n_student + 129,  # 128+1 = head_hidden→1
-          f"PPOStudent = StudentNet + value_head（{n_ppo} vs {n_student}+129）")
+    check(
+        n_ppo == n_student + 129,  # 128+1 = head_hidden→1
+        f"PPOStudent = StudentNet + value_head（{n_ppo} vs {n_student}+129）",
+    )
 
 
 def test_coord_channels_formula() -> None:
@@ -85,8 +88,7 @@ def test_coord_channels_formula() -> None:
     exp_y = (row / (BOARD - 1) * 255).round().to(torch.uint8)
     got_y = coords[1, [0, 13, 25], 0]
     check(torch.equal(got_y, exp_y), f"ch1 沿行 = round(row/25*255)（got {got_y.tolist()}）")
-    check(coords[0, 0, 0].item() == 0 and coords[0, 0, 25].item() == 255,
-          "坐标通道端点 0/255")
+    check(coords[0, 0, 0].item() == 0 and coords[0, 0, 25].item() == 255, "坐标通道端点 0/255")
 
 
 def test_arch_metadata() -> None:
@@ -95,8 +97,10 @@ def test_arch_metadata() -> None:
     check(a["kind"] == "student", "arch.kind == student")
     check(a["h"] == DEFAULT_H and a["d"] == DEFAULT_D, "arch 记录 h/d")
     check(a["head_hidden"] == 128, "arch 记录 head_hidden")
-    check(a["in_ch"] == OBS_CHANNELS and a["board"] == BOARD
-          and a["scalar_dim"] == SCALAR_DIM, "arch 记录输入维度")
+    check(
+        a["in_ch"] == OBS_CHANNELS and a["board"] == BOARD and a["scalar_dim"] == SCALAR_DIM,
+        "arch 记录输入维度",
+    )
 
 
 def test_deterministic_init() -> None:

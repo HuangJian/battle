@@ -12,9 +12,10 @@ iterations before it100 (spikes at it65/73/79 were singles). Two trip rules:
 对 R3 的校验：ENT 规则 ~it70 触发（it63-it73 连续 11 轮 <0.60）；仅 KL 规则要到
 it100 才触发——KL 是滞后指标，entropy 才是先导。
 """
+
 from __future__ import annotations
 
-KL_WARN = 0.08        # calibrated to our setup: healthy steady state is 0.045-0.054
+KL_WARN = 0.08  # calibrated to our setup: healthy steady state is 0.045-0.054
 ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
 
 KL_BREAK = 0.15
@@ -25,9 +26,16 @@ ENT_BREAK_MAX_WINRATE = 0.5
 CIRCUIT_EXIT_CODE = 3
 
 
-def breaker_update(kl_streak: int, ent_streak: int, *, kl: float, entropy: float,
-                   win_rate: float, kl_break: float = KL_BREAK,
-                   kl_consec: int = KL_BREAK_CONSEC) -> tuple[int, int, str | None]:
+def breaker_update(
+    kl_streak: int,
+    ent_streak: int,
+    *,
+    kl: float,
+    entropy: float,
+    win_rate: float,
+    kl_break: float = KL_BREAK,
+    kl_consec: int = KL_BREAK_CONSEC,
+) -> tuple[int, int, str | None]:
     """推进连击计数并判定是否熔断。
 
     返回 (kl_streak, ent_streak, tripped)：tripped 为 None 表示继续训练，
@@ -39,13 +47,20 @@ def breaker_update(kl_streak: int, ent_streak: int, *, kl: float, entropy: float
     0.045–0.054 健康带 → 必须用更高阈值（如 0.6 / 3），否则连续 3 代必误熔断（Bug D）。
     """
     kl_streak = kl_streak + 1 if kl >= kl_break else 0
-    ent_streak = (ent_streak + 1
-                  if entropy <= ENT_BREAK and win_rate < ENT_BREAK_MAX_WINRATE else 0)
+    ent_streak = ent_streak + 1 if entropy <= ENT_BREAK and win_rate < ENT_BREAK_MAX_WINRATE else 0
     if kl_streak >= kl_consec:
-        return kl_streak, ent_streak, \
-            f"kl>={kl_break} for {kl_streak} consecutive iters (now {kl:.3f})"
+        return (
+            kl_streak,
+            ent_streak,
+            f"kl>={kl_break} for {kl_streak} consecutive iters (now {kl:.3f})",
+        )
     if ent_streak >= ENT_BREAK_CONSEC:
-        return kl_streak, ent_streak, (
-            f"entropy<={ENT_BREAK} for {ent_streak} consecutive iters "
-            f"(now {entropy:.3f}, winRate={win_rate})")
+        return (
+            kl_streak,
+            ent_streak,
+            (
+                f"entropy<={ENT_BREAK} for {ent_streak} consecutive iters "
+                f"(now {entropy:.3f}, winRate={win_rate})"
+            ),
+        )
     return kl_streak, ent_streak, None

@@ -14,6 +14,7 @@
 
 退出码：全部通过 0，否则 1。新增队列/流式行为时请在此补用例，不要写临时脚本。
 """
+
 from __future__ import annotations
 
 import gzip
@@ -37,10 +38,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "nn-training"))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
-
 import dist_common  # noqa: E402
 import run_rl  # noqa: E402
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW  # noqa: E402
 from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM  # noqa: E402
 
 FAILS: list[str] = []
@@ -57,11 +57,17 @@ def check(cond: bool, msg: str) -> None:
 
 
 def bp_args(sps: int, rotate_stages: int = 35, total_stages: int = 35):
-    return types.SimpleNamespace(rotate_stages=rotate_stages, seeds_per_stage=sps,
-                                 total_stages=total_stages, stages="0-3", seeds="0-3")
+    return types.SimpleNamespace(
+        rotate_stages=rotate_stages,
+        seeds_per_stage=sps,
+        total_stages=total_stages,
+        stages="0-3",
+        seeds="0-3",
+    )
 
 
 # ---------------- 快速层 ----------------
+
 
 def test_parse_range() -> None:
     print("[fast] parse_range")
@@ -91,14 +97,15 @@ def test_mirror_scalar_lockstep() -> None:
     """M2 镜像索引锁步：SCALAR_X_INDICES 已迁移为 [15,18]（v2 重编号）——
     mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
     from dataset import mirror_x
-    from schema import SCALAR_X_INDICES, SCALAR_DIM
+    from schema import SCALAR_DIM, SCALAR_X_INDICES
+
     check(SCALAR_X_INDICES == [15, 18], f"SCALAR_X_INDICES == [15,18] (got {SCALAR_X_INDICES})")
     n = 26
     obs = np.zeros((1, 14, n, n), dtype=np.uint8)
     sc = np.zeros(SCALAR_DIM, dtype=np.float32)
-    sc[15] = 0.5   # nearestEnemyRelX → 翻转
+    sc[15] = 0.5  # nearestEnemyRelX → 翻转
     sc[18] = -0.25  # nearestBaseRelX → 翻转
-    sc[20] = 0.7   # 旧索引必须已是死位（不再参与翻转）
+    sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
     sc[23] = 0.7
     obs2, sc2, mv2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
     check(mv2 == 4, "move left<->right flip")
@@ -118,9 +125,17 @@ def test_curriculum() -> None:
     check(run_rl.curriculum_active_count(6, 100, 4, 8, 4) == 6, "caps at order_len")
     check(run_rl.curriculum_active_count(35, 1, 4, 0, 4) == 4, "every=0 never expands")
     # build_pairs 课程模式：激活窗口是排序前缀，且随 it 扩展；种子 (rotateSeed,it) 确定
-    ca = types.SimpleNamespace(curriculum_stages="13,1,16,8,21,4", seeds_per_stage=3,
-                               curriculum_start=2, curriculum_every=5, curriculum_grow=2,
-                               rotate_stages=0, total_stages=35, stages="0-3", seeds="0-3")
+    ca = types.SimpleNamespace(
+        curriculum_stages="13,1,16,8,21,4",
+        seeds_per_stage=3,
+        curriculum_start=2,
+        curriculum_every=5,
+        curriculum_grow=2,
+        rotate_stages=0,
+        total_stages=35,
+        stages="0-3",
+        seeds="0-3",
+    )
     p1 = run_rl.build_pairs(ca, 1, 4242)
     p2 = run_rl.build_pairs(ca, 1, 4242)
     check(p1 == p2 and len(p1) == 2 * 3, "curriculum deterministic; it1 = 2 stages x 3 seeds")
@@ -132,18 +147,35 @@ def test_curriculum() -> None:
 
 def test_combine_reports() -> None:
     print("[fast] combine_reports")
-    r1 = {"games": 2, "winRate": 0.5, "outcomes": {"stage_clear": 1, "base_destroyed": 1},
-          "totalSamples": 100, "totalTicks": 200, "scoreList": [0.1, 0.3],
-          "dimLists": {"progress": [0.2, 0.4]}}
-    r2 = {"games": 1, "winRate": 0.0, "outcomes": {"base_destroyed": 1},
-          "totalSamples": 50, "totalTicks": 90, "scoreList": [0.2],
-          "dimLists": {"progress": [0.1]}, "elapsedSec": 1.0}
+    r1 = {
+        "games": 2,
+        "winRate": 0.5,
+        "outcomes": {"stage_clear": 1, "base_destroyed": 1},
+        "totalSamples": 100,
+        "totalTicks": 200,
+        "scoreList": [0.1, 0.3],
+        "dimLists": {"progress": [0.2, 0.4]},
+    }
+    r2 = {
+        "games": 1,
+        "winRate": 0.0,
+        "outcomes": {"base_destroyed": 1},
+        "totalSamples": 50,
+        "totalTicks": 90,
+        "scoreList": [0.2],
+        "dimLists": {"progress": [0.1]},
+        "elapsedSec": 1.0,
+    }
     comb = run_rl.combine_reports([r1, r2])
-    check(comb["games"] == 3 and comb["totalSamples"] == 150 and comb["totalTicks"] == 290,
-          "counts summed")
+    check(
+        comb["games"] == 3 and comb["totalSamples"] == 150 and comb["totalTicks"] == 290,
+        "counts summed",
+    )
     check(comb["winRate"] == round(1 / 3, 4), "winRate recomputed across workers")
-    check(len(comb["scoreList"]) == 3 and abs(comb["scoreStats"]["mean"] - 0.2) < 1e-9,
-          "scoreList merged + stats")
+    check(
+        len(comb["scoreList"]) == 3 and abs(comb["scoreStats"]["mean"] - 0.2) < 1e-9,
+        "scoreList merged + stats",
+    )
     check(comb["dimMeans"]["progress"] == round((0.2 + 0.4 + 0.1) / 3, 4), "dimMeans merged")
 
 
@@ -151,12 +183,28 @@ def _mk_shard(traj: Path, stage: int, seed: int, wver: str, *, aggregate: bool =
     d = traj / f"rl_s{stage}_seed{seed}"
     d.mkdir(parents=True, exist_ok=True)
     if aggregate:
-        mm = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
-              "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
-              "scoreList": [0.5], "dimLists": {}, "node": "fake"}
+        mm = {
+            "wver": wver,
+            "stage": stage,
+            "seed": seed,
+            "games": 1,
+            "outcomes": {"stage_clear": 1},
+            "totalSamples": 30,
+            "totalTicks": 900,
+            "scoreList": [0.5],
+            "dimLists": {},
+            "node": "fake",
+        }
     else:
-        mm = {"wver": wver, "stage": stage, "seed": seed, "nSamples": 30, "ticks": 900,
-              "outcome": "stage_clear", "score": 0.4}
+        mm = {
+            "wver": wver,
+            "stage": stage,
+            "seed": seed,
+            "nSamples": 30,
+            "ticks": 900,
+            "outcome": "stage_clear",
+            "score": 0.4,
+        }
     (d / "obs.npy").write_bytes(b"\x00")
     (d / "manifest.json").write_text(json.dumps(mm), encoding="utf-8")
 
@@ -169,33 +217,39 @@ def test_resume_scope(tmp: Path) -> None:
     wver = "a" * 64
     _mk_shard(traj, 0, 111, wver)
     _mk_shard(traj, 3, 222, wver, aggregate=True)
-    _mk_shard(traj, 9, 999, wver)           # 计划外残留（跨配置断点）
-    _mk_shard(traj, 5, 555, "b" * 64)       # 旧权重代际
+    _mk_shard(traj, 9, 999, wver)  # 计划外残留（跨配置断点）
+    _mk_shard(traj, 5, 555, "b" * 64)  # 旧权重代际
     plan = {(0, 111), (3, 222)}
     done_all = run_rl.completed_pairs(traj, wver)
     check(done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only")
     done_plan = done_all & plan
     check(done_plan == {(0, 111), (3, 222)}, "plan intersection")
     rm = run_rl.resumed_manifests(traj, wver, only=plan)
-    check({(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)},
-          "resumed honors only=plan (drops off-plan)")
+    check(
+        {(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)},
+        "resumed honors only=plan (drops off-plan)",
+    )
     agg = [m for m in rm if m.get("games") == 1 and m.get("node") == "fake"]
     check(len(agg) == 1, "aggregate-schema manifest passed through")
     legacy = [m for m in rm if m.get("node") != "fake"]
-    check(len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30,
-          "legacy schema converted to aggregate shape")
+    check(
+        len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30,
+        "legacy schema converted to aggregate shape",
+    )
     rm_ex = run_rl.resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
     check({(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored")
 
     # 吞吐 T4 提前预采：double-wver 对账——本轮 θ_N(wver) 之外还需认上一轮 epoch3
     # 快照（extra_wver）采的首波 shard（预采首波 wver=θ_{N,e3}，否则被当未完成清场）。
-    _mk_shard(traj, 7, 777, "e" * 64)      # 模拟预采首波：wver=快照指纹（extra）
+    _mk_shard(traj, 7, 777, "e" * 64)  # 模拟预采首波：wver=快照指纹（extra）
     e_done = run_rl.completed_pairs(traj, wver, extra_wver="e" * 64)
     check((7, 777) in e_done, "extra-wver precollected shard counted as done")
     rm_e = run_rl.resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
     check(len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard")
-    check((7, 777) not in run_rl.completed_pairs(traj, wver),
-          "without extra_wver precollected shard NOT treated as current-θ shard")
+    check(
+        (7, 777) not in run_rl.completed_pairs(traj, wver),
+        "without extra_wver precollected shard NOT treated as current-θ shard",
+    )
 
 
 def test_jsonl_anchors(tmp: Path) -> None:
@@ -216,6 +270,7 @@ def test_jsonl_anchors(tmp: Path) -> None:
 
 # ---------------- 集成层（RUN_RL_ITEST=1）----------------
 
+
 def _npy_bytes(arr: np.ndarray) -> bytes:
     bio = io.BytesIO()
     np.lib.format.write_array(bio, arr)
@@ -228,35 +283,63 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
     f32 = lambda x: rng.standard_normal(x).astype(np.float32)  # noqa: E731
     done = np.zeros(n, dtype=np.int64)
     done[-1] = 1
-    return {"obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
-            "scalars": f32((n, SCALAR_DIM)), "a_move": i64(MOVE_DIM), "a_fire": i64(FIRE_DIM),
-            "lp_move": -np.abs(f32(n)) - 0.05,
-            "lp_fire": -np.abs(f32(n)) - 0.05,
-            "value": f32(n), "reward": f32(n), "done": done,
-            "mask": np.ones((n, MASK_DIM), dtype=np.int64)}
+    return {
+        "obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
+        "scalars": f32((n, SCALAR_DIM)),
+        "a_move": i64(MOVE_DIM),
+        "a_fire": i64(FIRE_DIM),
+        "lp_move": -np.abs(f32(n)) - 0.05,
+        "lp_fire": -np.abs(f32(n)) - 0.05,
+        "value": f32(n),
+        "reward": f32(n),
+        "done": done,
+        "mask": np.ones((n, MASK_DIM), dtype=np.int64),
+    }
 
 
 def _pack_container(stage: int, seed: int, wver: str, mode: str | None = None) -> bytes:
     if mode == "eval":
         # eval 局：validate_eval_result 校验的清单（wver/mode/outcome/ticks/win/stage/seed）；
         # 无 shards（eval 不落盘），payload 可省略，直接空。
-        manifest = {"wver": wver, "mode": "eval", "stage": stage, "seed": seed,
-                    "outcome": "timeout", "ticks": 600, "win": 0, "elapsedSec": 0.01,
-                    "node": "fake"}
+        manifest = {
+            "wver": wver,
+            "mode": "eval",
+            "stage": stage,
+            "seed": seed,
+            "outcome": "timeout",
+            "ticks": 600,
+            "win": 0,
+            "elapsedSec": 0.01,
+            "node": "fake",
+        }
         header_files: list[dict] = []
         body = b""
     else:
-        manifest = {"wver": wver, "stage": stage, "seed": seed, "games": 1,
-                    "outcomes": {"stage_clear": 1}, "totalSamples": 30, "totalTicks": 900,
-                    "scoreList": [0.5], "dimLists": {}, "elapsedSec": 0.01, "node": "fake"}
+        manifest = {
+            "wver": wver,
+            "stage": stage,
+            "seed": seed,
+            "games": 1,
+            "outcomes": {"stage_clear": 1},
+            "totalSamples": 30,
+            "totalTicks": 900,
+            "scoreList": [0.5],
+            "dimLists": {},
+            "elapsedSec": 0.01,
+            "node": "fake",
+        }
         header_files, body = [], b""
         for name, arr in _synth_payload().items():
             fname = f"{name}.npy"
             raw = _npy_bytes(arr)
             header_files.append({"name": fname, "len": len(raw)})
-            body += struct.pack(">H", len(fname)) + fname.encode() + struct.pack(">Q", len(raw)) + raw
+            body += (
+                struct.pack(">H", len(fname)) + fname.encode() + struct.pack(">Q", len(raw)) + raw
+            )
     header = json.dumps({"manifest": manifest, "files": header_files}).encode()
-    return gzip.compress(struct.pack(">I", 0x42435632) + struct.pack(">I", len(header)) + header + body)
+    return gzip.compress(
+        struct.pack(">I", 0x42435632) + struct.pack(">I", len(header)) + header + body
+    )
 
 
 class FakeAgent(BaseHTTPRequestHandler):
@@ -279,15 +362,24 @@ class FakeAgent(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         u = urlparse(self.path)
         if u.path == "/v1/ping":
             bun = shutil.which("bun")
-            self._json({"codeHash": dist_common.compute_code_hash(),
-                        "bunVersion": subprocess.run([bun, "--version"], capture_output=True,
-                                                     text=True, timeout=10,
-                                                     **_POPEN_NO_WINDOW).stdout.strip(),
-                        "cpus": 4, "evalSupport": True})
+            self._json(
+                {
+                    "codeHash": dist_common.compute_code_hash(),
+                    "bunVersion": subprocess.run(
+                        [bun, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        **_POPEN_NO_WINDOW,
+                    ).stdout.strip(),
+                    "cpus": 4,
+                    "evalSupport": True,
+                }
+            )
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             key = (int(q["stage"]), int(q["seed"]))
@@ -306,7 +398,7 @@ class FakeAgent(BaseHTTPRequestHandler):
         else:
             self._json({"error": "nf"})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         FakeAgent.events.append(("weights", time.time(), ()))
         self._json({"cache": "kept"})
@@ -326,8 +418,14 @@ class _StubPpo:
 
     def update(self, model, opt, chunks, epochs, device, ckpt_path=None, **kw):
         self.updates += 1
-        return {"kl": self.kl, "entropy": 1.0, "policy": 0.0, "value": 0.0,
-                "mean_ret": 0.5, "gnorm": 1.0}
+        return {
+            "kl": self.kl,
+            "entropy": 1.0,
+            "policy": 0.0,
+            "value": 0.0,
+            "mean_ret": 0.5,
+            "gnorm": 1.0,
+        }
 
     def _ppo_load(self, path, model, opt) -> int:
         return 0  # 无 checkpoint 路径 → 轮内零结算走全盘更新分支
@@ -350,9 +448,15 @@ def test_integration(tmp: Path) -> None:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
     bun = shutil.which("bun")
-    cfg = {"nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
-           "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3,
-                      "agentRescanSec": 1}}  # rescan 默认 120s 轮询 → 每轮白等 120s 才收官
+    cfg = {
+        "nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
+        "policy": {
+            "taskTimeoutSec": 60,
+            "queueWindowSec": 120,
+            "statusTimeoutSec": 3,
+            "agentRescanSec": 1,
+        },
+    }  # rescan 默认 120s 轮询 → 每轮白等 120s 才收官
     args = types.SimpleNamespace(workers=4, max_ticks=300, difficulty="hard")
 
     def fresh(tag: str) -> Path:
@@ -367,10 +471,17 @@ def test_integration(tmp: Path) -> None:
         traj = fresh("i1")
         drained_ts, result_ts = [], []
         rep = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i1.1",
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i1.1",
             local_slots_max=0,
             on_result=lambda _s: result_ts.append(time.time()),
-            on_queue_drained=lambda: drained_ts.append(time.time()))
+            on_queue_drained=lambda: drained_ts.append(time.time()),
+        )
         disp = [t for kind, t, _x in FakeAgent.events if kind == "dispatch"]
         wts = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
         disp_pairs = {p for kind, _t, p in FakeAgent.events if kind == "dispatch"}
@@ -389,9 +500,17 @@ def test_integration(tmp: Path) -> None:
         ev.set()
         calls = []
         rep2 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i2.2",
-            local_slots_max=0, halt_event=ev,
-            on_queue_drained=lambda: calls.append(1))
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (3, 222)],
+            args,
+            cfg,
+            "i2.2",
+            local_slots_max=0,
+            halt_event=ev,
+            on_queue_drained=lambda: calls.append(1),
+        )
         check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
         check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
         check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
@@ -412,10 +531,19 @@ def test_integration(tmp: Path) -> None:
             return th
 
         rep3 = run_rl.run_rollout_stream(
-            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3, "i3.3", None, None, "cpu", on_collect_done=on_collect_done,
-            backend=stub3)
+            cfg3,
+            "i3.3",
+            None,
+            None,
+            "cpu",
+            on_collect_done=on_collect_done,
+            backend=stub3,
+        )
         sm = rep3.pop("_stream")
         check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
         check(stub3.updates >= 1, f"I3 stub PPO invoked for waves ({stub3.updates})")
@@ -432,10 +560,19 @@ def test_integration(tmp: Path) -> None:
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = run_rl.run_rollout_stream(
-            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4, "i4.4", None, None, "cpu", on_collect_done=None,
-            backend=stub4)
+            cfg4,
+            "i4.4",
+            None,
+            None,
+            "cpu",
+            on_collect_done=None,
+            backend=stub4,
+        )
         sm4 = rep4.pop("_stream")
         check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
         check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
@@ -446,17 +583,29 @@ def test_integration(tmp: Path) -> None:
         susp = threading.Event()
         susp.set()
         rep5a = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.51",
-            local_slots_max=2, local_suspend=susp)
-        check(rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
-              f"I5 suspended → zero local settlements (byNode={rep5a['dist']['nodes']})")
+            bun,
+            str(WEIGHTS),
+            traj,
+            pairs5,
+            args,
+            cfg,
+            "i5.51",
+            local_slots_max=2,
+            local_suspend=susp,
+        )
+        check(
+            rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
+            f"I5 suspended → zero local settlements (byNode={rep5a['dist']['nodes']})",
+        )
         # I5b 对照组（不置位）：头部分配使 local 独占前 N 局——确定性断言
         traj = fresh("i5b")
         rep5b = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52",
-            local_slots_max=2)
-        check(rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
-              f"I5b no-suspend → local owns head tasks ({rep5b['dist']['nodes']})")
+            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52", local_slots_max=2
+        )
+        check(
+            rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
+            f"I5b no-suspend → local owns head tasks ({rep5b['dist']['nodes']})",
+        )
 
         # I6 v3.10 长尾竞速：慢主副本独占 in-flight（2s 窗口）→ 空闲槽复制竞速先返回。
         # 若末尾任务被单 worker 独占后无人竞速（v3.7 盲区），本轮会被 2s 窗口拖住且
@@ -466,11 +615,12 @@ def test_integration(tmp: Path) -> None:
         FakeAgent._slowed_once = set()
         t0 = time.time()
         rep6 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6",
-            local_slots_max=0)
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6", local_slots_max=0
+        )
         took6 = time.time() - t0
-        n_slow_disp = sum(1 for kind, _t, p in FakeAgent.events
-                          if kind == "dispatch" and p == (0, 111))
+        n_slow_disp = sum(
+            1 for kind, _t, p in FakeAgent.events if kind == "dispatch" and p == (0, 111)
+        )
         check(rep6["games"] == 2 and rep6["missing"] == [], "I6 long-tail race settled all")
         check(n_slow_disp >= 2, f"I6 slow task re-raced by idle slot (dispatches={n_slow_disp})")
         check(took6 < 10.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")
@@ -489,23 +639,28 @@ def test_integration(tmp: Path) -> None:
         if shared_eval_log.exists():
             shared_eval_log.unlink()
         FakeAgent.eval_delay = 3.0  # 每局 mode=eval 延迟 3s（6 局/4 并发 ≈ 6s+）≫ 采集 1.4s
-        args_eval = types.SimpleNamespace(**{**vars(args), "eval_games_per_stage": 2,
-                                             "eval_stages": "0-2"})
+        args_eval = types.SimpleNamespace(
+            **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
+        )
         eval_th = threading.Thread(
             target=lambda: ed.dispatch_eval_round(
-                bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10),
-            daemon=True, name="eval-it10")
+                bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10
+            ),
+            daemon=True,
+            name="eval-it10",
+        )
         eval_th.start()
         time.sleep(0.3)  # 让 eval 抢先派发、进入在途（模拟"eval 已在跑"）
         t_collect = time.time()
         rep7 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9",
-            local_slots_max=0)
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9", local_slots_max=0
+        )
         t_collect = round(time.time() - t_collect, 1)
-        check(rep7["games"] == 2 and rep7["missing"] == [],
-              f"I7 collection completes while slow eval in flight ({t_collect}s)")
-        check(eval_th.is_alive(),
-              "I7 slow eval still running afterwards (deferred to background)")
+        check(
+            rep7["games"] == 2 and rep7["missing"] == [],
+            f"I7 collection completes while slow eval in flight ({t_collect}s)",
+        )
+        check(eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)")
         eval_th.join(timeout=45)  # 放 eval 收尾（不阻塞断言路径）
         FakeAgent.eval_delay = 0.0
 
@@ -513,24 +668,40 @@ def test_integration(tmp: Path) -> None:
         # shard 已在盘 → 本轮 stream 应①把它注入第一波训练（seed pend）；②collector
         # resume 对账（double-wver）跳过它、只现场采计划内剩余局（不重复 dispatch）。
         traj = fresh("i8")
-        plan8 = [(0, 111), (3, 222)]                       # 本轮计划 2 局
+        plan8 = [(0, 111), (3, 222)]  # 本轮计划 2 局
         pre_pair, cur_pair = (0, 111), (3, 222)
         # 预采首波盘上 shard：wver = "e"*64（模拟 θ_{N,e3} 快照指纹，≠当前权重）
         _mk_shard(traj, *pre_pair, "e" * 64)
-        args8 = types.SimpleNamespace(**{**vars(args), "max_ticks": 600,
-                                     "mb": 128, "epochs": 1, "seed": 7})
+        args8 = types.SimpleNamespace(
+            **{**vars(args), "max_ticks": 600, "mb": 128, "epochs": 1, "seed": 7}
+        )
         cfg8 = json.loads(json.dumps(cfg))
         cfg8["policy"]["streamWaveGames"] = 1  # 每局一波（首波注入立即起训）
         calls8 = []
         stub8 = _StubPpo(kl=1e-12)
         rep8 = run_rl.run_rollout_stream(
-            bun, str(WEIGHTS), traj, plan8, args8, cfg8, "i8.8", None, None, None,
-            backend=stub8, extra_wver="e" * 64)
+            bun,
+            str(WEIGHTS),
+            traj,
+            plan8,
+            args8,
+            cfg8,
+            "i8.8",
+            None,
+            None,
+            None,
+            backend=stub8,
+            extra_wver="e" * 64,
+        )
         disp8 = [p for kind, _t, p in FakeAgent.events if kind == "dispatch"]
-        check(stub8.updates >= 2,
-              f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})")
-        check(pre_pair not in disp8 and cur_pair in disp8,
-              f"I8 collector skips precollected pair, dispatches only remaining ({disp8})")
+        check(
+            stub8.updates >= 2,
+            f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})",
+        )
+        check(
+            pre_pair not in disp8 and cur_pair in disp8,
+            f"I8 collector skips precollected pair, dispatches only remaining ({disp8})",
+        )
         check(rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})")
     finally:
         srv.shutdown()
@@ -538,6 +709,7 @@ def test_integration(tmp: Path) -> None:
 
 def test_breaker_update() -> None:
     from rl.breaker import breaker_update
+
     print("[fast] breaker_update (F4 纯逻辑)")
     # KL 规则：连续 3 轮 ≥0.15 触发；中间一轮回落即清零
     s = breaker_update(0, 0, kl=0.16, entropy=1.2, win_rate=0.9)
@@ -557,6 +729,7 @@ def test_breaker_update() -> None:
 
 def test_wave_params() -> None:
     from rl.stream import wave_params
+
     print("[fast] wave_params (软降档 + 残局上限)")
     check(wave_params(0.0, 0.12, 12, 24) == (12, 24), "normal zone unchanged")
     check(wave_params(0.0839, 0.12, 12, 24) == (12, 24), "below 70% cap unchanged")
@@ -572,6 +745,7 @@ def test_wave_params() -> None:
 def test_compute_gae() -> None:
     import numpy as np
     import ppo as ppo_mod
+
     print("[fast] ppo.compute_gae (手算用例)")
     rewards = np.array([1.0, 0.0])
     values = np.array([0.5, 0.8])
@@ -587,6 +761,7 @@ def test_compute_gae() -> None:
 
 def test_chunk_episodes() -> None:
     import ppo as ppo_mod
+
     print("[fast] ppo.chunk_episodes (ragged 尾巴)")
     eps = [{"obs": np.zeros((1000, 2)), "adv": np.arange(1000)}]
     chs = ppo_mod.chunk_episodes(eps, 600)
@@ -599,6 +774,7 @@ def test_chunk_episodes() -> None:
 
 def test_backup_weights(tmp: Path) -> None:
     import run_rl
+
     print("[fast] backup_weights (归档 + 有界清理)")
     bdir = tmp / "weights-archive"
     shutil.rmtree(bdir, ignore_errors=True)
@@ -624,7 +800,9 @@ def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
     checkpoint 永久丢失）。本用例用**真实存档文件名 + 交错 mtime** 复现：
     老 it2/it3 的 mtime 早于新 it20–25，KEEP 足够 → 必须删老留新。"""
     import os
+
     import run_rl
+
     print("[fast] backup_weights prune by mtime (it20 not before it3)")
     bdir = tmp / "weights-archive-mt"
     shutil.rmtree(bdir, ignore_errors=True)
@@ -664,23 +842,36 @@ def test_eval_local_gate(tmp: Path) -> None:
     shutil.rmtree(work, ignore_errors=True)  # 台账按 wver 去重——残留会让 todo 清空走 skip 早退
     work.mkdir(parents=True, exist_ok=True)
     rl = work / "w.json"
-    rl.write_text("{\"arch\":{}}", encoding="utf-8")
+    rl.write_text('{"arch":{}}', encoding="utf-8")
 
     def mk_args(window: float):
-        return types.SimpleNamespace(eval_games_per_stage=2, total_stages=3,
-                                     eval_window_sec=window, max_ticks=10,
-                                     difficulty="hard")
+        return types.SimpleNamespace(
+            eval_games_per_stage=2,
+            total_stages=3,
+            eval_window_sec=window,
+            max_ticks=10,
+            difficulty="hard",
+        )
 
     cfg = {"nodes": [], "policy": {"evalLocalSlots": 2}}
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(bun, snap, stage, seed, out_dir, max_ticks, difficulty,
-                    timeout_sec, wver):
+    def fake_runner(bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver):
         calls.append((stage, seed))
-        assert Path(snap).read_text(encoding="utf-8") == "{\"arch\":{}}"
-        return {"stage": stage, "seed": seed, "outcome": "timeout", "ticks": 10,
-                "win": 0, "score": 0.1, "quality": 0.2, "dims": {},
-                "elapsedSec": 0.001, "wver": wver, "mode": "eval"}
+        assert Path(snap).read_text(encoding="utf-8") == '{"arch":{}}'
+        return {
+            "stage": stage,
+            "seed": seed,
+            "outcome": "timeout",
+            "ticks": 10,
+            "win": 0,
+            "score": 0.1,
+            "quality": 0.2,
+            "dims": {},
+            "elapsedSec": 0.001,
+            "wver": wver,
+            "mode": "eval",
+        }
 
     orig = ed.run_local_eval_game
     ed.run_local_eval_game = fake_runner
@@ -696,49 +887,72 @@ def test_eval_local_gate(tmp: Path) -> None:
         traj_a = work / "trajA"
         gate = threading.Event()
         gate.set()
-        ed.dispatch_eval_round("bun", str(rl), traj_a, mk_args(30), cfg,
-                               "rid.1", 1, local_gate=gate)
-        rows = [json.loads(l) for l in
-                (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
-                if l.strip()]
+        ed.dispatch_eval_round(
+            "bun", str(rl), traj_a, mk_args(30), cfg, "rid.1", 1, local_gate=gate
+        )
+        rows = [
+            json.loads(l)
+            for l in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
         eval_rows = [r for r in rows if r.get("event") == "eval"]
         summ = [r for r in rows if r.get("event") == "eval_summary"]
-        check(len(calls) == 6 and len(eval_rows) == 6,
-              f"gate set → all 6 games ran locally (calls={len(calls)}, rows={len(eval_rows)})")
-        check(all(r.get("node") == "local" for r in eval_rows),
-              "ledger rows attributed to node=local")
-        check(bool(summ) and summ[-1]["games"] == 6 and summ[-1]["nodes"] == {"local": 6}
-              and summ[-1]["dropped"] == 0, "summary aggregates local-only round")
-        check((traj_a / "_eval_frozen_weights.json").exists(),
-              "frozen weights snapshot written into traj_dir")
+        check(
+            len(calls) == 6 and len(eval_rows) == 6,
+            f"gate set → all 6 games ran locally (calls={len(calls)}, rows={len(eval_rows)})",
+        )
+        check(
+            all(r.get("node") == "local" for r in eval_rows), "ledger rows attributed to node=local"
+        )
+        check(
+            bool(summ)
+            and summ[-1]["games"] == 6
+            and summ[-1]["nodes"] == {"local": 6}
+            and summ[-1]["dropped"] == 0,
+            "summary aggregates local-only round",
+        )
+        check(
+            (traj_a / "_eval_frozen_weights.json").exists(),
+            "frozen weights snapshot written into traj_dir",
+        )
         # 采样机健康账本：eval 局同册入账（mode:"eval"），喂「采样机健康」表指标
-        meta_rows = [json.loads(l) for l in
-                     (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
-                     if l.strip()]
-        check(len(meta_rows) == 6 and all(r.get("mode") == "eval" and r.get("ok")
-                                          and r.get("node") == "local"
-                                          for r in meta_rows),
-              f"meta ledger records 6 eval games ({len(meta_rows)} rows)")
+        meta_rows = [
+            json.loads(l)
+            for l in (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        check(
+            len(meta_rows) == 6
+            and all(
+                r.get("mode") == "eval" and r.get("ok") and r.get("node") == "local"
+                for r in meta_rows
+            ),
+            f"meta ledger records 6 eval games ({len(meta_rows)} rows)",
+        )
         # B：gate 从不放行 → runner 零新增调用，窗口到期自然收场（不挂死、不越权训练侧）。
         # 用不同权重文件（不同 wver）确保 todo 非空，真正进入关门等待路径。
         baseline_calls = len(calls)
         traj_b = work / "trajB"
         rl_b = work / "w2.json"
-        rl_b.write_text("{\"arch\":{\"h\":32}}", encoding="utf-8")
+        rl_b.write_text('{"arch":{"h":32}}', encoding="utf-8")
         gate_open_never = threading.Event()
         t0 = time.time()
-        ed.dispatch_eval_round("bun", str(rl_b), traj_b, mk_args(1), cfg,
-                               "rid.2", 2, local_gate=gate_open_never)
+        ed.dispatch_eval_round(
+            "bun", str(rl_b), traj_b, mk_args(1), cfg, "rid.2", 2, local_gate=gate_open_never
+        )
         took = time.time() - t0
         check(len(calls) == baseline_calls, "gate closed → local runner never invoked")
         check(took < 8, f"closed-gate round exits at window ({took:.1f}s)")
-        rows_b = [json.loads(l) for l in
-                  (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
-                  if l.strip()]
-        summ_b = [r for r in rows_b if r.get("event") == "eval_summary"
-                  and r.get("iter") == 2]
-        check(bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6,
-              "closed-gate round settles nothing, all dropped")
+        rows_b = [
+            json.loads(l)
+            for l in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        summ_b = [r for r in rows_b if r.get("event") == "eval_summary" and r.get("iter") == 2]
+        check(
+            bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6,
+            "closed-gate round settles nothing, all dropped",
+        )
     finally:
         ed.run_local_eval_game = orig
 
@@ -756,8 +970,10 @@ def test_race_tier_ok() -> None:
     check(race_tier_ok(spd, "d", 3) is False, "slowest excluded (d=60)")
     check(race_tier_ok(spd, "local", 3) is True, "local always races (no RPC)")
     check(race_tier_ok({}, "a", 3) is True, "no speed data -> optimistic pass")
-    check(race_tier_ok({"a": 5.0, "b": 9.0}, "b", 3) is True,
-          "node count <= top_n -> all in tier (degenerate no-gate)")
+    check(
+        race_tier_ok({"a": 5.0, "b": 9.0}, "b", 3) is True,
+        "node count <= top_n -> all in tier (degenerate no-gate)",
+    )
 
 
 def test_pick_tail_race() -> None:
@@ -768,10 +984,13 @@ def test_pick_tail_race() -> None:
     check(pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked")
     check(pick_tail_race({(1, 2): 2}, 2) is None, "dup full -> None")
     check(pick_tail_race({(1, 2): 1}, 1) is None, "dup=1 disables racing")
-    check(pick_tail_race({(5, 9): 2, (3, 4): 1, (0, 7): 1}, 2) == (0, 7),
-          "lexicographically smallest raceable task picked")
-    check(pick_tail_race({(0, 7): 2, (3, 4): 1}, 2) == (3, 4),
-          "only non-full in-flight task picked")
+    check(
+        pick_tail_race({(5, 9): 2, (3, 4): 1, (0, 7): 1}, 2) == (0, 7),
+        "lexicographically smallest raceable task picked",
+    )
+    check(
+        pick_tail_race({(0, 7): 2, (3, 4): 1}, 2) == (3, 4), "only non-full in-flight task picked"
+    )
 
 
 def main() -> None:

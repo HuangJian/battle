@@ -6,6 +6,7 @@ rl_model 标为 "NOT used by the live RL pipeline"（教师参考）；本测试
 运行（经统一启动器进入 venv）：
   python test_rl_model.py
 """
+
 from __future__ import annotations
 
 import os
@@ -15,8 +16,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM  # noqa: E402
-from rl_model import RLNet, count_params, TOTAL_ACTION_DIM  # noqa: E402
+from rl_model import TOTAL_ACTION_DIM, RLNet, count_params
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 
@@ -35,8 +36,10 @@ def test_forward_shapes() -> None:
     obs = torch.zeros(3, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     sc = torch.zeros(3, SCALAR_DIM)
     logits, value = m(obs, sc)
-    check(tuple(logits.shape) == (3, TOTAL_ACTION_DIM),
-          f"action_logits (3,{TOTAL_ACTION_DIM})（got {tuple(logits.shape)}）")
+    check(
+        tuple(logits.shape) == (3, TOTAL_ACTION_DIM),
+        f"action_logits (3,{TOTAL_ACTION_DIM})（got {tuple(logits.shape)}）",
+    )
     check(tuple(value.shape) == (3, 1), f"value (3,1)（got {tuple(value.shape)}）")
 
 

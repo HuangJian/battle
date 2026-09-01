@@ -12,19 +12,19 @@ the input/output pair self-consistent:
 Flipping the grid but NOT the labels (or vice-versa) is explicitly forbidden —
 it produces a contradictory (input, target) pair.
 """
+
 from __future__ import annotations
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
-
 from schema import (
-    SCALAR_X_INDICES,
     DIRECTION_CHANNELS,
-    MOVE_DIM,
     FIRE_DIM,
     MASK_DIM,
+    MOVE_DIM,
+    SCALAR_X_INDICES,
 )
+from torch.utils.data import DataLoader, Dataset, random_split
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 
@@ -62,8 +62,8 @@ class NNDataset(Dataset):
     ):
         self.obs = data["obs"].astype(np.uint8)
         self.scalars = data["scalars"].astype(np.float32)
-        self.actions = data["actions"].astype(np.int64)   # (N,2) move,fire
-        self.masks = data["masks"].astype(np.float32)      # (N,7)
+        self.actions = data["actions"].astype(np.int64)  # (N,2) move,fire
+        self.masks = data["masks"].astype(np.float32)  # (N,7)
         self.conditions = data["conditions"].astype(np.int64)
         # v2: returns.npy（M3 value 头 MC 预置）可选——不存在时 n/a
         self.returns = (
@@ -95,7 +95,7 @@ class NNDataset(Dataset):
             mv,
             fr,
             mask[:MOVE_DIM],
-            mask[MOVE_DIM:MOVE_DIM + FIRE_DIM],
+            mask[MOVE_DIM : MOVE_DIM + FIRE_DIM],
             ret,
         )
 
@@ -131,8 +131,9 @@ class _AugWrapper(Dataset):
     """Thin wrapper exposing NNDataset.__getitem__ with augmentation on a split."""
 
     def __init__(self, data: dict, indices: list[int], mirror_p: float, seed: int):
-        self.inner = NNDataset(data, augment=True, mirror_p=mirror_p,
-                               rng=np.random.default_rng(seed))
+        self.inner = NNDataset(
+            data, augment=True, mirror_p=mirror_p, rng=np.random.default_rng(seed)
+        )
         self.indices = list(indices)
 
     def __len__(self):

@@ -38,6 +38,8 @@ select = [
 ]
 ignore = [
   "E501", # line-length (handled by formatter)
+  "RUF002", # ambiguous unicode in text (中文标点：逗号/句号在 docstring 中合法)
+  "RUF003", # ambiguous unicode in text (中文标点：括号/冒号在 comment 中合法)
   "SIM108", # if-else-block-instead-of-if-explicit-exit (opinion)
 ]
 unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-exports)

@@ -13,6 +13,7 @@ train/val 按【局（shard）】切分——同局相邻帧不跨集，防时�
   powershell nn-training/start-training.ps1 -Script train_intent_probe.py \
       -ScriptArgs "--data tmp/intent-probe-hard/shards --out tmp/intent-probe-hard/probe-report.json"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,11 +24,19 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
-
-from student_model import StudentNet, DEFAULT_H, DEFAULT_D
 from intent_net import IntentNet, export_intent_weights
+from student_model import DEFAULT_D, DEFAULT_H, StudentNet
 
-INTENT_IDS = ["INTERCEPT", "RETURN_DEFENSE", "HUNT", "HOLD_LANE", "CLEAR", "PICKUP", "CRUISE", "ESCAPE"]
+INTENT_IDS = [
+    "INTERCEPT",
+    "RETURN_DEFENSE",
+    "HUNT",
+    "HOLD_LANE",
+    "CLEAR",
+    "PICKUP",
+    "CRUISE",
+    "ESCAPE",
+]
 BUCKET_NAMES = ["base", "combat", "cruise"]
 MARGIN_GATE = 0.1  # 预注册 #16
 
@@ -36,7 +45,9 @@ class IntentProbeNet(IntentNet):
     """M5：IntentNet 全尺寸三头 + 注入；训练仅对 intent 头算 CE（enemy/anchor 头
     随机初始化保留导出——M6 之后由 M8/enemy-anchor 监督接管）。探针瘦身 h/d 亦支持。"""
 
-    def intent_forward(self, obs: torch.Tensor, scalars: torch.Tensor, inject_vec=None) -> torch.Tensor:
+    def intent_forward(
+        self, obs: torch.Tensor, scalars: torch.Tensor, inject_vec=None
+    ) -> torch.Tensor:
         h = self.features(obs, scalars)
         if self.inject:
             if inject_vec is None:
@@ -59,8 +70,15 @@ def build_injection(seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return onehot, dur
 
 
-def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
-                 xinj: np.ndarray | None, quota: int, rng: np.random.RandomState):
+def quota_sample(
+    xi: np.ndarray,
+    xo: np.ndarray,
+    xs: np.ndarray,
+    xb: np.ndarray,
+    xinj: np.ndarray | None,
+    quota: int,
+    rng: np.random.RandomState,
+):
     """P2-2 每类配额采样：每类至多 quota 帧（超类下采样、稀有类全留）。xinj 随帧对齐。"""
     idx = []
     for c in range(8):
@@ -70,13 +88,20 @@ def quota_sample(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
         idx.append(ci)
     sel = np.concatenate(idx)
     rng.shuffle(sel)
-    return (xo[sel], xs[sel], xi[sel], xb[sel],
-            xinj[sel] if xinj is not None else None)
+    return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None)
 
 
-def quota_sample_priority(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np.ndarray,
-                          xr: np.ndarray, xinj: np.ndarray | None, quota: int,
-                          rng: np.random.RandomState, priority_root: int):
+def quota_sample_priority(
+    xi: np.ndarray,
+    xo: np.ndarray,
+    xs: np.ndarray,
+    xb: np.ndarray,
+    xr: np.ndarray,
+    xinj: np.ndarray | None,
+    quota: int,
+    rng: np.random.RandomState,
+    priority_root: int,
+):
     """B 臂配额采样（预注册 #20）：priority_root 帧优先保留，God-AI 帧补足每类配额。
 
     目的：人像黄金样本（人类守家分布）不因"每类配额随机采样"被按比例稀释——比例采样下
@@ -102,29 +127,53 @@ def quota_sample_priority(xi: np.ndarray, xo: np.ndarray, xs: np.ndarray, xb: np
         idx.append(np.array(sel, dtype=np.int64))
     sel = np.concatenate(idx)
     rng.shuffle(sel)
-    return (xo[sel], xs[sel], xi[sel], xb[sel],
-            xinj[sel] if xinj is not None else None)
+    return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", nargs="+", required=True, help="shards 目录（可多个根合并训练，M5-B 用：God-AI + 人像）")
+    ap.add_argument(
+        "--data",
+        nargs="+",
+        required=True,
+        help="shards 目录（可多个根合并训练，M5-B 用：God-AI + 人像）",
+    )
     ap.add_argument("--out", required=True)
-    ap.add_argument("--max-train", type=int, default=60_000, help="训练帧上限（内存预算；60K ≈ 1 轮 ~15-20min CPU）")
+    ap.add_argument(
+        "--max-train",
+        type=int,
+        default=60_000,
+        help="训练帧上限（内存预算；60K ≈ 1 轮 ~15-20min CPU）",
+    )
     ap.add_argument("--val-shard-frac", type=float, default=0.2)
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）")
-    ap.add_argument("--ss-eps", type=float, default=0.0,
-                    help="P1-2 scheduled sampling ε：训练时按 ε 概率用离线 self-feed 注入"
-                         "（gen_self_inj.py 产出 self_inj.npy）混合 teacher 注入——收敛 self-feed gap")
+    ap.add_argument(
+        "--inject", action="store_true", help="①.5 注入版（prev-intent+duration teacher-forced）"
+    )
+    ap.add_argument(
+        "--ss-eps",
+        type=float,
+        default=0.0,
+        help="P1-2 scheduled sampling ε：训练时按 ε 概率用离线 self-feed 注入"
+        "（gen_self_inj.py 产出 self_inj.npy）混合 teacher 注入——收敛 self-feed gap",
+    )
     ap.add_argument("--quota", type=int, default=0, help="P2-2 每类配额采样帧数（0=不限）")
-    ap.add_argument("--priority-root", type=int, default=-1,
-                    help="B 臂（预注册 #20）：该 data 根索引的帧优先保留（人类黄金样本），"
-                         "God-AI 帧补足每类配额；-1 = 关闭（A 臂比例采样）")
-    ap.add_argument("--save", metavar="OUT", default="", help="M5：训练后保存全尺寸权重 JSON（intent_net 导出格式）")
+    ap.add_argument(
+        "--priority-root",
+        type=int,
+        default=-1,
+        help="B 臂（预注册 #20）：该 data 根索引的帧优先保留（人类黄金样本），"
+        "God-AI 帧补足每类配额；-1 = 关闭（A 臂比例采样）",
+    )
+    ap.add_argument(
+        "--save",
+        metavar="OUT",
+        default="",
+        help="M5：训练后保存全尺寸权重 JSON（intent_net 导出格式）",
+    )
     ap.add_argument("--h", type=int, default=DEFAULT_H, help="主干宽度（探针可瘦身；M5 全尺寸 64）")
     ap.add_argument("--d", type=int, default=DEFAULT_D)
     args = ap.parse_args()
@@ -140,7 +189,8 @@ def main() -> None:
         shards += [
             os.path.join(root, d)
             for d in sorted(os.listdir(root))
-            if os.path.isdir(os.path.join(root, d)) and os.path.exists(os.path.join(root, d, "intent.npy"))
+            if os.path.isdir(os.path.join(root, d))
+            and os.path.exists(os.path.join(root, d, "intent.npy"))
         ]
     shards = sorted(shards)
     if not shards:
@@ -169,7 +219,9 @@ def main() -> None:
             rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
             # self-feed 注入（P1-2 scheduled sampling 数据源；缺省 -1 哨兵 = 该帧无 self 注入）。
             sj = os.path.join(base, "self_inj.npy")
-            inx_l.append(np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32))
+            inx_l.append(
+                np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32)
+            )
         return (
             np.concatenate(obs_l),
             np.concatenate(sc_l),
@@ -189,7 +241,9 @@ def main() -> None:
         xo, xs, xi, xb, xr, xinj = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel], xinj[sel]
     if args.quota > 0:
         if args.priority_root >= 0:
-            xo, xs, xi, xb, xinj = quota_sample_priority(xi, xo, xs, xb, xr, xinj, args.quota, rng, args.priority_root)
+            xo, xs, xi, xb, xinj = quota_sample_priority(
+                xi, xo, xs, xb, xr, xinj, args.quota, rng, args.priority_root
+            )
         else:
             xo, xs, xi, xb, xinj = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
 
@@ -216,8 +270,11 @@ def main() -> None:
         f"trainFrames={len(xi)} valFrames={len(vi)} inject={args.inject} quota={args.quota}",
         file=sys.stderr,
     )
-    print(f"[probe] label dist train={np.bincount(xi, minlength=8).tolist()} "
-          f"val={np.bincount(vi, minlength=8).tolist()}", file=sys.stderr)
+    print(
+        f"[probe] label dist train={np.bincount(xi, minlength=8).tolist()} "
+        f"val={np.bincount(vi, minlength=8).tolist()}",
+        file=sys.stderr,
+    )
 
     dev = torch.device("cpu")
     model = IntentProbeNet(inject=args.inject, h=args.h, d=args.d).to(dev)
@@ -238,14 +295,18 @@ def main() -> None:
         for b in range(0, n, args.batch):
             idx = order[b : b + args.batch]
             opt.zero_grad()
-            logits = model.intent_forward(to[idx], ts[idx], t_inj_t[idx] if t_inj_t is not None else None)
+            logits = model.intent_forward(
+                to[idx], ts[idx], t_inj_t[idx] if t_inj_t is not None else None
+            )
             loss = ce(logits, ti[idx])
             loss.backward()
             opt.step()
             tot_loss += float(loss) * len(idx)
             correct += int((logits.argmax(1) == ti[idx]).sum())
-        print(f"[probe] epoch {ep + 1}/{args.epochs} loss={tot_loss / n:.4f} trainAcc={correct / n:.4f}",
-              file=sys.stderr)
+        print(
+            f"[probe] epoch {ep + 1}/{args.epochs} loss={tot_loss / n:.4f} trainAcc={correct / n:.4f}",
+            file=sys.stderr,
+        )
 
     # M5：保存全尺寸权重（intent_net 导出格式，含主干 shape 断言 + 三头）。
     if args.save:
@@ -269,8 +330,8 @@ def main() -> None:
         "gate": "any-bucket margin < 0.1 -> fail (prereg #16)",
         "marginGate": MARGIN_GATE,
         "shards": len(shards),
-        "trainFrames": int(len(xi)),
-        "valFrames": int(len(vi)),
+        "trainFrames": len(xi),
+        "valFrames": len(vi),
         "epochs": args.epochs,
         "inject": args.inject,
         "quota": args.quota,

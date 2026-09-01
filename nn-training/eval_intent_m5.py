@@ -18,6 +18,7 @@ eval_intent_m5.py — M5 gate 四必报项评估（plan/Intent-Policy-NN-Plan.md
   # B 臂（多根合并，与训练同 --data）：
   -ScriptArgs "--data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-B.json --out tmp/probe-M5-B-gate.json"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,11 +28,19 @@ import sys
 
 import numpy as np
 import torch
-
 from intent_net import IntentNet
 from weights_io import load_weights_json
 
-INTENT_IDS = ["INTERCEPT", "RETURN_DEFENSE", "HUNT", "HOLD_LANE", "CLEAR", "PICKUP", "CRUISE", "ESCAPE"]
+INTENT_IDS = [
+    "INTERCEPT",
+    "RETURN_DEFENSE",
+    "HUNT",
+    "HOLD_LANE",
+    "CLEAR",
+    "PICKUP",
+    "CRUISE",
+    "ESCAPE",
+]
 BUCKET_NAMES = ["base", "combat", "cruise"]
 SAFETY_GATE = 0.05  # 守家桶安全级误判阈值（Q5）
 D_MAX = 300.0  # 时长归一化上限（预注册 #11，与训练一致的口径）
@@ -104,7 +113,8 @@ def main() -> None:
         shards += [
             os.path.join(root, d)
             for d in sorted(os.listdir(root))
-            if os.path.isdir(os.path.join(root, d)) and os.path.exists(os.path.join(root, d, "intent.npy"))
+            if os.path.isdir(os.path.join(root, d))
+            and os.path.exists(os.path.join(root, d, "intent.npy"))
         ]
     shards = sorted(shards)
     rng = np.random.RandomState(args.seed)
@@ -112,7 +122,10 @@ def main() -> None:
     n_val = max(1, int(len(shards) * args.val_shard_frac))
     val_idx = set(perm[:n_val].tolist())
     val_shards = [i for i in range(len(shards)) if i in val_idx]
-    print(f"[m5gate] shards={len(shards)} val={len(val_shards)} weights={args.weights}", file=sys.stderr)
+    print(
+        f"[m5gate] shards={len(shards)} val={len(val_shards)} weights={args.weights}",
+        file=sys.stderr,
+    )
 
     meta, params = load_weights_json(args.weights)
     model = build_model(meta, params)
@@ -143,9 +156,7 @@ def main() -> None:
             n_total += n
 
             # 主干整批缓存 h（注入无关）
-            h = model.features(
-                torch.from_numpy(obs), torch.from_numpy(scalars)
-            )  # (n, 128)
+            h = model.features(torch.from_numpy(obs), torch.from_numpy(scalars))  # (n, 128)
             hc = torch.from_numpy(np.ascontiguousarray(h.numpy(), dtype=np.float32))
 
             # ---- teacher-feed ----
@@ -168,9 +179,7 @@ def main() -> None:
                     inj_t = np.zeros(9, dtype=np.float32)
                     inj_t[prev_c] = 1.0
                     inj_t[8] = min(dur_c, D_MAX)
-                logit = model.intent_head(
-                    torch.cat([hc[t], torch.from_numpy(inj_t)]).unsqueeze(0)
-                )
+                logit = model.intent_head(torch.cat([hc[t], torch.from_numpy(inj_t)]).unsqueeze(0))
                 p = int(logit.argmax(1)[0])
                 pred_s[t] = p
                 if p == prev_c:
@@ -185,7 +194,10 @@ def main() -> None:
             for t in range(n):
                 if pred_t[t] != intent[t]:
                     n_route_preddiff += 1
-                    if ACTIVATION[INTENT_IDS[int(pred_t[t])]] != ACTIVATION[INTENT_IDS[int(intent[t])]]:
+                    if (
+                        ACTIVATION[INTENT_IDS[int(pred_t[t])]]
+                        != ACTIVATION[INTENT_IDS[int(intent[t])]]
+                    ):
                         n_route_mismatch += 1
 
             # ---- base 桶混淆 + 安全级误判 ----
@@ -201,7 +213,9 @@ def main() -> None:
                 p_k = shift_prev(intent, k)
                 oh = np.zeros((n, 8), dtype=np.float32)
                 oh[np.arange(n), p_k] = 1.0
-                inj_k = np.concatenate([oh, np.minimum(dur, D_MAX)[:, None]], axis=1).astype(np.float32)
+                inj_k = np.concatenate([oh, np.minimum(dur, D_MAX)[:, None]], axis=1).astype(
+                    np.float32
+                )
                 lg = model.intent_head(torch.cat([hc, torch.from_numpy(inj_k)], dim=1))
                 pert[k][0] += int((lg.argmax(1).numpy() == intent).sum())
                 pert[k][1] += n
@@ -230,9 +244,15 @@ def main() -> None:
             "gap": round(float(teach_acc - self_acc), 4),
         },
         "item2": {
-            "perturbedPrevAcc": {k: round(v[0] / v[1], 4) if v[1] else None for k, v in sorted(pert.items())},
+            "perturbedPrevAcc": {
+                k: round(v[0] / v[1], 4) if v[1] else None for k, v in sorted(pert.items())
+            },
             "maxDropAt3": round(
-                max((pert[0][0] / pert[0][1] - pert[k][0] / pert[k][1]) for k in (-3, 3) if pert[k][1]),
+                max(
+                    (pert[0][0] / pert[0][1] - pert[k][0] / pert[k][1])
+                    for k in (-3, 3)
+                    if pert[k][1]
+                ),
                 4,
             ),
         },
@@ -262,7 +282,16 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
-    print(json.dumps({k: v for k, v in report.items() if k not in ("confusion8x8", "confusionTeacher8x8", "confusionSelf8x8")}, indent=2))
+    print(
+        json.dumps(
+            {
+                k: v
+                for k, v in report.items()
+                if k not in ("confusion8x8", "confusionTeacher8x8", "confusionSelf8x8")
+            },
+            indent=2,
+        )
+    )
     print(f"[m5gate] done -> {args.out}", file=sys.stderr)
 
 

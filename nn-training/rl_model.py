@@ -20,13 +20,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from torch.distributions import Categorical
 
-from schema import OBS_CHANNELS, BOARD, SCALAR_DIM
-
 # Action space dimensions (v2: item 删除 —— AI 不使用主动道具)
-MOVE_DIM = 5   # none/up/down/left/right
-FIRE_DIM = 2   # hold/fire
+MOVE_DIM = 5  # none/up/down/left/right
+FIRE_DIM = 2  # hold/fire
 TOTAL_ACTION_DIM = MOVE_DIM + FIRE_DIM  # 7
 
 
@@ -81,9 +80,7 @@ class RLNet(nn.Module):
             nn.BatchNorm2d(channels),
             nn.ReLU(inplace=True),
         )
-        self.resblocks = nn.Sequential(
-            *[ResBlock(channels) for _ in range(num_res_blocks)]
-        )
+        self.resblocks = nn.Sequential(*[ResBlock(channels) for _ in range(num_res_blocks)])
         self.conv_out = nn.Sequential(
             nn.Conv2d(channels, channels * 2, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels * 2),
@@ -135,22 +132,22 @@ class RLNet(nn.Module):
         """
         # Backbone
         x = obs.float() / 255.0  # normalize uint8 to [0,1]
-        x = self.conv_in(x)      # (B, 64, 26, 26)
-        x = self.resblocks(x)    # (B, 64, 26, 26)
-        x = self.conv_out(x)     # (B, 128, 26, 26)
-        x = self.gap(x)          # (B, 128, 1, 1)
-        x = x.flatten(1)         # (B, 128)
+        x = self.conv_in(x)  # (B, 64, 26, 26)
+        x = self.resblocks(x)  # (B, 64, 26, 26)
+        x = self.conv_out(x)  # (B, 128, 26, 26)
+        x = self.gap(x)  # (B, 128, 1, 1)
+        x = x.flatten(1)  # (B, 128)
 
         # Scalar fusion
         s = F.relu(self.scalar_fc(scalars))  # (B, 64)
 
         # Shared features
         h = torch.cat([x, s], dim=1)  # (B, 192)
-        h = self.shared(h)            # (B, 256)
+        h = self.shared(h)  # (B, 256)
 
         # Dual heads
         action_logits = self.actor(h)  # (B, 7)
-        value = self.critic(h)         # (B, 1)
+        value = self.critic(h)  # (B, 1)
 
         return action_logits, value
 
@@ -170,7 +167,7 @@ class RLNet(nn.Module):
 
         # Split logits into move/fire heads (v2: item 删除)
         move_logits = logits[:, :MOVE_DIM]
-        fire_logits = logits[:, MOVE_DIM:MOVE_DIM + FIRE_DIM]
+        fire_logits = logits[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]
 
         # Create independent distributions
         move_dist = Categorical(logits=move_logits)
@@ -186,14 +183,8 @@ class RLNet(nn.Module):
             fire_action = action[:, 1]
 
         # Log probabilities and entropy
-        log_prob = (
-            move_dist.log_prob(move_action)
-            + fire_dist.log_prob(fire_action)
-        )
-        entropy = (
-            move_dist.entropy()
-            + fire_dist.entropy()
-        )
+        log_prob = move_dist.log_prob(move_action) + fire_dist.log_prob(fire_action)
+        entropy = move_dist.entropy() + fire_dist.entropy()
 
         return action, log_prob, entropy, value.squeeze(-1)
 
@@ -211,18 +202,18 @@ def count_params(model: nn.Module) -> int:
 if __name__ == "__main__":
     model = RLNet()
     n = count_params(model)
-    print(f"RLNet params: {n:,} ({n/1000:.1f}K)")
-    print(f"Receptive field: 27×27 (104% of 26×26)")
+    print(f"RLNet params: {n:,} ({n / 1000:.1f}K)")
+    print("Receptive field: 27×27 (104% of 26×26)")
 
     # Test forward pass
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
     logits, value = model(dummy_obs, dummy_sc)
     print(f"action_logits: {logits.shape}")  # (2, 10)
-    print(f"value: {value.shape}")          # (2, 1)
+    print(f"value: {value.shape}")  # (2, 1)
 
     # Test action sampling
     action, log_prob, entropy, value = model.get_action_and_value(dummy_obs, dummy_sc)
-    print(f"action: {action.shape}")        # (2, 3)
-    print(f"log_prob: {log_prob.shape}")    # (2,)
-    print(f"entropy: {entropy.shape}")      # (2,)
+    print(f"action: {action.shape}")  # (2, 3)
+    print(f"log_prob: {log_prob.shape}")  # (2,)
+    print(f"entropy: {entropy.shape}")  # (2,)

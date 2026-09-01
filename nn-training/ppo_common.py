@@ -16,17 +16,18 @@ checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把�
   * _ppo_save / _ppo_load / _pack_np_state / _unpack_np_state 原样搬移——
     ppo_intent 原内联的 checkpoint 段改为调用本实现（逐字节相同）。
 """
+
 from __future__ import annotations
 
 import json
 import os
 import time
-from typing import Any, Callable, Dict, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any, Dict
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
 from rl.log import log  # 统一时间戳日志（与 ppo 旧 log 逐字节一致）
 
 
@@ -47,8 +48,7 @@ def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------- GAE ----------------
-def compute_gae(rewards, values, dones, gamma: float, lam: float,
-                dt: Sequence[int] | None = None):
+def compute_gae(rewards, values, dones, gamma: float, lam: float, dt: Sequence[int] | None = None):
     """Per-episode GAE. rewards[t]=r_{t+1}, values[t]=V(s_t).
 
     dt=None — 定长 per-tick 折扣（ppo.py 原路径，逐字节一致）。
@@ -78,13 +78,13 @@ def discover_shards(root: str, need: Sequence[str]) -> list[str]:
     return sorted(out)
 
 
-def load_shard_fields(dirpath: str, spec: Dict[str, tuple[str, np.dtype]]) -> Dict[str, np.ndarray]:
+def load_shard_fields(dirpath: str, spec: dict[str, tuple[str, np.dtype]]) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
     `dtype` 用 np.uint8/np.float32/np.int64；astype(..., copy=False) 在 dtype 已
     符合时零拷贝（obs 每轮 ~550MB，无谓拷贝纯烧内存带宽）。
     """
-    out: Dict[str, np.ndarray] = {}
+    out: dict[str, np.ndarray] = {}
     for key, (fname, dtype) in spec.items():
         out[key] = np.load(os.path.join(dirpath, fname)).astype(dtype, copy=False)
     return out
@@ -98,8 +98,9 @@ def _pack_np_state() -> list:
 
 
 def _unpack_np_state(packed: list) -> None:
-    np.random.set_state((packed[0], np.asarray(packed[1], dtype=np.uint32),
-                         packed[2], packed[3], packed[4]))
+    np.random.set_state(
+        (packed[0], np.asarray(packed[1], dtype=np.uint32), packed[2], packed[3], packed[4])
+    )
 
 
 def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
@@ -140,7 +141,7 @@ def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
     for e in episodes:
         n = e["obs"].shape[0]
         for s in range(0, n, mb):
-            out.append({k: v[s:s + mb] for k, v in e.items()})
+            out.append({k: v[s : s + mb] for k, v in e.items()})
     return out
 
 
@@ -151,8 +152,8 @@ def load_episodes_common(
     label: str,
     shard_kind: str,
     need_files: Sequence[str],
-    shard_loader: Callable[[str], Dict[str, np.ndarray]],
-    gae: Callable[[Dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
+    shard_loader: Callable[[str], dict[str, np.ndarray]],
+    gae: Callable[[dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
     gae_name: str,
     normalize_ret: bool,
     load_log_every: int = 128,
@@ -185,8 +186,10 @@ def load_episodes_common(
         episode["ret"] = ret.astype(np.float32)
         episodes.append(episode)
 
-    log(f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
-        f"({time.time() - t_load:.0f}s)")
+    log(
+        f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
+        f"({time.time() - t_load:.0f}s)"
+    )
     all_adv = np.concatenate([e["adv"] for e in episodes])
     amean, astd = all_adv.mean(), all_adv.std() + 1e-8
     for e in episodes:

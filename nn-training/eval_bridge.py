@@ -19,6 +19,7 @@ Usage:
   python eval_bridge.py --data-dir <held-out>
   python eval_bridge.py --emit-bun-cmd --weights-dir .
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,10 +31,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model import NNPolicy  # noqa: E402
-from weights_io import load_state_into, latest_weights_path  # noqa: E402
-from npyio import load_dataset  # noqa: E402
-from schema import MOVE_DIM, FIRE_DIM  # noqa: E402
+from model import NNPolicy
+from npyio import load_dataset
+from schema import FIRE_DIM, MOVE_DIM
+from weights_io import latest_weights_path, load_state_into
 
 
 def quick_eval(weights_path: str, data_dir: str) -> dict:
@@ -84,10 +85,16 @@ def emit_bun_cmd(weights_path: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", default=None,
-                    help="explicit weights JSON path; if omitted, the latest weights.*.json in --weights-dir is auto-selected")
-    ap.add_argument("--weights-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"),
-                    help="directory to auto-discover the latest weights when --weights is omitted")
+    ap.add_argument(
+        "--weights",
+        default=None,
+        help="explicit weights JSON path; if omitted, the latest weights.*.json in --weights-dir is auto-selected",
+    )
+    ap.add_argument(
+        "--weights-dir",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"),
+        help="directory to auto-discover the latest weights when --weights is omitted",
+    )
     ap.add_argument("--data-dir", default=None, help="held-out npy shards for quick eval")
     ap.add_argument("--emit-bun-cmd", action="store_true", help="print the full sim-eval command")
     args = ap.parse_args()
@@ -97,7 +104,9 @@ def main():
     if weights_path is None:
         weights_path = latest_weights_path(args.weights_dir)
         if weights_path is None:
-            print(f"ERROR: no weights found in {args.weights_dir} (pass --weights <path> to specify)")
+            print(
+                f"ERROR: no weights found in {args.weights_dir} (pass --weights <path> to specify)"
+            )
             sys.exit(2)
     print(f"[eval] using weights: {weights_path}")
 

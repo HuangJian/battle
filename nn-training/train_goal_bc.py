@@ -20,6 +20,7 @@ shard（export-counterfactual-goals.ts 产出）：
   ./start-training.sh --script train_goal_bc.py --data tmp/cf-goals-pilot \
       --out tmp/goal-bc/weights.json --epochs 20 --lambda 0.5 --tau 1.0
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,9 +31,8 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-from goal_net import GoalNet, load_goal_weights, export_goal_weights
-from ppo_common import discover_shards, log  # noqa: F402
+from goal_net import GoalNet, export_goal_weights, load_goal_weights
+from ppo_common import discover_shards, log
 
 UNREACH = 65535
 LOAD_LOG_EVERY = 128
@@ -41,10 +41,16 @@ HB_SEC = 30.0
 
 def load_cf_shard(dirpath: str, window: int) -> dict:
     """多窗口 shard（cand_s_w{W}.npy）；旧单窗口文件 cand_s.npy 作为回退。"""
-    s_name = f"cand_s_w{window}.npy" if os.path.exists(
-        os.path.join(dirpath, f"cand_s_w{window}.npy")) else "cand_s.npy"
-    e_name = f"engage_w{window}.npy" if os.path.exists(
-        os.path.join(dirpath, f"engage_w{window}.npy")) else "engage.npy"
+    s_name = (
+        f"cand_s_w{window}.npy"
+        if os.path.exists(os.path.join(dirpath, f"cand_s_w{window}.npy"))
+        else "cand_s.npy"
+    )
+    e_name = (
+        f"engage_w{window}.npy"
+        if os.path.exists(os.path.join(dirpath, f"engage_w{window}.npy"))
+        else "engage.npy"
+    )
     d = {
         "obs": np.load(os.path.join(dirpath, "obs.npy")),
         "scalars": np.load(os.path.join(dirpath, "scalars.npy")),
@@ -111,16 +117,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=str, required=True, help="cf-goals shard root")
     ap.add_argument("--out", type=str, required=True)
-    ap.add_argument("--init-from", type=str, default=None, help="迁移主干（如 intent BC 权重；可选）")
+    ap.add_argument(
+        "--init-from", type=str, default=None, help="迁移主干（如 intent BC 权重；可选）"
+    )
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--mb", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--lambda", dest="lam", type=float, default=0.5, help="carve 代价系数 λ（§9.4.2）")
+    ap.add_argument(
+        "--lambda", dest="lam", type=float, default=0.5, help="carve 代价系数 λ（§9.4.2）"
+    )
     ap.add_argument("--tau", type=float, default=1.0, help="软目标温度 τ（§11.5）")
     ap.add_argument("--window", type=int, default=240, help="H 扫描选出的窗口档（§11.8）")
     ap.add_argument("--engage-coef", type=float, default=0.3, help="engage 辅助 CE 权重")
-    ap.add_argument("--long-weight", type=float, default=1.0,
-                    help="长承诺样本（inject duration ≥0.5）的损失加权（§8.1.1 评审 a1 OOD 缓解#2）")
+    ap.add_argument(
+        "--long-weight",
+        type=float,
+        default=1.0,
+        help="长承诺样本（inject duration ≥0.5）的损失加权（§8.1.1 评审 a1 OOD 缓解#2）",
+    )
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=8)
@@ -154,8 +168,10 @@ def main():
         n_long += int((dur >= 0.5).sum())
         weight_chunks.append(w)
     n_valid = sum(int(v.sum()) for _, v in target_chunks)
-    log(f"[goal-bc] soft targets built (λ={args.lam} τ={args.tau}) valid={n_valid} "
-        f"long={n_long} ({100.0 * n_long / max(1, n_valid):.1f}%)")
+    log(
+        f"[goal-bc] soft targets built (λ={args.lam} τ={args.tau}) valid={n_valid} "
+        f"long={n_long} ({100.0 * n_long / max(1, n_valid):.1f}%)"
+    )
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     model.train()
@@ -210,8 +226,17 @@ def main():
     # 元数据（λ/τ 随权重归档，T9a 检查可溯）
     meta_path = args.out + ".meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"lambda": args.lam, "tau": args.tau, "epochs": args.epochs,
-                   "engageCoef": args.engage_coef, "data": args.data}, f, indent=2)
+        json.dump(
+            {
+                "lambda": args.lam,
+                "tau": args.tau,
+                "epochs": args.epochs,
+                "engageCoef": args.engage_coef,
+                "data": args.data,
+            },
+            f,
+            indent=2,
+        )
 
 
 if __name__ == "__main__":

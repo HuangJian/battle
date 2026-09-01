@@ -23,6 +23,7 @@ BC / 历史路径零影响）。
 然后 run_rl.py --bc <path>.json（--bc 是"首个 init 来源"通道；权重已存在则
 run_rl 原样续跑，语义不变）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,8 +34,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ppo import build_ppo  # noqa: E402
-from weights_io import save_weights_json  # noqa: E402
+from ppo import build_ppo
+from weights_io import save_weights_json
 
 TRUNK_SCALE = 0.1
 HEAD_SCALE = 0.01
@@ -73,8 +74,12 @@ def main() -> None:
     mmax = float(mv.abs().max())
     fmax = float(fr.abs().max())
     vmax = float(val.abs().max())
-    print(f"[init_scratch] saved {args.out} (trunk×{TRUNK_SCALE} heads×{HEAD_SCALE} value×{VALUE_SCALE})")
-    print(f"[init_scratch] |move_logits|max={mmax:.4f} |fire_logits|max={fmax:.4f} |value|={vmax:.4f}")
+    print(
+        f"[init_scratch] saved {args.out} (trunk×{TRUNK_SCALE} heads×{HEAD_SCALE} value×{VALUE_SCALE})"
+    )
+    print(
+        f"[init_scratch] |move_logits|max={mmax:.4f} |fire_logits|max={fmax:.4f} |value|={vmax:.4f}"
+    )
     # logits ±0.5 ⇒ softmax p_max ≈ 0.30（5 动作近均匀）；value ≈ 回报量级。
     assert mmax < 0.5 and fmax < 0.5, "policy logits too large — near-deterministic start"
     assert vmax < 10.0, "value head far from return scale — GAE bootstrap will explode"
