@@ -1,3 +1,4 @@
+
 """run_rl.py — RL on-policy 主循环入口（唯一 RL 入口，P1.5 蒸馏 → RL 阶段）。
 
 **三模式入口**（2026-09-01 RL 入口整合，plan/RL-Entry-Consolidation.md /
@@ -109,69 +110,6 @@ from weights_io import load_state_into, save_weights_json
 
 # Per-iteration weights archive (user request 2026-08-24): every completed PPO
 # write-back is copied into nn-training/weights/ with an identifiable name.
-WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
-WEIGHTS_BACKUP_KEEP = 20  # bounded archive: prune oldest it-backups beyond this
-
-# ==================== RL 入口整合（DECISIONS §307）：三模式基础设施 ====================
-
-_MODES = ("per-tick", "intent", "goal")
-# PPO 后端注册表：stream.py 的 backend 契约（update/_ppo_load/load_episodes/
-# chunk_episodes）三者都实现（ppo.py 尾部 update = ppo_update 别名）。
-_MODE_BACKENDS = {"per-tick": ppo_mod, "intent": ppo_intent, "goal": ppo_goal}
-# 权重归档前缀分桶（backup_weights 按 mtime prune，互不干扰）。
-_MODE_BACKUP_PREFIX = {
-    "per-tick": "rl-weights",
-    "intent": "intent-rl-weights",
-    "goal": "goal-rl-weights",
-}
-# 意图 RL 干净评估默认迭代（评估旁路不拖慢采集：只在这几个迭代跑）。
-DEFAULT_EVAL_AT_INTENT = "5,10,15"
-
-
-def resolve_mode(argv: list[str]) -> str:
-    """从 argv 预解析 --mode / --goal（两阶段 argparse 的第一阶段）。纯函数。"""
-    mode = "per-tick"
-    for i, a in enumerate(argv):
-        if a == "--mode" and i + 1 < len(argv):
-            mode = argv[i + 1]
-        elif a.startswith("--mode="):
-            mode = a.split("=", 1)[1]
-        elif a == "--goal":
-            mode = "goal"
-    return mode if mode in _MODES else mode  # 非法值留给 argparse 报错
-
-
-def merged_mode_args(cfg: dict, mode: str) -> tuple[dict, dict]:
-    """启动参数默认合并（单一事实来源，DECISIONS §307 D2）。纯函数。
-
-    查找优先级（高→低）：rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl。
-    返回 (合并后的默认字典, {key: 来源块}) 供 trust-but-verify 日志。"""
-    rl_block = dict(cfg.get("rl", {}) or {})
-    mode_key = "intent" if mode == "intent" else ("goal" if mode == "goal" else "")
-    nested = dict((cfg.get("rl", {}) or {}).get(mode_key, {}) or {}) if mode_key else {}
-    legacy = {}
-    if mode in ("intent", "goal"):
-        legacy = dict(cfg.get("intent_rl", {}) or {})
-    merged = {**rl_block, **legacy, **nested}
-    src = {k: ("rl" if k in rl_block else "fallback") for k in merged}
-    for k in legacy:
-        src[k] = "intent_rl(legacy)"
-    for k in nested:
-        src[k] = f"rl.{mode_key}"
-    return merged, src
-
-
-def apply_mode_flags(args) -> None:
-    """按 --mode 置位采集器/权重桶 flag（rl/queue.py 与 rl/stream.py 按此分支，
-    机制层零改动）。--goal 别名 → mode=goal。"""
-    if getattr(args, "goal", False):
-        args.mode = "goal"
-    args.intent_rollout = args.mode == "intent"
-    args.goal_rollout = args.mode == "goal"
-    args.goal = args.mode == "goal"
-    return args
-
-
 def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
     """intent/goal 模式的 PPO 更新参数：value 预热（前 warmup-iters 冻结主干只训
     value 头）+ kickstarting KL 惩罚（系数按策略迭代衰减）。自 run_rl_intent 原样
@@ -571,76 +509,6 @@ def build_model(
         + ("" if resume else f" -> {rl_path}")
     )
     return model
-
-
-def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> str | None:
-    """Archive the just-written RL weights into nn-training/weights/.
-
-    Name: <prefix>.it<N>.<YYYYMMDD-HHMMSS>.json — iteration-first so the
-    archive sorts by training progress at a glance; the timestamp disambiguates
-    re-runs of the same iter. Deliberately NOT matching weights_io's strict
-    `weights.<ts>_ep<N>_val<V>.json` BC auto-discovery regex (same reason the
-    manual `rl-weights.*_post-it*ppo.json` backup avoided it): eval_bridge's
-    latest_weights_path must never pick up RL archives. Less-recent pruned
-    beyond WEIGHTS_BACKUP_KEEP; non-fatal on any IO error.
-    prefix（工程化共享）：run_rl_intent 用 'intent-rl-weights' 独立前缀，与 per-tick
-    RL 归档分桶（各自按前缀 prune，互不干扰）。
-
-    2026-08-27 §30 修复 prune 排序：原来是 `sorted(glob)`（按**文件名**字典序）取最小
-    一批删——而名字 `it2 < it20 < it3`（'2'<'3'），字典序最小 ≠ 最旧，导致重启后轮
-    it20–23 的最新多样权重被当"最旧"误删、12:00 时代的老 it3–9 反而幸存（it21–24
-    多样 checkpoint 永久丢失的根因）。改为按 **st_mtime**（真实新旧）排序删最旧，
-    名字时间戳只作同 mtime 兜底。"""
-    try:
-        WEIGHTS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        dst = WEIGHTS_BACKUP_DIR / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
-        shutil.copyfile(weights_path, dst)
-        baks = sorted(
-            WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"),
-            key=lambda p: (p.stat().st_mtime, p.name),
-        )
-        if len(baks) > WEIGHTS_BACKUP_KEEP:
-            for old in baks[: len(baks) - WEIGHTS_BACKUP_KEEP]:
-                old.unlink(missing_ok=True)
-        return str(dst)
-    except OSError as e:
-        log(f"[run_rl] WARN weights backup failed (non-fatal): {e}")
-        return None
-
-
-def ensure_current_branch_pushed(repo_root: Path) -> str | None:
-    """启动前把当前 git 分支 push 到 origin——远端 agent 的 upgrade 是 `git pull`，
-    拉的是 **origin**，本地 ahead 的 commit 不 push，agents 永久拉旧代码 →
-    codeHash 对不上被排除 → 训练全程本机独扛、远端 30+ 槽闲置（§30 实测教训）。
-    push 失败（离线/无远端/无 upstream）仅告警不中断——本地训练不依赖远端。
-    返回 push 的分支名（失败返回 None）。"""
-    try:
-        branch = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.strip()
-        if not branch or branch == "HEAD":
-            return None
-        r = subprocess.run(
-            ["git", "push", "origin", branch],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if r.returncode == 0:
-            log(f"[run_rl] pushed {branch} -> origin (agents can git-pull to sync)")
-            return branch
-        log(
-            f"[run_rl] WARN git push {branch} failed (rc={r.returncode}): "
-            f"{(r.stderr or r.stdout)[-200:]} — remote agents may stay stale"
-        )
-    except Exception as e:
-        log(f"[run_rl] WARN git push skipped: {e}")
-    return None
 
 
 def _log_iter_error(jsonl_path: Path, it: int, err: str) -> None:

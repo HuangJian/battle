@@ -644,21 +644,23 @@ def test_chunk_episodes() -> None:
 def test_backup_weights(tmp: Path) -> None:
     import run_rl
 
+    from rl import archive as rl_archive
+
     print("[fast] backup_weights (归档 + 有界清理)")
     bdir = tmp / "weights-archive"
     shutil.rmtree(bdir, ignore_errors=True)
     src = tmp / "src-weights.json"
     src.write_text("{}", encoding="utf-8")
-    old_dir, old_keep = run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP
-    run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = bdir, 2
+    old_dir, old_keep = rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP
+    rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP = bdir, 2
     try:
         for it in (1, 2, 3):
-            out = run_rl.backup_weights(str(src), it)
+            out = rl_archive.backup_weights(str(src), it)
             check(out is not None, f"backup it{it} returned path")
         remain = sorted(p.name.split(".")[1] for p in bdir.glob("rl-weights.it*.json"))
         check(remain == ["it2", "it3"], f"bounded prune keeps newest KEEP (got {remain})")
     finally:
-        run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
+        rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
 
 
 def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
@@ -686,12 +688,13 @@ def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
         p.write_text("{}", encoding="utf-8")
         created.append(p)
         os.utime(p, (now - 5000, now - 5000))
-    old_dir, old_keep = run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP
-    run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = bdir, 5
+    from rl import archive as rl_archive
+    old_dir, old_keep = rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP
+    rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP = bdir, 5
     try:
         # 新迭代 20–25 逐个备份（mtime 晚于老文件）。
         for it in range(20, 26):
-            out = run_rl.backup_weights(str(src), it)
+            out = rl_archive.backup_weights(str(src), it)
             check(out is not None, f"backup it{it} returned path")
         remain = sorted(p.name.split(".")[1] for p in bdir.glob("rl-weights.it*.json"))
         # 应保留最新 5 个 = it21–25；老 it2/it3 与最早的 it20 被清理。
@@ -700,7 +703,7 @@ def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
             f"prune 保留最新 KEEP (got {remain})",
         )
     finally:
-        run_rl.WEIGHTS_BACKUP_DIR, run_rl.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
+        rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP = old_dir, old_keep
 
 
 def test_eval_local_gate(tmp: Path) -> None:
