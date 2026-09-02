@@ -171,40 +171,42 @@ def test_merged_mode_args() -> None:
 
 
 def test_stop_loss_hit() -> None:
+    from rl.stop_loss import stop_loss_hit
+
     print("[fast] stop_loss_hit：止损判门分模式（原 iter15 Δ≤0 泛化 + P1-9 统计化）")
     check(
-        run_rl.stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发"
+        stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发"
     )
     check(
-        run_rl.stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭"
+        stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭"
     )
     check(
-        run_rl.stop_loss_hit("intent", 15, 0.0, 10, {"delta": -0.1}) is False,
+        stop_loss_hit("intent", 15, 0.0, 10, {"delta": -0.1}) is False,
         "未到 stop-loss-at 不触发",
     )
     # 旧调用方（eval_rec 无 games/winRate）：保持原语义 Δ≤bar 即停（无 σ 可推）。
-    check(run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05}) is True, "Δ<=0 触发(legacy)")
-    check(run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.1}) is False, "Δ>0 不触发")
-    check(run_rl.stop_loss_hit("goal", 15, 0.0, 20, {"delta": 0.0}) is True, "goal Δ==0 触发(legacy)")
-    check(run_rl.stop_loss_hit("intent", 15, 0.0, 20, None) is False, "无 eval 记录不触发")
+    check(stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05}) is True, "Δ<=0 触发(legacy)")
+    check(stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.1}) is False, "Δ>0 不触发")
+    check(stop_loss_hit("goal", 15, 0.0, 20, {"delta": 0.0}) is True, "goal Δ==0 触发(legacy)")
+    check(stop_loss_hit("intent", 15, 0.0, 20, None) is False, "无 eval 记录不触发")
     # P1-9 统计化：带 games/winRate 时要求 Δ ≤ −2σ（350 局 p≈0.72 → σ≈0.024 → −2σ≈−0.048）。
     check(
-        run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05, "games": 350, "winRate": 0.72})
+        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05, "games": 350, "winRate": 0.72})
         is True,
         "Δ=−0.05 ≤ −2σ(−0.048) 统计显著 → 触发",
     )
     check(
-        run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.0, "games": 350, "winRate": 0.72})
+        stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.0, "games": 350, "winRate": 0.72})
         is False,
         "Δ=0 不显著（旧逻辑会误停）——P1-9 修复核心断言",
     )
     check(
-        run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72})
+        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72})
         is False,
         "Δ=−0.02 在噪声带内（−0.048, 0）→ 不触发",
     )
     check(
-        run_rl.stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72}, z_score=0.5)
+        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72}, z_score=0.5)
         is True,
         "z 收紧（0.5σ）时 −0.02 也算显著——z 参数可调",
     )
