@@ -102,7 +102,11 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-ra -q --tb=short -x --basetemp=tmp/pytest-tmp"
+addopts = "-ra -q --tb=short -x"
+# 2026-09-02：**不设 --basetemp**。pytest 每次启动会清空 basetemp（>50 文件触发
+# 沙箱批量删除确认，无交互场景直接失败）。conftest 已覆盖内置 tmp_path fixture：
+# 临时目录落在项目内 tmp/pytest-tmp/ 唯一子目录、从不删除——pytest 不创建 basetemp、
+# 全程零删除。旧累积目录可手动清理（一次性确认）。
 
 # NOTE: tests/test_run_rl.py is ALSO runnable as a standalone script
 # (python tests/test_run_rl.py). This is intentional for ad-hoc regression

@@ -207,3 +207,28 @@ scripts/* → models/*, ppo/*
 - [ ] P4 CI（GitHub Actions + 权重归档自动化）
 
 > 注：本 README 与 `plan/nn-training-refactor.md` 路线图对齐。
+
+---
+
+## Pre-commit 门禁（2026-09-02）
+
+仓库 `tools/githook/pre-commit`（`core.hooksPath = tools/githook`）在提交时自动
+执行质量门禁。**当 staged 内容包含 `nn-training/` 下文件时**，除仓库既有的
+TS 门禁（typecheck / bun test / oxfmt / oxlint / freeze gate）外，额外跑 Python
+门禁（在 `nn-training/` 内、用 `.venv` 解释器）：
+
+```sh
+python -m ruff check .              # lint
+python -m mypy . --config-file pyproject.toml   # typecheck
+python -m pytest tests/             # 全量测试
+```
+
+任一失败即阻止提交。跳过方式（二选一）：
+
+```sh
+SKIP_NN_TRAINING_GATE=1 git commit ...   # 仅跳过 Python 门禁
+git commit --no-verify ...               # 跳过全部门禁
+```
+
+> 门禁产物（pytest basetemp / ruff / mypy 缓存）全部落在 `nn-training/tmp/`
+> （已 gitignore），提交时不产生额外噪音。
