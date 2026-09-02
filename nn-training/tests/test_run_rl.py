@@ -840,6 +840,7 @@ def main() -> None:
     test_compute_gae()
     test_chunk_episodes()
     test_backup_weights(tmp)
+    test_scan_shards_mtime_cache(tmp)
     test_eval_local_gate(tmp)
     test_pick_tail_race()
     test_race_tier_ok()
@@ -860,3 +861,46 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_scan_shards_mtime_cache(tmp: Path) -> None:
+    """P2-2：_scan_shards 目录签名缓存——新 shard 落盘后签名变化 → 重扫；未变 → 复用。"""
+    from rl import resume as rl_resume
+
+    print("[fast] _scan_shards mtime cache（热路径零 IO）")
+    traj = tmp / "cache-traj"
+    traj.mkdir(parents=True)
+    wver = "abc123"
+    # 空目录：无 shard
+    rl_resume._SCAN_CACHE.clear()
+    check(rl_resume.completed_pairs(traj, wver) == set(), "空目录无 done")
+    check(len(rl_resume._SCAN_CACHE) == 1, "首次扫描写入缓存")
+    check(rl_resume.completed_pairs(traj, wver) == set(), "缓存命中结果一致")
+
+    # 写入一个完整 shard（manifest 含 stage/seed/wver）→ 签名变 → 重扫应命中
+    shard = traj / "rl_s0_seed111"
+    shard.mkdir()
+    import json as _json
+
+    (shard / "obs.npy").write_bytes(b"x")
+    (shard / "manifest.json").write_text(
+        _json.dumps({"stage": 0, "seed": 111, "wver": wver}), encoding="utf-8"
+    )
+    check(
+        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
+        "新 shard 落盘后缓存失效重扫",
+    )
+    check(
+        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
+        "签名未变缓存命中",
+    )
+    # wver 不匹配的 shard 不计入
+    shard2 = traj / "rl_s1_seed222"
+    shard2.mkdir()
+    (shard2 / "manifest.json").write_text(
+        _json.dumps({"stage": 1, "seed": 222, "wver": "other"}), encoding="utf-8"
+    )
+    check(
+        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
+        "wver 不匹配不计入",
+    )

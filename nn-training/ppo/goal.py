@@ -258,7 +258,10 @@ def ppo_update_goal(
             "mean_ret": 0.0,
             "early_stopped": False,
         }
-    np.random.seed(seed)
+    # P1-5（2026-09-02）：**不在 update 内重播种 RNG**。旧实现每次 update 调
+    # np.random.seed(seed) → 流式模式每波调用 update → 每波 minibatch permutation
+    # 序列逐字节相同（叠加连续切片的强相关性，等于每波用同一顺序消化高度相关语料）。
+    # RNG 由调用方（CLI main / run_rl 主循环）播种一次；seed 参数保留供签名兼容。
     model.train()
     clip = CLIP_EPS
     stats: list[dict[str, float]] = []

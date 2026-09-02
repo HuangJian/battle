@@ -200,6 +200,7 @@ def main() -> None:
     test_cat_logprob_entropy()
     test_chunk_episodes()
     test_np_state_roundtrip()
+    test_backend_params_match_config()
     test_ppo_save_load(Path(_td))
     test_discover_and_load_shard_fields(Path(_td))
     if FAILS:
@@ -210,3 +211,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_backend_params_match_config() -> None:
+    """P1-1 守护：三后端本地超参与 ppo/config.py BACKEND_PARAMS 一致（调参必须同步）。"""
+    from ppo.config import assert_backend_constants
+
+    assert_backend_constants()

@@ -78,6 +78,7 @@ from rl.eval_m1 import (
 )
 
 # rl/ 包：编排逻辑单点实现（本文件以下仅存 CLI + 主循环 + 权重归档/巡检）
+from rl.log import Tee as _Tee  # P2-6d：run_rl._Tee 迁入 rl/log.py 通用实现
 from rl.log import log
 from rl.modes import (
     _MODE_BACKUP_PREFIX,
@@ -171,31 +172,6 @@ def stop_loss_hit(
     if sigma is None:
         return True  # 无 games 数据：保持原语义（Δ≤bar 即停）
     return delta <= -z_score * sigma
-
-
-class _Tee:
-    """同时写多个流（控制台 + 文件），供长训日志持久化且终端仍可见。
-    自 run_rl_intent 迁入（per-tick 模式从此也获得 out_log/err_log 落盘能力）。"""
-
-    def __init__(self, *streams):
-        self._streams = streams
-
-    def write(self, s):
-        for st in self._streams:
-            try:
-                st.write(s)
-            except Exception:
-                pass
-
-    def flush(self):
-        for st in self._streams:
-            try:
-                st.flush()
-            except Exception:
-                pass
-
-    def isatty(self) -> bool:
-        return False
 
 
 def _setup_log_redirect(args) -> None:

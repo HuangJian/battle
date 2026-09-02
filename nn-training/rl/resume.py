@@ -5,6 +5,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# P2-2（2026-09-02）：_scan_shards 目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
+# completed_pairs——旧实现每次都 rglob 全树 + 逐个 JSON 解析（140 局 ≈ 25 万次
+# 文件读）。目录签名 = 全部 rl_s*_seed* 目录的 (相对路径, mtime) 元组：新增 shard
+# 目录、或 shard 内写完 manifest（目录 mtime 更新）都会改变签名 → 缓存失效重扫；
+# 签名未变时零 IO 直接复用。mtime 秒级精度足够（轮询间隔 2s）。
+_SCAN_CACHE: dict[tuple, list[tuple[tuple[int, int], Path]]] = {}
+_SCAN_CACHE_MAX = 512
+
+
+def _dir_signature(traj_dir: Path) -> tuple:
+    """traj_dir 下全部 shard 目录的 (相对路径, mtime)——检测新增/完成的 shard。"""
+    sig = []
+    for p in traj_dir.rglob("rl_s*_seed*"):
+        if p.is_dir():
+            try:
+                sig.append((str(p.relative_to(traj_dir)), p.stat().st_mtime))
+            except OSError:
+                continue
+    return tuple(sorted(sig))
+
 
 def completed_pairs(
     traj_dir: Path, wver: str, extra_wver: str | None = None
@@ -26,10 +46,17 @@ def _scan_shards(
 ) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
+
+    目录签名缓存（P2-2）：签名未变（无新 shard / 无 shard 内容更新）时零 IO 复用。
     """
-    res: list[tuple[tuple[int, int], Path]] = []
     if not traj_dir.exists():
-        return res
+        return []
+    sig = _dir_signature(traj_dir)
+    key = (str(traj_dir), wver, extra_wver, sig)
+    cached = _SCAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    res: list[tuple[tuple[int, int], Path]] = []
     for m in traj_dir.rglob("rl_s*_seed*/manifest.json"):
         try:
             mm = json.loads(m.read_text(encoding="utf-8"))
@@ -40,6 +67,9 @@ def _scan_shards(
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
         res.append(((int(st), int(sd)), m.parent))
+    if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
+        _SCAN_CACHE.clear()
+    _SCAN_CACHE[key] = res
     return res
 
 
