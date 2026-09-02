@@ -21,6 +21,7 @@ from rl.reward_library import (
     METRIC_INDEX,
     METRICS,
     CompiledFormula,
+    FormulaDegradeError,
     FormulaError,
     ParsedFormula,
     RewardSpec,
@@ -99,6 +100,7 @@ def symbolic_envelope(
     params: Mapping[str, float],
     ranges: Mapping[str, tuple[float, float]] | None = None,
     limit: float = DEFAULT_ENVELOPE_LIMIT,
+    allow_extended_funcs: bool = False,
 ) -> list[EnvelopeTerm]:
     """逐加性项角点求值（评审 P1-3 务实版）：放弃全局符号上界，只枚举每项引用的
     1–4 个指标变量的 2^n 角点组合。
@@ -132,7 +134,7 @@ def symbolic_envelope(
             for name, val in zip(names, corner, strict=True):
                 met[j, METRIC_INDEX[name]] = val
         try:
-            sub = compile_formula(ast.unparse(term), params)
+            sub = compile_formula(ast.unparse(term), params, allow_extended_funcs)
             vals = sub.phi(met, params)
         except (FormulaError, SyntaxError, ZeroDivisionError, FloatingPointError):
             # 角点上的除零/溢出本身就是要拦的信号 → 记为超限
@@ -183,18 +185,29 @@ def validate_reward(
     if spec.formula:
         try:
             compiled = compile_formula(spec.formula, spec.params, spec.allow_extended_funcs)
-            envelope = tuple(symbolic_envelope(compiled.parsed, spec.params, ranges, limit))
+            envelope = tuple(
+                symbolic_envelope(
+                    compiled.parsed,
+                    spec.params,
+                    ranges,
+                    limit,
+                    allow_extended_funcs=spec.allow_extended_funcs,
+                )
+            )
             for t in envelope:
                 if not t.ok:
                     warnings.append(
                         f"数值包络超限：|{t.src}| 峰值 {t.max_abs:.3g} > {limit:.3g}"
                         f"（vars={t.vars} @ {t.at}）"
                     )
-        except FormulaError as e:
+        except FormulaDegradeError as e:
+            # 评审 F1：仅量化触发面（长度/深度）可回退；其余 FormulaError 是配置错误 → 硬错
             if spec.builtin:
-                warnings.append(f"formula 不可用，回退内置 '{spec.builtin}'：{e}")
+                warnings.append(f"formula 触发降级卡，回退内置 '{spec.builtin}'：{e}")
             else:
-                errors.append(f"formula 非法：{e}")
+                errors.append(f"formula 超限且无 builtin：{e}")
+        except FormulaError as e:
+            errors.append(f"formula 非法（配置错误，不回退 builtin）：{e}")
     if spec.scheme not in ("toy", "score_reconcile"):
         errors.append(f"scheme 非法：'{spec.scheme}'（toy/score_reconcile）")
     for k in spec.terminal:

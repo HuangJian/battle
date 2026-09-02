@@ -132,6 +132,55 @@ def test_limits_trigger_degrade_card() -> None:
     assert out.shape == (2,) and np.all(np.isfinite(out))
 
 
+def test_degrade_only_on_quantitative_triggers() -> None:
+    """评审 F1：降级卡**只**在量化触发面（>1024 字符 / AST>64）回退 builtin——
+
+    语法错误 / 未知名 params / 白名单外符号是配置错误，声明了 builtin 也必须
+    响亮 raise（否则调参手误 → 实验静默换内置，golden 在 v7 域上还不暴露）。
+    """
+    import re as _re
+
+    # 量化触发面 → 回退（warning 带真实原因）
+    long_f = " + ".join(["kills"] * 400)
+    spec = RewardSpec(formula=long_f, builtin="v7", params=dict(V7_DEFAULT_PARAMS))
+    fn = build_reward_fn(spec)
+    assert fn._compiled is None and fn._builtin is not None
+
+    # 语法错误 + builtin → 硬失败（不回退）
+    with pytest.raises(FormulaError, match="语法错误"):
+        build_reward_fn(RewardSpec(formula="kills +", builtin="v7", params={}))
+    # 未知名 params 拼错（wP→wq 实测案例）+ builtin → 硬失败
+    with pytest.raises(FormulaError, match="未知符号 'wq'"):
+        build_reward_fn(RewardSpec(formula="wq*kills + 1", builtin="v7", params={"wP": 0.3}))
+    # 白名单外函数 + builtin → 硬失败（需 allow_extended_funcs 显式开启）
+    with pytest.raises(FormulaError, match="白名单外的函数"):
+        build_reward_fn(RewardSpec(formula="tanh(kills)", builtin="v7", params={}))
+    # validate_reward 侧同语义：配置错误记 errors（不回退 warning）
+    rep = validate_reward(RewardSpec(formula="wq*kills + 1", builtin="v7", params={"wP": 0.3}))
+    assert not rep.ok and any("配置错误" in e for e in rep.errors), rep.errors
+    # 量化触发面 validate 侧：仍回退（warning）
+    rep2 = validate_reward(RewardSpec(formula=long_f, builtin="v7", params=dict(V7_DEFAULT_PARAMS)))
+    assert rep2.ok and any("降级卡" in w for w in rep2.warnings), rep2.warnings
+
+
+def test_envelope_extended_funcs_no_false_positive() -> None:
+    """评审 F2：symbolic_envelope 对扩展层公式不再误报（allow_extended 透传）。
+
+    修复前 envelope 的子 compile 不透传 allow_extended_funcs → tanh/sin 等扩展
+    函数每个项都标 inf「数值包络超限」污染启动日志。有界扩展函数现在应干净通过。
+    """
+    spec = RewardSpec(
+        formula="tanh(kills) + 0.5*sin(ticks/1000)", params={}, allow_extended_funcs=True
+    )
+    rep = validate_reward(spec)
+    assert rep.ok, rep.errors
+    assert not any("数值包络超限" in w for w in rep.warnings), rep.warnings
+    # 关闭扩展层 → 白名单外函数 → 配置错误（硬失败），而不是假 inf 警告
+    spec_off = RewardSpec(formula="tanh(kills)", params={})
+    rep_off = validate_reward(spec_off)
+    assert not rep_off.ok and any("配置错误" in e for e in rep_off.errors), rep_off
+
+
 def test_isfinite_guard() -> None:
     """除零/溢出不得静默污染 GAE —— Φ 非有限即报错。"""
     cf = compile_formula("kills/playerShots", {})

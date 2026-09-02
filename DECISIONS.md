@@ -1512,3 +1512,23 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 **eval 双侧同规**（plan §6/§10）：`export-eval-game.ts` 增 `--stage-json/--lives-override/--player-level`（decodeStageGrid 短路、自定义关 loadIndex=0、覆盖在 S-Dodge 默认之后生效）；`eval_local.run_local_eval_game` + `eval_dispatch` 本地评估按课程透传；sampler-agent eval 分支同传。自定义关 eval 直跑冒烟通过。说明：legacy 非课程 arena eval 仍保留 exporter 内 S-Dodge lives=1 默认（课程路径以配置覆盖为准，双轨共存不破既有评估基线）。
 
 **验证**：nn python gate ✓；tsc/oxlint/oxfmt ✓；bun 13 用例 ✓；test_run_rl fake_runner 签名同步（+3 可选参）。
+
+## §308c 评审 F1–F3 处理（2026-09-02，commit e828331/8b849e4/0dec734 之后）
+
+**F1（中）降级卡触发面收窄**：`RewardSpec` 降级回退从「任意 FormulaError」收窄到新异常
+`FormulaDegradeError`（机制性量化限制：formula>1024 字符 / AST 深度>64，专用异常由
+`parse_formula` 抛出）——语法错误、白名单外函数、未知名 params（wq 实测案例）现在带
+builtin 也**响亮 raise**，不再静默回退内置；warning 文案拼入真实异常文本。`validate_reward`
+同语义（配置错误记 errors 硬失败，仅量化触发回退 warning）。单测
+`test_degrade_only_on_quantitative_triggers` 覆盖四象限。
+
+**F2（低）envelope 扩展层误报**：`symbolic_envelope` 增 `allow_extended_funcs` 透传（子项
+compile 同参）——有界扩展函数（tanh/sin 等）不再被误标 inf「数值包络超限」污染启动日志；
+关闭扩展层时白名单外函数走 F1 的配置错误路径。单测 `test_envelope_extended_funcs_no_false_positive`。
+
+**F3（低）plan 文档-实现回填三处**（行为安全、措辞更新）：
+① §4.2 param_schedule mode = 硬编码 (linear, step) + 未知 mode 响亮报错（非自由字符串）；
+② §5.2 布局指纹 = `sha256(stageJson 串)[:16]`（较字段级 FNV 更保守：key 序变化 → miss 而非复用）；
+③ §4.1 21 维表回填 idx10 `starsCollected`。F4–F6 信息级确认无需改代码。
+
+**验证**：nn-training pytest 全绿（含 4 个相关单测）；ruff/mypy 门禁通过。

@@ -282,6 +282,16 @@ class FormulaError(ValueError):
     """公式非法（解析/校验/求值任一阶段）。"""
 
 
+class FormulaDegradeError(FormulaError):
+    """公式**量化触发面**超限（评审 F1，2026-09-02）。
+
+    降级卡只允许在**机制性量化限制**上触发：formula > 1024 字符 / AST 深度 > 64
+    ——这两类与公式语义无关，配置方「换 builtin」是合法备胎。语法错误、白名单
+    外符号、未知名 params 等都是**配置错误**（手误即脚枪），必须原样传播、
+    由调用方响亮报错——绝不静默回退 builtin 掩盖真因。
+    """
+
+
 # ---------------------------------------------------------------- parse
 
 
@@ -341,8 +351,8 @@ def parse_formula(
     if not isinstance(source, str) or not source.strip():
         raise FormulaError("formula 为空")
     if len(source) > MAX_FORMULA_CHARS:
-        raise FormulaError(
-            f"formula 长度 {len(source)} > {MAX_FORMULA_CHARS}（降级卡触发：请缩短公式"
+        raise FormulaDegradeError(
+            f"formula 长度 {len(source)} > {MAX_FORMULA_CHARS}（降级卡量化触发：请缩短公式"
             "或改用 reward.builtin 内置实现）"
         )
     try:
@@ -357,7 +367,7 @@ def parse_formula(
 
     def check(node: ast.AST, depth: int, is_func: bool) -> int:
         if depth > MAX_AST_DEPTH:
-            raise FormulaError(f"formula AST 深度 > {MAX_AST_DEPTH}（降级卡触发）")
+            raise FormulaDegradeError(f"formula AST 深度 > {MAX_AST_DEPTH}（降级卡量化触发）")
         if not isinstance(node, _ALLOWED_NODES):
             raise FormulaError(f"禁止的 AST 节点：{type(node).__name__}（{ast.dump(node)[:80]}）")
         max_d = depth
@@ -650,14 +660,16 @@ class RewardFn:
                 self._compiled = compile_formula(
                     spec.formula, spec.params, spec.allow_extended_funcs
                 )
-            except FormulaError:
+            except FormulaDegradeError as e:
                 if not spec.builtin:
                     raise
-                # 降级卡：warning 日志 + 回退内置，**不静默切换**（LC §4.3）
+                # 降级卡：**仅量化触发面**（长度/深度超限）回退内置，warning 带真实原因；
+                # 语法/白名单/未知名等 FormulaError 不在此捕获——原样传播响亮报错
+                # （评审 F1：调参手误不得静默回退掩盖真因）。
                 from rl.log import log
 
                 log(
-                    f"[reward] WARNING: formula 超限/含白名单外符号 —— 回退内置 "
+                    f"[reward] WARNING: formula 触发降级卡（{e}）—— 回退内置 "
                     f"'{spec.builtin}'（第二机制，DoD 已承认；formula={spec.formula[:60]}…）"
                 )
         if self._compiled is None:
