@@ -1428,6 +1428,10 @@ def main() -> None:
                             "kl": agg["kl"] if agg else None,
                             "mean_ret": agg["mean_ret"] if agg else None,
                             "lr": args.lr,
+                            # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
+                            # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）
+                            "reward": getattr(args, "reward", ""),
+                            "dodge": getattr(args, "dodge", ""),
                             "mb": args.mb,
                             "epochs": args.epochs,
                             # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）

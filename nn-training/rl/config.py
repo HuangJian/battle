@@ -36,6 +36,7 @@ class RLConfig:
     adv_norm: str = "auto"
     eval_seeds: int = 10
     eval_at: str = ""
+    reward: str = ""
 
     def validate(self) -> list[str]:
         """返回配置错误列表（空 = 合法）。启动期调用，任一错误即阻止训练。"""
@@ -73,6 +74,13 @@ class RLConfig:
             errs.append(f"eval_seeds={self.eval_seeds} 非法（≥1）")
         if self.stop_loss_at < 0:
             errs.append(f"stop_loss_at={self.stop_loss_at} 非法（≥0）")
+        # P1-12：reward 臂规格校验（'' / 'v7' / 'toy:<arm>'）——防拼错静默走默认
+        if self.reward and self.reward != "v7" and not self.reward.startswith("toy:"):
+            errs.append(
+                f"reward={self.reward!r} 非法（'' 按 stage 解析 / 'v7' / 'toy:<arm>'）"
+            )
+        if self.reward.startswith("toy:") and len(self.reward) <= len("toy:"):
+            errs.append(f"reward={self.reward!r} 非法（toy:<arm> 需要具体 arm）")
         return errs
 
 
@@ -101,6 +109,7 @@ def validate_args(args) -> None:
         adv_norm=getattr(args, "adv_norm", "auto"),
         eval_seeds=getattr(args, "eval_seeds", 10),
         eval_at=getattr(args, "eval_at", ""),
+        reward=getattr(args, "reward", ""),
     )
     errs = cfg.validate()
     if errs:

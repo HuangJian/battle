@@ -57,18 +57,36 @@ from schema import OBS_SCHEMA_MAJOR
 
 
 def _masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Mean CE over samples where mask==1 (mask: (B, K))."""
-    per = F.cross_entropy(logits, target, reduction="none")  # (B,)
-    m = mask.sum(dim=-1)  # (B,) — at least one valid class per sample
-    loss = (per * m) / m.clamp(min=1)
-    return loss.mean()
+    """合法类掩码 CE（P1-8 修复，2026-09-02）。
+
+    旧实现 `(per * m) / m.clamp(min=1)` 是**恒等式**：m≥1 时 = per，mask 100% 无效
+    ——非法类 logits 照样进 softmax 分母、被梯度推高，训练目标与 TS 推理
+    （argmax(z+mask)）不一致，且 "masked accuracy" 实为普通 accuracy。
+
+    修复：
+      1) 非法类 logit 置 -1e9（softmax 分母只含合法类）；
+      2) 合法类数 <2 的样本无决策信息（CE 恒 0），跳过——fire 冷却期 [release,1]
+         就是这类，旧实现白白喂零梯度样本。
+    """
+    m = mask > 0
+    keep = m.sum(dim=-1) >= 2
+    if not keep.any():
+        return logits.sum() * 0.0  # 无可训练样本（全为单合法类）
+    z = logits.masked_fill(~m, -1e9)
+    per = F.cross_entropy(z[keep], target[keep], reduction="none")
+    return per.mean()
 
 
 def _masked_acc(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> float:
-    pred = logits.argmax(dim=-1)
-    correct = (pred == target).float() * mask.sum(dim=-1)
-    denom = mask.sum(dim=-1).clamp(min=1)
-    return (correct / denom).mean().item()
+    """合法类掩码 accuracy（P1-8 修复）：与 TS 推理同语义（非法类不参与 argmax）；
+    单合法类样本跳过。旧实现同样是恒等式（mask 无效、指标名误导）。"""
+    m = mask > 0
+    keep = m.sum(dim=-1) >= 2
+    if not keep.any():
+        return 0.0
+    z = logits.masked_fill(~m, -1e9)
+    pred = z.argmax(dim=-1)
+    return (pred[keep] == target[keep]).float().mean().item()
 
 
 _WEIGHTS_MD_HEADER = """\
@@ -248,6 +266,9 @@ def train(args) -> dict:
                 lm, lf = model(obs, sc)
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
             loss.backward()
+            # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
+            # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             run["loss"] += loss.item() * obs.shape[0]
             run["n"] += obs.shape[0]
