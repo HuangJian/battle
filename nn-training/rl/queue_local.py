@@ -16,6 +16,7 @@ from typing import Any
 
 import dist_common
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from rl.cmd import build_rollout_cmd
 from rl.log import log
 from rl.reports import combine_reports
 
@@ -47,75 +48,10 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         wdir = traj_dir / f"w{idx}"
         wdir.mkdir(parents=True, exist_ok=True)
         log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
-        if getattr(args, "goal_rollout", False):
-            # T7.2 goal RL：goal 承诺步采样器（export-goal-rollout.ts，心跳承诺期）。
-            cmd = [
-                bun,
-                "tools/sim/export-goal-rollout.ts",
-                "--weights",
-                rl_path,
-                "--out",
-                str(wdir),
-                "--stages",
-                str(si),
-                "--seeds",
-                str(seed),
-                "--max-ticks",
-                str(args.max_ticks),
-                "--difficulty",
-                args.difficulty,
-                "--heartbeat",
-                str(getattr(args, "heartbeat", 240)),
-            ]
-            if getattr(args, "goal_coarse", False):
-                cmd.append("--coarse")
-        elif getattr(args, "intent_rollout", False):
-            # M8 意图 RL：意图步半 MDP 采样器（export-intent-rollout.ts，replan cadence）。
-            cmd = [
-                bun,
-                "tools/sim/export-intent-rollout.ts",
-                "--weights",
-                rl_path,
-                "--out",
-                str(wdir),
-                "--stages",
-                str(si),
-                "--seeds",
-                str(seed),
-                "--max-ticks",
-                str(args.max_ticks),
-                "--difficulty",
-                args.difficulty,
-                "--replan",
-                str(getattr(args, "replan", 30)),
-            ]
-        else:
-            cmd = [
-                bun,
-                "tools/sim/export-rl-rollout.ts",
-                "--weights",
-                rl_path,
-                "--out",
-                str(wdir),
-                "--stages",
-                str(si),
-                "--seeds",
-                str(seed),
-                "--max-ticks",
-                str(args.max_ticks),
-                "--difficulty",
-                args.difficulty,
-                "--wver",
-                wver,
-                "--node-label",
-                "local",
-            ]
-            # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
-            if getattr(args, "reward", ""):
-                cmd += ["--reward", args.reward]
-            # goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-            if getattr(args, "dodge", ""):
-                cmd += ["--dodge", args.dodge]
+        cmd = build_rollout_cmd(
+            bun, args, weights=rl_path, out_dir=str(wdir), stage=si, seed=seed,
+            wver=wver, node_label="local",
+        )
         p = subprocess.Popen(
             cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
         )
@@ -152,81 +88,10 @@ def run_local_rollout(bun: str, rl_path: str, traj_dir: Path, idx: int, task: tu
     si, sd = task
     wdir = traj_dir / f"w{idx}"
     wdir.mkdir(parents=True, exist_ok=True)
-    if getattr(args, "goal_rollout", False):
-        cmd = [
-            bun,
-            "tools/sim/export-goal-rollout.ts",
-            "--weights",
-            rl_path,
-            "--out",
-            str(wdir),
-            "--stages",
-            str(si),
-            "--seeds",
-            str(sd),
-            "--max-ticks",
-            str(args.max_ticks),
-            "--difficulty",
-            args.difficulty,
-            "--heartbeat",
-            str(getattr(args, "heartbeat", 240)),
-            "--wver",
-            wver,
-            "--node-label",
-            "local",
-        ]
-        if getattr(args, "goal_coarse", False):
-            cmd.append("--coarse")
-    elif getattr(args, "intent_rollout", False):
-        cmd = [
-            bun,
-            "tools/sim/export-intent-rollout.ts",
-            "--weights",
-            rl_path,
-            "--out",
-            str(wdir),
-            "--stages",
-            str(si),
-            "--seeds",
-            str(sd),
-            "--max-ticks",
-            str(args.max_ticks),
-            "--difficulty",
-            args.difficulty,
-            "--replan",
-            str(getattr(args, "replan", 30)),
-            "--wver",
-            wver,
-            "--node-label",
-            "local",
-        ]
-    else:
-        cmd = [
-            bun,
-            "tools/sim/export-rl-rollout.ts",
-            "--weights",
-            rl_path,
-            "--out",
-            str(wdir),
-            "--stages",
-            str(si),
-            "--seeds",
-            str(sd),
-            "--max-ticks",
-            str(args.max_ticks),
-            "--difficulty",
-            args.difficulty,
-            "--wver",
-            wver,
-            "--node-label",
-            "local",
-        ]
-        # goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
-        if getattr(args, "reward", ""):
-            cmd += ["--reward", args.reward]
-        # goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-        if getattr(args, "dodge", ""):
-            cmd += ["--dodge", args.dodge]
+    cmd = build_rollout_cmd(
+        bun, args, weights=rl_path, out_dir=str(wdir), stage=si, seed=sd,
+        wver=wver, node_label="local",
+    )
     with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
         # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
         # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
@@ -329,4 +194,34 @@ def rescan_nodes(
                 t = threading.Thread(target=worker, args=(nd,), daemon=True)
                 t.start()
                 extra_threads.append(t)
+
+def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:
+    """v3.10 长尾竞速选择（纯函数，v3.10 单测覆盖）：排队队列已空时，空闲执行槽应复制
+    哪个 in-flight 任务竞速——只要副本数 < tailFanoutDup 即选（**不看任务已耗时**，
+    用户裁定"有空槽就派发"）。确定性：字典序最小者优先（避免多 worker 锁竞争抖动）。
+    dup=1 或 inflight 为空 → None（无竞速副本名额）。"""
+    cand: tuple[int, int] | None = None
+    for t, c in inflight.items():
+        if c < dup and (cand is None or t < cand):
+            cand = t
+    return cand
+
+def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
+    """v3.11 竞速派档（纯函数，单测覆盖）：竞速副本只派给**快节点**，避免副本恰好落入
+    慢节点、竞速形同虚设（用户 2026-08-31 观察："两个副本都分派到慢速节点，不还是要等"）。
+
+    - 本机（local）：豁免（实测最快、无网络往返），永久参与竞速。
+    - 无速度样本（首轮/全空）：乐观放行——没数据时不该设门槛。
+    - 其余按 EWMA 耗时（speed 表，即各节点最近任务平均耗时）排序，取 top_n 快档；
+      不在快档的节点不参与竞速（慢节点对竞速是负资产）。
+    - 节点数 ≤ top_n：全员参与（退化回无门槛，正确）。"""
+    if nid == "local":
+        return True
+    if not speeds:
+        return True
+    ranked = sorted((v, k) for k, v in speeds.items() if k != "local")
+    if not ranked:
+        return True
+    tier = {k for _v, k in ranked[:top_n]}
+    return nid in tier
 
