@@ -138,15 +138,19 @@ def rescan_nodes(
     all_settled,
     deadline,
     rescan_sec,
-    log,
-    dist_common,
-    node_ping,
-    request_upgrade_guarded,
-    is_self_node,
-    mm,
     worker,
     extra_threads,
 ) -> None:
+    """v3.9 动态节点发现线程主体（dispatch.run() spawn，18 参逐位对应）。
+
+    2026-09-02 OO 拆分回归修复：旧签名带 log/dist_common/node_ping/
+    request_upgrade_guarded/is_self_node/mm 六个参数——log/dist_common 本模块
+    已顶层导入（拆出后不再需要注入），node_ping/request_upgrade_guarded/
+    is_self_node 经 dist_common.xxx 调用（裸参数从未使用），mm 就地内联。
+    修复前 dispatch 的 18 个实参会整体错位 → 线程启动即抛
+    `missing 6 required positional arguments`（rollout-rescan 线程报废，
+    运行中上线的节点永远不被发现）。
+    """
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
     while not all_settled.is_set() and time.time() < deadline:
         sleep_sec = min(rescan_sec, max(1.0, deadline - time.time()))
@@ -192,7 +196,8 @@ def rescan_nodes(
                     log(f"[dist] rescan {nid}: codeHash stale — upgrade request failed ({reason})")
                 continue
             remote_full = str(ping.get("bunVersion", "?"))
-            if mm(remote_full) != mm(local_bun):
+            # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
+            if ".".join(remote_full.split(".")[:2]) != ".".join(str(local_bun).split(".")[:2]):
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
             try:
