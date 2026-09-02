@@ -249,3 +249,13 @@ make -C nn-training python-gate                    # Makefile 入口（SHARDS �
 ```sh
 NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
 ```
+
+### 测试临时目录自动清理
+
+`tmp/pytest-tmp/` 每次运行累积测试临时目录（零删除策略），由门禁**前置自动清理**
+（`nn-python-gate.sh` 每次运行前执行 `python -S tools/githook/nn-clean-tmp.py`）：
+
+- 只删除 `tmp/pytest-tmp/` 下 **1 天前** 的测试子目录（`NN_TMP_KEEP_DAYS` 可调）
+- 用 `python -S` 启动（跳过 site 初始化 → 沙箱删除保护不注入 → 无删除确认弹窗）；
+  这是用户知情的沙箱保护绕过方案，严格限界于该临时目录
+- 手动触发：`NN_TMP_KEEP_DAYS=2 python -S tools/githook/nn-clean-tmp.py`

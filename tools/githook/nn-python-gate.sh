@@ -43,6 +43,10 @@ has_skip() {
 
 cd "$NN_ROOT"
 echo "▶ nn-training python gate（ruff + mypy + pytest ${SHARDS}-shard, parallel）"
+# 门禁前清理过期测试临时目录（python -S 绕过沙箱删除保护，仅限 tmp/pytest-tmp
+# 下 KEEP_DAYS 天前的子目录；NN_TMP_KEEP_DAYS 可调，默认 7）。失败静默（清理
+# 是锦上添花，不阻塞门禁）。
+"$NN_PY" -S ../tools/githook/nn-clean-tmp.py >/dev/null 2>&1 || true
 PIDS=""
 if has_skip ruff; then
   echo " ▸ ruff skipped（NN_GATE_SKIP=$SKIP_LIST）"
