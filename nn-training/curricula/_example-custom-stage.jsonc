@@ -1,0 +1,105 @@
+// 示例课程 —— 自定义关卡（stageData.ts 13×13 数字瓦格）+ 公式 + schedule 三件套。
+//
+// 这是 plan §5 的**配置示例**：grid 走 stageData codec（1/2..5/17/18=砖，
+// 6..10/19/20=铁，11=森林，12=冰，13=水，15=基地 2×2，0=空），经
+// `fetch_task` → sampler-agent → `--stage-json` 透传到远端导出器解码。
+// 第 i 个自定义关 → **stage ID 2000+i**（本例 2000/2001）。
+//
+// 启动：python run_rl.py --course _example-custom-stage
+{
+  "version": 5,
+  "name": "example-custom-stage",
+  "mode": "per-tick",
+
+  "stages": [
+    {
+      "name": "open-24-base",
+      // 13×13 → 解码为 26×26 tiles；基地码 15 落在 (col 6, row 12) = tile (12,24)
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0],
+        [0, 1, 1, 0, 0, 6, 6, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 11, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 11, 0, 0, 0, 0],
+        [0, 13, 13, 0, 0, 0, 0, 0, 0, 0, 13, 13, 0],
+        [0, 13, 13, 0, 0, 0, 0, 0, 0, 0, 13, 13, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 0, 15, 1, 0, 0, 0, 0, 0],
+      ],
+      // 20 字符敌种串：a=basic b=fast c=power d=armor
+      "forces": "cccccccccccccccccccc",
+      "count": 20,
+      // 出生点在基地门位（tile 坐标 10..11,24..25，左侧开门）——与 2×2 不重叠
+      "player_spawn": { "col": 10, "row": 24 },
+      "enemy_spawns": [
+        { "col": 6, "row": 1 },
+        { "col": 12, "row": 1 },
+        { "col": 18, "row": 1 },
+      ],
+    },
+    {
+      "name": "open-24-base-brickless",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 11, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 11, 0, 0, 0, 0],
+        [0, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0],
+        // 底行基地左右留门（col4/col7 不设砖）——默认出生点 {8,24} 才不压砖
+        [0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0],
+      ],
+      "forces": "bbbbccccccddddaaaaaa",
+      "count": 20,
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 8000,
+  "seed_rotate": 20,
+  "player": { "lives": 2, "level": 2 },
+
+  "reward": {
+    "formula": "wKill*(kills+1)**p - wDmg*playerHits - wDmg2*playerDamageTaken + wLoot*powerUpsCollected + wHit*enemyHits - wStuck*max(0, stuckTicks-180)",
+    "params": {
+      "wKill": 1.0,
+      "p": 1.15,
+      "wDmg": 1.0,
+      "wDmg2": 0.01,
+      "wLoot": 0.4,
+      "wHit": 0.2,
+      "wStuck": 0.002,
+    },
+    // wHit 线性升温：先学躲，再学打
+    "param_schedule": { "wHit": { "from": 0.0, "to": 0.2, "until_iter": 20, "mode": "linear" } },
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -1.5 },
+  },
+  // 自定义关**强制 off**（plan §5.2 守卫④）——这里写什么都行，导出器会覆盖
+  "dodge": "off",
+
+  "bc": "tmp/student-weights-dagger/weights.json",
+  "iters": 30,
+  "workers": 8,
+  "out": "tmp/example-next/weights.json",
+  "traj": "tmp/example-next",
+  "backup_dir": "nn-training/weights/example-next",
+  "backup_prefix": "example-next",
+
+  "ppo_schedule": [
+    { "until_iter": 10, "lr": 1e-4, "epochs": 2, "mb": 256, "kl_coef": 1.0 },
+    { "until_iter": 30, "lr": 3e-4, "epochs": 4, "mb": 512, "kl_coef": 0.3 },
+    { "lr": 3e-4, "epochs": 4, "mb": 512, "kl_coef": 0.0 },
+  ],
+  "eval_stages": "2000-2001",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+}

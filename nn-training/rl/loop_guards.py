@@ -79,7 +79,10 @@ class TrainingGuards:
                 f"[run_rl] WARNING kl={agg['kl']:.3f} > {KL_WARN} — policy drifting fast; "
                 f"consider lower lr/epochs"
             )
-        if self._prev_entropy is not None and self._prev_entropy - agg["entropy"] > ENT_COLLAPSE_DROP:
+        if (
+            self._prev_entropy is not None
+            and self._prev_entropy - agg["entropy"] > ENT_COLLAPSE_DROP
+        ):
             log(
                 f"[run_rl] WARNING entropy dropped {self._prev_entropy - agg['entropy']:.3f} "
                 f"in one iteration (now {agg['entropy']:.3f}) — possible premature convergence"
@@ -125,6 +128,8 @@ class TrainingGuards:
                     continue
                 if n_old <= it - args.keep_iters:
                     try:
-                        shutil.rmtree(old, ignore_errors=True)  # 沙箱删除保护拦截时跳过（磁盘轮转降级）
+                        shutil.rmtree(
+                            old, ignore_errors=True
+                        )  # 沙箱删除保护拦截时跳过（磁盘轮转降级）
                     except BaseException:
                         pass

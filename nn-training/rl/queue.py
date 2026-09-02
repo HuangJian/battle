@@ -8,7 +8,7 @@ from pathlib import Path
 
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/rl/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
 from rl.queue_local import (
     pick_tail_race,  # noqa: F401 — re-exported（tests 引用）
@@ -47,7 +47,6 @@ def _record_agent_meta(meta_path: Path, rec: dict) -> None:
 
 
 def run_rollout_queue(
-
     bun: str,
     rl_path: str,
     traj_dir: Path,
@@ -62,7 +61,6 @@ def run_rollout_queue(
     on_queue_drained=None,
     local_suspend: threading.Event | None = None,
     extra_wver: str | None = None,
-
 ) -> dict:
     """中央队列调度（薄包装：RolloutDispatcher 构造 + run，OO 实现在 rl/dispatch.py）。"""
     from rl.dispatch import RolloutDispatcher
@@ -81,5 +79,5 @@ def run_rollout_queue(
         halt_event,
         on_queue_drained,
         local_suspend,
-        extra_wver
+        extra_wver,
     ).run()

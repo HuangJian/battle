@@ -24,8 +24,6 @@ Usage (via start-training.{sh,ps1} which provides the venv + torch):
       --data tmp/rl-traj/it1 --out tmp/rl-weights/weights.json --epochs 4
 """
 
-
-
 from __future__ import annotations
 
 # 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
@@ -41,6 +39,7 @@ if _ilu.find_spec("schema") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import argparse
+import json
 import os
 import time
 
@@ -105,6 +104,9 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 # ---------------- trajectory loading ----------------
 # RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
+# plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
+# 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
+# 加载器读 holder（rl.reward_context）的 RewardFn 按配置公式算 reward。
 _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
@@ -113,18 +115,68 @@ _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "lp_move": ("lp_move.npy", np.float32),
     "lp_fire": ("lp_fire.npy", np.float32),
     "value": ("value.npy", np.float32),
-    "reward": ("reward.npy", np.float32),
+    "metrics": ("metrics.npy", np.float64),
     "done": ("done.npy", np.int64),
     "mask": ("mask.npy", np.int64),
 }
 
 
 def discover_rl_shards(root: str) -> list[str]:
-    return discover_shards(root, ("reward.npy", "obs.npy"))
+    return discover_shards(root, ("metrics.npy", "obs.npy"))
 
 
 def load_shard(dirpath: str) -> dict[str, np.ndarray]:
-    return load_shard_fields(dirpath, _RL_SHARD_SPEC)
+    """读 shard 字段 + manifest → `reward` 由公式引擎按 metrics 算（N 样本）。
+
+    无 holder（reward_fn None）时**响亮报错**——旧 reward.npy 直读路径已随
+    TS 落盘改版删除（历史 run 需在公式引擎下重采，plan §4.2 / §12-2）。
+    """
+    d = load_shard_fields(dirpath, _RL_SHARD_SPEC)
+    metrics = d.pop("metrics")  # [N+1,21]
+    n_obs = int(d["obs"].shape[0])
+    if metrics.shape[0] != n_obs + 1:
+        raise ValueError(
+            f"metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}（{dirpath}）——"
+            "指标行失配（决策行 + 终局行），shard 损坏或格式不符"
+        )
+    manifest: dict = {}
+    mp = os.path.join(dirpath, "manifest.json")
+    if os.path.exists(mp):
+        with open(mp, encoding="utf-8") as f:
+            manifest = json.load(f)
+    d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
+    return d
+
+
+def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> np.ndarray:
+    """metrics [N+1,21] + manifest {outcome, score} → reward [N]（float32）。
+
+    wrapper（§4.3.3）：Φ = formula(metrics)；r[i] = Φ[i+1]−Φ[i]；末样本 +=
+    reconcile（score_reconcile → scale·score(gated)−(Φ[N]−Φ[0])；toy → terminal）。
+    """
+    from rl.reward_context import current as _ctx_current
+
+    ctx = _ctx_current()
+    m = np.asarray(metrics, dtype=np.float64)
+    if m.ndim != 2 or m.shape[1] != 21:
+        raise ValueError(
+            f"metrics 形状应为 [N+1,21]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
+        )
+    mver = manifest.get("metrics_version")
+    if mver is not None and int(mver) != ctx.metrics_version:
+        raise ValueError(
+            f"shard metrics_version={mver} != 期望 {ctx.metrics_version}（{dirpath}）——"
+            "shard 格式版本不匹配，禁止静默错读（评审 LC §1.1）"
+        )
+    if ctx.reward_fn is None:
+        raise RuntimeError(
+            f"metrics shard 需要 RewardFn，但 reward_context holder 未设置（{dirpath}）——"
+            "per-tick 训练请经 `python run_rl.py --course <name>` 启动（奖励唯一定义源=课程配置公式）"
+        )
+    outcome = str(manifest.get("outcome", "timeout"))
+    score = float(manifest.get("score", 0.0))
+    r = ctx.reward_fn(m, outcome, score, ctx.it)
+    return np.asarray(r, dtype=np.float32)
 
 
 def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
@@ -162,7 +214,7 @@ def load_episodes(
         data_root,
         label="ppo",
         shard_kind="RL",
-        need_files=("reward.npy", "obs.npy"),
+        need_files=("metrics.npy", "obs.npy"),
         shard_loader=load_shard,
         gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
         gae_name="GAE",
@@ -177,7 +229,14 @@ def load_episodes(
 
 
 def ppo_update(
-    model, opt, chunks, epochs, device, ckpt_path: str | None = None, on_epoch_done=None
+    model,
+    opt,
+    chunks,
+    epochs,
+    device,
+    ckpt_path: str | None = None,
+    on_epoch_done=None,
+    kl_coef: float = 0.0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -186,6 +245,11 @@ def ppo_update(
     on_epoch_done(ep_done, model): 每个 epoch 完成后同步回调（双缓冲提前预采的
     触发点——stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn 首波预采，PPO 继续
     最后一个 epoch；模型在此处即当前 epoch 训练完的状态）。
+
+    kl_coef（plan/rl-training-config.md §8，M1c）：update 期新增形参，默认 0.0
+    （向后兼容，缺省路径数学逐字节不变）。>0 时对每个 minibatch 施加对采样策略
+    （lp_old，即收集策略）的 KL 惩罚 `kl_coef · E[(r−1) − ln r]`——per-tick 的
+    「初始 KL 大、稳定后衰减」由 ppo_schedule 显式传值落地。
     """
     model.train()
     clip = CLIP_EPS
@@ -234,6 +298,9 @@ def ppo_update(
             entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
 
             loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
+            if kl_coef > 0.0:
+                # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
+                loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
 
             opt.zero_grad()
             loss.backward()

@@ -1488,3 +1488,17 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 **理由**：机制层（rl/ 包）早已共享；残留差异仅剩后端/采集器/评估/配置四处绑定点，全部可参数化。per-tick 默认路径行为字节一致（回归护栏 = test_run_rl 快速层）。
 
 **验证**：test_run_rl / test_run_rl_m1 / test_ppo_intent / test_ppo_goal / test_ppo_common 全 PASS；无遗留 run_rl_intent 引用。
+
+## §308 RL 训练配置化 M1：公式引擎 + metrics.npy + 课程启动通道（2026-09-02，plan/rl-training-config.md v8）
+
+**交付**（M1a/b/c/d 主体落地；golden/单测全绿，tsc/oxlint/oxfmt/ruff 通过）：
+1. **M1a 公式引擎**（`rl/reward_library.py`）：AST 白名单求值器（无 eval/Attribute/Import、限长 1024/深 64、分层白名单核心+扩展 opt-in、唯一归约 helper `wavg`=特征轴；白名单无任何时间轴归约函数，单测锁死）。`RewardSpec/RewardFn` 支撑 toy 与 score_reconcile（telescoping：Σr ≡ scale×gatedScore）。JSONC 限行注释剥离器（`rl/jsonc.py`）。
+2. **M1b metrics 落盘**：`export-rl-rollout.ts` 删全部 TS 侧奖励计算（v7/toy 势、paidTotal、对账），改落 `metrics.npy [N+1,21] f8`（N 决策快照 + 终局快照）+ manifest `metrics_version:2`；`ppo/engine.py` 加载器改读 metrics + manifest → holder RewardFn 算 reward（无 holder 响亮报错）。`metrics_stats.py` 每 iter 落 21 维统计。
+3. **M1c 超参 schedule**：`ppo_schedule` 按绝对 iter 查表（lr 保 Adam 动量/epochs/mb 每轮改写/kl_coef 新增 `ppo_update` 形参默认 0 向后兼容 + 采样策略 KL 惩罚）；加载期 holder（`rl/reward_context.py`，frozen）承载 reward_fn/gamma/lam/it；冻结前缀表进 `_setup` 优化器只收可训参数。`--course`/`--course-file`/`--echo-config` 启动通道（课程 > rl-config > 默认，无 CLI 逐参覆盖）。
+4. **M1d 远端透传**：`--stage-json` → `decodeStageGrid`（src/nn/config-stage.ts，13×13→26×26、enemyCount 恒显式、出生点 2×2 冲突校验）四守卫短路；agent 能力位 `stageJsonSupport` + stageJson 布局指纹（sha256[:16]）进 resultCache 键（无 stageJson 时逐字节不变）；lives/level override 全链路。
+5. **v7 保真**：`reward_builtin.v7_phi` + `curricula/s4b.jsonc` 公式（607 字符，`wavg`+`clip`+`where`）对 TS oracle（rl-reward.ts phiNow）256 行**逐位一致**（max|Δ|=0）；golden 文件 + bun oracle（`tools/diag/v7-phi-oracle.ts`）。
+6. **回归修复**：`rl/{queue,queue_local,archive}.py` REPO_ROOT 修正为仓库根（原少一层 → nn-training，本地 spawn exporter 报 module-not-found、归档落到 nn-training/nn-training/weights——2026-09-02 OO 拆分引入的既有回归，本次顺手修正）。
+
+**关键取舍**：idx10 空槽按「连续编号 + 已编号项不变」补 `starsCollected`；manifest.score 本就是 gated（F3 门控在 TS 完成），Python 不再二次乘 BASE_LOSS_MULT（避免双重门控）；rl-reward.ts 的 `basePressureMean` 字段实为 sum（oracle 按 rollout 口径 sum/samples 喂入，命名坑已注释）。S4a 移出本期（随 A7）。v7 公式 607 字符未触降级卡——`reward.builtin` 机制保留（warning+回退）但不作默认路径。
+
+**验证**：`tests/test_reward_golden.py`（安全边界/wrapper/N=1/末样本差异/telescoping/golden-file/v7 逐位）、`test_metrics_shard.py`（加载器端到端/版本分支/无 holder 报错/行失配报错）、`test_rl_schedule.py`、`tests/config-stage.test.ts`、`tests/dist-agent.test.ts` 全绿；`python run_rl.py --course _smoke`（1 局 arena）与自定义关 stage-json 直跑端到端通过（Σr 恒等式 + 列序抽查）。课程配置 = 配置机制验收夹具（S1/S2/S3/S-Dodge/S4b，不再实际训练）。

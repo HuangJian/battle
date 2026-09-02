@@ -84,7 +84,7 @@ describe('dist sampler-agent helpers (plan/distributed-rollout.md v3.3)', () => 
       'lp_move.npy',
       'lp_fire.npy',
       'value.npy',
-      'reward.npy',
+      'metrics.npy',
       'done.npy',
       'mask.npy',
     ]

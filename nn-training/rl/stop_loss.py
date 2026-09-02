@@ -1,5 +1,4 @@
-"""止损判门（P1-9 统计化，2026-09-02 从 run_rl.py 拆出）。
-"""
+"""止损判门（P1-9 统计化，2026-09-02 从 run_rl.py 拆出）。"""
 
 from __future__ import annotations
 
@@ -52,4 +51,3 @@ def stop_loss_hit(
     if sigma is None:
         return True  # 无 games 数据：保持原语义（Δ≤bar 即停）
     return delta <= -z_score * sigma
-

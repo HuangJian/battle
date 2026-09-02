@@ -216,16 +216,8 @@ def settle_eval_summary(
         done_msg = (
             f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="
             f"{clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
-            + (
-                f" clearRate={clear_rate:.1%} ({clears_v}/{n})"
-                if clear_rate is not None
-                else ""
-            )
-            + (
-                f" vs rollout(sampled)={rollout_winrate:.1%}"
-                if rollout_winrate is not None
-                else ""
-            )
+            + (f" clearRate={clear_rate:.1%} ({clears_v}/{n})" if clear_rate is not None else "")
+            + (f" vs rollout(sampled)={rollout_winrate:.1%}" if rollout_winrate is not None else "")
             + f" outcomes={json.dumps(outcomes)}"
         )
         log(done_msg)

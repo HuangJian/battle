@@ -140,6 +140,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             self._traj_dir = self._traj_root / f"it{it}"
             try:
                 self._prepare_iter_dir(it)
+                # M1c：本轮课程上下文（holder + ppo_schedule）——先于任何 shard 加载
+                self._course_iter(it)
                 log(f"[run_rl] === iteration {it}/{self._total} ===")
                 pairs = build_pairs(args, it, self._rotate_seed)
                 # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
@@ -152,6 +154,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 self._export_weights(it)
                 eval_rec = self._join_eval(it)
                 self._record_iteration(it)
+                # M1c：每 iter 指标统计落盘（非致命）
+                self._write_iter_stats(it)
                 # 每轮 ppo_backend 写回后自动生成巡检 HTML（intent/goal 总是生成；
                 # per-tick 仅默认 traj）
                 if self._auto_inspect:
@@ -239,7 +243,27 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 p.requires_grad = False
             ref_model.eval()
         self._ref_model = ref_model
-        self._opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+        # M1c 冻结层/头（plan §7）：freeze/freeze_heads 前缀表 → requires_grad=False，
+        # 优化器只收可训参数（前缀 = name.startswith，前缀间不得父子歧义，见单测）。
+        freeze_prefixes = list(getattr(args, "freeze", []) or []) + list(
+            getattr(args, "freeze_heads", []) or []
+        )
+        n_frozen = 0
+        if freeze_prefixes:
+            for n, p_ in model.named_parameters():
+                if any(n.startswith(pre) for pre in freeze_prefixes):
+                    p_.requires_grad = False
+                    n_frozen += 1
+            log(
+                f"[run_rl] freeze: {n_frozen} params frozen by prefixes "
+                f"{freeze_prefixes}（优化器只含可训参数）"
+            )
+        trainable = [p_ for p_ in model.parameters() if p_.requires_grad]
+        if not trainable:
+            raise SystemExit(f"[run_rl] freeze 前缀 {freeze_prefixes} 冻结了全部参数——没有可训参数")
+        self._opt = torch.optim.Adam(trainable, lr=args.lr)
+        if n_frozen == 0 and freeze_prefixes:
+            log(f"[run_rl] WARN freeze prefixes matched nothing: {freeze_prefixes}")
 
         traj_root = Path(args.traj)
         traj_root.mkdir(parents=True, exist_ok=True)
@@ -289,7 +313,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             else traj_root.resolve() == (REPO_ROOT / "tmp" / "rl-traj").resolve()
         )
         if auto_inspect:
-            log("[run_rl] per-iteration auto-inspection ENABLED (HTML report after each ppo_backend)")
+            log(
+                "[run_rl] per-iteration auto-inspection ENABLED (HTML report after each ppo_backend)"
+            )
         self._auto_inspect = auto_inspect
 
         self._deadline = time.time() + args.max_hours * 3600 if args.max_hours > 0 else None
@@ -297,12 +323,16 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._prev_entropy = None
         self._consec_fail = 0
         self._kl_streak = 0  # F4: consecutive iters with kl >= KL_BREAK
-        self._ent_streak = 0  # F4: consecutive iters with entropy <= ENT_BREAK and winRate < MAX_WINRATE
+        self._ent_streak = (
+            0  # F4: consecutive iters with entropy <= ENT_BREAK and winRate < MAX_WINRATE
+        )
         self._stop_loss_streak = 0  # P1-9: 统计显著止损（Δ≤−2σ）的连续轮数，≥2 才停车
         self._tripped = None
         # it 断点续跑：--start-it 显式，否则自动 = 日志最后一个完成迭代 + 1
-        start_it = args.start_it if args.start_it is not None else (
-            last_completed_iter(self._jsonl_path) + 1
+        start_it = (
+            args.start_it
+            if args.start_it is not None
+            else (last_completed_iter(self._jsonl_path) + 1)
         )
         if start_it > 1:
             log(
@@ -313,7 +343,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
         self._eval_every = int(getattr(args, "eval_every", 1) or 1)
         # 吞吐 T3：eval 绝对迭代点集（复用 run_rl_intent 的 eval_at 语义；空 = 不启用该维）。
-        self._eval_at_set = {int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()}
+        self._eval_at_set = {
+            int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()
+        }
         # 吞吐 T4：预采子进程句柄与「本轮已提前 spawn」标记（run() 迭代期读写）
 
     # -------------------------------------------------------------- 迭代步骤
@@ -355,7 +387,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     pass
             traj_dir.mkdir(parents=True)
 
-    def _rollout_phase(self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None, eval_on_round: bool) -> None:
+    def _rollout_phase(
+        self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None, eval_on_round: bool
+    ) -> None:
         """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地），结果落 self._report。"""
         args = self.args
         (report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early) = (

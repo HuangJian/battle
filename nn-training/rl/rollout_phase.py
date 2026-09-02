@@ -185,12 +185,19 @@ def dispatch_rollout_phase(
                     )
 
             _stream_kwargs = {}
-            if args.mode in ("intent", "goal"):
-                # backend/update_kwargs 注入（intent 的 value warmup + kickstarting）。
-                _stream_kwargs = {
-                    "backend": ppo_backend,
-                    "update_kwargs": update_kwargs(args, it, start_it, ref_model),
-                }
+            if args.mode in ("intent", "goal") or float(getattr(args, "_kl_coef", 0.0) or 0.0) > 0:
+                # backend/update_kwargs 注入：intent/goal = value warmup + kickstarting；
+                # per-tick 课程 = ppo_schedule 的 kl_coef（M1c，plan §8）。
+                if args.mode in ("intent", "goal"):
+                    _stream_kwargs = {
+                        "backend": ppo_backend,
+                        "update_kwargs": update_kwargs(args, it, start_it, ref_model),
+                    }
+                else:
+                    _stream_kwargs = {
+                        "backend": ppo_backend,
+                        "update_kwargs": {"kl_coef": float(args._kl_coef)},
+                    }
             report = run_rollout_stream(
                 bun,
                 args.out,

@@ -169,5 +169,3 @@ def build_model(
         + ("" if resume else f" -> {rl_path}")
     )
     return model
-
-

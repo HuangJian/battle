@@ -20,11 +20,9 @@ from rl.cmd import build_rollout_cmd
 from rl.log import log
 from rl.reports import combine_reports
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-02）
 
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
-
-
 
 
 def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]], args) -> dict:
@@ -49,8 +47,14 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         wdir.mkdir(parents=True, exist_ok=True)
         log_f = open(wdir / "rollout.log", "w", encoding="utf-8")
         cmd = build_rollout_cmd(
-            bun, args, weights=rl_path, out_dir=str(wdir), stage=si, seed=seed,
-            wver=wver, node_label="local",
+            bun,
+            args,
+            weights=rl_path,
+            out_dir=str(wdir),
+            stage=si,
+            seed=seed,
+            wver=wver,
+            node_label="local",
         )
         p = subprocess.Popen(
             cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT, **_POPEN_NO_WINDOW
@@ -82,15 +86,21 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     return combine_reports(reports)
 
 
-
-
-def run_local_rollout(bun: str, rl_path: str, traj_dir: Path, idx: int, task: tuple[int, int], args, wver: str) -> dict:
+def run_local_rollout(
+    bun: str, rl_path: str, traj_dir: Path, idx: int, task: tuple[int, int], args, wver: str
+) -> dict:
     si, sd = task
     wdir = traj_dir / f"w{idx}"
     wdir.mkdir(parents=True, exist_ok=True)
     cmd = build_rollout_cmd(
-        bun, args, weights=rl_path, out_dir=str(wdir), stage=si, seed=sd,
-        wver=wver, node_label="local",
+        bun,
+        args,
+        weights=rl_path,
+        out_dir=str(wdir),
+        stage=si,
+        seed=sd,
+        wver=wver,
+        node_label="local",
     )
     with open(wdir / "rollout.log", "w", encoding="utf-8") as log_f:
         # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
@@ -111,13 +121,31 @@ def run_local_rollout(bun: str, rl_path: str, traj_dir: Path, idx: int, task: tu
     return report
 
 
-
 def rescan_nodes(
-    cfg, code_hash, upgrade_branch, dirty_files, local_bun,
-    spawned_ids, alive, lock, weights_bytes, iter_id, wver,
-    task_timeout, status_timeout, all_settled, deadline, rescan_sec,
-    log, dist_common, node_ping, request_upgrade_guarded, is_self_node,
-    mm, worker, extra_threads,
+    cfg,
+    code_hash,
+    upgrade_branch,
+    dirty_files,
+    local_bun,
+    spawned_ids,
+    alive,
+    lock,
+    weights_bytes,
+    iter_id,
+    wver,
+    task_timeout,
+    status_timeout,
+    all_settled,
+    deadline,
+    rescan_sec,
+    log,
+    dist_common,
+    node_ping,
+    request_upgrade_guarded,
+    is_self_node,
+    mm,
+    worker,
+    extra_threads,
 ) -> None:
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
     while not all_settled.is_set() and time.time() < deadline:
@@ -161,10 +189,7 @@ def rescan_nodes(
                 elif dist_common.is_self_node(n["url"], nid):
                     log(f"[dist] rescan {nid}: self node stale — restart-only ({reason})")
                 elif reason != "dedup":
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale — upgrade request "
-                        f"failed ({reason})"
-                    )
+                    log(f"[dist] rescan {nid}: codeHash stale — upgrade request failed ({reason})")
                 continue
             remote_full = str(ping.get("bunVersion", "?"))
             if mm(remote_full) != mm(local_bun):
@@ -187,13 +212,13 @@ def rescan_nodes(
                 spawned_ids.add(nid)
                 alive.append(nd)
             log(
-                f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
-                f"spawning {c_n} workers"
+                f"[dist] rescan: node {nid} online mid-run — weights {mode}, spawning {c_n} workers"
             )
             for _ in range(c_n):
                 t = threading.Thread(target=worker, args=(nd,), daemon=True)
                 t.start()
                 extra_threads.append(t)
+
 
 def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:
     """v3.10 长尾竞速选择（纯函数，v3.10 单测覆盖）：排队队列已空时，空闲执行槽应复制
@@ -205,6 +230,7 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
         if c < dup and (cand is None or t < cand):
             cand = t
     return cand
+
 
 def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
     """v3.11 竞速派档（纯函数，单测覆盖）：竞速副本只派给**快节点**，避免副本恰好落入
@@ -224,4 +250,3 @@ def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
         return True
     tier = {k for _v, k in ranked[:top_n]}
     return nid in tier
-

@@ -20,8 +20,6 @@ Usage:
   python eval_bridge.py --emit-bun-cmd --weights-dir .
 """
 
-
-
 from __future__ import annotations
 
 # 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在

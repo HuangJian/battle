@@ -203,7 +203,9 @@ class EvalDispatcher:
 
             def record(manifest: dict, nd_id: str, task: tuple[int, int]) -> None:
                 dims = manifest.get("dims") or {}
-                dim_vals = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()}
+                dim_vals = {
+                    k: (v.get("value") if isinstance(v, dict) else v) for k, v in dims.items()
+                }
                 win = 1 if manifest.get("win") else 0
                 # 全歼率（方案 A 口径，§15/P0-1）：export-eval-game 已透传 cleared——
                 # 敌人全灭即算歼灭，不受 BONUS TIME 窗口截断影响。门判定全歼必须读它，
@@ -407,7 +409,9 @@ class EvalDispatcher:
                                     "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                                 },
                             )
-                            log(f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — dropped")
+                            log(
+                                f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — dropped"
+                            )
 
             threads = []
             for nd in nodes_ok:
@@ -462,7 +466,9 @@ def dispatch_eval_round(
     薄包装：OO 实现在 EvalDispatcher（rl/eval_dispatch.py 同模块——本地直跑
     runner 的 monkeypatch 需落在本模块全局名上，见 tests/test_run_rl.py）。
     """
-    EvalDispatcher(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate).run()
+    EvalDispatcher(
+        bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate
+    ).run()
 
 
 def dispatch_eval_bg(

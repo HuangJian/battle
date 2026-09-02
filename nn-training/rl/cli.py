@@ -330,4 +330,23 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=0,
         help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。",
     )
+    # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口，无 CLI 逐参覆盖 =====
+    ap.add_argument(
+        "--course",
+        default="",
+        help="课程名（nn-training/curricula/<name>.jsonc）或路径。启动参数/关卡布局/"
+        "奖励公式的单一事实来源——优先级：课程配置 > rl-config.json > argparse 默认；"
+        "传入后各训练参数不再允许 CLI 逐参覆盖（评审 P1-7：改名避开 --curriculum-* 语义）",
+    )
+    ap.add_argument(
+        "--course-file",
+        default="",
+        help="等价于 --course <路径>（显式文件路径形式；与 --course 互斥）",
+    )
+    ap.add_argument(
+        "--echo-config",
+        action="store_true",
+        help="只打印生效配置 + 当轮公式与 params 指纹（AST dump），不训练——"
+        "可重定向到文件，据此复现任意 iter 的完整奖励计算（评审 R1-8 / LC §4.5）",
+    )
     return ap

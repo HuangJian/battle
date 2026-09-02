@@ -50,7 +50,9 @@ export const SHARD_FILES = [
   'lp_move.npy',
   'lp_fire.npy',
   'value.npy',
-  'reward.npy',
+  // per-tick RL shard（export-rl-rollout.ts 产物）；plan §4.2：奖励改由 Python
+  // 公式引擎按 metrics.npy（[N+1,21] f8）计算，TS 不再落 reward.npy。
+  'metrics.npy',
   'done.npy',
   'mask.npy',
 ] as const
@@ -278,6 +280,14 @@ function safeEqual(a: string, b: string): boolean {
   return ba.length === bb.length && timingSafeEqual(ba, bb)
 }
 
+function jsonParseSafe(t: string): unknown {
+  try {
+    return JSON.parse(t)
+  } catch {
+    return null
+  }
+}
+
 // ---------------- state ----------------
 interface CachedResult {
   buf: Buffer
@@ -431,9 +441,11 @@ async function runGame(
   replan = 0,
   heartbeat = 240,
   goalCoarse = false,
-  reward = '',
   dodge = '',
   wver = '',
+  stageJson = '',
+  livesOverride = '',
+  playerLevel = '',
 ): Promise<Buffer> {
   // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流
   const ws = weightsOf(kind, wver)
@@ -484,10 +496,12 @@ async function runGame(
         args.push('--heartbeat', String(heartbeat))
         if (goalCoarse) args.push('--coarse')
       }
-      // goal-nn 卡 A2：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
-      if (reward) args.push('--reward', reward)
       // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
       if (dodge) args.push('--dodge', dodge)
+      // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
+      if (stageJson) args.push('--stage-json', stageJson)
+      if (livesOverride) args.push('--lives-override', livesOverride)
+      if (playerLevel) args.push('--player-level', playerLevel)
     }
     args.push(
       '--max-ticks',
@@ -551,6 +565,22 @@ function jsonResponse(obj: unknown, status = 200, headers: Record<string, string
  * 但不挂任何 HTTP 流——局完成（或失败）后结果落在 resultCache/failedTasks 里，
  * 由 trainer 轮询 /v1/result 取走。同 key 重复提交幂等（不重复 spawn）。
  */
+// M1d：resultCache / inflight / failedTasks 的任务键。stageJsonHash 非空时并入
+// 键尾（布局指纹，评审 R0-3）——改 grid 不改 stage id 不会静默复用旧局；无
+// stageJson 时与历史键逐字节一致。
+function taskKey(
+  iterId: string,
+  mode: string,
+  kind: string,
+  stage: number,
+  seed: number,
+  sjHash = '',
+): string {
+  return sjHash
+    ? `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
+    : `${iterId}:${mode}:${kind}:${stage}:${seed}`
+}
+
 function beginTask(
   key: string,
   iterId: string,
@@ -564,9 +594,11 @@ function beginTask(
   replan = 0,
   heartbeat = 240,
   goalCoarse = false,
-  reward = '',
   dodge = '',
   wver = '',
+  stageJson = '',
+  livesOverride = '',
+  playerLevel = '',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -581,9 +613,11 @@ function beginTask(
     replan,
     heartbeat,
     goalCoarse,
-    reward,
     dodge,
     wver,
+    stageJson,
+    livesOverride,
+    playerLevel,
   )
     .then((buf) => {
       lruPut(key, buf)
@@ -821,6 +855,12 @@ async function handle(req: Request): Promise<Response> {
     const replan = parseInt(url.searchParams.get('replan') ?? '0', 10)
     const ws = weightsOf(kind, wver)
     if (!ws) return jsonResponse({ error: 'wver not cached here' }, 409)
+    // M1d：课程自定义关参数（仅 per-tick rollout 消费；eval/其它 kind 忽略）。
+    const stageJson = url.searchParams.get('stageJson') ?? ''
+    const livesOverride = url.searchParams.get('livesOverride') ?? ''
+    const playerLevel = url.searchParams.get('playerLevel') ?? ''
+    if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
+      return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
       return jsonResponse(
         { error: 'intent weights not cached (POST /v1/weights x-kind=intent)' },
@@ -834,7 +874,11 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
-    const key = `${iterId}:${mode}:${kind}:${stage}:${seed}`
+    // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 dist_common）。
+    const sjHash = stageJson
+      ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
+      : ''
+    const key = taskKey(iterId, mode, kind, stage, seed, sjHash)
     const cached = resultCache.get(key)
     if (cached) {
       cacheHits++
@@ -866,9 +910,11 @@ async function handle(req: Request): Promise<Response> {
         replan,
         parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
         url.searchParams.get('goalCoarse') === '1',
-        url.searchParams.get('reward') ?? '',
         url.searchParams.get('dodge') ?? '',
         wver,
+        stageJson,
+        livesOverride,
+        playerLevel,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -901,9 +947,11 @@ async function handle(req: Request): Promise<Response> {
           replan,
           parseInt(url.searchParams.get('heartbeat') ?? '240', 10),
           url.searchParams.get('goalCoarse') === '1',
-          url.searchParams.get('reward') ?? '',
           url.searchParams.get('dodge') ?? '',
           wver,
+          stageJson,
+          livesOverride,
+          playerLevel,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -946,7 +994,15 @@ async function handle(req: Request): Promise<Response> {
     // v3.7：与提交端同 key 配方（mode+kind 避免 eval/rollout 同局撞缓存）。
     const mode = url.searchParams.get('mode') ?? 'rollout'
     const kind = url.searchParams.get('kind') ?? 'rollout'
-    const key = `${iterId}:${mode}:${kind}:${stage}:${seed}`
+    // stageJsonHash：与提交端 taskKey 配方一致（M1d 布局指纹）
+    const key = taskKey(
+      iterId,
+      mode,
+      kind,
+      stage,
+      seed,
+      url.searchParams.get('stageJsonHash') ?? '',
+    )
     const cached = resultCache.get(key)
     if (cached) {
       resultCache.delete(key)
@@ -1004,6 +1060,8 @@ async function handle(req: Request): Promise<Response> {
       cpus: CPUS,
       // 能力声明：trainer 据此把节点纳入干净评估分发（旧 agent 无此字段 → 自动跳过）
       evalSupport: true,
+      // M1d：课程自定义关（stageJson）支持位——不支持的节点绝不派 stageJson 任务
+      stageJsonSupport: true,
     })
   }
 

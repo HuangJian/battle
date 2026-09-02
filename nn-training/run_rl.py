@@ -103,8 +103,20 @@ def main() -> None:
     ap = build_argparser(mode, _rl_args)
     args = ap.parse_args()
     apply_mode_flags(args)
+    # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口 =====
+    # 优先级 课程 > rl-config.json > argparse 默认；无 CLI 逐参覆盖。课程自带
+    # 关卡布局/奖励公式/超参 schedule，apply 后由各阶段消费。
+    from rl.config import apply_course, course_from_args, echo_config
+
+    course = course_from_args(args)
+    if course is not None:
+        apply_course(args, course)
+    if getattr(args, "echo_config", False):
+        echo_config(args, course)
+        log("[run_rl] --echo-config done — exit")
+        return
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
-    # 要等训练中途才暴露）。
+    # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
     from rl.config import validate_args
 
     validate_args(args)

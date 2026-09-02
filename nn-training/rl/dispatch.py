@@ -1,7 +1,5 @@
 """RolloutDispatcher —— 中央队列调度（2026-09-02 从 rl/queue.py 类化）。"""
 
-
-
 from __future__ import annotations
 
 import json
@@ -68,6 +66,8 @@ def _record_agent_meta(meta_path: Path, rec: dict) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
 class RolloutDispatcher:
     """中央队列调度（原 run_rollout_queue 函数类化）。
 
@@ -77,20 +77,20 @@ class RolloutDispatcher:
 
     def __init__(
         self,
-    bun: str,
-    rl_path: str,
-    traj_dir: Path,
-    pairs: list[tuple[int, int]],
-    args,
-    cfg: dict,
-    iter_id: str,
-    on_result=None,
-    local_slots_max: int | None = None,
-    tail_dispatch: bool = True,
-    halt_event: threading.Event | None = None,
-    on_queue_drained=None,
-    local_suspend: threading.Event | None = None,
-    extra_wver: str | None = None,
+        bun: str,
+        rl_path: str,
+        traj_dir: Path,
+        pairs: list[tuple[int, int]],
+        args,
+        cfg: dict,
+        iter_id: str,
+        on_result=None,
+        local_slots_max: int | None = None,
+        tail_dispatch: bool = True,
+        halt_event: threading.Event | None = None,
+        on_queue_drained=None,
+        local_suspend: threading.Event | None = None,
+        extra_wver: str | None = None,
     ):
         self.bun = bun
         self.rl_path = rl_path
@@ -164,7 +164,9 @@ class RolloutDispatcher:
 
         def _probe(n: dict):
             nid = str(n.get("id") or n.get("url") or "?")
-            return nid, dist_common.node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
+            return nid, dist_common.node_ping(
+                n["url"], n.get("authKey", ""), timeout=status_timeout
+            )
 
         probe_results: list = []
         if cfg_nodes:
@@ -234,7 +236,15 @@ class RolloutDispatcher:
                 )
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
             log(f"[dist] node {nid}: online, concurrency={c_n}")
-            nodes.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
+            nodes.append(
+                {
+                    "id": nid,
+                    "url": n["url"],
+                    "key": n.get("authKey", ""),
+                    "c": c_n,
+                    "ping": ping,  # M1d：能力位查询（stageJsonSupport）
+                }
+            )
         if not nodes:
             log("[dist] no eligible node — falling back to local-only rollout")
             return run_rollout(bun, rl_path, traj_dir, pairs, args)
@@ -398,7 +408,9 @@ class RolloutDispatcher:
 
         speed = _seed_speeds() if tail_dispatch else {}
         if speed:
-            preview = ", ".join(f"{k}={v:.0f}s" for k, v in sorted(speed.items(), key=lambda x: x[1]))
+            preview = ", ".join(
+                f"{k}={v:.0f}s" for k, v in sorted(speed.items(), key=lambda x: x[1])
+            )
             log(f"[dist] tail-dispatch speeds (seeded): {preview}")
         tail_notes: set[str] = set()
         last_progress = [time.time()]
@@ -552,10 +564,22 @@ class RolloutDispatcher:
                     if nd is None:
                         _idx = next_idx[0]
                         next_idx[0] += 1
-                        summary = run_local_rollout(
-                            bun, rl_path, traj_dir, _idx, task, args, wver
-                        )
+                        summary = run_local_rollout(bun, rl_path, traj_dir, _idx, task, args, wver)
                     else:
+                        # M1d：课程自定义关 stageJson / 命数星级覆盖（本地 slot 分支经
+                        # cmd.py 透传；dist 分支在这里进查询参数）。
+                        from rl.config import args_rollout_overrides, stage_json_for_args
+
+                        _sj = stage_json_for_args(args, task[0])
+                        _ov = args_rollout_overrides(args)
+                        # 能力握手（plan §5.2 / LC §4.6）：stageJson 任务只派给
+                        # ping.stageJsonSupport 节点；不支持 → 响亮失败，绝不降级。
+                        if _sj and not (nd.get("ping") or {}).get("stageJsonSupport"):
+                            raise dist_common.DistError(
+                                0,
+                                f"node {nd_id} 缺 stageJsonSupport 能力位（旧 agent）——"
+                                "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
+                            )
                         manifest, files = dist_common.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -570,8 +594,17 @@ class RolloutDispatcher:
                             replan=getattr(args, "replan", 0),
                             reward=getattr(args, "reward", ""),
                             dodge=getattr(args, "dodge", ""),
+                            stage_json=_sj or "",
+                            lives_override=int(_ov["lives_override"])
+                            if "lives_override" in _ov
+                            else None,
+                            player_level=int(_ov["player_level"])
+                            if "player_level" in _ov
+                            else None,
                         )
-                        why = dist_common.validate_result(manifest, files, wver, set(norm_pairs), seen)
+                        why = dist_common.validate_result(
+                            manifest, files, wver, set(norm_pairs), seen
+                        )
                         if why:
                             raise dist_common.DistError(0, why)
                         out_dir = traj_dir / "dist" / nd_id / f"rl_s{task[0]}_seed{task[1]}"
@@ -596,7 +629,9 @@ class RolloutDispatcher:
                                 inflight[task] = inflight.get(task, 0) - 1
                                 if inflight[task] <= 0:
                                     inflight.pop(task, None)
-                            log(f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped")
+                            log(
+                                f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
+                            )
                             continue
                         seen.add(task)
                         if task in inflight:
@@ -733,10 +768,24 @@ class RolloutDispatcher:
             scan_t = threading.Thread(
                 target=rescan_nodes,
                 args=(
-                    cfg, code_hash, upgrade_branch, dirty_files, local_bun,
-                    spawned_ids, alive, lock, weights_bytes, iter_id, wver,
-                    task_timeout, status_timeout, all_settled, deadline, rescan_sec,
-                    worker, extra_threads,
+                    cfg,
+                    code_hash,
+                    upgrade_branch,
+                    dirty_files,
+                    local_bun,
+                    spawned_ids,
+                    alive,
+                    lock,
+                    weights_bytes,
+                    iter_id,
+                    wver,
+                    task_timeout,
+                    status_timeout,
+                    all_settled,
+                    deadline,
+                    rescan_sec,
+                    worker,
+                    extra_threads,
                 ),
                 daemon=True,
                 name="rollout-rescan",

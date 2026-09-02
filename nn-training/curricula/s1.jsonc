@@ -1,0 +1,38 @@
+// 课程 S1 —— 公式引擎验收夹具（原 kill2 臂）。
+//
+// 这些课程**不再实际训练**（用户 2026-09-02 决策）：只作配置机制的可用性
+// 测试夹具——能由配置公式完整表达、能启动、golden 测试锁行为即可。
+// 启动：python run_rl.py --course s1
+{
+  "version": 5,
+  "name": "s1-kill2",
+  "mode": "per-tick",
+
+  // arena 训练场 S1（1000-1002 = 3 张布局变异）
+  "stages": "1000-1002",
+  "difficulty": "hard",
+  "max_ticks": 8000,
+  "seed_rotate": 50,
+  "player": { "lives": 3, "level": 1 },
+
+  // 奖励 = 配置公式（唯一机制）。Φ = 势；reward[i] = Φ[i+1] − Φ[i]
+  "reward": {
+    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
+  },
+  "dodge": "",
+
+  "bc": "tmp/student-weights-dagger/weights.json",
+  "freeze": [],
+  "freeze_heads": [],
+  "iters": 20,
+  "workers": 8,
+  "out": "tmp/s1-cap/weights.json",
+  "traj": "tmp/s1-cap",
+  "backup_dir": "nn-training/weights/s1-cap",
+  "backup_prefix": "s1-cap",
+  "eval_stages": "1000-1002",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+}

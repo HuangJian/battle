@@ -1,5 +1,4 @@
-"""collect-only 采样子进程（T4 双缓冲）——2026-09-02 从 run_rl.py 拆出。
-"""
+"""collect-only 采样子进程（T4 双缓冲）——2026-09-02 从 run_rl.py 拆出。"""
 
 from __future__ import annotations
 
@@ -193,4 +192,3 @@ def precollect_snapshot_wver(out_path: str, it: int) -> str | None:
         return dist_common.weights_fingerprint(str(snap))
     except OSError:
         return None
-

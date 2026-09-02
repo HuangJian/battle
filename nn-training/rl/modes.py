@@ -26,6 +26,7 @@ import 链白白支付 torch 加载（CPU 上 3~8s/轮）。改为按需 `import
 import 本模块不再触发 torch 加载；`collect-only` 路径全程零 torch（rl/course、
 rl/queue、dist_common 均 stdlib-only）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,9 +77,7 @@ def apply_mode_flags(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
-def merged_mode_args(
-    cfg: dict, mode: str
-) -> tuple[dict, dict]:
+def merged_mode_args(cfg: dict, mode: str) -> tuple[dict, dict]:
     """启动参数默认合并（单一事实来源，DECISIONS §307 D2）。纯函数。
 
     查找优先级（高→低）：rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl。

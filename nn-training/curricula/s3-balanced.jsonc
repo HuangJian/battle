@@ -1,0 +1,33 @@
+// 课程 S3-balanced —— 公式引擎验收夹具（原 balanced 臂：被命中惩罚更重）。
+// 启动：python run_rl.py --course s3-balanced
+{
+  "version": 5,
+  "name": "s3-balanced",
+  "mode": "per-tick",
+  "stages": "1020-1022",
+  "difficulty": "hard",
+  "max_ticks": 8000,
+  "seed_rotate": 50,
+  "player": { "lives": 3, "level": 1 },
+
+  "reward": {
+    // wHit（命中敌方）由 param_schedule 线性升温，需先在此声明初值
+    "formula": "1.0*(kills+1) - 0.35*playerHits + 0.001*ticks + wHit*enemyHits",
+    "params": { "wHit": 0.0 },
+    // param_schedule 演示：wHit 线性升温（it1=0 → it20=0.2）
+    "param_schedule": { "wHit": { "from": 0.0, "to": 0.2, "until_iter": 20, "mode": "linear" } },
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -1.0 },
+  },
+  "dodge": "",
+
+  "bc": "tmp/s2-cap/weights.json",
+  "iters": 20,
+  "workers": 8,
+  "out": "tmp/s3-cap2/weights.json",
+  "traj": "tmp/s3-cap2",
+  "backup_dir": "nn-training/weights/s3-cap2",
+  "backup_prefix": "s3-cap2",
+  "eval_stages": "1020-1022",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+}

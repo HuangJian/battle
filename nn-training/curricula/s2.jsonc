@@ -1,0 +1,31 @@
+// 课程 S2 —— 公式引擎验收夹具（原 kill 臂：kill2 + 线性存活项）。
+// 启动：python run_rl.py --course s2
+{
+  "version": 5,
+  "name": "s2-kill",
+  "mode": "per-tick",
+  "stages": "1010-1012",
+  "difficulty": "hard",
+  "max_ticks": 8000,
+  "seed_rotate": 50,
+  "player": { "lives": 3, "level": 1 },
+
+  // kill = kill2 + 0.0005*ticks（存活即得分，抑制自杀式速通）
+  "reward": {
+    "formula": "1.0*(kills+1) - 0.15*playerHits + 0.0005*ticks",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
+  },
+  "dodge": "",
+
+  "bc": "tmp/s1-cap/weights.json",
+  "iters": 20,
+  "workers": 8,
+  "out": "tmp/s2-cap/weights.json",
+  "traj": "tmp/s2-cap",
+  "backup_dir": "nn-training/weights/s2-cap",
+  "backup_prefix": "s2-cap",
+  "eval_stages": "1010-1012",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+}

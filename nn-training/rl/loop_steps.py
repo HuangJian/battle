@@ -56,6 +56,77 @@ class TrainingSteps:
     _waves_n: Any
     _eval_join_sec: float
 
+    def _course_iter(self, it: int) -> None:
+        """M1c：每 iter 注入课程配置的加载期上下文（holder）与超参 schedule。
+
+        - holder（reward_context）：reward_fn + gamma/lam + it + 血缘——loaders
+          （ppo.engine.load_shard）读取，奖励唯一定义源=课程配置公式；
+        - ppo_schedule（按绝对 iter 查表）：lr 改 opt.param_groups（保 Adam
+          动量）、epochs/mb 改 args（串行/流式每轮读取）、kl_coef 存 args._kl_coef
+          供 update 期注入。
+        """
+        args = self.args
+        course = getattr(args, "course_obj", None)
+        if course is None:
+            from rl.reward_context import reset as _ctx_reset
+
+            _ctx_reset()
+            args._kl_coef = 0.0
+            return
+        if getattr(self, "_course_reward_fn", None) is None:
+            from rl.reward_library import build_reward_fn
+
+            self._course_reward_fn = build_reward_fn(course.reward_spec())
+            log(f"[course] reward_fn compiled: formula_len={len(course.reward.formula)}")
+        spec = course.reward_spec()
+        from rl.reward_context import update as _ctx_update
+
+        _ctx_update(
+            reward_fn=self._course_reward_fn,
+            gamma=float(getattr(args, "gamma", 0.995)),
+            lam=float(getattr(args, "lam", 0.95)),
+            it=it,
+            identity={"course": course.name, "formula_hash": spec.identity()},
+        )
+        sch: dict = {}
+        if course.ppo_schedule:
+            from rl.schedule import resolve_ppo_schedule
+
+            sch = resolve_ppo_schedule(course.ppo_schedule_dicts(), it)
+        if "lr" in sch and getattr(self, "_opt", None) is not None:
+            self._opt.param_groups[0]["lr"] = float(sch["lr"])
+        if "mb" in sch:
+            args.mb = int(sch["mb"])
+        if "epochs" in sch:
+            args.epochs = int(sch["epochs"])
+        kl_coef = float(sch.get("kl_coef", 0.0) or 0.0)
+        args._kl_coef = kl_coef
+        if sch:
+            log(
+                f"[course] ppo_schedule@it{it}: lr={sch.get('lr')} epochs={sch.get('epochs')} "
+                f"mb={sch.get('mb')} kl_coef={kl_coef}"
+            )
+
+    def _write_iter_stats(self, it: int) -> None:
+        """M1c：每 iter 落 metrics_stats.jsonl（21 维统计 + 血缘；非致命）。"""
+        course = getattr(self.args, "course_obj", None)
+        if course is None:
+            return
+        try:
+            from rl.metrics_stats import metrics_stats
+
+            identity = {
+                "course": course.name,
+                "formula_hash": course.reward_spec().identity(),
+            }
+            rec = metrics_stats(str(self._traj_dir), it=it, identity=identity)
+            log(
+                f"[run_rl] metrics_stats it{it}: shards={rec['shards']} "
+                f"steps={rec['decision_steps']} elapsed_ms={rec['elapsed_ms']}"
+            )
+        except Exception as e:  # 统计失败不打断训练（warn-only，评审 P1-4）
+            log(f"[run_rl] WARN metrics_stats failed (non-fatal): {e}")
+
     def _log_report(self, it: int, t_rollout: float) -> None:
         """报告结算：stream 报告拆解（eval 线程句柄 / 阶段耗时 / 遥测）与日志行。"""
         report = self._report
@@ -135,6 +206,7 @@ class TrainingSteps:
                 args.epochs,
                 self._device,
                 ckpt_path=str(traj_dir / "ppo_ckpt"),
+                kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
             )
         self._ppo_sec = round(time.time() - t_ppo, 1)
         self._chunks_n = len(chunks)

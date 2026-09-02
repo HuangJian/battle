@@ -30,13 +30,20 @@ def build_rollout_cmd(
         cmd = [
             bun,
             "tools/sim/export-goal-rollout.ts",
-            "--weights", weights,
-            "--out", out_dir,
-            "--stages", str(stage),
-            "--seeds", str(seed),
-            "--max-ticks", str(args.max_ticks),
-            "--difficulty", args.difficulty,
-            "--heartbeat", str(getattr(args, "heartbeat", 240)),
+            "--weights",
+            weights,
+            "--out",
+            out_dir,
+            "--stages",
+            str(stage),
+            "--seeds",
+            str(seed),
+            "--max-ticks",
+            str(args.max_ticks),
+            "--difficulty",
+            args.difficulty,
+            "--heartbeat",
+            str(getattr(args, "heartbeat", 240)),
         ]
         if getattr(args, "goal_coarse", False):
             cmd.append("--coarse")
@@ -44,30 +51,54 @@ def build_rollout_cmd(
         cmd = [
             bun,
             "tools/sim/export-intent-rollout.ts",
-            "--weights", weights,
-            "--out", out_dir,
-            "--stages", str(stage),
-            "--seeds", str(seed),
-            "--max-ticks", str(args.max_ticks),
-            "--difficulty", args.difficulty,
-            "--replan", str(getattr(args, "replan", 30)),
+            "--weights",
+            weights,
+            "--out",
+            out_dir,
+            "--stages",
+            str(stage),
+            "--seeds",
+            str(seed),
+            "--max-ticks",
+            str(args.max_ticks),
+            "--difficulty",
+            args.difficulty,
+            "--replan",
+            str(getattr(args, "replan", 30)),
         ]
     else:
         cmd = [
             bun,
             "tools/sim/export-rl-rollout.ts",
-            "--weights", weights,
-            "--out", out_dir,
-            "--stages", str(stage),
-            "--seeds", str(seed),
-            "--max-ticks", str(args.max_ticks),
-            "--difficulty", args.difficulty,
-            "--wver", wver,
-            "--node-label", node_label,
+            "--weights",
+            weights,
+            "--out",
+            out_dir,
+            "--stages",
+            str(stage),
+            "--seeds",
+            str(seed),
+            "--max-ticks",
+            str(args.max_ticks),
+            "--difficulty",
+            args.difficulty,
+            "--wver",
+            wver,
+            "--node-label",
+            node_label,
         ]
         # goal-nn 卡 A2/A3：玩具奖励臂 / dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-        if getattr(args, "reward", ""):
-            cmd += ["--reward", args.reward]
+        # A2 已废（plan/rl-training-config.md §4：奖励由课程配置公式驱动，TS 不再算
+        # reward）——不再追加 --reward；--dodge 保留透传。
         if getattr(args, "dodge", ""):
             cmd += ["--dodge", args.dodge]
+        # M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2；四守卫在导出器端）。
+        # stageJson 只有 stage ∈ [2000..] 的自定义关才有；arena/真实关恒 None。
+        from rl.config import args_rollout_overrides, stage_json_for_args
+
+        sj = stage_json_for_args(args, stage)
+        if sj:
+            cmd += ["--stage-json", sj]
+        for k, v in args_rollout_overrides(args).items():
+            cmd += [f"--{k}", v]
     return cmd

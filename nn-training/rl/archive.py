@@ -11,6 +11,7 @@ nn-training/weights/，按 <prefix>.it<N>.<YYYYMMDD-HHMMSS>.json 命名（iter-f
     `make weights-prune-apply`（weights_prune.py，用户主动触发时自己确认）。
   - push 失败（离线/无远端）仅告警不中断训练——本地训练不依赖远端。
 """
+
 from __future__ import annotations
 
 import shutil
@@ -20,15 +21,13 @@ from pathlib import Path
 
 from rl.log import log
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/rl/ 上溯 3 层）
 
 WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（weights_prune.py）的参考配额；backup_weights 不自动删
 
 
-def backup_weights(
-    weights_path: str, it: int, prefix: str = "rl-weights"
-) -> str | None:
+def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
 
     只归档不清理（2026-09-02）：旧归档删除已移除——沙箱删除保护会拦截生产代码的
@@ -38,10 +37,7 @@ def backup_weights(
     """
     try:
         WEIGHTS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        dst = (
-            WEIGHTS_BACKUP_DIR
-            / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
-        )
+        dst = WEIGHTS_BACKUP_DIR / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
         shutil.copyfile(weights_path, dst)
         return str(dst)
     except OSError as e:

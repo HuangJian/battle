@@ -1,0 +1,71 @@
+// 课程 S4b —— 真实关（0-34），v7 真实关奖励。
+//
+// 这是公式引擎的**表达力压测**（plan §4.4）：8 维条件加权平均（null 维不进
+// 分母）用 `wavg` + `clip` + `where` 表达，607 字符（限长 1024 内，不触降级卡）。
+// terminal 走 `score_reconcile`：末样本 += S*gatedScore − (Φ[N]−Φ[0])，
+// 使 Σr ≡ REWARD_SCALE × gatedScore（telescoping 恒等式，与旧 TS 口径一致）。
+//
+// 忠实性对账：与 `reward_builtin.v7_phi`（TS `rl-reward.ts::phiNow` 的向量化
+// 移植）在 golden 向量上逐位一致（tolerance ≤1e-9）。
+// 启动：python run_rl.py --course s4b
+{
+  "version": 5,
+  "name": "s4b-v7",
+  "mode": "per-tick",
+  // 真实关 0..34
+  "stages": "0-34",
+  "difficulty": "hard",
+  "max_ticks": 12000,
+  "seed_rotate": 50,
+  "player": { "lives": 3, "level": 1 },
+
+  "reward": {
+    // Φ = S·B·wavg(8 维)·(baseAlive ? 1 : M)
+    //   · null 维剔除 = 权重乘 0（progress/lives/tempo/accuracy/loot/baseSafety）
+    //   · baseIntegrity：基地没了 → v=0 但权重照计（TS 分支语义）
+    //   · openingTempo：无首杀（firstKillTick==-1）→ v=0 但权重照计（评审 P0-7）
+    "formula": "S*B*wavg(clip(kills/max(enemyTotal,1),0,1),wP*(enemyTotal>0),clip(lives/max(startLives,1),0,1),wL*(startLives>0),(baseAlive>0)*(0.55+0.45*clip(baseWallIntact/max(baseWallTotal,1),0,1)),wBI*(where(baseAlive>0,baseWallTotal,1)>0),clip(kills/where(ticks>0,ticks/3600,1)/kpmRef,0,1),wT*(kpmRef>0),clip(kills/max(playerShots,1)/accRef,0,1),wA*(accRef>0)*(playerShots>0),clip(powerUpsCollected/max(powerUpsSpawned,1),0,1),wLo*(powerUpsSpawned>0),clip(1-basePressureSum/max(basePressureSamples,1),0,1),wBS*(basePressureSamples>0),where(firstKillTick==-1,0,1-clip(firstKillTick/1800,0,1)),wO)*where(baseAlive>0,1,M)",
+    "params": {
+      // REWARD_SCALE / V7 lossBandMax / BASE_LOSS_MULT（tools/sim/rl-reward.ts）
+      "S": 10.0,
+      "B": 0.4,
+      "M": 0.1,
+      // StageRefs 归一化参考（DEFAULT_STAGE_REFS）
+      "kpmRef": 8.0,
+      "accRef": 0.3,
+      // RL_LOSS_WEIGHTS（守家优先败局带；lives=0 → 整维剔除）
+      "wP": 0.3,
+      "wL": 0.0,
+      "wBI": 0.25,
+      "wT": 0.08,
+      "wA": 0.06,
+      "wLo": 0.03,
+      "wBS": 0.25,
+      "wO": 0.03,
+      // startLives 由 player.lives 自动注入（不占指标向量维）
+    },
+    "scheme": "score_reconcile",
+    // 降级卡回退目标（formula 超限/含白名单外符号时启用，warning 不静默切换）
+    "builtin": "v7",
+  },
+  "dodge": "",
+
+  "bc": "tmp/student-weights-dagger/weights.json",
+  "iters": 60,
+  "max_hours": 12,
+  "workers": 8,
+  "out": "tmp/s4b-cap/weights.json",
+  "traj": "tmp/s4b-cap",
+  "backup_dir": "nn-training/weights/s4b-cap",
+  "backup_prefix": "s4b-cap",
+
+  // 超参 schedule（按**绝对 iter** 查表）：初期小 lr/小 batch 稳住 KL，稳定后放开
+  "ppo_schedule": [
+    { "until_iter": 10, "lr": 1e-4, "epochs": 2, "mb": 256, "kl_coef": 1.0 },
+    { "until_iter": 30, "lr": 3e-4, "epochs": 4, "mb": 512, "kl_coef": 0.3 },
+    { "lr": 3e-4, "epochs": 4, "mb": 512, "kl_coef": 0.0 },
+  ],
+  "eval_stages": "0-34",
+  "eval_games_per_stage": 4,
+  "eval_every": 5,
+}

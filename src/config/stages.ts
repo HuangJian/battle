@@ -152,7 +152,7 @@ const STAGE_NAMES_ZH = [
 ]
 
 /** Decode one 13×13 numeric level into a 26×26 char grid (one char per sub-block). */
-function decodeLevel(grid: number[][]): string[] {
+export function decodeLevel(grid: number[][]): string[] {
   const rows: string[] = []
   for (let r = 0; r < 26; r++) rows.push('.'.repeat(26))
   for (let ty = 0; ty < 13; ty++) {
@@ -190,14 +190,18 @@ function decodeLevel(grid: number[][]): string[] {
 }
 
 /** Build the 20-enemy spawn queue for a stage from its force string. */
-function decodeForces(index: number): TankKind[] {
-  const forces = ENEMY_FORCES[index % ENEMY_FORCES.length]
+export function decodeForceString(forces: string): TankKind[] {
   const queue: TankKind[] = []
   for (let i = 0; i < 20; i++) {
     const ch = forces[i] ?? 'a'
     queue.push(KIND_OF[ch] ?? 'basic')
   }
   return queue
+}
+
+/** Build the 20-enemy spawn queue from the stage table's force string. */
+function decodeForces(index: number): TankKind[] {
+  return decodeForceString(ENEMY_FORCES[index % ENEMY_FORCES.length])
 }
 
 export const STAGES: StageData[] = LEVELS.map((grid, i) => ({

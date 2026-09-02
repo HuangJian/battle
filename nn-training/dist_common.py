@@ -47,7 +47,9 @@ SHARD_FILES = (
     "lp_move.npy",
     "lp_fire.npy",
     "value.npy",
-    "reward.npy",
+    # plan/rl-training-config.md §4.2：per-tick shard 奖励改由 Python 公式引擎按
+    # metrics.npy（[N+1,21] f8）计算 —— TS 侧不再落 reward.npy。
+    "metrics.npy",
     "done.npy",
     "mask.npy",
 )
@@ -468,6 +470,9 @@ def fetch_task(
     replan: int = 0,
     reward: str = "",
     dodge: str = "",
+    stage_json: str = "",
+    lives_override: int | None = None,
+    player_level: int | None = None,
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -478,6 +483,11 @@ def fetch_task(
     replan（M8）：意图 rollout 的 replan cadence（0=不传）。
     reward（goal-nn 卡 A2）：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
     dodge（goal-nn 卡 A3）：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+
+    stage_json / lives_override / player_level（M1d，plan/rl-training-config.md §5.2）：
+    课程自定义关透传参数（远端 export-rl-rollout --stage-json/--lives-override/
+    --player-level）。stageJson 非空时只派给 ping.stageJsonSupport=true 的节点
+    （旧 agent 不认识该参数会静默丢弃跑默认关——数据污染，绝不降级）。
 
     v3.6：提交带 x-async 头。新 agent 立即 202 → 转 /v1/result 轮询（轮询期网络瞬断
     不丢局：结果在 agent 结果缓存里，恢复后继续拉）；旧 agent 无视该头同步阻塞返回
@@ -502,6 +512,15 @@ def fetch_task(
         params["reward"] = reward
     if dodge:
         params["dodge"] = dodge
+    if stage_json:
+        params["stageJson"] = stage_json
+        # 布局指纹（评审 R0-3 / LC §1.3）：agent resultCache 键并入该哈希，改 grid
+        # 不改 stage id 不再静默复用旧局。agent 侧对收到的 stageJson 算同一 sha256。
+        params["stageJsonHash"] = hashlib.sha256(stage_json.encode("utf-8")).hexdigest()[:16]
+    if lives_override is not None:
+        params["livesOverride"] = lives_override
+    if player_level is not None:
+        params["playerLevel"] = player_level
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
@@ -541,6 +560,9 @@ def _poll_result(
         qparams["mode"] = params["mode"]
     if params.get("kind"):
         qparams["kind"] = params["kind"]
+    # stageJsonHash 必须进轮询键（agent resultCache key 含布局指纹，M1d）
+    if params.get("stageJsonHash"):
+        qparams["stageJsonHash"] = params["stageJsonHash"]
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(1.0, budget)
     while True:

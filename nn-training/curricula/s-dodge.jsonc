@@ -1,0 +1,35 @@
+// 课程 S-Dodge —— 公式引擎验收夹具（原 dodge-mix 臂，1 命躲弹场）。
+//
+// 注意 `player.lives: 1`：命数覆盖走配置（plan §6），**导出器里
+// arenaLevelOfId==='S-Dodge' → lives=1 的硬编码已删除**，配置是单一来源。
+// 启动：python run_rl.py --course s-dodge
+{
+  "version": 5,
+  "name": "s-dodge-mix",
+  "mode": "per-tick",
+  "stages": "1050-1052",
+  "difficulty": "hard",
+  "max_ticks": 8000,
+  "seed_rotate": 50,
+  "player": { "lives": 1, "level": 1 },
+
+  // dodge-mix：击杀超线性 + 命中敌方 + 拾取 − 被命中 − 掉血 − 停滞（180 tick 免罚）
+  "reward": {
+    "formula": "1.0*(kills+1)**1.15 + 0.2*enemyHits - 1.0*playerHits - 0.01*playerDamageTaken + 0.4*powerUpsCollected - 0.002*max(0, stuckTicks-180)",
+    "params": {},
+    "terminal": { "stage_clear": 2.0, "lives_exhausted": -1.5 },
+  },
+  // arena S-Dodge 场的 L0 保底层（自定义关会被强制 off，见 plan §5.2 守卫④）
+  "dodge": "l0",
+
+  "bc": "tmp/s2-cap/weights.json",
+  "iters": 20,
+  "workers": 8,
+  "out": "tmp/s-dodge/weights.json",
+  "traj": "tmp/s-dodge",
+  "backup_dir": "nn-training/weights/s-dodge",
+  "backup_prefix": "s-dodge",
+  "eval_stages": "1050-1052",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+}

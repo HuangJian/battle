@@ -42,6 +42,27 @@ def log_iter_error(jsonl_path: Path, it: int, err: str) -> None:
         pass
 
 
+def _json_args(args) -> dict:
+    """argparse Namespace → JSON 可序列化 dict（跳过 CourseConfig 等复杂对象）。
+
+    非课程运行的既有字段全部是 JSON 基本类型——过滤器对旧行为逐字节透明；
+    课程模式把 course_obj 折叠成 course_name（血缘可归因，不落巨型对象）。
+    """
+    out: dict = {}
+    for k, v in vars(args).items():
+        if v is None or isinstance(v, (str, int, float, bool)):
+            out[k] = v
+        elif isinstance(v, (list, tuple)) and all(
+            x is None or isinstance(x, (str, int, float, bool)) for x in v
+        ):
+            out[k] = list(v)
+    course = getattr(args, "course_obj", None)
+    if course is not None:
+        out["course"] = getattr(args, "course_name", "")
+        out["course_formula_hash"] = course.reward_spec().identity()
+    return out
+
+
 def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> None:
     """run_start 事件：落盘启动参数与课程 rotateSeed（断点续跑继承来源）。"""
     write_event(
@@ -49,7 +70,7 @@ def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> None:
         {
             "event": "run_start",
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "args": {k: v for k, v in vars(args).items()},
+            "args": _json_args(args),
             "rotateSeed": rotate_seed,
         },
     )
