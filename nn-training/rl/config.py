@@ -601,6 +601,25 @@ def stage_json_for_args(args, stage: int) -> str | None:
     return sj
 
 
+def course_cli_conflicts(cli_values: dict, defaults: dict, course: CourseConfig) -> list[str]:
+    """课程存在时，显式 CLI 训练参数 vs 课程键的冲突清单（plan §3 fail-loud）。
+
+    argparse 无法区分「用户显式传参」与「吃默认值」——用 `parse_args([])`
+    的默认命名空间做基线：凡 CLI 值 ≠ 默认值 且 该键被课程 flat_overrides
+    覆盖，即判为用户意图与课程单一事实来源冲突，响亮报错而非静默忽略。
+    """
+    overridden = set(course.flat_overrides())
+    bad: list[str] = []
+    for k in sorted(overridden):
+        if k == "mode":
+            continue  # 模式一致性已在 apply_course 校验
+        if k not in cli_values or k not in defaults:
+            continue
+        if cli_values[k] != defaults[k]:
+            bad.append(f"{k}={cli_values[k]!r}（该键由课程配置定义，不能经 CLI 显式传参）")
+    return bad
+
+
 def args_rollout_overrides(args) -> dict[str, str]:
     """课程命数/星级覆盖（导出器 CLI 参数）；无覆盖返回空 dict。"""
     out: dict[str, str] = {}

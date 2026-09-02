@@ -489,6 +489,10 @@ async function runGame(
         const gw = latestWeightsOfKind('goal')
         if (policy === 'goal' && gw) args.push('--goal-weights', gw.file)
       }
+      // M1d 双侧同规：eval 也支持课程自定义关 stageJson + lives/level 覆盖
+      if (stageJson) args.push('--stage-json', stageJson)
+      if (livesOverride) args.push('--lives-override', livesOverride)
+      if (playerLevel) args.push('--player-level', playerLevel)
     } else {
       args.push('--stages', String(stage), '--seeds', String(seed))
       if (isIntentRollout && replan > 0) args.push('--replan', String(replan))

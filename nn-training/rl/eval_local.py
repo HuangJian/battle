@@ -62,6 +62,9 @@ def run_local_eval_game(
     difficulty: str,
     timeout_sec: float,
     wver: str,
+    stage_json: str = "",
+    lives_override: int | None = None,
+    player_level: int | None = None,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -91,6 +94,13 @@ def run_local_eval_game(
         "--node-label",
         "local",
     ]
+    # M1d 双侧同规：课程自定义关 stageJson + lives/level 覆盖（plan §6/§5.2）
+    if stage_json:
+        cmd += ["--stage-json", stage_json]
+    if lives_override is not None:
+        cmd += ["--lives-override", str(lives_override)]
+    if player_level is not None:
+        cmd += ["--player-level", str(player_level)]
     t0 = time.time()
     proc = subprocess.run(
         cmd,

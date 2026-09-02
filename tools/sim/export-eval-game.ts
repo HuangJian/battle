@@ -35,6 +35,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { createHash } from 'node:crypto'
 import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena-ladder'
+import { decodeStageGrid } from '../../src/nn/config-stage'
 import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
@@ -202,6 +203,8 @@ export function runEvalOne(
   goalWeightsText = '',
   promiseTicks = 0,
   arenaId = 0,
+  livesOverride: number | null = null,
+  playerLevelOverride: number | null = null,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -217,6 +220,10 @@ export function runEvalOne(
   if (isArenaId(arenaId) && arenaLevelOfId(arenaId) === 'S-Dodge') {
     world.lives = 1
   }
+  // M1d（plan/rl-training-config.md §6 双侧同规）：课程 lives/level 覆盖**后生效**
+  // （高于 S-Dodge 默认）——课程配置是命数/星级的单一事实来源。
+  if (livesOverride !== null) world.lives = livesOverride
+  if (playerLevelOverride !== null) world.playerLevel = playerLevelOverride
   // 有效初始生命（覆写后）：S-Dodge 一命 → 1；其余关卡 → difficulty.startLives。
   // 下游 lives 归一与报告均以此为准（此前误用 difficulty.startLives=3，一命局
   // 的 lives 被错算成 1/3）。
@@ -435,6 +442,10 @@ function main(): void {
   let nodeLabel = ''
   // --pack <path>（v3.6）：BCV2 容器输出，语义同 export-rl-rollout（无 shards、空 entries）。
   let packPath = ''
+  // M1d：课程自定义关 stageJson（13×13 瓦格，decodeStageGrid 解码）+ lives/level 覆盖。
+  let stageJson = ''
+  let livesOverride = ''
+  let playerLevelOverride = ''
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--difficulty') difficulty = argv[++i]
@@ -449,6 +460,10 @@ function main(): void {
     else if (argv[i] === '--wver') wver = argv[++i]
     else if (argv[i] === '--node-label') nodeLabel = argv[++i]
     else if (argv[i] === '--pack') packPath = argv[++i]
+    // M1d：课程自定义关 stageJson + lives/level 覆盖（与 export-rl-rollout 同规）
+    else if (argv[i] === '--stage-json') stageJson = argv[++i]
+    else if (argv[i] === '--lives-override') livesOverride = argv[++i]
+    else if (argv[i] === '--player-level') playerLevelOverride = argv[++i]
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
     console.error('[export-eval-game] --stage/--seed required')
@@ -457,8 +472,10 @@ function main(): void {
   // arena 编号命名空间（goal-nn 卡 A1/A2）：si >= 1000 经 ARENA_LADDER 解析，
   // 门禁贪心评估（S 级通关率）在 arena 上进行。stageIndex 传 0（同
   // export-rl-rollout 的修复——1.05^index 缩放经里程碑掉落反哺玩法）。
-  const stage = isArenaId(stageIdx) ? resolveArenaStage(stageIdx)! : STAGES[stageIdx]
-  const loadIndex = isArenaId(stageIdx) ? 0 : stageIdx
+  // M1d 守卫①：--stage-json 先解码（短路 arena/真实关解析）；守卫②：自定义关 index 0。
+  const custom = stageJson ? decodeStageGrid(stageJson, stageIdx) : null
+  const stage = custom ?? (isArenaId(stageIdx) ? resolveArenaStage(stageIdx)! : STAGES[stageIdx])
+  const loadIndex = custom ? 0 : isArenaId(stageIdx) ? 0 : stageIdx
   mkdirSync(outDir, { recursive: true })
   // v4.0：仅 'nn' 策略需要权重文件（god/goal-god/intent/goal 各自携带自己的权重源）。
   const weightsText = policy === 'nn' ? readFileSync(weightsPath, 'utf8') : '{}'
@@ -480,6 +497,8 @@ function main(): void {
     goalWeightsText,
     promiseTicks,
     isArenaId(stageIdx) ? stageIdx : 0,
+    livesOverride ? parseInt(livesOverride, 10) : null,
+    playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。

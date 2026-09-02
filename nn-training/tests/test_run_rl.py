@@ -692,7 +692,10 @@ def test_eval_local_gate(tmp: Path) -> None:
     cfg = {"nodes": [], "policy": {"evalLocalSlots": 2}}
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver):
+    def fake_runner(
+        bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver,
+        stage_json="", lives_override=None, player_level=None,
+    ):
         calls.append((stage, seed))
         assert Path(snap).read_text(encoding="utf-8") == '{"arch":{}}'
         return {

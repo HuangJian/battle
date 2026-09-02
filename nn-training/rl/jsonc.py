@@ -53,11 +53,52 @@ def strip_comments(src: str) -> str:
     return "".join(out)
 
 
+def _drop_trailing_commas(src: str) -> str:
+    """删除字符串外的尾逗号（`, }`/`, ]`）——JSONC 惯例兜底。
+
+    Python `json.loads` 严格拒绝尾逗号；课程作者（及本仓首批样例）常按 JSONC
+    习惯在末项后留逗号。纯文本扫描（维护 in-string/转义），不依赖 json 解析；
+    无副作用：非尾逗号原样保留。
+    """
+    out: list[str] = []
+    in_str = False
+    esc = False
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == ",":
+            j = i + 1
+            while j < n and src[j] in " \t\r\n":
+                j += 1
+            if j < n and src[j] in "}]":
+                i += 1  # 尾逗号：丢弃
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def loads(src: str) -> dict:
-    """`strip_comments` + `json.loads`（JSONC 文本 → dict）。"""
+    """`strip_comments` + 去尾逗号 + `json.loads`（JSONC 文本 → dict）。"""
     import json
 
-    return dict(json.loads(strip_comments(src)))
+    return dict(json.loads(_drop_trailing_commas(strip_comments(src))))
 
 
 def load(path: str) -> dict:

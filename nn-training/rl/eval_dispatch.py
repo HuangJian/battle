@@ -364,6 +364,9 @@ class EvalDispatcher:
                     err = ""
                     manifest: dict = {}
                     try:
+                        from rl.config import args_rollout_overrides, stage_json_for_args
+
+                        _ov = args_rollout_overrides(args)
                         manifest = run_local_eval_game(
                             bun,
                             snapshot_path,
@@ -374,6 +377,13 @@ class EvalDispatcher:
                             difficulty=args.difficulty,
                             timeout_sec=task_timeout,
                             wver=wver,
+                            stage_json=stage_json_for_args(args, task[0]) or "",
+                            lives_override=int(_ov["lives_override"])
+                            if "lives_override" in _ov
+                            else None,
+                            player_level=int(_ov["player_level"])
+                            if "player_level" in _ov
+                            else None,
                         )
                         why = dist_common.validate_eval_result(manifest, wver)
                         if why:

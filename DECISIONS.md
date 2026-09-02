@@ -1502,3 +1502,13 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 **关键取舍**：idx10 空槽按「连续编号 + 已编号项不变」补 `starsCollected`；manifest.score 本就是 gated（F3 门控在 TS 完成），Python 不再二次乘 BASE_LOSS_MULT（避免双重门控）；rl-reward.ts 的 `basePressureMean` 字段实为 sum（oracle 按 rollout 口径 sum/samples 喂入，命名坑已注释）。S4a 移出本期（随 A7）。v7 公式 607 字符未触降级卡——`reward.builtin` 机制保留（warning+回退）但不作默认路径。
 
 **验证**：`tests/test_reward_golden.py`（安全边界/wrapper/N=1/末样本差异/telescoping/golden-file/v7 逐位）、`test_metrics_shard.py`（加载器端到端/版本分支/无 holder 报错/行失配报错）、`test_rl_schedule.py`、`tests/config-stage.test.ts`、`tests/dist-agent.test.ts` 全绿；`python run_rl.py --course _smoke`（1 局 arena）与自定义关 stage-json 直跑端到端通过（Σr 恒等式 + 列序抽查）。课程配置 = 配置机制验收夹具（S1/S2/S3/S-Dodge/S4b，不再实际训练）。
+
+## §308b M1 收尾：尾逗号容忍 + 课程/CLI 冲突 fail-loud + eval 双侧同规（2026-09-02，commit e828331 后续）
+
+**尾逗号**：首批 `.jsonc` 样例带 JSONC 惯例尾逗号（末项后 `,` + `}`）——Python `json.loads` 严格拒绝，且 `//` 注释在逗号与闭合符之间时简单文本清理会漏。处置双层：① `rl/jsonc.py` 的 `loads()` 加 `_drop_trailing_commas`（字符串外扫描，维护 in-string/转义，仅删 `,` 后随 `}`/`]` 者）；② 六个课程文件清理。加载流程 = strip_comments → drop 尾逗号 → json.loads（单测覆盖）。
+
+**课程/CLI 冲突**（plan §3 fail-loud）：argparse 无法区分「显式传参」与「吃默认」——以 `ap.parse_args([])` 的默认命名空间为基线，凡 CLI 值 ≠ 默认 且 该键在课程 flat_overrides 覆盖集内 → SystemExit 列出冲突（此前课程静默覆盖用户显式参数）。`course_cli_conflicts()` 纯函数 + 单测。
+
+**eval 双侧同规**（plan §6/§10）：`export-eval-game.ts` 增 `--stage-json/--lives-override/--player-level`（decodeStageGrid 短路、自定义关 loadIndex=0、覆盖在 S-Dodge 默认之后生效）；`eval_local.run_local_eval_game` + `eval_dispatch` 本地评估按课程透传；sampler-agent eval 分支同传。自定义关 eval 直跑冒烟通过。说明：legacy 非课程 arena eval 仍保留 exporter 内 S-Dodge lives=1 默认（课程路径以配置覆盖为准，双轨共存不破既有评估基线）。
+
+**验证**：nn python gate ✓；tsc/oxlint/oxfmt ✓；bun 13 用例 ✓；test_run_rl fake_runner 签名同步（+3 可选参）。

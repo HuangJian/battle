@@ -303,6 +303,16 @@ def test_strip_comments() -> None:
     assert strip_comments('{\n// c\n"a":1}') == '{\n\n"a":1}'
 
 
+def test_jsonc_trailing_commas_and_loads() -> None:
+    """JSONC 加载器：注释 + 尾逗号（`, }`/`, ]`）双容忍；字符串内不受影响。"""
+    from rl.jsonc import loads as jsonc_loads
+
+    d = jsonc_loads('{\n  "a": [1, 2,],  // 尾逗号+注释\n  "b": {"x": 1,},\n}')
+    assert d == {"a": [1, 2], "b": {"x": 1}}
+    # 字符串内的 `},` 原样保留
+    assert jsonc_loads('{"s": "a,},b"}') == {"s": "a,},b"}
+
+
 def test_jsonc_courses_load() -> None:
     files = sorted(CURRICULA_DIR.glob("*.jsonc"))
     assert len(files) >= 5, f"课程配置太少：{files}"

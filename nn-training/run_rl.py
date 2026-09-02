@@ -106,11 +106,27 @@ def main() -> None:
     # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口 =====
     # 优先级 课程 > rl-config.json > argparse 默认；无 CLI 逐参覆盖。课程自带
     # 关卡布局/奖励公式/超参 schedule，apply 后由各阶段消费。
-    from rl.config import apply_course, course_from_args, echo_config
+    from rl.config import (
+        apply_course,
+        course_cli_conflicts,
+        course_from_args,
+        echo_config,
+    )
 
     course = course_from_args(args)
     if course is not None:
+        # CLI 快照（apply 前）+ 纯默认基线（parse_args([])）→ 冲突检测
+        _cli_before = {k: v for k, v in vars(args).items()}
+        _defaults_ns = ap.parse_args([])
         apply_course(args, course)
+        conflicts = course_cli_conflicts(_cli_before, vars(_defaults_ns), course)
+        if conflicts:
+            raise SystemExit(
+                "[run_rl] --course 与显式 CLI 参数冲突（课程是单一事实来源，无 CLI 逐参"
+                "覆盖——plan §3）：\n  "
+                + "\n  ".join(conflicts)
+                + "\n删掉冲突 flag 或改课程配置后重试"
+            )
     if getattr(args, "echo_config", False):
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")
