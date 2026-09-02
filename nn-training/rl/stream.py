@@ -255,7 +255,10 @@ def run_rollout_stream(
             if ep is None:
                 continue
             eps.append(ep)
-        if eps:
+        # P1-7：wave 内 adv 归一化受 --adv-norm 控制（auto=流式默认 wave 归一；
+        # none 跳过——供对照实验，与串行 global 归一形成三档可测粒度）。
+        adv_norm = getattr(args, "adv_norm", "auto")
+        if eps and adv_norm != "none":
             all_adv = np.concatenate([ep["adv"] for ep in eps])
             mean, std = all_adv.mean(), all_adv.std() + 1e-8
             for ep in eps:

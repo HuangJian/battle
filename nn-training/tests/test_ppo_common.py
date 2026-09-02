@@ -199,6 +199,7 @@ def main() -> None:
     test_masked_logsoftmax()
     test_cat_logprob_entropy()
     test_chunk_episodes()
+    test_chunk_episodes_shuffle_preserves_data()
     test_np_state_roundtrip()
     test_backend_params_match_config()
     test_ppo_save_load(Path(_td))
@@ -211,6 +212,34 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_chunk_episodes_shuffle_preserves_data() -> None:
+    """P1-6：全局 transition 重排只改变顺序，不丢/不增数据；shuffle=False 保留旧行为。"""
+    import numpy as np
+
+    rng = np.random.RandomState(7)
+    eps: list[dict] = [
+        {"obs": rng.randint(0, 255, (12, 14, 26, 26)).astype(np.uint8),
+         "adv": rng.randn(12).astype(np.float32),
+         "ret": rng.randn(12).astype(np.float32)},
+        {"obs": rng.randint(0, 255, (20, 14, 26, 26)).astype(np.uint8),
+         "adv": rng.randn(20).astype(np.float32),
+         "ret": rng.randn(20).astype(np.float32)},
+    ]
+    total = 32
+    # shuffle=False：旧行为（逐字节等价）——首 chunk = 第一个 episode 的前 mb 行
+    old_chunks = ppo_common.chunk_episodes(eps, mb=8, shuffle=False)
+    np.testing.assert_array_equal(old_chunks[0]["obs"], eps[0]["obs"][:8])
+    # shuffle=True：行数守恒 + 元素集合不变（拼回后与 flatten 一致）
+    sh_chunks = ppo_common.chunk_episodes(eps, mb=8, shuffle=True)
+    assert sum(c["obs"].shape[0] for c in sh_chunks) == total
+    flat_adv = np.concatenate([e["adv"] for e in eps])
+    got_adv = np.concatenate([c["adv"] for c in sh_chunks])
+    assert sorted(got_adv.tolist()) == sorted(flat_adv.tolist()), "重排不丢/不增数据"
+    # 重排确实发生（概率性断言：32 个连续索引全保持原序的概率 ≈ 0）
+    first_flat = np.concatenate([e["adv"] for e in eps])
+    assert not np.array_equal(got_adv, first_flat), "应发生重排"
 
 
 def test_backend_params_match_config() -> None:

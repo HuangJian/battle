@@ -16,12 +16,21 @@ Params（h=64/d=8）：主干 67.5K + 三头 (137→8=1104 / 137→5=690 / 137�
 
 from __future__ import annotations
 
+import importlib.util as _ilu
 import json
 import os
+import sys as _sys
 from collections import OrderedDict
+from pathlib import Path as _Path
 
 import torch
 import torch.nn as nn
+
+# 仓库根探测（B4，2026-09-02）：直接 `python models/intent_net.py --golden` 时
+# sys.path[0]=models/，需仓库根才能 import models/ppo/schema（此前漏加探针，
+# --golden CLI 直跑报 ModuleNotFoundError）。
+if _ilu.find_spec("schema") is None:
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 from models.student import StudentNet
 

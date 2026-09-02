@@ -124,5 +124,21 @@ def main() -> None:
     print("\nAll tests passed.")
 
 
+def test_stem_input_normalization_folded() -> None:
+    """P1-10：输入归一化折进 stem 权重——初始 stem.weight 量级 ≈ kaiming/255。
+
+    数学等价于 forward 里 input/255，但权重文件格式不变（TS 运行时零改动）。
+    """
+    import torch
+
+    m = StudentNet(h=16, d=2)
+    # stem.weight 的 kaiming 边界 ≈ sqrt(6/(fan_in))，fan_in=16*9=144
+    bound = (6.0 / 144.0) ** 0.5
+    assert float(m.stem.weight.abs().max()) <= bound / 255.0 + 1e-6, (
+        "stem.weight 应已 ×1/255（输入归一化折进权重）"
+    )
+
+
 if __name__ == "__main__":
     main()
+    test_stem_input_normalization_folded()

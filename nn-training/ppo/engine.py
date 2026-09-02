@@ -68,6 +68,7 @@ from ppo.common import (
     log,
     masked_logsoftmax,
 )
+from ppo.trainer import aggregate_stats, tensored_chunks
 from schema import FIRE_DIM, MOVE_DIM
 
 # ---------------- hyper-params (CLI-overridable) ----------------
@@ -151,7 +152,9 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
     }
 
 
-def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> list[dict]:
+def load_episodes(
+    data_root: str, gamma: float = GAMMA, lam: float = LAM, normalize_adv: bool = True
+) -> list[dict]:
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's
     update mode and the run_rl.py loop."""
@@ -163,6 +166,7 @@ def load_episodes(data_root: str, gamma: float = GAMMA, lam: float = LAM) -> lis
         shard_loader=load_shard,
         gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
         gae_name="GAE",
+        normalize_adv=normalize_adv,
         normalize_ret=False,
     )
 
@@ -188,7 +192,7 @@ def ppo_update(
     stats: list[dict[str, float]] = []
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
-    tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
+    tensored = tensored_chunks(chunks, device)
     total_steps = len(tensored) * epochs
     log(f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)")
     t0 = time.time()
@@ -297,8 +301,7 @@ def ppo_update(
             "gnorm": 0.0,
             "mean_ret": 0.0,
         }
-    n = len(stats)
-    agg = {k: sum(s[k] for s in stats) / n for k in stats[0]}
+    agg = aggregate_stats(stats, list(stats[0].keys()))
     return agg
 
 

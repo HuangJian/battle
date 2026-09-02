@@ -61,6 +61,7 @@ from ppo.common import (
     log,
     masked_logsoftmax,
 )
+from ppo.trainer import tensored_chunks
 from schema import BOARD
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
@@ -205,7 +206,7 @@ def load_episode_from_shard(dirpath: str) -> dict | None:
     return ep
 
 
-def load_episodes_goal(data_root: str) -> list[dict]:
+def load_episodes_goal(data_root: str, normalize_adv: bool = True) -> list[dict]:
     return load_episodes_common(
         data_root,
         label="ppo_goal",
@@ -214,6 +215,7 @@ def load_episodes_goal(data_root: str) -> list[dict]:
         shard_loader=load_goal_shard,
         gae=lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
         gae_name="variable-step GAE",
+        normalize_adv=normalize_adv,
         normalize_ret=True,
     )
 
@@ -265,7 +267,7 @@ def ppo_update_goal(
     model.train()
     clip = CLIP_EPS
     stats: list[dict[str, float]] = []
-    tensored = [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
+    tensored = tensored_chunks(chunks, device)
     total_steps = len(tensored) * epochs
     log(
         f"[ppo_goal] update start: {len(tensored)} chunks x {epochs} epochs "

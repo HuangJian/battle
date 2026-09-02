@@ -841,6 +841,7 @@ def main() -> None:
     test_chunk_episodes()
     test_backup_weights(tmp)
     test_scan_shards_mtime_cache(tmp)
+    test_rl_config_validation()
     test_eval_local_gate(tmp)
     test_pick_tail_race()
     test_race_tier_ok()
@@ -904,3 +905,34 @@ def test_scan_shards_mtime_cache(tmp: Path) -> None:
         rl_resume.completed_pairs(traj, wver) == {(0, 111)},
         "wver 不匹配不计入",
     )
+
+
+def test_rl_config_validation() -> None:
+    """P1-3：启动参数校验——互斥/范围非法值在启动期 fail fast。"""
+    import types
+
+    from rl.config import RLConfig, validate_args
+
+    print("[fast] RLConfig 校验（互斥/范围）")
+    # 合法默认
+    check(RLConfig().validate() == [], "默认配置合法")
+    # 互斥：precollect_games + precollect_samples
+    c = RLConfig(precollect_games=5, precollect_samples=1000)
+    check(any("互斥" in e for e in c.validate()), "games/samples 互斥")
+    # 范围
+    check(any("workers" in e for e in RLConfig(workers=0).validate()), "workers<1 拦截")
+    check(any("mb" in e for e in RLConfig(mb=0).validate()), "mb<1 拦截")
+    check(any("lr" in e for e in RLConfig(lr=0).validate()), "lr<=0 拦截")
+    check(any("adv_norm" in e for e in RLConfig(adv_norm="bogus").validate()), "adv_norm 非法拦截")
+    # validate_args 对 Namespace：非法 → SystemExit
+    bad = types.SimpleNamespace(
+        mode="per-tick", iters=2, stream=1, double_buffer=0, precollect_games=5,
+        precollect_samples=1000, workers=8, local_slots=0, mb=512, epochs=4,
+        lr=3e-4, seed=7, keep_iters=3, stop_loss_at=0, stop_loss_delta=0.0,
+        adv_norm="auto", eval_seeds=10, eval_at="",
+    )
+    try:
+        validate_args(bad)
+        check(False, "互斥组合应 SystemExit")
+    except SystemExit:
+        check(True, "互斥组合启动期拦截")

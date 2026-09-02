@@ -807,6 +807,14 @@ def main() -> None:
         help="PPO learning rate（默认 3e-4，与 ppo/engine.py LR 同步；collect-only "
         "子进程不得 import torch，故不用模块常量）",
     )
+    ap.add_argument(
+        "--adv-norm",
+        choices=("auto", "global", "wave", "none"),
+        default=_d("adv_norm", "auto"),
+        help="advantage 归一化粒度（P1-7，2026-09-02）：auto=流式 wave / 串行 "
+        "global（保持现状）；global=整轮归一；wave=每 wave 归一；none=不归一 "
+        "（供对照实验）。同一套超参在不同粒度下数学不同，显式记录口径",
+    )
     ap.add_argument("--seed", type=int, default=_d("seed", 7))
     ap.add_argument(
         "--max-hours",
@@ -902,6 +910,11 @@ def main() -> None:
     )
     args = ap.parse_args()
     apply_mode_flags(args)
+    # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
+    # 要等训练中途才暴露）。
+    from rl.config import validate_args
+
+    validate_args(args)
 
     # stdout/stderr 落盘（out_log/err_log；CLI 可覆盖调试；per-tick 默认空=仅控制台）。
     _setup_log_redirect(args)
@@ -1298,7 +1311,10 @@ def main() -> None:
 
             if stream_meta is None:
                 t_ppo = time.time()
-                episodes = PPO.load_episodes(str(traj_dir))
+                # P1-7：--adv-norm none 时串行路径跳过 global 归一（对照实验）
+                episodes = PPO.load_episodes(
+                    str(traj_dir), normalize_adv=getattr(args, "adv_norm", "auto") != "none"
+                )
                 total_steps = sum(e["obs"].shape[0] for e in episodes)
                 chunks = PPO.chunk_episodes(episodes, args.mb)
                 # PPO epoch 级断点续跑：崩溃重启后从最近 checkpoint 继续未完成批次

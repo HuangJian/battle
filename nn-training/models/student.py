@@ -108,6 +108,14 @@ class StudentNet(nn.Module):
         self.fire_head = nn.Linear(head_hidden, FIRE_DIM, bias=True)
 
         self._init_weights()
+        # P1-10（2026-09-02）：输入归一化**折进首层权重**。obs 与 coord 通道同为
+        # 0..255，对 stem.weight 统一 ×1/255 在数学上等价于 forward 里 input/255
+        # ——但权重文件格式不变，TS 运行时 src/nn/infer.ts **零改动**（它不做除法，
+        # 权重已含缩放）。历史教训：不归一化导致 trunk 激活 ~千级、策略头 logits
+        # ±7600、熵≈0.01，PPO 无法探索（run_rl.py warm_start_normalize 手工兜底
+        # 的根源，plan/python-refactor.md P1-10）。
+        with torch.no_grad():
+            self.stem.weight.mul_(1.0 / 255.0)
 
     def _init_weights(self) -> None:
         for m in self.modules():

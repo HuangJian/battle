@@ -169,18 +169,36 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
 
 
 # ---------------- minibatch chunking ----------------
-def chunk_episodes(episodes: list[dict], mb: int) -> list[dict]:
+def chunk_episodes(
+    episodes: list[dict], mb: int, shuffle: bool = True
+) -> list[dict]:
     """Split per-episode dicts into fixed-size minibatch chunks (last chunk ragged).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
     granularity unit (bounds activation memory, adds gradient steps).
+
+    shuffle（P1-6，2026-09-02 默认开启）：旧实现按 episode 顺序连续切片——每个
+    minibatch 是同一局内 mb 个**相邻**决策步，帧间强相关，SGD 的 i.i.d. 假设被
+    严重违反（梯度方差大 → KL spikes → 熔断/早停；H1 假设的主因）。默认改为
+    **全局 transition 级重排**：展平全部 episodes → 单次 permutation → 按 mb 切片。
+    GAE/adv/ret 是逐 transition 存储的，重排不改变任何数学（on-policy 正确性
+    不受影响）；RNG 用全局 np.random（由 main 播种，可复现）。
+    shuffle=False 保留旧行为（逐字节一致，供对照实验）。
     """
-    out: list[dict] = []
-    for e in episodes:
-        n = e["obs"].shape[0]
-        for s in range(0, n, mb):
-            out.append({k: v[s : s + mb] for k, v in e.items()})
-    return out
+    if not shuffle or len(episodes) <= 1:
+        out: list[dict] = []
+        for e in episodes:
+            n = e["obs"].shape[0]
+            for s in range(0, n, mb):
+                out.append({k: v[s : s + mb] for k, v in e.items()})
+        return out
+    keys = list(episodes[0].keys())
+    flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
+    n = flat["obs"].shape[0]
+    idx = np.random.permutation(n)
+    return [
+        {k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n, mb)
+    ]
 
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------
@@ -195,6 +213,7 @@ def load_episodes_common(
     gae_name: str,
     normalize_ret: bool,
     load_log_every: int = 128,
+    normalize_adv: bool = True,
 ) -> list[dict]:
     """Discover shards → per-shard GAE → global normalize → episode dicts.
 
@@ -228,10 +247,13 @@ def load_episodes_common(
         f"[{label}] shard IO + {gae_name} done for {len(episodes)} episodes "
         f"({time.time() - t_load:.0f}s)"
     )
-    all_adv = np.concatenate([e["adv"] for e in episodes])
-    amean, astd = all_adv.mean(), all_adv.std() + 1e-8
-    for e in episodes:
-        e["adv"] = (e["adv"] - amean) / astd
+    # P1-7（2026-09-02）：adv 归一化粒度参数化（normalize_adv=False 供
+    # --adv-norm none 对照实验；默认 True 保持全局归一现状）。
+    if normalize_adv:
+        all_adv = np.concatenate([e["adv"] for e in episodes])
+        amean, astd = all_adv.mean(), all_adv.std() + 1e-8
+        for e in episodes:
+            e["adv"] = (e["adv"] - amean) / astd
     if normalize_ret:
         all_ret = np.concatenate([e["ret"] for e in episodes])
         rmean, rstd = all_ret.mean(), all_ret.std() + 1e-8
