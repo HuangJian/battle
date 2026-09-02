@@ -71,27 +71,27 @@ def test_variable_dt_differs() -> None:
 
 
 def test_goal_net_roundtrip(tmp_path: Path) -> None:
-    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
-        path = os.path.join(td, "goal.json")
-        m = ppo_goal.GoalRLNet(h=32, d=2)
-        export_goal_weights(m, path)
-        meta, _ = load_weights_json(path)
-        check(meta["arch"]["kind"] == "goal", "arch.kind == goal")
-        shapes = {k: list(v["shape"]) for k, v in meta["params"].items()}
-        check(shapes["goal_conv.weight"] == [1, 32, 1, 1], "goal_conv.weight [1,h,1,1]")
-        check(shapes["goal_conv.bias"] == [1], "goal_conv.bias [1]")
-        check(shapes["engage_head.weight"] == [2, 128 + 9], "engage_head [2,137]")
-        check(shapes["value_head.weight"] == [1, 128 + 9], "value_head [1,137]")
-        check(not any(k.startswith("intent_head") for k in shapes), "无 intent 头（goal 专属）")
-        m2 = ppo_goal.GoalRLNet(h=32, d=2)
-        ppo_goal.load_goal_weights(m2, path)
-        for k in ("goal_conv.weight", "engage_head.weight", "value_head.weight"):
-            check(
-                torch.equal(
-                    dict(m.named_parameters())[k].data, dict(m2.named_parameters())[k].data
-                ),
-                f"roundtrip {k}",
-            )
+    td = tempfile.mkdtemp(dir=str(tmp_path))
+    path = os.path.join(td, "goal.json")
+    m = ppo_goal.GoalRLNet(h=32, d=2)
+    export_goal_weights(m, path)
+    meta, _ = load_weights_json(path)
+    check(meta["arch"]["kind"] == "goal", "arch.kind == goal")
+    shapes = {k: list(v["shape"]) for k, v in meta["params"].items()}
+    check(shapes["goal_conv.weight"] == [1, 32, 1, 1], "goal_conv.weight [1,h,1,1]")
+    check(shapes["goal_conv.bias"] == [1], "goal_conv.bias [1]")
+    check(shapes["engage_head.weight"] == [2, 128 + 9], "engage_head [2,137]")
+    check(shapes["value_head.weight"] == [1, 128 + 9], "value_head [1,137]")
+    check(not any(k.startswith("intent_head") for k in shapes), "无 intent 头（goal 专属）")
+    m2 = ppo_goal.GoalRLNet(h=32, d=2)
+    ppo_goal.load_goal_weights(m2, path)
+    for k in ("goal_conv.weight", "engage_head.weight", "value_head.weight"):
+        check(
+            torch.equal(
+                dict(m.named_parameters())[k].data, dict(m2.named_parameters())[k].data
+            ),
+            f"roundtrip {k}",
+        )
 
 
 def test_coarse_logsumexp() -> None:

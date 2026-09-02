@@ -116,17 +116,17 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     check(not torch.equal(va, vb), "value 输出随注入变化（value 看到承诺状态）")
 
     # export/load 往返。
-    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
-        p = os.path.join(td, "w.json")
-        export_intent_weights(m, p)
-        meta, params = load_weights_json(p)
-        check(meta["arch"]["kind"] == "intent", "arch.kind=intent")
-        check("value_head.weight" in params, "exported value_head.weight present")
-        m2 = ppo_intent.IntentRLNet(h=64, d=8)
-        from models.intent_net import load_intent_weights
+    td = tempfile.mkdtemp(dir=str(tmp_path))
+    p = os.path.join(td, "w.json")
+    export_intent_weights(m, p)
+    meta, params = load_weights_json(p)
+    check(meta["arch"]["kind"] == "intent", "arch.kind=intent")
+    check("value_head.weight" in params, "exported value_head.weight present")
+    m2 = ppo_intent.IntentRLNet(h=64, d=8)
+    from models.intent_net import load_intent_weights
 
-        load_intent_weights(m2, p)
-        check(True, "load_intent_weights roundtrip ok")
+    load_intent_weights(m2, p)
+    check(True, "load_intent_weights roundtrip ok")
 
 
 def test_ppo_update_smoke() -> None:

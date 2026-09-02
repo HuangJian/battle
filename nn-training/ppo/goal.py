@@ -13,7 +13,6 @@ ppo_goal.py — Goal-Space PPO（semi-MDP，变步长 GAE）
 
 multi-head loss（§T7.2，对照 ppo_intent.py）：
   loss = surrogate_clip(goal, N 路)            # 主项
-       + λ_bc · CE(goal, bc_p 软目标)          # 可选 kickstart（shard 提供 bc_p 时）
        + CE(engage, engage_label)              # 辅助监督（仅 shard 带 engage_label 时；
                                                #   on-policy 采样无反事实标签 ⇒ 不训）
        + VF_COEF · value_MSE − ENT_COEF · H
@@ -131,8 +130,9 @@ _GOAL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
 # 可选字段（存在才加载；缺失返回 None）
 _GOAL_OPT_SPEC = {
     "engage_label": ("engage_label.npy", np.int64),
-    "bc_p": ("bc_p.npy", np.float32),
-    "bc_idx": ("bc_idx.npy", np.int64),
+    # 注：bc_p/bc_idx 软目标 kickstart（§11.5）于 2026-09-02 清理——TS 侧
+    # export-goal-rollout.ts 从不产出这两个字段（无生产方），对应分支永不执行
+    # （plan/python-refactor.md P2-6a）。未来如需 bc kickstart，从 git 历史恢复。
 }
 
 
@@ -199,7 +199,7 @@ def load_episode_from_shard(dirpath: str) -> dict | None:
         "dt": d["dt"],
         "engage": d["engage"],
     }
-    for k in ("engage_label", "bc_p", "bc_idx"):
+    for k in ("engage_label",):
         if k in d:
             ep[k] = d[k]
     return ep
@@ -231,11 +231,10 @@ def ppo_update_goal(
     value_warmup_epochs: int = 0,
     ref_model: torch.nn.Module | None = None,
     kl_coef: float = 0.0,
-    bc_coef: float = 0.0,
     on_epoch_done=None,
 ):
     """chunks: goal 承诺步 minibatch dicts（obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask
-    [+ bc_p/bc_idx + engage_label]）。
+    [+ engage_label]）。
 
     on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（与 ppo / ppo_intent 逐
     行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
@@ -246,8 +245,6 @@ def ppo_update_goal(
     value_warmup：同 ppo_intent——前 N epoch 冻结主干只训 value 头（goal-BC 冷启动
     value 随机，直接 PPO 会被 value 噪声主导）。
     kickstarting：ref_model = goal-BC 冻结快照，kl_coef·KL(π_curr‖π_ref)，系数外置退火。
-    bc_coef：BC 软目标 kickstart（shard 带 bc_p 时生效），CE(goal, bc_p) over 全 676 路
-    （§11.5 软目标 + 稀疏 CE 的 RL 期延续）。
     target_kl 早停同 ppo_intent。
     """
     if not chunks:
@@ -270,7 +267,7 @@ def ppo_update_goal(
     log(
         f"[ppo_goal] update start: {len(tensored)} chunks x {epochs} epochs "
         f"(~{total_steps} grad steps) value_warmup={value_warmup_epochs} "
-        f"kickstart_kl_coef={kl_coef} bc_coef={bc_coef}"
+        f"kickstart_kl_coef={kl_coef}"
     )
     t0 = time.time()
     last_hb = t0
@@ -306,7 +303,6 @@ def ppo_update_goal(
 
             if warmup:
                 policy_loss = torch.zeros((), device=device)
-                bc_loss = torch.zeros((), device=device)
                 loss = VF_COEF * value_loss
             else:
                 ratio = torch.exp(lp_new_a - lp_old)
@@ -314,14 +310,6 @@ def ppo_update_goal(
                 surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
                 policy_loss = -torch.min(surr1, surr2).mean()
                 loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
-                # BC 软目标 kickstart（§11.5）：CE(softmax(goal 676), bc_p)，
-                # 仅当 chunk 携带 bc_p。bc_p 行和 = 1（采集/标注侧保证）。
-                bc_loss = torch.zeros((), device=device)
-                if bc_coef > 0 and "bc_p" in e:
-                    goal_f, _eng, _val = model.forward_rl(obs, sc, inj)
-                    logp = F.log_softmax(goal_f, dim=-1)
-                    bc_loss = -(e["bc_p"] * logp).sum(dim=-1).mean()
-                    loss = loss + bc_coef * bc_loss
                 # engage 辅助 CE（仅离线标注语料带 engage_label 时；on-policy 不训）
                 if "engage_label" in e:
                     engage_loss = F.cross_entropy(engage_log, e["engage_label"])
@@ -345,7 +333,7 @@ def ppo_update_goal(
                     "value": float(value_loss.item()),
                     "entropy": float(entropy.item()),
                     "kl": float(approx_kl),
-                    "bc": float(bc_loss.item()),
+                    "bc": 0.0,  # bc 软目标已清理（P2-6a）；保留键保 schema 兼容
                     "mean_ret": float(ret.mean().item()),
                     "gnorm": float(gn),
                 }
@@ -425,12 +413,6 @@ def main():
         default=None,
         help="kickstarting 参考策略权重（goal-BC 冻结快照；缺省 = 当前权重）",
     )
-    ap.add_argument(
-        "--bc-coef",
-        type=float,
-        default=0.0,
-        help="BC 软目标 kickstart 系数（shard 带 bc_p 时生效）",
-    )
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--threads", type=int, default=8)
@@ -485,7 +467,6 @@ def main():
         value_warmup_epochs=args.value_warmup_epochs,
         ref_model=ref_model,
         kl_coef=args.kl_coef,
-        bc_coef=args.bc_coef,
     )
 
     model.to("cpu")

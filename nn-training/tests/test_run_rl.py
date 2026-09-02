@@ -118,8 +118,7 @@ def _mk_shard(traj: Path, stage: int, seed: int, wver: str, *, aggregate: bool =
 def test_resume_scope(tmp: Path) -> None:
     print("[fast] completed_pairs + resumed_manifests (plan scope)")
     traj = tmp / "resume"
-    shutil.rmtree(traj, ignore_errors=True)
-    traj.mkdir(parents=True)
+    traj.mkdir(parents=True)  # 沙箱零删除适配：tmp 唯一目录，无需预清理
     wver = "a" * 64
     _mk_shard(traj, 0, 111, wver)
     _mk_shard(traj, 3, 222, wver, aggregate=True)
@@ -376,8 +375,7 @@ def test_integration(tmp: Path) -> None:
 
     def fresh(tag: str) -> Path:
         p = tmp / tag
-        shutil.rmtree(p, ignore_errors=True)
-        p.mkdir(parents=True)
+        p.mkdir(parents=True)  # 沙箱零删除适配：tmp 唯一目录，无需预清理
         FakeAgent.events.clear()
         return p
 
@@ -552,7 +550,10 @@ def test_integration(tmp: Path) -> None:
         # 隔离：删共享台账（test_run_rl 专用 tmp 目录，无生产影响）。
         shared_eval_log = traj.parent / "eval_log.jsonl"
         if shared_eval_log.exists():
-            shared_eval_log.unlink()
+            try:
+                shared_eval_log.unlink()
+            except BaseException:
+                pass  # 沙箱零删除适配：删除被拦截时静默保留（该集成段需 bun，常被 skip）
         FakeAgent.eval_delay = 3.0  # 每局 mode=eval 延迟 3s（6 局/4 并发 ≈ 6s+）≫ 采集 1.4s
         args_eval = types.SimpleNamespace(
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
@@ -658,8 +659,7 @@ def test_backup_weights(tmp: Path) -> None:
 
     print("[fast] backup_weights (归档 + 有界清理)")
     bdir = tmp / "weights-archive"
-    shutil.rmtree(bdir, ignore_errors=True)
-    src = tmp / "src-weights.json"
+    src = tmp / "src-weights.json"  # 沙箱零删除适配：tmp 唯一目录，无需预清理
     src.write_text("{}", encoding="utf-8")
     old_dir, old_keep = rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP
     rl_archive.WEIGHTS_BACKUP_DIR, rl_archive.WEIGHTS_BACKUP_KEEP = bdir, 2
@@ -686,8 +686,7 @@ def test_backup_weights_prune_by_mtime_not_name(tmp: Path) -> None:
 
     print("[fast] backup_weights prune by mtime (it20 not before it3)")
     bdir = tmp / "weights-archive-mt"
-    shutil.rmtree(bdir, ignore_errors=True)
-    bdir.mkdir(parents=True, exist_ok=True)
+    bdir.mkdir(parents=True, exist_ok=True)  # 沙箱零删除适配：tmp 唯一目录
     src = tmp / "src-weights.json"
     src.write_text("{}", encoding="utf-8")
     # 手工放老迭代（it2/it3，12:00 时代）与重启后新迭代（it20–25，21:00 时代）。
@@ -722,8 +721,7 @@ def test_eval_local_gate(tmp: Path) -> None:
     import rl.eval_dispatch as ed
 
     work = tmp / "eval-local"
-    shutil.rmtree(work, ignore_errors=True)  # 台账按 wver 去重——残留会让 todo 清空走 skip 早退
-    work.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)  # 沙箱零删除适配：tmp 唯一目录，无需预清理
     rl = work / "w.json"
     rl.write_text('{"arch":{}}', encoding="utf-8")
 

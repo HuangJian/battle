@@ -146,20 +146,20 @@ def test_ppo_save_load(tmp_path: Path) -> None:
 
     model = nn.Linear(4, 2)
     opt = torch.optim.Adam(model.parameters(), lr=0.1)
-    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
-        ppo_common._ppo_save(td, model, opt, 3)
-        # 文件齐备
-        for f in ("model.pt", "opt.pt", "state.json"):
-            check(os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在")
-        # 加载返回 epochs_done
-        m2 = nn.Linear(4, 2)
-        o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
-        done = ppo_common._ppo_load(td, m2, o2)
-        check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
-        check(
-            np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
-            "checkpoint 加载后权重一致",
-        )
+    td = tempfile.mkdtemp(dir=str(tmp_path))
+    ppo_common._ppo_save(td, model, opt, 3)
+    # 文件齐备
+    for f in ("model.pt", "opt.pt", "state.json"):
+        check(os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在")
+    # 加载返回 epochs_done
+    m2 = nn.Linear(4, 2)
+    o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
+    done = ppo_common._ppo_load(td, m2, o2)
+    check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
+    check(
+        np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
+        "checkpoint 加载后权重一致",
+    )
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
@@ -167,27 +167,27 @@ def test_ppo_save_load(tmp_path: Path) -> None:
 
 
 def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
-    with tempfile.TemporaryDirectory(dir=str(tmp_path)) as td:
-        root = Path(td)
-        shard = root / "s1"
-        shard.mkdir()
-        np.save(shard / "obs.npy", np.zeros((4, 14, 26, 26), dtype=np.uint8))
-        np.save(shard / "reward.npy", np.zeros(4, dtype=np.float32))
-        np.save(shard / "dt.npy", np.ones(4, dtype=np.int64))
-        # 缺 marker 的目录被过滤
-        partial = root / "s2"
-        partial.mkdir()
-        np.save(partial / "obs.npy", np.zeros(1))
-        found = ppo_common.discover_shards(str(root), ("reward.npy", "obs.npy"))
-        check(found == [str(shard)], f"discover 只含完整 shard (got {found})")
-        spec: dict[str, tuple[str, npt.DTypeLike]] = {
-            "obs": ("obs.npy", np.uint8),
-            "reward": ("reward.npy", np.float32),
-            "dt": ("dt.npy", np.int64),
-        }
-        d = ppo_common.load_shard_fields(str(shard), spec)
-        check(set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备")
-        check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换")
+    td = tempfile.mkdtemp(dir=str(tmp_path))
+    root = Path(td)
+    shard = root / "s1"
+    shard.mkdir()
+    np.save(shard / "obs.npy", np.zeros((4, 14, 26, 26), dtype=np.uint8))
+    np.save(shard / "reward.npy", np.zeros(4, dtype=np.float32))
+    np.save(shard / "dt.npy", np.ones(4, dtype=np.int64))
+    # 缺 marker 的目录被过滤
+    partial = root / "s2"
+    partial.mkdir()
+    np.save(partial / "obs.npy", np.zeros(1))
+    found = ppo_common.discover_shards(str(root), ("reward.npy", "obs.npy"))
+    check(found == [str(shard)], f"discover 只含完整 shard (got {found})")
+    spec: dict[str, tuple[str, npt.DTypeLike]] = {
+        "obs": ("obs.npy", np.uint8),
+        "reward": ("reward.npy", np.float32),
+        "dt": ("dt.npy", np.int64),
+    }
+    d = ppo_common.load_shard_fields(str(shard), spec)
+    check(set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备")
+    check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换")
 
 
 def main() -> None:
