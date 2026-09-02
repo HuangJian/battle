@@ -1,4 +1,4 @@
-"""rl/archive.py — RL 权重归档轮转 + 分支 push。
+"""rl/archive.py — RL 权重归档 + 分支 push。
 
 Per-iteration weights archive (user request 2026-08-24)：每轮 PPO 写回后把权重拷贝进
 nn-training/weights/，按 <prefix>.it<N>.<YYYYMMDD-HHMMSS>.json 命名（iter-first 方便按训练进度一览，时间戳消歧合同 iter 重跑）。
@@ -6,12 +6,14 @@ nn-training/weights/，按 <prefix>.it<N>.<YYYYMMDD-HHMMSS>.json 命名（iter-f
 约束：
   - 命名**故意不**匹配 weights_io 严格 BC 自动发现正则，避免 eval_bridge.latest_weights_path
     选中 RL 归档。
-  - prune 按 mtime（真实新旧）+ 文件名兜底排序——2026-08-27 §30 修复：之前纯 filename
-    字典序（'it2' < 'it20' < 'it3'）导致多样最新 checkpoint 被误删。
+  - **只归档、不自动清理**（2026-09-02 用户指令：生产代码不做删除——沙箱删除保护
+    会拦截自动 prune，训练/测试弹窗）。归档目录的有界清理由**手动工具**承担：
+    `make weights-prune-apply`（weights_prune.py，用户主动触发时自己确认）。
   - push 失败（离线/无远端）仅告警不中断训练——本地训练不依赖远端。
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -21,13 +23,16 @@ from rl.log import log
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
-WEIGHTS_BACKUP_KEEP = 20  # bounded archive: prune oldest it-backups beyond this
+WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（weights_prune.py）的参考配额；backup_weights 不自动删
 
 
 def backup_weights(
     weights_path: str, it: int, prefix: str = "rl-weights"
 ) -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
+
+    只归档不清理（2026-09-02）：旧归档删除已移除——沙箱删除保护会拦截生产代码的
+    自动删除。磁盘有界性由手动 `make weights-prune-apply` 保证。
 
     Returns the archive destination path, or None on any (non-fatal) IO error.
     """
@@ -37,18 +42,7 @@ def backup_weights(
             WEIGHTS_BACKUP_DIR
             / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
         )
-        import shutil
-
         shutil.copyfile(weights_path, dst)
-        # glob removed (unused) keeps module-load side-effects minimal
-
-        baks = sorted(
-            WEIGHTS_BACKUP_DIR.glob(f"{prefix}.it*.json"),
-            key=lambda p: (p.stat().st_mtime, p.name),
-        )
-        if len(baks) > WEIGHTS_BACKUP_KEEP:
-            for old in baks[: len(baks) - WEIGHTS_BACKUP_KEEP]:
-                old.unlink(missing_ok=True)
         return str(dst)
     except OSError as e:
         log(f"[archive] WARN weights backup failed (non-fatal): {e}")

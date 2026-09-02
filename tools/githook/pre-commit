@@ -51,36 +51,18 @@ BUN=$(command -v bun)
 echo "▶ Running pre-commit checks (bun: $BUN)..."
 
 # --- nn-training Python gate (2026-09-02) --------------------------------------
-# When the staged changes touch nn-training/, run the FULL Python quality gate:
-# ruff lint + mypy typecheck + pytest suite. The venv lives at nn-training/.venv
-# (Windows: .venv/Scripts/python.exe; Unix: .venv/bin/python). Skip explicitly with
-#   SKIP_NN_TRAINING_GATE=1 git commit ...
-# or the usual `git commit --no-verify`.
+# When the staged changes touch nn-training/, run the FULL Python quality gate
+# (ruff + mypy + pytest 4-shard, all parallel — 实现见 nn-python-gate.sh，与日常
+# 开发共用同一入口，避免 hook/日常门禁漂移)。跳过方式：
+#   SKIP_NN_TRAINING_GATE=1 git commit ...   # 仅跳过 Python 门禁
+#   git commit --no-verify ...               # 跳过全部门禁
 NN_STAGED=$(git diff --cached --name-only | grep '^nn-training/' || true)
 if [ -n "$NN_STAGED" ]; then
   if [ -n "$SKIP_NN_TRAINING_GATE" ]; then
     echo "▸ skip nn-training python gate (SKIP_NN_TRAINING_GATE set)"
   else
     echo "▶ nn-training python gate ($(printf '%s\n' "$NN_STAGED" | wc -l | tr -d ' ') staged file(s))..."
-    NN_ROOT="$(git rev-parse --show-toplevel)/nn-training"
-    if [ -x "$NN_ROOT/.venv/Scripts/python.exe" ]; then
-      NN_PY="$NN_ROOT/.venv/Scripts/python.exe"
-    elif [ -x "$NN_ROOT/.venv/bin/python" ]; then
-      NN_PY="$NN_ROOT/.venv/bin/python"
-    else
-      echo "✗ nn-training/.venv not found (expected $NN_ROOT/.venv)."
-      echo "  Recreate it (python -m venv .venv && pip install -r requirements.txt),"
-      echo "  or skip this gate with SKIP_NN_TRAINING_GATE=1."
-      exit 1
-    fi
-    cd "$NN_ROOT"
-    echo " ▸ python lint (ruff)"
-    "$NN_PY" -m ruff check .
-    echo " ▸ python typecheck (mypy)"
-    "$NN_PY" -m mypy . --config-file pyproject.toml
-    echo " ▸ python tests (pytest)"
-    "$NN_PY" -m pytest tests/
-    cd "$(git rev-parse --show-toplevel)"
+    sh "$(git rev-parse --show-toplevel)/tools/githook/nn-python-gate.sh" 4 || exit 1
   fi
 fi
 

@@ -31,6 +31,13 @@ endif
 
 check: lint typecheck test-fast
 
+# 并行门禁（2026-09-02）：ruff + mypy + pytest 4 路分片同时跑，~13s。
+# 与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh），日常开发
+# 用 make python-gate 即可获得与提交时一致的质量门禁。分片数可调：
+#   make python-gate SHARDS=6
+python-gate:
+	bash ../tools/githook/nn-python-gate.sh $(SHARDS)
+
 test: test-fast
 	$(PREFIX) $(PYTHON) -m pytest tests/ -v --timeout=50000
 

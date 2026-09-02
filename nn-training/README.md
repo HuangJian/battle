@@ -232,3 +232,20 @@ git commit --no-verify ...               # 跳过全部门禁
 
 > 门禁产物（pytest basetemp / ruff / mypy 缓存）全部落在 `nn-training/tmp/`
 > （已 gitignore），提交时不产生额外噪音。
+
+### 日常开发入口
+
+与提交时**同一套**并行门禁，日常随时可跑（脚本 `tools/githook/nn-python-gate.sh`
+自定位 nn-training 与 venv，从仓库根或任意目录执行）：
+
+```sh
+bash tools/githook/nn-python-gate.sh [n_shards]   # 默认 4 路分片，~12s
+make -C nn-training python-gate                    # Makefile 入口（SHARDS 可调）
+```
+
+并行架构：ruff + mypy（热缓存 ~4s）+ pytest 4 路分片（`nn-gate-shards.py`
+独立进程并行，~12s）同时跑。跳过单项：
+
+```sh
+NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
+```
