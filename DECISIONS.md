@@ -1532,3 +1532,34 @@ compile 同参）——有界扩展函数（tanh/sin 等）不再被误标 inf�
 ③ §4.1 21 维表回填 idx10 `starsCollected`。F4–F6 信息级确认无需改代码。
 
 **验证**：nn-training pytest 全绿（含 4 个相关单测）；ruff/mypy 门禁通过。
+
+## §309 新课程 S5-open20：20×20 空旷无基地 / 一命无星 / 20 敌 4 类混编（2026-09-03）
+
+**目标**：AI 学会走位杀敌、闪避子弹、主动捡道具。地形=课程自定义关（2000-2002，三张出生点变异）：
+13×13 grid 钢外框 + 10×10 cells = 20×20 tiles 开放区、无基地码；forces=basic×5+fast×5+power×5+armor×5
+(count 20)；player.lives=1 / level=0（导出器 CLI 覆盖）。dodge 因自定义关守卫④强制 off——闪避纯靠奖励学。
+
+**起始权重决策**（用户点名 S2 终点）：候选 = a2-kill（S1 1 敌）、s2-cap（arena S2 size14 空旷 3 敌，kill2，
+30 iter，**域内 winRate 0.549**）、s3-cap（S3 迷宫 8 敌 kill2，0.603）、s3-cap2（S3 迷宫 balanced，**0.78**）。
+迁移实测（新图 2000，3 seeds，一命无星 20 敌）：**s2-cap 均击杀 3.67 / 命中 11.33 / 存活 1347 / 捡道具 0.33**
+显著第一（s3-cap2 2.67/7.00/1101/0.33；a2-kill 与 s3-cap 均 ~0.33 杀）。结论：**域内强 ≠ 迁移强**——
+S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 **tmp/s2-cap/weights.json**（两重证据：用户点名 +
+实测迁移第一）。
+
+**奖励设计**（Φ 势 + diff，scheme=toy——无基地禁用 score_reconcile，v7 分守家维度缺失/承压恒 1 语义扭曲）：
+- 杀敌：`wKill*(kills+1)**1.15`（超线性）+ `wHit*enemyHits`（密集正反馈，0.3）+ **首杀跳变**
+  `wFirst*where(firstKillTick>=0,1,0)`（+1.0，0→1 击杀冷启动梯度）
+- 闪避：−`wDmg*playerHits`（0.6→1.5 升温）+ −`wDmg2*playerDamageTaken`（**0.005**——初稿 0.05 使死亡扣血
+  累计 200 → −10 支配整局 Σr≈−13，实测修正）
+- 道具：+`wLoot*powerUpsCollected`（0.8→0.5）+ +`wStar*starsCollected`(0.3)
+- 走位：−`wStuck*max(0,stuckTicks−120)`(0.02) + −`wShot*playerShots`(0.01)；**不放** cellsVisited 正项
+  （防乱走刷分）
+- terminal：stage_clear +6 / lives_exhausted −3 / timeout −1
+- 超参：lr 1.5e-4 / epochs 4 / mb 512 / gamma 0.99 / lam 0.95 / seed_rotate 8（每图每轮 8 新 seed）/
+  max_ticks 12000 / 40 iter / ppo_schedule kl_coef 0.6→0.2→0（防继续训练早期漂移）
+- 量级实测：好局（10 杀/命中30/道具3/星1）Σr≈+21.8 vs 差局（0 杀死亡）≈−2.0
+
+**已知限制（诚实标注）**：一命满血 200 → 被击中即死，playerHits 每局 ≤1、damageTaken 无中间态；21 维指标
+无子弹近距/敌距类**密集**信号 →「闪避」在现指标下只有死亡二元负反馈可学。缓解路径（视 it10 表现再选）：
+加「存活 tick 微正项」给闪避密集梯度（代价：苟活得分）/ 扩展指标 v3（子弹近距/敌距——需 TS 落盘 + 双侧同步，
+工作量在 M2+）。评估：eval_stages 2000-2002 × 8 局，eval_every 5。

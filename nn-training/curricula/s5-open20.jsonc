@@ -1,0 +1,228 @@
+// 课程 S5-open20 —— 20×20 空旷无基地 / 一命无星 / 20 敌 4 类混编（2026-09-03）
+//
+// 地形：13×13 grid = 26×26 tiles，外围钢框 + 内部 10×10 cells = **20×20 tiles 开放区**，
+//       无基地码（15）→ 目标 = 全歼 20 敌（outcome: stage_clear / lives_exhausted / timeout）。
+// 敌人：forces 20 字 = basic×5 + fast×5 + power×5 + armor×5（4 类混编），count=20。
+// 玩家：player.lives=1（一命）、player.level=0（无星，单发慢弹）——导出器 CLI 覆盖生效。
+// dodge：自定义关守卫④强制 off —— 闪避**完全由奖励学出**，不靠 L0 保底层覆盖动作。
+//
+// 起始权重：tmp/s2-cap/weights.json（**S2 结束权重**：bc=s1-cap2 / arena S2 1010-1012 /
+//   kill2 臂 / 30 iter）。2026-09-03 迁移实测（新图 2000，3 seeds，一命无星 20 敌）——
+//   均击杀 / 均命中 / 均存活 tick / 捡道具：
+//     s2-cap   3.67 / 11.33 / 1347 / 0.33  ← 迁移最强（且是用户点名的 S2 终点）
+//     s3-cap2  2.67 /  7.00 / 1101 / 0.33  （S3 迷宫 balanced 臂，域内 winRate 最高 0.78）
+//     a2-kill  0.33 /  3.33 /  904 / 0.00  （S1 1 敌 kill 臂）
+//     s3-cap   0.33 /  4.00 /  661 / 0.00  （S3 迷宫 kill2 臂）
+//   域内 winRate 排序 s3-cap2(0.78) > s3-cap(0.60) > s2-cap(0.55) >> a2-kill(0)，
+//   但**域内强 ≠ 迁移强**：S3 是迷宫场（有掩体）8 敌，本图空旷无掩体 20 敌，
+//   掩体策略失效 → 选同为空旷场出身的 S2 权重。
+//
+// 奖励（Φ 势 + diff，scheme=toy）：
+//   杀敌：wKill*(kills+1)**1.15（超线性：连续清场价值更高）+ wHit*enemyHits（密集正反馈）
+//         + wFirst*where(firstKillTick>=0,1,0)（**首杀一次性跳变**：0→1 击杀的冷启动梯度）
+//   闪避：−wDmg*playerHits（挨打，schedule 0.6→1.5 收紧）
+//         −wDmg2*playerDamageTaken（0.005：死亡时扣血累计 200 → 仅 −1.0；初始用 0.05
+//         会以 −10 支配整局，2026-09-03 实测后修正）
+//   道具：+wLoot*powerUpsCollected + wStar*starsCollected（吃星额外加权；schedule 0.8→0.5，
+//         前期强引导对抗「道具只在击杀 bonus 敌人后掉落」的冷启动稀疏）
+//   走位：−wStuck*max(0,stuckTicks−120)（反蹲坑，2s 宽限）− wShot*playerShots（弹药效率）
+//   终局：stage_clear +6 / lives_exhausted −3 / timeout −1（抑制苟活与自杀速通）
+//
+// 已知限制（2026-09-03 实测）：一命满血 200 → 被击中即死，playerHits 每局 ≤1、
+// playerDamageTaken 无中间态 —— 21 维指标下「闪避」只有死亡二元负反馈可学（无
+// 子弹/敌距类密集指标）。若 it10 后 kill 已起但闪避不涨，建议加「存活 tick 微正项」
+// 或扩展指标（子弹近距/敌距）——见 DECISIONS §309。
+// 启动：python run_rl.py --course s5-open20
+{
+  "version": 5,
+  "name": "s5-open20",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "open20-a",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "aaaaabbbbbcccccddddd",
+      "count": 20,
+      "player_spawn": {
+        "col": 10,
+        "row": 18,
+      },
+      "enemy_spawns": [
+        {
+          "col": 4,
+          "row": 3,
+        },
+        {
+          "col": 12,
+          "row": 3,
+        },
+        {
+          "col": 19,
+          "row": 3,
+        },
+      ],
+    },
+    {
+      "name": "open20-b",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "aaaaabbbbbcccccddddd",
+      "count": 20,
+      "player_spawn": {
+        "col": 3,
+        "row": 18,
+      },
+      "enemy_spawns": [
+        {
+          "col": 12,
+          "row": 3,
+        },
+        {
+          "col": 19,
+          "row": 5,
+        },
+        {
+          "col": 19,
+          "row": 13,
+        },
+      ],
+    },
+    {
+      "name": "open20-c",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      ],
+      "forces": "aaaaabbbbbcccccddddd",
+      "count": 20,
+      "player_spawn": {
+        "col": 12,
+        "row": 12,
+      },
+      "enemy_spawns": [
+        {
+          "col": 3,
+          "row": 3,
+        },
+        {
+          "col": 20,
+          "row": 3,
+        },
+        {
+          "col": 3,
+          "row": 20,
+        },
+      ],
+    },
+  ],
+  "difficulty": "hard",
+  "max_ticks": 12000,
+  "seed_rotate": 8,
+  "player": {
+    "lives": 1,
+    "level": 0,
+  },
+  "reward": {
+    "formula": "wKill*(kills+1)**p + wFirst*where(firstKillTick>=0, 1.0, 0.0) + wHit*enemyHits - wDmg*playerHits - wDmg2*playerDamageTaken + wLoot*powerUpsCollected + wStar*starsCollected - wStuck*max(0, stuckTicks-120) - wShot*playerShots",
+    "params": {
+      "wKill": 1.0,
+      "p": 1.15,
+      "wFirst": 1.0,
+      "wHit": 0.3,
+      "wDmg": 0.6,
+      "wDmg2": 0.005,
+      "wLoot": 0.8,
+      "wStar": 0.3,
+      "wStuck": 0.02,
+      "wShot": 0.01,
+    },
+    "param_schedule": {
+      "wDmg": {
+        "from": 0.6,
+        "to": 1.5,
+        "until_iter": 25,
+        "mode": "linear",
+      },
+      "wLoot": {
+        "from": 0.8,
+        "to": 0.5,
+        "until_iter": 20,
+        "mode": "linear",
+      },
+    },
+    "terminal": {
+      "stage_clear": 6.0,
+      "lives_exhausted": -3.0,
+      "timeout": -1.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "tmp/s2-cap/weights.json",
+  "iters": 40,
+  "max_hours": 12,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.99,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 10,
+      "kl_coef": 0.6,
+    },
+    {
+      "until_iter": 25,
+      "kl_coef": 0.2,
+    },
+    {
+      "kl_coef": 0.0,
+    },
+  ],
+  "out": "tmp/s5-open20/weights.json",
+  "traj": "tmp/s5-open20",
+  "backup_dir": "nn-training/weights/s5-open20",
+  "backup_prefix": "s5-open20",
+  "eval_stages": "2000-2002",
+  "eval_games_per_stage": 8,
+  "eval_every": 5,
+}
