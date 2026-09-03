@@ -662,3 +662,130 @@ Fixes that worked, in `run_rl.py build_model` (!resume path) and
   `run_rl_intent` only — `run_rl` ignores it; the launch must pass `--stream 1`
   (now the code default). Serial remains available via `--stream 0` for
   debugging (deterministic, easier attribution).
+
+## §16 Long-run task discipline — budget & observability (AGENTS §16)
+
+**Case study (2026-09-04, BC distillation — the 8× miss).** A 60-epoch BC run
+over a 165K-frame corpus was budgeted from a 723-frame smoke: 3 epochs in 12.5 s
+→ ~1.5 s/epoch "pure training" → ~85 s/epoch extrapolated → "~60 min" for 60
+epochs. Reality: ~11 min/epoch → ~11 h. The extrapolation ignored fixed
+per-epoch overhead (validation forward on 16.5K frames, mirrorX augmentation,
+per-epoch stats + best-state clone) that is invisible at 723 frames and
+dominates at 165K. The launch also piped stdout through `| tail -N`, which
+buffered every epoch line until process exit — so the 8× miss stayed invisible
+for 5.5 h and progress could only be guessed from CPU sampling. Two lessons,
+both now rules (AGENTS 16.1-16.4).
+
+- **Measure on the real corpus, then scale (16.1)**. For any run >5 min: launch
+  1-2 epochs/batches on the actual data with output to a file, read the
+  timestamps, multiply out, THEN set the full `--epochs`. Kilo-sample smokes are
+  pipeline checks, not speed benchmarks. Reference point (2026-09-04, CPU 8
+  cores, batch 512, student model ~67.7K): 165K frames ≈ 11 min/epoch incl. val
+  + mirrorX; pure training ≈ 322 iters × ~2 s.
+- **Logs to files, never pipes (16.2)**. Long tasks launch as
+  `python -u ... > run.log 2>&1` (or the runner's log file), then
+  `tail -f run.log` / read tail on demand. `| tail`/pipes buffer until the
+  process exits — a backgrounded run with buffered output is unverifiable, and
+  "unverifiable progress" is one step from "restart from scratch".
+- **Mid-run artifacts (16.3)**. Emit one line per epoch/step (loss, acc, value
+  loss, lr, elapsed). For weight-producing runs, checkpoint periodically:
+  `train/bc.py --ckpt-every N` writes `{out}.ckpt.{epoch}` (meta carries
+  epoch/best_val_loss) resumable via `--resume` — any moment is a valid stopping
+  point, so an over-budget run keeps its best work.
+- **Kill-vs-wait on data (16.4)**. When a run overruns: sample process CPU time
+  twice, ~20 s apart (Windows: PowerShell `(Get-Process -Id N).CPU`; Linux:
+  `ps -o time= -p N`). CPU-seconds rising ≈ full-speed compute — let it run.
+  Flat CPU with climbing RSS = hang/leak — investigate or kill. Memory alone is
+  ambiguous (torch caches fluctuate); CPU delta is the signal.
+- **Parallel is the default (16.5/16.6)**. Shardable long tasks run sharded.
+  By tool class:
+  - *Data/corpus collection*: split (stage, seed) across processes. Tools with a
+    built-in pool use it; otherwise shell-level seed sharding — 8 processes each
+    own a disjoint seed range writing uniquely-named shards (e.g.
+    `export-godai-labels.ts` probe: 2000 games ≈ 4 min wall on 8 shards, and the
+    per-worker logs land in separate files so no interleaving). Shard counts
+    follow the machine: ~1 process per physical core, headroom for the reader.
+  - *Batch sims / evals*: `tools/lib/worker-pool.ts` (N persistent Workers,
+    results re-ordered by task id — identical to serial, so float aggregation
+    stays stable) or `sim-pool.ts`; its determinism contract is *parallel ==
+    serial* **only when every task is pure** — verify once per tool by
+    byte-comparing a parallel run against a serial run on identical inputs
+    (16.6). The God-AI exporter has no pool today; a shard driver script is the
+    accepted pattern until it grows one.
+  - *RL/PPO*: stream mode overlaps collection with updates (15.6); distributed
+    dispatch fans out to nodes by `concurrency` + local `local_slots`. A local
+    run that ignores these and trains single-worker wastes the machine.
+  - *Tests*: `bun test --parallel` (AGENTS §5) and `pytest -n` (xdist — §318
+    measured 27.2s → 14.8s on the full suite).
+  Serial is the exception, always with a stated reason: order-sensitive
+  debugging/attribution, memory-bound single huge job, or a workload so small
+  that spawn cost dominates.
+
+
+## §17 Editing files on Windows — text-splicing discipline (AGENTS §17)
+
+**Why this section exists.** 2026-09-04, one working session hit four separate
+Windows text-splicing failures, all of which a scripted-replacement discipline
+would have prevented or made instantly diagnosable:
+
+1. A multi-line `python - <<'PYEOF'` heredoc whose replacement text contained
+   nested double quotes (`help="... (continue, not retrain)"` right before the
+   closing `"""`) produced `SyntaxError: unterminated string literal` — the
+   heredoc/quote interaction ate the rest of the script.
+2. The interactive file-edit tool reported "Successfully edited" for three
+   hunks that were later found **not on disk** (file had been rolled back to
+   HEAD between edits). Trust-but-verify applies to our own write path: a
+   "success" is a hypothesis until grep/ast confirms it.
+3. Git Bash `/tmp/foo.py` was written by `cat >`, but native Python (a Windows
+   binary) resolved `/tmp` as `D:/tmp` → `can't open file`. Throwaway scripts
+   must live inside the repo with cwd-relative paths.
+4. `cd /d/github/battle2` then `./.venv/Scripts/python.exe` failed because the
+   venv lives under `nn-training/.venv` — an environment fact, not a text bug,
+   but the same class of "assumed path silently wrong" error.
+
+**The pattern that worked (scripted all-or-nothing replacement):**
+
+```python
+# _patch_xxx.py — temp patch script, written via the file tools, run, deleted.
+import io
+p = 'path/to/target'            # repo-relative or explicit drive path
+s = io.open(p, encoding='utf-8').read()
+
+def rep(old, new):
+    global s
+    c = s.count(old)
+    assert c == 1, f'count={c}: {old[:70]!r}'   # wrong-count guard fails loudly
+    s = s.replace(old, new)                     #   BEFORE any write
+
+rep("""<exact old hunk>""", """<exact new hunk>""")   # per hunk
+# ...
+io.open(p, 'w', encoding='utf-8', newline='\n').write(s)   # one atomic write
+```
+
+Properties that make it reliable:
+- **Assertions before write**: every hunk must match exactly the expected
+  number of times (usually 1). count=0 → text drifted, stop; count>1 →
+  ambiguous anchor, stop. Either way the file on disk is untouched and the fix
+  is a retry with a corrected hunk — no partial state, no cleanup.
+- **Single atomic write**: all replacements run in memory; the file is written
+  once at the end. A crash/exception mid-script = zero side effects.
+- **No shell layer**: Python reads/writes bytes directly — no bash expansion,
+  no quote re-parsing, no CRLF conversion surprises (write with
+  `newline='\n'`).
+- **Encoding**: always `encoding='utf-8'` on both read and write; the repo is
+  full of CJK comments and a default codepage read/write on Windows will garble
+  them.
+
+Escalation ladder for edit jobs (biggest hammer only when needed):
+1. Dedicated edit tool for single, uniquely-anchored hunks — then verify with
+   grep of the anchor line (17.4).
+2. Temp python patch script for multi-hunk / repeated-text edits (17.1/17.2).
+3. Full-file rewrite only for wholesale regenerations (e.g. codegen), never for
+   surgical changes.
+
+Rules of thumb:
+- Never construct file content by `echo`/`printf` piping into a file.
+- Never inline long replacement text in `bash -c` / `python -c` strings.
+- After every patch run, immediately do a cheap existence check (`ast.parse`
+  for python targets, `bun build <file> --outfile ...` for TS, or grep the
+  anchor) — if the file rolled back again, reapply and verify before moving on.

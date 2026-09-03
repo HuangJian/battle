@@ -319,3 +319,84 @@ When this file and your instincts disagree, this file wins. When this file and t
   window (~half of wall time at 150 games/iter). Pass `--stream 0` only with a
   stated reason; keep the stream path exercised — it rotted once unnoticed
   (`ppo.update` alias missing for the plain backend).
+
+## 16. Long-Run Task Discipline — Budget, Parallelism & Observability
+
+> Any long task (training runs, batch sims, full test suites) costs hours of wall
+> time, and two failure modes make it cost twice: a duration estimate off by an
+> order of magnitude, and output you cannot read until the process exits. Both
+> are preventable. Case study: `docs/agents.details.md` §16 (2026-09-04 BC
+> distillation — 11 min/epoch measured vs ~85 s extrapolated from a 723-frame
+> smoke (8× miss, "~60 min" run took ~11 h), and a `| tail` pipe hid every epoch
+> line so the miss was invisible until the end).
+
+- **16.1 Speed-budget before launch**: any run expected to take >5 min gets
+  1-2 epochs/batches measured on the REAL corpus first — read the log
+  timestamps, then scale. Never extrapolate per-step cost from a kilo-sample
+  smoke: fixed overhead (validation, augmentation, per-epoch stats) is invisible
+  there and dominates at scale.
+- **16.2 Logs go to files, always**: redirect long-task output to a log file
+  (`> run.log 2>&1`); never feed it into a `| tail`/pipe that buffers until
+  exit. Unreadable output = unverifiable progress = one step from a wasted
+  restart.
+- **16.3 Progress observable mid-run**: emit a per-epoch/per-batch line (loss,
+  metric, elapsed) to the log, and checkpoint weight-producing runs every N
+  epochs (`train/bc.py --ckpt-every N`) so any moment is a valid stopping point —
+  an over-budget or crashed run keeps its best work instead of starting over.
+- **16.4 Decide kill-vs-wait from measurements**: when a run overruns budget,
+  sample its CPU time twice across ~20 s (rising CPU-seconds = working, flat CPU
+  + climbing memory = leak/hang). Kill or wait on data, not vibes.
+- **16.5 Parallelize every shardable long task — never default to single-core**:
+  corpus/data collection splits by (stage, seed) across N processes; batch sims
+  run through `worker-pool.ts`/`sim-pool.ts` (its determinism contract makes
+  parallel == serial byte-for-byte when tasks are pure); RL uses stream mode +
+  node concurrency + local slots; tests take `--parallel` (bun) / `-n` (pytest
+  xdist). Parallelism is the default, not an optimization — serial is the
+  exception, stated with a reason (order-sensitive debug, memory-bound, tiny
+  workload where spawn cost dominates). Shell-level seed sharding is the
+  fallback when a tool has no built-in pool (e.g. `export-godai-labels.ts`:
+  8-way shard split measured ~4 min for 2000 games vs unbounded serial).
+- **16.6 Verify parallel == serial once per tool**: before trusting a parallel
+  path, byte-compare its output against a serial run on the same inputs (the
+  worker-pool determinism note assumes pure tasks — confirm the tool honors it).
+
+## 17. Editing Files on Windows — Text-Splicing Discipline
+
+> Text splicing through PowerShell/bash on Windows fails constantly: heredoc
+> quoting, nested quotes, CRLF vs LF, `|` buffering, and path mangling (`/tmp`
+> resolves to `D:\tmp` under native Python, not Git Bash's `/tmp`). In-repo
+> agent runs confirmed it — most edit attempts that piped text through the
+> shell mis-landed or silently no-op'd, while scripted replacements succeeded.
+> Full case study: `docs/agents.details.md` §17.
+
+- **17.1 Scripted replacements for multi-hunk edits**: read the file once in
+  Python, apply each hunk behind `assert old.count(...) == expected`, write
+  back only after every hunk matched — all-or-nothing, a failed run leaves the
+  file untouched and is safe to retry.
+- **17.2 Keep hunk text out of the shell**: quoted heredocs (`<<'EOF'`) stop
+  bash expansion, but nested/triple quotes still corrupt inline `python -c`
+  and heredoc scripts. Beyond a one-liner, write the patch to a temp `.py`
+  with the file tools, run it, delete it.
+- **17.3 Windows path discipline**: native Python resolves `/tmp` to `D:\tmp`,
+  not Git Bash's `/tmp`; keep throwaway scripts repo-relative (cwd), never in
+  shell temp dirs. Use the managed runtime's absolute python path or a venv
+  path relative to the dir you `cd`'d into — bare `./.venv` fails from the
+  repo root.
+- **17.4 Verify the write landed**: after patching, run a cheap check (`python
+  ast.parse`, `bun build <file>`, grep the anchor). "Reported success" is not
+  "on disk" — silent rollback has happened here.
+- **17.5 Anchor multi-line hunks on unique context**: replace a signature plus
+  its neighbors, never a bare line that recurs (wrong-count asserts catch the
+  rest).
+- **17.6 Shell encoding facts on this machine (zh-CN Windows)**: the
+  PowerShell tool runs pwsh 7.6.5 Core (not 5.1) as a clean session that does
+  NOT load `$PROFILE`, and `[Console]::OutputEncoding` defaults to gb2312
+  (cp936) — CJK text printed to the console comes back garbled under UTF-8.
+  When a command must emit or capture CJK, set both
+  `[Console]::OutputEncoding` and `$OutputEncoding` to UTF-8 first, or (better)
+  route text through the python channel of 17.1 with explicit
+  `encoding='utf-8'`. Never rely on a user profile to fix this.
+
+
+
+

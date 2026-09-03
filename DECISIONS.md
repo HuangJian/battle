@@ -1795,3 +1795,77 @@ srv/WEIGHTS/cfg/args/bun，每个函数 try/finally 关 server）。原有的 sh
 
 **验证**：全量 14.8s rc=0；standalone `main()`（RUN_RL_ITEST=1）改为逐个调用 9 函数
 （各传独立 tmp 子目录 + fresh MonkeyPatch）。
+
+## §319 长程任务纪律入规：启动测速预算 + 日志落盘可观测（2026-09-04，用户裁定）
+
+**背景**：BC 蒸馏 60 epochs 预算严重低估——由 723 帧冒烟（3 epochs 12.5s）外推单
+epoch ~85s，实际 165K 帧 ~11 min/epoch（含 val 前向 + mirrorX + 每 epoch 统计），
+总时长 60min→11h（8-11× 误差）。且启动命令 `| tail` 管道缓冲吞掉全部 epoch 日志，
+错误在 5.5h 内不可观测，只能靠 CPU 采样猜进度。
+
+**裁定**：
+1. AGENTS.md 新增 §16 Long-Run Task Discipline（Budget & Observability），
+   docs/agents.details.md §16 给案例与可操作细节：
+   - 16.1 长任务（>5min）启动前必须在真实语料上实测 1-2 epochs/batch 再放大，
+     禁止千帧级冒烟外推（固定开销在小数据不显形）；
+   - 16.2 长任务输出一律重定向日志文件（`> run.log 2>&1`），禁止 `| tail` 管道；
+   - 16.3 日志逐 epoch/step 落盘 + 权重训练类任务每 N epochs checkpoint
+     （`train/bc.py --ckpt-every N`，{out}.ckpt.{epoch}，`--resume` 可续），
+     任意时刻是可验收/止损点；
+   - 16.4 超预算时用 CPU 时间双采样（20s 间隔）判 kill-vs-wait，不靠感觉。
+2. train/bc.py 新增 `--ckpt-every N`（中途 checkpoint，meta 带 epoch/best_val，
+   冒烟验证通过；bc 相关测试 5 pass）。
+
+## §320 长程任务并行入规：可分片任务禁止默认串行（2026-09-04，用户裁定）
+
+**背景**：盘点 AGENTS.md 无任何并行强制规则——worker-pool.ts（注释自带 parallel ==
+serial 契约）、RL stream/多节点、bun test --parallel 都存在，但数据采集类工具
+（export-godai-labels）默认单进程串行，agent 跑长任务普遍烧单核（2000 局 8 并行
+~4min vs 串行无界）。
+
+**裁定**：AGENTS.md §16 扩为 "Budget, Parallelism & Observability"：
+- 16.5 可分片长任务默认并行——采集按 (stage,seed) 分片多进程、batch sim 走
+  worker-pool/sim-pool（纯任务下并行==串行逐字节）、RL 用 stream+节点
+  concurrency+local slots、测试 bun --parallel / pytest xdist；串行是例外且须
+  说明理由；无内建池的工具用 shell 级 seed 分片兜底。
+- 16.6 每个工具的并行路径先做一次"并行 vs 串行字节比对"再信任（worker-pool
+  契约假设纯任务，需确认工具遵守）。
+docs/agents.details.md §16 补按工具类的并行清单与实测参照（§318 pytest xdist
+27.2s→14.8s；godai 采集 8 分片 2000 局 ~4min）。
+
+## §321 Windows 文本编辑纪律入规：脚本化替换 + 断言守卫 + 原子写（2026-09-04，用户裁定）
+
+**背景**：Windows 下 shell 文本拼接编辑（heredoc/echo 管道/内联 -c/编辑工具）错位频发——
+单会话实测四例：① heredoc 内嵌双引号致 unterminated string；② 编辑工具报 success 但
+hunk 未落盘（文件被回滚到 HEAD）；③ Git Bash /tmp 在原生 Python 解析为 D:/tmp；
+④ .venv 相对路径错位。一半时间/token 耗在文本搬运与重试。而 python 脚本化替换
+（读全文→逐 hunk assert count==1→一次性原子写盘）全程零错位。
+
+**裁定**：AGENTS.md §17 "Editing Files on Windows — Text-Splicing Discipline"：
+- 17.1 多 hunk 编辑用 python 脚本化替换，每 hunk `assert old.count()==expected`，
+  全部匹配才一次写回（all-or-nothing，失败零副作用可安全重试）；
+- 17.2 hunk 文本不经过 shell——heredoc/内联引号嵌套必坏，超一行就用文件工具写
+  临时 .py → 执行 → 删除；
+- 17.3 Windows 路径纪律：临时脚本放仓库内 cwd 相对路径，勿用 /tmp；venv/运行时
+  用绝对路径或 cd 后相对路径；
+- 17.4 写后立即廉价验证（ast.parse / bun build / grep 锚点）——"报成功"≠"在盘上"；
+- 17.5 多行 hunk 锚唯一上下文（签名+邻行），不锚重复裸行。
+docs/agents.details.md §17 给完整案例 + 可复用 patch 模板 + 升级阶梯
+（编辑工具→临时脚本→全量重写）+ 编码纪律（utf-8 读写，仓库多 CJK 注释）。
+
+
+## §322 PowerShell 环境事实与编码纪律（2026-09-04，用户裁定）
+
+**实测**（trust-but-verify）：
+- agent 的 PowerShell 工具跑的是 **pwsh 7.6.5（Core）**，不是系统提示假设的 5.1；
+- 每命令是干净会话，**不加载 profile**（创建 profile 后实测 Console 编码仍 gb2312、
+  Out-File 默认仍非 utf8）；
+- Console OutputEncoding 默认 **gb2312(cp936)**，而 OutputEncoding 变量=utf-8——CJK
+  输出经控制台按 GB2312、被工具按 UTF-8 捕获 → 乱码根因。
+- 修复命令有效：设两个 UTF-8 变量后均变 utf-8。
+
+**裁定**：AGENTS.md §17.6 记录机器事实——agent 侧不用 5.1 语法自限（可放心用 pwsh7
+语法）；涉 CJK 文本的 PowerShell 命令先显式设两个 UTF-8 变量，或文本处理走 python
+通道（§17.1，显式 encoding='utf-8'）；不依赖用户 profile。用户交互式 pwsh 的
+profile（C:/Users/ustch/Documents/PowerShell/Microsoft.PowerShell_profile.ps1，
+已创建）加 UTF-8 默认仍有效，但只惠及交互会话。
