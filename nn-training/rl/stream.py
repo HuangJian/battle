@@ -159,6 +159,9 @@ def run_rollout_stream(
     local_slots = _ovr if _ovr > 0 else max(2, int(args.workers) // 4)
     policy = cfg.get("policy", {})
     kl_cap = float(policy.get("streamKlCap", 0.06))  # 0.12 为旧 2× 口径（P0-3 换算）
+    _kl_cap_override = getattr(args, "_kl_cap", None)
+    if _kl_cap_override is not None:
+        kl_cap = float(_kl_cap_override)  # ppo_schedule 指定本轮 KL 上限（覆盖 policy.streamKlCap）
     wave_games = max(4, int(policy.get("streamWaveGames", 12)))
     # M8 意图 RL：streamKlCap=0.2（旧 2× 口径，新口径 0.1）是为 per-tick RL（单波数千步）标定的——意图 RL 单波
     # 仅 ~12 局（~14 chunks），单波 KL 已达 ~0.32–0.49（旧 2× 口径，新口径 ~0.16–0.245），会在第 1 波即触顶 → 派发停摆 →
@@ -248,7 +251,7 @@ def run_rollout_stream(
             if shard is None:
                 continue
             try:
-                ep = backend.load_episode_from_shard(shard)
+                ep = backend.load_episode_from_shard(shard, float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95)))
             except Exception as e:
                 log(f"[stream] skip bad shard {shard}: {str(e)[:100]}")
                 continue
@@ -389,7 +392,7 @@ def run_rollout_stream(
             )
         else:
             log("[stream] no fresh settles this round — falling back to full-disk update")
-            episodes = backend.load_episodes(str(traj_dir))
+            episodes = backend.load_episodes(str(traj_dir), float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95)))
             chunks = backend.chunk_episodes(episodes, args.mb)
             t_p = time.time()
             state["last_agg"] = backend.update(

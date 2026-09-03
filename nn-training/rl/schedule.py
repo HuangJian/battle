@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_SCHED_KEYS = ("lr", "epochs", "mb", "kl_coef")
+_SCHED_KEYS = ("lr", "epochs", "mb", "kl_coef", "kl_cap")
 
 
 class ScheduleError(ValueError):

@@ -296,6 +296,7 @@ class PpoScheduleEntry(BaseModel):
     epochs: int | None = None
     mb: int | None = None
     kl_coef: float | None = None
+    kl_cap: float | None = None
 
 
 class PlayerBlock(BaseModel):
@@ -454,7 +455,7 @@ class CourseConfig(BaseModel):
             d: dict[str, Any] = {}
             if e.until_iter is not None:
                 d["until_iter"] = e.until_iter
-            for k in ("lr", "epochs", "mb", "kl_coef"):
+            for k in ("lr", "epochs", "mb", "kl_coef", "kl_cap"):
                 v = getattr(e, k)
                 if v is not None:
                     d[k] = v

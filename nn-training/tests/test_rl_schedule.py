@@ -53,3 +53,17 @@ def test_non_ascending_rejected() -> None:
         resolve_ppo_schedule([{"until_iter": 10, "lr": 1e-4}, {"until_iter": 5, "lr": 2e-4}], 3)
     with pytest.raises(ScheduleError, match="非末段"):
         resolve_ppo_schedule([{"lr": 1e-4}, {"until_iter": 5, "lr": 2e-4}], 1)
+
+
+def test_kl_cap_propagated() -> None:
+    """kl_cap 经 ppo_schedule 正确透传（冷启动前 n 轮不做 KL 熔断）。"""
+    entries = [
+        {"until_iter": 10, "kl_coef": 0.8, "kl_cap": 1e9},
+        {"kl_coef": 0.05, "kl_cap": 0.2},
+    ]
+    assert resolve_ppo_schedule(entries, 5)["kl_cap"] == 1e9
+    assert resolve_ppo_schedule(entries, 11)["kl_cap"] == 0.2
+    # 无 kl_cap 的段不返回该键
+    no_cap = [{"until_iter": 5, "kl_coef": 0.8}, {"kl_coef": 0.05}]
+    assert "kl_cap" not in resolve_ppo_schedule(no_cap, 3)
+    assert "kl_cap" not in resolve_ppo_schedule(no_cap, 10)

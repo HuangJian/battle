@@ -89,7 +89,8 @@ def build_model(
     resume = os.path.exists(rl_path)
     src = rl_path if resume else bc_path
     model = ppo_mod.build_ppo(src)
-    load_state_into(model, src)
+    if src:
+        load_state_into(model, src)
     if not resume:
         # goal-nn 卡 A4（2026-08-30 最终版）：BC 权重有两个 PPO 不可消费的量级问题——
         # ① BC 训练动态把 ConvMixer trunk 激活放大到真实局面上 ~千级（合成探针会

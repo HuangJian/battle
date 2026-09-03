@@ -371,14 +371,14 @@ class _StubPpo:
     def _ppo_load(self, path, model, opt) -> int:
         return 0  # 无 checkpoint 路径 → 轮内零结算走全盘更新分支
 
-    def load_episodes(self, path):
+    def load_episodes(self, path, gamma=0.995, lam=0.95):
         # full-disk 回放路径（无 fresh settles 时）→ ep["obs"].shape[0] 即 steps
         return [{"obs": np.zeros(30, dtype=np.uint8)}]
 
     def chunk_episodes(self, eps, mb):
         return list(eps)
 
-    def load_episode_from_shard(self, shard_dir):
+    def load_episode_from_shard(self, shard_dir, gamma=0.995, lam=0.95):
         # stream._load_wave 只要求 ep["adv"]（做 wave 内归一化）；具体轨迹数值不重要
         # ——rollout 引擎的真实性由 tools/sim/export-rl-rollout.ts 的 TS 测试保证。
         return {"adv": np.zeros(1, dtype=np.float32)}

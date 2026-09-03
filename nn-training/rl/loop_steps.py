@@ -101,10 +101,11 @@ class TrainingSteps:
             args.epochs = int(sch["epochs"])
         kl_coef = float(sch.get("kl_coef", 0.0) or 0.0)
         args._kl_coef = kl_coef
+        args._kl_cap = sch.get("kl_cap")  # None = 不覆盖，由 policy.streamKlCap 决定
         if sch:
             log(
                 f"[course] ppo_schedule@it{it}: lr={sch.get('lr')} epochs={sch.get('epochs')} "
-                f"mb={sch.get('mb')} kl_coef={kl_coef}"
+                f"mb={sch.get('mb')} kl_coef={kl_coef} kl_cap={sch.get('kl_cap', 'default')}"
             )
 
     def _write_iter_stats(self, it: int) -> None:
@@ -183,7 +184,10 @@ class TrainingSteps:
         t_ppo = time.time()
         # P1-7：--adv-norm none 时串行路径跳过 global 归一（对照实验）
         episodes = self.ppo_backend.load_episodes(
-            str(traj_dir), normalize_adv=getattr(args, "adv_norm", "auto") != "none"
+            str(traj_dir),
+            float(getattr(args, "gamma", 0.995)),
+            float(getattr(args, "lam", 0.95)),
+            normalize_adv=getattr(args, "adv_norm", "auto") != "none",
         )
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
