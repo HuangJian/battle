@@ -1563,3 +1563,31 @@ S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 
 无子弹近距/敌距类**密集**信号 →「闪避」在现指标下只有死亡二元负反馈可学。缓解路径（视 it10 表现再选）：
 加「存活 tick 微正项」给闪避密集梯度（代价：苟活得分）/ 扩展指标 v3（子弹近距/敌距——需 TS 落盘 + 双侧同步，
 工作量在 M2+）。评估：eval_stages 2000-2002 × 8 局，eval_every 5。
+
+## §310 S5 测试 iter 全链路体检：5 个修复 + 性能 profile + 激励函数检验（2026-09-03）
+
+**工作流体检（s5-open20 测试 iter，跑 3 遍完整 1-iter）暴露并修复 5 个真实缺陷**：
+1. `rl/eval_local.py` REPO_ROOT 少一层（OO 拆分同族回归，与 queue_local 2026-09-02 同病）→ 本机 local eval spawn cwd=nn-training → `Module not found tools/sim/export-eval-game.ts`。→ parents[2]。
+2. `loop_core` `_eval_every = int(... or 1)` 把显式 `eval_every=0` 吞成每轮（想关闭 eval 却每轮都跑）→ 0=关闭，默认仍每轮（字节一致）。
+3. `eval_dispatch`：eval_stages 含自定义关（≥2000）时无能力握手 → 旧 agent（mac，无 stageJsonSupport）收到 stage=2000 走 arena/真实关解析 → `stage.tiles` null 崩溃。→ need_sj 时要求 ping.stageJsonSupport，任务落本机；fetch 透传 stage-json/lives/level（与 rollout 同规）。
+4. `dist_common.write_shard` 不写 manifest.json → M1 metrics 方案下分布式/self-node 局落盘缺 outcome/score/metrics_version → engine 加载器把这类局错标 timeout，**奖励错算**（M1 引入回归；queue_local/exporter 直写路径无此问题）。→ write_shard 补写 manifest.json。
+5. `export-rl-rollout --pack` 的 BCV2 manifest 用**聚合 summary**（缺单局 outcome/nSamples/metrics_version）→ 修复为单局 shard manifest 基底（lastShardManifest + mode/elapsedSec）。已单局解包验证：manifest 含 outcome/nSamples/metrics_version 等单局键。
+
+**远程节点（mac）可用性结论**：mac 在线且能收 upgrade 请求，但不可用 —— 根因链：本地 push 无凭据（`git push origin goal-nn` rc=128，origin 停在 dd163ac）→ mac `git pull` 空转（Already up to date）→ codeHash 恒 stale → 每轮 run 触发 upgrade/restart → mac 端 restart 竞速（手动起 agent 与旧实例并存 → EADDRINUSE）→ 反复掉线。修复路径：① **先 push**（凭据/ssh/手动），mac pull 到新代码后 codeHash 匹配即自动正常；② 别手动起 agent（端口双实例自残）。dirty-tree 抑制（本提交未 push 时）已阻止对 mac 的无效 restart（第 3 遍日志：`remote restart suppressed (dirty-tree:1)` ✓）。
+
+**性能 profile（本机 CPU-only）**：
+- TS 侧：单局分段 98.4% 在 `model.forward`（稳态 ~39.6ms/次 → 12000-tick 满局纯推理 ~48s）；sim.tick 仅 0.8%（0.03ms/tick）。→ 吞吐瓶颈 = NN 推理；优化候选：onnxruntime/wasm、int8、降 K、模型裁剪（量级工作，另行立项）。
+- Python 侧数据管线全部亚秒：reward_fn 0.1ms/局、metrics_stats 46ms、np.load 3.2GB/s、GAE 0.3ms/局 → 非瓶颈。
+- 整 iter 实测（第 3 遍 local-only）：collect_wall≈142s（24 局 8 workers）、PPO CPU 321s（22 chunks×4ep=88 步）→ **PPO 占大头**（local-only 全量盘全量更新路径）；stream 双波路径（第 2 遍）collect 152s + PPO 190s。
+- load_cpu=0s：加载不是瓶颈（M1 架构红利再次确认）。
+
+**激励函数检验（修复后 24 局，outcome 全真值）**：
+- step reward 79% 零步（稀疏，符合"一命局多数在移动"）；非零步 std 0.72。
+- Σr/局@it1：min −6.14 / p25 +0.04 / 中位 +4.12 / max +50.37（20 杀全歼局）→ 不再全负、正负分明。
+- **激励方向单调正确**：高杀局（≥3 杀）Σr 中位 +4.26 vs 低杀局 −6.14。
+- kills 中位 6 / 总 162/480 / 24/24 局有击杀 / 1 局 20 杀全歼（stage_clear）→ 起点策略（s2-cap）在 20 敌图上已有动作基础。
+- Σr@it25 整体下移 ~3（wDmg 0.6→1.5 升温生效方向正确）。
+- **归一化状态**：adv 全局归一 ✓；ret/value **未归一** → Σr std 11.05 → value 头 raw MSE 量大（PPO value≈0.99 仍在学，gnorm 0.9-2.3 可控）。评估：可接受；若后续 value 收敛慢可加 ret 归一对照（intent 已有 normalize_ret 先例）。
+- 一命二元性确认：100% 局死亡、挨打 3.04 次/局、扣血累计 859（≫200 满血）→ 「闪避」仍是死亡二元为主；缓解路径沿用 DECISIONS §309（存活微正项 / 指标 v3）。
+
+**建议的下一步**（按序）：① 提供 push 凭据让 mac/a97/a98 升级（否则只能本机 8 workers）；② commit 本批修复后正式起 s5-open20 40 iter；③ 若 40 iter 中 value loss 持续 >0.5，考虑 per-tick normalize_ret 或 terminal 尺度下调；④ NN 推理加速（TS 侧 98% 瓶颈）单独立项评估。

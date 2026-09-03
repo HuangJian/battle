@@ -18,7 +18,7 @@ from typing import Any
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.log import log
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（rl/ 上溯 3 层，修正 2026-09-03）
 
 # 固定语料种子——前 2 个承载历史可比性（永不改动）；860003+ 为 goal-nn 扩展
 # （arena 自评需要 20 seed/关的 trend 精度，纯增量、不影响旧口径）。

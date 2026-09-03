@@ -127,6 +127,11 @@ class EvalDispatcher:
                     log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
 
             local_bun = bun_version(bun)
+            # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
+            # （>=2000）时，节点必须有能力位 stageJsonSupport——旧 agent（无该位）
+            # 收到 stage=2000 会走 arena/真实关解析 → stage null → 崩溃。无能力节点
+            # 一律跳过，任务自然落回本机 local（已支持 stage-json 透传）。
+            need_sj = bool(todo) and any(t[0] >= 2000 for t in todo)
             alive = []
             for n in cfg.get("nodes", []):
                 if not n.get("enabled", True):
@@ -139,6 +144,12 @@ class EvalDispatcher:
                     log(
                         f"[eval] node {nid}: agent lacks evalSupport — skipped "
                         f"(sync code + restart agent to enable)"
+                    )
+                    continue
+                if need_sj and not ping.get("stageJsonSupport"):
+                    log(
+                        f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
                     )
                     continue
                 if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
@@ -287,6 +298,9 @@ class EvalDispatcher:
                     err = ""
                     manifest: dict = {}
                     try:
+                        from rl.config import args_rollout_overrides, stage_json_for_args
+
+                        _ov = args_rollout_overrides(args)
                         manifest, _files = dist_common.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -298,6 +312,13 @@ class EvalDispatcher:
                             difficulty=args.difficulty,
                             timeout=task_timeout,
                             mode="eval",
+                            stage_json=stage_json_for_args(args, task[0]) or "",
+                            lives_override=int(_ov["lives_override"])
+                            if "lives_override" in _ov
+                            else None,
+                            player_level=int(_ov["player_level"])
+                            if "player_level" in _ov
+                            else None,
                         )
                         why = dist_common.validate_eval_result(manifest, wver)
                         if why:

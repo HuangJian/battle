@@ -780,6 +780,11 @@ function main(): void {
   mkdirSync(outDir, { recursive: true })
   const weightsText = readFileSync(weightsPath, 'utf8')
 
+  // 最近一局的单局 shard manifest（--pack 单局模式用：BCV2 manifest 必须是
+  // **单局**（outcome/nSamples/metrics_version 等），不能是聚合 summary——
+  // 2026-09-03 修正：此前 pack 用聚合 summary → dist/self 落盘缺 outcome →
+  // engine 加载器把分布式局错标 timeout，奖励错算）。
+  let lastShardManifest: Record<string, unknown> | null = null
   const outcomes: Record<string, number> = {}
   const scores: number[] = []
   const scoresUngated: number[] = []
@@ -876,7 +881,10 @@ function main(): void {
         stuckTicks: res.stuckTicks,
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
-      if (res.shard.n > 0) writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+      if (res.shard.n > 0) {
+        writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+        lastShardManifest = manifest
+      }
       totalSamples += res.shard.n
       totalTicks += res.ticks
       totalDecisionTicks += res.decisionTicks
@@ -974,9 +982,7 @@ function main(): void {
     // 溯源戳与 v1 agent 主线程所盖戳逐字段一致：validate_result 按
     // manifest.stage/seed/wver 对账（标量），elapsedSec 语义改为子进程内耗时。
     const packManifest = {
-      ...summary,
-      stage: stages[0],
-      seed: seeds[0],
+      ...(lastShardManifest ?? summary),
       mode: 'rollout',
       elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
     }

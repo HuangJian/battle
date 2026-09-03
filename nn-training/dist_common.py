@@ -657,12 +657,21 @@ def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
 
 
 def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
-    """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。"""
+    """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。
+
+    2026-09-03 修正：补写 manifest.json——M1 metrics 方案下 engine 加载器
+    （ppo.engine.load_shard → _reward_from_metrics）需要 outcome/score/metrics_version
+    在**落盘目录内**（分布式/self-node 局的单局 manifest 此前只存在于 fetch 返回的
+    内存对象，落盘即丢 → 被当成 timeout 错标，奖励错算）。queue_local 路径由 exporter
+    直接写盘不受影响；此处补齐 dist 路径两侧同规。
+    """
     os.makedirs(out_dir, exist_ok=True)
     for name in _shard_files_for(manifest):
         val = files[name]
         raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
         with open(os.path.join(out_dir, name), "wb") as f:
             f.write(raw)
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False)
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

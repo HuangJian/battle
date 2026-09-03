@@ -341,7 +341,10 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             )
         self._start_it = start_it
         # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
-        self._eval_every = int(getattr(args, "eval_every", 1) or 1)
+        # 2026-09-03 修正：`or 1` 曾把显式 eval_every=0 吞成 1（想关闭 eval 却变成
+        # 每轮都跑——课程 _s5t 测试期实测）。现在 0 表示关闭；默认（cli/rl-config
+        # 未给时 = 1）仍每轮，字节一致。
+        self._eval_every = int(getattr(args, "eval_every", 1) or 0)
         # 吞吐 T3：eval 绝对迭代点集（复用 run_rl_intent 的 eval_at 语义；空 = 不启用该维）。
         self._eval_at_set = {
             int(x) for x in str(getattr(args, "eval_at", "") or "").split(",") if x.strip()
@@ -357,7 +360,8 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         if args.mode == "per-tick":
             return (
                 int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
-                and (self._eval_every <= 1 or it % self._eval_every == 0)
+                and self._eval_every > 0
+                and (self._eval_every == 1 or it % self._eval_every == 0)
                 and (not self._eval_at_set or it in self._eval_at_set)
             )
         return it in self._eval_at_set
