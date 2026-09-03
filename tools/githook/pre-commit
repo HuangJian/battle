@@ -78,15 +78,21 @@ echo " ▸ tests (bun run test — scoped to local changes)"
 # Re-run `bun test` before committing a God-AI change to validate the gate floors.
 "$BUN" run test
 
-echo " ▸ format (oxfmt, in place)"
-# oxfmt rewrites files in place. Re-stage the touched files so the commit contains
-# the formatted versions. `git add -u` only updates already-tracked files, so it
-# never sweeps untracked files (e.g. untracked *.md) into the index.
-"$BUN" x oxfmt
-git add -u
+echo " ▸ format (oxfmt, staged only)"
+# 只 format 已 staged 的文件，不改动未 stage 的修改。
+# 从 git diff --cached --name-only 获取 staged 文件列表，筛选 .ts/.js/.mjs 等
+# oxfmt 可处理的类型，逐个 format 后重新 stage。
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
+if [ -n "$STAGED_FILES" ]; then
+  echo "$STAGED_FILES" | tr '\n' '\0' | xargs -0 "$BUN" x oxfmt
+  git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' | tr '\n' '\0' | xargs -0 git add
+fi
 
-echo " ▸ lint (oxlint)"
-"$BUN" x oxlint
+echo " ▸ lint (oxlint, staged only)"
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
+if [ -n "$STAGED_FILES" ]; then
+  echo "$STAGED_FILES" | tr '\n' '\0' | xargs -0 "$BUN" x oxlint
+fi
 
 echo " ▸ freeze gate (det signature vs golden — DECISIONS §272)"
 # God AI v1 frozen-signature gate (~100s). A red gate is NOT an error per se:
