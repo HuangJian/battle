@@ -140,8 +140,13 @@ def rescan_nodes(
     rescan_sec,
     worker,
     extra_threads,
+    halt_event=None,
 ) -> None:
-    """v3.9 动态节点发现线程主体（dispatch.run() spawn，18 参逐位对应）。
+    """v3.9 动态节点发现线程主体（dispatch.run() spawn，19 参逐位对应）。
+
+    v3.14b：追加 halt_event —— KL 熔断后 rescan 线程必须立即退出，否则主线程
+    join(timeout=max(30, window+taskTimeout)) 会白等满超时（实测 180s/次，
+    集成 I2/I4 因此假死）。0 参代价：旧调用方不传 = 永不因 halt 退出（兼容）。
 
     2026-09-02 OO 拆分回归修复：旧签名带 log/dist_common/node_ping/
     request_upgrade_guarded/is_self_node/mm 六个参数——log/dist_common 本模块
@@ -152,12 +157,20 @@ def rescan_nodes(
     运行中上线的节点永远不被发现）。
     """
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
-    while not all_settled.is_set() and time.time() < deadline:
+    while (
+        not all_settled.is_set()
+        and not (halt_event is not None and halt_event.is_set())
+        and time.time() < deadline
+    ):
         sleep_sec = min(rescan_sec, max(1.0, deadline - time.time()))
         if sleep_sec <= 0:
             return
         time.sleep(sleep_sec)
-        if all_settled.is_set() or time.time() >= deadline:
+        if (
+            all_settled.is_set()
+            or (halt_event is not None and halt_event.is_set())
+            or time.time() >= deadline
+        ):
             return
         for n in configured:
             nid = str(n.get("id") or n.get("url") or "?")
@@ -223,6 +236,17 @@ def rescan_nodes(
                 t = threading.Thread(target=worker, args=(nd,), daemon=True)
                 t.start()
                 extra_threads.append(t)
+
+
+def register_inflight(inflight: dict[tuple[int, int], int], task: tuple[int, int]) -> None:
+    """v3.14 主副本派发登记（纯函数，v3.14 单测覆盖）：**所有**主副本派发一律入表。
+
+    v3.7 旧语义只在「出队时 pending ≤ tailFanoutN」登记尾部任务——早派任务对
+    `pick_tail_race` 不可见（it6 实测：a97 重启后积压 3 局，mac/a98 空闲槽因
+    inflight 表空无从竞速，整轮空等 ~2min）。登记即竞速候选；副本上限
+    tailFanoutDup 与 race_tier_ok 派档仍兜底，不会因登记面扩大而放大复制。
+    重试 requeue 不出表、再派发再登记（计数累加），结算/终局失败路径负责扣减。"""
+    inflight[task] = inflight.get(task, 0) + 1
 
 
 def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:

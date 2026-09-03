@@ -13,6 +13,7 @@ RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch �
 from rl.queue_local import (
     pick_tail_race,  # noqa: F401 — re-exported（tests 引用）
     race_tier_ok,  # noqa: F401 — re-exported（tests 引用）
+    register_inflight,  # noqa: F401 — re-exported（tests 引用）
     run_rollout,  # noqa: F401 — re-exported（collect_only/loop 调用方）
 )
 

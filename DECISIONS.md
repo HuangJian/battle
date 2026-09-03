@@ -1636,3 +1636,162 @@ S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 
 - 适用边界：仅同构单平台集群（x64 Linux）且逐平台 golden 校核后可考虑；int8 必须全量统一启用。
 
 **结论**：分布式继续方案①；② 不引入异构。
+
+## §314 v3.14 竞速可见域修正：主副本派发一律登记 inflight（2026-09-03，it6 实测）
+
+**问题（s5-open20 it6 实测，本机低 CPU 窗口 09:05:15→09:07:23）**：v3.7 派发登记条件是
+「出队时 pending ≤ tailFanoutN(4) 才写入 inflight 表」，而 `pick_tail_race` 只从该表选
+候选——**早派任务对竞速机制不可见**。it6 中 a97 于 08:48 升级重启、09:03:18 才 rejoin，
+权重重灌 + worker 拉起期间分到它名下的 3 局在节点侧积压（settle 时 elapsed 仅 2.1s，
+即 ~09:06 才开工）；这 3 局均为早期派发、不在 inflight 表内。PPO 09:05:15 结束后本机
+让位槽按设计不竞速，mac/a98 空闲槽想竞速但表已空（唯一成员 seed474308045 已结算），
+→ 整轮空等 a97 ~2min（collect_wall 249s，对比本地轮 4.8s）。
+
+**修正**：主副本派发**一律** `register_inflight(inflight, task)`（新纯函数，
+`queue_local.py`；queue.py re-export；dispatch.py 派发处调用），不限 src、不看 pending
+余量。登记即竞速候选；`tailFanoutDup=2` 副本上限与 `race_tier_ok` top-3 快节点派档
+仍然兜底，登记面扩大不会放大复制（竞速仅在排队队列已空时空槽触发）。
+
+**保持不变的语义**：
+- requeue 不出表、再派发再登记（计数累加），终态由 settle 全 pop / 失败路径扣减——
+  均为既有逻辑，未改动；
+- `missing_keys` 分支不清理 inflight（保留竞速副本"抢救"失败局的通道）；
+- 本机 `local_suspend` 让位槽不竞速（v3.10 让位语义：给 PPO 腾核，不抢尾流）。
+
+**测试**：`tests/test_run_rl.py::test_register_inflight_v314`（登记即候选 + requeue
+累加 + dup 满跳过）；集成层 `test_integration`（含 I6 慢任务被空闲槽再竞速端到端）回归。
+
+**预期效果**：拖尾局（无论派发早晚）在排队队列清空后即被空闲快槽竞速；轮末同步屏障
+等待时长从「最慢节点开工+执行」缩到「min(主副本, 最快竞速副本)」。
+
+**v3.14b 同日增补（§6.4 dated note）——集成测试编排化 + rescan halt 感知**：
+1. **集成层脱离真实依赖**（用户裁定"编排测试不需要真权重"）：去掉 `bun on PATH +
+   tmp/rl-weights/weights.json` skipif 与 standalone 前置检查；权重改 tmp 哑文件
+   （wver=文件指纹，任意内容皆可）；本地直跑 `run_local_rollout` 在 `rl.dispatch`
+   命名空间 monkeypatch 打桩（返回同构最小 summary，不 spawn bun 不写盘）。
+   集成测试从此零外部 fixture、`RUN_RL_ITEST=1` 即跑。
+2. **rescan halt 感知（生产修复）**：`rescan_nodes` 循环退出条件不含 halt_event →
+   KL 熔断后主线程 `join(timeout=max(30, window+taskTimeout))` 白等满超时
+   （queueWindowSec=120 时实测 180s/次）。追加 halt_event 参数（19 参，缺省 None
+   兼容旧调用方），循环条件加 halt 检查——熔断后 dispatch 立即收尾。
+3. **I9 判别修正**：早派任务竞速的判别用「竞速副本 dispatch 发生在慢窗口内
+   （+0.28s < 1.5s）」，不用墙钟——迟到主副本的在途 sleep 两代语义都必须等，无区分度。
+
+## §315 轴 2 补测试：per-tick 策略头（move/fire/value-128）torch↔TS parity golden（2026-09-03）
+
+**背景（审计 gap 确认）**：`goal-infer.test.ts` / `intent-infer.test.ts` 的 golden 校验的是
+StudentNet 主干 + 各自专用头（goal_conv/engage、intent/enemy/anchor），**从不触碰
+PPOStudent 的 `move_head` / `fire_head` / 128 宽 `value_head`**——而这正是活路径
+（`export-rl-rollout.ts`，s5-open20 权重 `kind='student' h=64/d=8 head_hidden=128` + value）
+在采样的三头。轴 2（torch↔TS 前向语义一致）此前对该路径无自动化回归网；任一侧改这些头
+或主干都可能静默漂移。
+
+**修正**（复用 goal/intent 既有 golden 模式，两规格覆盖两条推理路径）：
+- `nn-training/models/student.py --golden <out> [--h --d --golden-seed]`：新增 PPOStudent
+  + value_head 的固定 seed golden 导出（`export_student_golden`，镜像 `goal_net.py` 模式；
+  输出 `{format:"student-golden", h, d, head_hidden, seed, obs, scalars,
+  moveLogits[5], fireLogits[2], valueLogits[1], params}`）。
+- 两个 fixture：`tests/fixtures/student-golden.json`（瘦身 h=16/d=2，TS 手写循环路径）、
+  `tests/fixtures/student-golden-wasm.json`（生产 h=64/d=8，走 conv-wasm，参数数 42 与
+  s5-open20 活权重同构）。
+- 新测试 `tests/nn/student-infer.test.ts`：`buildModelFromText`（与 export-rl-rollout 同一
+  构建入口）→ `forward()` → 两规格各断言 move/fire/value 三头 ≤1e-4（沿用 intent golden
+  容差先例；wasm 卷积段 §312 实测 pooled max|Δ|≈4.8e-6 远在容差内）。
+
+**验证**：37 pass（4 个 golden 文件：coord/intent/goal/新增 student）× bun test；typecheck 绿；
+ruff+mypy 对 student.py 改动干净。基底仅新增 `export_student_golden` + `__main__` argparse，
+`StudentNet/PPOStudent` 本体零改动（不加依赖、不触训练路径）。
+
+**再生成（维护说明）**：改 torch 侧学生网结构后需重新生成两 fixture：
+`python models/student.py --golden ../tests/fixtures/student-golden.json --h 16 --d 2`
+`python models/student.py --golden ../tests/fixtures/student-golden-wasm.json --h 64 --d 8`
+
+## §316 python 测试提速 v3.15：integration 提速 + heavy 分层 + 等待轮询化（2026-09-03）
+
+**背景**：全量 pytest 实测 30.5s（211 passed），`test_integration`（编排化集成）单测 17.5s
+占 57%；4-shard 并行（python-gate / pre-commit 通道）24.96s —— 瓶颈在 integration 所在片。
+`heavy`/`slow` marker 在 pyproject 声明已久但**零使用**，`test-fast` 与全量实际无差别。
+
+**改动**（三管齐下）：
+1. **integration 提速**（17.46→13.28s，-4.2s）：
+   - I6/I9 刻意慢窗口 `sleep(2.0→0.4s)`：判据本就依赖「竞速副本 dispatch 计数 + 相对时差」
+     而非窗口长度，短窗足够区分两代语义；I9 判别窗口 1.5s→0.5s 同步收紧。
+   - I7 刻意慢 eval `eval_delay 3.0→2.0s`（ThreadingHTTPServer 无限并发，6 局全并行，
+     2s 仍安全 ≫ 采集 ~1s，保 is_alive 断言边际）。
+   - **等待轮询化（用户裁定）**：I7「等 eval 进入在途」从固定 `sleep(0.3)` 改为
+     `FakeAgent.eval_dispatched：threading.Event` 轮询栅栏（首局 eval dispatch 即置位，
+     `wait(timeout=3)`）——触发即继续、语义更稳（不再碰运气赌 0.3s 够不够）。
+2. **heavy 分层落地**：`test_integration` 挂 `@pytest.mark.heavy`；fast gate（`make
+   test-fast` 与 `tools/githook/nn-gate-shards.py` 分片命令）加 `-m "not heavy"`。
+   全量 `make test`（不带 -m）与 `RUN_RL_ITEST=1` standalone 仍跑 integration——这兑现了
+   pyproject「heavy excluded from fast-gate」的既有契约注释，pre-commit 日常门不再吞 17s。
+3. 配套注释（I6/I7/I9）同步 0.4s/2.0s 新值。
+
+**实测**（本机，训练结束后空闲态）：
+| 通道 | 前 | 后 |
+|---|---|---|
+| 全量 `pytest tests/` | 30.5s | 27.2s |
+| `test_integration` 单独 | 17.5s | 13.3s |
+| fast-gate 串行（-m not heavy） | — | 14.0s |
+| 4-shard fast-gate（python-gate 通道） | 24.96s | **10.5s** |
+
+**保留的刻意慢**：I6/I9 慢窗口（0.4s）、I7 eval_delay（2.0s）——属状态注入（模拟慢节点/
+慢 eval），不可轮询，仅按时长下限收紧。测试编排器内部的 `all_settled.wait(0.5)` 等生产
+代码轮询未动。
+
+**验证**：全量 211 passed / fast-gate 210 passed + 1 skipped（integration）/ ruff+mypy 干净。
+
+## §317 全量测试自动并行：xdist 解禁 + FakeAgent 实例隔离（2026-09-03，用户裁定）
+
+**背景（用户问"全量测试能自动并行吗？CPU 充裕"）**：§316 把 fast-gate 压到 14s，但全量
+`make test` 仍串行 27s。仓库曾禁 pytest-xdist（worker 强制系统 %TEMP% basetemp 触发沙箱删除
+确认），改用自研 `nn-gate-shards.py` 文件分片。
+
+**根因（xdist 解禁）**：`.venv` 的 `colorama` 是**无 `__init__.py` 的损坏 namespace 目录**
+（site-packages/colorama 有子模块但缺 `__init__.py`，未重新导出 `AnsiToWin32`）。串行时某处提前
+加载绕过了它；xdist worker 直接 `import colorama` → `AttributeError: module 'colorama' has no
+attribute 'AnsiToWin32'`（pytest terminalwriter 旧 API）。`pip install colorama`（装 0.4.6 完整
+包）修复。conftest 的 `tmp_path` 覆盖已消除沙箱问题，xdist 禁令前提不复存在。
+
+**FakeAgent 实例隔离（并发安全）**：原 `FakeAgent.events`/`slow_first`/`eval_delay` 等全是
+**类变量**，xdist 按函数分发时 `test_integration` 与 `test_eval_local_gate` 并发跑会踩共享状态。
+新增 `FakeServer(ThreadingHTTPServer)` 子类持有这些实例状态，handler 经 `self.server` 访问——
+每个 test 起独立 server，状态完全隔离。`_ping_cache` 留类变量（纯计算缓存，共享无害）。
+
+**worker 数调优**（16 逻辑核）：n=4 最优 **17.5s**（串行 27.2s，-36%）。更多 worker 更慢
+（torch import 开销每 worker ~2s + 单函数 `test_integration` 13.9s 不可再分，auto=16 → 22.8s）。
+
+**落地**：
+- `make test` → `pytest tests/ -n 4 -q`；`make test-fast` → 加 `-m "not heavy"`。
+- `nn-python-gate.sh`（pre-commit）pytest 部分换 xdist `-n 4` **全量**（含 heavy/integration，
+  ~17s；FakeServer 实例隔离保证并发安全；删 `SHARDS` 变量/分片脚本调用）。
+- 删 `nn-gate-shards.py`（已无引用）。
+
+**实测**：全量 17.5s / fast-gate 7.8s / 多次运行 rc=0（无跨 worker 竞态）。
+
+**验证**：`make test` 17.6s rc=0；ruff+mypy 干净；`colorama` 0.4.6 进 `.venv`（未进
+requirements.txt——属 pytest 传递依赖，由 venv 管理）。
+
+## §318 test_integration 拆分 9 独立函数，xdist 全量并行再提速（2026-09-03，用户裁定）
+
+**背景（用户问"integration 能不能再拆分并行跑"）**：§317 后全量 17.5s 瓶颈是 `test_integration`
+单函数 13.9s 独占一个 xdist worker（单函数不可再分，墙时 ≈ max(13.9, 其他 ~4s)）。
+
+**拆分**：I1-I9 九个编排子用例 → 各自独立 `@pytest.mark.heavy` 函数：
+`test_it_queue_normal / test_it_halt_preset / test_it_stream_smoke / test_it_stream_halt /
+test_it_local_suspend / test_it_longtail_race / test_it_eval_deferred / test_it_precollect_resume
+/ test_it_early_race_v314`。公共 setup 提取为 `_itest_env(monkeypatch, tmp_path)`（返回
+srv/WEIGHTS/cfg/args/bun，每个函数 try/finally 关 server）。原有的 shared-eval-log 清理逻辑
+不再需要（每个函数独立 `tmp_path`）。
+
+**实测**（16 核，xdist -n 4）：
+| 通道 | 拆分前 | 拆分后 |
+|---|---|---|
+| 9 个 itest 串行 | 13.9s（单函数） | 15.1s |
+| 9 个 itest xdist n4 | —（不可分） | **7.3s** |
+| **全量 `pytest -n 4`** | 17.5s | **14.8s** |
+
+并行墙时由 9 个分散的函数均摊到 4 个 worker；全量从 17.5→14.8s（相对串行 27.2s 已 -46%）。
+
+**验证**：全量 14.8s rc=0；standalone `main()`（RUN_RL_ITEST=1）改为逐个调用 9 函数
+（各传独立 tmp 子目录 + fresh MonkeyPatch）。

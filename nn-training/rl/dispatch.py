@@ -21,6 +21,7 @@ from rl.log import log
 from rl.queue_local import (
     pick_tail_race,
     race_tier_ok,
+    register_inflight,
     rescan_nodes,
     run_local_rollout,
     run_rollout,
@@ -380,6 +381,9 @@ class RolloutDispatcher:
         # 执行槽因 src=None 退化为干等 → 整轮被一个慢副本拖住。本机制：排队队列已空时，
         # **只要空槽**就复制一个 in-flight 任务竞速（每任务副本数上限 = tailFanoutDup，
         # 不按时间阈值等待——用户裁定"有空槽就派发"）。
+        # v3.14 竞速可见域修正（it6 实测 2026-09-03）：v3.7 登记条件「出队时 pending ≤
+        # tailFanoutN 才入 inflight 表」使早派任务对 pick_tail_race 不可见——a97 重启后
+        # 积压 3 局、空闲快槽因表空无从竞速，整轮空等 ~2min。主副本派发一律登记。
         # v3.9 动态节点发现（用户需求 2026-08-27）：跑批中途上线的 agent 也能贡献算力。
         # rescan 线程周期 ping 配置里未在跑的节点，合格即权重下发 + 孵化新 worker 线程
         # （共享 pending 队列），无需重启整轮。0 = 关闭。
@@ -414,7 +418,9 @@ class RolloutDispatcher:
             log(f"[dist] tail-dispatch speeds (seeded): {preview}")
         tail_notes: set[str] = set()
         last_progress = [time.time()]
-        # v3.7 fan-out：尾部任务 -> 当前在跑副本数（>1 = 已被重复派发竞速）。
+        # v3.7 fan-out：任务 -> 当前在跑副本数（>1 = 已被重复派发竞速）。
+        # v3.14：登记面扩大到**所有**主副本派发（原 v3.7 只登记出队时 pending ≤
+        # tailFanoutN 的尾局，早派任务对竞速不可见——it6 实测 a97 积压 3 局拖整轮）。
         inflight: dict[tuple[int, int], int] = {}
 
         def _fast_enough(nid: str, pending_len: int) -> bool:
@@ -509,8 +515,10 @@ class RolloutDispatcher:
                                 task = src.popleft()
                                 attempts[task] = attempts.get(task, 0) + 1
                                 attempt = attempts[task]
-                                if src is pending and len(pending) <= tail_fanout_n:
-                                    inflight[task] = inflight.get(task, 0) + 1
+                                # v3.14：主副本派发一律登记（不限 src、不看 pending 余量）——
+                                # 早派到慢节点/滞后节点的任务同样成为竞速候选；
+                                # tailFanoutDup 上限 + race_tier_ok 派档防复制放大。
+                                register_inflight(inflight, task)
                             if nd is None:
                                 local_active[0] += 1
                             if not head_tasks and not pending:
@@ -786,6 +794,8 @@ class RolloutDispatcher:
                     rescan_sec,
                     worker,
                     extra_threads,
+                    # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
+                    halt_event,
                 ),
                 daemon=True,
                 name="rollout-rescan",

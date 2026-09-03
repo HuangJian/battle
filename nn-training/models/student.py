@@ -41,6 +41,9 @@ if _ilu.find_spec("schema") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
+import json
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -199,7 +202,68 @@ def param_count(model: nn.Module) -> int:
     return sum(int(p.numel()) for p in model.parameters())
 
 
+def export_student_golden(path: str, h: int = DEFAULT_H, d: int = DEFAULT_D, seed: int = 20260903) -> None:
+    """轴 2 parity golden（PPOStudent 生产路径，kind='student'）。
+
+    输出 JSON：{ format:"student-golden", version, h, d, head_hidden, seed,
+                 obs, scalars, moveLogits:[5], fireLogits:[2], valueLogits:[1],
+                 params（stem/blocks/fc/move_head/fire_head/value_head）}
+    TS 端 buildModelFromText(arch.kind='student', h, d) → forward() 对比三头。
+
+    为什么需要（2026-09-03 审计）：goal/intent golden 只覆盖 StudentNet 主干+专用头，
+    从不触碰 **per-tick 策略头（move_head/fire_head + 128 宽 value_head）**——而这是
+    export-rl-rollout.ts / s5-open20 活路径。任一侧改这些头或主干都会在此变红。"""
+    torch.manual_seed(seed)
+    rng = torch.Generator().manual_seed(seed)
+    obs = torch.randint(0, 256, (1, OBS_CHANNELS, BOARD, BOARD), generator=rng, dtype=torch.uint8)
+    sc = (torch.rand(1, SCALAR_DIM, generator=rng) - 0.5) * 4
+
+    torch.manual_seed(seed + 1)
+    m = PPOStudent(h=h, d=d).eval()
+    with torch.no_grad():
+        mv, fr, v = m(obs, sc)  # PPOStudent: (move, fire, value)
+
+    from data.weights_io import tensor_to_b64
+
+    params = {}
+    for name, p in m.state_dict().items():
+        params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
+    golden = {
+        "format": "student-golden",
+        "version": 1,
+        "h": h,
+        "d": d,
+        "head_hidden": m.head_hidden,
+        "seed": seed,
+        "obs": [int(v) for v in obs.flatten().tolist()],
+        "scalars": [float(v) for v in sc.flatten().tolist()],
+        "moveLogits": [float(v) for v in mv.flatten().tolist()],
+        "fireLogits": [float(v) for v in fr.flatten().tolist()],
+        "valueLogits": [float(v) for v in v.flatten().tolist()],
+        "params": params,
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(golden, f)
+    print(f"student golden written: {path} (h={h} d={d} head_hidden={m.head_hidden} params={len(params)})")
+
+
 if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--golden", metavar="OUT", help="PPOStudent golden 导出：固定权重+输入 → move/fire/value logits JSON"
+    )
+    ap.add_argument("--h", type=int, default=DEFAULT_H)
+    ap.add_argument("--d", type=int, default=DEFAULT_D)
+    ap.add_argument("--golden-seed", type=int, default=20260903)
+    args = ap.parse_args()
+
+    if args.golden:
+        export_student_golden(args.golden, args.h, args.d, args.golden_seed)
+        raise SystemExit(0)
+
     m = StudentNet()
     n = param_count(m)
     print(f"StudentNet params: {n} (~{n / 1000:.1f}K)  budget<=200K: {n <= 200_000}")

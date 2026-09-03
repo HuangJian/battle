@@ -3,6 +3,90 @@
 > 按 AGENTS §5.6 / 用户指令建立。新条目置顶（倒序）。架构改动 / 评估结果 / 教训都记这里。
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
 > NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
+## §26 test_integration 拆分 9 独立函数 + xdist 并行（DECISIONS §318）
+
+**背景**：§25 后全量 17.5s 瓶颈是单函数 test_integration 13.9s（独占一个 worker，不可分）。
+
+**拆分**：I1-I9 → 9 个独立 `test_it_*` 函数（各 `@pytest.mark.heavy`），公共 setup 抽
+`_itest_env`（srv/weights/cfg/args/bun + try/finally 关 server）；standalone main() 改为
+逐个调用。
+
+**实测**（16 核 n=4）：9 itest 串行 15.1s → xdist 7.3s（-52%）；**全量 17.5→14.8s rc=0**
+（相对串行 27.2s 已 -46%）。
+## §24 python 测试提速（DECISIONS §316）：integration -4.2s + heavy 分层 + 等待轮询化
+
+**背景**：全量 30.5s，integration 占 57%（17.5s）；pyproject 的 heavy marker 声明而未用。
+
+**改动**：I6/I9 慢窗口 2.0→0.4s、I7 eval_delay 3.0→2.0s、I7「等 eval 在途」固定 sleep(0.3)
+→ `FakeAgent.eval_dispatched` Event 轮询栅栏；`test_integration` 挂 `@pytest.mark.heavy`，
+`make test-fast` 与 `nn-gate-shards.py` 加 `-m "not heavy"`（全量 make test 仍跑）。
+
+**实测**：全量 30.5→27.2s；integration 17.5→13.3s；**4-shard fast-gate 24.96→10.5s**
+（pre-commit 日常门不再吞 integration）。
+
+**教训**：等待性 sleep 用 Event 轮询栅栏（触发即继续 + 语义稳），刻意慢注入只按下限收。
+fast-gate=210+1 skipped、全量 211 pass、ruff/mypy 干净。
+
+## §25 全量测试自动并行（DECISIONS §317）：xdist 解禁 + FakeAgent 实例隔离
+
+**背景**：用户问"全量测试能自动并行吗？CPU 充裕"。§316 后全量仍串行 27s。
+
+**根因**：`.venv` 的 `colorama` 是无 `__init__.py` 的损坏 namespace 目录 → xdist worker
+`import colorama` 报 `AttributeError: module 'colorama' has no attribute 'AnsiToWin32'`。
+`pip install colorama`（0.4.6 完整包）修复。conftest 的 tmp_path 覆盖已消除沙箱问题。
+
+**FakeAgent 实例隔离**：原 events/slow_first/eval_delay 等全是类变量，xdist 按函数分发时
+test_integration 与 test_eval_local_gate 并发会踩共享状态。新增 FakeServer(ThreadingHTTPServer)
+子类持有实例状态，handler 经 self.server 访问——每个 test 独立 server，完全隔离。
+
+**worker 调优**（16 核）：n=4 最优 17.5s（串行 27.2s，-36%）；auto=16 反更慢（torch import
+开销 + 单函数 test_integration 13.9s 不可再分）。
+
+**落地**：make test → `pytest -n 4 -q`；gate 换 xdist `-n 4` **全量**（含 heavy/integration，
+~17s；FakeServer 实例隔离保证并发安全；删 SHARDS/分片脚本）。
+用户后续裁定 pre-commit 门改回全量。实测：gate 全量 17.5s rc=0 / 多次稳定。
+## §23 轴 2 parity 补测试：per-tick 策略头 torch↔TS golden（2026-09-03）
+
+**审计发现**（DECISIONS §315）：goal/intent golden 只覆盖 StudentNet 主干 + 专用头，**活路径
+的三头（move/fire/value-128，s5-open20 的 kind='student' h64/d8）在 TS 侧从无 torch↔TS
+parity 回归网**——任一侧改这些头都可能静默漂移而测试全绿。
+
+**落地**：`student.py --golden`（镜像 goal_net.py 模式）+ 两 fixture（瘦身 h16/d2 走 TS
+手写循环、生产 h64/d8 走 conv-wasm，参数数 42 与活权重同构）+ `tests/nn/student-infer.test.ts`
+（buildModelFromText 同入口，三头各 ≤1e-4）。验证：37 pass / typecheck / ruff+mypy 全绿。
+
+**维护纪律**：改 torch 学生网结构 → 重跑 §315 末的两条再生成命令。纯测试添加，不触训练路径。
+
+## §22 v3.14 竞速可见域修正：主副本派发一律登记 inflight（2026-09-03）
+
+**背景**：§21 的 s5-open20 训练（resume it3 起，40 iter）it6 实测轮末同步屏障空等
+~2min（collect_wall 249s vs 本地轮 4.8s），用户观察到本机 CPU 低谷数十秒。归因：
+v3.10 竞速对「早期派发 + 节点侧积压」的任务失明——v3.7 登记条件「出队时 pending ≤
+tailFanoutN(4)」使早派任务不进 inflight 表，`pick_tail_race` 无从选择；a97 重启 rejoin
+晚（09:03:18），其 3 局在 PPO 结束后（09:05:15）才开工（settle elapsed=2.1s 即证），
+而当时本机让位槽不竞速（设计正确）、mac/a98 空闲槽因表空无候选。唯一被登记的尾局
+seed474308045 竞速成功（09:03:20 x2 → 09:03:32 a98 副本先回）——机制对已登记任务有效。
+
+**修正**（DECISIONS §314）：`register_inflight` 新纯函数（queue_local.py，queue.py
+re-export），dispatch.py 主副本派发**一律**调用（不限 src、不看 pending 余量）；
+tailFanoutDup 上限 + race_tier_ok 派档兜底不变；requeue 累加 / settle 全 pop /
+missing 分支不清理（保留抢救通道）等既有语义未动；本机 local_suspend 槽仍不竞速。
+
+**验证**：`test_register_inflight_v314` 单测（登记即候选 + requeue 累加 + dup 满跳过）；
+`test_run_rl.py` 全量 13 passed；集成层 `test_integration`（I6 再竞速端到端）回归；
+ruff / mypy 干净。**生效方式**：改的是训练机侧 dispatch.py，运行中进程（内存旧码）
+不受影响，下轮重启训练后生效。
+
+**观察点**：下一轮训练的轮末 dist 段应看到对早派任务的 `tail-race … race lane` 行，
+collect_wall 不再被单节点开工延迟拖到 200s+。
+
+**v3.14b 同日增补**：①集成层编排化（用户裁定）——去 bun/weights fixture 依赖，
+权重改 tmp 哑文件、`run_local_rollout` 在 rl.dispatch 命名空间打桩，`RUN_RL_ITEST=1`
+即跑、零外部准备；②顺手修掉 rescan 线程不感知 halt 的生产缺陷（KL 熔断后主 join
+白等 180s/次）；③I9 判别改用「竞速副本 dispatch 落在慢窗口内」（+0.28s < 1.5s），
+墙钟不作判别（迟到主副本在途等待两代语义等价，无区分度）。全量 13 passed +
+ruff/mypy 干净。
+> NN 训练统一经 `nn-training/start-training.sh|.ps1` 启动（AGENTS §5.6 硬规则）。
 
 ## §20 S-Dodge 坍塌修正：移除 wMiss + 从 s3-cap2 重启训练（2026-09-01）
 

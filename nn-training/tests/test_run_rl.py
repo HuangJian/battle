@@ -5,13 +5,16 @@
       test_rl_breaker / test_rl_stream / test_rl_resume）。本文件仅保留
       集成层与无法拆出的 fixture-重测试（mirror / resume / jsonl / compute_gae /
       chunk / backup / eval_local_gate / race-tier）。
-  集成层（RUN_RL_ITEST=1）：本地假 HTTP agent 节点驱动真 run_rollout_queue /
+  集成层（默认运行）：本地假 HTTP agent 节点驱动真 run_rollout_queue /
       run_rollout_stream —— 正常流、halt 流、派发队列清空回调的触发与次序。
+      v3.14b 编排化重构（2026-09-03）：无关流程全部 mock —— 权重临时哑文件
+      （wver=文件指纹），bunVersion 与 dispatch 同源计算（bun 缺失恒匹配），
+      本地直跑 run_local_rollout 打桩 —— 不依赖 PATH 上有 bun、不需要真实权重。
 
 运行（经统一启动器，venv/torch 由它保证）：
   bash nn-training/start-training.sh --script test_run_rl.py
   powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_run_rl.py
-  集成层追加环境变量 RUN_RL_ITEST=1（需 PATH 上有 bun、tmp/rl-weights/weights.json 存在）。
+  （集成层不再需要 RUN_RL_ITEST 门禁与环境 fixture；RUN_RL_ITEST=1 仍可强制 standalone 入口跑集成层）
 
 退出码：全部通过 0，否则 1。新增队列/流式行为时请在此补用例，不要写临时脚本。
 """
@@ -41,6 +44,7 @@ sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 import dist_common
+import rl.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
 import run_rl
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.stream import run_rollout_stream as _run_rollout_stream  # B7：run_rl 模块级不再 re-export
@@ -48,7 +52,6 @@ from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
-WEIGHTS = REPO / "tmp" / "rl-weights" / "weights.json"
 
 
 def check(cond: bool, msg: str) -> None:
@@ -184,11 +187,13 @@ def _npy_bytes(arr: np.ndarray) -> bytes:
 
 def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(11)
+
     def i64(hi):
         return rng.integers(0, hi, n).astype(np.int64)
 
     def f32(x):
         return rng.standard_normal(x).astype(np.float32)
+
     done = np.zeros(n, dtype=np.int64)
     done[-1] = 1
     return {
@@ -199,7 +204,9 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
         "lp_move": -np.abs(f32(n)) - 0.05,
         "lp_fire": -np.abs(f32(n)) - 0.05,
         "value": f32(n),
-        "reward": f32(n),
+        # plan/rl-training-config.md §4.2：per-tick 奖励由 Python 奖励引擎计算，
+        # metrics.npy [N+1,21] f8 存储——TS 侧不再落 reward.npy（intent 时代遗留）。
+        "metrics": np.zeros((n + 1, 21), dtype=np.float64),
         "done": done,
         "mask": np.ones((n, MASK_DIM), dtype=np.int64),
     }
@@ -250,15 +257,28 @@ def _pack_container(stage: int, seed: int, wver: str, mode: str | None = None) -
     )
 
 
+class FakeServer(ThreadingHTTPServer):
+    """v3.15：把 FakeAgent 的状态从类变量移到 server 实例，使 xdist 按函数分发时
+    各测试的 FakeAgent 状态完全隔离（不再跨 worker 竞争）。
+    FakeAgent handler 通过 self.server 访问这些实例属性。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.events: list[tuple[str, float, tuple]] = []
+        self.slow_first: set[tuple[int, int]] = set()
+        self._slowed_once: set[tuple[int, int]] = set()
+        self.eval_delay: float = 0.0
+        self.eval_dispatched: threading.Event = threading.Event()
+        super().__init__(*args, **kwargs)
+
+
 class FakeAgent(BaseHTTPRequestHandler):
-    events: list[tuple[str, float, tuple]] = []
-    # I6 长尾竞速注入：首次 dispatch 该 (stage,seed) 时 sleep（模拟慢节点独占 in-flight）；
-    # 之后（含竞速副本）秒回 —— 竞速副本必须绕开慢窗口才会赢。
-    slow_first: set[tuple[int, int]] = set()
-    _slowed_once: set[tuple[int, int]] = set()
-    # I7 eval 最低优先级注入：mode=eval 的每局任务 sleep（模拟慢 eval 后台消化）——
-    # 验证它与采集/训练并行时互不阻塞（采集照常、eval 慢慢做）。
-    eval_delay = 0.0
+    # _ping_cache 留在类变量：codeHash + bunVersion 只计算缓存，跨 server 共享无害
+    _ping_cache: dict[str, str] = {}
+
+    @property
+    def _srv(self) -> FakeServer:
+        """类型收窄：self.server 是 BaseServer，但运行时必为 FakeServer（mypy 收窄）。"""
+        return self.server  # type: ignore[return-value]  # FakeServer 在 FakeAgent 之前定义
 
     def log_message(self, *_a) -> None:
         return
@@ -273,18 +293,29 @@ class FakeAgent(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         u = urlparse(self.path)
         if u.path == "/v1/ping":
-            bun = shutil.which("bun")
-            assert bun is not None, "bun not found"
+            cache = FakeAgent._ping_cache
+            if "bun" not in cache:
+                bun = shutil.which("bun")
+                if bun is not None:
+                    cache["bun"] = (
+                        subprocess.run(
+                            [bun, "--version"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            **_POPEN_NO_WINDOW,
+                        ).stdout.strip()
+                        or "?"
+                    )
+                else:
+                    # 与 dispatch.bun_version(缺失) 的失败回落同 "?" → mm 门恒匹配
+                    cache["bun"] = "?"
+            if "codeHash" not in cache:
+                cache["codeHash"] = dist_common.compute_code_hash()
             self._json(
                 {
-                    "codeHash": dist_common.compute_code_hash(),
-                    "bunVersion": subprocess.run(
-                        [bun, "--version"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        **_POPEN_NO_WINDOW,
-                    ).stdout.strip(),
+                    "codeHash": cache["codeHash"],
+                    "bunVersion": cache["bun"],
                     "cpus": 4,
                     "evalSupport": True,
                 }
@@ -292,12 +323,13 @@ class FakeAgent(BaseHTTPRequestHandler):
         elif u.path == "/v1/task":
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             key = (int(q["stage"]), int(q["seed"]))
-            FakeAgent.events.append(("dispatch", time.time(), key))
-            if key in FakeAgent.slow_first and key not in FakeAgent._slowed_once:
-                FakeAgent._slowed_once.add(key)
-                time.sleep(2.0)  # 慢主副本窗口
-            if q.get("mode") == "eval" and FakeAgent.eval_delay > 0:
-                time.sleep(FakeAgent.eval_delay)  # I7 慢 eval（后台消化模拟）
+            self._srv.events.append(("dispatch", time.time(), key))
+            if key in self._srv.slow_first and key not in self._srv._slowed_once:
+                self._srv._slowed_once.add(key)
+                time.sleep(0.4)  # 慢主副本窗口（v3.15 2.0→0.4，判据不依赖窗长）
+            if q.get("mode") == "eval" and self._srv.eval_delay > 0:
+                self._srv.eval_dispatched.set()  # I7 栅栏：eval 已派发（首局即置位）
+                time.sleep(self._srv.eval_delay)  # I7 慢 eval（后台消化模拟）
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             body = _pack_container(*key, q["wver"], mode=q.get("mode"))
@@ -309,7 +341,7 @@ class FakeAgent(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        FakeAgent.events.append(("weights", time.time(), ()))
+        self._srv.events.append(("weights", time.time(), ()))
         self._json({"cache": "kept"})
 
 
@@ -340,7 +372,8 @@ class _StubPpo:
         return 0  # 无 checkpoint 路径 → 轮内零结算走全盘更新分支
 
     def load_episodes(self, path):
-        return [object()]  # 1 个假 episode → chunk_episodes 至少 1 chunk
+        # full-disk 回放路径（无 fresh settles 时）→ ep["obs"].shape[0] 即 steps
+        return [{"obs": np.zeros(30, dtype=np.uint8)}]
 
     def chunk_episodes(self, eps, mb):
         return list(eps)
@@ -351,90 +384,115 @@ class _StubPpo:
         return {"adv": np.zeros(1, dtype=np.float32)}
 
 
-@pytest.mark.skipif(
-    shutil.which("bun") is None or not WEIGHTS.exists(),
-    reason="integration: requires bun on PATH + tmp/rl-weights/weights.json",
-)
-def test_integration(tmp: Path) -> None:
-    print("[itest] queue normal / halt / queue-drained ordering")
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeAgent)
+def _stub_local_rollout(
+    bun: str, rl_path: str, traj_dir: Path, idx: int, task: tuple[int, int], args, wver: str
+) -> dict:
+    """本地直跑桩（v3.14b 编排化重构）：返回与 export-rl-rollout 报告同构的最小
+    summary（win_of / by_node 消费的字段），并写盘最小 shard 文件使 stream 的
+    _shard_dir 能检测到 obs.npy，避免 _load_wave 因目录空而跳过。"""
+    si, sd = task
+    out_dir = Path(traj_dir) / f"w{idx}" / f"rl_s{si}_seed{sd}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # 写最小 obs.npy（30 steps × 14 channels × 26×26 零数组）和 manifest.json
+    np.save(str(out_dir / "obs.npy"), np.zeros((30, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
+    np.save(str(out_dir / "scalars.npy"), np.zeros((30, SCALAR_DIM), dtype=np.float32))
+    for arr_name in ("a_move", "a_fire", "lp_move", "lp_fire", "value", "done", "mask"):
+        arr = _synth_payload(30).get(arr_name)
+        if arr is not None:
+            np.save(str(out_dir / f"{arr_name}.npy"), arr)
+    (out_dir / "manifest.json").write_text(json.dumps({
+        "wver": wver, "stage": si, "seed": sd, "nSamples": 30, "ticks": 900,
+        "outcome": "stage_clear", "score": 0.4,
+    }), encoding="utf-8")
+    return {
+        "node": "local",
+        "wver": wver,
+        "stage": si,
+        "seed": sd,
+        "games": 1,
+        "outcomes": {"stage_clear": 1},
+        "totalSamples": 30,
+        "totalTicks": 900,
+        "scoreList": [0.5],
+        "dimLists": {},
+        "elapsedSec": 0.01,
+        "_dir": str(out_dir),
+    }
+
+
+def _itest_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FakeServer, Path, dict, types.SimpleNamespace, str]:
+    """为集成子测试拉起 FakeServer + 本地直跑打桩。调用方负责 try/finally 关闭 server。"""
+    weights = tmp_path / "weights.json"
+    weights.write_text('{"stub": true}')
+    monkeypatch.setattr(_rdispatch, "run_local_rollout", _stub_local_rollout)
+    srv = FakeServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{srv.server_address[1]}"
-    bun = shutil.which("bun")
-    assert bun is not None, "bun not found"
     cfg = {
-        "nodes": [{"id": "fake", "url": url, "authKey": "", "concurrency": 4, "enabled": True}],
-        "policy": {
-            "taskTimeoutSec": 60,
-            "queueWindowSec": 120,
-            "statusTimeoutSec": 3,
-            "agentRescanSec": 1,
-        },
-    }  # rescan 默认 120s 轮询 → 每轮白等 120s 才收官
+        "nodes": [{"id": "fake", "url": f"http://127.0.0.1:{srv.server_address[1]}",
+                   "authKey": "", "concurrency": 4, "enabled": True}],
+        "policy": {"taskTimeoutSec": 60, "queueWindowSec": 120, "statusTimeoutSec": 3, "agentRescanSec": 1},
+    }
     args = types.SimpleNamespace(workers=4, max_ticks=300, difficulty="hard")
+    bun = shutil.which("bun") or "bun-stub"
+    return srv, weights, cfg, args, bun
 
-    def fresh(tag: str) -> Path:
-        p = tmp / tag
-        p.mkdir(parents=True)  # 沙箱零删除适配：tmp 唯一目录，无需预清理
-        FakeAgent.events.clear()
-        return p
 
+@pytest.mark.heavy
+def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
-        # I1 正常流：结算齐全；queue-drained 恰一次，且在首次 dispatch 之后
-        traj = fresh("i1")
+        traj = tmp_path / "i1"
+        traj.mkdir()
         drained_ts, result_ts = [], []
         rep = run_rl.run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i1.1",
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i1.1",
             local_slots_max=0,
             on_result=lambda _s: result_ts.append(time.time()),
             on_queue_drained=lambda: drained_ts.append(time.time()),
         )
-        _ = [t for kind, t, _x in FakeAgent.events if kind == "dispatch"]
-        wts = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
-        disp_pairs = {p for kind, _t, p in FakeAgent.events if kind == "dispatch"}
+        wts = [t for kind, t, _x in srv.events if kind == "weights"]
+        disp_pairs = {p for kind, _t, p in srv.events if kind == "dispatch"}
         check(rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully")
         check(rep.get("dist_phase_sec") is not None, "I1 dist_phase_sec present")
         check(len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})")
-        # 契约：清空信号晚于权重分发（不得退回 dist-done 时代）；pop 即交接，
-        # 最后一个任务的 HTTP 提交允许在信号之后，但必须全部发生。
         check(bool(wts) and drained_ts[0] > wts[0], "I1 drained after weight distribution")
         check(disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched")
         check(rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards")
+    finally:
+        srv.shutdown()
 
-        # I2 预置 halt：零派发、drained 不触发、halt_aborted
-        traj = fresh("i2")
+
+@pytest.mark.heavy
+def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i2"
+        traj.mkdir()
         ev = threading.Event()
         ev.set()
         calls = []
         rep2 = run_rl.run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i2.2",
-            local_slots_max=0,
-            halt_event=ev,
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i2.2",
+            local_slots_max=0, halt_event=ev,
             on_queue_drained=lambda: calls.append(1),
         )
         check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
         check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
         check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
+    finally:
+        srv.shutdown()
 
-        # I3 流式迷你轮（PPO 桩化版）——只验编排：真 PPO 更新由 _StubPpo 取代，
-        # 断言 wave 训练调用真实发生 + 评估恰一次（队列清空时）+ 句柄回传。
-        traj = fresh("i3")
+
+@pytest.mark.heavy
+def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i3"
+        traj.mkdir()
         stub3 = _StubPpo(kl=1e-12)
         cfg3 = json.loads(json.dumps(cfg))
         cfg3["policy"]["streamWaveGames"] = 2
-        cfg3["policy"]["streamKlCap"] = 1e12  # 桩 kl 极小，只验非熔断路径
+        cfg3["policy"]["streamKlCap"] = 1e12
         fired = []
 
         def on_collect_done():
@@ -444,181 +502,174 @@ def test_integration(tmp: Path) -> None:
             return th
 
         rep3 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3,
-            "i3.3",
-            None,
-            None,
-            "cpu",
-            on_collect_done=on_collect_done,
-            backend=stub3,
+            cfg3, "i3.3", None, None, "cpu",
+            on_collect_done=on_collect_done, backend=stub3,
         )
         sm = rep3.pop("_stream")
         check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
         check(stub3.updates >= 1, f"I3 stub PPO invoked for waves ({stub3.updates})")
         check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
         check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
-        wts3 = [t for kind, t, _x in FakeAgent.events if kind == "weights"]
+        wts3 = [t for kind, t, _x in srv.events if kind == "weights"]
         check(bool(wts3) and fired[0] > wts3[0], "I3 eval after weight distribution (queue-drained)")
         check("_eval_thread" in rep3, "I3 eval thread returned via report")
+    finally:
+        srv.shutdown()
 
-        # I4 流式熔断轮（PPO 桩化版）：桩 kl=1e6 单波触顶 → 停训 + 停派发
-        traj = fresh("i4")
+
+@pytest.mark.heavy
+def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i4"
+        traj.mkdir()
         stub4 = _StubPpo(kl=1e6)
         cfg4 = json.loads(json.dumps(cfg))
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
+            bun, str(WEIGHTS), traj, [(0, 111), (0, 222), (1, 333), (1, 444)],
             types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4,
-            "i4.4",
-            None,
-            None,
-            "cpu",
-            on_collect_done=None,
-            backend=stub4,
+            cfg4, "i4.4", None, None, "cpu", on_collect_done=None, backend=stub4,
         )
         sm4 = rep4.pop("_stream")
         check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
         check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
+    finally:
+        srv.shutdown()
 
-        # I5 local_suspend 语义：置位后本机直跑让位（全部落 fake 节点）
+
+@pytest.mark.heavy
+def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
         pairs5 = [(0, 111), (3, 222)]
-        traj = fresh("i5a")
+        traj = tmp_path / "i5a"
+        traj.mkdir()
         susp = threading.Event()
         susp.set()
         rep5a = run_rl.run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            pairs5,
-            args,
-            cfg,
-            "i5.51",
-            local_slots_max=2,
-            local_suspend=susp,
+            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.51",
+            local_slots_max=2, local_suspend=susp,
         )
-        check(
-            rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
-            f"I5 suspended → zero local settlements (byNode={rep5a['dist']['nodes']})",
-        )
-        # I5b 对照组（不置位）：头部分配使 local 独占前 N 局——确定性断言
-        traj = fresh("i5b")
+        check(rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
+              f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})")
+        traj = tmp_path / "i5b"
+        traj.mkdir()
         rep5b = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52", local_slots_max=2
+            bun, str(WEIGHTS), traj, pairs5, args, cfg, "i5.52", local_slots_max=2,
         )
-        check(
-            rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
-            f"I5b no-suspend → local owns head tasks ({rep5b['dist']['nodes']})",
-        )
+        check(rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
+              f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})")
+    finally:
+        srv.shutdown()
 
-        # I6 v3.10 长尾竞速：慢主副本独占 in-flight（2s 窗口）→ 空闲槽复制竞速先返回。
-        # 若末尾任务被单 worker 独占后无人竞速（v3.7 盲区），本轮会被 2s 窗口拖住且
-        # (0,111) 只会 dispatch 1 次；v3.10 下应 dispatch ≥2（主 + 竞速副本）且快速收官。
-        traj = fresh("i6")
-        FakeAgent.slow_first = {(0, 111)}
-        FakeAgent._slowed_once = set()
+
+@pytest.mark.heavy
+def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i6"
+        traj.mkdir()
+        srv.slow_first = {(0, 111)}
+        srv._slowed_once = set()
         t0 = time.time()
         rep6 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6", local_slots_max=0
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i6.6", local_slots_max=0,
         )
         took6 = time.time() - t0
-        n_slow_disp = sum(
-            1 for kind, _t, p in FakeAgent.events if kind == "dispatch" and p == (0, 111)
-        )
+        n_slow_disp = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
         check(rep6["games"] == 2 and rep6["missing"] == [], "I6 long-tail race settled all")
         check(n_slow_disp >= 2, f"I6 slow task re-raced by idle slot (dispatches={n_slow_disp})")
-        check(took6 < 40.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")  # 并行门禁放宽：争抢下不误报
-        FakeAgent.slow_first = set()
-        FakeAgent._slowed_once = set()
+        check(took6 < 40.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")
+    finally:
+        srv.slow_first = set()
+        srv._slowed_once = set()
+        srv.shutdown()
 
-        # I7 eval 最低优先级（v3.12 语义）：eval 慢速在途（后台线程）时，下一轮采集照常
-        # 进行、互不阻塞——eval 冻结本轮权重、后台消化，采集/PPO 空档慢慢做，不抢主链。
-        import rl.eval_dispatch as ed
 
-        traj = fresh("i7")
-        # eval_done_keys 台账在 traj.parent（= tmp/eval_log.jsonl）按 wver 去重——
-        # 上次运行残留的同 wver 记录会让本轮 eval 全量 skip 早退、is_alive 断言落空。
-        # 隔离：删共享台账（test_run_rl 专用 tmp 目录，无生产影响）。
-        shared_eval_log = traj.parent / "eval_log.jsonl"
-        if shared_eval_log.exists():
-            try:
-                shared_eval_log.unlink()
-            except BaseException:
-                pass  # 沙箱零删除适配：删除被拦截时静默保留（该集成段需 bun，常被 skip）
-        FakeAgent.eval_delay = 3.0  # 每局 mode=eval 延迟 3s（6 局/4 并发 ≈ 6s+）≫ 采集 1.4s
-        args_eval = types.SimpleNamespace(
-            **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
-        )
+@pytest.mark.heavy
+def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import rl.eval_dispatch as ed
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i7"
+        traj.mkdir()
+        srv.eval_delay = 2.0
+        args_eval = types.SimpleNamespace(**{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"})
         eval_th = threading.Thread(
-            target=lambda: ed.dispatch_eval_round(
-                bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10
-            ),
-            daemon=True,
-            name="eval-it10",
+            target=lambda: ed.dispatch_eval_round(bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10),
+            daemon=True, name="eval-it10",
         )
         eval_th.start()
-        time.sleep(0.3)  # 让 eval 抢先派发、进入在途（模拟"eval 已在跑"）
+        srv.eval_dispatched.clear()
+        if not srv.eval_dispatched.wait(timeout=3.0):
+            raise AssertionError("I7 eval round never dispatched a game")
         t_collect = time.time()
         rep7 = run_rl.run_rollout_queue(
-            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9", local_slots_max=0
+            bun, str(WEIGHTS), traj, [(0, 111), (3, 222)], args, cfg, "i7.9", local_slots_max=0,
         )
         t_collect = round(time.time() - t_collect, 1)
-        check(
-            rep7["games"] == 2 and rep7["missing"] == [],
-            f"I7 collection completes while slow eval in flight ({t_collect}s)",
-        )
+        check(rep7["games"] == 2 and rep7["missing"] == [],
+              f"I7 collection completes while slow eval in flight ({t_collect}s)")
         check(eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)")
-        eval_th.join(timeout=45)  # 放 eval 收尾（不阻塞断言路径）
-        FakeAgent.eval_delay = 0.0
+        eval_th.join(timeout=45)
+    finally:
+        srv.eval_delay = 0.0
+        srv.shutdown()
 
-        # I8 吞吐 T4 提前预采：上一轮 epoch3 快照（θ_{N,e3}，wver=extra）采的首波
-        # shard 已在盘 → 本轮 stream 应①把它注入第一波训练（seed pend）；②collector
-        # resume 对账（double-wver）跳过它、只现场采计划内剩余局（不重复 dispatch）。
-        traj = fresh("i8")
-        plan8 = [(0, 111), (3, 222)]  # 本轮计划 2 局
+
+@pytest.mark.heavy
+def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i8"
+        traj.mkdir()
+        plan8 = [(0, 111), (3, 222)]
         pre_pair, cur_pair = (0, 111), (3, 222)
-        # 预采首波盘上 shard：wver = "e"*64（模拟 θ_{N,e3} 快照指纹，≠当前权重）
         _mk_shard(traj, *pre_pair, "e" * 64)
-        args8 = types.SimpleNamespace(
-            **{**vars(args), "max_ticks": 600, "mb": 128, "epochs": 1, "seed": 7}
-        )
+        args8 = types.SimpleNamespace(**{**vars(args), "max_ticks": 600, "mb": 128, "epochs": 1, "seed": 7})
         cfg8 = json.loads(json.dumps(cfg))
-        cfg8["policy"]["streamWaveGames"] = 1  # 每局一波（首波注入立即起训）
+        cfg8["policy"]["streamWaveGames"] = 1
         stub8 = _StubPpo(kl=1e-12)
         rep8 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            plan8,
-            args8,
-            cfg8,
-            "i8.8",
-            None,
-            None,
-            None,
-            backend=stub8,
-            extra_wver="e" * 64,
+            bun, str(WEIGHTS), traj, plan8, args8, cfg8, "i8.8",
+            None, None, None, backend=stub8, extra_wver="e" * 64,
         )
-        disp8 = [p for kind, _t, p in FakeAgent.events if kind == "dispatch"]
-        check(
-            stub8.updates >= 2,
-            f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})",
-        )
-        check(
-            pre_pair not in disp8 and cur_pair in disp8,
-            f"I8 collector skips precollected pair, dispatches only remaining ({disp8})",
-        )
+        disp8 = [p for kind, _t, p in srv.events if kind == "dispatch"]
+        check(stub8.updates >= 2,
+              f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})")
+        check(pre_pair not in disp8 and cur_pair in disp8,
+              f"I8 collector skips precollected pair, dispatches only remaining ({disp8})")
         check(rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})")
     finally:
+        srv.shutdown()
+
+
+@pytest.mark.heavy
+def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    try:
+        traj = tmp_path / "i9"
+        traj.mkdir()
+        plan9 = [(0, 111)] + [(s % 4, 9000 + i) for i, s in enumerate(range(1, 8))]
+        srv.slow_first = {(0, 111)}
+        srv._slowed_once = set()
+        t0 = time.time()
+        rep9 = run_rl.run_rollout_queue(bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0)
+        took9 = time.time() - t0
+        n_disp9 = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
+        check(rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled")
+        check(n_disp9 >= 2, f"I9 early-dispatched slow task re-raced by idle slot (dispatches={n_disp9})")
+        race_at = [t for kind, t, p in srv.events if kind == "dispatch" and p == (0, 111)]
+        check(len(race_at) >= 2 and race_at[1] - t0 < 0.5,
+              f"I9 race copy dispatched inside slow window (+{race_at[-1] - t0:.2f}s < 0.5s)")
+        check(took9 < 5.0, f"I9 round terminates ({took9:.2f}s)")
+    finally:
+        srv.slow_first = set()
+        srv._slowed_once = set()
         srv.shutdown()
 
 
@@ -815,6 +866,25 @@ def test_race_tier_ok() -> None:
     )
 
 
+def test_register_inflight_v314() -> None:
+    """v3.14 主副本派发一律登记（it6 教训 2026-09-03：v3.7 只登记尾部，早派到
+    慢节点的任务对 pick_tail_race 不可见，空闲槽无从竞速，整轮空等）。"""
+    from rl.queue import pick_tail_race, register_inflight
+
+    inflight: dict[tuple[int, int], int] = {}
+    register_inflight(inflight, (2000, 612570782))  # 早派（pending > tailFanoutN）也登记
+    register_inflight(inflight, (2002, 179564083))
+    check(inflight[(2000, 612570782)] == 1, "first dispatch registers at count=1")
+    register_inflight(inflight, (2000, 612570782))  # 失败 requeue 后再派发 → 计数累加
+    check(inflight[(2000, 612570782)] == 2, "re-dispatch accumulates copy count")
+    # 登记即竞速候选：早派任务立即能被 pick_tail_race 选中（副本数 dup=2 内）
+    check(
+        pick_tail_race(inflight, 2) == (2002, 179564083),
+        "early-dispatched non-full task is raceable (dup-full one skipped)",
+    )
+    check(pick_tail_race(inflight, 3) == (2000, 612570782), "under higher dup the smaller key wins")
+
+
 def test_pick_tail_race() -> None:
     """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
     from rl.queue import pick_tail_race
@@ -833,9 +903,11 @@ def test_pick_tail_race() -> None:
 
 
 def main() -> None:
-    if not WEIGHTS.exists():
-        print(f"[skip-integration] missing weights fixture: {WEIGHTS}")
-    tmp = REPO / "tmp" / "test-run-rl"
+    import secrets
+
+    # 每次运行子目录（沙箱零删除适配）：standalone 共享 tmp/test-run-rl 会残留旧
+    # 子目录，二次运行 mkdir(exist_ok=False) → FileExistsError。带随机后缀每次新建。
+    tmp = REPO / "tmp" / "test-run-rl" / f"run-{secrets.token_hex(4)}"
     tmp.mkdir(parents=True, exist_ok=True)
     test_mirror_scalar_lockstep()
     test_resume_scope(tmp)
@@ -846,12 +918,19 @@ def main() -> None:
     test_scan_shards_mtime_cache(tmp)
     test_rl_config_validation()
     test_eval_local_gate(tmp)
+    test_register_inflight_v314()
     test_pick_tail_race()
     test_race_tier_ok()
     if ITEST:
-        if not WEIGHTS.exists() or shutil.which("bun") is None:
-            raise SystemExit("RUN_RL_ITEST=1 requires bun on PATH and tmp/rl-weights/weights.json")
-        test_integration(tmp)
+        itests = [
+            test_it_queue_normal, test_it_halt_preset, test_it_stream_smoke,
+            test_it_stream_halt, test_it_local_suspend, test_it_longtail_race,
+            test_it_eval_deferred, test_it_precollect_resume, test_it_early_race_v314,
+        ]
+        for fn in itests:
+            sub = tmp / fn.__name__
+            sub.mkdir(parents=True, exist_ok=True)
+            fn(sub, pytest.MonkeyPatch())
     else:
         print("[skip] integration tier: set RUN_RL_ITEST=1 to enable")
     print()
@@ -861,10 +940,6 @@ def main() -> None:
             print("  - " + f)
         raise SystemExit(1)
     print("RESULT: ALL PASS")
-
-
-if __name__ == "__main__":
-    main()
 
 
 def test_scan_shards_mtime_cache(tmp: Path) -> None:
@@ -950,3 +1025,7 @@ def test_rl_config_validation() -> None:
         check(False, "互斥组合应 SystemExit")
     except SystemExit:
         check(True, "互斥组合启动期拦截")
+
+
+if __name__ == "__main__":
+    main()

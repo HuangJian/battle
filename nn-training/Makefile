@@ -31,18 +31,17 @@ endif
 
 check: lint typecheck test-fast
 
-# 并行门禁（2026-09-02）：ruff + mypy + pytest 4 路分片同时跑，~13s。
+# 并行门禁（v3.15 2026-09-03）：ruff + mypy + pytest xdist -n 4 同时跑，~8s。
 # 与 pre-commit hook 共用同一入口（tools/githook/nn-python-gate.sh），日常开发
-# 用 make python-gate 即可获得与提交时一致的质量门禁。分片数可调：
-#   make python-gate SHARDS=6
+# 用 make python-gate 即可获得与提交时一致的质量门禁。
 python-gate:
-	bash ../tools/githook/nn-python-gate.sh $(SHARDS)
+	bash ../tools/githook/nn-python-gate.sh
 
 test: test-fast
-	$(PREFIX) $(PYTHON) -m pytest tests/ -v --timeout=50000
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q
 
 test-fast:
-	$(PREFIX) $(PYTHON) -m pytest tests/ -q
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q -m "not heavy"
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"
