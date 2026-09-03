@@ -1622,3 +1622,17 @@ S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 
 **方案② onnxruntime-node —— 可行性确认（未落地）**：`npm i onnxruntime-node` 成功；**bun 可 require 加载**（N-API 兼容 ✓）。完整落地还需：torch 模型从 weights.json 重建 → onnx 导出 →（可选 int8 量化）→ 推理集成 + 数值/确定性验证——链路长于方案①且已获 ×5.7；建议仅在需要更高倍率（onnx+mkl 预估 ×10-15）或 int8 显著省带宽时立项。
 
 **下一步建议**：恢复 s5-open20 训练（resume it3 起）——rollout 提速 ×5 后单 iter 墙钟主要被 PPO(torch CPU 190-320s) 主导，40 iter 预估 ~3h；机器空闲时恢复即可。
+
+## §313 提速方案异构平台兼容性评估（2026-09-03）
+
+**方案① conv_feats.wasm（已落地）——可直接兼容**：
+- 产物实测依赖 WASM SIMD（v128 指令 410 条；同 C 源去 -msimd128 得标量版 5239B/v128×2）。SIMD 为 wasm 正式特性（2021），bun 各平台（macOS/Linux/Windows/WSL）内嵌引擎默认支持；Android Termux proot Ubuntu 若可跑 bun（x64/aarch64）同样支持。
+- **跨节点确定性保障**：① wasm 字节码跨平台同执行；② dispatch 已有 **bun major.minor 版本红线** → 同轮节点引擎一致 → SIMD 能力一致 → 全走 wasm 或全走 TS，不会 wasm/TS 混跑（1e-6 输出差的 argmax 边界翻转只发生在混跑下）；③ 无 SIMD 的极旧引擎 compile 抛错 → 自动回退 TS（正确性兜底，性能降级不崩）。
+- 结论：无需改造；节点唯一前提 = 能跑 bun + exporter（分布式既有基线）。
+
+**方案② onnxruntime-node（未落地）——不可直接兼容异构集群**：
+- N-API 原生 addon：官方 prebuilt 仅 win/mac(含 arm64)/linux(x64/arm64) → **Android/Termux 无包**；bun 加载 N-API 需逐平台验证（当前仅 win 冒烟 require 成功）。
+- 数值确定性：onnxruntime 按平台后端（MLAS/oneDNN AVX vs NEON）累加/融合不同 → 同模型跨平台输出 ~1e-6~e-4 差异；int8 量化引入 ~e-2 量化误差 → **混跑即破坏同 seed 确定性**（M4 红线）。
+- 适用边界：仅同构单平台集群（x64 Linux）且逐平台 golden 校核后可考虑；int8 必须全量统一启用。
+
+**结论**：分布式继续方案①；② 不引入异构。
