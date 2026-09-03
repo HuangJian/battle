@@ -808,17 +808,20 @@ function main(): void {
     //
     // 守卫①（plan §5.2）：--stage-json 存在时**先**解码自定义关，短路
     // arena/真实关解析——否则 2000+i 走到 STAGES[2000] 未定义 → 静默 SKIP 漏跑。
-    const custom = stageJson ? decodeStageGrid(stageJson, si) : null
-    const arenaStage = custom ? null : isArenaId(si) ? resolveArenaStage(si) : null
-    const stage = custom ?? arenaStage ?? STAGES[si]
-    if (!stage) {
+    // spawn_variants（seed 哈希选点）存在时，同一 stage 每 seed 出生点不同 →
+    // 解码必须发生在 seed loop 内。真实关/arena 舞台与 seed 无关，stage loop 解析一次。
+    const arenaStage = stageJson ? null : isArenaId(si) ? resolveArenaStage(si) : null
+    const baseStage = arenaStage ?? STAGES[si]
+    if (!stageJson && !baseStage) {
       perGame.push(`[SKIP] stage ${si}: not found`)
       continue
     }
-    // 守卫④：自定义关强制 off（isArenaId(2000+i)=true → resolveDodge 默认 l0
-    // 会覆盖动作——自定义关没有保底层语义，口径偏移不可接受）。
-    const dodgeMode = custom ? 'off' : resolveDodge(dodgeArg, si)
     for (const seed of seeds) {
+      const custom = stageJson ? decodeStageGrid(stageJson, si, seed) : null
+      const stage = custom ?? baseStage!
+      // 守卫④：自定义关强制 off（isArenaId(2000+i)=true → resolveDodge 默认 l0
+      // 会覆盖动作——自定义关没有保底层语义，口径偏移不可接受）。
+      const dodgeMode = custom ? 'off' : resolveDodge(dodgeArg, si)
       const res = runOne(
         si,
         stage,

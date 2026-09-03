@@ -473,7 +473,7 @@ function main(): void {
   // 门禁贪心评估（S 级通关率）在 arena 上进行。stageIndex 传 0（同
   // export-rl-rollout 的修复——1.05^index 缩放经里程碑掉落反哺玩法）。
   // M1d 守卫①：--stage-json 先解码（短路 arena/真实关解析）；守卫②：自定义关 index 0。
-  const custom = stageJson ? decodeStageGrid(stageJson, stageIdx) : null
+  const custom = stageJson ? decodeStageGrid(stageJson, stageIdx, seed) : null
   const stage = custom ?? (isArenaId(stageIdx) ? resolveArenaStage(stageIdx)! : STAGES[stageIdx])
   const loadIndex = custom ? 0 : isArenaId(stageIdx) ? 0 : stageIdx
   mkdirSync(outDir, { recursive: true })

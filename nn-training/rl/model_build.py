@@ -91,6 +91,16 @@ def build_model(
     model = ppo_mod.build_ppo(src)
     if src:
         load_state_into(model, src)
+    value_pretrained = False
+    if not resume and bc_path:
+        try:
+            from data.weights_io import load_weights_json
+            _meta, _ = load_weights_json(bc_path)
+            value_pretrained = float((_meta.get("args") or {}).get("value_coef", 0) or 0) > 0
+            if value_pretrained:
+                log("[run_rl] BC value head MC-pretrained - keep value (skip zeroing)")
+        except Exception as e:
+            log(f"[run_rl] WARN cannot read bc meta for value flag: {e}")
     if not resume:
         # goal-nn 卡 A4（2026-08-30 最终版）：BC 权重有两个 PPO 不可消费的量级问题——
         # ① BC 训练动态把 ConvMixer trunk 激活放大到真实局面上 ~千级（合成探针会
@@ -128,7 +138,7 @@ def build_model(
             chunks.append(synth)
             return torch.cat(chunks, dim=0)
 
-        def warm_start_normalize(model: PPOStudent) -> None:
+        def warm_start_normalize(model: PPOStudent, keep_value: bool = False) -> None:
             TRUNK = ("stem.", "blocks.", "fc.")
             sample = _sample_real_obs(32)
             sc = torch.zeros(sample.shape[0], 19)
@@ -152,15 +162,16 @@ def build_model(
                 for n, p_ in model.named_parameters():
                     if n.startswith(("move_head.", "fire_head.")):
                         p_.mul_(beta)
-                    elif n.startswith("value_head."):
+                    elif n.startswith("value_head.") and not keep_value:
                         p_.zero_()
             print(
                 f"[run_rl] BC warm-start normalize: trunk x{alpha:.4g}, "
-                f"policy heads x{beta:.4g} (logit range -> 3.0 soft prior), value zeroed; "
+                f"policy heads x{beta:.4g} (logit range -> 3.0 soft prior), "
+                f"value {'kept (MC-pretrained)' if keep_value else 'zeroed'}; "
                 f"feat_max={15.0 / alpha:.0f}, logit_max_pre={3.0 / beta:.1f}"
             )
 
-        warm_start_normalize(model)
+        warm_start_normalize(model, keep_value=value_pretrained)
         save_weights_json(model, rl_path)
     print(
         f"[{time.strftime('%H:%M:%S')}] [run_rl] "

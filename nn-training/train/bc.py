@@ -315,6 +315,16 @@ def train(args) -> dict:
         if val_loss < best_val:
             best_val = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        # Mid-run checkpoint (--ckpt-every N): save current weights (not best, for resume).
+        ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
+        if ckpt_every > 0 and epoch % ckpt_every == 0:
+            ckpt_path = f"{args.out}.ckpt.{epoch}"
+            save_weights_json(
+                model,
+                ckpt_path,
+                extra_meta={"epoch": epoch, "best_val_loss": round(best_val, 4), "ckpt": True},
+            )
+            print(f"[train] checkpoint epoch {epoch}/{args.epochs} -> {ckpt_path}")
 
     # Restore best and export (versioned archive + active pointer + history md).
     model.load_state_dict(best_state)
@@ -404,6 +414,12 @@ def main():
     )
     ap.add_argument(
         "--resume", default=None, help="resume training from a weights JSON (continue, not retrain)"
+    )
+    ap.add_argument(
+        "--ckpt-every",
+        type=int,
+        default=0,
+        help=">0: per-N-epoch mid-run checkpoint ({--out}.ckpt.{epoch}) for --resume truncation / mid-run acceptance",
     )
     ap.add_argument("--checkpoint", default=None, help="optional .pt checkpoint path")
     ap.add_argument("--epochs", type=int, default=100)

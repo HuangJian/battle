@@ -197,6 +197,20 @@ class Spawn(BaseModel):
     row: int
 
 
+class SpawnVariant(BaseModel):
+    """出生点变体（`spawn_variants` 单元素）：seed 哈希选点后生效的出生点组。
+
+    2026-09-03 p1-onset：固定出生点使 God-AI BC 语料 left 方向仅 1.4% + 模型学到
+    位置记忆；变体池让 (stage, seed) 确定性选点，语料/rollout 几何多样化。
+    TS 侧解码（src/nn/config-stage.ts::decodeStageGrid）按同一哈希选点——BC 语料
+    与 RL rollout 分布自动对齐。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_spawn: Spawn | None = None
+    enemy_spawns: list[Spawn] = []
+
+
 class StageSpec(BaseModel):
     """自定义关卡（`stageData.ts` 13×13 数字瓦格格式，plan §5.1）。"""
 
@@ -208,6 +222,8 @@ class StageSpec(BaseModel):
     count: int | None = None
     player_spawn: Spawn | None = None
     enemy_spawns: list[Spawn] = []
+    # 出生点变体池（seed 哈希选点；空 = 顶层 player_spawn/enemy_spawns 固定）
+    spawn_variants: list[SpawnVariant] = []
 
     @field_validator("grid")
     @classmethod
@@ -413,6 +429,16 @@ class CourseConfig(BaseModel):
             payload["player_spawn"] = {"col": spec.player_spawn.col, "row": spec.player_spawn.row}
         if spec.enemy_spawns:
             payload["enemy_spawns"] = [{"col": s.col, "row": s.row} for s in spec.enemy_spawns]
+        if spec.spawn_variants:
+            payload["spawn_variants"] = [
+                {
+                    **({"player_spawn": {"col": v.player_spawn.col, "row": v.player_spawn.row}}
+                       if v.player_spawn is not None else {}),
+                    **({"enemy_spawns": [{"col": s.col, "row": s.row} for s in v.enemy_spawns]}
+                       if v.enemy_spawns else {}),
+                }
+                for v in spec.spawn_variants
+            ]
         s: str = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         nb = len(s.encode("utf-8"))
         if nb > STAGE_JSON_MAX_BYTES:

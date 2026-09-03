@@ -36,6 +36,12 @@ export interface StageJsonSpawn {
   row: number
 }
 
+/** 出生点变体（`spawn_variants` 单元素）：某 (stage, seed) 组合下生效的出生点。 */
+export interface StageJsonSpawnVariant {
+  player_spawn?: StageJsonSpawn
+  enemy_spawns?: StageJsonSpawn[]
+}
+
 /** 课程配置 `stages[i]` 的 stageJson 载荷（Python 侧 `CourseConfig.stage_json` 序列化）。 */
 export interface StageJson {
   name?: string
@@ -44,6 +50,13 @@ export interface StageJson {
   count?: number
   player_spawn?: StageJsonSpawn
   enemy_spawns?: StageJsonSpawn[]
+  /**
+   * 出生点变体池（2026-09-03，p1-onset 随机出生点）：
+   * `seed` 给定时按确定性哈希在池中选一；无 seed / 未提供时退回 player_spawn /
+   * enemy_spawns（或 variants[0]）。用途=语料与 rollout 的几何多样性（God-AI
+   * BC 语料曾因固定出生点 left 方向仅 1.4%，模型学到位置记忆而非找敌技能）。
+   */
+  spawn_variants?: StageJsonSpawnVariant[]
 }
 
 const SOLID: ReadonlySet<string> = new Set(['b', 's'])
@@ -53,6 +66,16 @@ const SOLID: ReadonlySet<string> = new Set(['b', 's'])
     只查 2×2 占位本身的冲突——出生点与基地之间留空/贴门是合法设计（经典关
     PLAYER_SPAWN 就在基地门位），邻格限制过严会误杀门位布局。
  */
+/** (seed, n) → [0, n)：确定性整数哈希（无状态、跨进程稳定——(stage,seed) 必须
+    处处得到同一出生点布局，BC 语料与 RL rollout 的分布才能对齐）。 */
+function pickVariantIndex(seed: number, n: number): number {
+  let h = (seed ^ 0x9e3779b9) >>> 0
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b)
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b)
+  h = (h ^ (h >>> 16)) >>> 0 // imul 返回 int32 可能为负——>>>0 归 uint32 再取模
+  return h % n
+}
+
 function assertSpawnClear(tiles: string[], col: number, row: number, what: string): void {
   for (let dr = 0; dr < 2; dr++) {
     for (let dc = 0; dc < 2; dc++) {
@@ -73,7 +96,11 @@ function assertSpawnClear(tiles: string[], col: number, row: number, what: strin
  * stageJson（字符串或已解析对象）→ StageData。**必须在 arena/真实关解析之前调用**
  * （守卫①）；非法布局直接 throw（配置校验期已拦大部分，这里兜底运行时）。
  */
-export function decodeStageGrid(raw: string | StageJson, stageId: number): StageData {
+export function decodeStageGrid(
+  raw: string | StageJson,
+  stageId: number,
+  seed?: number,
+): StageData {
   let json: StageJson
   if (typeof raw === 'string') {
     try {
@@ -107,9 +134,18 @@ export function decodeStageGrid(raw: string | StageJson, stageId: number): Stage
   // 守卫③：enemyCount 恒显式（tel.enemyTotal 取 stage.enemyCount ?? 20）
   const enemyCount = json.count ?? Math.max(1, forces.length || 20)
 
-  const playerSpawn = json.player_spawn
+  // 出生点解析：spawn_variants 池 + seed → 确定性选点；无池/无 seed → 顶层字段
+  //（向后兼容：tests 与旧课程不带 spawn_variants，行为逐字节不变）。
+  let playerSpawn = json.player_spawn
+  let spawnList = json.enemy_spawns ?? []
+  const variants = json.spawn_variants
+  if (variants && variants.length > 0) {
+    const v = variants[seed === undefined ? 0 : pickVariantIndex(seed, variants.length)]
+    if (v.player_spawn) playerSpawn = v.player_spawn
+    if (v.enemy_spawns) spawnList = v.enemy_spawns
+  }
   if (playerSpawn) assertSpawnClear(tiles, playerSpawn.col, playerSpawn.row, 'player')
-  const enemySpawns = (json.enemy_spawns ?? []).map((s) => ({ col: s.col, row: s.row }))
+  const enemySpawns = spawnList.map((s) => ({ col: s.col, row: s.row }))
   for (const s of enemySpawns) assertSpawnClear(tiles, s.col, s.row, 'enemy')
 
   const stage: StageData = {

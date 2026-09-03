@@ -56,6 +56,7 @@ import {
   OBS_SCHEMA_MAJOR,
   SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
+import { decodeStageGrid, CUSTOM_STAGE_BASE } from '../../src/nn/config-stage'
 import { writeNpy } from '../../src/nn/npy'
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { platform, arch, cpus } from 'os'
@@ -193,6 +194,9 @@ export function exportGame(
   maxTicks: number,
   winsOnly: boolean,
   nearMissTimes: number,
+  stageJson?: string,
+  livesOverride?: number,
+  playerLevelOverride?: number,
 ): GameResult | 'loss-skipped' {
   const world = new World()
   world.rng.reseed(seed)
@@ -201,12 +205,21 @@ export function exportGame(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
+  // 课程命数/星级覆盖（plan §5.2）：语料分布须与 RL 课程 rollout 口径一致
+  if (livesOverride !== undefined) world.lives = livesOverride
+  if (playerLevelOverride !== undefined) world.playerLevel = playerLevelOverride
 
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const god = new GodAIInput(world, DEFAULT_GOD_AI_PARAMS, godRng)
   const sim = new Simulation(world, god)
-  const stage = STAGES[stageIndex]
-  world.loadStageData(stage, stageIndex)
+  // 自定义关（课程 stageJson，plan/rl-training-config.md §5.2）：与 export-rl-rollout
+  // 同款四守卫——① 短路在真实关表解析之前；② index-0 显式（loadStageData 第二参驱动
+  // 1.05^index 关卡缩放，传 2003 会把 1 敌课程放大成满编关）；③ grid/出生点校验在
+  // decodeStageGrid 内部。
+  const stage = stageJson
+    ? decodeStageGrid(stageJson, stageIndex, seed) // seed → spawn_variants 确定性选点
+    : STAGES[stageIndex]
+  world.loadStageData(stage, stageJson ? 0 : stageIndex)
   god.reset()
 
   const encoder = new ObsEncoder()
@@ -234,18 +247,22 @@ export function exportGame(
     tel.baseWallIntact = countBaseWall(world)
     phis.push(phiNow(makeCounters(tel, world, t, baseAlive)))
     const ringFrac = encoder.scalars[6]
-    // near-miss（守家帧，预注册口径 = 环受损 OR 敌压基地）→ 训练侧超采样权重
+    // near-miss（守家帧，预注册口径 = 环受损 OR 敌压基地）→ 训练侧超采样权重。
+    // 无基地关（课程自定义关 grid 无 base 码）：near-miss 语义不存在，恒 false——
+    // 否则 countBaseWall=0 → ringFrac 判 0<1 恒 true，无基地语料全被误标守家帧
+    //（实测 coverage.nearMissFrac=1.0；near-miss-times>0 会把每帧复制 N 份）。
     const basePressed =
-      ringFrac < 1 ||
-      world.tanks.some(
-        (e) =>
-          e.alive &&
-          e.spawnTimer <= 0 &&
-          e.allegiance === 'enemy' &&
-          Math.abs(Math.floor((e.x + 16) / CELL) - BASE_POS.col) +
-            Math.abs(Math.floor((e.y + 16) / CELL) - BASE_POS.row) <=
-            BASE_PRESSURE_RADIUS,
-      )
+      !!world.tileMap.getBasePos() &&
+      (ringFrac < 1 ||
+        world.tanks.some(
+          (e) =>
+            e.alive &&
+            e.spawnTimer <= 0 &&
+            e.allegiance === 'enemy' &&
+            Math.abs(Math.floor((e.x + 16) / CELL) - BASE_POS.col) +
+              Math.abs(Math.floor((e.y + 16) / CELL) - BASE_POS.row) <=
+              BASE_PRESSURE_RADIUS,
+        ))
     samples.push({
       obs: encoder.obs.slice(),
       scalars: encoder.scalars.slice(),
@@ -483,8 +500,30 @@ function main(): void {
   const nearMissTimes = parseInt(arg('near-miss-times', '3')!, 10)
   const determinism = has('verify-determinism')
 
+  // 课程自定义关（`--stage-json-file <path>`）：JSON 数组，第 i 项对应 stage 2000+i
+  // （decodeStageGrid 的 StageJson 载荷）。不传时逐字节不变（真实关表路径）——God AI
+  // 语料此前只能采真实关，课程自定义关（无基地/单敌/自定义出生点）是唯一缺口。
+  const stageJsonFile = arg('stage-json-file', '')!
+  let customStages: string[] = []
+  if (stageJsonFile) {
+    const parsed: unknown = JSON.parse(readFileSync(stageJsonFile, 'utf-8'))
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      console.error('--stage-json-file 必须是非空的 stageJson 对象数组')
+      process.exit(2)
+    }
+    customStages = parsed.map((x) => JSON.stringify(x))
+  }
+  const stageJsonFor = (stageId: number): string | undefined =>
+    customStages.length ? customStages[stageId - CUSTOM_STAGE_BASE] : undefined
+  const livesRaw = arg('lives-override', '')!
+  const livesOverride = livesRaw === '' ? undefined : parseInt(livesRaw, 10)
+  const levelRaw = arg('player-level', '')!
+  const playerLevelOverride = levelRaw === '' ? undefined : parseInt(levelRaw, 10)
+
   let stages: number[]
   if (stageSpec === 'all') stages = STAGES.map((_, i) => i)
+  // 自定义关：stage ID 就是 2000+i（不是 1-based 关卡号），不做 -1 换算
+  else if (customStages.length) stages = parseRange(stageSpec)
   else stages = parseRange(stageSpec).map((s) => s - 1)
   const seeds = parseRange(seedSpec)
   if (seeds.length === 0 || stages.length === 0) {
@@ -509,7 +548,17 @@ function main(): void {
       const label = `s${si + 1}_seed${seed}`
       const shardName = `shard_${label}`
       for (const target of [detA, detB]) {
-        const res = exportGame(seed, si, difficulty, maxTicks, false, 1)
+        const res = exportGame(
+          seed,
+          si,
+          difficulty,
+          maxTicks,
+          false,
+          1,
+          stageJsonFor(si),
+          livesOverride,
+          playerLevelOverride,
+        )
         if (res !== 'loss-skipped') {
           flushShard(res, `${target}/${shardName}`, shardName, {
             stage: si,
@@ -551,7 +600,17 @@ function main(): void {
   const outcomes: Record<string, number> = {}
   for (const si of stages) {
     for (const seed of seeds) {
-      const res = exportGame(seed, si, difficulty, maxTicks, winsOnly, nearMissTimes)
+      const res = exportGame(
+        seed,
+        si,
+        difficulty,
+        maxTicks,
+        winsOnly,
+        nearMissTimes,
+        stageJsonFor(si),
+        livesOverride,
+        playerLevelOverride,
+      )
       games++
       if (res === 'loss-skipped') {
         skippedLoss++

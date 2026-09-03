@@ -75,4 +75,29 @@ describe('decodeStageGrid (course custom stage, plan §5)', () => {
     expect(st.tiles.length).toBe(26)
     expect(() => decodeStageGrid('{oops', 2000)).toThrow(/不是合法 JSON/)
   })
+
+  test('spawn_variants: seed-hash picks deterministically, no-seed falls back', () => {
+    const variants: StageJson = {
+      ...STAGE,
+      spawn_variants: [
+        { player_spawn: { col: 4, row: 20 }, enemy_spawns: [{ col: 20, row: 4 }] },
+        { player_spawn: { col: 20, row: 20 }, enemy_spawns: [{ col: 4, row: 4 }] },
+        { player_spawn: { col: 4, row: 12 }, enemy_spawns: [{ col: 20, row: 12 }] },
+      ],
+    }
+    // 确定性：(stage, seed) → 同一出生点，跨调用一致
+    const a = decodeStageGrid(variants, 2000, 7)
+    const b = decodeStageGrid(variants, 2000, 7)
+    expect(a.playerSpawn).toEqual(b.playerSpawn)
+    // seed 变化 → 覆盖多个变体（3 变体池 12 seeds 应至少命中 2 个）
+    const seen = new Set<string>()
+    for (let seed = 1; seed <= 12; seed++) {
+      seen.add(JSON.stringify(decodeStageGrid(variants, 2000, seed).playerSpawn))
+    }
+    expect(seen.size).toBeGreaterThanOrEqual(2)
+    // 无 seed → variants[0]（向后兼容旧调用）
+    expect(decodeStageGrid(variants, 2000).playerSpawn).toEqual({ col: 4, row: 20 })
+    // 无 spawn_variants 的旧课程 → 顶层 player_spawn 原样
+    expect(decodeStageGrid(STAGE, 2000).playerSpawn).toEqual(STAGE.player_spawn)
+  })
 })

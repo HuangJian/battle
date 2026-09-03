@@ -1,24 +1,35 @@
-// 课程 P1-onset —— 冷启动入门：发现并击毙 1 个敌人
+// 课程 P1-onset —— 入门：发现并击毙 1 个敌人（God-AI 蒸馏 BC 热启动 + RL 微调）
 //
 // 目标：学会发现敌人并尽快击毙，同时尽量减少被击中。
 // 地图：hard 难度，11×11 cells（22×22 tiles）空旷场，无基地。
 // 敌人：4 类轮换（basic / fast / power / armor），每关 1 个。
 // 玩家：1 命 0 星。
+// 出生点：8 布局 spawn_variants（四角+四边中点对角对峙），(stage,seed) 确定性哈希
+//   选点——固定出生点曾使 God-AI 语料 left 仅 1.4%（up:down≈2:1 偏斜）且模型学到
+//   位置记忆而非找敌技能；多样后语料 left 1.4%→10.2%、四向均衡（2026-09-03 实测）。
 //
-// 激励设计：
-//   - 杀敌 +3.0（核心目标，杀敌即有明确正回报）
-//   - 命中 +0.3/次（稠密瞄准信号）
-//   - 挨打 -1.0/次（不鼓励换伤——硬扛 3 枪换 1 杀会亏）
-//   - 存活 +0.0005/tick（稠密生存信号）
-//   - 反蹲坑 -0.02 × max(0, stuckTicks-300)（5s 宽限后开始）
-//   - 弹药效率 -0.005/发
-//   - 终局：通关 +2.0 / 死亡 -1.0 / 超时 -0.5
+// 起始权重 = God-AI 蒸馏 BC（tmp/p1-bc/weights.json；165K 帧 / 1892 胜局 /
+//   --value-coef 0.5 MC 预置 value 头——model_build 对 value_pretrained 权重跳过清零）。
+//   纯随机冷启动实测 0/8 击杀、回报仅 -1.36±0.44 且与存活时长线性相关 → 唯一梯度
+//   指向「远离敌人」→ 死锁；BC 热启动跳过探索陷阱（同一轮里 BC→RL 全链路已验证）。
 //
-// 注意：1 敌场景下 kills / firstKillTick / stage_clear 三者的触发条件完全一致，
-// 因此只保留 kills（杀敌奖励）和 terminal（终局通关），去掉 wFirst 避免重复。
+// 激励设计（Φ 势，scheme=toy）：
+//   - 杀敌 +3.0 + 命中 +0.3/次（核心目标 + 稠密瞄准信号）
+//   - 挨打 -1.0/次（不鼓励换伤——0 星 1 命玩家 maxHp 263，挨 2-3 发死）
+//   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)（5s 宽限，封顶 -18——实测不
+//     封顶时卡死局单项 -107 占总回报 102%，value 尺度被污染）
+//   - 弹药效率 -0.01/发（0 星 825ms 射速，2400 tick 内最多 ~48 发，成本 ~0.5）
+//   - 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0（压「绕圈苟活到超时」≈-2，杀敌 +5 占优）
+//   注：1 敌场景 kills/firstKillTick/stage_clear 触发点完全一致 → 只留 kills + terminal。
+//   无 wTick 生存项：势差下是每步常数（advantage 归零、白给 value 学习负担并奖励拖延
+//   ——0.0005×6000=+3.0 曾让苟活价值=半次击杀）。
 //
-// 训练超参参照 s5-open20，冷启动（bc="" 随机初始化）。
-// 启动：python run_rl.py --course p1-onset
+// 超参（BC 热启动口径）：max_ticks 2400（God-AI 胜局平均 ~800 tick 完成击杀；6000
+//   让「学不会」的局空转 600 决策步/iter，样本量失控）；γ 0.995/λ 0.97（GAE 有效
+//   horizon ≈1/(1-γλ)=26.7 决策步，覆盖接敌段；0.99/0.95 只有 16.8 步=168 tick，
+//   追击段零信用分配）；kl_coef 0.6→0.2→0（BC 起点无需 0.8 的强信任域压制）；
+//   kl_cap 1e9→0.2（流式 KL 波门，前段 warmup 不裁）。
+// 启动：python run_rl.py --course p1-onset（bc 指向 tmp/p1-bc/weights.json）
 {
   "version": 5,
   "name": "p1-onset",
@@ -43,8 +54,16 @@
       ],
       "forces": "aaaaaaaaaaaaaaaaaaaa",
       "count": 1,
-      "player_spawn": { "col": 4, "row": 20 },
-      "enemy_spawns": [{ "col": 20, "row": 4 }]
+      "spawn_variants": [
+        { "player_spawn": { "col": 4, "row": 20 }, "enemy_spawns": [{ "col": 20, "row": 4 }] },
+        { "player_spawn": { "col": 20, "row": 20 }, "enemy_spawns": [{ "col": 4, "row": 4 }] },
+        { "player_spawn": { "col": 4, "row": 4 }, "enemy_spawns": [{ "col": 20, "row": 20 }] },
+        { "player_spawn": { "col": 20, "row": 4 }, "enemy_spawns": [{ "col": 4, "row": 20 }] },
+        { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
+        { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
+        { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
+      ]
     },
     {
       "name": "p1-onset-fast",
@@ -65,8 +84,16 @@
       ],
       "forces": "bbbbbbbbbbbbbbbbbbbb",
       "count": 1,
-      "player_spawn": { "col": 4, "row": 20 },
-      "enemy_spawns": [{ "col": 20, "row": 4 }]
+      "spawn_variants": [
+        { "player_spawn": { "col": 4, "row": 20 }, "enemy_spawns": [{ "col": 20, "row": 4 }] },
+        { "player_spawn": { "col": 20, "row": 20 }, "enemy_spawns": [{ "col": 4, "row": 4 }] },
+        { "player_spawn": { "col": 4, "row": 4 }, "enemy_spawns": [{ "col": 20, "row": 20 }] },
+        { "player_spawn": { "col": 20, "row": 4 }, "enemy_spawns": [{ "col": 4, "row": 20 }] },
+        { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
+        { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
+        { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
+      ]
     },
     {
       "name": "p1-onset-power",
@@ -87,8 +114,16 @@
       ],
       "forces": "cccccccccccccccccccc",
       "count": 1,
-      "player_spawn": { "col": 4, "row": 20 },
-      "enemy_spawns": [{ "col": 20, "row": 4 }]
+      "spawn_variants": [
+        { "player_spawn": { "col": 4, "row": 20 }, "enemy_spawns": [{ "col": 20, "row": 4 }] },
+        { "player_spawn": { "col": 20, "row": 20 }, "enemy_spawns": [{ "col": 4, "row": 4 }] },
+        { "player_spawn": { "col": 4, "row": 4 }, "enemy_spawns": [{ "col": 20, "row": 20 }] },
+        { "player_spawn": { "col": 20, "row": 4 }, "enemy_spawns": [{ "col": 4, "row": 20 }] },
+        { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
+        { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
+        { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
+      ]
     },
     {
       "name": "p1-onset-armor",
@@ -109,31 +144,38 @@
       ],
       "forces": "dddddddddddddddddddd",
       "count": 1,
-      "player_spawn": { "col": 4, "row": 20 },
-      "enemy_spawns": [{ "col": 20, "row": 4 }]
+      "spawn_variants": [
+        { "player_spawn": { "col": 4, "row": 20 }, "enemy_spawns": [{ "col": 20, "row": 4 }] },
+        { "player_spawn": { "col": 20, "row": 20 }, "enemy_spawns": [{ "col": 4, "row": 4 }] },
+        { "player_spawn": { "col": 4, "row": 4 }, "enemy_spawns": [{ "col": 20, "row": 20 }] },
+        { "player_spawn": { "col": 20, "row": 4 }, "enemy_spawns": [{ "col": 4, "row": 20 }] },
+        { "player_spawn": { "col": 4, "row": 12 }, "enemy_spawns": [{ "col": 20, "row": 12 }] },
+        { "player_spawn": { "col": 20, "row": 12 }, "enemy_spawns": [{ "col": 4, "row": 12 }] },
+        { "player_spawn": { "col": 12, "row": 4 }, "enemy_spawns": [{ "col": 12, "row": 20 }] },
+        { "player_spawn": { "col": 12, "row": 20 }, "enemy_spawns": [{ "col": 12, "row": 4 }] }
+      ]
     }
   ],
   "difficulty": "hard",
-  "max_ticks": 6000,
+  "max_ticks": 2400,
   "seed_rotate": 50,
   "player": {
     "lives": 1,
     "level": 0
   },
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits + wTick*ticks - wStuck*max(0, stuckTicks-300) - wShot*playerShots",
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,
       "wDmg": 1.0,
-      "wTick": 0.0005,
       "wStuck": 0.02,
-      "wShot": 0.005
+      "wShot": 0.01
     },
     "terminal": {
       "stage_clear": 2.0,
       "lives_exhausted": -1.0,
-      "timeout": -0.5
+      "timeout": -2.0
     },
     "scheme": "toy"
   },
@@ -145,12 +187,12 @@
   "lr": 0.00015,
   "epochs": 4,
   "mb": 512,
-  "gamma": 0.99,
-  "lam": 0.95,
+  "gamma": 0.995,
+  "lam": 0.97,
   "ppo_schedule": [
-    { "until_iter": 15, "kl_coef": 0.8, "lr": 0.0003, "kl_cap": 1e9 },
-    { "until_iter": 35, "kl_coef": 0.3, "lr": 0.00015, "kl_cap": 0.2 },
-    { "kl_coef": 0.05, "lr": 0.00005 }
+    { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
+    { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
   ],
   "out": "tmp/p1-onset/weights.json",
   "traj": "tmp/p1-onset",
