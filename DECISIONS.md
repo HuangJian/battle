@@ -1591,3 +1591,19 @@ S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 
 - 一命二元性确认：100% 局死亡、挨打 3.04 次/局、扣血累计 859（≫200 满血）→ 「闪避」仍是死亡二元为主；缓解路径沿用 DECISIONS §309（存活微正项 / 指标 v3）。
 
 **建议的下一步**（按序）：① 提供 push 凭据让 mac/a97/a98 升级（否则只能本机 8 workers）；② commit 本批修复后正式起 s5-open20 40 iter；③ 若 40 iter 中 value loss 持续 >0.5，考虑 per-tick normalize_ret 或 terminal 尺度下调；④ NN 推理加速（TS 侧 98% 瓶颈）单独立项评估。
+
+## §311 TS 推理性能调优结论：JS 标量循环已达上限，需结构性方案（2026-09-03）
+
+**背景**：S5 正式训练跑完 it2（08:20 结算后按用户指令停止）转入调优。§310 profile 定 TS 侧 `model.forward ~39.6ms/次` 占 rollout 98%。
+
+**实测调优过程（conv1x1 pointwise，占 ~60% forward）**：naive（内层 ic 跨 676-float 平面跳读）→ 纯外积（out 写放大 64×，43.0ms 更慢）→ 分块外积 T=16（39.3ms）——三种实现均 ~39-43ms，**缓存重排无效**。结论：瓶颈是 **JS/JIT 标量循环上限**（37M MACs/forward ≈ 1.9 GFLOPS，JIT 标量 ~1ns/MAC 的典型水平），不是访存。conv1x1 已回滚（git checkout src/nn/infer.ts），保持逐字节行为。
+
+**Python 侧确认**：数据管线全亚秒（§310）；torch_threads=8（rl-config）已生效、16 核机器 → PPO 与 rollout 平衡合理，无需改。
+
+**后续候选（均需立项评估，非配置可及）**：
+1. **WASM SIMD conv**（自写 conv3x3/5x5dw/1x1 → SIMD）→ 预计 conv 3-8×，forward 落到 ~8-15ms，rollout 提速 2-4×（最大单点收益）；
+2. onnxruntime-node（原生 addon，bun 兼容性待验）或 int8 量化；
+3. PPO 期临时 torch_threads 8→12-16（rollout 暂停期空核利用，~20-30% PPO 增益，影响小）；
+4. 结构层：决策频率 K、模型裁剪属训练口径/架构决策，不列入推理侧。
+
+**训练恢复**：s5-open20 已结算 it1-it2（training_log iteration 2 = last），同命令 `python run_rl.py --course s5-open20` 从 it3 续跑（resume 按 last_completed_iter，权重 tmp/s5-open20/weights.json = it2 产物）。
