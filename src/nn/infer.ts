@@ -16,6 +16,7 @@
  */
 
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
+import { runStudentConvWasm } from './conv-wasm'
 
 export const MOVE_DIM = 5
 export const FIRE_DIM = 2
@@ -552,27 +553,32 @@ export class StudentModel implements ModelLike {
     for (let i = 0; i < 14 * sp; i++) this.in16[i] = obs[i]
     this.in16.set(this.coords, 14 * sp)
 
-    // stem: conv 3x3 16->h + ReLU
-    this.conv3x3(this.in16, 16, this.stemW, this.stemB, this.bufA)
-    this.reluInPlace(this.bufA)
+    // 2026-09-03 wasm32 SIMD 后端（conv_feats.wasm，h64/d8/board26，DECISIONS §311）：
+    // 卷积段 ~6× 加速（probe pooled max|Δ|≈4.8e-6）。失败/架构不符 → false → TS 原路径。
+    const wasmOk = this.h === 64 && this.d === 8 && runStudentConvWasm(this as never)
+    if (!wasmOk) {
+      // stem: conv 3x3 16->h + ReLU
+      this.conv3x3(this.in16, 16, this.stemW, this.stemB, this.bufA)
+      this.reluInPlace(this.bufA)
 
-    // d ConvMixer blocks: depthwise 5x5 + pointwise 1x1 + residual.
-    for (let i = 0; i < this.d; i++) {
-      this.conv5x5dw(this.bufA, this.dwW[i], this.dwB[i], this.bufB)
-      this.reluInPlace(this.bufB)
-      this.conv1x1(this.bufB, this.pwW[i], this.pwB[i], this.bufC)
-      this.reluInPlace(this.bufC)
-      // residual: bufA += bufC
-      for (let j = 0; j < this.bufA.length; j++) this.bufA[j] += this.bufC[j]
-    }
+      // d ConvMixer blocks: depthwise 5x5 + pointwise 1x1 + residual.
+      for (let i = 0; i < this.d; i++) {
+        this.conv5x5dw(this.bufA, this.dwW[i], this.dwB[i], this.bufB)
+        this.reluInPlace(this.bufB)
+        this.conv1x1(this.bufB, this.pwW[i], this.pwB[i], this.bufC)
+        this.reluInPlace(this.bufC)
+        // residual: bufA += bufC
+        for (let j = 0; j < this.bufA.length; j++) this.bufA[j] += this.bufC[j]
+      }
 
-    // GAP
-    this.pooled.fill(0)
-    for (let ch = 0; ch < h; ch++) {
-      const base = ch * sp
-      let sum = 0
-      for (let i = 0; i < sp; i++) sum += this.bufA[base + i]
-      this.pooled[ch] = sum / sp
+      // GAP
+      this.pooled.fill(0)
+      for (let ch = 0; ch < h; ch++) {
+        const base = ch * sp
+        let sum = 0
+        for (let i = 0; i < sp; i++) sum += this.bufA[base + i]
+        this.pooled[ch] = sum / sp
+      }
     }
 
     // fc: hidden = relu(fused · fcW^T + fcB)

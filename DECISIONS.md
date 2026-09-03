@@ -1607,3 +1607,18 @@ S3 迷宫掩体策略在空旷 20 敌图上失效；选同为空旷场出身的 
 4. 结构层：决策频率 K、模型裁剪属训练口径/架构决策，不列入推理侧。
 
 **训练恢复**：s5-open20 已结算 it1-it2（training_log iteration 2 = last），同命令 `python run_rl.py --course s5-open20` 从 it3 续跑（resume 按 last_completed_iter，权重 tmp/s5-open20/weights.json = it2 产物）。
+
+## §312 TS 推理提速①落地：conv_feats.wasm（WASM SIMD，×5.1–5.7）+ 方案②可行性
+
+**背景**：§311 定 model.forward ~39.6ms = JS 标量上限。用户点试两方案。
+
+**方案① WASM SIMD conv —— 已落地并验证**：
+- `src/nn/wasm/conv_feats.c`：clang `--target=wasm32 -O3 -msimd128` 编译（无 libc、静态对齐 scratch）；把 StudentModel 卷积段（stem conv3x3 16→64 + 8×[depthwise 5×5 + pointwise 1×1 + relu + residual] + GAP）整体移入 wasm——**外积排布 + pad-拷贝去边界分支**让 LLVM 自动向量化 f32x4。
+- `src/nn/conv-wasm.ts`：懒加载单例（memory 自 1MB 布局避开 .bss；权重按实例引用只上传一次，每帧只拷 in16 43KB）；`infer.ts StudentModel.features` 在 h64/d8/board26 时走 wasm，失败/架构不符自动回退 TS 原路径（双重兜底）。
+- **实测**：features 6.9ms vs TS 41ms（×6）；forward 稳态 **39.6→6.9ms（×5.7）**；单局端到端 1730→337ms（×5.1）；12000-tick 满局纯推理 48s→8s。
+- **正确性**：真实权重 pooled max|Δ|=4.8e-6（累加顺序级）；tests/conv-wasm.test.ts 随机权重 3 帧相对误差 ≤1e-3（防回归）；freeze 确定性门禁 OK（God-AI 基准不涉 NN）；exporter 冒烟正常。
+- 踩坑记录：typedarray `.set` 目标短于源 view 抛 Range（pooled 须 subarray 限长）；wasm 默认 memory 小需 grow；JS 布局偏移需字节计。
+
+**方案② onnxruntime-node —— 可行性确认（未落地）**：`npm i onnxruntime-node` 成功；**bun 可 require 加载**（N-API 兼容 ✓）。完整落地还需：torch 模型从 weights.json 重建 → onnx 导出 →（可选 int8 量化）→ 推理集成 + 数值/确定性验证——链路长于方案①且已获 ×5.7；建议仅在需要更高倍率（onnx+mkl 预估 ×10-15）或 int8 显著省带宽时立项。
+
+**下一步建议**：恢复 s5-open20 训练（resume it3 起）——rollout 提速 ×5 后单 iter 墙钟主要被 PPO(torch CPU 190-320s) 主导，40 iter 预估 ~3h；机器空闲时恢复即可。
