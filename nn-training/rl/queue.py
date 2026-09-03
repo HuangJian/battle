@@ -11,6 +11,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/rl/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
 from rl.queue_local import (
+    pick_race_target,  # noqa: F401 — re-exported（v3.16 竞速选靶+节点排除，tests 引用）
     pick_tail_race,  # noqa: F401 — re-exported（tests 引用）
     race_tier_ok,  # noqa: F401 — re-exported（tests 引用）
     register_inflight,  # noqa: F401 — re-exported（tests 引用）

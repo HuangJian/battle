@@ -282,6 +282,102 @@ function poolStatusCell(h: NodeHistory): string {
   return `<span class="badge b-red">异常 ${okN}/${n}</span>`
 }
 
+// ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
+
+interface IterActuals {
+  /** 去重后实际局数（= 唯一 (stage,seed) 数）。 */
+  games: number
+  /** 本轮总击杀。 */
+  totalKills: number
+  /** 本轮总道具（powerUpsCollected）。 */
+  totalPU: number
+  /** 场均存活 tick（totalTicks / games）。 */
+  avgTicks: number
+}
+
+/** 聚合某一轮的真实终局值：递归扫 it{N} 下全部 shard 的 manifest.json。
+ *
+ * - 按 (stage,seed) 去重：fan-out 竞速副本会重复写盘（同一局多节点结算），
+ *   取 nSamples 最大者（局信息最全的副本）。
+ * - 跳过 local-eval：干净评估局不是 rollout 局，混入会放大轮计数。
+ * - 无任何 manifest / it 目录不存在（已被 _rotate_cleanup 轮转删除）→ null，
+ * 调用方回退为估算值。 */
+function readIterActuals(trajDir: string, iter: number): IterActuals | null {
+  const itDir = join(trajDir, `it${iter}`)
+  try {
+    if (!existsSync(itDir)) return null
+    const best = new Map<string, { nSamples: number; kills: number; pu: number; ticks: number }>()
+    const walk = (base: string, rel: string): void => {
+      if (rel.split('/').length > 6) return
+      let names: string[]
+      try {
+        names = readdirSync(join(base, rel), { withFileTypes: true }).map((d) => d.name)
+      } catch {
+        return
+      }
+      for (const name of names) {
+        if (name === 'local-eval') continue
+        const childRel = rel ? `${rel}/${name}` : name
+        const p = join(base, childRel)
+        let isDir = false
+        try {
+          isDir = statSync(p).isDirectory()
+        } catch {
+          continue
+        }
+        if (isDir) {
+          walk(base, childRel)
+          continue
+        }
+        if (name !== 'manifest.json') continue
+        try {
+          const m = JSON.parse(readFileSync(p, 'utf8')) as {
+            stage?: unknown
+            seed?: unknown
+            kills?: number
+            powerUpsCollected?: number
+            ticks?: number
+            nSamples?: number
+          }
+          const stage = Number(m.stage)
+          const seed = Number(m.seed)
+          if (!Number.isFinite(stage) || !Number.isFinite(seed)) continue
+          const nSamples = Number(m.nSamples ?? 0)
+          const prev = best.get(`${stage}:${seed}`)
+          if (!prev || nSamples > prev.nSamples) {
+            best.set(`${stage}:${seed}`, {
+              nSamples,
+              kills: Number(m.kills ?? 0) || 0,
+              pu: Number(m.powerUpsCollected ?? 0) || 0,
+              ticks: Number(m.ticks ?? 0) || 0,
+            })
+          }
+        } catch {
+          /* skip bad manifest */
+        }
+      }
+    }
+    walk(itDir, '')
+    if (best.size === 0) return null
+    let totalKills = 0
+    let totalPU = 0
+    let totalTicks = 0
+    for (const v of best.values()) {
+      totalKills += v.kills
+      totalPU += v.pu
+      totalTicks += v.ticks
+    }
+    return {
+      games: best.size,
+      totalKills,
+      totalPU,
+      avgTicks: Math.round(totalTicks / best.size),
+    }
+  } catch {
+    return null
+  }
+}
+
 // ---------------- 每轮迭代指标（training_log.jsonl） ----------------
 
 interface IterRow {
@@ -309,6 +405,8 @@ interface IterRow {
   accuracy: number
   loot: number
   kills: number
+  /** 该轮磁盘真实聚合（it{N} 下各局 manifest.json）；null = 无数据（已轮转/未收尾）。 */
+  actuals: IterActuals | null
 }
 
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标。 */
@@ -330,8 +428,9 @@ function readIterMetrics(trajDir: string): IterRow[] {
           .slice(0, 3)
           .map(([k, v]) => `${k}:${(v * 100).toFixed(0)}%`)
           .join(' ')
+        const iter = Number(r.iter ?? 0)
         rows.push({
-          iter: Number(r.iter ?? 0),
+          iter,
           time: String(r.time ?? ''),
           winRate: Number(r.winRate ?? 0),
           scoreMean: Number(r.score_mean ?? 0),
@@ -356,6 +455,7 @@ function readIterMetrics(trajDir: string): IterRow[] {
           accuracy: Number(dm.accuracy ?? 0),
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
+          actuals: readIterActuals(trajDir, iter),
         })
       } catch {
         /* skip bad line */
@@ -374,7 +474,7 @@ function renderIterTable(rows: IterRow[]): string {
 <th>iter</th><th>时间</th><th>胜率</th><th>得分</th>
 <th>rollout</th><th>PPO</th>
 <th>KL</th><th>entropy</th><th>mean_ret</th>
-<th>lr</th><th>avg_ticks</th><th>击杀</th><th>道具</th>
+<th>lr</th><th>存活</th><th>击杀</th><th>道具</th>
 </tr></thead>`
   const cells = rows.map((r) => {
     const winPct = (r.winRate * 100).toFixed(1)
@@ -382,6 +482,17 @@ function renderIterTable(rows: IterRow[]): string {
     const klCls = r.kl > 0.05 ? 'b-red' : r.kl > 0.02 ? 'b-yellow' : 'b-green'
     const retCls = r.meanRet > -0.5 ? 'b-green' : r.meanRet > -1.0 ? 'b-yellow' : 'b-red'
     const halted = r.halted ? ' <span class="pill">halted</span>' : ''
+    // 实际值优先（it{N} 磁盘 shard 聚合）；轮次被轮转清理/未收尾 → 回退估算并标注。
+    const a = r.actuals
+    const ticksCell = a
+      ? `<td class="num">${a.avgTicks}</td>`
+      : `<td class="num"><span class="muted" title="该轮磁盘数据已清理，估算值">${r.avgTicks}≈</span></td>`
+    const killsCell = a
+      ? `<td class="num">${a.totalKills}<span class="muted"> /${a.games}局</span></td>`
+      : `<td class="num"><span class="muted" title="该轮磁盘数据已清理，估算值">${r.kills.toFixed(1)}≈</span></td>`
+    const lootCell = a
+      ? `<td class="num">${a.totalPU}<span class="muted"> /${a.games}局</span></td>`
+      : `<td class="num"><span class="muted" title="该轮磁盘数据已清理，估算值">${(r.loot * 100).toFixed(0)}%≈</span></td>`
     return `<tr>
 <td class="num">${r.iter}${halted}</td>
 <td class="muted">${r.time}</td>
@@ -393,9 +504,9 @@ function renderIterTable(rows: IterRow[]): string {
 <td class="num">${r.entropy.toFixed(3)}</td>
 <td><span class="badge ${retCls}">${r.meanRet.toFixed(3)}</span></td>
 <td class="num">${r.lr}</td>
-<td class="num">${r.avgTicks}</td>
-<td class="num">${r.kills.toFixed(2)}</td>
-<td class="num">${(r.loot * 100).toFixed(0)}%</td>
+${ticksCell}
+${killsCell}
+${lootCell}
 </tr>`
   })
   return `<div class="card" style="margin-top:16px">
@@ -403,7 +514,7 @@ function renderIterTable(rows: IterRow[]): string {
 <table id="iters">${hdr}
 <tbody>${cells.join(String.fromCharCode(10))}</tbody>
 </table>
-<p class="foot" style="margin:8px 2px 0">数据源：<code>training_log.jsonl</code>（最近 ${rows.length} 轮迭代）。胜率/得分/PPO 指标来自 PPO 收敛日志；节点贡献为该轮 rollout 阶段各节点完成局数。</p>
+<p class="foot" style="margin:8px 2px 0">存活/击杀/道具 = <b>实际值</b>（该轮 <code>it{N}/**/manifest.json</code> 逐局聚合，按 stage+seed 去重；轮次完成落盘才显示）。带 <code>≈</code> 的为估算（该轮磁盘目录已被轮转清理，仅剩 <code>training_log.jsonl</code> 的 dim 均值的换算）。胜率/得分/PPO 指标来自 PPO 收敛日志。</p>
 </div>`
 }
 

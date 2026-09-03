@@ -902,11 +902,39 @@ def test_pick_tail_race() -> None:
     )
 
 
+def test_pick_race_target_v316() -> None:
+    """v3.16 竞速选靶：排除当前节点+冷却黑名单（纯函数，单测覆盖）。
+
+    规则验证：
+    - 不选当前节点已持有
+    - 不选冷却黑名单里的节点
+    - 选副本数 < dup，字典序最小
+    """
+    from rl.queue import pick_race_target
+
+    inflight = {(2000, 1): 1, (2000, 2): 1}
+    nodes = {(2000, 1): {"a"}, (2000, 2): {"a"}}
+    blocked: dict[tuple[int, int], set[str]] = {(2000, 1): {"b"}}
+    cand = pick_race_target(inflight, 2, "b", nodes, blocked)
+    check(cand == (2000, 2), "b was blocked on (2000,1), picks (2000,2)")
+
+    cand = pick_race_target(inflight, 2, "a", nodes, blocked)
+    check(cand is None, "a is already on inflight for (2000,1), so skip")
+
+    cand = pick_race_target(inflight, 2, "c", nodes, blocked)
+    check(cand == (2000, 1), "c is not blocked/picked, picks lex min")
+
+    inflight_empty: dict[tuple[int, int], int] = {}
+    cand = pick_race_target(inflight_empty, 2, "a", {}, {})
+    check(cand is None, "empty inflight -> None")
+
+
 def main() -> None:
     import secrets
 
     # 每次运行子目录（沙箱零删除适配）：standalone 共享 tmp/test-run-rl 会残留旧
-    # 子目录，二次运行 mkdir(exist_ok=False) → FileExistsError。带随机后缀每次新建。
+    # 子目录，二次运行 mkdir(exist_ok=False，二级
+    #  mkdir(exist_ok=False) → FileExistsError。带随机后缀每次新建。
     tmp = REPO / "tmp" / "test-run-rl" / f"run-{secrets.token_hex(4)}"
     tmp.mkdir(parents=True, exist_ok=True)
     test_mirror_scalar_lockstep()
@@ -920,6 +948,7 @@ def main() -> None:
     test_eval_local_gate(tmp)
     test_register_inflight_v314()
     test_pick_tail_race()
+    test_pick_race_target_v316()
     test_race_tier_ok()
     if ITEST:
         itests = [

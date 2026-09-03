@@ -19,8 +19,7 @@ import dist_common
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.log import log
 from rl.queue_local import (
-    pick_tail_race,
-    race_tier_ok,
+    pick_race_target,
     register_inflight,
     rescan_nodes,
     run_local_rollout,
@@ -38,6 +37,26 @@ MAX_TASK_ATTEMPTS = (
     3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
 )
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
+
+
+def _ensure_games(m: dict) -> dict:
+    """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
+
+    分布式 agent 返回的 manifest 没有 games/totalSamples/totalTicks 等聚合字段，
+    而 _rl_report.json（本地 rollout）已含这些键。本函数为缺失格式补上，使
+    results 与 resumed_manifests 输出同构，消除 KeyError('games')。
+    """
+    if "games" in m:
+        return m
+    score = m.get("score")
+    return {
+        "games": 1,
+        "outcomes": {str(m.get("outcome", "unknown")): 1},
+        "totalSamples": int(m.get("nSamples") or 0),
+        "totalTicks": int(m.get("ticks") or 0),
+        "scoreList": [score] if isinstance(score, (int, float)) else [],
+        "dimLists": {},
+    }
 
 
 def bun_version(bun: str) -> str:
@@ -376,6 +395,15 @@ class RolloutDispatcher:
         # 末尾任务仍可能落在低速 agent（EWMA 是预期、单局有方差），fan-out 用重复执行兜底。
         tail_fanout_n = int(policy.get("tailFanoutN", 4))
         tail_fanout_dup = int(policy.get("tailFanoutDup", 2))
+        # v3.15 分配超时（用户 2026-09-03 指令）：in-flight 任务墙钟超时。
+        # 闪断节点（如 a96）中间上线时抢走尾部任务、实际挂起，导致任务被锁死在
+        # in-flight 长达 15 分钟（taskTimeoutSec=900），全轮空等。taskFetchTimeoutSec
+        # 是更短时间阈值，超时后任务重新进入 pending 队列，由其他健康节点执行。
+        # 默认 30s ≈ 5-10 局正常耗时，闪断节点必超重入。
+        # 冷却黑名单：超时重入后记录节点，冷却期内该节点不能再次抢到同一任务。
+        task_fetch_timeout = float(policy.get("taskFetchTimeoutSec", 30))
+        # 冷却期 = 4 × taskFetchTimeoutSec，保证节点状态稳定后再参与该任务竞速
+        _cooldown_sec = task_fetch_timeout * 4
         # v3.10 长尾竞速（用户需求 2026-08-31）：v3.7 的 fan-out 只在「pending 还有排队任务」
         # 时复制。末尾任务一旦被某 worker pop 出队、独占 in-flight（长 RPC 挂起），其他空闲
         # 执行槽因 src=None 退化为干等 → 整轮被一个慢副本拖住。本机制：排队队列已空时，
@@ -421,7 +449,14 @@ class RolloutDispatcher:
         # v3.7 fan-out：任务 -> 当前在跑副本数（>1 = 已被重复派发竞速）。
         # v3.14：登记面扩大到**所有**主副本派发（原 v3.7 只登记出队时 pending ≤
         # tailFanoutN 的尾局，早派任务对竞速不可见——it6 实测 a97 积压 3 局拖整轮）。
+        # v3.15：分配超时追踪——inflight_ts 记录每个 in-flight 任务的派发墙钟，
+        # 超时后 re-queue 到 pending 由其他节点执行。
+        # inflight_nodes：任务 → 持有该任务副本的节点集合（防竞速副本派回同节点）。
+        # task_timeout_blocks：任务 → 超时节点集合（冷却期内该节点不能重抢该任务）。
         inflight: dict[tuple[int, int], int] = {}
+        inflight_ts: dict[tuple[int, int], float] = {}
+        inflight_nodes: dict[tuple[int, int], set[str]] = {}
+        task_timeout_blocks: dict[tuple[int, int], set[str]] = {}
 
         def _fast_enough(nid: str, pending_len: int) -> bool:
             # R6：本机直跑槽位豁免速度持留——它由 local_slots 上限 + local_suspend
@@ -465,6 +500,42 @@ class RolloutDispatcher:
                 with lock:
                     if nd is not None and streaks.get(nd_id, 0) >= fail_streak_max:
                         return
+                    # v3.15 分配超时重入：扫描 in-flight 找到超时任务，重新进入 pending 队列。
+                    # 闪断节点（如 a96）抢走任务后实际挂起，其他节点为空闲但看不到这些任务。
+                    # 超时任务的持有节点加入冷却黑名单（task_timeout_blocks），冷却期内
+                    # 该节点不得再次抢到同一任务，防 a96 超时→回队→又被 a96 抢走的死循环。
+                    _now = time.time()
+                    _reaped = []
+                    for _t, _ts in list(inflight_ts.items()):
+                        if _now - _ts > task_fetch_timeout:
+                            _reaped.append(_t)
+                    if _reaped:
+                        for _t in _reaped:
+                            _blocked_nodes = inflight_nodes.pop(_t, set())
+                            inflight.pop(_t, None)
+                            inflight_ts.pop(_t, None)
+                            pending.append(_t)
+                            if _blocked_nodes:
+                                task_timeout_blocks.setdefault(_t, set()).update(_blocked_nodes)
+                                log(
+                                    f"[dist] alloc-timeout s{_t[0]}/seed{_t[1]} "
+                                    f"({task_fetch_timeout:.0f}s) — re-queued, "
+                                    f"cooling nodes: {_blocked_nodes}"
+                                )
+                            else:
+                                log(
+                                    f"[dist] alloc-timeout s{_t[0]}/seed{_t[1]} "
+                                    f"({task_fetch_timeout:.0f}s) — re-queued"
+                                )
+                    # 清理过期的冷却黑名单条目
+                    _now2 = time.time()
+                    _expired = []
+                    for _t, _nodes in list(task_timeout_blocks.items()):
+                        if _t in inflight or _t in pending:
+                            continue  # 任务仍在活跃，保留冷却
+                        _expired.append(_t)
+                    for _t in _expired:
+                        task_timeout_blocks.pop(_t, None)
                     if nd is None:
                         # 远端失联 → 本机并发恢复满额（防流式 PPO 被饿死）
                         if (
@@ -509,16 +580,32 @@ class RolloutDispatcher:
                                 if cand is not None:
                                     task = cand
                                     inflight[task] += 1
+                                    inflight_ts[task] = time.time()
+                                    inflight_nodes.setdefault(task, set()).add(nd_id)
                                     fanout_copy = True
                                     attempt = attempts.get(task, 0) + 1
                             if not fanout_copy:
+                                # v3.16 冷却黑名单旋转：如果 pending 队首任务被当前节点
+                                # 冷却封锁（该任务此前在此节点超时），旋转到队尾继续找。
+                                if src is pending and task_timeout_blocks:
+                                    _rotated = 0
+                                    while pending and _rotated < len(pending):
+                                        _front = pending[0]
+                                        _blk = task_timeout_blocks.get(_front, set())
+                                        if nd_id in _blk:
+                                            pending.rotate(-1)  # 队首→队尾
+                                            _rotated += 1
+                                        else:
+                                            break
                                 task = src.popleft()
                                 attempts[task] = attempts.get(task, 0) + 1
                                 attempt = attempts[task]
                                 # v3.14：主副本派发一律登记（不限 src、不看 pending 余量）——
                                 # 早派到慢节点/滞后节点的任务同样成为竞速候选；
-                                # tailFanoutDup 上限 + race_tier_ok 派档防复制放大。
+                                # tailFanoutDup 上限派档防复制放大。
                                 register_inflight(inflight, task)
+                                inflight_ts[task] = time.time()
+                                inflight_nodes.setdefault(task, set()).add(nd_id)
                             if nd is None:
                                 local_active[0] += 1
                             if not head_tasks and not pending:
@@ -536,22 +623,27 @@ class RolloutDispatcher:
                         # 每任务副本数上限 tailFanoutDup 防无限复制；副本失败静默、成功到 seen
                         # 则丢弃（v3.7 既有 fan-out 语义）。本机槽被 local_suspend 让位时不竞速
                         # （让位语义 = 给 PPO 腾核，不抢尾流）。
-                        # v3.11 竞速派档（用户 2026-08-31 观察"副本落到慢节点=白等"）：竞速名额
-                        # 只给 top-3 快节点（EWMA 耗时，speed 表）——慢节点不浪费竞速副本。
-                        if (
-                            not (nd is None and suspended)
-                            and inflight
-                            and race_tier_ok(speed, nd_id, 3)
-                        ):
-                            tail_cand = pick_tail_race(inflight, tail_fanout_dup)
+                        # v3.16 竞速派档（用户 2026-09-03）：修改 v3.11 的 EWMA top-3 快档——
+                        # 它让健康的空闲快节点饿死，闪断节点偷走尾部任务后锁死它们。
+                        # 新规则：保留 tail_fanout_dup 上限防复制爆炸；删除快慢分档，任意
+                        # 空槽都能抢；PPO 完毕的 local 也参与；永不派回任务当前持有节点；
+                        # 超时冷却黑名单节点也不能抢回同一任务。
+                        if not (nd is None and suspended) and inflight:
+                            # v3.16 使用 pick_race_target 排除当前节点 + 冷却黑名单
+                            tail_cand = pick_race_target(
+                                inflight, tail_fanout_dup, nd_id,
+                                inflight_nodes, task_timeout_blocks,
+                            )
                             if tail_cand is not None:
                                 task = tail_cand
                                 inflight[task] += 1
+                                inflight_ts[task] = time.time()
+                                inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
                                 attempt = attempts.get(task, 0) + 1
                                 log(
                                     f"[dist] tail-race s{task[0]}/seed{task[1]} "
-                                    f"(inflight x{inflight[task]}) — race lane"
+                                    f"node={nd_id} (inflight x{inflight[task]}) — race lane"
                                 )
                 if drained and on_queue_drained is not None:
                     # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
@@ -637,6 +729,8 @@ class RolloutDispatcher:
                                 inflight[task] = inflight.get(task, 0) - 1
                                 if inflight[task] <= 0:
                                     inflight.pop(task, None)
+                                    inflight_ts.pop(task, None)
+                                    inflight_nodes.pop(task, None)
                             log(
                                 f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
                             )
@@ -644,6 +738,8 @@ class RolloutDispatcher:
                         seen.add(task)
                         if task in inflight:
                             inflight.pop(task, None)
+                            inflight_ts.pop(task, None)
+                            inflight_nodes.pop(task, None)
                         last_settle_at[0] = time.time()
                         streaks[nd_id] = 0
                         if nd is not None:
@@ -689,6 +785,8 @@ class RolloutDispatcher:
                             inflight[task] -= 1
                             if inflight[task] <= 0:
                                 inflight.pop(task, None)
+                                inflight_ts.pop(task, None)
+                                inflight_nodes.pop(task, None)
                         if task in seen or task in missing_keys:
                             log(
                                 f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped"
@@ -706,6 +804,8 @@ class RolloutDispatcher:
                             inflight[task] -= 1
                             if inflight[task] <= 0:
                                 inflight.pop(task, None)
+                                inflight_ts.pop(task, None)
+                                inflight_nodes.pop(task, None)
                         log(
                             f"[dist] main s{task[0]}/seed{task[1]} failed ({err}) — settled by fanout copy, dropped"
                         )
@@ -717,6 +817,13 @@ class RolloutDispatcher:
                     else:
                         broke = False
                     if attempt < MAX_TASK_ATTEMPTS or busy503:
+                        # v3.16：失败回队前清理 inflight 登记（避免 stale 条目）
+                        if task in inflight:
+                            inflight[task] -= 1
+                            if inflight[task] <= 0:
+                                inflight.pop(task, None)
+                                inflight_ts.pop(task, None)
+                                inflight_nodes.pop(task, None)
                         pending.append(task)
                         stats["retried"] += 1
                         log(
@@ -823,7 +930,7 @@ class RolloutDispatcher:
             log(f"[dist] missing pairs: {[list(k) for k in missing]}")
 
         combined = combine_reports(
-            results
+            [_ensure_games(r) for r in results]
             + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set, extra_wver=extra_wver)
         )
         combined["missing"] = [list(k) for k in missing]

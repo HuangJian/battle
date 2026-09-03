@@ -261,6 +261,31 @@ def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int,
     return cand
 
 
+def pick_race_target(
+    inflight: dict[tuple[int, int], int],
+    dup: int,
+    nd_id: str,
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    timeout_blocks: dict[tuple[int, int], set[str]],
+) -> tuple[int, int] | None:
+    """v3.16 竞速选择 + 节点排除（纯函数，单测覆盖）：在 pick_tail_race 的基础上，
+    排除当前节点已持有或冷却中的任务，避免竞速副本派回同一闪断节点。
+
+    规则：
+    - 副本数 < dup 的任务才可竞速（tail_fanout_dup 防复制爆炸）
+    - nd_id 在 inflight_nodes[task] 中 → 当前节点已有该任务副本，不派回
+    - nd_id 在 timeout_blocks[task] 中 → 当前节点刚超时过该任务，冷却期内不重抢
+    - 返回第一个满足条件的任务（按字典序，与 pick_tail_race 一致）
+    - 无合适候选返回 None"""
+    for t, c in sorted(inflight.items()):
+        if c < dup:
+            current = inflight_nodes.get(t, set())
+            blocked = timeout_blocks.get(t, set())
+            if nd_id not in current and nd_id not in blocked:
+                return t
+    return None
+
+
 def race_tier_ok(speeds: dict[str, float], nid: str, top_n: int = 3) -> bool:
     """v3.11 竞速派档（纯函数，单测覆盖）：竞速副本只派给**快节点**，避免副本恰好落入
     慢节点、竞速形同虚设（用户 2026-08-31 观察："两个副本都分派到慢速节点，不还是要等"）。
