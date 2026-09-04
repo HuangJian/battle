@@ -4,8 +4,9 @@
  *
  * Receives one chunk payload:
  *   {
- *     weightsPath: string        // nn-weights JSON (student/bc/god arch)
- *     label: string              // row tag (usually the weights file name)
+ *     weightsPath: string        // nn-weights JSON (student/bc/god arch); '' for god
+ *     label: string              // row tag (usually the weights file name, or 'god')
+ *     policy: string             // 'nn' | 'god' — passed through to runEvalOne
  *     difficulty, maxTicks, lives, level,
  *     stages: Array<{ name: string; json: string }>,   // single-stage JSON payloads
  *     jobs: Array<{ id: number; stageLocal: number; seed: number }>
@@ -28,6 +29,7 @@ export interface EvalJob {
 export interface EvalCourseWorkerPayload {
   weightsPath: string
   label: string
+  policy: string
   difficulty: string
   maxTicks: number
   lives: number
@@ -58,7 +60,7 @@ export interface EvalCourseRow {
 self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
   const p = ev.data
   try {
-    const weightsText = readFileSync(p.weightsPath, 'utf8')
+    const weightsText = p.policy === 'nn' ? readFileSync(p.weightsPath, 'utf8') : ''
     const rows: EvalCourseRow[] = []
     for (const job of p.jobs) {
       const s = p.stages[job.stageLocal]
@@ -71,7 +73,7 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         p.difficulty,
         p.maxTicks,
         weightsText,
-        'nn',
+        p.policy,
         '',
         '',
         0,

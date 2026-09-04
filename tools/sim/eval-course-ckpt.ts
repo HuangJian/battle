@@ -22,6 +22,8 @@
  *   bun tools/sim/eval-course-ckpt.ts --course nn-training/curricula/p1-onset.jsonc \
  *       --weights a.json --weights b.json --games 50 --workers 8 \
  *       --out tmp/p1-eval-rows.jsonl
+ *   bun tools/sim/eval-course-ckpt.ts --course p1-onset --policy god --games 100 \
+ *       # true God-AI (DEFAULT_GOD_AI_PARAMS, RNG 同 simulation-runner，无需 --weights)
  *
  * Output: one JSON row per game (JSONL) to --out or stdout; human summary per
  * checkpoint to stderr.
@@ -128,11 +130,20 @@ async function main(): Promise<void> {
     console.error('[eval-course-ckpt] --course <name|path> required')
     process.exit(2)
   }
-  const weights = argAll('weights')
-  if (weights.length === 0) {
-    console.error('[eval-course-ckpt] --weights <file> required (repeatable)')
+  const policy = arg('policy') ?? 'nn'
+  if (policy !== 'nn' && policy !== 'god') {
+    console.error(`[eval-course-ckpt] unknown --policy '${policy}' (nn|god)`)
     process.exit(2)
   }
+  const weightPaths = argAll('weights')
+  if (policy === 'nn' && weightPaths.length === 0) {
+    console.error('[eval-course-ckpt] --weights <file> required for --policy nn (repeatable)')
+    process.exit(2)
+  }
+  const weights =
+    policy === 'god'
+      ? [{ path: '', label: 'god' }]
+      : weightPaths.map((p) => ({ path: p, label: p.split(/[\\/]/).pop() ?? p }))
   const games = parseRangeInt(arg('games'), 100)
   const seed0 = parseRangeInt(arg('seed0'), 0)
   const workersArg = parseInt(arg('workers') ?? '0', 10)
@@ -154,7 +165,7 @@ async function main(): Promise<void> {
 
   process.stderr.write(
     `[eval-course-ckpt] course=${courseArg} stages=${stages.length} games/weights=${games} ` +
-      `weights=${weights.length} workers=${workers} difficulty=${difficulty} ` +
+      `policy=${policy} weights=${weights.length} workers=${workers} difficulty=${difficulty} ` +
       `max_ticks=${maxTicks} lives=${lives} level=${level}\n`,
   )
 
@@ -183,8 +194,9 @@ async function main(): Promise<void> {
     for (const slice of slices) {
       if (slice.length === 0) continue
       chunks.push({
-        weightsPath: weights[wi],
-        label: weights[wi].split(/[\\/]/).pop() ?? weights[wi],
+        weightsPath: weights[wi].path,
+        label: weights[wi].label,
+        policy,
         difficulty,
         maxTicks,
         lives,

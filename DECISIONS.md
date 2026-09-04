@@ -1941,3 +1941,23 @@ JSONL 行 + 每 checkpoint 汇总表；不复制 runEvalOne 循环（唯一实�
 **验证**：telemetry-parity 测试扩展（runEvalOne.playerHits/playerDamageTaken ≡ 事件流
 recount）；eval-course-ckpt 50 局 ckpt3 与早前 8 核 parity harness 输出 0 mismatch；
 bun run check 全绿（1700 pass）；oxfmt/oxlint 干净。
+
+## §327 p4-onset 课程：4 敌混编四面围攻（2026-09-04，p1 饱和后课程升级）
+
+**背景**：p1-onset（单敌）已被 60 轮全量 BC 蒸馏饱和——ep60 贪心 94/100 vs
+God-AI 92/100（教师级，docs/rl.progress.md §1 基线），继续在其上跑 RL 的边际
+收益≈0。用户要求把课程升级为 p4-onset：4 个敌人、混编（basic/fast/power/armor
+各 1）、player 正中出生、敌人四角，其它设置（difficulty hard / 1 命 0 星 /
+max_ticks 2400 / grid 布局 / reward 公式与参数 / seed_rotate）一律沿用 p1。
+
+**定案**：新建 `nn-training/curricula/p4-onset.jsonc`（p1-onset.jsonc 保留不动——
+battle.ipynb / DECISIONS §326 / docs/rl.progress.md §1 均引用它）。grid 逐格拷贝
+p1（11×11 cells 空旷场 + 钢墙边）；forces 20 字符（`"abcdabcdabcdabcdabcd"`，
+count 4 取前 4 = a/b/c/d）→ 出生顺序 basic/fast/power/armor，四角按 spawn 点
+轮转落位（TL/TR/BR/BL）；player_spawn
+tile (12,12) 正中央；无 spawn_variants 池（用户指定固定布局，seed 只影响模拟 RNG
+不影响几何）。已知语义：max_ticks 2400 原为单敌标定（God-AI 胜局平均 ~535 tick），
+4 敌清场或需 2-4× 时长——评估若超时占比过高，则预算对多敌偏紧，按实测重标定。
+
+**验证**：`eval-course-ckpt.ts` 在 p4-onset 上跑 ep60 与 `--policy god` 各 100 局，
+结果记 docs/rl.progress.md §2（ep60 对单敌 94% → 对 4 敌的表现即泛化读数）。

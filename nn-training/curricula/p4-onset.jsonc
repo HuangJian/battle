@@ -1,0 +1,105 @@
+// 课程 P4-onset —— 四面围攻：4 敌混编（basic/fast/power/armor），玩家居中
+//
+// 背景：p1-onset（单敌）已被 60 轮全量 BC 蒸馏饱和——ep60 贪心评估 94/100 vs
+// God-AI 92/100（教师级，docs/rl.progress.md §1）。继续在 p1 上跑 RL 的边际
+// 收益≈0，课程升级到多敌混编，测试「发现→瞄准→击杀」在 4 个同时在场目标、
+// 四向受敌压力下的泛化。
+//
+// 地图：hard 难度，11×11 cells（22×22 tiles）空旷场，无基地（grid 与 p1 逐格
+// 相同——「其它设置不变」）。
+// 敌人：4 个，混编 = 每关 basic/fast/power/armor 各 1（forces 20 字符重复 abcd，
+//   取前 4 字符 = a/b/c/d；出生顺序 = spawn 队列顺序，四角依次落位：
+//   TL basic / TR fast / BR power / BL armor）。
+// 玩家：1 命 0 星，出生点正中央（tile 12,12——22×22 内场的正中 2×2）。
+// 出生点：固定布局（用户指定：player 中间、敌人四角），无 spawn_variants 池——
+//   seed 只影响模拟 RNG（敌方 AI），不影响几何。
+//
+// 注意（2026-09-04 评估时确认）：max_ticks 2400 沿用 p1（"其它设置不变"），但该
+// 值原为单敌标定（God-AI 胜局平均 ~535 tick）。4 敌清场预计需 ~2-4× 时长，若
+// 评估中超时占比过高则该预算对多敌偏紧——届时按实测重标定，属后续项。
+//
+// 激励设计（scheme=toy，与 p1 全同——"其它设置不变"）：
+//   - 杀敌 +3.0/个 ×4（核心目标）· 命中 +0.3/次
+//   - 挨打 -1.0/次（1 命 0 星玩家 maxHp 263，挨 2-3 发死）
+//   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)
+//   - 弹药效率 -0.01/发 · 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0
+{
+  "version": 5,
+  "name": "p4-onset",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 50,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.995,
+  "lam": 0.97,
+  "ppo_schedule": [
+    { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
+    { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p4-onset/weights.json",
+  "traj": "tmp/p4-onset",
+  "backup_dir": "nn-training/weights/p4-onset",
+  "backup_prefix": "p4-onset",
+  // 自定义关 stage ID 从 2000 开始，p4-onset 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 20,
+  "eval_every": 5
+}
