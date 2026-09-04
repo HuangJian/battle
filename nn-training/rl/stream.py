@@ -93,6 +93,7 @@ def run_rollout_stream(
     backend=None,
     update_kwargs: dict | None = None,
     extra_wver: str | None = None,
+    course_fp: str | None = None,
 ) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
@@ -179,7 +180,7 @@ def run_rollout_stream(
     # 等待窗口（它们作为首波语料已注入 pend，collector 只补采真正缺失的局）。
     try:
         wver_start = dist_common.weights_fingerprint(rl_path)
-        _done_start = completed_pairs(traj_dir, wver_start, extra_wver=extra_wver)
+        _done_start = completed_pairs(traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp)
         remaining_games = max(0, len(pairs) - len(_done_start))
     except OSError:
         remaining_games = None
@@ -232,6 +233,7 @@ def run_rollout_stream(
                 local_suspend=ppo_started_ev,
                 on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"),
                 extra_wver=extra_wver,
+                course_fp=course_fp,
             )
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             _fire_eval_once("collector done")
@@ -332,7 +334,7 @@ def run_rollout_stream(
     _pre_seeded = 0
     if extra_wver and extra_wver != wver_start:
         plan_set_ = {(int(a), int(b)) for a, b in pairs}
-        for _pair, _dir in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver):
+        for _pair, _dir in _scan_shards(traj_dir, wver_start, extra_wver=extra_wver, course_fp=course_fp):
             if _pair not in plan_set_:
                 continue
             with lock:

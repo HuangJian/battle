@@ -133,6 +133,17 @@ def main() -> None:
         return
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
+    # 远程模式（--ppo remote）的 stream/double-buffer 显式互斥判定需要区分
+    # 「用户显式传参」与「吃 rl-config 默认值」——config 默认 stream=1 对本地模式
+    # 是对的，远程模式只对**显式** `--stream 1` 报错，config 默认值静默降为 0
+    # （plan §5「内部强制 stream=0」）。存到 args 供 validate_args 消费。
+    _defaults_ns2 = ap.parse_args([])
+    args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
+        getattr(_defaults_ns2, "stream", 0) or 0
+    )
+    args._explicit_double_buffer = int(getattr(args, "double_buffer", 0) or 0) != int(
+        getattr(_defaults_ns2, "double_buffer", 0) or 0
+    )
     from rl.config import validate_args
 
     validate_args(args)

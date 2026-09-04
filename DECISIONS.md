@@ -1961,6 +1961,179 @@ tile (12,12) 正中央；无 spawn_variants 池（用户指定固定布局，see
 
 **验证**：`eval-course-ckpt.ts` 在 p4-onset 上跑 ep60 与 `--policy god` 各 100 局，
 结果记 docs/rl.progress.md §2（ep60 对单敌 94% → 对 4 敌的表现即泛化读数）。
+## §328 远程 PPO 训练架构定案：rollout 在 LAN、PPO 在云端 GPU（2026-09-04，方案拍板）
+
+**背景**：BC 阶段云端 GPU（Colab T4）相对本地 CPU 提速 >10×，用户要把同样的拆分
+带到 RL：PPO 更新跑云端 GPU 主机，rollout 仍由本地 LAN 分布式集群采集；一台本地
+机器作采集中枢（hub）经 Cloudflare tunnel 与云机通讯，其余 LAN 节点保持现状
+（只收派发任务、不见云）；同时保留"本地集群采集 + 本机 CPU 跑 PPO"模式作回归基线。
+方案全文：plan/remote-ppo-architecture.md v0.2（本文的验收依据）。此条只记定案，
+不动代码（M1-M4 按方案 §9 后续实施）。
+
+**定案**（用户逐项确认）：
+- **迭代语义**：远程模式 = 每迭代结算一次 PPO（等价现有串行路径）+ 迭代级双缓冲
+  预采（θ_N 快照提前 spawn 下一轮首波，extra_wver 现成机制），放弃 wave 级 stream
+  重叠——stream 是进程内紧耦合（collector 线程攒满 streamWaveGames 唤醒主线程
+  update），远程化每波跨 tunnel 往返，吞吐不升反降；stream 只保留给本地 CPU 模式。
+- **云端 worker 无状态可重连**：云机只能出站 → hub 起 cloudflared，云 worker 轮询
+  拉 job；job 幂等键 = (runId, it, init_weights_fp, data_fp) + 租约心跳，云死重发、
+  hub 死靠 jsonl 账本 + 现有 resume 机制（rotateSeed 继承 / completed_pairs /
+  resume manifest）恢复。
+- **Adam 保真**：job 往返携带 torch opt 状态（student 全状态 < 数 MB），与本地同
+  进程语义对齐；不做每迭代 fresh-Adam。
+- **代码同步**：云 git clone 固定 commit（hub `ensure_current_branch_pushed` 现成 +
+  manifest 带 commit，两端校验 fail fast）；payload 内置 nn-training zip 仅作留档备选。
+- **隧道**：ipynb 预留"hub 连接信息"（URL+token）手动填录位；命名隧道与 quick
+  tunnel 皆可，端点带共享 token 鉴权。Q6 hub 落点实施前确认。
+- **兜底**：云不可达 = 暂停等恢复（GPU/CPU 轨迹不混跑，数值非位确定）；不做降级
+  本地 CPU 分支。
+- **确定性契约边界**：rollout 侧 RNG/派发/时序逐字节契约不变；torch GPU 数值非位
+  确定 → 同 run 中途不做 GPU↔CPU 无缝切换，切换只能是显式 checkpoint 级续跑。
+- **范围红线**：v1 仅 per-tick 课程（p4 系列）；intent/goal 后端远程化（value
+  warmup / ref_model / kickstart 状态随 job 走）为独立后续项；本地模式与仓库门禁
+  零改动。
+
+**验证锚点**：M3 对照实验（p4-onset 小步数远程 vs 本地 CPU，winRate 曲线趋势一致
+即达标，不做位级对比）；每迭代账本 / events jsonl 字段契约不变。
+
+
+## §329 远程 PPO 架构评审处置（2026-09-04，plan/remote.review-ms.md → 计划 v0.3）
+
+评审人 ms（agent）对 `plan/remote-ppo-architecture.md` v0.2 出具 `plan/remote.review-ms.md`；
+本条目记录逐条核验结论与用户新拍板，方案文档已升 v0.3（§11 处置表、§12 附录 A 字段表、
+§13 附录 B Windows hub 护栏）。**不推翻 §328 方向**，仅在 v0.2 基础上补契约缺口与测量门。
+
+### 核验方法
+- 评审所有带行号主张逐一对照代码核验（`loop_steps._course_iter/_serial_ppo`、
+  `ppo/common.chunk_episodes`、`ppo/engine._reward_from_metrics`、`rl/reward_context`、
+  `rl/loop_core._setup`、`rl/collect_only.spawn_collect_next`、`rl/rollout_phase`、
+  `dist_common.write_shard/post_weights/weights_fingerprint`、`rl/resume.last_completed_iter`、
+  `rl/events.write_iteration`、`rl/archive.backup_weights`、`tests/test_no_torch_on_import`）。
+- 三处事实修正（见下）已核实：F1.3 的 "adv_norm 漏了" **不实**（v0.2 D1 已列）；
+  F5 的 "zip 3–10× 压缩" **低估**（p4 语料实测 2.6GB → 18.5MB ≈ 140×）；
+  F6 的 "import 期 torch 依赖" **已被 B7 + test_no_torch_on_import 解决**。
+
+### 采纳项（并入 v0.3）
+- **F1.1/F1.2/F1.3（修正后）**：manifest 必带 course jsonc 全文快照 + metrics_version + it
+  （hash 只校验、不能重建 reward_fn）；schedule 双带（解析后值执行 + 原始表审计）；
+  编译期常量两端一致断言进 M1 DoD；dirty-tree 护栏不覆盖 jsonc → 快照兜底。
+- **F1.4**：云端 worker 以 per-job 确定性种子 `seed=hash(runId,it,init_weights_fp)`
+  重新播种后再 load/chunk/update → 同一 job 重发 chunk 逐字节一致；跨进程
+  （本地 vs 云）chunk 顺序差异文档化为预期（D7）；本地模式种子不动、字节基线不破坏。
+- **F2**：`_ppo_save` 目录 tar（model.pt/opt.pt/state.json = Adam+numpy RNG）作 opt 状态
+  唯一载体随 job 往返（不另起序列化）；`on_epoch_done` 不透传；常驻进程收益 M2 实测。
+- **F3**：定义 `data_fp = sha256(排序 shard 路径 + 各 manifest 的 wver/stage/seed)`；
+  lease=30min / 心跳=60s；hub 落权重前三重校验（init_weights_fp / data_fp / commit）。
+- **F4**：§4 "与 stream 同一量级" 表述删除 → 改为"结构性差异待 M3 量化"；
+  `--remote-precollect {0,1}` + stale 分数上限 30%（S5）。
+- **F8.1**：时序改为收官 → job 发布 + 预采 + eval 并行。
+- **F8.2**：M4 前归档磁盘水位告警（`backup_weights` 只归档不清理）。
+- **F8.3**：`dist_common.write_shard` manifest 双写顺手修为 M1 项 + manifest 内容单测。
+
+### 用户新拍板（2026-09-04）
+- **Q7 租约减法（S4）**：v1 租约超时**只告警不主动重发**（job 回可领取池）；
+  重发仅限云 worker 主动重拉同一 job（幂等键去重，已完成返回缓存结果不重算）；
+  双 worker 竞争写回整类 race 从 v1 删除，与 D10 暂停语义自洽。
+- **Q8 hub 落点（评审建议 Linux 常驻机，未采纳）**：**维持 Windows 训练机**；
+  缓解护栏入附录 B（powercfg 关睡眠、Defender 放行、命名隧道为 M2+/M4 默认、
+  quick 仅 M2 冒烟——quick URL 漂移与 D8 hub 重启恢复互斥）。
+
+### 实施顺序（M0 先于一切代码，替代 v0.2 的 M1 开头）
+- **M0 测量门**（S1，半天）：M0a 本地 RL `rollout_sec vs ppo_sec` 基线（<15% 则先验证
+  本地开大 epochs/mb 收益）；M0b zip/tar 字节实测；M0c quick tunnel curl 吞吐 ×3。
+  结论记 DECISIONS（新 §）。
+- M1 假云回环（协议+打包+chaos 单测+本地三路字节一致回归）；
+  M2 真隧道真 GPU（命名隧道+连通性矩阵+常驻进程测量）；M3 三曲线对照
+  （本地/远程+预采/远程无预采，winRate Δ≤5pp 且 Spearman≥0.7）；M4 长跑+恢复演练+水位。
+
+**验证锚点**：M0 三数落盘即通行证；M1 DoD = 假云回环 + chaos 单测全绿 + `bun run check`；
+M3 DoD = 三曲线 + 量化判定；M4 前磁盘水位告警就位。
+
+
+## §330 远程 PPO 第二评审处置（2026-09-04，plan/remote.review-ds.md → 计划 v0.4）
+
+第二评审人 ds（agent）对 `plan/remote-ppo-architecture.md` v0.3 出具 `plan/remote.review-ds.md`；
+本条目记录核验结论与用户新拍板，方案文档已升 v0.4（§3.1/§3.2/§11-D12/§12 处置表/附录 C/D）。
+**不推翻 §328/§329 方向**，聚焦 v0.3 留白的进程拓扑/责任归属三缝（G1–G3）与四条观测（G4–G6）。
+
+### 核验方法
+- G1/G2/G5/G6 主张逐一对代码核验：`save_weights_json`（data/weights_io.py:63）确为 torch
+  耦合（NaN fail-fast / schema_major / arch meta / 原子 replace）；`_export_weights` per-tick
+  即调它（loop_steps.py:221）；`TrainingLoop.run()` 为阻塞串行 while（loop_core.py:140-174，
+  sleep(30)/it-=1 原地重试）；`spawn_next_collect` 只在 stream 分支接线（loop_core.py:172）。
+- 三处事实修正：G1 的"hub 免 torch ⇒ hub 无能力导出 nn-weights-json"成立（v0.3 D2 确实
+  绕过了产出方）；G2 的"阻塞等待期间隧道端点须同活"成立（v0.3 未定进程拓扑）；G4 的
+  "免费档会话回收风险"成立（Colab 12h/90min、Kaggle 配额）。
+
+### 采纳项（并入 v0.4）
+- **G1/D12 weights_json 产出方锁死**：云 worker PPO 收尾时**同 commit 调与 `_export_weights`
+  per-tick 相同的 `save_weights_json`**，产 weights_json（回传）+ model.pt（tar 内）两份同源；
+  NaN 守卫/schema_major/arch meta 防线随函数上云；hub 三重校验（init_weights_fp / data_fp /
+  commit）兜住云产出漂移；M1 单测锁字节/指纹一致 + NaN 注入 fail-fast。
+- **G2/D11 hub 进程拓扑**：**旁路轻量 server 进程**（stdlib http.server，零新依赖）——
+  训练主循环只做"打包→POST→轮询等待→校验"，job 队列/租约/鉴权/jsonl 账单归 server；
+  **可领取 pool = jsonl（job_pending 事件）+ 租约状态重算**，hub kill -9 后纯重读；
+  主循环阻塞等待语义与 `_serial_ppo` 同构；进程/状态一页图入附录 C。
+- **G3/D12 云 worker 独立入口**：`python -m remote_worker --poll <url> --token <token>`；
+  notebook 一行拉起，断线重连自理；M1 假云直接驱动、M2 换 URL；协议单测可被 check 覆盖。
+- **G6/M0d**：M0 增"回环假云完整真实规模 job 往返计时"（非隧道部分先测），隧道由 M0c 给上限。
+- **G4/G5/附录 D**：连通性矩阵加"会话活性策略/后台计算配额"与"shallow clone 时长"两列；
+  云侧 `git clone --depth 1` + `--filter=blob:none`/sparse-checkout（tip==pin commit）。
+
+### 用户新拍板（2026-09-04）
+- **Q9 云会话策略（G4，单 worker 提速被平台生命周期约束）**：**免费档也长跑，接受回收**；
+  notebook resume 机制兜底，M4 前验证"断线→重连→续跑"路径；不因会话回收换付费档。
+- **Q10 预采默认（ds D4）**：**`--remote-precollect` 默认 0（测后开）**——M0d 先测全往返
+  墙钟，往返 ≪ 一轮 rollout 剩余采集则无需预采；确需重叠再开，stale ≤30%；常驻进程
+  跨 job 复用收益降为 M2 观测项而非 v1 承诺。
+
+### 实施顺序
+- 与 §329 合并执行：M0（a/b/c/d 四数落盘）→ M1 假云回环（含 G1 字节一致 + G2 池重建 +
+  G3 入口 + write_shard 双写修复）→ M2 真隧道真 GPU（连通性矩阵含会话活性 2h 验证）→
+  M3 三曲线 → M4 长跑（kill -9 池重建演练 + 断线重连续跑验证）。
+
+**验证锚点**：M0 四数落盘即通行证；M1 DoD = 假云回环 + chaos 单测（含本地 vs 云
+weights_json 字节指纹一致 / NaN 注入 fail-fast / 池 jsonl 重建）全绿 + `bun run check`；
+M3 DoD = 三曲线 + 量化判定；M4 前磁盘水位告警 + resume 断线重连演练就位。
+
+
+## §331 远程 PPO 内容管控补充需求（2026-09-04，plan/remote-ppo-architecture.md v0.5）
+
+**用户补充需求**：hub 侧完全管控 RL 训练的内容——奖励函数、训练超参、游戏地图、课程切换、
+甚至游戏机制；RL 使用的课程文件名写在 hub 的 `rl-config.json` 里，内容随时可改；修改后
+**下一轮 rollout/迭代**必须使用修改后的内容。PPO 侧完全不关心这些游戏配置，只读取
+**游戏语料 + RL 配置参数 + 上一轮产出的权重**，继续训练。
+
+**关键事实（agent 勘察，2026-09-04）**：奖励不是采集时算的——TS rollout 只落原始
+`metrics.npy`（[N+1,21]）+ manifest {outcome, score}，奖励由课程公式在 **PPO 装载期**
+现算（`rl.reward_context` holder + `ppo.engine._reward_from_metrics`，奖励唯一定义源=课程
+配置公式）。⇒ 改奖励函数**不需要重新采集语料**（同课程下用新公式重标 metrics 即可）；
+游戏内容（grid/forces/spawns/difficulty）经 `--stage-json`/`--difficulty` 只走 rollout
+（TS 侧），PPO 从不见游戏内容——用户模型与现状高度吻合，方案 v0.5 D13–D15 落地。
+
+**拍板**：
+- **Q11 生效粒度：下一轮迭代**（本轮在途 rollout+PPO 用派发时固化的 course 快照，修改从
+  下一轮整体生效）——保持语料同质性 + 确定性契约（D7），不做 mid-batch 切换；
+- **Q12 课程切换：延续 run 热启动**——保持同一 runId/out/traj，从上一轮权重继续 PPO
+  （curriculum 式迁移）；新课程显式改 out/traj = 声明新 run；shard manifest 带 course_fp
+  防止新旧课程语料混训。
+
+**落地（plan v0.5 §6-D13~D15，M1 checklist 增加）**：
+- D13：`rl-config.json` 增 `rl.<mode>.course` 指针，hub 每轮 publish 前重读 → course 快照
+  全文入 manifest（复用 D1/D6）；hub publish 前本地校验（`load_course` pydantic +
+  `build_reward_fn` 公式编译，均免 torch——reward_library 纯 numpy/ast）；奖励变化的价值头
+  1-2 轮暂态为预期现象；
+- D14：run 身份（runId/out/traj/backup）由 hub 固定，切换只换内容键；**shard manifest 增
+  course_fp（课程文件 sha256）**，PPO 装载校验 `job.course_fp == shard.course_fp`，
+  `resumed_manifests`/`completed_pairs` 按 course_fp 过滤（防旧课程 shard 混入新迭代）；
+- D15：游戏机制两层边界——配置级机制（坦克参数/难度/兵力=数据，§2.4）热改无需代码；
+  代码级机制（TS 仿真逻辑）必须 commit+push+节点升级+云 clone pin；**改 obs/action/metrics
+  schema → 权重与旧语料同时失效（METRICS_VERSION/schema_major/metrics_version 守卫响亮
+  拒绝）→ 新 era**，v1 红线明确排除。
+
+**验证锚点**：D13 publish 前校验单测（坏公式/坏关卡 hub 侧响亮拒绝，免 torch）+ D14
+course_fp 血缘校验单测（续跑过滤 + 装载校验）进 M1 DoD；M3 三曲线沿用（v0.5 不新增对照）。
+
 ## §332 p10-onset 奖励函数：p4 toy 公式 + 拾取项（2026-09-04，用户指令）
 
 **用户指令**：p10 起激励函数增加 powerup 指标——不主动捡道具很难通关。
@@ -1999,3 +2172,98 @@ nudging，主信号仍是击杀（wKill=3.0）。
 
 **验证（2026-09-04，本机实测）**：`load_course('p4-onset'/'p10-onset')` 均通过；
 合成矩阵拾取步 +1.5 / 星星增量 +1.0 / 通关 +2.0 全对；`test_reward_golden.py` 43 passed。
+
+## §334 远程 PPO M1 落地：hub-server/worker/协议全链路 + 语料血缘（2026-09-05，实现签入）
+
+**范围**：plan/remote-ppo-architecture.md §9 M1（假云回环冒烟）全量实施——hub-server
+旁路进程 + 云 worker 入口 + 协议模块 + TrainingLoop 远程分支接线 + course_fp 语料血缘。
+§328/§329 的定案全部落到代码，未改任何既定契约（本地模式零改动，回归基线 = bun run check
+1700 pass / python gate 294 pass 全绿）。
+
+**新增模块**（`nn-training/remote/`，全 stdlib，hub 侧免 torch）：
+- `protocol.py`：纯协议层——manifest 必填/可选字段表（附录 A）、`data_fp`
+  （sha256(排序 shard 路径 + {wver,stage,seed})，D1）、payload zip 打包/解包、
+  幂等键 (runId,it,init_weights_fp,data_fp)（D1）、per-job 确定性种子
+  `hash(runId,it,init_weights_fp)`（D5，前 8 hex = 32bit numpy 种子）、结果信封校验；
+- `hub_server.py`：旁路 http.server——job 队列/租约（30min，Q7 过期回池）/Bearer 鉴权
+  （同 IP 5 次 401 闭锁 1h）/jsonl 账本（job_pending→job_completed 双态，D8 重启纯重读）；
+- `worker.py` + `remote_worker.py`：云侧无状态轮询 worker（`python -m remote_worker`），
+  下载→payload_sha256 校验→commit 校验→课程快照重建→load/chunk/update（复用
+  ppo.engine 同一调用链）→save_weights_json 产出（D12 产出方锁死）→`_ppo_save` tar
+  （model/opt/RNG，D5）→POST；
+- `hub_client.py`：TrainingLoop 远程分支的发布/等待/校验落位——发布 = 磁盘 IPC
+  （job 目录 + jsonl，D11），等待 = HTTP 轮询，落位前三重校验
+  （init_weights_fp/data_fp/commit，D12）。
+
+**TrainingLoop 接线**：`--ppo remote` → `_setup` 跳过 torch/模型/优化器全链（hub 免
+torch，D2，test_no_torch_on_import 仍绿）；`_serial_ppo` 远程分支 = 打包→发布→阻塞
+等待→三重校验落位（语义与本地串行同构）；`_export_weights` 只归档（weights 已由云
+落位）。启动期 fail fast：与显式 `--stream 1`/`--double-buffer 1` 互斥（config 默认值
+静默降 0——run_rl.main 用 parse_args([]) 基线区分显式性，§331-Q11 的 config 默认
+stream=1 不误伤远程）；非 per-tick 模式拒绝。
+
+**course_fp 语料血缘（D14）**：课程文件 sha256 贯通全链——shard manifest 带
+course_fp（export-rl-rollout.ts --course-fp → agent → write_shard）、`completed_pairs`/
+`resumed_manifests`/`_scan_shards` 按 course_fp 过滤续跑对账、远程 PPO 装载前校验
+job.course_fp == 每个 shard.course_fp（跨课程语料绝不混训）、hub 发布时课程快照进
+manifest。三处 course_fp 计算统一为 **sha256(原始文件字节)**（修掉 read_text 换行翻译
+导致 CRLF 下指纹断裂的隐患）。顺手修 `write_shard` manifest 双写（F8.3：只留 indent=2
+写，磁盘字节不变）。
+
+**冒烟（M0d，本机假云回环，p4-onset + p1-ep60）**：publish → 云 worker 轮询拉 →
+payload_sha256 校验 → PPO（epochs=2, 128 steps, 1.7s）→ POST → 三重校验 → 落位
+args.out + ppo_ckpt_remote（model.pt/opt.pt/state.json）→ 账本双态。**整趟墙钟
+5.8s**（发布→落位，非隧道部分；数据 <2MB——p4 语料实测 zip 140× 压缩，§329-F5）。
+隧道部分 M0c 上限 + M2 真云端后续再测。结论：单轮往返 ≪ 一轮 rollout 采集时间，
+**远程预采默认 0 成立**（§4/D3/Q10），与计划一致。
+
+**M1 单测**（tests/test_remote_ppo.py，30 用例）：协议编解码、data_fp 确定性/排序无关/
+语料漂移检出、幂等键/job_id 稳定、payload zip 往返、commit 不一致拒收、job_id/data_fp
+漂移拒收、agg 缺字段拒收、D12 本地 vs 云 weights_json 字节+指纹一致、NaN 注入
+fail-fast、reward 非有限拒收、账本新事件不破坏 last_completed_iter、course_fp resume
+过滤、write_shard 单写、发布端课程校验（坏公式 FormulaError/坏 grid pydantic）、
+hub-server 全链路（鉴权/领取/payload/结果/状态/幂等/租约过期回池/账本重建/迟到写回
+409/commit 不符 400）。
+
+**运维备忘**：hub-server 需在**训练进程旁**单独起（`python -m remote.hub_server
+--port 8787 --token <t> --job-root <traj>/remote-jobs --jsonl <traj>/training_log.jsonl`），
+云 worker 用同一 token 经 tunnel 轮询；hub 崩溃恢复 = jsonl 账本纯重读（M4 演练项）。
+
+## §335 hy 评审处置：H1–H11 修复 + F2 channels_last + F3 重估（2026-09-05，plan/remote.review-hy.md 处置签入）
+
+**评审结论**：方向可行，GPU 收益已由用户 BC 实测 11× 证实。存在 1 个 P0（H1/H2 心跳）
++ 3 个 P1 + 5 个 P2，其中 P0 在 M2 真规模下必然触发。**全部处置如下**：
+
+**H1（P0，心跳在 job 完成后才发）** → 已修复：守护心跳线程（daemon, 60s 周期续租），
+job 结束 join。H2（P0，heartbeat 不校验租者）→ 已修复：领取时下发 `lease_token`，
+心跳/结果回传须携带，hub 校验后才续租/收结果。
+
+**H3（P1，wait_job 超时 == LEASE_SEC 双花窗口）** → 已修复：`wait_job` 默认超时
+25min **严格小于** LEASE_SEC=30min，超时前二次确认状态（`GET /jobs/{id}/status`）。
+**H4（P1，git_head 不检查 dirty tree）** → 已修复：`_remote_ppo`（loop_steps.py）在
+发布前运行 `git status --porcelain`，有未提交/未跟踪文件时 fail-fast。`hub_client.git_head`
+维持纯 commit 解析（供 smoke_loopback 等非发布场景使用）。
+**H5（P1，state.json 从未被读取）** → 已修复：`pack_opt_tar` 只打 model.pt + opt.pt，
+不打 state.json（per-job 种子已足够自洽，D5）。`smoke_loopback.py` 断言同步更新。
+**H6（P1，claimable_job_ids 全量重读 jsonl）** → 已修复：`_JobStore._ledger_cache`
+按文件 size 增量读，未变化时零 IO 复用。
+
+**H7（P2，--remote-precollect 死开关）** → 已修复：`_remote_ppo` 直接调用
+`spawn_collect_next`（绕过 `spawn_next_collect` 的 stream_meta 门控），句柄存入
+`self._collect_child` 让下一轮 `join_precollect_child` 正确等待。
+**H8（P2，--once 失败退出码 0）** → 已修复：`worker_loop` 返回 -1，`main` 非零退出。
+**H9（P2，job 目录生命周期）** → 已修复：`_rotate_cleanup` 扩展清理——扫描
+remote-jobs 目录，清理已完成且迭代 <= keep_iters 的 job。
+**H10（P2，token 进程列表可见）** → 已修复：`hub_server.py` 和 `worker.py` 新增
+`--token-file` 支持，token 从文件读取而非 CLI 参数。
+**H11（P2，start-training 未集成）** → 暂缓（M2 运维阶段统一集成 hub-server + cloudflared
+启动脚本）。
+
+**F2（channels_last 2.08×）** → 已实现：`ppo/trainer.py::tensored_chunks` 新增可选
+`memory_format` 参数，传入 `torch.channels_last` 时 obs 张量转为 NHWC 布局。
+实测 2.06 s/chunk vs 4.28 s（contiguous），云 worker 和本地 PPO 均受益。
+**F3（按 100-200 局/轮重估）** → 评估完成：200 局/轮下 GPU PPO ~2.2 min，payload
+~2.8 MB，LEASE_SEC=30min 余量充足，wait_timeout=25min 合理。无需调整数值。
+
+**验证**：`bun run check` 1700 pass / python gate 294 pass 全绿；`smoke_loopback.py`
+（p4-onset + p1-ep60）round-trip=8.0s, PPO=1.7s, 全部断言通过。

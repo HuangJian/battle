@@ -539,6 +539,7 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
   const iterRows = activeFlow ? readIterMetrics(join(REPO_ROOT, 'tmp', activeFlow.dir)) : []
   const iterTableHtml = renderIterTable(iterRows)
   const rows: string[] = []
+  const disabledRows: string[] = []
   if (nodes) {
     const probes = await Promise.all(
       nodes.map(async (n) => {
@@ -595,16 +596,18 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
       const errCell = h.lastError
         ? `<span class="err">${h.lastError}</span><br><span class="muted">${h.lastFailTs || ''}</span>`
         : '<span class="muted">-</span>'
-      rows.push(
+      const rowHtml =
         `<tr><td class="name">${n.id}</td><td>${statusCell}</td>` +
-          `<td>${specCell}</td><td class="ver">${verCell}</td>` +
-          `<td class="num" data-v="${disabled || !ping ? 9999 : ms}">${!disabled && ping ? `${ms}ms` : '-'}</td>` +
-          `<td class="num" data-v="${h.ok}">${h.ok}</td><td class="num" data-v="${h.fail}">${h.fail}</td>` +
-          `<td class="num" data-v="${h.lastIterOk}">${h.lastIter >= 0 ? h.lastIterOk : '-'}</td>` +
-          `<td class="num" data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
-          `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
-          `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`,
-      )
+        `<td>${specCell}</td><td class="ver">${verCell}</td>` +
+        `<td class="num" data-v="${disabled || !ping ? 9999 : ms}">${!disabled && ping ? `${ms}ms` : '-'}</td>` +
+        `<td class="num" data-v="${h.ok}">${h.ok}</td><td class="num" data-v="${h.fail}">${h.fail}</td>` +
+        `<td class="num" data-v="${h.lastIterOk}">${h.lastIter >= 0 ? h.lastIterOk : '-'}</td>` +
+        `<td class="num" data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
+        `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
+        `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`
+      // disabled 节点行进折叠组（渲染时默认折叠、可展开），其余行正常入表。
+      if (disabled) disabledRows.push(rowHtml)
+      else rows.push(rowHtml)
     }
     // 本机直跑（训练器 local 槽位）固定入表一行：无 ping/版本，状态按最近完成率、
     // 上轮贡献度照常聚合。无历史（部署清零后）也占位显示，槽位数来自 rl-config。
@@ -640,11 +643,13 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
   }
   // 默认按「已结算局」倒序（点击表头仍可手动排）。num cell 列表：ping、已结算局、失败局、
   // 上轮贡献度、平均耗时——第 2 个（index 1）= 已结算局。
-  rows.sort((a, b) => {
+  const bySettledDesc = (a: string, b: string): number => {
     const okA = Number((a.match(/<td class="num" data-v="(\d+)">/g) ?? [])[1]?.match(/\d+/) ?? 0)
     const okB = Number((b.match(/<td class="num" data-v="(\d+)">/g) ?? [])[1]?.match(/\d+/) ?? 0)
     return okB - okA
-  })
+  }
+  rows.sort(bySettledDesc)
+  disabledRows.sort(bySettledDesc)
   return `<!doctype html><html><head><meta charset="utf-8">
 <title>sampler-agent 节点池</title>
 <style>
@@ -671,6 +676,10 @@ thead th:hover{background:#f0f3f8;color:var(--accent)}
 tbody td{padding:10px 14px;border-bottom:1px solid #f0f2f6;font-size:13px;vertical-align:middle}
 tbody tr:last-child td{border-bottom:none}
 tbody tr:hover td{background:var(--row-hover)}
+tr.grp td{background:#eef2fb;color:var(--accent);font-weight:600;cursor:pointer;font-size:12.5px;
+letter-spacing:.3px;user-select:none;border-bottom:1px solid #e2e8f4}
+tr.grp:hover td{background:#e4ecfa}
+tr.grp .caret{display:inline-block;width:14px}
 td.name{font-weight:600}
 td.name .dim{color:var(--muted);font-weight:400;font-size:12px}
 td.ver{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4b5563}
@@ -710,6 +719,14 @@ ${activeFlow ? `<span class="badge b-accent">当前训练流: ${activeFlow.dir}�
 <th onclick="sortTbl(9,this)">最近成功</th><th onclick="sortTbl(10,this)">最近错误</th>
 </tr></thead>
 <tbody>${rows.join(String.fromCharCode(10))}</tbody>
+${
+  disabledRows.length > 0
+    ? `<tbody id="disabledBody">
+<tr id="disabledToggle" class="grp" onclick="toggleDisabled()" title="点击展开/折叠"><td colspan="11"><span id="disabledCaret" class="caret">▸</span>&nbsp;已禁用节点（${disabledRows.length}）</td></tr>
+${disabledRows.join(String.fromCharCode(10)).replaceAll('<tr>', '<tr class="drow">')}
+</tbody>`
+    : ''
+}
 </table></div>
 ${iterTableHtml}
 <script>
@@ -726,18 +743,57 @@ function sortTbl(col, th) {
     return dir * cmp;
   });
   for (const r of rows) tb.appendChild(r);
-}
-// 自动刷新定时器
+}// 自动刷新定时器（间隔记录到 localStorage，刷新后恢复）
 let _timer = null;
+const INTERVAL_KEY = 'pool.refreshSec';
+function readInterval() {
+  try {
+    const v = parseInt(localStorage.getItem(INTERVAL_KEY), 10);
+    const opts = document.querySelectorAll('#interval option');
+    for (let i = 0; i < opts.length; i++) if (Number(opts[i].value) === v) return v;
+  } catch {}
+  return parseInt(document.getElementById('interval').value, 10);
+}
 function _startTimer() {
   if (_timer) clearInterval(_timer);
-  const sec = parseInt(document.getElementById('interval').value, 10);
+  const sec = readInterval();
+  document.getElementById('interval').value = String(sec);
   var label = sec >= 60 ? (sec/60)+' 分钟' : sec+'s';
   document.getElementById('status').textContent = '\u6bcf ' + label + ' \u81ea\u52a8\u5237\u65b0 \u00b7 \u672c\u6b21\u5237\u65b0 ' + '${nowStr}';
   _timer = setInterval(function() { location.reload(); }, sec * 1000);
 }
-document.getElementById('interval').addEventListener('change', _startTimer);
+function onIntervalChange() {
+  const sel = document.getElementById('interval');
+  try { localStorage.setItem(INTERVAL_KEY, sel.value) } catch {}
+  _startTimer();
+}
+document.getElementById('interval').addEventListener('change', onIntervalChange);
 _startTimer();
+// 折叠 disabled 节点组：用户展开/折叠状态记录到 localStorage（pool.disableCollapsed），
+// 刷新后按记录恢复。默认折叠（disabled 节点很少看）。
+const DISABLED_KEY = 'pool.disableCollapsed';
+function isDisabledCollapsed() {
+  try { return localStorage.getItem(DISABLED_KEY) !== '0' } catch { return true }
+}
+function setDisabledCollapsed(v) {
+  try { localStorage.setItem(DISABLED_KEY, v ? '1' : '0') } catch {}
+}
+function applyDisabledView() {
+  const toggle = document.getElementById('disabledToggle');
+  if (!toggle) return;
+  const collapsed = isDisabledCollapsed();
+  const rows = document.querySelectorAll('#disabledBody tr.drow');
+  for (let i = 0; i < rows.length; i++) rows[i].style.display = collapsed ? 'none' : '';
+  const caret = document.getElementById('disabledCaret');
+  if (caret) caret.textContent = collapsed ? '▸' : '▾';
+  const toggleRow = document.getElementById('disabledToggle');
+  if (toggleRow) toggleRow.style.display = '';
+}
+function toggleDisabled() {
+  setDisabledCollapsed(!isDisabledCollapsed());
+  applyDisabledView();
+}
+applyDisabledView();
 </script>
 <p class="foot">状态 = 最近 10 次 rollout/eval 结算完成率（<b>健康</b>≥90% · <b>波动</b>≥70% · <b>异常</b>&lt;70%），替代单次 ping 判断；ping 列仅作实时参考。
 最近错误仅显示最近 1 小时内。数据源：按 mtime 自动选取最新训练流的 dist-agent-meta.jsonl（仅聚合最近活跃目录）·

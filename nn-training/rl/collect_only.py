@@ -23,6 +23,10 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
     """
     import threading as _threading
 
+    # D14 语料血缘：预采 shard 也带 course_fp（manifest 由 exporter 写入，
+    # resume 对账按 course_fp 过滤——旧课程 shard 不混入新课程预采目录）。
+    from rl.loop_core import _course_file_fp
+
     it = args.start_it or 1
     traj_dir = traj_root / f"it{it}"
     traj_dir.mkdir(parents=True, exist_ok=True)
@@ -72,12 +76,22 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
                 iter_id,
                 on_result=_on_result,
                 halt_event=halt_event,
+                course_fp=_course_file_fp(args),
             )
         else:
             report = run_rollout(bun, args.bc, traj_dir, pairs, args)
     else:
         if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
-            report = run_rollout_queue(bun, args.bc, traj_dir, pairs, args, dist_cfg, iter_id)
+            report = run_rollout_queue(
+                bun,
+                args.bc,
+                traj_dir,
+                pairs,
+                args,
+                dist_cfg,
+                iter_id,
+                course_fp=_course_file_fp(args),
+            )
         else:
             report = run_rollout(bun, args.bc, traj_dir, pairs, args)
     log(

@@ -111,6 +111,7 @@ class RolloutDispatcher:
         on_queue_drained=None,
         local_suspend: threading.Event | None = None,
         extra_wver: str | None = None,
+        course_fp: str | None = None,
     ):
         self.bun = bun
         self.rl_path = rl_path
@@ -126,6 +127,7 @@ class RolloutDispatcher:
         self.on_queue_drained = on_queue_drained
         self.local_suspend = local_suspend
         self.extra_wver = extra_wver
+        self.course_fp = course_fp
 
     def run(self) -> dict:
         # 参数局部别名（OO 化：run 主体保持原函数体裸名，指向 self 状态）
@@ -143,6 +145,7 @@ class RolloutDispatcher:
         on_queue_drained = self.on_queue_drained
         local_suspend = self.local_suspend
         extra_wver = self.extra_wver
+        course_fp = self.course_fp
         t_queue_enter = time.time()  # ping+权重下发阶段计时起点（→ dist_phase_sec）
 
         policy = cfg.get("policy", {})
@@ -314,7 +317,7 @@ class RolloutDispatcher:
         # 重启同一迭代，it60 实测目录 235 局/计划 105 局），它们不在新计划里——既不重跑
         # 也不并入报告。done 一词自此恒指计划内已完成。
         plan_set = set(norm_pairs)
-        done_all = completed_pairs(traj_dir, wver, extra_wver=extra_wver)
+        done_all = completed_pairs(traj_dir, wver, extra_wver=extra_wver, course_fp=course_fp)
         done = done_all & plan_set
         tasks = [p for p in norm_pairs if p not in done]
         if done_all:
@@ -336,7 +339,9 @@ class RolloutDispatcher:
             # 全为零（指标盲区）；only=plan_set 保证跨配置残留下聚合口径仍等于本轮计划。
             # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
             combined = combine_reports(
-                resumed_manifests(traj_dir, wver, only=plan_set, extra_wver=extra_wver)
+                resumed_manifests(
+                    traj_dir, wver, only=plan_set, extra_wver=extra_wver, course_fp=course_fp
+                )
             )
             combined["missing"] = []
             combined["expectedGames"] = len(pairs)
@@ -668,10 +673,12 @@ class RolloutDispatcher:
                     else:
                         # M1d：课程自定义关 stageJson / 命数星级覆盖（本地 slot 分支经
                         # cmd.py 透传；dist 分支在这里进查询参数）。
+                        from rl.cmd import course_fp_for_args
                         from rl.config import args_rollout_overrides, stage_json_for_args
 
                         _sj = stage_json_for_args(args, task[0])
                         _ov = args_rollout_overrides(args)
+                        _cfp = course_fp_for_args(args)  # D14 语料血缘
                         # 能力握手（plan §5.2 / LC §4.6）：stageJson 任务只派给
                         # ping.stageJsonSupport 节点；不支持 → 响亮失败，绝不降级。
                         if _sj and not (nd.get("ping") or {}).get("stageJsonSupport"):
@@ -701,6 +708,7 @@ class RolloutDispatcher:
                             player_level=int(_ov["player_level"])
                             if "player_level" in _ov
                             else None,
+                            course_fp=_cfp,
                         )
                         why = dist_common.validate_result(
                             manifest, files, wver, set(norm_pairs), seen
@@ -931,7 +939,9 @@ class RolloutDispatcher:
 
         combined = combine_reports(
             [_ensure_games(r) for r in results]
-            + resumed_manifests(traj_dir, wver, exclude=seen, only=plan_set, extra_wver=extra_wver)
+            + resumed_manifests(
+                traj_dir, wver, exclude=seen, only=plan_set, extra_wver=extra_wver, course_fp=course_fp
+            )
         )
         combined["missing"] = [list(k) for k in missing]
         combined["expectedGames"] = len(pairs)

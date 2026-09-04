@@ -747,6 +747,10 @@ function main(): void {
   let weightsPath = 'tmp/rl-weights/weights.json'
   let wver = ''
   let nodeLabel = ''
+  // D14（plan/remote-ppo-architecture.md）：语料血缘 course_fp = 课程文件 sha256。
+  // hub 侧在发布 rollout 时透传——写进每局 shard manifest，远程 PPO 装载校验
+  // job.course_fp == shard.course_fp（跨课程语料绝不混训）。空 = 非课程路径，不写。
+  let courseFp = ''
   // plan/rl-training-config.md §5：自定义关 stageJson（课程配置 grid，13×13 瓦格）
   let stageJson = ''
   let livesOverride = ''
@@ -773,6 +777,7 @@ function main(): void {
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
     else if (args[i] === '--node-label') nodeLabel = args[++i]
+    else if (args[i] === '--course-fp') courseFp = args[++i]
     else if (args[i] === '--pack') packPath = args[++i]
   }
   const stages = parseRange(stagesStr)
@@ -883,6 +888,7 @@ function main(): void {
         playerDamageTaken: res.playerDamageTaken,
         stuckTicks: res.stuckTicks,
         ...(wver ? { wver, node: nodeLabel } : {}),
+        ...(courseFp ? { course_fp: courseFp } : {}),
       }
       if (res.shard.n > 0) {
         writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
@@ -953,6 +959,7 @@ function main(): void {
       Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))]),
     ),
     ...(wver ? { wver, node: nodeLabel } : {}),
+    ...(courseFp ? { course_fp: courseFp } : {}),
   }
   console.log(perGame.join('\n'))
   console.log(`\n=== RL on-policy rollout (R3 v7-aligned-f3) ===`)

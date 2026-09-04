@@ -473,6 +473,7 @@ def fetch_task(
     stage_json: str = "",
     lives_override: int | None = None,
     player_level: int | None = None,
+    course_fp: str = "",
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -521,6 +522,8 @@ def fetch_task(
         params["livesOverride"] = lives_override
     if player_level is not None:
         params["playerLevel"] = player_level
+    if course_fp:
+        params["courseFp"] = course_fp
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
@@ -563,6 +566,9 @@ def _poll_result(
     # stageJsonHash 必须进轮询键（agent resultCache key 含布局指纹，M1d）
     if params.get("stageJsonHash"):
         qparams["stageJsonHash"] = params["stageJsonHash"]
+    # courseFp 必须进轮询键（agent resultCache key 含课程血缘，D14）
+    if params.get("courseFp"):
+        qparams["courseFp"] = params["courseFp"]
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(1.0, budget)
     while True:
@@ -671,7 +677,9 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
         raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
         with open(os.path.join(out_dir, name), "wb") as f:
             f.write(raw)
-    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False)
+    # 2026-09-05 修复（F8.3 / plan/remote-ppo-architecture.md §11）：此前**双写**
+    # manifest.json（先紧凑再 indent=2，第二次覆盖第一次）——冗余 IO + 双写窗口
+    # 无谓暴露（中途崩溃留半写文件）。只保留 indent=2 写（与 TS 侧 exporter 同规），
+    # 磁盘产物字节不变（旧代码最终落盘的就是 indent=2 版本）。
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)

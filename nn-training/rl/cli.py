@@ -343,6 +343,37 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default="",
         help="等价于 --course <路径>（显式文件路径形式；与 --course 互斥）",
     )
+    # ===== 远程 PPO（plan/remote-ppo-architecture.md §5/§9）：PPO 在云端 GPU，rollout 在本地 =====
+    # 默认 local = 现状逐字节回归基线；remote 内部强制 stream=0（每迭代结算一次 PPO）+
+    # skip 模型构建（hub 免 torch，D2），且与 --stream 1 / --double-buffer 显式互斥（fail-fast）。
+    ap.add_argument(
+        "--ppo",
+        default=_d("ppo", "local"),
+        choices=("local", "remote"),
+        help="PPO 执行面：local（现状，CPU/本机） / remote（云端 GPU worker，旁路 hub-server）",
+    )
+    ap.add_argument(
+        "--remote-hub-url",
+        default=_d("remote_hub_url", ""),
+        help="远程模式：hub-server base URL（如 http://127.0.0.1:8787）",
+    )
+    ap.add_argument(
+        "--remote-token",
+        default=_d("remote_token", ""),
+        help="远程模式：hub-server Bearer token（云 worker 与训练主循环共享）",
+    )
+    ap.add_argument(
+        "--remote-job-root",
+        default=_d("remote_job_root", ""),
+        help="远程模式：job 目录根（默认 <traj>/remote-jobs；与 hub-server --job-root 一致）",
+    )
+    ap.add_argument(
+        "--remote-precollect",
+        type=int,
+        default=_d("remote_precollect", 0),
+        help="远程模式预采（D3/Q10，默认 0=测后开）：1=PPO 等待窗口 spawn 下一轮首波"
+        "预采（stale 上限 30%，超量下轮现场重采）",
+    )
     ap.add_argument(
         "--echo-config",
         action="store_true",

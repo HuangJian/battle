@@ -17,14 +17,28 @@ from __future__ import annotations
 from typing import Any
 
 
-def tensored_chunks(chunks: list[dict], device) -> list[dict]:
+def tensored_chunks(chunks: list[dict], device, memory_format=None) -> list[dict]:
     """numpy minibatch chunks → torch（一次性转换，避免每 epoch 重复）。
 
     chunk 字段全部为 numpy 数组（obs/scalars/actions/logprobs/adv/ret/mask）。
+
+    memory_format（F2/review-hy 2.08×）：传入 torch.channels_last 时，obs 张量
+    转换后即转换为 NHWC 内存布局——mkldnn 在 NHWC 下走快路径，实测 2.08× 加速
+    （4.29 → 2.06 s/chunk）。对 GPU 也是快路径。调用方（ppo/engine.py 等）在
+    模型构建后调用一次 model.to(memory_format=channels_last) 即可。
     """
     import torch
 
-    return [{k: torch.from_numpy(v).to(device) for k, v in c.items()} for c in chunks]
+    out: list[dict] = []
+    for c in chunks:
+        item: dict = {}
+        for k, v in c.items():
+            t = torch.from_numpy(v).to(device)
+            if memory_format is not None and k == "obs":
+                t = t.contiguous(memory_format=memory_format)
+            item[k] = t
+        out.append(item)
+    return out
 
 
 def aggregate_stats(stats: list[dict[str, float]], keys: list[str]) -> dict[str, float]:

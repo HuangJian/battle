@@ -446,6 +446,7 @@ async function runGame(
   stageJson = '',
   livesOverride = '',
   playerLevel = '',
+  courseFp = '',
 ): Promise<Buffer> {
   // 多桶：按 (kind, wver) 精确取——同节点可同时服务多个不同权重的训练流
   const ws = weightsOf(kind, wver)
@@ -506,6 +507,9 @@ async function runGame(
       if (stageJson) args.push('--stage-json', stageJson)
       if (livesOverride) args.push('--lives-override', livesOverride)
       if (playerLevel) args.push('--player-level', playerLevel)
+      // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
+      // goal/intent exporter 不认识该参数）
+      if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
     }
     args.push(
       '--max-ticks',
@@ -579,10 +583,13 @@ function taskKey(
   stage: number,
   seed: number,
   sjHash = '',
+  courseFp = '',
 ): string {
-  return sjHash
-    ? `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
-    : `${iterId}:${mode}:${kind}:${stage}:${seed}`
+  if (sjHash && courseFp)
+    return `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}:${courseFp.slice(0, 16)}`
+  if (sjHash) return `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
+  if (courseFp) return `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
+  return `${iterId}:${mode}:${kind}:${stage}:${seed}`
 }
 
 function beginTask(
@@ -603,6 +610,7 @@ function beginTask(
   stageJson = '',
   livesOverride = '',
   playerLevel = '',
+  courseFp = '',
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -622,6 +630,7 @@ function beginTask(
     stageJson,
     livesOverride,
     playerLevel,
+    courseFp,
   )
     .then((buf) => {
       lruPut(key, buf)
@@ -863,6 +872,8 @@ async function handle(req: Request): Promise<Response> {
     const stageJson = url.searchParams.get('stageJson') ?? ''
     const livesOverride = url.searchParams.get('livesOverride') ?? ''
     const playerLevel = url.searchParams.get('playerLevel') ?? ''
+    // D14：语料血缘 course_fp（课程文件 sha256，进 shard manifest + 缓存键）
+    const courseFp = url.searchParams.get('courseFp') ?? ''
     if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
       return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
@@ -882,7 +893,7 @@ async function handle(req: Request): Promise<Response> {
     const sjHash = stageJson
       ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
       : ''
-    const key = taskKey(iterId, mode, kind, stage, seed, sjHash)
+    const key = taskKey(iterId, mode, kind, stage, seed, sjHash, courseFp)
     const cached = resultCache.get(key)
     if (cached) {
       cacheHits++
@@ -919,6 +930,7 @@ async function handle(req: Request): Promise<Response> {
         stageJson,
         livesOverride,
         playerLevel,
+        courseFp,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -956,6 +968,7 @@ async function handle(req: Request): Promise<Response> {
           stageJson,
           livesOverride,
           playerLevel,
+          courseFp,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)

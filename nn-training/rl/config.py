@@ -177,6 +177,32 @@ def validate_args(args) -> None:
             "[run_rl] 启动参数非法（见上）——修复后重试；"
             "这些错误此前要等训练中途才暴露（P1-3 启动期校验）"
         ) from None
+    # ===== 远程模式（--ppo remote，plan §5）：内部强制 stream=0 + skip 模型构建；
+    # 与 --stream 1 / --double-buffer **显式互斥**——config 默认值（rl.<mode>.stream
+    # 对本地模式正确）静默降 0，用户显式传 --stream 1 / --double-buffer 1 才报错
+    # （run_rl.main 用 parse_args([]) 基线把显式性存到 args._explicit_*）。=====
+    if getattr(args, "ppo", "local") == "remote":
+        if getattr(args, "_explicit_stream", False) and int(getattr(args, "stream", 0) or 0):
+            raise SystemExit(
+                "[run_rl] --ppo remote 与显式 --stream 1 互斥（远程 = 每迭代结算一次 "
+                "PPO，wave 级 stream 只留本地模式）——删掉 --stream 1"
+            )
+        if getattr(args, "_explicit_double_buffer", False) and int(
+            getattr(args, "double_buffer", 0) or 0
+        ):
+            raise SystemExit(
+                "[run_rl] --ppo remote 与显式 --double-buffer 互斥（远程预采由 "
+                "--remote-precollect 控制，Q10 默认 0）——删掉 --double-buffer"
+            )
+        if getattr(args, "mode", "per-tick") != "per-tick":
+            raise SystemExit(
+                "[run_rl] --ppo remote 仅支持 per-tick 课程（v1 红线）——"
+                f"收到 mode={getattr(args, 'mode', 'per-tick')}"
+            )
+        # 静默降级（内部强制）：config 默认 stream/double-buffer 不适用于远程
+        args.stream = 0
+        args.double_buffer = 0
+        log("[run_rl] remote mode: stream/double-buffer forced to 0 (config defaults suppressed)")
 
 
 # ================================================================== 课程配置
@@ -581,14 +607,20 @@ def resolve_course(name_or_path: str) -> Path:
 
 
 def course_from_args(args) -> CourseConfig | None:
-    """argparse Namespace → CourseConfig（未传 --course/--course-file 时返回 None）。"""
+    """argparse Namespace → CourseConfig（未传 --course/--course-file 时返回 None）。
+
+    同时把解析出的课程文件路径挂到 `args.course_path`——远程模式发布 job 时
+    需要课程 jsonc 全文快照 + course_fp（sha256 of 文件字节）进 manifest（D13/D14）。
+    """
     name = str(getattr(args, "course", "") or "")
     path = str(getattr(args, "course_file", "") or "")
     if name and path:
         raise SystemExit("[run_rl] --course 与 --course-file 互斥，只能给一个")
     if not name and not path:
         return None
-    return load_course(path if path else name)
+    p = resolve_course(path if path else name)
+    args.course_path = str(p)
+    return load_course(p)
 
 
 def apply_course(args, course: CourseConfig) -> None:

@@ -38,6 +38,32 @@ from rl.rollout_phase import (
 )
 
 
+def _course_file_fp(args) -> str | None:
+    """D14 语料血缘：课程文件 sha256；无课程返回 None（旧行为不过滤）。
+
+    torch-free（hub 远程分支也调用——只读文件字节）。与
+    remote/hub_client.publish_job 的 course_fp 同算法，两端必须一致。
+    """
+    import hashlib
+
+    course = getattr(args, "course_obj", None)
+    if course is None:
+        return None
+    path = getattr(args, "course_path", "") or ""
+    if not path:
+        from rl.config import resolve_course
+
+        try:
+            path = str(resolve_course(course.name))
+        except Exception:
+            return None
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def run_inspect(bun: str, it: int, traj_dir: Path) -> None:
     """每轮 ppo_backend 写回后自动生成巡检 HTML（rl-hourly-inspect.ts --traj-dir）。
 
@@ -132,7 +158,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
             it += 1
             # 吞吐 T4：本轮开头检查预采子进程产出（句柄消费后归零）
             self._collect_child = join_precollect_child(
-                self._collect_child, self._traj_root, it, args
+                self._collect_child, self._traj_root, it, args, course_fp=self._course_fp
             )
             if self._deadline is not None and time.time() >= self._deadline:
                 log(f"[run_rl] max-hours={args.max_hours} reached — stopping before it{it}")
@@ -208,6 +234,30 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         # ===== 训练路径延迟导入（B7，2026-09-02）：collect-only 子进程已提前 return，
         # 此刻起才允许拉起 torch / ppo.* / models.*（CPU 上 ~3-8s 的 torch 加载不再
         # 出现在每轮的双缓冲预采子进程里）。=====
+        #
+        # ===== 远程模式（--ppo remote，D2）：hub 免 torch——PPO 在云端 worker，
+        # 本机只做调度 + 文件搬运。跳过 build_model/opt/ref_model 全链（不 import
+        # torch / ppo.*），模型/优化器零加载（_serial_ppo 远程分支也不触碰）。=====
+        if getattr(args, "ppo", "local") == "remote":
+            import numpy as np
+
+            np.random.seed(args.seed)
+            self.ppo_backend = None
+            self._model = None
+            self._opt = None
+            self._device = None
+            self._ref_model = None
+            self._ppo_mod = None
+            self._ppo_goal = None
+            self._ppo_intent = None
+            self._save_weights_json = None
+            log(
+                "[run_rl] REMOTE PPO mode: hub torch-free (D2) — PPO runs on cloud worker; "
+                "rollout/eval stay local"
+            )
+            self._setup_common()
+            return
+
         import numpy as np
         import torch
 
@@ -265,10 +315,18 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         if n_frozen == 0 and freeze_prefixes:
             log(f"[run_rl] WARN freeze prefixes matched nothing: {freeze_prefixes}")
 
+        self._setup_common()
+
+    def _setup_common(self) -> None:
+        """两模式（local/remote）共享的启动尾部：traj 目录 / rotateSeed / run_start 账本 /
+        日志 / eval 稀疏化 / 断点续跑定位。remote 分支在跳过 torch 构建后也走这里。"""
+        args = self.args
         traj_root = Path(args.traj)
         traj_root.mkdir(parents=True, exist_ok=True)
         self._traj_root = traj_root
         self._jsonl_path = traj_root / "training_log.jsonl"
+        # D14 语料血缘：课程文件 sha256（None = 非课程运行，不过滤——旧行为字节不变）
+        self._course_fp = _course_file_fp(args)
 
         # 续跑继承 rotateSeed：已有 run_start 历史 → 沿用其 rotateSeed（课程连续 → it 续跑时
         # 下轮 (stage,seed) 与已落盘局一致 → 断点续跑剔除生效，不重跑已完成局）。
@@ -376,7 +434,9 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         # （θ_{N,e3} ≈ θ_N 于最后 1 个 epoch 前）——否则预采首波被当"未完成"清场。
         extra_wver = precollect_snapshot_wver(args.out, it)
         self._extra_wver = extra_wver
-        have_resume = bool(completed_pairs(traj_dir, wver, extra_wver=extra_wver))
+        have_resume = bool(
+            completed_pairs(traj_dir, wver, extra_wver=extra_wver, course_fp=self._course_fp)
+        )
         if have_resume:
             traj_dir.mkdir(parents=True, exist_ok=True)
             log(
@@ -414,6 +474,7 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 self._ref_model,
                 self._extra_wver,
                 eval_on_round,
+                course_fp=self._course_fp,
             )
         )
         self._report = report

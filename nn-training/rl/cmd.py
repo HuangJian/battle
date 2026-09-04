@@ -99,6 +99,36 @@ def build_rollout_cmd(
         sj = stage_json_for_args(args, stage)
         if sj:
             cmd += ["--stage-json", sj]
+        # D14：语料血缘 course_fp 进 shard manifest（远程 PPO 装载校验
+        # job.course_fp == shard.course_fp，跨课程语料绝不混训）。
+        cfp = course_fp_for_args(args)
+        if cfp:
+            cmd += ["--course-fp", cfp]
         for k, v in args_rollout_overrides(args).items():
             cmd += [f"--{k}", v]
     return cmd
+
+
+def course_fp_for_args(args) -> str:
+    """课程文件 sha256（D14 语料血缘）。无课程返回 ""（非课程路径不写 course_fp）。
+
+    与远程发布（remote/hub_client.publish_job）同一算法：sha256(课程 jsonc 文件字节)。
+    """
+    import hashlib
+
+    course = getattr(args, "course_obj", None)
+    if course is None:
+        return ""
+    path = getattr(args, "course_path", "") or ""
+    if not path:
+        from rl.config import resolve_course
+
+        try:
+            path = str(resolve_course(course.name))
+        except Exception:
+            return ""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""

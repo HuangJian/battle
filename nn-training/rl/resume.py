@@ -27,7 +27,10 @@ def _dir_signature(traj_dir: Path) -> tuple:
 
 
 def completed_pairs(
-    traj_dir: Path, wver: str, extra_wver: str | None = None
+    traj_dir: Path,
+    wver: str,
+    extra_wver: str | None = None,
+    course_fp: str | None = None,
 ) -> set[tuple[int, int]]:
     """扫描 traj_dir 已完整落盘且 manifest.wver∈{wver, extra_wver} 的 (stage,seed)——rollout 断点。
 
@@ -35,24 +38,33 @@ def completed_pairs(
     θ_N（PPO 末写好），而预采首波 shard 的 wver = 快照指纹——必须双白名单，否则
     首波被当"未完成"重新派发/清场，预采白做。
 
+    course_fp（D14，2026-09-05）：课程文件 sha256（语料血缘）。非空时只认
+    manifest.course_fp == 该值的 shard——跨课程语料绝不混入本轮（课程切换后旧课程
+    shard 不参与断点对账，被当"未完成"重新派发）。None = 不过滤（旧行为逐字节不变）。
+
     完整 shard 判定：write_shard 先写 12 npy 后写 manifest；存在 manifest.json ⇒ 目录完整。
     仅在 manifest 显式回显 stage/seed（agent 打包时回填）后才算数，否则不计入 done。
     """
-    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver)}
+    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver, course_fp)}
 
 
 def _scan_shards(
-    traj_dir: Path, wver: str, extra_wver: str | None = None
+    traj_dir: Path,
+    wver: str,
+    extra_wver: str | None = None,
+    course_fp: str | None = None,
 ) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
+
+    course_fp：非空时额外要求 manifest.course_fp 匹配（D14 语料血缘）。
 
     目录签名缓存（P2-2）：签名未变（无新 shard / 无 shard 内容更新）时零 IO 复用。
     """
     if not traj_dir.exists():
         return []
     sig = _dir_signature(traj_dir)
-    key = (str(traj_dir), wver, extra_wver, sig)
+    key = (str(traj_dir), wver, extra_wver, course_fp, sig)
     cached = _SCAN_CACHE.get(key)
     if cached is not None:
         return cached
@@ -66,6 +78,8 @@ def _scan_shards(
         wv = mm.get("wver")
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
+        if course_fp is not None and mm.get("course_fp") != course_fp:
+            continue  # D14：跨课程语料不参与对账
         res.append(((int(st), int(sd)), m.parent))
     if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
         _SCAN_CACHE.clear()
@@ -79,6 +93,7 @@ def resumed_manifests(
     exclude: set[tuple[int, int]] | None = None,
     only: set[tuple[int, int]] | None = None,
     extra_wver: str | None = None,
+    course_fp: str | None = None,
 ) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
@@ -106,6 +121,8 @@ def resumed_manifests(
         wv = mm.get("wver")
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
             continue
+        if course_fp is not None and mm.get("course_fp") != course_fp:
+            continue  # D14：跨课程语料绝不并入本轮报告
         if (int(st), int(sd)) in skip:
             continue
         if only is not None and (int(st), int(sd)) not in only:

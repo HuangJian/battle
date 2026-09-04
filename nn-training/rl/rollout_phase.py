@@ -32,6 +32,7 @@ def join_precollect_child(
     traj_root: Path,
     it: int,
     args,
+    course_fp: str | None = None,
 ) -> subprocess.Popen | None:
     """吞吐 T4：本轮开头检查预采子进程产出。
 
@@ -55,7 +56,9 @@ def join_precollect_child(
     _pre_deadline = time.time() + 3600
     _pre_ready = False
     while time.time() < _pre_deadline:
-        _pre_done = completed_pairs(_pre_traj_dir, _pre_wver, extra_wver=_pre_extra_wver)
+        _pre_done = completed_pairs(
+            _pre_traj_dir, _pre_wver, extra_wver=_pre_extra_wver, course_fp=course_fp
+        )
         if len(_pre_done) >= _pre_min_wave:
             log(
                 f"[double-buffer] precollect it{it}: {len(_pre_done)} shards ready "
@@ -91,6 +94,7 @@ def dispatch_rollout_phase(
     ref_model,
     extra_wver: str | None,
     eval_on_round: bool,
+    course_fp: str | None = None,
 ) -> tuple[
     dict,
     dict | None,
@@ -212,11 +216,14 @@ def dispatch_rollout_phase(
                 on_collect_done=_fire_eval,
                 on_epoch_done=_on_epoch_done,
                 extra_wver=extra_wver,
+                course_fp=course_fp,
                 **_stream_kwargs,
             )
             stream_meta = report
         else:
-            report = run_rollout_queue(bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id)
+            report = run_rollout_queue(
+                bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id, course_fp=course_fp
+            )
             # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 ppo_backend 空窗
             # 吞吐 T3：非 eval 轮不派发（eval_on_round 循环级统一门控）。
             if eval_on_round:
