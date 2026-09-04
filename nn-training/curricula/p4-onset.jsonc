@@ -18,11 +18,26 @@
 // 值原为单敌标定（God-AI 胜局平均 ~535 tick）。4 敌清场预计需 ~2-4× 时长，若
 // 评估中超时占比过高则该预算对多敌偏紧——届时按实测重标定，属后续项。
 //
-// 激励设计（scheme=toy，与 p1 全同——"其它设置不变"）：
+// 激励设计（scheme=toy，p1 公式 + 拾取项——与 p10 同值，DECISIONS §332/§333）：
 //   - 杀敌 +3.0/个 ×4（核心目标）· 命中 +0.3/次
+//   - 拾取道具 +1.5/个（powerUpsCollected）· 星星额外 +1.0/个（starsCollected 子集，
+//     star 实得 2.5）——4 敌局按 carrier 节奏约 1 滴，拾取项总量 ≈ 1.5-2.5 < 一杀，
+//     只做"别绕开道具走"的 nudging，主信号仍是击杀。防刷同 p10（供给有界 + 超时消失）。
 //   - 挨打 -1.0/次（1 命 0 星玩家 maxHp 263，挨 2-3 发死）
 //   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)
 //   - 弹药效率 -0.01/发 · 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0
+//
+// 行为基线（2026-09-04，tools/sim/eval-course-ckpt.ts，单关 × seeds 0..99，贪心部署）：
+//   - God-AI：64/100（杀 306，均 3.06；击中敌 881；被击中 34；开枪 1500；
+//     通关 64 / 死亡 34 / 超时 2；4 杀局 64 全部真正清场）
+//   - p1-ep60（RL 起点）：14/100（杀 193；击中敌 617；被击中 75；开枪 1021；
+//     通关 14 / 死亡 74 / 超时 12）——单敌 94% 到 4 敌只剩 14%，泛化缺口 ~50pp。
+//   - p4-BC ckpt.36：14/100（杀 135；被击中 83；开枪 676；死亡 82）——胜率打平 ep60
+//     但开火积极性永久掉档（"变怂"）；p1 留存 94→84。
+//   - p4-BC ep1-45 全扫（4500 局）：胜率 2-20/100，均值 ~11；击杀最高 ep2 的 160，
+//     从未接近 ep60 的 193——蒸馏上限证据链，详见 docs/rl.progress.md §3。
+// 行数据 tmp/p4-eval-{god,ckpt36}.jsonl、tmp/ep60-on-p4.jsonl、tmp/p45/ep*.jsonl
+// （易失）。注：评估不消费 reward 公式，基线不受 §332/§333 奖励变更影响。
 {
   "version": 5,
   "name": "p4-onset",
@@ -64,10 +79,12 @@
     "level": 0
   },
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
       "wDmg": 1.0,
       "wStuck": 0.02,
       "wShot": 0.01

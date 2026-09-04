@@ -1,0 +1,130 @@
+// 课程 P10-onset —— 十面围攻：10 敌混编，p4-onset 的直接升级版
+//
+// 背景：p4-onset（4 敌）是「多目标交战」技能课程（docs/rl.progress.md §2-§3）。
+// p4 蒸馏已平台期（45 ckpt 胜率 2-20/100，均值 ~11，教师 64），RL 起点定为
+// p1-ep60（§3.4）。本课程在 p4 达标后接力：敌人 4 → 10，其它配置与 p4 逐项
+// 相同（hard / 1 命 0 星 / 2400 ticks / 同一 toy reward / 同一地图）。
+//
+// 地图：与 p4 同一 11×11 cells（22×22 tiles）空旷场，无基地，玩家正中
+// （tile 12,12），敌人四角（tile 2,2 / 22,2 / 22,22 / 2,22）。
+// 敌人：10 个，混编。forces 沿用 20 字符 "abcd" 重复（RL 课程加载器要求恰好
+//   20 字符——nn-training/rl/config.py StageSpec 强校验），count=10 取前 10 字符
+//   = a/b/c/d/a/b/c/d/a/b，即 basic×3 / fast×3 / power×2 / armor×2。
+// 出生：前 4 号按队列顺序落四角（TL basic / TR fast / BR power / BL armor，与 p4
+//   同）；5-10 号按 spawnPointIndex 轮转取首个空位（src/game/SimulationSpawn.ts）。
+//   游戏机制保证同时在场 ≤4（MAX_ENEMIES_ALIVE），后续敌人排队补位。
+// 玩家：1 命 0 星（maxHp 263，挨 2-3 发死——与 p4 同一生存压力）。
+//
+// 注意（cap 预警）：max_ticks 2400 沿用 p4（"其它配置不变"），但 10 杀预计需
+// ~2.5× p4 的清场时长。若评估中超时占比 >15% 且胜率同步走高，则该预算已成紧约束——
+// 按 rl.progress.md §3.4 红灯规则重标定（先标定、再判断平台期），属后续项。
+//
+// 激励设计（scheme=toy，p4 公式 + 拾取项——p10 起新增，DECISIONS §332）：
+//   - 杀敌 +3.0/个 ×10（注意：可拿击杀 reward 总量随敌数放大，PPO value 尺度自适应）
+//   - 命中 +0.3/次
+//   - 拾取道具 +1.5/个（powerUpsCollected，累计计数 → 势能差分只在拾取步给奖）
+//   - 星星额外 +1.0/个（starsCollected 是子集，star 实得 2.5 ≈ 一杀——升枪是 10 敌
+//     规模下唯一的火力 scaling，不捡星很难通关）
+//   - 挨打 -1.0/次（1 命 0 星玩家 maxHp 263，挨 2-3 发死）
+//   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)
+//   - 弹药效率 -0.01/发 · 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0
+//
+// 定价依据：tank（1 命局 = 多一条命）/ bomb / freeze / frenzy 等多为翻盘级，单次拾取
+// 期望价值 ≈ 1-2 杀；按 carrier 节奏（每 4 出生 1 carrier）10 敌局约 2 滴，拾取项总量
+// ≈ 3 ≈ 1 杀，不会淹没击杀主信号。防刷：供给天然有界（carrier 数固定）+ 掉落超时消失
+// （POWERUP_TIMEOUT_MS，过期不捡即无）→ 不存在 farming 均衡。p4 课程已同步同值
+// 拾取项（DECISIONS §333）。
+//
+// 行为基线（2026-09-04，tools/sim/eval-course-ckpt.ts，单关 × seeds 0..99，贪心部署）：
+//   - God-AI：10/100（杀 413，均 4.13；击中敌 1182；被击中 77；开枪 1719；
+//     通关 10 / 死亡 73 / 超时 17）——10 敌下教师也只剩 10%，且超时占比 17% 已触发
+//     cap 红灯（见上），天花板预期要打折扣。
+//   - p1-ep60（RL 起点，zero-shot）：0/100（杀 129；被击中 95；死亡 92 / 超时 8）——
+//     单敌技能完全淹没在 10 敌围攻里，RL 要从近零胜率爬起。
+//   - p4-BC ep45（zero-shot）：1/100（杀 112；被击中 99；死亡 97）——p4 蒸馏无迁移，
+//     与 ep60 同档，佐证 RL 起点选 ep60（rl.progress.md §3.4）。
+// 行数据 tmp/p10-{god,ep60,ep45}.jsonl（易失）。注：评估不消费 reward 公式，基线不受
+// §332/§333 奖励变更影响。
+{
+  "version": 5,
+  "name": "p10-onset",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p10-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 10,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 50,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.995,
+  "lam": 0.97,
+  "ppo_schedule": [
+    { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
+    { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p10-onset/weights.json",
+  "traj": "tmp/p10-onset",
+  "backup_dir": "nn-training/weights/p10-onset",
+  "backup_prefix": "p10-onset",
+  // 自定义关 stage ID 按课程内偏移本地编号（tools/sim/eval-course-ckpt-worker.ts：
+  // stageId = 2000 + stageLocal）——p10 单关 → ID 2000，与 p4 的 2000 不冲突。
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 20,
+  "eval_every": 5
+}

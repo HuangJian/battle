@@ -1961,3 +1961,41 @@ tile (12,12) 正中央；无 spawn_variants 池（用户指定固定布局，see
 
 **验证**：`eval-course-ckpt.ts` 在 p4-onset 上跑 ep60 与 `--policy god` 各 100 局，
 结果记 docs/rl.progress.md §2（ep60 对单敌 94% → 对 4 敌的表现即泛化读数）。
+## §332 p10-onset 奖励函数：p4 toy 公式 + 拾取项（2026-09-04，用户指令）
+
+**用户指令**：p10 起激励函数增加 powerup 指标——不主动捡道具很难通关。
+
+**依据**：1 命 0 星 + 10 敌下，道具池多为翻盘级（star=全场唯一火力 scaling；
+tank=多一条命；bomb/freeze/frenzy=免费杀伤；config/powerups.ts 三档池）。
+God/p10 基线 10/100 佐证单靠枪法不够。供给天然有界（carrier 节奏每 4 出生 1 个，
+10 敌局约 2 滴）+ 掉落超时消失（POWERUP_TIMEOUT_MS）→ 无 farming 均衡，shaping 安全。
+
+**拍板**（`nn-training/curricula/p10-onset.jsonc`，纯配置，零代码改动——计数器
+`powerUpsCollected`/`starsCollected` 在 21 维 metrics 现成，公式引擎白名单内）：
+- 公式：p4 toy + `wPickup*powerUpsCollected + wStar*starsCollected`；
+- 定价：`wPickup=1.5`，`wStar=1.0`（starsCollected 是子集，star 实得 2.5≈一杀）。
+  拾取项总量/局 ≈ 3 ≈ 1 杀，不淹没击杀主信号（wKill=3.0）；
+- p4 课程公式不动 _(后被 §333 取代：用户指令同步拾取项）_；p10 从未训练，out/traj 天然 fresh——符合 §15.5 新实验语义。
+
+**备选（否决）**：按道具种类差别定价——21 维无分类型计数器，加维 = shard 格式变更
++ 旧语料失效（§331-D15 红线），为调参付 schema 代价不值；先跑，有证据再议。
+
+**验证（2026-09-04，本机实测）**：`load_course('p10-onset')` pydantic 通过；
+`build_reward_fn` 编译通过；合成累计矩阵数值语义全对（拾取步 +1.5 / 星星步 +2.5 /
+击杀步 +3.0 / 通关终局 +2.0 / 死亡终局 −1.0）；`load_course('p4-onset')` 回归 unchanged；
+`test_reward_golden.py` 43 passed。
+
+## §333 p4-onset 奖励同步拾取项（2026-09-04，用户指令，取代 §332 的"p4 不动"）
+
+**用户指令**：道具激励也加进 p4 课程。
+
+**时機安全**：p4-RL 尚未开跑（起点 ep60 已定、未启动），现在改不触发 §331-Q11 的
+"在途 run 冻结"问题；一旦 PPO 启动，奖励再改只能等下一轮。BC 侧不受影响（BC 只拟合
+动作，不消费 reward 公式；§2/§3 的行为基线照常有效）。
+
+**拍板**：与 p10 **同值**（`wPickup=1.5`，`wStar=1.0`，star 实得 2.5）——跨课程可比，
+且 4 敌局按 carrier 节奏约 1 滴，拾取项总量 ≈ 1.5–2.5 < 一杀，只做"别绕开道具走"的
+nudging，主信号仍是击杀（wKill=3.0）。
+
+**验证（2026-09-04，本机实测）**：`load_course('p4-onset'/'p10-onset')` 均通过；
+合成矩阵拾取步 +1.5 / 星星增量 +1.0 / 通关 +2.0 全对；`test_reward_golden.py` 43 passed。
