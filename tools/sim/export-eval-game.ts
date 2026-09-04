@@ -9,6 +9,9 @@
  * 与训练 rollout 的语义差异（有意为之）：
  *   - 动作 = 掩码 argmax（无探索噪声）；整局零随机决策 → 同 (权重, 关, seed) 逐 tick 确定。
  *   - 只写 `_eval_report.json`（outcome/ticks/win/cleared/score/dims），不产 trajectory shards。
+ *   - 报告同时携带 `playerHits`（player_hit 事件数：死亡 + 星盾消耗）与
+ *     `playerDamageTaken`（player_damage 非致命扣血累计）——与 export-rl-rollout
+ *     telemetry 同语义（评估报告 schema 变更，dist 哈希集节点须随新代码同步）。
  *   - 打分 = 纯 v7（V7_SCORE_CONFIG 原值，不做 F3 门控、不败局带剔 lives）
  *     ——与 God-AI 全部基线可比（评估口径 godai-score.ts 保持不动）。
  *   - `cleared` = 全歼率口径（方案 §2.1「全歼率」门）：敌人全灭即算，不受 BONUS TIME
@@ -133,6 +136,10 @@ interface Telemetry {
   firstKillTick: number | undefined
   /** 命中敌方累计（enemy_hit 事件数，含致死命中）。双侧同步字段。 */
   enemyHits: number
+  /** 玩家被命中次数（player_hit 事件：死亡 + 星盾消耗）。与 export-rl-rollout 同语义。 */
+  playerHits: number
+  /** 非致命扣血累计（player_damage 事件 damage 累计；致死/星盾不推）。 */
+  playerDamageTaken: number
 }
 
 function countBaseWall(world: World): number {
@@ -187,6 +194,10 @@ interface EvalResult {
   scorable: Record<string, unknown>
   kills: number
   enemyHits: number
+  /** 玩家被命中次数（player_hit 事件；同 rollout 口径）。 */
+  playerHits: number
+  /** 非致命扣血累计（player_damage 事件）。 */
+  playerDamageTaken: number
   playerShots: number
   powerUpsCollected: number
 }
@@ -283,6 +294,8 @@ export function runEvalOne(
     cellsVisited: new Set<number>(),
     firstKillTick: undefined,
     enemyHits: 0,
+    playerHits: 0,
+    playerDamageTaken: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -318,6 +331,10 @@ export function runEvalOne(
       if (e.type === 'tank_destroyed') {
         if ((e as any).by === 'player' && tel.firstKillTick === undefined) tel.firstKillTick = t - 1
         if ((e as any).tank?.isPlayer) tel.playerDeaths++
+      } else if (e.type === 'player_hit') {
+        tel.playerHits++
+      } else if (e.type === 'player_damage') {
+        tel.playerDamageTaken += (e as { damage: number }).damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
       } else if (e.type === 'enemy_hit') {
@@ -420,6 +437,8 @@ export function runEvalOne(
     },
     kills: world.killCount,
     enemyHits: tel.enemyHits,
+    playerHits: tel.playerHits,
+    playerDamageTaken: tel.playerDamageTaken,
     playerShots: tel.playerShots,
     powerUpsCollected: tel.powerUpsCollected,
   }
@@ -521,6 +540,8 @@ function main(): void {
     scorable: res.scorable,
     kills: res.kills,
     enemyHits: res.enemyHits,
+    playerHits: res.playerHits,
+    playerDamageTaken: res.playerDamageTaken,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
     ...(wver ? { wver, node: nodeLabel } : {}),

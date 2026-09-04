@@ -6,8 +6,9 @@ trains the 3-headed policy with masked cross-entropy:
   * Only samples where the invalid-action mask == 1 contribute to a head's loss
     (plan §1.3-4 — turn-locked / cooldown / zero-stock actions are masked out).
   * mirrorX online augmentation (prob --mirror-p) on the training split only.
-  * CPU-only (plan: 8-core 32G, no GPU). Small network (~77K params) matches
-    the 40-120K BC sample count (underfit-safe).
+  * CPU by default; `--device cuda` trains on GPU (weights export stays CPU —
+    bitwise-stable files regardless of device). Small network (~77K params)
+    matches the 40-120K BC sample count (underfit-safe).
 
 Outputs:
   * <--out>  : JSON+base64 weights (plan §5), loadable by the TS runtime.
@@ -222,11 +223,13 @@ def train(args) -> dict:
     # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
     # 纯 BC（无 returns）沿用 StudentNet / NNPolicy 双头。
+    dev = torch.device(getattr(args, "device", "cpu") or "cpu")
     use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
     model = PPOStudent() if use_value else (StudentNet() if args.arch == "student" else NNPolicy())  # type: ignore
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
+    model = model.to(dev)
     n_params = param_count(model)
     print(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"
@@ -251,7 +254,7 @@ def train(args) -> dict:
         model.train()
         run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
-            obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
+            obs, sc, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
             opt.zero_grad()
             if use_value:
                 lm, lf, vpred = model(obs, sc)
@@ -280,7 +283,7 @@ def train(args) -> dict:
         v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "vloss": 0.0, "vn": 0}
         with torch.no_grad():
             for batch in val_dl:
-                obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
+                obs, sc, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
                 if use_value:
                     lm, lf, vpred = model(obs, sc)
                 else:
@@ -326,7 +329,9 @@ def train(args) -> dict:
             )
             print(f"[train] checkpoint epoch {epoch}/{args.epochs} -> {ckpt_path}")
 
-    # Restore best and export (versioned archive + active pointer + history md).
+    # Restore best on CPU (weights export/registry must be bitwise-stable
+    # regardless of training device).
+    model.to("cpu")
     model.load_state_dict(best_state)
     trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     meta = {
@@ -429,6 +434,12 @@ def main():
     ap.add_argument("--mirror-p", type=float, default=0.5, help="mirrorX augmentation prob")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--num-workers", type=int, default=0)
+    ap.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="torch device for training: cpu | cuda | cuda:N (weights export is always CPU, bits-stable)",
+    )
     ap.add_argument(
         "--value-coef",
         type=float,

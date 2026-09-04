@@ -18,12 +18,14 @@ function recount(events: GameEvent[]): {
   deaths: number
   kills: number
   hits: number
+  damage: number
   enemyHits: number
 } {
   let shots = 0
   let deaths = 0
   let kills = 0
   let hits = 0
+  let damage = 0
   let enemyHits = 0
   for (const e of events) {
     if (e.type === 'bullet_fired') {
@@ -33,11 +35,13 @@ function recount(events: GameEvent[]): {
       if (e.by === 'player') kills++
     } else if (e.type === 'player_hit') {
       hits++
+    } else if (e.type === 'player_damage') {
+      damage += (e as unknown as { damage: number }).damage
     } else if (e.type === 'enemy_hit') {
       enemyHits++
     }
   }
-  return { shots, deaths, kills, hits, enemyHits }
+  return { shots, deaths, kills, hits, damage, enemyHits }
 }
 
 function simOne(stageIdx: number, seed: number, maxTicks = 4000): SimResult {
@@ -122,6 +126,10 @@ describe('远程/本地评估遥测口径一致（P0-1 分发对账）', () => {
       // enemy_hit 双侧一致（2026-09-01 新增 telemetry 字段）
       const recount1 = recount(local.events)
       expect(remote.enemyHits).toBe(recount1.enemyHits)
+      // player_hit / player_damage 双侧一致（2026-09-04：runEvalOne 报告新增字段，
+      // 与 export-rl-rollout telemetry 同语义）
+      expect(remote.playerHits).toBe(recount1.hits)
+      expect(remote.playerDamageTaken).toBe(recount1.damage)
     }
   })
 })

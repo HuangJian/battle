@@ -1888,3 +1888,56 @@ CPU 采样、nn-training README/五个 .py docstring 示例、docs/agents.detail
 plan/python-env-bootstrap-and-device.md、NN-Training-Foundation-Overview.md、
 tools/githook/pre-commit 注释、AGENTS.md §17.7 新增规则。历史日志
 （nn.progress.md / goal-nn.progress.md / decisions.details.md 等）为当时实况记录，不改写。
+
+## §324 launcher --script 支持子包入口与旧名别名（2026-09-04，修复 stale 契约）
+
+**背景**：2026-09-01 打包重构（3c83169）把 root 训练入口并入子包：train_bc.py→
+train/bc.py、train_goal_bc.py→train/goal_bc.py、train_intent_probe.py→
+train/intent_probe.py、eval_bridge/eval_intent_m5/gen_self_inj/init_scratch_weights/
+validate_export.py→scripts/；train_rl.py 删除（run_rl.py 为现行 RL 入口）。但
+start-training.{sh,ps1} 仍只收 nn-training/ 根目录**裸 .py 名** —— `--script
+train_bc.py` 报 script not found，头注/文档示例全 stale。2026-09-04 p1-godai BC
+早前因此留下 0 字节 log、无权重产出（机制 smoke 复验后定位）。
+
+**定案**：launcher --script 接受三类：① 根裸名（train_loop.py / run_rl.py /
+smoke_test.py）；② 子包相对路径（train/bc.py、scripts/eval_bridge.py …，前向斜杠）；
+③ 旧扁平名自动别名到包内（映射来自 3c83169 rename 清单；train_rl.py→run_rl.py 为
+尽力映射）。守卫拒绝绝对路径 / 盘符 / 反斜杠 / `..` 越级。别名仅为 sh/ps1 两端
+本地查找表，无 repo 外状态。头注示例与 agents.details §5.6 同步更新。
+
+**验证**：bash -n / pwsh Parser 语法通过；--echo 解析子路径与别名均正确；经
+launcher 真跑 train/bc.py 1-epoch smoke（32 shards）exit 0。
+
+## §325 train/bc.py 增加 --device（GPU 训练支持）（2026-09-04，Colab 全量 p1-bc 需求）
+
+**背景**：train/bc.py 头注按旧 plan 明写 "CPU-only（8-core 32G，无 GPU）"，无任何
+device 参数（同族 goal_bc.py 早有 --device）。Colab 全量 60 epoch p1-bc（165K 帧）在
+CPU runtime 上不可行：本机 8 核 12 线程实测 ~16 min/epoch，Colab CPU（2 vCPU）更慢，
+60 epoch 需要 T4 GPU。
+
+**定案**：给 train/bc.py 加 --device（默认 cpu，镜像 goal_bc.py 契约）：model 构建后
+.to(dev)、train/val 每 batch .to(dev)、导出前 model.to('cpu')（权重文件跨设备 bitwise
+稳定——save_weights_json 本就 .cpu()）。纯加法：device=cpu 时行为逐字节不变。
+
+**验证**：--device cpu 重跑 resume 1-epoch smoke（32 shards，seed 1234）与改动前逐值
+一致（train_loss=50.7875 val_loss=4.3381 acc 0.533/0.839 value 14.8296）；nn-python-
+gate（ruff+mypy+274 pytest）绿。
+
+## §326 eval-course-ckpt 工具 + export-eval-game 报告补 被击中 字段（2026-09-04）
+
+**背景**：p1-bc checkpoint 需要按课程自定义关（p1-onset stages 2000-2003）评估胜率 /
+击中 / 被击中。既有 m1-eval 只评内置 STAGES；export-eval-game 单局贪心评估支持自定义
+stage-json 但报告缺 player_hit（死亡+星盾）与 player_damage（非致命扣血）计数——RL
+metrics（reward_library 21 维）在训练侧一直统计这两项，评估侧此前不落盘。
+
+**定案**：① export-eval-game.runEvalOne telemetry/报告新增 playerHits 与
+playerDamageTaken（事件口径与 export-rl-rollout 完全一致；EvalResult + _eval_report.json
+同步；不进 scorable.telemetry——本地 runSimulation 无对应字段，遥测对账不受扰）。评估
+报告 schema 变更 ⇒ dist 哈希集节点须随新代码同步（同 2026-08-31 cleared 先例）。② 新工具
+tools/sim/eval-course-ckpt.{ts,worker.ts}：多 checkpoint × N 局在课程自定义关上的贪心评估，
+runChunkedWorkers 语义（逐局纯函数 ⇒ 并行==串行；round-robin 分片 + id 归序稳定聚合），
+JSONL 行 + 每 checkpoint 汇总表；不复制 runEvalOne 循环（唯一实现，无漂移面）。
+
+**验证**：telemetry-parity 测试扩展（runEvalOne.playerHits/playerDamageTaken ≡ 事件流
+recount）；eval-course-ckpt 50 局 ckpt3 与早前 8 核 parity harness 输出 0 mismatch；
+bun run check 全绿（1700 pass）；oxfmt/oxlint 干净。
