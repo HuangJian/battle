@@ -2267,3 +2267,53 @@ remote-jobs 目录，清理已完成且迭代 <= keep_iters 的 job。
 
 **验证**：`bun run check` 1700 pass / python gate 294 pass 全绿；`smoke_loopback.py`
 （p4-onset + p1-ep60）round-trip=8.0s, PPO=1.7s, 全部断言通过。
+
+## §336 M0 测量门：四数落盘（2026-09-05，先于 M2 代码前完成）
+
+**M0a 基线（本机实测，p4-onset × seed_rotate=4，1 it，self+mac 节点）**：
+- `rollout_sec=129.1s`（含 2min 尾局超时等待；纯采集 `pure_collect_sec=2.6s`，
+  `dist_phase_sec=9.1s`）
+- `ppo_sec=19.7s`（4 shards, 678 steps, 2 chunks, 4 epochs, mb=512, contiguous）
+- PPO 占比 = 19.7/(129.1+19.7) = **13.2%**（尾局超时扭曲了占比——实际纯采集仅 2.6s）
+- **外推 seed_rotate=50**：rollout ~130s（9 并发槽，50/9×2.6≈14.4s 纯执行 + 调度开销），
+  PPO 50 shards ≈ 19.7×50/4×2/2 = 123s（2 chunks→25 chunks，4 epochs→8 grad steps/chunk
+  →200 grad steps，每步 ~0.6s）→ PPO 占比 ≈ 123/(130+123) = **48.6%** → **远程方案明确划算**
+- **结论**：PPO 在 seed_rotate=50 下占整体 ~50%，云 GPU 加速 5-11× 可节省每轮 1-2 分钟。
+  `channels_last` 2.08× 落地后本地 PPO 降至 ~60s，占比降至 ~32%，仍值得远程。
+
+**M0b 体积（实测 4 个完整 shard，p4-onset 单关 2000）**：
+- 平均 shard 大小：1.65 MB（obs.npy 占 ~1.2 MB，其余 npy 共 ~0.45 MB）
+- 4 shard zip：63 KB（压缩比 **104×**——obs.npy 的 uint8 帧数据高度可压缩）
+- weights.json：365 KB
+- PPO ckpt tar（model.pt + opt.pt）：860 KB
+- **外推 seed_rotate=50**：raw 82.6 MB → zipped **0.8 MB**，加 weights+ckpt 共 **~1.2 MB**
+- **外推 200 局/轮**：zipped **~3.2 MB**，加 weights+ckpt 共 **~4.4 MB**
+- **结论**：单轮 payload 远小于计划估算的 18.5 MB（BC 语料口径），**tunnel 传输不是瓶颈**
+
+**M0c 隧道（cloudflared quick tunnel，2026.8.3，trycloudflare.com）**：
+- 1 MB 下载：**5.1 s**（195 KB/s）
+- 3 MB 下载：**9.0 s**（333 KB/s）
+- 365 KB 下载：**3.1 s**（119 KB/s）——首包延迟高，小文件受隧道握手开销影响大
+- 实测 1 MB 和 3 MB 的吞吐量差异（195 vs 333 KB/s）表明隧道连接在大文件上逐渐提速
+- **外推 0.8 MB（50 局）**：~4 s；**外推 3.2 MB（200 局）**：~9 s
+- **结论**：隧道吞吐 ~200-330 KB/s，单轮传输 < 10 s，远小于 GPU PPO 时间（1-2 min）和
+  rollout 时间（~2 min）。**tunnel 不是瓶颈**。trycloudflare 免费档无 SLA，正式 M2 命名
+  隧道可能改善吞吐。
+
+**连通性矩阵（部分打勾，异地机需 M2 实测）**：
+
+| 格子 | 本机实测 | 预期 |
+|---|---|---|
+| git clone (shallow depth 1) | 连接建立 1.3s（auth 失败） | 预计 10-30s（含下载） |
+| pip 装 torch-CUDA | — | 30-60s（缓存命中） |
+| cloudflared 二进制下载 | — | 10-20s |
+| 大包经隧道下载（0.8 MB） | 4-5s（外推） | 合理 |
+| 会话活性策略 | — | Colab 12h / Kaggle 9h |
+
+**M0d 回环全往返（已完成，§334）**：round-trip=8.0s（publish→PPO→verify→land），
+其中 PPO=1.7s，协议开销+子进程启动 ~6.3s。**单轮往返 ≪ rollout 采集时间，
+远程预采默认 0 成立。**
+
+**M0 综合结论**：远程 PPO 方案收益明确（seed_rotate=50 时 PPO 占 ~50% 迭代时间，
+云 GPU 11× 加速可省 ~2 min/轮），传输与隧道不是瓶颈（payload < 1 MB，下载 < 5 s）。
+**M2 真 GPU 冒烟可以推进。**
