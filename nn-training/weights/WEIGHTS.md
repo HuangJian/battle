@@ -43,6 +43,7 @@
 | trained_at | file | epochs | samples (train/val) | val_loss | move/fire/value | git | notes |
 |---|---|---|---|---|---|---|---|
 | 2026-09-04T10:02:31 | `battle-p1bc-ep60.zip`（内含 `weights.20260904-100231_ep60_val0.5084.json` + `weights.json` + `ckpt.1..60` + `run_state.json` + `resume_seed.json` + 语料） | 60 | 149039/16566 | 0.5084 | 0.8616/0.929/0.7022 | 37fcc7b | p1-BC 全量（Colab T4，`train/bc.py --device cuda`，seed 1234）。p1-onset 贪心评估 **94/100** ≈ 教师 92/100（docs/rl.progress.md §1）。**p4-BC 热启动源权重**（p4-onset.ipynb 的 WARM_ZIP）。 |
+| 2026-09-04（Colab，run 未完：60 目标已到 45） | `p4-BC-checkpoints-45.zip`（内含 `run/weights.json.ckpt.1..45` + `resume_seed.json`；无 `weights.json` best 指针） | 45 | —（语料 `tmp/p4-godai-v2`，本机无） | best 0.9656（`ckpt.45` 元数据；latest 日志 ep43：val 0.9752） | 0.738/0.863/0.8810（ep43 val；value 系 MSE 横盘，见 rl.progress.md §3.3） | — | p4-BC（ep60 热启动，`--arch student --value-coef 0.5 --seed 1234`）。45 ckpt 全量评估见 docs/rl.progress.md §3：胜率 2–20/100（均值 ~11）、击杀 ≤160（ep60 为 193）——蒸馏平台期。**RL 起点仍用 ep60**（§3.4）。 |
 
 ---
 
