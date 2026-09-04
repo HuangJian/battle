@@ -36,4 +36,6 @@ tools/agent/agent.auth
 *.lock
 *.lock.*
 *.log
+# uv.lock 是 universal 锁文件，必须入库（2026-09-04 决策：uv + uv.lock 真锁）
+!nn-training/uv.lock
 nn-training/rl-config.json

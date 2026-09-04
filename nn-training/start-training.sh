@@ -8,8 +8,8 @@
 #   系统裸 `python`/`python3` 解释器**没有 torch** —— 直接运行
 #   `python train_bc.py` / `python train_loop.py` 必然报
 #   ModuleNotFoundError: torch，这就是「找不到 torch」的根因。
-#   本脚本是唯一入口：定位系统 python → (重新)建 venv → 依 requirements.txt
-#   安装 torch+numpy（缺时才装，幂等）→ 把参数转发给所选训练脚本。
+#   本脚本是唯一入口：定位系统 python → 若 venv+torch 未就绪则委派 bootstrap.py
+#   （探测 GPU → 选 torch 变体 → uv sync → 装后自检）→ 把参数转发给训练脚本。
 #
 # 用法：
 #   ./start-training.sh                                # 默认跑 train_loop.py（连续 BC）
@@ -151,33 +151,18 @@ run_sys_py() {
 }
 
 # ── bootstrap：确保 venv + torch 就绪（幂等）─────────────────────────
+# 2026-09-04 重构：安装逻辑**只在 bootstrap.py 里存在一份**。这里只做「还缺不缺」
+# 的判断，缺了就把整件事委派出去。此前本函数内联了 pip install -r requirements.txt，
+# 与 bootstrap.py 的 uv sync 是两套并行实现 —— 改一处漏一处，且 requirements.txt
+# 与 pyproject.toml 长期双份真相。requirements.txt 已删。
 bootstrap() {
-  local has=0
-  if [ -f "$VENV_PYTHON" ]; then
-    if "$VENV_PYTHON" -c "import torch, numpy" >/dev/null 2>&1; then
-      has=1
-    else
-      log "venv 存在但 torch 缺失 -> 将重装依赖"
-    fi
+  if [ -f "$VENV_PYTHON" ] && "$VENV_PYTHON" -c "import torch, numpy" >/dev/null 2>&1; then
+    return 0
   fi
-
-  if [ "$has" != "1" ]; then
-    if [ "$SYS_PY" = "" ]; then
-      log "ERROR: 找不到系统 Python。请安装 Python 3.10+，或设 \$PYTHON 指向有效 python。"
-      exit 3
-    fi
-    if [ ! -f "$VENV_PYTHON" ]; then
-      log "creating venv: $SYS_PY -> $VENV_DIR"
-      run_sys_py -m venv "$VENV_DIR"
-    fi
-    log "installing pinned deps (torch + numpy) ..."
-    "$VENV_PYTHON" -m pip install --upgrade pip -q
-    "$VENV_PYTHON" -m pip install -r "$SCRIPT_DIR/requirements.txt"
-  fi
-
-  if ! "$VENV_PYTHON" -c "import torch, numpy" >/dev/null 2>&1; then
-    log "ERROR: torch 仍无法导入。查看上方 pip 输出（CPU index "
-    log "       https://download.pytorch.org/whl/cpu 可能不可达）。"
+  log "venv/torch 未就绪 -> 委派 bootstrap.py（探测 GPU → 选变体 → uv sync → 自检）"
+  run_sys_py "$SCRIPT_DIR/bootstrap.py"
+  if [ $? -ne 0 ]; then
+    log "ERROR: bootstrap.py 失败（退出码非 0）。看上方输出。"
     exit 4
   fi
 }

@@ -9,13 +9,14 @@
 
 ```
 nn-training/
-├── pyproject.toml           # 包元数据 + ruff / mypy / pytest 配置
-├── task.py                  # 跨平台 task runner  ("make check" 等价)
+├── pyproject.toml           # 包元数据 + uv 变体/索引配置 + ruff/mypy/pytest 配置
+├── uv.lock                  # universal lockfile（6 个 torch 变体一次锁全）
+├── bootstrap.py             # 【一条命令搭环境】探测 GPU → 选 torch 变体 → sync → 自检
+├── .python-version          # uv 默认解释器档（3.10；bootstrap 可用 --python 覆盖）
+├── task.py                  # 跨平台 task runner  ("make check" 等价；含 setup)
 ├── Makefile                 # 同上的 make 封装（Git Bash 用户）
-├── .python-version          # CPython 3.13
 ├── rl-config.json           # RL 训练配置（rl-mode 默认值、workers、eval-seeds 等）
-├── requirements.txt         # pip 依赖（torch / numpy / dev-tools）
-├── start-training.sh / .ps1 # 统一启动器（venv bootstrap、线程环境、锁）
+├── start-training.sh / .ps1 # 统一启动器（venv/torch 未就绪时委派 bootstrap.py）
 │
 ├── run_rl.py                # 【RL 编排入口】三模式 CLI + 迭代主循环 + 权重归档/熔断
 │                              #   --mode {per-tick, intent, goal}（DECISIONS §307 整合）
@@ -107,6 +108,12 @@ nn-training/
 ```bash
 # 全部在 nn-training/ 目录下执行
 
+# ── 一条命令搭环境（新机器 / 换机器 / 换 GPU）──
+python bootstrap.py              # 推荐：探测 GPU → 选 torch 变体 → uv sync → 装后自检
+python bootstrap.py --check      # 只读模式：打印本机探测结果与环境健康度，不改任何东西
+make setup                       # 等价于 python bootstrap.py
+python task.py setup --variant cu128   # 显式指定变体（跳过自动探测）
+
 # ── ruff + mypy + fast-test ──
 make check               # 或:  python task.py check
 make lint                # 或:  python task.py lint
@@ -130,6 +137,40 @@ make weights-update-md   # 重新生成 weights/WEIGHTS.md 目录清单
 bash start-training.sh --script run_rl.py --mode intent-rl --stream 1
 powershell -File start-training.ps1 -Script run_rl.py -Mode intent-rl -Stream 1
 ```
+
+---
+
+## 环境搭建与 GPU 变体（bootstrap.py）
+
+**目标：任何机器上一条命令搭出可用环境，torch 自动装对机器的那一版。**
+
+```sh
+python bootstrap.py          # 探测 → 装 → 自检，全自动
+```
+
+内部流水线（详见 `plan/python-env-bootstrap-and-device.md`）：
+
+1. 找 uv（PATH 上没有就装到 `~/.local/bin`，可 `--no-install-uv` 拒绝）；
+2. 探 GPU：NVIDIA 驱动版本 → CUDA runtime 梯子（≥12.8→cu128，≥12.6→cu126，
+   ≥11.8→cu118）；否则看 AMD ROCm（`/dev/kfd`，Linux）→ rocm6.3、Intel XPU →
+   xpu；macOS 一律 cpu（Apple Silicon 的 MPS 由默认 wheel 提供）；以上全无 → cpu；
+3. `uv sync` 对应 `dependency-groups`（互斥变体，见 `pyproject.toml`）：
+   - `cpu` / `cu118` / `cu126` / `cu128` → Win + Linux
+   - `rocm6.3` / `xpu` → 仅 Linux
+   - torch 2.7.1 无 `cu124`/`cu130` 构建，故不提供（实测 download.pytorch.org）；
+4. **装后自检**：真跑一次 matmul+backward 再读回 CPU —— 光 `is_available()`
+   会骗人（驱动与 wheel CUDA 版本不匹配时它仍返回 True，跑起来才炸）；自检失败
+   自动二段自救（重装 torch → 重建 venv）。
+
+**为什么训练时不能只写 `torch.device('cpu')` 了**：机器若装了 cu128 变体，训练段
+（PPO update / BC step）是实打实的算力瓶颈（前向+反传 ~220 MFLOPs/样本，165K
+帧/epoch ≈ 36 TFLOPs）。rollout 已由 bun 分布式集群承担（节点零 Python，GPU 无
+用武之地），GPU 只属于 orchestrator —— 设备层（P2，`rl/device.py`）会让 PPO/BC
+自动 `cuda` + TF32 + AMP，无 GPU 机器自动回落 CPU + 线程数自适配。在 P2 落地前，
+`start-training.{sh,ps1}` 仍以 CPU + OMP 线程档运行（OMP≤8 时 `PROC_BIND=close`）。
+
+**机器画像**：bootstrap 把探测结果写入 `.venv/machine-profile.json`
+（platform / python / gpu / variant / probe），`bootstrap.py --check` 只读展示。
 
 ---
 

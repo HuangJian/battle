@@ -32,7 +32,8 @@ dist-agent-meta.jsonl
 .train_loop.lock
 
 # ---- python version pinning ----
-.python-version
+# 反例必须提交：uv 靠它选默认解释器档（3.10），冷机器可复现（2026-09-04）
+!.python-version
 
 # ---- OS / editor ----
 .DS_Store

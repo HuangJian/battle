@@ -7,8 +7,8 @@ start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerS
   torch/numpy 只装在 nn-training/.venv 这个逐平台 venv 里，系统裸 `python` 没有
   torch —— 直接运行 `python train_bc.py`/`python train_loop.py` 必然报
   ModuleNotFoundError: torch，这就是「找不到 torch」的根因。本脚本是唯一入口：
-  定位系统 python → (重新)建 venv → 依 requirements.txt 安装 torch+numpy（缺时
-  才装，幂等）→ 把参数转发给所选训练脚本。
+  定位系统 python → 若 venv+torch 未就绪则委派 bootstrap.py（探测 GPU → 选
+  torch 变体 → uv sync → 装后自检）→ 把参数转发给所选训练脚本。
 
 用法（与 bash 版逐项等价）：
   .\start-training.ps1                              # 默认跑 train_loop.py（连续 BC）
@@ -108,6 +108,10 @@ function Invoke-SysPy {
 function Log([string]$Msg) { Write-Host "[start-training] $Msg" }
 
 # ── bootstrap：确保 venv + torch 就绪（幂等）────────────────────────
+# 2026-09-04 重构：安装逻辑**只在 bootstrap.py 里存在一份**。这里只做「还缺不缺」
+# 的判断，缺了就把整件事委派出去。此前本段内联了 pip install -r requirements.txt，
+# 与 bootstrap.py 的 uv sync 是两套并行实现 —— 改一处漏一处，且 requirements.txt
+# 与 pyproject.toml 长期双份真相。requirements.txt 已删。
 $has = $false
 if (Test-Path $VenvPython) {
   & $VenvPython -c 'import torch, numpy' 2>$null | Out-Null
@@ -120,20 +124,17 @@ if (-not $has) {
     Log 'ERROR: 找不到系统 Python。请安装 Python 3.10+，或设 $PYTHON 指向有效 python。'
     exit 3
   }
-  if (-not (Test-Path $VenvPython)) {
-    Log "creating venv: $SysPy -> $VenvDir"
-    Invoke-SysPy -m venv $VenvDir
-    if ($LASTEXITCODE -ne 0) { exit 3 }
+  Log 'venv/torch 未就绪 -> 委派 bootstrap.py（探测 GPU → 选变体 → uv sync → 自检）'
+  Invoke-SysPy (Join-Path $ScriptDir 'bootstrap.py')
+  if ($LASTEXITCODE -ne 0) {
+    Log "ERROR: bootstrap.py 失败（退出码 $LASTEXITCODE）。看上方输出。"
+    exit 4
   }
-  Log 'installing pinned deps (torch + numpy) ...'
-  & $VenvPython -m pip install --upgrade pip -q | Out-Null
-  & $VenvPython -m pip install -r (Join-Path $ScriptDir 'requirements.txt')
-  if ($LASTEXITCODE -ne 0) { exit 4 }
 }
 
 & $VenvPython -c 'import torch, numpy' 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
-  Log 'ERROR: torch 仍无法导入。查看上方 pip 输出（CPU index https://download.pytorch.org/whl/cpu 可能不可达）。'
+  Log 'ERROR: torch 仍无法导入。查看上方 bootstrap.py 输出。'
   exit 4
 }
 $TorchVer = (& $VenvPython -c 'import torch; print(torch.__version__)' 2>$null)

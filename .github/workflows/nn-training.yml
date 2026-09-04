@@ -30,28 +30,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: '3.13'
-          cache: 'pip'
-          cache-dependency-path: nn-training/requirements.txt
+          # uv.lock 是 universal lock（含全部 6 个 torch 变体），任何机器/任何变体
+          # 都能离线复现。cache 以 lock 文件为键 —— requirements.txt 已删。
+          enable-cache: true
+          cache-dependency-glob: nn-training/uv.lock
 
-      - name: Install runtime deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Install dev deps (ruff + mypy + pytest)
-        run: pip install "ruff>=0.6.0" "mypy>=1.11.0" "pytest>=8.0.0"
+      - name: Sync env (CPU torch + dev tools)
+        # 裸 `uv sync` = default-groups (dev + torch-cpu)。CI runner 无 GPU，
+        # 装 CPU 变体；有 GPU 的自托管 runner 走 `uv sync --no-default-groups
+        # --group dev --group torch-cu128`。
+        run: uv sync --frozen
 
       - name: ruff lint
-        run: ruff check . --config pyproject.toml
+        run: uv run ruff check . --config pyproject.toml
 
       - name: mypy typecheck
-        run: mypy . --config-file pyproject.toml
+        run: uv run mypy . --config-file pyproject.toml
         continue-on-error: true # baseline: 121 pre-existing errors; reported not blocked
 
       - name: fast test layer
         run: |
-          pytest tests/ -v -q --no-header
-          python test_run_rl.py
+          uv run pytest tests/ -v -q --no-header
+          uv run python test_run_rl.py

@@ -5,12 +5,122 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "battle2-nn-training"
 version = "0.1.0"
-description = "Battle City Web - NN player AI training workspace (PyTorch / CPU-only)"
+description = "Battle City Web - NN player AI training workspace (PyTorch)"
 requires-python = ">=3.10,<3.14"
-dependencies = ["torch>=2.7.1", "numpy>=2.1.3", "pydantic>=2.13"]
+# torch 刻意不在主依赖里：它只存在于下方互斥的 dependency-groups 变体中，由
+# bootstrap.py 按机器探测结果选一个装。
+#
+# 为什么：把 torch 写进主依赖又不配 index，Linux/Windows 上 pip 会从 PyPI 拉
+# 默认 CUDA 构建（连带 nvidia-* 依赖，~3GB）—— 与原来的 CPU 口径正面冲突。
+# 为什么用 dependency-groups 而不是 optional-dependencies：后者会被 setuptools
+# 消费，`pip install .[cpu]` 会无视 [tool.uv.sources] 从 PyPI 拉 CUDA 构建，
+# 等于把同一个坑换个地方再踩一次；dependency-groups（PEP 735）只有 uv 认，
+# setuptools 完全无视。详见 plan/python-env-bootstrap-and-device.md §3.2。
+dependencies = ["numpy>=2.1.3", "pydantic>=2.13"]
 
-[project.optional-dependencies]
-dev = ["ruff>=0.6.0", "mypy>=1.11.0", "pytest>=8.0.0"]
+# dev 工具链（PEP 735）
+[dependency-groups]
+dev = [
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "pytest>=8.0.0",
+  "pytest-xdist>=3.6",    # Makefile `pytest -n 4` 与 tools/githook/nn-python-gate.sh 依赖
+  "pytest-timeout>=2.3",  # task.py `--timeout=50000` 依赖
+]
+
+# torch 变体：互斥，须且只须选一个。变体名 → index 映射见 [tool.uv.sources]，
+# 选择逻辑在 bootstrap.py。
+#
+# 变体清单是 2026-09-04 实测 download.pytorch.org 得出的（针对 torch 2.7.1）：
+#   cpu / cu118 / cu126 / cu128 / xpu → Win + Linux 有构建
+#   rocm6.3                            → 仅 Linux
+#   cu124 / cu130                      → 无 2.7.1 构建（属其它 torch 版本），不设
+# macOS 无 GPU 变体 → Darwin 上一律用 torch-cpu（Apple Silicon 的 MPS 由 PyPI
+# 原生 wheel 提供，无需特殊 index）。
+torch-cpu = ["torch==2.7.1"]
+torch-cu118 = ["torch==2.7.1"]
+torch-cu126 = ["torch==2.7.1"]
+torch-cu128 = ["torch==2.7.1"]
+# 注意：triton 只随 Linux wheel 发布，故带 sys_platform 标记——否则 universal
+# resolution 在 Windows split 上找不到 wheel 会直接失败。
+torch-rocm = ["torch==2.7.1", "pytorch-triton-rocm==3.3.1 ; sys_platform == 'linux'"]
+torch-xpu = ["torch==2.7.1", "pytorch-triton-xpu==3.3.1 ; sys_platform == 'linux'"]
+
+# ---------------------------------------------------------------------------
+# uv — 环境与变体解析
+# ---------------------------------------------------------------------------
+[tool.uv]
+# system = 优先用机器上已有的解释器（满足 requires-python 即可），没有才回退到
+# uv 托管的下载版。实测（2026-09-04）：设成 managed 时 uv 会用 3.13.12 把本机
+# 现役 venv（pyenv 3.10.5 + torch 2.7.1+cpu）整个 "Would replace project
+# environment" 重建一遍——纯属无谓破坏。requires-python 已把范围钉在
+# 3.10–3.13，用系统解释器完全够，冷机器上没 python 时仍会自动下载托管的。
+python-preference = "system"
+# 关键：裸 `uv sync` 就装上 CPU 变体，不需要任何命令行参数。
+# （已实测：uv 0.12.9，default-groups + sources 的 group key 均生效）
+default-groups = ["dev", "torch-cpu"]
+# 六个变体互斥 —— uv 需要它才能生成 universal resolution，
+# 否则同包不同 index 会解析冲突。（已实测：同时给两个变体会明确报错，不静默）
+conflicts = [
+  [
+    { group = "torch-cpu" },
+    { group = "torch-cu118" },
+    { group = "torch-cu126" },
+    { group = "torch-cu128" },
+    { group = "torch-rocm" },
+    { group = "torch-xpu" },
+  ],
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", group = "torch-cpu" },
+  { index = "pytorch-cu118", group = "torch-cu118" },
+  { index = "pytorch-cu126", group = "torch-cu126" },
+  { index = "pytorch-cu128", group = "torch-cu128" },
+  { index = "pytorch-rocm", group = "torch-rocm" },
+  { index = "pytorch-xpu", group = "torch-xpu" },
+]
+# 传递依赖也必须钉 index —— 否则 `uv lock` 直接失败（已实测 2026-09-04）：
+#   torch==2.7.1+xpu   → pytorch-triton-xpu==3.3.1
+#   torch==2.7.1+rocm6.3 → pytorch-triton-rocm==3.3.1
+# 这两个包**只存在于各自的 PyTorch index**，PyPI 上没有。因为上面的 index 都是
+# explicit = true（只服务显式钉住的包），未钉住的传递依赖会落到 PyPI → 无解 →
+# "No solution found when resolving dependencies for split (sys_platform ==
+# 'linux')"。CPU / cu* 变体无此问题（nvidia-* 传递依赖本来就在 PyPI 上）。
+pytorch-triton-xpu = [{ index = "pytorch-xpu", group = "torch-xpu" }]
+pytorch-triton-rocm = [{ index = "pytorch-rocm", group = "torch-rocm" }]
+
+# explicit = true：这些 index 只用于 torch，jinja2/numpy 之类仍走 PyPI。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.3"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
 
 [tool.setuptools]
 # 2026-09-02（plan/python-refactor.md B4）：此前 py-modules=[] 使 `pip install -e .`

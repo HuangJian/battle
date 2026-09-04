@@ -1,6 +1,7 @@
 # nn-training Makefile - Unified command entry for training / testing / cleanup
 #
 # Usage:
+#   make setup          One-command env bootstrap (GPU detect -> torch variant -> uv sync)
 #   make check          Lint + typecheck + test-fast
 #   make test           Full test suite
 #   make test-fast      Fast layer only
@@ -15,7 +16,7 @@
 #
 # Note: Windows users without `make` can use `python task.py <target>` instead.
 
-.PHONY: check test test-fast smoke clean format lint typecheck
+.PHONY: check test test-fast smoke clean format lint typecheck setup
 .PHONY: weights-prune weights-prune-apply weights-update-md
 
 PYTHON        ?= python
@@ -24,10 +25,21 @@ WEIGHTS_KEEP  ?= 3
 
 ifeq ($(OS),Windows_NT)
 PREFIX = powershell -NoProfile -Command
+VENV_PY = .venv/Scripts/python.exe
 else
 PREFIX =
-
+VENV_PY = .venv/bin/python
 endif
+
+# 有 venv 就用 venv 解释器 —— 系统裸 python 没有 torch（原 `PYTHON ?= python`
+# 在新机器上必然踩 ModuleNotFoundError: torch）。
+ifneq ($(wildcard $(VENV_PY)),)
+PYTHON = $(VENV_PY)
+endif
+
+# 一条指令搭环境：探测 GPU → 选 torch 变体 → uv sync → 装后自检
+setup:
+	python bootstrap.py
 
 check: lint typecheck test-fast
 
@@ -37,11 +49,11 @@ check: lint typecheck test-fast
 python-gate:
 	bash ../tools/githook/nn-python-gate.sh
 
-test: test-fast
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q
+test: 
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n auto -q
 
 test-fast:
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n 4 -q -m "not heavy"
+	$(PREFIX) $(PYTHON) -m pytest tests/ -n auto -q -m "not heavy"
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"
