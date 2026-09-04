@@ -74,7 +74,7 @@
   确认损失在真实语料（43,566 样本）上下降。
 
 ## 环境坑（已沉淀）
-- **venv 必须走 PowerShell + 原生 `C:\` 路径** 创建：Bash(msys) 下 `python -m venv` 静默 no-op
+- **venv 必须走 pwsh（PowerShell 7）+ 原生 `C:\` 路径** 创建：Bash(msys) 下 `python -m venv` 静默 no-op
   （sandbox 丢弃 `~/.workbuddy` 写入），且 `/c/` 在 `dangerouslyDisableSandbox` 下被错拼成 `d:\c\`。
-- 改用 PowerShell：`$PyExe -m venv --copies --without-pip`。
+- 改用 pwsh：`$PyExe -m venv --copies --without-pip`。
 - **torch 版本 × Python**：3.13 解释器只能用 `torch>=2.6.0`；`torch==2.5.1` 永远装不上，勿回退。

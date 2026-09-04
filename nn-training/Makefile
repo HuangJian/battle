@@ -23,12 +23,23 @@ PYTHON        ?= python
 VENV_DIR      ?= .venv
 WEIGHTS_KEEP  ?= 3
 
+# Windows 判定：OS=Windows_NT（cmd/PowerShell/Git Bash 常见）**或**存在 Windows
+# 原生 venv 布局 $(VENV_DIR)/Scripts/python.exe —— 后者兜底 msys make 看不到 OS
+# 的情况（2026-09-04 实测：Git Bash 下 msys make 的 $(OS) 为空，旧 ifeq 会错走
+# Unix 分支，导致 PREFIX 丢失、PYTHON 退回系统 python）。
 ifeq ($(OS),Windows_NT)
-PREFIX = powershell -NoProfile -Command
-VENV_PY = .venv/Scripts/python.exe
+IS_WINDOWS := 1
+else ifneq ($(wildcard $(VENV_DIR)/Scripts/python.exe),)
+IS_WINDOWS := 1
+endif
+
+ifeq ($(IS_WINDOWS),1)
+# DECISIONS §323（2026-09-04）：仓库内 PowerShell 调用一律 pwsh 7 —— 裸 powershell = 5.1
+PREFIX = pwsh -NoProfile -Command
+VENV_PY = $(VENV_DIR)/Scripts/python.exe
 else
 PREFIX =
-VENV_PY = .venv/bin/python
+VENV_PY = $(VENV_DIR)/bin/python
 endif
 
 # 有 venv 就用 venv 解释器 —— 系统裸 python 没有 torch（原 `PYTHON ?= python`

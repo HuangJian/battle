@@ -397,6 +397,10 @@ When this file and your instincts disagree, this file wins. When this file and t
   route text through the python channel of 17.1 with explicit
   `encoding='utf-8'`. Never rely on a user profile to fix this.
 
-
-
-
+- **17.7 PowerShell invocations use `pwsh` only — never bare `powershell`**
+  (2026-09-04, DECISIONS §323): repo scripts, run-books, Makefiles, and examples
+  invoke `pwsh` (PowerShell 7; this machine runs 7.6.5). Bare `powershell`
+  resolves to inbox Windows PowerShell 5.1
+  (`C:\Windows\System32\WindowsPowerShell\v1.0`), an OS component that cannot
+  be uninstalled and must not be called from the repo — the two coexist
+  side-by-side and only `pwsh` is used.

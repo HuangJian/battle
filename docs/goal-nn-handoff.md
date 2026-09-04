@@ -82,7 +82,7 @@
   --eval-stages <同训练 arena> --eval-games-per-stage 20 --keep-iters 3
 
 # 停止（TaskStop 不可靠——python 子进程会复活；必须进程名限定杀）
-powershell -ExecutionPolicy Bypass -File tmp/kill-s2-clean.ps1   # 模式见文件
+pwsh -ExecutionPolicy Bypass -File tmp/kill-s2-clean.ps1   # 模式见文件
 
 # 贪心门评估（60 局/臂，3 arena × 20 seed；模板 tmp/gate-judge.sh）
 # 门判定（(stage,seed) 2100 对口径；AGENTS 15.3：部署口径必须单评）
@@ -149,7 +149,7 @@ ticks 中位 672。
 
 - [ ] 读完 §2 三份文档
 - [ ] `bun run check` 全绿
-- [ ] `powershell tmp/list-rl.ps1` 确认只有一个训练进程
+- [ ] `pwsh tmp/list-rl.ps1` 确认只有一个训练进程
 - [ ] `/pool` 页面 8 节点状态核对
 - [ ] S2 曲线与检点规则对齐（§6）
 - [ ] git log 扫一遍 `docs/goal-nn.progress.md` §8-§11 的 commit 链

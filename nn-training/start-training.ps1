@@ -1,7 +1,7 @@
 <#
 start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerShell 版，与 start-training.sh 等价）
 
-支持：Windows(Windows PowerShell / PowerShell 7) · Linux · macOS(PowerShell 7+)
+支持：Windows · Linux · macOS（PowerShell 7+ / pwsh；仓库内一律用 pwsh 调用）
 
 为什么要有它：
   torch/numpy 只装在 nn-training/.venv 这个逐平台 venv 里，系统裸 `python` 没有
@@ -44,7 +44,7 @@ $ScriptArgs = @()
 $TorchThreads = 0
 
 # ── CLI 解析（手写，与 bash 等价；未识别项透传）────────────────────────
-# 同时接受 PowerShell 风格 (-Check) 与 POSIX 风格 (--check)：powershell -File
+# 同时接受 PowerShell 风格 (-Check) 与 POSIX 风格 (--check)：pwsh -File
 # 调用时参数按字面量进入 $args，不做原生参数绑定，故必须自行兼容两种前缀。
 # 训练脚本自身参数均为 --xxx 长选项，不会被 ^--?name$ 误吞。
 $i = 0

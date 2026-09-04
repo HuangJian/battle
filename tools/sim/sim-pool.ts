@@ -69,7 +69,7 @@ function cpuLoadWin32(): Promise<number> {
         }
       }
       exec(
-        'powershell -NoProfile -Command "(Get-CimInstance Win32_Processor | ForEach-Object { $_.LoadPercentage } | Where-Object { $_ -ne $null } | Measure-Object -Average).Average"',
+        'pwsh -NoProfile -Command "(Get-CimInstance Win32_Processor | ForEach-Object { $_.LoadPercentage } | Where-Object { $_ -ne $null } | Measure-Object -Average).Average"',
         { encoding: 'utf8', timeout: 6000 },
         (err2, out2) => {
           if (!err2 && out2) {

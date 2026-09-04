@@ -193,7 +193,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
 
 - [ ] 读完 `plan/goal-nn-action.md` §0（怎么用）+ §4（门禁）+ §5（卡片状态）
 - [ ] `bun run check` 全绿
-- [ ] `powershell tmp/list-rl.ps1` 确认只有一个训练进程
+- [ ] `pwsh tmp/list-rl.ps1` 确认只有一个训练进程
 - [ ] `/pool` 节点状态核对
 - [ ] S2 曲线与 §1 的红线表对齐
 - [ ] 扫一遍 `DECISIONS.md` §295–§298

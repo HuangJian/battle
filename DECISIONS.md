@@ -1869,3 +1869,22 @@ docs/agents.details.md §17 给完整案例 + 可复用 patch 模板 + 升级阶
 通道（§17.1，显式 encoding='utf-8'）；不依赖用户 profile。用户交互式 pwsh 的
 profile（C:/Users/ustch/Documents/PowerShell/Microsoft.PowerShell_profile.ps1，
 已创建）加 UTF-8 默认仍有效，但只惠及交互会话。
+
+## §323 仓库内 PowerShell 调用一律 pwsh 7（2026-09-04，用户裁定）
+
+**裁定**：本仓库一切 PowerShell **调用**（脚本、Makefile、README/runbook 示例、
+docstring 命令、agents 手册）统一用 `pwsh`（PowerShell 7；本机 7.6.5）。禁止裸
+`powershell`——它解析到 System32 的 Windows PowerShell 5.1（inbox 组件，**无法
+卸载**，微软不支持移除；删除会破坏依赖它的系统工具与本仓库调用点）。
+
+**理由**：agent 的 PowerShell 通道是 pwsh 7.6.5（§322 实测），5.1 与 pwsh 在编码
+（§17.6、nn.progress.md：GBK 解码）与参数绑定（`-File`）上的差异制造双份真相；
+本机两版并存是微软支持的形态，5.1 保留作系统兜底，但仓库**调用**侧只允许 pwsh。
+
+**已改调用点（2026-09-04）**：nn-training/Makefile PREFIX、bootstrap.py install_uv
+及提示语、start-training.sh detach（+注释）、start-training.ps1 头注、sim-pool.ts
+CPU 采样、nn-training README/五个 .py docstring 示例、docs/agents.details.md §5.6/
+§5.7/§16.4、docs/goal-nn-handoff.md 与 goal-nn-next.md runbook、
+plan/python-env-bootstrap-and-device.md、NN-Training-Foundation-Overview.md、
+tools/githook/pre-commit 注释、AGENTS.md §17.7 新增规则。历史日志
+（nn.progress.md / goal-nn.progress.md / decisions.details.md 等）为当时实况记录，不改写。

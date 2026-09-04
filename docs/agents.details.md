@@ -226,7 +226,7 @@ spin up a browser) to validate its own changes.
 
 ### 5.6 NEVER launch NN training by running `python` directly
 Training must go through the launch scripts: `nn-training/start-training.sh` (bash/Git-Bash) or
-`nn-training/start-training.ps1` (PowerShell, `-ExecutionPolicy Bypass -File …`) — fully equivalent;
+`nn-training/start-training.ps1` (PowerShell 7 / pwsh, `-ExecutionPolicy Bypass -File …`) — fully equivalent;
 both handle venv setup, single-instance locking, and signal cleanup.
 
 - Raw `python train_loop.py` / `python train_bc.py` bypasses pre-flight checks and can spawn
@@ -240,14 +240,14 @@ both handle venv setup, single-instance locking, and signal cleanup.
   idempotent self-check (either entry, equivalent):
   - bash: `bash nn-training/start-training.sh --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
-  - PowerShell: `powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Check`.
+  - PowerShell (pwsh 7): `pwsh -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Check`.
   - Print the exact command without running it: `--echo --script <name>.py [args]` (PS: `-Echo -Script`).
 - The launcher is not just `train_loop.py`: `--script <name>.py [args]` runs any `nn-training/*.py`
   through the same venv (`train_bc.py --arch student`, `train_rl.py`, `smoke_test.py`,
   `eval_bridge.py`, …) so all torch work shares one entry and agents never hit "no torch".
 
-### 5.7 PowerShell git commit — the reliable recipe (Windows agents)
-The shell is **PowerShell**, not bash; redirect-and-heredoc tricks that work in bash silently break
+### 5.7 pwsh git commit — the reliable recipe (Windows agents)
+The shell is **PowerShell 7 (pwsh)**, not bash; redirect-and-heredoc tricks that work in bash silently break
 here. Each pitfall below was hit and debugged (2026-08-27) — the "reproduce" of §7 applied to git.
 
 1. **No multi-line messages via heredoc / `$(cat <<'EOF' …)`.** PowerShell parses `<<` as redirection
@@ -693,7 +693,7 @@ both now rules (AGENTS 16.1-16.4).
   epoch/best_val_loss) resumable via `--resume` — any moment is a valid stopping
   point, so an over-budget run keeps its best work.
 - **Kill-vs-wait on data (16.4)**. When a run overruns: sample process CPU time
-  twice, ~20 s apart (Windows: PowerShell `(Get-Process -Id N).CPU`; Linux:
+  twice, ~20 s apart (Windows: pwsh `(Get-Process -Id N).CPU`; Linux:
   `ps -o time= -p N`). CPU-seconds rising ≈ full-speed compute — let it run.
   Flat CPU with climbing RSS = hang/leak — investigate or kill. Memory alone is
   ambiguous (torch caches fluctuate); CPU delta is the signal.

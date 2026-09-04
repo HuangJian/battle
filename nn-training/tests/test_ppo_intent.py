@@ -7,7 +7,7 @@
   4) ppo_update_intent 微型 shard 冒烟：不崩、policy loss 有限、early-stop 逻辑可触发。
 
 运行（经统一启动器）：
-  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_ppo_intent.py
+  pwsh -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_ppo_intent.py
 退出码：全部通过 0，否则 1。
 """
 

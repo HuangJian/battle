@@ -13,7 +13,7 @@
 
 运行（经统一启动器，venv/torch 由它保证）：
   bash nn-training/start-training.sh --script test_run_rl.py
-  powershell -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_run_rl.py
+  pwsh -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Script test_run_rl.py
   （集成层不再需要 RUN_RL_ITEST 门禁与环境 fixture；RUN_RL_ITEST=1 仍可强制 standalone 入口跑集成层）
 
 退出码：全部通过 0，否则 1。新增队列/流式行为时请在此补用例，不要写临时脚本。

@@ -64,7 +64,7 @@ fi
 log() { echo "[start-training] $*"; }
 
 # POSIX -> Windows 原生路径（MSYS / Git-Bash 下 exec 原生 python.exe /
-# powershell.exe 必需）。避免 MSYS 自动路径转换把 /d/... 二次扭曲成
+# pwsh.exe 必需）。避免 MSYS 自动路径转换把 /d/... 二次扭曲成
 # D:\d\... 这类病态形式。优先用 cygpath；不可用时退化到手动 /c/x -> c:\x。
 to_win_path() {
   local p="$1"
@@ -260,7 +260,7 @@ if [ "$DETACH" = "1" ] && [ "$IS_WINDOWS" = "1" ] && [ "$SCRIPT" = "train_loop.p
   if [ "${#SCRIPT_ARGS[@]}" != "0" ]; then
     PS_LAUNCH_ARGS+=("${SCRIPT_ARGS[@]}")
   fi
-  powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_PATH_W" "${PS_LAUNCH_ARGS[@]}"
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "$PS1_PATH_W" "${PS_LAUNCH_ARGS[@]}"
   exit 0
 fi
 

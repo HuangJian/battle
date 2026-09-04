@@ -249,8 +249,9 @@ def install_uv(system: str) -> str | None:
     但日志会明说在做什么，可用 --no-install-uv 关闭。
     """
     if system == "Windows":
+        # DECISIONS §323（2026-09-04）：PowerShell 调用一律 pwsh 7（裸 powershell = 5.1）
         cmd = [
-            "powershell",
+            "pwsh",
             "-NoProfile",
             "-ExecutionPolicy",
             "ByPass",
@@ -447,7 +448,7 @@ def main() -> int:
     if uv is None:
         print(
             "\n[bootstrap] 缺少 uv，且未自动安装成功。请手动执行：\n"
-            "  Windows : powershell -ExecutionPolicy ByPass -c "
+            "  Windows : pwsh -ExecutionPolicy ByPass -c "
             '"irm https://astral.sh/uv/install.ps1 | iex"\n'
             "  Unix    : curl -LsSf https://astral.sh/uv/install.sh | sh\n"
             "装好后重跑 `python bootstrap.py`（或加 --no-install-uv 跳过自动安装）。"

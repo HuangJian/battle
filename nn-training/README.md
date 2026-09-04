@@ -135,7 +135,7 @@ make weights-update-md   # 重新生成 weights/WEIGHTS.md 目录清单
 
 # ── 训练启动器（venv 由它 bootstrap）──
 bash start-training.sh --script run_rl.py --mode intent-rl --stream 1
-powershell -File start-training.ps1 -Script run_rl.py -Mode intent-rl -Stream 1
+pwsh -File start-training.ps1 -Script run_rl.py -Mode intent-rl -Stream 1
 ```
 
 ---

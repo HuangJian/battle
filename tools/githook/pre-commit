@@ -4,14 +4,14 @@
 # Activated by:  git config core.hooksPath .githooks   (see `bun run setup`)
 #
 # Runs under Git's bundled `sh` on every platform (Linux shell, Windows Git Bash, and
-# Windows PowerShell), so it is shell-agnostic. The only external dependency is `bun`,
+# Windows PowerShell 7 / pwsh), so it is shell-agnostic. The only external dependency is `bun`,
 # which we locate robustly below so the hook works no matter which shell triggered the commit.
 
 # Abort on the first failing command.
 set -e
 
 # --- Locate `bun` even if it is not yet on PATH ---------------------------------
-# Coding agents may commit from a Linux shell, Windows Git Bash, or Windows PowerShell,
+# Coding agents may commit from a Linux shell, Windows Git Bash, or Windows PowerShell 7 (pwsh),
 # each with a slightly different PATH. Augment PATH with the common bun install dirs so
 # the hook resolves `bun` regardless of the calling environment.
 add_to_path() {
