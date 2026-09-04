@@ -5,7 +5,7 @@ start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerS
 
 为什么要有它：
   torch/numpy 只装在 nn-training/.venv 这个逐平台 venv 里，系统裸 `python` 没有
-  torch —— 直接运行 `python train_bc.py`/`python train_loop.py` 必然报
+  torch —— 直接运行 `python train/bc.py`/`python train_loop.py` 必然报
   ModuleNotFoundError: torch，这就是「找不到 torch」的根因。本脚本是唯一入口：
   定位系统 python → 若 venv+torch 未就绪则委派 bootstrap.py（探测 GPU → 选
   torch 变体 → uv sync → 装后自检）→ 把参数转发给所选训练脚本。
@@ -14,12 +14,15 @@ start-training.ps1 — 跨平台 torch(python) NN 训练统一启动器（PowerS
   .\start-training.ps1                              # 默认跑 train_loop.py（连续 BC）
   .\start-training.ps1 -Check                         # 只验证 venv+torch 就绪并打印解释器路径，退出
   .\start-training.ps1 -Echo -Script smoke_test.py    # 只打印将执行的准确命令，不执行
-  .\start-training.ps1 -Script train_bc.py --data-dir tmp/mix --arch student --epochs 25
-  .\start-training.ps1 -Script train_rl.py --num-envs 4 --num-steps 2048
-  .\start-training.ps1 -Script eval_bridge.py --data-dir <shards>
+  .\start-training.ps1 -Script train/bc.py --data-dir tmp/mix --arch student --epochs 25
+  .\start-training.ps1 -Script run_rl.py --num-envs 4 --num-steps 2048
+  .\start-training.ps1 -Script scripts/validate_export.py --data-dir <shards>
   .\start-training.ps1 -Force -TorchThreads 8
   .\start-training.ps1 -Script run_rl.py   # RL（per-tick）；--mode intent/goal 意图/goal 步 RL
 
+  注：-Script 接受根裸名（run_rl.py / train_loop.py / smoke_test.py）、子包相对路径
+  （train/bc.py / scripts/eval_bridge.py …，前向斜杠），或旧扁平名（train_bc.py /
+  gen_self_inj.py / train_rl.py … —— 自动别名到包内，DECISIONS §324）。
   注：-Script 之后的所有“未知”参数（--data-dir/--arch/--epochs 等）原样透传给
   目标脚本 —— 本脚本不自带参数校验（无 [CmdletBinding]），故不会把它们当绑定
   错误。真正被本脚本消费的：-Force -KillPrevious -Check -Echo -Help -Detach
@@ -74,8 +77,20 @@ if ($Help) {
   exit 0
 }
 
-# --script 必须是 nn-training/ 下的裸 .py 文件名
-if ($Script -match '[/\\]') { Write-Host 'ERROR: --script must be a bare .py filename inside nn-training/'; exit 2 }
+# --script 解析（DECISIONS §324，2026-09-04）：根裸名 / 子包相对路径 / 旧扁平名别名。
+# 别名映射来自 2026-09-01 打包重构（root → train/ | scripts/）的 rename 清单（3c83169）。
+$LegacyAlias = @{
+  'train_bc.py' = 'train/bc.py'; 'train_goal_bc.py' = 'train/goal_bc.py'; 'train_intent_probe.py' = 'train/intent_probe.py'
+  'eval_bridge.py' = 'scripts/eval_bridge.py'; 'eval_intent_m5.py' = 'scripts/eval_intent_m5.py'; 'gen_self_inj.py' = 'scripts/gen_self_inj.py'
+  'init_scratch_weights.py' = 'scripts/init_scratch_weights.py'; 'validate_export.py' = 'scripts/validate_export.py'; 'train_rl.py' = 'run_rl.py'
+}
+if ($LegacyAlias.ContainsKey($Script)) {
+  Write-Host "[start-training] alias: $Script -> $($LegacyAlias[$Script]) (DECISIONS §324)"
+  $Script = $LegacyAlias[$Script]
+}
+if (($Script -eq '') -or ($Script -match '\\') -or ($Script -match '^(\.\.|[A-Za-z]:)') -or (($Script -split '[\\/]') -contains '..')) {
+  Write-Host "ERROR: --script must be a .py path inside nn-training/ (no leading /, drive, or ..): $Script"; exit 2
+}
 $ScriptDir = $PSScriptRoot
 $ScriptPath = Join-Path $ScriptDir $Script
 if (-not (Test-Path $ScriptPath)) { Write-Host "ERROR: script not found: $ScriptPath"; exit 2 }

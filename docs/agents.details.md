@@ -242,9 +242,12 @@ both handle venv setup, single-instance locking, and signal cleanup.
     torch interpreter path; exit 0 = usable.
   - PowerShell (pwsh 7): `pwsh -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Check`.
   - Print the exact command without running it: `--echo --script <name>.py [args]` (PS: `-Echo -Script`).
-- The launcher is not just `train_loop.py`: `--script <name>.py [args]` runs any `nn-training/*.py`
-  through the same venv (`train_bc.py --arch student`, `train_rl.py`, `smoke_test.py`,
-  `eval_bridge.py`, …) so all torch work shares one entry and agents never hit "no torch".
+- The launcher is not just `train_loop.py`: `--script <path>.py [args]` runs root runners
+  (`run_rl.py`, `train_loop.py`, `smoke_test.py`) or subpackage entries (`train/bc.py --arch student`,
+  `train/goal_bc.py`, `train/intent_probe.py`, `scripts/eval_bridge.py`, `scripts/validate_export.py`, …)
+  through the same venv, so all torch work shares one entry and agents never hit "no torch".
+  Legacy flat names auto-alias to their package home (`train_bc.py` → `train/bc.py`,
+  `gen_self_inj.py` → `scripts/gen_self_inj.py`, `train_rl.py` → `run_rl.py`; DECISIONS §324).
 
 ### 5.7 pwsh git commit — the reliable recipe (Windows agents)
 The shell is **PowerShell 7 (pwsh)**, not bash; redirect-and-heredoc tricks that work in bash silently break

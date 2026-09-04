@@ -6,7 +6,7 @@
 # 为什么要有它：
 #   torch / numpy 只安装在 nn-training/.venv 这个逐平台的 venv 里，
 #   系统裸 `python`/`python3` 解释器**没有 torch** —— 直接运行
-#   `python train_bc.py` / `python train_loop.py` 必然报
+#   `python train/bc.py` / `python train_loop.py` 必然报
 #   ModuleNotFoundError: torch，这就是「找不到 torch」的根因。
 #   本脚本是唯一入口：定位系统 python → 若 venv+torch 未就绪则委派 bootstrap.py
 #   （探测 GPU → 选 torch 变体 → uv sync → 装后自检）→ 把参数转发给训练脚本。
@@ -15,9 +15,12 @@
 #   ./start-training.sh                                # 默认跑 train_loop.py（连续 BC）
 #   ./start-training.sh --check                          # 只验证 venv+torch 存在并打印解释器路径，退出
 #   ./start-training.sh --echo --arch variant          # 只打印将执行的准确命令，不执行
-#   ./start-training.sh --script train_bc.py --data-dir tmp/mix --arch student --epochs 25
-#   ./start-training.sh --script train_rl.py --num-envs 4 --num-steps 2048
-#   ./start-training.sh --script eval_bridge.py --data-dir <shards>
+#   ./start-training.sh --script train/bc.py --data-dir tmp/mix --arch student --epochs 25
+#   ./start-training.sh --script run_rl.py --num-envs 4 --num-steps 2048
+#   ./start-training.sh --script scripts/validate_export.py --data-dir <shards>
+#   --script 可传：根 runner（train_loop.py / run_rl.py / smoke_test.py）、子包入口
+#   （train/bc.py / scripts/eval_bridge.py …），或旧扁平名（train_bc.py / gen_self_inj.py /
+#   train_rl.py … —— 自动别名到包内，见下，DECISIONS §324）
 #   ./start-training.sh --rounds 5 --epochs-per-round 60 --lr 1e-3    # 转发给 train_loop.py
 #   ./start-training.sh --force --torch-threads 8
 #   ./start-training.sh --kill-previous --detach --script run_rl.py  # 一键带杀重启 RL
@@ -113,9 +116,22 @@ if [ "$HELP" = "1" ]; then
   exit 0
 fi
 
-# --script 必须是 nn-training/ 下的裸 .py 文件名
+# --script 解析（DECISIONS §324，2026-09-04）：根裸名 / 子包相对路径 / 旧扁平名别名。
+# 别名映射来自 2026-09-01 打包重构（root → train/ | scripts/）的 rename 清单（3c83169）。
 case "$SCRIPT" in
-  */*|*\\*) echo "ERROR: --script must be a bare .py filename inside nn-training/"; exit 2 ;;
+  train_bc.py)            log "alias: $SCRIPT -> train/bc.py";            SCRIPT="train/bc.py" ;;
+  train_goal_bc.py)       log "alias: $SCRIPT -> train/goal_bc.py";       SCRIPT="train/goal_bc.py" ;;
+  train_intent_probe.py)  log "alias: $SCRIPT -> train/intent_probe.py";  SCRIPT="train/intent_probe.py" ;;
+  eval_bridge.py)         log "alias: $SCRIPT -> scripts/eval_bridge.py"; SCRIPT="scripts/eval_bridge.py" ;;
+  eval_intent_m5.py)      log "alias: $SCRIPT -> scripts/eval_intent_m5.py"; SCRIPT="scripts/eval_intent_m5.py" ;;
+  gen_self_inj.py)        log "alias: $SCRIPT -> scripts/gen_self_inj.py"; SCRIPT="scripts/gen_self_inj.py" ;;
+  init_scratch_weights.py) log "alias: $SCRIPT -> scripts/init_scratch_weights.py"; SCRIPT="scripts/init_scratch_weights.py" ;;
+  validate_export.py)     log "alias: $SCRIPT -> scripts/validate_export.py"; SCRIPT="scripts/validate_export.py" ;;
+  train_rl.py)            log "alias: $SCRIPT -> run_rl.py";              SCRIPT="run_rl.py" ;;
+esac
+# 路径守卫：相对 nn-training/、允许前向斜杠子路径；拒绝绝对路径 / 盘符 / 反斜杠 / 越级
+case "$SCRIPT" in
+  /*|*:*|*\\*|*..*|"") echo "ERROR: --script must be a .py path inside nn-training/ (no leading /, drive, \\, or ..): $SCRIPT"; exit 2 ;;
 esac
 SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT"
 if [ ! -f "$SCRIPT_PATH" ]; then
