@@ -295,7 +295,7 @@ class TrainingSteps:
         import subprocess as _sp
 
         _dirty = _sp.run(
-            ["git", "status", "--porcelain"],
+            ["git", "diff-index", "--name-only", "HEAD"],
             cwd=str(Path(__file__).resolve().parents[2]),
             capture_output=True,
             text=True,
@@ -304,8 +304,8 @@ class TrainingSteps:
         _dirty_files = [ln for ln in _dirty.stdout.splitlines() if ln.strip()]
         if _dirty.returncode == 0 and _dirty_files:
             raise SystemExit(
-                "[run_rl] --ppo remote 要求干净工作区（云端按 commit-pin checkout 代码）："
-                f"{len(_dirty_files)} 个未提交/未跟踪文件（如 {_dirty_files[0][:60]}…）。"
+                "[run_rl] --ppo remote 要求已跟踪文件无修改（云端按 commit-pin checkout 代码）："
+                f"{len(_dirty_files)} 个已修改文件（如 {_dirty_files[0][:60]}…）。"
                 "先 commit + push 再启动远程训练（review-hy H4）"
             )
         from rl.queue import RUN_ID
