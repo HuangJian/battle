@@ -27,7 +27,7 @@ from rl.course import build_pairs
 from rl.events import log_iter_error, write_run_start
 from rl.log import log
 from rl.loop_guards import TrainingGuards
-from rl.loop_steps import TrainingSteps
+from rl.loop_steps import SmokeVoidRoundError, TrainingSteps
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
 from rl.resume import completed_pairs, last_completed_iter, last_rotate_seed
@@ -199,6 +199,15 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                     args, it, self._stream_meta, self._spawned_early
                 )
                 self._consec_fail = 0
+            except SmokeVoidRoundError:
+                # 冒烟回显（worker --echo）：已走完全链路但权重是 init 回显——作废。
+                # 不计失败连击、不 sleep；it 原地（异常从 _remote_ppo 抛出时本轮
+                # 未写 iteration 事件，重试轮 _prepare_iter_dir 清场重采）。
+                if getattr(args, "smoke", False):
+                    log(f"[run_rl] smoke it{it}: 冒烟回显已作废——--smoke 干净退出")
+                    break
+                log(f"[run_rl] it{it} 收到冒烟回显结果——本轮作废，原地重试")
+                it -= 1
             except SystemExit as e:
                 self._consec_fail += 1
                 log_iter_error(self._jsonl_path, it, f"SystemExit: {e}")

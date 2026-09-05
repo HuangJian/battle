@@ -2338,3 +2338,89 @@ remote-jobs 目录，清理已完成且迭代 <= keep_iters 的 job。
 → M1（`gate_check` 库 + loop 第四守卫 + p4 gates 落地，eval_games 20→100 系课程
 文件变更 = course_fp 变 = 新实验，p4-RL 未启动故安全）→ M2（停机执行器 + 实弹演习）。
 P10-CAP 悬案与 p10 门限追认同批评审（p10-RL early curve 出来后）。
+
+## §338 课程结束条件 v0.4 拍板：ds 评审 13 项 + P10-CAP 重标定（2026-09-05，转实施依据）
+
+**拍板**（`plan/course-exit-and-shutdown.md` v0.4 + `plan/exit.review-ds.md` 13 项处置，
+全接受）：EVAL_SEEDS 扩池进 M0（前 20 不动）；趋势单源改 settled-summary（含富化）；
+G3/G8/dependency 首期休眠；G5 基线 = 首条 run_start + deadline 跨重启累计；
+breaker 熔断同写 ABORT 行；worker 空闲自停；完成度 = 连续通过数/sustain；
+窗口单位一律 eval 轮；G7 改斜率口径。
+
+**语料口径变更（取代 §337 门限数字）**：门控语料统一为 in-loop 评估语料。
+教师现池 20 局复测——p4：12/20（60%，与 0..99 的 64% 一致，校准成立）；
+p10：1/20（5%）且超时 30%。门限切换为现池口径：p4 G1 胜率 ≥36%（0.6×60%）、
+被击中 ≤0.60/局；p10 G1 rel 取 1.0（追平教师）。§337 的 40/51 系旧语料口径，
+不再作为门控依据（保留为历史记录）。
+
+**P10-CAP  verdict（复核 5，选 a）**：教师超时 30% 证明 cap 扭曲参照系本身，
+`p10-onset.jsonc` max_ticks 2400→3600（重标定，p10 未启动故安全），
+G7 取 0.40 待扩池重测后追认。
+
+**落地**：M0（+种子扩池 + 教师 100 局重测 + summary 富化 + breaker-ABORT 行 +
+deadline 累计）→ M1（7 kind 求值器 + loop 接线 + p4 gates 落地）→ M2（停机执行器 +
+worker 自停 + 实弹演习）。行数据 `tmp/p{4,10}-god-evalseeds.jsonl`。
+
+## §339 hub-start.ts 全原生 Bun 重写：跳板进程与注册竞态修复（2026-09-05）
+
+`tools/hub-start.ts`（HUB 一键启动）调试定案。原实现用 netstat/tasklist/ps 按进程名
+匹配，在中文 Windows 上全部失效（`\r` 行尾、映像名不含脚本名），改为全原生 Bun API：
+`Bun.connect` 探端口、`Bun.spawn(detached+windowsHide)` 起进程、`process.kill` 停止、
+PID 账本替代进程名扫描。四条用户指令落实：等待一律以命令输出/健康探测触发（waitUntil
+轮询，无硬编码 sleep）；自启组件并行起停（Promise.allSettled）；无 --course 时列
+curricula 最新 5 课；cloudflared 黑窗修复。
+
+**四个平台层陷阱（全为实测证据，后续勿再踩）**：
+1. **Bun Job Object**：Windows 上 Bun.spawn 子进程默认进 kill-on-close 作业对象，
+   脚本一退后台组件全灭；必须 `detached: true`（脱离后 `windowsHide: true` 防黑窗）。
+2. **choco shim**：`Bun.which("cloudflared")` 拿到的是 chocolatey bin 的 shim，它另起
+   真身子进程、不透传 stdio 句柄（日志 0 字节）、被杀留孤儿。解法：shim 路径反推
+   `lib\cloudflared\tools\` 真身直启 + cloudflared 自带 `--logfile`（不依赖句柄继承）。
+3. **uv venv trampoline**：`.venv\Scripts\python.exe` 同样是跳板，真身是 pyenv 基础
+   解释器子进程——杀跳板留孤儿 hub_server 继续占 8787。解法：读 pyvenv.cfg
+   `executable` 直启真身，第三方包由 PYTHONPATH 挂 venv site-packages
+   （**优先 `Lib\site-packages`**：本 venv 另有 POSIX 残留 `lib\python3.12\`，
+   无实际包，此前误选导致 pydantic ImportError）。
+4. **注册账本竞态**：并行启动阶段多组件并发 load→save 单一 registry.json 互相覆盖，
+   kill 漏杀；改为按组件分文件 `registry.<name>.json`。
+
+**协议层修复**：rollout 冒烟解包对齐 pack-container v2（gzip → BCV2 magic+headerLen+
+headerJSON；另 strip agent 同步流式路径的前导空格保活字节）；冒烟异步分支弃用返回
+布尔的 waitUntil（曾把 ArrayBuffer 丢成 true）改专用 pollAsyncResult。
+
+## §340 冒烟预演设计：真课程 + echo 回显 + 作废轮，不建虚拟课程（2026-09-05，用户拍板）
+
+hub-start --smoke-only 的 Kaggle 交互预演采用**真课程路径**（用户方案，否决虚拟课程）：
+TrainingLoop 以真课程 + `--smoke` 旗标发布真 job；伪 Kaggle 用与 notebook 完全相同的
+`remote_worker` 入口加 `--echo` 冒烟旗标（下载/校验全走、不拉 torch 不跑 PPO）回显
+payload 携带的 init 权重并带 `smoke: true` 标记；TrainingLoop 按正常流程
+wait_job → verify_and_land 落位后识别标记抛 SmokeVoidRound 作废本轮——it 不前进、
+不写 iteration 事件（last_completed_iter 续跑锚点零污染，实测账本 0 iteration）。
+
+**为什么优于虚拟课程**：① 冒烟验证的与真训练逐字节同路径（真课程_fp/真 rollout/
+真发布/真三重校验），虚拟课程会造出只在冒烟里存在的配置路径；② 零新课程文件维护；
+③ hub-server 不需要按课程重启；④ smoke 标记让**任何**消费方对回显结果作废重试——
+真训练在途时误入的回显也不会污染权重（自保护）。
+
+落位安全性论证：三重校验第一项即 init_weights_fp == sha256(args.out)，echo 回传
+字节 == 发布时 init 权重 → 落位为无操作；ppo_ckpt_remote 的回显 tar 由重试轮
+_prepare_iter_dir 清场。连带修复：`remote/hub_client.wait_job` 容忍瞬时网络错误/5xx
+（快速隧道单次抖动曾废整轮并堆积陈旧 pending job）+ `tools/hub-start.ts
+drainStaleJobs`（新启动前下架死运行残留 pending job，防真 worker 空烧租约）。
+流程接续 §339；实施记 docs/nn.progress.md §18。
+
+### §340 补充：冒烟/启动门禁严格化（2026-09-05，用户拍板"隧道不可达必须报错退出"）
+
+hub-start 全部隧道/code.zip/self-rollout 检查从 warn 升级为**硬门**：cloudflared 缺失、
+隧道 URL 获取失败、隧道 30s 探测不可达、code.zip 不可下载、self 节点 rollout 失败——
+任一命中即抛错退出（exit 1，基础设施保留供重跑复用）；--smoke-only 同语义。最终
+报告/冒烟总结的 cloudflared 行按**实测可达性**展示（不再只看 URL 是否拿到），退出码
+真实反映门禁状态。新增 `--no-tunnel` 逃生门：无 cloudflared 的机器显式跳过隧道
+（Kaggle 路径不验证、summary 明示）。实测：断 cloudflared → exit 1；绿路径 → exit 0。
+
+### §340 补充 2：位置参数课程名 + 课程快速失败校验（2026-09-05，用户指令）
+
+`bun tools/hub-start.ts p4-onset` ≡ `--course p4-onset`（裸词位置参数）；`--course` 与
+位置参数重复指定即报错（防静默覆盖）。课程参数在启动任何基础设施**之前**按
+`rl/config.resolve_course` 同规则快速失败（先路径后 curricula/<name>.jsonc），拼错
+课程名响亮报错并列出最新 5 课；未知旗标 exit 1。

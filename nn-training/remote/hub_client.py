@@ -24,6 +24,7 @@ import tarfile
 import time
 from pathlib import Path
 
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.protocol import (
     AUTH_HEADER,
     data_fp,
@@ -53,12 +54,13 @@ def git_head(repo_root: Path = REPO_ROOT) -> str:
     import subprocess
 
     try:
-        r = subprocess.run(
+        r: subprocess.CompletedProcess[str] = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=30,
+            **_POPEN_NO_WINDOW,
         )
         if r.returncode == 0:
             return r.stdout.strip()
@@ -377,13 +379,26 @@ def wait_job(
     """
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        status, body = _request(base_url, token, f"/jobs/{jid}/result", timeout=30.0)
+        try:
+            status, body = _request(base_url, token, f"/jobs/{jid}/result", timeout=30.0)
+        except Exception as e:
+            # 瞬时网络错误（快速隧道抖动/DNS/连接重置）——与 404 同等处理，续等；
+            # 2026-09-05：此前单次错误直接抛 HubClientError 会废掉整轮迭代
+            # （loop 连击 retry），对 24/7 隧道运营是可靠性缺陷。
+            log(f"wait_job: job {jid} 轮询网络错误 ({type(e).__name__}) —— {poll_sec}s 后重试")
+            time.sleep(poll_sec)
+            continue
         if status == 200:
             loaded = json.loads(body.decode("utf-8"))
             if isinstance(loaded, dict):
                 return loaded
             raise HubClientError(f"wait_job: job {jid} 结果非对象: {type(loaded).__name__}")
         if status == 404:
+            time.sleep(poll_sec)
+            continue
+        if status >= 500:
+            # 隧道/边缘瞬时 5xx（Cloudflare 错误页等）——容忍至 deadline
+            log(f"wait_job: job {jid} HTTP {status}（瞬时错误）—— {poll_sec}s 后重试")
             time.sleep(poll_sec)
             continue
         raise HubClientError(f"wait_job: HTTP {status}: {body[:200].decode('utf-8', 'replace')}")

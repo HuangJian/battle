@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.archive import ensure_current_branch_pushed
 from rl.cli import build_argparser
 from rl.collect_only import run_collect_only
@@ -164,6 +165,7 @@ def main() -> None:
         capture_output=True,
         text=True,
         timeout=30,
+        **_POPEN_NO_WINDOW,
     ).stdout.strip()
     if _current_branch and _current_branch != "HEAD":
         import dist_common as _dc

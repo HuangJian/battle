@@ -27,6 +27,11 @@
 //   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)
 //   - 弹药效率 -0.01/发 · 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0
 //
+// 起始权重 = p1 BC ep60（tmp/ep60/battle2-p1bc/run/weights.json；God-AI 蒸馏 BC 权重，
+//   165K 帧 / 1892 胜局 / --value-coef 0.5 MC 预置 value 头——model_build 对
+//   value_pretrained 权重跳过清零）。p1-ep60 在 p4-onset 上贪心评估 14/100 胜率，
+//   RL 从该起点通过 PPO 迭代提升至 God-AI 的 ~64/100 以上。
+//
 // 行为基线（2026-09-04，tools/sim/eval-course-ckpt.ts，单关 × seeds 0..99，贪心部署）：
 //   - God-AI：64/100（杀 306，均 3.06；击中敌 881；被击中 34；开枪 1500；
 //     通关 64 / 死亡 34 / 超时 2；4 杀局 64 全部真正清场）
@@ -73,7 +78,7 @@
   ],
   "difficulty": "hard",
   "max_ticks": 2400,
-  "seed_rotate": 50,
+  "seed_rotate": 150,
   "player": {
     "lives": 1,
     "level": 0
@@ -97,7 +102,7 @@
     "scheme": "toy"
   },
   "dodge": "",
-  "bc": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json",
   "iters": 0,
   "max_hours": 24,
   "workers": 8,
@@ -117,6 +122,6 @@
   "backup_prefix": "p4-onset",
   // 自定义关 stage ID 从 2000 开始，p4-onset 仅 1 关 → ID 2000
   "eval_stages": "2000-2000",
-  "eval_games_per_stage": 20,
+  "eval_games_per_stage": 100,
   "eval_every": 5
 }

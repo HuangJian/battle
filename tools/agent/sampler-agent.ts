@@ -614,6 +614,10 @@ function beginTask(
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
+  console.log(
+    `[sampler-agent] beginTask key=${key} iterId=${iterId} stage=${stage} seed=${seed} ` +
+      `inflight.size=${inflight.size} activeWorkers=${activeWorkers}`,
+  )
   runGame(
     stage,
     seed,
@@ -636,16 +640,27 @@ function beginTask(
       lruPut(key, buf)
       gamesDoneTotal++
       gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
+      console.log(
+        `[sampler-agent] task done key=${key} stage=${stage} seed=${seed} ` +
+          `buf.len=${buf.length} resultCache.size=${resultCache.size}`,
+      )
     })
     .catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e)
       failedTasks.set(key, msg.slice(0, 300))
       lastError = `${new Date().toISOString()} s${stage}/seed${seed}: ${msg}`
-      console.error(`[sampler-agent] task failed: ${lastError}`)
+      console.error(
+        `[sampler-agent] task FAILED key=${key} stage=${stage} seed=${seed} ` +
+          `msg=${msg} failedTasks.size=${failedTasks.size}`,
+      )
     })
     .finally(() => {
       activeWorkers--
       inflight.delete(key)
+      console.log(
+        `[sampler-agent] task finally key=${key} stage=${stage} seed=${seed} ` +
+          `inflight.has=${inflight.has(key)} activeWorkers=${activeWorkers}`,
+      )
     })
 }
 
@@ -1012,14 +1027,11 @@ async function handle(req: Request): Promise<Response> {
     const mode = url.searchParams.get('mode') ?? 'rollout'
     const kind = url.searchParams.get('kind') ?? 'rollout'
     // stageJsonHash：与提交端 taskKey 配方一致（M1d 布局指纹）
-    const key = taskKey(
-      iterId,
-      mode,
-      kind,
-      stage,
-      seed,
-      url.searchParams.get('stageJsonHash') ?? '',
-    )
+    // courseFp（D14）：2026-09-05 修复——此前缺漏导致轮询 key ≠ 提交 key，
+    // 有 courseFp 时 taskKey 格式不同（多 c${fp} 前缀），轮询永远找不到任务。
+    const sjHash = url.searchParams.get('stageJsonHash') ?? ''
+    const courseFp = url.searchParams.get('courseFp') ?? ''
+    const key = taskKey(iterId, mode, kind, stage, seed, sjHash, courseFp)
     const cached = resultCache.get(key)
     if (cached) {
       resultCache.delete(key)
@@ -1039,6 +1051,13 @@ async function handle(req: Request): Promise<Response> {
         { status: 'running', elapsedSec: +((Date.now() - running.startedAt) / 1000).toFixed(1) },
         202,
       )
+    // 404 调试日志：记录 key 和所有集合状态，用于定位 D14 courseFp 类问题
+    console.log(
+      `[sampler-agent] /v1/result MISS key=${key} iterId=${iterId} ` +
+        `stage=${stage} seed=${seed} mode=${mode} kind=${kind} ` +
+        `sjHash=${sjHash} courseFp=${courseFp} ` +
+        `resultCache.size=${resultCache.size} failedTasks.size=${failedTasks.size} inflight.size=${inflight.size}`,
+    )
     return jsonResponse({ error: 'unknown task (expired/purged/restart)' }, 404)
   }
 

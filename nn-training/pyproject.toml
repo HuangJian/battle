@@ -137,7 +137,7 @@ include = ["models*", "ppo*", "rl*", "data*", "train*", "scripts*", "tools*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = [".venv", "weights", "tmp", "__pycache__"]
+extend-exclude = [".venv", "weights", "tmp", "__pycache__", "ipynb"]
 # 2026-09-02：缓存迁到项目内 tmp/（默认在 %LOCALAPPDATA%\ruff，清理旧缓存会触发
 # 沙箱删除权限请求；项目内删除无需审批）。
 cache-dir = "tmp/.ruff-cache"

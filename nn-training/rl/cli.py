@@ -353,6 +353,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="PPO 执行面：local（现状，CPU/本机） / remote（云端 GPU worker，旁路 hub-server）",
     )
     ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="冒烟预演（配 --ppo remote）：收到冒烟回显结果（remote_worker --echo）后"
+             "作废本轮并干净退出；it 不前进、不写 iteration 事件",
+    )
+    ap.add_argument(
         "--remote-hub-url",
         default=_d("remote_hub_url", ""),
         help="远程模式：hub-server base URL（如 http://127.0.0.1:8787）",

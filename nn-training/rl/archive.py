@@ -19,6 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from rl.log import log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/rl/ 上溯 3 层）
@@ -53,13 +54,15 @@ def ensure_current_branch_pushed(repo_root: Path) -> str | None:
     Returns the pushed branch name, or None on any (non-fatal) failure.
     """
     try:
-        branch = subprocess.run(
+        branch_res: subprocess.CompletedProcess[str] = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=30,
-        ).stdout.strip()
+            **_POPEN_NO_WINDOW,
+        )
+        branch = branch_res.stdout.strip()
         if not branch or branch == "HEAD":
             return None
         r = subprocess.run(
@@ -68,6 +71,7 @@ def ensure_current_branch_pushed(repo_root: Path) -> str | None:
             capture_output=True,
             text=True,
             timeout=120,
+            **_POPEN_NO_WINDOW,
         )
         if r.returncode == 0:
             log(f"[archive] pushed {branch} -> origin (agents can git-pull to sync)")

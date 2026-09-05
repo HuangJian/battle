@@ -36,6 +36,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "nn-training", "rl-config.json")
 
@@ -290,6 +292,7 @@ def dirty_hash_files() -> list[str]:
             capture_output=True,
             text=True,
             timeout=10,
+            **_POPEN_NO_WINDOW,
         )
         if proc.returncode != 0:
             return []

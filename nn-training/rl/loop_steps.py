@@ -23,6 +23,16 @@ from rl.log import log
 from rl.modes import _MODE_BACKUP_PREFIX
 
 
+class SmokeVoidRoundError(Exception):
+    """冒烟回显结果（result.smoke=true，remote/worker.py --echo）。
+
+    本轮已按正常流程走完 发布→领取→三重校验落位，但权重是 init 回显而非真
+    PPO 产出——作废本轮：不写 iteration 事件（last_completed_iter 续跑锚点
+    不受影响）、it 不前进。loop_core.run 捕获：--smoke 干净退出，真训练原地
+    重试同一迭代（作废不是故障，不计失败连击）。
+    """
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -347,6 +357,15 @@ class TrainingSteps:
             log=log,
         )
         mark_job_completed(self._jsonl_path, jid)
+        if result.get("smoke"):
+            # 冒烟回显（worker --echo）：全链路已验证，但权重 = init 回显非真 PPO——
+            # 作废本轮。job_completed 已记账（审计链完整）；落位的 out 权重与
+            # 发布时逐字节相同（init 回显），无需回滚；重试轮 _prepare_iter_dir 清场。
+            log(
+                f"[run_rl] remote ppo it{it}: job {jid} 是冒烟回显（result.smoke）"
+                "——本轮作废"
+            )
+            raise SmokeVoidRoundError(jid)
         # H7（review-hy）：--remote-precollect 1 → 在 PPO 等待窗口后 spawn 下一轮首波
         # 预采（θ_N 快照，复用 spawn_collect_next 双缓冲机制）。默认 0（Q10 测后开）
         # 时不可达。stale 分数上限 30% 的筛选（S5/F4）属 §6-D3 后续项，未在此实现。

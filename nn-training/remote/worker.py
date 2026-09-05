@@ -220,11 +220,15 @@ def run_job(
     work_dir: Path,
     device: str = "cpu",
     torch_threads: int = 0,
+    echo: bool = False,
     log=lambda msg: print(
         f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
     ),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
+
+    echo=True（冒烟）：下载/校验全走，但不拉 torch 不跑 PPO——init 权重原样回传
+    并带 smoke 标记（消费方作废本轮）；hub-start --smoke-only 的 Kaggle 交互预演。
 
     返回 hub 侧需要的 result dict（未 POST——调用方决定上传时机；本函数
     负责完成 PPO 与产物）。幂等：已完成（result 已落盘）的 job 由 hub 返回
@@ -287,6 +291,49 @@ def run_job(
                 f"（{_sd}）——跨课程语料混入，拒收"
             )
 
+    # ---- 冒烟回显（--echo，2026-09-05）：不拉 torch、不跑 PPO——把 payload 携带的
+    # init 权重与指纹原样回传为 job 结果（hub-start --smoke-only 的 Kaggle 交互预演，
+    # 用户拍板：真课程 + 作废轮，不建虚拟课程）。三重校验按构造必过
+    # （init_weights_fp/data_fp/commit_echo 均为 manifest 回显）；消费方
+    # （rl/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
+    if echo:
+        init_w = job_dir / "init_weights.json"
+        if not init_w.exists():
+            raise ProtocolError("payload 缺 init_weights.json——echo 冒烟无法回显")
+        # opt tar：manifest 携带则原样回显（Adam 动量 = 发布时状态）；首轮无 tar 时
+        # 回空 tar（解包为空目录——作废轮的落位产物会被 _prepare_iter_dir 清场，
+        # 真 PPO 轮会重新落位覆盖，永不消费空 tar）
+        opt_b64 = str(manifest.get("opt_init") or "")
+        if not opt_b64:
+            import io as _io
+
+            _buf = _io.BytesIO()
+            with tarfile.open(fileobj=_buf, mode="w:"):
+                pass
+            opt_b64 = encode_opt_tar(_buf.getvalue())
+        result = {
+            "job_id": jid,
+            "data_fp": manifest["data_fp"],
+            "init_weights_fp": manifest["init_weights_fp"],
+            "weights_json": encode_weights_json(init_w.read_bytes()),
+            "opt_tar_b64": opt_b64,
+            "agg": {
+                "policy": 0.0,
+                "value": 0.0,
+                "entropy": 0.0,
+                "kl": 0.0,
+                "mean_ret": 0.0,
+                "steps": 0,
+                "chunks": 0,
+            },
+            "commit_echo": manifest["commit"],
+            "ppo_sec": 0.0,
+            "smoke": True,
+        }
+        validate_result(result, manifest, commit_echo_must_match=False)
+        log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
+        return result
+
     # ---- 课程上下文：快照全文 → CourseConfig → reward_fn（D1/D6/D13） ----
     import numpy as np
 
@@ -334,22 +381,23 @@ def run_job(
     if not init_w.exists():
         raise ProtocolError("payload 缺 init_weights.json——无法构建模型")
     model = ppo_engine.build_ppo(str(init_w))
+    device_t = torch.device(device)
     opt = None
     if manifest.get("opt_init"):
         opt_dir = job_dir / "opt_init"
         unpack_opt_tar(decode_opt_tar(str(manifest["opt_init"])), opt_dir)
+        # 必须在 model.to(device_t) 之前加载 state_dict，然后统一移到目标设备
         model.load_state_dict(torch.load(opt_dir / "model.pt", map_location="cpu"))
+        model.to(device_t)
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-        opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+        opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location=device_t))
         log(f"job {jid}: model/opt 从 opt_init tar 恢复（Adam 动量延续，D5）")
     else:
         # 首轮/无 tar：从 init 权重 warm-start（hub 打包时写入 payload 的 weights_json）
         load_state_into(model, str(init_w))
+        model.to(device_t)
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
         log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
-
-    device_t = torch.device(device)
-    model.to(device_t)
 
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
     shards_root = str(job_dir)
@@ -416,6 +464,7 @@ def worker_loop(
     torch_threads: int = 0,
     poll_sec: float = 5.0,
     once: bool = False,
+    echo: bool = False,
     max_idle_sec: float = 0.0,
     log=lambda msg: print(
         f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
@@ -466,7 +515,7 @@ def worker_loop(
         job_ok = False
         try:
             result = run_job(base_url, token, job, work_dir=work_dir, device=device,
-                             torch_threads=torch_threads, log=log)
+                             torch_threads=torch_threads, echo=echo, log=log)
             post_result(base_url, token, jid, result, lease_token=lease_token)
             log(f"job {jid} done — result accepted")
             done += 1
@@ -497,6 +546,11 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
     ap.add_argument("--poll-sec", type=float, default=5.0)
     ap.add_argument("--once", action="store_true", help="处理一个 job 后退出")
+    ap.add_argument(
+        "--echo",
+        action="store_true",
+        help="冒烟：跳过 PPO，回显 init 权重为结果（hub-start 冒烟预演；消费方作废本轮）",
+    )
     ap.add_argument("--max-idle-sec", type=float, default=0.0, help="空闲超时退出（0=永不）")
     args = ap.parse_args()
     token = args.token
@@ -518,6 +572,7 @@ def main() -> None:
         torch_threads=args.threads,
         poll_sec=args.poll_sec,
         once=args.once,
+        echo=args.echo,
         max_idle_sec=args.max_idle_sec,
     )
     print(f"[worker] done: {n} job(s) processed")

@@ -5,6 +5,43 @@
 
 ---
 
+## §18 远程链路冒烟预演：worker --echo + TrainingLoop 作废轮（2026-09-05，DECISIONS §340）
+
+用户拍板：不建虚拟课程——TrainingLoop 跑**真课程**，伪 Kaggle（echo worker）回传 init
+权重并带 smoke 标记，TrainingLoop 走完正常落位后识别标记**作废本轮**（it 不前进）。
+冒烟保真度 = 与真训练逐字节同路径；作废标记使任何消费方都不会把回显权重当真 PPO
+吃进去（自保护）。
+
+落地（`bun run check` / pytest test_remote_ppo 32 绿）：
+- `remote/worker.py --echo`：下载/校验/commit/course_fp 全走，跳过 torch 与 PPO，
+  result = init 权重回显 + manifest 指纹回显 + `smoke: true`（validate_result 不拒额外键）。
+- `rl/loop_steps._remote_ppo`：`verify_and_land` + `mark_job_completed` 后查
+  `result["smoke"]` → 抛 `SmokeVoidRoundError`；落位权重与发布时逐字节相同（init 回显），
+  无需回滚。
+- `rl/loop_core.run`：捕获 SmokeVoidRoundError——`--smoke` 干净退出，真训练 `it -= 1`
+  原地重试（不计失败连击、不 sleep）。**作废轮不写 iteration 事件** →
+  `last_completed_iter` 续跑锚点零污染（实测账本 0 iteration 事件）。
+- `rl/cli.py --smoke`；`tools/hub-start.ts --smoke-only` 新增 Kaggle 交互预演阶段
+  （真 job 发布 → echo worker 穿隧道 claim→payload→code→result → 落位 → 作废退出）。
+- `remote/hub_client.wait_job` 加固：轮询容忍瞬时网络错误与 5xx（快速隧道抖动曾
+  一击废掉整轮迭代 → 连击重试堆积陈旧 pending job）——24/7 隧道运营可靠性修复。
+- 闪窗收尾：`archive.py`（git push）/`run_rl.py`（rev-parse）补接
+  `platform_utils.POPEN_NO_WINDOW`（console-less 父进程拉 git 会新建可见控制台；
+  其余文件的接线早已完成）。
+- 闪窗第二三轮排查（看门狗实证法：EnumWindows 扫可见 ConsoleWindowClass 窗口记
+  PID）：漏网点共两处——`remote/hub_client.git_head`（每次发布）与
+  `dist_common.dirty_hash_files`（每轮派发的 dirty-tree 检查）——均已补接。dirty 检查
+  本身保留：它只管**远端** pull 节点的 restart 循环护栏（self 节点经 is_self_node
+  豁免、纯重启零 git 操作，2026-08-30 修订），与 code.zip 直接打包无关。
+- `tools/hub-start.ts drainStaleJobs`：TrainingLoop 新启动前下架陈旧 pending job
+  （删 payload.zip → hub claimable 跳过；账本保留 job_pending 真实历史），避免真
+  worker 空烧 GPU 租约。
+
+实测（20:56 冒烟）：发布 8s（断点续跑）→ echo worker 全趟 54s → 落位 → 作废退出；
+账本 0 iteration 事件。教训：Bun Windows `detached` = DETACHED_PROCESS（子进程完全
+无控制台，hwnd=0 实测），孙进程（git 等）会新建可见控制台闪窗——python 侧子进程
+一律挂 POPEN_NO_WINDOW。
+
 ## §17 goal-space 策略网络重建开工（2026-08-29，M9 时代）
 
 按 `plan/Goal-Space-Policy-Rebuild.md`（2865 行开发手册，六轮评审收敛）启动 goal-space 轨：
