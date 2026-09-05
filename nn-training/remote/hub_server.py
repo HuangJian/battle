@@ -286,10 +286,14 @@ class HubHandler(BaseHTTPRequestHandler):
                 if not self._auth_ok():
                     return
                 self._json({"status": "ok"}, 200)
+            elif path == "/code":
+                self._get_shared_code()
             elif path == "/jobs/next":
                 self._get_next()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
+            elif path.startswith("/jobs/") and path.endswith("/code"):
+                self._get_code()
             elif path.startswith("/jobs/") and path.endswith("/status"):
                 self._get_status()
             elif path.startswith("/jobs/") and path.endswith("/result"):
@@ -343,6 +347,30 @@ class HubHandler(BaseHTTPRequestHandler):
         p = self.store._job_dir(jid) / "payload.zip"
         if not p.exists():
             self._json({"error": "no payload"}, 404)
+            return
+        self._bytes(p.read_bytes())
+
+    # ---- GET /jobs/{id}/code ----
+    def _get_code(self) -> None:
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None:
+            self._json({"error": "not found"}, 404)
+            return
+        p = self.store._job_dir(jid) / "code.zip"
+        if not p.exists():
+            self._json({"error": "no code zip"}, 404)
+            return
+        self._bytes(p.read_bytes())
+
+    # ---- GET /code（共享 code.zip，colab bootstrap 用） ----
+    def _get_shared_code(self) -> None:
+        if not self._auth_ok():
+            return
+        p = self.store.job_root / "code.zip"
+        if not p.exists():
+            self._json({"error": "no shared code zip — training loop 尚未启动"}, 404)
             return
         self._bytes(p.read_bytes())
 

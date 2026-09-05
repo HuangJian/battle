@@ -71,6 +71,7 @@ def _mini_manifest(**over) -> dict:
         "it": 3,
         "job_id": "j" * 16,
         "commit": "c" * 40,
+        "code_sha256": "z" * 64,
         "course": "// course jsonc\n{\"reward\": {\"formula\": \"score\"}}",
         "course_fp": "f" * 64,
         "reward_formula": "score",

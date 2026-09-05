@@ -43,6 +43,7 @@ MANIFEST_REQUIRED = (
     "it",
     "job_id",
     "commit",
+    "code_sha256",  # Python 源码 zip sha256（hub 启动时打包，替代 git 同步）
     "course",  # 课程 jsonc 全文快照（reward_spec 重建输入，D6）
     "course_fp",  # 课程文件 sha256（语料血缘，D14）
     "reward_formula",
@@ -102,7 +103,7 @@ def normalize_manifest(m: dict) -> dict:
             raise ProtocolError(f"{k} 必须是 float，收到 {v!r}")
         if float(v) <= 0:
             raise ProtocolError(f"{k} 必须 > 0，收到 {v!r}")
-    for k in ("commit", "course", "course_fp", "mode", "seed", "init_weights_fp",
+    for k in ("commit", "code_sha256", "course", "course_fp", "mode", "seed", "init_weights_fp",
               "data_fp", "payload_sha256", "job_id"):
         if not isinstance(out[k], str) or not out[k]:
             raise ProtocolError(f"{k} 必须是非空 str")

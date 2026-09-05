@@ -86,6 +86,13 @@ def download_payload(base_url: str, token: str, jid: str) -> bytes:
     return body
 
 
+def download_code(base_url: str, token: str, jid: str) -> bytes:
+    status, body = _request(base_url, token, f"/jobs/{jid}/code", timeout=120.0)
+    if status != 200:
+        raise ProtocolError(f"code download failed: HTTP {status}")
+    return body
+
+
 def post_result(
     base_url: str,
     token: str,
@@ -243,14 +250,23 @@ def run_job(
     # init_weights.json / opt_init.tar.b64 与 shard 目录同落 job_dir 根（解包天然如此）。
     _unused_manifest, shard_dirs = unpack_payload(zip_path, job_dir)
 
-    # ---- commit 校验（D6：两端代码一致） ----
-    # 不等时自动 git fetch + checkout 修复（最多重试 5 次），避免并行开发时
-    # 云端 hash 落后导致任务永久拒收。
-    if not _ensure_commit(manifest["commit"], log=log):
+    # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
+    # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
+    code_raw = download_code(base_url, token, jid)
+    if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
         raise ProtocolError(
-            f"commit 不匹配：manifest={manifest['commit'][:12]} "
-            f"— git fetch + checkout 重试 5 次后仍失败，拒收"
+            "code_sha256 不匹配——传输损坏或 hub 代码版本不一致（拒收）"
         )
+    code_zip_path = job_dir / "code.zip"
+    code_zip_path.write_bytes(code_raw)
+    import zipfile
+
+    code_extract_dir = job_dir / "code"
+    code_extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(code_zip_path) as zf:
+        zf.extractall(code_extract_dir)
+    sys.path.insert(0, str(code_extract_dir))
+    log(f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, {len(list(code_extract_dir.rglob('*.py')))} .py files) -> sys.path[0]")
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

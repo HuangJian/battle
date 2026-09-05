@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT))
 from remote.hub_client import (
     git_head,
     iter_shard_dirs,
+    pack_code_zip,
     publish_job,
     verify_and_land,
     wait_job,
@@ -195,6 +196,9 @@ def main() -> int:
 
     # ---- 4) hub 发布 job（磁盘 IPC，TrainingLoop._remote_ppo 同路径） ----
     commit = git_head(REPO)
+    # 打包 code.zip（hub 启动时一次打包，smoke 测试也遵循此流程）
+    code_zip_path = work / "code.zip"
+    code_sha256 = pack_code_zip(ROOT, code_zip_path, log=log)
     m = publish_job(
         job_root=work / "jobs",
         jsonl_path=str(work / "training_log.jsonl"),
@@ -205,6 +209,8 @@ def main() -> int:
         init_weights_path=str(init_w),
         ckpt_remote_dir=None,
         commit=commit,
+        code_sha256=code_sha256,
+        code_zip_path=code_zip_path,
         course=course_bytes.decode("utf-8"),
         course_fp=course_fp,
         reward_formula=course.reward.formula,

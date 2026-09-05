@@ -245,6 +245,7 @@ class TrainingSteps:
             git_head,
             iter_shard_dirs,
             mark_job_completed,
+            pack_code_zip,
             publish_job,
             verify_and_land,
             wait_job,
@@ -288,26 +289,14 @@ class TrainingSteps:
         from rl.reward_library import METRICS_VERSION
 
         commit = git_head()
-        # H4（review-hy P1）：commit-pin 的前提是云端 checkout 到 HEAD 拿到与 hub
-        # **一致**的代码。工作区有未提交/未跟踪文件时，云端 git pull 后根本没有
-        # remote/ 模块或拿到旧行为——commit 校验照样通过，训练却跑了错代码。
-        # fail fast：先 commit + push 再跑云。
-        import subprocess as _sp
-
-        _dirty = _sp.run(
-            ["git", "diff-index", "--name-only", "HEAD"],
-            cwd=str(Path(__file__).resolve().parents[2]),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        _dirty_files = [ln for ln in _dirty.stdout.splitlines() if ln.strip()]
-        if _dirty.returncode == 0 and _dirty_files:
-            raise SystemExit(
-                "[run_rl] --ppo remote 要求已跟踪文件无修改（云端按 commit-pin checkout 代码）："
-                f"{len(_dirty_files)} 个已修改文件（如 {_dirty_files[0][:60]}…）。"
-                "先 commit + push 再启动远程训练（review-hy H4）"
-            )
+        # 启动时一次打包源文件 code.zip（避免后继并行修改干扰云端代码一致性）
+        if not hasattr(self, "_code_sha256"):
+            nn_root = Path(__file__).resolve().parent.parent
+            code_zip_path = Path(job_root) / "code.zip"
+            cs = pack_code_zip(nn_root, code_zip_path, log=log)
+            self._code_sha256 = cs
+            self._code_zip_path = code_zip_path
+        # code.zip 已包含当前源码快照（含未提交修改），无需 git commit-pin 检查。
         from rl.queue import RUN_ID
 
         run_id = RUN_ID
@@ -323,6 +312,8 @@ class TrainingSteps:
             init_weights_path=args.out,
             ckpt_remote_dir=ckpt_remote,
             commit=commit,
+            code_sha256=self._code_sha256,
+            code_zip_path=self._code_zip_path,
             course=course_text,
             course_fp=course_fp,
             reward_formula=course.reward.formula,

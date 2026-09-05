@@ -118,6 +118,59 @@ def pack_payload_zip(
     return _sha256_bytes(zip_path.read_bytes())
 
 
+def pack_code_zip(
+    nn_root: str | Path,
+    zip_path: str | Path,
+    *,
+    log=lambda msg: None,
+) -> str:
+    """打包 nn-training Python 源文件为 code.zip（hub 启动时一次打包，避免后继
+    并行修改干扰云端代码一致性）。
+
+    包含：所有 .py + .jsonc 文件（递归），排除 tmp/ weights/ .venv/ __pycache__/
+    tests/ rl-config.json。
+
+    返回 zip 字节 sha256。
+    """
+    import zipfile
+
+    nn_root_p = Path(nn_root).resolve()
+    zip_path_p = Path(zip_path)
+    zip_path_p.parent.mkdir(parents=True, exist_ok=True)
+
+    _exclude_dirs = {"tmp", "weights", ".venv", "__pycache__", "tests", ".mypy_cache", ".ruff_cache"}
+    _exclude_files = {"rl-config.json"}
+
+    n_files = 0
+    with zipfile.ZipFile(zip_path_p, "w", zipfile.ZIP_DEFLATED) as z:
+        for dirpath, dirnames, filenames in os.walk(nn_root_p):
+            dir_p = Path(dirpath)
+            # 跳过排除目录（os.walk 修改 dirnames 原地剪枝，避免遍历进入）
+            rel = dir_p.relative_to(nn_root_p)
+            parts = rel.parts
+            if any(p in _exclude_dirs for p in parts):
+                dirnames[:] = []
+                continue
+            for fn in sorted(filenames):
+                if fn in _exclude_files:
+                    continue
+                if not fn.endswith((".py", ".jsonc")):
+                    continue
+                f = dir_p / fn
+                try:
+                    if not f.is_file():
+                        continue
+                except OSError:
+                    continue
+                z.write(f, arcname=str(rel / fn))
+                n_files += 1
+    # 清理 dirnames 修改后残留的记录（不出现在 zip 中，已正确跳过）
+    sha = _sha256_bytes(zip_path_p.read_bytes())
+    if log:
+        log(f"code.zip: {n_files} files, {zip_path_p.stat().st_size} bytes, sha256={sha[:12]}…")
+    return sha
+
+
 # ------------------------------------------------------------------ 发布（磁盘 IPC）
 
 def publish_job(
@@ -131,6 +184,8 @@ def publish_job(
     init_weights_path: str,
     ckpt_remote_dir: str | Path | None,
     commit: str,
+    code_sha256: str,
+    code_zip_path: str | Path | None = None,
     course: str,
     course_fp: str,
     reward_formula: str,
@@ -177,6 +232,7 @@ def publish_job(
         "runId": run_id,
         "it": it,
         "commit": commit,
+        "code_sha256": code_sha256,
         "course": course,
         "course_fp": course_fp,
         "reward_formula": reward_formula,
@@ -211,6 +267,11 @@ def publish_job(
     m["payload_sha256"] = sha
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 复制 code.zip 到 job 目录（hub-server 的 GET /jobs/{id}/code 从此目录服务）
+    if code_zip_path:
+        czp = Path(code_zip_path)
+        if czp.exists():
+            shutil.copy2(czp, jd / "code.zip")
     try:
         shutil.rmtree(tmp_extra_dir)
     except OSError:
