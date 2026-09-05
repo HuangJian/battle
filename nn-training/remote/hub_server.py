@@ -237,8 +237,11 @@ class HubHandler(BaseHTTPRequestHandler):
     store: _JobStore = None  # type: ignore[assignment]  # 由 factory 注入
 
     # ---- 基础 ----
-    def log_message(self, fmt: str, *args: object) -> None:  # 简洁日志
-        print(f"[hub-server {self.client_address[0]}] {fmt % args}")
+    def log_message(self, fmt: str, *args: object) -> None:  # 简洁日志（含时间戳）
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server {self.client_address[0]}] {fmt % args}",
+            flush=True,
+        )
 
     def _auth_ok(self) -> bool:
         ip = self.client_address[0]

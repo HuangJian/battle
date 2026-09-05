@@ -182,7 +182,9 @@ def run_job(
     work_dir: Path,
     device: str = "cpu",
     torch_threads: int = 0,
-    log=lambda msg: print(f"[worker] {msg}", flush=True),
+    log=lambda msg: print(
+        f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
+    ),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
 
@@ -367,7 +369,9 @@ def worker_loop(
     poll_sec: float = 5.0,
     once: bool = False,
     max_idle_sec: float = 0.0,
-    log=lambda msg: print(f"[worker] {msg}", flush=True),
+    log=lambda msg: print(
+        f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
+    ),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
