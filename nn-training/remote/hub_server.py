@@ -114,8 +114,9 @@ class _JobStore:
         now = self._now()
         out = []
         for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):
-            if self._job_dir(jid).exists() and not (self._job_dir(jid) / "payload.zip").exists():
-                continue  # 目录在但 payload 未落盘（发布中）——不可领取
+            jd = self._job_dir(jid)
+            if not jd.exists() or not (jd / "payload.zip").exists():
+                continue  # 目录不存在或 payload 未落盘——不可领取
             lease = self._leases.get(jid)
             if lease is not None and lease > now:
                 continue  # 已租出未过期：只有原租者心跳续租，不重发（Q7）
