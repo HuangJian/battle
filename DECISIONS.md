@@ -2317,3 +2317,24 @@ remote-jobs 目录，清理已完成且迭代 <= keep_iters 的 job。
 **M0 综合结论**：远程 PPO 方案收益明确（seed_rotate=50 时 PPO 占 ~50% 迭代时间，
 云 GPU 11× 加速可省 ~2 min/轮），传输与隧道不是瓶颈（payload < 1 MB，下载 < 5 s）。
 **M2 真 GPU 冒烟可以推进。**
+
+## §337 课程结束条件与停机规范 v0.3 拍板（2026-09-05，转实施依据）
+
+**拍板**（`plan/course-exit-and-shutdown.md` v0.3 + `plan/exit.review-hy.md` 15 项处置）：
+- 过门线：p4 G1 胜率 ≥40/100 连 3 次 + G2 技能三项（0 杀 <15%、场均杀 ≥2.1、
+  被击中 ≤51/局）——40 系教师 64 六折，与 §327"接近教师"带衔接；
+- G9 首期降级 PAUSE（拾取↑在 §332 下系期望行为，ABORT 待模式库实证）；
+- 裁剪清单：删两相确认协议/executor 握手/`.run_meta.json`/exit-code 主协议，
+  改 loop 内纯函数库 + 富 eval 单源；kind 目录保留 10 种（单源化后每种十余行，
+  advance_requires 自洽所需）；defer 仅 `dependency` kind 与 stop-loss 扩 per-tick。
+
+**评审背书**：15 项接受 11 / 部分接受 2（P1-2 库为主壳保留、P1-4 复用+三缺口）/
+驳回 1——P0-1"跨课污染最致命"前提不成立（`loop_core.py:166` 逐轮重建
+`_traj_dir` → eval_log 按课程隔离），硬化建议（行补 course_fp）照收。
+9.7s 引证系 p1 单敌，p4 四敌按 1 分钟备料；NaN 缺口为真（`breaker.py:54-55`
+比较恒 False）；G4 `/20` 折算拍脑袋，改半分 + `eval_sigma` SE 口径。
+
+**落地**：M0（GatesSpec 解析 + eval 行补 course_fp/被击中三字段 + NaN 检测）
+→ M1（`gate_check` 库 + loop 第四守卫 + p4 gates 落地，eval_games 20→100 系课程
+文件变更 = course_fp 变 = 新实验，p4-RL 未启动故安全）→ M2（停机执行器 + 实弹演习）。
+P10-CAP 悬案与 p10 门限追认同批评审（p10-RL early curve 出来后）。
