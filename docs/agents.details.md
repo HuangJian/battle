@@ -312,37 +312,73 @@ before architectural changes (`model.py`, `infer.ts`, `obs-encoder.ts`).
   96×96 viewBox, tanks face UP.
 - New test → `tests/`, mirroring the concern (e.g. `tests/stages.test.ts` ↔ `src/config/stages.ts`).
 
-### 5.12 NEVER `git stash` — sandbox object-store destruction (2026-08-28 incident)
-This environment's sandbox silently intercepts some git writes to `.git`. `git stash -u` (used during
-an A/B baseline check) deleted the entire object store: all 4 pack files vanished, `.git/refs` was
-removed, and `git status` reported "not a git repository". Only the working tree and `.git/logs`
-survived. 503 commits were temporarily unreadable.
+### 5.12 NEVER `git stash` — sandbox object-store destruction (2026-08-28 + 2026-09-06 incidents)
+
+This environment's sandbox silently intercepts some git writes to `.git`. The **first** incident
+(2026-08-28): `git stash -u` (during an A/B baseline check) deleted the entire object store — all 4
+pack files vanished, `.git/refs` was removed, `git status` reported "not a git repository". The
+**second** incident (2026-09-06): `git stash push <pathspec>` repeated the same destruction — the
+three `objects/pack/*.pack` files, the whole `refs/` tree, and `logs/refs/heads|remotes/*` reflogs
+were deleted; only `logs/HEAD` survived. Working tree and `index` were untouched both times. The
+trigger mechanism is not fully understood (gc.auto=0 rules out auto-gc; the write is intercepted
+mid-transaction) — **do not try to reproduce it.**
+
+**Why "just this once" is never acceptable (the actual failure mode, 2026-09-06):**
+the operator knew an A/B comparison was needed and reached for the most convenient command instead
+of reading the rulebook first. Two compounding gaps: the auto-injected AGENTS.md preview is truncated
+before §5 (the git-discipline section), and §5.12 lived only in `docs/agents.details.md`. Any agent
+about to run a git write that is not `add`/`commit`/`push`/`fetch`/`pull` **must Read this section
+first** — the cost is seconds; the cost of not doing it was a full repo restore.
 
 **Rules that follow:**
-- **Never run `git stash`** (with or without `-u`). For before/after comparisons use
-  `git worktree add <path> HEAD` (safe, parallel working trees) or copy the directory. Never reach
-  for stash.
+- **Never run any `git stash` subcommand** (`push`/`pop`/`apply`/`drop`/`clear`, with or without
+  `-u`/`--keep-index`/pathspec). For before/after A/B comparisons use
+  `git worktree add --detach <path> HEAD` (verified safe in this sandbox; remove with
+  `git worktree remove <path>` when done) or a scratch clone. Never reach for stash.
 - Normal git usage (`add`/`commit`/`push`/`fetch`/`pull`) writes `.git` all the time and is safe —
   **no backup needed**. Back up the object store only before a genuinely destructive command
-  (`reset --hard`, `filter-branch`, `gc`, `repack`): `cp -r .git/objects /tmp/git-objects-backup`.
+  (`reset --hard`, `filter-branch`, `gc`, `repack`, `prune`): `cp -r .git <tmp>/<name>-git-backup`.
+- **Push after every commit.** Both incidents were fully recoverable ONLY because all local commits
+  already existed on `origin`. Local-only commits are the only real loss vector — keep that set empty.
 - Remote access in this sandbox is **HTTPS-only** (SSH port is blocked: "Connection closed by
   UNKNOWN port 65535"). `origin` is already switched to `https://github.com/HuangJian/battle.git`.
   Do not switch it back to SSH.
 
-**Recovery path (verified working, in case it ever happens again):**
-1. The object store is the only loss — working tree + `.git/logs` + `packed-refs` are intact.
-2. Recreate the ref dirs: `mkdir -p .git/refs/{heads,tags,remotes}`; restore `main` from the last
-   reflog entry if needed.
-3. Fetch the full history over HTTPS:
-   `git fetch https://github.com/HuangJian/battle.git '+refs/heads/*:refs/remotes/origin/*'`
-   (delete any refs whose objects are missing first, e.g. stale `refs/cline/checkpoints/*`).
-4. **Gotcha:** in this environment `git update-ref` silently does NOT persist updates to refs that
-   live in `packed-refs` (rc=0 but nothing written). Write the loose ref file directly instead:
-   `printf '<sha>\n' > .git/refs/remotes/origin/<branch>`.
-5. Re-attach un-pushed local work onto the recovered remote history:
-   `git commit-tree <local-tree> -p <remote-main-sha> -m "..."` → point `refs/heads/main` at it.
-6. Keep `.git/recovery-backup/` (reflog snapshot) and `.git/objects.broken/` until recovery is
-   confirmed; delete after a successful `git push` of the local-ahead branches.
+**Recovery path (runbook verified working 2026-09-06 — two rounds of lessons folded in):**
+1. **Stop, assess, back up**: copy the surviving `.git` metadata first
+   (`HEAD`, `packed-refs`, `index`, `logs/`, `config`) into `tmp/<name>-git-backup/`; full
+   `cp -r .git tmp/<name>-git-backup/git-full` if it is small. Confirm the working tree still holds
+   your uncommitted edits (`git grep` a known-new string) before touching anything.
+2. **Recreate the ref dirs** (git refuses to recognize the repo without them):
+   `mkdir -p .git/refs/{heads,tags,remotes,remotes/origin} .git/logs/refs/{heads,remotes,stash}`.
+3. **Restore objects**:
+   - Loose object dirs (whatever the interrupted command wrote) are still there — keep them.
+   - A `git fetch` that got partway leaves `*.pack` files **without** `.idx` — index them with
+     `git index-pack <pack>.pack`; they become usable.
+   - Older packs may exist in a local scratch clone (`/d/github/battle2-git-backup/objects/pack/`) —
+     `cp` the `.pack`/`.idx`/`.rev` files in; extra packs are harmless (objects are content-addressed).
+   - **Remove orphaned `.idx` files that have no `.pack`** (move them aside) — they poison
+     negotiation.
+4. **Clear dead refs**: any ref whose object is gone (e.g. stale `refs/cline/checkpoints/*` — IDE
+   checkpoints, list them with a `git cat-file -e` loop first and save the list) blocks every
+   `fetch`. Remove them with `git update-ref -d` (works on packed refs) — they were unrecoverable
+   anyway.
+5. **Fetch the full history**: `git fetch origin` now succeeds. Compare every
+   `refs/heads/*` tip against `refs/remotes/origin/*` and the last `logs/HEAD` entries; restore the
+   branch to the newest (it is always a fast-forward). **Gotcha:** `git update-ref` silently does NOT
+   persist updates to refs that live in `packed-refs` (rc=0 but nothing written; loose-ref writes to
+   `refs/heads/` DO persist) — edit `packed-refs` directly with python (`str.replace` on the two
+   `goal-nn` lines) after backing it up. `git show-ref <branch>` is the verification.
+6. **Re-sync the index without touching the working tree**: `git reset` (mixed, never `--hard`) so
+   `git status` shows exactly the real uncommitted edits.
+7. **Verify**: `git fsck --connectivity-only` — ignore "HEAD: invalid reflog entry" (pre-rewrite
+   leftovers from the filter-repo history rewrite) and dangling objects; any `missing`/`broken`
+   output means the store is still damaged. `git status -sb` must show the branch even with
+   `origin`, and `git log --oneline -3 HEAD` must show today's commits.
+8. Keep `tmp/<name>-git-backup/` until a successful `git push` of all branches, then delete.
+
+Deviations seen in the field: `git fetch` may print a ref update that does not stick (same
+packed-refs write gotcha) — verify with `git show-ref`, not the fetch banner.
 
 ---
 

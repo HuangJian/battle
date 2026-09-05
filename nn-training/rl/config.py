@@ -397,6 +397,13 @@ class CourseConfig(BaseModel):
     max_grad_norm: float | None = None
     ppo_schedule: list[PpoScheduleEntry] = []
 
+    # ---- F4 熔断（2026-09-06，DECISIONS §339）：ENT 三阈值课程可配 ----
+    # 默认值 = rl/breaker.py 常量（0.60 / 8 / 0.5）；热启动课程（BC 蒸馏权重天生低熵）
+    # 下调 ent_break（如 p4-onset 的 0.25）收紧保护。配合 breaker 的相对崩塌语义。
+    ent_break: float = 0.60
+    ent_break_consec: int = 8
+    ent_break_max_winrate: float = 0.5
+
     # ---- 运行 ----
     iters: int = 15
     max_hours: float = 0.0

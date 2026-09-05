@@ -23,6 +23,7 @@ from rl.resume import (
     completed_pairs,  # noqa: F401 — re-exported for tests
     last_completed_iter,  # noqa: F401 — re-exported for tests
     last_rotate_seed,
+    peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
 

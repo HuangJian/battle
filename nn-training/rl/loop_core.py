@@ -30,7 +30,7 @@ from rl.loop_guards import TrainingGuards
 from rl.loop_steps import SmokeVoidRoundError, TrainingSteps
 from rl.modes import get_backend
 from rl.queue import REPO_ROOT, RUN_ID
-from rl.resume import completed_pairs, last_completed_iter, last_rotate_seed
+from rl.resume import completed_pairs, last_completed_iter, last_rotate_seed, peak_entropy
 from rl.rollout_phase import (
     dispatch_rollout_phase,
     join_precollect_child,
@@ -391,8 +391,12 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
         self._consec_fail = 0
         self._kl_streak = 0  # F4: consecutive iters with kl >= KL_BREAK
         self._ent_streak = (
-            0  # F4: consecutive iters with entropy <= ENT_BREAK and winRate < MAX_WINRATE
+            0  # F4: consecutive iters with entropy <= ent_break and winRate < ent_max_winrate
         )
+        # F4 ENT 相对崩塌基线（2026-09-06）：本轮之前见过的最大熵。None = 无历史
+        # （冷启动首轮）→ breaker 退回绝对电平判定。续跑时从 training_log.jsonl 回读，
+        # 否则每次重启 peak 归零，it9 会被当成"首轮"白送一次连击。
+        self._ent_peak: float | None = None
         self._stop_loss_streak = 0  # P1-9: 统计显著止损（Δ≤−2σ）的连续轮数，≥2 才停车
         self._tripped = None
         # it 断点续跑：--start-it 显式，否则自动 = 日志最后一个完成迭代 + 1
@@ -406,6 +410,11 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 f"[run_rl] resume: continuing from iteration {start_it} "
                 f"(weights resume from {args.out})"
             )
+            # ENT 相对崩塌基线续跑继承（§339）：不继承则重启后首轮 peak=None 被当冷启动，
+            # 直接按绝对电平白记一次连击。
+            self._ent_peak = peak_entropy(self._jsonl_path)
+            if self._ent_peak is not None:
+                log(f"[run_rl] resume: inherited entropy peak={self._ent_peak:.3f} (F4 ENT baseline)")
         self._start_it = start_it
         # 吞吐 T3：eval 稀疏化周期（默认 1 = 每轮，字节一致；>1 = 每 N 轮一次）。
         # 2026-09-03 修正：`or 1` 曾把显式 eval_every=0 吞成 1（想关闭 eval 却变成

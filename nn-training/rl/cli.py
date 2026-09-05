@@ -11,7 +11,13 @@ from __future__ import annotations
 import argparse
 import os
 
-from rl.breaker import KL_BREAK, KL_BREAK_CONSEC
+from rl.breaker import (
+    ENT_BREAK,
+    ENT_BREAK_CONSEC,
+    ENT_BREAK_MAX_WINRATE,
+    KL_BREAK,
+    KL_BREAK_CONSEC,
+)
 from rl.modes import (
     _MODES,
     DEFAULT_EVAL_AT_INTENT,
@@ -102,6 +108,27 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         type=int,
         default=_d("kl_break_consec", KL_BREAK_CONSEC),
         help="F4 KL 连续代阈值（intent/goal 专属）",
+    )
+    # F4 ENT 熔断（2026-09-06 课程可配，DECISIONS §339）：热启动课程（BC 蒸馏权重）
+    # 天生低熵，旧硬编码 0.60/8/0.5 会误判为崩塌——课程可下调 ent_break（如 0.25）
+    # 收紧保护，或抬高 ent_break_consec 放宽。配合相对崩塌语义（breaker.py）。
+    ap.add_argument(
+        "--ent-break",
+        type=float,
+        default=_d("ent_break", ENT_BREAK),
+        help="F4 ENT 熔断阈值：熵 <= 此值且 winRate < ent-break-max-winrate 才计连击",
+    )
+    ap.add_argument(
+        "--ent-break-consec",
+        type=int,
+        default=_d("ent_break_consec", ENT_BREAK_CONSEC),
+        help="F4 ENT 连续轮阈值",
+    )
+    ap.add_argument(
+        "--ent-break-max-winrate",
+        type=float,
+        default=_d("ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
+        help="F4 ENT 护栏：winRate >= 此值视为已收敛，不因低熵停车",
     )
     ap.add_argument(
         "--out-log",

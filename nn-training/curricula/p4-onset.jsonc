@@ -118,6 +118,12 @@
   ],
   "out": "tmp/p4-onset/weights.json",
   "traj": "tmp/p4-onset",
+  // F4 ENT 熔断收紧（DECISIONS §339）：本局为 BC 热启动，熵天生在 0.36 带（it1 0.254
+  // → it8 0.365，一路缓升而非崩塌）。旧硬编码阈值 0.60 把"天生低熵"误判为崩塌，
+  // it8 满 8 连击误停。配合相对崩塌语义（跌破 0.25 或相对峰值跌幅 ≥0.10 才计连击），
+  // 此处把绝对阈值下调到 0.25 —— 保留真崩塌保护（当前 0.36 → 还有 0.11 余量），
+  // 又不会在正常带里误触发。ent_break_consec 沿用默认 8。
+  "ent_break": 0.25,
   "backup_dir": "nn-training/weights/p4-onset",
   "backup_prefix": "p4-onset",
   // 自定义关 stage ID 从 2000 开始，p4-onset 仅 1 关 → ID 2000

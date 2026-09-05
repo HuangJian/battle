@@ -174,6 +174,21 @@ def test_jsonl_anchors(tmp: Path) -> None:
     jl.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     check(run_rl.last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)")
     check(run_rl.last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start")
+    check(run_rl.peak_entropy(jl) is None, "no entropy field -> no F4 ENT baseline (cold start)")
+
+    rows2 = [
+        {"event": "iteration", "iter": 1, "entropy": 0.254},
+        {"event": "iteration", "iter": 2, "entropy": 0.377},
+        {"event": "iteration", "iter": 3, "entropy": 0.365},
+        {"event": "circuit_break", "iter": 3},
+    ]
+    (tmp / "log2.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows2) + "\n", encoding="utf-8"
+    )
+    check(
+        run_rl.peak_entropy(tmp / "log2.jsonl") == 0.377,
+        "peak entropy inherited (F4 ENT relative-collapse baseline survives relaunch)",
+    )
 
 
 # ---------------- 集成层（RUN_RL_ITEST=1）----------------
@@ -650,7 +665,31 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.heavy
 def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # v3.14/v3.10 回归：早派到慢副本的尾部任务，必须在 pending 清空后由空闲槽竞速复制，
+    # 不能干等慢主副本（FakeAgent 慢窗 0.4s）。
+    #
+    # 2026-09-06 flaky 修复（重构判据，实测 ~1/12 → 0）：竞速副本可能走 fake（记 dispatch
+    # 事件）也可能走 local 通道（不经 HTTP、无事件）——旧判据死锁「≥2 次 fake dispatch +
+    # 0.5s 时间窗」，主副本事件缺席/派发滞后时 IndexError 或时间窗误报（实测慢主副本可晚至
+    # +3.8s 才派发、整轮 churn 4.2s，时间判据在负载下失效）。新判据**结构性、与通道无关、
+    # 零时间依赖**：monkeypatch rl.dispatch.log 捕获调度器日志，竞速一旦发生必有
+    #   - "tail-race s0/seed111 ... race lane"（空闲槽复制在跑任务）
+    #   - 或 "dup settle/fanout copy ... s0/seed111"（副本重复结算）
+    # 三类行之一。无竞速（回归）时慢主副本独占结算，上述行不会出现 → 判据失败。
+    # 另：check() 只聚合不抛错（main() 专属语义），pytest 模式下静默放行曾掩盖失败——
+    # 本测试结束时把本轮新增 FAILS 显式抛为 AssertionError。
+    import rl.dispatch as _dispatch_mod
+
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    f0 = len(FAILS)
+    lines: list[str] = []
+    _real_log = _dispatch_mod.log
+
+    def _capture_log(msg: str) -> None:
+        lines.append(msg)
+        _real_log(msg)
+
+    monkeypatch.setattr(_dispatch_mod, "log", _capture_log)
     try:
         traj = tmp_path / "i9"
         traj.mkdir()
@@ -660,13 +699,24 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         t0 = time.time()
         rep9 = run_rl.run_rollout_queue(bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0)
         took9 = time.time() - t0
-        n_disp9 = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
         check(rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled")
-        check(n_disp9 >= 2, f"I9 early-dispatched slow task re-raced by idle slot (dispatches={n_disp9})")
-        race_at = [t for kind, t, p in srv.events if kind == "dispatch" and p == (0, 111)]
-        check(len(race_at) >= 2 and race_at[1] - t0 < 0.5,
-              f"I9 race copy dispatched inside slow window (+{race_at[-1] - t0:.2f}s < 0.5s)")
-        check(took9 < 5.0, f"I9 round terminates ({took9:.2f}s)")
+        # 竞速证据：调度器日志中 seed111 出现过 tail-race / dup settle / fanout copy。
+        # 这三类行只可能在任务已在 in-flight（主副本已派发）时由竞速副本触发 ——
+        # 故 raced=True 已蕴含「慢任务主副本确实被派发」，无需再单独断言 dispatch 计数
+        # （2026-09-06 实测：慢主副本的 HTTP 事件偶发缺席，raced 仍为 True —— 计数断言
+        # 是多余的、且制造 flake）。
+        raced = any(
+            "seed111" in ln
+            and ("race lane" in ln or "dup settle" in ln or "fanout copy" in ln)
+            for ln in lines
+        )
+        check(raced, "I9 slow in-flight task re-raced by idle slot (log has tail-race/dup/fanout for seed111)")
+        # 死锁兜底（非性能上界）：健康轮 ~0.1-4s（含竞速 churn）；xdist 并行/高负载下实测
+        # 可超 5s（2026-09-06 hook 门禁实测）→ 放宽到 30s，仍能抓住 queueWindowSec=120 的
+        # 死锁空等（这才是本断言的目的：round 必须自己终结，不靠外部超时）。
+        check(took9 < 30.0, f"I9 round terminates ({took9:.2f}s)")
+        if len(FAILS) > f0:
+            raise AssertionError("; ".join(FAILS[f0:]))
     finally:
         srv.slow_first = set()
         srv._slowed_once = set()

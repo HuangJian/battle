@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from rl.breaker import (
+    ENT_BREAK,
+    ENT_BREAK_CONSEC,
+    ENT_BREAK_MAX_WINRATE,
     ENT_COLLAPSE_DROP,
     KL_BREAK,
     KL_BREAK_CONSEC,
@@ -38,6 +41,7 @@ class TrainingGuards:
     _jsonl_path: Any
     _kl_streak: int
     _ent_streak: int
+    _ent_peak: float | None
     _tripped: Any
     _prev_entropy: Any
     _stop_loss_streak: int
@@ -52,6 +56,8 @@ class TrainingGuards:
         # 0.6 / --kl-break-consec 3，避免误熔断 Bug D；per-tick 用默认 0.15/3）。
         _kl_break = args.kl_break if args.mode in ("intent", "goal") else KL_BREAK
         _kl_consec = args.kl_break_consec if args.mode in ("intent", "goal") else KL_BREAK_CONSEC
+        # ENT 三阈值全课程可配（热启动课程下调 ent_break 收紧保护）；ent_peak 为
+        # 本轮之前的历史最大熵——相对崩塌判定的基线（None = 冷启动首轮，退回绝对判定）。
         kl_streak, ent_streak, tripped_now = breaker_update(
             self._kl_streak,
             self._ent_streak,
@@ -60,9 +66,16 @@ class TrainingGuards:
             win_rate=self._report["winRate"],
             kl_break=_kl_break,
             kl_consec=_kl_consec,
+            ent_break=getattr(args, "ent_break", ENT_BREAK),
+            ent_consec=getattr(args, "ent_break_consec", ENT_BREAK_CONSEC),
+            ent_max_winrate=getattr(args, "ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
+            ent_peak=self._ent_peak,
         )
         self._kl_streak = kl_streak
         self._ent_streak = ent_streak
+        self._ent_peak = (
+            agg["entropy"] if self._ent_peak is None else max(self._ent_peak, agg["entropy"])
+        )
         if tripped_now is not None:
             self._tripped = tripped_now
         if self._tripped is not None:

@@ -169,6 +169,30 @@ def last_completed_iter(jsonl_path: Path) -> int:
     return last
 
 
+def peak_entropy(jsonl_path: Path) -> float | None:
+    """回读日志中历史最大 entropy（F4 ENT 相对崩塌基线，DECISIONS §339）。
+
+    续跑时 breaker 的 ent_peak 不能从 None 重新开始，否则重启首轮被当冷启动、
+    按绝对电平判定白记连击。无 iteration 事件或无 entropy 字段 → None（真冷启动）。
+    """
+    if not jsonl_path.exists():
+        return None
+    peak: float | None = None
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("event") != "iteration":
+            continue
+        ent = e.get("entropy")
+        if isinstance(ent, (int, float)):
+            peak = ent if peak is None else max(peak, float(ent))
+    return peak
+
+
 def last_rotate_seed(jsonl_path: Path) -> int | None:
     """回读日志最后一个 run_start 的 rotateSeed（课程连续性）。
 
