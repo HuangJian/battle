@@ -15,6 +15,7 @@
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
   GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done）
+  POST /jobs/{id}/release       worker 瞬时失败主动还租约（job 立即回池，2026-09-05）
   GET  /jobs/{id}/result        训练主循环取回已落盘结果做三重校验
 
 鉴权（D9）：`Authorization: Bearer <token>`；同一来源 IP 5 次 401 → 封 1 小时
@@ -180,6 +181,17 @@ class _JobStore:
             self._leases[job_id] = self._now() + LEASE_SEC
             return True
 
+    def release(self, job_id: str, lease_token: str) -> bool:
+        """worker 瞬时失败主动还租约（2026-09-05）：job 立即回池可重领，
+        不再干等 LEASE_SEC 过期。H2：仅租约持有人可释放。返回 False = 无租约/非持有人。"""
+        with self._lock:
+            owner = self._lease_owners.get(job_id)
+            if not lease_token or owner != lease_token:
+                return False
+            self._leases.pop(job_id, None)
+            self._lease_owners.pop(job_id, None)
+            return True
+
     # ---- 结果 ----
     def store_result(self, job_id: str, result: dict) -> bool:
         """落盘 worker 回传结果（result/ 目录）。返回 False = 该 job 已有结果（防重复写回）。"""
@@ -312,6 +324,8 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/jobs/") and path.endswith("/heartbeat"):
                 self._post_heartbeat()
+            elif path.startswith("/jobs/") and path.endswith("/release"):
+                self._post_release()
             elif path.startswith("/jobs/") and path.endswith("/result"):
                 self._post_result()
             else:
@@ -423,6 +437,23 @@ class HubHandler(BaseHTTPRequestHandler):
         )
         ok = self.store.heartbeat(jid, lease_token)
         self._json({"job_id": jid, "ok": ok}, 200 if ok else 404)
+
+    # ---- POST /jobs/{id}/release ----
+    def _post_release(self) -> None:
+        """worker 瞬时失败主动还租约（2026-09-05）：仅租约持有人可释放（H2）。"""
+        if not self._auth_ok():
+            return
+        jid = self._job_id()
+        if jid is None or not (self.store._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": "not found"}, 404)
+            return
+        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
+            "lease-token", ""
+        )
+        if self.store.release(jid, lease_token):
+            self._json({"job_id": jid, "status": "released"})
+        else:
+            self._json({"error": "lease mismatch or absent — 非本 job 租约持有人"}, 403)
 
     # ---- POST /jobs/{id}/result ----
     def _post_result(self) -> None:

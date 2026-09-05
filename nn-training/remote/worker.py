@@ -32,6 +32,7 @@ from remote.protocol import (
     AUTH_HEADER,
     HEARTBEAT_SEC,
     ProtocolError,
+    RetryableError,
     decode_opt_tar,
     encode_opt_tar,
     encode_weights_json,
@@ -79,18 +80,61 @@ def poll_job(base_url: str, token: str, timeout: float = 30.0) -> dict | None:
     return data
 
 
-def download_payload(base_url: str, token: str, jid: str) -> bytes:
-    status, body = _request(base_url, token, f"/jobs/{jid}/payload", timeout=300.0)
-    if status != 200:
-        raise ProtocolError(f"payload download failed: HTTP {status}")
-    return body
+def _get_with_retry(
+    base_url: str,
+    token: str,
+    path: str,
+    *,
+    timeout: float,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bytes:
+    """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
+
+    传输级抖动（连接重置/读超时/边缘 5xx）在租约窗口内就地消化，不再付
+    「放弃本次 → 30min 租约过期 → 重领」的惩罚（2026-09-05，DECISIONS §340）。"""
+    last: str = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            status, body = _request(base_url, token, path, timeout=timeout)
+        except Exception as e:  # 网络层抖动（URLError/timeout/reset）
+            status, body = None, repr(e).encode()
+        if status == 200:
+            return body
+        if status is not None and 400 <= status < 500:
+            raise ProtocolError(f"{path} failed: HTTP {status}")
+        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        if attempt < attempts:
+            backoff = min(2 ** attempt, 8)
+            log(f"{path}: 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
+            time.sleep(backoff)
+    raise RetryableError(f"{path} 重试 {attempts} 次仍失败: {last}")
 
 
-def download_code(base_url: str, token: str, jid: str) -> bytes:
-    status, body = _request(base_url, token, f"/jobs/{jid}/code", timeout=120.0)
-    if status != 200:
-        raise ProtocolError(f"code download failed: HTTP {status}")
-    return body
+def download_payload(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bytes:
+    return _get_with_retry(
+        base_url, token, f"/jobs/{jid}/payload", timeout=300.0, attempts=attempts, log=log
+    )
+
+
+def download_code(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> bytes:
+    return _get_with_retry(
+        base_url, token, f"/jobs/{jid}/code", timeout=120.0, attempts=attempts, log=log
+    )
 
 
 def post_result(
@@ -100,23 +144,66 @@ def post_result(
     result: dict,
     lease_token: str = "",
     timeout: float = 120.0,
+    attempts: int = 5,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
-    status, body = _request(
-        base_url,
-        token,
-        f"/jobs/{jid}/result",
-        timeout=timeout,
-        data=json.dumps(result, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
-            **({"X-Lease-Token": lease_token} if lease_token else {}),
-        },
-    )
-    if status not in (200, 201):
-        raise ProtocolError(f"result POST failed: HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
-    return status
+    """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
+    4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。"""
+    last: str = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            status, body = _request(
+                base_url,
+                token,
+                f"/jobs/{jid}/result",
+                timeout=timeout,
+                data=json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
+                    **({"X-Lease-Token": lease_token} if lease_token else {}),
+                },
+            )
+        except Exception as e:
+            status, body = None, repr(e).encode()
+        if status in (200, 201):
+            return status
+        if status == 409:
+            log("result POST 409（hub 已有同 job 结果）——按成功处理")
+            return 409
+        if status is not None and 400 <= status < 500:
+            raise ProtocolError(
+                f"result POST rejected: HTTP {status}: {body[:300].decode('utf-8', 'replace')}"
+            )
+        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        if attempt < attempts:
+            backoff = min(2 ** attempt, 16)
+            log(f"result POST 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
+            time.sleep(backoff)
+    raise RetryableError(f"result POST 重试 {attempts} 次仍失败: {last}")
+
+
+def release_job(
+    base_url: str,
+    token: str,
+    jid: str,
+    lease_token: str = "",
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> None:
+    """瞬时失败后主动还租约（POST /jobs/{id}/release）：job 立即回池可重领，
+    不再干等 30min 租约过期。尽力而为：release 本身不可达时由租约过期兜底。"""
+    try:
+        _request(
+            base_url,
+            token,
+            f"/jobs/{jid}/release",
+            timeout=15.0,
+            method="POST",
+            headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
+        )
+    except Exception:
+        pass  # release 不可达：租约过期兜底（30min），与旧行为一致
 
 
 def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> None:
@@ -131,6 +218,13 @@ def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> Non
         )
     except Exception:
         pass  # 心跳失败不致命：下一次轮询/心跳再续
+
+
+def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
+    """结果落盘 _result.json：回传失败后重领同 job 时直接复用，不重算 PPO。"""
+    rpath = work_dir / jid / "_result.json"
+    rpath.parent.mkdir(parents=True, exist_ok=True)
+    rpath.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
 # ------------------------------------------------------------------ PPO 执行
@@ -237,10 +331,22 @@ def run_job(
     jid = job["job_id"]
     manifest = normalize_manifest(job["manifest"])
 
+    # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
+    cached_path = work_dir / jid / "_result.json"
+    if cached_path.exists():
+        try:
+            cached: dict = json.loads(cached_path.read_text(encoding="utf-8"))
+            validate_result(cached, manifest, commit_echo_must_match=False)
+            log(f"job {jid}: 复用上次算完的结果（上次回传失败）——直接重传")
+            return cached
+        except Exception:
+            pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
+
     # ---- 下载 + payload_sha256 校验（D1：防隧道截断；对 job 记录的 manifest 校验） ----
     raw = download_payload(base_url, token, jid)
     if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
-        raise ProtocolError("payload_sha256 不匹配——传输损坏（拒收）")
+        # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
+        raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
 
     job_dir = work_dir / jid
     if job_dir.exists():
@@ -258,9 +364,8 @@ def run_job(
     # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
     code_raw = download_code(base_url, token, jid)
     if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
-        raise ProtocolError(
-            "code_sha256 不匹配——传输损坏或 hub 代码版本不一致（拒收）"
-        )
+        # per-job 快照 sha 与 manifest 对账：不匹配 = 传输损坏（瞬时，重下可修复）
+        raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
     code_zip_path = job_dir / "code.zip"
     code_zip_path.write_bytes(code_raw)
     import zipfile
@@ -331,6 +436,7 @@ def run_job(
             "smoke": True,
         }
         validate_result(result, manifest, commit_echo_must_match=False)
+        _persist_result(work_dir, jid, result)
         log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
         return result
 
@@ -450,6 +556,7 @@ def run_job(
         "ppo_sec": ppo_sec,
     }
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
+    _persist_result(work_dir, jid, result)
     return result
 
 
@@ -520,9 +627,13 @@ def worker_loop(
             log(f"job {jid} done — result accepted")
             done += 1
             job_ok = True
+        except RetryableError as e:
+            # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
+            log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")
+            release_job(base_url, token, jid, lease_token, log=log)
         except ProtocolError as e:
             log(f"job {jid} REJECTED: {e} — skip (not retried)")
-            # 确定性拒绝（commit 不符/模式不符/损坏）不重试——轮询下一个
+            # 确定性拒绝（commit 不符/模式不符）不重试——轮询下一个
         except Exception as e:
             log(f"job {jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
             # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等

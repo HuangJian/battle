@@ -672,3 +672,127 @@ def test_claimable_pool_rebuilt_from_ledger(tmp_path: Path) -> None:
         e for e in store2._read_ledger() if e.get("event") == "job_completed"
     ]
     assert len(completed) == 1
+
+
+# ------------------------------------------------------------------ 重传机制（2026-09-05，DECISIONS §340）
+
+import remote.worker as worker_mod
+from remote.protocol import RetryableError
+
+
+@pytest.fixture()
+def _no_sleep(monkeypatch):
+    """重试退避不真睡——测试只验证次序与分类。"""
+    monkeypatch.setattr(worker_mod.time, "sleep", lambda _s: None)
+
+
+def test_download_retry_transient_then_success(monkeypatch, _no_sleep) -> None:
+    calls = []
+
+    def fake_request(base_url, token, path, timeout=30.0, **kw):
+        calls.append(path)
+        if len(calls) == 1:
+            return 503, b"edge error"
+        return 200, b"payload-bytes"
+
+    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    out = worker_mod.download_payload("http://hub", "t", "jid1", log=lambda _m: None)
+    assert out == b"payload-bytes"
+    assert calls == ["/jobs/jid1/payload"] * 2
+
+
+def test_download_4xx_is_deterministic(monkeypatch, _no_sleep) -> None:
+    calls = []
+
+    def fake_request(base_url, token, path, timeout=30.0, **kw):
+        calls.append(path)
+        return 404, b"not found"
+
+    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    with pytest.raises(ProtocolError, match="404"):
+        worker_mod.download_code("http://hub", "t", "jid1", log=lambda _m: None)
+    assert len(calls) == 1  # 4xx 确定性拒绝：不重试
+
+
+def test_download_exhausted_raises_retryable(monkeypatch, _no_sleep) -> None:
+    monkeypatch.setattr(worker_mod, "_request", lambda *_a, **_k: (500, b"x"))
+    with pytest.raises(RetryableError, match="重试 3 次"):
+        worker_mod.download_payload("http://hub", "t", "jid1", attempts=3, log=lambda _m: None)
+
+
+def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
+    statuses = iter([502, 503, 200])
+
+    def fake_request(base_url, token, path, timeout=30.0, **kw):
+        return next(statuses), b"{}"
+
+    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    rc = worker_mod.post_result(
+        "http://hub", "t", "jid1",
+        {"job_id": "jid1"}, lease_token="L", log=lambda _m: None,
+    )
+    assert rc == 200
+
+
+def test_post_result_409_is_idempotent_success(monkeypatch, _no_sleep) -> None:
+    monkeypatch.setattr(worker_mod, "_request", lambda *_a, **_k: (409, b"duplicate"))
+    rc = worker_mod.post_result(
+        "http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None,
+    )
+    assert rc == 409
+
+
+def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
+    calls = []
+
+    def fake_request(base_url, token, path, timeout=30.0, **kw):
+        calls.append(1)
+        return 400, b"result rejected: bad fingerprints"
+
+    monkeypatch.setattr(worker_mod, "_request", fake_request)
+    with pytest.raises(ProtocolError, match="400"):
+        worker_mod.post_result("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None)
+    assert len(calls) == 1
+
+
+def test_store_release_returns_to_pool(tmp_path: Path) -> None:
+    store = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
+    store.publish("jid-r", {"job_id": "jid-r"}, b"payload")
+    token = store.claim("jid-r")
+    assert token is not None
+    assert store.claimable_job_ids() == []  # 租约期内不可领
+    assert store.release("jid-r", "wrong-token") is False  # H2：非持有人拒释放
+    assert store.release("jid-r", token) is True
+    assert store.claimable_job_ids() == ["jid-r"]  # 立即回池
+    assert store.release("jid-r", token) is False  # 已释放：幂等拒绝
+
+
+def test_run_job_result_cache_reuse(tmp_path: Path, monkeypatch) -> None:
+    """上次算完但回传失败 → 重领同 job 直接复用缓存结果，不再下载/重算。"""
+    m = _mini_manifest()
+    jid = m["job_id"]
+    cached = {
+        "job_id": jid,
+        "data_fp": m["data_fp"],
+        "init_weights_fp": m["init_weights_fp"],
+        "weights_json": encode_weights_json(b"{}"),
+        "opt_tar_b64": encode_opt_tar(b""),
+        "agg": {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "mean_ret": 0.0},
+        "commit_echo": m["commit"],
+        "ppo_sec": 0.0,
+        "smoke": True,
+    }
+    rdir = tmp_path / jid
+    rdir.mkdir(parents=True)
+    (rdir / "_result.json").write_text(json.dumps(cached), encoding="utf-8")
+
+    def _boom(*_a, **_k):  # 缓存命中时不允许发生任何网络/重算
+        raise AssertionError("cache hit must not download or recompute")
+
+    monkeypatch.setattr(worker_mod, "download_payload", _boom)
+    monkeypatch.setattr(worker_mod, "download_code", _boom)
+    out = worker_mod.run_job(
+        "http://hub", "t", {"job_id": jid, "manifest": m},
+        work_dir=tmp_path, echo=False, log=lambda _m: None,
+    )
+    assert out == cached

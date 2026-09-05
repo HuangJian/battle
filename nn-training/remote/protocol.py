@@ -75,6 +75,14 @@ class ProtocolError(ValueError):
     """协议违规（缺失必填 / 类型错 / 哈希不匹配）。调用方（hub/worker）决定拒收方式。"""
 
 
+class RetryableError(Exception):
+    """瞬时失败（网络抖动 / 5xx / 传输损坏）——租约窗口内重试即可修复，非确定性拒绝。
+
+    与 ProtocolError 的分界（2026-09-05，DECISIONS §340 补充 3）：4xx/字段级校验
+    失败 = 确定性拒绝（重试无意义）；网络层异常与 5xx = 可重试。worker_loop 捕获
+    RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
+
+
 def normalize_manifest(m: dict) -> dict:
     """校验 + 归一化 job manifest（proto=1：缺失必填 fail fast，未知字段忽略）。
 

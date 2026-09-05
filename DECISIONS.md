@@ -2424,3 +2424,20 @@ hub-start 全部隧道/code.zip/self-rollout 检查从 warn 升级为**硬门**�
 位置参数重复指定即报错（防静默覆盖）。课程参数在启动任何基础设施**之前**按
 `rl/config.resolve_course` 同规则快速失败（先路径后 curricula/<name>.jsonc），拼错
 课程名响亮报错并列出最新 5 课；未知旗标 exit 1。
+
+### §340 补充 3：GPU↔HUB 通信重传加固（2026-09-05，用户拍板"全改"）
+
+快速隧道抖动下单次请求失败即造成实际损失（payload 下载中断 → 干等 30min 租约过期；
+PPO 结果最后一米丢失 → 整局重算）。分层修复：
+- `remote/protocol.py` 新增 `RetryableError`，与 ProtocolError 划界：4xx/字段校验 =
+  确定性拒绝；网络异常/5xx/传输损坏 = 可重试。
+- worker 下载（payload/code）`_get_with_retry`：3 次指数退避就地重试；sha 不匹配改判
+  RetryableError（重下可修复）。
+- `post_result`：5 次退避重试；409（hub 已有结果）按幂等成功。
+- hub 新增 `POST /jobs/{id}/release`：瞬时失败主动还租约立即回池（H2 仅持有人可释放），
+  30min 惩罚清零。
+- `run_job` 结果缓存复用：结果先落 `_result.json`，重领同 job 校验通过即直接重传，
+  不重算 PPO。
+- 训练侧 `wait_job` 已于同日加固（瞬时错误容忍）。心跳本就容忍单次失败。
+测试：test_remote_ppo 38 绿（新增 8：下载重试/4xx 分类/耗尽抛出、回传重试/409/4xx、
+release 回池、缓存复用不许触网）。
