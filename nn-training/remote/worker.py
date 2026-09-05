@@ -174,6 +174,37 @@ def _git_head(repo_root: Path = REPO_ROOT) -> str:
     return ""
 
 
+def _ensure_commit(target: str, repo_root: Path = REPO_ROOT,
+                   log=lambda msg: None) -> bool:
+    """确保本地 HEAD 等于 target commit。不等则 git fetch + checkout 自动修复。
+
+    返回 True（一致）或 False（重试 5 次后仍不一致）。
+    """
+    import subprocess as _sp
+
+    for attempt in range(5):
+        head = _git_head(repo_root)
+        if head and head == target:
+            return True
+        log(
+            f"commit mismatch: HEAD={head[:12] if head else '?'} "
+            f"target={target[:12]} — fetching (attempt {attempt + 1}/5)"
+        )
+        try:
+            _sp.run(
+                ["git", "fetch", "origin"],
+                cwd=str(repo_root), capture_output=True, text=True, timeout=60,
+            )
+            _sp.run(
+                ["git", "checkout", target],
+                cwd=str(repo_root), capture_output=True, text=True, timeout=30,
+            )
+        except Exception as e:
+            log(f"git fetch/checkout failed: {e}")
+    head = _git_head(repo_root)
+    return head == target
+
+
 def run_job(
     base_url: str,
     token: str,
@@ -213,11 +244,12 @@ def run_job(
     _unused_manifest, shard_dirs = unpack_payload(zip_path, job_dir)
 
     # ---- commit 校验（D6：两端代码一致） ----
-    local_head = _git_head()
-    if local_head and local_head != manifest["commit"]:
+    # 不等时自动 git fetch + checkout 修复（最多重试 5 次），避免并行开发时
+    # 云端 hash 落后导致任务永久拒收。
+    if not _ensure_commit(manifest["commit"], log=log):
         raise ProtocolError(
-            f"commit 不匹配：manifest={manifest['commit'][:12]} 本地={local_head[:12]}——"
-            "云 worker 需 checkout hub 的 commit（git fetch + checkout）"
+            f"commit 不匹配：manifest={manifest['commit'][:12]} "
+            f"— git fetch + checkout 重试 5 次后仍失败，拒收"
         )
 
     # ---- mode 红线（v1：仅 per-tick） ----
