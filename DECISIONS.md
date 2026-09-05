@@ -2441,3 +2441,27 @@ PPO 结果最后一米丢失 → 整局重算）。分层修复：
 - 训练侧 `wait_job` 已于同日加固（瞬时错误容忍）。心跳本就容忍单次失败。
 测试：test_remote_ppo 38 绿（新增 8：下载重试/4xx 分类/耗尽抛出、回传重试/409/4xx、
 release 回池、缓存复用不许触网）。
+
+### §340 补充 4：HUB 推架构落地（方向翻转，用户拍板"改成 HUB 推"）
+
+cloudflared/服务端移到 GPU 机器，HUB 变纯出站客户端——弱链路（edge↔cloudflared）
+落在 Kaggle 网络，HUB 只做普通出站 HTTPS（可走 Clash）。gcs 节点先例（节点侧隧道 +
+HUB 连出，实测稳）为架构背书。落地：
+- `remote/worker_server.py` + `remote_worker_serve.py`：GPU 侧服务端（stdlib http，
+  Bearer 鉴权，单 GPU 串行 409 busy）——`POST /job`（manifest+payload_b64+code_b64?
+  上传，后台 run_job 全套），`GET /job/{id}/status|/result`（幂等读），
+  `GET /code-sha?sha=X`（code 缓存探测），X-Smoke-Echo 头触发冒烟回显。
+- `remote/push_client.py`：submit_job（code 按 sha 按需上传：GET /code-sha 未命中才带；
+  退避重试，428/409 可重试）+ wait_result（瞬时容忍轮询，同 wait_job 纪律）。
+- `remote/worker.py run_job(preloaded=...)`：payload/code 由请求携带时跳过下载；
+  code 缓存（work_dir/code_cache/<sha>，tmp 原子改名）pull/push 共用。
+- `rl/loop_steps._remote_ppo`：gpu push 节点存在时 POST+wait_result，尾部
+  verify_and_land/SmokeVoidRoundError/结算与 pull 完全共享；节点来源 =
+  REMOTE_PUSH_NODE 环境变量（冒烟注入本机伪节点）> rl-config nodes[].gpu_push。
+  无 push 节点 → 原 mailbox 路径逐字节不变（向后兼容）。
+- hub-start --smoke-only：本机起 worker_server（127.0.0.1:hub+2）+ REMOTE_PUSH_NODE
+  注入 → 预演走真推送链路（发布→推送→echo→落位→作废，23s）。
+实测：38 单测 + 实弹冒烟 EXIT=0。遗留：pack_code_zip 确定性化已做（固定 ZipInfo
+时间戳），Kaggle 侧 sys.modules 跨版本陈旧性与 pull 同规（trainer codeHash restart
+兜底）。Kaggle 接入：notebook 起 worker_serve + cloudflared，URL 贴 rl-config
+nodes（gpu_push: true）。

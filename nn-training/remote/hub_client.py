@@ -164,7 +164,12 @@ def pack_code_zip(
                         continue
                 except OSError:
                     continue
-                z.write(f, arcname=str(rel / fn))
+                # 固定时间戳打包：sha 只由文件内容决定（否则 mtime 参与 →
+                # 同内容重打包 sha 漂移，云端代码缓存永远无法命中）
+                zi = zipfile.ZipInfo(str(rel / fn).replace("\\", "/"), date_time=(1980, 1, 1, 0, 0, 0))
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.external_attr = 0o644 << 16
+                z.writestr(zi, f.read_bytes())
                 n_files += 1
     # 清理 dirnames 修改后残留的记录（不出现在 zip 中，已正确跳过）
     sha = _sha256_bytes(zip_path_p.read_bytes())

@@ -150,6 +150,8 @@ def post_result(
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
     4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。"""
     last: str = ""
+    req_body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    t0 = time.time()
     for attempt in range(1, attempts + 1):
         try:
             status, body = _request(
@@ -157,7 +159,7 @@ def post_result(
                 token,
                 f"/jobs/{jid}/result",
                 timeout=timeout,
-                data=json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                data=req_body,
                 method="POST",
                 headers={
                     "Content-Type": "application/json",
@@ -168,6 +170,10 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
+            log(
+                f"result POST ok: {len(req_body)} bytes in {time.time() - t0:.1f}s"
+                f" (attempt {attempt})"
+            )
             return status
         if status == 409:
             log("result POST 409（hub 已有同 job 结果）——按成功处理")
@@ -315,11 +321,16 @@ def run_job(
     device: str = "cpu",
     torch_threads: int = 0,
     echo: bool = False,
+    preloaded: dict | None = None,
     log=lambda msg: print(
         f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
     ),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
+
+    preloaded（push 模式，2026-09-05）：{"payload_zip": bytes, "code_zip"?: bytes}——
+    HUB 把 payload/code 随 POST /job 直接上传（worker_server），跳过下载步骤；
+    code 仍走 sha 缓存目录（code_zip 缺省时要求本地缓存已命中或服务器自行处理）。
 
     echo=True（冒烟）：下载/校验全走，但不拉 torch 不跑 PPO——init 权重原样回传
     并带 smoke 标记（消费方作废本轮）；hub-start --smoke-only 的 Kaggle 交互预演。
@@ -342,8 +353,14 @@ def run_job(
         except Exception:
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
 
-    # ---- 下载 + payload_sha256 校验（D1：防隧道截断；对 job 记录的 manifest 校验） ----
-    raw = download_payload(base_url, token, jid)
+    # ---- payload 来源（D1：sha256 校验防截断/损坏，两条路径同规） ----
+    t_dl = time.time()
+    if preloaded is not None and "payload_zip" in preloaded:
+        raw = preloaded["payload_zip"]
+        log(f"job {jid}: payload from push ({len(raw)} bytes)")
+    else:
+        raw = download_payload(base_url, token, jid)
+        log(f"job {jid}: payload downloaded ({len(raw)} bytes in {time.time() - t_dl:.1f}s)")
     if hashlib.sha256(raw).hexdigest() != manifest["payload_sha256"]:
         # 传输损坏属瞬时故障：重下即可修复（RetryableError → 释放租约立即重领重下）
         raise RetryableError("payload_sha256 不匹配——传输损坏（重下可修复）")
@@ -362,20 +379,36 @@ def run_job(
 
     # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
     # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
-    code_raw = download_code(base_url, token, jid)
-    if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
-        # per-job 快照 sha 与 manifest 对账：不匹配 = 传输损坏（瞬时，重下可修复）
-        raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
-    code_zip_path = job_dir / "code.zip"
-    code_zip_path.write_bytes(code_raw)
-    import zipfile
+    # ---- code.zip 内容寻址缓存（2026-09-05）：同 sha 只下载/解压一次 ----
+    # code 在多次迭代间通常不变（sha 只由源码内容决定，pack 侧时间戳已固定化），
+    # 缓存命中即省一次隧道下载 + 解压。缓存目录按 sha 隔离，tmp 原子改名防半截。
+    code_cache_dir = work_dir / "code_cache" / manifest["code_sha256"]
+    if code_cache_dir.exists():
+        sys.path.insert(0, str(code_cache_dir))
+        log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+    else:
+        if preloaded is not None and "code_zip" in preloaded:
+            code_raw = preloaded["code_zip"]
+        else:
+            code_raw = download_code(base_url, token, jid)
+        if hashlib.sha256(code_raw).hexdigest() != manifest["code_sha256"]:
+            # per-job 快照 sha 与 manifest 对账：不匹配 = 传输损坏（瞬时，重下可修复）
+            raise RetryableError("code_sha256 不匹配——传输损坏（重下可修复）")
+        import zipfile
 
-    code_extract_dir = job_dir / "code"
-    code_extract_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(code_zip_path) as zf:
-        zf.extractall(code_extract_dir)
-    sys.path.insert(0, str(code_extract_dir))
-    log(f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, {len(list(code_extract_dir.rglob('*.py')))} .py files) -> sys.path[0]")
+        code_extract_tmp = work_dir / "code_cache" / (manifest["code_sha256"] + ".tmp")
+        code_extract_tmp.mkdir(parents=True, exist_ok=True)
+        code_zip_path = job_dir / "code.zip"
+        code_zip_path.write_bytes(code_raw)
+        with zipfile.ZipFile(code_zip_path) as zf:
+            zf.extractall(code_extract_tmp)
+        code_cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        code_extract_tmp.rename(code_cache_dir)
+        sys.path.insert(0, str(code_cache_dir))
+        log(
+            f"job {jid}: code.zip unpacked ({len(code_raw)} bytes, "
+            f"{len(list(code_cache_dir.rglob('*.py')))} .py files) -> sys.path[0]"
+        )
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

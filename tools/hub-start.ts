@@ -69,7 +69,7 @@ interface RlConfig {
 interface Registry {
   selfNode?: { pid: number }
   hubServer?: { pid: number }
-  cloudflared?: { pid: number; url?: string; log?: string }
+  cloudflared?: { pid: number; url?: string; log?: string; metrics?: number }
   trainingLoop?: { pid: number; course: string }
 }
 
@@ -147,6 +147,39 @@ function pidAlive(pid: number | undefined | null): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/** 端口占用者 PID 清单（--kill 兜底清场专用）。Bun 没有端口→PID 的原生 API，
+ *  这里是全脚本唯一触碰 OS 进程表的点：Windows 走 netstat -ano（LISTENING 行
+ *  尾列即 PID，状态名与列结构不受中文区域影响），POSIX 走 lsof。 */
+function portOwnerPids(port: number): number[] {
+  try {
+    if (process.platform === 'win32') {
+      const out = Bun.spawnSync(['netstat', '-ano']).stdout.toString()
+      const pids = new Set<number>()
+      for (const line of out.split('\n')) {
+        if (!line.includes('LISTENING')) continue
+        const cols = line.trim().split(/\s+/)
+        // TCP  本地地址  远程地址  状态  PID
+        if (cols.length >= 5 && cols[1]!.endsWith(`:${port}`)) {
+          const pid = Number(cols[4])
+          if (Number.isInteger(pid) && pid > 0) pids.add(pid)
+        }
+      }
+      return [...pids]
+    }
+    const out = Bun.spawnSync(['lsof', '-t', `-i:${port}`, '-s', 'TCP:LISTEN']).stdout.toString()
+    return [
+      ...new Set(
+        out
+          .split(/\s+/)
+          .map(Number)
+          .filter((n) => Number.isInteger(n) && n > 0),
+      ),
+    ]
+  } catch {
+    return []
   }
 }
 
@@ -406,6 +439,18 @@ async function stopAll(): Promise<void> {
   )
   clearRegistry()
 
+  // 端口兜底清场（用户指令 2026-09-05：不管进程从哪来，占着端口就杀）。
+  // 登记表只覆盖本脚本启动的组件；agent 自重启遗留、手动启动、登记丢失的
+  // 进程由这一层兜住——只认端口，不认出身。Bun 没有端口→PID 原生 API，
+  // OS 差异封装在 portOwnerPids 里。
+  for (const port of [config.rl.hub_port, config.rl.agent_port]) {
+    for (const pid of portOwnerPids(port)) {
+      if (pid === process.pid) continue
+      await killPid(pid)
+      ok(`端口 ${port} 占用进程 (PID ${pid}) 已终止`)
+    }
+  }
+
   // 端口释放以探测为准，不做固定等待
   const freed = await waitUntil(
     async () =>
@@ -417,10 +462,10 @@ async function stopAll(): Promise<void> {
     ok('所有 HUB 端口已释放')
   } else {
     warn(
-      `仍有端口占用: hub=${config.rl.hub_port} agent=${config.rl.agent_port}（可能存在本脚本登记之外的残留进程，请手动排查）`,
+      `仍有端口占用: hub=${config.rl.hub_port} agent=${config.rl.agent_port}（终止失败或权限不足，请手动排查）`,
     )
   }
-  if (attempted === 0) info('登记表中无进程记录（可能本来就没启动过）')
+  if (attempted === 0) info('登记表中无进程记录（端口已由兜底清场处理）')
 }
 
 async function stepSelfNode(): Promise<void> {
@@ -494,6 +539,13 @@ async function stepHubServer(): Promise<void> {
   }
 }
 
+/** cloudflared 本地 metrics /ready：200 = edge 连接已注册（隧道建立）。
+ *  纯本机检查，不经过出网——用它判定"隧道死活"，避免 hub 出网劣化造成假阴性。 */
+async function tunnelEdgeReady(metricsPort: number | undefined): Promise<boolean> {
+  if (!metricsPort) return false
+  return httpOk(`http://127.0.0.1:${metricsPort}/ready`, '', 3000)
+}
+
 async function stepCloudflared(noTunnel = false): Promise<string> {
   log('检查 cloudflared tunnel...')
   if (noTunnel) {
@@ -507,75 +559,98 @@ async function stepCloudflared(noTunnel = false): Promise<string> {
     throw new Error('cloudflared 未安装')
   }
 
-  // 已有登记的隧道且可达 → 复用
+  // 已有登记的隧道：edge 就绪（本地 /ready）即复用；穿隧道 ping 失败可能是
+  // hub 出网劣化（探测路径独有段），不足以判死刑——只有 edge 未注册才重启
   if (reg.cloudflared && pidAlive(reg.cloudflared.pid) && reg.cloudflared.url) {
     const url = reg.cloudflared.url
-    if (await httpOk(`${url}/ping`, config.rl.remote_token, 10000)) {
-      ok(`cloudflared 已在运行: ${url}`)
+    const edgeReady = await tunnelEdgeReady(reg.cloudflared.metrics)
+    if (edgeReady || (await httpOk(`${url}/ping`, config.rl.remote_token, 10000))) {
+      edgeReady
+        ? ok(`cloudflared 已在运行（edge 在线）: ${url}`)
+        : ok(`cloudflared 已在运行: ${url}`)
       return url
     }
-    warn('cloudflared 进程存在但隧道不可达，重启中...')
+    warn('cloudflared 进程存在但 edge 未连接，重启中...')
     await killPid(reg.cloudflared.pid)
   }
 
-  // 每次启动用全新时间戳日志（--logfile 由 cloudflared 自写，绕开 shim/句柄继承问题），
-  // 杜绝上一轮的旧 URL 污染
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const cfLog = path.join(LOG_DIR, `cloudflared-${ts}.log`)
+  const metricsPort = config.rl.hub_port + 1
 
-  log('启动 cloudflared tunnel...')
-  const proc = spawnBg([
-    cfBin,
-    'tunnel',
-    '--url',
-    `http://localhost:${config.rl.hub_port}`,
-    '--logfile',
-    cfLog,
-  ])
-  saveComponent('cloudflared', { pid: proc.pid, log: cfLog })
-
-  // URL 以 cloudflared 日志输出为触发（取最后一个），上限 45s
+  // 快速隧道申请（api.trycloudflare.com）本身有失败窗口（实测 context deadline
+  // exceeded 后进程直接退出）——整段 spawn+申请重试 3 次，单次失败先清理残留
+  // 进程再退避重试。stderr 一并接进日志文件（--logfile 只收结构化日志）。
   let url: string | null = null
-  const gotUrl = await waitUntil(
-    async () => {
-      const urls = extractCfUrls(cfLog)
-      if (urls.length > 0) {
-        url = urls[urls.length - 1]
-        return true
-      }
-      if (!pidAlive(proc.pid)) return true // 提前退出，外层报错
-      return false
-    },
-    45000,
-    1000,
-  )
+  let proc: Bun.Subprocess | null = null
+  let cfLog = ''
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    log(`启动 cloudflared tunnel（第 ${attempt}/3 次尝试）...`)
+    cfLog = path.join(
+      LOG_DIR,
+      `cloudflared-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-a${attempt}.log`,
+    )
+    proc = spawnBg(
+      [
+        cfBin,
+        'tunnel',
+        '--url',
+        `http://localhost:${config.rl.hub_port}`,
+        '--metrics',
+        `127.0.0.1:${metricsPort}`,
+        '--logfile',
+        cfLog,
+      ],
+      { log: cfLog },
+    )
+    saveComponent('cloudflared', { pid: proc.pid, log: cfLog, metrics: metricsPort })
 
-  if (!url) {
+    // URL 以 cloudflared 日志输出为触发（取最后一个），单次上限 45s
+    await waitUntil(
+      async () => {
+        const urls = extractCfUrls(cfLog)
+        if (urls.length > 0) {
+          url = urls[urls.length - 1]
+          return true
+        }
+        if (!pidAlive(proc!.pid)) return true // 提前退出，外层报错
+        return false
+      },
+      45000,
+      1000,
+    )
+    if (url) break
+    fail(`第 ${attempt}/3 次尝试未获取 URL（quick Tunnel 申请超时/进程退出）— 见 ${cfLog}`)
+    if (pidAlive(proc!.pid)) await killPid(proc!.pid)
+    if (attempt < 3) await Bun.sleep(3000)
+  }
+
+  if (!url || !proc) {
     fail(
-      `cloudflared tunnel URL 获取失败（45s 超时${pidAlive(proc.pid) ? '' : '，进程已退出'}）— 见 ${cfLog}`,
+      'cloudflared tunnel URL 获取失败（3 次尝试均未通过）——判定启动失败；基础设施保留，稍后重跑即可复用',
     )
     throw new Error('cloudflared tunnel URL 获取失败')
   }
-  void gotUrl
 
-  reg.cloudflared = { pid: proc.pid, url, log: cfLog }
-  saveComponent('cloudflared', { pid: proc.pid, url, log: cfLog })
+  reg.cloudflared = { pid: proc.pid, url, log: cfLog, metrics: metricsPort }
+  saveComponent('cloudflared', { pid: proc.pid, url, log: cfLog, metrics: metricsPort })
 
-  // 新隧道首次建链需数秒，以探测为准（500ms 步进，上限 30s）；
-  // 超时即硬失败——隧道不可达 = Kaggle 无法接入 = 启动不成立（基础设施保留供重跑复用）
-  const tunnelOk = await waitUntil(
-    () => httpOk(`${url}/ping`, config.rl.remote_token, 8000),
-    30000,
-    500,
-  )
-  if (!tunnelOk) {
+  // 隧道死活以本地 /ready 为准（edge 连接注册 = 建立，不依赖出网）；穿隧道 ping
+  // 失败只降级为警告——探测路径含 hub 本机出网段，该段劣化时探测假阴性，
+  // Kaggle 入站路径（Kaggle→CF→隧道→hub）不经过 hub 出网，不受影响
+  const edgeReady = await waitUntil(() => tunnelEdgeReady(metricsPort), 20000, 500)
+  if (!edgeReady) {
     fail(
-      `cloudflared tunnel 不可达（30s 重试未通过）——Kaggle 无法连接，判定启动失败；` +
+      `cloudflared edge 连接未注册（20s）——隧道未建立，判定启动失败；` +
         `基础设施保留，稍后重跑本脚本即可复用`,
     )
-    throw new Error('cloudflared tunnel 不可达')
+    throw new Error('cloudflared edge 未注册')
   }
-  ok(`cloudflared tunnel 已就绪: ${url}`)
+  const pingOk = await httpOk(`${url}/ping`, config.rl.remote_token, 8000)
+  pingOk
+    ? ok(`cloudflared tunnel 已就绪: ${url}`)
+    : warn(
+        `隧道 edge 在线，但 hub 出网探测未通过（hub→CF 劣化）——` +
+          `Kaggle 入站路径不受影响，继续（预演阶段实测连通性）`,
+      )
 
   writeTunnelUrl(url)
   return url
@@ -759,13 +834,19 @@ async function stepSmokeTest(cfUrl: string | null, noTunnel = false): Promise<vo
     throw new Error('隧道 URL 缺失')
   }
 
-  // 隧道可达性与 code.zip 可下载性是 Kaggle 接入的两道硬门，任一失败即冒烟不通过
-  const tunnelOk = await httpOk(`${cfUrl}/ping`, config.rl.remote_token, 10000)
-  if (!tunnelOk) {
-    fail(`cloudflared tunnel 不可达——Kaggle 无法连接`)
+  // 隧道判定分两级（用户指出探测路径 ≠ Kaggle 路径）：穿隧道 ping 失败但
+  // edge 在线（本地 /ready）= hub 出网劣化（探测独有段）→ 警告继续；edge 未
+  // 建立 = 隧道真死 → 硬失败。code.zip 走同一出网路径，ping 失败时跳过检查。
+  const pingOk = await httpOk(`${cfUrl}/ping`, config.rl.remote_token, 10000)
+  const edgeReady = pingOk ? true : await tunnelEdgeReady(loadRegistry().cloudflared?.metrics)
+  if (!pingOk && !edgeReady) {
+    fail(`cloudflared tunnel 不可达（edge 未建立）——Kaggle 无法连接`)
     throw new Error('cloudflared tunnel 不可达')
   }
-  ok(`cloudflared tunnel 可达: ${cfUrl}`)
+  pingOk
+    ? ok(`cloudflared tunnel 可达: ${cfUrl}`)
+    : warn('隧道 edge 在线，但 hub 出网探测未通过——Kaggle 入站不受影响（code.zip 检查跳过）')
+  if (!pingOk) return
 
   try {
     const resp = await fetch(`${cfUrl}/code`, {
@@ -825,6 +906,7 @@ async function stepTrainingLoop(
   course: string,
   weightsPath: string,
   smoke = false,
+  pushNodeUrl = '',
 ): Promise<boolean> {
   log('检查 TrainingLoop...')
   const reg = loadRegistry()
@@ -873,7 +955,11 @@ async function stepTrainingLoop(
       ...(smoke ? ['--smoke'] : []),
     ],
     {
-      env: { PYTHONPATH: `${sitePackages}${path.delimiter}${NN_TRAINING}` },
+      env: {
+        PYTHONPATH: `${sitePackages}${path.delimiter}${NN_TRAINING}`,
+        // push 模式冒烟：本机伪 GPU 节点（worker_server），优先于 rl-config gpu 节点
+        ...(pushNodeUrl ? { REMOTE_PUSH_NODE: pushNodeUrl } : {}),
+      },
       log: trainLog,
     },
   )
@@ -911,15 +997,9 @@ async function stepTrainingLoop(
  *  用与 Kaggle notebook 完全相同的 remote_worker 代码路径（--echo 冒烟回显，不跑 PPO）
  *  穿隧道完成 claim→payload→code→result 一整趟，TrainingLoop 三重校验落位后识别
  *  smoke 标记作废本轮并干净退出——it 不前进、账本零污染。 */
-async function stepKaggleRehearsal(
-  course: string,
-  cfUrl: string | null,
-  tlPid: number,
-): Promise<void> {
-  log('── Kaggle 交互预演（echo worker，不跑 PPO）──')
+async function stepKaggleRehearsal(course: string, tlPid: number): Promise<void> {
+  log('── Kaggle 交互预演（push 模式：trainer 推送 → 本机伪 GPU 节点 echo）──')
   const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
-  const base = cfUrl ?? `http://127.0.0.1:${config.rl.hub_port}`
-  cfUrl ? info(`经隧道: ${base}`) : warn('无隧道，走本机直连（隧道未建，Kaggle 暂不可接入）')
 
   // 日志基线 = 预演开始时刻（字节偏移），就绪判定只看本次产出。
   // 注意按字节切（Buffer.toString(offset)）而非字符串 slice——日志含 CJK 时
@@ -939,68 +1019,22 @@ async function stepKaggleRehearsal(
     }
   }
 
-  // 1) 等 TrainingLoop 发布 job（输出触发；真实 rollout 收集需 ~20-60s）
+  // 1) 等 TrainingLoop 发布 job 并推送到 push 节点（输出触发；真实 rollout 收集需 ~20-60s）
   const published = await waitUntil(async () => tailSince().includes('published job'), 180000, 2000)
   if (!published) {
     fail('TrainingLoop 180s 内未发布 job——见 training-loop.log')
     throw new Error('Kaggle 预演失败：job 未发布')
   }
-  ok('TrainingLoop 已发布真 job')
+  ok('TrainingLoop 已发布真 job 并推送')
 
-  // 2) echo worker：与 Kaggle notebook 相同的 remote_worker 入口，--once 领取一单
-  const workerLog = path.join(LOG_DIR, 'kaggle-smoke-worker.log')
-  const { python, sitePackages } = resolveVenvPython()
-  const worker = spawnBg(
-    [
-      python,
-      '-u',
-      '-m',
-      'remote_worker',
-      '--poll',
-      base,
-      '--token',
-      config.rl.remote_token,
-      '--once',
-      '--echo',
-      '--device',
-      'cpu',
-      '--out',
-      'tmp/remote-smoke-worker',
-    ],
-    {
-      cwd: NN_TRAINING,
-      env: { PYTHONPATH: `${sitePackages}${path.delimiter}${NN_TRAINING}` },
-      log: workerLog,
-    },
-  )
-  const workerDone = await waitUntil(async () => !pidAlive(worker.pid), 600000, 2000)
-  if (!workerDone) {
-    await killPid(worker.pid)
-    fail('echo worker 600s 未退出——见 kaggle-smoke-worker.log')
-    throw new Error('Kaggle 预演失败：worker 超时')
-  }
-  const wlog = readFileSync(workerLog, 'utf-8')
-  if (worker.exitCode !== 0 || !wlog.includes('result accepted')) {
-    // 良性竞态：真 Kaggle worker 先接入抢走了 job（它跑真 PPO 无 smoke 标记）
-    if (tailSince().includes('weights landed')) {
-      warn('job 被已接入的真实 worker 抢先完成（本轮真 PPO 已计入迭代）——预演按通过处理')
-      return
-    }
-    fail(`echo worker 失败 (exit ${worker.exitCode})`)
-    printLogTail(workerLog, 0)
-    throw new Error('Kaggle 预演失败：echo worker')
-  }
-  ok('echo worker 已完成 claim→payload→code→result 一整趟（与 Kaggle 同路径）')
-
-  // 3) 等 TrainingLoop 三重校验落位 + 识别 smoke 标记作废退出——两步都是预演的
-  //    验收项，超时即失败（不可只 warn，否则冒烟总结会误报通过）
-  const landed = await waitUntil(async () => tailSince().includes('weights landed'), 60000, 1000)
+  // 2) 等 push 节点回显结果被三重校验落位（trainer POST → worker_server echo → land）
+  const landed = await waitUntil(async () => tailSince().includes('weights landed'), 120000, 1000)
   if (!landed) {
-    fail('60s 内未见 weights landed——wait_job 未消费结果？')
+    fail('120s 内未见 weights landed——push/echo/落位链路有断点')
     printLogTail(trainLog, baseline)
     throw new Error('Kaggle 预演失败：结果未落位')
   }
-  ok('TrainingLoop 三重校验落位（wait_job → verify_and_land 全通过）')
+  ok('三重校验落位（HUB 推 → worker_server echo 回显 → verify_and_land 全通过）')
 
   const voided = await waitUntil(
     async () => tailSince().includes('冒烟回显已作废') && !pidAlive(tlPid),
@@ -1081,6 +1115,26 @@ async function main() {
   let doKill = false
   let noTunnel = false
 
+  // 代理环境整形：hub↔自己隧道的回环流量永远直连。shell 里若设了 HTTP(S)_PROXY
+  //（如 Clash），Bun fetch / urllib / wait_job 都会被代理接管——trycloudflare.com
+  // 走哪条出口取决于代理规则，健康检查与预演因此引入假阴性（实测）。追加
+  // NO_PROXY 使回环语义确定；其余流量的代理行为不变。子进程经 env 继承同享。
+  const hadProxy = !!(
+    process.env.HTTP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.http_proxy ||
+    process.env.https_proxy
+  )
+  if (hadProxy) {
+    const cur = (process.env.NO_PROXY || process.env.no_proxy || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const merged = [...new Set([...cur, 'localhost', '127.0.0.1', '.trycloudflare.com'])].join(',')
+    process.env.NO_PROXY = merged
+    process.env.no_proxy = merged
+  }
+
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? ''
     switch (a) {
@@ -1146,6 +1200,12 @@ async function main() {
 
   // 初始化日志
   initLog(course)
+  if (hadProxy) {
+    info(
+      '检测到代理环境变量（HTTP(S)_PROXY）——hub↔隧道回环已追加 NO_PROXY 直连' +
+        '（localhost/127.0.0.1/.trycloudflare.com），防探测与预演被代理规则引入假阴性',
+    )
+  }
 
   // 课程相关路径
   const trajDir = path.join(REPO_ROOT, 'tmp', course)
@@ -1187,9 +1247,45 @@ async function main() {
       stepRolloutSmoke(weightsPath),
     ])
 
-    // 阶段 3：Kaggle 交互预演——真课程 TrainingLoop（--smoke）发布真 job，
-    // echo worker（与 Kaggle 同代码路径，不跑 PPO）完成一整趟往返
-    const started = await stepTrainingLoop(course, weightsPath, true)
+    // 阶段 3：本机伪 GPU 节点（worker_server，与真 Kaggle 同一套 run_job 代码路径；
+    // echo 模式不跑 PPO）——push 模式预演的落点
+    const { python: servePy, sitePackages: serveSite } = resolveVenvPython()
+    const pushPort = config.rl.hub_port + 2
+    const pushUrl = `http://127.0.0.1:${pushPort}`
+    const serveLog = path.join(LOG_DIR, 'remote-worker-serve.log')
+    const serveProc = spawnBg(
+      [
+        servePy,
+        '-u',
+        '-m',
+        'remote_worker_serve',
+        '--port',
+        String(pushPort),
+        '--token',
+        config.rl.remote_token,
+        '--work',
+        'tmp/remote-worker-serve',
+      ],
+      {
+        cwd: NN_TRAINING,
+        env: { PYTHONPATH: `${serveSite}${path.delimiter}${NN_TRAINING}` },
+        log: serveLog,
+      },
+    )
+    const serveUp = await waitUntil(
+      () => httpOk(`${pushUrl}/ping`, config.rl.remote_token, 3000),
+      20000,
+      500,
+    )
+    if (!serveUp) {
+      fail('本机 worker_server 20s 未就绪——见 remote-worker-serve.log')
+      throw new Error('本机 push 节点未就绪')
+    }
+    ok(`本机 push 节点就绪: ${pushUrl}（模拟 Kaggle 侧 worker_server）`)
+
+    // 阶段 4：Kaggle 交互预演——真课程 TrainingLoop（--smoke）发布真 job 并推送到
+    // push 节点，echo 回显 → 三重校验落位 → 作废退出（不跑 PPO）
+    const started = await stepTrainingLoop(course, weightsPath, true, pushUrl)
     if (!started) {
       warn('TrainingLoop 已在运行（可能是真训练）——跳过 Kaggle 预演，以免干扰在途 job')
       return
@@ -1197,7 +1293,7 @@ async function main() {
     const tlPid = loadRegistry().trainingLoop?.pid ?? 0
     let rehearsalOk = true
     try {
-      await stepKaggleRehearsal(course, cfUrl, tlPid)
+      await stepKaggleRehearsal(course, tlPid)
     } catch (e) {
       rehearsalOk = false
       fail(`Kaggle 交互预演未通过: ${(e as Error).message}`)
@@ -1205,6 +1301,10 @@ async function main() {
         await killPid(tlPid)
         warn('已停止冒烟用 TrainingLoop（--smoke 进程没有 echo 结果会一直等待）')
       }
+    }
+    if (pidAlive(serveProc.pid)) {
+      await killPid(serveProc.pid)
+      info('已停止本机 worker_server（冒烟用）')
     }
 
     // ── 冒烟总结（任何硬门失败都以非零码退出）──
@@ -1220,12 +1320,17 @@ async function main() {
         ? ok(`cloudflared   ${cfUrl}`)
         : fail('cloudflared 未建立')
     rehearsalOk
-      ? ok('Kaggle 交互预演全通过（发布→领取→回传→落位→作废）')
+      ? ok('Kaggle 交互预演全通过（发布→推送→echo→落位→作废）')
       : fail('Kaggle 交互预演未通过——见上方日志')
     process.exitCode = hubOk && selfOk && rehearsalOk ? 0 : 1
+    if (cfUrl) {
+      console.log(`\n${GREEN}📋 Kaggle 粘贴用:${NC}`)
+      console.log(`  HUB_URL = "${cfUrl}"`)
+      console.log(`  TOKEN   = "${config.rl.remote_token}"`)
+    }
     console.log(
       `\n${GRAY}下一步：Kaggle notebook 填入 HUB_URL 接入；真训练直接跑全流程` +
-        `（bun tools/hub-start.ts --course ${course}）${NC}\n`,
+        `（bun tools/hub-start.ts ${course}）${NC}\n`,
     )
     return
   }
@@ -1289,8 +1394,11 @@ async function main() {
   if (cfUrl) {
     console.log(`\n${GREEN}📋 Kaggle 接入指引:${NC}`)
     console.log(`  1. HUB_URL = "${cfUrl}"（已写入 rl-config.json）`)
-    console.log(`  2. 打开 Kaggle notebook: nn-training/ipynb/ 下的对应课程 notebook`)
-    console.log(`  3. 填入 HUB_URL 后依次运行所有单元格`)
+    console.log(`  2. TOKEN   = "${config.rl.remote_token}"（rl-config.json 的 rl.remote_token）`)
+    console.log(`  3. 打开 Kaggle notebook: nn-training/ipynb/ 下的对应课程 notebook`)
+    console.log(
+      `  4. worker 一行命令：python -m remote_worker --poll <HUB_URL> --token <TOKEN> --device cuda`,
+    )
   }
 
   console.log(`\n${GRAY}日志文件:${NC}`)

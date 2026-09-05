@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, cast
 
+import dist_common
+from remote.protocol import RetryableError
+from remote.push_client import submit_job as _push_submit
+from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
 from rl.eval_m1 import read_eval_summary
 from rl.events import write_iteration
@@ -31,6 +36,40 @@ class SmokeVoidRoundError(Exception):
     不受影响）、it 不前进。loop_core.run 捕获：--smoke 干净退出，真训练原地
     重试同一迭代（作废不是故障，不计失败连击）。
     """
+
+
+def _gpu_push_nodes(remote_token: str) -> list[dict]:
+    """GPU push 节点清单（HUB 推模式，DECISIONS §340 补充 4）：
+    环境变量 REMOTE_PUSH_NODE（hub-start 冒烟注入本机伪节点，优先）→
+    rl-config nodes[].gpu_push=true（真 GPU 机器，URL 指向其 worker_server 隧道）。"""
+    out: list[dict] = []
+    env_node = os.environ.get("REMOTE_PUSH_NODE")
+    if env_node:
+        out.append({"url": env_node.rstrip("/"), "authKey": remote_token})
+    cfg = dist_common.load_dist_config() or {}
+    for n in cfg.get("nodes") or []:
+        if n.get("gpu_push") and n.get("enabled", True):
+            out.append({"url": str(n.get("url", "")).rstrip("/"), "authKey": str(n.get("authKey", ""))})
+    return out
+
+
+def _push_job_round(nodes: list[dict], manifest: dict, jid: str, payload_bytes: bytes,
+                    code_bytes: bytes, args: Any, timeout_sec: float, log: Any) -> dict:
+    """按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
+    RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
+    冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。"""
+    last: Exception | None = None
+    for node in nodes:
+        url, key = node["url"], node.get("authKey", "")
+        try:
+            _push_submit(url, key, manifest, payload_bytes, code_bytes,
+                         echo=bool(getattr(args, "smoke", False)), log=log)
+            log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
+            return _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)
+        except Exception as e:  # 单节点失败换下一个（含确定性拒绝）
+            last = e
+            log(f"[run_rl] push: 节点 {url} 失败（{type(e).__name__}: {e}）——尝试下一节点")
+    raise RetryableError(f"push 全部节点失败: {last}")
 
 
 class TrainingSteps:
@@ -345,7 +384,17 @@ class TrainingSteps:
         jid = manifest["job_id"]
         # 阻塞等待云 worker 完成（与 _serial_ppo 同构；超时由 hub-server 租约吸收）
         timeout_sec = 30 * 60.0
-        result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
+        gpu_nodes = _gpu_push_nodes(token)
+        if gpu_nodes:
+            # ---- HUB 推分支（DECISIONS §340 补充 4）：payload/code 直接 POST 到
+            # GPU 节点的 worker_server（其 cloudflared 隧道暴露），HUB 只做出站
+            # HTTPS——弱链路落在 Kaggle 网络。打包/账本/三重校验/落位与 pull 同构。
+            payload_bytes = (Path(job_root) / jid / "payload.zip").read_bytes()
+            code_bytes = self._code_zip_path.read_bytes()
+            result = _push_job_round(gpu_nodes, manifest, jid, payload_bytes, code_bytes,
+                                     args, timeout_sec, log)
+        else:
+            result = wait_job(hub_url, token, jid, timeout_sec=timeout_sec, log=log)
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
         verify_and_land(
             result,
