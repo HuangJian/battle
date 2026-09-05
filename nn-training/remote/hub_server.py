@@ -283,6 +283,8 @@ class HubHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path == "/ping" or path == "/":
+                if not self._auth_ok():
+                    return
                 self._json({"status": "ok"}, 200)
             elif path == "/jobs/next":
                 self._get_next()
