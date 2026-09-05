@@ -282,7 +282,9 @@ class HubHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         try:
-            if path == "/jobs/next":
+            if path == "/ping" or path == "/":
+                self._json({"status": "ok"}, 200)
+            elif path == "/jobs/next":
                 self._get_next()
             elif path.startswith("/jobs/") and path.endswith("/payload"):
                 self._get_payload()
