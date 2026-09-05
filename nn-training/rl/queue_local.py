@@ -165,7 +165,11 @@ def rescan_nodes(
         sleep_sec = min(rescan_sec, max(1.0, deadline - time.time()))
         if sleep_sec <= 0:
             return
-        time.sleep(sleep_sec)
+        # 用 all_settled.wait(sleep_sec) 替代 time.sleep(sleep_sec)：
+        # 所有游戏已结算完毕（all_settled.set()）时立即唤醒，不等满 rescan_sec 超时。
+        # 此前 `t.join(timeout=window+taskTimeout)` 被 rescan 线程的固定 120s sleep
+        # 阻塞，导致 round done 滞后 2 分钟（实测 2026-09-05）。
+        all_settled.wait(sleep_sec)
         if (
             all_settled.is_set()
             or (halt_event is not None and halt_event.is_set())
