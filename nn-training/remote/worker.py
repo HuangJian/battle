@@ -380,6 +380,7 @@ def worker_loop(
     """
     done = 0
     idle_since = time.time()
+    _last_alive_log = time.time()
     while True:
         try:
             job = poll_job(base_url, token)
@@ -393,6 +394,10 @@ def worker_loop(
             if max_idle_sec > 0 and time.time() - idle_since > max_idle_sec:
                 log(f"idle > {max_idle_sec}s — exit")
                 break
+            # 每 30s 打一次 alive 日志，让用户知道 worker 在正常运行
+            if time.time() - _last_alive_log > 30:
+                log(f"polling hub (no job yet, {done} done)")
+                _last_alive_log = time.time()
             time.sleep(poll_sec)
             continue
         idle_since = time.time()
