@@ -2541,3 +2541,35 @@ session 断开重连时发生；多 worker 的双跑浪费可接受。
 - 权衡（明示）：多 worker 时每个 iter 全员重算（N=1 实际为零）；先回传者的
   权重落账——GPU 结果本就非逐字节确定，账本以 wver 记录落了谁，无回放语义损失。
 - 测试：test_remote_ppo 全套改为竞速语义（广播重领 / 409 丢弃 / 结果落盘剔除）。
+
+## §344 / pre-commit 门禁按文件归因——多 agent 并行安全版（2026-09-06，用户指令）
+
+同仓多 coding agent 并行成为常态，门禁拦截必须回答「这是谁的错」。历史：
+v1（hook 临时摘除未暂存改动做 staged 快照）在竞态下弄丢了并行 agent 的在途
+工作（pool-page.ts）；v2（影子树 checkout-index + junction + index.lock +
+树守卫）复杂危险被否决——junction 清理穿链删库、hook bug 卡死所有提交。
+
+v3 语义：**全量门禁照常运行（判定质量不降级），拦截只认 staged 归因**——
+- ruff 只扫 staged 的 `nn-training/**/*.py`（范围化 = 归因化）；
+- tsc/mypy 报错解析文件路径，与 staged 集合求交（mypy 反斜杠归一）：
+  staged 命中 → 拦；全部落在未暂存/未跟踪 → 放行（他人后继自理）；
+  无法归因到文件的错误 → 保守拦；
+- pytest/bun test 红 → 拦 + 归因指引，因果由提交 agent 判定：自己的修、
+  他人的汇报对方后以 `NN_GATE_SKIP=pytest` / `SKIP_BUN_TEST=1` 定向跳过重试；
+- oxfmt 逐 staged 文件，MM（另有未暂存改动）文件跳过——格式化工作树
+  内容会把他人未暂存编辑折进提交（v1 同源事故）；
+- freeze 仅 staged 含 TS/游戏代码（*.ts 等 / src/）时运行——纯 python 提交
+  物理上不可能改变 det 签名；
+- hook 对工作树零写操作（唯 oxfmt 对「无未暂存改动的 staged 文件」的精确
+  格式化）；
+- 逃生口：`NN_GATE_SKIP` / `SKIP_BUN_TEST` / `SKIP_TSC` / `SKIP_NN_TRAINING_GATE`
+  / `--no-verify`；`pre-commit --selftest` 内置归因解析器断言。
+
+已知接受误差（用户裁定语义）：staged 改共享接口 → 报错落在他人未暂存
+文件 → 放行，对方后继撞见并修复；反向（他人半成品 import 进我的 staged 文件）
+→ 假拦截，走逃生口。共享索引的最终落库竞态（两 agent 同时 commit 的毫秒
+窗口）为 git 原生行为——agent 纪律：stage 后尽快 commit。
+
+演练实录：ruff staged 拦截 ✓（F401，rl/zz_drill_tmp.py）；tsc staged 拦截 ✓
+（TS2322，tools/zz-drill-staged.ts）；tsc 未跟踪文件报错放行 ✓
+（src/zz-drill-untracked.ts，兼作真实提交）；selftest ✓。

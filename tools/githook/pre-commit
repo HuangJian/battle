@@ -1,11 +1,39 @@
 #!/bin/sh
-# Pre-commit hook: enforce typecheck, tests, formatting, and linting before a commit lands.
+# pre-commit hook — 多 agent 并行安全版：报错按文件归因（DECISIONS §344，2026-09-06）。
 #
-# Activated by:  git config core.hooksPath .githooks   (see `bun run setup`)
+# 语义：全量门禁照常运行（判定质量不降级），但 **拦截只认 staged 归因** ——
+# 报错落在本次提交的文件上才中止；落在未暂存/未跟踪文件上（多 agent 并行时
+# 他人的在途改动随时会把整程序门禁打成红）只告警不拦，由改动的主人后继自理。
 #
-# Runs under Git's bundled `sh` on every platform (Linux shell, Windows Git Bash, and
-# Windows PowerShell 7 / pwsh), so it is shell-agnostic. The only external dependency is `bun`,
-# which we locate robustly below so the hook works no matter which shell triggered the commit.
+#   门禁            行为
+#   --------------  -----------------------------------------------------------
+#   ruff            只对 staged 的 nn-training/**/*.py 运行，红即拦
+#                   （范围化 = 归因化：未暂存文件根本不参与判定）
+#   mypy + pytest   nn-python-gate.sh 全量运行；mypy 报错按文件归因——
+#                   staged 归因 → 拦；全部未暂存 → 放行；pytest 红 → 拦 +
+#                   归因指引（因果由提交 agent 判定：自己的修，他人的汇报后
+#                   定向跳过重试 NN_GATE_SKIP=pytest）
+#   tsc             全量运行；报错按文件归因，staged → 拦；全部未暂存/未跟踪
+#                   → 放行；无法归因到文件的错误 → 拦（保守）
+#   bun test        红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
+#   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
+#                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
+#                   （2026-09-06 v1 事故教训）。永不阻断。
+#   oxlint          staged 文件，红即拦（不变）
+#   freeze          仅 staged 含 TS/游戏代码（*.ts 等 / src/）时运行；
+#                   纯 python 提交物理上不可能改变 det 签名
+#
+#   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、SKIP_BUN_TEST=1、
+#   --no-verify（全跳，最后手段）。
+#   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
+#
+#   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化外，本 hook
+#   对工作树 **零写操作**。历史教训：v1「临时摘除未暂存改动」在多 agent 并行
+#   下弄丢了他人在途工作；v2 影子树方案（junction/锁/守卫）因复杂危险被否决
+#   ——归因式拦截是既不弃门禁又不碰工作树的解。
+#   已知接受的误差（用户裁定语义）：staged 改共享接口 → 报错落在他人未暂存
+#   文件上 → 放行，对方后继撞见并修复；反向（他人半成品 import 进我的
+#   staged 文件）→ 假拦截，肉眼可辨后走逃生口。
 
 # Abort on the first failing command.
 set -e
@@ -35,7 +63,7 @@ if ! command -v bun >/dev/null 2>&1; then
   # Windows npm global lives under %APPDATA%\Roaming\npm
   if [ -n "$APPDATA" ]; then
     APPDIR=$(printf '%s' "$APPDATA" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
-    APPDIR=$(printf '%s' "$APPDIR" | sed -E 's|^([a-z]):/|/\1/|')
+    APPDIR=$(printf '%s' "$APPDATA" | sed -E 's|^([a-z]):/|/\1/|')
     add_to_path "$APPDIR/Roaming/npm"
   fi
 fi
@@ -47,93 +75,225 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 
 BUN=$(command -v bun)
+TOP=$(git rev-parse --show-toplevel)
+cd "$TOP"
+
+# ------------------------------------------------------------------ 归因解析器
+# tsc 错误行：tools/x.ts(32,21): error TS2440: ... → 文件路径（正斜杠）
+attrib_tsc() {
+  grep -E '^[^ (]+\([0-9]+,[0-9]+\): error TS[0-9]+:' "$1" \
+    | cut -d'(' -f1 | sed 's|\\|/|g' | sort -u
+}
+# mypy 错误行：tests\x.py:73: error: ... [code] → 文件路径（反斜杠归一；摘要行排除）
+attrib_mypy() {
+  grep -E '^[^ :]+:[0-9]+: error: ' "$1" \
+    | sed -E 's|:[0-9]+: error: .*||; s|\\|/|g' | sort -u
+}
+# 候选文件（stdin）∩ staged 集合（$1 = staged 清单文件）→ 命中者
+attrib_staged_hits() {
+  grep -Fxf "$1" || true
+}
+
+hook_selftest() {
+  D="tmp/selftest-$$"
+  mkdir -p "$D"
+  FAIL=0
+  printf '%s\n' \
+    'tools/agent/sampler-agent.ts(32,21): error TS2440: Import declaration conflicts with local declaration' \
+    'src/foo.ts(1,1): error TS2322: Type "x" is not "y"' \
+    'src/bar.ts(2,2): error TS9999: bad' \
+    > "$D/tsc.log"
+  TSC_OUT=$(attrib_tsc "$D/tsc.log")
+  if ! printf '%s\n' "$TSC_OUT" | grep -Fqx 'tools/agent/sampler-agent.ts'; then
+    echo "selftest FAIL: tsc 路径提取缺失"; FAIL=1
+  fi
+  if ! printf '%s\n' "$TSC_OUT" | grep -Fqx 'src/bar.ts'; then
+    echo "selftest FAIL: tsc 路径提取缺失(src/bar.ts)"; FAIL=1
+  fi
+  printf '%s\n' \
+    'tests\test_rl_remote_fixes.py:73: error: "object" has no attribute "_course_iter"  [attr-defined]' \
+    'rl\loop_steps.py:10: error: Something [misc]' \
+    'Found 2 errors in 2 files (checked 118 source files)' \
+    > "$D/mypy.log"
+  MYPY_OUT=$(attrib_mypy "$D/mypy.log")
+  if ! printf '%s\n' "$MYPY_OUT" | grep -Fqx 'tests/test_rl_remote_fixes.py'; then
+    echo "selftest FAIL: mypy 反斜杠归一失败"; FAIL=1
+  fi
+  if ! printf '%s\n' "$MYPY_OUT" | grep -Fqx 'rl/loop_steps.py'; then
+    echo "selftest FAIL: mypy 路径提取缺失"; FAIL=1
+  fi
+  if printf '%s\n' "$MYPY_OUT" | grep -q 'Found 2 errors'; then
+    echo "selftest FAIL: mypy 摘要行被误认为路径"; FAIL=1
+  fi
+  printf '%s\n' 'tools/agent/sampler-agent.ts' > "$D/staged.txt"
+  printf '%s\n' "$TSC_OUT" > "$D/tsc.files"
+  HITS=$(attrib_staged_hits "$D/staged.txt" < "$D/tsc.files")
+  if [ -z "$HITS" ]; then
+    echo "selftest FAIL: staged 交集应有命中"; FAIL=1
+  fi
+  printf '%s\n' 'other/thing.ts' > "$D/staged2.txt"
+  HITS2=$(attrib_staged_hits "$D/staged2.txt" < "$D/tsc.files")
+  if [ -n "$HITS2" ]; then
+    echo "selftest FAIL: 非 staged 命中应为空"; FAIL=1
+  fi
+  rm -rf "$D"
+  if [ "$FAIL" -eq 0 ]; then
+    echo "✓ hook selftest 全部通过"
+  fi
+  return "$FAIL"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+  hook_selftest
+  exit $?
+fi
 
 echo "▶ Running pre-commit checks (bun: $BUN)..."
 
-# --- 未暂存改动隔离（2026-09-06 用户指令）：门禁只判 staged 快照 --------------
-# 门禁（tsc/bun test/nn-gate/freeze）天然针对工作树运行——工作树里未暂存的在途
-# 改动（如改到一半的 TS）会把门禁打成红，而那些改动并不在本次提交里。此段在
-# 门禁前把未暂存 diff 摘除（工作树 := 索引），门禁结束或失败后原样恢复：
-#   - 禁用 git stash（AGENTS §5.8 沙箱事故）——等价机制用 diff/apply 文件级
-#     操作实现，不触碰对象库；
-#   - 恢复失败时补丁文件保留并响亮报错，绝不静默吞用户的在途改动；
-#   - 未暂存改动不存在时零开销（不产生补丁、不做 apply）。
-UNSTAGED_PATCH=""
-hook_restore_unstaged() {
-  if [ -n "$UNSTAGED_PATCH" ]; then
-    if git apply --whitespace=nowarn "$UNSTAGED_PATCH" 2>/dev/null; then
-      rm -f "$UNSTAGED_PATCH"
-      UNSTAGED_PATCH=""
-      echo " ▸ 未暂存改动已原样恢复（工作树回到门禁前状态）"
-    else
-      echo "!! 未暂存改动自动恢复失败——完整补丁保留在 $UNSTAGED_PATCH"
-      echo "!! 请手动恢复: git apply \"$UNSTAGED_PATCH\"（恢复前先确认编辑器里没有会覆盖它的未保存修改）"
-      exit 1
-    fi
-  fi
-}
-if [ -n "$(git diff --name-only)" ]; then
-  mkdir -p tmp
-  UNSTAGED_PATCH="tmp/pre-commit-unstaged-$$.patch"
-  if git diff --binary > "$UNSTAGED_PATCH" && git apply --reverse --whitespace=nowarn "$UNSTAGED_PATCH"; then
-    echo " ▸ 未暂存改动已临时摘除——门禁只判 staged 快照；提交结束自动恢复"
-  else
-    echo "!! 未暂存改动摘除失败——本次门禁按工作树现状运行（不做隔离）"
-    rm -f "$UNSTAGED_PATCH"
-    UNSTAGED_PATCH=""
-  fi
-fi
-trap 'hook_restore_unstaged' EXIT
+# ---------- 提交内容清单（staged = 归因基准；dirty = 归因排除集） ----------
+STAGED_LIST="tmp/pre-commit-staged-$$.txt"
+DIRTY_LIST="tmp/pre-commit-dirty-$$.txt"
+TSC_LOG="tmp/pre-commit-tsc-$$.log"
+GATE_LOG="tmp/pre-commit-nn-$$.log"
+trap 'rm -f "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG"' EXIT
+git diff --cached --name-only > "$STAGED_LIST"
+git diff --name-only > "$DIRTY_LIST"
+STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
+DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
+echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"
 
-# --- nn-training Python gate (2026-09-02) --------------------------------------
-# When the staged changes touch nn-training/, run the FULL Python quality gate
-# (ruff + mypy + pytest 4-shard, all parallel — 实现见 nn-python-gate.sh，与日常
-# 开发共用同一入口，避免 hook/日常门禁漂移)。跳过方式：
-#   SKIP_NN_TRAINING_GATE=1 git commit ...   # 仅跳过 Python 门禁
-#   git commit --no-verify ...               # 跳过全部门禁
-NN_STAGED=$(git diff --cached --name-only | grep '^nn-training/' || true)
+# ---------- nn-training python 门禁（ruff staged 范围 + mypy/pytest 全量归因） ----
+NN_STAGED=$(grep '^nn-training/' "$STAGED_LIST" || true)
 if [ -n "$NN_STAGED" ]; then
   if [ -n "$SKIP_NN_TRAINING_GATE" ]; then
     echo "▸ skip nn-training python gate (SKIP_NN_TRAINING_GATE set)"
   else
-    echo "▶ nn-training python gate ($(printf '%s\n' "$NN_STAGED" | wc -l | tr -d ' ') staged file(s))..."
-    sh "$(git rev-parse --show-toplevel)/tools/githook/nn-python-gate.sh" 4 || exit 1
+    NN_PY="$TOP/nn-training/.venv/Scripts/python.exe"
+    if [ ! -x "$NN_PY" ]; then NN_PY="$TOP/nn-training/.venv/bin/python"; fi
+    STAGED_PY=$(grep '\.py$' "$STAGED_LIST" | grep '^nn-training/' || true)
+
+    if [ -n "$STAGED_PY" ]; then
+      echo " ▸ ruff（staged 范围：$(printf '%s\n' "$STAGED_PY" | wc -l | tr -d ' ') 文件——未暂存文件不参与判定）"
+      if ! ( cd "$TOP/nn-training" \
+             && printf '%s\n' "$STAGED_PY" | sed 's|^nn-training/||' \
+             | xargs "$NN_PY" -m ruff check ); then
+        echo "✗ ruff（staged 归因）——修复本次提交的文件后重试"
+        exit 1
+      fi
+    fi
+
+    GATE_SKIP="ruff"
+    if [ -n "$NN_GATE_SKIP" ]; then GATE_SKIP="ruff,$NN_GATE_SKIP"; fi
+    echo " ▸ mypy + pytest（nn-python-gate 全量；mypy 按文件归因，pytest 红走因果判定）"
+    GATE_RC=0
+    NN_GATE_SKIP="$GATE_SKIP" sh "$TOP/tools/githook/nn-python-gate.sh" 4 \
+      > "$GATE_LOG" 2>&1 || GATE_RC=$?
+    cat "$GATE_LOG"
+    if [ "$GATE_RC" -ne 0 ]; then
+      PYTEST_RED=0
+      if grep -qE '^(FAILED |ERROR |={3,} short test summary info)' "$GATE_LOG"; then
+        PYTEST_RED=1
+      fi
+      if [ "$PYTEST_RED" -eq 1 ]; then
+        echo "✗ pytest 红——按多 agent 协作语义判定归因后重试："
+        echo "   · 失败由你 staged 的改动造成 → 修复后重新 commit；"
+        echo "   · 失败源自他人未暂存改动 → 汇报对方，并以 NN_GATE_SKIP=pytest 重试本次 commit。"
+        exit 1
+      fi
+      MYPY_FILES=$(attrib_mypy "$GATE_LOG" | sed 's|^|nn-training/|' | sort -u)
+      if [ -n "$MYPY_FILES" ]; then
+        MYPY_BLOCK=$(printf '%s\n' "$MYPY_FILES" | attrib_staged_hits "$STAGED_LIST")
+        if [ -n "$MYPY_BLOCK" ]; then
+          echo "✗ mypy 错误落在 staged 文件（提交被拦）:"
+          printf '    %s\n' $MYPY_BLOCK
+          exit 1
+        fi
+        echo "⚠ mypy 错误全部落在未暂存文件（他人改动，本次不拦；对方后继自理）:"
+        printf '    %s\n' $MYPY_FILES
+        echo "  （nn-python-gate 其余失败项均未落在 staged 文件上——放行）"
+      else
+        echo "✗ nn-python-gate 失败且无法按文件归因（保守拦截）——见上方日志"
+        exit 1
+      fi
+    fi
   fi
 fi
 
-echo " ▸ typecheck (tsc --noEmit)"
-"$BUN" run typecheck
-
-echo " ▸ tests (bun run test — scoped to local changes)"
-# Uses `bun run test`, which is aliased to the scoped silent runner
-# (tools/test-silent.ts). It runs only the tests related to the staged/working
-# changes (and prints only failure logs) for a fast commit gate. Falls back to
-# the fast suite when nothing maps (excluding heavy gate/integration sims such as
-# the God-AI gates and calibration — those still run via `bun test` / `--heavy`).
-# Re-run `bun test` before committing a God-AI change to validate the gate floors.
-"$BUN" run test
-
-echo " ▸ format (oxfmt, staged only)"
-# 只 format 已 staged 的文件，不改动未 stage 的修改。
-# 从 git diff --cached --name-only 获取 staged 文件列表，筛选 .ts/.js/.mjs 等
-# oxfmt 可处理的类型，逐个 format 后重新 stage。
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
-if [ -n "$STAGED_FILES" ]; then
-  echo "$STAGED_FILES" | tr '\n' '\0' | xargs -0 "$BUN" x oxfmt
-  git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' | tr '\n' '\0' | xargs -0 git add
+# ---------- typecheck（tsc 全量；报错按文件归因） ----------
+if [ -n "$SKIP_TSC" ]; then
+  echo "▸ skip typecheck (SKIP_TSC set)"
+else
+  echo " ▸ typecheck (tsc --noEmit) — 报错按文件归因，staged 才拦"
+  TSC_RC=0
+  "$BUN" run typecheck > "$TSC_LOG" 2>&1 || TSC_RC=$?
+  cat "$TSC_LOG"
+  if [ "$TSC_RC" -ne 0 ]; then
+    TSC_TOTAL=$(grep -cE ': error TS[0-9]+:' "$TSC_LOG" || true)
+    if [ "$TSC_TOTAL" -eq 0 ]; then
+      echo "✗ typecheck 失败但无 TS 错误行（无法归因，保守拦截）——见上方日志"
+      exit 1
+    fi
+    TSC_FILES=$(attrib_tsc "$TSC_LOG")
+    TSC_BLOCK=$(printf '%s\n' "$TSC_FILES" | attrib_staged_hits "$STAGED_LIST")
+    if [ -n "$TSC_BLOCK" ]; then
+      echo "✗ tsc 错误落在 staged 文件（提交被拦）:"
+      printf '    %s\n' $TSC_BLOCK
+      exit 1
+    fi
+    echo "⚠ tsc 错误全部落在未暂存/未跟踪文件（他人改动，本次不拦；对方后继自理）:"
+    printf '    %s\n' $TSC_FILES
+  fi
 fi
 
-echo " ▸ lint (oxlint, staged only)"
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
-if [ -n "$STAGED_FILES" ]; then
-  echo "$STAGED_FILES" | tr '\n' '\0' | xargs -0 "$BUN" x oxlint
+# ---------- tests（bun scoped；红走因果判定） ----------
+if [ -n "$SKIP_BUN_TEST" ]; then
+  echo "▸ skip bun test (SKIP_BUN_TEST set——请确保失败已归因并汇报)"
+else
+  echo " ▸ tests (bun run test — scoped to local changes)"
+  if ! "$BUN" run test; then
+    echo "✗ bun test 红——按多 agent 协作语义判定归因后重试："
+    echo "   · 失败由你 staged 的改动造成 → 修复后重新 commit；"
+    echo "   · 失败源自他人未暂存改动 → 汇报对方，并以 SKIP_BUN_TEST=1 重试本次 commit。"
+    exit 1
+  fi
 fi
 
-echo " ▸ freeze gate (det signature vs golden — DECISIONS §272)"
-# God AI v1 frozen-signature gate (~100s). A red gate is NOT an error per se:
-# it means current behavior ≠ the frozen baseline. Either roll back, or run
-# the new-era triple (new DECISIONS entry + 60-seed baseline re-run + golden
-# update). See plan/God-AI-Organization.md §7 / docs/god-ai-tuning.progress.md Part 0.
-bash tools/probe-det-baseline.sh --golden
+# ---------- format（oxfmt 逐 staged 文件；MM 文件跳过防折叠） ----------
+STAGED_TS=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" || true)
+if [ -n "$STAGED_TS" ]; then
+  echo " ▸ format (oxfmt, staged 逐文件；另有未暂存改动的文件跳过)"
+  for f in $STAGED_TS; do
+    if grep -Fxq "$f" "$DIRTY_LIST"; then
+      echo "   ⚠ 跳过 $f（MM：另有未暂存改动——格式化工作树内容会把未暂存编辑折进提交）；请自行格式化后 git add"
+    else
+      "$BUN" x oxfmt "$f" >/dev/null 2>&1 || true
+      git add -- "$f"
+    fi
+  done
+fi
+
+# ---------- lint（oxlint，staged 文件——红即拦） ----------
+STAGED_LINT=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|js|mjs|cjs|tsx|jsx|json)$' || true)
+if [ -n "$STAGED_LINT" ]; then
+  echo "$STAGED_LINT" | tr '\n' '\0' | xargs -0 -r "$BUN" x oxlint
+fi
+
+# ---------- freeze gate（det signature vs golden — DECISIONS §272） ----------
+FREEZE_RELEVANT=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" || true)
+if [ -z "$FREEZE_RELEVANT" ]; then
+  echo " ▸ freeze gate skipped（staged 无 TS/游戏代码——det 签名不可能受本次提交影响）"
+else
+  echo " ▸ freeze gate (det signature vs golden — DECISIONS §272; ~100s)"
+  bash tools/probe-det-baseline.sh --golden
+fi
+
+# ---------- 并发提示：门禁期间暂存区是否被他人追加 ----------
+if [ "$STAGED_N" -gt 0 ]; then
+  NEW_STAGED=$(git diff --cached --name-only | grep -Fvx -f "$STAGED_LIST" || true)
+  if [ -n "$NEW_STAGED" ]; then
+    echo "⚠ 门禁期间暂存区新增文件（将随本次提交入库但未经本次门禁判定）——建议立即重新 commit:"
+    printf '    %s\n' $NEW_STAGED
+  fi
+fi
 
 echo "✓ All pre-commit checks passed."
