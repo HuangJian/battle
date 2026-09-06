@@ -202,9 +202,10 @@ export class UIManager {
     this.updateSuperKeyLabels()
   }
 
-  /** Re-render the HUD super-item labels (bindings + locale changed). */
+  /** Re-render the HUD super-item labels (bindings + locale changed).
+   *  P2's bindings ride along so the two-player rows carry P2's own keys. */
   private updateSuperKeyLabels(): void {
-    this.hud.updateSuperKeyLabels(this.controls.currentBindings)
+    this.hud.updateSuperKeyLabels(this.controls.currentBindings, this.controls.currentBindings2)
   }
 
   /** Apply theme colors as CSS variables — only when theme key changes */

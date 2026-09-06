@@ -57,6 +57,14 @@ export class HudView {
   readonly guardLabel: HTMLElement | null
   readonly frenzyLabel: HTMLElement | null
   readonly rewindLabel: HTMLElement | null
+  /** 双打 Two-Player: P2's own super-key labels (colored rows). Created
+   *  lazily by updateSuperKeyLabels when P2 bindings are first supplied. */
+  private guardLabel2: HTMLElement | null = null
+  private frenzyLabel2: HTMLElement | null = null
+  private rewindLabel2: HTMLElement | null = null
+  /** Mirrors world.twoPlayer as of the last syncWorld — drives the P2 label
+   *  rows' visibility (the flag can flip without any binding/locale change). */
+  private twoPlayerLabels = false
 
   // Last HUD values (avoid unnecessary textContent writes)
   private lastScore = -1
@@ -246,15 +254,29 @@ export class HudView {
     this.takeoverBtn.hidden = !takeoverVisible
   }
 
-  /** Re-render the super-item key labels from the current bindings + locale. */
-  updateSuperKeyLabels(bindings: KeyBindings): void {
-    const pairs: Array<[HTMLElement | null, keyof KeyBindings, string]> = [
-      [this.guardLabel, 'guard', t('hud.guard')],
-      [this.frenzyLabel, 'frenzy', t('hud.frenzy')],
-      [this.rewindLabel, 'rewind', t('hud.rewind')],
+  /** Re-render the super-item key labels from the current bindings + locale.
+   *  When P2 bindings are provided, a second colored row per item is rendered
+   *  for two-player mode (stocks are world-global — either human may spend
+   *  one — so each player's own release key is shown). */
+  updateSuperKeyLabels(bindings: KeyBindings, bindings2?: KeyBindings): void {
+    const pairs: Array<[
+      HTMLElement | null,
+      HTMLElement | null,
+      keyof KeyBindings,
+      string,
+    ]> = [
+      [this.guardLabel, this.guardLabel2, 'guard', t('hud.guard')],
+      [this.frenzyLabel, this.frenzyLabel2, 'frenzy', t('hud.frenzy')],
+      [this.rewindLabel, this.rewindLabel2, 'rewind', t('hud.rewind')],
     ]
-    for (const [el, action, name] of pairs) {
-      if (el) el.textContent = `${name}<${formatKeyCode(parseBinding(bindings[action]).code)}>`
+    for (const [el, el2, action, name] of pairs) {
+      if (el) el.textContent = formatSuperKeyLabel(name, bindings[action])
+      if (el2 && bindings2) {
+        el2.textContent = formatSuperKeyLabel(name, bindings2[action])
+        // Visible only in two-player mode — mirrored in syncWorld so the
+        // mode flip without a label change still shows/hides the row.
+        el2.hidden = !this.twoPlayerLabels
+      }
     }
   }
 
@@ -352,6 +374,24 @@ export class HudView {
     for (const el of this.superItems) {
       if (el.hidden !== hideSuper) el.hidden = hideSuper
     }
+    // 双打 Two-Player: show/hide the P2 super-key label rows. The flag can
+    // flip (CC toggle / snapshot restore) without any binding or locale
+    // change, so this change-guarded sync lives here, not only in
+    // updateSuperKeyLabels. Rows mirror the P1 items' classic-mode hiding.
+    if (this.twoPlayerLabels !== world.twoPlayer) {
+      this.twoPlayerLabels = world.twoPlayer
+      for (const el of [this.guardLabel2, this.frenzyLabel2, this.rewindLabel2]) {
+        if (el) el.hidden = !world.twoPlayer || hideSuper
+      }
+    } else if (!world.twoPlayer) {
+      // classic-mode gate above flipped while 2p rows are already hidden —
+      // nothing to do (they only show when twoPlayer && !hideSuper).
+    } else {
+      // twoPlayer unchanged and on: follow the classic-mode hiding.
+      for (const el of [this.guardLabel2, this.frenzyLabel2, this.rewindLabel2]) {
+        if (el && el.hidden !== hideSuper) el.hidden = hideSuper
+      }
+    }
     if (!hideSuper) {
       if (world.guardStock !== this.lastGuard) {
         this.guardEl.textContent = String(world.guardStock)
@@ -425,6 +465,17 @@ export class HudView {
       chip.hidden = true
     }
   }
+}
+
+/**
+ * Render one HUD super-item key label: `Name<Key>`. Pure so both the P1 and
+ * two-player P2 label rows are regression-tested headlessly (AGENTS §8).
+ * Modifier prefixes are deliberately dropped — the HUD hint is a compact
+ * physical-key reminder; a rebinding to a modifier COMBO still communicates
+ * its primary key here.
+ */
+export function formatSuperKeyLabel(name: string, binding: string): string {
+  return `${name}<${formatKeyCode(parseBinding(binding).code)}>`
 }
 
 /** Render a bare `KeyboardEvent.code` (no modifiers) into a short label. */
