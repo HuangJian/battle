@@ -28,6 +28,13 @@ import os from 'node:os'
 import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
+// BCV2 结果容器读写（服务耗时打点改口径用——unpack → 改 manifest → repack）。
+// 本文件另有 v1 遗留 packContainer/unpackContainer（下方导出，兼容旧消费方），
+// 故别名导入 v2 实现。
+import {
+  buildPack as buildPackV2,
+  unpackContainer as unpackContainerV2,
+} from '../sim/pack-container'
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -595,6 +602,28 @@ function jsonResponse(obj: unknown, status = 200, headers: Record<string, string
   })
 }
 
+/** 服务耗时改口径（2026-09-06 用户指令）：elapsedSec 从「子进程内纯游戏耗时」改为
+ * 「任务生命周期」= 接单（inflight startedAt；同步模式即 HTTP 请求起点）→ 结果就绪，
+ * 含 bun 子进程冷启动（本机实测 ~2.2s/局）与打包开销——与 local 直跑的 Popen 墙钟
+ * 同口径，节点间「平均耗时」可横向比（此前 local 4.2s vs 同机 self 2.0s 的差就是
+ * 被排除的冷启动）。实现 = 解包 BCV2 → 改写 manifest.elapsedSec → 重打包（~1MB
+ * 容器 gunzip+gzip 十几 ms，相对整局可忽略）；解包失败不吞结果——容器原样返回
+ * （保留旧口径）。纯游戏时长不再单列（shard 的 ticks 可间接推算）。 */
+function stampServiceSec(key: string, buf: Buffer): Buffer {
+  const startedAt = inflight.get(key)?.startedAt
+  if (!startedAt) return buf
+  try {
+    const { manifest, entries } = unpackContainerV2(buf)
+    manifest.elapsedSec = +((Date.now() - startedAt) / 1000).toFixed(1)
+    return buildPackV2(
+      manifest,
+      [...entries].map(([name, data]) => ({ name, data })),
+    )
+  } catch {
+    return buf
+  }
+}
+
 // ---------------- HTTP handler ----------------
 /**
  * v3.6 异步模式的后台执行器：与同步流式路径共用 runGame/缓存/计数器，
@@ -665,7 +694,7 @@ function beginTask(
     courseFp,
   )
     .then((buf) => {
-      lruPut(key, buf)
+      lruPut(key, stampServiceSec(key, buf))
       gamesDoneTotal++
       gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
       console.log(
@@ -1016,7 +1045,7 @@ async function handle(req: Request): Promise<Response> {
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
-            lruPut(key, buf)
+            lruPut(key, stampServiceSec(key, buf))
             gamesDoneTotal++
             gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
             try {
