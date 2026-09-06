@@ -15,6 +15,7 @@ import {
   emptyHistory,
 } from '../tools/training/monitor/history'
 import { readIterMetrics } from '../tools/training/monitor/iters'
+import { TRAINING_LOOP_ENTRY, trainingLoopSpec } from '../tools/training/specs'
 import { renderMonitorPage } from '../tools/training/monitor/page'
 import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -232,6 +233,27 @@ describe('training path constants', () => {
     expect(
       REPO_ROOT.endsWith('battle2') || REPO_ROOT.includes(':') || REPO_ROOT.includes('/'),
     ).toBe(true)
+  })
+})
+
+describe('ProcSpec path semantics (tools/training/specs.ts, DECISIONS §349 regression)', () => {
+  it('trainingLoop cmd points at an existing file (entry is repo-relative, not doubled)', () => {
+    // 回归：entry 曾被 join(NN_TRAINING) 再拼一次 → nn-training/nn-training/run_rl.py
+    // python 秒退 "can't open file"，预演空烧 180s。cmd[2] 必须真实存在。
+    const cfg = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 8787, agent_port: 8443, remote_token: 't' },
+    }
+    const spec = trainingLoopSpec(cfg, {
+      course: 'spec-path-test',
+      ppo: 'remote',
+      venv: { python: 'python', sitePackages: '' },
+    })
+    expect(spec.cmd[2]).toBe(join(REPO_ROOT, 'nn-training', 'run_rl.py'))
+    const { existsSync } = require('fs') as { existsSync: (p: string) => boolean }
+    expect(existsSync(spec.cmd[2]!)).toBe(true)
+    expect(TRAINING_LOOP_ENTRY).toBe('nn-training/run_rl.py')
   })
 })
 

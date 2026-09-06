@@ -162,7 +162,9 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
     cmd: [
       s.venv.python,
       '-u',
-      path.join(NN_TRAINING, TRAINING_LOOP_ENTRY),
+      // TRAINING_LOOP_ENTRY 是仓库相对路径（哨兵/账本用）——绝对路径从仓库根拼，
+      // 不能再 join(NN_TRAINING)（会把 nn-training 前缀翻倍，python 直接打不开文件）。
+      path.join(REPO_ROOT, TRAINING_LOOP_ENTRY),
       '--course',
       s.course,
       ...(s.ppo === 'local' ? [] : ['--ppo', 'remote']),

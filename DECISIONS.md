@@ -2742,3 +2742,15 @@ agents.details §5.6、README 模块地图、plan、py docstring）已同步改�
 **验证**：`bun run check` 1748 pass / 0 fail；`bun run build` 绿；train.ts CLI
 `--check/--echo/--help` 实弹通过；控制台 :8941 实弹（state API、页面 200、
 NO_PROXY 提示、监督启用日志）。
+
+**补 1（smokeTrain 实弹回归，2026-09-06 晚）**：首次对 p4-horizon 跑控制台
+「推送链路预演」暴露 trainingLoopSpec 路径翻倍 bug——cmd[2] 被再 join 一次
+`NN_TRAINING`，python 秒退 `can't open file ...nn-training
+n-trainingun_rl.py`，
+预演空烧 180s 等 job 发布。修复三件：(a) specs.ts 以 `REPO_ROOT` 拼入口
+（ENTRY 是仓库相对路径，哨兵/账本语义，不参与 join NN_TRAINING）；
+(b) stepTrainingLoop 加 fail-fast——进程秒退且日志含 "can't open file" 时立即
+抛路径错，不再等满超时窗；(c) 回归测试（tests/training-train.test.ts）：cmd[2]
+必须 `existsSync` 为真。复跑预演全通过：发布→推送→echo→落位→作废退出，
+iteration 计数 3 不变、wver c1369c289278 未动、无残留锁、8789 端口释放、
+workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属正常痕迹）。

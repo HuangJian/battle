@@ -409,7 +409,9 @@ export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Prom
   saveComponent('trainingLoop', { pid: r.pid, course: s.course, entry: TRAINING_LOOP_ENTRY })
   monitorTouch()
 
-  // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待
+  // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待。
+  // 另加 fail-fast：进程秒退且日志含 python "can't open file"（路径错/入口错）时
+  // 立即抛错——否则预演/等待逻辑会空烧整个超时窗口等一个永远不来的输出。
   const hasOutput = await waitUntil(
     async () => {
       if (!pidAlive(r.pid)) return true
@@ -426,6 +428,12 @@ export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Prom
   if (!pidAlive(r.pid)) {
     fail(`TrainingLoop 启动失败（PID ${r.pid} 已退出，见 ${trainLog}）`)
     printLogTail(trainLog, baseline)
+    const tail = tailText(trainLog, baseline)
+    if (tail.includes("can't open file")) {
+      throw new Error(
+        `TrainingLoop 入口文件打不开（cmd[2]=${spec.cmd[2]}）——检查 specs.ts 路径拼接: ${tail.split('\n').find((l) => l.includes("can't open file")) ?? ''}`,
+      )
+    }
     throw new Error('TrainingLoop 启动失败')
   }
   ok(`TrainingLoop 已启动 (PID ${r.pid})`)
@@ -435,6 +443,16 @@ export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Prom
     printLogTail(trainLog, baseline)
   }
   return true
+}
+
+/** baseline 之后的日志文本（字节偏移起读；无文件返回空串）。 */
+function tailText(logPath: string, offset: number): string {
+  try {
+    const b = readFileSync(logPath)
+    return b.toString('utf-8', Math.min(offset, b.length))
+  } catch {
+    return ''
+  }
 }
 
 // ────────────────────────── Kaggle 交互预演（--smoke-only 专属） ──────────────────────────
