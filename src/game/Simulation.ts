@@ -67,6 +67,13 @@ export class Simulation {
    * not survive a real game start, silently degrading dual mode to single.
    */
   private pendingSpectateDual: boolean | null = null
+  /**
+   * 双打 Two-Player mode: pending toggle, same deferred-application contract
+   * as pendingCoopToggle. Carries the toggle through `startGame` (which resets
+   * `world.twoPlayer`) and applies on the first playing tick — identical to
+   * how coop survives a menu-time enable.
+   */
+  private pendingTwoPlayerToggle: boolean | null = null
 
   constructor(world: World, input: InputLike) {
     const s = {} as SimulationSystems
@@ -138,6 +145,23 @@ export class Simulation {
   }
 
   /**
+   * 双打 Two-Player mode: request a toggle (called by Game.ts). The actual
+   * World mutation is deferred to updatePlaying() to preserve One-Author.
+   */
+  requestTwoPlayerToggle(on: boolean): void {
+    this.pendingTwoPlayerToggle = on
+  }
+
+  /**
+   * One-Author routing (§4.1): immediate twoPlayer flag flip for mid-handoff
+   * callers (menu/paused, no tick will fire) — same semantics as
+   * {@link applyTakeover}.
+   */
+  applyTwoPlayer(on: boolean): void {
+    this.world.twoPlayer = on
+  }
+
+  /**
    * 督战 (supervise) mode: cancel any pending spectate toggle. Called when
    * returning to menu — a stale pending toggle would otherwise fire on the
    * next playing tick and re-enable spectate against the player's intent.
@@ -145,6 +169,14 @@ export class Simulation {
   clearPendingSpectateToggle(): void {
     this.pendingSpectateToggle = null
     this.pendingSpectateDual = null
+  }
+
+  /**
+   * 双打 Two-Player mode: cancel any pending toggle (returning to menu —
+   * same stale-pending hazard as coop/spectate).
+   */
+  clearPendingTwoPlayerToggle(): void {
+    this.pendingTwoPlayerToggle = null
   }
 
   /** Run one simulation tick (1/60s) */
@@ -169,12 +201,33 @@ export class Simulation {
     const w = this.world
     const s = this.s
 
+    // 双打 Two-Player: apply deferred toggle at tick start — BEFORE the coop
+    // /spectate applies below so mode handoffs converge regardless of the
+    // order the pendings were requested in (each enable strips the other
+    // modes' flags; the shared P2 slot keeps exactly one owner).
+    if (this.pendingTwoPlayerToggle !== null) {
+      const enable = this.pendingTwoPlayerToggle
+      this.pendingTwoPlayerToggle = null
+      if (enable && !w.twoPlayer) {
+        w.coop = false
+        w.spectate = false
+        w.spectateDual = false
+        w.twoPlayer = true
+        if (!w.player2) w.enablePlayer2({ respawnShield: true })
+      } else if (!enable && w.twoPlayer) {
+        w.twoPlayer = false
+        if (!w.coop && !w.spectateDual) w.disablePlayer2()
+      }
+    }
+
     // Lie-Back-Win-Mode §3.5: apply deferred coop toggle at tick start.
     if (this.pendingCoopToggle !== null) {
       const enable = this.pendingCoopToggle
       this.pendingCoopToggle = null
       if (enable && !w.coop) {
         w.coop = true
+        // twoPlayer owns the same P2 slot — coop enable takes it over.
+        w.twoPlayer = false
         w.enablePlayer2({ respawnShield: true })
       } else if (!enable && w.coop) {
         w.coop = false
@@ -190,6 +243,8 @@ export class Simulation {
       this.pendingSpectateDual = null
       w.spectate = enableSpectate
       w.spectateDual = dual
+      // Enabling any spectate form strips twoPlayer (same P2 slot owner).
+      if (enableSpectate) w.twoPlayer = false
       if (dual) {
         // 督战双玩家: ensure player2 exists — startGame/loadStage wipe it.
         if (!w.player2) {

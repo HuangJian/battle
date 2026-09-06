@@ -46,6 +46,7 @@ export class ReplayController {
       enemiesTotal: w.enemiesSpawned,
       playTimeMs: w.playTimeMs,
       coop: w.coop,
+      twoPlayer: w.twoPlayer,
       spectate: w.spectate,
       spectateDual: w.spectateDual,
     }

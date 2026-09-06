@@ -1167,6 +1167,38 @@ body.theme-modern .ui-menu {
   margin-top: -4px;
 }
 
+/* Player 1 / Player 2 tab switcher (two-player key rebinding) */
+.controls-tabs {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.controls-tab {
+  flex: 1;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-secondary);
+  padding: 7px 12px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.controls-tab:hover {
+  background: var(--theme-button-hover);
+}
+
+.controls-tab.active {
+  color: var(--theme-text-primary);
+  background: var(--theme-button-active);
+  border-color: var(--theme-accent-primary);
+}
+
 .controls-list {
   display: flex;
   flex-direction: column;

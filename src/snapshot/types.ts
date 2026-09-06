@@ -158,6 +158,9 @@ export interface WorldSnapshot {
   // ---- Lie-Back-Win-Mode (coop) fields ----
   /** Whether cooperative mode was active at snapshot time. */
   coop?: boolean
+  /** 双打 Two-Player mode: a second HUMAN drives player2 (backward-compat
+   *  optional: absent in legacy snapshots → restore defaults to false). */
+  twoPlayer?: boolean
   /** 督战 (supervise) mode: God AI as player1, no human input. */
   spectate?: boolean
   /** 督战双玩家 (dual spectate): both P1 and P2 controlled by God AI. */

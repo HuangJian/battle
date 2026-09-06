@@ -34,6 +34,13 @@ export function canToggleSpectate(state: GameState): boolean {
   return state === 'menu' || state === 'paused' || state === 'recovery'
 }
 
+/** May 双打 Two-Player be toggled? Same availability contract as co-op /
+ *  supervise: menu / paused / MISSION FAILED (arm it before the run or before
+ *  a retry). Live play and terminal states fall through to no-op. */
+export function canToggleTwoPlayer(state: GameState): boolean {
+  return state === 'menu' || state === 'paused' || state === 'recovery'
+}
+
 /** Is the Replay Browser BLOCKED over this screen? Never. The browser is a
  *  fixed z-index-30 modal that layers over any screen; a live 'playing' game
  *  is auto-paused (and an active playback exited) by the caller before it

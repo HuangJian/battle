@@ -48,6 +48,8 @@ export class InputRecorder {
   private coopAtStart = false
   /** 督战双玩家: captured at recording start for hasP2 determination. */
   private spectateDualAtStart = false
+  /** 双打 twoPlayer: captured at recording start — P2's stream is HUMAN input. */
+  private twoPlayerAtStart = false
 
   /** Begin a new recording session. */
   startNew(world: World): void {
@@ -59,6 +61,7 @@ export class InputRecorder {
     this.world = world
     this.coopAtStart = world.coop
     this.spectateDualAtStart = world.spectateDual
+    this.twoPlayerAtStart = world.twoPlayer
   }
 
   /**
@@ -114,8 +117,11 @@ export class InputRecorder {
 
     // Lie-Back-Win-Mode Q10: flags fixed at recording start — use coopAtStart,
     // NOT derived from frames2 content. This ensures hasP2 is stable even if
-    // God AI never produces non-idle input.
-    const hasCoopInput = (this.coopAtStart || this.spectateDualAtStart) && this.frames2.length > 0
+    // God AI never produces non-idle input. 双打 twoPlayer counts too: its P2
+    // stream is the human's second keyboard.
+    const hasCoopInput =
+      (this.coopAtStart || this.spectateDualAtStart || this.twoPlayerAtStart) &&
+      this.frames2.length > 0
 
     let frames: Uint8Array
     let frames2: Uint8Array | null = null

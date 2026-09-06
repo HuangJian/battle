@@ -18,7 +18,7 @@ import { ReplayManager } from '../replay/ReplayManager'
 import type { PlaybackController, PlaybackSpeed } from '../replay/PlaybackController'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
-import { canToggleCoop, canToggleSpectate } from './uiFlowGates'
+import { canToggleCoop, canToggleSpectate, canToggleTwoPlayer } from './uiFlowGates'
 import { cycleBattleSpeed } from './battleSpeed'
 import type { BattleSpeed } from './battleSpeed'
 import { createReplayStorage } from '../replay/storage'
@@ -48,6 +48,13 @@ import { ReplayController } from './GameReplay'
 export class Game {
   world: World
   input: Input
+  /**
+   * 双打 Two-Player mode: the second HUMAN keyboard (P2's own bindings —
+   * WASD + F by default). Lives outside the World (AGENTS §2.2: it is an
+   * input device, not gameplay state); `world.twoPlayer` is the gameplay flag
+   * that decides whether the Simulation consumes it. Never mutates the World.
+   */
+  input2: Input
   simulation: Simulation
   presentation: PresentationLayer
   audio: AudioManager
@@ -115,6 +122,9 @@ export class Game {
     if (this.world.spectateDual && this.godInput2) return this.godInput2
     // Spectate is strictly single-player (God AI as P1) — never a second tank.
     if (this.world.spectate) return null
+    // 双打 Two-Player: the second HUMAN keyboard drives player2 (its own
+    // bindings — no auto-fire decorator; both drivers are human).
+    if (this.world.twoPlayer) return this.input2
     return this.godInput
   }
 
@@ -154,10 +164,18 @@ export class Game {
     this.settings = loadSettings()
     this.world = new World()
     this.input = new Input(this.settings.keys)
+    // P2's keyboard holds the LIVE settings.keys2 reference — same contract
+    // as P1: a Controls-panel remap mutates this exact object and gameplay
+    // sees it immediately. The two sets are separate objects, so remapping
+    // P1 never touches P2. (Legacy saves migrate to DEFAULT_P2_KEYS in
+    // loadSettings — see DECISIONS.md §347 follow-up.)
+    this.input2 = new Input(this.settings.keys2)
     this.simulation = new Simulation(this.world, this.input)
     this.presentation = new PresentationLayer(root, this.settings.performanceMode)
-    // Wire the live key-bindings object + persistence into the controls panel.
-    this.presentation.ui.initControls(this.settings.keys, () => this.saveSettings())
+    // Wire the live key-bindings objects + persistence into the controls panel.
+    this.presentation.ui.initControls(this.settings.keys, this.settings.keys2, () =>
+      this.saveSettings(),
+    )
 
     // Wire mouse-click handlers for the start screen (same World-mutating
     // paths as the keyboard menu input).
@@ -237,6 +255,13 @@ export class Game {
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
       this.simulation.requestCoopToggle(true)
+      // 双打 Two-Player owns the same P2 slot — coop enable takes it over.
+      // Applied immediately (paused/menu, no tick) + pending cleared so no
+      // stale toggle fires later (the deferred coop apply also strips it).
+      if (w.twoPlayer) {
+        this.simulation.clearPendingTwoPlayerToggle()
+        this.simulation.applyTwoPlayer(false)
+      }
       // 督战 (God AI as P1) and co-op (God AI as P2) are mutually exclusive —
       // enabling co-op turns supervise off so the two never fight over input.
       if (w.spectate) {
@@ -260,6 +285,59 @@ export class Game {
       this.audio.player2Id = w.player2?.id ?? null
     }
     this.presentation.ui.controlCenter.setCoopState(w.coop)
+    this.presentation.updateUI(w)
+    this.presentation.markNeedsRender()
+  }
+
+  // ---- 双打 Two-Player mode: a second HUMAN drives player2 ----
+
+  /**
+   * Toggle Two-Player mode on/off. Same availability contract as coop
+   * (menu / paused / MISSION FAILED — see canToggleTwoPlayer). Enabling
+   * spawns player2 through the canonical `enablePlayer2()` path and re-routes
+   * `simulation.input2` from (potential) God AI to P2's own keyboard.
+   * Mutually exclusive with coop and spectate — all three own the P2/P1
+   * takeover slots; enabling one tears the others down first.
+   */
+  requestTwoPlayerToggle(): void {
+    const w = this.world
+    if (!canToggleTwoPlayer(w.state)) return
+
+    if (w.twoPlayer) {
+      // Disable: World mutation deferred to Simulation (One-Author), applied
+      // immediately too since we are paused/menu (no tick will fire).
+      this.simulation.requestTwoPlayerToggle(false)
+      this.simulation.applyTwoPlayer(false)
+      w.disablePlayer2()
+      this.wireLiveInputs()
+      this.presentation.ui.notify(t('toast.twoPlayerOff'), 'info')
+    } else {
+      // Enable: the deferred toggle carries the flag through a following
+      // startGame (menu-time enable) — startGame resets world.twoPlayer, and
+      // the pending apply re-sets it on the first playing tick, exactly like
+      // coop's contract. Spectate (God AI as P1) is incompatible: tear it down.
+      this.simulation.requestTwoPlayerToggle(true)
+      if (w.spectate) {
+        this.disableSpectate()
+      }
+      if (w.coop) {
+        this.simulation.requestCoopToggle(false)
+        this.simulation.applyTakeover(false)
+        w.coop = false
+        w.disablePlayer2()
+        this.godInput = null
+        this.autoFireInput = null
+        this.presentation.ui.controlCenter.setCoopState(false)
+      }
+      // Apply immediately since we are paused/menu (no tick will fire). §4.1:
+      // routed through the Simulation entry point.
+      this.simulation.applyTwoPlayer(true)
+      w.enablePlayer2()
+      this.wireLiveInputs()
+      this.presentation.ui.notify(t('toast.twoPlayerOn'), 'info')
+      this.audio.player2Id = w.player2?.id ?? null
+    }
+    this.presentation.ui.controlCenter.setTwoPlayerState(w.twoPlayer)
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
   }
@@ -342,6 +420,14 @@ export class Game {
       w.coop = false
       w.disablePlayer2()
       this.presentation.ui.controlCenter.setCoopState(false)
+    }
+    // 双打 Two-Player is also mutually exclusive with 督战 (both own a
+    // takeover slot; spectate drives P1 by God AI).
+    if (w.twoPlayer) {
+      this.simulation.clearPendingTwoPlayerToggle()
+      w.twoPlayer = false
+      w.disablePlayer2()
+      this.presentation.ui.controlCenter.setTwoPlayerState(false)
     }
     // Apply immediately since we are paused/menu (no tick will fire).
     w.spectate = true
@@ -494,6 +580,7 @@ export class Game {
 
   resetToMenu(): void {
     this.world.resetToMenu()
+    this.simulation.clearPendingTwoPlayerToggle()
     this.godInput = null
     this.godInput2 = null
     this.autoFireInput = null
@@ -503,6 +590,7 @@ export class Game {
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
     this.presentation.ui.controlCenter.setSpectateState('off')
+    this.presentation.ui.controlCenter.setTwoPlayerState(false)
     // 督战 battle speed is a per-session viewing aid — return to ×1 on menu so
     // a fresh run never starts fast by accident.
     this.battleSpeed = 1

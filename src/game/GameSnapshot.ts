@@ -50,6 +50,7 @@ export class SnapshotController {
       onToggleFullscreen: () => this.g.presentation.toggleFullscreen(),
       onTogglePerformance: () => this.g.setPerformanceMode(!this.g.settings.performanceMode),
       onToggleCoop: () => this.g.requestCoopToggle(),
+      onToggleTwoPlayer: () => this.g.requestTwoPlayerToggle(),
       onCycleSpectate: () => this.g.cycleSpectate(),
       onOpenControls: () => {
         const s = this.g.world.state

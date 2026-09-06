@@ -50,6 +50,40 @@ export const DEFAULT_KEYS: KeyBindings = {
 }
 
 /**
+ * Default Player-2 key bindings (Two-Player mode, 双打). Classic Battle City
+ * keyboard layout: WASD moves, F fires. Movement keys avoid every P1 default
+ * (arrows) so two hands can share one keyboard without modifier tricks.
+ *
+ * Super-item / system keys are distinct from P1's F5/F6/F7 (which sit on
+ * function-row hardware keys): P2 uses Shift/Enter-adjacent codes that stay
+ * clear of P1's combos. Snapshot/theme/reset remain P1-only (single game,
+ * one owner) — P2 has exactly the keys it needs to drive its tank.
+ *
+ * The strings are `Modifier+Code` specs parsed by parseBinding, same as
+ * DEFAULT_KEYS — 'ShiftLeft' etc. never appear as a final segment (see
+ * MODIFIER_CODES), so bare codes are used for the modifier-physical keys.
+ */
+export const DEFAULT_P2_KEYS: KeyBindings = {
+  up: 'KeyW',
+  down: 'KeyS',
+  left: 'KeyA',
+  right: 'KeyD',
+  fire: 'KeyF',
+  // System / super keys — P2's Input is only ever polled for movement, fire
+  // and super-items, so these mirror P1's system bindings and are never
+  // consumed for P2 actions; listing them satisfies KeyBindings and keeps
+  // the claimed-key set identical to P1's (no NEW keys get preventDefault).
+  pause: 'KeyP',
+  reset: 'Alt+KeyR',
+  snapshot: 'Alt+KeyS',
+  theme: 'Alt+KeyT',
+  guard: 'KeyR',
+  frenzy: 'KeyT',
+  rewind: 'KeyG',
+  fullscreen: 'Alt+KeyF',
+}
+
+/**
  * Ensure every action has a binding, filling missing fields in place on the
  * passed object and returning the SAME reference. Used by the Input constructor
  * so the live key-bindings object stays shared with settings + the Controls UI.

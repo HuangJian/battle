@@ -18,6 +18,9 @@ export class LoopController {
   constructor(private g: Game) {}
   async start(): Promise<void> {
     this.g.input.attach(window)
+    // 双打 Two-Player: P2's keyboard listens on the same window — independent
+    // bindings (WASD + F), its own pressed/justPressed sets.
+    this.g.input2.attach(window)
     // Static-screen (menu / pause / game-over / victory) keyboard input is
     // event-driven: a single keydown listener processes it the instant a key
     // is pressed so the loop can stay fully asleep (0-loop idle) on those
@@ -69,6 +72,7 @@ export class LoopController {
     window.removeEventListener('keydown', this.onPerfKey)
     window.removeEventListener('keydown', this.onSpeedKey)
     this.g.input.detach(window)
+    this.g.input2.detach(window)
   }
 
   /**
@@ -180,6 +184,7 @@ export class LoopController {
     // per-frame input edges so a single press is consumed exactly once.
     this.g.handleStateInput()
     this.g.input.endFrame()
+    this.g.input2.endFrame()
     // Repaint on demand + (re)arm the loop driver if the state changed.
     this.refreshStaticScreen()
   }
@@ -470,8 +475,16 @@ export class LoopController {
       // was off) — re-create the God AI for player1 (default
       // controlledTank = `w.player`). No auto-fire: nobody is human here.
       this.g.rearmSpectateGodInput()
+    } else if (this.g.world.twoPlayer && this.g.world.player2) {
+      // 双打 Two-Player: the restored snapshot carries a human player2 —
+      // wireLiveInputs() already routes `input2` (P2's own keyboard) into the
+      // sim; just reflect the CC toggle state and audio attenuation.
+      this.g.wireLiveInputs()
+      this.g.audio.player2Id = this.g.world.player2?.id ?? null
+      this.g.presentation.ui.controlCenter.setTwoPlayerState(true)
     } else if (!this.g.world.coop && !this.g.world.spectate) {
-      // Snapshot restored without coop/spectate — ensure inputs are cleared.
+      // Snapshot restored without coop/spectate/twoPlayer — ensure inputs are
+      // cleared.
       this.g.godInput = null
       this.g.godInput2 = null
       this.g.autoFireInput = null
@@ -576,6 +589,8 @@ export class LoopController {
    */
   endFrameInputs(): void {
     this.g.input.endFrame()
+    // 双打 Two-Player: clear P2's per-frame press edges too.
+    this.g.input2.endFrame()
     // Lie-Back-Win-Mode: invalidate God AI per-tick caches.
     this.g.godInput?.endFrame()
     // 督战双玩家: invalidate second God AI per-tick caches.

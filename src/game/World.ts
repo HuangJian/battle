@@ -253,6 +253,14 @@ export class World {
   spectate: boolean
   /** 督战双玩家模式: both P1 and P2 controlled by God AI, no human input. */
   spectateDual: boolean
+  /**
+   * 双打 Two-Player mode: a second HUMAN drives player2 through its own key
+   * bindings (WASD + F), reusing the same P2 slot (player2/lives2/score2/
+   * playerLevel2) Lie-Back-Win coop uses for the God AI. Mutually exclusive
+   * with coop and spectate — all three own the P2 slot. Unlike coop, both
+   * drivers are human, so high-score saving stays eligible.
+   */
+  twoPlayer: boolean
   /** P2 spawn point in sub-block coords (经典位 col 16, row 24). */
   player2SpawnPoint: { col: number; row: number }
 
@@ -340,6 +348,7 @@ export class World {
     this.coop = false
     this.spectate = false
     this.spectateDual = false
+    this.twoPlayer = false
     this.player2SpawnPoint = { ...DEFAULT_P2_SPAWN }
     // Super power-up inventory & frenzy (DECISIONS.md §31)
     this.guardStock = 0
@@ -396,6 +405,9 @@ export class World {
     // 督战 (supervise) mode: clean up spectate state too.
     this.spectate = false
     this.spectateDual = false
+    // 双打 Two-Player: clean up the human-P2 flag too (P2 teardown is shared
+    // with coop via disablePlayer2 above).
+    this.twoPlayer = false
   }
 
   startGame(difficultyKey: string, themeKey: string, startStage = 0): void {
@@ -420,6 +432,7 @@ export class World {
     this.coop = false
     this.spectate = false
     this.spectateDual = false
+    this.twoPlayer = false
     // Fresh run: clear any deferred drops left over from a previous game
     // (e.g. a buffered drop from the final stage of a won run).
     this.pendingDrops = []
@@ -524,7 +537,8 @@ export class World {
     this.spawnPlayer()
     // Lie-Back-Win-Mode §3.8: recompute P2 spawn point from new stage's
     // playerSpawn and respawn player2 if coop (or dual supervise) is active.
-    if (this.coop || this.spectateDual) {
+    // 双打 twoPlayer shares the same P2 slot — respawn it across stages too.
+    if (this.coop || this.spectateDual || this.twoPlayer) {
       const p1Col = this.playerSpawnPoint.col
       this.player2SpawnPoint = { col: computePlayer2SpawnCol(p1Col), row: 24 }
       this.spawnPlayer2()
@@ -803,8 +817,11 @@ export class World {
   }
 
   saveHighScore(): void {
-    if (this.score > this.highScore) {
-      this.highScore = this.score
+    // 双打 twoPlayer: both drivers are human, so the high score is the
+    // COMBINED team total (coop/spectate never reach here — gated upstream).
+    const total = this.twoPlayer ? this.score + this.score2 : this.score
+    if (total > this.highScore) {
+      this.highScore = total
       persistHighScore(this.highScore)
     }
   }

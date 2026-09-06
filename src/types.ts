@@ -323,6 +323,15 @@ export interface GameSettings {
    *  Pro) so the fan stays off. Default ON — toggle in the start menu. */
   performanceMode: boolean
   keys: KeyBindings
+  /**
+   * Player-2 bindings (双打 Two-Player, §347 follow-up). Held as a LIVE
+   * object: Game constructs P2's Input over this exact reference so a panel
+   * remap reaches gameplay immediately (same contract as `keys`).
+   * Legacy saves predate this field — loadSettings migrates to
+   * DEFAULT_P2_KEYS. Only the active actions (movement/fire/super items)
+   * are user-rebindable; system keys mirror P1's and are never polled.
+   */
+  keys2: KeyBindings
 }
 
 export interface KeyBindings {

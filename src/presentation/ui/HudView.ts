@@ -3,7 +3,7 @@ import type { World } from '../../game/World'
 import type { KeyBindings } from '../../types'
 import { parseBinding } from '../../game/Input'
 import { localizedStageName } from '../../config/stages'
-import { t } from '../../i18n'
+import { t, localizeRoot } from '../../i18n'
 
 /**
  * HudView — the in-game HUD bar and its per-frame sync logic
@@ -311,22 +311,30 @@ export class HudView {
       this.livesEl.textContent = hearts || '—'
       this.lastLives = world.lives
     }
-    // Co-op God score (Lie-Back-Win-Mode Q1)
+    // Co-op God score (Lie-Back-Win-Mode Q1) — 双打 twoPlayer shows P2's
+    // human score in the same slot.
     if (this.score2Wrap && this.score2El) {
-      const showScore2 = world.coop
+      const showScore2 = world.coop || world.twoPlayer
       this.score2Wrap.style.display = showScore2 ? '' : 'none'
       if (showScore2 && world.score2 !== this.lastScore2) {
         this.score2El.textContent = String(world.score2).padStart(6, '0')
         this.lastScore2 = world.score2
       }
     }
-    // Co-op God lives (Lie-Back-Win-Mode)
+    // Co-op God lives (Lie-Back-Win-Mode) — 双打 twoPlayer shares the slot;
+    // the label switches from GOD to P2 for the human driver.
     if (this.coopLivesEl && this.lives2El) {
-      const showCoop = world.coop && world.lives2 > 0
+      const showCoop = (world.coop || world.twoPlayer) && world.lives2 > 0
       this.coopLivesEl.style.display = showCoop ? '' : 'none'
       if (showCoop && world.lives2 !== this.lastLives2) {
         this.lives2El.textContent = '♥'.repeat(Math.max(0, world.lives2))
         this.lastLives2 = world.lives2
+      }
+      if (this.coopLivesEl.dataset.mode !== (world.twoPlayer ? '2p' : 'god')) {
+        this.coopLivesEl.dataset.mode = world.twoPlayer ? '2p' : 'god'
+        const label = this.coopLivesEl.querySelector('.hud-label')
+        if (label) label.setAttribute('data-i18n', world.twoPlayer ? 'hud.p2' : 'hud.god')
+        if (label) localizeRoot(this.coopLivesEl)
       }
     }
 

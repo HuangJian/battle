@@ -39,6 +39,8 @@ export interface ControlCenterCallbacks {
   onTogglePerformance: () => void
   /** Toggle Lie-Back-Win-Mode (coop with God AI). */
   onToggleCoop: () => void
+  /** Toggle 双打 Two-Player mode (a second HUMAN drives player2). */
+  onToggleTwoPlayer: () => void
   /** Cycle 督战 (supervise) mode: OFF → 单玩家 (x1) → 双玩家 (x2) → OFF. */
   onCycleSpectate: () => void
   /** Snapshot counts for the status line. */
@@ -68,6 +70,8 @@ export class ControlCenter {
   private perfModeState: HTMLElement | null = null
   private coopBtn: HTMLButtonElement | null = null
   private coopState: HTMLElement | null = null
+  private twoPlayerBtn: HTMLButtonElement | null = null
+  private twoPlayerState: HTMLElement | null = null
   private spectateBtn: HTMLButtonElement | null = null
   private spectateState: HTMLElement | null = null
   private langNameEl: HTMLElement | null = null
@@ -115,6 +119,10 @@ export class ControlCenter {
           <button class="cc-btn" data-cc="spectate" type="button" aria-pressed="false" title="Toggle Supervise Mode (God AI as Player 1)" data-i18n-attr="title:cc.titleSpectate">
             <span data-i18n="cc.spectate">Supervise</span>
             <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="spectate-state">OFF</span></span>
+          </button>
+          <button class="cc-btn" data-cc="two-player" type="button" aria-pressed="false" title="Toggle Two-Player Mode (Player 2: WASD + F)" data-i18n-attr="title:cc.titleTwoPlayer">
+            <span data-i18n="cc.twoPlayer">Two-Player</span>
+            <span class="cc-perf-meta"><span class="cc-perf-state" data-cc="two-player-state">OFF</span></span>
           </button>
           <div class="cc-info" data-cc="gameplay">—</div>
         </section>
@@ -197,6 +205,7 @@ export class ControlCenter {
     wire('[data-cc="fullscreen"]', () => this.callbacks?.onToggleFullscreen())
     wire('[data-cc="perfmode"]', () => this.callbacks?.onTogglePerformance())
     wire('[data-cc="coop"]', () => this.callbacks?.onToggleCoop())
+    wire('[data-cc="two-player"]', () => this.callbacks?.onToggleTwoPlayer())
     wire('[data-cc="spectate"]', () => this.callbacks?.onCycleSpectate())
 
     this.perfBtn = this.el.querySelector('[data-cc="perf"]') as HTMLButtonElement
@@ -207,6 +216,8 @@ export class ControlCenter {
     this.perfModeState = this.el.querySelector('[data-cc="perfmode-state"]')
     this.coopBtn = this.el.querySelector('[data-cc="coop"]') as HTMLButtonElement
     this.coopState = this.el.querySelector('[data-cc="coop-state"]')
+    this.twoPlayerBtn = this.el.querySelector('[data-cc="two-player"]') as HTMLButtonElement
+    this.twoPlayerState = this.el.querySelector('[data-cc="two-player-state"]')
     this.spectateBtn = this.el.querySelector('[data-cc="spectate"]') as HTMLButtonElement
     this.spectateState = this.el.querySelector('[data-cc="spectate-state"]')
 
@@ -312,6 +323,11 @@ export class ControlCenter {
   /** Reflect coop (Lie-Back-Win) state in the GAMEPLAY panel button. */
   setCoopState(on: boolean): void {
     this.setToggleState(this.coopBtn, this.coopState, on ? 'ON' : 'OFF', on)
+  }
+
+  /** Reflect 双打 Two-Player state in the GAMEPLAY panel button. */
+  setTwoPlayerState(on: boolean): void {
+    this.setToggleState(this.twoPlayerBtn, this.twoPlayerState, on ? 'ON' : 'OFF', on)
   }
 
   /** Reflect 督战 (supervise) state in the GAMEPLAY panel button.

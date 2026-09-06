@@ -67,6 +67,8 @@ export function cloneWorld(world: World): WorldSnapshot {
     playerLevel: world.playerLevel,
     // Lie-Back-Win-Mode: coop state
     coop: world.coop,
+    // 双打 Two-Player mode: human P2
+    twoPlayer: world.twoPlayer,
     // 督战 (supervise) mode: God AI as player1
     spectate: world.spectate,
     // 督战双玩家 (dual spectate): both P1 and P2 controlled by God AI
@@ -175,6 +177,8 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.playerLevel = snap.playerLevel
   // Lie-Back-Win-Mode: restore coop state (backward compat: default to off)
   world.coop = snap.coop ?? false
+  // 双打 Two-Player: restore human-P2 state (backward compat: default to off)
+  world.twoPlayer = snap.twoPlayer ?? false
   // 督战 (supervise) mode: restore spectate state (backward compat: off)
   world.spectate = snap.spectate ?? false
   // 督战双玩家: restore dual spectate state (backward compat: off)

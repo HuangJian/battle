@@ -59,13 +59,16 @@ export class SpawnSystem {
   updateSpawning(): void {
     const w = this.d.world
     if (w.spawnQueue.length === 0) return
-    // Co-op (躺赢 / 督战x2) raises the concurrent-enemy cap so the field keeps
-    // a minimum of COOP_MAX_ENEMIES_ALIVE regular enemies alive (tasks.chat.md
-    // §27: "敌人最低同时在场数设为 5，除非敌人已全部出场"). The spawner refills
-    // to this cap every interval, so a higher cap == a floor. Single-player
-    // keeps the tighter MAX_ENEMIES_ALIVE. Balance (isExtra) enemies from
-    // 天降神兵 are excluded from enemyCount, so they stack on top of this floor.
-    const maxAlive = w.coop || w.spectateDual ? COOP_MAX_ENEMIES_ALIVE : MAX_ENEMIES_ALIVE
+    // Co-op (躺赢 / 督战x2 / 双打) raises the concurrent-enemy cap so the field
+    // keeps a minimum of COOP_MAX_ENEMIES_ALIVE regular enemies alive
+    // (tasks.chat.md §27: "敌人最低同时在场数设为 5，除非敌人已全部出场").
+    // The spawner refills to this cap every interval, so a higher cap == a
+    // floor. Single-player keeps the tighter MAX_ENEMIES_ALIVE — two players
+    // face the same pressure regardless of who drives the second tank.
+    // Balance (isExtra) enemies from 天降神兵 are excluded from enemyCount,
+    // so they stack on top of this floor.
+    const maxAlive =
+      w.coop || w.spectateDual || w.twoPlayer ? COOP_MAX_ENEMIES_ALIVE : MAX_ENEMIES_ALIVE
     if (w.enemyCount >= maxAlive) return
     if (w.spawnTimer > 0) return
 

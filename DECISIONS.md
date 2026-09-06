@@ -2646,3 +2646,57 @@ run_rl 单实例锁存活时预演空烧 180s（现 fail fast 提示）；--smok
 GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DONE 退出）。
 `nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
 （docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。
+
+## §347 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
+
+用户要求："player 1 和 player 2 分别使用不同的按键各自控制自己的坦克"。定案：
+**不新建第二条玩家管线**，而是给既有 P2 槽位（`world.player2` / `lives2` /
+`score2` / `playerLevel2` / `simulation.input2`，Lie-Back-Win 为 God AI 所建）
+增加第三位所有者——`world.twoPlayer` 布尔旗，由第二套人类键盘驱动。
+
+**要点**：
+1. **独立的 `twoPlayer` 旗，不复用 `coop`**：replay 元数据、高分语义、快照
+   兼容都依赖旗的语义无歧义（coop = God AI 队友、永不高分；twoPlayer = 双人类、
+   高分记两队合计）。三者（coop / spectate / twoPlayer）互斥、同槽唯一所有者，
+   enable 任一先拆除其它两个（Game 层立即应用 + Simulation 延迟应用双路径，
+   与 coop 的 One-Author 延迟切换模式一致，§2.1）。
+2. **按键**：`DEFAULT_P2_KEYS` = WASD 移动 + F 开火（经典 Battle City 布局），
+   超级道具 R/T/G 与 P1 的 F5/F6/F7 物理隔离；系统键（pause/reset/snapshot/
+   theme/fullscreen）镜像 P1 以满足 `KeyBindings` 类型——P2 的 Input 只被轮询
+   移动/开火/道具，不新增被 claim 的键。P2 Input 持有独立键对象（不共享 P1 的
+   settings 引用），与 `input` 分开的 attach/detach/endFrame/reset 生命周期。
+3. **P2 生命独立**：`lives2` 独立消耗（死亡/重生走既有 handlePlayerDeaths）;
+   生命数共享（resolveDefeat 的 >2 借命）沿用 coop 语义；双人皆灭才 gameover。
+4. **分数**：击杀按弹丸 `ownerId` 归池（`KillPipeline.toScore2`，twoPlayer 加入
+   `isGodKill` 判定改名义不变）；高分在 gameover 时记 `score + score2` 合计——
+   与 coop/spectate（永不 saveHighScore）相反，因驱动者皆人类。
+5. **平衡**：`twoPlayer` 与 coop/spectateDual 一样把敌人同屏上限提到
+   `COOP_MAX_ENEMIES_ALIVE`——双人面对同等压力，无论第二台坦克由谁驱动。
+6. **录制/回放/快照**：`WorldSnapshot.twoPlayer?`（legacy 缺省 false）+
+   WorldSerializer clone/restore；`InputRecorder.twoPlayerAtStart` 使 P2 人类
+   输入流进 v2 双流帧（PlaybackController 对 frames2 的接线本就通用，回放零
+   改动）；`ReplayMetadata.twoPlayer?`。`rebuildAfterRestore` 对 twoPlayer
+   快照重接 P2 键盘 + CC 状态。
+7. **UI**：Control Center GAMEPLAY 区新增 Two-Player 按钮（`onToggleTwoPlayer`），
+   HUD 复用 coop 的 score2/lives2 槽位、标签 GOD↔PLAYER 2 按 `dataset.mode`
+   切换（change-guarded）；i18n zh/en 全键（toast/cc/hud）。
+
+**验证**：`tests/two-player.test.ts` 10 例（先红后绿，§7）：双输入独立驱动、
+P2 开火归属、击杀分池、lives2 消耗/重生、双灭 gameover、延迟切换互斥、
+快照 roundtrip、固定种子确定性（§2.3）、tick 节奏。`bun run check` 全绿
+（1724 pass，含 godai-score-gate 无漂移），`bun run build` 绿。 God-AI 行为
+未动（候选/参数/思考循环零改动），不构成 §6.3b new-era。
+
+**§347a 补充（同日，P2 按键重绑）**：`GameSettings.keys2` 成为持久化字段
+（legacy 存档经 loadSettings 合并迁移到 `DEFAULT_P2_KEYS`，零显式分支——
+`{ ...saved.keys2 }` 对 undefined 展开为 `{}`，逐字段合并自然回退）。Game 构造
+P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面板重映射立即
+生效，两对象独立互不影响）。ControlsPanel 增 Player 1 / Player 2 标签页（P2
+页仅列活动动作：移动/开火/三超级道具——系统键 P1 全局、P2 的镜像绑定永不轮询
+故不展示不冲突检测）；同玩家查重扫面板可见行、跨玩家冲突经纯函数
+`findCrossPlayerConflict`（settings.ts 提取，headless 可测——关键语义差异：
+与同玩家查重相反，**同名动作在对方键集上是有效冲突**，无 `other !== action`
+豁免）；重置只重置当前页且按各自默认（P2 修复到 KeyF 而非 Space）。测试
+`tests/p2-keybindings.test.ts` 10 例（先红后绿）：keys2 sanitize 按各自默认、
+legacy 迁移、JSON roundtrip、跨玩家冲突/豁免/修饰键区分。`bun run check` 全绿
+（1734 pass），build 绿。

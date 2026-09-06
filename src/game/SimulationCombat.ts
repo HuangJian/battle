@@ -654,7 +654,9 @@ export class CombatSystem {
       w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
     } else {
       // Lie-Back-Win-Mode Q1: route kill score to the shooter's pool.
-      const isGodKill = w.coop && bullet.ownerId === w.player2?.id
+      // 双打 twoPlayer shares the P2 slot — P2's human kills credit score2.
+      const isGodKill =
+        (w.coop || w.twoPlayer) && bullet.ownerId === w.player2?.id
       // Accompanying "balance" enemies (isExtra) are outside the per-stage
       // 20-enemy count, so they never decrement enemiesRemaining / block
       // stage clear — but they still count as a normal kill for score

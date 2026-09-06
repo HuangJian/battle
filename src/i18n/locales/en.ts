@@ -43,6 +43,7 @@ export const en: Catalog = {
   'hud.lives': 'LIVES',
   'hud.enemy': 'ENEMY',
   'hud.god': 'GOD ALLY',
+  'hud.p2': 'PLAYER 2',
   'hud.spectate': 'SPECTATE',
   'hud.speed': 'SPEED',
   'hud.replayMode': 'REPLAY MODE',
@@ -86,6 +87,8 @@ export const en: Catalog = {
 
   // ---- Controls / key bindings panel ----
   'controls.title': 'KEY BINDINGS',
+  'controls.tabP1': 'Player 1',
+  'controls.tabP2': 'Player 2',
   'controls.hint': 'Click a key, then press a new one',
   'controls.reset': 'Reset Defaults',
   'controls.back': 'Back',
@@ -126,6 +129,8 @@ export const en: Catalog = {
   // ---- Toast: co-op / snapshots / replays (Game.ts) ----
   'toast.coopOff': 'Co-op: OFF',
   'toast.coopOn': 'Co-op: ON — God Player activated!',
+  'toast.twoPlayerOff': 'Two-Player: OFF',
+  'toast.twoPlayerOn': 'Two-Player: ON — Player 2 (WASD + F) joins the battle!',
   'toast.spectateOff': 'Supervise: OFF',
   'toast.spectateOn': 'Supervise: single ON — God AI fights as Player 1!',
   'toast.spectateDualOn': 'Supervise: DUAL ON — God AI drives both Player 1 and Player 2!',
@@ -230,6 +235,7 @@ export const en: Catalog = {
   'cc.keyBindings': 'Key Bindings',
   'cc.lieBackWin': 'Lie-Back Win',
   'cc.spectate': 'Supervise',
+  'cc.twoPlayer': 'Two-Player',
   'cc.theme': 'Theme',
   'cc.fullscreen': 'Fullscreen',
   'cc.perfMode': 'Performance Mode',
@@ -247,6 +253,7 @@ export const en: Catalog = {
   'cc.titleLanguage': 'Switch language',
   'cc.titleTheme': 'Switch theme (Alt+T) — click to pick',
   'cc.titleCoop': 'Toggle Lie-Back-Win-Mode (God AI co-op)',
+  'cc.titleTwoPlayer': 'Toggle Two-Player Mode (Player 2: WASD + F)',
   'cc.titleSpectate': 'Cycle Supervise Mode: OFF / single (x1) / dual (x2)',
   'cc.titleFullscreen': 'Toggle fullscreen mode (Alt+F)',
   'cc.titlePerfMode': 'Toggle Performance Mode (DPR cap + render FPS cap)',

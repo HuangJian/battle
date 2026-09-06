@@ -405,12 +405,12 @@ export class UIManager {
   // ---- Controls / Key Bindings Panel (delegates) ----
 
   /**
-   * Wire the live key-bindings object (the same reference the Input system
-   * reads) and a persistence callback. Called once from Game after the
-   * PresentationLayer is constructed.
+   * Wire the live key-bindings objects (the same references the Input
+   * systems read) and a persistence callback. Called once from Game after
+   * the PresentationLayer is constructed.
    */
-  initControls(bindings: KeyBindings, onChanged: () => void): void {
-    this.controls.initControls(bindings, onChanged)
+  initControls(bindings: KeyBindings, bindings2: KeyBindings, onChanged: () => void): void {
+    this.controls.initControls(bindings, bindings2, onChanged)
   }
 
   /** Whether the controls panel is currently open (a UI-modal, not a world state). */

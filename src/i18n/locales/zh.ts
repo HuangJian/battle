@@ -39,6 +39,7 @@ export const zh: Catalog = {
   'hud.lives': '生命',
   'hud.enemy': '敌军',
   'hud.god': '神队友',
+  'hud.p2': '二号玩家',
   'hud.spectate': '督战',
   'hud.speed': '速率',
   'hud.replayMode': '回放模式',
@@ -82,6 +83,8 @@ export const zh: Catalog = {
 
   // ---- Controls / key bindings panel ----
   'controls.title': '按键设置',
+  'controls.tabP1': '一号玩家',
+  'controls.tabP2': '二号玩家',
   'controls.hint': '点击一个按键，然后按下新键',
   'controls.reset': '恢复默认',
   'controls.back': '返回',
@@ -122,6 +125,8 @@ export const zh: Catalog = {
   // ---- Toast: co-op / snapshots / replays (Game.ts) ----
   'toast.coopOff': '躺赢：关闭',
   'toast.coopOn': '躺赢：开启 —— 神级玩家已激活！',
+  'toast.twoPlayerOff': '双打：关闭',
+  'toast.twoPlayerOn': '双打：开启 —— 二号玩家（WASD + F）加入战斗！',
   'toast.spectateOff': '督战：关闭',
   'toast.spectateOn': '督战：单玩家开启 —— 神级 AI 作为一号玩家出战！',
   'toast.spectateDualOn': '督战：双玩家开启 —— 神级 AI 同时操控一号与二号玩家！',
@@ -226,6 +231,7 @@ export const zh: Catalog = {
   'cc.keyBindings': '按键设置',
   'cc.lieBackWin': '躺赢模式',
   'cc.spectate': '督战模式',
+  'cc.twoPlayer': '双打模式',
   'cc.theme': '主题',
   'cc.fullscreen': '全屏',
   'cc.perfMode': '性能模式',
@@ -243,6 +249,7 @@ export const zh: Catalog = {
   'cc.titleLanguage': '切换语言',
   'cc.titleTheme': '切换主题 (Alt+T) — 点击选择',
   'cc.titleCoop': '切换躺赢模式（神级 AI 合作）',
+  'cc.titleTwoPlayer': '切换双打模式（二号玩家：WASD + F）',
   'cc.titleSpectate': '切换督战模式：关闭 / 单玩家(x1) / 双玩家(x2)',
   'cc.titleFullscreen': '切换全屏模式 (Alt+F)',
   'cc.titlePerfMode': '切换性能模式（限制 DPR 与渲染帧率）',

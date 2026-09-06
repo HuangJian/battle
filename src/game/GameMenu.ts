@@ -358,6 +358,7 @@ export class MenuController {
     // keyboard start path), so both entry points share one code path.
     // Drop the click so it can't bleed into the first-frame fire input.
     this.g.input.reset()
+    this.g.input2.reset()
     this.g.saveSettings()
     this.g.refreshStaticScreen()
   }
@@ -378,6 +379,7 @@ export class MenuController {
     // fading→countdown transition in loop(), right after restoreWorld.
     // Drop the input so the click/keypress can't bleed into gameplay.
     this.g.input.reset()
+    this.g.input2.reset()
     this.g.refreshStaticScreen()
   }
 
