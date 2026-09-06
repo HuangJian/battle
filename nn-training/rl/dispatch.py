@@ -710,6 +710,10 @@ class RolloutDispatcher:
                             if "player_level" in _ov
                             else None,
                             course_fp=_cfp,
+                            # 竞速收尾洞修复（2026-09-06）：all_settled 后本副本必是
+                            # 输家——fetch 内部轮询立即放弃，trainer 不再等慢节点把
+                            # 注定丢弃的局跑完（实测拖住发布 4.5 分钟）。
+                            abandon_event=all_settled,
                         )
                         why = dist_common.validate_result(
                             manifest, files, wver, set(norm_pairs), seen

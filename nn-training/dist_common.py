@@ -31,6 +31,7 @@ import json
 import os
 import struct
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -477,6 +478,7 @@ def fetch_task(
     lives_override: int | None = None,
     player_level: int | None = None,
     course_fp: str = "",
+    abandon_event: threading.Event | None = None,
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -533,7 +535,13 @@ def fetch_task(
     try:
         status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout, headers={"x-async": "1"})
         if status == 202:
-            return _poll_result(base, auth_key, params, timeout - (time.monotonic() - started))
+            return _poll_result(
+                base,
+                auth_key,
+                params,
+                timeout - (time.monotonic() - started),
+                abandon_event=abandon_event,
+            )
         if status == 200:
             return unpack_container(body)
         raise DistError(status, body[:300].decode("utf-8", "replace"))
@@ -548,12 +556,20 @@ def fetch_task(
 
 
 def _poll_result(
-    base_url: str, auth_key: str, params: dict, budget: float, poll_s: float = 3.0
+    base_url: str,
+    auth_key: str,
+    params: dict,
+    budget: float,
+    poll_s: float = 3.0,
+    abandon_event: threading.Event | None = None,
 ) -> tuple[dict, dict]:
     """轮询 GET /v1/result 直到取包/失败/超时。budget 秒内传输瞬断一律重试。
 
     只有网络调用本身受瞬断重试保护；容器解包与非预期状态码是确定性错误，
     必须立即抛出真实原因——绝不能被重试逻辑吞成误导性的 deadline exceeded。
+    abandon_event（2026-09-06，竞速收尾洞修复）：置位 = 本轮全部任务已结算，
+    本副本必是竞速输家（结果注定被丢弃）→ 立即放弃，trainer 不再等慢节点把
+    注定丢弃的局跑完（实测输家副本曾拖住发布 4.5 分钟）。
     """
     qparams = {
         "iterId": params["iterId"],
@@ -575,6 +591,8 @@ def _poll_result(
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(1.0, budget)
     while True:
+        if abandon_event is not None and abandon_event.is_set():
+            raise DistError(0, "abandoned: all tasks settled — race-loser copy dropped")
         remain = deadline - time.monotonic()
         if remain <= 0:
             raise DistError(0, "async result deadline exceeded (game still running on node?)")
