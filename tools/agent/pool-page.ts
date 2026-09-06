@@ -7,7 +7,9 @@
  * codeHash 集**：只动它 → 零升级（节点 agent 升级时 git pull 全仓库会带上它；
  * 特性开关集内文件 import 本文件时旧节点因旧版 sampler-agent 不引用、无裂解）。
  *
- * 调用方：sampler-agent.ts 的 GET /pool handler（仅主控机：rl-config.json 有 nodes）。
+ * 调用方：sampler-agent.ts 的 GET /pool handler（仅主控机：rl-config.json 有 nodes）——
+ * 经 mtime 键控动态 import 热加载（2026-09-06，DECISIONS §341）：改动本文件即时生效，
+ * 无需重启 agent；坏文件（语法错误/编辑中）时 agent 沿用上一版可用模块并打日志。
  * 本文件只读：聚合 tmp 下各训练流目录的 dist-agent-meta.jsonl + 实时 ping，不渲染任何密钥。
  */
 
@@ -109,12 +111,16 @@ interface NodeHistory {
   lastOkTs: string
   lastFailTs: string
   lastError: string
+  /** 最近至多 50 局的端到端服务时长样本（滑动窗口——2026-09-06：口径升级/负载变化后
+   * 均值不被终身历史拖累，替代原「自 epoch 全量平均」）。 */
+  elapsedRecent: number[]
+  /** elapsedRecent 的均值（scan 尾部计算）；null = 无样本。 */
   avgElapsedSec: number | null
-  elapsedSamples: number
   /** 最近至多 10 条结算结果（ok=true），完成率 = 在线状态的判定依据（替代单次 ping）。 */
   recent: boolean[]
-  /** 上轮贡献度：最大 it（各训练流取全局最大）那轮的成功局数。 */
+  /** 该节点自己最近一次成功结算的轮次（-1 = 无成功记录；落后提示用）。 */
   lastIter: number
+  /** 全局最新轮（aggregateNodeHistory 的 globalMaxIt）该节点的成功结算局数。 */
   lastIterOk: number
 }
 
@@ -131,8 +137,13 @@ interface ActiveFlow {
 function aggregateNodeHistory(): {
   hist: Map<string, NodeHistory>
   activeFlow: ActiveFlow | null
+  /** 全局最新轮 = 所有节点成功结算的最大 it（上轮贡献度的对齐基准）。 */
+  globalMaxIt: number
 } {
   const hist = new Map<string, NodeHistory>()
+  // 各节点在「轮次 → 成功局数」的分布：上轮贡献度按全局最大轮对齐（单遍扫描先
+  // 收集，扫完后归并——见函数尾的修正注释）。
+  const okByNodeIt = new Map<string, Map<number, number>>()
   const bump = (node: string): NodeHistory => {
     let h = hist.get(node)
     if (!h) {
@@ -143,8 +154,8 @@ function aggregateNodeHistory(): {
         lastOkTs: '',
         lastFailTs: '',
         lastError: '',
+        elapsedRecent: [],
         avgElapsedSec: null,
-        elapsedSamples: 0,
         recent: [],
         lastIter: -1,
         lastIterOk: 0,
@@ -230,21 +241,21 @@ function aggregateNodeHistory(): {
           // 最近 10 次完成率（rollout+eval 混合）：状态判定数据源。
           h.recent.push(!!r.ok)
           if (h.recent.length > 10) h.recent.shift()
-          // 上轮贡献度：最大 it 为"上一轮"，累计该轮成功局数。
-          const it = typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1
-          if (it > h.lastIter) {
-            h.lastIter = it
-            h.lastIterOk = r.ok ? 1 : 0
-          } else if (it === h.lastIter && it >= 0 && r.ok) {
-            h.lastIterOk++
-          }
           if (r.ok) {
             h.ok++
             if (nts >= h.lastOkTs) h.lastOkTs = nts
+            const it = typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1
+            if (it >= 0) {
+              let m = okByNodeIt.get(r.node)
+              if (!m) {
+                m = new Map()
+                okByNodeIt.set(r.node, m)
+              }
+              m.set(it, (m.get(it) ?? 0) + 1)
+            }
             if (typeof r.elapsedSec === 'number' && r.elapsedSec > 0) {
-              const prevTotal = (h.avgElapsedSec ?? 0) * h.elapsedSamples
-              h.elapsedSamples++
-              h.avgElapsedSec = +((prevTotal + r.elapsedSec) / h.elapsedSamples).toFixed(1)
+              h.elapsedRecent.push(r.elapsedSec)
+              if (h.elapsedRecent.length > 50) h.elapsedRecent.shift()
             }
           } else {
             h.fail++
@@ -270,7 +281,28 @@ function aggregateNodeHistory(): {
       /* ignore */
     }
   }
-  return { hist, activeFlow }
+  // 上轮贡献度修正（2026-09-06，a98 案例）：原实现按「节点自己的最大 it」计数——
+  // 慢节点的陈旧贡献会被永远展示成「上轮贡献」（a98 在 it14 的 1 局，全局已到
+  // it24 时仍显示 1，与 16 分钟前的 lastOkTs 一起误导）。本注释块之上的旧实现注
+  // 释原意即「全局最大 it」，实现与注释不符。现口径：globalMaxIt = 所有节点成功
+  // 结算的最大轮次；各节点只统计该轮的成功局数，落后节点计 0（渲染层灰显 +
+  // tooltip 给出其最近贡献轮次）。
+  let globalMaxIt = -1
+  for (const m of okByNodeIt.values()) {
+    for (const it of m.keys()) if (it > globalMaxIt) globalMaxIt = it
+  }
+  for (const [node, h] of hist) {
+    const m = okByNodeIt.get(node)
+    let maxIt = -1
+    if (m) for (const it of m.keys()) if (it > maxIt) maxIt = it
+    h.lastIter = maxIt
+    h.lastIterOk = (globalMaxIt >= 0 && m?.get(globalMaxIt)) || 0
+    // 滑动窗口均值（最近 ≤50 局）：口径升级/负载变化后即时不被终身历史拖累。
+    h.avgElapsedSec = h.elapsedRecent.length
+      ? +(h.elapsedRecent.reduce((a, b) => a + b, 0) / h.elapsedRecent.length).toFixed(1)
+      : null
+  }
+  return { hist, activeFlow, globalMaxIt }
 }
 
 function poolStatusCell(h: NodeHistory): string {
@@ -280,6 +312,21 @@ function poolStatusCell(h: NodeHistory): string {
   if (okN / n >= 0.9) return `<span class="badge b-green">健康 ${okN}/${n}</span>`
   if (okN / n >= 0.7) return `<span class="badge b-yellow">波动 ${okN}/${n}</span>`
   return `<span class="badge b-red">异常 ${okN}/${n}</span>`
+}
+
+/** 上轮贡献度单元格：>0 = 在全局最新轮的成功结算局数；0 但有历史 = 该节点最近
+ * 贡献已落后当前轮（灰显 + tooltip 指出其最近贡献轮次——a98 案例：it14 的 1 局
+ * 曾被当作「上轮贡献」展示，实际全局已到 it24）；无任何成功记录 = '-'。
+ * data-v=0 让落后节点在默认排序里沉底。 */
+function contribCell(h: NodeHistory, globalMaxIt: number): string {
+  if (h.lastIterOk > 0) return `<td class="num" data-v="${h.lastIterOk}">${h.lastIterOk}</td>`
+  if (h.lastIter >= 0 && globalMaxIt >= 0) {
+    return (
+      `<td class="num" data-v="0"><span class="muted" title="该节点最近一次成功结算在 ` +
+      `it${h.lastIter}，已落后当前 it${globalMaxIt}">${h.lastIterOk}</span></td>`
+    )
+  }
+  return `<td class="num" data-v="0">-</td>`
 }
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
@@ -378,6 +425,125 @@ function readIterActuals(trajDir: string, iter: number): IterActuals | null {
   }
 }
 
+// ---------------- 干净评估汇总（eval_log.jsonl） ----------------
+
+/** eval_log.jsonl 渲染所需聚合：eval_summary 行 + 该 (iter,wver) 逐局行的
+ * 存活/击杀/道具/得分聚合（summary 行本身不带这些——只在 event=eval 逐局行里，
+ * 字段 ticks/kills/powerUpsCollected/score）。 */
+interface EvalSummary {
+  time: string
+  games: number
+  wins: number
+  winRate: number | null
+  clears: number
+  clearRate: number | null
+  dropped: number
+  sec: number
+  wver: string
+  outcomes: Record<string, number>
+  /** 逐局聚合（按 wver 对齐该轮 summary）；null = 逐局行已缺（只剩 summary 行）。 */
+  avgTicks: number | null
+  totalKills: number | null
+  totalPU: number | null
+  scoreMean: number | null
+  scoreStd: number | null
+}
+
+/** 读取 eval_log.jsonl：eval_summary 按 iter 归并（同 iter 多条 = 断点续跑补评估后
+ * 的重复落账，取最后一条 = 最新对账结果，与 rl/eval_m1.read_eval_summary 的回读
+ * 口径一致），并聚合该 (iter,wver) 的 event=eval 逐局行。
+ *
+ * it 序数语义（eval 行对齐本表的关键）：eval_summary.iter = N 评估的是**第 N 轮
+ * PPO 更新前**的权重——即第 N 轮 rollout 采样所用的同一权重（eval 派发发生在第
+ * N 轮 rollout 收尾、_serial_ppo 之前，rl/rollout_phase.py 把该轮 report.winRate
+ * 随派发传入，落成 summary 的 rolloutWinRate 字段，可与本表第 N 行「胜率」逐字
+ * 对账：tmp/p4-onset 实测 it5 = 0.0533 两处一致）。summary 可能晚到——_join_eval
+ * 软等待最多 180s，溢出的在途局收官后 eval 线程才落账（写盘时刻已在第 N+1 轮内）
+ * ——因此按 iter 字段匹配本表行，绝不按时间邻近匹配。 */
+function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
+  const out = new Map<number, EvalSummary>()
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  // 逐局行按 (iter → wver → 聚合桶) 收集：summary 落账晚于逐局行（单遍文件读，
+  // wver 未知时先收着）；断点续跑同 iter 可能出现双 wver，逐局桶按 wver 分键互不串。
+  interface GameAgg {
+    n: number
+    ticks: number
+    kills: number
+    pu: number
+    scoreSum: number
+    scoreSqSum: number
+  }
+  const games = new Map<number, Map<string, GameAgg>>()
+  try {
+    if (!existsSync(logPath)) return out
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        const iter = Number(r.iter ?? -1)
+        if (!Number.isInteger(iter) || iter < 0) continue
+        if (r.event === 'eval') {
+          const wver = String(r.wver ?? '')
+          if (!wver) continue
+          let byWver = games.get(iter)
+          if (!byWver) {
+            byWver = new Map()
+            games.set(iter, byWver)
+          }
+          let agg = byWver.get(wver)
+          if (!agg) {
+            agg = { n: 0, ticks: 0, kills: 0, pu: 0, scoreSum: 0, scoreSqSum: 0 }
+            byWver.set(wver, agg)
+          }
+          const score = Number(r.score ?? 0)
+          agg.n++
+          agg.ticks += Number(r.ticks ?? 0) || 0
+          agg.kills += Number(r.kills ?? 0) || 0
+          agg.pu += Number(r.powerUpsCollected ?? 0) || 0
+          agg.scoreSum += score
+          agg.scoreSqSum += score * score
+          continue
+        }
+        if (r.event !== 'eval_summary') continue
+        out.set(iter, {
+          time: String(r.time ?? ''),
+          games: Number(r.games ?? 0),
+          wins: Number(r.wins ?? 0),
+          winRate: typeof r.winRate === 'number' ? r.winRate : null,
+          clears: Number(r.clears ?? 0),
+          clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
+          dropped: Number(r.dropped ?? 0),
+          sec: Number(r.sec ?? 0),
+          wver: String(r.wver ?? ''),
+          outcomes: (r.outcomes ?? {}) as Record<string, number>,
+          avgTicks: null,
+          totalKills: null,
+          totalPU: null,
+          scoreMean: null,
+          scoreStd: null,
+        })
+      } catch {
+        /* skip bad line */
+      }
+    }
+    // 合并：每个 summary 只配它自己 wver 的逐局桶。总体 std（÷n）——与逐局展示
+    // 同量纲即可，非统计推断场景。
+    for (const [iter, s] of out) {
+      const agg = games.get(iter)?.get(s.wver)
+      if (!agg || agg.n === 0) continue
+      const mean = agg.scoreSum / agg.n
+      s.avgTicks = Math.round(agg.ticks / agg.n)
+      s.totalKills = agg.kills
+      s.totalPU = agg.pu
+      s.scoreMean = +mean.toFixed(4)
+      s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
+    }
+  } catch {
+    /* unreadable */
+  }
+  return out
+}
+
 // ---------------- 每轮迭代指标（training_log.jsonl） ----------------
 
 interface IterRow {
@@ -407,12 +573,16 @@ interface IterRow {
   kills: number
   /** 该轮磁盘真实聚合（it{N} 下各局 manifest.json）；null = 无数据（已轮转/未收尾）。 */
   actuals: IterActuals | null
+  /** 该轮干净评估汇总（eval_log.jsonl 的 eval_summary，按 iter 对齐）；null = 该轮未派发 eval。 */
+  evalData: EvalSummary | null
 }
 
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标。 */
 function readIterMetrics(trajDir: string): IterRow[] {
   const MAX = 20
   const logPath = join(trajDir, 'training_log.jsonl')
+  // eval 汇总整册读一次（按 iter 键控），逐行查表——不在循环里反复开文件。
+  const evalSummaries = readEvalSummaries(trajDir)
   try {
     if (!existsSync(logPath)) return []
     const lines = readFileSync(logPath, 'utf8').split(String.fromCharCode(10))
@@ -456,27 +626,89 @@ function readIterMetrics(trajDir: string): IterRow[] {
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
           actuals: readIterActuals(trajDir, iter),
+          evalData: evalSummaries.get(iter) ?? null,
         })
       } catch {
         /* skip bad line */
       }
     }
-    rows.sort((a, b) => b.iter - a.iter)
-    return rows.slice(0, MAX)
+    // 同 iter 去重：取最后一条 = 最新对账结果（2026-09-06 双 trainer 并行事故：
+    // it57-59 各被两遍训练/落账，页面出现双行；与 rl.eval_m1.read_eval_summary
+    // 对 eval_summary「同 iter 取最后一条」的回读口径一致）。
+    const byIter = new Map<number, IterRow>()
+    for (const r of rows) byIter.set(r.iter, r)
+    const merged = [...byIter.values()]
+    merged.sort((a, b) => b.iter - a.iter)
+    return merged.slice(0, MAX)
   } catch {
     return []
   }
 }
 
+/** eval 子行：插在对应 iter 主行下，13 列与主行一一对齐。数据 = eval_summary（胜率/
+ * 全歼/局数/dropped/用时）+ 该 (iter,wver) 逐局行聚合（存活/击杀/道具/得分，见
+ * readEvalSummaries）。PPO 侧指标干净评估不产生，占 '-'——胜率/得分/存活/击杀/道具
+ * 上下两行同列同语义，采样（主行）vs 贪心（子行）逐列对照。 */
+function renderEvalRow(iter: number, e: EvalSummary): string {
+  const dash = `<td class="num"><span class="muted">-</span></td>`
+  // 标签：默认只显示「eval」（用户指令）；eval only 过滤模式下经 .evit 追加轮号
+  // （主行被隐藏后位置相邻失效，子行需自描述），全部/rollout 模式 CSS 隐藏轮号。
+  // 缺N pill 仅 dropped>0 时出现，恒显。
+  const label =
+    `eval<span class="evit"> it${iter}</span>` +
+    (e.dropped > 0
+      ? `<span class="pill" title="评估窗口内未收官、被下轮权重分发清场的评估局数">缺${e.dropped}</span>`
+      : '')
+  let winCell = dash
+  if (e.winRate !== null) {
+    const cls = e.winRate >= 0.3 ? 'b-green' : e.winRate >= 0.1 ? 'b-yellow' : 'b-red'
+    const outcomeTxt =
+      Object.entries(e.outcomes)
+        .map(([k, v]) => `${k}×${v}`)
+        .join(' ') || '-'
+    const title =
+      `干净评估（greedy 固定语料）· 评估权重 = 第 ${iter} 轮 PPO 更新前（与该轮 rollout 同权重，对照上行采样胜率）· ` +
+      `${e.games} 局 ${e.wins} 胜 · 全歼 ${e.clears} · outcomes: ${outcomeTxt} · 用时 ${e.sec}s · wver ${e.wver.slice(0, 12)}…`
+    winCell =
+      `<td><span class="badge ${cls}" title="${title}">${(e.winRate * 100).toFixed(1)}%</span>` +
+      `<span class="muted"> ${e.wins}/${e.games}</span></td>`
+  }
+  const scoreCell =
+    e.scoreMean !== null
+      ? `<td class="num">${e.scoreMean.toFixed(4)}<span class="muted">±${(e.scoreStd ?? 0).toFixed(4)}</span></td>`
+      : dash
+  const ticksCell = e.avgTicks !== null ? `<td class="num">${e.avgTicks}</td>` : dash
+  const killsCell =
+    e.totalKills !== null
+      ? `<td class="num">${e.totalKills}<span class="muted"> /${e.games}局</span></td>`
+      : dash
+  const puCell =
+    e.totalPU !== null
+      ? `<td class="num">${e.totalPU}<span class="muted"> /${e.games}局</span></td>`
+      : dash
+  return `<tr class="evalrow">
+<td class="muted" style="white-space:nowrap" title="第 ${iter} 轮的干净评估（对齐上方同 iter 主行；评估的是该轮 PPO 更新前的权重，全歼 ${e.clears}/${e.games}）">${label}</td>
+<td class="muted">${e.time}</td>
+${winCell}
+${ticksCell}
+${killsCell}
+${puCell}
+${scoreCell}
+<td class="num" title="eval 窗口用时">${e.sec.toFixed(0)}s</td>
+${dash}${dash}${dash}${dash}${dash}
+</tr>`
+}
+
 function renderIterTable(rows: IterRow[]): string {
   if (rows.length === 0) return ''
   const hdr = `<thead><tr>
-<th>iter</th><th>时间</th><th>胜率</th><th>得分</th>
+<th>iter</th><th>时间</th><th>胜率</th><th>存活</th><th>击杀</th><th>道具</th><th>得分</th>
 <th>rollout</th><th>PPO</th>
 <th>KL</th><th>entropy</th><th>mean_ret</th>
-<th>lr</th><th>存活</th><th>击杀</th><th>道具</th>
+<th>lr</th>
 </tr></thead>`
-  const cells = rows.map((r) => {
+  const cells: string[] = []
+  for (const r of rows) {
     const winPct = (r.winRate * 100).toFixed(1)
     const winCls = r.winRate >= 0.3 ? 'b-green' : r.winRate >= 0.1 ? 'b-yellow' : 'b-red'
     const klCls = r.kl > 0.05 ? 'b-red' : r.kl > 0.02 ? 'b-yellow' : 'b-green'
@@ -493,10 +725,13 @@ function renderIterTable(rows: IterRow[]): string {
     const lootCell = a
       ? `<td class="num">${a.totalPU}<span class="muted"> /${a.games}局</span></td>`
       : `<td class="num"><span class="muted" title="该轮磁盘数据已清理，估算值">${(r.loot * 100).toFixed(0)}%≈</span></td>`
-    return `<tr>
+    cells.push(`<tr>
 <td class="num">${r.iter}${halted}</td>
 <td class="muted">${r.time}</td>
 <td><span class="badge ${winCls}">${winPct}%</span></td>
+${ticksCell}
+${killsCell}
+${lootCell}
 <td class="num">${r.scoreMean.toFixed(4)}<span class="muted">±${r.scoreStd.toFixed(4)}</span></td>
 <td class="num">${r.rolloutSec.toFixed(0)}s</td>
 <td class="num">${r.ppoSec.toFixed(0)}s</td>
@@ -504,17 +739,51 @@ function renderIterTable(rows: IterRow[]): string {
 <td class="num">${r.entropy.toFixed(3)}</td>
 <td><span class="badge ${retCls}">${r.meanRet.toFixed(3)}</span></td>
 <td class="num">${r.lr}</td>
-${ticksCell}
-${killsCell}
-${lootCell}
-</tr>`
-  })
+</tr>`)
+    // eval 子行：有已落账干净评估的轮才插（eval_every 稀疏派发，多数轮没有）。
+    if (r.evalData) cells.push(renderEvalRow(r.iter, r.evalData))
+  }
   return `<div class="card" style="margin-top:16px">
-<h3 style="margin:0;padding:14px 14px 0;font-size:15px;font-weight:600;color:var(--text)">📈 每轮训练指标</h3>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:14px 14px 0">
+<h3 style="margin:0;font-size:15px;font-weight:600;color:var(--text)">📈 每轮训练指标</h3>
+<div style="display:flex;gap:12px;align-items:center;font-size:12.5px;color:var(--muted)">
+<span>行过滤</span>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="iterFilter" value="all">全部</label>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="iterFilter" value="rollout">rollout only</label>
+<label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="radio" name="iterFilter" value="eval">eval only</label>
+</div>
+</div>
+<div style="max-height:800px;overflow:auto;margin-top:8px">
 <table id="iters">${hdr}
 <tbody>${cells.join(String.fromCharCode(10))}</tbody>
 </table>
-<p class="foot" style="margin:8px 2px 0">存活/击杀/道具 = <b>实际值</b>（该轮 <code>it{N}/**/manifest.json</code> 逐局聚合，按 stage+seed 去重；轮次完成落盘才显示）。带 <code>≈</code> 的为估算（该轮磁盘目录已被轮转清理，仅剩 <code>training_log.jsonl</code> 的 dim 均值的换算）。胜率/得分/PPO 指标来自 PPO 收敛日志。</p>
+</div>
+<p class="foot" style="margin:8px 2px 0">存活/击杀/道具 = <b>实际值</b>（该轮 <code>it{N}/**/manifest.json</code> 逐局聚合，按 stage+seed 去重；轮次完成落盘才显示）。带 <code>≈</code> 的为估算（该轮磁盘目录已被轮转清理，仅剩 <code>training_log.jsonl</code> 的 dim 均值的换算）。胜率/得分/PPO 指标来自 PPO 收敛日志。eval 子行 = <b>干净评估</b>（greedy 固定语料，<code>eval_log.jsonl</code>：eval_summary + 逐局行聚合），插在对应 iter 行下、列位对齐——<b>iter=N 的 eval 评估的是第 N 轮 PPO 更新前的权重</b>，即该轮 rollout 采样所用的同一权重：胜率/存活/击杀/道具/得分上下两行直接对照（采样 vs 贪心）；summary 按 <code>iter</code> 字段对齐（可能晚到下一轮才落账，不按时间匹配）；<code>缺N</code> = 窗口内未收官被清场的评估局。行过滤选择记录在 localStorage；eval only 模式下子行标签带轮号。</p>
+<script>
+(function () {
+  const KEY = 'pool.iterFilter';
+  const apply = (mode) => {
+    const tbl = document.getElementById('iters');
+    if (!tbl) return;
+    tbl.classList.toggle('f-eval', mode === 'eval');
+    for (const tr of tbl.tBodies[0].rows) {
+      const isEval = tr.classList.contains('evalrow');
+      tr.style.display = mode === 'all' || (mode === 'eval' ? isEval : !isEval) ? '' : 'none';
+    }
+  };
+  let mode = 'all';
+  try { mode = localStorage.getItem(KEY) || 'all'; } catch {}
+  for (const el of document.querySelectorAll('input[name="iterFilter"]')) {
+    el.checked = el.value === mode;
+    el.addEventListener('change', function () {
+      if (!this.checked) return;
+      try { localStorage.setItem(KEY, this.value); } catch {}
+      apply(this.value);
+    });
+  }
+  apply(mode);
+})();
+</script>
 </div>`
 }
 
@@ -531,7 +800,7 @@ export interface PoolPageCtx {
 }
 
 export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
-  const { hist, activeFlow } = aggregateNodeHistory()
+  const { hist, activeFlow, globalMaxIt } = aggregateNodeHistory()
   const localHash = ctx.localHash()
   const nodes = loadPoolConfig()
   const nowStr = fmtTs(Date.now())
@@ -569,8 +838,8 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
         lastOkTs: '-',
         lastFailTs: '-',
         lastError: '',
+        elapsedRecent: [],
         avgElapsedSec: null,
-        elapsedSamples: 0,
         recent: [],
         lastIter: -1,
         lastIterOk: 0,
@@ -601,7 +870,7 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
         `<td>${specCell}</td><td class="ver">${verCell}</td>` +
         `<td class="num" data-v="${disabled || !ping ? 9999 : ms}">${!disabled && ping ? `${ms}ms` : '-'}</td>` +
         `<td class="num" data-v="${h.ok}">${h.ok}</td><td class="num" data-v="${h.fail}">${h.fail}</td>` +
-        `<td class="num" data-v="${h.lastIterOk}">${h.lastIter >= 0 ? h.lastIterOk : '-'}</td>` +
+        `${contribCell(h, globalMaxIt)}` +
         `<td class="num" data-v="${h.avgElapsedSec ?? 9999}">${h.avgElapsedSec !== null ? `${h.avgElapsedSec}s` : '-'}</td>` +
         `<td data-v="${h.lastOkTs}">${h.lastOkTs || '-'}</td>` +
         `<td data-v="${h.lastFailTs}">${errCell}</td></tr>`
@@ -619,8 +888,8 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
       lastOkTs: '-',
       lastFailTs: '-',
       lastError: '',
+      elapsedRecent: [],
       avgElapsedSec: null,
-      elapsedSamples: 0,
       recent: [],
       lastIter: -1,
       lastIterOk: 0,
@@ -634,7 +903,7 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
           `<td>${localSlots !== null ? `${localSlots} 槽` : '-'}</td><td class="ver">-</td>` +
           `<td class="num" data-v="9999">-</td>` +
           `<td class="num" data-v="${localH.ok}">${localH.ok}</td><td class="num" data-v="${localH.fail}">${localH.fail}</td>` +
-          `<td class="num" data-v="${localH.lastIterOk}">${localH.lastIter >= 0 ? localH.lastIterOk : '-'}</td>` +
+          `${contribCell(localH, globalMaxIt)}` +
           `<td class="num" data-v="${localH.avgElapsedSec ?? 9999}">${localH.avgElapsedSec !== null ? `${localH.avgElapsedSec}s` : '-'}</td>` +
           `<td data-v="${localH.lastOkTs}">${localH.lastOkTs || '-'}</td>` +
           `<td data-v="${localH.lastFailTs}">${errCellL}</td></tr>`,
@@ -684,6 +953,10 @@ td.name{font-weight:600}
 td.name .dim{color:var(--muted);font-weight:400;font-size:12px}
 td.ver{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#4b5563}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.evalrow td{background:#fafbfd;font-size:12px;padding:5px 14px;border-bottom:1px solid #f0f2f6}
+#iters .evit{display:none}
+#iters.f-eval .evit{display:inline}
+#iters thead th{position:sticky;top:0;z-index:1}
 .badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
 .b-green{background:var(--green-bg);color:var(--green)}
 .b-yellow{background:var(--yellow-bg);color:var(--yellow)}
@@ -796,6 +1069,8 @@ function toggleDisabled() {
 applyDisabledView();
 </script>
 <p class="foot">状态 = 最近 10 次 rollout/eval 结算完成率（<b>健康</b>≥90% · <b>波动</b>≥70% · <b>异常</b>&lt;70%），替代单次 ping 判断；ping 列仅作实时参考。
+上轮贡献度 = <b>全局最新轮</b>（所有节点成功结算的最大 it）该节点的成功局数；灰色 0 = 该节点最近贡献已落后当前轮（悬停显示其最近贡献轮次）。
+平均耗时 = 每局<b>端到端服务时长</b>（agent 节点：接单→结果就绪，含 bun 冷启动 ~2s；local：子进程墙钟）——同口径可横向比；取<b>最近 50 局滑动平均</b>（口径升级/负载变化不被历史拖累；agent 侧节点升级前的历史行不参与）。
 最近错误仅显示最近 1 小时内。数据源：按 mtime 自动选取最新训练流的 dist-agent-meta.jsonl（仅聚合最近活跃目录）·
 ${POOL_EPOCH_MS > 0 ? `<b>历史自 ${fmtTs(POOL_EPOCH_MS)} 起重新累计</b>（此后部署不再重置）` : `<b>累计全部历史</b>`}。
 只读页面，不含密钥。默认按「已结算局」倒序，点击表头排序。</p>
