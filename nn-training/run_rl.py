@@ -107,7 +107,7 @@ def _runrl_pid_alive(pid: int) -> bool:
 def _acquire_run_rl_lock(lock_path: str, *, force: bool = False) -> bool:
     """PID 文件单实例锁（O_CREAT|O_EXCL 原子创建；holder 死亡 → stale 自动清理）。
 
-    2026-09-06 事故：start-training --kill-previous 漏杀旧 trainer（msys pgrep 对
+    2026-09-06 事故：旧启动器 start-training --kill-previous 漏杀旧 trainer（msys pgrep 对
     Windows 原生进程不可靠）→ 两个 trainer 并行写同一 traj 7 分钟，it57-59 各被
     两遍训练/落账。锁在进入训练主循环前把关，双开=响亮拒启而非静默并行。"""
     if force:
@@ -158,7 +158,7 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
 def main() -> None:
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
-    # relative. Required for start-training.ps1 --detach, whose WorkingDirectory
+    # relative. Required for the unified launcher's --detach (tools/training/start.ts train), whose
     # is nn-training/ — same pattern as train_loop.py's REPO_ROOT.
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     # ===== RL 入口整合（DECISIONS §307）：两阶段 argparse，先预解析 --mode/--goal =====

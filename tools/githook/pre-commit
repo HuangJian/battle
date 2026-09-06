@@ -263,6 +263,10 @@ STAGED_TS=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" || true)
 if [ -n "$STAGED_TS" ]; then
   echo " ▸ format (oxfmt, staged 逐文件；另有未暂存改动的文件跳过)"
   for f in $STAGED_TS; do
+    if [ ! -f "$f" ]; then
+      echo "   ⚠ 跳过 $f（staged 删除/改名源——oxfmt/git add 对不存在的工作树文件会 fatal）"
+      continue
+    fi
     if grep -Fxq "$f" "$DIRTY_LIST"; then
       echo "   ⚠ 跳过 $f（MM：另有未暂存改动——格式化工作树内容会把未暂存编辑折进提交）；请自行格式化后 git add"
     else

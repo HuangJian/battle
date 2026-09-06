@@ -225,24 +225,25 @@ spin up a browser) to validate its own changes.
   "proof" of work, and never present a localhost URL as a validation step.
 
 ### 5.6 NEVER launch NN training by running `python` directly
-Training must go through the launch scripts: `nn-training/start-training.sh` (bash/Git-Bash) or
-`nn-training/start-training.ps1` (PowerShell 7 / pwsh, `-ExecutionPolicy Bypass -File …`) — fully equivalent;
-both handle venv setup, single-instance locking, and signal cleanup.
+Training must go through the unified launcher: `bun tools/training/start.ts` (DECISIONS §346 —
+replaced and deleted `nn-training/start-training.{sh,ps1}` + `tools/hub-start.ts`). Three modes:
+`hub` (Kaggle pull full infrastructure) · `push` (HUB push) · `train` (local CPU: venv setup,
+single-instance locking, smoke gates; all modes auto-restart managed processes on code change).
 
 - Raw `python train_loop.py` / `python train_bc.py` bypasses pre-flight checks and can spawn
   duplicate training processes competing for the same lock file and weights.
 - If training is already running, the launcher detects it and exits cleanly; a stale lock (crashed
   process) is auto-cleaned; force-restart after a crash with `--force`.
-- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py` — the shell scripts
-  never write to it (eliminates the shell-PID/Python-PID mismatch that caused double-spawn on Windows).
+- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py` — the launcher
+  never writes to it (eliminates the shell-PID/Python-PID mismatch that caused double-spawn on Windows).
 - **torch lives only in `nn-training/.venv`** (per-platform venv) — the system `python` has no torch
   (`ModuleNotFoundError: torch`). Do NOT probe with `python -c "import torch"`; use the launcher's
-  idempotent self-check (either entry, equivalent):
-  - bash: `bash nn-training/start-training.sh --check` — verifies venv+torch and prints the absolute
+  idempotent self-check:
+  - `bun tools/training/start.ts train --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
-  - PowerShell (pwsh 7): `pwsh -ExecutionPolicy Bypass -File nn-training/start-training.ps1 -Check`.
-  - Print the exact command without running it: `--echo --script <name>.py [args]` (PS: `-Echo -Script`).
-- The launcher is not just `train_loop.py`: `--script <path>.py [args]` runs root runners
+  - Print the exact command without running it: `bun tools/training/start.ts train --echo --script <name>.py [args]`.
+- The `train` mode is not just `train_loop.py`: `--script <path>.py [args]` (path relative to
+  `nn-training/`) runs root runners
   (`run_rl.py`, `train_loop.py`, `smoke_test.py`) or subpackage entries (`train/bc.py --arch student`,
   `train/goal_bc.py`, `train/intent_probe.py`, `scripts/eval_bridge.py`, `scripts/validate_export.py`, …)
   through the same venv, so all torch work shares one entry and agents never hit "no torch".

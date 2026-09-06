@@ -3,8 +3,8 @@
 不重新 rollout：直接复用已有回合 shards（如 tmp/s3-cap2/it3 的 obs/act/... ），
 只重跑 chunk_episodes + ppo_update 计时——OMP/mb 的差异全部落在 PPO 计算段。
 
-用法（必须经 start-training.sh 保证 venv/torch；OMP 由 --torch-threads 控制）：
-  bash nn-training/start-training.sh --torch-threads 12 --script ppo-bench.py \
+用法（必须经统一启动器保证 venv/torch；OMP 由 --torch-threads 控制）：
+  bun tools/training/start.ts train --torch-threads 12 --script ppo/bench.py \
       --shards tmp/s3-cap2/it3 --weights tmp/s3-cap2/weights.json --mb 512 --epochs 4
 
 输出：json 一行（chunks / ppo_sec / chunk_time / kl / entropy），追加 tmp/thru-bench.jsonl。

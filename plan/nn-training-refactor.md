@@ -19,7 +19,7 @@
 | 优势 | 位置 |
 |------|------|
 | 三层架构分离（编排入口 → rl/ 包 → 算法后端 ppo*.py） | `run_rl.py` + `rl/` |
-| 双平台统一启动器（venv bootstrap + 线程环境 + 锁） | `start-training.sh` / `.ps1` |
+| 双平台统一启动器（venv bootstrap + 线程环境 + 锁） | `tools/training/start.ts train`（原 `start-training.sh` / `.ps1`，已删） |
 | 断点续跑 / 流式 PPO / F4 熔断 / 语料轮转 | `rl/resume.py` / `stream.py` / `breaker.py` / `course.py` |
 | `(rotateSeed, it)` 纯函数键控种子流（防记忆化） | `rl/course.py` |
 
@@ -100,7 +100,7 @@
 - torch / numpy 版本 pin（已在 `requirements.txt` 工程化锁定）
 - PPO / BC / 课程采样 / 熔断等算法逻辑
 - `schema.py` 与 TS 端的字节级协议（`OBS_SCHEMA_MAJOR`）
-- `start-training.sh` / `.ps1` 的 venv bootstrap 行为（运行期不变）
+- 统一启动器（`tools/training/start.ts train`，原 `start-training.sh` / `.ps1`）的 venv bootstrap 行为（运行期不变）
 
 ---
 

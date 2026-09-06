@@ -34,7 +34,7 @@
    ⇒ 该判定作废并重跑。
 4. **只增不改**：arena 与新 difficulty 行只新增；God-AI 候选链、`ACTION_WEIGHTS`、现有 35 关、
    现有 difficulty 行**一个字节都不许动**（避免触发新纪元）。
-5. **训练统一经 `nn-training/start-training.sh|.ps1`**（AGENTS §5.6）；新增工具过 `bun run check`。
+5. **训练统一经 `bun tools/training/start.ts train`**（AGENTS §5.6，DECISIONS §346；取代旧 `start-training.sh|.ps1`）；新增工具过 `bun run check`。
 6. **账本同步**：卡落地即更新 §5 状态 + `docs/goal-nn.progress.md` 置顶条目。规格被推翻时改
    **规格正文**，不是只在日志里追加（手册 §6.1.1 已按此修，commit `b84c012`）。
 7. **预算是硬上限**：人日或 CPU 小时任一超限即停并写归因，禁止"再跑一会"。
@@ -793,7 +793,7 @@ bun tools/sim/m1-eval.ts --stages all --seeds 1-60 --difficulty hard --policy go
 bun tools/sim/paired-gate.ts --help
 
 # 训练（统一入口）
-./nn-training/start-training.sh --help
+bun tools/training/start.ts train --help
 # 关键参数（run_rl.py）：--bc <权重> --iters --stages --seeds --max-ticks \
 #   --difficulty --workers --epochs --curriculum-stages/-start/-every/-grow
 
@@ -801,7 +801,7 @@ bun tools/sim/paired-gate.ts --help
 bun test tests/sim/eval-game-parity.test.ts
 
 # CPU 墙钟校准（A1 出口必做）
-./nn-training/start-training.sh --script run_rl.py --iters 3 --stages 0 --seeds 0-3 \
+bun tools/training/start.ts train --script run_rl.py --iters 3 --stages 0 --seeds 0-3 \
   --max-ticks 1200 --out tmp/calib 2>&1 | tee reports/cpu-calibration.log
 ```
 

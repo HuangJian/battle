@@ -17,7 +17,7 @@ Two modes:
 Weight format is the canonical JSON+base64 (`weights_io.save_weights_json`),
 so the TS runtime reloads it byte-for-byte.
 
-Usage (via start-training.{sh,ps1} which provides the venv + torch):
+Usage (via the unified launcher — bun tools/training/start.ts train — which provides the venv + torch):
   python ppo.py --init-from tmp/student-weights-dagger/weights.json \
       --out tmp/rl-weights/weights.json
   python ppo.py --resume tmp/rl-weights/weights.json \

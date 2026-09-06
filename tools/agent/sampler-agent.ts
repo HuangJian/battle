@@ -354,6 +354,49 @@ async function loadPoolPage(): Promise<typeof import('./pool-page') | null> {
   }
 }
 
+/** rl-config 节点清单与 local 槽位（pool 页用；从 monitor 侧同规则读取）。 */
+function poolNodes():
+  | { id: string; url: string; authKey: string; enabled: boolean; concurrency: number }[]
+  | null {
+  try {
+    const cfgPath = path.join(REPO_ROOT, 'nn-training', 'rl-config.json')
+    if (!fs.existsSync(cfgPath)) return null
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
+      nodes?: Array<{
+        id?: string
+        url: string
+        authKey?: string
+        enabled?: boolean
+        concurrency?: number
+      }>
+    }
+    const nodes = (cfg.nodes ?? [])
+      .filter((n) => n && typeof n.url === 'string')
+      .map((n) => ({
+        id: n.id || n.url,
+        url: n.url,
+        authKey: n.authKey ?? '',
+        enabled: n.enabled !== false,
+        concurrency: n.concurrency ?? 1,
+      }))
+    return nodes.length > 0 ? nodes : null
+  } catch {
+    return null
+  }
+}
+
+function poolLocalSlots(): number | null {
+  try {
+    const cfgPath = path.join(REPO_ROOT, 'nn-training', 'rl-config.json')
+    if (!fs.existsSync(cfgPath)) return null
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { rl?: { local_slots?: number } }
+    const v = cfg.rl?.local_slots
+    return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
 async function renderPoolPageLocal(): Promise<string> {
   const pool = await loadPoolPage()
   if (!pool)
@@ -362,9 +405,9 @@ async function renderPoolPageLocal(): Promise<string> {
     workers,
     inflight,
     gamesDoneTotal,
-    weightsByKindSha,
-    lastError,
     localHash: memoizedCodeHash,
+    nodes: poolNodes(),
+    localSlots: poolLocalSlots(),
   })
 }
 
@@ -726,7 +769,7 @@ async function handle(req: Request): Promise<Response> {
   // 节点池监控页（③）：公开只读、无密钥渲染；仅主控机（配置含 nodes）有内容。
   if (req.method === 'GET' && (url.pathname === '/pool' || url.pathname === '/pool/')) {
     const pool = await loadPoolPage()
-    if (!pool || !pool.poolNodes())
+    if (!pool || !poolNodes())
       return new Response('pool page disabled (no nodes in rl-config.json)', { status: 404 })
     return new Response(await renderPoolPageLocal(), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },

@@ -8,9 +8,9 @@ scheduled sampling 的**离线数据增强实现**：用给定权重模型对每
 训练时按 ε 概率混合 teacher（真值 prev）与 self（自喂 prev）注入，让模型见过真实
 self-feed 输入分布，收敛 gap。成本 = 一次模型推理（CPU 秒级/千帧）。
 
-用法（经启动器，勿裸跑 python）：
-  pwsh nn-training/start-training.ps1 -Script gen_self_inj.py \
-    -ScriptArgs "--data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-Bp.json"
+用法（经统一启动器，勿裸跑 python）：
+  bun tools/training/start.ts train --script scripts/gen_self_inj.py \
+    --data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-Bp.json
 """
 
 from __future__ import annotations

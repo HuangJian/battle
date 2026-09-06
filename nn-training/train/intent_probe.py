@@ -10,8 +10,8 @@ Q1 预注册门槛：任何桶余量 < 0.1 → 表达/时序缺口嫌疑升级�
 train/val 按【局（shard）】切分——同局相邻帧不跨集，防时序泄漏高估。
 
 用法（经启动器，勿裸跑 python）：
-  pwsh nn-training/start-training.ps1 -Script train_intent_probe.py \
-      -ScriptArgs "--data tmp/intent-probe-hard/shards --out tmp/intent-probe-hard/probe-report.json"
+  bun tools/training/start.ts train --script train/intent_probe.py \
+      --data tmp/intent-probe-hard/shards --out tmp/intent-probe-hard/probe-report.json
 """
 
 from __future__ import annotations

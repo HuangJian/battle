@@ -95,7 +95,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
   # 臂 W（warm start，已有：tmp/bc-arena/weights.json）
   # 臂 F（纯从零）—— 必须用近均匀 init，不能用默认 kaiming
   python nn-training/init_scratch_weights.py --out tmp/scratch-init/weights.json
-  ./nn-training/start-training.sh --script run_rl.py \
+  bun tools/training/start.ts train --script run_rl.py \
     --bc tmp/scratch-init/weights.json --out tmp/a5-scratch2/weights.json \
     --traj tmp/a5-scratch2 --stages 1000-1002 --seed-rotate 50 --max-ticks 1200 \
     --workers 8 --stream 1 --dodge off --reward toy:kill2 \
@@ -177,7 +177,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
 - 节点池：lite 升级、a95 pull；监控 `/pool`。
 - **账本同步（纪律 6）**：每完成一件事 → 更新 `plan/goal-nn-action.md` §5 卡片状态
   + 在 `docs/goal-nn.progress.md` **置顶**写一条。**上一班只干活没记账，已补；不要重犯。**
-- 训练只经 `start-training.sh`；停进程只能用进程名限定的 ps1（bash 包装会自杀）。
+- 训练只经 `bun tools/training/start.ts train`；停进程只能用进程名限定的 ps1（bash 包装会自杀）。
 
 ---
 

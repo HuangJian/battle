@@ -2602,7 +2602,47 @@ warm-start **it70 权重**（贪心 35% 最优点，
 - 启动纠正（同日）：首启误用 start-training.ps1 → 本地 CPU PPO，且 bc 路径
   触发 warm_start_normalize 把 it70 权重洗掉（trunk ×0.0095 + value 清零）；
   已杀错跑、删污染 traj、原始 it70 逐字节重播种。正确入口是
-  `bun tools/hub-start.ts --course p4-horizon`（`--ppo remote`，PPO 上云；
+  `bun tools/training/start.ts hub p4-horizon`（`--ppo remote`，PPO 上云；
   remote 跳过 build_model 故无 normalize 风险）。另：hub-server 的
   job_root/jsonl 绑定课程队列，复用旧课程 hub 进程会读错队列——切课程必须
   重启 hub-server（本轮杀 23224，由 hub-start 重拉）。
+
+## §346 / tools/training/ 统一启动器：hub-start.ts 与 start-training.{sh,ps1} 三合一（2026-09-06，用户指令）
+
+`tools/hub-start.ts`（1415 行）按职责拆为 `tools/training/` 模块族，主入口
+`tools/training/start.ts`，三种模式：`hub`（Kaggle pull 全基建）· `push`（HUB 推，
+DECISIONS §340 补充 4）· `train`（本地 CPU，完整取代 `nn-training/start-training.{sh,ps1}`）。
+同时 `tools/agent/pool-page.ts`（1173 行）移植到 `tools/training/monitor/`
+（page/history/iters/theme/server 分层），旧路径留 9 行兼容壳重导出（sampler-agent
+GET /pool 的 mtime 键控动态 import 不需改动，§341 语义保持）。
+
+**模块划分**（每文件单一职责）：paths / types / log / config / net / proc /
+registry / venv / sentinels / reload / reload-touch / smoke / hub / push / train /
+start；monitor/{theme,history,iters,page,server,index}。
+
+**定案**：
+1. **全 Bun 原生 API 纪律**（§339 延续）：进程/端口/文件/HTTP 无平台 shell 分支。
+   唯二例外都有论证：`netstat/lsof` 端口兜底清场（--kill 语义必需，Bun 无端口→PID
+   API）；Windows `wmic` 单次调用做 --kill-previous 的 python 进程命令行快照
+   （msys pgrep 对原生进程不可靠的 §324 教训；wmic 是 OS 组件而非 shell，失败静默
+   降级为跳过清杀并告警）。POSIX 侧读 /proc。
+2. **变更检测（新能力）**：受管长跑进程（self-node/hub-server/TrainingLoop/
+   worker_server）由监督循环周期性 stat 哨兵（codehash-files.txt SSOT 清单 + 各自
+   入口源码）的 mtime/size——运行的代码更新后自动重启该进程应用最新代码。哨兵
+   而非 inotify：平台无关，且 codehash-files.txt 恰是"代码身份"的既有 SSOT。
+   --kill 是同步流程，跑完即退不留监督循环。
+3. **冒烟门禁三模式全覆盖**：base（BCV2 容器回环 + rl-config 契约）所有模式必过；
+   hub 加 rollout 冒烟 + 隧道/code.zip（硬门，§340 语义）；push 加本机伪 GPU 节点
+   echo 预演；train 加 torch import + 权重文件契约。
+4. **兼容层**：registry 账本从 hub-start 分文件迁移为单文件并消费旧账本（--kill
+   能收编旧进程）；pool-page.ts 保留 renderPoolPage/PoolPageCtx 导出名。
+5. **vite/svelte 不引入**（监控页技术选型）：单页只读监控，服务端渲染 + 原生 JS
+   已满足，构建链只添依赖（MANIFEST §14）。
+
+**实弹验证**：push p4-horizon --smoke-only 全绿（发布→推送→echo→落位→作废，
+100s）；train --script smoke_test.py 真跑 BC 12 epochs；--check/--echo/--kill
+各路径通过；变更检测实测哨兵写入后 1 轮内触发重启。新发现两处旧 bug 一并修：
+run_rl 单实例锁存活时预演空烧 180s（现 fail fast 提示）；--smoke 作废确认对
+GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DONE 退出）。
+`nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
+（docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。

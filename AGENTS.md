@@ -151,7 +151,7 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 ### Hard rules (NEVER)
 
 - **Never start the dev server** (or spin up a browser) to validate your own changes — validation is the automated gates only (`bun run check` / `bun run build`; for UI work untestable by units: `tsc --noEmit` + oxlint + a successful `vite build`).
-- **Never launch NN training with raw `python`** — always via `nn-training/start-training.sh` / `.ps1` (venv setup, single-instance locking, `--check` / `--echo --script <name>.py`; details: `docs/agents.details.md` §5.6).
+- **Never launch NN training with raw `python`** — always via `bun tools/training/start.ts` (modes: `hub` = Kaggle pull 全基建 / `push` = HUB 推 / `train` = 本地 CPU；venv setup, single-instance locking, smoke gates, auto-restart on code change; `train --check` / `--echo --script <name>.py`）。旧 `nn-training/start-training.{sh,ps1}` 已删除（DECISIONS §346；details: `docs/agents.details.md` §5.6）。
 - **Record every NN-training architecture change/eval/lesson in `docs/nn.progress.md`** (top, numbered §) — and check it before architectural changes.
 
 - **On PowerShell, commit via a temp message file** — `git commit -F tmp/<ascii-file>` (delete after; `--amend -F` likewise); heredocs and non-ASCII `-m` args fail silently, and the pre-commit hook's failing output is swallowed — diagnose with `bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"`, and verify every commit with `git log -1 --pretty=fuller` (full recipe: `docs/agents.details.md` §5.7).
