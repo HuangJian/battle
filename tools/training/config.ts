@@ -9,6 +9,11 @@ export function loadConfig(): RlConfig {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as RlConfig
 }
 
+/** 写回整份 rl-config.json（控制台模式开关/节点编辑；保持调用方传入对象原样落盘）。 */
+export function saveConfig(cfg: RlConfig, cfgPath = CONFIG_PATH): void {
+  writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf-8')
+}
+
 /** 写回 rl-config.json 的 rl.remote_hub_url（隧道 URL 变更时）。 */
 export function writeRemoteHubUrl(url: string): void {
   const cfg = loadConfig()

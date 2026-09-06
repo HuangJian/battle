@@ -22,6 +22,7 @@
     "play-generated": "bun tools/level/play-generated.ts",
     "lint": "oxlint",
     "format": "oxfmt",
+    "train": "bun tools/training/console/server.ts",
     "check": "tsc --noEmit --incremental && bun test --parallel --timeout=50000",
     "freeze:check": "bash tools/probe-det-baseline.sh --golden",
     "freeze:l2": "bun tools/diag/archived-reach-audit.ts",

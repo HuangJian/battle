@@ -1,7 +1,7 @@
 """test_run_rl_m1.py — run_rl.py 三模式整合 + m1-eval 评估管线回归（RL 入口整合，
 plan/RL-Entry-Consolidation.md P5；DECISIONS §307）。迁移自 test_run_rl_intent.py
 （parse_m1_eval_report / run_clean_eval_rerun）+ 新增三模式分派矩阵。无真实训练、
-不碰节点。运行：bun tools/training/start.ts train --script tests/test_run_rl_m1.py；退出码 0/1。
+不碰节点。运行：bun tools/training/train.ts --script tests/test_run_rl_m1.py；退出码 0/1。
 """
 
 from __future__ import annotations

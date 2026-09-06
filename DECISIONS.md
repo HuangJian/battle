@@ -2647,7 +2647,7 @@ GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DON
 `nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
 （docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。
 
-## §347 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
+## §350 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
 
 用户要求："player 1 和 player 2 分别使用不同的按键各自控制自己的坦克"。定案：
 **不新建第二条玩家管线**，而是给既有 P2 槽位（`world.player2` / `lives2` /
@@ -2687,7 +2687,7 @@ P2 开火归属、击杀分池、lives2 消耗/重生、双灭 gameover、延迟
 （1724 pass，含 godai-score-gate 无漂移），`bun run build` 绿。 God-AI 行为
 未动（候选/参数/思考循环零改动），不构成 §6.3b new-era。
 
-**§347a 补充（同日，P2 按键重绑）**：`GameSettings.keys2` 成为持久化字段
+**§350a 补充（同日，P2 按键重绑）**：`GameSettings.keys2` 成为持久化字段
 （legacy 存档经 loadSettings 合并迁移到 `DEFAULT_P2_KEYS`，零显式分支——
 `{ ...saved.keys2 }` 对 undefined 展开为 `{}`，逐字段合并自然回退）。Game 构造
 P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面板重映射立即
@@ -2701,7 +2701,12 @@ P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面�
 legacy 迁移、JSON roundtrip、跨玩家冲突/豁免/修饰键区分。`bun run check` 全绿
 （1734 pass），build 绿。
 
-## §348 / 手柄操作支持：轮询式快照差分边沿 + 复合输入（2026-09-06，用户指令）
+> 编号说明：§347/§348/§348a（双打、手柄、手柄重绑定）与 goal-nn 分支
+> 并行期间发生撞号（其 oxfmt §347 与控制台 §348 于 2026-09-06 21:22 先
+> 落地，保留原编号）；本三分支条目按「先落地者保留编号」重编为
+> §350/§350a/§351/§351a，代码内引用已同步更新。
+
+## §351 / 手柄操作支持：轮询式快照差分边沿 + 复合输入（2026-09-06，用户指令）
 
 用户要求："为游戏添加手柄操作支持"。定案：**轮询（poll），不监听事件**——
 Gamepad API 无可靠的逐帧 justPressed 事件，边沿检测由纯快照差分层承担，全部
@@ -2737,13 +2742,13 @@ reset 防串键、复合体优先级/OR/委托、管理器槽位稳定 + 跃迁�
 pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器零改动，
 不触发 §6.3b。
 
-## §348a / 手柄按键重绑定（Controls 面板新增手柄页）（2026-09-07，用户指令）
+## §351a / 手柄按键重绑定（Controls 面板新增手柄页）（2026-09-07，用户指令）
 
-§348 的追加：用户要求手柄按键可在 Controls 面板重绑定。定案：
+§351a 的追加：用户要求手柄按键可在 Controls 面板重绑定。定案：
 
 - **数据**（§2.4，全部在 settings.ts，避免 GamepadInput↔settings 循环依赖）：
   `PadBindings`（动作 → standard-mapping 按键序号，8 个可绑动作 = 十字键四向 +
-  fire/guard/frenzy/rewind）+ `DEFAULT_PAD_BINDINGS`（即 §347c 标准布局）+
+  fire/guard/frenzy/rewind）+ `DEFAULT_PAD_BINDINGS`（即 §351 标准布局）+
   `GAMEPAD_BUTTONS` 常量迁到此处（GamepadInput 再导出保持兼容）。
   摇杆移动是原始轴值**不可绑定**；Start/暂停固定不参与冲突检查（与键盘
   pause 是 P1 全局键同理）。
@@ -2763,3 +2768,110 @@ pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器
   sanitize 越界/NaN、冲突门（含自行豁免/Start 固定）、readSnapshot 参数化
   （重绑 fire→RB、十字键→面键、摇杆优先级不受绑定影响）。`bun run check`
   全绿（1772 pass），build 绿。表现层/玩法零行为漂移，不触发 §6.3b。
+## §348 / NN 训练控制台：tools/training/console（本地网页，2026-09-06，用户指令）
+
+用户需求：把 tools/training 的脚本能力做成「神经网络训练控制台」网站——本地
+localhost 无鉴权发布；独立控制所有训练组件的启/停/冒烟；监控运行状态与历史；
+监控训练指标；启停组件运行模式（trainer pull/push、stream、双缓冲等）；启停
+rollout 节点并改并行采集数（回写 rl-config.json）。
+
+**实现**：`tools/training/console/` 四模块——`server.ts`（Bun.serve 绑定
+127.0.0.1，无鉴权前提=仅回环）、`api.ts`（GET /api/state 快照 + POST /api/*
+动作路由；ActionError→409/参数错→400）、`actions.ts`（单组件启/停/冒烟、预设
+编排、模式开关、节点编辑）、`page.ts`（服务端渲染控制页，热加载 §341 语义）。
+
+**定案**：
+1. **零新依赖、无 vite/svelte**（§346 定案 5 延续）：服务端渲染 + 极小原生 JS，
+   复用 monitor/theme.ts 样式与 monitor/iters.ts 指标数据层。
+2. **复用而非旁路**：动作层调用与 CLI 启动器同一套原语（hub.step*、smoke、
+   proc.spawnBg/stopAllManaged、registry 账本、sentinels 哨兵）——组件状态与
+   CLI `--kill`/监督器共享同一账本，两条入口互不冲突。
+3. **模式开关两级落点**：`rl.stream/double_buffer/precollect_early` 是 run_rl
+   真实配置键 → 直接回写 rl-config.json（下次 trainer 启动生效，不碰在跑进程）；
+   trainer 的 pull/push/local 是控制台的基建编排选择 → 持久化
+   console-state.json，启动时翻译为组件组合（pull=+隧道，push=+hubServer，
+   local=仅 trainer）与 `--ppo remote` 有无。local 与 rl.stream=1 的显式互斥在
+   启动时拦（§330 语义）。
+4. **写回即冒烟**：节点启停/并发/模式开关写 rl-config.json 后跑 rlConfigSmoke
+   契约校验，坏配置不落盘生效。
+5. **并发纪律**：动作短命异步 + per-key busy 互斥（同 key 二次点击 409），
+   不做队列；页面 3s 整页 reload 轮询，输入焦点/展开详情时暂停防冲掉编辑。
+6. **setCourse 不复用 validateCourseArg**：CLI 版 process.exit(1)（控制台进程
+   会被测试/live 请求连带杀死）——路由层改抛 ActionError→409（单测覆盖）。
+
+**验证**：14 项单测（快照结构/路由 404·400·409/回写+还原/互斥/页面渲染）；
+实弹：server 起于 :8931，state/页面/双缓冲开关写回还原/未知动作 404/组件停
+止与冒烟动作/页面热加载全部实测通过；bun run check + build 绿。
+
+**补充 1（同日，用户指令）——训练指标 sparkline**：metricsSection 表格上方加
+概览条（spark-strip）：胜率/得分/KL/熵/eval 胜率五格内联 SVG polyline（近 20 轮
+时间正序，min-max 归一，恒定序列满幅平线灰色、末点圆点，非有限值断点跳过）。
+零依赖（内联 SVG 文本拼接，非 canvas/图表库）；sparkline() 纯函数可单测。
+trap：坐标对正则需 `[\d.]+`（x=2 这类整数不匹配 `\d+\.\d+`）；eval 全缺的
+序列 = NaN 全过滤 → 合法占位符而非 polyline（测试断言按语义写，不按实现写）。
+
+**补充 2（同日，用户指令）——组件日志查看页**：`/log/<key>` 独立页 +
+`/api/log/<key>` JSON 载荷；控制台组件表加「日志」链接。定案：
+1. **尾部窗口读取**（readLogTail）：先 stat 再只读尾部 ≤512KB 字节窗口、丢首行
+   残行——GB 级增长日志不整读，2s 自动刷新是热路径；URL ?lines= 限 10-2000。
+2. **定点替换而非整页 reload**：refresh() 只换 #logbox/#meta——滚动位置、跟随
+   开关、行数选择都不丢（控制台主页 reload 模式不适用于日志页：要保滚动）。
+3. **follow 默认开**：贴底滚动 + 2s 刷新；关闭 follow = 暂停（4s）+ 释放滚动。
+4. 日志解析 resolveComponentLog：COMPONENT_LOGS 常量优先，账本 entry.log 回退；
+   单测覆盖 tail 窗口/映射齐全/载荷/转义/暂停态占位（断言 `id="follow" checked`
+   而非裸 'checked'——客户端脚本的 ev.target.checked 是合法文本，会被裸词断言误伤）。
+
+## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
+
+提交本日删除清理时首跑失败：hook 的 oxfmt 循环对 staged 清单全量 `bunx oxfmt` +
+`git add`，staged **删除**的 `.ts`（本例 tools/hub-start.ts）工作树已不存在 →
+`git add` fatal（`pathspec ... did not match any files`），输出被吞只留 exit 1。
+修复：循环内对不存在的文件先 `continue` 并打印跳过原因（最小改动，照常通过
+`--selftest`；本次 commit 已实弹验证跳过分支生效）。已知留待项：python 门禁的
+STAGED_PY 与 lint 集合同构（--diff-filter=ACM 排除删除，仅 ruff 收到删除路径时
+ruff 自己会因文件不存在报错）——留给下次涉及 .py 删除的提交顺手修复。
+
+## §349 / 删除一键启动器 start.ts——控制台 + train.ts 双入口（2026-09-06，用户指令）
+
+用户指令：删除 `tools/training/start.ts`；训练组件完全由控制台管理；`package.json`
+支持 `bun run train` 启动控制台网站。
+
+**能力归并（删除前逐项清点，无能力丢失）：**
+- `start.ts train` 模式 → `tools/training/train.ts` 增加真 CLI 入口（argparse 原语义
+  逐项等价：`--script/--force/--kill-previous/--detach/--torch-threads/--check/--echo`，
+  未知参数透传）。AGENTS §5.6 "never raw python" 的无头执行通道由它继承。
+  教训：模块顶层 `main()` 在被 bun test import 时会真的拉起训练（测试导入即训练）——
+  CLI 入口必须 `if (import.meta.main)` 守卫（本次实弹复现：导入后 spawnSync 挂 65s）。
+- hub/push 全流程编排 → 控制台已有预设（pull/push/local）逐项覆盖。
+- push `--smoke-only` 推送链路预演 → 新控制台动作 `smokeTrain`（api 路由 + 页面按钮
+  「推送链路预演」）：伪 GPU 节点 + `--smoke` trainer + `stepKaggleRehearsal` 三段
+  日志触发，任何一段失败都停预演进程。`stepKaggleRehearsal/stepTrainingLoop/
+  drainStaleJobs/printLogTail` 因此保留在 hub.ts（唯一消费方变为控制台）。
+- 变更检测监督（start.ts 的 supervisor）→ 控制台 server 接管：`createSupervisor`
+  + 每 15s reconcile 账本登记的组件 → `sup.watch(spec)`；restart 经
+  `actions.restartSpecFor(key)` 按当前 rl-config + 账本元数据重建 spec。
+- hub/push 模式 CLI 的 Kaggle 指引打印/启动报告 → 控制台组件表/节点表已覆盖。
+
+**新 SSOT：`tools/training/specs.ts`** — 五组件 ProcSpec 构造（selfNode/hubServer/
+cloudflared/workerServe/trainingLoop）唯一来源；hub 步骤、控制台动作、监督重启三处
+共用。重启永远用最新配置重建（旧 spec 只是哨兵载体）。
+
+**入口**：`bun run train` = `bun tools/training/console/server.ts`（控制台）；
+`bun tools/training/train.ts --script …`（无头单次）。文档（AGENTS §5.6、
+agents.details §5.6、README 模块地图、plan、py docstring）已同步改指向。
+
+**验证**：`bun run check` 1748 pass / 0 fail；`bun run build` 绿；train.ts CLI
+`--check/--echo/--help` 实弹通过；控制台 :8941 实弹（state API、页面 200、
+NO_PROXY 提示、监督启用日志）。
+
+**补 1（smokeTrain 实弹回归，2026-09-06 晚）**：首次对 p4-horizon 跑控制台
+「推送链路预演」暴露 trainingLoopSpec 路径翻倍 bug——cmd[2] 被再 join 一次
+`NN_TRAINING`，python 秒退 `can't open file ...nn-training
+n-trainingun_rl.py`，
+预演空烧 180s 等 job 发布。修复三件：(a) specs.ts 以 `REPO_ROOT` 拼入口
+（ENTRY 是仓库相对路径，哨兵/账本语义，不参与 join NN_TRAINING）；
+(b) stepTrainingLoop 加 fail-fast——进程秒退且日志含 "can't open file" 时立即
+抛路径错，不再等满超时窗；(c) 回归测试（tests/training-train.test.ts）：cmd[2]
+必须 `existsSync` 为真。复跑预演全通过：发布→推送→echo→落位→作废退出，
+iteration 计数 3 不变、wver c1369c289278 未动、无残留锁、8789 端口释放、
+workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属正常痕迹）。

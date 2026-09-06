@@ -39,7 +39,8 @@ export interface RegistryEntry {
   url?: string
   log?: string
   metrics?: number
-  mode?: StartMode
+  /** 启动模式：控制台 trainer 编排（pull/push/local）或 'remote'（冒烟预演）。 */
+  mode?: 'pull' | 'push' | 'local' | 'remote'
 }
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。 */
@@ -69,7 +70,3 @@ export interface ProcSpec {
   /** 变更检测哨兵文件（mtime 变了 = 该进程运行的代码已更新）。 */
   sentinels: string[]
 }
-
-export const START_MODES = ['hub', 'push', 'train'] as const
-/** 启动模式：hub=Kaggle pull 全基建 · push=HUB 推模式 · train=本地 CPU 训练。 */
-export type StartMode = (typeof START_MODES)[number]

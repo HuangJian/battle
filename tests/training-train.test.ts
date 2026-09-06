@@ -15,6 +15,7 @@ import {
   emptyHistory,
 } from '../tools/training/monitor/history'
 import { readIterMetrics } from '../tools/training/monitor/iters'
+import { TRAINING_LOOP_ENTRY, trainingLoopSpec } from '../tools/training/specs'
 import { renderMonitorPage } from '../tools/training/monitor/page'
 import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -233,6 +234,65 @@ describe('training path constants', () => {
       REPO_ROOT.endsWith('battle2') || REPO_ROOT.includes(':') || REPO_ROOT.includes('/'),
     ).toBe(true)
   })
+})
+
+describe('ProcSpec path semantics (tools/training/specs.ts, DECISIONS §349 regression)', () => {
+  it('trainingLoop cmd points at an existing file (entry is repo-relative, not doubled)', () => {
+    // 回归：entry 曾被 join(NN_TRAINING) 再拼一次 → nn-training/nn-training/run_rl.py
+    // python 秒退 "can't open file"，预演空烧 180s。cmd[2] 必须真实存在。
+    const cfg = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 8787, agent_port: 8443, remote_token: 't' },
+    }
+    const spec = trainingLoopSpec(cfg, {
+      course: 'spec-path-test',
+      ppo: 'remote',
+      venv: { python: 'python', sitePackages: '' },
+    })
+    expect(spec.cmd[2]).toBe(join(REPO_ROOT, 'nn-training', 'run_rl.py'))
+    const { existsSync } = require('fs') as { existsSync: (p: string) => boolean }
+    expect(existsSync(spec.cmd[2]!)).toBe(true)
+    expect(TRAINING_LOOP_ENTRY).toBe('nn-training/run_rl.py')
+  })
+})
+
+describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)', () => {
+  it('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
+    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--check'], {
+      cwd: REPO_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout.toString()).toContain('torch 可用')
+  }, 60000)
+
+  it('--echo prints the exact command and exits 0 without executing', () => {
+    const r = Bun.spawnSync(
+      ['bun', 'tools/training/train.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
+      {
+        cwd: REPO_ROOT,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+    expect(r.exitCode).toBe(0)
+    const out = r.stdout.toString()
+    // Windows 下路径以 JSON 转义形式打印（ppo\\bench.py）——按文件名断言，平台无关。
+    expect(out).toContain('bench.py')
+    expect(out).toContain('--iters')
+  }, 60000)
+
+  it('--help exits 0 with usage', () => {
+    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--help'], {
+      cwd: REPO_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout.toString()).toContain('用法')
+  }, 60000)
 })
 
 describe('supervisor sentinel fingerprint', () => {

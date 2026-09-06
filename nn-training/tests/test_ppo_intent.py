@@ -7,7 +7,7 @@
   4) ppo_update_intent 微型 shard 冒烟：不崩、policy loss 有限、early-stop 逻辑可触发。
 
 运行（经统一启动器）：
-  bun tools/training/start.ts train --script tests/test_ppo_intent.py
+  bun tools/training/train.ts --script tests/test_ppo_intent.py
 退出码：全部通过 0，否则 1。
 """
 

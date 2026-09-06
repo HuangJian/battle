@@ -58,6 +58,14 @@ export function saveComponent(name: Component, entry: RegistryEntry): void {
   saveRegistry(reg)
 }
 
+/** 清除单个组件条目（停止后；其余组件登记不受影响）。 */
+export function clearComponent(name: Component): void {
+  const reg = loadRegistry()
+  if (!reg[name]) return
+  delete reg[name]
+  saveRegistry(reg)
+}
+
 export function clearRegistry(): void {
   try {
     unlinkSync(REGISTRY_PATH)

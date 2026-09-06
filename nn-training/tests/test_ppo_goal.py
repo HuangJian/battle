@@ -9,7 +9,7 @@
   6) ppo_update_goal 微型 shard 冒烟（fine+coarse）：不崩、loss 有限、早停、warmup 冻结。
 
 运行（经统一启动器）：
-  bun tools/training/start.ts train --script tests/test_ppo_goal.py
+  bun tools/training/train.ts --script tests/test_ppo_goal.py
 退出码：全部通过 0，否则 1。
 """
 

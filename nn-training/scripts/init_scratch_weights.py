@@ -19,7 +19,7 @@ BC / 历史路径零影响）。
   ⇒ 每 grad step 的 |Δlogp| ≈ clip×lr×|h|×√fan ≈ 0.03 纳特 ⇒ 更新温和。
 
 用法（经统一启动器跑）：
-  bun tools/training/start.ts train --script scripts/init_scratch_weights.py --out <path>.json
+  bun tools/training/train.ts --script scripts/init_scratch_weights.py --out <path>.json
 然后 run_rl.py --bc <path>.json（--bc 是"首个 init 来源"通道；权重已存在则
 run_rl 原样续跑，语义不变）。
 """

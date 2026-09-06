@@ -193,8 +193,8 @@ function peekContainer(buf: ArrayBuffer): { manifest: Record<string, unknown>; f
   return { manifest: payload.manifest ?? {}, fileCount: count }
 }
 
-/** 单节点 rollout 冒烟（weights → task → result）。 */
-async function rolloutSmokeNode(
+/** 单节点 rollout 冒烟（weights → task → result；控制台节点冒烟按钮复用）。 */
+export async function rolloutSmokeNode(
   node: { id: string; url: string; authKey: string },
   weightsBytes: Uint8Array<ArrayBuffer>,
   wver: string,

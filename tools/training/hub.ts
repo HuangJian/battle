@@ -1,6 +1,6 @@
-/** hub.ts — hub 模式（Kaggle pull 全基建）：self-node ∥ hub-server ∥ cloudflared，
- *  冒烟门禁，TrainingLoop，Kaggle 交互预演（--smoke-only）。职责拆分自
- *  tools/hub-start.ts（DECISIONS §339/§340 行为不变）。
+/** hub.ts — 基建组件启动步骤 + 冒烟门禁 + Kaggle 交互预演。职责拆分自
+ *  tools/hub-start.ts（DECISIONS §339/§340 行为不变）；组件 spec 构造统一在
+ *  specs.ts（DECISIONS §349），本层只做编排（检查→spawn→等就绪）。
  */
 
 import {
@@ -15,34 +15,25 @@ import {
   unlinkSync,
 } from 'fs'
 import path from 'path'
-import { LOG_DIR, NN_TRAINING, REPO_ROOT, fmtStamp } from './paths'
+import { LOG_DIR, REPO_ROOT, fmtStamp } from './paths'
 import { httpOk, killPid, pidAlive, portListen, waitUntil } from './net'
 import { loadRegistry, saveComponent } from './registry'
 import { launchSpec, spawnBg } from './proc'
-import { resolveVenvPython } from './venv'
 import { writeRemoteHubUrl } from './config'
 import { fail, info, log, ok, warn } from './log'
-import { pySentinels, agentSentinels } from './sentinels'
 import { monitorTouch } from './reload-touch'
-import type { ProcSpec, RlConfig } from './types'
+import {
+  HUB_SERVER_ENTRY,
+  SELF_NODE_ENTRY,
+  TRAINING_LOOP_ENTRY,
+  hubServerSpec,
+  resolveCloudflaredBin as specsResolveCloudflaredBin,
+  selfNodeSpec,
+  trainingLoopSpec,
+} from './specs'
+import type { RlConfig } from './types'
 
-// ──────────────────────────────────────────────────── cloudflared 辅助 ────────────────────────── ────────────────────────────────────────────────────
-
-/** 解析 cloudflared 真身路径：Chocolatey 的 bin\cloudflared.exe 是 shim——另起真身
- *  子进程、不透传 stdio 句柄、被杀留孤儿。优先直取 lib\<name>\tools\ 真身 exe。 */
-function resolveCloudflaredBin(): string | null {
-  const found = Bun.which('cloudflared')
-  if (!found) return null
-  const real = path.resolve(
-    path.dirname(path.dirname(found)),
-    'lib',
-    'cloudflared',
-    'tools',
-    'cloudflared.exe',
-  )
-  if (path.basename(found).toLowerCase().endsWith('.exe') && existsSync(real)) return real
-  return found
-}
+// ──────────────────────────────────────────────────── cloudflared 辅助 ──────────────────────────
 
 function extractCfUrls(logPath: string): string[] {
   try {
@@ -82,17 +73,9 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
     return
   }
   log('启动 self-node...')
-  const entry = 'tools/agent/sampler-agent.ts'
-  const spec: ProcSpec = {
-    key: 'selfNode',
-    name: 'self-node',
-    cmd: [process.execPath, 'run', entry, '--port', String(cfg.rl.agent_port)],
-    log: path.join(LOG_DIR, 'sampler-agent.log'),
-    healthy: () => selfNodeHealthy(cfg),
-    sentinels: agentSentinels(entry),
-  }
+  const spec = selfNodeSpec(cfg)
   const r = launchSpec(spec)
-  saveComponent('selfNode', { pid: r.pid, entry })
+  saveComponent('selfNode', { pid: r.pid, entry: SELF_NODE_ENTRY })
   monitorTouch()
   if (await waitUntil(() => selfNodeHealthy(cfg), 30000)) {
     ok(`self-node 启动成功 (port ${cfg.rl.agent_port}, PID ${r.pid})`)
@@ -102,12 +85,13 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
   }
 }
 
+/** jobRoot（tmp/<course>/remote-jobs）→ 课程名。 */
+function courseOf(jobRoot: string): string {
+  return path.basename(path.dirname(jobRoot))
+}
+
 /** hub-server（python remote.hub_server）步骤。 */
-export async function stepHubServer(
-  cfg: RlConfig,
-  jobRoot: string,
-  jsonlPath: string,
-): Promise<void> {
+export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<void> {
   log('检查 hub-server...')
   if (await hubServerHealthy(cfg)) {
     ok(`hub-server 已在运行 (port ${cfg.rl.hub_port})`)
@@ -115,32 +99,9 @@ export async function stepHubServer(
   }
   mkdirSync(jobRoot, { recursive: true })
   log('启动 hub-server...')
-  const { python } = resolveVenvPython()
-  const entry = 'nn-training/remote/hub_server.py'
-  const spec: ProcSpec = {
-    key: 'hubServer',
-    name: 'hub-server',
-    cmd: [
-      python,
-      '-u',
-      '-m',
-      'remote.hub_server',
-      '--port',
-      String(cfg.rl.hub_port),
-      '--token',
-      cfg.rl.remote_token,
-      '--job-root',
-      jobRoot,
-      '--jsonl',
-      jsonlPath,
-    ],
-    env: { PYTHONPATH: NN_TRAINING },
-    log: path.join(LOG_DIR, 'hub-server.out'),
-    healthy: () => hubServerHealthy(cfg),
-    sentinels: pySentinels(entry),
-  }
+  const spec = hubServerSpec(cfg, courseOf(jobRoot))
   const r = launchSpec(spec)
-  saveComponent('hubServer', { pid: r.pid, entry: 'nn-training/remote/hub_server.py' })
+  saveComponent('hubServer', { pid: r.pid, entry: HUB_SERVER_ENTRY })
   monitorTouch()
   // Python 冷启动（import 链）可达 10s+，以 /ping 探测为准，上限 45s
   if (await waitUntil(() => hubServerHealthy(cfg), 45000)) {
@@ -159,7 +120,7 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
     return ''
   }
   const reg = loadRegistry()
-  const cfBin = resolveCloudflaredBin()
+  const cfBin = specsResolveCloudflaredBin()
   if (!cfBin) {
     fail('cloudflared 不在 PATH 中——Kaggle 无法接入（安装 cloudflared，或显式 --no-tunnel 跳过）')
     throw new Error('cloudflared 未安装')
@@ -395,6 +356,8 @@ export interface TrainingLoopSpec {
   jobRoot: string
   jsonlPath: string
   smoke: boolean
+  /** PPO 模式：remote=pull/push 远程结算（默认）；local=本机 CPU PPO。 */
+  ppo?: 'local' | 'remote'
   /** push 模式冒烟：本机伪 GPU 节点（worker_server）URL，注入 REMOTE_PUSH_NODE。 */
   pushNodeUrl?: string
   /** 已就绪的 venv 解析结果（复用，避免重复解析）。 */
@@ -402,7 +365,7 @@ export interface TrainingLoopSpec {
 }
 
 /** TrainingLoop 步骤（新启动返回 true；已在运行返回 false）。 */
-export async function stepTrainingLoop(_cfg: RlConfig, s: TrainingLoopSpec): Promise<boolean> {
+export async function stepTrainingLoop(cfg: RlConfig, s: TrainingLoopSpec): Promise<boolean> {
   log('检查 TrainingLoop...')
   const reg = loadRegistry()
   if (pidAlive(reg.trainingLoop?.pid)) {
@@ -435,32 +398,20 @@ export async function stepTrainingLoop(_cfg: RlConfig, s: TrainingLoopSpec): Pro
     /* first run */
   }
 
-  const spec: ProcSpec = {
-    key: 'trainingLoop',
-    name: 'TrainingLoop',
-    cmd: [
-      s.venv.python,
-      '-u',
-      path.join(NN_TRAINING, 'run_rl.py'),
-      '--course',
-      s.course,
-      '--ppo',
-      'remote',
-      ...(s.smoke ? ['--smoke'] : []),
-    ],
-    env: {
-      PYTHONPATH: `${s.venv.sitePackages}${path.delimiter}${NN_TRAINING}`,
-      ...(s.pushNodeUrl ? { REMOTE_PUSH_NODE: s.pushNodeUrl } : {}),
-    },
-    log: trainLog,
-    healthy: async () => pidAlive(loadRegistry().trainingLoop?.pid),
-    sentinels: pySentinels('nn-training/run_rl.py'),
-  }
+  const spec = trainingLoopSpec(cfg, {
+    course: s.course,
+    ppo: s.ppo,
+    smoke: s.smoke,
+    pushNodeUrl: s.pushNodeUrl,
+    venv: s.venv,
+  })
   const r = launchSpec(spec)
-  saveComponent('trainingLoop', { pid: r.pid, course: s.course, entry: 'nn-training/run_rl.py' })
+  saveComponent('trainingLoop', { pid: r.pid, course: s.course, entry: TRAINING_LOOP_ENTRY })
   monitorTouch()
 
-  // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待
+  // 就绪以进程存活 + 本次启动的日志产出为触发（上限 20s），无固定等待。
+  // 另加 fail-fast：进程秒退且日志含 python "can't open file"（路径错/入口错）时
+  // 立即抛错——否则预演/等待逻辑会空烧整个超时窗口等一个永远不来的输出。
   const hasOutput = await waitUntil(
     async () => {
       if (!pidAlive(r.pid)) return true
@@ -477,6 +428,12 @@ export async function stepTrainingLoop(_cfg: RlConfig, s: TrainingLoopSpec): Pro
   if (!pidAlive(r.pid)) {
     fail(`TrainingLoop 启动失败（PID ${r.pid} 已退出，见 ${trainLog}）`)
     printLogTail(trainLog, baseline)
+    const tail = tailText(trainLog, baseline)
+    if (tail.includes("can't open file")) {
+      throw new Error(
+        `TrainingLoop 入口文件打不开（cmd[2]=${spec.cmd[2]}）——检查 specs.ts 路径拼接: ${tail.split('\n').find((l) => l.includes("can't open file")) ?? ''}`,
+      )
+    }
     throw new Error('TrainingLoop 启动失败')
   }
   ok(`TrainingLoop 已启动 (PID ${r.pid})`)
@@ -486,6 +443,16 @@ export async function stepTrainingLoop(_cfg: RlConfig, s: TrainingLoopSpec): Pro
     printLogTail(trainLog, baseline)
   }
   return true
+}
+
+/** baseline 之后的日志文本（字节偏移起读；无文件返回空串）。 */
+function tailText(logPath: string, offset: number): string {
+  try {
+    const b = readFileSync(logPath)
+    return b.toString('utf-8', Math.min(offset, b.length))
+  } catch {
+    return ''
+  }
 }
 
 // ────────────────────────── Kaggle 交互预演（--smoke-only 专属） ──────────────────────────
