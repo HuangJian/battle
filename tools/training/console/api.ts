@@ -91,21 +91,37 @@ export interface MetricsView {
 
 // ────────────────────────── 课程发现 ──────────────────────────
 
-/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录，按日志 mtime 新→旧。 */
+/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录（按日志 mtime 新→旧）+ curricula/*.jsonc 中尚未落盘的课程。 */
 export function discoverCourses(max = 12): string[] {
   const out: Array<{ name: string; mtime: number }> = []
+  const seen = new Set<string>()
   try {
     for (const ent of readdirSync(path.join(REPO_ROOT, 'tmp'), { withFileTypes: true })) {
       if (!ent.isDirectory()) continue
       const lp = path.join(REPO_ROOT, 'tmp', ent.name, 'training_log.jsonl')
       try {
         out.push({ name: ent.name, mtime: statSync(lp).mtimeMs })
+        seen.add(ent.name)
       } catch {
         /* no log — not a course dir */
       }
     }
   } catch {
     return []
+  }
+  // 补充 curricula/ 中尚未跑过的课程（按 jsonc mtime 新→旧），使新 course 首次选择有 UI 路径
+  try {
+    for (const ent of readdirSync(path.join(REPO_ROOT, 'nn-training', 'curricula'), {
+      withFileTypes: true,
+    })) {
+      if (ent.isDirectory() || !ent.name.endsWith('.jsonc')) continue
+      const name = ent.name.replace(/\.jsonc$/, '')
+      if (seen.has(name)) continue
+      const cp = path.join(REPO_ROOT, 'nn-training', 'curricula', ent.name)
+      out.push({ name, mtime: statSync(cp).mtimeMs })
+    }
+  } catch {
+    /* no curricula dir — fall through */
   }
   return out
     .sort((a, b) => b.mtime - a.mtime)

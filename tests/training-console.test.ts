@@ -115,10 +115,12 @@ describe('console/api.buildStateView', () => {
     expect(s.courses).toBeInstanceOf(Array)
   })
 
-  it('课程发现只列含 training_log.jsonl 的目录', () => {
+  it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
     const courses = api.discoverCourses()
-    // 仓库 tmp/ 至少有 p4 系课程日志（历史训练产物）；不强制非空，但类型必须对
+    // curricula/ 至少有 p4-fast.jsonc 等；不强制非空，但类型必须对
     for (const c of courses) expect(typeof c).toBe('string')
+    // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表
+    expect(courses).toContain('p4-fast')
   })
 })
 
