@@ -2466,6 +2466,28 @@ HUB 连出，实测稳）为架构背书。落地：
 兜底）。Kaggle 接入：notebook 起 worker_serve + cloudflared，URL 贴 rl-config
 nodes（gpu_push: true）。
 
+## §341 /pool 页面热加载——pool-page.ts 改动免重启 agent（2026-09-06，用户指令）
+
+背景：pool-page.ts 虽不在 dist codeHash 集（改它不触发节点升级波），但
+sampler-agent.ts 以静态 import 引用——Bun 启动时缓存模块，主控机不重启 agent
+改动就不生效（2026-09-06 实测踩坑：eval 列上线后页面不显示，重启后才有）。
+处置：sampler-agent.ts 去掉对 pool-page 的静态 import，改 **mtime 键控动态
+import** 热加载——
+- 每次 GET /pool 先 stat pool-page.ts 的 mtime：未变 → 复用缓存模块句柄（零
+  重复加载）；变了 → 以 `./pool-page.ts?m=<mtimeMs>` 为新键重新 import。
+- 键取 mtime 而非 Date.now()：每个文件版本只占一个模块记录，旧版失去引用即
+  可 GC——不随请求数累积（Date.now() 方案会在模块注册表里无限堆积）。
+- 加载失败（语法错误/编辑中的半文件）沿用上一版可用模块并打日志——页面永不
+  因 pool-page 的坏状态 500。
+- Bun 1.4.0 探针实测四前提成立：同键命中缓存 / 换键即新模块 / 文件变更后新键
+  读到新导出 / 坏文件抛可捕获的 BuildMessage。
+线上验证（tmp/sampler-agent.log 时序）：首载 → touch 重载 → 坏文件 4×FAILED
+且页面仍 200 回退上一版 → 恢复后干净重载，全部符合预期。
+代价与边界：sampler-agent.ts 本身在 codeHash 集（codehash-files.txt），本次
+接线 = **最后一次**节点升级波；此后 pool-page.ts 调整既免重启也不触碰
+codeHash。sampler-agent 自身/restart-guard 等其余依赖仍需重启（未纳入热加载
+——核心协议文件的意外热切换风险大于收益）。
+
 ## §342 / p4-onset 监控四修复（2026-09-06，监控发现 → 用户拍板"修全部问题"）
 
 首日远程推架构监控（nn.progress §19）发现四处配置管道失真，全部修复并有回归测试
