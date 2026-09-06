@@ -237,42 +237,66 @@ if [ "$FORCE" != "1" ] && [ "$SCRIPT" = "train_loop.py" ] && [ -f "$LOCK_FILE" ]
 fi
 
 # ── --kill-previous：按 --script 名清杀上一轮训练进程 ────────────────
-# pgrep -f 匹配命令行含本 <script>.py 的进程；排除自身($$)与父 shell($PPID)，
-# 且只杀命令行含 python 的进程（防误伤把脚本名当参数的外层 runner/编辑器）。
-# bun 在途局子进程不杀——自然结算落盘，断点续跑可回收。
+# Windows：msys pgrep 看不见/杀不动 Windows 原生进程（pyenv python.exe）——实测
+# 漏杀 → 双 trainer 事故（2026-09-06，it57-59 双份训练），委托 pwsh 走 CIM 精确
+# 清杀（与 start-training.ps1 -KillPrevious 同一实现；脚本名经环境变量传入避引号）。
+# 仅匹配 python* 进程名（防误伤把脚本名当参数的外层 runner/编辑器），排除自身与
+# 父进程。bun 在途局子进程不杀——自然结算落盘，断点续跑可回收。
 if [ "$KILLPREV" = "1" ]; then
-  if command -v pgrep >/dev/null 2>&1; then
-    KILLED=0
-    for PID_ in $(pgrep -f "$SCRIPT" 2>/dev/null); do
-      [ "$PID_" = "$$" ] && continue
-      [ "$PID_" = "$PPID" ] && continue
-      CMD_="$(ps -p "$PID_" -o command= 2>/dev/null || true)"
-      case "$CMD_" in
-        *python*) ;;
-        *) continue ;;
-      esac
-      if kill -9 "$PID_" 2>/dev/null; then
-        log "kill-previous: killed pid=$PID_ ($SCRIPT)"
-        KILLED=$((KILLED + 1))
-      fi
-    done
-    if [ "$KILLED" -gt 0 ]; then
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      SCRIPT_="$SCRIPT" pwsh -NoProfile -Command '
+        $pat = "(?<![A-Za-z0-9_])" + [regex]::Escape($env:SCRIPT_) + "(?![A-Za-z0-9_])"
+        $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+        $victims = @(Get-CimInstance Win32_Process | Where-Object {
+          $_.ProcessId -ne $PID -and $_.ProcessId -ne $parentPid -and
+          $_.Name -match "^python" -and $_.CommandLine -and $_.CommandLine -match $pat })
+        foreach ($v in $victims) {
+          Write-Host ("kill-previous: stopping pid={0} ({1})" -f $v.ProcessId, $v.Name)
+          Stop-Process -Id $v.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        if ($victims.Count -eq 0) {
+          Write-Host ("kill-previous: no previous trainer matched ({0})" -f $env:SCRIPT_)
+        }
+      '
       sleep 1
-    else
-      log "kill-previous: no previous trainer matched ($SCRIPT)"
-    fi
-  else
-    log "kill-previous: pgrep unavailable — skipped"
-  fi
+      ;;
+    *)
+      if command -v pgrep >/dev/null 2>&1; then
+        KILLED=0
+        for PID_ in $(pgrep -f "$SCRIPT" 2>/dev/null); do
+          [ "$PID_" = "$$" ] && continue
+          [ "$PID_" = "$PPID" ] && continue
+          CMD_="$(ps -p "$PID_" -o command= 2>/dev/null || true)"
+          case "$CMD_" in
+            *python*) ;;
+            *) continue ;;
+          esac
+          if kill -9 "$PID_" 2>/dev/null; then
+            log "kill-previous: killed pid=$PID_ ($SCRIPT)"
+            KILLED=$((KILLED + 1))
+          fi
+        done
+        if [ "$KILLED" -gt 0 ]; then
+          sleep 1
+        else
+          log "kill-previous: no previous trainer matched ($SCRIPT)"
+        fi
+      else
+        log "kill-previous: pgrep unavailable — skipped"
+      fi
+  esac
 fi
 
 # ── 启动 ─────────────────────────────────────────────────────────────
-# Windows + 显式 --detach + 目标是 train_loop.py：委托给 ps1 的 Start-Process
-# 隐藏窗口分离（替代旧 VBS；detach 行为单一定义在 ps1，避免两处维护）。
-# bash 数组逐元素传给 -File，ps1 侧自行解析，无引号拼接问题。
-if [ "$DETACH" = "1" ] && [ "$IS_WINDOWS" = "1" ] && [ "$SCRIPT" = "train_loop.py" ]; then
+# Windows + 显式 --detach + 长训脚本（train_loop.py / run_rl.py）：委托给 ps1 的
+# Start-Process 隐藏窗口分离（替代旧 VBS；detach 行为单一定义在 ps1，避免两处维护）。
+# 2026-09-06 修正：此前条件限定 train_loop.py——run_rl.py --detach 走了 bash 前台
+# exec（新 trainer 挂在调用方 shell 下，--kill-previous 的 msys pgrep 又漏杀 →
+# 双 trainer 事故）。现任何脚本都委托 ps1（ps1 自身校验白名单）。
+if [ "$DETACH" = "1" ] && [ "$IS_WINDOWS" = "1" ]; then
   log "detaching via PowerShell Start-Process（后台）..."
-  PS_LAUNCH_ARGS=(--detach)
+  PS_LAUNCH_ARGS=(--detach --script "$SCRIPT")
   if [ "${#SCRIPT_ARGS[@]}" != "0" ]; then
     PS_LAUNCH_ARGS+=("${SCRIPT_ARGS[@]}")
   fi
