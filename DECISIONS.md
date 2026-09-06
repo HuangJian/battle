@@ -2682,6 +2682,13 @@ rollout 节点并改并行采集数（回写 rl-config.json）。
 实弹：server 起于 :8931，state/页面/双缓冲开关写回还原/未知动作 404/组件停
 止与冒烟动作/页面热加载全部实测通过；bun run check + build 绿。
 
+**补充 1（同日，用户指令）——训练指标 sparkline**：metricsSection 表格上方加
+概览条（spark-strip）：胜率/得分/KL/熵/eval 胜率五格内联 SVG polyline（近 20 轮
+时间正序，min-max 归一，恒定序列满幅平线灰色、末点圆点，非有限值断点跳过）。
+零依赖（内联 SVG 文本拼接，非 canvas/图表库）；sparkline() 纯函数可单测。
+trap：坐标对正则需 `[\d.]+`（x=2 这类整数不匹配 `\d+\.\d+`）；eval 全缺的
+序列 = NaN 全过滤 → 合法占位符而非 polyline（测试断言按语义写，不按实现写）。
+
 ## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
 
 提交本日删除清理时首跑失败：hook 的 oxfmt 循环对 staged 清单全量 `bunx oxfmt` +

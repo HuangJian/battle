@@ -232,3 +232,99 @@ describe('console/page.renderConsolePage', () => {
     expect(html).not.toContain('<script>alert')
   })
 })
+
+describe('console/page.sparkline', () => {
+  it('正态序列：polyline 坐标数 = 数据点数，含末点圆点', () => {
+    const svg = page.sparkline([1, 2, 3, 4, 5])
+    expect(svg).toContain('<svg')
+    expect(svg).toContain('<polyline')
+    // 5 个坐标对（每对 x,y；[\d.] 同时匹配整数与小数）
+    const pairs =
+      svg
+        .split('<polyline')[1]!
+        .split('/>')[0]!
+        .match(/[\d.]+,[\d.]+/g) ?? []
+    expect(pairs.length).toBe(5)
+    expect(svg).toContain('<circle')
+  })
+
+  it('恒定序列：满幅平线（y 折半）+ 灰色（无形状可循）', () => {
+    const svg = page.sparkline([7, 7, 7, 7])
+    // 全部 y 相同 = height/2
+    const ys = [...svg.matchAll(/,([\d.]+) /g)].map((m) => m[1])
+    expect(new Set(ys).size).toBeLessThanOrEqual(1)
+    expect(svg).toContain('#94a3b8')
+  })
+
+  it('空序列与非有限值：占位符 / NaN 点被跳过', () => {
+    expect(page.sparkline([])).toContain('muted')
+    const svg = page.sparkline([1, Number.NaN, 3])
+    const pairs =
+      svg
+        .split('<polyline')[1]!
+        .split('/>')[0]!
+        .match(/[\d.]+,[\d.]+/g) ?? []
+    expect(pairs.length).toBe(2)
+  })
+
+  it('指标表渲染 sparkline 概览条（有数据课程）', async () => {
+    const s = await api.buildStateView()
+    const html = page.renderConsolePage(s)
+    expect(html).toContain('spark-strip')
+    expect(html).toContain('spark-cell')
+    if (s.metrics.available && s.metrics.iters.length > 0) {
+      expect(html).toContain('<svg class="spark"')
+      expect(html).toContain('eval 胜率')
+    }
+  })
+
+  it('sparkline 只取最近 20 轮且时间正序', () => {
+    // 直接验证 metricSeries 的排序窗口语义（经 renderConsolePage 间接覆盖亦可）
+    const s = {
+      time: 't',
+      course: 'c',
+      courses: [],
+      components: [],
+      nodes: [],
+      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: {
+        available: true,
+        iters: Array.from({ length: 30 }, (_, i) => ({
+          iter: 100 - i,
+          time: '',
+          winRate: i / 100,
+          scoreMean: i,
+          scoreStd: 1,
+          samples: 1,
+          rolloutSec: 1,
+          ppoSec: 1,
+          kl: 0.01,
+          entropy: 1,
+          policyLoss: 0,
+          valueLoss: 0,
+          meanRet: 0,
+          lr: 0.00005,
+          expectedGames: 4,
+          halted: false,
+          topDims: '',
+          avgTicks: 100,
+          accuracy: 0,
+          loot: 0,
+          kills: 0,
+          actuals: null,
+          evalData: null,
+        })),
+      },
+    }
+    const html = page.renderConsolePage(s)
+    // 30 轮输入、eval 全空（NaN）→ 4 条有限序列有 polyline，eval 列为占位符
+    const polylines = html.match(/<polyline/g) ?? []
+    expect(polylines.length).toBe(4)
+    expect(html).toContain('eval 胜率')
+    for (const seg of html.split('<polyline').slice(1)) {
+      const pts = seg.split('/>')[0]!.match(/[\d.]+,[\d.]+/g) ?? []
+      expect(pts.length).toBeLessThanOrEqual(20)
+      expect(pts.length).toBeGreaterThan(0)
+    }
+  })
+})

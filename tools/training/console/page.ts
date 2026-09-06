@@ -146,6 +146,68 @@ function fmtPct(v: number | null | undefined): string {
   return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
 }
 
+// ────────────────────────── 迷你趋势图（§348 补 1） ──────────────────────────
+
+/** 时间正序后段（图表左侧是历史，右侧是当前）。 */
+const SPARK_POINTS = 20
+const SPARK_W = 110
+const SPARK_H = 26
+
+/** 单指标 sparkline：内联 SVG polyline（无依赖；文本节点，转义不适用但坐标为数字）。
+ *  y 归一化到系列自身的 min/max（恒定序列满幅平线）；末点画圆点强调当前值。
+ *  非有限值（NaN）跳过——不影响其余点的连线。 */
+export function sparkline(values: number[], width = SPARK_W, height = SPARK_H): string {
+  const pts = values.filter((v) => Number.isFinite(v))
+  if (pts.length === 0) return '<span class="muted small">—</span>'
+  const min = Math.min(...pts)
+  const max = Math.max(...pts)
+  const span = max - min
+  const px = (i: number): number => +((i / (pts.length - 1)) * (width - 4) + 2).toFixed(1)
+  const py = (v: number): number =>
+    span === 0
+      ? +(height / 2).toFixed(1)
+      : +(height - 2 - ((v - min) / span) * (height - 4)).toFixed(1)
+  const coords = pts.map((v, i) => `${px(i)},${py(v)}`).join(' ')
+  const [lx, ly] = [px(pts.length - 1), py(pts[pts.length - 1]!)]
+  const line = span === 0 ? '#94a3b8' : '#2f5fe0'
+  return `<svg class="spark" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-hidden="true">
+  <polyline points="${coords}" fill="none" stroke="${line}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="${lx}" cy="${ly}" r="2.2" fill="${line}"/>
+</svg>`
+}
+
+/** 指标表列集（时间正序；与表头一一对应）。actuals/eval 缺轮断点：null 会被
+ *  sparkline 的 Number.isFinite 过滤（连线跳过），不伪造数值。 */
+function metricSeries(
+  rows: ConsoleStateView['metrics']['iters'],
+): Array<{ key: string; label: string; vals: number[] }> {
+  const chrono = [...rows].sort((a, b) => a.iter - b.iter).slice(-SPARK_POINTS)
+  return [
+    { key: 'winRate', label: '胜率', vals: chrono.map((r) => r.winRate) },
+    { key: 'scoreMean', label: '得分', vals: chrono.map((r) => r.scoreMean) },
+    { key: 'kl', label: 'KL', vals: chrono.map((r) => r.kl) },
+    { key: 'entropy', label: '熵', vals: chrono.map((r) => r.entropy) },
+    {
+      key: 'eval',
+      label: 'eval 胜率',
+      vals: chrono.map((r) => (r.evalData ? (r.evalData.winRate as number) : Number.NaN)),
+    },
+  ]
+}
+
+/** sparkline 概览条（表格上方；每格 = 指标名 + 图 + 末值）。 */
+function sparkStrip(rows: ConsoleStateView['metrics']['iters']): string {
+  const cells = metricSeries(rows)
+    .map((m) => {
+      const finite = m.vals.filter(Number.isFinite)
+      const last = finite.length > 0 ? finite[finite.length - 1]! : null
+      const lastTxt = last === null ? '—' : Math.abs(last) < 10 ? last.toFixed(3) : last.toFixed(1)
+      return `<div class="spark-cell"><div class="spark-head"><span>${m.label}</span><b>${lastTxt}</b></div>${sparkline(m.vals)}</div>`
+    })
+    .join('')
+  return `<div class="spark-strip">${cells}</div>`
+}
+
 function metricsSection(s: ConsoleStateView): string {
   if (!s.metrics.available)
     return `<div class="card pad"><h3>训练指标${s.course ? ` — ${esc(s.course)}` : ''}</h3>
@@ -167,12 +229,18 @@ function metricsSection(s: ConsoleStateView): string {
 </tr>`,
     )
     .join('')
-  return `<div class="card"><table>
+  return `<div class="card pad">
+<h3>训练指标${s.course ? ` — ${esc(s.course)}` : ''}</h3>
+${sparkStrip(s.metrics.iters)}
+<div class="card"><table>
 <thead><tr><th>轮</th><th>时刻</th><th>胜率</th><th>得分</th><th>样本</th><th>KL</th><th>熵</th>
 <th>采集/PPO</th><th>eval 胜率</th><th>实际终局</th><th></th></tr></thead>
 <tbody>${rows || '<tr><td colspan="11" class="muted">尚无完整迭代记录</td></tr>'}</tbody>
-</table></div>`
-} // ────────────────────────── 页面组装 ──────────────────────────
+</table></div>
+</div>`
+}
+
+// ────────────────────────── 页面组装 ──────────────────────────
 
 function clientScript(): string {
   return `
@@ -284,6 +352,12 @@ h3{margin:0 0 8px} h4{margin:4px 0 2px;font-size:13px;color:var(--muted)}
 select{padding:5px 9px;border:1px solid var(--border);border-radius:8px;background:var(--card)}
 .card+.card,.card+.cardpad{margin-top:16px} section{margin-top:18px}
 .stop-all{border-color:var(--red);color:var(--red)}
+.spark-strip{display:flex;gap:14px;flex-wrap:wrap;margin:4px 0 14px}
+.spark-cell{flex:1;min-width:130px;background:#fafbfd;border:1px solid var(--border);border-radius:10px;padding:7px 10px}
+.spark-head{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;color:var(--muted);margin-bottom:2px}
+.spark-head b{color:var(--text);font-size:13px}
+.spark{display:block}
+.card .card{margin-top:0}section .card .card{margin-top:2px}
 </style>
 </head>
 <body>
