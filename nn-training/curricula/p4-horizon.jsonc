@@ -1,0 +1,107 @@
+// 课程 p4-horizon —— 新实验（DECISIONS §345，docs/rl.progress.md §4）：视野假设
+//
+// 由 p4-onset.jsonc 逐字节派生，仅改动以下 6 处，其余（地图/敌编/player/reward/
+// max_ticks/终局分/workers/eval 节奏）与 p4-onset 完全同义：
+//   1. name: p4-onset → p4-horizon
+//   2. gamma: 0.995 → 0.998（视野 200 → 500 tick）
+//   3. lam: 0.97 → 0.99（GAE trace (γλ)^k 约 29 → 83 步；λ 才是 advantage
+//      视野的主旋钮，单改 γ 几乎不动 (γλ)^k，故双改记为同一个"视野假设"）
+//   4. bc: p1-BC ep60 → p4-onset it70 权重（贪心 35/100 最优点；不用 it80 的）
+//   5. out/traj/backup_dir/backup_prefix → tmp/p4-horizon（§15.5：fresh 目录，
+//      不 resume 旧 run；旧 run 终点 it81，基线锚 it80 贪心 20/100）
+//   6. ppo_schedule：新 run 从 it1 起，但权重已收敛，不用 phase-1（3e-4/kl 0.6），
+//      用 phase-2 档（1.5e-4/kl 0.2 × 40 轮 → 尾 5e-5/kl 0）续跑。
+//
+// 背景（p4-onset it1–81，2026-09-06）：自 it55 起 25 轮零净进展
+//   （贪心 30/29/28/35/17/20，it80=20% 触发提前干预线）；训练健康
+//   （熵 0.33–0.35，KL~0.02）——"学不动"而非"学崩"。
+// 不动项的理由：死亡 ~60% 是主因，eval 超时仅 8%（课程注释的 recalibrate
+//   触发条件未满足）；God 同 2400 内清 64%，预算够好策略用。
+// 风险：γ 切换重标 returns，value 头必有一段 dip；λ 0.99 方差上升。
+// 判定线：贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮则视野假设证伪，
+//   下一候选 wDmg 加码。
+// 启动：bun tools/hub-start.ts --course p4-horizon（远程 GPU PPO；本地只做
+//   调度+采集。hub-server 必须指向本课程 traj，复用旧课程的 hub 进程会读错队列。）
+{
+  "version": 5,
+  "name": "p4-horizon",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p4-horizon/weights.json",
+  "traj": "tmp/p4-horizon",
+  // F4 ENT 熔断：沿用 p4-onset 的 0.25（低熵热启动档；当前熵带 0.33，§339 语义）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p4-horizon",
+  "backup_prefix": "p4-horizon",
+  // 自定义关 stage ID 从 2000 开始，p4-horizon 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

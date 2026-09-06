@@ -6,6 +6,19 @@
 
 ---
 
+## §4 p4-horizon 新实验：视野假设（2026-09-06，DECISIONS §345）
+
+> p4-onset it55–80 平台确认（贪心 30/29/28/35/17/20）后的干预：γ 0.995→0.998 +
+> λ 0.97→0.99，warm-start it70 权重，fresh out/traj。结果待回填。
+
+- 起点：`nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json`
+  （贪心 35/100 最优点）；课程 `nn-training/curricula/p4-horizon.jsonc`；
+  输出 `tmp/p4-horizon/`；归档 `nn-training/weights/p4-horizon/`。
+- 基线锚：p4-onset it80（贪心 20/100，rollout 15.3%，熵 0.33/KL 0.02）。
+- 判定线：贪心持续 >35% 为成；≤30% 横盘 40 轮则视野假设证伪，下一候选 wDmg。
+
+---
+
 ## §3 p4-BC 全程蒸馏评估：45 checkpoints × 100 局（2026-09-04）
 
 > p4-BC（ep60 热启动 + p4 语料，`train/bc.py --arch student --value-coef 0.5`，

@@ -2573,3 +2573,36 @@ v3 语义：**全量门禁照常运行（判定质量不降级），拦截只认
 演练实录：ruff staged 拦截 ✓（F401，rl/zz_drill_tmp.py）；tsc staged 拦截 ✓
 （TS2322，tools/zz-drill-staged.ts）；tsc 未跟踪文件报错放行 ✓
 （src/zz-drill-untracked.ts，兼作真实提交）；selftest ✓。
+
+## §345 / p4-horizon 新实验：视野假设 γ+λ（2026-09-06，用户拍板"γ+λ一起动"）
+
+背景：p4-onset PPO 自 it55 起 25 轮零净进展（贪心 30/29/28/35/17/20，
+it80=20% 触发提前干预线——it100 线作废）；训练健康（熵 0.33–0.35，
+KL~0.02，无熔断）——"学不动"而非"学崩"。另两个结构证据：胜局清场
+p50=1804 tick 且 70 轮不下降（效率技能没学会）；超时局均 3.2 杀、
+23/25 有 3+ 杀（near-win 被 cap 咬）；死亡 ~60% 仍是主因。
+
+决策：按 §15.5 开新实验 `p4-horizon`（fresh out/traj，不 resume 旧 run），
+warm-start **it70 权重**（贪心 35% 最优点，
+`nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json`，不用 it80 的），
+仅动视野双旋钮 **γ 0.995→0.998、λ 0.97→0.99**（GAE trace (γλ)^k 约 29→83 步；
+单改 γ 几乎不动 advantage 视野——λ 才是主旋钮，故双改记为同一个"视野假设"）。
+其余与 p4-onset 逐字节同义：reward / max_ticks 2400 / 终局分一律不动
+（死亡主因下 cap 与 -2/-1 均非瓶颈——超时 eval 仅 8%，课程注释的 recalibrate
+触发条件未满足；God 同 2400 内清 64%，预算够好策略用）。
+
+- schedule：新 run 从 it1 起，但权重已收敛，不用 phase-1（3e-4/kl 0.6），
+  用 phase-2 档（1.5e-4/kl 0.2/kl_cap 0.2 × 40 轮 → 尾 5e-5/kl 0）续跑。
+- ent_break 0.25 沿用（当前熵带 0.33，F4 相对崩塌语义见 §339）。
+- 风险：γ 切换重标 returns，value 头必有一段 dip；λ 0.99 方差上升。
+  若 40 轮内贪心无超 35% → 视野假设证伪，下一候选 wDmg 加码（死亡主因）。
+- 判定线：贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮为败。
+  基线锚：p4-onset it80（贪心 20/100，rollout 15.3%）。详见
+  `docs/rl.progress.md` §4。
+- 启动纠正（同日）：首启误用 start-training.ps1 → 本地 CPU PPO，且 bc 路径
+  触发 warm_start_normalize 把 it70 权重洗掉（trunk ×0.0095 + value 清零）；
+  已杀错跑、删污染 traj、原始 it70 逐字节重播种。正确入口是
+  `bun tools/hub-start.ts --course p4-horizon`（`--ppo remote`，PPO 上云；
+  remote 跳过 build_model 故无 normalize 风险）。另：hub-server 的
+  job_root/jsonl 绑定课程队列，复用旧课程 hub 进程会读错队列——切课程必须
+  重启 hub-server（本轮杀 23224，由 hub-start 重拉）。
