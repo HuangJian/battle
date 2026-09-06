@@ -13,7 +13,7 @@
  * 本文件只读：聚合 tmp 下各训练流目录的 dist-agent-meta.jsonl + 实时 ping，不渲染任何密钥。
  */
 
-import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
+import { readFileSync, readdirSync, statSync, existsSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 
 /** 仓库根（本文件在 tools/agent/ 下）。 */
@@ -425,6 +425,66 @@ function readIterActuals(trajDir: string, iter: number): IterActuals | null {
   }
 }
 
+// ---------------- 实际值留底缓存（计算一次永久使用） ----------------
+// keep_iters（默认 5）一到，trainer 的 _rotate_cleanup 删旧 it{N} 目录；且 manifest
+// 聚合是递归目录扫描——每刷新都重算既慢又不必要。实际值是终局值、聚合一次不再变化，
+// 故：①轮次收尾后首次渲染时计算一次，写入 flow 根目录 .pool-actuals-cache.json；
+// ②此后每次渲染查缓存直接用（不再扫目录）；③目录被轮转后缓存即唯一来源，真实值
+// 照常展示（不再回退 ≈）。键 = iter；值附该轮 iteration 事件的 time 作防串门闩——
+// 同 traj 重启复用 iter 号时 time 不同，视为 miss 重算并覆写。文件损坏/缺失 →
+// 空缓存重建（自愈）。
+
+interface CachedActuals extends IterActuals {
+  /** 该轮 iteration 事件的 time（防串门闩：同 iter 号不同轮 → 不采用缓存）。 */
+  time: string
+}
+
+function actualsCachePath(trajDir: string): string {
+  return join(trajDir, '.pool-actuals-cache.json')
+}
+
+function loadActualsCache(trajDir: string): Map<number, CachedActuals> {
+  const out = new Map<number, CachedActuals>()
+  try {
+    const raw = JSON.parse(readFileSync(actualsCachePath(trajDir), 'utf8')) as Record<
+      string,
+      CachedActuals
+    >
+    for (const [k, v] of Object.entries(raw)) {
+      const it = Number(k)
+      if (
+        Number.isInteger(it) &&
+        it >= 0 &&
+        v &&
+        typeof v.time === 'string' &&
+        typeof v.games === 'number' &&
+        typeof v.totalKills === 'number' &&
+        typeof v.totalPU === 'number' &&
+        typeof v.avgTicks === 'number'
+      ) {
+        out.set(it, v)
+      }
+    }
+  } catch {
+    /* 缺失/损坏 → 空缓存重建 */
+  }
+  return out
+}
+
+function saveActualsCache(trajDir: string, cache: Map<number, CachedActuals>): void {
+  try {
+    // 只留最近 500 轮，防无限增长。
+    const obj: Record<string, CachedActuals> = {}
+    for (const k of [...cache.keys()].sort((a, b) => b - a).slice(0, 500)) {
+      const v = cache.get(k)
+      if (v) obj[String(k)] = v
+    }
+    writeFileSync(actualsCachePath(trajDir), JSON.stringify(obj))
+  } catch {
+    /* 写失败不致命——下次渲染带新数据重试 */
+  }
+}
+
 // ---------------- 干净评估汇总（eval_log.jsonl） ----------------
 
 /** eval_log.jsonl 渲染所需聚合：eval_summary 行 + 该 (iter,wver) 逐局行的
@@ -577,14 +637,24 @@ interface IterRow {
   evalData: EvalSummary | null
 }
 
-/** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标。 */
-function readIterMetrics(trajDir: string): IterRow[] {
+/** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标。
+
+ * 实际值缓存优先（2026-09-06 用户指令「计算过一次就缓存起来一直用」）：每轮的
+ * manifest 聚合（递归扫 it{N} 目录）只做一次，结果落 .pool-actuals-cache.json，
+ * 之后每次渲染查缓存直接用——time 门闩匹配才命中（同 traj 重启复用 iter 号时
+ * time 不同 → 视为 miss 重算并覆写）。轮转删除目录后缓存即唯一来源，真实值
+ * 照常展示（不再回退 ≈）。 */
+function readIterMetrics(
+  trajDir: string,
+  actualsCache: Map<number, CachedActuals>,
+): { rows: IterRow[]; cacheDirty: boolean } {
   const MAX = 20
   const logPath = join(trajDir, 'training_log.jsonl')
   // eval 汇总整册读一次（按 iter 键控），逐行查表——不在循环里反复开文件。
   const evalSummaries = readEvalSummaries(trajDir)
+  let cacheDirty = false
   try {
-    if (!existsSync(logPath)) return []
+    if (!existsSync(logPath)) return { rows: [], cacheDirty }
     const lines = readFileSync(logPath, 'utf8').split(String.fromCharCode(10))
     const rows: IterRow[] = []
     for (const line of lines) {
@@ -599,9 +669,29 @@ function readIterMetrics(trajDir: string): IterRow[] {
           .map(([k, v]) => `${k}:${(v * 100).toFixed(0)}%`)
           .join(' ')
         const iter = Number(r.iter ?? 0)
+        const rowTime = String(r.time ?? '')
+        // 实际值：缓存命中（time 门闩匹配）→ 直接用，不再递归扫目录；miss →
+        // 读盘聚合一次并写入缓存。iteration 事件只在轮次收尾时落账，故缓存值
+        // 恒为该轮终局聚合（无中途部分值污染）。
+        let actuals: IterActuals | null = null
+        const cached = actualsCache.get(iter)
+        if (cached && cached.time === rowTime) {
+          actuals = {
+            games: cached.games,
+            totalKills: cached.totalKills,
+            totalPU: cached.totalPU,
+            avgTicks: cached.avgTicks,
+          }
+        } else {
+          actuals = readIterActuals(trajDir, iter)
+          if (actuals) {
+            actualsCache.set(iter, { ...actuals, time: rowTime })
+            cacheDirty = true
+          }
+        }
         rows.push({
           iter,
-          time: String(r.time ?? ''),
+          time: rowTime,
           winRate: Number(r.winRate ?? 0),
           scoreMean: Number(r.score_mean ?? 0),
           scoreStd: Number(r.score_std ?? 0),
@@ -625,7 +715,7 @@ function readIterMetrics(trajDir: string): IterRow[] {
           accuracy: Number(dm.accuracy ?? 0),
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
-          actuals: readIterActuals(trajDir, iter),
+          actuals,
           evalData: evalSummaries.get(iter) ?? null,
         })
       } catch {
@@ -639,9 +729,9 @@ function readIterMetrics(trajDir: string): IterRow[] {
     for (const r of rows) byIter.set(r.iter, r)
     const merged = [...byIter.values()]
     merged.sort((a, b) => b.iter - a.iter)
-    return merged.slice(0, MAX)
+    return { rows: merged.slice(0, MAX), cacheDirty }
   } catch {
-    return []
+    return { rows: [], cacheDirty }
   }
 }
 
@@ -758,7 +848,7 @@ ${lootCell}
 <tbody>${cells.join(String.fromCharCode(10))}</tbody>
 </table>
 </div>
-<p class="foot" style="margin:8px 2px 0">存活/击杀/道具 = <b>实际值</b>（该轮 <code>it{N}/**/manifest.json</code> 逐局聚合，按 stage+seed 去重；轮次完成落盘才显示）。带 <code>≈</code> 的为估算（该轮磁盘目录已被轮转清理，仅剩 <code>training_log.jsonl</code> 的 dim 均值的换算）。胜率/得分/PPO 指标来自 PPO 收敛日志。eval 子行 = <b>干净评估</b>（greedy 固定语料，<code>eval_log.jsonl</code>：eval_summary + 逐局行聚合），插在对应 iter 行下、列位对齐——<b>iter=N 的 eval 评估的是第 N 轮 PPO 更新前的权重</b>，即该轮 rollout 采样所用的同一权重：胜率/存活/击杀/道具/得分上下两行直接对照（采样 vs 贪心）；summary 按 <code>iter</code> 字段对齐（可能晚到下一轮才落账，不按时间匹配）；<code>缺N</code> = 窗口内未收官被清场的评估局。行过滤选择记录在 localStorage；eval only 模式下子行标签带轮号。</p>
+<p class="foot" style="margin:8px 2px 0">存活/击杀/道具 = <b>实际值</b>（该轮 <code>it{N}/**/manifest.json</code> 逐局聚合，按 stage+seed 去重；<b>计算一次即留底</b> <code>.pool-actuals-cache.json</code>——目录被 keep_iters 轮转删除后照常按真实值展示，刷新不再重算）。带 <code>≈</code> 的为估算（该轮收尾时页面未在运行、缓存未及建立，仅剩 <code>training_log.jsonl</code> 的 dim 均值换算）。胜率/得分/PPO 指标来自 PPO 收敛日志。eval 子行 = <b>干净评估</b>（greedy 固定语料，<code>eval_log.jsonl</code>：eval_summary + 逐局行聚合），插在对应 iter 行下、列位对齐——<b>iter=N 的 eval 评估的是第 N 轮 PPO 更新前的权重</b>，即该轮 rollout 采样所用的同一权重：胜率/存活/击杀/道具/得分上下两行直接对照（采样 vs 贪心）；summary 按 <code>iter</code> 字段对齐（可能晚到下一轮才落账，不按时间匹配）；<code>缺N</code> = 窗口内未收官被清场的评估局。行过滤选择记录在 localStorage；eval only 模式下子行标签带轮号。</p>
 <script>
 (function () {
   const KEY = 'pool.iterFilter';
@@ -805,7 +895,12 @@ export async function renderPoolPage(ctx: PoolPageCtx): Promise<string> {
   const nodes = loadPoolConfig()
   const nowStr = fmtTs(Date.now())
   // 每轮迭代指标：从 activeFlow 目录下的 training_log.jsonl 读取。
-  const iterRows = activeFlow ? readIterMetrics(join(REPO_ROOT, 'tmp', activeFlow.dir)) : []
+  const trajDir = activeFlow ? join(REPO_ROOT, 'tmp', activeFlow.dir) : null
+  const actualsCache = trajDir ? loadActualsCache(trajDir) : new Map<number, CachedActuals>()
+  const { rows: iterRows, cacheDirty } = trajDir
+    ? readIterMetrics(trajDir, actualsCache)
+    : { rows: [] as IterRow[], cacheDirty: false }
+  if (trajDir && cacheDirty) saveActualsCache(trajDir, actualsCache)
   const iterTableHtml = renderIterTable(iterRows)
   const rows: string[] = []
   const disabledRows: string[] = []
