@@ -1,0 +1,389 @@
+/** api.ts — 控制台 API：状态快照（GET /api/state）+ 动作路由（POST /api/*）。
+ *
+ *  快照即页面数据源：组件表（进程/健康/日志尾）、节点表（rl-config + 实时 ping）、
+ *  模式开关（rl-config rl.* 键 + console-state）、课程数据与训练指标（iters.ts）。
+ *  所有动作经 actions.ts（busy 互斥在那一层）；本层只做解析/分发/HTTP 语义映射：
+ *  ActionError → 409，参数错误 → 400，动作失败（业务）→ 200 + ok:false。
+ */
+
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
+import path from 'path'
+import { REPO_ROOT } from '../paths'
+import { httpOk, pidAlive } from '../net'
+import { loadRegistry } from '../registry'
+import { loadConfig } from '../config'
+import { COMPONENT_LABELS, loadConsoleState } from './actions'
+import { readIterMetrics, type IterRow } from '../monitor/iters'
+import type { Component, RlConfig } from '../types'
+import {
+  ActionError,
+  busy,
+  smokeComponent,
+  setMode,
+  setNodeConcurrency,
+  setNodeEnabled,
+  startComponent,
+  startPreset,
+  stopAll,
+  stopComponent,
+  type ActionResult,
+  type StartCtx,
+} from './actions'
+
+// ────────────────────────── 快照类型 ──────────────────────────
+
+export interface ComponentView {
+  key: Component
+  label: string
+  /** running = 进程存活；stopped = 无存活进程；exited = 登记仍在但进程已死。 */
+  status: 'running' | 'stopped' | 'exited'
+  pid: number | null
+  url: string | null
+  course: string | null
+  mode: string | null
+  healthy: boolean | null
+  /** 日志文件相对 nn-training/ 的路径（页面点击查看尾行）。 */
+  log: string | null
+  logTail: string[]
+  busy: boolean
+}
+
+export interface NodeView {
+  id: string
+  url: string
+  gpuPush: boolean
+  enabled: boolean
+  concurrency: number
+  /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
+  online: boolean | null
+  codeHash: string | null
+  cpus: number | null
+  busy: boolean
+}
+
+export interface ModeView {
+  /** 控制台 trainer 基建编排（console-state 持久化）。 */
+  trainerPpo: 'pull' | 'push' | 'local'
+  /** rl-config rl.* 键（trainer 启动时消费）。 */
+  stream: number
+  doubleBuffer: number
+  precollectEarly: number
+}
+
+export interface ConsoleStateView {
+  time: string
+  course: string
+  /** tmp/ 下有 training_log.jsonl 的课程（最近更新优先）。 */
+  courses: string[]
+  components: ComponentView[]
+  nodes: NodeView[]
+  modes: ModeView
+  metrics: MetricsView
+}
+
+export interface MetricsView {
+  /** 该课程是否有数据。 */
+  available: boolean
+  iters: IterRow[]
+  error?: string
+}
+
+// ────────────────────────── 课程发现 ──────────────────────────
+
+/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录，按日志 mtime 新→旧。 */
+export function discoverCourses(max = 12): string[] {
+  const out: Array<{ name: string; mtime: number }> = []
+  try {
+    for (const ent of readdirSync(path.join(REPO_ROOT, 'tmp'), { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue
+      const lp = path.join(REPO_ROOT, 'tmp', ent.name, 'training_log.jsonl')
+      try {
+        out.push({ name: ent.name, mtime: statSync(lp).mtimeMs })
+      } catch {
+        /* no log — not a course dir */
+      }
+    }
+  } catch {
+    return []
+  }
+  return out
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, max)
+    .map((c) => c.name)
+}
+
+// ────────────────────────── 快照组装 ──────────────────────────
+
+const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
+  selfNode: () => 'tmp/sampler-agent.log',
+  hubServer: () => 'tmp/hub-server.out',
+  cloudflared: (_c) => 'tmp/cloudflared.log',
+  trainingLoop: (_cfg, course) => `tmp/${course || 'nocourse'}/training-loop.log`,
+  workerServe: () => 'tmp/remote-worker-serve.log',
+}
+
+const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig) => string>> = {
+  selfNode: (c) => `http://127.0.0.1:${c.rl.agent_port}/v1/ping`,
+  hubServer: (c) => `http://127.0.0.1:${c.rl.hub_port}/ping`,
+  workerServe: (c) => `http://127.0.0.1:${c.rl.hub_port + 2}/ping`,
+}
+
+const ALL_COMPONENTS: Component[] = [
+  'selfNode',
+  'hubServer',
+  'cloudflared',
+  'trainingLoop',
+  'workerServe',
+]
+
+function logTail(nnRel: string, n = 5): string[] {
+  try {
+    return readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel), 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .slice(-n)
+      .map((l) => l.slice(0, 200))
+  } catch {
+    return []
+  }
+}
+
+/** 组件视图（健康探测按组件语义：端口服务 ping / 隧道 URL / 存活即健康）。 */
+export async function componentViews(cfg: RlConfig, course: string): Promise<ComponentView[]> {
+  const reg = loadRegistry()
+  const views: ComponentView[] = []
+  for (const key of ALL_COMPONENTS) {
+    const e = reg[key]
+    const alive = pidAlive(e?.pid)
+    const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
+    let healthy: boolean | null = null
+    const probe = HEALTHY_PORTS[key]?.(cfg)
+    if (status === 'running' && probe) {
+      healthy = await httpOk(
+        probe,
+        key === 'selfNode'
+          ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
+          : cfg.rl.remote_token,
+        2500,
+      )
+    } else if (status === 'running' && key === 'cloudflared') {
+      healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 8000) : null
+    } else if (status === 'running' && key === 'trainingLoop') {
+      healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
+    }
+    const logRel = COMPONENT_LOGS[key]?.(cfg, course) ?? e?.log ?? null
+    views.push({
+      key,
+      label: COMPONENT_LABELS[key],
+      status,
+      pid: e?.pid ?? null,
+      url: e?.url ?? null,
+      course: e?.course ?? null,
+      mode: e?.mode ?? null,
+      healthy,
+      log: logRel,
+      logTail: logRel ? logTail(logRel) : [],
+      busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
+    })
+  }
+  return views
+}
+
+/** 节点视图（rl-config + enabled 节点并行 ping）。 */
+export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
+  const out: NodeView[] = []
+  for (const n of cfg.nodes) {
+    let online: boolean | null = null
+    let codeHash: string | null = null
+    let cpus: number | null = null
+    if (n.enabled) {
+      try {
+        const resp = await fetch(`${n.url}/v1/ping`, {
+          headers: { Authorization: `Bearer ${n.authKey}` },
+          signal: AbortSignal.timeout(4000),
+        })
+        online = resp.status === 200
+        if (online) {
+          const body = (await resp.json()) as { codeHash?: string; cpus?: number }
+          codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
+          cpus = typeof body.cpus === 'number' ? body.cpus : null
+        }
+      } catch {
+        online = false
+      }
+    }
+    out.push({
+      id: n.id,
+      url: n.url,
+      gpuPush: !!n.gpu_push,
+      enabled: n.enabled,
+      concurrency: n.concurrency,
+      online,
+      codeHash,
+      cpus,
+      busy: busy.has(`node:${n.id}`),
+    })
+  }
+  return out
+}
+
+/** 完整状态快照（页面 3s 轮询的数据源）。 */
+export async function buildStateView(): Promise<ConsoleStateView> {
+  const cfg = loadConfig()
+  const state = loadConsoleState()
+  const course = state.course || discoverCourses()[0] || ''
+  const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+  let metrics: MetricsView = { available: false, iters: [] }
+  if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
+    try {
+      metrics = {
+        available: true,
+        iters: readIterMetrics(path.join(REPO_ROOT, 'tmp', course)).rows,
+      }
+    } catch (e) {
+      metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return {
+    time: new Date().toISOString(),
+    course,
+    courses: discoverCourses(),
+    components,
+    nodes,
+    modes: {
+      trainerPpo: state.trainerPpo,
+      stream: Number(cfg.rl.stream ?? 0),
+      doubleBuffer: Number(cfg.rl.double_buffer ?? 0),
+      precollectEarly: Number(cfg.rl.precollect_early ?? 0),
+    },
+    metrics,
+  }
+}
+
+// ────────────────────────── 动作路由 ──────────────────────────
+
+interface PostBody {
+  [key: string]: unknown
+}
+
+function str(b: PostBody, k: string): string {
+  const v = b[k]
+  return typeof v === 'string' ? v : ''
+}
+
+function okResp(r: ActionResult, status = 200): Response {
+  return new Response(JSON.stringify(r), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  })
+}
+
+function errResp(message: string, status: number): Response {
+  return okResp({ ok: false, message }, status)
+}
+
+/** 解析/分发 POST /api/*。返回 null = 未匹配（调用方 404）。 */
+export async function routeAction(action: string, body: PostBody): Promise<Response | null> {
+  const state = loadConsoleState()
+  const ctx: StartCtx = {
+    course: str(body, 'course') || state.course,
+    trainerPpo: state.trainerPpo,
+  }
+  try {
+    switch (action) {
+      case 'start': {
+        const key = str(body, 'component') as Component
+        if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)
+        return okResp(await startComponent(key, ctx))
+      }
+      case 'stop': {
+        const key = str(body, 'component') as Component
+        if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)
+        return okResp(await stopComponent(key))
+      }
+      case 'stopAll':
+        return okResp(await stopAll())
+      case 'smoke': {
+        const key = str(body, 'component') as Component
+        if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)
+        return okResp(await smokeComponent(key, ctx))
+      }
+      case 'preset': {
+        const mode = str(body, 'mode')
+        if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)
+        return okResp(await startPreset(mode as 'pull' | 'push' | 'local', ctx.course))
+      }
+      case 'setMode': {
+        const key = str(body, 'key')
+        const value = str(body, 'value')
+        return okResp(await setMode(key, value))
+      }
+      case 'setCourse': {
+        const { saveConsoleState, ActionError } = await import('./actions')
+        const course = str(body, 'course')
+        if (course) {
+          // validateCourseArg 会 process.exit（CLI 语义）——控制台改抛 ActionError。
+          const { existsSync } = await import('fs')
+          const { CURRICULA_DIR } = await import('../paths')
+          const pathMod = await import('path')
+          if (
+            !existsSync(course) &&
+            !existsSync(pathMod.default.join(CURRICULA_DIR, `${course}.jsonc`))
+          ) {
+            throw new ActionError(
+              `课程不存在: ${course}（curricula/ 下无同名 .jsonc，或传已存在的课程文件路径）`,
+            )
+          }
+        }
+        saveConsoleState({ course })
+        return okResp({ ok: true, message: `当前课程 = ${course || '(空)'}` })
+      }
+      case 'setNodeEnabled': {
+        const id = str(body, 'id')
+        const enabled = body.enabled === true || body.enabled === 'true'
+        return okResp(await setNodeEnabled(id, enabled))
+      }
+      case 'setNodeConcurrency': {
+        const id = str(body, 'id')
+        const n = Number(body.concurrency)
+        if (!Number.isFinite(n)) return errResp(`并发数非法: ${body.concurrency}`, 400)
+        return okResp(await setNodeConcurrency(id, Math.round(n)))
+      }
+      case 'nodeSmoke': {
+        const id = str(body, 'id')
+        if (busy.has(`node:${id}`)) return errResp('该节点冒烟进行中', 409)
+        const cfg = loadConfig()
+        const node = cfg.nodes.find((x) => x.id === id)
+        if (!node) return errResp(`节点不存在: ${id}`, 400)
+        if (!node.enabled) return okResp({ ok: false, message: '节点已停用——先启用再冒烟' })
+        const cCourse = str(body, 'course') || state.course
+        const cPath = path.join(REPO_ROOT, 'tmp', cCourse, 'weights.json')
+        const weightsPath = existsSync(cPath)
+          ? cPath
+          : path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+        if (!existsSync(weightsPath))
+          return okResp({ ok: false, message: '无可用权重文件——无法 rollout 冒烟' })
+        busy.add(`node:${id}`)
+        try {
+          const raw = readFileSync(weightsPath)
+          const bytes = new Uint8Array(raw.byteLength)
+          bytes.set(raw)
+          const { rolloutSmokeNode, weightsFingerprint } = await import('../smoke')
+          const wver = await weightsFingerprint(weightsPath)
+          const passed = await rolloutSmokeNode(node, bytes, wver)
+          return okResp({
+            ok: passed,
+            message: passed ? `${id} rollout 冒烟通过` : `${id} 冒烟失败（明细见控制台服务日志）`,
+          })
+        } finally {
+          busy.delete(`node:${id}`)
+        }
+      }
+      default:
+        return null
+    }
+  } catch (e) {
+    if (e instanceof ActionError) return errResp(e.message, 409)
+    return errResp(e instanceof Error ? e.message : String(e), 500)
+  }
+}

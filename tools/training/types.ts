@@ -39,7 +39,8 @@ export interface RegistryEntry {
   url?: string
   log?: string
   metrics?: number
-  mode?: StartMode
+  /** 启动模式：CLI 三模式（hub/push/train）或控制台 trainer 编排（pull/local）。 */
+  mode?: StartMode | 'pull' | 'local'
 }
 
 /** registry.json：全部组件条目（缺省组件 = 未启动）。 */

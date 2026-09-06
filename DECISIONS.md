@@ -2646,3 +2646,48 @@ run_rl 单实例锁存活时预演空烧 180s（现 fail fast 提示）；--smok
 GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DONE 退出）。
 `nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
 （docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。
+
+## §348 / NN 训练控制台：tools/training/console（本地网页，2026-09-06，用户指令）
+
+用户需求：把 tools/training 的脚本能力做成「神经网络训练控制台」网站——本地
+localhost 无鉴权发布；独立控制所有训练组件的启/停/冒烟；监控运行状态与历史；
+监控训练指标；启停组件运行模式（trainer pull/push、stream、双缓冲等）；启停
+rollout 节点并改并行采集数（回写 rl-config.json）。
+
+**实现**：`tools/training/console/` 四模块——`server.ts`（Bun.serve 绑定
+127.0.0.1，无鉴权前提=仅回环）、`api.ts`（GET /api/state 快照 + POST /api/*
+动作路由；ActionError→409/参数错→400）、`actions.ts`（单组件启/停/冒烟、预设
+编排、模式开关、节点编辑）、`page.ts`（服务端渲染控制页，热加载 §341 语义）。
+
+**定案**：
+1. **零新依赖、无 vite/svelte**（§346 定案 5 延续）：服务端渲染 + 极小原生 JS，
+   复用 monitor/theme.ts 样式与 monitor/iters.ts 指标数据层。
+2. **复用而非旁路**：动作层调用与 CLI 启动器同一套原语（hub.step*、smoke、
+   proc.spawnBg/stopAllManaged、registry 账本、sentinels 哨兵）——组件状态与
+   CLI `--kill`/监督器共享同一账本，两条入口互不冲突。
+3. **模式开关两级落点**：`rl.stream/double_buffer/precollect_early` 是 run_rl
+   真实配置键 → 直接回写 rl-config.json（下次 trainer 启动生效，不碰在跑进程）；
+   trainer 的 pull/push/local 是控制台的基建编排选择 → 持久化
+   console-state.json，启动时翻译为组件组合（pull=+隧道，push=+hubServer，
+   local=仅 trainer）与 `--ppo remote` 有无。local 与 rl.stream=1 的显式互斥在
+   启动时拦（§330 语义）。
+4. **写回即冒烟**：节点启停/并发/模式开关写 rl-config.json 后跑 rlConfigSmoke
+   契约校验，坏配置不落盘生效。
+5. **并发纪律**：动作短命异步 + per-key busy 互斥（同 key 二次点击 409），
+   不做队列；页面 3s 整页 reload 轮询，输入焦点/展开详情时暂停防冲掉编辑。
+6. **setCourse 不复用 validateCourseArg**：CLI 版 process.exit(1)（控制台进程
+   会被测试/live 请求连带杀死）——路由层改抛 ActionError→409（单测覆盖）。
+
+**验证**：14 项单测（快照结构/路由 404·400·409/回写+还原/互斥/页面渲染）；
+实弹：server 起于 :8931，state/页面/双缓冲开关写回还原/未知动作 404/组件停
+止与冒烟动作/页面热加载全部实测通过；bun run check + build 绿。
+
+## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
+
+提交本日删除清理时首跑失败：hook 的 oxfmt 循环对 staged 清单全量 `bunx oxfmt` +
+`git add`，staged **删除**的 `.ts`（本例 tools/hub-start.ts）工作树已不存在 →
+`git add` fatal（`pathspec ... did not match any files`），输出被吞只留 exit 1。
+修复：循环内对不存在的文件先 `continue` 并打印跳过原因（最小改动，照常通过
+`--selftest`；本次 commit 已实弹验证跳过分支生效）。已知留待项：python 门禁的
+STAGED_PY 与 lint 集合同构（--diff-filter=ACM 排除删除，仅 ruff 收到删除路径时
+ruff 自己会因文件不存在报错）——留给下次涉及 .py 删除的提交顺手修复。

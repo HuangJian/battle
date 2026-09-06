@@ -395,6 +395,8 @@ export interface TrainingLoopSpec {
   jobRoot: string
   jsonlPath: string
   smoke: boolean
+  /** PPO 模式：remote=pull/push 远程结算（默认）；local=本机 CPU PPO。 */
+  ppo?: 'local' | 'remote'
   /** push 模式冒烟：本机伪 GPU 节点（worker_server）URL，注入 REMOTE_PUSH_NODE。 */
   pushNodeUrl?: string
   /** 已就绪的 venv 解析结果（复用，避免重复解析）。 */
@@ -444,8 +446,7 @@ export async function stepTrainingLoop(_cfg: RlConfig, s: TrainingLoopSpec): Pro
       path.join(NN_TRAINING, 'run_rl.py'),
       '--course',
       s.course,
-      '--ppo',
-      'remote',
+      ...(s.ppo === 'local' ? [] : ['--ppo', 'remote']),
       ...(s.smoke ? ['--smoke'] : []),
     ],
     env: {
