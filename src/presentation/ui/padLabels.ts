@@ -1,5 +1,5 @@
 /**
- * Pad button label formatting (§348 follow-up) — presentation-pure helpers,
+ * Pad button label formatting (§351a follow-up) — presentation-pure helpers,
  * headless-testable (AGENTS §8). Kept out of ControlsPanel so tests don't
  * need DOM, mirroring the formatKeyCode placement in HudView.
  */
@@ -36,7 +36,7 @@ export function formatPadButton(index: number): string {
 }
 
 /**
- * One row of the menu-screen pad legend (§348 follow-up): a rebindable
+ * One row of the menu-screen pad legend (§351a follow-up): a rebindable
  * action plus the human-readable label of its currently-bound button.
  */
 export interface PadLegendRow {

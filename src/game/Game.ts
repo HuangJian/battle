@@ -105,7 +105,7 @@ export class Game {
   /** Auto-fire wrapper around the human input — re-armed each stage. */
   autoFireInput: AutoFireInput | null = null
 
-  // ---- Gamepad support (DECISIONS §347c) ----
+  // ---- Gamepad support (DECISIONS §351) ----
   /**
    * Gamepad device manager: slots pad[0]→P1, pad[1]→P2, diffs connect /
    * disconnect transitions (toast wiring in GameLoop), and exposes one
@@ -123,7 +123,7 @@ export class Game {
    * The player-1 input the LIVE simulation must consume right now.
    * In Lie-Back-Win-Mode the raw keyboard is decorated by AutoFireInput, and
    * that decorated object — not `this.input` — is what the sim ticks on and
-   * what the recorder taps (DECISIONS #75). Since §347c the live input is a
+   * what the recorder taps (DECISIONS #75). Since §351 the live input is a
    * COMPOSITE (keyboard OR gamepad — the pad wins direction); `p1Composite`
    * is rebuilt by wireLiveInputs() whenever the auto-fire decoration flips.
    */
@@ -154,7 +154,7 @@ export class Game {
    * Call AFTER `godInput` / `autoFireInput` have been set to their new values.
    *
    * Both live inputs are COMPOSITES (keyboard OR gamepad, pad wins direction
-   * — §347c): P1's composite wraps AutoFireInput when coop decorates the
+   * — §351): P1's composite wraps AutoFireInput when coop decorates the
    * keyboard, otherwise the raw keyboard. The wrapper objects are rebuilt
    * whenever autoFireInput flips; the inner refs stay stable so pad state
    * never resets on a mode flip.
@@ -197,7 +197,7 @@ export class Game {
     // Pad bindings are a LIVE reference: the manager pushes it into both
     // GamepadInputs on every poll, so a Controls-panel remap (which mutates
     // this exact object) reaches gameplay immediately — same contract as
-    // keys/keys2 (§348 follow-up).
+    // keys/keys2 (§351a follow-up).
     this.pads.bindings = this.settings.pads ?? DEFAULT_PAD_BINDINGS
     this.world = new World()
     this.input = new Input(this.settings.keys)
@@ -205,7 +205,7 @@ export class Game {
     // as P1: a Controls-panel remap mutates this exact object and gameplay
     // sees it immediately. The two sets are separate objects, so remapping
     // P1 never touches P2. (Legacy saves migrate to DEFAULT_P2_KEYS in
-    // loadSettings — see DECISIONS.md §347 follow-up.)
+    // loadSettings — see DECISIONS.md §350 follow-up.)
     this.input2 = new Input(this.settings.keys2)
     // Gamepad composites: the sim consumes keyboard OR pad per player. The
     // inner InputLike refs are stable — AutoFireInput wraps this.input and is
@@ -223,7 +223,7 @@ export class Game {
       this.settings.pads,
     )
     // Pad-capture seam: the panel polls the LIVE P1 snapshot while listening
-    // for a button press (§348 follow-up). Read-only observation.
+    // for a button press (§351a follow-up). Read-only observation.
     this.presentation.ui.setPadSnapshotSource((): GamepadSnapshot | null => this.pads.p1Snapshot)
 
     // Wire mouse-click handlers for the start screen (same World-mutating
@@ -667,7 +667,7 @@ export class Game {
   }
 
   /**
-   * Drop all gamepad edge/held state (§347c). Called when leaving a state
+   * Drop all gamepad edge/held state (§351). Called when leaving a state
    * where pad input meant something other than gameplay — the unpause path
    * (MenuController) and resetToMenu — so a Start/A press consumed on the
    * pause or menu screen cannot bleed into the first playing frame (the

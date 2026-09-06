@@ -9,7 +9,7 @@ import {
 import type { GameSettings, KeyBindings } from '../src/types'
 
 /**
- * Player-2 key rebinding (DECISIONS.md two-player §347 follow-up):
+ * Player-2 key rebinding (DECISIONS.md two-player §350 follow-up):
  * settings persistence for `keys2`, sanitize repair, legacy-save migration,
  * and the cross-player conflict gate (P1 ↔ P2 must not share an active key).
  * Headless — pure functions only (AGENTS §8).

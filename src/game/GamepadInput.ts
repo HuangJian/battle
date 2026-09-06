@@ -7,7 +7,7 @@ import type { PadBindings } from '../types'
 export { GAMEPAD_BUTTONS } from './settings'
 
 // ================================================================
-// GamepadInput — gamepad support (DECISIONS §347c)
+// GamepadInput — gamepad support (DECISIONS §351)
 //
 // The browser Gamepad API is POLLED (navigator.getGamepads()), not
 // event-driven: there are no reliable per-frame "just pressed" events.
@@ -18,7 +18,7 @@ export { GAMEPAD_BUTTONS } from './settings'
 //   CompositeInput   keyboard OR gamepad merge (pad priority)
 //   GamepadManager   navigator slotting: pad[0]→P1, pad[1]→P2
 //
-// Standard-gamepad mapping (W3C mapping="standard"); §348 follow-up makes
+// Standard-gamepad mapping (W3C mapping="standard"); §351a follow-up makes
 // the action→button mapping rebindable via a live PadBindings reference
 // (defaults below), EXCEPT the left stick (raw axes) and Start/pause.
 //
@@ -62,7 +62,7 @@ const NEUTRAL: PadFrame = {
  * Stick has priority over d-pad when both are engaged (intentional single
  * direction: the movement system is axis-locked anyway).
  *
- * `bind` parametrizes the action→button mapping (§348 follow-up): a
+ * `bind` parametrizes the action→button mapping (§351a follow-up): a
  * PadBindings record of standard-mapping button indices per action; the
  * default is the standard layout above. Movement reads D-PAD buttons through
  * the binding — the left stick is raw axes and NOT rebindable. Pause (Start)
@@ -114,7 +114,7 @@ export class GamepadInput implements InputLike {
   private cur: PadFrame = NEUTRAL
 
   /**
-   * LIVE bindings reference (§348 follow-up) — readSnapshot reads it on
+   * LIVE bindings reference (§351a follow-up) — readSnapshot reads it on
    * every poll, so a Controls-panel remap reaches gameplay with zero
    * re-wiring (same live-ref contract as Input's KeyBindings).
    */
@@ -234,7 +234,7 @@ export class GamepadManager {
    */
   poll(): void {
     // Push the live bindings into the per-player inputs before the diff —
-    // both readSnapshot calls below must see the same mapping (§348).
+    // both readSnapshot calls below must see the same mapping (§351a).
     this.p1.bindings = this.bindings
     this.p2.bindings = this.bindings
     const pads = this.collect()
@@ -285,7 +285,7 @@ export class GamepadManager {
 }
 
 /**
- * First currently-pressed rebindable button in a snapshot, or null (§348
+ * First currently-pressed rebindable button in a snapshot, or null (§351a
  * follow-up). Used by the Controls panel's click-to-capture flow; pure so
  * it is headless-testable. Pause (Start) is excluded — it stays fixed.
  */

@@ -3,7 +3,7 @@ import { buildPadLegendRows, GAMEPAD_BUTTONS } from '../src/presentation/ui/padL
 import { DEFAULT_PAD_BINDINGS } from '../src/game/settings'
 
 /**
- * Menu-screen gamepad legend (§348 follow-up): a compact row list built
+ * Menu-screen gamepad legend (§351a follow-up): a compact row list built
  * purely from the live PadBindings, rendered near the nav hints. Headless —
  * pure functions only (AGENTS §8).
  */

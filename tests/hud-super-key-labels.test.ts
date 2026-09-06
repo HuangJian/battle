@@ -3,7 +3,7 @@ import { formatSuperKeyLabel } from '../src/presentation/ui/HudView'
 import { DEFAULT_KEYS, DEFAULT_P2_KEYS } from '../src/game/Input'
 
 /**
- * HUD super-item key labels (DECISIONS §347 follow-ups): the label text is a
+ * HUD super-item key labels (DECISIONS §350 follow-ups): the label text is a
  * pure function of (name, binding) so both the P1 row and the two-player P2
  * row are regression-tested headlessly (AGENTS §8 — no DOM).
  *

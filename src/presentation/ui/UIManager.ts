@@ -431,7 +431,7 @@ export class UIManager {
 
   /**
    * Pad-capture seam: give the panel read access to the live gamepad snapshot
-   * while it listens for a button press (§348 follow-up). Presentation-only —
+   * while it listens for a button press (§351a follow-up). Presentation-only —
    * the source is a read-only observation of the GamepadManager.
    */
   setPadSnapshotSource(source: () => GamepadSnapshot | null): void {

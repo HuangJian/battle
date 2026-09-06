@@ -324,7 +324,7 @@ export interface GameSettings {
   performanceMode: boolean
   keys: KeyBindings
   /**
-   * Player-2 bindings (双打 Two-Player, §347 follow-up). Held as a LIVE
+   * Player-2 bindings (双打 Two-Player, §350 follow-up). Held as a LIVE
    * object: Game constructs P2's Input over this exact reference so a panel
    * remap reaches gameplay immediately (same contract as `keys`).
    * Legacy saves predate this field — loadSettings migrates to
@@ -333,7 +333,7 @@ export interface GameSettings {
    */
   keys2: KeyBindings
   /**
-   * Gamepad bindings (§348 follow-up): standard-mapping button indices per
+   * Gamepad bindings (§351a follow-up): standard-mapping button indices per
    * pad action, held as a LIVE object — readSnapshot reads it on every poll,
    * so a panel remap reaches gameplay immediately (same contract as
    * keys/keys2). Legacy saves predate this field — loadSettings migrates to

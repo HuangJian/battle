@@ -3,7 +3,7 @@ import { DEFAULT_THEME } from '../config/theme'
 import type { GameSettings, KeyBindings, PadBindings } from '../types'
 
 /**
- * Standard-mapping button indices (W3C mapping="standard", §347c) — the
+ * Standard-mapping button indices (W3C mapping="standard", §351) — the
  * default gamepad layout, defined HERE (the data module, §2.4) so both
  * settings and GamepadInput can consume it without an import cycle.
  */
@@ -43,7 +43,7 @@ export const P2_ACTIVE_ACTIONS = [
 export type P2Action = (typeof P2_ACTIVE_ACTIONS)[number]
 
 /**
- * Rebindable gamepad actions (§348 follow-up) — the 4 d-pad directions plus
+ * Rebindable gamepad actions (§351a follow-up) — the 4 d-pad directions plus
  * the 4 face-button actions. Order is load-bearing for the panel's row layout.
  * `pause` (Start) is deliberately excluded: it is fixed for consistency, and
  * stick movement is raw-axes and not rebindable.
@@ -62,7 +62,7 @@ export const PAD_ACTIONS = [
 /** Actions shown in the Gamepad tab — exactly {@link PAD_ACTIONS}. */
 export type PadAction = (typeof PAD_ACTIONS)[number]
 
-/** Default gamepad bindings: the standard-mapping indices (§348). */
+/** Default gamepad bindings: the standard-mapping indices (§351a). */
 export const DEFAULT_PAD_BINDINGS: PadBindings = {
   up: GAMEPAD_BUTTONS.dpadUp,
   down: GAMEPAD_BUTTONS.dpadDown,
@@ -141,7 +141,7 @@ export function loadSettings(): GameSettings {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (raw) {
       const saved = JSON.parse(raw)
-      // Legacy saves predate keys2 (two-player §347): `{ ...saved.keys2 }` on
+      // Legacy saves predate keys2 (two-player §350): `{ ...saved.keys2 }` on
       // undefined spreads to {} so the per-field merge falls back to P2's
       // defaults — no explicit migration branch needed.
       const merged = {
@@ -149,7 +149,7 @@ export function loadSettings(): GameSettings {
         ...saved,
         keys: { ...defaults.keys, ...saved.keys },
         keys2: { ...defaults.keys2, ...saved.keys2 },
-        // Legacy saves predate pads (§348 follow-up): spreading undefined
+        // Legacy saves predate pads (§351a follow-up): spreading undefined
         // yields the defaults; a partial save keeps unspecified actions on
         // their defaults (per-field merge, same contract as keys/keys2).
         pads: sanitizePadBindings({ ...defaults.pads!, ...saved.pads }),
