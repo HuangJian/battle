@@ -101,6 +101,7 @@ export const en: Catalog = {
   'controls.padActions.guard': 'Pad Guardian',
   'controls.padActions.frenzy': 'Pad Frenzy',
   'controls.padActions.rewind': 'Pad Time Box',
+  'menu.padLegend': 'Gamepad:',
   'controls.reset': 'Reset Defaults',
   'controls.back': 'Back',
   'controls.escHint': 'Press Esc to go back',

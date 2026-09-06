@@ -97,6 +97,7 @@ export const zh: Catalog = {
   'controls.padActions.guard': '手柄·天降神兵',
   'controls.padActions.frenzy': '手柄·狂暴宣泄',
   'controls.padActions.rewind': '手柄·时光宝盒',
+  'menu.padLegend': '手柄：',
   'controls.reset': '恢复默认',
   'controls.back': '返回',
   'controls.escHint': '按 Esc 返回',

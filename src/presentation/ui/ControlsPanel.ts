@@ -64,6 +64,9 @@ export class ControlsPanel {
 
   /** Invoked whenever bindings change so HUD super-item labels re-render. */
   onSuperLabelsChanged: (() => void) | null = null
+  /** Invoked when the panel closes — lets the menu pad-legend re-render
+   *  from the (possibly just-rebound) live bindings. */
+  onClosed: (() => void) | null = null
 
   constructor(private readonly createElement: (tag: string, className: string) => HTMLElement) {
     this.el = this.build()
@@ -137,6 +140,7 @@ export class ControlsPanel {
     this.listeningAction = null
     this.stopPadCapture()
     this.el.classList.remove('active')
+    this.onClosed?.()
   }
 
   private build(): HTMLElement {

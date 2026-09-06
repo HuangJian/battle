@@ -870,6 +870,40 @@ body.theme-modern .ui-menu {
   color: var(--theme-text-secondary);
 }
 
+/* Menu-screen gamepad bindings legend (§348 follow-up) — same compact kbd
+   styling as the nav hints, muted so it never competes with the rows. */
+.menu-pad-legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--theme-text-muted);
+}
+
+.menu-pad-legend[hidden] {
+  display: none;
+}
+
+.menu-pad-legend-rows {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.menu-pad-legend-rows kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: var(--theme-button-bg);
+  border: 1px solid var(--theme-panel-border);
+  border-radius: 3px;
+  color: var(--theme-text-secondary);
+}
+
 .menu-hiscore {
   font-size: 11px;
   color: var(--theme-text-secondary);

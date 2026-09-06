@@ -4,6 +4,8 @@ import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES, localizedStageName } from '../../config/stages'
 import { i18n, t } from '../../i18n'
 import { menuRowIndex, type MenuRowKey } from '../../game/UIState'
+import { buildPadLegendRows } from './padLabels'
+import type { PadBindings } from '../../types'
 
 /**
  * Menu action callbacks registered by Game so mouse clicks on the start
@@ -54,6 +56,16 @@ export class MenuScreen {
   private resumeHint: HTMLElement | null = null
   private startHint: HTMLElement | null = null
   private controlsHint: HTMLElement | null = null
+  private padLegendRowsEl: HTMLElement | null = null
+
+  /**
+   * LIVE pad bindings (same reference GamepadManager reads) — the legend
+   * re-renders from it after a Controls-panel rebind, so it never goes
+   * stale. Null = feature not wired (legend hidden).
+   */
+  private padBindings: PadBindings | null = null
+  /** Change guard: last-rendered binding signature (avoids DOM churn). */
+  private lastPadSig = ''
 
   /** Whether a resumable manual snapshot exists (set after boot hydration). */
   private hasResume = false
@@ -138,6 +150,10 @@ export class MenuScreen {
         <div class="menu-controls">
           <span data-i18n="menu.nav.select">↑ ↓ Select</span>
           <span data-i18n="menu.nav.change">← → Change</span>
+        </div>
+        <div class="menu-pad-legend" data-menu="pad-legend">
+          <span class="menu-pad-legend-title" data-i18n="menu.padLegend">Gamepad:</span>
+          <span class="menu-pad-legend-rows" data-menu="pad-legend-rows"></span>
         </div>
         <div class="menu-hiscore">
           <span data-i18n="menu.hiscoreLabel">High Score:</span> <span data-menu="hiscore">0</span>
@@ -294,6 +310,9 @@ export class MenuScreen {
     // live language switch updates the menu without a full rebuild.
     this.refreshStageList()
     if (this.resumeTarget) this.setResumeTarget(this.resumeTarget)
+    // Legend rows are locale-neutral, but the render guard must not skip a
+    // first render after a locale swap rebuilt the DOM text nodes.
+    this.renderPadLegend()
   }
 
   /** Cache the menu DOM elements (once, after the el is in the document —
@@ -319,6 +338,38 @@ export class MenuScreen {
     this.resumeHint = this.el.querySelector('[data-menu="resume-hint"]')
     this.startHint = this.el.querySelector('[data-menu="start-hint"]')
     this.controlsHint = this.el.querySelector('[data-menu="controls-hint"]')
+    this.padLegendRowsEl = this.el.querySelector('[data-menu="pad-legend-rows"]')
+  }
+
+  /**
+   * Wire the LIVE pad bindings and render the legend (§348 follow-up).
+   * Called once from UIManager.initControls — the same live reference the
+   * GamepadManager reads, so a Controls-panel remap is visible here the
+   * moment the panel closes (see ControlsPanel.onClosed).
+   */
+  setPadBindings(pads: PadBindings | null): void {
+    this.padBindings = pads
+    this.renderPadLegend()
+  }
+
+  /**
+   * Rebuild the legend rows from the live bindings. Guarded by a binding
+   * signature so repeated calls (locale refresh, panel close) don't touch
+   * the DOM when nothing changed. Labels are language-neutral button names
+   * from {@link formatPadButton}; the title carries data-i18n instead.
+   */
+  renderPadLegend(): void {
+    if (!this.padLegendRowsEl || !this.padBindings) return
+    const p = this.padBindings
+    const sig = `${p.up},${p.down},${p.left},${p.right},${p.fire},${p.guard},${p.frenzy},${p.rewind}`
+    if (sig === this.lastPadSig) return
+    this.lastPadSig = sig
+    const rows = buildPadLegendRows(p)
+    // Labels come from our own formatter — fixed charset, no HTML-escape
+    // needed (same trust level as the built template above).
+    this.padLegendRowsEl.innerHTML = rows
+      .map((r) => `<kbd>${r.label}</kbd>`)
+      .join('')
   }
 
   /** Re-apply localized names to the (once-built) menu stage dropdown items. */

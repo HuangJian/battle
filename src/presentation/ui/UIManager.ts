@@ -418,6 +418,10 @@ export class UIManager {
     padBindings?: PadBindings,
   ): void {
     this.controls.initControls(bindings, bindings2, onChanged, padBindings)
+    // Menu pad legend reads the same live bindings; re-render when the
+    // panel closes (a rebind may have happened) — presentation-only.
+    this.menu.setPadBindings(padBindings ?? null)
+    this.controls.onClosed = () => this.menu.renderPadLegend()
   }
 
   /** Whether the controls panel is currently open (a UI-modal, not a world state). */
