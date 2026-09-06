@@ -332,6 +332,30 @@ export interface GameSettings {
    * are user-rebindable; system keys mirror P1's and are never polled.
    */
   keys2: KeyBindings
+  /**
+   * Gamepad bindings (§348 follow-up): standard-mapping button indices per
+   * pad action, held as a LIVE object — readSnapshot reads it on every poll,
+   * so a panel remap reaches gameplay immediately (same contract as
+   * keys/keys2). Legacy saves predate this field — loadSettings migrates to
+   * DEFAULT_PAD_BINDINGS. Movement maps d-pad buttons; stick movement is
+   * raw-axes and not rebindable. Pause (Start) is fixed for consistency.
+   */
+  pads?: PadBindings
+}
+
+/**
+ * Gamepad action → standard-mapping button index. Indices (not key codes):
+ * the browser reports buttons positionally, so a binding is the index itself.
+ */
+export interface PadBindings {
+  up: number
+  down: number
+  left: number
+  right: number
+  fire: number
+  guard: number
+  frenzy: number
+  rewind: number
 }
 
 export interface KeyBindings {

@@ -1,6 +1,23 @@
 import { DEFAULT_KEYS, DEFAULT_P2_KEYS, isModifierCode, parseBinding } from './Input'
 import { DEFAULT_THEME } from '../config/theme'
-import type { GameSettings, KeyBindings } from '../types'
+import type { GameSettings, KeyBindings, PadBindings } from '../types'
+
+/**
+ * Standard-mapping button indices (W3C mapping="standard", §347c) — the
+ * default gamepad layout, defined HERE (the data module, §2.4) so both
+ * settings and GamepadInput can consume it without an import cycle.
+ */
+export const GAMEPAD_BUTTONS = {
+  fire: 0, // A / Cross
+  guard: 1, // B / Circle
+  frenzy: 2, // X / Square
+  rewind: 3, // Y / Triangle
+  pause: 9, // Start / Options — fixed, not rebindable
+  dpadUp: 12,
+  dpadDown: 13,
+  dpadLeft: 14,
+  dpadRight: 15,
+} as const
 
 export const SETTINGS_KEY = 'bc_settings'
 
@@ -26,6 +43,84 @@ export const P2_ACTIVE_ACTIONS = [
 export type P2Action = (typeof P2_ACTIVE_ACTIONS)[number]
 
 /**
+ * Rebindable gamepad actions (§348 follow-up) — the 4 d-pad directions plus
+ * the 4 face-button actions. Order is load-bearing for the panel's row layout.
+ * `pause` (Start) is deliberately excluded: it is fixed for consistency, and
+ * stick movement is raw-axes and not rebindable.
+ */
+export const PAD_ACTIONS = [
+  'up',
+  'down',
+  'left',
+  'right',
+  'fire',
+  'guard',
+  'frenzy',
+  'rewind',
+] as const
+
+/** Actions shown in the Gamepad tab — exactly {@link PAD_ACTIONS}. */
+export type PadAction = (typeof PAD_ACTIONS)[number]
+
+/** Default gamepad bindings: the standard-mapping indices (§348). */
+export const DEFAULT_PAD_BINDINGS: PadBindings = {
+  up: GAMEPAD_BUTTONS.dpadUp,
+  down: GAMEPAD_BUTTONS.dpadDown,
+  left: GAMEPAD_BUTTONS.dpadLeft,
+  right: GAMEPAD_BUTTONS.dpadRight,
+  fire: GAMEPAD_BUTTONS.fire,
+  guard: GAMEPAD_BUTTONS.guard,
+  frenzy: GAMEPAD_BUTTONS.frenzy,
+  rewind: GAMEPAD_BUTTONS.rewind,
+}
+
+/** Highest standard-mapping button index we accept as a binding. */
+export const PAD_MAX_BUTTON = 17
+
+/**
+ * Repair corrupt persisted pad bindings: any non-integer or out-of-range
+ * button index falls back to its default. Guards against garbage saves and
+ * NaN (JSON can carry `null` where a number was expected).
+ */
+export function sanitizePadBindings(
+  pads: PadBindings,
+  defaults: PadBindings = DEFAULT_PAD_BINDINGS,
+): PadBindings {
+  const out: PadBindings = { ...pads }
+  for (const action of PAD_ACTIONS) {
+    const v = out[action]
+    if (
+      typeof v !== 'number' ||
+      !Number.isInteger(v) ||
+      v < 0 ||
+      v >= PAD_MAX_BUTTON
+    ) {
+      out[action] = defaults[action]
+    }
+  }
+  return out
+}
+
+/**
+ * Same-pad binding conflict: would assigning button `button` to `action`
+ * collide with another rebindable action already holding that button? Pure +
+ * headless (AGENTS §8). Pause/Start is fixed and never conflicts (it is not
+ * in {@link PAD_ACTIONS}); stick movement is raw axes and not rebindable.
+ *
+ * @returns the colliding action name, or null when the button is free.
+ */
+export function findPadConflict(
+  action: PadAction,
+  button: number,
+  pads: PadBindings,
+): PadAction | null {
+  for (const other of PAD_ACTIONS) {
+    if (other !== action && pads[other] === button) return other
+  }
+  return null
+}
+
+/**
  * Load persisted settings, merging over defaults and repairing any corrupt
  * key bindings (a binding whose primary key is a pure modifier can never
  * fire — fall back to its default).
@@ -39,6 +134,7 @@ export function loadSettings(): GameSettings {
     performanceMode: false,
     keys: { ...DEFAULT_KEYS },
     keys2: { ...DEFAULT_P2_KEYS },
+    pads: { ...DEFAULT_PAD_BINDINGS },
   }
 
   try {
@@ -53,6 +149,10 @@ export function loadSettings(): GameSettings {
         ...saved,
         keys: { ...defaults.keys, ...saved.keys },
         keys2: { ...defaults.keys2, ...saved.keys2 },
+        // Legacy saves predate pads (§348 follow-up): spreading undefined
+        // yields the defaults; a partial save keeps unspecified actions on
+        // their defaults (per-field merge, same contract as keys/keys2).
+        pads: sanitizePadBindings({ ...defaults.pads!, ...saved.pads }),
       }
       // Repair any previously-saved binding whose primary key is a pure
       // modifier (e.g. the old "Alt+AltLeft" capture bug). Such a binding can
@@ -60,6 +160,7 @@ export function loadSettings(): GameSettings {
       // OWN defaults (KeyF, not Space).
       merged.keys = sanitizeKeys(merged.keys)
       merged.keys2 = sanitizeKeys(merged.keys2, DEFAULT_P2_KEYS)
+      merged.pads = sanitizePadBindings(merged.pads ?? { ...DEFAULT_PAD_BINDINGS })
       return merged
     }
   } catch {

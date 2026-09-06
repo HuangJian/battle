@@ -19,12 +19,13 @@ import type { PlaybackController, PlaybackSpeed } from '../replay/PlaybackContro
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
 import { GamepadManager, CompositeInput } from './GamepadInput'
+import type { GamepadSnapshot } from './GamepadInput'
 import { canToggleCoop, canToggleSpectate, canToggleTwoPlayer } from './uiFlowGates'
 import { cycleBattleSpeed } from './battleSpeed'
 import type { BattleSpeed } from './battleSpeed'
 import { createReplayStorage } from '../replay/storage'
 import { t } from '../i18n'
-import { loadSettings, persistSettings } from './settings'
+import { loadSettings, persistSettings, DEFAULT_PAD_BINDINGS } from './settings'
 import type { ReplayType } from '../replay/types'
 import { LoopController } from './GameLoop'
 import { MenuController } from './GameMenu'
@@ -193,6 +194,11 @@ export class Game {
     this.snapCtl = new SnapshotController(this)
     this.replayCtl = new ReplayController(this)
     this.settings = loadSettings()
+    // Pad bindings are a LIVE reference: the manager pushes it into both
+    // GamepadInputs on every poll, so a Controls-panel remap (which mutates
+    // this exact object) reaches gameplay immediately — same contract as
+    // keys/keys2 (§348 follow-up).
+    this.pads.bindings = this.settings.pads ?? DEFAULT_PAD_BINDINGS
     this.world = new World()
     this.input = new Input(this.settings.keys)
     // P2's keyboard holds the LIVE settings.keys2 reference — same contract
@@ -210,9 +216,15 @@ export class Game {
     this.simulation = new Simulation(this.world, this.input)
     this.presentation = new PresentationLayer(root, this.settings.performanceMode)
     // Wire the live key-bindings objects + persistence into the controls panel.
-    this.presentation.ui.initControls(this.settings.keys, this.settings.keys2, () =>
-      this.saveSettings(),
+    this.presentation.ui.initControls(
+      this.settings.keys,
+      this.settings.keys2,
+      () => this.saveSettings(),
+      this.settings.pads,
     )
+    // Pad-capture seam: the panel polls the LIVE P1 snapshot while listening
+    // for a button press (§348 follow-up). Read-only observation.
+    this.presentation.ui.setPadSnapshotSource((): GamepadSnapshot | null => this.pads.p1Snapshot)
 
     // Wire mouse-click handlers for the start screen (same World-mutating
     // paths as the keyboard menu input).

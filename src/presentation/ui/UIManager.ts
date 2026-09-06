@@ -1,5 +1,6 @@
 import type { World } from '../../game/World'
-import type { ThemeColors, KeyBindings } from '../../types'
+import type { ThemeColors, KeyBindings, PadBindings } from '../../types'
+import type { GamepadSnapshot } from '../../game/GamepadInput'
 import { localizeRoot } from '../../i18n'
 import { i18n, t } from '../../i18n'
 
@@ -410,13 +411,27 @@ export class UIManager {
    * systems read) and a persistence callback. Called once from Game after
    * the PresentationLayer is constructed.
    */
-  initControls(bindings: KeyBindings, bindings2: KeyBindings, onChanged: () => void): void {
-    this.controls.initControls(bindings, bindings2, onChanged)
+  initControls(
+    bindings: KeyBindings,
+    bindings2: KeyBindings,
+    onChanged: () => void,
+    padBindings?: PadBindings,
+  ): void {
+    this.controls.initControls(bindings, bindings2, onChanged, padBindings)
   }
 
   /** Whether the controls panel is currently open (a UI-modal, not a world state). */
   isControlsOpen(): boolean {
     return this.controls.isOpen()
+  }
+
+  /**
+   * Pad-capture seam: give the panel read access to the live gamepad snapshot
+   * while it listens for a button press (§348 follow-up). Presentation-only —
+   * the source is a read-only observation of the GamepadManager.
+   */
+  setPadSnapshotSource(source: () => GamepadSnapshot | null): void {
+    this.controls.getSnapshot = source
   }
 
   /** Expose layout elements so PresentationLayer can measure reserved vertical

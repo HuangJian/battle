@@ -2736,3 +2736,30 @@ resetPads。i18n：toast.gamepadConnected/Disconnected（zh/en）。
 reset 防串键、复合体优先级/OR/委托、管理器槽位稳定 + 跃迁事件、按键常量
 pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器零改动，
 不触发 §6.3b。
+
+## §348a / 手柄按键重绑定（Controls 面板新增手柄页）（2026-09-07，用户指令）
+
+§348 的追加：用户要求手柄按键可在 Controls 面板重绑定。定案：
+
+- **数据**（§2.4，全部在 settings.ts，避免 GamepadInput↔settings 循环依赖）：
+  `PadBindings`（动作 → standard-mapping 按键序号，8 个可绑动作 = 十字键四向 +
+  fire/guard/frenzy/rewind）+ `DEFAULT_PAD_BINDINGS`（即 §347c 标准布局）+
+  `GAMEPAD_BUTTONS` 常量迁到此处（GamepadInput 再导出保持兼容）。
+  摇杆移动是原始轴值**不可绑定**；Start/暂停固定不参与冲突检查（与键盘
+  pause 是 P1 全局键同理）。
+- **持久化**：`GameSettings.pads?`（可选字段，legacy 存档经
+  `{ ...defaults.pads, ...saved.pads }` 逐字段迁移到默认值，与 keys2 同契约）；
+  `sanitizePadBindings` 修复越界/非整数序号；`findPadConflict` 同手柄内
+  冲突门（纯函数，headless 可测）。
+- **活性引用**（keys/keys2 同契约）：`pads.bindings = settings.pads`，
+  manager 每次 poll 都把该引用推入两个 GamepadInput，readSnapshot 每 poll
+  读之 —— 面板重映射零重接线直达玩法。
+- **UI**：Controls 面板第三页「手柄」，点击条目进入 rAF 捕获循环，首个
+  新按下的按键即新绑定（`firstPressedPadButton` 纯快照扫描，跳过 Start）；
+  冲突则闪红并保持监听；Esc 取消；Reset 恢复标准布局。捕获源经
+  `UIManager.setPadSnapshotSource` 注入（controls 保持 private）。
+- **验证**：`tests/pad-keybindings.test.ts` 17 例（先红后绿）：默认值 =
+  标准布局且互异、JSON roundtrip、legacy 迁移、部分存档逐字段合并、
+  sanitize 越界/NaN、冲突门（含自行豁免/Start 固定）、readSnapshot 参数化
+  （重绑 fire→RB、十字键→面键、摇杆优先级不受绑定影响）。`bun run check`
+  全绿（1772 pass），build 绿。表现层/玩法零行为漂移，不触发 §6.3b。

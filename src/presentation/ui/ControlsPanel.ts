@@ -1,12 +1,19 @@
-import type { KeyBindings } from '../../types'
+import type { KeyBindings, PadBindings } from '../../types'
 import { DEFAULT_KEYS, DEFAULT_P2_KEYS, eventToBinding, isModifierCode, parseBinding } from '../../game/Input'
 import {
   P2_ACTIVE_ACTIONS,
+  PAD_ACTIONS,
   findCrossPlayerConflict,
+  findPadConflict,
   type P2Action,
+  type PadAction,
 } from '../../game/settings'
 import { t } from '../../i18n'
 import { formatKeyCode } from './HudView'
+import { formatPadButton } from './padLabels'
+import type { GamepadSnapshot } from '../../game/GamepadInput'
+import { firstPressedPadButton } from '../../game/GamepadInput'
+import { DEFAULT_PAD_BINDINGS } from '../../game/settings'
 
 /**
  * ControlsPanel — the key-bindings modal: action list, click-to-rebind flow,
@@ -39,14 +46,21 @@ export class ControlsPanel {
   private bindings: KeyBindings = { ...DEFAULT_KEYS }
   /** P2's live bindings object (the same reference P2's Input reads). */
   private bindings2: KeyBindings = { ...DEFAULT_P2_KEYS }
+  /** Live gamepad bindings object (the same reference GamepadManager reads). */
+  private padBindings: PadBindings | null = null
   private onChanged: (() => void) | null = null
-  private listeningAction: keyof KeyBindings | null = null
+  private listeningAction: keyof KeyBindings | PadAction | null = null
   private openFlag = false
-  /** Which player's tab is shown in the panel ('1' default = pre-two-player layout). */
-  private activePlayer: 1 | 2 = 1
+  /** Which tab is shown: player 1, player 2, or the gamepad mapping. */
+  private activeTab: 'p1' | 'p2' | 'pad' = 'p1'
   private p1TabBtn: HTMLButtonElement | null = null
   private p2TabBtn: HTMLButtonElement | null = null
+  private padTabBtn: HTMLButtonElement | null = null
   private listEl: HTMLElement | null = null
+  /** While capturing a pad binding: rAF poll of the live GamepadSnapshot. */
+  private padCaptureRaf = 0
+  /** While capturing a pad binding: the live snapshot reader seam. */
+  getSnapshot: (() => GamepadSnapshot | null) | null = null
 
   /** Invoked whenever bindings change so HUD super-item labels re-render. */
   onSuperLabelsChanged: (() => void) | null = null
@@ -60,9 +74,15 @@ export class ControlsPanel {
    * systems read) and a persistence callback. Called once from Game after
    * the PresentationLayer is constructed.
    */
-  initControls(bindings: KeyBindings, bindings2: KeyBindings, onChanged: () => void): void {
+  initControls(
+    bindings: KeyBindings,
+    bindings2: KeyBindings,
+    onChanged: () => void,
+    padBindings?: PadBindings,
+  ): void {
     this.bindings = bindings
     this.bindings2 = bindings2
+    this.padBindings = padBindings ?? null
     this.onChanged = onChanged
     this.refreshAllKeyButtons()
     this.onSuperLabelsChanged?.()
@@ -85,6 +105,11 @@ export class ControlsPanel {
   /** Current live P2 bindings (read by the super-item label refresh bridge). */
   get currentBindings2(): KeyBindings {
     return this.bindings2
+  }
+
+  /** Current live gamepad bindings (present only when Game wired them). */
+  get currentPadBindings(): PadBindings | null {
+    return this.padBindings
   }
 
   /**
@@ -110,6 +135,7 @@ export class ControlsPanel {
     if (!this.openFlag) return
     this.openFlag = false
     this.listeningAction = null
+    this.stopPadCapture()
     this.el.classList.remove('active')
   }
 
@@ -122,6 +148,7 @@ export class ControlsPanel {
       <div class="controls-tabs" data-controls="tabs">
         <button class="controls-tab" data-controls="tab-p1" type="button" data-i18n="controls.tabP1">Player 1</button>
         <button class="controls-tab" data-controls="tab-p2" type="button" data-i18n="controls.tabP2">Player 2</button>
+        <button class="controls-tab" data-controls="tab-pad" type="button" data-i18n="controls.tabPad">Gamepad</button>
       </div>
       <div class="controls-list" data-controls="list"></div>
       <div class="controls-actions">
@@ -133,9 +160,11 @@ export class ControlsPanel {
 
     this.p1TabBtn = panel.querySelector('[data-controls="tab-p1"]') as HTMLButtonElement
     this.p2TabBtn = panel.querySelector('[data-controls="tab-p2"]') as HTMLButtonElement
+    this.padTabBtn = panel.querySelector('[data-controls="tab-pad"]') as HTMLButtonElement
     this.listEl = panel.querySelector('[data-controls="list"]') as HTMLElement
-    this.p1TabBtn.addEventListener('click', () => this.selectPlayer(1))
-    this.p2TabBtn.addEventListener('click', () => this.selectPlayer(2))
+    this.p1TabBtn.addEventListener('click', () => this.selectTab('p1'))
+    this.p2TabBtn.addEventListener('click', () => this.selectTab('p2'))
+    this.padTabBtn.addEventListener('click', () => this.selectTab('pad'))
 
     this.renderActiveTab()
 
@@ -148,10 +177,10 @@ export class ControlsPanel {
     return screen
   }
 
-  /** Switch the visible binding list to a player's tab (idempotent). */
-  private selectPlayer(player: 1 | 2): void {
-    if (this.activePlayer === player) return
-    this.activePlayer = player
+  /** Switch the visible binding list to a tab (idempotent). */
+  private selectTab(tab: 'p1' | 'p2' | 'pad'): void {
+    if (this.activeTab === tab) return
+    this.activeTab = tab
     this.listeningAction = null
     this.renderActiveTab()
   }
@@ -162,19 +191,26 @@ export class ControlsPanel {
     * the per-frame hot path never touches this.
     */
   private renderActiveTab(): void {
-    if (!this.listEl || !this.p1TabBtn || !this.p2TabBtn) return
-    this.p1TabBtn.classList.toggle('active', this.activePlayer === 1)
-    this.p2TabBtn.classList.toggle('active', this.activePlayer === 2)
-    this.p2TabBtn.setAttribute(
-      'aria-pressed',
-      String(this.activePlayer === 2),
-    )
+    if (!this.listEl || !this.p1TabBtn || !this.p2TabBtn || !this.padTabBtn) return
+    this.p1TabBtn.classList.toggle('active', this.activeTab === 'p1')
+    this.p2TabBtn.classList.toggle('active', this.activeTab === 'p2')
+    this.p2TabBtn.setAttribute('aria-pressed', String(this.activeTab === 'p2'))
+    this.padTabBtn.classList.toggle('active', this.activeTab === 'pad')
+    this.padTabBtn.setAttribute('aria-pressed', String(this.activeTab === 'pad'))
+    // Tab-specific hint (keyboard tabs vs the pad capture instruction).
+    const hint = this.el.querySelector('[data-i18n="controls.hint"]')
+    if (hint) hint.textContent = t(this.activeTab === 'pad' ? 'controls.padHint' : 'controls.hint')
     this.keyButtons.clear()
     this.listEl.innerHTML = ''
-    if (this.activePlayer === 1) {
+    if (this.activeTab === 'p1') {
       for (const action of ControlsPanel.CONTROL_ACTIONS) this.appendRow(action, this.bindings)
-    } else {
+    } else if (this.activeTab === 'p2') {
       for (const action of P2_ACTIVE_ACTIONS) this.appendRow(action, this.bindings2)
+    } else {
+      // Gamepad tab: the panel may be opened before Game wires pad bindings
+      // (defensive) — render the standard defaults read-only rather than
+      // crashing on null.
+      for (const action of PAD_ACTIONS) this.appendPadRow(action, this.padBindings ?? DEFAULT_PAD_BINDINGS)
     }
   }
 
@@ -195,6 +231,86 @@ export class ControlsPanel {
     this.keyButtons.set(action, btn)
   }
 
+  /** Append one gamepad action row (label + pad-button button). */
+  private appendPadRow(action: PadAction, pads: PadBindings): void {
+    if (!this.listEl) return
+    const row = this.createElement('div', 'controls-row')
+    const labelEl = this.createElement('span', 'controls-label')
+    labelEl.dataset.i18n = `controls.padActions.${action}`
+    const btn = this.createElement('button', 'controls-key-btn') as HTMLButtonElement
+    btn.type = 'button'
+    btn.dataset.action = action
+    btn.textContent = formatPadButton(pads[action])
+    btn.addEventListener('click', () => this.onPadButtonClick(action))
+    row.appendChild(labelEl)
+    row.appendChild(btn)
+    this.listEl.appendChild(row)
+    this.keyButtons.set(action, btn)
+  }
+
+  /** Begin listening for a pad-button press for `action` (rAF poll loop). */
+  private onPadButtonClick(action: PadAction): void {
+    if (!this.padBindings) return
+    if (this.listeningAction === action) {
+      this.cancelListening()
+      return
+    }
+    this.listeningAction = action
+    const btn = this.keyButtons.get(action)
+    if (btn) {
+      btn.classList.add('listening')
+      btn.classList.remove('conflict')
+      btn.textContent = t('controls.pressPadButton')
+    }
+    for (const [other, otherBtn] of this.keyButtons) {
+      if (other !== action) {
+        otherBtn.classList.remove('listening')
+        otherBtn.textContent =
+          this.activeTab === 'pad'
+            ? formatPadButton(this.padBindings[other as PadAction])
+            : this.formatKey((this.activeTab === 'p1' ? this.bindings : this.bindings2)[other as keyof KeyBindings])
+      }
+    }
+    this.startPadCapture()
+  }
+
+  /**
+   * rAF capture loop: poll the live pad each frame; the FIRST newly-pressed
+   * button is the new binding. Cancelled by Esc (the keydown listener still
+   * runs — pad events cannot cancel it) or by closing the tab/panel.
+   */
+  private startPadCapture(): void {
+    this.stopPadCapture()
+    const step = (): void => {
+      if (!this.openFlag || this.activeTab !== 'pad' || !this.listeningAction) return
+      const snap = this.getSnapshot?.() ?? null
+      const pressed = firstPressedPadButton(snap)
+      if (pressed !== null && this.padBindings) {
+        const action = this.listeningAction as PadAction
+        const conflict = findPadConflict(action, pressed, this.padBindings)
+        if (conflict) {
+          this.flashConflict(action)
+        } else {
+          this.padBindings[action] = pressed
+          this.listeningAction = null
+          this.refreshAllKeyButtons()
+          this.onChanged?.()
+        }
+        this.stopPadCapture()
+        return
+      }
+      this.padCaptureRaf = requestAnimationFrame(step)
+    }
+    this.padCaptureRaf = requestAnimationFrame(step)
+  }
+
+  private stopPadCapture(): void {
+    if (this.padCaptureRaf !== 0) {
+      cancelAnimationFrame(this.padCaptureRaf)
+      this.padCaptureRaf = 0
+    }
+  }
+
   private onKeyButtonClick(action: keyof KeyBindings): void {
     // Toggle listening mode for this action.
     if (this.listeningAction === action) {
@@ -202,7 +318,7 @@ export class ControlsPanel {
       return
     }
     this.listeningAction = action
-    const keys = this.activePlayer === 1 ? this.bindings : this.bindings2
+    const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
     const btn = this.keyButtons.get(action)
     if (btn) {
       btn.classList.add('listening')
@@ -220,29 +336,44 @@ export class ControlsPanel {
 
   private cancelListening(): void {
     this.listeningAction = null
+    this.stopPadCapture()
     this.refreshAllKeyButtons()
   }
 
   private resetBindings(): void {
     // Reset the ACTIVE tab's set against ITS OWN defaults (P2 repairs to
-    // WASD+F, not P1's arrows/space). Cross-player conflicts can only appear
-    // if the player manually re-creates them — the defaults are disjoint —
-    // and the user can always resolve those interactively.
-    const defaults = this.activePlayer === 1 ? DEFAULT_KEYS : DEFAULT_P2_KEYS
-    const keys = this.activePlayer === 1 ? this.bindings : this.bindings2
-    for (const action of Object.keys(defaults) as (keyof KeyBindings)[]) {
-      keys[action] = defaults[action]
+    // WASD+F, not P1's arrows/space; the pad tab repairs to the standard
+    // mapping). Cross-player conflicts can only appear if the player
+    // manually re-creates them — the defaults are disjoint — and the user
+    // can always resolve those interactively.
+    if (this.activeTab === 'pad') {
+      if (this.padBindings) Object.assign(this.padBindings, DEFAULT_PAD_BINDINGS)
+    } else {
+      const defaults = this.activeTab === 'p1' ? DEFAULT_KEYS : DEFAULT_P2_KEYS
+      const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
+      for (const action of Object.keys(defaults) as (keyof KeyBindings)[]) {
+        keys[action] = defaults[action]
+      }
     }
     this.listeningAction = null
+    this.stopPadCapture()
     this.refreshAllKeyButtons()
     this.onSuperLabelsChanged?.()
     this.onChanged?.()
   }
 
   private refreshAllKeyButtons(): void {
-    const keys = this.activePlayer === 1 ? this.bindings : this.bindings2
     for (const action of this.keyButtons.keys()) {
-      this.refreshKeyButton(action, keys)
+      if (this.activeTab === 'pad') {
+        const btn = this.keyButtons.get(action)
+        if (btn && this.padBindings) {
+          btn.classList.remove('listening', 'conflict')
+          btn.textContent = formatPadButton(this.padBindings[action as PadAction])
+        }
+      } else {
+        const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
+        this.refreshKeyButton(action, keys)
+      }
     }
   }
 
@@ -257,7 +388,7 @@ export class ControlsPanel {
    *  cross-player collisions on the actions both players actively drive. */
   private findConflict(action: keyof KeyBindings, binding: string): keyof KeyBindings | null {
     if (binding === 'Escape' || binding === 'Tab') return action // reserved
-    const keys = this.activePlayer === 1 ? this.bindings : this.bindings2
+    const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
     for (const [other] of this.keyButtons) {
       // Exact binding-string match: a modifier combo (Shift+R) is distinct
       // from its bare key (R), so they must not collide on the same action.
@@ -269,7 +400,7 @@ export class ControlsPanel {
     // directly (independent of which tab is visible).
     if (P2_ACTIVE_ACTIONS.includes(action as P2Action)) {
       return findCrossPlayerConflict(
-        this.activePlayer,
+        this.activeTab === 'p2' ? 2 : 1,
         action as P2Action,
         binding,
         this.bindings,
@@ -336,7 +467,7 @@ export class ControlsPanel {
         this.flashConflict(action)
         return
       }
-      const keys = this.activePlayer === 1 ? this.bindings : this.bindings2
+      const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
       keys[action] = binding
       this.listeningAction = null
       this.refreshKeyButton(action, keys)

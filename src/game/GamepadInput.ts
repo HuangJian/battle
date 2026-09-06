@@ -1,5 +1,10 @@
 import type { Direction } from '../constants'
 import type { InputLike } from './Input'
+import { DEFAULT_PAD_BINDINGS, GAMEPAD_BUTTONS } from './settings'
+import type { PadBindings } from '../types'
+
+/** Standard-mapping button indices (canonical definition: settings.ts). */
+export { GAMEPAD_BUTTONS } from './settings'
 
 // ================================================================
 // GamepadInput — gamepad support (DECISIONS §347c)
@@ -13,10 +18,9 @@ import type { InputLike } from './Input'
 //   CompositeInput   keyboard OR gamepad merge (pad priority)
 //   GamepadManager   navigator slotting: pad[0]→P1, pad[1]→P2
 //
-// Standard-gamepad mapping (W3C mapping="standard"):
-//   left stick / d-pad … move     A/Cross    (0) fire
-//   B/Circle (1) guard            X/Square   (2) frenzy
-//   Y/Triangle (3) rewind         Start      (9) pause / menu confirm
+// Standard-gamepad mapping (W3C mapping="standard"); §348 follow-up makes
+// the action→button mapping rebindable via a live PadBindings reference
+// (defaults below), EXCEPT the left stick (raw axes) and Start/pause.
 //
 // Input devices stay OUTSIDE the World (AGENTS §2.2); the recorder taps the
 // SAME composite InputLike the sim consumes (DECISIONS #75), so a pad-driven
@@ -30,19 +34,6 @@ export interface GamepadSnapshot {
   connected: boolean
   mapping: string
 }
-
-/** Standard-mapping button indices we bind. */
-export const GAMEPAD_BUTTONS = {
-  fire: 0, // A / Cross
-  guard: 1, // B / Circle
-  frenzy: 2, // X / Square
-  rewind: 3, // Y / Triangle
-  pause: 9, // Start / Options
-  dpadUp: 12,
-  dpadDown: 13,
-  dpadLeft: 14,
-  dpadRight: 15,
-} as const
 
 /** Stick axes beyond this magnitude count as a direction (16-bit pads drift). */
 export const GAMEPAD_DEADZONE = 0.5
@@ -70,8 +61,18 @@ const NEUTRAL: PadFrame = {
  * Pure snapshot → levels. No mutation, no DOM — unit-testable headlessly.
  * Stick has priority over d-pad when both are engaged (intentional single
  * direction: the movement system is axis-locked anyway).
+ *
+ * `bind` parametrizes the action→button mapping (§348 follow-up): a
+ * PadBindings record of standard-mapping button indices per action; the
+ * default is the standard layout above. Movement reads D-PAD buttons through
+ * the binding — the left stick is raw axes and NOT rebindable. Pause (Start)
+ * stays fixed.
  */
-export function readSnapshot(pad: GamepadSnapshot | null, deadzone = GAMEPAD_DEADZONE): PadFrame {
+export function readSnapshot(
+  pad: GamepadSnapshot | null,
+  deadzone = GAMEPAD_DEADZONE,
+  bind: PadBindings = DEFAULT_PAD_BINDINGS,
+): PadFrame {
   if (!pad || !pad.connected) return NEUTRAL
 
   let dir: Direction | null = null
@@ -84,19 +85,19 @@ export function readSnapshot(pad: GamepadSnapshot | null, deadzone = GAMEPAD_DEA
   }
   if (dir === null) {
     const b = pad.buttons
-    if (b[GAMEPAD_BUTTONS.dpadUp]?.pressed) dir = 'up'
-    else if (b[GAMEPAD_BUTTONS.dpadDown]?.pressed) dir = 'down'
-    else if (b[GAMEPAD_BUTTONS.dpadLeft]?.pressed) dir = 'left'
-    else if (b[GAMEPAD_BUTTONS.dpadRight]?.pressed) dir = 'right'
+    if (b[bind.up]?.pressed) dir = 'up'
+    else if (b[bind.down]?.pressed) dir = 'down'
+    else if (b[bind.left]?.pressed) dir = 'left'
+    else if (b[bind.right]?.pressed) dir = 'right'
   }
 
   const btn = (i: number): boolean => !!pad.buttons[i]?.pressed
   return {
     dir,
-    fire: btn(GAMEPAD_BUTTONS.fire),
-    guard: btn(GAMEPAD_BUTTONS.guard),
-    frenzy: btn(GAMEPAD_BUTTONS.frenzy),
-    rewind: btn(GAMEPAD_BUTTONS.rewind),
+    fire: btn(bind.fire),
+    guard: btn(bind.guard),
+    frenzy: btn(bind.frenzy),
+    rewind: btn(bind.rewind),
     pause: btn(GAMEPAD_BUTTONS.pause),
   }
 }
@@ -112,10 +113,17 @@ export class GamepadInput implements InputLike {
   private prev: PadFrame = NEUTRAL
   private cur: PadFrame = NEUTRAL
 
+  /**
+   * LIVE bindings reference (§348 follow-up) — readSnapshot reads it on
+   * every poll, so a Controls-panel remap reaches gameplay with zero
+   * re-wiring (same live-ref contract as Input's KeyBindings).
+   */
+  bindings: PadBindings = DEFAULT_PAD_BINDINGS
+
   /** Feed one polled hardware snapshot (once per render frame). */
   pollSnapshot(pad: GamepadSnapshot | null): void {
     this.prev = this.cur
-    this.cur = readSnapshot(pad)
+    this.cur = readSnapshot(pad, GAMEPAD_DEADZONE, this.bindings)
   }
 
   getMoveDirection(): Direction | null {
@@ -206,6 +214,13 @@ export class GamepadManager {
   readonly p1 = new GamepadInput()
   readonly p2 = new GamepadInput()
 
+  /**
+   * LIVE pad bindings — both GamepadInputs read this exact reference on
+   * every poll. Game wires it to `settings.pads` so a Controls-panel remap
+   * reaches gameplay immediately and persists via the normal settings save.
+   */
+  bindings: PadBindings = DEFAULT_PAD_BINDINGS
+
   /** Overridable navigator seam — returns the live pads in slot order. */
   protected collect(): (GamepadSnapshot | null)[] {
     const nav = navigator as Navigator & { getGamepads?: () => (GamepadSnapshot | null)[] }
@@ -218,27 +233,23 @@ export class GamepadManager {
    * disconnect transitions, and feed both GamepadInputs.
    */
   poll(): void {
+    // Push the live bindings into the per-player inputs before the diff —
+    // both readSnapshot calls below must see the same mapping (§348).
+    this.p1.bindings = this.bindings
+    this.p2.bindings = this.bindings
     const pads = this.collect()
-    const connected: GamepadSnapshot[] = []
-    for (const p of pads) {
-      if (p && p.connected) connected.push(p)
-    }
-    const newP1 = connected[0] ?? null
-    const newP2 = connected[1] ?? null
-    if (!!newP1 !== !!this.p1Pad) {
-      this.events.push({ player: 1, type: newP1 ? 'connected' : 'disconnected' })
-    }
-    if (!!newP2 !== !!this.p2Pad) {
-      this.events.push({ player: 2, type: newP2 ? 'connected' : 'disconnected' })
-    }
-    this.p1Pad = newP1
-    this.p2Pad = newP2
-    this.p1.pollSnapshot(this.p1Pad)
-    this.p2.pollSnapshot(this.p2Pad)
+    this.distribute(pads)
   }
 
   /** Headless test seam: poll with injected snapshots instead of navigator. */
   pollForTests(pads: (GamepadSnapshot | null)[]): void {
+    this.p1.bindings = this.bindings
+    this.p2.bindings = this.bindings
+    this.distribute(pads)
+  }
+
+  /** Shared slotting + transition-diff + feed (poll and pollForTests). */
+  private distribute(pads: (GamepadSnapshot | null)[]): void {
     const prevP1 = this.p1Pad
     const prevP2 = this.p2Pad
     const connected: GamepadSnapshot[] = []
@@ -271,4 +282,18 @@ export class GamepadManager {
     this.events = []
     return out
   }
+}
+
+/**
+ * First currently-pressed rebindable button in a snapshot, or null (§348
+ * follow-up). Used by the Controls panel's click-to-capture flow; pure so
+ * it is headless-testable. Pause (Start) is excluded — it stays fixed.
+ */
+export function firstPressedPadButton(pad: GamepadSnapshot | null): number | null {
+  if (!pad || !pad.connected) return null
+  for (let i = 0; i < pad.buttons.length; i++) {
+    if (i === GAMEPAD_BUTTONS.pause) continue
+    if (pad.buttons[i]?.pressed) return i
+  }
+  return null
 }
