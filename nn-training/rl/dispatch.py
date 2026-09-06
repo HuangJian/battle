@@ -938,11 +938,35 @@ class RolloutDispatcher:
 
         for t in threads:
             t.start()
-        for t in threads:
-            t.join(timeout=max(30.0, window + task_timeout))
-        # rescan 中途孵化的 worker 已由 all_settled/deadline 自然收尾，这里兜底 join。
-        for t in extra_threads:
-            t.join(timeout=max(30.0, window + task_timeout))
+        # v3.17 收尾兜底（2026-09-06，竞速收尾洞②）：旧实现对每个线程
+        # join(window + task_timeout) = 2700s —— 只要有一个 worker 卡在**不可中断**
+        # 的 HTTP 调用（同步 agent 的 200 分支、提交阶段挂起），整轮就空等到满超时，
+        # 哪怕 150 局早已结算完毕（p4-horizon it2 273s / it3 258s，洞内日志静默）。
+        # v3.16 的 abandon_event 只覆盖 x-async 轮询阶段，盖不住这条路径，故在此兜底。
+        # 新语义：
+        #   ① 先等「本轮结算完成 / halt / 窗口到期」——正常收官时立即通过；
+        #   ② 再给在飞副本 tailGraceJoinSec（默认 30s，**全局共享**不是每线程各 30s）
+        #      自然收工：结果已齐，输家副本的返回值注定被 dedup 丢弃；
+        #   ③ 仍存活的线程一律放弃等待（daemon 线程随进程退出，不影响报告/落盘）。
+        # 未正常收官（deadline/halt 中止）时不走 grace：给足单任务窗口，保持旧语义。
+        while not all_settled.is_set() and time.time() < deadline:
+            if halt_event is not None and halt_event.is_set():
+                break
+            all_settled.wait(0.5)
+        tail_join_sec = (
+            float(policy.get("tailGraceJoinSec", 30))
+            if all_settled.is_set()
+            else max(30.0, min(window, task_timeout))
+        )
+        join_until = time.time() + max(0.0, tail_join_sec)
+        for t in list(threads) + list(extra_threads):
+            t.join(timeout=max(0.0, join_until - time.time()))
+        stuck = [t.name for t in list(threads) + list(extra_threads) if t.is_alive()]
+        if stuck:
+            log(
+                f"[dist] tail-join grace {tail_join_sec:.0f}s 到期：{len(stuck)} 个 worker "
+                f"仍在收尾（本轮结果已齐，不再等待）: {stuck[:5]}"
+            )
 
         missing = sorted(k for k in all_tasks if k not in seen)
         by_node: dict[str, int] = {}

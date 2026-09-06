@@ -283,6 +283,11 @@ class FakeServer(ThreadingHTTPServer):
         self._slowed_once: set[tuple[int, int]] = set()
         self.eval_delay: float = 0.0
         self.eval_dispatched: threading.Event = threading.Event()
+        # v3.17 收尾兜底回归：重复派发的副本（竞速输家）在此挂住 dup_hang 秒——
+        # 模拟「输家副本落在慢节点且走同步 200 分支」：abandon_event 覆盖不到，
+        # 只能靠 dispatcher 的 tailGraceJoinSec 收尾兜底，否则整轮被拖到满超时。
+        self.dup_hang: float = 0.0
+        self.dispatched: set[tuple[int, int]] = set()
         super().__init__(*args, **kwargs)
 
 
@@ -339,6 +344,10 @@ class FakeAgent(BaseHTTPRequestHandler):
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             key = (int(q["stage"]), int(q["seed"]))
             self._srv.events.append(("dispatch", time.time(), key))
+            # 重复派发 = 竞速副本：挂住 dup_hang 秒（慢节点 + 同步 agent 的不可中断路径）
+            if self._srv.dup_hang > 0 and key in self._srv.dispatched:
+                time.sleep(self._srv.dup_hang)
+            self._srv.dispatched.add(key)
             if key in self._srv.slow_first and key not in self._srv._slowed_once:
                 self._srv._slowed_once.add(key)
                 time.sleep(0.4)  # 慢主副本窗口（v3.15 2.0→0.4，判据不依赖窗长）
@@ -720,6 +729,46 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     finally:
         srv.slow_first = set()
         srv._slowed_once = set()
+        srv.shutdown()
+
+
+@pytest.mark.heavy
+def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """v3.17 收尾兜底：竞速输家副本卡在不可中断的 HTTP 调用时，整轮不得被拖到满超时。
+
+    场景 = p4-horizon it2/it3 实测的 4.5 分钟洞：3 局计划、节点并发 4 ⇒ 有空槽复制
+    一个在飞任务（v3.10 长尾竞速）；FakeAgent 让**重复派发**的副本挂 30s，模拟「输家
+    副本落在慢节点且走同步 200 分支」——v3.16 的 abandon_event 只覆盖 x-async 轮询，
+    对这条路径无效。3 局仍由主副本全部结算（all_settled 置位），整轮必须在
+    tailGraceJoinSec（此处 2s）内返回，而不是等满 queueWindowSec+taskTimeout。
+    """
+    srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    f0 = len(FAILS)
+    cfg["policy"]["tailGraceJoinSec"] = 2
+    try:
+        traj = tmp_path / "i10"
+        traj.mkdir()
+        srv.dup_hang = 30.0
+        srv.dispatched = set()
+        t0 = time.time()
+        rep10 = run_rl.run_rollout_queue(
+            bun,
+            str(WEIGHTS),
+            traj,
+            [(0, 111), (0, 222), (0, 333)],
+            args,
+            cfg,
+            "i10.10",
+            local_slots_max=0,
+        )
+        took10 = time.time() - t0
+        check(rep10["games"] == 3 and rep10["missing"] == [], "I10 all 3 settled")
+        # 上界 15s：正常收官 ~2-4s（含 2s grace）；无兜底则须等满 dup_hang(30s)。
+        check(took10 < 15.0, f"I10 tail join bounded by grace ({took10:.2f}s < 15s)")
+        if len(FAILS) > f0:
+            raise AssertionError("; ".join(FAILS[f0:]))
+    finally:
+        srv.dup_hang = 0.0
         srv.shutdown()
 
 
