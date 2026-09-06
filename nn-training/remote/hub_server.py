@@ -10,7 +10,7 @@
     重建（D8），不依赖进程内状态。
 
 端点（附录 C）：
-  GET  /jobs/next               云 worker 轮询领取（lease 30min，心跳续租）
+  GET  /jobs/next               云 worker 轮询领取（§343 竞速：广播同一 open job，无租约）
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
@@ -100,9 +100,16 @@ class _JobStore:
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-    # ---- 可领取池（jsonl + 租约状态重算，D8） ----
+    # ---- 可领取池（jsonl + 结果落盘重算，D8） ----
     def claimable_job_ids(self) -> list[str]:
-        """job_pending 且未 job_completed 且（无租约或租约已过期）的 job_id，按发布序。"""
+        """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
+
+        §343 竞速语义（2026-09-06 用户指令）：不再有租约独占——同一 open job 对
+        所有轮询 worker 广播，先回传结果者胜（store_result 首写锁定，迟到写回 409
+        丢弃）。实际部署单 worker，竞速只发生在 session 断开重连：重连后立即重领
+        同一 job 重算，不再付 LEASE_SEC 孤儿租约等待（it24 实测白等 30min）。
+        已有结果未验收的 job 从池中剔除——防落后 worker 死循环重算同一 job。
+        """
         pending: dict[str, dict] = {}
         for e in self._read_ledger():
             jid = e.get("job_id")
@@ -112,15 +119,13 @@ class _JobStore:
                 pending[jid] = e
             elif e["event"] == "job_completed":
                 pending.pop(jid, None)
-        now = self._now()
         out = []
         for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):
             jd = self._job_dir(jid)
             if not jd.exists() or not (jd / "payload.zip").exists():
                 continue  # 目录不存在或 payload 未落盘——不可领取
-            lease = self._leases.get(jid)
-            if lease is not None and lease > now:
-                continue  # 已租出未过期：只有原租者心跳续租，不重发（Q7）
+            if (jd / "result").exists():
+                continue  # 结果已落盘待验收——竞速已分胜负，落后者不再领取（§343）
             out.append(jid)
         return out
 
@@ -154,9 +159,9 @@ class _JobStore:
                     }
                 )
 
-    # ---- 租约（H2：lease_token 绑定持有人） ----
+    # ---- 租约（H2 旧路径，§343 起仅兼容保留——调度不再消费租约） ----
     def claim(self, job_id: str) -> str | None:
-        """领取（设租约）。返回 lease_token；None = 已被他者持有（lease 未过期）。"""
+        """（兼容）领取（设租约）。§343 竞速模型下 _get_next 不再调用。"""
         import secrets
 
         with self._lock:
@@ -340,15 +345,14 @@ class HubHandler(BaseHTTPRequestHandler):
     def _get_next(self) -> None:
         if not self._auth_ok():
             return
+        # §343 竞速：不设租约、不独占——同一 open job 对所有轮询者广播，
+        # 先回传结果者胜（store_result 首写锁定），落后者 409 丢弃。
         jids = self.store.claimable_job_ids()
         for jid in jids:
-            lease_token = self.store.claim(jid)
-            if lease_token is not None:
-                mp = self.store._job_dir(jid) / "manifest.json"
-                manifest = json.loads(mp.read_text(encoding="utf-8"))
-                # H2：lease_token 随领取下发，心跳/结果回传须携带（防多 worker 抢租约）
-                self._json({"job_id": jid, "manifest": manifest, "lease_token": lease_token})
-                return
+            mp = self.store._job_dir(jid) / "manifest.json"
+            manifest = json.loads(mp.read_text(encoding="utf-8"))
+            self._json({"job_id": jid, "manifest": manifest})
+            return
         self._json({"job_id": None}, 200)  # 无可领取 job
 
     # ---- GET /jobs/{id}/payload ----
@@ -483,14 +487,9 @@ class HubHandler(BaseHTTPRequestHandler):
         except (ValueError, ProtocolError) as e:
             self._json({"error": f"result rejected: {e}"}, 400)
             return
-        # H2：结果回传须携带 lease_token（旧租约持有者/非领取者拒收）
-        lease_token = self.headers.get("X-Lease-Token", "") or self.headers.get(
-            "lease-token", ""
-        )
-        owner = self.store._lease_owners.get(jid)
-        if owner is None or owner != lease_token:
-            self._json({"error": "lease token mismatch — 非本 job 领取者"}, 403)
-            return
+        # §343 竞速：不再校验 lease_token（H2 租约已废）——鉴权边界 = Bearer token，
+        # 结果内容 = validate_result 对账（job_id/data_fp/init_weights_fp/commit_echo）；
+        # 先回传者 store_result 首写锁定，迟到写回 409 丢弃（防重复写回测试覆盖）。
         if not self.store.store_result(jid, result):
             self._json({"error": "result already stored (duplicate write-back)"}, 409)
             return

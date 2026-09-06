@@ -144,8 +144,14 @@ class TrainingSteps:
             from rl.schedule import resolve_ppo_schedule
 
             sch = resolve_ppo_schedule(course.ppo_schedule_dicts(), it)
-        if "lr" in sch and getattr(self, "_opt", None) is not None:
-            self._opt.param_groups[0]["lr"] = float(sch["lr"])
+        if "lr" in sch:
+            # lr 折算必须落到 args.lr：remote 模式 hub 侧无 _opt，job manifest 的
+            # lr 取自 args.lr（publish_job），worker 以 Adam(lr=manifest["lr"])
+            # 建优化器——只写 opt.param_groups 会让三段 lr 表在远程路径全程失效。
+            # 本地模式再同步 param_groups（保 Adam 动量，原语义不变）。
+            args.lr = float(sch["lr"])
+            if getattr(self, "_opt", None) is not None:
+                self._opt.param_groups[0]["lr"] = args.lr
         if "mb" in sch:
             args.mb = int(sch["mb"])
         if "epochs" in sch:
@@ -311,7 +317,7 @@ class TrainingSteps:
             Path(args.traj) / "remote-jobs"
         )
         # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）
-        shard_dirs = iter_shard_dirs(args.traj, it)
+        shard_dirs = iter_shard_dirs(args.traj, it, log=log)
         if not shard_dirs:
             raise SystemExit(f"[run_rl] remote it{it}: 无完整 shard（traj {it_dir} 空）——无法发布 job")
         # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
@@ -454,8 +460,12 @@ class TrainingSteps:
         三重校验落位到 args.out——这里只归档 + 日志（不再调 torch 导出，D2/D12）。
         """
         args = self.args
+        # 课程声明 backup_prefix/backup_dir 时优先（D6 课程单一事实来源）；缺省
+        # 退回按模式前缀 + 默认 nn-training/weights（旧行为）。
+        bak_prefix = str(getattr(args, "backup_prefix", "") or "") or _MODE_BACKUP_PREFIX[args.mode]
+        bak_dir = str(getattr(args, "backup_dir", "") or "") or None
         if getattr(args, "ppo", "local") == "remote":
-            bak = backup_weights(args.out, it, prefix=_MODE_BACKUP_PREFIX[args.mode])
+            bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
             log(
                 f"[run_rl] remote ppo it{it}: weights already landed by cloud worker "
                 f"(D12) -> {args.out}"
@@ -473,7 +483,7 @@ class TrainingSteps:
             self._ppo_intent.export_intent_weights(cast(IntentNet, self._model), args.out)
         else:
             self._save_weights_json(self._model, args.out)
-        bak = backup_weights(args.out, it, prefix=_MODE_BACKUP_PREFIX[args.mode])
+        bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
         log(
             f"[run_rl] ppo it{it}: steps={self._total_steps} chunks={self._chunks_n} "
             + (

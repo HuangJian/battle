@@ -28,17 +28,26 @@ WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（weights_prune.py）的参考配额；backup_weights 不自动删
 
 
-def backup_weights(weights_path: str, it: int, prefix: str = "rl-weights") -> str | None:
+def backup_weights(
+    weights_path: str, it: int, prefix: str = "rl-weights", backup_dir: str | None = None
+) -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
 
     只归档不清理（2026-09-02）：旧归档删除已移除——沙箱删除保护会拦截生产代码的
     自动删除。磁盘有界性由手动 `make weights-prune-apply` 保证。
 
+    `backup_dir`：课程可指定归档目录（`backup_dir` 课程键，D6 课程单一事实来源）。
+    相对路径按仓库根解析（课程值形如 "nn-training/weights/<course>"，与
+    TrainingLoop 的 cwd 无关）；None = 默认 WEIGHTS_BACKUP_DIR。
+
     Returns the archive destination path, or None on any (non-fatal) IO error.
     """
     try:
-        WEIGHTS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        dst = WEIGHTS_BACKUP_DIR / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
+        bdir = Path(backup_dir) if backup_dir else WEIGHTS_BACKUP_DIR
+        if not bdir.is_absolute():
+            bdir = REPO_ROOT / bdir
+        bdir.mkdir(parents=True, exist_ok=True)
+        dst = bdir / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
         shutil.copyfile(weights_path, dst)
         return str(dst)
     except OSError as e:

@@ -5,6 +5,99 @@
 
 ---
 
+## §20 四项监控修复落地 + PPO job 竞速模型（§343）+ it24 孤儿租约事故复盘（2026-09-06）
+
+§19 的三处发现（+ backup_prefix 第④项）经用户拍板「修全部问题」后全部落地，
+回归测试 nn-training/tests/test_rl_remote_fixes.py（6 项）+ 全量 pytest 312 绿：
+
+### 20.1 修复清单（DECISIONS §342）
+1. **lr 折算**：`rl/loop_steps.py _course_iter` 把 `sch['lr']` 同步折进 `args.lr`
+   （remote 模式经 publish_job → manifest → worker Adam 生效）。实战影响：it24–35
+   本就该 1.5e-4（绝对 iter 查表），修复的实战价值是 **it36+ 精调段正确降到
+   5e-5**（消除 3 倍超速 + 无 KL 惩罚叠加风险）。
+2. **dup shard 退场**：`rl/dispatch.py` dup-settle 分支退役输家副本目录
+   （`_dir` 目录名归一化兼容 local wave/远程 shard 两形态）；`remote/hub_client
+   .iter_shard_dirs` 同名去重兜底（manifest mtime 最早者胜）。it24 实测：发布
+   retire 2 份残留，`shards=150` 与 expectedGames 平，UserWarning 消失。
+3. **EVAL_SEEDS 扩 100**：`rl/eval_local.py`。it25 起评估 100 局（CI ±13pp →
+   ±10pp 内），旧 20 seed 前缀不变保持可比。
+4. **backup_prefix/backup_dir 按课程生效**：归档落 `nn-training/weights/p4-onset/`。
+
+### 20.2 §343 竞速模型（用户指令，详细权衡见 DECISIONS §343）
+PPO job 分发从「租约独占」改为「竞速广播」：`/jobs/next` 对所有轮询者广播同一
+open job，先回传结果者胜（store_result 首写锁定，迟到 409 丢弃），结果落盘未
+验收的 job 从池中剔除。租约/心跳降级为兼容路径不再参与调度。动机 = it24 事故：
+
+### 20.3 it24 孤儿租约事故复盘（08:45–09:20）
+- 时间线：08:45:40 发布 it24 → 3s 后旧 Kaggle 会话领取 → 用户家庭网络断 2–3min
+  → Kaggle 页面停更，用户重载页面 → 旧 worker 进程死亡，**租约独占下 job 被锁
+  满 30min**（孤儿租约）；trainer `wait_job` 同为 30min 超时 → 09:15:45 超时 →
+  iter_error → 幂等重发同一 job → 继续等待。断网期间 trainer 侧 502/URLError
+  均被 §18 加固的重试吞掉（设计生效），零数据损失。
+- 应急处置（已做）：hub_server 仅重启（租约纯内存态即清零，隧道/TrainingLoop
+  不动，Kaggle 的 HUB_URL 不变）→ 自愈从 30min 压到即时。
+- 根治（§343 已落地）：竞速模型下「断连重连」零等待——重连的 worker 立即重领
+  同一 job 重算，不存在孤儿租约概念。
+- **Kaggle 侧操作指引**：页面停更 ≠ worker 死了，先看 cell 状态；重载/重跑
+  worker cell 安全（幂等键 + 首写锁定兜底）；worker 代码经 code.zip 每任务下发
+  （GET /jobs/{id}/code），notebook 只需保持轮询 cell 运行，无需改代码。
+- 监控教训：hub-server.out 的请求时序（payload 下载 / heartbeat / result POST）
+  是判断「worker 活没活」的最直接证据——heartbeat 绝迹 + result 恒 404 = 租约
+  孤儿，而不是 PPO 慢。
+
+## §19 p4-onset 首日监控：lr 调度在 remote 模式未生效 + 重复 shard + 评估截断（2026-09-06，监控发现，待处置）
+
+监控 06:21–08:11 远程推架构首跑（it1–10 完成，it5/it10 两次评估）。训练本身健康
+（KL 0.0905→0.0077 单调收敛、熵 0.36 带稳定、value 6.2→2.6），it8 误熔断已由
+F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，热启动课程自动
+豁免，不会复发）。以下三处为监控新发现：
+
+### 19.1 ppo_schedule 的 lr 三段表在 remote 模式下全程未生效（重要，待用户拍板）
+- 证据链：`rl/loop_steps.py _course_iter` 只把 `sch['lr']` 写进 `self._opt.param_groups`
+  （remote 模式 hub 侧无 optimizer，静默跳过）；`publish_job(..., lr=float(args.lr), ...)`
+  传**静态** `args.lr`，全库无 `args.lr =` 赋值点；worker 侧 `remote/worker.py:531/538`
+  以 `Adam(lr=manifest["lr"])` 建 optimizer。日志双印证：每轮打
+  `[course] ppo_schedule@itN: lr=0.0003`，而 iteration 事件 lr 恒 0.00015
+  （`rl/events.py` 写 `args.lr`）。
+- 影响：it1–35 实际恒定 lr=1.5e-4——warmup 段（≤15，设计 3e-4）只有一半学习率；
+  **it36+ 精调段（设计 5e-5）将 3 倍超速**，phase3 又 kl_coef=0 无 KL 惩罚，风险最大。
+  kl_coef/kl_cap 经 `args._kl_coef/_kl_cap` 正常生效（已核 manifest 打包链路）。
+- 按 ~2.2 min/iter，it36 约 1 小时内到达。选项：(a) `_course_iter` 把 `sch['lr']`
+  同步折进 `args.lr`（一行改动）+ 重启 resume 续跑，it12 起与课程表对齐，
+  it1–11 半速段记为既成事实；(b) 维持恒定 1.5e-4 跑完并改课程注释。属实验语义
+  变更（AGENTS §15.5），由用户决定。
+
+### 19.2 同 seed shard 双份落盘（dist/<node> 与 wNN 各一份，内容不同）
+- 每轮 0–7 个 seed 在 `it{N}/dist/<node>/` 与 `it{N}/wNN/` 各有一份完整 shard
+  （it3=7、it4=3、it5=4、it6=4、it7=3、it8=2、it10=1、it11=1；it9 本地-only=0），
+  两份 obs sha **不同**（同 seed 同 wver 本应逐字节同——指向跨节点 agent 版本差，
+  参数 AGENTS §16.6）。机制高度疑似 tail fan-out 竞速的迟到副本：败者已被拒绝
+  结算却仍写盘共存（`rl/queue.py` §16 修的是误回队，未管盘上残留）。
+- 发布端 `remote/hub_client.pack_payload` 对重复 arcname 写 zip → zipfile
+  UserWarning 刷屏；worker `unpack_payload` extractall 同名后者胜（排序保证 wNN
+  在后）→ 实训只吃 150 个唯一 dir 的一份拷贝，**无双计**，但 payload 虚胖、
+  账面 shards=151–157 与 expectedGames=150 不平。修复方向：结算后 retire 输家
+  副本的盘上目录。
+
+### 19.3 贪心评估被 EVAL_SEEDS 常量截断为 20 局（配置 100 局不生效）
+- `rl/eval_local.py EVAL_SEEDS = (860001, 860002, *range(860003, 860021))` = 20 个
+  种子；`rl/eval_dispatch.py:107` `EVAL_SEEDS[:n_seeds]` 把课程
+  `eval_games_per_stage: 100` 静默截成 20。20 局胜率 95% CI ±13pp——it5/it10 的
+  10%（2/20）与起点 p1-ep60 的 14%（100 局）统计上不可区分，阶段判断目前只能靠
+  20 局粗评 + rollout 采样胜率双低通道。
+
+### 19.4 其它观察（备忘）
+- 备份正常但课程 `backup_prefix/backup_dir` 未被采用：`rl/loop_steps.py:458` 统一
+  用模式前缀 `rl-weights` 落 `nn-training/weights/rl-weights.itN.*.json`
+  （it1–11 全部已归档，权重安全）。
+- it9 低谷（winRate 2.7%、128/150 超时、熵 0.246）归因：重启窗口内 mac 升级重启、
+  a95/a97/a98 codeHash mismatch 被排除 → 150 局全本机采集（rollout 132s vs 常态
+  40–66s）。it10 恢复 6.7%，it11 起全舰队回归。若 it11+ 超时占比仍 >50% 则需另行归因。
+- it1 的 samples=68002 / mean_ret 8.0 为陈旧 shard 混入（resume=150，昨日多次失败
+  尝试的同 init 残留）——趋势判断从 it2 起。
+- 超时占比 ~45% 印证课程注释预判（max_ticks=2400 对 4 敌偏紧，后续重标定项）。
+  走势数据：tmp/p4-onset/training_log.jsonl 与 eval_log.jsonl。
+
 ## §18 远程链路冒烟预演：worker --echo + TrainingLoop 作废轮（2026-09-05，DECISIONS §340）
 
 用户拍板：不建虚拟课程——TrainingLoop 跑**真课程**，伪 Kaggle（echo worker）回传 init

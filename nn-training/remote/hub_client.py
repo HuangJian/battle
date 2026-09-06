@@ -83,16 +83,35 @@ def _sha256_bytes(b: bytes) -> str:
 
 # ------------------------------------------------------------------ 打包
 
-def iter_shard_dirs(traj_dir: str | Path, it: int) -> list[Path]:
+def iter_shard_dirs(traj_dir: str | Path, it: int, log=lambda msg: None) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
     `_serial_ppo` 的 load_episodes 装载口径一致——D1「wver 过滤 + resume 剔除
     后」由 _prepare_iter_dir 已保证目录内只有本轮 wver 匹配的完整 shard）。
+
+    同名 shard 去重（发布端不变量）：同一 seed 只允许一份进 payload——重复
+    arcname 的 zip 由解包顺序决定训练吃哪份（偶然语义），且 data_fp 账面与
+    expectedGames 不平。正常路径由 dispatch 结算退场输家副本（2026-09-06），
+    这里兜底崩溃/历史残留：按 manifest.json mtime 保留最早一份（先写盘者 =
+    结算赢家），退役者响亮日志。
     """
     it_dir = Path(traj_dir) / f"it{it}"
     if not it_dir.exists():
         return []
-    dirs = sorted({p.parent for p in it_dir.rglob("rl_s*_seed*/manifest.json")})
-    return [d for d in dirs if (d / "obs.npy").exists() or (d / "metrics.npy").exists()]
+    cands: dict[str, list[Path]] = {}
+    for p in it_dir.rglob("rl_s*_seed*/manifest.json"):
+        d = p.parent
+        if not ((d / "obs.npy").exists() or (d / "metrics.npy").exists()):
+            continue
+        cands.setdefault(d.name, []).append(d)
+    dirs: list[Path] = []
+    for name in sorted(cands):
+        ds = cands[name]
+        if len(ds) > 1:
+            ds.sort(key=lambda d: ((d / "manifest.json").stat().st_mtime, str(d)))
+            for loser in ds[1:]:
+                log(f"[publish] duplicate shard {name}: retire {loser} (keep {ds[0]})")
+        dirs.append(ds[0])
+    return dirs
 
 
 def pack_payload_zip(
@@ -449,7 +468,7 @@ def verify_and_land(
         raise HubClientError(
             "三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收"
         )
-    local_fp = data_fp(iter_shard_dirs(traj_dir, it))
+    local_fp = data_fp(iter_shard_dirs(traj_dir, it, log=log))
     if result["data_fp"] != local_fp:
         raise HubClientError(
             f"三重校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "

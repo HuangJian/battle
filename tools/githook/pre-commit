@@ -50,6 +50,41 @@ BUN=$(command -v bun)
 
 echo "▶ Running pre-commit checks (bun: $BUN)..."
 
+# --- 未暂存改动隔离（2026-09-06 用户指令）：门禁只判 staged 快照 --------------
+# 门禁（tsc/bun test/nn-gate/freeze）天然针对工作树运行——工作树里未暂存的在途
+# 改动（如改到一半的 TS）会把门禁打成红，而那些改动并不在本次提交里。此段在
+# 门禁前把未暂存 diff 摘除（工作树 := 索引），门禁结束或失败后原样恢复：
+#   - 禁用 git stash（AGENTS §5.8 沙箱事故）——等价机制用 diff/apply 文件级
+#     操作实现，不触碰对象库；
+#   - 恢复失败时补丁文件保留并响亮报错，绝不静默吞用户的在途改动；
+#   - 未暂存改动不存在时零开销（不产生补丁、不做 apply）。
+UNSTAGED_PATCH=""
+hook_restore_unstaged() {
+  if [ -n "$UNSTAGED_PATCH" ]; then
+    if git apply --whitespace=nowarn "$UNSTAGED_PATCH" 2>/dev/null; then
+      rm -f "$UNSTAGED_PATCH"
+      UNSTAGED_PATCH=""
+      echo " ▸ 未暂存改动已原样恢复（工作树回到门禁前状态）"
+    else
+      echo "!! 未暂存改动自动恢复失败——完整补丁保留在 $UNSTAGED_PATCH"
+      echo "!! 请手动恢复: git apply \"$UNSTAGED_PATCH\"（恢复前先确认编辑器里没有会覆盖它的未保存修改）"
+      exit 1
+    fi
+  fi
+}
+if [ -n "$(git diff --name-only)" ]; then
+  mkdir -p tmp
+  UNSTAGED_PATCH="tmp/pre-commit-unstaged-$$.patch"
+  if git diff --binary > "$UNSTAGED_PATCH" && git apply --reverse --whitespace=nowarn "$UNSTAGED_PATCH"; then
+    echo " ▸ 未暂存改动已临时摘除——门禁只判 staged 快照；提交结束自动恢复"
+  else
+    echo "!! 未暂存改动摘除失败——本次门禁按工作树现状运行（不做隔离）"
+    rm -f "$UNSTAGED_PATCH"
+    UNSTAGED_PATCH=""
+  fi
+fi
+trap 'hook_restore_unstaged' EXIT
+
 # --- nn-training Python gate (2026-09-02) --------------------------------------
 # When the staged changes touch nn-training/, run the FULL Python quality gate
 # (ruff + mypy + pytest 4-shard, all parallel — 实现见 nn-python-gate.sh，与日常

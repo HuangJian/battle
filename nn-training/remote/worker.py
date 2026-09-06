@@ -641,17 +641,19 @@ def worker_loop(
         jid = job["job_id"]
         lease_token = str(job.get("lease_token", "") or "")
         log(f"job {jid} claimed — downloading payload")
-        # H1（review-hy P0）：心跳必须在 **job 执行期间**持续（下载 + PPO 可能几十分钟，
-        # 期间不发心跳 → 租约 30min 过期 → job 回池被重领 → 双跑 + 结果竞态）。
-        # 守护心跳线程 60s 周期续租（HEARTBEAT_SEC），job 结束 join。
+        # 心跳线程仅在有租约时启动（§343 竞速 hub 不下发 lease_token——无租约可续，
+        # 结果胜负由 hub store_result 首写锁定决定，落后者 409 丢弃）。
+        # 旧租约模式 hub：H1（review-hy P0）job 执行期间 60s 周期续租，job 结束 join。
         _hb_stop = threading.Event()
+        hb_thread = None
+        if lease_token:
 
-        def _hb_loop() -> None:
-            while not _hb_stop.wait(HEARTBEAT_SEC):
-                heartbeat(base_url, token, jid, lease_token)
+            def _hb_loop() -> None:
+                while not _hb_stop.wait(HEARTBEAT_SEC):
+                    heartbeat(base_url, token, jid, lease_token)
 
-        hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"hb-{jid[:8]}")
-        hb_thread.start()
+            hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"hb-{jid[:8]}")
+            hb_thread.start()
         job_ok = False
         try:
             result = run_job(base_url, token, job, work_dir=work_dir, device=device,
@@ -672,7 +674,8 @@ def worker_loop(
             # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等
         finally:
             _hb_stop.set()
-            hb_thread.join(timeout=HEARTBEAT_SEC + 5)
+            if hb_thread is not None:
+                hb_thread.join(timeout=HEARTBEAT_SEC + 5)
         if once:
             # H8（review-hy）：--once 模式 job 失败必须非零退出——冒烟/单发场景
             # 退出码 0 会静默掩盖失败（smoke 只判 returncode）

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -739,8 +740,22 @@ class RolloutDispatcher:
                                     inflight.pop(task, None)
                                     inflight_ts.pop(task, None)
                                     inflight_nodes.pop(task, None)
+                            # 输家副本退场：竞速双方都在锁外写盘、锁内结算——后到者
+                            # 的 shard 目录若不删，发布端 iter_shard_dirs 会把同一
+                            # seed 的两份数据一起打进 payload.zip（重复 arcname，
+                            # 训练吃哪份由解包顺序偶然决定，2026-09-06 it3-it8 实测）。
+                            # 本地 _dir = wave 目录（shard 是其子目录），远程
+                            # _dir = shard 目录本身——按目录名归一化到 shard 层。
+                            victim = str(summary.get("_dir") or "")
+                            if victim:
+                                vdir = Path(victim)
+                                shard_name = f"rl_s{task[0]}_seed{task[1]}"
+                                if vdir.name != shard_name:
+                                    vdir = vdir / shard_name
+                                shutil.rmtree(vdir, ignore_errors=True)
                             log(
                                 f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
+                                + (f" (+retired {vdir})" if victim else "")
                             )
                             continue
                         seen.add(task)

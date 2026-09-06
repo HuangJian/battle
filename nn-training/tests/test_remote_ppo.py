@@ -540,17 +540,16 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
         )
         store.publish(jid, manifest, b"PK\x03\x04fake")
 
-        # 领取 → payload 下载（H2：领取时下发 lease_token，后续心跳/结果回传须携带）
+        # §343 竞速：无租约——所有轮询者领到同一 open job（广播）
         st, body = _http(base, "sekret", "/jobs/next")
         assert st == 200 and body["job_id"] == jid
         assert body["manifest"]["data_fp"] == manifest["data_fp"]
-        lease_token = str(body.get("lease_token", ""))
-        assert lease_token, "H2：领取时应下发 lease_token"
+        assert "lease_token" not in body, "§343：竞速模型不再下发 lease_token"
         st2, payload_bytes = _http_raw(base, "sekret", f"/jobs/{jid}/payload")
         assert st2 == 200 and payload_bytes == b"PK\x03\x04fake"
-        # 已领取未过期 → 不再领取（Q7：不重发）
+        # 再次轮询 → 同一 job 仍可领（竞速广播，先回传结果者胜）
         st3, body3 = _http(base, "sekret", "/jobs/next")
-        assert body3["job_id"] is None or body3["job_id"] != jid
+        assert st3 == 200 and body3["job_id"] == jid, "§343：广播不独占，重复轮询返回同一 job"
 
         # 结果 POST（带 lease_token + 正确 commit_echo）→ status done → 取回
         result = {
@@ -563,8 +562,7 @@ def test_hub_server_auth_and_job_lifecycle(tmp_path: Path) -> None:
             "commit_echo": manifest["commit"],
         }
         st4, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                       data=json.dumps(result).encode("utf-8"),
-                       extra_headers={"X-Lease-Token": lease_token})
+                       data=json.dumps(result).encode("utf-8"))
         assert st4 in (200, 201)
         st5, body5 = _http(base, "sekret", f"/jobs/{jid}/status")
         assert st5 == 200 and body5["state"] == "done"
@@ -582,10 +580,7 @@ def test_hub_server_late_worker_writeback_rejected(tmp_path: Path) -> None:
         manifest = normalize_manifest(_mini_manifest())
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
-        # 先领取获得 lease_token（H2）
-        st_claim, body_claim = _http(base, "sekret", "/jobs/next")
-        assert st_claim == 200 and body_claim["job_id"] == jid
-        lease_token = str(body_claim.get("lease_token", ""))
+        # §343 竞速：胜者直 POST（无租约头）；409 语义不变 = 首写锁定防迟到覆盖
         result = {
             "job_id": jid,
             "data_fp": manifest["data_fp"],
@@ -595,13 +590,11 @@ def test_hub_server_late_worker_writeback_rejected(tmp_path: Path) -> None:
             "commit_echo": manifest["commit"],
         }
         st1, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                       data=json.dumps(result).encode("utf-8"),
-                       extra_headers={"X-Lease-Token": lease_token})
+                       data=json.dumps(result).encode("utf-8"))
         assert st1 in (200, 201)
         st2, body = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                          data=json.dumps(result).encode("utf-8"),
-                          extra_headers={"X-Lease-Token": lease_token})
-        assert st2 == 409, f"迟到写回应 409，收到 {st2} {body}"
+                          data=json.dumps(result).encode("utf-8"))
+        assert st2 == 409, f"迟到写回应 409（§343 落后者丢弃），收到 {st2} {body}"
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -614,10 +607,6 @@ def test_hub_server_commit_mismatch_rejected_at_post(tmp_path: Path) -> None:
         manifest = normalize_manifest(_mini_manifest())
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
-        # 先领取获得 lease_token（H2）
-        st_claim, body_claim = _http(base, "sekret", "/jobs/next")
-        assert st_claim == 200 and body_claim["job_id"] == jid
-        lease_token = str(body_claim.get("lease_token", ""))
         result = {
             "job_id": jid,
             "data_fp": manifest["data_fp"],
@@ -627,8 +616,7 @@ def test_hub_server_commit_mismatch_rejected_at_post(tmp_path: Path) -> None:
             "commit_echo": "d" * 40,  # 旧 worker（不同 commit）迟到写回
         }
         st, body = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
-                         data=json.dumps(result).encode("utf-8"),
-                         extra_headers={"X-Lease-Token": lease_token})
+                         data=json.dumps(result).encode("utf-8"))
         assert st == 400, f"commit 不一致应 400，收到 {st} {body}"
         assert store.get_result(jid) is None, "拒收的结果不得落盘"
     finally:
@@ -636,20 +624,34 @@ def test_hub_server_commit_mismatch_rejected_at_post(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
-def test_hub_server_lease_expiry_requeues(tmp_path: Path) -> None:
-    """租约过期 → job 回可领取池（云 worker 崩溃后重拉同一 job，幂等键去重）。"""
+def test_hub_server_race_result_excludes_from_pool(tmp_path: Path) -> None:
+    """§343 竞速收口：结果已落盘（未验收）的 job 从可领取池剔除——落后 worker
+    重连后不再重算已分胜负的 job；孤儿租约（断连杀进程）零等待重领。"""
     base, store, srv, th = _boot_server(tmp_path)
     try:
         manifest = normalize_manifest(_mini_manifest())
         jid = manifest["job_id"]
         store.publish(jid, manifest, b"PK\x03\x04fake")
-        # 领取 → 租约生效
+        # worker A 领走后 session 死亡（竞速模型没有孤儿租约概念）
         st, body = _http(base, "sekret", "/jobs/next")
         assert body["job_id"] == jid
-        # 手动过期（无需等 30min）
-        store._leases[jid] = store._now() - 1
+        # worker B（重连）立即重领同一 job——零等待
         st2, body2 = _http(base, "sekret", "/jobs/next")
-        assert st2 == 200 and body2["job_id"] == jid, "租约过期后必须可重领"
+        assert st2 == 200 and body2["job_id"] == jid, "竞速广播：重连即重领，不等租约过期"
+        # B 先回传结果 → 结果落盘 → job 从池中剔除（A 的迟到写回已无意义）
+        result = {
+            "job_id": jid,
+            "data_fp": manifest["data_fp"],
+            "init_weights_fp": manifest["init_weights_fp"],
+            "weights_json": encode_weights_json(b"{}"),
+            "agg": {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5},
+            "commit_echo": manifest["commit"],
+        }
+        st3, _ = _http(base, "sekret", f"/jobs/{jid}/result", method="POST",
+                       data=json.dumps(result).encode("utf-8"))
+        assert st3 in (200, 201)
+        st4, body4 = _http(base, "sekret", "/jobs/next")
+        assert st4 == 200 and body4["job_id"] is None, "结果已落盘：竞速已分胜负，不再派发"
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -756,14 +758,17 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
 
 
 def test_store_release_returns_to_pool(tmp_path: Path) -> None:
+    """§343 竞速：租约不再参与调度——claim 与 release 均为兼容保留，
+    可领取池只看「pending + payload 在盘 + 结果未落盘」。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     store.publish("jid-r", {"job_id": "jid-r"}, b"payload")
     token = store.claim("jid-r")
-    assert token is not None
-    assert store.claimable_job_ids() == []  # 租约期内不可领
-    assert store.release("jid-r", "wrong-token") is False  # H2：非持有人拒释放
+    assert token is not None  # 兼容接口仍在
+    assert store.claimable_job_ids() == ["jid-r"]  # §343：租约不阻止广播
+    # release 兼容路径保留：H2 非持有人拒释放 / 幂等拒绝，但对调度无影响
+    assert store.release("jid-r", "wrong-token") is False
     assert store.release("jid-r", token) is True
-    assert store.claimable_job_ids() == ["jid-r"]  # 立即回池
+    assert store.claimable_job_ids() == ["jid-r"]  # 竞速模型：始终可领（结果未落盘）
     assert store.release("jid-r", token) is False  # 已释放：幂等拒绝
 
 

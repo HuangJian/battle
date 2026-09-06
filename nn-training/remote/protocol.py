@@ -32,8 +32,12 @@ from pathlib import Path
 # ------------------------------------------------------------------ constants
 
 PROTO = 1  # 协议版本：未知字段忽略，缺失必填 fail fast（D1）
-LEASE_SEC = 30 * 60  # job 租约（D1/F3）：30 分钟
-HEARTBEAT_SEC = 60  # 心跳（D1/F3）：60 秒
+# §343（2026-09-06）：job 分发改为竞速广播（先回传结果者胜，store_result 首写锁定，
+# 落后者 409 丢弃），租约/心跳不再参与调度。LEASE_SEC/HEARTBEAT_SEC 仅剩兼容职责：
+# 旧租约路径（_JobStore.claim/heartbeat/release + worker 心跳线程守卫）仍在，hub
+# 重启即丢租约、D8 账本重建语义不变。
+LEASE_SEC = 30 * 60  # （兼容）旧租约时长；竞速模型下无调度职责
+HEARTBEAT_SEC = 60  # （兼容）旧心跳周期；仅旧租约模式 hub 的 worker 心跳线程使用
 AUTH_HEADER = "Authorization"  # Bearer <token>（D9；token 永不落盘/落日志）
 
 #: manifest 必填字段（附录 A；缺失任一 → 校验失败）

@@ -2465,3 +2465,57 @@ HUB 连出，实测稳）为架构背书。落地：
 时间戳），Kaggle 侧 sys.modules 跨版本陈旧性与 pull 同规（trainer codeHash restart
 兜底）。Kaggle 接入：notebook 起 worker_serve + cloudflared，URL 贴 rl-config
 nodes（gpu_push: true）。
+
+## §342 / p4-onset 监控四修复（2026-09-06，监控发现 → 用户拍板"修全部问题"）
+
+首日远程推架构监控（nn.progress §19）发现四处配置管道失真，全部修复并有回归测试
+（nn-training/tests/test_rl_remote_fixes.py，全量 pytest 312 绿）：
+
+1. **ppo_schedule 的 lr 三段表在 remote 模式全程未生效**：`_course_iter` 只把
+   `sch['lr']` 写进 `self._opt.param_groups`（hub 侧无 optimizer，静默跳过），
+   而 job manifest 的 lr 取自静态 `args.lr`，worker 以 `Adam(lr=manifest["lr"])`
+   建优化器 → 三段表死路。修：`_course_iter` 把 `sch['lr']` 同步折进 `args.lr`
+   （本地模式再同步 opt，保 Adam 动量）。既成事实：p4-onset it1–23 恒定
+   1.5e-4（warmup 半速；按绝对 iter 查表 it24–35 本就该 1.5e-4，实战差异在
+   it36+ 精调段——修复消除其 3 倍超速风险）。
+2. **同 seed shard 双份落盘**：tail fan-out 竞速双方都在锁外写盘、锁内结算，
+   后到者判 `dup settle ... dropped` 时目录已落盘 → 同一 seed 两份进 payload
+   （zip 重复 arcname，训练吃哪份由解包顺序偶然决定；it3–it8 每轮 2–7 份）。
+   修：dup-settle 分支退役本线程刚写的输家目录（`_dir` 按目录名归一化到 shard
+   层，兼容 local wave 目录与远程 shard 目录两种形态）；`iter_shard_dirs` 同名
+   去重兜底（manifest mtime 最早者胜 = 先写盘者，退役响亮日志）。修复后发布
+   shards=150 与 expectedGames 平（it24 实测 retire 2 份残留）。
+3. **贪心评估被 EVAL_SEEDS 常量截成 20 局**：`EVAL_SEEDS` 只有 20 个种子，
+   课程 `eval_games_per_stage: 100` 被 `[:n_seeds]` 静默截断，胜率 95% CI
+   ±13pp 无法分辨爬坡。修：扩到 `range(860001, 860101)`（前 2 seed 历史前缀
+   不变，切片消费全兼容）。
+4. **课程 backup_prefix/backup_dir 未被采用**：`_export_weights` 恒用模式前缀。
+   修：课程声明时优先（`backup_weights` 新增 `backup_dir` 形参，相对路径按仓库
+   根解析），缺省退回旧行为。归档落 `nn-training/weights/p4-onset/`。
+
+监控教训：iteration 事件的 `lr` 字段写 `args.lr`（events.py），它不等于 worker
+实跑 lr——判断「配置是否生效」要看 manifest 打包链路而非日志回显。
+
+## §343 / PPO job 分发改竞速广播——废租约独占（2026-09-06，用户指令）
+
+背景：it24 实测孤儿租约事故——worker 领取后 Kaggle session 断连重连死亡，租约
+30min（LEASE_SEC）内 job 无法重领，trainer `wait_job`（同为 30min 超时）空转，
+实际损失 ≈ 整整一个租约周期。用户裁定：租约独占完全不合理，改为 **Kaggle 竞速
+形式**——一个 iter 语料准备好后，所有轮询的 worker 都领到同一份 PPO 任务，哪个
+节点先回传该轮结果就用谁的，落后者的结果直接丢弃。实际部署单 worker，竞速只在
+session 断开重连时发生；多 worker 的双跑浪费可接受。
+
+语义（与 rollout 侧 tail fan-out §16/v3.7 的「先结算者赢、后到者丢弃」同构）：
+- `claimable_job_ids` = pending 且未 completed 且 payload 在盘且**结果未落盘**；
+  不再读租约。结果落盘未验收的 job 从池中剔除——防落后 worker 死循环重算。
+- `_get_next` 直接广播同一 open job，不下发 lease_token；`_post_result` 不校验
+  租约——鉴权边界 = Bearer token（D9 不变），内容对账 = validate_result
+  （job_id/data_fp/init_weights_fp/commit_echo），防重复写回 = store_result
+  首写锁定（迟到 409）。
+- worker：claim 无 lease_token → 心跳线程不启动（旧租约模式 hub 兼容不变）；
+  post_result 的 409 幂等语义既有。
+- `_JobStore.claim/heartbeat/release` 与 LEASE_SEC/HEARTBEAT_SEC 保留为兼容路径
+  （心跳对旧 hub 无副作用），调度不再消费；租约内存态重启即丢的 D8 语义不变。
+- 权衡（明示）：多 worker 时每个 iter 全员重算（N=1 实际为零）；先回传者的
+  权重落账——GPU 结果本就非逐字节确定，账本以 wver 记录落了谁，无回放语义损失。
+- 测试：test_remote_ppo 全套改为竞速语义（广播重领 / 409 丢弃 / 结果落盘剔除）。
