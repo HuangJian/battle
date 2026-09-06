@@ -86,7 +86,7 @@ function modesSection(s: ConsoleStateView): string {
       <div class="btnrow">
         ${btn('pull', 'Pull（Kaggle 拉取）', 'self-node+hub-server+隧道+trainer（--ppo remote），Kaggle 入站拉取')}
         ${btn('push', 'Push（推送到 GPU）', 'self-node+hub-server+trainer（--ppo remote），GPU 在 Kaggle 侧推送')}
-        ${btn('local', 'Local（本机 PPO）', '仅 trainer，本机 CPU PPO；需 rl.stream=0')}
+        ${btn('local', 'Local（本机 PPO）', '仅 trainer，本机 CPU PPO（remote 互斥组合由 run_rl 启动期 fail-fast 兜底）')}
       </div>
       <p class="muted small">预设=按顺序拉起组件组合；也可在组件表单独启/停。变更即时持久化（console-state）。</p>
       <div class="btnrow" style="margin-top:10px">
@@ -96,7 +96,7 @@ function modesSection(s: ConsoleStateView): string {
     <div class="col">
       <h4>trainer 行为开关（回写 rl-config.json）</h4>
       <div class="btnrow colbtn">
-        ${toggle('rl.stream', m.stream, 'stream 流式派发', 'run_rl 的 --stream；远程模式内部强制 0，本地 PPO 互斥')}
+        ${toggle('rl.stream', m.stream, 'stream 流式派发', 'run_rl 的 --stream；本地模式默认开启（AGENTS §15.6），远程模式内部强制 0')}
         ${toggle('rl.double_buffer', m.doubleBuffer, '双缓冲预采', '迭代收尾提前采集下一轮（θ_N 快照）')}
         ${toggle('rl.precollect_early', m.precollectEarly, '预采提前 spawn', 'precollect_early=1 时提前一轮 spawn')}
       </div>
@@ -371,7 +371,7 @@ select{padding:5px 9px;border:1px solid var(--border);border-radius:8px;backgrou
   <div class="pool-header">
     <h2><span class="dot"></span>NN 训练控制台</h2>
     <div>
-      <select id="courseSel">${s.courses.map((c) => `<option value="${esc(c)}"${c === s.course ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <select id="courseSel"><option value=""${s.course ? '' : ' selected'}>自动（最近活跃课程）</option>${s.courses.map((c) => `<option value="${esc(c)}"${c === s.course ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <button data-act="stopAll" class="stop-all">停止全部</button>
       <span class="ts">快照 ${esc(s.time.slice(0, 19).replace('T', ' '))}</span>
     </div>

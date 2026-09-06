@@ -113,6 +113,28 @@ export function discoverCourses(max = 12): string[] {
     .map((c) => c.name)
 }
 
+// ───────────────────── 课程单一事实源（DECISIONS §351 bug 1） ─────────────────────
+
+/** console-state 中课程字段的形态（loadConsoleState 的结构子集）。 */
+export interface ConsoleCourseState {
+  course: string
+}
+
+/** 生效课程：console-state 优先，空则回退最近活跃课程（与页面显示同源）。
+ *  读路径不回写 console-state——保持「手动选择才持久化」语义。 */
+export function effectiveCourse(state: ConsoleCourseState, discovered: string[]): string {
+  return state.course || discovered[0] || ''
+}
+
+/** 动作上下文（routeAction 专用）：显式 body.course > effectiveCourse。
+ *  保证「页面显示的课程 = 动作实际使用的课程」不变量。 */
+export function actionCtx(body: PostBody): StartCtx {
+  const state = loadConsoleState()
+  return {
+    course: str(body, 'course') || effectiveCourse(state, discoverCourses()),
+    trainerPpo: state.trainerPpo,
+  }
+}
 // ────────────────────────── 快照组装 ──────────────────────────
 
 const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
@@ -225,7 +247,7 @@ export async function componentLogPayload(
   if (!ALL_COMPONENTS.includes(key)) return null
   const cfg = loadConfig()
   const state = loadConsoleState()
-  const course = state.course || discoverCourses()[0] || ''
+  const course = effectiveCourse(state, discoverCourses())
   const nnRel = resolveComponentLog(key, cfg, course)
   if (!nnRel) return null
   const t = readLogTail(nnRel, maxLines)
@@ -323,7 +345,8 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
 export async function buildStateView(): Promise<ConsoleStateView> {
   const cfg = loadConfig()
   const state = loadConsoleState()
-  const course = state.course || discoverCourses()[0] || ''
+  const courses = discoverCourses()
+  const course = effectiveCourse(state, courses)
   const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
@@ -339,7 +362,7 @@ export async function buildStateView(): Promise<ConsoleStateView> {
   return {
     time: new Date().toISOString(),
     course,
-    courses: discoverCourses(),
+    courses,
     components,
     nodes,
     modes: {
@@ -376,11 +399,7 @@ function errResp(message: string, status: number): Response {
 
 /** 解析/分发 POST /api/*。返回 null = 未匹配（调用方 404）。 */
 export async function routeAction(action: string, body: PostBody): Promise<Response | null> {
-  const state = loadConsoleState()
-  const ctx: StartCtx = {
-    course: str(body, 'course') || state.course,
-    trainerPpo: state.trainerPpo,
-  }
+  const ctx = actionCtx(body)
   try {
     switch (action) {
       case 'start': {
@@ -450,7 +469,7 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         const node = cfg.nodes.find((x) => x.id === id)
         if (!node) return errResp(`节点不存在: ${id}`, 400)
         if (!node.enabled) return okResp({ ok: false, message: '节点已停用——先启用再冒烟' })
-        const cCourse = str(body, 'course') || state.course
+        const cCourse = ctx.course
         const cPath = path.join(REPO_ROOT, 'tmp', cCourse, 'weights.json')
         const weightsPath = existsSync(cPath)
           ? cPath

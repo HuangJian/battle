@@ -144,15 +144,6 @@ function runRlLockHolder(): number | null {
   }
 }
 
-/** 本地 PPO 与 rl-config stream=1 的显式互斥（§330 语义；config 默认值静默降级，
- *  这里只拦「配置显式为 1 且用户要 local」的组合）。 */
-function trainerConflict(cfg: RlConfig, mode: ConsoleState['trainerPpo']): string | null {
-  if (mode !== 'local') return null
-  if (Number(cfg.rl.stream ?? 0) === 1)
-    return '本地 PPO 与 rl-config rl.stream=1 互斥——先在「模式开关」关闭 stream（或改用 pull/push 远程模式）'
-  return null
-}
-
 // ────────────────────────── 组件启动 ──────────────────────────
 
 export interface StartCtx {
@@ -217,8 +208,6 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
             false,
             `run_rl 锁被 PID ${holder} 持有——先停止在跑训练（或删除 nn-training/.run_rl.lock）`,
           )
-        const conflict = trainerConflict(cfg, ctx.trainerPpo)
-        if (conflict) return done(false, conflict)
 
         const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
         const weightsPath = path.join(trajDir, 'weights.json')

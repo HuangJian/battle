@@ -2754,3 +2754,83 @@ n-trainingun_rl.py`，
 必须 `existsSync` 为真。复跑预演全通过：发布→推送→echo→落位→作废退出，
 iteration 计数 3 不变、wver c1369c289278 未动、无残留锁、8789 端口释放、
 workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属正常痕迹）。
+
+## §350 / p4-fast 加速课程：GPU 吃满 + 语料×2（2026-09-07，用户指令）
+
+背景：Kaggle 15G 卡只用 ~1G——模型 67K 参数（`models/student.py`）、`mb=512`
+单 chunk obs 19MB + stem 激活 ~88MB，50 chunk 常驻（`ppo/trainer.py tensored_chunks`
+全量 `.to(device)`）约 1G 属正常；p4-onset 稳态 ppo ~90s、rollout 方差 40–360s，
+真瓶颈是采集而非 PPO。假设 p4-horizon 亦平台（it31 时贪心 15–27%，从未 >35%），
+用户确认采集集群已就绪、不用担心 rollout 速度，开加速变体求单位 rollout 的
+学习量最大化。
+
+决策：按 §15.5 开新实验 `p4-fast`（改 corpus/epochs 即新实验，fresh out/traj，
+不 resume 任何旧 run），由 p4-horizon 逐字节派生、仅改 4 处：`seed_rotate`
+150→300（语料×2，~52k 样本/轮，chunks ~100，常驻显存 ~2G，仍远低于 15G；
+采集墙钟由集群吸收）、`epochs` 4→8（200→~800 梯度步/轮，ppo 90s→~360s，
+GPU 算力换样本复用）、`name/out/traj/backup_*` → `tmp/p4-fast`（含 header 注释），
+其余（地图/敌编/reward/γ0.998/λ0.99/schedule/eval/mb/workers/bc）与 horizon
+完全同义——隔离"加速"变量：bc 沿用同一 it70 权重（公平对照起点），`mb` 刻意
+保持 512（拿 mb 填显存=步数减半学得更少；语料×2 + mb 不变才是正确吃 GPU 姿势，
+见 §350 讨论），wDmg 加码候选留给加速版亦平台后的下一实验、不在本课程混杂。
+
+- 安全阀：KL>0.05 连 3 轮或熵相对峰值掉 >0.05 即回滚 `epochs` 到 4（单改课程重发，
+  仍是同一实验内降档，不开新课；回滚记本条目补记）。
+- 判定线：沿用 §345（贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮则连加速
+  版亦平台 → 下一实验 wDmg）。基线锚：horizon it30 贪心 23/100 + onset it70 35%
+  起点对照。详见 `docs/rl.progress.md` §5（待回填）。
+- 启动：控制台（bun run train）选 Pull 预设 + course=p4-fast；切课程必须重启
+  hub-server（§345 教训：job_root 绑定课程队列）。
+
+**补记（2026-09-07，p4-fast 课程评审，三处修正；原 §350 正文留档不改）：**
+1. P0-1 安全阀误杀属实且更严重：horizon KL 基线 0.025–0.036（training_log 全步均值
+   口径），4× 步数下健康工作点约 0.04–0.08——原"KL>0.05 连 3 轮回滚"第 1–3 轮即
+   误触发。且 per-tick 内建熔断 kl≥0.075×3 硬编码于 `rl/loop_guards.py:57`（课程/CLI
+   均不可覆盖），任何 >0.075 的自定义阀都永不触发——评审建议的 0.10 阀同理，故未
+   采用，改运行规则：kl≥0.06 连 2 轮 → 内建开枪前人工降档（epochs 8→4 或
+   kl_coef 0.2→0.3），worker 日志末 epoch KL>0.10 为漂移实锤（`engine.py` 每 epoch
+   行可观测，training_log 只有全轮均值）。
+2. P1-3 "vs cap 0.2 余量"属实为虚假安全感：`engine.ppo_update` 无 target_kl 早停；
+   kl_cap 只在 `rl/stream.py` 流式路径执行，remote 串行（stream=0/waves=null）下
+   manifest 透传但无人消费。课程头注释已删 cap 表述，改写真护栏清单（kl_coef 软
+   惩罚 + F4 0.075 停车 + ent 0.25 相对崩塌 + 监控）。反讽：绑定护栏（0.075）比
+   已死的 cap（0.2）更紧——这正是 P0-1 必须处理的原因。
+3. P2-6 熵 tripwire（相对峰值掉 >0.05 → epochs 回滚）保留 + 预期管理：4× 步数下
+   5–8 轮内触发属正常，触发即降档、不判失败。
+4. GPU-cost P0（墙钟/显存/KL 工作点皆外推）：加 it1–2 校准门（预测 chunks~100 /
+   步数~800 / ppo≈horizon 3–4× / kl<0.06 / 熵跌<0.03），不达标按 epochs→6、
+   seed_rotate→200 顺序降档。课程头注释已同步。
+
+
+## §351 / 训练控制台两处缺陷：course 显示/动作双源 + local×stream 假互斥（2026-09-07，用户指令）
+
+用户报两个 bug（训练在跑，只改 `tools/training/console/` 网站代码，不碰组件进程）：
+
+**Bug 1（course 双源不一致）**：页面加载时下拉框显示了课程（如 p4-horizon），点启动却报
+「需要 course（先在顶部设置课程）」。根因：显示与动作走两条取数路径——
+`api.buildStateView()`/`componentLogPayload()` 用 `state.course || discoverCourses()[0]`
+（console-state 为空时回退最近活跃课程），而 `routeAction` 的 `ctx.course` 只读
+console-state.json（为空即空串）→ 组件启动守卫 `if (!ctx.course) throw` 必炸。
+**定案**：单一事实源——api.ts 导出纯函数 `effectiveCourse(state, discovered)`
+（console-state 优先，空则回退 `discoverCourses()[0]`）与 `actionCtx(body)`
+（显式 body.course > effectiveCourse）；`buildStateView`/`componentLogPayload`/
+`routeAction` 三处全部经它取课程——**页面显示的课程 = 动作实际使用的课程**，
+不再自动回写 console-state（保持「手动选择才持久化」语义，读路径不写盘；
+显式动作如 preset 启动时照旧 saveConsoleState）。页面下拉加占位项
+「自动（最近活跃课程）」使 value="" 态所见即所得。
+
+**Bug 2（local×stream 假互斥）**：控制台选中「stream 流式派发」后点 Local（本机 PPO）
+报「本地 PPO 与 rl-config rl.stream=1 互斥」。根因：`actions.trainerConflict()`
+把 §330 的互斥边界读错了——§330/run_rl 的 fail-fast 是 **remote × 显式 --stream 1**
+（远程内部强制 stream=0；rl/cli.py 只拦这一组合，config 默认值静默降级）；
+而 stream=1 恰是本地模式的**默认与推荐运行态**（rl/cli.py `--stream` default=1、
+AGENTS §15.6 流式为 RL 默认）。控制台不该在 run_rl 之外自设更严门槛。
+**定案**：删除 `trainerConflict` 及其调用点——local 不再检查 rl.stream；
+真非法组合仍由 run_rl 启动期 fail-fast 兜底（最终守门人唯一原则）。
+页面文案同步修正（去掉「需 rl.stream=0」「本地 PPO 互斥」误导提示）。
+
+**验证**：`tests/training-console.test.ts` 新增回归（先红后绿）：actionCtx 回退语义、
+buildStateView().course === actionCtx({}).course（显示=动作同源不变量）、页面不含
+互斥文案、`trainerConflict` 不再存在。headless 不 spawn 真实组件（启动动作本身
+仍有 run_rl 锁守卫，单测不触达）。api/actions 非热加载层——改后重启控制台进程
+（§349：受管组件 detached，控制台重启不影响训练）。
