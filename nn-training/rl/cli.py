@@ -239,7 +239,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "first-dispatched during collection; suspend once PPO waves "
         "begin (auto-resume if the whole cluster stalls); join eval "
         "remainder after PPO. 0 = auto (max(2, workers//4))；默认取 "
-        "rl-config 的 rl.local_slots",
+        "rl-config 的 rl.local_slots（每轮热读，2026-09-06 起）",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="run_rl 单实例锁（.run_rl.lock）强制接管——运维重启时旧进程"
+        "未被 --kill-previous 杀掉的兜底",
     )
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -79,6 +80,77 @@ def _log_rl_args(src: dict, merged: dict) -> None:
         "[launch] rl args source: "
         + " ".join(f"{k}={src.get(k, 'fallback')}" for k in sorted(merged))
     )
+
+
+def _runrl_pid_alive(pid: int) -> bool:
+    """Windows 安全的进程存活探测（GetExitCodeProcess == STILL_ACTIVE）。
+
+    不用 os.kill(pid, 0)——Windows 上那是 TerminateProcess(handle, 0)，会把锁
+    持有人直接杀掉（train/loop_util._pid_alive 的隐患，此处不复用）。"""
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_ulong()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
+
+
+def _acquire_run_rl_lock(lock_path: str, *, force: bool = False) -> bool:
+    """PID 文件单实例锁（O_CREAT|O_EXCL 原子创建；holder 死亡 → stale 自动清理）。
+
+    2026-09-06 事故：start-training --kill-previous 漏杀旧 trainer（msys pgrep 对
+    Windows 原生进程不可靠）→ 两个 trainer 并行写同一 traj 7 分钟，it57-59 各被
+    两遍训练/落账。锁在进入训练主循环前把关，双开=响亮拒启而非静默并行。"""
+    if force:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            os.write(fd, f"{os.getpid()}|{sys.executable}|{int(time.time())}".encode())
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        pass
+    try:
+        with open(lock_path) as f:
+            holder = int(f.read().split("|")[0])
+    except (OSError, ValueError):
+        holder = None
+    if holder is not None and _runrl_pid_alive(holder):
+        return False
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+    return _acquire_run_rl_lock(lock_path, force=True)
+
+
+def _cleanup_run_rl_lock(lock_path: str) -> None:
+    """仅清理自己持有的锁——锁已易主（--force 抢占）时不删别人的。"""
+    try:
+        with open(lock_path) as f:
+            holder = int(f.read().split("|")[0])
+        if holder != os.getpid():
+            return
+    except (OSError, ValueError):
+        return
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
 
 
 
@@ -189,6 +261,17 @@ def main() -> None:
         log("[run_rl] collect-only done — exit")
         return
     # ===== 双缓冲：collect-only 分支结束 =====
+
+    # ===== 单实例锁（2026-09-06 事故：--kill-previous 漏杀 → 双 trainer 并行写同一
+    # traj 7 分钟，it57-59 各被两遍训练/落账）===== 仅训练主循环持锁；collect-only
+    # 预采子进程（spawn_collect_next 的子代）不参与竞争。双开 = 响亮拒启。
+    lock_path = str(Path(__file__).resolve().parent / ".run_rl.lock")
+    if not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
+        raise SystemExit(
+            "[run_rl] another run_rl is running (holder pid in nn-training/.run_rl.lock) "
+            "— refusing to start; kill the holder or pass --force to take over"
+        )
+    atexit.register(_cleanup_run_rl_lock, lock_path)
 
     # ===== 主循环（rl/loop.py::run_training）=====
     from rl.loop import run_training
