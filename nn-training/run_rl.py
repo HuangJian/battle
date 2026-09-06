@@ -158,7 +158,7 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
 def main() -> None:
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
-    # relative. Required for the unified launcher's --detach (tools/training/start.ts train), whose
+    # relative. Required for the unified launcher's --detach (tools/training/train.ts), whose
     # is nn-training/ — same pattern as train_loop.py's REPO_ROOT.
     os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     # ===== RL 入口整合（DECISIONS §307）：两阶段 argparse，先预解析 --mode/--goal =====

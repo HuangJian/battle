@@ -2,7 +2,7 @@
 
 > 按 AGENTS §5.6 / 用户指令建立。新条目置顶（倒序）。架构改动 / 评估结果 / 教训都记这里。
 > 任务卡编号（T0–T12）与规格 § 号均指 `plan/Goal-Space-Policy-Rebuild.md`。
-> NN 训练统一经 `bun tools/training/start.ts` 启动（AGENTS §5.6 硬规则；2026-09-06 起取代旧 `start-training.sh|.ps1`，DECISIONS §346）。
+> NN 训练统一经 `bun tools/training/train.ts`（无头单次）或训练控制台 `bun run train`（组件管理）启动（AGENTS §5.6 硬规则；2026-09-06 起，DECISIONS §349）。
 ## §26 test_integration 拆分 9 独立函数 + xdist 并行（DECISIONS §318）
 
 **背景**：§25 后全量 17.5s 瓶颈是单函数 test_integration 13.9s（独占一个 worker，不可分）。

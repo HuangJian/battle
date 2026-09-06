@@ -77,6 +77,27 @@ export async function killPid(pid: number): Promise<boolean> {
   return !pidAlive(pid)
 }
 
+/** 代理环境整形（回环流量永远直连）：检测到 HTTP(S)_PROXY 时把 localhost /
+ *  127.0.0.1 / .trycloudflare.com 追加进 NO_PROXY——本机健康探测、rollout 预演与
+ *  隧道回环流量一旦被代理规则截走就全是假阴性（原 start.ts shapeProxyEnv 语义）。 */
+export function shapeLoopbackNoProxy(): boolean {
+  const hadProxy = !!(
+    process.env.HTTP_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.http_proxy ||
+    process.env.https_proxy
+  )
+  if (!hadProxy) return false
+  const cur = (process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const merged = [...new Set([...cur, 'localhost', '127.0.0.1', '.trycloudflare.com'])].join(',')
+  process.env.NO_PROXY = merged
+  process.env.no_proxy = merged
+  return true
+}
+
 /** SHA-256 hex 摘要（文件指纹 / 权重 wver）。 */
 export async function sha256Hex(data: Uint8Array): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', data as unknown as ArrayBuffer)

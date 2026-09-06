@@ -1,5 +1,5 @@
-/** train.ts — 本地 CPU 训练模式（完整取代 nn-training/start-training.sh/.ps1）。
-
+/** train.ts — 本地 CPU 训练脚本启动器 + CLI（DECISIONS §349：原 start.ts train 模式
+ *  的全部能力；原 nn-training/start-training.sh/.ps1 的能力在此逐项等价）。
  *  职责（与旧双平台启动器逐项等价）：
  *    - venv+torch 未就绪 → 委派 bootstrap.py（安装逻辑只在 bootstrap.py 一份）；
  *    - torch 线程 env（任何 torch import 之前设置，含 OMP_PROC_BIND §17 定案）；
@@ -13,15 +13,20 @@
  *  平台纪律：不调用 pgrep/netstat/pwsh 等平台命令；进程清杀走 /proc（POSIX）与
  *  Windows 命令行快照（Bun spawn wmic 一次性——wmic 在全部主流 Windows 仍内置，
  *  不属于 shell 语法分支，且失败时静默降级为"跳过清杀"并告警）。
+ *
+ *  CLI（直跑本文件）：`bun tools/training/train.ts [--script <name>.py] [args...]
+ *    [--force] [--kill-previous] [--detach] [--torch-threads N] [--check] [--echo]`。
+ *  未知参数原样透传给训练脚本。训练组件的日常管理走控制台；本 CLI 是"never
+ *  raw python"规则（AGENTS §5.6）的无头执行通道（CI / 脚本 / 一次性脚本）。
  */
 
 import { closeSync, existsSync, openSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, fmtStamp } from './paths'
-import { pidAlive } from './net'
+import { pidAlive, shapeLoopbackNoProxy } from './net'
 import { ensureVenv, resolveTorchThreads, resolveVenvPython, torchThreadEnv } from './venv'
 import { loadConfig } from './config'
-import { fail, info, log, ok } from './log'
+import { fail, info, initLog, log, ok } from './log'
 import { containerSmoke, summarizeSmoke, weightsSmoke } from './smoke'
 
 /** --script 旧扁平名别名（DECISIONS §324，2026-09-04；与旧启动器同一映射）。 */
@@ -248,7 +253,7 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
   }
   // 校验模式：给 agent「本机到底有没有 torch」的第一手答案
   if (opts.check) {
-    log('torch 可用。启动训练: bun tools/training/start.ts train --script <name>.py [args]')
+    log('torch 可用。启动训练: bun tools/training/train.ts --script <name>.py [args]')
     log(`或直接用解释器: ${python} -u ${scriptAbs}`)
     process.exit(0)
   }
@@ -300,8 +305,96 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
   return { exitCode: proc.exitCode ?? 1, cmd, env }
 }
 
-/** 便捷封装：start.ts 的 train 模式入口（冒烟 + 启动一体）。 */
-export function runTrainMode(opts: TrainOptions): number {
-  const r = launchTraining(opts)
-  return r.exitCode
+// ────────────────────────── CLI（直跑本文件） ──────────────────────────
+
+interface Cli {
+  opts: TrainOptions
+  help: boolean
 }
+
+function usage(): void {
+  console.log(`用法: bun tools/training/train.ts [--script <name>.py] [args...] [options]
+
+  本地 CPU 训练脚本启动器（AGENTS §5.6 "never raw python" 的无头执行通道；
+  训练组件的日常 启/停/冒烟/模式 管理走控制台 bun run train）。
+
+  --script <name>.py   训练脚本（相对 nn-training/；缺省 train_loop.py；旧扁平名自动别名）
+  --force              跳过 train_loop.py 单实例锁检查
+  --kill-previous      按脚本名清杀上一轮训练进程
+  --detach             分离启动（后台隐藏窗口，stdout/stderr 落盘）
+  --torch-threads N    torch 线程档（缺省 rl-config rl.torch_threads，再缺省 CPU 数）
+  --check              校验 venv+torch 可用即退出（打印解释器路径）
+  --echo               只打印将执行的命令，不执行
+  其余参数原样透传给训练脚本。`)
+}
+
+function parseCli(argv: string[]): Cli {
+  const opts: TrainOptions = {
+    script: 'train_loop.py',
+    scriptArgs: [],
+    force: false,
+    killPrevious: false,
+    echo: false,
+    check: false,
+    detach: false,
+    torchThreads: 0,
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] ?? ''
+    switch (a) {
+      case '--script': {
+        const v = argv[++i] ?? ''
+        if (!v) {
+          console.error('ERROR: --script requires a <name>.py')
+          process.exit(2)
+        }
+        opts.script = v
+        continue
+      }
+      case '--force':
+        opts.force = true
+        continue
+      case '--kill-previous':
+      case '--killprevious':
+        opts.killPrevious = true
+        continue
+      case '--echo':
+        opts.echo = true
+        continue
+      case '--check':
+        opts.check = true
+        continue
+      case '--detach':
+        opts.detach = true
+        continue
+      case '--torch-threads':
+      case '--torch_threads': {
+        const v = Number(argv[++i])
+        if (Number.isFinite(v)) opts.torchThreads = v
+        continue
+      }
+      case '--help':
+      case '-h':
+        return { opts, help: true }
+      default:
+        opts.scriptArgs.push(a)
+        continue
+    }
+  }
+  return { opts, help: false }
+}
+
+function main(): void {
+  const { opts, help } = parseCli(process.argv.slice(2))
+  if (help) {
+    usage()
+    process.exit(0)
+  }
+  if (shapeLoopbackNoProxy()) info('检测到代理环境变量——已追加 NO_PROXY 直连回环')
+  initLog('train-cli')
+  const r = launchTraining(opts)
+  process.exitCode = r.exitCode
+}
+
+// 仅直跑本文件时启动 CLI；被 import（测试/复用）不执行——避免测试导入即拉起训练。
+if (import.meta.main) main()

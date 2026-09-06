@@ -74,7 +74,7 @@
 
 ```bash
 # 启动/续跑（stream 默认开；--kill-previous 杀旧训练进程，在途 bun 局自然结算）
-bun tools/training/start.ts train --kill-previous --torch-threads 8 --script run_rl.py \
+bun tools/training/train.ts --kill-previous --torch-threads 8 --script run_rl.py \
   --bc <warm.json> --out <dir>/weights.json --traj <dir> \
   --iters N --max-hours H --stages <arena-ids> --seed-rotate 50 \
   --max-ticks <per-level> --workers 8 --stream 1 \
@@ -108,7 +108,7 @@ ticks 中位 672。
 
 ## 7. 硬纪律（违反 = 事故重演）
 
-1. 训练只经 `bun tools/training/start.ts train`（venv/锁/杀旧），**never raw python**
+1. 训练只经 `bun tools/training/train.ts`（venv/锁/杀旧；组件管理走 `bun run train` 控制台），**never raw python**
 2. 奖励臂 / 课程语义 / 物理改动 → **停下问人**（本次战役内 kill2/eval-stages/
    stream 默认均经用户确认）
 3. 停进程必须用**进程名限定**的 ps1（`python.exe`/`bun.exe` + 子串匹配）——

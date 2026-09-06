@@ -235,6 +235,44 @@ describe('training path constants', () => {
   })
 })
 
+describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)', () => {
+  it('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
+    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--check'], {
+      cwd: REPO_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout.toString()).toContain('torch 可用')
+  }, 60000)
+
+  it('--echo prints the exact command and exits 0 without executing', () => {
+    const r = Bun.spawnSync(
+      ['bun', 'tools/training/train.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
+      {
+        cwd: REPO_ROOT,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    )
+    expect(r.exitCode).toBe(0)
+    const out = r.stdout.toString()
+    // Windows 下路径以 JSON 转义形式打印（ppo\\bench.py）——按文件名断言，平台无关。
+    expect(out).toContain('bench.py')
+    expect(out).toContain('--iters')
+  }, 60000)
+
+  it('--help exits 0 with usage', () => {
+    const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--help'], {
+      cwd: REPO_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout.toString()).toContain('用法')
+  }, 60000)
+})
+
 describe('supervisor sentinel fingerprint', () => {
   it('detects sentinel changes via mtime', async () => {
     const { sentinelsChangedSince, sentinelStamp, lastMonitorChange, monitorTouch } =

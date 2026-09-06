@@ -225,24 +225,32 @@ spin up a browser) to validate its own changes.
   "proof" of work, and never present a localhost URL as a validation step.
 
 ### 5.6 NEVER launch NN training by running `python` directly
-Training must go through the unified launcher: `bun tools/training/start.ts` (DECISIONS §346 —
-replaced and deleted `nn-training/start-training.{sh,ps1}` + `tools/hub-start.ts`). Three modes:
-`hub` (Kaggle pull full infrastructure) · `push` (HUB push) · `train` (local CPU: venv setup,
-single-instance locking, smoke gates; all modes auto-restart managed processes on code change).
+Two sanctioned entries (DECISIONS §349 — the former unified CLI launcher `tools/training/start.ts`
+was folded into them; it had already replaced `nn-training/start-training.{sh,ps1}` +
+`tools/hub-start.ts` in DECISIONS §346):
+
+- **Training console** (daily management of all training components):
+  `bun run train` → http://127.0.0.1:8900 (loopback-only, no auth). Start/stop/smoke per component,
+  pull/push/local trainer presets, `rl.stream`/`rl.double_buffer`/`rl.precollect_early` toggles,
+  rollout-node enable/concurrency (writes back rl-config.json), per-iteration metrics + sparklines,
+  per-component log viewer, and change-detection supervision (sentinel mtime → auto-restart).
+- **Headless one-shot runner**: `bun tools/training/train.ts --script <name>.py [args]`
+  (venv setup, single-instance locking, smoke gates, `--force`, `--kill-previous`, `--detach`,
+  `--torch-threads`, `--check`, `--echo`).
 
 - Raw `python train_loop.py` / `python train_bc.py` bypasses pre-flight checks and can spawn
   duplicate training processes competing for the same lock file and weights.
-- If training is already running, the launcher detects it and exits cleanly; a stale lock (crashed
+- If training is already running, the runner detects it and exits cleanly; a stale lock (crashed
   process) is auto-cleaned; force-restart after a crash with `--force`.
-- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py` — the launcher
+- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py` — the runner
   never writes to it (eliminates the shell-PID/Python-PID mismatch that caused double-spawn on Windows).
 - **torch lives only in `nn-training/.venv`** (per-platform venv) — the system `python` has no torch
-  (`ModuleNotFoundError: torch`). Do NOT probe with `python -c "import torch"`; use the launcher's
+  (`ModuleNotFoundError: torch`). Do NOT probe with `python -c "import torch"`; use the runner's
   idempotent self-check:
-  - `bun tools/training/start.ts train --check` — verifies venv+torch and prints the absolute
+  - `bun tools/training/train.ts --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
-  - Print the exact command without running it: `bun tools/training/start.ts train --echo --script <name>.py [args]`.
-- The `train` mode is not just `train_loop.py`: `--script <path>.py [args]` (path relative to
+  - Print the exact command without running it: `bun tools/training/train.ts --echo --script <name>.py [args]`.
+- The runner is not just `train_loop.py`: `--script <path>.py [args]` (path relative to
   `nn-training/`) runs root runners
   (`run_rl.py`, `train_loop.py`, `smoke_test.py`) or subpackage entries (`train/bc.py --arch student`,
   `train/goal_bc.py`, `train/intent_probe.py`, `scripts/eval_bridge.py`, `scripts/validate_export.py`, …)

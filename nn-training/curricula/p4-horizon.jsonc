@@ -20,7 +20,7 @@
 // 风险：γ 切换重标 returns，value 头必有一段 dip；λ 0.99 方差上升。
 // 判定线：贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮则视野假设证伪，
 //   下一候选 wDmg 加码。
-// 启动：bun tools/hub-start.ts --course p4-horizon（远程 GPU PPO；本地只做
+// 启动：控制台（bun run train）选 Pull 预设 + course=p4-horizon（远程 GPU PPO；本地只做
 //   调度+采集。hub-server 必须指向本课程 traj，复用旧课程的 hub 进程会读错队列。）
 {
   "version": 5,

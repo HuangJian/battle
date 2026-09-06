@@ -17,7 +17,7 @@
   7. M0d：记录「发布 → 云拉 → 下载 → PPO → POST → 校验落位」整趟墙钟（非隧道部分）。
 
 退出码：0 = 全链路通过；非 0 = 失败（响亮报错）。运行（venv，含 torch）：
-  bun tools/training/start.ts train --script remote/smoke_loopback.py
+  bun tools/training/train.ts --script remote/smoke_loopback.py
 """
 
 from __future__ import annotations

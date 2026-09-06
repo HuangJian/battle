@@ -89,6 +89,9 @@ function modesSection(s: ConsoleStateView): string {
         ${btn('local', 'Local（本机 PPO）', '仅 trainer，本机 CPU PPO；需 rl.stream=0')}
       </div>
       <p class="muted small">预设=按顺序拉起组件组合；也可在组件表单独启/停。变更即时持久化（console-state）。</p>
+      <div class="btnrow" style="margin-top:10px">
+        <button data-act="smokeTrain" title="端到端预演：本机伪 GPU 节点 echo（不跑真 PPO）——发布→推送→回显→落位→作废，账本零污染">推送链路预演（不跑 PPO）</button>
+      </div>
     </div>
     <div class="col">
       <h4>trainer 行为开关（回写 rl-config.json）</h4>
@@ -291,6 +294,8 @@ document.addEventListener('click', (ev) => {
     post({ act, component: b.dataset.component })
   } else if (act === 'stopAll') {
     if (confirm('停止全部受管进程？')) post({ act })
+  } else if (act === 'smokeTrain') {
+    post({ act })
   } else if (act === 'preset') {
     post({ act, mode: b.dataset.mode })
   } else if (act === 'nodeConc') {

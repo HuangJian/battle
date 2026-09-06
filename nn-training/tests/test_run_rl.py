@@ -12,7 +12,7 @@
       本地直跑 run_local_rollout 打桩 —— 不依赖 PATH 上有 bun、不需要真实权重。
 
 运行（经统一启动器，venv/torch 由它保证）：
-  bun tools/training/start.ts train --script tests/test_run_rl.py
+  bun tools/training/train.ts --script tests/test_run_rl.py
   （集成层不再需要 RUN_RL_ITEST 门禁与环境 fixture；RUN_RL_ITEST=1 仍可强制 standalone 入口跑集成层）
 
 退出码：全部通过 0，否则 1。新增队列/流式行为时请在此补用例，不要写临时脚本。

@@ -13,10 +13,10 @@ eval_intent_m5.py — M5 gate 四必报项评估（plan/Intent-Policy-NN-Plan.md
    镜像，下方 ACTIVATION 常量）的帧占比——错配 ⇒ 执行器走错误白名单。
 
 用法（经统一启动器，勿裸跑 python）：
-  bun tools/training/start.ts train --script scripts/eval_intent_m5.py \
+  bun tools/training/train.ts --script scripts/eval_intent_m5.py \
     --data tmp/intent-probe-hard/shards --weights tmp/intent-weights-A.json --out tmp/probe-M5-A-gate.json
   # B 臂（多根合并，与训练同 --data）：
-  bun tools/training/start.ts train --script scripts/eval_intent_m5.py --data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-B.json --out tmp/probe-M5-B-gate.json
+  bun tools/training/train.ts --script scripts/eval_intent_m5.py --data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-B.json --out tmp/probe-M5-B-gate.json
 """
 
 from __future__ import annotations

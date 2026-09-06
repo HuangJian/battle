@@ -17,7 +17,7 @@ shard（export-counterfactual-goals.ts 产出）：
   cand_cell (N,K) u2（padding 65535）| cand_k (N,K) u2 | cand_s (N,K) f4 | engage (N) u1
 
 流程（经统一启动器）：
-  bun tools/training/start.ts train --script train/goal_bc.py --data tmp/cf-goals-pilot \
+  bun tools/training/train.ts --script train/goal_bc.py --data tmp/cf-goals-pilot \
       --out tmp/goal-bc/weights.json --epochs 20 --lambda 0.5 --tau 1.0
 """
 

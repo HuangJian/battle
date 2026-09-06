@@ -2709,3 +2709,36 @@ trap：坐标对正则需 `[\d.]+`（x=2 这类整数不匹配 `\d+\.\d+`）；e
 `--selftest`；本次 commit 已实弹验证跳过分支生效）。已知留待项：python 门禁的
 STAGED_PY 与 lint 集合同构（--diff-filter=ACM 排除删除，仅 ruff 收到删除路径时
 ruff 自己会因文件不存在报错）——留给下次涉及 .py 删除的提交顺手修复。
+
+## §349 / 删除一键启动器 start.ts——控制台 + train.ts 双入口（2026-09-06，用户指令）
+
+用户指令：删除 `tools/training/start.ts`；训练组件完全由控制台管理；`package.json`
+支持 `bun run train` 启动控制台网站。
+
+**能力归并（删除前逐项清点，无能力丢失）：**
+- `start.ts train` 模式 → `tools/training/train.ts` 增加真 CLI 入口（argparse 原语义
+  逐项等价：`--script/--force/--kill-previous/--detach/--torch-threads/--check/--echo`，
+  未知参数透传）。AGENTS §5.6 "never raw python" 的无头执行通道由它继承。
+  教训：模块顶层 `main()` 在被 bun test import 时会真的拉起训练（测试导入即训练）——
+  CLI 入口必须 `if (import.meta.main)` 守卫（本次实弹复现：导入后 spawnSync 挂 65s）。
+- hub/push 全流程编排 → 控制台已有预设（pull/push/local）逐项覆盖。
+- push `--smoke-only` 推送链路预演 → 新控制台动作 `smokeTrain`（api 路由 + 页面按钮
+  「推送链路预演」）：伪 GPU 节点 + `--smoke` trainer + `stepKaggleRehearsal` 三段
+  日志触发，任何一段失败都停预演进程。`stepKaggleRehearsal/stepTrainingLoop/
+  drainStaleJobs/printLogTail` 因此保留在 hub.ts（唯一消费方变为控制台）。
+- 变更检测监督（start.ts 的 supervisor）→ 控制台 server 接管：`createSupervisor`
+  + 每 15s reconcile 账本登记的组件 → `sup.watch(spec)`；restart 经
+  `actions.restartSpecFor(key)` 按当前 rl-config + 账本元数据重建 spec。
+- hub/push 模式 CLI 的 Kaggle 指引打印/启动报告 → 控制台组件表/节点表已覆盖。
+
+**新 SSOT：`tools/training/specs.ts`** — 五组件 ProcSpec 构造（selfNode/hubServer/
+cloudflared/workerServe/trainingLoop）唯一来源；hub 步骤、控制台动作、监督重启三处
+共用。重启永远用最新配置重建（旧 spec 只是哨兵载体）。
+
+**入口**：`bun run train` = `bun tools/training/console/server.ts`（控制台）；
+`bun tools/training/train.ts --script …`（无头单次）。文档（AGENTS §5.6、
+agents.details §5.6、README 模块地图、plan、py docstring）已同步改指向。
+
+**验证**：`bun run check` 1748 pass / 0 fail；`bun run build` 绿；train.ts CLI
+`--check/--echo/--help` 实弹通过；控制台 :8941 实弹（state API、页面 200、
+NO_PROXY 提示、监督启用日志）。

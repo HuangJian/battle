@@ -9,7 +9,7 @@ scheduled sampling 的**离线数据增强实现**：用给定权重模型对每
 self-feed 输入分布，收敛 gap。成本 = 一次模型推理（CPU 秒级/千帧）。
 
 用法（经统一启动器，勿裸跑 python）：
-  bun tools/training/start.ts train --script scripts/gen_self_inj.py \
+  bun tools/training/train.ts --script scripts/gen_self_inj.py \
     --data tmp/intent-probe-hard/shards tmp/human-obs --weights tmp/intent-weights-Bp.json
 """
 

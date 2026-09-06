@@ -19,6 +19,7 @@ import {
   ActionError,
   busy,
   smokeComponent,
+  smokeTrain,
   setMode,
   setNodeConcurrency,
   setNodeEnabled,
@@ -399,6 +400,8 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
         if (!ALL_COMPONENTS.includes(key)) return errResp(`未知组件: ${key}`, 400)
         return okResp(await smokeComponent(key, ctx))
       }
+      case 'smokeTrain':
+        return okResp(await smokeTrain(ctx.course))
       case 'preset': {
         const mode = str(body, 'mode')
         if (!['pull', 'push', 'local'].includes(mode)) return errResp(`未知预设: ${mode}`, 400)

@@ -24,7 +24,14 @@ import { loadConfig, saveConfig, validateCourseArg } from '../config'
 import { launchSpec, portOwnerPids, stopAllManaged } from '../proc'
 import { resolveVenvPython } from '../venv'
 import { monitorTouch } from '../reload-touch'
-import { pySentinels } from '../sentinels'
+import {
+  TRAINING_LOOP_ENTRY,
+  cloudflaredSpec,
+  hubServerSpec,
+  selfNodeSpec,
+  trainingLoopSpec,
+  workerServeSpec,
+} from '../specs'
 import {
   rlConfigSmoke,
   rolloutSmoke,
@@ -37,6 +44,7 @@ import {
   selfNodeHealthy,
   stepCloudflared,
   stepHubServer,
+  stepKaggleRehearsal,
   stepSelfNode,
 } from '../hub'
 import { startLocalWorkerServer } from '../push'
@@ -174,11 +182,7 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         if (await hubServerHealthy(cfg))
           return done(true, `hub-server 已在运行 (port ${cfg.rl.hub_port})`)
         const trajDir = path.join(REPO_ROOT, 'tmp', ctx.course)
-        await stepHubServer(
-          cfg,
-          path.join(trajDir, 'remote-jobs'),
-          path.join(trajDir, 'training_log.jsonl'),
-        )
+        await stepHubServer(cfg, path.join(trajDir, 'remote-jobs'))
         return done(true, 'hub-server 已启动')
       }
       case 'cloudflared': {
@@ -235,27 +239,16 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
             return 0
           }
         })()
-        const spec: ProcSpec = {
-          key: 'trainingLoop',
-          name: 'TrainingLoop',
-          cmd: [
-            venv.python,
-            '-u',
-            path.join(NN_TRAINING, 'run_rl.py'),
-            '--course',
-            ctx.course,
-            ...(ctx.trainerPpo === 'local' ? [] : ['--ppo', 'remote']),
-          ],
-          env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
-          log: trainLog,
-          healthy: async () => pidAlive(loadRegistry().trainingLoop?.pid),
-          sentinels: pySentinels('nn-training/run_rl.py'),
-        }
+        const spec = trainingLoopSpec(cfg, {
+          course: ctx.course,
+          ppo: ctx.trainerPpo,
+          venv,
+        })
         const r = launchSpec(spec)
         saveComponent('trainingLoop', {
           pid: r.pid,
           course: ctx.course,
-          entry: 'nn-training/run_rl.py',
+          entry: TRAINING_LOOP_ENTRY,
           mode: ctx.trainerPpo,
         })
         monitorTouch()
@@ -533,5 +526,117 @@ export async function setNodeConcurrency(id: string, concurrency: number): Promi
     )
   } finally {
     release(`node:${id}`)
+  }
+}
+
+// ────────────────────────── 推送链路预演（原 start.ts push --smoke-only） ──────────────────────────
+
+/** 推送链路端到端预演：本机伪 GPU 节点（remote_worker_serve echo）+ 真课程
+ *  TrainingLoop（--smoke）发布真 job 并推送 → 伪节点 echo 回显 → 三重校验落位 →
+ *  作废本轮干净退出（it 不前进、账本零污染，DECISIONS §340）。不跑真 PPO。
+ *  完成/失败后都停掉预演用 TrainingLoop（--smoke 进程没有 echo 结果会一直等待）。 */
+export async function smokeTrain(course: string): Promise<ActionResult> {
+  guard('smoke:train')
+  let servePid = 0
+  try {
+    if (!course) throw new ActionError('需要 course（先在顶部设置课程）')
+    validateCourseArg(course)
+    const cfg = loadConfig()
+    const reg = loadRegistry()
+    if (pidAlive(reg.trainingLoop?.pid))
+      return done(false, 'TrainingLoop 已在运行（可能是真训练）——预演会干扰在途 job，先停止')
+    const venv = resolveVenvPython()
+    const trajDir = path.join(REPO_ROOT, 'tmp', course)
+    const weightsPath = path.join(trajDir, 'weights.json')
+    if (!existsSync(weightsPath)) {
+      const bcPath = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
+      mkdirSync(trajDir, { recursive: true })
+      if (!existsSync(bcPath)) return done(false, `初始权重缺失且 BC 产物不存在: ${bcPath}`)
+      copyFileSync(bcPath, weightsPath)
+    }
+
+    // 1) 本机伪 GPU 节点
+    const { pushUrl, servePid: pid } = await startLocalWorkerServer({
+      course,
+      cfgToken: cfg.rl.remote_token,
+      hubPort: cfg.rl.hub_port,
+      venv,
+    })
+    servePid = pid
+
+    // 2) 真课程 TrainingLoop --smoke（REMOTE_PUSH_NODE 注入伪节点）
+    const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
+    const spec = trainingLoopSpec(cfg, {
+      course,
+      ppo: 'remote',
+      smoke: true,
+      pushNodeUrl: pushUrl,
+      venv,
+    })
+    const r = launchSpec(spec)
+    saveComponent('trainingLoop', {
+      pid: r.pid,
+      course,
+      entry: TRAINING_LOOP_ENTRY,
+      mode: 'remote',
+    })
+    monitorTouch()
+
+    // 3) 预演等三段日志触发（发布 → 落位 → 作废退出），任何一段失败都停预演进程
+    try {
+      await stepKaggleRehearsal(course, r.pid)
+    } catch (e) {
+      if (pidAlive(r.pid)) {
+        await killPid(r.pid)
+        clearComponent('trainingLoop')
+      }
+      return done(
+        false,
+        `推送链路预演未通过: ${e instanceof Error ? e.message : e}`,
+        tailLines(trainLog, 6),
+      )
+    }
+    return done(
+      true,
+      '推送链路预演全通过（发布→推送→echo→落位→作废；真训练零污染）',
+      tailLines(trainLog, 4),
+    )
+  } catch (e) {
+    return done(false, `预演失败: ${e instanceof Error ? e.message : e}`)
+  } finally {
+    if (servePid) {
+      const { killPid } = await import('../net')
+      await killPid(servePid)
+    }
+    release('smoke:train')
+  }
+}
+
+// ────────────────────────── 变更检测重启（监督器回调） ──────────────────────────
+
+/** 按账本元数据 + 当前 rl-config 重建组件 spec（监督器 restartProc 的数据源）。
+ *  返回 null = 该组件没有可重建的 spec（未登记或缺元数据）。 */
+export function restartSpecFor(key: Component): ProcSpec | null {
+  const entry = loadRegistry()[key]
+  if (!entry) return null
+  const cfg = loadConfig()
+  const venv = resolveVenvPython()
+  const state = loadConsoleState()
+  const course = entry.course || state.course
+  switch (key) {
+    case 'selfNode':
+      return selfNodeSpec(cfg)
+    case 'hubServer':
+      return hubServerSpec(cfg, course)
+    case 'cloudflared':
+      return cloudflaredSpec(cfg, entry)
+    case 'workerServe':
+      return workerServeSpec(cfg, venv)
+    case 'trainingLoop':
+      return trainingLoopSpec(cfg, {
+        course,
+        ppo: entry.mode,
+        venv,
+      })
   }
 }
