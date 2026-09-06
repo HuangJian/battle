@@ -16,7 +16,8 @@
 import { statSync } from 'fs'
 import path from 'path'
 import { CONFIG_PATH, REPO_ROOT } from '../paths'
-import { buildStateView, routeAction } from './api'
+import { buildStateView, componentLogPayload, routeAction } from './api'
+import type { Component } from '../types'
 
 const PAGE_TS = path.join(import.meta.dir, 'page.ts')
 
@@ -81,6 +82,41 @@ async function main(): Promise<void> {
         }
         if (req.method === 'GET' && url.pathname === '/api/state') {
           return json(await buildStateView())
+        }
+        if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
+          const key = url.pathname.slice('/api/log/'.length) as Component
+          const lines = Math.min(
+            Math.max(Number(url.searchParams.get('lines') ?? 200) || 200, 10),
+            2000,
+          )
+          const payload = await componentLogPayload(key, lines)
+          return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
+        }
+        if (req.method === 'GET' && url.pathname.startsWith('/log/')) {
+          const key = url.pathname.slice('/log/'.length) as Component
+          const lines = Math.min(
+            Math.max(Number(url.searchParams.get('lines') ?? 200) || 200, 10),
+            2000,
+          )
+          const payload = await componentLogPayload(key, lines)
+          if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
+          const page = await loadPage()
+          if (!page)
+            return new Response(`${PAGE_TS_HINT} unavailable — see console log`, { status: 500 })
+          const state = await buildStateView()
+          const follow = url.searchParams.get('follow') !== '0'
+          return new Response(
+            page.renderLogPage(payload, {
+              components: state.components.map((c) => ({
+                key: c.key,
+                label: c.label,
+                status: c.status,
+              })),
+              follow,
+              lines,
+            }),
+            { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+          )
         }
         if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
           const act = url.pathname.slice('/api/'.length)

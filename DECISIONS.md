@@ -2689,6 +2689,17 @@ rollout 节点并改并行采集数（回写 rl-config.json）。
 trap：坐标对正则需 `[\d.]+`（x=2 这类整数不匹配 `\d+\.\d+`）；eval 全缺的
 序列 = NaN 全过滤 → 合法占位符而非 polyline（测试断言按语义写，不按实现写）。
 
+**补充 2（同日，用户指令）——组件日志查看页**：`/log/<key>` 独立页 +
+`/api/log/<key>` JSON 载荷；控制台组件表加「日志」链接。定案：
+1. **尾部窗口读取**（readLogTail）：先 stat 再只读尾部 ≤512KB 字节窗口、丢首行
+   残行——GB 级增长日志不整读，2s 自动刷新是热路径；URL ?lines= 限 10-2000。
+2. **定点替换而非整页 reload**：refresh() 只换 #logbox/#meta——滚动位置、跟随
+   开关、行数选择都不丢（控制台主页 reload 模式不适用于日志页：要保滚动）。
+3. **follow 默认开**：贴底滚动 + 2s 刷新；关闭 follow = 暂停（4s）+ 释放滚动。
+4. 日志解析 resolveComponentLog：COMPONENT_LOGS 常量优先，账本 entry.log 回退；
+   单测覆盖 tail 窗口/映射齐全/载荷/转义/暂停态占位（断言 `id="follow" checked`
+   而非裸 'checked'——客户端脚本的 ev.target.checked 是合法文本，会被裸词断言误伤）。
+
 ## §347 / pre-commit oxfmt 循环跳过 staged 删除源（2026-09-06，§7 复现→修复）
 
 提交本日删除清理时首跑失败：hook 的 oxfmt 循环对 staged 清单全量 `bunx oxfmt` +

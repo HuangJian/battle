@@ -6,9 +6,9 @@
  *  ActionError → 409，参数错误 → 400，动作失败（业务）→ 200 + ok:false。
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT } from '../paths'
+import { NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
@@ -145,6 +145,97 @@ function logTail(nnRel: string, n = 5): string[] {
       .map((l) => l.slice(0, 200))
   } catch {
     return []
+  }
+}
+
+// ────────────────────────── 日志查看（§348 补 2） ──────────────────────────
+
+/** 组件日志解析：路径常量优先，缺省回退账本 entry.log。返回 null = 该组件无日志
+ *  语义（理论上不发生——ALL_COMPONENTS 全部有 COMPONENT_LOGS 映射）。 */
+export function resolveComponentLog(key: Component, cfg: RlConfig, course: string): string | null {
+  const mapped = COMPONENT_LOGS[key]?.(cfg, course)
+  if (mapped) return mapped
+  const entry = loadRegistry()[key]
+  if (entry?.log) return entry.log
+  return null
+}
+
+export interface LogPayload {
+  component: Component
+  label: string
+  /** nn-training/ 相对日志路径。 */
+  log: string | null
+  /** 文件是否存在。 */
+  exists: boolean
+  fileSize: number
+  lines: string[]
+  truncated: boolean
+}
+
+/** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
+ *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。 */
+export function readLogTail(
+  nnRel: string,
+  maxLines = 200,
+  maxBytes = 512 * 1024,
+): { lines: string[]; exists: boolean; fileSize: number; truncated: boolean } {
+  const abs = path.join(NN_TRAINING, nnRel)
+  let fileSize = 0
+  try {
+    fileSize = statSync(abs).size
+  } catch {
+    return { lines: [], exists: false, fileSize: 0, truncated: false }
+  }
+  const window = Math.min(maxBytes, fileSize)
+  const buf = Buffer.alloc(window)
+  try {
+    const fh = openSync(abs, 'r')
+    try {
+      readSync(fh, buf, 0, window, fileSize - window)
+    } finally {
+      closeSync(fh)
+    }
+  } catch {
+    return { lines: [], exists: true, fileSize, truncated: false }
+  }
+  let text = buf.toString('utf-8')
+  // 首行多半是被窗口切半的残行——丢弃（除非窗口覆盖了整个文件）。
+  const partial = window < fileSize
+  const lines = text.split('\n')
+  if (partial) lines.shift()
+  // 尾部空行折叠；过长行截断显示。
+  const out = lines
+    .filter((l) => l.length > 0)
+    .slice(-maxLines)
+    .map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l))
+  return {
+    lines: out,
+    exists: true,
+    fileSize,
+    truncated: partial || lines.length > maxLines,
+  }
+}
+
+/** 日志页数据载荷（GET /api/log/<key> 与页面渲染共用）。 */
+export async function componentLogPayload(
+  key: Component,
+  maxLines: number,
+): Promise<LogPayload | null> {
+  if (!ALL_COMPONENTS.includes(key)) return null
+  const cfg = loadConfig()
+  const state = loadConsoleState()
+  const course = state.course || discoverCourses()[0] || ''
+  const nnRel = resolveComponentLog(key, cfg, course)
+  if (!nnRel) return null
+  const t = readLogTail(nnRel, maxLines)
+  return {
+    component: key,
+    label: COMPONENT_LABELS[key],
+    log: nnRel,
+    exists: t.exists,
+    fileSize: t.fileSize,
+    lines: t.lines,
+    truncated: t.truncated,
   }
 }
 

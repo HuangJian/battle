@@ -5,7 +5,7 @@
  *  冒烟/预设/编辑）同页分区；无 vite/svelte——单页控制台，构建链只添依赖。
  */
 
-import type { ConsoleStateView, ComponentView, NodeView } from './api'
+import type { ConsoleStateView, ComponentView, LogPayload, NodeView } from './api'
 import { pageCss } from '../monitor/theme'
 
 function esc(s: string): string {
@@ -53,6 +53,7 @@ function componentRow(c: ComponentView): string {
     <button data-act="start" data-component="${c.key}"${dis}>启动</button>
     <button data-act="stop" data-component="${c.key}"${dis}>停止</button>
     <button data-act="smoke" data-component="${c.key}"${dis}>冒烟</button>
+    <a class="small" href="/log/${c.key}">日志</a>
   </td>
 </tr>`
 }
@@ -386,4 +387,87 @@ export function renderConsolePage(s: ConsoleStateView): string {
 <section>${nodesTable(s)}</section>
 <section><h3 style="margin:0 0 8px">训练指标${s.course ? ` — ${esc(s.course)}` : ''}</h3>${metricsSection(s)}</section>`
   return renderShell(s, body)
+}
+
+// ────────────────────────── 日志查看页（§348 补 2） ──────────────────────────
+
+function logClientScript(follow: boolean): string {
+  return `
+let follow = ${follow ? 'true' : 'false'}
+const box = document.getElementById('logbox')
+function scrollBottom() { box.scrollTop = box.scrollHeight }
+function refresh() {
+  fetch(location.pathname + location.search, { headers: { Accept: 'text/html' } })
+    .then((r) => r.text())
+    .then((html) => {
+      const doc = new DOMParser().parseFromString(html, 'text/html')
+      document.getElementById('logbox').innerHTML = doc.getElementById('logbox').innerHTML
+      document.getElementById('meta').innerHTML = doc.getElementById('meta').innerHTML
+      if (follow) scrollBottom()
+    })
+    .catch(() => {})
+}
+document.getElementById('follow').addEventListener('change', (ev) => {
+  follow = ev.target.checked
+  if (follow) scrollBottom()
+})
+document.getElementById('lines').addEventListener('change', (ev) => {
+  const u = new URL(location.href)
+  u.searchParams.set('lines', ev.target.value || '200')
+  location.href = u.href
+})
+setInterval(refresh, ${follow ? 2000 : 4000})
+`
+}
+
+/** 日志查看页：整页 reload 换成定点替换 #logbox/#meta（滚动位置与跟随开关不丢）。
+ *  follow 默认开（贴底滚动）；暂停 = 关闭 follow；URL ?lines= 控制尾行数。 */
+export function renderLogPage(
+  payload: LogPayload,
+  opts: {
+    components: Array<{ key: string; label: string; status: string }>
+    follow: boolean
+    lines: number
+  },
+): string {
+  const controls = `
+<label class="toggle inline"><input type="checkbox" id="follow"${opts.follow ? ' checked' : ''}/><span>跟随滚动（自动刷新）</span></label>
+<label class="toggle inline">尾行数
+  <select id="lines">
+  ${[100, 200, 500, 1000].map((n) => `<option value="${n}"${n === opts.lines ? ' selected' : ''}>${n}</option>`).join('')}
+  </select>
+</label>`
+  const body = `
+<div class="pool-header">
+  <h2><span class="dot"${payload.exists ? '' : ' style="background:var(--red)"'}></span>组件日志 — ${esc(payload.label)}</h2>
+  <span class="ts" id="meta">${esc(payload.log ?? '')} · ${payload.exists ? `${payload.fileSize} bytes${payload.truncated ? ' · 已截断（仅显示尾部）' : ''}` : '文件不存在'}</span>
+</div>
+<section>
+  <div class="btnrow">
+    ${opts.components.map((c) => `<a class="preset${c.key === payload.component ? ' on' : ''}" href="/log/${c.key}">${esc(c.label)}</a>`).join('')}
+    <a class="preset" href="/">← 返回控制台</a>
+  </div>
+</section>
+<section>${controls}</section>
+<section>
+  <pre id="logbox" class="logbox">${payload.exists ? esc(payload.lines.join('\n')) || '<span class="muted">（空）</span>' : '<span class="muted">日志文件不存在——组件可能从未启动。</span>'}</pre>
+</section>`
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>组件日志 — ${esc(payload.label)}</title>
+<style>${pageCss()}
+.logbox{background:#10141f;color:#d6e2f0;padding:14px 16px;border-radius:12px;overflow:auto;
+max-height:calc(100vh - 220px);font-size:12px;line-height:1.55;
+font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.preset{text-decoration:none;display:inline-block}
+</style>
+</head>
+<body>
+<div class="wrap">${body}</div>
+<script>${logClientScript(opts.follow)}</script>
+</body>
+</html>`
 }

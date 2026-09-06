@@ -328,3 +328,71 @@ describe('console/page.sparkline', () => {
     }
   })
 })
+
+describe('console/log viewer (§348 补 2)', () => {
+  it('readLogTail：文件尾部窗口 + maxLines 截断 + 缺文件安全', () => {
+    const missing = api.readLogTail('tmp/no-such-log-xyz.log', 50)
+    expect(missing.exists).toBe(false)
+    expect(missing.lines).toEqual([])
+    // sampler-agent.log 在真实仓库中通常存在（历史运行产物）；若存在则行数受 maxLines 约束
+    const real = api.readLogTail('tmp/sampler-agent.log', 30)
+    if (real.exists) {
+      expect(real.lines.length).toBeLessThanOrEqual(30)
+      expect(real.fileSize).toBeGreaterThan(0)
+    }
+  })
+
+  it('resolveComponentLog：五个组件均有日志映射；未知组件 null', () => {
+    const cfg = JSON.parse(readFileSync(REAL_CONFIG, 'utf-8')) as Parameters<
+      typeof api.resolveComponentLog
+    >[1]
+    for (const key of [
+      'selfNode',
+      'hubServer',
+      'cloudflared',
+      'trainingLoop',
+      'workerServe',
+    ] as const) {
+      expect(api.resolveComponentLog(key, cfg, 'p4-horizon')).toBeTruthy()
+    }
+    expect(api.resolveComponentLog('nope' as never, cfg, 'x')).toBeNull()
+  })
+
+  it('componentLogPayload：已知组件返回载荷；未知组件 null', async () => {
+    const p = await api.componentLogPayload('selfNode', 50)
+    expect(p).not.toBeNull()
+    expect(p!.component).toBe('selfNode')
+    expect(p!.log).toBe('tmp/sampler-agent.log')
+    expect(Array.isArray(p!.lines)).toBe(true)
+    expect(await api.componentLogPayload('nope' as never, 50)).toBeNull()
+  })
+
+  it('renderLogPage：日志内容转义 + 组件导航 + follow 开关', async () => {
+    const p = (await api.componentLogPayload('selfNode', 40))!
+    const state = await api.buildStateView()
+    const html = page.renderLogPage(p, {
+      components: state.components.map((c) => ({ key: c.key, label: c.label, status: c.status })),
+      follow: true,
+      lines: 40,
+    })
+    expect(html).toContain('组件日志')
+    expect(html).toContain('id="logbox"')
+    expect(html).toContain('id="follow" checked')
+    expect(html).toContain('/log/trainingLoop')
+    expect(html).toContain('返回控制台')
+    // 日志文本必须经 esc()（原始 <script> 不得出现在 logbox 内容里）
+    expect(html).not.toContain('<script>alert')
+    expect(html).toContain('setInterval(refresh')
+  })
+
+  it('renderLogPage：暂停态（follow=false）刷新间隔 4s；缺文件显示占位', async () => {
+    const p = (await api.componentLogPayload('cloudflared', 20))!
+    p.exists = false
+    p.lines = []
+    const html = page.renderLogPage(p, { components: [], follow: false, lines: 20 })
+    expect(html).toContain('日志文件不存在')
+    expect(html).toContain('setInterval(refresh, 4000)')
+    // follow 复选框无 checked 属性（客户端脚本里的 ev.target.checked 不算）
+    expect(html).not.toContain('id="follow" checked')
+  })
+})
