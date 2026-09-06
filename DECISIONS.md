@@ -2700,3 +2700,39 @@ P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面�
 `tests/p2-keybindings.test.ts` 10 例（先红后绿）：keys2 sanitize 按各自默认、
 legacy 迁移、JSON roundtrip、跨玩家冲突/豁免/修饰键区分。`bun run check` 全绿
 （1734 pass），build 绿。
+
+## §348 / 手柄操作支持：轮询式快照差分边沿 + 复合输入（2026-09-06，用户指令）
+
+用户要求："为游戏添加手柄操作支持"。定案：**轮询（poll），不监听事件**——
+Gamepad API 无可靠的逐帧 justPressed 事件，边沿检测由纯快照差分层承担，全部
+headless 可测（§8）。零新依赖（MANIFEST §14）。
+
+**架构**（全部在 `src/game/GamepadInput.ts`，输入设备在 World 之外，§2.2）：
+1. `readSnapshot(pad)` 纯函数：standard-mapping 快照 → 中性化电平（摇杆主轴
+   优先于十字键、0.5 死区、button 0=A 开火 / 1=B 天降神兵 / 2=X 狂暴 / 3=Y 宝盒
+   / 9=Start 暂停 / 12-15 十字键）。断连快照读作全中性。
+2. `GamepadInput implements InputLike`：每渲染帧 poll 一次，边沿 = 本帧 ∧
+   ¬上帧。`endFrame()` 只把 prev 推进到 cur（不清 cur）——一帧内 N 个固定步长
+   tick 都看到同一 press 边沿，追帧 catch-up 不丢超级道具按键（与 Input 的
+   菜单帧语义对齐）；`reset()` 全清（换屏防串键）。
+3. `CompositeInput`：键盘 OR 手柄（方向上手柄优先、布尔取或），endFrame/reset
+   双向委托。模拟与录制器只消费复合体（DECISIONS #75）——手柄局回放逐字节
+   一致，零录制器改动。
+4. `GamepadManager`：navigator.getGamepads() 槽位分配 pad[0]→P1、pad[1]→P2，
+   **槽位稳定**（中途拔线不换人）；连接/断开跃迁入队供 toast；collect() 可覆写
+   seam + pollForTests() 使槽位/跃迁逻辑 headless 可测。
+
+**接线**：GameLoop.loop 顶部 pollPads()（必须先于 handleFrameInput——边沿
+检测的轮询顺序是负载性的）；静态屏 onStaticKey 也 poll（Start 可在菜单/暂停/
+结算屏确认）；endFrameInputs 清模拟消费的复合体 + 原始引用。liveInput /
+liveInput2 升级为复合体（AutoFireInput 翻转时 wireLiveInputs 重建外层复合体、
+内部引用稳定，手柄状态不因模式切换复位）；督战仍整体屏蔽人类输入（手柄也是
+人类输入）。GameMenu：pad Start 暂停/取消暂停（取消暂停即 resetPads，与键盘
+同契约）、菜单确认、结算屏返回；menuStart/menuResume/resetToMenu 全部
+resetPads。i18n：toast.gamepadConnected/Disconnected（zh/en）。
+
+**验证**：`tests/gamepad-input.test.ts` 17 例（先红后绿）：纯快照映射（摇杆/
+十字键/死区/断连）、边沿语义（按住单次、松开再按）、电平语义（开火/移动）、
+reset 防串键、复合体优先级/OR/委托、管理器槽位稳定 + 跃迁事件、按键常量
+pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器零改动，
+不触发 §6.3b。

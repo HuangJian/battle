@@ -182,7 +182,12 @@ export class LoopController {
 
     // Process the key via the same code path the loop uses, then clear the
     // per-frame input edges so a single press is consumed exactly once.
+    // Static screens run no rAF loop, so pads are polled here too — a Start
+    // press on the menu / pause / game-over screen is consumed exactly once.
+    this.pollPads()
     this.g.handleStateInput()
+    this.g.simulation.input.endFrame()
+    this.g.simulation.input2?.endFrame()
     this.g.input.endFrame()
     this.g.input2.endFrame()
     // Repaint on demand + (re)arm the loop driver if the state changed.
@@ -585,9 +590,28 @@ export class LoopController {
   }
 
   /**
+   * Poll the gamepads once and route connect/disconnect transitions to
+   * toasts (§347c). Called at the top of each rAF frame, before input is
+   * consumed — poll order is load-bearing for edge detection.
+   */
+  pollPads(): void {
+    this.g.pads.poll()
+    for (const ev of this.g.pads.consumeEvents()) {
+      const key = ev.type === 'connected' ? 'toast.gamepadConnected' : 'toast.gamepadDisconnected'
+      this.g.presentation.ui.notify(t(key, { player: ev.player }), 'info')
+    }
+  }
+
+  /**
    * Clear per-frame input edges (keyboard + both God AI caches).
    */
   endFrameInputs(): void {
+    // The sim consumes the COMPOSITES (keyboard OR gamepad — §347c); clearing
+    // them covers the inner keyboard refs too (CompositeInput.endFrame
+    // delegates to both sources). Raw refs are cleared as well so menu-time
+    // reads (handleStateInput) never see stale edges.
+    this.g.simulation.input.endFrame()
+    this.g.simulation.input2?.endFrame()
     this.g.input.endFrame()
     // 双打 Two-Player: clear P2's per-frame press edges too.
     this.g.input2.endFrame()
@@ -678,6 +702,12 @@ export class LoopController {
 
     const dt = this.computeDelta(time)
     this.beginPerfProbe()
+
+    // Gamepad polling is a per-RENDER-frame step (§347c): the Gamepad API is
+    // polled, not event-driven, so edges are diffed here once — N sim ticks
+    // in this frame all see the same edges (fixed-timestep catch-up never
+    // loses a super-item press). Must run BEFORE handleFrameInput.
+    this.pollPads()
 
     this.handleFrameInput()
     this.stepSimulation(dt)

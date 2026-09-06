@@ -18,6 +18,7 @@ import { ReplayManager } from '../replay/ReplayManager'
 import type { PlaybackController, PlaybackSpeed } from '../replay/PlaybackController'
 import { GodAIInput } from '../ai/GodAIInput'
 import { AutoFireInput } from './AutoFireInput'
+import { GamepadManager, CompositeInput } from './GamepadInput'
 import { canToggleCoop, canToggleSpectate, canToggleTwoPlayer } from './uiFlowGates'
 import { cycleBattleSpeed } from './battleSpeed'
 import type { BattleSpeed } from './battleSpeed'
@@ -103,17 +104,34 @@ export class Game {
   /** Auto-fire wrapper around the human input — re-armed each stage. */
   autoFireInput: AutoFireInput | null = null
 
+  // ---- Gamepad support (DECISIONS §347c) ----
+  /**
+   * Gamepad device manager: slots pad[0]→P1, pad[1]→P2, diffs connect /
+   * disconnect transitions (toast wiring in GameLoop), and exposes one
+   * polled {@link GamepadInput} per player. Input devices live OUTSIDE the
+   * World (AGENTS §2.2); the recorder taps the composite the sim consumes,
+   * so pad-driven runs replay byte-identically (DECISIONS #75).
+   */
+  readonly pads = new GamepadManager()
+  /** P1 composite: AutoFireInput(keyboard) OR gamepad — pad wins direction. */
+  private p1Composite: CompositeInput | null = null
+  /** P2 composite: two-player keyboard OR gamepad. Rebuilt on mode flips. */
+  private p2Composite: CompositeInput | null = null
+
   /**
    * The player-1 input the LIVE simulation must consume right now.
    * In Lie-Back-Win-Mode the raw keyboard is decorated by AutoFireInput, and
    * that decorated object — not `this.input` — is what the sim ticks on and
-   * what the recorder taps (DECISIONS #75).
+   * what the recorder taps (DECISIONS #75). Since §347c the live input is a
+   * COMPOSITE (keyboard OR gamepad — the pad wins direction); `p1Composite`
+   * is rebuilt by wireLiveInputs() whenever the auto-fire decoration flips.
    */
   get liveInput(): InputLike {
     // 督战 (supervise) mode: God AI drives player1; the human keyboard is
-    // disconnected entirely — nobody is at the controls.
+    // disconnected entirely — nobody is at the controls. (A gamepad is human
+    // input too, so spectate still blocks it — same as the keyboard.)
     if (this.world.spectate && this.godInput) return this.godInput
-    return this.autoFireInput ?? this.input
+    return this.p1Composite ?? this.autoFireInput ?? this.input
   }
 
   /** The player-2 input the LIVE simulation must consume — null unless coop. */
@@ -123,8 +141,9 @@ export class Game {
     // Spectate is strictly single-player (God AI as P1) — never a second tank.
     if (this.world.spectate) return null
     // 双打 Two-Player: the second HUMAN keyboard drives player2 (its own
-    // bindings — no auto-fire decorator; both drivers are human).
-    if (this.world.twoPlayer) return this.input2
+    // bindings — no auto-fire decorator; both drivers are human). The pad
+    // composite rides along so pad[1] can drive P2 too.
+    if (this.world.twoPlayer) return this.p2Composite
     return this.godInput
   }
 
@@ -132,8 +151,20 @@ export class Game {
    * Point the simulation back at the live inputs. Single source of truth for
    * the wiring, so no exit path can restore only half of it (DECISIONS #76).
    * Call AFTER `godInput` / `autoFireInput` have been set to their new values.
+   *
+   * Both live inputs are COMPOSITES (keyboard OR gamepad, pad wins direction
+   * — §347c): P1's composite wraps AutoFireInput when coop decorates the
+   * keyboard, otherwise the raw keyboard. The wrapper objects are rebuilt
+   * whenever autoFireInput flips; the inner refs stay stable so pad state
+   * never resets on a mode flip.
    */
   wireLiveInputs(): void {
+    if (!this.world.spectate || !this.godInput) {
+      this.p1Composite = new CompositeInput(this.autoFireInput ?? this.input, this.pads.p1)
+    }
+    if (this.world.twoPlayer) {
+      this.p2Composite = new CompositeInput(this.input2, this.pads.p2)
+    }
     this.simulation.input = this.liveInput
     this.simulation.input2 = this.liveInput2
   }
@@ -170,6 +201,12 @@ export class Game {
     // P1 never touches P2. (Legacy saves migrate to DEFAULT_P2_KEYS in
     // loadSettings — see DECISIONS.md §347 follow-up.)
     this.input2 = new Input(this.settings.keys2)
+    // Gamepad composites: the sim consumes keyboard OR pad per player. The
+    // inner InputLike refs are stable — AutoFireInput wraps this.input and is
+    // rebuilt by coop toggles, so the composite is rebuilt there too (see
+    // wireLiveInputs).
+    this.p1Composite = new CompositeInput(this.input, this.pads.p1)
+    this.p2Composite = new CompositeInput(this.input2, this.pads.p2)
     this.simulation = new Simulation(this.world, this.input)
     this.presentation = new PresentationLayer(root, this.settings.performanceMode)
     // Wire the live key-bindings objects + persistence into the controls panel.
@@ -586,6 +623,7 @@ export class Game {
     this.autoFireInput = null
     this.simulation.clearPendingCoopToggle()
     this.simulation.clearPendingSpectateToggle()
+    this.resetPads()
     this.wireLiveInputs()
     this.audio.player2Id = null
     this.presentation.ui.controlCenter.setCoopState(false)
@@ -614,6 +652,18 @@ export class Game {
     this.settings.difficulty = this.world.difficultyKey
     this.settings.theme = this.world.themeKey
     persistSettings(this.settings)
+  }
+
+  /**
+   * Drop all gamepad edge/held state (§347c). Called when leaving a state
+   * where pad input meant something other than gameplay — the unpause path
+   * (MenuController) and resetToMenu — so a Start/A press consumed on the
+   * pause or menu screen cannot bleed into the first playing frame (the
+   * same contract as Input.reset for the keyboard).
+   */
+  resetPads(): void {
+    this.pads.p1.reset()
+    this.pads.p2.reset()
   }
 
   setVolume(v: number): void {

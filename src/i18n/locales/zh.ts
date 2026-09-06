@@ -132,6 +132,8 @@ export const zh: Catalog = {
   'toast.spectateDualOn': '督战：双玩家开启 —— 神级 AI 同时操控一号与二号玩家！',
   'toast.takeoverSuccess': '接管成功 —— 你现在操控一号玩家！',
   'toast.battleSpeed': '战斗速率：×{speed}',
+  'toast.gamepadConnected': '手柄 {player} 已连接 —— 摇杆/A 键参战',
+  'toast.gamepadDisconnected': '手柄 {player} 已断开',
   'toast.keyBindingsPaused': '按键设置在游戏暂停时可用',
   'toast.rewindActivated': '时光宝盒：时间回溯！',
   'toast.replayUnsupported': '本版本不支持该回放格式',

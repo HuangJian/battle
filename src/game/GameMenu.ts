@@ -143,7 +143,10 @@ export class MenuController {
     }
     // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter.
     const controlsIdx = row('controls')
-    if (this.g.input.isConfirmPressed()) {
+    // Pad Start/confirm counts (§347c) — the edge is consumed by GameLoop's
+    // static-key path polling, so it fires exactly once here.
+    const padConfirm = this.g.pads.p1.isPausePressed()
+    if (this.g.input.isConfirmPressed() || padConfirm) {
       if (this.g.resumeSnapshot && w.ui.menuCursor === 0) {
         this.menuResume()
       } else if (w.ui.menuCursor === row('start-row')) {
@@ -160,6 +163,21 @@ export class MenuController {
   /** In-game input (playing/paused): pause, manual snapshot, theme, reset. */
   private handleBattleInput(justExitedFullscreen: boolean): void {
     const w = this.g.world
+    // 双打 gamepad support (§347c): pad Start toggles pause like KeyP/Esc.
+    // Handled FIRST so a Start press during play never also lands as a
+    // menu-confirm edge on the same frame.
+    if (this.g.pads.p1.isPausePressed()) {
+      if (!justExitedFullscreen) {
+        this.g.simulation.togglePause()
+        this.g.audio.playPause()
+        // Unpausing here → drop pad state so the held Start cannot read as
+        // gameplay input on the first playing frame (keyboard parity).
+        if (w.state === 'playing') this.g.resetPads()
+        if (w.state === 'paused') {
+          this.g.snapshots.create('pause', w)
+        }
+      }
+    }
     if (this.g.input.isPausePressed()) {
       if (justExitedFullscreen) {
         // Consume the Esc without toggling pause
@@ -189,7 +207,12 @@ export class MenuController {
 
   /** Game-over / victory screen: any reset-or-confirm key returns to menu. */
   private handleEndScreenInput(): void {
-    if (this.g.input.isResetPressed() || this.g.input.isConfirmPressed()) {
+    // Pad Start counts as confirm (§347c).
+    if (
+      this.g.input.isResetPressed() ||
+      this.g.input.isConfirmPressed() ||
+      this.g.pads.p1.isPausePressed()
+    ) {
       this.g.resetToMenu()
     }
   }
@@ -359,6 +382,7 @@ export class MenuController {
     // Drop the click so it can't bleed into the first-frame fire input.
     this.g.input.reset()
     this.g.input2.reset()
+    this.g.resetPads()
     this.g.saveSettings()
     this.g.refreshStaticScreen()
   }
@@ -380,6 +404,7 @@ export class MenuController {
     // Drop the input so the click/keypress can't bleed into gameplay.
     this.g.input.reset()
     this.g.input2.reset()
+    this.g.resetPads()
     this.g.refreshStaticScreen()
   }
 

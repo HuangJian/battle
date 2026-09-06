@@ -136,6 +136,8 @@ export const en: Catalog = {
   'toast.spectateDualOn': 'Supervise: DUAL ON — God AI drives both Player 1 and Player 2!',
   'toast.takeoverSuccess': 'Takeover successful — you control Player 1!',
   'toast.battleSpeed': 'Battle speed: ×{speed}',
+  'toast.gamepadConnected': 'Gamepad {player} connected — stick/A to play',
+  'toast.gamepadDisconnected': 'Gamepad {player} disconnected',
   'toast.keyBindingsPaused': 'Key bindings are available when the game is paused',
   'toast.rewindActivated': 'Time Box: time rewind!',
   'toast.replayUnsupported': 'Replay format not supported by this version',
