@@ -26,8 +26,6 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-// /pool 渲染（独立文件，2026-08-31 拆出——不在 dist codeHash 集，监控调整零升级波）
-import { poolNodes, renderPoolPage as poolRender } from './pool-page'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
 
@@ -322,8 +320,38 @@ let pendingChildPid: number | null = null
 // 实现已拆至独立文件 tools/agent/pool-page.ts（不在 dist codeHash 集内——
 // 节点监控调整不触发全节点升级波）。本文件只保留 GET /pool handler 接线。
 
-function renderPoolPageLocal(): Promise<string> {
-  return poolRender({
+// pool-page 热加载（2026-09-06 用户指令）：pool-page.ts 改动免重启 agent。
+// 按 mtime 键控动态 import——mtime 未变直接复用模块句柄（零重复加载）；变了以
+// `?m=<mtimeMs>` 为新键重新 import（每个文件版本只占一个模块记录，旧版失去
+// 引用即可 GC，不随请求数累积；Bun 1.4.0 探针实测：同键命中缓存、换键即新
+// 模块、坏文件抛可捕获的 BuildMessage）。加载失败（编辑中的半文件/语法错误）
+// 沿用上一版可用模块并打日志——页面永不因 pool-page 的坏状态 500。注意：本
+// 文件自身在 dist codeHash 集内，本次接线改动是最后一次节点升级波；此后
+// pool-page.ts 的调整既免重启也不触碰 codeHash。
+let _poolPageMod: { mtimeMs: number; mod: typeof import('./pool-page') } | null = null
+
+async function loadPoolPage(): Promise<typeof import('./pool-page') | null> {
+  try {
+    const mtimeMs = fs.statSync(path.join(import.meta.dir, 'pool-page.ts')).mtimeMs
+    if (_poolPageMod && _poolPageMod.mtimeMs === mtimeMs) return _poolPageMod.mod
+    const mod = await import(`./pool-page.ts?m=${mtimeMs}`)
+    _poolPageMod = { mtimeMs, mod }
+    console.log(`[sampler-agent] pool-page.ts hot-reloaded (mtime=${Math.round(mtimeMs)})`)
+    return mod
+  } catch (e) {
+    console.error(
+      `[sampler-agent] pool-page.ts hot-reload FAILED — serving previous version: ` +
+        `${String(e).slice(0, 160)}`,
+    )
+    return _poolPageMod?.mod ?? null
+  }
+}
+
+async function renderPoolPageLocal(): Promise<string> {
+  const pool = await loadPoolPage()
+  if (!pool)
+    return '<html><body><p>pool-page.ts unavailable — see sampler-agent log</p></body></html>'
+  return pool.renderPoolPage({
     workers,
     inflight,
     gamesDoneTotal,
@@ -668,7 +696,8 @@ async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url)
   // 节点池监控页（③）：公开只读、无密钥渲染；仅主控机（配置含 nodes）有内容。
   if (req.method === 'GET' && (url.pathname === '/pool' || url.pathname === '/pool/')) {
-    if (!poolNodes())
+    const pool = await loadPoolPage()
+    if (!pool || !pool.poolNodes())
       return new Response('pool page disabled (no nodes in rl-config.json)', { status: 404 })
     return new Response(await renderPoolPageLocal(), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
