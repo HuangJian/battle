@@ -173,6 +173,13 @@ class TrainingLoop(TrainingSteps, TrainingGuards):
                 # 动态读取节点配置（每轮一次）：有 enabled 节点 → 队列调度模式；
                 # nodes=[] / 文件缺失 → 现有纯本地路径零改动（字节一致回归基线）。
                 dist_cfg = dist_common.load_dist_config()
+                # rl.local_slots 热读（2026-09-06 用户指令）：每轮从 rl-config 覆盖
+                # args.local_slots——改配置下一轮即生效，无需重启训练。CLI 显式
+                # --local-slots 同样被覆盖（该值以 rl-config 为 SSOT；rl.workers 的
+                # 既有语义不变）。
+                hot_slots = int((dist_cfg or {}).get("rl", {}).get("local_slots", 0) or 0)
+                if hot_slots > 0:
+                    args.local_slots = hot_slots
                 t_rollout = time.time()
                 self._rollout_phase(it, pairs, dist_cfg, self._eval_on_round(it))
                 self._log_report(it, t_rollout)

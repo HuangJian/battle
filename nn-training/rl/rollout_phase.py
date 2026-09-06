@@ -222,7 +222,18 @@ def dispatch_rollout_phase(
             stream_meta = report
         else:
             report = run_rollout_queue(
-                bun, args.out, traj_dir, pairs, args, dist_cfg, iter_id, course_fp=course_fp
+                bun,
+                args.out,
+                traj_dir,
+                pairs,
+                args,
+                dist_cfg,
+                iter_id,
+                # 本机直跑槽位（2026-09-06）：串行路径此前忽略 args.local_slots、
+                # 恒用 args.workers 封顶——rl.local_slots 热读后这里传下去使其真正
+                # 生效；0/缺省 = None = 退回 workers 封顶（既有行为不变）。
+                local_slots_max=(args.local_slots or None),
+                course_fp=course_fp,
             )
             # 串行：rollout 返回即 collector 收官；后台评估藏进随后的长 ppo_backend 空窗
             # 吞吐 T3：非 eval 轮不派发（eval_on_round 循环级统一门控）。
