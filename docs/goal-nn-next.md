@@ -174,7 +174,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
 
 ### P3 · 卫生与账本（持续）
 
-- 节点池：lite 升级、a95 pull；监控 `/pool`。
+- 节点池：lite 升级、a95 pull；监控走训练控制台（bun run train → 127.0.0.1:8900 节点池卡「统计」）。
 - **账本同步（纪律 6）**：每完成一件事 → 更新 `plan/goal-nn-action.md` §5 卡片状态
   + 在 `docs/goal-nn.progress.md` **置顶**写一条。**上一班只干活没记账，已补；不要重犯。**
 - 训练只经 `bun tools/training/train.ts`（组件管理走 `bun run train` 控制台）；停进程只能用进程名限定的 ps1（bash 包装会自杀）。
@@ -194,7 +194,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
 - [ ] 读完 `plan/goal-nn-action.md` §0（怎么用）+ §4（门禁）+ §5（卡片状态）
 - [ ] `bun run check` 全绿
 - [ ] `pwsh tmp/list-rl.ps1` 确认只有一个训练进程
-- [ ] `/pool` 节点状态核对
+- [ ] 控制台节点池「统计」视图节点状态核对（/pool 页面已下线）。
 - [ ] S2 曲线与 §1 的红线表对齐
 - [ ] 扫一遍 `DECISIONS.md` §295–§298
 - [ ] 确认 P0-1（遥测）是否已修 —— **未修则 S2 门判据②不可判**

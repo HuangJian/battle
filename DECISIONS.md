@@ -2800,7 +2800,36 @@ GPU 算力换样本复用）、`name/out/traj/backup_*` → `tmp/p4-fast`（含 
 4. GPU-cost P0（墙钟/显存/KL 工作点皆外推）：加 it1–2 校准门（预测 chunks~100 /
    步数~800 / ppo≈horizon 3–4× / kl<0.06 / 熵跌<0.03），不达标按 epochs→6、
    seed_rotate→200 顺序降档。课程头注释已同步。
-
+5. R5（2026-09-07，纯观测、零改动）：horizon value 均值 6.43（4.64–7.70）vs mean_ret
+   均值 2.52——value 头 MSE 显著大于 return 尺度，"学不动"候选病因之一，当前无从
+   归因。校准轮顺带抄录 value（training_log 已有字段）与 gnorm（training_log 无该
+   键，取 worker 日志 epoch 行，落盘位置校准时确认），不据此做任何停机决策，只为
+   wDmg 之后的 value-head 候选攒对照证据。
+6. CPU 回退成本实测（2026-09-07，无需 bench——horizon it1–31 本就跑在本地 CPU）：
+   26.5k 样本 × epochs 4（~200 梯度步）ppo 均值 781s（715–918）+ rollout 均值 53s。
+   p4-fast 数学（52k × epochs 8，样本 pass ×4）CPU 外推约 52 分钟/轮（+ 采集 ~2 分钟），
+   GPU 外推约 7 分钟/轮。40 轮总量：CPU ~35h vs GPU ~5h。回退三档（暂停等额度 /
+   同数学硬跑 / 降数学隔离课）见当日讨论，额度用尽时按此执行，stream/double-buffer
+   为数学中性提速手段。
+7. it1–2 校准实测（2026-09-07，GPU 首轮）：chunks 96/101 ✓（预测 ~100），步数
+   768/808 ✓（~800），worker 纯 PPO 157s（远好于 360s 外推——GPU 次线性），rollout
+   75s ✓（集群吸收），ppo_sec 墙钟 651s（transit 主导：payload 下 16s + 结果回传 92s）。
+   kl=0.507 乍看爆表，实为 fresh-Adam 首轮瞬态（it1 "无 opt_init，新 Adam"，epoch1
+   即 0.395；it2 opt 恢复后 epoch1/2 为 0.043/0.035）—— streak 随 it2 复位，无回滚、
+   无熔断风险，不动作。entropy 0.379（高于 horizon 带 0.33，峰值跟踪重起）；value
+   12.99 vs mean_ret 5.94（R5 照单全收，只记录）。rollout 胜率 10.7%（32/300）在带内。
+   GPU 墙钟修正为 ~11 分钟/轮（仍 ≪ CPU 52 分钟）。
+8. LR 试探（2026-09-07，it12–13 斜率 gated）：it12/13 worker 轮内 KL 0.023→0.052 /
+   0.015→0.050（2–3× 走阔），entropy ~0.41 稳，value 继续收敛——梯度活着、步子小，
+   且 it1 已废掉"权重收敛"前提（phase-1 跳过理由不成立）。试探：it13–16 lr 上
+   3e-4（kl_coef 保 0.2；停机时 it12 已落账、resume 从 it13 起，故为 4 轮；resolve
+   逐轮验证通过），schedule 到期 it17 自回 1.5e-4（无需二次重启）；abort 线
+   kl≥0.06×2（停 loop revert），success 读 it15 贪心 eval；预期 KL 进 0.06–0.09 带
+   （已知风险，试探封顶）。语料/reward 不动——同一实验内升档，非新实验。执行：
+   停 loop（it12 已落账，it13 job 结果孤儿由 resume 逻辑按 completed_pairs 处置）
+   → 改 schedule → Pull 预设重启。
+9. LR 试探 verdict（it20）：失败。KL 0.039/0.033/0.037/0.037 未升——步子×2 既无
+   漂移也无进展，更新噪声主导（R5），lr 洗清嫌疑，不延长（it17 已自回）。
 
 ## §351 / 训练控制台两处缺陷：course 显示/动作双源 + local×stream 假互斥（2026-09-07，用户指令）
 
@@ -2834,3 +2863,78 @@ buildStateView().course === actionCtx({}).course（显示=动作同源不变量�
 互斥文案、`trainerConflict` 不再存在。headless 不 spawn 真实组件（启动动作本身
 仍有 run_rl 锁守卫，单测不触达）。api/actions 非热加载层——改后重启控制台进程
 （§349：受管组件 detached，控制台重启不影响训练）。
+
+## §352 / p4-wdmg：死亡惩罚×2（2026-09-07，p4-fast it20 提前干预链）
+
+背景：fast 贪心 5/8/9/6 坑底 20 轮 + LR 试探失败（§350-9）——"加速/步长"双双证伪，
+轮到 §345 指定的下一候选：死亡 ~60% 主因，wDmg 加码。fast 的规模结论（§5）要求
+新实验变量隔离，故不从 fast 派生。
+
+决策：由 **p4-horizon 逐字节派生**（不是 fast），仅改 3 处：`wDmg` 1.0→2.0、
+`name/out/traj/backup_*` → `tmp/p4-wdmg`（§15.5 fresh）。其余（150 局/epochs 4/
+γ0.998/λ0.99/phase-2 schedule/bc it70/eval）与 horizon 全同义——与 horizon/fast
+共享同一起点，形成三臂对照（horizon=基线，fast=规模臂，wdmg=reward 臂）。
+
+- lr/KL 为何不动：it13–16 的 3e-4 试探证明系统对 lr 不敏感（KL 0.03–0.04 纹丝
+  不动，胜率亦不动）——带 3e-4 进新实验只会混杂 reward 效应；kl_coef 0.2/
+  kl_cap 0.2/ent 0.25 全沿用，护栏框架（0.06×2 人工规则、熵 tripwire、it1–2
+  校准门、R5 抄录）照搬 §350。
+- 为何 2.0 不更大：单旋钮最小步，3.0+ 留作 wDmg 无效后的升级；终局死亡 -1.0
+  不动，只动塑形项 wDmg。
+- 预期 value dip：wDmg 改写 reward 尺度，value 头必重标（γ 切换 it4 式 dip 翻版；
+  R5 基线 value~4–6 vs 新 return 尺度）——前 3 轮 value 混乱不判崩塌，看 KL/熵。
+- 判定线：沿用（>35%/趋近 64% 为成；≤30% 横盘 40 轮证伪 → 下一候选 R5 的
+  value-head 处理）。基线锚：it70 35% 起点 + horizon it30 23% + fast it20 6%
+  （负对照）。提前干预：it15 eval ≤10% 则讨论（fast precedent）。
+- 启动：停 fast → 控制台 setCourse p4-wdmg（API 直调，下拉框要到 it1 落账后出现）
+  → Pull 预设。切课程必重启 hub-server。
+
+## §353 / 训练控制台 Preact 化（plan/Training-Console-Preact.md v3.3 执行，2026-09-07）
+
+执行 plan §1–§4 全量 + §3.4 中 monitor/ 迁入部分（远端下线留待 P3.5）；主游戏零影响。
+
+**技术选型（§346/§348 修订，本条目逐项登记）：**
+1. **preact + preact-render-to-string 进 devDependencies**（§346「零新依赖」适用范围
+   修订为主游戏 src/ 仍零框架；本地工具页以 1 个 ~10KB 运行时依赖换可维护性，MANIFEST
+   §14 张力按 R6 原样接受）。tsconfig 加 `jsx: react-jsx` + `jsxImportSource: preact`
+   （src/ 无 .tsx → 主游戏零影响；不引 project references）。
+2. **不引 CSS 框架/图表库/路由/信号/Context**：自研 token + `tc-` 前缀 BEM
+   （ui/theme.ts ≈300 行）；sparkline 自绘；单页无路由；状态 5 项用 useState；
+   两层 props 传递，卡片内部状态绝不上升。
+3. **SSR 首屏 + hydrate**：GET / → render.tsx renderConsolePage（只含 /api/state，
+   pool 卡 skeleton 异步拉，R7/E8）；/log/<key> 同理。客户端 bundle 经
+   console/build.ts 独立构建（mtime 失效自动重建 + 禁词/体积断言：gzip 硬门禁
+   150KB，实测 app 100KB / log 43KB）。无 SSE/HMR（改 .tsx → F5，评审 E4 降级采纳）。
+4. **端点分层**：/api/state（3s 全局）含完整 IterRow[]；/api/pool（独立慢节奏，
+   默认 5min，服务端 30s TTL 缓存，**缓存 key 带 course**（DS-E1），?fresh=1 bypass）；
+   /api/log/<key>。指标卡 source=state 3s 实时（DS-U1，不再被 pool 拖慢）。
+5. **UI/交互**：卡片流 + 折叠/最大化 + 锚点（registry 派生，临时展开不落盘）；
+   停止全部两步内联确认（3s 超时还原）；「⏸ 暂停刷新」中性 / 停止全部危险红分离；
+   陈旧度 ●◐○ 双编码；三层错误（卡内/全局/挂断恢复 10s 探针）；dirty 分级
+   （L2 唯一=节点并发数，失焦即弃 + 顶栏提示 + [丢弃修改]）；智能 follow 日志页；
+   键盘仅 Esc/r + 输入框禁用；趋势卡点选列高亮；aria-label 全覆盖。
+6. **localStorage**：tc.* 白名单集中 + 启动清理；旧键（pool.disableCollapsed /
+   pool.iterFilter / pool.refreshSec）迁移，失败保留旧键 + console.warn（GLM-U6）。
+7. **测试**：交互正确性纯函数化（shouldFollow/isDirty/nextRefreshInterval/filterGroups/
+   sortRows/sparkPoints/migrateLegacyKey 等单测，替代 DOM 环境——触发重评条件：
+   卡 >8 或首次改 A 坏 B）；HTML 断言改指 render.tsx；新增 R13 ③ + 分层铁律静态断言。
+
+**数据层/删除：**
+- monitor/{history,iters,theme} → console/{pool-history,iters} + ui/{view,theme}；
+  monitor/page/server/index 与 console/page.ts 已删（§3.4 #3–#7）。
+- **GLM-U3 顺手修**：pool-history 聚合时剥离 sampler-agent 的 UTC ISO 前缀
+  （lastError 列不再与最近成功混排）；/v1/status 的 lastError 同样剥离。
+- **tools/agent/pool-page.ts 保留为自包含占位页**（不再重导出已删的 monitor/），
+  使中间态本地树 tsc 绿；**完整下线（占位页 + sampler-agent /pool 路由 + 死代码
+  删除 → 404）留待 P3.5 与 tools/agent 升级波同批**（训练在跑，严禁触碰 agent
+  进程；本次零升级波——codehash-files.txt 不含 tools/training/**）。
+
+**训练进行中纪律**：全程未触碰任何受管进程（selfNode 8443 / console 8900 存活态
+未变），未重启控制台；改动在磁盘生效，重启后进入新架构。
+
+**验证**：`bunx tsc --noEmit` 全绿；bundle 构建断言过；SSR 冒烟全过；console 测试
+54 pass / train 测试全绿；`bun run check` + `bun run build` 收尾。
+
+**废止/修订**：§341（/pool 页面热加载——页面已随监控下线退役，agent 仍保留 mtime
+动态 import 语义作过渡）；§346 定案 5「不引 vite/svelte」范围收窄为"主游戏 src/
+无框架"（本地工具页允许 preact）；§348 页面实现（服务端拼串 → Preact SSR）。

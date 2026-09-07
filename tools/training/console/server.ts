@@ -1,19 +1,21 @@
 /** server.ts — 神经网络训练控制台（本地 localhost 无鉴权；DECISIONS §348）。
  *
  *  职责：
- *    - GET  /            → 控制台页（page.renderConsolePage，服务端渲染整页）
- *    - GET  /api/state   → 状态快照（api.buildStateView：组件/节点/模式/指标）
- *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
- *  页面热加载：page.ts mtime 键控动态 import（§341 语义）——改页面即时生效；
- *  api/actions 为有状态逻辑层不热加载（改后重启控制台进程）。
+ *    - GET  /          → SSR 首屏（render.tsx renderConsolePage，renderToString + hydrate）
+ *    - GET  /app.js    → 客户端 bundle（build.ts ensureBundle：mtime 失效自动重建；禁词/体积断言）
+ *    - GET  /log/<key> → 日志页 SSR（renderLogPage）+ /app-log.js
+ *    - GET  /api/state → 状态快照（api.buildStateView：组件/节点/模式/指标，3s 全局节奏）
+ *    - GET  /api/pool  → 池数据端点（api.buildPoolView：节点历史/selfStatus/localHash，
+ *                        独立慢节奏 + 课程键控 30s TTL 缓存，?fresh=1 强制）
+ *    - GET  /api/log/<key> → 日志载荷（日志页 2s/4s 轮询）
+ *    - POST /api/<act> → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
  *
- *  变更检测监督（DECISIONS §349，原 start.ts 职责的归并）：监督循环周期性检查
- *  受管进程的哨兵文件（codehash-files.txt SSOT + 各自入口源码），运行的代码更新后
- *  自动重启该进程应用最新代码——spec 重建经 actions.restartSpecFor（specs.ts）。
- *  控制台进程自身退出 = 监督停止（受管进程是 detached 的，不受影响）。
+ *  变更检测监督（DECISIONS §349）：监督循环周期性检查受管进程的哨兵文件，运行代码
+ *  更新后自动重启该进程。控制台进程自身退出 = 监督停止（受管进程 detached 不受影响）。
+ *  ui/** 与 .tsx 非 api/actions 热加载层：改 .tsx → 下次请求 mtime 检测自动 rebuild
+ *  （~300ms，打印一行日志）→ 用户手动 F5 生效（§3.5/5，评审 E4 降级采纳）。
  *
- *  无鉴权边界：仅绑定 127.0.0.1（回环，不可外网访问）；动作面等价 CLI 启动器
- *  （能杀进程/改 rl-config.json），因此**不要**用 0.0.0.0 或端口转发暴露。
+ *  无鉴权边界：仅绑定 127.0.0.1（回环，不可外网访问）；动作面等价 CLI 启动器。
  *
  *  运行：bun run train（= bun tools/training/console/server.ts [--port 8900]）
  */
@@ -26,13 +28,11 @@ import { killPid, shapeLoopbackNoProxy, waitUntil } from '../net'
 import { saveComponent } from '../registry'
 import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
-import { buildStateView, componentLogPayload, routeAction } from './api'
+import { buildPoolView, buildStateView, componentLogPayload, routeAction } from './api'
 import { restartSpecFor } from './actions'
+import { ensureBundle, type BundleTarget } from './build'
+import { renderConsolePage, renderLogPage } from './render'
 import type { Component } from '../types'
-
-const PAGE_TS = path.join(import.meta.dir, 'page.ts')
-
-const PAGE_TS_HINT = 'tools/training/console/page.ts'
 
 interface ServeOpts {
   port: number
@@ -47,24 +47,6 @@ function parseArgs(): ServeOpts {
   return { port }
 }
 
-// page.ts 热加载（mtime 键控动态 import，§341 语义）；坏文件沿用上一版可用模块。
-let pageMod: { mtimeMs: number; mod: typeof import('./page') } | null = null
-async function loadPage(): Promise<typeof import('./page') | null> {
-  try {
-    const mtimeMs = statSync(PAGE_TS).mtimeMs
-    if (pageMod && pageMod.mtimeMs === mtimeMs) return pageMod.mod
-    const mod = await import(`./page.ts?m=${mtimeMs}`)
-    pageMod = { mtimeMs, mod }
-    console.log(`[console] page.ts hot-reloaded (mtime=${Math.round(mtimeMs)})`)
-    return mod
-  } catch (e) {
-    console.error(
-      `[console] page.ts hot-reload FAILED — serving previous version: ${String(e).slice(0, 160)}`,
-    )
-    return pageMod?.mod ?? null
-  }
-}
-
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -72,9 +54,7 @@ function json(data: unknown, status = 200): Response {
   })
 }
 
-/** 变更检测监督器：账本里登记的每个组件都纳入监督（登记 = 长跑语义；哨兵变更
- *  → 杀旧 → 按 specs.ts 最新配置重建 → 回灌账本）。与页面动作共用 busy 互斥，
- *  避免与手动启停同时操作同一组件。 */
+/** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。 */
 function startSupervisor(): ReturnType<typeof createSupervisor> {
   const restart = async (
     spec: Parameters<Parameters<typeof createSupervisor>[0]>[0],
@@ -99,6 +79,27 @@ function startSupervisor(): ReturnType<typeof createSupervisor> {
   return createSupervisor(restart, { intervalMs: 5000 })
 }
 
+// ────────────────────────── bundle 服务（mtime 内存缓存 + 自动重建） ──────────────────────────
+
+const bundleMemory = new Map<string, { mtimeMs: number; body: ArrayBuffer }>()
+
+async function serveBundle(target: BundleTarget): Promise<Response> {
+  await ensureBundle(target)
+  const st = statSync(target.out)
+  let ent = bundleMemory.get(target.key)
+  if (!ent || ent.mtimeMs !== st.mtimeMs) {
+    const ab = await Bun.file(target.out).arrayBuffer()
+    ent = { mtimeMs: st.mtimeMs, body: ab }
+    bundleMemory.set(target.key, ent)
+  }
+  return new Response(ent.body, {
+    headers: {
+      'Content-Type': 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+
 async function main(): Promise<void> {
   const { port } = parseArgs()
   if (shapeLoopbackNoProxy()) console.log('[console] 检测到代理环境变量——已追加 NO_PROXY 直连回环')
@@ -109,17 +110,20 @@ async function main(): Promise<void> {
   const reconcileWatch = async (): Promise<void> => {
     const state = await buildStateView()
     for (const c of state.components) {
-      if (c.status !== 'running' || watched.has(c.key)) continue
-      const spec = restartSpecFor(c.key)
+      if (c.status !== 'running' || watched.has(c.key as Component)) continue
+      const spec = restartSpecFor(c.key as Component)
       if (!spec) continue
       sup.watch(spec, c.pid ?? 0)
-      watched.add(c.key)
+      watched.add(c.key as Component)
       console.log(`[supervisor] 监督 ${c.key} (PID ${c.pid})`)
     }
   }
   await reconcileWatch()
   const reconcileTimer = setInterval(() => void reconcileWatch(), 15000)
   reconcileTimer.unref?.()
+
+  const { BUNDLES } = await import('./build')
+  const bundlesByPath = new Map(BUNDLES.map((b) => [`/${b.key}.js`, b]))
 
   const server = Bun.serve({
     // 无鉴权的前提 = 只听回环；绑 0.0.0.0 会把"杀进程/改配置"暴露给整个局域网。
@@ -129,17 +133,21 @@ async function main(): Promise<void> {
       const url = new URL(req.url)
       try {
         if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/console')) {
-          const page = await loadPage()
-          if (!page) {
-            return new Response(`${PAGE_TS_HINT} unavailable — see console log`, { status: 500 })
-          }
           const state = await buildStateView()
-          return new Response(page.renderConsolePage(state), {
+          return new Response(renderConsolePage(state), {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }
+        // 客户端 bundle（app.js / app-log.js；mtime 失效自动重建）
+        if (req.method === 'GET' && bundlesByPath.has(url.pathname)) {
+          return serveBundle(bundlesByPath.get(url.pathname)!)
+        }
         if (req.method === 'GET' && url.pathname === '/api/state') {
           return json(await buildStateView())
+        }
+        if (req.method === 'GET' && url.pathname === '/api/pool') {
+          const fresh = url.searchParams.get('fresh') === '1'
+          return json(await buildPoolView(fresh))
         }
         if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
           const key = url.pathname.slice('/api/log/'.length) as Component
@@ -158,13 +166,10 @@ async function main(): Promise<void> {
           )
           const payload = await componentLogPayload(key, lines)
           if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
-          const page = await loadPage()
-          if (!page)
-            return new Response(`${PAGE_TS_HINT} unavailable — see console log`, { status: 500 })
           const state = await buildStateView()
           const follow = url.searchParams.get('follow') !== '0'
           return new Response(
-            page.renderLogPage(payload, {
+            renderLogPage(payload, {
               components: state.components.map((c) => ({
                 key: c.key,
                 label: c.label,

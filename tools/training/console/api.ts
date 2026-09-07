@@ -13,8 +13,21 @@ import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
 import { COMPONENT_LABELS, loadConsoleState } from './actions'
-import { readIterMetrics, type IterRow } from '../monitor/iters'
+import { readIterMetrics } from './iters'
+import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
 import type { Component, RlConfig } from '../types'
+// 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
+import { stripIsoPrefix } from '../ui/view'
+import type {
+  ComponentView,
+  ConsoleStateView,
+  LogPayload,
+  MetricsView,
+  NodeHistoryRow,
+  NodeView,
+  PoolView,
+  SelfStatus,
+} from '../ui/view'
 import {
   ActionError,
   busy,
@@ -31,63 +44,16 @@ import {
   type StartCtx,
 } from './actions'
 
-// ────────────────────────── 快照类型 ──────────────────────────
+// ────────────────────────── 快照类型（单一源 ui/view.ts，此处仅透传导出） ──────────────────────────
 
-export interface ComponentView {
-  key: Component
-  label: string
-  /** running = 进程存活；stopped = 无存活进程；exited = 登记仍在但进程已死。 */
-  status: 'running' | 'stopped' | 'exited'
-  pid: number | null
-  url: string | null
-  course: string | null
-  mode: string | null
-  healthy: boolean | null
-  /** 日志文件相对 nn-training/ 的路径（页面点击查看尾行）。 */
-  log: string | null
-  logTail: string[]
-  busy: boolean
-}
-
-export interface NodeView {
-  id: string
-  url: string
-  gpuPush: boolean
-  enabled: boolean
-  concurrency: number
-  /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
-  online: boolean | null
-  codeHash: string | null
-  cpus: number | null
-  busy: boolean
-}
-
-export interface ModeView {
-  /** 控制台 trainer 基建编排（console-state 持久化）。 */
-  trainerPpo: 'pull' | 'push' | 'local'
-  /** rl-config rl.* 键（trainer 启动时消费）。 */
-  stream: number
-  doubleBuffer: number
-  precollectEarly: number
-}
-
-export interface ConsoleStateView {
-  time: string
-  course: string
-  /** tmp/ 下有 training_log.jsonl 的课程（最近更新优先）。 */
-  courses: string[]
-  components: ComponentView[]
-  nodes: NodeView[]
-  modes: ModeView
-  metrics: MetricsView
-}
-
-export interface MetricsView {
-  /** 该课程是否有数据。 */
-  available: boolean
-  iters: IterRow[]
-  error?: string
-}
+export type {
+  ComponentView,
+  ConsoleStateView,
+  LogPayload,
+  MetricsView,
+  ModeView,
+  NodeView,
+} from '../ui/view'
 
 // ────────────────────────── 课程发现 ──────────────────────────
 
@@ -197,18 +163,6 @@ export function resolveComponentLog(key: Component, cfg: RlConfig, course: strin
   const entry = loadRegistry()[key]
   if (entry?.log) return entry.log
   return null
-}
-
-export interface LogPayload {
-  component: Component
-  label: string
-  /** nn-training/ 相对日志路径。 */
-  log: string | null
-  /** 文件是否存在。 */
-  exists: boolean
-  fileSize: number
-  lines: string[]
-  truncated: boolean
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
@@ -389,6 +343,194 @@ export async function buildStateView(): Promise<ConsoleStateView> {
     },
     metrics,
   }
+}
+
+// ────────────────────────── /api/pool（§3.3 数据端点：独立慢节奏 + 服务端 30s TTL 缓存） ──────────────────────────
+
+const POOL_TTL_MS = 30_000
+/** 缓存 key 带 course（DS-E1）：切课程天然 miss 重算，30s 窗口内不错课程数据。 */
+const poolCache = new Map<string, { at: number; view: PoolView }>()
+
+// 本机 codeHash 惰性 memo（R9）：sampler-agent 是重模块，lazy import + 5s TTL；失败降级空串。
+let localHashMemo = ''
+let localHashAt = 0
+async function localCodeHash(): Promise<string> {
+  if (localHashMemo && Date.now() - localHashAt < 5000) return localHashMemo
+  try {
+    const mod = (await import('../../agent/sampler-agent')) as {
+      collectCodeHashEntries: () => { relPath: string; content: Buffer }[]
+      computeCodeHashFromFiles: (e: { relPath: string; content: Buffer }[]) => string
+    }
+    localHashMemo = mod.computeCodeHashFromFiles(mod.collectCodeHashEntries())
+  } catch {
+    localHashMemo = ''
+  }
+  localHashAt = Date.now()
+  return localHashMemo
+}
+
+/** selfNode 存活时拉 /v1/status；失败/未启动 → null（UI 显示「agent 未启动」占位，不伪造）。 */
+async function fetchSelfStatus(cfg: RlConfig): Promise<SelfStatus | null> {
+  const reg = loadRegistry()
+  if (!pidAlive(reg.selfNode?.pid)) return null
+  const auth = cfg.nodes.find((n) => n.id === 'self')?.authKey ?? ''
+  try {
+    const resp = await fetch(`http://127.0.0.1:${cfg.rl.agent_port}/v1/status`, {
+      headers: auth ? { Authorization: `Bearer ${auth}` } : {},
+      signal: AbortSignal.timeout(4000),
+    })
+    if (!resp.ok) return null
+    const b = (await resp.json()) as {
+      workers?: number
+      gamesDoneTotal?: number
+      inflight?: unknown[]
+      diskFreeMB?: number | null
+      lastError?: string
+      uptimeSec?: number
+      resultCache?: { items?: number; bytes?: number }
+      recentFailed?: number
+    }
+    return {
+      workers: Number(b.workers ?? 0),
+      inflight: Array.isArray(b.inflight) ? b.inflight.length : 0,
+      gamesDoneTotal: Number(b.gamesDoneTotal ?? 0),
+      diskFreeMB: typeof b.diskFreeMB === 'number' ? b.diskFreeMB : null,
+      lastError: b.lastError ? stripIsoPrefix(String(b.lastError)).slice(0, 200) : null,
+      uptimeSec: typeof b.uptimeSec === 'number' ? b.uptimeSec : null,
+      resultCacheItems: Number(b.resultCache?.items ?? 0),
+      resultCacheBytes: Number(b.resultCache?.bytes ?? 0),
+      recentFailed: Number(b.recentFailed ?? 0),
+    }
+  } catch {
+    return null
+  }
+}
+
+function nodeHistoryRow(
+  n: {
+    id: string
+    url: string
+    authKey: string
+    enabled: boolean
+    concurrency: number
+    gpu_push?: boolean
+  },
+  h: ReturnType<typeof emptyHistory>,
+  agg: { globalMaxIt: number },
+  ping: Record<string, unknown> | null,
+  pingMs: number | null,
+  localHash: string,
+): NodeHistoryRow {
+  const disabled = !n.enabled
+  let status: NodeHistoryRow['status']
+  let spec = '-'
+  let version = ''
+  let versionOk: boolean | null = null
+  if (disabled) {
+    status = 'disabled'
+  } else if (ping) {
+    const codeHash = String(ping.codeHash ?? '')
+    version = codeHash ? codeHash.slice(0, 7) : ''
+    versionOk = codeHash.length > 0 ? codeHash === localHash : null
+    spec = ping.cpus ? `${ping.cpus} 核` : '?核'
+    status = poolStatus(h) // 在线但无结算历史 → 'nodata' 灰显
+  } else {
+    status = h.recent.length === 0 ? 'noping' : poolStatus(h)
+  }
+  return {
+    id: n.id,
+    kind: 'node',
+    status,
+    okN: h.recent.filter(Boolean).length,
+    recentN: h.recent.length,
+    spec,
+    versionOk,
+    version,
+    pingMs: disabled ? null : pingMs,
+    ok: h.ok,
+    fail: h.fail,
+    contrib: h.lastIterOk,
+    lastIter: h.lastIter,
+    globalMaxIt: agg.globalMaxIt,
+    avgElapsedSec: h.avgElapsedSec,
+    lastOkTs: h.lastOkTs,
+    lastFailTs: h.lastFailTs,
+    lastError: h.lastError,
+    recent: h.recent,
+  }
+}
+
+/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。 */
+export async function buildPoolView(fresh = false): Promise<PoolView> {
+  const cfg = loadConfig()
+  const state = loadConsoleState()
+  const course = effectiveCourse(state, discoverCourses())
+  const key = `pool-view:${course}`
+  const cached = poolCache.get(key)
+  if (!fresh && cached && Date.now() - cached.at < POOL_TTL_MS) return cached.view
+
+  const hash = await localCodeHash()
+  const agg = aggregateNodeHistory()
+  const probes = await Promise.all(
+    cfg.nodes.map(async (n) => {
+      if (!n.enabled)
+        return { n, ping: null as Record<string, unknown> | null, ms: null as number | null }
+      const started = Date.now()
+      try {
+        const resp = await fetch(`${n.url.replace(/\/$/, '')}/v1/ping`, {
+          headers: { Authorization: `Bearer ${n.authKey}` },
+          signal: AbortSignal.timeout(2500),
+        })
+        if (!resp.ok) return { n, ping: null, ms: Date.now() - started }
+        return { n, ping: (await resp.json()) as Record<string, unknown>, ms: Date.now() - started }
+      } catch {
+        return { n, ping: null, ms: Date.now() - started }
+      }
+    }),
+  )
+
+  const nodes: NodeHistoryRow[] = []
+  for (const { n, ping, ms } of probes) {
+    const h = agg.hist.get(n.id) ?? emptyHistory()
+    nodes.push(nodeHistoryRow(n, h, agg, ping, ms, hash))
+  }
+
+  const localH = agg.hist.get('local') ?? emptyHistory()
+  const slots = Number(cfg.rl.local_slots)
+  const local: NodeHistoryRow = {
+    id: 'local',
+    kind: 'local',
+    status: poolStatus(localH),
+    okN: localH.recent.filter(Boolean).length,
+    recentN: localH.recent.length,
+    spec: Number.isInteger(slots) && slots > 0 ? `${slots} 槽` : '-',
+    versionOk: null,
+    version: '',
+    pingMs: null,
+    ok: localH.ok,
+    fail: localH.fail,
+    contrib: localH.lastIterOk,
+    lastIter: localH.lastIter,
+    globalMaxIt: agg.globalMaxIt,
+    avgElapsedSec: localH.avgElapsedSec,
+    lastOkTs: localH.lastOkTs,
+    lastFailTs: localH.lastFailTs,
+    lastError: localH.lastError,
+    recent: localH.recent,
+  }
+
+  const view: PoolView = {
+    cachedAt: Date.now(),
+    course,
+    epochMs: agg.epochMs,
+    activeFlow: agg.activeFlow,
+    nodes,
+    local,
+    selfStatus: await fetchSelfStatus(cfg),
+    localHash: hash,
+  }
+  poolCache.set(key, { at: view.cachedAt, view })
+  return view
 }
 
 // ────────────────────────── 动作路由 ──────────────────────────

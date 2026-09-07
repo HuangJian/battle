@@ -10,13 +10,12 @@ import { resolveTorchThreads, torchThreadEnv } from '../tools/training/venv'
 import { resolveTrainScript } from '../tools/training/train'
 import {
   aggregateNodeHistory,
-  contribCell,
-  poolStatusCell,
   emptyHistory,
-} from '../tools/training/monitor/history'
-import { readIterMetrics } from '../tools/training/monitor/iters'
+  poolStatus,
+} from '../tools/training/console/pool-history'
+import { readIterMetrics } from '../tools/training/console/iters'
+import { stripIsoPrefix } from '../tools/training/ui/view'
 import { TRAINING_LOOP_ENTRY, trainingLoopSpec } from '../tools/training/specs'
-import { renderMonitorPage } from '../tools/training/monitor/page'
 import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -100,17 +99,27 @@ describe('train script resolution (tools/training/train.ts, DECISIONS §324)', (
   })
 })
 
-describe('monitor data layers (tools/training/monitor/*)', () => {
-  it('empty history renders placeholder cells', () => {
-    const h = emptyHistory()
-    expect(poolStatusCell(h)).toContain('无数据')
-    expect(contribCell(h, 5)).toContain('-')
+describe('pool data layers (tools/training/console/pool-history + iters)', () => {
+  it('poolStatus thresholds: nodata → healthy ≥90% / warn ≥70% / bad', () => {
+    expect(poolStatus(emptyHistory())).toBe('nodata')
+    expect(
+      poolStatus({
+        ...emptyHistory(),
+        recent: [true, true, true, true, true, true, true, true, true, true],
+      }),
+    ).toBe('healthy')
+    expect(
+      poolStatus({
+        ...emptyHistory(),
+        recent: [true, true, true, false, false, true, true, true, true, true],
+      }),
+    ).toBe('warn')
+    expect(poolStatus({ ...emptyHistory(), recent: [false, false] })).toBe('bad')
   })
-  it('contrib cell marks lagging nodes with tooltip', () => {
-    const h = { ...emptyHistory(), lastIter: 3, lastIterOk: 0 }
-    const cell = contribCell(h, 10)
-    expect(cell).toContain('it3')
-    expect(cell).toContain('it10')
+  it('lastError 剥离 sampler-agent 的 UTC ISO 前缀（GLM-U3）', () => {
+    expect(stripIsoPrefix('2026-09-07T02:03:04.567Z link timeout')).toBe('link timeout')
+    expect(stripIsoPrefix('2026-09-07T02:03:04Z s5/seed1: boom')).toBe('s5/seed1: boom')
+    expect(stripIsoPrefix('normal error')).toBe('normal error')
   })
   it('aggregateNodeHistory returns empty aggregate without tmp data', () => {
     // 仓库 tmp/ 总存在；聚合不抛错即可（数据多少无关正确性）。
@@ -191,39 +200,6 @@ describe('monitor data layers (tools/training/monitor/*)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
-})
-
-describe('monitor page render (tools/training/monitor/page.ts)', () => {
-  it('renders a full standalone page without any server', async () => {
-    const html = await renderMonitorPage({
-      workers: 2,
-      inflight: { size: 0 },
-      gamesDoneTotal: 0,
-      localHash: () => 'x'.repeat(64),
-      nodes: [
-        { id: 'self', url: 'http://127.0.0.1:9', authKey: 'k', enabled: false, concurrency: 1 },
-      ],
-      localSlots: 4,
-    })
-    expect(html.startsWith('<!doctype html>')).toBe(true)
-    expect(html).toContain('id="pool"')
-    expect(html).toContain('已禁用节点')
-    expect(html).toContain('本机直跑')
-    // 密钥不渲染（页面契约）
-    expect(html).not.toContain('"k"')
-  })
-  it('renders placeholder page for non-master machines (no nodes)', async () => {
-    const html = await renderMonitorPage({
-      workers: 0,
-      inflight: { size: 0 },
-      gamesDoneTotal: 0,
-      localHash: () => '',
-      nodes: null,
-      localSlots: null,
-    })
-    expect(html).toContain('id="pool"')
-    expect(html).not.toContain('已禁用节点')
   })
 })
 

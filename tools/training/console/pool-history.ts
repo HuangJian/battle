@@ -1,14 +1,19 @@
-/** history.ts — 节点历史聚合（从 pool-page.ts 提取的数据层）。
-
- *  数据源：按 mtime 自动选取 tmp/ 下最新训练流的 dist-agent-meta.jsonl（递归扫
- *  描，只聚合最近活跃目录），聚合出每节点的 ok/fail/最近完成率/上轮贡献度/滑动
- *  平均耗时等。历史锚点 tmp/dist-agent/pool-epoch.txt（受控清空）保留原语义。
+/** pool-history.ts — 节点历史聚合（由 monitor/history.ts 迁入，§3.4 #4）。
+ *
+ *  纯 fs 逻辑的服务端数据层：按 mtime 自动选取 tmp/ 下最新训练流的
+ *  dist-agent-meta.jsonl（递归扫描，只聚合最近活跃目录），聚合出每节点的
+ *  ok/fail/最近完成率/上轮贡献度/滑动平均耗时等。历史锚点 tmp/dist-agent/pool-epoch.txt
+ *  （受控清空）保留原语义。
+ *
+ *  GLM-U3 修正（本轮迁入顺手做）：lastError 在聚合层剥离 sampler-agent 的
+ *  `new Date().toISOString()`（UTC）前缀——节点卡「最近错误」列不再与同行的
+ *  本机时间「最近成功」混排；时间单独经 lastFailTs 展示。
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { REPO_ROOT } from '../paths'
-import { fmtTs } from './theme'
+import { fmtFullTs, stripIsoPrefix } from '../ui/view'
 
 /** 锚点文件：tmp/dist-agent/pool-epoch.txt（毫秒时间戳）。语义（用户 2026-08-31）：
  *  · 部署写入一次 → 历史自此刻起重新累计；
@@ -40,6 +45,7 @@ export interface NodeHistory {
   lastTs: string
   lastOkTs: string
   lastFailTs: string
+  /** 已剥离 agent ISO 前缀（GLM-U3）。 */
   lastError: string
   /** 最近至多 50 局的端到端服务时长样本（滑动窗口）。 */
   elapsedRecent: number[]
@@ -71,7 +77,6 @@ export function emptyHistory(): NodeHistory {
 
 /** 活跃训练流信息：mtime 最新的 dist-agent-meta.jsonl 所在目录。 */
 export interface ActiveFlow {
-  /** 目录短名（如 s3-cap2、rl-traj）。 */
   dir: string
   mtimeMs: number
   lines: number
@@ -101,9 +106,9 @@ export function aggregateNodeHistory(): HistoryAggregate {
     }
     return h
   }
-  const epochStr = fmtTs(POOL_EPOCH_MS)
+  const epochStr = fmtFullTs(POOL_EPOCH_MS)
   // 最近一小时永远相对"当下"（不可复用 epoch——epoch 是部署锚点）。
-  const hourAgoStr = fmtTs(Date.now() - 3_600_000)
+  const hourAgoStr = fmtFullTs(Date.now() - 3_600_000)
 
   // 收集所有候选 meta 文件（递归扫描 tmp/ 下所有 dist-agent-meta.jsonl）。
   // 训练流的 traj_root 可以是 tmp/X（一层）或 tmp/X/traj（两层），必须递归搜索。
@@ -193,8 +198,10 @@ export function aggregateNodeHistory(): HistoryAggregate {
             }
           } else {
             h.fail++
-            // 最新错误只近一小时（用户指令）：窗口外错误不进 lastError。
-            h.lastError = nts >= hourAgoStr ? (r.reason ?? '').slice(0, 120) : h.lastError
+            // 最新错误只近一小时（用户指令）：窗口外错误不进 lastError；
+            // 剥离 agent 的 UTC ISO 前缀（GLM-U3），时间列另有 lastFailTs。
+            h.lastError =
+              nts >= hourAgoStr ? stripIsoPrefix(r.reason ?? '').slice(0, 120) : h.lastError
             if (nts >= hourAgoStr && nts > h.lastFailTs) h.lastFailTs = nts
           }
           if (nts > h.lastTs) h.lastTs = nts
@@ -226,25 +233,12 @@ export function aggregateNodeHistory(): HistoryAggregate {
   return { hist, activeFlow, globalMaxIt, epochMs: POOL_EPOCH_MS }
 }
 
-/** 状态徽章：最近 10 次结算完成率（健康≥90% · 波动≥70% · 异常<70%）。 */
-export function poolStatusCell(h: NodeHistory): string {
+/** 状态徽章判定：最近 10 次结算完成率（健康≥90% · 波动≥70% · 异常<70%）。 */
+export function poolStatus(h: NodeHistory): 'healthy' | 'warn' | 'bad' | 'nodata' {
   const n = h.recent.length
+  if (n === 0) return 'nodata'
   const okN = h.recent.filter(Boolean).length
-  if (n === 0) return `<span class="badge b-gray">无数据</span>`
-  if (okN / n >= 0.9) return `<span class="badge b-green">健康 ${okN}/${n}</span>`
-  if (okN / n >= 0.7) return `<span class="badge b-yellow">波动 ${okN}/${n}</span>`
-  return `<span class="badge b-red">异常 ${okN}/${n}</span>`
-}
-
-/** 上轮贡献度单元格：>0 = 在全局最新轮的成功结算局数；0 但有历史 = 落后当前轮
- *  （灰显 + tooltip）；无任何成功记录 = '-'。data-v=0 让落后节点排序沉底。 */
-export function contribCell(h: NodeHistory, globalMaxIt: number): string {
-  if (h.lastIterOk > 0) return `<td class="num" data-v="${h.lastIterOk}">${h.lastIterOk}</td>`
-  if (h.lastIter >= 0 && globalMaxIt >= 0) {
-    return (
-      `<td class="num" data-v="0"><span class="muted" title="该节点最近一次成功结算在 ` +
-      `it${h.lastIter}，已落后当前 it${globalMaxIt}">${h.lastIterOk}</span></td>`
-    )
-  }
-  return `<td class="num" data-v="0">-</td>`
+  if (okN / n >= 0.9) return 'healthy'
+  if (okN / n >= 0.7) return 'warn'
+  return 'bad'
 }

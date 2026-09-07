@@ -6,7 +6,7 @@
  *  - api.routeAction：未知动作 404、参数错误 400、busy 互斥 409、
  *    节点启停/并发回写 rl-config.json（临时副本，跑完还原）；
  *  - actions 控制台状态：trainer 模式持久化（console-state.json 副本）；
- *  - page.renderConsolePage：渲染包含关键区块与转义安全。
+ *  - 纯函数与 SSR（render.tsx 包装）：渲染包含关键区块与转义安全。
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -83,7 +83,8 @@ afterAll(() => {
 
 const api = await import('../tools/training/console/api')
 const actions = await import('../tools/training/console/actions')
-const page = await import('../tools/training/console/page')
+const render = await import('../tools/training/console/render')
+const view = await import('../tools/training/ui/view')
 
 function post(act: string, body: Record<string, unknown> = {}): Promise<Response> {
   return api.routeAction(act, body) as Promise<Response>
@@ -239,7 +240,7 @@ describe('console course single source (DECISIONS §351 bug 1)', () => {
 
   it('页面课程下拉含「自动（最近活跃课程）」占位项', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).toContain('自动（最近活跃课程）')
   })
 })
@@ -247,31 +248,31 @@ describe('console course single source (DECISIONS §351 bug 1)', () => {
 describe('console local×stream 假互斥移除 (DECISIONS §351 bug 2)', () => {
   it('页面不再声称 local 需 rl.stream=0 / 本地 PPO 互斥；stream 开关仍在', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).not.toContain('需 rl.stream=0')
     expect(html).not.toContain('本地 PPO 互斥')
     expect(html).toContain('stream 流式派发')
   })
 })
 
-describe('console/page.renderConsolePage', () => {
-  it('渲染包含区块标题、动作 data-act 与转义', async () => {
+describe('console SSR renderConsolePage', () => {
+  it('渲染包含区块标题、动作按钮、开关键与转义', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).toContain('NN 训练控制台')
-    expect(html).toContain('data-act="start"')
-    expect(html).toContain('data-act="preset"')
-    expect(html).toContain('rl.double_buffer')
-    expect(html).toContain('data-node-enable=')
+    expect(html).toContain('启动') // 组件卡动作按钮（aria-label 语义）
+    expect(html).toContain('tc-preset') // 运行模式预设
+    expect(html).toContain('rl.double_buffer') // 行为开关键名
+    expect(html).toContain('并行采集数') // 节点卡控制视图
     expect(html).toContain('训练指标')
-    // 无原始 <script> 注入风险：esc() 生效于 url
+    // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
   })
 })
 
-describe('console/page.sparkline', () => {
+describe('console sparkline (ui/view)', () => {
   it('正态序列：polyline 坐标数 = 数据点数，含末点圆点', () => {
-    const svg = page.sparkline([1, 2, 3, 4, 5])
+    const svg = view.sparkline([1, 2, 3, 4, 5])
     expect(svg).toContain('<svg')
     expect(svg).toContain('<polyline')
     // 5 个坐标对（每对 x,y；[\d.] 同时匹配整数与小数）
@@ -285,7 +286,7 @@ describe('console/page.sparkline', () => {
   })
 
   it('恒定序列：满幅平线（y 折半）+ 灰色（无形状可循）', () => {
-    const svg = page.sparkline([7, 7, 7, 7])
+    const svg = view.sparkline([7, 7, 7, 7])
     // 全部 y 相同 = height/2
     const ys = [...svg.matchAll(/,([\d.]+) /g)].map((m) => m[1])
     expect(new Set(ys).size).toBeLessThanOrEqual(1)
@@ -293,8 +294,8 @@ describe('console/page.sparkline', () => {
   })
 
   it('空序列与非有限值：占位符 / NaN 点被跳过', () => {
-    expect(page.sparkline([])).toContain('muted')
-    const svg = page.sparkline([1, Number.NaN, 3])
+    expect(view.sparkline([])).toContain('muted')
+    const svg = view.sparkline([1, Number.NaN, 3])
     const pairs =
       svg
         .split('<polyline')[1]!
@@ -305,7 +306,7 @@ describe('console/page.sparkline', () => {
 
   it('指标表渲染 sparkline 概览条（有数据课程）', async () => {
     const s = await api.buildStateView()
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     expect(html).toContain('spark-strip')
     expect(html).toContain('spark-cell')
     if (s.metrics.available && s.metrics.iters.length > 0) {
@@ -352,7 +353,7 @@ describe('console/page.sparkline', () => {
         })),
       },
     }
-    const html = page.renderConsolePage(s)
+    const html = render.renderConsolePage(s)
     // 30 轮输入、eval 全空（NaN）→ 4 条有限序列有 polyline，eval 列为占位符
     const polylines = html.match(/<polyline/g) ?? []
     expect(polylines.length).toBe(4)
@@ -406,7 +407,7 @@ describe('console/log viewer (§348 补 2)', () => {
   it('renderLogPage：日志内容转义 + 组件导航 + follow 开关', async () => {
     const p = (await api.componentLogPayload('selfNode', 40))!
     const state = await api.buildStateView()
-    const html = page.renderLogPage(p, {
+    const html = render.renderLogPage(p, {
       components: state.components.map((c) => ({ key: c.key, label: c.label, status: c.status })),
       follow: true,
       lines: 40,
@@ -416,19 +417,17 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(html).toContain('id="follow" checked')
     expect(html).toContain('/log/trainingLoop')
     expect(html).toContain('返回控制台')
-    // 日志文本必须经 esc()（原始 <script> 不得出现在 logbox 内容里）
+    // 日志文本必须经转义（原始 <script> 不得出现在 logbox 内容里）
     expect(html).not.toContain('<script>alert')
-    expect(html).toContain('setInterval(refresh')
   })
 
   it('renderLogPage：暂停态（follow=false）刷新间隔 4s；缺文件显示占位', async () => {
     const p = (await api.componentLogPayload('cloudflared', 20))!
     p.exists = false
     p.lines = []
-    const html = page.renderLogPage(p, { components: [], follow: false, lines: 20 })
+    const html = render.renderLogPage(p, { components: [], follow: false, lines: 20 })
     expect(html).toContain('日志文件不存在')
-    expect(html).toContain('setInterval(refresh, 4000)')
-    // follow 复选框无 checked 属性（客户端脚本里的 ev.target.checked 不算）
+    // follow 复选框无 checked 属性（跟随节奏由客户端 usePolling + shouldFollow 纯函数实现）
     expect(html).not.toContain('id="follow" checked')
   })
 })

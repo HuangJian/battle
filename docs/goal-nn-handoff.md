@@ -57,7 +57,7 @@
 ## 4. 环境与拓扑
 
 - **节点池 8 台**：self(3, 本机 127.0.0.1) / mac(6) / a95(7) / a97(7) / a98(7) /
-  lite(2) / a96(失联) / gcs(4)。监控页：`<self-agent-url>/pool`（5-60s 自刷新）。
+  lite(2) / a96(失联) / gcs(4)。监控已并入训练控制台 `bun run train` → http://127.0.0.1:8900（节点池卡「统计」视图，独立 /api/pool；远端 /pool 页面已下线，P3.5 后返回 404）。
 - **远控语义**：升级分支 = 训练机当前分支（`dist_common.UPGRADE_BRANCH` 锁存，
   启动时 push）；节点 stale → 自动远控 pull+重启；**self/回环节点 = 纯重启**
   （无 pullBranch，零 git 操作——共享工作区禁破坏性 pull）。
@@ -150,6 +150,6 @@ ticks 中位 672。
 - [ ] 读完 §2 三份文档
 - [ ] `bun run check` 全绿
 - [ ] `pwsh tmp/list-rl.ps1` 确认只有一个训练进程
-- [ ] `/pool` 页面 8 节点状态核对
+- [ ] 控制台节点池卡「统计」视图 8 节点状态核对（bun run train → 127.0.0.1:8900）
 - [ ] S2 曲线与检点规则对齐（§6）
 - [ ] git log 扫一遍 `docs/goal-nn.progress.md` §8-§11 的 commit 链

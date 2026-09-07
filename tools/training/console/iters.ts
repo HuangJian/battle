@@ -1,25 +1,11 @@
-/** iters.ts — 每轮训练指标聚合 + eval 汇总（从 pool-page.ts 提取的数据层）。
-
- *  数据源（activeFlow 目录下）：
- *    - training_log.jsonl 的 iteration 事件（PPO 收敛指标）；
- *    - it{N} 目录下各局 manifest.json 聚合（实际终局值，计算一次留底缓存）；
- *    - eval_log.jsonl（干净评估 summary + 逐局行聚合）。
- */
+/** iters.ts — 每轮训练指标聚合 + eval 汇总（由 monitor/iters.ts 迁入，§3.4 #5；
+ *  类型移居 ui/view.ts 单一源，本层只留实现）。api.ts 与 pool 共用。 */
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import type { EvalSummary, IterActuals, IterRow } from '../ui/view'
 
 // ---------------- 每轮实际值（it{N}/**/manifest.json 聚合） ----------------
-
-export interface IterActuals {
-  /** 去重后实际局数（= 唯一 (stage,seed) 数）。 */
-  games: number
-  totalKills: number
-  /** 本轮总道具（powerUpsCollected）。 */
-  totalPU: number
-  /** 场均存活 tick（totalTicks / games）。 */
-  avgTicks: number
-}
 
 /** 聚合某一轮的真实终局值：递归扫 it{N} 下全部 shard 的 manifest.json。
  *
@@ -154,25 +140,6 @@ function saveActualsCache(trajDir: string, cache: Map<number, CachedActuals>): v
 
 // ---------------- 干净评估汇总（eval_log.jsonl） ----------------
 
-export interface EvalSummary {
-  time: string
-  games: number
-  wins: number
-  winRate: number | null
-  clears: number
-  clearRate: number | null
-  dropped: number
-  sec: number
-  wver: string
-  outcomes: Record<string, number>
-  /** 逐局聚合（按 wver 对齐该轮 summary）；null = 逐局行已缺。 */
-  avgTicks: number | null
-  totalKills: number | null
-  totalPU: number | null
-  scoreMean: number | null
-  scoreStd: number | null
-}
-
 /** 读取 eval_log.jsonl：eval_summary 按 iter 归并（同 iter 多条 = 断点续跑补评估
  *  后的重复落账，取最后一条 = 最新对账结果），并聚合该 (iter,wver) 的 event=eval
  *  逐局行。
@@ -258,37 +225,6 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
     /* unreadable */
   }
   return out
-}
-
-// ---------------- 每轮迭代指标（training_log.jsonl） ----------------
-
-export interface IterRow {
-  iter: number
-  time: string
-  winRate: number
-  scoreMean: number
-  scoreStd: number
-  samples: number
-  rolloutSec: number
-  ppoSec: number
-  kl: number
-  entropy: number
-  policyLoss: number
-  valueLoss: number
-  meanRet: number
-  lr: number
-  expectedGames: number
-  halted: boolean
-  /** dim_means 前三名 key（简化展示）。 */
-  topDims: string
-  avgTicks: number
-  accuracy: number
-  loot: number
-  kills: number
-  /** 该轮磁盘真实聚合；null = 无数据（已轮转/未收尾）。 */
-  actuals: IterActuals | null
-  /** 该轮干净评估汇总；null = 该轮未派发 eval。 */
-  evalData: EvalSummary | null
 }
 
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标（实际值缓存优先：
