@@ -2647,7 +2647,7 @@ GBK 乱码课程文案假阴性（改双信号：result.smoke 标记 ∨ ALL DON
 `nn-training/start-training.{sh,ps1}` 已删除（2026-09-06，用户指令）；仓库内残余引用
 （docs / plan / README / py docstring 用法示例）已清理为指向 `tools/training/start.ts`。
 
-## §350 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
+## §353 / 双打 Two-Player 模式：第二人类输入源复用 P2 槽位（2026-09-06，用户指令）
 
 用户要求："player 1 和 player 2 分别使用不同的按键各自控制自己的坦克"。定案：
 **不新建第二条玩家管线**，而是给既有 P2 槽位（`world.player2` / `lives2` /
@@ -2687,7 +2687,7 @@ P2 开火归属、击杀分池、lives2 消耗/重生、双灭 gameover、延迟
 （1724 pass，含 godai-score-gate 无漂移），`bun run build` 绿。 God-AI 行为
 未动（候选/参数/思考循环零改动），不构成 §6.3b new-era。
 
-**§350a 补充（同日，P2 按键重绑）**：`GameSettings.keys2` 成为持久化字段
+**§353a 补充（同日，P2 按键重绑）**：`GameSettings.keys2` 成为持久化字段
 （legacy 存档经 loadSettings 合并迁移到 `DEFAULT_P2_KEYS`，零显式分支——
 `{ ...saved.keys2 }` 对 undefined 展开为 `{}`，逐字段合并自然回退）。Game 构造
 P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面板重映射立即
@@ -2701,12 +2701,13 @@ P2 Input 持有 `settings.keys2` 活引用（与 P1 的 `keys` 同契约：面�
 legacy 迁移、JSON roundtrip、跨玩家冲突/豁免/修饰键区分。`bun run check` 全绿
 （1734 pass），build 绿。
 
-> 编号说明：§347/§348/§348a（双打、手柄、手柄重绑定）与 goal-nn 分支
-> 并行期间发生撞号（其 oxfmt §347 与控制台 §348 于 2026-09-06 21:22 先
-> 落地，保留原编号）；本三分支条目按「先落地者保留编号」重编为
-> §350/§350a/§351/§351a，代码内引用已同步更新。
+> 编号说明（两轮撞号）：本组条目（双打、手柄、手柄重绑定）与 goal-nn 分支
+> 并行期间两度撞号，均按「先落地者保留编号」重编——第一轮（其 oxfmt §347
+> 与控制台 §348，2026-09-06 21:22 先落地）由 §347/§348/§348a 重编为
+> §350/§350a/§351/§351a；第二轮（其 p4-fast §350 与控制台 §351，2026-09-07
+> 07:19 先落地）再重编为 §353/§353a/§354/§354a。代码内引用均已同步更新。
 
-## §351 / 手柄操作支持：轮询式快照差分边沿 + 复合输入（2026-09-06，用户指令）
+## §354 / 手柄操作支持：轮询式快照差分边沿 + 复合输入（2026-09-06，用户指令）
 
 用户要求："为游戏添加手柄操作支持"。定案：**轮询（poll），不监听事件**——
 Gamepad API 无可靠的逐帧 justPressed 事件，边沿检测由纯快照差分层承担，全部
@@ -2742,13 +2743,13 @@ reset 防串键、复合体优先级/OR/委托、管理器槽位稳定 + 跃迁�
 pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器零改动，
 不触发 §6.3b。
 
-## §351a / 手柄按键重绑定（Controls 面板新增手柄页）（2026-09-07，用户指令）
+## §354a / 手柄按键重绑定（Controls 面板新增手柄页）（2026-09-07，用户指令）
 
-§351a 的追加：用户要求手柄按键可在 Controls 面板重绑定。定案：
+§354a 的追加：用户要求手柄按键可在 Controls 面板重绑定。定案：
 
 - **数据**（§2.4，全部在 settings.ts，避免 GamepadInput↔settings 循环依赖）：
   `PadBindings`（动作 → standard-mapping 按键序号，8 个可绑动作 = 十字键四向 +
-  fire/guard/frenzy/rewind）+ `DEFAULT_PAD_BINDINGS`（即 §351 标准布局）+
+  fire/guard/frenzy/rewind）+ `DEFAULT_PAD_BINDINGS`（即 §354 标准布局）+
   `GAMEPAD_BUTTONS` 常量迁到此处（GamepadInput 再导出保持兼容）。
   摇杆移动是原始轴值**不可绑定**；Start/暂停固定不参与冲突检查（与键盘
   pause 是 P1 全局键同理）。

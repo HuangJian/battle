@@ -12,7 +12,7 @@ import { DEFAULT_KEYS, DEFAULT_P2_KEYS, type InputLike } from '../src/game/Input
 import type { Direction } from '../src/constants'
 
 /**
- * Gamepad support (DECISIONS §351): the browser Gamepad API is polled —
+ * Gamepad support (DECISIONS §354): the browser Gamepad API is polled —
  * there are no reliable per-frame `justPressed` events — so the edge
  * detection lives in a pure snapshot-diff layer that is regression-tested
  * headlessly (AGENTS §8): fixed snapshots, no DOM, no rAF.

@@ -143,7 +143,7 @@ export class MenuController {
     }
     // Confirm — RESUME, NEW GAME, and CONTROLS respond to Enter.
     const controlsIdx = row('controls')
-    // Pad Start/confirm counts (§351) — the edge is consumed by GameLoop's
+    // Pad Start/confirm counts (§354) — the edge is consumed by GameLoop's
     // static-key path polling, so it fires exactly once here.
     const padConfirm = this.g.pads.p1.isPausePressed()
     if (this.g.input.isConfirmPressed() || padConfirm) {
@@ -163,7 +163,7 @@ export class MenuController {
   /** In-game input (playing/paused): pause, manual snapshot, theme, reset. */
   private handleBattleInput(justExitedFullscreen: boolean): void {
     const w = this.g.world
-    // 双打 gamepad support (§351): pad Start toggles pause like KeyP/Esc.
+    // 双打 gamepad support (§354): pad Start toggles pause like KeyP/Esc.
     // Handled FIRST so a Start press during play never also lands as a
     // menu-confirm edge on the same frame.
     if (this.g.pads.p1.isPausePressed()) {
@@ -207,7 +207,7 @@ export class MenuController {
 
   /** Game-over / victory screen: any reset-or-confirm key returns to menu. */
   private handleEndScreenInput(): void {
-    // Pad Start counts as confirm (§351).
+    // Pad Start counts as confirm (§354).
     if (
       this.g.input.isResetPressed() ||
       this.g.input.isConfirmPressed() ||

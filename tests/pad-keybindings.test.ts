@@ -10,7 +10,7 @@ import type { GamepadSnapshot } from '../src/game/GamepadInput'
 import type { GameSettings, PadBindings } from '../src/types'
 
 /**
- * Gamepad button rebinding (DECISIONS §351a follow-up): the Controls panel's
+ * Gamepad button rebinding (DECISIONS §354a follow-up): the Controls panel's
  * Gamepad tab rebinds standard-mapping button indices, persisted as
  * `GameSettings.pads` with the same live-reference contract as keys/keys2.
  * Headless — pure functions only (AGENTS §8).

@@ -342,7 +342,7 @@ export class MenuScreen {
   }
 
   /**
-   * Wire the LIVE pad bindings and render the legend (§351a follow-up).
+   * Wire the LIVE pad bindings and render the legend (§354a follow-up).
    * Called once from UIManager.initControls — the same live reference the
    * GamepadManager reads, so a Controls-panel remap is visible here the
    * moment the panel closes (see ControlsPanel.onClosed).

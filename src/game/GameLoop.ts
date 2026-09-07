@@ -591,7 +591,7 @@ export class LoopController {
 
   /**
    * Poll the gamepads once and route connect/disconnect transitions to
-   * toasts (§351). Called at the top of each rAF frame, before input is
+   * toasts (§354). Called at the top of each rAF frame, before input is
    * consumed — poll order is load-bearing for edge detection.
    */
   pollPads(): void {
@@ -606,7 +606,7 @@ export class LoopController {
    * Clear per-frame input edges (keyboard + both God AI caches).
    */
   endFrameInputs(): void {
-    // The sim consumes the COMPOSITES (keyboard OR gamepad — §351); clearing
+    // The sim consumes the COMPOSITES (keyboard OR gamepad — §354); clearing
     // them covers the inner keyboard refs too (CompositeInput.endFrame
     // delegates to both sources). Raw refs are cleared as well so menu-time
     // reads (handleStateInput) never see stale edges.
@@ -703,7 +703,7 @@ export class LoopController {
     const dt = this.computeDelta(time)
     this.beginPerfProbe()
 
-    // Gamepad polling is a per-RENDER-frame step (§351): the Gamepad API is
+    // Gamepad polling is a per-RENDER-frame step (§354): the Gamepad API is
     // polled, not event-driven, so edges are diffed here once — N sim ticks
     // in this frame all see the same edges (fixed-timestep catch-up never
     // loses a super-item press). Must run BEFORE handleFrameInput.
