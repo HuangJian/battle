@@ -1,45 +1,23 @@
-/** MetricsPanel.tsx — 训练指标卡（DS-U1：source=state，3s 实时）：
- *  迷你趋势卡（点选联动列高亮，GLM-U5 切换式）+ 13 列表格 + eval 子行 + 行过滤
- *  （全部/rollout/eval，localStorage 记忆，旧 pool.iterFilter 键迁移自 view.ts）。 */
+/** MetricsTable.tsx — 抽屉「指标」tab：13 列表格 + eval 子行 + 行过滤（全部/rollout/eval）。
+ *  迁移自旧 MetricsPanel（趋势卡点选/Sparkline 已由 Hero 承接，此处只留表格实体）。 */
 
 import { useState } from 'preact/hooks'
 import {
   filterGroups,
   fmtPct,
-  fmtValue,
   iterGroups,
-  lastFinite,
-  metricSeries,
+  klTone,
+  retTone,
   TC_METRICS_FILTER,
+  winTone,
   type EvalSummary,
   type IterFilter,
   type IterRow,
 } from '../../../ui/view'
-import type { PanelProps } from '../../../ui/view'
+import type { ConsoleStateView } from '../../../ui/view'
 import { Badge } from '../../../ui/components/Pill'
 import { DataTable, type Col } from '../../../ui/components/DataTable'
 import { SegmentedControl } from '../../../ui/components/SegmentedControl'
-import { Sparkline } from '../../../ui/components/Sparkline'
-
-const FILTER_KEY = TC_METRICS_FILTER
-
-function winTone(v: number): 'g' | 'y' | 'r' {
-  if (v >= 0.3) return 'g'
-  if (v >= 0.1) return 'y'
-  return 'r'
-}
-
-function klTone(v: number): 'g' | 'y' | 'r' {
-  if (v > 0.05) return 'r'
-  if (v > 0.02) return 'y'
-  return 'g'
-}
-
-function retTone(v: number): 'g' | 'y' | 'r' {
-  if (v > -0.5) return 'g'
-  if (v > -1.0) return 'y'
-  return 'r'
-}
 
 /** 显示行 = 主行 | eval 子行 的联合（eval only 时只保留子行，与旧 /pool 语义一致）。 */
 type MetricRow =
@@ -94,7 +72,16 @@ const metricCols: Col<MetricRow>[] = [
         <Badge tone={winTone(r.main.winRate)}>{fmtPct(r.main.winRate)}</Badge>
       ) : r.eval.winRate !== null ? (
         <>
-          <Badge tone={winTone(r.eval.winRate)}>{fmtPct(r.eval.winRate)}</Badge>{' '}
+          <Badge
+            tone={winTone(r.eval.winRate)}
+            title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${r.iter} 轮 PPO 更新前 · ${r.eval.games} 局 ${r.eval.wins} 胜 · 全歼 ${r.eval.clears} · outcomes: ${
+              Object.entries(r.eval.outcomes)
+                .map(([k, v]) => `${k}×${v}`)
+                .join(' ') || '-'
+            } · 用时 ${r.eval.sec}s · wver ${r.eval.wver.slice(0, 12)}…`}
+          >
+            {fmtPct(r.eval.winRate)}
+          </Badge>{' '}
           <span className="tc-muted">
             {r.eval.wins}/{r.eval.games}
           </span>
@@ -246,11 +233,11 @@ const metricCols: Col<MetricRow>[] = [
   },
 ]
 
-export function MetricsPanel({ stateView }: PanelProps) {
+export function MetricsTable({ stateView }: { stateView: ConsoleStateView | null }) {
   const [filter, setFilter] = useState<IterFilter>(() => {
     try {
       if (typeof localStorage !== 'undefined') {
-        const v = localStorage.getItem(FILTER_KEY)
+        const v = localStorage.getItem(TC_METRICS_FILTER)
         if (v === 'all' || v === 'rollout' || v === 'eval') return v
       }
     } catch {
@@ -258,51 +245,28 @@ export function MetricsPanel({ stateView }: PanelProps) {
     }
     return 'all'
   })
-  const [highlightCol, setHighlightCol] = useState<string | null>(null)
 
   if (!stateView?.metrics.available) {
-    const err = stateView?.metrics.error
-    return <p className="tc-muted">该课程暂无 training_log.jsonl 数据{err ? `（${err}）` : ''}。</p>
+    return (
+      <p className="tc-muted">
+        该课程暂无 training_log.jsonl 数据
+        {stateView?.metrics.error ? `（${stateView.metrics.error}）` : ''}。
+      </p>
+    )
   }
-
   const rows = stateView.metrics.iters
-  const series = metricSeries(rows)
   const display = buildRows(rows, filter)
   const setFilterPersist = (f: IterFilter): void => {
     setFilter(f)
     try {
-      if (typeof localStorage !== 'undefined') localStorage.setItem(FILTER_KEY, f)
+      if (typeof localStorage !== 'undefined') localStorage.setItem(TC_METRICS_FILTER, f)
     } catch {
       /* ignore */
     }
   }
-
   return (
     <div>
-      <div className="tc-spark-strip">
-        {series.map((m) => {
-          const last = lastFinite(m.vals)
-          const on = highlightCol === m.key
-          return (
-            <button
-              key={m.key}
-              type="button"
-              className={`tc-spark-cell${on ? ' tc-spark-cell--on' : ''}`}
-              aria-pressed={on}
-              aria-label={`高亮 ${m.label} 列`}
-              title="点选联动表格列高亮（再点取消）"
-              onClick={() => setHighlightCol(on ? null : m.key)}
-            >
-              <div className="tc-spark-head">
-                <span>{m.label}</span>
-                <b>{fmtValue(last)}</b>
-              </div>
-              <Sparkline values={m.vals} />
-            </button>
-          )
-        })}
-      </div>
-      <div className="tc-toolbar">
+      <div className="tc-toolbar" style={{ padding: '0 0 8px' }}>
         <SegmentedControl<IterFilter>
           value={filter}
           ariaLabel="行过滤"
@@ -313,11 +277,7 @@ export function MetricsPanel({ stateView }: PanelProps) {
           ]}
           onChange={setFilterPersist}
         />
-        <span className="tc-caption" style={{ border: 'none', padding: 0 }}>
-          存活/击杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，stage+seed
-          去重后留底缓存）；带 ≈ 为估算。 eval 行 = <b>干净评估</b>（greedy 固定语料），iter=N
-          评估的是第 N 轮 PPO 更新前的权重；缺N = 窗口内未收官被清场。
-        </span>
+        <span className="tc-muted tc-small">{rows.length} 轮</span>
       </div>
       <DataTable<MetricRow>
         rows={display}
@@ -326,10 +286,14 @@ export function MetricsPanel({ stateView }: PanelProps) {
         columns={metricCols}
         initialSortKey="iter"
         initialSortDir="desc"
-        highlightCol={highlightCol}
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
       />
+      <p className="tc-caption" style={{ border: 'none', padding: '8px 0 0' }}>
+        存活/击杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，stage+seed
+        去重后留底缓存）；带 ≈ 为估算。 eval 行 = <b>干净评估</b>（greedy 固定语料），iter=N
+        评估的是第 N 轮 PPO 更新前的权重；缺N = 窗口内未收官被清场。
+      </p>
     </div>
   )
 }

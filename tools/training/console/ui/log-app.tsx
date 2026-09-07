@@ -68,7 +68,7 @@ export function LogApp({ initial, options }: LogAppProps) {
     <div>
       <div
         className="tc-topbar"
-        style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0 }}
+        style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: 0, flexDirection: 'row' }}
       >
         <h1>
           <span className="dot" style={{ background: payload.exists ? undefined : 'var(--red)' }} />

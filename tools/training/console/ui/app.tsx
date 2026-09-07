@@ -1,34 +1,45 @@
-/** app.tsx — 控制台根组件（SSR + hydrate）。
+/** app.tsx — 训练控制台根组件（SSR + hydrate；一屏仪表盘布局，DECISIONS §355）。
  *
- *  全局状态只有 5 项（评审 E1 定案，无 Context/signals，两层 props 传递）：
- *  course（随 /api/state）、refreshInterval（全局节奏）、maximizedCard、pendingEdits、connError。
- *  卡片内部状态（排序/过滤/展开/输入/滚动）一律自有 useState，绝不上升。
+ *  布局：顶栏（课程▾ + 训练状态 chips + 刷新间隔 select + ⟳）→ Hero（胜率焦点 + 迷你条）
+ *  → 组件 4 小卡 → 节点 pill 行 → 详情抽屉（指标 | 节点统计 | 日志）→ TrainingLoop 启动弹窗。
  *
- *  polling 优先级（GLM-E6）：dirty(L2) > visibility(后台 tab) > 用户暂停 > 卡折叠；
- *  节奏类：单卡覆盖 tc.interval.<card>（仅独立数据源）> 全局节奏。 */
+ *  交互纪律：无「停止全部」（用户指令）· 无「暂停刷新」按钮（改刷新间隔 select）·
+ *  离线节点默认折叠 · 工具行并入启动弹窗 · 详情一律进右侧抽屉（Esc / ✕ / 遮罩关闭）。
+ *
+ *  polling 优先级（GLM-E6）：visibility(后台 tab) > 刷新间隔；客户端输入均为本地 state，
+ *  3s 轮询不覆盖（不再需要全局 dirty 暂停）。 */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
-import { CARD_REGISTRY, visibleCards, type CardDef, type CardSource } from './cards'
-import type { CardActionDesc } from './cards'
-import { Card } from '../../ui/components/Card'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import { Flash, type FlashState } from '../../ui/components/Flash'
+import { Drawer } from '../../ui/components/Drawer'
 import { PanelErrorBoundary } from '../../ui/components/PanelErrorBoundary'
 import { usePolling } from './lib/usePolling'
 import { fetchState, postAction } from './lib/api-client'
+import { Hero } from './panels/Hero'
+import { ComponentCards } from './panels/ComponentCards'
+import { NodePills } from './panels/NodePills'
+import { MetricsTable } from './panels/MetricsTable'
+import { NodeStats } from './panels/NodeStats'
+import { LogNavCard } from './panels/LogNavCard'
+import { TrainLaunchModal } from './panels/TrainLaunchModal'
 import {
+  fmtPct,
   fmtTs,
-  isDirty,
-  nextRefreshInterval,
-  TC_CARD_KEY,
+  klTone,
+  latestRow,
+  REFRESH_INTERVALS,
   TC_GLOBAL_INTERVAL,
+  winTone,
   type ConsoleStateView,
   type RefreshSec,
-  type StaleState,
+  type ValueTone,
 } from '../../ui/view'
 
 export interface AppProps {
   initial: ConsoleStateView
 }
+
+type DrawerTabKey = 'metrics' | 'nodes' | 'log'
 
 function readLocal(key: string): string | null {
   try {
@@ -47,71 +58,59 @@ function writeLocal(key: string, v: string): void {
   }
 }
 
-function initInterval(): RefreshSec | 'pause' {
+function initInterval(): RefreshSec {
   const v = readLocal(TC_GLOBAL_INTERVAL)
   if (v === '3' || v === '5' || v === '30') return Number(v) as RefreshSec
   return 3
 }
 
-function initCollapsed(): Record<string, boolean> {
-  const out: Record<string, boolean> = {}
-  for (const def of CARD_REGISTRY) {
-    const v = readLocal(TC_CARD_KEY(def.key))
-    out[def.key] = v === null ? (def.defaultCollapsed ?? false) : v === '1'
-  }
-  return out
+/** 顶栏状态 chips 小件。 */
+function Chip({ lbl, val, tone }: { lbl?: string; val: string; tone?: ValueTone | 'a' }) {
+  return (
+    <span className={`tc-cchip${tone ? ` tc-cchip--${tone}` : ''}`}>
+      {lbl ? <span className="lbl">{lbl}</span> : null}
+      <b>{val}</b>
+    </span>
+  )
 }
 
 export function App({ initial }: AppProps) {
   const [stateView, setStateView] = useState<ConsoleStateView | null>(initial)
-  const [stateStale, setStateStale] = useState<StaleState>('ok')
   const [connError, setConnError] = useState<'off' | 'retry' | 'down'>('off')
-  const [refreshInterval, setRefreshInterval] = useState<RefreshSec | 'pause'>(initInterval)
-  const [maximizedCard, setMaximizedCard] = useState<string | null>(null)
-  const [pendingEdits, setPendingEdits] = useState<Map<string, string>>(new Map())
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(initCollapsed)
-  const [transientExpanded, setTransientExpanded] = useState<Set<string>>(new Set())
+  const [refreshInterval, setRefreshInterval] = useState<RefreshSec>(initInterval)
   const [flash, setFlash] = useState<FlashState | null>(null)
-  const [userPaused, setUserPaused] = useState(false)
   const [documentVisible, setDocumentVisible] = useState(
     typeof document === 'undefined' || !document.hidden,
   )
-  const [stopAllArmed, setStopAllArmed] = useState(false)
+  const [drawerTab, setDrawerTab] = useState<DrawerTabKey | null>(null)
+  const [trainOpen, setTrainOpen] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
-  const [poolStale, setPoolStale] = useState<StaleState>('refresh')
-  const [poolAt, setPoolAt] = useState(0)
 
   const wasError = useRef(false)
   const failCount = useRef(0)
-  const stopTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // ── 拉取 /api/state（全局节奏；单次失败 retry，连续 3 次 down） ──
+  // ── 拉取 /api/state（刷新间隔；单次失败 retry，连续 3 次 down） ──
   const refreshState = useCallback(async (): Promise<void> => {
     try {
       const s = await fetchState()
       setStateView(s)
-      setStateStale('ok')
       setConnError('off')
       failCount.current = 0
-      if (wasError.current) setPoolFreshNonce((n) => n + 1) // 连接恢复 → 补拉一次池统计
+      if (wasError.current) setPoolFreshNonce((n) => n + 1)
       wasError.current = false
     } catch {
       wasError.current = true
       failCount.current += 1
-      setStateStale('err')
       setConnError(failCount.current >= 3 ? 'down' : 'retry')
     }
   }, [])
 
-  const dirty = isDirty(pendingEdits)
-  const globalPollEnabled = refreshInterval !== 'pause' && !dirty && !userPaused && documentVisible
   usePolling({
-    enabled: globalPollEnabled,
-    intervalSec: refreshInterval === 'pause' ? 3 : refreshInterval,
+    enabled: documentVisible,
+    intervalSec: refreshInterval,
     fetch: refreshState,
   })
 
-  // 后台 tab：切回前台立即重拉一次
   useEffect(() => {
     const onVis = (): void => {
       const vis = !document.hidden
@@ -122,28 +121,21 @@ export function App({ initial }: AppProps) {
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [refreshState])
 
-  // 键盘：Esc 退出最大化；r 立即刷新全部（输入框聚焦时禁用）
+  // 键盘：Esc 依次关 TrainingLoop 弹窗 / 抽屉；r 立即刷新（输入框聚焦时禁用）
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
-      if (e.key === 'Escape') setMaximizedCard(null)
-      else if (e.key.toLowerCase() === 'r') {
+      if (e.key === 'Escape') {
+        setTrainOpen(false)
+        setDrawerTab(null)
+      } else if (e.key.toLowerCase() === 'r') {
         void refreshState()
-        setPoolFreshNonce((n) => n + 1)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [refreshState])
-
-  // 最大化时 body 锁滚动
-  useEffect(() => {
-    document.body.style.overflow = maximizedCard ? 'hidden' : ''
-    return () => {
-      document.body.style.overflow = ''
-    }
-  }, [maximizedCard])
 
   // ── 动作派发（POST → flash → 重拉 state） ──
   const doAction = useCallback(
@@ -156,113 +148,51 @@ export function App({ initial }: AppProps) {
     [refreshState],
   )
 
-  // 卡级动作装配（DS-E2）：source 映射 exhaustive（DS-E5），新增 source 缺实现编译报错
-  const refreshBySource = useMemo((): Record<CardSource, () => void> => {
-    return {
-      state: () => void refreshState(),
-      pool: () => setPoolFreshNonce((n) => n + 1),
-      log: () => undefined,
-    }
-  }, [refreshState])
-
-  const handleCardAction = (def: CardDef, desc: CardActionDesc): void => {
-    if (desc.key === 'refresh') refreshBySource[def.source]()
-    else if (desc.key === 'poolFresh') setPoolFreshNonce((n) => n + 1)
+  const handleLaunch = async (mode: 'pull' | 'push' | 'local'): Promise<void> => {
+    setTrainOpen(false)
+    await doAction('preset', { mode })
   }
 
-  // ── L2 dirty（唯一控件：节点并发数） ──
-  const onPending = (key: string, value: string): void => {
-    setPendingEdits((prev) => {
-      const n = new Map(prev)
-      n.set(key, value)
-      return n
-    })
-  }
-  const onDiscardPending = (): void => setPendingEdits(new Map())
-  const onCommitConcurrency = async (id: string, value: string): Promise<void> => {
-    const num = Number(value)
-    if (!Number.isInteger(num) || num < 1 || num > 64) {
-      setFlash({ ok: false, message: `并发数需为 1-64 的整数，收到: ${value}` })
-      return
-    }
-    const r = await doAction('setNodeConcurrency', { id, concurrency: num })
-    if (r.ok) onDiscardPending()
-  }
-
-  // ── 停止全部（两步内联确认，3s 超时还原；DS-U2） ──
-  const handleStopAll = (): void => {
-    if (!stopAllArmed) {
-      setStopAllArmed(true)
-      stopTimer.current = setTimeout(() => setStopAllArmed(false), 3000)
-      return
-    }
-    if (stopTimer.current) clearTimeout(stopTimer.current)
-    setStopAllArmed(false)
-    void doAction('stopAll')
-  }
-
-  // ── 折叠 / 锚点临时展开（DS-U4：锚点只临时展开，不写 localStorage） ──
-  const toggleCollapsed = (key: string, dflt: boolean): void => {
-    setTransientExpanded((prev) => {
-      const n = new Set(prev)
-      n.delete(key)
-      return n
-    })
-    setCollapsed((prev) => {
-      const next = !(prev[key] ?? dflt)
-      writeLocal(TC_CARD_KEY(key), next ? '1' : '0')
-      return { ...prev, [key]: next }
-    })
-  }
-  const anchorTo = (key: string): void => {
-    setTransientExpanded((prev) => new Set(prev).add(key))
-    document.getElementById(`card-${key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
-
-  // ── 陈旧度（nodes 卡 = 池节奏；其余 = state 节奏；title 用服务端时间戳保 SSR 确定） ──
-  const onPoolState = useCallback((st: StaleState, at: number): void => {
-    setPoolStale(st)
-    if (at > 0) setPoolAt(at)
-  }, [])
-  const staleFor = (def: CardDef): { state: StaleState; title?: string } => {
-    if (def.key === 'nodes')
-      return {
-        state: poolStale,
-        title: poolAt > 0 ? `池更新于 ${fmtTs(poolAt, poolAt)}` : undefined,
-      }
-    const t = stateView ? new Date(stateView.time).getTime() : 0
-    return { state: stateStale, title: t > 0 ? `更新于 ${fmtTs(t, t)}` : undefined }
-  }
-
+  // ── 顶栏状态 chips（最新迭代口径） ──
   const course = stateView?.course ?? ''
-  const buses = visibleCards(course)
-
-  const handleInterval = (): void => {
-    setRefreshInterval((cur) => {
-      const nxt = nextRefreshInterval(cur)
-      writeLocal(TC_GLOBAL_INTERVAL, String(nxt))
-      return nxt
-    })
-  }
+  const iters = stateView?.metrics.iters ?? []
+  const head = latestRow(iters)
+  const headChips = head
+    ? [
+        <Chip key="it" lbl="it" val={String(head.iter)} tone="a" />,
+        <Chip key="ro" lbl="rollout" val={`${head.rolloutSec.toFixed(0)}s`} />,
+        <Chip key="ppo" lbl="ppo" val={`${head.ppoSec.toFixed(0)}s`} />,
+        <Chip key="wr" lbl="胜率" val={fmtPct(head.winRate)} tone={winTone(head.winRate)} />,
+        <Chip
+          key="kills"
+          lbl="击杀"
+          val={head.actuals ? `${head.actuals.totalKills}/${head.actuals.games}局` : '—'}
+        />,
+        head.evalData && head.evalData.winRate !== null ? (
+          <Chip
+            key="ev"
+            lbl="eval"
+            val={fmtPct(head.evalData.winRate)}
+            tone={winTone(head.evalData.winRate)}
+          />
+        ) : null,
+        <Chip key="kl" lbl="KL" val={head.kl.toFixed(4)} tone={klTone(head.kl)} />,
+        <Chip key="ent" lbl="熵" val={head.entropy.toFixed(3)} />,
+      ].filter(Boolean)
+    : [
+        <Chip
+          key="none"
+          val={stateView && stateView.metrics.available === false ? '本课程暂无迭代记录' : '—'}
+        />,
+      ]
 
   return (
     <div className="tc-wrap">
       <Flash flash={flash} onHide={() => setFlash(null)} />
 
       <header className="tc-topbar">
-        <h1>
-          <span className="dot" />
-          NN 训练控制台
-        </h1>
-        <nav className="tc-topbar__anchors" aria-label="卡片锚点">
-          {buses.map((d) => (
-            <button key={d.key} type="button" className="tc-anchor" onClick={() => anchorTo(d.key)}>
-              {d.title}
-            </button>
-          ))}
-        </nav>
-        <div className="tc-topbar__right">
-          <label className="tc-toggle tc-small">
+        <div className="tc-status">
+          <label className="tc-toggle tc-small" style={{ margin: 0 }}>
             课程
             <select
               id="courseSel"
@@ -280,57 +210,50 @@ export function App({ initial }: AppProps) {
               ))}
             </select>
           </label>
-          <button
-            type="button"
-            className="tc-btn tc-btn--sm"
-            aria-label="立即刷新全部 (r)"
-            onClick={() => {
-              void refreshState()
-              setPoolFreshNonce((n) => n + 1)
-            }}
-          >
-            ⟳
-          </button>
-          <button
-            type="button"
-            className={`tc-btn tc-btn--sm${refreshInterval === 'pause' ? ' tc-btn--danger' : ''}`}
-            aria-pressed={refreshInterval === 'pause'}
-            title="暂停后不再自动轮询 /api/state"
-            onClick={handleInterval}
-          >
-            {refreshInterval === 'pause' ? '▶ 已暂停·UI' : `⏸ 暂停刷新（${refreshInterval}s）`}
-          </button>
-          <button
-            type="button"
-            className={`tc-stopall${stopAllArmed ? ' tc-stopall--arm' : ''}`}
-            aria-label="停止全部受管进程（危险）"
-            onClick={handleStopAll}
-          >
-            {stopAllArmed ? '确认停止全部？' : '停止全部'}
-          </button>
-          <span className="tc-topbar__ts">
-            {stateView ? `更新于 ${fmtTs(new Date(stateView.time).getTime(), Date.now())}` : ''}
-          </span>
+          {headChips}
+        </div>
+        <div className="tc-topbar__row">
+          <h1>
+            <span className="dot" />
+            NN 训练控制台
+          </h1>
+          <div className="tc-topbar__right">
+            <label className="tc-toggle tc-small">
+              刷新
+              <select
+                className="tc-sel"
+                aria-label="刷新间隔"
+                value={refreshInterval}
+                onChange={(e) => {
+                  const v = Number((e.target as HTMLSelectElement).value) as RefreshSec
+                  setRefreshInterval(v)
+                  writeLocal(TC_GLOBAL_INTERVAL, String(v))
+                }}
+              >
+                {REFRESH_INTERVALS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}s
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              aria-label="立即刷新全部 (r)"
+              onClick={() => {
+                void refreshState()
+                setPoolFreshNonce((n) => n + 1)
+              }}
+            >
+              ⟳
+            </button>
+            <span className="tc-topbar__ts">
+              {stateView ? `更新于 ${fmtTs(new Date(stateView.time).getTime(), Date.now())}` : ''}
+            </span>
+          </div>
         </div>
       </header>
-
-      {userPaused ? (
-        <div className="tc-banner tc-banner--dirty">
-          <span>▶ 已暂停·UI（已暂停刷新）——点击恢复自动轮询</span>
-          <button type="button" className="tc-btn tc-btn--sm" onClick={() => setUserPaused(false)}>
-            恢复
-          </button>
-        </div>
-      ) : null}
-
-      {dirty ? (
-        <div className="tc-banner tc-banner--dirty">
-          <span>已暂停：节点并发数有未保存修改（失焦自动丢弃；保存按钮提交本控件）</span>
-          <button type="button" className="tc-btn tc-btn--sm" onClick={onDiscardPending}>
-            丢弃修改
-          </button>
-        </div>
-      ) : null}
 
       {connError !== 'off' ? (
         <div className="tc-banner tc-banner--err" role="alert">
@@ -345,50 +268,58 @@ export function App({ initial }: AppProps) {
         </div>
       ) : null}
 
-      {buses.map((def) => {
-        const isMax = maximizedCard === def.key
-        const colDflt = def.defaultCollapsed ?? false
-        const col = collapsed[def.key] ?? colDflt
-        const isCol = col && !transientExpanded.has(def.key)
-        const P = def.component
-        return (
-          <Card
-            key={def.key}
-            id={`card-${def.key}`}
-            title={def.title}
-            sub={def.key === 'metrics' ? course || undefined : undefined}
-            stale={staleFor(def)}
-            collapsed={isCol}
-            maximized={isMax}
-            onToggleCollapsed={() => toggleCollapsed(def.key, colDflt)}
-            onToggleMaximized={() => setMaximizedCard(isMax ? null : def.key)}
-            actions={def.actions?.map((a) => ({ ...a, run: () => handleCardAction(def, a) }))}
-          >
-            <PanelErrorBoundary>
-              <P
-                course={course}
-                stateView={stateView}
-                active={!isCol && !dirty && !userPaused}
-                paused={dirty || userPaused || !documentVisible}
-                maximizedCard={maximizedCard}
-                onAction={doAction}
-                onPoolState={onPoolState}
-                poolFreshNonce={poolFreshNonce}
-                pendingEdits={pendingEdits}
-                onPending={onPending}
-                onDiscardPending={onDiscardPending}
-                onCommitConcurrency={onCommitConcurrency}
-              />
-            </PanelErrorBoundary>
-          </Card>
-        )
-      })}
+      <PanelErrorBoundary>
+        <Hero stateView={stateView} onMore={() => setDrawerTab('metrics')} />
+      </PanelErrorBoundary>
+
+      <PanelErrorBoundary>
+        <ComponentCards
+          stateView={stateView}
+          onAction={doAction}
+          onLaunchTrainer={() => setTrainOpen(true)}
+        />
+      </PanelErrorBoundary>
+
+      <PanelErrorBoundary>
+        <NodePills
+          nodes={stateView?.nodes ?? []}
+          onAction={doAction}
+          onMore={() => setDrawerTab('nodes')}
+        />
+      </PanelErrorBoundary>
 
       <p className="tc-caption">
-        仅回环 127.0.0.1 无鉴权（DECISIONS §348）· /api/state 3s 轮询（无整页 reload）· 池统计独立
-        /api/pool（默认 5 分钟，折叠/最大化节点卡即暂停拉取）· 动作 POST 后立即重拉 · 快捷键： Esc
-        退出最大化 · r 立即刷新全部。
+        仅回环 127.0.0.1 无鉴权（DECISIONS §348）· /api/state {refreshInterval}s 轮询 · 池统计独立
+        /api/pool（抽屉内 5 分钟） · 详情进右侧抽屉 · Esc 关闭弹窗/抽屉 · r 立即刷新全部。
       </p>
+
+      <Drawer
+        open={drawerTab !== null}
+        activeTab={drawerTab ?? 'metrics'}
+        tabs={[
+          { key: 'metrics', label: '指标' },
+          { key: 'nodes', label: '节点统计' },
+          { key: 'log', label: '日志' },
+        ]}
+        onTab={(k) => setDrawerTab(k as DrawerTabKey)}
+        onClose={() => setDrawerTab(null)}
+      >
+        {drawerTab === 'metrics' ? <MetricsTable stateView={stateView} /> : null}
+        {drawerTab === 'nodes' ? <NodeStats enabled poolFreshNonce={poolFreshNonce} /> : null}
+        {drawerTab === 'log' ? <LogNavCard stateView={stateView} /> : null}
+      </Drawer>
+
+      {stateView ? (
+        <TrainLaunchModal
+          open={trainOpen}
+          modes={stateView.modes}
+          onClose={() => setTrainOpen(false)}
+          onAction={doAction}
+          onLaunch={(m) => void handleLaunch(m)}
+        />
+      ) : null}
     </div>
   )
 }
+
+void null

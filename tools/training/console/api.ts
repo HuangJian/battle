@@ -268,6 +268,8 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
       log: logRel,
       logTail: logRel ? logTail(logRel) : [],
       busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
+      // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
+      ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
     })
   }
   return views

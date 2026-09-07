@@ -26,6 +26,8 @@ export interface ComponentView {
   log: string | null
   logTail: string[]
   busy: boolean
+  /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。回环无鉴权页可接受。 */
+  secret?: string
 }
 
 export interface NodeView {
@@ -329,6 +331,35 @@ export function lastFinite(vals: number[]): number | null {
 export function fmtValue(v: number | null): string {
   if (v === null) return '—'
   return Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(1)
+}
+
+// ────────────────────────── 纯函数：最新轮 / 色调（顶栏状态条 + 指标卡共用） ──────────────────────────
+
+/** 最新一轮迭代（按 iter 最大；空 = null）。固定头部状态条的单一数据口径。 */
+export function latestRow(iters: IterRow[]): IterRow | null {
+  let best: IterRow | null = null
+  for (const r of iters) if (!best || r.iter > best.iter) best = r
+  return best
+}
+
+export type ValueTone = 'g' | 'y' | 'r'
+
+export function winTone(v: number): ValueTone {
+  if (v >= 0.3) return 'g'
+  if (v >= 0.1) return 'y'
+  return 'r'
+}
+
+export function klTone(v: number): ValueTone {
+  if (v > 0.05) return 'r'
+  if (v > 0.02) return 'y'
+  return 'g'
+}
+
+export function retTone(v: number): ValueTone {
+  if (v > -0.5) return 'g'
+  if (v > -1.0) return 'y'
+  return 'r'
 }
 
 // ────────────────────────── 纯函数：指标行过滤（DS-U1 13 列 + eval 子行） ──────────────────────────

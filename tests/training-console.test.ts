@@ -251,7 +251,8 @@ describe('console local×stream 假互斥移除 (DECISIONS §351 bug 2)', () => 
     const html = render.renderConsolePage(s)
     expect(html).not.toContain('需 rl.stream=0')
     expect(html).not.toContain('本地 PPO 互斥')
-    expect(html).toContain('stream 流式派发')
+    // stream 开关已收入 TrainingLoop 启动弹窗（SSR 首帧不渲染）
+    expect(html).not.toContain('启动 TrainingLoop')
   })
 })
 
@@ -260,11 +261,14 @@ describe('console SSR renderConsolePage', () => {
     const s = await api.buildStateView()
     const html = render.renderConsolePage(s)
     expect(html).toContain('NN 训练控制台')
-    expect(html).toContain('启动') // 组件卡动作按钮（aria-label 语义）
-    expect(html).toContain('tc-preset') // 运行模式预设
-    expect(html).toContain('rl.double_buffer') // 行为开关键名
-    expect(html).toContain('并行采集数') // 节点卡控制视图
-    expect(html).toContain('训练指标')
+    expect(html).toContain('tc-cc__name') // 组件小卡（名称渲染体）
+    expect(html).toContain('tc-hero') // 训练状态 hero
+    expect(html).toContain('tc-comps') // 组件 4 小卡
+    expect(html).toContain('tc-npill') // 节点 pill 行
+    expect(html).toContain('训练状态') // hero aria-label
+    // 详情抽屉 / TrainingLoop 启动弹窗默认不渲染（SSR 首帧；tc-drawer 类名在 CSS，用 <aside 判定）
+    expect(html).not.toContain('<aside class="tc-drawer"')
+    expect(html).not.toContain('启动 TrainingLoop')
     // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
   })
@@ -304,14 +308,12 @@ describe('console sparkline (ui/view)', () => {
     expect(pairs.length).toBe(2)
   })
 
-  it('指标表渲染 sparkline 概览条（有数据课程）', async () => {
+  it('hero 渲染胜率趋势 sparkline（有数据课程）', async () => {
     const s = await api.buildStateView()
     const html = render.renderConsolePage(s)
-    expect(html).toContain('spark-strip')
-    expect(html).toContain('spark-cell')
+    expect(html).toContain('tc-hero')
     if (s.metrics.available && s.metrics.iters.length > 0) {
       expect(html).toContain('<svg class="spark"')
-      expect(html).toContain('eval 胜率')
     }
   })
 
@@ -354,10 +356,9 @@ describe('console sparkline (ui/view)', () => {
       },
     }
     const html = render.renderConsolePage(s)
-    // 30 轮输入、eval 全空（NaN）→ 4 条有限序列有 polyline，eval 列为占位符
+    // 30 轮输入 → hero 只画近 20 轮 winRate sparkline：1 条 polyline、点数 ≤20
     const polylines = html.match(/<polyline/g) ?? []
-    expect(polylines.length).toBe(4)
-    expect(html).toContain('eval 胜率')
+    expect(polylines.length).toBe(1)
     for (const seg of html.split('<polyline').slice(1)) {
       const pts = seg.split('/>')[0]!.match(/[\d.]+,[\d.]+/g) ?? []
       expect(pts.length).toBeLessThanOrEqual(20)

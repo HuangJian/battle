@@ -1,7 +1,10 @@
-/** Card.tsx — 卡片容器：header（标题+副徽章+卡级动作+折叠/最大化图标）+ 折叠体 + footer。
+/** Card.tsx — 卡片容器：header（标题 + 摘要徽章 + 卡级动作 + 折叠/最大化图标）+ 折叠体 + footer。
  *
+ *  紧凑化契约（用户指令 2026-09-07）：卡片默认只露 header——header 内 title + summary
+ *  （状态徽章 = 基本信息）常驻；点击 header 主体任意处展开/收起完整内容（角色=button，
+ *  aria-expanded），右上角 ⌄ 按钮同语义。摘要徽章始终可见（折叠态信息不丢）。
  *  折叠/最大化状态由 App 层持有（localStorage 持久化折叠；最大化不持久化），
- *  header 右侧两枚图标按钮必带 aria-label（GLM-U7），卡级动作统一在此渲染（DS-E2）。
+ *  图标按钮必带 aria-label（GLM-U7），卡级动作统一在此渲染（DS-E2）。
  */
 
 import type { ComponentChildren } from 'preact'
@@ -26,6 +29,8 @@ export interface CardProps {
   id?: string
   title: string
   sub?: ComponentChildren
+  /** 摘要徽章（基本信息，折叠/展开均可见）：组件运行数 / 模式 / 节点在线 / 最新迭代状态等。 */
+  summary?: ComponentChildren
   /** 陈旧度（数据源最近拉到的时间点）。 */
   stale?: { state: StaleState; title?: string } | null
   collapsed: boolean
@@ -42,6 +47,7 @@ export function Card({
   id,
   title,
   sub,
+  summary,
   stale,
   collapsed,
   maximized,
@@ -60,10 +66,21 @@ export function Card({
       data-card={title}
     >
       <header className="tc-card__hd">
-        <h2 className="tc-card__title">
-          {title}
-          {sub ? <span className="tc-card__sub"> — {sub}</span> : null}
-        </h2>
+        <div
+          className="tc-card__main"
+          role="button"
+          tabIndex={0}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? `展开 ${title}` : `折叠 ${title}`}
+          title={collapsed ? '点击展开完整内容' : '点击折叠'}
+          onClick={onToggleCollapsed}
+        >
+          <h2 className="tc-card__title">
+            {title}
+            {sub ? <span className="tc-card__sub"> — {sub}</span> : null}
+          </h2>
+          {summary ? <div className="tc-card__summary">{summary}</div> : null}
+        </div>
         <div className="tc-card__actions">
           {stale ? <StaleDot state={stale.state} title={stale.title} /> : null}
           {actions.map((a) => (

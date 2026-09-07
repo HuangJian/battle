@@ -2889,6 +2889,21 @@ buildStateView().course === actionCtx({}).course（显示=动作同源不变量�
 - 启动：停 fast → 控制台 setCourse p4-wdmg（API 直调，下拉框要到 it1 落账后出现）
   → Pull 预设。切课程必重启 hub-server。
 
+**补记（2026-09-07，it15）：**①熵 tripwire 加连续 2 轮要求——it13 单轮 -0.054
+触发后 it14–15 自恢复，证伪"单轮即结构"的隐含假设；机械回滚会误伤 climbing
+曲线。内建 F4（相对崩塌＋8 轮口径）不受影响。②R5 立案：value 冻 ~6–7 vs
+mean_ret 转负，结构性错配实锤 → wDmg 证伪后的下一候选定为 value-head 处理。
+③it15 贪心 11/100：弱阳性（3/3 压 fast 一头但绝对值 ≤11%），继续跑满 40 轮
+（~2 分钟/轮，信息便宜），不提前停。
+
+**补记（2026-09-07，it40 verdict）：wDmg 证伪。**贪心 8 点 7/9/11/9/3/5/4/6
+（max 11，≤30% 线触发证伪）。行为学结论：死亡 70（最低）＋超时 24（最高）——
+wDmg×2 教会超时苟活而非杀敌，惩罚死亡≠学会杀敌。淘汰出局：视野（horizon 31轮
+≤27%）/规模（fast 25轮≤9%）/步长（3e-4试探零效应）/死亡价格（wdmg 40轮≤11%）
+四连败。下一棒次：p2 腿（§354 门已过）→ R5 value-head（p2 数据 informed，见
+p2-vs-R5 分析）。三臂对照遗产：同一起点 it70 上，reward/规模/视野三变量已清零，
+剩难度（课程）与机制（critic）二选一。
+
 ## §353 / 训练控制台 Preact 化（plan/Training-Console-Preact.md v3.3 执行，2026-09-07）
 
 执行 plan §1–§4 全量 + §3.4 中 monitor/ 迁入部分（远端下线留待 P3.5）；主游戏零影响。
@@ -2938,3 +2953,106 @@ buildStateView().course === actionCtx({}).course（显示=动作同源不变量�
 **废止/修订**：§341（/pool 页面热加载——页面已随监控下线退役，agent 仍保留 mtime
 动态 import 语义作过渡）；§346 定案 5「不引 vite/svelte」范围收窄为"主游戏 src/
 无框架"（本地工具页允许 preact）；§348 页面实现（服务端拼串 → Preact SSR）。
+
+## §354 / p2-step 诊断台阶：1敌→4敌步子太大？（2026-09-07，用户指令）
+
+背景：p4-wdmg 不乐观（it15 贪心 11/100）→ 用户问 p1(94%)→p4(14%) 步子是否太大。
+支持：BC 单敌 94%→4 敌 14%（-80pp）vs God 92%→64%（-28pp），多目标交战结构性缺失；
+p4-BC 45 ckpt 全程 ≤20%（连 dense-label 蒸馏都爬不出）；4 向火力下 1 命活不过 2–3 发，
+competent 行为拿不到 reward 样本（R5 噪声故事的另一半）。反方：p2 成功≠p4 得救
+（transfer 是第二个未验证假设）；若天花板在容量/value-head，p2 只是搬平台。
+定位：诊断性台阶，非新主线——R5/wdmg 照常，不 blocked。
+
+决策：建 `p2-step.jsonc`（由 p4-horizon 逐字节派生，仅改 3 处：name、count 4→2、
+dirs→tmp/p2-step；几何/出生点/forces 串/difficulty/1命/max_ticks/reward 全同义——
+count 语义经 World.ts:504-505 核实：spawn 队列取前 count 种，forces "abcd…" 故为
+basic(TL)＋fast(TR)，perc-敌人变量干净隔离）。reward 沿用 horizon 版
+（探针贪心 eval 不消费 reward；RL 腿超参待门控结果再定，本条目不授权 RL）。
+
+探针协议（零训练成本，CPU only，wdmg 不停）：同工具
+`tools/sim/eval-course-ckpt.ts`，BC ep60（tmp/ep60/...ckpt.60）×100 ＋
+`--policy god` ×100，同 seeds 配对，行数据落 `tmp/p2-probe-*.jsonl`。
+预注册门：BC≥50% 且 God≥85% → 台阶存在，开 RL 腿（另起条目）；BC<30% → 步子
+假说死，回 R5 主线；30–50% 灰区再议。eval 高峰与 wdmg rollout 错峰（worker 池
+争用只是变慢，不污染）。
+
+## §355 / p3-step 诊断台阶补完：悬崖在 2→3 还是 3→4？（2026-09-07，用户指令）
+
+背景：p2 探针门通过（BC 67/God 85，§7）→ 用户要补 p3（3 敌）看悬崖位置。
+决策：同 §354 套路，由 p4-horizon 逐字节派生 `p3-step.jsonc`（仅改 name/count 4→3/
+dirs；语义 basic TL＋fast TR＋power BR），BC ep60 ×100 ＋ God ×100 配对探针。
+预注册判读：BC 单调 p2(67)>p3>p4(14) 为台阶成立；p3≈60 → 悬崖在 3→4（p3 腿亦可开）；
+p3≈20 → 悬崖在 2→3（p2 是最后一个可学台阶，p3 腿不开）；God p3≥75% 为教师侧 sanity。
+RL 腿一律另起条目，本条目只授权探针。
+
+## §354 / 控制台 UI 紧凑化三项调整（2026-09-07，用户指令；纯客户端，零进程影响）
+
+1. **固定头部训练状态条**：粘性顶栏第一行 = 课程下拉 + 最新迭代口径 chips（itN ·
+   rollout/ppo 秒 · 胜率（色调双编码）· 击杀 x/y局（actuals，缺省 —）· eval · KL · 熵），
+   数据源 /api/state.metrics 最新迭代（view.latestRow 单一口径），3s 轮询自然更新。
+2. **卡片紧凑化默认**：全卡 defaultCollapsed=true；header 增 summary 徽章区（运行数/
+   模式/节点在线/最新迭代/日志数）折叠态常驻可见；点击 header 主体任意处展开/收起
+   （role=button + aria-expanded，右上角 ⌄ 同语义）；localStorage tc.card.<id> 偏好语义不变。
+3. **worker_server 移出组件栏**：本机伪 GPU 节点仅随「推送链路预演」瞬态起停，组件表与
+   日志导航均隐藏（ComponentsPanel/LogNavCard 过滤 + 脚注说明）；服务端 ALL_COMPONENTS/
+   /log/workerServe 端点不变（数据层零改动）。
+
+验证：tsc 绿；bundle 禁词/gzip 门禁过（app gzip 约 100KB）；SSR（含状态条/摘要徽章/
+workerServe 隐藏断言）与纯函数（latestRow）单测通过；bun run check + build 收尾。
+运行中控制台（10:50 快照进程）客户端 bundle 已即时重建生效（F5 可见）；SSR 侧待下次
+重启进入新形态（过渡态 hydrate 自愈，无功能影响）。
+
+## §355 / 控制台 UI 重设计：一屏仪表盘 + 抽屉 + 启动弹窗（2026-09-07，用户拍板草图后实施）
+
+用户在稠密卡片流上拍板「重点不突出、交互繁杂」，经三张交互草图（首页布局/组件小卡三态/右侧抽屉）与
+三处决议（点击卡=展开详情、详情=右侧抽屉、接受草图）后重做布局；随后补充 5 条修正（去停止全部/刷新
+间隔 select/cloudflared 复制/离线节点折叠/启动弹窗）一并实施。
+
+**新布局（一屏原则，删五卡堆叠）**：
+1. 顶栏：课程▾ + 训练状态 chips（itN/rollout/ppo/胜率/eval/KL/熵，latestRow 口径）+ 刷新间隔 select
+   （3/5/30s，替代旧「暂停刷新」按钮）+ ⟳ + 更新时刻。**「停止全部」删除**（服务端 stopAll 路由保留）。
+2. Hero（唯一焦点）：胜率大数字（红/绿色调）+ 近 20 轮 sparkline + 最近 5 轮迷你条 + 「完整指标表 ›」进抽屉。
+3. 组件 4 小卡：点击卡=展开详情（PID/日志尾行/endpoint）；主按钮随状态换身（未启动=品牌色「启动」、
+   运行中=「停止」+冒烟/日志小图标、busy 黄点锁定）。**cloudflared 常态缩略 endpoint + auth key
+   （ComponentView.secret 新字段，仅 cloudflared 填 remote_token），各带 CopyButton 复制**。
+4. 节点 pill 行：在线 pill（id + ✓并发）点击就地编辑并发/启用/冒烟；**离线/停用默认折叠成计数 pill**
+   「离线 N · 停用 M ▸」点击展开；「节点统计 ›」进抽屉。
+5. 详情 = 右侧抽屉三 tab（指标 = MetricsTable 13 列+过滤；节点统计 = NodeStats /api/pool 独立节奏；
+   日志 = LogNav）；Esc/✕/遮罩关闭，主界面不动。抽屉/弹窗 SSR 首帧不渲染（open 态才 mount）。
+6. **工具行并入 TrainingLoop 启动弹窗**：TrainLaunchModal（Pull/Push/Local 模式 Segmented +
+   stream/双缓冲/预采即时开关 + 推送链路预演入口 + 启动/取消）；TrainingLoop 卡「启动」打开弹窗，选模式后走 preset。
+
+**清理**：cards.ts 卡片注册表与 Components/Modes/Nodes/Metrics 四旧面板删除（MetricsTable 承接指标表、
+NodeStats 承接池统计、NodePills 承接控制）；删除卡折叠/最大化/锚点/摘要徽章/停止全部逻辑。
+
+**服务端**：仅 ComponentView.secret 一个字段（回环无鉴权页可展示 token，供用户复制贴给远端）；
+/api/state /api/pool /actions 零改动。
+
+验证：tsc 零错误；bundle 禁词/gzip 门禁过；SSR 断言更新（hero/小卡/pill/抽屉不渲染体）；console
+测试 56 pass；bun run check + build 收尾。运行中控制台客户端 bundle 即时重建（F5 生效），SSR 待重启。
+
+## §356 / p2-step RL 腿启动（2026-09-07，wdmg it40 证伪后，用户直接启动）
+
+背景：wdmg 40 轮证伪（§6 verdict）→ 按序列开 p2 腿。p2-step.jsonc（§354）＋
+提案条款（ep60 热启动/horizon reward/规模/≥75×2 晋升）此前均已备好，但本条目
+是事后补记——启动先于授权（§6.3 程序瑕疵，认）。
+
+如实记录 as-run 参数（与提案的唯一偏差）：warm-start 用的是课程文件自带的
+**it70**（`p4-onset.it70.20260906-115550.json`），不是提案的 ep60。后果：
+BC 67% 参考系不适用本腿；本腿基线以 it5 贪心 eval 为准（it70 在 p2 上的水平
+从未探过）。其余合规：stream=0（§6.5 约束兑现）/epochs 4/mb 512/lr 1.5e-4/
+local CPU/seed_rotate 150（run_start 已验）。
+it1 落账：rollout 42%（63/150，死 32/超时 55——超时偏高，it70 打法偏慢），
+kl=0.433（fresh-Adam 瞬态，老食谱），entropy 0.403，value 11.39 vs mean_ret 5.69
+（dip 进行中），ppo 671s（CPU 实测，horizon 档一致）。
+晋升门维持（连续 2 eval ≥75→p3），附注：若 it70 系起点 it5 即≥75，则本腿瞬间
+毕业——同样是有效结论（p4 特化权重零样本统治 p2 → transfer 上行容易），届时
+直接转 p3 腿 authentic。
+
+**补记（2026-09-07，bc 修正＋pilot 隔离）：**用户重跑指令——warm-start 改回提案
+ep60（探针权重，67% 参考系生效）。课程 bc 已改＋校验通过。it70 系 it1–3 为
+pilot 数据，隔离映射：`tmp/p2-step/` → `tmp/p2-step-it70pilot/`、
+`nn-training/weights/p2-step/` → `nn-training/weights/p2-step-it70pilot/`
+（隔离须在停 loop 后执行，运行中 mv 会撕裂落盘）。ep60 腿全新启用 canonical
+路径（it 计数从 1 起，无 lineage 混杂）。教训：课程 bc 字段即 warm-start 决策，
+探针权重≠课程默认——建课时就该对齐，事后隔离是补救。

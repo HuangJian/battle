@@ -27,6 +27,7 @@ import {
   isDirty,
   iterGroups,
   keywordMatch,
+  latestRow,
   LEGACY_KEY_RULES,
   migrateLegacyKey,
   nextRefreshInterval,
@@ -165,6 +166,11 @@ describe('view 指标行分组 / 过滤 / 排序（DS-U1 13 列 + eval 子行语
     expect(ev[0]!.iter).toBe(4)
   })
 
+  it('latestRow：空 → null；取最大 iter（固定头部状态条口径）', () => {
+    expect(latestRow([])).toBeNull()
+    expect(latestRow([fakeRow(3), fakeRow(9), fakeRow(5)])!.iter).toBe(9)
+  })
+
   it('sortRows：数值优先 + null 沉底 + 字符串 localeCompare', () => {
     const rows = [{ k: 3 }, { k: 1 }, { k: 2 }]
     expect(sortRows(rows, 'k', 'asc').map((r) => r.k)).toEqual([1, 2, 3])
@@ -289,10 +295,20 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     expect(html).toContain('NN 训练控制台')
     expect(html).toContain('window.__INITIAL__')
     expect(html).toContain('自动（最近活跃课程）')
-    expect(html).toContain('data-card=') // 卡注册表驱动
+    expect(html).toContain('tc-cc') // 组件小卡驱动
     expect(html).toContain('/app.js')
     expect(html).not.toContain('location.reload()') // 无整页 reload（§4.5）
     expect(html).not.toContain('<script>alert')
+    // 固定头部训练状态条 + 一屏仪表盘结构（DECISIONS §355）
+    expect(html).toContain('tc-status')
+    expect(html).toContain('tc-hero')
+    expect(html).toContain('tc-comps')
+    expect(html).toContain('tc-npill')
+    // worker_server（冒烟瞬态）不进渲染体
+    expect(html).not.toContain('<span class="tc-cc__name">workerServe')
+    // 详情抽屉 / 弹窗 SSR 首帧不渲染（tc-drawer 类名在 CSS，用渲染体判定）
+    expect(html).not.toContain('<aside class="tc-drawer"')
+    expect(html).not.toContain('启动 TrainingLoop')
   })
 })
 
