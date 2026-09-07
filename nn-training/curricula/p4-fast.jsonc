@@ -1,0 +1,111 @@
+// 课程 p4-fast —— 加速变体（DECISIONS §350，2026-09-07：GPU 吃满 + 语料×2）
+//
+// 由 p4-horizon.jsonc 逐字节派生（§15.5 新实验：fresh out/traj，不 resume 旧 run），
+// 仅改动以下 4 处，其余（地图/敌编/reward/γ0.998/λ0.99/schedule/eval/mb/workers/bc）
+// 与 p4-horizon 完全同义——隔离"加速"变量：
+//   1. seed_rotate: 150 → 300（语料×2，~52k 样本/轮，chunks ~100，常驻显存 ~2G，
+//      仍远低于 15G；采集墙钟由集群吸收）
+//   2. epochs: 4 → 8（200→~800 梯度步/轮，ppo 90s→~360s，GPU 算力换样本复用）
+//   3. name: p4-horizon → p4-fast
+//   4. out/traj/backup_dir/backup_prefix → tmp/p4-fast（含本 header 注释）
+// bc 沿用同一 p4-onset it70 权重（公平对照起点）；mb 刻意保持 512（拿 mb 填显存=
+// 步数减半学得更少；语料×2 + mb 不变才是正确吃 GPU 姿势，见 §350 讨论）。
+//
+// 护栏（§350 补记 2026-09-07 评审后重写——engine.ppo_update 无 target_kl 早停，
+// kl_cap 只在 rl/stream.py 流式路径执行，remote 串行下 manifest 透传但无人消费；
+// 绑定护栏是硬编码 kl≥0.075×3 熔断 loop_guards.py，课程/CLI 均不可覆盖）：
+//   - KL 健康带：horizon 基线 0.025–0.036，4× 步数下约 0.04–0.08；
+//     kl≥0.06 连 2 轮 → 内建开枪前人工降档（epochs 8→4 或 kl_coef 0.2→0.3）；
+//     worker 日志末 epoch KL>0.10 为漂移实锤（engine.py 每 epoch 行可观测，
+//     training_log 只有全轮均值）。
+//   - F4 ENT 熔断 0.25（§339 语义）+ 熵相对峰值掉 >0.05 → epochs 回滚 4
+//     （tripwire，4× 步数下 5–8 轮内触发属正常，触发即降档、不判失败）。
+//   - GPU-cost 校准门（it1–2，预测 chunks~100 / 步数~800 / ppo≈horizon 3–4× /
+//     kl<0.06 / 熵跌<0.03），不达标按 epochs→6、seed_rotate→200 顺序降档。
+// 判定线：沿用 §345（贪心持续 >35% / 趋近 God 64% 为成；≤30% 横盘 40 轮则连加速
+//   版亦平台 → 下一实验 wDmg）。基线锚：horizon it30 贪心 23/100 + onset it70 35%。
+// 启动：控制台（bun run train）选 Pull 预设 + course=p4-fast；切课程必须重启
+//   hub-server（§345 教训：job_root 绑定课程队列）。
+{
+  "version": 5,
+  "name": "p4-fast",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 300,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 8,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p4-fast/weights.json",
+  "traj": "tmp/p4-fast",
+  // F4 ENT 熔断：沿用 p4-onset 的 0.25（低熵热启动档；§339 语义）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p4-fast",
+  "backup_prefix": "p4-fast",
+  // 自定义关 stage ID 从 2000 开始，p4-fast 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
