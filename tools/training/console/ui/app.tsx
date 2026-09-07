@@ -28,9 +28,11 @@ import {
   klTone,
   latestRow,
   REFRESH_INTERVALS,
+  refreshLabel,
   TC_GLOBAL_INTERVAL,
   winTone,
   type ConsoleStateView,
+  type PhaseInfo,
   type RefreshSec,
   type ValueTone,
 } from '../../ui/view'
@@ -60,8 +62,9 @@ function writeLocal(key: string, v: string): void {
 
 function initInterval(): RefreshSec {
   const v = readLocal(TC_GLOBAL_INTERVAL)
-  if (v === '3' || v === '5' || v === '30') return Number(v) as RefreshSec
-  return 3
+  if (v === '60' || v === '180' || v === '300' || v === '600' || v === '1800')
+    return Number(v) as RefreshSec
+  return 300
 }
 
 /** 顶栏状态 chips 小件。 */
@@ -72,6 +75,19 @@ function Chip({ lbl, val, tone }: { lbl?: string; val: string; tone?: ValueTone 
       <b>{val}</b>
     </span>
   )
+}
+
+/** 阶段耗时格式化 'Xs' / 'Xm Ys' / 'Xh Ym'。 */
+function fmtElapsed(ms: number | null): string {
+  if (ms == null || ms < 0) return '—'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rs = s % 60
+  if (m < 60) return `${m}m${rs > 0 ? ` ${rs}s` : ''}`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h}h${rm > 0 ? ` ${rm}m` : ''}`
 }
 
 export function App({ initial }: AppProps) {
@@ -85,6 +101,8 @@ export function App({ initial }: AppProps) {
   const [drawerTab, setDrawerTab] = useState<DrawerTabKey | null>(null)
   const [trainOpen, setTrainOpen] = useState(false)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
+  // 阶段耗时段 10s 客户端自走（sinceMs 是服务器锚点；两次轮询之间显示不冻结）。
+  const [now, setNow] = useState(() => Date.now())
 
   const wasError = useRef(false)
   const failCount = useRef(0)
@@ -115,11 +133,36 @@ export function App({ initial }: AppProps) {
     const onVis = (): void => {
       const vis = !document.hidden
       setDocumentVisible(vis)
+      setNow(Date.now())
       if (vis) void refreshState()
     }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [refreshState])
+
+  // 阶段耗时自走：可见时 10s 一跳（后台 tab 靠 visibilitychange 回来时校正）。
+  useEffect(() => {
+    if (!documentVisible) return
+    const t = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(t)
+  }, [documentVisible])
+
+  // iter 结束自动刷新（§361④）：SSR __INITIAL__ 已注入最新 iter；观测到迭代号增长
+  // 即立即补拉一次 + 池统计 nonce++（10s 去抖，防 eval 尾巴/同 iter 重写连跳）。轮询间隔不变。
+  const headIter = latestRow(stateView?.metrics.iters ?? [])?.iter ?? null
+  const lastIterSeen = useRef<number | null>(latestRow(initial.metrics.iters)?.iter ?? null)
+  const lastBoostAt = useRef(0)
+  useEffect(() => {
+    if (headIter == null || !documentVisible) return
+    const prev = lastIterSeen.current ?? -1
+    lastIterSeen.current = headIter
+    if (headIter <= prev) return
+    const now = Date.now()
+    if (now - lastBoostAt.current < 10_000) return
+    lastBoostAt.current = now
+    void refreshState()
+    setPoolFreshNonce((n) => n + 1)
+  }, [headIter, documentVisible, refreshState])
 
   // 键盘：Esc 依次关 TrainingLoop 弹窗 / 抽屉；r 立即刷新（输入框聚焦时禁用）
   useEffect(() => {
@@ -186,6 +229,10 @@ export function App({ initial }: AppProps) {
         />,
       ]
 
+  // 顶栏阶段耗时（至今；now 由 10s ticker 驱动，轮询间隙不冻结）。
+  const phaseInfo: PhaseInfo | null = stateView?.phase ?? null
+  const phaseElapsed = phaseInfo && phaseInfo.sinceMs != null ? now - phaseInfo.sinceMs : null
+
   return (
     <div className="tc-wrap">
       <Flash flash={flash} onHide={() => setFlash(null)} />
@@ -218,6 +265,26 @@ export function App({ initial }: AppProps) {
             NN 训练控制台
           </h1>
           <div className="tc-topbar__right">
+            {phaseInfo && phaseInfo.phase !== 'idle' ? (
+              <span
+                className={`tc-phase tc-phase--${phaseInfo.phase}`}
+                title={
+                  phaseInfo.iter != null
+                    ? `it${phaseInfo.iter} ${phaseInfo.phase === 'rollout' ? '采集' : 'PPO'} 阶段`
+                    : phaseInfo.phase === 'rollout'
+                      ? '采集阶段'
+                      : 'PPO 阶段'
+                }
+              >
+                <span className="tc-phase__icon" aria-hidden="true">
+                  {phaseInfo.phase === 'rollout' ? '◎' : '⬡'}
+                </span>
+                <span className="tc-phase__label">
+                  {phaseInfo.phase === 'rollout' ? 'rollout' : 'ppo'}
+                </span>
+                <span className="tc-phase__elapsed">{fmtElapsed(phaseElapsed)}</span>
+              </span>
+            ) : null}
             <label className="tc-toggle tc-small">
               刷新
               <select
@@ -232,7 +299,7 @@ export function App({ initial }: AppProps) {
               >
                 {REFRESH_INTERVALS.map((s) => (
                   <option key={s} value={s}>
-                    {s}s
+                    {refreshLabel(s)}
                   </option>
                 ))}
               </select>
@@ -283,6 +350,7 @@ export function App({ initial }: AppProps) {
       <PanelErrorBoundary>
         <NodePills
           nodes={stateView?.nodes ?? []}
+          local={stateView?.localNode ?? null}
           onAction={doAction}
           onMore={() => setDrawerTab('nodes')}
         />

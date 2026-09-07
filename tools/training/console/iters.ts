@@ -230,7 +230,9 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
 /** 从 training_log.jsonl 读取最近 MAX_ITER_ROWS 轮迭代指标（实际值缓存优先：
  *  manifest 聚合只做一次，落 .pool-actuals-cache.json；time 门闩匹配才命中）。 */
 export function readIterMetrics(trajDir: string): { rows: IterRow[] } {
-  const MAX = 20
+  // §361②：完整指标表要显示所有 iter，不再截断到 20。500 上限只防病态日志
+  // （单行重复写/双 trainer 事故的千轮级日志）撑爆 /api/state payload。
+  const MAX = 500
   const logPath = join(trajDir, 'training_log.jsonl')
   // eval 汇总整册读一次（按 iter 键控），逐行查表——不在循环里反复开文件。
   const evalSummaries = readEvalSummaries(trajDir)

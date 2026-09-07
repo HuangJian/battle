@@ -190,6 +190,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-col{flex:1;min-width:320px}
 .tc-logtail{max-height:150px;overflow:auto;font-size:var(--fs-1);background:#f7f8fa;padding:6px 9px;border-radius:8px;margin-top:5px;white-space:pre-wrap;word-break:break-all}
 .tc-subhead{margin:4px 0 2px;font-size:var(--fs-3);color:var(--muted)}
+.tc-link{background:none;border:none;padding:0;color:var(--accent);cursor:pointer;font-size:var(--fs-2);font-weight:600}
+.tc-link:hover{text-decoration:underline}
 
 /* ── 日志页 ──────────────────────────────────────────────── */
 .tc-logbox{background:#10141f;color:#d6e2f0;padding:14px 16px;border-radius:var(--r-3);overflow:auto;
@@ -211,13 +213,26 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-hero__val--danger{color:var(--red)}
 .tc-hero__val--ok{color:var(--green)}
 .tc-hero__sub{font-size:var(--fs-2);color:var(--muted)}
-.tc-hero__right{flex:1;display:grid;gap:6px;align-content:center;min-width:270px}
-.tc-mini{display:grid;grid-template-columns:42px 1fr 56px;align-items:center;gap:var(--sp-2);font-size:var(--fs-2);color:var(--muted)}
-.tc-mini__bar{height:6px;border-radius:999px;background:var(--gray-bg);overflow:hidden}
-.tc-mini__bar i{display:block;height:100%;background:var(--accent)}
-.tc-mini b{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-size:var(--fs-2);font-weight:600;color:var(--text);text-align:right;font-variant-numeric:tabular-nums}
-.tc-mini--now b{color:var(--accent)}
-.tc-mini .spark{display:block}
+.tc-hero__right{flex:1;display:flex;flex-direction:column;gap:var(--sp-2);min-width:300px}
+
+/* hero 右侧趋势网格：击杀/道具/eval 三等宽格，上「标签+值」下「通栏走势」 */
+.tc-trends{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-3);flex:1;min-width:300px;align-self:stretch}
+.tc-tcell{display:flex;flex-direction:column;gap:3px;padding:7px 10px;background:var(--row-hover);border:1px solid var(--border);border-radius:var(--r-2);min-width:0}
+.tc-tcell__hd{display:flex;align-items:baseline;justify-content:space-between;gap:var(--sp-2)}
+.tc-tcell__lbl{color:var(--muted);font-weight:600;font-size:var(--fs-2);white-space:nowrap}
+.tc-tcell .spark{width:100%;height:26px;display:block}
+.tc-mtrend__val--g{color:var(--green)}
+.tc-mtrend__val--y{color:var(--yellow)}
+.tc-mtrend__val--r{color:var(--red)}
+.tc-hero__more{align-self:flex-end;flex-shrink:0}
+
+/* 顶栏阶段指示器 */
+.tc-phase{display:inline-flex;align-items:center;gap:5px;padding:3px 12px;border-radius:999px;font-size:var(--fs-2);font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tc-phase--rollout{background:var(--accent-bg);color:var(--accent)}
+.tc-phase--ppo{background:var(--green-bg);color:var(--green)}
+.tc-phase__icon{font-size:13px;line-height:1}
+.tc-phase__label{letter-spacing:.3px}
+.tc-phase__elapsed{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:700}
 
 /* 组件 4 小卡 */
 .tc-comps{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);margin-bottom:var(--sp-4)}
@@ -248,6 +263,7 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-npill--off .v{color:var(--muted)}
 .tc-npill--dead{opacity:.72}
 .tc-npill--collapse{color:var(--accent);border-color:var(--accent);background:var(--accent-bg);font-weight:600}
+.tc-npill__contrib{font-family:ui-monospace,'Cascadia Mono',Consolas,monospace;font-weight:700;font-size:var(--fs-2);color:var(--green);border-left:1px solid var(--border);padding-left:var(--sp-2);margin-left:2px}
 .tc-npill__edit{display:flex;gap:6px;align-items:center}
 .tc-npill__edit input[type=number]{width:56px;padding:2px 6px;border:1px solid var(--border);border-radius:6px;font-size:var(--fs-2)}
 .tc-nodes .more{margin-left:auto;font-size:var(--fs-2);color:var(--accent);font-weight:600;border:none;background:none;cursor:pointer}
@@ -278,5 +294,12 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-copy{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--border);border-radius:var(--r-1);padding:2px 8px;font-size:11px;color:var(--muted);cursor:pointer;background:var(--card);white-space:nowrap}
 .tc-copy:hover{border-color:var(--accent);color:var(--accent)}
 .tc-copy--done{color:var(--green);border-color:var(--green)}
+.tc-copy--sm{padding:1px 6px;font-size:10.5px}
+/* §361①：无字图标复制键（仅 ⧉/✓，复制语义走 title/aria）。 */
+.tc-copy--icon{min-width:22px;padding:2px 6px;justify-content:center;font-size:12px}
+/* §361⑤：local 本机直跑 pill（只读，不悬停高亮，无点击语义）。 */
+.tc-npill--local{cursor:default;border-color:var(--accent);background:var(--accent-bg)}
+.tc-npill--local:hover{border-color:var(--accent)}
+.tc-npill--local .v{color:var(--muted)}
 `
 }

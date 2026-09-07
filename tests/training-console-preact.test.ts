@@ -17,6 +17,7 @@ import { buildPoolView } from '../tools/training/console/api'
 import { renderConsolePage, renderLogPage } from '../tools/training/console/render'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
+import { CopyButton } from '../tools/training/ui/components/CopyButton'
 import { PanelErrorBoundary } from '../tools/training/ui/components/PanelErrorBoundary'
 import {
   cleanupNonTcKeys,
@@ -31,13 +32,16 @@ import {
   LEGACY_KEY_RULES,
   migrateLegacyKey,
   nextRefreshInterval,
+  parsePhaseFromLog,
   refreshLabel,
+  shortUrl,
   shouldFollow,
   sortRows,
   sparkline,
   sparkPoints,
   statusFromRecent,
   stripIsoPrefix,
+  type ConsoleStateView,
   type IterRow,
 } from '../tools/training/ui/view'
 
@@ -208,13 +212,55 @@ describe('view 交互纯函数（§7 评审 E5 替代 DOM 测试）', () => {
     expect(isDirty(new Map([['conc:self', '8']]))).toBe(true)
   })
 
-  it('nextRefreshInterval 轮转 3→5→30→暂停→3；refreshLabel 文案', () => {
-    expect(nextRefreshInterval(3)).toBe(5)
-    expect(nextRefreshInterval(5)).toBe(30)
-    expect(nextRefreshInterval(30)).toBe('pause')
-    expect(nextRefreshInterval('pause')).toBe(3)
+  it('nextRefreshInterval 轮转 1m→3m→5m→10m→30m→暂停→1m；refreshLabel 文案', () => {
+    expect(nextRefreshInterval(60)).toBe(180)
+    expect(nextRefreshInterval(180)).toBe(300)
+    expect(nextRefreshInterval(300)).toBe(600)
+    expect(nextRefreshInterval(600)).toBe(1800)
+    expect(nextRefreshInterval(1800)).toBe('pause')
+    expect(nextRefreshInterval('pause')).toBe(60)
     expect(refreshLabel('pause')).toBe('暂停')
-    expect(refreshLabel(5)).toBe('5s')
+    expect(refreshLabel(60)).toBe('1m')
+    expect(refreshLabel(300)).toBe('5m')
+    expect(refreshLabel(1800)).toBe('30m')
+  })
+
+  it('parsePhaseFromLog：iteration 头 → rollout；rollout itN/push/ppo → ppo；空/未知 → idle', () => {
+    // 空日志 / 无时间戳行 → idle
+    expect(parsePhaseFromLog([])).toEqual({ phase: 'idle', sinceMs: null, iter: null })
+    expect(parsePhaseFromLog(['random noise line'])).toEqual({
+      phase: 'idle',
+      sinceMs: null,
+      iter: null,
+    })
+    // === iteration N/M === → rollout（取 N）
+    expect(parsePhaseFromLog(['[10:00:00] [run_rl] === iteration 7/12 ==='])).toEqual({
+      phase: 'rollout',
+      sinceMs: new Date().setHours(10, 0, 0, 0),
+      iter: 7,
+    })
+    // rollout itN: → ppo（rollout 已结束，进入 PPO）
+    expect(parsePhaseFromLog(['[10:01:30] [run_rl] rollout it7: win=0.5'])).toEqual({
+      phase: 'ppo',
+      sinceMs: new Date().setHours(10, 1, 30, 0),
+      iter: 7,
+    })
+    // push / ppo itN / weights archived → ppo
+    expect(parsePhaseFromLog(['[10:02:00] [run_rl] push: it7 done'])).toEqual({
+      phase: 'ppo',
+      sinceMs: new Date().setHours(10, 2, 0, 0),
+      iter: 7,
+    })
+    expect(parsePhaseFromLog(['[10:03:00] [run_rl] ppo it7: kl=0.01'])).toEqual({
+      phase: 'ppo',
+      sinceMs: new Date().setHours(10, 3, 0, 0),
+      iter: 7,
+    })
+    expect(parsePhaseFromLog(['[10:04:00] [run_rl] weights archived'])).toEqual({
+      phase: 'ppo',
+      sinceMs: new Date().setHours(10, 4, 0, 0),
+      iter: null,
+    })
   })
 
   it('shouldFollow：贴底跟随 / 上滚不跟随（阈值 24）', () => {
@@ -425,6 +471,7 @@ describe('PanelErrorBoundary SSR 隔离（DS-E3）', () => {
     const html = renderToString(
       h(
         'div',
+
         null,
         h(PanelErrorBoundary, null, h(Boom, null)),
         h('section', { id: 'sibling' }, '存活'),
@@ -433,5 +480,71 @@ describe('PanelErrorBoundary SSR 隔离（DS-E3）', () => {
     expect(html).toContain('该卡片加载失败：boom-panel')
     expect(html).toContain('存活')
     expect(html).toContain('id="sibling"')
+  })
+})
+describe('§361：icon 复制键 / cloudflared endpoint 截断与复制 / local pill', () => {
+  it('CopyButton icon 模式：按钮无可见「复制」文字（仅 ⧉/✓；语义走 title/aria）', () => {
+    const html = renderToString(
+      h(CopyButton, { text: 'https://abc.trycloudflare.com', label: '隧道', icon: true }),
+    )
+    expect(html).toContain('⧉')
+    expect(html).not.toContain('⧉ 复制')
+    expect(html).toContain('复制隧道') // title/aria 仍有复制语义
+    // 非 icon 模式仍带「复制」字样
+    const plain = renderToString(h(CopyButton, { text: 'x' }))
+    expect(plain).toContain('复制')
+  })
+
+  it('cloudflared endpoint 截断展示 + 全量复制（title 留全量）', () => {
+    const longUrl = 'https://abc-def.trycloudflare.com/abcdefgh/%2F%2F%2F%2F%2F'
+    const s = {
+      time: 't',
+      course: 'c',
+      courses: [],
+      components: [
+        {
+          key: 'cloudflared',
+          label: 'cloudflared (入站隧道)',
+          status: 'running',
+          pid: 1,
+          url: longUrl,
+          course: null,
+          mode: null,
+          healthy: true,
+          log: null,
+          logTail: [],
+          busy: false,
+          secret: 'tok_123456789012345',
+        },
+      ],
+      nodes: [],
+      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: false, iters: [] },
+      phase: { phase: 'idle' as const, sinceMs: null, iter: null },
+      localNode: null,
+    } as ConsoleStateView
+    const html = renderConsolePage(s)
+    expect(html).toContain(shortUrl(longUrl))
+    expect(html).toContain(`title="${longUrl}"`) // 截断展示，hover 留全量
+    expect(html).toContain('⧉') // icon 复制键在
+  })
+
+  it('local pill：只读展示（槽位 + 上轮贡献）', () => {
+    const s = {
+      time: 't',
+      course: 'c',
+      courses: [],
+      components: [],
+      nodes: [],
+      modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: false, iters: [] },
+      phase: { phase: 'idle' as const, sinceMs: null, iter: null },
+      localNode: { id: 'local', slots: 3, lastContrib: 2 },
+    } as ConsoleStateView
+    const html = renderConsolePage(s)
+    expect(html).toContain('tc-npill--local')
+    expect(html).toContain('>local<')
+    expect(html).toContain('3槽')
+    expect(html).toContain('本机直跑')
   })
 })

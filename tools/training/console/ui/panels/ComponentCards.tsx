@@ -5,6 +5,7 @@
 
 import { useState } from 'preact/hooks'
 import type { ComponentView, ConsoleStateView } from '../../../ui/view'
+import { shortUrl } from '../../../ui/view'
 import { CopyButton } from '../../../ui/components/CopyButton'
 
 export interface ComponentCardsProps {
@@ -51,7 +52,16 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
             </div>
             {c.key === 'cloudflared' ? (
               <div className="tc-cc__meta">
-                <div>{c.url ?? '未建立隧道'}</div>
+                <div className="tc-cc__sec">
+                  {c.url ? (
+                    <>
+                      <code title={c.url}>{shortUrl(c.url)}</code>
+                      <CopyButton text={c.url} label="隧道" icon small />
+                    </>
+                  ) : (
+                    <span className="tc-muted">未建立隧道</span>
+                  )}
+                </div>
                 <div className="tc-cc__sec">
                   <code>
                     token{' '}
@@ -61,7 +71,7 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                         : (c.secret ?? '-')
                       : '-'}
                   </code>
-                  {c.secret ? <CopyButton text={c.secret} label="auth key" small /> : null}
+                  {c.secret ? <CopyButton text={c.secret} label="auth key" icon small /> : null}
                 </div>
               </div>
             ) : (

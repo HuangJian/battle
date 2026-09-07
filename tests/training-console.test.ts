@@ -10,9 +10,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+import { readIterMetrics } from '../tools/training/console/iters'
 
 // ── 隔离：rl-config.json 与 console-state.json 指向临时副本（跑前备份，跑后还原）──
 
@@ -326,6 +327,7 @@ describe('console sparkline (ui/view)', () => {
       components: [],
       nodes: [],
       modes: { trainerPpo: 'pull' as const, stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      phase: { phase: 'idle' as const, sinceMs: null, iter: null },
       metrics: {
         available: true,
         iters: Array.from({ length: 30 }, (_, i) => ({
@@ -350,15 +352,31 @@ describe('console sparkline (ui/view)', () => {
           accuracy: 0,
           loot: 0,
           kills: 0,
-          actuals: null,
-          evalData: null,
+          actuals: { games: 4, totalKills: i, totalPU: i % 3, avgTicks: 100 },
+          evalData: {
+            time: '',
+            games: 10,
+            wins: i % 10,
+            winRate: (i % 10) / 10,
+            clears: 0,
+            clearRate: 0,
+            dropped: 0,
+            sec: 30,
+            wver: 'v1',
+            outcomes: {},
+            avgTicks: 100,
+            totalKills: i,
+            totalPU: 0,
+            scoreMean: 0,
+            scoreStd: 0,
+          },
         })),
       },
     }
     const html = render.renderConsolePage(s)
-    // 30 轮输入 → hero 只画近 20 轮 winRate sparkline：1 条 polyline、点数 ≤20
+    // 30 轮输入 → hero 画 4 条 polyline：KPI 大胜率走势 1 条 + 击杀/道具/eval 三格各 1 条（胜率不再重复画），点数 ≤20
     const polylines = html.match(/<polyline/g) ?? []
-    expect(polylines.length).toBe(1)
+    expect(polylines.length).toBe(4)
     for (const seg of html.split('<polyline').slice(1)) {
       const pts = seg.split('/>')[0]!.match(/[\d.]+,[\d.]+/g) ?? []
       expect(pts.length).toBeLessThanOrEqual(20)
@@ -430,5 +448,58 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(html).toContain('日志文件不存在')
     // follow 复选框无 checked 属性（跟随节奏由客户端 usePolling + shouldFollow 纯函数实现）
     expect(html).not.toContain('id="follow" checked')
+  })
+})
+
+describe('console/api §361③：配置损坏兜底与日志尾容错', () => {
+  it('loadConfigSafe：rl-config.json 瞬时损坏回退上次成功配置，不抛 500', async () => {
+    const before = readFileSync(REAL_CONFIG, 'utf-8')
+    const good = api.loadConfigSafe()
+    expect(good.nodes).toBeInstanceOf(Array)
+    try {
+      // 模拟 saveConfig 写盘窗口的半截 JSON（§339 同款竞态家族）
+      writeFileSync(REAL_CONFIG, '{"version":1,"nodes":[', 'utf-8')
+      const safe = api.loadConfigSafe()
+      expect(safe.nodes).toEqual(good.nodes) // 回退内存缓存
+    } finally {
+      writeFileSync(REAL_CONFIG, before, 'utf-8')
+    }
+    expect(api.loadConfigSafe().nodes).toBeInstanceOf(Array) // 恢复后无崩溃
+  })
+
+  it('logTail：缺文件安全 + 尾窗口 + 超长行截断（单行损坏不拖垮）', () => {
+    expect(api.logTail('tmp/no-such-log-xyz.log', 5)).toEqual([])
+    const p = path.join(import.meta.dir, '..', 'nn-training', 'tmp', 'logtail-test-361.log')
+    mkdirSync(path.dirname(p), { recursive: true })
+    writeFileSync(p, 'a\n' + 'x'.repeat(300) + '\nb\n')
+    try {
+      const t = api.logTail('tmp/logtail-test-361.log', 5)
+      expect(t[0]).toBe('a')
+      expect(t[1]!.length).toBe(200) // 超长行截到 200
+      expect(t[2]).toBe('b')
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+})
+
+describe('console/iters §361②：完整指标表不截断（MAX 500 上限）', () => {
+  it('600 轮日志 → 返回最近 500 轮', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-361-'))
+    try {
+      const lines: string[] = []
+      for (let i = 0; i < 600; i++) {
+        lines.push(
+          JSON.stringify({ event: 'iteration', iter: i, time: '', winRate: 0.5, score_mean: 0 }),
+        )
+      }
+      writeFileSync(path.join(dir, 'training_log.jsonl'), lines.join('\n'), 'utf-8')
+      const { rows } = readIterMetrics(dir)
+      expect(rows.length).toBe(500)
+      expect(rows[0]!.iter).toBe(599)
+      expect(rows[499]!.iter).toBe(100)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

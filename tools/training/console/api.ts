@@ -17,13 +17,14 @@ import { readIterMetrics } from './iters'
 import { aggregateNodeHistory, emptyHistory, poolStatus } from './pool-history'
 import type { Component, RlConfig } from '../types'
 // 视图类型单一源：ui/view.ts（api.ts 不再定义本地视图类型）
-import { stripIsoPrefix } from '../ui/view'
+import { parsePhaseFromLog, stripIsoPrefix } from '../ui/view'
 import type {
   ComponentView,
   ConsoleStateView,
   LogPayload,
   MetricsView,
   NodeHistoryRow,
+  NodeLocalView,
   NodeView,
   PoolView,
   SelfStatus,
@@ -54,6 +55,33 @@ export type {
   ModeView,
   NodeView,
 } from '../ui/view'
+
+// ────────────────────────── 配置读取（§361③：rl-config.json 瞬时读损坏兜底） ──────────────────────────
+
+const CFG_RETRY_MS = 1000
+let cfgLastOk: RlConfig | null = null
+let cfgBadUntil = 0
+const EMPTY_CONFIG = { version: 1, nodes: [], rl: {} } as unknown as RlConfig
+
+/**
+ * 读 rl-config.json + 损坏兜底。控制台自身 saveConfig 用 writeFileSync 非原子写
+ * （2026-09-06 §339 同款竞态家族）——轮询恰落在写盘窗口会读到半截/空 JSON，loadConfig
+ * 抛错会让 /api/state 整条 500 → 前端「刷新失败，正在重试」banner 假阳性（§361③根因）。
+ * 失败回退上次成功配置（内存缓存；1s 坏窗内直接命中缓存，不再反复解析半截文件）；
+ * 从未成功过则回退空配置（UI 降级为空节点/组件列表，不 500）。
+ */
+export function loadConfigSafe(): RlConfig {
+  if (Date.now() < cfgBadUntil && cfgLastOk) return cfgLastOk
+  try {
+    const cfg = loadConfig()
+    cfgLastOk = cfg
+    cfgBadUntil = 0
+    return cfg
+  } catch {
+    cfgBadUntil = Date.now() + CFG_RETRY_MS
+    return cfgLastOk ?? EMPTY_CONFIG
+  }
+}
 
 // ────────────────────────── 课程发现 ──────────────────────────
 
@@ -141,16 +169,20 @@ const ALL_COMPONENTS: Component[] = [
   'workerServe',
 ]
 
-function logTail(nnRel: string, n = 5): string[] {
+/** 逐行容错的日志尾（§361③）：单行损坏/读取异常只丢该行，不再让整个 /api/state 500。 */
+export function logTail(nnRel: string, n = 5): string[] {
+  let raw = ''
   try {
-    return readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel), 'utf-8')
-      .split('\n')
-      .filter(Boolean)
-      .slice(-n)
-      .map((l) => l.slice(0, 200))
+    raw = readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel), 'utf-8')
   } catch {
-    return []
+    return [] // 文件缺失/暂时不可读 = 无日志尾（正常态，非错误）
   }
+  const out: string[] = []
+  for (const line of raw.split('\n')) {
+    if (!line) continue
+    out.push(line.length > 200 ? line.slice(0, 200) : line)
+  }
+  return out.slice(-n) // 只取尾 n 行（原语义）
 }
 
 // ────────────────────────── 日志查看（§348 补 2） ──────────────────────────
@@ -308,14 +340,15 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
       codeHash,
       cpus,
       busy: busy.has(`node:${n.id}`),
+      lastContrib: -1,
     })
   }
   return out
 }
 
-/** 完整状态快照（页面 3s 轮询的数据源）。 */
+/** 完整状态快照（页面轮询的数据源）。 */
 export async function buildStateView(): Promise<ConsoleStateView> {
-  const cfg = loadConfig()
+  const cfg = loadConfigSafe()
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = effectiveCourse(state, courses)
@@ -331,12 +364,39 @@ export async function buildStateView(): Promise<ConsoleStateView> {
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
+  // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
+  const contribById = new Map<string, number>()
+  let localNode: NodeLocalView | null = null
+  try {
+    const { hist, globalMaxIt } = aggregateNodeHistory()
+    for (const [id, h] of hist) {
+      contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
+    }
+    const localH = hist.get('local')
+    const slots = Number(cfg.rl.local_slots)
+    if (Number.isInteger(slots) && slots > 0) {
+      localNode = {
+        id: 'local',
+        slots,
+        lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
+      }
+    }
+  } catch {
+    /* 池历史不可用 → 全部 -1 */
+  }
+  for (const n of nodes) {
+    n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
+  }
+  // 当前训练阶段（训练循环日志尾解析）。
+  const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
+  const phase = parsePhaseFromLog(logTail)
   return {
     time: new Date().toISOString(),
     course,
     courses,
     components,
     nodes,
+    localNode,
     modes: {
       trainerPpo: state.trainerPpo,
       stream: Number(cfg.rl.stream ?? 0),
@@ -344,6 +404,7 @@ export async function buildStateView(): Promise<ConsoleStateView> {
       precollectEarly: Number(cfg.rl.precollect_early ?? 0),
     },
     metrics,
+    phase,
   }
 }
 

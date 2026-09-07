@@ -2,16 +2,18 @@
  *  点击展开（用户指令）；点在线 pill 就地编辑并发/启用/冒烟。完整统计进抽屉（节点统计 ›）。 */
 
 import { useState } from 'preact/hooks'
-import type { NodeView } from '../../../ui/view'
+import type { NodeLocalView, NodeView } from '../../../ui/view'
 import { Toggle } from '../../../ui/components/Toggle'
 
 export interface NodePillsProps {
   nodes: NodeView[]
+  /** 本机直跑节点（§361⑤：只读展示；无池数据/无槽位时缺省）。 */
+  local?: NodeLocalView | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
 }
 
-export function NodePills({ nodes, onAction, onMore }: NodePillsProps) {
+export function NodePills({ nodes, local, onAction, onMore }: NodePillsProps) {
   const [showOff, setShowOff] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -23,6 +25,25 @@ export function NodePills({ nodes, onAction, onMore }: NodePillsProps) {
   return (
     <div className="tc-nodes" aria-label="节点">
       <span className="lbl">节点</span>
+      {local ? (
+        <span
+          className="tc-npill tc-npill--local"
+          title={`本机直跑 · ${local.slots} 槽 · 上轮贡献 ${local.lastContrib >= 0 ? local.lastContrib : '—'}`}
+        >
+          <span className="tc-dot tc-dot--on" />
+          <b>local</b>
+          <span className="v">{local.slots}槽</span>
+          <span className="tc-npill__contrib">
+            {local.lastContrib > 0 ? (
+              local.lastContrib
+            ) : local.lastContrib === 0 ? (
+              <span className="tc-muted">0</span>
+            ) : (
+              '—'
+            )}
+          </span>
+        </span>
+      ) : null}
       {online.map((n) => (
         <NodeEditPill
           key={n.id}
@@ -161,12 +182,21 @@ function NodeEditPill({
       className="tc-npill"
       role="button"
       tabIndex={0}
-      aria-label={`${n.id} 在线，并发 ${n.concurrency}，点击编辑`}
+      aria-label={`${n.id} 在线，并发 ${n.concurrency}，上轮贡献 ${n.lastContrib >= 0 ? n.lastContrib : '—'}，点击编辑`}
       onClick={onEdit}
     >
       <span className="tc-dot tc-dot--on" />
       <b>{n.id}</b>
       <span className="v">✓{n.concurrency}</span>
+      <span className="tc-npill__contrib" title="上一轮贡献数">
+        {n.lastContrib > 0 ? (
+          n.lastContrib
+        ) : n.lastContrib === 0 ? (
+          <span className="tc-muted">0</span>
+        ) : (
+          '—'
+        )}
+      </span>
     </span>
   )
 }

@@ -1468,6 +1468,9 @@ PPO。观察者建议"spawn 提前到 PPO 开始"——但 S3（stream waves=0�
 ## §306 远控重启护栏：脏工作区拒发 + 跨代去重 + agent grace 窗口（2026-09-01）
 
 **问题**（用户报告 + 节点实测日志）：① 远控重启过的进程被再次远控重启（10:16–10:18 四连杀，节点始终无法贡献）；② 用户手动更新代码重启的进程被远控杀掉再重启。
+<!-- APPEND-MARKER: do not remove; new entries go below this line -->
+
+
 
 **根因**：expected codeHash 由训练机**工作区**文件内容算出（`_collect_code_hash_files` 直读磁盘），含未提交改动；远端 `git pull` 只能拿到已推送提交，hash 永不收敛 ⇒ 每轮 ping 门 / rescan（~15s）都判 stale ⇒ 再杀再拉成死循环。叠加：旧实现去重集合 `upgrade_requested` 是每轮局部变量，新一轮迭代重建 ⇒ stale 节点每轮再收一次 restart。
 
@@ -3056,3 +3059,160 @@ pilot 数据，隔离映射：`tmp/p2-step/` → `tmp/p2-step-it70pilot/`、
 （隔离须在停 loop 后执行，运行中 mv 会撕裂落盘）。ep60 腿全新启用 canonical
 路径（it 计数从 1 起，无 lineage 混杂）。教训：课程 bc 字段即 warm-start 决策，
 探针权重≠课程默认——建课时就该对齐，事后隔离是补救。
+
+## §357 / p4-open 敞篷探针：钢盒子是不是帮凶？（2026-09-07，用户指令）
+
+背景：用户纠正——p2/p3/p4 全是 22×22 内场＋整圈不可摧毁钢墙（6='s' WHOLE，
+stages.ts:53），"小斗场"准确；"加掩体"被用户否决（掩体走位是更高阶技能，
+战斗不会时掩体更学不会——接受，掩体路线作废）。诉求：斗场扩大两三格降密度。
+决策：去边框（外圈 6→0），内场 22×22→26×26 tiles（+40% 面积，平均间距 +18%），
+出生点/敌编/其余逐字节不动——单变量"是否有墙"。零代码改动的依据（已验）：
+坦克位移钳制 [0,FIELD] 与地形无关（SimulationCombat.ts:199-204）、子弹越界
+销毁（:411-415）、TileMap 越界读数按钢（TileMap.ts:106）。超时若涨则 max_ticks
+另议（课程级可调）。探针：BC ep60 ×100 ＋ God ×100 配对（p4 现状 14/64，
+gap 50pp）。门：gap 收窄到 ≤30pp →  confinement 是主犯之一，开敞篷腿；
+gap 不动 → 钢盒无罪，回 R5。本条目只授权探针。
+
+## §358 / p3-step RL 腿：晋升门兑现（2026-09-07，p2 it35/it40 连击 75/84）
+
+背景：p2 腿 39→84/40 轮，晋升门（≥75×2）触发。p2 腿结业（媲美教师 85±噪声，
+ diminishing returns 区，停）。
+决策：开 p3 腿。warm-start 用晋升权重 `nn-training/weights/p2-step/p2-step.it40.20260907-174640.json`
+（预注册方案），其余沿用 p2 腿数学（horizon reward/scale/schedule，γ/λ，stream=0），
+fresh dirs（tmp/p3-step canonical，探针只写了根目录行数据，无残留——已验空）。
+step-0 transfer  datum：p2-it40 零样本 p3 = 27/100 vs BC 36/100（diff -9pp，
+SE 6.5pp，z=-1.38，噪声带内不可分）。不断案：按预注册＋basin 理由（多目标切换
+ machinery）仍用 p2 权重，但加 it5 检查点——it5 贪心 ≥35 即 transfer 起效继续；
+≤25 则切 ep60 臂（fresh dirs，另记）。p3→p4 门：连续 2 eval ≥70（ toward God 82；
+沿用晋级门哲学：摸教师下沿即转场）。
+启动链：停 p2 loop → setCourse p3-step（API）→ 重启 hub-server 指 tmp/p3-step → Pull。
+
+## §359 / p3-bc 臂：transfer 证伪，切 ep60 重开（2026-09-07，§358 it5 检查点触发）
+
+背景：p3-p2arm it5 贪心 20/100（≤25 切换线）＋it10 14/100（零样本 27→20→14，
+单调恶化）——transfer 假设方向性证伪：p2 冠军权重在 p3 上越训越差，而 BC 原地
+36% 更好。rollout it2 起 7–10% 横盘；it10 超时 81/150（生存主义 p3 翻版）；
+熵 0.358→0.26–0.32 带（自定义 tripwire it4 起连击 firing 中——§358 细化规则下
+wins 同步跌，满足执行条件，但看盘滞后未执行；程序 miss 认第二个。arm 切换
+ supersede 回滚：弃臂不降档）。
+决策：开 p3-bc 臂。新课程 `p3-bc.jsonc`（由 p3-step 派生：name/dirs→tmp/p3-bc，
+bc→ep60 探针权重；其余全同义）。其余条款照搬 §358（horizon reward/scale/
+schedule/stream=0，p3→p4 门连续 2 eval ≥70，it5 检查点反向沿用：it5 ≥35 则
+ep60 臂成立继续——对称门）。p2 腿权重 lineage 保留（p3-step-p2arm 隔离）。
+启动链：停 p3 loop → 隔离（tmp/p3-step→tmp/p3-step-p2arm/，weights 同）→
+setCourse p3-bc → 重启 hub → Pull。
+
+## §360 / 全 p 系出生点变体化：固定靶退役（2026-09-07，用户指令"四个角随机"）
+
+背景：p2 北边套路过拟合嫌疑（§9 讨论）——p2/p3/p4 固定几何，只有 p1 有 8 布局池。
+决策：未来向课程全加出生点池，玩家恒居中，只变 enemy_spawns；历史冻结线：
+p1-onset（God 冻结/BC lineage 承重）、p4-onset/horizon/fast/wdmg/open（已完赛记录＋
+引用基线）、p2-step 在跑腿＋p3-step p2arm 记录——一律不动。新/改只三处：
+p2-var（新建，6 对子全组合）、p3-bc（原地改，从未跑过故安全；4 三元组去一角）、
+p4-var（新建，4 轮转，kind↔角轮换）。seed→variant 确定性哈希已验（eval/rollout
+双路径同口径，100 局≈p2 每 variant 17 局/p3p4 各 25 局，aggregate 可比、单 variant
+读数噪声大——只读总数）。
+探针：BC ep60＋God ×100 逐课（CPU，可与 GPU 训练并行）。门：与固定版对照读
+"多样性税"（BC 67→?/36→?/14→?）；若 variant 版 BC 崩盘（如 p2 <45%）→ 过拟合
+实锤，p2-var 扶正为主线（重定基线＋门），p3-bc 启动所依赖的固定版基线（36/82）
+作废待重测——故 p3-bc 启动门加一条：variant 探针先行。本条目授权文件＋探针，
+RL 腿一律另起条目。
+
+**补记（2026-09-07，§360 探针 verdict）：多样性税不存在，过拟合警报解除。**
+p2-var BC 87/God 94（固定 67/85）、p3-var BC 42/God 81（固定 36/82）、p4-var
+BC 10/God 76（固定 14/64）——无一收税，p2 反倒 +20pp。逐 variant 分解（seed 哈希
+重建，确定性配对）：p2 固定对 TL+TR 15/24（62%，复刻固定版——plumbing 自证），
+其余五对 88–100%；p4 v0 子集 1/23 vs 固定 14/100（seed 子集选择偏差＋噪声，
+读总数 10 为准）。结论三条：①"北边套路"过拟合无证据——BC 在没见过的对子上
+打得更好，固定对恰是最难构型之一，p2 腿 84% 含金量上升而非下降；
+②p2-var 不扶正为主线（池平均更容易，拿它训练是降难度；固定＝硬核训练集，
+var 池＝泛化测试集——与 §360 初衷反转，认）；③p3-bc 启动放行（新基线 BC 42/
+God 81，对称门重定 it5≥40），p4 腿课程待 p3 verdict 时定（fixed/var 到时看
+p3-var 训练数据再选）。
+
+**补记（2026-09-07，it15 verdict）：停腿。**贪心 42→37→22→**11**（杀 169→139→106，
+死 59→71→84）——≤25 触发，BC 起点在 p3 上也被练差（与 p2arm 同死法不同起点）。
+KL 全静、熵未达线、value 冻 ~7 vs ret ~0（R5 第五次复现，唯 p2 例外）。
+
+## §361 / R5 value-head 实验：normalize_ret 先行（2026-09-07，p3-bc 停腿后）
+
+背景：淘汰链终点——视野/规模/步长/死亡价格/p2转暖（p2arm）/BC起点（p3-bc）六连败，
+共同签名 it1 smash＋阴跌＋value/return 错配（p2 靠信号密硬爬为例外）。
+R5 从 p4 放大器→多敌通病→现升**首要假设**。
+决策：四个候选中先上改动最小的 **normalize_ret**（`ppo/common.py:214-257`  plumbing
+已存在，adv 归一的镜像；现调用恒 False）。第一候选理由：零架构改动、单 flag 级
+diff、失败回滚一分钟；且直击"return 尺度漂移（5.9→-0.75→~0）而 head 跟不上"。
+其余三候选（独立 value lr/裁剪损失/value 暖机）按序排队，一次上一个。
+成功门（预注册）：value MSE 进入 return 方差量级（<2）为评论员毕业；毕业＋胜率抬头
+为根因确认；毕业＋胜率平为 critic 出局（→容量 R6）。实验载体：p3-bc 同数学另起
+ fresh run（语料/reward/起点全同义，只改 normalize_ret——单变量），命名 p3-vr1。
+实施需要：单测（归一化开关两种路径数值）、旧数学回归基线（默认 False 路径逐字节
+不变）、DECISIONS 本条目即授权。
+## §361 训练控制台 UI 五项调整（2026-09-07，用户指令）
+
+**问题**（用户五条）：① cloudflared endpoint 要截断展示 + 复制键（且复制键不显示「复制」字样）；② 指标表只显示最近 20 轮，要全部 iter；③ 页面自动刷新时不时提示「失败」；④ 页面要在每个 iter 结束时自动刷新；⑤ 节点 pill 行不显示 local（本机直跑）节点。
+
+**决定**：
+1. `CopyButton` 增加 icon 模式（`icon?: boolean`）：无文字，仅 ⧉ 图标，成功翻 ✓ 绿色；语义走 aria-label/title（无字复制键）。cloudflared 卡 endpoint 用 `shortUrl()`（协议+域名+尾 4 位，title 留全量）+ icon 复制；auth key 同样式。
+2. `console/iters.ts` `readIterMetrics` 的 MAX 20 → 500：全量 iter 进指标表（DataTable 客户端排序/过滤/列显隐本就不截断；500 上限防病态日志撑爆 payload）。
+3. `/api/state` 抗抖：`loadConfigSafe()` 兜底——rl-config.json 读损坏（与控制台自身 writeFileSync 非原子写竞态的窗口）时回退上次成功配置（内存缓存），配 NaN 哨兵防同值反复缓存；`logTail` 逐行 try（单行损坏不再拖垮整个 logTail）。此前这些异常会让 `/api/state` 500 → 前端「刷新失败，正在重试」banner 假阳性。
+4. iter 事件驱动刷新：SSR `window.__INITIAL__.metrics.iters` 注入最新 iter，App 内 `useEffect` 对比 `stateView.metrics.iters` 增长即 `refreshState()` + `poolFreshNonce++`（10s 去抖节流，防 eval 尾巴连跳），并清 connError。轮询间隔不变；iter 结束 ≤10s 内自动上新数据。
+5. `NodePills` 增补 local 节点 pill（本机直跑，`rl.local_slots` 槽位，贡献数 = 池历史 `lastIterOk` 口径；只读不可编辑——local 无 setNodeConcurrency 语义；无池数据时贡献显示 —）。
+
+**理由**：③ 的根因是服务端把瞬时读损坏当硬错误直通 500（2026-09-06 §339 同款竞态家族）；④ 纯轮询（300s）让用户 iter 级进展盲等，事件驱动 + 去抖是两全；② 表格全量后排序默认 iter 降序、最新在首屏，无滚动成本。
+
+**测试**：`tests/training-console.test.ts`（loadConfigSafe 损坏回退 / logTail 单行存活 / MAX=500 截断语义 / shortUrl 纯函数）+ `tests/training-console-preact.test.ts`（icon 复制键无「复制」字样、endpoint 截断与 title、local pill 在线行只读渲染、__INITIAL__ 注入）。
+
+**补记（2026-09-07，§361 实施）：**8 文件 + 3 测试 + 1 课程落地，python 门禁全绿。
+链：CourseConfig.normalize_ret → flat_overrides → args → loop（serial 直传/
+remote 进 manifest）→ worker engine.load_episodes，全默认 False（旧行为逐字节
+不变；manifest 缺键回填 False，旧 hub 兼容）。
+实施中纠正一处设计：曾考虑 reward_scale 做全局缩放——查实 toy scheme 下它只
+用于 score_reconcile 分支（reward_library.py:713-716），不是全局乘子，不可用；
+维持 normalize_ret 方案。无偏性论证：baseline 不改变策略梯度无偏性只改变方差，
+当前 V 近乎常数时归一化只会把 baseline 从"无"变"有"（engine.py docstring 已记；
+intent 早就这么跑）。stream 路径明确 out-of-scope（课程全 stream=0）。
+门禁注：首跑 test_it_early_race_v314 在 xdist 下失败 1 次，单跑过、门禁复跑全绿——
+timing flake，与本次改动无交集（dist 调度逻辑未碰）。
+A/B 纯度实证：p3-vr1 vs p3-bc reward 指纹相同、bc/schedule 相同，唯一差
+normalize_ret（echo-config＋identity 双验证）。载体 `p3-vr1.jsonc` 就绪。
+
+## §362 / intent 后端永不用于 p 系执行（2026-09-07，用户陈述既往否决结论，入档）
+
+intent 能学到正确的决策，但执行层依赖有缺陷的 God-AI 行动方案——天花板锁死在
+略逊于 God 的水平。再好的决策经有缺陷的执行器落地，等于给错误蒸馏抛光。
+故 credit-assignment 家族剔除 intent/goal 后端（含其 replan/heartbeat 全套），
+无论稀疏度如何都不回头。候选重排：①BC-anchored per-tick（kickstart ref 移植，
+无执行器天花板，复用 intent 现成的 kickstart_kl/decay 语义）；②回报重分配
+（理论重、 machinery 新）；③短局（暂否：超时组恰是战斗最激烈的组，缩 cap
+罚错人——方向性错误）。
+
+## §363 / BC-anchored per-tick kickstart 移植（2026-09-07，p3-vr1 it15 verdict 后）
+
+背景：vr1 毕业＋胜率平（42→11→14→14）——critic 修好但车不动，真凶是行为精度
+（瞄准 9%）＋step 贫困。intent 否决已入档（§362），把 intent 现成的 kickstart
+语义搬到 per-tick：开局用 KL 缰绳把政策钉在 BC（瞄准 32% 真本事）附近防 it1
+smash，衰减放手让它超越——"回到起点再超越"，风筝线不是笼子。
+设计（mirror intent.py:292-298，不自创数学）：
+- engine.ppo_update 加 `ref_model=None, kickstart_kl=0.0`：非 warmup（per-tick 无
+  warmup 概念，不引入）且两者就绪时，loss += kickstart_kl·KL(π‖π_BC)，分头
+  exact-KL（move＋fire 求和，与 entropy 口径同构）；stats 记 kickstart 列
+  （epoch 行＋iteration 事件可观测，校准用）。
+- 系数复用 run_rl.update_kwargs 衰减语义（kickstart_kl·decay^(policy_iter-1)）；
+  warmup_iters 补进 CourseConfig＋flat_overrides（CLI 早有 flag，课程一直没通—
+  顺手补的通用缺口），kickstart 课程设 0（缰绳必须 it1 就勒住——smash 轮）。
+  per-tick 忽略 warmup_epochs（value 头本 lineage 已训；R5-warmup 仍在排队）。
+- ref 源＝课程 bc（冻结 master 快照，非 args.out 滚动值——与 intent 取 out 不同，
+  语义不同故分建 `self._bc_ref`）；local 一次构建＋freeze，remote 随包发
+  ref_weights.json＋fp 对账（学生权重 ~270KB，transit 可忽略）。
+- 三重默认关闭：ref None 或 coef 0 → 数学逐字节不变（旧 manifests/旧课程零影响；
+  worker 读 manifest.get 默认；CLI/course/协议测试全覆盖）。
+成功门（预注册）：it1 KL 无 smash（<0.1）为缰绳生效；i5 贪心 ≥25（超 vr1 同期 11）
+为恢复起效；之后看是否破 42 基线。载体：p3 同数学 fresh run（只加缰绳）。
+
+**补记（2026-09-07，p3-ks1 复查抓包）：**echo-config 发现所有 p 系课程的
+ent_break 0.25 从未落地——flat_overrides 漏映射三阈值（§339 文档与实现脱节），
+全员跑 CLI 默认 0.6。影响定级 benign：相对语义下 0.6 版只丢绝对臂、跌幅臂仍在，
+且历史最大连击 streak=1（从未近 8 线）；人工 tripwire 看盘覆盖了真空期。
+已修（3 行映射＋回归单测），ks1 echo 验证 0.25 落地。教训：凡"课程可配"的文档
+断言，必须配一个 overrides 映射测试——断言与 plumbing 分家是同类 bug 温床。

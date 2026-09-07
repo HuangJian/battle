@@ -41,6 +41,25 @@ export interface NodeView {
   codeHash: string | null
   cpus: number | null
   busy: boolean
+  /** 上一轮贡献数（全局最新轮下该节点成功局数；-1 = 无池数据）。 */
+  lastContrib: number
+}
+
+export interface NodeLocalView {
+  id: 'local'
+  /** 本机直跑槽数（rl.local_slots）；0 = 配置缺失/非法。 */
+  slots: number
+  /** 上一轮贡献数（与节点同口径：全局最新轮下 local 成功局数；-1 = 无池数据）。 */
+  lastContrib: number
+}
+
+/** URL 展示整形（§361①）：协议 + 域名 + 尾 4 位。cloudflared 隧道域名过长，
+ *  卡片内溢出换行——截断展示 + CopyButton 复制全量（title 仍给完整 URL）。 */
+export function shortUrl(url: string): string {
+  const m = url.match(/^(https?:\/\/[^/]+)/)
+  if (!m) return url
+  const host = m[1]!
+  return url.length <= host.length + 4 ? url : `${host}…${url.slice(-4)}`
 }
 
 export interface ModeView {
@@ -62,8 +81,12 @@ export interface ConsoleStateView {
   courses: string[]
   components: ComponentView[]
   nodes: NodeView[]
+  /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */
+  localNode?: NodeLocalView | null
   modes: ModeView
   metrics: MetricsView
+  /** 当前训练阶段（顶栏图标用）。 */
+  phase: PhaseInfo
 }
 
 // ────────────────────────── 日志视图类型 ──────────────────────────
@@ -320,7 +343,65 @@ export function metricSeries(rows: IterRow[]): Series[] {
       label: 'eval 胜率',
       vals: chrono.map((r) => (r.evalData ? (r.evalData.winRate as number) : Number.NaN)),
     },
+    {
+      key: 'kills',
+      label: '击杀',
+      vals: chrono.map((r) => (r.actuals ? r.actuals.totalKills : Number.NaN)),
+    },
+    {
+      key: 'pu',
+      label: '道具',
+      vals: chrono.map((r) => (r.actuals ? r.actuals.totalPU : Number.NaN)),
+    },
   ]
+}
+
+/** 训练阶段（顶栏图标用）。 */
+export type TrainingPhase = 'rollout' | 'ppo' | 'idle'
+
+export interface PhaseInfo {
+  phase: TrainingPhase
+  /** 当前阶段开始时刻（ms）；idle 时为 null。 */
+  sinceMs: number | null
+  /** 当前迭代序号；idle 时为 null。 */
+  iter: number | null
+}
+
+/**
+ * 从训练循环日志尾解析当前阶段。
+ * 规则：日志最后一行含 "=== iteration N/M ===" → rollout（本轮刚开始）；
+ *        含 "rollout itN:" 之后 → PPO 阶段（含 push/remote ppo/ppo itN 等）；
+ *        其它 / 无日志 → idle。
+ * 耗时 = 当前时间 - 日志时间戳（仅 rollout/ppo 有效）。
+ */
+export function parsePhaseFromLog(tail: string[]): PhaseInfo {
+  if (tail.length === 0) return { phase: 'idle', sinceMs: null, iter: null }
+  const last = tail[tail.length - 1]!
+  // 日志格式：[HH:MM:SS] [run_rl] ...
+  const tsMatch = last.match(/^\[(\d{2}):(\d{2}):(\d{2})\]/)
+  let sinceMs: number | null = null
+  if (tsMatch) {
+    const h = Number(tsMatch[1])
+    const m = Number(tsMatch[2])
+    const s = Number(tsMatch[3])
+    const d = new Date()
+    d.setHours(h, m, s, 0)
+    sinceMs = d.getTime()
+  }
+  const iterMatch = last.match(/=== iteration (\d+)\//)
+  if (iterMatch) {
+    return { phase: 'rollout', sinceMs, iter: Number(iterMatch[1]) }
+  }
+  const rolloutMatch = last.match(/rollout it(\d+):/)
+  if (rolloutMatch) {
+    return { phase: 'ppo', sinceMs, iter: Number(rolloutMatch[1]) }
+  }
+  // push/remote ppo/ppo itN/weights archived 等 → 仍在 PPO 阶段
+  if (/\[run_rl\] (push:|remote ppo|ppo it\d+|weights archived|export)/.test(last)) {
+    const itMatch = last.match(/it(\d+)/)
+    return { phase: 'ppo', sinceMs, iter: itMatch ? Number(itMatch[1]) : null }
+  }
+  return { phase: 'idle', sinceMs: null, iter: null }
 }
 
 export function lastFinite(vals: number[]): number | null {
@@ -444,23 +525,28 @@ export function shouldFollow(
 
 // ────────────────────────── 纯函数：dirty / 轮询节奏 ──────────────────────────
 
-export const REFRESH_INTERVALS = [3, 5, 30] as const
+export const REFRESH_INTERVALS = [60, 180, 300, 600, 1800] as const
 export type RefreshSec = (typeof REFRESH_INTERVALS)[number]
 
 export function isDirty(pendingEdits: ReadonlyMap<string, string>): boolean {
   return pendingEdits.size > 0
 }
 
-/** 全局节奏轮转：3s → 5s → 30s → 暂停 → 3s。 */
+/** 全局节奏轮转：1m → 3m → 5m → 10m → 30m → 暂停 → 1m。 */
 export function nextRefreshInterval(cur: RefreshSec | 'pause'): RefreshSec | 'pause' {
-  if (cur === 3) return 5
-  if (cur === 5) return 30
-  if (cur === 30) return 'pause'
-  return 3
+  if (cur === 60) return 180
+  if (cur === 180) return 300
+  if (cur === 300) return 600
+  if (cur === 600) return 1800
+  if (cur === 1800) return 'pause'
+  return 60
 }
 
 export function refreshLabel(cur: RefreshSec | 'pause'): string {
-  return cur === 'pause' ? '暂停' : `${cur}s`
+  if (cur === 'pause') return '暂停'
+  if (cur < 60) return `${cur}s`
+  if (cur % 60 === 0) return `${cur / 60}m`
+  return `${Math.floor(cur / 60)}m${cur % 60}s`
 }
 
 // ────────────────────────── 纯函数：localStorage 迁移（GLM-U6） ──────────────────────────
@@ -494,7 +580,7 @@ export const LEGACY_KEY_RULES: LegacyKeyRule[] = [
   {
     old: 'pool.refreshSec',
     newKey: (): string => TC_GLOBAL_INTERVAL,
-    legalValues: new Set(['3', '5', '30', '60', '300', '600', '1800']),
+    legalValues: new Set(['60', '180', '300', '600', '1800']),
   },
 ]
 

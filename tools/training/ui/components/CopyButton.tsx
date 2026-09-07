@@ -7,9 +7,11 @@ export interface CopyButtonProps {
   /** 复制按钮的语意（如「隧道」）。 */
   label?: string
   small?: boolean
+  /** 无字图标模式（§361①：只显示 ⧉ 图标，不显示「复制」字样；语义走 title/aria）。 */
+  icon?: boolean
 }
 
-export function CopyButton({ text, label, small }: CopyButtonProps) {
+export function CopyButton({ text, label, small, icon }: CopyButtonProps) {
   const [done, setDone] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(
@@ -31,12 +33,12 @@ export function CopyButton({ text, label, small }: CopyButtonProps) {
   return (
     <button
       type="button"
-      className={`tc-copy${done ? ' tc-copy--done' : ''}${small ? ' tc-copy--sm' : ''}`}
+      className={`tc-copy${done ? ' tc-copy--done' : ''}${small ? ' tc-copy--sm' : ''}${icon ? ' tc-copy--icon' : ''}`}
       aria-label={`复制${label ?? '内容'}`}
       title={done ? '已复制' : `复制${label ? ` ${label}` : ''}`}
       onClick={copy}
     >
-      {done ? '已复制 ✓' : '⧉ 复制'}
+      {icon ? (done ? '✓' : '⧉') : done ? '已复制 ✓' : '⧉ 复制'}
     </button>
   )
 }
