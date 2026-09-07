@@ -87,6 +87,23 @@ def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
     return base64.b64encode(raw).decode("ascii"), hashlib.sha256(raw).hexdigest()
 
 
+def _remote_forward_agg(agg: dict) -> dict:
+    """云 worker result agg → 训练侧结算 agg（与 _serial_ppo 的 ppo_update agg 同口径）。
+
+    2026-09-08 vk1 事故回归：R5§363 之后云端 agg 已携带 `kickstart`（缰绳遥测），
+    结算端若丢弃该键 → iteration 行 kickstart 恒 None——worker 缰绳明明在跑、
+    可观测性却全盲，整根腿被误判「课程配置未起效」而作废。缺失键按 0.0 兜底
+    （旧 worker 无该键，不破迭代行结构）。"""
+    return {
+        "policy": float(agg.get("policy", 0.0)),
+        "value": float(agg.get("value", 0.0)),
+        "entropy": float(agg.get("entropy", 0.0)),
+        "kl": float(agg.get("kl", 0.0)),
+        "mean_ret": float(agg.get("mean_ret", 0.0)),
+        "kickstart": float(agg.get("kickstart", 0.0) or 0.0),
+    }
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -475,23 +492,25 @@ class TrainingSteps:
             if self._collect_child is not None:
                 log(f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})")
         # 结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）
-        agg = result.get("agg", {})
-        self._agg = {
-            "policy": float(agg.get("policy", 0.0)),
-            "value": float(agg.get("value", 0.0)),
-            "entropy": float(agg.get("entropy", 0.0)),
-            "kl": float(agg.get("kl", 0.0)),
-            "mean_ret": float(agg.get("mean_ret", 0.0)),
-        }
-        self._chunks_n = int(agg.get("chunks", 0))
-        self._total_steps = int(agg.get("steps", 0))
+        self._agg = _remote_forward_agg(result.get("agg", {}))
+        self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
+        self._total_steps = int(result.get("agg", {}).get("steps", 0))
         self._kl_cum = self._agg["kl"]
         self._ppo_sec = round(time.time() - t_ppo, 1)
+        # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
+        # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
+        # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
+        if kick_on and not result.get("smoke") and float(self._agg.get("kickstart", 0.0)) == 0.0:
+            log(
+                f"[run_rl] WARN remote it{it}: kickstart_ref 已要求（kk 衰减调度激活）"
+                "但云端结果 kickstart=0——worker 未执行缰绳？查 worker 代码/会话新鲜度"
+            )
         log(
             f"[run_rl] remote ppo it{it}: job {jid} accepted — "
             f"steps={self._total_steps} chunks={self._chunks_n} "
             f"kl={self._agg['kl']:.5f} entropy={self._agg['entropy']:.4f} "
-            f"({self._ppo_sec}s round-trip) -> {args.out}"
+            + (f"kickstart={self._agg['kickstart']:.4f} " if kick_on else "")
+            + f"({self._ppo_sec}s round-trip) -> {args.out}"
         )
 
     def _export_weights(self, it: int) -> None:

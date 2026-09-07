@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rl.config import CourseConfig, PpoScheduleEntry, RewardBlock
-from rl.loop_steps import TrainingSteps
+from rl.loop_steps import TrainingSteps, _remote_forward_agg
 
 # 与 p4-onset 课程同形的分段表 + 已知可编译的奖励公式（build_reward_fn 白名单内）。
 SCHEDULE = [
@@ -60,6 +60,35 @@ def _steps(opt=None) -> TrainingSteps:
     if opt is not None:
         ts._opt = opt
     return ts
+
+
+def test_remote_forward_agg_carries_kickstart() -> None:
+    """R5§363 回归（2026-09-08 vk1 事故）：云 worker agg 的 kickstart 缰绳遥测必须
+    透传到训练侧结算——否则 iteration 行 kickstart 恒 None，worker 缰绳明明在跑
+    却整根腿被误判「课程配置未起效」而作废。
+
+    样例取自真实 vk1 结果（it8 job 18d73cee：agg.kickstart≈0.63、kl≈0.005）。
+    """
+    agg = {
+        "policy": -0.0023,
+        "value": 0.4604,
+        "entropy": 0.3479,
+        "kl": 0.00496,
+        "mean_ret": 0.0016,
+        "kickstart": 0.6343,
+    }
+    out = _remote_forward_agg(agg)
+    assert out["kickstart"] == pytest.approx(0.6343)
+    assert out["kl"] == pytest.approx(0.00496)
+    assert out["value"] == pytest.approx(0.4604)
+
+
+def test_remote_forward_agg_old_worker_defaults() -> None:
+    """旧 worker（agg 无 kickstart 键）→ 0.0 兜底，不破迭代行结构、不抛。"""
+    agg = {"policy": 0.1, "value": 0.2, "entropy": 0.3, "kl": 0.4, "mean_ret": 0.5}
+    out = _remote_forward_agg(agg)
+    assert out["kickstart"] == 0.0
+    assert out["kl"] == 0.4
 
 
 def test_course_iter_folds_lr_into_args_remote() -> None:

@@ -3265,6 +3265,31 @@ ref 487KB/normalize），worker 11 轮无 kickstart 列——hub 自 vr1 后从�
 旧 code 锚 3d2029b3…；新 hub 的 code_sha256 必须不同，否则视为没重启。
 启动协议补丁：it1 校准永远含缰绳列存在性检查。
 
+**纠错补记（2026-09-08，同晚取证重审——上述"作废" verdict 撤回，技术结论
+被数据推翻）：**主根因不是 hub、不是 worker（两者都证明没问题），是**训练侧
+结算把云 worker 的 kickstart 遥测丢掉了**。证据链（`tmp/p3-vk1-stalehub`）：
+① 幸存结果文件（it8–13，it1–7 的 job 目录是被 H9 轮转 `loop_guards._rotate_cleanup`
+正常删掉的）`result/result.json` agg.kickstart=0.60–0.63——R5-only 引擎无此键，
+不可能产出；② iteration 行 kl 曲线 0.75→0.031→0.0135→0.0067→… 与缰绳系数
+kk=2^-(it−1)（it8 manifest kk=0.0078 验证）同形衰减——缰绳"回拽→松绑"正是该
+形状，无缰绳 it1 应为 ~0.005；③ 对照组 ks1（本地 CPU，同一 loop 的本地路径把
+ppo_update agg 原样喂给 iteration 行）kickstart 列正常 0.15/0.23/0.31/…
+④ code.zip（sha=3d2029b3188b==锚）解包验证 engine.kickstart_kl/ref_model/
+worker.ref_weights 全在——锚从来不是 R5-only，"旧 hub"从未存在，重启验收
+标准因此必然落空。所以：vk1 首发 it1–12 是**有效 combo 数据**（归一＋缰绳都在
+跑），不该作废、不该 reclassify 为 vr1-replication；stalehub 数据建议保留续评。
+"it1 KL 0.75"是 update 侧 KL（kk=1.0 满额回拽，且 vk1 首轮离 BC ref ~0.6 nats
+远于 ks1 的 0.15→拽力更大），不是"缰绳没生效"；§364 成功门 value MSE<2 其实
+it2（1.01）即过。
+
+**修复（2026-09-08，落库）：**`loop_steps._remote_ppo` 原先手写结算 agg 时漏掉
+`kickstart` 键（`rl/loop_steps.py`）——已抽出 `_remote_forward_agg()` 纯函数透传
+（旧 worker 无键按 0.0 兜底），并加启动协议机器版：`kickstart_ref` 已要求但云端
+结果 kickstart=0 时响亮 WARN（worker 没跑缰绳的持续监护）。§7 回归测试见
+`tests/test_rl_remote_fixes.py::test_remote_forward_agg_*`（先红后绿）。
+涉及"重启 hub / worker 退出重载 / 模块钉住"的手术**未做**——数据不支持（缰绳
+一直在跑），worker 模块钉住仅记为潜在风险，下次改 worker 侧代码时再评估。
+
 ## §366 / 页面加载 <1s：慢部件快照缓存（2026-09-08，用户指令"6.7s 太慢"）
 
 **问题**：§365 修复后 `buildStateView` 仍 6.7s（节点 ping 1.5-4s + 组件探测串行

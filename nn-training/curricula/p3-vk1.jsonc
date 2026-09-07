@@ -1,0 +1,107 @@
+// 课程 p3-vk1 —— combo 叠加（DECISIONS §364）：归一＋缰绳
+//
+// 由 p3-ks1.jsonc 逐字节派生，仅改动以下 3 处，其余（地图/variants/count 3/player/
+// reward/scale/schedule/eval/护栏/bc ep60/kickstart/warmup 0）全同义——三臂对照：
+// vr1＝归一单飞，ks1＝缰绳单飞，vk1＝叠加：
+//   1. name: p3-ks1 → p3-vk1
+//   2. normalize_ret: false → true（R5：ret 跨 batch mean 0/std 1；串行全路径生效）
+//   3. out/traj/backup_dir/backup_prefix → tmp/p3-vk1（fresh，不 resume 任何旧腿）
+//
+// 成功门（§364 预注册）：value MSE<2（vr1 复现性检验，3 轮内）＋it5 贪心 ≥40
+// （ks1 未做到 34；叠加必须双过才算 1+1>1）。失败分支见 §364。
+// 注意：本腿跑在活的 0.25 ENT 熔断下（映射修复后；前辈腿跑的都是死的 0.6）。
+// p3→p4 门连续 2 eval ≥70 不变。
+{
+  "version": 5,
+  "name": "p3-vk1",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 3,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5＋§363 双 flag（串行路径生效；默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p3-vk1/weights.json",
+  "traj": "tmp/p3-vk1",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p3-vk1",
+  "backup_prefix": "p3-vk1",
+  // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
