@@ -3216,3 +3216,45 @@ ent_break 0.25 从未落地——flat_overrides 漏映射三阈值（§339 文�
 且历史最大连击 streak=1（从未近 8 线）；人工 tripwire 看盘覆盖了真空期。
 已修（3 行映射＋回归单测），ks1 echo 验证 0.25 落地。教训：凡"课程可配"的文档
 断言，必须配一个 overrides 映射测试——断言与 plumbing 分家是同类 bug 温床。
+
+**补记（2026-09-08，ks1 it23：自定义熵阀退役）：**三振——wdmg it13（自恢复）、
+p2 it14–15（sharpening 爬升中）、ks1 it22–23（胜率 35 上下＋死主导＋KL 静），
+三次 firing 全误报、零命中。退役自定义熵 tripwire（条文作废），保留内建 F4
+（0.25 绝对臂＋跌幅臂）＋人工看盘＋KL 双规则。教训：自创护栏的假阳性率必须
+用"触发三次全错即退役"约束，否则护栏比风险本身更扰民。
+
+## §365 / 控制台 /api/state 空回复：nodeViews 串行 ping 修复（2026-09-08，用户报告）
+
+**问题**（用户报告）：`bun run train` 后 `curl http://127.0.0.1:8900/` 得
+`Empty reply from server`（连接建立、无响应）。逐段计时定位：`nodeViews` 对 enabled
+节点**串行** `fetch /v1/ping`（每节点 `AbortSignal.timeout(4000)`），5 个启用节点
+中 3 个离线 → 10.1s；全量 `buildStateView` 13.2s，超过 Bun.serve 默认 idleTimeout
+10s → 服务端关连接，curl 空回复。注释明写「并行 ping」，实现却是串行 for——
+注释契约与实现脱节的又一起（§363 同款教训）。
+
+**决定**：
+1. `nodeViews` 改 `Promise.all` 并行 ping（`cfg.nodes.map(async ...)`），保序、输出
+   形状与串行逐字节一致；不可达节点各自 4s 超时，最坏 8 节点 = 4s 而非 32s。
+2. 测试：fetch 打桩 + 并发计数（并行实现下全部 enabled 节点在同一微任务批次已发起，
+   串行实现此刻仅 1 个挂起 → 断言 `started.length===3 && maxActive===3`，串行必红）。
+3. `componentViews` 的健康探测（cloudflared 探针 8s 超时）保持串行不动——实测当前
+   只 1.5s，且那是"组件失活"的次级场景；本次只修实测瓶颈，不加码。
+
+**效果**：`buildStateView` 13.2s → 6.7s（nodeViews 10.1s → 4s 上限；其余为
+aggregateNodeHistory 1.9s 递归扫 tmp/ + componentViews 1.5s + metrics 0.1s），
+回到 10s idleTimeout 预算内，页面可开。**修复前失败测试**：新测试在旧串行实现上
+红（started.length=1），改并行后绿——§7 复现-修复闭环成立。
+
+## §364 / p3-vk1 combo：归一＋缰绳叠加（2026-09-08，ks1 it25 停腿后，用户指令）
+
+背景：ks1 守住（34–43/25 轮）但不爬＋熵 1/8 计数，主动转场。两张牌均已单验证：
+vr1（毕业 1 轮，胜率平）、ks1（守线 25 轮，value 冻）。叠加测 1+1 是否 >1。
+决策：新课程 `p3-vk1.jsonc`（由 p3-ks1 派生加 normalize_ret:true；与 vr1/ks1
+同起点 ep60、同数学——三臂对照：vr1=归一单飞，ks1=缰绳单飞，vk1=叠加）。
+warmup_iters=0（缰绳要，双闸已验）。注意本腿首次跑在**活的 0.25 ENT 熔断**下
+（ent_break 映射修复后；前辈们跑的都是死的 0.6——熵行为读数会更严，属预期）。
+成功门（预注册）：value MSE<2（vr1 复现性检验，3 轮内）＋it5 贪心 ≥40
+（ks1 未做到 34；叠加必须双过才算 1+1>1）。失败分支：毕业＋胜率平→ 与 vr1
+同 verdict，转向回报重分配/短局（§362 排序）；不毕业（归一化在叠加下失效）→
+查交互 bug（单飞时 work 的东西叠加不 work，先疑实现后疑理论）。
+p3→p4 门连续 2 eval ≥70 不变。启动链同前（停 ks1 → setCourse → 重启 hub → Pull）。

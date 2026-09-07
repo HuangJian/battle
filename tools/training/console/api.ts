@@ -307,43 +307,47 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
   return views
 }
 
-/** 节点视图（rl-config + enabled 节点并行 ping）。 */
+/** 节点视图（rl-config + enabled 节点并行 ping）。
+ *  并行是硬要求：不可达节点各自等 AbortSignal.timeout(4000)，串行会让 /api/state
+ *  在节点离线时拖到 N×4s（2026-09-08 实测 5 启用节点 10.1s → 超过 Bun.serve 默认
+ *  idleTimeout 10s，服务端关连接 → curl 空回复；DECISIONS §365）。Promise.all 保序，
+ *  输出与串行一致。 */
 export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
-  const out: NodeView[] = []
-  for (const n of cfg.nodes) {
-    let online: boolean | null = null
-    let codeHash: string | null = null
-    let cpus: number | null = null
-    if (n.enabled) {
-      try {
-        const resp = await fetch(`${n.url}/v1/ping`, {
-          headers: { Authorization: `Bearer ${n.authKey}` },
-          signal: AbortSignal.timeout(4000),
-        })
-        online = resp.status === 200
-        if (online) {
-          const body = (await resp.json()) as { codeHash?: string; cpus?: number }
-          codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
-          cpus = typeof body.cpus === 'number' ? body.cpus : null
+  return Promise.all(
+    cfg.nodes.map(async (n): Promise<NodeView> => {
+      let online: boolean | null = null
+      let codeHash: string | null = null
+      let cpus: number | null = null
+      if (n.enabled) {
+        try {
+          const resp = await fetch(`${n.url}/v1/ping`, {
+            headers: { Authorization: `Bearer ${n.authKey}` },
+            signal: AbortSignal.timeout(4000),
+          })
+          online = resp.status === 200
+          if (online) {
+            const body = (await resp.json()) as { codeHash?: string; cpus?: number }
+            codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
+            cpus = typeof body.cpus === 'number' ? body.cpus : null
+          }
+        } catch {
+          online = false
         }
-      } catch {
-        online = false
       }
-    }
-    out.push({
-      id: n.id,
-      url: n.url,
-      gpuPush: !!n.gpu_push,
-      enabled: n.enabled,
-      concurrency: n.concurrency,
-      online,
-      codeHash,
-      cpus,
-      busy: busy.has(`node:${n.id}`),
-      lastContrib: -1,
-    })
-  }
-  return out
+      return {
+        id: n.id,
+        url: n.url,
+        gpuPush: !!n.gpu_push,
+        enabled: n.enabled,
+        concurrency: n.concurrency,
+        online,
+        codeHash,
+        cpus,
+        busy: busy.has(`node:${n.id}`),
+        lastContrib: -1,
+      }
+    }),
+  )
 }
 
 /** 完整状态快照（页面轮询的数据源）。 */
