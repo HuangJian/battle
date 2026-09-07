@@ -1,0 +1,109 @@
+// 课程 p3-vr1 —— R5 首攻（DECISIONS §361）：ret 归一（normalize_ret=true）
+//
+// 由 p3-bc.jsonc 逐字节派生，仅改动以下 3 处，其余（地图/variants/count 3/player/
+// reward/scale/schedule/eval/护栏/bc ep60）全同义——与 p3-bc 最干净的 A/B
+// （同起点同数学，只差这一个 flag）：
+//   1. name: p3-bc → p3-vr1
+//   2. normalize_ret: false → true（R5：ret 跨 batch mean 0/std 1，value 头拟合
+//      O(1) 目标；串行 local/remote 全路径生效，stream 路径不适用）
+//   3. out/traj/backup_dir/backup_prefix → tmp/p3-vr1（fresh，不 resume p3-bc）
+//
+// 成功门（§361 预注册）：value MSE<2 为评论员毕业；毕业＋胜率抬头＝根因确认；
+// 毕业＋胜率平＝critic 出局（→容量 R6）。对照锚：p3-bc it15（11/100，value~7）。
+// p3→p4 门连续 2 eval ≥70 不变。
+//
+// 历史注记（§360 全系变体化，p3-bc 腿用）：stages[0].spawn_variants 4 三元组去一角
+// （[TL,TR,BR]/[TR,BR,BL]/[TL,BR,BL]/[TL,TR,BL]，玩家恒居中；顶层 enemy_spawns
+// 保留）。变体新基线（§12）：BC 42 / God 81。本腿对称门不适用——本腿先看
+// value 毕业（MSE<2），再看胜率（一并见成功门）。
+{
+  "version": 5,
+  "name": "p3-vr1",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 3,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  // R5：ret 跨 batch 归一（§361；串行路径生效，默认 false 即历史行为）。
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p3-vr1/weights.json",
+  "traj": "tmp/p3-vr1",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p3-vr1",
+  "backup_prefix": "p3-vr1",
+  // 自定义关 stage ID 从 2000 开始，p3-vr1 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

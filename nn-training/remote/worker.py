@@ -460,6 +460,7 @@ def run_job(
                 "value": 0.0,
                 "entropy": 0.0,
                 "kl": 0.0,
+                "kickstart": 0.0,
                 "mean_ret": 0.0,
                 "steps": 0,
                 "chunks": 0,
@@ -538,6 +539,31 @@ def run_job(
         opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
         log(f"job {jid}: 无 opt_init，从 init_weights warm-start + 新 Adam")
 
+    # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
+    # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
+    kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
+    ref_model = None
+    if kick_kl > 0:
+        import base64 as _b64
+        import hashlib as _hl
+
+        ref_b64 = str(manifest.get("ref_weights_b64", "") or "")
+        ref_fp = str(manifest.get("ref_weights_fp", "") or "")
+        if not ref_b64:
+            raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
+        ref_raw = _b64.b64decode(ref_b64.encode("ascii"))
+        if _hl.sha256(ref_raw).hexdigest() != ref_fp:
+            raise ProtocolError(f"job {jid}: ref_weights 指纹不符——拒收")
+        ref_path = job_dir / "ref_weights.json"
+        ref_path.write_bytes(ref_raw)
+        ref_model = ppo_engine.build_ppo(str(ref_path))
+        load_state_into(ref_model, str(ref_path))
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        ref_model.eval()
+        ref_model.to(device_t)
+        log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
+
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
     shards_root = str(job_dir)
     t_ppo = time.time()
@@ -546,6 +572,7 @@ def run_job(
         float(manifest["gamma"]),
         float(manifest["lam"]),
         normalize_adv=str(manifest["adv_norm"]) != "none",
+        normalize_ret=bool(manifest.get("normalize_ret", False)),
     )
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     chunks = ppo_engine.chunk_episodes(episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"]))
@@ -556,6 +583,8 @@ def run_job(
         int(manifest["epochs"]),
         device_t,
         kl_coef=float(manifest["kl_coef"]),
+        ref_model=ref_model,
+        kickstart_kl=kick_kl,
     )
     ppo_sec = round(time.time() - t_ppo, 1)
     log(f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}")
@@ -581,6 +610,7 @@ def run_job(
             "value": float(agg.get("value", 0.0)),
             "entropy": float(agg.get("entropy", 0.0)),
             "kl": float(agg.get("kl", 0.0)),
+            "kickstart": float(agg.get("kickstart", 0.0)),
             "mean_ret": float(agg.get("mean_ret", 0.0)),
             "steps": int(total_steps),
             "chunks": len(chunks),

@@ -1,0 +1,112 @@
+// 课程 p4-wdmg —— reward 实验（DECISIONS §352，docs/rl.progress.md §6）：死亡惩罚×2
+//
+// 由 p4-horizon.jsonc 逐字节派生（刻意不是 p4-fast——fast 的规模结论要求 reward 变量
+// 干净隔离，规模回到 horizon 档），仅改动以下 3 处，其余（地图/敌编/player/reward 公式
+// 结构/其它权重/max_ticks/终局分/gamma/lam/schedule/epochs/mb/workers/bc/eval 节奏）
+// 与 p4-horizon 完全同义：
+//   1. name: p4-horizon → p4-wdmg
+//   2. reward.params.wDmg: 1.0 → 2.0（死亡 ~60% 主因，§345 指定下一候选；单旋钮最小步，
+//      3.0+ 留作升级；终局 lives_exhausted -1.0 不动，只动塑形项）
+//   3. out/traj/backup_dir/backup_prefix → tmp/p4-wdmg（§15.5：改 reward 即新实验，
+//      fresh 目录，不 resume 旧 run；基线锚 it70 35% 起点 + horizon it30 23% +
+//      fast it20 6% 负对照）
+//
+// 刻意不动项的理由（fast it20 实测结论）：
+//   - lr 1.5e-4 / kl_coef 0.2 不动：it13–16 的 3e-4 试探证明系统对 lr 不敏感
+//     （KL 0.03–0.04、胜率双双不动）——带 3e-4 进新实验只会混杂 reward 效应。
+//   - 规模回 horizon 档（150 局/epochs 4）：fast 证明 800 步/轮换不来进展；reward 是
+//     当前最高 EV 变量，给它干净对照，找到信号再谈放大。
+//   - gamma 0.998 / lam 0.99 沿用 horizon：三臂（horizon/fast/wdmg）共享同一视野假设。
+//   - bc 沿用同一 it70 权重：三臂同一起点，paired 可比。
+// 预期 value dip：wDmg 改写 reward 尺度，value 头必重标（γ 切换 it4 式 dip 翻版；
+//   R5 基线 value~4–6 vs 新 return 尺度）——前 3 轮 value 混乱不判崩塌，看 KL/熵。
+// 真护栏（照搬 §350）：内建 F4 kl≥0.075×3 停车为绑定护栏；运行规则 kl≥0.06 连 2 轮
+//   → 人工降档（worker 末 epoch KL>0.10 为确认）；熵相对峰值掉 >0.05 → epochs 回滚到
+//   2（horizon 档的一半；4 已是小规模，降档路径不同于 fast）；it1–2 校准门＋R5 抄录。
+// 判定线：>35% / 趋近 God 64% 为成；≤30% 横盘 40 轮证伪 → 下一候选 R5 value-head
+//   处理。提前干预：it15 eval ≤10% 则讨论（fast precedent）。
+// 启动：停 fast → 控制台 setCourse p4-wdmg（API 直调：POST /api/setCourse，
+//   下拉框要到 it1 落账后出现）→ Pull 预设。切课程必重启 hub-server。
+{
+  "version": 5,
+  "name": "p4-wdmg",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 2.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/p4-onset/p4-onset.it70.20260906-115550.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p4-wdmg/weights.json",
+  "traj": "tmp/p4-wdmg",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（低熵热启动档；当前熵带 0.40，§339 语义）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p4-wdmg",
+  "backup_prefix": "p4-wdmg",
+  // 自定义关 stage ID 从 2000 开始，p4-wdmg 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

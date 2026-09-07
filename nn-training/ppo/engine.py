@@ -205,11 +205,23 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
 
 
 def load_episodes(
-    data_root: str, gamma: float = GAMMA, lam: float = LAM, normalize_adv: bool = True
+    data_root: str,
+    gamma: float = GAMMA,
+    lam: float = LAM,
+    normalize_adv: bool = True,
+    normalize_ret: bool = False,
 ) -> list[dict]:
     """Discover trajectory shards under `data_root`, compute per-episode GAE,
     and normalize advantages across the whole batch. Shared by this CLI's
-    update mode and the run_rl.py loop."""
+    update mode and the run_rl.py loop.
+
+    normalize_ret（R5，默认 False = 历史行为逐字节不变）：True 时 ret 跨 batch
+    归一（mean 0 / std 1，intent 头同款），让 value 头拟合 O(1) 量级目标。
+    备注：GAE 自举仍用 rollout 时 head 输出的原始尺度 V——baseline 不改变策略
+    梯度的无偏性，只改变方差；当前 V 近乎常数（MSE≫return 方差）时归一化只会
+    把 baseline 从"无"变"有"，不会变坏。stream 路径不走本函数（见
+    rl/stream.py），该 flag 只覆盖串行（local/remote）路径。
+    """
     return load_episodes_common(
         data_root,
         label="ppo",
@@ -219,7 +231,7 @@ def load_episodes(
         gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
         gae_name="GAE",
         normalize_adv=normalize_adv,
-        normalize_ret=False,
+        normalize_ret=normalize_ret,
     )
 
 
@@ -237,6 +249,8 @@ def ppo_update(
     ckpt_path: str | None = None,
     on_epoch_done=None,
     kl_coef: float = 0.0,
+    ref_model=None,
+    kickstart_kl: float = 0.0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -250,6 +264,11 @@ def ppo_update(
     （向后兼容，缺省路径数学逐字节不变）。>0 时对每个 minibatch 施加对采样策略
     （lp_old，即收集策略）的 KL 惩罚 `kl_coef · E[(r−1) − ln r]`——per-tick 的
     「初始 KL 大、稳定后衰减」由 ppo_schedule 显式传值落地。
+
+    ref_model + kickstart_kl（R5§363，BC-anchored kickstart，mirror intent 数学）：
+    ref = BC 冻结快照（调用方 freeze＋eval）；两者就绪时 loss +=
+    kickstart_kl · KL(π_curr ‖ π_BC)，分头 exact-KL（move＋fire 求和，与 entropy
+    口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
     """
     model.train()
     clip = CLIP_EPS
@@ -301,6 +320,19 @@ def ppo_update(
             if kl_coef > 0.0:
                 # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
                 loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+            kick_mean = torch.zeros((), device=device)
+            if ref_model is not None and kickstart_kl > 0:
+                # BC-anchored kickstart（§363，intent.py:292-298 同构）：
+                # KL(π_curr ‖ π_ref) = Σ_a π_curr·(log π_curr − log π_ref)，
+                # 分头求和（与本文件 entropy 口径同构）。
+                with torch.no_grad():
+                    rm, rf, _ = ref_model(obs, sc)
+                    ref_move = masked_logsoftmax(rm, mask[:, :MOVE_DIM])
+                    ref_fire = masked_logsoftmax(rf, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+                kl_m = (move_logp.exp() * (move_logp - ref_move)).sum(dim=-1)
+                kl_f = (fire_logp.exp() * (fire_logp - ref_fire)).sum(dim=-1)
+                kick_mean = (kl_m + kl_f).mean()
+                loss = loss + kickstart_kl * kick_mean
 
             opt.zero_grad()
             loss.backward()
@@ -309,12 +341,14 @@ def ppo_update(
 
             with torch.no_grad():
                 approx_kl = approx_kl_est(lp_old, lp_new).item()
+                kick_log = float(kick_mean.item())
             stats.append(
                 {
                     "policy": float(policy_loss.item()),
                     "value": float(value_loss.item()),
                     "entropy": float(entropy.item()),
                     "kl": float(approx_kl),
+                    "kickstart": kick_log,
                     "mean_ret": float(ret.mean().item()),
                     "mean_adv": float(adv.mean().item()),
                     "gnorm": float(gn),
@@ -351,6 +385,7 @@ def ppo_update(
             + (", ckpt saved" if ckpt_path else "")
             + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
             f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
+            f"kickstart={sum(s['kickstart'] for s in ep_stats) / n_e:.4f} "
             f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
             f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
             f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
@@ -365,6 +400,7 @@ def ppo_update(
             "value": 0.0,
             "entropy": 0.0,
             "kl": 0.0,
+            "kickstart": 0.0,
             "gnorm": 0.0,
             "mean_ret": 0.0,
         }
@@ -394,6 +430,14 @@ def main():
     ap.add_argument("--gamma", type=float, default=GAMMA)
     ap.add_argument("--lam", type=float, default=LAM)
     ap.add_argument("--device", type=str, default="cpu")
+    ap.add_argument(
+        "--normalize-ret",
+        type=int,
+        default=0,
+        help="R5：ret 跨 batch 归一（mean 0/std 1，value 头拟合 O(1) 目标）；"
+        "0 = 历史行为（默认）。run_rl 课程模式由课程 normalize_ret 驱动，本 flag "
+        "仅手动 update 用。",
+    )
     ap.add_argument("--seed", type=int, default=7, help="numpy seed for minibatch shuffling")
     ap.add_argument(
         "--threads",
@@ -437,7 +481,9 @@ def main():
     load_state_into(model, args.resume)
     model.to(device)
 
-    episodes = load_episodes(args.data, args.gamma, args.lam)
+    episodes = load_episodes(
+        args.data, args.gamma, args.lam, normalize_ret=bool(args.normalize_ret)
+    )
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     log(f"[ppo] total transition steps={total_steps}")
 

@@ -69,6 +69,10 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "kl_coef": 0.0,
     "kl_cap": None,  # None = 不覆盖，由 policy.streamKlCap 决定
     "adv_norm": "auto",
+    "normalize_ret": False,  # R5：ret 归一；缺失（旧 hub）= 关
+    "kickstart_kl": 0.0,  # §363：BC 缰绳系数（已衰减）；0 = 关
+    "ref_weights_b64": "",  # §363：BC ref 权重 base64；空 = 无
+    "ref_weights_fp": "",  # §363：上者 sha256（有字节时必对上）
     "shuffle": True,
     "schedule_raw": [],  # ppo_schedule 解析前原始表（审计）
     "opt_init": "",  # base64 tar（model/opt/numpy RNG）；空 = 无（首轮）
@@ -121,6 +125,14 @@ def normalize_manifest(m: dict) -> dict:
             raise ProtocolError(f"{k} 必须是非空 str")
     if out["mode"] != "per-tick":
         raise ProtocolError(f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）")
+    if not isinstance(out.get("normalize_ret", False), bool):
+        raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
+    if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
+        out.get("kickstart_kl", 0.0), bool
+    ):
+        raise ProtocolError(f"kickstart_kl 必须是 number，收到 {out.get('kickstart_kl')!r}")
+    if float(out.get("kickstart_kl", 0.0)) < 0:
+        raise ProtocolError("kickstart_kl 必须 >= 0")
     return out
 
 

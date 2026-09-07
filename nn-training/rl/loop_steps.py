@@ -72,6 +72,21 @@ def _push_job_round(nodes: list[dict], manifest: dict, jid: str, payload_bytes: 
     raise RetryableError(f"push 全部节点失败: {last}")
 
 
+def _kickstart_ref_payload(args: Any) -> tuple[str, str]:
+    """BC ref 权重文件 → (base64, sha256)。缺失响亮失败（缰绳无尺子＝静默裸奔，
+    不可接受）。仅 kickstart 激活路径调用。"""
+    import base64
+
+    path = str(getattr(args, "bc", "") or "")
+    if not path or not Path(path).exists():
+        raise SystemExit(
+            f"[run_rl] kickstart_ref 要求课程 bc 权重存在（ref 尺子）：{path!r}——"
+            "检查课程 bc 路径"
+        )
+    raw = Path(path).read_bytes()
+    return base64.b64encode(raw).decode("ascii"), hashlib.sha256(raw).hexdigest()
+
+
 class TrainingSteps:
     """单轮结算与梯度步 mixin。"""
 
@@ -83,6 +98,7 @@ class TrainingSteps:
     _opt: Any
     _device: Any
     _ref_model: Any
+    _bc_ref: Any
     _ppo_mod: Any
     _ppo_goal: Any
     _ppo_intent: Any
@@ -253,6 +269,7 @@ class TrainingSteps:
             float(getattr(args, "gamma", 0.995)),
             float(getattr(args, "lam", 0.95)),
             normalize_adv=getattr(args, "adv_norm", "auto") != "none",
+            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
         )
         total_steps = sum(e["obs"].shape[0] for e in episodes)
         chunks = self.ppo_backend.chunk_episodes(episodes, args.mb)
@@ -268,6 +285,15 @@ class TrainingSteps:
                 **self.update_kwargs(args, it, self._start_it, self._ref_model),
             )
         else:
+            # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减语义
+            # （warmup_iters=0 由 validate_args 强制，故 it1 即满额）；
+            # value_warmup_epochs 忽略（per-tick 无 warmup 概念，R5-warmup 另排）。
+            kick = 0.0
+            bc_ref = getattr(self, "_bc_ref", None)
+            if bc_ref is not None:
+                kick = float(
+                    self.update_kwargs(args, it, self._start_it, bc_ref)["kl_coef"]
+                )
             agg = self._ppo_mod.ppo_update(
                 self._model,
                 self._opt,
@@ -276,6 +302,8 @@ class TrainingSteps:
                 self._device,
                 ckpt_path=str(traj_dir / "ppo_ckpt"),
                 kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
+                ref_model=bc_ref,
+                kickstart_kl=kick,
             )
         self._ppo_sec = round(time.time() - t_ppo, 1)
         self._chunks_n = len(chunks)
@@ -357,6 +385,15 @@ class TrainingSteps:
         run_id = RUN_ID
         ckpt_remote_path = Path(args.traj) / f"it{it - 1}" / "ppo_ckpt_remote"
         ckpt_remote: Path | None = ckpt_remote_path if ckpt_remote_path.exists() else None
+        # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减（ref 传 None——
+        # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
+        kick_on = bool(getattr(args, "kickstart_ref", False))
+        kick_kl = (
+            float(self.update_kwargs(args, it, self._start_it, None)["kl_coef"])
+            if kick_on
+            else 0.0
+        )
+        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_on else ("", "")
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -383,6 +420,10 @@ class TrainingSteps:
             kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
             kl_cap=getattr(args, "_kl_cap", None),
             adv_norm=getattr(args, "adv_norm", "auto"),
+            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
+            kickstart_kl=kick_kl,
+            ref_weights_b64=ref_b64,
+            ref_weights_fp=ref_fp,
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
             log=log,

@@ -146,3 +146,32 @@ def test_backup_relative_dir_resolves_repo_root(
     out = archive.backup_weights(str(src), 1, prefix="x", backup_dir="nn-training/weights/t")
     assert out is not None
     assert Path(out).parent == tmp_path / "nn-training" / "weights" / "t"
+
+
+def test_course_normalize_ret_override() -> None:
+    """R5：课程显式 normalize_ret 才进 flat_overrides（默认缺席，保持现状）。"""
+    assert "normalize_ret" not in _course().flat_overrides()
+    c = CourseConfig(name="nr-test", normalize_ret=True)
+    assert c.flat_overrides()["normalize_ret"] is True
+
+
+def test_course_kickstart_overrides() -> None:
+    """§363：kickstart_ref/warmup_iters 显式才进 flat_overrides（默认缺席）。"""
+    assert "kickstart_ref" not in _course().flat_overrides()
+    assert "warmup_iters" not in _course().flat_overrides()
+    c = CourseConfig(name="ks-test", kickstart_ref=True, warmup_iters=0)
+    assert c.flat_overrides()["kickstart_ref"] is True
+    assert c.flat_overrides()["warmup_iters"] == 0
+
+
+def test_course_ent_break_overrides() -> None:
+    """§339 回归：F4 三阈值课程可配（此前漏映射，课程值从未落地）。"""
+    assert "ent_break" not in _course().flat_overrides()
+    c = CourseConfig(
+        name="ent-test", ent_break=0.25, ent_break_consec=5,
+        ent_break_max_winrate=0.4,
+    )
+    o = c.flat_overrides()
+    assert o["ent_break"] == 0.25
+    assert o["ent_break_consec"] == 5
+    assert o["ent_break_max_winrate"] == 0.4

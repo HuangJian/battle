@@ -801,3 +801,25 @@ def test_run_job_result_cache_reuse(tmp_path: Path, monkeypatch) -> None:
         work_dir=tmp_path, echo=False, log=lambda _m: None,
     )
     assert out == cached
+
+
+def test_manifest_normalize_ret_default_and_passthrough() -> None:
+    """R5：normalize_ret 缺失默认 False（旧 hub 兼容）；显式 True 透传；
+    非 bool 响亮拒绝。"""
+    assert normalize_manifest(_mini_manifest())["normalize_ret"] is False
+    m = normalize_manifest(_mini_manifest(normalize_ret=True))
+    assert m["normalize_ret"] is True
+    with pytest.raises(ProtocolError, match="normalize_ret"):
+        normalize_manifest(_mini_manifest(normalize_ret=1))
+
+
+def test_manifest_kickstart_defaults_and_reject() -> None:
+    """§363：kickstart 三键缺失默认（0.0/""/""）；显式透传；负系数拒收。"""
+    m = normalize_manifest(_mini_manifest())
+    assert m["kickstart_kl"] == 0.0
+    assert m["ref_weights_b64"] == ""
+    assert m["ref_weights_fp"] == ""
+    m2 = normalize_manifest(_mini_manifest(kickstart_kl=0.5))
+    assert m2["kickstart_kl"] == 0.5
+    with pytest.raises(ProtocolError, match="kickstart_kl"):
+        normalize_manifest(_mini_manifest(kickstart_kl=-1.0))

@@ -203,6 +203,20 @@ def validate_args(args) -> None:
         args.stream = 0
         args.double_buffer = 0
         log("[run_rl] remote mode: stream/double-buffer forced to 0 (config defaults suppressed)")
+    # ===== BC-anchored kickstart（§363）：per-tick 缰绳双闸 =====
+    # 缰绳必须 it1 就勒住（smash 轮）——warmup_iters!=0 会让首轮系数归零（见
+    # run_rl.update_kwargs），属配置自相矛盾，启动期响亮拒绝。
+    if bool(getattr(args, "kickstart_ref", False)):
+        if getattr(args, "mode", "per-tick") != "per-tick":
+            raise SystemExit(
+                "[run_rl] kickstart_ref 只支持 per-tick（intent/goal 自带 out 系 ref，"
+                "双锚定语义冲突）——关掉课程 kickstart_ref"
+            )
+        if int(getattr(args, "warmup_iters", 1) or 0) != 0:
+            raise SystemExit(
+                "[run_rl] kickstart_ref 要求 warmup_iters=0（缰绳 it1 必须生效；"
+                f"当前 {getattr(args, 'warmup_iters', 1)} 会让首轮系数归零）"
+            )
 
 
 # ================================================================== 课程配置
@@ -389,6 +403,12 @@ class CourseConfig(BaseModel):
     lr: float = 3e-4
     epochs: int = 4
     mb: int = 512
+    # R5（2026-09-07）：ret 跨 batch 归一开关——课程级，默认 False 即历史行为。
+    # True 经 flat_overrides → args → manifest → worker，全串行路径生效。
+    normalize_ret: bool = False
+    # BC-anchored kickstart（§363）：True = per-tick 缰绳开（ref 取课程 bc 冻结
+    # 快照）；默认 False 即历史行为。warmup_iters 课程 plumbing 见下（CLI 早有）。
+    kickstart_ref: bool = False
     gamma: float = 0.995
     lam: float = 0.95
     clip_eps: float | None = None
@@ -408,6 +428,7 @@ class CourseConfig(BaseModel):
     iters: int = 15
     max_hours: float = 0.0
     workers: int = 8
+    warmup_iters: int = 1
     stream: int = 1
     keep_iters: int = 3
     out: str = "tmp/rl-weights/weights.json"
@@ -541,6 +562,9 @@ class CourseConfig(BaseModel):
             "lr": "lr",
             "epochs": "epochs",
             "mb": "mb",
+            "normalize_ret": "normalize_ret",
+            "kickstart_ref": "kickstart_ref",
+            "warmup_iters": "warmup_iters",
             "gamma": "gamma",
             "lam": "lam",
             "iters": "iters",
@@ -553,6 +577,12 @@ class CourseConfig(BaseModel):
             "eval_stages": "eval_stages",
             "eval_games_per_stage": "eval_games_per_stage",
             "eval_every": "eval_every",
+            # F4 熔断三阈值（§339 课程可配；缺席=CLI 默认。注意：此前漏映射，
+            # 课程 ent_break 0.25 从未落地、一律跑 0.6——2026-09-07 审计发现，
+            # 见 §363 补记； benign：相对语义下 0.6 版只丢绝对臂，跌幅臂仍在）。
+            "ent_break": "ent_break",
+            "ent_break_consec": "ent_break_consec",
+            "ent_break_max_winrate": "ent_break_max_winrate",
         }
         out: dict[str, Any] = {}
         for src_key, dst_key in mapping.items():

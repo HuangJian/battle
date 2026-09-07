@@ -1,0 +1,146 @@
+// 课程 p4-open —— 敞篷探针（DECISIONS §357）：钢盒子是不是帮凶？
+//
+// 由 p4-onset.jsonc 逐字节派生，仅改动以下 3 处，其余（敌编/player/reward/超参/
+// 调度/eval 节奏）完全同义：
+//   1. name: p4-onset → p4-open
+//   2. grid 外圈 6→0（去钢边框：内场 22×22→26×26 tiles，+40% 面积；出生点/敌编不动。
+//      零代码依据：坦克钳制 [0,FIELD]（SimulationCombat.ts:199-204）、子弹越界销毁
+//      （:411-415）、TileMap 越界读数按钢（TileMap.ts:106）。超时若涨 max_ticks 另议）
+//   3. out/traj/backup_dir/backup_prefix → tmp/p4-open（探针只用 eval）
+//
+// 用途（本条目只授权探针）：BC ep60 ×100 ＋ God ×100 配对（p4 现状 14/64，gap 50pp）。
+// 门：gap ≤30pp → confinement 主犯之一，开敞篷腿；gap 不动 → 钢盒无罪，回 R5。
+// 注意：掩体路线已否决（更高阶技能）；本探针只回答"空间密度"。
+// 课程 P4-onset —— 四面围攻：4 敌混编（basic/fast/power/armor），玩家居中
+//
+// 背景：p1-onset（单敌）已被 60 轮全量 BC 蒸馏饱和——ep60 贪心评估 94/100 vs
+// God-AI 92/100（教师级，docs/rl.progress.md §1）。继续在 p1 上跑 RL 的边际
+// 收益≈0，课程升级到多敌混编，测试「发现→瞄准→击杀」在 4 个同时在场目标、
+// 四向受敌压力下的泛化。
+//
+// 地图：hard 难度，11×11 cells（22×22 tiles）空旷场，无基地（grid 与 p1 逐格
+// 相同——「其它设置不变」）。
+// 敌人：4 个，混编 = 每关 basic/fast/power/armor 各 1（forces 20 字符重复 abcd，
+//   取前 4 字符 = a/b/c/d；出生顺序 = spawn 队列顺序，四角依次落位：
+//   TL basic / TR fast / BR power / BL armor）。
+// 玩家：1 命 0 星，出生点正中央（tile 12,12——22×22 内场的正中 2×2）。
+// 出生点：固定布局（用户指定：player 中间、敌人四角），无 spawn_variants 池——
+//   seed 只影响模拟 RNG（敌方 AI），不影响几何。
+//
+// 注意（2026-09-04 评估时确认）：max_ticks 2400 沿用 p1（"其它设置不变"），但该
+// 值原为单敌标定（God-AI 胜局平均 ~535 tick）。4 敌清场预计需 ~2-4× 时长，若
+// 评估中超时占比过高则该预算对多敌偏紧——届时按实测重标定，属后续项。
+//
+// 激励设计（scheme=toy，p1 公式 + 拾取项——与 p10 同值，DECISIONS §332/§333）：
+//   - 杀敌 +3.0/个 ×4（核心目标）· 命中 +0.3/次
+//   - 拾取道具 +1.5/个（powerUpsCollected）· 星星额外 +1.0/个（starsCollected 子集，
+//     star 实得 2.5）——4 敌局按 carrier 节奏约 1 滴，拾取项总量 ≈ 1.5-2.5 < 一杀，
+//     只做"别绕开道具走"的 nudging，主信号仍是击杀。防刷同 p10（供给有界 + 超时消失）。
+//   - 挨打 -1.0/次（1 命 0 星玩家 maxHp 263，挨 2-3 发死）
+//   - 反蹲坑 -0.02 × min(max(0, stuckTicks-300), 900)
+//   - 弹药效率 -0.01/发 · 终局：通关 +2.0 / 死亡 -1.0 / 超时 -2.0
+//
+// 起始权重 = p1 BC ep60（tmp/ep60/battle2-p1bc/run/weights.json；God-AI 蒸馏 BC 权重，
+//   165K 帧 / 1892 胜局 / --value-coef 0.5 MC 预置 value 头——model_build 对
+//   value_pretrained 权重跳过清零）。p1-ep60 在 p4-onset 上贪心评估 14/100 胜率，
+//   RL 从该起点通过 PPO 迭代提升至 God-AI 的 ~64/100 以上。
+//
+// 行为基线（2026-09-04，tools/sim/eval-course-ckpt.ts，单关 × seeds 0..99，贪心部署）：
+//   - God-AI：64/100（杀 306，均 3.06；击中敌 881；被击中 34；开枪 1500；
+//     通关 64 / 死亡 34 / 超时 2；4 杀局 64 全部真正清场）
+//   - p1-ep60（RL 起点）：14/100（杀 193；击中敌 617；被击中 75；开枪 1021；
+//     通关 14 / 死亡 74 / 超时 12）——单敌 94% 到 4 敌只剩 14%，泛化缺口 ~50pp。
+//   - p4-BC ckpt.36：14/100（杀 135；被击中 83；开枪 676；死亡 82）——胜率打平 ep60
+//     但开火积极性永久掉档（"变怂"）；p1 留存 94→84。
+//   - p4-BC ep1-45 全扫（4500 局）：胜率 2-20/100，均值 ~11；击杀最高 ep2 的 160，
+//     从未接近 ep60 的 193——蒸馏上限证据链，详见 docs/rl.progress.md §3。
+// 行数据 tmp/p4-eval-{god,ckpt36}.jsonl、tmp/ep60-on-p4.jsonl、tmp/p45/ep*.jsonl
+// （易失）。注：评估不消费 reward 公式，基线不受 §332/§333 奖励变更影响。
+{
+  "version": 5,
+  "name": "p4-open",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 4,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.995,
+  "lam": 0.97,
+  "ppo_schedule": [
+    { "until_iter": 15, "kl_coef": 0.6, "lr": 0.0003, "kl_cap": 1e9 },
+    { "until_iter": 35, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p4-open/weights.json",
+  "traj": "tmp/p4-open",
+  // F4 ENT 熔断收紧（DECISIONS §339）：本局为 BC 热启动，熵天生在 0.36 带（it1 0.254
+  // → it8 0.365，一路缓升而非崩塌）。旧硬编码阈值 0.60 把"天生低熵"误判为崩塌，
+  // it8 满 8 连击误停。配合相对崩塌语义（跌破 0.25 或相对峰值跌幅 ≥0.10 才计连击），
+  // 此处把绝对阈值下调到 0.25 —— 保留真崩塌保护（当前 0.36 → 还有 0.11 余量），
+  // 又不会在正常带里误触发。ent_break_consec 沿用默认 8。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p4-open",
+  "backup_prefix": "p4-open",
+  // 自定义关 stage ID 从 2000 开始，p4-onset 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}

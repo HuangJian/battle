@@ -1,0 +1,108 @@
+// 课程 p3-ks1 —— BC 缰绳首试（DECISIONS §363）：kickstart_ref=true＋warmup_iters=0
+//
+// 由 p3-bc.jsonc 逐字节派生，仅改动以下 4 处，其余（地图/variants/count 3/player/
+// reward/scale/schedule/eval/护栏/bc ep60）全同义——与 p3-bc 最干净的 A/B
+// （同起点同数学，只差缰绳；p3-bc 42→11→14→14 为对照锚）：
+//   1. name: p3-bc → p3-ks1
+//   2. kickstart_ref: false → true（ref 取课程 bc＝ep60 冻结 master；local 一次构建，
+//      remote 随包发 ref_weights.json＋fp 对账；三重默认关闭保证旧行为不变）
+//   3. warmup_iters: 1 → 0（缰绳 it1 必须满额——smash 轮；validate_args 强制配对，
+//      缺 0 即启动期拒跑）
+//   4. out/traj/backup_dir/backup_prefix → tmp/p3-ks1（fresh，不 resume 任何旧腿）
+//
+// 成功门（§363 预注册）：it1 KL<0.1 为缰绳生效；i5 贪心 ≥25（超 vr1 同期 11）为
+// 恢复起效；之后看是否破 42 基线。kickstart_kl 初值 1.0/衰减 0.5（CLI 默认，
+// update_kwargs 语义复用）；kl_coef 0.2（采样锚）不动，双锚并存。
+// p3→p4 门连续 2 eval ≥70 不变。
+{
+  "version": 5,
+  "name": "p3-ks1",
+  "mode": "per-tick",
+  "stages": [
+    {
+      "name": "p4-onset-mixed",
+      "grid": [
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+        [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 3,
+      "player_spawn": { "col": 12, "row": 12 },
+      "enemy_spawns": [
+        { "col": 2, "row": 2 },
+        { "col": 22, "row": 2 },
+        { "col": 22, "row": 22 },
+        { "col": 2, "row": 22 }
+      ],
+      "spawn_variants": [
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
+        {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},
+        {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 2, "row": 22}]}
+      ]
+    }
+  ],
+  "difficulty": "hard",
+  "max_ticks": 2400,
+  "seed_rotate": 150,
+  "player": {
+    "lives": 1,
+    "level": 0
+  },
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.3,
+      "wPickup": 1.5,
+      "wStar": 1.0,
+      "wDmg": 1.0,
+      "wStuck": 0.02,
+      "wShot": 0.01
+    },
+    "terminal": {
+      "stage_clear": 2.0,
+      "lives_exhausted": -1.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+  "bc": "tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60",
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+  // §363 缰绳双闸：ref 取课程 bc；warmup 必须 0（validate_args 强制配对）。
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "lr": 0.00015,
+  "epochs": 4,
+  "mb": 512,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.2, "lr": 0.00015, "kl_cap": 0.2 },
+    { "kl_coef": 0.0, "lr": 0.00005 }
+  ],
+  "out": "tmp/p3-ks1/weights.json",
+  "traj": "tmp/p3-ks1",
+  // F4 ENT 熔断：沿用 horizon 档 0.25（RL 腿启用时生效；探针不消费）。
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/p3-ks1",
+  "backup_prefix": "p3-ks1",
+  // 自定义关 stage ID 从 2000 开始，p3-bc 仅 1 关 → ID 2000
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
