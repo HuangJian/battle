@@ -115,10 +115,12 @@ describe('console/api.buildStateView', () => {
     expect(s.courses).toBeInstanceOf(Array)
   })
 
-  it('课程发现只列含 training_log.jsonl 的目录', () => {
+  it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
     const courses = api.discoverCourses()
-    // 仓库 tmp/ 至少有 p4 系课程日志（历史训练产物）；不强制非空，但类型必须对
+    // curricula/ 至少有 p4-fast.jsonc 等；不强制非空，但类型必须对
     for (const c of courses) expect(typeof c).toBe('string')
+    // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表
+    expect(courses).toContain('p4-fast')
   })
 })
 
@@ -215,6 +217,40 @@ describe('console/api.routeAction', () => {
     }
     expect(r.__status).toBe(409)
     expect(r.ok).toBe(false)
+  })
+})
+
+describe('console course single source (DECISIONS §351 bug 1)', () => {
+  it('effectiveCourse：state 优先；空则回退最近活跃课程；无课程为空串', () => {
+    expect(api.effectiveCourse({ course: 'p4-horizon' }, ['a', 'b'])).toBe('p4-horizon')
+    expect(api.effectiveCourse({ course: '' }, ['a', 'b'])).toBe('a')
+    expect(api.effectiveCourse({ course: '' }, [])).toBe('')
+  })
+
+  it('显示课程 = 动作课程（单一事实源不变量）', async () => {
+    const s = await api.buildStateView()
+    const ctx = api.actionCtx({})
+    expect(ctx.course).toBe(s.course)
+  })
+
+  it('actionCtx：显式 body.course 覆盖回退', () => {
+    expect(api.actionCtx({ course: 'explicit-course' }).course).toBe('explicit-course')
+  })
+
+  it('页面课程下拉含「自动（最近活跃课程）」占位项', async () => {
+    const s = await api.buildStateView()
+    const html = page.renderConsolePage(s)
+    expect(html).toContain('自动（最近活跃课程）')
+  })
+})
+
+describe('console local×stream 假互斥移除 (DECISIONS §351 bug 2)', () => {
+  it('页面不再声称 local 需 rl.stream=0 / 本地 PPO 互斥；stream 开关仍在', async () => {
+    const s = await api.buildStateView()
+    const html = page.renderConsolePage(s)
+    expect(html).not.toContain('需 rl.stream=0')
+    expect(html).not.toContain('本地 PPO 互斥')
+    expect(html).toContain('stream 流式派发')
   })
 })
 
