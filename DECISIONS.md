@@ -3258,3 +3258,37 @@ warmup_iters=0（缰绳要，双闸已验）。注意本腿首次跑在**活的 
 同 verdict，转向回报重分配/短局（§362 排序）；不毕业（归一化在叠加下失效）→
 查交互 bug（单飞时 work 的东西叠加不 work，先疑实现后疑理论）。
 p3→p4 门连续 2 eval ≥70 不变。启动链同前（停 ks1 → setCourse → 重启 hub → Pull）。
+
+**补记（2026-09-08，vk1 首发作废）：**loop 侧 manifest 全对（kickstart_kl 衰减/
+ref 487KB/normalize），worker 11 轮无 kickstart 列——hub 自 vr1 后从未重启，
+旧代码（R5-only）跑了 vr1 复刻。ks1 因走本地 CPU 恰好绕过，掩盖了问题。
+旧 code 锚 3d2029b3…；新 hub 的 code_sha256 必须不同，否则视为没重启。
+启动协议补丁：it1 校准永远含缰绳列存在性检查。
+
+## §366 / 页面加载 <1s：慢部件快照缓存（2026-09-08，用户指令"6.7s 太慢"）
+
+**问题**：§365 修复后 `buildStateView` 仍 6.7s（节点 ping 1.5-4s + 组件探测串行
+1.5-8s + 池历史聚合 1.9s），页面加载远超标。逐段计时发现隐藏大头：pool-history
+的递归 readdir 每请求扫整个 tmp/（p1-godai-v2 1893 个 it 目录），1.39s/次。
+
+**决定**：
+1. **慢部件快照缓存**：节点 ping / 组件健康探测 / 池历史聚合全部移出请求路径，
+   后台刷新器每 5s 重算一次（`startSnapshotRefresher`，unref）；`buildStateView`
+   只读缓存，请求侧只剩配置/课程/指标（实测 4ms + 指标 ~100ms）。动作（启/停/
+   切课）经 `invalidateSlowSnapshot` 置空缓存 → 下一次请求冷算即时上屏。
+   新鲜度 ≤5s，对监控面板不可见。单飞（promise 共享）防后台刷新与请求互相叠加。
+2. **walk 深度收敛**：dist-agent-meta.jsonl 只存在于文档布局 `tmp/X`（一层）或
+   `tmp/X/traj`（两层）；it 目录树不可能放 meta。下探深度 ≤2 且仅 'traj' 进
+   入 → 1.39s → 20ms。
+3. 超时收敛：节点 ping 4s→1.5s（健康探测口径，1.5s 不应答即离线）；组件探测
+   本地 2.5s→1.5s、cloudflared 8s→2.5s；组件探测改并行（Promise.all，原串行）。
+   冷算最坏 ~1.5s，但只发生在启动暖缓存或动作后即时刷新（用户主动操作）。
+
+**效果**：warm 页面路径 buildStateView 4ms + renderConsolePage 7ms ≈ **11ms**；
+冷算 6.7s → 1.5s。console 测试套件 73s → 11.5s。测试：缓存命中零探测（冷算后
+重复请求不再发 fetch）、invalidate 后重新冷算。
+
+**教训**：聚合/扫描类"每次请求全量重扫"是隐藏慢路径（§365 的 for-await 同族）；
+监控面板的正确形态是"后台刷新 + 请求读缓存"，新鲜度 1 个刷新周期即可。
+另：DECISIONS.md / 源码并行编辑遭遇静默回滚（§17 同款），改用脚本化替换 +
+逐次验证落地。

@@ -354,7 +354,9 @@ describe('控制台 SSR（render.tsx renderConsolePage）', () => {
     expect(html).not.toContain('<span class="tc-cc__name">workerServe')
     // 详情抽屉 / 弹窗 SSR 首帧不渲染（tc-drawer 类名在 CSS，用渲染体判定）
     expect(html).not.toContain('<aside class="tc-drawer"')
-    expect(html).not.toContain('启动 TrainingLoop')
+    // 弹窗本体不渲染（勿用 '启动 TrainingLoop' 裸子串——它与未运行时训练卡启动键的
+    // aria-label '启动 TrainingLoop (trainer)' 撞词，训练态一停就误报）
+    expect(html).not.toContain('class="tc-modal-mask"')
   })
 })
 

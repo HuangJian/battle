@@ -118,7 +118,7 @@ describe('console/api.buildStateView', () => {
   })
 
   it('课程发现含 curricula/*.jsonc（即使 tmp 无日志）', () => {
-    const courses = api.discoverCourses()
+    const courses = api.discoverCourses(50) // max 越 12 上限：环境课程目录增长会把 p4-fast 挤出
     // curricula/ 至少有 p4-fast.jsonc 等；不强制非空，但类型必须对
     for (const c of courses) expect(typeof c).toBe('string')
     // p4-fast 在 curricula/ 有定义但 tmp/ 可能无日志——应被补充进列表
@@ -182,6 +182,57 @@ describe('console/api.nodeViews 并行 ping（§365：串行导致 /api/state �
     } finally {
       release()
       globalThis.fetch = origFetch
+    }
+  })
+})
+
+describe('console/api 慢部件快照缓存（§366：页面加载 <1s）', () => {
+  it('buildStateView 冷算一次后缓存命中：重复请求零新增探测', async () => {
+    api.invalidateSlowSnapshot() // 清掉前序测试可能留下的真实快照
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = ((_url: unknown, _init?: RequestInit) => {
+      calls++
+      return Promise.resolve(
+        new Response(JSON.stringify({ codeHash: 'x', cpus: 4 }), { status: 200 }),
+      )
+    }) as typeof fetch
+    try {
+      const s1 = await api.buildStateView()
+      expect(calls).toBeGreaterThan(0) // 冷路径：发节点/组件探测
+      const coldCalls = calls
+      const s2 = await api.buildStateView()
+      expect(s2.course).toBe(s1.course)
+      expect(s2.components.length).toBe(s1.components.length)
+      expect(calls).toBe(coldCalls) // 缓存命中：零新增探测 → 页面加载只读缓存
+    } finally {
+      globalThis.fetch = origFetch
+      api.invalidateSlowSnapshot()
+    }
+  })
+
+  it('invalidateSlowSnapshot 后下一次 buildStateView 重新冷算（动作即时上屏）', async () => {
+    api.invalidateSlowSnapshot()
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = ((_url: unknown, _init?: RequestInit) => {
+      calls++
+      return Promise.resolve(
+        new Response(JSON.stringify({ codeHash: 'x', cpus: 4 }), { status: 200 }),
+      )
+    }) as typeof fetch
+    try {
+      await api.buildStateView() // 冷算填缓存
+      const warm = calls
+      await api.buildStateView()
+      expect(calls).toBe(warm)
+      api.invalidateSlowSnapshot() // 模拟动作：置空缓存
+      const before = calls
+      await api.buildStateView() // 重新冷算
+      expect(calls).toBeGreaterThan(before)
+    } finally {
+      globalThis.fetch = origFetch
+      api.invalidateSlowSnapshot()
     }
   })
 })
@@ -313,7 +364,7 @@ describe('console local×stream 假互斥移除 (DECISIONS §351 bug 2)', () => 
     expect(html).not.toContain('需 rl.stream=0')
     expect(html).not.toContain('本地 PPO 互斥')
     // stream 开关已收入 TrainingLoop 启动弹窗（SSR 首帧不渲染）
-    expect(html).not.toContain('启动 TrainingLoop')
+    expect(html).not.toContain('class="tc-modal-mask"')
   })
 })
 
@@ -329,7 +380,7 @@ describe('console SSR renderConsolePage', () => {
     expect(html).toContain('训练状态') // hero aria-label
     // 详情抽屉 / TrainingLoop 启动弹窗默认不渲染（SSR 首帧；tc-drawer 类名在 CSS，用 <aside 判定）
     expect(html).not.toContain('<aside class="tc-drawer"')
-    expect(html).not.toContain('启动 TrainingLoop')
+    expect(html).not.toContain('class="tc-modal-mask"')
     // 无原始 <script> 注入风险：SSR 输出经 preact 转义
     expect(html).not.toContain('<script>alert')
   })

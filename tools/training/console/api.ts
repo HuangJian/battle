@@ -26,6 +26,7 @@ import type {
   NodeHistoryRow,
   NodeLocalView,
   NodeView,
+  PhaseInfo,
   PoolView,
   SelfStatus,
 } from '../ui/view'
@@ -264,54 +265,55 @@ export async function componentLogPayload(
   }
 }
 
-/** 组件视图（健康探测按组件语义：端口服务 ping / 隧道 URL / 存活即健康）。 */
+/** 组件视图（健康探测按组件语义：端口服务 ping / 隧道 URL / 存活即健康）。
+ *  探测并行（§366）：本地端口 1.5s、cloudflared 隧道 2.5s 超时，串行会叠加等待。 */
 export async function componentViews(cfg: RlConfig, course: string): Promise<ComponentView[]> {
   const reg = loadRegistry()
-  const views: ComponentView[] = []
-  for (const key of ALL_COMPONENTS) {
-    const e = reg[key]
-    const alive = pidAlive(e?.pid)
-    const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
-    let healthy: boolean | null = null
-    const probe = HEALTHY_PORTS[key]?.(cfg)
-    if (status === 'running' && probe) {
-      healthy = await httpOk(
-        probe,
-        key === 'selfNode'
-          ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
-          : cfg.rl.remote_token,
-        2500,
-      )
-    } else if (status === 'running' && key === 'cloudflared') {
-      healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 8000) : null
-    } else if (status === 'running' && key === 'trainingLoop') {
-      healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
-    }
-    const logRel = COMPONENT_LOGS[key]?.(cfg, course) ?? e?.log ?? null
-    views.push({
-      key,
-      label: COMPONENT_LABELS[key],
-      status,
-      pid: e?.pid ?? null,
-      url: e?.url ?? null,
-      course: e?.course ?? null,
-      mode: e?.mode ?? null,
-      healthy,
-      log: logRel,
-      logTail: logRel ? logTail(logRel) : [],
-      busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
-      // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
-      ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
-    })
-  }
-  return views
+  return Promise.all(
+    ALL_COMPONENTS.map(async (key): Promise<ComponentView> => {
+      const e = reg[key]
+      const alive = pidAlive(e?.pid)
+      const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
+      let healthy: boolean | null = null
+      const probe = HEALTHY_PORTS[key]?.(cfg)
+      if (status === 'running' && probe) {
+        healthy = await httpOk(
+          probe,
+          key === 'selfNode'
+            ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
+            : cfg.rl.remote_token,
+          1500,
+        )
+      } else if (status === 'running' && key === 'cloudflared') {
+        healthy = e?.url ? await httpOk(`${e.url}/ping`, cfg.rl.remote_token, 2500) : null
+      } else if (status === 'running' && key === 'trainingLoop') {
+        healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
+      }
+      const logRel = COMPONENT_LOGS[key]?.(cfg, course) ?? e?.log ?? null
+      return {
+        key,
+        label: COMPONENT_LABELS[key],
+        status,
+        pid: e?.pid ?? null,
+        url: e?.url ?? null,
+        course: e?.course ?? null,
+        mode: e?.mode ?? null,
+        healthy,
+        log: logRel,
+        logTail: logRel ? logTail(logRel) : [],
+        busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
+        // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
+        ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),
+      }
+    }),
+  )
 }
 
 /** 节点视图（rl-config + enabled 节点并行 ping）。
- *  并行是硬要求：不可达节点各自等 AbortSignal.timeout(4000)，串行会让 /api/state
+ *  并行是硬要求：不可达节点各自等 AbortSignal.timeout(1500)，串行会让 /api/state
  *  在节点离线时拖到 N×4s（2026-09-08 实测 5 启用节点 10.1s → 超过 Bun.serve 默认
  *  idleTimeout 10s，服务端关连接 → curl 空回复；DECISIONS §365）。Promise.all 保序，
- *  输出与串行一致。 */
+ *  输出与串行一致。超时 1500ms：健康探测口径，1.5s 不应答即视为离线（§366 预算）。 */
 export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
   return Promise.all(
     cfg.nodes.map(async (n): Promise<NodeView> => {
@@ -322,7 +324,7 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
         try {
           const resp = await fetch(`${n.url}/v1/ping`, {
             headers: { Authorization: `Bearer ${n.authKey}` },
-            signal: AbortSignal.timeout(4000),
+            signal: AbortSignal.timeout(1500),
           })
           online = resp.status === 200
           if (online) {
@@ -350,13 +352,88 @@ export async function nodeViews(cfg: RlConfig): Promise<NodeView[]> {
   )
 }
 
-/** 完整状态快照（页面轮询的数据源）。 */
+// ────────────────────────── 慢部件快照缓存（§366：页面加载 <1s） ──────────────────────────
+// 节点 ping（超时 1.5s）、组件健康探测（1.5-2.5s）、池历史聚合（磁盘）全部移出请求路径：
+// 后台刷新器每 SNAPSHOT_REFRESH_MS 重算一次，buildStateView 只读缓存。请求侧开销只剩
+// 配置/课程/指标（实测 ~150ms）；新鲜度 ≤1 个刷新周期（5s），对监控面板不可见。
+// 动作（启/停/切课）经 invalidateSlowSnapshot 置空缓存 → 下一次 buildStateView 冷算即时反映。
+
+export interface SlowSnapshot {
+  components: ComponentView[]
+  nodes: NodeView[]
+  localNode: NodeLocalView | null
+  phase: PhaseInfo
+}
+
+const SNAPSHOT_REFRESH_MS = 5000
+let slowSnapshot: SlowSnapshot | null = null
+let snapshotInFlight: Promise<void> | null = null
+
+/** 重算慢部件快照并落缓存。promise 单飞：并发调用共享同一次计算，防后台刷新与请求互相叠加。 */
+export function refreshSlowSnapshot(cfg: RlConfig, course: string): Promise<void> {
+  if (snapshotInFlight) return snapshotInFlight
+  snapshotInFlight = (async () => {
+    try {
+      const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+      // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
+      const contribById = new Map<string, number>()
+      let localNode: NodeLocalView | null = null
+      try {
+        const { hist, globalMaxIt } = aggregateNodeHistory()
+        for (const [id, h] of hist) contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
+        const localH = hist.get('local')
+        const slots = Number(cfg.rl.local_slots)
+        if (Number.isInteger(slots) && slots > 0) {
+          localNode = {
+            id: 'local',
+            slots,
+            lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
+          }
+        }
+      } catch {
+        /* 池历史不可用 → 全部 -1 */
+      }
+      for (const n of nodes) n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
+      // 当前训练阶段（训练循环日志尾解析）。
+      const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
+      const phase = parsePhaseFromLog(logTail)
+      slowSnapshot = { components, nodes, localNode, phase }
+    } finally {
+      snapshotInFlight = null
+    }
+  })()
+  return snapshotInFlight
+}
+
+/** 动作后置空缓存：下一次 buildStateView 冷算，动作结果即时上屏（不主动后台刷新，避免与请求竞争）。 */
+export function invalidateSlowSnapshot(): void {
+  slowSnapshot = null
+}
+
+/** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时调用一次。 */
+export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS): void {
+  const run = async (): Promise<void> => {
+    try {
+      const cfg = loadConfigSafe()
+      const course = effectiveCourse(loadConsoleState(), discoverCourses())
+      await refreshSlowSnapshot(cfg, course)
+    } catch {
+      /* 下一拍重试 */
+    }
+  }
+  void run()
+  const t = setInterval(() => void run(), intervalMs)
+  t.unref?.()
+}
+
+/** 完整状态快照（页面轮询的数据源）。慢部件（节点 ping/组件探测/池历史）走快照缓存。 */
 export async function buildStateView(): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
   const state = loadConsoleState()
   const courses = discoverCourses()
   const course = effectiveCourse(state, courses)
-  const [components, nodes] = await Promise.all([componentViews(cfg, course), nodeViews(cfg)])
+  if (!slowSnapshot) await refreshSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase } = slowSnapshot!
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -368,32 +445,6 @@ export async function buildStateView(): Promise<ConsoleStateView> {
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
-  // 节点上一轮贡献数（池历史聚合；无数据 = -1）。
-  const contribById = new Map<string, number>()
-  let localNode: NodeLocalView | null = null
-  try {
-    const { hist, globalMaxIt } = aggregateNodeHistory()
-    for (const [id, h] of hist) {
-      contribById.set(id, globalMaxIt >= 0 ? h.lastIterOk : -1)
-    }
-    const localH = hist.get('local')
-    const slots = Number(cfg.rl.local_slots)
-    if (Number.isInteger(slots) && slots > 0) {
-      localNode = {
-        id: 'local',
-        slots,
-        lastContrib: globalMaxIt >= 0 ? (localH?.lastIterOk ?? 0) : -1,
-      }
-    }
-  } catch {
-    /* 池历史不可用 → 全部 -1 */
-  }
-  for (const n of nodes) {
-    n.lastContrib = contribById.has(n.id) ? contribById.get(n.id)! : -1
-  }
-  // 当前训练阶段（训练循环日志尾解析）。
-  const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
-  const phase = parsePhaseFromLog(logTail)
   return {
     time: new Date().toISOString(),
     course,

@@ -124,8 +124,11 @@ export function aggregateNodeHistory(): HistoryAggregate {
       for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
         const childRel = rel ? `${rel}/${d.name}` : d.name
         if (d.isDirectory()) {
-          // 限制深度：最多 3 层（tmp/X/traj/it1 级别），避免扫描 node_modules 等
-          if (childRel.split('/').length <= 3) walk(base, childRel)
+          // §366：meta 只存在于文档声明的布局——tmp/X（一层）或 tmp/X/traj（两层）。
+          // 训练迭代目录（itN，p1-godai-v2 有 1893 个）不可能放 meta，跳过其子树：
+          // 此前下探 3 层把整个 it 目录树扫一遍，实测 1.39s/次 → 页面 6.7s 的隐藏大头。
+          const depth = childRel.split('/').length
+          if (depth < 2 || (depth === 2 && d.name === 'traj')) walk(base, childRel)
         } else if (d.name === 'dist-agent-meta.jsonl') {
           const p = join(base, childRel)
           try {

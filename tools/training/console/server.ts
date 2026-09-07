@@ -28,7 +28,14 @@ import { killPid, shapeLoopbackNoProxy, waitUntil } from '../net'
 import { saveComponent } from '../registry'
 import { launchSpec } from '../proc'
 import { monitorTouch } from '../reload-touch'
-import { buildPoolView, buildStateView, componentLogPayload, routeAction } from './api'
+import {
+  buildPoolView,
+  buildStateView,
+  componentLogPayload,
+  invalidateSlowSnapshot,
+  routeAction,
+  startSnapshotRefresher,
+} from './api'
 import { restartSpecFor } from './actions'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderLogPage } from './render'
@@ -121,6 +128,9 @@ async function main(): Promise<void> {
   await reconcileWatch()
   const reconcileTimer = setInterval(() => void reconcileWatch(), 15000)
   reconcileTimer.unref?.()
+  // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
+  // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
+  startSnapshotRefresher()
 
   const { BUNDLES } = await import('./build')
   const bundlesByPath = new Map(BUNDLES.map((b) => [`/${b.key}.js`, b]))
@@ -190,6 +200,8 @@ async function main(): Promise<void> {
             /* empty body — actions that need params will 400 */
           }
           const resp = await routeAction(act, body)
+          // 动作改动组件/节点/课程 → 失效慢部件缓存，下次 buildStateView 冷算即时上屏（§366）。
+          if (resp) invalidateSlowSnapshot()
           return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
         }
         return new Response('not found', { status: 404 })
