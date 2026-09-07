@@ -1,4 +1,7 @@
 /** venv.ts — venv 真实解释器解析 + bootstrap 委派（torch 安装决策只活在 bootstrap.py）。
+ *
+ *  §352（2026-09-07）门禁分层：**python 环境本身是硬要求**（venv 坏/解释器不可执行
+ *  ⇒ 红），**torch 只是降级条件**（缺席 ⇒ 相关测试跳过 + 可见 warning）。
 
  *  - 解析 uv venv 跳板：.venv\Scripts\python.exe 是 trampoline，真正干活的是它另起的
  *    基础解释器子进程；只杀跳板会留下孤儿继续占端口。读 pyvenv.cfg 的
@@ -63,6 +66,47 @@ export function venvTorchReady(): boolean {
     stderr: 'ignore',
   })
   return r.exitCode === 0
+}
+
+/** python 门禁状态（§352）：pyOk/torchReady 语义分离的单一探测点。
+ *
+ *  - `pyOk`      —— venv 解释器**存在且能真跑一条语句**（探针 `pass`）。venv 布局
+ *                  错（Windows venv 在 Linux）或解释器坏都会暴露。这是**硬要求**：
+ *                  假 → 调用方报错（绝不静默跳过）。
+ *  - `torchReady`—— 同一解释器能 `import torch`。只是**降级条件**：假 →
+ *                  调用方跳过 torch 相关测试并打 warning，门禁仍绿。
+ *  - `reason`    —— pyOk=false 时的人类可读原因；`python` = 解析出的解释器路径。
+ */
+export function pythonGateState(): {
+  pyOk: boolean
+  torchReady: boolean
+  python: string
+  reason: string | null
+} {
+  const { python } = resolveVenvPython()
+  if (!existsSync(python)) {
+    return {
+      pyOk: false,
+      torchReady: false,
+      python,
+      reason: `venv 解释器不存在（${python}）——在 nn-training/ 下运行 python3 bootstrap.py 重建`,
+    }
+  }
+  const probe = Bun.spawnSync([python, '-c', 'pass'], {
+    cwd: NN_TRAINING,
+    stdout: 'ignore',
+    stderr: 'pipe',
+  })
+  if (probe.exitCode !== 0) {
+    const msg = probe.stderr.toString().trim().split('\n').slice(-1)[0] || '未知错误'
+    return {
+      pyOk: false,
+      torchReady: false,
+      python,
+      reason: `venv 解释器不可执行（exit ${probe.exitCode}）：${msg}——布局不匹配时在 nn-training/ 下 python3 bootstrap.py --recreate 重建`,
+    }
+  }
+  return { pyOk: true, torchReady: venvTorchReady(), python, reason: null }
 }
 
 function findSystemPython(): string | null {

@@ -2875,3 +2875,28 @@ n-trainingun_rl.py`，
 必须 `existsSync` 为真。复跑预演全通过：发布→推送→echo→落位→作废退出，
 iteration 计数 3 不变、wver c1369c289278 未动、无残留锁、8789 端口释放、
 workerServe 账本清除（trainingLoop 条目留 `exited` 状态页可见，属正常痕迹）。
+
+## §352 / python 门禁分层：python 环境硬要求，torch 缺席降级为跳过+warning（2026-09-07，用户指令）
+
+用户需求：python 门禁改为「检测本地环境有没有 torch，没有就不跑相关测试但显
+示 warning；同时 python 环境必须具备」。定案——门禁分层，跳过的是 torch 而
+非 python：
+
+- **硬要求（pyOk）**：nn-training venv 解释器存在**且能真跑一条语句**（探针
+  `pass`）。venv 不存在 / 布局不匹配（Windows venv 在 Linux：`-x` 检查通过但
+  执行不了，2026-09-07 WSL 迁移实录）/ 解释器坏 ⇒ 门禁红，绝不静默跳过。
+- **降级条件（torchReady）**：同一解释器能 `import torch`。缺席 ⇒ 跳过
+  依赖 torch 的 mypy+pytest（typing/测试都会 import），打**可见 WARNING**
+  并附重建指引；ruff 纯静态不依赖 torch，照常运行。
+- **两处执行点，同一语义**：① `tools/githook/nn-python-gate.sh`（解释器硬
+  探针 + torch 探针 → torch 缺席时向 NN_GATE_SKIP 追加 `mypy,pytest`）；
+  ② bun 侧 `tools/training/venv.ts` 新增 `pythonGateState()`（pyOk/
+  torchReady/python/reason 单一探测点）+ `tests/training-train.test.ts` 两个
+  spawn 真实 CLI 的测试改 `it.skipIf(!gate.torchReady)`（torch 缺席跳过）+
+  一条**硬测试**断言 `gate.pyOk === true`（python 环境坏了就是红）。
+- **skipIf 方向**：`it.skipIf(cond)` 在 cond 真时跳过 ⇒ 条件是 `!torchReady`
+  （初版写反成 `gate.torchReady`，2 例被误跳，已修）。
+- **验证**：正路径 23s 全绿；模拟 torch 缺席 → WARNING + mypy/pytest skipped
+  + ruff 照常 + 退出 0；模拟解释器坏 → 硬红退出 1；`bun run check` 1811 pass
+  全绿，build 绿。测试语义变化见 §7（先红后绿）。无 gameplay 触碰，不触发
+  §6.3b。

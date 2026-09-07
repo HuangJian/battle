@@ -6,7 +6,11 @@ import {
   summarizeSmoke,
   type SmokeItem,
 } from '../tools/training/smoke'
-import { resolveTorchThreads, torchThreadEnv } from '../tools/training/venv'
+import {
+  pythonGateState,
+  resolveTorchThreads,
+  torchThreadEnv,
+} from '../tools/training/venv'
 import { resolveTrainScript } from '../tools/training/train'
 import {
   aggregateNodeHistory,
@@ -68,6 +72,31 @@ describe('training venv helpers (tools/training/venv.ts)', () => {
     expect(torchThreadEnv(8).OMP_PROC_BIND).toBe('CLOSE')
     expect(torchThreadEnv(12).OMP_PROC_BIND).toBeUndefined()
     expect(torchThreadEnv(4).OMP_NUM_THREADS).toBe('4')
+  })
+
+  it('pythonGateState: present-env+missing-torch = skip-with-warning; broken env = hard fail (§352)', () => {
+    // 纯逻辑矩阵（真实环境探测由 CLI 测试区覆盖）：
+    // 1) torch 就绪 → 什么都不跳，pyOk 必真。
+    const ready = { pyOk: true, torchReady: true, python: '/x/python', reason: null }
+    expect(ready.pyOk && ready.torchReady).toBe(true)
+    // 2) venv 在但 torch 缺 → skip+warn（绝不红）。
+    const noTorch = { pyOk: true, torchReady: false, python: '/x/python', reason: null }
+    expect(noTorch.pyOk).toBe(true)
+    expect(noTorch.torchReady).toBe(false)
+    // 3) venv 坏/解释器不可执行 → pyOk=false，reason 说明 → 调用方硬失败。
+    const broken = { pyOk: false, torchReady: false, python: '', reason: 'venv 解释器不可执行' }
+    expect(broken.pyOk).toBe(false)
+    expect(broken.reason).toBeTruthy()
+    // 4) torchReady 为真蕴含 pyOk 为真（torch 探测建立在 python 可跑之上）。
+    expect(ready.torchReady && !ready.pyOk).toBe(false)
+    expect(noTorch.torchReady && !noTorch.pyOk).toBe(false)
+    // pythonGateState() 纯探测本身合法性：字段齐、不变量成立。
+    const s = pythonGateState()
+    expect(typeof s.pyOk).toBe('boolean')
+    expect(typeof s.torchReady).toBe('boolean')
+    if (s.torchReady) expect(s.pyOk).toBe(true)
+    if (s.pyOk) expect(s.python.length).toBeGreaterThan(0)
+    if (!s.pyOk) expect(s.reason).toBeTruthy()
   })
 })
 
@@ -258,7 +287,10 @@ describe('ProcSpec path semantics (tools/training/specs.ts, DECISIONS §349 regr
 })
 
 describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)', () => {
-  it('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
+  // §352 门禁：torch 缺席时这两个 spawn 真实 CLI 的测试只跳过（带 warning），
+  // python 环境本身仍由 pythonGateState 硬门禁覆盖（下方 dedicated test）。
+  const gate = pythonGateState()
+  it.skipIf(!gate.torchReady)('translates --check to a successful interpreter probe (spawns real CLI)', async () => {
     const r = Bun.spawnSync(['bun', 'tools/training/train.ts', '--check'], {
       cwd: REPO_ROOT,
       stdout: 'pipe',
@@ -268,7 +300,7 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     expect(r.stdout.toString()).toContain('torch 可用')
   }, 60000)
 
-  it('--echo prints the exact command and exits 0 without executing', () => {
+  it.skipIf(!gate.torchReady)('--echo prints the exact command and exits 0 without executing', () => {
     const r = Bun.spawnSync(
       ['bun', 'tools/training/train.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
       {
@@ -293,6 +325,13 @@ describe('train CLI arg parsing (tools/training/train.ts main, DECISIONS §349)'
     expect(r.exitCode).toBe(0)
     expect(r.stdout.toString()).toContain('用法')
   }, 60000)
+
+  it('python env is a hard requirement: gate state reports a runnable interpreter (§352)', () => {
+    // 本机 python 环境必须具备——坏了就是红，不跳过（与 torch 缺席的降级语义不同）。
+    expect(gate.pyOk).toBe(true)
+    expect(gate.python).toBeTruthy()
+    expect(gate.reason).toBeNull()
+  })
 })
 
 describe('supervisor sentinel fingerprint', () => {
