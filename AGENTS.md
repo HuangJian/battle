@@ -177,7 +177,7 @@ The autonomy contract: make judgment calls instead of stalling (full detail + DE
 
 - **6.1 Identify the doubt** — plan silent on a design point / two reasonable implementations unpicked / plan-vs-MANIFEST conflict / unspecified tunable value.
 - **6.2 Derive the solution** in priority order: MANIFEST → DECISIONS precedent → existing-code consistency → classic Famicom authenticity → the plan's stated rationale.
-- **6.3 Record BEFORE executing** — foundational decisions get full entries in `DECISIONS.md` (sequential numbering; superseded entries are marked `_(superseded by §N)_`, never deleted); tuning experiments get a compressed index row + full text in the matching `docs/*.progress.md`.
+- **6.3 Record AFTER passing the three gates (decision governance, plan/decisions-governance.md)** — before any `DECISIONS.md` entry ask: ① 有无被否决的备选方案？ ② 未来会重犯/重查？ ③ 能否就近表达（注释/断言/配置/docstring）？ any No → don't write. 真决策/禁令/铁律 → `DECISIONS.md`; 实验记录/调优 → `docs/*.progress.md`（禁止双写）; bugfix/UI/运维 → commit message only. New entries use date IDs `§YYYY-MM-DD-<branch>-<slug>` (branch 去连字符; §1–§382 frozen contract, never renumber/delete; superseded marked `_(superseded by §ID)_`). Template ≤12 lines (背景/备选与否决/决定/违反后果); full process + template: `docs/decisions/HOW-TO-ADD.md`; `bun run check` enforces via `tools/check-decisions.ts`.
 
 - **6.3b God-AI behavior changes = a new era** — required triple: new `DECISIONS.md` entry + 60-seed three-difficulty baseline (eval-suite v7; `hard` primary, classic/chaos reference) + frozen-signature golden update (`bun run freeze:check` going red is the forced explicit judgment, not an error); tune on `hard`, conclude only on ≥60 seeds — current official baseline: `docs/god-ai-tuning.progress.md` Part 0.1 (DECISIONS §293).
 

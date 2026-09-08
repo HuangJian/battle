@@ -23,7 +23,7 @@
     "lint": "oxlint",
     "format": "oxfmt",
     "train": "bun tools/training/console/server.ts",
-    "check": "tsc --noEmit --incremental && bun test --parallel --timeout=50000",
+    "check": "tsc --noEmit --incremental && bun tools/check-decisions.ts && bun test --parallel --timeout=50000",
     "freeze:check": "bash tools/probe-det-baseline.sh --golden",
     "freeze:l2": "bun tools/diag/archived-reach-audit.ts",
     "setup": "git config core.hooksPath tools/githook"
