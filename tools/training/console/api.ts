@@ -243,9 +243,10 @@ const LOG_NAME_MATCH: Record<Component, (name: string) => boolean> = {
 /**
  * 运行时动态查找组件日志（§374）：trainingLoop 扫 LOG_DIR 各课程目录的 training-loop.log；
  * 其余扫 LOG_DIR 一层匹配文件，mtime 最新者为准。只扫一层 + 定点 stat，不做全文递归
- * （§366 教训：扫描慢路径会拖垮请求）。
+ * （§366 教训：扫描慢路径会拖垮请求）。dir 参数化（§381）：真实路径用 LOG_DIR，
+ * 单测注入临时目录获得确定性。
  */
-export function findLatestLog(key: Component, course: string): string | null {
+export function scanLatestLog(dir: string, key: Component, course: string): string | null {
   let bestP: string | null = null
   let bestM = -1
   const consider = (p: string): void => {
@@ -262,19 +263,24 @@ export function findLatestLog(key: Component, course: string): string | null {
   const match = LOG_NAME_MATCH[key]
   try {
     if (key === 'trainingLoop') {
-      if (course) consider(path.join(LOG_DIR, course, 'training-loop.log'))
-      for (const d of readdirSync(LOG_DIR, { withFileTypes: true })) {
-        if (d.isDirectory()) consider(path.join(LOG_DIR, d.name, 'training-loop.log'))
+      if (course) consider(path.join(dir, course, 'training-loop.log'))
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isDirectory()) consider(path.join(dir, d.name, 'training-loop.log'))
       }
     } else {
-      for (const d of readdirSync(LOG_DIR, { withFileTypes: true })) {
-        if (d.isFile() && match(d.name)) consider(path.join(LOG_DIR, d.name))
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        if (d.isFile() && match(d.name)) consider(path.join(dir, d.name))
       }
     }
   } catch {
     /* tmp unreadable */
   }
   return bestP
+}
+
+/** 对真实 LOG_DIR 的动态查找（scanLatestLog 的默认目录版）。 */
+export function findLatestLog(key: Component, course: string): string | null {
+  return scanLatestLog(LOG_DIR, key, course)
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
@@ -394,7 +400,9 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
       } else if (status === 'running' && key === 'trainingLoop') {
         healthy = true // 存活即健康（就绪以日志产出为准，见 iters 指标）
       }
-      const logRel = COMPONENT_LOGS[key]?.(cfg, course) ?? e?.log ?? null
+      // 运行时动态查找（§374）：静态映射 ≠ 实际落盘文件（cloudflared 动态文件名、
+      // 课程子目录日志、tmp 清理后重建）——组件表日志/尾行与 /log/<key> 页同源。
+      const logRel = resolveComponentLog(key, cfg, course)
       return {
         key,
         label: COMPONENT_LABELS[key],

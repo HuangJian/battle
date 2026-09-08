@@ -28,6 +28,8 @@ export interface ComponentView {
   busy: boolean
   /** 需要展示的密钥型字段（仅 cloudflared：rl.remote_token，供用户复制贴给远端）。回环无鉴权页可接受。 */
   secret?: string
+  /** 非正常退出原因（§380 消费；服务端填充由该条目实施方完成）。 */
+  error?: string | null
 }
 
 export interface NodeView {

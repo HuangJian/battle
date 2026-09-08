@@ -10,7 +10,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { readIterMetrics } from '../tools/training/console/iters'
@@ -573,6 +573,58 @@ describe('console/log viewer (§348 补 2)', () => {
       expect(api.resolveComponentLog(key, cfg, 'p4-horizon')).toBeTruthy()
     }
     expect(api.resolveComponentLog('nope' as never, cfg, 'x')).toBeNull()
+  })
+
+  it('scanLatestLog（§374/§381）：cloudflared 动态文件名按 mtime 取最新，忽略无关文件', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logscan-'))
+    try {
+      const stale = path.join(dir, 'cloudflared-2026-09-08T04-00-00-a1.log')
+      const fresh = path.join(dir, 'cloudflared-2026-09-08T05-00-00-a1.log')
+      writeFileSync(stale, 'stale\n', 'utf-8')
+      writeFileSync(fresh, 'fresh\n', 'utf-8')
+      writeFileSync(path.join(dir, 'hub-server.out'), 'noise\n', 'utf-8')
+      // 指定 mtime（utimes 确定性：stale < fresh），不依赖写入顺序
+      utimesSync(stale, new Date('2026-09-08T05:00:00Z'), new Date('2026-09-08T05:00:00Z'))
+      utimesSync(fresh, new Date('2026-09-08T06:00:00Z'), new Date('2026-09-08T06:00:00Z'))
+      expect(api.scanLatestLog(dir, 'cloudflared', 'x')).toBe(fresh)
+      // 无匹配文件 → null；目录不存在 → null（不抛）
+      expect(api.scanLatestLog(dir, 'workerServe', 'x')).toBeNull()
+      const missing = path.join(os.tmpdir(), 'bcity-logscan-no-such-dir-xyz')
+      expect(api.scanLatestLog(missing, 'selfNode', 'x')).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('scanLatestLog（§374/§381）：trainingLoop 扫课程子目录与 course 直连路径', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logscan2-'))
+    try {
+      const courseDir = path.join(dir, 'p3-vk1')
+      const otherDir = path.join(dir, 'ep60')
+      mkdirSync(courseDir, { recursive: true })
+      mkdirSync(otherDir, { recursive: true })
+      const a = path.join(courseDir, 'training-loop.log')
+      const b = path.join(otherDir, 'training-loop.log')
+      writeFileSync(a, 'a\n', 'utf-8')
+      writeFileSync(b, 'b\n', 'utf-8')
+      utimesSync(a, new Date('2026-09-08T05:00:00Z'), new Date('2026-09-08T05:00:00Z'))
+      utimesSync(b, new Date('2026-09-08T06:00:00Z'), new Date('2026-09-08T06:00:00Z'))
+      // 任意课程目录里最新的 training-loop.log（ep60 新）
+      expect(api.scanLatestLog(dir, 'trainingLoop', '')).toBe(b)
+      // course 直连路径存在且比其它都新 → 优先
+      utimesSync(a, new Date('2026-09-08T07:00:00Z'), new Date('2026-09-08T07:00:00Z'))
+      expect(api.scanLatestLog(dir, 'trainingLoop', 'p3-vk1')).toBe(a)
+      // 目录不存在 → null
+      expect(
+        api.scanLatestLog(
+          path.join(os.tmpdir(), 'bcity-logscan2-no-dir'),
+          'trainingLoop',
+          'p3-vk1',
+        ),
+      ).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('componentLogPayload：已知组件返回载荷；未知组件 null', async () => {
