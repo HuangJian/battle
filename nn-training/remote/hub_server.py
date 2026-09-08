@@ -88,7 +88,7 @@ class _JobStore:
                         e = json.loads(line)
                     except ValueError:
                         continue
-                    if e.get("event") in ("job_pending", "job_completed"):
+                    if e.get("event") in ("job_pending", "job_completed", "job_cancelled"):
                         out.append(e)
         except OSError:
             return list(cached)
@@ -117,7 +117,7 @@ class _JobStore:
                 continue
             if e["event"] == "job_pending":
                 pending[jid] = e
-            elif e["event"] == "job_completed":
+            elif e["event"] in ("job_completed", "job_cancelled"):
                 pending.pop(jid, None)
         out = []
         for jid, _e in sorted(pending.items(), key=lambda kv: kv[1].get("ts", 0)):

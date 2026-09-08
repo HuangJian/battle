@@ -823,3 +823,46 @@ def test_manifest_kickstart_defaults_and_reject() -> None:
     assert m2["kickstart_kl"] == 0.5
     with pytest.raises(ProtocolError, match="kickstart_kl"):
         normalize_manifest(_mini_manifest(kickstart_kl=-1.0))
+
+
+# ------------------------------------------------------------------ §381 悬空 job 清理
+
+def test_hub_pool_excludes_cancelled_job(tmp_path: Path) -> None:
+    """§381：job_cancelled 账本事件 → 该 job 退出可领取池（悬空清理后不再派发给 worker）。"""
+    store = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
+    manifest = normalize_manifest(_mini_manifest())
+    jid = manifest["job_id"]
+    store.publish(jid, manifest, b"PK\x03\x04fake")
+    assert store.claimable_job_ids() == [jid]
+    # 新 runId 发布同 it job 时，旧 jid 被 hub_client.cancel_stale_jobs 作废
+    store._append_ledger({"event": "job_cancelled", "job_id": jid, "it": 3, "ts": time.time()})
+    assert store.claimable_job_ids() == []
+
+
+def test_cancel_stale_jobs_old_runs_only(tmp_path: Path) -> None:
+    """§381：发布新 it 时作废「更早迭代/同 it + 旧 runId」的 pending，不动本次 job
+    与已 completed 的；重复调用幂等（不重复写 cancelled）。"""
+    from remote.hub_client import cancel_stale_jobs  # 免 torch，纯账本操作
+
+    jl = tmp_path / "training_log.jsonl"
+    lines = [
+        {"event": "job_pending", "job_id": "old-a", "runId": "runA", "it": 3, "ts": 1.0},
+        {"event": "job_pending", "job_id": "old-b", "runId": "runA", "it": 5, "ts": 2.0},
+        {"event": "job_pending", "job_id": "done-c", "runId": "runA", "it": 2, "ts": 0.5},
+        {"event": "job_completed", "job_id": "done-c", "ts": 9.0},
+        {"event": "job_pending", "job_id": "keep-d", "runId": "runB", "it": 5, "ts": 4.0},
+    ]
+    jl.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    n = cancel_stale_jobs(jl, it=5, keep_job_id="keep-d")
+    assert n == 2  # old-a(it3≤5) 与 old-b(it5≤5)；done-c 已 completed、keep-d 是本次发布
+    n2 = cancel_stale_jobs(jl, it=5, keep_job_id="keep-d")
+    assert n2 == 0  # 幂等：已 cancelled 的不重复
+
+    evs = [json.loads(line) for line in open(jl, encoding="utf-8")]
+    cancelled = sorted(e["job_id"] for e in evs if e.get("event") == "job_cancelled")
+    assert cancelled == ["old-a", "old-b"]
+
+    # keep-d 仍 pending、done-c 仍未动
+    assert any(e.get("event") == "job_pending" and e.get("job_id") == "keep-d" for e in evs)
+    assert not any(e.get("event") == "job_cancelled" and e.get("job_id") == "done-c" for e in evs)

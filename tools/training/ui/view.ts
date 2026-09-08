@@ -480,6 +480,12 @@ export function parsePhaseFromLog(tail: string[]): PhaseInfo {
   if (rolloutMatch) {
     return { phase: 'ppo', sinceMs, iter: Number(rolloutMatch[1]) }
   }
+  // §380：发布 PPO job 后等待云 worker 期间，日志尾常停在 published job 行——
+  // wait_job 不打印，若不加匹配阶段灯会退成 idle（数据明明在等 PPO）。
+  const pubMatch = last.match(/published job \S+ it(\d+)/)
+  if (pubMatch) {
+    return { phase: 'ppo', sinceMs, iter: Number(pubMatch[1]) }
+  }
   // push/remote ppo/ppo itN/weights archived 等 → 仍在 PPO 阶段
   if (/\[run_rl\] (push:|remote ppo|ppo it\d+|weights archived|export)/.test(last)) {
     const itMatch = last.match(/it(\d+)/)

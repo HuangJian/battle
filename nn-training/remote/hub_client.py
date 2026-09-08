@@ -311,6 +311,12 @@ def publish_job(
     except OSError:
         pass
     # 6) jsonl job_pending（磁盘 IPC；幂等去重——同 job_id 不重复追加）
+    # 悬空 job 清理（§381）：发布前作废更早迭代/旧 runId 遗留的 pending job——
+    # 否则 loop 重启（runId 变 → 同 it 新 jid）后，无 worker 期间滞留的旧 job
+    # 会在 GPU 上线时被全部补做（白烧 GPU + PPO 数 ≠ iteration 数）。
+    _n_cancelled = cancel_stale_jobs(jsonl_path, it, jid)
+    if _n_cancelled:
+        log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {it}（旧 runId 遗留，不再派发）")
     _append_ledger(jsonl_path, {
         "event": "job_pending",
         "job_id": jid,
@@ -364,6 +370,52 @@ def mark_job_completed(jsonl_path: str | Path, jid: str) -> None:
         if e.get("event") == "job_completed" and e.get("job_id") == jid:
             return  # 已存在
     _append_ledger(p, {"event": "job_completed", "job_id": jid, "ts": time.time()})
+
+
+def cancel_stale_jobs(jsonl_path: str | Path, it: int, keep_job_id: str) -> int:
+    """作废滞后迭代 / 旧 runId 遗留的 pending job（写 job_cancelled 账本事件，幂等）。
+
+    §381（2026-09-08）：loop 重启 runId 变 → 同一 it 生成新 jid；无 worker 期间
+    发布的旧 pending 会滞留池中，GPU 上线后按发布序全部补做——白烧 GPU 且让
+    「PPO 完成数 ≠ iteration 行数」，控制台看起来像丢数据。
+
+    发布新 job 时作废所有 `it <= 当前 it` 且非本次 job_id 的 pending job：
+    同 runId 每 it 只发布一次（wait_job 阻塞后才进下一轮），故命中的必然属于
+    旧 runId 遗留 / 已被更新的同 it 覆盖。hub 侧（claimable_job_ids）识别
+    job_cancelled 后不再派发。返回本次作废数。
+    """
+    if not isinstance(it, int):
+        return 0
+    p = Path(jsonl_path)
+    if not p.exists():
+        return 0
+    terminal: dict[str, str] = {}  # jid -> 终态事件（completed / cancelled）
+    pendings: dict[str, dict] = {}
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        ev = e.get("event")
+        jid = e.get("job_id")
+        if not (isinstance(ev, str) and isinstance(jid, str)):
+            continue
+        if ev == "job_pending":
+            pendings[jid] = e
+        elif ev in ("job_completed", "job_cancelled"):
+            terminal[jid] = ev
+    n = 0
+    for jid, e in pendings.items():
+        if jid == keep_job_id or jid in terminal:
+            continue
+        jit = e.get("it")
+        if not (isinstance(jit, int) and jit <= it):
+            continue
+        _append_ledger(p, {"event": "job_cancelled", "job_id": jid, "it": jit, "ts": time.time()})
+        n += 1
+    return n
 
 
 # ------------------------------------------------------------------ 等待（HTTP）

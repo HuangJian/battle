@@ -259,6 +259,14 @@ describe('view 交互纯函数（§7 评审 E5 替代 DOM 测试）', () => {
       sinceMs: new Date().setHours(10, 3, 0, 0),
       iter: 7,
     })
+    // §380：published job（wait_job 等待云 worker 期间日志尾常停在此行）→ ppo
+    expect(
+      parsePhaseFromLog(['[10:04:00] published job abcd1234 it7: shards=150 data_fp=abc…']),
+    ).toEqual({
+      phase: 'ppo',
+      sinceMs: new Date().setHours(10, 4, 0, 0),
+      iter: 7,
+    })
     expect(parsePhaseFromLog(['[10:04:00] [run_rl] weights archived'])).toEqual({
       phase: 'ppo',
       sinceMs: new Date().setHours(10, 4, 0, 0),

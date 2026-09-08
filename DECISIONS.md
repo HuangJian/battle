@@ -3647,6 +3647,26 @@ p3-ks1/vr1/vk1 三臂共用）——vk1 续跑 boot 时 `_setup` 建 BC ref 触�
 
 教训：状态机（exited）不是日志；失败必须**写进日志文件 + 可查询字段**才不算静默。
 
+## §383 / 悬空 job 清理 + 阶段灯 idle 修复（2026-09-08，用户指令）
+
+**悬空 job 清理**：loop 重启 runId 变 → 同 it 新 jid；无 worker 期间发布的旧 pending
+滞留 hub 池，GPU 上线后按发布序全部补做（白烧 GPU、PPO 数 ≠ iteration 数，控制台
+看似丢数——2026-09-08 vk1 实证：worker 补做 3 个历史 jid 仅 2 个是新轮次）。
+机制：`remote/hub_client.cancel_stale_jobs` 在 publish_job 追加 job_pending 前作废
+所有 `it <= 当前 it` 且非本次 job_id 的 pending（同 runId 每 it 只发一次，命中的必属
+旧 runId 遗留；幂等）；`remote/hub_server` 账本识别 `job_cancelled` 事件并从可领取
+池剔除（与 job_completed 同语义）。效果：worker 只做活 job；同 it 被新 runId 覆盖时
+旧 jid 即刻作废。
+
+**阶段灯 idle 修复**：wait_job 期间 loop 不打印，日志尾常停在 `published job … itN`
+行——parsePhaseFromLog 未匹配 → 阶段灯退 idle（数据明明在等 PPO）。补一行匹配 →
+ppo 阶段（view.ts）。
+
+测试：test_remote_ppo.py（池剔除 cancelled + cancel_stale_jobs 幂等/不动 completed）、
+training-console-preact.test.ts（published job → ppo）。pytest 全绿；tsc + console
+套件 76 绿。注：并行会话 §382（p3-rd1 回报重分配）进行中导致的 test_reward_golden
+mypy 中间态失败与本改动无关。
+
 ## §381 / 组件日志动态查找在组件表落地 + 账本真实性回归（2026-09-08，用户指令）
 
 背景：清理 tmp 后「先起控制台、再起服务」，所有日志页提示「日志文件不存在——
@@ -3668,3 +3688,31 @@ p3-ks1/vr1/vk1 三臂共用）——vk1 续跑 boot 时 `_setup` 建 BC ref 触�
 4. 控制台代码更新后必须**重启控制台进程**（受管进程 detached 不受影响，安全）；
    否则旧代码继续按失效路径解析。任何「改码后看见旧行为」的排查第一件事：
    核对控制台进程启动时间 ≥ 代码提交时间。
+
+## §382 / ②回报重分配 = terminal-spread 均匀重分配（2026-09-08，vk1 停腿后用户指令"开发下一棒"）
+
+背景：p3 四腿全灭（bc 阴跌/vr1 平/ks1 平/vk1 冲高回落 49→32，rl.progress §17）——
+"critic/缰绳带 p3 爬坡"证伪。§362 排序出口只剩②（③短局已否：超时组恰是战斗组）。
+R5 诊断原文：episode 级 return 方差健康（std 5.12），step 级 credit 贫困
+（2400tick 摊薄；timeout +1.31 是正当战果非怠工；死=站位、超时=瞄准 9%）。
+
+设计（最小可用，MANIFEST §10 简单优先）：
+- 现状（toy scheme）：r[i]=Φ[i+1]−Φ[i] 稠密势差＋终局 lump T 全砸 r[N−1]
+ （clear+2/death−1/timeout−2）。GAE（γ=0.998/λ=0.99）自举视野 ~83 步，
+  100–240 步的局里早期瞄准动作几乎拿不到终局梯度——即 step 贫困的机制解释。
+- 改动：`terminal_spread: bool`（默认 False=历史行为逐字节不变）。True 时
+  终局对账额 T（toy 取 terminal[outcome]，reconcile 取 scale·gated−(Φ[N]−Φ[0])）
+  改为每步 +T/N。Σr 恒等不变（同一局总回报逐位同），只换时间分配——
+  RUDDER 的均匀基线，不含学习模型。
+- 为什么均匀不加权：零新超参；按开火/活動加权会惩罚"开火"本身（方向反了——
+  超时组恰在打）；尾窗 spread 多一个窗口超参，留作均匀失败后的 follow-up。
+- 为什么不动公式 DSL：TIME_AXIS_REDUCERS 不变式锁死公式语言无跨步归约；
+  spread 做在 wrapper 层（已有点索引操作），纯向量化，DSL 零触碰。
+- 部署：reward 全 trainer 侧装载期算（shard 只带 metrics.npy），worker 经
+  manifest 课程全文＋code.zip 自带新代码——flag 自动透传，零手动升级节点。
+  identity() 指纹含新键 → formula_hash 变 → D14/course_fp 强制新实验隔离。
+- 载体 p3-rd1.jsonc：由 p3-vk1 派生，仅 +terminal_spread＋改名＋fresh 目录；
+  normalize/缰绳/ep60起点/地图/schedule 全不动——rd1 vs vk1 单变量对照。
+- 预注册门：it5 eval ≥35（不比 vk1 36/ks1 38 起点差）；it15−it5 ≥+15pp
+  且 it15 ≥45 → 继续（翻转噪音下 2σ）；it15 ≤35 → 停腿；之间 → it20 裁决。
+  verdict 只看配对净变化＋翻转率（§17 教训），不看单点。
