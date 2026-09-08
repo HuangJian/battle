@@ -3,23 +3,33 @@ import { World } from '../src/game/World'
 import { HudView } from '../src/presentation/ui/HudView'
 import { DEFAULT_KEYS, DEFAULT_P2_KEYS } from '../src/game/Input'
 import { RULES } from '../src/config/rules'
-import { FakeEl, fakeCreateElement } from './helpers/fake-dom'
 
 /**
  * Two-player HUD super-item label rows (2p-review P0-1): the 2p commit shipped
  * the update/show-hide logic for `guardLabel2/frenzyLabel2/rewindLabel2` but
  * never the create step, so the rows could never appear. DOM regression test
- * (AGENTS §8 permits DOM when the system under test requires it) via the
- * minimal fake DOM — no jsdom dependency (tests/helpers/fake-dom.ts).
+ * against happy-dom's real DOM (DECISIONS §2026-09-08-ps2-happydom) — the
+ * element factory mirrors UIManager.createElement (document.createElement +
+ * className).
  */
 
+/** Same element factory UIManager hands to HudView in production. */
+function makeCreateElement(tag: string, className: string): HTMLElement {
+  const el = document.createElement(tag)
+  el.className = className
+  return el
+}
+
 function makeHud(): HudView {
-  return new HudView(fakeCreateElement, () => {})
+  return new HudView(makeCreateElement, () => {})
 }
 
 /** Read a private HudView label field (the DOM elements the class owns). */
-function labelOf(hud: HudView, field: 'guardLabel2' | 'frenzyLabel2' | 'rewindLabel2'): FakeEl {
-  const el = (hud as unknown as Record<string, FakeEl | null>)[field]
+function labelOf(
+  hud: HudView,
+  field: 'guardLabel2' | 'frenzyLabel2' | 'rewindLabel2',
+): HTMLElement {
+  const el = (hud as unknown as Record<string, HTMLElement | null>)[field]
   if (!el) throw new Error(`P2 label ${field} was never created (P0-1 regression)`)
   return el
 }
@@ -38,7 +48,7 @@ describe('HudView two-player super-key labels (P0-1)', () => {
     expect(labelOf(hud, 'guardLabel2').textContent).toBe('Guardian<R>')
     expect(labelOf(hud, 'frenzyLabel2').textContent).toBe('Frenzy<T>')
     expect(labelOf(hud, 'rewindLabel2').textContent).toBe('Time Box<G>')
-    const hudAny = hud as unknown as Record<string, FakeEl | null>
+    const hudAny = hud as unknown as Record<string, HTMLElement | null>
     expect(hudAny.guardLabel!.textContent).toBe('Guardian<F5>')
     // Created hidden — only visible in two-player mode.
     expect(labelOf(hud, 'guardLabel2').hidden).toBe(true)

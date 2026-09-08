@@ -4,21 +4,22 @@ import { DEFAULT_KEYS, DEFAULT_P2_KEYS } from '../src/game/Input'
 import { DEFAULT_PAD_BINDINGS } from '../src/game/settings'
 import type { PadBindings } from '../src/types'
 import type { GamepadSnapshot } from '../src/game/GamepadInput'
-import { FakeEl, fakeCreateElement, installRafStub, installWindowStub } from './helpers/fake-dom'
 
 /**
  * Gamepad rebind capture on STATIC screens (2p-review P0-2): menu / paused /
  * gameover run no rAF loop, so the GamepadManager is never polled there — the
  * capture loop must drive a fresh poll itself or a pure-pad user can never
  * rebind (the snapshot would be the stale pre-capture value forever).
- * DOM regression test via the minimal fake DOM + stubbed rAF/window.
+ * DOM regression test against happy-dom's real DOM; the capture loop's rAF is
+ * stubbed for deterministic frame stepping (DECISIONS §2026-09-08-ps2-happydom).
  */
 
 /** A gamepad snapshot with a single button held. */
 function padWithButtonPressed(button: number): GamepadSnapshot {
   return {
     index: 0,
-    axes: [0, 0, 0, 0],    buttons: Array.from({ length: 17 }, (_, i) => ({
+    axes: [0, 0, 0, 0],
+    buttons: Array.from({ length: 17 }, (_, i) => ({
       pressed: i === button,
       value: i === button ? 1 : 0,
     })),
@@ -27,29 +28,57 @@ function padWithButtonPressed(button: number): GamepadSnapshot {
   }
 }
 
-function makePanel(): ControlsPanel {
-  return new ControlsPanel(fakeCreateElement)
+/** Same element factory UIManager hands to ControlsPanel in production. */
+function makeCreateElement(tag: string, className: string): HTMLElement {
+  const el = document.createElement(tag)
+  el.className = className
+  return el
 }
 
-/** Fake element cast for dispatching captured clicks. */
-function elOf(panel: ControlsPanel, sel: string): FakeEl {
-  return panel.el.querySelector(sel) as unknown as FakeEl
+function makePanel(): ControlsPanel {
+  return new ControlsPanel(makeCreateElement)
+}
+
+/** Real DOM element for a selector inside the panel. */
+function elOf(panel: ControlsPanel, sel: string): HTMLElement {
+  const el = panel.el.querySelector(sel)
+  if (!el) throw new Error(`missing element for ${sel}`)
+  return el as HTMLElement
 }
 
 /** Open the panel, switch to the Gamepad tab, and click the given row. */
 function openPadTabAndClick(panel: ControlsPanel, action: string): void {
   panel.open()
-  elOf(panel, '[data-controls="tab-pad"]').dispatch('click')
-  elOf(panel, `[data-action="${action}"]`).dispatch('click')
+  elOf(panel, '[data-controls="tab-pad"]').click()
+  elOf(panel, `[data-action="${action}"]`).click()
+}
+
+/** Deterministic rAF stub: each nextFrame() runs the latest scheduled callback. */
+function installRafStub(): { nextFrame: () => void; restore: () => void } {
+  let pending: (() => void) | null = null
+  const origRaf = globalThis.requestAnimationFrame.bind(globalThis)
+  globalThis.requestAnimationFrame = (fn: FrameRequestCallback): number => {
+    pending = () => fn(0)
+    return 1
+  }
+  return {
+    nextFrame: () => {
+      const fn = pending
+      pending = null
+      fn?.()
+    },
+    restore: () => {
+      globalThis.requestAnimationFrame = origRaf
+    },
+  }
 }
 
 describe('ControlsPanel gamepad capture (P0-2)', () => {
   afterEach(() => {
-    delete (globalThis as Record<string, unknown>).window
+    // Panel constructors register a window keydown listener; detach via close.
   })
 
   it('capture polls fresh hardware state before reading, and binds the press', () => {
-    installWindowStub()
     const raf = installRafStub()
     const panel = makePanel()
     const pads: PadBindings = { ...DEFAULT_PAD_BINDINGS }
@@ -72,7 +101,6 @@ describe('ControlsPanel gamepad capture (P0-2)', () => {
   })
 
   it('capture never binds when the snapshot is stale (no poll seam) — starvation repro', () => {
-    installWindowStub()
     const raf = installRafStub()
     const panel = makePanel()
     const pads: PadBindings = { ...DEFAULT_PAD_BINDINGS }
@@ -92,7 +120,6 @@ describe('ControlsPanel gamepad capture (P0-2)', () => {
   })
 
   it('a conflicting press is rejected (flash) and the binding stays put', () => {
-    installWindowStub()
     const raf = installRafStub()
     const panel = makePanel()
     const pads: PadBindings = { ...DEFAULT_PAD_BINDINGS }

@@ -1,0 +1,6 @@
+[test]
+# Register happy-dom browser globals (window/document/navigator/...) before
+# every test file so UI integration tests run against a real DOM emulator
+# (DECISIONS §2026-09-08-ps2-happydom). Headless logic tests are unaffected —
+# the globals are inert unless the code under test touches them.
+preload = ["./tests/setup.ts"]

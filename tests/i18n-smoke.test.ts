@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach } from 'bun:test'
 import { I18n, localizeRoot, t, i18n as singleton } from '../src/i18n'
 import { localizedStageName } from '../src/config/stages'
 
-// Minimal DOM/localStorage stubs so the module can run under bun.
+// Minimal localStorage stub so each test starts from a clean store. (Since
+// happy-dom registers a getter-only `localStorage` global — DECISIONS
+// §2026-09-08-ps2-happydom — we override it via defineProperty, not
+// assignment; the rest of the DOM the module needs comes from happy-dom.)
 function makeLocalStorage(): Storage {
   const map = new Map<string, string>()
   return {
@@ -23,7 +26,11 @@ describe('i18n core', () => {
   beforeEach(() => {
     calls = []
     storage = makeLocalStorage()
-    globalThis.localStorage = storage
+    Object.defineProperty(globalThis, 'localStorage', {
+      value: storage,
+      configurable: true,
+      writable: true,
+    })
     i18n = new I18n()
   })
 

@@ -1113,3 +1113,16 @@ pin。`bun run check` 全绿（1755 pass），build 绿。God-AI/World/录制器
   实验/调优 → progress 指针，bugfix/UI → commit 承载）。本次迁移 3734 → 约 980 行，编号集合逐条核对未变。
 - **违反后果**：撞号与膨胀回归（目标 ≤5 条/月 vs 现状 ~30）、合并冲突复现、外部引用断链。
 - **留存**：旧全文在 ccf49ff^（瘦身前全文版，git 历史为准，不另存本机备份）。
+
+## §2026-09-08-ps2-happydom（2026-09-08，用户指令引入 web 界面集成测试）
+
+- **背景**：UI 回归测试此前依赖手写 FakeEl 解析器（tests/helpers/fake-dom.ts），只覆盖组件子集，
+  覆盖不了 UIManager 全树装配 / 启动本地化 / 菜单点击路由等真实 DOM 场景。
+- **备选与否决**：jsdom —— 否，Bun 下兼容摩擦大、启动慢、依赖重；继续手写 FakeEl —— 否，
+  每多用一个 DOM API 就要扩一次解析器，且测不到 document.createElement/document.body 直调路径。
+- **决定**：devDependency 引入 happy-dom@20 + @happy-dom/global-registrator，
+  bunfig.toml `[test] preload` 全局注册浏览器全局（headless 逻辑测试不触 DOM、不受影响）；
+  FakeEl 删除，原两个回归测试（hud 双人键位、手柄改键轮询）改写为真实 DOM，
+  新增 UIManager 全启动集成测试（tests/ui-integration.test.ts，含菜单点击路由 / 本地化切换 / 手柄图例落 DOM）；
+  i18n-smoke 改用 defineProperty 覆写 localStorage（happy-dom 是只读访问器，直接赋值会抛）。
+- **违反后果**：UI 测试退回手写解析器（覆盖漏、维护贵）；新增 UI 测试必须跑在 happy-dom 下，不许再造解析器。
