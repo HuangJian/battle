@@ -418,7 +418,7 @@ visual/tunable value (color, timing, count, threshold).
   bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯者落成测试断言）;
   临时上下文 → `.workbuddy/memory/YYYY-MM-DD.md`.
 - **New-entry ID (自治理生效起)**: `§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如
-  `god-ai` → `godai`；同日同分支第 N 条加 `-N`）. Old §1–§382 are a **frozen external-reference
+  `god-ai` → `godai`；同日同分支第 N 条加 `-N`）. Old §1–§384 are a **frozen external-reference
   contract: never renumber, never delete**; superseded entries are marked `_(superseded by §ID)_`.
 - **Entry template (≤12 lines, 备选与否决必填)**:
   背景（2 行）→ 备选与否决（A —— 否，因为…；B —— 否，因为…）→ 决定（1–3 行）→ 违反后果（1 行）.
@@ -427,7 +427,7 @@ visual/tunable value (color, timing, count, threshold).
   `docs/decisions/HOW-TO-ADD.md` + `tail -200`，不要全文扫描几千行。
 - **Automated guard**: `bun run check` runs `tools/check-decisions.ts`（撞号 / 丢号 /
   新条目格式，基线见 `tools/decisions-baseline.json`）.
-- **Historical format（§1–§382 期间使用，仅供解读旧条目）**: foundational / architecture /
+- **Historical format（§1–§384 期间使用，仅供解读旧条目）**: foundational / architecture /
   gameplay-mechanic decisions previously used this shape — keep numbering sequential; revising an
   older decision marks it `_(superseded by §N)_` — history matters, never delete:
 

@@ -20,13 +20,14 @@
 > | §21–§26 | 渲染 / 仿真性能四轮压榨 | `docs/perf-optimization.progress.md` |
 > | §31 | 超级道具背包累积制 | `docs/features.md` §1.3 |
 >
-> **编号冲突注**：§293 有两个条目（§293-intent「M4 完成」与 §293-God AI「解冻+恢复道具」），
-> 系 intent-ai 分支并入时撞号（见 §277 迁移注）。两者编号均被外部引用，保持不动。
+> **编号冲突注**：同号多条均为历史分支并入撞号（§75/§165/§182/§293–§304/§307/§354/§355/§361，
+> 其中 §302 有三条），各条均被外部引用，保持不动；完整计数以 `tools/decisions-baseline.json` 为准。
 >
 > **编号规则变更（2026-09-08，plan/decisions-governance.md）**：旧编号 §1–§384 是
 > **冻结历史契约**（永不重排、永不删除）；**自治理生效起新条目改用日期 ID
 > `§YYYY-MM-DD-<branch>-<slug>`**（branch 去连字符；首个样本 = §2026-09-08-decisions-governance）。
-> 新 ID 是本地可生成的不可变标识：零协调、零共享状态、零撞号。
+> 新 ID 本地可生成（写前先 tail 查当日已有 ID 防重）；基线中不存在的 ID 出现两次即撞号，
+> `tools/check-decisions.ts` 直接 fail。
 >
 > **准入三问（答 No 就不写）**：① 有没有被否决的备选方案？ ② 未来 agent 会不会重犯/重查？
 > ③ 能不能就近表达（代码注释 / 测试断言 / 配置字段 / docstring）？真决策/禁令/铁律 → 本文件；
@@ -34,12 +35,12 @@
 >
 > **归档约定**：长正文已收编为「编号 + 一句话 + 指针」索引行（实验数据 → progress 文档指针，
 > bugfix → commit 承载）；查细节先走指针，再查 progress，最后才回提交历史。旧全文存留于
-> git HEAD（前身为 3734 行版）。写法见 `docs/decisions/HOW-TO-ADD.md`；正确性由 `bun run check`
+> ccf49ff^（瘦身前全文版，git 历史为准）。写法见 `docs/decisions/HOW-TO-ADD.md`；正确性由 `bun run check`
 > 里的 `tools/check-decisions.ts` 强制（撞号/丢号/新条目格式）。
 
 ---
 
-## 铁律清单 (Iron Laws)
+### 铁律清单 (Iron Laws)
 
 > 防重犯必读。全文在对应条目；以下为最短形式。
 
@@ -53,7 +54,7 @@
 
 ---
 
-## 勿重提清单 (Do-Not-Re-Investigate)
+### 勿重提清单 (Do-Not-Re-Investigate)
 
 > 以下结论已在重构审计中反复确认，未来 agent 不要再重查或推翻。完整依据见 `plan/refactor.trae.md` §0.5。
 
@@ -72,7 +73,7 @@
 ---
 
 
-## 基石决策 §1–§10（全文 → docs/decisions.details.md Part A）
+### 基石决策 §1–§10（全文 → docs/decisions.details.md Part A）
 
 | 编号 | 一句话 | 交叉引用 |
 |---|---|---|
@@ -89,7 +90,7 @@
 
 ---
 
-## Architecture Decisions
+### Architecture Decisions
 
 | Decision | Detail |
 |----------|--------|
@@ -106,7 +107,7 @@
 | Stage loading API (`World.loadStageData`) | `docs/architecture.md` §8 |
 | Level generator (7-layer procedural pipeline) | `docs/architecture.md` §11 |
 
-## Gameplay Feature Decisions
+### Gameplay Feature Decisions
 
 | Decision | Detail |
 |----------|--------|
@@ -122,7 +123,7 @@
 | Snapshot management framework (one model, four origins, policy-driven retention) | `docs/architecture.md` §7 |
 | Recovery-screen UI state guards extracted to pure predicates (`uiFlowGates.ts`) | 修复 Recovery 屏按钮因状态守卫漏 `'recovery'` 而死/报错；抽为无 DOM 纯谓词后可无头回归。→ `docs/decisions.details.md` 附录 A1 · `tests/recovery-screen-flow.test.ts` |
 
-## God AI Tuning
+### God AI Tuning
 
 Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
@@ -168,11 +169,11 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 75. §75: Distance-Aware Base-Wall Fire Guard (T2a/Aggressive Suicide Fix) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Performance Optimization —— 全文 → docs/perf-optimization.progress.md
+### Performance Optimization —— 全文 → docs/perf-optimization.progress.md
 
-## Lie-Back-Win-Mode (Coop God AI) —— 全文 → docs/god-ai-tuning.progress.md
+### Lie-Back-Win-Mode (Coop God AI) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Render Optimization —— 全文 → docs/render-optimization.progress.md
+### Render Optimization —— 全文 → docs/render-optimization.progress.md
 
 ## 70. Base-Ring Fire Guard (Never Destroy Own Base) —— 全文 → docs/god-ai-tuning.progress.md
 
@@ -512,7 +513,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 234. 门禁种子 20→10 后补 — test-silent HEAVY_TESTS 修复 + 强制 --parallel (STATUS: SHIPPED) —— 全文 → docs/god-ai-tuning.progress.md
 
-## Render Optimization（§235–§238 渲染实测否决，全文 → docs/render-optimization.progress.md）
+### Render Optimization（§235–§238 渲染实测否决，全文 → docs/render-optimization.progress.md）
 
 ## 235. R6 vignette 缓存 1× 化 — 全屏 alpha blit 面积 4× 缩减 (STATUS: SHIPPED, 有损项已论证) —— 全文 → docs/render-optimization.progress.md R6（2026-08-17）
 
@@ -522,7 +523,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 238. 粒子烘焙位图 blit — 实测 4× 慢，彻底证伪 (STATUS: 否决) —— 全文 → docs/render-optimization.progress.md R8（2026-08-17）
 
-## Refactor & Engineering（§239–§271 重构落地，全文 → docs/decisions.details.md Part B）
+### Refactor & Engineering（§239–§271 重构落地，全文 → docs/decisions.details.md Part B）
 
 ## 239. §1.6 魔法数字 → 命名常量 (STATUS: 已实施, plan/refactor.agy.md Phase 1) —— 全文 → docs/decisions.details.md（Part B §239）
 
@@ -592,7 +593,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 272. God AI v1 封版冻结 —— D0 拍板 + 冻结基线 + 签名 golden (STATUS: 已实施, 2026-08-26) —— 全文 → docs/god-ai-tuning.progress.md Part 0（冻结基线 / golden 完整）· 重启协议 → plan/God-AI-Organization.md §8
 
-## God AI 冻结纪元运维（§273–§276，全文 → docs/decisions.details.md Part C）
+### God AI 冻结纪元运维（§273–§276，全文 → docs/decisions.details.md Part C）
 
 ## 273. 留档实验资产不删决策（OFF 旋钮 / OFF 候选 / 锁存测试全保留）(STATUS: 已实施, 2026-08-26) —— 全文 → docs/decisions.details.md（Part C §273）
 
@@ -610,7 +611,7 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
 
 ## 280. 否决 RL-WASM-Bridge（B3），改走 A'（bun 持久进程桥）(STATUS: 已决议) —— 全文 → docs/decisions.details.md（Part D §280，含 v3–v5 评审附录）· 评审 → plan/RL-WASM-Bridge.review.md · 执行 → plan/RL-Bun-Bridge.md
 
-## RL 训练基础设施（§281–§284，全文 → docs/nn.progress.md）
+### RL 训练基础设施（§281–§284，全文 → docs/nn.progress.md）
 
 ## 281. RL 训练断点续跑机制（服务随时停启）(STATUS: 完成, 2026-08-23) —— 全文 → docs/nn.progress.md §4（RL 训练断点续跑机制）
 
@@ -964,4 +965,4 @@ Full history in `docs/god-ai-tuning.progress.md`. Key milestones:
   基线 `tools/decisions-baseline.json`）+ 一次性瘦身（编号集合不变式：只删正文不删编号；
   实验/调优 → progress 指针，bugfix/UI → commit 承载）。本次迁移 3734 → 约 980 行，编号集合逐条核对未变。
 - **违反后果**：撞号与膨胀回归（目标 ≤5 条/月 vs 现状 ~30）、合并冲突复现、外部引用断链。
-- **留存**：旧全文在 git HEAD（前身 3734 行版）与 tmp/decisions-orig-3734.md（一次性本机备份，随 tmp 清理）。
+- **留存**：旧全文在 ccf49ff^（瘦身前全文版，git 历史为准，不另存本机备份）。

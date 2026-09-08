@@ -5,7 +5,8 @@
  * 四条校验：
  *  1. 编号集合不变式 —— 编号 multiset 与 tools/decisions-baseline.json 完全一致：
  *     任一编号消失或数量减少（误删历史契约，外部引用断链）=> fail；
- *     任一编号数量多于基线（新撞号）=> fail。
+ *     任一编号数量多于基线（新撞号）=> fail；基线中不存在的新日期 ID 出现多次
+ *    （同 ID 并发写入撞号）=> fail。
  *  2. 越界告警 —— 单条正文 > 40 行（明显该搬 progress 文档了）=> 告警（不 fail）。
  *  3. 新条目格式 —— 不在基线中的新编号必须形如 §YYYY-MM-DD-<branch>-<slug> => 否则 fail。
  *  4. 头部可解析 —— 无法提取编号的 `## ` 行 => 告警。
@@ -144,8 +145,10 @@ function main() {
     const now = counts.get(key) ?? 0
     if (now === 0) missing.push(key)
     else if (now > before) {
-      if (before === 0) added.push(key)
-      else newDups.push(`${key} (基线 ${before} → 现在 ${now})`)
+      if (before === 0) {
+        if (now > 1) newDups.push(`${key} (新条目撞号 ×${now})`)
+        else added.push(key)
+      } else newDups.push(`${key} (基线 ${before} → 现在 ${now})`)
     }
   }
   if (missing.length) {
