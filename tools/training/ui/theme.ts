@@ -229,8 +229,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-logtool__clear:hover{color:var(--red)}
 .tc-logtool__lines{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-2);color:var(--muted)}
 
-/* 暂停跟随提示条 */
-.tc-logpause{position:sticky;top:46px;z-index:19;align-self:flex-start;padding:4px 12px;border-radius:999px;background:var(--yellow-bg);color:#b45309;font-size:var(--fs-2);font-weight:600}
+/* 暂停跟随提示条（§373：并入工具栏最左 inline pill，不再占独立纵向行） */
+.tc-logpause{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;background:var(--yellow-bg);color:#b45309;font-size:var(--fs-2);font-weight:600;white-space:nowrap}
 
 /* 日志面板：终端风 */
 .tc-logpanel{background:#0d1117;border:1px solid #232a36;border-radius:var(--r-3);overflow:hidden;box-shadow:var(--sh-1)}

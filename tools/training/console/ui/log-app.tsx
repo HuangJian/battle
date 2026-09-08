@@ -279,6 +279,15 @@ export function LogApp({ initial, options }: LogAppProps) {
 
       {/* ── 吸顶工具栏：导航 + follow + 尾行数 + 搜索 + 级别 ── */}
       <div className="tc-logtool">
+        {!pinned && follow ? (
+          <span
+            className="tc-logpause"
+            role="status"
+            title="上滚读历史时自动暂停跟随；滚回底部或点直达底部恢复"
+          >
+            已暂停跟随 · 正在读历史
+          </span>
+        ) : null}
         <nav className="tc-logtool__nav" aria-label="组件">
           {options.components.map((c) => (
             <a
@@ -367,12 +376,6 @@ export function LogApp({ initial, options }: LogAppProps) {
           {!exists ? <span className="tc-chip tc-chip--red">文件不存在</span> : null}
         </div>
       </div>
-
-      {!pinned && follow ? (
-        <div className="tc-logpause" role="status">
-          已暂停跟随 · 正在读历史
-        </div>
-      ) : null}
 
       {/* ── 日志体 ── */}
       <div className="tc-logpanel">

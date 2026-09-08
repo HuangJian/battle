@@ -3456,3 +3456,20 @@ bundle 路径一致性校验（SSR script src ∈ servable paths + log.js 禁词
 
 **测试**：readLogTail all 断言 totalLines=50、缺文件 null；renderLogPage SSR 断言
 `共 N 行` 用 totalLines（正则匹配空白折叠）、工具栏含 tc-logbtn。控制台 73 测试全绿。
+## §373 / 日志乱码修复 + 暂停提示入工具栏（2026-09-08，用户报告）
+
+**问题**：①TrainingLoop 日志出现「HTTP 530˲ʱ󣩡」式乱码——python 子进程
+（hub/worker/run_rl）在 zh-CN Windows 下 stdout 走 GBK，日志被整段按 UTF-8 解码；
+②「已暂停跟随 · 正在读历史」是独立 sticky 行，占纵向空间。
+
+**决定**：
+1. **逐行容错解码**：readLogTail / logTail（dashboard 卡同款）改为按 \n 字节切行，
+   每行先严格 UTF-8（fatal），失败整行 GB18030（GBK 超集）重解——纯 UTF-8 文件零影响，
+   只有真正 GBK 行兜底；窗口被切半的多字节尾字节只影响该行，不误伤其余行。
+   Bun TextDecoder 支持 gb18030 已实测。修复前如果走「整段 UTF-8 fatal→整体 gb18030」
+   会把整段 UTF-8 误判，故必须逐行。
+2. **提示条并入工具栏最左**：从独立 sticky 行改为 `.tc-logtool` 内首个 inline pill
+   （nav 之前），不再占纵向空间。
+
+**测试**：写混合 UTF-8/GBK 字节的真实文件 → readLogTail 正确还原 GBK 中文（无 U+FFFD）
+且 UTF-8 行不受影响；logTail 同验。控制台 74 测试全绿。

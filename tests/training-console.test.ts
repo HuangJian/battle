@@ -531,6 +531,33 @@ describe('console/log viewer (§348 补 2)', () => {
     }
   })
 
+  it('日志 GBK 乱码修复（§373）：混合 UTF-8/GBK 行逐行容错解码，不误伤其它行', () => {
+    // 「超时（瞬时连接被拒），重试 5.0s 之后」的 GBK 字节（python gbk encode 实测）
+    const gbkB64 = 's6zKsaOoy7LKscGsvdOxu77co6mjrNbYytQgNS4wcyDWrrrz'
+    const gbkBytes = Uint8Array.from(atob(gbkB64), (c) => c.charCodeAt(0))
+    const rel = 'tmp/logtail-gbk-373.log'
+    const p = path.join(import.meta.dir, '..', 'nn-training', rel)
+    mkdirSync(path.dirname(p), { recursive: true })
+    const buf = Buffer.concat([
+      Buffer.from('[09:01:53] wait_job: job bb11e73f1d2c327d HTTP 530 '),
+      Buffer.from(gbkBytes),
+      Buffer.from('\n'),
+      Buffer.from('[09:01:55] [sampler-agent] task ok utf8 中文正常行\n'),
+    ])
+    writeFileSync(p, buf)
+    try {
+      const t = api.readLogTail(rel, 'all')
+      expect(t.lines[0]).toContain('超时（瞬时连接被拒）')
+      expect(t.lines[0]).not.toContain('\uFFFD') // 无替换符乱码残留
+      expect(t.lines[1]).toBe('[09:01:55] [sampler-agent] task ok utf8 中文正常行') // UTF-8 行不受影响
+      // dashboard 卡的 logTail 同步修复
+      const tail = api.logTail(rel, 5)
+      expect(tail[0]).toContain('超时')
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+
   it('resolveComponentLog：五个组件均有日志映射；未知组件 null', () => {
     const cfg = JSON.parse(readFileSync(REAL_CONFIG, 'utf-8')) as Parameters<
       typeof api.resolveComponentLog

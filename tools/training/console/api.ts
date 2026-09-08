@@ -171,15 +171,42 @@ const ALL_COMPONENTS: Component[] = [
 ]
 
 /** 逐行容错的日志尾（§361③）：单行损坏/读取异常只丢该行，不再让整个 /api/state 500。 */
-export function logTail(nnRel: string, n = 5): string[] {
-  let raw = ''
+// ────────────────────────── 日志字节容错解码（§373） ──────────────────────────
+// python 子进程（hub/worker/run_rl）在 zh-CN Windows 下可能以 GBK(stdout) 写日志，
+// 整段按 UTF-8 解码会产生「˲ʱ󣩡」式乱码。逐行严格 UTF-8 解码，失败行用
+// GB18030（GBK 超集）重解——纯 UTF-8 文件零影响，只有真正 GBK 行走兜底。
+
+function decodeLogBytes(u8: Uint8Array): string {
   try {
-    raw = readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel), 'utf-8')
+    return new TextDecoder('utf-8', { fatal: true }).decode(u8)
+  } catch {
+    return new TextDecoder('gb18030').decode(u8)
+  }
+}
+
+/** 按 \n 字节切行并逐行容错解码（窗口读的 buf 含被切半的 UTF-8/GBK 尾字节也不影响其它行）。 */
+function splitLogBytes(buf: Uint8Array): string[] {
+  const out: string[] = []
+  let start = 0
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 10) {
+      out.push(decodeLogBytes(buf.subarray(start, i)))
+      start = i + 1
+    }
+  }
+  if (start < buf.length) out.push(decodeLogBytes(buf.subarray(start)))
+  return out
+}
+
+export function logTail(nnRel: string, n = 5): string[] {
+  let raw: Uint8Array
+  try {
+    raw = readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel))
   } catch {
     return [] // 文件缺失/暂时不可读 = 无日志尾（正常态，非错误）
   }
   const out: string[] = []
-  for (const line of raw.split('\n')) {
+  for (const line of splitLogBytes(raw)) {
     if (!line) continue
     out.push(line.length > 200 ? line.slice(0, 200) : line)
   }
@@ -234,10 +261,9 @@ export function readLogTail(
   } catch {
     return { lines: [], exists: true, fileSize, truncated: false, totalLines: null }
   }
-  let text = buf.toString('utf-8')
   // 首行多半是被窗口切半的残行——丢弃（除非窗口覆盖了整个文件）。
   const partial = window < fileSize
-  const lines = text.split('\n')
+  const lines = splitLogBytes(buf)
   if (partial) lines.shift()
   // 尾部空行折叠；过长行截断显示。
   const out = lines
