@@ -11,7 +11,8 @@ import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from './config'
 //   bit 4:    firing
 //   bit 5:    guard
 //   bit 6:    frenzy
-//   bit 7:    reserved
+//   bit 7:    rewind (时光宝盒 manual rewind edge — 2p-review P1-1; was
+//             reserved, so old recordings decode rewind=false automatically)
 //
 // v2 adds a flags byte after the version byte:
 //   bit 0:    hasP2 — whether the replay includes a second input stream
@@ -39,6 +40,7 @@ const DIR_MASK = 0x0f
 const FIRE_BIT = 1 << 4
 const GUARD_BIT = 1 << 5
 const FRENZY_BIT = 1 << 6
+const REWIND_BIT = 1 << 7
 
 /** V2 flags byte bits */
 const HAS_P2_BIT = 1 << 0
@@ -51,6 +53,7 @@ export function packFrame(frame: InputFrame): number {
   if (frame.firing) b |= FIRE_BIT
   if (frame.guard) b |= GUARD_BIT
   if (frame.frenzy) b |= FRENZY_BIT
+  if (frame.rewind) b |= REWIND_BIT
   return b
 }
 
@@ -63,6 +66,7 @@ export function unpackFrame(packed: number): InputFrame {
     firing: (packed & FIRE_BIT) !== 0,
     guard: (packed & GUARD_BIT) !== 0,
     frenzy: (packed & FRENZY_BIT) !== 0,
+    rewind: (packed & REWIND_BIT) !== 0,
   }
 }
 
@@ -95,7 +99,13 @@ export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null):
     const base = 2 + i * 2
     packed[base] = packFrame(frames[i])
     packed[base + 1] = packFrame(
-      frames2![i] ?? { direction: null, firing: false, guard: false, frenzy: false },
+      frames2![i] ?? {
+        direction: null,
+        firing: false,
+        guard: false,
+        frenzy: false,
+        rewind: false,
+      },
     )
   }
   return packed

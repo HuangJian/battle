@@ -16,6 +16,7 @@ const IDLE_FRAME: InputFrame = {
   firing: false,
   guard: false,
   frenzy: false,
+  rewind: false,
 }
 
 /**
@@ -63,10 +64,12 @@ export class ReplayInput implements InputLike {
     return frame?.firing ?? IDLE_FRAME.firing
   }
 
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
     const frame = this.frames1[this.cursor]
     if (!frame) return false
-    return kind === 'guard' ? frame.guard : frame.frenzy
+    if (kind === 'guard') return frame.guard
+    if (kind === 'frenzy') return frame.frenzy
+    return frame.rewind
   }
 
   endFrame(): void {
@@ -131,10 +134,12 @@ class ReplayInputSlice implements InputLike {
     return frame?.firing ?? IDLE_FRAME.firing
   }
 
-  wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
     const frame = this.frames[this.getTick()]
     if (!frame) return false
-    return kind === 'guard' ? frame.guard : frame.frenzy
+    if (kind === 'guard') return frame.guard
+    if (kind === 'frenzy') return frame.frenzy
+    return frame.rewind
   }
 
   endFrame(): void {}

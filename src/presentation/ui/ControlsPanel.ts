@@ -1,10 +1,17 @@
 import type { KeyBindings, PadBindings } from '../../types'
-import { DEFAULT_KEYS, DEFAULT_P2_KEYS, eventToBinding, isModifierCode, parseBinding } from '../../game/Input'
+import {
+  DEFAULT_KEYS,
+  DEFAULT_P2_KEYS,
+  eventToBinding,
+  isModifierCode,
+  parseBinding,
+} from '../../game/Input'
 import {
   P2_ACTIVE_ACTIONS,
   PAD_ACTIONS,
   findCrossPlayerConflict,
   findPadConflict,
+  findSystemKeyConflict,
   type P2Action,
   type PadAction,
 } from '../../game/settings'
@@ -61,6 +68,12 @@ export class ControlsPanel {
   private padCaptureRaf = 0
   /** While capturing a pad binding: the live snapshot reader seam. */
   getSnapshot: (() => GamepadSnapshot | null) | null = null
+  /** While capturing a pad binding: force a FRESH hardware poll per frame.
+   *  Static screens (menu / paused / gameover) run no rAF loop, so the
+   *  GamepadManager is never polled there — the captured snapshot would be
+   *  stale forever and a pure-pad user could never rebind (2p-review P0-2).
+   *  Production wiring polls the manager first, then returns p1Snapshot. */
+  requestPadPoll: (() => GamepadSnapshot | null) | null = null
 
   /** Invoked whenever bindings change so HUD super-item labels re-render. */
   onSuperLabelsChanged: (() => void) | null = null
@@ -70,6 +83,11 @@ export class ControlsPanel {
 
   constructor(private readonly createElement: (tag: string, className: string) => HTMLElement) {
     this.el = this.build()
+    // Initial tab render — AFTER `this.el` is assigned. build() runs before
+    // the constructor's field assignment, so a renderActiveTab() inside build
+    // would read `this.el === undefined` (a boot crash — 3b607c1 moved the
+    // call into build without moving the assignment).
+    this.renderActiveTab()
   }
 
   /**
@@ -170,8 +188,6 @@ export class ControlsPanel {
     this.p2TabBtn.addEventListener('click', () => this.selectTab('p2'))
     this.padTabBtn.addEventListener('click', () => this.selectTab('pad'))
 
-    this.renderActiveTab()
-
     const resetBtn = panel.querySelector('[data-controls="reset"]') as HTMLElement
     resetBtn.addEventListener('click', () => this.resetBindings())
     const backBtn = panel.querySelector('[data-controls="back"]') as HTMLElement
@@ -190,10 +206,10 @@ export class ControlsPanel {
   }
 
   /**
-    * Render the active player's rows into the list. Rows are rebuilt per
-    * switch (a tab flip is a rare UI event — allocation cost is irrelevant);
-    * the per-frame hot path never touches this.
-    */
+   * Render the active player's rows into the list. Rows are rebuilt per
+   * switch (a tab flip is a rare UI event — allocation cost is irrelevant);
+   * the per-frame hot path never touches this.
+   */
   private renderActiveTab(): void {
     if (!this.listEl || !this.p1TabBtn || !this.p2TabBtn || !this.padTabBtn) return
     this.p1TabBtn.classList.toggle('active', this.activeTab === 'p1')
@@ -214,7 +230,8 @@ export class ControlsPanel {
       // Gamepad tab: the panel may be opened before Game wires pad bindings
       // (defensive) — render the standard defaults read-only rather than
       // crashing on null.
-      for (const action of PAD_ACTIONS) this.appendPadRow(action, this.padBindings ?? DEFAULT_PAD_BINDINGS)
+      for (const action of PAD_ACTIONS)
+        this.appendPadRow(action, this.padBindings ?? DEFAULT_PAD_BINDINGS)
     }
   }
 
@@ -272,7 +289,11 @@ export class ControlsPanel {
         otherBtn.textContent =
           this.activeTab === 'pad'
             ? formatPadButton(this.padBindings[other as PadAction])
-            : this.formatKey((this.activeTab === 'p1' ? this.bindings : this.bindings2)[other as keyof KeyBindings])
+            : this.formatKey(
+                (this.activeTab === 'p1' ? this.bindings : this.bindings2)[
+                  other as keyof KeyBindings
+                ],
+              )
       }
     }
     this.startPadCapture()
@@ -287,7 +308,10 @@ export class ControlsPanel {
     this.stopPadCapture()
     const step = (): void => {
       if (!this.openFlag || this.activeTab !== 'pad' || !this.listeningAction) return
-      const snap = this.getSnapshot?.() ?? null
+      // Poll FIRST, then read: on static screens the manager never polls on
+      // its own (no rAF loop), so this is the only way a pad press can be
+      // seen mid-capture. Falls back to the passive snapshot seam.
+      const snap = this.requestPadPoll ? this.requestPadPoll() : (this.getSnapshot?.() ?? null)
       const pressed = firstPressedPadButton(snap)
       if (pressed !== null && this.padBindings) {
         const action = this.listeningAction as PadAction
@@ -389,28 +413,41 @@ export class ControlsPanel {
   }
 
   /** Reject keys reserved for panel navigation, same-player duplicates, and
-   *  cross-player collisions on the actions both players actively drive. */
+   *  cross-player collisions — active-vs-active AND active-vs-other-player's-
+   *  system-keys (2p-review P0-3). */
   private findConflict(action: keyof KeyBindings, binding: string): keyof KeyBindings | null {
     if (binding === 'Escape' || binding === 'Tab') return action // reserved
     const keys = this.activeTab === 'p1' ? this.bindings : this.bindings2
-    for (const [other] of this.keyButtons) {
-      // Exact binding-string match: a modifier combo (Shift+R) is distinct
-      // from its bare key (R), so they must not collide on the same action.
+    // Same-player duplicates across the FULL key table (visible rows AND
+    // system keys like reset/snapshot/theme): a rebind onto any other binding
+    // of THIS player is a real collision — both fire / preventDefault for the
+    // same physical key. Exact binding-string match: a modifier combo
+    // (Shift+R) is distinct from its bare key (R).
+    for (const other of Object.keys(keys) as (keyof KeyBindings)[]) {
       if (other !== action && keys[other] === binding) return other
     }
-    // Cross-player: system keys (pause/reset/…) are P1-global — P2's Input
-    // is never polled for them, so its mirrored defaults can never actually
-    // clash. Only the active action set is cross-checked, against both sets
-    // directly (independent of which tab is visible).
+    // Cross-player, gate 1: the ACTIVE-action set (historical semantics).
     if (P2_ACTIVE_ACTIONS.includes(action as P2Action)) {
-      return findCrossPlayerConflict(
+      const activeConflict = findCrossPlayerConflict(
         this.activeTab === 'p2' ? 2 : 1,
         action as P2Action,
         binding,
         this.bindings,
         this.bindings2,
       )
+      if (activeConflict) return activeConflict
     }
+    // Cross-player, gate 2: the other player's FULL table, system keys
+    // included. Both Inputs listen on the same window and interpret every
+    // owned key, so an active key parked on the other player's pause/reset/…
+    // — or a P1 rebind onto a P2 active key — fires both handlers at once.
+    const systemConflict = findSystemKeyConflict(
+      this.activeTab === 'p2' ? 2 : 1,
+      binding,
+      this.bindings,
+      this.bindings2,
+    )
+    if (systemConflict) return systemConflict
     return null
   }
 

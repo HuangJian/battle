@@ -34,6 +34,10 @@ export interface InputFrame {
   guard: boolean
   /** Frenzy (狂暴宣泄) pressed this tick. */
   frenzy: boolean
+  /** 时光宝盒 (manual rewind) pressed this tick — consumed by the sim like
+   *  guard/frenzy (decrements the world-global rewind stock), so it must be
+   *  recorded for identical replay (2p-review P1-1). */
+  rewind: boolean
 }
 
 /**

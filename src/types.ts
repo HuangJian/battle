@@ -339,6 +339,9 @@ export interface GameSettings {
    * keys/keys2). Legacy saves predate this field — loadSettings migrates to
    * DEFAULT_PAD_BINDINGS. Movement maps d-pad buttons; stick movement is
    * raw-axes and not rebindable. Pause (Start) is fixed for consistency.
+   * NOTE (2p-review P2-2): optional is a historical type residue — the field
+   * is ALWAYS present at runtime (loadSettings default + `?? DEFAULT_PAD_BINDINGS`
+   * in Game). Consider making it required the next time settings types change.
    */
   pads?: PadBindings
 }

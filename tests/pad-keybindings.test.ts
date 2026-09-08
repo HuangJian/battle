@@ -25,10 +25,11 @@ function pad(overrides: {
 }): GamepadSnapshot {
   const pressed = overrides.buttons ?? {}
   return {
+    index: 0,
     axes: overrides.axes ?? [0, 0],
     buttons: Array.from({ length: 17 }, (_, i) => ({
       pressed: pressed[i] ?? false,
-      value: pressed[i] ?? false ? 1 : 0,
+      value: (pressed[i] ?? false) ? 1 : 0,
     })),
     connected: overrides.connected ?? true,
     mapping: 'standard',
@@ -37,7 +38,16 @@ function pad(overrides: {
 
 describe('PadBindings — defaults & shape', () => {
   it('covers the 8 rebindable pad actions (4 d-pad + 4 face)', () => {
-    expect(PAD_ACTIONS).toEqual(['up', 'down', 'left', 'right', 'fire', 'guard', 'frenzy', 'rewind'])
+    expect(PAD_ACTIONS).toEqual([
+      'up',
+      'down',
+      'left',
+      'right',
+      'fire',
+      'guard',
+      'frenzy',
+      'rewind',
+    ])
   })
 
   it('defaults match the standard mapping constants', () => {
@@ -68,14 +78,34 @@ describe('PadBindings — persistence', () => {
       screenScale: 1,
       performanceMode: false,
       keys: {
-        up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
-        fire: 'Space', pause: 'KeyP', reset: 'Alt+KeyR', snapshot: 'Alt+KeyS',
-        guard: 'F5', frenzy: 'F6', rewind: 'F7', theme: 'Alt+KeyT', fullscreen: 'Alt+KeyF',
+        up: 'ArrowUp',
+        down: 'ArrowDown',
+        left: 'ArrowLeft',
+        right: 'ArrowRight',
+        fire: 'Space',
+        pause: 'KeyP',
+        reset: 'Alt+KeyR',
+        snapshot: 'Alt+KeyS',
+        guard: 'F5',
+        frenzy: 'F6',
+        rewind: 'F7',
+        theme: 'Alt+KeyT',
+        fullscreen: 'Alt+KeyF',
       },
       keys2: {
-        up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD',
-        fire: 'KeyF', pause: 'KeyP', reset: 'Alt+KeyR', snapshot: 'Alt+KeyS',
-        guard: 'KeyR', frenzy: 'KeyT', rewind: 'KeyG', theme: 'Alt+KeyT', fullscreen: 'Alt+KeyF',
+        up: 'KeyW',
+        down: 'KeyS',
+        left: 'KeyA',
+        right: 'KeyD',
+        fire: 'KeyF',
+        pause: 'KeyP',
+        reset: 'Alt+KeyR',
+        snapshot: 'Alt+KeyS',
+        guard: 'KeyR',
+        frenzy: 'KeyT',
+        rewind: 'KeyG',
+        theme: 'Alt+KeyT',
+        fullscreen: 'Alt+KeyF',
       },
       pads: { ...DEFAULT_PAD_BINDINGS, fire: 7 }, // RB — common fire rebind
     }
@@ -84,7 +114,13 @@ describe('PadBindings — persistence', () => {
   })
 
   it('legacy saved settings without pads migrate to the defaults', () => {
-    const defaults: GameSettings = { volume: 0.3, difficulty: 'classic', theme: 'modern', screenScale: 1, performanceMode: false } as unknown as GameSettings
+    const defaults: GameSettings = {
+      volume: 0.3,
+      difficulty: 'classic',
+      theme: 'modern',
+      screenScale: 1,
+      performanceMode: false,
+    } as unknown as GameSettings
     void defaults
     // The loadSettings merge contract: `pads: { ...defaults.pads, ...saved.pads }`
     // on a legacy save (saved.pads === undefined) spreads to the defaults.

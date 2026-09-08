@@ -89,12 +89,7 @@ export function sanitizePadBindings(
   const out: PadBindings = { ...pads }
   for (const action of PAD_ACTIONS) {
     const v = out[action]
-    if (
-      typeof v !== 'number' ||
-      !Number.isInteger(v) ||
-      v < 0 ||
-      v >= PAD_MAX_BUTTON
-    ) {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v >= PAD_MAX_BUTTON) {
       out[action] = defaults[action]
     }
   }
@@ -174,10 +169,7 @@ export function loadSettings(): GameSettings {
  * Meta themselves) — these are un-fireable — back to its default. Guards
  * against the historical rebind bug and any corrupt saved value.
  */
-export function sanitizeKeys(
-  keys: KeyBindings,
-  defaults: KeyBindings = DEFAULT_KEYS,
-): KeyBindings {
+export function sanitizeKeys(keys: KeyBindings, defaults: KeyBindings = DEFAULT_KEYS): KeyBindings {
   const out: KeyBindings = { ...keys }
   for (const action of Object.keys(defaults) as (keyof KeyBindings)[]) {
     const binding = out[action]
@@ -214,6 +206,54 @@ export function findCrossPlayerConflict(
   // Space → conflict), so no `other !== action` guard here.
   for (const other of P2_ACTIVE_ACTIONS) {
     if (otherKeys[other] === binding) return other
+  }
+  return null
+}
+
+/**
+ * Cross-player SYSTEM-key conflict gate (2p-review P0-3): would assigning
+ * `binding` to `player`'s set collide with the OTHER player's FULL key table
+ * — system keys (pause / reset / snapshot / theme / fullscreen) included?
+ *
+ * Why the active-only gate is not enough: both players' `Input` instances
+ * listen on the SAME window and `Input.isGameKey` matches the WHOLE binding
+ * set for preventDefault + per-player interpretation. A physical key press is
+ * therefore interpreted by BOTH bindings tables at once — P2 parking an
+ * active key on P1's `pause` fires P1's pause AND P2's action simultaneously
+ * (and symmetric: P1 rebinding `pause` onto a P2 active key pauses while P2
+ * moves). The active-vs-active gate cannot see either collision.
+ *
+ * Mirror-default exemption: P2's table deliberately mirrors P1's system-key
+ * defaults (pause=KeyP etc.). Those un-modified mirrors are equal to P1's own
+ * defaults, so WITHOUT an exemption the default config would self-conflict
+ * the moment P1 rebinds any key back to a default. Only a user-modified value
+ * (or an ACTIVE action, which is never a mirror) trips the gate.
+ *
+ * Pure + headless (AGENTS §8).
+ *
+ * @returns the OTHER player's colliding action name, or null when free.
+ */
+export function findSystemKeyConflict(
+  player: 1 | 2,
+  binding: string,
+  keys1: KeyBindings,
+  keys2: KeyBindings,
+): keyof KeyBindings | null {
+  const otherKeys = player === 1 ? keys2 : keys1
+  const otherDefaults = player === 1 ? DEFAULT_P2_KEYS : DEFAULT_KEYS
+  for (const other of Object.keys(otherKeys) as (keyof KeyBindings)[]) {
+    if (otherKeys[other] !== binding) continue
+    // Exempt the other player's SYSTEM-key entries that still hold their
+    // DEFAULT (mirror) value — only P2's table contains mirrors (P1's is all
+    // genuine bindings, so scanning keys1 exempts nothing).
+    if (
+      player === 1 &&
+      !P2_ACTIVE_ACTIONS.includes(other as P2Action) &&
+      otherKeys[other] === otherDefaults[other]
+    ) {
+      continue
+    }
+    return other
   }
   return null
 }

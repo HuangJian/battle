@@ -95,9 +95,14 @@ export class MenuController {
       this.g.audio.resume()
       this.g.audio.playMenuSelect()
     }
-    // Change value of the selected row
-    const left = this.g.input.wasPressed('ArrowLeft') || this.g.input.wasPressed('KeyA')
-    const right = this.g.input.wasPressed('ArrowRight') || this.g.input.wasPressed('KeyD')
+    // Change value of the selected row. Navigation follows P1's OWN bound
+    // keys + arrows (2p-review P1-4): the historical KeyA/KeyD hard-fallback
+    // is removed because WASD are P2's default movement keys — a menu-time
+    // WASD press from P2 must not cycle difficulty/theme/language/stage.
+    const left =
+      this.g.input.wasPressed('ArrowLeft') || this.g.input.wasPressed(this.g.input.keys.left)
+    const right =
+      this.g.input.wasPressed('ArrowRight') || this.g.input.wasPressed(this.g.input.keys.right)
     if (left || right) {
       const dir = left ? -1 : 1
       let changed = false
@@ -163,33 +168,25 @@ export class MenuController {
   /** In-game input (playing/paused): pause, manual snapshot, theme, reset. */
   private handleBattleInput(justExitedFullscreen: boolean): void {
     const w = this.g.world
-    // 双打 gamepad support (§354): pad Start toggles pause like KeyP/Esc.
-    // Handled FIRST so a Start press during play never also lands as a
-    // menu-confirm edge on the same frame.
-    if (this.g.pads.p1.isPausePressed()) {
-      if (!justExitedFullscreen) {
-        this.g.simulation.togglePause()
-        this.g.audio.playPause()
-        // Unpausing here → drop pad state so the held Start cannot read as
-        // gameplay input on the first playing frame (keyboard parity).
-        if (w.state === 'playing') this.g.resetPads()
-        if (w.state === 'paused') {
-          this.g.snapshots.create('pause', w)
-        }
+    // Pause toggle — pad Start (§354) OR keyboard P/Esc. MERGED into a single
+    // intent (2p-review P1-5): two live players on two devices can press both
+    // on the same frame, and two toggles would cancel out (pause → unpause in
+    // one frame). One edge ⇒ exactly one toggle + one pause snapshot.
+    const padPause = this.g.pads.p1.isPausePressed()
+    const keyPause = this.g.input.isPausePressed()
+    if ((padPause || keyPause) && !justExitedFullscreen) {
+      this.g.simulation.togglePause()
+      this.g.audio.playPause()
+      // Unpausing → drop pad state so a held Start cannot read as gameplay
+      // input on the first playing frame (keyboard parity).
+      if (w.state === 'playing') this.g.resetPads()
+      // Entering pause → Pause snapshot (plan §3: created on pause,
+      // captures the exact moment for a safe later return).
+      if (w.state === 'paused') {
+        this.g.snapshots.create('pause', w)
       }
-    }
-    if (this.g.input.isPausePressed()) {
-      if (justExitedFullscreen) {
-        // Consume the Esc without toggling pause
-      } else {
-        this.g.simulation.togglePause()
-        this.g.audio.playPause()
-        // Entering pause → Pause snapshot (plan §3: created on pause,
-        // captures the exact moment for a safe later return).
-        if (w.state === 'paused') {
-          this.g.snapshots.create('pause', w)
-        }
-      }
+    } else if (keyPause && justExitedFullscreen) {
+      // Consume the Esc without toggling pause (browser fullscreen-exit Esc).
     }
     // Manual snapshot — Alt+S by default (plan §3, Manual); rebindable.
     if (this.g.input.isSnapshotPressed()) {

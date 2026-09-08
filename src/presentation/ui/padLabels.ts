@@ -58,3 +58,19 @@ export function buildPadLegendRows(pads: PadBindings): PadLegendRow[] {
   }
   return rows
 }
+
+/**
+ * Assemble the legend chips HTML (2p-review P1-3): each chip prefixes the
+ * action's localized name so a rebind (e.g. fire → BUTTON 7) stays readable
+ * instead of an anonymous `BUTTON 7` chip. Pure — the translate fn is
+ * injected so the assembly is regression-testable headlessly; the label text
+ * is our own formatter's fixed charset (no HTML-escape needed).
+ */
+export function padLegendChipsHtml(
+  rows: PadLegendRow[],
+  translate: (key: string) => string,
+): string {
+  return rows
+    .map((r) => `<kbd>${translate(`controls.padActions.${r.action}`)} ${r.label}</kbd>`)
+    .join('')
+}

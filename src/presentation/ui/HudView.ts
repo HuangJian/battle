@@ -18,6 +18,9 @@ import { t, localizeRoot } from '../../i18n'
  */
 export class HudView {
   readonly el: HTMLElement
+  /** Shared element factory (owned by UIManager) — also used to lazily
+   *  create the P2 super-key label rows (2p-review P0-1). */
+  private readonly createElement: (tag: string, className: string) => HTMLElement
 
   // Cached HUD elements
   private scoreEl: HTMLElement
@@ -101,6 +104,7 @@ export class HudView {
     createElement: (tag: string, className: string) => HTMLElement,
     onTakeoverClick: () => void,
   ) {
+    this.createElement = createElement
     this.el = createElement('div', 'hud-bar')
     this.el.innerHTML = `
       <div class="hud-group hud-left">
@@ -257,27 +261,67 @@ export class HudView {
   /** Re-render the super-item key labels from the current bindings + locale.
    *  When P2 bindings are provided, a second colored row per item is rendered
    *  for two-player mode (stocks are world-global — either human may spend
-   *  one — so each player's own release key is shown). */
+   *  one — so each player's own release key is shown). The P2 rows are
+   *  CREATED lazily on the first call that supplies P2 bindings (2p-review
+   *  P0-1: the update/show-hide logic shipped without the create step, so
+   *  the rows never appeared). */
   updateSuperKeyLabels(bindings: KeyBindings, bindings2?: KeyBindings): void {
-    const pairs: Array<[
-      HTMLElement | null,
-      HTMLElement | null,
-      keyof KeyBindings,
-      string,
-    ]> = [
-      [this.guardLabel, this.guardLabel2, 'guard', t('hud.guard')],
-      [this.frenzyLabel, this.frenzyLabel2, 'frenzy', t('hud.frenzy')],
-      [this.rewindLabel, this.rewindLabel2, 'rewind', t('hud.rewind')],
+    const actions: Array<['guard' | 'frenzy' | 'rewind', string]> = [
+      ['guard', t('hud.guard')],
+      ['frenzy', t('hud.frenzy')],
+      ['rewind', t('hud.rewind')],
     ]
-    for (const [el, el2, action, name] of pairs) {
+    // P1 rows (always present in the template).
+    for (const [action, name] of actions) {
+      const el =
+        action === 'guard'
+          ? this.guardLabel
+          : action === 'frenzy'
+            ? this.frenzyLabel
+            : this.rewindLabel
       if (el) el.textContent = formatSuperKeyLabel(name, bindings[action])
-      if (el2 && bindings2) {
-        el2.textContent = formatSuperKeyLabel(name, bindings2[action])
-        // Visible only in two-player mode — mirrored in syncWorld so the
-        // mode flip without a label change still shows/hides the row.
-        el2.hidden = !this.twoPlayerLabels
+    }
+    // P2 rows — lazily created, then kept in sync. Visible only in
+    // two-player mode; syncWorld mirrors the flag so a mode flip without a
+    // label change still shows/hides the rows.
+    if (bindings2) {
+      for (const [action, name] of actions) {
+        const el2 = this.ensureP2Label(action)
+        if (el2) {
+          el2.textContent = formatSuperKeyLabel(name, bindings2[action])
+          el2.hidden = !this.twoPlayerLabels
+        }
       }
     }
+  }
+
+  /** Lazily create (and cache) the P2 super-key label inside the P1 item row.
+   *  Styled like the score2/GOD slot (#f0c040) so the second player's row is
+   *  visually distinct; created hidden and flipped by syncWorld/updates. */
+  private ensureP2Label(action: 'guard' | 'frenzy' | 'rewind'): HTMLElement | null {
+    const p1 =
+      action === 'guard'
+        ? this.guardLabel
+        : action === 'frenzy'
+          ? this.frenzyLabel
+          : this.rewindLabel
+    const existing =
+      action === 'guard'
+        ? this.guardLabel2
+        : action === 'frenzy'
+          ? this.frenzyLabel2
+          : this.rewindLabel2
+    if (existing) return existing
+    const item = p1?.parentElement
+    if (!item) return null
+    const el = this.createElement('span', 'hud-label hud-super-p2')
+    el.style.color = '#f0c040'
+    el.hidden = !this.twoPlayerLabels
+    item.appendChild(el)
+    if (action === 'guard') this.guardLabel2 = el
+    else if (action === 'frenzy') this.frenzyLabel2 = el
+    else this.rewindLabel2 = el
+    return el
   }
 
   /**

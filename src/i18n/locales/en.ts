@@ -149,6 +149,7 @@ export const en: Catalog = {
   'toast.takeoverSuccess': 'Takeover successful — you control Player 1!',
   'toast.battleSpeed': 'Battle speed: ×{speed}',
   'toast.gamepadConnected': 'Gamepad {player} connected — stick/A to play',
+  'toast.gamepadConnectedP2Idle': 'Gamepad 2 connected — only drives Player 2 in Two-Player mode',
   'toast.gamepadDisconnected': 'Gamepad {player} disconnected',
   'toast.keyBindingsPaused': 'Key bindings are available when the game is paused',
   'toast.rewindActivated': 'Time Box: time rewind!',

@@ -3,6 +3,7 @@ import { DEFAULT_KEYS, DEFAULT_P2_KEYS } from '../src/game/Input'
 import {
   sanitizeKeys,
   findCrossPlayerConflict,
+  findSystemKeyConflict,
   P2_ACTIVE_ACTIONS,
   SETTINGS_KEY,
 } from '../src/game/settings'
@@ -103,15 +104,62 @@ describe('P2 key bindings — cross-player conflict gate', () => {
     }
   })
 
-  it('ignores system-only actions (pause/reset/… are P1-global, never cross-checked)', () => {
+  it('the ACTIVE gate keeps historical semantics — a P2 guard→KeyP rebind is not an ACTIVE collision (the system gate catches it, 2p-review P0-3)', () => {
     const keys1: KeyBindings = { ...DEFAULT_KEYS }
-    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS } // guard mirrors… no — guard is active
-    // P2's DEFAULT mirror of system keys (pause = KeyP = P1's pause) must not
-    // trip the gate: 'pause' is not in P2_ACTIVE_ACTIONS, and the gate only
-    // scans the active set — so a system binding never collides cross-player.
-    // Prove it behaviorally: a P2 'guard' rebind to P1's pause key is fine.
+    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS }
+    // 'pause' is not in P2_ACTIVE_ACTIONS, so the active-vs-active gate sees
+    // nothing — this used to be the WHOLE gate, letting the collision through.
     expect(findCrossPlayerConflict(2, 'guard', 'KeyP', keys1, keys2)).toBeNull()
-    // And the type-level contract: P2_ACTIVE_ACTIONS contains no system keys.
+    // The NEW system gate scans P1's full table (pause included) and flags it.
+    expect(findSystemKeyConflict(2, 'KeyP', keys1, keys2)).toBe('pause')
+  })
+
+  it('flags a P2 active key parked on a P1 SYSTEM key (guard→KeyP: P1 pause + P2 guard double-fire)', () => {
+    const keys1: KeyBindings = { ...DEFAULT_KEYS } // pause = KeyP
+    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS }
+    const conflict = findSystemKeyConflict(2, 'KeyP', keys1, keys2)
+    expect(conflict).toBe('pause')
+    // Symmetric direction: P2 rebind onto P1's reset combo is a collision too.
+    expect(findSystemKeyConflict(2, 'Alt+KeyR', keys1, keys2)).toBe('reset')
+  })
+
+  it('flags a P1 SYSTEM key parked on a P2 active key (pause→KeyW: P2 up + pause double-fire)', () => {
+    const keys1: KeyBindings = { ...DEFAULT_KEYS }
+    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS } // up = KeyW
+    const conflict = findSystemKeyConflict(1, 'KeyW', keys1, keys2)
+    expect(conflict).toBe('up')
+  })
+
+  it('default mirror keys never self-conflict (P1 pause→KeyP is its own default)', () => {
+    const keys1: KeyBindings = { ...DEFAULT_KEYS }
+    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS }
+    // P2's table mirrors P1's pause/reset/… defaults — the exemption must
+    // keep the DEFAULT config collision-free when P1 rebinds back to a
+    // default (or rebinds anything onto one of those physical keys).
+    expect(findSystemKeyConflict(1, 'KeyP', keys1, keys2)).toBeNull()
+    expect(findSystemKeyConflict(1, 'Alt+KeyR', keys1, keys2)).toBeNull()
+    expect(findSystemKeyConflict(1, 'Alt+KeyS', keys1, keys2)).toBeNull()
+    expect(findSystemKeyConflict(1, 'Alt+KeyF', keys1, keys2)).toBeNull()
+  })
+
+  it('the default config has zero system-key conflicts (in the rebindable directions)', () => {
+    const keys1: KeyBindings = { ...DEFAULT_KEYS }
+    const keys2: KeyBindings = { ...DEFAULT_P2_KEYS }
+    // P1 can rebind ANY action — the mirror exemptions keep every default
+    // collision-free (P1.pause=KeyP vs P2's mirrored pause is exempted).
+    for (const b1 of Object.values(keys1)) {
+      if (b1) expect(findSystemKeyConflict(1, b1, keys1, keys2)).toBeNull()
+    }
+    // P2 can only rebind ACTIVE actions (the tab shows no system rows); its
+    // mirrored system keys are never entered through the gate, so checking
+    // the rebindable set is the faithful zero-conflict contract.
+    for (const action of P2_ACTIVE_ACTIONS) {
+      const b2 = keys2[action]
+      if (b2) expect(findSystemKeyConflict(2, b2, keys1, keys2)).toBeNull()
+    }
+  })
+
+  it('P2_ACTIVE_ACTIONS contains exactly the actions P2 drives (no system keys)', () => {
     for (const action of P2_ACTIVE_ACTIONS) {
       expect(['up', 'down', 'left', 'right', 'fire', 'guard', 'frenzy', 'rewind']).toContain(action)
     }

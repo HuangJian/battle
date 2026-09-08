@@ -30,10 +30,10 @@ import type { InputFrame, ReplayMetadata } from '../src/replay/types'
 // ================================================================
 
 const SAMPLE: InputFrame[] = [
-  { direction: 'up', firing: true, guard: false, frenzy: false },
-  { direction: 'left', firing: false, guard: true, frenzy: false },
-  { direction: null, firing: false, guard: false, frenzy: false },
-  { direction: 'right', firing: true, guard: false, frenzy: true },
+  { direction: 'up', firing: true, guard: false, frenzy: false, rewind: false },
+  { direction: 'left', firing: false, guard: true, frenzy: false, rewind: false },
+  { direction: null, firing: false, guard: false, frenzy: false, rewind: false },
+  { direction: 'right', firing: true, guard: false, frenzy: true, rewind: false },
 ]
 
 const METADATA: ReplayMetadata = {

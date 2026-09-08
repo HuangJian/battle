@@ -4,7 +4,7 @@ import { THEME_DEFINITIONS } from '../../config/theme'
 import { STAGES, localizedStageName } from '../../config/stages'
 import { i18n, t } from '../../i18n'
 import { menuRowIndex, type MenuRowKey } from '../../game/UIState'
-import { buildPadLegendRows } from './padLabels'
+import { buildPadLegendRows, padLegendChipsHtml } from './padLabels'
 import type { PadBindings } from '../../types'
 
 /**
@@ -365,11 +365,11 @@ export class MenuScreen {
     if (sig === this.lastPadSig) return
     this.lastPadSig = sig
     const rows = buildPadLegendRows(p)
-    // Labels come from our own formatter — fixed charset, no HTML-escape
-    // needed (same trust level as the built template above).
-    this.padLegendRowsEl.innerHTML = rows
-      .map((r) => `<kbd>${r.label}</kbd>`)
-      .join('')
+    // Each chip carries the action's localized name (2p-review P1-3) — a
+    // rebound button (e.g. fire → BUTTON 7) stays readable. Labels come from
+    // our own formatter — fixed charset, no HTML-escape needed (same trust
+    // level as the built template above).
+    this.padLegendRowsEl.innerHTML = padLegendChipsHtml(rows, t)
   }
 
   /** Re-apply localized names to the (once-built) menu stage dropdown items. */

@@ -10,9 +10,9 @@ import type { InputFrame } from '../src/replay/types'
 // ============================================================
 
 const SAMPLE_FRAMES: InputFrame[] = [
-  { direction: 'up', firing: true, guard: false, frenzy: false },
-  { direction: 'left', firing: false, guard: true, frenzy: false },
-  { direction: null, firing: false, guard: false, frenzy: false },
+  { direction: 'up', firing: true, guard: false, frenzy: false, rewind: false },
+  { direction: 'left', firing: false, guard: true, frenzy: false, rewind: false },
+  { direction: null, firing: false, guard: false, frenzy: false, rewind: false },
 ]
 
 function makeMinimalSnapshot(): any {

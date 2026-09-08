@@ -78,6 +78,10 @@ export class InputRecorder {
         firing: input.isFiring(),
         guard: input.wasItemPressed('guard'),
         frenzy: input.wasItemPressed('frenzy'),
+        // 时光宝盒 (manual rewind) is gameplay input consumed by the sim
+        // (decrements the world-global rewind stock) — record it so playback
+        // re-enacts the edge (2p-review P1-1).
+        rewind: input.wasItemPressed('rewind'),
       }),
     )
 
@@ -89,11 +93,14 @@ export class InputRecorder {
           firing: input2.isFiring(),
           guard: input2.wasItemPressed('guard'),
           frenzy: input2.wasItemPressed('frenzy'),
+          rewind: input2.wasItemPressed('rewind'),
         }),
       )
     } else {
       // Pad with idle frame to keep streams aligned
-      this.frames2.push(packFrame({ direction: null, firing: false, guard: false, frenzy: false }))
+      this.frames2.push(
+        packFrame({ direction: null, firing: false, guard: false, frenzy: false, rewind: false }),
+      )
     }
 
     // Tick-hash checkpoint — phase contract in tickHash.ts header: sample the

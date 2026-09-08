@@ -145,6 +145,7 @@ export const zh: Catalog = {
   'toast.takeoverSuccess': '接管成功 —— 你现在操控一号玩家！',
   'toast.battleSpeed': '战斗速率：×{speed}',
   'toast.gamepadConnected': '手柄 {player} 已连接 —— 摇杆/A 键参战',
+  'toast.gamepadConnectedP2Idle': '手柄 2 已连接 —— 仅在双打模式驱动二号玩家',
   'toast.gamepadDisconnected': '手柄 {player} 已断开',
   'toast.keyBindingsPaused': '按键设置在游戏暂停时可用',
   'toast.rewindActivated': '时光宝盒：时间回溯！',

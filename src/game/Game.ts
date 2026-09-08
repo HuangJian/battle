@@ -21,6 +21,7 @@ import { AutoFireInput } from './AutoFireInput'
 import { GamepadManager, CompositeInput } from './GamepadInput'
 import type { GamepadSnapshot } from './GamepadInput'
 import { canToggleCoop, canToggleSpectate, canToggleTwoPlayer } from './uiFlowGates'
+import { planModeInputs } from './modeInputs'
 import { cycleBattleSpeed } from './battleSpeed'
 import type { BattleSpeed } from './battleSpeed'
 import { createReplayStorage } from '../replay/storage'
@@ -132,6 +133,9 @@ export class Game {
     // disconnected entirely — nobody is at the controls. (A gamepad is human
     // input too, so spectate still blocks it — same as the keyboard.)
     if (this.world.spectate && this.godInput) return this.godInput
+    // NOTE (2p-review P2-1): `p1Composite` is non-null from construction and
+    // rebuilt by wireLiveInputs() on every mode flip, so the `autoFireInput` /
+    // `input` fallbacks only apply BEFORE the first wire (defensive only).
     return this.p1Composite ?? this.autoFireInput ?? this.input
   }
 
@@ -168,6 +172,54 @@ export class Game {
     }
     this.simulation.input = this.liveInput
     this.simulation.input2 = this.liveInput2
+  }
+
+  /**
+   * 模式归一化 (2p-review P1-2): collapse the mode inputs to EXACTLY what the
+   * world's CURRENT flags require, clearing every decorator the other modes
+   * armed — a residual coop autoFireInput/godInput would make P1 auto-fire in
+   * a restored two-player game. Decision source: {@link planModeInputs} (pure,
+   * regression-tested); this applies it. Call AFTER the world flags reflect
+   * the target mode (rebuildAfterRestore).
+   */
+  normalizeModeInputs(): void {
+    const w = this.world
+    const plan = planModeInputs(w)
+    // Coop needs a live player2 for the God AI target; spectate needs a live
+    // player1 (same guards the old rebuildAfterRestore branches had) — a flag
+    // without its entity collapses to the plain (no-decorator) case.
+    const coopArmed = plan.keepGodInput && !!w.player2
+    if (coopArmed) {
+      // Coop: P2 driven by God AI (re-create if missing), P1 auto-fires.
+      this.godInput2 = null
+      if (!this.godInput) {
+        const rng = new RNG((w.seed ^ SEED_HASH) >>> 0)
+        this.godInput = new GodAIInput(w, undefined, rng, (world) => world.player2)
+        this.godInput.reset()
+      }
+      this.autoFireInput = new AutoFireInput(this.input)
+      this.audio.player2Id = w.player2?.id ?? null
+    } else {
+      // Spectate re-arms P1's God AI itself (incl. dual P2); plain and
+      // twoPlayer keep no AI decorators at all.
+      this.godInput = null
+      this.godInput2 = null
+      this.autoFireInput = null
+      if (plan.keepSpectateGodInput && w.player) {
+        this.rearmSpectateGodInput()
+      } else {
+        this.audio.player2Id = null
+      }
+    }
+    this.wireLiveInputs()
+  }
+
+  /** Set the Control-Center mode lights from the world flags — no branch can
+   *  leave a stale light from another mode (2p-review P1-2). */
+  syncModeLights(): void {
+    this.presentation.ui.controlCenter.setCoopState(this.world.coop)
+    this.presentation.ui.controlCenter.setTwoPlayerState(this.world.twoPlayer)
+    this.presentation.ui.controlCenter.setSpectateState(this.spectateMode())
   }
 
   /** Rolling FPS (updated once per second) — cheap regression signal. */
@@ -225,6 +277,14 @@ export class Game {
     // Pad-capture seam: the panel polls the LIVE P1 snapshot while listening
     // for a button press (§354a follow-up). Read-only observation.
     this.presentation.ui.setPadSnapshotSource((): GamepadSnapshot | null => this.pads.p1Snapshot)
+    // Pad-capture POLL seam (2p-review P0-2): on static screens (menu / pause /
+    // gameover) the loop is idle and never polls the manager, so the capture
+    // loop must drive a fresh poll itself — otherwise a pure-pad user can
+    // never rebind (the snapshot would be the stale pre-capture value).
+    this.presentation.ui.setPadPollSource((): GamepadSnapshot | null => {
+      this.pads.poll()
+      return this.pads.p1Snapshot
+    })
 
     // Wire mouse-click handlers for the start screen (same World-mutating
     // paths as the keyboard menu input).
@@ -300,6 +360,7 @@ export class Game {
       this.godInput = null
       this.autoFireInput = null
       this.wireLiveInputs()
+      this.audio.player2Id = null
       this.presentation.ui.notify(t('toast.coopOff'), 'info')
     } else {
       // Enable coop: World mutation deferred to Simulation (One-Author).
@@ -333,7 +394,7 @@ export class Game {
       this.presentation.ui.notify(t('toast.coopOn'), 'info')
       this.audio.player2Id = w.player2?.id ?? null
     }
-    this.presentation.ui.controlCenter.setCoopState(w.coop)
+    this.syncModeLights()
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
   }
@@ -359,6 +420,7 @@ export class Game {
       this.simulation.applyTwoPlayer(false)
       w.disablePlayer2()
       this.wireLiveInputs()
+      this.audio.player2Id = null
       this.presentation.ui.notify(t('toast.twoPlayerOff'), 'info')
     } else {
       // Enable: the deferred toggle carries the flag through a following
@@ -386,7 +448,7 @@ export class Game {
       this.presentation.ui.notify(t('toast.twoPlayerOn'), 'info')
       this.audio.player2Id = w.player2?.id ?? null
     }
-    this.presentation.ui.controlCenter.setTwoPlayerState(w.twoPlayer)
+    this.syncModeLights()
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
   }
@@ -453,7 +515,7 @@ export class Game {
     // P2 stream, so the replay desyncs. Idempotent for the other branches.
     this.wireLiveInputs()
 
-    this.presentation.ui.controlCenter.setSpectateState(this.spectateMode())
+    this.syncModeLights()
     this.presentation.updateUI(w)
     this.presentation.markNeedsRender()
   }
@@ -638,9 +700,7 @@ export class Game {
     this.resetPads()
     this.wireLiveInputs()
     this.audio.player2Id = null
-    this.presentation.ui.controlCenter.setCoopState(false)
-    this.presentation.ui.controlCenter.setSpectateState('off')
-    this.presentation.ui.controlCenter.setTwoPlayerState(false)
+    this.syncModeLights()
     // 督战 battle speed is a per-session viewing aid — return to ×1 on menu so
     // a fresh run never starts fast by accident.
     this.battleSpeed = 1

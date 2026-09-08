@@ -38,7 +38,9 @@ class ScriptedInput implements InputLike {
   private i = 0
   constructor(seq: InputFrame[]) {
     this.seq =
-      seq.length > 0 ? seq : [{ direction: null, firing: false, guard: false, frenzy: false }]
+      seq.length > 0
+        ? seq
+        : [{ direction: null, firing: false, guard: false, frenzy: false, rewind: false }]
   }
   private cur(): InputFrame {
     return this.seq[Math.min(this.i, this.seq.length - 1)]
@@ -66,11 +68,11 @@ class ScriptedInput implements InputLike {
 }
 
 const SAMPLE_FRAMES: InputFrame[] = [
-  { direction: 'up', firing: true, guard: false, frenzy: false },
-  { direction: 'left', firing: false, guard: true, frenzy: false },
-  { direction: 'down', firing: true, guard: false, frenzy: true },
-  { direction: null, firing: false, guard: false, frenzy: false },
-  { direction: 'right', firing: false, guard: false, frenzy: false },
+  { direction: 'up', firing: true, guard: false, frenzy: false, rewind: false },
+  { direction: 'left', firing: false, guard: true, frenzy: false, rewind: false },
+  { direction: 'down', firing: true, guard: false, frenzy: true, rewind: false },
+  { direction: null, firing: false, guard: false, frenzy: false, rewind: false },
+  { direction: 'right', firing: false, guard: false, frenzy: false, rewind: false },
 ]
 
 /** Strip entity id-like fields so two deterministically-equal worlds compare
@@ -117,8 +119,8 @@ describe('Replay frame packing', () => {
 
   it('packFrames with frames2 produces v2 format', () => {
     const p2frames: InputFrame[] = [
-      { direction: 'left', firing: true, guard: false, frenzy: false },
-      { direction: null, firing: false, guard: false, frenzy: false },
+      { direction: 'left', firing: true, guard: false, frenzy: false, rewind: false },
+      { direction: null, firing: false, guard: false, frenzy: false, rewind: false },
     ]
     const packed = packFrames(SAMPLE_FRAMES, p2frames)
     expect(packed[0]).toBe(FRAME_SCHEMA_VERSION) // v2

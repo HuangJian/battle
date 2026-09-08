@@ -27,8 +27,12 @@ export { GAMEPAD_BUTTONS } from './settings'
 // run replays byte-identically.
 // ================================================================
 
-/** Minimal structural snapshot of one Gamepad (subset we consume). */
+/** Minimal structural snapshot of one Gamepad (subset we consume).
+ *  `index` is the browser's per-device id — stable while a pad stays
+ *  connected, freed on disconnect — and is what the manager uses to keep
+ *  player slots STABLE across polls (2p-review P0-4). */
 export interface GamepadSnapshot {
+  index: number
   axes: readonly number[]
   buttons: readonly { pressed: boolean; value: number }[]
   connected: boolean
@@ -197,14 +201,14 @@ export class CompositeInput implements InputLike {
 export interface GamepadEvent {
   player: 1 | 2
   type: 'connected' | 'disconnected'
-}
-
-/**
+} /**
  * Device slotting over navigator.getGamepads(): the first two CONNECTED
  * pads map to player1 / player2 and slots stay STABLE across polls — a
- * mid-session unplug never swaps players' pads. All navigator access is
- * funneled through one overridable seam (`collect`) so the slotting and
- * transition logic is testable headlessly.
+ * mid-session unplug never swaps players' pads (P2's pad is never promoted
+ * into P1's empty slot). Slotting is by DEVICE IDENTITY (`Gamepad.index`),
+ * not by array position, so re-plugging the same pad returns it to its
+ * slot. All navigator access is funneled through one overridable seam
+ * (`collect`) so the slotting and transition logic is testable headlessly.
  */
 export class GamepadManager {
   private p1Pad: GamepadSnapshot | null = null
@@ -252,18 +256,49 @@ export class GamepadManager {
   private distribute(pads: (GamepadSnapshot | null)[]): void {
     const prevP1 = this.p1Pad
     const prevP2 = this.p2Pad
-    const connected: GamepadSnapshot[] = []
+    // Index → live snapshot of every pad connected RIGHT NOW. The browser
+    // frees an index only when its pad disconnects, so an index identifies a
+    // pad for its whole connected lifetime.
+    const byIndex = new Map<number, GamepadSnapshot>()
     for (const p of pads) {
-      if (p && p.connected) connected.push(p)
+      if (p && p.connected) byIndex.set(p.index, p)
     }
-    this.p1Pad = connected[0] ?? null
-    this.p2Pad = connected[1] ?? null
-    if (!!this.p1Pad !== !!prevP1) {
-      this.events.push({ player: 1, type: this.p1Pad ? 'connected' : 'disconnected' })
+    // Slot continuity by device identity: a slot keeps its pad while that
+    // pad is still connected; an unplugged pad leaves its slot EMPTY — never
+    // compact-promote the other pad into it (P1's unplug must not yank P2).
+    // Claimed pads are removed from the map so they cannot fill a SECOND slot.
+    const keep = (slotPad: GamepadSnapshot | null): GamepadSnapshot | null => {
+      if (!slotPad) return null
+      const snap = byIndex.get(slotPad.index)
+      if (snap) byIndex.delete(slotPad.index)
+      return snap ?? null
     }
-    if (!!this.p2Pad !== !!prevP2) {
-      this.events.push({ player: 2, type: this.p2Pad ? 'connected' : 'disconnected' })
+    let nextP1 = keep(this.p1Pad)
+    let nextP2 = keep(this.p2Pad)
+    // Free slots (empty, or whose pad just disconnected) take the next NEW
+    // pad, in navigator slot order (pad[0] → P1, pad[1] → P2 on first poll).
+    for (const snap of byIndex.values()) {
+      if (!nextP1) {
+        nextP1 = snap
+        byIndex.delete(snap.index)
+      } else if (!nextP2) {
+        nextP2 = snap
+        byIndex.delete(snap.index)
+      } else {
+        break
+      }
     }
+    // Transition detection — identity-aware: a slot whose pad changed
+    // identity without ever emptying (unplug + different pad re-plug) is a
+    // connect event, so a silent pad swap is never invisible to toasts.
+    if (slotChanged(prevP1, nextP1)) {
+      this.events.push({ player: 1, type: nextP1 ? 'connected' : 'disconnected' })
+    }
+    if (slotChanged(prevP2, nextP2)) {
+      this.events.push({ player: 2, type: nextP2 ? 'connected' : 'disconnected' })
+    }
+    this.p1Pad = nextP1
+    this.p2Pad = nextP2
     this.p1.pollSnapshot(this.p1Pad)
     this.p2.pollSnapshot(this.p2Pad)
   }
@@ -282,6 +317,12 @@ export class GamepadManager {
     this.events = []
     return out
   }
+}
+
+/** True when a slot's pad appeared, disappeared, or changed identity. */
+function slotChanged(prev: GamepadSnapshot | null, next: GamepadSnapshot | null): boolean {
+  if (!next !== !prev) return true
+  return !!next && !!prev && next.index !== prev.index
 }
 
 /**

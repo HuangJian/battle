@@ -438,6 +438,16 @@ export class UIManager {
     this.controls.getSnapshot = source
   }
 
+  /**
+   * Pad-capture poll seam (2p-review P0-2): while the panel is capturing a
+   * pad binding it must see FRESH hardware state — on static screens (menu /
+   * paused / gameover) no rAF loop polls the GamepadManager, so the source
+   * must poll it itself and return the post-poll snapshot.
+   */
+  setPadPollSource(source: () => GamepadSnapshot | null): void {
+    this.controls.requestPadPoll = source
+  }
+
   /** Expose layout elements so PresentationLayer can measure reserved vertical
    *  space when sizing the canvas. Read-only access only. */
   get hudBarEl(): HTMLElement {

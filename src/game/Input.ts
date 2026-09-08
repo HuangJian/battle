@@ -54,10 +54,10 @@ export const DEFAULT_KEYS: KeyBindings = {
  * keyboard layout: WASD moves, F fires. Movement keys avoid every P1 default
  * (arrows) so two hands can share one keyboard without modifier tricks.
  *
- * Super-item / system keys are distinct from P1's F5/F6/F7 (which sit on
- * function-row hardware keys): P2 uses Shift/Enter-adjacent codes that stay
- * clear of P1's combos. Snapshot/theme/reset remain P1-only (single game,
- * one owner) — P2 has exactly the keys it needs to drive its tank.
+ * Super-item / system keys are distinct from P1's F5/F6/F7 (function-row
+ * hardware keys): P2 uses the bare letter keys R/T/G, which stay clear of
+ * P1's combos. Snapshot/theme/reset remain P1-only (single game, one
+ * owner) — P2 has exactly the keys it needs to drive its tank.
  *
  * The strings are `Modifier+Code` specs parsed by parseBinding, same as
  * DEFAULT_KEYS — 'ShiftLeft' etc. never appear as a final segment (see
@@ -371,14 +371,18 @@ export class Input implements InputLike {
     return this.wasPressed('Enter') || this.wasPressed('Space')
   }
 
+  /** Menu navigation: only P1's bound movement keys + the arrow keys.
+   *  The historical WASD hard-fallback is REMOVED (2p-review P1-4): WASD are
+   *  P2's default movement keys, so in the menu — where P2 is likely testing
+   *  keys before a two-player session — a WASD press must not silently move
+   *  the cursor / cycle settings. P1 users who rebind movement to WASD still
+   *  navigate through the bound-key path. */
   isUpPressed(): boolean {
-    return this.wasPressed(this.keys.up) || this.wasPressed('ArrowUp') || this.wasPressed('KeyW')
+    return this.wasPressed(this.keys.up) || this.wasPressed('ArrowUp')
   }
 
   isDownPressed(): boolean {
-    return (
-      this.wasPressed(this.keys.down) || this.wasPressed('ArrowDown') || this.wasPressed('KeyS')
-    )
+    return this.wasPressed(this.keys.down) || this.wasPressed('ArrowDown')
   }
 
   /** Clear per-frame state. Call at end of each simulation step. */

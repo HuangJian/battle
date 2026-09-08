@@ -22,9 +22,13 @@ import type { Direction } from '../src/constants'
  * Start (9) = pause/menu-confirm.
  */
 
+/** Distinct device indices — the browser's `Gamepad.index` contract. */
+let nextPadIndex = 0
+
 /** Build a Gamepad-like plain object (tests construct these directly). */
 function pad(over: Partial<GamepadSnapshot> = {}): GamepadSnapshot {
   return {
+    index: nextPadIndex++,
     axes: [0, 0, 0, 0],
     buttons: new Array(17).fill(0).map(() => ({ pressed: false, value: 0 })),
     connected: true,
@@ -36,16 +40,34 @@ function pad(over: Partial<GamepadSnapshot> = {}): GamepadSnapshot {
 describe('Gamepad snapshot reader (pure)', () => {
   it('maps dpad buttons to directions, stick priority over dpad', () => {
     // D-pad up (button 12).
-    let s = pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })) })
+    let s = pad({
+      buttons: new Array(17)
+        .fill(0)
+        .map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })),
+    })
     expect(readSnapshot(s, GAMEPAD_DEADZONE).dir).toBe('up')
     // D-pad right (button 15).
-    s = pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 15, value: i === 15 ? 1 : 0 })) })
+    s = pad({
+      buttons: new Array(17)
+        .fill(0)
+        .map((_, i) => ({ pressed: i === 15, value: i === 15 ? 1 : 0 })),
+    })
     expect(readSnapshot(s, GAMEPAD_DEADZONE).dir).toBe('right')
     // Stick pushes left beyond deadzone → left, overriding d-pad up.
-    s = pad({ axes: [-0.8, 0, 0, 0], buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })) })
+    s = pad({
+      axes: [-0.8, 0, 0, 0],
+      buttons: new Array(17)
+        .fill(0)
+        .map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })),
+    })
     expect(readSnapshot(s, GAMEPAD_DEADZONE).dir).toBe('left')
     // Stick within deadzone → ignored (d-pad wins instead).
-    s = pad({ axes: [-GAMEPAD_DEADZONE * 0.5, 0, 0, 0], buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })) })
+    s = pad({
+      axes: [-GAMEPAD_DEADZONE * 0.5, 0, 0, 0],
+      buttons: new Array(17)
+        .fill(0)
+        .map((_, i) => ({ pressed: i === 12, value: i === 12 ? 1 : 0 })),
+    })
     expect(readSnapshot(s, GAMEPAD_DEADZONE).dir).toBe('up')
   })
 
@@ -64,9 +86,7 @@ describe('Gamepad snapshot reader (pure)', () => {
 
   it('pause is button 9 (Start)', () => {
     const s = pad({
-      buttons: new Array(17)
-        .fill(0)
-        .map((_, i) => ({ pressed: i === 9, value: i === 9 ? 1 : 0 })),
+      buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: i === 9 ? 1 : 0 })),
     })
     expect(readSnapshot(s, GAMEPAD_DEADZONE).pause).toBe(true)
   })
@@ -83,17 +103,35 @@ describe('Gamepad snapshot reader (pure)', () => {
 describe('GamepadInput edge detection', () => {
   it('held buttons fire exactly once (edge semantics for wasItemPressed/pause)', () => {
     const g = new GamepadInput()
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })) }))
+    g.pollSnapshot(
+      pad({
+        buttons: new Array(17)
+          .fill(0)
+          .map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })),
+      }),
+    )
     expect(g.wasItemPressed('guard')).toBe(true)
     g.endFrame()
     // Still held — no new edge.
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })) }))
+    g.pollSnapshot(
+      pad({
+        buttons: new Array(17)
+          .fill(0)
+          .map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })),
+      }),
+    )
     expect(g.wasItemPressed('guard')).toBe(false)
     g.endFrame()
     // Released, then pressed again → new edge.
     g.pollSnapshot(pad())
     g.endFrame()
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })) }))
+    g.pollSnapshot(
+      pad({
+        buttons: new Array(17)
+          .fill(0)
+          .map((_, i) => ({ pressed: i === 1, value: i === 1 ? 1 : 0 })),
+      }),
+    )
     expect(g.wasItemPressed('guard')).toBe(true)
   })
 
@@ -102,7 +140,12 @@ describe('GamepadInput edge detection', () => {
     g.pollSnapshot(pad())
     expect(g.isFiring()).toBe(false)
     expect(g.getMoveDirection()).toBeNull()
-    g.pollSnapshot(pad({ axes: [0, -1, 0, 0], buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 0, value: 1 })) }))
+    g.pollSnapshot(
+      pad({
+        axes: [0, -1, 0, 0],
+        buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 0, value: 1 })),
+      }),
+    )
     expect(g.getMoveDirection()).toBe('up')
     expect(g.isFiring()).toBe(true)
     // No endFrame between polls is fine for level reads.
@@ -113,16 +156,22 @@ describe('GamepadInput edge detection', () => {
 
   it('isPausePressed edges once per press', () => {
     const g = new GamepadInput()
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }))
+    g.pollSnapshot(
+      pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }),
+    )
     expect(g.isPausePressed()).toBe(true)
     g.endFrame()
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }))
+    g.pollSnapshot(
+      pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }),
+    )
     expect(g.isPausePressed()).toBe(false)
   })
 
   it('reset() clears edges and previous-state (stale press cannot carry across screens)', () => {
     const g = new GamepadInput()
-    g.pollSnapshot(pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }))
+    g.pollSnapshot(
+      pad({ buttons: new Array(17).fill(0).map((_, i) => ({ pressed: i === 9, value: 1 })) }),
+    )
     g.reset()
     expect(g.isPausePressed()).toBe(false)
   })
@@ -185,51 +234,91 @@ describe('CompositeInput — keyboard + gamepad merge', () => {
 })
 
 describe('GamepadManager — device slotting (pure, injected snapshots)', () => {
-  function managerWith(pads: (GamepadSnapshot | null)[]): GamepadManager {
-    const m = new GamepadManager()
-    m.pollForTests(pads)
-    return m
-  }
-
-  it('assigns pad[0] to player1, pad[1] to player2, and keeps slots stable', () => {
+  it('assigns pad[0] to player1, pad[1] to player2 on the first poll', () => {
     const a = pad()
     const b = pad()
-    const m = managerWith([a, b])
+    const m = new GamepadManager()
+    m.pollForTests([a, b])
     expect(m.p1Snapshot).toBe(a)
     expect(m.p2Snapshot).toBe(b)
-    // P2 unplugs; P1 keeps its slot (no swap).
-    const a2 = pad()
-    const m2 = managerWith([a2, null])
-    expect(m2.p1Snapshot).toBe(a2)
-    expect(m2.p2Snapshot).toBeNull()
   })
 
-  it('a newly plugged second pad takes the free P2 slot', () => {
+  it('keeps slots stable across polls of the SAME manager (P2 never promoted to P1)', () => {
+    const m = new GamepadManager()
     const a = pad()
-    const m = managerWith([a, null])
+    const b = pad()
+    m.pollForTests([a, b])
+    expect(m.p1Snapshot).toBe(a)
+    expect(m.p2Snapshot).toBe(b)
+    // P1 unplugs: P2 keeps its slot, P1's slot stays EMPTY (no promotion).
+    m.pollForTests([null, b])
+    expect(m.p1Snapshot).toBeNull()
+    expect(m.p2Snapshot).toBe(b)
+    // The same pad reconnects → returns to the (free) P1 slot; B stays on P2.
+    m.pollForTests([a, b])
+    expect(m.p1Snapshot).toBe(a)
+    expect(m.p2Snapshot).toBe(b)
+  })
+
+  it('a newly plugged second pad takes the free P2 slot (same instance)', () => {
+    const m = new GamepadManager()
+    const a = pad()
+    m.pollForTests([a, null])
     expect(m.p2Snapshot).toBeNull()
     const b = pad()
-    const m2 = managerWith([a, b])
-    expect(m2.p2Snapshot).toBe(b)
+    m.pollForTests([a, b])
+    expect(m.p2Snapshot).toBe(b)
   })
 
-  it('reports connect/disconnect transitions for toasts', () => {
-    const m = managerWith([pad(), null])
+  it('a new pad fills an unplugged P1 slot; the returning pad reclaims it', () => {
+    const m = new GamepadManager()
+    const a = pad()
+    const b = pad()
+    m.pollForTests([a, b])
+    // A unplugs, a fresh pad C takes slot 0.
+    m.pollForTests([null, b])
+    const c = pad()
+    m.pollForTests([c, b])
+    expect(m.p1Snapshot).toBe(c)
+    expect(m.p2Snapshot).toBe(b)
+    // A returns → P1 slot back; C is dropped (no slot free).
+    m.pollForTests([a, b])
+    expect(m.p1Snapshot).toBe(a)
+    expect(m.p2Snapshot).toBe(b)
+  })
+
+  it('reports connect/disconnect transitions for toasts (same instance, stable identity)', () => {
+    const m = new GamepadManager()
+    const a = pad()
+    const b = pad()
     // First-ever poll transitions from "nothing" to "P1 present" — that IS a
     // connect event (so a pad plugged in before page load still greets).
+    m.pollForTests([a, null])
     expect(m.consumeEvents()).toEqual([{ player: 1, type: 'connected' }])
-    // Steady state across repeated polls of the SAME manager: no transitions.
-    m.pollForTests([pad(), null])
+    // Steady state across repeated polls of the SAME pad object: none.
+    m.pollForTests([a, null])
     expect(m.consumeEvents()).toEqual([])
-    // P2 plugs in on the same manager → one connect for P2 only.
-    m.pollForTests([pad(), pad()])
+    // A new pad plugs in on the same manager → one connect for P2 only.
+    m.pollForTests([a, b])
     expect(m.consumeEvents()).toEqual([{ player: 2, type: 'connected' }])
-    // Both unplug → two disconnects.
+    // P2 unplugs → disconnect P2 only.
+    m.pollForTests([a, null])
+    expect(m.consumeEvents()).toEqual([{ player: 2, type: 'disconnected' }])
+    // Both unplug → P1 disconnect.
     m.pollForTests([null, null])
-    expect(m.consumeEvents()).toEqual([
-      { player: 1, type: 'disconnected' },
-      { player: 2, type: 'disconnected' },
-    ])
+    expect(m.consumeEvents()).toEqual([{ player: 1, type: 'disconnected' }])
+  })
+
+  it('reports a connect when a slot changes identity without emptying (silent swap)', () => {
+    const m = new GamepadManager()
+    const a = pad()
+    m.pollForTests([a, null])
+    m.consumeEvents()
+    // A is replaced by a DIFFERENT pad in the same navigator slot.
+    const c = pad()
+    m.pollForTests([c, null])
+    expect(m.consumeEvents()).toEqual([{ player: 1, type: 'connected' }])
+    expect(m.p1Snapshot).toBe(c)
   })
 
   it('button indices match the standard-mapping constants', () => {

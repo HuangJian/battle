@@ -41,7 +41,13 @@ function makeCoopWorld(seed = 42): World {
   return world
 }
 
-const IDLE: InputFrame = { direction: null, firing: false, guard: false, frenzy: false }
+const IDLE: InputFrame = {
+  direction: null,
+  firing: false,
+  guard: false,
+  frenzy: false,
+  rewind: false,
+}
 
 function makeV1Frames(ticks: number): Uint8Array {
   const frames: InputFrame[] = Array.from({ length: ticks }, () => IDLE)
@@ -51,12 +57,18 @@ function makeV1Frames(ticks: number): Uint8Array {
 function makeV2Frames(ticks: number): Uint8Array {
   const p1: InputFrame[] = Array.from({ length: ticks }, (_, i) =>
     i % 2 === 0
-      ? { direction: 'up' as Direction, firing: true, guard: false, frenzy: false }
+      ? { direction: 'up' as Direction, firing: true, guard: false, frenzy: false, rewind: false }
       : IDLE,
   )
   const p2: InputFrame[] = Array.from({ length: ticks }, (_, i) =>
     i % 3 === 0
-      ? { direction: 'down' as Direction, firing: false, guard: false, frenzy: false }
+      ? {
+          direction: 'down' as Direction,
+          firing: false,
+          guard: false,
+          frenzy: false,
+          rewind: false,
+        }
       : IDLE,
   )
   return packFrames(p1, p2)
@@ -209,9 +221,9 @@ describe('M6 — ReplayInput dual-stream', () => {
   it('input2 reads correct direction at each tick', () => {
     const p1: InputFrame[] = [IDLE, IDLE, IDLE, IDLE, IDLE]
     const p2: InputFrame[] = [
-      { direction: 'down', firing: false, guard: false, frenzy: false },
+      { direction: 'down', firing: false, guard: false, frenzy: false, rewind: false },
       IDLE,
-      { direction: 'left', firing: true, guard: false, frenzy: false },
+      { direction: 'left', firing: true, guard: false, frenzy: false, rewind: false },
       IDLE,
       IDLE,
     ]
@@ -327,9 +339,9 @@ describe('M6 — Audio coop mode flag', () => {
   it('ReplayInput.input2 advances with parent tick', () => {
     const p1: InputFrame[] = [IDLE, IDLE, IDLE]
     const p2: InputFrame[] = [
-      { direction: 'up', firing: true, guard: false, frenzy: false },
-      { direction: 'down', firing: false, guard: false, frenzy: false },
-      { direction: 'left', firing: false, guard: false, frenzy: false },
+      { direction: 'up', firing: true, guard: false, frenzy: false, rewind: false },
+      { direction: 'down', firing: false, guard: false, frenzy: false, rewind: false },
+      { direction: 'left', firing: false, guard: false, frenzy: false, rewind: false },
     ]
     const data = packFrames(p1, p2)
     const ri = new ReplayInput(data)

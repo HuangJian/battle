@@ -142,3 +142,50 @@ describe('Input.getMoveDirection — last pressed wins', () => {
     expect(dir(input)).toBe('right') // still last-pressed-wins after a frame boundary
   })
 })
+
+describe('Input menu navigation — WASD fallback removed (2p-review P1-4)', () => {
+  it('default bindings: arrows navigate, WASD does NOT (P2’s keys must not move the menu)', () => {
+    const input = new Input()
+    keydown(input, 'ArrowUp')
+    expect(input.isUpPressed()).toBe(true)
+    input.endFrame()
+    keydown(input, 'KeyW') // P2's default up key
+    expect(input.isUpPressed()).toBe(false) // regression: WASD is inert in the menu
+    input.endFrame()
+    keydown(input, 'ArrowDown')
+    expect(input.isDownPressed()).toBe(true)
+    input.endFrame()
+    keydown(input, 'KeyS') // P2's default down key
+    expect(input.isDownPressed()).toBe(false)
+  })
+
+  it('P1 who rebinds movement to WASD still navigates via the bound-key path', () => {
+    const input = new Input({
+      ...DEFAULT_KEYS,
+      up: 'KeyW',
+      down: 'KeyS',
+      left: 'KeyA',
+      right: 'KeyD',
+    })
+    keydown(input, 'KeyW')
+    expect(input.isUpPressed()).toBe(true)
+    input.endFrame()
+    keydown(input, 'KeyS')
+    expect(input.isDownPressed()).toBe(true)
+  })
+
+  it('the arrow keys remain a navigation fallback regardless of bindings', () => {
+    const input = new Input({
+      ...DEFAULT_KEYS,
+      up: 'KeyW',
+      down: 'KeyS',
+      left: 'KeyA',
+      right: 'KeyD',
+    })
+    keydown(input, 'ArrowUp')
+    expect(input.isUpPressed()).toBe(true)
+    input.endFrame()
+    keydown(input, 'ArrowDown')
+    expect(input.isDownPressed()).toBe(true)
+  })
+})

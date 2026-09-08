@@ -5,11 +5,8 @@
 // orchestrator back-reference (`this.g`). Cross-slice entry points are
 // delegated on Game itself.
 // ================================================================
-import { LOW_POWER_STATES, MAX_LIVE_STEPS, TICK_MS, SEED_HASH } from '../constants'
+import { LOW_POWER_STATES, MAX_LIVE_STEPS, TICK_MS } from '../constants'
 import { spriteLibrary } from '../presentation/renderer/SpriteLibrary'
-import { RNG } from '../utils/RNG'
-import { GodAIInput } from '../ai/GodAIInput'
-import { AutoFireInput } from './AutoFireInput'
 import { cycleBattleSpeed } from './battleSpeed'
 import { t } from '../i18n'
 import type { Game } from './Game'
@@ -462,42 +459,15 @@ export class LoopController {
     // quiet so it doesn't overwrite this session / snapshot a mid-stage
     // world as 'stage-start'.
     this.g.prevStageIndex = this.g.world.stageIndex
-    // Lie-Back-Win-Mode: if the restored snapshot has coop enabled but
-    // godInput was cleared (e.g. loaded a coop snapshot from browser while
-    // coop was off), re-create the God AI input for player2.
-    if (this.g.world.coop && !this.g.godInput && this.g.world.player2) {
-      const rng = new RNG((this.g.world.seed ^ SEED_HASH) >>> 0)
-      this.g.godInput = new GodAIInput(this.g.world, undefined, rng, (w) => w.player2)
-      this.g.godInput.reset()
-      // Lie-Back-Win-Mode §3.4: re-create auto-fire on recovery restore.
-      this.g.autoFireInput = new AutoFireInput(this.g.input)
-      this.g.wireLiveInputs()
-      this.g.audio.player2Id = this.g.world.player2?.id ?? null
-      this.g.presentation.ui.controlCenter.setCoopState(true)
-    } else if (this.g.world.spectate && !this.g.godInput && this.g.world.player) {
-      // 督战: restored snapshot has spectate but godInput was cleared
-      // (e.g. loaded a spectate snapshot from the browser while spectate
-      // was off) — re-create the God AI for player1 (default
-      // controlledTank = `w.player`). No auto-fire: nobody is human here.
-      this.g.rearmSpectateGodInput()
-    } else if (this.g.world.twoPlayer && this.g.world.player2) {
-      // 双打 Two-Player: the restored snapshot carries a human player2 —
-      // wireLiveInputs() already routes `input2` (P2's own keyboard) into the
-      // sim; just reflect the CC toggle state and audio attenuation.
-      this.g.wireLiveInputs()
-      this.g.audio.player2Id = this.g.world.player2?.id ?? null
-      this.g.presentation.ui.controlCenter.setTwoPlayerState(true)
-    } else if (!this.g.world.coop && !this.g.world.spectate) {
-      // Snapshot restored without coop/spectate/twoPlayer — ensure inputs are
-      // cleared.
-      this.g.godInput = null
-      this.g.godInput2 = null
-      this.g.autoFireInput = null
-      this.g.wireLiveInputs()
-      this.g.audio.player2Id = null
-      this.g.presentation.ui.controlCenter.setCoopState(false)
-      this.g.presentation.ui.controlCenter.setSpectateState('off')
-    }
+    // 模式归一化 (2p-review P1-2): collapse the mode inputs to EXACTLY the
+    // restored world's flags (coop → P2 God AI + P1 auto-fire; spectate → P1
+    // God AI; twoPlayer → P2's human keyboard; plain → none), clearing
+    // residues of the OTHER modes — a leftover coop autoFireInput/godInput
+    // would make P1 auto-fire in a restored two-player game. All three
+    // Control-Center mode lights are set from the flags so no stale light
+    // survives a cross-mode restore.
+    this.g.normalizeModeInputs()
+    this.g.syncModeLights()
   }
 
   /**
@@ -597,8 +567,18 @@ export class LoopController {
   pollPads(): void {
     this.g.pads.poll()
     for (const ev of this.g.pads.consumeEvents()) {
-      const key = ev.type === 'connected' ? 'toast.gamepadConnected' : 'toast.gamepadDisconnected'
-      this.g.presentation.ui.notify(t(key, { player: ev.player }), 'info')
+      if (ev.type === 'connected') {
+        // 2p-review P2-4: pad[1] only drives player2 in Two-Player mode — in a
+        // single-player (or coop/spectate) session the second pad sits unused,
+        // so say so instead of promising it joined the battle.
+        if (ev.player === 2 && !this.g.world.twoPlayer) {
+          this.g.presentation.ui.notify(t('toast.gamepadConnectedP2Idle'), 'info')
+        } else {
+          this.g.presentation.ui.notify(t('toast.gamepadConnected', { player: ev.player }), 'info')
+        }
+      } else {
+        this.g.presentation.ui.notify(t('toast.gamepadDisconnected', { player: ev.player }), 'info')
+      }
     }
   }
 

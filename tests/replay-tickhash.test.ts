@@ -33,7 +33,9 @@ class ScriptedInput implements InputLike {
   private i = 0
   constructor(seq: InputFrame[]) {
     this.seq =
-      seq.length > 0 ? seq : [{ direction: null, firing: false, guard: false, frenzy: false }]
+      seq.length > 0
+        ? seq
+        : [{ direction: null, firing: false, guard: false, frenzy: false, rewind: false }]
   }
   private cur(): InputFrame {
     return this.seq[Math.min(this.i, this.seq.length - 1)]
@@ -76,7 +78,7 @@ const DIFF = 'hard'
 function scriptedFrames(count: number): InputFrame[] {
   const frames: InputFrame[] = []
   for (let t = 0; t < count; t++) {
-    frames.push({ direction: null, firing: false, guard: false, frenzy: false })
+    frames.push({ direction: null, firing: false, guard: false, frenzy: false, rewind: false })
   }
   for (let t = 150; t < 180; t++) frames[t].firing = true
   for (let t = 250; t < 280; t++) frames[t].firing = true
