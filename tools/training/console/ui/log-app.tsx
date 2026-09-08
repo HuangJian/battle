@@ -279,15 +279,6 @@ export function LogApp({ initial, options }: LogAppProps) {
 
       {/* ── 吸顶工具栏：导航 + follow + 尾行数 + 搜索 + 级别 ── */}
       <div className="tc-logtool">
-        {!pinned && follow ? (
-          <span
-            className="tc-logpause"
-            role="status"
-            title="上滚读历史时自动暂停跟随；滚回底部或点直达底部恢复"
-          >
-            已暂停跟随 · 正在读历史
-          </span>
-        ) : null}
         <nav className="tc-logtool__nav" aria-label="组件">
           {options.components.map((c) => (
             <a
@@ -301,6 +292,16 @@ export function LogApp({ initial, options }: LogAppProps) {
           ))}
         </nav>
         <div className="tc-logtool__right">
+          {/* 暂停提示与「过滤日志」同排（§373 修订：勿放 nav 前，会把组件 chips 挤到提示后） */}
+          {!pinned && follow ? (
+            <span
+              className="tc-logpause"
+              role="status"
+              title="上滚读历史时自动暂停跟随；滚回底部或点直达底部恢复"
+            >
+              已暂停跟随 · 正在读历史
+            </span>
+          ) : null}
           <span className="tc-logtool__search">
             <span className="tc-logtool__search-icon" aria-hidden="true">
               ⌕

@@ -3473,3 +3473,6 @@ bundle 路径一致性校验（SSR script src ∈ servable paths + log.js 禁词
 
 **测试**：写混合 UTF-8/GBK 字节的真实文件 → readLogTail 正确还原 GBK 中文（无 U+FFFD）
 且 UTF-8 行不受影响；logTail 同验。控制台 74 测试全绿。
+**补记（2026-09-08，§373 修订）：**「已暂停跟随 · 正在读历史」初版放在 tc-logtool 内
+nav（组件 chips）之前——导航被提示挤出成两行，且提示不在「过滤日志」所在行。
+改为移入 `.tc-logtool__right` 内、搜索框之前，与「过滤日志」同排且位于该行最左。
