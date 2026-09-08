@@ -205,13 +205,20 @@ export function readLogTail(
   nnRel: string,
   maxLines: number | 'all' = 200,
   maxBytes = 512 * 1024,
-): { lines: string[]; exists: boolean; fileSize: number; truncated: boolean } {
+): {
+  lines: string[]
+  exists: boolean
+  fileSize: number
+  truncated: boolean
+  /** 文件总行数（顶部「共 N 行」）；>8MB 返回 null（UI 按截断窗口退化显示）。 */
+  totalLines: number | null
+} {
   const abs = path.join(NN_TRAINING, nnRel)
   let fileSize = 0
   try {
     fileSize = statSync(abs).size
   } catch {
-    return { lines: [], exists: false, fileSize: 0, truncated: false }
+    return { lines: [], exists: false, fileSize: 0, truncated: false, totalLines: null }
   }
   const all = maxLines === 'all'
   const effBytes = all ? Math.max(maxBytes, 4 * 1024 * 1024) : maxBytes
@@ -225,7 +232,7 @@ export function readLogTail(
       closeSync(fh)
     }
   } catch {
-    return { lines: [], exists: true, fileSize, truncated: false }
+    return { lines: [], exists: true, fileSize, truncated: false, totalLines: null }
   }
   let text = buf.toString('utf-8')
   // 首行多半是被窗口切半的残行——丢弃（除非窗口覆盖了整个文件）。
@@ -237,11 +244,26 @@ export function readLogTail(
     .filter((l) => l.length > 0)
     .slice(all ? undefined : -maxLines)
     .map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l))
+  // 顶部「共 N 行」要总行数：≤8MB 精确统计（字节计数换行 + 末尾残行），更大返回 null。
+  let totalLines: number | null = null
+  if (fileSize <= 8 * 1024 * 1024) {
+    try {
+      const whole = readFileSync(abs)
+      let n = 0
+      let idx = whole.indexOf(10)
+      while (idx !== -1) (n++, (idx = whole.indexOf(10, idx + 1)))
+      if (whole.length > 0 && whole[whole.length - 1] !== 10) n++
+      totalLines = n
+    } catch {
+      totalLines = null
+    }
+  }
   return {
     lines: out,
     exists: true,
     fileSize,
     truncated: partial,
+    totalLines,
   }
 }
 
@@ -265,6 +287,7 @@ export async function componentLogPayload(
     fileSize: t.fileSize,
     lines: t.lines,
     truncated: t.truncated,
+    totalLines: t.totalLines,
     updatedAt: Date.now(),
   }
 }

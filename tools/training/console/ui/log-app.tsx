@@ -238,8 +238,19 @@ export function LogApp({ initial, options }: LogAppProps) {
             </code>
           ) : null}
           {exists ? (
-            <span className="tc-chip">
-              共 <b>{counts.total}</b> 行
+            <span
+              className="tc-chip"
+              title={payload.totalLines == null ? '文件过大，行数按已读窗口展示' : '文件总行数'}
+            >
+              共{' '}
+              <b>
+                {payload.totalLines != null
+                  ? payload.totalLines
+                  : payload.truncated
+                    ? `>${counts.total}`
+                    : counts.total}
+              </b>{' '}
+              行{payload.totalLines == null && payload.truncated ? '（窗口内）' : ''}
             </span>
           ) : null}
           {exists ? (
@@ -342,6 +353,17 @@ export function LogApp({ initial, options }: LogAppProps) {
               ))}
             </select>
           </label>
+          <button
+            type="button"
+            className={`tc-logbtn${pinned ? ' tc-logbtn--bottom' : ''}`}
+            aria-label={pinned ? '已到底部' : '直达底部'}
+            disabled={pinned}
+            onClick={scrollToBottom}
+          >
+            <span className="tc-logbtn__icon">↓</span>
+            {pinned ? '已到底部' : '直达底部'}
+            {!pinned && arrivals > 0 ? <span className="tc-logbtn__badge">+{arrivals}</span> : null}
+          </button>
           {!exists ? <span className="tc-chip tc-chip--red">文件不存在</span> : null}
         </div>
       </div>
@@ -410,19 +432,6 @@ export function LogApp({ initial, options }: LogAppProps) {
           )}
         </div>
       </div>
-
-      {/* ── FAB：直达底部（常驻；贴底灰显，未贴底高亮 + 新行徽章） ── */}
-      <button
-        type="button"
-        className={`tc-logfab${pinned ? ' tc-logfab--bottom' : ''}`}
-        aria-label={pinned ? '已到底部' : '直达底部'}
-        disabled={pinned}
-        onClick={scrollToBottom}
-      >
-        <span className="tc-logfab__icon">↓</span>
-        {pinned ? '已到底部' : '直达底部'}
-        {!pinned && arrivals > 0 ? <span className="tc-logfab__badge">+{arrivals}</span> : null}
-      </button>
     </div>
   )
 }

@@ -484,9 +484,25 @@ describe('日志页展示层（§367：结构化解析 + 事件卡）', () => {
     expect(html).toContain('value="all"') // 尾行下拉含 all
     expect(html).toContain('已截断·尾部窗口') // all 专用截断文案
     expect(html).toContain('更新于') // 取数时刻可感知（自动刷新=有动）
-    expect(html).toContain('tc-logfab') // FAB 常驻（不再仅非贴底+follow 时出现）
+    expect(html).toContain('tc-logbtn') // 直达底部按钮并入工具栏（不再浮动 FAB）
     expect(html).toContain('已到底部') // 初始贴底态文案
     expect(html).not.toContain('<script>alert')
+  })
+
+  it('renderLogPage（§372）：共 N 行 = 文件总行数（totalLines）', () => {
+    const p = {
+      component: 'selfNode',
+      label: 'selfNode',
+      log: 'tmp/sampler-agent.log',
+      exists: true,
+      fileSize: 888,
+      lines: Array.from({ length: 5 }, (_, i) => `line-${i}`),
+      truncated: true,
+      totalLines: 1234,
+    }
+    const html = renderLogPage(p, { components: [], follow: false, lines: 200 })
+    expect(html).toMatch(/共\s*<b>1234<\/b>\s*行/) // 顶部显示文件总行数而非截断窗口 5
+    expect(html).not.toMatch(/共\s*<b>5<\/b>\s*行/)
   })
 })
 

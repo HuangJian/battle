@@ -272,12 +272,12 @@ a.tc-preset{text-decoration:none;display:inline-block}
 .tc-logempty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:48px 16px;color:#8b98ab;text-align:center}
 .tc-logempty__icon{font-size:26px}
 
-/* FAB 回到底部 */
-.tc-logfab{position:fixed;right:24px;bottom:24px;display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:999px;box-shadow:var(--sh-2);padding:9px 16px;font-size:var(--fs-2);font-weight:600;color:var(--text);cursor:pointer;z-index:30}
-.tc-logfab:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
-.tc-logfab--bottom{opacity:.55;cursor:default;border-color:var(--border)}
-.tc-logfab__icon{color:var(--accent);font-size:14px}
-.tc-logfab__badge{min-width:20px;text-align:center;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;animation:tc-live 1.2s ease-in-out infinite}
+/* 直达底部（工具栏内联按钮；§372 不再浮动） */
+.tc-logbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:999px;background:var(--card);padding:4px 12px;font-size:var(--fs-2);font-weight:600;color:var(--text);cursor:pointer;white-space:nowrap}
+.tc-logbtn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.tc-logbtn--bottom{opacity:.55;cursor:default}
+.tc-logbtn__icon{color:var(--accent);font-size:13px}
+.tc-logbtn__badge{min-width:18px;text-align:center;padding:0 5px;border-radius:999px;background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;animation:tc-live 1.2s ease-in-out infinite}
 
 /* ── 响应式 ──────────────────────────────────────────────── */
 @media (max-width:900px){.tc-wrap{padding:var(--sp-4)}.tc-table thead th,.tc-table tbody td{padding:8px 10px}.tc-topbar{gap:var(--sp-2)}}

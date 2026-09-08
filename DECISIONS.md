@@ -3445,3 +3445,14 @@ FAB 全部是死的（SSR 静态内容看起来「页面在」，交互全无）
 value="all" 选项 / all 截断文案 / 更新于芯片 / 常驻 FAB / 已到底部文案；
 bundle 路径一致性校验（SSR script src ∈ servable paths + log.js 禁词/体积门禁）。
 控制台 72 测试全绿。
+## §372 / 日志页细节二改：「共 N 行」= 文件总行数；直达底部按钮并入工具栏（2026-09-08，用户指令）
+
+1. 顶部「共 N 行」此前显示的是截断窗口内的行数（payload.lines.length），用户要求显示
+   **文件总行数**。方案：`readLogTail` 增加 `totalLines`（≤8MB 精确统计——字节级数换行
+   + 末尾残行；>8MB 返回 null，UI 退化为 `>窗口行数（窗口内）`）。大日志 2s 轮询全读
+   不可接受，8MB 上限已是热路径折衷（此前的窗口读 + all 4MB 语义不变）。
+2. 直达底部按钮从浮动 FAB（position:fixed）改为**尾行 select 旁的工具栏内联按钮**
+   （.tc-logbtn）：贴底灰显「已到底部」，未贴底高亮 + 新到行 +N 徽章；不再遮挡右下角内容。
+
+**测试**：readLogTail all 断言 totalLines=50、缺文件 null；renderLogPage SSR 断言
+`共 N 行` 用 totalLines（正则匹配空白折叠）、工具栏含 tc-logbtn。控制台 73 测试全绿。

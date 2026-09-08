@@ -520,9 +520,12 @@ describe('console/log viewer (§348 补 2)', () => {
       expect(t.exists).toBe(true)
       expect(t.truncated).toBe(false)
       expect(t.lines).toEqual(lines)
+      expect(t.totalLines).toBe(50) // 顶部「共 N 行」= 文件总行数（§372）
       // 数字模式仍然只取尾 N 行
       const t5 = api.readLogTail(rel, 5)
       expect(t5.lines).toEqual(lines.slice(-5))
+      // 缺文件：totalLines null
+      expect(api.readLogTail('tmp/no-such-log-xyz.log', 50).totalLines).toBeNull()
     } finally {
       rmSync(p, { force: true })
     }

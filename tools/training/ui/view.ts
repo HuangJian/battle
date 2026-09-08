@@ -101,6 +101,8 @@ export interface LogPayload {
   truncated: boolean
   /** 服务端取数时刻（页面「更新于」指示；§371 优化 2 可感知刷新）。 */
   updatedAt?: number
+  /** 文件总行数（顶部「共 N 行」；服务端 >8MB 时为 null，UI 退化显示窗口行数）。 */
+  totalLines?: number | null
 }
 
 export interface LogPageOptions {
