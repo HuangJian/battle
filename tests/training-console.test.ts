@@ -509,6 +509,25 @@ describe('console/log viewer (§348 补 2)', () => {
     }
   })
 
+  it('readLogTail：maxLines=all 读全部行，小文件不截断（§371）', () => {
+    const rel = 'tmp/logtail-all-371.log'
+    const p = path.join(import.meta.dir, '..', 'nn-training', rel)
+    mkdirSync(path.dirname(p), { recursive: true })
+    const lines = Array.from({ length: 50 }, (_, i) => `line-${i}`)
+    writeFileSync(p, lines.join('\n') + '\n', 'utf-8')
+    try {
+      const t = api.readLogTail(rel, 'all')
+      expect(t.exists).toBe(true)
+      expect(t.truncated).toBe(false)
+      expect(t.lines).toEqual(lines)
+      // 数字模式仍然只取尾 N 行
+      const t5 = api.readLogTail(rel, 5)
+      expect(t5.lines).toEqual(lines.slice(-5))
+    } finally {
+      rmSync(p, { force: true })
+    }
+  })
+
   it('resolveComponentLog：五个组件均有日志映射；未知组件 null', () => {
     const cfg = JSON.parse(readFileSync(REAL_CONFIG, 'utf-8')) as Parameters<
       typeof api.resolveComponentLog

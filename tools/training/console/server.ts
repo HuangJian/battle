@@ -61,6 +61,12 @@ function json(data: unknown, status = 200): Response {
   })
 }
 
+/** ?lines 解析（§371 优化 1）：'all' → 读全部；数字 clamp [10, 2000]。 */
+function parseLogLines(raw: string | null, dft = 200): number | 'all' {
+  if (raw === 'all') return 'all'
+  return Math.min(Math.max(Number(raw ?? dft) || dft, 10), 2000)
+}
+
 /** 变更检测监督器（同 §349；页面动作与监督共用 busy 互斥语义在 actions 层）。 */
 function startSupervisor(): ReturnType<typeof createSupervisor> {
   const restart = async (
@@ -148,7 +154,7 @@ async function main(): Promise<void> {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }
-        // 客户端 bundle（app.js / app-log.js；mtime 失效自动重建）
+        // 客户端 bundle（app.js / log.js；mtime 失效自动重建）
         if (req.method === 'GET' && bundlesByPath.has(url.pathname)) {
           return serveBundle(bundlesByPath.get(url.pathname)!)
         }
@@ -161,19 +167,13 @@ async function main(): Promise<void> {
         }
         if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
           const key = url.pathname.slice('/api/log/'.length) as Component
-          const lines = Math.min(
-            Math.max(Number(url.searchParams.get('lines') ?? 200) || 200, 10),
-            2000,
-          )
+          const lines = parseLogLines(url.searchParams.get('lines'))
           const payload = await componentLogPayload(key, lines)
           return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
         }
         if (req.method === 'GET' && url.pathname.startsWith('/log/')) {
           const key = url.pathname.slice('/log/'.length) as Component
-          const lines = Math.min(
-            Math.max(Number(url.searchParams.get('lines') ?? 200) || 200, 10),
-            2000,
-          )
+          const lines = parseLogLines(url.searchParams.get('lines'))
           const payload = await componentLogPayload(key, lines)
           if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
           const state = await buildStateView()

@@ -53,7 +53,7 @@ export async function fetchPool(fresh = false): Promise<PoolView> {
   return (await r.json()) as PoolView
 }
 
-export async function fetchLog(key: string, lines: number): Promise<LogPayload> {
+export async function fetchLog(key: string, lines: number | 'all'): Promise<LogPayload> {
   const r = await fetch(`/api/log/${key}?lines=${lines}`)
   if (!r.ok) throw new Error(`/api/log/${key} HTTP ${r.status}`)
   return (await r.json()) as LogPayload

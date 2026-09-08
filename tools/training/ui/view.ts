@@ -99,12 +99,15 @@ export interface LogPayload {
   fileSize: number
   lines: string[]
   truncated: boolean
+  /** 服务端取数时刻（页面「更新于」指示；§371 优化 2 可感知刷新）。 */
+  updatedAt?: number
 }
 
 export interface LogPageOptions {
   components: Array<{ key: string; label: string; status: string }>
   follow: boolean
-  lines: number
+  /** 尾行数；'all' = 读全部（§371 优化 1）。 */
+  lines: number | 'all'
 }
 
 // ────────────────────────── 日志页展示层纯函数（§367：直观/审美/交互） ──────────────────────────

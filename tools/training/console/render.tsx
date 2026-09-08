@@ -40,11 +40,12 @@ export function renderConsolePage(state: ConsoleStateView, scriptSrc = '/app.js'
   return shell('NN 训练控制台', html, JSON.stringify(state), scriptSrc)
 }
 
-/** 日志页（/log/<key>，SSR 首帧 + hydrate）。 */
+/** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认
+ *  /app-log.js 与服务端 bundlesByPath（/log.js）不一致 → bundle 404 → 日志页零交互）。 */
 export function renderLogPage(
   payload: LogPayload,
   opts: LogPageOptions,
-  scriptSrc = '/app-log.js',
+  scriptSrc = '/log.js',
 ): string {
   const html = renderToString(<LogApp initial={payload} options={opts} />)
   return shell(

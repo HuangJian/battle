@@ -378,7 +378,7 @@ describe('日志页 SSR（render.tsx renderLogPage，§348 补 2 语义保留）
     expect(html).toContain('id="follow" checked')
     expect(html).toContain('/log/trainingLoop')
     expect(html).toContain('返回控制台')
-    expect(html).toContain('/app-log.js')
+    expect(html).toContain('/log.js') // 服务端可服务的 bundle 路径（§371：旧 /app-log.js 404）
     expect(html).not.toContain('<script>alert')
   })
 
@@ -466,6 +466,26 @@ describe('日志页展示层（§367：结构化解析 + 事件卡）', () => {
     expect(html).toContain('iteration')
     expect(html).toContain('tc-logline--error') // failed 行红色级别
     expect(html).toContain('tc-logline__no') // 行号 gutter
+    expect(html).not.toContain('<script>alert')
+  })
+
+  it('renderLogPage（§371）：尾行 all 选项 + 常驻直达底部 FAB + 更新于指示 + all 截断文案', () => {
+    const p = {
+      component: 'selfNode',
+      label: 'selfNode',
+      log: 'tmp/sampler-agent.log',
+      exists: true,
+      fileSize: 888,
+      lines: ['[13:49:32] [sampler-agent] task done', 'a doomed thing'],
+      truncated: true,
+      updatedAt: 1788820000000,
+    }
+    const html = renderLogPage(p, { components: [], follow: false, lines: 'all' })
+    expect(html).toContain('value="all"') // 尾行下拉含 all
+    expect(html).toContain('已截断·尾部窗口') // all 专用截断文案
+    expect(html).toContain('更新于') // 取数时刻可感知（自动刷新=有动）
+    expect(html).toContain('tc-logfab') // FAB 常驻（不再仅非贴底+follow 时出现）
+    expect(html).toContain('已到底部') // 初始贴底态文案
     expect(html).not.toContain('<script>alert')
   })
 })

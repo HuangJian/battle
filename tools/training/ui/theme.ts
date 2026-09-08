@@ -274,7 +274,8 @@ a.tc-preset{text-decoration:none;display:inline-block}
 
 /* FAB 回到底部 */
 .tc-logfab{position:fixed;right:24px;bottom:24px;display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:999px;box-shadow:var(--sh-2);padding:9px 16px;font-size:var(--fs-2);font-weight:600;color:var(--text);cursor:pointer;z-index:30}
-.tc-logfab:hover{border-color:var(--accent);color:var(--accent)}
+.tc-logfab:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.tc-logfab--bottom{opacity:.55;cursor:default;border-color:var(--border)}
 .tc-logfab__icon{color:var(--accent);font-size:14px}
 .tc-logfab__badge{min-width:20px;text-align:center;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;animation:tc-live 1.2s ease-in-out infinite}
 

@@ -3420,3 +3420,28 @@ int16 dot 量化维持否决（§368 补记）。计划文件 plan/nn-arch-speed
 iter_error 的 error 提取（win 百分化/kl 4 位小数）、formatBytes B/KB/MB、renderLogPage
 JSON 行渲染为事件卡 + 普通行红色级别 + 行号 gutter，且存量锚点（id=logbox / id=follow
 checked / 返回控制台 / /log/trainingLoop / 无 <script> 注入）全保留。控制台 70 测试全绿。
+## §371 / 日志页四项交互修复 + bundle 404 根因（2026-09-08，用户反馈"跟随/过滤未起效"）
+
+**根因（2/3/4 项的共同元凶）**：renderLogPage 默认 scriptSrc 是 `/app-log.js`，
+而服务端 bundlesByPath 只挂 `/app.js` 与 **`/log.js`**（build.ts BUNDLES key='log'）
+——日志页 bundle 请求 404，**整页无任何客户端 JS**：智能跟随、自动刷新、过滤器、
+FAB 全部是死的（SSR 静态内容看起来「页面在」，交互全无）。旧测试断言的是 SSR HTML，
+从没抓到这条链路。修复：render 默认 scriptSrc 改 `/log.js`（与可服务路径一致），
+服务端注释同步，测试断言 `/app-log.js` → `/log.js`。
+
+**四项优化**：
+1. **尾行截断选项 200/500/1000/all**：`?lines=all` → readLogTail 读整个文件
+   （字节窗口放宽 4MB 上限，行数不截；truncated 仅按字节窗口），服务端
+   parseLogLines 解析 'all'；client LINES_OPTIONS 含 'all'，截断徽章文案适配。
+2. **智能跟随/自动刷新**：post-commit 滚动修复——refetch 内同步 scrollToBottom
+   读到的是旧 DOM 高度，新行进来「差一点没到底」，看起来像跟随没生效；改为
+   `useEffect([payload])` 里、跟随开且贴底时才滚到底。加「更新于 HH:mm:ss」芯片
+   （payload.updatedAt 服务端取数时刻）——刷新是否有动静肉眼可证。
+3. **直达底部按钮**：FAB 常驻（此前仅「follow 开 + 非贴底」才出现）；贴底灰显
+   「已到底部」，未贴底高亮「直达底部」+ 新行 +N 徽章。
+4. **日志过滤器**：根因即 bundle 404（无 JS 故任何交互都无效）；修复后有交互。
+
+**测试**：readLogTail('all') 全量读数 + 数字模式仍截尾；renderLogPage SSR 断言
+value="all" 选项 / all 截断文案 / 更新于芯片 / 常驻 FAB / 已到底部文案；
+bundle 路径一致性校验（SSR script src ∈ servable paths + log.js 禁词/体积门禁）。
+控制台 72 测试全绿。

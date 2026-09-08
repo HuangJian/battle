@@ -199,10 +199,11 @@ export function resolveComponentLog(key: Component, cfg: RlConfig, course: strin
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
- *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。 */
+ *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。
+ *  maxLines='all'（§371 优化 1）：读整个文件（字节窗口放宽到 4MB 上限，行数不截）。 */
 export function readLogTail(
   nnRel: string,
-  maxLines = 200,
+  maxLines: number | 'all' = 200,
   maxBytes = 512 * 1024,
 ): { lines: string[]; exists: boolean; fileSize: number; truncated: boolean } {
   const abs = path.join(NN_TRAINING, nnRel)
@@ -212,7 +213,9 @@ export function readLogTail(
   } catch {
     return { lines: [], exists: false, fileSize: 0, truncated: false }
   }
-  const window = Math.min(maxBytes, fileSize)
+  const all = maxLines === 'all'
+  const effBytes = all ? Math.max(maxBytes, 4 * 1024 * 1024) : maxBytes
+  const window = Math.min(effBytes, fileSize)
   const buf = Buffer.alloc(window)
   try {
     const fh = openSync(abs, 'r')
@@ -232,20 +235,20 @@ export function readLogTail(
   // 尾部空行折叠；过长行截断显示。
   const out = lines
     .filter((l) => l.length > 0)
-    .slice(-maxLines)
+    .slice(all ? undefined : -maxLines)
     .map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l))
   return {
     lines: out,
     exists: true,
     fileSize,
-    truncated: partial || lines.length > maxLines,
+    truncated: partial,
   }
 }
 
 /** 日志页数据载荷（GET /api/log/<key> 与页面渲染共用）。 */
 export async function componentLogPayload(
   key: Component,
-  maxLines: number,
+  maxLines: number | 'all',
 ): Promise<LogPayload | null> {
   if (!ALL_COMPONENTS.includes(key)) return null
   const cfg = loadConfig()
@@ -262,6 +265,7 @@ export async function componentLogPayload(
     fileSize: t.fileSize,
     lines: t.lines,
     truncated: t.truncated,
+    updatedAt: Date.now(),
   }
 }
 

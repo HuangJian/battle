@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import {
   formatBytes,
+  fmtTs,
   parseLogLine,
   parseTrainingEvent,
   shouldFollow,
@@ -30,7 +31,7 @@ export interface LogAppProps {
   options: LogPageOptions
 }
 
-const LINES_OPTIONS = [100, 200, 500, 1000]
+const LINES_OPTIONS = [200, 500, 1000, 'all'] as const
 type LevelFilter = 'all' | 'error' | 'warn'
 
 /** 状态点颜色：running 绿（pulse）/ exited 红 / stopped 灰。 */
@@ -99,7 +100,7 @@ interface ParsedEntry {
 export function LogApp({ initial, options }: LogAppProps) {
   const [payload, setPayload] = useState<LogPayload>(initial)
   const [follow, setFollow] = useState<boolean>(options.follow)
-  const [lines, setLines] = useState<number>(options.lines)
+  const [lines, setLines] = useState<number | 'all'>(options.lines)
   const [pinned, setPinned] = useState<boolean>(true)
   const [query, setQuery] = useState('')
   const [level, setLevel] = useState<LevelFilter>('all')
@@ -129,17 +130,12 @@ export function LogApp({ initial, options }: LogAppProps) {
 
   const refetch = useCallback(async (): Promise<void> => {
     const p = await fetchLog(initial.component, lines)
-    // 未贴底（读历史）时统计新到行数，悬浮纽出 +N 徽章；贴底直接滚到底。
     const grew = p.lines.length - linesLenRef.current
+    linesLenRef.current = p.lines.length
     setPayload(p)
-    if (followRef.current && pinnedRef.current) {
-      linesLenRef.current = p.lines.length
-      scrollToBottom()
-    } else if (grew > 0) {
-      linesLenRef.current = p.lines.length
+    // 未贴底（读历史）时统计新到行数，FAB 出 +N 徽章；贴底滚动在 post-commit effect 里做。
+    if (grew > 0 && !(followRef.current && pinnedRef.current)) {
       setArrivals((a) => a + grew)
-    } else {
-      linesLenRef.current = p.lines.length
     }
   }, [initial.component, lines])
 
@@ -153,6 +149,12 @@ export function LogApp({ initial, options }: LogAppProps) {
       scrollToBottom()
     }
   }, [follow])
+
+  // 新数据落 DOM 后再贴底（§371 优化 2）：refetch 里同步 scrollToBottom 读到的是旧 DOM 高度，
+  // 新行进来后画面上看「差一点没到底」——自动跟随/刷新像没生效。
+  useEffect(() => {
+    if (followRef.current && pinnedRef.current) scrollToBottom()
+  }, [payload])
 
   // 尾行数变化 → 立即拉取（URL 只做首帧初始值，不回写）
   useEffect(() => {
@@ -244,8 +246,18 @@ export function LogApp({ initial, options }: LogAppProps) {
             <span className="tc-chip tc-chip--muted">{formatBytes(payload.fileSize)}</span>
           ) : null}
           {payload.truncated ? (
-            <span className="tc-chip tc-chip--amber" title={`仅显示尾部 ${lines} 行`}>
-              已截断·尾部 {lines} 行
+            <span
+              className="tc-chip tc-chip--amber"
+              title={
+                lines === 'all' ? '文件过大，仅显示尾部 4MB 字节窗口' : `仅显示尾部 ${lines} 行`
+              }
+            >
+              {lines === 'all' ? '已截断·尾部窗口' : `已截断·尾部 ${lines} 行`}
+            </span>
+          ) : null}
+          {exists && payload.updatedAt ? (
+            <span className="tc-chip tc-chip--time" title="服务端取数时刻">
+              更新于 <b>{fmtTs(payload.updatedAt, payload.updatedAt)}</b>
             </span>
           ) : null}
         </div>
@@ -317,8 +329,11 @@ export function LogApp({ initial, options }: LogAppProps) {
             <select
               id="lines"
               className="tc-sel"
-              value={lines}
-              onChange={(e) => setLines(Number((e.target as HTMLInputElement).value))}
+              value={String(lines)}
+              onChange={(e) => {
+                const v = (e.target as HTMLSelectElement).value
+                setLines(v === 'all' ? 'all' : Number(v) || 200)
+              }}
             >
               {LINES_OPTIONS.map((n) => (
                 <option key={n} value={n}>
@@ -349,7 +364,7 @@ export function LogApp({ initial, options }: LogAppProps) {
           {exists ? (
             <span className="tc-logpanel__live" aria-hidden="true">
               <i />
-              {follow ? 'LIVE' : `refresh ${follow ? '2s' : '4s'}`}
+              {follow ? 'LIVE' : 'refresh 4s'}
             </span>
           ) : null}
           <span className="tc-logpanel__count">
@@ -396,19 +411,18 @@ export function LogApp({ initial, options }: LogAppProps) {
         </div>
       </div>
 
-      {/* ── FAB：回到底部（带新到行数徽章） ── */}
-      {!pinned && follow ? (
-        <button
-          type="button"
-          className="tc-logfab"
-          aria-label="回到底部并恢复跟随"
-          onClick={scrollToBottom}
-        >
-          <span className="tc-logfab__icon">↓</span>
-          底部
-          {arrivals > 0 ? <span className="tc-logfab__badge">+{arrivals}</span> : null}
-        </button>
-      ) : null}
+      {/* ── FAB：直达底部（常驻；贴底灰显，未贴底高亮 + 新行徽章） ── */}
+      <button
+        type="button"
+        className={`tc-logfab${pinned ? ' tc-logfab--bottom' : ''}`}
+        aria-label={pinned ? '已到底部' : '直达底部'}
+        disabled={pinned}
+        onClick={scrollToBottom}
+      >
+        <span className="tc-logfab__icon">↓</span>
+        {pinned ? '已到底部' : '直达底部'}
+        {!pinned && arrivals > 0 ? <span className="tc-logfab__badge">+{arrivals}</span> : null}
+      </button>
     </div>
   )
 }
