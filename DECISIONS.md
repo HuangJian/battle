@@ -3606,3 +3606,23 @@ macOS 0.94×、Android proot 0.94-0.97× → **V8 只在 x64 Linux/Windows 系�
 - 强制：`--no-node` / `SAMPLER_ENGINE=bun|node`；`SAMPLER_NODE_BIN` = 参与基准的 node。
 - 本机冒烟：微基准 bun 5.84 vs node22 4.41ms → 选 node；二次启动走缓存（基准 0 次）。
 - 跨引擎字节一致已在五平台 3/3 验证 → 节点间引擎混用不破坏确定性（M4）。
+
+## §379 / 铁律：课程引用的权重文件常备备份到 nn-training/weights/in-use/（2026-09-08，用户指令）
+
+背景：§376/§377 统一临时目录到仓库根 `./tmp` 并上线 `tools/tmp-clean.py` 清理策略后，
+**被清理回收了课程必需的 BC 缰绳参考**（`tmp/ep60/battle2-p1bc/run/weights.json.ckpt.60`，
+p3-ks1/vr1/vk1 三臂共用）——vk1 续跑 boot 时 `_setup` 建 BC ref 触发
+`FileNotFoundError`，TrainingLoop 启动失败（§363「缺字节响亮拒绝」如期生效，但文件
+本不该只有 tmp 一份）。
+
+规则（铁律，无条件遵守）：
+1. **任何被课程文件（`curricula/*.jsonc` 的 bc / init / 其他引用路径）使用的权重文件，
+  除原位置外，必须常备一份在 `nn-training/weights/in-use/` 下**（命名含课程/用途标识，
+  可追溯来源；该目录不属 tmp，不受任何 tmp 清理策略影响）。
+2. 新课程创建 / 课程新增权重引用时，同步把权重落一份到 in-use（与 setCourse 同级动作）。
+3. tmp/ 下原件丢失或被清理时，从 in-use 恢复后启动；禁止「无备份裸奔」直接重训或换
+   ref 偷偷救场（换 ref = 破坏三臂对照，须用户拍板）。
+4. 教训：临时目录里只放可再生的中间产物；**课程依赖的输入文件永远双份**。
+
+现场处置：in-use 目录已建；ep60 BC 权重本机已不可恢复（无 git 跟踪 / 无归档副本 /
+无隔离区），恢复来源需用户提供（云端 / 重训 / 其他机器），恢复后即复制入 in-use。
