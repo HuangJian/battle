@@ -1,9 +1,17 @@
-/* conv_feats.c —— PPOStudent features 前向的 wasm32 SIMD 实现（S5 提速 ①）。
- * 用 clang --target=wasm32 -O3 -msimd128 编译：外积排布让 LLVM 自动向量化。
- * 无 libc：纯函数 + 静态对齐缓冲，memory 由 JS 提供大区（权重/输入/输出/scratch）。
+/* conv_feats.c —— PPOStudent features 前向的 wasm32 SIMD 实现（S5 提速 ①，§368 提速②）。
+ * 用 clang --target=wasm32 -O3 -msimd128 编译；无 libc：纯函数 + 静态对齐缓冲，
+ * memory 由 JS 提供大区（权重/输入/输出/scratch）。
  * 布局与 infer.ts StudentModel 逐点一致（board=26；stem conv3x3 16->h relu；
  * d=8 × [depthwise 5x5 + pointwise 1x1 + relu + residual]；GAP -> pooled[h]）。
+ *
+ * §368（2026-09-08）：pointwise 1x1 由「外积排布等 LLVM 自动向量化」改为**手写
+ * wasm_simd128 intrinsics**（4 输出通道 × 4 像素寄存器块 + relu/residual 融合写回）。
+ * 实测 features：bun 8.10→5.46ms（1.48×）、node 4.59→3.43ms（1.35×），且**逐位相同**
+ * （累加顺序未变：从 bias 起累加，relu 后再加 residual），单局产物逐字节一致。
+ * stem / depthwise 保持自动向量化版本——实测把这两段也 intrinsics 化反而更慢
+ * （tmp/split/conv_feats_v3.c：1.42×/1.27×，且不再逐位相同）。
  */
+#include <wasm_simd128.h>
 typedef float f32;
 #define B 26
 #define SP (B * B)
@@ -94,24 +102,44 @@ static void conv5dw(const f32* pad, const f32* w, const f32* b, f32* out) {
   for (int oc = 0; oc < H; oc++) relu_(out + oc * SP, SP);
 }
 
-/* pointwise 1x1: out[oc] += w[oc,ic] * in[ic]（p 连续 → 向量化） */
-static void conv1x1(const f32* in, const f32* w, const f32* b, f32* out) {
-  const int T = 16;
-  for (int oc = 0; oc < H; oc++) {
-    f32* o = out + oc * SP;
-    const f32 bias = b[oc];
-    for (int p = 0; p < SP; p++) o[p] = bias;
+/* pointwise 1x1 + relu + residual 融合（**手写 wasm_simd128 intrinsics**）。
+ * 4 个输出通道 × 4 个像素 寄存器分块：acc[4] 各持 f32x4，内层只做
+ * splat(w) * v128_load(in) + acc —— 与旧实现同一累加顺序 ⇒ **逐位相同**。 */
+#ifndef RLAX
+#define MACC(acc, s, v) wasm_f32x4_add(acc, wasm_f32x4_mul(wasm_f32x4_splat(s), v))
+#else
+#define MACC(acc, s, v) wasm_f32x4_relaxed_madd(wasm_f32x4_splat(s), v, acc)
+#endif
+static void conv1x1_res(const f32* in, const f32* w, const f32* b, f32* resid) {
+  const v128_t zero = wasm_f32x4_const(0.f, 0.f, 0.f, 0.f);
+  for (int oc0 = 0; oc0 < H; oc0 += 4) {
+    for (int p0 = 0; p0 < SP; p0 += 4) {
+      v128_t a0 = wasm_f32x4_splat(b[oc0 + 0]);
+      v128_t a1 = wasm_f32x4_splat(b[oc0 + 1]);
+      v128_t a2 = wasm_f32x4_splat(b[oc0 + 2]);
+      v128_t a3 = wasm_f32x4_splat(b[oc0 + 3]);
+      const f32* w0 = w + (oc0 + 0) * H;
+      const f32* w1 = w + (oc0 + 1) * H;
+      const f32* w2 = w + (oc0 + 2) * H;
+      const f32* w3 = w + (oc0 + 3) * H;
+      for (int ic = 0; ic < H; ic++) {
+        const v128_t v = wasm_v128_load(in + ic * SP + p0);
+        const f32 s0 = w0[ic], s1 = w1[ic], s2 = w2[ic], s3 = w3[ic];
+        a0 = MACC(a0, s0, v);
+        a1 = MACC(a1, s1, v);
+        a2 = MACC(a2, s2, v);
+        a3 = MACC(a3, s3, v);
+      }
+      f32* o0 = resid + (oc0 + 0) * SP + p0;
+      f32* o1 = resid + (oc0 + 1) * SP + p0;
+      f32* o2 = resid + (oc0 + 2) * SP + p0;
+      f32* o3 = resid + (oc0 + 3) * SP + p0;
+      wasm_v128_store(o0, wasm_f32x4_add(wasm_f32x4_max(a0, zero), wasm_v128_load(o0)));
+      wasm_v128_store(o1, wasm_f32x4_add(wasm_f32x4_max(a1, zero), wasm_v128_load(o1)));
+      wasm_v128_store(o2, wasm_f32x4_add(wasm_f32x4_max(a2, zero), wasm_v128_load(o2)));
+      wasm_v128_store(o3, wasm_f32x4_add(wasm_f32x4_max(a3, zero), wasm_v128_load(o3)));
+    }
   }
-  for (int ic0 = 0; ic0 < H; ic0 += T)
-    for (int oc0 = 0; oc0 < H; oc0 += T)
-      for (int ic = ic0; ic < ic0 + T; ic++)
-        for (int oc = oc0; oc < oc0 + T; oc++) {
-          const f32 s = w[oc * H + ic];
-          const f32* src = in + ic * SP;
-          f32* o = out + oc * SP;
-          for (int p = 0; p < SP; p++) o[p] += s * src[p];
-        }
-  for (int oc = 0; oc < H; oc++) relu_(out + oc * SP, SP);
 }
 
 /* 全前向：in16(16ch) + stemW/stemB + dwW/dwB/pwW/pwB + pooled(64) 输出。
@@ -127,8 +155,7 @@ void features(const f32* in16, const f32* stemW, const f32* stemB,
   for (int i = 0; i < D; i++) {
     pad5(bufA, pad5_);
     conv5dw(pad5_, dwW + i * H * 25, dwB + i * H, bufB);
-    conv1x1(bufB, pwW + i * H * H, pwB + i * H, bufC);
-    for (int j = 0; j < H * SP; j++) bufA[j] += bufC[j];
+    conv1x1_res(bufB, pwW + i * H * H, pwB + i * H, bufA);
   }
   for (int c = 0; c < H; c++) {
     const f32* a = bufA + c * SP;
