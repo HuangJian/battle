@@ -55,8 +55,9 @@ import {
 } from '../../src/nn/obs-encoder'
 import { NNInput, type NNInputOptions } from '../../src/nn/policy-input'
 import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
+import { decodeStageGrid, CUSTOM_STAGE_BASE } from '../../src/nn/config-stage'
 import { writeShard } from '../../src/nn/npy'
-import { writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 
 const MAX_TICKS = 36000
 const K = 10
@@ -91,6 +92,8 @@ function runOne(
   difficulty: string,
   maxTicks: number,
   nnOpts: NNInputOptions,
+  // p3 任务三件套（与 export-godai-labels 同语义；全缺省 = 历史行为逐字节不变）：
+  extra?: { stageJson?: string; livesOverride?: number; playerLevelOverride?: number },
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -99,6 +102,8 @@ function runOne(
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
+  if (extra?.livesOverride !== undefined) world.lives = extra.livesOverride
+  if (extra?.playerLevelOverride !== undefined) world.playerLevel = extra.playerLevelOverride
 
   // 教师：与 BC 采集同种子的独立 RNG，保证可复现（不消耗 world.rng）。
   const teacherRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
@@ -109,7 +114,13 @@ function runOne(
   const sim = new Simulation(world, student)
   // arena 编号不进 stageIndex（killScore 的 1.05^index 缩放经里程碑掉落反哺
   // 玩法，index=1000 会让单杀掉落循环爆内存——同 export-rl-rollout 的修复）。
-  world.loadStageData(stage, isArenaId(stageIdx) ? 0 : stageIdx)
+  // 自定义关（课程 stageJson）：decodeStageGrid 解码（含 spawn_variants 种子选点）。
+  const loadIdx = isArenaId(stageIdx) ? 0 : stageIdx
+  if (extra?.stageJson) {
+    world.loadStageData(decodeStageGrid(extra.stageJson, loadIdx, seed), 0)
+  } else {
+    world.loadStageData(stage, loadIdx)
+  }
   teacher.reset()
   student.reset()
 
@@ -186,6 +197,8 @@ function runOne(
 }
 
 function flushShard(acc: Acc, dir: string, manifest: unknown): void {
+  // 注意：shard 不带 returns.npy —— 与 godai 混训且 --value-coef>0 时，value 头
+  // 只从 godai 半学到东西；纯策略重训建议 coef 0（§15 value 压制策略头前科）。
   const N = acc.n
   if (N === 0) return
   const obs = new Uint8Array(N * 14 * 26 * 26)
@@ -224,6 +237,9 @@ function main(): void {
   let maxTicks = MAX_TICKS
   let weightsDir = 'tmp/student-weights-full'
   let weightsPath: string | undefined
+  let stageJsonFile = ''
+  let livesOverride: number | undefined
+  let playerLevelOverride: number | undefined
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -232,12 +248,30 @@ function main(): void {
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
     else if (args[i] === '--weights-dir') weightsDir = args[++i]
     else if (args[i] === '--weights') weightsPath = args[++i]
+    else if (args[i] === '--stage-json-file') stageJsonFile = args[++i]
+    else if (args[i] === '--lives-override') livesOverride = parseInt(args[++i], 10)
+    else if (args[i] === '--player-level') playerLevelOverride = parseInt(args[++i], 10)
   }
+  // 课程自定义关（与 export-godai-labels 同语义）：JSON 数组，第 i 项对应
+  // stage 2000+i。不传时下面全空，行为逐字节不变。
+  // 另注意 lives 默认走 difficulty（非课程）：课程任务必须显式 --lives-override。
+  let customStages: string[] = []
+  if (stageJsonFile) {
+    const parsed: unknown = JSON.parse(readFileSync(stageJsonFile, 'utf-8'))
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      console.error('--stage-json-file 必须是非空的 stageJson 对象数组')
+      process.exit(2)
+    }
+    customStages = parsed.map((x) => JSON.stringify(x))
+  }
+  const stageJsonFor = (stageId: number): string | undefined =>
+    customStages.length ? customStages[stageId - CUSTOM_STAGE_BASE] : undefined
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
   mkdirSync(outDir, { recursive: true })
 
   const nnOpts: NNInputOptions = { weightsDir, weightsPath }
+  const extra = { stageJson: undefined as string | undefined, livesOverride, playerLevelOverride }
   const outcomes: Record<string, number> = {}
   let totalSamples = 0
   let totalTicks = 0
@@ -250,7 +284,8 @@ function main(): void {
     // 状态上采集，与真实关 dagger 权重（0% 胜率学生，§1.2 失败条件③）严格区分。
     const arenaStage = isArenaId(si) ? resolveArenaStage(si) : null
     const stage = arenaStage ?? STAGES[si]
-    if (!stage) {
+    extra.stageJson = stageJsonFor(si)
+    if (!stage && !extra.stageJson) {
       perGame.push(`[SKIP] stage ${si}: not found`)
       continue
     }
@@ -262,6 +297,7 @@ function main(): void {
         difficulty,
         maxTicks,
         nnOpts,
+        { stageJson: extra.stageJson, livesOverride, playerLevelOverride },
       )
       outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
       if (studentWin) studentWins++

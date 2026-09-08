@@ -77,8 +77,9 @@ describe('decodeStageGrid (course custom stage, plan §5)', () => {
   })
 
   test('spawn_variants: seed-hash picks deterministically, no-seed falls back', () => {
+    const { enemy_spawns: _dropped, ...noTopSpawns } = STAGE
     const variants: StageJson = {
-      ...STAGE,
+      ...noTopSpawns,
       spawn_variants: [
         { player_spawn: { col: 4, row: 20 }, enemy_spawns: [{ col: 20, row: 4 }] },
         { player_spawn: { col: 20, row: 20 }, enemy_spawns: [{ col: 4, row: 4 }] },
@@ -99,5 +100,26 @@ describe('decodeStageGrid (course custom stage, plan §5)', () => {
     expect(decodeStageGrid(variants, 2000).playerSpawn).toEqual({ col: 4, row: 20 })
     // 无 spawn_variants 的旧课程 → 顶层 player_spawn 原样
     expect(decodeStageGrid(STAGE, 2000).playerSpawn).toEqual(STAGE.player_spawn)
+  })
+
+  test('spawn_variants + top-level enemy_spawns coexist => loud reject', () => {
+    // 两者共存（备胎与选中变体可能静默分叉）→ decode 期响亮报错
+    const both: StageJson = {
+      ...STAGE,
+      spawn_variants: [{ enemy_spawns: [{ col: 20, row: 4 }] }],
+    }
+    expect(() => decodeStageGrid(both, 2000, 7)).toThrow(/不许共存/)
+    expect(() => decodeStageGrid(both, 2000)).toThrow(/不许共存/)
+    // 字符串形态同样拦截（课程文件走此路径）
+    expect(() => decodeStageGrid(JSON.stringify(both), 2000, 7)).toThrow(/不许共存/)
+    // 单源均合法：纯顶层（旧课程）/ 纯变体池
+    expect(() => decodeStageGrid(STAGE, 2000, 7)).not.toThrow()
+    const { enemy_spawns: _dropped, ...clean } = STAGE as unknown as Record<string, unknown>
+    const st = decodeStageGrid(
+      JSON.stringify({ ...clean, spawn_variants: [{ enemy_spawns: [{ col: 20, row: 4 }] }] }),
+      2000,
+      7,
+    )
+    expect(st.enemySpawns).toEqual([{ col: 20, row: 4 }])
   })
 })

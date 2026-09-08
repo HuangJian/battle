@@ -40,12 +40,6 @@
       "forces": "abcdabcdabcdabcdabcd",
       "count": 3,
       "player_spawn": { "col": 12, "row": 12 },
-      "enemy_spawns": [
-        { "col": 2, "row": 2 },
-        { "col": 22, "row": 2 },
-        { "col": 22, "row": 22 },
-        { "col": 2, "row": 22 }
-      ],
       "spawn_variants": [
         {"enemy_spawns": [{"col": 2, "row": 2},{"col": 22, "row": 2},{"col": 22, "row": 22}]},
         {"enemy_spawns": [{"col": 22, "row": 2},{"col": 22, "row": 22},{"col": 2, "row": 22}]},

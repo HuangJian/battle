@@ -55,6 +55,9 @@ export interface StageJson {
    * `seed` 给定时按确定性哈希在池中选一；无 seed / 未提供时退回 player_spawn /
    * enemy_spawns（或 variants[0]）。用途=语料与 rollout 的几何多样性（God-AI
    * BC 语料曾因固定出生点 left 方向仅 1.4%，模型学到位置记忆而非找敌技能）。
+   *
+   * 不变式：池非空时顶层 `enemy_spawns` 必须缺席（共存即 decode 期响亮报错，
+   * 防备胎与选中变体静默分叉）。
    */
   spawn_variants?: StageJsonSpawnVariant[]
 }
@@ -136,9 +139,16 @@ export function decodeStageGrid(
 
   // 出生点解析：spawn_variants 池 + seed → 确定性选点；无池/无 seed → 顶层字段
   //（向后兼容：tests 与旧课程不带 spawn_variants，行为逐字节不变）。
+  // 不变式：两者不许共存（变体池存在时顶层 enemy_spawns 必须删除，防"备胎"
+  // 与选中变体不一致的静默分叉）；两者都无时退回空列表（旧行为，保持）。
   let playerSpawn = json.player_spawn
   let spawnList = json.enemy_spawns ?? []
   const variants = json.spawn_variants
+  if (variants && variants.length > 0 && json.enemy_spawns !== undefined) {
+    throw new Error(
+      `decodeStageGrid: spawn_variants 与顶层 enemy_spawns 不许共存（stage ${stageId}）——变体池存在时删除顶层字段`,
+    )
+  }
   if (variants && variants.length > 0) {
     const v = variants[seed === undefined ? 0 : pickVariantIndex(seed, variants.length)]
     if (v.player_spawn) playerSpawn = v.player_spawn
