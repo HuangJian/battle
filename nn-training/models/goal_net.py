@@ -21,8 +21,6 @@ Params（h=64/d=8）：主干 67.5K + goal_conv 65 + engage 276 + value 138 ≈ 
 MAdds：主干 ~37M + goal 头 43,264（0.115%，§16.2）。
 """
 
-
-
 from __future__ import annotations
 
 # 仓库根探测（B4，2026-09-02）：包已安装（pip install -e .）或 script-dir/cwd 在
@@ -40,6 +38,9 @@ if _ilu.find_spec("schema") is None:
 import json
 import os
 from collections import OrderedDict
+
+# 仓库根（models/ 上溯 3 层；2026-09-08 双 tmp 统一：相对 tmp/ 一律锚定仓库根 tmp/）
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
@@ -182,7 +183,7 @@ def main() -> None:
     inj = torch.zeros(2, INJECT_DIM)
     g, e = m(obs, sc, inj)
     print("goal", tuple(g.shape), "engage", tuple(e.shape))
-    export_goal_weights(m, "tmp/_goal_net_weights.json")
+    export_goal_weights(m, os.path.join(REPO_ROOT, "tmp", "_goal_net_weights.json"))
     print("export roundtrip ok")
 
 

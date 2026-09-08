@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rl.terminal_stats import terminal_stats
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]  # 仓库根（2026-09-08 双 tmp 统一：tmp/ 在仓库根）
 FAILS: list[str] = []
 
 
@@ -102,9 +102,13 @@ def test_terminal_stats_win_rate() -> None:
     """混合 outcome 验证 win_rate。"""
     tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_win_{secrets.token_hex(4)}"
     it_dir = tmp / "it2"
-    _write_manifest(it_dir, "w0", 2000, 1, kills=5, powerups=2, ticks=8000, nsamples=800, outcome="stage_clear")
+    _write_manifest(
+        it_dir, "w0", 2000, 1, kills=5, powerups=2, ticks=8000, nsamples=800, outcome="stage_clear"
+    )
     _write_manifest(it_dir, "w0", 2000, 2, kills=0, powerups=0, ticks=400, nsamples=40)
-    _write_manifest(it_dir, "w0", 2000, 3, kills=3, powerups=1, ticks=6000, nsamples=600, outcome="stage_clear")
+    _write_manifest(
+        it_dir, "w0", 2000, 3, kills=3, powerups=1, ticks=6000, nsamples=600, outcome="stage_clear"
+    )
     _write_manifest(it_dir, "w0", 2000, 4, kills=1, powerups=0, ticks=1500, nsamples=150)
 
     rec = terminal_stats(str(it_dir), it=2)
@@ -137,7 +141,9 @@ def test_terminal_stats_ignores_metrics_npy() -> None:
     it_dir = tmp / "it4"
     _write_manifest(it_dir, "w0", 2000, 1, kills=2, powerups=0, ticks=3000, nsamples=300)
     # 伪造 metrics.npy
-    (it_dir / "w0" / "rl_s2000_seed1").joinpath("metrics.npy").write_text("garbage", encoding="utf-8")
+    (it_dir / "w0" / "rl_s2000_seed1").joinpath("metrics.npy").write_text(
+        "garbage", encoding="utf-8"
+    )
     rec = terminal_stats(str(it_dir), it=4)
     check(rec["games"] == 1, "metrics.npy ignored: 1 game")
     check(rec["kills"]["total"] == 2.0, "metrics.npy ignored: kills=2")

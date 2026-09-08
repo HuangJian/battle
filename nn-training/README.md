@@ -272,8 +272,8 @@ SKIP_NN_TRAINING_GATE=1 git commit ...   # 仅跳过 Python 门禁
 git commit --no-verify ...               # 跳过全部门禁
 ```
 
-> 门禁产物（pytest basetemp / ruff / mypy 缓存）全部落在 `nn-training/tmp/`
-> （已 gitignore），提交时不产生额外噪音。
+> 门禁产物（pytest basetemp / ruff / mypy 缓存）全部落在仓库根 `tmp/`
+> （已 gitignore；2026-09-08 双 tmp 统一，不再用 `nn-training/tmp`），提交时不产生额外噪音。
 
 ### 日常开发入口
 

@@ -8,7 +8,7 @@
 
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
 import path from 'path'
-import { NN_TRAINING, REPO_ROOT } from '../paths'
+import { LOG_DIR, NN_TRAINING, REPO_ROOT } from '../paths'
 import { httpOk, pidAlive } from '../net'
 import { loadRegistry } from '../registry'
 import { loadConfig } from '../config'
@@ -148,12 +148,14 @@ export function actionCtx(body: PostBody): StartCtx {
 }
 // ────────────────────────── 快照组装 ──────────────────────────
 
+// 组件日志统一读 LOG_DIR（仓库根 tmp/，2026-09-08 双 tmp 统一）——绝对路径，
+// 与组件启动写入路径（specs.ts log:）同源，不依赖控制台自身 cwd。
 const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> = {
-  selfNode: () => 'tmp/sampler-agent.log',
-  hubServer: () => 'tmp/hub-server.out',
-  cloudflared: (_c) => 'tmp/cloudflared.log',
-  trainingLoop: (_cfg, course) => `tmp/${course || 'nocourse'}/training-loop.log`,
-  workerServe: () => 'tmp/remote-worker-serve.log',
+  selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
+  hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
+  cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
+  trainingLoop: (_cfg, course) => path.join(LOG_DIR, course || 'nocourse', 'training-loop.log'),
+  workerServe: () => path.join(LOG_DIR, 'remote-worker-serve.log'),
 }
 
 const HEALTHY_PORTS: Partial<Record<Component, (cfg: RlConfig) => string>> = {

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import torch
 
@@ -50,6 +51,12 @@ def main() -> None:
     ap.add_argument("--out", default="tmp/scratch-init/weights.json")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
+    # 2026-09-08 双 tmp 统一：相对 --out 锚定仓库根（scripts/ 上溯 3 层），
+    # 不再落到 nn-training/tmp。
+    out = Path(args.out)
+    if not out.is_absolute():
+        out = Path(__file__).resolve().parents[2] / out
+    args.out = str(out)
 
     torch.manual_seed(args.seed)
     model = build_ppo(None)

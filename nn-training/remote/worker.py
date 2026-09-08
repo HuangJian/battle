@@ -47,6 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ HTTP 客户端
 
+
 def _request(
     base_url: str,
     token: str,
@@ -103,9 +104,11 @@ def _get_with_retry(
             return body
         if status is not None and 400 <= status < 500:
             raise ProtocolError(f"{path} failed: HTTP {status}")
-        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        last = (
+            f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        )
         if attempt < attempts:
-            backoff = min(2 ** attempt, 8)
+            backoff = min(2**attempt, 8)
             log(f"{path}: 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
             time.sleep(backoff)
     raise RetryableError(f"{path} 重试 {attempts} 次仍失败: {last}")
@@ -182,9 +185,11 @@ def post_result(
             raise ProtocolError(
                 f"result POST rejected: HTTP {status}: {body[:300].decode('utf-8', 'replace')}"
             )
-        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        last = (
+            f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        )
         if attempt < attempts:
-            backoff = min(2 ** attempt, 16)
+            backoff = min(2**attempt, 16)
             log(f"result POST 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
             time.sleep(backoff)
     raise RetryableError(f"result POST 重试 {attempts} 次仍失败: {last}")
@@ -235,6 +240,7 @@ def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
 
 # ------------------------------------------------------------------ PPO 执行
 
+
 def unpack_opt_tar(tar_bytes: bytes, dest: Path) -> None:
     """opt_init base64 tar → dest。兼容 3.10（无 filter 参数）。"""
     import io
@@ -281,8 +287,7 @@ def _git_head(repo_root: Path = REPO_ROOT) -> str:
     return ""
 
 
-def _ensure_commit(target: str, repo_root: Path = REPO_ROOT,
-                   log=lambda msg: None) -> bool:
+def _ensure_commit(target: str, repo_root: Path = REPO_ROOT, log=lambda msg: None) -> bool:
     """确保本地 HEAD 等于 target commit。不等则 git fetch + checkout 自动修复。
 
     返回 True（一致）或 False（重试 5 次后仍不一致）。
@@ -300,11 +305,17 @@ def _ensure_commit(target: str, repo_root: Path = REPO_ROOT,
         try:
             _sp.run(
                 ["git", "fetch", "origin"],
-                cwd=str(repo_root), capture_output=True, text=True, timeout=60,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             _sp.run(
                 ["git", "checkout", target],
-                cwd=str(repo_root), capture_output=True, text=True, timeout=30,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
         except Exception as e:
             log(f"git fetch/checkout failed: {e}")
@@ -322,9 +333,7 @@ def run_job(
     torch_threads: int = 0,
     echo: bool = False,
     preloaded: dict | None = None,
-    log=lambda msg: print(
-        f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
-    ),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
 
@@ -575,7 +584,9 @@ def run_job(
         normalize_ret=bool(manifest.get("normalize_ret", False)),
     )
     total_steps = sum(e["obs"].shape[0] for e in episodes)
-    chunks = ppo_engine.chunk_episodes(episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"]))
+    chunks = ppo_engine.chunk_episodes(
+        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
+    )
     agg = ppo_engine.ppo_update(
         model,
         opt,
@@ -587,7 +598,9 @@ def run_job(
         kickstart_kl=kick_kl,
     )
     ppo_sec = round(time.time() - t_ppo, 1)
-    log(f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}")
+    log(
+        f"job {jid}: PPO done in {ppo_sec}s, steps={total_steps} chunks={len(chunks)} kl={agg.get('kl')}"
+    )
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     model.to("cpu")
@@ -625,6 +638,7 @@ def run_job(
 
 # ------------------------------------------------------------------ 主循环
 
+
 def worker_loop(
     base_url: str,
     token: str,
@@ -636,9 +650,7 @@ def worker_loop(
     once: bool = False,
     echo: bool = False,
     max_idle_sec: float = 0.0,
-    log=lambda msg: print(
-        f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True
-    ),
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
@@ -686,8 +698,16 @@ def worker_loop(
             hb_thread.start()
         job_ok = False
         try:
-            result = run_job(base_url, token, job, work_dir=work_dir, device=device,
-                             torch_threads=torch_threads, echo=echo, log=log)
+            result = run_job(
+                base_url,
+                token,
+                job,
+                work_dir=work_dir,
+                device=device,
+                torch_threads=torch_threads,
+                echo=echo,
+                log=log,
+            )
             post_result(base_url, token, jid, result, lease_token=lease_token)
             log(f"job {jid} done — result accepted")
             done += 1
@@ -715,7 +735,9 @@ def worker_loop(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="remote PPO worker (cloud, stateless)")
-    ap.add_argument("--poll", required=True, help="hub-server base URL, e.g. https://hub.example.com")
+    ap.add_argument(
+        "--poll", required=True, help="hub-server base URL, e.g. https://hub.example.com"
+    )
     ap.add_argument("--token", default="", help="bearer token（与 hub-server 一致）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
     ap.add_argument("--out", default="tmp/remote-worker", help="work dir (payloads/ckpts)")
@@ -740,11 +762,16 @@ def main() -> None:
     if not token:
         print("[worker] ERROR: 需要 --token 或 --token-file", flush=True)
         sys.exit(1)
-    Path(args.out).mkdir(parents=True, exist_ok=True)
+    # 2026-09-08 双 tmp 统一：相对 work 路径锚定仓库根（remote/ 上溯 3 层），
+    # 不再落到 nn-training/tmp（此前 spawn cwd=nn-training 时相对路径走偏）。
+    out = Path(args.out)
+    if not out.is_absolute():
+        out = Path(__file__).resolve().parents[2] / out
+    out.mkdir(parents=True, exist_ok=True)
     n = worker_loop(
         args.poll,
         token,
-        work_dir=Path(args.out),
+        work_dir=out,
         device=args.device,
         torch_threads=args.threads,
         poll_sec=args.poll_sec,

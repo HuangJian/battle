@@ -15,6 +15,10 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
+
+# 仓库根（ppo/ 上溯 3 层；2026-09-08 双 tmp 统一：写仓库根 tmp/，不再用 nn-training/tmp）
+REPO_TMP = Path(__file__).resolve().parents[2] / "tmp"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -93,8 +97,8 @@ def main() -> None:
     }
     line = json.dumps(out, ensure_ascii=False)
     print(f"[ppo-bench] {line}")
-    os.makedirs("tmp", exist_ok=True)
-    with open("tmp/thru-bench.jsonl", "a", encoding="utf-8") as f:
+    os.makedirs(REPO_TMP, exist_ok=True)
+    with open(REPO_TMP / "thru-bench.jsonl", "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 

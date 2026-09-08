@@ -14,6 +14,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { readIterMetrics } from '../tools/training/console/iters'
+import { LOG_DIR } from '../tools/training/paths'
 
 // ── 隔离：rl-config.json 与 console-state.json 指向临时副本（跑前备份，跑后还原）──
 
@@ -578,7 +579,8 @@ describe('console/log viewer (§348 补 2)', () => {
     const p = await api.componentLogPayload('selfNode', 50)
     expect(p).not.toBeNull()
     expect(p!.component).toBe('selfNode')
-    expect(p!.log).toBe('tmp/sampler-agent.log')
+    // 2026-09-08 双 tmp 统一：组件日志统一落到 LOG_DIR = 仓库根 tmp/（绝对路径）
+    expect(p!.log).toBe(path.join(LOG_DIR, 'sampler-agent.log'))
     expect(Array.isArray(p!.lines)).toBe(true)
     expect(await api.componentLogPayload('nope' as never, 50)).toBeNull()
   })

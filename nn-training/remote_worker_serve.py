@@ -19,14 +19,21 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--token", default="", help="Bearer token（与 HUB 共享密钥）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
-    ap.add_argument("--work", default="tmp/remote-worker-serve", help="job/payload/code_cache 工作目录")
+    ap.add_argument(
+        "--work", default="tmp/remote-worker-serve", help="job/payload/code_cache 工作目录"
+    )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
     args = ap.parse_args()
     token = args.token
     if args.token_file:
         token = Path(args.token_file).read_text(encoding="utf-8").strip()
-    serve_forever(args.port, token, Path(args.work), device=args.device, torch_threads=args.threads)
+    # 2026-09-08 双 tmp 统一：相对 --work 锚定仓库根（本文件在 nn-training/ 下，上溯 2 层），
+    # 不再落到 nn-training/tmp（specs 以 cwd=nn-training spawn 时相对路径走偏）。
+    work = Path(args.work)
+    if not work.is_absolute():
+        work = Path(__file__).resolve().parents[1] / work
+    serve_forever(args.port, token, work, device=args.device, torch_threads=args.threads)
 
 
 if __name__ == "__main__":

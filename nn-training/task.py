@@ -77,7 +77,8 @@ def target_clean() -> int:
         if pycache.is_dir():
             shutil.rmtree(pycache, ignore_errors=True)
             cleaned += 1
-    for log in list(HERE.glob("*.log")) + list((HERE / "tmp").glob("*.log")):
+    # 双 tmp 统一（2026-09-08）：临时产物只在仓库根 tmp/（HERE.parent / tmp）
+    for log in list(HERE.glob("*.log")) + list((HERE.parent / "tmp").glob("*.log")):
         log.unlink(missing_ok=True)
         cleaned += 1
     for orphan in ["dist-agent-meta.jsonl", "train_loop.lock"]:

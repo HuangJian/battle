@@ -80,7 +80,7 @@ export async function stepSelfNode(cfg: RlConfig): Promise<void> {
   if (await waitUntil(() => selfNodeHealthy(cfg), 30000)) {
     ok(`self-node 启动成功 (port ${cfg.rl.agent_port}, PID ${r.pid})`)
   } else {
-    fail('self-node 启动失败（30s 内健康检查未通过，见 nn-training/tmp/sampler-agent.log）')
+    fail('self-node 启动失败（30s 内健康检查未通过，见 tmp/sampler-agent.log）')
     throw new Error('self-node 启动失败')
   }
 }
@@ -107,7 +107,7 @@ export async function stepHubServer(cfg: RlConfig, jobRoot: string): Promise<voi
   if (await waitUntil(() => hubServerHealthy(cfg), 45000)) {
     ok(`hub-server 启动成功 (port ${cfg.rl.hub_port}, PID ${r.pid})`)
   } else {
-    fail('hub-server 启动失败（45s 内未就绪，见 nn-training/tmp/hub-server.out）')
+    fail('hub-server 启动失败（45s 内未就绪，见 tmp/hub-server.out）')
     throw new Error('hub-server 启动失败')
   }
 }

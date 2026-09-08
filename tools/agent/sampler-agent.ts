@@ -37,6 +37,8 @@ import {
 } from '../sim/pack-container'
 // rollout 子进程运行时选择（node/V8 推理更快；§353）
 import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
+// 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
+import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
 
 // 时间戳日志（2026-08-30 用户指令）：单点包装 console——agent 全部日志带本地时间
 // 前缀（HH:MM:SS，与训练侧 log() 同格式）。必须位于任何日志调用之前。
@@ -462,6 +464,16 @@ function latestWeightsOfKind(kind: string): WeightsState | null {
 }
 const AUTH_KEY = loadOrCreateAuthKey()
 fs.mkdirSync(WORK_DIR, { recursive: true })
+// boot 收敛（§374）：清被杀进程残留的 game-* 孤儿 / 陈旧 pid，权重按 kind 收敛到最新
+// KEEP 份——重启后内存桶为空，旧文件若无人清扫会无限累积（此前正则不匹配 kind 命名）。
+const workdirBefore = fs.readdirSync(WORK_DIR).length
+try {
+  sweepWorkdir()
+  const swept = workdirBefore - fs.readdirSync(WORK_DIR).length
+  if (swept > 0) console.log(`[sampler-agent] workdir swept @boot (${swept} stale entries removed)`)
+} catch {
+  /* best effort */
+}
 
 function lruPut(key: string, buf: Buffer): void {
   const prev = resultCache.get(key)
@@ -493,22 +505,37 @@ function diskFreeMB(): number | null {
   }
 }
 
-/** 权重文件保留清扫：只留最新 KEEP 份；被在飞评估局占用的尽力跳过。 */
-const WEIGHT_FILES_KEEP = 4
-
-function sweepWeightFiles(): void {
+/**
+ * 工作目录磁盘收敛（boot + 权重切换时调用）：
+ *  - 权重文件按 kind 各留最新 KEEP 份（修正则匹配 weights-<kind>-<sha16>.json）；
+ *    在飞权重桶引用的文件跳过（删掉即 /v1/task 409/局失败）；
+ *  - 清 mtime 早于 STALE_ORPHAN_MS 的 game-* 孤儿目录（被杀进程残留，finally 无法执行）
+ *    与陈旧 agent.pid/agent-child.pid（年龄门防误删 /v1/restart 交接窗口内父进程在飞局）。
+ * 逻辑在 workdir-cleanup.ts（纯函数，单测共享）；此处只做 IO 与在飞桶枚举。
+ */
+function sweepWorkdir(nowMs = Date.now()): void {
   try {
-    const files = fs
+    const live = new Set<string>()
+    for (const bucket of weightsByKindSha.values())
+      for (const ws of bucket.values()) live.add(path.basename(ws.file))
+    const names = fs
       .readdirSync(WORK_DIR)
-      .filter((f) => /^weights-[0-9a-f]{16}\.json$/.test(f))
-      .map((f) => {
-        const p = path.join(WORK_DIR, f)
-        return { p, m: fs.statSync(p).mtimeMs }
-      })
-      .sort((a, b) => b.m - a.m)
-    for (const x of files.slice(WEIGHT_FILES_KEEP)) {
+      .filter(
+        (n) =>
+          /^weights-[a-z]+-[0-9a-f]{16}\.json$/.test(n) ||
+          /^game-\d+-\d+$/.test(n) ||
+          n === 'agent.pid' ||
+          n === 'agent-child.pid',
+      )
+    const entries = names.map((name) => ({
+      name,
+      mtimeMs: fs.statSync(path.join(WORK_DIR, name)).mtimeMs,
+    }))
+    const del = sweepWeightFilePlan(entries, live)
+    const { games, pids } = staleOrphanPlan(entries, nowMs)
+    for (const name of [...del, ...games, ...pids]) {
       try {
-        fs.rmSync(x.p, { force: true })
+        fs.rmSync(path.join(WORK_DIR, name), { recursive: true, force: true })
       } catch {
         /* busy — next sweep */
       }
@@ -1009,7 +1036,7 @@ async function handle(req: Request): Promise<Response> {
         }
       }
     }
-    sweepWeightFiles()
+    sweepWorkdir()
     console.log(
       `[sampler-agent] weights[${kind}] switched -> ${actualSha.slice(0, 12)}… (result cache purged)`,
     )
