@@ -3626,3 +3626,23 @@ p3-ks1/vr1/vk1 三臂共用）——vk1 续跑 boot 时 `_setup` 建 BC ref 触�
 
 现场处置：in-use 目录已建；ep60 BC 权重本机已不可恢复（无 git 跟踪 / 无归档副本 /
 无隔离区），恢复来源需用户提供（云端 / 重训 / 其他机器），恢复后即复制入 in-use。
+
+## §380 / TrainingLoop 不许静默失败：退出看护 + 失败写日志（2026-09-08，用户指令）
+
+背景：vk1 续跑时 TrainingLoop boot 崩溃（缺 BC 参考），console 只把状态标成
+`exited`——失败原因藏在进程日志里，UI 只有空洞的「已退出」，用户只能人肉翻日志
+（本次还是靠逐行取证才定位到 FileNotFoundError）。
+
+决策（三件事，缺一不可）：
+1. **意外退出看护**：console 独立 4s 周期扫描受管进程（exit-watchdog.ts）——
+   **两帧确认**（同一死 pid 连续两轮，排除监督器 kill→换 pid 的瞬时窗口；复活即清帧）；
+   确证后：往组件日志文件追加 `[console] … 意外退出 (PID n)` 标记（含日志尾），
+   console warn 一条，并把原因写进 registry 条目 `error/exitAt`（/api/state 与
+   UI 组件卡展示；正常 stop 清条目不触发）。
+2. **启动即退出落标记**：startComponent 的「启动即退出」分支先往日志文件追加失败
+   标记（含尾日志）再清账——响应里的 tail 刷新即丢，日志文件里的才是审计面。
+3. **UI 直面**：组件卡在「已退出」态显示 error + 一键进日志页链接（ComponentCards）。
+测试：tests/exit-watchdog.test.ts（两帧锁 / 复活清帧 / error 幂等 / 标记落盘真实 io）。
+生效前提：console 进程重启一次（受管进程 detached 不受影响，安全）。
+
+教训：状态机（exited）不是日志；失败必须**写进日志文件 + 可查询字段**才不算静默。

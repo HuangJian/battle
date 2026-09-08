@@ -15,7 +15,15 @@
  *  --ppo/--env 与基建组件组合。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'fs'
 import path from 'path'
 import { LOG_DIR, NN_TRAINING, REPO_ROOT, START_LOG_DIR } from '../paths'
 import { httpOk, killPid, pidAlive, waitUntil } from '../net'
@@ -254,6 +262,22 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
           500,
         )
         if (!pidAlive(r.pid)) {
+          // §380：启动即退出不许静默——往日志文件追加失败标记（含尾日志）后再清账，
+          // 否则只剩 startComponent 响应里的临时 tail，刷新即丢（2026-09-08 vk1 事故）。
+          try {
+            appendFileSync(
+              trainLog,
+              `\n[console] ${new Date().toISOString()} ${COMPONENT_LABELS[key]} 启动即退出` +
+                ` (PID ${r.pid})——启动失败，原因见上方日志尾段：\n` +
+                tailLines(trainLog)
+                  .map((l) => `  | ${l}`)
+                  .join('\n') +
+                '\n',
+              'utf-8',
+            )
+          } catch {
+            /* best-effort */
+          }
           clearComponent('trainingLoop')
           return done(false, `TrainingLoop 启动即退出 (PID ${r.pid})`, tailLines(trainLog))
         }

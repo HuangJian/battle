@@ -129,6 +129,7 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
             {isOpen ? (
               <pre className="tc-cc__detail">
                 {[
+                  c.error ? `exit-error: ${c.error}` : null,
                   c.log ? `log: ${c.log}` : null,
                   c.course ? `course: ${c.course}` : null,
                   c.mode ? `mode: ${c.mode}` : null,
@@ -139,6 +140,14 @@ export function ComponentCards({ stateView, onAction, onLaunchTrainer }: Compone
                   .filter(Boolean)
                   .join('\n')}
               </pre>
+            ) : null}
+            {c.status === 'exited' && c.error ? (
+              // §380：非正常退出原因直面展示（不再只有空洞的"已退出"）+ 一键进日志页
+              <div className="tc-cc__err" role="alert">
+                <a className="tc-cc__err-link" href={`/log/${c.key}`}>
+                  ⚠ {c.error} · 日志
+                </a>
+              </div>
             ) : null}
           </section>
         )

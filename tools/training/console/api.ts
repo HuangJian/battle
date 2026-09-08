@@ -203,7 +203,7 @@ function splitLogBytes(buf: Uint8Array): string[] {
 export function logTail(nnRel: string, n = 5): string[] {
   let raw: Uint8Array
   try {
-    raw = readFileSync(path.join(REPO_ROOT, 'nn-training', nnRel))
+    raw = readFileSync(path.isAbsolute(nnRel) ? nnRel : path.join(REPO_ROOT, 'nn-training', nnRel))
   } catch {
     return [] // 文件缺失/暂时不可读 = 无日志尾（正常态，非错误）
   }
@@ -217,14 +217,64 @@ export function logTail(nnRel: string, n = 5): string[] {
 
 // ────────────────────────── 日志查看（§348 补 2） ──────────────────────────
 
-/** 组件日志解析：路径常量优先，缺省回退账本 entry.log。返回 null = 该组件无日志
- *  语义（理论上不发生——ALL_COMPONENTS 全部有 COMPONENT_LOGS 映射）。 */
+/** 组件日志解析：静态映射存在 → 用之；否则账本 entry.log → 否则运行时动态查找（§374）：
+ *  cloudflared 每次 spawn 生成 cloudflared-<ts>.log（动态文件名），trainingLoop 日志在
+ *  tmp/<course>/ 下，清理 tmp 或换课程后静态路径会失效——按组件语义扫 tmp 找最近活跃文件。
+ *  全失败返回静态路径（让 UI 显示「日志文件不存在」占位，而非 404）。 */
 export function resolveComponentLog(key: Component, cfg: RlConfig, course: string): string | null {
   const mapped = COMPONENT_LOGS[key]?.(cfg, course)
-  if (mapped) return mapped
-  const entry = loadRegistry()[key]
-  if (entry?.log) return entry.log
-  return null
+  if (mapped && existsSync(mapped)) return mapped
+  const entryLog = loadRegistry()[key]?.log
+  if (entryLog && existsSync(entryLog)) return entryLog
+  const found = findLatestLog(key, course)
+  if (found) return found
+  return mapped ?? entryLog ?? null
+}
+
+/** 组件日志文件名匹配（LOG_DIR 一层放文件；trainingLoop 在 LOG_DIR/<course>/ 子目录）。 */
+const LOG_NAME_MATCH: Record<Component, (name: string) => boolean> = {
+  selfNode: (n) => n.startsWith('sampler-agent') && n.endsWith('.log'),
+  hubServer: (n) => n.startsWith('hub-server'),
+  cloudflared: (n) => n.startsWith('cloudflared') && n.endsWith('.log'),
+  trainingLoop: (n) => n === 'training-loop.log',
+  workerServe: (n) => n.startsWith('remote-worker-serve') && n.endsWith('.log'),
+}
+
+/**
+ * 运行时动态查找组件日志（§374）：trainingLoop 扫 LOG_DIR 各课程目录的 training-loop.log；
+ * 其余扫 LOG_DIR 一层匹配文件，mtime 最新者为准。只扫一层 + 定点 stat，不做全文递归
+ * （§366 教训：扫描慢路径会拖垮请求）。
+ */
+export function findLatestLog(key: Component, course: string): string | null {
+  let bestP: string | null = null
+  let bestM = -1
+  const consider = (p: string): void => {
+    try {
+      const m = statSync(p).mtimeMs
+      if (m > bestM) {
+        bestP = p
+        bestM = m
+      }
+    } catch {
+      /* stat race */
+    }
+  }
+  const match = LOG_NAME_MATCH[key]
+  try {
+    if (key === 'trainingLoop') {
+      if (course) consider(path.join(LOG_DIR, course, 'training-loop.log'))
+      for (const d of readdirSync(LOG_DIR, { withFileTypes: true })) {
+        if (d.isDirectory()) consider(path.join(LOG_DIR, d.name, 'training-loop.log'))
+      }
+    } else {
+      for (const d of readdirSync(LOG_DIR, { withFileTypes: true })) {
+        if (d.isFile() && match(d.name)) consider(path.join(LOG_DIR, d.name))
+      }
+    }
+  } catch {
+    /* tmp unreadable */
+  }
+  return bestP
 }
 
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
@@ -242,7 +292,7 @@ export function readLogTail(
   /** 文件总行数（顶部「共 N 行」）；>8MB 返回 null（UI 按截断窗口退化显示）。 */
   totalLines: number | null
 } {
-  const abs = path.join(NN_TRAINING, nnRel)
+  const abs = path.isAbsolute(nnRel) ? nnRel : path.join(NN_TRAINING, nnRel)
   let fileSize = 0
   try {
     fileSize = statSync(abs).size
@@ -356,6 +406,8 @@ export async function componentViews(cfg: RlConfig, course: string): Promise<Com
         healthy,
         log: logRel,
         logTail: logRel ? logTail(logRel) : [],
+        /** §380：非正常退出原因（exit-watchdog 记录），UI 显示"已退出"处展示。 */
+        error: e?.error ?? null,
         busy: busy.has(`start:${key}`) || busy.has(`stop:${key}`) || busy.has(`smoke:${key}`),
         // cloudflared 卡展示隧道 auth key（复制用）；其余组件无密钥字段
         ...(key === 'cloudflared' ? { secret: cfg.rl.remote_token } : {}),

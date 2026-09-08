@@ -37,6 +37,7 @@ import {
   startSnapshotRefresher,
 } from './api'
 import { restartSpecFor } from './actions'
+import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
 import { renderConsolePage, renderLogPage } from './render'
 import type { Component } from '../types'
@@ -137,6 +138,17 @@ async function main(): Promise<void> {
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()
+  // 非正常退出看护（§380）：受管进程自行退出/被杀 → 显式写失败日志 + 记录 error，
+  // 不再静默（TrainingLoop 曾因缺 BC 参考 boot 崩溃，只有翻日志才知道原因）。4s 一轮，
+  // 两帧确认（内部）避免监督器换 pid 的瞬时误报。
+  const exitWatchdog = setInterval(() => {
+    try {
+      runExitCheck()
+    } catch {
+      /* 失败不炸循环 */
+    }
+  }, 4000)
+  exitWatchdog.unref?.()
 
   const { BUNDLES } = await import('./build')
   const bundlesByPath = new Map(BUNDLES.map((b) => [`/${b.key}.js`, b]))
